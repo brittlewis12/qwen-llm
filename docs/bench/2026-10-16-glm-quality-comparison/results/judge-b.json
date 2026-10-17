@@ -1,0 +1,239 @@
+{
+  "grades": [
+    {
+      "case_id": "stream-lookahead",
+      "candidate": "C1",
+      "score": 1,
+      "definite_bugs": [
+        "_fill never records exhaustion: StopIteration leaves _cached as the empty sentinel, so subsequent calls touch the source again.",
+        "The trace uses strings for None and 7 and incorrectly repeats ValueError."
+      ],
+      "uncertain_concerns": [],
+      "rationale": "The JSON is valid and the class handles cached None and transient exceptions, but it fails the explicit exhaustion-caching contract. The explanation acknowledges that an exhausted flag is necessary while supplying no such flag. The required source-call count is 4, not 5."
+    },
+    {
+      "case_id": "stream-lookahead",
+      "candidate": "C2",
+      "score": 2,
+      "definite_bugs": [
+        "The trace incorrectly repeats ValueError and represents None and 7 as strings.",
+        "Markdown fences violate the requirement to return only a JSON object."
+      ],
+      "uncertain_concerns": [],
+      "rationale": "The complete class correctly uses _has_cache and _done to distinguish values, an empty buffer, and exhaustion. However, the requested simulation is materially wrong: the second peek after ValueError returns 7. The explanation also contradicts source_calls=4 by describing five calls and an extra ValueError."
+    },
+    {
+      "case_id": "stream-lookahead",
+      "candidate": "C3",
+      "score": 2,
+      "definite_bugs": [
+        "facts.trace contains the strings \"None\" and \"7\" instead of JSON null and integer 7."
+      ],
+      "uncertain_concerns": [],
+      "rationale": "The valid JSON contains a complete, lazy implementation with separate cache and exhaustion states. Only StopIteration is cached, and the explanation correctly derives four source calls. Nevertheless, the trace violates the explicit actual-value requirement, making the returned facts incorrect."
+    },
+    {
+      "case_id": "shared-load-cancellation",
+      "candidate": "C1",
+      "score": 2,
+      "definite_bugs": [
+        "get reuses an existing entry without checking whether its task has already completed; a call before _finish runs can receive the previous load.",
+        "Markdown fences violate the JSON-only format."
+      ],
+      "uncertain_concerns": [],
+      "rationale": "Private waiter Futures isolate cancellation, _finish retrieves orphan exceptions, and shutdown cancels and gathers tasks. The supplied facts are correct. However, cleanup occurs only in a scheduled done callback, leaving a completion window where a later get shares completed work instead of starting a new load."
+    },
+    {
+      "case_id": "shared-load-cancellation",
+      "candidate": "C2",
+      "score": 2,
+      "definite_bugs": [
+        "No done callback retrieves an orphaned loader exception; _run_loader only deletes the entry.",
+        "The explanation incorrectly claims Task.__del__ retrieves exceptions without an unretrieved-exception warning.",
+        "_timeline assigns b_value and c_value from _Waiter.run tasks, whose coroutine returns None.",
+        "Markdown fences violate the JSON-only format."
+      ],
+      "uncertain_concerns": [],
+      "rationale": "Shielding, identity-guarded removal, and shutdown admission control implement substantial parts of the contract. But when every waiter cancels and the loader later raises, no explicit exception retrieval remains. The claimed callback is absent, and the included demonstration does not produce its stated values."
+    },
+    {
+      "case_id": "shared-load-cancellation",
+      "candidate": "C3",
+      "score": 2,
+      "definite_bugs": [
+        "When an entry's task is done but _on_done has not run, get explicitly returns task.result() rather than starting a new loader."
+      ],
+      "uncertain_concerns": [],
+      "rationale": "The response is complete valid JSON with correct timeline facts. Per-waiter Futures isolate cancellation, _on_done retrieves exceptions and identity-guards removal, and close cancels and drains live tasks. However, the task.done branch violates the no-value-cache contract during the interval between task completion and callback cleanup."
+    },
+    {
+      "case_id": "generation-fenced-cache",
+      "candidate": "C1",
+      "score": 3,
+      "definite_bugs": [
+        "The explanation says T1's retry loads and publishes 'new'; in the stated timeline it instead hits T2's already cached value."
+      ],
+      "uncertain_concerns": [],
+      "rationale": "The valid JSON supplies correct facts and complete code. Generation comparison and publication share the invalidation lock, loader calls occur outside it, membership supports None, and stale results retry. The implementation is correct; the stated retry behavior is a minor explanatory error."
+    },
+    {
+      "case_id": "generation-fenced-cache",
+      "candidate": "C2",
+      "score": 2,
+      "definite_bugs": [
+        "A successful initial load stores _val[key] without creating _gen[key]; the next cache hit evaluates self._gen[key] and raises KeyError."
+      ],
+      "uncertain_concerns": [],
+      "rationale": "The JSON, scenario facts, atomic publication check, and stale retry are correct. However, the default generation is read with get(key, 0) but never persisted on ordinary loads. Consequently, a normal get followed by another get fails for a key that has never been invalidated."
+    },
+    {
+      "case_id": "generation-fenced-cache",
+      "candidate": "C3",
+      "score": 4,
+      "definite_bugs": [],
+      "uncertain_concerns": [],
+      "rationale": "Complete valid JSON gives the correct facts and implementation. Generation comparison, publication, and invalidation use the same lock; loads run outside it; stale completions retry; hits use membership and support None. The explanation correctly identifies T1's retry hit and the check-then-publish race."
+    },
+    {
+      "case_id": "sql-null-bag-semantics",
+      "candidate": "C1",
+      "score": 3,
+      "definite_bugs": [
+        "The explanation says x NOT IN (2,2,NULL) evaluates to NULL for every row; for x=2 it evaluates to false.",
+        "The COUNT(*) discussion omits the NULL-extended row produced for a customer with no matching orders."
+      ],
+      "uncertain_concerns": [],
+      "rationale": "The valid JSON supplies correct rows and a correct PostgreSQL SELECT. Filtering NULL blocked IDs makes NOT IN safe, duplicate blocked rows cannot multiply results, and COUNT(o.id) preserves paid orders with NULL amounts. The defects are confined to the requested explanation."
+    },
+    {
+      "case_id": "sql-null-bag-semantics",
+      "candidate": "C2",
+      "score": 4,
+      "definite_bugs": [],
+      "uncertain_concerns": [],
+      "rationale": "The complete JSON supplies correct rows and a correct SELECT. Aggregate FILTER clauses preserve customers without paid orders, COUNT(o.id) counts paid NULL amounts, and COALESCE handles absent amounts. The explanation covers NULL poisoning, harmless blocked duplicates, and COUNT(*) counting NULL-extended rows."
+    },
+    {
+      "case_id": "sql-null-bag-semantics",
+      "candidate": "C3",
+      "score": 4,
+      "definite_bugs": [],
+      "uncertain_concerns": [],
+      "rationale": "The valid JSON contains the correct facts and complete query. NULL blocked IDs are removed before NOT IN, duplicates do not multiply joins, filtered COUNT counts paid order IDs regardless of amount, and filtered SUM is coalesced. The explanation addresses unmatched customers, void orders, and NULL-extended COUNT(*) behavior."
+    },
+    {
+      "case_id": "framed-log-recovery",
+      "candidate": "C1",
+      "score": 4,
+      "definite_bugs": [],
+      "uncertain_concerns": [],
+      "rationale": "The complete valid JSON correctly leaves code empty. It truncates A to 19, rejects B's complete bad-CRC frame without resynchronization, and rejects C's length 2048 before checking body availability. The explanation gives the relevant offsets and preserves B and C unchanged."
+    },
+    {
+      "case_id": "framed-log-recovery",
+      "candidate": "C2",
+      "score": 4,
+      "definite_bugs": [],
+      "uncertain_concerns": [],
+      "rationale": "All facts and the empty code field satisfy the format. The decision order checks the complete header's length bound before classifying a missing body as torn. It correctly identifies A's prefix end, B's payload and CRC offsets, and why neither later valid-looking bytes nor C's EOF permits recovery."
+    },
+    {
+      "case_id": "framed-log-recovery",
+      "candidate": "C3",
+      "score": 4,
+      "definite_bugs": [],
+      "uncertain_concerns": [],
+      "rationale": "The valid JSON supplies all correct facts and no implementation, as requested. Its explanation validates length before body completeness, truncates only A's [19,21) tail, rejects B without scanning forward, and classifies C's complete over-limit header as corruption without modifying the file."
+    },
+    {
+      "case_id": "incremental-utf8-lines",
+      "candidate": "C1",
+      "score": 2,
+      "definite_bugs": [
+        "facts.lines incorrectly retains LF terminators: it reports \"A\\n\", \"\u20ac\\n\", and \"B\\rC\\n\".",
+        "The memory explanation omits the current chunk, which can contain many complete lines."
+      ],
+      "uncertain_concerns": [],
+      "rationale": "The valid JSON contains complete byte-buffering code that spans chunks, strips exactly one CR before LF, preserves bare CR, skips empty chunks, and strictly decodes the EOF residual. However, its requested output facts contradict both the specification and its own code, which yields lines without LF."
+    },
+    {
+      "case_id": "incremental-utf8-lines",
+      "candidate": "C2",
+      "score": 3,
+      "definite_bugs": [
+        "The explanation contains invalid JSON escapes \\xf0 and \\x9f, so the response is not a valid JSON object.",
+        "The stated O(longest line) memory bound omits decoded text from the current chunk."
+      ],
+      "uncertain_concerns": [],
+      "rationale": "The complete implementation uses a strict incremental decoder, finalizes only at iterator exhaustion, handles split CRLF and bare CR correctly, and emits the correct stated lines before the incomplete EOF sequence fails. Core behavior is correct, but JSON escaping and the memory-bound explanation need correction."
+    },
+    {
+      "case_id": "incremental-utf8-lines",
+      "candidate": "C3",
+      "score": 1,
+      "definite_bugs": [
+        "buf starts as bytes, but dec.decode(chunk) returns str; buf += dec.decode(chunk) raises TypeError on the first nonempty chunk."
+      ],
+      "uncertain_concerns": [],
+      "rationale": "Although the response is valid JSON with correct expected facts, the implementation cannot yield even the first line. It mixes an incremental text decoder with byte-buffer operations, including byte delimiters and later decode calls. The explanation therefore does not describe working code."
+    },
+    {
+      "case_id": "archive-recovery-authority",
+      "candidate": "C1",
+      "score": 4,
+      "definite_bugs": [],
+      "uncertain_concerns": [],
+      "rationale": "The complete valid JSON correctly selects R9-C8 by numeric revision and explicitly rejects R9-C7, R9-C6, R8-C99, and R9-D-LAST. It replays sequences 301\u2013305 including commits, explains transaction visibility, derives blue/gold, and truncates only [6400,6437), discarding 37 bytes. Code is correctly empty."
+    },
+    {
+      "case_id": "archive-recovery-authority",
+      "candidate": "C2",
+      "score": 4,
+      "definite_bugs": [],
+      "uncertain_concerns": [],
+      "rationale": "The valid JSON supplies every correct fact and leaves code empty. The explanation applies R9-C8's manifest, rejects competing evidence by record ID and authority rule, distinguishes replay from committed visibility, and derives offset 6400 and 37 discarded bytes without discarding committed post-checkpoint frames."
+    },
+    {
+      "case_id": "archive-recovery-authority",
+      "candidate": "C3",
+      "score": 4,
+      "definite_bugs": [],
+      "uncertain_concerns": [],
+      "rationale": "The complete JSON correctly resolves authority independently of timestamps and position, explicitly rejecting lower revisions, the other incident, and unsigned drafts. It explains both transactions' commit points, final visible sequence 305, blue/gold state, and retention of all complete frames before truncating the 37-byte torn tail. Code is empty."
+    },
+    {
+      "case_id": "archive-rollout-fences",
+      "candidate": "C1",
+      "score": 2,
+      "definite_bugs": [
+        "The response places facts directly at the top level, omits the required facts and code fields, and appends an explanation fragment outside the object.",
+        "The explanation does not explicitly reject O900 by record ID."
+      ],
+      "uncertain_concerns": [],
+      "rationale": "The substantive configuration and execution reasoning is correct: L42 patches L40, west inherits false/45, east retains true/15, shielding preserves the load, and stale generation 11 retries at 12. However, the answer is not one valid JSON object and materially violates the required response schema."
+    },
+    {
+      "case_id": "archive-rollout-fences",
+      "candidate": "C2",
+      "score": 2,
+      "definite_bugs": [
+        "It invents base=L41 for L42, whose explicitly named base is L40.",
+        "The invented base chain produces east_ttl=5 and west_enabled=true instead of 15 and false.",
+        "It does not explicitly reject L41, O900, and L-D-LAST by record ID."
+      ],
+      "uncertain_concerns": [],
+      "rationale": "The response is complete valid JSON with empty code and correct cancellation, retry, generation, and loader-count facts. Nevertheless, its central configuration reasoning contradicts the explicit-base rule: it applies L41's defaults and east override to L42. Correct concurrency analysis does not repair those material configuration errors."
+    },
+    {
+      "case_id": "archive-rollout-fences",
+      "candidate": "C3",
+      "score": 3,
+      "definite_bugs": [
+        "The explanation does not explicitly reject O900 and L-D-LAST by record ID.",
+        "The required algorithm explanation names compare_generation_under_lock but does not explicitly explain that comparison and publication must be atomic under the same lock."
+      ],
+      "uncertain_concerns": [],
+      "rationale": "The complete valid JSON leaves code empty and identifies L42, although authority is verbose rather than the reference's bare ID. It correctly resolves L42 against L40, removes west's entire override, retains east's settings, and derives shielding, stale-result rejection, retry, generation 12, and two loader calls. Explanation omissions prevent a complete-contract score."
+    }
+  ]
+}

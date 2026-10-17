@@ -1,0 +1,50 @@
+{
+  "cases_sha256": "af75387cd0f9c885c95e435953683e2e3cadfe0ec619117e679fd6a617b4b0a7",
+  "cases": {
+    "stream-lookahead": {
+      "C1": "arm-02",
+      "C2": "arm-03",
+      "C3": "arm-01"
+    },
+    "shared-load-cancellation": {
+      "C1": "arm-03",
+      "C2": "arm-02",
+      "C3": "arm-01"
+    },
+    "generation-fenced-cache": {
+      "C1": "arm-02",
+      "C2": "arm-03",
+      "C3": "arm-01"
+    },
+    "sql-null-bag-semantics": {
+      "C1": "arm-02",
+      "C2": "arm-03",
+      "C3": "arm-01"
+    },
+    "framed-log-recovery": {
+      "C1": "arm-02",
+      "C2": "arm-03",
+      "C3": "arm-01"
+    },
+    "incremental-utf8-lines": {
+      "C1": "arm-02",
+      "C2": "arm-03",
+      "C3": "arm-01"
+    },
+    "archive-recovery-authority": {
+      "C1": "arm-03",
+      "C2": "arm-02",
+      "C3": "arm-01"
+    },
+    "archive-rollout-fences": {
+      "C1": "arm-01",
+      "C2": "arm-02",
+      "C3": "arm-03"
+    }
+  },
+  "recipes": {
+    "arm-01": "maya",
+    "arm-02": "stock-q4",
+    "arm-03": "stock-iq3"
+  }
+}

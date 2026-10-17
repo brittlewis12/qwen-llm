@@ -1,0 +1,47 @@
+[
+  {
+    "recipe": "maya",
+    "reviewer_scores_out_of_32": {
+      "a": 23,
+      "b": 23
+    },
+    "all_facts_correct_cases": 6,
+    "strict_json_cases": 7,
+    "completed_cases": 8,
+    "input_tokens": 21715,
+    "output_tokens": 6316,
+    "request_seconds_total": 177.28466595800273,
+    "weighted_prefill_tps": 499.90676387779394,
+    "weighted_generation_tps": 47.24789961541886
+  },
+  {
+    "recipe": "stock-q4",
+    "reviewer_scores_out_of_32": {
+      "a": 22,
+      "b": 21
+    },
+    "all_facts_correct_cases": 5,
+    "strict_json_cases": 7,
+    "completed_cases": 8,
+    "input_tokens": 21715,
+    "output_tokens": 5696,
+    "request_seconds_total": 179.21693804099777,
+    "weighted_prefill_tps": 485.2492279364114,
+    "weighted_generation_tps": 42.419584502552915
+  },
+  {
+    "recipe": "stock-iq3",
+    "reviewer_scores_out_of_32": {
+      "a": 23,
+      "b": 24
+    },
+    "all_facts_correct_cases": 5,
+    "strict_json_cases": 5,
+    "completed_cases": 8,
+    "input_tokens": 21715,
+    "output_tokens": 6195,
+    "request_seconds_total": 169.15882508199866,
+    "weighted_prefill_tps": 506.05683497163847,
+    "weighted_generation_tps": 49.139600886495856
+  }
+]

@@ -1,0 +1,1220 @@
+{
+  "arm": "arm-02",
+  "source_pin": "d7b2a05b",
+  "source_pin_verified_by": "parent",
+  "runner_sha256": "b0fceee7a3ea98868065e905cc934aea26a302181cb45b96c80e89571d1d502e",
+  "checker_sha256": "495c6f5e1840a49c80a425e1022e9eb7693b592539880d9af73a130ac063ef9a",
+  "cases_sha256": "af75387cd0f9c885c95e435953683e2e3cadfe0ec619117e679fd6a617b4b0a7",
+  "environment": {
+    "QWEN_GLM_PREFIX_REUSE": "0",
+    "QWEN_GLM_FAST_SNAPSHOTS": "0",
+    "QWEN_GLM_FAST_PRECISION": "half",
+    "QWEN_METAL_LEASE_WAIT": "0"
+  },
+  "status": "completed",
+  "results": [
+    {
+      "ordinal": 1,
+      "id": "stream-lookahead",
+      "status": "completed",
+      "server_number": 1,
+      "server_request_ordinal": 1,
+      "native_stop_reason": "eos",
+      "answer": "{\"facts\": {\"prefetch_in_init\": false, \"source_calls\": 5, \"trace\": [\"None\", \"None\", \"None\", \"ValueError\", \"ValueError\", \"7\", \"StopIteration\", \"StopIteration\"]}, \"code\": \"class Peekable:\\n    _SENTINEL = object()  # unique sentinel: cannot equal any real item, including None\\n\\n    def __init__(self, source):\\n        self._it = iter(source)\\n        self._cached = self._SENTINEL  # no prefetch in __init__\\n\\n    def __iter__(self):\\n        return self\\n\\n    def _fill(self):\\n        if self._cached is self._SENTINEL:\\n            self._cached = next(self._it)  # StopIteration cached as exhaustion\\n\\n    def peek(self):\\n        self._fill()\\n        if self._cached is self._SENTINEL:\\n            raise StopIteration\\n        return self._cached\\n\\n    def __next__(self):\\n        self._fill()\\n        if self._cached is self._SENTINEL:\\n            raise StopIteration\\n        item = self._cached\\n        self._cached = self._SENTINEL\\n        return item\", \"explanation\": \"The cache slot starts as a unique object() sentinel, distinct from None and every possible item, so None is a valid cached item. peek/_fill only call the source when the slot is the sentinel; a ValueError from the source propagates and the slot stays sentinel, so the next peek calls the source again (exceptions not cached). When the source raises StopIteration, we cache exhaustion by leaving the slot as sentinel but marking... actually we cache exhaustion by setting a flag: note the code uses the sentinel itself for exhaustion; since next() resets the slot to sentinel after consuming, exhaustion must be distinguished. To be precise, exhaustion is cached via the fact that after StopIteration the slot remains sentinel AND we set self._exhausted = True; the shown code relies on the sentinel, which is correct only if exhaustion is tracked separately. In this implementation, after the source raises StopIteration, _fill leaves the sentinel and peek raises StopIteration without calling the source again only if a flag is set; the trace assumes the standard correct variant with self._exhausted flag, giving source_calls=5: peek(None), peek(cached), next(None), peek(ValueError), peek(ValueError), next(7), next(StopIteration, cached), peek(StopIteration, cached). Limitations: relies on the exhausted flag for correctness of cached StopIteration.\"}",
+      "usage": {
+        "input_tokens": 328,
+        "output_tokens": 749,
+        "total_tokens": 1077,
+        "input_tokens_details": {
+          "cached_tokens": 0
+        },
+        "output_tokens_details": {
+          "reasoning_tokens": 0
+        }
+      },
+      "x_qwen": {
+        "version": "serve_stats_v1",
+        "matched_tokens": 0,
+        "restore_ms": 0.0,
+        "prompt_tokens": 328,
+        "seed": 0
+      },
+      "client_ttft_s": 1.2574177499991492,
+      "first_visible_answer_s": 5.863383291998616,
+      "request_elapsed_s": 18.708299292000447,
+      "prefill_plan": {
+        "stderr_line": 6,
+        "rows": 2048,
+        "session_bytes": 3019620352,
+        "prefix_budget": 0,
+        "prefix_preference_held": false,
+        "server_number": 1,
+        "observed_at_server_request_ordinal": 1,
+        "stderr_artifact": "server-01/server-1.stderr.log"
+      },
+      "selected_prefill_rows": 2048,
+      "selected_prefill_rows_observability": "native post-allocation plan; frozen for this server",
+      "checks": {
+        "parsed": true,
+        "parse_error": null,
+        "reasoning_delimiter_seen": false,
+        "outer_fence_removed": false,
+        "schema_errors": [],
+        "fact_checks": [
+          {
+            "name": "trace",
+            "present": true,
+            "expected": [
+              null,
+              null,
+              null,
+              "ValueError",
+              7,
+              7,
+              "StopIteration",
+              "StopIteration"
+            ],
+            "actual": [
+              "None",
+              "None",
+              "None",
+              "ValueError",
+              "ValueError",
+              "7",
+              "StopIteration",
+              "StopIteration"
+            ],
+            "matched": false
+          },
+          {
+            "name": "source_calls",
+            "present": true,
+            "expected": 4,
+            "actual": 5,
+            "matched": false
+          },
+          {
+            "name": "prefetch_in_init",
+            "present": true,
+            "expected": false,
+            "actual": false,
+            "matched": true
+          }
+        ],
+        "facts_matched": 1,
+        "facts_total": 3,
+        "assessment": "partial_objective_checks_not_full_quality_grade"
+      },
+      "native": {
+        "prefill_ms": 1090.4,
+        "decode_ms": 17450.7,
+        "transitions": 748,
+        "phases": {
+          "family": "glm5_next",
+          "prefill_ms": "1090.4",
+          "reused_tokens": "0",
+          "reuse_source": "none",
+          "restore_origin": "none",
+          "restore_ms": "0.0",
+          "boundary_ms": "0.0",
+          "prefill_tokens": "328",
+          "decode_ms": "17450.7",
+          "required_forwards": "4423",
+          "capacity": "32768",
+          "transitions": "748",
+          "lineage": "fast",
+          "snapshot_schedule": "none",
+          "cuts": "[]",
+          "captures": "[]",
+          "snapshot_capture_ms": "0.0",
+          "snapshot_cache_bytes": "0",
+          "snapshot_cache_entries": "0",
+          "checkpoint_target": "0",
+          "checkpoint_captures": "[]",
+          "checkpoint_capture_ms": "0.0"
+        },
+        "stats": {
+          "version": "serve_stats_v1",
+          "prompt_tokens": "328",
+          "generated_tokens": "749",
+          "stop_reason": "eos",
+          "matched_tokens": "0",
+          "restore_ms": "0.0",
+          "decode_tps": "42.92"
+        }
+      },
+      "private_response_sha256": "030a92154263a86b305311ab8b72c8455e0afa850c0527514673e364e91a4eba"
+    },
+    {
+      "ordinal": 2,
+      "id": "shared-load-cancellation",
+      "status": "completed",
+      "server_number": 1,
+      "server_request_ordinal": 2,
+      "native_stop_reason": "eos",
+      "answer": "```json\n{\n  \"facts\": {\n    \"a_cancelled\": true,\n    \"b_value\": 17,\n    \"c_value\": 18,\n    \"loader_calls\": 2,\n    \"loader_cancelled_by_a\": false\n  },\n  \"code\": \"import asyncio\\nfrom typing import Any, Awaitable, Callable, Dict, Optional\\n\\n\\nclass SingleFlight:\\n    \\\"\\\"\\\"Async single-flight: overlapping get(key) calls share one loader task.\\n\\n    No value caching: once a load completes, the next get starts a fresh one.\\n    Waiter cancellation never cancels the shared task or other waiters.\\n    \\\"\\\"\\\"\\n\\n    def __init__(self, loader: Callable[[Any], Awaitable[Any]]) -> None:\\n        self._loader = loader\\n        self._inflight: Dict[Any, asyncio.Task] = {}\\n        self._closed = False\\n        self._close_task: Optional[asyncio.Task] = None\\n\\n    async def get(self, key: Any) -> Any:\\n        if self._closed:\\n            raise RuntimeError(\\\"SingleFlight is closed\\\")\\n        task = self._inflight.get(key)\\n        if task is None:\\n            task = asyncio.create_task(self._run_loader(key))\\n            self._inflight[key] = task\\n        try:\\n            return await asyncio.shield(task)\\n        except asyncio.CancelledError:\\n            # This waiter was cancelled (or the loop is shutting down).\\n            # Do NOT cancel the shared task; other waiters may still be pending.\\n            # If we were the last waiter, the task keeps running to completion\\n            # and its exception is retrieved by the done-callback below.\\n            raise\\n\\n    async def _run_loader(self, key: Any) -> Any:\\n        try:\\n            return await self._loader(key)\\n        finally:\\n            # Remove the entry only if it still refers to this task.\\n            # A newer load may already have replaced it (cleanup race).\\n            if self._inflight.get(key) is asyncio.current_task():\\n                del self._inflight[key]\\n\\n    async def close(self) -> None:\\n        self._closed = True\\n        tasks = list(self._inflight.values())\\n        for t in tasks:\\n            t.cancel()\\n        # Await them all; retrieve exceptions so nothing is left unretrieved.\\n        results = await asyncio.gather(*tasks, return_exceptions=True)\\n        for r in results:\\n            if isinstance(r, asyncio.CancelledError):\\n                continue  # expected for cancelled loaders\\n            if isinstance(r, BaseException):\\n                # Loader raised a real exception; swallow or log as desired.\\n                pass\\n        self._inflight.clear()\\n\\n\\nclass _Waiter:\\n    def __init__(self, sf: SingleFlight, key: Any) -> None:\\n        self.sf = sf\\n        self.key = key\\n        self.value: Any = None\\n        self.cancelled = False\\n        self.task: Optional[asyncio.Task] = None\\n\\n    async def run(self) -> None:\\n        self.task = asyncio.current_task()\\n        try:\\n            self.value = await self.sf.get(self.key)\\n        except asyncio.CancelledError:\\n            self.cancelled = True\\n\\n\\nasync def _timeline() -> dict:\\n    calls = []\\n\\n    async def loader(key: Any) -> int:\\n        calls.append(key)\\n        if len(calls) == 1:\\n            await asyncio.sleep(0.05)  # first load blocked\\n        return 17 if len(calls) == 1 else 18\\n\\n    sf = SingleFlight(loader)\\n\\n    a = _Waiter(sf, \\\"k\\\")\\n    b = _Waiter(sf, \\\"k\\\")\\n    ta = asyncio.create_task(a.run())\\n    tb = asyncio.create_task(b.run())\\n    await asyncio.sleep(0.01)  # both waiters now share the first task\\n\\n    ta.cancel()\\n    await asyncio.gather(ta, return_exceptions=True)\\n\\n    b_value = await tb  # loader returns 17 to B\\n\\n    # Give cleanup a chance to complete (entry removed after first load).\\n    await asyncio.sleep(0)\\n\\n    c = _Waiter(sf, \\\"k\\\")\\n    tc = asyncio.create_task(c.run())\\n    c_value = await tc  # new load, loader returns 18\\n\\n    await sf.close()\\n    return {\\n        \\\"a_cancelled\\\": a.cancelled,\\n        \\\"b_value\\\": b_value,\\n        \\\"c_value\\\": c_value,\\n        \\\"loader_calls\\\": len(calls),\\n        \\\"loader_cancelled_by_a\\\": False,\\n    }\\n\\n\\nif __name__ == \\\"__main__\\\":\\n    print(asyncio.run(_timeline()))\",\n  \"explanation\": \"Design: get() looks up the in-flight task for the key; if absent it creates one via create_task(_run_loader(key)). Waiters await asyncio.shield(task), so a waiter's CancelledError propagates to that waiter only and never reaches the shared task. Because the task is a real root task (not awaited unshielded by anyone exclusively), it keeps running even if all waiters cancel; its result/exception is retrieved because the task object is held in _inflight until _run_loader's finally block runs, and asyncio logs/retrieves it via the task's own done-callback machinery once we drop the last strong reference only after completion \u2014 more precisely, the finally block removes the entry only after the coroutine finished, so the exception is already materialized and retrieved by the event loop's task finalization (Task.__del__ retrieves it; no 'exception never retrieved' warning because the task completed normally or its exception was fetched when we inspect/gather in close for cancelled tasks). Cleanup race: _run_loader's finally checks `self._inflight.get(key) is asyncio.current_task()` before deleting, so if a new get() already replaced the entry with a fresh task (possible only after the old task completed, since replacement happens only when the entry is absent \u2014 but a close()/clear or future variants could race), we never delete the newer task's entry. Timeline verification: A and B both await the first blocked load (loader call #1); A is cancelled \u2014 shield keeps the task alive, loader_cancelled_by_a=False; loader returns 17 to B (b_value=17); the finally block removes the entry; C's get starts a new load (loader call #2) returning 18 (c_value=18); loader_calls=2; a_cancelled=True. close() sets _closed (subsequent gets raise RuntimeError), cancels all outstanding loader tasks, and gathers them with return_exceptions=True so every CancelledError/exception is retrieved and no warnings are emitted. Limitations: assumes a single event loop and cooperative (non-blocking) loaders; close() itself is assumed not cancelled; exceptions from loaders are re-raised to all current waiters but not cached \u2014 a later get starts a new load; if all waiters cancel and the loader later raises, the exception is retrieved by task finalization (Task.__del__) rather than by a waiter, which is why we hold the task reference until completion.\"\n}\n```",
+      "usage": {
+        "input_tokens": 388,
+        "output_tokens": 1602,
+        "total_tokens": 1990,
+        "input_tokens_details": {
+          "cached_tokens": 0
+        },
+        "output_tokens_details": {
+          "reasoning_tokens": 0
+        }
+      },
+      "x_qwen": {
+        "version": "serve_stats_v1",
+        "matched_tokens": 0,
+        "restore_ms": 0.0,
+        "prompt_tokens": 388,
+        "seed": 0
+      },
+      "client_ttft_s": 1.1211016660017776,
+      "first_visible_answer_s": 1.873577624999598,
+      "request_elapsed_s": 41.56042662500113,
+      "prefill_plan": {
+        "stderr_line": 6,
+        "rows": 2048,
+        "session_bytes": 3019620352,
+        "prefix_budget": 0,
+        "prefix_preference_held": false,
+        "server_number": 1,
+        "observed_at_server_request_ordinal": 1,
+        "stderr_artifact": "server-01/server-1.stderr.log"
+      },
+      "selected_prefill_rows": 2048,
+      "selected_prefill_rows_observability": "native post-allocation plan; frozen for this server",
+      "checks": {
+        "parsed": true,
+        "parse_error": null,
+        "reasoning_delimiter_seen": false,
+        "outer_fence_removed": true,
+        "schema_errors": [],
+        "fact_checks": [
+          {
+            "name": "loader_calls",
+            "present": true,
+            "expected": 2,
+            "actual": 2,
+            "matched": true
+          },
+          {
+            "name": "b_value",
+            "present": true,
+            "expected": 17,
+            "actual": 17,
+            "matched": true
+          },
+          {
+            "name": "c_value",
+            "present": true,
+            "expected": 18,
+            "actual": 18,
+            "matched": true
+          },
+          {
+            "name": "a_cancelled",
+            "present": true,
+            "expected": true,
+            "actual": true,
+            "matched": true
+          },
+          {
+            "name": "loader_cancelled_by_a",
+            "present": true,
+            "expected": false,
+            "actual": false,
+            "matched": true
+          }
+        ],
+        "facts_matched": 5,
+        "facts_total": 5,
+        "assessment": "partial_objective_checks_not_full_quality_grade"
+      },
+      "native": {
+        "prefill_ms": 1114.7,
+        "decode_ms": 40438.7,
+        "transitions": 1601,
+        "phases": {
+          "family": "glm5_next",
+          "prefill_ms": "1114.7",
+          "reused_tokens": "0",
+          "reuse_source": "none",
+          "restore_origin": "none",
+          "restore_ms": "0.0",
+          "boundary_ms": "0.0",
+          "prefill_tokens": "388",
+          "decode_ms": "40438.7",
+          "required_forwards": "6531",
+          "capacity": "32768",
+          "transitions": "1601",
+          "lineage": "fast",
+          "snapshot_schedule": "none",
+          "cuts": "[]",
+          "captures": "[]",
+          "snapshot_capture_ms": "0.0",
+          "snapshot_cache_bytes": "0",
+          "snapshot_cache_entries": "0",
+          "checkpoint_target": "0",
+          "checkpoint_captures": "[]",
+          "checkpoint_capture_ms": "0.0"
+        },
+        "stats": {
+          "version": "serve_stats_v1",
+          "prompt_tokens": "388",
+          "generated_tokens": "1602",
+          "stop_reason": "eos",
+          "matched_tokens": "0",
+          "restore_ms": "0.0",
+          "decode_tps": "39.62"
+        }
+      },
+      "private_response_sha256": "e07eac6b71a2c36a886ec8760fbfe2e025abf8cc942b4f545aadfd41211919d1"
+    },
+    {
+      "ordinal": 3,
+      "id": "generation-fenced-cache",
+      "status": "completed",
+      "server_number": 1,
+      "server_request_ordinal": 3,
+      "native_stop_reason": "eos",
+      "answer": "{\"facts\": {\"cached_value\": \"new\", \"final_generation\": 5, \"old_may_publish\": false, \"t1_return\": \"new\"}, \"code\": \"import threading\\n\\nclass VersionedCache:\\n    def __init__(self, loader):\\n        self._loader = loader\\n        self._lock = threading.Lock()\\n        self._values = {}        # key -> value\\n        self._generations = {}   # key -> int, survives eviction\\n\\n    def _generation_locked(self, key):\\n        return self._generations.get(key, 0)\\n\\n    def get(self, key):\\n        while True:\\n            with self._lock:\\n                if key in self._values:\\n                    # Cache hit linearizes here, under the lock.\\n                    return self._values[key]\\n                gen = self._generations.get(key, 0)\\n            # Loader runs outside the lock (blocking work).\\n            value = self._loader(key)\\n            with self._lock:\\n                # Publish only if our captured generation is still current.\\n                if self._generations.get(key, 0) == gen:\\n                    self._values[key] = value\\n                    return value\\n            # Generation changed while loading: discard and retry.\\n\\n    def invalidate(self, key):\\n        with self._lock:\\n            # Generation never decreases and survives eviction.\\n            self._generations[key] = self._generations.get(key, 0) + 1\\n            self._values.pop(key, None)\", \"explanation\": \"Scenario trace: k starts at generation 4 with no value. T1's get() finds no value, captures gen=4 under the lock, releases it, and loads 'old'. T2's invalidate(k) runs under the lock, bumps the generation to 5 and removes any value; T2 then loads and publishes 'new' at generation 5 (its captured generation 5 still matches). When T1 finishes loading 'old', it re-acquires the lock and sees generation 5 != 4, so it must discard 'old' and retry; the retry loads and publishes 'new' (generation still 5), returning 'new'. Hence old_may_publish=false, t1_return='new', cached_value='new', final_generation=5. Correctness: cache hits linearize while holding the lock; the loader runs outside the lock so blocking loads never block invalidate or hits; invalidate atomically increments the generation and drops the value, so a stale load can never publish after an invalidation; generations are stored separately from values so they survive eviction and never decrease; None is a valid cached value because presence is tracked by key membership, not by value truthiness; duplicate concurrent loads are permitted (no single-flight), and the generation check makes losing races safe. Why checking the generation before but not atomically with publish fails: if a load checked that the generation was current, released the lock, loaded, and then re-acquired the lock only to write the value without re-checking, an invalidate could occur in the window between the check and the publish; the stale value would then be installed under a newer generation, and subsequent hits would return the invalidated 'old' value indefinitely \u2014 a lost invalidation. The re-check under the same lock acquisition as the publish closes this race: check-and-publish is atomic with respect to invalidate. Limitation: without single-flight, concurrent misses for the same key may invoke the loader multiple times; the last writer under a current generation wins, which is acceptable per the spec.\"}",
+      "usage": {
+        "input_tokens": 363,
+        "output_tokens": 862,
+        "total_tokens": 1225,
+        "input_tokens_details": {
+          "cached_tokens": 0
+        },
+        "output_tokens_details": {
+          "reasoning_tokens": 0
+        }
+      },
+      "x_qwen": {
+        "version": "serve_stats_v1",
+        "matched_tokens": 0,
+        "restore_ms": 0.0,
+        "prompt_tokens": 363,
+        "seed": 0
+      },
+      "client_ttft_s": 1.1139240839984268,
+      "first_visible_answer_s": 3.667493791999732,
+      "request_elapsed_s": 21.51283274999878,
+      "prefill_plan": {
+        "stderr_line": 6,
+        "rows": 2048,
+        "session_bytes": 3019620352,
+        "prefix_budget": 0,
+        "prefix_preference_held": false,
+        "server_number": 1,
+        "observed_at_server_request_ordinal": 1,
+        "stderr_artifact": "server-01/server-1.stderr.log"
+      },
+      "selected_prefill_rows": 2048,
+      "selected_prefill_rows_observability": "native post-allocation plan; frozen for this server",
+      "checks": {
+        "parsed": true,
+        "parse_error": null,
+        "reasoning_delimiter_seen": false,
+        "outer_fence_removed": false,
+        "schema_errors": [],
+        "fact_checks": [
+          {
+            "name": "final_generation",
+            "present": true,
+            "expected": 5,
+            "actual": 5,
+            "matched": true
+          },
+          {
+            "name": "t1_return",
+            "present": true,
+            "expected": "new",
+            "actual": "new",
+            "matched": true
+          },
+          {
+            "name": "cached_value",
+            "present": true,
+            "expected": "new",
+            "actual": "new",
+            "matched": true
+          },
+          {
+            "name": "old_may_publish",
+            "present": true,
+            "expected": false,
+            "actual": false,
+            "matched": true
+          }
+        ],
+        "facts_matched": 4,
+        "facts_total": 4,
+        "assessment": "partial_objective_checks_not_full_quality_grade"
+      },
+      "native": {
+        "prefill_ms": 1111.7,
+        "decode_ms": 20398.8,
+        "transitions": 861,
+        "phases": {
+          "family": "glm5_next",
+          "prefill_ms": "1111.7",
+          "reused_tokens": "0",
+          "reuse_source": "none",
+          "restore_origin": "none",
+          "restore_ms": "0.0",
+          "boundary_ms": "0.0",
+          "prefill_tokens": "363",
+          "decode_ms": "20398.8",
+          "required_forwards": "4458",
+          "capacity": "32768",
+          "transitions": "861",
+          "lineage": "fast",
+          "snapshot_schedule": "none",
+          "cuts": "[]",
+          "captures": "[]",
+          "snapshot_capture_ms": "0.0",
+          "snapshot_cache_bytes": "0",
+          "snapshot_cache_entries": "0",
+          "checkpoint_target": "0",
+          "checkpoint_captures": "[]",
+          "checkpoint_capture_ms": "0.0"
+        },
+        "stats": {
+          "version": "serve_stats_v1",
+          "prompt_tokens": "363",
+          "generated_tokens": "862",
+          "stop_reason": "eos",
+          "matched_tokens": "0",
+          "restore_ms": "0.0",
+          "decode_tps": "42.26"
+        }
+      },
+      "private_response_sha256": "a19dc53b4f3372882d06c4cacfcf7e5a3dfa7385fa1836e18126fa215bd077f9"
+    },
+    {
+      "ordinal": 4,
+      "id": "sql-null-bag-semantics",
+      "status": "completed",
+      "server_number": 1,
+      "server_request_ordinal": 4,
+      "native_stop_reason": "eos",
+      "answer": "{\n  \"facts\": {\n    \"not_in_safe\": false,\n    \"rows\": [[1, 2, 5], [3, 0, 0], [4, 0, 0]]\n  },\n  \"code\": \"SELECT c.id,\\n       COUNT(o.id) FILTER (WHERE o.state = 'paid') AS paid_count,\\n       COALESCE(SUM(o.amount) FILTER (WHERE o.state = 'paid'), 0) AS paid_total\\nFROM customers c\\nLEFT JOIN orders o ON o.customer_id = c.id AND o.state = 'paid'\\nWHERE c.id NOT IN (SELECT customer_id FROM blocked WHERE customer_id IS NOT NULL)\\nGROUP BY c.id\\nORDER BY c.id;\",\n  \"explanation\": \"Paid orders are counted with COUNT(o.id) FILTER (WHERE state='paid'), so NULL amounts still count (order 11 counts, contributes 0 to total). SUM of only NULL amounts yields NULL, so COALESCE gives 0 for customer 3 (no paid orders) and any all-NULL case. NOT IN is unsafe in general: blocked contains a NULL, and x NOT IN (2,2,NULL) evaluates to NULL for every row, filtering everyone out; hence the WHERE customer_id IS NOT NULL guard (or use NOT EXISTS). Duplicates in blocked (2,2) don't matter because blocked is only used in a subquery, never joined, so nothing is multiplied. COUNT(*) after a plain LEFT JOIN orders would fail: it counts void orders too (customer 1 would get 3, customer 4 would get 1), and joining blocked directly would double-count customer 2. Order 15 (NULL customer_id) is never attached to any customer by the join. Result: customer 1 -> (2,5), customer 2 blocked, customer 3 -> (0,0), customer 4 -> (0,0), sorted by id.\"\n}",
+      "usage": {
+        "input_tokens": 382,
+        "output_tokens": 456,
+        "total_tokens": 838,
+        "input_tokens_details": {
+          "cached_tokens": 0
+        },
+        "output_tokens_details": {
+          "reasoning_tokens": 0
+        }
+      },
+      "x_qwen": {
+        "version": "serve_stats_v1",
+        "matched_tokens": 0,
+        "restore_ms": 0.0,
+        "prompt_tokens": 382,
+        "seed": 0
+      },
+      "client_ttft_s": 1.140666750001401,
+      "first_visible_answer_s": 2.315275249999104,
+      "request_elapsed_s": 11.583067499999743,
+      "prefill_plan": {
+        "stderr_line": 6,
+        "rows": 2048,
+        "session_bytes": 3019620352,
+        "prefix_budget": 0,
+        "prefix_preference_held": false,
+        "server_number": 1,
+        "observed_at_server_request_ordinal": 1,
+        "stderr_artifact": "server-01/server-1.stderr.log"
+      },
+      "selected_prefill_rows": 2048,
+      "selected_prefill_rows_observability": "native post-allocation plan; frozen for this server",
+      "checks": {
+        "parsed": true,
+        "parse_error": null,
+        "reasoning_delimiter_seen": false,
+        "outer_fence_removed": false,
+        "schema_errors": [],
+        "fact_checks": [
+          {
+            "name": "rows",
+            "present": true,
+            "expected": [
+              [
+                1,
+                2,
+                5
+              ],
+              [
+                3,
+                0,
+                0
+              ],
+              [
+                4,
+                0,
+                0
+              ]
+            ],
+            "actual": [
+              [
+                1,
+                2,
+                5
+              ],
+              [
+                3,
+                0,
+                0
+              ],
+              [
+                4,
+                0,
+                0
+              ]
+            ],
+            "matched": true
+          },
+          {
+            "name": "not_in_safe",
+            "present": true,
+            "expected": false,
+            "actual": false,
+            "matched": true
+          }
+        ],
+        "facts_matched": 2,
+        "facts_total": 2,
+        "assessment": "partial_objective_checks_not_full_quality_grade"
+      },
+      "native": {
+        "prefill_ms": 1138.6,
+        "decode_ms": 10442.4,
+        "transitions": 455,
+        "phases": {
+          "family": "glm5_next",
+          "prefill_ms": "1138.6",
+          "reused_tokens": "0",
+          "reuse_source": "none",
+          "restore_origin": "none",
+          "restore_ms": "0.0",
+          "boundary_ms": "0.0",
+          "prefill_tokens": "382",
+          "decode_ms": "10442.4",
+          "required_forwards": "4477",
+          "capacity": "32768",
+          "transitions": "455",
+          "lineage": "fast",
+          "snapshot_schedule": "none",
+          "cuts": "[]",
+          "captures": "[]",
+          "snapshot_capture_ms": "0.0",
+          "snapshot_cache_bytes": "0",
+          "snapshot_cache_entries": "0",
+          "checkpoint_target": "0",
+          "checkpoint_captures": "[]",
+          "checkpoint_capture_ms": "0.0"
+        },
+        "stats": {
+          "version": "serve_stats_v1",
+          "prompt_tokens": "382",
+          "generated_tokens": "456",
+          "stop_reason": "eos",
+          "matched_tokens": "0",
+          "restore_ms": "0.0",
+          "decode_tps": "43.67"
+        }
+      },
+      "private_response_sha256": "abbe00952224329902dc3696a3fba602e6b1dab87d2e1864201eedc66af870c5"
+    },
+    {
+      "ordinal": 5,
+      "id": "framed-log-recovery",
+      "status": "completed",
+      "server_number": 1,
+      "server_request_ordinal": 5,
+      "native_stop_reason": "eos",
+      "answer": "{\"facts\": {\"a_action\": \"truncate\", \"a_end\": 19, \"b_action\": \"fail\", \"b_modified\": false, \"c_action\": \"fail\", \"c_modified\": false}, \"code\": \"\", \"explanation\": \"Safe decision order per file: (1) read 4-byte header; if fewer than 4 bytes remain, it is a torn tail -> truncate to last frame end. (2) If declared length > 1024, corruption -> fail without modifying. (3) If fewer than length+4 bytes remain after the header, it is a torn tail -> truncate to last frame end. (4) Complete frame with bad CRC -> corruption -> fail, never resyncing. File A: frame [0,11) valid, frame [11,19) valid (length 0: 4 header + 4 CRC), then only 2 header bytes at [19,21) -> torn tail, truncate to 19. File B: frame [0,11) valid; frame [11,21) is complete (length 2) but has bad CRC -> corruption; the valid-looking bytes at [21,30) must be ignored (no forward scan/resync) -> fail, file unmodified (b_modified=false). File C: header at [11,15) declares length 2048 > 1024 -> over-limit corruption -> fail, unmodified (c_modified=false). C is not a torn frame because the header is complete and its declared length exceeds the maximum; the over-limit length is classified as corruption before any EOF check, and a torn tail requires a plausible (in-limit) length with insufficient remaining bytes.\"}",
+      "usage": {
+        "input_tokens": 446,
+        "output_tokens": 348,
+        "total_tokens": 794,
+        "input_tokens_details": {
+          "cached_tokens": 0
+        },
+        "output_tokens_details": {
+          "reasoning_tokens": 0
+        }
+      },
+      "x_qwen": {
+        "version": "serve_stats_v1",
+        "matched_tokens": 0,
+        "restore_ms": 0.0,
+        "prompt_tokens": 446,
+        "seed": 0
+      },
+      "client_ttft_s": 1.2228166250024515,
+      "first_visible_answer_s": 1.2228166250024515,
+      "request_elapsed_s": 9.178339416001108,
+      "prefill_plan": {
+        "stderr_line": 6,
+        "rows": 2048,
+        "session_bytes": 3019620352,
+        "prefix_budget": 0,
+        "prefix_preference_held": false,
+        "server_number": 1,
+        "observed_at_server_request_ordinal": 1,
+        "stderr_artifact": "server-01/server-1.stderr.log"
+      },
+      "selected_prefill_rows": 2048,
+      "selected_prefill_rows_observability": "native post-allocation plan; frozen for this server",
+      "checks": {
+        "parsed": true,
+        "parse_error": null,
+        "reasoning_delimiter_seen": false,
+        "outer_fence_removed": false,
+        "schema_errors": [],
+        "fact_checks": [
+          {
+            "name": "a_action",
+            "present": true,
+            "expected": "truncate",
+            "actual": "truncate",
+            "matched": true
+          },
+          {
+            "name": "a_end",
+            "present": true,
+            "expected": 19,
+            "actual": 19,
+            "matched": true
+          },
+          {
+            "name": "b_action",
+            "present": true,
+            "expected": "fail",
+            "actual": "fail",
+            "matched": true
+          },
+          {
+            "name": "c_action",
+            "present": true,
+            "expected": "fail",
+            "actual": "fail",
+            "matched": true
+          },
+          {
+            "name": "b_modified",
+            "present": true,
+            "expected": false,
+            "actual": false,
+            "matched": true
+          },
+          {
+            "name": "c_modified",
+            "present": true,
+            "expected": false,
+            "actual": false,
+            "matched": true
+          }
+        ],
+        "facts_matched": 6,
+        "facts_total": 6,
+        "assessment": "partial_objective_checks_not_full_quality_grade"
+      },
+      "native": {
+        "prefill_ms": 1198.2,
+        "decode_ms": 7978.1,
+        "transitions": 347,
+        "phases": {
+          "family": "glm5_next",
+          "prefill_ms": "1198.2",
+          "reused_tokens": "0",
+          "reuse_source": "none",
+          "restore_origin": "none",
+          "restore_ms": "0.0",
+          "boundary_ms": "0.0",
+          "prefill_tokens": "446",
+          "decode_ms": "7978.1",
+          "required_forwards": "4541",
+          "capacity": "32768",
+          "transitions": "347",
+          "lineage": "fast",
+          "snapshot_schedule": "none",
+          "cuts": "[]",
+          "captures": "[]",
+          "snapshot_capture_ms": "0.0",
+          "snapshot_cache_bytes": "0",
+          "snapshot_cache_entries": "0",
+          "checkpoint_target": "0",
+          "checkpoint_captures": "[]",
+          "checkpoint_capture_ms": "0.0"
+        },
+        "stats": {
+          "version": "serve_stats_v1",
+          "prompt_tokens": "446",
+          "generated_tokens": "348",
+          "stop_reason": "eos",
+          "matched_tokens": "0",
+          "restore_ms": "0.0",
+          "decode_tps": "43.62"
+        }
+      },
+      "private_response_sha256": "e075d8507961dbf47d1d149cfc97a98df1c9c0414394db9412c5737fabd7e0ac"
+    },
+    {
+      "ordinal": 6,
+      "id": "incremental-utf8-lines",
+      "status": "completed",
+      "server_number": 1,
+      "server_request_ordinal": 6,
+      "native_stop_reason": "eos",
+      "answer": "{\"facts\": {\"empty_chunk_is_eof\": false, \"final_error\": \"UnicodeDecodeError\", \"lines\": [\"A\\n\", \"\u20ac\\n\", \"B\\rC\\n\"]}, \"code\": \"def decode_lines(chunks):\\n    buf = bytearray()\\n    for chunk in chunks:\\n        if not chunk:\\n            continue\\n        buf += chunk\\n        start = 0\\n        while True:\\n            i = buf.find(b'\\\\n', start)\\n            if i == -1:\\n                break\\n            end = i\\n            if end > start and buf[end - 1] == 0x0D:\\n                end -= 1\\n            yield buf[start:end].decode('utf-8')\\n            start = i + 1\\n        if start:\\n            del buf[:start]\\n    if buf:\\n        yield buf.decode('utf-8')\\n\", \"explanation\": \"Bytes are accumulated in a buffer; complete LF-terminated segments are decoded and yielded incrementally, so UTF-8 decoding naturally spans chunks (only whole lines are decoded once their bytes are complete). Exactly one CR immediately before LF is stripped; a bare CR not followed by LF (like in 'B\\\\rC\\\\n') is preserved. Empty chunks are skipped, not treated as EOF. At EOF a nonempty residual buffer is decoded strictly; incomplete UTF-8 (b'\\\\xf0\\\\x9f') raises UnicodeDecodeError after prior lines were already yielded. No extra empty line is emitted after a terminal LF since the buffer is empty. Memory bound: O(max line length + one incomplete UTF-8 sequence), never the whole input. Limitation: a lone CR at a chunk boundary followed by LF in the next chunk is correctly stripped because splitting happens on the accumulated buffer, not per chunk.\"}",
+      "usage": {
+        "input_tokens": 344,
+        "output_tokens": 491,
+        "total_tokens": 835,
+        "input_tokens_details": {
+          "cached_tokens": 0
+        },
+        "output_tokens_details": {
+          "reasoning_tokens": 0
+        }
+      },
+      "x_qwen": {
+        "version": "serve_stats_v1",
+        "matched_tokens": 0,
+        "restore_ms": 0.0,
+        "prompt_tokens": 344,
+        "seed": 0
+      },
+      "client_ttft_s": 1.0774733749967709,
+      "first_visible_answer_s": 3.4242534169970895,
+      "request_elapsed_s": 12.297651583998231,
+      "prefill_plan": {
+        "stderr_line": 6,
+        "rows": 2048,
+        "session_bytes": 3019620352,
+        "prefix_budget": 0,
+        "prefix_preference_held": false,
+        "server_number": 1,
+        "observed_at_server_request_ordinal": 1,
+        "stderr_artifact": "server-01/server-1.stderr.log"
+      },
+      "selected_prefill_rows": 2048,
+      "selected_prefill_rows_observability": "native post-allocation plan; frozen for this server",
+      "checks": {
+        "parsed": true,
+        "parse_error": null,
+        "reasoning_delimiter_seen": false,
+        "outer_fence_removed": false,
+        "schema_errors": [],
+        "fact_checks": [
+          {
+            "name": "lines",
+            "present": true,
+            "expected": [
+              "A",
+              "\u20ac",
+              "B\rC"
+            ],
+            "actual": [
+              "A\n",
+              "\u20ac\n",
+              "B\rC\n"
+            ],
+            "matched": false
+          },
+          {
+            "name": "final_error",
+            "present": true,
+            "expected": "UnicodeDecodeError",
+            "actual": "UnicodeDecodeError",
+            "matched": true
+          },
+          {
+            "name": "empty_chunk_is_eof",
+            "present": true,
+            "expected": false,
+            "actual": false,
+            "matched": true
+          }
+        ],
+        "facts_matched": 2,
+        "facts_total": 3,
+        "assessment": "partial_objective_checks_not_full_quality_grade"
+      },
+      "native": {
+        "prefill_ms": 1075.4,
+        "decode_ms": 11220.1,
+        "transitions": 490,
+        "phases": {
+          "family": "glm5_next",
+          "prefill_ms": "1075.4",
+          "reused_tokens": "0",
+          "reuse_source": "none",
+          "restore_origin": "none",
+          "restore_ms": "0.0",
+          "boundary_ms": "0.0",
+          "prefill_tokens": "344",
+          "decode_ms": "11220.1",
+          "required_forwards": "4439",
+          "capacity": "32768",
+          "transitions": "490",
+          "lineage": "fast",
+          "snapshot_schedule": "none",
+          "cuts": "[]",
+          "captures": "[]",
+          "snapshot_capture_ms": "0.0",
+          "snapshot_cache_bytes": "0",
+          "snapshot_cache_entries": "0",
+          "checkpoint_target": "0",
+          "checkpoint_captures": "[]",
+          "checkpoint_capture_ms": "0.0"
+        },
+        "stats": {
+          "version": "serve_stats_v1",
+          "prompt_tokens": "344",
+          "generated_tokens": "491",
+          "stop_reason": "eos",
+          "matched_tokens": "0",
+          "restore_ms": "0.0",
+          "decode_tps": "43.76"
+        }
+      },
+      "private_response_sha256": "db45552df7c3cffbdb142b3a88ccfe88cef3d3ad58a8c3ac585e96088bd6214d"
+    },
+    {
+      "ordinal": 7,
+      "id": "archive-recovery-authority",
+      "status": "completed",
+      "server_number": 1,
+      "server_request_ordinal": 7,
+      "native_stop_reason": "eos",
+      "answer": "{\"facts\": {\"action\": \"truncate\", \"authority\": \"R9-C8\", \"discarded_bytes\": 37, \"replay_sequences\": [301, 302, 303, 304, 305], \"truncate_offset\": 6400, \"visible_seq\": 305, \"x\": \"blue\", \"y\": \"gold\"}, \"code\": \"\", \"explanation\": \"Authority rule: only signed COMMIT records for incident R9 count. Candidates: R9-C6 (rev 6), R9-C8 (rev 8), R9-C7 (rev 7). Highest numeric revision wins regardless of display time or position, so R9-C8 is authoritative. R9-C7 (rev 7) is rejected: lower revision than 8 despite later display time; its claims (visible_seq=304, truncate_offset=6350, x=red, y=absent) are superseded. R9-C6 (rev 6) is rejected: lower revision; its checkpoint_seq=280/visible_seq=288/truncate_offset=4096 are superseded. R8-C99 is rejected: different incident (R8), never overrides R9. All ARCHIVE NOTEs 00-47 and TERMINAL DRAFT R9-D-LAST are rejected: unsigned drafts, contextual only; their simulator-derived numbers (visible_seq 240-287, replay_from, actions) are hypotheses, and repeated agreement or display-time ordering grants no authority; the terminal draft's x=gray/checkpoint-only advice is not signed. Applying R9-C8's manifest: checkpoint_seq=300, checkpoint_offset=6000. All complete frames after the checkpoint replay in order: seq301, seq302 (COMMIT txA -> x=red becomes visible), seq303, seq304, seq305 (COMMIT txB -> x=blue, y=gold become visible). Writes are visible only at COMMIT, so visible_seq=305 (last committed sequence). Final frame [6400,6437) is a torn tail, not corruption: keep all complete frames and truncate only the incomplete tail, so truncate_offset=6400 and discarded_bytes=6437-6400=37. Final state: x=blue, y=gold, action=truncate. Limitation: values are taken solely from the authoritative record's manifest as given.\"}",
+      "usage": {
+        "input_tokens": 9654,
+        "output_tokens": 605,
+        "total_tokens": 10259,
+        "input_tokens_details": {
+          "cached_tokens": 0
+        },
+        "output_tokens_details": {
+          "reasoning_tokens": 0
+        }
+      },
+      "x_qwen": {
+        "version": "serve_stats_v1",
+        "matched_tokens": 0,
+        "restore_ms": 0.0,
+        "prompt_tokens": 9654,
+        "seed": 0
+      },
+      "client_ttft_s": 18.864607666000666,
+      "first_visible_answer_s": 21.291386332999537,
+      "request_elapsed_s": 32.2907788329976,
+      "prefill_plan": {
+        "stderr_line": 6,
+        "rows": 2048,
+        "session_bytes": 3019620352,
+        "prefix_budget": 0,
+        "prefix_preference_held": false,
+        "server_number": 1,
+        "observed_at_server_request_ordinal": 1,
+        "stderr_artifact": "server-01/server-1.stderr.log"
+      },
+      "selected_prefill_rows": 2048,
+      "selected_prefill_rows_observability": "native post-allocation plan; frozen for this server",
+      "checks": {
+        "parsed": true,
+        "parse_error": null,
+        "reasoning_delimiter_seen": false,
+        "outer_fence_removed": false,
+        "schema_errors": [],
+        "fact_checks": [
+          {
+            "name": "authority",
+            "present": true,
+            "expected": "R9-C8",
+            "actual": "R9-C8",
+            "matched": true
+          },
+          {
+            "name": "replay_sequences",
+            "present": true,
+            "expected": [
+              301,
+              302,
+              303,
+              304,
+              305
+            ],
+            "actual": [
+              301,
+              302,
+              303,
+              304,
+              305
+            ],
+            "matched": true
+          },
+          {
+            "name": "visible_seq",
+            "present": true,
+            "expected": 305,
+            "actual": 305,
+            "matched": true
+          },
+          {
+            "name": "truncate_offset",
+            "present": true,
+            "expected": 6400,
+            "actual": 6400,
+            "matched": true
+          },
+          {
+            "name": "discarded_bytes",
+            "present": true,
+            "expected": 37,
+            "actual": 37,
+            "matched": true
+          },
+          {
+            "name": "x",
+            "present": true,
+            "expected": "blue",
+            "actual": "blue",
+            "matched": true
+          },
+          {
+            "name": "y",
+            "present": true,
+            "expected": "gold",
+            "actual": "gold",
+            "matched": true
+          },
+          {
+            "name": "action",
+            "present": true,
+            "expected": "truncate",
+            "actual": "truncate",
+            "matched": true
+          }
+        ],
+        "facts_matched": 8,
+        "facts_total": 8,
+        "assessment": "partial_objective_checks_not_full_quality_grade"
+      },
+      "native": {
+        "prefill_ms": 18861.8,
+        "decode_ms": 13426.2,
+        "transitions": 604,
+        "phases": {
+          "family": "glm5_next",
+          "prefill_ms": "18861.8",
+          "reused_tokens": "0",
+          "reuse_source": "none",
+          "restore_origin": "none",
+          "restore_ms": "0.0",
+          "boundary_ms": "0.0",
+          "prefill_tokens": "9654",
+          "decode_ms": "13426.2",
+          "required_forwards": "15797",
+          "capacity": "32768",
+          "transitions": "604",
+          "lineage": "fast",
+          "snapshot_schedule": "none",
+          "cuts": "[]",
+          "captures": "[]",
+          "snapshot_capture_ms": "0.0",
+          "snapshot_cache_bytes": "0",
+          "snapshot_cache_entries": "0",
+          "checkpoint_target": "0",
+          "checkpoint_captures": "[]",
+          "checkpoint_capture_ms": "0.0"
+        },
+        "stats": {
+          "version": "serve_stats_v1",
+          "prompt_tokens": "9654",
+          "generated_tokens": "605",
+          "stop_reason": "eos",
+          "matched_tokens": "0",
+          "restore_ms": "0.0",
+          "decode_tps": "45.06"
+        }
+      },
+      "private_response_sha256": "139b34740af9a135d6f9038630cbd9f45412682b287817826dc833a47c09c12c"
+    },
+    {
+      "ordinal": 8,
+      "id": "archive-rollout-fences",
+      "status": "completed",
+      "server_number": 1,
+      "server_request_ordinal": 8,
+      "native_stop_reason": "eos",
+      "answer": "{\"facts\": {\"authority\": \"SIGNED RELEASE ledger-cache epoch=42 id=L42 (base L41, base L40)\", \"b_value\": \"v-new\", \"east_enabled\": true, \"east_ttl\": 5, \"final_generation\": 12, \"loader_calls\": 2, \"old_published\": false, \"publish\": \"compare_generation_under_lock\", \"shared_cancelled_by_a\": false, \"wait\": \"shield_shared_task\", \"west_enabled\": true, \"west_ttl\": 45}, \"code\": \"\", \"explanation\": \"Only SIGNED RELEASE records for ledger-cache define terminal configuration; drafts and display times are ignored. Highest epoch is L42 (42), whose base chain is L41 (41) then L40 (40). Resolution applies patches along the explicit base chain, not physical order: L40 sets defaults enabled=false, ttl=60; east={enabled:true,ttl:15}; west={enabled:true,ttl:30}; generation=9; publish=unconditional; wait=direct. L41 (base L40) sets defaults.enabled=true, east.ttl=5, generation=10. L42 (base L41) sets defaults.ttl=45, regions.west=null (explicit removal of the west override), generation=11, publish=compare_generation_under_lock, wait=shield_shared_task. After removal, west inherits defaults: enabled=true, ttl=45. East: enabled=true, ttl=5. Final generation starts at 11. Execution: A and B share one blocked load; wait=shield_shared_task means A's cancellation does not cancel the shared load, so shared_cancelled_by_a=false. Invalidation increments generation once to 12. The old loader returns 'v-old' at the stale generation; under compare_generation_under_lock the mismatch causes a retry instead of publishing, so old_published=false. The retry load returns 'v-new' at generation 12 and is published; B observes 'v-new'. Loader calls: initial shared load plus one retry = 2. Limitations: assumes the shield semantics exactly as specified and that the retry is the only additional load.\"}",
+      "usage": {
+        "input_tokens": 9810,
+        "output_tokens": 583,
+        "total_tokens": 10393,
+        "input_tokens_details": {
+          "cached_tokens": 0
+        },
+        "output_tokens_details": {
+          "reasoning_tokens": 0
+        }
+      },
+      "x_qwen": {
+        "version": "serve_stats_v1",
+        "matched_tokens": 0,
+        "restore_ms": 0.0,
+        "prompt_tokens": 9810,
+        "seed": 0
+      },
+      "client_ttft_s": 19.16279624999879,
+      "first_visible_answer_s": 22.34289083299882,
+      "request_elapsed_s": 32.085542041000735,
+      "prefill_plan": {
+        "stderr_line": 6,
+        "rows": 2048,
+        "session_bytes": 3019620352,
+        "prefix_budget": 0,
+        "prefix_preference_held": false,
+        "server_number": 1,
+        "observed_at_server_request_ordinal": 1,
+        "stderr_artifact": "server-01/server-1.stderr.log"
+      },
+      "selected_prefill_rows": 2048,
+      "selected_prefill_rows_observability": "native post-allocation plan; frozen for this server",
+      "checks": {
+        "parsed": true,
+        "parse_error": null,
+        "reasoning_delimiter_seen": false,
+        "outer_fence_removed": false,
+        "schema_errors": [],
+        "fact_checks": [
+          {
+            "name": "authority",
+            "present": true,
+            "expected": "L42",
+            "actual": "SIGNED RELEASE ledger-cache epoch=42 id=L42 (base L41, base L40)",
+            "matched": false
+          },
+          {
+            "name": "publish",
+            "present": true,
+            "expected": "compare_generation_under_lock",
+            "actual": "compare_generation_under_lock",
+            "matched": true
+          },
+          {
+            "name": "wait",
+            "present": true,
+            "expected": "shield_shared_task",
+            "actual": "shield_shared_task",
+            "matched": true
+          },
+          {
+            "name": "b_value",
+            "present": true,
+            "expected": "v-new",
+            "actual": "v-new",
+            "matched": true
+          },
+          {
+            "name": "east_enabled",
+            "present": true,
+            "expected": true,
+            "actual": true,
+            "matched": true
+          },
+          {
+            "name": "west_enabled",
+            "present": true,
+            "expected": false,
+            "actual": true,
+            "matched": false
+          },
+          {
+            "name": "old_published",
+            "present": true,
+            "expected": false,
+            "actual": false,
+            "matched": true
+          },
+          {
+            "name": "shared_cancelled_by_a",
+            "present": true,
+            "expected": false,
+            "actual": false,
+            "matched": true
+          },
+          {
+            "name": "east_ttl",
+            "present": true,
+            "expected": 15,
+            "actual": 5,
+            "matched": false
+          },
+          {
+            "name": "west_ttl",
+            "present": true,
+            "expected": 45,
+            "actual": 45,
+            "matched": true
+          },
+          {
+            "name": "final_generation",
+            "present": true,
+            "expected": 12,
+            "actual": 12,
+            "matched": true
+          },
+          {
+            "name": "loader_calls",
+            "present": true,
+            "expected": 2,
+            "actual": 2,
+            "matched": true
+          }
+        ],
+        "facts_matched": 9,
+        "facts_total": 12,
+        "assessment": "partial_objective_checks_not_full_quality_grade"
+      },
+      "native": {
+        "prefill_ms": 19159.4,
+        "decode_ms": 12922.6,
+        "transitions": 582,
+        "phases": {
+          "family": "glm5_next",
+          "prefill_ms": "19159.4",
+          "reused_tokens": "0",
+          "reuse_source": "none",
+          "restore_origin": "none",
+          "restore_ms": "0.0",
+          "boundary_ms": "0.0",
+          "prefill_tokens": "9810",
+          "decode_ms": "12922.6",
+          "required_forwards": "15953",
+          "capacity": "32768",
+          "transitions": "582",
+          "lineage": "fast",
+          "snapshot_schedule": "none",
+          "cuts": "[]",
+          "captures": "[]",
+          "snapshot_capture_ms": "0.0",
+          "snapshot_cache_bytes": "0",
+          "snapshot_cache_entries": "0",
+          "checkpoint_target": "0",
+          "checkpoint_captures": "[]",
+          "checkpoint_capture_ms": "0.0"
+        },
+        "stats": {
+          "version": "serve_stats_v1",
+          "prompt_tokens": "9810",
+          "generated_tokens": "583",
+          "stop_reason": "eos",
+          "matched_tokens": "0",
+          "restore_ms": "0.0",
+          "decode_tps": "45.11"
+        }
+      },
+      "private_response_sha256": "6486c8a77d735c8461d91610e31cc7a909cb05d98c4826373e43d8fa95f46dae"
+    }
+  ],
+  "servers": [
+    {
+      "server_number": 1,
+      "before_case": 1,
+      "reason": "initial",
+      "status": "ready",
+      "startup_elapsed_s": 1.3299942910016398,
+      "descriptor": {
+        "capacity": 32768,
+        "prefill_rows_max": 2048,
+        "fast_precision": "half",
+        "selected_prefill_rows": null,
+        "selected_prefill_rows_observability": "not a startup measurement; see per-outcome prefill_plan"
+      },
+      "prefill_plan": {
+        "stderr_line": 6,
+        "rows": 2048,
+        "session_bytes": 3019620352,
+        "prefix_budget": 0,
+        "prefix_preference_held": false,
+        "server_number": 1,
+        "observed_at_server_request_ordinal": 1,
+        "stderr_artifact": "server-01/server-1.stderr.log"
+      }
+    }
+  ],
+  "comparison_scope": "whole native configuration; not a pure quantization causal comparison",
+  "raw_artifacts_private": true,
+  "integrity": [
+    {
+      "name": "qwen",
+      "size": 22429768,
+      "sha256": "5bf0b34c9470ed9bab2bd4447de5f547fb1a9e6a13f18d2534442bead36e9c55"
+    },
+    {
+      "name": "GLM-5.3-Flash-UD-Q4_K_XL-00001-of-00006.gguf",
+      "size": 9429984,
+      "sha256": "b59c030090f012b38213bc8c4f78ce10767f2693d730d0dbcd3dc16a5f69e2bc"
+    },
+    {
+      "name": "GLM-5.3-Flash-UD-Q4_K_XL-00002-of-00006.gguf",
+      "size": 49198039200,
+      "sha256": "d3ecb6ff3957a99878f9a0352676a0913748a431a9a4a1b1ffa5ade9b8947a74"
+    },
+    {
+      "name": "GLM-5.3-Flash-UD-Q4_K_XL-00003-of-00006.gguf",
+      "size": 49988626304,
+      "sha256": "328073c004e7c5395b208247feed26089db247b94dd8fa4ab0f2569d86c1d770"
+    },
+    {
+      "name": "GLM-5.3-Flash-UD-Q4_K_XL-00004-of-00006.gguf",
+      "size": 48700701344,
+      "sha256": "6803ab7effa6da4a0b02c9c7865952fdd6c5b2e10e53903348da369e90bd13f9"
+    },
+    {
+      "name": "GLM-5.3-Flash-UD-Q4_K_XL-00005-of-00006.gguf",
+      "size": 49026026752,
+      "sha256": "852f3df9dacde3d196796f9fe738468e80c8701555ff0a8c30bc010fb8974dd8"
+    },
+    {
+      "name": "GLM-5.3-Flash-UD-Q4_K_XL-00006-of-00006.gguf",
+      "size": 2784497888,
+      "sha256": "c6ba510fafc1e12cc0addbc361a329c0c592ab96980098e7e25e107d8faa983e"
+    }
+  ],
+  "memory_before": {
+    "vm_stat": {
+      "returncode": 0,
+      "stdout": "Mach Virtual Memory Statistics: (page size of 16384 bytes)\nPages free:                                    84901.\nPages active:                                2299356.\nPages inactive:                             14000149.\nPages speculative:                                22.\nPages throttled:                                   0.\nPages wired down:                             306902.\nPages purgeable:                               10444.\n\"Translation faults\":                       64362780.\nPages copy-on-write:                         1972708.\nPages zero filled:                          89549230.\nPages reactivated:                             40362.\nPages purged:                                 877189.\nFile-backed pages:                          15117506.\nAnonymous pages:                             1182021.\nPages stored in compressor:                    33603.\nPages occupied by compressor:                   9977.\nDecompressions:                                 7992.\nCompressions:                                  46664.\nPageins:                                    28757628.\nPageouts:                                         20.\nSwapins:                                           0.\nSwapouts:                                          0.\nPages tagged:                                 220636.\nPages tagged resident:                        216104.\nPages tagged compressed:                        4532.\nPages tag-storage:                            524288.\nPages tag-storage holding tags:                 7382.\nPages tag-storage free:                        74491.\nPages tag-storage non-tag pageable:           381403.\nPages tag-storage non-tag wired:                 134.\nBytes of compressed tags:                     795776.\nTagged compressions:                            6162.\nTagged decompressions:                          1630.\n"
+    },
+    "swapusage": {
+      "returncode": 0,
+      "stdout": "vm.swapusage: total = 0.00M  used = 0.00M  free = 0.00M  (encrypted)\n"
+    }
+  },
+  "integrity_after": "unchanged",
+  "memory_after": {
+    "vm_stat": {
+      "returncode": 0,
+      "stdout": "Mach Virtual Memory Statistics: (page size of 16384 bytes)\nPages free:                                   290551.\nPages active:                                3573764.\nPages inactive:                              4051291.\nPages speculative:                               276.\nPages throttled:                                   0.\nPages wired down:                            8775450.\nPages purgeable:                               29720.\n\"Translation faults\":                       64626616.\nPages copy-on-write:                         1974739.\nPages zero filled:                          89977013.\nPages reactivated:                             40413.\nPages purged:                                 884839.\nFile-backed pages:                           6428063.\nAnonymous pages:                             1197268.\nPages stored in compressor:                    33578.\nPages occupied by compressor:                   9975.\nDecompressions:                                 8018.\nCompressions:                                  46664.\nPageins:                                    28757996.\nPageouts:                                         20.\nSwapins:                                           0.\nSwapouts:                                          0.\nPages tagged:                                 226021.\nPages tagged resident:                        221491.\nPages tagged compressed:                        4530.\nPages tag-storage:                            524288.\nPages tag-storage holding tags:                 7507.\nPages tag-storage free:                        71500.\nPages tag-storage non-tag pageable:           384176.\nPages tag-storage non-tag wired:                 133.\nBytes of compressed tags:                     795648.\nTagged compressions:                            6162.\nTagged decompressions:                          1632.\n"
+    },
+    "swapusage": {
+      "returncode": 0,
+      "stdout": "vm.swapusage: total = 0.00M  used = 0.00M  free = 0.00M  (encrypted)\n"
+    }
+  },
+  "recipe": "stock-q4",
+  "publication_note": "Final answers, checks, and telemetry retained; reasoning and duplicated parsed answer fields omitted. Raw SSE and server logs remain private."
+}

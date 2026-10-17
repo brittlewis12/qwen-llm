@@ -6,6 +6,30 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-10-17 - Three-Way GLM Pilot Finds No Q4 Quality Advantage
+
+- Preregistered eight public engineering cases, including two approximately
+  9.7K-token archives, at `b57ce0b8`. Same M5 Ultra, native `d7b2a05b`, low
+  reasoning, greedy sampling, Fast/Half, budgets, and no prefix reuse across
+  Maya-M, stock UD-IQ3_XXS, and stock UD-Q4_K_XL. Full artifact hashes pass.
+- All 24 responses complete naturally; all actual prefill widths are 2048.
+  Zero swap at before/after observations; existing compressor occupancy remains
+  nonzero without new compression events. Q4 fits without tuning.
+- Two fresh blinded reviewers score Maya 23/23, IQ3 23/24, and Q4 22/21, each
+  out of 32. Separate exact-fact all-correct cases are 6/8, 5/8, and 5/8.
+  Reviewers agree on 22/24 scores; no averaging or significance claim.
+- Weighted real-response generation is 47.25/49.14/42.42 tok/s for Maya/IQ3/Q4;
+  weighted prefill is 499.91/506.06/485.25 tok/s. Eight-request totals are
+  177.28/169.16/179.22 seconds. Q4 emits fewer tokens, so its slower generation
+  does not translate directly into the same whole-request latency penalty.
+- Q4 misses exhaustion caching and chooses a wrong long-context base; Maya has
+  a bytes/str UTF-8 implementation bug; IQ3 has a generation-key cache-hit bug.
+  These are static-review findings, not execution-test passes or broad rankings.
+- Keep Maya as incumbent: this small low-reasoning pilot does not show enough
+  Q4 benefit to justify approximately 74-78 GiB extra storage and 10-14% lower
+  generation throughput. IQ3 remains competitive. No backend changes/promotions.
+  Evidence: `docs/bench/2026-10-16-glm-quality-comparison/`.
+
 ## 2026-10-16 - M5 Ultra GLM Maya First Light Complete
 
 - The same three-shard Maya-M IQ2_S artifact passed full SHA-256 verification

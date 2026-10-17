@@ -2,14 +2,89 @@
 
 ## Status
 
-Prepared, not yet measured. The stock Q4 artifact is downloading directly to
-the M5 Ultra using Hugging Face's Xet high-performance mode. The other stock
-artifact must also be staged on that worker before its evaluation. No quality
-winner or numerical accuracy claim exists yet.
+Completed: all three verified artifacts ran all eight frozen cases, and all 24
+responses ended naturally. Two fresh blind reviews are complete. The pilot does
+not demonstrate a quality advantage for Q4; Maya and stock IQ3 remain competitive.
+This is not a universal ranking or independent numerical qualification.
 
 The direct downloader uses `huggingface_hub` 2.2.0 and `hf_xet` 1.7.0, with
 `HF_XET_HIGH_PERFORMANCE=1` and four file workers. Subsequent acquisition pins
 those observed versions. Raw transfer logs remain private.
+
+## Results
+
+| Recipe | Reviewer A / B, each out of 32 | Exact-fact cases / 8 | Strict JSON cases / 8 | Generation tok/s | Prefill tok/s | Eight-request total |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| Maya-M | 23 / 23 | 6 | 7 | 47.25 | 499.91 | 177.28 s |
+| Stock IQ3 | 23 / 24 | 5 | 5 | 49.14 | 506.06 | 169.16 s |
+| Stock Q4 | 22 / 21 | 5 | 7 | 42.42 | 485.25 | 179.22 s |
+
+Rates are weighted totals: emitted tokens divided by summed native generation
+time, and input tokens divided by summed native prefill time. Output-token counts
+include stop tokens. These are real generated responses, not fixed-token compute
+benchmarks. Outputs differ in length and content: Maya produced 6316 tokens,
+IQ3 6195, and Q4 5696. Q4's shorter outputs mostly offset slower generation in
+whole-request time; do not equate the rate difference with an identical increase
+in end-to-end latency. Checksum, startup, and acquisition time are excluded.
+
+Every arm received the same 21715 rendered input tokens, case by case. The long
+cases are 9654 and 9810 input tokens; their native prefills took approximately
+18.5-19.2 seconds across all three models. All actual selected prefill widths
+were 2048, all cache-reuse counters were zero, and all three arms used exactly
+the committed runner/checker/prompt bytes. Swap usage was zero before and after
+each arm. Existing compressor occupancy was nonzero (approximately 146-158 MiB)
+and stayed flat or declined; the cumulative compression count did not increase
+during any arm. These are endpoint observations, not continuous peak-memory
+measurements. No arm restarted or exhausted its token budget.
+
+Reviewer A used the `astra` CX profile; reviewer B used `sol`, in independent
+fresh read-only sessions with reversed candidate presentation order. Both full
+24-record grades were saved and validated before the private map was opened.
+They agreed on 22 of 24 numerical scores; the remaining disagreements concern
+severity, not different identified bugs. Scores are retained separately.
+
+| Case | Maya A/B | Stock IQ3 A/B | Stock Q4 A/B |
+| --- | ---: | ---: | ---: |
+| Single-pass lookahead | 2/2 | 2/2 | 2/1 |
+| Shared-load cancellation | 2/2 | 2/2 | 2/2 |
+| Generation-fenced cache | 4/4 | 2/2 | 3/3 |
+| SQL NULL/bag semantics | 4/4 | 4/4 | 3/3 |
+| Framed-log recovery | 4/4 | 4/4 | 4/4 |
+| Incremental UTF-8 lines | 1/1 | 2/3 | 2/2 |
+| Long archive recovery | 4/4 | 4/4 | 4/4 |
+| Long rollout/base resolution | 2/2 | 3/3 | 2/2 |
+
+Examples from static review, not executed-code tests:
+
+- Q4's lookahead class does not cache exhaustion; its rollout answer incorrectly
+  substitutes L41 for the explicitly named L40 base, producing wrong settings.
+- Maya's UTF-8 implementation mixes a bytes buffer with decoded strings and
+  would raise TypeError. Its rollout facts are substantively on track but the
+  final answer violates the requested JSON structure.
+- IQ3's cache implementation can raise KeyError on a normal later hit because
+  an initial successful load never inserts the corresponding generation key.
+- All three have material issues in the shared-load cancellation task. None is
+  a blanket correctness winner merely because its model file is larger.
+
+Exact-fact checks are deliberately strict about types and strings. Some failures
+are formatting-only, such as quoted numbers or an explanatory record-ID string.
+The checker tolerates and reports an outer JSON fence for fact extraction, but
+the strict-JSON column excludes fenced answers. These counts are not general
+reasoning accuracy, and the blind scores are judgments rather than test execution.
+
+**Decision:** this eight-case, low-reasoning pilot does not justify switching the
+default to Q4. It uses roughly 72-77 GiB more main-weight storage (74-78 GiB
+larger files) than the smaller recipes and generated about 10-14% fewer tokens per second on this task mix,
+without a demonstrated quality gain. Keep Maya as the incumbent; stock IQ3 is
+competitive but not a clearly established quality upgrade. Different tasks,
+reasoning effort, or repeated sampling could change that assessment.
+
+`results/` contains final answers, exact checks, usage/timing summaries, both
+blind packets and review prompts, validated grades, the subsequently revealed
+map, and calculated metrics. Reasoning traces, full SSE streams, and server logs
+remain in the private run directory. Private terminal-response hashes are kept
+in the public summaries for traceability. No hostnames or private connection
+identifiers are published. The worker is idle after owned-server cleanup.
 
 ## Scope and identity
 
@@ -153,7 +228,8 @@ uv run --script run.py --binary "$QWEN" --model "$MODEL" \
 The parent verifies the worker source checkout matches the pinned clean commit
 before launch. Output directories must be new. Raw results require privacy
 review before publication; the public packet will identify hardware and model
-artifacts, not private machines. No public result is implied by this preparation.
+artifacts, not private machines. The preparation checkpoint was `b57ce0b8`,
+committed before any scored responses; the results above are the subsequent run.
 
 `worker-queue.sh` performs the source check before each arm, using caller-supplied
 paths. `stage.py` creates only canonical shard links, refusing conflicting files;
@@ -174,3 +250,16 @@ Half precision, and selected rows 2048; parsing this real log also passed.
 
 Frozen prompt-file SHA-256:
 `af75387cd0f9c885c95e435953683e2e3cadfe0ec619117e679fd6a617b4b0a7`.
+
+All three measured arms report runner SHA-256
+`b0fceee7a3ea98868065e905cc934aea26a302181cb45b96c80e89571d1d502e`
+and checker SHA-256
+`495c6f5e1840a49c80a425e1022e9eb7693b592539880d9af73a130ac063ef9a`.
+Preparation structural contracts passed for tree
+`6af7264ef04c72e8410a6717c43f122ab517b372`.
+
+Final evidence validation: 51 CPU tests and shellcheck pass. Result tests
+recompute scores, facts, rates, mappings, source hashes, input equality, cache
+isolation, and the memory claims from retained artifacts. An independent
+publication audit checked the report against the outputs; its compressor
+accounting correction is reflected above.

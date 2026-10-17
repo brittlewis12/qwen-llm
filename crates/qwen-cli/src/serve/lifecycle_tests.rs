@@ -306,6 +306,7 @@ fn busy_rejection_does_not_create_an_owner_completion() {
 }
 
 struct PhaseBackend {
+    v41: bool,
     owner: ThreadId,
     address: SocketAddr,
     events: Sender<&'static str>,
@@ -320,6 +321,16 @@ impl PhaseBackend {
 }
 
 impl http::GenerationBackend for PhaseBackend {
+    fn request_profile(&self) -> request_profile::RequestProfile {
+        if self.v41 {
+            protocol_v41::profile(request_profile::OutputLimits {
+                default_max_tokens: 65536,
+                max_piece_bytes: 64,
+            })
+        } else {
+            request_profile::RequestProfile::UnboundQwen
+        }
+    }
     fn model_id(&self) -> &str {
         "test"
     }
@@ -375,6 +386,15 @@ fn small_socket_buffer(socket: &impl std::os::fd::AsRawFd, option: i32) {
 
 #[test]
 fn busy_and_shutdown_cover_reading_generation_backpressure_and_response_writing() {
+    exercise_busy_shutdown(false);
+}
+
+#[test]
+fn v41_busy_and_shutdown_cover_reading_generation_and_writing() {
+    exercise_busy_shutdown(true);
+}
+
+fn exercise_busy_shutdown(v41: bool) {
     for phase in ["reading", "generation", "writing"] {
         let listener = bind_loopback("127.0.0.1:0").unwrap();
         small_socket_buffer(&listener, libc::SO_SNDBUF);
@@ -399,6 +419,7 @@ fn busy_and_shutdown_cover_reading_generation_backpressure_and_response_writing(
         let (done, completion) = channel();
         let server = std::thread::spawn(move || {
             let mut backend = PhaseBackend {
+                v41,
                 owner: std::thread::current().id(),
                 address,
                 events,

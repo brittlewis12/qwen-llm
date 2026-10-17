@@ -8,6 +8,9 @@ use std::time::Duration;
 
 #[derive(Debug, Subcommand)]
 pub(crate) enum Command {
+    /// Inspect, load, generate, or serve old REAP-272E safetensors.
+    #[command(name = "deepseek-v41")]
+    DeepSeekV41(crate::deepseek_v41_cli::Options),
     /// Run one model-templated or explicitly raw request.
     #[command(
         after_help = "Examples:\n  qwen run -m MODEL --user 'Explain this'\n  qwen run -m MODEL --system 'Be concise' --user 'Explain this'\n  qwen run -m Qwen3.8-27B.gguf --reasoning-effort low --user 'Explain this'\n  qwen run -m MODEL --user -\n  qwen run -m MODEL --messages -\n  qwen run -m MODEL --raw-prompt '<exact model input>'\n  qwen run -m Qwen3.6-35B-A3B.gguf --user 'Explain this' --no-thinking"
@@ -192,6 +195,7 @@ fn parse_positive_usize(value: &str) -> std::result::Result<usize, String> {
 
 #[derive(Debug)]
 pub(crate) enum Invocation {
+    DeepSeekV41(crate::deepseek_v41_cli::Options),
     Legacy,
     Run(RunInvocation),
     Serve(ServeInvocation),
@@ -486,6 +490,7 @@ pub(crate) fn normalize(args: &mut Args) -> Invocation {
     };
 
     match command {
+        Command::DeepSeekV41(options) => Invocation::DeepSeekV41(options),
         Command::Info(info) => Invocation::Info(InfoInvocation {
             model: info.model,
             json: info.json,

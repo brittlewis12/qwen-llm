@@ -1,4 +1,6 @@
 pub mod bounded_file;
+#[path = "deepseek_v41_cli/engram.rs"]
+pub mod deepseek_v41_tokenizer;
 pub mod messages;
 pub mod model_request;
 pub mod open_responses;
@@ -48,10 +50,12 @@ mod tests {
         assert_eq!(std::env::var(CHILD_ENV).as_deref(), Ok("1"));
         super::shutdown::install().unwrap();
         assert!(super::shutdown::checkpoint().is_ok());
+        assert!(!super::shutdown::cancellation_flag().load(std::sync::atomic::Ordering::Acquire));
         // The installed handler records the signal in the same library
         // static that checkpoint reads.
         assert_eq!(unsafe { libc::raise(libc::SIGTERM) }, 0);
         let error = super::shutdown::checkpoint().unwrap_err();
         assert!(error.to_string().contains("termination signal"));
+        assert!(super::shutdown::cancellation_flag().load(std::sync::atomic::Ordering::Acquire));
     }
 }

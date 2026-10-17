@@ -440,6 +440,7 @@ fn paired_http_history_and_exact_retry_survive_loss_of_capture_capability() {
 fn family_profiles_serve_history_or_standalone_assets_without_native_inference() {
     use crate::serve::items::TemplateStyle;
     let profiles = [
+        crate::serve::protocol_v41::profile(crate::serve::request_profile::OutputLimits::TEST),
         RequestProfile::DeepSeekV4 {
             style: TemplateStyle::House,
             sampling: None,

@@ -57,6 +57,10 @@ pub(crate) enum RequestProfile {
         sampling: Option<SamplingConfig>,
         limits: OutputLimits,
     },
+    DeepSeekV41 {
+        limits: OutputLimits,
+        sampling: Option<SamplingConfig>,
+    },
     Muse {
         template: MuseGlimmerChatTemplateProfile,
         default_max_tokens: usize,
@@ -103,6 +107,25 @@ impl RequestProfile {
 
     pub(crate) fn parse(&self, body: &Value) -> Result<ServeRequest, ServeError> {
         match self {
+            Self::DeepSeekV41 { .. } => {
+                if let Some(options) = body["x_qwen"].as_object() {
+                    for key in [
+                        "ced",
+                        "prefix_reuse",
+                        "prefix_cache",
+                        "snapshot_cache",
+                        "durable_prefix_cache",
+                    ] {
+                        if options.get(key).is_some_and(|v| !v.is_null()) {
+                            return Err(ServeError::invalid_request(
+                                Some(&format!("x_qwen.{key}")),
+                                "V4.1 serving has no CED, snapshots, or prefix reuse",
+                            ));
+                        }
+                    }
+                }
+                super::items::parse_request(body)
+            }
             Self::K2 { chat, .. } => render_k2::parse_with_profile(body, chat.as_deref()),
             Self::Glm5Next { .. } => {
                 render_glm5_next::check_raw_tool_definitions(body)?;
@@ -117,7 +140,11 @@ impl RequestProfile {
             Self::OrdinaryQwen { style, .. }
             | Self::FlashNext { style, .. }
             | Self::DeepSeekV4 { style, .. } => Some(*style),
-            Self::UnboundQwen | Self::Muse { .. } | Self::K2 { .. } | Self::Glm5Next { .. } => None,
+            Self::DeepSeekV41 { .. }
+            | Self::UnboundQwen
+            | Self::Muse { .. }
+            | Self::K2 { .. }
+            | Self::Glm5Next { .. } => None,
         }
     }
 
@@ -133,13 +160,14 @@ impl RequestProfile {
         // Qwen and Flash-Next (undeclared tool syntax still parses), for
         // DeepSeek V4 when tools are declared.
         let parses_tools = match self {
-            Self::OrdinaryQwen { .. } | Self::FlashNext { .. } => true,
+            Self::DeepSeekV41 { .. } | Self::OrdinaryQwen { .. } | Self::FlashNext { .. } => true,
             Self::DeepSeekV4 { .. } => !request.model_request.tools.is_empty(),
             _ => false,
         };
         if let Self::OrdinaryQwen { limits, .. }
         | Self::FlashNext { limits, .. }
-        | Self::DeepSeekV4 { limits, .. } = self
+        | Self::DeepSeekV4 { limits, .. }
+        | Self::DeepSeekV41 { limits, .. } = self
             && parses_tools
             && super::output_memory::tool_byte_ceiling(
                 limits.max_tokens(request),
@@ -155,6 +183,17 @@ impl RequestProfile {
         match self {
             // Ordinary Qwen binds a clone during rendering; Flash-Next binds
             // before rendering, protocol selection and response echoes.
+            Self::DeepSeekV41 { limits, sampling } => {
+                super::protocol_v41::validate(request)?;
+                if let Some(defaults) = sampling {
+                    request.seed.get_or_insert(defaults.seed);
+                    fill_sampling_defaults(request, *defaults);
+                }
+                request
+                    .max_output_tokens
+                    .get_or_insert(limits.default_max_tokens);
+                Ok(())
+            }
             Self::UnboundQwen => Ok(()),
             Self::OrdinaryQwen { sampling, .. } => {
                 if let Some(release) = sampling {
@@ -230,6 +269,7 @@ impl RequestProfile {
                 )?;
                 Ok(render::render_qwen_serve_prompt(&bound))
             }
+            Self::DeepSeekV41 { .. } => super::protocol_v41::render(request),
             Self::DeepSeekV4 { .. } => render_ds4::render_deepseek_v4_serve_prompt(request),
             Self::Muse { template, .. } => {
                 render_muse::render_muse_glimmer_serve_prompt(request, *template)
@@ -265,6 +305,13 @@ impl RequestProfile {
             )
         };
         match self {
+            Self::DeepSeekV41 { limits, .. } => OutputProtocol::DeepSeekV41 {
+                thinking: super::protocol_v41::thinking(request)
+                    .ok()
+                    .flatten()
+                    .is_some(),
+                max_bytes: ceiling(limits).unwrap_or(0),
+            },
             Self::UnboundQwen => OutputProtocol::Qwen {
                 preopened_reasoning: false,
                 parse_tools: true,

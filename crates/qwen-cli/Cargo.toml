@@ -43,6 +43,10 @@ dflash-k0s-diagnostics = ["qwen-llm/dflash-k0s-diagnostics"]
 dsv4-diagnostics = ["qwen-llm/dsv4-diagnostics"]
 
 [dependencies]
+tokenizers.workspace = true
+deepseek-recipe-core.workspace = true
+deepseek-recipe-encoding.workspace = true
+deepseek-recipe.workspace = true
 qwen-llm = { path = "../qwen-llm" }
 objc2.workspace = true
 objc2-foundation.workspace = true

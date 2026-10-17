@@ -56,7 +56,7 @@ pub struct ToolResult {
 /// rejects reserved recipients and empty segments).
 pub(crate) const TOOL_NAME_GRAMMAR: &str = "[A-Za-z0-9_.-]{1,64}";
 
-pub(crate) fn tool_name_is_valid(name: &str) -> bool {
+pub fn tool_name_is_valid(name: &str) -> bool {
     !name.is_empty()
         && name.len() <= 64
         && name

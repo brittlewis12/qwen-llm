@@ -5,6 +5,7 @@ mod admission;
 #[path = "qwen/args.rs"]
 mod args;
 mod cli;
+mod deepseek_v41_cli;
 #[cfg(test)]
 mod test_alloc;
 use qwen_cli::bounded_file;
@@ -206,6 +207,7 @@ fn run() -> Result<()> {
     let invocation = match invocation {
         cli::Invocation::Serve(serve_invocation) => return serve::run_serve(serve_invocation),
         cli::Invocation::Info(info) => return run_info(info),
+        cli::Invocation::DeepSeekV41(options) => return deepseek_v41_cli::run(options),
         other => other,
     };
     invocation.apply_option_overrides(&mut args);

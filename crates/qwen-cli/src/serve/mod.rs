@@ -20,6 +20,7 @@ mod backend_glm5_next;
 pub(crate) mod backend_k2;
 pub(crate) mod backend_muse;
 pub(crate) mod backend_qwen4exp;
+pub(crate) mod backend_v41;
 mod control;
 pub(crate) mod decode_loop;
 pub(crate) mod durable;
@@ -39,6 +40,7 @@ pub(crate) mod partition_glm5_next;
 pub(crate) mod partition_k2;
 pub(crate) mod partition_muse;
 pub(crate) mod partition_preopened;
+pub(crate) mod protocol_v41;
 pub(crate) mod render_ds4;
 pub(crate) mod render_glm5_next;
 pub(crate) mod render_k2;
@@ -506,8 +508,10 @@ fn open_workbench(invocation: &crate::cli::ServeInvocation) -> Result<Option<Wor
 /// because llama.cpp initializes its Metal backend there.
 pub(crate) fn run_serve(invocation: crate::cli::ServeInvocation) -> Result<()> {
     crate::shutdown::checkpoint()?;
+    protocol_v41::check_model_path(&invocation.model)?;
     let gguf = GgufFile::open(&invocation.model)
         .with_context(|| format!("open model {}", invocation.model.display()))?;
+    protocol_v41::check_runtime(gguf.architecture().as_deref())?;
     let Some(family) = ModelFamily::detect(&gguf) else {
         bail!(
             "qwen serve does not support model architecture {:?}; recognised families: {} (docs/SERVE.md)",
@@ -637,7 +641,7 @@ mod storage_policy_tests {
     }
 }
 
-fn bind_loopback(addr: &str) -> Result<TcpListener> {
+pub(crate) fn bind_loopback(addr: &str) -> Result<TcpListener> {
     let addresses = addr
         .to_socket_addrs()
         .with_context(|| format!("resolve listen address {addr}"))?
@@ -752,6 +756,21 @@ fn accept_loop(
         workbench,
         |_| crate::shutdown::checkpoint(),
     )
+}
+
+/// Safetensors resident owner stays on this stack; only CPU HTTP work moves.
+pub(crate) fn serve_v41(
+    listener: TcpListener,
+    backend: &mut backend_v41::Backend<'_>,
+    load_ms: f64,
+) -> Result<()> {
+    use http::GenerationBackend;
+    let model_id = backend.model_id().to_owned();
+    eprintln!(
+        "V4.1 listening on http://{}; caches/CED/prefix reuse disabled",
+        listener.local_addr()?
+    );
+    accept_loop(listener, &model_id, load_ms, backend, &mut None, None)
 }
 
 #[derive(Clone, Copy, PartialEq)]

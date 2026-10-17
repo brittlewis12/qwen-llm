@@ -1,0 +1,9 @@
+{
+  "repository": "LibertAIDAI/DeepSeek-V4.1-Flash-REAP-272E",
+  "revision": "f792019bcb369768220f01088f0f7af230786982",
+  "tokenizer_sha256": "c90dfa01249db1be4245780a052ede752e1361c612ac6d08e2bdada7d599476b",
+  "raw_vocab": 129280,
+  "compressed_vocab": 99092,
+  "compressed_pad_id": 2,
+  "lookup_u32le_sha256": "c60a86322ec17b4142bfef3c57a8d81fb428550cdf487f88a4320cb59fe46481"
+}

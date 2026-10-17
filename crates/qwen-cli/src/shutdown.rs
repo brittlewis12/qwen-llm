@@ -1,15 +1,22 @@
 use anyhow::{Result, anyhow};
 use std::process::ExitCode;
 use std::sync::OnceLock;
-use std::sync::atomic::{AtomicI32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI32, Ordering};
 
 static REQUESTED_SIGNAL: AtomicI32 = AtomicI32::new(0);
+static CANCELLED: AtomicBool = AtomicBool::new(false);
 static INSTALLED: OnceLock<Result<(), i32>> = OnceLock::new();
 
 extern "C" fn handle_signal(signal: libc::c_int) {
+    CANCELLED.store(true, Ordering::SeqCst);
     REQUESTED_SIGNAL
         .compare_exchange(0, signal, Ordering::SeqCst, Ordering::SeqCst)
         .ok();
+}
+
+/// Borrowed by synchronous model steps so signal cancellation reaches layers.
+pub fn cancellation_flag() -> &'static AtomicBool {
+    &CANCELLED
 }
 
 fn install_signal(signal: libc::c_int) -> Result<(), i32> {

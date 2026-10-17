@@ -109,6 +109,9 @@ impl OwnerSink {
 }
 
 impl GenerationSink for OwnerSink {
+    fn cancellation_flag(&self) -> Option<Arc<std::sync::atomic::AtomicBool>> {
+        Some(self.control.execution.cancellation_flag())
+    }
     fn transport_reserve_bytes(&self) -> u64 {
         BUFFER_RESERVE_BYTES + self.extra_cpu_reserve
     }

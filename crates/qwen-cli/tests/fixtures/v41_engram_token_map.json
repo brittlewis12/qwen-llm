@@ -1,0 +1,86 @@
+{
+  "source_sha256": "11f35ecbead8150c35aa002b3d180ef290b05a25afe883a11884f94d476d3897",
+  "tokenizer": {
+    "version": "1.0",
+    "truncation": null,
+    "padding": null,
+    "added_tokens": [
+      {
+        "id": 17,
+        "content": "<special>",
+        "single_word": false,
+        "lstrip": false,
+        "rstrip": false,
+        "normalized": false,
+        "special": true
+      }
+    ],
+    "normalizer": null,
+    "pre_tokenizer": null,
+    "post_processor": null,
+    "decoder": {
+      "type": "ByteLevel",
+      "add_prefix_space": true,
+      "trim_offsets": true,
+      "use_regex": true
+    },
+    "model": {
+      "type": "BPE",
+      "dropout": null,
+      "unk_token": null,
+      "continuing_subword_prefix": null,
+      "end_of_word_suffix": null,
+      "fuse_unk": false,
+      "byte_fallback": false,
+      "ignore_merges": false,
+      "vocab": {
+        "\u0120The": 0,
+        "the": 1,
+        "THE": 2,
+        "caf\u00c3\u00a9": 3,
+        "CAFE": 4,
+        "\u00ef\u00bc\u00a3\u00ef\u00bc\u00a1\u00ef\u00bc\u00a6\u00ef\u00bc\u00a5": 5,
+        "e\u00cc\u0123": 6,
+        "\u00c3\u012b": 7,
+        "\u0120": 8,
+        "\u0109": 9,
+        "\u010d\u010a": 10,
+        "\u0120\u0120": 11,
+        "": 12,
+        "\u00c2\u0142": 13,
+        "\u00ee\u0122\u0122": 14,
+        "\u00c4\u00b0": 15,
+        "\u00c3\u0141": 16,
+        "<special>": 17,
+        "\u00c3": 18,
+        "\u00a9": 19,
+        "\u00ff": 20
+      },
+      "merges": []
+    }
+  },
+  "lookup": [
+    0,
+    0,
+    0,
+    1,
+    1,
+    1,
+    2,
+    2,
+    3,
+    3,
+    3,
+    3,
+    4,
+    3,
+    3,
+    5,
+    6,
+    7,
+    8,
+    9,
+    10
+  ],
+  "compressed_vocab_size": 11
+}

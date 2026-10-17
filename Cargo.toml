@@ -10,6 +10,10 @@ license = "MIT OR Apache-2.0"
 authors = ["Britt Lewis"]
 
 [workspace.dependencies]
+tokenizers = "=0.23.2"
+deepseek-recipe-core = { git = "https://github.com/deepseek-ai/deepseek-recipe", rev = "8cadfede7063c896b944e7bae05daa3549ae97ea", version = "=0.1.0" }
+deepseek-recipe-encoding = { git = "https://github.com/deepseek-ai/deepseek-recipe", rev = "8cadfede7063c896b944e7bae05daa3549ae97ea", version = "=0.1.0" }
+deepseek-recipe = { git = "https://github.com/deepseek-ai/deepseek-recipe", rev = "8cadfede7063c896b944e7bae05daa3549ae97ea", version = "=0.1.0" }
 # host-side metal bindings (objc2-metal is the active successor to metal-rs)
 objc2 = "0.6"
 objc2-foundation = { version = "0.3", features = ["NSString", "NSURL", "NSError", "NSData"] }

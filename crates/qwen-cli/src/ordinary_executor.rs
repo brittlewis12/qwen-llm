@@ -86,6 +86,10 @@ impl std::fmt::Display for ExecutionCancelled {
 impl std::error::Error for ExecutionCancelled {}
 
 impl ExecutionControl {
+    pub(crate) fn cancellation_flag(&self) -> Arc<AtomicBool> {
+        Arc::clone(&self.cancelled)
+    }
+
     pub(crate) fn cancel(&self) {
         self.cancelled.store(true, Ordering::Release);
     }

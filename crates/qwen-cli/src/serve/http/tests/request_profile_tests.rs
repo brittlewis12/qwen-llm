@@ -121,6 +121,67 @@ fn k2(chat: bool, max_piece_bytes: usize) -> RequestProfile {
 }
 
 #[test]
+fn v41_http_tools_and_multiturn_use_official_recipe() {
+    let profile =
+        crate::serve::protocol_v41::profile(crate::serve::request_profile::OutputLimits::TEST);
+    let tools = json!([{"type":"function","name":"lookup","parameters":{"type":"object","properties":{"q":{"type":"string"}}}}]);
+    let history = json!([
+        {"role":"user","content":"question"},
+        {"type":"reasoning","content":"plan"},
+        {"type":"function_call","call_id":"c","name":"lookup","arguments":"{\"q\":\"caf\u{e9}\"}"},
+        {"type":"function_call_output","call_id":"c","output":"found"},
+        {"role":"user","content":"continue"}
+    ]);
+    let replay =
+        json!({"model":"test","input":history,"tools":tools,"reasoning":{"effort":"high"}});
+    let replay_prompt = profile.render(&profile.parse(&replay).unwrap()).unwrap();
+    let start = replay_prompt.find("<think>plan").unwrap() + "<think>".len();
+    let close = "</\u{ff5c}DSML\u{ff5c} calls>";
+    let end = start + replay_prompt[start..].find(close).unwrap() + close.len();
+    let emission = replay_prompt[start..end].to_owned();
+    for streaming in [false, true] {
+        let body = json!({"model":"test","input":"question","tools":tools,"reasoning":{"effort":"high"},"stream":streaming});
+        let result = roundtrip(
+            ProfileBackend {
+                profile: profile.clone(),
+                expected_prompt: Some(profile.render(&profile.parse(&body).unwrap()).unwrap()),
+                output: emission.clone(),
+                end: GenerationEnd::StopToken(0),
+            },
+            &post("/v1/responses", &body.to_string()),
+        );
+        let reply = envelope(&result, streaming);
+        let call = reply["output"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|item| item["type"] == "function_call")
+            .unwrap();
+        assert_eq!(call["name"], "lookup");
+        assert_eq!(
+            serde_json::from_str::<Value>(call["arguments"].as_str().unwrap()).unwrap(),
+            json!({"q":"caf\u{e9}"})
+        );
+        let mut body = replay.clone();
+        body["stream"] = streaming.into();
+        let result = roundtrip(
+            ProfileBackend {
+                profile: profile.clone(),
+                expected_prompt: Some(replay_prompt.clone()),
+                output: "next</think>done".into(),
+                end: GenerationEnd::StopToken(0),
+            },
+            &post("/v1/responses", &body.to_string()),
+        );
+        let reply = envelope(&result, streaming);
+        assert_eq!(
+            reply["output"].as_array().unwrap().last().unwrap()["content"][0]["text"],
+            "done"
+        );
+    }
+}
+
+#[test]
 fn family_profiles_drive_real_http_json_and_sse_without_hook_overrides() {
     let qwen_prompt =
         "<|im_start|>user\nHello<|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n\n";
@@ -137,6 +198,25 @@ fn family_profiles_drive_real_http_json_and_sse_without_hook_overrides() {
         .as_str()
         .unwrap();
     let mut cases = Vec::new();
+    for effort in ["none", "high"] {
+        let profile =
+            crate::serve::protocol_v41::profile(crate::serve::request_profile::OutputLimits::TEST);
+        let body = json!({"model":"test","input":"Hello","reasoning":{"effort":effort}});
+        let prompt = profile.render(&profile.parse(&body).unwrap()).unwrap();
+        cases.push((
+            profile,
+            body,
+            prompt,
+            if effort == "none" {
+                "answer"
+            } else {
+                "plan</think>answer"
+            }
+            .into(),
+            GenerationEnd::StopToken(0),
+            effort != "none",
+        ));
+    }
     // Served Qwen models carry their release's sampling decision; 0.6 is the
     // Qwen3.5-27B/122B-A10B case.
     for (template, temperature) in [

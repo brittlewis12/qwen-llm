@@ -60,6 +60,10 @@ impl GenerationEnd {
 pub(crate) enum OutputProtocol {
     /// Literal completion text: UTF-8 assembly only, no control-marker parsing.
     RawText,
+    DeepSeekV41 {
+        thinking: bool,
+        max_bytes: usize,
+    },
     K2Chat {
         effort: qwen_llm::k2_horizon_chat::Effort,
     },
@@ -99,6 +103,7 @@ impl OutputProtocol {
     /// history preclosed or dropped, where absent reasoning changes nothing.
     pub(crate) fn reasons(&self) -> bool {
         match self {
+            Self::DeepSeekV41 { thinking, .. } => *thinking,
             Self::RawText => false,
             Self::K2Chat { .. }
             | Self::K2Tools { .. }
@@ -115,6 +120,7 @@ impl OutputProtocol {
 
 pub(crate) enum OutputPartition {
     Raw(Utf8Assembler),
+    DeepSeekV41(super::protocol_v41::Partition),
     Preopened(super::partition_preopened::PreopenedPartition),
     K2Tools(super::partition_k2::K2ToolsPartition),
     Glm5NextTools(super::partition_glm5_next::Glm5NextToolsPartition),
@@ -134,6 +140,10 @@ impl OutputPartition {
     /// (Qwen/DS4, GLM) check (serve passes the backend's; tests inject).
     pub(crate) fn with_headroom(protocol: OutputProtocol, headroom: super::http::Headroom) -> Self {
         match protocol {
+            OutputProtocol::DeepSeekV41 {
+                thinking,
+                max_bytes,
+            } => Self::DeepSeekV41(super::protocol_v41::Partition::new(thinking, max_bytes)),
             OutputProtocol::RawText => Self::Raw(Utf8Assembler::new()),
             OutputProtocol::K2Chat { effort } => {
                 Self::Preopened(super::partition_k2::k2_partition(effort))
@@ -188,6 +198,7 @@ impl OutputPartition {
                     events.push(PartitionEvent::Visible(text));
                 }
             }
+            Self::DeepSeekV41(partition) => partition.push(bytes, events),
             Self::Qwen(partition) => partition.push(bytes, events),
             Self::Preopened(partition) => partition.push(bytes, events),
             Self::K2Tools(partition) => partition.push(bytes, events),
@@ -209,6 +220,7 @@ impl OutputPartition {
                 }
                 Ok(())
             }
+            Self::DeepSeekV41(partition) => partition.finish(events),
             Self::Qwen(partition) => partition.finish(events),
             Self::Muse(partition) => partition.finish(end, events),
             Self::Preopened(partition) => partition.finish(end, events),
@@ -221,6 +233,7 @@ impl OutputPartition {
     /// turn (generation can stop; `finish` returns it).
     pub(crate) fn failure(&self) -> Option<&ServeError> {
         match self {
+            Self::DeepSeekV41(partition) => partition.failure(),
             Self::Qwen(partition) => partition.failure(),
             Self::Glm5NextTools(partition) => partition.failure(),
             Self::Raw(_) | Self::Preopened(_) | Self::K2Tools(_) | Self::Muse(_) => None,
@@ -238,7 +251,7 @@ impl OutputPartition {
             Self::Qwen(partition) => partition.abort(events),
             Self::Muse(partition) => partition.abort(events),
             Self::Preopened(partition) => partition.abort(events),
-            Self::K2Tools(_) | Self::Glm5NextTools(_) => {}
+            Self::DeepSeekV41(_) | Self::K2Tools(_) | Self::Glm5NextTools(_) => {}
         }
     }
 }

@@ -40,6 +40,10 @@ const REQUEST_READ_DEADLINE: Duration = Duration::from_secs(30);
 /// `tick` is called between prefill chunks so the transport can heartbeat
 /// and detect disconnects (cancellation = the returned error).
 pub(crate) trait GenerationSink {
+    /// Shared request flag for synchronous models checking between layers.
+    fn cancellation_flag(&self) -> Option<Arc<std::sync::atomic::AtomicBool>> {
+        None
+    }
     fn piece(&mut self, bytes: &[u8]) -> io::Result<()>;
     /// Transport fragments may change streaming delta boundaries. A collector
     /// can use the first fragment's original length to keep its allocation shape.

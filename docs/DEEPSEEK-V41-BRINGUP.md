@@ -311,3 +311,20 @@ pad ID, disk-row reads and floating-point Engram injection remain unimplemented.
 Do not use this component on raw token IDs or infer model execution from integer
 address agreement. Generator/verification commands are documented in
 `scripts/reference/deepseek_v41/engram_oracle.py`.
+
+### Verification
+
+Implementation `e3e662a3`, tree `d76b8a41646956aa1fa3b671299ca65bdf8b187b`,
+passed `scripts/check-contracts.sh --full`: all workspace targets compiled,
+22 V4.1 Rust tests and 26 offline Python tests executed without skips, and the
+existing comparison/structural/README gates passed. Explicit bounded header
+recapture and isolated NumPy Engram regeneration matched the pinned fixtures.
+
+Read-only review found and resolved an unbounded redirect-body read in the
+initial capture transport. The replacement is tested through the actual urllib
+handler chain, including hop limits, rejected schemes and regenerated Host
+headers. Follow-up review found no remaining blocker for this model-free scope;
+an independent 100-case history/mask probe also matched the extracted Engram
+source under multiple chunkings. These results are not GPU or full-model
+qualification. No shared kernels, model weight payloads, system memory limits
+or installed inference binaries were changed.

@@ -54,3 +54,12 @@ AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
 LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
+
+## DeepSeek V4.1 Reference Fixtures
+
+`scripts/reference/deepseek_v41/fixtures/` retains unmodified configuration and
+inference source from `deepseek-ai/DeepSeek-V4.1-Flash-1017`, revision
+`1bae0e1088993b9b82de08f59de5be5a34e42170`. These are offline test references,
+not a runtime dependency. SHA256 provenance is in the adjacent `sources.json`.
+The upstream MIT license, copyright (c) 2023 DeepSeek, is retained verbatim in
+`scripts/reference/deepseek_v41/fixtures/LICENSE`.

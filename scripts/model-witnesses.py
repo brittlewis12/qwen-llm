@@ -176,6 +176,43 @@ def witness_annotations(source: str, path: pathlib.Path, package: str):
     return offsets
 
 
+def select_annotations(
+    annotations: list[tuple[str, str]], prefixes: list[str], name_filter: str
+) -> list[int]:
+    if "" in prefixes:
+        raise ValueError("--fixture-prefix must not be empty")
+    fixture_ids = [
+        reason.removeprefix("model witness: ")
+        if reason.startswith("model witness: ")
+        else None
+        for reason, _ in annotations
+    ]
+    unmatched = [
+        prefix
+        for prefix in prefixes
+        if not any(
+            fixture_id is not None and fixture_id.startswith(prefix)
+            for fixture_id in fixture_ids
+        )
+    ]
+    if unmatched:
+        raise ValueError(
+            f"fixture prefixes have no annotated model witnesses: {', '.join(repr(prefix) for prefix in unmatched)}"
+        )
+    return [
+        index
+        for index, ((_, name), fixture_id) in enumerate(zip(annotations, fixture_ids))
+        if name_filter in name
+        and (
+            not prefixes
+            or (
+                fixture_id is not None
+                and any(fixture_id.startswith(prefix) for prefix in prefixes)
+            )
+        )
+    ]
+
+
 def self_test() -> None:
     source = '''
 mod outer {
@@ -200,6 +237,59 @@ mod outer {
         "needs reference logits from the external llm tool",
         "oracle",
     )
+
+    selection_source = """
+#[ignore = "model witness: deepseek-v4-flash-0731-small"]
+fn alpha_keep() {}
+#[ignore = "model witness: glm-5.3-flash-small"]
+fn beta_drop() {}
+#[ignore = "model witness: qwen-small"]
+fn gamma_keep() {}
+#[ignore = "model witness: dflash-small"]
+fn delta_drop() {}
+#[ignore = "needs reference logits from the external llm tool"]
+fn qwen_oracle_keep() {}
+#[ignore = "other reason"]
+fn qwen_unannotated_keep() {}
+"""
+    parsed = witness_annotations(selection_source, path, "fixture")
+    assert parsed is not None
+    identities = [(reason, name) for reason, name, _ in parsed]
+    prefixes = ["deepseek-v4-flash-0731", "glm-5.3-flash", "qwen", "dflash"]
+    assert select_annotations(identities, [], "") == [0, 1, 2, 3, 4]
+    assert select_annotations(identities, [], "qwen") == [4]
+    assert select_annotations(identities, prefixes, "") == [0, 1, 2, 3]
+    assert select_annotations(identities, prefixes, "keep") == [0, 2]
+    assert select_annotations(identities, ["qwen", "deepseek", "qwen-small"], "") == [
+        0,
+        2,
+    ]
+    assert select_annotations(identities, ["qwen"], "alpha") == []
+    renamed_source = selection_source
+    for _, name in identities:
+        renamed_source = renamed_source.replace(
+            f"fn {name}()", f"fn renamed_{len(name)}_{name[::-1]}()"
+        )
+    renamed = witness_annotations(renamed_source, path, "fixture")
+    assert renamed is not None
+    assert select_annotations(
+        [(reason, name) for reason, name, _ in renamed], prefixes, ""
+    ) == [0, 1, 2, 3]
+    for requested in (["missing"], ["qwen", "missing"], ["needs reference"]):
+        try:
+            select_annotations(identities, requested, "no_matching_name")
+        except ValueError as error:
+            assert repr(requested[-1]) in str(error)
+            assert "no annotated model witnesses" in str(error)
+        else:
+            raise AssertionError(f"unmatched prefix accepted: {requested}")
+    for requested in ([""], ["qwen", ""]):
+        try:
+            select_annotations(identities, requested, "")
+        except ValueError as error:
+            assert "--fixture-prefix must not be empty" in str(error)
+        else:
+            raise AssertionError(f"empty prefix accepted: {requested}")
 
 
 def cargo_metadata() -> dict:
@@ -241,8 +331,15 @@ def ignored_listing(package: str, selector: list[str]) -> list[str]:
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("filter", nargs="?", default="", help="function-name substring")
+    parser.add_argument(
+        "--fixture-prefix",
+        action="append",
+        default=[],
+        metavar="PREFIX",
+        help="annotated fixture ID prefix (repeatable OR; AND with name filter); each must match an annotation before name filtering",
+    )
     parser.add_argument("--list-only", action="store_true", help="validate and print target-qualified selections")
-    parser.add_argument("--self-test", action="store_true", help="exercise source annotation parsing")
+    parser.add_argument("--self-test", action="store_true", help="exercise source annotation parsing and selection")
     args = parser.parse_args()
     if args.self_test:
         self_test()
@@ -257,6 +354,7 @@ def main() -> int:
     metadata = cargo_metadata()
     packages = {package["name"]: package for package in metadata["packages"]}
     witnesses: list[tuple[str, str, pathlib.Path, str, bool]] = []
+    identities: list[tuple[str, str]] = []
 
     for package_name in PACKAGES:
         package = packages[package_name]
@@ -288,12 +386,18 @@ def main() -> int:
                 code = rust_code_only(source)
                 ranges = module_ranges(code)
                 base = source_base_path(path, src_root)
-                for _, name, offset in annotations:
-                    if args.filter and args.filter not in name:
-                        continue
+                for reason, name, offset in annotations:
                     module = base + inline_module_path(ranges, offset)
                     full_name = "::".join([*module, name])
                     witnesses.append((package_name, full_name, path, name, path.is_relative_to(manifest.parent / "tests")))
+                    identities.append((reason, name))
+
+    try:
+        indices = select_annotations(identities, args.fixture_prefix, args.filter)
+    except ValueError as error:
+        print(error, file=sys.stderr)
+        return 1
+    witnesses = [witnesses[index] for index in indices]
 
     env = os.environ.copy()
     env["QWEN_REQUIRE_METAL_TESTS"] = "1"

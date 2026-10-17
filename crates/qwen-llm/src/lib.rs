@@ -34,6 +34,7 @@ pub mod checkpoint_store;
 pub mod codec;
 pub mod compare;
 pub mod deepseek_v4;
+pub mod deepseek_v41;
 pub mod deepseek_v4_cache;
 pub mod deepseek_v4_census;
 pub mod deepseek_v4_checkpoint_store;

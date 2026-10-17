@@ -101,11 +101,20 @@ uv run scripts/model-witnesses.py --self-test
 uv run scripts/qualification-witnesses.py --self-test
 uv run scripts/reference/normalize_paths.py --self-test
 uv run scripts/reference/normalize_paths.py --check
+uv run --no-project python scripts/reference/deepseek_v41/check.py
 if [ "$full" -eq 1 ]; then
   cargo test --release --workspace --no-run
 fi
 
 cargo test --release -p qwen-llm --test comparison_tripwire
+status=0
+output=$(cargo test --release -p qwen-llm --lib deepseek_v41:: 2>&1) || status=$?
+printf '%s\n' "$output"
+[ "$status" -eq 0 ] || exit "$status"
+if ! grep -Eq '^test result: ok\. [1-9][0-9]* passed; 0 failed; 0 ignored' <<<"$output"; then
+  echo "check-contracts: V4.1 model-free tests did not execute without skips" >&2
+  exit 1
+fi
 if [ "$full" -eq 1 ]; then
   readme_test=family_profile::tests::readme_family_table_matches_profiles
   status=0

@@ -1,0 +1,3 @@
+# Source hashes cover original bytes, including the upstream license's CRLF.
+fixtures/** -text
+fixtures/LICENSE whitespace=cr-at-eol

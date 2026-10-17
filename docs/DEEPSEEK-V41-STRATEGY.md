@@ -5,6 +5,13 @@ support is claimed in qwen-llm. Preserve V4 Flash-0731 and Qwen Flash-Next contr
 Community refresh: 2026-09-11, approximately 01:18 UTC (see below).
 Latest update: DwarfStar Metal support landed on main on 2026-09-12.
 
+2026-10-17 bring-up: the separate model-free 1017 profile and source-contract
+fixtures are recorded in `DEEPSEEK-V41-BRINGUP.md`. The pinned 1017 numerical
+reference fixes the index-owner defect described below; the regression suite
+retains a control that reintroduces it. No V4.1 execution is admitted. The
+historical 128 GiB capacity discussion below is not the new 256 GiB deployment
+target or a current memory admission result.
+
 ## Decision
 
 Treat V4.1 as a separate execution and cache profile, not a dimension update to

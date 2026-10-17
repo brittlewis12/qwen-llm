@@ -164,6 +164,11 @@ impl SourceHeader {
     pub fn descriptor(&self, key: &str) -> Option<&TensorDescriptor> {
         self.tensors.get(key)
     }
+    pub fn descriptors(&self) -> impl Iterator<Item = (&str, &TensorDescriptor)> {
+        self.tensors
+            .iter()
+            .map(|(name, descriptor)| (name.as_str(), descriptor))
+    }
 }
 
 fn unsigned_array(value: &Value) -> Result<Vec<u64>, String> {

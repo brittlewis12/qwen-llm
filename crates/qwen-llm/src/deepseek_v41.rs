@@ -1,8 +1,9 @@
-//! DeepSeek V4.1 Flash 1017 metadata/schedule contract, separate from V4.
+//! DeepSeek V4.1 contracts and old REAP-272E NativeF32 runtime, separate from V4.
 //!
-//! Not a runnable model registration, GGUF admission, full-model binding, or
-//! memory admission. `source` binds individual expert pairs without payload reads.
-//! Validation covers the complete text_config, architecture/model
+//! The strict 1017 metadata contract does not admit 1017 execution or GGUFs.
+//! `loader` and `forward` implement the old REAP-272E safetensors path; `source`
+//! binds individual expert pairs without payload reads. Metadata validation
+//! covers the complete text_config, architecture/model
 //! tags, text special-token IDs and quantization_config. Other top-level metadata
 //! and vision_config are deliberately outside this text-only scope. NextN
 //! metadata is validated but no NextN execution plan is provided.
@@ -11,7 +12,10 @@ use serde_json::{Value, json};
 use std::ops::Range;
 
 pub mod engram;
+pub mod forward;
+pub mod loader;
 pub mod mxfp4;
+pub mod operators;
 pub mod source;
 
 const KV_OWNERS: [usize; 4] = [2, 8, 14, 20];
@@ -72,7 +76,7 @@ impl ExpertProjection {
 }
 
 /// Distinct arithmetic contracts, not interchangeable numerical implementations.
-/// Neither is implemented or admitted by this metadata module.
+/// Metadata validation alone does not admit either arithmetic mode.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ActivationArithmetic {
     /// Native f32 activations, accumulation and outputs over decoded weights,

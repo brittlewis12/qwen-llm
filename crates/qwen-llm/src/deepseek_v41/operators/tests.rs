@@ -61,6 +61,44 @@ fn close(a: &[f32], b: &[f32]) {
 }
 
 #[test]
+fn sparse_exponent_reuse_preserves_per_coordinate_arithmetic() {
+    let query: Vec<_> = (0..512).map(|i| (i as f32 * 0.031).sin()).collect();
+    let rows: Vec<Vec<_>> = (0..640)
+        .map(|r| {
+            (0..512)
+                .map(|i| ((r * 512 + i) as f32 * 0.017).cos())
+                .collect()
+        })
+        .collect();
+    for indices in [vec![], vec![0], vec![639, 7, 7, 1], (0..640).collect()] {
+        for sink in [-1000.0f32, 0.7, 1000.0] {
+            let scale = (query.len() as f32).sqrt().recip();
+            let scores: Vec<_> = indices
+                .iter()
+                .map(|&i| dot(&query, &rows[i]) * scale)
+                .collect();
+            let max = scores.iter().copied().fold(sink, f32::max);
+            let denom = (sink - max).exp() + scores.iter().map(|s| (s - max).exp()).sum::<f32>();
+            let incumbent: Vec<f32> = (0..query.len())
+                .map(|j| {
+                    indices
+                        .iter()
+                        .zip(&scores)
+                        .map(|(&i, s)| rows[i][j] * (s - max).exp() / denom)
+                        .sum()
+                })
+                .collect();
+            let actual = sparse_attention(&query, &rows, &indices, sink).unwrap();
+            assert!(actual.iter().all(|v| v.is_finite()));
+            assert_eq!(
+                actual.iter().map(|v| v.to_bits()).collect::<Vec<_>>(),
+                incumbent.iter().map(|v| v.to_bits()).collect::<Vec<_>>()
+            );
+        }
+    }
+}
+
+#[test]
 fn compression_pairs_and_continuation() {
     let mut state = CompressorState::default();
     let mut w = weights(2).compressor.unwrap();

@@ -184,18 +184,20 @@ pub fn sparse_attention(
         "sparse attention geometry",
     )?;
     let scale = (query.len() as f32).sqrt().recip();
-    let scores: Vec<_> = indices
+    let mut scores: Vec<_> = indices
         .iter()
         .map(|&i| dot(query, &rows[i]) * scale)
         .collect();
     let max = scores.iter().copied().fold(sink, f32::max);
-    let denom = (sink - max).exp() + scores.iter().map(|s| (s - max).exp()).sum::<f32>();
+    // Reuse exponentials without changing each term's multiply-then-divide order.
+    scores.iter_mut().for_each(|s| *s = (*s - max).exp());
+    let denom = (sink - max).exp() + scores.iter().sum::<f32>();
     Ok((0..query.len())
         .map(|j| {
             indices
                 .iter()
                 .zip(&scores)
-                .map(|(&i, s)| rows[i][j] * (s - max).exp() / denom)
+                .map(|(&i, s)| rows[i][j] * s / denom)
                 .sum()
         })
         .collect())

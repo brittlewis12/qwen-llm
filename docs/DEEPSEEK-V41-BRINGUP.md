@@ -129,12 +129,14 @@ qualification predicates. Only the capability-gate landing is a dependency;
 independent artifact-identity cleanup need not delay V4.1. Request a specific
 primitive's conversion if it becomes necessary; do not edit it concurrently.
 
-The M5 worker lacks the Xcode Metal compiler. Its first-light tests used binaries
-built elsewhere, not a locally built kernel suite. Xcode installation requires
-the user's Apple ID. After installation, establish a workspace-test,
-qualification-runner and model-witness baseline before debugging new kernels
-there. Model-free work can proceed while this is blocked. Do not attribute a
-new GPU/OS/toolchain failure to the new architecture without that control.
+The M5 toolchain prerequisite is resolved: Xcode 27.1 and the separate Metal
+Toolchain component are installed. The native baseline is recorded in
+`bench/2026-10-17-m5-toolchain-baseline/README.md`: ordinary workspace tests,
+available model witnesses, validated correctness replays and a GLM trunk control
+pass. The qualification runner retains three failed facets (one duplicated HCA
+speed gate and one missing K216 asset), not a blanket qualification pass. Its
+first-light binaries remain unchanged. Keep these GPU/OS/compiler controls
+separate from subsequent V4.1 architecture changes.
 
 ## Regression and review gates
 

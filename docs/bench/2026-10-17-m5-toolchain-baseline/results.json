@@ -1,0 +1,813 @@
+{
+  "schema_version": 1,
+  "source_commit": "d47eeced1d77b2d780c14315363c27bd8623089a",
+  "source_tree": "1bfc7d248796507468cf78ca335cd57df081227f",
+  "hardware": {
+    "name": "Apple M5 Ultra",
+    "architecture": "applegpu_g17d",
+    "gpu_families": {
+      "apple7": true,
+      "apple8": true,
+      "apple9": true,
+      "apple10": true,
+      "metal3": true,
+      "metal4": true
+    },
+    "physical_memory_bytes": 274877906944,
+    "recommended_max_working_set_bytes": 239143780352,
+    "host_page_size_bytes": 16384
+  },
+  "toolchain": {
+    "xcode": "27.1",
+    "xcode_build": "27A9275",
+    "macos_sdk": "27.0",
+    "metal": "32023.921 (metalfe-32023.921.6)",
+    "metal_asset": "27A266a",
+    "rust": "1.99.1 (58cf8f9c3 2026-10-13)",
+    "cargo": "1.99.1 (5f94df478 2026-08-27)",
+    "macos": "27.0.1",
+    "macos_build": "26A434"
+  },
+  "workspace": {
+    "targets": [
+      {
+        "target": "qwen_cli",
+        "declared_tests": 118,
+        "passed": 114,
+        "failed": 0,
+        "ignored": 4
+      },
+      {
+        "target": "qwen",
+        "declared_tests": 855,
+        "passed": 808,
+        "failed": 0,
+        "ignored": 47
+      },
+      {
+        "target": "qwen_bench",
+        "declared_tests": 140,
+        "passed": 140,
+        "failed": 0,
+        "ignored": 0
+      },
+      {
+        "target": "qwen_census",
+        "declared_tests": 8,
+        "passed": 8,
+        "failed": 0,
+        "ignored": 0
+      },
+      {
+        "target": "qwen_grammar_oracle",
+        "declared_tests": 9,
+        "passed": 9,
+        "failed": 0,
+        "ignored": 0
+      },
+      {
+        "target": "qwen_lens",
+        "declared_tests": 308,
+        "passed": 302,
+        "failed": 0,
+        "ignored": 6
+      },
+      {
+        "target": "qwen_tok",
+        "declared_tests": 1,
+        "passed": 1,
+        "failed": 0,
+        "ignored": 0
+      },
+      {
+        "target": "cli_ux",
+        "declared_tests": 7,
+        "passed": 7,
+        "failed": 0,
+        "ignored": 0
+      },
+      {
+        "target": "qwen_llm",
+        "declared_tests": 2013,
+        "passed": 1485,
+        "failed": 0,
+        "ignored": 528
+      },
+      {
+        "target": "comparison_tripwire",
+        "declared_tests": 10,
+        "passed": 10,
+        "failed": 0,
+        "ignored": 0
+      },
+      {
+        "target": "deepseek_v4_census",
+        "declared_tests": 9,
+        "passed": 7,
+        "failed": 0,
+        "ignored": 2
+      },
+      {
+        "target": "deepseek_v4_decision_fixture",
+        "declared_tests": 2,
+        "passed": 2,
+        "failed": 0,
+        "ignored": 0
+      },
+      {
+        "target": "deepseek_v4_indexer_fp4_contract",
+        "declared_tests": 4,
+        "passed": 4,
+        "failed": 0,
+        "ignored": 0
+      },
+      {
+        "target": "deepseek_v4_oracle",
+        "declared_tests": 12,
+        "passed": 11,
+        "failed": 0,
+        "ignored": 1
+      },
+      {
+        "target": "deepseek_v4_position_zero_live",
+        "declared_tests": 35,
+        "passed": 5,
+        "failed": 0,
+        "ignored": 30
+      },
+      {
+        "target": "dflash_correctness",
+        "declared_tests": 20,
+        "passed": 3,
+        "failed": 0,
+        "ignored": 17
+      },
+      {
+        "target": "eos_gap",
+        "declared_tests": 8,
+        "passed": 5,
+        "failed": 0,
+        "ignored": 3
+      },
+      {
+        "target": "glm53_tool_block_peak",
+        "declared_tests": 1,
+        "passed": 1,
+        "failed": 0,
+        "ignored": 0
+      },
+      {
+        "target": "qwen4exp_metadata",
+        "declared_tests": 3,
+        "passed": 0,
+        "failed": 0,
+        "ignored": 3
+      },
+      {
+        "target": "doc:qwen_cli",
+        "declared_tests": 2,
+        "passed": 0,
+        "failed": 0,
+        "ignored": 2
+      },
+      {
+        "target": "doc:qwen_llm",
+        "declared_tests": 2,
+        "passed": 0,
+        "failed": 0,
+        "ignored": 2
+      }
+    ],
+    "passed": 2922,
+    "failed": 0,
+    "ignored": 645,
+    "nested_child_summaries_excluded": 4,
+    "exit_code": 0,
+    "wall_seconds": 100.86431384086609,
+    "metal_required": true,
+    "metal_validation": true,
+    "model_search_unset": true,
+    "gpu_test_count": null
+  },
+  "qualification": {
+    "exit_code": 1,
+    "facet_status_counts": {
+      "passed": 12,
+      "not applicable on this device": 7,
+      "failed": 3,
+      "none": 7,
+      "scope-only": 5
+    },
+    "records": [
+      {
+        "path": "deepseek_v4.multigroup_selector",
+        "holds_for_device": false,
+        "witnesses": [
+          {
+            "facet": "correctness",
+            "kind": "replay",
+            "command": "cargo test --release -p qwen-llm --lib deepseek_v4_metal::tests::multigroup_selector_full_matches_current_and_fails_closed -- --exact",
+            "status": "passed",
+            "exit_code": null
+          },
+          {
+            "facet": "performance",
+            "kind": "m4_characterization_skip",
+            "command": "cargo test --release -p qwen-llm --features dsv4-diagnostics --lib deepseek_v4_metal::tests::current_asset_multigroup_selector_whole_token_gate -- --ignored --exact --nocapture --test-threads=1",
+            "status": "not applicable on this device",
+            "exit_code": null
+          }
+        ]
+      },
+      {
+        "path": "deepseek_v4.singleton_f16_matrix_scorer",
+        "holds_for_device": false,
+        "witnesses": [
+          {
+            "facet": "correctness",
+            "kind": "m4_characterization_skip",
+            "command": "cargo test --release -p qwen-llm --features dsv4-diagnostics --lib deepseek_v4_metal::tests::current_weight_boundary_optimization_differentials -- --ignored --exact --nocapture --test-threads=1",
+            "status": "not applicable on this device",
+            "exit_code": null
+          },
+          {
+            "facet": "performance",
+            "kind": "replay",
+            "command": "cargo test --release -p qwen-llm --lib deepseek_v4_metal::tests::profile_lightning_matrix_ceiling_at_far_context -- --ignored --exact --nocapture",
+            "status": "passed",
+            "exit_code": null
+          }
+        ]
+      },
+      {
+        "path": "deepseek_v4.grouped_long_hca",
+        "holds_for_device": true,
+        "witnesses": [
+          {
+            "facet": "correctness",
+            "kind": "replay",
+            "command": "cargo test --release -p qwen-llm --lib deepseek_v4_metal::tests::online_hca_matches_legacy_envelope_at_structural_boundaries -- --exact",
+            "status": "passed",
+            "exit_code": null
+          },
+          {
+            "facet": "performance",
+            "kind": "replay",
+            "command": "cargo test --release -p qwen-llm --lib deepseek_v4_metal::tests::profile_tiled_hca_at_far_context -- --ignored --exact --nocapture",
+            "status": "failed",
+            "exit_code": 101,
+            "failure_class": "performance assertion",
+            "assertions": [
+              "assertion failed: online_ms <= baseline_midpoint_ms * 0.87"
+            ]
+          }
+        ]
+      },
+      {
+        "path": "deepseek_v4.splitk_hca",
+        "holds_for_device": true,
+        "witnesses": [
+          {
+            "facet": "correctness",
+            "kind": "replay",
+            "command": "cargo test --release -p qwen-llm --lib deepseek_v4_metal::tests::online_hca_matches_legacy_envelope_at_structural_boundaries -- --exact",
+            "status": "passed",
+            "exit_code": null
+          },
+          {
+            "facet": "performance",
+            "kind": "replay",
+            "command": "cargo test --release -p qwen-llm --lib deepseek_v4_metal::tests::profile_tiled_hca_at_far_context -- --ignored --exact --nocapture",
+            "status": "failed",
+            "exit_code": 101,
+            "failure_class": "performance assertion",
+            "assertions": [
+              "assertion failed: online_ms <= baseline_midpoint_ms * 0.87"
+            ]
+          }
+        ]
+      },
+      {
+        "path": "deepseek_v4.packed_q8_matrix_family",
+        "holds_for_device": false,
+        "witnesses": [
+          {
+            "facet": "correctness",
+            "kind": "replay",
+            "command": "cargo test --release -p qwen-llm --lib deepseek_v4_metal::prefill::tests::q8_f32_mma_r2c4k64_reduces_operand_rounding_and_preserves_guards -- --exact",
+            "status": "passed",
+            "exit_code": null
+          },
+          {
+            "facet": "performance",
+            "kind": "m4_characterization_skip",
+            "command": "cargo test --release -p qwen-llm --features dsv4-diagnostics --lib deepseek_v4_metal::prefill::tests::profile_q8_f32_mma_r2c4k64_attention_output_packet -- --ignored --exact --nocapture",
+            "status": "not applicable on this device",
+            "exit_code": null
+          }
+        ]
+      },
+      {
+        "path": "deepseek_v4.packed_gpu_route_compaction",
+        "holds_for_device": false,
+        "witnesses": [
+          {
+            "facet": "correctness",
+            "kind": "replay",
+            "command": "cargo test --release -p qwen-llm --lib deepseek_v4_metal::prefill::tests::packed_gpu_route_compaction_matches_cpu_at_capacity_boundaries -- --exact",
+            "status": "passed",
+            "exit_code": null
+          },
+          {
+            "facet": "performance",
+            "kind": "m4_characterization_skip",
+            "command": "cargo test --release -p qwen-llm --features dsv4-diagnostics --lib deepseek_v4_metal::tests::current_asset_packed_gpu_route_kill_packet -- --ignored --exact --nocapture",
+            "status": "not applicable on this device",
+            "exit_code": null
+          }
+        ]
+      },
+      {
+        "path": "deepseek_v4.packed_mxfp4_matrix",
+        "holds_for_device": false,
+        "witnesses": [
+          {
+            "facet": "correctness",
+            "kind": "replay",
+            "command": "cargo test --release -p qwen-llm --lib metal::tests::mxfp4_f32_matrix_tile_matches_scalar_envelope_and_guards -- --exact",
+            "status": "passed",
+            "exit_code": null
+          },
+          {
+            "facet": "performance",
+            "kind": "replay",
+            "command": "cargo test --release -p qwen-llm --lib metal::tests::mxfp4_f32_matrix_tile_k216_n2048_bucket_floor -- --ignored --exact --nocapture",
+            "status": "failed",
+            "exit_code": 101,
+            "failure_class": "missing model fixture",
+            "assertions": []
+          }
+        ]
+      },
+      {
+        "path": "deepseek_v4.packed_e8p32_router",
+        "holds_for_device": false,
+        "witnesses": [
+          {
+            "facet": "correctness",
+            "kind": "replay",
+            "command": "cargo test --release -p qwen-llm --lib metal::moe::tests::mat_mat_f32_router_e8p32_strict_matches_generic_bits -- --exact",
+            "status": "passed",
+            "exit_code": null
+          },
+          {
+            "facet": "performance",
+            "kind": "none",
+            "command": "none: the cited PERF-LOG entry records sampled E8 router intervals and a noisy bracket but no executable replay command; the available post-route packet does not isolate this router",
+            "status": "none",
+            "exit_code": null
+          }
+        ]
+      },
+      {
+        "path": "deepseek_v4.packed_q_a_raw_kv_matrix",
+        "holds_for_device": false,
+        "witnesses": [
+          {
+            "facet": "correctness",
+            "kind": "scope_only",
+            "command": "scope-only: cargo test --release -p qwen-llm --lib deepseek_v4_metal::prefill::tests::packed_q8_qa_kv_matrix_policy_is_scoped_and_fail_closed -- --exact",
+            "status": "scope-only",
+            "exit_code": null
+          },
+          {
+            "facet": "performance",
+            "kind": "none",
+            "command": "none: the 2026-08-08 PERF-LOG entry gives Q-A/raw-KV A/B results but no exact command or packet runner for that measurement",
+            "status": "none",
+            "exit_code": null
+          }
+        ]
+      },
+      {
+        "path": "deepseek_v4.packed_indexer_q_matrix",
+        "holds_for_device": false,
+        "witnesses": [
+          {
+            "facet": "correctness",
+            "kind": "scope_only",
+            "command": "scope-only: cargo test --release -p qwen-llm --lib deepseek_v4_metal::prefill::tests::packed_indexer_q_matrix_scope_is_4096_only -- --exact",
+            "status": "scope-only",
+            "exit_code": null
+          },
+          {
+            "facet": "performance",
+            "kind": "none",
+            "command": "none: the cited PERF-LOG sections record the indexed-Q measurements and rollback but contain no replay command or packet path for that schedule",
+            "status": "none",
+            "exit_code": null
+          }
+        ]
+      },
+      {
+        "path": "deepseek_v4.packed_grouped_q3q4",
+        "holds_for_device": false,
+        "witnesses": [
+          {
+            "facet": "correctness",
+            "kind": "replay",
+            "command": "cargo test --release -p qwen-llm --lib deepseek_v4_metal::prefill::tests::packed_grouped_mapped_q3_q4_match_static_expert_views -- --exact",
+            "status": "passed",
+            "exit_code": null
+          },
+          {
+            "facet": "performance",
+            "kind": "m4_characterization_skip",
+            "command": "cargo test --release -p qwen-llm --lib deepseek_v4_metal::prefill::k160_n128_floor::k160_n128_grouped_q3q4_representative_layer_floor -- --ignored --exact --nocapture",
+            "status": "not applicable on this device",
+            "exit_code": null
+          }
+        ]
+      },
+      {
+        "path": "deepseek_v4.packed_shared_route_overlap",
+        "holds_for_device": false,
+        "witnesses": [
+          {
+            "facet": "correctness",
+            "kind": "scope_only",
+            "command": "scope-only: cargo test --release -p qwen-llm --lib deepseek_v4_metal::prefill::tests::packed_scope_helpers_use_their_named_device_qualifications -- --exact",
+            "status": "scope-only",
+            "exit_code": null
+          },
+          {
+            "facet": "performance",
+            "kind": "none",
+            "command": "none: the PERF-LOG records the serial/default wall pair, but no exact command or dedicated shared-route overlap runner is recorded",
+            "status": "none",
+            "exit_code": null
+          }
+        ]
+      },
+      {
+        "path": "deepseek_v4.packed_grouped_expert",
+        "holds_for_device": false,
+        "witnesses": [
+          {
+            "facet": "correctness",
+            "kind": "replay",
+            "command": "cargo test --release -p qwen-llm --lib deepseek_v4_metal::prefill::tests::packed_grouped_iq2_xs_iq3_xxs_matches_bucket_path -- --exact",
+            "status": "passed",
+            "exit_code": null
+          },
+          {
+            "facet": "performance",
+            "kind": "m4_characterization_skip",
+            "command": "QWEN_DSV4_PACKED_GROUPED_EXPERTS=1 QWEN_DSV4_PACKED_GROUPED_SAMPLES=5 QWEN_DSV4_PACKED_GROUPED_ONLY_N=128 QWEN_MATMAT_IQ3_XXS_MM=1 cargo test --release -p qwen-llm --features dsv4-diagnostics --lib deepseek_v4_metal::tests::current_asset_packed_grouped_expert_integration_packet -- --ignored --exact --nocapture",
+            "status": "not applicable on this device",
+            "exit_code": null
+          }
+        ]
+      },
+      {
+        "path": "deepseek_v4.all_slots_q3q4_decode",
+        "holds_for_device": true,
+        "witnesses": [
+          {
+            "facet": "correctness",
+            "kind": "replay",
+            "command": "QWEN_METAL_LEASE_WAIT=1 cargo test --release -p qwen-llm --lib deepseek_v4_metal::tests::all_slot_q3q4_fast_k160_matches_generic_and_serial_with_dispatch_evidence -- --exact --nocapture",
+            "status": "passed",
+            "exit_code": null
+          },
+          {
+            "facet": "performance",
+            "kind": "replay",
+            "command": "QWEN_METAL_LEASE_WAIT=1 cargo test --release -p qwen-llm --lib deepseek_v4_metal::tests::profile_all_slot_routed_experts_against_serial_indexed -- --ignored --exact --nocapture",
+            "status": "passed",
+            "exit_code": null
+          }
+        ]
+      },
+      {
+        "path": "deepseek_v4.residency_set",
+        "holds_for_device": false,
+        "witnesses": [
+          {
+            "facet": "correctness",
+            "kind": "scope_only",
+            "command": "scope-only: cargo test --release -p qwen-llm --lib deepseek_v4_metal::tests::model_residency_set_scope_is_exact -- --exact",
+            "status": "scope-only",
+            "exit_code": null
+          },
+          {
+            "facet": "performance",
+            "kind": "none",
+            "command": "none: PERF-LOG records product load/prefill runs and the safety rollback, but no replay command or packet runner for those pairs is recorded",
+            "status": "none",
+            "exit_code": null
+          }
+        ]
+      },
+      {
+        "path": "metal_forward.a3b_parallel_copy_auto",
+        "holds_for_device": false,
+        "witnesses": [
+          {
+            "facet": "correctness",
+            "kind": "m4_characterization_skip",
+            "command": "cargo test --release -p qwen-llm --lib metal_forward::tests::gguf_parallel_pread_a3b_q4_is_bit_exact -- --ignored --exact",
+            "status": "not applicable on this device",
+            "exit_code": null
+          },
+          {
+            "facet": "performance",
+            "kind": "none",
+            "command": "none: the v0.608 PERF-LOG reports inherited v0.602 timing and Auto smoke results but records no executable benchmark command",
+            "status": "none",
+            "exit_code": null
+          }
+        ]
+      },
+      {
+        "path": "metal_forward.exact_unified_parallel_copy_profiles",
+        "holds_for_device": false,
+        "witnesses": [
+          {
+            "facet": "correctness",
+            "kind": "scope_only",
+            "command": "scope-only: cargo test --release -p qwen-llm --lib metal_forward::tests::gguf_parallel_pread_a10b_profile_is_exact_and_force_only -- --exact",
+            "status": "scope-only",
+            "exit_code": null
+          },
+          {
+            "facet": "performance",
+            "kind": "none",
+            "command": "none: commits 8c223624 and fba3b97a plus their PERF-LOG entries report measurements but record no executable A/B replay command",
+            "status": "none",
+            "exit_code": null
+          }
+        ]
+      }
+    ]
+  },
+  "validated_correctness_replays": [
+    {
+      "paths": [
+        "deepseek_v4.multigroup_selector"
+      ],
+      "command": [
+        "cargo",
+        "test",
+        "--release",
+        "-p",
+        "qwen-llm",
+        "--lib",
+        "deepseek_v4_metal::tests::multigroup_selector_full_matches_current_and_fails_closed",
+        "--",
+        "--exact",
+        "--nocapture"
+      ],
+      "exit_code": 0,
+      "passed": true,
+      "seconds": 0.13573765754699707
+    },
+    {
+      "paths": [
+        "deepseek_v4.grouped_long_hca",
+        "deepseek_v4.splitk_hca"
+      ],
+      "command": [
+        "cargo",
+        "test",
+        "--release",
+        "-p",
+        "qwen-llm",
+        "--lib",
+        "deepseek_v4_metal::tests::online_hca_matches_legacy_envelope_at_structural_boundaries",
+        "--",
+        "--exact",
+        "--nocapture"
+      ],
+      "exit_code": 0,
+      "passed": true,
+      "seconds": 0.18910598754882812
+    },
+    {
+      "paths": [
+        "deepseek_v4.packed_q8_matrix_family"
+      ],
+      "command": [
+        "cargo",
+        "test",
+        "--release",
+        "-p",
+        "qwen-llm",
+        "--lib",
+        "deepseek_v4_metal::prefill::tests::q8_f32_mma_r2c4k64_reduces_operand_rounding_and_preserves_guards",
+        "--",
+        "--exact",
+        "--nocapture"
+      ],
+      "exit_code": 0,
+      "passed": true,
+      "seconds": 0.11259794235229492
+    },
+    {
+      "paths": [
+        "deepseek_v4.packed_gpu_route_compaction"
+      ],
+      "command": [
+        "cargo",
+        "test",
+        "--release",
+        "-p",
+        "qwen-llm",
+        "--lib",
+        "deepseek_v4_metal::prefill::tests::packed_gpu_route_compaction_matches_cpu_at_capacity_boundaries",
+        "--",
+        "--exact",
+        "--nocapture"
+      ],
+      "exit_code": 0,
+      "passed": true,
+      "seconds": 0.14278602600097656
+    },
+    {
+      "paths": [
+        "deepseek_v4.packed_mxfp4_matrix"
+      ],
+      "command": [
+        "cargo",
+        "test",
+        "--release",
+        "-p",
+        "qwen-llm",
+        "--lib",
+        "metal::tests::mxfp4_f32_matrix_tile_matches_scalar_envelope_and_guards",
+        "--",
+        "--exact",
+        "--nocapture"
+      ],
+      "exit_code": 0,
+      "passed": true,
+      "seconds": 0.10957002639770508
+    },
+    {
+      "paths": [
+        "deepseek_v4.packed_e8p32_router"
+      ],
+      "command": [
+        "cargo",
+        "test",
+        "--release",
+        "-p",
+        "qwen-llm",
+        "--lib",
+        "metal::moe::tests::mat_mat_f32_router_e8p32_strict_matches_generic_bits",
+        "--",
+        "--exact",
+        "--nocapture"
+      ],
+      "exit_code": 0,
+      "passed": true,
+      "seconds": 0.1771860122680664
+    },
+    {
+      "paths": [
+        "deepseek_v4.packed_grouped_q3q4"
+      ],
+      "command": [
+        "cargo",
+        "test",
+        "--release",
+        "-p",
+        "qwen-llm",
+        "--lib",
+        "deepseek_v4_metal::prefill::tests::packed_grouped_mapped_q3_q4_match_static_expert_views",
+        "--",
+        "--exact",
+        "--nocapture"
+      ],
+      "exit_code": 0,
+      "passed": true,
+      "seconds": 0.10419416427612305
+    },
+    {
+      "paths": [
+        "deepseek_v4.packed_grouped_expert"
+      ],
+      "command": [
+        "cargo",
+        "test",
+        "--release",
+        "-p",
+        "qwen-llm",
+        "--lib",
+        "deepseek_v4_metal::prefill::tests::packed_grouped_iq2_xs_iq3_xxs_matches_bucket_path",
+        "--",
+        "--exact",
+        "--nocapture"
+      ],
+      "exit_code": 0,
+      "passed": true,
+      "seconds": 0.19500112533569336
+    },
+    {
+      "paths": [
+        "deepseek_v4.all_slots_q3q4_decode"
+      ],
+      "command": [
+        "cargo",
+        "test",
+        "--release",
+        "-p",
+        "qwen-llm",
+        "--lib",
+        "deepseek_v4_metal::tests::all_slot_q3q4_fast_k160_matches_generic_and_serial_with_dispatch_evidence",
+        "--",
+        "--exact",
+        "--nocapture"
+      ],
+      "exit_code": 0,
+      "passed": true,
+      "seconds": 0.5028049945831299
+    }
+  ],
+  "model_witnesses": {
+    "exit_code": 0,
+    "packages": [
+      {
+        "package": "qwen-llm",
+        "selected": 12,
+        "passed": 12,
+        "failed": 0
+      },
+      {
+        "package": "qwen-cli",
+        "selected": 1,
+        "passed": 1,
+        "failed": 0
+      }
+    ],
+    "tests": [
+      "loader::tests::loads_35b_a3b_q4_k_m",
+      "forward::tests::forward_runs_one_token_35b_a3b_moe",
+      "glm5_next::tests::release_artifact_census_and_allocation_plan",
+      "tokenizer::glm4::tests::gguf_tokenizer_matches_hf_ids",
+      "metal_forward::tests::metal_single_token_concurrent_gdn_moe_matches_serial_a3b",
+      "metal_forward::tests::moe_decode_rejects_a_discarded_command_and_poisons_the_session",
+      "metal_forward::tests::metal_35b_a3b_moe_matches_cpu_smoke",
+      "metal_forward::tests::metal_argmax_chain_matches_full_logits_moe",
+      "metal_forward::tests::metal_exact_greedy_chain_matches_full_logits_moe",
+      "metal_forward::tests::ordinary_moe_serial_post_block_fixed_add_seam",
+      "prefill_tokens_matches_single_token_loop_35b_a3b_moe",
+      "prefill_tokens_moe_hidden_capture_matches_p1_oracle_35b_a3b",
+      "serve::render_glm5_next::natural_tests::natural_fixture_replays_through_serve"
+    ]
+  },
+  "glm_runtime": {
+    "exit_code": 0,
+    "metal_validation": true,
+    "prompt_tokens": 200,
+    "prefill_kl": 7.775e-07,
+    "continuation_kl": [
+      5.262e-05,
+      3.777e-06,
+      4.919e-06
+    ],
+    "oracle": "native Exact lineage; not independent upstream full-model parity"
+  },
+  "offline_source_contracts_exit_code": 0,
+  "memory_endpoints": {
+    "wired_limit_mb": [
+      0,
+      0
+    ],
+    "compressions": [
+      46664,
+      46664
+    ],
+    "compressor_pages": [
+      6348,
+      6328
+    ],
+    "swap_used_zero_both": true,
+    "peak_memory_measured": false
+  },
+  "raw_evidence_sha256": {
+    "environment.txt": "be322d222f470a78d5b3d25ff4f79d387231c267047e4793b9c5d2164e897704",
+    "post-run.txt": "1868c888ef618946926ea8798f994ad0e9f4451b24ff9be00ca9d67a2c1d1947",
+    "metal-install.log": "b5be4f01c3caea9885b533781d1baba4f4daba9a8ba880d441f6adedbf953ea8",
+    "build.log": "d5bb9b2dd65321180e4b897040f28b7123d841fea04c97a5ac2594c059ade9f3",
+    "workspace.log": "60fcca6a7cc08f891b9e42ce4244661214b577edb29305632bfc249657a13fa9",
+    "workspace.json": "0cab344a62b6bb739f8211fc47cb04ec8ff044fa1419583efc849547407ff52d",
+    "qualification.json": "7f41667b624f995621ca9ef3d807c809de6d61079f81886ca374299fc99a8dd4",
+    "models.log": "780ff0f0878562fb72a6d751b37ae2c7ae02f0fd9e2dff5e491986b01e161913",
+    "models.json": "2c8b99a050660dbff55034d3011e394774d27b55e1a670662b581b4076f586f1",
+    "validated-replays.json": "717be9e94f305d78e5331ad2d7a9ab55e6576324b9b12bda8d9ff36ced59bec0",
+    "glm-runtime.log": "ab9125e42f4f835846fbe3dc53af73844be603f95ff1681c6038463233bf7910",
+    "glm-runtime.json": "733cccf097d260f8b9198d8acceab99443e91281420a31b3b7e9598956760595",
+    "source-contracts.log": "b78b20715dc276f3ebedc8865b9fd5b16872690de6d1fbaa5e08dcd26b587cc9"
+  }
+}

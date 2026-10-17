@@ -149,12 +149,22 @@ uv run scripts/qualification-witnesses.py
 scripts/check-contracts.sh --full
 ```
 
-Set `QWEN_MODEL_PATH` to the existing artifact search roots as documented in
+Set `QWEN_MODEL_SEARCH_PATH` to the existing artifact search roots as documented in
 `ENV.md`; do not encode machine paths in scripts. Missing required fixtures or
 Metal are failures, not passes. The runner covers its annotated witness catalog,
 not every GPU or unannotated test. Preserve the per-test execution counts and
 report missing prerequisites explicitly. The model-free checkpoint changes no
 shared kernel and does not claim to have run this GPU gate.
+
+**Coverage gap found during this checkpoint:** the union resolves 99 annotated
+witnesses (97 in qwen-llm, two in qwen-cli), but DS4 and GLM Metal integration
+tests still use free-form ignore reasons that the runner does not discover.
+Examples include `deepseek_v4_metal/tests.rs`'s current-asset packets and
+`glm5_next_metal/tests.rs`'s checkpoint/oracle packets. The command above is not
+yet the complete family execution regression set. Reconcile that catalog and
+its required artifact/oracle prerequisites before completing a shared-kernel
+change. Do not relabel timed experiments as correctness witnesses or treat
+99 selected tests as proof that the missing execution packets ran.
 
 A fast-path witness must prove the candidate actually ran with production
 geometry and must be callable before the device is qualified. Compare against
@@ -167,3 +177,21 @@ Review small coherent checkpoints before integration and rerun affected checks
 on the integrated tree. Share storage/dispatch mechanisms, not family-specific
 state layouts or numerical policies. Retain negative results in evidence/history,
 not indefinitely in production switches.
+
+## First-checkpoint verification
+
+Implementation commit `27efde5b`, tree
+`e520658e466ebcbc61977d0225694fb28102582e`, passed
+`scripts/check-contracts.sh --full`: all workspace test targets compiled, six
+model-free V4.1 Rust tests, six offline source-contract Python tests, ten
+comparison tripwire tests and the README family-table test passed. The existing
+format, environment, path and witness-runner structural checks passed as well.
+This was not workspace test execution or a GPU qualification run.
+
+Independent read-only review identified two initially incomplete gates: Rust
+tests were compiled but not executed by the contract script, and Python discovery
+could succeed with zero tests. Both are fixed; Rust requires nonzero passes and
+zero ignored tests, and Python names its required module and rejects empty
+suites. Empty selection and missing-module controls are retained. Follow-up
+review found no remaining blocker for this model-free checkpoint. The 99-witness
+catalog was enumerated only, not executed. No model weights were downloaded.

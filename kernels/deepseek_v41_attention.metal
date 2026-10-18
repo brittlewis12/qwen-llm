@@ -108,6 +108,7 @@ kernel void kernel_deepseek_v41_attention_chronological(
     out[rank] = id;
 }
 
+// Incumbent for same-run tests; production uses the three passes below.
 kernel void kernel_deepseek_v41_attention_sink(
     constant uint4 &a [[buffer(0)]], constant uint2 &b [[buffer(1)]],
     device const float *q [[buffer(2)]], device const float *raw [[buffer(3)]],
@@ -146,4 +147,60 @@ kernel void kernel_deepseek_v41_attention_sink(
         out[h * a.x + j] = value;
         if (!isfinite(value)) atomic_fetch_or_explicit(status, 4u, memory_order_relaxed);
     }
+}
+
+kernel void kernel_deepseek_v41_attention_score(
+    constant uint4 &a [[buffer(0)]], constant uint2 &b [[buffer(1)]],
+    device const float *q [[buffer(2)]], device const float *raw [[buffer(3)]],
+    device const float *compressed [[buffer(4)]], device const uint *ids [[buffer(5)]],
+    device float *scores [[buffer(7)]], constant uint &length [[buffer(9)]],
+    uint t [[thread_position_in_grid]]) {
+    uint count = a.y + b.x, h = t / count, i = t % count;
+    if (i >= a.y && ids[i - a.y] >= length) return;
+    device const float *row = i < a.y ? raw + ((a.z + i) % a.w) * a.x : compressed + ids[i - a.y] * a.x;
+    float dot = 0;
+    for (uint j = 0; j < a.x; ++j) dot += q[h * a.x + j] * row[j];
+    scores[h * b.y + i] = dot * rsqrt(float(a.x));
+}
+
+kernel void kernel_deepseek_v41_attention_softmax(
+    constant uint4 &a [[buffer(0)]], constant uint2 &b [[buffer(1)]],
+    device const uint *ids [[buffer(5)]], device const float *sink [[buffer(6)]],
+    device float *scores [[buffer(7)]], constant uint &length [[buffer(9)]],
+    device atomic_uint *status [[buffer(10)]], uint h [[thread_position_in_grid]]) {
+    // Last slot per head holds the denominator, or a local invalid-ID sentinel.
+    for (uint i = 0; i < b.x; ++i) {
+        if (ids[i] >= length) {
+            atomic_fetch_or_explicit(status, 2u, memory_order_relaxed);
+            scores[h * b.y + b.y - 1] = -1.0f;
+            return;
+        }
+    }
+    float maximum = sink[h];
+    for (uint i = 0; i < a.y + b.x; ++i) maximum = max(maximum, scores[h * b.y + i]);
+    float denom = 0;
+    for (uint i = 0; i < a.y + b.x; ++i) {
+        float s = exp(scores[h * b.y + i] - maximum);
+        scores[h * b.y + i] = s; denom += s;
+    }
+    denom += exp(sink[h] - maximum);
+    scores[h * b.y + b.y - 1] = denom;
+}
+
+kernel void kernel_deepseek_v41_attention_output(
+    constant uint4 &a [[buffer(0)]], constant uint2 &b [[buffer(1)]],
+    device const float *raw [[buffer(3)]], device const float *compressed [[buffer(4)]],
+    device const uint *ids [[buffer(5)]], device const float *scores [[buffer(7)]],
+    device float *out [[buffer(8)]], device atomic_uint *status [[buffer(10)]],
+    uint t [[thread_position_in_grid]]) {
+    uint h = t / a.x, j = t % a.x;
+    float denom = scores[h * b.y + b.y - 1], value = 0;
+    if (denom != -1.0f) {
+        for (uint i = 0; i < a.y + b.x; ++i) {
+            device const float *row = i < a.y ? raw + ((a.z + i) % a.w) * a.x : compressed + ids[i - a.y] * a.x;
+            value += row[j] * scores[h * b.y + i] / denom;
+        }
+    }
+    out[t] = value;
+    if (!isfinite(value)) atomic_fetch_or_explicit(status, 4u, memory_order_relaxed);
 }

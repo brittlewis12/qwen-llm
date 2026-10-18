@@ -490,3 +490,154 @@ fn native_index_32_heads_128_dim_signed_weights() {
         .collect();
     close(f32_slice(&output).unwrap(), &expected);
 }
+
+#[test]
+fn split_sink_real_geometry_same_run_witness() {
+    let ctx = MetalContext::new().unwrap();
+    let (heads, dim, window, k, stride) = (64usize, 512usize, 128usize, 512usize, 641usize);
+    let make = |n, seed| {
+        (0..n)
+            .map(|i| ((i * seed % 101) as f32 - 50.0) / 103.0)
+            .collect::<Vec<_>>()
+    };
+    let q = make(heads * dim, 37);
+    let raw = make(window * dim, 19);
+    let compressed = make(k * dim, 23);
+    let sinks = make(heads, 29);
+    let up = |v: &[f32]| upload(&ctx, v, vec![v.len() as u64]).unwrap();
+    let query = up(&q);
+    let raw_gpu = up(&raw);
+    let compressed_gpu = up(&compressed);
+    let sink = up(&sinks);
+    let selection = MetalTensor::from_bytes(
+        &ctx,
+        bytemuck::cast_slice(&(0..k as u32).rev().collect::<Vec<_>>()),
+        vec![k as u64],
+        GgmlType::I32,
+    )
+    .unwrap();
+    let scores = tensor(&ctx, heads * stride, GgmlType::F32).unwrap();
+    let split = up(&vec![f32::NAN; heads * dim]);
+    let serial = up(&vec![f32::NAN; heads * dim]);
+    let status = tensor(&ctx, 1, GgmlType::I32).unwrap();
+    let encode =
+        |enc: &KernelEncoder, parallel, nr: usize, nk: usize, length: u32, query: &MetalTensor| {
+            enc.set_bytes(0, &[dim as u32, nr as u32, 17u32, window as u32]);
+            enc.set_bytes(1, &[nk as u32, stride as u32]);
+            for (slot, t) in [
+                (2, query),
+                (3, &raw_gpu),
+                (4, &compressed_gpu),
+                (5, &selection),
+                (6, &sink),
+                (7, &scores),
+                (8, if parallel { &split } else { &serial }),
+                (10, &status),
+            ] {
+                enc.set_tensor(slot, t);
+            }
+            enc.set_bytes(9, &length);
+            if parallel {
+                sink_passes(&ctx, enc, heads, dim, nr + nk).unwrap();
+            } else {
+                pipeline(&ctx, enc, "sink").unwrap();
+                dispatch(enc, heads);
+            }
+        };
+    for (nr, nk) in [(0, 0), (1, 0), (128, 0), (128, 512)] {
+        metal::dispatch_census_begin();
+        execute(&ctx, |enc| {
+            encode(enc, false, nr, nk, k as u32, &query);
+            encode(enc, true, nr, nk, k as u32, &query);
+        });
+        let census = metal::dispatch_census_take();
+        let expected_passes = if nr + nk == 0 {
+            vec![("sink", heads), ("softmax", heads), ("output", heads * dim)]
+        } else {
+            vec![
+                ("sink", heads),
+                ("score", heads * (nr + nk)),
+                ("softmax", heads),
+                ("output", heads * dim),
+            ]
+        };
+        assert_eq!(census.len(), expected_passes.len());
+        for (row, (name, count)) in census.iter().zip(expected_passes) {
+            assert_eq!(row.kernel, format!("kernel_deepseek_v41_attention_{name}"));
+            assert_eq!(row.grid_tgs * row.tg_threads, count as u64);
+            assert_eq!(row.encoder_ordinal, census[0].encoder_ordinal);
+            assert!(!row.encoder_concurrent);
+        }
+        let actual = f32_slice(&split).unwrap();
+        let incumbent = f32_slice(&serial).unwrap();
+        assert_eq!(
+            actual.iter().map(|v| v.to_bits()).collect::<Vec<_>>(),
+            incumbent.iter().map(|v| v.to_bits()).collect::<Vec<_>>(),
+            "serial mismatch {nr}+{nk}"
+        );
+        let rows: Vec<_> = (0..nr)
+            .map(|i| raw[((17 + i) % window) * dim..((17 + i) % window + 1) * dim].to_vec())
+            .chain((0..nk).map(|i| compressed[(k - 1 - i) * dim..(k - i) * dim].to_vec()))
+            .collect();
+        for h in 0..heads {
+            let expected = op::sparse_attention(
+                &q[h * dim..(h + 1) * dim],
+                &rows,
+                &(0..nr + nk).collect::<Vec<_>>(),
+                sinks[h],
+            )
+            .unwrap();
+            close(&actual[h * dim..(h + 1) * dim], &expected);
+        }
+        assert_eq!(ids(&status, 1), [0]);
+        // Alternate incumbent/split ordering; warm up both before timed samples.
+        let mut times = [Vec::new(), Vec::new()];
+        for round in 0..9 {
+            for which in [round % 2, 1 - round % 2] {
+                let command = ctx.queue.commandBuffer().unwrap();
+                let enc = KernelEncoder::begin(&command);
+                for _ in 0..4 {
+                    encode(&enc, which == 1, nr, nk, k as u32, &query);
+                }
+                enc.end();
+                metal::commit_and_wait(&command).unwrap();
+                if round > 0 {
+                    times[which].push(command.GPUEndTime() - command.GPUStartTime());
+                }
+            }
+        }
+        for t in &mut times {
+            t.sort_by(f64::total_cmp);
+        }
+        assert!(times.iter().all(|t| t[4] > 0.0));
+        eprintln!(
+            "split sink {heads}x{dim} {nr}+{nk}: same-run median speedup {:.3}x, bitwise incumbent match",
+            times[0][4] / times[1][4]
+        );
+    }
+    execute(&ctx, |enc| {
+        encode(enc, true, window, k, (k - 1) as u32, &query)
+    });
+    assert_eq!(ids(&status, 1), [2]);
+    assert!(f32_slice(&split).unwrap().iter().all(|&v| v == 0.0));
+    execute(&ctx, |enc| {
+        encode(enc, false, window, k, (k - 1) as u32, &query)
+    });
+    assert_eq!(f32_slice(&split).unwrap(), f32_slice(&serial).unwrap());
+    execute(&ctx, |enc| encode(enc, true, window, k, k as u32, &query));
+    assert_eq!(ids(&status, 1), [2]);
+    assert!(f32_slice(&split).unwrap().iter().any(|&v| v != 0.0));
+    for bad in [f32::NAN, f32::INFINITY, f32::NEG_INFINITY] {
+        let bad_query = up(&vec![bad; heads * dim]);
+        execute(&ctx, |enc| {
+            encode(enc, true, 1, 0, k as u32, &bad_query);
+        });
+        assert_eq!(ids(&status, 1), [6]);
+        execute(&ctx, |enc| {
+            encode(enc, false, 1, 0, k as u32, &bad_query);
+        });
+        assert!(f32_slice(&split).unwrap().iter().all(|v| !v.is_finite()));
+        assert!(f32_slice(&serial).unwrap().iter().all(|v| !v.is_finite()));
+        assert_eq!(ids(&status, 1), [6]);
+    }
+}

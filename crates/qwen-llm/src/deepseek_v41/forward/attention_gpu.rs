@@ -101,6 +101,7 @@ fn validate(c: &Config, capacity: usize) -> Result<()> {
             c.heads,
             c.window
                 .checked_add(c.index_topk)
+                .and_then(|n| n.checked_add(1))
                 .ok_or("attention overflow")?,
             1,
         ],
@@ -127,7 +128,7 @@ fn shapes(c: &Config, capacity: usize) -> Result<Vec<usize>> {
         capacity.next_power_of_two(),
         capacity.next_power_of_two(),
         c.index_topk,
-        c.heads * (c.window + c.index_topk),
+        c.heads * (c.window + c.index_topk + 1),
         c.heads * c.head_dim,
         c.groups * c.output_rank,
         c.hidden,
@@ -186,6 +187,41 @@ fn dispatch(enc: &KernelEncoder, n: usize) {
             },
         );
     }
+}
+
+// Bindings 0..10 match the incumbent. Each head's last score slot is scratch.
+fn sink_passes(
+    ctx: &MetalContext,
+    enc: &KernelEncoder,
+    heads: usize,
+    dim: usize,
+    count: usize,
+) -> Result<()> {
+    for (name, n) in [
+        ("score", heads * count),
+        ("softmax", heads),
+        ("output", heads * dim),
+    ] {
+        if n == 0 {
+            continue;
+        }
+        pipeline(ctx, enc, name)?;
+        // Exact grids, including tiny toy geometries, need no padded-thread guard.
+        let width = 1usize << n.trailing_zeros().min(5);
+        enc.dispatch(
+            MTLSize {
+                width: n / width,
+                height: 1,
+                depth: 1,
+            },
+            MTLSize {
+                width,
+                height: 1,
+                depth: 1,
+            },
+        );
+    }
+    Ok(())
 }
 fn linear(
     ctx: &MetalContext,
@@ -377,7 +413,7 @@ impl Workspace {
             sort_scores: f(capacity.next_power_of_two())?,
             sort_ids: i(capacity.next_power_of_two())?,
             selected: i(c.index_topk)?,
-            attention_scores: f(c.heads * (c.window + c.index_topk))?,
+            attention_scores: f(c.heads * (c.window + c.index_topk + 1))?,
             attended: f(c.heads * c.head_dim)?,
             low: f(c.groups * c.output_rank)?,
             output: f(c.hidden)?,
@@ -652,7 +688,6 @@ impl Workspace {
             }
         }
         let raw_count = (position + 1).min(c.window);
-        pipeline(ctx, enc, "sink")?;
         enc.set_bytes(
             0,
             &[
@@ -664,7 +699,7 @@ impl Workspace {
         );
         enc.set_bytes(
             1,
-            &[selected_count as u32, (c.window + c.index_topk) as u32],
+            &[selected_count as u32, (c.window + c.index_topk + 1) as u32],
         );
         enc.set_tensor(2, &self.query);
         enc.set_tensor(3, &raw);
@@ -676,7 +711,7 @@ impl Workspace {
         let length = owner.map_or(0, |o| (position + 1) / if o == 3 { 1 } else { 2 });
         enc.set_bytes(9, &(length as u32));
         enc.set_tensor(10, &self.status);
-        dispatch(enc, c.heads);
+        sink_passes(ctx, enc, c.heads, c.head_dim, raw_count + selected_count)?;
         rope(
             ctx,
             enc,

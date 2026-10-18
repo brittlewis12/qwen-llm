@@ -173,6 +173,16 @@ fn check_report(report: &Value) -> Result<()> {
 #[test]
 #[ignore = "model witness: deepseek-v4.1-reap-272e-native-f32-7t-40l-cpu"]
 fn native_f32_seven_token_cpu_oracle() -> Result<()> {
+    replay(false)
+}
+
+#[test]
+#[ignore = "model witness: deepseek-v4.1-reap-272e-native-f32-7t-40l-cpu"]
+fn gpu_step_seven_token_cpu_oracle() -> Result<()> {
+    replay(true)
+}
+
+fn replay(gpu_step: bool) -> Result<()> {
     let marker = CPU_REFERENCE.required();
     let reference = marker.parent().context("reference has no parent")?;
     let reference_meta = manifest(&reference.join("run.json"))?;
@@ -196,10 +206,23 @@ fn native_f32_seven_token_cpu_oracle() -> Result<()> {
     std::fs::create_dir(&output)?;
     eprintln!("oracle evidence retained at {}", output.display());
     let trace = output.join("trace");
-    let status = replay_command(&model, &engram, &trace).status()?;
+    let mut command = replay_command(&model, &engram, &trace);
+    if gpu_step {
+        command.arg("--gpu-step");
+    }
+    let status = command.status()?;
     ensure!(status.success(), "qwen replay failed: {status}");
     let runtime = manifest(&trace.join("run.json"))?;
     check_policy(&reference_meta, &runtime)?;
+    ensure!(
+        runtime["execution"]
+            == if gpu_step {
+                "gpu_step"
+            } else {
+                "cpu_boundaries"
+            },
+        "wrong execution mode"
+    );
     let compare = Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("../../scripts/reference/deepseek_v41/cpu/compare.py");
     let result = Command::new("uv")

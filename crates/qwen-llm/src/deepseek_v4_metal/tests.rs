@@ -3033,6 +3033,61 @@ fn current_asset_packed_grouped_expert_integration_packet() {
         );
     }
 
+    fn assert_f16_approximate(label: &str, actual: &Evidence, expected: &Evidence) {
+        const MAX_RELATIVE_RMS: f64 = 0.043638839;
+
+        fn relative_rms(actual: &[f32], expected: &[f32]) -> f64 {
+            assert_eq!(actual.len(), expected.len());
+            let mut squared_error = 0.0_f64;
+            let mut reference_energy = 0.0_f64;
+            for (&actual, &expected) in actual.iter().zip(expected) {
+                let error = f64::from(actual) - f64::from(expected);
+                squared_error += error * error;
+                reference_energy += f64::from(expected).powi(2);
+            }
+            (squared_error / reference_energy).sqrt()
+        }
+
+        // The IQ2 F16 staging contract records 0.00171 post-SwiGLU RMS for
+        // production K. Compound that per-layer budget across 25 eligible
+        // layers: (1 + 0.00171)^25 - 1 = 0.043638839.
+        for (name, actual, expected) in [
+            (
+                "logits",
+                actual.logits.as_slice(),
+                expected.logits.as_slice(),
+            ),
+            (
+                "hidden",
+                actual.hidden.as_slice(),
+                expected.hidden.as_slice(),
+            ),
+            (
+                "continuation logits",
+                actual.continuation_logits.as_slice(),
+                expected.continuation_logits.as_slice(),
+            ),
+        ] {
+            let rms = relative_rms(actual, expected);
+            assert!(
+                rms.is_finite() && rms <= MAX_RELATIVE_RMS,
+                "{label} {name} relative RMS {rms:.9}"
+            );
+        }
+        assert_eq!(
+            actual.prefix_digest, expected.prefix_digest,
+            "{label} prefix"
+        );
+        assert_eq!(
+            actual.compatibility_digest, expected.compatibility_digest,
+            "{label} compatibility"
+        );
+        assert_eq!(
+            actual.committed_tokens, expected.committed_tokens,
+            "{label} committed tokens"
+        );
+    }
+
     fn execute_samples(
         ctx: &MetalContext,
         mut residency: DeepSeekV4MetalResidency,
@@ -3146,6 +3201,9 @@ fn current_asset_packed_grouped_expert_integration_packet() {
         .into_iter()
         .filter(|n_tokens| only_n.is_none_or(|only_n| only_n == *n_tokens))
     {
+        let f16_iq2_approximate = n_tokens == 128
+            && (grouped_enabled || iq3_experiment)
+            && crate::env_flag::read_default_on("QWEN_DSV4_PACKED_IQ2_F16_MATRIX");
         let prefix = (0..n_tokens)
             .map(|index| [35, 201, 200, 34][index % 4])
             .collect::<Vec<_>>();
@@ -3178,7 +3236,11 @@ fn current_asset_packed_grouped_expert_integration_packet() {
             let (next, warm_candidate) =
                 execute(&ctx, next, model_content_id, &prefix, candidate_arm);
             residency = next;
-            assert_exact("warm candidate", &warm_candidate, &warm_control);
+            if f16_iq2_approximate {
+                assert_f16_approximate("warm candidate", &warm_candidate, &warm_control);
+            } else {
+                assert_exact("warm candidate", &warm_candidate, &warm_control);
+            }
         }
 
         let (next, current_before, candidate, current_after) = if iq3_experiment && samples > 1 {
@@ -3240,7 +3302,11 @@ fn current_asset_packed_grouped_expert_integration_packet() {
             assert_eq!(sample.grouped_iq3_invocations, 0);
         }
         for sample in &candidate {
-            assert_exact("grouped candidate", sample, reference);
+            if f16_iq2_approximate {
+                assert_f16_approximate("grouped candidate", sample, reference);
+            } else {
+                assert_exact("grouped candidate", sample, reference);
+            }
             assert_eq!(sample.grouped_iq2_invocations, expected_candidate_iq2);
             assert_eq!(sample.grouped_iq3_invocations, expected_candidate_iq3);
         }

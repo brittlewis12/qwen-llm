@@ -13,6 +13,9 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 use tokenizers::Tokenizer;
 
+#[path = "backend_v41/io.rs"]
+mod memory_io;
+
 pub(crate) struct Backend<'a> {
     ctx: &'a MetalContext,
     forward: Forward<'a>,
@@ -357,7 +360,8 @@ impl GenerationBackend for Backend<'_> {
         sink: &mut dyn GenerationSink,
     ) -> std::result::Result<GenerationOutcome, BackendFailure> {
         let epoch = Instant::now();
-        self.settings.execute(
+        let mut observations = request.echo_stats.then(memory_io::Observations::default);
+        let mut outcome = self.settings.execute(
             request,
             prompt,
             sink,
@@ -379,9 +383,28 @@ impl GenerationBackend for Backend<'_> {
                     self.forward.new_state(capacity)
                 }
             },
-            |state, token, cancel| self.forward.step(state, token, Some(cancel)),
+            |state, token, cancel| {
+                let position = state.position();
+                memory_io::observe(
+                    observations.as_mut(),
+                    position,
+                    || qwen_llm::pid_metrics::PidSnapshot::now().ok(),
+                    || self.forward.step(state, token, Some(cancel)),
+                )
+            },
             || epoch.elapsed(),
-        )
+        )?;
+        if let Some(observations) = observations {
+            let phases = outcome
+                .stats
+                .as_mut()
+                .expect("shared stats")
+                .phases
+                .as_mut()
+                .expect("V4.1 phases");
+            phases["process_token_io"] = observations.json();
+        }
+        Ok(outcome)
     }
 }
 

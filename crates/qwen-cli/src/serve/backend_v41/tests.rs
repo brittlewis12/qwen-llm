@@ -11,6 +11,125 @@ use std::time::{Duration, Instant};
 
 const WAIT: Duration = Duration::from_secs(5);
 
+fn io_snapshot(pageins: u64, bytes: u64) -> qwen_llm::pid_metrics::PidSnapshot {
+    qwen_llm::pid_metrics::PidSnapshot {
+        pageins,
+        diskio_bytesread: bytes,
+        diskio_byteswritten: 0,
+        resident_size: 0,
+        phys_footprint: 0,
+    }
+}
+
+#[test]
+fn token_io_aggregates_consumed_steps() {
+    let mut observations = memory_io::Observations::default();
+    for (position, pageins, bytes) in [(0, 3, 100), (1, 7, 300), (2, 0, 0)] {
+        let mut snapshots = [
+            Some(io_snapshot(10, 1000)),
+            Some(io_snapshot(10 + pageins, 1000 + bytes)),
+        ]
+        .into_iter();
+        memory_io::observe(
+            Some(&mut observations),
+            position,
+            || snapshots.next().unwrap(),
+            || Ok::<_, ()>(()),
+        )
+        .unwrap();
+    }
+    let stats = observations.json();
+    assert_eq!(stats["attempted_tokens"], 3);
+    assert_eq!(stats["successful_tokens"], 3);
+    assert_eq!(
+        stats["process_pageins"],
+        json!({"count":3,"total":10,"max":7,"per_token_mean":10.0/3.0})
+    );
+    assert_eq!(
+        stats["process_disk_read_bytes"],
+        json!({"count":3,"total":400,"max":300,"per_token_mean":400.0/3.0})
+    );
+}
+
+#[test]
+fn token_io_missing_and_regressed_counters_are_not_zero() {
+    for missing_before in [false, true] {
+        let mut observations = memory_io::Observations::default();
+        let mut snapshots = if missing_before {
+            [None, Some(io_snapshot(4, 40))]
+        } else {
+            [Some(io_snapshot(4, 40)), None]
+        }
+        .into_iter();
+        memory_io::observe(
+            Some(&mut observations),
+            0,
+            || snapshots.next().unwrap(),
+            || Ok::<_, ()>(()),
+        )
+        .unwrap();
+        let stats = observations.json();
+        for metric in ["process_pageins", "process_disk_read_bytes"] {
+            assert_eq!(
+                stats[metric],
+                json!({"count":0,"total":null,"max":null,"per_token_mean":null})
+            );
+        }
+    }
+    let mut observations = memory_io::Observations::default();
+    assert!(observations.json()["process_pageins"]["total"].is_null());
+    let mut snapshots = [Some(io_snapshot(4, 40)), Some(io_snapshot(3, 60))].into_iter();
+    memory_io::observe(
+        Some(&mut observations),
+        0,
+        || snapshots.next().unwrap(),
+        || Ok::<_, ()>(()),
+    )
+    .unwrap();
+    memory_io::observe(
+        Some(&mut observations),
+        1,
+        || Some(io_snapshot(5, 60)),
+        || Ok::<_, ()>(()),
+    )
+    .unwrap();
+    let stats = observations.json();
+    assert_eq!(stats["process_pageins"]["count"], 1);
+    assert!(stats["process_pageins"]["total"].is_null());
+    assert!(stats["process_pageins"]["max"].is_null());
+    assert!(stats["process_pageins"]["per_token_mean"].is_null());
+    assert_eq!(stats["process_disk_read_bytes"]["total"], 20);
+}
+
+#[test]
+fn token_io_nonstats_never_snapshots_and_preserves_errors() {
+    let error = memory_io::observe(
+        None,
+        9,
+        || panic!("nonstats snapshot"),
+        || Err::<(), _>("cancelled"),
+    );
+    assert_eq!(error, Err("cancelled"));
+    let value = memory_io::observe(None, 9, || panic!("nonstats snapshot"), || Ok::<_, ()>(42));
+    assert_eq!(value, Ok(42));
+    let mut observations = memory_io::Observations::default();
+    let mut snapshots = 0;
+    let error = memory_io::observe(
+        Some(&mut observations),
+        9,
+        || {
+            snapshots += 1;
+            Some(io_snapshot(snapshots, snapshots * 10))
+        },
+        || Err::<(), _>("original forward error"),
+    );
+    assert_eq!(error, Err("original forward error"));
+    assert_eq!(snapshots, 2);
+    assert_eq!(observations.json()["attempted_tokens"], 1);
+    assert_eq!(observations.json()["successful_tokens"], 0);
+    assert_eq!(observations.json()["process_pageins"]["total"], 1);
+}
+
 struct State(usize, Arc<AtomicUsize>);
 impl Drop for State {
     fn drop(&mut self) {

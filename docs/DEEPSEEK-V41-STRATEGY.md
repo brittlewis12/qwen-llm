@@ -1,9 +1,9 @@
 # DeepSeek V4.1 bring-up assessment
 
-Status: source-verified architecture assessment, 2026-09-10. No V4.1 execution
+Historical status: source-verified architecture assessment, 2026-09-10. No V4.1 execution
 support is claimed in qwen-llm. Preserve V4 Flash-0731 and Qwen Flash-Next contracts.
 Community refresh: 2026-09-11, approximately 01:18 UTC (see below).
-Latest update: DwarfStar Metal support landed on main on 2026-09-12.
+September update: DwarfStar Metal support landed on main on 2026-09-12.
 
 2026-10-17 bring-up: the separate model-free 1017 profile and source-contract
 fixtures are recorded in `DEEPSEEK-V41-BRINGUP.md`. The pinned 1017 numerical
@@ -12,7 +12,26 @@ retains a control that reintroduces it. No V4.1 execution is admitted. The
 historical 128 GiB capacity discussion below is not the new 256 GiB deployment
 target or a current memory admission result.
 
-## Decision
+2026-10-18 current status: `qwen deepseek-v41` executes old REAP-272E in
+NativeF32, not 1017. It is usable only for short, disposable sessions, not agent
+use: 12.7 tokens/s prefill processes fresh full history each turn. Exact batched
+prefill and prefix reuse are separate from approximate CED. The seven-token
+registered witness enforces a 1e-4 logit bound; 40-layer agreement and sub-1e-5
+GPU differences are characterization, not acceptance. Lower-ID router ties and
+ID-sorted output are local NativeF32 policy version 1, with the existing policy
+string retained as the stable identifier, not official torch/vLLM REAP-272
+parity. Pinned `torch.topk` ties are unstable; the source oracle follows the local
+rule and retains the negative control.
+
+The long 10K reference is teacher-forced attention only, with zero candidate
+discards, not full-model 10K continuation. Candidate-boundary checks at
+16,383/16,384/16,385 plus continuation remain pending before 30K TTFT. First
+priority is the four-case, two-condition truncation diagnostic; cherry-picked
+completed cases establish no quality win. See `DEEPSEEK-V41-BRINGUP.md` for
+current evidence. The assessment and
+checkpoint decisions below are historical, not current execution claims.
+
+## Historical Decision (2026-09-10)
 
 Treat V4.1 as a separate execution and cache profile, not a dimension update to
 V4. Build a correctness-first full-forward path before adding optimized CED

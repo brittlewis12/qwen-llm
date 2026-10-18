@@ -127,9 +127,9 @@ owner stack, and the borrowed backend never moves to an HTTP worker. The
 worker's cancellation flag reaches forward layer checks, including while the
 owner is inside a synchronous step; all terminal paths drop request state.
 
-The 221.33 GiB resident / 222.7 GiB recommended case does NOT fit the default
-4 GiB reserve. The explicit `--reserve-mib 1024` override above allows a smaller
-weight headroom reserve for initial small-context testing, subject to actual
+The 221.33 GiB resident / 222.7 GiB recommended case does NOT fit a
+4 GiB reserve. The explicit `--reserve-mib 1024` above matches the default
+1 GiB weight headroom reserve for initial small-context testing, subject to actual
 Metal allocation/alignment and process-memory admission. It is not a guarantee
 that KV/scratch or arbitrary output limits fit. `--weight-budget-bytes` can only
 lower the resulting ceiling, not bypass the reserve or device/process checks.
@@ -148,7 +148,7 @@ the actual headers, not estimated. Original-base Engram tables stay disk-backed.
 The loader may repeat header planning for admission, but payloads load only once.
 
 The default weight ceiling is Metal's recommended working set minus current
-allocations and 4 GiB reserve. `--weight-budget-bytes` can lower it. Device/process
+allocations and 1 GiB reserve. `--weight-budget-bytes` can lower it. Device/process
 admission still applies; nothing changes sysctl or iogpu limits. `--context` records
 the intended future capacity and checks the config limit: it does not allocate KV
 or prove that the reserve suffices for that context in inspect/load-only mode.

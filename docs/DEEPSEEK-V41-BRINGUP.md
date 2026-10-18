@@ -5,16 +5,23 @@
 The separate `qwen deepseek-v41` runtime now executes old REAP-272E with the
 original Engram shards. Routed experts remain MXFP4; arithmetic is NativeF32,
 not reference activation-quantized FP8. This does not admit 1017 weights.
+It is usable only for short, disposable sessions, not agent use: prefill measures
+12.7 tokens/s and each turn prefills the full history afresh. Exact batched
+prefill and prefix reuse are distinct from approximate CED.
 
 - Converted weights persist by default; measured cache-hit loading is about
   7 seconds with zero source payload reads, rather than rewriting 221 GiB.
 - Opt-in `--gpu-step` retains two CPU Engram boundaries and uses three command
   submissions per token. On the 256 GiB M5, warm short-chat forwards take about
   59-60 ms; a 10K-token capture takes 862.7 seconds (87.4 ms median forward).
-- Seven-token, 40-layer CPU comparison passes. Independent teacher-forced
+- The registered seven-token witness bounds logits at 1e-4; 40-layer agreement
+  and sub-1e-5 GPU differences are characterization, not acceptance. Teacher-forced
   attention replay at positions 2046/2047 and 9998/9999 matches all 32 selected
   ID sets exactly; worst output absolute error is 2.89e-5. These positions exercise
-  index selection, not candidate pruning, which starts at 16,385 tokens.
+  index selection with zero candidate discards, not candidate pruning, which
+  starts at 16,385 tokens. This is attention-only evidence, not a full-model 10K
+  continuation. Candidate-boundary checks at 16,383/16,384/16,385 plus continuation
+  remain pending before 30K TTFT measurements.
 - Real JSON/SSE, multi-turn, reasoning, tools and disconnect recovery pass on
   the GPU path. Stats-enabled serving reports per-token process page-ins and IO.
   The 10K capture sees at most two page-ins per token; this is not a guarantee
@@ -22,13 +29,19 @@ not reference activation-quantized FP8. This does not admit 1017 weights.
 - The frozen eight-case pilot completes in 70.3 minutes: 12.7 input tokens/s
   and 11.8 generated tokens/s. Two independently blinded reviews score this
   configuration 17/32 and 16/32, versus Maya's 22/32 in both. Four cases exhaust
-  the frozen output budget, three without a final answer. Completed-case scores
-  are competitive, but this is not an established intelligence-ceiling win.
+  the frozen output budget, three without a final answer. Cherry-picked completed
+  cases do not establish a quality win.
   Maya's retained run takes 3.0 minutes with substantially fewer generated tokens;
   these are whole-configuration observations, not a causal quantization test.
-  Resolve the reasoning-policy/output-budget question before funding CED or more
-  kernel optimization. The pilot observes 3,406 process page-ins over 51,390
+  First priority is the four-case, two-condition truncation diagnostic. Resolve
+  that question before funding CED or
+  more kernel optimization. The pilot observes 3,406 process page-ins over 51,390
   native steps, at most two per step, without a residency set or limit change.
+
+Router lower-ID tie selection and ID-sorted output are local NativeF32 policy,
+version 1; the existing policy string remains its stable identifier. This is not
+official torch/vLLM REAP-272 parity: pinned `torch.topk` ties are unstable. The
+source oracle is aligned to the local rule and retains the negative control.
 
 Named fixtures and ignored short/long oracle witnesses live in
 `crates/qwen-cli/tests/deepseek_v41_oracle.rs`; the long witness regenerates a

@@ -1,0 +1,174 @@
+diff --git a/conversion/deepseek.py b/conversion/deepseek.py
+index 33bb98f..4464cb2 100644
+--- a/conversion/deepseek.py
++++ b/conversion/deepseek.py
+@@ -2,6 +2,7 @@ from __future__ import annotations
+ 
+ import json
+ import re
++from contextlib import ExitStack
+ from pathlib import Path
+ 
+ from typing import Any, Callable, Iterable, TYPE_CHECKING
+@@ -723,7 +724,7 @@ class DeepseekV4Model(TextModel):
+ 
+     def _write_mxfp4_expert_tensor(self, bid: int, proj: str, tensor_key: gguf.MODEL_TENSOR) -> list[str]:
+         n_experts = self.hparams["n_routed_experts"]
+-        data: np.ndarray | None = None
++        loaders: list[tuple[Callable[[], Tensor], Callable[[], Tensor]]] = []
+         consumed: list[str] = []
+ 
+         for eid in range(n_experts):
+@@ -732,15 +733,10 @@ class DeepseekV4Model(TextModel):
+             if weight_name not in self.model_tensors or scale_name not in self.model_tensors:
+                 raise KeyError(f"Missing routed expert tensors for {weight_name}")
+ 
+-            weight = LazyTorchTensor.to_eager(self.model_tensors[weight_name]())
+-            scale = LazyTorchTensor.to_eager(self.model_tensors[scale_name]())
+-            packed = self.repack_mxfp4_blocks(weight, scale)
+-            if data is None:
+-                data = np.empty((n_experts, *packed.shape), dtype=packed.dtype)
+-            data[eid] = packed
++            loaders.append((self.model_tensors[weight_name], self.model_tensors[scale_name]))
+             consumed.extend((weight_name, scale_name))
+ 
+-        assert data is not None
++        data = self._mxfp4_expert_tensor(loaders)
+         new_name = self.format_tensor_name(tensor_key, bid)
+         shape = gguf.quant_shape_from_byte_shape(data.shape, gguf.GGMLQuantizationType.MXFP4)
+         logger.info(f"{new_name}: repacked routed experts to MXFP4, shape = {{{', '.join(str(n) for n in reversed(shape))}}}")
+@@ -1369,95 +1365,53 @@ class DeepseekV41Model(DeepseekV4Model):
+                         multipliers.shape, primes_array.shape, offsets_array.shape, len(token_map))
+ 
+ 
+-    # rows per block when rewriting an engram table; 1M rows is about 1 GB of float32 scratch
+-    _V41_ENGRAM_CHUNK_ROWS = 1_000_000
++    _V41_ENGRAM_CHUNK_ROWS = 65_536
+ 
+     def _write_engram_table(self, bid: int) -> list[str]:
+-        """Quantize one engram table in row blocks, accumulating into a disk-backed memmap.
+-
+-        The inherited FP8 path cannot be used here. It computes weight.float() * scale over the
+-        whole tensor, and one engram table is 384,006,168 x 256, so 98.3 billion elements, which
+-        is 393 GB as float32. A run that reaches this tensor collapses from 118 GiB free to 13 GiB
+-        and is killed. Every other tensor in the model converts normally.
+-
+-        The scale layout also differs from the rest of the checkpoint. Linear weights carry a
+-        [rows/32, cols/32] scale matching weight_block_size [32, 32], while the engram scale is
+-        [rows, 8], which is one scale per 32 columns within a single row. Broadcasting it the way
+-        the generic path does would corrupt the table, so it is expanded along columns only.
+-
+-        Reading is done straight from the safetensors shard rather than through the lazy tensor
+-        wrapper, because to_eager materializes the whole tensor before any slicing takes effect.
+-        """
+-        import json as _json
+-        import os as _os
+-        import tempfile as _tempfile
+-
+-        import numpy as _np
+-        from safetensors import safe_open as _safe_open
+-
++        """Register row chunks without materializing or staging the full table."""
+         weight_name = f"layers.{bid}.engram.embed.weight"
+         scale_name = f"layers.{bid}.engram.embed.scale"
+-
+-        index_path = self.dir_model / "model.safetensors.index.json"
+-        with open(index_path, "r", encoding="utf-8") as f:
+-            weight_map = _json.load(f)["weight_map"]
++        with open(self.dir_model / "model.safetensors.index.json", "r", encoding="utf-8") as f:
++            weight_map = json.load(f)["weight_map"]
+         shard = self.dir_model / weight_map[weight_name]
+-
+-        qtype = gguf.GGMLQuantizationType.Q8_0
+-        block_elems = gguf.GGML_QUANT_SIZES[qtype][0]
+-
+-        with _safe_open(str(shard), framework="pt") as f:
+-            wsl = f.get_slice(weight_name)
+-            n_rows, n_cols = (int(x) for x in wsl.get_shape())
+-            has_scale = scale_name in f.keys()
+-            ssl = f.get_slice(scale_name) if has_scale else None
+-            scale_groups = int(ssl.get_shape()[1]) if has_scale else 0
+-
+-            if n_cols % block_elems:
+-                raise ValueError(
+-                    f"engram row width {n_cols} is not a multiple of the {qtype.name} block {block_elems}"
+-                )
+-            if has_scale and n_cols % scale_groups:
+-                raise ValueError(
+-                    f"engram row width {n_cols} is not divisible by its {scale_groups} scale groups"
+-                )
+-            per_group = n_cols // scale_groups if has_scale else 0
+-
+-            row_bytes = int(gguf.quantize(_np.zeros((1, n_cols), dtype=_np.float32), qtype).nbytes)
+-            rows_per_chunk = min(int(self._V41_ENGRAM_CHUNK_ROWS), n_rows)
+-            n_chunks = (n_rows + rows_per_chunk - 1) // rows_per_chunk
+-
+-            tmp_dir = _os.environ.get("V41_ENGRAM_TMPDIR") or _tempfile.gettempdir()
+-            tmp_path = _os.path.join(tmp_dir, f"engram_{bid}_{qtype.name}.bin")
+-            logger.info(
+-                "engram layer %d: %d x %d, scale groups %d, %s in %d blocks of %d rows, staging %.1f GB at %s",
+-                bid, n_rows, n_cols, scale_groups, qtype.name, n_chunks, rows_per_chunk,
+-                n_rows * row_bytes / 1e9, tmp_path,
+-            )
+-
+-            out = _np.memmap(tmp_path, dtype=_np.uint8, mode="w+", shape=(n_rows, row_bytes))
+-            for ci, start in enumerate(range(0, n_rows, rows_per_chunk)):
+-                stop = min(start + rows_per_chunk, n_rows)
+-                chunk = wsl[start:stop, :].float()
+-                if has_scale:
+-                    s = self._e8m0_to_float(ssl[start:stop, :])
+-                    chunk = chunk * s.repeat_interleave(per_group, 1)[:, :n_cols]
+-                out[start:stop] = gguf.quantize(
+-                    chunk.cpu().numpy().astype(_np.float32), qtype
+-                ).reshape(stop - start, row_bytes)
+-                del chunk
+-                if ci % 25 == 0:
++        scale_shard = self.dir_model / weight_map[scale_name] if scale_name in weight_map else None
++
++        with gguf.utility.SafetensorsLocal(shard) as tensors:
++            n_rows, n_cols = tensors[weight_name].shape
++        scale_groups = 0
++        if scale_shard is not None:
++            with gguf.utility.SafetensorsLocal(scale_shard) as tensors:
++                scale_rows, scale_groups = tensors[scale_name].shape
++            if scale_rows != n_rows or scale_groups <= 0 or n_cols % scale_groups:
++                raise ValueError(f"Invalid Engram scale shape for {weight_name}")
++        if n_rows <= 0 or n_cols <= 0:
++            raise ValueError(f"Invalid Engram shape {(n_rows, n_cols)}")
++        rows_per_chunk = int(self._V41_ENGRAM_CHUNK_ROWS)
++        if rows_per_chunk <= 0:
++            raise ValueError("Engram chunk rows must be positive")
++
++        def load_chunk(start: int, stop: int) -> np.ndarray:
++            from safetensors import safe_open
++
++            # Slice before converting to float; a lazy tensor would materialize the entire table.
++            with ExitStack() as stack:
++                weights = stack.enter_context(safe_open(str(shard), framework="pt"))
++                chunk = weights.get_slice(weight_name)[start:stop, :].float()
++                if scale_shard is not None:
++                    scales = weights if scale_shard == shard else stack.enter_context(safe_open(str(scale_shard), framework="pt"))
++                    s = self._e8m0_to_float(scales.get_slice(scale_name)[start:stop, :])
++                    chunk = chunk * s.repeat_interleave(n_cols // scale_groups, 1)[:, :n_cols]
++                if start // rows_per_chunk % 25 == 0:
+                     logger.info("  engram layer %d: %d / %d rows", bid, stop, n_rows)
+-            out.flush()
++                return chunk.cpu().numpy()
+ 
++        chunks = [lambda start=start: load_chunk(start, min(start + rows_per_chunk, n_rows))
++                  for start in range(0, n_rows, rows_per_chunk)]
++        qtype = gguf.GGMLQuantizationType.Q8_0
++        data = gguf.LazyChunkedTensor(chunks, (n_rows, n_cols), np.float32).quantize(qtype)
+         new_name = self.format_tensor_name(gguf.MODEL_TENSOR.ENGRAM_EMBD, bid, ".weight")
+-        self.gguf_writer.add_tensor(new_name, out, raw_dtype=qtype)
+-        logger.info("engram layer %d: wrote %s as %s", bid, new_name, qtype.name)
+-
+-        consumed = [weight_name]
+-        if has_scale:
+-            consumed.append(scale_name)
+-        return consumed
++        self.gguf_writer.add_tensor(new_name, data, raw_dtype=qtype)
++        return [weight_name, scale_name] if scale_shard is not None else [weight_name]
+ 
+     def generate_extra_tensors(self):
+         yield from super().generate_extra_tensors()

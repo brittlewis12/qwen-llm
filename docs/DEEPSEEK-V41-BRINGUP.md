@@ -74,15 +74,13 @@ characterization, not an automatic 10K run or a full-model continuation oracle.
 
 ## Conversion Status
 
-No new conversion or production-model run has been performed for this repair.
-Source inspection pins PR 28696 at
-`2076412598e99127ea2554467b2b7530856895d3`. It supports the old 272E configuration
-and losslessly repacks MXFP4 experts, but its safe-RAM temporary-file mode stages
-complete Q8 Engram files plus a writer spool. Predicted final payload is
-423,675,613,728 bytes; peak additional disk occupancy is about 983.71 GiB,
-including temporary staging. This is not a direct-to-final-file conversion.
-Resolve that write-cost decision before running it. The converter's `--dry-run`
-still prepares tensors and is not a safe metadata-only preflight.
+The [output-only converter patch](../scripts/convert_v41_gguf.md) reuses PR 28696's
+existing lazy expert and chunked tensor support. It removes both the global
+writer spool and intermediate Engram tables without changing output bytes.
+Eight tiny-fixture tests pass against the unmodified pinned converter. The old
+272E metadata-only preflight predicts 423,681,448,000 bytes of final output and
+zero temporary payload staging. No production GGUF execution is verified yet.
+The obsolete runtime cache has been removed; all 48 source shards are retained.
 
 After first-light correctness, improve exact batched prefill and prefix reuse
 through the shared benchmark harness. Historical safetensors timings and pilot

@@ -1,5 +1,74 @@
 # Old REAP-272E bounded CPU oracle
 
+## Targeted long-context capture contract (independent CPU lane)
+
+`uv run scripts/reference/deepseek_v41/cpu/long_context.py --model /local/old-reap --capture /local/capture`
+replays attention only, teacher-forced from native normalized attention inputs.
+No full-model historical forward, downloads, GPU, router, or native cache input is
+needed. The pinned old configuration is used intentionally for this targeted lane.
+`old_model.py` remains unchanged; `source_module` retains its owner-publication fix
+and NativeF32 router contract (no routing occurs here).
+
+Parent/native capture API must emit a directory with `manifest.json`:
+
+```json
+{
+  "format": "dsv41-long-context-v1",
+  "mode": "NativeF32",
+  "inputs": {"2": {"file": "input-02.npy", "start": 0}},
+  "checkpoints": [{"position": 2047, "layers": {
+    "2": {"output": "output-2047-02.npy", "kv_owner": 2,
+          "index_source": 2, "compressed_ids": [0, 1]}
+  }}]
+}
+```
+
+This is a schema illustration, not a complete runnable capture: every checkpoint
+requires layers 2,8,14,20,24,28,32,36. Optional consumers 3..39 can also be included.
+For every included layer, provide contiguous little-endian F32 NPY rows
+`[positions,5120]`, immediately after attention RMSNorm / HC input reduction and
+before attention projections. `start` is the absolute zero-based first position.
+Owners 2,8,14,20 require all rows from zero through the largest checkpoint.
+Other layers need only checkpoint queries and their preceding 127 window rows;
+the v1 contiguous format requires intervening rows for separated checkpoints.
+Eight full histories at 10K cost 1.64 GB decimal; mmap and projection batches
+(default 256, ratio-aligned) keep replay input memory bounded.
+
+Outputs are F32 NPY vectors `[5120]` after attention `wo_b`, before residual/HC
+merge. `compressed_ids` are ascending zero-based compressed positions, WITHOUT
+the window-cache offset, not raw token positions. Supply exact active `kv_owner`
+and `index_source`. Layers >=20 additionally require `candidate_blocks`, ascending
+zero-based retained block IDs from layer 20, including the pinned newest block.
+Native keys, scores and selected values are never accepted as reference inputs.
+Record model/source identity, token IDs and native revision alongside the capture
+for provenance; v1 does not authenticate those external identifiers.
+
+Source reuse: `Compressor.forward` pools aligned batches and carries the final
+partial group; `Indexer.forward`, `select_candidate_blocks`, `Attention.forward`,
+window/index helpers, RMSNorm, RoPE, and CPU sparse attention run unchanged through
+the existing adapter. Historical index keys are rebuilt from compressor latents
+using source projections/norm/RoPE. `Weights.project` bounds weight decoding.
+Each checkpoint starts fresh; layers execute in order, preserving shared owners.
+
+Practical checkpoints: positions 2046/2047 and 9998/9999 exercise both ratio-2
+phases and real 512-of-N selection discard. Candidate pruning does NOT occur at
+10K: 2048 blocks * 8 positions = 16384 at ratio-1 layer 20. Add positions
+16383/16384 (prefer also 16400) to cover its first genuine discard. Synthetic
+tests shrink the candidate budget and separately verify the actual threshold.
+
+Reports require exact owner, IDs and candidate blocks plus output allclose
+(configurable default atol/rtol 0.02), max absolute error, RMSE and relative L2.
+These tolerances are provisional, not calibrated long-context GPU acceptance.
+Selection boundary gaps and exact boundary ties are reported for index sources;
+candidate boundary ties are reported at layer 20. Pinned PyTorch topk tie behavior
+is retained: a tied ID mismatch still fails, never silently accepted as equivalent.
+The NativeF32 router tie rule does not define indexer ties.
+
+Local tests: from this directory, run
+`uv run --with torch --with safetensors --with numpy --with sympy --with tokenizers python -m unittest long_context_test`.
+Real checkpoint/capture comparison remains unverified until the parent emits
+this contract; no artifact download or GPU job is part of this lane.
+
 Run from the repository root; `uv` manages PyTorch and all Python dependencies.
 No CUDA, Triton, TileLang, system installation, or checkpoint conversion is used.
 

@@ -85,8 +85,18 @@ fn validate_source(
         return Err(Error::SizeMismatch);
     }
     for (block, &scale) in codes.chunks_exact(16).zip(scales) {
-        for position in 0..32 {
-            decode_source(code_at(block, position), scale)?;
+        if scale == 255 {
+            return Err(Error::ReservedScale);
+        }
+        // Magnitudes are 0, 0.5, 1, 1.5, 2, 3, 4, 6. Only the two
+        // highest finite scales can overflow F32; the sign is irrelevant.
+        if scale >= 253 {
+            let limit = if scale == 253 { 6 } else { 4 };
+            for &byte in block {
+                if byte & 7 >= limit || (byte >> 4) & 7 >= limit {
+                    return Err(Error::NonFinite);
+                }
+            }
         }
     }
     Ok(destination)
@@ -173,6 +183,64 @@ mod tests {
         assert_eq!(decode_source(2, 254).unwrap(), 2.0_f32.powi(127));
         assert_eq!(decode_source(4, 254), Err(Error::NonFinite));
         assert_eq!(decode_source(16, 127), Err(Error::InvalidCode));
+    }
+
+    #[test]
+    fn exhaustive_packed_validation_matches_decoder_with_canaries() {
+        for scale in 0..=255_u8 {
+            for byte in 0..=255_u8 {
+                let codes = [byte; 16];
+                let expected = (0..32).try_for_each(|position| {
+                    decode_source(code_at(&codes, position), scale).map(|_| ())
+                });
+                assert_eq!(
+                    validate_source(1, 32, &codes, &[scale]),
+                    expected.map(|()| 17)
+                );
+                let mut output = [0xa5; 19];
+                assert_eq!(
+                    repack_into(1, 32, &codes, &[scale], &mut output[1..18]),
+                    expected,
+                    "byte={byte} scale={scale}"
+                );
+                if expected.is_err() {
+                    assert_eq!(output, [0xa5; 19]);
+                } else {
+                    assert_eq!((output[0], output[18]), (0xa5, 0xa5));
+                    assert_eq!(output[1], scale);
+                    for position in 0..32 {
+                        let packed = output[2 + position % 16];
+                        assert_eq!(
+                            (packed >> (4 * (position / 16))) & 15,
+                            code_at(&codes, position)
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn validation_preserves_first_error_and_atomicity() {
+        for (scales, expected) in [
+            ([253, 255], Error::NonFinite),
+            ([255, 253], Error::ReservedScale),
+            ([252, 255], Error::ReservedScale),
+            ([252, 254], Error::NonFinite),
+        ] {
+            let codes = [0x77; 32];
+            let mut output = [0xa5; 36];
+            assert_eq!(
+                repack_into(1, 64, &codes, &scales, &mut output[1..35]),
+                Err(expected)
+            );
+            assert_eq!(output, [0xa5; 36]);
+            assert_eq!(
+                repack_into(1, 64, &codes, &scales, &mut output),
+                Err(Error::SizeMismatch)
+            );
+            assert_eq!(output, [0xa5; 36]);
+        }
     }
 
     #[test]

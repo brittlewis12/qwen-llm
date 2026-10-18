@@ -38,8 +38,11 @@ the completeness of every nonexpert projection.
 Each packed bank is a public `MetalTensor`, with its public Metal buffer, offset
 zero, MXFP4 dtype and native `[K, M, 272]` shape. Expert bytes are exactly
 204,550,963,200 (190.503 GiB). One expert's codes and scales (6,266,880 bytes) are
-read at a time and repacked directly into resident 17-byte GGML blocks. No second
-resident bank or expanded expert matrix is constructed. Dense BF16/F32 and
+read at a time and repacked directly into resident 17-byte GGML blocks. Bulk
+source reads use descriptor-local `F_NOCACHE` on macOS to avoid retaining a
+file-cache copy beside resident weights; the separate Engram handles keep their
+normal row-read cache policy. No second resident bank or expanded expert matrix
+is constructed. Dense BF16/F32 and
 FP8+UE8M0 tensors become resident F32 using at most 32-row tiles. The exact dense
 footprint comes from `plan`; fitting the entire model in a given budget is not
 assumed. Published weight buffers must not be written by CPU or GPU callers.

@@ -208,6 +208,28 @@ impl SourceStore {
             .ok_or_else(|| format!("missing tensor: {name}"))
     }
 
+    fn stream_without_cache(&self) -> Result<(), String> {
+        #[cfg(target_os = "macos")]
+        {
+            use std::os::fd::AsRawFd;
+            let mut seen = std::collections::BTreeSet::new();
+            for tensor in self.tensors.values() {
+                let fd = tensor.file.as_raw_fd();
+                if seen.insert(fd) {
+                    // SAFETY: the descriptor stays open; only its read-cache policy changes.
+                    if unsafe { libc::fcntl(fd, libc::F_NOCACHE, 1) } == -1 {
+                        return Err(format!(
+                            "uncached reads for {}: {}",
+                            tensor.source_file,
+                            std::io::Error::last_os_error()
+                        ));
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+
     /// Read a tensor-relative byte range; never allocate or read more than 32 MiB.
     pub fn bounded_read(&self, name: &str, range: Range<u64>) -> Result<Vec<u8>, String> {
         let tensor = self.tensor(name)?;

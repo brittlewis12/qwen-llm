@@ -323,6 +323,8 @@ impl ResidentWeights {
         if let Some(refusal) = admission.refusal() {
             return Err(refusal.to_string());
         }
+        // Do not retain a file-cache copy alongside the resident weight buffers.
+        source.stream_without_cache()?;
         let mut loaded = Self {
             banks: Vec::with_capacity(LAYERS * 3),
             dense: BTreeMap::new(),

@@ -83,6 +83,8 @@ fn split_shards_padded_headers_fp8_block_and_engram_rows() {
         ],
     );
     let s = SourceStore::open(&f.0).unwrap();
+    s.stream_without_cache().unwrap();
+    s.stream_without_cache().unwrap();
     let values = s.decode_rows("p.weight", 31..33, false).unwrap();
     assert_eq!(&values[..32], &[1.0; 32]);
     assert_eq!(values[32], 2.0);

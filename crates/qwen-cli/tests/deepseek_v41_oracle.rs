@@ -1,8 +1,5 @@
-//! Explicit, ignored HF-source vs converted-GGUF characterization, not parity acceptance.
-//! Seven-token reports cover conversion plus execution error. Long attention reports
-//! are teacher-forced diagnostics, not full-model continuation qualification.
-//! Tight legacy validators remain model-free unit-test controls for a future
-//! execution-only GGUF oracle; they do not gate these converted-weight measurements.
+//! Separate GGUF execution-only logit acceptance and HF conversion characterization.
+//! Hidden states and long teacher-forced attention remain characterization only.
 use anyhow::{Context, Result, ensure};
 use qwen_llm::deepseek_v41::{
     forward::Forward,
@@ -18,6 +15,8 @@ use std::sync::Arc;
 mod capture;
 #[path = "support/v41_characterization.rs"]
 mod characterization;
+#[path = "support/v41_execution.rs"]
+mod execution;
 #[path = "support/v41_trace.rs"]
 mod trace;
 use characterization::{
@@ -30,6 +29,11 @@ const CPU_REFERENCE: qwen_llm::test_fixtures::Fixture = qwen_llm::test_fixtures:
     id: "deepseek-v4.1-reap-272e-native-f32-7t-40l-cpu",
     env: &[],
     filename: "deepseek-v4.1-reap-272e-native-f32-7t-40l-cpu.json",
+};
+const GGUF_CPU_REFERENCE: qwen_llm::test_fixtures::Fixture = qwen_llm::test_fixtures::Fixture {
+    id: "deepseek-v4.1-reap-272e-gguf-native-f32-7t-40l-cpu",
+    env: &[],
+    filename: "deepseek-v4.1-reap-272e-gguf-native-f32-7t-40l-cpu.json",
 };
 const GGUF_MODEL: qwen_llm::test_fixtures::Fixture = qwen_llm::test_fixtures::Fixture {
     id: "deepseek-v4.1-reap-272e-mxfp4-q8engram",
@@ -74,7 +78,7 @@ fn load_characterization_model(ctx: &MetalContext, path: &Path) -> Result<Reside
     )?)
 }
 
-fn replay_trace(model: &Path, path: &Path) -> Result<()> {
+fn replay_trace(model: &Path, path: &Path, execution_only: bool) -> Result<()> {
     qwen_cli::shutdown::install()?;
     qwen_cli::shutdown::checkpoint()?;
     let ctx = MetalContext::new()?;
@@ -83,7 +87,11 @@ fn replay_trace(model: &Path, path: &Path) -> Result<()> {
         Forward::from_resident(&ctx, &weights, weights.token_map.clone(), weights.raw_pad)
             .map_err(anyhow::Error::msg)?;
     let mut state = forward.new_state_with_gpu_step(TOKENS.len())?;
-    let mut trace = trace::Trace::create(path, &weights.config, 40, &TOKENS)?;
+    let mut trace = if execution_only {
+        trace::Trace::create_execution(path, &weights.config, 40, &TOKENS)?
+    } else {
+        trace::Trace::create(path, &weights.config, 40, &TOKENS)?
+    };
     let mut logits = Vec::new();
     for (position, token) in TOKENS.into_iter().enumerate() {
         trace.begin_step(position, token)?;
@@ -528,7 +536,7 @@ fn hf_conversion_seven_token_characterization() -> Result<()> {
         output.display()
     );
     let trace = output.join("trace");
-    replay_trace(model, &trace)?;
+    replay_trace(model, &trace, false)?;
     let runtime = manifest(&trace.join("run.json"))?;
     check_policy(&reference_meta, &runtime)?;
     ensure!(
@@ -556,7 +564,13 @@ fn hf_conversion_seven_token_characterization() -> Result<()> {
 }
 
 #[test]
-fn legacy_tight_report_bounds_remain_unchanged_for_future_execution_oracle() {
+#[ignore = "model witness: deepseek-v4.1-reap-272e-mxfp4-q8engram"]
+fn independent_gguf_seven_token_execution_acceptance() -> Result<()> {
+    execution::run()
+}
+
+#[test]
+fn tight_execution_report_bounds_remain_unchanged() {
     let mut report = json!({"mode":"NativeF32", "positions":7,"layers":40,
         "tensors_compared":567,"token_check":"complete","token_positions_verified":7,
         "shapes":{"hidden":[4,5120],"pre":[4],"logits":[129280]},
@@ -564,6 +578,24 @@ fn legacy_tight_report_bounds_remain_unchanged_for_future_execution_oracle() {
             "runtime_top1":5,"top1_match":true,"maxabs":5.49e-5,
             "kl_reference_to_runtime":4.82e-11})).collect::<Vec<_>>()});
     check_legacy_tight_report(&report).unwrap();
+    report["first_divergence"] = json!({"position":0,"layer":15,"tensor":"hidden",
+        "maxabs":0.00390625,"normrelative":2.9849533440885867e-7});
+    report["worst_maxabs"] = json!({"position":1,"layer":36,"tensor":"hidden","maxabs":0.3125});
+    check_legacy_tight_report(&report).unwrap();
+    for (key, value) in [
+        ("tensors_compared", json!(566)),
+        ("layers", json!(39)),
+        ("positions", json!(6)),
+        ("token_check", json!("partial")),
+        (
+            "shapes",
+            json!({"hidden":[4,5121],"pre":[4],"logits":[129280]}),
+        ),
+    ] {
+        let mut bad = report.clone();
+        bad[key] = value;
+        assert!(check_legacy_tight_report(&bad).is_err(), "accepted {key}");
+    }
     for (key, value) in [
         ("maxabs", json!(1.01e-4)),
         ("kl_reference_to_runtime", json!(1.01e-10)),

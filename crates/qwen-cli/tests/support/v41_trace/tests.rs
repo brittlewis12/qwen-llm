@@ -56,6 +56,27 @@ fn converted_capture_has_one_production_mode_and_characterization_scope() {
     drop(trace);
 }
 
+#[test]
+fn execution_capture_is_distinct_from_hf_characterization() {
+    let temp = Temp::new();
+    let root = temp.0.join("execution");
+    let config = Config {
+        hidden: 2,
+        vocab: 3,
+        ..Config::default()
+    };
+    let trace = Trace::create_execution(&root, &config, 1, &[0]).unwrap();
+    let manifest = status(&root);
+    assert_eq!(
+        manifest["comparison_scope"],
+        "independent_gguf_execution_only"
+    );
+    assert_eq!(manifest["execution"], "gpu_step");
+    assert_eq!(manifest["context"], 1);
+    assert_eq!(manifest["status"], "incomplete");
+    drop(trace);
+}
+
 fn status(path: &Path) -> Value {
     serde_json::from_slice(&fs::read(path.join("run.json")).unwrap()).unwrap()
 }

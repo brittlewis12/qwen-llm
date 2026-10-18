@@ -68,6 +68,7 @@ ALIASES = {
     "indexer.proj.weight": "attn.indexer.weights_proj.weight",
     "ffn_gate_inp.weight": "ffn.gate.weight",
     "exp_probs_b.bias": "ffn.gate.bias",
+    "exp_probs_b_vl.bias": "ffn.gate.bias_vl",
     "ffn_gate_shexp.weight": "ffn.shared_experts.w1.weight",
     "ffn_up_shexp.weight": "ffn.shared_experts.w3.weight",
     "ffn_down_shexp.weight": "ffn.shared_experts.w2.weight",
@@ -276,6 +277,7 @@ class GGUFWeights(Weights):
             "engram.rows": "engram_num_embeddings",
             "hidden_activation": "hidden_act",
             "rope.scaling.factor": "rope_scaling.factor",
+            "rope.scaling.type": "rope_scaling.rope_type",
             "rope.scaling.original_context_length": "rope_scaling.original_max_position_embeddings",
             "rope.scaling.yarn_beta_fast": "rope_scaling.beta_fast",
             "rope.scaling.yarn_beta_slow": "rope_scaling.beta_slow",
@@ -388,6 +390,7 @@ class GGUFWeights(Weights):
             if n.startswith("layers.")
             and int(n.split(".")[1]) < layers
             and n not in used
+            and not n.endswith(".gate.bias_vl")
         ]
         if extra:
             raise ValueError("unbound GGUF backbone tensors: " + str(extra[:10]))

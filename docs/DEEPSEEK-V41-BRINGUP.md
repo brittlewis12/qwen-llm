@@ -35,11 +35,12 @@ CED, speculation and Lens are not implemented for V4.1.
 
 ## Verification
 
-The repair passes 90 V4.1 library tests with required Metal and API validation,
+The repair passes 93 V4.1 library tests, including required-Metal/API-validation runs,
 including nonzero GGUF load-to-forward tests at 272/320/384 experts, quantized
 projection tests, ownership transitions and bounded Engram reads. Shared
 CLI/server/benchmark fixtures cover dispatch, request preparation, cancellation,
-typed refusals and statistics. These are not a production-model execution result.
+typed refusals and statistics. Full committed-tree contracts and release
+workspace compilation pass at `ee232eac`.
 
 Actual Rust `gguf::plan()` succeeds against all ten mrfakename 1017 Q8_0 shard
 headers: 1,046 tensors, 384 experts, 120 MXFP4 banks. The resident payload is
@@ -58,8 +59,8 @@ Header checks used about 5.8 MB per artifact, not full downloads.
 The existing offline HF CPU oracle remains the first conversion-plus-execution
 signal. The chosen converter requantizes dense FP8 and Engram to Q8_0, so its
 errors must be characterized, not tested against the old lossless-path bound.
-An independent GGUF-reading CPU oracle will subsequently measure execution
-error alone. NativeF32 uses lower-expert-ID ties and ID-sorted normalization;
+The independent GGUF-reading CPU oracle measures execution error alone.
+NativeF32 uses lower-expert-ID ties and ID-sorted normalization;
 this is a local arithmetic policy, not official `torch.topk` tie parity.
 
 Resolve the converted artifact and retained CPU reference by name through
@@ -76,6 +77,32 @@ tight numerical acceptance. Original tight-bound negative controls remain unit
 tests. The long teacher-forced attention comparison is also explicit
 characterization, not an automatic 10K run or a full-model continuation oracle.
 
+The converted 272E now executes through normal `run` and `serve`. The seven-token
+HF comparison covers 40 layers and 567 tensors: 7/7 top-1 agreement, worst logit
+error 0.178663 and worst KL 5.3512e-5. Against independently decoded GGUF weights,
+the same GPU trace has worst logit error 1.2398e-5 and KL 1.7810e-12, again with
+7/7 top-1 agreement. Worst hidden normalized error is 2.411e-6; hidden elementwise
+differences remain characterization, not a new acceptance claim.
+
+The tight execution witness retains the original logit bound 1e-4 and KL bound
+1e-10. Its distinct CPU marker is
+`deepseek-v4.1-reap-272e-gguf-native-f32-7t-40l-cpu.json`, beside `run.json`,
+`tokens.json` and the independent GGUF reference traces:
+
+```sh
+uv run scripts/model-witnesses.py independent_gguf_seven_token_execution_acceptance
+```
+
+## Speed Baseline
+
+On the M5 Ultra, the shared harness measures pp128 at 22.823 tokens/s and tg32
+at 21.635 tokens/s: depth zero, seed one, three warmed repetitions, API validation
+off. This is still single-token prefill with per-token logits copies, not batched
+prefill. JSON, SSE and two-turn serving checks pass. Three warmed short HTTPS SSE
+requests have first-content-delta latency 856-876 ms (median 860 ms), with the
+client on the serving host and API validation on. Header receipt is not counted
+as TTFT. These short probes establish neither long-context speed nor quality.
+
 ## Conversion Status
 
 The [output-only converter patch](../scripts/convert_v41_gguf.md) reuses PR 28696's
@@ -83,7 +110,8 @@ existing lazy expert and chunked tensor support. It removes both the global
 writer spool and intermediate Engram tables without changing output bytes.
 Eight tiny-fixture tests pass against the unmodified pinned converter. The old
 272E metadata-only preflight predicts 423,681,448,000 bytes of final output and
-zero temporary payload staging. No production GGUF execution is verified yet.
+zero temporary payload staging. The single conversion completes in about
+43 minutes; normal serving and both short numerical comparisons complete.
 The obsolete runtime cache has been removed; all 48 source shards are retained.
 
 After first-light correctness, improve exact batched prefill and prefix reuse

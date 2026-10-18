@@ -37,6 +37,24 @@ pub(super) struct Trace {
 }
 
 impl Trace {
+    pub(super) fn create_execution(
+        path: &Path,
+        config: &Config,
+        layers: usize,
+        prompt: &[u32],
+    ) -> Result<Self> {
+        Self::create_inner(
+            path,
+            Shapes {
+                hidden: config.hidden,
+                vocab: config.vocab,
+                layers,
+            },
+            json!({"prompt_token_ids":prompt, "context":prompt.len(), "max_output_tokens":1,
+                "execution":"gpu_step", "comparison_scope":"independent_gguf_execution_only"}),
+        )
+    }
+
     pub(super) fn create(
         path: &Path,
         config: &Config,

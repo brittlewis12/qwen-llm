@@ -210,6 +210,20 @@ class GGUFTest(unittest.TestCase):
             finally:
                 store.close()
 
+    def test_rope_scaling_type(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "tiny.gguf"
+            write_gguf(path, [], {"deepseek41.rope.scaling.type": "yarn"})
+            store = GGUFWeights(path)
+            try:
+                config = {"rope_scaling": {"rope_type": "yarn"}}
+                store.validate_config(config)
+                store.metadata["deepseek41.rope.scaling.type"] = "linear"
+                with self.assertRaisesRegex(ValueError, "metadata mismatch"):
+                    store.validate_config(config)
+            finally:
+                store.close()
+
     def test_tiny_forward_matches_hf(self):
         from oracle import Oracle
         from test_cpu import synthetic_checkpoint
@@ -251,8 +265,15 @@ class GGUFTest(unittest.TestCase):
                     item.flatten().tolist() if isinstance(item, torch.Tensor) else item
                 )
             path = root / "tiny.gguf"
+            tensors.append(("blk.0.exp_probs_b_vl.bias", (2,), 0, b"\0" * 8))
             write_gguf(path, tensors, metadata)
             gg = Oracle(root, root / "gg", max_seq_len=8, gguf=path)
+            gg.store.names["layers.0.unexpected.bias"] = gg.store.names[
+                "layers.0.ffn.gate.bias_vl"
+            ]
+            with self.assertRaisesRegex(ValueError, "unbound GGUF"):
+                gg.store.validate_model(gg.model, gg.module)
+            del gg.store.names["layers.0.unexpected.bias"]
             try:
                 torch.testing.assert_close(
                     gg.feed([1, 2, 3, 4, 5, 6, 7]),

@@ -322,7 +322,10 @@ fn conversion_error() {}
     oracle_annotations = witness_annotations(oracle_source, path, "qwen-cli")
     assert oracle_annotations is not None
     oracle_identities = [(reason, name) for reason, name, _ in oracle_annotations]
-    assert select_annotations(oracle_identities, [], "") == []
+    acceptance_indices = select_annotations(oracle_identities, [], "")
+    assert {oracle_identities[index][1] for index in acceptance_indices} == {
+        "independent_gguf_seven_token_execution_acceptance",
+    }
     conversion_indices = select_annotations(
         oracle_identities,
         ["deepseek-v4.1-reap-272e-mxfp4-q8engram"],

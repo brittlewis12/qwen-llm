@@ -1,5 +1,6 @@
 pub mod bounded_file;
-pub mod deepseek_v41_tokenizer;
+#[cfg(test)]
+mod deepseek_v41_tokenizer;
 pub mod messages;
 pub mod model_request;
 pub mod open_responses;

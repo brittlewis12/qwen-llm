@@ -286,6 +286,8 @@ impl RequestProfile {
         request: &ServeRequest,
     ) -> Result<(String, Option<super::http::PromptBoundaries>), ServeError> {
         match self {
+            Self::DeepSeekV41 { .. } => super::protocol_v41::render_with_boundaries(request)
+                .map(|(prompt, boundaries)| (prompt, Some(boundaries))),
             Self::Glm5Next { .. } => render_glm5_next::render_with_boundaries(request)
                 .map(|(prompt, boundaries)| (prompt, Some(boundaries))),
             _ => self.render(request).map(|prompt| (prompt, None)),

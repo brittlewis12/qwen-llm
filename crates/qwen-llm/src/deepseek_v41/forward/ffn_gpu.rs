@@ -300,6 +300,40 @@ impl Workspace {
             c.norm_eps,
         )?;
         layer.router.encode(enc, &b[7], &b[8])?;
+        for j in 0..2 {
+            layer.shared[j].encode(enc, &b[7], &b[16 + j])?;
+        }
+        metal::encode_clamped_swiglu(ctx, enc, &b[16], &b[17], &b[18], c.clamp)?;
+        layer.shared[2].encode(enc, &b[18], &b[19])?;
+        self.encode_routed(
+            ctx,
+            enc,
+            c,
+            layer,
+            &constants[3],
+            &b[7],
+            &b[8],
+            &b[19],
+            &b[20],
+            &self.statuses[id],
+        )?;
+        metal::encode_mhc4_post(ctx, enc, c.hidden, &b[20], x, &b[4], &b[5], output)
+    }
+
+    fn encode_routed(
+        &self,
+        ctx: &MetalContext,
+        enc: &KernelEncoder,
+        c: &Config,
+        layer: &Layer<'_>,
+        bias: &MetalTensor,
+        normalized: &MetalTensor,
+        logits: &MetalTensor,
+        shared: &MetalTensor,
+        output: &MetalTensor,
+        status: &MetalTensor,
+    ) -> std::result::Result<(), metal::MetalError> {
+        let b = &self.buffers;
         enc.set_pipeline(&ctx.pipeline("kernel_deepseek_v41_route")?);
         enc.set_bytes(
             0,
@@ -310,16 +344,9 @@ impl Workspace {
                 scale: c.route_scale,
             },
         );
-        for (slot, tensor) in [
-            &b[8],
-            &constants[3],
-            &b[9],
-            &b[10],
-            &b[11],
-            &self.statuses[id],
-        ]
-        .iter()
-        .enumerate()
+        for (slot, tensor) in [logits, bias, &b[9], &b[10], &b[11], status]
+            .iter()
+            .enumerate()
         {
             enc.set_tensor(slot + 1, tensor);
         }
@@ -329,9 +356,9 @@ impl Workspace {
             enc,
             layer.banks[0],
             layer.banks[1],
-            &b[7],
+            normalized,
             &b[10],
-            &self.statuses[id],
+            status,
             &b[13],
             c.hidden,
             c.intermediate,
@@ -342,10 +369,7 @@ impl Workspace {
         enc.set_pipeline(&ctx.pipeline("kernel_deepseek_v41_weight")?);
         enc.set_bytes(0, &((c.intermediate * c.topk) as u32));
         enc.set_bytes(1, &(c.intermediate as u32));
-        for (slot, tensor) in [&b[13], &b[11], &b[14], &self.statuses[id]]
-            .iter()
-            .enumerate()
-        {
+        for (slot, tensor) in [&b[13], &b[11], &b[14], status].iter().enumerate() {
             enc.set_tensor(slot + 2, tensor);
         }
         dispatch(enc, c.intermediate * c.topk, 256);
@@ -355,28 +379,154 @@ impl Workspace {
             layer.banks[2],
             &b[14],
             &b[10],
-            &self.statuses[id],
+            status,
             &b[15],
             c.intermediate,
             c.hidden,
             c.experts,
             c.topk,
         )?;
-        for j in 0..2 {
-            layer.shared[j].encode(enc, &b[7], &b[16 + j])?;
-        }
-        metal::encode_clamped_swiglu(ctx, enc, &b[16], &b[17], &b[18], c.clamp)?;
-        layer.shared[2].encode(enc, &b[18], &b[19])?;
         enc.set_pipeline(&ctx.pipeline("kernel_deepseek_v41_sum")?);
         enc.set_bytes(0, &(c.hidden as u32));
         enc.set_bytes(1, &(c.topk as u32));
-        for (slot, tensor) in [&b[15], &b[19], &b[20], &self.statuses[id]]
-            .iter()
-            .enumerate()
-        {
+        for (slot, tensor) in [&b[15], shared, output, status].iter().enumerate() {
             enc.set_tensor(slot + 2, tensor);
         }
         dispatch(enc, c.hidden, 256);
-        metal::encode_mhc4_post(ctx, enc, c.hidden, &b[20], x, &b[4], &b[5], output)
+        Ok(())
+    }
+
+    pub(super) fn encode_rows(
+        &self,
+        ctx: &MetalContext,
+        enc: &KernelEncoder,
+        c: &Config,
+        layer: &Layer<'_>,
+        id: usize,
+        x: &MetalTensor,
+        incoming: &MetalTensor,
+        output: &MetalTensor,
+        scratch: &Rows,
+    ) -> std::result::Result<(), metal::MetalError> {
+        let n = scratch.hc.rows;
+        let b = &scratch.buffers;
+        scratch.hc.encode(
+            ctx,
+            enc,
+            c,
+            &layer.ffn_hc.projection,
+            &self.constants[id],
+            x,
+            incoming,
+        )?;
+        layer
+            .router
+            .encode_rows(enc, &scratch.hc.normalized, &b[0], n)?;
+        for j in 0..2 {
+            layer.shared[j].encode_rows(enc, &scratch.hc.normalized, &b[1 + j], n)?;
+        }
+        let shape = vec![(c.intermediate * n) as u64];
+        metal::encode_clamped_swiglu(
+            ctx,
+            enc,
+            &b[1].view_bytes(0, shape.clone()),
+            &b[2].view_bytes(0, shape.clone()),
+            &b[3].view_bytes(0, shape),
+            c.clamp,
+        )?;
+        layer.shared[2].encode_rows(enc, &b[3], &b[4], n)?;
+        for row in 0..n {
+            self.encode_routed(
+                ctx,
+                enc,
+                c,
+                layer,
+                &self.constants[id][3],
+                &prefill::row(&scratch.hc.normalized, c.hidden, row),
+                &prefill::row(&b[0], c.experts, row),
+                &prefill::row(&b[4], c.hidden, row),
+                &prefill::row(&b[5], c.hidden, row),
+                &prefill::row(&b[6], 1, id * n + row),
+            )?;
+        }
+        metal::encode_mhc4_post_rows(
+            ctx,
+            enc,
+            c.hidden,
+            n,
+            &b[5],
+            x,
+            &scratch.hc.post,
+            &scratch.hc.comb,
+            output,
+        )
+    }
+}
+
+pub(super) struct Rows {
+    pub(super) hc: prefill::HcRows,
+    // Activations are reused; buffer 6 retains layer-major [layer][row] statuses.
+    buffers: Vec<MetalTensor>,
+}
+impl Rows {
+    pub(super) fn widths(c: &Config, layers: usize) -> Vec<usize> {
+        let mut widths = prefill::HcRows::widths(c);
+        widths.extend([
+            c.experts,
+            c.intermediate,
+            c.intermediate,
+            c.intermediate,
+            c.hidden,
+            c.hidden,
+            layers,
+        ]);
+        widths
+    }
+    pub(super) fn new(ctx: &MetalContext, c: &Config, rows: usize, layers: usize) -> Result<Self> {
+        let hc = prefill::HcRows::new(ctx, c, rows)?;
+        let buffers = [
+            c.experts,
+            c.intermediate,
+            c.intermediate,
+            c.intermediate,
+            c.hidden,
+            c.hidden,
+            layers,
+        ]
+        .into_iter()
+        .enumerate()
+        .map(|(i, width)| {
+            prefill::allocate(
+                ctx,
+                width,
+                rows,
+                if i == 6 { GgmlType::I32 } else { GgmlType::F32 },
+            )
+        })
+        .collect::<Result<Vec<_>>>()?;
+        Ok(Self { hc, buffers })
+    }
+    pub(super) fn validate_status(&self) -> Result<()> {
+        let t = &self.buffers[6];
+        let values = unsafe {
+            std::slice::from_raw_parts(
+                t.buffer
+                    .contents()
+                    .as_ptr()
+                    .cast::<i32>()
+                    .add((t.offset / 4) as usize),
+                t.n_elements() as usize,
+            )
+        };
+        for (index, &status) in values.iter().enumerate() {
+            if status != metal::ROUTE_STATUS_READY {
+                return Err(format!(
+                    "prefill FFN layer {} row {} route status {status}",
+                    index / self.hc.rows,
+                    index % self.hc.rows,
+                ));
+            }
+        }
+        Ok(())
     }
 }

@@ -16,14 +16,7 @@ pub(crate) fn default_sampling(seed: u64) -> SamplingConfig {
 
 pub(crate) fn load(ctx: &MetalContext, gguf: Arc<GgufFile>) -> Result<weights::ResidentWeights> {
     shutdown::checkpoint()?;
-    Ok(weights::ResidentWeights::load(
-        ctx,
-        gguf,
-        weights::LoadLimits {
-            // No CLI-specific budget; the loader performs typed runtime admission.
-            resident_bytes: u64::MAX,
-        },
-    )?)
+    Ok(weights::ResidentWeights::load(ctx, gguf)?)
 }
 
 pub(crate) fn capabilities(gguf: &GgufFile) -> Result<serde_json::Value> {
@@ -44,11 +37,13 @@ pub(crate) fn capabilities(gguf: &GgufFile) -> Result<serde_json::Value> {
         "reasoning": {"levels":["none","low","high","xhigh","max"],"fallback":"none",
             "no_thinking":{"status":"unsupported"},"thinking":{"status":"unsupported"}},
         "template": {"status":"identified","rendered_as":"deepseek_recipe_dsv41"},
-        "execution":{"status":"supported","capacity_policy":"runtime_memory_admission"},
+        "execution":{"status":"supported","capacity_policy":"runtime_memory_admission",
+            "prefill_mode":crate::family_options::V41_PREFILL_MODE,
+            "prefill_rows_max":crate::family_options::V41_PREFILL_ROWS},
         "geometry":{"experts":plan.config.experts,"context_tokens":plan.engram_hash.max_position},
         "local_fit":{"status":"not_evaluated","stage":"runtime_memory_admission"},
         "bench":{"status":"supported","harness":"family_pp_tg"},
-        "cache":{"policy":"fresh_request","prefix_reuse":false,"snapshots":false},
+        "cache":{"policy":"exact_prefix_ram","prefix_reuse":true,"snapshots":true},
         "lens":{"status":"unsupported"},"speculation":{"status":"unsupported"}
     }))
 }
@@ -243,12 +238,12 @@ mod tests {
     }
 
     #[test]
-    fn v41_profile_is_fresh_request_without_speculation() {
+    fn v41_profile_is_ram_prefix_reuse_without_speculation() {
         let profile = family_profile::profile(ModelFamily::DeepSeekV41);
         assert!(profile.serve_backend);
         assert_eq!(
             profile.serve_warmth,
-            family_profile::ServeWarmth::FreshRequest
+            family_profile::ServeWarmth::SnapshotsRam
         );
         assert_eq!(profile.fixed_cohort, family_profile::FixedCohort::None);
         assert!(matches!(
@@ -307,14 +302,19 @@ pub(crate) fn run(
     let mut state = forward.new_state_with_gpu_step(required)?;
     let execution = Instant::now();
     let prefill = Instant::now();
-    let mut logits = Vec::new();
-    for &id in &ids {
-        shutdown::checkpoint()?;
-        logits = forward
-            .step(&mut state, id as u32, Some(shutdown::cancellation_flag()))
-            .map_err(anyhow::Error::msg)?;
-    }
+    let logits = forward
+        .prefill(
+            &mut state,
+            &ids.iter().map(|&id| id as u32).collect::<Vec<_>>(),
+            Some(shutdown::cancellation_flag()),
+        )
+        .context("V4.1 prefill")?;
     let prefill_ms = prefill.elapsed().as_secs_f64() * 1e3;
+    tracing::info!(target: "qwen_diag", family="deepseek_v41", prefill_ms,
+        prefill_mode=crate::family_options::V41_PREFILL_MODE,
+        prefill_rows=ids.len().min(crate::family_options::V41_PREFILL_ROWS),
+        prefill_chunks=ids.len().div_ceil(crate::family_options::V41_PREFILL_ROWS),
+        "run prefill");
     let mut stdout = std::io::stdout().lock();
     let generation = decode::generate_serial(
         logits,

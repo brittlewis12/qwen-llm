@@ -20,8 +20,6 @@ pub(crate) enum FixedCohort {
 /// How `qwen serve` keeps a family's prefixes warm between requests.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum ServeWarmth {
-    /// Every request starts empty; no prefix reuse or snapshots.
-    FreshRequest,
     /// RAM snapshot cache (`--snapshot-cache-mib`) plus the durable disk tier
     /// (`--durable-snapshot-*`).
     SnapshotsDurable,
@@ -129,7 +127,7 @@ static DEEPSEEK_V41: FamilyProfile = FamilyProfile {
     fixed_cohort: FixedCohort::None,
     serve_backend: true,
     serve_capacity: ServeCapacity::FixedContextAndOutput,
-    serve_warmth: ServeWarmth::FreshRequest,
+    serve_warmth: ServeWarmth::SnapshotsRam,
     durable_idle_publish: false,
     idle_residency_eligible: false,
     upstream_template_style: false,
@@ -376,7 +374,7 @@ mod tests {
             let snapshots = match family_profile.serve_warmth {
                 ServeWarmth::SnapshotsDurable => "RAM and disk",
                 ServeWarmth::SnapshotsRam => "RAM",
-                ServeWarmth::LiveSession | ServeWarmth::FreshRequest => "none",
+                ServeWarmth::LiveSession => "none",
             };
             let drafter = match family_profile.drafter {
                 DrafterSupport::Dense => "`run`, `serve`",

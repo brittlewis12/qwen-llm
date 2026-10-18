@@ -48,7 +48,7 @@ fn metadata_schedule_drives_full_gpu_graph_and_engram_at_zero() {
             assert_eq!(logits, model.step(&mut plain, token, None).unwrap());
             assert_eq!(state.position(), position + 1);
             let workspace = state.gpu_step.as_ref().unwrap();
-            assert_eq!(workspace.commands, if use_engram { 2 } else { 1 });
+            assert_eq!(workspace.commands, 1);
             assert_eq!(workspace.constants.len(), 6);
             assert_eq!(workspace.trace_copies, 12);
         }
@@ -64,7 +64,7 @@ fn close(a: &[f32], b: &[f32]) {
 }
 
 #[test]
-fn forty_layers_python_legacy_trace_and_three_commands() {
+fn forty_layers_python_legacy_trace_and_one_command() {
     let ctx = MetalContext::new().unwrap();
     let weights = toy::Weights::new(&ctx);
     let model = weights.model(&ctx);
@@ -136,14 +136,14 @@ fn forty_layers_python_legacy_trace_and_three_commands() {
                 .iter()
                 .map(|o| o.completed_submits)
                 .sum::<usize>(),
-            3
+            1
         );
         assert!(report.operations.iter().all(|o| o.operation == "gpu_step"));
         assert_eq!(logits, untraced);
         let ws = plain.gpu_step.as_ref().unwrap();
-        assert_eq!((ws.commands, ws.trace_copies), (3, 0));
+        assert_eq!((ws.commands, ws.trace_copies), (1, 0));
         let ws = traced.gpu_step.as_ref().unwrap();
-        assert_eq!((ws.commands, ws.trace_copies), (3, 80));
+        assert_eq!((ws.commands, ws.trace_copies), (1, 80));
         assert_eq!(plain.position(), position + 1);
         assert_eq!(plain.addresses, legacy.addresses);
         assert_eq!(
@@ -172,7 +172,7 @@ fn earlier_route_failure_is_not_overwritten_by_later_layers() {
     let ws = state.gpu_step.as_ref().unwrap();
     assert_ne!(ws.ffn.status(3), metal::ROUTE_STATUS_READY);
     assert_eq!(ws.ffn.status(13), metal::ROUTE_STATUS_READY);
-    assert_eq!(ws.commands, 2);
+    assert_eq!(ws.commands, 1);
     assert!(state.is_poisoned());
     assert_eq!(state.position(), 0);
     assert!(
@@ -247,7 +247,7 @@ fn cancellation_callback_errors_and_encode_failure_poison() {
             .contains("GPU attention weights")
     );
     assert!(state.is_poisoned());
-    assert_eq!(state.gpu_step.as_ref().unwrap().commands, 1);
+    assert_eq!(state.gpu_step.as_ref().unwrap().commands, 0);
 }
 
 #[test]

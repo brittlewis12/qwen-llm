@@ -107,14 +107,8 @@ pub(crate) fn with_family_bench<R>(
         ModelFamily::DeepSeekV41 => {
             let plan = v41_weights::plan(gguf)?;
             validate_v41_extent(extent, plan.engram_hash.max_position)?;
-            let weights = v41_weights::ResidentWeights::load(
-                ctx,
-                gguf.clone(),
-                v41_weights::LoadLimits {
-                    resident_bytes: u64::MAX,
-                },
-            )
-            .context("load DeepSeek V4.1 weights")?;
+            let weights = v41_weights::ResidentWeights::load(ctx, gguf.clone())
+                .context("load DeepSeek V4.1 weights")?;
             let forward = V41Forward::from_resident(
                 ctx,
                 &weights,
@@ -126,6 +120,12 @@ pub(crate) fn with_family_bench<R>(
                 vocab: weights.config.vocab,
                 state: None,
                 create: || Ok(forward.new_state_with_gpu_step(extent.forwards)?),
+                prefill: |state: &mut qwen_llm::deepseek_v41::forward::State, ids: &[u32]| {
+                    shutdown::checkpoint()?;
+                    forward
+                        .prefill(state, ids, Some(shutdown::cancellation_flag()))
+                        .map_err(anyhow::Error::from)
+                },
                 step: |state: &mut qwen_llm::deepseek_v41::forward::State, token| {
                     shutdown::checkpoint()?;
                     forward
@@ -289,17 +289,19 @@ fn validate_v41_extent(extent: FamilyBenchExtent, max_position: u64) -> Result<(
     Ok(())
 }
 
-struct DeepSeekV41Bench<S, Create, Step> {
+struct DeepSeekV41Bench<S, Create, Step, Prefill> {
     vocab: usize,
     state: Option<S>,
     create: Create,
     step: Step,
+    prefill: Prefill,
 }
 
-impl<S, Create, Step> FamilyBench for DeepSeekV41Bench<S, Create, Step>
+impl<S, Create, Step, Prefill> FamilyBench for DeepSeekV41Bench<S, Create, Step, Prefill>
 where
     Create: FnMut() -> Result<S>,
     Step: FnMut(&mut S, u32) -> Result<Vec<f32>>,
+    Prefill: FnMut(&mut S, &[u32]) -> Result<Vec<f32>>,
 {
     fn vocab_size(&self) -> usize {
         self.vocab
@@ -310,9 +312,11 @@ where
         Ok(())
     }
     fn prefill(&mut self, ids: &[u32]) -> Result<()> {
-        for &id in ids {
-            self.decode(id)?;
-        }
+        let state = self
+            .state
+            .as_mut()
+            .context("DeepSeek V4.1 bench used before begin_rep")?;
+        std::hint::black_box((self.prefill)(state, ids)?);
         Ok(())
     }
     fn decode(&mut self, id: u32) -> Result<()> {
@@ -325,9 +329,9 @@ where
     }
     fn semantics(&self) -> FamilySemantics {
         FamilySemantics {
-            prefill_mode: "single_token_forward_gpu_step+logits_copy",
+            prefill_mode: crate::family_options::V41_PREFILL_MODE,
             decode_mode: "gpu_step+logits_copy",
-            prefill_chunk: Some(1),
+            prefill_chunk: Some(crate::family_options::V41_PREFILL_ROWS),
         }
     }
 }
@@ -801,6 +805,14 @@ mod tests {
                 repetitions.borrow_mut().push(vec![]);
                 Ok(0usize)
             },
+            prefill: |position: &mut usize, tokens: &[u32]| {
+                let mut reps = repetitions.borrow_mut();
+                let ids = reps.last_mut().unwrap();
+                assert_eq!(*position, ids.len());
+                ids.extend_from_slice(tokens);
+                *position += tokens.len();
+                Ok(vec![0.; 257])
+            },
             step: |position: &mut usize, token| {
                 let mut reps = repetitions.borrow_mut();
                 let ids = reps.last_mut().unwrap();
@@ -834,10 +846,13 @@ mod tests {
         );
         assert_eq!(pp.test, "pp3@d2");
         assert_eq!(tg.test, "tg4@d2");
-        assert_eq!(pp.prefill_chunk, Some(1));
+        assert_eq!(
+            pp.prefill_chunk,
+            Some(crate::family_options::V41_PREFILL_ROWS)
+        );
         assert_eq!(
             pp.prefill_mode,
-            Some("single_token_forward_gpu_step+logits_copy")
+            Some(crate::family_options::V41_PREFILL_MODE)
         );
         assert_eq!(tg.decode_mode, Some("gpu_step+logits_copy"));
         for row in [pp, tg] {

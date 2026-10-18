@@ -6,6 +6,11 @@ loader. It reuses the converter's lazy MXFP4 helper and `LazyChunkedTensor` to
 write Engram rows directly into the final GGUF. Quantization, metadata and the
 GGUF writer are unchanged. No global spool or Engram staging files are created.
 
+Remove the local patch when the selected upstream converter includes equivalent
+bounded expert/Engram streaming without payload staging. Verify that with source
+review and the tiny-fixture tests below; no extra full-model conversion is needed
+just to retire the patch.
+
 ## Prepare And Run
 
 Use an owned checkout of the pinned converter and a Python environment with its

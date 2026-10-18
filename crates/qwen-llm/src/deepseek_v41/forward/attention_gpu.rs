@@ -31,6 +31,7 @@ pub(super) struct Workspace {
     capacity: usize,
     next_layer: usize,
     next_position: usize,
+    batch: Option<BatchCursor>,
     constants: Vec<Constants>,
     raw: MetalTensor,
     owners: Vec<OwnerCache>,
@@ -52,6 +53,161 @@ pub(super) struct Workspace {
     low: MetalTensor,
     output: MetalTensor,
     status: MetalTensor,
+}
+
+struct BatchCursor {
+    start: usize,
+    rows: usize,
+    layer: usize,
+    row: usize,
+}
+
+pub(super) struct Rows {
+    rank: MetalTensor,
+    query: MetalTensor,
+    latent: MetalTensor,
+    low: MetalTensor,
+    selected: MetalTensor,
+    candidates: MetalTensor,
+    rows: usize,
+}
+
+impl Rows {
+    pub(super) fn widths(c: &Config, capacity: usize) -> Vec<usize> {
+        vec![
+            c.query_rank,
+            c.heads * c.head_dim,
+            c.head_dim,
+            c.index_topk,
+            capacity.div_ceil(c.candidate_block),
+            c.groups * c.output_rank,
+        ]
+    }
+
+    pub(super) fn new(
+        ctx: &MetalContext,
+        c: &Config,
+        capacity: usize,
+        rows: usize,
+    ) -> Result<Self> {
+        let widths = Self::widths(c, capacity);
+        Ok(Self {
+            rank: prefill::allocate(ctx, widths[0], rows, GgmlType::F32)?,
+            query: prefill::allocate(ctx, widths[1], rows, GgmlType::F32)?,
+            latent: prefill::allocate(ctx, widths[2], rows, GgmlType::F32)?,
+            selected: prefill::allocate(ctx, widths[3], rows, GgmlType::I32)?,
+            candidates: prefill::allocate(ctx, widths[4], rows, GgmlType::I32)?,
+            low: prefill::allocate(ctx, widths[5], rows, GgmlType::F32)?,
+            rows,
+        })
+    }
+}
+
+impl Workspace {
+    pub(super) fn capacity(&self) -> usize {
+        self.capacity
+    }
+    /// Physical rings, completed owner rows, and pending pooling operands only.
+    pub(super) fn causal_regions(&self, position: usize) -> Result<Vec<(&MetalTensor, usize)>> {
+        op::require(
+            position <= self.capacity,
+            "snapshot exceeds attention capacity",
+        )?;
+        let mut regions = vec![(
+            &self.raw,
+            checked_product(&[
+                self.schedule.layers,
+                self.config.window,
+                self.config.head_dim,
+            ])?,
+        )];
+        for (&layer, owner) in self.schedule.kv_source_layers.iter().zip(&self.owners) {
+            let rows = position / self.schedule.ratio(layer);
+            regions.extend([
+                (
+                    &owner.compressed,
+                    checked_product(&[rows, self.config.head_dim])?,
+                ),
+                (
+                    &owner.keys,
+                    checked_product(&[rows, self.config.index_dim])?,
+                ),
+                (&owner.pending_value, self.config.head_dim),
+                (&owner.pending_gate, self.config.head_dim),
+            ]);
+        }
+        for &(tensor, count) in &regions {
+            op::require(f32_slice(tensor)?.len() >= count, "snapshot region extent")?;
+        }
+        Ok(regions)
+    }
+
+    pub(super) fn validate_snapshot_position(&self, position: usize) -> Result<()> {
+        op::require(
+            self.batch.is_none() && self.next_layer == 0 && self.next_position == position,
+            "snapshot requires committed attention state",
+        )
+    }
+
+    pub(super) fn validate_causal_restore(
+        &self,
+        position: usize,
+        payload_len: usize,
+    ) -> Result<()> {
+        let regions = self.causal_regions(position)?;
+        let size = regions
+            .iter()
+            .try_fold(0usize, |sum, (_, n)| sum.checked_add(*n))
+            .ok_or("snapshot extent overflow")?;
+        op::require(size == payload_len, "snapshot payload extent")?;
+        op::require(
+            self.status.dtype == GgmlType::I32
+                && self.status.offset % 4 == 0
+                && self.status.buffer.storageMode() == objc2_metal::MTLStorageMode::Shared
+                && self
+                    .status
+                    .offset
+                    .checked_add(4)
+                    .is_some_and(|end| end <= self.status.buffer.length() as u64),
+            "snapshot status extent",
+        )?;
+        Ok(())
+    }
+
+    pub(super) fn restore_causal(&mut self, position: usize, payload: &[f32]) -> Result<()> {
+        self.validate_causal_restore(position, payload.len())?;
+        let regions = self.causal_regions(position)?;
+        let mut offset = 0;
+        for (tensor, count) in regions {
+            // All regions were validated before the first write. No GPU work is in flight.
+            unsafe {
+                std::ptr::copy_nonoverlapping(
+                    payload.as_ptr().add(offset),
+                    tensor
+                        .buffer
+                        .contents()
+                        .as_ptr()
+                        .cast::<f32>()
+                        .add((tensor.offset / 4) as usize),
+                    count,
+                );
+            }
+            offset += count;
+        }
+        unsafe {
+            self.status
+                .buffer
+                .contents()
+                .as_ptr()
+                .cast::<i32>()
+                .add((self.status.offset / 4) as usize)
+                .write(0);
+        }
+        self.next_layer = 0;
+        self.next_position = position;
+        self.batch = None;
+        Ok(())
+    }
 }
 
 fn checked_product(dims: &[usize]) -> Result<usize> {
@@ -450,6 +606,7 @@ impl Workspace {
             capacity,
             next_layer: 0,
             next_position: 0,
+            batch: None,
             constants,
             raw: f(schedule.layers * c.window * c.head_dim)?,
             owners,
@@ -530,28 +687,185 @@ impl Workspace {
         w: &Weights<'_>,
         input: &MetalTensor,
     ) -> Result<&MetalTensor> {
+        op::require(self.batch.is_none(), "decode during attention batch")?;
+        self.encode_inner(ctx, enc, id, position, w, input, None)
+    }
+
+    pub(super) fn begin_batch(&mut self, start: usize, rows: usize) -> Result<()> {
+        self.validate_snapshot_position(start)?;
+        op::require(
+            rows > 0 && rows <= self.capacity.saturating_sub(start),
+            "attention batch extent",
+        )?;
+        self.batch = Some(BatchCursor {
+            start,
+            rows,
+            layer: 0,
+            row: 0,
+        });
+        Ok(())
+    }
+
+    pub(super) fn prepare_rows(
+        &self,
+        ctx: &MetalContext,
+        enc: &KernelEncoder,
+        id: usize,
+        w: &Weights<'_>,
+        input: &MetalTensor,
+        rows: &Rows,
+    ) -> std::result::Result<(), metal::MetalError> {
+        let c = &self.config;
+        w.query_a.encode_rows(enc, input, &rows.rank, rows.rows)?;
+        metal::encode_rms_norm_mul_rows_f32(
+            ctx,
+            enc,
+            &rows.rank,
+            &self.constants[id].query_norm,
+            &rows.rank,
+            rows.rows,
+            c.query_rank,
+            w.eps,
+        )?;
+        w.query_b
+            .encode_rows(enc, &rows.rank, &rows.query, rows.rows)?;
+        w.kv.encode_rows(enc, input, &rows.latent, rows.rows)?;
+        metal::encode_rms_norm_mul_rows_f32(
+            ctx,
+            enc,
+            &rows.latent,
+            &self.constants[id].kv_norm,
+            &rows.latent,
+            rows.rows,
+            c.head_dim,
+            w.eps,
+        )
+    }
+
+    pub(super) fn encode_batch_row(
+        &mut self,
+        ctx: &MetalContext,
+        enc: &KernelEncoder,
+        id: usize,
+        position: usize,
+        w: &Weights<'_>,
+        input: &MetalTensor,
+        rows: &Rows,
+        row: usize,
+    ) -> Result<()> {
+        op::require(
+            self.batch.as_ref().is_some_and(|b| {
+                b.rows == rows.rows && b.row == row && b.layer == id && b.start + row == position
+            }),
+            "attention batch row order",
+        )?;
+        let selected = std::mem::replace(
+            &mut self.selected,
+            prefill::row(&rows.selected, self.config.index_topk, row),
+        );
+        let candidates = std::mem::replace(
+            &mut self.candidates,
+            prefill::row(
+                &rows.candidates,
+                self.capacity.div_ceil(self.config.candidate_block),
+                row,
+            ),
+        );
+        let result = self
+            .encode_inner(ctx, enc, id, position, w, input, Some((rows, row)))
+            .map(|_| ());
+        self.selected = selected;
+        self.candidates = candidates;
+        result
+    }
+
+    pub(super) fn finish_rows(
+        &self,
+        ctx: &MetalContext,
+        enc: &KernelEncoder,
+        w: &Weights<'_>,
+        rows: &Rows,
+        output: &MetalTensor,
+    ) -> Result<()> {
+        w.output_b
+            .encode_rows(enc, &rows.low, output, rows.rows)
+            .map_err(|e| e.to_string())?;
+        pipeline(ctx, enc, "finite")?;
+        enc.set_bytes(0, &((self.config.hidden * rows.rows) as u32));
+        enc.set_tensor(1, output);
+        enc.set_tensor(2, &self.status);
+        dispatch(enc, self.config.hidden * rows.rows);
+        Ok(())
+    }
+
+    fn encode_inner(
+        &mut self,
+        ctx: &MetalContext,
+        enc: &KernelEncoder,
+        id: usize,
+        position: usize,
+        w: &Weights<'_>,
+        input: &MetalTensor,
+        prepared: Option<(&Rows, usize)>,
+    ) -> Result<&MetalTensor> {
         op::require(
             !enc.is_concurrent(),
             "GPU attention requires serial encoder",
         )?;
         let c = &self.config;
         op::require(
-            id == self.next_layer && position == self.next_position && position < self.capacity,
+            self.batch.as_ref().map_or(
+                id == self.next_layer && position == self.next_position,
+                |b| id == b.layer && position == b.start + b.row,
+            ) && position < self.capacity,
             "GPU attention order/capacity",
         )?;
         validate_weights(c, id, w, &self.schedule)?;
         valid_view(input, c.hidden)?;
         let constants = &self.constants[id];
-        linear(ctx, enc, &w.query_a, input, &self.query_rank)?;
-        norm(
-            ctx,
-            enc,
-            &self.query_rank,
-            &constants.query_norm,
-            c.query_rank,
-            w.eps,
-        )?;
-        linear(ctx, enc, &w.query_b, &self.query_rank, &self.query)?;
+        if let Some((rows, row)) = prepared {
+            copy(
+                ctx,
+                enc,
+                &prefill::row(&rows.rank, c.query_rank, row),
+                &self.query_rank,
+                c.query_rank,
+            )?;
+            copy(
+                ctx,
+                enc,
+                &prefill::row(&rows.query, c.heads * c.head_dim, row),
+                &self.query,
+                c.heads * c.head_dim,
+            )?;
+            copy(
+                ctx,
+                enc,
+                &prefill::row(&rows.latent, c.head_dim, row),
+                &self.latent,
+                c.head_dim,
+            )?;
+        } else {
+            linear(ctx, enc, &w.query_a, input, &self.query_rank)?;
+            norm(
+                ctx,
+                enc,
+                &self.query_rank,
+                &constants.query_norm,
+                c.query_rank,
+                w.eps,
+            )?;
+            linear(ctx, enc, &w.query_b, &self.query_rank, &self.query)?;
+            linear(ctx, enc, &w.kv, input, &self.latent)?;
+            norm(
+                ctx,
+                enc,
+                &self.latent,
+                &constants.kv_norm,
+                c.head_dim,
+                w.eps,
+            )?;
+        }
         rope(
             ctx,
             enc,
@@ -562,15 +876,6 @@ impl Workspace {
             c.rope_dim / 2,
             position,
             false,
-        )?;
-        linear(ctx, enc, &w.kv, input, &self.latent)?;
-        norm(
-            ctx,
-            enc,
-            &self.latent,
-            &constants.kv_norm,
-            c.head_dim,
-            w.eps,
         )?;
         rope(
             ctx,
@@ -801,15 +1106,38 @@ impl Workspace {
                     .view_subrange((group * c.output_rank) as u64, vec![c.output_rank as u64]),
             )?;
         }
-        linear(ctx, enc, &w.output_b, &self.low, &self.output)?;
-        pipeline(ctx, enc, "finite")?;
-        enc.set_bytes(0, &(c.hidden as u32));
-        enc.set_tensor(1, &self.output);
-        enc.set_tensor(2, &self.status);
-        dispatch(enc, c.hidden);
-        self.next_layer = (id + 1) % self.schedule.layers;
-        if self.next_layer == 0 {
-            self.next_position += 1;
+        if let Some((rows, row)) = prepared {
+            copy(
+                ctx,
+                enc,
+                &self.low,
+                &prefill::row(&rows.low, c.groups * c.output_rank, row),
+                c.groups * c.output_rank,
+            )?;
+        } else {
+            linear(ctx, enc, &w.output_b, &self.low, &self.output)?;
+            pipeline(ctx, enc, "finite")?;
+            enc.set_bytes(0, &(c.hidden as u32));
+            enc.set_tensor(1, &self.output);
+            enc.set_tensor(2, &self.status);
+            dispatch(enc, c.hidden);
+        }
+        if let Some(batch) = self.batch.as_mut() {
+            batch.row += 1;
+            if batch.row == batch.rows {
+                batch.row = 0;
+                batch.layer += 1;
+            }
+            if batch.layer == self.schedule.layers {
+                self.next_position = batch.start + batch.rows;
+                self.next_layer = 0;
+                self.batch = None;
+            }
+        } else {
+            self.next_layer = (id + 1) % self.schedule.layers;
+            if self.next_layer == 0 {
+                self.next_position += 1;
+            }
         }
         Ok(&self.output)
     }

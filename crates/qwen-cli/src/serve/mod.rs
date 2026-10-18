@@ -441,10 +441,7 @@ fn check_warmth_flags(
             family.display
         );
     }
-    if matches!(
-        family.serve_warmth,
-        ServeWarmth::LiveSession | ServeWarmth::FreshRequest
-    ) {
+    if matches!(family.serve_warmth, ServeWarmth::LiveSession) {
         let defaults = qwen_llm::snapshot_policy::SnapshotPolicyConfig::default();
         let unsupported = [
             (
@@ -1016,7 +1013,6 @@ mod tests {
                 !matches!(
                     family.serve_warmth,
                     crate::family_profile::ServeWarmth::LiveSession
-                        | crate::family_profile::ServeWarmth::FreshRequest
                 ),
                 "{}",
                 family.display
@@ -1097,10 +1093,7 @@ mod tests {
                 "{}: idle publication without a durable tier",
                 family.display
             );
-            let live = matches!(
-                family.serve_warmth,
-                ServeWarmth::LiveSession | ServeWarmth::FreshRequest
-            );
+            let live = matches!(family.serve_warmth, ServeWarmth::LiveSession);
             for (mib, policy) in &accepted {
                 assert!(
                     check_warmth_flags(family, &default_tier, *mib, policy).is_ok(),

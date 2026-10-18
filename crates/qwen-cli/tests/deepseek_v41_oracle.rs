@@ -1,10 +1,7 @@
 //! Separate GGUF execution-only logit acceptance and HF conversion characterization.
 //! Hidden states and long teacher-forced attention remain characterization only.
 use anyhow::{Context, Result, ensure};
-use qwen_llm::deepseek_v41::{
-    forward::Forward,
-    gguf::{LoadLimits, ResidentWeights},
-};
+use qwen_llm::deepseek_v41::{forward::Forward, gguf::ResidentWeights};
 use qwen_llm::{gguf::GgufFile, metal::MetalContext};
 use serde_json::{Value, json};
 use std::path::{Path, PathBuf};
@@ -69,13 +66,7 @@ fn load_characterization_model(ctx: &MetalContext, path: &Path) -> Result<Reside
             && plan.config.experts == 272,
         "GGUF does not match the HF comparison's geometry"
     );
-    Ok(ResidentWeights::load(
-        ctx,
-        gguf,
-        LoadLimits {
-            resident_bytes: u64::MAX,
-        },
-    )?)
+    Ok(ResidentWeights::load(ctx, gguf)?)
 }
 
 fn replay_trace(model: &Path, path: &Path, execution_only: bool) -> Result<()> {
@@ -567,6 +558,119 @@ fn hf_conversion_seven_token_characterization() -> Result<()> {
 #[ignore = "model witness: deepseek-v4.1-reap-272e-mxfp4-q8engram"]
 fn independent_gguf_seven_token_execution_acceptance() -> Result<()> {
     execution::run()
+}
+
+#[test]
+#[ignore = "model witness: deepseek-v4.1-reap-272e-mxfp4-q8engram"]
+fn gguf_native_f32_prefill_65_token_serial_snapshot_parity() -> Result<()> {
+    fn compare(label: &str, actual: &[f32], expected: &[f32]) -> Result<()> {
+        ensure!(
+            actual.len() == 129280 && actual.len() == expected.len(),
+            "{label}: logits shape mismatch"
+        );
+        // Match forward/prefill/tests.rs NativeF32 parity bounds, not HF conversion bounds.
+        let (atol, rtol) = (3e-5_f64, 3e-5_f64);
+        let (mut max_abs, mut squared_error, mut squared_reference) = (0.0_f64, 0.0, 0.0);
+        let mut violations = 0;
+        for (&a, &b) in actual.iter().zip(expected) {
+            ensure!(a.is_finite() && b.is_finite(), "{label}: nonfinite logits");
+            let (a, b) = (f64::from(a), f64::from(b));
+            let error = (a - b).abs();
+            max_abs = max_abs.max(error);
+            squared_error += error * error;
+            squared_reference += b * b;
+            violations += usize::from(error > atol + rtol * b.abs());
+        }
+        let top1 = |values: &[f32]| {
+            values.iter().enumerate().fold(
+                0,
+                |best, (i, value)| {
+                    if *value > values[best] { i } else { best }
+                },
+            )
+        };
+        let relative_l2 = (squared_error / squared_reference.max(f64::MIN_POSITIVE)).sqrt();
+        eprintln!(
+            "{label}: max_abs={max_abs:.9e} relative_l2={relative_l2:.9e} rms={:.9e} top1={}/{} violations={violations} atol={atol} rtol={rtol}",
+            (squared_error / actual.len() as f64).sqrt(),
+            top1(actual),
+            top1(expected)
+        );
+        ensure!(
+            violations == 0,
+            "{label}: {violations} logits exceed existing NativeF32 tolerance"
+        );
+        ensure!(top1(actual) == top1(expected), "{label}: top1 mismatch");
+        Ok(())
+    }
+
+    qwen_cli::shutdown::install()?;
+    qwen_cli::shutdown::checkpoint()?;
+    let ctx = MetalContext::new()?;
+    let weights = load_characterization_model(&ctx, GGUF_MODEL.required())?;
+    let forward =
+        Forward::from_resident(&ctx, &weights, weights.token_map.clone(), weights.raw_pad)
+            .map_err(anyhow::Error::msg)?;
+    // Reuse the oracle prompt IDs: 65 rows cross two full 32-row chunks and a tail.
+    let prompt: Vec<_> = TOKENS.into_iter().cycle().take(65).collect();
+    let continuation = [223, 939, 23];
+    let cancel = Some(qwen_cli::shutdown::cancellation_flag());
+    let mut serial = forward.new_state_with_gpu_step(prompt.len() + continuation.len())?;
+    let mut batch = forward.new_state_with_gpu_step(prompt.len())?;
+    for &token in &prompt[..prompt.len() - 1] {
+        forward
+            .advance(&mut serial, token, cancel)
+            .map_err(anyhow::Error::msg)?;
+    }
+    let expected = forward
+        .step(&mut serial, *prompt.last().unwrap(), cancel)
+        .map_err(anyhow::Error::msg)?;
+    let actual = forward.prefill(&mut batch, &prompt, cancel)?;
+    ensure!(
+        serial.position() == prompt.len() && batch.position() == prompt.len(),
+        "prompt position mismatch"
+    );
+    compare("65-row prompt", &actual, &expected)?;
+
+    let snapshot = forward.capture_snapshot(&batch)?;
+    ensure!(
+        snapshot.position() == prompt.len(),
+        "snapshot position mismatch"
+    );
+    forward.ensure_capacity(&mut batch, prompt.len() + continuation.len())?;
+    ensure!(
+        batch.capacity() > prompt.len() && batch.position() == prompt.len(),
+        "growth did not preserve prefix"
+    );
+    let mut expected_continuation = Vec::new();
+    for (i, &token) in continuation.iter().enumerate() {
+        let expected = forward
+            .step(&mut serial, token, cancel)
+            .map_err(anyhow::Error::msg)?;
+        let actual = forward
+            .step(&mut batch, token, cancel)
+            .map_err(anyhow::Error::msg)?;
+        compare(&format!("grown continuation {i}"), &actual, &expected)?;
+        expected_continuation.push(expected);
+    }
+    // Restore over a used state, so stale continuation rows must not survive.
+    forward.restore_snapshot(&mut batch, &snapshot)?;
+    ensure!(
+        batch.position() == prompt.len(),
+        "restore position mismatch"
+    );
+    let actual = forward.prefill(&mut batch, &continuation, cancel)?;
+    compare(
+        "restored continuation prefill",
+        &actual,
+        expected_continuation.last().unwrap(),
+    )?;
+    ensure!(
+        batch.position() == serial.position() && batch.position() == 68,
+        "continuation position mismatch"
+    );
+    qwen_cli::shutdown::checkpoint()?;
+    Ok(())
 }
 
 #[test]

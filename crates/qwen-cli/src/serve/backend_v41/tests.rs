@@ -10,6 +10,22 @@ use std::sync::{
 use std::time::{Duration, Instant};
 
 const WAIT: Duration = Duration::from_secs(5);
+thread_local! { static OUTPUT_HEADROOM: std::cell::Cell<u64> = const { std::cell::Cell::new(0) }; }
+
+fn prompt_len(backend: &Stub, input: &str) -> usize {
+    let request = backend
+        .settings
+        .profile()
+        .parse(&json!({"model":"test", "input":input}))
+        .unwrap();
+    let prompt = backend.settings.profile().render(&request).unwrap();
+    backend
+        .settings
+        .tokenizer
+        .encode(&prompt, false)
+        .unwrap()
+        .len()
+}
 
 #[test]
 fn v41_serve_preparation_uses_validated_context_alias() {
@@ -67,6 +83,7 @@ fn v41_typed_state_pressure_is_503_and_never_steps() {
     let result = backend.settings.execute::<()>(
         &request,
         "prompt",
+        None,
         &mut Sink,
         |_, _| Ok(()),
         |_| {
@@ -74,6 +91,8 @@ fn v41_typed_state_pressure_is_503_and_never_steps() {
                 qwen_llm::deepseek_v41::forward::StateError::MemoryAdmissionDenied(denied),
             ))
         },
+        &mut reuse::NoReuse,
+        |_, _, _, _| panic!("state refusal must precede prefill"),
         |_, _, _| panic!("state refusal must precede forward"),
         || Duration::ZERO,
     );
@@ -142,12 +161,15 @@ fn v41_cancellation_during_state_construction_remains_aborted() {
     let result = backend.settings.execute::<()>(
         &request,
         "prompt",
+        None,
         &mut Sink(cancel.clone()),
         |_, _| Ok(()),
         |_| {
             cancel.store(true, Ordering::Release);
             Err(ServeError::server_error("cancelled allocation"))
         },
+        &mut reuse::NoReuse,
+        |_, _, _, _| panic!("cancelled construction must not prefill"),
         |_, _, _| panic!("cancelled construction must not step"),
         || Duration::ZERO,
     );
@@ -275,6 +297,43 @@ fn token_io_nonstats_never_snapshots_and_preserves_errors() {
     assert_eq!(observations.json()["process_pageins"]["total"], 1);
 }
 
+#[test]
+fn prefill_io_counts_rows_but_reports_chunk_observation_maxima() {
+    let mut observations = memory_io::ChunkObservations::default();
+    for (position, rows, delta) in [(0, 32, 64), (32, 3, 6)] {
+        let mut snapshots = [
+            Some(io_snapshot(10, 100)),
+            Some(io_snapshot(10 + delta, 100 + delta)),
+        ]
+        .into_iter();
+        memory_io::observe_chunk(
+            Some(&mut observations),
+            position,
+            rows,
+            || snapshots.next().unwrap(),
+            || Ok::<_, ()>(()),
+        )
+        .unwrap();
+    }
+    let stats = observations.json();
+    assert_eq!(stats["scope"], "whole_process_native_prefill_chunk");
+    assert_eq!(stats["attempted_tokens"], 35);
+    assert_eq!(stats["successful_tokens"], 35);
+    assert_eq!(stats["attempted_chunks"], 2);
+    assert_eq!(
+        stats["process_pageins"],
+        json!({"count":2,"total":70,"max_chunk":64,"per_token_mean":2.0})
+    );
+    let result = memory_io::observe_chunk::<(), _>(
+        None,
+        0,
+        32,
+        || panic!("nonstats must not observe"),
+        || Err("cancelled"),
+    );
+    assert_eq!(result, Err("cancelled"));
+}
+
 struct State(usize, Arc<AtomicUsize>);
 impl Drop for State {
     fn drop(&mut self) {
@@ -285,6 +344,7 @@ impl Drop for State {
 struct Stub {
     settings: Settings,
     starts: usize,
+    emission: u32,
     state_failure: Option<qwen_llm::deepseek_v41::forward::StateError>,
     drops: Arc<AtomicUsize>,
     block: Option<mpsc::Sender<()>>,
@@ -298,29 +358,13 @@ struct Stub {
 }
 
 fn stub(emission: &str) -> Stub {
-    use tokenizers::{decoders::byte_level::ByteLevel, models::wordlevel::WordLevel};
-    let vocabulary = [
-        "[UNK]".to_owned(),
-        deepseek_recipe_encoding::v4::EOS_TOKEN.into(),
-        emission.into(),
-    ]
-    .into_iter()
-    .enumerate()
-    .map(|(i, word)| (word, i as u32))
-    .collect();
-    let model = WordLevel::builder()
-        .vocab(vocabulary)
-        .unk_token("[UNK]".into())
-        .build()
-        .unwrap();
-    let mut tokenizer = Tokenizer::new(model);
-    tokenizer.with_decoder(Some(ByteLevel::default()));
+    let tokenizer = tokenizer_fixture::tokenizer(Some(emission));
     let mut settings = Settings::new(
         tokenizer,
-        64,
+        16384,
         8,
         SamplingConfig::default(),
-        1,
+        tokenizer_fixture::EOS,
         "test".into(),
     )
     .unwrap();
@@ -328,6 +372,7 @@ fn stub(emission: &str) -> Stub {
     Stub {
         settings,
         starts: 0,
+        emission: tokenizer_fixture::EMISSION,
         state_failure: None,
         drops: Arc::new(AtomicUsize::new(0)),
         block: None,
@@ -363,10 +408,37 @@ impl GenerationBackend for Stub {
         let steps = self.steps.clone();
         let drop_after = self.drop_after;
         let headroom = self.settings.headroom;
+        let emission = self.emission;
+        let consume = std::cell::RefCell::new(
+            |state: &mut State, tokens: &[u32], cancel: &AtomicBool| -> Result<(), String> {
+                if let Some(entered) = block.take() {
+                    entered.send(()).unwrap();
+                    let start = Instant::now();
+                    while !cancel.load(Ordering::Acquire) && start.elapsed() < WAIT {
+                        std::thread::sleep(Duration::from_millis(1));
+                    }
+                    assert!(
+                        cancel.load(Ordering::Acquire),
+                        "HTTP disconnect must reach a layer without another sink tick"
+                    );
+                    return Err("cancelled inside synthetic layer".into());
+                }
+                for _ in tokens {
+                    state.0 += 1;
+                    let count = steps.fetch_add(1, Ordering::SeqCst) + 1;
+                    if drop_after == Some(count) {
+                        available.store(1, Ordering::Release);
+                        OUTPUT_HEADROOM.with(|value| value.set(1));
+                    }
+                }
+                Ok(())
+            },
+        );
         let epoch = Instant::now();
         self.settings.execute(
             request,
             prompt,
+            None,
             sink,
             |positions, reserve| {
                 self.admitted_positions.push(positions);
@@ -395,34 +467,21 @@ impl GenerationBackend for Stub {
                 }
                 Ok(State(0, drops))
             },
+            &mut reuse::NoReuse,
+            |state, tokens, cancel, with_logits| {
+                consume.borrow_mut()(state, tokens, cancel).map_err(ServeError::server_error)?;
+                if !with_logits {
+                    return Ok(vec![]);
+                }
+                let mut logits = vec![0.; 258];
+                logits[emission as usize] = 100.;
+                Ok(logits)
+            },
             |state, token, cancel| {
-                if let Some(entered) = block.take() {
-                    entered.send(()).unwrap();
-                    let start = Instant::now();
-                    while !cancel.load(Ordering::Acquire) && start.elapsed() < WAIT {
-                        std::thread::sleep(Duration::from_millis(1));
-                    }
-                    assert!(
-                        cancel.load(Ordering::Acquire),
-                        "HTTP disconnect must reach a layer without another sink tick"
-                    );
-                    return Err("cancelled inside synthetic layer".into());
-                }
-                state.0 += 1;
-                let count = steps.fetch_add(1, Ordering::SeqCst) + 1;
-                if drop_after == Some(count) {
-                    available.store(1, Ordering::Release);
-                }
-                let mut input = vec![0.; 3];
-                input[token as usize] = 1.;
-                let normalized =
-                    qwen_llm::deepseek_v41::operators::rms_norm(&input, &[1.; 3], 1e-20)?;
-                qwen_llm::deepseek_v41::operators::Linear {
-                    input: 3,
-                    output: 3,
-                    weight: vec![0., 0., 0., 0., 0., 10., 10., 0., 0.],
-                }
-                .forward(&normalized)
+                consume.borrow_mut()(state, &[token], cancel)?;
+                let mut logits = vec![0.; 258];
+                logits[tokenizer_fixture::EOS as usize] = 100.;
+                Ok(logits)
             },
             || epoch.elapsed(),
         )
@@ -507,7 +566,8 @@ fn v41_backend_http_fresh_state_reasoning_eos_and_token_limit() {
 
 #[test]
 fn v41_backend_flushes_incomplete_utf8_at_eos() {
-    let mut backend = stub("\u{c3}");
+    let mut backend = stub("answer");
+    backend.emission = 0xc3;
     for stream in [false, true] {
         let reply = response(
             &exchange(
@@ -539,7 +599,7 @@ fn v41_backend_tools_multiturn_non_generation_and_preflight_rejections() {
     );
     assert!(wire.starts_with("HTTP/1.1 200") && wire.contains("test"));
     for body in [
-        json!({"model":"test","input":"hi","max_output_tokens":65}),
+        json!({"model":"test","input":"hi","max_output_tokens":16385}),
         json!({"model":"test","input":"hi","x_qwen":{"prefix_reuse":true}}),
         json!({"model":"test","input":"hi","prompt_cache_key":"x"}),
     ] {
@@ -626,11 +686,6 @@ fn v41_backend_defaults_prompt_budget_and_loopback_only() {
     profile.normalize(&mut request).unwrap();
     assert_eq!((request.temperature, request.seed), (Some(0.), Some(7)));
     backend.settings.context = 4;
-    backend
-        .settings
-        .tokenizer
-        .hf_mut()
-        .with_pre_tokenizer(Some(tokenizers::pre_tokenizers::whitespace::Whitespace));
     let wire = exchange(
         &mut backend,
         post(&json!({"model":"test","input":"one two three four five","max_output_tokens":1})),
@@ -638,13 +693,10 @@ fn v41_backend_defaults_prompt_budget_and_loopback_only() {
     assert!(wire.starts_with("HTTP/1.1 400"), "{wire}");
     assert_eq!(backend.starts, 0);
     assert!(super::super::bind_loopback("0.0.0.0:0").is_err());
-    let mut tokenizer = backend.settings.tokenizer;
-    tokenizer
-        .hf_mut()
-        .with_decoder(None::<tokenizers::decoders::DecoderWrapper>);
+    // Native tokenizer/config mismatch must still fail before execution.
     assert!(
         Settings::new(
-            tokenizer,
+            backend.settings.tokenizer,
             64,
             8,
             SamplingConfig::default(),
@@ -656,7 +708,7 @@ fn v41_backend_defaults_prompt_budget_and_loopback_only() {
 }
 
 #[test]
-fn v41_request_memory_refuses_before_state_and_rechecks_mid_prefill() {
+fn v41_request_memory_admits_creation_once_and_checks_output_growth() {
     let mut backend = stub("answer");
     backend.available.store(16 << 20, Ordering::Release);
     let wire = exchange(
@@ -668,16 +720,13 @@ fn v41_request_memory_refuses_before_state_and_rechecks_mid_prefill() {
     assert_eq!(backend.starts, 0);
     assert_eq!(backend.steps.load(Ordering::Acquire), 0);
     assert_eq!(backend.drops.load(Ordering::Acquire), 0);
-    assert_eq!(backend.admitted_positions, [1]);
+    assert_eq!(backend.admitted_positions, [prompt_len(&backend, "hi")]);
 
     backend.available.store(128 << 20, Ordering::Release);
     backend.settings.context = 256;
-    backend
-        .settings
-        .tokenizer
-        .hf_mut()
-        .with_pre_tokenizer(Some(tokenizers::pre_tokenizers::whitespace::Whitespace));
     backend.drop_after = Some(1);
+    OUTPUT_HEADROOM.with(|value| value.set(128 << 20));
+    backend.settings.headroom = || Some(OUTPUT_HEADROOM.with(|value| value.get()));
     let wire = exchange(
         &mut backend,
         post(&json!({"model":"test","input":"one two three four five six","max_output_tokens":1})),
@@ -687,16 +736,12 @@ fn v41_request_memory_refuses_before_state_and_rechecks_mid_prefill() {
     assert_eq!(backend.starts, 1);
     assert_eq!(
         backend.steps.load(Ordering::Acquire),
-        1,
-        "second prefill forward must not run"
+        crate::family_options::V41_PREFILL_ROWS,
+        "pressure must stop before the next bounded prefill chunk"
     );
     assert_eq!(backend.drops.load(Ordering::Acquire), 1);
     let checks = &backend.admitted_positions[1..];
-    assert_eq!(
-        checks.len(),
-        3,
-        "preflight and both attempted prefill steps"
-    );
+    assert_eq!(checks.len(), 1, "only creation prices the request state");
     assert!(checks[0] > 1 && checks[0] < 256);
     assert!(checks.iter().all(|n| *n == checks[0]));
 }
@@ -712,8 +757,27 @@ fn v41_request_memory_prices_actual_use_not_million_token_capacity() {
     );
     assert!(wire.starts_with("HTTP/1.1 200"), "{wire}");
     assert_eq!(backend.starts, 1);
-    assert_eq!(backend.steps.load(Ordering::Acquire), 1);
-    assert_eq!(backend.admitted_positions, [1, 1]);
+    let prompt_tokens = prompt_len(&backend, "hi");
+    assert_eq!(backend.steps.load(Ordering::Acquire), prompt_tokens);
+    assert_eq!(backend.admitted_positions, [prompt_tokens]);
+}
+
+#[test]
+fn v41_allocated_state_is_not_readmitted_during_prefill_or_decode() {
+    let mut backend = stub("answer");
+    backend.drop_after = Some(1);
+    let wire = exchange(
+        &mut backend,
+        post(&json!({
+            "model":"test", "input":"hi", "max_output_tokens":3
+        })),
+    );
+    assert!(wire.starts_with("HTTP/1.1 200"), "{wire}");
+    assert_eq!(backend.available.load(Ordering::Acquire), 1);
+    let prompt_tokens = prompt_len(&backend, "hi");
+    assert_eq!(backend.admitted_positions, [prompt_tokens + 2]);
+    assert_eq!(backend.steps.load(Ordering::Acquire), prompt_tokens + 1);
+    assert_eq!(backend.drops.load(Ordering::Acquire), 1);
 }
 
 #[test]
@@ -808,10 +872,10 @@ fn v41_native_phase_clock_excludes_preparation_and_counts_eos_and_max_one() {
             Ok(())
         }
     }
-    for (maximum, eos_first, generated, transitions, decode_ms) in [
-        (3, false, 2, 1, 27.),
-        (1, false, 1, 0, 13.),
-        (3, true, 1, 0, 6.),
+    for (maximum, eos_first, generated, transitions, decode_work) in [
+        (3, false, 2, 1, 16),
+        (1, false, 1, 0, 9),
+        (3, true, 1, 0, 2),
     ] {
         let backend = stub("answer");
         let request = backend
@@ -825,6 +889,7 @@ fn v41_native_phase_clock_excludes_preparation_and_counts_eos_and_max_one() {
             .execute(
                 &request,
                 "prompt",
+                None,
                 &mut TimedSink(&clock),
                 |_, _| {
                     clock.set(clock.get() + 3);
@@ -834,14 +899,25 @@ fn v41_native_phase_clock_excludes_preparation_and_counts_eos_and_max_one() {
                     clock.set(clock.get() + 2000);
                     Ok(0)
                 },
+                &mut reuse::NoReuse,
+                |state, tokens, _, with_logits| {
+                    assert!(with_logits);
+                    clock.set(clock.get() + 7 * tokens.len() as u64);
+                    *state += tokens.len();
+                    let mut logits = vec![0.; 258];
+                    logits[if eos_first {
+                        tokenizer_fixture::EOS
+                    } else {
+                        tokenizer_fixture::EMISSION
+                    } as usize] = 100.;
+                    Ok(logits)
+                },
                 |state, _, _| {
                     clock.set(clock.get() + 7);
                     *state += 1;
-                    Ok(if eos_first || *state > 1 {
-                        vec![0., 10., 0.]
-                    } else {
-                        vec![0., 0., 10.]
-                    })
+                    let mut logits = vec![0.; 258];
+                    logits[tokenizer_fixture::EOS as usize] = 100.;
+                    Ok(logits)
                 },
                 || Duration::from_millis(clock.get()),
             )
@@ -849,7 +925,7 @@ fn v41_native_phase_clock_excludes_preparation_and_counts_eos_and_max_one() {
         let stats = outcome.stats.unwrap();
         assert_eq!(
             (stats.prompt_tokens, stats.matched_tokens, stats.restore_ms),
-            (1, 0, 0.)
+            (6, 0, 0.)
         );
         assert_eq!(outcome.usage.output_tokens, generated);
         assert_eq!(
@@ -857,19 +933,27 @@ fn v41_native_phase_clock_excludes_preparation_and_counts_eos_and_max_one() {
             if maximum == 1 && !eos_first {
                 GenerationEnd::TokenLimit
             } else {
-                GenerationEnd::StopToken(1)
+                GenerationEnd::StopToken(tokenizer_fixture::EOS as i32)
             }
         );
         let phases = stats.phases.unwrap();
-        assert_eq!(phases["prefill_ms"], 14.);
-        assert_eq!(phases["decode_ms"], decode_ms);
+        assert_eq!(phases["prefill_ms"], 48.);
+        assert_eq!(clock.get(), 2 + 3 + 2000 + 48 + decode_work);
+        // Decode uses the shared loop's real clock, not this prefill clock.
+        assert!(phases["decode_ms"].as_f64().unwrap() >= phases["transition_ms"].as_f64().unwrap());
         assert_eq!(phases["transitions"], transitions);
-        assert_eq!(
-            phases["transition_ms"],
-            if transitions == 1 { 12. } else { 0. }
-        );
+        if transitions == 0 {
+            assert_eq!(phases["transition_ms"], 0.);
+        } else {
+            assert!(phases["transition_ms"].as_f64().unwrap() > 0.);
+        }
         assert_eq!(phases["generated_tokens"], generated);
-        assert_eq!(phases["prefill_mode"], "single_token_forward");
+        assert_eq!(
+            phases["prefill_mode"],
+            crate::family_options::V41_PREFILL_MODE
+        );
+        assert_eq!(phases["prefill_rows"], 6);
+        assert_eq!(phases["prefill_chunks"], 1);
         assert_eq!(phases["ced"], false);
     }
 }

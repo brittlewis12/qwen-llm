@@ -154,7 +154,7 @@ detail.
 | Qwen MoE (qwen35moe) | none (request-shaped) | RAM and disk | `run` |
 | Qwen3.8-Flash-Next | `--max-context-tokens`, `--max-tokens` | RAM | no |
 | DeepSeek V4 | `--max-context-tokens` | RAM and disk | no |
-| DeepSeek V4.1 | `--max-context-tokens`, `--max-tokens` | none | no |
+| DeepSeek V4.1 | `--max-context-tokens`, `--max-tokens` | RAM | no |
 | Muse Glimmer | `--max-context-tokens`, `--max-tokens` | none | no |
 | K2 Horizon | `--max-context-tokens`, `--max-tokens` | none | no |
 | GLM-5.3-Flash | `--max-context-tokens`, `--max-tokens` | RAM | no |

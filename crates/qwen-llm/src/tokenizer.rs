@@ -745,16 +745,18 @@ mod retained_tokenizer_tests {
     #[test]
     fn deepseek41_native_tokenizer_needs_only_standard_gguf_metadata() {
         let temp = Temp::new();
-        for pre in ["deepseek-v3", "joyai-llm"] {
-            let path = temp.0.join(format!("{pre}.gguf"));
-            fs::write(&path, vocab_gguf_for(false, None, "deepseek41", pre)).unwrap();
-            let gguf = GgufFile::open(&path).unwrap();
-            let tokenizer = NativeTokenizer::from_gguf(&gguf).unwrap();
-            let text = "Hello, world! 1234";
-            let ids = tokenizer.encode(text, false).unwrap();
-            assert_eq!(tokenizer.try_decode(&ids).unwrap(), text);
-            assert_eq!(tokenizer.eos(), Some(256));
-        }
+        let path = temp.0.join("joyai-llm.gguf");
+        fs::write(
+            &path,
+            vocab_gguf_for(false, None, "deepseek41", "joyai-llm"),
+        )
+        .unwrap();
+        let gguf = GgufFile::open(&path).unwrap();
+        let tokenizer = NativeTokenizer::from_gguf(&gguf).unwrap();
+        let text = "Hello, world! 1234";
+        let ids = tokenizer.encode(text, false).unwrap();
+        assert_eq!(tokenizer.try_decode(&ids).unwrap(), text);
+        assert_eq!(tokenizer.eos(), Some(256));
     }
 
     #[test]
@@ -953,7 +955,6 @@ impl NativeTokenizer {
                 PretokenizerKind::Qwen35
             }
             (Some("deepseek4" | "deepseek41"), "gpt2", "joyai-llm") => PretokenizerKind::JoyAi,
-            (Some("deepseek41"), "gpt2", "deepseek-v3") => PretokenizerKind::JoyAi,
             (Some("k2-horizon"), "gpt2", "k2-horizon") => PretokenizerKind::K2Horizon,
             (Some("glm5-next" | "glm5next"), "gpt2", "glm4") => PretokenizerKind::Glm4,
             _ => {

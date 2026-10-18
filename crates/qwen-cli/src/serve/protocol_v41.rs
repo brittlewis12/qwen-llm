@@ -125,6 +125,12 @@ pub(crate) fn validate(request: &ServeRequest) -> Result<(), ServeError> {
 }
 
 pub(crate) fn render(request: &ServeRequest) -> Result<String, ServeError> {
+    render_with_boundaries(request).map(|(prompt, _)| prompt)
+}
+
+pub(crate) fn render_with_boundaries(
+    request: &ServeRequest,
+) -> Result<(String, super::http::PromptBoundaries), ServeError> {
     validate(request)?;
     let effort = thinking(request)?;
     let mut conversation = Conversation {
@@ -183,9 +189,33 @@ pub(crate) fn render(request: &ServeRequest) -> Result<String, ServeError> {
             strict: tool.strict,
         })
         .collect();
-    Ok(DeepseekV41Encoding::new()
+    let mut prompt = DeepseekV41Encoding::new()
         .render_conversation(&conversation)
-        .prompt)
+        .prompt;
+    // The pinned recipe unconditionally appends this exact generation suffix
+    // (tool choice is Auto here). Never search transcript text for markers.
+    use deepseek_recipe_encoding::v4::{
+        ASSISTANT_SP_TOKEN, THINKING_END_TOKEN, THINKING_START_TOKEN,
+    };
+    let header = format!(
+        "{ASSISTANT_SP_TOKEN}{}",
+        if conversation.thinking_mode {
+            THINKING_START_TOKEN
+        } else {
+            THINKING_END_TOKEN
+        }
+    );
+    let transcript_len = prompt
+        .strip_suffix(&header)
+        .ok_or_else(|| ServeError::server_error("V4.1 recipe generation suffix changed"))?
+        .len();
+    prompt.truncate(transcript_len);
+    let boundaries = super::http::PromptBoundaries {
+        generation_header_start: Some(prompt.len()),
+        shared_prefix_end: None,
+    };
+    prompt.push_str(&header);
+    Ok((prompt, boundaries))
 }
 
 pub(crate) struct Partition {

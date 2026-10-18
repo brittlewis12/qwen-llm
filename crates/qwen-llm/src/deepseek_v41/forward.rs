@@ -3,6 +3,10 @@
 mod attention;
 mod attention_gpu;
 mod bind;
+mod engram_gpu;
+mod prefill;
+mod snapshot;
+pub use snapshot::Snapshot;
 pub mod error;
 pub use error::StateError;
 pub mod capture;
@@ -444,6 +448,7 @@ enum EngramGate {
     Folded(Vec<f32>),
 }
 
+#[cfg(test)]
 impl EngramGate {
     fn inject(&self, x: &mut [f32], kv: &[f32], eps: f32) -> Result<()> {
         match self {
@@ -494,6 +499,10 @@ pub struct State {
     identity: Arc<()>,
 }
 impl State {
+    pub fn capacity(&self) -> usize {
+        self.max_context
+    }
+
     pub fn position(&self) -> usize {
         self.addresses.position() as usize
     }
@@ -533,7 +542,7 @@ impl<'a> Forward<'a> {
         })
     }
 
-    /// Three-command token graph used by the production default.
+    /// GPU token graph used by the production default.
     /// Capacity is the actual requested token capacity, not model metadata.
     pub fn new_state_with_gpu_step(
         &self,
@@ -553,6 +562,52 @@ impl<'a> Forward<'a> {
         cancel: Option<&AtomicBool>,
     ) -> Result<Vec<f32>> {
         self.step_with_trace(state, token, cancel, None)
+    }
+
+    /// Consume a token without computing unused vocabulary logits.
+    pub fn advance(
+        &self,
+        state: &mut State,
+        token: u32,
+        cancel: Option<&AtomicBool>,
+    ) -> Result<()> {
+        self.execute_token(state, token, cancel, None, None, false)
+            .map(|_| ())
+    }
+
+    /// Consume a nonempty suffix and return logits only for its final token.
+    pub fn prefill(
+        &self,
+        state: &mut State,
+        tokens: &[u32],
+        cancel: Option<&AtomicBool>,
+    ) -> std::result::Result<Vec<f32>, StateError> {
+        prefill::run(
+            self,
+            state,
+            tokens,
+            cancel,
+            prefill::DEFAULT_CHUNK_ROWS,
+            true,
+        )
+    }
+
+    /// Consume a nonempty suffix without computing vocabulary logits.
+    pub fn advance_prefill(
+        &self,
+        state: &mut State,
+        tokens: &[u32],
+        cancel: Option<&AtomicBool>,
+    ) -> std::result::Result<(), StateError> {
+        prefill::run(
+            self,
+            state,
+            tokens,
+            cancel,
+            prefill::DEFAULT_CHUNK_ROWS,
+            false,
+        )
+        .map(|_| ())
     }
 
     /// Synchronously borrow each completed block's CPU F32 outputs. None adds
@@ -581,6 +636,18 @@ impl<'a> Forward<'a> {
         trace: Option<&mut dyn FnMut(LayerTrace<'_>) -> Result<()>>,
         capture: Option<&mut dyn capture::Capture>,
     ) -> Result<Vec<f32>> {
+        self.execute_token(state, token, cancel, trace, capture, true)
+    }
+
+    fn execute_token(
+        &self,
+        state: &mut State,
+        token: u32,
+        cancel: Option<&AtomicBool>,
+        trace: Option<&mut dyn FnMut(LayerTrace<'_>) -> Result<()>>,
+        capture: Option<&mut dyn capture::Capture>,
+        with_logits: bool,
+    ) -> Result<Vec<f32>> {
         op::require(
             capture.is_none() || state.gpu_step.is_some(),
             "attention capture requires GPU step",
@@ -607,7 +674,15 @@ impl<'a> Forward<'a> {
             .step_with_config(engram::Token::Compressed(compressed), &self.engram_hash)
             .map_err(|e| format!("{e:?}"))?;
         state.poisoned = true;
-        let result = self.step_inner(state, token as usize, &rows, cancel, trace, capture)?;
+        let result = self.step_inner(
+            state,
+            token as usize,
+            &rows,
+            cancel,
+            trace,
+            capture,
+            with_logits,
+        )?;
         state.addresses = next;
         state.poisoned = false;
         Ok(result)
@@ -621,12 +696,22 @@ impl<'a> Forward<'a> {
         cancel: Option<&AtomicBool>,
         trace: Option<&mut dyn FnMut(LayerTrace<'_>) -> Result<()>>,
         capture: Option<&mut dyn capture::Capture>,
+        with_logits: bool,
     ) -> Result<Vec<f32>> {
         #[cfg(test)]
         let c = &self.config;
         let position = state.position();
         if let Some(workspace) = state.gpu_step.as_mut() {
-            return workspace.run(self, position, token, rows, cancel, trace, capture);
+            return workspace.run(
+                self,
+                position,
+                token,
+                rows,
+                cancel,
+                trace,
+                capture,
+                with_logits,
+            );
         }
         #[cfg(not(test))]
         {
@@ -664,6 +749,9 @@ impl<'a> Forward<'a> {
                         next_pre_mix: &pre,
                     })?;
                 }
+            }
+            if !with_logits {
+                return Ok(Vec::new());
             }
             let hidden = op::rms_norm(&op::collapse(&x, &pre)?, &self.norm, c.norm_eps)?;
             let logits = self.head.forward(&hidden)?;
@@ -809,6 +897,7 @@ fn route(
     Ok((ids.into_iter().map(|i| i as i32).collect(), weights))
 }
 
+#[cfg(test)]
 fn inject_engram(x: &mut [f32], kv: &[f32], q: &[f32], k: &[f32], eps: f32) -> Result<()> {
     op::require(
         x.len() % 4 == 0

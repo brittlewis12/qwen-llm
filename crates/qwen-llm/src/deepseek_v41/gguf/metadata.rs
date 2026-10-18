@@ -46,7 +46,7 @@ fn uint(g: &GgufFile, keys: &[&str], default: Option<usize>) -> Result<usize, Lo
     }
     Ok(n)
 }
-fn float(g: &GgufFile, keys: &[&str], default: f32) -> Result<f32, LoadError> {
+fn float(g: &GgufFile, keys: &[&str], default: Option<f32>) -> Result<f32, LoadError> {
     let mut found = None;
     for key in keys {
         let key = format!("deepseek41.{key}");
@@ -66,7 +66,9 @@ fn float(g: &GgufFile, keys: &[&str], default: f32) -> Result<f32, LoadError> {
             found = Some(n);
         }
     }
-    Ok(found.unwrap_or(default))
+    found
+        .or(default)
+        .ok_or_else(|| invalid(format!("missing deepseek41.{}", keys[0])))
 }
 pub(super) fn array(g: &GgufFile, keys: &[&str]) -> Result<Option<Vec<u64>>, LoadError> {
     let mut result = None;
@@ -83,16 +85,22 @@ pub(super) fn array(g: &GgufFile, keys: &[&str]) -> Result<Option<Vec<u64>>, Loa
 fn sources(
     g: &GgufFile,
     keys: &[&str],
-    defaults: &[u64],
+    defaults: Option<&[usize]>,
     layers: usize,
 ) -> Result<Vec<u64>, LoadError> {
-    let values = array(g, keys)?.unwrap_or_else(|| {
-        defaults
+    let values = match array(g, keys)? {
+        Some(values) => values,
+        None => defaults
+            .ok_or_else(|| {
+                invalid(format!(
+                    "missing deepseek41.{} for non-default layout",
+                    keys[0]
+                ))
+            })?
             .iter()
-            .copied()
-            .filter(|&n| n < layers as u64)
-            .collect()
-    });
+            .map(|&n| n as u64)
+            .collect(),
+    };
     if values.iter().any(|&n| n >= layers as u64) || values.windows(2).any(|w| w[0] >= w[1]) {
         return Err(invalid(format!("invalid layer schedule {}", keys[0])));
     }
@@ -107,7 +115,7 @@ pub(super) fn parse(g: &GgufFile) -> Result<Plan, LoadError> {
         ("scoring_func", "sqrtsoftplus"),
         ("topk_method", "noaux_tc"),
         ("hidden_act", "silu"),
-        ("hidden_activation", "silu"),
+        ("rope.scaling.type", "yarn"),
     ] {
         let key = format!("deepseek41.{short}");
         if g.model.metadata().get(&key).is_some() && g.get_str(&key) != Some(expected) {
@@ -133,45 +141,29 @@ pub(super) fn parse(g: &GgufFile) -> Result<Plan, LoadError> {
             "unsupported deepseek41.expert_gating_func; SQRTSOFTPLUS is numeric value 4",
         ));
     }
-    if uint(
-        g,
-        &["attention.head_count_kv", "num_key_value_heads"],
-        Some(1),
-    )? != 1
-    {
+    if uint(g, &["attention.head_count_kv", "num_key_value_heads"], None)? != 1 {
         return Err(invalid(
             "unsupported KV head count; attention implements one shared KV head",
         ));
     }
     engram::validate_encoding(g)?;
-    if uint(g, &["hyper_connection.count", "hc_mult"], Some(4))? != 4 {
+    if uint(g, &["hyper_connection.count", "hc_mult"], None)? != 4 {
         return Err(invalid("mHC kernels require four residual streams"));
     }
-    if uint(g, &["expert_shared_count", "n_shared_experts"], Some(1))? != 1 {
+    if uint(g, &["expert_shared_count", "n_shared_experts"], None)? != 1 {
         return Err(invalid("FFN binding supports one shared expert"));
     }
     let emb = g.find("token_embd.weight");
-    let bank = g.find("blk.0.ffn_gate_exps.weight");
-    let hidden = uint(
-        g,
-        &["embedding_length", "hidden_size"],
-        emb.and_then(|t| t.shape.first())
-            .map(|&n| n as usize)
-            .or(Some(d.hidden)),
-    )?;
+    let hidden = uint(g, &["embedding_length", "hidden_size"], None)?;
     let intermediate = uint(
         g,
         &["expert_feed_forward_length", "moe_intermediate_size"],
-        bank.and_then(|t| t.shape.get(1))
-            .map(|&n| n as usize)
-            .or(Some(d.intermediate)),
+        None,
     )?;
     let vocab = uint(
         g,
         &["vocab_size"],
-        emb.and_then(|t| t.shape.get(1))
-            .map(|&n| n as usize)
-            .or(Some(d.vocab)),
+        emb.and_then(|t| t.shape.get(1)).map(|&n| n as usize),
     )?;
     let experts = uint(g, &["expert_count", "n_routed_experts"], None)?;
     let mut config = Config {
@@ -179,65 +171,17 @@ pub(super) fn parse(g: &GgufFile) -> Result<Plan, LoadError> {
         intermediate,
         vocab,
         experts,
-        heads: uint(
-            g,
-            &["attention.head_count", "num_attention_heads"],
-            Some(d.heads),
-        )?,
-        head_dim: uint(g, &["attention.key_length", "head_dim"], Some(d.head_dim))?,
-        rope_dim: uint(
-            g,
-            &["rope.dimension_count", "qk_rope_head_dim"],
-            Some(d.rope_dim),
-        )?,
-        query_rank: uint(
-            g,
-            &["attention.q_lora_rank", "q_lora_rank"],
-            Some(d.query_rank),
-        )?,
-        output_rank: uint(
-            g,
-            &[
-                "attention.output_lora_rank",
-                "attention.o_lora_rank",
-                "o_lora_rank",
-            ],
-            Some(d.output_rank),
-        )?,
-        groups: uint(
-            g,
-            &[
-                "attention.output_group_count",
-                "attention.o_groups",
-                "o_groups",
-            ],
-            Some(d.groups),
-        )?,
-        topk: uint(
-            g,
-            &["expert_used_count", "num_experts_per_tok"],
-            Some(d.topk.min(experts)),
-        )?,
-        index_heads: uint(
-            g,
-            &["attention.indexer.head_count", "index_n_heads"],
-            Some(d.index_heads),
-        )?,
-        index_dim: uint(
-            g,
-            &["attention.indexer.key_length", "index_head_dim"],
-            Some(d.index_dim),
-        )?,
-        index_topk: uint(
-            g,
-            &["attention.indexer.top_k", "index_topk"],
-            Some(d.index_topk),
-        )?,
-        window: uint(
-            g,
-            &["attention.sliding_window", "sliding_window"],
-            Some(d.window),
-        )?,
+        heads: uint(g, &["attention.head_count", "num_attention_heads"], None)?,
+        head_dim: uint(g, &["attention.key_length", "head_dim"], None)?,
+        rope_dim: uint(g, &["rope.dimension_count", "qk_rope_head_dim"], None)?,
+        query_rank: uint(g, &["attention.q_lora_rank", "q_lora_rank"], None)?,
+        output_rank: uint(g, &["attention.output_lora_rank", "o_lora_rank"], None)?,
+        groups: uint(g, &["attention.output_group_count", "o_groups"], None)?,
+        topk: uint(g, &["expert_used_count", "num_experts_per_tok"], None)?,
+        index_heads: uint(g, &["attention.indexer.head_count", "index_n_heads"], None)?,
+        index_dim: uint(g, &["attention.indexer.key_length", "index_head_dim"], None)?,
+        index_topk: uint(g, &["attention.indexer.top_k", "index_topk"], None)?,
+        window: uint(g, &["attention.sliding_window", "sliding_window"], None)?,
         candidate_block: uint(
             g,
             &[
@@ -257,26 +201,22 @@ pub(super) fn parse(g: &GgufFile) -> Result<Plan, LoadError> {
         norm_eps: float(
             g,
             &["attention.layer_norm_rms_epsilon", "rms_norm_eps"],
-            d.norm_eps,
+            None,
         )?,
-        hc_eps: float(g, &["hyper_connection.epsilon", "hc_eps"], d.hc_eps)?,
+        hc_eps: float(g, &["hyper_connection.epsilon", "hc_eps"], None)?,
         hc_iterations: uint(
             g,
             &["hyper_connection.sinkhorn_iterations", "hc_sinkhorn_iters"],
-            Some(d.hc_iterations),
+            None,
         )?,
-        clamp: float(g, &["swiglu_limit"], d.clamp)?,
-        route_scale: float(
-            g,
-            &["expert_weights_scale", "routed_scaling_factor"],
-            d.route_scale,
-        )?,
-        gate_temperature: float(g, &["gate_temperature"], d.gate_temperature)?,
-        rope_theta: float(g, &["rope.freq_base", "rope_theta"], d.rope_theta)?,
+        clamp: float(g, &["swiglu_limit"], Some(d.clamp))?,
+        route_scale: float(g, &["expert_weights_scale", "routed_scaling_factor"], None)?,
+        gate_temperature: float(g, &["gate_temperature"], Some(d.gate_temperature))?,
+        rope_theta: float(g, &["rope.freq_base", "rope_theta"], None)?,
         compress_theta: float(
             g,
             &["attention.compress_rope_freq_base", "compress_rope_theta"],
-            d.compress_theta,
+            None,
         )?,
         original_context: float(
             g,
@@ -284,25 +224,26 @@ pub(super) fn parse(g: &GgufFile) -> Result<Plan, LoadError> {
                 "rope.scaling.original_context_length",
                 "rope_scaling.original_max_position_embeddings",
             ],
-            d.original_context as f32,
+            None,
         )? as usize,
-        rope_factor: float(
-            g,
-            &["rope.scaling.factor", "rope_scaling.factor"],
-            d.rope_factor,
-        )?,
+        rope_factor: float(g, &["rope.scaling.factor", "rope_scaling.factor"], None)?,
         beta_fast: float(
             g,
             &["rope.scaling.yarn_beta_fast", "rope_scaling.beta_fast"],
-            d.beta_fast,
+            None,
         )?,
         beta_slow: float(
             g,
             &["rope.scaling.yarn_beta_slow", "rope_scaling.beta_slow"],
-            d.beta_slow,
+            None,
         )?,
     };
     let c = &config;
+    if optional_uint(g, "attention.value_length")?.is_some_and(|n| n != c.head_dim as u64) {
+        return Err(invalid(
+            "unsupported attention.value_length; shared KV requires key/value dimensions to match",
+        ));
+    }
     if c.topk > c.experts
         || c.heads % c.groups != 0
         || c.rope_dim > c.head_dim
@@ -320,7 +261,7 @@ pub(super) fn parse(g: &GgufFile) -> Result<Plan, LoadError> {
         a.checked_mul(b)
             .ok_or_else(|| invalid("projection dimension overflow"))?;
     }
-    let layers = uint(g, &["block_count", "num_hidden_layers"], Some(40))?;
+    let layers = uint(g, &["block_count", "num_hidden_layers"], None)?;
     let mut declared_clamp = g
         .model
         .metadata()
@@ -350,53 +291,47 @@ pub(super) fn parse(g: &GgufFile) -> Result<Plan, LoadError> {
             declared_clamp = Some(value);
         }
     }
+    if declared_clamp.is_none() {
+        return Err(invalid(
+            "missing deepseek41.swiglu_limit or swiglu_clamp_exp/shexp",
+        ));
+    }
     if layers > g.tensors.len() / 3 {
         return Err(invalid("block count exceeds available expert bank triples"));
     }
+    let compression_ratios = array(g, &["attention.compress_ratios", "compress_ratios"])?
+        .ok_or_else(|| invalid("missing deepseek41.attention.compress_ratios"))?;
+    if compression_ratios.len() < layers {
+        return Err(invalid("compression ratios shorter than main block count"));
+    }
+    let fallback = Schedule::deepseek41_shared_kv_layout(layers, &compression_ratios);
     let kv_source_layers = sources(
         g,
-        &["attention.kv_source_layers", "kv_source_layer_ids"],
-        &[2, 8, 14, 20],
+        &["kv_source_layer_ids"],
+        fallback.as_ref().map(|s| s.kv_source_layers.as_slice()),
         layers,
     )?;
     let index_source_layers = sources(
         g,
-        &["attention.indexer.source_layers", "index_source_layer_ids"],
-        &[2, 8, 14, 20, 24, 28, 32, 36],
+        &["index_source_layer_ids"],
+        fallback.as_ref().map(|s| s.index_source_layers.as_slice()),
         layers,
     )?;
-    let compression_ratios = array(g, &["attention.compress_ratios", "compress_ratios"])?
-        .unwrap_or_else(|| {
-            (0..layers)
-                .map(|l| {
-                    if l < 2 {
-                        0
-                    } else if l < 20 {
-                        2
-                    } else {
-                        1
-                    }
-                })
-                .collect()
-        });
-    if compression_ratios.len() < layers {
-        return Err(invalid("compression ratios shorter than main block count"));
-    }
-    let candidate_source_layer = optional_uint_aliases(
-        g,
-        &[
-            "attention.indexer.candidate_source_layer",
-            "candidate_source_layer_id",
-        ],
-    )?
-    .map(|n| usize::try_from(n).map_err(|_| invalid("candidate source overflow")))
-    .transpose()?
-    .or_else(|| {
-        kv_source_layers
-            .iter()
-            .find(|&&l| compression_ratios[l as usize] == 1)
-            .map(|&l| l as usize)
-    });
+    let candidate_source_layer = optional_uint_aliases(g, &["candidate_source_layer_id"])?
+        .map(|n| usize::try_from(n).map_err(|_| invalid("candidate source overflow")))
+        .transpose()?;
+    let candidate_source_layer = match candidate_source_layer {
+        Some(n) => Some(n),
+        None if !compression_ratios[..layers].contains(&1) => None,
+        None => Some(
+            fallback
+                .as_ref()
+                .and_then(|s| s.candidate_source_layer)
+                .ok_or_else(|| {
+                    invalid("missing deepseek41.candidate_source_layer_id for non-default layout")
+                })?,
+        ),
+    };
     let schedule = Schedule {
         layers,
         kv_source_layers: kv_source_layers.iter().map(|&l| l as usize).collect(),
@@ -410,8 +345,8 @@ pub(super) fn parse(g: &GgufFile) -> Result<Plan, LoadError> {
     schedule.validate()?;
     let engram_layers = sources_alias(g, layers)?;
     if !engram_layers.is_empty()
-        && (uint(g, &["engram.head_count", "engram.n_heads"], Some(8))? != 8
-            || uint(g, &["engram.max_ngram_size"], Some(4))? != 4)
+        && (uint(g, &["engram.head_count", "engram.n_heads"], None)? != 8
+            || uint(g, &["engram.max_ngram_size"], None)? != 4)
     {
         return Err(invalid(
             "Engram projection requires three n-gram orders with eight heads each",
@@ -440,7 +375,9 @@ pub(super) fn parse(g: &GgufFile) -> Result<Plan, LoadError> {
             .position(|&v| u64::from(v) == n)
             .ok_or_else(|| invalid("compressed pad absent from token_map"))? as u32
     } else {
-        2
+        return Err(invalid(
+            "missing deepseek41.engram.pad_id or engram.pad_token_id",
+        ));
     };
     if raw_pad as usize >= vocab {
         return Err(invalid("pad outside vocabulary"));
@@ -450,30 +387,31 @@ pub(super) fn parse(g: &GgufFile) -> Result<Plan, LoadError> {
             return Err(invalid("conflicting Engram pad aliases"));
         }
     }
-    let width = uint(g, &["engram.head_dim", "engram.key_length"], Some(256))?;
-    if width != 256 {
+    if !engram_layers.is_empty() && uint(g, &["engram.head_dim", "engram.key_length"], None)? != 256
+    {
         return Err(invalid("Engram row decoder requires head_dim 256"));
     }
-    let primes = array(g, &["engram.primes"])?;
-    let offsets = array(g, &["engram.offsets"])?;
-    let multipliers = array(g, &["engram.multipliers"])?;
-    for (values, width) in [(&primes, 24), (&offsets, 24), (&multipliers, 4)] {
-        if values
-            .as_ref()
-            .is_some_and(|v| v.len() != engram_layers.len() * width)
-        {
+    let hash_array = |key, width| -> Result<Vec<u64>, LoadError> {
+        let values = match array(g, &[key])? {
+            Some(values) => values,
+            None if engram_layers.is_empty() => Vec::new(),
+            None => return Err(invalid(format!("missing deepseek41.{key}"))),
+        };
+        if values.len() != engram_layers.len() * width {
             return Err(invalid("Engram hash metadata length"));
         }
-    }
-    let defaults = HashConfig::default();
+        Ok(values)
+    };
+    let primes = hash_array("engram.primes", 24)?;
+    let offsets = hash_array("engram.offsets", 24)?;
+    let multipliers = hash_array("engram.multipliers", 4)?;
     let compressed_vocab_size = optional_uint(g, "engram.compressed_vocab_size")?
         .unwrap_or(u64::from(token_map.iter().copied().max().unwrap_or(0)) + 1);
     let mut engram_hash = HashConfig {
         layers: Vec::new(),
         compressed_vocab_size: u32::try_from(compressed_vocab_size)
             .map_err(|_| invalid("compressed vocabulary overflow"))?,
-        max_position: optional_uint_aliases(g, &["context_length", "max_position_embeddings"])?
-            .unwrap_or(super::super::engram::MAX_POSITION),
+        max_position: uint(g, &["context_length", "max_position_embeddings"], None)? as u64,
     };
     let declared_rows = array(g, &["engram.num_embeddings", "engram.rows"])?;
     if declared_rows
@@ -492,35 +430,9 @@ pub(super) fn parse(g: &GgufFile) -> Result<Plan, LoadError> {
         if declared_rows.as_ref().is_some_and(|v| v[i] != t.shape[1]) {
             return Err(invalid("Engram rows metadata differs from tensor"));
         }
-        let default = defaults.layers.iter().find(|p| p.layer == layer as usize);
-        let primes: [u64; 24] = match &primes {
-            Some(values) => values[i * 24..(i + 1) * 24].try_into().unwrap(),
-            None => {
-                default
-                    .ok_or_else(|| invalid("non-default Engram layer needs primes"))?
-                    .primes
-            }
-        };
-        let multipliers: [u64; 4] = match &multipliers {
-            Some(values) => values[i * 4..(i + 1) * 4].try_into().unwrap(),
-            None => {
-                default
-                    .ok_or_else(|| invalid("non-default Engram layer needs multipliers"))?
-                    .multipliers
-            }
-        };
-        let offsets = match &offsets {
-            Some(values) => values[i * 24..(i + 1) * 24].try_into().unwrap(),
-            None => {
-                let mut values = [0; 24];
-                let mut offset = 0;
-                for (j, &prime) in primes.iter().enumerate() {
-                    values[j] = offset;
-                    offset = add(offset, prime)?;
-                }
-                values
-            }
-        };
+        let primes = primes[i * 24..(i + 1) * 24].try_into().unwrap();
+        let multipliers = multipliers[i * 4..(i + 1) * 4].try_into().unwrap();
+        let offsets = offsets[i * 24..(i + 1) * 24].try_into().unwrap();
         engram_hash.layers.push(super::super::engram::LayerHash {
             layer: layer as usize,
             primes,
@@ -559,7 +471,7 @@ pub(super) fn parse(g: &GgufFile) -> Result<Plan, LoadError> {
 }
 fn sources_alias(g: &GgufFile, layers: usize) -> Result<Vec<u64>, LoadError> {
     let ids = array(g, &["engram.layers", "engram.layer_ids"])?
-        .unwrap_or_else(|| [1, 14].into_iter().filter(|&l| l < layers as u64).collect());
+        .ok_or_else(|| invalid("missing deepseek41.engram.layer_ids"))?;
     if ids.iter().any(|&n| n >= layers as u64) || ids.windows(2).any(|w| w[0] >= w[1]) {
         return Err(invalid("invalid Engram layers"));
     }

@@ -3,6 +3,7 @@ use std::io::Write;
 
 #[derive(Clone)]
 enum Value<'a> {
+    F32(f32),
     Bool(bool),
     F32s(Vec<f32>),
     U32(u32),
@@ -33,6 +34,34 @@ fn fixture_parts(
         ("deepseek41.expert_count", Value::U32(experts)),
         ("deepseek41.expert_used_count", Value::U32(1)),
         ("deepseek41.block_count", Value::U32(1)),
+        ("deepseek41.context_length", Value::U32(1048576)),
+        ("deepseek41.embedding_length", Value::U32(width as u32)),
+        (
+            "deepseek41.expert_feed_forward_length",
+            Value::U32(width as u32),
+        ),
+        ("deepseek41.attention.head_count_kv", Value::U32(1)),
+        ("deepseek41.expert_shared_count", Value::U32(1)),
+        ("deepseek41.hc_mult", Value::U32(4)),
+        ("deepseek41.hc_sinkhorn_iters", Value::U32(20)),
+        ("deepseek41.index_topk", Value::U32(512)),
+        ("deepseek41.sliding_window", Value::U32(128)),
+        ("deepseek41.rms_norm_eps", Value::F32(1e-20)),
+        ("deepseek41.hc_eps", Value::F32(1e-6)),
+        ("deepseek41.swiglu_limit", Value::F32(10.0)),
+        ("deepseek41.routed_scaling_factor", Value::F32(1.5)),
+        ("deepseek41.rope_theta", Value::F32(10000.0)),
+        ("deepseek41.compress_rope_theta", Value::F32(160000.0)),
+        ("deepseek41.rope_scaling.factor", Value::F32(16.0)),
+        ("deepseek41.rope_scaling.beta_fast", Value::F32(32.0)),
+        ("deepseek41.rope_scaling.beta_slow", Value::F32(1.0)),
+        (
+            "deepseek41.rope_scaling.original_max_position_embeddings",
+            Value::U32(65536),
+        ),
+        ("deepseek41.compress_ratios", Value::U64s(vec![0])),
+        ("deepseek41.kv_source_layer_ids", Value::U64s(vec![])),
+        ("deepseek41.index_source_layer_ids", Value::U64s(vec![])),
         ("deepseek41.vocab_size", Value::U32(3)),
         ("deepseek41.num_attention_heads", Value::U32(1)),
         ("deepseek41.head_dim", Value::U32(2)),
@@ -45,11 +74,20 @@ fn fixture_parts(
         ("deepseek41.engram.token_map", Value::Ints(vec![0, 1, 1])),
         ("deepseek41.engram.pad_id", Value::U32(1)),
         (
-            "deepseek41.engram.layers",
+            "deepseek41.engram.layer_ids",
             Value::U64s(if engram { vec![0] } else { vec![] }),
         ),
     ];
     if engram {
+        kv.extend([
+            ("deepseek41.engram.head_count", Value::U32(8)),
+            ("deepseek41.engram.key_length", Value::U32(256)),
+            ("deepseek41.engram.max_ngram_size", Value::U32(4)),
+            (
+                "deepseek41.engram.offsets",
+                Value::U64s((0..24).map(|i| i * 2).collect()),
+            ),
+        ]);
         kv.push(("deepseek41.engram.primes", Value::U64s(vec![2; 24])));
         kv.push((
             "deepseek41.engram.multipliers",
@@ -148,6 +186,10 @@ fn write_fixture_payload(
     for (key, val) in kv {
         string(&mut out, key);
         match val {
+            Value::F32(v) => {
+                out.extend(6u32.to_le_bytes());
+                out.extend(v.to_le_bytes());
+            }
             Value::F32s(v) => {
                 out.extend(9u32.to_le_bytes());
                 out.extend(6u32.to_le_bytes());
@@ -273,14 +315,7 @@ fn nonzero_bf16_load_forward_multiple_steps() {
             })
         };
         let g = write_fixture_payload(kv, tensors, true, payload);
-        let weights = ResidentWeights::load(
-            &ctx,
-            g.clone(),
-            LoadLimits {
-                resident_bytes: 2 << 20,
-            },
-        )
-        .unwrap();
+        let weights = ResidentWeights::load(&ctx, g.clone()).unwrap();
         for (disk, part) in [("gate", "w1"), ("up", "w3"), ("down", "w2")] {
             let name = format!("blk.0.ffn_{disk}_exps.weight");
             let desc = g.find(&name).unwrap();
@@ -372,10 +407,19 @@ fn metadata_expert_counts_and_native_dtypes() {
 }
 #[test]
 fn oversized_plan_is_metadata_only() {
-    let mut g = fixture(384, GgmlType::F32, 2, false);
-    let mut config = plan(&g).unwrap().config;
+    let mut config = plan(&fixture(384, GgmlType::F32, 2, false)).unwrap().config;
     config.hidden = 1 << 20;
     config.intermediate = 1 << 20;
+    let (mut kv, tensors) = fixture_parts(384, GgmlType::F32, 2, false);
+    for (key, value) in &mut kv {
+        if matches!(
+            *key,
+            "deepseek41.embedding_length" | "deepseek41.expert_feed_forward_length"
+        ) {
+            *value = Value::U32(1 << 20);
+        }
+    }
+    let mut g = write_fixture(kv, tensors);
     let g = Arc::get_mut(&mut g).unwrap();
     for t in &mut g.tensors {
         if names::bank(&t.name).is_some() {
@@ -414,14 +458,7 @@ fn direct_views_retain_mapping_and_preserve_offsets() {
     let ctx = MetalContext::new().expect("Metal is required for GGUF validation");
     let g = fixture(320, GgmlType::F32, 2, false);
     let expected = g.find("blk.0.ffn_gate_exps.weight").unwrap().data_offset;
-    let weights = ResidentWeights::load(
-        &ctx,
-        g,
-        LoadLimits {
-            resident_bytes: u64::MAX,
-        },
-    )
-    .unwrap();
+    let weights = ResidentWeights::load(&ctx, g).unwrap();
     let bank = weights.bank(0, "w1").unwrap().clone();
     drop(weights);
     assert_eq!(bank.shape, vec![2, 2, 320]);
@@ -445,11 +482,12 @@ fn direct_views_retain_mapping_and_preserve_offsets() {
 #[test]
 fn expert_count_is_mandatory_and_positive() {
     for count in [None, Some(0)] {
-        let mut kv = vec![("general.architecture", Value::Str("deepseek41"))];
+        let (mut kv, tensors) = fixture_parts(17, GgmlType::F32, 2, false);
+        kv.retain(|(key, _)| *key != "deepseek41.expert_count");
         if let Some(count) = count {
             kv.push(("deepseek41.expert_count", Value::U32(count)));
         }
-        let g = write_fixture(kv, vec![]);
+        let g = write_fixture(kv, tensors);
         let error = plan(&g).unwrap_err().to_string();
         assert!(error.contains("expert_count"), "{error}");
     }
@@ -508,6 +546,16 @@ fn declared_math_must_match_implemented_operations() {
             Value::Str("gelu"),
         ),
         (
+            "deepseek41.rope.scaling.type",
+            Value::Str("yarn"),
+            Value::Str("linear"),
+        ),
+        (
+            "deepseek41.attention.value_length",
+            Value::U32(2),
+            Value::U32(3),
+        ),
+        (
             "deepseek41.norm_topk_prob",
             Value::Bool(true),
             Value::Bool(false),
@@ -524,9 +572,11 @@ fn declared_math_must_match_implemented_operations() {
         ),
     ] {
         let mut accepted = kv.clone();
+        accepted.retain(|(k, _)| *k != key);
         accepted.push((key, good));
         plan(&write_fixture(accepted, tensors.clone())).unwrap();
         let mut rejected = kv.clone();
+        rejected.retain(|(k, _)| *k != key);
         rejected.push((key, bad));
         assert!(
             plan(&write_fixture(rejected, tensors.clone())).is_err(),
@@ -534,6 +584,7 @@ fn declared_math_must_match_implemented_operations() {
         );
     }
     let mut conflicting = kv;
+    conflicting.retain(|(key, _)| *key != "deepseek41.context_length");
     conflicting.extend([
         ("deepseek41.context_length", Value::U32(1024)),
         ("deepseek41.max_position_embeddings", Value::U32(2048)),
@@ -549,6 +600,15 @@ fn declared_math_must_match_implemented_operations() {
 #[test]
 fn pr28696_numeric_parameters_and_uniform_clamps_are_consumed() {
     let (mut kv, tensors) = fixture_parts(320, GgmlType::F32, 2, false);
+    kv.retain(|(key, _)| {
+        !matches!(
+            *key,
+            "deepseek41.hc_sinkhorn_iters"
+                | "deepseek41.hc_eps"
+                | "deepseek41.compress_rope_theta"
+                | "deepseek41.swiglu_limit"
+        )
+    });
     for (key, _) in &mut kv {
         *key = match *key {
             "deepseek41.o_groups" => "deepseek41.attention.output_group_count",
@@ -610,14 +670,7 @@ fn standard_q8_engram_wkv_alias_and_positional_rows() {
         }
         Some(rows)
     });
-    let w = ResidentWeights::load(
-        &ctx,
-        g,
-        LoadLimits {
-            resident_bytes: u64::MAX,
-        },
-    )
-    .unwrap();
+    let w = ResidentWeights::load(&ctx, g).unwrap();
     let rows = w.engram.decode_rows(0, &[2, 0, 47]).unwrap();
     for (row, expected) in rows.chunks_exact(256).zip([-1.5, -0.5, -24.0]) {
         assert!(row.iter().all(|&v| v == expected));
@@ -720,14 +773,7 @@ fn engram_standard_codecs_gather_selected_rows_with_exact_strides() {
         );
         let p = plan(&g).unwrap();
         assert_eq!(p.bytes.disk_engram, payload.len() as u64);
-        let weights = ResidentWeights::load(
-            &ctx,
-            g,
-            LoadLimits {
-                resident_bytes: u64::MAX,
-            },
-        )
-        .unwrap();
+        let weights = ResidentWeights::load(&ctx, g).unwrap();
         assert!(!weights.dense.keys().any(|key| key.contains("engram_embd")));
         let ids = [47, 0, 13, 1, 47];
         let actual = weights.engram.read_rows(0, &ids).unwrap();
@@ -862,14 +908,7 @@ fn unused_tensors_keep_inventory_without_binding_or_dtype_requirements() {
     let p = plan(&g).unwrap();
     assert_eq!(p.dtype_inventory["I8"], 64);
     assert_eq!(p.dtype_inventory["Unknown"], 16);
-    let w = ResidentWeights::load(
-        &ctx,
-        g,
-        LoadLimits {
-            resident_bytes: u64::MAX,
-        },
-    )
-    .unwrap();
+    let w = ResidentWeights::load(&ctx, g).unwrap();
     assert!(!w.dense.contains_key("layers.0.ffn.gate.bias_vl"));
     assert_eq!(w.banks.len(), 3);
     assert_eq!(w.bytes.disk_engram, 0);
@@ -913,14 +952,7 @@ fn metadata_hash_survives_planning_and_loading() {
     assert_eq!(p.engram_hash.layers[0].multipliers, [1, 3, 5, 7]);
     assert_eq!(p.engram_offsets, (0..24).map(|i| i * 2).collect::<Vec<_>>());
     let ctx = MetalContext::new().expect("Metal is required for GGUF validation");
-    let w = ResidentWeights::load(
-        &ctx,
-        g,
-        LoadLimits {
-            resident_bytes: u64::MAX,
-        },
-    )
-    .unwrap();
+    let w = ResidentWeights::load(&ctx, g).unwrap();
     assert_eq!(w.engram_hash, p.engram_hash);
     assert_eq!(w.schedule, p.schedule);
     super::super::forward::Forward::from_resident(&ctx, &w, w.token_map.clone(), w.raw_pad)
@@ -949,6 +981,116 @@ fn schedule_accepts_structural_variation_not_identity() {
 }
 
 #[test]
+fn mandatory_numeric_metadata_cannot_be_inferred_or_defaulted() {
+    let (kv, tensors) = fixture_parts(17, GgmlType::F32, 2, false);
+    for (key, _) in &kv {
+        if !key.starts_with("deepseek41.")
+            || key.starts_with("deepseek41.engram.")
+            || *key == "deepseek41.vocab_size"
+        {
+            continue;
+        }
+        let mut missing = kv.clone();
+        missing.retain(|(k, _)| k != key);
+        let error = plan(&write_fixture(missing, tensors.clone()))
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("missing"), "{key}: {error}");
+    }
+}
+
+#[test]
+fn named_ownership_fallback_requires_known_layer_operations() {
+    let ratios: Vec<_> = Schedule::default()
+        .compression_ratios
+        .iter()
+        .map(|&n| n as u64)
+        .collect();
+    assert_eq!(
+        Schedule::deepseek41_shared_kv_layout(40, &ratios),
+        Some(Schedule::default())
+    );
+    for layers in [1, 20, 39] {
+        assert!(Schedule::deepseek41_shared_kv_layout(layers, &ratios[..layers]).is_none());
+    }
+    let mut wrong = ratios.clone();
+    wrong[19] = 1;
+    assert!(Schedule::deepseek41_shared_kv_layout(40, &wrong).is_none());
+    let mut extended = ratios;
+    extended.push(1);
+    assert!(Schedule::deepseek41_shared_kv_layout(41, &extended).is_none());
+    extended.resize(48, 1);
+    assert!(Schedule::deepseek41_shared_kv_layout(48, &extended).is_none());
+}
+
+#[test]
+fn active_engram_metadata_is_required_without_static_hash_fallbacks() {
+    let (kv, tensors) = fixture_parts(17, GgmlType::F32, 2, true);
+    for key in [
+        "deepseek41.context_length",
+        "deepseek41.engram.layer_ids",
+        "deepseek41.engram.pad_id",
+        "deepseek41.engram.head_count",
+        "deepseek41.engram.key_length",
+        "deepseek41.engram.max_ngram_size",
+        "deepseek41.engram.primes",
+        "deepseek41.engram.multipliers",
+        "deepseek41.engram.offsets",
+        "deepseek41.engram.token_map",
+    ] {
+        let mut missing = kv.clone();
+        missing.retain(|(k, _)| *k != key);
+        let error = plan(&write_fixture(missing, tensors.clone()))
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("missing"), "{key}: {error}");
+    }
+    let expected = plan(&write_fixture(kv.clone(), tensors.clone())).unwrap();
+    let mut aliases = kv;
+    for (key, value) in &mut aliases {
+        *key = match *key {
+            "deepseek41.context_length" => "deepseek41.max_position_embeddings",
+            "deepseek41.engram.layer_ids" => "deepseek41.engram.layers",
+            "deepseek41.engram.head_count" => "deepseek41.engram.n_heads",
+            "deepseek41.engram.key_length" => "deepseek41.engram.head_dim",
+            "deepseek41.engram.pad_id" => {
+                *value = Value::U32(expected.raw_pad);
+                "deepseek41.engram.pad_token_id"
+            }
+            key => key,
+        };
+    }
+    let actual = plan(&write_fixture(aliases, tensors)).unwrap();
+    assert_eq!(actual.engram_primes, expected.engram_primes);
+    assert_eq!(actual.engram_offsets, expected.engram_offsets);
+    assert_eq!(actual.engram_multipliers, expected.engram_multipliers);
+    assert_eq!(
+        actual.engram_hash.max_position,
+        expected.engram_hash.max_position
+    );
+    assert_eq!(actual.raw_pad, expected.raw_pad);
+}
+
+#[test]
+fn empty_engram_layers_need_no_hash_arrays_or_geometry() {
+    let (kv, tensors) = fixture_parts(17, GgmlType::F32, 2, false);
+    let p = plan(&write_fixture(kv.clone(), tensors.clone())).unwrap();
+    assert!(p.engram_hash.layers.is_empty());
+    for key in [
+        "deepseek41.engram.layer_ids",
+        "deepseek41.engram.pad_id",
+        "deepseek41.context_length",
+    ] {
+        let mut missing = kv.clone();
+        missing.retain(|(k, _)| *k != key);
+        assert!(
+            plan(&write_fixture(missing, tensors.clone())).is_err(),
+            "{key}"
+        );
+    }
+}
+
+#[test]
 fn metadata_schedules_and_auxiliary_compression_entries_are_retained() {
     let custom = Schedule {
         layers: 6,
@@ -958,8 +1100,19 @@ fn metadata_schedules_and_auxiliary_compression_entries_are_retained() {
         candidate_source_layer: Some(4),
     };
     let config = plan(&fixture(384, GgmlType::F32, 2, false)).unwrap().config;
-    for schedule in [custom, Schedule::default()] {
+    let mut extended = Schedule::default();
+    extended.layers = 41;
+    extended.compression_ratios.push(1);
+    for schedule in [custom, Schedule::default(), extended] {
         let (mut kv, _) = fixture_parts(384, GgmlType::F32, 2, false);
+        kv.retain(|(key, _)| {
+            !matches!(
+                *key,
+                "deepseek41.compress_ratios"
+                    | "deepseek41.kv_source_layer_ids"
+                    | "deepseek41.index_source_layer_ids"
+            )
+        });
         kv.iter_mut()
             .find(|(k, _)| *k == "deepseek41.block_count")
             .unwrap()
@@ -1016,6 +1169,57 @@ fn metadata_schedules_and_auxiliary_compression_entries_are_retained() {
             if published {
                 published_keys(&mut kv);
             }
+            if schedule.layers == 41 {
+                for key in [
+                    "deepseek41.kv_source_layer_ids",
+                    "deepseek41.index_source_layer_ids",
+                    "deepseek41.candidate_source_layer_id",
+                ] {
+                    let mut missing = kv.clone();
+                    missing.retain(|(k, _)| *k != key);
+                    let error = plan(&write_fixture(missing, tensors.clone()))
+                        .unwrap_err()
+                        .to_string();
+                    assert!(error.contains("missing") && error.contains(key), "{error}");
+                }
+            }
+            if schedule == Schedule::default() {
+                let mut implicit = kv.clone();
+                implicit.retain(|(key, _)| {
+                    !matches!(
+                        *key,
+                        "deepseek41.kv_source_layer_ids"
+                            | "deepseek41.attention.kv_source_layers"
+                            | "deepseek41.index_source_layer_ids"
+                            | "deepseek41.attention.indexer.source_layers"
+                            | "deepseek41.candidate_source_layer_id"
+                            | "deepseek41.attention.indexer.candidate_source_layer"
+                    )
+                });
+                for experts in [17, 272, 384] {
+                    implicit
+                        .iter_mut()
+                        .find(|(key, _)| *key == "deepseek41.expert_count")
+                        .unwrap()
+                        .1 = Value::U32(experts);
+                    let mut banks = tensors.clone();
+                    for (name, shape, _) in &mut banks {
+                        if name.ends_with("_exps.weight") {
+                            shape[2] = experts as u64;
+                        }
+                        if name.contains("ffn_gate_inp") || name.contains("exp_probs_b") {
+                            *shape.last_mut().unwrap() = experts as u64;
+                        }
+                    }
+                    // Parsing isolates ownership from dense/expert binding validation.
+                    assert_eq!(
+                        metadata::parse(&write_fixture(implicit.clone(), banks))
+                            .unwrap()
+                            .schedule,
+                        schedule
+                    );
+                }
+            }
             let g = write_fixture(kv, tensors.clone());
             let p = plan(&g).unwrap();
             assert_eq!(p.schedule, schedule);
@@ -1027,20 +1231,28 @@ fn metadata_schedules_and_auxiliary_compression_entries_are_retained() {
 fn published_keys(kv: &mut [(&'static str, Value<'static>)]) {
     for (key, _) in kv {
         *key = match *key {
+            "deepseek41.num_attention_heads" => "deepseek41.attention.head_count",
+            "deepseek41.head_dim" => "deepseek41.attention.key_length",
+            "deepseek41.qk_rope_head_dim" => "deepseek41.rope.dimension_count",
+            "deepseek41.q_lora_rank" => "deepseek41.attention.q_lora_rank",
+            "deepseek41.o_lora_rank" => "deepseek41.attention.output_lora_rank",
+            "deepseek41.o_groups" => "deepseek41.attention.output_group_count",
+            "deepseek41.sliding_window" => "deepseek41.attention.sliding_window",
+            "deepseek41.rms_norm_eps" => "deepseek41.attention.layer_norm_rms_epsilon",
+            "deepseek41.hc_eps" => "deepseek41.hyper_connection.epsilon",
+            "deepseek41.hc_sinkhorn_iters" => "deepseek41.hyper_connection.sinkhorn_iterations",
+            "deepseek41.routed_scaling_factor" => "deepseek41.expert_weights_scale",
+            "deepseek41.rope_theta" => "deepseek41.rope.freq_base",
+            "deepseek41.compress_rope_theta" => "deepseek41.attention.compress_rope_freq_base",
+            "deepseek41.rope_scaling.factor" => "deepseek41.rope.scaling.factor",
+            "deepseek41.rope_scaling.beta_fast" => "deepseek41.rope.scaling.yarn_beta_fast",
+            "deepseek41.rope_scaling.beta_slow" => "deepseek41.rope.scaling.yarn_beta_slow",
+            "deepseek41.rope_scaling.original_max_position_embeddings" => {
+                "deepseek41.rope.scaling.original_context_length"
+            }
             "deepseek41.index_n_heads" => "deepseek41.attention.indexer.head_count",
             "deepseek41.index_head_dim" => "deepseek41.attention.indexer.key_length",
             "deepseek41.index_topk" => "deepseek41.attention.indexer.top_k",
-            "deepseek41.kv_source_layer_ids" => "deepseek41.attention.kv_source_layers",
-            "deepseek41.index_source_layer_ids" => "deepseek41.attention.indexer.source_layers",
-            "deepseek41.candidate_source_layer_id" => {
-                "deepseek41.attention.indexer.candidate_source_layer"
-            }
-            "deepseek41.candidate_topk_blocks" => {
-                "deepseek41.attention.indexer.candidate_top_k_blocks"
-            }
-            "deepseek41.candidate_block_size" => {
-                "deepseek41.attention.indexer.candidate_block_size"
-            }
             "deepseek41.compress_ratios" => "deepseek41.attention.compress_ratios",
             "deepseek41.hc_mult" => "deepseek41.hyper_connection.count",
             "deepseek41.engram.rows" => "deepseek41.engram.num_embeddings",
@@ -1052,6 +1264,7 @@ fn published_keys(kv: &mut [(&'static str, Value<'static>)]) {
 #[test]
 fn published_scalar_and_engram_aliases_are_consumed() {
     let (mut kv, tensors) = fixture_parts(384, GgmlType::F32, 2, true);
+    kv.retain(|(key, _)| !matches!(*key, "deepseek41.index_topk" | "deepseek41.hc_mult"));
     kv.extend([
         ("deepseek41.index_topk", Value::U32(7)),
         ("deepseek41.candidate_topk_blocks", Value::U32(5)),
@@ -1090,6 +1303,44 @@ fn published_scalar_and_engram_aliases_are_consumed() {
 }
 
 #[test]
+fn candidate_mask_aliases_preserve_values_and_reject_conflicts() {
+    let (kv, tensors) = fixture_parts(17, GgmlType::F32, 2, false);
+    let aliases = [
+        (
+            "deepseek41.candidate_block_size",
+            "deepseek41.attention.indexer.candidate_block_size",
+            3,
+        ),
+        (
+            "deepseek41.candidate_topk_blocks",
+            "deepseek41.attention.indexer.candidate_top_k_blocks",
+            5,
+        ),
+    ];
+    for spelling in 0..3 {
+        let mut declared = kv.clone();
+        for (source, native, value) in aliases {
+            if spelling != 1 {
+                declared.push((source, Value::U32(value)));
+            }
+            if spelling != 0 {
+                declared.push((native, Value::U32(value)));
+            }
+        }
+        let p = plan(&write_fixture(declared, tensors.clone())).unwrap();
+        assert_eq!((p.config.candidate_block, p.config.candidate_topk), (3, 5));
+    }
+    for (source, native, value) in aliases {
+        let mut conflicting = kv.clone();
+        conflicting.extend([(source, Value::U32(value)), (native, Value::U32(value + 1))]);
+        let error = plan(&write_fixture(conflicting, tensors.clone()))
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("conflicting aliases"), "{native}: {error}");
+    }
+}
+
+#[test]
 fn conflicting_published_aliases_are_rejected() {
     let (kv, tensors) = fixture_parts(384, GgmlType::F32, 2, false);
     for (old, new, a, b) in [
@@ -1100,22 +1351,10 @@ fn conflicting_published_aliases_are_rejected() {
             Value::U32(8),
         ),
         (
-            "deepseek41.candidate_source_layer_id",
-            "deepseek41.attention.indexer.candidate_source_layer",
-            Value::U32(0),
-            Value::U32(1),
-        ),
-        (
             "deepseek41.compress_ratios",
             "deepseek41.attention.compress_ratios",
             Value::U64s(vec![0]),
             Value::U64s(vec![1]),
-        ),
-        (
-            "deepseek41.kv_source_layer_ids",
-            "deepseek41.attention.kv_source_layers",
-            Value::U64s(vec![]),
-            Value::U64s(vec![0]),
         ),
         (
             "deepseek41.engram.rows",
@@ -1125,6 +1364,7 @@ fn conflicting_published_aliases_are_rejected() {
         ),
     ] {
         let mut bad = kv.clone();
+        bad.retain(|(key, _)| *key != old && *key != new);
         bad.extend([(old, a), (new, b)]);
         let error = plan(&write_fixture(bad, tensors.clone()))
             .unwrap_err()
@@ -1151,14 +1391,7 @@ fn singleton_expert_axes_are_restored_on_direct_views() {
         g.find("blk.0.ffn_gate_exps.weight").unwrap().shape,
         vec![32, 32]
     );
-    let w = ResidentWeights::load(
-        &ctx,
-        g,
-        LoadLimits {
-            resident_bytes: u64::MAX,
-        },
-    )
-    .unwrap();
+    let w = ResidentWeights::load(&ctx, g).unwrap();
     assert_eq!(w.bank(0, "w1").unwrap().shape, vec![32, 32, 1]);
     assert_eq!(w.dense["layers.0.ffn.gate.weight"].shape, vec![32, 1]);
     super::super::forward::Forward::from_resident(&ctx, &w, w.token_map.clone(), w.raw_pad)

@@ -38,6 +38,64 @@ pub(super) struct Observations {
     disk_read_bytes: Metric,
 }
 
+#[derive(Default)]
+pub(super) struct ChunkObservations {
+    calls: Observations,
+    attempted_tokens: u64,
+    successful_tokens: u64,
+}
+
+impl ChunkObservations {
+    pub(super) fn json(&self) -> Value {
+        let mut value = self.calls.json();
+        value["scope"] = json!("whole_process_native_prefill_chunk");
+        value["attempted_chunks"] = json!(self.calls.attempted_tokens);
+        value["successful_chunks"] = json!(self.calls.successful_tokens);
+        value["attempted_tokens"] = json!(self.attempted_tokens);
+        value["successful_tokens"] = json!(self.successful_tokens);
+        for key in ["process_pageins", "process_disk_read_bytes"] {
+            let metric = value[key].as_object_mut().unwrap();
+            let max = metric.remove("max").unwrap();
+            metric.insert("max_chunk".into(), max);
+            metric.insert(
+                "per_token_mean".into(),
+                json!(
+                    metric["total"]
+                        .as_u64()
+                        .filter(|_| self.attempted_tokens > 0)
+                        .map(|total| total as f64 / self.attempted_tokens as f64)
+                ),
+            );
+        }
+        value
+    }
+}
+
+pub(super) fn observe_chunk<T, E>(
+    observations: Option<&mut ChunkObservations>,
+    position: usize,
+    rows: usize,
+    snapshot: impl FnMut() -> Option<PidSnapshot>,
+    prefill: impl FnOnce() -> Result<T, E>,
+) -> Result<T, E> {
+    let Some(observations) = observations else {
+        return prefill();
+    };
+    let result = observe_call(
+        Some(&mut observations.calls),
+        position,
+        rows,
+        "whole_process_native_prefill_chunk",
+        snapshot,
+        prefill,
+    );
+    observations.attempted_tokens += rows as u64;
+    if result.is_ok() {
+        observations.successful_tokens += rows as u64;
+    }
+    result
+}
+
 impl Observations {
     pub(super) fn json(&self) -> Value {
         json!({
@@ -53,6 +111,24 @@ impl Observations {
 pub(super) fn observe<T, E>(
     observations: Option<&mut Observations>,
     position: usize,
+    snapshot: impl FnMut() -> Option<PidSnapshot>,
+    step: impl FnOnce() -> Result<T, E>,
+) -> Result<T, E> {
+    observe_call(
+        observations,
+        position,
+        1,
+        "whole_process_native_step",
+        snapshot,
+        step,
+    )
+}
+
+fn observe_call<T, E>(
+    observations: Option<&mut Observations>,
+    position: usize,
+    rows: usize,
+    scope: &str,
     mut snapshot: impl FnMut() -> Option<PidSnapshot>,
     step: impl FnOnce() -> Result<T, E>,
 ) -> Result<T, E> {
@@ -71,7 +147,7 @@ pub(super) fn observe<T, E>(
     observations.pageins.record(pageins);
     observations.disk_read_bytes.record(disk_read_bytes);
     tracing::info!(target: "qwen_diag",
-        "serve token io: family=deepseek_v41 scope=whole_process_native_step position={position} success={} process_pageins={} process_disk_read_bytes={}",
+        "serve forward io: family=deepseek_v41 scope={scope} position={position} rows={rows} success={} process_pageins={} process_disk_read_bytes={}",
         result.is_ok(),
         pageins.map_or_else(|| "null".into(), |n| n.to_string()),
         disk_read_bytes.map_or_else(|| "null".into(), |n| n.to_string()));

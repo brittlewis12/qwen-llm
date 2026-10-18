@@ -46,6 +46,29 @@ impl Default for Schedule {
     }
 }
 impl Schedule {
+    /// HF shared-KV ownership omitted by the upstream GGUF converter.
+    fn deepseek41_shared_kv_layout(layers: usize, ratios: &[u64]) -> Option<Self> {
+        if layers != 40 || ratios.len() < layers {
+            return None;
+        }
+        let mut layout = Self::default();
+        if ratios[..layers].iter().enumerate().any(|(l, &ratio)| {
+            ratio
+                != if l < 2 {
+                    0
+                } else if l < 20 {
+                    2
+                } else {
+                    1
+                }
+        }) {
+            return None;
+        }
+        layout.layers = layers;
+        layout.compression_ratios = ratios[..layers].iter().map(|&n| n as usize).collect();
+        Some(layout)
+    }
+
     pub fn owns_kv(&self, layer: usize) -> bool {
         self.kv_source_layers.contains(&layer)
     }
@@ -114,8 +137,6 @@ pub enum LoadError {
     Io(#[from] std::io::Error),
     #[error(transparent)]
     MemoryAdmissionDenied(#[from] metal::MemoryAdmissionDenied),
-    #[error("resident weight budget exceeded: required {required}, limit {limit}")]
-    Budget { required: u64, limit: u64 },
 }
 impl LoadError {
     pub fn as_memory_admission(&self) -> Option<&metal::MemoryAdmissionDenied> {
@@ -143,9 +164,6 @@ impl ByteCounters {
     pub fn resident_bytes(&self) -> u64 {
         self.packed_experts + self.dense_bytes
     }
-}
-pub struct LoadLimits {
-    pub resident_bytes: u64,
 }
 pub struct PackedBank {
     pub layer: usize,
@@ -299,19 +317,9 @@ impl ResidentWeights {
     pub fn plan(g: &GgufFile) -> Result<Plan, LoadError> {
         plan(g)
     }
-    pub fn load(
-        ctx: &MetalContext,
-        g: Arc<GgufFile>,
-        limits: LoadLimits,
-    ) -> Result<Self, LoadError> {
+    pub fn load(ctx: &MetalContext, g: Arc<GgufFile>) -> Result<Self, LoadError> {
         let p = plan(&g)?;
         g.revalidate_retained_shard_stamps()?;
-        if p.bytes.resident_bytes() > limits.resident_bytes {
-            return Err(LoadError::Budget {
-                required: p.bytes.resident_bytes(),
-                limit: limits.resident_bytes,
-            });
-        }
         let requests: Vec<_> = g
             .tensors
             .iter()
@@ -345,12 +353,6 @@ impl ResidentWeights {
             windows.extend(storage.windows);
         }
         let view_bytes = windows.iter().try_fold(0, |n, w| add(n, w.length as u64))?;
-        if view_bytes > limits.resident_bytes {
-            return Err(LoadError::Budget {
-                required: view_bytes,
-                limit: limits.resident_bytes,
-            });
-        }
         if let Some(e) = metal::evaluate_metal_memory_admission_with_cpu_bytes(
             view_bytes,
             0,

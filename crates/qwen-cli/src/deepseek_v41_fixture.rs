@@ -4,6 +4,7 @@ use std::io::Write;
 
 enum Value {
     Number(u32),
+    Float(f32),
     Text(String),
     Numbers(Vec<u32>),
     Texts(Vec<String>),
@@ -34,6 +35,30 @@ pub(crate) fn gguf(experts: u32, context_key: &str) -> GgufFile {
         ("deepseek41.expert_used_count", Number(1)),
         ("deepseek41.block_count", Number(1)),
         ("deepseek41.vocab_size", Number(257)),
+        ("deepseek41.embedding_length", Number(2)),
+        ("deepseek41.expert_feed_forward_length", Number(2)),
+        ("deepseek41.attention.head_count_kv", Number(1)),
+        ("deepseek41.expert_shared_count", Number(1)),
+        ("deepseek41.hc_mult", Number(4)),
+        ("deepseek41.hc_sinkhorn_iters", Number(20)),
+        ("deepseek41.index_topk", Number(512)),
+        ("deepseek41.sliding_window", Number(128)),
+        ("deepseek41.rms_norm_eps", Float(1e-20)),
+        ("deepseek41.hc_eps", Float(1e-6)),
+        ("deepseek41.swiglu_limit", Float(10.0)),
+        ("deepseek41.routed_scaling_factor", Float(1.5)),
+        ("deepseek41.rope_theta", Float(10000.0)),
+        ("deepseek41.compress_rope_theta", Float(160000.0)),
+        ("deepseek41.rope_scaling.factor", Float(16.0)),
+        ("deepseek41.rope_scaling.beta_fast", Float(32.0)),
+        ("deepseek41.rope_scaling.beta_slow", Float(1.0)),
+        (
+            "deepseek41.rope_scaling.original_max_position_embeddings",
+            Number(65536),
+        ),
+        ("deepseek41.compress_ratios", Numbers(vec![0])),
+        ("deepseek41.kv_source_layer_ids", Numbers(vec![])),
+        ("deepseek41.index_source_layer_ids", Numbers(vec![])),
         ("deepseek41.num_attention_heads", Number(1)),
         ("deepseek41.head_dim", Number(2)),
         ("deepseek41.qk_rope_head_dim", Number(2)),
@@ -47,7 +72,7 @@ pub(crate) fn gguf(experts: u32, context_key: &str) -> GgufFile {
         ("deepseek41.engram.pad_id", Number(1)),
         ("deepseek41.engram.layers", Numbers(vec![])),
         ("tokenizer.ggml.model", Text("gpt2".into())),
-        ("tokenizer.ggml.pre", Text("deepseek-v3".into())),
+        ("tokenizer.ggml.pre", Text("joyai-llm".into())),
         ("tokenizer.ggml.tokens", Texts(tokens)),
         ("tokenizer.ggml.merges", Texts(vec![])),
         (
@@ -97,6 +122,10 @@ pub(crate) fn gguf(experts: u32, context_key: &str) -> GgufFile {
     for (key, value) in kv {
         string(&mut out, key);
         match value {
+            Float(n) => {
+                out.extend(6u32.to_le_bytes());
+                out.extend(n.to_le_bytes());
+            }
             Number(n) => {
                 out.extend(4u32.to_le_bytes());
                 out.extend(n.to_le_bytes());

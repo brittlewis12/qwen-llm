@@ -42,6 +42,30 @@ fn rows(count: u64, width: u64) -> Result<u64> {
     ])
 }
 
+fn estimate_gpu_step(
+    c: &Config,
+    positions: usize,
+    schedule: &super::super::gguf::Schedule,
+    engrams: usize,
+) -> Result<RequestMemoryEstimate> {
+    op::require(positions > 0, "invalid GPU step capacity")?;
+    let mut estimate = c.estimate_request_memory(1)?;
+    // CPU control vectors and row decode scratch stay bounded independently of
+    // token capacity; layer/hash descriptors follow the loaded schedule.
+    let extra_cpu = add(&[
+        mul(&[schedule.layers as u64, 1024])?,
+        mul(&[engrams as u64, 6144 * 4 + 512])?,
+    ])?;
+    estimate.cpu_transient_bytes = add(&[estimate.cpu_transient_bytes, extra_cpu])?;
+    estimate.cpu_bytes = add(&[estimate.cpu_persistent_bytes, estimate.cpu_transient_bytes])?;
+    estimate.metal_bytes = add(&[
+        estimate.metal_bytes,
+        super::gpu_step::bytes_with_schedule(c, positions, schedule, engrams)?,
+    ])?;
+    estimate.total_bytes = add(&[estimate.cpu_bytes, estimate.metal_bytes])?;
+    Ok(estimate)
+}
+
 impl Config {
     /// GPU-owned caches sized to the requested capacity; includes optional trace
     /// snapshots and conservative CPU Engram/embedding/logit transient storage.
@@ -49,41 +73,7 @@ impl Config {
         &self,
         positions: usize,
     ) -> Result<RequestMemoryEstimate> {
-        op::require(
-            positions > 0 && positions as u64 <= engram::MAX_POSITION,
-            "invalid GPU step capacity",
-        )?;
-        let mut estimate = self.estimate_request_memory(1)?;
-        estimate.metal_bytes = add(&[
-            estimate.metal_bytes,
-            super::gpu_step::bytes(self, positions)?,
-        ])?;
-        estimate.total_bytes = add(&[estimate.cpu_bytes, estimate.metal_bytes])?;
-        Ok(estimate)
-    }
-
-    /// Legacy conservative request estimate plus GPU FFN workspace and retained
-    /// constants. Counts shared storage once, with allocation/descriptor slack.
-    pub fn estimate_request_memory_with_gpu_ffn(
-        &self,
-        positions: usize,
-    ) -> Result<RequestMemoryEstimate> {
-        let mut estimate = self.estimate_request_memory(positions)?;
-        let bytes = super::ffn_gpu::bytes(self)?;
-        estimate.metal_bytes = add(&[estimate.metal_bytes, bytes])?;
-        estimate.total_bytes = add(&[estimate.total_bytes, bytes])?;
-        Ok(estimate)
-    }
-
-    pub fn estimate_request_memory_with_expert_staging(
-        &self,
-        positions: usize,
-    ) -> Result<RequestMemoryEstimate> {
-        let mut estimate = self.estimate_request_memory(positions)?;
-        let bytes = super::staging::bytes(self)?;
-        estimate.metal_bytes = add(&[estimate.metal_bytes, bytes])?;
-        estimate.total_bytes = add(&[estimate.total_bytes, bytes])?;
-        Ok(estimate)
+        estimate_gpu_step(self, positions, &super::super::gguf::Schedule::default(), 2)
     }
 
     /// Estimate peak additional memory for ONE sequence through `positions`
@@ -226,17 +216,16 @@ impl Forward<'_> {
         &self,
         positions: usize,
     ) -> Result<RequestMemoryEstimate> {
-        self.config.estimate_request_memory_with_gpu_step(positions)
-    }
-
-    /// Includes reusable active-bank storage, counted once as Metal shared bytes.
-    /// Legacy estimates exclude it. No tensor-sized CPU staging allocation exists.
-    pub fn estimate_request_memory_with_expert_staging(
-        &self,
-        positions: usize,
-    ) -> Result<RequestMemoryEstimate> {
-        self.config
-            .estimate_request_memory_with_expert_staging(positions)
+        op::require(
+            positions as u64 <= self.engram_hash.max_position,
+            "GPU step exceeds model context",
+        )?;
+        estimate_gpu_step(
+            &self.config,
+            positions,
+            &self.schedule,
+            self.engram_hash.layers.len(),
+        )
     }
 
     pub fn estimated_request_bytes(&self, positions: usize) -> Result<u64> {
@@ -253,8 +242,54 @@ mod tests {
     use super::*;
 
     #[test]
+    fn gpu_estimate_tracks_actual_layers_owners_ratios_and_engrams() {
+        let c = super::super::toy::config();
+        let mut schedule = super::super::super::gguf::Schedule {
+            layers: 3,
+            kv_source_layers: vec![0],
+            index_source_layers: vec![0],
+            compression_ratios: vec![2; 3],
+            candidate_source_layer: None,
+        };
+        let small = estimate_gpu_step(&c, 8, &schedule, 0).unwrap();
+        schedule.compression_ratios.fill(1);
+        let uncompressed = estimate_gpu_step(&c, 8, &schedule, 0).unwrap();
+        assert_eq!(
+            uncompressed.metal_bytes - small.metal_bytes,
+            4 * 4 * (c.head_dim + c.index_dim) as u64
+        );
+        schedule.kv_source_layers.push(2);
+        schedule.index_source_layers.push(2);
+        let owner = estimate_gpu_step(&c, 8, &schedule, 0).unwrap();
+        assert!(owner.metal_bytes > uncompressed.metal_bytes);
+        schedule.layers += 1;
+        schedule.compression_ratios.push(1);
+        let layer = estimate_gpu_step(&c, 8, &schedule, 0).unwrap();
+        assert!(layer.metal_bytes > owner.metal_bytes);
+        let engram = estimate_gpu_step(&c, 8, &schedule, 1).unwrap();
+        assert!(engram.metal_bytes > layer.metal_bytes);
+        assert!(engram.cpu_bytes > layer.cpu_bytes);
+        let long = estimate_gpu_step(&c, 16, &schedule, 1).unwrap();
+        assert!(long.metal_bytes > engram.metal_bytes);
+        assert_eq!(long.cpu_bytes, engram.cpu_bytes);
+        for estimate in [small, uncompressed, owner, layer, engram, long] {
+            assert_eq!(
+                estimate.cpu_bytes,
+                estimate.cpu_persistent_bytes + estimate.cpu_transient_bytes
+            );
+            assert_eq!(
+                estimate.total_bytes,
+                estimate.cpu_bytes + estimate.metal_bytes
+            );
+        }
+    }
+
+    #[test]
     fn old_model_request_estimates_are_monotone_and_split_without_double_counting() {
-        let config = Config::default();
+        let config = Config {
+            experts: 272,
+            ..Config::default()
+        };
         let mut previous = 0;
         for n in [1, 2, 3, 128, 4096, 8192, 1048576] {
             let e = config.estimate_request_memory(n).unwrap();

@@ -90,44 +90,10 @@ mod tests {
                 .iter()
                 .any(|e| matches!(e, PartitionEvent::FunctionCall(_)))
         );
-        assert!(
-            check_runtime(Some("deepseek_v41"))
-                .unwrap_err()
-                .to_string()
-                .contains("unsupported")
-        );
-        assert!(check_runtime(Some("deepseek4")).is_ok());
         let mut partition = Partition::new(false, 1);
         partition.push(b"too big", &mut vec![]);
         assert!(partition.failure().is_some());
     }
-}
-
-pub(crate) fn check_runtime(architecture: Option<&str>) -> anyhow::Result<()> {
-    anyhow::ensure!(
-        !matches!(
-            architecture,
-            Some("deepseek_v41" | "deepseek41" | "deepseek_v4_1")
-        ),
-        "DeepSeek V4.1 is unsupported on the GGUF serve path; use qwen deepseek-v41 --model-dir PATH --serve for the safetensors HTTP backend"
-    );
-    Ok(())
-}
-
-pub(crate) fn check_model_path(path: &std::path::Path) -> anyhow::Result<()> {
-    if path.is_dir() && path.join("config.json").is_file() {
-        let bytes =
-            crate::bounded_file::read_regular_file_bounded(&path.join("config.json"), 1024 * 1024)?;
-        let config: serde_json::Value = serde_json::from_slice(&bytes)?;
-        check_runtime(config["model_type"].as_str())?;
-        if config["architectures"]
-            .as_array()
-            .is_some_and(|values| values.iter().any(|v| v == "DeepseekV41ForCausalLM"))
-        {
-            check_runtime(Some("deepseek_v41"))?;
-        }
-    }
-    Ok(())
 }
 
 fn invalid(detail: impl Into<String>) -> ServeError {

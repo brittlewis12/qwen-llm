@@ -1,3 +1,4 @@
+//! Offline oracle helper; GGUF runtime consumes the embedded Engram token map.
 //! Tokenizers-native port of build_compressed_token_map in upstream inference/engram.py.
 //! Pinned source: scripts/reference/deepseek_v41/fixtures/inference/engram.py.
 use anyhow::{Context, Result, anyhow, ensure};
@@ -104,7 +105,7 @@ mod tests {
     fn v41_full_tokenizer_matches_python_digest() {
         use sha2::{Digest, Sha256};
         let expected: serde_json::Value = serde_json::from_str(include_str!(
-            "../../tests/fixtures/v41_engram_full_summary.json"
+            "../tests/fixtures/v41_engram_full_summary.json"
         ))
         .unwrap();
         let bytes = std::fs::read(TOKENIZER.required()).unwrap();
@@ -138,10 +139,9 @@ mod tests {
     }
     #[test]
     fn v41_engram_matches_upstream_python_fixture() {
-        let fixture: serde_json::Value = serde_json::from_str(include_str!(
-            "../../tests/fixtures/v41_engram_token_map.json"
-        ))
-        .unwrap();
+        let fixture: serde_json::Value =
+            serde_json::from_str(include_str!("../tests/fixtures/v41_engram_token_map.json"))
+                .unwrap();
         let tokenizer =
             Tokenizer::from_bytes(serde_json::to_vec(&fixture["tokenizer"]).unwrap()).unwrap();
         let (lookup, size) = build_compressed_token_map(&tokenizer).unwrap();

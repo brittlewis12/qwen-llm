@@ -6,6 +6,7 @@ pub enum ModelFamily {
     Qwen35Moe,
     Qwen4Exp,
     DeepSeek4,
+    DeepSeekV41,
     MuseGlimmer,
     K2Horizon,
     Glm5Next,
@@ -19,6 +20,7 @@ impl ModelFamily {
         Self::Qwen35Moe,
         Self::Qwen4Exp,
         Self::DeepSeek4,
+        Self::DeepSeekV41,
         Self::MuseGlimmer,
         Self::K2Horizon,
         Self::Glm5Next,
@@ -26,7 +28,7 @@ impl ModelFamily {
 
     /// Bump when adding a family; the exhaustive match in the closedness test
     /// is what tells you to update this value and `ALL`.
-    pub const FAMILY_COUNT: usize = 7;
+    pub const FAMILY_COUNT: usize = 8;
 
     pub fn from_architecture_name(name: &str) -> Option<Self> {
         // The original unsloth shard spells GLM-5.3 without the hyphen.
@@ -54,6 +56,7 @@ impl ModelFamily {
             Self::Qwen35 | Self::Qwen35Moe => "qwen",
             Self::Qwen4Exp => "qwen4exp",
             Self::DeepSeek4 => "deepseek_v4",
+            Self::DeepSeekV41 => "deepseek_v41",
             Self::MuseGlimmer => "muse_glimmer",
             Self::K2Horizon => "k2_horizon",
             Self::Glm5Next => "glm5_next",
@@ -66,6 +69,7 @@ impl ModelFamily {
             Self::Qwen35Moe => "qwen35moe",
             Self::Qwen4Exp => "qwen4exp",
             Self::DeepSeek4 => "deepseek4",
+            Self::DeepSeekV41 => "deepseek41",
             Self::MuseGlimmer => crate::muse_glimmer::ARCHITECTURE_NAME,
             Self::K2Horizon => crate::k2_horizon::ARCHITECTURE_NAME,
             Self::Glm5Next => crate::glm5_next::ARCHITECTURE_NAME,
@@ -76,6 +80,40 @@ impl ModelFamily {
 #[cfg(test)]
 mod tests {
     use super::ModelFamily;
+
+    #[test]
+    fn deepseek41_detection_is_geometry_and_capacity_independent() {
+        fn string(bytes: &mut Vec<u8>, value: &str) {
+            bytes.extend_from_slice(&(value.len() as u64).to_le_bytes());
+            bytes.extend_from_slice(value.as_bytes());
+        }
+        for experts in [384u32, 272] {
+            let mut bytes = b"GGUF".to_vec();
+            bytes.extend_from_slice(&3u32.to_le_bytes());
+            bytes.extend_from_slice(&0u64.to_le_bytes());
+            bytes.extend_from_slice(&2u64.to_le_bytes());
+            string(&mut bytes, "general.architecture");
+            bytes.extend_from_slice(&8u32.to_le_bytes());
+            string(&mut bytes, "deepseek41");
+            string(&mut bytes, "deepseek41.expert_count");
+            bytes.extend_from_slice(&4u32.to_le_bytes());
+            bytes.extend_from_slice(&experts.to_le_bytes());
+            bytes.resize(bytes.len().next_multiple_of(32), 0);
+            let path = std::env::temp_dir()
+                .join(format!("v41-family-{}-{experts}.gguf", std::process::id()));
+            let mut file = std::fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(&path)
+                .unwrap();
+            std::io::Write::write_all(&mut file, &bytes).unwrap();
+            drop(file);
+            let gguf = crate::gguf::GgufFile::open(&path).unwrap();
+            std::fs::remove_file(path).unwrap();
+            assert_eq!(ModelFamily::detect(&gguf), Some(ModelFamily::DeepSeekV41));
+            assert_ne!(ModelFamily::detect(&gguf), Some(ModelFamily::DeepSeek4));
+        }
+    }
 
     #[test]
     fn architecture_names_are_closed() {
@@ -131,6 +169,7 @@ mod tests {
                 ModelFamily::Qwen35
                 | ModelFamily::Qwen35Moe
                 | ModelFamily::Qwen4Exp
+                | ModelFamily::DeepSeekV41
                 | ModelFamily::DeepSeek4
                 | ModelFamily::MuseGlimmer
                 | ModelFamily::K2Horizon

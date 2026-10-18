@@ -30,9 +30,30 @@ fn create(path: &Path) -> Result<Trace> {
         Shapes {
             hidden: 2,
             vocab: 3,
+            layers: 40,
         },
         json!({"prompt_token_ids":[0]}),
     )
+}
+
+#[test]
+fn converted_capture_has_one_production_mode_and_characterization_scope() {
+    let temp = Temp::new();
+    let root = temp.0.join("production-mode");
+    let config = Config {
+        hidden: 2,
+        vocab: 3,
+        ..Config::default()
+    };
+    let trace = Trace::create(&root, &config, 1, &[0]).unwrap();
+    let manifest = status(&root);
+    assert_eq!(manifest["execution"], "gpu_step");
+    assert_eq!(
+        manifest["comparison_scope"],
+        "hf_conversion_and_execution_characterization"
+    );
+    assert_eq!(manifest["status"], "incomplete");
+    drop(trace);
 }
 
 fn status(path: &Path) -> Value {
@@ -104,11 +125,8 @@ fn v41_trace_portable_bytes_all_layers_positions_and_success_manifest() {
         json!([{"position":0,"token_id":0},{"position":1,"token_id":2}])
     );
     assert_eq!(manifest["generated_token_ids"], json!([2, 1]));
-    assert_eq!(
-        manifest["config_profile"]["expected_revision"],
-        loader::OLD_REVISION
-    );
-    assert_eq!(manifest["config_profile"]["provenance_verified"], false);
+    assert_eq!(manifest["artifact_format"], "gguf");
+    assert_eq!(manifest["provenance_verified"], false);
     assert_eq!(fs::read_dir(&root).unwrap().count(), 163);
     assert!(!root.join("run.json.tmp").exists());
 }

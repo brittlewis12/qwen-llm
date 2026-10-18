@@ -11,6 +11,151 @@ use std::time::{Duration, Instant};
 
 const WAIT: Duration = Duration::from_secs(5);
 
+#[test]
+fn v41_serve_preparation_uses_validated_context_alias() {
+    for experts in [272, 320, 384] {
+        let gguf = crate::deepseek_v41_fixture::gguf(experts, "deepseek41.max_position_embeddings");
+        assert!(gguf.get_u64("deepseek41.context_length").is_none());
+        let (mut args, _) = crate::Args::parse_with_explicit([
+            "qwen",
+            "serve",
+            "-m",
+            "fixture.gguf",
+            "--max-context-tokens",
+            "64",
+            "--max-tokens",
+            "8",
+        ]);
+        let crate::cli::Invocation::Serve(mut invocation) = crate::cli::normalize(&mut args) else {
+            panic!("serve invocation")
+        };
+        let prepared = Prepared::new(&gguf, &invocation).unwrap();
+        assert_eq!(prepared.settings.context, 64);
+        assert_eq!(prepared.settings.limits.default_max_tokens, 8);
+        invocation.max_context_tokens = Some(65);
+        assert!(Prepared::new(&gguf, &invocation).is_err());
+    }
+}
+
+#[test]
+fn v41_typed_state_pressure_is_503_and_never_steps() {
+    struct Sink;
+    impl GenerationSink for Sink {
+        fn piece(&mut self, _: &[u8]) -> io::Result<()> {
+            Ok(())
+        }
+        fn tick(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+    let backend = stub("answer");
+    let request = backend
+        .settings
+        .profile()
+        .parse(&json!({"model":"test","input":"hi","max_output_tokens":1}))
+        .unwrap();
+    let denied = qwen_llm::metal::MemoryAdmissionDenied {
+        reason: qwen_llm::metal::MetalMemoryAdmissionReason::WorkingSetInsufficient,
+        required_bytes: Some(4096),
+        signals: MetalMemorySignals {
+            recommended_max_bytes: 1024,
+            current_allocated_bytes: 0,
+            process_limit_remaining_bytes: Some(1024),
+        },
+        working_set_headroom_bytes: Some(1024),
+    };
+    let result = backend.settings.execute::<()>(
+        &request,
+        "prompt",
+        &mut Sink,
+        |_, _| Ok(()),
+        |_| {
+            Err(state_error(
+                qwen_llm::deepseek_v41::forward::StateError::MemoryAdmissionDenied(denied),
+            ))
+        },
+        |_, _, _| panic!("state refusal must precede forward"),
+        || Duration::ZERO,
+    );
+    let Err(BackendFailure::Serve(error)) = result else {
+        panic!("expected typed refusal")
+    };
+    assert_eq!(error.status, 503);
+    assert_eq!(error.code, Some("memory_admission_denied"));
+    let invalid = state_error(qwen_llm::deepseek_v41::forward::StateError::Invalid(
+        "bad geometry".into(),
+    ));
+    assert_eq!(invalid.status, 500);
+    assert_ne!(invalid.code, Some("memory_admission_denied"));
+}
+
+#[test]
+fn v41_state_refusal_is_http_503_and_next_request_starts_fresh() {
+    let mut backend = stub("answer");
+    backend.state_failure = Some(
+        qwen_llm::deepseek_v41::forward::StateError::MemoryAdmissionDenied(
+            qwen_llm::metal::MemoryAdmissionDenied {
+                reason: qwen_llm::metal::MetalMemoryAdmissionReason::ProcessInsufficient,
+                required_bytes: Some(4096),
+                signals: MetalMemorySignals {
+                    recommended_max_bytes: 1 << 40,
+                    current_allocated_bytes: 0,
+                    process_limit_remaining_bytes: Some(1024),
+                },
+                working_set_headroom_bytes: Some(1 << 40),
+            },
+        ),
+    );
+    let body = json!({"model":"test","input":"hi","max_output_tokens":1});
+    let wire = exchange(&mut backend, post(&body));
+    assert!(wire.starts_with("HTTP/1.1 503"), "{wire}");
+    assert!(wire.contains("memory_admission_denied"), "{wire}");
+    assert_eq!(backend.starts, 1);
+    assert_eq!(backend.steps.load(Ordering::Acquire), 0);
+    let wire = exchange(&mut backend, post(&body));
+    assert!(wire.starts_with("HTTP/1.1 200"), "{wire}");
+    assert_eq!(backend.starts, 2);
+    assert_eq!(backend.drops.load(Ordering::Acquire), 1);
+}
+
+#[test]
+fn v41_cancellation_during_state_construction_remains_aborted() {
+    struct Sink(Arc<AtomicBool>);
+    impl GenerationSink for Sink {
+        fn cancellation_flag(&self) -> Option<Arc<AtomicBool>> {
+            Some(self.0.clone())
+        }
+        fn piece(&mut self, _: &[u8]) -> io::Result<()> {
+            Ok(())
+        }
+        fn tick(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+    let backend = stub("answer");
+    let request = backend
+        .settings
+        .profile()
+        .parse(&json!({"model":"test","input":"hi","max_output_tokens":1}))
+        .unwrap();
+    let cancel = Arc::new(AtomicBool::new(false));
+    let result = backend.settings.execute::<()>(
+        &request,
+        "prompt",
+        &mut Sink(cancel.clone()),
+        |_, _| Ok(()),
+        |_| {
+            cancel.store(true, Ordering::Release);
+            Err(ServeError::server_error("cancelled allocation"))
+        },
+        |_, _, _| panic!("cancelled construction must not step"),
+        || Duration::ZERO,
+    );
+    assert!(
+        matches!(result, Err(BackendFailure::Aborted(error)) if error.kind() == io::ErrorKind::Interrupted)
+    );
+}
+
 fn io_snapshot(pageins: u64, bytes: u64) -> qwen_llm::pid_metrics::PidSnapshot {
     qwen_llm::pid_metrics::PidSnapshot {
         pageins,
@@ -140,6 +285,7 @@ impl Drop for State {
 struct Stub {
     settings: Settings,
     starts: usize,
+    state_failure: Option<qwen_llm::deepseek_v41::forward::StateError>,
     drops: Arc<AtomicUsize>,
     block: Option<mpsc::Sender<()>>,
     owner: std::thread::ThreadId,
@@ -182,6 +328,7 @@ fn stub(emission: &str) -> Stub {
     Stub {
         settings,
         starts: 0,
+        state_failure: None,
         drops: Arc::new(AtomicUsize::new(0)),
         block: None,
         owner: std::thread::current().id(),
@@ -243,6 +390,9 @@ impl GenerationBackend for Stub {
             },
             |_| {
                 self.starts += 1;
+                if let Some(error) = self.state_failure.take() {
+                    return Err(state_error(error));
+                }
                 Ok(State(0, drops))
             },
             |state, token, cancel| {
@@ -479,6 +629,7 @@ fn v41_backend_defaults_prompt_budget_and_loopback_only() {
     backend
         .settings
         .tokenizer
+        .hf_mut()
         .with_pre_tokenizer(Some(tokenizers::pre_tokenizers::whitespace::Whitespace));
     let wire = exchange(
         &mut backend,
@@ -488,7 +639,9 @@ fn v41_backend_defaults_prompt_budget_and_loopback_only() {
     assert_eq!(backend.starts, 0);
     assert!(super::super::bind_loopback("0.0.0.0:0").is_err());
     let mut tokenizer = backend.settings.tokenizer;
-    tokenizer.with_decoder(None::<tokenizers::decoders::DecoderWrapper>);
+    tokenizer
+        .hf_mut()
+        .with_decoder(None::<tokenizers::decoders::DecoderWrapper>);
     assert!(
         Settings::new(
             tokenizer,
@@ -522,6 +675,7 @@ fn v41_request_memory_refuses_before_state_and_rechecks_mid_prefill() {
     backend
         .settings
         .tokenizer
+        .hf_mut()
         .with_pre_tokenizer(Some(tokenizers::pre_tokenizers::whitespace::Whitespace));
     backend.drop_after = Some(1);
     let wire = exchange(

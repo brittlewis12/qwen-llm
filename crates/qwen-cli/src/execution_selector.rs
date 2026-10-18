@@ -361,6 +361,7 @@ pub(super) fn select_qwen(input: QwenSelectionInput) -> ExecutionSelection {
         Some(
             ModelFamily::Qwen4Exp
             | ModelFamily::DeepSeek4
+            | ModelFamily::DeepSeekV41
             | ModelFamily::MuseGlimmer
             | ModelFamily::K2Horizon
             | ModelFamily::Glm5Next,

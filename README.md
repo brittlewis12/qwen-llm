@@ -26,6 +26,7 @@ general versions.
 | Qwen3.5, Qwen3.6 and Qwen3.8, dense and mixture-of-experts | `qwen35`, `qwen35moe` |
 | Qwen3.8 Flash-Next | `qwen4exp` |
 | DeepSeek V4 Flash-0731 | `deepseek4` |
+| DeepSeek V4.1 | `deepseek41` |
 | GLM-5.3-Flash | `glm5-next` |
 | Muse Glimmer 30B | `muse-glimmer` |
 | K2 Horizon 7B | `k2-horizon` |
@@ -153,6 +154,7 @@ detail.
 | Qwen MoE (qwen35moe) | none (request-shaped) | RAM and disk | `run` |
 | Qwen3.8-Flash-Next | `--max-context-tokens`, `--max-tokens` | RAM | no |
 | DeepSeek V4 | `--max-context-tokens` | RAM and disk | no |
+| DeepSeek V4.1 | `--max-context-tokens`, `--max-tokens` | none | no |
 | Muse Glimmer | `--max-context-tokens`, `--max-tokens` | none | no |
 | K2 Horizon | `--max-context-tokens`, `--max-tokens` | none | no |
 | GLM-5.3-Flash | `--max-context-tokens`, `--max-tokens` | RAM | no |

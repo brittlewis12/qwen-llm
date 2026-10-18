@@ -1,5 +1,4 @@
 pub mod bounded_file;
-#[path = "deepseek_v41_cli/engram.rs"]
 pub mod deepseek_v41_tokenizer;
 pub mod messages;
 pub mod model_request;

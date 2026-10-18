@@ -10,7 +10,7 @@ pub(super) const DEFAULT_CHECKPOINTS: [usize; 4] = [2046, 2047, 9998, 9999];
 const HEADER: usize = 256;
 
 #[cfg(test)]
-#[path = "capture/tests.rs"]
+#[path = "v41_capture/tests.rs"]
 mod tests;
 
 pub(super) struct Writer {

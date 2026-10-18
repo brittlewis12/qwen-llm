@@ -149,34 +149,16 @@ fn capture_partial_failure_and_cancellation_remain_incomplete() {
 }
 
 #[test]
-fn capture_cli_requires_gpu_generation_and_explicit_override() {
-    use clap::Parser;
-    #[derive(Parser)]
-    struct Cli {
-        #[command(flatten)]
-        options: super::super::Options,
-    }
-    let base = [
-        "qwen",
-        "--model-dir",
-        "/model",
-        "--attention-capture-dir",
-        "/capture",
-    ];
-    for extra in [
-        vec![],
-        vec!["--token-ids", "0"],
-        vec!["--gpu-step", "--serve"],
-    ] {
-        assert!(Cli::try_parse_from(base.iter().copied().chain(extra)).is_err());
-    }
-    let parsed = Cli::try_parse_from(base.iter().copied().chain([
-        "--gpu-step",
-        "--token-ids",
-        "0",
-        "--attention-capture-positions",
-        "1,2",
-    ]))
-    .unwrap();
-    assert_eq!(parsed.options.attention_capture_positions, Some(vec![1, 2]));
+fn capture_library_records_explicit_checkpoints() {
+    let temp = Temp::new();
+    let root = temp.0.join("explicit-checkpoints");
+    let writer =
+        Writer::create_inner(&root, &[1, 2], 2, json!({"artifact_format":"gguf"})).unwrap();
+    assert!(writer.is_checkpoint(1));
+    assert!(writer.is_checkpoint(2));
+    assert!(!writer.is_checkpoint(0));
+    assert!(!writer.wants_position(3));
+    assert_eq!(manifest(&root)["requested_checkpoints"], json!([1, 2]));
+    drop(writer);
+    assert_eq!(manifest(&root)["status"], "incomplete");
 }

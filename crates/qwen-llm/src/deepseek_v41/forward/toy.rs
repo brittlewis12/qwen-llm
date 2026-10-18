@@ -183,8 +183,10 @@ impl Weights {
                         projection: b
                             .linear(&format!("{p}.engram.wkv.weight"), 6144, 160)
                             .unwrap(),
-                        q: vec![1.0; 128],
-                        k: vec![1.0; 128],
+                        gate: EngramGate::Separate {
+                            q: vec![1.0; 128],
+                            k: vec![1.0; 128],
+                        },
                     }),
                 }
             })
@@ -199,6 +201,8 @@ impl Weights {
                     })
                     .collect())
             }),
+            engram_hash: engram::HashConfig::default(),
+            schedule: super::super::gguf::Schedule::default(),
             config: c,
             token_map: vec![5, 3, 2, 7, 0, 1, 6, 4],
             pad: 2,
@@ -225,8 +229,8 @@ fn full_graph_python_parity_and_trace_is_observational() {
     let model = weights.model(&ctx);
     let expected: serde_json::Value =
         serde_json::from_str(include_str!("toy_expected.json")).unwrap();
-    let mut traced = model.new_state(3).unwrap();
-    let mut plain = model.new_state_with_expert_staging(3).unwrap();
+    let mut traced = model.new_cpu_state(3).unwrap();
+    let mut plain = model.new_cpu_state(3).unwrap();
     let close = |a: f32, e: f32| assert!((a - e).abs() <= 3e-5 + 3e-5 * e.abs(), "{a} != {e}");
     for (pos, token) in [0, 3, 1].into_iter().enumerate() {
         let mut count = 0;
@@ -247,10 +251,10 @@ fn full_graph_python_parity_and_trace_is_observational() {
             .step_with_trace(&mut traced, token, None, Some(&mut callback))
             .unwrap();
         assert_eq!(count, 40);
-        let staged = model.step(&mut plain, token, None).unwrap();
+        let plain_logits = model.step(&mut plain, token, None).unwrap();
         assert_eq!(
             logits.iter().map(|v| v.to_bits()).collect::<Vec<_>>(),
-            staged.iter().map(|v| v.to_bits()).collect::<Vec<_>>()
+            plain_logits.iter().map(|v| v.to_bits()).collect::<Vec<_>>()
         );
         assert_eq!(snapshot(&traced), snapshot(&plain));
         assert_eq!(traced.position(), pos + 1);
@@ -274,7 +278,7 @@ fn trace_errors_and_mid_token_cancellation_poison_but_preflight_does_not() {
     let weights = Weights::new(&ctx);
     let model = weights.model(&ctx);
     let cancel = AtomicBool::new(true);
-    let mut state = model.new_state(3).unwrap();
+    let mut state = model.new_cpu_state(3).unwrap();
     let before = snapshot(&state);
     assert!(
         model
@@ -286,7 +290,7 @@ fn trace_errors_and_mid_token_cancellation_poison_but_preflight_does_not() {
     assert!(model.step(&mut state, 8, None).is_err());
     assert_eq!(before, snapshot(&state));
     for at in [0, 14, 39] {
-        let mut state = model.new_state(3).unwrap();
+        let mut state = model.new_cpu_state(3).unwrap();
         cancel.store(false, Ordering::Relaxed);
         let mut count = 0;
         let mut callback = |trace: LayerTrace<'_>| {
@@ -313,7 +317,7 @@ fn trace_errors_and_mid_token_cancellation_poison_but_preflight_does_not() {
                 .contains("poisoned")
         );
     }
-    let mut state = model.new_state(3).unwrap();
+    let mut state = model.new_cpu_state(3).unwrap();
     model.step(&mut state, 0, None).unwrap();
     let addresses = state.addresses;
     let mut callback = |_: LayerTrace<'_>| Err("trace write failed".to_owned());

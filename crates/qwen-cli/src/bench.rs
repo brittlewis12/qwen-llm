@@ -18,6 +18,8 @@ mod batch_probe;
 mod block_slice;
 #[path = "bench/decode_window.rs"]
 mod decode_window;
+#[cfg(test)]
+mod deepseek_v41_fixture;
 mod dense_block_batch;
 mod dense_whole_batch;
 #[path = "bench/dflash.rs"]

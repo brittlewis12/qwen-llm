@@ -1,19 +1,20 @@
-//! Old REAP-272E single-token NativeF32 execution. Dense weights remain resident;
+//! GGUF V4.1 single-token NativeF32 execution. Dense weights remain resident;
 //! only activations and small normalization/control vectors are copied to CPU.
 mod attention;
 mod attention_gpu;
 mod bind;
+pub mod error;
+pub use error::StateError;
 pub mod capture;
 mod ffn_gpu;
 mod gpu_step;
 mod memory;
 pub mod profile;
-mod staging;
 mod token_map;
 pub use memory::RequestMemoryEstimate;
 pub use token_map::build_compressed_token_map;
 
-use super::{engram, loader::ResidentWeights, operators as op};
+use super::{engram, gguf::ResidentWeights, operators as op};
 use crate::metal::{self, KernelEncoder, MetalContext, MetalTensor};
 use crate::tensor::GgmlType;
 use objc2_metal::{MTLBuffer, MTLCommandBuffer, MTLCommandQueue, MTLResource};
@@ -34,7 +35,7 @@ pub struct LayerTrace<'a> {
 }
 
 enum EngramRows<'a> {
-    Disk(&'a super::loader::DiskEngram),
+    Disk(&'a super::gguf::DiskEngram),
     #[cfg(test)]
     Toy(fn(usize, &[u64]) -> Result<Vec<f32>>),
 }
@@ -48,8 +49,8 @@ impl EngramRows<'_> {
     }
 }
 
-/// Dimensions can be reduced for fixtures; layer ownership remains the old
-/// forty-layer schedule. Production callers should use Default.
+/// Runtime geometry comes from GGUF metadata. Default is the base 384-expert
+/// architecture and is useful for estimates and reduced test fixtures.
 #[derive(Clone, Debug)]
 pub struct Config {
     pub hidden: usize,
@@ -94,7 +95,7 @@ impl Default for Config {
             query_rank: 1280,
             output_rank: 1024,
             groups: 8,
-            experts: 272,
+            experts: 384,
             topk: 6,
             index_heads: 32,
             index_dim: 128,
@@ -122,10 +123,118 @@ impl Default for Config {
 struct Linear<'a> {
     ctx: &'a MetalContext,
     tensor: MetalTensor,
+    native_control: Option<MetalTensor>,
     input: usize,
     output: usize,
 }
+fn native_control(ctx: &MetalContext, dtype: GgmlType) -> Result<Option<MetalTensor>> {
+    op::require(
+        dense_linear_supported(dtype),
+        &format!("unsupported NativeF32 linear storage: {dtype:?}"),
+    )?;
+    if matches!(
+        dtype,
+        GgmlType::F32
+            | GgmlType::F16
+            | GgmlType::BF16
+            | GgmlType::IQ2_XXS
+            | GgmlType::IQ1_S
+            | GgmlType::IQ1_M
+    ) {
+        return Ok(None);
+    }
+    MetalTensor::from_bytes(
+        ctx,
+        bytemuck::cast_slice(&[0i32, metal::ROUTE_STATUS_READY]),
+        vec![2],
+        GgmlType::I32,
+    )
+    .map(Some)
+    .map_err(|e| e.to_string())
+}
+
+pub(crate) fn dense_linear_supported(dtype: GgmlType) -> bool {
+    metal::all_slots_down_native_supported(dtype)
+        || matches!(dtype, GgmlType::IQ2_XXS | GgmlType::IQ1_S | GgmlType::IQ1_M)
+}
+
 impl Linear<'_> {
+    fn encode(
+        &self,
+        enc: &KernelEncoder,
+        x: &MetalTensor,
+        y: &MetalTensor,
+    ) -> std::result::Result<(), metal::MetalError> {
+        if x.dtype != GgmlType::F32
+            || y.dtype != GgmlType::F32
+            || x.n_elements() != self.input as u64
+            || y.n_elements() != self.output as u64
+        {
+            return Err(metal::MetalError::BadShape {
+                kernel: "v41_linear",
+                detail: "linear requires matching F32 activation/output extents".into(),
+            });
+        }
+        let x = x.view_bytes(0, vec![self.input as u64]);
+        let y = y.view_bytes(0, vec![self.output as u64]);
+        let direct: Option<
+            fn(
+                &MetalContext,
+                &KernelEncoder,
+                &MetalTensor,
+                &MetalTensor,
+                &MetalTensor,
+                usize,
+                usize,
+            ) -> std::result::Result<(), metal::MetalError>,
+        > = match self.tensor.dtype {
+            GgmlType::F32 => Some(metal::encode_mat_vec_f32),
+            GgmlType::F16 => Some(metal::encode_mat_vec_f16_f32),
+            GgmlType::BF16 => Some(metal::encode_mat_vec_bf16_f32),
+            GgmlType::IQ2_XXS => Some(metal::encode_mat_vec_iq2_xxs_f32),
+            GgmlType::IQ1_S | GgmlType::IQ1_M => Some(metal::encode_mat_vec_iq1_f32),
+            _ => None,
+        };
+        if let Some(encode) = direct {
+            return encode(self.ctx, enc, &self.tensor, &x, &y, self.input, self.output);
+        }
+        if !metal::all_slots_down_native_supported(self.tensor.dtype) {
+            return Err(metal::MetalError::BadShape {
+                kernel: "v41_linear",
+                detail: format!(
+                    "unsupported NativeF32 linear storage: {:?}",
+                    self.tensor.dtype
+                ),
+            });
+        }
+        // Native expert projection avoids fast matvec paths that narrow operands
+        // to half. This is a single-bank projection, not matrix materialization.
+        let control = self
+            .native_control
+            .as_ref()
+            .expect("bound native projection control");
+        let ids = control.view_subrange(0, vec![1]);
+        let status = control.view_subrange(1, vec![1]);
+        let bank = self
+            .tensor
+            .view_bytes(0, vec![self.input as u64, self.output as u64, 1]);
+        let input = x.view_bytes(0, vec![self.input as u64, 1]);
+        let output = y.view_bytes(0, vec![self.output as u64, 1]);
+        metal::encode_all_slots_down_native(
+            self.ctx,
+            enc,
+            &bank,
+            &input,
+            &ids,
+            &status,
+            &output,
+            self.input,
+            self.output,
+            1,
+            1,
+        )
+    }
+
     fn forward(&self, x: &[f32]) -> Result<Vec<f32>> {
         let dims = [self.input, self.output, 0, 1];
         let _wall = profile::Wall("linear", dims, profile::start());
@@ -134,15 +243,7 @@ impl Linear<'_> {
         let output = MetalTensor::zeros_f32(self.ctx, vec![self.output as u64])
             .map_err(|e| e.to_string())?;
         submit(self.ctx, "linear", dims, |enc| {
-            metal::encode_mat_vec_f32(
-                self.ctx,
-                enc,
-                &self.tensor,
-                &input,
-                &output,
-                self.input,
-                self.output,
-            )
+            self.encode(enc, &input, &output)
         })?;
         Ok(f32_slice(&output)?.to_vec())
     }
@@ -180,9 +281,7 @@ impl op::Projection for Linear<'_> {
             for (i, p) in projections.iter().enumerate() {
                 let input = input.view_subrange((i * p.input) as u64, vec![p.input as u64]);
                 let output = output.view_subrange((i * p.output) as u64, vec![p.output as u64]);
-                metal::encode_mat_vec_f32(
-                    p.ctx, enc, &p.tensor, &input, &output, p.input, p.output,
-                )?;
+                p.encode(enc, &input, &output)?;
             }
             Ok(())
         })?;
@@ -258,12 +357,73 @@ fn f32_slice(t: &MetalTensor) -> Result<&[f32]> {
     })
 }
 
+fn row_bytes(t: &MetalTensor) -> Result<u64> {
+    let (block, bytes) = t
+        .dtype
+        .storage_layout()
+        .ok_or("unsupported tensor layout")?;
+    let width = *t.shape.first().ok_or("empty tensor shape")?;
+    op::require(width > 0 && width % block == 0, "unaligned tensor row")?;
+    (width / block)
+        .checked_mul(bytes)
+        .ok_or_else(|| "row extent overflow".into())
+}
+
+fn decode_rows(t: &MetalTensor, first: usize, rows: usize) -> Result<Vec<f32>> {
+    let stride = row_bytes(t)?;
+    let available = t
+        .shape
+        .iter()
+        .skip(1)
+        .try_fold(1u64, |a, &b| a.checked_mul(b))
+        .ok_or("row count overflow")?;
+    op::require(
+        (first as u64)
+            .checked_add(rows as u64)
+            .is_some_and(|end| end <= available),
+        "row outside tensor view",
+    )?;
+    let size = stride
+        .checked_mul(rows as u64)
+        .ok_or("row extent overflow")?;
+    let start = stride
+        .checked_mul(first as u64)
+        .and_then(|n| n.checked_add(t.offset))
+        .ok_or("row offset overflow")?;
+    let end = start.checked_add(size).ok_or("row extent overflow")?;
+    op::require(
+        t.buffer.storageMode() == objc2_metal::MTLStorageMode::Shared
+            && end <= t.buffer.length() as u64,
+        "invalid shared row extent",
+    )?;
+    let bytes = unsafe {
+        std::slice::from_raw_parts(
+            t.buffer
+                .contents()
+                .as_ptr()
+                .cast::<u8>()
+                .add(start as usize),
+            size as usize,
+        )
+    };
+    let desc = crate::tensor::TensorDesc {
+        name: "bounded forward rows".into(),
+        shape: vec![t.shape[0], rows as u64],
+        dtype: t.dtype,
+        shard_idx: 0,
+        data_offset: 0,
+        n_bytes: size,
+    };
+    crate::codec::dequant_to_f32(&desc, bytes).map_err(|e| e.to_string())
+}
+
 struct Hc<'a> {
     projection: Linear<'a>,
     scale: [f32; 3],
     base: Vec<f32>,
     norm: Vec<f32>,
 }
+#[cfg(test)]
 impl Hc<'_> {
     fn prepare(&self, x: &[f32], pre: &[f32], c: &Config) -> Result<(op::Mixes, Vec<f32>)> {
         let inv = (op::dot(x, x) / x.len() as f32 + c.norm_eps).sqrt().recip();
@@ -276,8 +436,23 @@ impl Hc<'_> {
 }
 struct Engram<'a> {
     projection: Linear<'a>,
-    q: Vec<f32>,
-    k: Vec<f32>,
+    gate: EngramGate,
+}
+
+enum EngramGate {
+    Separate { q: Vec<f32>, k: Vec<f32> },
+    Folded(Vec<f32>),
+}
+
+impl EngramGate {
+    fn inject(&self, x: &mut [f32], kv: &[f32], eps: f32) -> Result<()> {
+        match self {
+            Self::Separate { q, k } => inject_engram(x, kv, q, k, eps),
+            // Folded storage supplies the product directly. It is not claimed
+            // to be bit-identical to separately rounded source q/k operands.
+            Self::Folded(product) => inject_engram(x, kv, product, &vec![1.0; product.len()], eps),
+        }
+    }
 }
 struct Layer<'a> {
     attention: attention::AttentionWeights<'a>,
@@ -295,6 +470,8 @@ struct Layer<'a> {
 pub struct Forward<'a> {
     ctx: &'a MetalContext,
     engram_rows: EngramRows<'a>,
+    engram_hash: engram::HashConfig,
+    schedule: super::gguf::Schedule,
     config: Config,
     token_map: Vec<u32>,
     pad: u32,
@@ -309,9 +486,8 @@ pub struct Forward<'a> {
 /// reusing partially advanced KV caches. Start a fresh State to retry a prompt.
 pub struct State {
     gpu_step: Option<gpu_step::Workspace>,
-    ffn_gpu: Option<ffn_gpu::Workspace>,
+    #[cfg(test)]
     attention: attention::Session,
-    staging: Option<staging::Staging>,
     addresses: engram::AddressState,
     max_context: usize,
     poisoned: bool,
@@ -327,45 +503,43 @@ impl State {
 }
 
 impl<'a> Forward<'a> {
-    pub fn new_state(&self, max_context: usize) -> Result<State> {
+    pub fn new_state(&self, max_context: usize) -> std::result::Result<State, StateError> {
+        self.new_state_with_gpu_step(max_context)
+    }
+
+    #[cfg(test)]
+    fn new_cpu_state(&self, max_context: usize) -> Result<State> {
         op::require(
-            max_context > 0 && max_context as u64 <= engram::MAX_POSITION,
+            self.schedule == super::gguf::Schedule::default(),
+            "CPU test oracle requires base attention schedule",
+        )?;
+        self.empty_state(max_context)
+    }
+
+    fn empty_state(&self, max_context: usize) -> Result<State> {
+        op::require(
+            max_context > 0 && max_context as u64 <= self.engram_hash.max_position,
             "invalid maximum context",
         )?;
         Ok(State {
             gpu_step: None,
-            ffn_gpu: None,
+            #[cfg(test)]
             attention: attention::Session::default(),
-            staging: None,
-            addresses: engram::AddressState::new(self.pad).map_err(|e| format!("{e:?}"))?,
+            addresses: engram::AddressState::new_with_config(self.pad, &self.engram_hash)
+                .map_err(|e| format!("{e:?}"))?,
             max_context,
             poisoned: false,
             identity: Arc::clone(&self.identity),
         })
     }
 
-    /// Experimental active banks: admits only the added allocation against current
-    /// memory signals. Budget the full sequence separately with the staging-aware
-    /// estimate; this is not a reservation for future KV growth or other states.
-    pub fn new_state_with_expert_staging(&self, max_context: usize) -> Result<State> {
-        let mut state = self.new_state(max_context)?;
-        state.staging = Some(staging::Staging::new(self.ctx, &self.config)?);
-        Ok(state)
-    }
-
-    /// Experimental single-command GPU FFN; legacy CPU boundaries remain the
-    /// default. Includes retained per-layer constants and a reusable workspace.
-    /// This option is separate from CPU-selected active-expert staging.
-    pub fn new_state_with_gpu_ffn(&self, max_context: usize) -> Result<State> {
-        let mut state = self.new_state(max_context)?;
-        state.ffn_gpu = Some(ffn_gpu::Workspace::new(self)?);
-        Ok(state)
-    }
-
-    /// Experimental three-command token graph; legacy remains the default.
+    /// Three-command token graph used by the production default.
     /// Capacity is the actual requested token capacity, not model metadata.
-    pub fn new_state_with_gpu_step(&self, capacity: usize) -> Result<State> {
-        let mut state = self.new_state(capacity)?;
+    pub fn new_state_with_gpu_step(
+        &self,
+        capacity: usize,
+    ) -> std::result::Result<State, StateError> {
+        let mut state = self.empty_state(capacity)?;
         state.gpu_step = Some(gpu_step::Workspace::new(self, capacity)?);
         Ok(state)
     }
@@ -430,7 +604,7 @@ impl<'a> Forward<'a> {
         cancelled(cancel)?;
         let (rows, next) = state
             .addresses
-            .step(engram::Token::Compressed(compressed))
+            .step_with_config(engram::Token::Compressed(compressed), &self.engram_hash)
             .map_err(|e| format!("{e:?}"))?;
         state.poisoned = true;
         let result = self.step_inner(state, token as usize, &rows, cancel, trace, capture)?;
@@ -443,74 +617,64 @@ impl<'a> Forward<'a> {
         &self,
         state: &mut State,
         token: usize,
-        rows: &engram::Rows,
+        rows: &engram::LayerRows,
         cancel: Option<&AtomicBool>,
-        mut trace: Option<&mut dyn FnMut(LayerTrace<'_>) -> Result<()>>,
+        trace: Option<&mut dyn FnMut(LayerTrace<'_>) -> Result<()>>,
         capture: Option<&mut dyn capture::Capture>,
     ) -> Result<Vec<f32>> {
+        #[cfg(test)]
         let c = &self.config;
         let position = state.position();
         if let Some(workspace) = state.gpu_step.as_mut() {
-            op::require(
-                state.ffn_gpu.is_none() && state.staging.is_none(),
-                "GPU step excludes GPU FFN and staging modes",
-            )?;
             return workspace.run(self, position, token, rows, cancel, trace, capture);
         }
-        let embedding = &f32_slice(self.embedding)?[token * c.hidden..(token + 1) * c.hidden];
-        let mut x = embedding.repeat(4);
-        let mut pre = vec![1.0, 0.0, 0.0, 0.0];
-        for (id, layer) in self.layers.iter().enumerate() {
-            cancelled(cancel)?;
-            if let Some(e) = &layer.engram {
-                let hashes = &rows[if id == 1 { 0 } else { 1 }];
-                let values = self.engram_rows.decode(id, hashes)?;
-                let kv = e.projection.forward(&values)?;
-                inject_engram(&mut x, &kv, &e.q, &e.k, c.norm_eps)?;
-            }
-            let (mixes, input) = layer.attn_hc.prepare(&x, &pre, c)?;
-            let output = state
-                .attention
-                .attention(id, position, &input, &layer.attention)?;
-            x = op::merge(&output, &x, &mixes)?;
-            pre = mixes.pre;
-            if let Some(workspace) = state.ffn_gpu.as_mut() {
-                (x, pre) = workspace.run(self.ctx, c, layer, id, &x, &pre)?;
-            } else {
-                let (mixes, input) = layer.ffn_hc.prepare(&x, &pre, c)?;
-                let output = Self::moe(
-                    self.ctx,
-                    &self.config,
-                    layer,
-                    &input,
-                    state.staging.as_mut(),
-                )?;
+        #[cfg(not(test))]
+        {
+            Err("missing GPU step workspace".into())
+        }
+        #[cfg(test)]
+        {
+            let mut trace = trace;
+            let embedding = decode_rows(self.embedding, token, 1)?;
+            let mut x = embedding.repeat(4);
+            let mut pre = vec![1.0, 0.0, 0.0, 0.0];
+            for (id, layer) in self.layers.iter().enumerate() {
+                cancelled(cancel)?;
+                if let Some(e) = &layer.engram {
+                    let hashes = rows.get(&id).ok_or("missing Engram hashes")?;
+                    let values = self.engram_rows.decode(id, hashes)?;
+                    let kv = e.projection.forward(&values)?;
+                    e.gate.inject(&mut x, &kv, c.norm_eps)?;
+                }
+                let (mixes, input) = layer.attn_hc.prepare(&x, &pre, c)?;
+                let output = state
+                    .attention
+                    .attention(id, position, &input, &layer.attention)?;
                 x = op::merge(&output, &x, &mixes)?;
                 pre = mixes.pre;
+                let (mixes, input) = layer.ffn_hc.prepare(&x, &pre, c)?;
+                let output = Self::moe(self.ctx, &self.config, layer, &input)?;
+                x = op::merge(&output, &x, &mixes)?;
+                pre = mixes.pre;
+                if let Some(callback) = trace.as_mut() {
+                    callback(LayerTrace {
+                        position,
+                        layer: id,
+                        hidden: &x,
+                        next_pre_mix: &pre,
+                    })?;
+                }
             }
-            if let Some(callback) = trace.as_mut() {
-                callback(LayerTrace {
-                    position,
-                    layer: id,
-                    hidden: &x,
-                    next_pre_mix: &pre,
-                })?;
-            }
+            let hidden = op::rms_norm(&op::collapse(&x, &pre)?, &self.norm, c.norm_eps)?;
+            let logits = self.head.forward(&hidden)?;
+            cancelled(cancel)?;
+            op::require(logits.iter().all(|v| v.is_finite()), "non-finite logits")?;
+            Ok(logits)
         }
-        let hidden = op::rms_norm(&op::collapse(&x, &pre)?, &self.norm, c.norm_eps)?;
-        let logits = self.head.forward(&hidden)?;
-        cancelled(cancel)?;
-        op::require(logits.iter().all(|v| v.is_finite()), "non-finite logits")?;
-        Ok(logits)
     }
 
-    fn moe(
-        ctx: &MetalContext,
-        c: &Config,
-        layer: &Layer<'_>,
-        x: &[f32],
-        staging: Option<&mut staging::Staging>,
-    ) -> Result<Vec<f32>> {
+    #[cfg(test)]
+    fn moe(ctx: &MetalContext, c: &Config, layer: &Layer<'_>, x: &[f32]) -> Result<Vec<f32>> {
         let (ids, weights) = route(
             &layer.router.forward(x)?,
             &layer.bias,
@@ -518,15 +682,7 @@ impl<'a> Forward<'a> {
             c.gate_temperature,
             c.route_scale,
         )?;
-        let (banks, ids, experts) = if let Some(staging) = staging {
-            (
-                staging.copy(c, layer.banks, &ids)?,
-                (0..c.topk as i32).collect(),
-                c.topk,
-            )
-        } else {
-            (layer.banks, ids, c.experts)
-        };
+        let (banks, experts) = (layer.banks, c.experts);
         let input = upload(ctx, x, vec![c.hidden as u64])?;
         let ids_tensor = MetalTensor::from_bytes(
             ctx,
@@ -615,6 +771,7 @@ fn cancelled(cancel: Option<&AtomicBool>) -> Result<()> {
     )
 }
 
+#[cfg(test)]
 fn route(
     logits: &[f32],
     bias: &[f32],

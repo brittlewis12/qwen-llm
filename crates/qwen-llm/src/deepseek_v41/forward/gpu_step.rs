@@ -1,4 +1,4 @@
-//! Three serial commands per token, with only the two legacy Engram CPU boundaries.
+//! Serial command segments separated only by Engram CPU boundaries.
 use super::*;
 use objc2_metal::MTLSize;
 
@@ -24,23 +24,50 @@ pub(super) struct Workspace {
     trace_copies: usize,
 }
 
-pub(super) fn bytes(c: &Config, capacity: usize) -> Result<u64> {
-    let attention = attention_gpu::bytes(c, capacity)?;
-    let ffn = ffn_gpu::bytes(c)?;
-    let logits = (c.vocab as u64)
-        .checked_mul(4)
-        .ok_or("GPU logits memory overflow")?;
-    let own = (22 * c.hidden as u64 + 2 * 6144 + 64) * 4
-        + 40 * (c.hidden as u64 + 27) * 4
-        + 144 * (16384 + 1024);
-    // Includes optional forty-layer trace storage, even when tracing is disabled.
-    let trace = 40 * ((4 * c.hidden as u64 + 4) * 4 + 2 * (16384 + 1024));
-    attention
-        .checked_add(ffn)
-        .and_then(|n| n.checked_add(logits))
-        .and_then(|n| n.checked_add(own))
-        .and_then(|n| n.checked_add(trace))
-        .ok_or_else(|| "GPU step memory overflow".into())
+pub(super) fn bytes_with_schedule(
+    c: &Config,
+    capacity: usize,
+    schedule: &super::super::gguf::Schedule,
+    engrams: usize,
+) -> Result<u64> {
+    let attention = attention_gpu::bytes_with_schedule(c, capacity, schedule)?;
+    let ffn = ffn_gpu::bytes_for_layers(c, schedule.layers)?;
+    let mul = |a: u64, b: u64| {
+        a.checked_mul(b)
+            .ok_or("GPU step memory overflow".to_string())
+    };
+    let add = |a: u64, b: u64| {
+        a.checked_add(b)
+            .ok_or("GPU step memory overflow".to_string())
+    };
+    let h = c.hidden as u64;
+    let layers = schedule.layers as u64;
+    let engrams = engrams as u64;
+    let checkpoints = schedule.index_source_layers.len() as u64;
+    let slack = 16384 + 1024;
+    let own = add(add(mul(11, h)?, 64)?, c.vocab as u64)?;
+    let constants = mul(layers, add(h, 27)?)?;
+    let engram = mul(engrams, add(6144, mul(5, h)?)?)?;
+    let trace = mul(layers, add(mul(4, h)?, 4)?)?;
+    let checkpoint = mul(
+        checkpoints,
+        add(
+            add(mul(2, h)?, c.index_topk as u64)?,
+            capacity.div_ceil(c.candidate_block) as u64,
+        )?,
+    )?;
+    let allocations = add(
+        add(
+            add(mul(5, layers)?, mul(2, engrams)?)?,
+            mul(4, checkpoints)?,
+        )?,
+        16,
+    )?;
+    let logical = add(add(add(add(own, constants)?, engram)?, trace)?, checkpoint)?;
+    add(
+        add(attention, ffn)?,
+        add(mul(logical, 4)?, mul(allocations, slack)?)?,
+    )
 }
 
 fn write(t: &MetalTensor, values: &[f32]) -> Result<()> {
@@ -60,9 +87,23 @@ fn write(t: &MetalTensor, values: &[f32]) -> Result<()> {
 }
 
 impl Workspace {
-    pub(super) fn new(model: &Forward<'_>, capacity: usize) -> Result<Self> {
+    pub(super) fn new(
+        model: &Forward<'_>,
+        capacity: usize,
+    ) -> std::result::Result<Self, StateError> {
         let c = &model.config;
-        let estimate = c.estimate_request_memory_with_gpu_step(capacity)?;
+        model.schedule.validate().map_err(|e| e.to_string())?;
+        model.engram_hash.validate().map_err(|e| format!("{e:?}"))?;
+        op::require(
+            model.layers.len() == model.schedule.layers
+                && model
+                    .engram_hash
+                    .layers
+                    .iter()
+                    .all(|hash| hash.layer < model.layers.len()),
+            "GPU step schedule/Engram layer extent",
+        )?;
+        let estimate = model.estimate_request_memory_with_gpu_step(capacity)?;
         let admission = metal::evaluate_metal_memory_admission_with_cpu_bytes(
             estimate.metal_bytes,
             estimate.cpu_bytes,
@@ -71,14 +112,12 @@ impl Workspace {
             true,
         );
         if let Some(reason) = admission.refusal() {
-            return Err(format!("GPU step admission: {reason:?}"));
+            return Err(StateError::MemoryAdmissionDenied(reason));
         }
         op::require(
-            model
-                .layers
-                .iter()
-                .enumerate()
-                .all(|(id, l)| l.engram.is_some() == (id == 1 || id == 14)),
+            model.layers.iter().enumerate().all(|(id, l)| {
+                l.engram.is_some() == model.engram_hash.layers.iter().any(|hash| hash.layer == id)
+            }),
             "GPU step Engram placement",
         )?;
         let f = |n: usize| -> Result<MetalTensor> {
@@ -105,7 +144,7 @@ impl Workspace {
             })
             .collect::<Result<Vec<_>>>()?;
         Ok(Self {
-            attention: attention_gpu::Workspace::new(
+            attention: attention_gpu::Workspace::new_with_schedule(
                 model.ctx,
                 c,
                 capacity,
@@ -114,6 +153,7 @@ impl Workspace {
                     .iter()
                     .map(|l| &l.attention)
                     .collect::<Vec<_>>(),
+                &model.schedule,
             )?,
             ffn: ffn_gpu::Workspace::new(model)?,
             x: f(4 * c.hidden)?.view_subrange(0, vec![c.hidden as u64, 4]),
@@ -150,15 +190,7 @@ impl Workspace {
             self.ffn.next_pre()
         };
         let encode = || -> std::result::Result<(), metal::MetalError> {
-            metal::encode_mat_vec_f32(
-                ctx,
-                enc,
-                &l.attn_hc.projection.tensor,
-                &self.x,
-                &self.raw,
-                4 * c.hidden,
-                24,
-            )?;
+            l.attn_hc.projection.encode(enc, &self.x, &self.raw)?;
             enc.set_pipeline(&ctx.pipeline("kernel_deepseek_v41_projected_rms")?);
             enc.set_bytes(0, &((4 * c.hidden) as u32));
             enc.set_bytes(1, &c.norm_eps);
@@ -221,7 +253,7 @@ impl Workspace {
         model: &Forward<'_>,
         position: usize,
         token: usize,
-        rows: &engram::Rows,
+        rows: &engram::LayerRows,
         cancel: Option<&AtomicBool>,
         mut trace: Option<&mut dyn FnMut(LayerTrace<'_>) -> Result<()>>,
         mut capture: Option<&mut dyn capture::Capture>,
@@ -230,12 +262,22 @@ impl Workspace {
         let ctx = model.ctx;
         let snapshots = if let Some(sink) = capture.as_ref().filter(|s| s.wants_position(position))
         {
-            capture::LAYERS
-                .into_iter()
+            model
+                .schedule
+                .index_source_layers
+                .iter()
+                .copied()
                 .map(|id| {
                     Ok((
                         id,
-                        capture::Snapshot::new(ctx, c, position, id, sink.is_checkpoint(position))?,
+                        capture::Snapshot::new(
+                            ctx,
+                            c,
+                            position,
+                            id,
+                            sink.is_checkpoint(position),
+                            &model.schedule,
+                        )?,
                     ))
                 })
                 .collect::<Result<Vec<_>>>()?
@@ -244,12 +286,15 @@ impl Workspace {
         };
         self.commands = 0;
         self.trace_copies = 0;
-        let embedding = &f32_slice(model.embedding)?[token * c.hidden..(token + 1) * c.hidden];
+        let embedding = decode_rows(model.embedding, token, 1)?;
         write(&self.x, &embedding.repeat(4))?;
         let mut engrams = Vec::new();
-        for (slot, id) in [1, 14].into_iter().enumerate() {
+        for hash in &model.engram_hash.layers {
+            let id = hash.layer;
             let e = model.layers[id].engram.as_ref().ok_or("missing Engram")?;
-            let values = model.engram_rows.decode(id, &rows[slot])?;
+            let values = model
+                .engram_rows
+                .decode(id, rows.get(&id).ok_or("missing Engram hashes")?)?;
             engrams.push((
                 upload(ctx, &values, vec![values.len() as u64])?,
                 MetalTensor::zeros_dtype_unstaged(
@@ -261,7 +306,7 @@ impl Workspace {
             ));
         }
         let captures = if trace.is_some() {
-            (0..40)
+            (0..model.layers.len())
                 .map(|_| {
                     Ok((
                         MetalTensor::zeros_dtype_unstaged(
@@ -278,7 +323,12 @@ impl Workspace {
         } else {
             Vec::new()
         };
-        for (segment, (start, end)) in [(0, 1), (1, 14), (14, 40)].into_iter().enumerate() {
+        let boundaries: Vec<_> = std::iter::once(0)
+            .chain(model.engram_hash.layers.iter().map(|hash| hash.layer))
+            .chain(std::iter::once(model.layers.len()))
+            .collect();
+        for (segment, boundary) in boundaries.windows(2).enumerate() {
+            let (start, end) = (boundary[0], boundary[1]);
             cancelled(cancel)?;
             if segment > 0 {
                 let e = model.layers[start]
@@ -286,13 +336,8 @@ impl Workspace {
                     .as_ref()
                     .ok_or("missing Engram")?;
                 let mut x = f32_slice(&self.x)?.to_vec();
-                inject_engram(
-                    &mut x,
-                    f32_slice(&engrams[segment - 1].1)?,
-                    &e.q,
-                    &e.k,
-                    c.norm_eps,
-                )?;
+                e.gate
+                    .inject(&mut x, f32_slice(&engrams[segment - 1].1)?, c.norm_eps)?;
                 write(&self.x, &x)?;
             }
             let started = profile::start();
@@ -304,18 +349,11 @@ impl Workspace {
             let enc = KernelEncoder::begin(&command);
             let encoded = (|| -> Result<()> {
                 if segment == 0 {
-                    for (slot, id) in [1, 14].into_iter().enumerate() {
+                    for (slot, hash) in model.engram_hash.layers.iter().enumerate() {
+                        let id = hash.layer;
                         let p = &model.layers[id].engram.as_ref().unwrap().projection;
-                        metal::encode_mat_vec_f32(
-                            ctx,
-                            &enc,
-                            &p.tensor,
-                            &engrams[slot].0,
-                            &engrams[slot].1,
-                            p.input,
-                            p.output,
-                        )
-                        .map_err(|e| e.to_string())?;
+                        p.encode(&enc, &engrams[slot].0, &engrams[slot].1)
+                            .map_err(|e| e.to_string())?;
                     }
                 }
                 for id in start..end {
@@ -352,7 +390,7 @@ impl Workspace {
                         self.trace_copies += 2;
                     }
                 }
-                if end == 40 {
+                if end == model.layers.len() {
                     metal::encode_mhc4_collapse(
                         ctx,
                         &enc,
@@ -373,16 +411,10 @@ impl Workspace {
                         c.norm_eps,
                     )
                     .map_err(|e| e.to_string())?;
-                    metal::encode_mat_vec_f32(
-                        ctx,
-                        &enc,
-                        &model.head.tensor,
-                        &self.normalized,
-                        &self.logits,
-                        c.hidden,
-                        c.vocab,
-                    )
-                    .map_err(|e| e.to_string())?;
+                    model
+                        .head
+                        .encode(&enc, &self.normalized, &self.logits)
+                        .map_err(|e| e.to_string())?;
                 }
                 Ok(())
             })();

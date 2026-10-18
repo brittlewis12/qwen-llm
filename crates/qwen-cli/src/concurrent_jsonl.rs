@@ -523,6 +523,7 @@ fn validate_model_family_with_modes(
         }
         Some(ModelFamily::K2Horizon) => bail!("--concurrency is not supported for K2 Horizon"),
         Some(ModelFamily::Glm5Next) => bail!("--concurrency is not supported for GLM-5.3-Flash"),
+        Some(ModelFamily::DeepSeekV41) => bail!("--concurrency is not supported for DeepSeek V4.1"),
         None => bail!("--concurrency requires a supported Qwen or DeepSeek V4 model"),
     }
 }

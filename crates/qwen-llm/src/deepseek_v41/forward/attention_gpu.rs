@@ -1,5 +1,6 @@
 //! Encode-only F32 attention. Workspace metadata is provisional: a failed encode
 //! or command completion requires the caller to poison/discard the workspace.
+use super::super::gguf::Schedule;
 use super::*;
 use objc2_metal::MTLSize;
 
@@ -26,6 +27,7 @@ struct OwnerCache {
 
 pub(super) struct Workspace {
     config: Config,
+    schedule: Schedule,
     capacity: usize,
     next_layer: usize,
     next_position: usize,
@@ -60,7 +62,14 @@ fn checked_product(dims: &[usize]) -> Result<usize> {
     })
 }
 
-fn validate(c: &Config, capacity: usize) -> Result<()> {
+fn validate(c: &Config, capacity: usize, schedule: &Schedule) -> Result<()> {
+    schedule.validate().map_err(|e| e.to_string())?;
+    op::require(
+        schedule
+            .candidate_source_layer
+            .is_none_or(|source| (source..schedule.layers).all(|id| schedule.ratio(id) == 1)),
+        "candidate mask requires ratio-one coordinates after its source",
+    )?;
     op::require(
         capacity > 0 && capacity <= u32::MAX as usize / 8,
         "GPU attention capacity",
@@ -91,7 +100,7 @@ fn validate(c: &Config, capacity: usize) -> Result<()> {
         "GPU attention geometry",
     )?;
     for d in [
-        [40, c.window, c.head_dim],
+        [schedule.layers, c.window, c.head_dim],
         [capacity, c.head_dim, 1],
         [capacity, c.index_dim, 1],
         [c.heads, c.head_dim, 1],
@@ -111,10 +120,10 @@ fn validate(c: &Config, capacity: usize) -> Result<()> {
     Ok(())
 }
 
-fn shapes(c: &Config, capacity: usize) -> Result<Vec<usize>> {
-    validate(c, capacity)?;
+fn shapes(c: &Config, capacity: usize, schedule: &Schedule) -> Result<Vec<usize>> {
+    validate(c, capacity, schedule)?;
     let mut sizes = vec![
-        40 * c.window * c.head_dim,
+        schedule.layers * c.window * c.head_dim,
         c.query_rank,
         c.heads * c.head_dim,
         c.head_dim,
@@ -134,7 +143,8 @@ fn shapes(c: &Config, capacity: usize) -> Result<Vec<usize>> {
         c.hidden,
         1,
     ];
-    for ratio in [2, 2, 2, 1] {
+    for &owner in &schedule.kv_source_layers {
+        let ratio = schedule.ratio(owner);
         sizes.extend([
             capacity.div_ceil(ratio) * c.head_dim,
             capacity.div_ceil(ratio) * c.index_dim,
@@ -142,7 +152,7 @@ fn shapes(c: &Config, capacity: usize) -> Result<Vec<usize>> {
             c.head_dim,
         ]);
     }
-    for _ in 0..40 {
+    for _ in 0..schedule.layers {
         sizes.extend([
             c.query_rank,
             c.head_dim,
@@ -155,11 +165,18 @@ fn shapes(c: &Config, capacity: usize) -> Result<Vec<usize>> {
     Ok(sizes)
 }
 
+#[cfg(test)]
 pub(super) fn bytes(c: &Config, capacity: usize) -> Result<u64> {
-    shapes(c, capacity)?.into_iter().try_fold(0u64, |sum, n| {
-        sum.checked_add(n as u64 * 4 + 17408)
-            .ok_or_else(|| "GPU attention memory overflow".into())
-    })
+    bytes_with_schedule(c, capacity, &Schedule::default())
+}
+
+pub(super) fn bytes_with_schedule(c: &Config, capacity: usize, schedule: &Schedule) -> Result<u64> {
+    shapes(c, capacity, schedule)?
+        .into_iter()
+        .try_fold(0u64, |sum, n| {
+            sum.checked_add(n as u64 * 4 + 17408)
+                .ok_or_else(|| "GPU attention memory overflow".into())
+        })
 }
 
 fn tensor(ctx: &MetalContext, n: usize, dtype: GgmlType) -> Result<MetalTensor> {
@@ -224,14 +241,13 @@ fn sink_passes(
     Ok(())
 }
 fn linear(
-    ctx: &MetalContext,
+    _ctx: &MetalContext,
     enc: &KernelEncoder,
     w: &Linear<'_>,
     x: &MetalTensor,
     y: &MetalTensor,
 ) -> Result<()> {
-    metal::encode_mat_vec_f32(ctx, enc, &w.tensor, x, y, w.input, w.output)
-        .map_err(|e| e.to_string())
+    w.encode(enc, x, y).map_err(|e| e.to_string())
 }
 fn norm(
     ctx: &MetalContext,
@@ -284,10 +300,24 @@ fn copy(
 }
 
 fn projection(w: &Linear<'_>, input: usize, output: usize) -> Result<()> {
-    valid_view(&w.tensor, checked_product(&[input, output])?)?;
+    let t = &w.tensor;
+    checked_product(&[input, output])?;
+    let alignment = match t.dtype {
+        GgmlType::F32 => 4,
+        GgmlType::F16 | GgmlType::BF16 | GgmlType::IQ1_S | GgmlType::IQ1_M | GgmlType::IQ2_XXS => 2,
+        _ => 16,
+    };
+    let end = row_bytes(t)?
+        .checked_mul(output as u64)
+        .and_then(|bytes| bytes.checked_add(t.offset));
     op::require(
-        w.input == input && w.output == output && w.tensor.dtype == GgmlType::F32,
-        "GPU attention projection geometry/dtype",
+        w.input == input
+            && w.output == output
+            && t.shape == [input as u64, output as u64]
+            && dense_linear_supported(t.dtype)
+            && t.offset % alignment == 0
+            && end.is_some_and(|end| end <= t.buffer.length() as u64),
+        "GPU attention projection geometry/storage bounds",
     )
 }
 
@@ -306,6 +336,12 @@ fn valid_view(t: &MetalTensor, count: usize) -> Result<()> {
 }
 
 impl Workspace {
+    fn selected_count(&self, id: usize, position: usize) -> usize {
+        self.schedule.owner(id).map_or(0, |_| {
+            ((position + 1) / self.schedule.ratio(id)).min(self.config.index_topk)
+        })
+    }
+
     pub(super) fn capture(
         &self,
         ctx: &MetalContext,
@@ -315,7 +351,7 @@ impl Workspace {
         id: usize,
         position: usize,
     ) -> Result<()> {
-        let count = ((position + 1) / if id < 20 { 2 } else { 1 }).min(self.config.index_topk);
+        let count = self.selected_count(id, position);
         snapshot.encode(
             ctx,
             enc,
@@ -327,15 +363,29 @@ impl Workspace {
         )
     }
 
+    #[cfg(test)]
     pub(super) fn new(
         ctx: &MetalContext,
         c: &Config,
         capacity: usize,
         weights: &[&Weights<'_>],
-    ) -> Result<Self> {
-        let size = bytes(c, capacity)?;
-        op::require(weights.len() == 40, "GPU attention layer count")?;
-        for n in shapes(c, capacity)? {
+    ) -> std::result::Result<Self, StateError> {
+        Self::new_with_schedule(ctx, c, capacity, weights, &Schedule::default())
+    }
+
+    pub(super) fn new_with_schedule(
+        ctx: &MetalContext,
+        c: &Config,
+        capacity: usize,
+        weights: &[&Weights<'_>],
+        schedule: &Schedule,
+    ) -> std::result::Result<Self, StateError> {
+        let size = bytes_with_schedule(c, capacity, schedule)?;
+        op::require(
+            weights.len() == schedule.layers,
+            "GPU attention layer count",
+        )?;
+        for n in shapes(c, capacity, schedule)? {
             let priced = ctx
                 .price_shared_buffer_upper(n as u64 * 4)
                 .map_err(|e| e.to_string())?;
@@ -352,13 +402,13 @@ impl Workspace {
             true,
         );
         if let Some(reason) = admission.refusal() {
-            return Err(format!("GPU attention admission: {reason:?}"));
+            return Err(StateError::MemoryAdmissionDenied(reason));
         }
         let constants = weights
             .iter()
             .enumerate()
             .map(|(id, w)| {
-                validate_weights(c, id, w)?;
+                validate_weights(c, id, w, schedule)?;
                 let up = |x: &[f32]| upload(ctx, x, vec![x.len().max(1) as u64]);
                 Ok(Constants {
                     query_norm: up(&w.query_norm)?,
@@ -381,9 +431,11 @@ impl Workspace {
             .collect::<Result<Vec<_>>>()?;
         let f = |n| tensor(ctx, n, GgmlType::F32);
         let i = |n| tensor(ctx, n, GgmlType::I32);
-        let owners = [2, 2, 2, 1]
-            .into_iter()
-            .map(|ratio| {
+        let owners = schedule
+            .kv_source_layers
+            .iter()
+            .map(|&owner| {
+                let ratio = schedule.ratio(owner);
                 Ok(OwnerCache {
                     compressed: f(capacity.div_ceil(ratio) * c.head_dim)?,
                     keys: f(capacity.div_ceil(ratio) * c.index_dim)?,
@@ -394,11 +446,12 @@ impl Workspace {
             .collect::<Result<Vec<_>>>()?;
         Ok(Self {
             config: c.clone(),
+            schedule: schedule.clone(),
             capacity,
             next_layer: 0,
             next_position: 0,
             constants,
-            raw: f(40 * c.window * c.head_dim)?,
+            raw: f(schedule.layers * c.window * c.head_dim)?,
             owners,
             query_rank: f(c.query_rank)?,
             query: f(c.heads * c.head_dim)?,
@@ -464,7 +517,7 @@ impl Workspace {
         Ok(())
     }
 
-    /// Requires a serial encoder and strict token-major forty-layer order.
+    /// Requires a serial encoder and strict token-major schedule order.
     /// Weights and their constants must be the immutable weights passed to new.
     /// The returned tensor aliases scratch and must be consumed before reuse.
     /// No submission, wait, host activation access, or HC occurs here.
@@ -486,7 +539,7 @@ impl Workspace {
             id == self.next_layer && position == self.next_position && position < self.capacity,
             "GPU attention order/capacity",
         )?;
-        validate_weights(c, id, w)?;
+        validate_weights(c, id, w, &self.schedule)?;
         valid_view(input, c.hidden)?;
         let constants = &self.constants[id];
         linear(ctx, enc, &w.query_a, input, &self.query_rank)?;
@@ -539,13 +592,13 @@ impl Workspace {
             vec![c.head_dim as u64],
         );
         copy(ctx, enc, &self.latent, &row, c.head_dim)?;
-        let owner = [2, 8, 14, 20].into_iter().rposition(|owner| owner <= id);
+        let owner = self.schedule.owner_slot(id);
         let mut selected_count = 0;
         if let Some(owner) = owner {
             let cache = &self.owners[owner];
-            let ratio = if owner == 3 { 1 } else { 2 };
+            let ratio = self.schedule.ratio(id);
             let length = (position + 1) / ratio;
-            if id == [2, 8, 14, 20][owner] {
+            if self.schedule.owns_kv(id) {
                 let compressor = w.compressor.as_ref().ok_or("missing compressor")?;
                 linear(ctx, enc, &compressor.kv, input, &self.latent)?;
                 if ratio == 2 {
@@ -640,7 +693,7 @@ impl Workspace {
                 }
             }
             selected_count = length.min(c.index_topk);
-            if [2, 8, 14, 20, 24, 28, 32, 36].contains(&id) && length > 0 {
+            if self.schedule.produces_index(id) && length > 0 {
                 let index = w.index.as_ref().ok_or("missing index")?;
                 linear(ctx, enc, &index.query, &self.query_rank, &self.index_query)?;
                 linear(ctx, enc, &index.weights, input, &self.index_weights)?;
@@ -665,7 +718,7 @@ impl Workspace {
                 enc.set_tensor(3, &cache.keys);
                 enc.set_tensor(4, &self.index_scores);
                 dispatch(enc, length);
-                if id == 20 {
+                if self.schedule.candidate_source_layer == Some(id) {
                     let blocks = length.div_ceil(c.candidate_block);
                     pipeline(ctx, enc, "blocks")?;
                     enc.set_bytes(0, &[length as u32, c.candidate_block as u32]);
@@ -679,7 +732,15 @@ impl Workspace {
                     enc.set_tensor(2, &self.candidates);
                     dispatch(enc, blocks);
                 }
-                self.sort(ctx, enc, &self.index_scores, length, id > 20)?;
+                self.sort(
+                    ctx,
+                    enc,
+                    &self.index_scores,
+                    length,
+                    self.schedule
+                        .candidate_source_layer
+                        .is_some_and(|source| id > source),
+                )?;
                 pipeline(ctx, enc, "chronological")?;
                 enc.set_bytes(0, &(selected_count as u32));
                 enc.set_tensor(1, &self.sort_ids);
@@ -703,12 +764,15 @@ impl Workspace {
         );
         enc.set_tensor(2, &self.query);
         enc.set_tensor(3, &raw);
-        enc.set_tensor(4, &self.owners[owner.unwrap_or(0)].compressed);
+        enc.set_tensor(
+            4,
+            owner.map_or(&self.latent, |slot| &self.owners[slot].compressed),
+        );
         enc.set_tensor(5, &self.selected);
         enc.set_tensor(6, &constants.sink);
         enc.set_tensor(7, &self.attention_scores);
         enc.set_tensor(8, &self.attended);
-        let length = owner.map_or(0, |o| (position + 1) / if o == 3 { 1 } else { 2 });
+        let length = owner.map_or(0, |_| (position + 1) / self.schedule.ratio(id));
         enc.set_bytes(9, &(length as u32));
         enc.set_tensor(10, &self.status);
         sink_passes(ctx, enc, c.heads, c.head_dim, raw_count + selected_count)?;
@@ -743,7 +807,7 @@ impl Workspace {
         enc.set_tensor(1, &self.output);
         enc.set_tensor(2, &self.status);
         dispatch(enc, c.hidden);
-        self.next_layer = (id + 1) % 40;
+        self.next_layer = (id + 1) % self.schedule.layers;
         if self.next_layer == 0 {
             self.next_position += 1;
         }
@@ -757,11 +821,10 @@ impl Workspace {
     }
 }
 
-fn validate_weights(c: &Config, id: usize, w: &Weights<'_>) -> Result<()> {
-    let owns = [2, 8, 14, 20].contains(&id);
-    let produces = [2, 8, 14, 20, 24, 28, 32, 36].contains(&id);
+fn validate_weights(c: &Config, id: usize, w: &Weights<'_>, schedule: &Schedule) -> Result<()> {
+    let owns = w.compressor.is_some();
     op::require(
-        w.compressor.is_some() == owns && w.index.is_some() == produces,
+        owns == schedule.owns_kv(id) && w.index.is_some() == schedule.produces_index(id),
         "GPU attention ownership weights",
     )?;
     op::require(
@@ -793,8 +856,7 @@ fn validate_weights(c: &Config, id: usize, w: &Weights<'_>) -> Result<()> {
     for p in &w.output_a {
         projection(p, c.heads / c.groups * c.head_dim, c.output_rank)?;
     }
-    if [2, 8, 14, 20, 24, 28, 32, 36].contains(&id) {
-        let index = w.index.as_ref().ok_or("missing GPU index weights")?;
+    if let Some(index) = &w.index {
         op::require(
             index.heads == c.index_heads
                 && index.dim == c.index_dim
@@ -806,18 +868,18 @@ fn validate_weights(c: &Config, id: usize, w: &Weights<'_>) -> Result<()> {
         )?;
         projection(&index.query, c.query_rank, c.index_heads * c.index_dim)?;
         projection(&index.weights, c.hidden, c.index_heads)?;
-        if [2, 8, 14, 20].contains(&id) {
+        if owns {
             let compressor = w.compressor.as_ref().ok_or("missing GPU compressor")?;
             op::require(
-                compressor.ratio == if id == 20 { 1 } else { 2 }
+                compressor.ratio == schedule.ratio(id)
                     && compressor.norm.len() == c.head_dim
-                    && compressor.gate.is_some() == (id != 20)
+                    && compressor.gate.is_some() == (compressor.ratio == 2)
                     && compressor.norm.iter().all(|x| x.is_finite())
                     && index.key_norm.len() == c.index_dim,
                 "GPU compressor geometry",
             )?;
             projection(&compressor.kv, c.hidden, c.head_dim)?;
-            if id != 20 {
+            if compressor.ratio == 2 {
                 projection(
                     compressor.gate.as_ref().ok_or("missing GPU gate")?,
                     c.hidden,

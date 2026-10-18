@@ -360,7 +360,9 @@ pub(crate) fn run_suite(args: SuiteArgs) -> Result<()> {
     ensure!(!depths.is_empty(), "--depth needs at least one value");
     let json_mode = matches!(output, OutputFormat::Json);
 
-    let probe = GgufFile::open(&model).with_context(|| format!("open {}", model.display()))?;
+    let probe = std::sync::Arc::new(
+        GgufFile::open(&model).with_context(|| format!("open {}", model.display()))?,
+    );
     let family = ModelFamily::detect(&probe).with_context(|| {
         format!(
             "{}: architecture {:?} is not a supported family",

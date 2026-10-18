@@ -16,16 +16,35 @@ impl<'a> Binder<'a> {
             t.shape == expected,
             &format!("shape mismatch {name}: {:?} != {expected:?}", t.shape),
         )?;
-        f32_slice(t)?;
+        let rows = t
+            .shape
+            .iter()
+            .skip(1)
+            .try_fold(1u64, |n, &d| n.checked_mul(d))
+            .ok_or("tensor extent overflow")?;
+        let end = row_bytes(t)?
+            .checked_mul(rows)
+            .and_then(|n| n.checked_add(t.offset))
+            .ok_or("tensor extent overflow")?;
+        op::require(
+            end <= t.buffer.length() as u64,
+            "tensor outside resident buffer",
+        )?;
         Ok(t)
     }
     fn vector(&self, name: &str, n: usize) -> Result<Vec<f32>> {
-        Ok(f32_slice(self.tensor(name, &[n])?)?.to_vec())
+        decode_rows(self.tensor(name, &[n])?, 0, 1)
     }
     pub(super) fn linear(&self, name: &str, input: usize, output: usize) -> Result<Linear<'a>> {
+        let tensor = self.tensor(name, &[output, input])?;
+        op::require(
+            dense_linear_supported(tensor.dtype),
+            "unsupported linear storage",
+        )?;
         Ok(Linear {
             ctx: self.ctx,
-            tensor: self.tensor(name, &[output, input])?.clone(),
+            tensor: tensor.clone(),
+            native_control: native_control(self.ctx, tensor.dtype)?,
             input,
             output,
         })
@@ -39,20 +58,32 @@ impl<'a> Binder<'a> {
             norm: self.vector(&format!("layers.{layer}.{kind}_norm.weight"), c.hidden)?,
         })
     }
+    #[cfg(test)]
     pub(super) fn attention(&self, layer: usize, c: &Config) -> Result<AttentionWeights<'a>> {
+        self.attention_with_schedule(layer, c, &super::super::gguf::Schedule::default())
+    }
+    pub(super) fn attention_with_schedule(
+        &self,
+        layer: usize,
+        c: &Config,
+        schedule: &super::super::gguf::Schedule,
+    ) -> Result<AttentionWeights<'a>> {
         let p = format!("layers.{layer}.attn");
         let lin =
             |name: &str, input, output| self.linear(&format!("{p}.{name}.weight"), input, output);
         let vec = |name: &str, n| self.vector(&format!("{p}.{name}"), n);
-        let owner = [2, 8, 14, 20].contains(&layer);
-        let index = [2, 8, 14, 20, 24, 28, 32, 36].contains(&layer);
+        let owner = schedule.owns_kv(layer);
+        let index = schedule.produces_index(layer);
+        let ratio = schedule.ratio(layer);
         let group_input = c.heads * c.head_dim / c.groups;
         let output_a = lin("wo_a", group_input, c.groups * c.output_rank)?;
+        let stride = row_bytes(&output_a.tensor)?;
         let output_a = (0..c.groups)
             .map(|g| Linear {
                 ctx: self.ctx,
-                tensor: output_a.tensor.view_subrange(
-                    (g * c.output_rank * group_input) as u64,
+                native_control: output_a.native_control.clone(),
+                tensor: output_a.tensor.view_bytes(
+                    g as u64 * c.output_rank as u64 * stride,
                     vec![group_input as u64, c.output_rank as u64],
                 ),
                 input: group_input,
@@ -70,9 +101,9 @@ impl<'a> Binder<'a> {
             output_b: lin("wo_b", c.groups * c.output_rank, c.hidden)?,
             compressor: if owner {
                 Some(CompressorWeights {
-                    ratio: if layer < 20 { 2 } else { 1 },
+                    ratio,
                     kv: lin("compressor.wkv", c.hidden, c.head_dim)?,
-                    gate: if layer < 20 {
+                    gate: if ratio > 1 {
                         Some(lin("compressor.wgate", c.hidden, c.head_dim)?)
                     } else {
                         None
@@ -105,12 +136,12 @@ impl<'a> Binder<'a> {
             },
             frequencies: op::rotary_frequencies(
                 c.rope_dim,
-                if layer < 2 {
+                if ratio == 0 {
                     c.rope_theta
                 } else {
                     c.compress_theta
                 },
-                if layer < 2 { 0 } else { c.original_context },
+                if ratio == 0 { 0 } else { c.original_context },
                 c.rope_factor,
                 c.beta_fast,
                 c.beta_slow,
@@ -134,7 +165,7 @@ impl<'a> Forward<'a> {
         token_map: Vec<u32>,
         raw_pad: u32,
     ) -> Result<Self> {
-        Self::from_resident_with_config(ctx, resident, token_map, raw_pad, Config::default())
+        Self::from_resident_with_config(ctx, resident, token_map, raw_pad, resident.config.clone())
     }
 
     pub fn from_resident_with_config(
@@ -145,6 +176,11 @@ impl<'a> Forward<'a> {
         config: Config,
     ) -> Result<Self> {
         let c = &config;
+        resident.schedule.validate().map_err(|e| e.to_string())?;
+        resident
+            .engram_hash
+            .validate()
+            .map_err(|e| format!("{e:?}"))?;
         for n in [
             c.hidden,
             c.intermediate,
@@ -170,8 +206,6 @@ impl<'a> Forward<'a> {
             c.heads % c.groups == 0
                 && c.topk <= c.experts
                 && c.topk <= 16
-                && c.hidden % 32 == 0
-                && c.intermediate % 32 == 0
                 && c.rope_dim <= c.head_dim
                 && c.rope_dim <= c.index_dim,
             "invalid attention/expert geometry",
@@ -204,28 +238,18 @@ impl<'a> Forward<'a> {
             token_map.len() == c.vocab
                 && token_map
                     .iter()
-                    .all(|&id| id < engram::COMPRESSED_VOCAB_SIZE),
+                    .all(|&id| id < resident.engram_hash.compressed_vocab_size),
             "compressed token map shape/range",
         )?;
         let pad = *token_map
             .get(raw_pad as usize)
             .ok_or("pad outside raw vocabulary")?;
-        if c.vocab == 129280 {
-            let mut seen = vec![false; engram::COMPRESSED_VOCAB_SIZE as usize];
-            for &id in &token_map {
-                seen[id as usize] = true;
-            }
-            op::require(
-                seen.iter().all(|&v| v),
-                "compressed map must cover exactly 99092 IDs",
-            )?;
-        }
         let b = Binder {
             ctx,
             weights: &resident.dense,
         };
-        let mut layers = Vec::with_capacity(40);
-        for id in 0..40 {
+        let mut layers = Vec::with_capacity(resident.schedule.layers);
+        for id in 0..resident.schedule.layers {
             let p = format!("layers.{id}.ffn");
             let mut banks = Vec::new();
             for (part, input, output) in [
@@ -237,14 +261,13 @@ impl<'a> Forward<'a> {
                     .bank(id, part)
                     .ok_or_else(|| format!("missing expert bank {id}/{part}"))?;
                 let expected = vec![input as u64, output as u64, c.experts as u64];
-                let bytes = (input as u64 / 32)
-                    .checked_mul(17)
-                    .and_then(|n| n.checked_mul(output as u64))
+                let bytes = row_bytes(t)?
+                    .checked_mul(output as u64)
                     .and_then(|n| n.checked_mul(c.experts as u64))
                     .and_then(|n| n.checked_add(t.offset))
                     .ok_or("expert extent overflow")?;
                 op::require(
-                    t.dtype == GgmlType::MXFP4
+                    metal::all_slots_down_native_supported(t.dtype)
                         && t.shape == expected
                         && t.offset % 16 == 0
                         && bytes <= t.buffer.length() as u64,
@@ -252,18 +275,36 @@ impl<'a> Forward<'a> {
                 )?;
                 banks.push(t);
             }
-            let engram = if [1, 14].contains(&id) {
+            let engram = if resident.engram_hash.layers.iter().any(|p| p.layer == id) {
                 let p = format!("layers.{id}.engram");
                 Some(Engram {
                     projection: b.linear(&format!("{p}.wkv.weight"), 6144, 5 * c.hidden)?,
-                    q: f32_slice(b.tensor(&format!("{p}.q_weight"), &[4, c.hidden])?)?.to_vec(),
-                    k: f32_slice(b.tensor(&format!("{p}.k_weight"), &[4, c.hidden])?)?.to_vec(),
+                    gate: if let Some(t) = b.weights.get(&format!("{p}.gate.weight")) {
+                        op::require(
+                            t.shape == vec![c.hidden as u64, 4],
+                            "folded Engram gate shape",
+                        )?;
+                        EngramGate::Folded(decode_rows(t, 0, 4)?)
+                    } else {
+                        EngramGate::Separate {
+                            q: decode_rows(
+                                b.tensor(&format!("{p}.q_weight"), &[4, c.hidden])?,
+                                0,
+                                4,
+                            )?,
+                            k: decode_rows(
+                                b.tensor(&format!("{p}.k_weight"), &[4, c.hidden])?,
+                                0,
+                                4,
+                            )?,
+                        }
+                    },
                 })
             } else {
                 None
             };
             layers.push(Layer {
-                attention: b.attention(id, c)?,
+                attention: b.attention_with_schedule(id, c, &resident.schedule)?,
                 attn_hc: b.hc(id, "attn", c)?,
                 ffn_hc: b.hc(id, "ffn", c)?,
                 router: b.linear(&format!("{p}.gate.weight"), c.hidden, c.experts)?,
@@ -295,6 +336,8 @@ impl<'a> Forward<'a> {
         Ok(Self {
             ctx,
             engram_rows: EngramRows::Disk(&resident.engram),
+            engram_hash: resident.engram_hash.clone(),
+            schedule: resident.schedule.clone(),
             config,
             token_map,
             pad,

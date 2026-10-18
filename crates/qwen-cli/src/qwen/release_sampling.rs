@@ -25,6 +25,7 @@ pub(crate) fn release_sampling(identity: ReleaseIdentity, seed: u64) -> Sampling
         // preset found it equal or better and loop-free.
         ReleaseIdentity::Qwen { .. } => SamplingConfig::qwen3_release(1.0, seed),
         ReleaseIdentity::FlashNext => SamplingConfig::qwen38_flash_next(seed),
+        ReleaseIdentity::DeepSeekV41 => crate::deepseek_v41::default_sampling(seed),
         ReleaseIdentity::DeepSeekV4 => SamplingConfig::deepseek_v4_0731(seed),
         ReleaseIdentity::MuseGlimmer => SamplingConfig::muse_glimmer(seed),
         ReleaseIdentity::K2Horizon => SamplingConfig::k2_horizon(seed),

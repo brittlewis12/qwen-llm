@@ -527,6 +527,7 @@ pub(crate) fn run(args: LensRunArgs) -> Result<()> {
     })?;
     validate_family_inputs(family, &args)?;
     match family {
+        ModelFamily::DeepSeekV41 => bail!("DeepSeek V4.1 has no Lens runtime"),
         ModelFamily::MuseGlimmer => {
             return crate::muse_lens_run::run(
                 &args,

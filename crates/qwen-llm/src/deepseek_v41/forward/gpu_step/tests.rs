@@ -1,5 +1,60 @@
 use super::*;
 
+#[test]
+fn metadata_schedule_drives_full_gpu_graph_and_engram_at_zero() {
+    let ctx = MetalContext::new().unwrap();
+    let weights = toy::Weights::new(&ctx);
+    for use_engram in [false, true] {
+        let mut model = weights.model(&ctx);
+        let engram = model.layers[1].engram.take();
+        model.layers = model
+            .layers
+            .into_iter()
+            .enumerate()
+            .filter_map(|(id, layer)| [0, 2, 3, 20, 24, 25].contains(&id).then_some(layer))
+            .collect();
+        model.schedule = super::super::super::gguf::Schedule {
+            layers: 6,
+            kv_source_layers: vec![1, 3],
+            index_source_layers: vec![1, 3, 4],
+            compression_ratios: vec![0, 2, 2, 1, 1, 1],
+            candidate_source_layer: Some(3),
+        };
+        if use_engram {
+            model.layers[0].engram = engram;
+            model.engram_hash.layers.truncate(1);
+            model.engram_hash.layers[0].layer = 0;
+        } else {
+            model.engram_hash.layers.clear();
+        }
+        let mut state = model.new_state(3).unwrap();
+        let mut plain = model.new_state_with_gpu_step(3).unwrap();
+        for (position, token) in [0, 3, 1].into_iter().enumerate() {
+            let mut count = 0;
+            let logits = model
+                .step_with_trace(
+                    &mut state,
+                    token,
+                    None,
+                    Some(&mut |trace| {
+                        assert_eq!((trace.position, trace.layer), (position, count));
+                        count += 1;
+                        assert!(trace.hidden.iter().all(|v| v.is_finite()));
+                        Ok(())
+                    }),
+                )
+                .unwrap();
+            assert_eq!(count, 6);
+            assert_eq!(logits, model.step(&mut plain, token, None).unwrap());
+            assert_eq!(state.position(), position + 1);
+            let workspace = state.gpu_step.as_ref().unwrap();
+            assert_eq!(workspace.commands, if use_engram { 2 } else { 1 });
+            assert_eq!(workspace.constants.len(), 6);
+            assert_eq!(workspace.trace_copies, 12);
+        }
+    }
+}
+
 // F32 reduction trees differ from the scalar CPU/Python reference.
 fn close(a: &[f32], b: &[f32]) {
     assert_eq!(a.len(), b.len());
@@ -15,7 +70,7 @@ fn forty_layers_python_legacy_trace_and_three_commands() {
     let model = weights.model(&ctx);
     let expected: serde_json::Value =
         serde_json::from_str(include_str!("../toy_expected.json")).unwrap();
-    let mut legacy = model.new_state(5).unwrap();
+    let mut legacy = model.new_cpu_state(5).unwrap();
     let mut traced = model.new_state_with_gpu_step(5).unwrap();
     let mut plain = model.new_state_with_gpu_step(5).unwrap();
     for (position, token) in [0, 3, 1, 4, 2].into_iter().enumerate() {
@@ -225,13 +280,6 @@ fn capacity_memory_and_modes_are_explicit() {
     let ctx = MetalContext::new().unwrap();
     let weights = toy::Weights::new(&ctx);
     let model = weights.model(&ctx);
-    let mut state = model.new_state_with_gpu_step(1).unwrap();
-    state.ffn_gpu = Some(ffn_gpu::Workspace::new(&model).unwrap());
-    assert!(
-        model
-            .step(&mut state, 0, None)
-            .unwrap_err()
-            .contains("excludes")
-    );
-    assert!(state.is_poisoned());
+    let state = model.new_state(1).unwrap();
+    assert!(state.gpu_step.is_some());
 }

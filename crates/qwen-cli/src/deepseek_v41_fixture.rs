@@ -1,0 +1,156 @@
+//! Tiny header fixtures shared by CLI unit tests; never loaded on Metal.
+use qwen_llm::gguf::GgufFile;
+use std::io::Write;
+
+enum Value {
+    Number(u32),
+    Text(String),
+    Numbers(Vec<u32>),
+    Texts(Vec<String>),
+}
+
+fn string(out: &mut Vec<u8>, value: &str) {
+    out.extend((value.len() as u64).to_le_bytes());
+    out.extend(value.as_bytes());
+}
+
+pub(crate) fn gguf(experts: u32, context_key: &str) -> GgufFile {
+    use Value::*;
+    let mut tokens = Vec::new();
+    let mut extra = 256;
+    for byte in 0..=255u32 {
+        let code = if (33..=126).contains(&byte) || (161..=172).contains(&byte) || byte >= 174 {
+            byte
+        } else {
+            extra += 1;
+            extra - 1
+        };
+        tokens.push(char::from_u32(code).unwrap().to_string());
+    }
+    tokens.push(deepseek_recipe_encoding::v4::EOS_TOKEN.into());
+    let kv = vec![
+        ("general.architecture", Text("deepseek41".into())),
+        ("deepseek41.expert_count", Number(experts)),
+        ("deepseek41.expert_used_count", Number(1)),
+        ("deepseek41.block_count", Number(1)),
+        ("deepseek41.vocab_size", Number(257)),
+        ("deepseek41.num_attention_heads", Number(1)),
+        ("deepseek41.head_dim", Number(2)),
+        ("deepseek41.qk_rope_head_dim", Number(2)),
+        ("deepseek41.q_lora_rank", Number(2)),
+        ("deepseek41.o_lora_rank", Number(2)),
+        ("deepseek41.o_groups", Number(1)),
+        ("deepseek41.index_n_heads", Number(1)),
+        ("deepseek41.index_head_dim", Number(2)),
+        (context_key, Number(64)),
+        ("deepseek41.engram.token_map", Numbers((0..257).collect())),
+        ("deepseek41.engram.pad_id", Number(1)),
+        ("deepseek41.engram.layers", Numbers(vec![])),
+        ("tokenizer.ggml.model", Text("gpt2".into())),
+        ("tokenizer.ggml.pre", Text("deepseek-v3".into())),
+        ("tokenizer.ggml.tokens", Texts(tokens)),
+        ("tokenizer.ggml.merges", Texts(vec![])),
+        (
+            "tokenizer.ggml.token_type",
+            Numbers((0..257).map(|i| if i == 256 { 3 } else { 1 }).collect()),
+        ),
+        ("tokenizer.ggml.bos_token_id", Number(256)),
+        ("tokenizer.ggml.eos_token_id", Number(256)),
+    ];
+    let mut tensors: Vec<(String, Vec<u64>)> = vec![
+        ("token_embd.weight".into(), vec![2, 257]),
+        ("output.weight".into(), vec![2, 257]),
+        ("output_norm.weight".into(), vec![2]),
+    ];
+    for (name, shape) in [
+        ("attn_norm.weight", vec![2]),
+        ("ffn_norm.weight", vec![2]),
+        ("attn_sinks.weight", vec![1]),
+        ("attn_q_a.weight", vec![2, 2]),
+        ("attn_q_b.weight", vec![2, 2]),
+        ("attn_q_a_norm.weight", vec![2]),
+        ("attn_kv.weight", vec![2, 2]),
+        ("attn_kv_a_norm.weight", vec![2]),
+        ("attn_output_a.weight", vec![2, 2]),
+        ("attn_output_b.weight", vec![2, 2]),
+        ("ffn_gate_inp.weight", vec![2, experts as u64]),
+        ("exp_probs_b.bias", vec![experts as u64]),
+        ("ffn_gate_shexp.weight", vec![2, 2]),
+        ("ffn_up_shexp.weight", vec![2, 2]),
+        ("ffn_down_shexp.weight", vec![2, 2]),
+        ("hc_attn_fn.weight", vec![8, 24]),
+        ("hc_attn_scale.weight", vec![3]),
+        ("hc_attn_base.weight", vec![24]),
+        ("hc_ffn_fn.weight", vec![8, 24]),
+        ("hc_ffn_scale.weight", vec![3]),
+        ("hc_ffn_base.weight", vec![24]),
+        ("ffn_gate_exps.weight", vec![2, 2, experts as u64]),
+        ("ffn_up_exps.weight", vec![2, 2, experts as u64]),
+        ("ffn_down_exps.weight", vec![2, 2, experts as u64]),
+    ] {
+        tensors.push((format!("blk.0.{name}"), shape));
+    }
+    let mut out = b"GGUF".to_vec();
+    out.extend(3u32.to_le_bytes());
+    out.extend((tensors.len() as u64).to_le_bytes());
+    out.extend((kv.len() as u64).to_le_bytes());
+    for (key, value) in kv {
+        string(&mut out, key);
+        match value {
+            Number(n) => {
+                out.extend(4u32.to_le_bytes());
+                out.extend(n.to_le_bytes());
+            }
+            Text(s) => {
+                out.extend(8u32.to_le_bytes());
+                string(&mut out, &s);
+            }
+            Numbers(values) => {
+                out.extend(9u32.to_le_bytes());
+                out.extend(4u32.to_le_bytes());
+                out.extend((values.len() as u64).to_le_bytes());
+                for n in values {
+                    out.extend(n.to_le_bytes());
+                }
+            }
+            Texts(values) => {
+                out.extend(9u32.to_le_bytes());
+                out.extend(8u32.to_le_bytes());
+                out.extend((values.len() as u64).to_le_bytes());
+                for s in values {
+                    string(&mut out, &s);
+                }
+            }
+        }
+    }
+    let mut offset = 0u64;
+    for (name, shape) in tensors {
+        string(&mut out, &name);
+        out.extend((shape.len() as u32).to_le_bytes());
+        for n in &shape {
+            out.extend(n.to_le_bytes());
+        }
+        out.extend(0u32.to_le_bytes());
+        out.extend(offset.to_le_bytes());
+        offset = (offset + shape.iter().product::<u64>() * 4).next_multiple_of(32);
+    }
+    out.resize(out.len().next_multiple_of(32), 0);
+    let path = std::env::temp_dir().join(format!(
+        "v41-cli-{}-{}.gguf",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    let mut file = std::fs::OpenOptions::new()
+        .create_new(true)
+        .read(true)
+        .write(true)
+        .open(&path)
+        .unwrap();
+    std::fs::remove_file(&path).unwrap();
+    file.write_all(&out).unwrap();
+    file.set_len(out.len() as u64 + offset).unwrap();
+    GgufFile::from_opened_file(file, "v41-synthetic.gguf").unwrap()
+}

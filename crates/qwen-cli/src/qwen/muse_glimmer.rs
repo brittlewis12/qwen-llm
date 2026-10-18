@@ -76,7 +76,7 @@ pub(crate) fn prepare_muse_glimmer_prompt(
                 add_special_tokens: prompt_add_special_tokens(args, source),
             })
         }
-        cli::Invocation::Serve(_) | cli::Invocation::Info(_) | cli::Invocation::DeepSeekV41(_) => {
+        cli::Invocation::Serve(_) | cli::Invocation::Info(_) => {
             bail!("Muse Glimmer prompt preparation is a run/legacy path")
         }
     }

@@ -2,6 +2,191 @@ use super::*;
 use std::collections::BTreeMap;
 
 #[test]
+fn folded_engram_storage_is_explicit() {
+    let separate = EngramGate::Separate {
+        q: vec![0.5; 16],
+        k: vec![0.25; 16],
+    };
+    let folded = EngramGate::Folded(vec![0.125; 16]);
+    let mut a = vec![0.75; 16];
+    let mut b = a.clone();
+    let kv = vec![0.25; 20];
+    separate.inject(&mut a, &kv, 1e-6).unwrap();
+    folded.inject(&mut b, &kv, 1e-6).unwrap();
+    assert_eq!(a, b);
+    assert!(folded.inject(&mut b, &kv[..19], 1e-6).is_err());
+}
+
+#[test]
+fn gguf_dense_bf16_q8_bounded_rows_and_group_offsets() {
+    let ctx = MetalContext::new().unwrap();
+    let input = 32;
+    let output = 8;
+    let x: Vec<f32> = (0..input).map(|i| (i as f32 - 11.0) / 31.001).collect();
+    for dtype in [GgmlType::BF16, GgmlType::Q8_0] {
+        let mut bytes = Vec::new();
+        for row in 0..16 {
+            if dtype == GgmlType::BF16 {
+                for j in 0..32 {
+                    let v = ((row + j) as f32 - 17.0) / 32.0;
+                    bytes.extend_from_slice(&((v.to_bits() >> 16) as u16).to_le_bytes());
+                }
+            } else {
+                bytes.extend_from_slice(&half::f16::from_f32(0.03125).to_bits().to_le_bytes());
+                bytes.extend((0..32).map(|j| ((row + j) as i8 - 17) as u8));
+            }
+        }
+        let tensor = MetalTensor::from_bytes(&ctx, &bytes, vec![32, 16], dtype).unwrap();
+        assert!(decode_rows(&tensor, 16, 1).is_err());
+        let stride = row_bytes(&tensor).unwrap();
+        let projections: Vec<_> = (0..2)
+            .map(|group| Linear {
+                native_control: native_control(&ctx, dtype).unwrap(),
+                ctx: &ctx,
+                tensor: tensor.view_bytes(group * 8 * stride, vec![32, 8]),
+                input,
+                output,
+            })
+            .collect();
+        for (group, projection) in projections.iter().enumerate() {
+            let actual = projection.forward(&x).unwrap();
+            for (row, actual) in actual.into_iter().enumerate() {
+                let values = decode_rows(&tensor, group * output + row, 1).unwrap();
+                assert_eq!(values.len(), input);
+                let expected = op::dot(&values, &x);
+                assert!(
+                    (actual - expected).abs() < 2e-5,
+                    "{dtype:?}: {actual} != {expected}"
+                );
+            }
+        }
+        let grouped =
+            <Linear<'_> as op::Projection>::forward_grouped(&projections, &x.repeat(2)).unwrap();
+        let serial: Vec<_> = projections
+            .iter()
+            .flat_map(|p| p.forward(&x).unwrap())
+            .collect();
+        assert_eq!(grouped, serial);
+    }
+}
+
+#[test]
+fn gguf_quant_bank_real_expert_counts_high_ids() {
+    let ctx = MetalContext::new().unwrap();
+    for experts in [384, 272, 320] {
+        let mut bytes = Vec::new();
+        for expert in 0..experts {
+            for row in 0..8 {
+                bytes.extend_from_slice(&half::f16::from_f32(0.03125).to_bits().to_le_bytes());
+                bytes.extend((0..32).map(|j| (((expert + row + j) % 31) as i8 - 15) as u8));
+            }
+        }
+        let bank =
+            MetalTensor::from_bytes(&ctx, &bytes, vec![32, 8, experts as u64], GgmlType::Q8_0)
+                .unwrap();
+        let selected = [experts as i32 - 1, experts as i32 - 2];
+        if experts > 272 {
+            assert!(selected.iter().all(|&id| id >= 272));
+        }
+        let ids = MetalTensor::from_bytes(
+            &ctx,
+            bytemuck::cast_slice(&selected),
+            vec![2],
+            GgmlType::I32,
+        )
+        .unwrap();
+        let status = MetalTensor::from_bytes(
+            &ctx,
+            bytemuck::cast_slice(&[metal::ROUTE_STATUS_READY]),
+            vec![1],
+            GgmlType::I32,
+        )
+        .unwrap();
+        let x: Vec<_> = (0..64).map(|i| (i as f32 - 20.0) / 63.001).collect();
+        let input = upload(&ctx, &x, vec![32, 2]).unwrap();
+        let output = MetalTensor::zeros_f32(&ctx, vec![8, 2]).unwrap();
+        submit(&ctx, "quant_bank", [0; 4], |enc| {
+            metal::encode_all_slots_down_native(
+                &ctx, enc, &bank, &input, &ids, &status, &output, 32, 8, experts, 2,
+            )
+        })
+        .unwrap();
+        for (slot, &expert) in selected.iter().enumerate() {
+            for row in 0..8 {
+                let values = decode_rows(&bank, expert as usize * 8 + row, 1).unwrap();
+                let expected = op::dot(&values, &x[slot * 32..(slot + 1) * 32]);
+                assert!((f32_slice(&output).unwrap()[slot * 8 + row] - expected).abs() < 2e-5);
+            }
+        }
+    }
+}
+
+#[test]
+fn gguf_dense_extra_iq_formats_preserve_f32_operands() {
+    let ctx = MetalContext::new().unwrap();
+    for dtype in [GgmlType::IQ2_XXS, GgmlType::IQ1_S, GgmlType::IQ1_M] {
+        assert!(dense_linear_supported(dtype));
+        let (_, stride) = dtype.storage_layout().unwrap();
+        let mut bytes = vec![0u8; stride as usize * 8];
+        for (row, block) in bytes.chunks_exact_mut(stride as usize).enumerate() {
+            for (i, byte) in block.iter_mut().enumerate() {
+                *byte = (i * 11 + row * 7) as u8;
+            }
+            let scale = half::f16::from_f32((row + 1) as f32 / 1024.0).to_bits();
+            if dtype == GgmlType::IQ1_M {
+                for i in 0..4 {
+                    let old = u16::from_le_bytes([block[48 + 2 * i], block[49 + 2 * i]]);
+                    let value = (old & 0x0fff) | (((scale >> (4 * i)) & 15) << 12);
+                    block[48 + 2 * i..50 + 2 * i].copy_from_slice(&value.to_le_bytes());
+                }
+            } else {
+                block[..2].copy_from_slice(&scale.to_le_bytes());
+            }
+        }
+        let tensor = MetalTensor::from_bytes(&ctx, &bytes, vec![256, 8], dtype).unwrap();
+        let linear = Linear {
+            ctx: &ctx,
+            tensor,
+            input: 256,
+            output: 8,
+            native_control: native_control(&ctx, dtype).unwrap(),
+        };
+        assert!(linear.native_control.is_none());
+        let x: Vec<_> = (0..256).map(|i| 70000.125 + i as f32 / 31.001).collect();
+        let actual = linear.forward(&x).unwrap();
+        let input = upload(&ctx, &x, vec![64, 4]).unwrap();
+        let output = MetalTensor::zeros_f32(&ctx, vec![4, 2]).unwrap();
+        submit(&ctx, "iq_shaped_activation", [0; 4], |enc| {
+            linear.encode(enc, &input, &output)
+        })
+        .unwrap();
+        assert_eq!(actual, f32_slice(&output).unwrap());
+        for (row, &actual) in actual.iter().enumerate() {
+            let values = decode_rows(&linear.tensor, row, 1).unwrap();
+            let expected: f64 = values
+                .iter()
+                .zip(&x)
+                .map(|(&w, &x)| f64::from(w) * f64::from(x))
+                .sum();
+            assert!(actual.is_finite(), "{dtype:?} narrowed F32 activations");
+            assert!(
+                (f64::from(actual) - expected).abs() <= 0.01 + 3e-5 * expected.abs(),
+                "{dtype:?}: {actual} != {expected}"
+            );
+        }
+    }
+    for dtype in [GgmlType::Q5_0, GgmlType::Q5_1] {
+        assert!(!dense_linear_supported(dtype));
+        assert!(
+            native_control(&ctx, dtype)
+                .err()
+                .unwrap()
+                .contains("unsupported NativeF32")
+        );
+    }
+}
+
+#[test]
 fn grouped_projection_default_validates_and_preserves_order() {
     use op::Projection;
     let p = vec![
@@ -32,6 +217,7 @@ fn grouped_linear_bitwise_serial_gpu_witness() {
                     .map(|i| (((i * 17 + g * 31) % 257) as f32 - 128.0) / 257.0)
                     .collect();
                 Linear {
+                    native_control: None,
                     ctx: &ctx,
                     tensor: upload(&ctx, &weights, vec![input as u64, output as u64]).unwrap(),
                     input,
@@ -85,6 +271,7 @@ fn profile_linear_completed_and_scope_cleanup() {
     assert!(profile::start().is_none());
     let ctx = MetalContext::new().expect("Metal required");
     let linear = Linear {
+        native_control: None,
         ctx: &ctx,
         tensor: upload(&ctx, &[1.0; 64], vec![8, 8]).unwrap(),
         input: 8,
@@ -391,6 +578,7 @@ fn six_native_experts_plus_shared_match_cpu_f32() {
             .map(|i| (((i * 7 + phase) % 31) as f32 - 15.0) / 70.0)
             .collect();
         Linear {
+            native_control: None,
             ctx: &ctx,
             tensor: upload(&ctx, &values, vec![input as u64, output as u64]).unwrap(),
             input,
@@ -458,12 +646,6 @@ fn six_native_experts_plus_shared_match_cpu_f32() {
     {
         *e += v;
     }
-    let legacy = Forward::moe(&ctx, &c, &layer, &x, None).unwrap();
+    let legacy = Forward::moe(&ctx, &c, &layer, &x).unwrap();
     close(&legacy, &expected);
-    let mut staging = staging::Staging::new(&ctx, &c).unwrap();
-    let staged = Forward::moe(&ctx, &c, &layer, &x, Some(&mut staging)).unwrap();
-    assert_eq!(
-        legacy.iter().map(|v| v.to_bits()).collect::<Vec<_>>(),
-        staged.iter().map(|v| v.to_bits()).collect::<Vec<_>>()
-    );
 }

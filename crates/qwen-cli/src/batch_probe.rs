@@ -253,6 +253,10 @@ fn capabilities(family: ModelFamily) -> Vec<ModeCapability> {
             "unsupported",
             "Flash-Next queue-overlap probing requires a family-specific session backend",
         ),
+        ModelFamily::DeepSeekV41 => (
+            "unsupported",
+            "V4.1 queue-overlap probing is not implemented",
+        ),
         ModelFamily::DeepSeek4 => (
             "primitive_only",
             "shared immutable residency exists; layer-synchronous backend required",
@@ -1278,6 +1282,7 @@ pub fn run(args: QueueOverlapProbeArgs, build: Value) -> Result<()> {
         ModelFamily::Qwen4Exp
             | ModelFamily::MuseGlimmer
             | ModelFamily::K2Horizon
+            | ModelFamily::DeepSeekV41
             | ModelFamily::Glm5Next
     ) {
         bail!(
@@ -1291,6 +1296,7 @@ pub fn run(args: QueueOverlapProbeArgs, build: Value) -> Result<()> {
         ModelFamily::Qwen4Exp
         | ModelFamily::MuseGlimmer
         | ModelFamily::K2Horizon
+        | ModelFamily::DeepSeekV41
         | ModelFamily::Glm5Next => {
             unreachable!("unsupported families fail before Metal init")
         }
@@ -1304,6 +1310,7 @@ pub fn run(args: QueueOverlapProbeArgs, build: Value) -> Result<()> {
         ModelFamily::Qwen4Exp
         | ModelFamily::MuseGlimmer
         | ModelFamily::K2Horizon
+        | ModelFamily::DeepSeekV41
         | ModelFamily::Glm5Next => {
             unreachable!("unsupported families fail before Metal init")
         }

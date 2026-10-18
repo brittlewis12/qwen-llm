@@ -315,6 +315,9 @@ pub fn qwen_template_for_gguf(gguf: &GgufFile) -> Result<QwenTemplate> {
         ) => serve_qwen_template(family, gguf),
         Some(ModelFamily::K2Horizon) => bail!("K2 Horizon has no Qwen prompt or output protocol"),
         Some(ModelFamily::Glm5Next) => bail!("GLM-5.3-Flash has no Qwen prompt or output protocol"),
+        Some(ModelFamily::DeepSeekV41) => {
+            bail!("DeepSeek V4.1 has no Qwen prompt or output protocol")
+        }
         _ => Ok(QwenTemplate::Generic),
     }
 }

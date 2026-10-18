@@ -42,6 +42,86 @@ const MULTIPLIERS: [[u64; 4]; 2] = [
 
 /// Rows by layer [1, 14], then n-gram length [2, 3, 4], eight heads each.
 pub type Rows = [[u64; 24]; 2];
+pub type LayerRows = std::collections::BTreeMap<usize, [u64; 24]>;
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct LayerHash {
+    pub layer: usize,
+    pub primes: [u64; 24],
+    pub offsets: [u64; 24],
+    pub multipliers: [u64; 4],
+    pub rows: u64,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct HashConfig {
+    pub layers: Vec<LayerHash>,
+    pub compressed_vocab_size: u32,
+    pub max_position: u64,
+}
+impl Default for HashConfig {
+    fn default() -> Self {
+        Self {
+            layers: (0..2)
+                .map(|i| {
+                    let mut offset = 0;
+                    let offsets = PRIMES[i].map(|prime| {
+                        let start = offset;
+                        offset += prime;
+                        start
+                    });
+                    LayerHash {
+                        layer: LAYER_IDS[i] as usize,
+                        primes: PRIMES[i],
+                        offsets,
+                        multipliers: MULTIPLIERS[i],
+                        rows: TABLE_TOTALS[i],
+                    }
+                })
+                .collect(),
+            compressed_vocab_size: COMPRESSED_VOCAB_SIZE,
+            max_position: MAX_POSITION,
+        }
+    }
+}
+impl HashConfig {
+    pub fn validate(&self) -> Result<(), AddressError> {
+        if self.compressed_vocab_size == 0 || self.max_position == 0 {
+            return Err(AddressError::InvalidConfig("empty vocabulary/context"));
+        }
+        if self.layers.windows(2).any(|w| w[0].layer >= w[1].layer) {
+            return Err(AddressError::InvalidConfig(
+                "unordered or duplicate hash layers",
+            ));
+        }
+        for layer in &self.layers {
+            let mut end = 0u64;
+            for (&prime, &offset) in layer.primes.iter().zip(&layer.offsets) {
+                if prime < 2 || offset != end {
+                    return Err(AddressError::InvalidConfig("bucket geometry"));
+                }
+                end = end
+                    .checked_add(prime)
+                    .ok_or(AddressError::InvalidConfig("bucket overflow"))?;
+            }
+            if end != layer.rows {
+                return Err(AddressError::InvalidConfig("bucket/table rows"));
+            }
+            for &m in &layer.multipliers {
+                if m % 2 == 0
+                    || u64::from(self.compressed_vocab_size - 1)
+                        .checked_mul(m)
+                        .is_none_or(|n| n > i64::MAX as u64)
+                {
+                    return Err(AddressError::InvalidConfig(
+                        "hash product outside signed int64",
+                    ));
+                }
+            }
+        }
+        Ok(())
+    }
+}
 
 /// `Dead` is a boundary, never an integer ID or an alias for padding.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -52,6 +132,7 @@ pub enum Token {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum AddressError {
+    InvalidConfig(&'static str),
     InvalidCompressedId(u32),
     InvalidPadId(u32),
     InvalidPosition(u64),
@@ -67,6 +148,8 @@ pub struct AddressState {
     history: [Token; 3],
     pad: u32,
     position: u64,
+    vocab_size: u32,
+    max_position: u64,
 }
 
 impl AddressState {
@@ -75,14 +158,28 @@ impl AddressState {
         Self::restore(pad, 0, &[])
     }
 
+    pub fn new_with_config(pad: u32, config: &HashConfig) -> Result<Self, AddressError> {
+        Self::restore_with_config(pad, 0, &[], config)
+    }
+
     /// Restore bounded address history, not a whole-session snapshot. This
     /// checks shape and ranges only; the engine owns session/content identity.
     /// A position equal to MAX_POSITION is valid but cannot accept another step.
     pub fn restore(pad: u32, position: u64, history: &[Token]) -> Result<Self, AddressError> {
-        if pad >= COMPRESSED_VOCAB_SIZE {
+        Self::restore_with_config(pad, position, history, &HashConfig::default())
+    }
+
+    pub fn restore_with_config(
+        pad: u32,
+        position: u64,
+        history: &[Token],
+        config: &HashConfig,
+    ) -> Result<Self, AddressError> {
+        config.validate()?;
+        if pad >= config.compressed_vocab_size {
             return Err(AddressError::InvalidPadId(pad));
         }
-        if position > MAX_POSITION {
+        if position > config.max_position {
             return Err(AddressError::InvalidPosition(position));
         }
         let expected = position.min(3) as usize;
@@ -93,12 +190,14 @@ impl AddressState {
             });
         }
         for &token in history {
-            validate_token(token)?;
+            validate_token_with_limit(token, config.compressed_vocab_size)?;
         }
         let mut state = Self {
             history: [Token::Dead; 3],
             pad,
             position,
+            vocab_size: config.compressed_vocab_size,
+            max_position: config.max_position,
         };
         state.history[..expected].copy_from_slice(history);
         Ok(state)
@@ -116,12 +215,27 @@ impl AddressState {
         &self.history[..self.position.min(3) as usize]
     }
 
-    /// Allocation-free, pure staged step. All IDs and the position are checked
+    /// Pure staged step using the legacy family-default hash configuration.
     /// before hashing (state invariants are established by new/restore).
     /// Valid products are nonnegative and <= i64::MAX, matching upstream int64.
     pub fn step(&self, token: Token) -> Result<(Rows, Self), AddressError> {
-        validate_token(token)?;
-        if self.position == MAX_POSITION {
+        let (rows, next) = self.step_with_config(token, &HashConfig::default())?;
+        Ok(([rows[&1], rows[&14]], next))
+    }
+
+    pub fn step_with_config(
+        &self,
+        token: Token,
+        config: &HashConfig,
+    ) -> Result<(LayerRows, Self), AddressError> {
+        config.validate()?;
+        if self.vocab_size != config.compressed_vocab_size
+            || self.max_position != config.max_position
+        {
+            return Err(AddressError::InvalidConfig("state/config bounds differ"));
+        }
+        validate_token_with_limit(token, self.vocab_size)?;
+        if self.position == self.max_position {
             return Err(AddressError::ContextFull);
         }
         let len = self.history().len();
@@ -140,19 +254,18 @@ impl AddressState {
                 _ => blocked = true,
             }
         }
-        let mut rows = [[0; 24]; 2];
-        for layer in 0..2 {
-            let mut rolling = tokens[0] * MULTIPLIERS[layer][0];
-            let mut offset = 0;
+        let mut rows = LayerRows::new();
+        for layer in &config.layers {
+            let mut row = [0; 24];
+            let mut rolling = tokens[0] * layer.multipliers[0];
             for shift in 1..4 {
-                rolling ^= tokens[shift] * MULTIPLIERS[layer][shift];
+                rolling ^= tokens[shift] * layer.multipliers[shift];
                 for head in 0..8 {
                     let column = (shift - 1) * 8 + head;
-                    let prime = PRIMES[layer][column];
-                    rows[layer][column] = offset + rolling % prime;
-                    offset += prime;
+                    row[column] = layer.offsets[column] + rolling % layer.primes[column];
                 }
             }
+            rows.insert(layer.layer, row);
         }
         let mut next = *self;
         if len < 3 {
@@ -165,9 +278,9 @@ impl AddressState {
     }
 }
 
-fn validate_token(token: Token) -> Result<(), AddressError> {
+fn validate_token_with_limit(token: Token, limit: u32) -> Result<(), AddressError> {
     if let Token::Compressed(id) = token {
-        if id >= COMPRESSED_VOCAB_SIZE {
+        if id >= limit {
             return Err(AddressError::InvalidCompressedId(id));
         }
     }
@@ -178,6 +291,48 @@ fn validate_token(token: Token) -> Result<(), AddressError> {
 mod tests {
     use super::*;
     use serde_json::Value;
+
+    #[test]
+    fn metadata_layers_buckets_and_multipliers_change_addresses() {
+        let config = HashConfig {
+            compressed_vocab_size: 10,
+            max_position: 4,
+            layers: vec![LayerHash {
+                layer: 5,
+                primes: [5; 24],
+                offsets: std::array::from_fn(|i| i as u64 * 5),
+                multipliers: [3, 5, 7, 9],
+                rows: 120,
+            }],
+        };
+        let initial = AddressState::new_with_config(0, &config).unwrap();
+        let (rows, next) = initial
+            .step_with_config(Token::Compressed(3), &config)
+            .unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[&5], std::array::from_fn(|i| i as u64 * 5 + 4));
+        let restored =
+            AddressState::restore_with_config(0, next.position(), next.history(), &config).unwrap();
+        assert_eq!(next, restored);
+        // 2*3 XOR 3*5 = 9; the other history terms are zero padding.
+        assert_eq!(
+            next.step_with_config(Token::Compressed(2), &config)
+                .unwrap()
+                .0[&5],
+            std::array::from_fn(|i| i as u64 * 5 + 4)
+        );
+        assert!(
+            initial
+                .step_with_config(Token::Compressed(10), &config)
+                .is_err()
+        );
+        let mut bad = config.clone();
+        bad.layers[0].multipliers[0] = u64::MAX;
+        assert!(bad.validate().is_err());
+        bad = config.clone();
+        bad.layers[0].offsets[1] += 1;
+        assert!(bad.validate().is_err());
+    }
 
     fn fixture() -> Value {
         serde_json::from_str(include_str!(

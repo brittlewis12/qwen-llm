@@ -144,7 +144,7 @@ fn capture_requires_gpu_and_callback_errors_poison_state() {
     let ctx = MetalContext::new().unwrap();
     let weights = toy::Weights::new(&ctx);
     let model = weights.model(&ctx);
-    let mut legacy = model.new_state(1).unwrap();
+    let mut legacy = model.new_cpu_state(1).unwrap();
     assert!(
         model
             .step_with_capture(&mut legacy, 0, None, None, Some(&mut Fail))

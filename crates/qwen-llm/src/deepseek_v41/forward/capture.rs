@@ -19,7 +19,7 @@ pub struct Checkpoint<'a> {
     pub index_source: usize,
     /// Ascending compressed positions, without a window offset.
     pub compressed_ids: &'a [i32],
-    /// Layer-20 block mask (one i32 per block), not token positions.
+    /// Candidate-source block mask (one i32 per block), not token positions.
     pub candidate_mask: Option<&'a [i32]>,
 }
 
@@ -30,6 +30,9 @@ pub trait Capture {
 }
 
 pub(super) struct Snapshot {
+    selected_count: usize,
+    kv_owner: usize,
+    index_source: usize,
     input: MetalTensor,
     output: Option<MetalTensor>,
     selected: Option<MetalTensor>,
@@ -43,13 +46,26 @@ impl Snapshot {
         position: usize,
         layer: usize,
         checkpoint: bool,
+        schedule: &super::super::gguf::Schedule,
     ) -> Result<Self> {
         let tensor = |n: usize, dtype| {
             MetalTensor::zeros_dtype_unstaged(ctx, vec![n.max(1) as u64], dtype)
                 .map_err(|e| e.to_string())
         };
-        let count = ((position + 1) / if layer < 20 { 2 } else { 1 }).min(c.index_topk);
+        let owner = schedule
+            .owner(layer)
+            .ok_or("capture layer has no KV owner")?;
+        let source = schedule
+            .index_source_layers
+            .iter()
+            .copied()
+            .rfind(|&id| id <= layer)
+            .ok_or("capture layer has no index source")?;
+        let count = ((position + 1) / schedule.ratio(layer)).min(c.index_topk);
         Ok(Self {
+            selected_count: count,
+            kv_owner: owner,
+            index_source: source,
             input: tensor(c.hidden, GgmlType::F32)?,
             output: checkpoint
                 .then(|| tensor(c.hidden, GgmlType::F32))
@@ -57,9 +73,12 @@ impl Snapshot {
             selected: checkpoint
                 .then(|| tensor(count, GgmlType::I32))
                 .transpose()?,
-            candidates: (checkpoint && layer >= 20)
-                .then(|| tensor((position + 1).div_ceil(c.candidate_block), GgmlType::I32))
-                .transpose()?,
+            candidates: (checkpoint
+                && schedule
+                    .candidate_source_layer
+                    .is_some_and(|source| layer >= source))
+            .then(|| tensor((position + 1).div_ceil(c.candidate_block), GgmlType::I32))
+            .transpose()?,
         })
     }
 
@@ -99,7 +118,7 @@ impl Snapshot {
 
     pub(super) fn deliver(
         &self,
-        c: &Config,
+        _c: &Config,
         position: usize,
         layer: usize,
         sink: &mut dyn Capture,
@@ -115,12 +134,11 @@ impl Snapshot {
             )
         };
         let checkpoint = if let Some(output) = &self.output {
-            let count = ((position + 1) / if layer < 20 { 2 } else { 1 }).min(c.index_topk);
             Some(Checkpoint {
                 output: f32_slice(output)?,
-                kv_owner: if layer >= 20 { 20 } else { layer },
-                index_source: layer,
-                compressed_ids: ints(self.selected.as_ref().unwrap(), count),
+                kv_owner: self.kv_owner,
+                index_source: self.index_source,
+                compressed_ids: ints(self.selected.as_ref().unwrap(), self.selected_count),
                 candidate_mask: self
                     .candidates
                     .as_ref()

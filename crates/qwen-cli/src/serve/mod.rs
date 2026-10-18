@@ -441,7 +441,10 @@ fn check_warmth_flags(
             family.display
         );
     }
-    if family.serve_warmth == ServeWarmth::LiveSession {
+    if matches!(
+        family.serve_warmth,
+        ServeWarmth::LiveSession | ServeWarmth::FreshRequest
+    ) {
         let defaults = qwen_llm::snapshot_policy::SnapshotPolicyConfig::default();
         let unsupported = [
             (
@@ -465,7 +468,7 @@ fn check_warmth_flags(
         ];
         if let Some((flag, _)) = unsupported.iter().find(|(_, set)| *set) {
             bail!(
-                "{} serve reuses its live session's prefix and keeps no snapshots, so {flag} cannot take effect; drop the flag (`auto` or 0 for --snapshot-cache-mib, 0 for the expiry flags, are accepted)",
+                "{} serve keeps no snapshots, so {flag} cannot take effect; drop the flag (`auto` or 0 for --snapshot-cache-mib, 0 for the expiry flags, are accepted)",
                 family.display
             );
         }
@@ -508,10 +511,8 @@ fn open_workbench(invocation: &crate::cli::ServeInvocation) -> Result<Option<Wor
 /// because llama.cpp initializes its Metal backend there.
 pub(crate) fn run_serve(invocation: crate::cli::ServeInvocation) -> Result<()> {
     crate::shutdown::checkpoint()?;
-    protocol_v41::check_model_path(&invocation.model)?;
     let gguf = GgufFile::open(&invocation.model)
         .with_context(|| format!("open model {}", invocation.model.display()))?;
-    protocol_v41::check_runtime(gguf.architecture().as_deref())?;
     let Some(family) = ModelFamily::detect(&gguf) else {
         bail!(
             "qwen serve does not support model architecture {:?}; recognised families: {} (docs/SERVE.md)",
@@ -586,6 +587,12 @@ pub(crate) fn run_serve(invocation: crate::cli::ServeInvocation) -> Result<()> {
     )?;
     drop(drafter);
     match family {
+        ModelFamily::DeepSeekV41 => {
+            let prepared = backend_v41::Prepared::new(&gguf, &invocation)?;
+            let workbench = open_workbench(&invocation)?;
+            let listening = Listening::open(&invocation, workbench)?;
+            backend_v41::start(prepared, gguf, listening)
+        }
         ModelFamily::K2Horizon => {
             let prepared = backend_k2::Prepared::new(&gguf, &invocation)?;
             let workbench = open_workbench(&invocation)?;
@@ -756,21 +763,6 @@ fn accept_loop(
         workbench,
         |_| crate::shutdown::checkpoint(),
     )
-}
-
-/// Safetensors resident owner stays on this stack; only CPU HTTP work moves.
-pub(crate) fn serve_v41(
-    listener: TcpListener,
-    backend: &mut backend_v41::Backend<'_>,
-    load_ms: f64,
-) -> Result<()> {
-    use http::GenerationBackend;
-    let model_id = backend.model_id().to_owned();
-    eprintln!(
-        "V4.1 listening on http://{}; caches/CED/prefix reuse disabled",
-        listener.local_addr()?
-    );
-    accept_loop(listener, &model_id, load_ms, backend, &mut None, None)
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -1021,7 +1013,11 @@ mod tests {
             assert!(check_warmth_flags(family, &defaulted, None, &policy).is_ok());
             assert_eq!(
                 check_warmth_flags(family, &defaulted, Some(1024), &policy).is_ok(),
-                family.serve_warmth != crate::family_profile::ServeWarmth::LiveSession,
+                !matches!(
+                    family.serve_warmth,
+                    crate::family_profile::ServeWarmth::LiveSession
+                        | crate::family_profile::ServeWarmth::FreshRequest
+                ),
                 "{}",
                 family.display
             );
@@ -1101,7 +1097,10 @@ mod tests {
                 "{}: idle publication without a durable tier",
                 family.display
             );
-            let live = family.serve_warmth == ServeWarmth::LiveSession;
+            let live = matches!(
+                family.serve_warmth,
+                ServeWarmth::LiveSession | ServeWarmth::FreshRequest
+            );
             for (mib, policy) in &accepted {
                 assert!(
                     check_warmth_flags(family, &default_tier, *mib, policy).is_ok(),
@@ -1227,6 +1226,29 @@ mod tests {
     }
 
     #[test]
+    fn v41_routes_to_header_preparation_before_listener_or_workbench() {
+        let fixture = crate::linear_transport::tests::fixture("v41-prebind", 2, 19);
+        let model = fixture.0.join("model.gguf");
+        crate::linear_transport::cpu_fixture::write_cpu_gguf(
+            &model,
+            "deepseek41",
+            2,
+            "cpu-test",
+            false,
+        );
+        let held = TcpListener::bind("127.0.0.1:0").unwrap();
+        let mut invocation = serve_invocation(model, held.local_addr().unwrap().to_string());
+        let store = fixture.0.join("not-created");
+        invocation.lens_data_dir = Some(store.clone());
+        invocation.max_context_tokens = Some(64);
+        invocation.max_tokens = Some(8);
+        let error = run_serve(invocation).unwrap_err().to_string();
+        assert!(error.contains("invalid V4.1 GGUF"), "{error}");
+        assert!(!error.contains("unsupported model architecture"), "{error}");
+        assert!(!store.exists());
+    }
+
+    #[test]
     fn preparation_refusal_precedes_invalid_web_root() {
         let (fixture, model) = generic_qwen_model("serve-invalid-web-root");
         let mut invocation = serve_invocation(model, "0.0.0.0:0".into());
@@ -1313,6 +1335,7 @@ mod tests {
             let expected_capacity = match family {
                 ModelFamily::Qwen35 | ModelFamily::Qwen35Moe => ServeCapacity::RequestShaped,
                 ModelFamily::Qwen4Exp
+                | ModelFamily::DeepSeekV41
                 | ModelFamily::MuseGlimmer
                 | ModelFamily::K2Horizon
                 | ModelFamily::Glm5Next => ServeCapacity::FixedContextAndOutput,

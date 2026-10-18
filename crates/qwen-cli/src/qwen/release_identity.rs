@@ -75,6 +75,7 @@ pub(crate) enum ReleaseIdentity {
     },
     FlashNext,
     DeepSeekV4,
+    DeepSeekV41,
     MuseGlimmer,
     K2Horizon,
     Glm53Flash,
@@ -100,6 +101,7 @@ impl ReleaseIdentity {
             },
             ModelFamily::Qwen4Exp => Self::FlashNext,
             ModelFamily::DeepSeek4 => Self::DeepSeekV4,
+            ModelFamily::DeepSeekV41 => Self::DeepSeekV41,
             ModelFamily::MuseGlimmer => Self::MuseGlimmer,
             ModelFamily::K2Horizon => Self::K2Horizon,
             ModelFamily::Glm5Next => Self::Glm53Flash,
@@ -126,6 +128,7 @@ impl ReleaseIdentity {
             }
             Self::FlashNext => "qwen3.8_flash_next".into(),
             Self::DeepSeekV4 => "deepseek_v4_0731".into(),
+            Self::DeepSeekV41 => "deepseek_v41".into(),
             Self::MuseGlimmer => "muse_glimmer".into(),
             Self::K2Horizon => "k2_horizon".into(),
             Self::Glm53Flash => "glm_5.3_flash".into(),

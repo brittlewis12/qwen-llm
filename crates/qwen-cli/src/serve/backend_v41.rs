@@ -1,4 +1,4 @@
-//! Stateless safetensors HTTP backend. Forward borrows the caller's resident
+//! Stateless GGUF HTTP backend. Forward borrows the caller's resident
 //! weights/context; neither they nor the backend move to an HTTP worker.
 use super::http::{BackendFailure, GenerationBackend, GenerationOutcome, GenerationSink, Headroom};
 use super::items::{ServeError, ServeRequest};
@@ -13,6 +13,130 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 use tokenizers::Tokenizer;
 
+use qwen_llm::tokenizer::NativeTokenizer;
+
+pub(crate) enum RequestTokenizer {
+    Native(NativeTokenizer),
+    #[cfg(test)]
+    Fixture(Tokenizer),
+}
+impl From<NativeTokenizer> for RequestTokenizer {
+    fn from(value: NativeTokenizer) -> Self {
+        Self::Native(value)
+    }
+}
+#[cfg(test)]
+impl From<Tokenizer> for RequestTokenizer {
+    fn from(value: Tokenizer) -> Self {
+        Self::Fixture(value)
+    }
+}
+impl RequestTokenizer {
+    #[cfg(test)]
+    fn hf_mut(&mut self) -> &mut Tokenizer {
+        match self {
+            Self::Fixture(t) => t,
+            Self::Native(_) => panic!("expected test tokenizer"),
+        }
+    }
+    fn hf(&self) -> Option<&Tokenizer> {
+        match self {
+            Self::Native(_) => None,
+            #[cfg(test)]
+            Self::Fixture(t) => Some(t),
+        }
+    }
+    fn vocab(&self) -> usize {
+        match self {
+            Self::Native(t) => t.n_vocab() as usize,
+            #[cfg(test)]
+            Self::Fixture(t) => t.get_vocab_size(true),
+        }
+    }
+    fn encode(&self, prompt: &str) -> Result<Vec<u32>> {
+        match self {
+            Self::Native(t) => Ok(t
+                .encode(prompt, false)?
+                .into_iter()
+                .map(|id| id as u32)
+                .collect()),
+            #[cfg(test)]
+            Self::Fixture(t) => t
+                .encode(prompt, false)
+                .map(|e| e.get_ids().to_vec())
+                .map_err(|e| anyhow::anyhow!(e.to_string())),
+        }
+    }
+    fn decode(&self, ids: &[u32]) -> Result<String> {
+        match self {
+            Self::Native(t) => {
+                Ok(t.try_decode(&ids.iter().map(|&id| id as i32).collect::<Vec<_>>())?)
+            }
+            #[cfg(test)]
+            Self::Fixture(t) => t
+                .decode(ids, false)
+                .map_err(|e| anyhow::anyhow!(e.to_string())),
+        }
+    }
+}
+
+pub(super) struct Prepared {
+    settings: Settings,
+}
+impl Prepared {
+    pub(super) fn new(
+        gguf: &qwen_llm::gguf::GgufFile,
+        invocation: &crate::cli::ServeInvocation,
+    ) -> Result<Self> {
+        let plan = qwen_llm::deepseek_v41::gguf::plan(gguf)?;
+        ensure!(
+            invocation.lens_data_dir.is_none() && invocation.web_root.is_none(),
+            "DeepSeek V4.1 has no Lens backend"
+        );
+        let limits = super::resolve_serve_limits(
+            super::profile(qwen_llm::model_family::ModelFamily::DeepSeekV41),
+            Some(usize::try_from(plan.engram_hash.max_position)?),
+            invocation.max_context_tokens,
+            invocation.max_tokens,
+        )?
+        .context("V4.1 requires fixed request limits")?;
+        let tokenizer = NativeTokenizer::from_gguf(gguf)?;
+        ensure!(
+            tokenizer.n_vocab() as usize == plan.config.vocab,
+            "V4.1 tokenizer/model vocabulary mismatch"
+        );
+        let eos = tokenizer.eos().context("V4.1 GGUF has no EOS")? as u32;
+        Ok(Self {
+            settings: Settings::new(
+                tokenizer,
+                limits.context_tokens,
+                limits.max_tokens,
+                crate::deepseek_v41::default_sampling(crate::release_sampling::fresh_seed()),
+                eos,
+                String::new(),
+            )?,
+        })
+    }
+}
+
+pub(super) fn start(
+    prepared: Prepared,
+    gguf: qwen_llm::gguf::GgufFile,
+    listening: super::Listening,
+) -> Result<()> {
+    crate::shutdown::checkpoint()?;
+    let ctx = MetalContext::new()?;
+    let started = Instant::now();
+    let weights = crate::deepseek_v41::load(&ctx, std::sync::Arc::new(gguf))?;
+    let forward =
+        Forward::from_resident(&ctx, &weights, weights.token_map.clone(), weights.raw_pad)
+            .map_err(anyhow::Error::msg)?;
+    let mut settings = prepared.settings;
+    settings.model_id = listening.model_id.clone();
+    let mut backend = Backend::new(&ctx, forward, settings);
+    listening.serve(started.elapsed().as_secs_f64() * 1e3, &mut backend)
+}
+
 #[path = "backend_v41/io.rs"]
 mod memory_io;
 
@@ -20,7 +144,6 @@ pub(crate) struct Backend<'a> {
     ctx: &'a MetalContext,
     forward: Forward<'a>,
     settings: Settings,
-    gpu_step: bool,
 }
 
 /// Caller-retained logits and sampler candidates/weights/sort storage, separate
@@ -60,7 +183,7 @@ pub(crate) fn admit_request_memory(
 }
 
 pub(crate) struct Settings {
-    tokenizer: Tokenizer,
+    tokenizer: RequestTokenizer,
     context: usize,
     limits: OutputLimits,
     sampling: SamplingConfig,
@@ -71,7 +194,7 @@ pub(crate) struct Settings {
 
 impl Settings {
     pub(crate) fn new(
-        mut tokenizer: Tokenizer,
+        tokenizer: impl Into<RequestTokenizer>,
         context: usize,
         default_max: usize,
         sampling: SamplingConfig,
@@ -83,29 +206,36 @@ impl Settings {
             "V4.1 default output limit must fit positive context"
         );
         sampling.validate()?;
+        let mut tokenizer = tokenizer.into();
         ensure!(
-            tokenizer.token_to_id(deepseek_recipe_encoding::v4::EOS_TOKEN) == Some(eos),
+            tokenizer.encode(deepseek_recipe_encoding::v4::EOS_TOKEN)? == [eos],
             "V4.1 tokenizer/config EOS mismatch"
         );
         ensure!(eos <= i32::MAX as u32, "EOS ID exceeds server token range");
         // ByteLevel emits at most one byte per encoded scalar (or the literal
         // token's bytes for added tokens). The shared ceiling adds 3x for U+FFFD.
-        let decoder = serde_json::to_value(tokenizer.get_decoder())?;
-        ensure!(
-            decoder["type"] == "ByteLevel",
-            "V4.1 serving requires the official ByteLevel decoder for byte budgeting"
-        );
-        tokenizer
-            .with_truncation(None)
-            .map_err(|e| anyhow::anyhow!(e.to_string()))?;
-        tokenizer.with_padding(None);
-        let max_piece_bytes = tokenizer
-            .get_vocab(true)
-            .keys()
-            .map(String::len)
-            .max()
-            .filter(|n| *n > 0)
-            .context("empty tokenizer vocabulary")?;
+        let max_piece_bytes = match &mut tokenizer {
+            RequestTokenizer::Native(t) => t.max_decoded_piece_bytes(),
+            #[cfg(test)]
+            RequestTokenizer::Fixture(tokenizer) => {
+                let decoder = serde_json::to_value(tokenizer.get_decoder())?;
+                ensure!(
+                    decoder["type"] == "ByteLevel",
+                    "V4.1 serving requires the official ByteLevel decoder for byte budgeting"
+                );
+                tokenizer
+                    .with_truncation(None)
+                    .map_err(|e| anyhow::anyhow!(e.to_string()))?;
+                tokenizer.with_padding(None);
+                tokenizer
+                    .get_vocab(true)
+                    .keys()
+                    .map(String::len)
+                    .max()
+                    .filter(|n| *n > 0)
+                    .context("empty tokenizer vocabulary")?
+            }
+        };
         Ok(Self {
             tokenizer,
             context,
@@ -133,22 +263,17 @@ impl Settings {
         prompt: &str,
         sink: &mut dyn GenerationSink,
         mut admit: impl FnMut(usize, u64) -> std::result::Result<(), ServeError>,
-        new_state: impl FnOnce(usize) -> std::result::Result<S, String>,
+        new_state: impl FnOnce(usize) -> std::result::Result<S, ServeError>,
         mut step: impl FnMut(&mut S, u32, &AtomicBool) -> std::result::Result<Vec<f32>, String>,
         mut now: impl FnMut() -> Duration,
     ) -> std::result::Result<GenerationOutcome, BackendFailure> {
         let maximum = self.limits.max_tokens(request);
         // Check the output-only lower bound before tokenization or state allocation.
         super::decode_loop::required_forwards("V4.1", 1, maximum, self.context)?;
-        let ids = self
-            .tokenizer
-            .encode(prompt, false)
-            .map_err(|e| {
-                ServeError::invalid_request(Some("input"), format!("V4.1 tokenization: {e}"))
-            })?
-            .get_ids()
-            .to_vec();
-        let vocab = self.tokenizer.get_vocab_size(true);
+        let ids = self.tokenizer.encode(prompt).map_err(|e| {
+            ServeError::invalid_request(Some("input"), format!("V4.1 tokenization: {e}"))
+        })?;
+        let vocab = self.tokenizer.vocab();
         if ids.is_empty() || ids.iter().any(|&id| id as usize >= vocab) {
             return Err(ServeError::invalid_request(
                 Some("input"),
@@ -200,7 +325,15 @@ impl Settings {
             }
         };
         check(sink)?;
-        let mut state = new_state(required).map_err(&forward_error)?;
+        let mut state = new_state(required).map_err(|error| {
+            if cancel.load(Ordering::Acquire)
+                || crate::shutdown::cancellation_flag().load(Ordering::Acquire)
+            {
+                BackendFailure::Aborted(io::Error::new(io::ErrorKind::Interrupted, error.message))
+            } else {
+                BackendFailure::Serve(error)
+            }
+        })?;
         let prefill_start = now();
         let mut logits = Vec::new();
         for &token in &ids {
@@ -216,7 +349,8 @@ impl Settings {
         let decode_start = now();
         let mut generated = Vec::new();
         let mut emitted = String::new();
-        let mut decoder = self.tokenizer.decode_stream(false);
+        let mut decoder = self.tokenizer.hf().map(|t| t.decode_stream(false));
+        let mut utf8 = super::utf8::Utf8Assembler::new();
         let mut end = GenerationEnd::TokenLimit;
         let mut transitions = 0;
         let mut transition_ms = 0.0;
@@ -243,10 +377,23 @@ impl Settings {
                 end = GenerationEnd::StopToken(token);
                 break;
             }
-            if let Some(piece) = decoder
-                .step(token as u32)
-                .map_err(|e| ServeError::server_error(format!("V4.1 decode: {e}")))?
-            {
+            let piece =
+                if let Some(decoder) = &mut decoder {
+                    decoder
+                        .step(token as u32)
+                        .map_err(|e| ServeError::server_error(format!("V4.1 decode: {e}")))?
+                } else {
+                    match &self.tokenizer {
+                        RequestTokenizer::Native(t) => Some(utf8.push(
+                            t.try_decode_piece_bytes_exact(token).map_err(|e| {
+                                ServeError::server_error(format!("V4.1 decode: {e}"))
+                            })?,
+                        )),
+                        #[cfg(test)]
+                        RequestTokenizer::Fixture(_) => unreachable!(),
+                    }
+                };
+            if let Some(piece) = piece {
                 if piece.len() > ceiling.saturating_sub(emitted.len()) {
                     return Err(super::output_memory::ceiling_exceeded(
                         "V4.1 decoded output",
@@ -286,7 +433,7 @@ impl Settings {
             .collect();
         let complete = self
             .tokenizer
-            .decode(&text_tokens, false)
+            .decode(&text_tokens)
             .map_err(|e| ServeError::server_error(format!("V4.1 decode tail: {e}")))?;
         if complete.len() > ceiling || !complete.starts_with(&emitted) {
             return Err(ServeError::server_error(
@@ -323,6 +470,7 @@ impl Settings {
             "decode_ms":generation.wall_ms, "generated_tokens":generation.tokens.len(),
             "transitions":transitions, "transition_ms":transition_ms,
             "required_forwards":required, "capacity":self.context, "reused_tokens":0, "ced":false,
+            "cache_policy":"fresh_request",
         });
         let mut outcome = super::outcome::finish_generation(ids.len(), &generation, 0, 0.);
         outcome.stats.as_mut().expect("shared stats").phases = Some(phases);
@@ -336,13 +484,7 @@ impl<'a> Backend<'a> {
             ctx,
             forward,
             settings,
-            gpu_step: false,
         }
-    }
-
-    pub(crate) fn with_gpu_step(mut self, enabled: bool) -> Self {
-        self.gpu_step = enabled;
-        self
     }
 }
 
@@ -366,22 +508,17 @@ impl GenerationBackend for Backend<'_> {
             prompt,
             sink,
             |positions, reserve| {
-                let estimate = if self.gpu_step {
-                    self.forward
-                        .estimate_request_memory_with_gpu_step(positions)
-                } else {
-                    self.forward.estimate_request_memory(positions)
-                }
-                .map_err(|e| ServeError::server_error(format!("V4.1 request estimate: {e}")))?;
+                let estimate = self
+                    .forward
+                    .estimate_request_memory_with_gpu_step(positions)
+                    .map_err(|e| ServeError::server_error(format!("V4.1 request estimate: {e}")))?;
                 admit_request_memory(estimate, reserve, self.ctx.memory_signals())
                     .map_err(|e| super::transport_memory::memory_refusal("V4.1 request", &e))
             },
             |capacity| {
-                if self.gpu_step {
-                    self.forward.new_state_with_gpu_step(capacity)
-                } else {
-                    self.forward.new_state(capacity)
-                }
+                self.forward
+                    .new_state_with_gpu_step(capacity)
+                    .map_err(state_error)
             },
             |state, token, cancel| {
                 let position = state.position();
@@ -410,3 +547,10 @@ impl GenerationBackend for Backend<'_> {
 
 #[cfg(test)]
 mod tests;
+
+fn state_error(error: qwen_llm::deepseek_v41::forward::StateError) -> ServeError {
+    match error.memory_admission() {
+        Some(denied) => super::transport_memory::memory_refusal("V4.1 state", denied),
+        None => ServeError::server_error(format!("V4.1 state: {error}")),
+    }
+}

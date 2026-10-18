@@ -20,6 +20,8 @@ pub(crate) enum FixedCohort {
 /// How `qwen serve` keeps a family's prefixes warm between requests.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum ServeWarmth {
+    /// Every request starts empty; no prefix reuse or snapshots.
+    FreshRequest,
     /// RAM snapshot cache (`--snapshot-cache-mib`) plus the durable disk tier
     /// (`--durable-snapshot-*`).
     SnapshotsDurable,
@@ -120,6 +122,20 @@ static DEEPSEEK4: FamilyProfile = FamilyProfile {
     capabilities: deepseek4_capabilities,
 };
 
+static DEEPSEEK_V41: FamilyProfile = FamilyProfile {
+    family: ModelFamily::DeepSeekV41,
+    display: "DeepSeek V4.1",
+    drafter: DrafterSupport::Unsupported("family_no_speculation"),
+    fixed_cohort: FixedCohort::None,
+    serve_backend: true,
+    serve_capacity: ServeCapacity::FixedContextAndOutput,
+    serve_warmth: ServeWarmth::FreshRequest,
+    durable_idle_publish: false,
+    idle_residency_eligible: false,
+    upstream_template_style: false,
+    capabilities: crate::deepseek_v41::capabilities,
+};
+
 static MUSE_GLIMMER: FamilyProfile = FamilyProfile {
     family: ModelFamily::MuseGlimmer,
     display: "Muse Glimmer",
@@ -168,6 +184,7 @@ pub(crate) fn profile(family: ModelFamily) -> &'static FamilyProfile {
         ModelFamily::Qwen35Moe => &QWEN35_MOE,
         ModelFamily::Qwen4Exp => &QWEN4EXP,
         ModelFamily::DeepSeek4 => &DEEPSEEK4,
+        ModelFamily::DeepSeekV41 => &DEEPSEEK_V41,
         ModelFamily::MuseGlimmer => &MUSE_GLIMMER,
         ModelFamily::K2Horizon => &K2_HORIZON,
         ModelFamily::Glm5Next => &GLM5_NEXT,
@@ -359,7 +376,7 @@ mod tests {
             let snapshots = match family_profile.serve_warmth {
                 ServeWarmth::SnapshotsDurable => "RAM and disk",
                 ServeWarmth::SnapshotsRam => "RAM",
-                ServeWarmth::LiveSession => "none",
+                ServeWarmth::LiveSession | ServeWarmth::FreshRequest => "none",
             };
             let drafter = match family_profile.drafter {
                 DrafterSupport::Dense => "`run`, `serve`",

@@ -1,8 +1,7 @@
 //! Optional synchronous oracle dumps. Binary files are provisional until the
 //! final run.json says success; a failed step/run deliberately leaves evidence.
 use anyhow::{Context, Result, ensure};
-use qwen_llm::deepseek_v41::{forward::LayerTrace, loader};
-use qwen_llm::sampling::SamplingConfig;
+use qwen_llm::deepseek_v41::forward::{Config, LayerTrace};
 use serde_json::{Value, json};
 use std::fs::{self, File, OpenOptions};
 use std::io::Write;
@@ -12,6 +11,7 @@ use std::path::{Path, PathBuf};
 struct Shapes {
     hidden: usize,
     vocab: usize,
+    layers: usize,
 }
 
 impl Shapes {
@@ -39,32 +39,19 @@ pub(super) struct Trace {
 impl Trace {
     pub(super) fn create(
         path: &Path,
-        config: &Value,
+        config: &Config,
+        layers: usize,
         prompt: &[u32],
-        context: u32,
-        maximum: u32,
-        sampling: SamplingConfig,
-        gpu_step: bool,
     ) -> Result<Self> {
-        let text = &config["text_config"];
-        ensure!(
-            text["num_hidden_layers"] == loader::LAYERS
-                && text["hidden_size"] == loader::HIDDEN
-                && text["vocab_size"] == 129280
-                && text["hc_mult"] == 4,
-            "trace requires old REAP-272E shapes (40 layers, 4 streams, hidden 5120, vocab 129280)"
-        );
         Self::create_inner(
             path,
             Shapes {
-                hidden: loader::HIDDEN,
-                vocab: 129280,
+                hidden: config.hidden,
+                vocab: config.vocab,
+                layers,
             },
-            json!({
-                "config":config, "prompt_token_ids":prompt, "context":context, "max_output_tokens":maximum,
-                "execution":if gpu_step {"gpu_step"} else {"cpu_boundaries"},
-                "sampling":{"temperature":sampling.temperature,"top_k":sampling.top_k,"top_p":sampling.top_p,"min_p":sampling.min_p,"seed":sampling.seed}
-            }),
+            json!({"prompt_token_ids":prompt, "context":prompt.len(), "max_output_tokens":1,
+                "execution":"gpu_step", "comparison_scope":"hf_conversion_and_execution_characterization"}),
         )
     }
 
@@ -102,8 +89,9 @@ impl Trace {
         manifest["router_tie_policy"] = json!("lower_expert_id_then_id_sorted");
         manifest["dtype"] = json!("float32");
         manifest["byte_order"] = json!("little");
-        manifest["config_profile"] = json!({"name":"old-reap-272e", "expected_repository":"LibertAIDAI/DeepSeek-V4.1-Flash-REAP-272E", "expected_revision":loader::OLD_REVISION, "provenance_verified":false});
-        manifest["layer_count"] = json!(loader::LAYERS);
+        manifest["artifact_format"] = json!("gguf");
+        manifest["provenance_verified"] = json!(false);
+        manifest["layer_count"] = json!(shapes.layers);
         manifest["shapes"] =
             json!({"hidden":[4,shapes.hidden],"next_pre_mix":[4],"logits":[shapes.vocab]});
         manifest["bytes_per_file"] = json!({"hidden":byte_count(shapes.hidden_elements()?)?,"pre":byte_count(4)?,"logits":byte_count(shapes.vocab)?});
@@ -144,7 +132,7 @@ impl Trace {
         ensure!(
             trace.position == step.position
                 && trace.layer == step.next_layer
-                && trace.layer < loader::LAYERS,
+                && trace.layer < self.shapes.layers,
             "trace callback position/layer mismatch"
         );
         ensure!(
@@ -167,8 +155,8 @@ impl Trace {
     pub(super) fn finish_step(&mut self, logits: &[f32]) -> Result<()> {
         let step = self.pending.as_ref().context("no active trace step")?;
         ensure!(
-            step.next_layer == loader::LAYERS,
-            "trace step did not record all 40 layers"
+            step.next_layer == self.shapes.layers,
+            "trace step did not record all layers"
         );
         ensure!(
             logits.len() == self.shapes.vocab,
@@ -237,7 +225,7 @@ impl Trace {
 }
 
 #[cfg(test)]
-#[path = "trace/tests.rs"]
+#[path = "v41_trace/tests.rs"]
 mod tests;
 
 fn byte_count(elements: usize) -> Result<u64> {

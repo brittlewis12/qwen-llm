@@ -1,3 +1,9 @@
+> Historical frozen safetensors pilot, not the GGUF runtime's default profile or
+> a GGUF qualification result. Current serving uses `qwen serve -m MODEL.gguf
+> --max-context-tokens N --max-tokens N`; no separate V4.1 command or reserve flag.
+> The artifact-specific identity and scores below must not be attributed to an
+> arbitrary GGUF deployment.
+
 # V4.1 Adapter For The Frozen Eight-Case Pilot
 
 Run after the full-model correctness comparison. The adapter

@@ -1,4 +1,4 @@
-//! Opt-in one-command FFN boundary. No CPU routes or intermediate activations.
+//! FFN component of the full GPU graph. No CPU routes or intermediate readbacks.
 use super::*;
 use objc2_metal::MTLSize;
 
@@ -51,9 +51,7 @@ fn shapes(c: &Config) -> Vec<Vec<u64>> {
 fn validate(c: &Config) -> Result<()> {
     op::require(
         c.hidden > 0
-            && c.hidden % 32 == 0
             && c.intermediate > 0
-            && c.intermediate % 32 == 0
             && c.experts > 0
             && c.topk > 0
             && c.topk <= c.experts
@@ -76,24 +74,26 @@ fn validate(c: &Config) -> Result<()> {
     Ok(())
 }
 
-// Includes per-buffer page slack, constants retained for all forty layers, and
+// Includes per-buffer page slack, constants retained for the loaded layers, and
 // host-side tensor descriptors. Dense resident weights are not counted twice.
-pub(super) fn bytes(c: &Config) -> Result<u64> {
+pub(super) fn bytes_for_layers(c: &Config, layers: usize) -> Result<u64> {
     validate(c)?;
-    allocation_shapes(c).iter().try_fold(0u64, |sum, shape| {
-        shape
-            .iter()
-            .try_fold(4u64, |n, &d| n.checked_mul(d))
-            .and_then(|n| n.checked_add(16384 + 1024))
-            .and_then(|n| sum.checked_add(n))
-            .ok_or_else(|| "GPU FFN memory overflow".into())
-    })
+    allocation_shapes(c, layers)
+        .iter()
+        .try_fold(0u64, |sum, shape| {
+            shape
+                .iter()
+                .try_fold(4u64, |n, &d| n.checked_mul(d))
+                .and_then(|n| n.checked_add(16384 + 1024))
+                .and_then(|n| sum.checked_add(n))
+                .ok_or_else(|| "GPU FFN memory overflow".into())
+        })
 }
 
-fn allocation_shapes(c: &Config) -> Vec<Vec<u64>> {
+fn allocation_shapes(c: &Config, layers: usize) -> Vec<Vec<u64>> {
     let mut sizes = shapes(c);
-    sizes.extend((0..40).map(|_| vec![1]));
-    for _ in 0..40 {
+    sizes.extend((0..layers).map(|_| vec![1]));
+    for _ in 0..layers {
         sizes.extend([
             vec![3],
             vec![24],
@@ -129,11 +129,11 @@ struct RouteArgs {
 }
 
 impl Workspace {
-    pub(super) fn new(model: &Forward<'_>) -> Result<Self> {
+    pub(super) fn new(model: &Forward<'_>) -> std::result::Result<Self, StateError> {
         let c = &model.config;
-        let size = bytes(c)?;
-        op::require(model.layers.len() == 40, "GPU FFN layer count")?;
-        for shape in allocation_shapes(c) {
+        let size = bytes_for_layers(c, model.layers.len())?;
+        op::require(!model.layers.is_empty(), "GPU FFN layer count")?;
+        for shape in allocation_shapes(c, model.layers.len()) {
             let logical = shape.iter().product::<u64>() * 4;
             let priced = model
                 .ctx
@@ -152,7 +152,7 @@ impl Workspace {
             true,
         );
         if let Some(reason) = admission.refusal() {
-            return Err(format!("GPU FFN admission: {reason:?}"));
+            return Err(StateError::MemoryAdmissionDenied(reason));
         }
         let buffers = shapes(c)
             .into_iter()
@@ -182,7 +182,7 @@ impl Workspace {
                 ])
             })
             .collect::<Result<Vec<_>>>()?;
-        let statuses = (0..40)
+        let statuses = (0..model.layers.len())
             .map(|_| {
                 MetalTensor::zeros_dtype_unstaged(model.ctx, vec![1], GgmlType::I32)
                     .map_err(|e| e.to_string())
@@ -195,6 +195,7 @@ impl Workspace {
         })
     }
 
+    #[cfg(test)]
     pub(super) fn run(
         &mut self,
         ctx: &MetalContext,
@@ -269,15 +270,7 @@ impl Workspace {
     ) -> std::result::Result<(), metal::MetalError> {
         let b = &self.buffers;
         let constants = &self.constants[id];
-        metal::encode_mat_vec_f32(
-            ctx,
-            enc,
-            &layer.ffn_hc.projection.tensor,
-            x,
-            &b[2],
-            4 * c.hidden,
-            24,
-        )?;
+        layer.ffn_hc.projection.encode(enc, x, &b[2])?;
         enc.set_pipeline(&ctx.pipeline("kernel_deepseek_v41_projected_rms")?);
         enc.set_bytes(0, &((4 * c.hidden) as u32));
         enc.set_bytes(1, &c.norm_eps);
@@ -306,15 +299,7 @@ impl Workspace {
             c.hidden,
             c.norm_eps,
         )?;
-        metal::encode_mat_vec_f32(
-            ctx,
-            enc,
-            &layer.router.tensor,
-            &b[7],
-            &b[8],
-            c.hidden,
-            c.experts,
-        )?;
+        layer.router.encode(enc, &b[7], &b[8])?;
         enc.set_pipeline(&ctx.pipeline("kernel_deepseek_v41_route")?);
         enc.set_bytes(
             0,
@@ -378,26 +363,10 @@ impl Workspace {
             c.topk,
         )?;
         for j in 0..2 {
-            metal::encode_mat_vec_f32(
-                ctx,
-                enc,
-                &layer.shared[j].tensor,
-                &b[7],
-                &b[16 + j],
-                c.hidden,
-                c.intermediate,
-            )?;
+            layer.shared[j].encode(enc, &b[7], &b[16 + j])?;
         }
         metal::encode_clamped_swiglu(ctx, enc, &b[16], &b[17], &b[18], c.clamp)?;
-        metal::encode_mat_vec_f32(
-            ctx,
-            enc,
-            &layer.shared[2].tensor,
-            &b[18],
-            &b[19],
-            c.intermediate,
-            c.hidden,
-        )?;
+        layer.shared[2].encode(enc, &b[18], &b[19])?;
         enc.set_pipeline(&ctx.pipeline("kernel_deepseek_v41_sum")?);
         enc.set_bytes(0, &(c.hidden as u32));
         enc.set_bytes(1, &(c.topk as u32));

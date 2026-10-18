@@ -12,64 +12,6 @@ fn close(a: &[f32], b: &[f32]) {
 }
 
 #[test]
-fn full_forty_layer_python_reference_and_submit_census() {
-    let ctx = MetalContext::new().unwrap();
-    let weights = toy::Weights::new(&ctx);
-    let model = weights.model(&ctx);
-    let expected: serde_json::Value =
-        serde_json::from_str(include_str!("../toy_expected.json")).unwrap();
-    let mut state = model.new_state_with_gpu_ffn(3).unwrap();
-    let mut legacy = model.new_state(3).unwrap();
-    for (pos, token) in [0, 3, 1].into_iter().enumerate() {
-        let mut count = 0;
-        let mut callback = |trace: LayerTrace<'_>| {
-            let row = &expected["traces"][pos * 40 + count];
-            for s in 0..4 {
-                close(
-                    &trace.hidden[s * 32..(s + 1) * 32],
-                    &[row[s].as_f64().unwrap() as f32; 32],
-                );
-                close(
-                    &trace.next_pre_mix[s..s + 1],
-                    &[row[4 + s].as_f64().unwrap() as f32],
-                );
-            }
-            count += 1;
-            Ok(())
-        };
-        let scope = profile::Scope::begin().unwrap();
-        let logits = model
-            .step_with_trace(&mut state, token, None, Some(&mut callback))
-            .unwrap();
-        let report = scope.finish();
-        assert_eq!(count, 40);
-        assert_eq!(
-            report
-                .operations
-                .iter()
-                .filter(|o| o.operation == "ffn_gpu")
-                .map(|o| o.completed_submits)
-                .sum::<usize>(),
-            40
-        );
-        assert!(
-            !report
-                .operations
-                .iter()
-                .any(|o| o.operation == "native_down" || o.operation == "native_gate_up")
-        );
-        close(&logits, &model.step(&mut legacy, token, None).unwrap());
-        let reference: Vec<_> = expected["logits"][pos]
-            .as_array()
-            .unwrap()
-            .iter()
-            .map(|v| v.as_f64().unwrap() as f32)
-            .collect();
-        close(&logits, &reference);
-    }
-}
-
-#[test]
 fn stages_lagged_pre_weight_before_down_and_nonalias() {
     let ctx = MetalContext::new().unwrap();
     let weights = toy::Weights::new(&ctx);
@@ -88,7 +30,7 @@ fn stages_lagged_pre_weight_before_down_and_nonalias() {
         .collect();
     let pre = [0.7, 0.1, 0.3, 0.9];
     let (mixes, input) = layer.ffn_hc.prepare(&x, &pre, c).unwrap();
-    let output = Forward::moe(&ctx, c, layer, &input, None).unwrap();
+    let output = Forward::moe(&ctx, c, layer, &input).unwrap();
     let (actual, next) = workspace.run(&ctx, c, layer, 0, &x, &pre).unwrap();
     close(&actual, &op::merge(&output, &x, &mixes).unwrap());
     close(&next, &mixes.pre);
@@ -137,55 +79,30 @@ fn stages_lagged_pre_weight_before_down_and_nonalias() {
 }
 
 #[test]
-fn route_failure_poisons_state_and_memory_is_opt_in() {
-    let ctx = MetalContext::new().unwrap();
-    let weights = toy::Weights::new(&ctx);
-    let mut model = weights.model(&ctx);
-    model.layers[0].bias[0] = f32::NAN;
-    let mut state = model.new_state_with_gpu_ffn(2).unwrap();
-    assert!(
-        model
-            .step(&mut state, 0, None)
-            .unwrap_err()
-            .contains("route status")
-    );
-    assert!(state.is_poisoned());
-    let workspace = state.ffn_gpu.as_ref().unwrap();
-    assert!(
-        f32_slice(&workspace.buffers[13])
-            .unwrap()
-            .iter()
-            .all(|&v| v == 0.0)
-    );
-    assert!(
-        f32_slice(&workspace.buffers[15])
-            .unwrap()
-            .iter()
-            .all(|&v| v == 0.0)
-    );
-    assert_eq!(state.position(), 0);
-    assert!(
-        model
-            .step(&mut state, 0, None)
-            .unwrap_err()
-            .contains("poisoned")
-    );
-    assert!(model.new_state(2).unwrap().ffn_gpu.is_none());
-    let baseline = model.config.estimate_request_memory(2).unwrap();
-    let gpu = model
-        .config
-        .estimate_request_memory_with_gpu_ffn(2)
-        .unwrap();
-    assert_eq!(
-        gpu.total_bytes - baseline.total_bytes,
-        bytes(&model.config).unwrap()
-    );
-}
-
-#[test]
 fn routing_ties_bias_absorption_temperature_extremes_and_top1() {
     let ctx = MetalContext::new().unwrap();
     for (logits, bias, topk, temperature, scale) in [
+        (
+            (0..384).map(|i| i as f32 / 384.0).collect(),
+            vec![0.0; 384],
+            6,
+            1.0,
+            1.5,
+        ),
+        (
+            (0..272).map(|i| i as f32 / 272.0).collect(),
+            vec![0.0; 272],
+            6,
+            1.0,
+            1.5,
+        ),
+        (
+            (0..320).map(|i| i as f32 / 320.0).collect(),
+            vec![0.0; 320],
+            6,
+            1.0,
+            1.5,
+        ),
         (vec![0.0; 8], vec![0.0; 8], 6, 1.0, 1.5),
         (vec![-5.0, 9.0, 1.0, 4.0], vec![1e20; 4], 2, 1.0, 1.5),
         (
@@ -238,6 +155,9 @@ fn routing_ties_bias_absorption_temperature_extremes_and_top1() {
                     std::slice::from_raw_parts(ids.buffer.contents().as_ptr().cast::<i32>(), topk)
                 };
                 assert_eq!(actual, expected_ids);
+                if n > 272 {
+                    assert!(actual.iter().all(|&id| id >= 272));
+                }
                 close(f32_slice(&weights).unwrap(), &expected_weights);
                 for (&actual, &expected) in
                     f32_slice(&weights).unwrap().iter().zip(&expected_weights)

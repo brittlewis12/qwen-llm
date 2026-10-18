@@ -1,6 +1,282 @@
 use super::*;
 use std::collections::BTreeMap;
 
+fn scheduled_weights<'a>(
+    ctx: &'a MetalContext,
+    c: &Config,
+    schedule: &Schedule,
+    id: usize,
+    dtype: GgmlType,
+) -> Weights<'a> {
+    let linear = |input: usize, output: usize| {
+        let mut bytes = Vec::new();
+        for row in 0..output {
+            for block in 0..input / 32 {
+                if dtype == GgmlType::Q8_0 {
+                    bytes.extend_from_slice(&half::f16::from_f32(0.015625).to_bits().to_le_bytes());
+                }
+                for j in 0..32 {
+                    let q = ((row * 3 + block * 7 + j * 11 + id) % 31) as i8 - 15;
+                    let value = q as f32 * 0.015625;
+                    match dtype {
+                        GgmlType::Q8_0 => bytes.push(q as u8),
+                        GgmlType::BF16 => bytes.extend_from_slice(
+                            &half::bf16::from_f32(value).to_bits().to_le_bytes(),
+                        ),
+                        GgmlType::F32 => bytes.extend_from_slice(&value.to_le_bytes()),
+                        _ => unreachable!(),
+                    }
+                }
+            }
+        }
+        Linear {
+            ctx,
+            tensor: MetalTensor::from_bytes(ctx, &bytes, vec![input as u64, output as u64], dtype)
+                .unwrap(),
+            native_control: native_control(ctx, dtype).unwrap(),
+            input,
+            output,
+        }
+    };
+    let owner = schedule.owns_kv(id);
+    op::AttentionWeights {
+        query_a: linear(c.hidden, c.query_rank),
+        query_norm: vec![1.0; c.query_rank],
+        query_b: linear(c.query_rank, c.heads * c.head_dim),
+        kv: linear(c.hidden, c.head_dim),
+        kv_norm: vec![1.0; c.head_dim],
+        sink: vec![-0.25; c.heads],
+        output_a: (0..c.groups)
+            .map(|_| linear(c.heads * c.head_dim / c.groups, c.output_rank))
+            .collect(),
+        output_b: linear(c.groups * c.output_rank, c.hidden),
+        compressor: owner.then(|| op::CompressorWeights {
+            ratio: schedule.ratio(id),
+            kv: linear(c.hidden, c.head_dim),
+            gate: (schedule.ratio(id) == 2).then(|| linear(c.hidden, c.head_dim)),
+            norm: vec![1.0; c.head_dim],
+        }),
+        index: schedule.produces_index(id).then(|| op::IndexWeights {
+            query: linear(c.query_rank, c.index_heads * c.index_dim),
+            weights: linear(c.hidden, c.index_heads),
+            key: owner.then(|| linear(c.head_dim, c.index_dim)),
+            key_norm: if owner {
+                vec![1.0; c.index_dim]
+            } else {
+                vec![]
+            },
+            heads: c.index_heads,
+            dim: c.index_dim,
+            topk: c.index_topk,
+        }),
+        frequencies: vec![],
+        head_dim: c.head_dim,
+        window: c.window,
+        eps: c.norm_eps,
+        candidate_block_size: c.candidate_block,
+        candidate_topk_blocks: c.candidate_topk,
+    }
+}
+
+#[test]
+fn scheduled_bf16_q8_attention_and_capture_match_f32() {
+    let ctx = MetalContext::new().unwrap();
+    let c = Config {
+        hidden: 32,
+        heads: 2,
+        head_dim: 32,
+        query_rank: 32,
+        output_rank: 32,
+        groups: 1,
+        index_heads: 1,
+        index_dim: 32,
+        index_topk: 2,
+        window: 2,
+        rope_dim: 0,
+        candidate_block: 2,
+        candidate_topk: 1,
+        norm_eps: 1e-6,
+        ..Config::default()
+    };
+    let schedules = [
+        Schedule {
+            layers: 7,
+            kv_source_layers: vec![1, 3],
+            index_source_layers: vec![1, 3, 5],
+            compression_ratios: vec![0, 2, 2, 1, 1, 1, 1],
+            candidate_source_layer: Some(3),
+        },
+        Schedule {
+            layers: 3,
+            kv_source_layers: vec![],
+            index_source_layers: vec![],
+            compression_ratios: vec![0; 3],
+            candidate_source_layer: None,
+        },
+    ];
+    for schedule in schedules {
+        let oracle: Vec<_> = (0..schedule.layers)
+            .map(|id| scheduled_weights(&ctx, &c, &schedule, id, GgmlType::F32))
+            .collect();
+        for dtype in [GgmlType::BF16, GgmlType::Q8_0] {
+            let weights: Vec<_> = (0..schedule.layers)
+                .map(|id| scheduled_weights(&ctx, &c, &schedule, id, dtype))
+                .collect();
+            let mut actual = Workspace::new_with_schedule(
+                &ctx,
+                &c,
+                5,
+                &weights.iter().collect::<Vec<_>>(),
+                &schedule,
+            )
+            .unwrap();
+            let mut expected = Workspace::new_with_schedule(
+                &ctx,
+                &c,
+                5,
+                &oracle.iter().collect::<Vec<_>>(),
+                &schedule,
+            )
+            .unwrap();
+            assert_eq!(
+                actual.raw.n_elements(),
+                (schedule.layers * c.window * c.head_dim) as u64
+            );
+            assert_eq!(actual.owners.len(), schedule.kv_source_layers.len());
+            for (cache, &id) in actual.owners.iter().zip(&schedule.kv_source_layers) {
+                assert_eq!(
+                    cache.compressed.n_elements(),
+                    (5usize.div_ceil(schedule.ratio(id)) * c.head_dim) as u64
+                );
+            }
+            for position in 0..5 {
+                let x: Vec<_> = (0..c.hidden)
+                    .map(|i| (i as f32 - 15.0 + position as f32) / 31.0)
+                    .collect();
+                let input = upload(&ctx, &x, vec![c.hidden as u64]).unwrap();
+                for id in 0..schedule.layers {
+                    execute(&ctx, |enc| {
+                        actual
+                            .encode(&ctx, enc, id, position, &weights[id], &input)
+                            .unwrap();
+                        expected
+                            .encode(&ctx, enc, id, position, &oracle[id], &input)
+                            .unwrap();
+                    });
+                    close(
+                        f32_slice(&actual.output).unwrap(),
+                        f32_slice(&expected.output).unwrap(),
+                    );
+                    let count = schedule.owner(id).map_or(0, |_| {
+                        ((position + 1) / schedule.ratio(id)).min(c.index_topk)
+                    });
+                    assert_eq!(actual.selected_count(id, position), count);
+                    assert_eq!(ids(&actual.selected, count), ids(&expected.selected, count));
+                    if schedule.produces_index(id) {
+                        let snapshot =
+                            capture::Snapshot::new(&ctx, &c, position, id, true, &schedule)
+                                .unwrap();
+                        execute(&ctx, |enc| {
+                            actual
+                                .capture(&ctx, enc, &snapshot, &input, id, position)
+                                .unwrap()
+                        });
+                        struct Sink {
+                            owner: usize,
+                            count: usize,
+                            mask: bool,
+                        }
+                        impl capture::Capture for Sink {
+                            fn wants_position(&self, _: usize) -> bool {
+                                true
+                            }
+                            fn is_checkpoint(&self, _: usize) -> bool {
+                                true
+                            }
+                            fn layer(
+                                &mut self,
+                                captured: capture::AttentionCapture<'_>,
+                            ) -> Result<()> {
+                                let checkpoint = captured.checkpoint.unwrap();
+                                assert_eq!(checkpoint.kv_owner, self.owner);
+                                assert_eq!(checkpoint.index_source, captured.layer);
+                                assert_eq!(checkpoint.compressed_ids.len(), self.count);
+                                assert_eq!(checkpoint.candidate_mask.is_some(), self.mask);
+                                if let Some(mask) = checkpoint.candidate_mask {
+                                    assert_eq!(mask.last(), Some(&1));
+                                }
+                                Ok(())
+                            }
+                        }
+                        snapshot
+                            .deliver(
+                                &c,
+                                position,
+                                id,
+                                &mut Sink {
+                                    owner: schedule.owner(id).unwrap(),
+                                    count,
+                                    mask: schedule
+                                        .candidate_source_layer
+                                        .is_some_and(|source| id >= source),
+                                },
+                            )
+                            .unwrap();
+                    }
+                }
+            }
+            assert_eq!((actual.next_layer, actual.next_position), (0, 5));
+        }
+    }
+}
+
+#[test]
+fn projection_checks_quantized_row_bounds_without_f32_upcasting() {
+    let ctx = MetalContext::new().unwrap();
+    let schedule = Schedule {
+        layers: 1,
+        kv_source_layers: vec![],
+        index_source_layers: vec![],
+        compression_ratios: vec![0],
+        candidate_source_layer: None,
+    };
+    let c = Config {
+        hidden: 32,
+        heads: 1,
+        head_dim: 32,
+        query_rank: 32,
+        groups: 1,
+        output_rank: 32,
+        ..Config::default()
+    };
+    for dtype in [GgmlType::BF16, GgmlType::Q8_0] {
+        let mut w = scheduled_weights(&ctx, &c, &schedule, 0, dtype).query_a;
+        projection(&w, 32, 32).unwrap();
+        w.tensor.offset = w.tensor.buffer.length() as u64 - 16;
+        assert!(projection(&w, 32, 32).is_err());
+        w.tensor.offset = 0;
+        w.tensor.shape[0] = 31;
+        assert!(projection(&w, 32, 32).is_err());
+    }
+}
+
+#[test]
+fn candidate_mask_rejects_incompatible_compressed_coordinates() {
+    let schedule = Schedule {
+        layers: 4,
+        kv_source_layers: vec![1, 3],
+        index_source_layers: vec![1, 3],
+        compression_ratios: vec![0, 1, 1, 2],
+        candidate_source_layer: Some(1),
+    };
+    schedule.validate().unwrap();
+    assert!(
+        bytes_with_schedule(&super::super::toy::config(), 8, &schedule)
+            .unwrap_err()
+            .contains("ratio-one coordinates")
+    );
+}
+
 fn close(a: &[f32], b: &[f32]) {
     assert_eq!(a.len(), b.len());
     for (i, (&a, &b)) in a.iter().zip(b).enumerate() {
@@ -108,6 +384,7 @@ fn cpu_weights(data: &BTreeMap<String, Vec<f32>>, layer: usize) -> op::Attention
 
 fn resident<'a>(ctx: &'a MetalContext, w: &op::AttentionWeights) -> Weights<'a> {
     let p = |w: &op::Linear| Linear {
+        native_control: None,
         ctx,
         input: w.input,
         output: w.output,

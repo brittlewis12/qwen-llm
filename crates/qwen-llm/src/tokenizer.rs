@@ -680,14 +680,18 @@ mod retained_tokenizer_tests {
     }
 
     fn vocab_gguf_split(swap: bool, split: Option<u16>) -> Vec<u8> {
+        vocab_gguf_for(swap, split, "llama", "gpt-2")
+    }
+
+    fn vocab_gguf_for(swap: bool, split: Option<u16>, architecture: &str, pre: &str) -> Vec<u8> {
         let mut bytes = b"GGUF".to_vec();
         bytes.extend_from_slice(&3u32.to_le_bytes());
         bytes.extend_from_slice(&0u64.to_le_bytes());
         bytes.extend_from_slice(&(if split.is_some() { 11u64 } else { 8u64 }).to_le_bytes());
         for (key, value) in [
-            ("general.architecture", "llama"),
+            ("general.architecture", architecture),
             ("tokenizer.ggml.model", "gpt2"),
-            ("tokenizer.ggml.pre", "gpt-2"),
+            ("tokenizer.ggml.pre", pre),
         ] {
             string(&mut bytes, key);
             bytes.extend_from_slice(&8u32.to_le_bytes());
@@ -736,6 +740,21 @@ mod retained_tokenizer_tests {
         }
         bytes.resize(bytes.len().next_multiple_of(32), 0);
         bytes
+    }
+
+    #[test]
+    fn deepseek41_native_tokenizer_needs_only_standard_gguf_metadata() {
+        let temp = Temp::new();
+        for pre in ["deepseek-v3", "joyai-llm"] {
+            let path = temp.0.join(format!("{pre}.gguf"));
+            fs::write(&path, vocab_gguf_for(false, None, "deepseek41", pre)).unwrap();
+            let gguf = GgufFile::open(&path).unwrap();
+            let tokenizer = NativeTokenizer::from_gguf(&gguf).unwrap();
+            let text = "Hello, world! 1234";
+            let ids = tokenizer.encode(text, false).unwrap();
+            assert_eq!(tokenizer.try_decode(&ids).unwrap(), text);
+            assert_eq!(tokenizer.eos(), Some(256));
+        }
     }
 
     #[test]
@@ -933,7 +952,8 @@ impl NativeTokenizer {
             (Some("qwen35" | "qwen35moe" | "qwen4exp"), "gpt2", "qwen35") => {
                 PretokenizerKind::Qwen35
             }
-            (Some("deepseek4"), "gpt2", "joyai-llm") => PretokenizerKind::JoyAi,
+            (Some("deepseek4" | "deepseek41"), "gpt2", "joyai-llm") => PretokenizerKind::JoyAi,
+            (Some("deepseek41"), "gpt2", "deepseek-v3") => PretokenizerKind::JoyAi,
             (Some("k2-horizon"), "gpt2", "k2-horizon") => PretokenizerKind::K2Horizon,
             (Some("glm5-next" | "glm5next"), "gpt2", "glm4") => PretokenizerKind::Glm4,
             _ => {

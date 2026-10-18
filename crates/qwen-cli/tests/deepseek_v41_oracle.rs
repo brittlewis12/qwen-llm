@@ -1,11 +1,28 @@
-//! Opt-in real-weight replay using named fixtures under QWEN_MODEL_SEARCH_PATH.
-//! Bounds logits and complete inventories; hidden/pre tensors are characterization only.
-//! The model config marker is a copy/symlink beside config.json, index, and tokenizer.
-//! The optional base Engram marker is a symlink to shard 47 beside actual shards 47/48.
+//! Explicit, ignored HF-source vs converted-GGUF characterization, not parity acceptance.
+//! Seven-token reports cover conversion plus execution error. Long attention reports
+//! are teacher-forced diagnostics, not full-model continuation qualification.
+//! Tight legacy validators remain model-free unit-test controls for a future
+//! execution-only GGUF oracle; they do not gate these converted-weight measurements.
 use anyhow::{Context, Result, ensure};
+use qwen_llm::deepseek_v41::{
+    forward::Forward,
+    gguf::{LoadLimits, ResidentWeights},
+};
+use qwen_llm::{gguf::GgufFile, metal::MetalContext};
 use serde_json::{Value, json};
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::Arc;
+
+#[path = "support/v41_capture.rs"]
+mod capture;
+#[path = "support/v41_characterization.rs"]
+mod characterization;
+#[path = "support/v41_trace.rs"]
+mod trace;
+use characterization::{
+    check_characterization, check_long_characterization, emit_characterization,
+};
 
 const TOKENS: [u32; 7] = [0, 5, 223, 939, 23, 695, 22];
 const POLICY: &str = "lower_expert_id_then_id_sorted";
@@ -14,82 +31,153 @@ const CPU_REFERENCE: qwen_llm::test_fixtures::Fixture = qwen_llm::test_fixtures:
     env: &[],
     filename: "deepseek-v4.1-reap-272e-native-f32-7t-40l-cpu.json",
 };
-const MODEL_CONFIG: qwen_llm::test_fixtures::Fixture = qwen_llm::test_fixtures::Fixture {
-    id: "deepseek-v4.1-reap-272e-config",
+const GGUF_MODEL: qwen_llm::test_fixtures::Fixture = qwen_llm::test_fixtures::Fixture {
+    id: "deepseek-v4.1-reap-272e-mxfp4-q8engram",
+    env: &[],
+    filename: "DeepSeek-V4.1-Flash-REAP-272E-MXFP4-Q8Engram.gguf",
+};
+const OFFLINE_CONFIG: qwen_llm::test_fixtures::Fixture = qwen_llm::test_fixtures::Fixture {
+    id: "deepseek-v4.1-reap-272e-cpu-source-config",
     env: &[],
     filename: "DeepSeek-V4.1-Flash-REAP-272E-config.json",
 };
-const ENGRAM_SHARD: qwen_llm::test_fixtures::Fixture = qwen_llm::test_fixtures::Fixture {
-    id: "deepseek-v4.1-flash-base-engram-47-of-48",
-    env: &[],
-    filename: "DeepSeek-V4.1-Flash-base-engram-00047-of-00048.safetensors",
-};
-const ENGRAM_FILES: [&str; 2] = [
-    "model-00047-of-00048.safetensors",
-    "model-00048-of-00048.safetensors",
-];
 
-fn model_root(marker: &Path) -> Result<PathBuf> {
-    let root = marker.parent().context("model marker has no parent")?;
+fn offline_source_root(marker: &Path) -> Result<PathBuf> {
+    let root = marker.parent().context("source marker has no parent")?;
     ensure!(
         manifest(marker)? == manifest(&root.join("config.json"))?,
-        "model marker differs from adjacent config.json"
+        "source marker differs from config.json"
     );
-    for file in ["model.safetensors.index.json", "tokenizer.json"] {
-        ensure!(
-            root.join(file).is_file(),
-            "model marker missing adjacent {file}"
-        );
-    }
-    Ok(root.to_owned())
-}
-
-fn engram_root(model: &Path, resolve_marker: impl FnOnce() -> PathBuf) -> Result<PathBuf> {
-    if ENGRAM_FILES.iter().all(|file| model.join(file).is_file()) {
-        return Ok(model.to_owned());
-    }
-    let marker = resolve_marker();
-    let root = marker.parent().context("Engram marker has no parent")?;
-    for file in ENGRAM_FILES {
-        ensure!(
-            root.join(file).is_file(),
-            "Engram marker missing adjacent {file}"
-        );
-    }
     ensure!(
-        marker.canonicalize()? == root.join(ENGRAM_FILES[0]).canonicalize()?,
-        "Engram marker must alias adjacent shard 47"
+        root.join("model.safetensors.index.json").is_file(),
+        "CPU source index missing"
     );
     Ok(root.to_owned())
 }
 
-fn replay_command(model: &Path, engram: &Path, trace: &Path) -> Command {
-    let mut command = Command::new(env!("CARGO_BIN_EXE_qwen"));
-    command
-        .arg("deepseek-v41")
-        .arg("--model-dir")
-        .arg(model)
-        .arg("--engram-dir")
-        .arg(engram)
-        .args([
-            "--token-ids",
-            "0,5,223,939,23,695,22",
-            "--max-tokens",
-            "1",
-            "--temperature",
-            "0",
-            "--context",
-            "16",
-            "--reserve-mib",
-            "1024",
-        ])
-        .arg("--trace-dir")
-        .arg(trace);
-    command
+fn load_characterization_model(ctx: &MetalContext, path: &Path) -> Result<ResidentWeights> {
+    let gguf = Arc::new(GgufFile::open(path)?);
+    let plan = ResidentWeights::plan(&gguf)?;
+    ensure!(
+        plan.layers == 40
+            && plan.config.hidden == 5120
+            && plan.config.vocab == 129280
+            && plan.config.experts == 272,
+        "GGUF does not match the HF comparison's geometry"
+    );
+    Ok(ResidentWeights::load(
+        ctx,
+        gguf,
+        LoadLimits {
+            resident_bytes: u64::MAX,
+        },
+    )?)
+}
+
+fn replay_trace(model: &Path, path: &Path) -> Result<()> {
+    qwen_cli::shutdown::install()?;
+    qwen_cli::shutdown::checkpoint()?;
+    let ctx = MetalContext::new()?;
+    let weights = load_characterization_model(&ctx, model)?;
+    let forward =
+        Forward::from_resident(&ctx, &weights, weights.token_map.clone(), weights.raw_pad)
+            .map_err(anyhow::Error::msg)?;
+    let mut state = forward.new_state_with_gpu_step(TOKENS.len())?;
+    let mut trace = trace::Trace::create(path, &weights.config, 40, &TOKENS)?;
+    let mut logits = Vec::new();
+    for (position, token) in TOKENS.into_iter().enumerate() {
+        trace.begin_step(position, token)?;
+        logits = forward
+            .step_with_trace(
+                &mut state,
+                token,
+                Some(qwen_cli::shutdown::cancellation_flag()),
+                Some(&mut |layer| trace.layer(layer).map_err(|e| e.to_string())),
+            )
+            .map_err(anyhow::Error::msg)?;
+        trace.finish_step(&logits)?;
+    }
+    qwen_cli::shutdown::checkpoint()?;
+    let token = qwen_llm::sampling::Sampler::new(Default::default())?
+        .sample(&logits)?
+        .token;
+    trace.finish(&[u32::try_from(token)?], None)
+}
+
+fn capture_attention(model: &Path, path: &Path, tokens: &[u32]) -> Result<()> {
+    qwen_cli::shutdown::install()?;
+    qwen_cli::shutdown::checkpoint()?;
+    ensure!(
+        tokens.len() == 10000,
+        "attention oracle needs exactly 10000 tokens"
+    );
+    let ctx = MetalContext::new()?;
+    let weights = load_characterization_model(&ctx, model)?;
+    let forward =
+        Forward::from_resident(&ctx, &weights, weights.token_map.clone(), weights.raw_pad)
+            .map_err(anyhow::Error::msg)?;
+    let mut state = forward.new_state_with_gpu_step(tokens.len())?;
+    let mut capture = capture::Writer::create(
+        path,
+        &LONG_POSITIONS,
+        json!({"gguf":model,"execution":"gpu_step","provenance_verified":false}),
+    )?;
+    for (position, &token) in tokens.iter().enumerate() {
+        capture.begin_step(position, token)?;
+        if let Err(error) = forward.step_with_capture(
+            &mut state,
+            token,
+            Some(qwen_cli::shutdown::cancellation_flag()),
+            None,
+            Some(&mut capture),
+        ) {
+            capture.failure(&error, qwen_cli::shutdown::checkpoint().is_err());
+            anyhow::bail!(error);
+        }
+    }
+    qwen_cli::shutdown::checkpoint()?;
+    capture.finish()
 }
 
 fn manifest(path: &Path) -> Result<Value> {
     Ok(serde_json::from_slice(&std::fs::read(path)?)?)
+}
+
+fn compare_command(reference: &Path, trace: &Path) -> Command {
+    let mut command = Command::new("uv");
+    command
+        .args(["run", "--offline", "--script"])
+        .arg(
+            Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("../../scripts/reference/deepseek_v41/cpu/compare.py"),
+        )
+        .arg("--reference-dir")
+        .arg(reference)
+        .arg("--runtime-dir")
+        .arg(trace)
+        .env("CUDA_VISIBLE_DEVICES", "");
+    command
+}
+
+#[test]
+fn seven_token_comparison_has_no_numerical_threshold_arguments() {
+    let command = compare_command(Path::new("hf-reference"), Path::new("gguf-trace"));
+    let args: Vec<_> = command.get_args().map(|a| a.to_str().unwrap()).collect();
+    assert_eq!(&args[..3], ["run", "--offline", "--script"]);
+    assert!(args[3].ends_with("/cpu/compare.py"));
+    assert_eq!(
+        &args[4..],
+        [
+            "--reference-dir",
+            "hf-reference",
+            "--runtime-dir",
+            "gguf-trace"
+        ]
+    );
+    assert_eq!(
+        GGUF_MODEL.filename(),
+        "DeepSeek-V4.1-Flash-REAP-272E-MXFP4-Q8Engram.gguf"
+    );
 }
 
 const LONG_TOKENS: qwen_llm::test_fixtures::Fixture = qwen_llm::test_fixtures::Fixture {
@@ -97,10 +185,10 @@ const LONG_TOKENS: qwen_llm::test_fixtures::Fixture = qwen_llm::test_fixtures::F
     env: &[],
     filename: "deepseek-v4.1-reap-272e-native-f32-10k-attention.json",
 };
-const LONG_POSITIONS: [usize; 4] = [2046, 2047, 9998, 9999];
+const LONG_POSITIONS: [usize; 4] = capture::DEFAULT_CHECKPOINTS;
 const LONG_LAYERS: [usize; 8] = [2, 8, 14, 20, 24, 28, 32, 36];
 
-fn long_tokens(meta: &Value) -> Result<String> {
+fn long_tokens(meta: &Value) -> Result<Vec<u32>> {
     ensure!(
         meta["format"] == "dsv41-long-context-v1",
         "wrong capture format"
@@ -122,36 +210,9 @@ fn long_tokens(meta: &Value) -> Result<String> {
                 .as_u64()
                 .context("token must be an unsigned integer")?;
             ensure!(id < 129280, "token outside vocabulary");
-            Ok(id.to_string())
+            Ok(id as u32)
         })
         .collect::<Result<Vec<_>>>()
-        .map(|ids| ids.join(","))
-}
-
-fn long_capture_command(model: &Path, engram: &Path, capture: &Path, tokens: &str) -> Command {
-    let mut command = Command::new(env!("CARGO_BIN_EXE_qwen"));
-    command
-        .args(["deepseek-v41", "--gpu-step", "--model-dir"])
-        .arg(model)
-        .arg("--engram-dir")
-        .arg(engram)
-        .args([
-            "--token-ids",
-            tokens,
-            "--max-tokens",
-            "1",
-            "--temperature",
-            "0",
-            "--context",
-            "10000",
-            "--reserve-mib",
-            "1024",
-            "--attention-capture-positions",
-            "2046,2047,9998,9999",
-        ])
-        .arg("--attention-capture-dir")
-        .arg(capture);
-    command
 }
 
 fn long_compare_command(model: &Path, capture: &Path) -> Command {
@@ -171,7 +232,7 @@ fn long_compare_command(model: &Path, capture: &Path) -> Command {
     command
 }
 
-fn check_long_report(report: &Value) -> Result<()> {
+fn check_legacy_tight_long_report(report: &Value) -> Result<()> {
     let rows = report.as_array().context("expected comparison rows")?;
     ensure!(rows.len() == 32, "expected exactly 32 checkpoints");
     for (row, (position, layer)) in rows.iter().zip(
@@ -209,13 +270,12 @@ fn check_long_report(report: &Value) -> Result<()> {
 }
 
 #[test]
-#[ignore = "model witness: deepseek-v4.1-reap-272e-native-f32-10k-attention"]
-fn gpu_step_ten_thousand_token_attention_oracle() -> Result<()> {
+#[ignore = "model characterization: deepseek-v4.1-reap-272e-mxfp4-q8engram"]
+fn hf_conversion_ten_thousand_token_attention_characterization() -> Result<()> {
     let tokens = long_tokens(&manifest(LONG_TOKENS.required())?)?;
-    let model = model_root(MODEL_CONFIG.required())?;
-    let engram = engram_root(&model, || ENGRAM_SHARD.required().clone())?;
+    let model = GGUF_MODEL.required();
     let output = std::env::temp_dir().join(format!(
-        "qwen-v41-long-oracle-{}-{}",
+        "qwen-v41-long-characterization-{}-{}",
         std::process::id(),
         std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)?
@@ -228,65 +288,37 @@ fn gpu_step_ten_thousand_token_attention_oracle() -> Result<()> {
         builder.mode(0o700);
     }
     builder.create(&output)?;
-    eprintln!("long oracle evidence retained at {}", output.display());
-    let capture = output.join("capture");
-    // Inherit output rather than retaining 10k forward logs in memory.
-    ensure!(
-        long_capture_command(&model, &engram, &capture, &tokens)
-            .status()?
-            .success(),
-        "GPU capture failed"
+    eprintln!(
+        "long HF conversion characterization (not acceptance) retained at {}",
+        output.display()
     );
+    let capture = output.join("capture");
+    capture_attention(model, &capture, &tokens)?;
     ensure!(
         long_tokens(&manifest(&capture.join("manifest.json"))?)? == tokens,
         "fresh capture tokens differ from fixture"
     );
     let report = output.join("comparison.json");
+    let status = long_compare_command(&offline_source_root(OFFLINE_CONFIG.required())?, &capture)
+        .stdout(std::fs::File::create(&report)?)
+        .status()?;
+    // The existing CPU tool exits 1 on numerical/selection differences. Those
+    // differences are measurements here; malformed or nonfinite reports still fail.
     ensure!(
-        long_compare_command(&model, &capture)
-            .stdout(std::fs::File::create(&report)?)
-            .status()?
-            .success(),
-        "CPU replay failed"
+        matches!(status.code(), Some(0 | 1)),
+        "CPU diagnostic failed: {status}"
     );
-    check_long_report(&manifest(&report)?)
+    let report = manifest(&report)?;
+    check_long_characterization(&report)?;
+    emit_characterization(
+        &output,
+        "teacher_forced_attention_hf_source_vs_converted_gguf",
+        &report,
+    )
 }
 
 #[test]
-fn long_context_commands_are_fresh_gpu_and_independent_cpu() {
-    let gpu = long_capture_command(
-        Path::new("model"),
-        Path::new("engram"),
-        Path::new("fresh"),
-        "1,2",
-    );
-    assert_eq!(gpu.get_program(), env!("CARGO_BIN_EXE_qwen"));
-    let args: Vec<_> = gpu.get_args().map(|a| a.to_str().unwrap()).collect();
-    assert_eq!(
-        args,
-        [
-            "deepseek-v41",
-            "--gpu-step",
-            "--model-dir",
-            "model",
-            "--engram-dir",
-            "engram",
-            "--token-ids",
-            "1,2",
-            "--max-tokens",
-            "1",
-            "--temperature",
-            "0",
-            "--context",
-            "10000",
-            "--reserve-mib",
-            "1024",
-            "--attention-capture-positions",
-            "2046,2047,9998,9999",
-            "--attention-capture-dir",
-            "fresh"
-        ]
-    );
+fn long_context_comparison_remains_independent_cpu() {
     let cpu = long_compare_command(Path::new("model"), Path::new("fresh"));
     let args: Vec<_> = cpu.get_args().map(|a| a.to_str().unwrap()).collect();
     assert_eq!(&args[..3], ["run", "--offline", "--script"]);
@@ -310,7 +342,7 @@ fn long_context_commands_are_fresh_gpu_and_independent_cpu() {
 fn long_context_manifest_validation() -> Result<()> {
     let valid = json!({"format":"dsv41-long-context-v1", "mode":"NativeF32", "status":"success",
         "requested_checkpoints":LONG_POSITIONS, "token_ids":vec![0;10000]});
-    assert_eq!(long_tokens(&valid)?.split(',').count(), 10000);
+    assert_eq!(long_tokens(&valid)?.len(), 10000);
     for (key, bad) in [
         ("format", json!("other")),
         ("mode", json!("BF16")),
@@ -345,7 +377,7 @@ fn long_context_report_negative_controls() -> Result<()> {
             })
             .collect(),
     );
-    check_long_report(&valid)?;
+    check_legacy_tight_long_report(&valid)?;
     for key in [
         "position",
         "layer",
@@ -361,7 +393,7 @@ fn long_context_report_negative_controls() -> Result<()> {
         let mut report = valid.clone();
         report[31][key] = Value::Null;
         assert!(
-            check_long_report(&report).is_err(),
+            check_legacy_tight_long_report(&report).is_err(),
             "accepted missing {key}"
         );
     }
@@ -374,16 +406,19 @@ fn long_context_report_negative_controls() -> Result<()> {
     ] {
         let mut report = valid.clone();
         report[31]["output"][key] = bad;
-        assert!(check_long_report(&report).is_err(), "accepted {key}");
+        assert!(
+            check_legacy_tight_long_report(&report).is_err(),
+            "accepted {key}"
+        );
     }
     let mut report = valid.clone();
     report[31] = report[0].clone();
-    assert!(check_long_report(&report).is_err());
+    assert!(check_legacy_tight_long_report(&report).is_err());
     let mut rows = valid.as_array().unwrap().clone();
     rows.pop();
-    assert!(check_long_report(&json!(rows)).is_err());
+    assert!(check_legacy_tight_long_report(&json!(rows)).is_err());
     rows.extend([valid[31].clone(), valid[31].clone()]);
-    assert!(check_long_report(&json!(rows)).is_err());
+    assert!(check_legacy_tight_long_report(&json!(rows)).is_err());
     Ok(())
 }
 
@@ -428,7 +463,7 @@ fn bounded(value: &Value, key: &str, maximum: f64) -> Result<()> {
     Ok(())
 }
 
-fn check_report(report: &Value) -> Result<()> {
+fn check_legacy_tight_report(report: &Value) -> Result<()> {
     ensure!(report["mode"] == "NativeF32", "comparison mode mismatch");
     ensure!(
         report["positions"] == 7 && report["layers"] == 40 && report["tensors_compared"] == 567,
@@ -466,18 +501,8 @@ fn check_report(report: &Value) -> Result<()> {
 }
 
 #[test]
-#[ignore = "model witness: deepseek-v4.1-reap-272e-native-f32-7t-40l-cpu"]
-fn native_f32_seven_token_cpu_oracle() -> Result<()> {
-    replay(false)
-}
-
-#[test]
-#[ignore = "model witness: deepseek-v4.1-reap-272e-native-f32-7t-40l-cpu"]
-fn gpu_step_seven_token_cpu_oracle() -> Result<()> {
-    replay(true)
-}
-
-fn replay(gpu_step: bool) -> Result<()> {
+#[ignore = "model characterization: deepseek-v4.1-reap-272e-mxfp4-q8engram"]
+fn hf_conversion_seven_token_characterization() -> Result<()> {
     let marker = CPU_REFERENCE.required();
     let reference = marker.parent().context("reference has no parent")?;
     let reference_meta = manifest(&reference.join("run.json"))?;
@@ -489,46 +514,28 @@ fn replay(gpu_step: bool) -> Result<()> {
         reference_meta["mode"] == "NativeF32" && reference_meta["router_tie_policy"] == POLICY,
         "reference must use stable NativeF32 routing (not the upstream-tie negative control)"
     );
-    let model = model_root(MODEL_CONFIG.required())?;
-    let engram = engram_root(&model, || ENGRAM_SHARD.required().clone())?;
+    let model = GGUF_MODEL.required();
     let output = std::env::temp_dir().join(format!(
-        "qwen-v41-oracle-{}-{}",
+        "qwen-v41-characterization-{}-{}",
         std::process::id(),
         std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)?
             .as_nanos()
     ));
     std::fs::create_dir(&output)?;
-    eprintln!("oracle evidence retained at {}", output.display());
+    eprintln!(
+        "HF conversion characterization (not acceptance) retained at {}",
+        output.display()
+    );
     let trace = output.join("trace");
-    let mut command = replay_command(&model, &engram, &trace);
-    if gpu_step {
-        command.arg("--gpu-step");
-    }
-    let status = command.status()?;
-    ensure!(status.success(), "qwen replay failed: {status}");
+    replay_trace(model, &trace)?;
     let runtime = manifest(&trace.join("run.json"))?;
     check_policy(&reference_meta, &runtime)?;
     ensure!(
-        runtime["execution"]
-            == if gpu_step {
-                "gpu_step"
-            } else {
-                "cpu_boundaries"
-            },
-        "wrong execution mode"
+        runtime["execution"] == "gpu_step",
+        "wrong production execution mode"
     );
-    let compare = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../../scripts/reference/deepseek_v41/cpu/compare.py");
-    let result = Command::new("uv")
-        .args(["run", "--offline", "--script"])
-        .arg(compare)
-        .arg("--reference-dir")
-        .arg(reference)
-        .arg("--runtime-dir")
-        .arg(&trace)
-        .env("CUDA_VISIBLE_DEVICES", "")
-        .output()?;
+    let result = compare_command(reference, &trace).output()?;
     std::fs::write(output.join("comparison.json"), &result.stdout)?;
     ensure!(
         result.status.success(),
@@ -536,23 +543,27 @@ fn replay(gpu_step: bool) -> Result<()> {
         String::from_utf8_lossy(&result.stderr)
     );
     let report: Value = serde_json::from_slice(&result.stdout)?;
-    check_report(&report)?;
+    check_characterization(&report)?;
     ensure!(
-        runtime["generated_token_ids"] == json!([report["logits"][6]["reference_top1"]]),
-        "final sampled token differs from CPU argmax"
+        runtime["generated_token_ids"] == json!([report["logits"][6]["runtime_top1"]]),
+        "final sampled token differs from runtime argmax"
     );
-    Ok(())
+    emit_characterization(
+        &output,
+        "seven_token_hf_source_vs_converted_gguf_conversion_and_execution",
+        &report,
+    )
 }
 
 #[test]
-fn comparison_gate_rejects_characterization_failures() {
+fn legacy_tight_report_bounds_remain_unchanged_for_future_execution_oracle() {
     let mut report = json!({"mode":"NativeF32", "positions":7,"layers":40,
         "tensors_compared":567,"token_check":"complete","token_positions_verified":7,
         "shapes":{"hidden":[4,5120],"pre":[4],"logits":[129280]},
         "logits": (0..7).map(|position| json!({"position":position,"reference_top1":5,
             "runtime_top1":5,"top1_match":true,"maxabs":5.49e-5,
             "kl_reference_to_runtime":4.82e-11})).collect::<Vec<_>>()});
-    check_report(&report).unwrap();
+    check_legacy_tight_report(&report).unwrap();
     for (key, value) in [
         ("maxabs", json!(1.01e-4)),
         ("kl_reference_to_runtime", json!(1.01e-10)),
@@ -562,47 +573,16 @@ fn comparison_gate_rejects_characterization_failures() {
     ] {
         let mut bad = report.clone();
         bad["logits"][0][key] = value;
-        assert!(check_report(&bad).is_err(), "accepted {key}");
+        assert!(check_legacy_tight_report(&bad).is_err(), "accepted {key}");
     }
     report["token_positions_verified"] = json!(6);
-    assert!(check_report(&report).is_err());
+    assert!(check_legacy_tight_report(&report).is_err());
 }
 
 #[test]
-fn replay_uses_bounded_reserve_and_default_cache_policy() {
-    let command = replay_command(Path::new("model"), Path::new("base"), Path::new("trace"));
-    let args: Vec<_> = command
-        .get_args()
-        .map(|arg| arg.to_str().unwrap())
-        .collect();
-    assert_eq!(
-        args,
-        [
-            "deepseek-v41",
-            "--model-dir",
-            "model",
-            "--engram-dir",
-            "base",
-            "--token-ids",
-            "0,5,223,939,23,695,22",
-            "--max-tokens",
-            "1",
-            "--temperature",
-            "0",
-            "--context",
-            "16",
-            "--reserve-mib",
-            "1024",
-            "--trace-dir",
-            "trace"
-        ]
-    );
-}
-
-#[test]
-fn named_root_fixtures_and_colocated_engrams() -> Result<()> {
+fn named_gguf_fixture_is_resolved_without_runtime_source_directory() -> Result<()> {
     let root = std::env::temp_dir().join(format!(
-        "qwen-v41-root-fixtures-{}-{}",
+        "qwen-v41-gguf-fixture-{}-{}",
         std::process::id(),
         std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)?
@@ -610,31 +590,10 @@ fn named_root_fixtures_and_colocated_engrams() -> Result<()> {
     ));
     std::fs::create_dir(&root)?;
     let result = (|| -> Result<()> {
-        let model = root.join("checkpoint");
-        let base = root.join("base");
-        std::fs::create_dir(&model)?;
-        std::fs::create_dir(&base)?;
-        let marker = model.join(MODEL_CONFIG.filename());
-        std::fs::write(&marker, b"{}")?;
-        std::fs::write(model.join("config.json"), b"{}")?;
-        assert!(model_root(&marker).is_err());
-        for file in ["model.safetensors.index.json", "tokenizer.json"] {
-            std::fs::write(model.join(file), b"{}")?;
-        }
-        assert_eq!(model_root(&marker)?, model);
-        std::fs::write(&marker, b"{\"wrong\":true}")?;
-        assert!(model_root(&marker).is_err());
-        std::fs::write(&marker, b"{}")?;
-        let alias = base.join(ENGRAM_SHARD.filename());
-        std::fs::write(base.join(ENGRAM_FILES[0]), b"synthetic header")?;
-        std::os::unix::fs::symlink(ENGRAM_FILES[0], &alias)?;
-        assert!(engram_root(&model, || alias.clone()).is_err());
-        std::fs::write(base.join(ENGRAM_FILES[1]), b"synthetic header")?;
-        assert_eq!(engram_root(&model, || alias.clone())?, base);
-        // Resolve through the real shared resolver in a child: no process-global env edits.
+        std::fs::write(root.join(GGUF_MODEL.filename()), b"fixture lookup only")?;
         let child = Command::new(std::env::current_exe()?)
             .args([
-                "named_root_fixture_lookup_child",
+                "named_gguf_fixture_lookup_child",
                 "--exact",
                 "--ignored",
                 "--nocapture",
@@ -643,18 +602,8 @@ fn named_root_fixtures_and_colocated_engrams() -> Result<()> {
             .output()?;
         ensure!(
             child.status.success(),
-            "fixture lookup child failed: {}\n{}",
-            String::from_utf8_lossy(&child.stdout),
+            "GGUF fixture lookup failed: {}",
             String::from_utf8_lossy(&child.stderr)
-        );
-        for file in ENGRAM_FILES {
-            std::fs::write(model.join(file), b"synthetic header")?;
-        }
-        assert_eq!(
-            engram_root(&model, || panic!(
-                "co-located shards need no second fixture"
-            ))?,
-            model
         );
         Ok(())
     })();
@@ -663,13 +612,17 @@ fn named_root_fixtures_and_colocated_engrams() -> Result<()> {
 }
 
 #[test]
-#[ignore = "subprocess fixture; run by named_root_fixtures_and_colocated_engrams"]
-fn named_root_fixture_lookup_child() -> Result<()> {
-    let model = model_root(MODEL_CONFIG.required())?;
-    let base = engram_root(&model, || ENGRAM_SHARD.required().clone())?;
+#[ignore = "subprocess fixture; run by named_gguf_fixture_is_resolved_without_runtime_source_directory"]
+fn named_gguf_fixture_lookup_child() -> Result<()> {
+    let path = GGUF_MODEL.required();
     ensure!(
-        model.file_name().unwrap() == "checkpoint" && base.file_name().unwrap() == "base",
-        "named fixtures resolved to unexpected roots"
+        path.extension().is_some_and(|ext| ext == "gguf"),
+        "not a GGUF fixture"
+    );
+    let root = path.parent().unwrap();
+    ensure!(
+        !root.join("config.json").exists() && !root.join("tokenizer.json").exists(),
+        "runtime source directory is not needed"
     );
     Ok(())
 }

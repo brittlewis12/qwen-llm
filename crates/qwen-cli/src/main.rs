@@ -5,7 +5,10 @@ mod admission;
 #[path = "qwen/args.rs"]
 mod args;
 mod cli;
-mod deepseek_v41_cli;
+#[path = "qwen/deepseek_v41.rs"]
+mod deepseek_v41;
+#[cfg(test)]
+mod deepseek_v41_fixture;
 #[cfg(test)]
 mod test_alloc;
 use qwen_cli::bounded_file;
@@ -207,7 +210,6 @@ fn run() -> Result<()> {
     let invocation = match invocation {
         cli::Invocation::Serve(serve_invocation) => return serve::run_serve(serve_invocation),
         cli::Invocation::Info(info) => return run_info(info),
-        cli::Invocation::DeepSeekV41(options) => return deepseek_v41_cli::run(options),
         other => other,
     };
     invocation.apply_option_overrides(&mut args);
@@ -333,6 +335,9 @@ fn run() -> Result<()> {
     // lane. K2, GLM and Muse own their request shapes and skip the Qwen batch
     // and DeepSeek selector validators below.
     match family {
+        ModelFamily::DeepSeekV41 => {
+            return deepseek_v41::run(gguf, &args, explicit_options, invocation);
+        }
         ModelFamily::K2Horizon => {
             return k2_horizon::run_raw(&gguf, &args, explicit_options, invocation);
         }
@@ -388,6 +393,7 @@ fn run() -> Result<()> {
         );
     }
     match family {
+        ModelFamily::DeepSeekV41 => unreachable!("V4.1 returned above"),
         ModelFamily::K2Horizon => unreachable!("K2 Horizon returned above"),
         ModelFamily::Glm5Next => unreachable!("GLM-5.3-Flash returned above"),
         ModelFamily::MuseGlimmer => unreachable!("Muse Glimmer returned above"),
@@ -816,6 +822,7 @@ fn prepare_modern_run_prompt(
                     deepseek_v4_options,
                 )
                 .context("render DeepSeek V4 0731 user request")?,
+                ModelFamily::DeepSeekV41 => bail!("V4.1 owns its request rendering"),
                 ModelFamily::K2Horizon => bail!("K2 Horizon currently supports raw input only"),
                 ModelFamily::Glm5Next => {
                     bail!("GLM-5.3-Flash requests are prepared by its own run lane")
@@ -892,6 +899,7 @@ fn prepare_modern_run_prompt(
                     deepseek_v4_options,
                 )
                 .context("render strict DeepSeek V4 0731 messages")?,
+                ModelFamily::DeepSeekV41 => bail!("V4.1 owns its request rendering"),
                 ModelFamily::K2Horizon => bail!("K2 Horizon currently supports raw input only"),
                 ModelFamily::Glm5Next => {
                     bail!("GLM-5.3-Flash requests are prepared by its own run lane")
@@ -944,7 +952,7 @@ pub(crate) fn input_capability_for(
                 ),
             }
         }
-        Some(ModelFamily::DeepSeek4 | ModelFamily::MuseGlimmer) => InputCapability::all_supported(),
+        Some(ModelFamily::DeepSeekV41 | ModelFamily::DeepSeek4 | ModelFamily::MuseGlimmer) => InputCapability::all_supported(),
         Some(ModelFamily::K2Horizon) => {
             match qwen_llm::k2_horizon_runtime::K2PreparedArtifact::inspect(gguf)
                 .and_then(|artifact| artifact.generation_stops()) {
@@ -983,6 +991,9 @@ fn template_projection(family: Option<ModelFamily>, gguf: &GgufFile) -> serde_js
                     "message": error.to_string(),
                 }),
             }
+        }
+        Some(ModelFamily::DeepSeekV41) => {
+            serde_json::json!({"status":"identified", "rendered_as":"deepseek_recipe_dsv41"})
         }
         Some(ModelFamily::DeepSeek4) => serde_json::json!({
             "status": "identified",

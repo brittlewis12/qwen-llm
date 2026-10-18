@@ -1,5 +1,5 @@
 //! Family-general pp/tg rows for the families that do not bind through the
-//! Qwen `Runtime`: Flash-Next (`qwen4exp`), DeepSeek V4, Muse Glimmer and K2
+//! Qwen `Runtime`: Flash-Next (`qwen4exp`), DeepSeek V4/V4.1, Muse Glimmer and K2
 //! Horizon. Each adapter loads weights once with the production options
 //! `qwen run` uses (`family_options`) and times the production calls,
 //! including the host logits copy production makes at a prompt endpoint and
@@ -13,6 +13,7 @@ use crate::family_options::{
 };
 use anyhow::{bail, ensure};
 use qwen_llm::deepseek_v4_metal::{DeepSeekV4MetalResidency, DeepSeekV4Session};
+use qwen_llm::deepseek_v41::{forward::Forward as V41Forward, gguf as v41_weights};
 use qwen_llm::glm5_next_metal::{Glm5NextSession, Glm5NextWeights};
 use qwen_llm::k2_horizon_runtime::{K2LoadedModel, K2Session};
 use qwen_llm::model_family::ModelFamily;
@@ -98,11 +99,42 @@ const QWEN4EXP_PROFILE_ONLY_ENV: [&str; 3] = [
 pub(crate) fn with_family_bench<R>(
     family: ModelFamily,
     ctx: &MetalContext,
-    gguf: &GgufFile,
+    gguf: &std::sync::Arc<GgufFile>,
     extent: FamilyBenchExtent,
     body: &mut dyn FnMut(&mut dyn FamilyBench) -> Result<R>,
 ) -> Result<R> {
     match family {
+        ModelFamily::DeepSeekV41 => {
+            let plan = v41_weights::plan(gguf)?;
+            validate_v41_extent(extent, plan.engram_hash.max_position)?;
+            let weights = v41_weights::ResidentWeights::load(
+                ctx,
+                gguf.clone(),
+                v41_weights::LoadLimits {
+                    resident_bytes: u64::MAX,
+                },
+            )
+            .context("load DeepSeek V4.1 weights")?;
+            let forward = V41Forward::from_resident(
+                ctx,
+                &weights,
+                weights.token_map.clone(),
+                weights.raw_pad,
+            )
+            .map_err(anyhow::Error::msg)?;
+            let mut bench = DeepSeekV41Bench {
+                vocab: weights.config.vocab,
+                state: None,
+                create: || Ok(forward.new_state_with_gpu_step(extent.forwards)?),
+                step: |state: &mut qwen_llm::deepseek_v41::forward::State, token| {
+                    shutdown::checkpoint()?;
+                    forward
+                        .step(state, token, Some(shutdown::cancellation_flag()))
+                        .map_err(anyhow::Error::msg)
+                },
+            };
+            body(&mut bench)
+        }
         ModelFamily::Qwen4Exp => {
             for name in QWEN4EXP_PROFILE_ONLY_ENV {
                 ensure!(
@@ -244,6 +276,58 @@ pub(crate) fn with_family_bench<R>(
         }
         ModelFamily::Qwen35 | ModelFamily::Qwen35Moe => {
             bail!("Qwen models bind through the Qwen runtime path, not the family adapter")
+        }
+    }
+}
+
+fn validate_v41_extent(extent: FamilyBenchExtent, max_position: u64) -> Result<()> {
+    ensure!(
+        extent.forwards > 0 && u64::try_from(extent.forwards)? <= max_position,
+        "DeepSeek V4.1 rows must stay within the checkpoint context {max_position} (need {})",
+        extent.forwards
+    );
+    Ok(())
+}
+
+struct DeepSeekV41Bench<S, Create, Step> {
+    vocab: usize,
+    state: Option<S>,
+    create: Create,
+    step: Step,
+}
+
+impl<S, Create, Step> FamilyBench for DeepSeekV41Bench<S, Create, Step>
+where
+    Create: FnMut() -> Result<S>,
+    Step: FnMut(&mut S, u32) -> Result<Vec<f32>>,
+{
+    fn vocab_size(&self) -> usize {
+        self.vocab
+    }
+    fn begin_rep(&mut self) -> Result<()> {
+        self.state = None;
+        self.state = Some((self.create)()?);
+        Ok(())
+    }
+    fn prefill(&mut self, ids: &[u32]) -> Result<()> {
+        for &id in ids {
+            self.decode(id)?;
+        }
+        Ok(())
+    }
+    fn decode(&mut self, id: u32) -> Result<()> {
+        let state = self
+            .state
+            .as_mut()
+            .context("DeepSeek V4.1 bench used before begin_rep")?;
+        std::hint::black_box((self.step)(state, id)?);
+        Ok(())
+    }
+    fn semantics(&self) -> FamilySemantics {
+        FamilySemantics {
+            prefill_mode: "single_token_forward_gpu_step+logits_copy",
+            decode_mode: "gpu_step+logits_copy",
+            prefill_chunk: Some(1),
         }
     }
 }
@@ -705,6 +789,88 @@ fn family_row(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn v41_standard_harness_keeps_fresh_state_depth_and_common_columns() {
+        use std::cell::RefCell;
+        let repetitions = RefCell::new(Vec::<Vec<u32>>::new());
+        let mut bench = DeepSeekV41Bench {
+            vocab: 257,
+            state: None,
+            create: || {
+                repetitions.borrow_mut().push(vec![]);
+                Ok(0usize)
+            },
+            step: |position: &mut usize, token| {
+                let mut reps = repetitions.borrow_mut();
+                let ids = reps.last_mut().unwrap();
+                assert_eq!(*position, ids.len());
+                ids.push(token);
+                *position += 1;
+                Ok(vec![0.; 257])
+            },
+        };
+        assert!(bench.decode(1).is_err());
+        let row_ctx = SuiteRowContext {
+            build_commit: "fixture",
+            build_dirty: 0,
+            model_filename: "fixture.gguf".into(),
+            model_size: 123,
+            model_n_params: 456,
+            arch_kind: "deepseek_v41",
+            family: "deepseek_v41",
+            power: None,
+            qwen_env: Default::default(),
+        };
+        let pp = run_family_pp_row(&mut bench, &row_ctx, 3, 2, 2, false, 42).unwrap();
+        let tg = run_family_tg_row(&mut bench, &row_ctx, 4, 2, 2, false, 42).unwrap();
+        assert_eq!(
+            repetitions
+                .borrow()
+                .iter()
+                .map(Vec::len)
+                .collect::<Vec<_>>(),
+            [5, 5, 5, 6, 6, 6]
+        );
+        assert_eq!(pp.test, "pp3@d2");
+        assert_eq!(tg.test, "tg4@d2");
+        assert_eq!(pp.prefill_chunk, Some(1));
+        assert_eq!(
+            pp.prefill_mode,
+            Some("single_token_forward_gpu_step+logits_copy")
+        );
+        assert_eq!(tg.decode_mode, Some("gpu_step+logits_copy"));
+        for row in [pp, tg] {
+            let json = serde_json::to_value(row).unwrap();
+            assert_eq!(json["schema_version"], BENCH_SCHEMA_VERSION);
+            assert_eq!(json["family"], "deepseek_v41");
+            assert_eq!(json["n_repetitions"], 2);
+            assert_eq!(json["samples_ns"].as_array().unwrap().len(), 2);
+        }
+    }
+
+    #[test]
+    fn v41_bench_extent_uses_validated_alias_without_expert_count_gate() {
+        for experts in [272, 320, 384] {
+            let gguf =
+                crate::deepseek_v41_fixture::gguf(experts, "deepseek41.max_position_embeddings");
+            assert_eq!(ModelFamily::detect(&gguf), Some(ModelFamily::DeepSeekV41));
+            let plan = v41_weights::plan(&gguf).unwrap();
+            assert_eq!(plan.engram_hash.max_position, 64);
+            let extent = FamilyBenchExtent::for_shapes(&[32], &[16], &[32], (16, 16)).unwrap();
+            validate_v41_extent(extent, plan.engram_hash.max_position).unwrap();
+            assert!(
+                validate_v41_extent(
+                    FamilyBenchExtent {
+                        forwards: 65,
+                        ..extent
+                    },
+                    plan.engram_hash.max_position
+                )
+                .is_err()
+            );
+        }
+    }
 
     /// The admitted extent is the deepest position any row or the warm-up
     /// reaches (no arbitrary margin, so context-edge shapes stay valid), and

@@ -43,6 +43,21 @@ pub struct ResidentWeights {
     pub bytes: ByteCounters,
 }
 
+pub(super) fn residency_admission(
+    metal_bytes: u64,
+    staging_bytes: u64,
+    signals: crate::metal::MetalMemorySignals,
+) -> crate::metal::MetalMemoryAdmission {
+    // A reported zero omits the process budget on macOS, as in other resident loaders.
+    crate::metal::evaluate_metal_memory_admission_with_cpu_bytes(
+        metal_bytes,
+        staging_bytes,
+        0,
+        signals,
+        true,
+    )
+}
+
 fn dimensions(part: &str) -> (usize, usize) {
     if part == "w2" {
         (HIDDEN, INTERMEDIATE)
@@ -304,13 +319,7 @@ impl ResidentWeights {
             let (r, c) = row_geometry(&tensor.descriptor)?;
             price(r * c * 4)?;
         }
-        let admission = crate::metal::evaluate_metal_memory_admission_with_cpu_bytes(
-            priced,
-            bytes.peak_staging,
-            0,
-            ctx.memory_signals(),
-            false,
-        );
+        let admission = residency_admission(priced, bytes.peak_staging, ctx.memory_signals());
         if let Some(refusal) = admission.refusal() {
             return Err(refusal.to_string());
         }

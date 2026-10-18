@@ -3,6 +3,35 @@ use std::io::Write;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 static NEXT: AtomicU64 = AtomicU64::new(0);
+
+#[test]
+fn residency_accepts_omitted_budget_but_preserves_real_limits() {
+    use crate::metal::{MetalMemoryAdmissionReason as R, MetalMemorySignals};
+    let mut signals = MetalMemorySignals {
+        recommended_max_bytes: 1000,
+        current_allocated_bytes: 100,
+        process_limit_remaining_bytes: Some(0),
+    };
+    assert_eq!(
+        resident::residency_admission(800, 20, signals).reason,
+        R::AdmittedProcessBudgetOmitted
+    );
+    assert_eq!(
+        resident::residency_admission(901, 20, signals).reason,
+        R::WorkingSetInsufficient
+    );
+    signals.process_limit_remaining_bytes = None;
+    assert_eq!(
+        resident::residency_admission(800, 20, signals).reason,
+        R::ProcessSignalUnavailable
+    );
+    signals.process_limit_remaining_bytes = Some(819);
+    assert_eq!(
+        resident::residency_admission(800, 20, signals).reason,
+        R::ProcessInsufficient
+    );
+}
+
 struct Fixture(std::path::PathBuf);
 impl Fixture {
     fn new() -> Self {

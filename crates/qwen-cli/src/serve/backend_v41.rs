@@ -47,7 +47,7 @@ pub(crate) fn admit_request_memory(
         cpu,
         0,
         signals,
-        false,
+        true,
     );
     match decision.refusal() {
         Some(error) => Err(error),

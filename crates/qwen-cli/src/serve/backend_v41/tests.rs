@@ -457,6 +457,24 @@ fn v41_request_memory_splits_metal_cpu_and_preserves_typed_refusals() {
     // Resident weights are in current allocation; CPU KV/output aren't charged
     // to the device working set. A one-byte shortage on either side refuses.
     admit_request_memory(estimate, extra_cpu, signals).unwrap();
+    let omitted = MetalMemorySignals {
+        process_limit_remaining_bytes: Some(0),
+        ..signals
+    };
+    admit_request_memory(estimate, extra_cpu, omitted).unwrap();
+    assert_eq!(
+        admit_request_memory(
+            estimate,
+            extra_cpu,
+            MetalMemorySignals {
+                process_limit_remaining_bytes: None,
+                ..signals
+            },
+        )
+        .unwrap_err()
+        .reason,
+        qwen_llm::metal::MetalMemoryAdmissionReason::ProcessSignalUnavailable
+    );
     let cpu_short = MetalMemorySignals {
         process_limit_remaining_bytes: Some(estimate.total_bytes + extra_cpu - 1),
         ..signals
@@ -479,6 +497,19 @@ fn v41_request_memory_splits_metal_cpu_and_preserves_typed_refusals() {
         admit_request_memory(estimate, extra_cpu, metal_short)
             .unwrap_err()
             .reason,
+        qwen_llm::metal::MetalMemoryAdmissionReason::WorkingSetInsufficient
+    );
+    assert_eq!(
+        admit_request_memory(
+            estimate,
+            extra_cpu,
+            MetalMemorySignals {
+                process_limit_remaining_bytes: Some(0),
+                ..metal_short
+            },
+        )
+        .unwrap_err()
+        .reason,
         qwen_llm::metal::MetalMemoryAdmissionReason::WorkingSetInsufficient
     );
     assert_eq!(

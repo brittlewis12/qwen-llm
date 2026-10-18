@@ -13,6 +13,8 @@ use std::{
     sync::Arc,
 };
 
+#[path = "loader/backing.rs"]
+mod backing;
 #[path = "loader/resident.rs"]
 mod resident;
 pub use resident::{ByteCounters, LoadLimits, PackedBank, ResidentWeights};

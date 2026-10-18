@@ -5,6 +5,82 @@ use std::sync::atomic::{AtomicU64, Ordering};
 static NEXT: AtomicU64 = AtomicU64::new(0);
 
 #[test]
+fn ephemeral_backing_bounds_padding_and_cleanup() {
+    use crate::{metal::MetalContext, tensor::GgmlType};
+    use backing::BackingWriter;
+    use objc2_metal::MTLBuffer;
+    let f = Fixture::new();
+    let ctx = MetalContext::new().unwrap();
+    let mut writer = BackingWriter::new(&f.0, 4).unwrap();
+    assert_eq!(std::fs::read_dir(&f.0).unwrap().count(), 0);
+    assert!(writer.write(&[0; 5]).is_err());
+    writer.write(&[1, 2]).unwrap();
+    assert!(writer.tensor(&ctx, vec![1], GgmlType::F32).is_err());
+    let mut writer = BackingWriter::new(&f.0, 4).unwrap();
+    writer.write(&[1, 2, 3, 4]).unwrap();
+    assert!(writer.write(&[5]).is_err());
+    let tensor = writer.tensor(&ctx, vec![1], GgmlType::F32).unwrap();
+    assert_eq!(
+        tensor.buffer.length() as u64,
+        backing::padded_bytes(4).unwrap()
+    );
+    let bytes = unsafe {
+        std::slice::from_raw_parts(
+            tensor.buffer.contents().as_ptr().cast::<u8>(),
+            tensor.buffer.length(),
+        )
+    };
+    assert_eq!(&bytes[..4], &[1, 2, 3, 4]);
+    assert!(bytes[4..].iter().all(|&b| b == 0));
+    drop(tensor);
+    assert_eq!(std::fs::read_dir(&f.0).unwrap().count(), 0);
+    assert!(BackingWriter::new(&f.0.join("absent"), 4).is_err());
+    assert!(BackingWriter::new(&f.0, u64::MAX).is_err());
+    assert_eq!(std::fs::read_dir(&f.0).unwrap().count(), 0);
+}
+
+#[test]
+fn mapped_dense_conversion_and_matvec_outlive_loader() {
+    use crate::{metal::*, tensor::GgmlType};
+    let f = Fixture::new();
+    let out = Fixture::new();
+    f.shard(
+        "dense.safetensors",
+        &[(
+            "dense.weight",
+            "BF16",
+            &[2, 2],
+            &[128, 63, 0, 64, 64, 64, 128, 64],
+        )],
+    );
+    let source = SourceStore::open(&f.0).unwrap();
+    let ctx = MetalContext::new().unwrap();
+    let (weight, read) =
+        resident::materialize_dense(&ctx, &source, "dense.weight", &out.0).unwrap();
+    assert_eq!(read, 8);
+    assert_eq!(
+        weight.provenance(),
+        MetalTensorProvenance::RetainedGgufReadOnly
+    );
+    drop(source);
+    assert_eq!(std::fs::read_dir(&out.0).unwrap().count(), 0);
+    assert_eq!(read_back_f32(&weight.buffer, 4), [1., 2., 3., 4.]);
+    let x = MetalTensor::from_bytes(
+        &ctx,
+        bytemuck::cast_slice(&[2f32, 3.]),
+        vec![2],
+        GgmlType::F32,
+    )
+    .unwrap();
+    let y = MetalTensor::zeros_f32(&ctx, vec![2]).unwrap();
+    one_shot(&ctx, |enc| {
+        encode_mat_vec_f32(&ctx, enc, &weight, &x, &y, 2, 2)
+    })
+    .unwrap();
+    assert_eq!(read_back_f32(&y.buffer, 2), [8., 18.]);
+}
+
+#[test]
 fn residency_accepts_omitted_budget_but_preserves_real_limits() {
     use crate::metal::{MetalMemoryAdmissionReason as R, MetalMemorySignals};
     let mut signals = MetalMemorySignals {
@@ -291,10 +367,16 @@ fn tiny_metal_bank_materializes_directly_in_native_layout() {
     );
     let source = SourceStore::open(&f.0).unwrap();
     let ctx = crate::metal::MetalContext::new().unwrap();
-    let tensor = resident::materialize_bank(&ctx, &source, 0, "w1", 2, 32, 2).unwrap();
+    let tensor = resident::materialize_bank(&ctx, &source, 0, "w1", 2, 32, 2, &f.0).unwrap();
     assert_eq!(tensor.shape, [32, 2, 2]);
     assert_eq!(tensor.dtype, crate::tensor::GgmlType::MXFP4);
     assert_eq!(tensor.n_bytes(), 68);
+    assert_eq!(
+        tensor.provenance(),
+        crate::metal::MetalTensorProvenance::RetainedGgufReadOnly
+    );
+    drop(source);
+    assert_eq!(std::fs::read_dir(&f.0).unwrap().count(), 2);
     let bytes =
         unsafe { std::slice::from_raw_parts(tensor.buffer.contents().as_ptr().cast::<u8>(), 68) };
     assert_eq!(
@@ -303,6 +385,16 @@ fn tiny_metal_bank_materializes_directly_in_native_layout() {
     );
     assert_eq!(&bytes[1..5], &[0x11, 0x22, 0x11, 0x22]);
     assert_eq!(&bytes[35..39], &[0x33, 0x44, 0x33, 0x44]);
+    let expected: Vec<u8> = [
+        (127, 0x11, 0x22),
+        (128, 0x11, 0x22),
+        (129, 0x33, 0x44),
+        (130, 0x33, 0x44),
+    ]
+    .into_iter()
+    .flat_map(|(scale, lo, hi)| std::iter::once(scale).chain([lo, hi].into_iter().cycle().take(16)))
+    .collect();
+    assert_eq!(bytes, expected);
 }
 
 #[test]
@@ -414,7 +506,7 @@ fn complete_header_plan_counts_all_experts_and_rejects_last_bad_pair() {
     );
     assert_eq!(bytes.disk_engram, (384006168 + 384016682) * 264);
     assert_eq!(bytes.skipped_source, 12);
-    assert_eq!(bytes.peak_staging, 6_266_880);
+    assert_eq!(bytes.peak_staging, 12_533_760);
     assert_eq!(bytes.source_bytes_read, 0);
     main.tensors
         .get_mut("layers.39.ffn.experts.271.w2.scale")

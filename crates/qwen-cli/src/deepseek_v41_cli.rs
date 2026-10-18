@@ -75,6 +75,10 @@ pub(crate) struct Options {
     /// Explicit resident weight ceiling in bytes; default recommended minus reserve and existing allocations.
     #[arg(long)]
     weight_budget_bytes: Option<u64>,
+    /// Directory for temporary file-backed weights (default: OS temp directory).
+    /// Needs about 222 GiB free; backing is released when the model is unloaded.
+    #[arg(long)]
+    weight_backing_dir: Option<PathBuf>,
     /// Headroom left for KV/scratch; not a claim that a context fits.
     #[arg(long, default_value_t = 4096)]
     reserve_mib: u64,
@@ -298,6 +302,15 @@ pub(crate) fn run(options: Options) -> Result<()> {
         None
     };
     crate::shutdown::checkpoint()?;
+    let backing_dir = options
+        .weight_backing_dir
+        .clone()
+        .unwrap_or_else(std::env::temp_dir);
+    std::fs::create_dir_all(&backing_dir).context("create weight backing directory")?;
+    ensure!(
+        backing_dir.is_dir(),
+        "weight backing path must be a directory"
+    );
     let ctx = MetalContext::new()?;
     let limit = budget(
         ctx.recommended_max_working_set_size(),
@@ -307,6 +320,7 @@ pub(crate) fn run(options: Options) -> Result<()> {
     )?;
     report(
         json!({"stage":"load_start", "weight_budget_bytes":limit, "reserve_mib":options.reserve_mib,
+        "weight_storage":"temporary_file_backed", "weight_backing_dir":backing_dir,
         "memory":if options.report_memory { Some(memory(Some(&ctx))?) } else { None }}),
     );
     ensure!(
@@ -324,6 +338,7 @@ pub(crate) fn run(options: Options) -> Result<()> {
         LoadLimits {
             resident_bytes: limit,
         },
+        &backing_dir,
     )
     .map_err(|e| anyhow!(e))?;
     let load_ms = start.elapsed().as_secs_f64() * 1000.0;
@@ -507,6 +522,7 @@ mod tests {
         assert!(!parsed.options.load_only);
         assert_eq!(parsed.options.reserve_mib, 4096);
         assert_eq!(parsed.options.context, 4096);
+        assert!(parsed.options.weight_backing_dir.is_none());
         for flags in [
             vec!["--inspect", "--load-only"],
             vec!["--context", "0"],
@@ -536,9 +552,15 @@ mod tests {
             "--report-memory",
             "--context",
             "8192",
+            "--weight-backing-dir",
+            "/tmp/v41-backing",
         ])
         .unwrap();
         assert!(parsed.options.load_only && parsed.options.report_memory);
+        assert_eq!(
+            parsed.options.weight_backing_dir,
+            Some(PathBuf::from("/tmp/v41-backing"))
+        );
         let parsed = TestCli::try_parse_from([
             "qwen",
             "--model-dir",

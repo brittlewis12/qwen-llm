@@ -37,7 +37,7 @@ pub struct PackedBank {
 
 pub struct ResidentWeights {
     pub banks: Vec<PackedBank>,
-    /// GGML dimension order (reverse of the source); F32 shared storage.
+    /// GGML dimension order (reverse of the source); read-only mapped F32 storage.
     pub dense: BTreeMap<String, MetalTensor>,
     pub engram: DiskEngram,
     pub bytes: ByteCounters,
@@ -153,7 +153,7 @@ impl ResidentWeights {
                 let (codes, scales, packed) =
                     super::super::mxfp4::storage_sizes(rows, columns).map_err(|e| e.to_string())?;
                 bytes.packed_experts += (packed * EXPERTS) as u64;
-                bytes.peak_staging = bytes.peak_staging.max((codes + scales) as u64);
+                bytes.peak_staging = bytes.peak_staging.max((codes + scales + packed) as u64);
                 for expert in 0..EXPERTS {
                     for (suffix, dtype, shape) in [
                         ("weight", SourceDtype::I8, [rows as u64, columns as u64 / 2]),
@@ -278,12 +278,14 @@ impl ResidentWeights {
         Ok(bytes)
     }
 
+    /// The caller creates and validates `backing_dir`; files are unlinked immediately.
     pub fn load(
         ctx: &MetalContext,
         source: &SourceStore,
         engram: Arc<SourceStore>,
         config: &serde_json::Value,
         limits: LoadLimits,
+        backing_dir: &Path,
     ) -> Result<Self, String> {
         let bytes = Self::plan(source, &engram, config)?;
         if bytes.resident_bytes() > limits.resident_bytes {
@@ -297,6 +299,7 @@ impl ResidentWeights {
         // creating any buffer. Respect both recommended and process budgets.
         let mut priced = 0u64;
         let mut price = |n: u64| -> Result<(), String> {
+            let n = backing::padded_bytes(n)?;
             if n > ctx.max_buffer_length() as u64 {
                 return Err("weight exceeds Metal max buffer length".into());
             }
@@ -323,6 +326,14 @@ impl ResidentWeights {
         if let Some(refusal) = admission.refusal() {
             return Err(refusal.to_string());
         }
+        let disk_required = priced.checked_add(2 << 30).ok_or("backing size overflow")?;
+        let disk_available = crate::checkpoint_fs::volume_free_bytes(backing_dir)
+            .ok_or("cannot determine free space for weight backing")?;
+        if disk_available < disk_required {
+            return Err(format!(
+                "temporary weight backing needs {disk_required} bytes free, found {disk_available}"
+            ));
+        }
         // Do not retain a file-cache copy alongside the resident weight buffers.
         source.stream_without_cache()?;
         let mut loaded = Self {
@@ -336,7 +347,16 @@ impl ResidentWeights {
                 let (rows, columns) = dimensions(part);
                 let (nc, ns, _) =
                     super::super::mxfp4::storage_sizes(rows, columns).map_err(|e| e.to_string())?;
-                let tensor = materialize_bank(ctx, source, layer, part, rows, columns, EXPERTS)?;
+                let tensor = materialize_bank(
+                    ctx,
+                    source,
+                    layer,
+                    part,
+                    rows,
+                    columns,
+                    EXPERTS,
+                    backing_dir,
+                )?;
                 loaded.bytes.source_bytes_read += ((nc + ns) * EXPERTS) as u64;
                 loaded.banks.push(PackedBank {
                     layer,
@@ -344,43 +364,14 @@ impl ResidentWeights {
                     tensor,
                 });
             }
+            eprintln!("[dsv41] loaded expert layer {}/{}", layer + 1, LAYERS);
         }
-        for (key, stored, store) in dense_entries(source, &engram)
+        for (key, _, store) in dense_entries(source, &engram)
             .into_iter()
             .filter(|(key, _, _)| !key.ends_with(".scale"))
         {
-            let d = &stored.descriptor;
-            let (rows, columns) = row_geometry(d)?;
-            let tensor = MetalTensor::zeros_dtype_unstaged(
-                ctx,
-                d.shape.iter().rev().copied().collect(),
-                GgmlType::F32,
-            )
-            .map_err(|e| e.to_string())?;
-            let batch = rows.min(32).min(MAX_READ_BYTES as u64 / (columns * 4));
-            for row in (0..rows).step_by(batch as usize) {
-                let end = (row + batch).min(rows);
-                let values = store.decode_rows(key, row..end, false)?;
-                // Only a bounded row tile is expanded, never a full matrix.
-                unsafe {
-                    std::ptr::copy_nonoverlapping(
-                        values.as_ptr(),
-                        tensor
-                            .buffer
-                            .contents()
-                            .as_ptr()
-                            .cast::<f32>()
-                            .add((row * columns) as usize),
-                        values.len(),
-                    )
-                };
-                loaded.bytes.source_bytes_read += (end - row) * columns * d.dtype.byte_width()
-                    + if d.dtype == SourceDtype::F8E4M3 {
-                        (end.div_ceil(32) - row / 32) * columns.div_ceil(32)
-                    } else {
-                        0
-                    };
-            }
+            let (tensor, read) = materialize_dense(ctx, store, key, backing_dir)?;
+            loaded.bytes.source_bytes_read += read;
             loaded.dense.insert(key.to_owned(), tensor);
         }
         Ok(loaded)
@@ -452,35 +443,63 @@ pub(super) fn materialize_bank(
     rows: usize,
     columns: usize,
     experts: usize,
+    backing_dir: &Path,
 ) -> Result<MetalTensor, String> {
     let (nc, ns, np) =
         super::super::mxfp4::storage_sizes(rows, columns).map_err(|e| e.to_string())?;
-    let tensor = MetalTensor::zeros_dtype_unstaged(
-        ctx,
-        vec![columns as u64, rows as u64, experts as u64],
-        GgmlType::MXFP4,
-    )
-    .map_err(|e| e.to_string())?;
+    if np > MAX_READ_BYTES || nc > MAX_READ_BYTES || ns > MAX_READ_BYTES {
+        return Err("expert exceeds staging bound".into());
+    }
+    let extent = np.checked_mul(experts).ok_or("bank extent overflow")?;
+    let mut writer = backing::BackingWriter::new(backing_dir, extent as u64)?;
+    let mut output = vec![0; np];
     for expert in 0..experts {
         let codes =
             source.bounded_read(&expert_key(layer, expert, part, "weight"), 0..nc as u64)?;
         let scales =
             source.bounded_read(&expert_key(layer, expert, part, "scale"), 0..ns as u64)?;
-        // Fresh shared buffer, not published or submitted. Each expert writes
-        // only its disjoint, exactly sized bank slot; there is no packed copy.
-        let output = unsafe {
-            std::slice::from_raw_parts_mut(
-                tensor
-                    .buffer
-                    .contents()
-                    .as_ptr()
-                    .cast::<u8>()
-                    .add(expert * np),
-                np,
-            )
-        };
-        super::super::mxfp4::repack_into(rows, columns, &codes, &scales, output)
+        super::super::mxfp4::repack_into(rows, columns, &codes, &scales, &mut output)
             .map_err(|e| e.to_string())?;
+        writer.write(&output)?;
     }
-    Ok(tensor)
+    writer.tensor(
+        ctx,
+        vec![columns as u64, rows as u64, experts as u64],
+        GgmlType::MXFP4,
+    )
+}
+
+pub(super) fn materialize_dense(
+    ctx: &MetalContext,
+    store: &SourceStore,
+    key: &str,
+    backing_dir: &Path,
+) -> Result<(MetalTensor, u64), String> {
+    let d = &store.tensor(key)?.descriptor;
+    let (rows, columns) = row_geometry(d)?;
+    let extent = rows
+        .checked_mul(columns)
+        .and_then(|n| n.checked_mul(4))
+        .ok_or("dense extent overflow")?;
+    let batch = rows.min(32).min(MAX_READ_BYTES as u64 / (columns * 4));
+    if batch == 0 {
+        return Err("dense row exceeds staging bound".into());
+    }
+    let mut writer = backing::BackingWriter::new(backing_dir, extent)?;
+    let mut read = 0;
+    for row in (0..rows).step_by(batch as usize) {
+        let end = (row + batch).min(rows);
+        let values = store.decode_rows(key, row..end, false)?;
+        writer.write(bytemuck::cast_slice(&values))?;
+        read += (end - row) * columns * d.dtype.byte_width()
+            + if d.dtype == SourceDtype::F8E4M3 {
+                (end.div_ceil(32) - row / 32) * columns.div_ceil(32)
+            } else {
+                0
+            };
+    }
+    Ok((
+        writer.tensor(ctx, d.shape.iter().rev().copied().collect(), GgmlType::F32)?,
+        read,
+    ))
 }

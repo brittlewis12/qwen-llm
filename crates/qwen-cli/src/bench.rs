@@ -486,7 +486,8 @@ mod stop_token_cli_tests {
 /// (always-null on old emitters) does NOT require a bump.
 /// v3: `family` and `n_depth`; `test` gains an `@d<depth>` suffix at depth;
 /// `arch_kind` carries the family label for non-Qwen families.
-const BENCH_SCHEMA_VERSION: u32 = 3;
+/// v4: BuildIdentity carries the compile-time enabled feature list.
+const BENCH_SCHEMA_VERSION: u32 = 4;
 
 /// One bench result row. Field names match `llama-bench`'s JSON schema where
 /// the meaning is the same; engine-specific fields are `Option<T>` and
@@ -595,6 +596,10 @@ fn model_weight_bytes(g: &qwen_llm::gguf::GgufFile) -> u64 {
 }
 
 fn main() -> std::process::ExitCode {
+    if let Err(error) = qwen_llm::env_flag::check_perf_ablation_environment() {
+        eprintln!("{error}");
+        return std::process::ExitCode::FAILURE;
+    }
     shutdown::finish(run())
 }
 

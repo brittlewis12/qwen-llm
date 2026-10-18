@@ -6,6 +6,7 @@ use super::*;
 #[serde(deny_unknown_fields)]
 pub(crate) struct BuildIdentity {
     pub(crate) schema_version: u32,
+    pub(crate) features: Vec<String>,
     pub(crate) metallib_compiler_identity: String,
     pub(crate) metallib_sdk_version: String,
     pub(crate) build_commit: String,
@@ -127,7 +128,11 @@ pub(crate) fn classify_build_identity(
 
     let (metallib_compiler_identity, metallib_sdk_version) = qwen_llm::metallib_build_identity();
     BuildIdentity {
-        schema_version: 3,
+        schema_version: 4,
+        features: qwen_llm::enabled_diagnostic_features()
+            .iter()
+            .map(|feature| (*feature).to_string())
+            .collect(),
         metallib_compiler_identity: metallib_compiler_identity.to_string(),
         metallib_sdk_version: metallib_sdk_version.to_string(),
         build_commit: normalized_build,
@@ -254,6 +259,13 @@ mod build_identity_tests {
     fn clean_matching_identity_passes() {
         let id = identity(A, Some(false), Some(A), Some(false));
         assert_eq!(id.status, "match");
+        assert_eq!(id.schema_version, 4);
+        assert_eq!(
+            id.features
+                .iter()
+                .any(|feature| feature == "perf-ablations"),
+            cfg!(feature = "perf-ablations")
+        );
         assert!(validate_build_identity(&id, BuildIdentityPolicy::default()).is_ok());
     }
 

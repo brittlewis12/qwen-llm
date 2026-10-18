@@ -583,6 +583,10 @@ struct TokenReadoutManifest {
 }
 
 fn main() -> std::process::ExitCode {
+    if let Err(error) = qwen_llm::env_flag::check_perf_ablation_environment() {
+        eprintln!("{error}");
+        return std::process::ExitCode::FAILURE;
+    }
     shutdown::finish(run())
 }
 
@@ -2723,8 +2727,8 @@ fn decode_f32_le(bytes: &[u8], expected_values: usize) -> Result<Vec<f32>> {
     values
         .try_reserve_exact(expected_values)
         .context("allocate decoded F32 payload")?;
-    for chunk in bytes.chunks_exact(4) {
-        values.push(f32::from_le_bytes(chunk.try_into().unwrap()));
+    for chunk in bytes.as_chunks::<4>().0 {
+        values.push(f32::from_le_bytes(*chunk));
     }
     ensure!(
         values.iter().all(|value| value.is_finite()),

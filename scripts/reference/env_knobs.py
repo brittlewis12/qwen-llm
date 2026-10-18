@@ -326,7 +326,7 @@ def parse_env_flag(
         index = attr_end + 1
     if (
         index + 1 >= len(declaration)
-        or declaration[index].value not in ("default_on", "default_off")
+        or declaration[index].value not in ("default_on", "default_off", "perf_ablation")
         or declaration[index + 1].kind != "ident"
         or len(declaration) != index + 2
         or len(variable) != 1
@@ -1262,7 +1262,10 @@ def render(knobs: dict[str, Knob], revision: str) -> str:
         rendered_description = item.description
         if item.polarities:
             polarity = next(iter(item.polarities))
-            if polarity == "default_off":
+            if polarity == "perf_ablation":
+                parse_rule = "enabled only in a `perf-ablations` build; product binaries refuse startup when set"
+                rendered_description += " Perf-only computation-skipping ablation; requires the `perf-ablations` feature."
+            elif polarity == "default_off":
                 parse_rule = "on for `1`/`true`/`TRUE`/`yes`/`YES`; any other value uses the default"
             else:
                 parse_rule = "off for `0`/`false`/`FALSE`/`no`/`NO`; any other value uses the default"

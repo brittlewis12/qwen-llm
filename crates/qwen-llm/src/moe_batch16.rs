@@ -4,7 +4,6 @@
 //! extending the dense batching machinery. Causal state, routing decisions,
 //! expert slot order, and all down/final waves remain sequence-owned.
 
-use crate::env_flag::read_default_off;
 use crate::metal::{
     BlitEncoder, KernelEncoder, MetalContext, MetalError, MetalTensor, encode_argmax_f32_greedy,
     encode_get_rows_f32, encode_mat_vec_q6_k_batch_f32, encode_mat_vec_q8_0_batch_f32,
@@ -636,22 +635,13 @@ fn build_execution_plan(model: &MetalModel) -> Result<MoeBatch16ExecutionPlan, M
             "model residency is scoped to another command queue".into(),
         ));
     }
-    for flag in [
-        "QWEN_DECODE_GDN_NOOP_FRONT",
-        "QWEN_DECODE_GDN_NOOP_OUT",
-        "QWEN_DECODE_GDN_NOOP_QKV",
-        "QWEN_DECODE_GDN_NOOP_Z",
-        "QWEN_DECODE_GDN_NOOP_BETA",
-        "QWEN_DECODE_GDN_NOOP_ALPHA",
-        "QWEN_DECODE_MOE_NOOP_ROUTE",
-        "QWEN_DECODE_MOE_NOOP_ROUTED_GATEUP",
-        "QWEN_DECODE_MOE_NOOP_ROUTED_DOWN",
-    ] {
-        if read_default_off(flag) {
-            return Err(MoeBatch16Error::Unsupported(format!(
-                "diagnostic flag {flag} changes the production graph"
-            )));
-        }
+    if crate::env_flag::any_perf_ablation_enabled_with_prefixes(&[
+        "QWEN_DECODE_GDN_NOOP_",
+        "QWEN_DECODE_MOE_NOOP_",
+    ]) {
+        return Err(MoeBatch16Error::Unsupported(
+            "diagnostic perf ablation changes the decode graph".into(),
+        ));
     }
     let hidden = arch.hidden_size as usize;
     let vocab = arch.vocab_size as usize;

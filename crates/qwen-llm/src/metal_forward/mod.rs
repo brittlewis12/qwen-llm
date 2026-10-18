@@ -110,8 +110,8 @@ crate::env_flag!(
 crate::env_flag!(default_on decode_moe_grouped_finalizer_enabled, "QWEN_DECODE_MOE_GROUPED_FINALIZER");
 crate::env_flag!(default_on decode_attn_sigmoid_mul_enabled, "QWEN_DECODE_ATTN_SIGMOID_MUL");
 crate::env_flag!(default_off moe_router_f16_enabled, "QWEN_MOE_ROUTER_F16");
-crate::env_flag!(default_off decode_gdn_noop_front_enabled, "QWEN_DECODE_GDN_NOOP_FRONT");
-crate::env_flag!(default_off decode_gdn_noop_out_enabled, "QWEN_DECODE_GDN_NOOP_OUT");
+crate::env_flag!(perf_ablation decode_gdn_noop_front_enabled, "QWEN_DECODE_GDN_NOOP_FRONT");
+crate::env_flag!(perf_ablation decode_gdn_noop_out_enabled, "QWEN_DECODE_GDN_NOOP_OUT");
 crate::env_flag!(default_on decode_gdn_fused_beta_proj_enabled, "QWEN_DECODE_GDN_FUSED_BETA_PROJ");
 crate::env_flag!(default_on decode_rope_pair_enabled, "QWEN_DECODE_ROPE_PAIR");
 crate::env_flag!(
@@ -811,10 +811,10 @@ pub fn resolve_gguf_storage_load_configuration() -> Result<GgufStorageLoadConfig
     )
 }
 
-crate::env_flag!(default_off decode_gdn_noop_qkv_flag, "QWEN_DECODE_GDN_NOOP_QKV");
-crate::env_flag!(default_off decode_gdn_noop_z_flag, "QWEN_DECODE_GDN_NOOP_Z");
-crate::env_flag!(default_off decode_gdn_noop_beta_flag, "QWEN_DECODE_GDN_NOOP_BETA");
-crate::env_flag!(default_off decode_gdn_noop_alpha_flag, "QWEN_DECODE_GDN_NOOP_ALPHA");
+crate::env_flag!(perf_ablation decode_gdn_noop_qkv_flag, "QWEN_DECODE_GDN_NOOP_QKV");
+crate::env_flag!(perf_ablation decode_gdn_noop_z_flag, "QWEN_DECODE_GDN_NOOP_Z");
+crate::env_flag!(perf_ablation decode_gdn_noop_beta_flag, "QWEN_DECODE_GDN_NOOP_BETA");
+crate::env_flag!(perf_ablation decode_gdn_noop_alpha_flag, "QWEN_DECODE_GDN_NOOP_ALPHA");
 crate::env_flag!(
     /// Normalizes GDN query and key tensors with a paired L2 dispatch; disabling uses separate query and key normalization dispatches.
     default_on decode_gdn_pair_l2_enabled,
@@ -828,9 +828,9 @@ crate::env_flag!(default_off phase_moe_cpu_route_enabled, "QWEN_PHASE_MOE_CPU_RO
 crate::env_flag!(default_off phase_moe_route_replay_enabled, "QWEN_PHASE_MOE_ROUTE_REPLAY");
 crate::env_flag!(default_off phase_lm_argmax_enabled, "QWEN_PHASE_LM_ARGMAX");
 crate::env_flag!(default_off decode_fused_residual_rmsnorm_enabled, "QWEN_DECODE_FUSED_RESIDUAL_RMSNORM");
-crate::env_flag!(default_off decode_moe_noop_route_enabled, "QWEN_DECODE_MOE_NOOP_ROUTE");
-crate::env_flag!(default_off decode_moe_noop_routed_gateup_enabled, "QWEN_DECODE_MOE_NOOP_ROUTED_GATEUP");
-crate::env_flag!(default_off decode_moe_noop_routed_down_enabled, "QWEN_DECODE_MOE_NOOP_ROUTED_DOWN");
+crate::env_flag!(perf_ablation decode_moe_noop_route_enabled, "QWEN_DECODE_MOE_NOOP_ROUTE");
+crate::env_flag!(perf_ablation decode_moe_noop_routed_gateup_enabled, "QWEN_DECODE_MOE_NOOP_ROUTED_GATEUP");
+crate::env_flag!(perf_ablation decode_moe_noop_routed_down_enabled, "QWEN_DECODE_MOE_NOOP_ROUTED_DOWN");
 
 thread_local! {
     static MATMAT_BF16_BFLOAT_ACT_OVERRIDE: Cell<Option<bool>> = const { Cell::new(None) };

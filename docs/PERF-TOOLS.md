@@ -1302,7 +1302,14 @@ Rules:
   and `ffn_swiglu` trace buckets. It is trace-only and intentionally not a
   production execution shape.
 - `QWEN_PREFILL_ATTN_MATRIX_CAUSAL_SKIP=0` disables the default 27B G6 matrix
-  causal-tail tile skip when bisecting dense attention-body changes.
+  causal-tail tile skip when bisecting dense attention-body changes. This is a
+  production optimization rollback, not a compute-skipping ablation.
+- Computation-skipping attribution knobs (`QWEN_DECODE_GDN_NOOP_*`,
+  `QWEN_DECODE_MOE_NOOP_*`, `QWEN_PREFILL_NOOP_*`, and
+  `QWEN_PREFILL_MOE_GROUPED_ZERO_FILL`) only work in an explicitly identified
+  diagnostic build: `cargo build --release -p qwen-cli --features perf-ablations`.
+  The build identity records `perf-ablations`; product binaries refuse to
+  start if any ablation setting is present without the feature.
 - Dense GDN front traces split the projection bucket into `gdn_qkv`, `gdn_z`, and
   `gdn_beta_alpha`; use that split to catch dispatcher-class mismatches before
   returning to broad FFN or attention hypotheses.

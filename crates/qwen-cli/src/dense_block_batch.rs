@@ -1,7 +1,7 @@
 use super::{
     GdnLayerReplayScratch, collect_gdn_layers, cosine_max_abs, encode_gdn_layer_baseline,
-    encode_gdn_layer_replay_with_post_norm, env_flag_enabled, f32_rms_delta,
-    fresh_gdn_replay_sessions, read_f32_tensor,
+    encode_gdn_layer_replay_with_post_norm, f32_rms_delta, fresh_gdn_replay_sessions,
+    read_f32_tensor,
 };
 use anyhow::{Context, Result, anyhow, ensure};
 use clap::Parser;
@@ -265,8 +265,8 @@ fn wait_success(
     label: &str,
 ) -> Result<()> {
     command.commit();
-    qwen_llm::metal::wait_unchecked(&command);
-    qwen_llm::metal::command_buffer_completed(&command)
+    qwen_llm::metal::wait_unchecked(command);
+    qwen_llm::metal::command_buffer_completed(command)
         .map_err(|error| anyhow::anyhow!("{label} command failed: {error}"))?;
     Ok(())
 }
@@ -433,19 +433,10 @@ pub fn run(args: DecodeDenseBlockBatchArgs) -> Result<()> {
     batches.sort_unstable();
     batches.dedup();
     let max_batch = *batches.last().expect("validated nonempty batches");
-    for flag in [
-        "QWEN_DECODE_GDN_NOOP_FRONT",
-        "QWEN_DECODE_GDN_NOOP_OUT",
-        "QWEN_DECODE_GDN_NOOP_QKV",
-        "QWEN_DECODE_GDN_NOOP_Z",
-        "QWEN_DECODE_GDN_NOOP_BETA",
-        "QWEN_DECODE_GDN_NOOP_ALPHA",
-    ] {
-        ensure!(
-            !env_flag_enabled(flag),
-            "decode-dense-block-batch does not support {flag}"
-        );
-    }
+    ensure!(
+        !qwen_llm::env_flag::any_perf_ablation_enabled_with_prefixes(&["QWEN_DECODE_GDN_NOOP_",]),
+        "decode-dense-block-batch does not support decode GDN perf ablations"
+    );
 
     let ctx = MetalContext::new().context("create dense static-batch Metal context")?;
     let gguf = GgufFile::open(&args.model)

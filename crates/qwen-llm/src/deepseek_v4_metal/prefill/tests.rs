@@ -9,7 +9,8 @@ fn scope_facts(
     unified_memory: bool,
 ) -> crate::metal::DeviceFacts {
     crate::metal::DeviceFacts {
-        version: "qwen_device_info_v6",
+        version: "qwen_device_info_v7",
+        features: crate::enabled_diagnostic_features(),
         name: model.into(),
         architecture: "test".into(),
         registry_id: 0,

@@ -69,6 +69,7 @@ fn parse_token_ids(input: &str) -> Result<Vec<i32>> {
 }
 
 fn main() -> Result<()> {
+    qwen_llm::env_flag::check_perf_ablation_environment().map_err(anyhow::Error::msg)?;
     let args = Args::parse();
     let tok = qwen_llm::tokenizer::Tokenizer::open(&args.model)
         .with_context(|| format!("open tokenizer from {:?}", args.model))?;

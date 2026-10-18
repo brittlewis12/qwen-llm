@@ -193,6 +193,10 @@ struct MuseGlimmerPreparedPrompt {
 }
 
 fn main() -> std::process::ExitCode {
+    if let Err(error) = qwen_llm::env_flag::check_perf_ablation_environment() {
+        eprintln!("{error}");
+        return std::process::ExitCode::FAILURE;
+    }
     shutdown::finish(run())
 }
 

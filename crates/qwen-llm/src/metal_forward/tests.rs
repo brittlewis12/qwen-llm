@@ -58,7 +58,7 @@ fn qualification_facts(
     unified_memory: bool,
 ) -> crate::metal::DeviceFacts {
     crate::metal::DeviceFacts {
-        version: "qwen_device_info_v5",
+        version: "qwen_device_info_v6",
         name: name.into(),
         architecture: "test".into(),
         registry_id: 0,
@@ -79,6 +79,8 @@ fn qualification_facts(
         os_version: None,
         product_metallib_deployment_target: "",
         research_metallib_deployment_target: "",
+        metallib_compiler_identity: "",
+        metallib_sdk_version: "",
     }
 }
 

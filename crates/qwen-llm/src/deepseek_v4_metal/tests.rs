@@ -372,7 +372,7 @@ fn synthetic_device_facts(
     unified: bool,
 ) -> crate::metal::DeviceFacts {
     crate::metal::DeviceFacts {
-        version: "qwen_device_info_v5",
+        version: "qwen_device_info_v6",
         name: name.into(),
         architecture: "test".into(),
         registry_id: 0,
@@ -393,6 +393,8 @@ fn synthetic_device_facts(
         os_version: Some("15.0".into()),
         product_metallib_deployment_target: "",
         research_metallib_deployment_target: "",
+        metallib_compiler_identity: "",
+        metallib_sdk_version: "",
     }
 }
 

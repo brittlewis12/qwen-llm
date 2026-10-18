@@ -345,6 +345,8 @@ def validate_qwen_identity(
 ) -> None:
     required = {
         "schema_version",
+        "metallib_compiler_identity",
+        "metallib_sdk_version",
         "build_commit",
         "build_commit_short",
         "build_dirty",
@@ -361,11 +363,13 @@ def validate_qwen_identity(
     missing = sorted(required - identity.keys())
     if missing:
         die(f"qwen build-info missing required fields: {', '.join(missing)}")
-    if identity["schema_version"] != 2:
+    if identity["schema_version"] != 3:
         die(
             "qwen build-info schema mismatch: "
-            f"expected=2 got={identity['schema_version']!r}"
+            f"expected=3 got={identity['schema_version']!r}"
         )
+    if not identity["metallib_compiler_identity"] or not identity["metallib_sdk_version"]:
+        die("qwen build-info is missing metallib compiler or SDK identity")
     build_commit = identity["build_commit"]
     runtime_commit = identity["runtime_commit"]
     if not isinstance(build_commit, str) or not re.fullmatch(

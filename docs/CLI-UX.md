@@ -297,6 +297,12 @@ consumer migrates.
 
 ## K2 Horizon Verified Chat
 
+No-model `qwen info --json` reports the metallib compiler's first version line
+and the macOS SDK version used to build the embedded Metal libraries. Its
+device facts schema is `qwen_device_info_v6`; witness reports retain those
+fields from this command so they identify the shader-producing toolchain even
+when collected on a host without Xcode.
+
 K2's native raw lane remains available for compatible dense 7B checkpoints. The
 templated CLI profile is deliberately narrower: the verified final Q8_0 and
 standard Q4_K_M artifacts documented in `K2-HORIZON-PLAN.md`, not filename-based detection or a

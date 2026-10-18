@@ -39,6 +39,28 @@ fn main() -> anyhow::Result<()> {
     );
     println!("cargo:rerun-if-env-changed=MACOSX_DEPLOYMENT_TARGET");
 
+    // Record the exact toolchain and SDK selected for the same macOS SDK
+    // invocation used below to compile every metallib.
+    let compiler_identity = xcrun_output(&["-sdk", "macosx", "metal", "--version"])?
+        .lines()
+        .next()
+        .unwrap_or_default()
+        .trim()
+        .to_string();
+    anyhow::ensure!(
+        !compiler_identity.is_empty(),
+        "xcrun metal --version returned no compiler identity"
+    );
+    let sdk_version = xcrun_output(&["-sdk", "macosx", "--show-sdk-version"])?
+        .trim()
+        .to_string();
+    anyhow::ensure!(
+        !sdk_version.is_empty(),
+        "xcrun returned an empty macOS SDK version"
+    );
+    println!("cargo:rustc-env=QWEN_METALLIB_COMPILER_IDENTITY={compiler_identity}");
+    println!("cargo:rustc-env=QWEN_METALLIB_SDK_VERSION={sdk_version}");
+
     // Pin the language and deployment target: without them the compiler
     // derives the target from the build host, so a library built on a newer
     // macOS may not load on an older one. MSL 4 raises the target to macOS 26
@@ -78,6 +100,17 @@ fn main() -> anyhow::Result<()> {
         &target,
     )?;
     Ok(())
+}
+
+fn xcrun_output(args: &[&str]) -> anyhow::Result<String> {
+    let output = Command::new("xcrun").args(args).output()?;
+    anyhow::ensure!(
+        output.status.success(),
+        "xcrun {args:?} failed with {}: {}",
+        output.status,
+        String::from_utf8_lossy(&output.stderr).trim()
+    );
+    Ok(String::from_utf8(output.stdout)?.trim().to_string())
 }
 
 fn compile_metallib(

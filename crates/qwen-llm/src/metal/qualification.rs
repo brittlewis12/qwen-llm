@@ -1199,6 +1199,8 @@ mod tests {
             os_version: Some("15.0".into()),
             product_metallib_deployment_target: "",
             research_metallib_deployment_target: "",
+            metallib_compiler_identity: "",
+            metallib_sdk_version: "",
         }
     }
 

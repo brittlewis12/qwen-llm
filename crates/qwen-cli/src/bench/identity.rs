@@ -6,6 +6,8 @@ use super::*;
 #[serde(deny_unknown_fields)]
 pub(crate) struct BuildIdentity {
     pub(crate) schema_version: u32,
+    pub(crate) metallib_compiler_identity: String,
+    pub(crate) metallib_sdk_version: String,
     pub(crate) build_commit: String,
     pub(crate) build_commit_short: String,
     pub(crate) build_dirty: Option<bool>,
@@ -123,8 +125,11 @@ pub(crate) fn classify_build_identity(
         "unknown".to_string()
     };
 
+    let (metallib_compiler_identity, metallib_sdk_version) = qwen_llm::metallib_build_identity();
     BuildIdentity {
-        schema_version: 2,
+        schema_version: 3,
+        metallib_compiler_identity: metallib_compiler_identity.to_string(),
+        metallib_sdk_version: metallib_sdk_version.to_string(),
         build_commit: normalized_build,
         build_commit_short: short,
         build_dirty,

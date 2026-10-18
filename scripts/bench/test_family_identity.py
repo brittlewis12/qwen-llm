@@ -23,7 +23,9 @@ STATE_B = f"{family.SOURCE_STATE_PREFIX}{'b' * 64}"
 
 def identity(*, commit: str = COMMIT_A, dirty: bool = False) -> dict:
     return {
-        "schema_version": 2,
+        "schema_version": 3,
+        "metallib_compiler_identity": "Apple metal version test",
+        "metallib_sdk_version": "15.0",
         "build_commit": commit,
         "build_commit_short": commit[:9],
         "build_dirty": dirty,

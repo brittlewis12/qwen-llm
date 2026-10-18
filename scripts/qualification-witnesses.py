@@ -207,6 +207,8 @@ def run_info(binary: pathlib.Path, root: pathlib.Path) -> dict:
         raise RuntimeError(f"{binary} info --json did not return valid JSON: {error}") from error
     if not isinstance(facts, dict) or not isinstance(facts.get("qualifications"), list):
         raise RuntimeError("qwen info --json is missing its qualifications array")
+    if not facts.get("metallib_compiler_identity") or not facts.get("metallib_sdk_version"):
+        raise RuntimeError("qwen info --json is missing metallib compiler or SDK identity")
     return facts
 
 
@@ -367,6 +369,10 @@ def main() -> int:
             "schema_version": 1,
             "git_commit": commit,
             "timestamp": dt.datetime.now(dt.timezone.utc).isoformat().replace("+00:00", "Z"),
+            "metallib_build_identity": {
+                "compiler": facts["metallib_compiler_identity"],
+                "sdk_version": facts["metallib_sdk_version"],
+            },
             "device_facts": facts,
             "dry_run": args.dry_run,
             "records": report_records,

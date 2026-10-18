@@ -8,6 +8,7 @@
 from __future__ import annotations
 
 import argparse
+import datetime as dt
 import json
 import os
 import pathlib
@@ -489,6 +490,11 @@ def main() -> int:
         action="store_true",
         help="exercise source annotation parsing and selection",
     )
+    parser.add_argument(
+        "--out",
+        type=pathlib.Path,
+        help="write JSON execution evidence with the build identity from qwen info",
+    )
     args = parser.parse_args()
     if args.self_test:
         self_test()
@@ -564,6 +570,27 @@ def main() -> int:
         return 1
     witnesses = [witnesses[index] for index in indices]
 
+    facts = None
+    if args.out is not None:
+        binary = repo / "target/release/qwen"
+        result = subprocess.run(
+            [str(binary), "info", "--json"], capture_output=True, text=True
+        )
+        if result.returncode:
+            print(
+                f"{binary} info --json failed with exit code {result.returncode}: {result.stderr}",
+                file=sys.stderr,
+            )
+            return 1
+        try:
+            facts = json.loads(result.stdout)
+        except json.JSONDecodeError as error:
+            print(f"qwen info --json returned invalid JSON: {error}", file=sys.stderr)
+            return 1
+        if not isinstance(facts, dict) or not facts.get("metallib_compiler_identity") or not facts.get("metallib_sdk_version"):
+            print("qwen info --json is missing metallib build identity", file=sys.stderr)
+            return 1
+
     env = os.environ.copy()
     completion_label = "completed" if args.kind == "characterization" else "passed"
     env["QWEN_REQUIRE_METAL_TESTS"] = "1"
@@ -572,6 +599,7 @@ def main() -> int:
     passed_by_package = {name: 0 for name in PACKAGES}
     selected_by_package = {name: 0 for name in PACKAGES}
     failed_by_package = {name: 0 for name in PACKAGES}
+    execution_records = []
     for package_name in PACKAGES:
         package_targets = packages[package_name]["targets"]
         package_witnesses = [
@@ -701,8 +729,10 @@ def main() -> int:
                     f"{package_name}: {args.kind} failed: {exact_name}", file=sys.stderr
                 )
                 failed_by_package[package_name] += 1
+                execution_records.append({"package": package_name, "test": exact_name, "status": "failed"})
             else:
                 passed_by_package[package_name] += 1
+                execution_records.append({"package": package_name, "test": exact_name, "status": "passed"})
         print(
             f"{package_name}: kind={args.kind} selected={selected_by_package[package_name]} {completion_label}={passed_by_package[package_name]} failed={failed_by_package[package_name]}",
             flush=True,
@@ -710,6 +740,27 @@ def main() -> int:
     if selected == 0:
         print("no witnesses matched", file=sys.stderr)
         return 1
+    if args.out is not None and facts is not None:
+        records = execution_records
+        if args.list_only:
+            records = [
+                {"package": package_name, "test": exact_name, "status": "not_run"}
+                for package_name, _, exact_name in selections
+            ]
+        report = {
+            "schema_version": 1,
+            "timestamp": dt.datetime.now(dt.timezone.utc).isoformat().replace("+00:00", "Z"),
+            "metallib_build_identity": {
+                "compiler": facts["metallib_compiler_identity"],
+                "sdk_version": facts["metallib_sdk_version"],
+            },
+            "device_facts": facts,
+            "kind": args.kind,
+            "records": records,
+        }
+        output_path = args.out.expanduser().resolve()
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        output_path.write_text(json.dumps(report, indent=2) + "\n", encoding="utf-8")
     return int(any(failed_by_package.values()))
 
 

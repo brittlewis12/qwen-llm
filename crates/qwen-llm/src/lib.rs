@@ -60,6 +60,23 @@ pub mod metal;
 pub const PRODUCT_METALLIB_TARGET: &str = env!("QWEN_PRODUCT_METALLIB_TARGET");
 /// Deployment target used to compile the research Metal library.
 pub const RESEARCH_METALLIB_TARGET: &str = env!("QWEN_RESEARCH_METALLIB_TARGET");
+/// Compiler and macOS SDK identity used to compile both Metal libraries.
+pub fn metallib_build_identity() -> (&'static str, &'static str) {
+    (
+        env!("QWEN_METALLIB_COMPILER_IDENTITY"),
+        env!("QWEN_METALLIB_SDK_VERSION"),
+    )
+}
+
+#[cfg(test)]
+mod metallib_identity_tests {
+    #[test]
+    fn metallib_build_identity_is_populated() {
+        let (compiler, sdk) = super::metallib_build_identity();
+        assert!(!compiler.is_empty());
+        assert!(!sdk.is_empty());
+    }
+}
 pub mod metal_dflash;
 pub mod metal_forward;
 pub mod metal_mtp;

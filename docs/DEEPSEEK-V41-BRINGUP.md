@@ -18,8 +18,11 @@ qwen serve -m /path/to/model.gguf --max-context-tokens 4096 --max-tokens 512
 ```
 
 The chosen convention is llama.cpp PR 28696: standard GGML expert/dense types
-and Q8_0 Engram tables `[256, rows]`. MXFP4 experts stay packed. Engram reads
-only requested rows from disk and is excluded from resident Metal weight banks.
+and Engram tables `[256, rows]` decoded through the shared GGML codec. MXFP4
+experts stay packed. Engram reads only requested rows from disk and is excluded
+from resident Metal weight banks. Its dtype is a codec capability, not a quant
+quality policy; the primary converted artifact uses Q8_0, but other supported
+GGML types work without new Engram kernels.
 Known metadata spellings are aliases. Unsupported consumed encodings are named
 in errors; unused vision/MTP tensors and vision router biases are not bound.
 The converter revision is provenance, never an accepted-file restriction.
@@ -45,8 +48,9 @@ though that resident artifact exceeds a 256 GiB host. Header inspection reads
 no model payload and does not initialize Metal. The repository revision used
 for this check is `1df54e7d1b1e442051ad393ce871870a929f243e`.
 
-The same all-shard check of Q2_K names its actual incompatibility: its Engram
-tables are Q2_K, not Q8_0. That artifact is outside the current Engram scope.
+The same all-shard Q2_K check now passes through the shared Engram codec:
+186.260 GiB resident and 60.083 GiB disk Engram, with 384 experts. This establishes
+planning compatibility, not its numerical quality or measured local fit.
 Header checks used about 5.8 MB per artifact, not full downloads.
 
 ## First End-to-End Comparison

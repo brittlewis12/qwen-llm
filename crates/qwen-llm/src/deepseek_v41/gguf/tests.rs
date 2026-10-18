@@ -627,6 +627,192 @@ fn standard_q8_engram_wkv_alias_and_positional_rows() {
         .unwrap();
 }
 
+fn packed_engram_rows(dtype: GgmlType, rows: usize) -> Vec<u8> {
+    let (elements, bytes) = dtype.storage_layout().unwrap();
+    let stride = (256 / elements * bytes) as usize;
+    let mut payload = vec![0; rows * stride];
+    for (row, packed) in payload.chunks_exact_mut(stride).enumerate() {
+        let scale = (row + 1) as f32 * 0.25;
+        if matches!(dtype, GgmlType::F32 | GgmlType::F16 | GgmlType::BF16) {
+            for (col, value) in packed.chunks_exact_mut(bytes as usize).enumerate() {
+                let f = (col as i32 % 7 - 3) as f32 * scale;
+                match dtype {
+                    GgmlType::F32 => value.copy_from_slice(&f.to_le_bytes()),
+                    GgmlType::F16 => value.copy_from_slice(&half::f16::from_f32(f).to_le_bytes()),
+                    GgmlType::BF16 => value.copy_from_slice(&half::bf16::from_f32(f).to_le_bytes()),
+                    _ => unreachable!(),
+                }
+            }
+            continue;
+        }
+        let scale = half::f16::from_f32(scale).to_le_bytes();
+        for block in packed.chunks_exact_mut(bytes as usize) {
+            match dtype {
+                GgmlType::Q2_K => {
+                    block[..16].fill(0x11);
+                    block[80..82].copy_from_slice(&scale);
+                    block[82..84].copy_from_slice(&scale);
+                }
+                GgmlType::Q3_K => {
+                    block[..32].fill(0xff);
+                    block[32..96].fill(0x55);
+                    block[108..110].copy_from_slice(&scale);
+                }
+                GgmlType::Q8_0 => {
+                    block[..2].copy_from_slice(&scale);
+                    for (col, q) in block[2..].iter_mut().enumerate() {
+                        *q = (col as i8 - 16) as u8;
+                    }
+                }
+                GgmlType::IQ4_NL | GgmlType::IQ2_XXS | GgmlType::IQ2_XS => {
+                    block.fill(0x11);
+                    block[..2].copy_from_slice(&scale);
+                }
+                _ => panic!("no synthetic block fixture for {dtype:?}"),
+            }
+        }
+    }
+    payload
+}
+
+#[test]
+fn engram_standard_codecs_gather_selected_rows_with_exact_strides() {
+    let ctx = MetalContext::new().expect("Metal is required for GGUF validation");
+    for dtype in [
+        GgmlType::Q2_K,
+        GgmlType::Q3_K,
+        GgmlType::Q8_0,
+        GgmlType::IQ4_NL,
+        GgmlType::IQ2_XXS,
+        GgmlType::IQ2_XS,
+        GgmlType::F32,
+        GgmlType::F16,
+        GgmlType::BF16,
+    ] {
+        let (mut kv, mut tensors) = fixture_parts(320, GgmlType::F32, 2, true);
+        // Exercise explicit standard encoding declarations as well as inferred storage.
+        kv.push(("deepseek41.engram.encoding", Value::Str(dtype.wire_name())));
+        kv.iter_mut()
+            .find(|(key, _)| *key == "general.alignment")
+            .unwrap()
+            .1 = Value::U32(32);
+        tensors
+            .iter_mut()
+            .find(|(name, _, _)| name == "blk.0.engram_embd.weight")
+            .unwrap()
+            .2 = dtype;
+        let payload = packed_engram_rows(dtype, 48);
+        let g = write_fixture_payload(kv, tensors, false, |name, _, _| {
+            (name == "blk.0.engram_embd.weight").then(|| payload.clone())
+        });
+        let t = g.find("blk.0.engram_embd.weight").unwrap();
+        assert_ne!(t.data_offset, 0);
+        assert_eq!(
+            t.data_offset + t.n_bytes,
+            g.shards[t.shard_idx].mmap_len() as u64
+        );
+        let expected = crate::codec::dequant_to_f32(t, &payload).unwrap();
+        assert!(expected.iter().all(|v| v.is_finite()));
+        assert_ne!(
+            &expected[..256],
+            &expected[47 * 256..],
+            "fixture rows must differ for {dtype:?}"
+        );
+        let p = plan(&g).unwrap();
+        assert_eq!(p.bytes.disk_engram, payload.len() as u64);
+        let weights = ResidentWeights::load(
+            &ctx,
+            g,
+            LoadLimits {
+                resident_bytes: u64::MAX,
+            },
+        )
+        .unwrap();
+        assert!(!weights.dense.keys().any(|key| key.contains("engram_embd")));
+        let ids = [47, 0, 13, 1, 47];
+        let actual = weights.engram.read_rows(0, &ids).unwrap();
+        assert_eq!(actual.len(), ids.len() * 256);
+        for (&id, actual) in ids.iter().zip(actual.chunks_exact(256)) {
+            let expected = &expected[id as usize * 256..(id as usize + 1) * 256];
+            assert!(
+                actual
+                    .iter()
+                    .zip(expected)
+                    .all(|(a, b)| a.to_bits() == b.to_bits()),
+                "{dtype:?} row {id}"
+            );
+        }
+        assert!(weights.engram.read_rows(0, &[]).unwrap().is_empty());
+        assert!(weights.engram.read_rows(0, &[48]).is_err());
+        assert!(weights.engram.read_rows(0, &[u64::MAX]).is_err());
+        assert!(weights.engram.read_rows(1, &[0]).is_err());
+        assert!(weights.engram.read_rows(0, &vec![0; 32769]).is_err());
+    }
+}
+
+#[test]
+fn engram_header_validation_checks_codecs_without_table_payloads() {
+    let g = fixture(320, GgmlType::F32, 2, true);
+    let mut t = g.find("blk.0.engram_embd.weight").unwrap().clone();
+    t.dtype = GgmlType::Q2_K;
+    t.shape = vec![256, 1 << 40];
+    t.n_bytes = 84 * (1 << 40);
+    // Header-only validation must not allocate/decode this enormous descriptor.
+    engram::validate(&g, &t).unwrap();
+    t.shape[0] = 255;
+    assert!(engram::validate(&g, &t).is_err());
+    t.shape = vec![256, 48];
+    t.dtype = GgmlType::I8;
+    t.n_bytes = 256 * 48;
+    assert!(
+        engram::validate(&g, &t)
+            .unwrap_err()
+            .to_string()
+            .contains("Engram codec")
+    );
+    t.dtype = GgmlType::from_raw(67);
+    assert!(engram::validate(&g, &t).is_err());
+    t.dtype = GgmlType::Q2_K;
+    t.n_bytes = 84 * 48 - 1;
+    assert!(engram::validate(&g, &t).is_err());
+    t.shape[1] = u64::MAX;
+    assert!(engram::validate(&g, &t).is_err());
+}
+
+#[test]
+fn engram_rejects_nonfinite_rows_and_mismatched_encoding() {
+    let (kv, mut tensors) = fixture_parts(320, GgmlType::F32, 2, true);
+    tensors
+        .iter_mut()
+        .find(|(name, _, _)| name == "blk.0.engram_embd.weight")
+        .unwrap()
+        .2 = GgmlType::F16;
+    let mut bad_encoding = kv.clone();
+    bad_encoding.push(("deepseek41.engram.encoding", Value::Str("Q8_0")));
+    assert!(
+        plan(&write_fixture(bad_encoding, tensors.clone()))
+            .unwrap_err()
+            .to_string()
+            .contains("conflicts")
+    );
+    let g = write_fixture_payload(kv, tensors, false, |name, _, _| {
+        if name != "blk.0.engram_embd.weight" {
+            return None;
+        }
+        let mut bytes = packed_engram_rows(GgmlType::F16, 48);
+        bytes[47 * 512..47 * 512 + 2].copy_from_slice(&0x7c00u16.to_le_bytes());
+        Some(bytes)
+    });
+    let disk = DiskEngram::new(g).unwrap();
+    assert!(disk.read_rows(0, &[0]).is_ok());
+    assert!(
+        disk.read_rows(0, &[47])
+            .unwrap_err()
+            .to_string()
+            .contains("non-finite")
+    );
+}
+
 #[test]
 fn custom_engram_dtype_and_encoding_are_explicitly_unsupported() {
     let (kv, tensors) = fixture_parts(320, GgmlType::F32, 2, true);

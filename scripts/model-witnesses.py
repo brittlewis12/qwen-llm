@@ -24,6 +24,16 @@ FUNCTION = re.compile(r"(?:pub(?:\([^)]*\))?\s+)?fn\s+(?P<name>\w+)")
 PACKAGES = ("qwen-llm", "qwen-cli")
 
 
+def local_fixture_ids(source: str) -> set[str]:
+    """Focused witnesses may declare the shared resolver's Fixture locally."""
+    code = rust_code_only(source)
+    return {
+        match.group(1)
+        for match in re.finditer(r'\bFixture\s*\{\s*id:\s*"([^"]+)"', source)
+        if code[match.start() :].startswith("Fixture")
+    }
+
+
 def rust_code_only(source: str) -> str:
     """Mask strings and comments so braces in them cannot affect module scope."""
     output = list(source)
@@ -120,6 +130,8 @@ def source_base_path(path: pathlib.Path, source_root: pathlib.Path) -> list[str]
         relative = path.relative_to(source_root)
     except ValueError:
         return []
+    if relative.as_posix() == "deepseek_v41_cli/engram.rs":
+        return ["deepseek_v41_tokenizer"]
     parts = list(relative.with_suffix("").parts)
     if len(parts) == 1 and parts[0] in {"lib", "main"}:
         return []
@@ -214,6 +226,28 @@ def select_annotations(
 
 
 def self_test() -> None:
+    assert local_fixture_ids(
+        'const F: Fixture = Fixture { id: "local", env: &[], filename: "local.json" };'
+    ) == {"local"}
+    assert local_fixture_ids("""
+const MODEL: qwen_llm::test_fixtures::Fixture = qwen_llm::test_fixtures::Fixture {
+    id: "deepseek-v4.1-reap-272e-config", env: &[],
+    filename: "DeepSeek-V4.1-Flash-REAP-272E-config.json",
+};
+const BASE: qwen_llm::test_fixtures::Fixture = qwen_llm::test_fixtures::Fixture {
+    id: "deepseek-v4.1-flash-base-engram-47-of-48", env: &[],
+    filename: "DeepSeek-V4.1-Flash-base-engram-00047-of-00048.safetensors",
+};
+""") == {"deepseek-v4.1-reap-272e-config", "deepseek-v4.1-flash-base-engram-47-of-48"}
+    assert (
+        local_fixture_ids(
+            '// Fixture { id: "comment" }\nlet x = r#"Fixture { id: "string" }"#;'
+        )
+        == set()
+    )
+    assert source_base_path(
+        pathlib.Path("src/deepseek_v41_cli/engram.rs"), pathlib.Path("src")
+    ) == ["deepseek_v41_tokenizer"]
     source = '''
 mod outer {
     mod inner {
@@ -377,7 +411,7 @@ def main() -> int:
                     return 1
                 for reason, _, _ in annotations:
                     fixture_id = reason.removeprefix("model witness: ")
-                    if reason.startswith("model witness: ") and fixture_id not in fixture_ids:
+                    if reason.startswith("model witness: ") and fixture_id not in fixture_ids | local_fixture_ids(source):
                         print(
                             f"{package_name}: witness annotation in {path} names unknown fixture {fixture_id!r}",
                             file=sys.stderr,
@@ -419,8 +453,15 @@ def main() -> int:
                     and pathlib.Path(target["src_path"]).resolve() == source_path.resolve()
                 ]
             elif package_name == "qwen-cli":
-                relative = source_path.relative_to(manifest.parent / "src")
-                if relative.parts[0] in {"qwen", "serve"}:
+                relative = source_path.relative_to(
+                    pathlib.Path(packages[package_name]["manifest_path"]).parent / "src"
+                )
+                if relative.as_posix() in {
+                    "deepseek_v41_tokenizer.rs",
+                    "deepseek_v41_cli/engram.rs",
+                }:
+                    target_name = "qwen_cli"
+                elif relative.parts[0] in {"qwen", "serve"}:
                     target_name = "qwen"
                 elif relative.parts[0] == "bench":
                     target_name = "qwen-bench"

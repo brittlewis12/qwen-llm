@@ -93,15 +93,21 @@ impl CompressedTokenMap {
 mod tests {
     use super::*;
 
+    const TOKENIZER: qwen_llm::test_fixtures::Fixture = qwen_llm::test_fixtures::Fixture {
+        id: "deepseek-v4.1-reap-272e-tokenizer",
+        env: &[],
+        filename: "DeepSeek-V4.1-Flash-REAP-272E-tokenizer.json",
+    };
+
     #[test]
-    #[ignore = "requires QWEN_V41_TOKENIZER pointing at the pinned old tokenizer.json"]
+    #[ignore = "model witness: deepseek-v4.1-reap-272e-tokenizer"]
     fn v41_full_tokenizer_matches_python_digest() {
         use sha2::{Digest, Sha256};
         let expected: serde_json::Value = serde_json::from_str(include_str!(
             "../../tests/fixtures/v41_engram_full_summary.json"
         ))
         .unwrap();
-        let bytes = std::fs::read(std::env::var_os("QWEN_V41_TOKENIZER").unwrap()).unwrap();
+        let bytes = std::fs::read(TOKENIZER.required()).unwrap();
         assert_eq!(
             format!("{:x}", Sha256::digest(&bytes)),
             expected["tokenizer_sha256"].as_str().unwrap()

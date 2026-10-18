@@ -2,6 +2,85 @@ use super::*;
 use std::collections::BTreeMap;
 
 #[test]
+fn grouped_projection_default_validates_and_preserves_order() {
+    use op::Projection;
+    let p = vec![
+        op::Linear {
+            input: 2,
+            output: 1,
+            weight: vec![2.0, -1.0]
+        };
+        2
+    ];
+    assert_eq!(
+        op::Linear::forward_grouped(&p, &[1.0, 3.0, 4.0, 2.0]).unwrap(),
+        [-1.0, 6.0]
+    );
+    assert!(op::Linear::forward_grouped(&[], &[1.0]).is_err());
+    assert!(op::Linear::forward_grouped(&p, &[]).is_err());
+    assert!(op::Linear::forward_grouped(&p, &[1.0; 3]).is_err());
+}
+
+#[test]
+fn grouped_linear_bitwise_serial_gpu_witness() {
+    use op::Projection;
+    let ctx = MetalContext::new().expect("Metal required");
+    for (input, output) in [(32, 7), (4096, 1024)] {
+        let projections: Vec<_> = (0..8)
+            .map(|g| {
+                let weights: Vec<_> = (0..input * output)
+                    .map(|i| (((i * 17 + g * 31) % 257) as f32 - 128.0) / 257.0)
+                    .collect();
+                Linear {
+                    ctx: &ctx,
+                    tensor: upload(&ctx, &weights, vec![input as u64, output as u64]).unwrap(),
+                    input,
+                    output,
+                }
+            })
+            .collect();
+        let x: Vec<_> = (0..8 * input)
+            .map(|i| ((i * 13 % 127) as f32 - 63.0) / 127.0)
+            .collect();
+        metal::dispatch_census_begin();
+        let scope = profile::Scope::begin().unwrap();
+        let serial: Vec<_> = projections
+            .iter()
+            .zip(x.chunks_exact(input))
+            .flat_map(|(p, x)| p.forward(x).unwrap())
+            .collect();
+        let serial_report = scope.finish();
+        let serial_census = metal::dispatch_census_take();
+        metal::dispatch_census_begin();
+        let scope = profile::Scope::begin().unwrap();
+        let grouped = Linear::forward_grouped(&projections, &x).unwrap();
+        let report = scope.finish();
+        let census = metal::dispatch_census_take();
+        assert_eq!(serial_census.len(), 8);
+        assert_eq!(census.len(), 8);
+        for (a, b) in census.iter().zip(&serial_census) {
+            assert!(a.kernel.starts_with("kernel_mat_vec_f32_f32"));
+            assert_eq!(a.kernel, b.kernel);
+            assert_eq!(a.encoder_ordinal, census[0].encoder_ordinal);
+        }
+        assert_eq!(serial_report.operations[0].completed_submits, 8);
+        assert_eq!(report.operations[0].operation, "linear_grouped");
+        assert_eq!(report.operations[0].dimensions, [input, output, 8, 1]);
+        assert_eq!(report.operations[0].completed_submits, 1);
+        assert!(serial.iter().chain(&grouped).all(|x| x.is_finite()));
+        assert_eq!(
+            serial.iter().map(|x| x.to_bits()).collect::<Vec<_>>(),
+            grouped.iter().map(|x| x.to_bits()).collect::<Vec<_>>()
+        );
+        assert!(Linear::forward_grouped(&[], &x).is_err());
+        assert!(Linear::forward_grouped(&projections, &x[..x.len() - 1]).is_err());
+        println!(
+            "grouped witness {input}->{output} x8: bitwise equal, 8 F32 dispatches, submits 8->1"
+        );
+    }
+}
+
+#[test]
 fn profile_linear_completed_and_scope_cleanup() {
     assert!(profile::start().is_none());
     let ctx = MetalContext::new().expect("Metal required");

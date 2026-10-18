@@ -14,6 +14,24 @@ pub type Result<T> = std::result::Result<T, String>;
 
 pub trait Projection {
     fn forward(&self, x: &[f32]) -> Result<Vec<f32>>;
+
+    fn forward_grouped(projections: &[Self], x: &[f32]) -> Result<Vec<f32>>
+    where
+        Self: Sized,
+    {
+        require(
+            !projections.is_empty() && !x.is_empty() && x.len() % projections.len() == 0,
+            "grouped projection input shape",
+        )?;
+        let mut output = Vec::new();
+        for (projection, input) in projections
+            .iter()
+            .zip(x.chunks_exact(x.len() / projections.len()))
+        {
+            output.extend(projection.forward(input)?);
+        }
+        Ok(output)
+    }
 }
 
 pub(crate) fn require(ok: bool, message: &str) -> Result<()> {

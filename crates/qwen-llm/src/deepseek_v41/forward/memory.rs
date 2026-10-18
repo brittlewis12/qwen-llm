@@ -145,7 +145,7 @@ impl Config {
             add(&[h, qr])?,
             add(&[qr, query])?,
             add(&[h, hd])?,
-            add(&[query / groups, orank])?,
+            add(&[query, low])?,
             add(&[low, h])?,
             add(&[h, inter])?,
             add(&[h, experts])?,
@@ -221,6 +221,27 @@ mod tests {
                 expected
             );
         }
+    }
+
+    #[test]
+    fn grouped_buffers_bound_when_they_dominate_toy_scratch() {
+        let c = Config {
+            hidden: 8,
+            intermediate: 8,
+            vocab: 8,
+            heads: 8,
+            head_dim: 4096,
+            query_rank: 1,
+            output_rank: 1024,
+            groups: 8,
+            experts: 1,
+            topk: 1,
+            index_heads: 1,
+            index_dim: 1,
+            ..Config::default()
+        };
+        let expected = 16 * 1024 * 1024 + 4 * (8 + 2 * 8 + 8 + 8 * 4096 + 8 * 1024) + 4 * 2;
+        assert_eq!(c.estimate_request_memory(1).unwrap().metal_bytes, expected);
     }
 
     #[test]

@@ -146,6 +146,43 @@ impl op::Projection for Linear<'_> {
     fn forward(&self, x: &[f32]) -> Result<Vec<f32>> {
         Linear::forward(self, x)
     }
+
+    fn forward_grouped(projections: &[Self], x: &[f32]) -> Result<Vec<f32>> {
+        let first = projections.first().ok_or("empty grouped projection")?;
+        let groups = projections.len();
+        op::require(
+            first.input > 0
+                && first.output > 0
+                && first.input.checked_mul(groups) == Some(x.len())
+                && projections.iter().all(|p| {
+                    p.input == first.input
+                        && p.output == first.output
+                        && std::ptr::eq(p.ctx, first.ctx)
+                }),
+            "resident grouped linear shape/context",
+        )?;
+        let count = first
+            .output
+            .checked_mul(groups)
+            .ok_or("grouped output overflow")?;
+        // Dimensions: per-group input, per-group output, group count, tokens.
+        let dims = [first.input, first.output, groups, 1];
+        let _wall = profile::Wall("linear_grouped", dims, profile::start());
+        let input = upload(first.ctx, x, vec![x.len() as u64])?;
+        let output =
+            MetalTensor::zeros_f32(first.ctx, vec![count as u64]).map_err(|e| e.to_string())?;
+        submit(first.ctx, "linear_grouped", dims, |enc| {
+            for (i, p) in projections.iter().enumerate() {
+                let input = input.view_subrange((i * p.input) as u64, vec![p.input as u64]);
+                let output = output.view_subrange((i * p.output) as u64, vec![p.output as u64]);
+                metal::encode_mat_vec_f32(
+                    p.ctx, enc, &p.tensor, &input, &output, p.input, p.output,
+                )?;
+            }
+            Ok(())
+        })?;
+        Ok(f32_slice(&output)?.to_vec())
+    }
 }
 
 fn submit(

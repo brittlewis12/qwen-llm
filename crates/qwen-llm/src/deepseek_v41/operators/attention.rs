@@ -399,14 +399,7 @@ impl Session {
             rotary(&mut o, &w.frequencies, position, true)?;
             output.extend(o);
         }
-        require(output.len() % w.output_a.len() == 0, "output groups")?;
-        let mut low = Vec::new();
-        for (group, projection) in output
-            .chunks_exact(output.len() / w.output_a.len())
-            .zip(&w.output_a)
-        {
-            low.extend(projection.forward(group)?);
-        }
+        let low = P::forward_grouped(&w.output_a, &output)?;
         w.output_b.forward(&low)
     }
 

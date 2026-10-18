@@ -152,6 +152,7 @@ class Oracle:
         max_seq_len=32,
         engram_dir=None,
         upstream_router_ties=False,
+        gguf=None,
     ):
         if mode not in ("NativeF32", "ReferenceFp8") or max_seq_len < 1:
             raise ValueError("invalid arithmetic mode or sequence bound")
@@ -160,12 +161,22 @@ class Oracle:
         self.mode, self.position = mode, 0
         stable_router = mode == "NativeF32" and not upstream_router_ties
         m = self.module = source_module(stable_router=stable_router)
-        store = self.store = Weights(
-            [model_dir] + ([engram_dir] if engram_dir else []), projection_rows, mode
-        )
-        args = model_args(
-            m, json.loads((Path(model_dir) / "config.json").read_text()), max_seq_len
-        )
+        config = json.loads((Path(model_dir) / "config.json").read_text())
+        if gguf is None:
+            store = Weights(
+                [model_dir] + ([engram_dir] if engram_dir else []),
+                projection_rows,
+                mode,
+            )
+        else:
+            from gguf_weights import GGUFWeights
+
+            if engram_dir is not None:
+                raise ValueError("--gguf contains Engram; do not pass --engram-dir")
+            store = GGUFWeights(gguf, projection_rows, mode)
+            store.validate_config(config)
+        self.store = store
+        args = model_args(m, config, max_seq_len)
         for cls in (
             m.Linear,
             m.ParallelEmbedding,
@@ -230,7 +241,10 @@ class Oracle:
         dtype = torch.float32 if mode == "NativeF32" else torch.bfloat16
         with m.set_dtype(dtype):
             self.model = m.Transformer(args, tokenizer)
-        validate_bindings(self.model, m, store.descriptors())
+        if gguf is None:
+            validate_bindings(self.model, m, store.descriptors())
+        else:
+            store.validate_model(self.model, m)
         lazy = (
             m.Linear,
             m.ParallelEmbedding,
@@ -273,6 +287,11 @@ class Oracle:
                     "expected_reap_revision": "f792019bcb369768220f01088f0f7af230786982",
                     "expected_engram_base_revision": "314113f8a7dadb388215396ba5fbee2c610a04d6",
                     "checkpoint_revision_verified": False,
+                    **(
+                        {"weight_backend": "independent_gguf", "gguf": str(gguf)}
+                        if gguf
+                        else {}
+                    ),
                 },
                 indent=2,
             )
@@ -295,6 +314,10 @@ class Oracle:
 def main():
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument("--model-dir", required=True)
+    p.add_argument(
+        "--gguf",
+        help="read-only GGUF weights; model-dir still supplies HF config/tokenizer",
+    )
     p.add_argument(
         "--engram-dir",
         help="original base directory containing Engram shards 47/48 and index",
@@ -324,6 +347,7 @@ def main():
         a.max_seq_len,
         a.engram_dir,
         upstream_router_ties=a.upstream_router_ties,
+        gguf=a.gguf,
     )
     logits = oracle.feed(ids)
     generated = []

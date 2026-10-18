@@ -326,6 +326,7 @@ fn conversion_error() {}
     acceptance_indices = select_annotations(oracle_identities, [], "")
     assert {oracle_identities[index][1] for index in acceptance_indices} == {
         "independent_gguf_seven_token_execution_acceptance",
+        "gguf_native_f32_prefill_65_token_serial_snapshot_parity",
     }
     conversion_indices = select_annotations(
         oracle_identities,

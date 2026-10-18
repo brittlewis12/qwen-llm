@@ -130,8 +130,6 @@ pub(crate) enum Cmd {
     GrammarLmHeadRowFloor(grammar_lm_head_row_floor::GrammarLmHeadRowFloorArgs),
     /// Measure one exact A3B request with integrated grammar-row heads.
     IntegratedGrammarRow(integrated_grammar_row::IntegratedGrammarRowArgs),
-    /// Acquire the frozen v0.664 A3B lm-head screening packet.
-    LmHeadScreeningOracle(lm_head_screening_oracle::LmHeadScreeningOracleArgs),
     /// Report Metal counter-set availability for in-process counter probes.
     MetalCounters(MetalCountersArgs),
     /// Report Metal compute-pipeline resource hints for hot kernels.

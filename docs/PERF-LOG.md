@@ -8335,6 +8335,13 @@ Decision: close generic norm-certified lm-head screening. Reopen only for a
 materially tighter certificate with charged traffic below avoided head bytes,
 or changed model/head geometry—not alignment, compaction, or survivor retuning.
 
+## 2026-10-18 - Archived v0.664 LM-Head Screening Code
+
+The concluded v0.664 screening oracle and its `qwen-bench` subcommand were
+removed from the live workspace. The last commit containing the implementation
+is `ac70437fd3fc56f462f326d087cef705b2241cbd`; recover it from git if needed.
+The protocol and result records remain under `docs/bench/`.
+
 ## 2026-08-09 - DeepSeek V4 Compressor-Pair Accounting KILL
 
 Status: KILL implementation of a pair-only KV/gate compressor kernel. Existing

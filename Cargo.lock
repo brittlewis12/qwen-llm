@@ -1934,8 +1934,6 @@ dependencies = [
  "half",
  "libc",
  "memmap2",
- "num-bigint",
- "num-traits",
  "objc2",
  "objc2-foundation",
  "objc2-metal",

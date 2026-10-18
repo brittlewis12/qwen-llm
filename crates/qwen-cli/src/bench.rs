@@ -52,7 +52,6 @@ mod host_validity;
 mod identity;
 mod integrated_grammar_row;
 mod k2_request_bench;
-mod lm_head_screening_oracle;
 mod moe_gdn_repair;
 #[path = "bench/moe_micro.rs"]
 mod moe_micro;
@@ -618,10 +617,7 @@ fn run() -> Result<()> {
     let _ = BUILD_IDENTITY_POLICY.set(policy);
     if !matches!(
         &args.cmd,
-        Cmd::BuildInfo(_)
-            | Cmd::LmHeadScreeningOracle(_)
-            | Cmd::DflashE0Lockstep(_)
-            | Cmd::ResidencyKillChild(_)
+        Cmd::BuildInfo(_) | Cmd::DflashE0Lockstep(_) | Cmd::ResidencyKillChild(_)
     ) {
         validate_build_identity(qwen_build_identity_packet(), policy)?;
     }
@@ -701,7 +697,6 @@ fn run() -> Result<()> {
             serde_json::to_value(recorded_build_identity())?,
             capture_qwen_env(),
         ),
-        Cmd::LmHeadScreeningOracle(a) => lm_head_screening_oracle::run(a),
         Cmd::MetalCounters(a) => run_metal_counters(a),
         Cmd::MetalPipelines(a) => run_metal_pipelines(a),
         Cmd::TopologyProbe(a) => run_topology_probe(a),

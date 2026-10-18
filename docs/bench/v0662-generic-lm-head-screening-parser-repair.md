@@ -1,5 +1,9 @@
 # v0.662 Generic Lm-Head Screening Parser Repair
 
+Archived 2026-10-18: the `qwen-bench lm-head-screening-oracle` command was
+removed after the v0.664 kill decision. The invocation below is historical and
+cannot be run from the current workspace.
+
 Status: preregistration. v0.661 is sealed `INVALID`; no v0.662 implementation,
 packet root, model observation, screening result, or authority exists.
 

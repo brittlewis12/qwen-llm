@@ -1,5 +1,9 @@
 # v0.661 Generic Lm-Head Screening Oracle
 
+Archived 2026-10-18: the `qwen-bench lm-head-screening-oracle` command was
+removed after the v0.664 kill decision. The invocation below is historical and
+cannot be run from the current workspace.
+
 Status: preregistration. No v0.661 capture seam, analyzer, command, packet root,
 model observation, screening result, or authority exists.
 

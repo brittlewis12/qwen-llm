@@ -80,8 +80,6 @@ crossbeam = "0.8"
 parking_lot = "0.12"
 rayon = "1.10"
 libc = "0.2"
-num-bigint = "0.4"
-num-traits = "0.2"
 mach2 = "0.6"
 
 [profile.release]

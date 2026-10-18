@@ -24,12 +24,45 @@ class Capture:
             or self.meta["mode"] != "NativeF32"
         ):
             raise ValueError("unsupported capture contract")
+        if self.meta.get("status") != "success":
+            raise ValueError("capture status must be success")
+        requested = self.meta.get("requested_checkpoints")
+        if (
+            not isinstance(requested, list)
+            or not requested
+            or any(type(p) is not int or p < 1 for p in requested)
+            or any(a >= b for a, b in zip(requested, requested[1:]))
+        ):
+            raise ValueError(
+                "requested checkpoints must be nonempty and strictly increasing"
+            )
+        checkpoints = self.meta.get("checkpoints", [])
+        if [c["position"] for c in checkpoints] != requested:
+            raise ValueError(
+                "recorded positions must exactly match requested checkpoints"
+            )
+        config = json.loads((HERE / "old_config.json").read_text())["text_config"]
+        required = set(config["index_source_layer_ids"])
+        layers = set()
+        for checkpoint in checkpoints:
+            current = set(map(int, checkpoint["layers"]))
+            if not required.issubset(current):
+                raise ValueError("each checkpoint must include all eight index sources")
+            if any(not 2 <= layer < 40 for layer in current):
+                raise ValueError("target layers must be backbone compressed attention")
+            layers.update(current)
         self.inputs = {}
         for layer, spec in self.meta["inputs"].items():
             rows = np.load(self.root / spec["file"], mmap_mode="r", allow_pickle=False)
             if rows.dtype != np.dtype("<f4") or rows.ndim != 2 or rows.shape[1] != 5120:
                 raise ValueError("inputs must be little-endian F32 [positions,5120]")
             self.inputs[int(layer)] = (spec["start"], rows)
+        for layer in layers:
+            if layer not in self.inputs:
+                raise ValueError(f"missing input layer={layer}")
+            start, rows = self.inputs[layer]
+            if start != 0 or len(rows) <= requested[-1]:
+                raise ValueError(f"incomplete input coverage layer={layer}")
 
     def rows(self, layer, start, end):
         base, rows = self.inputs[layer]

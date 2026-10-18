@@ -617,7 +617,7 @@ fn open_pinned_legacy_gguf(model_path: &Path) -> GgufFile {
 
 #[cfg(feature = "dsv4-diagnostics")]
 fn open_pinned_current_gguf(model_path: &Path) -> (GgufFile, DeepSeekV4ModelContentId) {
-    let gguf = GgufFile::open(&model_path).expect("open current DS4 GGUF shards");
+    let gguf = GgufFile::open(model_path).expect("open current DS4 GGUF shards");
     PinnedDeepSeekV4AssetV1::parse(CURRENT_CENSUS_MANIFEST)
         .expect("parse current DS4 census")
         .validate_observed(&gguf)

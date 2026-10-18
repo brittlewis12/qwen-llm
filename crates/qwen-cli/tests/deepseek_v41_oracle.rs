@@ -14,6 +14,8 @@ mod capture;
 mod characterization;
 #[path = "support/v41_execution.rs"]
 mod execution;
+#[path = "support/v41_prefill.rs"]
+mod prefill;
 #[path = "support/v41_trace.rs"]
 mod trace;
 use characterization::{
@@ -563,107 +565,7 @@ fn independent_gguf_seven_token_execution_acceptance() -> Result<()> {
 #[test]
 #[ignore = "model witness: deepseek-v4.1-reap-272e-mxfp4-q8engram"]
 fn gguf_native_f32_prefill_65_token_serial_snapshot_parity() -> Result<()> {
-    fn compare(
-        label: &str,
-        actual: &[f32],
-        expected: &[f32],
-        failures: &mut Vec<String>,
-    ) -> Result<()> {
-        ensure!(
-            actual.len() == 129280 && actual.len() == expected.len(),
-            "{label}: logits shape mismatch"
-        );
-        // Match forward/prefill/tests.rs NativeF32 parity bounds, not HF conversion bounds.
-        let (atol, rtol) = (3e-5_f64, 3e-5_f64);
-        let (mut max_abs, mut squared_error, mut squared_reference) = (0.0_f64, 0.0, 0.0);
-        let mut violations = 0;
-        for (&a, &b) in actual.iter().zip(expected) {
-            ensure!(a.is_finite() && b.is_finite(), "{label}: nonfinite logits");
-            let (a, b) = (f64::from(a), f64::from(b));
-            let error = (a - b).abs();
-            max_abs = max_abs.max(error);
-            squared_error += error * error;
-            squared_reference += b * b;
-            violations += usize::from(error > atol + rtol * b.abs());
-        }
-        let top1 = |values: &[f32]| {
-            values.iter().enumerate().fold(
-                0,
-                |best, (i, value)| {
-                    if *value > values[best] { i } else { best }
-                },
-            )
-        };
-        let relative_l2 = (squared_error / squared_reference.max(f64::MIN_POSITIVE)).sqrt();
-        let mean_residual = actual
-            .iter()
-            .zip(expected)
-            .map(|(&a, &b)| f64::from(a) - f64::from(b))
-            .sum::<f64>()
-            / actual.len() as f64;
-        let mut centered_max_abs = 0.0_f64;
-        let mut centered_squared_error = 0.0;
-        for (&a, &b) in actual.iter().zip(expected) {
-            let residual = f64::from(a) - f64::from(b) - mean_residual;
-            centered_max_abs = centered_max_abs.max(residual.abs());
-            centered_squared_error += residual * residual;
-        }
-        let log_probs = |values: &[f32]| {
-            let max = values
-                .iter()
-                .copied()
-                .map(f64::from)
-                .fold(f64::NEG_INFINITY, f64::max);
-            let log_sum = values
-                .iter()
-                .map(|&v| (f64::from(v) - max).exp())
-                .sum::<f64>()
-                .ln();
-            values
-                .iter()
-                .map(|&v| (f64::from(v) - max) - log_sum)
-                .collect::<Vec<_>>()
-        };
-        let actual_logp = log_probs(actual);
-        let expected_logp = log_probs(expected);
-        let (mut kl, mut tv) = (0.0, 0.0);
-        for (&a, &b) in actual_logp.iter().zip(&expected_logp) {
-            let p = b.exp();
-            let delta = a - b;
-            // Generalized KL cancels the first-order term before summation.
-            kl += p * (delta.exp_m1() - delta);
-            tv += (a.exp() - p).abs() * 0.5;
-        }
-        let centered_rms = (centered_squared_error / actual.len() as f64).sqrt();
-        ensure!(
-            [
-                relative_l2,
-                mean_residual,
-                centered_max_abs,
-                centered_rms,
-                kl,
-                tv
-            ]
-            .iter()
-            .all(|v| v.is_finite()),
-            "{label}: nonfinite metrics"
-        );
-        eprintln!(
-            "{label}: max_abs={max_abs:.9e} relative_l2={relative_l2:.9e} rms={:.9e} mean_residual={mean_residual:.9e} centered_max_abs={centered_max_abs:.9e} centered_rms={centered_rms:.9e} kl_expected_to_actual={kl:.9e} tv={tv:.9e} top1={}/{} violations={violations} atol={atol} rtol={rtol}",
-            (squared_error / actual.len() as f64).sqrt(),
-            top1(actual),
-            top1(expected)
-        );
-        if violations != 0 {
-            failures.push(format!(
-                "{label}: {violations} logits exceed existing NativeF32 tolerance"
-            ));
-        }
-        if top1(actual) != top1(expected) {
-            failures.push(format!("{label}: top1 mismatch"));
-        }
-        Ok(())
-    }
+    use prefill::compare;
 
     qwen_cli::shutdown::install()?;
     qwen_cli::shutdown::checkpoint()?;

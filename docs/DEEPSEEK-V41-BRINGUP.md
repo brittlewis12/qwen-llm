@@ -19,13 +19,26 @@ not reference activation-quantized FP8. This does not admit 1017 weights.
   the GPU path. Stats-enabled serving reports per-token process page-ins and IO.
   The 10K capture sees at most two page-ins per token; this is not a guarantee
   against eviction under other workloads. No residency set or wiring is enabled.
-- The frozen eight-case quality pilot is separate from these correctness and
-  latency checks. No quality win or CED qualification follows from them.
+- The frozen eight-case pilot completes in 70.3 minutes: 12.7 input tokens/s
+  and 11.8 generated tokens/s. Two independently blinded reviews score this
+  configuration 17/32 and 16/32, versus Maya's 22/32 in both. Four cases exhaust
+  the frozen output budget, three without a final answer. Completed-case scores
+  are competitive, but this is not an established intelligence-ceiling win.
+  Maya's retained run takes 3.0 minutes with substantially fewer generated tokens;
+  these are whole-configuration observations, not a causal quantization test.
+  Resolve the reasoning-policy/output-budget question before funding CED or more
+  kernel optimization. The pilot observes 3,406 process page-ins over 51,390
+  native steps, at most two per step, without a residency set or limit change.
 
 Named fixtures and ignored short/long oracle witnesses live in
 `crates/qwen-cli/tests/deepseek_v41_oracle.rs`; the long witness regenerates a
-10K capture and therefore needs exclusive model execution time. The following
-sections retain the historical checkpoint boundaries, not the current scope.
+10K capture and therefore needs exclusive model execution time. Both short
+replays, the tokenizer witness and the registered long replay pass on the M5.
+Full contracts pass. The shared-family run passes 94 witnesses, with two missing
+Qwen assets; three DS4 qualification performance facets still fail (route digest,
+matrix timing spread, grouped-expert equality). This is not a blanket
+qualification pass. The following sections retain the historical checkpoint
+boundaries, not the current scope.
 
 ## Target and checkpoint boundary
 

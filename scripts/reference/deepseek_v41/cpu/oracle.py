@@ -23,7 +23,7 @@ MODEL_SHA256 = "4e9ae23620edc8028ccc5d5fef552ab7fdc7dcd6f79608754fe9f67644056f65
 ENGRAM_SHA256 = "11f35ecbead8150c35aa002b3d180ef290b05a25afe883a11884f94d476d3897"
 
 
-def source_module():
+def source_module(stable_router=False):
     # Each execution has its own globals, caches, classes and shared_attn runtime.
     engram = types.ModuleType("cpu_engram")
     sys.modules[engram.__name__] = engram
@@ -42,6 +42,14 @@ def source_module():
     source_hash = hashlib.sha256(text.encode()).hexdigest()
     if source_hash != MODEL_SHA256:
         raise ValueError("Pinned old REAP model source hash mismatch")
+    if stable_router:
+        old = "        indices = (scores + bias).topk(self.topk, dim=-1)[1]"
+        assert text.count(old) == 1
+        text = text.replace(
+            old,
+            "        indices = (scores + bias).argsort(dim=-1, descending=True, "
+            "stable=True)[..., :self.topk].sort(dim=-1).values",
+        )
     text = text.replace("from engram import EngramLayout, NgramHashState", "")
     text = text.replace(
         "from image_processor import IMAGE, IMAGE_END, IMAGE_NEW_LINE, IMAGE_START", ""
@@ -143,13 +151,15 @@ class Oracle:
         projection_rows=128,
         max_seq_len=32,
         engram_dir=None,
+        upstream_router_ties=False,
     ):
         if mode not in ("NativeF32", "ReferenceFp8") or max_seq_len < 1:
             raise ValueError("invalid arithmetic mode or sequence bound")
         self.dump_dir = Path(dump_dir)
         self.dump_dir.mkdir(parents=True, exist_ok=True)
         self.mode, self.position = mode, 0
-        m = self.module = source_module()
+        stable_router = mode == "NativeF32" and not upstream_router_ties
+        m = self.module = source_module(stable_router=stable_router)
         store = self.store = Weights(
             [model_dir] + ([engram_dir] if engram_dir else []), projection_rows, mode
         )
@@ -252,6 +262,9 @@ class Oracle:
             json.dumps(
                 {
                     "mode": mode,
+                    "router_tie_policy": "lower_expert_id_then_id_sorted"
+                    if stable_router
+                    else "upstream_torch_topk",
                     "source_sha256": m.source_hash,
                     "engram_source_sha256": ENGRAM_SHA256,
                     "owner_correction": "publish index_k whenever owns_k, including incomplete pairs",
@@ -293,13 +306,24 @@ def main():
     p.add_argument("--max-seq-len", type=int, default=32)
     p.add_argument("--generate", type=int, default=2)
     p.add_argument("--threads", type=int, default=8)
+    p.add_argument(
+        "--upstream-router-ties",
+        action="store_true",
+        help="diagnostic NativeF32 negative control: retain upstream torch.topk ties",
+    )
     a = p.parse_args()
     ids = [int(x) for x in a.token_ids.split(",")]
     if a.generate < 1 or len(ids) + a.generate - 1 > a.max_seq_len:
         p.error("generation must fit max-seq-len and generate must be positive")
     torch.set_num_threads(a.threads)
     oracle = Oracle(
-        a.model_dir, a.dump_dir, a.mode, a.projection_rows, a.max_seq_len, a.engram_dir
+        a.model_dir,
+        a.dump_dir,
+        a.mode,
+        a.projection_rows,
+        a.max_seq_len,
+        a.engram_dir,
+        upstream_router_ties=a.upstream_router_ties,
     )
     logits = oracle.feed(ids)
     generated = []

@@ -19,6 +19,18 @@ fn router_bias_selects_but_does_not_weight() {
 }
 
 #[test]
+fn router_exact_bias_absorption_ties_choose_lower_expert_ids() {
+    let logits = [-34.0f32, -32.0, -30.0, -28.0];
+    let scores: Vec<_> = logits.iter().map(|v| v.exp().ln_1p().sqrt()).collect();
+    assert!(scores.windows(2).all(|s| s[0] < s[1]));
+    assert!(scores.iter().all(|s| s + 32.0 == 32.0));
+    let (ids, weights) = route(&logits, &[32.0; 4], 2, 1.0, 1.5).unwrap();
+    assert_eq!(ids, [0, 1]);
+    let total = scores[0] + scores[1] + 1e-20;
+    assert_eq!(weights, [scores[0] / total * 1.5, scores[1] / total * 1.5]);
+}
+
+#[test]
 fn engram_injection_normalizes_each_stream_and_preserves_gate_sign() {
     let mut x = vec![1.0, 2.0, -1.0, -2.0, 3.0, 6.0, -3.0, -6.0];
     let original = x.clone();

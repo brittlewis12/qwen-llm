@@ -22,13 +22,15 @@ Use the original tokenizer, not a substitute: compressed vocabulary size is chec
 The CLI prints greedy generated token IDs and saves `tokens.json`. Every consumed
 token produces `pos-NNNNN-layer-NN.pt` (post-block HC residual and next pre-mix) and
 `pos-NNNNN-logits.pt` (full vocabulary). `run.json` records arithmetic mode, source
-hashes, correction, and bounds. Choose a fresh dump directory to avoid stale files.
+hashes, correction, router tie policy, and bounds. Choose a fresh dump directory to avoid stale files.
 
 ## Arithmetic
 
 - `NativeF32`: decoded F32 weights, F32 activations/accumulation/output. No simulated
   activation or KV/index-cache quantization; this is the runtime baseline, not a
-  claim of upstream BF16/FP8 equivalence.
+  claim of upstream BF16/FP8 equivalence. Router cutoff ties choose lower expert
+  IDs, then selected IDs are sorted before weight normalization and accumulation,
+  matching native. Weights use unbiased scores, not the bias-adjusted selection scores.
 - `ReferenceFp8`: E4M3 activation quantization, block 32, upward power-of-two UE8M0
   scales using the pinned FP32 reciprocal multiply and exponent/mantissa bit
   round-up (not `ceil(log2(x))`); F32 GEMM accumulation and BF16
@@ -37,12 +39,22 @@ hashes, correction, and bounds. Choose a fresh dump directory to avoid stale fil
   F32. Index keys/queries use E2M1 block32/UE8M0 and compressed KV uses E2M1
   block16/E4M3. Sparse attention follows 64-entry online softmax, including BF16
   probability rounding and a denominator-only attention sink. HC follows the
-  pinned Sinkhorn iteration order and epsilon placement.
+  pinned Sinkhorn iteration order and epsilon placement. Routing retains the
+  original upstream `torch.topk`, including its unspecified tie ordering.
+
+`--upstream-router-ties` (or `Oracle(..., upstream_router_ties=True)`) retains
+upstream routing in NativeF32 as a diagnostic negative control; ReferenceFp8 is
+unchanged. Large F32 correction biases can absorb distinct tiny sqrt-softplus
+scores into exact ties, so different cutoff choices can materially change output.
+`run.json` records `router_tie_policy` as `lower_expert_id_then_id_sorted` or
+`upstream_torch_topk`. This is an arithmetic contract, not a tolerance relaxation.
 
 These are explicit numerical modes, not selectable tolerance relaxations. CPU
 BLAS reductions, transcendental functions and GPU tensor-core reductions need not
-be bit-identical. No real GPU-reference comparison or tolerance certification has
-been performed. Tests never substitute NativeF32 for ReferenceFp8.
+be bit-identical. Real-weight NativeF32 CPU/Metal traces now exist for seven
+consumed tokens, with matching greedy outputs. A consistent full seven-token rerun
+with this shared tie policy is pending; no numerical tolerance is certified.
+Tests never substitute NativeF32 for ReferenceFp8.
 
 ## Source and correction
 
@@ -54,6 +66,8 @@ The runner checks that hash before adapting imports, lazy projections and the
 grouped output projection. The owner fix is explicit in `source_module()`:
 publish `shared_attn.index_k = self.k_cache` whenever `owns_k`, even on an
 incomplete compression pair. Each model gets its own module globals and caches.
+For NativeF32, an asserted exact replacement of the single Gate selection line
+adapts router ties in memory; the pinned source file and its hash remain unchanged.
 
 The old grouped output projection intentionally does NOT gain 1017's additional
 activation quantization. Its reference weight decode does round to BF16, matching
@@ -84,9 +98,9 @@ Supply the pinned main checkpoint and original base Engram shards, not 1017 weig
 - Sequence state is in-process only. No restart/resume serialization, batching,
   or concurrent construction/thread-safe execution is promised. Separate models
   may be interleaved without sharing attention state.
-- Full real-checkpoint generation is pending weight availability. Disk traffic
-  is substantial and CPU generation is expected to be slow. No remote/GPU job
-  was launched. Synthetic generated IDs are not evidence of language quality.
+- Real-checkpoint CPU and native Metal generation has run for seven consumed
+  tokens. Disk traffic is substantial. This bounded run and synthetic generated
+  IDs do not establish language quality or ReferenceFp8 GPU parity.
 
 ## Verification and synthetic generation
 
@@ -196,4 +210,5 @@ shapes when available. Same-size layout errors appear as numerical differences.
 Fixtures cover matching traces, differing hidden/pre/logits, missing files,
 truncation, shapes, nonfinite values, modes, token IDs/counts, explicit reporting
 tolerances, zero reference norms, and the CLI's current success/incomplete
-manifest schema. This comparison tool has not yet been run on real-weight traces.
+manifest schema. The comparison tool has also run on real-weight seven-token
+CPU/Metal traces; the shared-router-policy full rerun remains pending.

@@ -86,6 +86,10 @@ fn v41_trace_portable_bytes_all_layers_positions_and_success_manifest() {
     let manifest = status(&root);
     assert_eq!(manifest["status"], "success");
     assert_eq!(manifest["mode"], "NativeF32");
+    assert_eq!(
+        manifest["router_tie_policy"],
+        "lower_expert_id_then_id_sorted"
+    );
     assert_eq!(manifest["byte_order"], "little");
     assert_eq!(
         manifest["shapes"],

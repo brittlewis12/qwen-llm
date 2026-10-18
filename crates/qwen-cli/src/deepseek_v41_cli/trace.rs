@@ -97,6 +97,7 @@ impl Trace {
         manifest["schema_version"] = json!(1);
         manifest["status"] = json!("incomplete");
         manifest["mode"] = json!("NativeF32");
+        manifest["router_tie_policy"] = json!("lower_expert_id_then_id_sorted");
         manifest["dtype"] = json!("float32");
         manifest["byte_order"] = json!("little");
         manifest["config_profile"] = json!({"name":"old-reap-272e", "expected_repository":"LibertAIDAI/DeepSeek-V4.1-Flash-REAP-272E", "expected_revision":loader::OLD_REVISION, "provenance_verified":false});

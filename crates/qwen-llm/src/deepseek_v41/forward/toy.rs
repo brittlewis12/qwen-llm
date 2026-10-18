@@ -226,7 +226,7 @@ fn full_graph_python_parity_and_trace_is_observational() {
     let expected: serde_json::Value =
         serde_json::from_str(include_str!("toy_expected.json")).unwrap();
     let mut traced = model.new_state(3).unwrap();
-    let mut plain = model.new_state(3).unwrap();
+    let mut plain = model.new_state_with_expert_staging(3).unwrap();
     let close = |a: f32, e: f32| assert!((a - e).abs() <= 3e-5 + 3e-5 * e.abs(), "{a} != {e}");
     for (pos, token) in [0, 3, 1].into_iter().enumerate() {
         let mut count = 0;
@@ -247,7 +247,11 @@ fn full_graph_python_parity_and_trace_is_observational() {
             .step_with_trace(&mut traced, token, None, Some(&mut callback))
             .unwrap();
         assert_eq!(count, 40);
-        assert_eq!(logits, model.step(&mut plain, token, None).unwrap());
+        let staged = model.step(&mut plain, token, None).unwrap();
+        assert_eq!(
+            logits.iter().map(|v| v.to_bits()).collect::<Vec<_>>(),
+            staged.iter().map(|v| v.to_bits()).collect::<Vec<_>>()
+        );
         assert_eq!(snapshot(&traced), snapshot(&plain));
         assert_eq!(traced.position(), pos + 1);
         for (i, &value) in logits.iter().enumerate() {

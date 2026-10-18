@@ -43,6 +43,17 @@ fn rows(count: u64, width: u64) -> Result<u64> {
 }
 
 impl Config {
+    pub fn estimate_request_memory_with_expert_staging(
+        &self,
+        positions: usize,
+    ) -> Result<RequestMemoryEstimate> {
+        let mut estimate = self.estimate_request_memory(positions)?;
+        let bytes = super::staging::bytes(self)?;
+        estimate.metal_bytes = add(&[estimate.metal_bytes, bytes])?;
+        estimate.total_bytes = add(&[estimate.total_bytes, bytes])?;
+        Ok(estimate)
+    }
+
     /// Estimate peak additional memory for ONE sequence through `positions`
     /// total token forwards (prompt plus tokens actually fed back). This is NOT
     /// the configured max_context. For a continuing sequence include its already
@@ -179,6 +190,16 @@ impl Config {
 }
 
 impl Forward<'_> {
+    /// Includes reusable active-bank storage, counted once as Metal shared bytes.
+    /// Legacy estimates exclude it. No tensor-sized CPU staging allocation exists.
+    pub fn estimate_request_memory_with_expert_staging(
+        &self,
+        positions: usize,
+    ) -> Result<RequestMemoryEstimate> {
+        self.config
+            .estimate_request_memory_with_expert_staging(positions)
+    }
+
     pub fn estimated_request_bytes(&self, positions: usize) -> Result<u64> {
         Ok(self.config.estimate_request_memory(positions)?.total_bytes)
     }

@@ -458,5 +458,12 @@ fn six_native_experts_plus_shared_match_cpu_f32() {
     {
         *e += v;
     }
-    close(&Forward::moe(&ctx, &c, &layer, &x).unwrap(), &expected);
+    let legacy = Forward::moe(&ctx, &c, &layer, &x, None).unwrap();
+    close(&legacy, &expected);
+    let mut staging = staging::Staging::new(&ctx, &c).unwrap();
+    let staged = Forward::moe(&ctx, &c, &layer, &x, Some(&mut staging)).unwrap();
+    assert_eq!(
+        legacy.iter().map(|v| v.to_bits()).collect::<Vec<_>>(),
+        staged.iter().map(|v| v.to_bits()).collect::<Vec<_>>()
+    );
 }

@@ -4,6 +4,7 @@ mod attention;
 mod bind;
 mod memory;
 pub mod profile;
+mod staging;
 mod token_map;
 pub use memory::RequestMemoryEstimate;
 pub use token_map::build_compressed_token_map;
@@ -304,6 +305,7 @@ pub struct Forward<'a> {
 /// reusing partially advanced KV caches. Start a fresh State to retry a prompt.
 pub struct State {
     attention: attention::Session,
+    staging: Option<staging::Staging>,
     addresses: engram::AddressState,
     max_context: usize,
     poisoned: bool,
@@ -326,11 +328,21 @@ impl<'a> Forward<'a> {
         )?;
         Ok(State {
             attention: attention::Session::default(),
+            staging: None,
             addresses: engram::AddressState::new(self.pad).map_err(|e| format!("{e:?}"))?,
             max_context,
             poisoned: false,
             identity: Arc::clone(&self.identity),
         })
+    }
+
+    /// Experimental active banks: admits only the added allocation against current
+    /// memory signals. Budget the full sequence separately with the staging-aware
+    /// estimate; this is not a reservation for future KV growth or other states.
+    pub fn new_state_with_expert_staging(&self, max_context: usize) -> Result<State> {
+        let mut state = self.new_state(max_context)?;
+        state.staging = Some(staging::Staging::new(self.ctx, &self.config)?);
+        Ok(state)
     }
 
     /// Consume one raw tokenizer ID and return the full next-token logits.
@@ -411,7 +423,13 @@ impl<'a> Forward<'a> {
             x = op::merge(&output, &x, &mixes)?;
             pre = mixes.pre;
             let (mixes, input) = layer.ffn_hc.prepare(&x, &pre, c)?;
-            let output = Self::moe(self.ctx, &self.config, layer, &input)?;
+            let output = Self::moe(
+                self.ctx,
+                &self.config,
+                layer,
+                &input,
+                state.staging.as_mut(),
+            )?;
             x = op::merge(&output, &x, &mixes)?;
             pre = mixes.pre;
             if let Some(callback) = trace.as_mut() {
@@ -430,7 +448,13 @@ impl<'a> Forward<'a> {
         Ok(logits)
     }
 
-    fn moe(ctx: &MetalContext, c: &Config, layer: &Layer<'_>, x: &[f32]) -> Result<Vec<f32>> {
+    fn moe(
+        ctx: &MetalContext,
+        c: &Config,
+        layer: &Layer<'_>,
+        x: &[f32],
+        staging: Option<&mut staging::Staging>,
+    ) -> Result<Vec<f32>> {
         let (ids, weights) = route(
             &layer.router.forward(x)?,
             &layer.bias,
@@ -438,6 +462,15 @@ impl<'a> Forward<'a> {
             c.gate_temperature,
             c.route_scale,
         )?;
+        let (banks, ids, experts) = if let Some(staging) = staging {
+            (
+                staging.copy(c, layer.banks, &ids)?,
+                (0..c.topk as i32).collect(),
+                c.topk,
+            )
+        } else {
+            (layer.banks, ids, c.experts)
+        };
         let input = upload(ctx, x, vec![c.hidden as u64])?;
         let ids_tensor = MetalTensor::from_bytes(
             ctx,
@@ -455,21 +488,21 @@ impl<'a> Forward<'a> {
         .map_err(|e| e.to_string())?;
         let activation = MetalTensor::zeros_f32(ctx, vec![c.intermediate as u64, c.topk as u64])
             .map_err(|e| e.to_string())?;
-        let dims = [c.hidden, c.intermediate, c.experts, c.topk];
+        let dims = [c.hidden, c.intermediate, experts, c.topk];
         let wall = profile::Wall("native_gate_up", dims, profile::start());
         submit(ctx, "native_gate_up", dims, |enc| {
             metal::encode_all_slots_gate_up_swiglu_native(
                 ctx,
                 enc,
-                layer.banks[0],
-                layer.banks[1],
+                banks[0],
+                banks[1],
                 &input,
                 &ids_tensor,
                 &status,
                 &activation,
                 c.hidden,
                 c.intermediate,
-                c.experts,
+                experts,
                 c.topk,
                 c.clamp,
             )
@@ -483,20 +516,20 @@ impl<'a> Forward<'a> {
         let weighted = upload(ctx, &weighted, vec![c.intermediate as u64, c.topk as u64])?;
         let down = MetalTensor::zeros_f32(ctx, vec![c.hidden as u64, c.topk as u64])
             .map_err(|e| e.to_string())?;
-        let dims = [c.intermediate, c.hidden, c.experts, c.topk];
+        let dims = [c.intermediate, c.hidden, experts, c.topk];
         let wall = profile::Wall("native_down", dims, profile::start());
         submit(ctx, "native_down", dims, |enc| {
             metal::encode_all_slots_down_native(
                 ctx,
                 enc,
-                layer.banks[2],
+                banks[2],
                 &weighted,
                 &ids_tensor,
                 &status,
                 &down,
                 c.intermediate,
                 c.hidden,
-                c.experts,
+                experts,
                 c.topk,
             )
         })?;

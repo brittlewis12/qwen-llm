@@ -49,6 +49,9 @@ pub(crate) struct Options {
     /// Requires generation and a fresh or empty directory; never overwrites traces.
     #[arg(long, requires = "v41_generation", conflicts_with_all = ["serve", "inspect", "load_only"])]
     trace_dir: Option<PathBuf>,
+    /// Emit aggregate per-consumed-token forward timings to stderr (inclusive wall times).
+    #[arg(long, requires = "v41_generation", conflicts_with_all = ["serve", "inspect", "load_only"])]
+    profile_forward: bool,
     /// System text for --prompt.
     #[arg(long, requires = "prompt")]
     system: Option<String>,
@@ -455,23 +458,41 @@ pub(crate) fn run(options: Options) -> Result<()> {
                 // Same conservative current-headroom check as HTTP, before any
                 // prefill/decode growth, not just before the first state.
                 admit()?;
-                if let Some(trace) = trace.as_mut() {
-                    trace.begin_step(state.position(), token)?;
-                    let logits = forward
-                        .step_with_trace(
-                            &mut state,
-                            token,
-                            Some(cancel),
-                            Some(&mut |layer| trace.layer(layer).map_err(|e| format!("{e:#}"))),
-                        )
-                        .map_err(|e| anyhow!(e))?;
-                    trace.finish_step(&logits)?;
-                    Ok(logits)
-                } else {
-                    forward
-                        .step(&mut state, token, Some(cancel))
-                        .map_err(|e| anyhow!(e))
+                let position = state.position();
+                let profile = options
+                    .profile_forward
+                    .then(qwen_llm::deepseek_v41::forward::profile::Scope::begin)
+                    .transpose()
+                    .map_err(|e| anyhow!(e))?;
+                let result = (|| {
+                    if let Some(trace) = trace.as_mut() {
+                        trace.begin_step(state.position(), token)?;
+                        let logits = forward
+                            .step_with_trace(
+                                &mut state,
+                                token,
+                                Some(cancel),
+                                Some(&mut |layer| trace.layer(layer).map_err(|e| format!("{e:#}"))),
+                            )
+                            .map_err(|e| anyhow!(e))?;
+                        trace.finish_step(&logits)?;
+                        Ok(logits)
+                    } else {
+                        forward
+                            .step(&mut state, token, Some(cancel))
+                            .map_err(|e| anyhow!(e))
+                    }
+                })();
+                if let Some(profile) = profile {
+                    report(profile_json(
+                        position,
+                        token,
+                        tokens.len(),
+                        result.is_ok(),
+                        profile.finish(),
+                    ));
                 }
+                result
             },
             |token| {
                 first_token_seconds.get_or_insert_with(|| started.elapsed().as_secs_f64());
@@ -505,6 +526,19 @@ pub(crate) fn run(options: Options) -> Result<()> {
     Ok(())
 }
 
+fn profile_json(
+    position: usize,
+    token: u32,
+    prompt_len: usize,
+    success: bool,
+    profile: qwen_llm::deepseek_v41::forward::profile::Report,
+) -> Value {
+    json!({"stage":"forward_profile", "position":position, "token_id":token,
+        "role":if position < prompt_len {"prompt"} else {"decode"},
+        "success":success, "cpu_timings":"inclusive_wall_not_additive_with_gpu",
+        "profile":profile})
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -514,6 +548,41 @@ mod tests {
     struct TestCli {
         #[command(flatten)]
         options: Options,
+    }
+
+    #[test]
+    fn v41_profile_parser_and_json() {
+        for mode in [
+            vec![],
+            vec!["--inspect"],
+            vec!["--load-only"],
+            vec!["--serve"],
+        ] {
+            let mut args = vec!["qwen", "--model-dir", "/model", "--profile-forward"];
+            args.extend(mode);
+            assert!(TestCli::try_parse_from(args).is_err());
+        }
+        let parsed = TestCli::try_parse_from([
+            "qwen",
+            "--model-dir",
+            "/model",
+            "--profile-forward",
+            "--token-ids",
+            "1,2",
+        ])
+        .unwrap();
+        assert!(parsed.options.profile_forward);
+        let scope = qwen_llm::deepseek_v41::forward::profile::Scope::begin().unwrap();
+        let value = profile_json(3, 7, 2, true, scope.finish());
+        let decoded: Value = serde_json::from_str(&value.to_string()).unwrap();
+        assert_eq!(decoded["position"], 3);
+        assert_eq!(decoded["role"], "decode");
+        assert!(
+            decoded["profile"]["token_wall_ms"]
+                .as_f64()
+                .unwrap()
+                .is_finite()
+        );
     }
 
     #[test]

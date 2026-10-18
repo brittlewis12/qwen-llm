@@ -3,6 +3,7 @@
 mod attention;
 mod bind;
 mod memory;
+pub mod profile;
 mod token_map;
 pub use memory::RequestMemoryEstimate;
 pub use token_map::build_compressed_token_map;
@@ -10,7 +11,7 @@ pub use token_map::build_compressed_token_map;
 use super::{engram, loader::ResidentWeights, operators as op};
 use crate::metal::{self, KernelEncoder, MetalContext, MetalTensor};
 use crate::tensor::GgmlType;
-use objc2_metal::{MTLBuffer, MTLCommandQueue, MTLResource};
+use objc2_metal::{MTLBuffer, MTLCommandBuffer, MTLCommandQueue, MTLResource};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -121,11 +122,13 @@ struct Linear<'a> {
 }
 impl Linear<'_> {
     fn forward(&self, x: &[f32]) -> Result<Vec<f32>> {
+        let dims = [self.input, self.output, 0, 1];
+        let _wall = profile::Wall("linear", dims, profile::start());
         op::require(x.len() == self.input, "resident linear input shape")?;
         let input = upload(self.ctx, x, vec![self.input as u64])?;
         let output = MetalTensor::zeros_f32(self.ctx, vec![self.output as u64])
             .map_err(|e| e.to_string())?;
-        submit(self.ctx, |enc| {
+        submit(self.ctx, "linear", dims, |enc| {
             metal::encode_mat_vec_f32(
                 self.ctx,
                 enc,
@@ -147,8 +150,11 @@ impl op::Projection for Linear<'_> {
 
 fn submit(
     ctx: &MetalContext,
+    role: &'static str,
+    dimensions: [usize; 4],
     encode: impl FnOnce(&KernelEncoder) -> std::result::Result<(), metal::MetalError>,
 ) -> Result<()> {
+    let started = profile::start();
     let command = ctx
         .queue
         .commandBuffer()
@@ -157,7 +163,21 @@ fn submit(
     let result = encode(&encoder);
     encoder.end();
     result.map_err(|e| e.to_string())?;
-    metal::commit_and_wait(&command).map_err(|e| e.to_string())
+    let encoded = started.map(|s| s.elapsed().as_secs_f64() * 1000.0);
+    let wait = started.map(|_| std::time::Instant::now());
+    let result = metal::commit_and_wait(&command).map_err(|e| e.to_string());
+    if let Some(wait) = wait {
+        profile::submitted(
+            role,
+            dimensions,
+            encoded.unwrap(),
+            wait.elapsed().as_secs_f64() * 1000.0,
+            result.is_ok(),
+            command.GPUStartTime(),
+            command.GPUEndTime(),
+        );
+    }
+    result
 }
 
 fn upload(ctx: &MetalContext, values: &[f32], shape: Vec<u64>) -> Result<MetalTensor> {
@@ -398,7 +418,9 @@ impl<'a> Forward<'a> {
         .map_err(|e| e.to_string())?;
         let activation = MetalTensor::zeros_f32(ctx, vec![c.intermediate as u64, c.topk as u64])
             .map_err(|e| e.to_string())?;
-        submit(ctx, |enc| {
+        let dims = [c.hidden, c.intermediate, c.experts, c.topk];
+        let wall = profile::Wall("native_gate_up", dims, profile::start());
+        submit(ctx, "native_gate_up", dims, |enc| {
             metal::encode_all_slots_gate_up_swiglu_native(
                 ctx,
                 enc,
@@ -415,6 +437,7 @@ impl<'a> Forward<'a> {
                 c.clamp,
             )
         })?;
+        drop(wall);
         // Old Expert.forward applies route weight BEFORE down, not after it.
         let mut weighted = f32_slice(&activation)?.to_vec();
         for (slot, &weight) in weighted.chunks_exact_mut(c.intermediate).zip(&weights) {
@@ -423,7 +446,9 @@ impl<'a> Forward<'a> {
         let weighted = upload(ctx, &weighted, vec![c.intermediate as u64, c.topk as u64])?;
         let down = MetalTensor::zeros_f32(ctx, vec![c.hidden as u64, c.topk as u64])
             .map_err(|e| e.to_string())?;
-        submit(ctx, |enc| {
+        let dims = [c.intermediate, c.hidden, c.experts, c.topk];
+        let wall = profile::Wall("native_down", dims, profile::start());
+        submit(ctx, "native_down", dims, |enc| {
             metal::encode_all_slots_down_native(
                 ctx,
                 enc,
@@ -438,6 +463,7 @@ impl<'a> Forward<'a> {
                 c.topk,
             )
         })?;
+        drop(wall);
         let mut output = vec![0.0; c.hidden];
         for slot in f32_slice(&down)?.chunks_exact(c.hidden) {
             for (out, value) in output.iter_mut().zip(slot) {

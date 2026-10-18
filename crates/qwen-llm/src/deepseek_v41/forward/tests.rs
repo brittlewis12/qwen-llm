@@ -1,6 +1,54 @@
 use super::*;
 use std::collections::BTreeMap;
 
+#[test]
+fn profile_linear_completed_and_scope_cleanup() {
+    assert!(profile::start().is_none());
+    let ctx = MetalContext::new().expect("Metal required");
+    let linear = Linear {
+        ctx: &ctx,
+        tensor: upload(&ctx, &[1.0; 64], vec![8, 8]).unwrap(),
+        input: 8,
+        output: 8,
+    };
+    let expected = linear.forward(&[1.0; 8]).unwrap();
+    let scope = profile::Scope::begin().unwrap();
+    assert!(profile::Scope::begin().is_err());
+    for _ in 0..2 {
+        assert_eq!(linear.forward(&[1.0; 8]).unwrap(), expected);
+    }
+    let report = scope.finish();
+    assert!(report.token_wall_ms.is_finite() && report.token_wall_ms > 0.0);
+    let op = &report.operations[0];
+    assert_eq!(op.dimensions, [8, 8, 0, 1]);
+    assert_eq!((op.count, op.completed_submits), (2, 2));
+    assert_eq!(op.invalid_gpu_timestamps, 0);
+    assert!(op.gpu_ms.unwrap().is_finite() && op.gpu_ms.unwrap() > 0.0);
+    assert!(op.encode_ms.is_finite() && op.commit_wait_ms.is_finite());
+    assert!(op.wall_ms >= op.encode_ms + op.commit_wait_ms);
+    assert!(profile::start().is_none());
+    let fail = || -> Result<()> {
+        let _scope = profile::Scope::begin()?;
+        linear.forward(&[])?;
+        Ok(())
+    };
+    assert!(fail().is_err());
+    assert!(profile::start().is_none());
+    assert!(
+        std::panic::catch_unwind(|| {
+            let _scope = profile::Scope::begin().unwrap();
+            panic!("scope cleanup");
+        })
+        .is_err()
+    );
+    let scope = profile::Scope::begin().unwrap();
+    profile::submitted("invalid", [0; 4], 1.0, 2.0, true, 0.0, 0.0);
+    let report = scope.finish();
+    assert_eq!(report.operations[0].gpu_ms, None);
+    assert_eq!(report.operations[0].invalid_gpu_timestamps, 1);
+    assert_eq!(linear.forward(&[1.0; 8]).unwrap(), expected);
+}
+
 fn close(actual: &[f32], expected: &[f32]) {
     assert_eq!(actual.len(), expected.len());
     for (&a, &e) in actual.iter().zip(expected) {

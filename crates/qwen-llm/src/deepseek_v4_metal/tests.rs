@@ -12570,7 +12570,12 @@ fn current_asset_multigroup_selector_whole_token_gate() {
     const WARM_SAMPLES: usize = 2;
     const TIMED_SAMPLES: usize = 8;
     const EXPECTED_ELIGIBLE_LAYERS: u32 = 21;
-    const MIN_WHOLE_TOKEN_SAVING_MS: f64 = 10.5;
+    // A first live session can still include allocator/cache warm-up. Repeat
+    // the bracket once, but accept only a stationary before/after control pair.
+    const MAX_STATIONARITY_BRACKETS: usize = 2;
+    // The introduction packet measured 13.867 ms saved against a 181.056 ms
+    // faster control median (7.66%); round down to a stable 7.5% relative gate.
+    const MIN_WHOLE_TOKEN_SAVING_FRACTION: f64 = 0.075;
 
     struct Evidence {
         profiles: Vec<DeepSeekV4WholeTokenProfile>,
@@ -12822,9 +12827,53 @@ fn current_asset_multigroup_selector_whole_token_gate() {
         .into_residency()
         .expect("recover exclusive DeepSeek V4 residency");
 
-    let (residency, current_before) = execute(&ctx, residency, model_content_id, &snapshot, false);
-    let (residency, candidate) = execute(&ctx, residency, model_content_id, &snapshot, true);
-    let (_residency, current_after) = execute(&ctx, residency, model_content_id, &snapshot, false);
+    let mut next_residency = residency;
+    let mut accepted_bracket = None;
+    let mut last_drift = (f64::INFINITY, f64::INFINITY);
+    for bracket in 0..MAX_STATIONARITY_BRACKETS {
+        let (next, current_before) =
+            execute(&ctx, next_residency, model_content_id, &snapshot, false);
+        let (next, candidate) = execute(&ctx, next, model_content_id, &snapshot, true);
+        let (next, current_after) = execute(&ctx, next, model_content_id, &snapshot, false);
+        next_residency = next;
+
+        let median_profile = |evidence: &Evidence, gpu: bool| {
+            let samples = evidence
+                .profiles
+                .iter()
+                .map(|profile| {
+                    if gpu {
+                        profile.command_gpu_ms
+                    } else {
+                        profile.forward_wall_ms
+                    }
+                })
+                .collect::<Vec<_>>();
+            median(&samples)
+        };
+        let before_gpu = median_profile(&current_before, true);
+        let after_gpu = median_profile(&current_after, true);
+        let before_wall = median_profile(&current_before, false);
+        let after_wall = median_profile(&current_after, false);
+        let gpu_drift = 2.0 * (before_gpu - after_gpu).abs() / (before_gpu + after_gpu);
+        let wall_drift = 2.0 * (before_wall - after_wall).abs() / (before_wall + after_wall);
+        last_drift = (gpu_drift, wall_drift);
+        if gpu_drift <= 0.05 && wall_drift <= 0.05 {
+            accepted_bracket = Some((current_before, candidate, current_after));
+            break;
+        }
+        if bracket + 1 < MAX_STATIONARITY_BRACKETS {
+            eprintln!(
+                "measurement invalid: control drift (GPU={gpu_drift:.6}, wall={wall_drift:.6}); re-bracketing once after warm-up"
+            );
+        }
+    }
+    let (current_before, candidate, current_after) = accepted_bracket.unwrap_or_else(|| {
+        panic!(
+            "measurement invalid: control drift after {MAX_STATIONARITY_BRACKETS} brackets (GPU={:.6}, wall={:.6})",
+            last_drift.0, last_drift.1
+        )
+    });
 
     for control in [&current_before, &current_after] {
         assert_eq!(candidate.logits_bits, control.logits_bits);
@@ -12894,15 +12943,24 @@ fn current_asset_multigroup_selector_whole_token_gate() {
     let gpu_saving = current_before_gpu_median.min(current_after_gpu_median) - candidate_gpu_median;
     let wall_saving =
         current_before_wall_median.min(current_after_wall_median) - candidate_wall_median;
-    assert!(gpu_drift <= 0.05, "control GPU drift {gpu_drift:.6}");
-    assert!(wall_drift <= 0.05, "control wall drift {wall_drift:.6}");
+    let gpu_saving_fraction = gpu_saving / current_before_gpu_median.min(current_after_gpu_median);
+    let wall_saving_fraction =
+        wall_saving / current_before_wall_median.min(current_after_wall_median);
     assert!(
-        gpu_saving >= MIN_WHOLE_TOKEN_SAVING_MS,
-        "whole-token GPU saving {gpu_saving:.3} ms"
+        gpu_drift <= 0.05,
+        "measurement invalid: control drift (GPU) {gpu_drift:.6} exceeds 0.05"
     );
     assert!(
-        wall_saving >= MIN_WHOLE_TOKEN_SAVING_MS,
-        "whole-token wall saving {wall_saving:.3} ms"
+        wall_drift <= 0.05,
+        "measurement invalid: control drift (wall) {wall_drift:.6} exceeds 0.05"
+    );
+    assert!(
+        gpu_saving_fraction >= MIN_WHOLE_TOKEN_SAVING_FRACTION,
+        "contract failed: whole-token GPU saving fraction {gpu_saving_fraction:.6} is below {MIN_WHOLE_TOKEN_SAVING_FRACTION:.3}"
+    );
+    assert!(
+        wall_saving_fraction >= MIN_WHOLE_TOKEN_SAVING_FRACTION,
+        "contract failed: whole-token wall saving fraction {wall_saving_fraction:.6} is below {MIN_WHOLE_TOKEN_SAVING_FRACTION:.3}"
     );
 
     let memory = memory_plan
@@ -12919,7 +12977,7 @@ fn current_asset_multigroup_selector_whole_token_gate() {
         Sha256::digest(serde_json::to_vec(&candidate.decision).unwrap()).into();
     let metallib_sha256 = deepseek_v4_diagnostics_metallib_sha256();
     eprintln!(
-        "deepseek_v4 multigroup_live position={POSITION} visible_rows=196608 eligible_layers={EXPECTED_ELIGIBLE_LAYERS} current_before_gpu_median_ms={current_before_gpu_median:.6} candidate_gpu_median_ms={candidate_gpu_median:.6} current_after_gpu_median_ms={current_after_gpu_median:.6} gpu_saving_ms={gpu_saving:.6} gpu_drift={gpu_drift:.6} current_before_wall_median_ms={current_before_wall_median:.6} candidate_wall_median_ms={candidate_wall_median:.6} current_after_wall_median_ms={current_after_wall_median:.6} wall_saving_ms={wall_saving:.6} wall_drift={wall_drift:.6} pass=true"
+        "deepseek_v4 multigroup_live position={POSITION} visible_rows=196608 eligible_layers={EXPECTED_ELIGIBLE_LAYERS} current_before_gpu_median_ms={current_before_gpu_median:.6} candidate_gpu_median_ms={candidate_gpu_median:.6} current_after_gpu_median_ms={current_after_gpu_median:.6} gpu_saving_ms={gpu_saving:.6} gpu_saving_fraction={gpu_saving_fraction:.6} gpu_drift={gpu_drift:.6} current_before_wall_median_ms={current_before_wall_median:.6} candidate_wall_median_ms={candidate_wall_median:.6} current_after_wall_median_ms={current_after_wall_median:.6} wall_saving_ms={wall_saving:.6} wall_saving_fraction={wall_saving_fraction:.6} wall_drift={wall_drift:.6} pass=true"
     );
     eprintln!(
         "deepseek_v4 multigroup_live current_before_gpu_ms={current_before_gpu:?} current_before_wall_ms={current_before_wall:?} candidate_gpu_ms={candidate_gpu:?} candidate_wall_ms={candidate_wall:?} current_after_gpu_ms={current_after_gpu:?} current_after_wall_ms={current_after_wall:?}"

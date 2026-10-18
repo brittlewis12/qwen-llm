@@ -37,6 +37,7 @@ fn native_pipeline_name(dtype: GgmlType) -> Option<String> {
         GgmlType::F16 => "f16",
         GgmlType::BF16 => "bf16",
         GgmlType::IQ2_XS => "iq2_xs",
+        GgmlType::IQ2_XXS => "iq2_xxs",
         GgmlType::MXFP4 => "mxfp4",
         _ => return None,
     };

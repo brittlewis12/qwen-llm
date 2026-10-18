@@ -4,6 +4,12 @@
 using namespace metal;
 #include "native_dequant_f32.h"
 #include "iq2_xs_grid.metalh"
+#include "iq2_xxs_decode.metalh"
+
+inline void expert_dequantize_iq2_xxs(device const uchar * blk, short il,
+                                     thread float4x4 & reg) {
+    iq2_xxs_dequant16(blk, uint(il), reg);
+}
 
 // IQ2_XS uses the same packed grid/sign/scale interpretation as the existing
 // all-slot decoder, widened directly to F32 (never through a half register).
@@ -148,4 +154,5 @@ template [[host_name("kernel_expert_native_f32_f32")]] kernel expert_native_t ke
 template [[host_name("kernel_expert_native_f16_f32")]] kernel expert_native_t kernel_expert_native_f32<QT_F16_BYTES, QT_F16_NL, latent_dequantize_f16, 2>;
 template [[host_name("kernel_expert_native_bf16_f32")]] kernel expert_native_t kernel_expert_native_f32<QT_BF16_BYTES, QT_BF16_NL, latent_dequantize_bf16, 3>;
 template [[host_name("kernel_expert_native_iq2_xs_f32")]] kernel expert_native_t kernel_expert_native_f32<74, 16, expert_dequantize_iq2_xs>;
+template [[host_name("kernel_expert_native_iq2_xxs_f32")]] kernel expert_native_t kernel_expert_native_f32<66, 16, expert_dequantize_iq2_xxs>;
 template [[host_name("kernel_expert_native_mxfp4_f32")]] kernel expert_native_t kernel_expert_native_f32<17, 2, expert_dequantize_mxfp4, 0, true>;

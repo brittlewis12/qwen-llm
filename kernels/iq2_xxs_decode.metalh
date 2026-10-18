@@ -1,0 +1,35 @@
+// Shared canonical F32 IQ2_XXS decoder; attribution in iq2_xxs.metal.
+#pragma once
+#include "iq2_xxs_grid.metalh"
+#define IQ2_XXS_UNROLL _Pragma("clang loop unroll(full)") for
+
+// Blocks are 66 bytes: metadata is only ushort-aligned, never uint-aligned.
+inline uint iq2_xxs_metadata(device const ushort * q) {
+    return uint(q[2]) | (uint(q[3]) << 16);
+}
+
+inline float iq2_xxs_value(device const uchar * block, uint i) {
+    device const ushort * q = (device const ushort *)(block + 2) + 4u * (i / 32u);
+    const uint meta = iq2_xxs_metadata(q);
+    const uint l = (i % 32u) / 8u;
+    const uint j = i % 8u;
+    const uint code = ((device const uchar *)q)[l];
+    constant uchar * grid = (constant uchar *)(iq2_xxs_grid + code);
+    const uint signs = iq2_xxs_signs[(meta >> (7u * l)) & 127u];
+    const float dl = float(((device const half *)block)[0]) * (0.5f + float(meta >> 28)) * 0.25f;
+    return dl * float(grid[j]) * ((signs & (1u << j)) ? -1.0f : 1.0f);
+}
+
+inline void iq2_xxs_dequant16(device const uchar * block, uint il, thread float4x4 & w) {
+    device const ushort * q = (device const ushort *)(block + 2) + 4u * (il / 2u);
+    const uint meta = iq2_xxs_metadata(q);
+    const float dl = float(((device const half *)block)[0]) * (0.5f + float(meta >> 28)) * 0.25f;
+    IQ2_XXS_UNROLL (uint l = 0; l < 2; ++l) {
+        const uint part = 2u * (il % 2u) + l;
+        constant uchar * grid = (constant uchar *)(iq2_xxs_grid + ((device const uchar *)q)[part]);
+        const uint signs = iq2_xxs_signs[(meta >> (7u * part)) & 127u];
+        IQ2_XXS_UNROLL (uint j = 0; j < 8; ++j) {
+            w[2u * l + j / 4u][j % 4u] = dl * float(grid[j]) * ((signs & (1u << j)) ? -1.0f : 1.0f);
+        }
+    }
+}

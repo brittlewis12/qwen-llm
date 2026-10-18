@@ -10,20 +10,22 @@ const IDS: [i32; 7] = [2, 0, 2, -1, EXPERTS as i32, i32::MIN, i32::MAX];
 
 #[test]
 fn native_mxfp4_top6_large_banks_real_widths_and_dispatch() {
+    large_banks_case(GgmlType::MXFP4, &[32, 2304, 5120]);
+}
+
+#[test]
+fn native_iq2_xxs_high_ids_generic_geometry_and_dispatch() {
+    large_banks_case(GgmlType::IQ2_XXS, &[256, 768, 1280]);
+}
+
+fn large_banks_case(dtype: GgmlType, widths: &[usize]) {
     let Some(ctx) = metal_test_context() else {
         return;
     };
-    for experts in [272usize, 384] {
-        for k in [32usize, 2304, 5120] {
+    for experts in [272usize, 320, 384] {
+        for &k in widths {
             let m = 5;
-            let dtype = GgmlType::MXFP4;
-            let seed = bank_bytes(dtype, k, m, 3);
-            let bytes: Vec<u8> = seed
-                .iter()
-                .copied()
-                .cycle()
-                .take(k / 32 * 17 * m * experts)
-                .collect();
+            let bytes = bank_bytes_for_experts(dtype, k, m, 3, experts);
             let weights = offset_tensor(
                 &ctx,
                 32,
@@ -72,7 +74,7 @@ fn native_mxfp4_top6_large_banks_real_widths_and_dispatch() {
                     assert!(
                         census
                             .iter()
-                            .all(|r| r.kernel == "kernel_expert_native_mxfp4_f32")
+                            .all(|r| r.kernel == native_pipeline_name(dtype).unwrap())
                     );
                     let mut expected = vec![0.0; 30];
                     for (slot, &id) in routes.iter().enumerate() {
@@ -93,7 +95,11 @@ fn native_mxfp4_top6_large_banks_real_widths_and_dispatch() {
                             };
                         }
                     }
-                    close("MXFP4 top6", &tensor_f32_at_offset(&output), &expected);
+                    close(
+                        &format!("{dtype:?} top6"),
+                        &tensor_f32_at_offset(&output),
+                        &expected,
+                    );
                     assert_offset_guards(&output, 20, 28);
                     for (t, b) in inputs.iter().zip(before) {
                         assert_eq!(tensor_backing_bytes(t), b);
@@ -197,7 +203,7 @@ fn formats() -> Vec<GgmlType> {
     GROUPED_PROJECTION_DTYPES
         .iter()
         .copied()
-        .chain([GgmlType::IQ2_XS, GgmlType::MXFP4])
+        .chain([GgmlType::IQ2_XS, GgmlType::IQ2_XXS, GgmlType::MXFP4])
         .collect()
 }
 
@@ -249,8 +255,18 @@ fn native_capabilities_match_actual_dispatch_and_abi() {
 // Independent linked GGML decoder supplies the oracle; no shader arithmetic
 // or lookup tables are reimplemented in the CPU reference.
 fn bank_bytes(dtype: GgmlType, k: usize, m: usize, seed: usize) -> Vec<u8> {
+    bank_bytes_for_experts(dtype, k, m, seed, EXPERTS)
+}
+
+fn bank_bytes_for_experts(
+    dtype: GgmlType,
+    k: usize,
+    m: usize,
+    seed: usize,
+    experts: usize,
+) -> Vec<u8> {
     if matches!(dtype, GgmlType::F32 | GgmlType::F16 | GgmlType::BF16) {
-        return (0..k * m * EXPERTS)
+        return (0..k * m * experts)
             .flat_map(|i| {
                 let v = (((i * 23 + seed * 11) % 97) as f32 - 48.0) * 0.013007;
                 match dtype {
@@ -264,7 +280,7 @@ fn bank_bytes(dtype: GgmlType, k: usize, m: usize, seed: usize) -> Vec<u8> {
     }
     let (block, bytes) = dtype.storage_layout().unwrap();
     let mut result = Vec::new();
-    for ordinal in 0..k * m * EXPERTS / block as usize {
+    for ordinal in 0..k * m * experts / block as usize {
         let mut b: Vec<u8> = (0..bytes as usize)
             .map(|i| (ordinal * 73 + i * 29 + seed * 11 + ordinal / 7) as u8)
             .collect();
@@ -434,6 +450,8 @@ fn native_mixed_gate_up_cpu_oracles_and_route_rejection() {
         (GgmlType::IQ2_S, GgmlType::IQ3_S),
         (GgmlType::F32, GgmlType::BF16),
         (GgmlType::IQ2_XS, GgmlType::Q4_K),
+        (GgmlType::IQ2_XXS, GgmlType::Q4_K),
+        (GgmlType::IQ2_XXS, GgmlType::F32),
         (GgmlType::MXFP4, GgmlType::F32),
         (GgmlType::MXFP4, GgmlType::Q2_K),
     ] {

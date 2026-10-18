@@ -37,8 +37,10 @@
     "gguf-py/gguf/tensor_mapping.py": {
       "canonical": "df97c2291dc1d8e8992ae91b800e0cf139f94d5173b9ed4705f5ef75a371d924",
       "patched": "df97c2291dc1d8e8992ae91b800e0cf139f94d5173b9ed4705f5ef75a371d924"
-    },
-    "models/templates/deepseek-ai-DeepSeek-V4.1-Flash.jinja": {
+    }
+  },
+  "templates": {
+    "deepseek-ai-DeepSeek-V4.1-Flash.jinja": {
       "canonical": "7e22c97665b1c45ebcc31327373e8be4416262da35e9950bca5a24e3aee88976",
       "patched": "7e22c97665b1c45ebcc31327373e8be4416262da35e9950bca5a24e3aee88976"
     }

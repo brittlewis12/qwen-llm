@@ -29,14 +29,19 @@ def check_source(root: Path) -> str:
     """Optional source audit, not a model/runtime identity gate."""
     manifest = json.loads((HERE / "convert_v41_gguf.source.json").read_text())
     states = []
-    for name, expected in manifest["files"].items():
-        digest = hashlib.sha256((root / name).read_bytes()).hexdigest()
+    files = [(root / name, expected) for name, expected in manifest["files"].items()]
+    files.extend(
+        (root / "models" / "templates" / name, expected)
+        for name, expected in manifest["templates"].items()
+    )
+    for path, expected in files:
+        digest = hashlib.sha256(path.read_bytes()).hexdigest()
         if digest == expected["canonical"]:
             states.append("canonical")
         elif digest == expected["patched"]:
             states.append("patched")
         else:
-            raise ValueError(f"Source audit mismatch: {name}")
+            raise ValueError(f"Source audit mismatch: {path.relative_to(root)}")
     diff = HERE / "convert_v41_gguf.patch"
     if hashlib.sha256(diff.read_bytes()).hexdigest() != manifest["patch_sha256"]:
         raise ValueError("Sidecar patch does not match source manifest")

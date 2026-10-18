@@ -67,7 +67,7 @@ pub(super) fn validate_operation_dtypes(
         if let Some(role) = expert_role {
             let supported = match role {
                 "routed gate" | "routed up" => {
-                    let selector = super::moe::routed_all_slots_gate_up_selector(tensor.dtype);
+                    let selector = crate::metal::all_slots_gate_up_recipe(tensor.dtype);
                     let indexed = super::moe::indexed_expert_selector(tensor.dtype);
                     if role == "routed gate" {
                         gate_dtypes.insert(
@@ -96,7 +96,7 @@ pub(super) fn validate_operation_dtypes(
                     }
                 }
                 "routed down" => {
-                    if super::moe::routed_all_slots_down_selector(tensor.dtype).is_none()
+                    if crate::metal::all_slots_down_recipe(tensor.dtype).is_none()
                         || super::moe::indexed_expert_selector(tensor.dtype).is_none()
                     {
                         false

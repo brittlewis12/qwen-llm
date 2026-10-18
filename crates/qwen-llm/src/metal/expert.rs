@@ -17,6 +17,24 @@ use super::checks::{
 };
 use super::*;
 
+/// Fused all-slot `silu(min(g, c)) * clamp(u, -c, c)` launch recipe.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct AllSlotsGateUpRecipe {
+    pub(crate) kernel: &'static str,
+    pub(crate) rows_per_group: usize,
+    pub(crate) threads_per_group: usize,
+    pub(crate) threadgroup_memory_f32: usize,
+}
+
+/// Fused all-slot down launch recipe, including its input block requirement.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct AllSlotsDownRecipe {
+    pub(crate) kernel: &'static str,
+    pub(crate) rows_per_group: usize,
+    pub(crate) threads_per_group: usize,
+    pub(crate) input_block: usize,
+}
+
 /// Gate/up dtypes with a fused all-slot `silu(min(g, c)) * clamp(u, -c, c)`.
 const GATE_UP_KERNELS: &[(GgmlType, &str)] = &[
     (
@@ -41,15 +59,20 @@ const GATE_UP_KERNELS: &[(GgmlType, &str)] = &[
     ),
 ];
 
-fn all_slots_gate_up_kernel(dtype: GgmlType) -> Option<&'static str> {
+pub(crate) fn all_slots_gate_up_recipe(dtype: GgmlType) -> Option<AllSlotsGateUpRecipe> {
     GATE_UP_KERNELS
         .iter()
         .find(|(t, _)| *t == dtype)
-        .map(|(_, kernel)| *kernel)
+        .map(|(_, kernel)| AllSlotsGateUpRecipe {
+            kernel,
+            rows_per_group: 8,
+            threads_per_group: 64,
+            threadgroup_memory_f32: 16,
+        })
 }
 
-fn all_slots_down_kernel(dtype: GgmlType) -> Option<(&'static str, usize, usize, usize)> {
-    Some(match dtype {
+pub(crate) fn all_slots_down_recipe(dtype: GgmlType) -> Option<AllSlotsDownRecipe> {
+    let (kernel, rows_per_group, threads_per_group, input_block) = match dtype {
         GgmlType::IQ3_S => (
             "kernel_deepseek_v4_all_slots_down_iq3_s_f32_fast",
             8,
@@ -65,19 +88,25 @@ fn all_slots_down_kernel(dtype: GgmlType) -> Option<(&'static str, usize, usize,
         GgmlType::MXFP4 => ("kernel_deepseek_v4_all_slots_down_mxfp4_f32", 4, 128, 32),
         GgmlType::Q4_K => ("kernel_deepseek_v4_all_slots_down_q4_K_f32", 4, 64, 256),
         _ => return None,
+    };
+    Some(AllSlotsDownRecipe {
+        kernel,
+        rows_per_group,
+        threads_per_group,
+        input_block,
     })
 }
 
 /// Optimized equal-type fused kernels or independently typed native banks.
 /// Native composition reuses the output for gate then clamped SwiGLU.
 pub fn all_slots_gate_up_supported(gate: GgmlType, up: GgmlType) -> bool {
-    (gate == up && all_slots_gate_up_kernel(gate).is_some())
+    (gate == up && all_slots_gate_up_recipe(gate).is_some())
         || all_slots_gate_up_native_supported(gate, up)
 }
 
 pub fn all_slots_down_supported(dtype: GgmlType) -> bool {
     dtype == GgmlType::IQ4_XS
-        || all_slots_down_kernel(dtype).is_some()
+        || all_slots_down_recipe(dtype).is_some()
         || all_slots_down_native_supported(dtype)
 }
 
@@ -214,7 +243,7 @@ pub fn encode_all_slots_gate_up_swiglu(
     clamp: f32,
 ) -> Result<(), MetalError> {
     const K: &str = "all_slots_gate_up_swiglu";
-    if gate_bank.dtype != up_bank.dtype || all_slots_gate_up_kernel(gate_bank.dtype).is_none() {
+    if gate_bank.dtype != up_bank.dtype || all_slots_gate_up_recipe(gate_bank.dtype).is_none() {
         return encode_all_slots_gate_up_swiglu_native(
             ctx, enc, gate_bank, up_bank, input, ids, status, output, n_in, n_out, experts, top_k,
             clamp,
@@ -241,7 +270,7 @@ pub fn encode_all_slots_gate_up_swiglu(
             (status, "route status"),
         ],
     )?;
-    let kernel = all_slots_gate_up_kernel(gate_bank.dtype)
+    let recipe = all_slots_gate_up_recipe(gate_bank.dtype)
         .ok_or_else(|| bad_shape(K, format!("no all-slot kernel for {:?}", gate_bank.dtype)))?;
     if !n_in.is_multiple_of(256) {
         return Err(bad_shape(
@@ -249,7 +278,7 @@ pub fn encode_all_slots_gate_up_swiglu(
             format!("input width {n_in} is not a multiple of 256"),
         ));
     }
-    let pso = pipeline_for(ctx, kernel, 64)?;
+    let pso = pipeline_for(ctx, recipe.kernel, recipe.threads_per_group)?;
     enc.set_pipeline(&pso);
     enc.set_bytes(
         0,
@@ -267,15 +296,18 @@ pub fn encode_all_slots_gate_up_swiglu(
     enc.set_tensor(4, ids);
     enc.set_tensor(5, status);
     enc.set_tensor(6, output);
-    enc.set_threadgroup_memory(0, 16 * std::mem::size_of::<f32>());
+    enc.set_threadgroup_memory(
+        0,
+        recipe.threadgroup_memory_f32 * std::mem::size_of::<f32>(),
+    );
     enc.dispatch(
         MTLSize {
-            width: n_out.div_ceil(8),
+            width: n_out.div_ceil(recipe.rows_per_group),
             height: top_k,
             depth: 1,
         },
         MTLSize {
-            width: 64,
+            width: recipe.threads_per_group,
             height: 1,
             depth: 1,
         },
@@ -299,7 +331,7 @@ pub fn encode_all_slots_down(
     top_k: usize,
 ) -> Result<(), MetalError> {
     const K: &str = "all_slots_down";
-    if bank.dtype != GgmlType::IQ4_XS && all_slots_down_kernel(bank.dtype).is_none() {
+    if bank.dtype != GgmlType::IQ4_XS && all_slots_down_recipe(bank.dtype).is_none() {
         return encode_all_slots_down_native(
             ctx, enc, bank, input, ids, status, output, n_in, n_out, experts, top_k,
         );
@@ -376,15 +408,18 @@ pub fn encode_all_slots_down(
         );
         return Ok(());
     }
-    let (kernel, rows_per_group, threads, block) = all_slots_down_kernel(bank.dtype)
+    let recipe = all_slots_down_recipe(bank.dtype)
         .ok_or_else(|| bad_shape(K, format!("no all-slot kernel for {:?}", bank.dtype)))?;
-    if !n_in.is_multiple_of(block) {
+    if !n_in.is_multiple_of(recipe.input_block) {
         return Err(bad_shape(
             K,
-            format!("input width {n_in} is not a multiple of {block}"),
+            format!(
+                "input width {n_in} is not a multiple of {}",
+                recipe.input_block
+            ),
         ));
     }
-    let pso = pipeline_for(ctx, kernel, threads)?;
+    let pso = pipeline_for(ctx, recipe.kernel, recipe.threads_per_group)?;
     enc.set_pipeline(&pso);
     enc.set_bytes(0, &args);
     enc.set_tensor(1, bank);
@@ -394,12 +429,12 @@ pub fn encode_all_slots_down(
     enc.set_tensor(5, output);
     enc.dispatch(
         MTLSize {
-            width: n_out.div_ceil(rows_per_group),
+            width: n_out.div_ceil(recipe.rows_per_group),
             height: top_k,
             depth: 1,
         },
         MTLSize {
-            width: threads,
+            width: recipe.threads_per_group,
             height: 1,
             depth: 1,
         },
@@ -1015,6 +1050,37 @@ mod tests {
             }
             assert_moe_oracle_close(&format!("{dtype:?} down"), &read_f32(&out), &expected);
         }
+        // DS4 Flash routed down shape: 2048 -> 4096 with top-6.
+        const DS4_TOP_K: usize = 6;
+        let dtype = GgmlType::IQ3_S;
+        let bytes = synthetic_bank(dtype, FFN, HIDDEN, 13);
+        let down = bank(&ctx, &bytes, dtype, FFN, HIDDEN);
+        let ds4_inner = values(FFN * DS4_TOP_K, 17);
+        let input = f32_tensor(&ctx, &ds4_inner, vec![FFN as u64, DS4_TOP_K as u64]);
+        let ids = i32_tensor(&ctx, &IDS[..DS4_TOP_K]);
+        let status = i32_tensor(&ctx, &[ROUTE_STATUS_READY]);
+        let out = f32_tensor(
+            &ctx,
+            &vec![7.0; HIDDEN * DS4_TOP_K],
+            vec![HIDDEN as u64, DS4_TOP_K as u64],
+        );
+        run(&ctx, |enc| {
+            encode_all_slots_down(
+                &ctx, enc, &down, &input, &ids, &status, &out, FFN, HIDDEN, EXPERTS, DS4_TOP_K,
+            )
+            .unwrap();
+        });
+        let mut expected = Vec::with_capacity(HIDDEN * DS4_TOP_K);
+        for (slot, &expert) in IDS[..DS4_TOP_K].iter().enumerate() {
+            let w = dequant_expert(&bytes, dtype, FFN, HIDDEN, expert as usize);
+            expected.extend(mat_vec(
+                &w,
+                &ds4_inner[slot * FFN..(slot + 1) * FFN],
+                HIDDEN,
+            ));
+        }
+        assert_moe_oracle_close("IQ3_S down at DS4 widths", &read_f32(&out), &expected);
+
         // The DS4 IQ3_S kernel writes zero rows for an unready route.
         let bytes = synthetic_bank(GgmlType::IQ3_S, FFN, HIDDEN, 7);
         let down = bank(&ctx, &bytes, GgmlType::IQ3_S, FFN, HIDDEN);
@@ -1419,11 +1485,19 @@ fn expert_capability_names_have_shader_implementations() {
     let packed = include_str!("../../../../kernels/moe.metal");
     for raw in 0..=255 {
         let dtype = GgmlType::from_raw(raw);
-        if let Some(name) = all_slots_gate_up_kernel(dtype) {
-            assert!(decode.contains(name), "{dtype:?}: {name}");
+        if let Some(recipe) = all_slots_gate_up_recipe(dtype) {
+            assert!(
+                decode.contains(recipe.kernel),
+                "{dtype:?}: {}",
+                recipe.kernel
+            );
         }
-        if let Some((name, _, _, _)) = all_slots_down_kernel(dtype) {
-            assert!(decode.contains(name), "{dtype:?}: {name}");
+        if let Some(recipe) = all_slots_down_recipe(dtype) {
+            assert!(
+                decode.contains(recipe.kernel),
+                "{dtype:?}: {}",
+                recipe.kernel
+            );
         }
         if grouped_clamped_gate_up_supported(dtype, dtype) {
             use super::moe_grouped_generic::{MoeGroupedClampedRecipe, moe_grouped_clamped_recipe};

@@ -110,23 +110,6 @@ fn routed_selector_predicates_match_their_operation_tables() {
             "packed batch projection {dtype:?}"
         );
         assert_eq!(
-            super::moe::routed_all_slots_gate_up_selector(dtype).is_some(),
-            matches!(
-                dtype,
-                GgmlType::IQ2_XS
-                    | GgmlType::IQ2_S
-                    | GgmlType::IQ3_XXS
-                    | GgmlType::IQ3_S
-                    | GgmlType::Q3_K
-            ),
-            "gate/up {dtype:?}"
-        );
-        assert_eq!(
-            super::moe::routed_all_slots_down_selector(dtype).is_some(),
-            matches!(dtype, GgmlType::IQ3_XXS | GgmlType::MXFP4 | GgmlType::Q4_K),
-            "down {dtype:?}"
-        );
-        assert_eq!(
             super::moe::indexed_expert_selector(dtype).is_some(),
             matches!(
                 dtype,

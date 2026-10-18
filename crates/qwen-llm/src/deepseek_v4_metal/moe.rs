@@ -2,26 +2,6 @@
 
 use super::*;
 
-pub(super) fn routed_all_slots_gate_up_selector(dtype: GgmlType) -> Option<&'static str> {
-    Some(match dtype {
-        GgmlType::IQ2_XS => "kernel_deepseek_v4_all_slots_swiglu_iq2_xs_f32_fast",
-        GgmlType::IQ2_S => "kernel_deepseek_v4_all_slots_swiglu_iq2_s_f32_fast",
-        GgmlType::IQ3_XXS => "kernel_deepseek_v4_all_slots_swiglu_iq3_xxs_f32_fast",
-        GgmlType::IQ3_S => "kernel_deepseek_v4_all_slots_swiglu_iq3_s_f32_fast",
-        GgmlType::Q3_K => "kernel_deepseek_v4_all_slots_swiglu_q3_K_f32",
-        _ => return None,
-    })
-}
-
-pub(super) fn routed_all_slots_down_selector(dtype: GgmlType) -> Option<(&'static str, usize)> {
-    Some(match dtype {
-        GgmlType::IQ3_XXS => ("kernel_deepseek_v4_all_slots_down_iq3_xxs_f32_fast", 64),
-        GgmlType::MXFP4 => ("kernel_deepseek_v4_all_slots_down_mxfp4_f32", 128),
-        GgmlType::Q4_K => ("kernel_deepseek_v4_all_slots_down_q4_K_f32", 64),
-        _ => return None,
-    })
-}
-
 #[derive(Clone, Copy)]
 enum SharedSwiGluKernel {
     Q6K,
@@ -1137,23 +1117,32 @@ impl DeepSeekV4MoeScratch {
             c.expert_count,
             "all-slot routed down bank",
         )?;
-        let gate_kernel = routed_all_slots_gate_up_selector(gate_bank.dtype)
+        let gate_recipe = crate::metal::all_slots_gate_up_recipe(gate_bank.dtype)
             .filter(|_| gate_bank.dtype == up_bank.dtype);
-        let Some(gate_kernel) = gate_kernel else {
+        let Some(gate_recipe) = gate_recipe else {
             return invalid(format!(
                 "all-slot routed gate/up require matching executable dtypes, got {:?}/{:?}",
                 gate_bank.dtype, up_bank.dtype
             ));
         };
-        let Some((down_kernel, down_threads)) = routed_all_slots_down_selector(down_bank.dtype)
-        else {
+        let Some(down_recipe) = crate::metal::all_slots_down_recipe(down_bank.dtype) else {
             return invalid(format!(
                 "all-slot routed down requires an executable dtype, got {:?}",
                 down_bank.dtype
             ));
         };
-        validate_deepseek_v4_all_slot_pipeline(ctx, gate_kernel, 64, 64)?;
-        validate_deepseek_v4_all_slot_pipeline(ctx, down_kernel, down_threads, 0)?;
+        validate_deepseek_v4_all_slot_pipeline(
+            ctx,
+            gate_recipe.kernel,
+            gate_recipe.threadgroup_memory_f32 * std::mem::size_of::<f32>(),
+            gate_recipe.threads_per_group,
+        )?;
+        validate_deepseek_v4_all_slot_pipeline(
+            ctx,
+            down_recipe.kernel,
+            down_recipe.threads_per_group,
+            0,
+        )?;
         encode_ds4_all_slots_gate_up_swiglu(
             ctx,
             enc,

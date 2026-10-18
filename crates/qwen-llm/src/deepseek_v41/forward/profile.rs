@@ -25,12 +25,15 @@ pub struct Operation {
 #[derive(Debug, Serialize)]
 pub struct Report {
     pub token_wall_ms: f64,
+    pub process_pageins: Option<u64>,
+    pub process_disk_read_bytes: Option<u64>,
     pub operations: Vec<Operation>,
 }
 
 /// Thread-bound scope; dropping on errors/unwind clears profiling. No nesting.
 pub struct Scope {
     start: Instant,
+    before: Option<crate::pid_metrics::PidSnapshot>,
     _thread: PhantomData<Rc<()>>,
 }
 impl Scope {
@@ -42,14 +45,25 @@ impl Scope {
             }
             *slot = Some(Vec::new());
             Ok(Self {
+                before: crate::pid_metrics::PidSnapshot::now().ok(),
                 start: Instant::now(),
                 _thread: PhantomData,
             })
         })
     }
     pub fn finish(self) -> Report {
+        let token_wall_ms = self.start.elapsed().as_secs_f64() * 1000.0;
+        let after = crate::pid_metrics::PidSnapshot::now().ok();
+        let delta = self.before.as_ref().zip(after.as_ref());
         Report {
-            token_wall_ms: self.start.elapsed().as_secs_f64() * 1000.0,
+            token_wall_ms,
+            process_pageins: delta
+                .map(|(before, after)| after.pageins.saturating_sub(before.pageins)),
+            process_disk_read_bytes: delta.map(|(before, after)| {
+                after
+                    .diskio_bytesread
+                    .saturating_sub(before.diskio_bytesread)
+            }),
             operations: ACTIVE.with(|slot| slot.borrow_mut().take().unwrap()),
         }
     }

@@ -63,6 +63,47 @@ the expected old REAP repository/revision with `provenance_verified: false`;
 it does not claim checkpoint hashes or authenticity. No per-layer atomic staging
 or background tracing service is used.
 
+## Targeted Long-Context Capture
+
+Use the full GPU step and a fresh capture directory. `ids-10000.csv` must
+contain 10,000 raw prompt IDs, comma-delimited, without chat rendering:
+
+```sh
+qwen deepseek-v41 --model-dir /path/to/old-reap \
+  --engram-dir /path/to/original-base --gpu-step \
+  --token-ids "$(cat /path/to/ids-10000.csv)" --max-tokens 1 --context 10000 \
+  --attention-capture-dir /path/to/fresh-capture
+uv run scripts/reference/deepseek_v41/cpu/long_context.py \
+  --model /path/to/old-reap --capture /path/to/fresh-capture
+```
+
+Default zero-based checkpoints are `2046,2047,9998,9999`. Override with
+`--attention-capture-positions 2046,2047,9998,9999,16383,16384` and at least
+16,385 consumed tokens to include the first candidate-block discard. Requested
+checkpoints must fit the planned forward count; an early EOS that prevents
+capture completion fails rather than claiming a complete comparison.
+
+The writer emits eight contiguous little-endian F32 NPY input histories for
+layers 2,8,14,20,24,28,32,36, after HC collapse/RMS and before attention
+projection, plus eight post-`wo_b` vectors per checkpoint. Device snapshots are
+encoded before scratch reuse and read only after command completion. Exact
+compressed IDs, KV owner, index producer, and layer-20 candidate block IDs
+accompany each checkpoint in `manifest.json` (`dsv41-long-context-v1`). Capture
+stops after the largest checkpoint. No full-layer trace flag is needed.
+
+The manifest records consumed IDs, model paths/config, expected source revision,
+and native build commit/dirty/source-state identity; model payload identity is
+not authenticated. It starts incomplete. Normal completion finalizes NPY shapes
+and marks success; failure/cancellation leaves an incomplete manifest and partial
+histories. Abrupt termination may leave the initial manifest and provisional
+headers. Never use an incomplete capture as agreement evidence. Existing files
+and symlink directories are refused; there is no overwrite/resume mode.
+
+These captures enable the real 2K/10K sparse-selection comparison; toy tests do
+not replace that gate or certify a pilot. At 10K there is real index selection
+discard but no candidate-block discard. Disk usage for eight 10K histories is
+approximately 1.64 GB, independent of checkpoint count.
+
 Serve the existing loopback Responses endpoint:
 
 ```sh

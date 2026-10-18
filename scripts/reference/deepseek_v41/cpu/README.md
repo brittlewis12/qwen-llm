@@ -65,7 +65,7 @@ is retained: a tied ID mismatch still fails, never silently accepted as equivale
 The NativeF32 router tie rule does not define indexer ties.
 
 Local tests: from this directory, run
-`uv run --with torch --with safetensors --with numpy --with sympy --with tokenizers python -m unittest long_context_test`.
+`uv run --with torch --with safetensors --with numpy --with sympy --with tokenizers python -m unittest test_long_context`.
 Real checkpoint/capture comparison remains unverified until the parent emits
 this contract; no artifact download or GPU job is part of this lane.
 

@@ -10,6 +10,8 @@ use std::{path::PathBuf, sync::Arc, time::Instant};
 
 use qwen_cli::deepseek_v41_tokenizer as engram;
 
+#[path = "deepseek_v41_cli/capture.rs"]
+mod capture;
 #[path = "deepseek_v41_cli/generate.rs"]
 mod generate;
 #[path = "deepseek_v41_cli/trace.rs"]
@@ -17,6 +19,7 @@ mod trace;
 
 #[derive(Debug, Args)]
 #[command(group(clap::ArgGroup::new("v41_generation").args(["prompt", "token_ids"])))]
+#[command(group(clap::ArgGroup::new("v41_execution").args(["prompt", "token_ids", "serve"])))]
 pub(crate) struct Options {
     /// Old REAP-272E root containing config.json and safetensors index.
     #[arg(long)]
@@ -49,9 +52,18 @@ pub(crate) struct Options {
     /// Requires generation and a fresh or empty directory; never overwrites traces.
     #[arg(long, requires = "v41_generation", conflicts_with_all = ["serve", "inspect", "load_only"])]
     trace_dir: Option<PathBuf>,
+    /// Capture eight normalized attention histories and sparse checkpoints (GPU step only).
+    #[arg(long, requires_all = ["v41_generation", "gpu_step"], conflicts_with_all = ["serve", "inspect", "load_only"])]
+    attention_capture_dir: Option<PathBuf>,
+    /// Zero-based checkpoints; default 2046,2047,9998,9999. Add 16383,16384 for pruning.
+    #[arg(long, value_delimiter = ',', num_args = 1.., requires = "attention_capture_dir")]
+    attention_capture_positions: Option<Vec<usize>>,
     /// Emit aggregate per-consumed-token forward timings to stderr (inclusive wall times).
     #[arg(long, requires = "v41_generation", conflicts_with_all = ["serve", "inspect", "load_only"])]
     profile_forward: bool,
+    /// Opt-in GPU-resident token graph; retains only the two CPU Engram boundaries.
+    #[arg(long, requires = "v41_execution", conflicts_with_all = ["inspect", "load_only"])]
+    gpu_step: bool,
     /// System text for --prompt.
     #[arg(long, requires = "prompt")]
     system: Option<String>,
@@ -78,12 +90,16 @@ pub(crate) struct Options {
     /// Explicit resident weight ceiling in bytes; default recommended minus reserve and existing allocations.
     #[arg(long)]
     weight_budget_bytes: Option<u64>,
-    /// Directory for temporary file-backed weights (default: OS temp directory).
+    /// Use ephemeral converted weights in this directory instead of the persistent cache.
     /// Needs about 222 GiB free; backing is released when the model is unloaded.
-    #[arg(long)]
+    #[arg(long, conflicts_with = "weight_cache_dir")]
     weight_backing_dir: Option<PathBuf>,
+    /// Persistent converted-weight cache (default: model-dir/.qwen-v41-cache).
+    /// First conversion needs about 222 GiB; later loads reuse immutable buffers.
+    #[arg(long, conflicts_with = "weight_backing_dir")]
+    weight_cache_dir: Option<PathBuf>,
     /// Headroom left for KV/scratch; not a claim that a context fits.
-    #[arg(long, default_value_t = 4096)]
+    #[arg(long, default_value_t = 1024)]
     reserve_mib: u64,
     /// Include current Metal allocation and OS process footprint snapshots.
     #[arg(long)]
@@ -261,6 +277,41 @@ pub(crate) fn run(options: Options) -> Result<()> {
     } else {
         None
     };
+    let mut attention_capture = options
+        .attention_capture_dir
+        .as_deref()
+        .map(|path| {
+            let (_, _, tokens) = prepared.as_ref().context("capture requires generation")?;
+            let positions = options
+                .attention_capture_positions
+                .as_deref()
+                .unwrap_or(&capture::DEFAULT_CHECKPOINTS);
+            let required = generate::required_context(
+                tokens,
+                options.max_tokens as usize,
+                options.context as usize,
+                129280,
+            )?;
+            ensure!(
+                positions.iter().all(|&p| p < required),
+                "capture checkpoints exceed requested forward positions"
+            );
+            capture::Writer::create(
+                path,
+                positions,
+                json!({
+                    "model_dir":options.model_dir,"engram_dir":options.engram_dir,
+                    "config":config,"prompt_token_ids":tokens,
+                    "expected_source_revision":qwen_llm::deepseek_v41::loader::OLD_REVISION,
+                    "provenance_verified":false,"execution":"gpu_step",
+                    "native_version":env!("CARGO_PKG_VERSION"),
+                    "native_revision":env!("QWEN_BUILD_COMMIT"),
+                    "native_dirty":env!("QWEN_BUILD_DIRTY"),
+                    "native_source_state":env!("QWEN_BUILD_SOURCE_STATE"),
+                }),
+            )
+        })
+        .transpose()?;
     let mut trace = options
         .trace_dir
         .as_deref()
@@ -275,6 +326,7 @@ pub(crate) fn run(options: Options) -> Result<()> {
                 options.context,
                 options.max_tokens,
                 sampling,
+                options.gpu_step,
             )
         })
         .transpose()?;
@@ -305,11 +357,23 @@ pub(crate) fn run(options: Options) -> Result<()> {
         None
     };
     crate::shutdown::checkpoint()?;
-    let backing_dir = options
-        .weight_backing_dir
-        .clone()
-        .unwrap_or_else(std::env::temp_dir);
-    std::fs::create_dir_all(&backing_dir).context("create weight backing directory")?;
+    let persistent = options.weight_backing_dir.is_none();
+    let backing_dir = options.weight_backing_dir.clone().unwrap_or_else(|| {
+        options
+            .weight_cache_dir
+            .clone()
+            .unwrap_or_else(|| options.model_dir.join(".qwen-v41-cache"))
+    });
+    if persistent {
+        use std::os::unix::fs::DirBuilderExt;
+        std::fs::DirBuilder::new()
+            .recursive(true)
+            .mode(0o700)
+            .create(&backing_dir)
+            .context("create private converted-weight cache")?;
+    } else {
+        std::fs::create_dir_all(&backing_dir).context("create weight backing directory")?;
+    }
     ensure!(
         backing_dir.is_dir(),
         "weight backing path must be a directory"
@@ -323,7 +387,7 @@ pub(crate) fn run(options: Options) -> Result<()> {
     )?;
     report(
         json!({"stage":"load_start", "weight_budget_bytes":limit, "reserve_mib":options.reserve_mib,
-        "weight_storage":"temporary_file_backed", "weight_backing_dir":backing_dir,
+        "weight_storage":if persistent {"persistent_file_backed"} else {"temporary_file_backed"}, "weight_backing_dir":backing_dir,
         "memory":if options.report_memory { Some(memory(Some(&ctx))?) } else { None }}),
     );
     ensure!(
@@ -333,7 +397,12 @@ pub(crate) fn run(options: Options) -> Result<()> {
     );
     let allocated_before = ctx.current_allocated_size();
     let start = Instant::now();
-    let weights = ResidentWeights::load(
+    let load = if persistent {
+        ResidentWeights::load_cached
+    } else {
+        ResidentWeights::load
+    };
+    let weights = load(
         &ctx,
         &source,
         engram_source,
@@ -363,11 +432,13 @@ pub(crate) fn run(options: Options) -> Result<()> {
             &ctx, &weights, map.lookup, raw_pad,
         )
         .map_err(|e| anyhow!(e))?;
-        let mut backend = crate::serve::backend_v41::Backend::new(&ctx, forward, settings);
+        let mut backend = crate::serve::backend_v41::Backend::new(&ctx, forward, settings)
+            .with_gpu_step(options.gpu_step);
         report(
             json!({"stage":"serve_ready", "model":options.model_id, "context":options.context,
             "default_max_output_tokens":options.max_tokens, "prefix_reuse":false, "ced":false,
-            "memory":if options.report_memory {Some(memory(Some(&ctx))?)} else {None}}),
+             "gpu_step":options.gpu_step,
+             "memory":if options.report_memory {Some(memory(Some(&ctx))?)} else {None}}),
         );
         crate::serve::serve_v41(listener, &mut backend, load_ms)?;
     } else if generating {
@@ -392,9 +463,12 @@ pub(crate) fn run(options: Options) -> Result<()> {
             options.context as usize,
             tokenizer.get_vocab_size(true),
         )?;
-        let request_memory = forward
-            .estimate_request_memory(required)
-            .map_err(|e| anyhow!(e))?;
+        let request_memory = if options.gpu_step {
+            forward.estimate_request_memory_with_gpu_step(required)
+        } else {
+            forward.estimate_request_memory(required)
+        }
+        .map_err(|e| anyhow!(e))?;
         ensure!(
             serde_json::to_value(tokenizer.get_decoder())?["type"] == "ByteLevel",
             "V4.1 generation requires ByteLevel decoding for output budgeting"
@@ -437,9 +511,12 @@ pub(crate) fn run(options: Options) -> Result<()> {
             "caller_cpu_reserve_bytes":caller_reserve, "recheck":"full_estimate_before_each_forward"}),
         );
         admit()?;
-        let mut state = forward
-            .new_state(options.context as usize)
-            .map_err(|e| anyhow!(e))?;
+        let mut state = if options.gpu_step {
+            forward.new_state_with_gpu_step(required)
+        } else {
+            forward.new_state(options.context as usize)
+        }
+        .map_err(|e| anyhow!(e))?;
         let mut decoder = tokenizer.decode_stream(false);
         let mut emitted = String::new();
         let stdout = std::io::stdout();
@@ -465,21 +542,35 @@ pub(crate) fn run(options: Options) -> Result<()> {
                     .transpose()
                     .map_err(|e| anyhow!(e))?;
                 let result = (|| {
+                    if let Some(capture) = attention_capture.as_mut() {
+                        capture.begin_step(position, token)?;
+                    }
                     if let Some(trace) = trace.as_mut() {
                         trace.begin_step(state.position(), token)?;
                         let logits = forward
-                            .step_with_trace(
+                            .step_with_capture(
                                 &mut state,
                                 token,
                                 Some(cancel),
                                 Some(&mut |layer| trace.layer(layer).map_err(|e| format!("{e:#}"))),
+                                attention_capture.as_mut().map(|c| {
+                                    c as &mut dyn qwen_llm::deepseek_v41::forward::capture::Capture
+                                }),
                             )
                             .map_err(|e| anyhow!(e))?;
                         trace.finish_step(&logits)?;
                         Ok(logits)
                     } else {
                         forward
-                            .step(&mut state, token, Some(cancel))
+                            .step_with_capture(
+                                &mut state,
+                                token,
+                                Some(cancel),
+                                None,
+                                attention_capture.as_mut().map(|c| {
+                                    c as &mut dyn qwen_llm::deepseek_v41::forward::capture::Capture
+                                }),
+                            )
                             .map_err(|e| anyhow!(e))
                     }
                 })();
@@ -503,13 +594,25 @@ pub(crate) fn run(options: Options) -> Result<()> {
                 }
                 Ok(())
             },
-        )?;
+        );
+        let outcome = outcome.map_err(|error| {
+            if let Some(capture) = attention_capture.as_mut() {
+                capture.failure(
+                    &format!("{error:#}"),
+                    cancel.load(std::sync::atomic::Ordering::Relaxed),
+                );
+            }
+            error
+        })?;
         let visible_ids =
             &outcome.tokens[..outcome.tokens.len() - usize::from(outcome.stop.is_some())];
         stdout.write_all(generate::finish_text(&tokenizer, visible_ids, &emitted)?.as_bytes())?;
         stdout.flush()?;
         if let Some(trace) = trace {
             trace.finish(&outcome.tokens, outcome.stop)?;
+        }
+        if let Some(capture) = attention_capture {
+            capture.finish()?;
         }
         report(
             json!({"stage":"generated", "input_tokens":tokens.len(), "output_tokens":outcome.tokens.len(),
@@ -572,6 +675,23 @@ mod tests {
         ])
         .unwrap();
         assert!(parsed.options.profile_forward);
+        for flags in [
+            vec!["--gpu-step"],
+            vec!["--inspect", "--gpu-step"],
+            vec!["--load-only", "--gpu-step"],
+        ] {
+            let mut args = vec!["qwen", "--model-dir", "/model"];
+            args.extend(flags);
+            assert!(TestCli::try_parse_from(args).is_err());
+        }
+        for flags in [
+            vec!["--serve", "--gpu-step"],
+            vec!["--prompt", "hello", "--gpu-step"],
+        ] {
+            let mut args = vec!["qwen", "--model-dir", "/model"];
+            args.extend(flags);
+            assert!(TestCli::try_parse_from(args).unwrap().options.gpu_step);
+        }
         let scope = qwen_llm::deepseek_v41::forward::profile::Scope::begin().unwrap();
         let value = profile_json(3, 7, 2, true, scope.finish());
         let decoded: Value = serde_json::from_str(&value.to_string()).unwrap();
@@ -589,11 +709,18 @@ mod tests {
     fn v41_cli_is_inspect_by_default_and_load_is_explicit() {
         let parsed = TestCli::try_parse_from(["qwen", "--model-dir", "/models/reap"]).unwrap();
         assert!(!parsed.options.load_only);
-        assert_eq!(parsed.options.reserve_mib, 4096);
+        assert_eq!(parsed.options.reserve_mib, 1024);
         assert_eq!(parsed.options.context, 4096);
         assert!(parsed.options.weight_backing_dir.is_none());
+        assert!(parsed.options.weight_cache_dir.is_none());
         for flags in [
             vec!["--inspect", "--load-only"],
+            vec![
+                "--weight-cache-dir",
+                "/tmp/cache",
+                "--weight-backing-dir",
+                "/tmp/backing",
+            ],
             vec!["--context", "0"],
             vec!["--context", "1048577"],
             vec!["--prompt", "hi", "--load-only"],

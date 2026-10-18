@@ -44,6 +44,7 @@ impl Trace {
         context: u32,
         maximum: u32,
         sampling: SamplingConfig,
+        gpu_step: bool,
     ) -> Result<Self> {
         let text = &config["text_config"];
         ensure!(
@@ -61,6 +62,7 @@ impl Trace {
             },
             json!({
                 "config":config, "prompt_token_ids":prompt, "context":context, "max_output_tokens":maximum,
+                "execution":if gpu_step {"gpu_step"} else {"cpu_boundaries"},
                 "sampling":{"temperature":sampling.temperature,"top_k":sampling.top_k,"top_p":sampling.top_p,"min_p":sampling.min_p,"seed":sampling.seed}
             }),
         )

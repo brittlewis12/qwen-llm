@@ -1,7 +1,11 @@
 //! Old REAP-272E single-token NativeF32 execution. Dense weights remain resident;
 //! only activations and small normalization/control vectors are copied to CPU.
 mod attention;
+mod attention_gpu;
 mod bind;
+pub mod capture;
+mod ffn_gpu;
+mod gpu_step;
 mod memory;
 pub mod profile;
 mod staging;
@@ -304,6 +308,8 @@ pub struct Forward<'a> {
 /// A failed/cancelled partial token poisons the sequence, rather than silently
 /// reusing partially advanced KV caches. Start a fresh State to retry a prompt.
 pub struct State {
+    gpu_step: Option<gpu_step::Workspace>,
+    ffn_gpu: Option<ffn_gpu::Workspace>,
     attention: attention::Session,
     staging: Option<staging::Staging>,
     addresses: engram::AddressState,
@@ -327,6 +333,8 @@ impl<'a> Forward<'a> {
             "invalid maximum context",
         )?;
         Ok(State {
+            gpu_step: None,
+            ffn_gpu: None,
             attention: attention::Session::default(),
             staging: None,
             addresses: engram::AddressState::new(self.pad).map_err(|e| format!("{e:?}"))?,
@@ -345,6 +353,23 @@ impl<'a> Forward<'a> {
         Ok(state)
     }
 
+    /// Experimental single-command GPU FFN; legacy CPU boundaries remain the
+    /// default. Includes retained per-layer constants and a reusable workspace.
+    /// This option is separate from CPU-selected active-expert staging.
+    pub fn new_state_with_gpu_ffn(&self, max_context: usize) -> Result<State> {
+        let mut state = self.new_state(max_context)?;
+        state.ffn_gpu = Some(ffn_gpu::Workspace::new(self)?);
+        Ok(state)
+    }
+
+    /// Experimental three-command token graph; legacy remains the default.
+    /// Capacity is the actual requested token capacity, not model metadata.
+    pub fn new_state_with_gpu_step(&self, capacity: usize) -> Result<State> {
+        let mut state = self.new_state(capacity)?;
+        state.gpu_step = Some(gpu_step::Workspace::new(self, capacity)?);
+        Ok(state)
+    }
+
     /// Consume one raw tokenizer ID and return the full next-token logits.
     /// Cancellation is checked before each layer and after the final head.
     pub fn step(
@@ -360,6 +385,8 @@ impl<'a> Forward<'a> {
     /// no readbacks, copies, or allocations. Callback errors poison a partially
     /// executed sequence just like operator errors; callback panics also leave
     /// it poisoned. The callback may set cancel to stop before the next layer.
+    /// GPU-step mode captures on device and delivers callbacks in layer order
+    /// after each segment completes; cancellation cannot undo that segment.
     pub fn step_with_trace(
         &self,
         state: &mut State,
@@ -367,6 +394,23 @@ impl<'a> Forward<'a> {
         cancel: Option<&AtomicBool>,
         trace: Option<&mut dyn FnMut(LayerTrace<'_>) -> Result<()>>,
     ) -> Result<Vec<f32>> {
+        self.step_with_capture(state, token, cancel, trace, None)
+    }
+
+    /// Capture normalized attention inputs and selected checkpoint outputs.
+    /// Requires GPU-step state. None performs no capture allocation or copies.
+    pub fn step_with_capture(
+        &self,
+        state: &mut State,
+        token: u32,
+        cancel: Option<&AtomicBool>,
+        trace: Option<&mut dyn FnMut(LayerTrace<'_>) -> Result<()>>,
+        capture: Option<&mut dyn capture::Capture>,
+    ) -> Result<Vec<f32>> {
+        op::require(
+            capture.is_none() || state.gpu_step.is_some(),
+            "attention capture requires GPU step",
+        )?;
         op::require(
             !state.poisoned,
             "sequence poisoned by a failed partial token",
@@ -389,7 +433,7 @@ impl<'a> Forward<'a> {
             .step(engram::Token::Compressed(compressed))
             .map_err(|e| format!("{e:?}"))?;
         state.poisoned = true;
-        let result = self.step_inner(state, token as usize, &rows, cancel, trace)?;
+        let result = self.step_inner(state, token as usize, &rows, cancel, trace, capture)?;
         state.addresses = next;
         state.poisoned = false;
         Ok(result)
@@ -402,9 +446,17 @@ impl<'a> Forward<'a> {
         rows: &engram::Rows,
         cancel: Option<&AtomicBool>,
         mut trace: Option<&mut dyn FnMut(LayerTrace<'_>) -> Result<()>>,
+        capture: Option<&mut dyn capture::Capture>,
     ) -> Result<Vec<f32>> {
         let c = &self.config;
         let position = state.position();
+        if let Some(workspace) = state.gpu_step.as_mut() {
+            op::require(
+                state.ffn_gpu.is_none() && state.staging.is_none(),
+                "GPU step excludes GPU FFN and staging modes",
+            )?;
+            return workspace.run(self, position, token, rows, cancel, trace, capture);
+        }
         let embedding = &f32_slice(self.embedding)?[token * c.hidden..(token + 1) * c.hidden];
         let mut x = embedding.repeat(4);
         let mut pre = vec![1.0, 0.0, 0.0, 0.0];
@@ -422,16 +474,20 @@ impl<'a> Forward<'a> {
                 .attention(id, position, &input, &layer.attention)?;
             x = op::merge(&output, &x, &mixes)?;
             pre = mixes.pre;
-            let (mixes, input) = layer.ffn_hc.prepare(&x, &pre, c)?;
-            let output = Self::moe(
-                self.ctx,
-                &self.config,
-                layer,
-                &input,
-                state.staging.as_mut(),
-            )?;
-            x = op::merge(&output, &x, &mixes)?;
-            pre = mixes.pre;
+            if let Some(workspace) = state.ffn_gpu.as_mut() {
+                (x, pre) = workspace.run(self.ctx, c, layer, id, &x, &pre)?;
+            } else {
+                let (mixes, input) = layer.ffn_hc.prepare(&x, &pre, c)?;
+                let output = Self::moe(
+                    self.ctx,
+                    &self.config,
+                    layer,
+                    &input,
+                    state.staging.as_mut(),
+                )?;
+                x = op::merge(&output, &x, &mixes)?;
+                pre = mixes.pre;
+            }
             if let Some(callback) = trace.as_mut() {
                 callback(LayerTrace {
                     position,

@@ -17,6 +17,7 @@ pub(crate) struct Backend<'a> {
     ctx: &'a MetalContext,
     forward: Forward<'a>,
     settings: Settings,
+    gpu_step: bool,
 }
 
 /// Caller-retained logits and sampler candidates/weights/sort storage, separate
@@ -196,7 +197,7 @@ impl Settings {
             }
         };
         check(sink)?;
-        let mut state = new_state(self.context).map_err(&forward_error)?;
+        let mut state = new_state(required).map_err(&forward_error)?;
         let prefill_start = now();
         let mut logits = Vec::new();
         for &token in &ids {
@@ -332,7 +333,13 @@ impl<'a> Backend<'a> {
             ctx,
             forward,
             settings,
+            gpu_step: false,
         }
+    }
+
+    pub(crate) fn with_gpu_step(mut self, enabled: bool) -> Self {
+        self.gpu_step = enabled;
+        self
     }
 }
 
@@ -355,14 +362,23 @@ impl GenerationBackend for Backend<'_> {
             prompt,
             sink,
             |positions, reserve| {
-                let estimate = self
-                    .forward
-                    .estimate_request_memory(positions)
-                    .map_err(|e| ServeError::server_error(format!("V4.1 request estimate: {e}")))?;
+                let estimate = if self.gpu_step {
+                    self.forward
+                        .estimate_request_memory_with_gpu_step(positions)
+                } else {
+                    self.forward.estimate_request_memory(positions)
+                }
+                .map_err(|e| ServeError::server_error(format!("V4.1 request estimate: {e}")))?;
                 admit_request_memory(estimate, reserve, self.ctx.memory_signals())
                     .map_err(|e| super::transport_memory::memory_refusal("V4.1 request", &e))
             },
-            |capacity| self.forward.new_state(capacity),
+            |capacity| {
+                if self.gpu_step {
+                    self.forward.new_state_with_gpu_step(capacity)
+                } else {
+                    self.forward.new_state(capacity)
+                }
+            },
             |state, token, cancel| self.forward.step(state, token, Some(cancel)),
             || epoch.elapsed(),
         )

@@ -43,6 +43,38 @@ fn rows(count: u64, width: u64) -> Result<u64> {
 }
 
 impl Config {
+    /// GPU-owned caches sized to the requested capacity; includes optional trace
+    /// snapshots and conservative CPU Engram/embedding/logit transient storage.
+    pub fn estimate_request_memory_with_gpu_step(
+        &self,
+        positions: usize,
+    ) -> Result<RequestMemoryEstimate> {
+        op::require(
+            positions > 0 && positions as u64 <= engram::MAX_POSITION,
+            "invalid GPU step capacity",
+        )?;
+        let mut estimate = self.estimate_request_memory(1)?;
+        estimate.metal_bytes = add(&[
+            estimate.metal_bytes,
+            super::gpu_step::bytes(self, positions)?,
+        ])?;
+        estimate.total_bytes = add(&[estimate.cpu_bytes, estimate.metal_bytes])?;
+        Ok(estimate)
+    }
+
+    /// Legacy conservative request estimate plus GPU FFN workspace and retained
+    /// constants. Counts shared storage once, with allocation/descriptor slack.
+    pub fn estimate_request_memory_with_gpu_ffn(
+        &self,
+        positions: usize,
+    ) -> Result<RequestMemoryEstimate> {
+        let mut estimate = self.estimate_request_memory(positions)?;
+        let bytes = super::ffn_gpu::bytes(self)?;
+        estimate.metal_bytes = add(&[estimate.metal_bytes, bytes])?;
+        estimate.total_bytes = add(&[estimate.total_bytes, bytes])?;
+        Ok(estimate)
+    }
+
     pub fn estimate_request_memory_with_expert_staging(
         &self,
         positions: usize,
@@ -190,6 +222,13 @@ impl Config {
 }
 
 impl Forward<'_> {
+    pub fn estimate_request_memory_with_gpu_step(
+        &self,
+        positions: usize,
+    ) -> Result<RequestMemoryEstimate> {
+        self.config.estimate_request_memory_with_gpu_step(positions)
+    }
+
     /// Includes reusable active-bank storage, counted once as Metal shared bytes.
     /// Legacy estimates exclude it. No tensor-sized CPU staging allocation exists.
     pub fn estimate_request_memory_with_expert_staging(

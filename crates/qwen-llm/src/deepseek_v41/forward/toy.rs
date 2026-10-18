@@ -2,7 +2,7 @@
 use super::*;
 use std::collections::BTreeMap;
 
-fn config() -> Config {
+pub(super) fn config() -> Config {
     Config {
         hidden: 32,
         intermediate: 32,
@@ -30,12 +30,12 @@ fn config() -> Config {
     }
 }
 
-struct Weights {
+pub(super) struct Weights {
     dense: BTreeMap<String, MetalTensor>,
     banks: Vec<MetalTensor>,
 }
 impl Weights {
-    fn new(ctx: &MetalContext) -> Self {
+    pub(super) fn new(ctx: &MetalContext) -> Self {
         let mut dense = BTreeMap::new();
         for l in 0..40 {
             let mut put = |suffix: &str, shape: &[u64], value| {
@@ -157,7 +157,7 @@ impl Weights {
         Self { dense, banks }
     }
 
-    fn model<'a>(&'a self, ctx: &'a MetalContext) -> Forward<'a> {
+    pub(super) fn model<'a>(&'a self, ctx: &'a MetalContext) -> Forward<'a> {
         let c = config();
         let b = bind::Binder {
             ctx,

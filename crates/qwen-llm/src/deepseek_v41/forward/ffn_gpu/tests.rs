@@ -1,0 +1,302 @@
+use super::super::toy;
+use super::*;
+
+fn close(a: &[f32], b: &[f32]) {
+    assert_eq!(a.len(), b.len());
+    for (i, (&a, &b)) in a.iter().zip(b).enumerate() {
+        assert!(
+            (a - b).abs() <= 4e-5 + 4e-5 * b.abs(),
+            "index {i}: {a} != {b}"
+        );
+    }
+}
+
+#[test]
+fn full_forty_layer_python_reference_and_submit_census() {
+    let ctx = MetalContext::new().unwrap();
+    let weights = toy::Weights::new(&ctx);
+    let model = weights.model(&ctx);
+    let expected: serde_json::Value =
+        serde_json::from_str(include_str!("../toy_expected.json")).unwrap();
+    let mut state = model.new_state_with_gpu_ffn(3).unwrap();
+    let mut legacy = model.new_state(3).unwrap();
+    for (pos, token) in [0, 3, 1].into_iter().enumerate() {
+        let mut count = 0;
+        let mut callback = |trace: LayerTrace<'_>| {
+            let row = &expected["traces"][pos * 40 + count];
+            for s in 0..4 {
+                close(
+                    &trace.hidden[s * 32..(s + 1) * 32],
+                    &[row[s].as_f64().unwrap() as f32; 32],
+                );
+                close(
+                    &trace.next_pre_mix[s..s + 1],
+                    &[row[4 + s].as_f64().unwrap() as f32],
+                );
+            }
+            count += 1;
+            Ok(())
+        };
+        let scope = profile::Scope::begin().unwrap();
+        let logits = model
+            .step_with_trace(&mut state, token, None, Some(&mut callback))
+            .unwrap();
+        let report = scope.finish();
+        assert_eq!(count, 40);
+        assert_eq!(
+            report
+                .operations
+                .iter()
+                .filter(|o| o.operation == "ffn_gpu")
+                .map(|o| o.completed_submits)
+                .sum::<usize>(),
+            40
+        );
+        assert!(
+            !report
+                .operations
+                .iter()
+                .any(|o| o.operation == "native_down" || o.operation == "native_gate_up")
+        );
+        close(&logits, &model.step(&mut legacy, token, None).unwrap());
+        let reference: Vec<_> = expected["logits"][pos]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|v| v.as_f64().unwrap() as f32)
+            .collect();
+        close(&logits, &reference);
+    }
+}
+
+#[test]
+fn stages_lagged_pre_weight_before_down_and_nonalias() {
+    let ctx = MetalContext::new().unwrap();
+    let weights = toy::Weights::new(&ctx);
+    let mut model = weights.model(&ctx);
+    let projection: Vec<_> = (0..128 * 24)
+        .map(|i| ((i * 19 % 101) as f32 - 50.0) / 512.0)
+        .collect();
+    model.layers[0].ffn_hc.projection.tensor = upload(&ctx, &projection, vec![128, 24]).unwrap();
+    model.layers[0].ffn_hc.scale = [0.7, 1.3, 0.4];
+    model.layers[0].ffn_hc.base = (0..24).map(|i| (i as f32 - 9.0) / 17.0).collect();
+    let c = &model.config;
+    let layer = &model.layers[0];
+    let mut workspace = Workspace::new(&model).unwrap();
+    let x: Vec<_> = (0..128)
+        .map(|i| ((i * 17 % 43) as f32 - 21.0) / 7.0)
+        .collect();
+    let pre = [0.7, 0.1, 0.3, 0.9];
+    let (mixes, input) = layer.ffn_hc.prepare(&x, &pre, c).unwrap();
+    let output = Forward::moe(&ctx, c, layer, &input, None).unwrap();
+    let (actual, next) = workspace.run(&ctx, c, layer, 0, &x, &pre).unwrap();
+    close(&actual, &op::merge(&output, &x, &mixes).unwrap());
+    close(&next, &mixes.pre);
+    let b = &workspace.buffers;
+    close(f32_slice(&b[0]).unwrap(), &x);
+    close(f32_slice(&b[1]).unwrap(), &pre);
+    let inv = (op::dot(&x, &x) / x.len() as f32 + c.norm_eps)
+        .sqrt()
+        .recip();
+    let projected: Vec<_> = layer
+        .ffn_hc
+        .projection
+        .forward(&x)
+        .unwrap()
+        .iter()
+        .map(|v| v * inv)
+        .collect();
+    close(f32_slice(&b[2]).unwrap(), &projected);
+    close(f32_slice(&b[4]).unwrap(), &mixes.post);
+    close(f32_slice(&b[5]).unwrap(), &mixes.comb);
+    close(f32_slice(&b[6]).unwrap(), &op::collapse(&x, &pre).unwrap());
+    close(f32_slice(&b[7]).unwrap(), &input);
+    let (ids, weights) = route(
+        &layer.router.forward(&input).unwrap(),
+        &layer.bias,
+        c.topk,
+        c.gate_temperature,
+        c.route_scale,
+    )
+    .unwrap();
+    let actual_ids = unsafe {
+        std::slice::from_raw_parts(b[10].buffer.contents().as_ptr().cast::<i32>(), c.topk)
+    };
+    assert_eq!(actual_ids, ids);
+    close(f32_slice(&b[11]).unwrap(), &weights);
+    let expected: Vec<_> = f32_slice(&b[13])
+        .unwrap()
+        .iter()
+        .enumerate()
+        .map(|(i, v)| v * weights[i / c.intermediate])
+        .collect();
+    close(f32_slice(&b[14]).unwrap(), &expected);
+    close(f32_slice(&b[20]).unwrap(), &output);
+    assert!(f32_slice(&b[13]).unwrap().iter().any(|v| *v != 0.0));
+    assert!(f32_slice(&b[15]).unwrap().iter().any(|v| *v != 0.0));
+}
+
+#[test]
+fn route_failure_poisons_state_and_memory_is_opt_in() {
+    let ctx = MetalContext::new().unwrap();
+    let weights = toy::Weights::new(&ctx);
+    let mut model = weights.model(&ctx);
+    model.layers[0].bias[0] = f32::NAN;
+    let mut state = model.new_state_with_gpu_ffn(2).unwrap();
+    assert!(
+        model
+            .step(&mut state, 0, None)
+            .unwrap_err()
+            .contains("route status")
+    );
+    assert!(state.is_poisoned());
+    let workspace = state.ffn_gpu.as_ref().unwrap();
+    assert!(
+        f32_slice(&workspace.buffers[13])
+            .unwrap()
+            .iter()
+            .all(|&v| v == 0.0)
+    );
+    assert!(
+        f32_slice(&workspace.buffers[15])
+            .unwrap()
+            .iter()
+            .all(|&v| v == 0.0)
+    );
+    assert_eq!(state.position(), 0);
+    assert!(
+        model
+            .step(&mut state, 0, None)
+            .unwrap_err()
+            .contains("poisoned")
+    );
+    assert!(model.new_state(2).unwrap().ffn_gpu.is_none());
+    let baseline = model.config.estimate_request_memory(2).unwrap();
+    let gpu = model
+        .config
+        .estimate_request_memory_with_gpu_ffn(2)
+        .unwrap();
+    assert_eq!(
+        gpu.total_bytes - baseline.total_bytes,
+        bytes(&model.config).unwrap()
+    );
+}
+
+#[test]
+fn routing_ties_bias_absorption_temperature_extremes_and_top1() {
+    let ctx = MetalContext::new().unwrap();
+    for (logits, bias, topk, temperature, scale) in [
+        (vec![0.0; 8], vec![0.0; 8], 6, 1.0, 1.5),
+        (vec![-5.0, 9.0, 1.0, 4.0], vec![1e20; 4], 2, 1.0, 1.5),
+        (
+            vec![-100.0, -40.0, -20.0, 0.0, 40.0, 100.0],
+            vec![0.0; 6],
+            4,
+            0.25,
+            1.5,
+        ),
+        (vec![-90.0, -80.0, -70.0, -60.0], vec![0.0; 4], 3, 2.0, 0.75),
+        (vec![-20.0, -20.0, -20.0], vec![0.0; 3], 1, 1.0, 1.5),
+        (vec![3.0, 2.0, 1.0], vec![-10.0, 0.0, 10.0], 2, 3.0, 2.0),
+        (vec![f32::NAN, 0.0], vec![0.0; 2], 1, 1.0, 1.5),
+        (vec![0.0, 1.0], vec![0.0, f32::INFINITY], 1, 1.0, 1.5),
+    ] {
+        let n = logits.len();
+        let input = upload(&ctx, &logits, vec![n as u64]).unwrap();
+        let bias_gpu = upload(&ctx, &bias, vec![n as u64]).unwrap();
+        let scores = MetalTensor::zeros_f32(&ctx, vec![n as u64]).unwrap();
+        let ids =
+            MetalTensor::zeros_dtype_unstaged(&ctx, vec![topk as u64], GgmlType::I32).unwrap();
+        let weights = MetalTensor::zeros_f32(&ctx, vec![topk as u64]).unwrap();
+        let status = MetalTensor::zeros_dtype_unstaged(&ctx, vec![1], GgmlType::I32).unwrap();
+        submit(&ctx, "route_test", [0; 4], |enc| {
+            enc.set_pipeline(&ctx.pipeline("kernel_deepseek_v41_route")?);
+            enc.set_bytes(
+                0,
+                &RouteArgs {
+                    experts: n as u32,
+                    topk: topk as u32,
+                    temperature,
+                    scale,
+                },
+            );
+            for (slot, tensor) in [&input, &bias_gpu, &scores, &ids, &weights, &status]
+                .iter()
+                .enumerate()
+            {
+                enc.set_tensor(slot + 1, tensor);
+            }
+            dispatch(enc, 1, 1);
+            Ok(())
+        })
+        .unwrap();
+        let status = unsafe { *status.buffer.contents().as_ptr().cast::<i32>() };
+        match route(&logits, &bias, topk, temperature, scale) {
+            Ok((expected_ids, expected_weights)) => {
+                assert_eq!(status, metal::ROUTE_STATUS_READY);
+                let actual = unsafe {
+                    std::slice::from_raw_parts(ids.buffer.contents().as_ptr().cast::<i32>(), topk)
+                };
+                assert_eq!(actual, expected_ids);
+                close(f32_slice(&weights).unwrap(), &expected_weights);
+                for (&actual, &expected) in
+                    f32_slice(&weights).unwrap().iter().zip(&expected_weights)
+                {
+                    if expected.abs() > 1e-30 {
+                        assert!(
+                            (actual - expected).abs() <= expected.abs() * 2e-5,
+                            "router tail {actual} != {expected}"
+                        );
+                    }
+                }
+            }
+            Err(_) => assert!(status < 0),
+        }
+    }
+}
+
+#[test]
+fn asymmetric_clamps_preserve_negative_gate_tail() {
+    let ctx = MetalContext::new().unwrap();
+    let gate = [-20.0, -2.0, -0.2, 0.2, 2.0, 20.0];
+    let up = [-20.0, 20.0, -2.0, 2.0, -20.0, 20.0];
+    let g = upload(&ctx, &gate, vec![6]).unwrap();
+    let u = upload(&ctx, &up, vec![6]).unwrap();
+    let out = MetalTensor::zeros_f32(&ctx, vec![6]).unwrap();
+    submit(&ctx, "clamp_test", [0; 4], |enc| {
+        metal::encode_clamped_swiglu(&ctx, enc, &g, &u, &out, 0.35)
+    })
+    .unwrap();
+    close(
+        f32_slice(&out).unwrap(),
+        &op::clamped_swiglu(&gate, &up, 0.35).unwrap(),
+    );
+    assert!(f32_slice(&out).unwrap()[0].abs() < 1e-6);
+}
+
+#[test]
+fn ordered_slots_then_shared_sum() {
+    let ctx = MetalContext::new().unwrap();
+    let slots = upload(&ctx, &[1e20, -1e20, 3.0], vec![1, 3]).unwrap();
+    let shared = upload(&ctx, &[4.0], vec![1]).unwrap();
+    let output = MetalTensor::zeros_f32(&ctx, vec![1]).unwrap();
+    let status = MetalTensor::from_bytes(
+        &ctx,
+        bytemuck::cast_slice(&[metal::ROUTE_STATUS_READY]),
+        vec![1],
+        GgmlType::I32,
+    )
+    .unwrap();
+    submit(&ctx, "sum_test", [0; 4], |enc| {
+        enc.set_pipeline(&ctx.pipeline("kernel_deepseek_v41_sum")?);
+        enc.set_bytes(0, &1u32);
+        enc.set_bytes(1, &3u32);
+        for (slot, tensor) in [&slots, &shared, &output, &status].iter().enumerate() {
+            enc.set_tensor(slot + 2, tensor);
+        }
+        dispatch(enc, 1, 1);
+        Ok(())
+    })
+    .unwrap();
+    assert_eq!(f32_slice(&output).unwrap(), &[7.0]);
+}

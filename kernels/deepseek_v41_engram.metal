@@ -1,7 +1,7 @@
 #include <metal_stdlib>
 using namespace metal;
 
-// Keep the baseline's left-to-right reductions and multiplication grouping.
+// Preserve per-element multiplication grouping; reduction order is SIMD-parallel.
 #pragma clang fp reassociate(off)
 #pragma clang fp contract(off)
 kernel void kernel_deepseek_v41_engram(
@@ -14,28 +14,31 @@ kernel void kernel_deepseek_v41_engram(
     device float *h = x + group * d;
     device const float *key = projected + (row * 5 + stream) * d;
     device const float *value = projected + (row * 5 + 4) * d;
-    threadgroup float gate;
-    if (tid == 0) {
-        float hh = 0.0f, kk = 0.0f, dot = -0.0f;
-        bool negative_zero = true;
-        for (uint j = 0; j < d; ++j) {
-            hh += h[j] * h[j];
-            kk += key[j] * key[j];
-            float term = h[j] * (q[stream * d + j] * k[stream * d + j]) * key[j];
-            // Fast-math builds may discard zero signs. Rust Sum starts at -0.
-            uint sign = (as_type<uint>(h[j]) ^ as_type<uint>(q[stream * d + j])
-                ^ as_type<uint>(k[stream * d + j]) ^ as_type<uint>(key[j])) & 0x80000000u;
-            negative_zero &= term == 0.0f && sign != 0;
-            dot += term;
-        }
-        uint sign = negative_zero ? 0x80000000u : (as_type<uint>(dot) & 0x80000000u);
-        float rstd = (1.0f / precise::sqrt(hh / float(d) + eps))
-            * (1.0f / precise::sqrt(kk / float(d) + eps));
-        float normalized = dot * rstd * (1.0f / precise::sqrt(float(d)));
-        float magnitude = precise::sqrt(max(abs(normalized), 1e-6f));
-        float signed_root = as_type<float>((as_type<uint>(magnitude) & 0x7fffffffu) | sign);
-        gate = 1.0f / (1.0f + precise::exp(-signed_root));
+    float hh = 0.0f, kk = 0.0f, dot = -0.0f;
+    bool negative_zero = true;
+    for (uint j = tid; j < d; j += 32) {
+        float hj = h[j], kj = key[j];
+        float qj = q[stream * d + j], gj = k[stream * d + j];
+        hh += hj * hj;
+        kk += kj * kj;
+        float term = hj * (qj * gj) * kj;
+        // Fast-math builds may discard zero signs. Rust Sum starts at -0.
+        uint sign = (as_type<uint>(hj) ^ as_type<uint>(qj)
+            ^ as_type<uint>(gj) ^ as_type<uint>(kj)) & 0x80000000u;
+        negative_zero &= term == 0.0f && sign != 0;
+        dot += term;
     }
-    threadgroup_barrier(mem_flags::mem_threadgroup);
+    hh = simd_sum(hh);
+    kk = simd_sum(kk);
+    dot = simd_sum(dot);
+    // Inactive lanes are neutral for this predicate, including d < 32.
+    negative_zero = simd_all(negative_zero);
+    uint sign = negative_zero ? 0x80000000u : (as_type<uint>(dot) & 0x80000000u);
+    float rstd = (1.0f / precise::sqrt(hh / float(d) + eps))
+        * (1.0f / precise::sqrt(kk / float(d) + eps));
+    float normalized = dot * rstd * (1.0f / precise::sqrt(float(d)));
+    float magnitude = precise::sqrt(max(abs(normalized), 1e-6f));
+    float signed_root = as_type<float>((as_type<uint>(magnitude) & 0x7fffffffu) | sign);
+    float gate = 1.0f / (1.0f + precise::exp(-signed_root));
     for (uint j = tid; j < d; j += 32) h[j] += gate * value[j];
 }

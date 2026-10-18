@@ -92,6 +92,301 @@ fn manifest(path: &Path) -> Result<Value> {
     Ok(serde_json::from_slice(&std::fs::read(path)?)?)
 }
 
+const LONG_TOKENS: qwen_llm::test_fixtures::Fixture = qwen_llm::test_fixtures::Fixture {
+    id: "deepseek-v4.1-reap-272e-native-f32-10k-attention",
+    env: &[],
+    filename: "deepseek-v4.1-reap-272e-native-f32-10k-attention.json",
+};
+const LONG_POSITIONS: [usize; 4] = [2046, 2047, 9998, 9999];
+const LONG_LAYERS: [usize; 8] = [2, 8, 14, 20, 24, 28, 32, 36];
+
+fn long_tokens(meta: &Value) -> Result<String> {
+    ensure!(
+        meta["format"] == "dsv41-long-context-v1",
+        "wrong capture format"
+    );
+    ensure!(
+        meta["mode"] == "NativeF32" && meta["status"] == "success",
+        "incomplete NativeF32 fixture"
+    );
+    ensure!(
+        meta["requested_checkpoints"] == json!(LONG_POSITIONS),
+        "wrong checkpoint request"
+    );
+    let tokens = meta["token_ids"].as_array().context("missing token_ids")?;
+    ensure!(tokens.len() == 10000, "expected exactly 10000 tokens");
+    tokens
+        .iter()
+        .map(|token| {
+            let id = token
+                .as_u64()
+                .context("token must be an unsigned integer")?;
+            ensure!(id < 129280, "token outside vocabulary");
+            Ok(id.to_string())
+        })
+        .collect::<Result<Vec<_>>>()
+        .map(|ids| ids.join(","))
+}
+
+fn long_capture_command(model: &Path, engram: &Path, capture: &Path, tokens: &str) -> Command {
+    let mut command = Command::new(env!("CARGO_BIN_EXE_qwen"));
+    command
+        .args(["deepseek-v41", "--gpu-step", "--model-dir"])
+        .arg(model)
+        .arg("--engram-dir")
+        .arg(engram)
+        .args([
+            "--token-ids",
+            tokens,
+            "--max-tokens",
+            "1",
+            "--temperature",
+            "0",
+            "--context",
+            "10000",
+            "--reserve-mib",
+            "1024",
+            "--attention-capture-positions",
+            "2046,2047,9998,9999",
+        ])
+        .arg("--attention-capture-dir")
+        .arg(capture);
+    command
+}
+
+fn long_compare_command(model: &Path, capture: &Path) -> Command {
+    let mut command = Command::new("uv");
+    command
+        .args(["run", "--offline", "--script"])
+        .arg(
+            Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("../../scripts/reference/deepseek_v41/cpu/long_context.py"),
+        )
+        .arg("--model")
+        .arg(model)
+        .arg("--capture")
+        .arg(capture)
+        .args(["--atol", "0.0001", "--rtol", "0"])
+        .env("CUDA_VISIBLE_DEVICES", "");
+    command
+}
+
+fn check_long_report(report: &Value) -> Result<()> {
+    let rows = report.as_array().context("expected comparison rows")?;
+    ensure!(rows.len() == 32, "expected exactly 32 checkpoints");
+    for (row, (position, layer)) in rows.iter().zip(
+        LONG_POSITIONS
+            .into_iter()
+            .flat_map(|p| LONG_LAYERS.into_iter().map(move |l| (p, l))),
+    ) {
+        ensure!(
+            row["position"] == position && row["layer"] == layer,
+            "wrong checkpoint inventory"
+        );
+        ensure!(
+            row["owner"] == layer.min(20) && row["index_source"] == layer,
+            "wrong checkpoint owners"
+        );
+        for key in ["selection_exact", "owner_exact"] {
+            ensure!(row[key] == true, "{key} mismatch");
+        }
+        for key in ["selection_boundary_tie", "candidate_boundary_tie"] {
+            ensure!(row[key] == false, "{key} missing or tied");
+        }
+        if layer >= 20 {
+            ensure!(row["candidates_exact"] == true, "candidate mismatch");
+            // This 10k witness does not exercise candidate pruning.
+            ensure!(
+                row["candidate_discard"] == 0,
+                "unexpected candidate pruning"
+            );
+        }
+        ensure!(row["output"]["pass"] == true, "attention comparison failed");
+        bounded(&row["output"], "max_abs", 1e-4)?;
+        bounded(&row["output"], "relative_l2", 3e-5)?;
+    }
+    Ok(())
+}
+
+#[test]
+#[ignore = "model witness: deepseek-v4.1-reap-272e-native-f32-10k-attention"]
+fn gpu_step_ten_thousand_token_attention_oracle() -> Result<()> {
+    let tokens = long_tokens(&manifest(LONG_TOKENS.required())?)?;
+    let model = model_root(MODEL_CONFIG.required())?;
+    let engram = engram_root(&model, || ENGRAM_SHARD.required().clone())?;
+    let output = std::env::temp_dir().join(format!(
+        "qwen-v41-long-oracle-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)?
+            .as_nanos()
+    ));
+    let mut builder = std::fs::DirBuilder::new();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::DirBuilderExt;
+        builder.mode(0o700);
+    }
+    builder.create(&output)?;
+    eprintln!("long oracle evidence retained at {}", output.display());
+    let capture = output.join("capture");
+    // Inherit output rather than retaining 10k forward logs in memory.
+    ensure!(
+        long_capture_command(&model, &engram, &capture, &tokens)
+            .status()?
+            .success(),
+        "GPU capture failed"
+    );
+    ensure!(
+        long_tokens(&manifest(&capture.join("manifest.json"))?)? == tokens,
+        "fresh capture tokens differ from fixture"
+    );
+    let report = output.join("comparison.json");
+    ensure!(
+        long_compare_command(&model, &capture)
+            .stdout(std::fs::File::create(&report)?)
+            .status()?
+            .success(),
+        "CPU replay failed"
+    );
+    check_long_report(&manifest(&report)?)
+}
+
+#[test]
+fn long_context_commands_are_fresh_gpu_and_independent_cpu() {
+    let gpu = long_capture_command(
+        Path::new("model"),
+        Path::new("engram"),
+        Path::new("fresh"),
+        "1,2",
+    );
+    assert_eq!(gpu.get_program(), env!("CARGO_BIN_EXE_qwen"));
+    let args: Vec<_> = gpu.get_args().map(|a| a.to_str().unwrap()).collect();
+    assert_eq!(
+        args,
+        [
+            "deepseek-v41",
+            "--gpu-step",
+            "--model-dir",
+            "model",
+            "--engram-dir",
+            "engram",
+            "--token-ids",
+            "1,2",
+            "--max-tokens",
+            "1",
+            "--temperature",
+            "0",
+            "--context",
+            "10000",
+            "--reserve-mib",
+            "1024",
+            "--attention-capture-positions",
+            "2046,2047,9998,9999",
+            "--attention-capture-dir",
+            "fresh"
+        ]
+    );
+    let cpu = long_compare_command(Path::new("model"), Path::new("fresh"));
+    let args: Vec<_> = cpu.get_args().map(|a| a.to_str().unwrap()).collect();
+    assert_eq!(&args[..3], ["run", "--offline", "--script"]);
+    assert!(args[3].ends_with("/cpu/long_context.py"));
+    assert_eq!(
+        &args[4..],
+        [
+            "--model",
+            "model",
+            "--capture",
+            "fresh",
+            "--atol",
+            "0.0001",
+            "--rtol",
+            "0"
+        ]
+    );
+}
+
+#[test]
+fn long_context_manifest_validation() -> Result<()> {
+    let valid = json!({"format":"dsv41-long-context-v1", "mode":"NativeF32", "status":"success",
+        "requested_checkpoints":LONG_POSITIONS, "token_ids":vec![0;10000]});
+    assert_eq!(long_tokens(&valid)?.split(',').count(), 10000);
+    for (key, bad) in [
+        ("format", json!("other")),
+        ("mode", json!("BF16")),
+        ("status", json!("incomplete")),
+        ("requested_checkpoints", json!([9999])),
+        ("token_ids", json!([0])),
+    ] {
+        let mut meta = valid.clone();
+        meta[key] = bad;
+        assert!(long_tokens(&meta).is_err(), "accepted {key}");
+    }
+    for bad in [json!(-1), json!(1.5), json!(129280), Value::Null] {
+        let mut meta = valid.clone();
+        meta["token_ids"][9999] = bad;
+        assert!(long_tokens(&meta).is_err());
+    }
+    Ok(())
+}
+
+#[test]
+fn long_context_report_negative_controls() -> Result<()> {
+    let valid = Value::Array(
+        LONG_POSITIONS
+            .into_iter()
+            .flat_map(|p| {
+                LONG_LAYERS.into_iter().map(move |l| {
+                    json!({"position":p,"layer":l,"owner":l.min(20),"index_source":l,
+            "selection_exact":true,"owner_exact":true,"candidates_exact":true,"candidate_discard":0,
+            "selection_boundary_tie":false,"candidate_boundary_tie":false,
+            "output":{"pass":true,"max_abs":2.8848648e-5,"relative_l2":1.00598e-5}})
+                })
+            })
+            .collect(),
+    );
+    check_long_report(&valid)?;
+    for key in [
+        "position",
+        "layer",
+        "owner",
+        "index_source",
+        "selection_exact",
+        "owner_exact",
+        "candidates_exact",
+        "candidate_discard",
+        "selection_boundary_tie",
+        "candidate_boundary_tie",
+    ] {
+        let mut report = valid.clone();
+        report[31][key] = Value::Null;
+        assert!(
+            check_long_report(&report).is_err(),
+            "accepted missing {key}"
+        );
+    }
+    for (key, bad) in [
+        ("pass", json!(false)),
+        ("max_abs", json!(0.000101)),
+        ("relative_l2", json!(0.000031)),
+        ("max_abs", json!(-1)),
+        ("relative_l2", Value::Null),
+    ] {
+        let mut report = valid.clone();
+        report[31]["output"][key] = bad;
+        assert!(check_long_report(&report).is_err(), "accepted {key}");
+    }
+    let mut report = valid.clone();
+    report[31] = report[0].clone();
+    assert!(check_long_report(&report).is_err());
+    let mut rows = valid.as_array().unwrap().clone();
+    rows.pop();
+    assert!(check_long_report(&json!(rows)).is_err());
+    rows.extend([valid[31].clone(), valid[31].clone()]);
+    assert!(check_long_report(&json!(rows)).is_err());
+    Ok(())
+}
+
 fn check_policy(reference: &Value, runtime: &Value) -> Result<()> {
     for value in [reference, runtime] {
         ensure!(value["mode"] == "NativeF32", "expected NativeF32");

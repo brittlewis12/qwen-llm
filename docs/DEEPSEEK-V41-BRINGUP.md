@@ -1,8 +1,31 @@
 # V4.1 Flash 1017 bring-up
 
-Current scope: pinned metadata, individual source expert-pair binding, a
-lossless CPU MXFP4 repacker/oracle and bounded Engram integer addressing.
-No V4.1 runtime or Metal execution is admitted.
+## Current status (2026-10-18)
+
+The separate `qwen deepseek-v41` runtime now executes old REAP-272E with the
+original Engram shards. Routed experts remain MXFP4; arithmetic is NativeF32,
+not reference activation-quantized FP8. This does not admit 1017 weights.
+
+- Converted weights persist by default; measured cache-hit loading is about
+  7 seconds with zero source payload reads, rather than rewriting 221 GiB.
+- Opt-in `--gpu-step` retains two CPU Engram boundaries and uses three command
+  submissions per token. On the 256 GiB M5, warm short-chat forwards take about
+  59-60 ms; a 10K-token capture takes 862.7 seconds (87.4 ms median forward).
+- Seven-token, 40-layer CPU comparison passes. Independent teacher-forced
+  attention replay at positions 2046/2047 and 9998/9999 matches all 32 selected
+  ID sets exactly; worst output absolute error is 2.89e-5. These positions exercise
+  index selection, not candidate pruning, which starts at 16,385 tokens.
+- Real JSON/SSE, multi-turn, reasoning, tools and disconnect recovery pass on
+  the GPU path. Stats-enabled serving reports per-token process page-ins and IO.
+  The 10K capture sees at most two page-ins per token; this is not a guarantee
+  against eviction under other workloads. No residency set or wiring is enabled.
+- The frozen eight-case quality pilot is separate from these correctness and
+  latency checks. No quality win or CED qualification follows from them.
+
+Named fixtures and ignored short/long oracle witnesses live in
+`crates/qwen-cli/tests/deepseek_v41_oracle.rs`; the long witness regenerates a
+10K capture and therefore needs exclusive model execution time. The following
+sections retain the historical checkpoint boundaries, not the current scope.
 
 ## Target and checkpoint boundary
 

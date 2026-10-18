@@ -7,6 +7,23 @@ mod tests;
 
 pub(super) const DEFAULT_CHUNK_ROWS: usize = 32;
 
+#[cfg(test)]
+thread_local! {
+    static ROWWISE_LINEAR_ROWS: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+#[cfg(test)]
+fn with_rowwise_linears<T>(f: impl FnOnce() -> T) -> T {
+    struct Restore(bool);
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            ROWWISE_LINEAR_ROWS.with(|flag| flag.set(self.0));
+        }
+    }
+    let _restore = Restore(ROWWISE_LINEAR_ROWS.with(|flag| flag.replace(true)));
+    f()
+}
+
 impl Linear<'_> {
     pub(super) fn encode_rows(
         &self,
@@ -26,14 +43,16 @@ impl Linear<'_> {
                 detail: "nonempty matching F32 row extents required".into(),
             });
         }
-        if metal::grouped_projection_supported(self.tensor.dtype)
+        let grouped = metal::grouped_projection_supported(self.tensor.dtype)
             && self.input.is_multiple_of(32)
             && self
                 .tensor
                 .dtype
                 .storage_layout()
-                .is_some_and(|(block, _)| (self.input as u64).is_multiple_of(block))
-        {
+                .is_some_and(|(block, _)| (self.input as u64).is_multiple_of(block));
+        #[cfg(test)]
+        let grouped = grouped && !ROWWISE_LINEAR_ROWS.with(|flag| flag.get());
+        if grouped {
             return metal::encode_mat_mat_grouped_f32(
                 self.ctx,
                 enc,

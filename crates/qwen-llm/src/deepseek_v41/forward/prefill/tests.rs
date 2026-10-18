@@ -1,5 +1,52 @@
 use super::*;
 
+mod real;
+
+#[test]
+fn rowwise_linear_override_is_scoped_and_changes_dispatch() {
+    let ctx = MetalContext::new().unwrap();
+    let linear = Linear {
+        ctx: &ctx,
+        tensor: upload(&ctx, &[0.25; 256], vec![32, 8]).unwrap(),
+        native_control: None,
+        input: 32,
+        output: 8,
+    };
+    let x = upload(&ctx, &[0.125; 96], vec![32, 3]).unwrap();
+    let y = allocate(&ctx, 8, 3, GgmlType::F32).unwrap();
+    let dispatch = || {
+        metal::dispatch_census_begin();
+        let result = submit(&ctx, "linear_rows_override", [3, 0, 0, 0], |enc| {
+            linear.encode_rows(enc, &x, &y, 3)
+        });
+        let rows = metal::dispatch_census_take();
+        result.unwrap();
+        rows
+    };
+    let grouped = metal::grouped_projection_pipeline_name(GgmlType::F32).unwrap();
+    let normal = dispatch();
+    assert_eq!(normal.len(), 1);
+    assert_eq!(normal[0].kernel, grouped);
+    let expected = f32_slice(&y).unwrap().to_vec();
+    with_rowwise_linears(|| {
+        let rows = dispatch();
+        assert_eq!(rows.len(), 3);
+        assert!(rows.iter().all(|r| r.kernel != grouped));
+        assert_eq!(f32_slice(&y).unwrap(), expected);
+        with_rowwise_linears(|| assert!(ROWWISE_LINEAR_ROWS.with(|flag| flag.get())));
+        assert!(ROWWISE_LINEAR_ROWS.with(|flag| flag.get()));
+        assert!(
+            !std::thread::spawn(|| ROWWISE_LINEAR_ROWS.with(|flag| flag.get()))
+                .join()
+                .unwrap()
+        );
+    });
+    assert!(!ROWWISE_LINEAR_ROWS.with(|flag| flag.get()));
+    assert!(std::panic::catch_unwind(|| with_rowwise_linears(|| panic!("scope test"))).is_err());
+    assert!(!ROWWISE_LINEAR_ROWS.with(|flag| flag.get()));
+    assert_eq!(dispatch()[0].kernel, grouped);
+}
+
 fn close(a: &[f32], b: &[f32]) {
     assert_eq!(a.len(), b.len());
     for (i, (&a, &b)) in a.iter().zip(b).enumerate() {

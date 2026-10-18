@@ -563,7 +563,12 @@ fn independent_gguf_seven_token_execution_acceptance() -> Result<()> {
 #[test]
 #[ignore = "model witness: deepseek-v4.1-reap-272e-mxfp4-q8engram"]
 fn gguf_native_f32_prefill_65_token_serial_snapshot_parity() -> Result<()> {
-    fn compare(label: &str, actual: &[f32], expected: &[f32]) -> Result<()> {
+    fn compare(
+        label: &str,
+        actual: &[f32],
+        expected: &[f32],
+        failures: &mut Vec<String>,
+    ) -> Result<()> {
         ensure!(
             actual.len() == 129280 && actual.len() == expected.len(),
             "{label}: logits shape mismatch"
@@ -590,17 +595,73 @@ fn gguf_native_f32_prefill_65_token_serial_snapshot_parity() -> Result<()> {
             )
         };
         let relative_l2 = (squared_error / squared_reference.max(f64::MIN_POSITIVE)).sqrt();
+        let mean_residual = actual
+            .iter()
+            .zip(expected)
+            .map(|(&a, &b)| f64::from(a) - f64::from(b))
+            .sum::<f64>()
+            / actual.len() as f64;
+        let mut centered_max_abs = 0.0_f64;
+        let mut centered_squared_error = 0.0;
+        for (&a, &b) in actual.iter().zip(expected) {
+            let residual = f64::from(a) - f64::from(b) - mean_residual;
+            centered_max_abs = centered_max_abs.max(residual.abs());
+            centered_squared_error += residual * residual;
+        }
+        let log_probs = |values: &[f32]| {
+            let max = values
+                .iter()
+                .copied()
+                .map(f64::from)
+                .fold(f64::NEG_INFINITY, f64::max);
+            let log_sum = values
+                .iter()
+                .map(|&v| (f64::from(v) - max).exp())
+                .sum::<f64>()
+                .ln();
+            values
+                .iter()
+                .map(|&v| (f64::from(v) - max) - log_sum)
+                .collect::<Vec<_>>()
+        };
+        let actual_logp = log_probs(actual);
+        let expected_logp = log_probs(expected);
+        let (mut kl, mut tv) = (0.0, 0.0);
+        for (&a, &b) in actual_logp.iter().zip(&expected_logp) {
+            let p = b.exp();
+            let delta = a - b;
+            // Generalized KL cancels the first-order term before summation.
+            kl += p * (delta.exp_m1() - delta);
+            tv += (a.exp() - p).abs() * 0.5;
+        }
+        let centered_rms = (centered_squared_error / actual.len() as f64).sqrt();
+        ensure!(
+            [
+                relative_l2,
+                mean_residual,
+                centered_max_abs,
+                centered_rms,
+                kl,
+                tv
+            ]
+            .iter()
+            .all(|v| v.is_finite()),
+            "{label}: nonfinite metrics"
+        );
         eprintln!(
-            "{label}: max_abs={max_abs:.9e} relative_l2={relative_l2:.9e} rms={:.9e} top1={}/{} violations={violations} atol={atol} rtol={rtol}",
+            "{label}: max_abs={max_abs:.9e} relative_l2={relative_l2:.9e} rms={:.9e} mean_residual={mean_residual:.9e} centered_max_abs={centered_max_abs:.9e} centered_rms={centered_rms:.9e} kl_expected_to_actual={kl:.9e} tv={tv:.9e} top1={}/{} violations={violations} atol={atol} rtol={rtol}",
             (squared_error / actual.len() as f64).sqrt(),
             top1(actual),
             top1(expected)
         );
-        ensure!(
-            violations == 0,
-            "{label}: {violations} logits exceed existing NativeF32 tolerance"
-        );
-        ensure!(top1(actual) == top1(expected), "{label}: top1 mismatch");
+        if violations != 0 {
+            failures.push(format!(
+                "{label}: {violations} logits exceed existing NativeF32 tolerance"
+            ));
+        }
+        if top1(actual) != top1(expected) {
+            failures.push(format!("{label}: top1 mismatch"));
+        }
         Ok(())
     }
 
@@ -616,7 +677,8 @@ fn gguf_native_f32_prefill_65_token_serial_snapshot_parity() -> Result<()> {
     let continuation = [223, 939, 23];
     let cancel = Some(qwen_cli::shutdown::cancellation_flag());
     let mut serial = forward.new_state_with_gpu_step(prompt.len() + continuation.len())?;
-    let mut batch = forward.new_state_with_gpu_step(prompt.len())?;
+    let mut batch = forward.new_state_with_gpu_step(prompt.len() + continuation.len())?;
+    let mut failures = Vec::new();
     for &token in &prompt[..prompt.len() - 1] {
         forward
             .advance(&mut serial, token, cancel)
@@ -630,19 +692,15 @@ fn gguf_native_f32_prefill_65_token_serial_snapshot_parity() -> Result<()> {
         serial.position() == prompt.len() && batch.position() == prompt.len(),
         "prompt position mismatch"
     );
-    compare("65-row prompt", &actual, &expected)?;
+    compare("65-row prompt", &actual, &expected, &mut failures)?;
 
     let snapshot = forward.capture_snapshot(&batch)?;
     ensure!(
         snapshot.position() == prompt.len(),
         "snapshot position mismatch"
     );
-    forward.ensure_capacity(&mut batch, prompt.len() + continuation.len())?;
-    ensure!(
-        batch.capacity() > prompt.len() && batch.position() == prompt.len(),
-        "growth did not preserve prefix"
-    );
     let mut expected_continuation = Vec::new();
+    let mut packed_continuation = Vec::new();
     for (i, &token) in continuation.iter().enumerate() {
         let expected = forward
             .step(&mut serial, token, cancel)
@@ -650,8 +708,49 @@ fn gguf_native_f32_prefill_65_token_serial_snapshot_parity() -> Result<()> {
         let actual = forward
             .step(&mut batch, token, cancel)
             .map_err(anyhow::Error::msg)?;
-        compare(&format!("grown continuation {i}"), &actual, &expected)?;
+        compare(
+            &format!("uninterrupted packed-prefix scalar continuation {i}"),
+            &actual,
+            &expected,
+            &mut failures,
+        )?;
         expected_continuation.push(expected);
+        packed_continuation.push(actual);
+    }
+    for grow in [false, true] {
+        forward.restore_snapshot(&mut batch, &snapshot)?;
+        ensure!(
+            batch.position() == prompt.len(),
+            "restore position mismatch"
+        );
+        if grow {
+            let old_capacity = batch.capacity();
+            forward.ensure_capacity(&mut batch, old_capacity + 1)?;
+            ensure!(
+                batch.capacity() > old_capacity && batch.position() == prompt.len(),
+                "growth did not preserve prefix"
+            );
+        }
+        for (i, &token) in continuation.iter().enumerate() {
+            let actual = forward
+                .step(&mut batch, token, cancel)
+                .map_err(anyhow::Error::msg)?;
+            let label = format!("restored scalar continuation {i} growth={grow}");
+            compare(&label, &actual, &packed_continuation[i], &mut failures)?;
+            if !actual
+                .iter()
+                .zip(&packed_continuation[i])
+                .all(|(a, b)| a.to_bits() == b.to_bits())
+            {
+                failures.push(format!(
+                    "{label}: not bitwise equal to uninterrupted packed-prefix scalar continuation"
+                ));
+            }
+        }
+        ensure!(
+            batch.position() == 68,
+            "scalar continuation position mismatch"
+        );
     }
     // Restore over a used state, so stale continuation rows must not survive.
     forward.restore_snapshot(&mut batch, &snapshot)?;
@@ -664,12 +763,18 @@ fn gguf_native_f32_prefill_65_token_serial_snapshot_parity() -> Result<()> {
         "restored continuation prefill",
         &actual,
         expected_continuation.last().unwrap(),
+        &mut failures,
     )?;
     ensure!(
         batch.position() == serial.position() && batch.position() == 68,
         "continuation position mismatch"
     );
     qwen_cli::shutdown::checkpoint()?;
+    ensure!(
+        failures.is_empty(),
+        "numerical comparison failures:\n{}",
+        failures.join("\n")
+    );
     Ok(())
 }
 

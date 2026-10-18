@@ -15,6 +15,9 @@ use std::{
 
 #[path = "loader/backing.rs"]
 mod backing;
+#[path = "loader/cache.rs"]
+mod cache;
+pub use cache::CONVERTER_LAYOUT_VERSION;
 #[path = "loader/resident.rs"]
 mod resident;
 pub use resident::{ByteCounters, LoadLimits, PackedBank, ResidentWeights};
@@ -31,6 +34,7 @@ pub struct StoredTensor {
     pub source_file: String,
     pub descriptor: TensorDescriptor,
     file: Arc<File>,
+    stamp: crate::checkpoint_identity::SourceStamp,
 }
 
 /// An index of completed local shards. Missing shards are reported, not opened;
@@ -39,6 +43,8 @@ pub struct SourceStore {
     tensors: BTreeMap<String, StoredTensor>,
     pub missing_shards: Vec<String>,
     pub missing_tensors: BTreeMap<String, String>,
+    #[cfg(test)]
+    payload_reads: std::sync::atomic::AtomicU64,
 }
 
 fn canonical(name: &str) -> String {
@@ -138,6 +144,8 @@ impl SourceStore {
             tensors: BTreeMap::new(),
             missing_shards: Vec::new(),
             missing_tensors: BTreeMap::new(),
+            #[cfg(test)]
+            payload_reads: std::sync::atomic::AtomicU64::new(0),
         };
         for shard in shards {
             let path = safe_path(&root, &shard)?;
@@ -150,6 +158,8 @@ impl SourceStore {
                 Err(e) => return Err(e.to_string()),
             };
             let metadata = file.metadata().map_err(|e| e.to_string())?;
+            let stamp =
+                crate::checkpoint_identity::source_stamp(&file).map_err(|e| e.to_string())?;
             if !metadata.is_file() {
                 return Err("shard is not a regular file".into());
             }
@@ -165,6 +175,10 @@ impl SourceStore {
             file.read_exact_at(&mut bytes[8..], 8)
                 .map_err(|e| e.to_string())?;
             let header = SourceHeader::parse(&shard, &bytes, metadata.len())?;
+            if crate::checkpoint_identity::source_stamp(&file).map_err(|e| e.to_string())? != stamp
+            {
+                return Err("source changed while reading header".into());
+            }
             for (key, descriptor) in header.descriptors() {
                 let key = canonical(key);
                 if !indexed.is_empty() && indexed.get(&key) != Some(&shard) {
@@ -178,6 +192,7 @@ impl SourceStore {
                             source_file: shard.clone(),
                             descriptor: descriptor.clone(),
                             file: file.clone(),
+                            stamp,
                         },
                     )
                     .is_some()
@@ -210,6 +225,20 @@ impl SourceStore {
             .ok_or_else(|| format!("missing tensor: {name}"))
     }
 
+    fn validate_immutable(&self) -> Result<(), String> {
+        let mut seen = std::collections::BTreeSet::new();
+        for tensor in self.tensors.values() {
+            if seen.insert((tensor.stamp.dev, tensor.stamp.ino))
+                && crate::checkpoint_identity::source_stamp(&tensor.file)
+                    .map_err(|e| e.to_string())?
+                    != tensor.stamp
+            {
+                return Err("source mutated since headers were opened".into());
+            }
+        }
+        Ok(())
+    }
+
     fn stream_without_cache(&self) -> Result<(), String> {
         #[cfg(target_os = "macos")]
         {
@@ -234,6 +263,15 @@ impl SourceStore {
 
     /// Read a tensor-relative byte range; never allocate or read more than 32 MiB.
     pub fn bounded_read(&self, name: &str, range: Range<u64>) -> Result<Vec<u8>, String> {
+        self.read_hashed(name, range, &mut None)
+    }
+
+    fn read_hashed(
+        &self,
+        name: &str,
+        range: Range<u64>,
+        hash: &mut Option<blake3::Hasher>,
+    ) -> Result<Vec<u8>, String> {
         let tensor = self.tensor(name)?;
         let len = range
             .end
@@ -245,10 +283,20 @@ impl SourceStore {
             return Err("read exceeds tensor or staging bound".into());
         }
         let mut bytes = vec![0; len as usize];
+        #[cfg(test)]
+        self.payload_reads
+            .fetch_add(len, std::sync::atomic::Ordering::Relaxed);
         tensor
             .file
             .read_exact_at(&mut bytes, tensor.descriptor.file_bytes.start + range.start)
             .map_err(|e| format!("{name}: {e}"))?;
+        if let Some(hash) = hash {
+            hash.update(&(name.len() as u64).to_le_bytes());
+            hash.update(name.as_bytes());
+            hash.update(&range.start.to_le_bytes());
+            hash.update(&range.end.to_le_bytes());
+            hash.update(&bytes);
+        }
         Ok(bytes)
     }
 
@@ -259,6 +307,16 @@ impl SourceStore {
         name: &str,
         rows: Range<u64>,
         engram: bool,
+    ) -> Result<Vec<f32>, String> {
+        self.decode_rows_hashed(name, rows, engram, &mut None)
+    }
+
+    fn decode_rows_hashed(
+        &self,
+        name: &str,
+        rows: Range<u64>,
+        engram: bool,
+        hash: &mut Option<blake3::Hasher>,
     ) -> Result<Vec<f32>, String> {
         let d = &self.tensor(name)?.descriptor;
         let (height, width) = row_geometry(d)?;
@@ -287,7 +345,11 @@ impl SourceStore {
             } else {
                 rows.end.div_ceil(32)
             };
-            Some((self.bounded_read(&key, start * sw..end * sw)?, start, sw))
+            Some((
+                self.read_hashed(&key, start * sw..end * sw, hash)?,
+                start,
+                sw,
+            ))
         } else {
             None
         };
@@ -300,7 +362,7 @@ impl SourceStore {
         let stride = width
             .checked_mul(d.dtype.byte_width())
             .ok_or("row stride overflow")?;
-        let raw = self.bounded_read(name, rows.start * stride..rows.end * stride)?;
+        let raw = self.read_hashed(name, rows.start * stride..rows.end * stride, hash)?;
         let mut output = Vec::with_capacity((count * width) as usize);
         for (i, bytes) in raw.chunks_exact(d.dtype.byte_width() as usize).enumerate() {
             let value = match d.dtype {

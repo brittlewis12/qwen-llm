@@ -9,9 +9,10 @@ does not authenticate checkpoint contents. Source files must remain immutable.
 let main = SourceStore::open(root)?;
 let base = Arc::new(SourceStore::open_engram(root)?);
 let bytes = ResidentWeights::plan(&main, &base, &old_config)?;
-let weights = ResidentWeights::load(
+let weights = ResidentWeights::load_cached(
     &ctx, &main, base, &old_config,
     LoadLimits { resident_bytes: weight_budget },
+    &cache_dir,
 )?;
 let gate = weights.bank(0, "w1").unwrap();
 let up = weights.bank(0, "w3").unwrap();
@@ -53,7 +54,33 @@ is a conservative bound, excluding header/index metadata, allocator overhead,
 forward/KV storage and on-demand Engram output. Load prices actual Metal buffer
 allocations and checks device/process headroom as well as the caller's explicit
 weight budget. It never raises iogpu limits. Leave forward/KV headroom in that
-budget. Allocation/data errors drop partial residency; loading is not resumable.
+budget. Allocation/data errors drop partial residency.
+
+`load_cached` requires an existing caller-owned, private (0700) directory at the
+exact caller-selected path. `load` retains the ephemeral control path, with the
+same arguments and a temporary backing directory instead of `cache_dir`.
+Completed per-bank/per-dense entries survive interruption; unfinished staging
+files have no manifest and are never reused. Interrupted orphan files are not
+automatically reclaimed. Corrupt/truncated published entries fail closed rather
+than silently using or overwriting them.
+
+Cache content identities are BLAKE3 over the consumed source payload ranges,
+tensor descriptors, output shape/dtype, and `CONVERTER_LAYOUT_VERSION`. Hashing
+piggybacks on bounded conversion reads, including split scale tensors, without
+a second payload pass or reading Engram tables. The trusted manifest caches that
+identity under the exact retained source file stamps from `checkpoint_identity`
+(device, inode, size, mtime, ctime). Changed stamps force conversion; mutation of
+an already-open source fails closed. Local stable inode/nanosecond timestamps,
+private trusted cache storage, and immutable source/cache files for their entire
+store/mapping lifetimes are required, as with the checkpoint identity cache.
+
+A directory writer lock serializes admission/publication. Finished, padded,
+synced buffers get fresh names without replacing mapped inodes; checksummed
+manifests are atomically published last and directory-synced. Reuse validates
+manifest/layout and buffer stamps/length, then retains a read-only no-copy mmap.
+It performs zero source payload reads (`bytes.source_bytes_read == 0` on all-hit
+loads). Full memory admission remains mandatory; disk admission counts only
+missing buffers, so all-hit reuse requires no additional model-sized free space.
 
 `bounded_read` and `decode_rows` cap individual reads/output at 32 MiB. FP8 dense
 scales cover 32x32 blocks; Engram scales cover 32 columns of one row. Engram uses

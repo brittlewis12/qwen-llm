@@ -416,6 +416,7 @@ fn complete_header_plan_counts_all_experts_and_rejects_last_bad_pair() {
                     file_bytes: 0..bytes,
                 },
                 file: file.clone(),
+                stamp: crate::checkpoint_identity::source_stamp(&file).unwrap(),
             },
         );
     };
@@ -518,4 +519,303 @@ fn complete_header_plan_counts_all_experts_and_rejects_last_bad_pair() {
             .unwrap_err()
             .contains("layers.39.ffn.experts.271.w2.scale")
     );
+}
+
+fn private_cache(f: &Fixture) -> cache::Cache {
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::set_permissions(&f.0, std::fs::Permissions::from_mode(0o700)).unwrap();
+    cache::Cache::open(&f.0).unwrap()
+}
+
+#[test]
+fn persistent_fp8_hashes_split_scales_and_reuses_without_reads() {
+    use crate::metal::{MetalContext, read_back_f32};
+    let f = Fixture::new();
+    let out = Fixture::new();
+    let cache = private_cache(&out);
+    f.shard(
+        "weight.safetensors",
+        &[("p.weight", "F8_E4M3", &[33, 33], &[0x38; 1089])],
+    );
+    f.shard(
+        "scale.safetensors",
+        &[("p.scale", "F8_E8M0", &[2, 2], &[127, 128, 129, 130])],
+    );
+    let ctx = MetalContext::new().unwrap();
+    let source = SourceStore::open(&f.0).unwrap();
+    let (first, bytes) =
+        resident::materialize_dense_impl(&ctx, &source, "p.weight", &out.0, Some(&cache)).unwrap();
+    assert_eq!(bytes, 1093);
+    let (hit, bytes) =
+        resident::materialize_dense_impl(&ctx, &source, "p.weight", &out.0, Some(&cache)).unwrap();
+    assert_eq!(bytes, 0);
+    assert_eq!(source.payload_reads.load(Ordering::Relaxed), 1093);
+    assert_eq!(
+        read_back_f32(&hit.buffer, 1089),
+        read_back_f32(&first.buffer, 1089)
+    );
+    let offset = source
+        .tensor("p.scale")
+        .unwrap()
+        .descriptor
+        .file_bytes
+        .start;
+    std::fs::OpenOptions::new()
+        .write(true)
+        .open(f.0.join("scale.safetensors"))
+        .unwrap()
+        .write_all_at(&[128], offset)
+        .unwrap();
+    assert!(
+        resident::materialize_dense_impl(&ctx, &source, "p.weight", &out.0, Some(&cache)).is_err()
+    );
+    let changed = SourceStore::open(&f.0).unwrap();
+    let (converted, bytes) =
+        resident::materialize_dense_impl(&ctx, &changed, "p.weight", &out.0, Some(&cache)).unwrap();
+    assert_eq!(bytes, 1093);
+    assert_eq!(read_back_f32(&converted.buffer, 1), [2.]);
+    assert_eq!(manifests(&out).len(), 2);
+}
+
+#[test]
+fn persistent_cache_serializes_publishers_and_rejects_public_root() {
+    use std::os::unix::fs::PermissionsExt;
+    use std::sync::mpsc;
+    use std::time::Duration;
+    let out = Fixture::new();
+    std::fs::set_permissions(&out.0, std::fs::Permissions::from_mode(0o755)).unwrap();
+    assert!(cache::Cache::open(&out.0).is_err());
+    let cache = private_cache(&out);
+    let path = out.0.clone();
+    let (attempted_tx, attempted_rx) = mpsc::channel();
+    let (acquired_tx, acquired_rx) = mpsc::channel();
+    let waiter = std::thread::spawn(move || {
+        attempted_tx.send(()).unwrap();
+        let _cache = cache::Cache::open(&path).unwrap();
+        acquired_tx.send(()).unwrap();
+    });
+    attempted_rx.recv().unwrap();
+    assert!(acquired_rx.recv_timeout(Duration::from_millis(50)).is_err());
+    drop(cache);
+    acquired_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+    waiter.join().unwrap();
+}
+
+fn manifests(f: &Fixture) -> Vec<std::path::PathBuf> {
+    std::fs::read_dir(&f.0)
+        .unwrap()
+        .map(|e| e.unwrap().path())
+        .filter(|p| p.extension().is_some_and(|e| e == "json"))
+        .collect()
+}
+
+#[test]
+fn persistent_dense_reuse_gpu_lifetime_and_content_invalidation() {
+    use crate::{metal::*, tensor::GgmlType};
+    use std::os::unix::fs::FileExt;
+    let f = Fixture::new();
+    let out = Fixture::new();
+    let cache = private_cache(&out);
+    f.shard(
+        "dense.safetensors",
+        &[
+            (
+                "dense.weight",
+                "BF16",
+                &[2, 2],
+                &[128, 63, 0, 64, 64, 64, 128, 64],
+            ),
+            (
+                "layers.1.engram.embed.weight",
+                "F8_E4M3",
+                &[4096],
+                &[0x38; 4096],
+            ),
+        ],
+    );
+    let source = SourceStore::open(&f.0).unwrap();
+    let ctx = MetalContext::new().unwrap();
+    let (first, read) =
+        resident::materialize_dense_impl(&ctx, &source, "dense.weight", &out.0, Some(&cache))
+            .unwrap();
+    assert_eq!(read, 8);
+    assert_eq!(source.payload_reads.load(Ordering::Relaxed), 8);
+    drop(first);
+    drop(source);
+    drop(cache);
+    let cache = private_cache(&out);
+    let source = SourceStore::open(&f.0).unwrap();
+    let (weight, read) =
+        resident::materialize_dense_impl(&ctx, &source, "dense.weight", &out.0, Some(&cache))
+            .unwrap();
+    assert_eq!(read, 0);
+    assert_eq!(source.payload_reads.load(Ordering::Relaxed), 0);
+    assert_eq!(
+        weight.provenance(),
+        MetalTensorProvenance::RetainedGgufReadOnly
+    );
+    let old_manifest = std::fs::read_to_string(&manifests(&out)[0]).unwrap();
+    let tensor = source.tensor("dense.weight").unwrap();
+    let file = std::fs::OpenOptions::new()
+        .write(true)
+        .open(f.0.join("dense.safetensors"))
+        .unwrap();
+    file.write_all_at(&[0, 64], tensor.descriptor.file_bytes.start)
+        .unwrap();
+    file.sync_all().unwrap();
+    assert!(
+        resident::materialize_dense_impl(&ctx, &source, "dense.weight", &out.0, Some(&cache))
+            .is_err()
+    );
+    drop(source);
+    let source = SourceStore::open(&f.0).unwrap();
+    let (changed, read) =
+        resident::materialize_dense_impl(&ctx, &source, "dense.weight", &out.0, Some(&cache))
+            .unwrap();
+    assert_eq!(read, 8);
+    assert_eq!(read_back_f32(&changed.buffer, 4), [2., 2., 3., 4.]);
+    assert_eq!(manifests(&out).len(), 2);
+    let old: serde_json::Value = serde_json::from_str(&old_manifest).unwrap();
+    let old_body: serde_json::Value = serde_json::from_str(old["body"].as_str().unwrap()).unwrap();
+    assert!(manifests(&out).iter().any(|p| {
+        let m: serde_json::Value = serde_json::from_slice(&std::fs::read(p).unwrap()).unwrap();
+        let body: serde_json::Value = serde_json::from_str(m["body"].as_str().unwrap()).unwrap();
+        body["content"] != old_body["content"]
+    }));
+    drop(changed);
+    drop(source);
+    drop(cache);
+    // Removing names cannot invalidate retained mappings or replace their inodes.
+    drop(out);
+    let x = MetalTensor::from_bytes(
+        &ctx,
+        bytemuck::cast_slice(&[2f32, 3.]),
+        vec![2],
+        GgmlType::F32,
+    )
+    .unwrap();
+    let y = MetalTensor::zeros_f32(&ctx, vec![2]).unwrap();
+    one_shot(&ctx, |enc| {
+        encode_mat_vec_f32(&ctx, enc, &weight, &x, &y, 2, 2)
+    })
+    .unwrap();
+    assert_eq!(read_back_f32(&y.buffer, 2), [8., 18.]);
+}
+
+#[test]
+fn persistent_expert_reuse_and_partial_writer_cleanup() {
+    use crate::metal::{MetalContext, MetalTensorProvenance};
+    use objc2_metal::MTLBuffer;
+    let f = Fixture::new();
+    let out = Fixture::new();
+    let cache = private_cache(&out);
+    f.shard(
+        "codes.safetensors",
+        &[(
+            "layers.0.ffn.experts.0.w1.weight",
+            "I8",
+            &[2, 16],
+            &[0x21; 32],
+        )],
+    );
+    f.shard(
+        "scales.safetensors",
+        &[(
+            "layers.0.ffn.experts.0.w1.scale",
+            "F8_E8M0",
+            &[2, 1],
+            &[127, 128],
+        )],
+    );
+    let source = SourceStore::open(&f.0).unwrap();
+    let ctx = MetalContext::new().unwrap();
+    let before = std::fs::read_dir(&out.0).unwrap().count();
+    let mut partial = backing::BackingWriter::persistent(&out.0, 34).unwrap();
+    partial.write(&[0; 3]).unwrap();
+    assert!(partial.publish(&out.0.join("unfinished.buffer")).is_err());
+    assert_eq!(std::fs::read_dir(&out.0).unwrap().count(), before);
+    // An interrupted staging file is not a cache entry.
+    std::fs::write(out.0.join("qwen-weights-interrupted"), [0; 17]).unwrap();
+    let (first, n) =
+        resident::materialize_bank_impl(&ctx, &source, 0, "w1", 2, 32, 1, &out.0, Some(&cache))
+            .unwrap();
+    assert_eq!(n, 34);
+    let (hit, n) =
+        resident::materialize_bank_impl(&ctx, &source, 0, "w1", 2, 32, 1, &out.0, Some(&cache))
+            .unwrap();
+    assert_eq!(n, 0);
+    assert_eq!(source.payload_reads.load(Ordering::Relaxed), 34);
+    assert_eq!(
+        hit.provenance(),
+        MetalTensorProvenance::RetainedGgufReadOnly
+    );
+    let raw = |t: &crate::metal::MetalTensor| unsafe {
+        std::slice::from_raw_parts(t.buffer.contents().as_ptr().cast::<u8>(), 34).to_vec()
+    };
+    assert_eq!(raw(&first), raw(&hit));
+    assert_eq!(&raw(&hit)[..5], &[127, 0x11, 0x22, 0x11, 0x22]);
+}
+
+#[test]
+fn persistent_rejects_manifest_version_shape_and_truncated_buffer() {
+    use crate::{metal::MetalContext, tensor::GgmlType};
+    let f = Fixture::new();
+    let out = Fixture::new();
+    let cache = private_cache(&out);
+    f.shard(
+        "dense.safetensors",
+        &[(
+            "dense.weight",
+            "BF16",
+            &[2, 2],
+            &[128, 63, 0, 64, 64, 64, 128, 64],
+        )],
+    );
+    let source = SourceStore::open(&f.0).unwrap();
+    let ctx = MetalContext::new().unwrap();
+    drop(
+        resident::materialize_dense_impl(&ctx, &source, "dense.weight", &out.0, Some(&cache))
+            .unwrap(),
+    );
+    let changed_shape = cache::Entry::new(
+        &cache,
+        vec![("dense.weight", source.tensor("dense.weight").unwrap())],
+        16,
+        vec![4],
+        GgmlType::F32,
+    )
+    .unwrap();
+    assert!(changed_shape.lookup(&ctx).unwrap().is_none());
+    let path = manifests(&out).pop().unwrap();
+    let original = std::fs::read(&path).unwrap();
+    let manifest: serde_json::Value = serde_json::from_slice(&original).unwrap();
+    let body: serde_json::Value = serde_json::from_str(manifest["body"].as_str().unwrap()).unwrap();
+    for bad_spec in ["old-converter-layout-v0", "wrong-output-shape"] {
+        let mut bad = body.clone();
+        bad["spec"] = bad_spec.into();
+        let text = bad.to_string();
+        std::fs::write(&path, serde_json::json!({"body":text,"checksum":blake3::hash(text.as_bytes()).to_hex().to_string()}).to_string()).unwrap();
+        assert!(
+            resident::materialize_dense_impl(&ctx, &source, "dense.weight", &out.0, Some(&cache))
+                .is_err()
+        );
+    }
+    std::fs::write(&path, b"{partial").unwrap();
+    assert!(
+        resident::materialize_dense_impl(&ctx, &source, "dense.weight", &out.0, Some(&cache))
+            .is_err()
+    );
+    std::fs::write(&path, original).unwrap();
+    let buffer = out.0.join(body["buffer"].as_str().unwrap());
+    std::fs::OpenOptions::new()
+        .write(true)
+        .open(buffer)
+        .unwrap()
+        .set_len(4)
+        .unwrap();
+    assert!(
+        resident::materialize_dense_impl(&ctx, &source, "dense.weight", &out.0, Some(&cache))
+            .is_err()
+    );
+    assert_eq!(source.payload_reads.load(Ordering::Relaxed), 8);
 }

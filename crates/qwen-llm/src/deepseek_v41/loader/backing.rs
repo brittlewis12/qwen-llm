@@ -29,10 +29,27 @@ pub(super) struct BackingWriter {
     file: File,
     bytes: u64,
     written: u64,
+    path: Option<std::path::PathBuf>,
+}
+
+impl Drop for BackingWriter {
+    fn drop(&mut self) {
+        if let Some(path) = &self.path {
+            let _ = std::fs::remove_file(path);
+        }
+    }
 }
 
 impl BackingWriter {
     pub(super) fn new(dir: &Path, bytes: u64) -> Result<Self, String> {
+        Self::create(dir, bytes, false)
+    }
+
+    pub(super) fn persistent(dir: &Path, bytes: u64) -> Result<Self, String> {
+        Self::create(dir, bytes, true)
+    }
+
+    fn create(dir: &Path, bytes: u64, persistent: bool) -> Result<Self, String> {
         let padded = padded_bytes(bytes)?;
         let mut template = CString::new(dir.join("qwen-weights-XXXXXX").as_os_str().as_bytes())
             .map_err(|e| e.to_string())?
@@ -42,13 +59,22 @@ impl BackingWriter {
             return Err(std::io::Error::last_os_error().to_string());
         }
         let file = unsafe { File::from_raw_fd(fd) };
-        // Unlink before any setup or payload writes; the descriptor owns cleanup.
-        if unsafe { libc::unlink(template.as_ptr().cast()) } != 0 {
+        // Ephemeral files are unlinked immediately; persistent staging is RAII-owned.
+        if !persistent && unsafe { libc::unlink(template.as_ptr().cast()) } != 0 {
             let error = std::io::Error::last_os_error();
             let path = std::ffi::CStr::from_bytes_with_nul(&template).unwrap();
             let _ = std::fs::remove_file(std::ffi::OsStr::from_bytes(path.to_bytes()));
             return Err(error.to_string());
         }
+        let writer = Self {
+            file,
+            bytes,
+            written: 0,
+            path: persistent.then(|| {
+                Path::new(std::ffi::OsStr::from_bytes(&template[..template.len() - 1])).to_owned()
+            }),
+        };
+        let file = &writer.file;
         if unsafe { libc::fcntl(file.as_raw_fd(), libc::F_SETFD, libc::FD_CLOEXEC) } == -1 {
             return Err(std::io::Error::last_os_error().to_string());
         }
@@ -57,11 +83,7 @@ impl BackingWriter {
             return Err(std::io::Error::last_os_error().to_string());
         }
         file.set_len(padded).map_err(|e| e.to_string())?;
-        Ok(Self {
-            file,
-            bytes,
-            written: 0,
-        })
+        Ok(writer)
     }
 
     pub(super) fn write(&mut self, bytes: &[u8]) -> Result<(), String> {
@@ -82,25 +104,49 @@ impl BackingWriter {
         unsafe { Mmap::map(&self.file) }.map_err(|e| e.to_string())
     }
 
+    pub(super) fn publish(mut self, path: &Path) -> Result<(), String> {
+        if self.written != self.bytes {
+            return Err("short persistent backing write".into());
+        }
+        self.file.sync_all().map_err(|e| e.to_string())?;
+        let temporary = self.path.as_ref().ok_or("not a persistent writer")?;
+        // Never replace an inode that a concurrent loader may have mapped.
+        std::fs::hard_link(temporary, path).map_err(|e| e.to_string())?;
+        std::fs::remove_file(temporary).map_err(|e| e.to_string())?;
+        self.path = None;
+        Ok(())
+    }
+
     pub(super) fn tensor(
         self,
         ctx: &MetalContext,
         shape: Vec<u64>,
         dtype: GgmlType,
     ) -> Result<MetalTensor, String> {
-        let desc = TensorDesc {
-            name: "ephemeral weight".into(),
-            shape,
-            dtype,
-            shard_idx: 0,
-            data_offset: 0,
-            n_bytes: self.bytes,
-        };
-        let mmap = Arc::new(self.finish()?);
-        let backing = ctx
-            .gguf_no_copy_backing(mmap, 0, 32)
-            .map_err(|e| e.to_string())?;
-        let (eligibility, tensor) = backing.tensor(&desc).map_err(|e| e.to_string())?;
-        tensor.ok_or_else(|| format!("weight no-copy backing ineligible: {eligibility:?}"))
+        let bytes = self.bytes;
+        mapped_tensor(ctx, self.finish()?, shape, dtype, bytes)
     }
+}
+
+pub(super) fn mapped_tensor(
+    ctx: &MetalContext,
+    mmap: Mmap,
+    shape: Vec<u64>,
+    dtype: GgmlType,
+    bytes: u64,
+) -> Result<MetalTensor, String> {
+    let desc = TensorDesc {
+        name: "converted weight".into(),
+        shape,
+        dtype,
+        shard_idx: 0,
+        data_offset: 0,
+        n_bytes: bytes,
+    };
+    let mmap = Arc::new(mmap);
+    let backing = ctx
+        .gguf_no_copy_backing(mmap, 0, 32)
+        .map_err(|e| e.to_string())?;
+    let (eligibility, tensor) = backing.tensor(&desc).map_err(|e| e.to_string())?;
+    tensor.ok_or_else(|| format!("weight no-copy backing ineligible: {eligibility:?}"))
 }

@@ -287,6 +287,34 @@ impl ResidentWeights {
         limits: LoadLimits,
         backing_dir: &Path,
     ) -> Result<Self, String> {
+        Self::load_impl(ctx, source, engram, config, limits, backing_dir, None)
+    }
+
+    /// Persistent no-copy converted weights. `cache_dir` must already exist,
+    /// be caller-owned mode 0700, and remain private and immutable while mapped.
+    /// Source files must remain immutable for the entire SourceStore lifetime.
+    /// Metadata-validated hits read no source payload and need no backing space.
+    pub fn load_cached(
+        ctx: &MetalContext,
+        source: &SourceStore,
+        engram: Arc<SourceStore>,
+        config: &serde_json::Value,
+        limits: LoadLimits,
+        cache_dir: &Path,
+    ) -> Result<Self, String> {
+        let cache = cache::Cache::open(cache_dir)?;
+        Self::load_impl(ctx, source, engram, config, limits, cache_dir, Some(&cache))
+    }
+
+    fn load_impl(
+        ctx: &MetalContext,
+        source: &SourceStore,
+        engram: Arc<SourceStore>,
+        config: &serde_json::Value,
+        limits: LoadLimits,
+        backing_dir: &Path,
+        cache: Option<&cache::Cache>,
+    ) -> Result<Self, String> {
         let bytes = Self::plan(source, &engram, config)?;
         if bytes.resident_bytes() > limits.resident_bytes {
             return Err(format!(
@@ -326,13 +354,43 @@ impl ResidentWeights {
         if let Some(refusal) = admission.refusal() {
             return Err(refusal.to_string());
         }
-        let disk_required = priced.checked_add(2 << 30).ok_or("backing size overflow")?;
-        let disk_available = crate::checkpoint_fs::volume_free_bytes(backing_dir)
-            .ok_or("cannot determine free space for weight backing")?;
-        if disk_available < disk_required {
-            return Err(format!(
-                "temporary weight backing needs {disk_required} bytes free, found {disk_available}"
-            ));
+        let mut missing = 0u64;
+        if let Some(cache) = cache {
+            for layer in 0..LAYERS {
+                for part in ["w1", "w3", "w2"] {
+                    let (rows, columns) = dimensions(part);
+                    let entry = bank_entry(cache, source, layer, part, rows, columns, EXPERTS)?;
+                    if entry.open_buffer()?.is_none() {
+                        let (_, _, np) = super::super::mxfp4::storage_sizes(rows, columns)
+                            .map_err(|e| e.to_string())?;
+                        missing += backing::padded_bytes((np * EXPERTS) as u64)?;
+                    }
+                }
+            }
+            for (key, _, store) in dense_entries(source, &engram)
+                .into_iter()
+                .filter(|(key, _, _)| !key.ends_with(".scale"))
+            {
+                let entry = dense_entry(cache, store, key)?;
+                if entry.open_buffer()?.is_none() {
+                    let (r, c) = row_geometry(&store.tensor(key)?.descriptor)?;
+                    missing += backing::padded_bytes(r * c * 4)?;
+                }
+            }
+        } else {
+            missing = priced;
+        }
+        if missing != 0 {
+            let disk_required = missing
+                .checked_add(2 << 30)
+                .ok_or("backing size overflow")?;
+            let disk_available = crate::checkpoint_fs::volume_free_bytes(backing_dir)
+                .ok_or("cannot determine free space for weight backing")?;
+            if disk_available < disk_required {
+                return Err(format!(
+                    "weight backing needs {disk_required} bytes free, found {disk_available}"
+                ));
+            }
         }
         // Do not retain a file-cache copy alongside the resident weight buffers.
         source.stream_without_cache()?;
@@ -345,9 +403,7 @@ impl ResidentWeights {
         for layer in 0..LAYERS {
             for part in ["w1", "w3", "w2"] {
                 let (rows, columns) = dimensions(part);
-                let (nc, ns, _) =
-                    super::super::mxfp4::storage_sizes(rows, columns).map_err(|e| e.to_string())?;
-                let tensor = materialize_bank(
+                let (tensor, read) = materialize_bank_impl(
                     ctx,
                     source,
                     layer,
@@ -356,8 +412,9 @@ impl ResidentWeights {
                     columns,
                     EXPERTS,
                     backing_dir,
+                    cache,
                 )?;
-                loaded.bytes.source_bytes_read += ((nc + ns) * EXPERTS) as u64;
+                loaded.bytes.source_bytes_read += read;
                 loaded.banks.push(PackedBank {
                     layer,
                     projection: part,
@@ -370,9 +427,13 @@ impl ResidentWeights {
             .into_iter()
             .filter(|(key, _, _)| !key.ends_with(".scale"))
         {
-            let (tensor, read) = materialize_dense(ctx, store, key, backing_dir)?;
+            let (tensor, read) = materialize_dense_impl(ctx, store, key, backing_dir, cache)?;
             loaded.bytes.source_bytes_read += read;
             loaded.dense.insert(key.to_owned(), tensor);
+        }
+        if cache.is_some() {
+            source.validate_immutable()?;
+            engram.validate_immutable()?;
         }
         Ok(loaded)
     }
@@ -435,6 +496,7 @@ impl ResidentWeights {
     }
 }
 
+#[cfg(test)]
 pub(super) fn materialize_bank(
     ctx: &MetalContext,
     source: &SourceStore,
@@ -445,36 +507,105 @@ pub(super) fn materialize_bank(
     experts: usize,
     backing_dir: &Path,
 ) -> Result<MetalTensor, String> {
+    materialize_bank_impl(
+        ctx,
+        source,
+        layer,
+        part,
+        rows,
+        columns,
+        experts,
+        backing_dir,
+        None,
+    )
+    .map(|(tensor, _)| tensor)
+}
+
+pub(super) fn materialize_bank_impl(
+    ctx: &MetalContext,
+    source: &SourceStore,
+    layer: usize,
+    part: &str,
+    rows: usize,
+    columns: usize,
+    experts: usize,
+    backing_dir: &Path,
+    cache: Option<&cache::Cache>,
+) -> Result<(MetalTensor, u64), String> {
+    let entry = cache
+        .map(|cache| bank_entry(cache, source, layer, part, rows, columns, experts))
+        .transpose()?;
+    if let Some(entry) = &entry {
+        if let Some(tensor) = entry.lookup(ctx)? {
+            return Ok((tensor, 0));
+        }
+    }
+    let mut hash = entry.as_ref().map(cache::Entry::hasher);
     let (nc, ns, np) =
         super::super::mxfp4::storage_sizes(rows, columns).map_err(|e| e.to_string())?;
     if np > MAX_READ_BYTES || nc > MAX_READ_BYTES || ns > MAX_READ_BYTES {
         return Err("expert exceeds staging bound".into());
     }
     let extent = np.checked_mul(experts).ok_or("bank extent overflow")?;
-    let mut writer = backing::BackingWriter::new(backing_dir, extent as u64)?;
+    let mut writer = if cache.is_some() {
+        backing::BackingWriter::persistent(backing_dir, extent as u64)?
+    } else {
+        backing::BackingWriter::new(backing_dir, extent as u64)?
+    };
     let mut output = vec![0; np];
     for expert in 0..experts {
-        let codes =
-            source.bounded_read(&expert_key(layer, expert, part, "weight"), 0..nc as u64)?;
-        let scales =
-            source.bounded_read(&expert_key(layer, expert, part, "scale"), 0..ns as u64)?;
+        let codes = source.read_hashed(
+            &expert_key(layer, expert, part, "weight"),
+            0..nc as u64,
+            &mut hash,
+        )?;
+        let scales = source.read_hashed(
+            &expert_key(layer, expert, part, "scale"),
+            0..ns as u64,
+            &mut hash,
+        )?;
         super::super::mxfp4::repack_into(rows, columns, &codes, &scales, &mut output)
             .map_err(|e| e.to_string())?;
         writer.write(&output)?;
     }
-    writer.tensor(
-        ctx,
-        vec![columns as u64, rows as u64, experts as u64],
-        GgmlType::MXFP4,
-    )
+    let tensor = if let Some(entry) = entry {
+        entry.publish(ctx, writer, hash.unwrap())?
+    } else {
+        writer.tensor(
+            ctx,
+            vec![columns as u64, rows as u64, experts as u64],
+            GgmlType::MXFP4,
+        )?
+    };
+    Ok((tensor, ((nc + ns) * experts) as u64))
 }
 
+#[cfg(test)]
 pub(super) fn materialize_dense(
     ctx: &MetalContext,
     store: &SourceStore,
     key: &str,
     backing_dir: &Path,
 ) -> Result<(MetalTensor, u64), String> {
+    materialize_dense_impl(ctx, store, key, backing_dir, None)
+}
+
+pub(super) fn materialize_dense_impl(
+    ctx: &MetalContext,
+    store: &SourceStore,
+    key: &str,
+    backing_dir: &Path,
+    cache: Option<&cache::Cache>,
+) -> Result<(MetalTensor, u64), String> {
+    let entry = cache
+        .map(|cache| dense_entry(cache, store, key))
+        .transpose()?;
+    if let Some(entry) = &entry {
+        if let Some(tensor) = entry.lookup(ctx)? {
+            return Ok((tensor, 0));
+        }
+    }
+    let mut hash = entry.as_ref().map(cache::Entry::hasher);
     let d = &store.tensor(key)?.descriptor;
     let (rows, columns) = row_geometry(d)?;
     let extent = rows
@@ -485,11 +616,15 @@ pub(super) fn materialize_dense(
     if batch == 0 {
         return Err("dense row exceeds staging bound".into());
     }
-    let mut writer = backing::BackingWriter::new(backing_dir, extent)?;
+    let mut writer = if cache.is_some() {
+        backing::BackingWriter::persistent(backing_dir, extent)?
+    } else {
+        backing::BackingWriter::new(backing_dir, extent)?
+    };
     let mut read = 0;
     for row in (0..rows).step_by(batch as usize) {
         let end = (row + batch).min(rows);
-        let values = store.decode_rows(key, row..end, false)?;
+        let values = store.decode_rows_hashed(key, row..end, false, &mut hash)?;
         writer.write(bytemuck::cast_slice(&values))?;
         read += (end - row) * columns * d.dtype.byte_width()
             + if d.dtype == SourceDtype::F8E4M3 {
@@ -499,7 +634,73 @@ pub(super) fn materialize_dense(
             };
     }
     Ok((
-        writer.tensor(ctx, d.shape.iter().rev().copied().collect(), GgmlType::F32)?,
+        if let Some(entry) = entry {
+            entry.publish(ctx, writer, hash.unwrap())?
+        } else {
+            writer.tensor(ctx, d.shape.iter().rev().copied().collect(), GgmlType::F32)?
+        },
         read,
     ))
+}
+
+fn bank_entry<'a>(
+    cache: &'a cache::Cache,
+    source: &'a SourceStore,
+    layer: usize,
+    part: &str,
+    rows: usize,
+    columns: usize,
+    experts: usize,
+) -> Result<cache::Entry<'a>, String> {
+    let mut sources = Vec::new();
+    for expert in 0..experts {
+        for suffix in ["weight", "scale"] {
+            let key = expert_key(layer, expert, part, suffix);
+            let (name, tensor) = source
+                .tensors
+                .get_key_value(&key)
+                .ok_or_else(|| format!("missing tensor: {key}"))?;
+            sources.push((name.as_str(), tensor));
+        }
+    }
+    let (_, _, np) =
+        super::super::mxfp4::storage_sizes(rows, columns).map_err(|e| e.to_string())?;
+    cache::Entry::new(
+        cache,
+        sources,
+        np.checked_mul(experts).ok_or("bank extent overflow")? as u64,
+        vec![columns as u64, rows as u64, experts as u64],
+        GgmlType::MXFP4,
+    )
+}
+
+fn dense_entry<'a>(
+    cache: &'a cache::Cache,
+    store: &'a SourceStore,
+    key: &'a str,
+) -> Result<cache::Entry<'a>, String> {
+    let tensor = store.tensor(key)?;
+    let mut sources = vec![(key, tensor)];
+    if tensor.descriptor.dtype == SourceDtype::F8E4M3 {
+        let scale = format!(
+            "{}scale",
+            key.strip_suffix("weight")
+                .ok_or("FP8 without weight suffix")?
+        );
+        let (name, tensor) = store
+            .tensors
+            .get_key_value(&scale)
+            .ok_or("missing dense scale")?;
+        sources.push((name.as_str(), tensor));
+    }
+    let (r, c) = row_geometry(&tensor.descriptor)?;
+    cache::Entry::new(
+        cache,
+        sources,
+        r.checked_mul(c)
+            .and_then(|n| n.checked_mul(4))
+            .ok_or("dense extent overflow")?,
+        tensor.descriptor.shape.iter().rev().copied().collect(),
+        GgmlType::F32,
+    )
 }

@@ -30884,3 +30884,11 @@ Interpretation:
   contributes little by 16K.
 - The combined branch is still a stronger overall decode checkpoint than either
   attention-only or pipelined submission.
+
+## 2026-10-18 - Archived v0.656 Integrated Grammar-Row Code
+
+The concluded v0.656 integrated grammar-row runner, its private runtime helper,
+and the `qwen-bench integrated-grammar-row` subcommand were removed from the
+live workspace. The last commit containing the live implementation is
+`66c4be5785307c8eb616e12278c6c55e933ebbd4`; recover it from git if needed.
+The KILL result and protocol remain under `docs/bench/` as historical evidence.

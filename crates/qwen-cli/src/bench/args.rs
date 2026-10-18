@@ -128,8 +128,6 @@ pub(crate) enum Cmd {
     Q4MmaCeiling(q4_mma_ceiling::Q4MmaCeilingArgs),
     /// Measure the charged exact grammar-row Q6_K lm-head floor.
     GrammarLmHeadRowFloor(grammar_lm_head_row_floor::GrammarLmHeadRowFloorArgs),
-    /// Measure one exact A3B request with integrated grammar-row heads.
-    IntegratedGrammarRow(integrated_grammar_row::IntegratedGrammarRowArgs),
     /// Report Metal counter-set availability for in-process counter probes.
     MetalCounters(MetalCountersArgs),
     /// Report Metal compute-pipeline resource hints for hot kernels.

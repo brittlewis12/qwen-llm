@@ -63,11 +63,13 @@ fn pipeline() -> (OwnerActivity, HttpProxy, Receiver<Work>) {
 }
 
 fn prepared() -> Arc<PreparedResponse> {
+    let request =
+        crate::serve::items::parse_request(&serde_json::json!({"model":"test", "input":"hi"}))
+            .unwrap();
     Arc::new(PreparedResponse {
-        request: crate::serve::items::parse_request(
-            &serde_json::json!({"model":"test", "input":"hi"}),
-        )
-        .unwrap(),
+        validated: crate::serve::request_profile::RequestProfile::UnboundQwen
+            .validate(request)
+            .unwrap(),
         prompt: "already rendered".into(),
         boundaries: None,
     })

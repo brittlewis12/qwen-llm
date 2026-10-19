@@ -186,7 +186,7 @@ fn gpu_verified_k2_chat_http_matches_raw_and_releases_sessions() {
         let body = json!({"model":"k2-chat","temperature":0,"input":[{"role":"user","content":"What is 2+2? Answer briefly."}], "reasoning":{"effort":effort}, "max_output_tokens":budget});
         let (req, prompt) = request(&backend, body.clone());
         assert_eq!(
-            backend.output_protocol(&req),
+            backend.output_protocol(&req).unwrap(),
             OutputProtocol::K2Chat { effort }
         );
         let mut sink = Sink::default();
@@ -490,7 +490,10 @@ fn gpu_borrowed_backend_matches_raw_run_and_discards_aborted_requests() {
         &backend,
         json!({"model":"k2-test","temperature":0,"input":text}),
     );
-    assert_eq!(backend.output_protocol(&req), OutputProtocol::RawText);
+    assert_eq!(
+        backend.output_protocol(&req).unwrap(),
+        OutputProtocol::RawText
+    );
     let mut first = Sink::default();
     let result = backend.generate(&req, &prompt, &mut first).unwrap();
     assert_eq!(first.bytes, b" Paris. The capital of Germany is Berlin");

@@ -61,10 +61,16 @@ pub(crate) trait GenerationSink {
 pub(crate) type Headroom = fn() -> Option<u64>;
 
 pub(crate) struct PreparedResponse {
-    pub(crate) request: ServeRequest,
+    pub(crate) validated: super::request_profile::ValidatedRequest,
     pub(crate) prompt: String,
     /// Boundaries the family renderer recorded in `prompt`, if any.
     pub(crate) boundaries: Option<PromptBoundaries>,
+}
+
+impl PreparedResponse {
+    pub(crate) fn request(&self) -> &ServeRequest {
+        self.validated.request()
+    }
 }
 
 /// Byte offsets into a rendered prompt that its renderer recorded while
@@ -126,8 +132,19 @@ pub(crate) trait GenerationBackend {
         self.request_profile().template_style_default()
     }
     /// Family-owned grammar for exact generated token bytes.
-    fn output_protocol(&self, request: &ServeRequest) -> OutputProtocol {
-        self.request_profile().output(request)
+    fn output_protocol(&self, request: &ServeRequest) -> Result<OutputProtocol, ServeError> {
+        self.request_profile().resolve_output(request)
+    }
+    fn validate_request(
+        &self,
+        request: ServeRequest,
+    ) -> Result<super::request_profile::ValidatedRequest, ServeError> {
+        let profile = self.request_profile();
+        profile.validate_with(
+            request,
+            |request| self.normalize_request(request),
+            |request| self.output_protocol(request),
+        )
     }
     /// Family-specific prompt rendering. Defaults to the Qwen ChatML path.
     fn render_prompt(&self, request: &ServeRequest) -> Result<String, ServeError> {
@@ -156,7 +173,7 @@ pub(crate) trait GenerationBackend {
         prepared: Arc<PreparedResponse>,
         sink: &mut dyn GenerationSink,
     ) -> Result<GenerationOutcome, BackendFailure> {
-        self.generate(&prepared.request, &prepared.prompt, sink)
+        self.generate(prepared.request(), &prepared.prompt, sink)
     }
     /// Called from the serial loop while no request is admitted (snapshot
     /// cache expiry). Must be cheap.
@@ -949,10 +966,12 @@ fn handle_responses(
         }
         _ => {}
     }
-    if let Err(error) = backend.normalize_request(&mut request) {
-        return write_serve_error(&mut writer, &error);
-    }
-    let (prompt, boundaries) = match backend.render_prepared(&request) {
+    let validated = match backend.validate_request(request) {
+        Ok(validated) => validated,
+        Err(error) => return write_serve_error(&mut writer, &error),
+    };
+    let request = validated.request();
+    let (prompt, boundaries) = match backend.render_prepared(request) {
         Ok(rendered) => rendered,
         Err(error) => return write_serve_error(&mut writer, &error),
     };
@@ -960,17 +979,17 @@ fn handle_responses(
     let created_at = now_unix();
 
     // Resolved before the mutable generate borrow.
-    let output_protocol = backend.output_protocol(&request);
+    let output_protocol = validated.output().clone();
     // Said per request, before generation can fail.
     if let Some(line) = history_reasoning_diagnostic(&request, &output_protocol) {
         eprintln!("{line}");
     }
     let prepared = Arc::new(PreparedResponse {
-        request,
+        validated,
         prompt,
         boundaries,
     });
-    let request = &prepared.request;
+    let request = prepared.request();
     if !request.stream {
         let mut sink = CollectSink::new(stream, backend.output_headroom());
         match backend.generate_prepared(Arc::clone(&prepared), &mut sink) {
@@ -1189,8 +1208,8 @@ mod tests {
                 Ok(render_qwen_serve_prompt(request))
             }
         }
-        fn output_protocol(&self, _request: &ServeRequest) -> OutputProtocol {
-            self.protocol.clone()
+        fn output_protocol(&self, _request: &ServeRequest) -> Result<OutputProtocol, ServeError> {
+            Ok(self.protocol.clone())
         }
         fn output_headroom(&self) -> Headroom {
             self.headroom

@@ -449,7 +449,7 @@ fn gpu_adaptive_prefill_cold_hit_and_continuation() {
     assert!((1..=32).contains(&(continued_tokens.len() - previous)));
     let started = Instant::now();
     let continued = backend
-        .generate(&prompt.request, &continuation, &mut Sink::default())
+        .generate(&prompt.request(), &continuation, &mut Sink::default())
         .unwrap();
     eprintln!(
         "adaptive short_suffix: rows={:?} suffix_rows={} cached_rows={} elapsed_ms={:.1}",
@@ -695,7 +695,7 @@ fn gpu_live_session_extends_resumes_and_resets() {
     // Cold request: the run lane's bytes, history = prompt + forwarded.
     let (first_req, first_prompt) = request(&backend, greedy(json!(QUESTION), "low"));
     assert_eq!(
-        backend.output_protocol(&first_req),
+        backend.output_protocol(&first_req).unwrap(),
         OutputProtocol::Glm5NextChat
     );
     let mut first = Sink::default();
@@ -1342,11 +1342,11 @@ fn release_keep_pin_is_cleared_when_eviction_panics() {
 
 /// A request rendered as serve renders it, with its boundaries.
 fn prepared_request(backend: &Glm5NextBackend<'_, '_>, body: Value) -> Arc<PreparedResponse> {
-    let mut request = backend.parse_request(&body).unwrap();
-    backend.normalize_request(&mut request).unwrap();
-    let (prompt, boundaries) = backend.render_prepared(&request).unwrap();
+    let request = backend.parse_request(&body).unwrap();
+    let validated = backend.validate_request(request).unwrap();
+    let (prompt, boundaries) = backend.render_prepared(validated.request()).unwrap();
     Arc::new(PreparedResponse {
-        request,
+        validated,
         prompt,
         boundaries,
     })
@@ -1629,7 +1629,9 @@ fn gpu_snapshots_continue_the_captured_trajectory() {
     backend.history.clear();
     let entries = backend.cache.len();
     let mut sink = Sink::default();
-    let outcome = backend.generate(&a.request, &a.prompt, &mut sink).unwrap();
+    let outcome = backend
+        .generate(&a.request(), &a.prompt, &mut sink)
+        .unwrap();
     check(
         "fast without boundaries: no restore, no capture",
         outcome.usage.cached_tokens == 0 && backend.cache.len() == entries,

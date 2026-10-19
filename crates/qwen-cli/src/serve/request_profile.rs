@@ -33,6 +33,23 @@ impl OutputLimits {
     };
 }
 
+/// The request and protocol after family normalization and fallible protocol
+/// resolution. Both values are immutable once constructed.
+pub(crate) struct ValidatedRequest {
+    request: ServeRequest,
+    output: OutputProtocol,
+}
+
+impl ValidatedRequest {
+    pub(crate) fn request(&self) -> &ServeRequest {
+        &self.request
+    }
+
+    pub(crate) fn output(&self) -> &OutputProtocol {
+        &self.output
+    }
+}
+
 #[derive(Clone)]
 pub(crate) enum RequestProfile {
     /// The trait default for test backends: no output limits, so no tool
@@ -82,6 +99,27 @@ pub(crate) enum RequestProfile {
 }
 
 impl RequestProfile {
+    #[cfg(test)]
+    pub(crate) fn validate(
+        &self,
+        mut request: ServeRequest,
+    ) -> Result<ValidatedRequest, ServeError> {
+        self.normalize(&mut request)?;
+        let output = self.resolve_output(&request)?;
+        Ok(ValidatedRequest { request, output })
+    }
+
+    pub(crate) fn validate_with(
+        &self,
+        mut request: ServeRequest,
+        normalize: impl FnOnce(&mut ServeRequest) -> Result<(), ServeError>,
+        resolve_output: impl FnOnce(&ServeRequest) -> Result<OutputProtocol, ServeError>,
+    ) -> Result<ValidatedRequest, ServeError> {
+        normalize(&mut request)?;
+        let output = resolve_output(&request)?;
+        Ok(ValidatedRequest { request, output })
+    }
+
     pub(crate) fn decode(&self, body: &[u8]) -> Result<Value, ServeError> {
         match self {
             Self::K2 { .. } => render_k2::tools::decode_request_json(body),
@@ -294,7 +332,10 @@ impl RequestProfile {
         }
     }
 
-    pub(crate) fn output(&self, request: &ServeRequest) -> OutputProtocol {
+    pub(crate) fn resolve_output(
+        &self,
+        request: &ServeRequest,
+    ) -> Result<OutputProtocol, ServeError> {
         // Normalization admitted the ceiling before any response bytes;
         // were it uncomputable here, fail closed (any tool block exceeds 0).
         let ceiling = |limits: &OutputLimits| {
@@ -306,12 +347,9 @@ impl RequestProfile {
                 .unwrap_or(0),
             )
         };
-        match self {
+        Ok(match self {
             Self::DeepSeekV41 { limits, .. } => OutputProtocol::DeepSeekV41 {
-                thinking: super::protocol_v41::thinking(request)
-                    .ok()
-                    .flatten()
-                    .is_some(),
+                thinking: super::protocol_v41::thinking(request)?.is_some(),
                 max_bytes: ceiling(limits).unwrap_or(0),
             },
             Self::UnboundQwen => OutputProtocol::Qwen {
@@ -336,7 +374,7 @@ impl RequestProfile {
                 tool_byte_ceiling: ceiling(limits),
             },
             Self::DeepSeekV4 { limits, .. } => OutputProtocol::Qwen {
-                preopened_reasoning: render_ds4::preopens_reasoning(request).unwrap_or(false),
+                preopened_reasoning: render_ds4::preopens_reasoning(request)?,
                 parse_tools: !request.model_request.tools.is_empty(),
                 tool_grammar: ToolGrammar::DeepSeekDsml,
                 tool_byte_ceiling: ceiling(limits),
@@ -363,8 +401,16 @@ impl RequestProfile {
             Self::K2 { chat: None, .. } => OutputProtocol::RawText,
             Self::Glm5Next {
                 max_piece_bytes, ..
-            } => render_glm5_next::output_protocol(request, *max_piece_bytes),
-        }
+            } => render_glm5_next::try_output_protocol(request, *max_piece_bytes)?,
+        })
+    }
+
+    /// Test-only compatibility helper for fixtures that have already
+    /// normalized a request.
+    #[cfg(test)]
+    pub(crate) fn output(&self, request: &ServeRequest) -> OutputProtocol {
+        self.resolve_output(request)
+            .expect("normalized fixture has a resolvable output protocol")
     }
 }
 

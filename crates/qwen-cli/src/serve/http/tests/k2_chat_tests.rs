@@ -23,16 +23,16 @@ impl GenerationBackend for K2Mock {
     fn render_prompt(&self, request: &ServeRequest) -> Result<String, ServeError> {
         render_k2::render_with_profile(request, self.profile.as_ref())
     }
-    fn output_protocol(&self, request: &ServeRequest) -> OutputProtocol {
+    fn output_protocol(&self, request: &ServeRequest) -> Result<OutputProtocol, ServeError> {
         if self.profile.is_some() && request.k2_tools.is_some() {
-            return render_k2::tools::output_protocol(request, 128);
+            return Ok(render_k2::tools::output_protocol(request, 128));
         }
-        match (&self.profile, &request.k2_chat) {
+        Ok(match (&self.profile, &request.k2_chat) {
             (Some(_), Some(chat)) => OutputProtocol::K2Chat {
                 effort: chat.effort,
             },
             _ => OutputProtocol::RawText,
-        }
+        })
     }
     fn generate(
         &mut self,

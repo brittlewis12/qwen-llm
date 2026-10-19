@@ -104,20 +104,21 @@ pub(crate) fn tool_byte_budget(
 }
 
 /// Text chat, or the tools grammar when the request declares functions.
-pub(crate) fn output_protocol(
+pub(crate) fn try_output_protocol(
     request: &ServeRequest,
     max_piece_bytes: usize,
-) -> crate::serve::output_partition::OutputProtocol {
+) -> Result<crate::serve::output_partition::OutputProtocol, ServeError> {
     use crate::serve::output_partition::OutputProtocol;
-    match definitions(request) {
-        Ok(definitions) if !definitions.is_empty() => OutputProtocol::Glm5NextTools {
+    let definitions = definitions(request)?;
+    Ok(if !definitions.is_empty() {
+        OutputProtocol::Glm5NextTools {
             definitions,
             // Normalization admitted this bound before any response bytes.
-            max_bytes: tool_byte_budget(request.max_output_tokens.unwrap_or(1), max_piece_bytes)
-                .unwrap_or(usize::MAX),
-        },
-        _ => OutputProtocol::Glm5NextChat,
-    }
+            max_bytes: tool_byte_budget(request.max_output_tokens.unwrap_or(1), max_piece_bytes)?,
+        }
+    } else {
+        OutputProtocol::Glm5NextChat
+    })
 }
 
 /// GLM's template prints every key of a function object except `strict`

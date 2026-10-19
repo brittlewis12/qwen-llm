@@ -249,6 +249,29 @@ fn all_family_request_profile_snapshot() {
 }
 
 #[test]
+fn glm_tool_definition_errors_propagate_during_protocol_resolution() {
+    let profile = RequestProfile::Glm5Next {
+        default_max_tokens: 8,
+        capacity: 128,
+        max_piece_bytes: 64,
+    };
+    let mut request = profile
+        .parse(&json!({
+            "model":"test",
+            "input":"Hello",
+            "tools":[{"type":"function","name":"lookup","parameters":{"type":"object"}}]
+        }))
+        .unwrap();
+    request.model_request.tools[0].strict = Some(true);
+    let error = profile.resolve_output(&request).unwrap_err();
+    assert_eq!(
+        (error.status, error.error_type, error.param.as_deref()),
+        (400, "invalid_request", Some("tools"))
+    );
+    assert!(error.message.contains("cannot honor strict tool schemas"));
+}
+
+#[test]
 fn v41_http_tools_and_multiturn_use_official_recipe() {
     let profile =
         crate::serve::protocol_v41::profile(crate::serve::request_profile::OutputLimits::TEST);

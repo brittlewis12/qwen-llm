@@ -1356,7 +1356,7 @@ impl GenerationBackend for Glm5NextBackend<'_, '_> {
         sink: &mut dyn GenerationSink,
     ) -> Result<GenerationOutcome, BackendFailure> {
         self.generate_with(
-            &prepared.request,
+            prepared.request(),
             &prepared.prompt,
             prepared.boundaries,
             sink,

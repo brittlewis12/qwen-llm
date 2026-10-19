@@ -220,7 +220,7 @@ impl GenerationBackend for Backend<'_> {
         sink: &mut dyn GenerationSink,
     ) -> std::result::Result<GenerationOutcome, BackendFailure> {
         self.generate_prompt(
-            &prepared.request,
+            prepared.request(),
             &prepared.prompt,
             prepared.boundaries,
             sink,

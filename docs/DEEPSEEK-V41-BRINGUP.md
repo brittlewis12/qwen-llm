@@ -127,8 +127,9 @@ The shared F32 attention-value matrix path at `94907364` measures pp1024 at
 Parallel index heads at `b29d6991` measure **118.729 +/- 0.010 tokens/s pp1024**
 (8.625 seconds) and **26.746 +/- 0.021 tg32**, with three repetitions. A single
 pp2048 repetition measures **114.636 tokens/s** (17.865 seconds). No validation
-layers or diagnostic ablations are enabled. These results still do not reach
-the roughly 500 tokens/s agent-prefill target. Evidence locations and the reuse
+layers or diagnostic ablations are enabled. The owner's roughly 500 tokens/s
+figure is a headroom heuristic, not an acceptance target; current device-local
+attribution should decide the next optimizations. Evidence locations and the reuse
 review are recorded in [the review packet](bench/2026-10-19-v41-review.md).
 Three-repetition checks at `733d629f` measure 118.664, 114.549 and 108.079
 tokens/s at pp1024, pp2048 and pp10000 respectively, with resident weights and

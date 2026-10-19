@@ -64,7 +64,7 @@ fn publish_causal_snapshot_file_with_hook(
     after_final_link: impl FnOnce(),
 ) -> Result<DeepSeekV4SnapshotFileReport, DeepSeekV4SnapshotFileError> {
     let parent = checked_parent(path)?;
-    let temp_path = unique_temp_path(path, snapshot.causal_digest())?;
+    let temp_path = unique_temp_path(path)?;
     let result = publish_staged(
         path,
         &temp_path,
@@ -179,7 +179,7 @@ fn same_causal_state(left: &DeepSeekV4CausalSnapshot, right: &DeepSeekV4CausalSn
         && left.compatibility_digest() == right.compatibility_digest()
         && left.next_position() == right.next_position()
         && left.prefix_tokens() == right.prefix_tokens()
-        && left.causal_digest() == right.causal_digest()
+        && left.causal_arenas_equal(right)
 }
 
 fn checked_parent(path: &Path) -> Result<&Path, DeepSeekV4SnapshotFileError> {
@@ -196,28 +196,14 @@ fn checked_parent(path: &Path) -> Result<&Path, DeepSeekV4SnapshotFileError> {
     Ok(parent)
 }
 
-fn unique_temp_path(
-    final_path: &Path,
-    causal_digest: &[u8; 32],
-) -> Result<PathBuf, DeepSeekV4SnapshotFileError> {
+fn unique_temp_path(final_path: &Path) -> Result<PathBuf, DeepSeekV4SnapshotFileError> {
     let parent = checked_parent(final_path)?;
     let filename = final_path
         .file_name()
         .ok_or(DeepSeekV4SnapshotFileError::MissingFilename)?
         .to_string_lossy();
     let counter = TEMP_COUNTER.fetch_add(1, Ordering::Relaxed);
-    let nonce = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_nanos();
-    let digest = causal_digest[..8]
-        .iter()
-        .map(|byte| format!("{byte:02x}"))
-        .collect::<String>();
-    Ok(parent.join(format!(
-        ".{filename}.tmp-{}-{nonce}-{counter}-{digest}",
-        std::process::id()
-    )))
+    Ok(parent.join(format!(".{filename}.tmp-{}-{counter}", std::process::id())))
 }
 
 fn validate_private_regular_file(
@@ -313,7 +299,7 @@ mod tests {
             .map(|index| index as u16 ^ seed)
             .collect::<Vec<_>>()
             .into_boxed_slice();
-        let mut snapshot = DeepSeekV4CausalSnapshot {
+        let snapshot = DeepSeekV4CausalSnapshot {
             model_content_id,
             compatibility_digest: snapshot_compatibility_digest(model_content_id, config),
             next_position: position,
@@ -323,9 +309,7 @@ mod tests {
             raw_f16_bits,
             compressor_f32_bits: Box::new([]),
             published_f16_bits: Box::new([]),
-            causal_digest: [0; 32],
         };
-        snapshot.causal_digest = causal_digest(&snapshot);
         validate_snapshot(&snapshot, config, session_capacity, model_content_id).unwrap();
         snapshot
     }

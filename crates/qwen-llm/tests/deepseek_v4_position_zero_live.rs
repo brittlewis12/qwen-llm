@@ -5,8 +5,9 @@ use qwen_llm::deepseek_v4_metal::{
     DeepSeekV4CausalSnapshot, DeepSeekV4CommandProfile, DeepSeekV4MetalResidency,
     DeepSeekV4ModelContentId, DeepSeekV4PositionZeroForward, DeepSeekV4RoutingKind,
     DeepSeekV4SnapshotCodecConstraints, DeepSeekV4SnapshotObservation, DeepSeekV4StageKind,
-    DeepSeekV4StageProfile, DeepSeekV4WholeTokenProfile, decode_causal_snapshot,
-    encode_causal_snapshot, load_causal_snapshot_file, publish_causal_snapshot_file,
+    DeepSeekV4StageProfile, DeepSeekV4WholeTokenProfile, causal_snapshot_digest,
+    decode_causal_snapshot, encode_causal_snapshot, load_causal_snapshot_file,
+    publish_causal_snapshot_file,
 };
 #[cfg(feature = "dsv4-diagnostics")]
 use qwen_llm::deepseek_v4_metal::{
@@ -261,7 +262,7 @@ fn open_pinned_legacy_gguf(model_path: &Path) -> GgufFile {
 
 #[cfg(feature = "dsv4-diagnostics")]
 fn open_pinned_current_gguf(model_path: &Path) -> (GgufFile, DeepSeekV4ModelContentId) {
-    let gguf = GgufFile::open(&model_path).expect("open current DS4 GGUF shards");
+    let gguf = GgufFile::open(model_path).expect("open current DS4 GGUF shards");
     PinnedDeepSeekV4AssetV1::parse(CURRENT_CENSUS_MANIFEST)
         .expect("parse current DS4 census")
         .validate_observed(&gguf)
@@ -320,8 +321,10 @@ fn assert_packed_singleton_schedule_containment(label: &str, comparison: &LogitC
 
 fn compare_logits(label: &str, logits: &[f32], oracle_bytes: &[u8]) -> LogitComparison {
     let oracle = oracle_bytes
-        .chunks_exact(4)
-        .map(|bytes| f32::from_le_bytes(bytes.try_into().unwrap()))
+        .as_chunks::<4>()
+        .0
+        .iter()
+        .map(|bytes| f32::from_le_bytes(*bytes))
         .collect::<Vec<_>>();
     assert_eq!(logits.len(), oracle.len());
     assert!(logits.iter().chain(&oracle).all(|value| value.is_finite()));
@@ -384,8 +387,10 @@ fn compare_logits(label: &str, logits: &[f32], oracle_bytes: &[u8]) -> LogitComp
 fn decode_f32_vector(bytes: &[u8]) -> Vec<f32> {
     assert!(bytes.len().is_multiple_of(std::mem::size_of::<f32>()));
     bytes
-        .chunks_exact(4)
-        .map(|bytes| f32::from_le_bytes(bytes.try_into().unwrap()))
+        .as_chunks::<4>()
+        .0
+        .iter()
+        .map(|bytes| f32::from_le_bytes(*bytes))
         .collect()
 }
 
@@ -1550,7 +1555,7 @@ fn current_deepseek_v4_fp4_selection_counterfactual_packet() {
 
         let prefix_started = Instant::now();
         let mut after_first_forward_bytes = None;
-        for chunk in prefix.chunks_exact(128) {
+        for chunk in prefix.as_chunks::<128>().0 {
             session
                 .advance_tokens(ctx, chunk)
                 .expect("advance current-asset packed FP4 prefix");
@@ -1614,7 +1619,7 @@ fn current_deepseek_v4_fp4_selection_counterfactual_packet() {
             let retained_restore_probe = retain_restore_probe.then_some(snapshot.clone());
             (
                 *snapshot.prefix_digest(),
-                *snapshot.causal_digest(),
+                causal_snapshot_digest(&snapshot),
                 None,
                 None,
                 0,
@@ -1675,7 +1680,7 @@ fn current_deepseek_v4_fp4_selection_counterfactual_packet() {
             assert_eq!(snapshot.next_position(), SINGLETON_POSITION + 1);
             (
                 *snapshot.prefix_digest(),
-                *snapshot.causal_digest(),
+                causal_snapshot_digest(&snapshot),
                 None,
                 None,
                 0,
@@ -1737,7 +1742,7 @@ fn current_deepseek_v4_fp4_selection_counterfactual_packet() {
             let snapshot = session
                 .capture_causal_snapshot()
                 .expect("capture final repeated observer state");
-            (*snapshot.causal_digest(), None, None, 0)
+            (causal_snapshot_digest(&snapshot), None, None, 0)
         };
 
         let run = Run {
@@ -3231,9 +3236,9 @@ fn current_deepseek_v4_fp4_collapsed_position_3070_packet() {
                 logits,
                 decisions,
                 audit_prefix_digest: *audit_snapshot.prefix_digest(),
-                audit_state_digest: *audit_snapshot.causal_digest(),
+                audit_state_digest: causal_snapshot_digest(&audit_snapshot),
                 final_prefix_digest: *final_snapshot.prefix_digest(),
-                final_state_digest: *final_snapshot.causal_digest(),
+                final_state_digest: causal_snapshot_digest(&final_snapshot),
                 audit_ledger,
                 audit_wall_ms: audit_profile.forward_wall_ms,
                 audit_gpu_ms: audit_profile.command_gpu_ms(),
@@ -3533,8 +3538,10 @@ fn native_deepseek_v4_token_35_position_zero() {
     assert!(logits.iter().all(|value| value.is_finite()));
     assert_eq!(ORACLE_BYTES.len(), logits.len() * 4);
     let oracle = ORACLE_BYTES
-        .chunks_exact(4)
-        .map(|bytes| f32::from_le_bytes(bytes.try_into().unwrap()))
+        .as_chunks::<4>()
+        .0
+        .iter()
+        .map(|bytes| f32::from_le_bytes(*bytes))
         .collect::<Vec<_>>();
     assert!(oracle.iter().all(|value| value.is_finite()));
 
@@ -3800,8 +3807,8 @@ fn native_deepseek_v4_snapshot_restores_exact_csa_continuation() {
         DeepSeekV4SnapshotObservation::Unavailable
     );
     assert_eq!(
-        restored_prefix.causal_digest(),
-        prefix_snapshot.causal_digest()
+        causal_snapshot_digest(&restored_prefix),
+        causal_snapshot_digest(&prefix_snapshot)
     );
 
     session
@@ -3821,8 +3828,8 @@ fn native_deepseek_v4_snapshot_restores_exact_csa_continuation() {
         .capture_causal_snapshot()
         .expect("capture restored continuation state");
     assert_eq!(
-        restored_state.causal_digest(),
-        uninterrupted_state.causal_digest()
+        causal_snapshot_digest(&restored_state),
+        causal_snapshot_digest(&uninterrupted_state)
     );
     assert_logits_match(
         "snapshot-restored position 4",
@@ -3834,8 +3841,7 @@ fn native_deepseek_v4_snapshot_restores_exact_csa_continuation() {
         "snapshot_record_bytes={} snapshot_restore_live_elapsed={:.3}s causal_digest={}",
         encoded.record_bytes,
         started.elapsed().as_secs_f64(),
-        prefix_snapshot
-            .causal_digest()
+        causal_snapshot_digest(&prefix_snapshot)
             .iter()
             .map(|byte| format!("{byte:02x}"))
             .collect::<String>()
@@ -5085,8 +5091,8 @@ fn profile_native_deepseek_v4_exact_packed_prefix_decode_at_129_and_513() {
         "whole-token and layer-command logits must be bit-identical"
     );
     assert_eq!(
-        collapsed_state.causal_digest(),
-        layer_command_state.causal_digest(),
+        causal_snapshot_digest(&collapsed_state),
+        causal_snapshot_digest(&layer_command_state),
         "whole-token profiling changed causal state"
     );
     session
@@ -5263,8 +5269,7 @@ fn native_deepseek_v4_durable_position_1024_snapshot_matches_oracle() {
         "durable_position_1024_elapsed={:.3}s identity_cache={:?} causal_digest={}",
         started.elapsed().as_secs_f64(),
         content.outcome,
-        snapshot
-            .causal_digest()
+        causal_snapshot_digest(&snapshot)
             .iter()
             .map(|byte| format!("{byte:02x}"))
             .collect::<String>()
@@ -5393,8 +5398,7 @@ fn native_deepseek_v4_position_1024_snapshot_reaches_position_2048() {
         "13cb8a323341f3f23bcb98ddfb8c257b5125411065d14e1b40c5a75fa19ed53c"
     );
     assert_eq!(snapshot_report.record_bytes, 31_957_024);
-    let causal_digest = boundary_snapshot
-        .causal_digest()
+    let causal_digest = causal_snapshot_digest(&boundary_snapshot)
         .iter()
         .map(|byte| format!("{byte:02x}"))
         .collect::<String>();
@@ -5486,8 +5490,7 @@ fn native_deepseek_v4_durable_position_2048_snapshot_matches_oracle() {
         DeepSeekV4SnapshotObservation::Unavailable
     );
     assert_eq!(
-        snapshot
-            .causal_digest()
+        causal_snapshot_digest(&snapshot)
             .iter()
             .map(|byte| format!("{byte:02x}"))
             .collect::<String>(),
@@ -5667,8 +5670,7 @@ fn native_deepseek_v4_position_2048_snapshot_crosses_first_sparse_csa() {
     );
     assert_eq!(continuation.argmax, continuation.oracle_argmax);
     assert_hca_long_prefix_gate("position 2052", &continuation);
-    let sparse_digest = sparse_snapshot
-        .causal_digest()
+    let sparse_digest = causal_snapshot_digest(&sparse_snapshot)
         .iter()
         .map(|byte| format!("{byte:02x}"))
         .collect::<String>();
@@ -5715,8 +5717,7 @@ fn native_deepseek_v4_position_2048_snapshot_crosses_first_sparse_csa() {
         packed_hasher.update(value.to_le_bytes());
     }
     let packed_hash = format!("{:x}", packed_hasher.finalize());
-    let packed_sparse_digest = packed_sparse_snapshot
-        .causal_digest()
+    let packed_sparse_digest = causal_snapshot_digest(&packed_sparse_snapshot)
         .iter()
         .map(|byte| format!("{byte:02x}"))
         .collect::<String>();
@@ -5843,8 +5844,7 @@ fn native_deepseek_v4_durable_position_2052_snapshot_matches_oracle() {
         DeepSeekV4SnapshotObservation::Available
     );
     assert_eq!(
-        snapshot
-            .causal_digest()
+        causal_snapshot_digest(&snapshot)
             .iter()
             .map(|byte| format!("{byte:02x}"))
             .collect::<String>(),
@@ -6065,8 +6065,7 @@ fn native_deepseek_v4_position_2052_snapshot_reaches_hca_row_16() {
         .unwrap()
         .0;
     let continuation_hash = f32_sha256(&continuation_logits);
-    let causal_digest = boundary_snapshot
-        .causal_digest()
+    let causal_digest = causal_snapshot_digest(&boundary_snapshot)
         .iter()
         .map(|byte| format!("{byte:02x}"))
         .collect::<String>();
@@ -6220,8 +6219,7 @@ fn native_deepseek_v4_durable_position_2176_snapshot_matches_oracle() {
         DeepSeekV4SnapshotObservation::Available
     );
     assert_eq!(
-        snapshot
-            .causal_digest()
+        causal_snapshot_digest(&snapshot)
             .iter()
             .map(|byte| format!("{byte:02x}"))
             .collect::<String>(),
@@ -6406,8 +6404,7 @@ fn native_deepseek_v4_position_2176_snapshot_fills_third_csa_slab() {
         continuation_hasher.update(value.to_le_bytes());
     }
     let continuation_hash = format!("{:x}", continuation_hasher.finalize());
-    let causal_digest = boundary_snapshot
-        .causal_digest()
+    let causal_digest = causal_snapshot_digest(&boundary_snapshot)
         .iter()
         .map(|byte| format!("{byte:02x}"))
         .collect::<String>();
@@ -6714,8 +6711,7 @@ fn native_deepseek_v4_durable_position_3072_snapshot_matches_schedule_envelope()
         DeepSeekV4SnapshotObservation::Available
     );
     assert_eq!(
-        snapshot
-            .causal_digest()
+        causal_snapshot_digest(&snapshot)
             .iter()
             .map(|byte| format!("{byte:02x}"))
             .collect::<String>(),
@@ -6841,7 +6837,10 @@ fn native_deepseek_v4_position_3072_snapshot_crosses_dynamic_csa_capacity() {
     let schedule_fork = session
         .capture_causal_snapshot()
         .expect("capture dynamic-capacity schedule fork");
-    assert_eq!(schedule_fork.causal_digest(), source.causal_digest());
+    assert_eq!(
+        causal_snapshot_digest(&schedule_fork),
+        causal_snapshot_digest(&source)
+    );
     session
         .forward_token(&ctx, 35)
         .expect("reproduce position 3072 under larger physical capacity");
@@ -6929,8 +6928,7 @@ fn native_deepseek_v4_position_3072_snapshot_crosses_dynamic_csa_capacity() {
         .expect("capture terminal position-3077 state");
     assert_eq!(terminal.next_position(), 3_077);
     assert_eq!(terminal.payload_bytes(), 39_016_724);
-    let terminal_digest = terminal
-        .causal_digest()
+    let terminal_digest = causal_snapshot_digest(&terminal)
         .iter()
         .map(|byte| format!("{byte:02x}"))
         .collect::<String>();
@@ -7025,8 +7023,10 @@ fn native_deepseek_v4_tokens_35_201_200_local_prefix() {
     assert_eq!(session.next_position(), 2);
     let logits = session.copy_logits_f32().expect("copy position-one logits");
     let oracle = POSITION_ONE_ORACLE_BYTES
-        .chunks_exact(4)
-        .map(|bytes| f32::from_le_bytes(bytes.try_into().unwrap()))
+        .as_chunks::<4>()
+        .0
+        .iter()
+        .map(|bytes| f32::from_le_bytes(*bytes))
         .collect::<Vec<_>>();
     assert_eq!(logits.len(), oracle.len());
     assert!(logits.iter().chain(&oracle).all(|value| value.is_finite()));

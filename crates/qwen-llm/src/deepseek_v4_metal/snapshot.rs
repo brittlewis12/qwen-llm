@@ -22,6 +22,9 @@ const COMPATIBILITY_DOMAIN: &[u8] = b"qwen-dsv4-metal-causal-compatibility-v1\0"
 const PREFIX_DOMAIN: &[u8] = b"qwen-dsv4-metal-causal-prefix-v1\0";
 const STATE_DOMAIN: &[u8] = b"qwen-dsv4-metal-causal-state-v1\0";
 
+#[cfg(not(target_endian = "little"))]
+compile_error!("DeepSeek V4 causal snapshot hashing requires a little-endian target");
+
 /// Caller-asserted digest of complete ordered model contents.
 ///
 /// The session binds this value at construction but does not prove how the
@@ -87,7 +90,6 @@ pub struct DeepSeekV4CausalSnapshot {
     raw_f16_bits: Box<[u16]>,
     compressor_f32_bits: Box<[u32]>,
     published_f16_bits: Box<[u16]>,
-    causal_digest: [u8; 32],
 }
 
 impl DeepSeekV4CausalSnapshot {
@@ -115,13 +117,8 @@ impl DeepSeekV4CausalSnapshot {
         self.source_observation
     }
 
-    pub fn causal_digest(&self) -> &[u8; 32] {
-        &self.causal_digest
-    }
-
     /// A copy attributed to `model_content_id` instead of the identity it was
-    /// captured under; the causal state is unchanged and its digests are
-    /// recomputed.
+    /// captured under; the causal state is unchanged.
     ///
     /// Sound only when the caller knows both identities name the same
     /// resident weights — e.g. a server that bound a process-local stand-in
@@ -140,7 +137,6 @@ impl DeepSeekV4CausalSnapshot {
         let mut rebound = self.clone();
         rebound.model_content_id = model_content_id;
         rebound.compatibility_digest = snapshot_compatibility_digest(model_content_id, config);
-        rebound.causal_digest = causal_digest(&rebound);
         Ok(rebound)
     }
 
@@ -166,10 +162,10 @@ impl DeepSeekV4CausalSnapshot {
         tests::synthetic_snapshot_fixture(ctx, next_position, seed)
     }
 
-    #[cfg(test)]
-    fn refresh_digests(&mut self) {
-        self.prefix_digest = prefix_digest(&self.prefix_tokens);
-        self.causal_digest = causal_digest(self);
+    pub(crate) fn causal_arenas_equal(&self, other: &Self) -> bool {
+        self.raw_f16_bits == other.raw_f16_bits
+            && self.compressor_f32_bits == other.compressor_f32_bits
+            && self.published_f16_bits == other.published_f16_bits
     }
 }
 
@@ -313,7 +309,7 @@ impl DeepSeekV4Session {
             &self.raw_cache,
             &self.compressor_frontiers,
         )?;
-        let state_digest = *state.causal_digest();
+        let state_digest = causal_snapshot_digest(&state);
         let (selection_trace_digest, selection_payload_digest, consumed_layer_count) =
             self.fp4_counterfactual_trace.digest();
         let mut hasher = blake3::Hasher::new();
@@ -400,7 +396,7 @@ fn capture_causal_state(
     } else {
         DeepSeekV4SnapshotObservation::Unavailable
     };
-    let mut snapshot = DeepSeekV4CausalSnapshot {
+    let snapshot = DeepSeekV4CausalSnapshot {
         model_content_id,
         compatibility_digest,
         next_position,
@@ -410,9 +406,7 @@ fn capture_causal_state(
         raw_f16_bits: raw_f16_bits.into_boxed_slice(),
         compressor_f32_bits: compressor_f32_bits.into_boxed_slice(),
         published_f16_bits: published_f16_bits.into_boxed_slice(),
-        causal_digest: [0; 32],
     };
-    snapshot.causal_digest = causal_digest(&snapshot);
     validate_snapshot(&snapshot, config, capacity, model_content_id)?;
     Ok(snapshot)
 }
@@ -635,9 +629,6 @@ fn validate_snapshot(
         snapshot.next_position,
         &snapshot.compressor_f32_bits,
     )?;
-    if snapshot.causal_digest != causal_digest(snapshot) {
-        return invalid("DeepSeek V4 snapshot causal digest mismatch");
-    }
     Ok(())
 }
 
@@ -1241,31 +1232,23 @@ fn prefix_digest(tokens: &[u32]) -> [u8; 32] {
     *hasher.finalize().as_bytes()
 }
 
-fn causal_digest(snapshot: &DeepSeekV4CausalSnapshot) -> [u8; 32] {
+/// Hash the canonical snapshot state for diagnostics or durable encoding.
+pub fn causal_snapshot_digest(snapshot: &DeepSeekV4CausalSnapshot) -> [u8; 32] {
     let mut hasher = blake3::Hasher::new();
     hasher.update(STATE_DOMAIN);
     hasher.update(snapshot.model_content_id.as_bytes());
     hasher.update(snapshot.compatibility_digest.as_bytes());
     hash_u32(&mut hasher, snapshot.next_position);
     hasher.update(&snapshot.prefix_digest);
-    hash_u16_arena(&mut hasher, &snapshot.raw_f16_bits);
-    hash_u32_arena(&mut hasher, &snapshot.compressor_f32_bits);
-    hash_u16_arena(&mut hasher, &snapshot.published_f16_bits);
+    hash_arena(&mut hasher, &snapshot.raw_f16_bits);
+    hash_arena(&mut hasher, &snapshot.compressor_f32_bits);
+    hash_arena(&mut hasher, &snapshot.published_f16_bits);
     *hasher.finalize().as_bytes()
 }
 
-fn hash_u16_arena(hasher: &mut blake3::Hasher, values: &[u16]) {
+fn hash_arena<T: bytemuck::Pod>(hasher: &mut blake3::Hasher, values: &[T]) {
     hash_u64(hasher, values.len() as u64);
-    for value in values {
-        hasher.update(&value.to_le_bytes());
-    }
-}
-
-fn hash_u32_arena(hasher: &mut blake3::Hasher, values: &[u32]) {
-    hash_u64(hasher, values.len() as u64);
-    for value in values {
-        hasher.update(&value.to_le_bytes());
-    }
+    hasher.update(bytemuck::cast_slice(values));
 }
 
 fn hash_named_u32(hasher: &mut blake3::Hasher, name: &[u8], value: u32) {
@@ -1442,6 +1425,43 @@ fn write_u32_bits(tensor: &MetalTensor, bits: &[u32]) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn legacy_hash_u16_arena(hasher: &mut blake3::Hasher, values: &[u16]) {
+        hash_u64(hasher, values.len() as u64);
+        for value in values {
+            hasher.update(&value.to_le_bytes());
+        }
+    }
+
+    fn legacy_hash_u32_arena(hasher: &mut blake3::Hasher, values: &[u32]) {
+        hash_u64(hasher, values.len() as u64);
+        for value in values {
+            hasher.update(&value.to_le_bytes());
+        }
+    }
+
+    #[test]
+    fn deepseek_v4_causal_byte_slice_arena_hash_matches_legacy_element_hashing() {
+        for len in [0, 1, 3, 511, 512, 513, 1023, 1024, 1025] {
+            let u16_values = (0..len)
+                .map(|index| (index as u16).wrapping_mul(31337))
+                .collect::<Vec<_>>();
+            let mut optimized = blake3::Hasher::new();
+            let mut legacy = blake3::Hasher::new();
+            hash_arena(&mut optimized, &u16_values);
+            legacy_hash_u16_arena(&mut legacy, &u16_values);
+            assert_eq!(optimized.finalize(), legacy.finalize(), "u16 length {len}");
+
+            let u32_values = (0..len)
+                .map(|index| (index as u32).wrapping_mul(0x9e37_79b9))
+                .collect::<Vec<_>>();
+            let mut optimized = blake3::Hasher::new();
+            let mut legacy = blake3::Hasher::new();
+            hash_arena(&mut optimized, &u32_values);
+            legacy_hash_u32_arena(&mut legacy, &u32_values);
+            assert_eq!(optimized.finalize(), legacy.finalize(), "u32 length {len}");
+        }
+    }
 
     struct SyntheticState {
         capacity: DeepSeekV4SessionCapacity,
@@ -1735,29 +1755,29 @@ mod tests {
     }
 
     #[test]
-    fn rebinding_changes_only_identity_and_its_digests() {
+    fn rebinding_changes_only_identity() {
         let config = crate::deepseek_v4::flash_0731_config_fixture();
-        let mut snapshot = DeepSeekV4CausalSnapshot {
+        let snapshot = DeepSeekV4CausalSnapshot {
             model_content_id: model_id(0x11),
             compatibility_digest: snapshot_compatibility_digest(model_id(0x11), &config),
             next_position: 2,
             prefix_tokens: vec![5, 6].into(),
-            prefix_digest: [0; 32],
+            prefix_digest: prefix_digest(&[5, 6]),
             source_observation: DeepSeekV4SnapshotObservation::Unavailable,
             raw_f16_bits: vec![1, 2, 3].into(),
             compressor_f32_bits: vec![4].into(),
             published_f16_bits: Vec::new().into(),
-            causal_digest: [0; 32],
         };
-        snapshot.refresh_digests();
         let rebound = snapshot.rebound_to_model(model_id(0x22), &config).unwrap();
         assert_eq!(rebound.model_content_id(), model_id(0x22));
         assert_eq!(
             rebound.compatibility_digest(),
             snapshot_compatibility_digest(model_id(0x22), &config)
         );
-        assert_eq!(rebound.causal_digest, causal_digest(&rebound));
-        assert_ne!(rebound.causal_digest, snapshot.causal_digest);
+        assert_ne!(
+            causal_snapshot_digest(&rebound),
+            causal_snapshot_digest(&snapshot)
+        );
         assert_eq!(rebound.prefix_digest, snapshot.prefix_digest);
         assert_eq!(rebound.prefix_tokens, snapshot.prefix_tokens);
         assert_eq!(rebound.raw_f16_bits, snapshot.raw_f16_bits);
@@ -1824,7 +1844,10 @@ mod tests {
             assert_eq!(restored.raw_f16_bits, snapshot.raw_f16_bits);
             assert_eq!(restored.compressor_f32_bits, snapshot.compressor_f32_bits);
             assert_eq!(restored.published_f16_bits, snapshot.published_f16_bits);
-            assert_eq!(restored.causal_digest, snapshot.causal_digest);
+            assert_eq!(
+                causal_snapshot_digest(&restored),
+                causal_snapshot_digest(&snapshot)
+            );
 
             if position == 4 {
                 let raw = tensor_u16(&destination.raw_cache);
@@ -1919,7 +1942,10 @@ mod tests {
         assert_eq!(restored.raw_f16_bits, snapshot.raw_f16_bits);
         assert_eq!(restored.compressor_f32_bits, snapshot.compressor_f32_bits);
         assert_eq!(restored.published_f16_bits, snapshot.published_f16_bits);
-        assert_eq!(restored.causal_digest, snapshot.causal_digest);
+        assert_eq!(
+            causal_snapshot_digest(&restored),
+            causal_snapshot_digest(&snapshot)
+        );
         assert_eq!(restored.compatibility_digest, snapshot.compatibility_digest);
 
         let encode = |snapshot: &DeepSeekV4CausalSnapshot,
@@ -2059,7 +2085,6 @@ mod tests {
         truncated.raw_f16_bits = truncated.raw_f16_bits[..truncated.raw_f16_bits.len() - 1]
             .to_vec()
             .into_boxed_slice();
-        truncated.refresh_digests();
         let error = restore_causal_state(
             &config,
             destination.capacity,
@@ -2079,7 +2104,6 @@ mod tests {
 
         let mut nonfinite = snapshot.clone();
         nonfinite.compressor_f32_bits[0] = f32::NAN.to_bits();
-        nonfinite.refresh_digests();
         let error = restore_causal_state(
             &config,
             destination.capacity,

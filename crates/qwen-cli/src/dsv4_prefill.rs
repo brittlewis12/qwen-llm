@@ -1121,7 +1121,9 @@ fn run_verifier_floor(args: &Dsv4PrefillArgs, build: Value) -> Result<()> {
         snapshot: snapshot_path.display().to_string(),
         snapshot_next_position: snapshot.next_position(),
         snapshot_prefix_sha256: digest_hex(snapshot.prefix_digest()),
-        snapshot_causal_sha256: digest_hex(snapshot.causal_digest()),
+        snapshot_causal_sha256: digest_hex(&qwen_llm::deepseek_v4_metal::causal_snapshot_digest(
+            &snapshot,
+        )),
         model_content_sha256: digest_hex(model_content_id.as_bytes()),
         identity_cache_outcome: format!("{:?}", identity.outcome),
         identity_hashed_bytes: identity.bytes_hashed,

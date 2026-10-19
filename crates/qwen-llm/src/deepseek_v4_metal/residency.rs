@@ -683,22 +683,29 @@ pub(super) fn buffer_as_allocation(
 pub(super) fn deepseek_v4_residency_set_scope_qualified(
     enabled: bool,
     facts: &crate::metal::DeviceFacts,
-    layer_count: u32,
-    expert_count: u32,
-    report: &DeepSeekV4ResidencyReport,
+    admission: MetalMemoryAdmission,
 ) -> bool {
-    enabled
-        && facts.supports_metal_residency_sets()
-        && deepseek_v4_residency_set_qualification().holds_for(facts)
-        && layer_count as usize == DEEPSEEK_V4_LAYER_COUNT
-        && report.tensor_count == DEEPSEEK_V4_FLASH_0731_TENSOR_COUNT
-        && ((expert_count == 160 && report.source_bytes == DEEPSEEK_V4_REAP_K160_SOURCE_BYTES)
-            || (expert_count == 216 && report.source_bytes == DEEPSEEK_V4_REAP_K216_SOURCE_BYTES)
-            || (expert_count == 256 && report.source_bytes == DEEPSEEK_V4_FRESH_SOURCE_BYTES))
+    enabled && facts.supports_metal_residency_sets() && admission.admitted
 }
 
-pub(super) fn deepseek_v4_residency_set_qualification() -> &'static crate::metal::Qualification {
-    &crate::metal::DEEPSEEK_V4_RESIDENCY_SET
+pub(super) fn deepseek_v4_residency_set_memory_admission(
+    report: &DeepSeekV4ResidencyReport,
+    session_priced_upper_bytes: u64,
+    signals: MetalMemorySignals,
+) -> MetalMemoryAdmission {
+    // The realized weights are already present in the device's current
+    // allocation signal. Use the larger observation so the explicit residency
+    // report still protects devices whose allocator telemetry lags realization.
+    let signals = MetalMemorySignals {
+        current_allocated_bytes: signals.current_allocated_bytes.max(report.resident_bytes),
+        ..signals
+    };
+    evaluate_metal_memory_admission(
+        session_priced_upper_bytes,
+        DEEPSEEK_V4_DYNAMIC_MEMORY_RESERVE_BYTES,
+        signals,
+        true,
+    )
 }
 
 /// Report that numerical dtype admission is evaluated at each fast-path gate.
@@ -714,27 +721,39 @@ fn log_deepseek_v4_fast_path_qualification(ctx: &MetalContext, config: &DeepSeek
     }
     eprintln!(
         "deepseek_v4: experts={} device={:?} qualified_fast_paths=per_path_dtype_contracts",
-        config.expert_count,
-        facts.name,
+        config.expert_count, facts.name,
     );
 }
 
 pub(super) fn create_deepseek_v4_residency_set(
     ctx: &MetalContext,
     tensors: &BTreeMap<String, MetalTensor>,
-    config: &DeepSeekV4Config,
     report: &DeepSeekV4ResidencyReport,
+    session_priced_upper_bytes: u64,
 ) -> Option<DeepSeekV4ResidencySetGuard> {
     if !ctx.device_facts().supports_metal_residency_sets() {
         return None;
     }
+    let admission = deepseek_v4_residency_set_memory_admission(
+        report,
+        session_priced_upper_bytes,
+        ctx.memory_signals(),
+    );
     if !deepseek_v4_residency_set_scope_qualified(
         deepseek_v4_residency_set_enabled(),
         ctx.device_facts(),
-        config.layer_count,
-        config.expert_count,
-        report,
+        admission,
     ) {
+        if deepseek_v4_residency_set_enabled() && !admission.admitted {
+            eprintln!(
+                "deepseek_v4: residency set declined reason=working_set_budget required_bytes={:?} resident_weight_bytes={} session_estimate_bytes={} working_set_headroom_bytes={:?} process_remaining_bytes={:?}",
+                admission.required_bytes,
+                report.resident_bytes,
+                session_priced_upper_bytes,
+                admission.working_set_headroom_bytes,
+                admission.signals.process_limit_remaining_bytes,
+            );
+        }
         return None;
     }
     let mut seen = HashSet::new();
@@ -916,7 +935,12 @@ impl DeepSeekV4MetalResidency {
         validate_realization(gguf, &tensors, &plan.report)?;
         let residency_set = {
             log_deepseek_v4_fast_path_qualification(ctx, &plan.config);
-            create_deepseek_v4_residency_set(ctx, &tensors, &plan.config, &plan.report)
+            create_deepseek_v4_residency_set(
+                ctx,
+                &tensors,
+                &plan.report,
+                plan.memory.session_priced_upper_bytes(),
+            )
         };
         let after_residency_bytes = ctx.current_allocated_size();
         plan.memory.reconcile_residency(

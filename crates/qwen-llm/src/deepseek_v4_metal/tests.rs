@@ -396,17 +396,13 @@ const LEGACY_CHECKPOINT_CONTENT_ID: [u8; 32] = [
 ];
 
 #[test]
-fn model_residency_set_scope_is_exact() {
-    assert_eq!(
-        deepseek_v4_residency_set_qualification().path,
-        "deepseek_v4.residency_set"
-    );
+fn model_residency_set_scope_uses_working_set_budget() {
     let m4 = synthetic_device_facts("Apple M4 Max", None, true);
     let mut m3 = synthetic_device_facts("Other Apple GPU", None, true);
     m3.gpu_families.apple7 = false;
-    let mut report = DeepSeekV4ResidencyReport {
+    let report = DeepSeekV4ResidencyReport {
         tensor_count: DEEPSEEK_V4_FLASH_0731_TENSOR_COUNT,
-        source_bytes: DEEPSEEK_V4_REAP_K160_SOURCE_BYTES,
+        source_bytes: 1,
         window_count: 4,
         window_bytes: 0,
         view_count: 0,
@@ -416,59 +412,42 @@ fn model_residency_set_scope_is_exact() {
         alias_bytes: 0,
         fallback_count: 5,
         fallback_bytes: 0,
-        resident_bytes: 0,
+        resident_bytes: 400,
         page_size: 16 * 1024,
         max_buffer_length: 0,
         required_alignment: GGUF_BINDING_ALIGNMENT,
     };
-    assert!(deepseek_v4_residency_set_scope_qualified(
-        true, &m4, 43, 160, &report,
+    let fit_signals = MetalMemorySignals {
+        recommended_max_bytes: 400 + 100 + DEEPSEEK_V4_DYNAMIC_MEMORY_RESERVE_BYTES,
+        current_allocated_bytes: 100,
+        process_limit_remaining_bytes: Some(0),
+    };
+    let fits = deepseek_v4_residency_set_memory_admission(&report, 100, fit_signals);
+    assert!(fits.admitted);
+    assert!(deepseek_v4_residency_set_scope_qualified(true, &m4, fits));
+
+    let no_fit_signals = MetalMemorySignals {
+        recommended_max_bytes: 400 + 99 + DEEPSEEK_V4_DYNAMIC_MEMORY_RESERVE_BYTES,
+        ..fit_signals
+    };
+    let does_not_fit = deepseek_v4_residency_set_memory_admission(&report, 100, no_fit_signals);
+    assert!(!does_not_fit.admitted);
+    assert_eq!(
+        does_not_fit.working_set_headroom_bytes,
+        Some(99 + DEEPSEEK_V4_DYNAMIC_MEMORY_RESERVE_BYTES)
+    );
+    assert!(!deepseek_v4_residency_set_scope_qualified(
+        true,
+        &m4,
+        does_not_fit,
     ));
     let mut old_os = m4.clone();
     old_os.os_version = Some("14.7.1".into());
     assert!(!deepseek_v4_residency_set_scope_qualified(
-        true, &old_os, 43, 160, &report,
+        true, &old_os, fits,
     ));
-    for (enabled, device, layers, experts) in [
-        (false, &m4, 43, 160),
-        (true, &m3, 43, 160),
-        (true, &m4, 42, 160),
-        (true, &m4, 43, 216),
-    ] {
-        assert!(!deepseek_v4_residency_set_scope_qualified(
-            enabled, device, layers, experts, &report,
-        ));
-    }
-
-    let mut k216_report = report.clone();
-    k216_report.source_bytes = DEEPSEEK_V4_REAP_K216_SOURCE_BYTES;
-    assert!(deepseek_v4_residency_set_scope_qualified(
-        true,
-        &m4,
-        43,
-        216,
-        &k216_report,
-    ));
-
-    let mut fresh_report = report.clone();
-    fresh_report.source_bytes = DEEPSEEK_V4_FRESH_SOURCE_BYTES;
-    assert!(deepseek_v4_residency_set_scope_qualified(
-        true,
-        &m4,
-        43,
-        256,
-        &fresh_report,
-    ));
-
-    report.tensor_count -= 1;
-    assert!(!deepseek_v4_residency_set_scope_qualified(
-        true, &m4, 43, 160, &report,
-    ));
-    report.tensor_count += 1;
-    report.source_bytes -= 1;
-    assert!(!deepseek_v4_residency_set_scope_qualified(
-        true, &m4, 43, 160, &report,
-    ));
+    assert!(!deepseek_v4_residency_set_scope_qualified(false, &m4, fits));
+    assert!(deepseek_v4_residency_set_scope_qualified(true, &m3, fits));
 }
 
 #[test]

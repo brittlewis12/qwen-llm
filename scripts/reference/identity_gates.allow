@@ -32,9 +32,6 @@ crates/qwen-cli/src/response_shape_runtime.rs	f3a053733738aa8e05c10c2f078ca5a36c
 crates/qwen-cli/src/serve/durable.rs	checkpoint_content_identity	durable_binding	strong content identity binds durable snapshots to the model weights
 crates/qwen-llm/src/checkpoint_identity.rs	verified_checkpoint_content_identity_with_cancel	disk_integrity	verifies checkpoint bytes read from disk before constructing a content identity
 crates/qwen-llm/src/deepseek_v4_census.rs	*	frozen_experiment	pinned census evidence and frozen research records
-crates/qwen-llm/src/deepseek_v4_metal.rs	104_202_502_492	temporary	trigger: replace with a structural property or keep by decision in the identity-pin review
-crates/qwen-llm/src/deepseek_v4_metal.rs	89_060_075_612	temporary	trigger: replace with a structural property or keep by decision in the identity-pin review
-crates/qwen-llm/src/deepseek_v4_metal.rs	89_920_886_108	temporary	trigger: replace with a structural property or keep by decision in the identity-pin review
 crates/qwen-llm/src/deepseek_v4_metal/prefill.rs	2_166_136_261	frozen_experiment	records a frozen model or experiment accounting value
 crates/qwen-llm/src/glm5_next_chat.rs	0c4099f3382d6c92700dfb99725025360966fd73032f0ecf32377c0d9e6309c5	temporary	trigger: replace with a structural property or keep by decision in the identity-pin review
 crates/qwen-llm/src/glm5_next_chat.rs	230c30609ecbbb9e6583bedde8e7bdda0c6eb8fe5fad0eaeb3d1b293d751cb4f	provenance	records a reviewed source artifact identity

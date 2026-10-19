@@ -1131,7 +1131,6 @@ pub static DEEPSEEK_V4_QUALIFICATIONS: &[&Qualification] = &[
     &DEEPSEEK_V4_PACKED_SHARED_ROUTE_OVERLAP,
     &DEEPSEEK_V4_PACKED_GROUPED_EXPERT,
     &DEEPSEEK_V4_ALL_SLOTS_Q3Q4,
-    &DEEPSEEK_V4_RESIDENCY_SET,
 ];
 
 pub fn qualification_statuses(facts: &DeviceFacts) -> Vec<QualificationStatus> {

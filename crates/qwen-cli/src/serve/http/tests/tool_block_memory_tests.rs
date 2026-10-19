@@ -7,7 +7,7 @@
 
 use super::*;
 use crate::serve::request_profile::RequestProfile;
-use qwen_llm::glm5_next_chat::{TOOL_BLOCK_PEAK_FACTOR, tool_block_peak_bytes};
+use qwen_llm::tool_output_memory::{TOOL_BLOCK_PEAK_FACTOR, tool_block_peak_bytes};
 
 /// Emits `output` in `piece`-byte pieces (ASCII, so every split is a char
 /// boundary), as a backend streams decoded tokens.

@@ -59,7 +59,7 @@ impl Glm5NextToolsPartition {
     /// it already holds.
     fn admit_outstanding(&self, capacity: usize) -> Result<(), ServeError> {
         let held = self.tools.block_capacity();
-        let peak = qwen_llm::glm5_next_chat::checked_tool_block_peak_bytes(capacity)
+        let peak = qwen_llm::tool_output_memory::checked_tool_block_peak_bytes(capacity)
             .ok_or_else(|| super::output_memory::size_overflow("tool block"))?;
         let outstanding = peak.saturating_sub(held);
         super::transport_memory::admit_resident_transport(outstanding as u64, (self.headroom)())
@@ -158,7 +158,7 @@ impl Glm5NextToolsPartition {
 mod tests {
     use super::*;
     use crate::serve::output_partition::GenerationEnd;
-    use qwen_llm::glm5_next_chat::tool_block_peak_bytes;
+    use qwen_llm::tool_output_memory::tool_block_peak_bytes;
     use serde_json::json;
 
     fn weather() -> ToolDefinition {

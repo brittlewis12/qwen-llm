@@ -376,7 +376,7 @@ impl QwenOutputPartition {
     /// Headroom for the tool block's outstanding peak at `capacity`, given
     /// what the buffer already holds.
     fn admit_outstanding(&self, capacity: usize) -> Result<(), ServeError> {
-        let peak = qwen_llm::glm5_next_chat::checked_tool_block_peak_bytes(capacity)
+        let peak = qwen_llm::tool_output_memory::checked_tool_block_peak_bytes(capacity)
             .ok_or_else(|| super::output_memory::size_overflow("tool block"))?;
         let outstanding = peak.saturating_sub(self.tool_buffer.capacity());
         super::transport_memory::admit_resident_transport(outstanding as u64, (self.headroom)())
@@ -583,7 +583,7 @@ mod tests {
         use std::sync::atomic::{AtomicU64, Ordering};
         static HEADROOM: AtomicU64 = AtomicU64::new(u64::MAX);
         let step = super::super::output_memory::OUTPUT_STEP_BYTES;
-        let peak = |bytes: usize| qwen_llm::glm5_next_chat::tool_block_peak_bytes(bytes) as u64;
+        let peak = |bytes: usize| qwen_llm::tool_output_memory::tool_block_peak_bytes(bytes) as u64;
         for (grammar, open, body) in [
             (
                 ToolGrammar::QwenXml,

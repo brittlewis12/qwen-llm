@@ -6,9 +6,8 @@
 //! one-element arrays, deep nesting, many keys) are the worst cases: their
 //! parsed trees cost far more than their text.
 
-use qwen_llm::glm5_next_chat::{
-    TOOL_BLOCK_PEAK_FACTOR, ToolDefinition, parse_tool_calls, tool_block_peak_bytes,
-};
+use qwen_llm::glm5_next_chat::{ToolDefinition, parse_tool_calls};
+use qwen_llm::tool_output_memory::{TOOL_BLOCK_PEAK_FACTOR, tool_block_peak_bytes};
 use serde_json::{Value, json};
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::sync::atomic::{AtomicUsize, Ordering};

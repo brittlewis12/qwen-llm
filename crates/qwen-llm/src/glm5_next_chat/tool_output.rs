@@ -200,10 +200,6 @@ fn typed_argument(definition: &ToolDefinition, key: &str, raw: &str) -> Result<V
     }
 }
 
-pub use crate::tool_output_memory::{
-    TOOL_BLOCK_PEAK_FACTOR, checked_tool_block_peak_bytes, tool_block_peak_bytes,
-};
-
 /// Post-reasoning visible text in, visible text and finally calls out.
 ///
 /// Memory: the block's capacity grows only to what the caller reserved

@@ -182,15 +182,29 @@ pub(crate) fn profile(family: ModelFamily) -> &'static FamilyProfile {
 }
 
 fn assemble(family: ModelFamily, gguf: &GgufFile, reasoning: Value) -> Result<Value> {
+    let input = qwen_cli::capabilities::input_for(
+        Some(family),
+        gguf,
+        |gguf| {
+            crate::qwen4exp::qwen4exp_prompt_capability_failure(ModelFamily::Qwen4Exp, gguf)
+                .map(|failure| failure.as_str().to_owned())
+        },
+        crate::glm5_next::input_capability,
+    );
+    let template = qwen_cli::capabilities::template_for(
+        Some(family),
+        gguf,
+        crate::glm5_next::template_projection,
+    );
     Ok(json!({
         "reasoning": reasoning,
-        "input": serde_json::to_value(crate::input_capability_for(Some(family), gguf))?,
-        "template": crate::template_projection(Some(family), gguf),
+        "input": serde_json::to_value(input)?,
+        "template": template,
     }))
 }
 
 fn qwen_capabilities(family: ModelFamily, gguf: &GgufFile) -> Result<Value> {
-    let reasoning = match crate::QwenUserPromptProtocol::resolve(family, gguf) {
+    let reasoning = match crate::prompt_template::QwenUserPromptProtocol::resolve(family, gguf) {
         Ok(Some(protocol)) => serde_json::to_value(protocol.reasoning_capability())?,
         Ok(None) => unreachable!("ordinary Qwen resolves a protocol"),
         Err(error) => json!({
@@ -211,7 +225,10 @@ fn qwen35_moe_capabilities(gguf: &GgufFile) -> Result<Value> {
 }
 
 fn qwen4exp_capabilities(gguf: &GgufFile) -> Result<Value> {
-    let reasoning = if crate::supports_qwen38_prompt_protocol(ModelFamily::Qwen4Exp, gguf) {
+    let reasoning = if crate::messages::supports_qwen38_release_prompt_protocol(
+        ModelFamily::Qwen4Exp,
+        gguf,
+    ) {
         serde_json::to_value(crate::prompt_template::ReasoningCapability {
             levels: crate::Qwen38GenerationMode::level_names(),
             fallback: Some("xhigh"),
@@ -219,8 +236,9 @@ fn qwen4exp_capabilities(gguf: &GgufFile) -> Result<Value> {
             thinking: crate::prompt_template::Support::Supported,
         })?
     } else {
-        let failure = crate::qwen4exp_prompt_capability_failure(ModelFamily::Qwen4Exp, gguf)
-            .expect("unsupported Flash-Next prompt has a capability failure");
+        let failure =
+            crate::qwen4exp::qwen4exp_prompt_capability_failure(ModelFamily::Qwen4Exp, gguf)
+                .expect("unsupported Flash-Next prompt has a capability failure");
         json!({
             "status": "unsupported",
             "code": "prompt_protocol_unsupported",
@@ -242,7 +260,7 @@ fn deepseek4_capabilities(gguf: &GgufFile) -> Result<Value> {
             );
         }
     };
-    if let Err(error) = crate::deepseek_v4_generation_stops(gguf, config.vocab_size) {
+    if let Err(error) = crate::deepseek_v4::deepseek_v4_generation_stops(gguf, config.vocab_size) {
         return unverified_profile_capabilities(
             "deepseek4_release_profile_unverified",
             error.to_string(),
@@ -288,7 +306,7 @@ fn muse_glimmer_capabilities(gguf: &GgufFile) -> Result<Value> {
     assemble(
         ModelFamily::MuseGlimmer,
         gguf,
-        serde_json::to_value(crate::muse_glimmer_reasoning_capability())?,
+        serde_json::to_value(crate::muse_glimmer::muse_glimmer_reasoning_capability())?,
     )
 }
 

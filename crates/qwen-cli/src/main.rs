@@ -939,112 +939,6 @@ fn prepare_modern_run_prompt(
 /// Which request forms a loaded header renders, per family. Ordinary Qwen
 /// derives it from its protocol (tools need an identified release); Flash-Next
 /// renders templated forms only with the released protocol; DeepSeek V4 and
-/// Muse Glimmer own complete renderers.
-pub(crate) fn input_capability_for(
-    family: Option<ModelFamily>,
-    gguf: &GgufFile,
-) -> prompt_template::InputCapability {
-    use prompt_template::InputCapability;
-    match family {
-        Some(family @ (ModelFamily::Qwen35 | ModelFamily::Qwen35Moe)) => {
-            match QwenUserPromptProtocol::resolve(family, gguf) {
-                Ok(Some(protocol)) => protocol.input_capability(),
-                Ok(None) => unreachable!("ordinary Qwen resolves a protocol"),
-                Err(error) => InputCapability::raw_only("template_unresolved", error.to_string()),
-            }
-        }
-        Some(ModelFamily::Qwen4Exp) => {
-            match qwen4exp_prompt_capability_failure(ModelFamily::Qwen4Exp, gguf) {
-                None => InputCapability::all_supported(),
-                Some(failure) => InputCapability::raw_only(
-                    "prompt_protocol_unsupported",
-                    format!(
-                        "Qwen3.8-Flash-Next chat rendering does not support the declared {}; use --raw-prompt for untemplated input",
-                        failure.as_str()
-                    ),
-                ),
-            }
-        }
-        Some(ModelFamily::DeepSeekV41 | ModelFamily::DeepSeek4 | ModelFamily::MuseGlimmer) => InputCapability::all_supported(),
-        Some(ModelFamily::K2Horizon) => {
-            match qwen_llm::k2_horizon_runtime::K2PreparedArtifact::inspect(gguf)
-                .and_then(|artifact| artifact.generation_stops()) {
-                Ok(_) => InputCapability::raw_only(
-                    "k2_native_chat_renderer_required",
-                    "K2 structured chat uses its native marker and template checks; compatible checkpoints retain raw input".into(),
-                ),
-                Err(error) => InputCapability::none(error.code(), error.to_string()),
-            }
-        }
-        Some(ModelFamily::Glm5Next) => glm5_next::input_capability(gguf),
-        None => InputCapability::none(
-            "unknown_family",
-            "templated input requires a recognised architecture".into(),
-        ),
-    }
-}
-
-/// `capabilities.template`: the rendering contract in force and how the
-/// release was identified.
-fn template_projection(family: Option<ModelFamily>, gguf: &GgufFile) -> serde_json::Value {
-    match family {
-        Some(ModelFamily::Qwen35 | ModelFamily::Qwen35Moe | ModelFamily::Qwen4Exp) => {
-            match prompt_template::identify_qwen_release_for_gguf(gguf) {
-                Ok(identity) if family == Some(ModelFamily::Qwen4Exp) => {
-                    qwen4exp_template_projection(&identity)
-                }
-                Ok(identity) => {
-                    let mut value =
-                        serde_json::to_value(&identity.status).expect("serialize release status");
-                    value["rendered_as"] = serde_json::json!(identity.template.renderer_name());
-                    value
-                }
-                Err(error) => serde_json::json!({
-                    "status": "unresolved",
-                    "message": error.to_string(),
-                }),
-            }
-        }
-        Some(ModelFamily::DeepSeekV41) => {
-            serde_json::json!({"status":"identified", "rendered_as":"deepseek_recipe_dsv41"})
-        }
-        Some(ModelFamily::DeepSeek4) => serde_json::json!({
-            "status": "identified",
-            "version": "deepseek_v4_0731",
-            "source": "general.architecture",
-            "rendered_as": "deepseek_v4_0731",
-        }),
-        Some(ModelFamily::MuseGlimmer) => serde_json::json!({
-            "status": "identified",
-            "version": "muse_glimmer",
-            "source": "general.architecture",
-            "rendered_as": "muse_glimmer",
-        }),
-        Some(ModelFamily::K2Horizon) => serde_json::json!({
-            "status": "unsupported", "rendered_as": null,
-            "message": "K2 Horizon raw input has no template renderer",
-        }),
-        Some(ModelFamily::Glm5Next) => glm5_next::template_projection(gguf),
-        None => serde_json::json!({
-            "status": "unresolved",
-            "message": "no recognised architecture",
-        }),
-    }
-}
-
-fn qwen4exp_template_projection(
-    identity: &prompt_template::QwenReleaseIdentity,
-) -> serde_json::Value {
-    let mut value = serde_json::to_value(&identity.status).expect("serialize release status");
-    if matches!(
-        &identity.status,
-        prompt_template::QwenReleaseStatus::Identified { .. }
-    ) {
-        value["rendered_as"] = serde_json::json!(identity.template.renderer_name());
-    }
-    value
-}
-
 /// `--no-thinking` is a released template transition; every identified
 /// release has one, the generic contract does not.
 #[cfg(test)]
@@ -1249,8 +1143,20 @@ fn project_info(model: &Path, gguf: &GgufFile) -> Result<serde_json::Value> {
                 "code": "unknown_family",
                 "message": "reasoning controls require a recognised architecture",
             },
-            "input": serde_json::to_value(input_capability_for(None, gguf))?,
-            "template": template_projection(None, gguf),
+            "input": serde_json::to_value(qwen_cli::capabilities::input_for(
+                None,
+                gguf,
+                |gguf| {
+                    qwen4exp_prompt_capability_failure(ModelFamily::Qwen4Exp, gguf)
+                        .map(|failure| failure.as_str().to_owned())
+                },
+                glm5_next::input_capability,
+            ))?,
+            "template": qwen_cli::capabilities::template_for(
+                None,
+                gguf,
+                glm5_next::template_projection,
+            ),
         }),
     };
     // Run and serve defaults for every sampling field a request omits.
@@ -1260,243 +1166,18 @@ fn project_info(model: &Path, gguf: &GgufFile) -> Result<serde_json::Value> {
         }
         None => serde_json::Value::Null,
     };
-    let projection = serde_json::json!({
-        "version": "qwen_info_v1",
-        "model": model.display().to_string(),
-        "architecture": gguf.architecture(),
-        "family": family.map(ModelFamily::record_label),
-        "drafter": {
-            "run": project(Lane::CliSingleTurn),
-            "serve": project(Lane::Serve),
-        },
-        "prompt_lookup": { "run": prompt_lookup },
-        "sampling": sampling,
-        "weight_storage": qwen_weight_storage_projection(family, gguf),
-        "capabilities": capabilities,
+    let projection = qwen_cli::info::assemble_projection(qwen_cli::info::ProjectionInput {
+        model: model.display().to_string(),
+        architecture: gguf.architecture(),
+        family: family.map(ModelFamily::record_label),
+        drafter_run: project(Lane::CliSingleTurn),
+        drafter_serve: project(Lane::Serve),
+        prompt_lookup,
+        sampling,
+        weight_storage: qwen_cli::info::weight_storage_projection(family, gguf),
+        capabilities,
     });
     Ok(projection)
-}
-
-fn qwen_weight_storage_projection(
-    family: Option<ModelFamily>,
-    gguf: &GgufFile,
-) -> serde_json::Value {
-    if !matches!(family, Some(ModelFamily::Qwen35 | ModelFamily::Qwen35Moe)) {
-        return serde_json::Value::Null;
-    }
-    let bound = match qwen_llm::loader::Model::from_gguf(gguf) {
-        Ok(model) => model,
-        Err(error) => {
-            return serde_json::json!({ "status": "unavailable", "reason": error.to_string() });
-        }
-    };
-    let storage_configuration =
-        match qwen_llm::metal_forward::resolve_gguf_storage_load_configuration() {
-            Ok(configuration) => configuration,
-            Err(error) => {
-                return serde_json::json!({ "status": "unavailable", "reason": error.to_string() });
-            }
-        };
-    let requests =
-        match qwen_llm::metal_forward::model_weight_storage_requests_for_runtime(gguf, &bound) {
-            Ok(requests) => requests,
-            Err(error) => {
-                return serde_json::json!({ "status": "unavailable", "reason": error.to_string() });
-            }
-        };
-    let device = match qwen_llm::metal::probe_metal_device() {
-        Ok(device) => device,
-        Err(error) => {
-            return serde_json::json!({ "status": "unavailable", "reason": error.to_string() });
-        }
-    };
-    let copied = requests.iter().try_fold(0u64, |sum, request| {
-        device
-            .shared_buffer_size_and_align(request.resident_bytes)
-            .map(|price| sum.saturating_add(price.size))
-    });
-    let mut copied = match copied {
-        Ok(bytes) => bytes,
-        Err(error) => {
-            return serde_json::json!({ "status": "unavailable", "reason": error.to_string() });
-        }
-    };
-    let derived = qwen_llm::metal_forward::fused_qkv_derived_weight_sizes(
-        &bound,
-        qwen_llm::metal_forward::fused_qkv_g8_enabled_for_runtime(),
-    )
-    .and_then(|sizes| {
-        sizes.into_iter().try_fold(0u64, |sum, bytes| {
-            device
-                .shared_buffer_size_and_align(bytes)
-                .map(|price| sum.saturating_add(price.size))
-                .map_err(qwen_llm::metal_forward::MfError::Metal)
-        })
-    });
-    match derived {
-        Ok(bytes) => copied = copied.saturating_add(bytes),
-        Err(error) => {
-            return serde_json::json!({ "status": "unavailable", "reason": error.to_string() });
-        }
-    }
-    let request = storage_configuration.storage_request();
-    let signals = device.memory_signals();
-    let mapping_unsupported = qwen_llm::metal_forward::runtime_retained_mapping_unsupported_reason(
-        gguf,
-        &bound,
-        usize::try_from(device.max_buffer_length()).unwrap_or(usize::MAX),
-    );
-    let decision = qwen_info_storage_decision(
-        copied,
-        0,
-        None,
-        signals,
-        device.device_facts().unified_memory,
-        request,
-        mapping_unsupported,
-    );
-    qwen_weight_storage_report(
-        if decision.map_weights {
-            "mapped"
-        } else {
-            "copied"
-        },
-        copied,
-        signals.recommended_max_bytes,
-        decision.reason,
-    )
-}
-
-fn qwen_info_storage_decision(
-    copied_bytes: u64,
-    auxiliary_weight_bytes: u64,
-    session_reserve_bytes: Option<u64>,
-    signals: qwen_llm::metal::MetalMemorySignals,
-    unified_memory: bool,
-    request: qwen_llm::metal_forward::GgufStorageRequest,
-    mapping_unsupported_reason: Option<&'static str>,
-) -> qwen_llm::metal_forward::GgufNoCopyDecision {
-    qwen_llm::metal_forward::decide_gguf_storage_mode_with_signals(
-        copied_bytes,
-        auxiliary_weight_bytes,
-        session_reserve_bytes,
-        signals,
-        unified_memory,
-        request,
-        mapping_unsupported_reason,
-    )
-}
-
-fn qwen_weight_storage_report(
-    mode: &str,
-    copied_bytes: u64,
-    working_set_bytes: u64,
-    reason: &str,
-) -> serde_json::Value {
-    serde_json::json!({
-        "status": if mode == "unavailable" { "unavailable" } else { "available" },
-        "mode": mode,
-        "load_intent": "reusable",
-        "copied_bytes_estimate": copied_bytes,
-        "recommended_working_set_bytes": working_set_bytes,
-        "reason": reason,
-        "margin_policy": "storage-performance heuristic fitted to measurements; not a memory-admission guarantee (76% copied decoded faster, 97% copied loaded 4-6x slower with heavy paging)",
-    })
-}
-
-/// One line per capability: its status (and code when unsupported), so the
-/// text view says the same thing as `--json` without its detail.
-fn capability_lines(projection: &serde_json::Value) -> Vec<String> {
-    fn status(value: &serde_json::Value) -> String {
-        let field = |key: &str| value.get(key).and_then(serde_json::Value::as_str);
-        match (field("status"), field("code")) {
-            (Some(status), Some(code)) => format!("{status} ({code})"),
-            (Some(status), None) => status.to_owned(),
-            (None, _) => "-".to_owned(),
-        }
-    }
-    let mut lines = Vec::new();
-    for (label, path) in [
-        ("drafter run", "/drafter/run"),
-        ("drafter serve", "/drafter/serve"),
-        ("prompt lookup", "/prompt_lookup/run"),
-    ] {
-        if let Some(value) = projection.pointer(path) {
-            lines.push(format!("{label}: {}", status(value)));
-        }
-    }
-    if let Some(sampling) = projection.get("sampling").filter(|value| value.is_object()) {
-        lines.push(format!(
-            "sampling: temperature {} top-k {} top-p {} min-p {} ({})",
-            sampling["temperature"],
-            sampling["top_k"],
-            sampling["top_p"],
-            sampling["min_p"],
-            sampling["identity"].as_str().unwrap_or("-"),
-        ));
-    }
-    let capabilities = &projection["capabilities"];
-    if let Some(reasoning) = capabilities.get("reasoning") {
-        let levels = reasoning
-            .get("levels")
-            .and_then(serde_json::Value::as_array)
-            .map(|levels| {
-                levels
-                    .iter()
-                    .filter_map(serde_json::Value::as_str)
-                    .collect::<Vec<_>>()
-                    .join("|")
-            });
-        lines.push(match levels.filter(|levels| !levels.is_empty()) {
-            Some(levels) => format!(
-                "reasoning: levels {levels}; no-thinking {}",
-                reasoning
-                    .get("no_thinking")
-                    .map_or_else(|| "-".to_owned(), status)
-            ),
-            None if reasoning.get("status").is_some() => {
-                format!("reasoning: {}", status(reasoning))
-            }
-            None => format!(
-                "reasoning: no effort levels; no-thinking {}",
-                reasoning
-                    .get("no_thinking")
-                    .map_or_else(|| "-".to_owned(), status)
-            ),
-        });
-    }
-    if let Some(input) = capabilities
-        .get("input")
-        .and_then(serde_json::Value::as_object)
-    {
-        let forms: Vec<String> = input
-            .iter()
-            .filter(|(_, value)| value.is_object())
-            .map(|(form, value)| format!("{form} {}", status(value)))
-            .collect();
-        if !forms.is_empty() {
-            lines.push(format!("input: {}", forms.join(", ")));
-        }
-    }
-    if let Some(template) = capabilities.get("template") {
-        let rendered = template
-            .get("rendered_as")
-            .and_then(serde_json::Value::as_str)
-            .map_or(String::new(), |name| format!(" as {name}"));
-        lines.push(format!("template: {}{rendered}", status(template)));
-    }
-    // Either one aggregate refusal (an unverified release profile) or one
-    // entry per execution lane.
-    if let Some(execution) = capabilities.get("execution") {
-        if execution.get("status").is_some() {
-            lines.push(format!("execution: {}", status(execution)));
-        } else if let Some(lanes) = execution.as_object() {
-            for (lane, value) in lanes {
-                lines.push(format!("{lane}: {}", status(value)));
-            }
-        }
-    }
-    lines
 }
 
 /// The family's own `<architecture>.*` metadata: scalar values in full,
@@ -1571,7 +1252,7 @@ fn print_model_info(model_path: &Path) -> Result<()> {
     match project_info(model_path, &gguf) {
         Ok(projection) => {
             println!("capabilities:");
-            for line in capability_lines(&projection) {
+            for line in qwen_cli::info::capability_lines(&projection) {
                 println!("  {line}");
             }
         }
@@ -1628,7 +1309,7 @@ fn print_qwen_hybrid_geometry(gguf: &GgufFile) {
 
 #[cfg(test)]
 mod info_text_tests {
-    use super::capability_lines;
+    use qwen_cli::info::capability_lines;
     use serde_json::json;
 
     #[test]

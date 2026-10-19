@@ -38,7 +38,7 @@ fn family_info_baselines() -> Value {
             json!({
                 "architecture": family.architecture_name(),
                 "json": projection,
-                "text_capability_lines": capability_lines(&projection),
+                "text_capability_lines": qwen_cli::info::capability_lines(&projection),
             }),
         );
         std::fs::remove_file(path).unwrap();

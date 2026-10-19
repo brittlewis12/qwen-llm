@@ -10,8 +10,12 @@ use std::os::unix::fs::PermissionsExt;
 
 #[test]
 fn qwen_info_storage_policy_report_projects_mode_and_capacity() {
-    let report =
-        crate::qwen_weight_storage_report("mapped", 22, 100, "copy_exceeds_working_set_headroom");
+    let report = qwen_cli::info::weight_storage_report(
+        "mapped",
+        22,
+        100,
+        "copy_exceeds_working_set_headroom",
+    );
     assert_eq!(report["mode"], "mapped");
     assert_eq!(report["copied_bytes_estimate"], 22);
     assert_eq!(report["recommended_working_set_bytes"], 100);
@@ -33,7 +37,7 @@ fn qwen_info_storage_decision_matches_load_with_short_process_headroom() {
         process_limit_remaining_bytes: Some(349),
     };
     let request = qwen_llm::metal_forward::GgufStorageRequest::Automatic;
-    let info = qwen_info_storage_decision(100, 0, Some(100), signals, true, request, None);
+    let info = qwen_cli::info::storage_decision(100, 0, Some(100), signals, true, request, None);
     let load = qwen_llm::metal_forward::decide_gguf_storage_mode_with_signals(
         100,
         0,
@@ -1061,7 +1065,7 @@ fn qwen4exp_projection_does_not_publish_a_renderer_the_lane_rejects() {
         QwenReleaseStatus::Unknown { reason, .. }
             if reason.contains("tokenizer.ggml.model")
     ));
-    let projection = qwen4exp_template_projection(&identity);
+    let projection = qwen_cli::capabilities::qwen4exp_template_projection(&identity);
     assert_eq!(projection["status"], "unknown");
     assert!(projection.get("rendered_as").is_none());
     let failure = classify_qwen4exp_prompt_capability(ModelFamily::Qwen4Exp, &facts);

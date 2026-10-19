@@ -11,26 +11,57 @@ use crate::release_identity::{QwenShape, QwenVersion, ReleaseIdentity};
 use crate::{Args, ExplicitCliOptions};
 use qwen_llm::sampling::SamplingConfig;
 
-pub(crate) fn release_sampling(identity: ReleaseIdentity, seed: u64) -> SamplingConfig {
-    match identity {
+/// Seedless release policy, shared by serving and the seeded run API.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct SamplingDefaults {
+    pub(crate) temperature: f32,
+    pub(crate) top_k: usize,
+    pub(crate) top_p: f32,
+    pub(crate) min_p: f32,
+}
+
+impl SamplingDefaults {
+    pub(crate) fn with_seed(self, seed: u64) -> SamplingConfig {
+        SamplingConfig {
+            temperature: self.temperature,
+            top_k: self.top_k,
+            top_p: self.top_p,
+            min_p: self.min_p,
+            seed,
+        }
+    }
+}
+
+pub(crate) fn release_sampling_defaults(identity: ReleaseIdentity) -> SamplingDefaults {
+    let seeded = match identity {
         // Qwen3.5-27B and Qwen3.5-122B-A10B generation_config.json.
         ReleaseIdentity::Qwen {
             version: QwenVersion::Qwen35,
             shape: QwenShape::Dense27b | QwenShape::Moe122bA10b,
-        } => SamplingConfig::qwen3_release(0.6, seed),
+        } => SamplingConfig::qwen3_release(0.6, 0),
         // Every other published Qwen3.x config (3.5-35B-A3B, 3.6, 3.8)
         // declares 1.0 / 20 / 0.95. Releases that publish none (Qwen3.5
         // 0.8B-9B) and unidentified Qwen models take the same convention: a
         // 2026-10-07 A/B on Qwen3.5-2B/9B against the 0.7/200/1/.05 chat
         // preset found it equal or better and loop-free.
-        ReleaseIdentity::Qwen { .. } => SamplingConfig::qwen3_release(1.0, seed),
-        ReleaseIdentity::FlashNext => SamplingConfig::qwen38_flash_next(seed),
-        ReleaseIdentity::DeepSeekV41 => crate::deepseek_v41::default_sampling(seed),
-        ReleaseIdentity::DeepSeekV4 => SamplingConfig::deepseek_v4_0731(seed),
-        ReleaseIdentity::MuseGlimmer => SamplingConfig::muse_glimmer(seed),
-        ReleaseIdentity::K2Horizon => SamplingConfig::k2_horizon(seed),
-        ReleaseIdentity::Glm53Flash => SamplingConfig::glm5_next(seed),
+        ReleaseIdentity::Qwen { .. } => SamplingConfig::qwen3_release(1.0, 0),
+        ReleaseIdentity::FlashNext => SamplingConfig::qwen38_flash_next(0),
+        ReleaseIdentity::DeepSeekV41 => crate::deepseek_v41::default_sampling(0),
+        ReleaseIdentity::DeepSeekV4 => SamplingConfig::deepseek_v4_0731(0),
+        ReleaseIdentity::MuseGlimmer => SamplingConfig::muse_glimmer(0),
+        ReleaseIdentity::K2Horizon => SamplingConfig::k2_horizon(0),
+        ReleaseIdentity::Glm53Flash => SamplingConfig::glm5_next(0),
+    };
+    SamplingDefaults {
+        temperature: seeded.temperature,
+        top_k: seeded.top_k,
+        top_p: seeded.top_p,
+        min_p: seeded.min_p,
     }
+}
+
+pub(crate) fn release_sampling(identity: ReleaseIdentity, seed: u64) -> SamplingConfig {
+    release_sampling_defaults(identity).with_seed(seed)
 }
 
 /// A fresh seed for a request that chose none: the standard library's
@@ -144,6 +175,17 @@ mod tests {
             assert!(config.temperature > 0.0, "{identity:?}");
             assert_eq!(config.seed, 7);
             config.validate().unwrap();
+            let defaults = release_sampling_defaults(identity);
+            assert_eq!(
+                (
+                    defaults.temperature,
+                    defaults.top_k,
+                    defaults.top_p,
+                    defaults.min_p
+                ),
+                (config.temperature, config.top_k, config.top_p, config.min_p),
+                "seedless and seeded release APIs must share one policy: {identity:?}"
+            );
         }
     }
 

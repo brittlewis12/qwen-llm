@@ -29,7 +29,7 @@ The MTP-aware GGUF on disk is `Qwen3.6-27B-MTP-Q4_K_M`. There is no
 kernel-gap work runs on 3.8 non-MTP. **P0 measures native MTP on 3.6-MTP.**
 
 The perflog entry cited elsewhere as "v0.555" is actually **v0.556**
-([PERF-LOG.md:8858](../../archive/perf-log/2026-08.md#2026-08-08---deepseek-v4-2k-prefill-cold-touch-attribution)). The 418-token / 2.602× / 117.6 ms figures belong to v0.556.
+([PERF-LOG.md:8858](../../archive/perf-log/2026-07.md#2026-07-10---v0556-physical-n8-denominator-splits-dense-and-moe)). The 418-token / 2.602× / 117.6 ms figures belong to v0.556.
 
 Weight-pass floor for verify decomposition uses measured M4 Max stream
 bandwidth **474 GB/s** ([PERF-LOG.md:17473-17476](../../archive/perf-log/2026-07.md#2026-07-05---v0484-gdn-update-dot-loop-falsifier)), not the 546 GB/s spec-sheet

@@ -69,7 +69,7 @@ s (σ ≈ 0.13 s, 0.5%); p02 all cells σ ≤ 6 ms.
 
 **Preregistered correctness gate PASSES for all 18 invocations** (`identical=true`
 ∧ `continuation_argmax_equal=true` — greedy-semantic + numerical-state
-equivalence per v0.587's [PERF-LOG.md:8237-8238](../../archive/perf-log/2026-08.md#2026-08-09---deepseek-v4-k216-raw-kv-matrix-transfer-kill) policy).
+equivalence per v0.587's [PERF-LOG.md:8237-8238](../../archive/perf-log/2026-07.md#2026-07-13---v0587-v0588-dense-mtp-committed-tail-falsifier) policy).
 
 **`resume_audit_pass` fails on p01** (all three D configs, all three reps). Root
 cause: `bench.rs:10652-10656` requires `kv_payload_cosine ≥ 0.99999`; we
@@ -80,7 +80,7 @@ KV-numerical drift only.
 
 ## Delta vs perflog anchors — the story
 
-### p01 vs v0.587 anchor ([PERF-LOG.md:8258-8264](../../archive/perf-log/2026-08.md#2026-08-09---deepseek-v4-k216-raw-kv-matrix-transfer-kill))
+### p01 vs v0.587 anchor ([PERF-LOG.md:8258-8264](../../archive/perf-log/2026-07.md#2026-07-13---v0587-v0588-dense-mtp-committed-tail-falsifier))
 
 | Metric | v0.587 (2026-07-13, b818986) | HEAD (2026-08-18, 98aba93) | Δ |
 | --- | ---: | ---: | ---: |
@@ -107,7 +107,7 @@ announces this fix under an obvious keyword (`MTP prompt construction`, `lazy
 MTP prefill`, `batched flush`, etc. — none match). The change must have landed
 as a side-effect of another line of work between 2026-07-13 and 2026-08-17.
 
-### p02 vs v0.556 anchor ([PERF-LOG.md:8867-8877](../../archive/perf-log/2026-08.md#2026-08-08---deepseek-v4-2k-prefill-cold-touch-attribution))
+### p02 vs v0.556 anchor ([PERF-LOG.md:8867-8877](../../archive/perf-log/2026-07.md#2026-07-10---v0556-physical-n8-denominator-splits-dense-and-moe))
 
 | Metric | v0.556 (2026-07-10) | HEAD (2026-08-18) | Δ |
 | --- | ---: | ---: | ---: |

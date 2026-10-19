@@ -47,11 +47,6 @@ pub const QWEN4EXP_RELEASE_TOKENIZER_IDENTITY_SHA256: [u8; 32] = [
     0x90, 0x4a, 0xdd, 0xb3, 0xbb, 0xa6, 0xdc, 0xd5, 0x0b, 0x50, 0xbe, 0xf0, 0x76, 0xe5, 0xe8, 0x9f,
 ];
 
-pub const MUSE_GLIMMER_RELEASE_TOKENIZER_IDENTITY_SHA256: [u8; 32] = [
-    0x90, 0xb2, 0x69, 0x1f, 0xf0, 0xd7, 0x6a, 0x0e, 0x6e, 0xd6, 0xc1, 0x2a, 0x14, 0xac, 0xcb, 0xea,
-    0x5c, 0x9b, 0x34, 0x5d, 0xa5, 0x49, 0x85, 0x8f, 0xcf, 0x75, 0xad, 0x97, 0x9a, 0x56, 0x54, 0x7d,
-];
-
 /// SHA-256 over the raw concatenation of signed token IDs in little-endian
 /// order. This is the production prompt-token identity contract.
 pub fn token_ids_sha256_i32le(tokens: &[i32]) -> String {
@@ -71,11 +66,9 @@ pub fn qwen4exp_tokenizer_identity_sha256(g: &GgufFile) -> Result<[u8; 32], TokE
     bpe_tokenizer_identity_sha256(g, b"qwen4exp-tokenizer-identity-v2\0")
 }
 
-pub fn muse_glimmer_tokenizer_identity_sha256(g: &GgufFile) -> Result<[u8; 32], TokError> {
-    bpe_tokenizer_identity_sha256(g, b"muse-glimmer-tokenizer-identity-v1\0")
-}
-
-fn bpe_tokenizer_identity_sha256(g: &GgufFile, domain: &[u8]) -> Result<[u8; 32], TokError> {
+/// Full BPE tokenizer fingerprint for explicit provenance reports and
+/// qualification tests. Chat admission uses marker and stop properties.
+pub fn bpe_tokenizer_identity_sha256(g: &GgufFile, domain: &[u8]) -> Result<[u8; 32], TokError> {
     let mut digest = Sha256::new();
     digest.update(domain);
     hash_identity_str(

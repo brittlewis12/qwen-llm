@@ -732,7 +732,12 @@ pub fn run(args: MuseRequestArgs) -> Result<()> {
             parameter_count: gguf
                 .get_u64("general.parameter_count")
                 .unwrap_or_else(|| gguf.tensors.iter().map(|tensor| tensor.n_elements()).sum()),
-            tokenizer_identity_sha256: fixed_sha256_hex(config.tokenizer_identity_sha256),
+            tokenizer_identity_sha256: fixed_sha256_hex(
+                qwen_llm::tokenizer::bpe_tokenizer_identity_sha256(
+                    &gguf,
+                    b"muse-glimmer-tokenizer-identity-v1\0",
+                )?,
+            ),
             chat_template_profile: chat_template_profile_label(config.chat_template_profile),
             chat_template_sha256: fixed_sha256_hex(config.chat_template_sha256),
             stop_token_ids: [eos_token_id, eot_token_id],

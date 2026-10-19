@@ -372,7 +372,6 @@ impl TinyMuseModel {
                 padding_token_id: 3,
                 add_bos_token: true,
                 add_sep_token: false,
-                tokenizer_identity_sha256: [0; 32],
                 chat_template_sha256: [0; 32],
                 chat_template_profile: MuseGlimmerChatTemplateProfile::MetaFixed,
             },

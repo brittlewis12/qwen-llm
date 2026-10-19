@@ -112,6 +112,10 @@ Contract:
 - Muse Glimmer uses the released `temperature=1`, `top_p=.95`, `top_k=64`,
   `min_p=0` preset. Each explicitly supplied sampling flag overrides only its
   corresponding field; the request seed remains explicit and deterministic.
+  Chat use checks the renderer's start, message, end, and stop markers directly
+  with the native tokenizer. The embedded-template SHA selects the MetaFixed or
+  UnslothLaunch renderer variant; the tokenizer-wide SHA is reported only as
+  provenance and does not gate chat.
 - Non-Muse modern messages accept the strict ordinary-chat subset (optional
   leading system or developer, alternating user/assistant turns, a final user
   turn) and, on identified Qwen releases (`capabilities.input.tools` in `qwen

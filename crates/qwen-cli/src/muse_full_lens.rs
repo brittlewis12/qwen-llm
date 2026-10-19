@@ -210,13 +210,13 @@ struct TokenScore {
 }
 
 enum ReadArtifact {
-    Generic(generic::GenericAccess),
+    Generic(Box<generic::GenericAccess>),
     Local {
-        manifest: artifact::Manifest,
+        manifest: Box<artifact::Manifest>,
         canonical_json_blake3: String,
     },
     Published {
-        manifest: published::Manifest,
+        manifest: Box<published::Manifest>,
         canonical_json_blake3: String,
     },
 }
@@ -478,20 +478,22 @@ pub(crate) fn read_full(args: ReadFullArgs) -> Result<()> {
     let gguf = GgufFile::open(&args.model)
         .with_context(|| format!("open Muse model {}", args.model.display()))?;
     let mut read_artifact = match probe.schema.as_str() {
-        "llm.lens.linear_transport" => ReadArtifact::Generic(generic::GenericAccess::open(
-            args.full_lens
-                .as_deref()
-                .context("--full-lens is required")?,
-            &gguf,
-            Some(&args.identity_cache),
-            args.allow_unvalidated_transfer,
-        )?),
+        "llm.lens.linear_transport" => {
+            ReadArtifact::Generic(Box::new(generic::GenericAccess::open(
+                args.full_lens
+                    .as_deref()
+                    .context("--full-lens is required")?,
+                &gguf,
+                Some(&args.identity_cache),
+                args.allow_unvalidated_transfer,
+            )?))
+        }
         artifact::SCHEMA => {
             let manifest: artifact::Manifest = super::read_json_file(&manifest_path)?;
             artifact::validate_manifest(&manifest)?;
             let canonical_json_blake3 = super::digest_json(&manifest)?;
             ReadArtifact::Local {
-                manifest,
+                manifest: Box::new(manifest),
                 canonical_json_blake3,
             }
         }
@@ -504,7 +506,7 @@ pub(crate) fn read_full(args: ReadFullArgs) -> Result<()> {
             published::validate_manifest(&manifest)?;
             let canonical_json_blake3 = super::digest_json(&manifest)?;
             ReadArtifact::Published {
-                manifest,
+                manifest: Box::new(manifest),
                 canonical_json_blake3,
             }
         }
@@ -1155,13 +1157,12 @@ pub(crate) fn trace_full(args: TraceFullArgs) -> Result<()> {
                 .iter()
                 .find(|matrix| matrix.source_layer == layer)
                 .context("Muse published trace omitted a selected source matrix")?;
-            let matrix = read_matrix(
+            read_matrix(
                 &full_lens,
                 &manifest.payload.path,
                 manifest.payload.byte_length,
                 descriptor,
-            )?;
-            matrix
+            )?
         };
         matrix_read_wall_ms += started.elapsed().as_secs_f64() * 1e3;
         let started = Instant::now();
@@ -1396,6 +1397,20 @@ pub(crate) fn trace_full(args: TraceFullArgs) -> Result<()> {
             true,
         )
     };
+    let tokenizer_metadata_id = if let Some(metadata_id) = generic
+        .as_ref()
+        .and_then(|a| a.runtime_binding["tokenizer_metadata_id"].as_str())
+    {
+        metadata_id.to_owned()
+    } else {
+        super::hex(
+            &qwen_llm::tokenizer::bpe_tokenizer_identity_sha256(
+                &gguf,
+                b"muse-glimmer-tokenizer-identity-v1\0",
+            )
+            .context("fingerprint Muse tokenizer for lens report provenance")?,
+        )
+    };
     let document = MuseTraceDocument {
         schema: "qwen.lens.trace",
         schema_version: 3,
@@ -1417,11 +1432,7 @@ pub(crate) fn trace_full(args: TraceFullArgs) -> Result<()> {
             vocab_size: model_config.vocab_size,
         },
         tokenizer: MuseTraceTokenizer {
-            metadata_id: generic
-                .as_ref()
-                .and_then(|a| a.runtime_binding["tokenizer_metadata_id"].as_str())
-                .map(str::to_owned)
-                .unwrap_or_else(|| super::hex(&model_config.tokenizer_identity_sha256)),
+            metadata_id: tokenizer_metadata_id,
             model: Some(model_config.tokenizer_model.clone()),
             pretokenizer: Some(model_config.tokenizer_pre.clone()),
         },
@@ -2370,8 +2381,8 @@ fn convert_f32_slice_to_f16(input: &[u8], output: &mut Vec<u8>) -> Result<()> {
     output
         .try_reserve_exact(expected)
         .context("allocate Muse F16 conversion buffer")?;
-    for chunk in input.chunks_exact(4) {
-        let value = f32::from_le_bytes(chunk.try_into().unwrap());
+    for chunk in input.as_chunks::<4>().0 {
+        let value = f32::from_le_bytes(*chunk);
         ensure!(
             value.is_finite(),
             "Muse input transport contains non-finite F32"

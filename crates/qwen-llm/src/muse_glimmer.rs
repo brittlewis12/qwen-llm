@@ -6,10 +6,7 @@
 
 use crate::gguf::{GgufError, GgufFile};
 use crate::tensor::{GgmlType, TensorDesc};
-use crate::tokenizer::{
-    MUSE_GLIMMER_RELEASE_TOKENIZER_IDENTITY_SHA256, Tokenize,
-    muse_glimmer_tokenizer_identity_sha256,
-};
+use crate::tokenizer::Tokenize;
 use sha2::{Digest, Sha256};
 use std::collections::HashSet;
 
@@ -82,7 +79,6 @@ pub struct MuseGlimmerConfig {
     pub padding_token_id: u32,
     pub add_bos_token: bool,
     pub add_sep_token: bool,
-    pub tokenizer_identity_sha256: [u8; 32],
     pub chat_template_sha256: [u8; 32],
     pub chat_template_profile: MuseGlimmerChatTemplateProfile,
 }
@@ -118,6 +114,19 @@ impl MuseGlimmerConfig {
                 self.eos_token_id.to_string(),
             ));
         }
+        let markers = [
+            ("<|start|>", Some(200_022)),
+            ("<|message|>", Some(200_023)),
+            ("<|eom|>", Some(200_007)),
+            ("<|eot|>", Some(200_008)),
+            ("<|end_of_text|>", Some(200_001)),
+        ];
+        crate::tokenizer::require_single_token_markers(&markers, |marker| {
+            tokenizer
+                .encode(marker, false)
+                .map_err(|error| error.to_string())
+        })
+        .map_err(|reason| invalid("Muse chat markers", reason))?;
         Ok(())
     }
 
@@ -164,7 +173,6 @@ impl MuseGlimmerConfig {
         }
         let chat_template_sha256: [u8; 32] = Sha256::digest(chat_template.as_bytes()).into();
         let chat_template_profile = classify_chat_template(chat_template_sha256)?;
-        let tokenizer_identity_sha256 = muse_glimmer_tokenizer_identity_sha256(gguf)?;
 
         let config = Self {
             layer_count,
@@ -191,7 +199,6 @@ impl MuseGlimmerConfig {
             padding_token_id: required_u32(gguf, "tokenizer.ggml.padding_token_id")?,
             add_bos_token: required_bool(gguf, "tokenizer.ggml.add_bos_token")?,
             add_sep_token: required_bool(gguf, "tokenizer.ggml.add_sep_token")?,
-            tokenizer_identity_sha256,
             chat_template_sha256,
             chat_template_profile,
         };
@@ -225,7 +232,6 @@ impl MuseGlimmerConfig {
             padding_token_id: 200_018,
             add_bos_token: true,
             add_sep_token: false,
-            tokenizer_identity_sha256: MUSE_GLIMMER_RELEASE_TOKENIZER_IDENTITY_SHA256,
             chat_template_sha256: META_FIXED_CHAT_SHA256,
             chat_template_profile: MuseGlimmerChatTemplateProfile::MetaFixed,
         }
@@ -352,15 +358,6 @@ impl MuseGlimmerConfig {
             return Err(invalid(
                 "tokenizer.ggml.add_bos_token",
                 "released Muse tokenizer requires add_bos=true and add_sep=false",
-            ));
-        }
-        if self.tokenizer_identity_sha256 != MUSE_GLIMMER_RELEASE_TOKENIZER_IDENTITY_SHA256 {
-            return Err(invalid(
-                "Muse tokenizer identity",
-                format!(
-                    "unrecognized SHA-256 {}",
-                    hex_digest(self.tokenizer_identity_sha256)
-                ),
             ));
         }
         let classified = classify_chat_template(self.chat_template_sha256)?;

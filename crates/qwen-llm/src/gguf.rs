@@ -1539,6 +1539,7 @@ fn bounds_check(mmap: &[u8], p: usize, n: usize) -> Result<(), GgufError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use objc2_metal::MTLBuffer;
 
     fn fixture() -> std::path::PathBuf {
         // Use the smallest local Qwen3.5 GGUF as a real-world fixture.
@@ -2812,6 +2813,103 @@ mod tests {
             matches!(err, GgufError::MissingKey("tokenizer.ggml.eos_token_id")),
             "expected MissingKey, got {err:?}",
         );
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn shared_retained_realization_matches_legacy_synthetic_views() {
+        let page_size = crate::metal::host_page_size_bytes().expect("host page size");
+        let mut bytes = build_test_gguf(
+            &[],
+            &[TestTensor {
+                name: "synthetic.weight",
+                value: 3.25,
+            }],
+        );
+        bytes.resize(page_size * 2, 0);
+        let path = write_temp(&bytes);
+        let gguf = GgufFile::open(&path).expect("open synthetic GGUF");
+        let desc = &gguf.tensors[0];
+        let plan = crate::metal::plan_retained_storage(
+            &gguf.shard_mapped_lengths(),
+            &[desc],
+            page_size,
+            page_size * 2,
+            32,
+        )
+        .expect("plan synthetic retained view");
+        assert!(matches!(
+            plan.entries[0].disposition,
+            crate::metal::RetainedStorageDisposition::View { .. }
+        ));
+
+        let ctx = crate::metal::MetalContext::new().expect("create Metal context");
+        let (windows, tensors) = crate::metal::realize_retained_storage_views(
+            &ctx,
+            &gguf,
+            &plan,
+            &[desc],
+            32,
+            crate::metal::MetalError::GgufNoCopy,
+            |_, _, _, _| unreachable!("synthetic plan contains no fallback"),
+        )
+        .expect("realize shared synthetic view");
+
+        // Preserve the previous family realization sequence as the reference.
+        let mut legacy_windows = Vec::new();
+        for window in &plan.windows {
+            legacy_windows.push(
+                ctx.gguf_no_copy_window(
+                    gguf.retained_shard_mmap(window.shard_idx)
+                        .expect("synthetic shard exists"),
+                    window.shard_idx,
+                    usize::try_from(window.mmap_offset).unwrap(),
+                    window.length,
+                    32,
+                )
+                .expect("realize legacy synthetic window"),
+            );
+        }
+        let (eligibility, legacy_tensor) = legacy_windows[0].tensor(desc).unwrap();
+        let legacy_tensor = legacy_tensor.expect("legacy view is eligible");
+        let shared_tensor = &tensors[0];
+        assert_eq!(eligibility, crate::metal::GgufBackingEligibility::Eligible);
+        assert_eq!(windows.len(), legacy_windows.len());
+        for (shared, legacy) in windows.iter().zip(&legacy_windows) {
+            assert_eq!(shared.mmap_offset(), legacy.mmap_offset());
+            assert_eq!(shared.exposed_len(), legacy.exposed_len());
+            assert_eq!(shared.required_alignment(), legacy.required_alignment());
+        }
+        assert_eq!(shared_tensor.offset, legacy_tensor.offset);
+        assert_eq!(shared_tensor.shape, legacy_tensor.shape);
+        assert_eq!(shared_tensor.dtype, legacy_tensor.dtype);
+        assert_eq!(shared_tensor.n_bytes(), legacy_tensor.n_bytes());
+        assert_eq!(shared_tensor.provenance(), legacy_tensor.provenance());
+        let expected_bytes = gguf.try_slice(desc).expect("synthetic tensor bytes");
+        let shared_bytes = unsafe {
+            std::slice::from_raw_parts(
+                shared_tensor
+                    .buffer
+                    .contents()
+                    .as_ptr()
+                    .cast::<u8>()
+                    .add(shared_tensor.offset as usize),
+                expected_bytes.len(),
+            )
+        };
+        assert_eq!(shared_bytes, expected_bytes);
+        let legacy_bytes = unsafe {
+            std::slice::from_raw_parts(
+                legacy_tensor
+                    .buffer
+                    .contents()
+                    .as_ptr()
+                    .cast::<u8>()
+                    .add(legacy_tensor.offset as usize),
+                expected_bytes.len(),
+            )
+        };
+        assert_eq!(legacy_bytes, expected_bytes);
         let _ = std::fs::remove_file(&path);
     }
 }

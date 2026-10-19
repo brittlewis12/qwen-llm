@@ -78,7 +78,7 @@ uv run scripts/bench/ensure_llama_cpp.py --smoke-model "$MODEL"
 ```
 
 The lock lives at `scripts/bench/llama-cpp.lock.json`. The builder uses a shared
-cache under `~/.cache/qwen-llm/llama.cpp`, reuses the local `~/code/llama.cpp`
+cache under `~/.cache/qwen-llm/llama.cpp`, reuses an existing local llama.cpp
 object store if present, and passes only `-DCMAKE_BUILD_TYPE=Release` so Metal,
 Accelerate/BLAS, ccache, and other defaults remain llama.cpp defaults at the
 pinned commit. If those defaults stop producing the expected `MTL,BLAS` backend
@@ -565,7 +565,8 @@ Trace provenance matters:
   token counts. Sequential local runs are real traces, but usually occupancy-1
   smoke, not S8 evidence.
 - `scripts/profile/request_trace_from_game.py` builds scenario traces from
-  `~/code/llm/game` transcripts. It emits provenance comments such as
+  transcripts supplied from the configured input directory. It emits provenance
+  comments such as
   `arrival_source`, `completion_source`, `token_count_source`, and
   `is_empirical_arrival=false`. When `--model` is supplied, exact counts use the
   lightweight `qwen-tok` binary rather than `qwen-bench`.
@@ -577,7 +578,7 @@ Example scenario packet:
 
 ```sh
 uv run scripts/profile/request_trace_from_game.py \
-  --input '$HOME/code/llm/game/*.json' \
+  --input "$QWEN_BENCH_INPUT_DIR/*.json" \
   --arrival-model fixed-gap --fixed-gap-ms 500 \
   --output target/profiles/game-scenario-fixed500.tsv
 
@@ -1009,7 +1010,7 @@ Rules:
 - Compare label counts with model metadata, not vibes. For A3B, expect `40`
   `moe-route-fused`, `40` `moe-routed-grouped`, and `40` `moe-shared-packed`
   labels on the default grouped path.
-- Pair trace coverage with `~/code/gguf/target/debug/gguf <model> --tensors` when
+- Pair trace coverage with `${GGUF_TOOL:-gguf} <model> --tensors` when
   auditing dtype support. Expert `gate/up/down` dtypes can vary by layer.
 - Treat any unexpected `moe-routed-token-loop`, `moe-route-token-loop`, or missing
   layer label as a higher-EV bug candidate than local kernel retuning.
@@ -1343,7 +1344,7 @@ the log with the local summary helper:
 
 ```sh
 GGML_METAL_PROFILE_OPS=1 \
-~/code/llama.cpp/build/bin/llama-bench \
+${LLAMA_BENCH:-llama-bench} \
   -m "$MODEL" \
   -p 4096 \
   -n 0 \
@@ -1424,7 +1425,7 @@ Important:
 - For MoE Metal attribution, record llama.cpp's startup line `has tensor = ...`.
   On the current M4 Max, `has tensor = false`; forcing
   `GGML_METAL_TENSOR_ENABLE=1` does not make the Metal4 tensor path live.
-- Use `~/code/gguf/target/debug/gguf <model> --tensors` when you need quick GGUF
+- Use `${GGUF_TOOL:-gguf} <model> --tensors` when you need quick GGUF
   tensor-name/type confirmation, for example whether a model has separate
   `ffn_gate_exps` / `ffn_up_exps` or a fused `ffn_gate_up_exps` tensor.
 - The bounded `llama-cli` shape for this repo is:
@@ -1435,7 +1436,7 @@ print(('The quick brown fox jumps over the lazy dog. ' * 32).strip())
 PY
 )"
 
-~/code/llama.cpp/build/bin/llama-cli \
+${LLAMA_CLI:-llama-cli} \
   -m "$MODEL" \
   -st \
   --temp 0 \
@@ -1596,20 +1597,11 @@ repo's Rust/Metal decode workload.
 - If a Metal parser returns zero rows, inspect `xcrun xctrace export --toc` and
   confirm process names; WindowServer and prior runs can also own GPU intervals.
 
-## What to add to the repo next
+## Profiling tool coverage
 
-The strongest autonomous profiling setup would be repo-native:
-
-1. `scripts/profile/trace-cpu` wrapping `xctrace` + `ztrace`.
-2. `scripts/profile/trace-metal.py` for Metal table summaries.
-3. `scripts/profile/trace-alloc.py` for Allocations summaries.
-4. `scripts/profile/bench-compare.py` wrapping `hyperfine` output.
-5. Optional `--profile-metal-counters` using `MTLCounterSampleBuffer`.
-6. Optional feature-gated allocation counter or `dhat-rs` profile.
-7. Optional `MTLCaptureManager` capture flag for `.gputrace` snapshots.
-
-Once (1)-(4) exist and have stable machine-readable summaries, extract a skill
-that simply invokes those scripts and reports concise results.
+The repository includes `scripts/profile/trace-metal.py` for Metal table
+summaries and `qwen-bench metal-counters` for supported counter collection.
+Other profiling tools are described in their respective sections below.
 
 Suggested script output contracts:
 

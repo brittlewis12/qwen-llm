@@ -4,11 +4,8 @@ This document defines the `qwen serve` contract as implemented; gate records
 follow.
 
 Evidence base: S0 packet
-(`docs/bench/2026-08-18-facade-s0-render-prefix-stability/`), the S1/S2/S3
-gate records under `docs/bench/`, the successful real OpenCode session
-`ses_fe307ea3effefOzYcDBgTbYiie` (2026-08-20, 5 h overnight / 58 requests /
-133 k tokens), adversarial reviews
-(`ses_fe8ee25c6ffe`), and the full investigation session (OpenCode Recall).
+(`docs/bench/2026-08-18-facade-s0-render-prefix-stability/`) and the S1/S2/S3
+gate records under `docs/bench/`.
 
 ## Scope
 
@@ -32,7 +29,7 @@ Operating goals, in order:
 | ----------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | S0                | Prefix-stability falsifier                                                                                                                                                                                                                                                   | measurement                                 | DONE — see packet RESULTS                                                                                                                                                                                                             |
 | S1                | Resident serial server, Open Responses subset, no tools                                                                                                                                                                                                                      | the game (thin HTTP client)                 | Functional evidence passed, but not the literal full gate: client was 187 lines versus `<150`, and the `<150 ms` TTFT gate failed at 186 ms. Conformance was 6/6 in scope and cancellation measured 24 ms — docs/bench/2026-08-18-serve-s1-gates/ |
-| S2                | Tool items (XML-parameter form from the template oracle), exact declared/allowed-tool enforcement, continuation rendering                                                                                                                                                    | OpenCode via stock `@ai-sdk/open-responses` | Provider gate: 10/10 requests checkpoint-hit (94–100% restored), 5/5 turns tool-called. `allowed_tools` subsequently landed. Production evidence: real OpenCode session `ses_fe307ea3effefOzYcDBgTbYiie` ran successfully for 5 h overnight — docs/bench/2026-08-19-s2-agent-gate/ |
+| S2                | Tool items (XML-parameter form from the template oracle), exact declared/allowed-tool enforcement, continuation rendering                                                                                                                                                    | OpenCode via stock `@ai-sdk/open-responses` | Provider gate: 10/10 requests checkpoint-hit (94–100% restored), 5/5 turns tool-called. `allowed_tools` subsequently landed. Production evidence: a 5 h overnight run — `docs/bench/2026-08-19-s2-agent-gate/` |
 | S3                | Pre-opened (headless) reasoning support, DeepSeek V4 family backend, DFlash drafter integration. `encrypted_content` is **not** implemented.                                                                                                                                    | OpenCode, DS4 clients                       | Core cells 1–5 passed: warm snapshot hits, CLI byte identity including CJK/emoji, 91% reasoning replay restore, clean headless partition, fail-closed behavior. Live cells 6–9 still require rerun — docs/bench/2026-08-19-s3-ds4-gate/ |
 
 ## Remaining program
@@ -124,7 +121,7 @@ memory envelope). Engine optimization candidates live in `docs/PERF-ROADMAP.md`.
 
 ## Current behaviour
 
-One new subcommand:
+Start the server with:
 
 ```sh
 qwen serve -m MODEL [--addr 127.0.0.1:8737] [--max-tokens N] \
@@ -230,8 +227,8 @@ is not a residency set.
     and with a command in flight
     (`docs/bench/2026-10-05-residency-kill-check/`).
 - **Eligible families.** Every family whose serve weights are no-copy GGUF
-  windows: GLM-5.3-Flash, K2 Horizon, DeepSeek V4, Muse Glimmer and
-  Qwen3.8-Flash-Next. Ordinary Qwen is also eligible when its selected storage
+  windows: GLM-5.3-Flash, K2 Horizon, DeepSeek V4, DeepSeek V4.1, Muse Glimmer
+  and Qwen3.8-Flash-Next. Ordinary Qwen is also eligible when its selected storage
   mode maps the GGUF weights. Each backend names its buffers (`retained_buffers()`).
   - Flash-Next's CPU-read PLE table stays in the page cache, outside the
     pulse.
@@ -244,8 +241,10 @@ is not a residency set.
 ### Durable snapshots (cross-restart warmth)
 
 Qwen (3.5/3.6/3.8 dense and MoE) and DeepSeek V4 keep warm prefixes across
-restarts in a disk tier under the RAM cache. Flash-Next, Muse Glimmer, K2 and
-GLM-5.3-Flash have no durable tier: an explicit `--durable-snapshot-*` value is
+restarts in a disk tier under the RAM cache. DeepSeek V4.1 uses automatic
+exact-prefix RAM snapshots and has no durable tier. Flash-Next, Muse Glimmer,
+K2 and GLM-5.3-Flash also have no durable tier: an explicit
+`--durable-snapshot-*` value is
 refused at startup (`--durable-snapshot-dir off` is accepted), and the default
 logs that the tier does not apply. Muse and K2 reuse their live session
 instead of snapshots, so they refuse snapshot settings they cannot honour: a
@@ -445,8 +444,10 @@ qwen serve -m MODEL --trace-sse "$trace_dir/serve-$(date +%Y%m%d-%H%M%S).jsonl"
   `Retry-After: 1`. HTTP/1.1 with
   `Connection: close`; hand-rolled request parse (loopback threat model;
   request bodies are `Content-Length` JSON).
-- **Implemented families: Qwen3.5/3.6/3.8, Qwen3.8-Flash-Next, DeepSeek
-  V4, Muse Glimmer, and K2 Horizon raw/native-format chat and tools.** DS4 runs its own session and snapshot stack
+- **Implemented families: Qwen3.5/3.6/3.8, Qwen3.8-Flash-Next, DeepSeek V4,
+  Muse Glimmer, and K2 Horizon raw/native-format chat and tools. DeepSeek V4.1
+  has its own text-generation backend and automatic exact-prefix RAM snapshots.
+  DS4 runs its own session and snapshot stack
   (`serve/backend_ds4.rs`) with a startup-fixed forward budget and a
   serve-owned snapshot cache (`serve/snapshot_cache.rs`; DS4 has no
   engine-side RAM prefix cache). Flash-Next (`serve/backend_qwen4exp.rs`, since 2026-09-17) holds
@@ -464,7 +465,8 @@ qwen serve -m MODEL --trace-sse "$trace_dir/serve-$(date +%Y%m%d-%H%M%S).jsonl"
   K/V rows: `118,063,104 + 24,576·n + 3,072·⌊n/4⌋` bytes (≈113 MiB + 24.75
   KiB/token; ≈0.95 GB at 32K). `--snapshot-cache-mib` configures the Qwen,
   Flash-Next, DS4 and GLM-5.3-Flash caches (default `auto`; see the cache
-  policy above). Muse
+  policy above). DeepSeek V4.1 uses automatic exact-prefix RAM snapshots with no
+  durable tier. Muse
   reuses its one live session's longest common token prefix by default (no
   snapshots; `QWEN_MUSE_PREFIX_REUSE=0` disables).
   K2 keeps one live session and reuses its longest common token prefix (see
@@ -555,7 +557,7 @@ and local `qwen run --user/--messages`. Raw strings never opt into templating:
 their EOS-only stop set and literal output contract below are unchanged.
 
 ```sh
-qwen serve -m "$HOME/models/K2-Horizon-7B-Q8_0.gguf" \
+qwen serve -m "$QWEN_MODEL_SEARCH_PATH/K2-Horizon-7B-Q8_0.gguf" \
   --addr 127.0.0.1:8795 --max-context-tokens 256 --max-tokens 8
 ```
 
@@ -1308,9 +1310,8 @@ because client model-pickers probe it).
    existing model-context/capacity and device admission checks. Unset or `1`
    permits only qualified execution; BF16 and other devices retain original math.
    Matrix prefill uses tiled full128 chunks and online packed remainders; scalar
-   tails remain. Split decode admits528 KiB scratch and requires1024 visible KV
-   positions. CLI-only math variables remain independent. Native ATEM, sampling,
-   reasoning and terminal-token accounting do not change. Token-prefix identity
+   tails remain. Split decode admits 528 KiB scratch and requires 1024 visible KV positions. CLI-only math variables remain
+   independent. Native ATEM, sampling, reasoning and terminal-token accounting do not change. Token-prefix identity
    is exact, but changed chunk boundaries and generated-versus-prompt history
    make optimized warm/reset arithmetic numerical, not bitwise or sampled-exact.
    Diagnostics report resolved options, planned tiled/online token counts, and
@@ -1318,11 +1319,7 @@ because client model-pickers probe it).
   Serve's durable tier (see
   [Durable snapshots](#durable-snapshots-cross-restart-warmth)) spills Qwen
   entries on eviction/expiry and shutdown rather than publishing per turn.
-  `--durable-dual-publish` is
-  designed but unbuilt (review R2: at q38's ~90 KB/token, dual durable publish
-  of a 32k context is ~6 GB/turn — LRU churn that evicts the prefixes it
-  is meant to protect, and publish time serializes the next request on a
-  serial server). Live cache-pressure behavior remains part of the S3 rerun.
+  Live cache-pressure behavior remains part of the S3 rerun.
 - **Replay-fidelity coverage (review R6):** render→items→render byte
   identity is asserted by unit tests (`render.rs` split/render inverse,
   `tool_parse.rs` `qwen36_raw_echo_identity`, `render_ds4.rs` preserved
@@ -1558,12 +1555,11 @@ graceful disconnect detection before that first write is inherently best-effort.
 
 ## Adversarial review record
 
-k3 review (`ses_fe8ee25c6ffe`, 2026-08-18) returned REVISE with six
+The 2026-08-18 adversarial review returned REVISE with six
 defects — item-list grammar vs turn grammar, `developer` role, unknown-
 field policy, `sequence_number`, TTFT gate gameable by heartbeats, and
-two interpretation-passable gates — all incorporated above, plus: dual
-durable publish demoted to a default-off flag, replay-fidelity golden
-pulled into S1, fixture-before-renderer ordering, and `x_qwen.stats`
+two interpretation-passable gates — all incorporated above, along with the
+replay-fidelity golden, fixture-before-renderer ordering, and `x_qwen.stats`
 response echo. Named riskiest assumption: stock-provider reasoning-item
 replay fidelity (mitigated by the S1 golden; measured by the S2 gate's
 `matched_tokens` definition).

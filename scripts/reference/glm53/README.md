@@ -13,7 +13,7 @@ not a source copy) and refuses any other revision:
 
 ```sh
 cmake -S scripts/reference/glm53 -B target/glm53-oracle \
-  -DLLAMA_CPP_DIR=$HOME/code/llama.cpp -DCMAKE_BUILD_TYPE=Release
+  -DLLAMA_CPP_DIR=/path/to/pinned/llama.cpp -DCMAKE_BUILD_TYPE=Release
 nice -n 10 cmake --build target/glm53-oracle --target glm53_oracle -j 4
 target/glm53-oracle/bin/glm53_oracle --identity
 ```

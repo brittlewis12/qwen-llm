@@ -54,6 +54,16 @@ path = "DeepSeek-V4-Flash-0731-UD-IQ3_XXS-00001-of-00004.gguf"
 tg_depths = [0, 8192]
 
 [[models]]
+tag = "deepseek-v41"
+display = "DeepSeek-V4.1-Flash-REAP-272E-MXFP4-Q8Engram"
+family = "deepseek_v41"
+kind = "moe"
+quant = "MXFP4-Q8Engram"
+path = "DeepSeek-V4.1-Flash-REAP-272E-MXFP4-Q8Engram.gguf"
+lcpp = false
+tg_depths = [0, 8192]
+
+[[models]]
 tag = "muse-30b"
 display = "Muse-Glimmer-30B"
 family = "muse_glimmer"

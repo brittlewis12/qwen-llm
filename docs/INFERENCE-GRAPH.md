@@ -10,9 +10,8 @@ Primary local references:
 
 - This engine: `crates/qwen-llm/src/metal_forward.rs`,
   `crates/qwen-llm/src/metal_dflash.rs`, `kernels/`.
-- llama.cpp: `$HOME/code/llama.cpp/src/models/qwen35.cpp`,
-  `$HOME/code/llama.cpp/src/models/qwen35moe.cpp`,
-  `$HOME/code/llama.cpp/ggml/src/ggml-metal/`.
+- llama.cpp: `src/models/qwen35.cpp`, `src/models/qwen35moe.cpp`, and
+  `ggml/src/ggml-metal/` in the pinned upstream checkout.
 - Current performance context: `docs/PERF-ROADMAP.md`, `docs/PERF-LOG.md`.
 
 ## 1. Shared Semantic Model
@@ -198,8 +197,8 @@ flowchart TD
 
 Important llama.cpp details:
 
-- Qwen dense path is built in `$HOME/code/llama.cpp/src/models/qwen35.cpp`.
-- Qwen MoE path is built in `$HOME/code/llama.cpp/src/models/qwen35moe.cpp`.
+- Qwen dense path is built in `src/models/qwen35.cpp` in the pinned upstream checkout.
+- Qwen MoE path is built in `src/models/qwen35moe.cpp` in the pinned upstream checkout.
 - Hybrid memory is split between `llama_kv_cache` for attention layers and
   `llama_memory_recurrent` for GDN/conv state.
 - Metal graph compute can encode graph slices on a main thread plus `n_cb`

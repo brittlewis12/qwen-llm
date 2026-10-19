@@ -6,7 +6,6 @@
 - [serve-opencode](serve-opencode.md): connect OpenCode to a local serve process.
 - [CLI-UX](CLI-UX.md): command-line design evidence and decisions.
 - [ENV](ENV.md): generated snapshot of the environment-knob reference.
-- [K2-HORIZON-PLAN](K2-HORIZON-PLAN.md): current K2 Horizon implementation map and evidence.
 - [THIRD-PARTY-NOTICES](THIRD-PARTY-NOTICES.md): licenses and notices for third-party components.
 
 ## Lens
@@ -35,13 +34,17 @@
 
 ## Design records for shipped features
 
-- [H4-MTP](H4-MTP.md): design and implementation record for Qwen3.6 MTP speculative decoding.
+- [H4-MTP](H4-MTP.md): Qwen3.6 MTP design and implementation record; its benchmark is reachable only through `qwen-bench`.
 - [H5-DFLASH](H5-DFLASH.md): design and implementation record for the DFlash speculative-decoding path.
 - [DEEPSEEK-V4-STRATEGY](DEEPSEEK-V4-STRATEGY.md): architecture and implementation record for DeepSeek V4 support.
 
+## Current reference
+
+- [DEEPSEEK-V41-BRINGUP](DEEPSEEK-V41-BRINGUP.md): current V4.1 bring-up requirements and evidence.
+
 ## Research notes
 
-- [DEEPSEEK-V41-STRATEGY](DEEPSEEK-V41-STRATEGY.md): source-verified assessment of DeepSeek V4.1 architecture.
+- [DEEPSEEK-V41-STRATEGY](DEEPSEEK-V41-STRATEGY.md): concise V4.1 requirement and design reference.
 - [H6-VISION](H6-VISION.md): unstarted design for native Qwen vision input.
 - [LENS-CROSSED-TASK](LENS-CROSSED-TASK.md): exploratory study of transfer across crossed tasks.
 - [LENS-DEPTH-AND-ORDER](LENS-DEPTH-AND-ORDER.md): exploratory findings on layer depth and sequence order.

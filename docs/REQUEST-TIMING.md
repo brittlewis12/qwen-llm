@@ -7,16 +7,18 @@ any decision about comparability; changing a field's meaning is a request-stats
 contract change. The common record builder writes schema version 2.
 
 Families: Qwen (Qwen3.5/3.6/3.8 dense and MoE, single turn); Flash-Next
-(Qwen3.8-Flash-Next); DS4 (DeepSeek V4); Muse (Muse Glimmer); K2 (Kimi K2
-Horizon); GLM (GLM-5.3). “Prefill” means processing prompt tokens. “Transition”
-means feeding a selected non-stop token back through the model to get the next
+(Qwen3.8-Flash-Next); DS4 (DeepSeek V4); V4.1 (DeepSeek V4.1); Muse (Muse
+Glimmer); K2 (Kimi K2 Horizon); GLM (GLM-5.3). “Prefill” means processing
+prompt tokens. “Transition” means feeding a selected non-stop token back through the model to get the next
 logits. “Resident execution” means the measured prefill-through-generator-return
 phase in K2/GLM diagnostics. “Unclassified” is the lane wall minus the sum of
 recorded phases.
 
 Scope: this page covers single-turn `--request-stats-jsonl` records and stderr
-stats, plus DS4 `--requests-jsonl` result/timing diagnostics. It excludes
-Qwen's separate `--request-timings` format and the DFlash and prompt-lookup
+stats, plus DS4 `--requests-jsonl` result/timing diagnostics and V4.1 single-turn
+request stats. V4.1 reports prompt encoding, Metal/model loading, prefill, decode,
+and total; session allocation follows `load_ms` and precedes resident execution.
+It excludes Qwen's separate `--request-timings` format and the DFlash and prompt-lookup
 decode paths; their timing semantics are not established here.
 
 ## Events and clocks
@@ -34,14 +36,14 @@ decode paths; their timing semantics are not established here.
 
 ## Stderr stats
 
-| Field | Qwen | Flash-Next | DS4 | Muse | K2 | GLM |
-|---|---|---|---|---|---|---|
-| `tokenizer_ms` | — | tokenizer construction + encoding | construction only | tokenizer construction + tokenizer-contract validation + encoding | encoding | encoding + token-ID check |
-| `load_ms` | runtime/model initialization through post-load checks and configuration; includes tokenizer construction on request 0 | device through weights and session | device through session; `prefetch_ms` is separately reported | device through weights and session | Metal context creation and model loading, plus session creation | weights plus session; no device setup or prefetch |
-| `prefill_ms` | Sum of measured prefill calls; excludes restore/capture | Prompt processing through timing accounting and mode selection; packed-profile mode uses its separate third-pass sample | Prompt processing, including restore, memory reconciliation, logits copy, and optional debug output | Prompt-processing interval | Prompt-processing interval | Prompt-processing interval |
+| Field | Qwen | Flash-Next | DS4 | V4.1 | Muse | K2 | GLM |
+|---|---|---|---|---|---|---|---|
+| `tokenizer_ms` | — | tokenizer construction + encoding | construction only | prompt encoding | tokenizer construction + tokenizer-contract validation + encoding | encoding | encoding + token-ID check |
+| `load_ms` | runtime/model initialization through post-load checks and configuration; includes tokenizer construction on request 0 | device through weights and session | device through session; `prefetch_ms` is separately reported | Metal context creation, resident-weight loading and forward setup | device through weights and session | Metal context creation and model loading, plus session creation | weights plus session; no device setup or prefetch |
+| `prefill_ms` | Sum of measured prefill calls; excludes restore/capture | Prompt processing through timing accounting and mode selection; packed-profile mode uses its separate third-pass sample | Prompt processing, including restore, memory reconciliation, logits copy, and optional debug output | Prompt-processing call | Prompt-processing interval | Prompt-processing interval | Prompt-processing interval |
 | `ttft_ms` | Request start to first written boundary above | — | — | — | — | — |
-| `generation_ms` | — | Decode loop wall time | Decode loop wall time | Decode loop wall time | Decode loop wall time | Decode loop wall time |
-| `total_ms` | — | Clock sample before stats-line printing | — | Clock sample before stats-line printing | Lane clock sample before stats-line printing | Lane clock sample after output assembly, before stats-line printing |
+| `generation_ms` | — | Decode loop wall time | Decode loop wall time | — | Decode loop wall time | Decode loop wall time | Decode loop wall time |
+| `total_ms` | — | Clock sample before stats-line printing | — | Preparation + encoding + resident execution | Clock sample before stats-line printing | Lane clock sample before stats-line printing | Lane clock sample after output assembly, before stats-line printing |
 
 Other stderr fields:
 
@@ -74,13 +76,13 @@ Other stderr fields:
 
 ## Request-stats JSONL records
 
-| Field | Qwen | Flash-Next, DS4, Muse | K2, GLM |
+| Field | Qwen | Flash-Next, DS4, Muse | V4.1 | K2, GLM |
 |---|---|---|---|
-| `timing_ms.tokenization` | Encoding | Encoding only | Encoding (GLM also includes token-ID check) |
-| `timing_ms.prefill` | Sum of measured prefill calls | Same family-specific prefill interval as above | Same family-specific prefill interval as above |
-| `timing_ms.decode` | Decode loop wall | Decode loop wall | Decode loop wall |
-| `timing_ms.total` | Encoding + request preparation + resident execution | Encoding + request preparation + resident execution | Sum of the same three non-overlapping phases. |
-| `throughput_tps.prefill` / `.decode` | Present | Present | Present |
+| `timing_ms.tokenization` | Encoding | Encoding only | Prompt encoding | Encoding (GLM also includes token-ID check) |
+| `timing_ms.prefill` | Sum of measured prefill calls | Same family-specific prefill interval as above | Same family-specific prefill interval as above | Same family-specific prefill interval as above |
+| `timing_ms.decode` | Decode loop wall | Decode loop wall | Decode loop wall | Decode loop wall |
+| `timing_ms.total` | Encoding + request preparation + resident execution | Encoding + request preparation + resident execution | Preparation + encoding + resident execution | Sum of the same three non-overlapping phases. |
+| `throughput_tps.prefill` / `.decode` | Present | Present | Present | Present |
 
 Schema v2 changes `timing_ms.total` to the sum of encoding, request
 preparation, and resident execution for every lane. A v1 total from Qwen,

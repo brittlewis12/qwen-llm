@@ -366,8 +366,8 @@ The fixture generator has three deliberately distinguished sources of evidence:
   projection/gating composition ran.
 
 Run `uv run scripts/reference/generate_dsv4_oracle.py` from the repository root
-with DwarfStar at `~/code/ds4` and llama.cpp at `~/code/llama.cpp`, or set
-`DSV4_DWARFSTAR_DIR` and `DSV4_LLAMA_CPP_DIR`. Python 3.14 and NumPy 2.5.1 are
+with checkout paths supplied through `DSV4_DWARFSTAR_DIR` and
+`DSV4_LLAMA_CPP_DIR`. Python 3.14 and NumPy 2.5.1 are
 pinned by the script metadata; the llama.cpp lane additionally requires CMake
 and a C++17 compiler. Use the same command with `--check` for a captured-
 toolchain byte-for-byte drift gate; the ignored

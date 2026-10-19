@@ -103,7 +103,7 @@ Contract:
   guarantee there.
 - `--reasoning-effort` is resolved by model family for structured
   `--user`/`--messages` input. Validated Qwen3.8 accepts
-  `low|medium|xhigh` and defaults to upstream xhigh; Muse Glimmer accepts
+  `none|low|medium|xhigh` and defaults to upstream xhigh; Muse Glimmer accepts
   exact `low|medium|high|xhigh` reasoning strengths and defaults to `high`;
   DeepSeek V4 accepts its `low|high|max` thinking tiers (preserving replayed
   reasoning) and defaults to ordinary chat. Each family rejects the other
@@ -194,21 +194,20 @@ only to `qwen run --messages -` in this slice.
 
 ## Field evidence
 
-Later on 2026-08-10, a separate OpenCode agent working on Recall interface
-design (`ses_084e54a7bffevGEXaLl2Yhph12`) discovered this runner without being
-prompted to use it. It located the project, read the README, inspected
-`qwen run --help`, and selected the modern structured path:
+A 2026-08-10 naturalistic usability episode discovered this runner without
+prompting to use it. The user interface was located through the README and `qwen run --help`,
+which led to the modern structured path:
 
 ```sh
 qwen run -m MODEL --messages - --no-thinking --temp 0 --max-tokens 700
 ```
 
-It used Qwen as a usability participant rather than falling back to legacy raw
-`-p`. The resulting review changed the Recall candidate: the participant read
-`applied=100` as 100 returned messages despite a separate `messages=37` field,
-and exposed ambiguity about how to continue a capped result window. This is one
-naturalistic episode, not evidence of prevalence, but it demonstrates
-unprompted discovery, correct interface composition, and direct workflow value.
+The workflow used Qwen rather than falling back to legacy raw `-p`. The review
+changed the Recall candidate: `applied=100` was read as 100 returned messages
+despite a separate `messages=37` field, and it exposed ambiguity about how to
+continue a capped result window. This is one naturalistic episode, not evidence
+of prevalence, but it demonstrates unprompted discovery, correct interface
+composition, and direct workflow value.
 
 The response reached the 700-token cap with `stop_reason=token_limit`, so this
 episode does not demonstrate reliable answer completion. It instead preserves
@@ -314,11 +313,11 @@ checks describe tokenizer and format compatibility; they do not authenticate
 weights or determine whether a checkpoint was chat-tuned.
 
 ```sh
-qwen run -m "$HOME/models/K2-Horizon-7B-Q8_0.gguf" \
+qwen run -m "$QWEN_MODEL_SEARCH_PATH/K2-Horizon-7B-Q8_0.gguf" \
   --user 'Explain why long-context evaluation is difficult.' \
   --reasoning-effort high -n 32768 --temp 1 --top-p 0.95
-qwen run -m "$HOME/models/K2-Horizon-7B-Q8_0.gguf" --messages conversation.json -n 1024
-qwen run -m "$HOME/models/K2-Horizon-7B-Q4_K_M.gguf" --user 'What is 2+2?' \
+qwen run -m "$QWEN_MODEL_SEARCH_PATH/K2-Horizon-7B-Q8_0.gguf" --messages conversation.json -n 1024
+qwen run -m "$QWEN_MODEL_SEARCH_PATH/K2-Horizon-7B-Q4_K_M.gguf" --user 'What is 2+2?' \
   --reasoning-effort low -n 128
 ```
 

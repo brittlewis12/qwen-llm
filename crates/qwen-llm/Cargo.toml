@@ -17,6 +17,7 @@ workspace = true
 default = []
 dflash-k0s-diagnostics = []
 dsv4-diagnostics = []
+perf-ablations = []
 
 [dependencies]
 objc2.workspace = true

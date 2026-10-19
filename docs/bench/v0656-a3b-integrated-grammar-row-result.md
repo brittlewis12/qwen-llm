@@ -1,5 +1,10 @@
 # v0.656 A3B Integrated Grammar-Row Result
 
+Archived 2026-10-18: the concluded `qwen-bench integrated-grammar-row`
+experiment was removed after the v0.656 KILL decision. This result is retained
+as historical evidence; its command is no longer available in the current
+workspace.
+
 Status: **KILL**. The exact compact Q6_K head removes real transition work,
 but the frozen request-local bank organization slows the complete request and
 regresses TTFT. The packet grants no performance or product authority.

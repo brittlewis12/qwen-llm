@@ -10129,7 +10129,7 @@ impl DeepSeekV4Session {
             endpoint_tokens,
             endpoint_prefix_digest: *endpoint.prefix_digest(),
             endpoint_compatibility_id: *endpoint.compatibility_digest().as_bytes(),
-            endpoint_causal_digest: *endpoint.causal_digest(),
+            endpoint_causal_digest: causal_snapshot_digest(&endpoint),
             endpoint_observation: endpoint.source_observation(),
             continuation_logits_bits,
             continuation_hidden_bits,
@@ -10137,7 +10137,7 @@ impl DeepSeekV4Session {
             continuation_tokens,
             continuation_prefix_digest: *continuation.prefix_digest(),
             continuation_compatibility_id: *continuation.compatibility_digest().as_bytes(),
-            continuation_causal_digest: *continuation.causal_digest(),
+            continuation_causal_digest: causal_snapshot_digest(&continuation),
             continuation_observation: continuation.source_observation(),
             sha256: [0; 32],
         };

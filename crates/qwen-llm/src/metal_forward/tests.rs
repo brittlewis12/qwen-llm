@@ -4,6 +4,13 @@ use crate::gguf::GgufFile;
 use crate::loader::Model;
 use crate::sampling::{Sampler, SamplingConfig};
 
+#[cfg(not(feature = "perf-ablations"))]
+#[test]
+fn perf_ablation_predicate_is_compile_time_false_without_feature() {
+    const PREDICATE_DISABLED: bool = !super::decode_moe_noop_route_enabled();
+    assert!(PREDICATE_DISABLED);
+}
+
 #[path = "tests/iq2_xs_mma.rs"]
 mod iq2_xs_mma;
 #[path = "tests/iq2_xs_mma_model.rs"]
@@ -58,7 +65,8 @@ fn qualification_facts(
     unified_memory: bool,
 ) -> crate::metal::DeviceFacts {
     crate::metal::DeviceFacts {
-        version: "qwen_device_info_v6",
+        version: "qwen_device_info_v7",
+        features: crate::enabled_diagnostic_features(),
         name: name.into(),
         architecture: "test".into(),
         registry_id: 0,

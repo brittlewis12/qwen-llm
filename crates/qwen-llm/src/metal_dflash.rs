@@ -703,7 +703,7 @@ fn prefill_gdn_proj_oracle_layer_enabled(layer_idx: usize) -> bool {
         .is_some_and(|layers| layers.contains(&usize::MAX) || layers.contains(&layer_idx))
 }
 
-crate::env_flag!(default_off prefill_noop_ffn_enabled, "QWEN_PREFILL_NOOP_FFN");
+crate::env_flag!(perf_ablation prefill_noop_ffn_enabled, "QWEN_PREFILL_NOOP_FFN");
 
 thread_local! {
     static PREFILL_DENSE_FFN_FUSED_SWIGLU_Q4_OVERRIDE: Cell<Option<bool>> = const { Cell::new(None) };
@@ -816,15 +816,15 @@ crate::env_flag!(default_on prefill_moe_packed_down_sum_enabled, "QWEN_PREFILL_M
 
 crate::env_flag!(default_on prefill_moe_packed_shared_enabled, "QWEN_PREFILL_MOE_PACKED_SHARED");
 
-crate::env_flag!(default_off prefill_noop_moe_shared_enabled, "QWEN_PREFILL_NOOP_MOE_SHARED");
+crate::env_flag!(perf_ablation prefill_noop_moe_shared_enabled, "QWEN_PREFILL_NOOP_MOE_SHARED");
 
-crate::env_flag!(default_off prefill_noop_moe_routed_enabled, "QWEN_PREFILL_NOOP_MOE_ROUTED");
+crate::env_flag!(perf_ablation prefill_noop_moe_routed_enabled, "QWEN_PREFILL_NOOP_MOE_ROUTED");
 
-crate::env_flag!(default_off prefill_noop_moe_grouped_swiglu_enabled, "QWEN_PREFILL_NOOP_MOE_GROUPED_SWIGLU");
+crate::env_flag!(perf_ablation prefill_noop_moe_grouped_swiglu_enabled, "QWEN_PREFILL_NOOP_MOE_GROUPED_SWIGLU");
 
-crate::env_flag!(default_off prefill_noop_moe_grouped_down_enabled, "QWEN_PREFILL_NOOP_MOE_GROUPED_DOWN");
+crate::env_flag!(perf_ablation prefill_noop_moe_grouped_down_enabled, "QWEN_PREFILL_NOOP_MOE_GROUPED_DOWN");
 
-crate::env_flag!(default_off prefill_noop_moe_grouped_reduce_enabled, "QWEN_PREFILL_NOOP_MOE_GROUPED_REDUCE");
+crate::env_flag!(perf_ablation prefill_noop_moe_grouped_reduce_enabled, "QWEN_PREFILL_NOOP_MOE_GROUPED_REDUCE");
 
 crate::env_flag!(default_on prefill_moe_grouped_enabled, "QWEN_PREFILL_MOE_GROUPED");
 
@@ -1099,7 +1099,7 @@ fn prefill_moe_grouped_q4_n32_all_enabled(_arch: &crate::model::Arch, _chunk_p: 
 
 crate::env_flag!(default_off prefill_moe_fused_finalizer_enabled, "QWEN_PREFILL_MOE_FUSED_FINALIZER");
 
-crate::env_flag!(default_off prefill_moe_grouped_zero_fill_enabled, "QWEN_PREFILL_MOE_GROUPED_ZERO_FILL");
+crate::env_flag!(perf_ablation prefill_moe_grouped_zero_fill_enabled, "QWEN_PREFILL_MOE_GROUPED_ZERO_FILL");
 
 fn prefill_moe_tiny_down_r16_enabled(chunk_p: usize) -> bool {
     static MODE: OnceLock<PrefillEnvMode> = OnceLock::new();
@@ -2279,20 +2279,14 @@ fn prefill_scratch_overlay_diagnostic_mode_present() -> bool {
         "QWEN_PREFILL_GDN_MATVEC_PROJ",
         "QWEN_PREFILL_GDN_MATVEC_LAYER",
         "QWEN_PREFILL_GDN_SPLIT",
-        "QWEN_PREFILL_NOOP_GDN_BODY",
-        "QWEN_PREFILL_NOOP_ATTN_BODY",
-        "QWEN_PREFILL_NOOP_FFN",
-        "QWEN_PREFILL_NOOP_MOE_SHARED",
-        "QWEN_PREFILL_NOOP_MOE_ROUTED",
-        "QWEN_PREFILL_NOOP_MOE_GROUPED_SWIGLU",
-        "QWEN_PREFILL_NOOP_MOE_GROUPED_DOWN",
-        "QWEN_PREFILL_NOOP_MOE_GROUPED_REDUCE",
         "QWEN_PREFILL_ATTN_PACKED_G8_ORACLE",
         "QWEN_PREFILL_ATTN_PACKED_G16_ORACLE",
     ];
-    DIAGNOSTIC_ENV
+    let unrelated_diagnostic = DIAGNOSTIC_ENV
         .iter()
-        .any(|name| std::env::var_os(name).is_some())
+        .any(|name| std::env::var_os(name).is_some());
+    unrelated_diagnostic
+        || crate::env_flag::any_perf_ablation_enabled_with_prefixes(&["QWEN_PREFILL_NOOP_"])
 }
 
 fn attn_matrix_query_tiles(n_rows: usize, max_rows: usize) -> impl Iterator<Item = (usize, usize)> {
@@ -2550,9 +2544,9 @@ fn build_expert_slot_groups_cpu(
     (ranges, slot_ids, token_ids, weights)
 }
 
-crate::env_flag!(default_off prefill_noop_gdn_body_enabled, "QWEN_PREFILL_NOOP_GDN_BODY");
+crate::env_flag!(perf_ablation prefill_noop_gdn_body_enabled, "QWEN_PREFILL_NOOP_GDN_BODY");
 
-crate::env_flag!(default_off prefill_noop_attn_body_enabled, "QWEN_PREFILL_NOOP_ATTN_BODY");
+crate::env_flag!(perf_ablation prefill_noop_attn_body_enabled, "QWEN_PREFILL_NOOP_ATTN_BODY");
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum PrefillGdnSplitMode {

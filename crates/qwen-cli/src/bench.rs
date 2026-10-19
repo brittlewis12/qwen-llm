@@ -46,11 +46,9 @@ mod family_options;
 mod gdn_replay;
 mod gguf_arena_floor;
 mod grammar_lm_head_row_floor;
-mod grammar_row_runtime;
 mod host_validity;
 #[path = "bench/identity.rs"]
 mod identity;
-mod integrated_grammar_row;
 mod k2_request_bench;
 mod moe_gdn_repair;
 #[path = "bench/moe_micro.rs"]
@@ -77,7 +75,6 @@ mod proj_micro;
 use qwen_cli::{messages, prompt_template};
 mod q4_mma_ceiling;
 mod residency_kill_child;
-use qwen_cli::response_shape_runtime;
 #[path = "bench/roofline.rs"]
 mod roofline;
 mod rope_micro;
@@ -441,10 +438,6 @@ mod stop_token_cli_tests {
                 "response_shape_runtime.rs",
                 include_str!("response_shape_runtime.rs"),
             ),
-            (
-                "grammar_row_runtime.rs",
-                include_str!("grammar_row_runtime.rs"),
-            ),
             ("serve/mod.rs", include_str!("serve/mod.rs")),
             ("serve/backend.rs", include_str!("serve/backend.rs")),
             ("serve/backend_ds4.rs", include_str!("serve/backend_ds4.rs")),
@@ -493,7 +486,8 @@ mod stop_token_cli_tests {
 /// (always-null on old emitters) does NOT require a bump.
 /// v3: `family` and `n_depth`; `test` gains an `@d<depth>` suffix at depth;
 /// `arch_kind` carries the family label for non-Qwen families.
-const BENCH_SCHEMA_VERSION: u32 = 3;
+/// v4: BuildIdentity carries the compile-time enabled feature list.
+const BENCH_SCHEMA_VERSION: u32 = 4;
 
 /// One bench result row. Field names match `llama-bench`'s JSON schema where
 /// the meaning is the same; engine-specific fields are `Option<T>` and
@@ -602,6 +596,10 @@ fn model_weight_bytes(g: &qwen_llm::gguf::GgufFile) -> u64 {
 }
 
 fn main() -> std::process::ExitCode {
+    if let Err(error) = qwen_llm::env_flag::check_perf_ablation_environment() {
+        eprintln!("{error}");
+        return std::process::ExitCode::FAILURE;
+    }
     shutdown::finish(run())
 }
 
@@ -688,11 +686,6 @@ fn run() -> Result<()> {
             q4_mma_ceiling::run(a, serde_json::to_value(recorded_build_identity())?)
         }
         Cmd::GrammarLmHeadRowFloor(a) => grammar_lm_head_row_floor::run(
-            a,
-            serde_json::to_value(recorded_build_identity())?,
-            capture_qwen_env(),
-        ),
-        Cmd::IntegratedGrammarRow(a) => integrated_grammar_row::run(
             a,
             serde_json::to_value(recorded_build_identity())?,
             capture_qwen_env(),

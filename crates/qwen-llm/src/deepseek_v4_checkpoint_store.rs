@@ -406,7 +406,7 @@ fn same_causal_state(a: &DeepSeekV4CausalSnapshot, b: &DeepSeekV4CausalSnapshot)
         && a.model_content_id() == b.model_content_id()
         && a.compatibility_digest() == b.compatibility_digest()
         && a.next_position() == b.next_position()
-        && a.causal_digest() == b.causal_digest()
+        && a.causal_arenas_equal(b)
 }
 
 fn blob_name(matched_len: usize, digest: &[u8; 32]) -> String {
@@ -839,8 +839,8 @@ mod tests {
             variant.snapshot.prefix_tokens()
         );
         assert_ne!(
-            original.snapshot.causal_digest(),
-            variant.snapshot.causal_digest()
+            crate::deepseek_v4_metal::causal_snapshot_digest(&original.snapshot),
+            crate::deepseek_v4_metal::causal_snapshot_digest(&variant.snapshot)
         );
 
         store
@@ -857,7 +857,10 @@ mod tests {
             .unwrap()
             .snapshot
             .unwrap();
-        assert_eq!(survivor.causal_digest(), original.snapshot.causal_digest());
+        assert_eq!(
+            crate::deepseek_v4_metal::causal_snapshot_digest(&survivor),
+            crate::deepseek_v4_metal::causal_snapshot_digest(&original.snapshot)
+        );
     }
 
     #[test]
@@ -891,7 +894,10 @@ mod tests {
             .unwrap()
             .snapshot
             .unwrap();
-        assert_eq!(survivor.causal_digest(), fixture.snapshot.causal_digest());
+        assert_eq!(
+            crate::deepseek_v4_metal::causal_snapshot_digest(&survivor),
+            crate::deepseek_v4_metal::causal_snapshot_digest(&fixture.snapshot)
+        );
     }
 
     #[test]

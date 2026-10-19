@@ -1937,7 +1937,9 @@ fn ds4_write_temporal_diagnostics(
             let snapshot = session
                 .capture_causal_snapshot()
                 .context("capture final temporal DeepSeek V4 causal state")?;
-            Some(hex_encode_bytes(snapshot.causal_digest()))
+            Some(hex_encode_bytes(
+                &qwen_llm::deepseek_v4_metal::causal_snapshot_digest(&snapshot),
+            ))
         } else {
             None
         };

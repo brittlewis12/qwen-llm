@@ -355,7 +355,8 @@ fn synthetic_device_facts(
     unified: bool,
 ) -> crate::metal::DeviceFacts {
     crate::metal::DeviceFacts {
-        version: "qwen_device_info_v6",
+        version: "qwen_device_info_v7",
+        features: crate::enabled_diagnostic_features(),
         name: name.into(),
         architecture: "test".into(),
         registry_id: 0,
@@ -2642,7 +2643,7 @@ fn current_asset_packed_gpu_route_kill_packet() {
         let packed = session
             .capture_causal_snapshot()
             .expect("capture packed GPU route state");
-        let packed_causal_digest = *packed.causal_digest();
+        let packed_causal_digest = causal_snapshot_digest(&packed);
         let packed_prefix_digest = *packed.prefix_digest();
         let compatibility_digest = *packed.compatibility_digest().as_bytes();
         session
@@ -2664,7 +2665,7 @@ fn current_asset_packed_gpu_route_kill_packet() {
             packed_prefix_digest,
             compatibility_digest,
             continuation_logits,
-            continuation_causal_digest: *continuation.causal_digest(),
+            continuation_causal_digest: causal_snapshot_digest(&continuation),
             committed_tokens: session.committed_tokens().to_vec(),
             route_generations,
             packed_wall_ms,
@@ -2952,7 +2953,7 @@ fn current_asset_packed_grouped_expert_integration_packet() {
         let snapshot = session
             .capture_causal_snapshot()
             .expect("capture packed grouped state");
-        let causal_digest = *snapshot.causal_digest();
+        let causal_digest = causal_snapshot_digest(&snapshot);
         let prefix_digest = *snapshot.prefix_digest();
         let compatibility_digest = *snapshot.compatibility_digest().as_bytes();
         session
@@ -2974,7 +2975,7 @@ fn current_asset_packed_grouped_expert_integration_packet() {
             prefix_digest,
             compatibility_digest,
             continuation_logits,
-            continuation_causal_digest: *continuation.causal_digest(),
+            continuation_causal_digest: causal_snapshot_digest(&continuation),
             committed_tokens: session.committed_tokens().to_vec(),
             grouped_iq2_invocations: session.packed_grouped_iq2_invocations_for_test(),
             grouped_iq3_invocations: session.packed_grouped_iq3_invocations_for_test(),
@@ -3515,7 +3516,7 @@ fn current_asset_packed_attention_split_attribution_packet() {
         let snapshot = session
             .capture_causal_snapshot()
             .expect("capture packed stage-profile state");
-        let causal_digest = *snapshot.causal_digest();
+        let causal_digest = causal_snapshot_digest(&snapshot);
         let prefix_digest = *snapshot.prefix_digest();
         let compatibility_digest = *snapshot.compatibility_digest().as_bytes();
         session
@@ -3537,7 +3538,7 @@ fn current_asset_packed_attention_split_attribution_packet() {
             prefix_digest,
             compatibility_digest,
             continuation_logits,
-            continuation_causal_digest: *continuation.causal_digest(),
+            continuation_causal_digest: causal_snapshot_digest(&continuation),
             committed_tokens: session.committed_tokens().to_vec(),
             profile,
             counters,
@@ -4198,7 +4199,7 @@ fn current_asset_packed_post_route_stage_attribution_packet() {
         let snapshot = session
             .capture_causal_snapshot()
             .expect("capture packed post-route stage-profile state");
-        let causal_digest = *snapshot.causal_digest();
+        let causal_digest = causal_snapshot_digest(&snapshot);
         let prefix_digest = *snapshot.prefix_digest();
         let compatibility_digest = *snapshot.compatibility_digest().as_bytes();
         session
@@ -4220,7 +4221,7 @@ fn current_asset_packed_post_route_stage_attribution_packet() {
             prefix_digest,
             compatibility_digest,
             continuation_logits,
-            continuation_causal_digest: *continuation.causal_digest(),
+            continuation_causal_digest: causal_snapshot_digest(&continuation),
             committed_tokens: session.committed_tokens().to_vec(),
             profile,
             counters,
@@ -4794,7 +4795,7 @@ fn current_asset_packed_all_iq3_sealed_promotion_gate() {
         let snapshot = session
             .capture_causal_snapshot()
             .expect("capture sealed all-IQ3 state");
-        let causal_digest = *snapshot.causal_digest();
+        let causal_digest = causal_snapshot_digest(&snapshot);
         let prefix_digest = *snapshot.prefix_digest();
         let compatibility_digest = *snapshot.compatibility_digest().as_bytes();
         session
@@ -4816,7 +4817,7 @@ fn current_asset_packed_all_iq3_sealed_promotion_gate() {
             prefix_digest,
             compatibility_digest,
             continuation_logits,
-            continuation_causal_digest: *continuation.causal_digest(),
+            continuation_causal_digest: causal_snapshot_digest(&continuation),
             committed_tokens: session.committed_tokens().to_vec(),
             grouped_iq2_invocations: session.packed_grouped_iq2_invocations_for_test(),
             grouped_iq3_invocations: session.packed_grouped_iq3_invocations_for_test(),
@@ -5964,10 +5965,10 @@ fn online_hca_preserves_terminal_decisions_repeatably() {
         let logits = session
             .copy_logits_f32()
             .expect("copy terminal decision logits");
-        let causal_digest = *session
+        let terminal_snapshot = session
             .capture_causal_snapshot()
-            .expect("capture terminal decision state")
-            .causal_digest();
+            .expect("capture terminal decision state");
+        let causal_digest = causal_snapshot_digest(&terminal_snapshot);
         let evidence = Evidence {
             logits_sha256: vector_sha256(&logits),
             logits,
@@ -6143,12 +6144,11 @@ fn sparse_csa_optimizations_preserve_far_context_token_and_causal_state() {
             .copy_logits_f32()
             .expect("copy synthetic far-context logits");
         let causal_digest = if mode == RunMode::Transcript {
-            Some(
-                *session
+            Some(causal_snapshot_digest(
+                &session
                     .capture_causal_snapshot()
-                    .expect("capture synthetic far-context causal state")
-                    .causal_digest(),
-            )
+                    .expect("capture synthetic far-context causal state"),
+            ))
         } else {
             None
         };
@@ -6490,12 +6490,11 @@ fn current_weight_boundary_optimization_differentials() {
             .copy_logits_f32()
             .expect("copy online HCA boundary logits");
         let causal_digest = if mode == RunMode::Transcript {
-            Some(
-                *session
+            Some(causal_snapshot_digest(
+                &session
                     .capture_causal_snapshot()
-                    .expect("capture online HCA boundary causal state")
-                    .causal_digest(),
-            )
+                    .expect("capture online HCA boundary causal state"),
+            ))
         } else {
             None
         };
@@ -12734,7 +12733,7 @@ fn current_asset_multigroup_selector_whole_token_gate() {
             completed.source_observation(),
             DeepSeekV4SnapshotObservation::Available
         );
-        let causal_digest = *completed.causal_digest();
+        let causal_digest = causal_snapshot_digest(&completed);
         let prefix_digest = *completed.prefix_digest();
         let compatibility_digest = *completed.compatibility_digest().as_bytes();
         drop(completed);
@@ -12821,7 +12820,7 @@ fn current_asset_multigroup_selector_whole_token_gate() {
     assert_eq!(snapshot.next_position(), POSITION);
     assert_eq!(snapshot.prefix_tokens().len(), POSITION as usize);
     let input_snapshot_payload_bytes = snapshot.payload_bytes();
-    let input_snapshot_causal_digest = *snapshot.causal_digest();
+    let input_snapshot_causal_digest = causal_snapshot_digest(&snapshot);
     let input_snapshot_prefix_digest = *snapshot.prefix_digest();
     let residency = seed
         .into_residency()

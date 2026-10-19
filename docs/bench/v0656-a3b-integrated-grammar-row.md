@@ -1,5 +1,9 @@
 # v0.656 A3B Integrated Grammar-Row Request
 
+Archived 2026-10-18: the concluded `qwen-bench integrated-grammar-row`
+experiment was removed after the v0.656 KILL decision. This protocol is
+historical and its command is no longer available in the current workspace.
+
 Status: preregistration. No `response-shape-runtime/v1` artifact, integrated
 executor tail, benchmark command, GPU conformance observation, timing result,
 or decision exists. The source-aligned prompt fixture is frozen with this

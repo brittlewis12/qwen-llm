@@ -52,8 +52,10 @@ pub(crate) fn gdn_replay_beta_projection_fused(
 ) -> bool {
     env_flag_default_on("QWEN_DECODE_GDN_FUSED_BETA_PROJ")
         && gb.beta_proj.dtype == GgmlType::F32
-        && !env_flag_enabled("QWEN_DECODE_GDN_NOOP_FRONT")
-        && !env_flag_enabled("QWEN_DECODE_GDN_NOOP_BETA")
+        && !qwen_llm::env_flag::any_perf_ablation_enabled_with_prefixes_and_suffixes(
+            &["QWEN_DECODE_GDN_NOOP_"],
+            &["_FRONT", "_BETA"],
+        )
 }
 
 pub(crate) fn gdn_replay_exact_projection(name: &str) -> bool {

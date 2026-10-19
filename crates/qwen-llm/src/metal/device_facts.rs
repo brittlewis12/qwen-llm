@@ -23,11 +23,13 @@ pub struct GpuFamilySupport {
 
 /// Stable identifier of the serialized report; bump it when a field's
 /// name or meaning changes.
-pub const DEVICE_FACTS_VERSION: &str = "qwen_device_info_v6";
+pub const DEVICE_FACTS_VERSION: &str = "qwen_device_info_v7";
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 pub struct DeviceFacts {
     pub version: &'static str,
+    /// Cargo diagnostic features enabled in this engine build.
+    pub features: &'static [&'static str],
     pub name: String,
     pub architecture: String,
     pub registry_id: u64,
@@ -55,6 +57,7 @@ impl DeviceFacts {
         let (metallib_compiler_identity, metallib_sdk_version) = metallib_build_identity();
         Self {
             version: DEVICE_FACTS_VERSION,
+            features: crate::enabled_diagnostic_features(),
             name: device.name().to_string(),
             architecture,
             registry_id: device.registryID(),
@@ -108,7 +111,7 @@ impl DeviceFacts {
 
     pub fn format_report(&self) -> String {
         let mut report = format!(
-            "device: {}\narchitecture: {}\nregistry_id: {}\ngpu_families: Apple7={} Apple8={} Apple9={} Apple10={} Metal3={} Metal4={}\nmax_threadgroup_memory: {} bytes\nmax_buffer_length: {} bytes\nrecommended_max_working_set: {} bytes\nunified_memory: {}\nhost_page_size: {}\nphysical_memory: {}\nos_version: {}\nproduct_metallib_deployment_target: {}\nresearch_metallib_deployment_target: {}\nmetallib_compiler_identity: {}\nmetallib_sdk_version: {}\nos_supports_metallib: {}",
+            "device: {}\narchitecture: {}\nregistry_id: {}\ngpu_families: Apple7={} Apple8={} Apple9={} Apple10={} Metal3={} Metal4={}\nmax_threadgroup_memory: {} bytes\nmax_buffer_length: {} bytes\nrecommended_max_working_set: {} bytes\nunified_memory: {}\nhost_page_size: {}\nphysical_memory: {}\nos_version: {}\nproduct_metallib_deployment_target: {}\nresearch_metallib_deployment_target: {}\nmetallib_compiler_identity: {}\nmetallib_sdk_version: {}\nfeatures: {}\nos_supports_metallib: {}",
             self.name,
             self.architecture,
             self.registry_id,
@@ -133,6 +136,7 @@ impl DeviceFacts {
             self.research_metallib_deployment_target,
             self.metallib_compiler_identity,
             self.metallib_sdk_version,
+            self.features.join(","),
             match self.os_supports_metallib() {
                 Some(true) => "yes",
                 Some(false) => "no",
@@ -255,6 +259,7 @@ mod tests {
     fn sample() -> DeviceFacts {
         DeviceFacts {
             version: DEVICE_FACTS_VERSION,
+            features: crate::enabled_diagnostic_features(),
             name: "Test GPU".into(),
             architecture: "test-arch".into(),
             registry_id: 42,
@@ -284,19 +289,24 @@ mod tests {
     /// contract; additive fields are compatible with this version.
     #[test]
     fn device_facts_json_is_pinned() {
-        assert_eq!(
-            serde_json::to_string(&sample()).unwrap(),
-            concat!(
-                r#"{"version":"qwen_device_info_v6","name":"Test GPU","architecture":"test-arch","#,
-                r#""registry_id":42,"gpu_families":{"apple7":true,"apple8":false,"apple9":false,"#,
-                r#""apple10":false,"metal3":true,"metal4":false},"max_threadgroup_memory_bytes":32,"#,
-                r#""max_buffer_length_bytes":4096,"recommended_max_working_set_bytes":8192,"#,
-                r#""unified_memory":true,"host_page_size_bytes":16384,"physical_memory_bytes":null,"#,
-                r#""os_version":"15.7","product_metallib_deployment_target":"15.0","#,
-                r#""research_metallib_deployment_target":"15.0","metallib_compiler_identity":"Apple metal version 32023.98 (metalfe-32023.98.1)","#,
-                r#""metallib_sdk_version":"15.7"}"#
-            )
+        let expected_prefix = r#"{"version":"qwen_device_info_v7","features":"#;
+        let expected_suffix = concat!(
+            r#","name":"Test GPU","architecture":"test-arch","#,
+            r#""registry_id":42,"gpu_families":{"apple7":true,"apple8":false,"apple9":false,"#,
+            r#""apple10":false,"metal3":true,"metal4":false},"max_threadgroup_memory_bytes":32,"#,
+            r#""max_buffer_length_bytes":4096,"recommended_max_working_set_bytes":8192,"#,
+            r#""unified_memory":true,"host_page_size_bytes":16384,"physical_memory_bytes":null,"#,
+            r#""os_version":"15.7","product_metallib_deployment_target":"15.0","#,
+            r#""research_metallib_deployment_target":"15.0","metallib_compiler_identity":"Apple metal version 32023.98 (metalfe-32023.98.1)","#,
+            r#""metallib_sdk_version":"15.7"}"#
         );
+        let expected = [
+            expected_prefix,
+            &serde_json::to_string(crate::enabled_diagnostic_features()).unwrap(),
+            expected_suffix,
+        ]
+        .concat();
+        assert_eq!(serde_json::to_string(&sample()).unwrap(), expected);
     }
 
     #[test]

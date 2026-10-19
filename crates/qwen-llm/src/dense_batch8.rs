@@ -4,7 +4,6 @@
 //! eight-slot dense-Qwen backend: mutable recurrent/KV state remains private
 //! while immutable-weight projections and the LM head run as B=8 matrices.
 
-use crate::env_flag::read_default_off;
 use crate::metal::{
     BlitEncoder, KernelEncoder, MetalContext, MetalError, MetalTensor, encode_add_inplace_f32,
     encode_argmax_f32, encode_argmax_f32_greedy, encode_get_rows_f32, encode_rms_norm_mul_f32,
@@ -279,19 +278,10 @@ pub fn inspect_dense_batch8(model: &MetalModel) -> Result<(), DenseBatch8Error> 
             "model residency is scoped to another command queue".into(),
         ));
     }
-    for flag in [
-        "QWEN_DECODE_GDN_NOOP_FRONT",
-        "QWEN_DECODE_GDN_NOOP_OUT",
-        "QWEN_DECODE_GDN_NOOP_QKV",
-        "QWEN_DECODE_GDN_NOOP_Z",
-        "QWEN_DECODE_GDN_NOOP_BETA",
-        "QWEN_DECODE_GDN_NOOP_ALPHA",
-    ] {
-        if read_default_off(flag) {
-            return Err(DenseBatch8Error::Unsupported(format!(
-                "diagnostic flag {flag} changes the production graph"
-            )));
-        }
+    if crate::env_flag::any_perf_ablation_enabled_with_prefixes(&["QWEN_DECODE_GDN_NOOP_"]) {
+        return Err(DenseBatch8Error::Unsupported(
+            "diagnostic perf ablation changes the decode graph".into(),
+        ));
     }
     dense_batch8_scratch_bytes(&model.arch)?;
     Ok(())

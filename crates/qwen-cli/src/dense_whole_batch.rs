@@ -713,19 +713,10 @@ pub fn run(args: DecodeDenseWholeBatchArgs) -> Result<()> {
         total_steps <= RAMP_CAPACITY,
         "whole-model short-frontier probe supports at most {RAMP_CAPACITY} total steps"
     );
-    for flag in [
-        "QWEN_DECODE_GDN_NOOP_FRONT",
-        "QWEN_DECODE_GDN_NOOP_OUT",
-        "QWEN_DECODE_GDN_NOOP_QKV",
-        "QWEN_DECODE_GDN_NOOP_Z",
-        "QWEN_DECODE_GDN_NOOP_BETA",
-        "QWEN_DECODE_GDN_NOOP_ALPHA",
-    ] {
-        ensure!(
-            !env_flag_enabled(flag),
-            "decode-dense-whole-batch does not support {flag}"
-        );
-    }
+    ensure!(
+        !qwen_llm::env_flag::any_perf_ablation_enabled_with_prefixes(&["QWEN_DECODE_GDN_NOOP_",]),
+        "decode-dense-whole-batch does not support decode GDN perf ablations"
+    );
     ensure!(
         env_flag_default_on("QWEN_DECODE_DENSE_CONCURRENT_GDN"),
         "decode-dense-whole-batch requires the production concurrent-GDN baseline"

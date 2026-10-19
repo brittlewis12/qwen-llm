@@ -1179,6 +1179,7 @@ mod tests {
     fn facts(name: &str, memory: Option<u64>) -> DeviceFacts {
         DeviceFacts {
             version: DEVICE_FACTS_VERSION,
+            features: crate::enabled_diagnostic_features(),
             name: name.into(),
             architecture: "test".into(),
             registry_id: 0,

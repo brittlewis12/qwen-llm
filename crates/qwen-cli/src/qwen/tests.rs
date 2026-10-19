@@ -52,7 +52,8 @@ fn qwen_info_storage_decision_matches_load_with_short_process_headroom() {
 
 fn selector_device_facts(name: &str) -> qwen_llm::metal::DeviceFacts {
     qwen_llm::metal::DeviceFacts {
-        version: "qwen_device_info_v6",
+        version: "qwen_device_info_v7",
+        features: qwen_llm::enabled_diagnostic_features(),
         name: name.into(),
         architecture: "test".into(),
         registry_id: 0,

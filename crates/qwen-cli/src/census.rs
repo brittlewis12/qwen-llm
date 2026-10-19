@@ -182,6 +182,7 @@ impl<'a> Candidate<'a> {
 }
 
 fn main() -> Result<()> {
+    qwen_llm::env_flag::check_perf_ablation_environment().map_err(anyhow::Error::msg)?;
     let args = Args::parse();
     if args.page_size == 0 {
         bail!("--page-size must be nonzero");

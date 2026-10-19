@@ -58,12 +58,152 @@ pub fn read_default_on(name: &str) -> bool {
     !std::env::var(name).as_deref().is_ok_and(env_value_falsy)
 }
 
+/// The one authoritative list for computation-skipping attribution settings.
+pub const PERF_ABLATION_ENV: &[&str] = &[
+    "QWEN_DECODE_GDN_NOOP_ALPHA",
+    "QWEN_DECODE_GDN_NOOP_BETA",
+    "QWEN_DECODE_GDN_NOOP_FRONT",
+    "QWEN_DECODE_GDN_NOOP_OUT",
+    "QWEN_DECODE_GDN_NOOP_QKV",
+    "QWEN_DECODE_GDN_NOOP_Z",
+    "QWEN_DECODE_MOE_NOOP_ROUTE",
+    "QWEN_DECODE_MOE_NOOP_ROUTED_GATEUP",
+    "QWEN_DECODE_MOE_NOOP_ROUTED_DOWN",
+    "QWEN_PREFILL_MOE_GROUPED_ZERO_FILL",
+    "QWEN_PREFILL_NOOP_ATTN_BODY",
+    "QWEN_PREFILL_NOOP_FFN",
+    "QWEN_PREFILL_NOOP_GDN_BODY",
+    "QWEN_PREFILL_NOOP_MOE_GROUPED_DOWN",
+    "QWEN_PREFILL_NOOP_MOE_GROUPED_REDUCE",
+    "QWEN_PREFILL_NOOP_MOE_GROUPED_SWIGLU",
+    "QWEN_PREFILL_NOOP_MOE_ROUTED",
+    "QWEN_PREFILL_NOOP_MOE_SHARED",
+];
+
+/// Const string equality used to keep each `perf_ablation` declaration in sync
+/// with `PERF_ABLATION_ENV` at compile time.
+pub const fn is_perf_ablation_env(name: &str) -> bool {
+    let mut index = 0;
+    while index < PERF_ABLATION_ENV.len() {
+        if const_str_eq(PERF_ABLATION_ENV[index], name) {
+            return true;
+        }
+        index += 1;
+    }
+    false
+}
+
+const fn const_str_eq(left: &str, right: &str) -> bool {
+    let left = left.as_bytes();
+    let right = right.as_bytes();
+    if left.len() != right.len() {
+        return false;
+    }
+    let mut index = 0;
+    while index < left.len() {
+        if left[index] != right[index] {
+            return false;
+        }
+        index += 1;
+    }
+    true
+}
+
+/// Return a refusal message for the listed settings present in an injected
+/// environment-name iterator. Used by the process check and its unit test.
+pub fn perf_ablation_refusal_for<I, S>(set_names: I) -> Option<String>
+where
+    I: IntoIterator<Item = S>,
+    S: AsRef<str>,
+{
+    let set_names: std::collections::HashSet<String> = set_names
+        .into_iter()
+        .map(|name| name.as_ref().to_string())
+        .collect();
+    let found: Vec<&str> = PERF_ABLATION_ENV
+        .iter()
+        .copied()
+        .filter(|name| set_names.contains(*name))
+        .collect();
+    (!found.is_empty()).then(|| {
+        format!(
+            "perf-ablation settings are refused in this product build: {}; rebuild with --features perf-ablations",
+            found.join(", ")
+        )
+    })
+}
+
+/// Refuse a product-binary invocation before doing work if any ablation
+/// setting is present in its environment.
+pub fn check_perf_ablation_environment() -> Result<(), String> {
+    #[cfg(feature = "perf-ablations")]
+    {
+        Ok(())
+    }
+    #[cfg(not(feature = "perf-ablations"))]
+    {
+        let names: Vec<String> = std::env::vars_os()
+            .filter_map(|(name, _)| name.into_string().ok())
+            .collect();
+        perf_ablation_refusal_for(names.iter().map(String::as_str)).map_or(Ok(()), Err)
+    }
+}
+
+#[cfg(feature = "perf-ablations")]
+#[inline]
+pub fn perf_ablation_enabled(name: &str) -> bool {
+    read_default_off(name)
+}
+
+#[cfg(not(feature = "perf-ablations"))]
+#[inline(always)]
+pub const fn perf_ablation_enabled(_name: &str) -> bool {
+    false
+}
+
+#[cfg(feature = "perf-ablations")]
+pub fn any_perf_ablation_enabled_with_prefixes(prefixes: &[&str]) -> bool {
+    PERF_ABLATION_ENV
+        .iter()
+        .filter(|name| prefixes.iter().any(|prefix| name.starts_with(prefix)))
+        .any(|name| perf_ablation_enabled(name))
+}
+
+#[cfg(feature = "perf-ablations")]
+pub fn any_perf_ablation_enabled_with_prefixes_and_suffixes(
+    prefixes: &[&str],
+    suffixes: &[&str],
+) -> bool {
+    PERF_ABLATION_ENV
+        .iter()
+        .filter(|name| {
+            prefixes.iter().any(|prefix| name.starts_with(prefix))
+                && suffixes.iter().any(|suffix| name.ends_with(suffix))
+        })
+        .any(|name| perf_ablation_enabled(name))
+}
+
+#[cfg(not(feature = "perf-ablations"))]
+#[inline(always)]
+pub const fn any_perf_ablation_enabled_with_prefixes(_prefixes: &[&str]) -> bool {
+    false
+}
+
+#[cfg(not(feature = "perf-ablations"))]
+#[inline(always)]
+pub const fn any_perf_ablation_enabled_with_prefixes_and_suffixes(
+    _prefixes: &[&str],
+    _suffixes: &[&str],
+) -> bool {
+    false
+}
+
 /// Declare a cached env-flag accessor function. New declarations should carry
 /// a doc line inside the invocation stating the setting's observable behavior.
 ///
 /// ```ignore
 /// env_flag!(default_on  concurrent_gdn_dense_decode_enabled, "QWEN_DECODE_DENSE_CONCURRENT_GDN");
-/// env_flag!(default_off decode_gdn_noop_front_enabled,       "QWEN_DECODE_GDN_NOOP_FRONT");
+/// env_flag!(perf_ablation $fn_name, $env);
 /// ```
 ///
 /// Expands to a `fn $name() -> bool` backed by a private `OnceLock<bool>`,
@@ -86,6 +226,22 @@ macro_rules! env_flag {
             *ENABLED.get_or_init(|| $crate::env_flag::read_default_off($env))
         }
     };
+    ($(#[$meta:meta])* perf_ablation $fn_name:ident, $env:literal) => {
+        const _: () = assert!($crate::env_flag::is_perf_ablation_env($env));
+        $(#[$meta])*
+        #[inline(always)]
+        #[cfg(feature = "perf-ablations")]
+        fn $fn_name() -> bool {
+            static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+            *ENABLED.get_or_init(|| $crate::env_flag::perf_ablation_enabled($env))
+        }
+        $(#[$meta])*
+        #[inline(always)]
+        #[cfg(not(feature = "perf-ablations"))]
+        const fn $fn_name() -> bool {
+            false
+        }
+    };
 }
 
 #[cfg(test)]
@@ -100,6 +256,17 @@ mod tests {
         default_off attributed_flag,
         "QWEN_TEST_ATTRIBUTED_FLAG"
     );
+    #[test]
+    fn startup_check_refuses_listed_variables_from_injected_environment() {
+        let decode_route = PERF_ABLATION_ENV[6];
+        let prefill_ffn = PERF_ABLATION_ENV[11];
+        let error = perf_ablation_refusal_for([prefill_ffn, "PATH", decode_route]).unwrap();
+        assert!(error.contains(decode_route));
+        assert!(error.contains(prefill_ffn));
+        assert!(error.contains("--features perf-ablations"));
+        assert!(!error.contains("PATH"));
+        assert!(perf_ablation_refusal_for(["PATH"]).is_none());
+    }
 
     #[test]
     fn truthy_and_falsy_sets_are_disjoint_and_exact() {

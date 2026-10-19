@@ -68,6 +68,18 @@ pub fn metallib_build_identity() -> (&'static str, &'static str) {
     )
 }
 
+/// Cargo diagnostic features enabled in this qwen-llm build.
+pub fn enabled_diagnostic_features() -> &'static [&'static str] {
+    &[
+        #[cfg(feature = "dflash-k0s-diagnostics")]
+        "dflash-k0s-diagnostics",
+        #[cfg(feature = "dsv4-diagnostics")]
+        "dsv4-diagnostics",
+        #[cfg(feature = "perf-ablations")]
+        "perf-ablations",
+    ]
+}
+
 #[cfg(test)]
 mod metallib_identity_tests {
     #[test]

@@ -238,7 +238,6 @@ def main() -> int:
         raise SystemExit("--window must be >= 1")
     if not args.variant:
         args.variant = [Variant(label="baseline", env={})]
-
     output_path = Path(args.output) if args.output else None
     base_cmd = build_bench_cmd(args)
     print(

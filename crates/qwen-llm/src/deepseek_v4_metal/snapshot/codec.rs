@@ -223,7 +223,8 @@ pub fn encode_causal_snapshot<W: Write>(
         layout.published_bytes,
     )?;
 
-    let header = build_header(snapshot, layout);
+    let causal_digest = causal_snapshot_digest(snapshot);
+    let header = build_header(snapshot, layout, &causal_digest);
     let mut hasher = blake3::Hasher::new();
     write_hashed(dst, &mut hasher, &header)?;
     write_zero_padding(dst, &mut hasher, PAYLOAD_OFFSET - HEADER_BYTES)?;
@@ -294,8 +295,10 @@ pub fn decode_causal_snapshot<R: Read>(
         raw_f16_bits: parse_u16_le("raw", &raw_raw)?.into_boxed_slice(),
         compressor_f32_bits: parse_u32_le("compressor", &compressor_raw)?.into_boxed_slice(),
         published_f16_bits: parse_u16_le("published", &published_raw)?.into_boxed_slice(),
-        causal_digest: header_identity.causal_digest,
     };
+    if causal_snapshot_digest(&snapshot) != header_identity.causal_digest {
+        return Err(DeepSeekV4SnapshotCodecError::DigestMismatch);
+    }
     validate_snapshot(
         &snapshot,
         constraints.config,
@@ -312,7 +315,11 @@ struct HeaderIdentity {
     causal_digest: [u8; 32],
 }
 
-fn build_header(snapshot: &DeepSeekV4CausalSnapshot, layout: WireLayout) -> [u8; HEADER_BYTES] {
+fn build_header(
+    snapshot: &DeepSeekV4CausalSnapshot,
+    layout: WireLayout,
+    causal_digest: &[u8; 32],
+) -> [u8; HEADER_BYTES] {
     let mut header = [0u8; HEADER_BYTES];
     header[OFF_MAGIC..OFF_MAGIC + MAGIC.len()].copy_from_slice(MAGIC);
     put_u32(&mut header, OFF_VERSION, CODEC_VERSION);
@@ -337,7 +344,7 @@ fn build_header(snapshot: &DeepSeekV4CausalSnapshot, layout: WireLayout) -> [u8;
     header[OFF_COMPATIBILITY_DIGEST..OFF_COMPATIBILITY_DIGEST + 32]
         .copy_from_slice(snapshot.compatibility_digest.as_bytes());
     header[OFF_PREFIX_DIGEST..OFF_PREFIX_DIGEST + 32].copy_from_slice(&snapshot.prefix_digest);
-    header[OFF_CAUSAL_DIGEST..OFF_CAUSAL_DIGEST + 32].copy_from_slice(&snapshot.causal_digest);
+    header[OFF_CAUSAL_DIGEST..OFF_CAUSAL_DIGEST + 32].copy_from_slice(causal_digest);
     header
 }
 
@@ -655,7 +662,7 @@ mod tests {
             .map(|index| index as u16 ^ 0x1357)
             .collect::<Vec<_>>()
             .into_boxed_slice();
-        let mut snapshot = DeepSeekV4CausalSnapshot {
+        let snapshot = DeepSeekV4CausalSnapshot {
             model_content_id,
             compatibility_digest: snapshot_compatibility_digest(model_content_id, config),
             next_position: position,
@@ -665,9 +672,7 @@ mod tests {
             raw_f16_bits,
             compressor_f32_bits,
             published_f16_bits,
-            causal_digest: [0; 32],
         };
-        snapshot.causal_digest = causal_digest(&snapshot);
         validate_snapshot(&snapshot, config, session_capacity, model_content_id).unwrap();
         snapshot
     }
@@ -769,6 +774,14 @@ mod tests {
         corrupt[PAYLOAD_OFFSET] ^= 1;
         assert!(matches!(
             decode_causal_snapshot(&mut Cursor::new(corrupt), constraints(&config)),
+            Err(DeepSeekV4SnapshotCodecError::DigestMismatch)
+        ));
+
+        let mut causal_corrupt = bytes.clone();
+        causal_corrupt[OFF_CAUSAL_DIGEST] ^= 1;
+        reseal(&mut causal_corrupt);
+        assert!(matches!(
+            decode_causal_snapshot(&mut Cursor::new(causal_corrupt), constraints(&config)),
             Err(DeepSeekV4SnapshotCodecError::DigestMismatch)
         ));
 

@@ -5,6 +5,7 @@ use std::{cell::RefCell, marker::PhantomData, rc::Rc, time::Instant};
 
 thread_local! {
     static ACTIVE: RefCell<Option<Vec<Operation>>> = const { RefCell::new(None) };
+    static STAGES: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 
 #[derive(Debug, Serialize)]
@@ -37,6 +38,11 @@ pub struct Scope {
     _thread: PhantomData<Rc<()>>,
 }
 impl Scope {
+    pub fn begin_stages() -> Result<Self, String> {
+        let scope = Self::begin()?;
+        STAGES.with(|enabled| enabled.set(true));
+        Ok(scope)
+    }
     pub fn begin() -> Result<Self, String> {
         ACTIVE.with(|slot| {
             let mut slot = slot.borrow_mut();
@@ -71,7 +77,23 @@ impl Scope {
 impl Drop for Scope {
     fn drop(&mut self) {
         ACTIVE.with(|slot| *slot.borrow_mut() = None);
+        STAGES.with(|enabled| enabled.set(false));
     }
+}
+
+pub(super) fn stages() -> bool {
+    STAGES.with(|enabled| enabled.get())
+}
+
+pub(super) fn gpu_interval(name: &'static str, rows: usize, start: u64, end: u64) {
+    record(name, [rows, 0, 0, 0], |op| {
+        op.count += 1;
+        if start > 0 && end > start && end != u64::MAX {
+            *op.gpu_ms.get_or_insert(0.0) += (end - start) as f64 / 1e6;
+        } else {
+            op.invalid_gpu_timestamps += 1;
+        }
+    });
 }
 
 pub(super) fn start() -> Option<Instant> {

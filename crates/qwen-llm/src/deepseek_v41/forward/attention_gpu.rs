@@ -69,6 +69,8 @@ pub(super) struct Rows {
     low: MetalTensor,
     selected: MetalTensor,
     candidates: MetalTensor,
+    grouped_input: MetalTensor,
+    grouped_low: MetalTensor,
     rows: usize,
 }
 
@@ -80,6 +82,8 @@ impl Rows {
             c.head_dim,
             c.index_topk,
             capacity.div_ceil(c.candidate_block),
+            c.groups * c.output_rank,
+            c.heads * c.head_dim,
             c.groups * c.output_rank,
         ]
     }
@@ -98,6 +102,8 @@ impl Rows {
             selected: prefill::allocate(ctx, widths[3], rows, GgmlType::I32)?,
             candidates: prefill::allocate(ctx, widths[4], rows, GgmlType::I32)?,
             low: prefill::allocate(ctx, widths[5], rows, GgmlType::F32)?,
+            grouped_input: prefill::allocate(ctx, widths[6], rows, GgmlType::F32)?,
+            grouped_low: prefill::allocate(ctx, widths[7], rows, GgmlType::F32)?,
             rows,
         })
     }
@@ -787,6 +793,42 @@ impl Workspace {
         rows: &Rows,
         output: &MetalTensor,
     ) -> Result<()> {
+        let c = &self.config;
+        let group_width = c.heads * c.head_dim / c.groups;
+        group_rows(
+            ctx,
+            enc,
+            &rows.query,
+            &rows.grouped_input,
+            group_width,
+            c.groups,
+            rows.rows,
+        )?;
+        for (group, projection) in w.output_a.iter().enumerate() {
+            projection
+                .encode_rows(
+                    enc,
+                    &rows.grouped_input.view_subrange(
+                        (group * group_width * rows.rows) as u64,
+                        vec![group_width as u64, rows.rows as u64],
+                    ),
+                    &rows.grouped_low.view_subrange(
+                        (group * c.output_rank * rows.rows) as u64,
+                        vec![c.output_rank as u64, rows.rows as u64],
+                    ),
+                    rows.rows,
+                )
+                .map_err(|e| e.to_string())?;
+        }
+        group_rows(
+            ctx,
+            enc,
+            &rows.grouped_low,
+            &rows.low,
+            c.output_rank,
+            rows.rows,
+            c.groups,
+        )?;
         w.output_b
             .encode_rows(enc, &rows.low, output, rows.rows)
             .map_err(|e| e.to_string())?;
@@ -1092,29 +1134,30 @@ impl Workspace {
             position,
             true,
         )?;
-        let group_width = c.heads / c.groups * c.head_dim;
-        for (group, projection) in w.output_a.iter().enumerate() {
-            linear(
-                ctx,
-                enc,
-                projection,
-                &self
-                    .attended
-                    .view_subrange((group * group_width) as u64, vec![group_width as u64]),
-                &self
-                    .low
-                    .view_subrange((group * c.output_rank) as u64, vec![c.output_rank as u64]),
-            )?;
-        }
         if let Some((rows, row)) = prepared {
+            // This query row has been consumed; reuse it for the attended row.
             copy(
                 ctx,
                 enc,
-                &self.low,
-                &prefill::row(&rows.low, c.groups * c.output_rank, row),
-                c.groups * c.output_rank,
+                &self.attended,
+                &prefill::row(&rows.query, c.heads * c.head_dim, row),
+                c.heads * c.head_dim,
             )?;
         } else {
+            let group_width = c.heads / c.groups * c.head_dim;
+            for (group, projection) in w.output_a.iter().enumerate() {
+                linear(
+                    ctx,
+                    enc,
+                    projection,
+                    &self
+                        .attended
+                        .view_subrange((group * group_width) as u64, vec![group_width as u64]),
+                    &self
+                        .low
+                        .view_subrange((group * c.output_rank) as u64, vec![c.output_rank as u64]),
+                )?;
+            }
             linear(ctx, enc, &w.output_b, &self.low, &self.output)?;
             pipeline(ctx, enc, "finite")?;
             enc.set_bytes(0, &(c.hidden as u32));
@@ -1147,6 +1190,26 @@ impl Workspace {
     pub(super) fn status(&self) -> &MetalTensor {
         &self.status
     }
+}
+
+fn group_rows(
+    ctx: &MetalContext,
+    enc: &KernelEncoder,
+    input: &MetalTensor,
+    output: &MetalTensor,
+    width: usize,
+    groups: usize,
+    rows: usize,
+) -> Result<()> {
+    enc.set_pipeline(
+        &ctx.pipeline("kernel_deepseek_v41_group_rows")
+            .map_err(|e| e.to_string())?,
+    );
+    enc.set_bytes(0, &[width as u32, groups as u32, rows as u32, 0]);
+    enc.set_tensor(1, input);
+    enc.set_tensor(2, output);
+    dispatch(enc, width * groups * rows);
+    Ok(())
 }
 
 fn validate_weights(c: &Config, id: usize, w: &Weights<'_>, schedule: &Schedule) -> Result<()> {

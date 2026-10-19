@@ -1,6 +1,15 @@
 #include <metal_stdlib>
 using namespace metal;
 
+kernel void kernel_deepseek_v41_group_rows(
+    constant uint3 &shape [[buffer(0)]], device const float *input [[buffer(1)]],
+    device float *output [[buffer(2)]], uint i [[thread_position_in_grid]]) {
+    uint width = shape.x, groups = shape.y, rows = shape.z;
+    if (i >= width * groups * rows) return;
+    uint row = i / (width * groups), group = (i / width) % groups;
+    output[(group * rows + row) * width + i % width] = input[i];
+}
+
 // Projection must precede RMS scaling; collapse uses a different, lagged pre.
 kernel void kernel_deepseek_v41_projected_rms(
     constant uint &n [[buffer(0)]], constant float &eps [[buffer(1)]],

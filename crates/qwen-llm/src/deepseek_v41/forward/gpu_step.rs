@@ -154,11 +154,22 @@ impl Workspace {
         self.trace_copies = 0;
         cancelled(cancel)?;
         let started = profile::start();
+        let samples = if profile::stages() {
+            Some(
+                ctx.timestamp_sample_buffer(model.layers.len() * 4)
+                    .map_err(|e| e.to_string())?,
+            )
+        } else {
+            None
+        };
         let command = ctx
             .queue
             .commandBuffer()
             .ok_or("Metal command buffer allocation")?;
-        let enc = KernelEncoder::begin(&command);
+        let mut enc = match &samples {
+            Some(samples) => KernelEncoder::begin_sampled(&command, samples, 0, 1, false),
+            None => KernelEncoder::begin(&command),
+        };
         let encoded = (|| -> Result<()> {
             for (id, layer) in model.layers.iter().enumerate() {
                 cancelled(cancel)?;
@@ -212,6 +223,16 @@ impl Workspace {
                     ctx, &enc, c.hidden, n, &outputs, &x, &hc.post, &hc.comb, &half,
                 )
                 .map_err(|e| e.to_string())?;
+                if let Some(samples) = &samples {
+                    enc.finish();
+                    enc = KernelEncoder::begin_sampled(
+                        &command,
+                        samples,
+                        id * 4 + 2,
+                        id * 4 + 3,
+                        false,
+                    );
+                }
                 self.ffn
                     .encode_rows(ctx, &enc, c, layer, id, &half, &hc.pre, &x, &ffn)
                     .map_err(|e| e.to_string())?;
@@ -246,6 +267,18 @@ impl Workspace {
                         .encode(&enc, &self.normalized, &self.logits)
                         .map_err(|e| e.to_string())?;
                 }
+                if let Some(samples) = &samples {
+                    if id + 1 < model.layers.len() {
+                        enc.finish();
+                        enc = KernelEncoder::begin_sampled(
+                            &command,
+                            samples,
+                            (id + 1) * 4,
+                            (id + 1) * 4 + 1,
+                            false,
+                        );
+                    }
+                }
             }
             cancelled(cancel)?;
             Ok(())
@@ -268,6 +301,15 @@ impl Workspace {
             );
         }
         result?;
+        if let Some(samples) = &samples {
+            let times = ctx
+                .resolve_timestamp_samples(samples, model.layers.len() * 4)
+                .map_err(|e| e.to_string())?;
+            for t in times.chunks_exact(4) {
+                profile::gpu_interval("prefill_attention", n, t[0], t[1]);
+                profile::gpu_interval("prefill_ffn", n, t[2], t[3]);
+            }
+        }
         ffn.validate_status()?;
         let status = self.attention.status();
         let value = unsafe {

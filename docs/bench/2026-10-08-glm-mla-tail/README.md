@@ -118,7 +118,7 @@ dispatch consolidation and scheduling/cache effects. One representative leaf
 is enough to decide whether to pursue it. Arithmetic preservation would be a
 specific implementation contract, not a general bitwise model-quality gate.
 
-Main next workstream: native IQ capacity in `docs/IQ-QUANT-NATIVE-CAPACITY.md`.
+Main next workstream: native IQ capacity in `docs/archive/IQ-QUANT-NATIVE-CAPACITY-2026-10-12.md`.
 Flash's existing indexed down kernels versus existing IQ4_NL N16 retile remain
 a separate short-prefill candidate; neither has been measured by this packet.
 

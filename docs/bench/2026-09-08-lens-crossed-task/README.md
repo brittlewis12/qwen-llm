@@ -1,6 +1,6 @@
 # Crossed Task: Strong Transfer, But Which Variable?
 
-Follow-up to [depth and order](LENS-DEPTH-AND-ORDER.md), using authored fictional
+Follow-up to [depth and order](../2026-09-08-lens-depth-and-order/README.md), using authored fictional
 records instead of another archive-wide generation pass. The principal finding
 is a qualification, not an operator discovery: a task-associated final-prefill
 contrast transfers strongly across content within one definition order, but
@@ -9,9 +9,9 @@ parity decomposition finds a smaller aligned order-even component as well.
 
 ## Design And Preserved Inputs
 
-- [Exact conditions](experiments/lens-crossed-task/conditions.json): four
+- [Exact conditions](../../experiments/lens-crossed-task/conditions.json): four
   fictional domains, two inferential jobs, and two counterbalanced A/B codebooks.
-- [Frozen response rubric](experiments/lens-crossed-task/rubric.md): conditional
+- [Frozen response rubric](../../experiments/lens-crossed-task/rubric.md): conditional
   consequence accounts and evidential discrimination rated separately, without
   requiring different conclusions or particular task-label words.
 

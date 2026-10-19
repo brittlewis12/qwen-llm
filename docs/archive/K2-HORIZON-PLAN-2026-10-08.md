@@ -2,7 +2,7 @@
 
 This is the current implementation map, not the superseded chronological plan.
 Historical decisions, failed experiments, review findings and qualification
-evidence remain in `K2-HORIZON-REVIEW.md`. User-facing contracts
+evidence remain in `archive/K2-HORIZON-REVIEW-2026-10-05.md`. User-facing contracts
 live in `CLI-UX.md` and `SERVE.md`; reproduction is in
 `scripts/reference/k2/README.md`.
 

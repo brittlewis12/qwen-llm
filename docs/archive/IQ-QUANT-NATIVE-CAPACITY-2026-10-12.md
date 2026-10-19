@@ -61,7 +61,7 @@ family-scope correction; production129 no longer binds the current source tree.
 Raw evidence is unchanged: successful final tests and reviewer approval do not
 turn historical packet hashes into current-source bindings. No whole repeat was
 required or claimed. Exact timings, numerical differences, limits and commands:
-[IQ2_XS MMA evidence](bench/2026-10-08-iq2-xs-mma/README.md).
+[IQ2_XS MMA evidence](../bench/2026-10-08-iq2-xs-mma/README.md).
 
 The shared session pricer now uses `price_shared_buffer_upper` per allocation
 before multiplying by count, with typed pricing-error propagation. All 165

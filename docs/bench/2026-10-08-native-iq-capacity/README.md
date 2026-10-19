@@ -76,7 +76,7 @@ policies. This is a partial capacity fix, not a claim of near-file-size RSS.
 Artifact: `Underdog-Saluki-27B-1.0-IQ2-mix.gguf`, architecture qwen35, 851
 tensors, 7.356 GiB file. The original report's roughly 75 GiB RSS / 7 tok/s
 was not reproduced as a baseline. Source inspection instead identified four
-converted cohorts, not IQ2_XXS alone; see `docs/IQ-QUANT-NATIVE-CAPACITY.md`.
+converted cohorts, not IQ2_XXS alone; see `docs/archive/IQ-QUANT-NATIVE-CAPACITY-2026-10-12.md`.
 
 | Cohort | Tensors | Previously planned F32 GiB | Native GiB | Saved GiB |
 | --- | ---: | ---: | ---: | ---: |

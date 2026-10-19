@@ -155,7 +155,7 @@ explicitly not authenticated weight-content roots.
 Private verification logs and frozen executable live under
 `target/lens-data-contract/verification/` in the implementation worktree. Binary
 SHA256: `12e69ef2c6e6856da2399fc7d47663578f4f18cb46531b6a46549ccbf15df9d1`.
-Follow-up: [comparative archive exploration](LENS-COMPARATIVE-PHYSIOLOGY.md)
+Follow-up: [comparative archive exploration](bench/2026-10-05-lens-comparative-physiology/README.md)
 now exercises the new 3.8 pair through live scalar/packed readout, cohorts,
 inspection and passive projected-bank execution. All twelve fitted/plain
 layer62 full-vocabulary comparisons in that panel are byte-identical. The earlier

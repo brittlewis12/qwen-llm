@@ -52,7 +52,7 @@ From docs/PERF-ROADMAP.md, force-ranked entry 7 + "Decisive gates":
   238.75 -> 124.34 t/s. So one real chunked implementation already
   lost on throughput. The unfalsified premise is SPECIFICALLY the
   one-dispatch / GEMM-shaped organization.
-- v0.556 (PERF-ROADMAP.md ~line 204): the current A3B physical-N8
+- v0.556 (archive/PERF-ROADMAP-2026-10-19.md ~line 204): the current A3B physical-N8
   verifier FAILS the state contract — 12-token code prompt keeps the
   128-token stream but fails resume numerics: KV cosine 0.999698864,
   continuation-logit cosine 0.999197009, max logit delta 0.437913 at
@@ -63,7 +63,7 @@ From docs/PERF-ROADMAP.md, force-ranked entry 7 + "Decisive gates":
   removal as sub-gate; v0.587 closed fixed committed-tail MTP history.
   None of these bar a WY formulation.
 
-## Architecture facts (docs/PLAN.md ~line 122-140; verify in code)
+## Architecture facts (docs/archive/PLAN-2026-09-03.md ~line 122-140; verify in code)
 
 - 27B: 64 layers, pattern [GDN x3, full-attn x1] x16 -> 48 GDN layers.
   GDN: 48 V heads, 16 K heads (V/K = 3), head_dim 128; conv1d k=4

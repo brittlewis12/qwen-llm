@@ -17,7 +17,7 @@
 
 ## Performance
 
-- [PERF-ROADMAP](PERF-ROADMAP.md): ranked performance work across model families.
+- [PERF-ROADMAP](PERF-ROADMAP.md): current shipped state, evidence index, and closed questions.
 - [PERF-LOG](PERF-LOG.md): append-only record of performance measurements and decisions.
 - [BENCH](BENCH.md): benchmark commands, evidence, and known measurement gaps.
 - [REQUEST-TIMING](REQUEST-TIMING.md): what each `qwen run` timing field measures in each family.
@@ -26,39 +26,33 @@
 - [APPLE-GPU-OPTIMIZATION](APPLE-GPU-OPTIMIZATION.md): Metal optimization guidance for Apple GPUs.
 - [bench/](bench/): dated measurement packets use `YYYY-MM-DD[-HHMM]-slug`; packet directories contain measurement artifacts and README files where provided.
 
-## Active plans
-
-- [GLM53-FLASH-PLAN](GLM53-FLASH-PLAN.md): implementation map for the GLM-5.3-Flash family.
-- [IQ-QUANT-NATIVE-CAPACITY](IQ-QUANT-NATIVE-CAPACITY.md): capacity and format-coverage work queue for native IQ quant support.
-- [LENS-TRAJECTORY-OBSERVATORY](LENS-TRAJECTORY-OBSERVATORY.md): living tracker for trajectory-observatory work.
-
-## Design records for shipped features
-
-- [H4-MTP](H4-MTP.md): Qwen3.6 MTP design and implementation record; its benchmark is reachable only through `qwen-bench`.
-- [H5-DFLASH](H5-DFLASH.md): design and implementation record for the DFlash speculative-decoding path.
-- [DEEPSEEK-V4-STRATEGY](DEEPSEEK-V4-STRATEGY.md): architecture and implementation record for DeepSeek V4 support.
-
 ## Current reference
 
 - [DEEPSEEK-V41-BRINGUP](DEEPSEEK-V41-BRINGUP.md): current V4.1 bring-up requirements and evidence.
+- [INFERENCE-GRAPH](INFERENCE-GRAPH.md): current semantic map of Qwen hybrid inference paths.
 
-## Research notes
+## Design records for shipped features
 
 - [DEEPSEEK-V41-STRATEGY](DEEPSEEK-V41-STRATEGY.md): concise V4.1 requirement and design reference.
-- [H6-VISION](H6-VISION.md): unstarted design for native Qwen vision input.
-- [LENS-CROSSED-TASK](LENS-CROSSED-TASK.md): exploratory study of transfer across crossed tasks.
-- [LENS-DEPTH-AND-ORDER](LENS-DEPTH-AND-ORDER.md): exploratory findings on layer depth and sequence order.
-- [LENS-COMPARATIVE-PHYSIOLOGY](LENS-COMPARATIVE-PHYSIOLOGY.md): observations about context, reader, and response boundaries.
-- [LENS-CONSTRUAL-CORPUS](LENS-CONSTRUAL-CORPUS.md): research audit and corpus design for construal plurality.
-- [LENS-REPOREF](LENS-REPOREF.md): research audit of evidence-seeking action and RepoRef.
 
-## History
+## Lens evidence packets
 
-- [PLAN](PLAN.md): historical May 2026 architecture plan.
-- [INFERENCE-GRAPH](INFERENCE-GRAPH.md): semantic map of Qwen hybrid inference paths.
-- [K2-HORIZON-REVIEW](K2-HORIZON-REVIEW.md): archived adversarial review and findings for K2 Horizon.
-- [K2-HORIZON-REVIEW-REQUEST](K2-HORIZON-REVIEW-REQUEST.md): archived brief for the K2 Horizon review.
-- [LENS-MVP](LENS-MVP.md): archived capability and qualification record with a frozen gate.
-- [dsv4-paper](dsv4-paper.md): third-party DeepSeek V4 paper text.
+- [Crossed-task study](bench/2026-09-08-lens-crossed-task/README.md)
+- [Depth and order study](bench/2026-09-08-lens-depth-and-order/README.md)
+- [Comparative physiology](bench/2026-10-05-lens-comparative-physiology/README.md)
+- [Construal corpus](bench/2026-10-12-lens-construal-corpus/README.md)
+- [RepoRef study](bench/2026-09-08-lens-reporef/README.md)
+
+## Archive and source references
+
+- [PLAN](archive/PLAN-2026-09-03.md): historical architecture plan.
+- [K2-HORIZON-PLAN](archive/K2-HORIZON-PLAN-2026-10-08.md): completed implementation map.
+- [K2-HORIZON-REVIEW](archive/K2-HORIZON-REVIEW-2026-10-05.md) and [review request](archive/K2-HORIZON-REVIEW-REQUEST-2026-10-08.md).
+- [LENS-MVP](archive/LENS-MVP-2026-09-08.md): completed capability and qualification record.
+- [H4-MTP](archive/H4-MTP-2026-05-03.md) and [H5-DFLASH](archive/H5-DFLASH-2026-10-05.md): shipped decode implementation records; benchmarks run through `qwen-bench`.
+- [DEEPSEEK-V4-STRATEGY](archive/DEEPSEEK-V4-STRATEGY-2026-10-19.md): completed implementation history.
+- [IQ-QUANT-NATIVE-CAPACITY](archive/IQ-QUANT-NATIVE-CAPACITY-2026-10-12.md): completed coverage and promotion record.
+- [GLM53-FLASH-PLAN](archive/GLM53-FLASH-PLAN-2026-10-12.md): completed bring-up plan.
+- [dsv4-paper](dsv4-paper.md): paper citation and repository implementation notes.
 - [archive/](archive/): retained historical design and experiment records.
 - [experiments/](experiments/): retained Lens experiment inputs and rubrics.

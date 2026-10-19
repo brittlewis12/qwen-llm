@@ -258,7 +258,7 @@ MTP: block 45 (`eh_proj`, `enorm`, `hnorm`, `shared_head_norm`, reusing the main
 | Component | Start from | Required change |
 |---|---|---|
 | mHC | DS4 `hc_repeat` (`deepseek_v4.metal:4394`), `hc_controls` (:4416), `hc_collapse` (:4565), `hc_post` (:4599), batch variants | Same 4/24/20 contract; mean collapse (pre = 1/4) then `output_norm`; skip `hc_head`. |
-| Router | DS4 GPU routing (`route_learned` :97, packed :278-789) and route records (`deepseek_v4_metal/moe.rs:17-43`) | Generalize together: score function (sigmoid), expert count 288, reduction groups, top-k 8, record strides, compaction descriptors and consumers. GPU routing for short prefill too (`PERF-ROADMAP.md:57`). |
+| Router | DS4 GPU routing (`route_learned` :97, packed :278-789) and route records (`deepseek_v4_metal/moe.rs:17-43`) | Generalize together: score function (sigmoid), expert count 288, reduction groups, top-k 8, record strides, compaction descriptors and consumers. GPU routing for short prefill too (`archive/PERF-ROADMAP-2026-10-19.md:57`). |
 | Routed experts | DS4 indexed expert encoders (`moe.rs:588-1081`, IQ2_S/IQ3_S at :1506); generic grouped kernels (`moe.metal:7145`, :7184) | Grouped fused SwiGLU is unclamped: add the DS4 clamp epilogue. Indexed decode lacks IQ4_XS: bridge to Qwen's IQ4_XS down with explicit ID/status/layout adapters. Decode scratch scales with top-k. |
 | Shared expert, dense FFN | DS4 shared Q6_K path (`moe.rs:1164`), dense matvec/matmat | Clamped SwiGLU; unweighted add; block 11 is Q8_0. |
 | KDA decode | DwarfStar fused decode with the `ssm_a` fix | Compare against `gdn_step_decay_f32` (`gated_delta_net.metal:137`) adapted to per-channel decay; keep the faster one that meets the contract. |
@@ -372,7 +372,7 @@ Each packet ends with a `cx` review. Estimates are focused engineer-days.
   visible length 2052; pp512 vs llama.cpp.
 - P4 Sparse selection (5-7 d). Ordered top-512 plus tail, selected attention, a packed
   chunk straddling 2052 with per-query visibility, continued prefill. Avoid inheriting
-  the Qwen4Exp `2048 + 3 + remainder` scheduling shoulder (`PERF-ROADMAP.md:56`).
+  the Qwen4Exp `2048 + 3 + remainder` scheduling shoulder (`archive/PERF-ROADMAP-2026-10-19.md:56`).
   Gate: boundary fixtures at 2049-2056 vs llama.cpp; then pp4096.
   Verified semantics (llama.cpp `build_kpool_select`, `set_input_kpool`): weights =
   `indexer_proj . x / 64`; score = sum_h relu(q_h . pooled) * w_h with q rounded to

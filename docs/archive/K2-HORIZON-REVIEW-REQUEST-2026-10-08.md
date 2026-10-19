@@ -3,7 +3,7 @@
 Archived review brief for the K2 Horizon review.
 
 This brief reviews a proposed implementation. Read
-`docs/K2-HORIZON-PLAN.md` and inspect relevant local source before judging reuse
+`docs/archive/K2-HORIZON-PLAN-2026-10-08.md` and inspect relevant local source before judging reuse
 claims. The review snapshot was a fresh branch from main at `4d8716ab`.
 
 ## Hard boundaries

@@ -658,7 +658,7 @@ particular device or is economical to run.
 This is not sustained-service, full-context, tool, or cross-checkpoint
 numerical qualification. Test reproduction is in
 [`scripts/reference/k2/README.md`](../scripts/reference/k2/README.md); development
-evidence remains in `K2-HORIZON-PLAN.md` and `K2-HORIZON-REVIEW.md`.
+evidence remains in `archive/K2-HORIZON-PLAN-2026-10-08.md` and `archive/K2-HORIZON-REVIEW-2026-10-05.md`.
 
 ## K2 Horizon Native Chat Format
 

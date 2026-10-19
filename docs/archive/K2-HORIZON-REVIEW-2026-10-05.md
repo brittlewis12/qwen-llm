@@ -9,7 +9,7 @@ Initial command in the K2 worktree:
 
 ```sh
 cx ask -m luna -e high --sandbox read-only --text \
-  --prompt-file docs/K2-HORIZON-REVIEW-REQUEST.md
+  --prompt-file docs/archive/K2-HORIZON-REVIEW-REQUEST-2026-10-08.md
 ```
 
 Session: `01a0b4e8-1183-7780-98fd-4a2038bf2504`. The initial call hit the CLI
@@ -67,7 +67,7 @@ Proposed touched files:
 - Small synthetic fixtures/tests following the repository's existing GGUF test
   construction conventions. Pin small external config/reference artifacts if
   included; do not call hand-authored data independent checkpoint evidence.
-- `docs/K2-HORIZON-PLAN.md`: record actual completed scope and outstanding gates.
+- `docs/archive/K2-HORIZON-PLAN-2026-10-08.md`: record actual completed scope and outstanding gates.
 
 Targeted CPU-only acceptance cases:
 

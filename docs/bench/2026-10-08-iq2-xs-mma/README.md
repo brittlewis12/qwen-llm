@@ -117,7 +117,7 @@ One copied all-native Saluki model on Apple M4 Max; technical prose and Rust
 code-review streams, encoded by the artifact tokenizer using `encode(false)`.
 Each stream retains 4,100 natural token IDs plus full-text/token hashes; no
 padding, corpus repetition or chat template is used. Source inputs are
-`docs/GLM53-FLASH-PLAN.md` and the GLM backend/rendering Rust files. The tokenizer
+`docs/archive/GLM53-FLASH-PLAN-2026-10-12.md` and the GLM backend/rendering Rust files. The tokenizer
 API correction preceded the measured build; its source hash is in the header.
 
 Each stream runs fresh 128 and fresh 4096, with warm A/B and two ABBA rounds.

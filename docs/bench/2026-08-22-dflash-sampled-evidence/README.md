@@ -291,7 +291,7 @@ bounds. The historical emitted-per-packet values `Q ~= 3.35` for Q4 and
 `Q ~= 2.47` for Q8 are sanity floors only, not acceptance gates and not
 substitutes for the full projected speedup. Repository discipline likewise
 requires held-out policy evaluation and guards important rows near `0.98x`
-(`docs/PERF-ROADMAP.md:2945`).
+(`docs/archive/PERF-ROADMAP-2026-10-19.md:2945`).
 
 Packed-target diagnostics must be reported separately with an explicit
 `different_distribution=true` label. They may estimate a future opportunity but

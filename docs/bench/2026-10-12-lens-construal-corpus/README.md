@@ -7,7 +7,7 @@ Qwen3.8 fitting reports, saved validation and importer code; cited literature.
 
 ## What The Previous Panel Does Not Test
 
-The [crossed-task panel](LENS-CROSSED-TASK.md) has 24 conditions over four worlds,
+The [crossed-task panel](../2026-09-08-lens-crossed-task/README.md) has 24 conditions over four worlds,
 not 24 independent situations. Under its explicitly closed deterministic rules,
 all four worlds select H1 and contradict H2. Thus **0/4 worlds retain multiple
 causal explanations**. Both inferential jobs and the rule selecting one are also
@@ -231,11 +231,11 @@ archive orientation, checkpoint/recipe/source identities and payload integrity;
 do not rename reports into manifests, disable validation or build another kernel.
 No second R fit is needed. Saved validation does not prove HF-to-GGUF transfer.
 
-Implementation update: the [data-only contract](LENS-DATA-CONTRACT.md) now removes
+Implementation update: the [data-only contract](../../LENS-DATA-CONTRACT.md) now removes
 per-fit admission. Both archives have been converted without executing pickle and
 pass native CPU integrity verification in adjacent `j/data-v1` and `r/data-v1`
 directories. No published profile was added. The subsequent
-[comparative archive exploration](LENS-COMPARATIVE-PHYSIOLOGY.md) exercises live
+[comparative archive exploration](../2026-10-05-lens-comparative-physiology/README.md) exercises live
 readout and passive bank execution while preserving these comparison limits.
 
 Local Q8 and Q4 GGUF headers are compatible with the ordinary Qwen family;

@@ -133,9 +133,9 @@ There are speedup numbers **inherited from Qwen** on this branch:
 
 > “Serial decode 16.59 tps vs drafter 28.54 tps (1.72x).”
 
-That packet explicitly identifies **Qwen3.8-27B-Q8_0**, a 2,232-token prompt and 128 generated tokens. [Branch benchmark packet:135–146](/Users/tito/code/qwen-llm-muse-glimmer/docs/bench/2026-08-20-windowed-dflash-pre-gates/README.md:135).
+That packet explicitly identifies **Qwen3.8-27B-Q8_0**, a 2,232-token prompt and 128 generated tokens. [Branch benchmark packet](../2026-08-20-windowed-dflash-pre-gates/README.md).
 
-The inherited performance log also reports Qwen code speedups of **2.80× / 1.23× / 1.96×** at 8K/32K/64K, versus prose **1.10× / 0.79× / 0.88×**. These cannot qualify Muse. [Branch PERF-LOG:1027–1035](/Users/tito/code/qwen-llm-muse-glimmer/docs/PERF-LOG.md:1027).
+The inherited performance log also reports Qwen code speedups of **2.80× / 1.23× / 1.96×** at 8K/32K/64K, versus prose **1.10× / 0.79× / 0.88×**. These cannot qualify Muse. [Branch performance log entry](../../PERF-LOG.md#2026-10-07---leverage-map-re-ranked-after-concurrent-flash-next-work-cx-01a10cc).
 
 The Muse CLI does provide useful counters, but two measurement issues need attention:
 

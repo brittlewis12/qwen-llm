@@ -9,7 +9,7 @@ assembled. This is a proposed research arm, not an experimental result.
 ## Scientific Purchase
 
 RepoRef is a useful expansion of the J/R program, not a replacement for the
-[open-ended construal casebook](LENS-CONSTRUAL-CORPUS.md). Its contribution is an
+[open-ended construal casebook](../2026-10-12-lens-construal-corpus/README.md). Its contribution is an
 externally checkable intended referent that an agent must discover through tools:
 
 ```
@@ -265,7 +265,7 @@ upstream repair project or a stock leaderboard run.
 
 ## Native Lens Readiness
 
-The [data-only transport contract](LENS-DATA-CONTRACT.md) now accepts the new
+The [data-only transport contract](../../LENS-DATA-CONTRACT.md) now accepts the new
 Qwen3.8 J/R pair through `read-full`, `trace-full` and projected token banks.
 Both data-v1 payloads are converted and CPU-verified, with identity at layer 62.
 Import is no longer pending. Exact deployment binding and live numerical smoke

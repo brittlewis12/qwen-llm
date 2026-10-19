@@ -61,7 +61,7 @@ move from 179,129,572/183,681,024 to 185,421,028/189,972,480.
 - Session limit: 129 forwards for the N=128 case
 
 The asset hashes and role-level dtype census are pinned in
-`docs/DEEPSEEK-V4-STRATEGY.md` and its current census fixture.
+`docs/archive/DEEPSEEK-V4-STRATEGY-2026-10-19.md` and its current census fixture.
 
 Command shapes:
 

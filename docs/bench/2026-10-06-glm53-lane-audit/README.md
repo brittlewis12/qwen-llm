@@ -218,11 +218,11 @@ rows is in the recon notes and is linked as each batch touches the row.
   GLM, and `:263` still lists split presentation as deferred.
 - **`serve-opencode.md`:** no GLM; no note on the reasoning-replay fix
   (#13); the DS4 "no tools" line is stale.
-- **`H5-DFLASH.md`:**
+- **`archive/H5-DFLASH-2026-10-05.md`:**
   - It has no family-support statement.
   - Speculation for a recurrent family needs per-token state checkpoints,
     as the Qwen GDN rollback does, not a claim that rewinding is impossible.
-  - `H4-MTP.md` does not record GLM's NextN block 45 (deferred).
+  - `archive/H4-MTP-2026-05-03.md` does not record GLM's NextN block 45 (deferred).
 - **`BENCH.md`:**
   - No family recipes and no GLM entry.
   - The `glm53-flash` registry row (`models-families.toml:75`,
@@ -234,7 +234,7 @@ rows is in the recon notes and is linked as each batch touches the row.
 - **PERF-ROADMAP:** the baseline snapshot (:2750) has no GLM row, and its
   K2 entry is superseded. Row #11's cost cell still describes the
   pre-landing state.
-- **`GLM53-FLASH-PLAN.md`:**
+- **`archive/GLM53-FLASH-PLAN-2026-10-12.md`:**
   - Status omits #12.
   - Tools still listed as deferred; the anchor link to `SERVE.md` is broken.
   - The P6 "Next" list is stale.

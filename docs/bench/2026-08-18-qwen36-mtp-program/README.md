@@ -29,10 +29,10 @@ The MTP-aware GGUF on disk is `Qwen3.6-27B-MTP-Q4_K_M`. There is no
 kernel-gap work runs on 3.8 non-MTP. **P0 measures native MTP on 3.6-MTP.**
 
 The perflog entry cited elsewhere as "v0.555" is actually **v0.556**
-(`PERF-LOG.md:8858`). The 418-token / 2.602× / 117.6 ms figures belong to v0.556.
+([PERF-LOG.md:8858](../../archive/perf-log/2026-08.md#2026-08-08---deepseek-v4-2k-prefill-cold-touch-attribution)). The 418-token / 2.602× / 117.6 ms figures belong to v0.556.
 
 Weight-pass floor for verify decomposition uses measured M4 Max stream
-bandwidth **474 GB/s** (`PERF-LOG.md:17473-17476`), not the 546 GB/s spec-sheet
+bandwidth **474 GB/s** ([PERF-LOG.md:17473-17476](../../archive/perf-log/2026-07.md#2026-07-05---v0484-gdn-update-dot-loop-falsifier)), not the 546 GB/s spec-sheet
 figure. At 16.74 GB weights, one full weight pass ≈ **35.3 ms**. Verify-only
 measured 117.6 ms/packet → unexplained overhead ≈ **82 ms**, not 88 ms. P4's
 kill criterion updates accordingly.
@@ -130,7 +130,7 @@ serial denominator drifted.
 ### Anti-guardrail: MTLResidencySet exclusion
 
 No milestone enables whole-model MTLResidencySet or wired-residency mechanism,
-per `PERF-LOG.md:322-350` closure. Any candidate implicating it exits P0/P3 and
+per [PERF-LOG.md:322-350](../../archive/perf-log/2026-08.md#2026-08-13-whole-model-residency-optimization-lane-closed) closure. Any candidate implicating it exits P0/P3 and
 enters a separate reopen review before measurement.
 
 ## Deliverables

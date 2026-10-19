@@ -3,6 +3,7 @@
 //! Omitted effort selects chat; low/high/xhigh/max enable official thinking.
 //! Cancellation discards withheld tool calls rather than manufacturing a finish.
 use super::items::{ServeError, ServeRequest};
+use super::output_partition::GenerationEnd;
 use super::partition::PartitionEvent;
 #[cfg(test)]
 use super::request_profile::{OutputLimits, RequestProfile};
@@ -28,7 +29,270 @@ pub(crate) fn profile(limits: OutputLimits) -> RequestProfile {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::serve::output_partition::{OutputPartition, OutputProtocol};
     use serde_json::json;
+
+    fn tool_fixture() -> String {
+        concat!(
+            "<\u{ff5c}DSML\u{ff5c} calls>\n",
+            "<\u{ff5c}DSML\u{ff5c}invoke name=\"first\">\n",
+            "</\u{ff5c}DSML\u{ff5c}invoke>\n",
+            "<\u{ff5c}DSML\u{ff5c}invoke name=\"lookup\">\n",
+            "<\u{ff5c}DSML\u{ff5c}parameter name=\"s\" string=\"true\">caf\u{e9}\n\"",
+            "</\u{ff5c}DSML\u{ff5c}parameter>\n",
+            "<\u{ff5c}DSML\u{ff5c}parameter name=\"n\" string=\"false\">2",
+            "</\u{ff5c}DSML\u{ff5c}parameter>\n",
+            "</\u{ff5c}DSML\u{ff5c}invoke>\n",
+            "</\u{ff5c}DSML\u{ff5c} calls>"
+        )
+        .into()
+    }
+
+    fn output_partition(thinking: bool, max_bytes: usize) -> OutputPartition {
+        OutputPartition::new(OutputProtocol::DeepSeekV41 {
+            thinking,
+            max_bytes,
+        })
+    }
+
+    fn calls(events: &[PartitionEvent]) -> Vec<&ParsedCall> {
+        events
+            .iter()
+            .filter_map(|event| match event {
+                PartitionEvent::FunctionCall(call) => Some(call),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn v41_tool_termination_every_byte_cut_and_split() {
+        let output = tool_fixture();
+        let opener_len = "<\u{ff5c}DSML\u{ff5c}".len();
+        for thinking in [false, true] {
+            for cut in 0..=output.len() {
+                for split in 0..=cut {
+                    for end in [
+                        Some(GenerationEnd::TokenLimit),
+                        Some(GenerationEnd::StopToken(1)),
+                        None,
+                    ] {
+                        let mut partition = output_partition(thinking, 100_000);
+                        let mut events = vec![];
+                        partition.push(&output.as_bytes()[..split], &mut events);
+                        partition.push(&output.as_bytes()[split..cut], &mut events);
+                        assert!(partition.failure().is_none(), "cut={cut} split={split}");
+                        assert!(calls(&events).is_empty());
+                        if let Some(end) = end {
+                            let result = partition.finish(end, &mut events);
+                            assert_eq!(
+                                result.is_ok(),
+                                end.is_token_limit() || cut < opener_len || cut == output.len(),
+                                "thinking={thinking} cut={cut} split={split} end={end:?}: {result:?}"
+                            );
+                        } else {
+                            let before = events.clone();
+                            partition.abort(&mut events);
+                            assert_eq!(events, before);
+                        }
+                        if cut < opener_len && end.is_some() {
+                            let text = published_text(&events, thinking);
+                            assert_eq!(text, String::from_utf8_lossy(&output.as_bytes()[..cut]));
+                        } else {
+                            assert!(
+                                events.iter().all(|event| matches!(
+                                    event,
+                                    PartitionEvent::ReasoningClosed
+                                        | PartitionEvent::FunctionCall(_)
+                                )),
+                                "cut={cut} split={split} end={end:?}: {events:?}"
+                            );
+                        }
+                        let calls = calls(&events);
+                        if cut == output.len() && end.is_some() {
+                            assert_eq!(calls.len(), 2);
+                            assert_eq!(calls[0].name, "first");
+                            assert!(calls[0].arguments.is_empty());
+                            assert_eq!(calls[1].name, "lookup");
+                            assert_eq!(
+                                calls[1].arguments,
+                                json!({"s":"caf\u{e9}\n\"", "n":2})
+                                    .as_object()
+                                    .unwrap()
+                                    .clone()
+                            );
+                        } else {
+                            assert!(calls.is_empty(), "cut={cut} split={split} end={end:?}");
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn v41_recipe_alias_and_completed_call_before_partial_are_atomic() {
+        let output = tool_fixture().replace(" calls>", "tool_calls>");
+        let opener_len = "<\u{ff5c}DSML\u{ff5c}".len();
+        for cut in 0..=output.len() {
+            for end in [GenerationEnd::TokenLimit, GenerationEnd::StopToken(1)] {
+                let mut partition = output_partition(false, 100_000);
+                let mut events = vec![];
+                for byte in &output.as_bytes()[..cut] {
+                    partition.push(&[*byte], &mut events);
+                }
+                if let OutputPartition::DeepSeekV41(inner) = &partition {
+                    if cut >= output.find("lookup").unwrap() {
+                        assert!(
+                            !inner.calls.is_empty(),
+                            "fixture has an earlier completed call"
+                        );
+                    }
+                }
+                let result = partition.finish(end, &mut events);
+                assert_eq!(
+                    result.is_ok(),
+                    end.is_token_limit() || cut < opener_len || cut == output.len()
+                );
+                assert_eq!(
+                    calls(&events).len(),
+                    if cut == output.len() { 2 } else { 0 }
+                );
+                if cut < opener_len {
+                    assert_eq!(
+                        published_text(&events, false),
+                        String::from_utf8_lossy(&output.as_bytes()[..cut])
+                    );
+                } else {
+                    assert!(
+                        events
+                            .iter()
+                            .all(|event| matches!(event, PartitionEvent::FunctionCall(_)))
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn v41_stored_parse_and_byte_limit_errors_survive_all_finishes() {
+        let valid = tool_fixture();
+        for output in [
+            valid.replace("name=\"lookup\"", "name=\"bad name\""),
+            valid.replace("false\">2", "false\">not_json"),
+        ] {
+            for split in 0..=output.len() {
+                for end in [GenerationEnd::TokenLimit, GenerationEnd::StopToken(1)] {
+                    let mut partition = output_partition(false, 100_000);
+                    let mut events = vec![];
+                    partition.push(&output.as_bytes()[..split], &mut events);
+                    partition.push(&output.as_bytes()[split..], &mut events);
+                    let failure = partition.failure().cloned().expect("stored parse error");
+                    partition.push(b"ignored", &mut events);
+                    assert_eq!(partition.finish(end, &mut events).unwrap_err(), failure);
+                    assert!(events.is_empty());
+                }
+            }
+        }
+        for end in [GenerationEnd::TokenLimit, GenerationEnd::StopToken(1)] {
+            for cut in 0..=valid.len() {
+                let mut partition = output_partition(false, cut);
+                let mut events = vec![];
+                partition.push(&valid.as_bytes()[..cut], &mut events);
+                assert!(partition.failure().is_none());
+                partition.push(b"x", &mut events);
+                let failure = partition
+                    .failure()
+                    .cloned()
+                    .expect("stored byte limit error");
+                partition.push(b"ignored", &mut events);
+                assert_eq!(partition.finish(end, &mut events).unwrap_err(), failure);
+                assert!(events.is_empty());
+            }
+        }
+    }
+
+    #[test]
+    fn v41_stored_typed_memory_errors_take_precedence_over_truncation() {
+        for headroom in [None, Some(1)] {
+            let failure =
+                crate::serve::transport_memory::admit_resident_transport(2, headroom).unwrap_err();
+            for end in [GenerationEnd::TokenLimit, GenerationEnd::StopToken(1)] {
+                let mut partition = Partition::new(false, 100_000);
+                let mut events = vec![];
+                partition.push("<\u{ff5c}DSML\u{ff5c} calls>".as_bytes(), &mut events);
+                // Inject a typed refusal without adding an admission policy.
+                partition.error = Some(failure.clone());
+                assert_eq!(partition.failure(), Some(&failure));
+                assert_eq!(partition.finish(end, &mut events).unwrap_err(), failure);
+                assert!(events.is_empty());
+            }
+        }
+    }
+
+    fn published_text(events: &[PartitionEvent], thinking: bool) -> String {
+        events
+            .iter()
+            .map(|event| match event {
+                PartitionEvent::Reasoning(text) if thinking => text.as_str(),
+                PartitionEvent::Visible(text) if !thinking => text.as_str(),
+                other => panic!("unexpected {other:?}"),
+            })
+            .collect()
+    }
+
+    #[test]
+    fn v41_plain_text_finish_preserves_recipe_suffix_and_utf8_semantics() {
+        let mut cases: Vec<Vec<u8>> = [
+            "answer",
+            "caf\u{e9}\n",
+            "answer\n\n",
+            "literal <x>",
+            "answer <",
+            "answer </",
+            "answer <nottool",
+            "answer <\u{ff5c}DSMX",
+            "answer\n<",
+            "answer\n</",
+            "answer\n</think",
+            "answer <think>",
+        ]
+        .into_iter()
+        .map(|text| text.as_bytes().to_vec())
+        .collect();
+        for marker in ["<\u{ff5c}DSML\u{ff5c}", "</think>"] {
+            for cut in 1..marker.len() {
+                let mut bytes = b"safe\n".to_vec();
+                bytes.extend_from_slice(&marker.as_bytes()[..cut]);
+                cases.push(bytes);
+            }
+        }
+        for character in ["\u{e9}", "\u{1f389}"] {
+            for cut in 1..character.len() {
+                let mut bytes = b"safe".to_vec();
+                bytes.extend_from_slice(&character.as_bytes()[..cut]);
+                cases.push(bytes);
+            }
+        }
+        for thinking in [false, true] {
+            for bytes in &cases {
+                for split in 0..=bytes.len() {
+                    for end in [GenerationEnd::TokenLimit, GenerationEnd::StopToken(1)] {
+                        let mut partition = output_partition(thinking, 100_000);
+                        let mut events = vec![];
+                        partition.push(&bytes[..split], &mut events);
+                        partition.push(&bytes[split..], &mut events);
+                        partition.finish(end, &mut events).unwrap();
+                        assert_eq!(
+                            published_text(&events, thinking),
+                            String::from_utf8_lossy(bytes),
+                            "split={split} end={end:?}"
+                        );
+                    }
+                }
+            }
+        }
+    }
 
     #[test]
     fn v41_official_renderer_parser_roundtrip_every_byte_boundary() {
@@ -59,7 +323,9 @@ mod tests {
             let mut events = vec![];
             partition.push(&output.as_bytes()[..split], &mut events);
             partition.push(&output.as_bytes()[split..], &mut events);
-            partition.finish(&mut events).unwrap();
+            partition
+                .finish(GenerationEnd::StopToken(1), &mut events)
+                .unwrap();
             let calls: Vec<_> = events
                 .iter()
                 .filter_map(|event| match event {
@@ -300,6 +566,7 @@ pub(crate) struct Partition {
     name: String,
     arguments: String,
     in_call: bool,
+    in_tool_block: bool,
     calls: Vec<ParsedCall>,
     reasoning: bool,
     bytes: usize,
@@ -319,6 +586,7 @@ impl Partition {
             name: String::new(),
             arguments: String::new(),
             in_call: false,
+            in_tool_block: false,
             calls: vec![],
             reasoning: thinking,
             bytes: 0,
@@ -420,6 +688,17 @@ impl Partition {
                 OutputAction::ToSpace => events.push(PartitionEvent::Visible(" ".into())),
                 OutputAction::Label(label) => events.push(PartitionEvent::Visible(label.into())),
                 OutputAction::Skip if text.ends_with("</think>") => self.close_reasoning(events),
+                OutputAction::Skip if text.ends_with("<\u{ff5c}DSML\u{ff5c}") => {
+                    self.in_tool_block = true;
+                }
+                OutputAction::Skip
+                    if matches!(
+                        text,
+                        "</\u{ff5c}DSML\u{ff5c} calls>" | "</\u{ff5c}DSML\u{ff5c}tool_calls>"
+                    ) =>
+                {
+                    self.in_tool_block = false;
+                }
                 OutputAction::Skip
                 | OutputAction::SkipInvalid { .. }
                 | OutputAction::StopSequence
@@ -435,12 +714,32 @@ impl Partition {
         }
     }
 
-    pub(crate) fn finish(mut self, events: &mut Vec<PartitionEvent>) -> Result<(), ServeError> {
+    pub(crate) fn finish(
+        mut self,
+        end: GenerationEnd,
+        events: &mut Vec<PartitionEvent>,
+    ) -> Result<(), ServeError> {
         if let Some(error) = self.error.take() {
             return Err(error);
         }
+        // The recipe ends arguments on the generic DSML close prefix, not
+        // the whole invoke delimiter. Commit only a closed terminal block,
+        // as GLM/K2/Muse do: a partial later call withholds earlier calls too.
+        // Only the recipe's recognized DSML opener confirms a tool block.
+        // Outside it, preserve ordinary suffix and UTF-8 finalization, even
+        // for ambiguous marker prefixes such as '<' or '</think'.
+        if self.in_call || self.in_tool_block {
+            return if end.is_token_limit() {
+                Ok(())
+            } else {
+                Err(ServeError::server_error("incomplete V4.1 tool call"))
+            };
+        }
         let text = self.utf8.finish();
         self.feed(&text, events);
+        if let Some(error) = self.error.take() {
+            return Err(error);
+        }
         let actions = self.machine.take().unwrap().finish();
         self.apply(actions, events);
         if let Some(error) = self.error {

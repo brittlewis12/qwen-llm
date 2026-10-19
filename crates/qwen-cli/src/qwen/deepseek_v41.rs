@@ -48,6 +48,54 @@ pub(crate) fn capabilities(gguf: &GgufFile) -> Result<serde_json::Value> {
     }))
 }
 
+fn only_message_fields(value: &serde_json::Value, scope: &str, fields: &[&str]) -> Result<()> {
+    let object = value
+        .as_object()
+        .with_context(|| format!("V4.1 {scope} must be an object"))?;
+    for key in object.keys() {
+        ensure!(
+            fields.contains(&key.as_str()),
+            "V4.1 {scope} field {key:?} is unsupported; --messages accepts conversation/render fields only, not generation, transport, or output controls"
+        );
+    }
+    Ok(())
+}
+
+fn messages_body(document: &str) -> Result<serde_json::Value> {
+    let mut body: serde_json::Value = serde_json::from_str(document)?;
+    if body.is_array() {
+        body = serde_json::json!({"input":body});
+    }
+    // StrictChat cannot represent Responses history. Keep the family parser and
+    // renderer, but do not admit serving controls that this text-only run drops.
+    only_message_fields(
+        &body,
+        "messages",
+        &["input", "messages", "instructions", "tools", "reasoning"],
+    )?;
+    ensure!(
+        body.get("input").is_none() || body.get("messages").is_none(),
+        "V4.1 messages cannot contain both input and messages"
+    );
+    if let Some(reasoning) = body.get("reasoning").filter(|value| !value.is_null()) {
+        only_message_fields(reasoning, "reasoning", &["effort"])?;
+    }
+    if let Some(tools) = body.get("tools").and_then(serde_json::Value::as_array) {
+        for (index, tool) in tools.iter().enumerate() {
+            only_message_fields(
+                tool,
+                &format!("tools[{index}]"),
+                &["type", "name", "description", "parameters", "strict"],
+            )?;
+        }
+    }
+    if let Some(messages) = body.as_object_mut().and_then(|map| map.remove("messages")) {
+        body["input"] = messages;
+    }
+    body["model"] = "v41".into();
+    Ok(body)
+}
+
 fn prepare_request_front(
     invocation: cli::Invocation,
     args: &Args,
@@ -69,7 +117,15 @@ fn prepare_request_front(
         "V4.1 selects thinking with --reasoning-effort none/low/high/xhigh/max"
     );
     let effort = run.reasoning_effort.clone();
-    let mut body = match run.acquire_input()? {
+    prepare_request_input(run.acquire_input()?, effort, args)
+}
+
+fn prepare_request_input(
+    input: cli::AcquiredRunInput,
+    effort: Option<String>,
+    args: &Args,
+) -> Result<(String, PromptSource)> {
+    let mut body = match input {
         cli::AcquiredRunInput::RawPrompt(text) => {
             ensure!(
                 effort.is_none(),
@@ -85,27 +141,14 @@ fn prepare_request_front(
             }
             body
         }
-        cli::AcquiredRunInput::Messages { document, .. } => {
-            let mut value: serde_json::Value = serde_json::from_str(&document)?;
-            if value.is_array() {
-                value = serde_json::json!({"input":value});
-            }
-            ensure!(
-                value.is_object(),
-                "V4.1 messages must be an array or an object"
-            );
-            ensure!(
-                value.get("input").is_none() || value.get("messages").is_none(),
-                "V4.1 messages cannot contain both input and messages"
-            );
-            if let Some(messages) = value.as_object_mut().and_then(|m| m.remove("messages")) {
-                value["input"] = messages;
-            }
-            value["model"] = "v41".into();
-            value
-        }
+        cli::AcquiredRunInput::Messages { document, source } => messages_body(&document)
+            .with_context(|| format!("parse V4.1 messages input {source}"))?,
     };
     if let Some(effort) = effort {
+        ensure!(
+            body.get("reasoning").is_none(),
+            "V4.1 --reasoning-effort conflicts with messages document reasoning; supply only one"
+        );
         body["reasoning"] = serde_json::json!({"effort":effort});
     }
     let profile = serve::request_profile::RequestProfile::DeepSeekV41 {
@@ -235,6 +278,225 @@ mod tests {
         assert!(prompt.contains("hello"));
         assert!(prompt.contains("Reasoning Effort: 75"));
         assert!(prompt.ends_with("<think>"));
+    }
+
+    fn prepare_document(document: serde_json::Value, flags: &[&str]) -> Result<String> {
+        let mut argv = vec![
+            "qwen",
+            "run",
+            "-m",
+            "model.gguf",
+            "--messages",
+            "unused.json",
+        ];
+        argv.extend_from_slice(flags);
+        let (args, cli::Invocation::Run(run)) = invocation(&argv) else {
+            unreachable!()
+        };
+        prepare_request_input(
+            cli::AcquiredRunInput::Messages {
+                document: document.to_string(),
+                source: "test".into(),
+            },
+            run.reasoning_effort,
+            &args,
+        )
+        .map(|(prompt, source)| {
+            assert_eq!(source, PromptSource::Messages);
+            prompt
+        })
+    }
+
+    #[test]
+    fn v41_messages_accept_arrays_and_both_document_aliases() {
+        use serde_json::json;
+        let history = json!([{"role":"user", "content":"hello"}]);
+        let expected = prepare_document(history.clone(), &[]).unwrap();
+        for document in [
+            json!({"messages":history}),
+            json!({"input":history}),
+            json!({"input":"hello"}),
+        ] {
+            assert_eq!(prepare_document(document, &[]).unwrap(), expected);
+        }
+        assert!(expected.contains("hello"));
+        assert!(expected.ends_with("</think>"));
+        let prompt = prepare_document(history, &["--reasoning-effort", "high"]).unwrap();
+        assert!(prompt.contains("Reasoning Effort: 75"));
+        assert!(prompt.ends_with("<think>"));
+    }
+
+    #[test]
+    fn v41_messages_preserve_responses_history_tools_and_reasoning() {
+        use serde_json::json;
+        for alias in ["input", "messages"] {
+            for effort in ["none", "low", "high", "xhigh", "max"] {
+                let document = json!({
+                    alias: [
+                        {"role":"user", "content":[{"type":"input_text", "text":"question"}]},
+                        {"type":"reasoning", "content":"plan"},
+                        {"role":"assistant", "content":"answer"},
+                        {"type":"function_call", "call_id":"c", "name":"lookup", "arguments":"{}"},
+                        {"type":"function_call_output", "call_id":"c", "output":{"result":"found"}},
+                        {"role":"user", "content":"continue"}
+                    ],
+                    "instructions":"be helpful",
+                    "tools":[{"type":"function", "name":"lookup", "description":"lookup facts",
+                        "parameters":{"type":"object", "properties":{"temperature":{"type":"number"}}}}],
+                    "reasoning":{"effort":effort}
+                });
+                let prompt = prepare_document(document, &[]).unwrap();
+                for text in [
+                    "be helpful",
+                    "question",
+                    "answer",
+                    "lookup",
+                    "found",
+                    "continue",
+                    "temperature",
+                ] {
+                    assert!(prompt.contains(text), "missing {text:?} in {prompt}");
+                }
+                assert_eq!(prompt.ends_with("<think>"), effort != "none");
+                assert_eq!(prompt.contains("Reasoning Effort:"), effort != "none");
+            }
+        }
+    }
+
+    #[test]
+    fn v41_messages_refuse_lost_controls_and_unknown_fields_even_when_null() {
+        use serde_json::json;
+        for (key, value) in [
+            ("temperature", json!(0.2)),
+            ("temp", json!(0.2)),
+            ("top_p", json!(0.9)),
+            ("top_k", json!(4)),
+            ("min_p", json!(0.1)),
+            ("seed", json!(42)),
+            ("max_output_tokens", json!(12)),
+            ("max_tokens", json!(12)),
+            ("tokens", json!(12)),
+            ("stream", json!(true)),
+            ("store", json!(false)),
+            ("truncation", json!("disabled")),
+            ("parallel_tool_calls", json!(false)),
+            ("response_format", json!({"type":"json_object"})),
+            ("text", json!({"format":{"type":"text"}})),
+            ("tool_choice", json!("auto")),
+            (
+                "tool_choice",
+                json!({"type":"allowed_tools", "mode":"auto", "tools":[]}),
+            ),
+            ("x_qwen", json!({"seed":42})),
+            ("x_qwen", json!({"stats":true})),
+            ("x_qwen", json!({"template_style":"upstream"})),
+            ("x_qwen", json!({"no_thinking":false})),
+            ("reasoning_effort", json!("high")),
+            ("no_thinking", json!(false)),
+            ("thinking", json!(true)),
+            ("model", json!("ignored-model")),
+            ("meta", json!({"temperature":0.2})),
+            ("unknown", json!(true)),
+        ] {
+            for value in [value, serde_json::Value::Null] {
+                let document = json!({"input":"hello", key:value});
+                let error = format!("{:#}", prepare_document(document, &[]).unwrap_err());
+                assert!(
+                    error.contains(key) && error.contains("unsupported"),
+                    "{error}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn v41_messages_refuse_nested_controls_without_restricting_schema_data() {
+        use serde_json::json;
+        for key in ["summary", "budget_tokens", "enabled", "unknown"] {
+            for value in [json!(true), serde_json::Value::Null] {
+                let document = json!({"input":"hello", "reasoning":{"effort":"high", key:value}});
+                let error = format!("{:#}", prepare_document(document, &[]).unwrap_err());
+                assert!(
+                    error.contains("reasoning") && error.contains(key),
+                    "{error}"
+                );
+            }
+        }
+        let document = json!({"input":"hello", "tools":[{"name":"lookup", "allowed":false}]});
+        let error = format!("{:#}", prepare_document(document, &[]).unwrap_err());
+        assert!(
+            error.contains("tools[0]") && error.contains("allowed"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn v41_messages_aliases_and_reasoning_sources_are_mutually_exclusive() {
+        use serde_json::json;
+        for input in [json!("hello"), serde_json::Value::Null] {
+            let error = format!(
+                "{:#}",
+                prepare_document(json!({"input":input, "messages":[]}), &[]).unwrap_err()
+            );
+            assert!(error.contains("both input and messages"), "{error}");
+        }
+        for reasoning in [
+            json!({"effort":"low"}),
+            json!({"effort":"high"}),
+            json!({}),
+            serde_json::Value::Null,
+        ] {
+            let error = prepare_document(
+                json!({"input":"hello", "reasoning":reasoning}),
+                &["--reasoning-effort", "high"],
+            )
+            .unwrap_err()
+            .to_string();
+            assert!(error.contains("--reasoning-effort conflicts"), "{error}");
+        }
+        for effort in [json!("medium"), json!(false)] {
+            assert!(
+                prepare_document(json!({"input":"hello", "reasoning":{"effort":effort}}), &[])
+                    .is_err()
+            );
+        }
+        for flags in [
+            vec!["--messages", "unused.json", "--user", "hello"],
+            vec!["--messages", "unused.json", "--raw-prompt", "hello"],
+            vec!["--messages", "unused.json", "--system", "hello"],
+            vec![
+                "--messages",
+                "unused.json",
+                "--reasoning-effort",
+                "high",
+                "--no-thinking",
+            ],
+        ] {
+            let mut argv = vec!["qwen", "run", "-m", "model.gguf"];
+            argv.extend(flags);
+            assert!(Args::command().try_get_matches_from(argv).is_err());
+        }
+    }
+
+    #[test]
+    fn v41_run_refuses_non_text_output_and_no_thinking_before_reading_messages() {
+        for flags in [vec!["--format", "responses"], vec!["--no-thinking"]] {
+            let mut argv = vec![
+                "qwen",
+                "run",
+                "-m",
+                "model.gguf",
+                "--messages",
+                "unused.json",
+            ];
+            argv.extend(flags);
+            let (args, run) = invocation(&argv);
+            let error = prepare_request_front(run, &args).unwrap_err().to_string();
+            assert!(
+                error.contains("--format text") || error.contains("--reasoning-effort"),
+                "{error}"
+            );
+        }
     }
 
     #[test]

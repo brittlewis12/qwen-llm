@@ -109,6 +109,15 @@ impl RequestProfile {
         match self {
             Self::DeepSeekV41 { .. } => {
                 if let Some(options) = body["x_qwen"].as_object() {
+                    if options
+                        .get("history_thinking")
+                        .is_some_and(|v| !v.is_null())
+                    {
+                        return Err(ServeError::invalid_request(
+                            Some("x_qwen.history_thinking"),
+                            "V4.1 uses official recipe history semantics; history_thinking overrides are unsupported",
+                        ));
+                    }
                     for key in [
                         "ced",
                         "prefix_reuse",
@@ -119,7 +128,11 @@ impl RequestProfile {
                         if options.get(key).is_some_and(|v| !v.is_null()) {
                             return Err(ServeError::invalid_request(
                                 Some(&format!("x_qwen.{key}")),
-                                "V4.1 serving has no CED, snapshots, or prefix reuse",
+                                if key == "ced" {
+                                    "V4.1 serving does not support CED"
+                                } else {
+                                    "V4.1 uses automatic exact-prefix RAM snapshots; per-request cache controls and durable caching are unsupported"
+                                },
                             ));
                         }
                     }
@@ -185,8 +198,13 @@ impl RequestProfile {
             // before rendering, protocol selection and response echoes.
             Self::DeepSeekV41 { limits, sampling } => {
                 super::protocol_v41::validate(request)?;
+                if request.template_style.is_some() {
+                    return Err(ServeError::invalid_request(
+                        Some("x_qwen.template_style"),
+                        "V4.1 uses the official recipe; template_style overrides are unsupported",
+                    ));
+                }
                 if let Some(defaults) = sampling {
-                    request.seed.get_or_insert(defaults.seed);
                     fill_sampling_defaults(request, *defaults);
                 }
                 request
@@ -280,7 +298,7 @@ impl RequestProfile {
     }
 
     /// [`Self::render`] plus the boundaries the family renderer recorded
-    /// (GLM-5.3 only; other families render text only).
+    /// (GLM-5.3 and V4.1; other families render text only).
     pub(crate) fn render_prepared(
         &self,
         request: &ServeRequest,
@@ -414,6 +432,49 @@ pub(super) fn qwen_preopens(template: QwenTemplate, request: &ServeRequest) -> b
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn v41_refuses_unbound_recipe_and_cache_controls_with_current_capabilities() {
+        let profile = RequestProfile::DeepSeekV41 {
+            limits: OutputLimits::TEST,
+            sampling: None,
+        };
+        for (key, value) in [
+            ("history_thinking", serde_json::json!("preserve")),
+            ("history_thinking", serde_json::json!("strip")),
+            ("template_style", serde_json::json!("house")),
+            ("template_style", serde_json::json!("upstream")),
+            ("ced", serde_json::json!(false)),
+            ("prefix_reuse", serde_json::json!(true)),
+            ("prefix_cache", serde_json::json!(false)),
+            ("snapshot_cache", serde_json::json!(true)),
+            ("durable_prefix_cache", serde_json::json!(true)),
+        ] {
+            let body = serde_json::json!({"model":"m", "input":"hi", "x_qwen":{key:value}});
+            let error = profile
+                .parse(&body)
+                .and_then(|mut request| profile.normalize(&mut request))
+                .unwrap_err();
+            assert_eq!(error.status, 400, "{key}");
+            assert_eq!(
+                error.param.as_deref(),
+                Some(format!("x_qwen.{key}").as_str())
+            );
+            if key.contains("cache") || key == "prefix_reuse" {
+                assert!(
+                    error
+                        .message
+                        .contains("automatic exact-prefix RAM snapshots")
+                );
+            }
+        }
+        let mut request = profile
+            .parse(
+                &serde_json::json!({"model":"m", "input":"hi", "x_qwen":{"history_thinking":null}}),
+            )
+            .unwrap();
+        profile.normalize(&mut request).unwrap();
+    }
 
     /// Qwen-family tool ceilings: the resolved token limit (explicit or the
     /// backend default) times the longest piece times 3; an uncomputable

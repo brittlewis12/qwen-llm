@@ -519,12 +519,16 @@ fn exchange(backend: &mut Stub, request: String) -> String {
 }
 
 fn response(wire: &str, stream: bool) -> Value {
+    terminal_response(wire, stream, "response.completed")
+}
+
+fn terminal_response(wire: &str, stream: bool, terminal: &str) -> Value {
     assert!(wire.starts_with("HTTP/1.1 200"), "{wire}");
     if stream {
         wire.lines()
             .filter_map(|line| line.strip_prefix("data: "))
             .filter_map(|data| serde_json::from_str::<Value>(data).ok())
-            .find(|v| v["type"] == "response.completed")
+            .find(|v| v["type"] == terminal)
             .unwrap()["response"]
             .clone()
     } else {
@@ -582,6 +586,48 @@ fn v41_backend_flushes_incomplete_utf8_at_eos() {
 }
 
 #[test]
+fn v41_http_partial_tool_is_incomplete_at_budget_but_failed_at_eos() {
+    let output = "answer<\u{ff5c}DSML\u{ff5c} calls><\u{ff5c}DSML\u{ff5c} invoke name=\"lookup\"><\u{ff5c}DSML\u{ff5c} parameter name=\"q\" string=\"true\">partial";
+    for stream in [false, true] {
+        for maximum in [1, 8] {
+            let mut backend = stub(output);
+            let wire = exchange(
+                &mut backend,
+                post(&json!({"model":"test", "input":"hi",
+                "stream":stream, "max_output_tokens":maximum,
+                "tools":[{"type":"function", "name":"lookup", "parameters":{"type":"object"}}]})),
+            );
+            assert!(!wire.contains("\"type\":\"function_call\""), "{wire}");
+            assert!(
+                !wire.contains("partial"),
+                "tool arguments must stay withheld: {wire}"
+            );
+            if maximum == 1 {
+                assert!(wire.starts_with("HTTP/1.1 200"), "{wire}");
+                let reply: Value = if stream {
+                    wire.lines()
+                        .filter_map(|line| line.strip_prefix("data: "))
+                        .filter_map(|data| serde_json::from_str::<Value>(data).ok())
+                        .find(|event| event["type"] == "response.incomplete")
+                        .expect("budget termination event")["response"]
+                        .clone()
+                } else {
+                    serde_json::from_str(wire.split_once("\r\n\r\n").unwrap().1).unwrap()
+                };
+                assert_eq!(reply["status"], "incomplete");
+                assert_eq!(reply["incomplete_details"]["reason"], "max_output_tokens");
+                assert_eq!(reply["output"][0]["content"][0]["text"], "answer");
+            } else if stream {
+                assert!(wire.contains("response.failed"), "{wire}");
+                assert!(!wire.contains("response.completed"), "{wire}");
+            } else {
+                assert!(wire.starts_with("HTTP/1.1 500"), "{wire}");
+            }
+        }
+    }
+}
+
+#[test]
 fn v41_backend_tools_multiturn_non_generation_and_preflight_rejections() {
     let output = "plan</think><\u{ff5c}DSML\u{ff5c} calls><\u{ff5c}DSML\u{ff5c} invoke name=\"lookup\"></\u{ff5c}DSML\u{ff5c} invoke></\u{ff5c}DSML\u{ff5c} calls>";
     let mut backend = stub(output);
@@ -610,6 +656,26 @@ fn v41_backend_tools_multiturn_non_generation_and_preflight_rejections() {
     let wire = exchange(&mut backend, post(&json!({"model":"test","input":"hi"})));
     assert!(wire.starts_with("HTTP/1.1 503"), "{wire}");
     assert_eq!(backend.starts, starts);
+}
+
+#[test]
+fn v41_http_complete_tool_at_budget_is_retained_in_incomplete_response() {
+    let output = "<\u{ff5c}DSML\u{ff5c} calls><\u{ff5c}DSML\u{ff5c} invoke name=\"lookup\"></\u{ff5c}DSML\u{ff5c} invoke></\u{ff5c}DSML\u{ff5c} calls>";
+    for stream in [false, true] {
+        let mut backend = stub(output);
+        let wire = exchange(
+            &mut backend,
+            post(&json!({"model":"test", "input":"hi",
+            "stream":stream, "max_output_tokens":1,
+            "tools":[{"type":"function", "name":"lookup", "parameters":{"type":"object"}}]})),
+        );
+        let reply = terminal_response(&wire, stream, "response.incomplete");
+        assert_eq!(reply["status"], "incomplete");
+        assert_eq!(reply["incomplete_details"]["reason"], "max_output_tokens");
+        assert_eq!(reply["output"][0]["type"], "function_call");
+        assert_eq!(reply["output"][0]["name"], "lookup");
+        assert_eq!(reply["output"][0]["arguments"], "{}");
+    }
 }
 
 #[test]
@@ -676,9 +742,23 @@ fn v41_backend_defaults_prompt_budget_and_loopback_only() {
         .parse(&json!({"model":"test","input":"hi"}))
         .unwrap();
     profile.normalize(&mut request).unwrap();
+    assert_eq!((request.temperature, request.top_k), (Some(0.7), Some(2)));
+    let first_seed = request.seed.expect("normalized request has a seed");
+    assert_ne!(first_seed, 123, "startup seed is not a request default");
+    profile.normalize(&mut request).unwrap();
     assert_eq!(
-        (request.temperature, request.top_k, request.seed),
-        (Some(0.7), Some(2), Some(123))
+        request.seed,
+        Some(first_seed),
+        "normalization is idempotent"
+    );
+    let mut second = profile
+        .parse(&json!({"model":"test","input":"hi"}))
+        .unwrap();
+    profile.normalize(&mut second).unwrap();
+    assert_ne!(second.seed, Some(first_seed));
+    assert_eq!(
+        sampling_with_defaults(&request, backend.settings.sampling).seed,
+        first_seed
     );
     let mut request = profile
         .parse(&json!({"model":"test","input":"hi","temperature":0,"x_qwen":{"seed":7}}))
@@ -977,4 +1057,29 @@ fn v41_native_phase_stats_are_opt_in_on_existing_http_echo() {
             assert!(reply.get("x_qwen").is_none());
         }
     }
+}
+
+#[test]
+fn v41_http_sampling_seeds_are_per_request_and_explicit_seeds_are_echoed() {
+    let mut backend = stub("answer");
+    let mut seeds = vec![];
+    for stream in [false, true] {
+        for explicit in [None, Some(7)] {
+            let mut body = json!({"model":"test", "input":"hi", "stream":stream,
+                "x_qwen":{"stats":true}});
+            if let Some(seed) = explicit {
+                body["x_qwen"]["seed"] = json!(seed);
+            }
+            let reply = response(&exchange(&mut backend, post(&body)), stream);
+            let seed = reply["x_qwen"]["seed"]
+                .as_u64()
+                .expect("effective sampler seed");
+            if let Some(explicit) = explicit {
+                assert_eq!(seed, explicit);
+            } else {
+                seeds.push(seed);
+            }
+        }
+    }
+    assert_ne!(seeds[0], seeds[1]);
 }

@@ -43,7 +43,7 @@ impl Store {
     }
 
     pub fn sweep(&mut self) {
-        self.cache.sweep();
+        super::super::log_expired_snapshots("deepseek_v41", &self.cache.sweep());
     }
 }
 

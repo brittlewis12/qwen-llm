@@ -201,6 +201,9 @@ impl GenerationBackend for Backend<'_> {
     fn request_profile(&self) -> RequestProfile {
         self.settings.profile()
     }
+    fn idle(&mut self) {
+        self.reuse.sweep();
+    }
     fn generate(
         &mut self,
         request: &ServeRequest,

@@ -85,7 +85,9 @@ fn official_text_reasoning_and_tool_rerenders_choose_exact_prefixes() {
             let mut partition = super::super::protocol_v41::Partition::new(thinking, 1 << 20);
             let mut events = vec![];
             partition.push(output.as_bytes(), &mut events);
-            partition.finish(&mut events).unwrap();
+            partition
+                .finish(GenerationEnd::StopToken(1), &mut events)
+                .unwrap();
             assert!(events.iter().any(|event| matches!(event,
                 super::super::partition::PartitionEvent::FunctionCall(call) if call.name == "lookup"
             )));

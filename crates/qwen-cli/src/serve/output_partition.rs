@@ -220,7 +220,7 @@ impl OutputPartition {
                 }
                 Ok(())
             }
-            Self::DeepSeekV41(partition) => partition.finish(events),
+            Self::DeepSeekV41(partition) => partition.finish(end, events),
             Self::Qwen(partition) => partition.finish(events),
             Self::Muse(partition) => partition.finish(end, events),
             Self::Preopened(partition) => partition.finish(end, events),

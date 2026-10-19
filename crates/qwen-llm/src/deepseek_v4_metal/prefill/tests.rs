@@ -9,7 +9,7 @@ fn scope_facts(
     unified_memory: bool,
 ) -> crate::metal::DeviceFacts {
     crate::metal::DeviceFacts {
-        version: "qwen_device_info_v7",
+        version: crate::metal::DEVICE_FACTS_VERSION,
         features: crate::enabled_diagnostic_features(),
         name: model.into(),
         architecture: "test".into(),
@@ -29,6 +29,7 @@ fn scope_facts(
         host_page_size_bytes: None,
         physical_memory_bytes: memory,
         os_version: None,
+        os_build: None,
         product_metallib_deployment_target: "",
         research_metallib_deployment_target: "",
         metallib_compiler_identity: "",

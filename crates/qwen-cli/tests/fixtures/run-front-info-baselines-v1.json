@@ -85,13 +85,15 @@
           ],
           "rendered_as": "qwen_chatml_messages_v1"
         }
-      }
+      },
+      "os_build": "<device-derived>"
     },
     "text_capability_lines": [
       "drafter run: permitted",
       "drafter serve: permitted",
       "prompt lookup: permitted",
       "sampling: temperature 1.0 top-k 20 top-p 0.95 min-p 0.0 (qwen_unidentified/other_shape)",
+      "os_build: <device-derived>",
       "reasoning: no effort levels; no-thinking unsupported (release_unknown)",
       "input: raw supported, user supported, messages supported, tools unsupported (tools_require_known_release)",
       "template: unknown as qwen_chatml_messages_v1"
@@ -184,13 +186,15 @@
           ],
           "rendered_as": "qwen_chatml_messages_v1"
         }
-      }
+      },
+      "os_build": "<device-derived>"
     },
     "text_capability_lines": [
       "drafter run: permitted",
       "drafter serve: unsupported (serve_moe_target)",
       "prompt lookup: permitted",
       "sampling: temperature 1.0 top-k 20 top-p 0.95 min-p 0.0 (qwen_unidentified/other_shape)",
+      "os_build: <device-derived>",
       "reasoning: no effort levels; no-thinking unsupported (release_unknown)",
       "input: raw supported, user supported, messages supported, tools unsupported (tools_require_known_release)",
       "template: unknown as qwen_chatml_messages_v1"
@@ -271,13 +275,15 @@
             "general.license.link"
           ]
         }
-      }
+      },
+      "os_build": "<device-derived>"
     },
     "text_capability_lines": [
       "drafter run: unsupported (family_no_speculation)",
       "drafter serve: unsupported (family_no_speculation)",
       "prompt lookup: unsupported (family_no_prompt_lookup)",
       "sampling: temperature 1.0 top-k 20 top-p 0.95 min-p 0.0 (qwen3.8_flash_next)",
+      "os_build: <device-derived>",
       "reasoning: unsupported (prompt_protocol_unsupported)",
       "input: raw supported, user unsupported (prompt_protocol_unsupported), messages unsupported (prompt_protocol_unsupported), tools unsupported (prompt_protocol_unsupported)",
       "template: unknown"
@@ -362,13 +368,15 @@
           "code": "deepseek4_release_profile_unverified",
           "message": "missing GGUF metadata \"deepseek4.context_length\""
         }
-      }
+      },
+      "os_build": "<device-derived>"
     },
     "text_capability_lines": [
       "drafter run: unsupported (family_no_speculation)",
       "drafter serve: unsupported (family_no_speculation)",
       "prompt lookup: unsupported (family_no_prompt_lookup)",
       "sampling: temperature 1.0 top-k 0 top-p 1.0 min-p 0.0 (deepseek_v4_0731)",
+      "os_build: <device-derived>",
       "reasoning: no effort levels; no-thinking unsupported (deepseek4_release_profile_unverified)",
       "input: raw unsupported (deepseek4_release_profile_unverified), user unsupported (deepseek4_release_profile_unverified), messages unsupported (deepseek4_release_profile_unverified), tools unsupported (deepseek4_release_profile_unverified)",
       "template: unknown",
@@ -444,13 +452,15 @@
           "status": "not_evaluated",
           "stage": "runtime_memory_admission"
         }
-      }
+      },
+      "os_build": "<device-derived>"
     },
     "text_capability_lines": [
       "drafter run: unsupported (family_no_speculation)",
       "drafter serve: unsupported (family_no_speculation)",
       "prompt lookup: unsupported (family_no_prompt_lookup)",
       "sampling: temperature 1.0 top-k 0 top-p 1.0 min-p 0.0 (deepseek_v41)",
+      "os_build: <device-derived>",
       "input: raw unsupported (invalid_v41_gguf), user unsupported (invalid_v41_gguf), messages unsupported (invalid_v41_gguf), tools unsupported (invalid_v41_gguf)",
       "template: unknown",
       "execution: rejected (invalid_v41_gguf)"
@@ -535,13 +545,15 @@
           "code": "muse_release_profile_unverified",
           "message": "missing required metadata key: muse-glimmer.attention.sliding_window_pattern"
         }
-      }
+      },
+      "os_build": "<device-derived>"
     },
     "text_capability_lines": [
       "drafter run: unsupported (family_no_speculation)",
       "drafter serve: unsupported (family_no_speculation)",
       "prompt lookup: unsupported (family_no_prompt_lookup)",
       "sampling: temperature 1.0 top-k 64 top-p 0.95 min-p 0.0 (muse_glimmer)",
+      "os_build: <device-derived>",
       "reasoning: no effort levels; no-thinking unsupported (muse_release_profile_unverified)",
       "input: raw unsupported (muse_release_profile_unverified), user unsupported (muse_release_profile_unverified), messages unsupported (muse_release_profile_unverified), tools unsupported (muse_release_profile_unverified)",
       "template: unknown",
@@ -700,13 +712,15 @@
             ]
           }
         }
-      }
+      },
+      "os_build": "<device-derived>"
     },
     "text_capability_lines": [
       "drafter run: unsupported (family_no_speculation)",
       "drafter serve: unsupported (family_no_speculation)",
       "prompt lookup: unsupported (family_no_prompt_lookup)",
       "sampling: temperature 1.0 top-k 0 top-p 0.95 min-p 0.0 (k2_horizon)",
+      "os_build: <device-derived>",
       "reasoning: unsupported (k2_chat_format_unavailable)",
       "input: raw unsupported (k2_configuration), user unsupported (k2_chat_format_unavailable), messages unsupported (k2_chat_format_unavailable), tools unsupported (k2_chat_format_unavailable)",
       "template: not_evaluated (k2_generation_not_admitted)",
@@ -829,13 +843,15 @@
           "rendered_as": null,
           "message": "GLM-5.3 artifact glm5_next_configuration: unsupported GLM-5.3 feature \"glm5-next.full_attention_interval\": unrecognized or unsupported architecture metadata"
         }
-      }
+      },
+      "os_build": "<device-derived>"
     },
     "text_capability_lines": [
       "drafter run: unsupported (family_no_speculation)",
       "drafter serve: unsupported (family_no_speculation)",
       "prompt lookup: unsupported (family_no_prompt_lookup)",
       "sampling: temperature 1.0 top-k 0 top-p 0.95 min-p 0.0 (glm_5.3_flash)",
+      "os_build: <device-derived>",
       "reasoning: no effort levels; no-thinking unsupported (glm5_next_configuration)",
       "input: raw unsupported (glm5_next_configuration), user unsupported (glm5_next_configuration), messages unsupported (glm5_next_configuration), tools unsupported (glm5_next_configuration)",
       "template: unsupported",

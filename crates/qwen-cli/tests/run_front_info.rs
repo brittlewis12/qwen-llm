@@ -21,6 +21,7 @@ fn fixture_path(architecture: &str) -> PathBuf {
 
 fn normalize_model_json(mut value: Value) -> Value {
     value["model"] = json!("<model>");
+    value["os_build"] = json!("<device-derived>");
     if let Some(storage) = value
         .get_mut("weight_storage")
         .and_then(Value::as_object_mut)
@@ -37,6 +38,20 @@ fn normalize_model_json(mut value: Value) -> Value {
         }
     }
     value
+}
+
+fn normalize_os_build(text: String) -> String {
+    text.lines()
+        .map(|line| {
+            if line.starts_with("  os_build: ") {
+                "  os_build: <device-derived>".to_owned()
+            } else {
+                line.to_owned()
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+        + "\n"
 }
 
 #[test]
@@ -63,9 +78,11 @@ fn every_family_qwen_info_json_and_text_matches_synthetic_cli_baseline() {
             "qwen info failed for {architecture}: {}",
             String::from_utf8_lossy(&text_output.stderr)
         );
-        let actual_text = String::from_utf8(text_output.stdout)
-            .unwrap()
-            .replace(model.to_str().unwrap(), "<model>");
+        let actual_text = normalize_os_build(
+            String::from_utf8(text_output.stdout)
+                .unwrap()
+                .replace(model.to_str().unwrap(), "<model>"),
+        );
         assert_eq!(
             actual_text,
             expected["text_utf8"].as_str().unwrap(),

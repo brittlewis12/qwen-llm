@@ -330,7 +330,7 @@ pub use bench::*;
 pub use census::*;
 pub use completion::*;
 pub use context::*;
-pub use device_facts::{DeviceFacts, GpuFamilySupport};
+pub use device_facts::{DEVICE_FACTS_VERSION, DeviceFacts, GpuFamilySupport, os_build_version};
 pub use dflash::*;
 pub use elementwise::*;
 pub use encoder::*;

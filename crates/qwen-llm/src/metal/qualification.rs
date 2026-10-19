@@ -1096,6 +1096,7 @@ mod tests {
             host_page_size_bytes: Some(16_384),
             physical_memory_bytes: memory,
             os_version: Some("15.0".into()),
+            os_build: None,
             product_metallib_deployment_target: "",
             research_metallib_deployment_target: "",
             metallib_compiler_identity: "",

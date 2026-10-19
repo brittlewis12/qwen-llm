@@ -56,7 +56,7 @@ fn qwen_info_storage_decision_matches_load_with_short_process_headroom() {
 
 fn selector_device_facts(name: &str) -> qwen_llm::metal::DeviceFacts {
     qwen_llm::metal::DeviceFacts {
-        version: "qwen_device_info_v7",
+        version: qwen_llm::metal::DEVICE_FACTS_VERSION,
         features: qwen_llm::enabled_diagnostic_features(),
         name: name.into(),
         architecture: "test".into(),
@@ -76,6 +76,7 @@ fn selector_device_facts(name: &str) -> qwen_llm::metal::DeviceFacts {
         host_page_size_bytes: None,
         physical_memory_bytes: None,
         os_version: None,
+        os_build: None,
         product_metallib_deployment_target: "",
         research_metallib_deployment_target: "",
         metallib_compiler_identity: "",

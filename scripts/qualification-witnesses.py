@@ -69,7 +69,25 @@ def libtest_passes(output: str) -> bool:
     )
 
 
+def metallib_build_identity(facts: dict) -> dict:
+    return {
+        "compiler": facts["metallib_compiler_identity"],
+        "sdk_version": facts["metallib_sdk_version"],
+        "os_build": facts.get("os_build"),
+    }
+
+
 def self_test() -> None:
+    assert metallib_build_identity({
+        "metallib_compiler_identity": "metal test",
+        "metallib_sdk_version": "test-sdk",
+        "os_build": None,
+    }) == {"compiler": "metal test", "sdk_version": "test-sdk", "os_build": None}
+    assert metallib_build_identity({
+        "metallib_compiler_identity": "metal test",
+        "metallib_sdk_version": "test-sdk",
+        "os_build": "25A1234",
+    })["os_build"] == "25A1234"
     env, command = parse_command(
         "QWEN_ONE=two QWEN_MANY='three four' cargo test --release -p qwen-llm --lib case -- --exact",
         "replay",
@@ -370,8 +388,7 @@ def main() -> int:
             "git_commit": commit,
             "timestamp": dt.datetime.now(dt.timezone.utc).isoformat().replace("+00:00", "Z"),
             "metallib_build_identity": {
-                "compiler": facts["metallib_compiler_identity"],
-                "sdk_version": facts["metallib_sdk_version"],
+                **metallib_build_identity(facts),
             },
             "device_facts": facts,
             "dry_run": args.dry_run,

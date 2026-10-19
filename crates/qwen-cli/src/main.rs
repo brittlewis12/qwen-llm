@@ -1255,6 +1255,7 @@ fn project_info(model: &Path, gguf: &GgufFile) -> Result<serde_json::Value> {
         sampling,
         weight_storage: qwen_cli::info::weight_storage_projection(family, gguf),
         capabilities,
+        os_build: qwen_llm::metal::os_build_version(),
     });
     Ok(projection)
 }
@@ -1406,6 +1407,11 @@ mod info_text_tests {
             capability_lines(&lanes),
             ["run: conditional", "lens: unsupported (x)"]
         );
+        let unavailable_build = json!({"os_build": null, "capabilities": {}});
+        assert_eq!(
+            capability_lines(&unavailable_build),
+            ["os_build: unavailable"]
+        );
     }
 
     /// A Qwen header too malformed to identify a release (a non-array
@@ -1462,6 +1468,12 @@ mod info_text_tests {
                 "top_k": 20, "top_p": 0.95, "min_p": 0.0})
         );
         assert!(projection["capabilities"].is_object());
+        assert!(projection.get("os_build").is_some());
+        assert!(
+            capability_lines(&projection)
+                .iter()
+                .any(|line| line.starts_with("os_build: "))
+        );
         assert!(
             capability_lines(&projection)
                 .iter()

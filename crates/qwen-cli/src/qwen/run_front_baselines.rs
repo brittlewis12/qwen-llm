@@ -26,6 +26,7 @@ fn family_info_baselines() -> Value {
         let gguf = GgufFile::open(&path).unwrap();
         let mut projection = project_info(Path::new("<model>"), &gguf).unwrap();
         projection["model"] = json!("<model>");
+        projection["os_build"] = json!("<device-derived>");
         if !projection["weight_storage"].is_null() {
             projection["weight_storage"]["mode"] = json!("<device-derived>");
             projection["weight_storage"]["copied_bytes_estimate"] = json!("<device-derived>");

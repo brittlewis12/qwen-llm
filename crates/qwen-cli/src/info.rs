@@ -15,6 +15,7 @@ pub struct ProjectionInput {
     pub sampling: Value,
     pub weight_storage: Value,
     pub capabilities: Value,
+    pub os_build: Option<String>,
 }
 
 /// Assemble the versioned `qwen info --json` record.
@@ -31,6 +32,7 @@ pub fn assemble_projection(input: ProjectionInput) -> Value {
         "prompt_lookup": { "run": input.prompt_lookup },
         "sampling": input.sampling,
         "weight_storage": input.weight_storage,
+        "os_build": input.os_build,
         "capabilities": input.capabilities,
     })
 }
@@ -63,6 +65,12 @@ pub fn capability_lines(projection: &Value) -> Vec<String> {
             sampling["top_p"],
             sampling["min_p"],
             sampling["identity"].as_str().unwrap_or("-"),
+        ));
+    }
+    if let Some(os_build) = projection.get("os_build") {
+        lines.push(format!(
+            "os_build: {}",
+            os_build.as_str().unwrap_or("unavailable")
         ));
     }
     let capabilities = &projection["capabilities"];

@@ -33,7 +33,8 @@ use the existing v2 schema; benchmarks use the existing family harness. Each
 request reuses the longest available exact causal prefix from live state or RAM
 snapshots. Cold prefill advances in 256-row layer-major chunks without computing
 unused prompt logits. Dense projections and supported routed experts use shared
-NativeF32 matrix kernels; cache updates remain causally ordered. CED, speculation
+NativeF32 matrix kernels, as does attention's value reduction at 256 or more
+attended key/value rows; cache updates remain causally ordered. CED, speculation
 and Lens are not implemented for V4.1.
 
 ## Verification
@@ -116,14 +117,31 @@ Selection/projection cleanup reaches 48.686, and SIMD score reduction measures
 50.116 +/- 0.224 tokens/s over three repetitions. Parallel softmax at `a707908b`
 then measures **76.550 +/- 0.048 tokens/s pp1024** and **26.861 +/- 0.011 tg32**,
 also over three repetitions. These cold-KV prefill rates use resident, warmed
-weights. A 1,024-token prompt still takes 13.377 seconds: practical agent latency
-is not solved.
+weights. At that checkpoint, a 1,024-token prompt takes 13.377 seconds.
+
+The shared F32 attention-value matrix path at `94907364` measures pp1024 at
+111.810 +/- 0.043 tokens/s over three repetitions (9.158 seconds), and tg32 at
+26.730 +/- 0.011. A separate single pp2048 repetition measures 101.836 tokens/s
+(20.111 seconds). These are improvements, not the practical-latency target.
+
+Parallel index heads at `b29d6991` measure **118.729 +/- 0.010 tokens/s pp1024**
+(8.625 seconds) and **26.746 +/- 0.021 tg32**, with three repetitions. A single
+pp2048 repetition measures **114.636 tokens/s** (17.865 seconds). No validation
+layers or diagnostic ablations are enabled. These results still do not reach
+the roughly 500 tokens/s agent-prefill target. Worker results are retained under
+`~/qwen-runs/2026-10-18-v41-optimization/attention-index/`.
 
 Exact prefix reuse is separately useful: a private HTTPS smoke request reuses
 492 of 494 prompt tokens in 0.21 seconds, and a follow-up reuses 495 tokens in
 0.73 seconds. Those are whole short-request timings, not cold-prefill throughput.
 The grouped path passes the independent seven-token GGUF CPU comparison and the
 65-token serial/batched, capacity-growth and snapshot-continuation comparisons.
+The matrix path also passes continuation through position 257 with the same
+distribution limits (maximum logit error 2.360e-5, KL 5.568e-14).
+The index-head path extends that comparison through position 1,025, with maximum
+logit error 1.955e-5, KL 2.169e-12 and matching top-1. Index scores remain within
+the existing F32 tolerances, with exact selected-ID comparisons across tested
+head geometries; they are not claimed bitwise equal to scalar scores.
 The latest 65-token comparison has maximum logit error 2.737e-4 and KL 6.855e-10;
 same-arithmetic snapshot/growth continuation remains bitwise equal. SIMD and
 grouped reductions are F32, not bitwise scalar reduction order. Existing

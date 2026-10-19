@@ -196,7 +196,9 @@ mod tests {
             }
         }
         for end in [GenerationEnd::TokenLimit, GenerationEnd::StopToken(1)] {
-            for cut in 0..=valid.len() {
+            // A zero byte ceiling is invalid backend configuration now; the
+            // request profile refuses it before partition construction.
+            for cut in 1..=valid.len() {
                 let mut partition = output_partition(false, cut);
                 let mut events = vec![];
                 partition.push(&valid.as_bytes()[..cut], &mut events);

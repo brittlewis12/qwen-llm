@@ -229,12 +229,15 @@ fn nonstream_plain_output_peak_per_byte() {
 /// factor the admission adopts; four shapes are evidence, not a proof.
 #[test]
 fn qwen_and_ds4_tool_block_peaks() {
-    let body = |streaming: bool| {
-        json!({"model": "test", "input": "Go.", "stream": streaming,
-            "max_output_tokens": 200_000, "reasoning": {"effort": "high"},
+    let body = |streaming: bool, family: &str| {
+        let mut body = json!({"model": "test", "input": "Go.", "stream": streaming,
+            "max_output_tokens": 200_000,
             "tools": [{"type": "function", "name": "f", "parameters": {"type": "object",
-                "properties": {"a": {}}}}]})
-        .to_string()
+                "properties": {"a": {}}}}]});
+        if family == "ds4-dsml" {
+            body["reasoning"] = json!({"effort": "high"});
+        }
+        body.to_string()
     };
     let inner = format!("{}1{}", "[".repeat(126), "]".repeat(126));
     let values: Vec<(&str, String)> = vec![
@@ -267,7 +270,13 @@ fn qwen_and_ds4_tool_block_peaks() {
     let families: [Family; 2] = [
         (
             "qwen-xml",
-            RequestProfile::test_qwen(),
+            RequestProfile::OrdinaryQwen {
+                template: crate::serve::items::QwenTemplate::Qwen36,
+                no_thinking_supported: true,
+                style: TemplateStyle::House,
+                sampling: None,
+                limits: crate::serve::request_profile::OutputLimits::TEST,
+            },
             "<think>plan</think>",
             &qwen,
         ),
@@ -291,7 +300,7 @@ fn qwen_and_ds4_tool_block_peaks() {
                     piece,
                     profile: profile.clone(),
                 },
-                post("/v1/responses", &body(streaming)),
+                post("/v1/responses", &body(streaming, family)),
                 None,
             );
             assert!(reply.starts_with("HTTP/1.1 200"), "{reply:.300}");
@@ -303,7 +312,7 @@ fn qwen_and_ds4_tool_block_peaks() {
                         piece,
                         profile: profile.clone(),
                     },
-                    post("/v1/responses", &body(streaming)),
+                    post("/v1/responses", &body(streaming, family)),
                     None,
                 );
                 assert!(

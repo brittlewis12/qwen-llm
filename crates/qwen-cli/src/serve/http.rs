@@ -1188,6 +1188,9 @@ mod tests {
         fn request_profile(&self) -> crate::serve::request_profile::RequestProfile {
             crate::serve::request_profile::RequestProfile::test_qwen()
         }
+        fn template_style_default(&self) -> Option<TemplateStyle> {
+            None
+        }
         fn parse_request(&self, body: &Value) -> Result<ServeRequest, ServeError> {
             if self.protocol == OutputProtocol::RawText {
                 super::super::render_k2::parse_request(body)

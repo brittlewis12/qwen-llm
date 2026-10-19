@@ -280,7 +280,8 @@ fn history_reasoning_diagnostic_fires_only_for_filled_reasoning_history() {
     let k2 = |input: Value| {
         let body = json!({"model":"k2-test","input":input,
             "tools":[{"type":"function","name":"lookup","parameters":{"type":"object"}}]});
-        let request = render_k2::parse_with_profile(&body, Some(&profile)).unwrap();
+        let mut request = render_k2::parse_with_profile(&body, Some(&profile)).unwrap();
+        render_k2::normalize_with_profile(&mut request, 8, 128, Some(&profile)).unwrap();
         let protocol = render_k2::tools::output_protocol(&request, 128).unwrap();
         assert!(matches!(protocol, OutputProtocol::K2Tools { .. }));
         history_reasoning_diagnostic(&request, &protocol)

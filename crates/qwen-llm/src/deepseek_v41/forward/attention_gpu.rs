@@ -49,6 +49,7 @@ pub(super) struct Workspace {
     sort_ids: MetalTensor,
     selected: MetalTensor,
     attention_scores: MetalTensor,
+    value_matrix: Option<ValueMatrix>,
     attended: MetalTensor,
     low: MetalTensor,
     output: MetalTensor,
@@ -60,6 +61,90 @@ struct BatchCursor {
     rows: usize,
     layer: usize,
     row: usize,
+}
+
+struct ValueMatrix {
+    values: MetalTensor,
+    probabilities: MetalTensor,
+}
+
+impl ValueMatrix {
+    fn shapes(c: &Config) -> Result<Vec<usize>> {
+        if !c.head_dim.is_multiple_of(32) || c.heads < 8 {
+            return Ok(Vec::new());
+        }
+        let padded = c
+            .window
+            .checked_add(c.index_topk)
+            .and_then(|n| n.checked_add(31))
+            .ok_or("attention value matrix extent")?
+            / 32
+            * 32;
+        Ok(vec![
+            checked_product(&[padded, c.head_dim])?,
+            checked_product(&[padded, c.heads])?,
+        ])
+    }
+
+    fn new(ctx: &MetalContext, c: &Config) -> Result<Option<Self>> {
+        let sizes = Self::shapes(c)?;
+        if sizes.is_empty() {
+            return Ok(None);
+        }
+        Ok(Some(Self {
+            values: tensor(ctx, sizes[0], GgmlType::F32)?,
+            probabilities: tensor(ctx, sizes[1], GgmlType::F32)?,
+        }))
+    }
+
+    fn encode(
+        &self,
+        ctx: &MetalContext,
+        enc: &KernelEncoder,
+        [heads, dim, count]: [usize; 3],
+        output: &MetalTensor,
+        status: &MetalTensor,
+    ) -> Result<()> {
+        let padded = count.div_ceil(32) * 32;
+        pipeline(ctx, enc, "matrix_values")?;
+        enc.set_bytes(11, &[padded as u32, heads as u32]);
+        enc.set_tensor(12, &self.values);
+        enc.set_tensor(13, &self.probabilities);
+        enc.dispatch(
+            MTLSize {
+                width: padded / 16,
+                height: dim.max(heads).div_ceil(16),
+                depth: 1,
+            },
+            MTLSize {
+                width: 256,
+                height: 1,
+                depth: 1,
+            },
+        );
+        metal::encode_mat_mat_grouped_f32(
+            ctx,
+            enc,
+            &self
+                .values
+                .view_bytes(0, vec![padded as u64, dim as u64, 1]),
+            &self
+                .probabilities
+                .view_bytes(0, vec![padded as u64, heads as u64]),
+            &output.view_bytes(0, vec![dim as u64, heads as u64]),
+            padded,
+            dim,
+            1,
+            heads,
+        )
+        .map_err(|e| e.to_string())?;
+        pipeline(ctx, enc, "finite")?;
+        enc.set_bytes(0, &((heads * dim) as u32));
+        enc.set_tensor(1, output);
+        enc.set_tensor(2, status);
+        dispatch(enc, heads * dim);
+        Ok(())
+    }
 }
 
 pub(super) struct Rows {
@@ -326,6 +411,7 @@ fn shapes(c: &Config, capacity: usize, schedule: &Schedule) -> Result<Vec<usize>
             c.head_dim,
         ]);
     }
+    sizes.extend(ValueMatrix::shapes(c)?);
     for _ in 0..schedule.layers {
         sizes.extend([
             c.query_rank,
@@ -387,6 +473,7 @@ fn sink_passes(
     heads: usize,
     dim: usize,
     count: usize,
+    matrix: Option<(&ValueMatrix, &MetalTensor, &MetalTensor)>,
 ) -> Result<()> {
     if count > 0 {
         pipeline(ctx, enc, "score")?;
@@ -411,6 +498,12 @@ fn sink_passes(
     ] {
         if groups == 0 {
             continue;
+        }
+        if name == "output" && count >= 256 {
+            if let Some((matrix, output, status)) = matrix {
+                matrix.encode(ctx, enc, [heads, dim, count], output, status)?;
+                continue;
+            }
         }
         pipeline(ctx, enc, name)?;
         // Exact grids, including tiny toy geometries, need no padded-thread guard.
@@ -657,6 +750,7 @@ impl Workspace {
             sort_ids: i(capacity.next_power_of_two())?,
             selected: i(c.index_topk)?,
             attention_scores: f(c.heads * (c.window + c.index_topk + 1))?,
+            value_matrix: ValueMatrix::new(ctx, c)?,
             attended: f(c.heads * c.head_dim)?,
             low: f(c.groups * c.output_rank)?,
             output: f(c.hidden)?,
@@ -1273,7 +1367,16 @@ impl Workspace {
         let length = owner.map_or(0, |_| (position + 1) / self.schedule.ratio(id));
         enc.set_bytes(9, &(length as u32));
         enc.set_tensor(10, &self.status);
-        sink_passes(ctx, enc, c.heads, c.head_dim, raw_count + selected_count)?;
+        sink_passes(
+            ctx,
+            enc,
+            c.heads,
+            c.head_dim,
+            raw_count + selected_count,
+            self.value_matrix
+                .as_ref()
+                .map(|matrix| (matrix, &self.attended, &self.status)),
+        )?;
         rope(
             ctx,
             enc,

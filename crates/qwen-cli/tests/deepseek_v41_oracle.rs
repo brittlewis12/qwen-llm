@@ -677,6 +677,20 @@ fn gguf_native_f32_prefill_65_token_serial_snapshot_parity() -> Result<()> {
         batch.position() == serial.position() && batch.position() == 68,
         "continuation position mismatch"
     );
+    // Reach the matrix-value attention path as well as the short-prefix fallback.
+    forward.ensure_capacity(&mut serial, 257)?;
+    forward.ensure_capacity(&mut batch, 257)?;
+    let tail: Vec<_> = TOKENS.into_iter().cycle().take(257 - 68).collect();
+    for &token in &tail[..tail.len() - 1] {
+        forward
+            .advance(&mut serial, token, cancel)
+            .map_err(anyhow::Error::msg)?;
+    }
+    let expected = forward
+        .step(&mut serial, *tail.last().unwrap(), cancel)
+        .map_err(anyhow::Error::msg)?;
+    let actual = forward.prefill(&mut batch, &tail, cancel)?;
+    compare("257-row continuation", &actual, &expected, &mut failures)?;
     qwen_cli::shutdown::checkpoint()?;
     ensure!(
         failures.is_empty(),

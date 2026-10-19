@@ -235,6 +235,32 @@ kernel void kernel_deepseek_v41_attention_softmax(
     if (lane == 0) scores[h * b.y + b.y - 1] = denom;
 }
 
+kernel void kernel_deepseek_v41_attention_matrix_values(
+    constant uint4 &a [[buffer(0)]], constant uint2 &b [[buffer(1)]],
+    device const float *raw [[buffer(3)]], device const float *compressed [[buffer(4)]],
+    device const uint *ids [[buffer(5)]], device const float *scores [[buffer(7)]],
+    constant uint &length [[buffer(9)]], constant uint2 &m [[buffer(11)]],
+    device float *values [[buffer(12)]], device float *probabilities [[buffer(13)]],
+    uint2 group [[threadgroup_position_in_grid]], uint tid [[thread_index_in_threadgroup]]) {
+    threadgroup float tile[16][17];
+    uint j = group.y * 16 + tid % 16, i = group.x * 16 + tid / 16, count = a.y + b.x;
+    float v = 0;
+    if (j < a.x) {
+        if (scores[b.y - 1] != -1.0f) {
+            if (i < a.y) v = raw[((a.z + i) % a.w) * a.x + j];
+            else if (i < count && ids[i - a.y] < length) v = compressed[ids[i - a.y] * a.x + j];
+        }
+    }
+    tile[tid / 16][tid % 16] = v;
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    j = group.y * 16 + tid / 16; i = group.x * 16 + tid % 16;
+    if (j < a.x) values[j * m.x + i] = tile[tid % 16][tid / 16];
+    if (j < m.y) {
+        float denom = scores[j * b.y + b.y - 1];
+        probabilities[j * m.x + i] = i < count && denom != -1.0f ? scores[j * b.y + i] / denom : 0;
+    }
+}
+
 kernel void kernel_deepseek_v41_attention_output(
     constant uint4 &a [[buffer(0)]], constant uint2 &b [[buffer(1)]],
     device const float *raw [[buffer(3)]], device const float *compressed [[buffer(4)]],

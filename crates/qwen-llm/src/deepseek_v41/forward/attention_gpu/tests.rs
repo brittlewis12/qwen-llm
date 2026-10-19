@@ -796,9 +796,16 @@ fn split_sink_real_geometry_same_run_witness() {
     let scores = tensor(&ctx, heads * stride, GgmlType::F32).unwrap();
     let split = up(&vec![f32::NAN; heads * dim]);
     let serial = up(&vec![f32::NAN; heads * dim]);
+    let matrix_output = up(&vec![f32::NAN; heads * dim]);
+    let mut c = super::super::toy::config();
+    c.heads = heads;
+    c.head_dim = dim;
+    c.window = window;
+    c.index_topk = k;
+    let matrix = ValueMatrix::new(&ctx, &c).unwrap().unwrap();
     let status = tensor(&ctx, 1, GgmlType::I32).unwrap();
     let encode =
-        |enc: &KernelEncoder, parallel, nr: usize, nk: usize, length: u32, query: &MetalTensor| {
+        |enc: &KernelEncoder, mode, nr: usize, nk: usize, length: u32, query: &MetalTensor| {
             enc.set_bytes(0, &[dim as u32, nr as u32, 17u32, window as u32]);
             enc.set_bytes(1, &[nk as u32, stride as u32]);
             for (slot, t) in [
@@ -808,24 +815,47 @@ fn split_sink_real_geometry_same_run_witness() {
                 (5, &selection),
                 (6, &sink),
                 (7, &scores),
-                (8, if parallel { &split } else { &serial }),
+                (
+                    8,
+                    match mode {
+                        0 => &serial,
+                        1 => &split,
+                        _ => &matrix_output,
+                    },
+                ),
                 (10, &status),
             ] {
                 enc.set_tensor(slot, t);
             }
             enc.set_bytes(9, &length);
-            if parallel {
-                sink_passes(&ctx, enc, heads, dim, nr + nk).unwrap();
+            if mode > 0 {
+                sink_passes(
+                    &ctx,
+                    enc,
+                    heads,
+                    dim,
+                    nr + nk,
+                    (mode == 2).then_some((&matrix, &matrix_output, &status)),
+                )
+                .unwrap();
             } else {
                 pipeline(&ctx, enc, "sink").unwrap();
                 dispatch(enc, heads);
             }
         };
-    for (nr, nk) in [(0, 0), (1, 0), (128, 0), (128, 512)] {
+    for (nr, nk) in [
+        (0, 0),
+        (1, 0),
+        (17, 16),
+        (128, 0),
+        (128, 129),
+        (128, 511),
+        (128, 512),
+    ] {
         metal::dispatch_census_begin();
         execute(&ctx, |enc| {
-            encode(enc, false, nr, nk, k as u32, &query);
-            encode(enc, true, nr, nk, k as u32, &query);
+            encode(enc, 0, nr, nk, k as u32, &query);
+            encode(enc, 1, nr, nk, k as u32, &query);
         });
         let census = metal::dispatch_census_take();
         let expected_passes = if nr + nk == 0 {
@@ -853,6 +883,8 @@ fn split_sink_real_geometry_same_run_witness() {
         let incumbent = f32_slice(&serial).unwrap();
         // SIMD score/softmax reductions change addition order, not F32 operands.
         close(actual, incumbent);
+        execute(&ctx, |enc| encode(enc, 2, nr, nk, k as u32, &query));
+        close(f32_slice(&matrix_output).unwrap(), incumbent);
         let rows: Vec<_> = (0..nr)
             .map(|i| raw[((17 + i) % window) * dim..((17 + i) % window + 1) * dim].to_vec())
             .chain((0..nk).map(|i| compressed[(k - 1 - i) * dim..(k - i) * dim].to_vec()))
@@ -875,7 +907,7 @@ fn split_sink_real_geometry_same_run_witness() {
                 let command = ctx.queue.commandBuffer().unwrap();
                 let enc = KernelEncoder::begin(&command);
                 for _ in 0..4 {
-                    encode(&enc, which == 1, nr, nk, k as u32, &query);
+                    encode(&enc, which + 1, nr, nk, k as u32, &query);
                 }
                 enc.end();
                 metal::commit_and_wait(&command).unwrap();
@@ -889,32 +921,40 @@ fn split_sink_real_geometry_same_run_witness() {
         }
         assert!(times.iter().all(|t| t[4] > 0.0));
         eprintln!(
-            "split sink {heads}x{dim} {nr}+{nk}: same-run median speedup {:.3}x, NativeF32 incumbent comparison",
+            "matrix values vs SIMD sink {heads}x{dim} {nr}+{nk}: same-run median speedup {:.3}x, NativeF32 incumbent comparison",
             times[0][4] / times[1][4]
         );
     }
     execute(&ctx, |enc| {
-        encode(enc, true, window, k, (k - 1) as u32, &query)
+        encode(enc, 2, window, k, (k - 1) as u32, &query)
     });
     assert_eq!(ids(&status, 1), [2]);
-    assert!(f32_slice(&split).unwrap().iter().all(|&v| v == 0.0));
+    assert!(f32_slice(&matrix_output).unwrap().iter().all(|&v| v == 0.0));
     execute(&ctx, |enc| {
-        encode(enc, false, window, k, (k - 1) as u32, &query)
+        encode(enc, 0, window, k, (k - 1) as u32, &query)
     });
-    assert_eq!(f32_slice(&split).unwrap(), f32_slice(&serial).unwrap());
-    execute(&ctx, |enc| encode(enc, true, window, k, k as u32, &query));
+    assert_eq!(
+        f32_slice(&matrix_output).unwrap(),
+        f32_slice(&serial).unwrap()
+    );
+    execute(&ctx, |enc| encode(enc, 2, window, k, k as u32, &query));
     assert_eq!(ids(&status, 1), [2]);
-    assert!(f32_slice(&split).unwrap().iter().any(|&v| v != 0.0));
+    assert!(f32_slice(&matrix_output).unwrap().iter().any(|&v| v != 0.0));
     for bad in [f32::NAN, f32::INFINITY, f32::NEG_INFINITY] {
         let bad_query = up(&vec![bad; heads * dim]);
         execute(&ctx, |enc| {
-            encode(enc, true, 1, 0, k as u32, &bad_query);
+            encode(enc, 2, window, k, k as u32, &bad_query);
         });
         assert_eq!(ids(&status, 1), [6]);
         execute(&ctx, |enc| {
-            encode(enc, false, 1, 0, k as u32, &bad_query);
+            encode(enc, 0, window, k, k as u32, &bad_query);
         });
-        assert!(f32_slice(&split).unwrap().iter().all(|v| !v.is_finite()));
+        assert!(
+            f32_slice(&matrix_output)
+                .unwrap()
+                .iter()
+                .all(|v| !v.is_finite())
+        );
         assert!(f32_slice(&serial).unwrap().iter().all(|v| !v.is_finite()));
         assert_eq!(ids(&status, 1), [6]);
     }

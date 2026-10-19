@@ -30,8 +30,11 @@ The converter revision is provenance, never an accepted-file restriction.
 Serving uses the official recipe renderer/parser, the common startup/request
 spine and typed HTTP 503 `memory_admission_denied` responses. CLI statistics
 use the existing v2 schema; benchmarks use the existing family harness. Each
-request starts fresh. Prefill is still token-at-a-time; prefix reuse, snapshots,
-CED, speculation and Lens are not implemented for V4.1.
+request reuses the longest available exact causal prefix from live state or RAM
+snapshots. Cold prefill advances in 256-row layer-major chunks without computing
+unused prompt logits. Dense projections and supported routed experts use shared
+NativeF32 matrix kernels; cache updates remain causally ordered. CED, speculation
+and Lens are not implemented for V4.1.
 
 ## Verification
 
@@ -93,15 +96,43 @@ The tight execution witness retains the original logit bound 1e-4 and KL bound
 uv run scripts/model-witnesses.py independent_gguf_seven_token_execution_acceptance
 ```
 
-## Speed Baseline
+## Speed Measurements
 
-On the M5 Ultra, the shared harness measures pp128 at 22.823 tokens/s and tg32
-at 21.635 tokens/s: depth zero, seed one, three warmed repetitions, API validation
-off. This is still single-token prefill with per-token logits copies, not batched
-prefill. JSON, SSE and two-turn serving checks pass. Three warmed short HTTPS SSE
+On the M5 Ultra, the initial shared-harness baseline measures pp128 at 22.823
+tokens/s and tg32 at 21.635 tokens/s: depth zero, seed one, three warmed
+repetitions, API validation off. That baseline uses single-token prefill with
+per-token logits copies, not batched prefill. JSON, SSE and two-turn serving
+checks pass. Three warmed short HTTPS SSE
 requests have first-content-delta latency 856-876 ms (median 860 ms), with the
 client on the serving host and API validation on. Header receipt is not counted
 as TTFT. These short probes establish neither long-context speed nor quality.
+
+The subsequent grouped-MXFP4 implementation measures pp1024 at 40.475 tokens/s
+against 22.653 for the preceding 32-row dense-only batching path; tg32 is 24.363
+versus 24.356. These are single warmed shared-harness repetitions, depth zero,
+seed one, with API and shader validation off. Batching output-A attention
+projections then measures pp1024 at 43.616 tokens/s (tg32 21.468 in that run).
+Selection/projection cleanup reaches 48.686, and SIMD score reduction measures
+50.116 +/- 0.224 tokens/s over three repetitions. Parallel softmax at `a707908b`
+then measures **76.550 +/- 0.048 tokens/s pp1024** and **26.861 +/- 0.011 tg32**,
+also over three repetitions. These cold-KV prefill rates use resident, warmed
+weights. A 1,024-token prompt still takes 13.377 seconds: practical agent latency
+is not solved.
+
+Exact prefix reuse is separately useful: a private HTTPS smoke request reuses
+492 of 494 prompt tokens in 0.21 seconds, and a follow-up reuses 495 tokens in
+0.73 seconds. Those are whole short-request timings, not cold-prefill throughput.
+The grouped path passes the independent seven-token GGUF CPU comparison and the
+65-token serial/batched, capacity-growth and snapshot-continuation comparisons.
+The latest 65-token comparison has maximum logit error 2.737e-4 and KL 6.855e-10;
+same-arithmetic snapshot/growth continuation remains bitwise equal. SIMD and
+grouped reductions are F32, not bitwise scalar reduction order. Existing
+independent-CPU and grouped-distribution bounds are unchanged.
+The repeated seven-token oracle prompt is a correctness input, not a throughput
+proxy for the random-token shared benchmark or real agent prompts.
+A separate 1K stage sample attributes 9.84 of 13.13 GPU seconds to attention
+and 3.29 seconds to FFN, with 0.15 seconds of CPU encoding and no measured disk
+reads. Attention remains the dominant cold-prefill cost.
 
 ## Conversion Status
 
@@ -114,7 +145,7 @@ zero temporary payload staging. The single conversion completes in about
 43 minutes; normal serving and both short numerical comparisons complete.
 The obsolete runtime cache has been removed; all 48 source shards are retained.
 
-After first-light correctness, improve exact batched prefill and prefix reuse
-through the shared benchmark harness. Historical safetensors timings and pilot
-results remain [archived](archive/DEEPSEEK-V41-BRINGUP-2026-10-18.md), not evidence
+Further work targets cold prefill through the shared benchmark harness.
+Historical safetensors timings and pilot results remain
+[archived](archive/DEEPSEEK-V41-BRINGUP-2026-10-18.md), not evidence
 for the repaired GGUF path.

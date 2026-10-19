@@ -470,13 +470,6 @@ pub(crate) fn run_single_turn(
             sampling.top_k < vocab,
             "--sampled-structural requires top-k smaller than vocabulary"
         );
-        ensure!(
-            loaded.gguf().get_str("general.base_model.0.name") == Some("Qwen3.6 35B A3B")
-                && loaded.gguf().get_u64("general.file_type") == Some(15)
-                && std::fs::metadata(model_path)
-                    .is_ok_and(|metadata| metadata.len() == 22_134_528_992),
-            "--sampled-structural requires the frozen Qwen3.6 35B A3B Q4_K_M profile"
-        );
         loaded
             .forward()
             .ensure_sampled_structural_supported()

@@ -505,6 +505,12 @@ qwen run -m GLM-5.3-Flash-UD-IQ3_XXS-00001-of-00004.gguf --messages tools.json \
   - a declared tool prints literally in text and becomes a `function_call`
     item.
 
+## Research sampling switches
+
+`--sampled-structural` is a hidden, default-off decode path. It checks the
+kernel's resident-head geometry and Q6_K output head at runtime; model name and
+file length do not determine eligibility.
+
 ## Validation gate
 
 - Pin modern and legacy parser behavior, conflicts, help, and explicit-default

@@ -6,6 +6,27 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the current state and evidence index.
 
+## 2026-10-19 - V4.1 Query Batching: 1.80-1.87x Warm Prefill
+
+- Experimental, not promoted: the separate 10K suite shows unexplained
+  repetition-by-repetition degradation in prefill and the following decode
+  control. Candidate pp samples 183.83/171.69/165.66 versus baseline
+  108.80/108.73/108.71; tg32 26.49/25.03/23.57 versus 26.70/26.69/26.66.
+- Five alternating REAP-272 pairs on M5 Ultra, NativeF32, resident weights,
+  fresh KV, chunk 256, capacity 2048: median pp1024 rises 119.399 -> 223.557
+  tokens/s; pp2048 rises 115.284 -> 207.055. Median paired gains are +87.25%
+  and +79.57%, with clean matching provenance and validation unset.
+- Bounded query tiles batch attention and HC RMS dispatches, retaining serial
+  compressor/index transitions and the existing scalar-F32 value kernel.
+  Actual real-model census asserts tiled kernels and the scalar singleton tail.
+- Independent attention replay passes ring/pair and real pruning boundaries:
+  128 attention comparisons and 80 candidate comparisons match, including
+  10 pruned rows. Seven-token independent execution, internal 1,025-token parity
+  and wrapped snapshot/growth continuation also pass; their scopes differ.
+- [Measurements and qualification](bench/2026-10-19-v41-query-batching.md).
+  Measured `c959e511`; no mixed-precision default, sustained-throughput
+  qualification or task-quality claim.
+
 ## 2026-10-19 - V4.1 Matched Baselines; F32 MMA Tiles Rejected
 
 - Clean `9604a7a17`, M5 Ultra 80-core, macOS 27.0.1, seed 1, three warmed runs,

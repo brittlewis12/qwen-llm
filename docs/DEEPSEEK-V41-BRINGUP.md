@@ -60,7 +60,11 @@ keep GPU weights wired through the shared residency mechanism.
   batched checkpoints at 2K/10K and pruning counts 16,384-16,386. Selected IDs
   and candidate sets match; worst batched output error is 2.933e-5 against 1e-4.
   This is conditional on captured normalized inputs, not long full-model logits.
-  Internal serial/batched parity through position 1,025 is a different witness.
+   Internal serial/batched parity through position 1,025 is a different witness.
+- The off-main [query-batching experiment](bench/2026-10-19-v41-query-batching.md)
+  passes ring/pair and odd pruning-boundary suffix replays, actual dispatch
+  census, and wrapped snapshot/growth continuation self-parity. Its sustained
+  repetition slowdown remains unexplained; it is not installed production.
 - Short prefix smoke (492/494 reused) and real agent shared-prefix reuse
   (11,453 reused, about 0.59 s to first text) are distinct from cold prefill.
   The retained 20-second suffix outlier remains unreproduced and unexplained.

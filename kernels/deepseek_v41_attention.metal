@@ -1,6 +1,47 @@
 #include <metal_stdlib>
 using namespace metal;
 
+kernel void kernel_deepseek_v41_attention_selection_prepare(
+    constant uint4 &a [[buffer(0)]], device uint *ids [[buffer(1)]],
+    device uint *mask [[buffer(2)]],
+    uint t [[thread_position_in_grid]]) {
+    if (t < a.w) ids[t] = t;
+    if (a.z && t < a.y) mask[t] = 1;
+}
+
+kernel void kernel_deepseek_v41_attention_sort_tile(
+    constant uint4 &a [[buffer(0)]], device float *scores [[buffer(1)]],
+    device uint *ids [[buffer(2)]], threadgroup float *values [[threadgroup(0)]],
+    threadgroup uint *order [[threadgroup(1)]], uint group [[threadgroup_position_in_grid]],
+    uint tid [[thread_index_in_threadgroup]]) {
+    uint base = group * a.y;
+    for (uint j = tid; j < a.y; j += 256) {
+        values[j] = scores[base + j]; order[j] = ids[base + j];
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    uint first = a.w ? 2 : a.z, last = a.w ? a.y : a.z;
+    for (uint width = first; width <= last; width *= 2) {
+        for (uint stride = min(width / 2, a.y / 2); stride; stride /= 2) {
+            for (uint j = tid; j < a.y; j += 256) {
+                uint other = j ^ stride;
+                if (other <= j) continue;
+                float l = values[j], r = values[other];
+                uint li = order[j], ri = order[other];
+                bool better = l > r || (l == r && (as_type<uint>(l) == as_type<uint>(r)
+                    ? li < ri : as_type<uint>(l) < as_type<uint>(r)));
+                if (better != (((base + j) & width) == 0)) {
+                    values[j] = r; values[other] = l;
+                    order[j] = ri; order[other] = li;
+                }
+            }
+            threadgroup_barrier(mem_flags::mem_threadgroup);
+        }
+    }
+    for (uint j = tid; j < a.y; j += 256) {
+        scores[base + j] = values[j]; ids[base + j] = order[j];
+    }
+}
+
 kernel void kernel_deepseek_v41_attention_finite(
     constant uint &n [[buffer(0)]], device const float *x [[buffer(1)]],
     device atomic_uint *status [[buffer(2)]], uint t [[thread_position_in_grid]]) {

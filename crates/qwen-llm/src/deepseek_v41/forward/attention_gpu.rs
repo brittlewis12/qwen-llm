@@ -71,6 +71,10 @@ pub(super) struct Rows {
     candidates: MetalTensor,
     grouped_input: MetalTensor,
     grouped_low: MetalTensor,
+    compressor_value: MetalTensor,
+    compressor_gate: MetalTensor,
+    index_query: MetalTensor,
+    index_weights: MetalTensor,
     rows: usize,
 }
 
@@ -85,6 +89,10 @@ impl Rows {
             c.groups * c.output_rank,
             c.heads * c.head_dim,
             c.groups * c.output_rank,
+            c.head_dim,
+            c.head_dim,
+            c.index_heads * c.index_dim,
+            c.index_heads,
         ]
     }
 
@@ -104,6 +112,10 @@ impl Rows {
             low: prefill::allocate(ctx, widths[5], rows, GgmlType::F32)?,
             grouped_input: prefill::allocate(ctx, widths[6], rows, GgmlType::F32)?,
             grouped_low: prefill::allocate(ctx, widths[7], rows, GgmlType::F32)?,
+            compressor_value: prefill::allocate(ctx, widths[8], rows, GgmlType::F32)?,
+            compressor_gate: prefill::allocate(ctx, widths[9], rows, GgmlType::F32)?,
+            index_query: prefill::allocate(ctx, widths[10], rows, GgmlType::F32)?,
+            index_weights: prefill::allocate(ctx, widths[11], rows, GgmlType::F32)?,
             rows,
         })
     }
@@ -637,6 +649,36 @@ impl Workspace {
         })
     }
 
+    fn select_unpruned(
+        &self,
+        ctx: &MetalContext,
+        enc: &KernelEncoder,
+        id: usize,
+        length: usize,
+    ) -> Result<()> {
+        let c = &self.config;
+        let blocks = length.div_ceil(c.candidate_block);
+        let publish_mask = self.schedule.candidate_source_layer == Some(id);
+        let all = if length <= c.index_topk { length } else { 0 };
+        if all == 0 && !publish_mask {
+            return Ok(());
+        }
+        pipeline(ctx, enc, "selection_prepare")?;
+        enc.set_bytes(
+            0,
+            &[
+                length as u32,
+                blocks as u32,
+                publish_mask as u32,
+                all as u32,
+            ],
+        );
+        enc.set_tensor(1, &self.selected);
+        enc.set_tensor(2, &self.candidates);
+        dispatch(enc, all.max(if publish_mask { blocks } else { 0 }));
+        Ok(())
+    }
+
     fn sort(
         &self,
         ctx: &MetalContext,
@@ -664,10 +706,33 @@ impl Workspace {
         enc.set_tensor(4, &self.sort_ids);
         enc.set_tensor(5, &self.status);
         dispatch(enc, padded);
-        let mut width = 2;
+        let tile = padded.min(1024);
+        let sort_tile = |width, full| -> Result<()> {
+            pipeline(ctx, enc, "sort_tile")?;
+            enc.set_bytes(0, &[padded as u32, tile as u32, width as u32, full as u32]);
+            enc.set_tensor(1, &self.sort_scores);
+            enc.set_tensor(2, &self.sort_ids);
+            enc.set_threadgroup_memory(0, tile * 4);
+            enc.set_threadgroup_memory(1, tile * 4);
+            enc.dispatch(
+                MTLSize {
+                    width: padded / tile,
+                    height: 1,
+                    depth: 1,
+                },
+                MTLSize {
+                    width: 256,
+                    height: 1,
+                    depth: 1,
+                },
+            );
+            Ok(())
+        };
+        sort_tile(tile, true)?;
+        let mut width = tile * 2;
         while width <= padded {
             let mut stride = width / 2;
-            while stride > 0 {
+            while stride >= tile {
                 pipeline(ctx, enc, "sort_step")?;
                 enc.set_bytes(0, &[padded as u32, stride as u32, width as u32, 0]);
                 enc.set_tensor(1, &self.sort_scores);
@@ -675,6 +740,7 @@ impl Workspace {
                 dispatch(enc, padded);
                 stride /= 2;
             }
+            sort_tile(width, false)?;
             width *= 2;
         }
         Ok(())
@@ -745,7 +811,30 @@ impl Workspace {
             rows.rows,
             c.head_dim,
             w.eps,
-        )
+        )?;
+        if let Some(compressor) = &w.compressor {
+            compressor
+                .kv
+                .encode_rows(enc, input, &rows.compressor_value, rows.rows)?;
+            if let Some(gate) = &compressor.gate {
+                gate.encode_rows(enc, input, &rows.compressor_gate, rows.rows)?;
+            }
+        }
+        if self.schedule.produces_index(id) {
+            let needs_index = self.batch.as_ref().is_none_or(|batch| {
+                let length = (batch.start + batch.rows) / self.schedule.ratio(id);
+                length > c.index_topk || length.div_ceil(c.candidate_block) > c.candidate_topk
+            });
+            if let Some(index) = w.index.as_ref().filter(|_| needs_index) {
+                index
+                    .query
+                    .encode_rows(enc, &rows.rank, &rows.index_query, rows.rows)?;
+                index
+                    .weights
+                    .encode_rows(enc, input, &rows.index_weights, rows.rows)?;
+            }
+        }
+        Ok(())
     }
 
     pub(super) fn encode_batch_row(
@@ -947,15 +1036,35 @@ impl Workspace {
             let length = (position + 1) / ratio;
             if self.schedule.owns_kv(id) {
                 let compressor = w.compressor.as_ref().ok_or("missing compressor")?;
-                linear(ctx, enc, &compressor.kv, input, &self.latent)?;
-                if ratio == 2 {
-                    linear(
+                if let Some((rows, row)) = prepared {
+                    copy(
                         ctx,
                         enc,
-                        compressor.gate.as_ref().ok_or("missing gate")?,
-                        input,
-                        &self.gate,
+                        &prefill::row(&rows.compressor_value, c.head_dim, row),
+                        &self.latent,
+                        c.head_dim,
                     )?;
+                } else {
+                    linear(ctx, enc, &compressor.kv, input, &self.latent)?;
+                }
+                if ratio == 2 {
+                    if let Some((rows, row)) = prepared {
+                        copy(
+                            ctx,
+                            enc,
+                            &prefill::row(&rows.compressor_gate, c.head_dim, row),
+                            &self.gate,
+                            c.head_dim,
+                        )?;
+                    } else {
+                        linear(
+                            ctx,
+                            enc,
+                            compressor.gate.as_ref().ok_or("missing gate")?,
+                            input,
+                            &self.gate,
+                        )?;
+                    }
                     if position % 2 == 0 {
                         copy(ctx, enc, &self.latent, &cache.pending_value, c.head_dim)?;
                         copy(ctx, enc, &self.gate, &cache.pending_gate, c.head_dim)?;
@@ -1041,58 +1150,85 @@ impl Workspace {
             }
             selected_count = length.min(c.index_topk);
             if self.schedule.produces_index(id) && length > 0 {
-                let index = w.index.as_ref().ok_or("missing index")?;
-                linear(ctx, enc, &index.query, &self.query_rank, &self.index_query)?;
-                linear(ctx, enc, &index.weights, input, &self.index_weights)?;
-                rope(
-                    ctx,
-                    enc,
-                    &self.index_query,
-                    &constants.frequencies,
-                    c.index_dim,
-                    c.index_heads,
-                    c.rope_dim / 2,
-                    position,
-                    false,
-                )?;
-                pipeline(ctx, enc, "index")?;
-                enc.set_bytes(
-                    0,
-                    &[length as u32, c.index_dim as u32, c.index_heads as u32, 0],
-                );
-                enc.set_tensor(1, &self.index_query);
-                enc.set_tensor(2, &self.index_weights);
-                enc.set_tensor(3, &cache.keys);
-                enc.set_tensor(4, &self.index_scores);
-                dispatch(enc, length);
-                if self.schedule.candidate_source_layer == Some(id) {
-                    let blocks = length.div_ceil(c.candidate_block);
-                    pipeline(ctx, enc, "blocks")?;
-                    enc.set_bytes(0, &[length as u32, c.candidate_block as u32]);
-                    enc.set_tensor(1, &self.index_scores);
-                    enc.set_tensor(2, &self.block_scores);
-                    dispatch(enc, blocks);
-                    self.sort(ctx, enc, &self.block_scores, blocks, false)?;
-                    pipeline(ctx, enc, "keep")?;
-                    enc.set_bytes(0, &[blocks as u32, blocks.min(c.candidate_topk) as u32]);
+                let unpruned = length.div_ceil(c.candidate_block) <= c.candidate_topk;
+                if unpruned && length <= c.index_topk {
+                    self.select_unpruned(ctx, enc, id, length)?;
+                } else {
+                    let index = w.index.as_ref().ok_or("missing index")?;
+                    if let Some((rows, row)) = prepared {
+                        copy(
+                            ctx,
+                            enc,
+                            &prefill::row(&rows.index_query, c.index_heads * c.index_dim, row),
+                            &self.index_query,
+                            c.index_heads * c.index_dim,
+                        )?;
+                        copy(
+                            ctx,
+                            enc,
+                            &prefill::row(&rows.index_weights, c.index_heads, row),
+                            &self.index_weights,
+                            c.index_heads,
+                        )?;
+                    } else {
+                        linear(ctx, enc, &index.query, &self.query_rank, &self.index_query)?;
+                        linear(ctx, enc, &index.weights, input, &self.index_weights)?;
+                    }
+                    rope(
+                        ctx,
+                        enc,
+                        &self.index_query,
+                        &constants.frequencies,
+                        c.index_dim,
+                        c.index_heads,
+                        c.rope_dim / 2,
+                        position,
+                        false,
+                    )?;
+                    pipeline(ctx, enc, "index")?;
+                    enc.set_bytes(
+                        0,
+                        &[length as u32, c.index_dim as u32, c.index_heads as u32, 0],
+                    );
+                    enc.set_tensor(1, &self.index_query);
+                    enc.set_tensor(2, &self.index_weights);
+                    enc.set_tensor(3, &cache.keys);
+                    enc.set_tensor(4, &self.index_scores);
+                    dispatch(enc, length);
+                    if !unpruned && self.schedule.candidate_source_layer == Some(id) {
+                        let blocks = length.div_ceil(c.candidate_block);
+                        pipeline(ctx, enc, "blocks")?;
+                        enc.set_bytes(0, &[length as u32, c.candidate_block as u32]);
+                        enc.set_tensor(1, &self.index_scores);
+                        enc.set_tensor(2, &self.block_scores);
+                        dispatch(enc, blocks);
+                        self.sort(ctx, enc, &self.block_scores, blocks, false)?;
+                        pipeline(ctx, enc, "keep")?;
+                        enc.set_bytes(0, &[blocks as u32, blocks.min(c.candidate_topk) as u32]);
+                        enc.set_tensor(1, &self.sort_ids);
+                        enc.set_tensor(2, &self.candidates);
+                        dispatch(enc, blocks);
+                    }
+                    if unpruned {
+                        self.select_unpruned(ctx, enc, id, length)?;
+                    }
+                    self.sort(
+                        ctx,
+                        enc,
+                        &self.index_scores,
+                        length,
+                        !unpruned
+                            && self
+                                .schedule
+                                .candidate_source_layer
+                                .is_some_and(|source| id > source),
+                    )?;
+                    pipeline(ctx, enc, "chronological")?;
+                    enc.set_bytes(0, &(selected_count as u32));
                     enc.set_tensor(1, &self.sort_ids);
-                    enc.set_tensor(2, &self.candidates);
-                    dispatch(enc, blocks);
+                    enc.set_tensor(2, &self.selected);
+                    dispatch(enc, selected_count);
                 }
-                self.sort(
-                    ctx,
-                    enc,
-                    &self.index_scores,
-                    length,
-                    self.schedule
-                        .candidate_source_layer
-                        .is_some_and(|source| id > source),
-                )?;
-                pipeline(ctx, enc, "chronological")?;
-                enc.set_bytes(0, &(selected_count as u32));
-                enc.set_tensor(1, &self.sort_ids);
-                enc.set_tensor(2, &self.selected);
-                dispatch(enc, selected_count);
             }
         }
         let raw_count = (position + 1).min(c.window);

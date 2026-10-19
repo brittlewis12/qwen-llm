@@ -1,0 +1,849 @@
+{
+  "qwen35": {
+    "architecture": "qwen35",
+    "json": {
+      "version": "qwen_info_v1",
+      "model": "<model>",
+      "architecture": "qwen35",
+      "family": "qwen",
+      "drafter": {
+        "run": {
+          "status": "permitted",
+          "target": "dense"
+        },
+        "serve": {
+          "status": "permitted",
+          "target": "dense"
+        }
+      },
+      "prompt_lookup": {
+        "run": {
+          "status": "permitted",
+          "experimental": true,
+          "message": "packed arithmetic may change tokens relative to ordinary decoding"
+        }
+      },
+      "sampling": {
+        "identity": "qwen_unidentified/other_shape",
+        "temperature": 1.0,
+        "top_k": 20,
+        "top_p": 0.95,
+        "min_p": 0.0
+      },
+      "weight_storage": {
+        "status": "available",
+        "mode": "<device-derived>",
+        "load_intent": "reusable",
+        "copied_bytes_estimate": "<device-derived>",
+        "recommended_working_set_bytes": "<device-derived>",
+        "reason": "<device-derived>",
+        "margin_policy": "storage-performance heuristic fitted to measurements; not a memory-admission guarantee (76% copied decoded faster, 97% copied loaded 4-6x slower with heavy paging)"
+      },
+      "capabilities": {
+        "reasoning": {
+          "levels": [],
+          "no_thinking": {
+            "status": "unsupported",
+            "code": "release_unknown",
+            "message": "requires an identified Qwen release (Qwen3.5/3.6/3.8 in the model's name metadata); this model's release is unknown"
+          },
+          "thinking": {
+            "status": "unsupported",
+            "code": "release_unknown",
+            "message": "requires an identified Qwen release (Qwen3.5/3.6/3.8 in the model's name metadata); this model's release is unknown"
+          }
+        },
+        "input": {
+          "raw": {
+            "status": "supported"
+          },
+          "user": {
+            "status": "supported"
+          },
+          "messages": {
+            "status": "supported"
+          },
+          "tools": {
+            "status": "unsupported",
+            "code": "tools_require_known_release",
+            "message": "tools and tool history requires an identified Qwen release (Qwen3.5/3.6/3.8 in the model's name metadata); this model's release is unknown"
+          }
+        },
+        "template": {
+          "status": "unknown",
+          "reason": "tokenizer.ggml.model is not the Qwen3.x release tokenizer",
+          "fields_consulted": [
+            "general.architecture",
+            "tokenizer.ggml.model",
+            "tokenizer.ggml.pre",
+            "tokenizer.ggml.tokens",
+            "general.name",
+            "general.basename",
+            "general.base_model.0.name",
+            "general.base_model.0.repo_url",
+            "general.license.link"
+          ],
+          "rendered_as": "qwen_chatml_messages_v1"
+        }
+      }
+    },
+    "text_capability_lines": [
+      "drafter run: permitted",
+      "drafter serve: permitted",
+      "prompt lookup: permitted",
+      "sampling: temperature 1.0 top-k 20 top-p 0.95 min-p 0.0 (qwen_unidentified/other_shape)",
+      "reasoning: no effort levels; no-thinking unsupported (release_unknown)",
+      "input: raw supported, user supported, messages supported, tools unsupported (tools_require_known_release)",
+      "template: unknown as qwen_chatml_messages_v1"
+    ]
+  },
+  "qwen35moe": {
+    "architecture": "qwen35moe",
+    "json": {
+      "version": "qwen_info_v1",
+      "model": "<model>",
+      "architecture": "qwen35moe",
+      "family": "qwen",
+      "drafter": {
+        "run": {
+          "status": "permitted",
+          "target": "moe_cli_serial"
+        },
+        "serve": {
+          "status": "unsupported",
+          "code": "serve_moe_target",
+          "message": "serve DFlash speculation currently supports dense targets only; this MoE model would run serially, so omit --drafter"
+        }
+      },
+      "prompt_lookup": {
+        "run": {
+          "status": "permitted",
+          "experimental": true,
+          "message": "packed arithmetic may change tokens relative to ordinary decoding"
+        }
+      },
+      "sampling": {
+        "identity": "qwen_unidentified/other_shape",
+        "temperature": 1.0,
+        "top_k": 20,
+        "top_p": 0.95,
+        "min_p": 0.0
+      },
+      "weight_storage": {
+        "status": "available",
+        "mode": "<device-derived>",
+        "load_intent": "reusable",
+        "copied_bytes_estimate": "<device-derived>",
+        "recommended_working_set_bytes": "<device-derived>",
+        "reason": "<device-derived>",
+        "margin_policy": "storage-performance heuristic fitted to measurements; not a memory-admission guarantee (76% copied decoded faster, 97% copied loaded 4-6x slower with heavy paging)"
+      },
+      "capabilities": {
+        "reasoning": {
+          "levels": [],
+          "no_thinking": {
+            "status": "unsupported",
+            "code": "release_unknown",
+            "message": "requires an identified Qwen release (Qwen3.5/3.6/3.8 in the model's name metadata); this model's release is unknown"
+          },
+          "thinking": {
+            "status": "unsupported",
+            "code": "release_unknown",
+            "message": "requires an identified Qwen release (Qwen3.5/3.6/3.8 in the model's name metadata); this model's release is unknown"
+          }
+        },
+        "input": {
+          "raw": {
+            "status": "supported"
+          },
+          "user": {
+            "status": "supported"
+          },
+          "messages": {
+            "status": "supported"
+          },
+          "tools": {
+            "status": "unsupported",
+            "code": "tools_require_known_release",
+            "message": "tools and tool history requires an identified Qwen release (Qwen3.5/3.6/3.8 in the model's name metadata); this model's release is unknown"
+          }
+        },
+        "template": {
+          "status": "unknown",
+          "reason": "tokenizer.ggml.model is not the Qwen3.x release tokenizer",
+          "fields_consulted": [
+            "general.architecture",
+            "tokenizer.ggml.model",
+            "tokenizer.ggml.pre",
+            "tokenizer.ggml.tokens",
+            "general.name",
+            "general.basename",
+            "general.base_model.0.name",
+            "general.base_model.0.repo_url",
+            "general.license.link"
+          ],
+          "rendered_as": "qwen_chatml_messages_v1"
+        }
+      }
+    },
+    "text_capability_lines": [
+      "drafter run: permitted",
+      "drafter serve: unsupported (serve_moe_target)",
+      "prompt lookup: permitted",
+      "sampling: temperature 1.0 top-k 20 top-p 0.95 min-p 0.0 (qwen_unidentified/other_shape)",
+      "reasoning: no effort levels; no-thinking unsupported (release_unknown)",
+      "input: raw supported, user supported, messages supported, tools unsupported (tools_require_known_release)",
+      "template: unknown as qwen_chatml_messages_v1"
+    ]
+  },
+  "qwen4exp": {
+    "architecture": "qwen4exp",
+    "json": {
+      "version": "qwen_info_v1",
+      "model": "<model>",
+      "architecture": "qwen4exp",
+      "family": "qwen4exp",
+      "drafter": {
+        "run": {
+          "status": "unsupported",
+          "code": "family_no_speculation",
+          "message": "--drafter is not supported for Qwen3.8-Flash-Next run (family_no_speculation)"
+        },
+        "serve": {
+          "status": "unsupported",
+          "code": "family_no_speculation",
+          "message": "--drafter is not supported for Qwen3.8-Flash-Next serve (family_no_speculation)"
+        }
+      },
+      "prompt_lookup": {
+        "run": {
+          "status": "unsupported",
+          "code": "family_no_prompt_lookup",
+          "message": "--prompt-lookup applies to ordinary Qwen models only"
+        }
+      },
+      "sampling": {
+        "identity": "qwen3.8_flash_next",
+        "temperature": 1.0,
+        "top_k": 20,
+        "top_p": 0.95,
+        "min_p": 0.0
+      },
+      "weight_storage": null,
+      "capabilities": {
+        "reasoning": {
+          "status": "unsupported",
+          "code": "prompt_protocol_unsupported",
+          "message": "Qwen3.8-Flash-Next chat rendering does not support the declared tokenizer.ggml.model"
+        },
+        "input": {
+          "raw": {
+            "status": "supported"
+          },
+          "user": {
+            "status": "unsupported",
+            "code": "prompt_protocol_unsupported",
+            "message": "Qwen3.8-Flash-Next chat rendering does not support the declared tokenizer.ggml.model; use --raw-prompt for untemplated input"
+          },
+          "messages": {
+            "status": "unsupported",
+            "code": "prompt_protocol_unsupported",
+            "message": "Qwen3.8-Flash-Next chat rendering does not support the declared tokenizer.ggml.model; use --raw-prompt for untemplated input"
+          },
+          "tools": {
+            "status": "unsupported",
+            "code": "prompt_protocol_unsupported",
+            "message": "Qwen3.8-Flash-Next chat rendering does not support the declared tokenizer.ggml.model; use --raw-prompt for untemplated input"
+          }
+        },
+        "template": {
+          "status": "unknown",
+          "reason": "tokenizer.ggml.model is not the Qwen3.x release tokenizer",
+          "fields_consulted": [
+            "general.architecture",
+            "tokenizer.ggml.model",
+            "tokenizer.ggml.pre",
+            "tokenizer.ggml.tokens",
+            "general.name",
+            "general.basename",
+            "general.base_model.0.name",
+            "general.base_model.0.repo_url",
+            "general.license.link"
+          ]
+        }
+      }
+    },
+    "text_capability_lines": [
+      "drafter run: unsupported (family_no_speculation)",
+      "drafter serve: unsupported (family_no_speculation)",
+      "prompt lookup: unsupported (family_no_prompt_lookup)",
+      "sampling: temperature 1.0 top-k 20 top-p 0.95 min-p 0.0 (qwen3.8_flash_next)",
+      "reasoning: unsupported (prompt_protocol_unsupported)",
+      "input: raw supported, user unsupported (prompt_protocol_unsupported), messages unsupported (prompt_protocol_unsupported), tools unsupported (prompt_protocol_unsupported)",
+      "template: unknown"
+    ]
+  },
+  "deepseek4": {
+    "architecture": "deepseek4",
+    "json": {
+      "version": "qwen_info_v1",
+      "model": "<model>",
+      "architecture": "deepseek4",
+      "family": "deepseek_v4",
+      "drafter": {
+        "run": {
+          "status": "unsupported",
+          "code": "family_no_speculation",
+          "message": "--drafter is not supported for DeepSeek V4 run (family_no_speculation)"
+        },
+        "serve": {
+          "status": "unsupported",
+          "code": "family_no_speculation",
+          "message": "--drafter is not supported for DeepSeek V4 serve (family_no_speculation)"
+        }
+      },
+      "prompt_lookup": {
+        "run": {
+          "status": "unsupported",
+          "code": "family_no_prompt_lookup",
+          "message": "--prompt-lookup applies to ordinary Qwen models only"
+        }
+      },
+      "sampling": {
+        "identity": "deepseek_v4_0731",
+        "temperature": 1.0,
+        "top_k": 0,
+        "top_p": 1.0,
+        "min_p": 0.0
+      },
+      "weight_storage": null,
+      "capabilities": {
+        "reasoning": {
+          "levels": [],
+          "no_thinking": {
+            "status": "unsupported",
+            "code": "deepseek4_release_profile_unverified",
+            "message": "release profile is not verified: missing GGUF metadata \"deepseek4.context_length\""
+          },
+          "thinking": {
+            "status": "unsupported",
+            "code": "deepseek4_release_profile_unverified",
+            "message": "release profile is not verified: missing GGUF metadata \"deepseek4.context_length\""
+          }
+        },
+        "input": {
+          "raw": {
+            "status": "unsupported",
+            "code": "deepseek4_release_profile_unverified",
+            "message": "release profile is not verified: missing GGUF metadata \"deepseek4.context_length\""
+          },
+          "user": {
+            "status": "unsupported",
+            "code": "deepseek4_release_profile_unverified",
+            "message": "release profile is not verified: missing GGUF metadata \"deepseek4.context_length\""
+          },
+          "messages": {
+            "status": "unsupported",
+            "code": "deepseek4_release_profile_unverified",
+            "message": "release profile is not verified: missing GGUF metadata \"deepseek4.context_length\""
+          },
+          "tools": {
+            "status": "unsupported",
+            "code": "deepseek4_release_profile_unverified",
+            "message": "release profile is not verified: missing GGUF metadata \"deepseek4.context_length\""
+          }
+        },
+        "template": {
+          "status": "unknown",
+          "reason": "missing GGUF metadata \"deepseek4.context_length\""
+        },
+        "execution": {
+          "status": "rejected",
+          "code": "deepseek4_release_profile_unverified",
+          "message": "missing GGUF metadata \"deepseek4.context_length\""
+        }
+      }
+    },
+    "text_capability_lines": [
+      "drafter run: unsupported (family_no_speculation)",
+      "drafter serve: unsupported (family_no_speculation)",
+      "prompt lookup: unsupported (family_no_prompt_lookup)",
+      "sampling: temperature 1.0 top-k 0 top-p 1.0 min-p 0.0 (deepseek_v4_0731)",
+      "reasoning: no effort levels; no-thinking unsupported (deepseek4_release_profile_unverified)",
+      "input: raw unsupported (deepseek4_release_profile_unverified), user unsupported (deepseek4_release_profile_unverified), messages unsupported (deepseek4_release_profile_unverified), tools unsupported (deepseek4_release_profile_unverified)",
+      "template: unknown",
+      "execution: rejected (deepseek4_release_profile_unverified)"
+    ]
+  },
+  "deepseek41": {
+    "architecture": "deepseek41",
+    "json": {
+      "version": "qwen_info_v1",
+      "model": "<model>",
+      "architecture": "deepseek41",
+      "family": "deepseek_v41",
+      "drafter": {
+        "run": {
+          "status": "unsupported",
+          "code": "family_no_speculation",
+          "message": "--drafter is not supported for DeepSeek V4.1 run (family_no_speculation)"
+        },
+        "serve": {
+          "status": "unsupported",
+          "code": "family_no_speculation",
+          "message": "--drafter is not supported for DeepSeek V4.1 serve (family_no_speculation)"
+        }
+      },
+      "prompt_lookup": {
+        "run": {
+          "status": "unsupported",
+          "code": "family_no_prompt_lookup",
+          "message": "--prompt-lookup applies to ordinary Qwen models only"
+        }
+      },
+      "sampling": {
+        "identity": "deepseek_v41",
+        "temperature": 1.0,
+        "top_k": 0,
+        "top_p": 1.0,
+        "min_p": 0.0
+      },
+      "weight_storage": null,
+      "capabilities": {
+        "input": {
+          "raw": {
+            "status": "unsupported",
+            "code": "invalid_v41_gguf",
+            "message": "invalid V4.1 GGUF: missing deepseek41.hyper_connection.count"
+          },
+          "user": {
+            "status": "unsupported",
+            "code": "invalid_v41_gguf",
+            "message": "invalid V4.1 GGUF: missing deepseek41.hyper_connection.count"
+          },
+          "messages": {
+            "status": "unsupported",
+            "code": "invalid_v41_gguf",
+            "message": "invalid V4.1 GGUF: missing deepseek41.hyper_connection.count"
+          },
+          "tools": {
+            "status": "unsupported",
+            "code": "invalid_v41_gguf",
+            "message": "invalid V4.1 GGUF: missing deepseek41.hyper_connection.count"
+          }
+        },
+        "execution": {
+          "status": "rejected",
+          "code": "invalid_v41_gguf",
+          "message": "invalid V4.1 GGUF: missing deepseek41.hyper_connection.count"
+        },
+        "template": {
+          "status": "unknown"
+        },
+        "local_fit": {
+          "status": "not_evaluated",
+          "stage": "runtime_memory_admission"
+        }
+      }
+    },
+    "text_capability_lines": [
+      "drafter run: unsupported (family_no_speculation)",
+      "drafter serve: unsupported (family_no_speculation)",
+      "prompt lookup: unsupported (family_no_prompt_lookup)",
+      "sampling: temperature 1.0 top-k 0 top-p 1.0 min-p 0.0 (deepseek_v41)",
+      "input: raw unsupported (invalid_v41_gguf), user unsupported (invalid_v41_gguf), messages unsupported (invalid_v41_gguf), tools unsupported (invalid_v41_gguf)",
+      "template: unknown",
+      "execution: rejected (invalid_v41_gguf)"
+    ]
+  },
+  "muse-glimmer": {
+    "architecture": "muse-glimmer",
+    "json": {
+      "version": "qwen_info_v1",
+      "model": "<model>",
+      "architecture": "muse-glimmer",
+      "family": "muse_glimmer",
+      "drafter": {
+        "run": {
+          "status": "unsupported",
+          "code": "family_no_speculation",
+          "message": "--drafter is not supported for Muse Glimmer run (Muse DFlash2 integration is not active yet) (family_no_speculation)"
+        },
+        "serve": {
+          "status": "unsupported",
+          "code": "family_no_speculation",
+          "message": "--drafter is not supported for Muse Glimmer serve (Muse DFlash2 integration is not active yet) (family_no_speculation)"
+        }
+      },
+      "prompt_lookup": {
+        "run": {
+          "status": "unsupported",
+          "code": "family_no_prompt_lookup",
+          "message": "--prompt-lookup applies to ordinary Qwen models only"
+        }
+      },
+      "sampling": {
+        "identity": "muse_glimmer",
+        "temperature": 1.0,
+        "top_k": 64,
+        "top_p": 0.95,
+        "min_p": 0.0
+      },
+      "weight_storage": null,
+      "capabilities": {
+        "reasoning": {
+          "levels": [],
+          "no_thinking": {
+            "status": "unsupported",
+            "code": "muse_release_profile_unverified",
+            "message": "release profile is not verified: missing required metadata key: muse-glimmer.attention.sliding_window_pattern"
+          },
+          "thinking": {
+            "status": "unsupported",
+            "code": "muse_release_profile_unverified",
+            "message": "release profile is not verified: missing required metadata key: muse-glimmer.attention.sliding_window_pattern"
+          }
+        },
+        "input": {
+          "raw": {
+            "status": "unsupported",
+            "code": "muse_release_profile_unverified",
+            "message": "release profile is not verified: missing required metadata key: muse-glimmer.attention.sliding_window_pattern"
+          },
+          "user": {
+            "status": "unsupported",
+            "code": "muse_release_profile_unverified",
+            "message": "release profile is not verified: missing required metadata key: muse-glimmer.attention.sliding_window_pattern"
+          },
+          "messages": {
+            "status": "unsupported",
+            "code": "muse_release_profile_unverified",
+            "message": "release profile is not verified: missing required metadata key: muse-glimmer.attention.sliding_window_pattern"
+          },
+          "tools": {
+            "status": "unsupported",
+            "code": "muse_release_profile_unverified",
+            "message": "release profile is not verified: missing required metadata key: muse-glimmer.attention.sliding_window_pattern"
+          }
+        },
+        "template": {
+          "status": "unknown",
+          "reason": "missing required metadata key: muse-glimmer.attention.sliding_window_pattern"
+        },
+        "execution": {
+          "status": "rejected",
+          "code": "muse_release_profile_unverified",
+          "message": "missing required metadata key: muse-glimmer.attention.sliding_window_pattern"
+        }
+      }
+    },
+    "text_capability_lines": [
+      "drafter run: unsupported (family_no_speculation)",
+      "drafter serve: unsupported (family_no_speculation)",
+      "prompt lookup: unsupported (family_no_prompt_lookup)",
+      "sampling: temperature 1.0 top-k 64 top-p 0.95 min-p 0.0 (muse_glimmer)",
+      "reasoning: no effort levels; no-thinking unsupported (muse_release_profile_unverified)",
+      "input: raw unsupported (muse_release_profile_unverified), user unsupported (muse_release_profile_unverified), messages unsupported (muse_release_profile_unverified), tools unsupported (muse_release_profile_unverified)",
+      "template: unknown",
+      "execution: rejected (muse_release_profile_unverified)"
+    ]
+  },
+  "k2-horizon": {
+    "architecture": "k2-horizon",
+    "json": {
+      "version": "qwen_info_v1",
+      "model": "<model>",
+      "architecture": "k2-horizon",
+      "family": "k2_horizon",
+      "drafter": {
+        "run": {
+          "status": "unsupported",
+          "code": "family_no_speculation",
+          "message": "--drafter is not supported for K2 Horizon run (family_no_speculation)"
+        },
+        "serve": {
+          "status": "unsupported",
+          "code": "family_no_speculation",
+          "message": "--drafter is not supported for K2 Horizon serve (family_no_speculation)"
+        }
+      },
+      "prompt_lookup": {
+        "run": {
+          "status": "unsupported",
+          "code": "family_no_prompt_lookup",
+          "message": "--prompt-lookup applies to ordinary Qwen models only"
+        }
+      },
+      "sampling": {
+        "identity": "k2_horizon",
+        "temperature": 1.0,
+        "top_k": 0,
+        "top_p": 0.95,
+        "min_p": 0.0
+      },
+      "weight_storage": null,
+      "capabilities": {
+        "reasoning": {
+          "status": "unsupported",
+          "code": "k2_chat_format_unavailable",
+          "message": "K2 chat requires available markers, stops, and supported template format"
+        },
+        "input": {
+          "raw": {
+            "status": "unsupported",
+            "code": "k2_configuration",
+            "message": "K2 artifact k2_configuration: unsupported K2 feature \"k2-horizon.expert_count\": dense 7B requires zero"
+          },
+          "user": {
+            "status": "unsupported",
+            "code": "k2_chat_format_unavailable",
+            "message": "K2 chat requires available markers, stops, and supported template format"
+          },
+          "messages": {
+            "status": "unsupported",
+            "code": "k2_chat_format_unavailable",
+            "message": "K2 chat requires available markers, stops, and supported template format"
+          },
+          "tools": {
+            "status": "unsupported",
+            "code": "k2_chat_format_unavailable",
+            "message": "K2 tools require available marker tokens, stops, and supported template format"
+          }
+        },
+        "template": {
+          "status": "not_evaluated",
+          "rendered_as": null,
+          "code": "k2_generation_not_admitted"
+        },
+        "execution": {
+          "run": {
+            "status": "unsupported",
+            "scope": "raw_only",
+            "requires_profile": "dense_7b",
+            "chat_profile": "supported_chat_format",
+            "output": "decoded_text_or_format_responses",
+            "capacity_policy": "checkpoint_context_and_device_memory",
+            "native_tokenizer": true,
+            "kv_storage": "f16",
+            "implementation_status": "supported",
+            "artifact_admission": {
+              "status": "rejected",
+              "code": "k2_configuration",
+              "message": "K2 artifact k2_configuration: unsupported K2 feature \"k2-horizon.expert_count\": dense 7B requires zero"
+            }
+          },
+          "serve": {
+            "status": "unsupported",
+            "endpoint": "/v1/responses",
+            "input": "raw_string_only",
+            "capacity_policy": "checkpoint_context_and_device_memory",
+            "snapshot_cache": false,
+            "tools": false,
+            "chat": false,
+            "special_token_control": "x_k2.add_special_tokens_raw_only",
+            "implementation_status": "partial",
+            "artifact_admission": {
+              "status": "rejected",
+              "code": "k2_configuration",
+              "message": "K2 artifact k2_configuration: unsupported K2 feature \"k2-horizon.expert_count\": dense 7B requires zero"
+            }
+          },
+          "bench": {
+            "status": "unsupported",
+            "command": "qwen-bench k2-request",
+            "scope": "raw_greedy_request_wall",
+            "capacity_policy": "checkpoint_context_and_device_memory",
+            "llama_bench_comparable": false,
+            "implementation_status": "partial",
+            "artifact_admission": {
+              "status": "rejected",
+              "code": "k2_configuration",
+              "message": "K2 artifact k2_configuration: unsupported K2 feature \"k2-horizon.expert_count\": dense 7B requires zero"
+            }
+          },
+          "lens": {
+            "status": "unsupported",
+            "command": "qwen-lens read-full --logit-lens",
+            "transport_command": "qwen-lens read-full --full-lens",
+            "scope": "raw_plain_or_data_only_linear_readout",
+            "capacity_policy": "checkpoint_context_and_device_memory",
+            "imported_assets": "llm.lens.linear_transport_v1_target_layer_35",
+            "cli_interventions": false,
+            "implementation_status": "partial",
+            "artifact_admission": {
+              "status": "rejected",
+              "code": "k2_configuration",
+              "message": "K2 artifact k2_configuration: unsupported K2 feature \"k2-horizon.expert_count\": dense 7B requires zero"
+            }
+          },
+          "local_fitting": {
+            "status": "unsupported"
+          },
+          "artifact": {
+            "core": {
+              "status": "rejected",
+              "code": "k2_configuration",
+              "message": "K2 artifact k2_configuration: unsupported K2 feature \"k2-horizon.expert_count\": dense 7B requires zero"
+            },
+            "generation": {
+              "status": "not_evaluated",
+              "code": "k2_core_rejected"
+            },
+            "scope": "cpu_layout_tokenizer_and_stop_policy_not_device_or_numerical_qualification"
+          },
+          "request_device": {
+            "status": "not_evaluated",
+            "requires": [
+              "request_options_and_token_budget",
+              "actual_device_buffer_limits",
+              "live_memory_admission"
+            ]
+          }
+        }
+      }
+    },
+    "text_capability_lines": [
+      "drafter run: unsupported (family_no_speculation)",
+      "drafter serve: unsupported (family_no_speculation)",
+      "prompt lookup: unsupported (family_no_prompt_lookup)",
+      "sampling: temperature 1.0 top-k 0 top-p 0.95 min-p 0.0 (k2_horizon)",
+      "reasoning: unsupported (k2_chat_format_unavailable)",
+      "input: raw unsupported (k2_configuration), user unsupported (k2_chat_format_unavailable), messages unsupported (k2_chat_format_unavailable), tools unsupported (k2_chat_format_unavailable)",
+      "template: not_evaluated (k2_generation_not_admitted)",
+      "run: unsupported",
+      "serve: unsupported",
+      "bench: unsupported",
+      "lens: unsupported",
+      "local_fitting: unsupported",
+      "artifact: -",
+      "request_device: not_evaluated"
+    ]
+  },
+  "glm5-next": {
+    "architecture": "glm5-next",
+    "json": {
+      "version": "qwen_info_v1",
+      "model": "<model>",
+      "architecture": "glm5-next",
+      "family": "glm5_next",
+      "drafter": {
+        "run": {
+          "status": "unsupported",
+          "code": "family_no_speculation",
+          "message": "--drafter is not supported for GLM-5.3-Flash run (family_no_speculation)"
+        },
+        "serve": {
+          "status": "unsupported",
+          "code": "family_no_speculation",
+          "message": "--drafter is not supported for GLM-5.3-Flash serve (family_no_speculation)"
+        }
+      },
+      "prompt_lookup": {
+        "run": {
+          "status": "unsupported",
+          "code": "family_no_prompt_lookup",
+          "message": "--prompt-lookup applies to ordinary Qwen models only"
+        }
+      },
+      "sampling": {
+        "identity": "glm_5.3_flash",
+        "temperature": 1.0,
+        "top_k": 0,
+        "top_p": 0.95,
+        "min_p": 0.0
+      },
+      "weight_storage": null,
+      "capabilities": {
+        "execution": {
+          "run": {
+            "status": "unsupported",
+            "implementation_status": "partial",
+            "artifact_admission": {
+              "status": "rejected",
+              "code": "glm5_next_configuration",
+              "message": "GLM-5.3 artifact glm5_next_configuration: unsupported GLM-5.3 feature \"glm5-next.full_attention_interval\": unrecognized or unsupported architecture metadata"
+            }
+          },
+          "bench": {
+            "status": "unsupported",
+            "implementation_status": "partial"
+          },
+          "serve": {
+            "status": "unsupported",
+            "implementation_status": "partial",
+            "code": "glm5_next_configuration",
+            "message": "GLM-5.3 artifact glm5_next_configuration: unsupported GLM-5.3 feature \"glm5-next.full_attention_interval\": unrecognized or unsupported architecture metadata"
+          },
+          "lens": {
+            "status": "unsupported",
+            "implementation_status": "partial",
+            "code": "glm5_next_configuration",
+            "message": "GLM-5.3 artifact glm5_next_configuration: unsupported GLM-5.3 feature \"glm5-next.full_attention_interval\": unrecognized or unsupported architecture metadata"
+          },
+          "request_device": {
+            "status": "not_evaluated",
+            "requires": [
+              "request_options_and_token_budget",
+              "live_memory_admission"
+            ]
+          }
+        },
+        "input": {
+          "raw": {
+            "status": "unsupported",
+            "code": "glm5_next_configuration",
+            "message": "GLM-5.3 artifact glm5_next_configuration: unsupported GLM-5.3 feature \"glm5-next.full_attention_interval\": unrecognized or unsupported architecture metadata"
+          },
+          "user": {
+            "status": "unsupported",
+            "code": "glm5_next_configuration",
+            "message": "GLM-5.3 artifact glm5_next_configuration: unsupported GLM-5.3 feature \"glm5-next.full_attention_interval\": unrecognized or unsupported architecture metadata"
+          },
+          "messages": {
+            "status": "unsupported",
+            "code": "glm5_next_configuration",
+            "message": "GLM-5.3 artifact glm5_next_configuration: unsupported GLM-5.3 feature \"glm5-next.full_attention_interval\": unrecognized or unsupported architecture metadata"
+          },
+          "tools": {
+            "status": "unsupported",
+            "code": "glm5_next_configuration",
+            "message": "GLM-5.3 artifact glm5_next_configuration: unsupported GLM-5.3 feature \"glm5-next.full_attention_interval\": unrecognized or unsupported architecture metadata"
+          }
+        },
+        "reasoning": {
+          "levels": [],
+          "fallback": null,
+          "no_thinking": {
+            "status": "unsupported",
+            "code": "glm5_next_configuration",
+            "message": "GLM-5.3 artifact glm5_next_configuration: unsupported GLM-5.3 feature \"glm5-next.full_attention_interval\": unrecognized or unsupported architecture metadata"
+          },
+          "thinking": {
+            "status": "unsupported",
+            "code": "glm5_next_configuration",
+            "message": "GLM-5.3 artifact glm5_next_configuration: unsupported GLM-5.3 feature \"glm5-next.full_attention_interval\": unrecognized or unsupported architecture metadata"
+          }
+        },
+        "template": {
+          "status": "unsupported",
+          "rendered_as": null,
+          "message": "GLM-5.3 artifact glm5_next_configuration: unsupported GLM-5.3 feature \"glm5-next.full_attention_interval\": unrecognized or unsupported architecture metadata"
+        }
+      }
+    },
+    "text_capability_lines": [
+      "drafter run: unsupported (family_no_speculation)",
+      "drafter serve: unsupported (family_no_speculation)",
+      "prompt lookup: unsupported (family_no_prompt_lookup)",
+      "sampling: temperature 1.0 top-k 0 top-p 0.95 min-p 0.0 (glm_5.3_flash)",
+      "reasoning: no effort levels; no-thinking unsupported (glm5_next_configuration)",
+      "input: raw unsupported (glm5_next_configuration), user unsupported (glm5_next_configuration), messages unsupported (glm5_next_configuration), tools unsupported (glm5_next_configuration)",
+      "template: unsupported",
+      "run: unsupported",
+      "bench: unsupported",
+      "serve: unsupported (glm5_next_configuration)",
+      "lens: unsupported (glm5_next_configuration)",
+      "request_device: not_evaluated"
+    ]
+  }
+}

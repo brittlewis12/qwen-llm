@@ -1,0 +1,274 @@
+{
+  "qwen35": {
+    "raw_prompt_utf8": "  exact raw bytes\nsecond line  ",
+    "raw_prompt_source": "inline",
+    "bos": {
+      "raw": true,
+      "chat": false
+    },
+    "refusal_precedence": {
+      "supplied": [
+        "--concurrency",
+        "--batch-size"
+      ],
+      "message": "ordinary Qwen single-turn generation does not support every legacy option; unsupported options: --concurrency, --batch-size"
+    },
+    "stats_jsonl_top_level_keys": [
+      "build",
+      "diagnostics",
+      "finish",
+      "input",
+      "invocation_id",
+      "model",
+      "output_fingerprint",
+      "record_type",
+      "request_index",
+      "schema",
+      "schema_version",
+      "status",
+      "throughput_tps",
+      "timing_ms",
+      "usage"
+    ],
+    "stats_family_label": "qwen",
+    "stats_chat_template_label": "qwen36"
+  },
+  "qwen35moe": {
+    "raw_prompt_utf8": "  exact raw bytes\nsecond line  ",
+    "raw_prompt_source": "inline",
+    "bos": {
+      "raw": true,
+      "chat": false
+    },
+    "refusal_precedence": {
+      "supplied": [
+        "--concurrency",
+        "--batch-size"
+      ],
+      "message": "ordinary Qwen single-turn generation does not support every legacy option; unsupported options: --concurrency, --batch-size"
+    },
+    "stats_jsonl_top_level_keys": [
+      "build",
+      "diagnostics",
+      "finish",
+      "input",
+      "invocation_id",
+      "model",
+      "output_fingerprint",
+      "record_type",
+      "request_index",
+      "schema",
+      "schema_version",
+      "status",
+      "throughput_tps",
+      "timing_ms",
+      "usage"
+    ],
+    "stats_family_label": "qwen",
+    "stats_chat_template_label": "qwen36"
+  },
+  "qwen4exp": {
+    "raw_prompt_utf8": "  exact raw bytes\nsecond line  ",
+    "raw_prompt_source": "inline",
+    "bos": {
+      "raw": true,
+      "chat": false
+    },
+    "refusal_precedence": {
+      "supplied": [
+        "--concurrency",
+        "--batch-size"
+      ],
+      "message": "Qwen3.8-Flash-Next currently supports request-shaped serial single-turn generation only; unsupported options: --concurrency, --batch-size"
+    },
+    "stats_jsonl_top_level_keys": [
+      "build",
+      "diagnostics",
+      "finish",
+      "input",
+      "invocation_id",
+      "model",
+      "output_fingerprint",
+      "record_type",
+      "request_index",
+      "schema",
+      "schema_version",
+      "status",
+      "throughput_tps",
+      "timing_ms",
+      "usage"
+    ],
+    "stats_family_label": "qwen4exp",
+    "stats_chat_template_label": "qwen38"
+  },
+  "deepseek4": {
+    "raw_prompt_utf8": "  exact raw bytes\nsecond line  ",
+    "raw_prompt_source": "inline",
+    "bos": {
+      "raw": false,
+      "chat": false
+    },
+    "refusal_precedence": {
+      "supplied": [
+        "--concurrency",
+        "--batch-size"
+      ],
+      "message": "DeepSeek V4 currently supports bounded raw or ordinary-message single-turn generation only; unsupported options: --concurrency, --batch-size"
+    },
+    "stats_jsonl_top_level_keys": [
+      "build",
+      "diagnostics",
+      "finish",
+      "input",
+      "invocation_id",
+      "model",
+      "output_fingerprint",
+      "record_type",
+      "request_index",
+      "schema",
+      "schema_version",
+      "status",
+      "throughput_tps",
+      "timing_ms",
+      "usage"
+    ],
+    "stats_family_label": "deepseek_v4",
+    "stats_chat_template_label": "deepseek_v4"
+  },
+  "deepseek41": {
+    "raw_prompt_utf8": "  exact raw bytes\nsecond line  ",
+    "raw_prompt_source": "inline",
+    "bos": {
+      "raw": true,
+      "chat": false
+    },
+    "refusal_precedence": {
+      "supplied": [
+        "--concurrency",
+        "--batch-size"
+      ],
+      "message": "DeepSeek V4.1 supports serial single-turn generation without prefix caching; unsupported options: --concurrency, --batch-size"
+    },
+    "stats_jsonl_top_level_keys": [
+      "build",
+      "diagnostics",
+      "finish",
+      "input",
+      "invocation_id",
+      "model",
+      "output_fingerprint",
+      "record_type",
+      "request_index",
+      "schema",
+      "schema_version",
+      "status",
+      "throughput_tps",
+      "timing_ms",
+      "usage"
+    ],
+    "stats_family_label": "deepseek_v41",
+    "stats_chat_template_label": "deepseek_recipe_dsv41"
+  },
+  "muse-glimmer": {
+    "raw_prompt_utf8": "  exact raw bytes\nsecond line  ",
+    "raw_prompt_source": "inline",
+    "bos": {
+      "raw": true,
+      "chat": false
+    },
+    "refusal_precedence": {
+      "supplied": [
+        "--concurrency",
+        "--batch-size"
+      ],
+      "message": "Muse Glimmer currently supports request-shaped serial text generation only; unsupported options: --concurrency, --batch-size"
+    },
+    "stats_jsonl_top_level_keys": [
+      "build",
+      "diagnostics",
+      "finish",
+      "input",
+      "invocation_id",
+      "model",
+      "output_fingerprint",
+      "record_type",
+      "request_index",
+      "schema",
+      "schema_version",
+      "status",
+      "throughput_tps",
+      "timing_ms",
+      "usage"
+    ],
+    "stats_family_label": "muse_glimmer",
+    "stats_chat_template_label": "atem"
+  },
+  "k2-horizon": {
+    "raw_prompt_utf8": "  exact raw bytes\nsecond line  ",
+    "raw_prompt_source": "inline",
+    "bos": {
+      "raw": true,
+      "chat": true
+    },
+    "refusal_precedence": {
+      "supplied": [
+        "--concurrency",
+        "--batch-size"
+      ],
+      "message": "K2 Horizon currently supports bounded raw single-turn generation only; unsupported options: --concurrency, --batch-size"
+    },
+    "stats_jsonl_top_level_keys": [
+      "build",
+      "diagnostics",
+      "finish",
+      "input",
+      "invocation_id",
+      "model",
+      "output_fingerprint",
+      "record_type",
+      "request_index",
+      "schema",
+      "schema_version",
+      "status",
+      "throughput_tps",
+      "timing_ms",
+      "usage"
+    ],
+    "stats_family_label": "k2_horizon",
+    "stats_chat_template_label": "k2_horizon_ifm_no_tools_v1"
+  },
+  "glm5-next": {
+    "raw_prompt_utf8": "  exact raw bytes\nsecond line  ",
+    "raw_prompt_source": "inline",
+    "bos": {
+      "raw": true,
+      "chat": false
+    },
+    "refusal_precedence": {
+      "supplied": [
+        "--concurrency",
+        "--batch-size"
+      ],
+      "message": "GLM-5.3-Flash currently supports bounded serial single-turn generation (raw or text chat) only; unsupported options: --concurrency, --batch-size"
+    },
+    "stats_jsonl_top_level_keys": [
+      "build",
+      "diagnostics",
+      "finish",
+      "input",
+      "invocation_id",
+      "model",
+      "output_fingerprint",
+      "record_type",
+      "request_index",
+      "schema",
+      "schema_version",
+      "status",
+      "throughput_tps",
+      "timing_ms",
+      "usage"
+    ],
+    "stats_family_label": "glm5_next",
+    "stats_chat_template_label": "glm53_flash_chat_v2"
+  }
+}

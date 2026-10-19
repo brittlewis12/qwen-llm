@@ -1,0 +1,66 @@
+{
+  "qwen35": {
+    "rendered_prompt_utf8": "<|im_start|>system\nYou are terse.<|im_end|>\n<|im_start|>user\nAdd 2 and 3.<|im_end|>\n<|im_start|>assistant\n<think>\n",
+    "bos_handling": {
+      "add_special_tokens": false,
+      "rendered_bos_marker": false,
+      "owner": "none"
+    }
+  },
+  "qwen35moe": {
+    "rendered_prompt_utf8": "<|im_start|>system\nYou are terse.<|im_end|>\n<|im_start|>user\nAdd 2 and 3.<|im_end|>\n<|im_start|>assistant\n<think>\n",
+    "bos_handling": {
+      "add_special_tokens": false,
+      "rendered_bos_marker": false,
+      "owner": "none"
+    }
+  },
+  "qwen4exp": {
+    "rendered_prompt_utf8": "<|im_start|>system\nReasoning effort is set to xhigh. Please think carefully through the task, validate key assumptions, consider plausible alternatives, and prioritize correctness, consistency, and clarity in the final answer.\n\nYou are terse.<|im_end|>\n<|im_start|>user\nAdd 2 and 3.<|im_end|>\n<|im_start|>assistant\n<think>\n",
+    "bos_handling": {
+      "add_special_tokens": false,
+      "rendered_bos_marker": false,
+      "owner": "none"
+    }
+  },
+  "deepseek4": {
+    "rendered_prompt_utf8": "<｜begin▁of▁sentence｜>You are terse.<｜User｜>Add 2 and 3.<｜Assistant｜></think>",
+    "bos_handling": {
+      "add_special_tokens": false,
+      "rendered_bos_marker": true,
+      "owner": "renderer"
+    }
+  },
+  "deepseek41": {
+    "rendered_prompt_utf8": "<｜begin▁of▁sentence｜><｜System｜>You are terse.<｜User｜>Add 2 and 3.<｜Assistant｜></think>",
+    "bos_handling": {
+      "add_special_tokens": false,
+      "rendered_bos_marker": true,
+      "owner": "renderer"
+    }
+  },
+  "muse-glimmer": {
+    "rendered_prompt_utf8": "<|begin_of_text|><|start|>system<|message|>You are terse.\n\nReasoning strength: high.\n\n# Valid recipients: \"self\", \"user\".<|eot|><|start|>user<|message|>Add 2 and 3.<|eot|><|start|>assistant",
+    "bos_handling": {
+      "add_special_tokens": false,
+      "rendered_bos_marker": true,
+      "owner": "renderer"
+    }
+  },
+  "k2-horizon": {
+    "rendered_prompt_utf8": "<|ifm|im_start|>system\nYou are terse.<|ifm|im_end|><|ifm|im_start|>user\nAdd 2 and 3.<|ifm|im_end|><|ifm|im_start|>assistant\n<ifm|think>\n",
+    "bos_handling": {
+      "add_special_tokens": true,
+      "rendered_bos_marker": false,
+      "owner": "native_tokenizer"
+    }
+  },
+  "glm5-next": {
+    "rendered_prompt_utf8": "[gMASK]<sop><|system|>Reasoning Effort: Max<|system|>You are terse.<|user|>Add 2 and 3.<|assistant|><think>",
+    "bos_handling": {
+      "add_special_tokens": false,
+      "rendered_bos_marker": false,
+      "owner": "glm_generation_prefix"
+    }
+  }
+}

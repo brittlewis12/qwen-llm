@@ -1709,3 +1709,7 @@ mod info_text_tests {
         );
     }
 }
+
+#[cfg(test)]
+#[path = "qwen/run_front_baselines.rs"]
+mod run_front_baselines;

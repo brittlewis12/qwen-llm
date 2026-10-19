@@ -25,6 +25,7 @@ CATEGORIES = {
     "lens_binding",
     "provenance",
     "frozen_experiment",
+    "renderer_format",
     "temporary",
 }
 RAW_STRING_START = re.compile(r"(?:br|r)(#{0,})\"")

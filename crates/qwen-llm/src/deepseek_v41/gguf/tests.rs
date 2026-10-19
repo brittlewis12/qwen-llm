@@ -1,6 +1,8 @@
 use super::*;
 use std::io::Write;
 
+mod ownership_metadata;
+
 #[derive(Clone)]
 enum Value<'a> {
     F32(f32),

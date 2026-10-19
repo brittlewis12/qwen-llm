@@ -304,22 +304,29 @@ pub(super) fn parse(g: &GgufFile) -> Result<Plan, LoadError> {
     if compression_ratios.len() < layers {
         return Err(invalid("compression ratios shorter than main block count"));
     }
+    // The named layout supplies missing ownership only, not an identity constraint.
     let fallback = Schedule::deepseek41_shared_kv_layout(layers, &compression_ratios);
     let kv_source_layers = sources(
         g,
-        &["kv_source_layer_ids"],
+        &["kv_source_layer_ids", "attention.kv_source_layers"],
         fallback.as_ref().map(|s| s.kv_source_layers.as_slice()),
         layers,
     )?;
     let index_source_layers = sources(
         g,
-        &["index_source_layer_ids"],
+        &["index_source_layer_ids", "attention.indexer.source_layers"],
         fallback.as_ref().map(|s| s.index_source_layers.as_slice()),
         layers,
     )?;
-    let candidate_source_layer = optional_uint_aliases(g, &["candidate_source_layer_id"])?
-        .map(|n| usize::try_from(n).map_err(|_| invalid("candidate source overflow")))
-        .transpose()?;
+    let candidate_source_layer = optional_uint_aliases(
+        g,
+        &[
+            "candidate_source_layer_id",
+            "attention.indexer.candidate_source_layer",
+        ],
+    )?
+    .map(|n| usize::try_from(n).map_err(|_| invalid("candidate source overflow")))
+    .transpose()?;
     let candidate_source_layer = match candidate_source_layer {
         Some(n) => Some(n),
         None if !compression_ratios[..layers].contains(&1) => None,

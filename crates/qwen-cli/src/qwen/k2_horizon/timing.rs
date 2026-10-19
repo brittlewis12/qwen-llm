@@ -1,6 +1,8 @@
 //! K2 request phases for the shared [`crate::lane_timing`] accumulator.
 
-use crate::lane_timing::{LanePhases, LaneReport, LaneTiming};
+#[cfg(test)]
+use crate::lane_timing::LaneReport;
+use crate::lane_timing::{LanePhases, LaneTiming};
 
 #[derive(Clone, Copy)]
 pub(super) enum Phase {
@@ -46,14 +48,12 @@ impl LanePhases for Phase {
 }
 
 pub(super) type Timing = LaneTiming<Phase>;
-#[allow(dead_code)]
-pub(super) type Report = LaneReport;
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::time::Duration;
-    fn example(extra: Option<Phase>) -> Report {
+    fn example(extra: Option<Phase>) -> LaneReport {
         let mut timing = Timing::default();
         for phase in [
             Phase::Encoding,

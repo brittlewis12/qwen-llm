@@ -1323,12 +1323,6 @@ pub(crate) struct PromptLookupDecodeStats {
 #[serde(rename_all = "lowercase")]
 pub(crate) enum RequestStatsStatus {
     Ok,
-    // Reserved for future error / cancelled records. Kept explicit so schema
-    // consumers see the full status vocabulary from v1.
-    #[allow(dead_code)]
-    Error,
-    #[allow(dead_code)]
-    Cancelled,
 }
 
 /// Envelope-owned finish reason enum, decoupled from the internal `StopReason`

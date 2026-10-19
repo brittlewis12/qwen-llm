@@ -5103,28 +5103,17 @@ fn request_stats_append_jsonl_serializes_one_line_per_record() {
 #[test]
 fn request_stats_status_serializes_as_lowercase() {
     assert_eq!(serde_json::to_value(RequestStatsStatus::Ok).unwrap(), "ok");
-    assert_eq!(
-        serde_json::to_value(RequestStatsStatus::Error).unwrap(),
-        "error"
-    );
-    assert_eq!(
-        serde_json::to_value(RequestStatsStatus::Cancelled).unwrap(),
-        "cancelled"
-    );
 }
 
 #[test]
-fn request_stats_success_only_fields_are_optional_for_error_records() {
-    // Verify the envelope structurally supports a future error/cancelled
-    // record without a breaking restructuring: success-only fields all
-    // permit `None` and skip serialization when absent.
+fn request_stats_optional_fields_are_omitted_when_absent() {
     let record = RequestStatsRequestRecord {
         schema: "qwen-llm.request-stats",
         schema_version: 1,
         record_type: "request_stats",
-        invocation_id: "inv-err",
+        invocation_id: "inv-ok",
         request_index: 0,
-        status: RequestStatsStatus::Error,
+        status: RequestStatsStatus::Ok,
         model: RequestStatsModel {
             family: "deepseek_v4",
         },
@@ -5144,7 +5133,7 @@ fn request_stats_success_only_fields_are_optional_for_error_records() {
         diagnostics: None,
     };
     let json = serde_json::to_value(&record).unwrap();
-    assert_eq!(json["status"], "error");
+    assert_eq!(json["status"], "ok");
     assert!(json.get("usage").is_none());
     assert!(json.get("finish").is_none());
     assert!(json.get("timing_ms").is_none());

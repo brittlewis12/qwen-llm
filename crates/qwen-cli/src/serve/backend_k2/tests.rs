@@ -3,18 +3,25 @@ use qwen_llm::metal::MetalContext;
 use serde_json::json;
 use std::io;
 
+fn k2_fixture_path() -> std::path::PathBuf {
+    qwen_llm::test_fixtures::catalog::K2_HORIZON_7B_Q8_0
+        .required()
+        .clone()
+}
+
 #[test]
-#[ignore = "K2_GGUF production lease/API validation; real tool call-result-final HTTP JSON/SSE round trip"]
+#[ignore = "K2 Q8_0 production lease/API correctness; requires MTL_DEBUG_LAYER=1 for Metal API validation"]
 fn gpu_k2_tools_roundtrip_all_formats_json_sse() {
     assert_eq!(std::env::var("MTL_DEBUG_LAYER").as_deref(), Ok("1"));
-    let path = std::env::var("K2_GGUF").unwrap();
+    const SEED: u64 = 123;
+    let path = k2_fixture_path();
     let source = GgufFile::open(&path).unwrap();
     let invocation = crate::cli::ServeInvocation {
         lens_data_dir: None,
         lens_config: None,
         web_root: None,
         lens_allowed_origin: Vec::new(),
-        model: path.into(),
+        model: path.clone(),
         addr: "127.0.0.1:0".into(),
         max_tokens: Some(512),
         max_context_tokens: Some(2048),
@@ -51,7 +58,7 @@ fn gpu_k2_tools_roundtrip_all_formats_json_sse() {
     }
     for format in ["xml", "json", "xml_typed"] {
         for stream in [false, true] {
-            let mut body = json!({"model":"k2-tools","input":[{"role":"user","content":"Call lookup_code with key orbital to obtain its code. Do not guess the code. After the tool result arrives, repeat that code as your final answer."}],"tools":[{"type":"function","name":"lookup_code","description":"Retrieve the code for a key.","parameters":{"type":"object","properties":{"key":{"type":"string"}},"required":["key"]}}],"reasoning":{"effort":"low"},"max_output_tokens":512,"stream":stream});
+            let mut body = json!({"model":"k2-tools","input":[{"role":"user","content":"Call lookup_code with key orbital to obtain its code. Do not guess the code. After the tool result arrives, repeat that code as your final answer."}],"tools":[{"type":"function","name":"lookup_code","description":"Retrieve the code for a key.","parameters":{"type":"object","properties":{"key":{"type":"string"}},"required":["key"]}}],"reasoning":{"effort":"low"},"max_output_tokens":512,"stream":stream,"x_qwen":{"seed":SEED}});
             if format != "xml" {
                 body["x_k2"] = json!({"tool_call_format":format});
             }
@@ -114,7 +121,7 @@ fn gpu_k2_tools_roundtrip_all_formats_json_sse() {
             evidence.push(json!({"format":format,"stream":stream,"prompt_token_ids_sha256_i32le":qwen_llm::tokenizer::token_ids_sha256_i32le(&prompt_ids),"first":first,"final":final_response}));
         }
     }
-    let body = json!({"model":"k2-tools","input":[{"role":"user","content":"Call lookup_code with key orbital."}],"tools":[{"type":"function","name":"lookup_code","parameters":{"properties":{"key":{"type":"string"}}}}],"reasoning":{"effort":"low"}});
+    let body = json!({"model":"k2-tools","input":[{"role":"user","content":"Call lookup_code with key orbital."}],"tools":[{"type":"function","name":"lookup_code","parameters":{"properties":{"key":{"type":"string"}}}}],"reasoning":{"effort":"low"},"x_qwen":{"seed":SEED}});
     let (req, prompt) = request(&backend, body);
     for mut sink in [
         Sink {
@@ -132,23 +139,24 @@ fn gpu_k2_tools_roundtrip_all_formats_json_sse() {
         ));
         assert!(backend.history.is_empty());
     }
-    let output = std::env::var("K2_TOOLS_HTTP_EVIDENCE").unwrap();
-    std::fs::write(output,serde_json::to_vec_pretty(&json!({"status":"passed","caller_supplied_tool_result":true,"engine_executes_tools":false,"cases":evidence})).unwrap()).unwrap();
+    if let Ok(output) = std::env::var("K2_TOOLS_HTTP_EVIDENCE") {
+        std::fs::write(output,serde_json::to_vec_pretty(&json!({"status":"passed","caller_supplied_tool_result":true,"engine_executes_tools":false,"cases":evidence})).unwrap()).unwrap();
+    }
 }
 
 #[test]
-#[ignore = "K2_GGUF leased production Metal chat/JSON/SSE correctness; ephemeral owned loopback only"]
+#[ignore = "K2 Q8_0 leased production Metal chat/JSON/SSE correctness; ephemeral owned loopback only"]
 fn gpu_verified_k2_chat_http_matches_raw_and_releases_sessions() {
     use super::super::partition::PartitionEvent;
     use qwen_llm::k2_horizon_chat::Effort;
-    let path = std::env::var("K2_GGUF").expect("K2_GGUF");
+    let path = k2_fixture_path();
     let source = GgufFile::open(&path).unwrap();
     let invocation = crate::cli::ServeInvocation {
         lens_data_dir: None,
         lens_config: None,
         web_root: None,
         lens_allowed_origin: Vec::new(),
-        model: path.into(),
+        model: path.clone(),
         addr: "127.0.0.1:0".into(),
         max_tokens: Some(8),
         max_context_tokens: Some(384),
@@ -317,9 +325,9 @@ struct Sink {
 }
 
 #[test]
-#[ignore = "CPU/header-only K2_GGUF startup rejection; never binds a socket or initializes Metal"]
+#[ignore = "CPU/header-only K2 Q8_0 fixture startup rejection; never binds a socket or initializes Metal"]
 fn cpu_downloaded_startup_rejects_options_before_listener_or_metal() {
-    let path = std::env::var("K2_GGUF").expect("K2_GGUF");
+    let path = k2_fixture_path();
     for (capacity, maximum, drafter, expected) in [
         (Some(usize::MAX), Some(8), None, "exceeds model context"),
         (None, Some(8), None, "explicit --max-context-tokens"),
@@ -336,7 +344,7 @@ fn cpu_downloaded_startup_rejects_options_before_listener_or_metal() {
             lens_config: None,
             web_root: None,
             lens_allowed_origin: Vec::new(),
-            model: path.clone().into(),
+            model: path.clone(),
             addr: "invalid-listen-address".into(),
             max_tokens: maximum,
             max_context_tokens: capacity,
@@ -448,16 +456,16 @@ fn wire_request(backend: &mut K2Backend<'_, '_>, body: serde_json::Value) -> Str
 }
 
 #[test]
-#[ignore = "K2_GGUF GPU correctness; CLI links production library lease/memory gate, no server process"]
+#[ignore = "K2 Q8_0 GPU correctness; CLI links production library lease/memory gate, no server process"]
 fn gpu_borrowed_backend_matches_raw_run_and_discards_aborted_requests() {
-    let path = std::env::var("K2_GGUF").expect("K2_GGUF");
+    let path = k2_fixture_path();
     let source = GgufFile::open(&path).unwrap();
     let invocation = crate::cli::ServeInvocation {
         lens_data_dir: None,
         lens_config: None,
         web_root: None,
         lens_allowed_origin: Vec::new(),
-        model: path.into(),
+        model: path.clone(),
         addr: "127.0.0.1:0".into(),
         max_tokens: Some(8),
         max_context_tokens: Some(32),
@@ -631,10 +639,10 @@ fn gpu_borrowed_backend_matches_raw_run_and_discards_aborted_requests() {
 }
 
 #[test]
-#[ignore = "K2_GGUF and K2_BOUNDARY_EVIDENCE; production CLI lease/gate; ephemeral JSON/SSE boundary correctness"]
+#[ignore = "K2 Q8_0 and K2_BOUNDARY_EVIDENCE; production CLI lease/gate; ephemeral JSON/SSE correctness; requires MTL_DEBUG_LAYER=1 for Metal API validation"]
 fn gpu_context_json_sse_match_run_bench_and_reject_capacity_plus_one() {
     assert_eq!(std::env::var("MTL_DEBUG_LAYER").as_deref(), Ok("1"));
-    let path = std::env::var("K2_GGUF").expect("K2_GGUF");
+    let path = k2_fixture_path();
     let evidence = std::path::PathBuf::from(
         std::env::var("K2_BOUNDARY_EVIDENCE").expect("K2_BOUNDARY_EVIDENCE"),
     );
@@ -649,7 +657,7 @@ fn gpu_context_json_sse_match_run_bench_and_reject_capacity_plus_one() {
         lens_config: None,
         web_root: None,
         lens_allowed_origin: Vec::new(),
-        model: path.into(),
+        model: path.clone(),
         addr: "127.0.0.1:0".into(),
         max_tokens: Some(1),
         max_context_tokens: Some(capacity),

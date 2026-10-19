@@ -539,26 +539,7 @@ pub(crate) fn validate_deepseek_v4_generation_mode(
         // accepting the flag in chat mode would silently no-op.
         unbound.push("--messages-preserve-thinking (requires --reasoning low, high, or max)");
     }
-    if args.durable_prefix_cache.is_none() {
-        for (set, flag) in [
-            (
-                explicit.durable_prefix_cache_max_mib,
-                "--durable-prefix-cache-max-mib",
-            ),
-            (
-                explicit.durable_prefix_cache_max_entry_mib,
-                "--durable-prefix-cache-max-entry-mib",
-            ),
-            (
-                explicit.durable_prefix_cache_min_tokens,
-                "--durable-prefix-cache-min-tokens",
-            ),
-        ] {
-            if set {
-                unbound.push(flag);
-            }
-        }
-    }
+    unbound.extend(crate::unbound_durable_prefix_options(args, explicit));
     lane.refuse(&unbound)?;
     ensure!(
         has_single_turn_input(args),

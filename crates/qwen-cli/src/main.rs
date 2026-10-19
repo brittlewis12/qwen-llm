@@ -419,27 +419,9 @@ fn run() -> Result<()> {
             if has_single_turn_input(&args) {
                 let lane = &admission::ORDINARY_QWEN_SINGLE_TURN;
                 let mut unsupported = lane.unsupported(&supplied);
-                // Single-turn reads the prefix-capture length and durable
-                // tuning only inside the durable store; without it they
-                // would no-op.
-                if args.durable_prefix_cache.is_none() {
-                    use admission::LegacyOption as O;
-                    unsupported.extend(supplied.iter().filter_map(|option| match option {
-                        O::CachePrefixTokens => {
-                            Some("--cache-prefix-tokens (requires --durable-prefix-cache)")
-                        }
-                        O::DurablePrefixCacheMaxMib => {
-                            Some("--durable-prefix-cache-max-mib (requires --durable-prefix-cache)")
-                        }
-                        O::DurablePrefixCacheMaxEntryMib => Some(
-                            "--durable-prefix-cache-max-entry-mib (requires --durable-prefix-cache)",
-                        ),
-                        O::DurablePrefixCacheMinTokens => Some(
-                            "--durable-prefix-cache-min-tokens (requires --durable-prefix-cache)",
-                        ),
-                        _ => None,
-                    }));
-                }
+                // These values only affect the durable store and must bind
+                // to an enabled cache instead of silently doing no work.
+                unsupported.extend(unbound_durable_prefix_options(&args, explicit_options));
                 lane.refuse(&unsupported)?;
                 return run_single_turn(&model_path, gguf, &args, staged_integrity, drafter);
             }
@@ -451,6 +433,33 @@ fn run() -> Result<()> {
             run_requests_jsonl(&model_path, path, gguf, &args, explicit_options)
         }
     }
+}
+
+fn unbound_durable_prefix_options(args: &Args, explicit: ExplicitCliOptions) -> Vec<&'static str> {
+    if args.durable_prefix_cache.is_some() {
+        return Vec::new();
+    }
+    [
+        (
+            args.cache_prefix_tokens.is_some(),
+            "--cache-prefix-tokens (requires --durable-prefix-cache)",
+        ),
+        (
+            explicit.durable_prefix_cache_max_mib,
+            "--durable-prefix-cache-max-mib (requires --durable-prefix-cache)",
+        ),
+        (
+            explicit.durable_prefix_cache_max_entry_mib,
+            "--durable-prefix-cache-max-entry-mib (requires --durable-prefix-cache)",
+        ),
+        (
+            explicit.durable_prefix_cache_min_tokens,
+            "--durable-prefix-cache-min-tokens (requires --durable-prefix-cache)",
+        ),
+    ]
+    .into_iter()
+    .filter_map(|(set, flag)| set.then_some(flag))
+    .collect()
 }
 
 fn validate_qwen_model_prefetch_scope(args: &Args) -> Result<()> {

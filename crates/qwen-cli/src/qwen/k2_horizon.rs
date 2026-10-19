@@ -417,7 +417,10 @@ pub(crate) fn run_raw(
                 Some(chat) => OutputProtocol::K2Tools {
                     effort: chat.effort,
                     config: chat.config.clone(),
-                    max_bytes: tool_byte_budget,
+                    max_bytes: crate::serve::output_memory::OutputByteCeiling::from_bytes(
+                        tool_byte_budget,
+                    )
+                    .context("tool output byte bound is zero or too large")?,
                 },
                 None => OutputProtocol::K2Chat { effort },
             };

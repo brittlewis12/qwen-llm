@@ -114,7 +114,16 @@ pub(crate) fn try_output_protocol(
         OutputProtocol::Glm5NextTools {
             definitions,
             // Normalization admitted this bound before any response bytes.
-            max_bytes: tool_byte_budget(request.max_output_tokens.unwrap_or(1), max_piece_bytes)?,
+            max_bytes: super::output_memory::OutputByteCeiling::from_bytes(tool_byte_budget(
+                request.max_output_tokens.unwrap_or(1),
+                max_piece_bytes,
+            )?)
+            .ok_or_else(|| {
+                invalid(
+                    "max_output_tokens",
+                    "GLM output byte bound is zero or too large",
+                )
+            })?,
         }
     } else {
         OutputProtocol::Glm5NextChat
@@ -354,7 +363,7 @@ mod tests {
             panic!("declared tools select the tools grammar");
         };
         assert_eq!(definitions.len(), 1);
-        assert_eq!(max_bytes, 8 * 64 * 3);
+        assert_eq!(max_bytes.get(), 8 * 64 * 3);
         // Duplicate keys are refused, not collapsed.
         let error = bound(json!({"model":"m","tools":[{"type":"function","name":"get_weather"}],
             "input":[{"role":"user","content":"q"},

@@ -62,7 +62,7 @@ pub(crate) enum OutputProtocol {
     RawText,
     DeepSeekV41 {
         thinking: bool,
-        max_bytes: usize,
+        max_bytes: super::output_memory::OutputByteCeiling,
     },
     K2Chat {
         effort: qwen_llm::k2_horizon_chat::Effort,
@@ -70,7 +70,7 @@ pub(crate) enum OutputProtocol {
     K2Tools {
         effort: qwen_llm::k2_horizon_chat::Effort,
         config: qwen_llm::k2_horizon_chat::tools::ToolConfig,
-        max_bytes: usize,
+        max_bytes: super::output_memory::OutputByteCeiling,
     },
     /// `<think>`-partitioned text with an optional tool block; the Qwen
     /// families and DeepSeek V4 share this shape and differ in grammar.
@@ -80,7 +80,7 @@ pub(crate) enum OutputProtocol {
         tool_grammar: ToolGrammar,
         /// The tool block's proven byte ceiling (`None`: unbound test
         /// profiles only).
-        tool_byte_ceiling: Option<usize>,
+        tool_byte_ceiling: Option<super::output_memory::OutputByteCeiling>,
     },
     MuseAtem {
         eos_token_id: i32,
@@ -92,7 +92,7 @@ pub(crate) enum OutputProtocol {
     /// GLM-5.3-Flash chat with declared tools: calls after `</think>`.
     Glm5NextTools {
         definitions: Vec<qwen_llm::glm5_next_chat::ToolDefinition>,
-        max_bytes: usize,
+        max_bytes: super::output_memory::OutputByteCeiling,
     },
 }
 
@@ -143,7 +143,10 @@ impl OutputPartition {
             OutputProtocol::DeepSeekV41 {
                 thinking,
                 max_bytes,
-            } => Self::DeepSeekV41(super::protocol_v41::Partition::new(thinking, max_bytes)),
+            } => Self::DeepSeekV41(super::protocol_v41::Partition::new(
+                thinking,
+                max_bytes.get(),
+            )),
             OutputProtocol::RawText => Self::Raw(Utf8Assembler::new()),
             OutputProtocol::K2Chat { effort } => {
                 Self::Preopened(super::partition_k2::k2_partition(effort))
@@ -153,7 +156,9 @@ impl OutputPartition {
                 config,
                 max_bytes,
             } => Self::K2Tools(super::partition_k2::K2ToolsPartition::new(
-                effort, config, max_bytes,
+                effort,
+                config,
+                max_bytes.get(),
             )),
             OutputProtocol::Qwen {
                 preopened_reasoning,
@@ -164,7 +169,7 @@ impl OutputPartition {
                 preopened_reasoning,
                 parse_tools,
                 tool_grammar,
-                tool_byte_ceiling,
+                tool_byte_ceiling.map(super::output_memory::OutputByteCeiling::get),
                 headroom,
             )),
             OutputProtocol::Glm5NextChat => Self::Preopened(super::render_glm5_next::partition()),
@@ -174,7 +179,7 @@ impl OutputPartition {
             } => Self::Glm5NextTools(
                 super::partition_glm5_next::Glm5NextToolsPartition::with_headroom(
                     definitions,
-                    max_bytes,
+                    max_bytes.get(),
                     headroom,
                 ),
             ),
@@ -676,11 +681,11 @@ mod tests {
     /// tool text, and never reserves past the ceiling.
     #[test]
     fn tool_byte_ceiling_bounds_the_block_and_its_reservation() {
-        let protocol = |ceiling| OutputProtocol::Qwen {
+        let protocol = |ceiling: usize| OutputProtocol::Qwen {
             preopened_reasoning: false,
             parse_tools: true,
             tool_grammar: ToolGrammar::QwenXml,
-            tool_byte_ceiling: Some(ceiling),
+            tool_byte_ceiling: crate::serve::output_memory::OutputByteCeiling::from_bytes(ceiling),
         };
         let open = "<tool_call>\n<function=f>\n<parameter=a>\n";
         let close = "\n</parameter>\n</function>\n</tool_call>";
@@ -723,13 +728,15 @@ mod tests {
     #[test]
     fn tool_byte_ceiling_holds_on_every_growth_path() {
         let step = super::super::output_memory::OUTPUT_STEP_BYTES;
-        let partition = |grammar, ceiling| {
+        let partition = |grammar, ceiling: usize| {
             OutputPartition::with_headroom(
                 OutputProtocol::Qwen {
                     preopened_reasoning: false,
                     parse_tools: true,
                     tool_grammar: grammar,
-                    tool_byte_ceiling: Some(ceiling),
+                    tool_byte_ceiling: crate::serve::output_memory::OutputByteCeiling::from_bytes(
+                        ceiling,
+                    ),
                 },
                 || Some(0),
             )

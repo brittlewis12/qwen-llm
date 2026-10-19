@@ -134,6 +134,54 @@ fn all_family_request_profile_snapshot() {
         });
         format!("{hash:016x}")
     }
+    fn protocol_snapshot(output: &crate::serve::output_partition::OutputProtocol) -> String {
+        use crate::serve::output_partition::OutputProtocol;
+        match output {
+            OutputProtocol::RawText => "RawText".into(),
+            OutputProtocol::DeepSeekV41 {
+                thinking,
+                max_bytes,
+            } => {
+                format!(
+                    "DeepSeekV41 {{ thinking: {thinking}, max_bytes: {} }}",
+                    max_bytes.get()
+                )
+            }
+            OutputProtocol::K2Chat { effort } => format!("K2Chat {{ effort: {effort:?} }}"),
+            OutputProtocol::K2Tools {
+                effort,
+                config,
+                max_bytes,
+            } => format!(
+                "K2Tools {{ effort: {effort:?}, config: {config:?}, max_bytes: {} }}",
+                max_bytes.get()
+            ),
+            OutputProtocol::Qwen {
+                preopened_reasoning,
+                parse_tools,
+                tool_grammar,
+                tool_byte_ceiling,
+            } => format!(
+                "Qwen {{ preopened_reasoning: {preopened_reasoning}, parse_tools: {parse_tools}, tool_grammar: {tool_grammar:?}, tool_byte_ceiling: {:?} }}",
+                tool_byte_ceiling.map(|ceiling| ceiling.get())
+            ),
+            OutputProtocol::MuseAtem {
+                eos_token_id,
+                eot_token_id,
+                declared_tools,
+            } => format!(
+                "MuseAtem {{ eos_token_id: {eos_token_id}, eot_token_id: {eot_token_id}, declared_tools: {declared_tools:?} }}"
+            ),
+            OutputProtocol::Glm5NextChat => "Glm5NextChat".into(),
+            OutputProtocol::Glm5NextTools {
+                definitions,
+                max_bytes,
+            } => format!(
+                "Glm5NextTools {{ definitions: {definitions:?}, max_bytes: {} }}",
+                max_bytes.get()
+            ),
+        }
+    }
     let tools = json!([{"type":"function","name":"lookup","parameters":{"type":"object","properties":{"q":{"type":"string"}}}}]);
     let qwen = |template| RequestProfile::OrdinaryQwen {
         template,
@@ -217,6 +265,7 @@ fn all_family_request_profile_snapshot() {
             RequestProfile::Muse {
                 template: MuseGlimmerChatTemplateProfile::UnslothLaunch,
                 default_max_tokens: 8,
+                max_piece_bytes: 64,
                 eos_token_id: 1,
                 eot_token_id: 2,
             },
@@ -233,13 +282,14 @@ fn all_family_request_profile_snapshot() {
         use std::fmt::Write as _;
         writeln!(
             actual,
-            "{name}|max={:?}|sampling={:?},{:?},{:?},{:?}|seed={:?}|protocol={output:?}|prompt={}",
+            "{name}|max={:?}|sampling={:?},{:?},{:?},{:?}|seed={:?}|protocol={}|prompt={}",
             request.max_output_tokens,
             request.temperature,
             request.top_k,
             request.top_p,
             request.min_p,
             request.seed,
+            protocol_snapshot(&output),
             digest(prompt.as_bytes()),
         )
         .unwrap();
@@ -269,6 +319,64 @@ fn glm_tool_definition_errors_propagate_during_protocol_resolution() {
         (400, "invalid_request", Some("tools"))
     );
     assert!(error.message.contains("cannot honor strict tool schemas"));
+}
+
+#[test]
+fn glm_and_k2_ceilings_reject_values_above_isize_max() {
+    let tools =
+        json!([{"type":"function","name":"lookup","parameters":{"type":"object","properties":{}}}]);
+    let glm = RequestProfile::Glm5Next {
+        default_max_tokens: 1,
+        capacity: 128,
+        max_piece_bytes: isize::MAX as usize / 2,
+    };
+    let mut request = glm
+        .parse(&json!({"model":"test","input":"Hello","max_output_tokens":1,"tools":tools}))
+        .unwrap();
+    glm.normalize(&mut request).unwrap();
+    let error = glm.resolve_output(&request).unwrap_err();
+    assert_eq!(
+        (error.status, error.param.as_deref()),
+        (400, Some("max_output_tokens"))
+    );
+
+    let k2 = RequestProfile::K2 {
+        chat: Some(Arc::new(crate::serve::render_k2::mock_profile())),
+        default_max_tokens: 1,
+        capacity: 128,
+        max_piece_bytes: isize::MAX as usize / 2,
+    };
+    let mut request = k2
+        .parse(&json!({
+            "model":"test",
+            "input":[{"role":"user","content":"Hello"}],
+            "max_output_tokens":1,
+            "tools":tools
+        }))
+        .unwrap();
+    k2.normalize(&mut request).unwrap();
+    let error = k2.resolve_output(&request).unwrap_err();
+    assert_eq!(
+        (error.status, error.param.as_deref()),
+        (400, Some("max_output_tokens"))
+    );
+}
+
+#[test]
+fn zero_decoder_piece_bound_is_server_configuration_error() {
+    let profile = RequestProfile::Glm5Next {
+        default_max_tokens: 8,
+        capacity: 128,
+        max_piece_bytes: 0,
+    };
+    let mut request = profile
+        .parse(&json!({"model":"test","input":"Hello"}))
+        .unwrap();
+    let error = profile.normalize(&mut request).unwrap_err();
+    assert_eq!(
+        (error.status, error.error_type, error.param),
+        (500, "server_error", None)
+    );
 }
 
 #[test]
@@ -418,7 +526,7 @@ fn family_profiles_drive_real_http_json_and_sse_without_hook_overrides() {
             false,
         ));
     }
-    cases.push((RequestProfile::Muse { template: MuseGlimmerChatTemplateProfile::UnslothLaunch, default_max_tokens: 8, eos_token_id: 1, eot_token_id: 2 }, json!({"model":"test","input":"Hello","instructions":"System"}), "<|begin_of_text|><|start|>system<|message|>System\n\nReasoning strength: high.\n\n# Valid recipients: \"self\", \"user\".<|eot|><|start|>user<|message|>Hello<|eot|><|start|>assistant".into(), " to=self<|message|>plan<|eom|><|start|>assistant to=user<|message|>answer".into(), GenerationEnd::StopToken(2), true));
+    cases.push((RequestProfile::Muse { template: MuseGlimmerChatTemplateProfile::UnslothLaunch, default_max_tokens: 8, max_piece_bytes: 64, eos_token_id: 1, eot_token_id: 2 }, json!({"model":"test","input":"Hello","instructions":"System"}), "<|begin_of_text|><|start|>system<|message|>System\n\nReasoning strength: high.\n\n# Valid recipients: \"self\", \"user\".<|eot|><|start|>user<|message|>Hello<|eot|><|start|>assistant".into(), " to=self<|message|>plan<|eom|><|start|>assistant to=user<|message|>answer".into(), GenerationEnd::StopToken(2), true));
     cases.push((
         k2(false, 128),
         json!({"model":"test","input":"raw bytes"}),
@@ -812,6 +920,7 @@ fn style_overrides_are_applied_or_refused_before_execution() {
         RequestProfile::Muse {
             template: MuseGlimmerChatTemplateProfile::UnslothLaunch,
             default_max_tokens: 8,
+            max_piece_bytes: 64,
             eos_token_id: 1,
             eot_token_id: 2,
         },
@@ -983,6 +1092,7 @@ fn prefill_lineage_is_glm_only_and_refused_elsewhere() {
         RequestProfile::Muse {
             template: MuseGlimmerChatTemplateProfile::UnslothLaunch,
             default_max_tokens: 8,
+            max_piece_bytes: 64,
             eos_token_id: 1,
             eot_token_id: 2,
         },

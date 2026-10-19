@@ -32,7 +32,7 @@ pub(crate) mod lens_http;
 mod memory_relief;
 mod native;
 pub(crate) mod outcome;
-mod output_memory;
+pub(crate) mod output_memory;
 pub(crate) mod output_partition;
 mod owner_activity;
 pub(crate) mod partition;

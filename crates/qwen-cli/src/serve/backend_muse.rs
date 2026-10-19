@@ -90,6 +90,7 @@ pub(crate) struct MuseGlimmerBackend {
     loaded: MuseGlimmerLoadedModel,
     model_id: String,
     default_max_tokens: usize,
+    max_piece_bytes: usize,
     capacity: usize,
     vocab_size: u32,
     eos_token_id: i32,
@@ -110,6 +111,17 @@ impl MuseGlimmerBackend {
         prepared: Prepared,
         tokenizer: LlamaCppTokenizer,
     ) -> anyhow::Result<Self> {
+        let max_piece_bytes = (0..prepared.config.vocab_size).try_fold(
+            0usize,
+            |maximum, token| -> anyhow::Result<usize> {
+                let bytes = tokenizer
+                    .try_decode_piece_bytes_exact(token as i32)
+                    .with_context(|| {
+                        format!("measure Muse decoded piece bound for token {token}")
+                    })?;
+                Ok(maximum.max(bytes.len()))
+            },
+        )?;
         let loaded = MuseGlimmerLoadedModel::load_with_options(
             &ctx,
             &gguf,
@@ -125,6 +137,7 @@ impl MuseGlimmerBackend {
             loaded,
             model_id,
             default_max_tokens: prepared.default_max_tokens,
+            max_piece_bytes,
             capacity: prepared.context_limit,
             vocab_size: prepared.config.vocab_size,
             eos_token_id: prepared.config.eos_token_id as i32,
@@ -257,6 +270,7 @@ impl GenerationBackend for MuseGlimmerBackend {
         super::request_profile::RequestProfile::Muse {
             template: self.profile,
             default_max_tokens: self.default_max_tokens,
+            max_piece_bytes: self.max_piece_bytes,
             eos_token_id: self.eos_token_id,
             eot_token_id: self.eot_token_id,
         }

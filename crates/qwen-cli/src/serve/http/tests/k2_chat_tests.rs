@@ -25,7 +25,7 @@ impl GenerationBackend for K2Mock {
     }
     fn output_protocol(&self, request: &ServeRequest) -> Result<OutputProtocol, ServeError> {
         if self.profile.is_some() && request.k2_tools.is_some() {
-            return Ok(render_k2::tools::output_protocol(request, 128));
+            return render_k2::tools::output_protocol(request, 128);
         }
         Ok(match (&self.profile, &request.k2_chat) {
             (Some(_), Some(chat)) => OutputProtocol::K2Chat {
@@ -273,7 +273,7 @@ fn history_reasoning_diagnostic_fires_only_for_filled_reasoning_history() {
         let body = json!({"model":"k2-test","input":input,
             "tools":[{"type":"function","name":"lookup","parameters":{"type":"object"}}]});
         let request = render_k2::parse_with_profile(&body, Some(&profile)).unwrap();
-        let protocol = render_k2::tools::output_protocol(&request, 128);
+        let protocol = render_k2::tools::output_protocol(&request, 128).unwrap();
         assert!(matches!(protocol, OutputProtocol::K2Tools { .. }));
         history_reasoning_diagnostic(&request, &protocol)
     };

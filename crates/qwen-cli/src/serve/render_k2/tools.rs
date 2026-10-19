@@ -335,26 +335,32 @@ pub(crate) fn byte_budget(max_tokens: usize, max_piece: usize) -> Result<usize, 
             )
         })
 }
-pub(crate) fn output_protocol(request: &ServeRequest, max_piece: usize) -> OutputProtocol {
+pub(crate) fn output_protocol(
+    request: &ServeRequest,
+    max_piece: usize,
+) -> Result<OutputProtocol, ServeError> {
     if let Some(chat) = &request.k2_tools {
         if !chat.config.definitions.is_empty() {
-            return OutputProtocol::K2Tools {
+            return Ok(OutputProtocol::K2Tools {
                 effort: chat.effort,
                 config: chat.config.clone(),
-                max_bytes: byte_budget(request.max_output_tokens.unwrap_or(0), max_piece)
-                    .unwrap_or(0),
-            };
+                max_bytes: super::super::output_memory::OutputByteCeiling::from_bytes(byte_budget(
+                    request.max_output_tokens.unwrap_or(0),
+                    max_piece,
+                )?)
+                .ok_or_else(|| invalid("max_output_tokens", "K2 output byte bound is too large"))?,
+            });
         }
-        return OutputProtocol::K2Chat {
+        return Ok(OutputProtocol::K2Chat {
             effort: chat.effort,
-        };
+        });
     }
-    request
+    Ok(request
         .k2_chat
         .as_ref()
         .map_or(OutputProtocol::RawText, |chat| OutputProtocol::K2Chat {
             effort: chat.effort,
-        })
+        }))
 }
 
 #[cfg(test)]

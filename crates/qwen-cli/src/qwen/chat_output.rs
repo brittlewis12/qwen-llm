@@ -333,7 +333,7 @@ mod tests {
         .unwrap();
         let structured = OutputProtocol::Glm5NextTools {
             definitions: vec![tool],
-            max_bytes: 1 << 20,
+            max_bytes: crate::serve::output_memory::OutputByteCeiling::from_bytes(1 << 20).unwrap(),
         };
         let mut output = ChatOutput::new(
             RunFormat::Responses,

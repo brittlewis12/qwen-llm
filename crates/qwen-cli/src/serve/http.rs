@@ -2064,7 +2064,7 @@ mod tests {
                         "properties": {"a": {"type": "integer"}}}}))
                 .unwrap(),
             ],
-            max_bytes: 1 << 20,
+            max_bytes: crate::serve::output_memory::OutputByteCeiling::from_bytes(1 << 20).unwrap(),
         };
         let cases: [(&str, Vec<&str>, Option<OutputProtocol>, usize); 2] = [
             (

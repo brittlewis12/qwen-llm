@@ -575,11 +575,13 @@ pub(crate) fn run(
             } else {
                 OutputProtocol::Glm5NextTools {
                     definitions: tools.clone(),
-                    max_bytes: args
-                        .tokens
-                        .checked_mul(prepared.tokenizer().max_decoded_piece_bytes())
-                        .and_then(|n| n.checked_mul(3))
-                        .context("tool output byte bound overflows")?,
+                    max_bytes: crate::serve::output_memory::OutputByteCeiling::from_bytes(
+                        args.tokens
+                            .checked_mul(prepared.tokenizer().max_decoded_piece_bytes())
+                            .and_then(|n| n.checked_mul(3))
+                            .context("tool output byte bound overflows")?,
+                    )
+                    .context("tool output byte bound is zero or too large")?,
                 }
             };
             Ok(crate::chat_output::ChatOutput::new(

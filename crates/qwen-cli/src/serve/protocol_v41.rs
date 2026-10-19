@@ -51,7 +51,8 @@ mod tests {
     fn output_partition(thinking: bool, max_bytes: usize) -> OutputPartition {
         OutputPartition::new(OutputProtocol::DeepSeekV41 {
             thinking,
-            max_bytes,
+            max_bytes: crate::serve::output_memory::OutputByteCeiling::from_bytes(max_bytes)
+                .unwrap(),
         })
     }
 
@@ -346,7 +347,7 @@ mod tests {
         use super::super::output_partition::{OutputPartition, OutputProtocol};
         let mut partition = OutputPartition::new(OutputProtocol::DeepSeekV41 {
             thinking: true,
-            max_bytes: 1024,
+            max_bytes: crate::serve::output_memory::OutputByteCeiling::from_bytes(1024).unwrap(),
         });
         let mut events = vec![];
         partition.push(b"plan</think><", &mut events);

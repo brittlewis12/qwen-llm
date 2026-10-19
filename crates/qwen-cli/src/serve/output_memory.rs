@@ -13,6 +13,34 @@
 
 use super::items::ServeError;
 use std::io;
+use std::num::NonZeroUsize;
+
+/// A validated byte bound for one request's tool output. It is distinct from
+/// model-owned [`super::request_profile::OutputLimits`].
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct OutputByteCeiling(NonZeroUsize);
+
+impl OutputByteCeiling {
+    pub(crate) fn from_tokens_and_piece(max_tokens: usize, max_piece_bytes: usize) -> Option<Self> {
+        max_tokens
+            .checked_mul(max_piece_bytes)?
+            .checked_mul(3)
+            .filter(|&bytes| bytes <= isize::MAX as usize)
+            .and_then(NonZeroUsize::new)
+            .map(Self)
+    }
+
+    pub(crate) fn from_bytes(bytes: usize) -> Option<Self> {
+        (bytes <= isize::MAX as usize)
+            .then(|| NonZeroUsize::new(bytes))
+            .flatten()
+            .map(Self)
+    }
+
+    pub(crate) const fn get(self) -> usize {
+        self.0.get()
+    }
+}
 
 /// The smallest growth step of an admitted output buffer.
 pub(crate) const OUTPUT_STEP_BYTES: usize = 64 << 10;
@@ -98,6 +126,23 @@ pub(crate) fn allocation_failure(what: &str, error: impl std::fmt::Display) -> S
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn output_byte_ceiling_checks_nonzero_multiplication_and_isize_boundary() {
+        let exact = isize::MAX as usize / 3;
+        assert_eq!(
+            OutputByteCeiling::from_tokens_and_piece(1, exact)
+                .unwrap()
+                .get(),
+            exact * 3
+        );
+        assert!(OutputByteCeiling::from_tokens_and_piece(1, exact + 1).is_none());
+        assert!(OutputByteCeiling::from_tokens_and_piece(0, 1).is_none());
+        assert!(OutputByteCeiling::from_tokens_and_piece(1, 0).is_none());
+        assert!(OutputByteCeiling::from_tokens_and_piece(usize::MAX, 2).is_none());
+        assert!(OutputByteCeiling::from_bytes(isize::MAX as usize).is_some());
+        assert!(OutputByteCeiling::from_bytes(isize::MAX as usize + 1).is_none());
+    }
 
     #[test]
     fn refusals_round_trip_through_io_errors() {

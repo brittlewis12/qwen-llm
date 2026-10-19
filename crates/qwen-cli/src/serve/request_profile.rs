@@ -81,6 +81,7 @@ pub(crate) enum RequestProfile {
     Muse {
         template: MuseGlimmerChatTemplateProfile,
         default_max_tokens: usize,
+        max_piece_bytes: usize,
         eos_token_id: i32,
         eot_token_id: i32,
     },
@@ -182,6 +183,27 @@ impl RequestProfile {
     }
 
     pub(crate) fn normalize(&self, request: &mut ServeRequest) -> Result<(), ServeError> {
+        let max_piece_bytes = match self {
+            Self::OrdinaryQwen { limits, .. }
+            | Self::FlashNext { limits, .. }
+            | Self::DeepSeekV4 { limits, .. }
+            | Self::DeepSeekV41 { limits, .. } => Some(limits.max_piece_bytes),
+            Self::K2 {
+                max_piece_bytes, ..
+            }
+            | Self::Glm5Next {
+                max_piece_bytes, ..
+            } => Some(*max_piece_bytes),
+            Self::Muse {
+                max_piece_bytes, ..
+            } => Some(*max_piece_bytes),
+            Self::UnboundQwen => None,
+        };
+        if max_piece_bytes == Some(0) {
+            return Err(ServeError::server_error(
+                "backend reports a zero decoded-piece byte bound",
+            ));
+        }
         if request.prefill_lineage.is_some() && !matches!(self, Self::Glm5Next { .. }) {
             return Err(ServeError::invalid_request(
                 Some("x_qwen.prefill_lineage"),
@@ -339,18 +361,20 @@ impl RequestProfile {
         // Normalization admitted the ceiling before any response bytes;
         // were it uncomputable here, fail closed (any tool block exceeds 0).
         let ceiling = |limits: &OutputLimits| {
-            Some(
-                super::output_memory::tool_byte_ceiling(
-                    limits.max_tokens(request),
-                    limits.max_piece_bytes,
-                )
-                .unwrap_or(0),
+            super::output_memory::OutputByteCeiling::from_tokens_and_piece(
+                limits.max_tokens(request),
+                limits.max_piece_bytes,
             )
         };
         Ok(match self {
             Self::DeepSeekV41 { limits, .. } => OutputProtocol::DeepSeekV41 {
                 thinking: super::protocol_v41::thinking(request)?.is_some(),
-                max_bytes: ceiling(limits).unwrap_or(0),
+                max_bytes: ceiling(limits).ok_or_else(|| {
+                    ServeError::invalid_request(
+                        Some("max_output_tokens"),
+                        "max_output_tokens must be >= 1 and small enough to bound the tool block",
+                    )
+                })?,
             },
             Self::UnboundQwen => OutputProtocol::Qwen {
                 preopened_reasoning: false,
@@ -397,7 +421,7 @@ impl RequestProfile {
                 chat: Some(_),
                 max_piece_bytes,
                 ..
-            } => render_k2::tools::output_protocol(request, *max_piece_bytes),
+            } => render_k2::tools::output_protocol(request, *max_piece_bytes)?,
             Self::K2 { chat: None, .. } => OutputProtocol::RawText,
             Self::Glm5Next {
                 max_piece_bytes, ..
@@ -569,7 +593,10 @@ mod tests {
                 match profile.output(&request) {
                     OutputProtocol::Qwen {
                         tool_byte_ceiling, ..
-                    } => assert_eq!(tool_byte_ceiling, Some(ceiling)),
+                    } => assert_eq!(
+                        tool_byte_ceiling.map(|ceiling| ceiling.get()),
+                        Some(ceiling)
+                    ),
                     other => panic!("{other:?}"),
                 }
             }

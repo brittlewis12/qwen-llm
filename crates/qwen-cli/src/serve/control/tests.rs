@@ -453,6 +453,7 @@ fn family_profiles_serve_history_or_standalone_assets_without_native_inference()
         RequestProfile::Muse {
             template: qwen_llm::muse_glimmer::MuseGlimmerChatTemplateProfile::UnslothLaunch,
             default_max_tokens: 8,
+            max_piece_bytes: 64,
             eos_token_id: 1,
             eot_token_id: 2,
         },

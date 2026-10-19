@@ -6,6 +6,35 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the current state and evidence index.
 
+## 2026-10-19 - V4.1 Matched Baselines; F32 MMA Tiles Rejected
+
+- Clean `9604a7a17`, M5 Ultra 80-core, macOS 27.0.1, seed 1, three warmed runs,
+  validation unset, resident weights/fresh KV. Mean pp1024/2048/10000 tokens/s:
+  REAP 118.686/114.599/108.088; IQ2_XXS 38.258/37.780/37.037. Matched tg32 at
+  depth 2048: 22.221/21.287. Combined pp capacity is 10K.
+- F32 MMA 16x64 (`25621ef4`) and 8x32 (`d0b44d70`) are rejected, retained only
+  on `feat/deepseek-v41-contract`. Correctness passed with API validation but
+  both lose to scalar in K640 pack/matmul/finite and whole-sink GPU timing.
+  No full-model performance claim follows from the rejected tiles.
+- Exact threadgroup packing (`7afc6aa9`, rebased as `3be2e136`) measures matched
+  REAP pp1024/2048/10000 at 119.498/115.248/108.860 tokens/s, gains of 0.57-0.71%.
+  Five alternating tg32/depth2048 pairs give median +0.16%, effectively flat.
+  Both arms show 22-to-25 tokens/s session variation; the first pair's +13.73%
+  is retained, not attributed to the change. Fresh conditional
+  attention replay matches all 56 selected-ID/ownership and 35 candidate-set
+  comparisons, worst output error 2.93255e-5 against 1e-4. Seven-token independent
+  execution and internal 1,025-token continuation also pass; these are distinct
+  evidence classes, not independent long full-model acceptance.
+- IQ2_XXS routed experts fall back per token for both gate/up and down; dense
+  and shared work stays batched, not proven performance attribution or quality.
+  Fresh full vendor-settings quality screening has not run. The old safetensors
+  pilot is not a current GGUF score.
+- [Follow-up evidence](bench/2026-10-19-v41-leverage.md)
+  retains SDs, leaf timings, raw locations, older measurements and vendor facts;
+  [review](bench/2026-10-19-v41-review.md) separates seven-token full-model,
+  conditional attention and internal parity evidence, plus real-agent prefix
+  reuse from the short smoke. The 20-second suffix remains unreproduced.
+
 ## 2026-10-19 — Descriptor-Derived GGUF Population Plan; Owned Arena Archived
 
 - Removed the three artifact-keyed parallel population profiles and the dense

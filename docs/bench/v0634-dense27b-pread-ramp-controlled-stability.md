@@ -33,7 +33,7 @@ repair, retry, selector packet, or second ramp design.
 The direct parent is certification commit
 `e307f273ee8d1c2cc6c8d67985e88e32876e0654`. The v0.634 commit is its clean,
 single-parent child and adds exactly this document and
-`scripts/profile/v0634_dense27b_pread_ramp_controlled_stability.py`. It changes
+`scripts/archive/profile/v0634_dense27b_pread_ramp_controlled_stability.py`. It changes
 no Rust, Metal, production behavior, model asset, prompt, benchmark command, or
 scored parser.
 

@@ -28,7 +28,7 @@ contains no timing and is not pooled or scored.
 
 R642 is a clean, non-merge, direct child of
 `dfde5e04b381a641537d91f616b7b8fba5560f9d`. It adds exactly this file and
-`scripts/profile/v0642_a3b_pread_worker_screen_fault_repair.py`. The parent is
+`scripts/archive/profile/v0642_a3b_pread_worker_screen_fault_repair.py`. The parent is
 the post-v0.641 PERF authority commit and modifies only `docs/PERF-LOG.md` and
 `docs/PERF-ROADMAP.md`. Its direct parent is v0.641 source
 `18fd67aff6bcc990e51b1f45fa488b7cad6c671b`, whose direct parent is

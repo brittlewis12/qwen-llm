@@ -43,7 +43,7 @@ R631  HEAD at execution
 Each commit has exactly one parent. Base-to-R630 adds only the v0.630 document
 and runner; R630-to-H630 modifies only `crates/qwen-cli/src/bench.rs`; H630-to-
 R631 adds only this document and
-`scripts/profile/v0631_dense27b_pread_loaded_stability_repair.py`. The repair
+`scripts/archive/profile/v0631_dense27b_pread_loaded_stability_repair.py`. The repair
 runner independently rechecks the frozen v0.630 complete `bench.rs` and patch
 digests, clean worktree, R631 build/runtime identity, sibling commits and exact
 untracked allowlist, OS build, model, prompt, binary, and every inherited input.

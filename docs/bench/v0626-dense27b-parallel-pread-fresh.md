@@ -36,7 +36,7 @@ seals:
   `implement-force-only-dense27b-loader-pilot`, six completed blocks, six
   wins, and paired median saving exactly `965.0405000000001 ms`.
 
-`scripts/profile/v0605_dense27b_parallel_copied_loader.py` is a mechanics
+`scripts/archive/profile/v0605_dense27b_parallel_copied_loader.py` is a mechanics
 library only. v0.626 must not authenticate, import, pool, rescore, reinterpret,
 or derive authority from any v0.604/v0.605 decision, attempt, closure, or
 successor authorization.
@@ -60,7 +60,7 @@ be the direct child of that packet commit. At execution the runner requires:
 
 - `HEAD^^ == 129379f1c1918e30ab4725856fe9699a7f54d0ed`;
 - `129379f..HEAD^` changes exactly this document and
-  `scripts/profile/v0626_dense27b_parallel_pread_fresh.py`;
+  `scripts/archive/profile/v0626_dense27b_parallel_pread_fresh.py`;
 - `HEAD^..HEAD` changes exactly `crates/qwen-llm/src/metal_forward.rs`;
 - a clean worktree, the repository root as working directory, and release
   `qwen` and `qwen-bench` build/runtime identities that independently equal

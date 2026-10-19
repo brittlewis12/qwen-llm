@@ -104,7 +104,7 @@ R632  HEAD at execution
 ```
 
 R632 adds exactly this document and
-`scripts/profile/v0632_dense27b_pread_correctness_fault_repair.py`. No existing
+`scripts/archive/profile/v0632_dense27b_pread_correctness_fault_repair.py`. No existing
 file changes. Rebuild `qwen-bench` at R632 for exact source identity. The runner
 rechecks every inherited commit/diff, frozen H source/patch digest, safe
 environment, sibling/OS/model/prompt/binary identity, v0.629 authority, and the

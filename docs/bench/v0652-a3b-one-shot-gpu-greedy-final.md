@@ -324,7 +324,7 @@ post-identity and does not require another 22 GB read.
 Freeze exact prompt and binary pre/post identity. Require clean commit topology:
 the preregistration commit, one bounded candidate-only commit, then exactly one
 runner-only commit at clean HEAD. Its full delta is exactly the added path
-`scripts/profile/v0652_a3b_one_shot_gpu_greedy_final.py`. The runner verifies its
+`scripts/archive/profile/v0652_a3b_one_shot_gpu_greedy_final.py`. The runner verifies its
 worktree and index blob against HEAD; build/runtime commit and complete
 source-state hashes must match.
 The manifest and any GO authority name the exact candidate and runner commits.

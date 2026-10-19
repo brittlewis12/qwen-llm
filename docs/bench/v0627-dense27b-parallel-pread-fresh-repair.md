@@ -61,7 +61,7 @@ included in and rehashed by the v0.627 build manifest.
 The v0.627 preregistration commit R must be the direct child of clean production
 implementation commit `7fb0488a5c075d8c62c8f9802352f717ec95b085`. R adds exactly
 this document and
-`scripts/profile/v0627_dense27b_parallel_pread_fresh_repair.py`.
+`scripts/archive/profile/v0627_dense27b_parallel_pread_fresh_repair.py`.
 
 At execution, the runner requires the repository root as working directory, a
 clean worktree, `HEAD=R`, `HEAD^=7fb0488a5c075d8c62c8f9802352f717ec95b085`,

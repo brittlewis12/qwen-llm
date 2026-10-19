@@ -64,7 +64,7 @@ The import is forensic only and has `authority_imported=false`.
 The clean repair base is
 `113350615c33e0a17773050befcb5fbbff7f65ec`. Execution commit P must be its
 direct child and add exactly this document and
-`scripts/profile/v0629_dense27b_pread_cold_composition_repair.py`. Relative to
+`scripts/archive/profile/v0629_dense27b_pread_cold_composition_repair.py`. Relative to
 dense implementation `7fb0488a5c075d8c62c8f9802352f717ec95b085`, the protected
 Cargo/crates/kernels tree must still differ only in
 `crates/qwen-llm/examples/first_byte_spike.rs`.

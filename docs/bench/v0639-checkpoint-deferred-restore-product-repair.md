@@ -62,7 +62,7 @@ performance_observations_imported=0
 
 R639 must be a clean, direct single-parent child of exact parent
 `ca2ee114d3140c1ed3bb577b6b7293ff8ec865ee`. It adds exactly this document and
-`scripts/profile/v0639_checkpoint_deferred_restore_product_repair.py`; it
+`scripts/archive/profile/v0639_checkpoint_deferred_restore_product_repair.py`; it
 modifies nothing else. Authenticate `ca2ee114d3140c1ed3bb577b6b7293ff8ec865ee`
 as a direct single-parent child of `482fa05341971755ecfcc0e1820a09be65490356`
 adding exactly the v0.638 document and runner, and authenticate their committed
@@ -87,9 +87,9 @@ crates/qwen-cli/src/main.rs
 1ee1e959fe5c2616fec20fb924b9edef026fc432b635db1f46166a43a1ce0c71
 crates/qwen-llm/src/checkpoint_store.rs
 a5ea6b001249418febb3f876253bf5989c0603ef42cc43bc50fda7d51927f8da
-scripts/profile/v0602_a3b_parallel_copied_loader.py
+scripts/archive/profile/v0602_a3b_parallel_copied_loader.py
 e5775489802dddc2d88dc9b950940417f325ebcc4ece29194550b7e430f851e3
-scripts/profile/v0593_demand_paged_no_copy.py
+scripts/archive/profile/v0593_demand_paged_no_copy.py
 4c1b73a2897d8bf882988407f45b59be7b19d236c06a612991491c57af0d7be4
 ```
 

@@ -52,7 +52,7 @@ retaining every inherited host gate:
 
 ```text
 runner
-scripts/profile/v0658_positive_temperature_sampling_attribution.py
+scripts/archive/profile/v0658_positive_temperature_sampling_attribution.py
 
 packet root
 target/profiles/v0658-positive-temperature-sampling-attribution-p1
@@ -120,7 +120,7 @@ operator check and runner check-only phase are green. The sole authorized
 command is:
 
 ```text
-uv run scripts/profile/v0658_positive_temperature_sampling_attribution.py \
+uv run scripts/archive/profile/v0658_positive_temperature_sampling_attribution.py \
   --phase acquire --attest-no-other-user-gpu-workload
 ```
 

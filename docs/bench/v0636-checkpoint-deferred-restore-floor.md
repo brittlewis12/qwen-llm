@@ -76,7 +76,7 @@ must never become authoritative state under this contract.
 
 The base is `b6a212ab78049607fae9ba9b0ccc3535e3fa7254`. R is its clean,
 single-parent child and adds exactly this document plus
-`scripts/profile/v0636_checkpoint_deferred_restore_floor.py`. H must be R's clean,
+`scripts/archive/profile/v0636_checkpoint_deferred_restore_floor.py`. H must be R's clean,
 single-parent child and modify exactly:
 
 ```text

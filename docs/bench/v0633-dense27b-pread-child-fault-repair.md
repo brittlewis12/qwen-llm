@@ -111,7 +111,7 @@ R633  HEAD at execution
 ```
 
 R633 adds exactly this document and
-`scripts/profile/v0633_dense27b_pread_child_fault_repair.py`. No existing file
+`scripts/archive/profile/v0633_dense27b_pread_child_fault_repair.py`. No existing file
 changes. Rebuild `qwen-bench` at R633. Recheck every inherited commit/diff,
 binary/source/dependency/OS/model/prompt identity, v0.629 authority, and complete
 v0.632 bridge.

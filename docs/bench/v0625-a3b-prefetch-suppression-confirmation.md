@@ -14,7 +14,7 @@ A3B Auto direct-pread plan while preserving explicit `Always` and `Off`.
 
 Pin implementation parent `4f2117c39740f3b9187ae8a7b0e6749094b7393d`.
 The packet commit may add only this contract and
-`scripts/profile/v0625_a3b_prefetch_suppression_confirmation.py`.
+`scripts/archive/profile/v0625_a3b_prefetch_suppression_confirmation.py`.
 
 Import and verify the complete sealed v0.624 GO. Use its exact model, host,
 release `first_byte_spike`, disposable intent, five-token prompt, output-1

@@ -211,7 +211,7 @@ fresh correctness, and a conservative `>=1.133x` gate/up prediction before imple
 Run exactly once:
 
 ```sh
-uv run scripts/profile/v0644_q4_matmat_attribution.py
+uv run scripts/archive/profile/v0644_q4_matmat_attribution.py
 ```
 
 Artifacts seal under `target/profiles/v0644-q4-matmat-attribution-p1/`. Existing packet

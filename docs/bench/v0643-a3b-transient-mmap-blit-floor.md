@@ -22,7 +22,7 @@ is a portfolio gate only, not an MDE.
 
 The preregistration commit must be a clean, non-merge direct child of frozen
 implementation `d859345118774b934218a7eb55460ef0870da882`. It adds exactly this
-file and `scripts/profile/v0643_a3b_transient_mmap_blit_floor.py`; its complete
+file and `scripts/archive/profile/v0643_a3b_transient_mmap_blit_floor.py`; its complete
 `crates` tree must equal the implementation parent's tree. Execution requires a
 clean worktree and matching clean release build/runtime identity at that commit.
 No sealed runner is imported.

@@ -38,7 +38,7 @@ H636  3d59d94cf314dae79b79cd05f74b4aea455cd30c
 ```
 
 R637 must be a clean single-parent child of H636. It adds exactly this document
-and `scripts/profile/v0637_checkpoint_deferred_restore_floor_parser_repair.py`.
+and `scripts/archive/profile/v0637_checkpoint_deferred_restore_floor_parser_repair.py`.
 It modifies no existing file. R637 is the execution commit; H636 remains the
 implementation commit. Both identities must appear separately in the manifest
 and decision.

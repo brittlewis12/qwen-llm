@@ -16,11 +16,11 @@ That recency gradient invalidates this exact ordered hash-then-global-residency
 method on the host; it does not compare copied with W4 parallel-pread.
 
 The frozen standalone runner is
-`scripts/profile/v0653_a10b_parallel_pread_floor.py`. Its CPU-only synthetic
+`scripts/archive/profile/v0653_a10b_parallel_pread_floor.py`. Its CPU-only synthetic
 check is:
 
 ```sh
-uv run scripts/profile/v0653_a10b_parallel_pread_floor.py --self-test
+uv run scripts/archive/profile/v0653_a10b_parallel_pread_floor.py --self-test
 ```
 
 That mode must not inspect the model or launch `qwen-bench`.

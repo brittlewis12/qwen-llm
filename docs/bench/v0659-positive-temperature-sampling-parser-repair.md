@@ -54,7 +54,7 @@ Change packet identity:
 
 ```text
 runner
-scripts/profile/v0659_positive_temperature_sampling_parser_repair.py
+scripts/archive/profile/v0659_positive_temperature_sampling_parser_repair.py
 
 packet root
 target/profiles/v0659-positive-temperature-sampling-parser-repair-p1
@@ -113,7 +113,7 @@ After non-GPU checks and adversarial review, confirm the host is quiet and run
 the inherited sole acquisition exactly once:
 
 ```text
-uv run scripts/profile/v0659_positive_temperature_sampling_parser_repair.py \
+uv run scripts/archive/profile/v0659_positive_temperature_sampling_parser_repair.py \
   --phase acquire --attest-no-other-user-gpu-workload
 ```
 

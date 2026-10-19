@@ -88,7 +88,7 @@ converter, default, no-copy conclusion, or production sidecar.
 The base is `0619c925d488a9f4b47b64c509b6231f4ab6bfb1`. R
 (`6fe16d5c878314b093799b551658eb651fdedbdc`) is its clean, single-parent child
 and adds exactly this document and
-`scripts/profile/v0635_a3b_page_rounded_copy_compatibility.py`. H
+`scripts/archive/profile/v0635_a3b_page_rounded_copy_compatibility.py`. H
 (`94e819b47d56553d8b298600b45a01b151ce5ddf`) is R's clean, single-parent child
 and modifies only `crates/qwen-llm/src/metal_forward.rs`. R2 is H's clean,
 single-parent child and modifies only this document and runner to replace the

@@ -51,7 +51,7 @@ Freeze the new packet identities:
 
 ```text
 runner
-scripts/profile/v0660_a3b_sampled_structural_product.py
+scripts/archive/profile/v0660_a3b_sampled_structural_product.py
 
 packet root
 target/profiles/v0660-a3b-sampled-structural-product-p1
@@ -377,7 +377,7 @@ inherited `QWEN_*` controls, and the v0.659 authority checks above.
 The sole acquisition command is:
 
 ```text
-uv run scripts/profile/v0660_a3b_sampled_structural_product.py \
+uv run scripts/archive/profile/v0660_a3b_sampled_structural_product.py \
   --phase acquire --attest-no-other-user-gpu-workload
 ```
 

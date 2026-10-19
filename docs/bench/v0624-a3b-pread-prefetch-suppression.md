@@ -17,7 +17,7 @@ It does not isolate only the read loop.
 
 Import and verify the complete sealed v0.621 GO. Pin packet parent
 `bd0c0495bff030b34b022cf22f5e3ef671d5c2be`; this packet commit may add only
-this contract and `scripts/profile/v0624_a3b_pread_prefetch_suppression.py`.
+this contract and `scripts/archive/profile/v0624_a3b_pread_prefetch_suppression.py`.
 
 Use the exact v0.621 model, host, release `first_byte_spike`, disposable intent,
 five-token prompt, output-1 shape, and in-child `MS_SYNC | MS_INVALIDATE` cache

@@ -22,7 +22,7 @@ loading, storage-cold performance, or an energy claim.
 The production-and-roadmap base is
 `cc47190654b898e2004117b6d03be1006a89d1fa`. The preregistration commit R is a
 clean direct child and adds exactly this document and
-`scripts/profile/v0630_dense27b_pread_loaded_stability.py`. The implementation
+`scripts/archive/profile/v0630_dense27b_pread_loaded_stability.py`. The implementation
 commit H is a clean direct child of R and changes exactly
 `crates/qwen-cli/src/bench.rs` to add opt-in exact generated-token-trace reporting
 to `qwen-bench decode`. It may not change loading, inference, timing, warmup,

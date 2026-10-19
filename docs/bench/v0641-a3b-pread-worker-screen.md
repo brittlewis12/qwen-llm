@@ -28,7 +28,7 @@ contains no timing and is not pooled or scored.
 
 R641 is a clean, non-merge, direct child of
 `1b8dd176fe8647f276ed8f50c7714ae89dbf62ef`. It adds exactly this file and
-`scripts/profile/v0641_a3b_pread_worker_screen.py`. The complete `crates` tree
+`scripts/archive/profile/v0641_a3b_pread_worker_screen.py`. The complete `crates` tree
 must be byte-identical to the parent tree. No production, Auto, dependency, or
 build file may change.
 

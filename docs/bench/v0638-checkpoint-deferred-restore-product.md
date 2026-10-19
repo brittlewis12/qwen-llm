@@ -39,7 +39,7 @@ performance_observations_imported=0
 
 R638 must be a clean, direct single-parent child of exact parent
 `482fa05341971755ecfcc0e1820a09be65490356`. It adds exactly this document and
-`scripts/profile/v0638_checkpoint_deferred_restore_product.py`; it modifies
+`scripts/archive/profile/v0638_checkpoint_deferred_restore_product.py`; it modifies
 nothing else. The unchanged implementation commit is
 `3d59d94cf314dae79b79cd05f74b4aea455cd30c` and the sealed v0.637 execution
 commit is `61f852e557d42180468a9c7ce77ccf606b68d8e8`.
@@ -57,9 +57,9 @@ crates/qwen-cli/src/main.rs
 1ee1e959fe5c2616fec20fb924b9edef026fc432b635db1f46166a43a1ce0c71
 crates/qwen-llm/src/checkpoint_store.rs
 a5ea6b001249418febb3f876253bf5989c0603ef42cc43bc50fda7d51927f8da
-scripts/profile/v0602_a3b_parallel_copied_loader.py
+scripts/archive/profile/v0602_a3b_parallel_copied_loader.py
 e5775489802dddc2d88dc9b950940417f325ebcc4ece29194550b7e430f851e3
-scripts/profile/v0593_demand_paged_no_copy.py
+scripts/archive/profile/v0593_demand_paged_no_copy.py
 4c1b73a2897d8bf882988407f45b59be7b19d236c06a612991491c57af0d7be4
 ```
 

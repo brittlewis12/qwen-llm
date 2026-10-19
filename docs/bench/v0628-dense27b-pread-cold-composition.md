@@ -58,7 +58,7 @@ dense-specific validity.
 The clean certification base is
 `7fc4c6b2e08379bd45be8b9db8dc742aa5e7a04e`. Preregistration commit P must be
 its direct child and add exactly this document and
-`scripts/profile/v0628_dense27b_pread_cold_composition.py`. Harness
+`scripts/archive/profile/v0628_dense27b_pread_cold_composition.py`. Harness
 implementation H must be P's direct child and change exactly
 `crates/qwen-llm/examples/first_byte_spike.rs`.
 

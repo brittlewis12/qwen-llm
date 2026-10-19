@@ -7,9 +7,7 @@
 //! rejected after a full weight load (serve MoE target), or silently ignored
 //! (DeepSeek CLI). `run` and `serve` now consume one resolver, settled once
 //! before family dispatch so no family lane can accept and ignore the flag
-//! (Muse's dispatch had skipped it). Lanes that also check
-//! (`ensure_drafter_admitted`) are defensive duplicates with the same code
-//! and message.
+//! (Muse's dispatch had skipped it).
 //!
 //! The decision is a projection of what the implementation supports; it is
 //! not a capability table maintained by hand. Lane differences that are real
@@ -83,7 +81,12 @@ pub(crate) enum DrafterUnsupported {
 impl DrafterUnsupported {
     pub(crate) fn code(self) -> &'static str {
         match self {
-            DrafterUnsupported::FamilyNoSpeculation { .. } => "family_no_speculation",
+            DrafterUnsupported::FamilyNoSpeculation { family, .. } => {
+                match profile(family).drafter {
+                    DrafterSupport::Unsupported(reason) => reason,
+                    _ => unreachable!("family refusal requires unsupported profile"),
+                }
+            }
             DrafterUnsupported::ServeMoeTarget => "serve_moe_target",
             DrafterUnsupported::UnknownFamily => "unknown_family",
         }
@@ -101,8 +104,12 @@ impl fmt::Display for DrafterUnsupported {
                 };
                 write!(
                     f,
-                    "--drafter is not supported for {family_label} {}{note}",
-                    lane.label()
+                    "--drafter is not supported for {family_label} {}{note} ({})",
+                    lane.label(),
+                    match profile(*family).drafter {
+                        DrafterSupport::Unsupported(reason) => reason,
+                        _ => unreachable!("family refusal requires unsupported profile"),
+                    }
                 )
             }
             DrafterUnsupported::ServeMoeTarget => write!(
@@ -145,19 +152,6 @@ pub(crate) fn resolve_drafter(
         },
         None => DrafterDecision::Unsupported(DrafterUnsupported::UnknownFamily),
     }
-}
-
-/// Defensive duplicate of the pre-dispatch admission for a lane that knows
-/// its family: the same decision, code and message, never a private one.
-pub(crate) fn ensure_drafter_admitted(
-    family: ModelFamily,
-    lane: Lane,
-    requested: bool,
-) -> Result<()> {
-    if let DrafterDecision::Unsupported(reason) = resolve_drafter(Some(family), lane, requested) {
-        bail!("{reason}");
-    }
-    Ok(())
 }
 
 /// A drafter whose GGUF has been opened and whose metadata has been bound
@@ -334,7 +328,7 @@ mod tests {
         };
         assert_eq!(
             muse.to_string(),
-            "--drafter is not supported for Muse Glimmer serve (Muse DFlash2 integration is not active yet)"
+            "--drafter is not supported for Muse Glimmer serve (Muse DFlash2 integration is not active yet) (family_no_speculation)"
         );
         let ds4 = DrafterUnsupported::FamilyNoSpeculation {
             family: ModelFamily::DeepSeek4,
@@ -342,12 +336,30 @@ mod tests {
         };
         assert_eq!(
             ds4.to_string(),
-            "--drafter is not supported for DeepSeek V4 run"
+            "--drafter is not supported for DeepSeek V4 run (family_no_speculation)"
         );
         assert!(
             DrafterUnsupported::ServeMoeTarget
                 .to_string()
                 .contains("dense targets only")
         );
+    }
+
+    #[test]
+    fn shared_refusal_covers_k2_and_glm() {
+        for (family, label) in [
+            (ModelFamily::K2Horizon, "K2 Horizon"),
+            (ModelFamily::Glm5Next, "GLM-5.3-Flash"),
+        ] {
+            let DrafterDecision::Unsupported(reason) =
+                resolve_drafter(Some(family), Lane::CliSingleTurn, true)
+            else {
+                panic!("{family:?} must share the family refusal");
+            };
+            assert_eq!(
+                reason.to_string(),
+                format!("--drafter is not supported for {label} run (family_no_speculation)")
+            );
+        }
     }
 }

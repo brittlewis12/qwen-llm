@@ -259,11 +259,6 @@ fn admit(
     explicit: ExplicitCliOptions,
 ) -> Result<Request> {
     admission::GLM5_NEXT_SINGLE_TURN.admit(&admission::supplied(args, explicit))?;
-    crate::drafter_policy::ensure_drafter_admitted(
-        qwen_llm::model_family::ModelFamily::Glm5Next,
-        crate::drafter_policy::Lane::CliSingleTurn,
-        args.drafter.is_some(),
-    )?;
     ensure!(
         args.messages.is_none(),
         "{FAMILY} reads chat documents with `qwen run --messages`; the legacy --messages flag is unsupported"
@@ -898,7 +893,6 @@ mod tests {
                 "no non-thinking mode",
             ),
             (&["--user", "hi", "--no-thinking"], "no --no-thinking mode"),
-            (&["--user", "hi", "--drafter", "d.gguf"], "--drafter"),
         ] {
             let error = format!("{:#}", admitted(extra).err().unwrap());
             assert!(error.contains(needle), "{extra:?}: {error}");

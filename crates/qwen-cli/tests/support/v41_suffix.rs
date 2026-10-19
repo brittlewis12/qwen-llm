@@ -5,6 +5,84 @@ use serde_json::{Value, json};
 
 pub(super) const RING_POSITIONS: [usize; 9] = [126, 127, 128, 254, 255, 256, 381, 382, 383];
 
+pub(super) fn ring_census(calls: &[Vec<qwen_llm::metal::DispatchCensusRow>]) -> Result<Value> {
+    ensure!(calls.len() == 2, "ring census needs both capture calls");
+    let names = ["score_rows", "softmax_rows", "score", "softmax"]
+        .map(|s| format!("kernel_deepseek_v41_attention_{s}"));
+    let mut totals = [0usize; 4];
+    let mut reports = Vec::new();
+    for (call, rows) in calls.iter().enumerate() {
+        let counts = std::array::from_fn(|i| rows.iter().filter(|r| r.kernel == names[i]).count());
+        let last_batch = rows
+            .iter()
+            .filter(|r| names[..2].contains(&r.kernel))
+            .map(|r| r.encoder_ordinal)
+            .max()
+            .context("missing batched attention census")?;
+        let decode_separate = rows
+            .iter()
+            .filter(|r| names[2..].contains(&r.kernel))
+            .all(|r| r.encoder_ordinal > last_batch);
+        check_ring_dispatches(call, counts, decode_separate)?;
+        for (total, count) in totals.iter_mut().zip(counts) {
+            *total += count;
+        }
+        let mut shapes = std::collections::BTreeMap::new();
+        for r in rows {
+            let grid = [r.grid_width, r.grid_height, r.grid_depth];
+            let tg = [r.threads_width, r.threads_height, r.threads_depth];
+            *shapes
+                .entry((r.kernel.clone(), grid, tg, r.grid_tgs, r.tg_threads))
+                .or_insert(0usize) += 1;
+        }
+        let shapes: Vec<_> = shapes
+            .into_iter()
+            .map(|((kernel, grid, tg, grid_tgs, tg_threads), count)| {
+                json!({
+                    "kernel":kernel, "grid":grid, "threadgroup":tg, "dispatches":count,
+                    "total_grid_tgs":count as u64 * grid_tgs, "tg_threads":tg_threads
+                })
+            })
+            .collect();
+        reports.push(json!({"start":([0,127][call]), "prefill_rows":([127,257][call]),
+            "attention_dispatches":counts, "decode_encoders_after_batch":decode_separate, "kernel_shapes":shapes}));
+    }
+    Ok(
+        json!({"kind":"dispatch_census", "scope":"ring_capture_prefill_only_not_timing",
+        "attention_kernels":names, "attention_dispatch_totals":totals, "calls":reports}),
+    )
+}
+
+fn check_ring_dispatches(call: usize, counts: [usize; 4], decode_separate: bool) -> Result<()> {
+    // run_captured uses [127] then [256, 1]; 32-query tiles do not straddle PV thresholds here.
+    let expected = [[160, 160, 0, 0], [320, 320, 40, 40]];
+    ensure!(
+        expected.get(call) == Some(&counts),
+        "ring call {call}: attention dispatches {counts:?}"
+    );
+    ensure!(
+        decode_separate,
+        "old row score/softmax appeared inside batched encoders"
+    );
+    Ok(())
+}
+
+#[test]
+fn ring_dispatch_census_negative_controls() {
+    for (call, valid) in [(0, [160, 160, 0, 0]), (1, [320, 320, 40, 40])] {
+        check_ring_dispatches(call, valid, true).unwrap();
+        assert!(check_ring_dispatches(call, valid, false).is_err());
+        assert!(check_ring_dispatches(call, [0; 4], true).is_err());
+        for i in 0..4 {
+            let mut bad = valid;
+            bad[i] += 1;
+            assert!(check_ring_dispatches(call, bad, true).is_err());
+        }
+    }
+    assert!(ring_census(&[]).is_err());
+    assert!(ring_census(&[vec![], vec![]]).is_err());
+}
+
 pub(super) fn check_schedule(positions: &[usize], calls: &[usize]) -> Result<()> {
     ensure!(
         !positions.is_empty() && positions[0] >= 1 && positions.windows(2).all(|p| p[0] < p[1]),

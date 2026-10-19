@@ -2,7 +2,10 @@
 //! Hidden states remain characterization; suffix qualification is attention-only.
 use anyhow::{Context, Result, ensure};
 use qwen_llm::deepseek_v41::{forward::Forward, gguf::ResidentWeights};
-use qwen_llm::{gguf::GgufFile, metal::MetalContext};
+use qwen_llm::{
+    gguf::GgufFile,
+    metal::{self, MetalContext},
+};
 use serde_json::{Value, json};
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -392,16 +395,25 @@ fn batched_attention_replay(
             json!({"gguf":model,"execution":"layer_major_batched_capture", "chunk_rows":qwen_llm::deepseek_v41::forward::PREFILL_CHUNK_ROWS, "prefill_call_rows":call_rows, "tokens":"cycled retained 10K fixture", "provenance_verified":false}),
         )?;
         let mut start = 0;
+        let mut censuses = Vec::new();
         for &rows in call_rows {
             let end = start + rows;
             ensure!(state.position() == start, "prefill call start mismatch");
             capture.begin_chunk(start, &tokens[start..end])?;
-            if let Err(error) = forward.prefill_with_capture(
+            if check_wrapped_continuation {
+                ensure!(!metal::dispatch_census_is_active(), "nested ring census");
+                metal::dispatch_census_begin();
+            }
+            let result = forward.prefill_with_capture(
                 &mut state,
                 &tokens[start..end],
                 Some(qwen_cli::shutdown::cancellation_flag()),
                 &mut capture,
-            ) {
+            );
+            if check_wrapped_continuation {
+                censuses.push(metal::dispatch_census_take());
+            }
+            if let Err(error) = result {
                 capture.failure(
                     &error.to_string(),
                     qwen_cli::shutdown::checkpoint().is_err(),
@@ -417,6 +429,12 @@ fn batched_attention_replay(
         );
         capture.finish()?;
         if check_wrapped_continuation {
+            let census = serde_json::to_string_pretty(&suffix::ring_census(&censuses)?)?;
+            std::fs::write(
+                output.join("ring-dispatch-census.json"),
+                format!("{census}\n"),
+            )?;
+            println!("{census}");
             let completed_capture = manifest(&capture_path.join("manifest.json"))?;
             let parity =
                 suffix::wrapped_continuation(&forward, &mut state, &prefix[count..count + 3])?;

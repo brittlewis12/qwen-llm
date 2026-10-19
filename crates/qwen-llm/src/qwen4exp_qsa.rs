@@ -320,7 +320,7 @@ pub(crate) fn with_qwen4exp_qsa_capture_layer<R>(layer: u32, f: impl FnOnce() ->
             previous
         });
         let _restore = RestoreLayer(previous);
-        return f();
+        f()
     }
     #[cfg(not(test))]
     {
@@ -987,7 +987,6 @@ struct QwenSparseAttentionSelectedPackedScratch {
     attention_logits: MetalTensor,
 }
 
-#[allow(dead_code)]
 struct QwenSparseAttentionSelectedPackedViews {
     index_query_raw: MetalTensor,
     index_query: MetalTensor,
@@ -1336,7 +1335,7 @@ impl QwenSparseAttentionSelectedPackedScratch {
         Ok(())
     }
 
-    #[allow(dead_code)]
+    #[cfg(test)]
     fn views(
         &self,
         geometry: QwenSparseAttentionMetalGeometry,
@@ -1957,7 +1956,7 @@ pub fn encode_qwen_sparse_attention_text<'a>(
 /// causal order. Any encode or command failure makes mutable state
 /// indeterminate and requires poisoning the enclosing transaction.
 #[allow(clippy::too_many_arguments)]
-#[allow(dead_code)]
+#[cfg(test)]
 pub(crate) unsafe fn encode_qwen_sparse_attention_text_dense_packed_motor(
     ctx: &MetalContext,
     enc: &KernelEncoder,
@@ -2019,37 +2018,6 @@ pub(crate) unsafe fn encode_qwen_sparse_attention_text_packed_motor(
             0,
             None,
             true,
-        )
-    }
-}
-
-#[allow(clippy::too_many_arguments)]
-#[allow(dead_code)]
-pub(crate) unsafe fn encode_qwen_sparse_attention_text_dense_packed_motor_profiled(
-    ctx: &MetalContext,
-    enc: &KernelEncoder,
-    input: &MetalTensor,
-    weights: QwenSparseAttentionMetalWeights<'_>,
-    workspace: &mut QwenSparseAttentionMetalWorkspace,
-    scratch: &QwenSparseAttentionPackedScratch,
-    start_position: usize,
-    tokens: usize,
-    layer: u32,
-    recorder: &mut Qwen4ExpPackedProfileRecorder<'_>,
-) -> Result<MetalTensor, Qwen4ExpQsaError> {
-    unsafe {
-        encode_qwen_sparse_attention_text_dense_packed_motor_inner(
-            ctx,
-            enc,
-            input,
-            weights,
-            workspace,
-            scratch,
-            start_position,
-            tokens,
-            layer,
-            Some(recorder),
-            false,
         )
     }
 }
@@ -2188,7 +2156,6 @@ pub(crate) fn prepare_control_scalars(
     Ok((position, sequence_length))
 }
 
-#[allow(dead_code)]
 fn prepare_packed_control_scalars(
     workspace: &QwenSparseAttentionMetalWorkspace,
     scratch: &QwenSparseAttentionPackedScratch,
@@ -2242,32 +2209,6 @@ fn prepare_packed_control_scalars(
         write_i32_scalar(&workspace.selected_count, 0)?;
     }
     Ok(())
-}
-
-#[allow(clippy::too_many_arguments)]
-#[allow(dead_code)]
-pub(crate) fn validate_dense_packed_contract(
-    ctx: &MetalContext,
-    enc: &KernelEncoder,
-    input: &MetalTensor,
-    weights: QwenSparseAttentionMetalWeights<'_>,
-    workspace: &QwenSparseAttentionMetalWorkspace,
-    scratch: &QwenSparseAttentionPackedScratch,
-    start_position: usize,
-    tokens: usize,
-) -> Result<(), Qwen4ExpQsaError> {
-    validate_packed_contract(
-        ctx,
-        enc,
-        input,
-        weights,
-        workspace,
-        scratch,
-        start_position,
-        tokens,
-        false,
-    )
-    .map(|_| ())
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -2883,7 +2824,6 @@ fn preflight_packed(
     Ok(())
 }
 
-#[allow(dead_code)]
 fn preflight_dense_packed_projection(
     ctx: &MetalContext,
     dtype: GgmlType,
@@ -2896,7 +2836,6 @@ fn preflight_dense_packed_projection(
     Ok(())
 }
 
-#[allow(dead_code)]
 fn preflight_selected_index_primitives(ctx: &MetalContext) -> Result<(), Qwen4ExpQsaError> {
     for kernel in [
         "kernel_qwen4exp_qsa_norm_rope_packed_f32",
@@ -2924,7 +2863,6 @@ fn preflight_selected_index_primitives(ctx: &MetalContext) -> Result<(), Qwen4Ex
     Ok(())
 }
 
-#[allow(dead_code)]
 fn preflight_selected_attention_primitives(ctx: &MetalContext) -> Result<(), Qwen4ExpQsaError> {
     ctx.pipeline("kernel_qwen4exp_qsa_audit_selected_i32")?;
     let reset = ctx.pipeline("kernel_qwen4exp_qsa_reset_selected_controls_i32")?;
@@ -2993,7 +2931,6 @@ fn validate_selected_reset_pipeline(max_threads: usize) -> Result<(), Qwen4ExpQs
 }
 
 #[allow(clippy::too_many_arguments)]
-#[allow(dead_code)]
 fn validate_selected_attention_packet(
     ctx: &MetalContext,
     enc: &KernelEncoder,
@@ -3175,7 +3112,6 @@ fn validate_selected_attention_packet(
     preflight_selected_attention_primitives(ctx)
 }
 
-#[allow(dead_code)]
 fn encode_selected_index_primitives(
     ctx: &MetalContext,
     enc: &KernelEncoder,
@@ -3316,7 +3252,6 @@ fn encode_selected_index_primitives(
 }
 
 #[allow(clippy::too_many_arguments)]
-#[allow(dead_code)]
 fn encode_selected_attention_packet(
     ctx: &MetalContext,
     enc: &KernelEncoder,
@@ -3428,7 +3363,6 @@ fn requires_exact_selected_q8_output(
 }
 
 #[allow(clippy::too_many_arguments)]
-#[allow(dead_code)]
 fn encode_packed_step(
     ctx: &MetalContext,
     enc: &KernelEncoder,
@@ -3914,7 +3848,6 @@ struct PackedIndexStateArgs {
 }
 
 #[allow(clippy::too_many_arguments)]
-#[allow(dead_code)]
 fn encode_packed_index_state(
     ctx: &MetalContext,
     enc: &KernelEncoder,
@@ -4888,7 +4821,6 @@ fn encode_norm_rope(
 }
 
 #[allow(clippy::too_many_arguments)]
-#[allow(dead_code)]
 fn encode_norm_rope_packed(
     ctx: &MetalContext,
     enc: &KernelEncoder,
@@ -5064,7 +4996,6 @@ struct PackedScoreArgs {
     block_capacity: u32,
 }
 
-#[allow(dead_code)]
 fn encode_index_scores_packed(
     ctx: &MetalContext,
     enc: &KernelEncoder,
@@ -5290,7 +5221,6 @@ struct PackedIdsArgs {
 }
 
 #[allow(clippy::too_many_arguments)]
-#[allow(dead_code)]
 fn encode_expand_ids_packed(
     ctx: &MetalContext,
     enc: &KernelEncoder,
@@ -5571,7 +5501,6 @@ fn encode_attention_softmax_value_tensors(
 }
 
 #[allow(clippy::too_many_arguments)]
-#[allow(dead_code)]
 fn encode_attention_logits_packed(
     ctx: &MetalContext,
     enc: &KernelEncoder,
@@ -5671,7 +5600,6 @@ fn encode_attention_logits_packed_gqa4(
 }
 
 #[allow(clippy::too_many_arguments)]
-#[allow(dead_code)]
 fn encode_attention_softmax_value_packed(
     ctx: &MetalContext,
     enc: &KernelEncoder,
@@ -5775,7 +5703,6 @@ fn encode_attention_softmax_value_packed_gqa4(
 }
 
 #[allow(clippy::too_many_arguments)]
-#[allow(dead_code)]
 fn encode_selected_audit(
     ctx: &MetalContext,
     enc: &KernelEncoder,
@@ -5820,7 +5747,6 @@ fn encode_selected_audit(
     Ok(())
 }
 
-#[allow(dead_code)]
 fn encode_selected_control_reset(
     ctx: &MetalContext,
     enc: &KernelEncoder,

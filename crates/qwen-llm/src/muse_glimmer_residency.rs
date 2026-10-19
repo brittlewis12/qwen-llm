@@ -9,13 +9,13 @@ use crate::metal::{
     MetalContext, MetalError, MetalGgufBacking, MetalMemoryAdmission, MetalMemorySignals,
     MetalTensor, MetalTensorProvenance, RetainedStorageDisposition, RetainedStorageFallback,
     RetainedStoragePlan, evaluate_metal_memory_admission, host_page_size_bytes,
-    plan_retained_storage,
+    plan_retained_storage, realize_retained_storage_views,
 };
 use crate::muse_glimmer::{
     MuseGlimmerArtifactProfile, MuseGlimmerConfig, MuseGlimmerError, MuseGlimmerModel,
 };
 use crate::tensor::{GgmlType, TensorDesc};
-use objc2_metal::{MTLBuffer, MTLDevice};
+use objc2_metal::MTLDevice;
 use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
 
@@ -463,8 +463,7 @@ impl MuseGlimmerMetalWeights {
         }
 
         let allocated_before = refreshed_admission.signals.current_allocated_bytes;
-        let windows = realize_windows(ctx, gguf, &plan.retained)?;
-        let tensors = realize_tensors(ctx, gguf, &plan.retained, &windows)?;
+        let (_windows, tensors) = realize_retained(ctx, gguf, &plan.retained)?;
         let final_stamps = gguf.revalidate_retained_shard_stamps()?;
         if final_stamps != plan.shard_stamps {
             return invalid("GGUF shard identity changed during weight realization");
@@ -727,148 +726,40 @@ fn build_weight_memory_plan(
     })
 }
 
-fn realize_windows(
+fn realize_retained(
     ctx: &MetalContext,
     gguf: &GgufFile,
     plan: &RetainedStoragePlan,
-) -> Result<Vec<MetalGgufBacking>, MuseGlimmerResidencyError> {
-    let mut windows = Vec::with_capacity(plan.windows.len());
-    for (index, window) in plan.windows.iter().enumerate() {
-        let mmap = gguf.retained_shard_mmap(window.shard_idx).ok_or_else(|| {
-            MuseGlimmerResidencyError::Invalid(format!(
-                "planned window {index} references missing shard {}",
-                window.shard_idx
-            ))
-        })?;
-        let mmap_offset = usize::try_from(window.mmap_offset).map_err(|_| {
-            MuseGlimmerResidencyError::Invalid(format!(
-                "planned window {index} offset exceeds usize"
-            ))
-        })?;
-        let backing = ctx.gguf_no_copy_window(
-            mmap,
-            window.shard_idx,
-            mmap_offset,
-            window.length,
-            MUSE_GLIMMER_GGUF_BINDING_ALIGNMENT,
-        )?;
-        if backing.mmap_offset() != mmap_offset
-            || backing.exposed_len() != window.length
-            || backing.required_alignment() != MUSE_GLIMMER_GGUF_BINDING_ALIGNMENT
-        {
-            return invalid(format!("retained window {index} realization drift"));
-        }
-        windows.push(backing);
-    }
-    Ok(windows)
-}
-
-fn realize_tensors(
-    ctx: &MetalContext,
-    gguf: &GgufFile,
-    plan: &RetainedStoragePlan,
-    windows: &[MetalGgufBacking],
-) -> Result<BTreeMap<String, MetalTensor>, MuseGlimmerResidencyError> {
-    if gguf.tensors.len() != plan.entries.len() {
-        return invalid(format!(
-            "realization descriptor count {} differs from planned {}",
-            gguf.tensors.len(),
-            plan.entries.len()
-        ));
-    }
-
-    let mut tensors = BTreeMap::new();
-    for (index, (entry, desc)) in plan.entries.iter().zip(&gguf.tensors).enumerate() {
-        if entry.request_index != index
-            || entry.name != desc.name
-            || entry.shard_idx != desc.shard_idx
-            || entry.data_offset != desc.data_offset
-            || entry.n_bytes != desc.n_bytes
-        {
-            return invalid(format!("planner descriptor drift at request {index}"));
-        }
-        let (tensor, expected_provenance) = match entry.disposition {
-            RetainedStorageDisposition::View {
-                window_index,
-                buffer_offset,
-            } => {
-                let backing = windows.get(window_index).ok_or_else(|| {
-                    MuseGlimmerResidencyError::Invalid(format!(
-                        "tensor {:?} references missing window {window_index}",
-                        desc.name
-                    ))
-                })?;
-                let (eligibility, tensor) = backing.tensor(desc)?;
-                let tensor = tensor.ok_or_else(|| {
-                    MuseGlimmerResidencyError::Invalid(format!(
-                        "tensor {:?} failed retained realization: {eligibility:?}",
-                        desc.name
-                    ))
-                })?;
-                if tensor.offset != buffer_offset {
-                    return invalid(format!("retained offset drift for tensor {:?}", desc.name));
-                }
-                (tensor, MetalTensorProvenance::RetainedGgufReadOnly)
-            }
-            RetainedStorageDisposition::CopyFallback {
-                reason: RetainedStorageFallback::FinalPartialPage,
-            } => (
-                MetalTensor::copied_gguf_weight(ctx, desc, gguf.try_slice(desc)?)?,
-                MetalTensorProvenance::OwnedWeightReadOnly,
-            ),
-            RetainedStorageDisposition::CopyFallback { reason } => {
+) -> Result<(Vec<MetalGgufBacking>, BTreeMap<String, MetalTensor>), MuseGlimmerResidencyError> {
+    let descriptors = gguf.tensors.iter().collect::<Vec<_>>();
+    let (windows, realized) = realize_retained_storage_views(
+        ctx,
+        gguf,
+        plan,
+        &descriptors,
+        MUSE_GLIMMER_GGUF_BINDING_ALIGNMENT,
+        MuseGlimmerResidencyError::Invalid,
+        |ctx, gguf, desc, reason| {
+            if reason != RetainedStorageFallback::FinalPartialPage {
                 return invalid(format!(
                     "disallowed {reason:?} fallback reached realization for {:?}",
                     desc.name
                 ));
             }
-            RetainedStorageDisposition::Alias {
-                source_request_index,
-            } => {
-                return invalid(format!(
-                    "unexpected alias for {:?} to request {source_request_index}",
-                    desc.name
-                ));
-            }
-        };
-        validate_realized_tensor(desc, &tensor, expected_provenance)?;
+            Ok(MetalTensor::copied_gguf_weight(
+                ctx,
+                desc,
+                gguf.try_slice(desc)?,
+            )?)
+        },
+    )?;
+    let mut tensors = BTreeMap::new();
+    for (desc, tensor) in descriptors.into_iter().zip(realized) {
         if tensors.insert(desc.name.clone(), tensor).is_some() {
             return invalid(format!("duplicate realized tensor {:?}", desc.name));
         }
     }
-    Ok(tensors)
-}
-
-fn validate_realized_tensor(
-    desc: &TensorDesc,
-    tensor: &MetalTensor,
-    expected_provenance: MetalTensorProvenance,
-) -> Result<(), MuseGlimmerResidencyError> {
-    if tensor.shape != desc.shape
-        || tensor.dtype != desc.dtype
-        || tensor.n_bytes() != desc.n_bytes
-        || tensor.provenance() != expected_provenance
-        || tensor.is_writable()
-    {
-        return invalid(format!(
-            "realized tensor metadata drift for {:?}",
-            desc.name
-        ));
-    }
-    let end = tensor.offset.checked_add(desc.n_bytes).ok_or_else(|| {
-        MuseGlimmerResidencyError::Invalid(format!(
-            "realized tensor {:?} buffer range overflow",
-            desc.name
-        ))
-    })?;
-    if end > tensor.buffer.length() as u64 {
-        return invalid(format!(
-            "realized tensor {:?} ends at {end}, beyond buffer length {}",
-            desc.name,
-            tensor.buffer.length()
-        ));
-    }
-    Ok(())
+    Ok((windows, tensors))
 }
 
 fn validate_realized_weights(

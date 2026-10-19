@@ -39,7 +39,7 @@ use qwen_llm::cache_probe::{invalidate_file_cache, probe_file_residency};
 use qwen_llm::pid_metrics::{PidDelta, PidSnapshot};
 use qwen_llm::runtime::{
     DEFAULT_COLD_ONLY_THRESHOLD, LoadedModelConfig, PrefetchAction, PrefetchOutcome,
-    PrefetchPolicy, PrefetchSuppressionReason, Runtime, SequenceConfig,
+    PrefetchPolicy, Runtime, SequenceConfig,
 };
 use sha2::{Digest, Sha256};
 
@@ -444,11 +444,8 @@ fn main() {
             println!("{line}");
         }
     }
-    if let PrefetchAction::Suppressed {
-        reason: PrefetchSuppressionReason::AuthenticatedDisposableAutoA3bDirectPread,
-    } = outcome.action
-    {
-        println!("  prefetch:    suppressed (authenticated disposable Auto A3B direct pread)");
+    if let PrefetchAction::Suppressed { reason } = outcome.action {
+        println!("  prefetch:    suppressed ({reason:?})");
     } else if !matches!(outcome.policy, PrefetchPolicy::Off) {
         let bytes_returned = outcome.bytes_returned_total();
         println!(

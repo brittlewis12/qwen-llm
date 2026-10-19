@@ -369,6 +369,7 @@ pub fn plan_retained_storage(
 }
 
 impl GgufBackingGeometry {
+    #[cfg(test)]
     pub(crate) fn new(
         shard_idx: usize,
         mapped_len: usize,
@@ -448,6 +449,7 @@ impl GgufBackingGeometry {
         })
     }
 
+    #[cfg(test)]
     pub(crate) fn mapped_len(self) -> usize {
         self.mapped_len
     }
@@ -488,6 +490,7 @@ pub(crate) struct GgufPrefaultReport {
 }
 
 impl MetalGgufBacking {
+    #[cfg(test)]
     pub(crate) fn mapped_len(&self) -> usize {
         self.geometry.mapped_len()
     }

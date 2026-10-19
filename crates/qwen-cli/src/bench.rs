@@ -44,7 +44,6 @@ mod family_bench;
 mod family_options;
 #[path = "bench/gdn_replay.rs"]
 mod gdn_replay;
-mod gguf_arena_floor;
 mod grammar_lm_head_row_floor;
 mod host_validity;
 #[path = "bench/identity.rs"]
@@ -636,9 +635,6 @@ fn run() -> Result<()> {
         Cmd::DecodeMoeGdnRepair(a) => moe_gdn_repair::run(a),
         Cmd::BuildInfo(a) => run_build_info(a),
         Cmd::GgufStoragePlan(a) => run_gguf_storage_plan(a),
-        Cmd::GgufArenaFloor(a) => {
-            gguf_arena_floor::run(a, serde_json::to_value(qwen_build_identity_packet())?)
-        }
         Cmd::PrefixCache(a) => run_prefix_cache(a),
         Cmd::PrefixCacheVtAb(a) => {
             prefix_cache_vt_ab::run(a, serde_json::to_value(qwen_build_identity_packet())?)

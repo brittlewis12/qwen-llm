@@ -32,19 +32,19 @@ use crate::gguf::GgufFile;
 use crate::loader::{Block, Model, MoeFfn};
 pub use crate::metal::PostBlockIntervention;
 use crate::metal::{
-    A10B_PARALLEL_PREAD_REQUIRED_HEADROOM_BYTES, Buffer, GgufBackingEligibility, KernelEncoder,
-    MetalContext, MetalError, MetalGgufBacking, MetalTensor, MetalTensorProvenance,
-    MetalTimestampSampleBuffer, RetainedStorageDisposition, RetainedStorageFallback,
-    RetainedStoragePlan, attn_v4_choose_nwg, attn_v4_choose_tile_c, encode_add_inplace_f32,
-    encode_argmax_f32, encode_argmax_f32_greedy, encode_attn_decode_f16kv_f32,
-    encode_attn_decode_v4_f32, encode_axpy_scalar_f32, encode_dot_sigmoid_f32,
-    encode_ffn_swiglu_q4_K_f32, encode_fill_f32, encode_gdn_decay_chain_f32,
-    encode_gdn_step_decay_f32, encode_get_rows_f32, encode_l2_norm_batched_f32,
-    encode_l2_norm_pair_batched_f32, encode_mat_vec_f32, encode_mat_vec_f32_sigmoid,
-    encode_mat_vec_q4_k_f32, encode_mat_vec_q5_k_f32, encode_mat_vec_q6_k_f32,
-    encode_moe_down_bf16_f32, encode_moe_down_f32_f32, encode_moe_down_iq4_nl_f32,
-    encode_moe_down_iq4_xs_f32, encode_moe_down_iq4_xs_f32_fast, encode_moe_down_q4_K_f32,
-    encode_moe_down_q5_K_f32, encode_moe_down_weighted_sum_q5_K_f32_packed_slots,
+    Buffer, GgufBackingEligibility, KernelEncoder, MetalContext, MetalError, MetalGgufBacking,
+    MetalTensor, MetalTensorProvenance, MetalTimestampSampleBuffer, RetainedStorageDisposition,
+    RetainedStorageFallback, RetainedStoragePlan, attn_v4_choose_nwg, attn_v4_choose_tile_c,
+    encode_add_inplace_f32, encode_argmax_f32, encode_argmax_f32_greedy,
+    encode_attn_decode_f16kv_f32, encode_attn_decode_v4_f32, encode_axpy_scalar_f32,
+    encode_dot_sigmoid_f32, encode_ffn_swiglu_q4_K_f32, encode_fill_f32,
+    encode_gdn_decay_chain_f32, encode_gdn_step_decay_f32, encode_get_rows_f32,
+    encode_l2_norm_batched_f32, encode_l2_norm_pair_batched_f32, encode_mat_vec_f32,
+    encode_mat_vec_f32_sigmoid, encode_mat_vec_q4_k_f32, encode_mat_vec_q5_k_f32,
+    encode_mat_vec_q6_k_f32, encode_moe_down_bf16_f32, encode_moe_down_f32_f32,
+    encode_moe_down_iq4_nl_f32, encode_moe_down_iq4_xs_f32, encode_moe_down_iq4_xs_f32_fast,
+    encode_moe_down_q4_K_f32, encode_moe_down_q5_K_f32,
+    encode_moe_down_weighted_sum_q5_K_f32_packed_slots,
     encode_moe_down_weighted_sum_q5_K_f32_packed_slots_k512_r2,
     encode_moe_down_weighted_sum_q6_K_f32, encode_moe_down_weighted_sum_q8_0_f32,
     encode_moe_grouped_finalizer_f32, encode_moe_mat_vec_bf16_f32, encode_moe_mat_vec_f32,
@@ -64,18 +64,12 @@ use crate::metal::{
     encode_topk_logits_softmax_parallel_f32, evaluate_metal_memory_admission, host_page_size_bytes,
     plan_retained_storage,
 };
-use crate::model::{Arch, ArchKind};
+use crate::model::ArchKind;
 use crate::sampling::{BoundedTopKEvidence, GreedySelection, SampledToken, Sampler, SamplingError};
 use objc2::rc::Retained;
 use objc2::runtime::ProtocolObject;
-use objc2_foundation::{NSError, NSString};
 use sha2::{Digest, Sha256};
-use std::{
-    cell::Cell,
-    collections::{HashMap, HashSet},
-    mem::MaybeUninit,
-    sync::OnceLock,
-};
+use std::{cell::Cell, collections::HashSet, mem::MaybeUninit, sync::OnceLock};
 
 /// Max NWG (split-K partitions) the v4 dispatcher will ever request.
 /// Sets the size of session-resident partial buffers; see
@@ -155,31 +149,9 @@ impl NativeQuantEmbeddingSelection {
 }
 
 const GGUF_NO_COPY_ALIGNMENT: usize = 32;
-const GGUF_NO_COPY_27B_LAYOUT_DIGEST: u64 = 0xd116_405f_d99f_54d9;
-const GGUF_NO_COPY_27B_MAPPED_BYTES: usize = 16_817_244_384;
-const GGUF_NO_COPY_27B_DESCRIPTOR_COUNT: usize = 851;
-const GGUF_NO_COPY_27B_SOURCE_BYTES: u64 = 16_806_250_496;
-const GGUF_NO_COPY_27B_TAIL_NAME: &str = "blk.63.post_attention_norm.weight";
-const GGUF_NO_COPY_27B_TAIL_BYTES: u64 = 20_480;
-const GGUF_OWNED_A3B_MAPPED_BYTES: usize = 22_134_528_992;
-const GGUF_OWNED_A3B_LAYOUT_DIGEST: u64 = 0x5ae6_45df_5cf7_d568;
-const GGUF_OWNED_A3B_INVENTORY_DIGEST: &str =
-    "f57153febec22463c7789b892d4d084041d722483a93191c81c40ab86be7d9e5";
-const GGUF_OWNED_A3B_REQUESTS: usize = 733;
-const GGUF_OWNED_A3B_SOURCE_BYTES: u64 = 22_123_538_944;
-const GGUF_OWNED_A3B_VIEWS: usize = 732;
-const GGUF_OWNED_A3B_VIEW_BYTES: u64 = 22_123_530_752;
-const GGUF_OWNED_A3B_WINDOW_BYTES: u64 = 22_123_544_576;
-const GGUF_OWNED_A3B_GAP_BYTES: u64 = 13_824;
-const GGUF_OWNED_A3B_FALLBACK_BYTES: u64 = 8_192;
-const GGUF_OWNED_A3B_PHYSICAL_BYTES: u64 = 22_123_552_768;
-const GGUF_PAGE_ROUNDED_A3B_ALLOCATED_BYTES: u64 = 22_126_297_088;
-const GGUF_PAGE_ROUNDED_A3B_PADDING_BYTES: u64 = 2_758_144;
-const GGUF_PAGE_ROUNDED_A3B_PADDED_RESOURCES: usize = 232;
-const GGUF_OWNED_WORKERS: usize = 4;
-const A3B_PARALLEL_COPY_AUTO_OVERRIDE_ENVS: [&str; 8] = [
+const PARALLEL_COPY_MAX_WORKERS: usize = 4;
+const PARALLEL_COPY_AUTO_OVERRIDE_ENVS: [&str; 7] = [
     "QWEN_GGUF_NO_COPY",
-    "QWEN_GGUF_OWNED_ARENA",
     "QWEN_GGUF_NO_COPY_PREFAULT",
     "QWEN_NATIVE_QUANT_EMBED",
     "QWEN_MOE_ROUTER_F16",
@@ -188,439 +160,25 @@ const A3B_PARALLEL_COPY_AUTO_OVERRIDE_ENVS: [&str; 8] = [
     "QWEN_PREFILL_ATTN_FUSED_QKV_G8",
 ];
 
-#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
-enum ParallelCopyProfileId {
-    A3bQ4kmV1,
-    A10bQ4xlV1,
-    Dense27bQ4kmV1,
-}
-
-impl ParallelCopyProfileId {
-    fn label(self) -> &'static str {
-        match self {
-            Self::A3bQ4kmV1 => "a3b-q4km-v1",
-            Self::A10bQ4xlV1 => "a10b-q4xl-v1",
-            Self::Dense27bQ4kmV1 => "dense27b-q4km-v1",
-        }
-    }
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum ParallelCopyDeviceConstraint {
-    UnifiedAnyName,
-    ExactUnified(&'static crate::metal::Qualification),
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum ParallelCopyAuthentication {
-    A3bRetainedPlan,
-    A10bPlannerFree,
-    DensePlannerFree,
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum ParallelCopyMarkerContract {
-    A3b,
-    A10bSchema2,
-    DenseSchema2,
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-struct ParallelCopyScheduleIdentity {
-    request_index: usize,
-    name: &'static str,
-    shard_idx: usize,
-    source_offset: u64,
-    source_bytes: u64,
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-struct ParallelCopyScheduleBoundary {
-    first: ParallelCopyScheduleIdentity,
-    last: ParallelCopyScheduleIdentity,
-}
-
 #[derive(Debug)]
-struct ParallelCopyProfile {
-    id: ParallelCopyProfileId,
-    architecture_label: Option<&'static str>,
-    arch: Arch,
-    tied_embeddings: bool,
-    mtp_present: bool,
-    shard_mapped_lengths: &'static [usize],
-    descriptor_layout_digest: u64,
-    inventory_digest: &'static str,
-    embedding_dtype: GgmlType,
-    embedding_shape: &'static [u64],
-    device_constraint: ParallelCopyDeviceConstraint,
-    authentication: ParallelCopyAuthentication,
-    marker_contract: ParallelCopyMarkerContract,
-    supports_direct_pread: bool,
+struct ParallelCopyLoadPlan {
     request_count: usize,
     source_bytes: u64,
-    cuts: [usize; GGUF_OWNED_WORKERS - 1],
-    task_counts: [usize; GGUF_OWNED_WORKERS],
-    worker_bytes: [u64; GGUF_OWNED_WORKERS],
-    boundaries: [ParallelCopyScheduleBoundary; GGUF_OWNED_WORKERS],
+    page_size: usize,
+    destination_bytes: u64,
+    padding_bytes: u64,
+    padded_resources: usize,
+    fallback_bytes: u64,
+    max_buffer_length: usize,
+    alignment: usize,
+    cuts: Vec<usize>,
+    task_counts: Vec<usize>,
+    worker_bytes: Vec<u64>,
 }
-
-const A3B_PARALLEL_COPY_ARCH: Arch = Arch {
-    kind: ArchKind::Moe,
-    n_layer: 40,
-    hidden_size: 2048,
-    intermediate_size: 0,
-    vocab_size: 248_320,
-    full_attention_interval: 4,
-    n_q_heads: 16,
-    n_kv_heads: 2,
-    attn_head_dim: 256,
-    rope_theta: 10_000_000.0,
-    partial_rotary_factor: 0.25,
-    gdn_n_v_heads: 32,
-    gdn_n_k_heads: 16,
-    gdn_head_dim: 128,
-    gdn_conv_kernel: 4,
-    expert_count: 256,
-    expert_used_count: 8,
-    expert_feed_forward_length: 512,
-    expert_shared_feed_forward_length: 512,
-    mtp_n_hidden_layers: 0,
-};
-
-const DENSE27B_PARALLEL_COPY_ARCH: Arch = Arch {
-    kind: ArchKind::Dense,
-    n_layer: 64,
-    hidden_size: 5120,
-    intermediate_size: 17_408,
-    vocab_size: 248_320,
-    full_attention_interval: 4,
-    n_q_heads: 24,
-    n_kv_heads: 4,
-    attn_head_dim: 256,
-    rope_theta: 10_000_000.0,
-    partial_rotary_factor: 0.25,
-    gdn_n_v_heads: 48,
-    gdn_n_k_heads: 16,
-    gdn_head_dim: 128,
-    gdn_conv_kernel: 4,
-    expert_count: 0,
-    expert_used_count: 0,
-    expert_feed_forward_length: 0,
-    expert_shared_feed_forward_length: 0,
-    mtp_n_hidden_layers: 0,
-};
-
-const A10B_PARALLEL_COPY_ARCH: Arch = Arch {
-    kind: ArchKind::Moe,
-    n_layer: 48,
-    hidden_size: 3072,
-    intermediate_size: 0,
-    vocab_size: 248_320,
-    full_attention_interval: 4,
-    n_q_heads: 32,
-    n_kv_heads: 2,
-    attn_head_dim: 256,
-    rope_theta: 10_000_000.0,
-    partial_rotary_factor: 0.25,
-    gdn_n_v_heads: 64,
-    gdn_n_k_heads: 16,
-    gdn_head_dim: 128,
-    gdn_conv_kernel: 4,
-    expert_count: 256,
-    expert_used_count: 8,
-    expert_feed_forward_length: 1024,
-    expert_shared_feed_forward_length: 1024,
-    mtp_n_hidden_layers: 0,
-};
-
-const A3B_PARALLEL_COPY_PROFILE: ParallelCopyProfile = ParallelCopyProfile {
-    id: ParallelCopyProfileId::A3bQ4kmV1,
-    architecture_label: None,
-    arch: A3B_PARALLEL_COPY_ARCH,
-    tied_embeddings: false,
-    mtp_present: false,
-    shard_mapped_lengths: &[GGUF_OWNED_A3B_MAPPED_BYTES],
-    descriptor_layout_digest: GGUF_OWNED_A3B_LAYOUT_DIGEST,
-    inventory_digest: GGUF_OWNED_A3B_INVENTORY_DIGEST,
-    embedding_dtype: GgmlType::Q8_0,
-    embedding_shape: &[2048, 248_320],
-    device_constraint: ParallelCopyDeviceConstraint::UnifiedAnyName,
-    authentication: ParallelCopyAuthentication::A3bRetainedPlan,
-    marker_contract: ParallelCopyMarkerContract::A3b,
-    supports_direct_pread: true,
-    request_count: GGUF_OWNED_A3B_REQUESTS,
-    source_bytes: GGUF_OWNED_A3B_SOURCE_BYTES,
-    cuts: [155, 359, 539],
-    task_counts: [155, 204, 180, 194],
-    worker_bytes: [5_532_746_240, 5_462_315_776, 5_595_522_304, 5_532_954_624],
-    boundaries: [
-        ParallelCopyScheduleBoundary {
-            first: ParallelCopyScheduleIdentity {
-                request_index: 2,
-                name: "output.weight",
-                shard_idx: 0,
-                source_offset: 10_990_048,
-                source_bytes: 417_177_600,
-            },
-            last: ParallelCopyScheduleIdentity {
-                request_index: 164,
-                name: "blk.8.ffn_gate_exps.weight",
-                shard_idx: 0,
-                source_offset: 5_392_741_344,
-                source_bytes: 150_994_944,
-            },
-        },
-        ParallelCopyScheduleBoundary {
-            first: ParallelCopyScheduleIdentity {
-                request_index: 163,
-                name: "blk.8.ffn_gate_inp.weight",
-                shard_idx: 0,
-                source_offset: 5_543_736_288,
-                source_bytes: 2_097_152,
-            },
-            last: ParallelCopyScheduleIdentity {
-                request_index: 354,
-                name: "blk.19.attn_v.weight",
-                shard_idx: 0,
-                source_offset: 11_004_937_952,
-                source_bytes: 1_114_112,
-            },
-        },
-        ParallelCopyScheduleBoundary {
-            first: ParallelCopyScheduleIdentity {
-                request_index: 366,
-                name: "blk.19.ffn_down_exps.weight",
-                shard_idx: 0,
-                source_offset: 11_006_052_064,
-                source_bytes: 184_549_376,
-            },
-            last: ParallelCopyScheduleIdentity {
-                request_index: 548,
-                name: "blk.29.ffn_gate_exps.weight",
-                shard_idx: 0,
-                source_offset: 16_450_579_424,
-                source_bytes: 150_994_944,
-            },
-        },
-        ParallelCopyScheduleBoundary {
-            first: ParallelCopyScheduleIdentity {
-                request_index: 547,
-                name: "blk.29.ffn_gate_inp.weight",
-                shard_idx: 0,
-                source_offset: 16_601_574_368,
-                source_bytes: 2_097_152,
-            },
-            last: ParallelCopyScheduleIdentity {
-                request_index: 721,
-                name: "blk.39.post_attention_norm.weight",
-                shard_idx: 0,
-                source_offset: 22_134_520_800,
-                source_bytes: 8_192,
-            },
-        },
-    ],
-};
-
-const DENSE27B_PARALLEL_COPY_PROFILE: ParallelCopyProfile = ParallelCopyProfile {
-    id: ParallelCopyProfileId::Dense27bQ4kmV1,
-    architecture_label: Some("qwen35"),
-    arch: DENSE27B_PARALLEL_COPY_ARCH,
-    tied_embeddings: false,
-    mtp_present: false,
-    shard_mapped_lengths: &[GGUF_NO_COPY_27B_MAPPED_BYTES],
-    descriptor_layout_digest: GGUF_NO_COPY_27B_LAYOUT_DIGEST,
-    inventory_digest: "50e9af4e4f590fc85687a71f5602ce035e7fdf0e2a31e928b2c7a2be10458a07",
-    embedding_dtype: GgmlType::Q4_K,
-    embedding_shape: &[5120, 248_320],
-    device_constraint: ParallelCopyDeviceConstraint::ExactUnified(
-        &crate::metal::PARALLEL_COPY_EXACT_UNIFIED,
-    ),
-    authentication: ParallelCopyAuthentication::DensePlannerFree,
-    marker_contract: ParallelCopyMarkerContract::DenseSchema2,
-    supports_direct_pread: true,
-    request_count: GGUF_NO_COPY_27B_DESCRIPTOR_COUNT,
-    source_bytes: GGUF_NO_COPY_27B_SOURCE_BYTES,
-    cuts: [136, 377, 618],
-    task_counts: [136, 241, 241, 233],
-    worker_bytes: [4_194_110_464, 4_214_375_808, 4_204_933_376, 4_192_830_848],
-    boundaries: [
-        ParallelCopyScheduleBoundary {
-            first: ParallelCopyScheduleIdentity {
-                request_index: 2,
-                name: "output.weight",
-                shard_idx: 0,
-                source_offset: 10_993_888,
-                source_bytes: 1_042_944_000,
-            },
-            last: ParallelCopyScheduleIdentity {
-                request_index: 135,
-                name: "blk.9.ssm_norm.weight",
-                shard_idx: 0,
-                source_offset: 4_205_103_840,
-                source_bytes: 512,
-            },
-        },
-        ParallelCopyScheduleBoundary {
-            first: ParallelCopyScheduleIdentity {
-                request_index: 136,
-                name: "blk.9.ssm_out.weight",
-                shard_idx: 0,
-                source_offset: 4_205_104_352,
-                source_bytes: 21_626_880,
-            },
-            last: ParallelCopyScheduleIdentity {
-                request_index: 379,
-                name: "blk.28.attn_qkv.weight",
-                shard_idx: 0,
-                source_offset: 8_376_472_160,
-                source_bytes: 43_008_000,
-            },
-        },
-        ParallelCopyScheduleBoundary {
-            first: ParallelCopyScheduleIdentity {
-                request_index: 378,
-                name: "blk.28.ffn_down.weight",
-                shard_idx: 0,
-                source_offset: 8_419_480_160,
-                source_bytes: 73_113_600,
-            },
-            last: ParallelCopyScheduleIdentity {
-                request_index: 618,
-                name: "blk.46.ffn_down.weight",
-                shard_idx: 0,
-                source_offset: 12_551_299_936,
-                source_bytes: 73_113_600,
-            },
-        },
-        ParallelCopyScheduleBoundary {
-            first: ParallelCopyScheduleIdentity {
-                request_index: 616,
-                name: "blk.46.ffn_gate.weight",
-                shard_idx: 0,
-                source_offset: 12_624_413_536,
-                source_bytes: 50_135_040,
-            },
-            last: ParallelCopyScheduleIdentity {
-                request_index: 844,
-                name: "blk.63.post_attention_norm.weight",
-                shard_idx: 0,
-                source_offset: 16_817_223_904,
-                source_bytes: 20_480,
-            },
-        },
-    ],
-};
-
-const A10B_PARALLEL_PREAD_PROFILE: ParallelCopyProfile = ParallelCopyProfile {
-    id: ParallelCopyProfileId::A10bQ4xlV1,
-    architecture_label: Some("qwen35moe"),
-    arch: A10B_PARALLEL_COPY_ARCH,
-    tied_embeddings: false,
-    mtp_present: false,
-    shard_mapped_lengths: &[10_943_552, 49_640_779_424, 27_378_273_056],
-    descriptor_layout_digest: 0x3eb2_9091_5bec_2041,
-    inventory_digest: "b331c475123dbee3bc862a495266dee3996c5f3adabcd6fbeaff9bbabd71a4f8",
-    embedding_dtype: GgmlType::Q8_0,
-    embedding_shape: &[3072, 248_320],
-    device_constraint: ParallelCopyDeviceConstraint::ExactUnified(
-        &crate::metal::PARALLEL_COPY_EXACT_UNIFIED,
-    ),
-    authentication: ParallelCopyAuthentication::A10bPlannerFree,
-    marker_contract: ParallelCopyMarkerContract::A10bSchema2,
-    supports_direct_pread: true,
-    request_count: 879,
-    source_bytes: 77_018_996_736,
-    cuts: [214, 435, 658],
-    task_counts: [214, 221, 223, 221],
-    worker_bytes: [
-        19_474_295_808,
-        19_228_744_704,
-        19_231_902_720,
-        19_084_053_504,
-    ],
-    boundaries: [
-        ParallelCopyScheduleBoundary {
-            first: ParallelCopyScheduleIdentity {
-                request_index: 2,
-                name: "output.weight",
-                shard_idx: 1,
-                source_offset: 35_488,
-                source_bytes: 810_516_480,
-            },
-            last: ParallelCopyScheduleIdentity {
-                request_index: 220,
-                name: "blk.11.ffn_down_exps.weight",
-                shard_idx: 1,
-                source_offset: 18_920_683_168,
-                source_bytes: 553_648_128,
-            },
-        },
-        ParallelCopyScheduleBoundary {
-            first: ParallelCopyScheduleIdentity {
-                request_index: 213,
-                name: "blk.11.ffn_down_shexp.weight",
-                shard_idx: 1,
-                source_offset: 19_474_331_296,
-                source_bytes: 3_342_336,
-            },
-            last: ParallelCopyScheduleIdentity {
-                request_index: 437,
-                name: "blk.23.ffn_gate_exps.weight",
-                shard_idx: 1,
-                source_offset: 38_250_091_168,
-                source_bytes: 452_984_832,
-            },
-        },
-        ParallelCopyScheduleBoundary {
-            first: ParallelCopyScheduleIdentity {
-                request_index: 436,
-                name: "blk.23.ffn_gate_inp.weight",
-                shard_idx: 1,
-                source_offset: 38_703_076_000,
-                source_bytes: 3_145_728,
-            },
-            last: ParallelCopyScheduleIdentity {
-                request_index: 657,
-                name: "blk.35.ffn_up_exps.weight",
-                shard_idx: 2,
-                source_offset: 7_841_234_720,
-                source_bytes: 452_984_832,
-            },
-        },
-        ParallelCopyScheduleBoundary {
-            first: ParallelCopyScheduleIdentity {
-                request_index: 650,
-                name: "blk.35.ffn_up_shexp.weight",
-                shard_idx: 2,
-                source_offset: 8_294_219_552,
-                source_bytes: 3_342_336,
-            },
-            last: ParallelCopyScheduleIdentity {
-                request_index: 867,
-                name: "blk.47.post_attention_norm.weight",
-                shard_idx: 2,
-                source_offset: 27_378_260_768,
-                source_bytes: 12_288,
-            },
-        },
-    ],
-};
-
-static PARALLEL_COPY_PROFILES: [&ParallelCopyProfile; 3] = [
-    &A3B_PARALLEL_COPY_PROFILE,
-    &A10B_PARALLEL_PREAD_PROFILE,
-    &DENSE27B_PARALLEL_COPY_PROFILE,
-];
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum GgufNoCopyMode {
     Auto,
-    Disabled,
-    Forced,
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum GgufOwnedArenaMode {
     Disabled,
     Forced,
 }
@@ -654,7 +212,7 @@ impl GgufParallelCopyMode {
             )),
             Self::ForcedPageRoundedCopy => Some((
                 ParallelPopulationMethod::MmapCopy,
-                ParallelDestinationLength::PageRounded16K,
+                ParallelDestinationLength::PageRounded,
             )),
             Self::Auto | Self::Disabled => None,
         }
@@ -671,7 +229,6 @@ enum GgufNoCopyPrefaultMode {
 #[derive(Debug)]
 pub struct GgufStorageLoadConfiguration {
     no_copy_mode: GgufNoCopyMode,
-    owned_mode: GgufOwnedArenaMode,
     parallel_mode: GgufParallelCopyMode,
     prefault_mode: GgufNoCopyPrefaultMode,
 }
@@ -684,24 +241,18 @@ impl GgufStorageLoadConfiguration {
             GgufNoCopyMode::Auto if self.parallel_mode.is_forced() => {
                 GgufStorageRequest::Copy("explicit_parallel_copy_precedence")
             }
-            GgufNoCopyMode::Auto if self.owned_mode == GgufOwnedArenaMode::Forced => {
-                GgufStorageRequest::Copy("explicit_owned_arena_precedence")
-            }
             GgufNoCopyMode::Auto => GgufStorageRequest::Automatic,
         }
     }
 }
 
 fn validate_forced_storage_embedding_policy(
-    owned_mode: GgufOwnedArenaMode,
     parallel_mode: GgufParallelCopyMode,
     embedding_mode: NativeQuantEmbeddingMode,
 ) -> Result<(), MfError> {
-    if (owned_mode == GgufOwnedArenaMode::Forced || parallel_mode.is_forced())
-        && embedding_mode != NativeQuantEmbeddingMode::Auto
-    {
+    if parallel_mode.is_forced() && embedding_mode != NativeQuantEmbeddingMode::Auto {
         return Err(MfError::LoadPolicy(
-            "forced owned or parallel storage requires production-auto native embedding selection"
+            "forced parallel storage requires production-auto native embedding selection"
                 .to_string(),
         ));
     }
@@ -728,35 +279,21 @@ fn resolve_gguf_storage_load_configuration_from_values(
     router_f16: Option<&str>,
 ) -> Result<GgufStorageLoadConfiguration, MfError> {
     let no_copy_mode = parse_gguf_no_copy_mode(no_copy)?;
-    let owned_mode = parse_gguf_owned_arena_mode(owned_arena)?;
+    parse_gguf_owned_arena_mode(owned_arena)?;
     let parallel_mode = parse_gguf_parallel_copy_mode(parallel_copy)?;
     let prefault_mode = parse_gguf_no_copy_prefault(prefault)?;
     validate_parallel_copy_policy(
         parallel_mode,
         no_copy_mode,
-        owned_mode,
         prefault.is_some(),
         native_embedding_present,
         router_f16,
     )?;
-    if owned_mode == GgufOwnedArenaMode::Forced && no_copy_mode == GgufNoCopyMode::Forced {
-        return Err(MfError::LoadPolicy(
-            "QWEN_GGUF_OWNED_ARENA and QWEN_GGUF_NO_COPY are mutually exclusive".to_string(),
-        ));
-    }
-    validate_forced_storage_embedding_policy(owned_mode, parallel_mode, native_embedding_mode)?;
-    if owned_mode == GgufOwnedArenaMode::Forced && prefault_mode != GgufNoCopyPrefaultMode::Default
-    {
-        return Err(MfError::LoadPolicy(
-            "QWEN_GGUF_NO_COPY_PREFAULT is invalid with owned arena".to_string(),
-        ));
-    }
-    if owned_mode == GgufOwnedArenaMode::Disabled
-        && matches!(
-            no_copy_mode,
-            GgufNoCopyMode::Disabled | GgufNoCopyMode::Auto
-        )
-        && prefault_mode != GgufNoCopyPrefaultMode::Default
+    validate_forced_storage_embedding_policy(parallel_mode, native_embedding_mode)?;
+    if matches!(
+        no_copy_mode,
+        GgufNoCopyMode::Disabled | GgufNoCopyMode::Auto
+    ) && prefault_mode != GgufNoCopyPrefaultMode::Default
     {
         return Err(MfError::LoadPolicy(
             "QWEN_GGUF_NO_COPY_PREFAULT requires QWEN_GGUF_NO_COPY=1".to_string(),
@@ -764,7 +301,6 @@ fn resolve_gguf_storage_load_configuration_from_values(
     }
     Ok(GgufStorageLoadConfiguration {
         no_copy_mode,
-        owned_mode,
         parallel_mode,
         prefault_mode,
     })
@@ -775,7 +311,7 @@ pub fn resolve_gguf_storage_load_configuration() -> Result<GgufStorageLoadConfig
     let no_copy = storage_environment_value("QWEN_GGUF_NO_COPY")?;
     // Owned arena selects copied weight storage for ordinary Qwen.
     let owned_arena = storage_environment_value("QWEN_GGUF_OWNED_ARENA")?;
-    // Forced parallel population profiles realize copied weight buffers.
+    // Forced parallel population plans realize copied weight buffers.
     let parallel_copy = storage_environment_value("QWEN_GGUF_PARALLEL_COPY")?;
     let prefault = storage_environment_value("QWEN_GGUF_NO_COPY_PREFAULT")?;
     let native_embedding_present = std::env::var_os("QWEN_NATIVE_QUANT_EMBED").is_some();
@@ -834,7 +370,7 @@ thread_local! {
     static MATMAT_BF16_BFLOAT_ACT_OVERRIDE: Cell<Option<bool>> = const { Cell::new(None) };
 }
 
-/// Return type for [`MetalForward::single_token_phase_profiled`]:
+/// Return type for [`MetalForward::single_token_phase_pland`]:
 /// `(logits, wall_with_artifact_ms, per-phase GPU ms map)`. The
 /// per-phase entries are `(phase_name, gpu_ms)`.
 pub type PhaseProfileOutput = (Vec<f32>, f64, Vec<(String, f64)>);
@@ -848,9 +384,8 @@ thread_local! {
 }
 
 use objc2_metal::{
-    MTLAllocation, MTLBuffer, MTLCPUCacheMode, MTLCommandBuffer, MTLCommandBufferStatus,
-    MTLCommandQueue, MTLComputePipelineState, MTLDevice, MTLHazardTrackingMode, MTLResidencySet,
-    MTLResidencySetDescriptor, MTLResource, MTLStorageMode,
+    MTLBuffer, MTLCPUCacheMode, MTLCommandBuffer, MTLCommandBufferStatus, MTLCommandQueue,
+    MTLComputePipelineState, MTLDevice, MTLHazardTrackingMode, MTLResource, MTLStorageMode,
 };
 
 #[cfg(test)]
@@ -933,10 +468,6 @@ pub struct LmHeadTailEvidence {
 /// directly (instead of going through the F32 codec) and the kernel
 /// dispatchers to pick `_q4_k`/`_q6_k` based on dtype.
 pub struct MetalModel {
-    // Fields drop in declaration order. Remove the residency set before any
-    // allocation it references can be released.
-    _residency_set: Option<MetalModelResidencySetGuard>,
-
     /// Reference back to the loader's bound model. Carries `arch`, the
     /// layer schedule (GDN vs Attn), tied-embedding flag.
     pub arch: crate::model::Arch,
@@ -1087,58 +618,22 @@ impl MetalModel {
     /// those queues receive matching residency-set ownership and teardown.
     #[doc(hidden)]
     pub fn has_queue_scoped_residency_set(&self) -> bool {
-        self._residency_set.is_some()
+        false
     }
 
     pub(crate) fn attach_residency_to_queue(
         &self,
-        queue: &Retained<ProtocolObject<dyn MTLCommandQueue>>,
+        _queue: &Retained<ProtocolObject<dyn MTLCommandQueue>>,
     ) -> Option<MetalAdditionalQueueResidencySetGuard> {
-        let model_guard = self._residency_set.as_ref()?;
-        queue.addResidencySet(&model_guard.set);
-        Some(MetalAdditionalQueueResidencySetGuard {
-            queue: queue.clone(),
-            set: model_guard.set.clone(),
-        })
+        None
     }
 }
 
-pub(crate) struct MetalAdditionalQueueResidencySetGuard {
-    queue: Retained<ProtocolObject<dyn MTLCommandQueue>>,
-    set: Retained<ProtocolObject<dyn MTLResidencySet>>,
-}
-
-impl Drop for MetalAdditionalQueueResidencySetGuard {
-    fn drop(&mut self) {
-        self.queue.removeResidencySet(&self.set);
-    }
-}
-
-struct MetalModelResidencySetGuard {
-    queue: Retained<ProtocolObject<dyn MTLCommandQueue>>,
-    set: Retained<ProtocolObject<dyn MTLResidencySet>>,
-}
-
-impl Drop for MetalModelResidencySetGuard {
-    fn drop(&mut self) {
-        let started = std::time::Instant::now();
-        let allocations = self.set.allocationCount();
-        let allocated_bytes = self.set.allocatedSize();
-        self.queue.removeResidencySet(&self.set);
-        self.set.endResidency();
-        let _ = std::io::Write::write_fmt(
-            &mut std::io::stderr().lock(),
-            format_args!(
-                "[metal-residency] API teardown returned allocations={allocations} allocated_bytes={allocated_bytes} elapsed_ms={:.3}\n",
-                started.elapsed().as_secs_f64() * 1e3,
-            ),
-        );
-    }
-}
+pub(crate) struct MetalAdditionalQueueResidencySetGuard;
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub(crate) struct MetalModelLoadOptions {
-    pub auto_parallel_copy_a3b: bool,
+    pub auto_parallel_copy: bool,
     pub auto_retained_single_pass: bool,
     pub auxiliary_weight_bytes: u64,
 }
@@ -1146,7 +641,7 @@ pub(crate) struct MetalModelLoadOptions {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum MetalLoadPrefetchAdvice {
     PreserveConfiguredPolicy,
-    SuppressColdOnlyAuthenticatedA3bDirectPread,
+    SuppressColdOnlyParallelDirectPread,
     SuppressForTightCopiedWeights,
 }
 
@@ -1154,7 +649,6 @@ pub(crate) enum MetalLoadPrefetchAdvice {
 struct ResolvedStoragePolicy {
     no_copy_mode: GgufNoCopyMode,
     prefault_enabled: bool,
-    owned_mode: GgufOwnedArenaMode,
     parallel_mode: GgufParallelCopyMode,
 }
 
@@ -1252,27 +746,20 @@ pub fn fused_qkv_g8_enabled_for_runtime() -> bool {
 }
 
 pub fn model_weight_storage_requests_for_runtime<'a>(
-    gguf: &GgufFile,
+    _gguf: &GgufFile,
     model: &Model<'a>,
 ) -> Result<Vec<ModelWeightStorageRequest<'a>>, MfError> {
-    let parallel_mode = gguf_parallel_copy_mode()?;
     let embedding_mode = native_quant_embedding_mode();
-    let forced_a10b_embedding = embedding_mode == NativeQuantEmbeddingMode::Auto
-        && forced_a10b_parallel_pread_embedding_qualified(parallel_mode, gguf, model);
-    let embedding_selection = if forced_a10b_embedding {
-        NativeQuantEmbeddingSelection::Forced
-    } else {
-        resolve_native_quant_embedding(
-            embedding_mode,
-            native_quant_embedding_supported(model.token_embd.dtype, &model.token_embd.shape),
-            native_quant_embedding_default_promoted(
-                &model.arch,
-                model.tied_embeddings,
-                model.token_embd.dtype,
-                &model.token_embd.shape,
-            ),
-        )
-    };
+    let embedding_selection = resolve_native_quant_embedding(
+        embedding_mode,
+        native_quant_embedding_supported(model.token_embd.dtype, &model.token_embd.shape),
+        native_quant_embedding_default_promoted(
+            &model.arch,
+            model.tied_embeddings,
+            model.token_embd.dtype,
+            &model.token_embd.shape,
+        ),
+    );
     ResolvedWeightLoadChoices::resolve(embedding_selection, moe_router_f16_enabled())
         .storage_requests(model)
 }
@@ -1294,33 +781,30 @@ pub fn runtime_retained_mapping_unsupported_reason(
         &direct,
         page_size,
         max_buffer_length,
-        matches_no_copy_27b_sentinel(gguf, model),
-        requests
-            .first()
-            .is_some_and(|request| request.kind == ModelWeightStorageKind::Direct),
     )
 }
 
-#[derive(Clone, Copy)]
-enum PreparedParallelCopyProof {
-    A3bRetainedPlan,
-    A10bPlannerFree,
-    DensePlannerFree,
-}
-
-struct PreparedParallelCopiedProfile {
-    profile: &'static ParallelCopyProfile,
+struct PreparedParallelCopyPlan {
+    plan: ParallelCopyLoadPlan,
     population: ParallelPopulationMethod,
     destination_length: ParallelDestinationLength,
     expected_identities: Vec<ModelWeightStorageIdentity>,
     sorted_request_indices: Vec<usize>,
-    _proof: PreparedParallelCopyProof,
 }
 
 enum PreparedAutoSelection {
     NotEligible,
     NoMatch,
-    Selected(PreparedParallelCopiedProfile),
+    Selected(PreparedParallelCopyPlan),
+}
+
+struct DirectStorageConfiguration {
+    no_copy_mode: GgufNoCopyMode,
+    prefault_enabled: bool,
+    parallel_mode: GgufParallelCopyMode,
+    auto_parallel: PreparedAutoSelection,
+    auto_retained: PreparedAutoRetainedSelection,
+    embedding_selection: NativeQuantEmbeddingSelection,
 }
 
 enum PreparedAutoRetainedSelection {
@@ -1333,12 +817,10 @@ impl PreparedAutoSelection {
     fn prefetch_advice(&self) -> MetalLoadPrefetchAdvice {
         match self {
             Self::Selected(prepared)
-                if prepared.profile.id == ParallelCopyProfileId::A3bQ4kmV1
-                    && prepared.population == ParallelPopulationMethod::Pread
-                    && prepared.destination_length == ParallelDestinationLength::LogicalExact
-                    && matches!(&prepared._proof, PreparedParallelCopyProof::A3bRetainedPlan) =>
+                if prepared.population == ParallelPopulationMethod::Pread
+                    && prepared.destination_length == ParallelDestinationLength::LogicalExact =>
             {
-                MetalLoadPrefetchAdvice::SuppressColdOnlyAuthenticatedA3bDirectPread
+                MetalLoadPrefetchAdvice::SuppressColdOnlyParallelDirectPread
             }
             Self::NotEligible | Self::NoMatch | Self::Selected(_) => {
                 MetalLoadPrefetchAdvice::PreserveConfiguredPolicy
@@ -1744,14 +1226,6 @@ impl PlannedRetainedStorage {
     }
 }
 
-struct PlannedOwnedStorage {
-    plan: RetainedStoragePlan,
-    resources: Vec<Buffer>,
-    fallback_resources: HashMap<usize, usize>,
-    realized: Vec<Option<MetalTensor>>,
-    cursor: usize,
-}
-
 struct ParallelCopyTask<'a> {
     source: &'a [u8],
     destination: &'a mut [u8],
@@ -1766,7 +1240,7 @@ enum ParallelPopulationMethod {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum ParallelDestinationLength {
     LogicalExact,
-    PageRounded16K,
+    PageRounded,
 }
 
 struct ParallelPreadTask<'a> {
@@ -1815,240 +1289,13 @@ struct ParallelCopyTiming {
 }
 
 struct PlannedParallelCopiedStorage {
-    profile: &'static ParallelCopyProfile,
+    plan: ParallelCopyLoadPlan,
     destination_length: ParallelDestinationLength,
     expected: Vec<ModelWeightStorageIdentity>,
     sorted_request_indices: Vec<usize>,
     resources: Vec<Buffer>,
     tensors: Vec<MetalTensor>,
     cursor: usize,
-}
-
-impl PlannedOwnedStorage {
-    fn load_direct(
-        &mut self,
-        desc: &TensorDesc,
-    ) -> Result<(MetalTensor, SourceMaterialization), MfError> {
-        let entry = self.plan.entries.get(self.cursor).ok_or_else(|| {
-            MfError::LoadPolicy(format!(
-                "owned storage received unexpected tensor {:?} at index {}",
-                desc.name, self.cursor
-            ))
-        })?;
-        if entry.request_index != self.cursor
-            || entry.name != desc.name
-            || entry.shard_idx != desc.shard_idx
-            || entry.data_offset != desc.data_offset
-            || entry.n_bytes != desc.n_bytes
-        {
-            return Err(MfError::LoadPolicy(format!(
-                "owned storage request drift at index {}: entry={entry:?} desc={desc:?}",
-                self.cursor
-            )));
-        }
-        let (tensor, materialization) = match entry.disposition {
-            RetainedStorageDisposition::View {
-                window_index,
-                buffer_offset,
-            } => {
-                let buffer = self.resources.get(window_index).ok_or_else(|| {
-                    MfError::LoadPolicy(format!("owned storage window {window_index} is missing"))
-                })?;
-                let tensor = MetalTensor::owned_weight_view(
-                    buffer.clone(),
-                    buffer_offset,
-                    desc.shape.clone(),
-                    desc.dtype,
-                    GGUF_NO_COPY_ALIGNMENT,
-                )?;
-                (tensor, SourceMaterialization::DirectCopy)
-            }
-            RetainedStorageDisposition::Alias {
-                source_request_index,
-            } => {
-                if source_request_index >= self.cursor {
-                    return Err(MfError::LoadPolicy(format!(
-                        "owned alias {:?} has non-prior source {source_request_index}",
-                        desc.name
-                    )));
-                }
-                let tensor = self
-                    .realized
-                    .get(source_request_index)
-                    .and_then(Option::as_ref)
-                    .ok_or_else(|| {
-                        MfError::LoadPolicy(format!(
-                            "owned alias {:?} source {source_request_index} is unrealized",
-                            desc.name
-                        ))
-                    })?
-                    .clone();
-                (tensor, SourceMaterialization::DirectAlias)
-            }
-            RetainedStorageDisposition::CopyFallback { reason } => {
-                if reason != RetainedStorageFallback::FinalPartialPage {
-                    return Err(MfError::LoadPolicy(format!(
-                        "owned tensor {:?} has disallowed fallback {reason:?}",
-                        desc.name
-                    )));
-                }
-                let resource_index = *self
-                    .fallback_resources
-                    .get(&entry.request_index)
-                    .ok_or_else(|| {
-                        MfError::LoadPolicy(format!(
-                            "owned fallback resource for {:?} is missing",
-                            desc.name
-                        ))
-                    })?;
-                let tensor = MetalTensor::owned_weight_view(
-                    self.resources[resource_index].clone(),
-                    0,
-                    desc.shape.clone(),
-                    desc.dtype,
-                    GGUF_NO_COPY_ALIGNMENT,
-                )?;
-                (tensor, SourceMaterialization::TailFallback)
-            }
-        };
-        if tensor.provenance() != MetalTensorProvenance::OwnedWeightReadOnly {
-            return Err(MfError::LoadPolicy(format!(
-                "owned tensor {:?} has writable or retained provenance",
-                desc.name
-            )));
-        }
-        self.realized[self.cursor] = Some(tensor.clone());
-        self.cursor += 1;
-        Ok((tensor, materialization))
-    }
-
-    fn validate_complete(&self, ledger: &WeightLoadLedger) -> Result<(), MfError> {
-        if self.cursor != self.plan.entries.len() || self.realized.iter().any(Option::is_none) {
-            return Err(MfError::LoadPolicy(format!(
-                "owned storage consumption mismatch: consumed={} planned={} realized={}",
-                self.cursor,
-                self.plan.entries.len(),
-                self.realized
-                    .iter()
-                    .filter(|tensor| tensor.is_some())
-                    .count()
-            )));
-        }
-        if self.resources.len() != 2
-            || self.resources[0].length() as u64 != GGUF_OWNED_A3B_WINDOW_BYTES
-            || self.resources[1].length() as u64 != GGUF_OWNED_A3B_FALLBACK_BYTES
-            || self
-                .resources
-                .iter()
-                .any(|buffer| buffer.storageMode() != MTLStorageMode::Shared)
-        {
-            return Err(MfError::LoadPolicy(
-                "owned storage physical resource ledger drifted".to_string(),
-            ));
-        }
-        let fallback_entry = self
-            .plan
-            .entries
-            .iter()
-            .find(|entry| {
-                matches!(
-                    entry.disposition,
-                    RetainedStorageDisposition::CopyFallback { .. }
-                )
-            })
-            .ok_or_else(|| MfError::LoadPolicy("owned fallback entry is missing".to_string()))?;
-        if self.fallback_resources.len() != 1
-            || self.fallback_resources.get(&fallback_entry.request_index) != Some(&1)
-        {
-            return Err(MfError::LoadPolicy(
-                "owned fallback resource map drifted".to_string(),
-            ));
-        }
-        for (entry, tensor) in self.plan.entries.iter().zip(self.realized.iter().flatten()) {
-            let (resource_index, offset) = match entry.disposition {
-                RetainedStorageDisposition::View {
-                    window_index,
-                    buffer_offset,
-                } => (window_index, buffer_offset),
-                RetainedStorageDisposition::CopyFallback { .. } => (1, 0),
-                RetainedStorageDisposition::Alias { .. } => {
-                    return Err(MfError::LoadPolicy(
-                        "owned A3B sentinel unexpectedly contains an alias".to_string(),
-                    ));
-                }
-            };
-            if Retained::as_ptr(&tensor.buffer) != Retained::as_ptr(&self.resources[resource_index])
-                || tensor.offset != offset
-            {
-                return Err(MfError::LoadPolicy(format!(
-                    "owned tensor {:?} resource identity drifted",
-                    entry.name
-                )));
-            }
-        }
-        let planned_source_bytes = self.plan.entries.iter().try_fold(0u64, |total, entry| {
-            total
-                .checked_add(entry.n_bytes)
-                .ok_or_else(|| MfError::LoadPolicy("owned plan source byte overflow".to_string()))
-        })?;
-        let planned_view_count = self
-            .plan
-            .entries
-            .iter()
-            .filter(|entry| matches!(entry.disposition, RetainedStorageDisposition::View { .. }))
-            .count();
-        let planned_fallback_count = self
-            .plan
-            .entries
-            .iter()
-            .filter(|entry| {
-                matches!(
-                    entry.disposition,
-                    RetainedStorageDisposition::CopyFallback { .. }
-                )
-            })
-            .count();
-        if ledger.source_descriptors != self.plan.entries.len()
-            || ledger.source_bytes != planned_source_bytes
-            || ledger.direct_copy_descriptors != planned_view_count
-            || ledger.direct_copy_bytes != self.plan.unique_view_bytes
-            || ledger.tail_fallback_descriptors != planned_fallback_count
-            || ledger.tail_fallback_bytes != self.plan.unique_fallback_bytes
-            || ledger.direct_view_descriptors != 0
-            || ledger.direct_view_bytes != 0
-            || ledger.direct_alias_descriptors != 0
-            || ledger.direct_alias_bytes != 0
-            || ledger.converted_descriptors != 0
-            || ledger.converted_source_bytes != 0
-            || ledger.converted_resident_bytes != 0
-            || self
-                .realized
-                .iter()
-                .flatten()
-                .any(|tensor| tensor.provenance() != MetalTensorProvenance::OwnedWeightReadOnly)
-        {
-            return Err(MfError::LoadPolicy(format!(
-                concat!(
-                    "owned storage logical ledger drift: source={}/{} copy={}/{} ",
-                    "tail={}/{} view={}/{} alias={}/{} converted={}/{}/{}"
-                ),
-                ledger.source_descriptors,
-                ledger.source_bytes,
-                ledger.direct_copy_descriptors,
-                ledger.direct_copy_bytes,
-                ledger.tail_fallback_descriptors,
-                ledger.tail_fallback_bytes,
-                ledger.direct_view_descriptors,
-                ledger.direct_view_bytes,
-                ledger.direct_alias_descriptors,
-                ledger.direct_alias_bytes,
-                ledger.converted_descriptors,
-                ledger.converted_source_bytes,
-                ledger.converted_resident_bytes,
-            )));
-        }
-        Ok(())
-    }
 }
 
 impl PlannedParallelCopiedStorage {
@@ -2105,23 +1352,23 @@ impl PlannedParallelCopiedStorage {
                 self.expected.len()
             )));
         }
-        let schedule = frozen_parallel_copy_order(self.profile, &self.expected)?;
+        let schedule = frozen_parallel_copy_order(&self.plan, &self.expected)?;
         if schedule != self.sorted_request_indices {
             return Err(MfError::LoadPolicy(
                 "parallel-copy schedule attestation drifted".to_string(),
             ));
         }
         validate_parallel_copied_topology(
-            self.profile,
+            &self.plan,
             self.destination_length,
             &self.expected,
             &self.resources,
             &self.tensors,
         )?;
-        if ledger.source_descriptors != self.profile.request_count
-            || ledger.source_bytes != self.profile.source_bytes
-            || ledger.direct_copy_descriptors != self.profile.request_count
-            || ledger.direct_copy_bytes != self.profile.source_bytes
+        if ledger.source_descriptors != self.plan.request_count
+            || ledger.source_bytes != self.plan.source_bytes
+            || ledger.direct_copy_descriptors != self.plan.request_count
+            || ledger.direct_copy_bytes != self.plan.source_bytes
             || ledger.direct_view_descriptors != 0
             || ledger.direct_view_bytes != 0
             || ledger.direct_alias_descriptors != 0
@@ -2203,9 +1450,7 @@ impl PlannedParallelCopiedStorage {
 
 enum DirectStorage {
     Copied,
-    ForcedExact27B(MetalGgufBacking),
     ForcedPlanned(PlannedRetainedStorage),
-    ForcedOwned(PlannedOwnedStorage),
     ForcedParallelCopied(PlannedParallelCopiedStorage),
 }
 
@@ -2214,7 +1459,6 @@ struct MetalWeightLoader<'a> {
     gguf: &'a GgufFile,
     direct_storage: DirectStorage,
     choices: ResolvedWeightLoadChoices,
-    seen_forced: HashSet<(usize, u64, u64)>,
     ledger: WeightLoadLedger,
 }
 
@@ -2230,13 +1474,8 @@ impl<'a> MetalWeightLoader<'a> {
             gguf,
             direct_storage,
             choices,
-            seen_forced: HashSet::new(),
             ledger: WeightLoadLedger::default(),
         }
-    }
-
-    fn is_forced_exact_27b(&self) -> bool {
-        matches!(self.direct_storage, DirectStorage::ForcedExact27B(_))
     }
 
     fn record_source(
@@ -2245,16 +1484,6 @@ impl<'a> MetalWeightLoader<'a> {
         materialization: SourceMaterialization,
         resident_bytes: u64,
     ) -> Result<(), MfError> {
-        if self.is_forced_exact_27b()
-            && !self
-                .seen_forced
-                .insert((desc.shard_idx, desc.data_offset, desc.n_bytes))
-        {
-            return Err(MfError::LoadPolicy(format!(
-                "forced no-copy materialized tensor {:?} more than once",
-                desc.name
-            )));
-        }
         self.ledger
             .record_source(desc, materialization, resident_bytes)
     }
@@ -2265,30 +1494,9 @@ impl<'a> MetalWeightLoader<'a> {
                 let tensor = MetalTensor::from_gguf_tensor(self.ctx, desc, self.gguf.slice(desc))?;
                 (tensor, SourceMaterialization::DirectCopy)
             }
-            DirectStorage::ForcedExact27B(backing) => {
-                let (eligibility, tensor) = backing.tensor(desc)?;
-                match (eligibility, tensor) {
-                    (GgufBackingEligibility::Eligible, Some(tensor)) => {
-                        (tensor, SourceMaterialization::DirectView)
-                    }
-                    (GgufBackingEligibility::FinalPartialPage, None)
-                        if desc.name == GGUF_NO_COPY_27B_TAIL_NAME
-                            && desc.n_bytes == GGUF_NO_COPY_27B_TAIL_BYTES =>
-                    {
-                        let tensor =
-                            MetalTensor::from_gguf_tensor(self.ctx, desc, self.gguf.slice(desc))?;
-                        (tensor, SourceMaterialization::TailFallback)
-                    }
-                    (reason, _) => Err(MfError::LoadPolicy(format!(
-                        "forced no-copy rejected direct tensor {:?}: {reason:?}",
-                        desc.name
-                    )))?,
-                }
-            }
             DirectStorage::ForcedPlanned(storage) => {
                 storage.load_direct(self.ctx, self.gguf, desc)?
             }
-            DirectStorage::ForcedOwned(storage) => storage.load_direct(desc)?,
             DirectStorage::ForcedParallelCopied(storage) => storage.load_direct(desc)?,
         };
         self.record_source(desc, materialization, tensor.n_bytes())?;
@@ -2415,15 +1623,8 @@ impl<'a> MetalWeightLoader<'a> {
         Ok(())
     }
 
-    fn finish(
-        self,
-        _exact_sentinel: bool,
-        expected: &[ModelWeightStorageRequest<'_>],
-    ) -> Result<(), MfError> {
+    fn finish(self, expected: &[ModelWeightStorageRequest<'_>]) -> Result<(), MfError> {
         if let DirectStorage::ForcedPlanned(storage) = &self.direct_storage {
-            storage.validate_complete(&self.ledger)?;
-        }
-        if let DirectStorage::ForcedOwned(storage) = &self.direct_storage {
             storage.validate_complete(&self.ledger)?;
         }
         if let DirectStorage::ForcedParallelCopied(storage) = &self.direct_storage {
@@ -2590,39 +1791,31 @@ impl MetalModel {
     ) -> Result<PreparedMetalModelLoad<'ctx, 'gguf, 'model>, MfError> {
         let storage_configuration = resolve_gguf_storage_load_configuration()?;
         let no_copy_mode = storage_configuration.no_copy_mode;
-        let owned_mode = storage_configuration.owned_mode;
         let parallel_mode = storage_configuration.parallel_mode;
         let prefault_mode = storage_configuration.prefault_mode;
         let prefault_enabled = prefault_mode != GgufNoCopyPrefaultMode::Disabled;
         let explicit_override_present =
-            auto_parallel_copy_a3b_override_present(|name| std::env::var_os(name).is_some());
-        let auto_parallel_copy_a3b = auto_parallel_copy_a3b_enabled(
-            options.auto_parallel_copy_a3b,
+            auto_parallel_copy_override_present(|name| std::env::var_os(name).is_some());
+        let auto_parallel_copy = auto_parallel_copy_enabled(
+            options.auto_parallel_copy,
             parallel_mode,
             explicit_override_present,
         );
         let embedding_mode = native_quant_embedding_mode();
-        let forced_a10b_embedding = embedding_mode == NativeQuantEmbeddingMode::Auto
-            && forced_a10b_parallel_pread_embedding_qualified(parallel_mode, gguf, model);
-        let embedding_selection = if forced_a10b_embedding {
-            NativeQuantEmbeddingSelection::Forced
-        } else {
-            resolve_native_quant_embedding(
-                embedding_mode,
-                native_quant_embedding_supported(model.token_embd.dtype, &model.token_embd.shape),
-                native_quant_embedding_default_promoted(
-                    &model.arch,
-                    model.tied_embeddings,
-                    model.token_embd.dtype,
-                    &model.token_embd.shape,
-                ),
-            )
-        };
+        let embedding_selection = resolve_native_quant_embedding(
+            embedding_mode,
+            native_quant_embedding_supported(model.token_embd.dtype, &model.token_embd.shape),
+            native_quant_embedding_default_promoted(
+                &model.arch,
+                model.tied_embeddings,
+                model.token_embd.dtype,
+                &model.token_embd.shape,
+            ),
+        );
         emit_native_quant_embedding_policy(model, embedding_selection);
         let router_f16 = moe_router_f16_enabled();
         let choices = ResolvedWeightLoadChoices::resolve(embedding_selection, router_f16);
         let expected = choices.storage_requests(model)?;
-        let exact_sentinel = matches_no_copy_27b_sentinel(gguf, model);
         let direct_descriptors = expected
             .iter()
             .filter(|request| request.kind == ModelWeightStorageKind::Direct)
@@ -2637,10 +1830,6 @@ impl MetalModel {
                     &direct_descriptors,
                     page_size,
                     ctx.device.maxBufferLength(),
-                    exact_sentinel,
-                    expected
-                        .first()
-                        .is_some_and(|request| request.kind == ModelWeightStorageKind::Direct),
                 ),
                 Err(_) => Some("automatic_mapping_unsupported_host_page_geometry"),
             }
@@ -2671,45 +1860,37 @@ impl MetalModel {
             GgufStorageRequest::Automatic,
             mapping_unsupported_reason,
         );
-        let auto_copy_capacity_admitted = automatic_a3b_profile_capacity_admitted(
+        let auto_copy_capacity_admitted = automatic_parallel_copy_capacity_admitted(
             no_copy_mode,
             parallel_mode,
-            owned_mode,
             automatic_copy_decision.capacity_would_map,
         );
         let mut auto_plan_host_facts_declined = false;
-        let auto = if auto_parallel_copy_a3b && auto_copy_capacity_admitted {
-            match select_auto_parallel_copy_profile(
-                ctx,
-                gguf,
-                model,
-                &expected,
-                embedding_selection,
-            )? {
-                AutoParallelCopyProfileSelection::Selected(profile) => {
-                    match auto_parallel_copy_population(profile.id) {
-                        Some(population) => match prepare_parallel_copied_profile(
+        let auto = if auto_parallel_copy && auto_copy_capacity_admitted {
+            match select_auto_parallel_copy_plan(ctx, gguf, model, &expected, embedding_selection)?
+            {
+                AutoParallelCopyLoadPlanSelection::Selected(plan) => {
+                    let plan_label = "descriptor-plan-v1";
+                    match auto_parallel_copy_population() {
+                        Some(population) => match prepare_parallel_copy_plan(
                             ctx,
-                            gguf,
-                            model,
                             &expected,
-                            embedding_selection,
-                            profile,
+                            plan,
                             population,
                             ParallelDestinationLength::LogicalExact,
                         ) {
                             Ok(prepared) => {
                                 emit_metal_load_line(format_args!(
-                                    "[metal-gguf-parallel-policy] mode=auto profile={}",
-                                    profile.id.label()
+                                    "[metal-gguf-parallel-policy] mode=auto plan={}",
+                                    plan_label
                                 ));
                                 PreparedAutoSelection::Selected(prepared)
                             }
                             Err(error) => {
                                 auto_plan_host_facts_declined = true;
                                 emit_metal_load_line(format_args!(
-                                    "[metal-gguf-parallel-policy] mode=auto profile={} declined reason=host_plan_facts details={error}",
-                                    profile.id.label()
+                                    "[metal-gguf-parallel-policy] mode=auto plan={} declined reason=host_plan_facts details={error}",
+                                    plan_label
                                 ));
                                 PreparedAutoSelection::NoMatch
                             }
@@ -2717,22 +1898,22 @@ impl MetalModel {
                         None => PreparedAutoSelection::NoMatch,
                     }
                 }
-                AutoParallelCopyProfileSelection::HostPlanUnsupported => {
+                AutoParallelCopyLoadPlanSelection::HostPlanUnsupported => {
                     auto_plan_host_facts_declined = true;
                     emit_metal_load_line(format_args!(
-                        "[metal-gguf-parallel-policy] mode=auto profile={} declined reason=host_plan_facts max_buffer_length={} host_page_size={:?}",
-                        A3B_PARALLEL_COPY_PROFILE.id.label(),
+                        "[metal-gguf-parallel-policy] mode=auto plan={} declined reason=host_plan_facts max_buffer_length={} host_page_size={:?}",
+                        "descriptor-plan-v1",
                         ctx.max_buffer_length(),
                         host_page_size_bytes().ok(),
                     ));
                     PreparedAutoSelection::NoMatch
                 }
-                AutoParallelCopyProfileSelection::NoMatch => PreparedAutoSelection::NoMatch,
+                AutoParallelCopyLoadPlanSelection::NoMatch => PreparedAutoSelection::NoMatch,
             }
-        } else if auto_parallel_copy_a3b {
+        } else if auto_parallel_copy {
             emit_metal_load_line(format_args!(
-                "[metal-gguf-parallel-policy] mode=auto profile={} declined reason={} admission={}",
-                A3B_PARALLEL_COPY_PROFILE.id.label(),
+                "[metal-gguf-parallel-policy] mode=auto plan={} declined reason={} admission={}",
+                "descriptor-plan-v1",
                 automatic_copy_decision.reason,
                 if automatic_copy_decision.capacity_would_map {
                     "insufficient"
@@ -2748,7 +1929,6 @@ impl MetalModel {
             options.auto_retained_single_pass,
             ctx.device.hasUnifiedMemory(),
             no_copy_mode,
-            owned_mode,
             parallel_mode,
             prefault_mode,
             explicit_override_present,
@@ -2760,10 +1940,8 @@ impl MetalModel {
         );
         let copy_reason = if parallel_mode.is_forced() {
             Some("explicit_parallel_copy_precedence")
-        } else if owned_mode == GgufOwnedArenaMode::Forced {
-            Some("explicit_owned_arena_precedence")
         } else if matches!(&auto, PreparedAutoSelection::Selected(_)) {
-            Some("authenticated_parallel_copy_precedence")
+            Some("planned_parallel_copy_precedence")
         } else {
             None
         };
@@ -2830,7 +2008,6 @@ impl MetalModel {
             storage: ResolvedStoragePolicy {
                 no_copy_mode: resolved_no_copy_mode,
                 prefault_enabled,
-                owned_mode,
                 parallel_mode,
             },
             choices,
@@ -2855,28 +2032,21 @@ impl MetalModel {
             auto_retained,
             ..
         } = prepared;
-        let (direct_storage, exact_sentinel) = direct_storage_for_load(
+        let direct_storage = direct_storage_for_load(
             ctx,
             gguf,
             model,
             &expected,
-            storage.no_copy_mode,
-            storage.prefault_enabled,
-            storage.owned_mode,
-            storage.parallel_mode,
-            auto,
-            auto_retained,
-            choices.embedding_selection,
+            DirectStorageConfiguration {
+                no_copy_mode: storage.no_copy_mode,
+                prefault_enabled: storage.prefault_enabled,
+                parallel_mode: storage.parallel_mode,
+                auto_parallel: auto,
+                auto_retained,
+                embedding_selection: choices.embedding_selection,
+            },
         )?;
-        Self::load_with_direct_storage(
-            ctx,
-            gguf,
-            model,
-            choices,
-            &expected,
-            direct_storage,
-            exact_sentinel,
-        )
+        Self::load_with_direct_storage(ctx, gguf, model, choices, &expected, direct_storage)
     }
 
     #[cfg(test)]
@@ -2893,7 +2063,6 @@ impl MetalModel {
             model,
             no_copy_mode,
             prefault_enabled,
-            GgufOwnedArenaMode::Disabled,
             GgufParallelCopyMode::Disabled,
             false,
         )
@@ -2906,17 +2075,16 @@ impl MetalModel {
         model: &Model<'_>,
         no_copy_mode: GgufNoCopyMode,
         prefault_enabled: bool,
-        owned_mode: GgufOwnedArenaMode,
         parallel_mode: GgufParallelCopyMode,
-        auto_parallel_copy_a3b: bool,
+        auto_parallel_copy: bool,
     ) -> Result<Self, MfError> {
-        if auto_parallel_copy_a3b {
+        if auto_parallel_copy {
             return Err(MfError::LoadPolicy(
                 "test storage-policy helper cannot select Auto parallel copy".to_string(),
             ));
         }
         let embedding_mode = native_quant_embedding_mode();
-        validate_forced_storage_embedding_policy(owned_mode, parallel_mode, embedding_mode)?;
+        validate_forced_storage_embedding_policy(parallel_mode, embedding_mode)?;
         let embedding_selection = resolve_native_quant_embedding(
             embedding_mode,
             native_quant_embedding_supported(model.token_embd.dtype, &model.token_embd.shape),
@@ -2931,18 +2099,19 @@ impl MetalModel {
         let router_f16 = moe_router_f16_enabled();
         let choices = ResolvedWeightLoadChoices::resolve(embedding_selection, router_f16);
         let expected_storage_requests = choices.storage_requests(model)?;
-        let (direct_storage, exact_sentinel) = direct_storage_for_load(
+        let direct_storage = direct_storage_for_load(
             ctx,
             gguf,
             model,
             &expected_storage_requests,
-            no_copy_mode,
-            prefault_enabled,
-            owned_mode,
-            parallel_mode,
-            PreparedAutoSelection::NotEligible,
-            PreparedAutoRetainedSelection::NotEligible,
-            embedding_selection,
+            DirectStorageConfiguration {
+                no_copy_mode,
+                prefault_enabled,
+                parallel_mode,
+                auto_parallel: PreparedAutoSelection::NotEligible,
+                auto_retained: PreparedAutoRetainedSelection::NotEligible,
+                embedding_selection,
+            },
         )?;
         Self::load_with_direct_storage(
             ctx,
@@ -2951,7 +2120,6 @@ impl MetalModel {
             choices,
             &expected_storage_requests,
             direct_storage,
-            exact_sentinel,
         )
     }
 
@@ -2962,9 +2130,7 @@ impl MetalModel {
         choices: ResolvedWeightLoadChoices,
         expected_storage_requests: &[ModelWeightStorageRequest<'_>],
         direct_storage: DirectStorage,
-        exact_sentinel: bool,
     ) -> Result<Self, MfError> {
-        let residency_set = create_a10b_parallel_residency_set(ctx, &direct_storage)?;
         let mut loader = MetalWeightLoader::new(ctx, gguf, direct_storage, choices);
         let token_embd =
             loader.load_embedding(model.token_embd, choices.embedding_selection.uses_native())?;
@@ -3095,7 +2261,7 @@ impl MetalModel {
                 }
             }
         }
-        loader.finish(exact_sentinel, expected_storage_requests)?;
+        loader.finish(expected_storage_requests)?;
         crate::metal_dflash::log_prefill_moe_grouped_fallbacks(&model.arch, &blocks);
 
         Ok(Self {
@@ -3105,7 +2271,6 @@ impl MetalModel {
             output_norm,
             lm_head,
             blocks,
-            _residency_set: residency_set,
         })
     }
 }
@@ -3521,15 +2686,13 @@ pub use token::*;
 
 pub const RMS_EPS: f32 = 1e-6;
 
-fn automatic_a3b_profile_capacity_admitted(
+fn automatic_parallel_copy_capacity_admitted(
     no_copy_mode: GgufNoCopyMode,
     parallel_mode: GgufParallelCopyMode,
-    owned_mode: GgufOwnedArenaMode,
     capacity_would_map: bool,
 ) -> bool {
-    let automatic = no_copy_mode == GgufNoCopyMode::Auto
-        && parallel_mode == GgufParallelCopyMode::Auto
-        && owned_mode != GgufOwnedArenaMode::Forced;
+    let automatic =
+        no_copy_mode == GgufNoCopyMode::Auto && parallel_mode == GgufParallelCopyMode::Auto;
     !automatic || !capacity_would_map
 }
 

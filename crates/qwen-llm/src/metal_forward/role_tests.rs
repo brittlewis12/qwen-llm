@@ -751,7 +751,7 @@ fn dense_iq_role_storage_private_loader_materializes_and_finishes() {
                     converted as u64 * 256 * 3 * 4
                 );
                 loader
-                    .finish(false, &expected)
+                    .finish(&expected)
                     .expect("real allocation ledger matches frozen plan");
             });
         }
@@ -770,7 +770,7 @@ fn dense_iq_role_storage_private_loader_materializes_and_finishes() {
                     .is_err()
             );
             assert_eq!(loader.ledger.source_descriptors, 0);
-            loader.finish(false, &[]).unwrap();
+            loader.finish(&[]).unwrap();
             // The final ledger check still rejects an actual allocation paired
             // with the wrong policy; it is defense in depth, not policy resolution.
             let mut loader = MetalWeightLoader::new(&ctx, &gguf, DirectStorage::Copied, choices);
@@ -785,7 +785,7 @@ fn dense_iq_role_storage_private_loader_materializes_and_finishes() {
                 false,
             )
             .unwrap();
-            assert!(loader.finish(false, &wrong).is_err());
+            assert!(loader.finish(&wrong).is_err());
         });
     }
 }
@@ -1164,7 +1164,7 @@ fn iq1_m_embedding_loader_and_gather_use_frozen_choice() {
     malformed.n_bytes -= 1;
     assert!(loader.load_embedding(&malformed, true).is_err());
     assert_eq!(loader.ledger.source_descriptors, 0);
-    loader.finish(false, &[]).unwrap();
+    loader.finish(&[]).unwrap();
     use NativeQuantEmbeddingMode::{Auto, Disabled, Forced, Invalid};
     for (mode, promoted) in [
         (Auto, true),
@@ -1206,7 +1206,7 @@ fn iq1_m_embedding_loader_and_gather_use_frozen_choice() {
                 choices.dense_iq_native,
             )
             .unwrap();
-            loader.finish(false, &expected).unwrap();
+            loader.finish(&expected).unwrap();
             embedding
         });
         for shaped in [false, true] {

@@ -53,8 +53,6 @@ pub(crate) enum Cmd {
     BuildInfo(BuildInfoArgs),
     /// Report model-agnostic retained-GGUF geometry and byte coverage without loading weights.
     GgufStoragePlan(GgufStoragePlanArgs),
-    /// Compare exact topology-preserving GGUF population primitives.
-    GgufArenaFloor(gguf_arena_floor::GgufArenaFloorArgs),
     /// Decode N tokens after a prompt using the plain no-spec path.
     ///
     /// Packed prefill is the default no-spec path. `--sequential-prefill`

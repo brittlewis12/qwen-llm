@@ -354,7 +354,6 @@ pub use moe_grouped_generic::*;
 pub use norm::*;
 pub use q2_0::*;
 pub use qualification::{
-    A3B_PARALLEL_COPY_AUTO, A10B_PARALLEL_PREAD_REQUIRED_HEADROOM_BYTES,
     DEEPSEEK_V4_ALL_SLOTS_Q3Q4, DEEPSEEK_V4_F16_MATRIX_SCORER, DEEPSEEK_V4_GROUPED_LONG_HCA,
     DEEPSEEK_V4_MULTIGROUP_SELECTOR, DEEPSEEK_V4_PACKED_E8P32_ROUTER,
     DEEPSEEK_V4_PACKED_GPU_ROUTE_COMPACTION, DEEPSEEK_V4_PACKED_GROUPED_EXPERT,
@@ -362,9 +361,8 @@ pub use qualification::{
     DEEPSEEK_V4_PACKED_MXFP4_MATRIX, DEEPSEEK_V4_PACKED_Q8_MATRIX_FAMILY,
     DEEPSEEK_V4_PACKED_QA_RAW_KV_MATRIX, DEEPSEEK_V4_PACKED_SHARED_ROUTE_OVERLAP,
     DEEPSEEK_V4_QUALIFICATIONS, DEEPSEEK_V4_RESIDENCY_SET, DEEPSEEK_V4_SPLITK_HCA,
-    HeadroomRequirementScope, PARALLEL_COPY_EXACT_UNIFIED, QUALIFICATIONS, Qualification,
-    QualificationDeclineReason, QualificationWitnessKind, QualifiedDevices, QualifiedMemory,
-    declined_reason_once,
+    HeadroomRequirementScope, QUALIFICATIONS, Qualification, QualificationDeclineReason,
+    QualificationWitnessKind, QualifiedDevices, QualifiedMemory, declined_reason_once,
 };
 pub use research::*;
 pub use rope::*;

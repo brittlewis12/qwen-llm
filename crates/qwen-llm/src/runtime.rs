@@ -350,19 +350,11 @@ pub fn prefetch_opened_gguf(gguf: &GgufFile, config: &LoadedModelConfig) -> Pref
     )
 }
 
-/// Exact `qwen_diag` line emitted when prefetch is suppressed on the
-/// authenticated-disposable auto-A3B direct-pread path.
-///
-/// Downstream profile scripts (v0625, v0651, v0652, v0626, v0628) anchor
-/// `stderr.count(SUPPRESSION_LINE) == 1` and `line.startswith(...)`
-/// against this exact string, so the tracing subscriber and the emit
-/// site must both keep it byte-for-byte stable. This constant is the
-/// single source of truth — tests in `qwen-cli::tracing_init` pin it,
-/// and [`apply_prefetch_policy`] emits it verbatim.
-pub const AUTHENTICATED_DISPOSABLE_AUTO_A3B_PREAD_SUPPRESSION_LINE: &str = concat!(
+/// Exact diagnostic line emitted when cold-only prefetch is suppressed for a
+/// planned parallel-pread load.
+pub const PLANNED_PARALLEL_PREAD_SUPPRESSION_LINE: &str = concat!(
     "[runtime-prefetch] schema=1 configured=cold-only action=suppressed ",
-    "reason=authenticated-disposable-auto-a3b-direct-pread ",
-    "profile=a3b-q4km-v1 population=pread",
+    "reason=planned-parallel-direct-pread population=pread",
 );
 
 /// Runs the prefetch policy against the freshly-opened GGUF and returns
@@ -387,18 +379,11 @@ fn apply_prefetch_policy(
             tracing::info!(target: "qwen_diag", "[runtime-prefetch] schema=1 action=suppressed reason=tight-copied-weights");
             return PrefetchOutcome::suppressed(config.prefetch_policy, action);
         }
-        // Sole `[runtime-prefetch]` emitter in the tree. Migrated from
-        // `eprintln!` to the `qwen_diag` target; the CLI subscriber prints
-        // `AUTHENTICATED_DISPOSABLE_AUTO_A3B_PREAD_SUPPRESSION_LINE`
-        // verbatim so profile scripts (v0625, v0651, v0652, v0626, v0628)
-        // that anchor `line.startswith("[runtime-prefetch]")` or
-        // `stderr.count(SUPPRESSION_LINE)` keep matching. The literal
-        // lives in one place so byte-format tests can pin the same
-        // string the emit site uses.
+        // The CLI subscriber renders this shared literal verbatim.
         tracing::info!(
             target: "qwen_diag",
             "{}",
-            AUTHENTICATED_DISPOSABLE_AUTO_A3B_PREAD_SUPPRESSION_LINE,
+            PLANNED_PARALLEL_PREAD_SUPPRESSION_LINE,
         );
         return PrefetchOutcome::suppressed(config.prefetch_policy, action);
     }
@@ -683,15 +668,15 @@ mod tests {
     #[test]
     fn model_load_intent_scopes_automatic_storage_admission() {
         let reusable = ModelLoadIntent::Reusable.metal_options(0);
-        assert!(!reusable.auto_parallel_copy_a3b);
+        assert!(!reusable.auto_parallel_copy);
         assert!(!reusable.auto_retained_single_pass);
 
         let generation = ModelLoadIntent::DisposableGeneration.metal_options(0);
-        assert!(generation.auto_parallel_copy_a3b);
+        assert!(generation.auto_parallel_copy);
         assert!(!generation.auto_retained_single_pass);
 
         let analysis = ModelLoadIntent::SinglePassAnalysis.metal_options(0);
-        assert!(analysis.auto_parallel_copy_a3b);
+        assert!(analysis.auto_parallel_copy);
         assert!(analysis.auto_retained_single_pass);
 
         let cold_only = PrefetchPolicy::cold_only(DEFAULT_COLD_ONLY_THRESHOLD).unwrap();
@@ -704,10 +689,10 @@ mod tests {
     #[test]
     fn prefetch_action_selector_table_is_fail_closed() {
         let cold_only = PrefetchPolicy::cold_only(DEFAULT_COLD_ONLY_THRESHOLD).unwrap();
-        let suppress = MetalLoadPrefetchAdvice::SuppressColdOnlyAuthenticatedA3bDirectPread;
+        let suppress = MetalLoadPrefetchAdvice::SuppressColdOnlyParallelDirectPread;
         let preserve = MetalLoadPrefetchAdvice::PreserveConfiguredPolicy;
         let suppressed = PrefetchAction::Suppressed {
-            reason: PrefetchSuppressionReason::AuthenticatedDisposableAutoA3bDirectPread,
+            reason: PrefetchSuppressionReason::PlannedDirectPread,
         };
         let tight_suppressed = PrefetchAction::Suppressed {
             reason: PrefetchSuppressionReason::TightCopiedWeights,
@@ -1006,7 +991,7 @@ pub struct ShardPrefetch {
 /// `Runtime::load_model_*` call.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum PrefetchSuppressionReason {
-    AuthenticatedDisposableAutoA3bDirectPread,
+    PlannedDirectPread,
     TightCopiedWeights,
 }
 
@@ -1026,9 +1011,9 @@ fn effective_prefetch_action(
         },
         (
             PrefetchPolicy::ColdOnly { .. },
-            MetalLoadPrefetchAdvice::SuppressColdOnlyAuthenticatedA3bDirectPread,
+            MetalLoadPrefetchAdvice::SuppressColdOnlyParallelDirectPread,
         ) => PrefetchAction::Suppressed {
-            reason: PrefetchSuppressionReason::AuthenticatedDisposableAutoA3bDirectPread,
+            reason: PrefetchSuppressionReason::PlannedDirectPread,
         },
         _ => PrefetchAction::ConfiguredPolicy,
     }
@@ -1085,7 +1070,7 @@ pub enum ModelLoadIntent {
 impl ModelLoadIntent {
     fn metal_options(self, auxiliary_weight_bytes: u64) -> MetalModelLoadOptions {
         MetalModelLoadOptions {
-            auto_parallel_copy_a3b: matches!(
+            auto_parallel_copy: matches!(
                 self,
                 Self::DisposableGeneration | Self::SinglePassAnalysis
             ),

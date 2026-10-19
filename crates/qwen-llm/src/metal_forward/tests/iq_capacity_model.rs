@@ -691,7 +691,6 @@ pub(super) fn load_copied_native(
         MetalModel::prepare_load_with_options(ctx, gguf, bound, MetalModelLoadOptions::default())
             .unwrap();
     let copied = prepared.storage.no_copy_mode == GgufNoCopyMode::Disabled
-        && prepared.storage.owned_mode == GgufOwnedArenaMode::Disabled
         && !prepared.storage.parallel_mode.is_forced()
         && !matches!(&prepared.auto, PreparedAutoSelection::Selected(_))
         && !matches!(
@@ -701,7 +700,7 @@ pub(super) fn load_copied_native(
     emit(
         out,
         json!({"event":"prepared_policy","copied_topology_supported":copied,"no_copy":format!("{:?}",prepared.storage.no_copy_mode),
-        "owned":format!("{:?}",prepared.storage.owned_mode),"parallel":format!("{:?}",prepared.storage.parallel_mode),
+        "parallel":format!("{:?}",prepared.storage.parallel_mode),
         "native_embedding_selection":prepared.choices.embedding_selection.label(),
         "embedding_source_dtype":format!("{:?}",bound.token_embd.dtype),"tied_embeddings":bound.tied_embeddings,
         "prefetch_advice":format!("{:?}",prepared.prefetch_advice()),"plan":prepared.expected.iter().map(request_json).collect::<Vec<_>>(),

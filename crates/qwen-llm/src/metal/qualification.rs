@@ -29,8 +29,7 @@ pub enum QualificationWitnessKind {
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum HeadroomRequirementScope {
-    /// Dynamic load-admission floor for A10B Q4_K_XL forced destination pread.
-    A10bQ4xlForcedPread,
+    PlannedParallelSchedule,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
@@ -254,9 +253,6 @@ enum QualificationFacet {
     HostPageSize,
     MaxBufferLength,
 }
-
-/// Admission floor measured for the force-only A10B destination-pread path.
-pub const A10B_PARALLEL_PREAD_REQUIRED_HEADROOM_BYTES: u64 = 85_608_931_328;
 
 /// Return the first decline for a qualification once per process.
 pub fn declined_reason_once(
@@ -699,60 +695,6 @@ const MEASUREMENTS_DEEPSEEK_V4_RESIDENCY_SET: &[DeviceMeasurement] = &[
     ),
 ];
 
-const MEASUREMENTS_A3B_PARALLEL_COPY_AUTO: &[DeviceMeasurement] = &[
-    device_measurement(
-        "Apple M4 Max",
-        MeasurementResult::Passed,
-        MeasurementResult::NotRecorded,
-        "2026-10-14",
-        "qual-m4max.json sha256=aa186d57e040e263df0bec60531eead39beeafedd2d5705133db42ba8d83df8b",
-        None,
-    ),
-    device_measurement(
-        "Apple M1 Pro",
-        MeasurementResult::NotApplicable,
-        MeasurementResult::NotRecorded,
-        "2026-10-14",
-        "qual-m1pro-2.json sha256=fc18b4f7ef79b7fe5f0586d964049f52ed7987679d64f28522ecd0edd8c9dd2c",
-        None,
-    ),
-    device_measurement(
-        "Apple M5 Ultra",
-        MeasurementResult::NotApplicable,
-        MeasurementResult::NotRecorded,
-        "2026-10-17",
-        "docs/bench/2026-10-17-m5-toolchain-baseline/results.json sha256=1ba1ce14804b9ada2330f374d792bf7b9396072ba0961785e6973801639eb2c2",
-        None,
-    ),
-];
-
-const MEASUREMENTS_PARALLEL_COPY_EXACT_UNIFIED: &[DeviceMeasurement] = &[
-    device_measurement(
-        "Apple M4 Max",
-        MeasurementResult::NotRun,
-        MeasurementResult::NotRecorded,
-        "2026-10-14",
-        "qual-m4max.json sha256=aa186d57e040e263df0bec60531eead39beeafedd2d5705133db42ba8d83df8b",
-        None,
-    ),
-    device_measurement(
-        "Apple M1 Pro",
-        MeasurementResult::NotRun,
-        MeasurementResult::NotRecorded,
-        "2026-10-14",
-        "qual-m1pro-2.json sha256=fc18b4f7ef79b7fe5f0586d964049f52ed7987679d64f28522ecd0edd8c9dd2c",
-        None,
-    ),
-    device_measurement(
-        "Apple M5 Ultra",
-        MeasurementResult::NotRun,
-        MeasurementResult::NotRecorded,
-        "2026-10-17",
-        "docs/bench/2026-10-17-m5-toolchain-baseline/results.json sha256=1ba1ce14804b9ada2330f374d792bf7b9396072ba0961785e6973801639eb2c2",
-        None,
-    ),
-];
-
 const NO_EXCLUSIONS: &[DeviceExclusion] = &[];
 
 pub static DEEPSEEK_V4_MULTIGROUP_SELECTOR: Qualification = Qualification {
@@ -1055,47 +997,6 @@ pub static DEEPSEEK_V4_RESIDENCY_SET: Qualification = Qualification {
     correctness_characterized_device: None,
     performance_characterized_device: None,
 };
-pub static A3B_PARALLEL_COPY_AUTO: Qualification = Qualification {
-    path: "metal_forward.a3b_parallel_copy_auto",
-    measurements: MEASUREMENTS_A3B_PARALLEL_COPY_AUTO,
-    excluded: NO_EXCLUSIONS,
-    capability_gate: QualifiedDevices::AppleFamily7,
-    requires_unified_memory: true,
-    minimum_os_version: None,
-    memory: QualifiedMemory::Any,
-    host_page_size_bytes: None,
-    max_buffer_length_bytes: None,
-    required_headroom_bytes: None,
-    required_headroom_scope: None,
-    evidence: "0a3cef59",
-    correctness: "cargo test --release -p qwen-llm --lib metal_forward::tests::gguf_parallel_pread_a3b_q4_is_bit_exact -- --ignored --exact",
-    correctness_kind: QualificationWitnessKind::M4CharacterizationSkip,
-    performance: "none: the v0.608 PERF-LOG reports inherited v0.602 timing and Auto smoke results but records no executable benchmark command",
-    performance_kind: QualificationWitnessKind::None,
-    correctness_characterized_device: Some("Apple M4 Max"),
-    performance_characterized_device: None,
-};
-pub static PARALLEL_COPY_EXACT_UNIFIED: Qualification = Qualification {
-    path: "metal_forward.exact_unified_parallel_copy_profiles",
-    measurements: MEASUREMENTS_PARALLEL_COPY_EXACT_UNIFIED,
-    excluded: NO_EXCLUSIONS,
-    capability_gate: QualifiedDevices::AppleFamily7,
-    requires_unified_memory: true,
-    minimum_os_version: None,
-    memory: QualifiedMemory::Any,
-    host_page_size_bytes: None,
-    max_buffer_length_bytes: None,
-    required_headroom_bytes: Some(A10B_PARALLEL_PREAD_REQUIRED_HEADROOM_BYTES),
-    required_headroom_scope: Some(HeadroomRequirementScope::A10bQ4xlForcedPread),
-    evidence: "8c223624, fba3b97a",
-    correctness: "scope-only: cargo test --release -p qwen-llm --lib metal_forward::tests::gguf_parallel_pread_a10b_profile_is_exact_and_force_only -- --exact",
-    correctness_kind: QualificationWitnessKind::ScopeOnly,
-    performance: "none: commits 8c223624 and fba3b97a plus their PERF-LOG entries report measurements but record no executable A/B replay command",
-    performance_kind: QualificationWitnessKind::None,
-    correctness_characterized_device: None,
-    performance_characterized_device: None,
-};
-
 pub static QUALIFICATIONS: &[&Qualification] = &[
     &DEEPSEEK_V4_MULTIGROUP_SELECTOR,
     &DEEPSEEK_V4_F16_MATRIX_SCORER,
@@ -1112,8 +1013,6 @@ pub static QUALIFICATIONS: &[&Qualification] = &[
     &DEEPSEEK_V4_PACKED_GROUPED_EXPERT,
     &DEEPSEEK_V4_ALL_SLOTS_Q3Q4,
     &DEEPSEEK_V4_RESIDENCY_SET,
-    &A3B_PARALLEL_COPY_AUTO,
-    &PARALLEL_COPY_EXACT_UNIFIED,
 ];
 
 pub static DEEPSEEK_V4_QUALIFICATIONS: &[&Qualification] = &[
@@ -1285,10 +1184,6 @@ mod tests {
 
         let mut non_unified = facts("Apple M4 Max", None);
         non_unified.unified_memory = false;
-        assert_eq!(
-            A3B_PARALLEL_COPY_AUTO.decline_reason(&non_unified),
-            Some(QualificationDeclineReason::UnifiedMemory { supported: false })
-        );
         assert!(DEEPSEEK_V4_MULTIGROUP_SELECTOR.holds_for(&non_unified));
 
         let mut old_os = facts("Apple M4 Max", None);
@@ -1308,7 +1203,7 @@ mod tests {
         }];
         let excluded = Qualification {
             excluded: TEST_EXCLUSIONS,
-            ..A3B_PARALLEL_COPY_AUTO
+            ..DEEPSEEK_V4_MULTIGROUP_SELECTOR
         };
         assert_eq!(
             excluded.decline_reason(&facts("Regression Mac", None)),
@@ -1316,21 +1211,6 @@ mod tests {
                 device: "Regression Mac",
                 evidence: "PERF-LOG test fixture: explicit regression reproduction",
             })
-        );
-    }
-
-    #[test]
-    fn copy_plan_constraints_are_dynamic_and_residency_headroom_stays_explicit() {
-        assert!(A3B_PARALLEL_COPY_AUTO.requires_unified_memory);
-        assert!(PARALLEL_COPY_EXACT_UNIFIED.requires_unified_memory);
-        assert_eq!(A3B_PARALLEL_COPY_AUTO.memory, QualifiedMemory::Any);
-        assert_eq!(A3B_PARALLEL_COPY_AUTO.host_page_size_bytes, None);
-        assert_eq!(A3B_PARALLEL_COPY_AUTO.max_buffer_length_bytes, None);
-        assert_eq!(PARALLEL_COPY_EXACT_UNIFIED.host_page_size_bytes, None);
-        assert_eq!(PARALLEL_COPY_EXACT_UNIFIED.max_buffer_length_bytes, None);
-        assert_eq!(
-            PARALLEL_COPY_EXACT_UNIFIED.required_headroom_bytes,
-            Some(A10B_PARALLEL_PREAD_REQUIRED_HEADROOM_BYTES)
         );
     }
 }

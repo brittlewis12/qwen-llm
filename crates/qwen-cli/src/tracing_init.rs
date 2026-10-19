@@ -237,106 +237,13 @@ mod tests {
     }
 
     #[test]
-    fn suppression_line_const_matches_v0625_python_literal() {
-        // Closes the Rust↔Python drift hole: if either
-        // `AUTHENTICATED_DISPOSABLE_AUTO_A3B_PREAD_SUPPRESSION_LINE` in
-        // qwen-llm or the `SUPPRESSION_LINE` literal in
-        // `scripts/profile/v0625_a3b_prefetch_suppression_confirmation.py`
-        // changes without the other, this test fails instead of the
-        // profile script silently miscounting.
-        //
-        // v0625 is the only script with the full-line literal; the four
-        // other consumers (v0651, v0652, v0626, v0628) anchor
-        // `startswith("[runtime-prefetch]")` which the const's prefix
-        // already covers.
-        use qwen_llm::runtime::AUTHENTICATED_DISPOSABLE_AUTO_A3B_PREAD_SUPPRESSION_LINE as LINE;
-        let script = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../../scripts/profile/v0625_a3b_prefetch_suppression_confirmation.py");
-        let text = std::fs::read_to_string(&script)
-            .unwrap_or_else(|error| panic!("read {}: {error}", script.display()));
-        // Collapse Python implicit string concatenation of the form
-        // `"…" <whitespace> "…"` into a single logical string, so a
-        // multi-line `SUPPRESSION_LINE = ("…" "…" "…")` literal is
-        // searchable as a single substring.
-        let normalized = collapse_python_adjacent_string_literals(&text);
-        assert!(
-            normalized.contains(LINE),
-            "v0625 SUPPRESSION_LINE drifted from Rust const:\n  Rust: {LINE:?}\n  script: {}",
-            script.display(),
-        );
-    }
-
-    /// Collapse Python implicit string-literal concatenation
-    /// (`"a" "b" "c"` -> `"abc"`) so a multi-line
-    /// `SUPPRESSION_LINE = ("…" "…" "…")` becomes a single flat literal
-    /// substring, searchable by the drift-protection test above.
-    ///
-    /// Does not handle escape sequences: the strings we anchor against
-    /// contain none, and correct escape handling would balloon this
-    /// helper beyond the value it provides.
-    fn collapse_python_adjacent_string_literals(text: &str) -> String {
-        let bytes = text.as_bytes();
-        let mut out = String::with_capacity(text.len());
-        let mut i = 0;
-        while i < bytes.len() {
-            if bytes[i] != b'"' {
-                out.push(bytes[i] as char);
-                i += 1;
-                continue;
-            }
-            // Scan one or more adjacent `"…"` literals and join their
-            // contents into a single logical string.
-            let mut joined = String::new();
-            loop {
-                debug_assert!(bytes[i] == b'"');
-                let content_start = i + 1;
-                let mut end = content_start;
-                while end < bytes.len() && bytes[end] != b'"' {
-                    end += 1;
-                }
-                if end >= bytes.len() {
-                    // Unterminated — emit an opening quote, the joined
-                    // material so far, and the raw tail; then stop.
-                    out.push('"');
-                    out.push_str(&joined);
-                    out.push_str(&text[content_start..]);
-                    return out;
-                }
-                joined.push_str(&text[content_start..end]);
-                i = end + 1;
-                // Skip whitespace to look for an adjacent literal.
-                let mut j = i;
-                while j < bytes.len() && (bytes[j] as char).is_whitespace() {
-                    j += 1;
-                }
-                if j < bytes.len() && bytes[j] == b'"' {
-                    i = j;
-                } else {
-                    break;
-                }
-            }
-            out.push('"');
-            out.push_str(&joined);
-            out.push('"');
-        }
-        out
-    }
-
-    #[test]
-    fn collapse_python_adjacent_string_literals_joins_multiline_concat() {
-        // Meta-test for the helper above — if this ever regresses, the
-        // drift-protection test above becomes a false positive/negative.
-        let src = "SUPPRESSION_LINE = (\n    \"foo \"\n    \"bar \"\n    \"baz\"\n)\n";
-        let out = collapse_python_adjacent_string_literals(src);
-        assert!(
-            out.contains("\"foo bar baz\""),
-            "expected joined literal in output: {out:?}",
-        );
-        // Standalone literals must survive unchanged.
-        let standalone = "print(\"hello\")\n";
+    fn planned_parallel_pread_suppression_line_is_stable() {
         assert_eq!(
-            collapse_python_adjacent_string_literals(standalone),
-            standalone,
+            qwen_llm::runtime::PLANNED_PARALLEL_PREAD_SUPPRESSION_LINE,
+            concat!(
+                "[runtime-prefetch] schema=1 configured=cold-only action=suppressed ",
+                "reason=planned-parallel-direct-pread population=pread",
+            )
         );
     }
 

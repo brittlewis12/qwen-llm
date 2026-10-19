@@ -59,37 +59,31 @@ fn max_abs_finite_rejects_uncomparable_inputs() {
     );
 }
 
-fn qualification_facts(
-    name: &str,
-    physical_memory_bytes: Option<u64>,
-    unified_memory: bool,
-) -> crate::metal::DeviceFacts {
-    crate::metal::DeviceFacts {
-        version: "qwen_device_info_v7",
-        features: crate::enabled_diagnostic_features(),
-        name: name.into(),
-        architecture: "test".into(),
-        registry_id: 0,
-        gpu_families: crate::metal::GpuFamilySupport {
-            apple7: true,
-            apple8: false,
-            apple9: false,
-            apple10: false,
-            metal3: false,
-            metal4: false,
-        },
-        max_threadgroup_memory_bytes: 0,
-        max_buffer_length_bytes: 77_309_411_328,
-        recommended_max_working_set_bytes: 0,
-        unified_memory,
-        host_page_size_bytes: Some(16_384),
-        physical_memory_bytes,
-        os_version: None,
-        product_metallib_deployment_target: "",
-        research_metallib_deployment_target: "",
-        metallib_compiler_identity: "",
-        metallib_sdk_version: "",
-    }
+#[test]
+fn parallel_schedule_balances_contiguous_source_ranges() {
+    let identity = |index: usize, bytes: u64, shard_idx: usize| ModelWeightStorageIdentity {
+        name: format!("tensor.{index}"),
+        shard_idx,
+        data_offset: index as u64 * 4096,
+        source_bytes: bytes,
+        dtype: GgmlType::F32,
+        shape: vec![bytes / 4],
+        kind: ModelWeightStorageKind::Direct,
+        resident_bytes: bytes,
+    };
+    let expected = vec![
+        identity(0, 80, 0),
+        identity(1, 20, 0),
+        identity(2, 30, 1),
+        identity(3, 70, 1),
+    ];
+    let plan = plan_parallel_schedule(&expected, 2).expect("valid schedule");
+    assert_eq!(plan.sorted_request_indices, [0, 1, 2, 3]);
+    assert_eq!(plan.cuts, [2]);
+    assert_eq!(plan.worker_bytes, [100, 100]);
+    assert_eq!(plan.worker_tasks, [2, 2]);
+    assert!(plan_parallel_schedule(&expected[..1], 2).is_err());
+    assert!(plan_parallel_schedule(&expected, 0).is_err());
 }
 
 fn snapshot_validation_fixture() -> SessionSnapshot {
@@ -363,21 +357,13 @@ fn snapshot_validation_rejects_section_length_overflow() {
 
 #[test]
 fn gguf_no_copy_mode_is_strict_and_default_off() {
-    assert_eq!(
-        parse_gguf_owned_arena_mode(None).unwrap(),
-        GgufOwnedArenaMode::Disabled
-    );
+    assert!(parse_gguf_owned_arena_mode(None).is_ok());
     for value in ["1", "true", "TRUE", "yes", "YES"] {
-        assert_eq!(
-            parse_gguf_owned_arena_mode(Some(value)).unwrap(),
-            GgufOwnedArenaMode::Forced
-        );
+        let error = parse_gguf_owned_arena_mode(Some(value)).unwrap_err();
+        assert!(error.to_string().contains("was archived"));
     }
     for value in ["0", "false", "FALSE", "no", "NO"] {
-        assert_eq!(
-            parse_gguf_owned_arena_mode(Some(value)).unwrap(),
-            GgufOwnedArenaMode::Disabled
-        );
+        assert!(parse_gguf_owned_arena_mode(Some(value)).is_ok());
     }
     assert!(parse_gguf_owned_arena_mode(Some("enabled")).is_err());
     assert!(parse_gguf_owned_arena_mode(Some("")).is_err());
@@ -437,25 +423,10 @@ fn automatic_no_copy_choice_uses_working_set_headroom_and_margin() {
 }
 
 #[test]
-fn storage_configuration_resolver_rejects_owned_and_parallel_conflicts() {
-    let conflict = resolve_gguf_storage_load_configuration_from_values(
+fn owned_arena_environment_is_archived() {
+    let error = resolve_gguf_storage_load_configuration_from_values(
         None,
         Some("1"),
-        Some("1"),
-        None,
-        false,
-        NativeQuantEmbeddingMode::Auto,
-        None,
-    )
-    .unwrap_err();
-    assert_eq!(
-        conflict.to_string(),
-        "metal load policy: parallel copy and owned arena are mutually exclusive"
-    );
-
-    let invalid_owned = resolve_gguf_storage_load_configuration_from_values(
-        None,
-        Some("enabled"),
         None,
         None,
         false,
@@ -463,24 +434,10 @@ fn storage_configuration_resolver_rejects_owned_and_parallel_conflicts() {
         None,
     )
     .unwrap_err();
-    assert_eq!(
-        invalid_owned.to_string(),
-        "metal load policy: invalid QWEN_GGUF_OWNED_ARENA value \"enabled\""
-    );
-
-    let owned_embedding_rollback = resolve_gguf_storage_load_configuration_from_values(
-        None,
-        Some("1"),
-        None,
-        None,
-        true,
-        NativeQuantEmbeddingMode::Disabled,
-        None,
-    )
-    .unwrap_err();
-    assert_eq!(
-        owned_embedding_rollback.to_string(),
-        "metal load policy: forced owned or parallel storage requires production-auto native embedding selection"
+    assert!(
+        error
+            .to_string()
+            .contains("QWEN_GGUF_OWNED_ARENA was archived")
     );
 }
 
@@ -498,14 +455,12 @@ fn automatic_mapping_falls_back_when_retained_storage_is_unsupported() {
         n_bytes: 4,
     };
     let embedding_rollback =
-        retained_mapping_unsupported_reason(&[8192], &[&misaligned], 4096, 1 << 20, true, false)
-            .unwrap();
+        retained_mapping_unsupported_reason(&[8192], &[&misaligned], 4096, 1 << 20).unwrap();
     let unsupported_geometry =
-        retained_mapping_unsupported_reason(&[8192], &[&misaligned], 4096, 1 << 20, false, true)
-            .unwrap();
+        retained_mapping_unsupported_reason(&[8192], &[&misaligned], 4096, 1 << 20).unwrap();
     assert_eq!(
         embedding_rollback,
-        "automatic_mapping_unsupported_exact_27b_embedding_rollback"
+        "automatic_mapping_unsupported_binding_misalignment"
     );
     assert_eq!(
         unsupported_geometry,
@@ -523,8 +478,8 @@ fn automatic_mapping_falls_back_when_retained_storage_is_unsupported() {
     let retained = plan_retained_storage(&[16_384], &[&small_window], 4096, 8192, 32).unwrap();
     assert!(retained.windows.iter().all(|window| window.length <= 8192));
     assert_eq!(
-        retained_mapping_unsupported_reason(&[16_384], &[&small_window], 4096, 8192, true, true,),
-        Some("automatic_mapping_unsupported_exact_27b_whole_shard_exceeds_max_buffer")
+        retained_mapping_unsupported_reason(&[16_384], &[&small_window], 4096, 8192),
+        None
     );
     for reason in [embedding_rollback, unsupported_geometry] {
         let automatic = decide_gguf_storage_mode(
@@ -630,7 +585,6 @@ fn parallel_copy_policy_is_strict_and_conflict_complete() {
         validate_parallel_copy_policy(
             GgufParallelCopyMode::ForcedCopy,
             GgufNoCopyMode::Disabled,
-            GgufOwnedArenaMode::Disabled,
             false,
             false,
             router_f16,
@@ -645,7 +599,6 @@ fn parallel_copy_policy_is_strict_and_conflict_complete() {
         validate_parallel_copy_policy(
             GgufParallelCopyMode::ForcedPageRoundedCopy,
             GgufNoCopyMode::Disabled,
-            GgufOwnedArenaMode::Disabled,
             false,
             false,
             None,
@@ -656,7 +609,6 @@ fn parallel_copy_policy_is_strict_and_conflict_complete() {
         validate_parallel_copy_policy(
             GgufParallelCopyMode::ForcedPread,
             GgufNoCopyMode::Disabled,
-            GgufOwnedArenaMode::Disabled,
             false,
             false,
             None,
@@ -667,7 +619,6 @@ fn parallel_copy_policy_is_strict_and_conflict_complete() {
         validate_parallel_copy_policy(
             GgufParallelCopyMode::ForcedPread,
             GgufNoCopyMode::Forced,
-            GgufOwnedArenaMode::Disabled,
             false,
             false,
             None,
@@ -678,7 +629,6 @@ fn parallel_copy_policy_is_strict_and_conflict_complete() {
         validate_parallel_copy_policy(
             GgufParallelCopyMode::ForcedCopy,
             GgufNoCopyMode::Forced,
-            GgufOwnedArenaMode::Disabled,
             false,
             false,
             None,
@@ -689,18 +639,6 @@ fn parallel_copy_policy_is_strict_and_conflict_complete() {
         validate_parallel_copy_policy(
             GgufParallelCopyMode::ForcedCopy,
             GgufNoCopyMode::Disabled,
-            GgufOwnedArenaMode::Forced,
-            false,
-            false,
-            None,
-        )
-        .is_err()
-    );
-    assert!(
-        validate_parallel_copy_policy(
-            GgufParallelCopyMode::ForcedCopy,
-            GgufNoCopyMode::Disabled,
-            GgufOwnedArenaMode::Disabled,
             true,
             false,
             None,
@@ -711,7 +649,6 @@ fn parallel_copy_policy_is_strict_and_conflict_complete() {
         validate_parallel_copy_policy(
             GgufParallelCopyMode::ForcedCopy,
             GgufNoCopyMode::Disabled,
-            GgufOwnedArenaMode::Disabled,
             false,
             true,
             None,
@@ -722,7 +659,6 @@ fn parallel_copy_policy_is_strict_and_conflict_complete() {
         validate_parallel_copy_policy(
             GgufParallelCopyMode::Auto,
             GgufNoCopyMode::Forced,
-            GgufOwnedArenaMode::Forced,
             true,
             true,
             Some("invalid"),
@@ -733,43 +669,41 @@ fn parallel_copy_policy_is_strict_and_conflict_complete() {
 
 #[test]
 fn parallel_copy_auto_requires_scope_and_yields_to_overrides() {
-    assert!(auto_parallel_copy_a3b_enabled(
+    assert!(auto_parallel_copy_enabled(
         true,
         GgufParallelCopyMode::Auto,
         false,
     ));
-    assert!(!auto_parallel_copy_a3b_enabled(
+    assert!(!auto_parallel_copy_enabled(
         false,
         GgufParallelCopyMode::Auto,
         false,
     ));
-    assert!(!auto_parallel_copy_a3b_enabled(
+    assert!(!auto_parallel_copy_enabled(
         true,
         GgufParallelCopyMode::Disabled,
         false,
     ));
-    assert!(!auto_parallel_copy_a3b_enabled(
+    assert!(!auto_parallel_copy_enabled(
         true,
         GgufParallelCopyMode::ForcedCopy,
         false,
     ));
-    assert!(!auto_parallel_copy_a3b_enabled(
+    assert!(!auto_parallel_copy_enabled(
         true,
         GgufParallelCopyMode::ForcedPageRoundedCopy,
         false,
     ));
-    assert!(!auto_parallel_copy_a3b_enabled(
+    assert!(!auto_parallel_copy_enabled(
         true,
         GgufParallelCopyMode::Auto,
         true,
     ));
-    assert!(!auto_parallel_copy_a3b_override_present(|_| false));
-    for expected in A3B_PARALLEL_COPY_AUTO_OVERRIDE_ENVS {
-        assert!(auto_parallel_copy_a3b_override_present(
-            |name| name == expected
-        ));
+    assert!(!auto_parallel_copy_override_present(|_| false));
+    for expected in PARALLEL_COPY_AUTO_OVERRIDE_ENVS {
+        assert!(auto_parallel_copy_override_present(|name| name == expected));
     }
-    assert!(!MetalModelLoadOptions::default().auto_parallel_copy_a3b);
+    assert!(!MetalModelLoadOptions::default().auto_parallel_copy);
     assert!(!MetalModelLoadOptions::default().auto_retained_single_pass);
 }
 
@@ -779,7 +713,6 @@ fn automatic_retained_single_pass_is_general_and_override_safe() {
         true,
         true,
         GgufNoCopyMode::Disabled,
-        GgufOwnedArenaMode::Disabled,
         GgufParallelCopyMode::Auto,
         GgufNoCopyPrefaultMode::Default,
         false,
@@ -789,7 +722,6 @@ fn automatic_retained_single_pass_is_general_and_override_safe() {
             false,
             true,
             GgufNoCopyMode::Disabled,
-            GgufOwnedArenaMode::Disabled,
             GgufParallelCopyMode::Auto,
             GgufNoCopyPrefaultMode::Default,
             false,
@@ -798,7 +730,6 @@ fn automatic_retained_single_pass_is_general_and_override_safe() {
             true,
             false,
             GgufNoCopyMode::Disabled,
-            GgufOwnedArenaMode::Disabled,
             GgufParallelCopyMode::Auto,
             GgufNoCopyPrefaultMode::Default,
             false,
@@ -807,7 +738,6 @@ fn automatic_retained_single_pass_is_general_and_override_safe() {
             true,
             true,
             GgufNoCopyMode::Forced,
-            GgufOwnedArenaMode::Disabled,
             GgufParallelCopyMode::Auto,
             GgufNoCopyPrefaultMode::Default,
             false,
@@ -816,16 +746,6 @@ fn automatic_retained_single_pass_is_general_and_override_safe() {
             true,
             true,
             GgufNoCopyMode::Disabled,
-            GgufOwnedArenaMode::Forced,
-            GgufParallelCopyMode::Auto,
-            GgufNoCopyPrefaultMode::Default,
-            false,
-        ),
-        auto_retained_single_pass_enabled(
-            true,
-            true,
-            GgufNoCopyMode::Disabled,
-            GgufOwnedArenaMode::Disabled,
             GgufParallelCopyMode::Disabled,
             GgufNoCopyPrefaultMode::Default,
             false,
@@ -834,7 +754,6 @@ fn automatic_retained_single_pass_is_general_and_override_safe() {
             true,
             true,
             GgufNoCopyMode::Disabled,
-            GgufOwnedArenaMode::Disabled,
             GgufParallelCopyMode::Auto,
             GgufNoCopyPrefaultMode::Enabled,
             false,
@@ -843,7 +762,6 @@ fn automatic_retained_single_pass_is_general_and_override_safe() {
             true,
             true,
             GgufNoCopyMode::Disabled,
-            GgufOwnedArenaMode::Disabled,
             GgufParallelCopyMode::Auto,
             GgufNoCopyPrefaultMode::Default,
             true,
@@ -903,7 +821,7 @@ fn automatic_retained_single_pass_plans_qwen36_bf16_without_realizing_weights() 
         &gguf,
         &model,
         MetalModelLoadOptions {
-            auto_parallel_copy_a3b: false,
+            auto_parallel_copy: false,
             auto_retained_single_pass: true,
             auxiliary_weight_bytes: 0,
         },
@@ -923,607 +841,6 @@ fn automatic_retained_single_pass_plans_qwen36_bf16_without_realizing_weights() 
         prepared.prefetch_advice(),
         MetalLoadPrefetchAdvice::PreserveConfiguredPolicy
     );
-}
-
-#[test]
-fn parallel_copy_auto_population_is_exact_and_narrow() {
-    assert_eq!(
-        auto_parallel_copy_population(ParallelCopyProfileId::A3bQ4kmV1),
-        Some(ParallelPopulationMethod::Pread)
-    );
-    assert_eq!(
-        auto_parallel_copy_population(ParallelCopyProfileId::A10bQ4xlV1),
-        None
-    );
-    assert_eq!(
-        auto_parallel_copy_population(ParallelCopyProfileId::Dense27bQ4kmV1),
-        None
-    );
-}
-
-#[test]
-fn gguf_parallel_pread_capability_table_is_exact() {
-    let observed = PARALLEL_COPY_PROFILES
-        .iter()
-        .map(|profile| (profile.id, profile.supports_direct_pread))
-        .collect::<Vec<_>>();
-    assert_eq!(
-        observed,
-        vec![
-            (ParallelCopyProfileId::A3bQ4kmV1, true),
-            (ParallelCopyProfileId::A10bQ4xlV1, true),
-            (ParallelCopyProfileId::Dense27bQ4kmV1, true),
-        ]
-    );
-    for profile in PARALLEL_COPY_PROFILES {
-        if profile.id == ParallelCopyProfileId::A10bQ4xlV1 {
-            assert!(
-                validate_parallel_population(profile, ParallelPopulationMethod::MmapCopy).is_err()
-            );
-        } else {
-            validate_parallel_population(profile, ParallelPopulationMethod::MmapCopy)
-                .expect("mmap population capability");
-        }
-        validate_parallel_population(profile, ParallelPopulationMethod::Pread)
-            .expect("pread population capability");
-    }
-}
-
-#[test]
-fn gguf_parallel_pread_dense_marker_table_is_exact() {
-    assert_eq!(
-        parallel_copy_marker_label(
-            &DENSE27B_PARALLEL_COPY_PROFILE,
-            ParallelPopulationMethod::MmapCopy,
-            ParallelDestinationLength::LogicalExact,
-        )
-        .unwrap(),
-        "[metal-gguf-parallel-copied]"
-    );
-    assert_eq!(
-        parallel_copy_marker_label(
-            &DENSE27B_PARALLEL_COPY_PROFILE,
-            ParallelPopulationMethod::Pread,
-            ParallelDestinationLength::LogicalExact,
-        )
-        .unwrap(),
-        "[metal-gguf-parallel-pread]"
-    );
-}
-
-#[test]
-fn page_rounded_parallel_copy_contract_is_narrow_and_checked() {
-    assert_eq!(
-        GgufParallelCopyMode::ForcedCopy.forced_configuration(),
-        Some((
-            ParallelPopulationMethod::MmapCopy,
-            ParallelDestinationLength::LogicalExact,
-        ))
-    );
-    assert_eq!(
-        GgufParallelCopyMode::ForcedPread.forced_configuration(),
-        Some((
-            ParallelPopulationMethod::Pread,
-            ParallelDestinationLength::LogicalExact,
-        ))
-    );
-    assert_eq!(
-        GgufParallelCopyMode::ForcedPageRoundedCopy.forced_configuration(),
-        Some((
-            ParallelPopulationMethod::MmapCopy,
-            ParallelDestinationLength::PageRounded16K,
-        ))
-    );
-    assert!(GgufParallelCopyMode::Auto.forced_configuration().is_none());
-    assert!(
-        GgufParallelCopyMode::Disabled
-            .forced_configuration()
-            .is_none()
-    );
-
-    assert!(
-        validate_parallel_destination_length(
-            &A3B_PARALLEL_COPY_PROFILE,
-            ParallelPopulationMethod::MmapCopy,
-            ParallelDestinationLength::PageRounded16K,
-        )
-        .is_ok()
-    );
-    assert!(
-        validate_parallel_destination_length(
-            &A3B_PARALLEL_COPY_PROFILE,
-            ParallelPopulationMethod::Pread,
-            ParallelDestinationLength::PageRounded16K,
-        )
-        .is_err()
-    );
-    assert!(
-        validate_parallel_destination_length(
-            &DENSE27B_PARALLEL_COPY_PROFILE,
-            ParallelPopulationMethod::MmapCopy,
-            ParallelDestinationLength::PageRounded16K,
-        )
-        .is_err()
-    );
-    assert_eq!(
-        parallel_copy_marker_label(
-            &A3B_PARALLEL_COPY_PROFILE,
-            ParallelPopulationMethod::MmapCopy,
-            ParallelDestinationLength::PageRounded16K,
-        )
-        .unwrap(),
-        "[metal-gguf-parallel-page-rounded]"
-    );
-
-    assert_eq!(
-        parallel_destination_resource_length(4, ParallelDestinationLength::PageRounded16K, 16_384,)
-            .unwrap(),
-        16_384
-    );
-    assert_eq!(
-        parallel_destination_resource_length(
-            16_384,
-            ParallelDestinationLength::PageRounded16K,
-            16_384,
-        )
-        .unwrap(),
-        16_384
-    );
-    assert_eq!(
-        parallel_destination_resource_length(
-            16_385,
-            ParallelDestinationLength::PageRounded16K,
-            32_768,
-        )
-        .unwrap(),
-        32_768
-    );
-    assert!(
-        parallel_destination_resource_length(
-            16_385,
-            ParallelDestinationLength::PageRounded16K,
-            32_767,
-        )
-        .is_err()
-    );
-    assert!(
-        parallel_destination_resource_length(
-            usize::MAX as u64,
-            ParallelDestinationLength::PageRounded16K,
-            usize::MAX,
-        )
-        .is_err()
-    );
-    assert!(
-        parallel_destination_resource_length(
-            0,
-            ParallelDestinationLength::LogicalExact,
-            usize::MAX,
-        )
-        .is_err()
-    );
-
-    let identity = |index: usize, source_bytes: u64| ModelWeightStorageIdentity {
-        name: format!("weight.{index}"),
-        shard_idx: 0,
-        data_offset: index as u64 * 65_536,
-        source_bytes,
-        dtype: GgmlType::F32,
-        shape: vec![source_bytes / 4],
-        kind: ModelWeightStorageKind::Direct,
-        resident_bytes: source_bytes,
-    };
-    let identities = [identity(0, 4), identity(1, 16_384), identity(2, 16_388)];
-    assert_eq!(
-        parallel_destination_accounting(
-            &identities,
-            ParallelDestinationLength::LogicalExact,
-            usize::MAX,
-        )
-        .unwrap(),
-        (32_776, 0)
-    );
-    assert_eq!(
-        parallel_destination_accounting(
-            &identities,
-            ParallelDestinationLength::PageRounded16K,
-            usize::MAX,
-        )
-        .unwrap(),
-        (65_536, 2)
-    );
-}
-
-#[test]
-fn gguf_parallel_pread_non_a3b_auto_remains_none() {
-    assert_eq!(
-        auto_parallel_copy_population(ParallelCopyProfileId::Dense27bQ4kmV1),
-        None
-    );
-    assert_eq!(
-        auto_parallel_copy_population(ParallelCopyProfileId::A10bQ4xlV1),
-        None
-    );
-    assert_eq!(
-        auto_parallel_copy_population(ParallelCopyProfileId::A3bQ4kmV1),
-        Some(ParallelPopulationMethod::Pread)
-    );
-}
-
-#[test]
-fn gguf_parallel_pread_a10b_profile_is_exact_and_force_only() {
-    let profile = &A10B_PARALLEL_PREAD_PROFILE;
-    assert_eq!(profile.id.label(), "a10b-q4xl-v1");
-    assert_eq!(profile.architecture_label, Some("qwen35moe"));
-    assert_eq!(profile.arch, A10B_PARALLEL_COPY_ARCH);
-    assert_eq!(
-        profile.shard_mapped_lengths,
-        [10_943_552, 49_640_779_424, 27_378_273_056]
-    );
-    assert_eq!(profile.descriptor_layout_digest, 0x3eb2_9091_5bec_2041);
-    assert_eq!(
-        profile.inventory_digest,
-        "b331c475123dbee3bc862a495266dee3996c5f3adabcd6fbeaff9bbabd71a4f8"
-    );
-    assert_eq!(profile.embedding_dtype, GgmlType::Q8_0);
-    assert_eq!(profile.embedding_shape, [3072, 248_320]);
-    assert_eq!(profile.request_count, 879);
-    assert_eq!(profile.source_bytes, 77_018_996_736);
-    assert_eq!(profile.cuts, [214, 435, 658]);
-    assert_eq!(profile.task_counts, [214, 221, 223, 221]);
-    assert_eq!(
-        profile.worker_bytes,
-        [
-            19_474_295_808,
-            19_228_744_704,
-            19_231_902_720,
-            19_084_053_504
-        ]
-    );
-    assert!(validate_parallel_population(profile, ParallelPopulationMethod::Pread).is_ok());
-    assert!(validate_parallel_population(profile, ParallelPopulationMethod::MmapCopy).is_err());
-    assert_eq!(
-        parallel_copy_marker_label(
-            profile,
-            ParallelPopulationMethod::Pread,
-            ParallelDestinationLength::LogicalExact,
-        )
-        .unwrap(),
-        "[metal-gguf-parallel-pread]"
-    );
-}
-
-#[test]
-fn gguf_parallel_pread_dense_advice_preserves_configured_policy() {
-    let selected = PreparedAutoSelection::Selected(PreparedParallelCopiedProfile {
-        profile: &DENSE27B_PARALLEL_COPY_PROFILE,
-        population: ParallelPopulationMethod::Pread,
-        destination_length: ParallelDestinationLength::LogicalExact,
-        expected_identities: Vec::new(),
-        sorted_request_indices: Vec::new(),
-        _proof: PreparedParallelCopyProof::DensePlannerFree,
-    });
-    assert_eq!(
-        selected.prefetch_advice(),
-        MetalLoadPrefetchAdvice::PreserveConfiguredPolicy
-    );
-    assert_eq!(
-        PreparedAutoSelection::NotEligible.prefetch_advice(),
-        MetalLoadPrefetchAdvice::PreserveConfiguredPolicy
-    );
-}
-
-#[test]
-fn prepared_auto_prefetch_advice_selector_table_is_fail_closed() {
-    #[derive(Clone, Copy)]
-    enum Selection {
-        A3bPread,
-        A3bCopy,
-        A3bPageRoundedCopy,
-        A3bPreadWrongProof,
-        DenseCopy,
-        NoMatch,
-    }
-
-    let selected = |profile: &'static ParallelCopyProfile,
-                    population: ParallelPopulationMethod,
-                    destination_length: ParallelDestinationLength,
-                    proof: PreparedParallelCopyProof| {
-        PreparedAutoSelection::Selected(PreparedParallelCopiedProfile {
-            profile,
-            population,
-            destination_length,
-            expected_identities: Vec::new(),
-            sorted_request_indices: Vec::new(),
-            _proof: proof,
-        })
-    };
-    let selection = |case| match case {
-        Selection::A3bPread => selected(
-            &A3B_PARALLEL_COPY_PROFILE,
-            ParallelPopulationMethod::Pread,
-            ParallelDestinationLength::LogicalExact,
-            PreparedParallelCopyProof::A3bRetainedPlan,
-        ),
-        Selection::A3bCopy => selected(
-            &A3B_PARALLEL_COPY_PROFILE,
-            ParallelPopulationMethod::MmapCopy,
-            ParallelDestinationLength::LogicalExact,
-            PreparedParallelCopyProof::A3bRetainedPlan,
-        ),
-        Selection::A3bPageRoundedCopy => selected(
-            &A3B_PARALLEL_COPY_PROFILE,
-            ParallelPopulationMethod::MmapCopy,
-            ParallelDestinationLength::PageRounded16K,
-            PreparedParallelCopyProof::A3bRetainedPlan,
-        ),
-        Selection::A3bPreadWrongProof => selected(
-            &A3B_PARALLEL_COPY_PROFILE,
-            ParallelPopulationMethod::Pread,
-            ParallelDestinationLength::LogicalExact,
-            PreparedParallelCopyProof::DensePlannerFree,
-        ),
-        Selection::DenseCopy => selected(
-            &DENSE27B_PARALLEL_COPY_PROFILE,
-            ParallelPopulationMethod::MmapCopy,
-            ParallelDestinationLength::LogicalExact,
-            PreparedParallelCopyProof::DensePlannerFree,
-        ),
-        Selection::NoMatch => PreparedAutoSelection::NoMatch,
-    };
-    let cases = [
-        (
-            "disposable-auto-authenticated-a3b-pread",
-            true,
-            GgufParallelCopyMode::Auto,
-            false,
-            Selection::A3bPread,
-            MetalLoadPrefetchAdvice::SuppressColdOnlyAuthenticatedA3bDirectPread,
-        ),
-        (
-            "force-only",
-            false,
-            GgufParallelCopyMode::Auto,
-            false,
-            Selection::A3bPread,
-            MetalLoadPrefetchAdvice::PreserveConfiguredPolicy,
-        ),
-        (
-            "forced-copy",
-            true,
-            GgufParallelCopyMode::ForcedCopy,
-            false,
-            Selection::A3bPread,
-            MetalLoadPrefetchAdvice::PreserveConfiguredPolicy,
-        ),
-        (
-            "forced-pread",
-            true,
-            GgufParallelCopyMode::ForcedPread,
-            false,
-            Selection::A3bPread,
-            MetalLoadPrefetchAdvice::PreserveConfiguredPolicy,
-        ),
-        (
-            "parallel-copy-disabled",
-            true,
-            GgufParallelCopyMode::Disabled,
-            false,
-            Selection::A3bPread,
-            MetalLoadPrefetchAdvice::PreserveConfiguredPolicy,
-        ),
-        (
-            "explicit-override",
-            true,
-            GgufParallelCopyMode::Auto,
-            true,
-            Selection::A3bPread,
-            MetalLoadPrefetchAdvice::PreserveConfiguredPolicy,
-        ),
-        (
-            "no-profile-match",
-            true,
-            GgufParallelCopyMode::Auto,
-            false,
-            Selection::NoMatch,
-            MetalLoadPrefetchAdvice::PreserveConfiguredPolicy,
-        ),
-        (
-            "mmap-copy-population",
-            true,
-            GgufParallelCopyMode::Auto,
-            false,
-            Selection::A3bCopy,
-            MetalLoadPrefetchAdvice::PreserveConfiguredPolicy,
-        ),
-        (
-            "page-rounded-mmap-copy-population",
-            true,
-            GgufParallelCopyMode::Auto,
-            false,
-            Selection::A3bPageRoundedCopy,
-            MetalLoadPrefetchAdvice::PreserveConfiguredPolicy,
-        ),
-        (
-            "authentication-proof-mismatch",
-            true,
-            GgufParallelCopyMode::Auto,
-            false,
-            Selection::A3bPreadWrongProof,
-            MetalLoadPrefetchAdvice::PreserveConfiguredPolicy,
-        ),
-        (
-            "other-profile",
-            true,
-            GgufParallelCopyMode::Auto,
-            false,
-            Selection::DenseCopy,
-            MetalLoadPrefetchAdvice::PreserveConfiguredPolicy,
-        ),
-    ];
-
-    for (name, admission, mode, override_present, selected, expected) in cases {
-        let auto = if auto_parallel_copy_a3b_enabled(admission, mode, override_present) {
-            selection(selected)
-        } else {
-            PreparedAutoSelection::NotEligible
-        };
-        assert_eq!(auto.prefetch_advice(), expected, "{name}");
-    }
-}
-
-#[test]
-fn parallel_copy_auto_host_gate_is_exact() {
-    assert_eq!(
-        crate::metal::A3B_PARALLEL_COPY_AUTO.path,
-        "metal_forward.a3b_parallel_copy_auto"
-    );
-    for memory in [
-        None,
-        Some(32 * 1024 * 1024 * 1024),
-        Some(128 * 1024 * 1024 * 1024),
-    ] {
-        let facts = qualification_facts("Apple M4 Max", memory, true);
-        assert!(a3b_parallel_copy_auto_host_supported(&facts));
-    }
-    let variant = qualification_facts("Apple M5 Ultra", None, true);
-    assert!(a3b_parallel_copy_auto_host_supported(&variant));
-    let non_unified = qualification_facts("Apple M4 Max", Some(192 * 1024 * 1024 * 1024), false);
-    assert!(!a3b_parallel_copy_auto_host_supported(&non_unified));
-}
-
-#[test]
-fn a3b_auto_plan_accepts_sufficient_buffer_changes_and_falls_back_when_short() {
-    let required = usize::try_from(GGUF_OWNED_A3B_WINDOW_BYTES).unwrap();
-    assert!(residency::a3b_required_window_fits(required + 16_384));
-    assert!(!residency::a3b_required_window_fits(required - 1));
-
-    assert!(automatic_a3b_profile_capacity_admitted(
-        GgufNoCopyMode::Auto,
-        GgufParallelCopyMode::Auto,
-        GgufOwnedArenaMode::Disabled,
-        false,
-    ));
-    assert!(!automatic_a3b_profile_capacity_admitted(
-        GgufNoCopyMode::Auto,
-        GgufParallelCopyMode::Auto,
-        GgufOwnedArenaMode::Disabled,
-        true,
-    ));
-    assert!(automatic_a3b_profile_capacity_admitted(
-        GgufNoCopyMode::Disabled,
-        GgufParallelCopyMode::Auto,
-        GgufOwnedArenaMode::Disabled,
-        true,
-    ));
-}
-
-#[test]
-fn automatic_copy_admission_checks_working_set_and_process_headroom() {
-    let signals = |process_limit_remaining_bytes| crate::metal::MetalMemorySignals {
-        recommended_max_bytes: 1_000,
-        current_allocated_bytes: 100,
-        process_limit_remaining_bytes,
-    };
-    let fits = decide_gguf_storage_mode_with_signals(
-        100,
-        50,
-        Some(100),
-        signals(Some(400)),
-        true,
-        GgufStorageRequest::Automatic,
-        None,
-    );
-    assert!(!fits.capacity_would_map);
-    assert!(!fits.map_weights);
-    assert_eq!(fits.reason, "copy_fits_with_headroom");
-
-    let process_short = decide_gguf_storage_mode_with_signals(
-        100,
-        50,
-        Some(100),
-        signals(Some(349)),
-        true,
-        GgufStorageRequest::Automatic,
-        None,
-    );
-    assert!(process_short.capacity_would_map);
-    assert!(process_short.map_weights);
-    assert_eq!(process_short.reason, "copy_exceeds_process_headroom");
-
-    let working_set_short = decide_gguf_storage_mode_with_signals(
-        100,
-        50,
-        Some(100),
-        crate::metal::MetalMemorySignals {
-            recommended_max_bytes: 250,
-            current_allocated_bytes: 100,
-            process_limit_remaining_bytes: Some(400),
-        },
-        true,
-        GgufStorageRequest::Automatic,
-        None,
-    );
-    assert!(working_set_short.capacity_would_map);
-    assert!(working_set_short.map_weights);
-    assert_eq!(
-        working_set_short.reason,
-        "copy_exceeds_working_set_headroom"
-    );
-
-    let forced_copy = decide_gguf_storage_mode_with_signals(
-        100,
-        50,
-        Some(100),
-        signals(Some(1)),
-        true,
-        GgufStorageRequest::Copy("explicit_environment_override"),
-        None,
-    );
-    assert!(!forced_copy.map_weights);
-    assert_eq!(forced_copy.reason, "explicit_environment_override");
-}
-
-#[test]
-fn parallel_copy_profile_selection_is_exactly_one() {
-    assert_eq!(
-        crate::metal::PARALLEL_COPY_EXACT_UNIFIED.path,
-        "metal_forward.exact_unified_parallel_copy_profiles"
-    );
-    for profile in [
-        &DENSE27B_PARALLEL_COPY_PROFILE,
-        &A10B_PARALLEL_PREAD_PROFILE,
-    ] {
-        assert!(matches!(
-            profile.device_constraint,
-            ParallelCopyDeviceConstraint::ExactUnified(qualification)
-                if std::ptr::eq(qualification, &crate::metal::PARALLEL_COPY_EXACT_UNIFIED)
-        ));
-    }
-    let selected = select_unique_parallel_copy_profile(&PARALLEL_COPY_PROFILES, |profile| {
-        Ok(profile.id == ParallelCopyProfileId::Dense27bQ4kmV1)
-    })
-    .unwrap();
-    assert_eq!(selected.id, ParallelCopyProfileId::Dense27bQ4kmV1);
-
-    assert!(select_unique_parallel_copy_profile(&PARALLEL_COPY_PROFILES, |_| Ok(false)).is_err());
-    assert!(select_unique_parallel_copy_profile(&PARALLEL_COPY_PROFILES, |_| Ok(true)).is_err());
-    assert!(
-        select_unique_parallel_copy_profile(
-            &[&A3B_PARALLEL_COPY_PROFILE, &A3B_PARALLEL_COPY_PROFILE],
-            |_| Ok(true),
-        )
-        .is_err()
-    );
-}
-
-#[test]
-fn owned_arena_worker_boundaries_cover_nondivisible_page_counts() {
-    let page = 16_384;
-    let boundaries = owned_arena_four_worker_boundaries(11 * page, page).expect("valid boundaries");
-    assert_eq!(boundaries, [0, 2 * page, 5 * page, 8 * page, 11 * page]);
-    assert!(owned_arena_four_worker_boundaries(3 * page, page).is_err());
-    assert!(owned_arena_four_worker_boundaries(4 * page + 1, page).is_err());
 }
 
 #[test]
@@ -1690,7 +1007,6 @@ fn run_generic_retained_arm(
     model: &Model<'_>,
     tokens: &[i32],
     mode: GgufNoCopyMode,
-    owned_mode: GgufOwnedArenaMode,
     forced_next: Option<i32>,
 ) -> GenericRetainedArmResult {
     let metal_model = MetalModel::load_with_storage_policy(
@@ -1699,7 +1015,6 @@ fn run_generic_retained_arm(
         model,
         mode,
         false,
-        owned_mode,
         GgufParallelCopyMode::Disabled,
         false,
     )
@@ -1818,7 +1133,6 @@ fn assert_generic_retained_model_exact(
     let gguf = GgufFile::open(model_path).expect("open generic retained fixture");
     let model = Model::from_gguf(&gguf).expect("bind generic retained fixture");
     assert_eq!(model.tied_embeddings, expect_tied);
-    assert!(!matches_no_copy_27b_sentinel(&gguf, &model));
     assert_generic_retained_contract(&ctx, &gguf, &model, native_embedding, contract);
     let tokenizer = crate::tokenizer::Tokenizer::open(model_path).expect("tokenizer");
     let tokens = tokenizer
@@ -1826,22 +1140,14 @@ fn assert_generic_retained_model_exact(
         .expect("tokenize generic retained prompt");
     assert!(tokens.len() < 64);
 
-    let copied = run_generic_retained_arm(
-        &ctx,
-        &gguf,
-        &model,
-        &tokens,
-        GgufNoCopyMode::Disabled,
-        GgufOwnedArenaMode::Disabled,
-        None,
-    );
+    let copied =
+        run_generic_retained_arm(&ctx, &gguf, &model, &tokens, GgufNoCopyMode::Disabled, None);
     let retained = run_generic_retained_arm(
         &ctx,
         &gguf,
         &model,
         &tokens,
         GgufNoCopyMode::Forced,
-        GgufOwnedArenaMode::Disabled,
         Some(copied.next_token),
     );
     let retained_argmax = retained
@@ -1948,303 +1254,231 @@ fn gguf_no_copy_generic_a3b_q4_is_bit_exact() {
 }
 
 #[test]
-#[ignore = "requires local Qwen3.6 A3B Q4 fixture"]
-fn gguf_owned_arena_a3b_q4_is_bit_exact() {
-    let _ = crate::test_fixtures::A3B_Q4_K_M.required();
-
-    let model_path = crate::test_fixtures::A3B_Q4_K_M
-        .required()
-        .to_str()
-        .expect("model fixture path must be UTF-8");
-    assert_eq!(
-        native_quant_embedding_mode(),
-        NativeQuantEmbeddingMode::Auto,
-        "owned fixture requires production-auto embedding selection"
-    );
-    let ctx = MetalContext::new().expect("Metal context");
-    let gguf = GgufFile::open(model_path).expect("open owned A3B fixture");
-    let model = Model::from_gguf(&gguf).expect("bind owned A3B fixture");
-    let expected =
-        model_weight_storage_requests(&model, true, false).expect("owned A3B storage requests");
-    let direct = expected
-        .iter()
-        .map(|request| request.desc)
-        .collect::<Vec<_>>();
-    let mut storage = planned_owned_storage_for_load(
-        &ctx,
-        &gguf,
-        &model,
-        &expected,
-        NativeQuantEmbeddingSelection::AutoPromoted,
-    )
-    .expect("realize owned A3B storage");
-    assert_eq!(storage.resources.len(), 2);
-    assert_ne!(
-        Retained::as_ptr(&storage.resources[0]),
-        Retained::as_ptr(&storage.resources[1])
-    );
-    let mut ledger = WeightLoadLedger::default();
-    for desc in &direct {
-        let (tensor, materialization) = storage
-            .load_direct(desc)
-            .expect("materialize owned A3B tensor");
-        assert_eq!(
-            tensor.provenance(),
-            MetalTensorProvenance::OwnedWeightReadOnly
-        );
-        assert!(!tensor.is_writable());
-        ledger
-            .record_source(desc, materialization, tensor.n_bytes())
-            .expect("record owned A3B tensor");
-    }
-    storage
-        .validate_complete(&ledger)
-        .expect("complete owned A3B realization");
-    for (index, entry) in storage.plan.entries.iter().enumerate() {
-        let tensor = storage.realized[index]
-            .as_ref()
-            .expect("realized owned tensor");
-        let resource_index = match entry.disposition {
-            RetainedStorageDisposition::View { window_index, .. } => window_index,
-            RetainedStorageDisposition::CopyFallback { .. } => 1,
-            RetainedStorageDisposition::Alias { .. } => {
-                panic!("owned A3B sentinel must not contain aliases")
-            }
+fn load_plan_matches_previous_schedules_when_fixtures_are_present() {
+    let cases: [(
+        crate::test_fixtures::Fixture,
+        [usize; 3],
+        [usize; 4],
+        [u64; 4],
+        Option<(u64, usize)>,
+    ); 3] = [
+        (
+            crate::test_fixtures::A3B_Q4_K_M,
+            [155, 359, 539],
+            [155, 204, 180, 194],
+            [5_532_746_240, 5_462_315_776, 5_595_522_304, 5_532_954_624],
+            Some((2_758_144, 232)),
+        ),
+        (
+            crate::test_fixtures::QWEN36_27B_Q4_K_M,
+            [136, 377, 618],
+            [136, 241, 241, 233],
+            [4_194_110_464, 4_214_375_808, 4_204_933_376, 4_192_830_848],
+            None,
+        ),
+        (
+            crate::test_fixtures::A10B_Q4_K_XL,
+            [214, 435, 658],
+            [214, 221, 223, 221],
+            [
+                19_474_295_808,
+                19_228_744_704,
+                19_231_902_720,
+                19_084_053_504,
+            ],
+            None,
+        ),
+    ];
+    let page_size = host_page_size_bytes().expect("host page size");
+    let ctx = metal_test_context();
+    for (fixture, old_cuts, old_tasks, old_worker_bytes, old_page_padding) in cases {
+        let Some(path) = fixture.path_or_skip() else {
+            continue;
         };
+        let gguf = GgufFile::open(&path).expect("open fixture headers only");
+        let model = Model::from_gguf(&gguf).expect("bind fixture descriptors");
+        let expected =
+            model_weight_storage_requests(&model, true, false).expect("build fixture storage plan");
+        let identities = expected
+            .iter()
+            .map(expected_model_weight_identity)
+            .collect::<Vec<_>>();
+        let plan = plan_parallel_schedule(&identities, 4).expect("plan fixture schedule");
+        if let Some(ctx) = &ctx {
+            let load_plan = build_parallel_copy_plan(
+                ctx,
+                &gguf,
+                &model,
+                &expected,
+                NativeQuantEmbeddingSelection::AutoPromoted,
+            )
+            .expect("build allocation and admission plan from headers");
+            assert_eq!(load_plan.cuts, plan.cuts, "{} load-plan cuts", fixture.id);
+            assert_eq!(load_plan.worker_bytes, plan.worker_bytes);
+            assert_eq!(load_plan.page_size, page_size);
+            let required_headroom = load_plan
+                .destination_bytes
+                .checked_add(load_plan.fallback_bytes)
+                .and_then(|bytes| bytes.checked_add(GGUF_COPY_SESSION_RESERVE_BYTES))
+                .expect("computed schedule headroom");
+            eprintln!(
+                "[parallel-plan-admission] fixture={} destination_bytes={} padding_bytes={} fallback_bytes={} reserve_bytes={} required_headroom={} page_size={} max_buffer_length={}",
+                fixture.id,
+                load_plan.destination_bytes,
+                load_plan.padding_bytes,
+                load_plan.fallback_bytes,
+                GGUF_COPY_SESSION_RESERVE_BYTES,
+                required_headroom,
+                load_plan.page_size,
+                load_plan.max_buffer_length,
+            );
+        }
+        let total = identities
+            .iter()
+            .map(|entry| entry.source_bytes)
+            .sum::<u64>();
+        let mean = total / 4;
+        let old_spread = old_worker_bytes
+            .iter()
+            .map(|bytes| bytes.abs_diff(mean))
+            .max()
+            .unwrap();
+        let new_spread = plan
+            .worker_bytes
+            .iter()
+            .map(|bytes| bytes.abs_diff(mean))
+            .max()
+            .unwrap();
         assert_eq!(
-            Retained::as_ptr(&tensor.buffer),
-            Retained::as_ptr(&storage.resources[resource_index])
+            plan.worker_bytes.iter().sum::<u64>(),
+            total,
+            "{} total",
+            fixture.id
         );
+        assert!(new_spread <= old_spread, "{} byte balance", fixture.id);
+        let old_tasks_from_cuts = [
+            old_cuts[0],
+            old_cuts[1] - old_cuts[0],
+            old_cuts[2] - old_cuts[1],
+            identities.len() - old_cuts[2],
+        ];
+        assert_eq!(
+            old_tasks_from_cuts, old_tasks,
+            "{} historical tasks",
+            fixture.id
+        );
+        assert_eq!(plan.worker_tasks.iter().sum::<usize>(), identities.len());
+        eprintln!(
+            "[parallel-plan-compare] fixture={} old_cuts={:?} new_cuts={:?} old_tasks={:?} new_tasks={:?} old_worker_bytes={:?} new_worker_bytes={:?} old_max_deviation={} new_max_deviation={}",
+            fixture.id,
+            old_cuts,
+            plan.cuts,
+            old_tasks,
+            plan.worker_tasks,
+            old_worker_bytes,
+            plan.worker_bytes,
+            old_spread,
+            new_spread
+        );
+        let (page_bytes, padded) = parallel_destination_accounting(
+            &identities,
+            ParallelDestinationLength::PageRounded,
+            page_size,
+            usize::MAX,
+        )
+        .expect("page-rounded allocation plan");
+        if let Some((old_padding, old_padded)) = old_page_padding {
+            assert_eq!(page_bytes - total, old_padding);
+            assert_eq!(padded, old_padded);
+        }
     }
-    drop(storage);
-
-    let tokenizer = crate::tokenizer::Tokenizer::open(model_path).expect("tokenizer");
-    let tokens = tokenizer
-        .encode("Owned storage must preserve this state.", true)
-        .expect("tokenize owned prompt");
-    assert!(tokens.len() < 64);
-    let copied = run_generic_retained_arm(
-        &ctx,
-        &gguf,
-        &model,
-        &tokens,
-        GgufNoCopyMode::Disabled,
-        GgufOwnedArenaMode::Disabled,
-        None,
-    );
-    let owned = run_generic_retained_arm(
-        &ctx,
-        &gguf,
-        &model,
-        &tokens,
-        GgufNoCopyMode::Disabled,
-        GgufOwnedArenaMode::Forced,
-        Some(copied.next_token),
-    );
-    let owned_argmax = owned
-        .prefill_logits
-        .iter()
-        .enumerate()
-        .fold((0usize, f32::NEG_INFINITY), |best, (index, &value)| {
-            if value > best.1 { (index, value) } else { best }
-        })
-        .0 as i32;
-    assert_eq!(copied.next_token, owned_argmax);
-    assert_eq!(owned.next_token, owned_argmax);
-    assert_generic_retained_f32_bits(
-        "owned prefill logits",
-        &copied.prefill_logits,
-        &owned.prefill_logits,
-    );
-    assert_generic_retained_snapshot(
-        "owned prefill snapshot",
-        &copied.prefill_snapshot,
-        &owned.prefill_snapshot,
-    );
-    assert_generic_retained_f32_bits(
-        "owned decode logits",
-        &copied.decode_logits,
-        &owned.decode_logits,
-    );
-    assert_generic_retained_snapshot(
-        "owned decode snapshot",
-        &copied.decode_snapshot,
-        &owned.decode_snapshot,
-    );
 }
 
-fn assert_gguf_parallel_a3b_q4_is_bit_exact(
+fn assert_parallel_fixture_is_bit_exact(
+    fixture: crate::test_fixtures::Fixture,
     population: ParallelPopulationMethod,
-    destination_length: ParallelDestinationLength,
     marker: &str,
 ) {
-    let model_path = crate::test_fixtures::A3B_Q4_K_M
-        .required()
-        .to_str()
-        .expect("model fixture path must be UTF-8");
-    assert_eq!(
-        native_quant_embedding_mode(),
-        NativeQuantEmbeddingMode::Auto,
-        "parallel-copy fixture requires production-auto embedding selection"
-    );
-    assert!(!moe_router_f16_enabled());
-    let ctx = MetalContext::new().expect("Metal context");
-    if let Some(reason) = crate::metal::A3B_PARALLEL_COPY_AUTO.decline_reason(ctx.device_facts()) {
-        eprintln!(
-            "[metal-parallel-copy-a3b] skipped: M4 Max qualification does not hold: {reason:?}"
-        );
+    let Some(model_path) = fixture.path_or_skip() else {
         return;
-    }
-    let gguf = GgufFile::open(model_path).expect("open parallel-copy A3B fixture");
-    let model = Model::from_gguf(&gguf).expect("bind parallel-copy A3B fixture");
+    };
+    let ctx = metal_test_context().expect("Metal context required for parallel load witness");
+    let gguf = GgufFile::open(&model_path).expect("open parallel fixture");
+    let model = Model::from_gguf(&gguf).expect("bind parallel fixture");
     let tokens = [
         7734, 264, 12654, 709, 310, 12204, 279, 76938, 8240, 5199, 7638, 13,
     ];
+    let expected =
+        model_weight_storage_requests(&model, true, false).expect("parallel storage requests");
+    let embedding_selection = resolve_native_quant_embedding(
+        native_quant_embedding_mode(),
+        native_quant_embedding_supported(model.token_embd.dtype, &model.token_embd.shape),
+        native_quant_embedding_default_promoted(
+            &model.arch,
+            model.tied_embeddings,
+            model.token_embd.dtype,
+            &model.token_embd.shape,
+        ),
+    );
+    assert!(
+        expected
+            .iter()
+            .all(|request| request.kind == ModelWeightStorageKind::Direct)
+    );
 
-    let ((reference, parallel), load_lines) = capture_metal_load_lines(|| {
-        let run_parallel = |population, destination_length, expected_next_token| {
-            let embedding_selection = NativeQuantEmbeddingSelection::AutoPromoted;
-            emit_native_quant_embedding_policy(&model, embedding_selection);
-            let expected = model_weight_storage_requests(&model, true, false)
-                .expect("parallel-copy A3B storage requests");
-            let storage = planned_parallel_copied_storage_for_load(
-                &ctx,
-                &gguf,
-                &model,
-                &expected,
-                embedding_selection,
-                population,
-                destination_length,
-            )
-            .expect("realize parallel A3B storage");
-            storage
-                .validate_source_bytes(&gguf, &expected)
-                .expect("audit every parallel logical source byte");
-            validate_parallel_copied_topology(
-                storage.profile,
-                storage.destination_length,
-                &storage.expected,
-                &storage.resources,
-                &storage.tensors,
-            )
-            .expect("validate parallel topology before model construction");
-            assert_eq!(
-                frozen_parallel_copy_order(storage.profile, &storage.expected)
-                    .expect("frozen schedule"),
-                storage.sorted_request_indices
-            );
-            assert_eq!(storage.destination_length, destination_length);
-            let (allocated_bytes, padded_resources) = parallel_destination_accounting(
-                &storage.expected,
-                destination_length,
-                ctx.max_buffer_length(),
-            )
-            .expect("parallel destination accounting");
-            match destination_length {
-                ParallelDestinationLength::LogicalExact => {
-                    assert_eq!(allocated_bytes, GGUF_OWNED_A3B_SOURCE_BYTES);
-                    assert_eq!(padded_resources, 0);
-                }
-                ParallelDestinationLength::PageRounded16K => {
-                    assert_eq!(allocated_bytes, GGUF_PAGE_ROUNDED_A3B_ALLOCATED_BYTES);
-                    assert_eq!(padded_resources, GGUF_PAGE_ROUNDED_A3B_PADDED_RESOURCES);
-                    assert_eq!(
-                        allocated_bytes - GGUF_OWNED_A3B_SOURCE_BYTES,
-                        GGUF_PAGE_ROUNDED_A3B_PADDING_BYTES
-                    );
-                    assert!(
-                        storage
-                            .resources
-                            .iter()
-                            .all(|resource| resource.length() % 16_384 == 0)
-                    );
-                }
-            }
-
-            let command = ctx.queue.commandBuffer().expect("write guard command");
-            let encoder = crate::metal::KernelEncoder::begin(&command);
-            let write_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                encoder.note_write(&storage.tensors[0]);
-            }));
-            assert!(
-                write_result.is_err(),
-                "parallel weights must reject compute writes"
-            );
-            encoder.end();
-
-            let command = ctx.queue.commandBuffer().expect("blit guard command");
-            let blit = crate::metal::BlitEncoder::begin(&command);
-            let blit_destination = storage
-                .tensors
-                .iter()
-                .find(|tensor| tensor.dtype == GgmlType::F32 && tensor.n_bytes() <= 1_048_576)
-                .expect("small direct F32 candidate weight");
-            let writable_source = MetalTensor::zeros_f32(&ctx, blit_destination.shape.clone())
-                .expect("equal-sized blit source");
-            assert_eq!(writable_source.n_bytes(), blit_destination.n_bytes());
-            let write_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                blit.copy_tensor(&writable_source, blit_destination);
-            }));
-            assert!(
-                write_result.is_err(),
-                "parallel weights must reject blit writes"
-            );
-            blit.end();
-
-            let parallel_model = MetalModel::load_with_direct_storage(
-                &ctx,
-                &gguf,
-                &model,
-                ResolvedWeightLoadChoices {
-                    embedding_selection,
-                    router_f16: false,
-                    fused_qkv_g8: false,
-                    dense_iq_native: dense_iq_native_storage_enabled(),
-                },
-                &expected,
-                DirectStorage::ForcedParallelCopied(storage),
-                false,
-            )
-            .expect("construct model from audited parallel storage");
-            run_loaded_model_arm(&ctx, parallel_model, &tokens, expected_next_token)
-        };
-
-        let reference = match destination_length {
-            ParallelDestinationLength::LogicalExact => run_generic_retained_arm(
-                &ctx,
-                &gguf,
-                &model,
-                &tokens,
-                GgufNoCopyMode::Disabled,
-                GgufOwnedArenaMode::Disabled,
-                None,
-            ),
-            ParallelDestinationLength::PageRounded16K => run_parallel(
-                ParallelPopulationMethod::MmapCopy,
-                ParallelDestinationLength::LogicalExact,
-                None,
-            ),
-        };
-        let parallel = run_parallel(population, destination_length, Some(reference.next_token));
-        (reference, parallel)
+    let reference =
+        run_generic_retained_arm(&ctx, &gguf, &model, &tokens, GgufNoCopyMode::Disabled, None);
+    let (storage, load_lines) = capture_metal_load_lines(|| {
+        planned_parallel_storage_for_load(
+            &ctx,
+            &gguf,
+            &model,
+            &expected,
+            embedding_selection,
+            population,
+            ParallelDestinationLength::LogicalExact,
+        )
+        .expect("realize descriptor-planned parallel storage")
     });
-    let parallel_argmax = parallel
-        .prefill_logits
-        .iter()
-        .enumerate()
-        .fold((0usize, f32::NEG_INFINITY), |best, (index, &value)| {
-            if value > best.1 { (index, value) } else { best }
-        })
-        .0 as i32;
-    assert_eq!(reference.next_token, parallel_argmax);
-    assert_eq!(parallel.next_token, parallel_argmax);
+    assert!(
+        load_lines
+            .iter()
+            .any(|line| line.starts_with(marker) && line.contains("schema=3"))
+    );
+    storage
+        .validate_source_bytes(&gguf, &expected)
+        .expect("parallel resident bytes equal file source bytes");
+    let plan = plan_parallel_schedule(&storage.expected, storage.plan.task_counts.len())
+        .expect("recompute plan from bound load requests");
+    assert_eq!(plan.cuts, storage.plan.cuts);
+    assert_eq!(plan.worker_bytes, storage.plan.worker_bytes);
+
+    let choices = ResolvedWeightLoadChoices::resolve(embedding_selection, false);
+    let (parallel_model, model_load_lines) = capture_metal_load_lines(|| {
+        MetalModel::load_with_direct_storage(
+            &ctx,
+            &gguf,
+            &model,
+            choices,
+            &expected,
+            DirectStorage::ForcedParallelCopied(storage),
+        )
+        .expect("construct model with planned parallel storage")
+    });
+    assert!(
+        model_load_lines
+            .iter()
+            .any(|line| line.starts_with("[metal-load-ledger]"))
+    );
+    let parallel = run_loaded_model_arm(&ctx, parallel_model, &tokens, Some(reference.next_token));
+    assert_eq!(reference.next_token, parallel.next_token);
     assert_generic_retained_f32_bits(
         "parallel prefill logits",
         &reference.prefill_logits,
         &parallel.prefill_logits,
     );
     assert_generic_retained_snapshot(
-        "parallel prefill snapshot",
+        "parallel prefill state",
         &reference.prefill_snapshot,
         &parallel.prefill_snapshot,
     );
@@ -2254,453 +1488,43 @@ fn assert_gguf_parallel_a3b_q4_is_bit_exact(
         &parallel.decode_logits,
     );
     assert_generic_retained_snapshot(
-        "parallel decode snapshot",
+        "parallel decode state",
         &reference.decode_snapshot,
         &parallel.decode_snapshot,
-    );
-
-    let native_line = format!(
-        "[metal-load] native quantized token embedding policy: auto-promoted ({:?} {:?})",
-        model.token_embd.dtype, model.token_embd.shape
-    );
-    let ledger_line = concat!(
-        "[metal-load-ledger] source=733/22123538944 ",
-        "direct_copy=733/22123538944 direct_view=0/0 direct_alias=0/0 ",
-        "tail_fallback=0/0 converted=0/0/0 derived=0/0"
-    );
-    let candidate_marker_index = match destination_length {
-        ParallelDestinationLength::LogicalExact => {
-            assert_eq!(load_lines.len(), 5, "recognized load-line count");
-            assert_eq!(load_lines[0], native_line, "A native policy line");
-            assert_eq!(load_lines[1], ledger_line, "A copied ledger line");
-            assert_eq!(load_lines[2], native_line, "B native policy line");
-            assert_eq!(load_lines[4], ledger_line, "B copied ledger line");
-            3
-        }
-        ParallelDestinationLength::PageRounded16K => {
-            assert_eq!(load_lines.len(), 6, "recognized load-line count");
-            assert_eq!(load_lines[0], native_line, "A native policy line");
-            assert!(
-                load_lines[1].starts_with("[metal-gguf-parallel-copied] schema=1 "),
-                "A exact-parallel marker"
-            );
-            assert_eq!(load_lines[2], ledger_line, "A copied ledger line");
-            assert_eq!(load_lines[3], native_line, "B native policy line");
-            assert_eq!(load_lines[5], ledger_line, "B copied ledger line");
-            4
-        }
-    };
-    assert_eq!(
-        load_lines
-            .iter()
-            .filter(|line| line.starts_with(marker))
-            .count(),
-        1,
-        "candidate marker count"
-    );
-    assert_eq!(
-        load_lines
-            .iter()
-            .filter(|line| *line == ledger_line)
-            .count(),
-        2,
-        "copied ledger count"
-    );
-
-    let marker_contract = match destination_length {
-        ParallelDestinationLength::LogicalExact => concat!(
-            " schema=1 resources=733 bytes=22123538944 ",
-            "workers=4 cuts=155,359,539 tasks=155,204,180,194 ",
-            "worker_bytes=5532746240,5462315776,5595522304,5532954624 ",
-            "first_offsets=10990048,5543736288,11006052064,16601574368 ",
-            "last_offsets=5392741344,11004937952,16450579424,22134520800 ",
-            "create=shared,default_cache,default observed=shared,default_cache,tracked ",
-            "device=Apple M4 Max page=Some(16384) alignment=32 max_buffer=77309411328 mapped=22134528992 ",
-            "layout=0x5ae645df5cf7d568 ",
-            "inventory=f57153febec22463c7789b892d4d084041d722483a93191c81c40ab86be7d9e5 ",
-        ),
-        ParallelDestinationLength::PageRounded16K => concat!(
-            " schema=2 resources=733 logical_bytes=22123538944 ",
-            "allocated_bytes=22126297088 padding_bytes=2758144 ",
-            "padded_resources=232 workers=4 cuts=155,359,539 ",
-            "tasks=155,204,180,194 ",
-            "worker_bytes=5532746240,5462315776,5595522304,5532954624 ",
-            "first_offsets=10990048,5543736288,11006052064,16601574368 ",
-            "last_offsets=5392741344,11004937952,16450579424,22134520800 ",
-            "create=shared,default_cache,default observed=shared,default_cache,tracked ",
-            "device=Apple M4 Max page=Some(16384) alignment=32 max_buffer=77309411328 mapped=22134528992 ",
-            "layout=0x5ae645df5cf7d568 ",
-            "inventory=f57153febec22463c7789b892d4d084041d722483a93191c81c40ab86be7d9e5 ",
-        ),
-    };
-    let marker_prefix = format!("{marker}{marker_contract}");
-    let timing_suffix = load_lines[candidate_marker_index]
-        .strip_prefix(&marker_prefix)
-        .expect("exact candidate marker prefix and field order");
-    let timing_fields = timing_suffix.split(' ').collect::<Vec<_>>();
-    assert_eq!(timing_fields.len(), 5, "candidate timing field count");
-    let parse_timing = |index: usize, name: &str| {
-        let value = timing_fields[index]
-            .strip_prefix(name)
-            .expect("candidate timing field name");
-        assert!(
-            !value.is_empty() && value.bytes().all(|byte| byte.is_ascii_digit()),
-            "candidate timing must be unsigned decimal"
-        );
-        let parsed = value.parse::<u64>().expect("candidate timing value");
-        assert_eq!(parsed.to_string(), value, "candidate timing canonical form");
-        parsed
-    };
-    let allocation_us = parse_timing(0, "allocation_us=");
-    let source_us = parse_timing(1, "source_us=");
-    let copy_us = parse_timing(2, "copy_us=");
-    let binding_us = parse_timing(3, "binding_us=");
-    let ready_us = parse_timing(4, "ready_us=");
-    let phase_us = allocation_us + source_us + copy_us + binding_us;
-    assert!(
-        ready_us.abs_diff(phase_us) <= 4,
-        "candidate timing reconciliation"
     );
 }
 
 #[test]
-#[ignore = "requires local Qwen3.6 A3B Q4 fixture"]
 fn gguf_parallel_copied_a3b_q4_is_bit_exact() {
-    assert_gguf_parallel_a3b_q4_is_bit_exact(
+    assert_parallel_fixture_is_bit_exact(
+        crate::test_fixtures::A3B_Q4_K_M,
         ParallelPopulationMethod::MmapCopy,
-        ParallelDestinationLength::LogicalExact,
         "[metal-gguf-parallel-copied]",
     );
 }
 
 #[test]
-#[ignore = "requires local Qwen3.6 A3B Q4 fixture"]
 fn gguf_parallel_pread_a3b_q4_is_bit_exact() {
-    assert_gguf_parallel_a3b_q4_is_bit_exact(
+    assert_parallel_fixture_is_bit_exact(
+        crate::test_fixtures::A3B_Q4_K_M,
         ParallelPopulationMethod::Pread,
-        ParallelDestinationLength::LogicalExact,
         "[metal-gguf-parallel-pread]",
     );
 }
 
 #[test]
-#[ignore = "requires local Qwen3.6 A3B Q4 fixture"]
-fn gguf_parallel_page_rounded_a3b_q4_is_bit_exact() {
-    assert_gguf_parallel_a3b_q4_is_bit_exact(
-        ParallelPopulationMethod::MmapCopy,
-        ParallelDestinationLength::PageRounded16K,
-        "[metal-gguf-parallel-page-rounded]",
-    );
-}
-
-fn assert_gguf_parallel_dense27b_q4_is_bit_exact(
-    population: ParallelPopulationMethod,
-    marker: &str,
-) {
-    let model_path = crate::test_fixtures::QWEN36_27B_Q4_K_M
-        .required()
-        .to_str()
-        .expect("model fixture path must be UTF-8");
-    assert_eq!(
-        native_quant_embedding_mode(),
-        NativeQuantEmbeddingMode::Auto,
-        "parallel-copy fixture requires production-auto embedding selection"
-    );
-    assert!(!moe_router_f16_enabled());
-    let ctx = MetalContext::new().expect("Metal context");
-    let gguf = GgufFile::open(model_path).expect("open parallel-copy dense fixture");
-    let model = Model::from_gguf(&gguf).expect("bind parallel-copy dense fixture");
-    let profile = &DENSE27B_PARALLEL_COPY_PROFILE;
-    if let Some(reason) =
-        crate::metal::PARALLEL_COPY_EXACT_UNIFIED.decline_reason(ctx.device_facts())
-    {
-        eprintln!(
-            "[metal-parallel-copy-dense27b] skipped: M4 Max qualification does not hold: {reason:?}"
-        );
-        return;
-    }
-    assert_eq!(gguf.architecture().as_deref(), profile.architecture_label);
-    assert_eq!(gguf.shard_mapped_lengths(), profile.shard_mapped_lengths);
-    assert_eq!(
-        gguf_descriptor_layout_digest(&gguf),
-        profile.descriptor_layout_digest
-    );
-    assert_eq!(model.arch, profile.arch);
-    assert_eq!(model.tied_embeddings, profile.tied_embeddings);
-    assert_eq!(model.mtp.is_some(), profile.mtp_present);
-    assert_eq!(model.token_embd.dtype, profile.embedding_dtype);
-    assert_eq!(model.token_embd.shape, profile.embedding_shape);
-    assert_eq!(ctx.device.name().to_string(), "Apple M4 Max");
-    assert_eq!(host_page_size_bytes().unwrap(), 16_384);
-    assert_eq!(ctx.max_buffer_length(), 77_309_411_328);
-    let expected_probe =
-        model_weight_storage_requests(&model, true, false).expect("dense profile requests");
-    assert_eq!(expected_probe.len(), profile.request_count);
-    assert_eq!(
-        model_weight_storage_inventory_digest(&expected_probe),
-        profile.inventory_digest
-    );
-    assert!(
-        parallel_copy_profile_matches(
-            &ctx,
-            &gguf,
-            &model,
-            &expected_probe,
-            NativeQuantEmbeddingSelection::AutoPromoted,
-            profile,
-        )
-        .expect("dense profile match")
-    );
-    drop(expected_probe);
-    let tokens = [
-        7734, 264, 12654, 709, 310, 12204, 279, 76938, 8240, 5199, 7638, 13,
-    ];
-
-    let ((copied, parallel), load_lines) = capture_metal_load_lines(|| {
-        let copied = run_generic_retained_arm(
-            &ctx,
-            &gguf,
-            &model,
-            &tokens,
-            GgufNoCopyMode::Disabled,
-            GgufOwnedArenaMode::Disabled,
-            None,
-        );
-
-        let embedding_selection = NativeQuantEmbeddingSelection::AutoPromoted;
-        emit_native_quant_embedding_policy(&model, embedding_selection);
-        let expected = model_weight_storage_requests(&model, true, false)
-            .expect("parallel-copy dense storage requests");
-        let storage = planned_parallel_copied_storage_for_load(
-            &ctx,
-            &gguf,
-            &model,
-            &expected,
-            embedding_selection,
-            population,
-            ParallelDestinationLength::LogicalExact,
-        )
-        .expect("realize parallel dense storage");
-        assert_eq!(storage.profile.id, ParallelCopyProfileId::Dense27bQ4kmV1);
-        storage
-            .validate_source_bytes(&gguf, &expected)
-            .expect("audit every parallel resource byte");
-        validate_parallel_copied_topology(
-            storage.profile,
-            storage.destination_length,
-            &storage.expected,
-            &storage.resources,
-            &storage.tensors,
-        )
-        .expect("validate parallel-copy topology before model construction");
-        assert_eq!(
-            frozen_parallel_copy_order(storage.profile, &storage.expected)
-                .expect("frozen schedule"),
-            storage.sorted_request_indices
-        );
-
-        let command = ctx.queue.commandBuffer().expect("write guard command");
-        let encoder = crate::metal::KernelEncoder::begin(&command);
-        let write_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            encoder.note_write(&storage.tensors[0]);
-        }));
-        assert!(
-            write_result.is_err(),
-            "parallel weights must reject compute writes"
-        );
-        encoder.end();
-
-        let command = ctx.queue.commandBuffer().expect("blit guard command");
-        let blit = crate::metal::BlitEncoder::begin(&command);
-        let blit_destination = storage
-            .tensors
-            .iter()
-            .find(|tensor| tensor.dtype == GgmlType::F32 && tensor.n_bytes() <= 1_048_576)
-            .expect("small direct F32 candidate weight");
-        let writable_source = MetalTensor::zeros_f32(&ctx, blit_destination.shape.clone())
-            .expect("equal-sized blit source");
-        assert_eq!(writable_source.n_bytes(), blit_destination.n_bytes());
-        let write_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            blit.copy_tensor(&writable_source, blit_destination);
-        }));
-        assert!(
-            write_result.is_err(),
-            "parallel weights must reject blit writes"
-        );
-        blit.end();
-
-        let parallel_model = MetalModel::load_with_direct_storage(
-            &ctx,
-            &gguf,
-            &model,
-            ResolvedWeightLoadChoices {
-                embedding_selection,
-                router_f16: false,
-                fused_qkv_g8: false,
-                dense_iq_native: dense_iq_native_storage_enabled(),
-            },
-            &expected,
-            DirectStorage::ForcedParallelCopied(storage),
-            false,
-        )
-        .expect("construct model from audited parallel-copy storage");
-        let parallel = run_loaded_model_arm(&ctx, parallel_model, &tokens, Some(copied.next_token));
-        (copied, parallel)
-    });
-    let parallel_argmax = parallel
-        .prefill_logits
-        .iter()
-        .enumerate()
-        .fold((0usize, f32::NEG_INFINITY), |best, (index, &value)| {
-            if value > best.1 { (index, value) } else { best }
-        })
-        .0 as i32;
-    assert_eq!(copied.next_token, parallel_argmax);
-    assert_eq!(parallel.next_token, parallel_argmax);
-    assert_generic_retained_f32_bits(
-        "parallel prefill logits",
-        &copied.prefill_logits,
-        &parallel.prefill_logits,
-    );
-    assert_generic_retained_snapshot(
-        "parallel prefill snapshot",
-        &copied.prefill_snapshot,
-        &parallel.prefill_snapshot,
-    );
-    assert_generic_retained_f32_bits(
-        "parallel decode logits",
-        &copied.decode_logits,
-        &parallel.decode_logits,
-    );
-    assert_generic_retained_snapshot(
-        "parallel decode snapshot",
-        &copied.decode_snapshot,
-        &parallel.decode_snapshot,
-    );
-
-    let native_line = format!(
-        "[metal-load] native quantized token embedding policy: auto-promoted ({:?} {:?})",
-        model.token_embd.dtype, model.token_embd.shape
-    );
-    let ledger_line = concat!(
-        "[metal-load-ledger] source=851/16806250496 ",
-        "direct_copy=851/16806250496 direct_view=0/0 direct_alias=0/0 ",
-        "tail_fallback=0/0 converted=0/0/0 derived=0/0"
-    );
-    assert_eq!(load_lines.len(), 5, "recognized load-line count");
-    assert_eq!(load_lines[0], native_line, "A native policy line");
-    assert_eq!(load_lines[1], ledger_line, "A copied ledger line");
-    assert_eq!(load_lines[2], native_line, "B native policy line");
-    assert_eq!(load_lines[4], ledger_line, "B copied ledger line");
-    assert_eq!(
-        load_lines
-            .iter()
-            .filter(|line| line.starts_with(marker))
-            .count(),
-        1,
-        "candidate marker count"
-    );
-    assert_eq!(
-        load_lines
-            .iter()
-            .filter(|line| *line == ledger_line)
-            .count(),
-        2,
-        "copied ledger count"
-    );
-
-    let marker_prefix = format!(
-        "{}{}",
-        marker,
-        concat!(
-            " schema=2 profile=dense27b-q4km-v1 ",
-            "resources=851 bytes=16806250496 workers=4 cuts=136,377,618 ",
-            "tasks=136,241,241,233 ",
-            "worker_bytes=4194110464,4214375808,4204933376,4192830848 ",
-            "w0_first=2,output.weight,0,10993888,1042944000 ",
-            "w0_last=135,blk.9.ssm_norm.weight,0,4205103840,512 ",
-            "w1_first=136,blk.9.ssm_out.weight,0,4205104352,21626880 ",
-            "w1_last=379,blk.28.attn_qkv.weight,0,8376472160,43008000 ",
-            "w2_first=378,blk.28.ffn_down.weight,0,8419480160,73113600 ",
-            "w2_last=618,blk.46.ffn_down.weight,0,12551299936,73113600 ",
-            "w3_first=616,blk.46.ffn_gate.weight,0,12624413536,50135040 ",
-            "w3_last=844,blk.63.post_attention_norm.weight,0,16817223904,20480 ",
-            "create=shared,default_cache,default ",
-            "observed=shared,default_cache,tracked ",
-            "device=Apple M4 Max page=Some(16384) alignment=32 max_buffer=77309411328 ",
-            "mapped=16817244384 layout=0xd116405fd99f54d9 ",
-            "inventory=50e9af4e4f590fc85687a71f5602ce035e7fdf0e2a31e928b2c7a2be10458a07 "
-        )
-    );
-    assert!(!load_lines[3].contains(" plan="));
-    let timing_suffix = load_lines[3]
-        .strip_prefix(&marker_prefix)
-        .expect("exact dense candidate marker prefix and field order");
-    let timing_fields = timing_suffix.split(' ').collect::<Vec<_>>();
-    let timing_names = [
-        "allocation_us",
-        "source_us",
-        "copy_us",
-        "binding_us",
-        "ready_us",
-        "user_cpu_us",
-        "system_cpu_us",
-        "total_cpu_us",
-        "timer_minor_faults",
-        "timer_major_faults",
-        "instructions_delta_raw",
-        "cycles_delta_raw",
-    ];
-    assert_eq!(
-        timing_fields.len(),
-        timing_names.len(),
-        "candidate dynamic field count"
-    );
-    let mut timing_values = Vec::with_capacity(timing_names.len());
-    for (field, name) in timing_fields.iter().zip(timing_names) {
-        let value = field
-            .strip_prefix(&format!("{name}="))
-            .expect("candidate dynamic field name");
-        assert!(
-            !value.is_empty() && value.bytes().all(|byte| byte.is_ascii_digit()),
-            "candidate dynamic field must be unsigned decimal"
-        );
-        let parsed = value.parse::<u64>().expect("candidate dynamic value");
-        assert_eq!(
-            parsed.to_string(),
-            value,
-            "candidate dynamic canonical form"
-        );
-        timing_values.push(parsed);
-    }
-    assert!(
-        timing_values[4] > 0,
-        "candidate ready time must be positive"
-    );
-    assert!(
-        timing_values[4].abs_diff(timing_values[..4].iter().sum()) <= 4,
-        "candidate timing reconciliation"
-    );
-    assert_eq!(
-        timing_values[7],
-        timing_values[5] + timing_values[6],
-        "candidate CPU reconciliation"
-    );
-}
-
-#[test]
-#[ignore = "requires local Qwen3.6 dense 27B Q4 fixture"]
 fn gguf_parallel_copied_dense27b_q4_is_bit_exact() {
-    assert_gguf_parallel_dense27b_q4_is_bit_exact(
+    assert_parallel_fixture_is_bit_exact(
+        crate::test_fixtures::QWEN36_27B_Q4_K_M,
         ParallelPopulationMethod::MmapCopy,
         "[metal-gguf-parallel-copied]",
     );
 }
 
 #[test]
-#[ignore = "requires local Qwen3.6 dense 27B Q4 fixture"]
 fn gguf_parallel_pread_dense27b_q4_is_bit_exact() {
-    assert_gguf_parallel_dense27b_q4_is_bit_exact(
+    assert_parallel_fixture_is_bit_exact(
+        crate::test_fixtures::QWEN36_27B_Q4_K_M,
         ParallelPopulationMethod::Pread,
         "[metal-gguf-parallel-pread]",
     );
@@ -2876,18 +1700,6 @@ fn gguf_no_copy_split_a10b_resources_outlive_loader() {
 }
 
 #[test]
-#[ignore = "requires QWEN_GGUF_NO_COPY_MODEL local exact 27B fixture"]
-fn gguf_no_copy_layout_digest_probe() {
-    let path = std::env::var("QWEN_GGUF_NO_COPY_MODEL")
-        .expect("set QWEN_GGUF_NO_COPY_MODEL to the exact 27B GGUF");
-    let gguf = GgufFile::open(&path).expect("open exact 27B GGUF");
-    eprintln!(
-        "[gguf-no-copy-layout] model={path} digest={:#018x}",
-        gguf_descriptor_layout_digest(&gguf)
-    );
-}
-
-#[test]
 #[ignore = "requires local exact 27B model and frozen Reva prompt"]
 fn gguf_no_copy_27b_prefill_and_continuation_are_bit_exact() {
     let _ = crate::test_fixtures::QWEN35_0_8B_F32.required();
@@ -3016,30 +1828,6 @@ fn gguf_no_copy_27b_prefill_and_continuation_are_bit_exact() {
     let ctx = MetalContext::new().expect("Metal context");
     let gguf = GgufFile::open(model_path).expect("open exact 27B GGUF");
     let model = Model::from_gguf(&gguf).expect("bind exact 27B model");
-    assert!(matches_no_copy_27b_sentinel(&gguf, &model));
-    let converted_embedding_requests =
-        model_weight_storage_requests(&model, false, false).expect("converted request plan");
-    let rollback_error = match direct_storage_for_load(
-        &ctx,
-        &gguf,
-        &model,
-        &converted_embedding_requests,
-        GgufNoCopyMode::Forced,
-        false,
-        GgufOwnedArenaMode::Disabled,
-        GgufParallelCopyMode::Disabled,
-        PreparedAutoSelection::NotEligible,
-        PreparedAutoRetainedSelection::NotEligible,
-        NativeQuantEmbeddingSelection::AutoUnpromoted,
-    ) {
-        Ok(_) => panic!("exact 27B rollback must fail before resource realization"),
-        Err(error) => error,
-    };
-    assert!(
-        rollback_error
-            .to_string()
-            .contains("requires native token embedding residency")
-    );
     let tokenizer = crate::tokenizer::Tokenizer::open(model_path).expect("tokenizer");
     let prompt = std::fs::read_to_string(prompt_path).expect("read frozen prompt");
     let tokens = tokenizer

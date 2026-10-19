@@ -74,7 +74,7 @@ pub(super) fn native_quant_embedding_mode() -> NativeQuantEmbeddingMode {
             Err(std::env::VarError::NotUnicode(_)) => NativeQuantEmbeddingMode::Invalid,
         };
         if mode == NativeQuantEmbeddingMode::Invalid {
-            // Not routed through `qwen_diag`: no profile script parses this
+            // Not routed through `qwen_diag`: no plan script parses this
             // specific `[metal-load] invalid …` line (unlike sibling
             // `[metal-load]` load-time lines). The default `Full` formatter
             // gives operators the visible `WARN` badge they need to notice
@@ -160,7 +160,7 @@ pub(super) fn resolve_native_quant_embedding(
     }
 }
 
-pub(super) fn auto_parallel_copy_a3b_enabled(
+pub(super) fn auto_parallel_copy_enabled(
     admission_enabled: bool,
     parallel_mode: GgufParallelCopyMode,
     explicit_override_present: bool,
@@ -168,10 +168,10 @@ pub(super) fn auto_parallel_copy_a3b_enabled(
     admission_enabled && parallel_mode == GgufParallelCopyMode::Auto && !explicit_override_present
 }
 
-pub(super) fn auto_parallel_copy_a3b_override_present(
+pub(super) fn auto_parallel_copy_override_present(
     mut is_present: impl FnMut(&str) -> bool,
 ) -> bool {
-    A3B_PARALLEL_COPY_AUTO_OVERRIDE_ENVS
+    PARALLEL_COPY_AUTO_OVERRIDE_ENVS
         .iter()
         .copied()
         .any(&mut is_present)
@@ -180,7 +180,6 @@ pub(super) fn auto_parallel_copy_a3b_override_present(
 pub(super) fn validate_parallel_copy_policy(
     parallel_mode: GgufParallelCopyMode,
     no_copy_mode: GgufNoCopyMode,
-    owned_mode: GgufOwnedArenaMode,
     prefault_present: bool,
     native_embedding_present: bool,
     router_f16: Option<&str>,
@@ -191,11 +190,6 @@ pub(super) fn validate_parallel_copy_policy(
     if no_copy_mode == GgufNoCopyMode::Forced {
         return Err(MfError::LoadPolicy(
             "parallel copy and retained no-copy are mutually exclusive".to_string(),
-        ));
-    }
-    if owned_mode == GgufOwnedArenaMode::Forced {
-        return Err(MfError::LoadPolicy(
-            "parallel copy and owned arena are mutually exclusive".to_string(),
         ));
     }
     if prefault_present {
@@ -340,37 +334,23 @@ pub(super) fn finish_parallel_copy_accounting(
 }
 
 pub(super) fn validate_parallel_population(
-    profile: &ParallelCopyProfile,
-    population: ParallelPopulationMethod,
+    _plan: &ParallelCopyLoadPlan,
+    _population: ParallelPopulationMethod,
 ) -> Result<(), MfError> {
-    if profile.id == ParallelCopyProfileId::A10bQ4xlV1
-        && population != ParallelPopulationMethod::Pread
-    {
-        return Err(MfError::LoadPolicy(
-            "A10B parallel population requires direct pread".to_string(),
-        ));
-    }
-    if population == ParallelPopulationMethod::Pread && !profile.supports_direct_pread {
-        return Err(MfError::LoadPolicy(format!(
-            "parallel pread rejects unauthenticated profile {}",
-            profile.id.label()
-        )));
-    }
     Ok(())
 }
 
 pub(super) fn validate_parallel_destination_length(
-    profile: &ParallelCopyProfile,
+    plan: &ParallelCopyLoadPlan,
     population: ParallelPopulationMethod,
     destination_length: ParallelDestinationLength,
 ) -> Result<(), MfError> {
-    validate_parallel_population(profile, population)?;
-    if destination_length == ParallelDestinationLength::PageRounded16K
-        && (profile.id != ParallelCopyProfileId::A3bQ4kmV1
-            || population != ParallelPopulationMethod::MmapCopy)
+    validate_parallel_population(plan, population)?;
+    if destination_length == ParallelDestinationLength::PageRounded
+        && population != ParallelPopulationMethod::MmapCopy
     {
         return Err(MfError::LoadPolicy(
-            "page-rounded parallel copy requires authenticated A3B mmap population".to_string(),
+            "page-rounded destinations require mmap-copy population".to_string(),
         ));
     }
     Ok(())
@@ -379,6 +359,7 @@ pub(super) fn validate_parallel_destination_length(
 pub(super) fn parallel_destination_resource_length(
     logical_bytes: u64,
     destination_length: ParallelDestinationLength,
+    page_size: usize,
     max_buffer_length: usize,
 ) -> Result<usize, MfError> {
     let logical = usize::try_from(logical_bytes).map_err(|_| {
@@ -391,12 +372,17 @@ pub(super) fn parallel_destination_resource_length(
     }
     let allocated = match destination_length {
         ParallelDestinationLength::LogicalExact => logical,
-        ParallelDestinationLength::PageRounded16K => logical
-            .checked_add(16_383)
-            .map(|value| value & !16_383)
-            .ok_or_else(|| {
-                MfError::LoadPolicy("page-rounded resource length overflow".to_string())
-            })?,
+        ParallelDestinationLength::PageRounded => {
+            if page_size == 0 {
+                return Err(MfError::LoadPolicy("host page size is zero".to_string()));
+            }
+            logical
+                .checked_add(page_size - 1)
+                .map(|value| value / page_size * page_size)
+                .ok_or_else(|| {
+                    MfError::LoadPolicy("page-rounded resource length overflow".to_string())
+                })?
+        }
     };
     if allocated > max_buffer_length {
         return Err(MfError::LoadPolicy(format!(
@@ -409,6 +395,7 @@ pub(super) fn parallel_destination_resource_length(
 pub(super) fn parallel_destination_accounting(
     expected: &[ModelWeightStorageIdentity],
     destination_length: ParallelDestinationLength,
+    page_size: usize,
     max_buffer_length: usize,
 ) -> Result<(u64, usize), MfError> {
     let mut allocated_bytes = 0u64;
@@ -417,6 +404,7 @@ pub(super) fn parallel_destination_accounting(
         let allocated = parallel_destination_resource_length(
             identity.source_bytes,
             destination_length,
+            page_size,
             max_buffer_length,
         )?;
         allocated_bytes = allocated_bytes
@@ -430,11 +418,10 @@ pub(super) fn parallel_destination_accounting(
 }
 
 pub(super) fn parallel_copy_marker_label(
-    profile: &ParallelCopyProfile,
+    _plan: &ParallelCopyLoadPlan,
     population: ParallelPopulationMethod,
     destination_length: ParallelDestinationLength,
 ) -> Result<&'static str, MfError> {
-    validate_parallel_destination_length(profile, population, destination_length)?;
     Ok(match (population, destination_length) {
         (ParallelPopulationMethod::MmapCopy, ParallelDestinationLength::LogicalExact) => {
             "[metal-gguf-parallel-copied]"
@@ -442,299 +429,210 @@ pub(super) fn parallel_copy_marker_label(
         (ParallelPopulationMethod::Pread, ParallelDestinationLength::LogicalExact) => {
             "[metal-gguf-parallel-pread]"
         }
-        (ParallelPopulationMethod::MmapCopy, ParallelDestinationLength::PageRounded16K) => {
+        (ParallelPopulationMethod::MmapCopy, ParallelDestinationLength::PageRounded) => {
             "[metal-gguf-parallel-page-rounded]"
         }
-        (ParallelPopulationMethod::Pread, ParallelDestinationLength::PageRounded16K) => {
-            unreachable!("page-rounded pread is rejected above")
+        (ParallelPopulationMethod::Pread, ParallelDestinationLength::PageRounded) => {
+            return Err(MfError::LoadPolicy(
+                "page-rounded pread is not supported".to_string(),
+            ));
         }
     })
 }
 
 pub(super) fn emit_parallel_copy_marker(
-    ctx: &MetalContext,
-    profile: &ParallelCopyProfile,
+    _ctx: &MetalContext,
+    plan: &ParallelCopyLoadPlan,
     population: ParallelPopulationMethod,
     destination_length: ParallelDestinationLength,
     timing: ParallelCopyTiming,
     accounting: Option<ParallelCopyEndpointAccounting>,
 ) -> Result<(), MfError> {
-    let marker = parallel_copy_marker_label(profile, population, destination_length)?;
-    let device_name = ctx.device_facts().name.as_str();
-    let page_size = crate::metal::host_page_size_bytes().ok();
-    let max_buffer_length = ctx.max_buffer_length();
-    match profile.marker_contract {
-        ParallelCopyMarkerContract::A3b => {
-            if accounting.is_some() {
-                return Err(MfError::LoadPolicy(
-                    "A3B parallel-copy marker received dense accounting".to_string(),
-                ));
-            }
-            match destination_length {
-                ParallelDestinationLength::LogicalExact => {
-                    emit_metal_load_line(format_args!(
-                        concat!(
-                            "{} schema=1 resources=733 bytes=22123538944 ",
-                            "workers=4 cuts=155,359,539 tasks=155,204,180,194 ",
-                            "worker_bytes=5532746240,5462315776,5595522304,5532954624 ",
-                            "first_offsets=10990048,5543736288,11006052064,16601574368 ",
-                            "last_offsets=5392741344,11004937952,16450579424,22134520800 ",
-                            "create=shared,default_cache,default observed=shared,default_cache,tracked ",
-                            "device={} page={:?} alignment={} max_buffer={} mapped=22134528992 ",
-                            "layout=0x5ae645df5cf7d568 ",
-                            "inventory=f57153febec22463c7789b892d4d084041d722483a93191c81c40ab86be7d9e5 ",
-                            "allocation_us={} source_us={} copy_us={} binding_us={} ready_us={}"
-                        ),
-                        marker,
-                        device_name,
-                        page_size,
-                        GGUF_NO_COPY_ALIGNMENT,
-                        max_buffer_length,
-                        timing.allocation_us,
-                        timing.source_us,
-                        timing.copy_us,
-                        timing.binding_us,
-                        timing.ready_us,
-                    ));
-                }
-                ParallelDestinationLength::PageRounded16K => {
-                    emit_metal_load_line(format_args!(
-                        concat!(
-                            "{} schema=2 resources=733 logical_bytes=22123538944 ",
-                            "allocated_bytes=22126297088 padding_bytes=2758144 ",
-                            "padded_resources=232 workers=4 cuts=155,359,539 ",
-                            "tasks=155,204,180,194 ",
-                            "worker_bytes=5532746240,5462315776,5595522304,5532954624 ",
-                            "first_offsets=10990048,5543736288,11006052064,16601574368 ",
-                            "last_offsets=5392741344,11004937952,16450579424,22134520800 ",
-                            "create=shared,default_cache,default observed=shared,default_cache,tracked ",
-                            "device={} page={:?} alignment={} max_buffer={} mapped=22134528992 ",
-                            "layout=0x5ae645df5cf7d568 ",
-                            "inventory=f57153febec22463c7789b892d4d084041d722483a93191c81c40ab86be7d9e5 ",
-                            "allocation_us={} source_us={} copy_us={} binding_us={} ready_us={}"
-                        ),
-                        marker,
-                        device_name,
-                        page_size,
-                        GGUF_NO_COPY_ALIGNMENT,
-                        max_buffer_length,
-                        timing.allocation_us,
-                        timing.source_us,
-                        timing.copy_us,
-                        timing.binding_us,
-                        timing.ready_us,
-                    ));
-                }
-            }
-        }
-        ParallelCopyMarkerContract::A10bSchema2 | ParallelCopyMarkerContract::DenseSchema2 => {
-            let accounting = accounting.ok_or_else(|| {
-                MfError::LoadPolicy(
-                    "profile parallel-copy marker is missing endpoint accounting".to_string(),
-                )
-            })?;
-            let mapped_bytes =
-                profile
-                    .shard_mapped_lengths
-                    .iter()
-                    .try_fold(0u64, |total, &length| {
-                        total.checked_add(length as u64).ok_or_else(|| {
-                            MfError::LoadPolicy("parallel-copy mapped byte overflow".to_string())
-                        })
-                    })?;
-            let boundary = profile.boundaries;
-            emit_metal_load_line(format_args!(
-                concat!(
-                    "{} schema=2 profile={} ",
-                    "resources={} bytes={} workers=4 cuts={},{},{} ",
-                    "tasks={},{},{},{} worker_bytes={},{},{},{} ",
-                    "w0_first={},{},{},{},{} w0_last={},{},{},{},{} ",
-                    "w1_first={},{},{},{},{} w1_last={},{},{},{},{} ",
-                    "w2_first={},{},{},{},{} w2_last={},{},{},{},{} ",
-                    "w3_first={},{},{},{},{} w3_last={},{},{},{},{} ",
-                    "create=shared,default_cache,default ",
-                    "observed=shared,default_cache,tracked ",
-                    "device={} page={:?} alignment={} max_buffer={} ",
-                    "mapped={} layout={:#018x} ",
-                    "inventory={} allocation_us={} source_us={} copy_us={} ",
-                    "binding_us={} ready_us={} user_cpu_us={} system_cpu_us={} ",
-                    "total_cpu_us={} timer_minor_faults={} timer_major_faults={} ",
-                    "instructions_delta_raw={} cycles_delta_raw={}"
-                ),
-                marker,
-                profile.id.label(),
-                profile.request_count,
-                profile.source_bytes,
-                profile.cuts[0],
-                profile.cuts[1],
-                profile.cuts[2],
-                profile.task_counts[0],
-                profile.task_counts[1],
-                profile.task_counts[2],
-                profile.task_counts[3],
-                profile.worker_bytes[0],
-                profile.worker_bytes[1],
-                profile.worker_bytes[2],
-                profile.worker_bytes[3],
-                boundary[0].first.request_index,
-                boundary[0].first.name,
-                boundary[0].first.shard_idx,
-                boundary[0].first.source_offset,
-                boundary[0].first.source_bytes,
-                boundary[0].last.request_index,
-                boundary[0].last.name,
-                boundary[0].last.shard_idx,
-                boundary[0].last.source_offset,
-                boundary[0].last.source_bytes,
-                boundary[1].first.request_index,
-                boundary[1].first.name,
-                boundary[1].first.shard_idx,
-                boundary[1].first.source_offset,
-                boundary[1].first.source_bytes,
-                boundary[1].last.request_index,
-                boundary[1].last.name,
-                boundary[1].last.shard_idx,
-                boundary[1].last.source_offset,
-                boundary[1].last.source_bytes,
-                boundary[2].first.request_index,
-                boundary[2].first.name,
-                boundary[2].first.shard_idx,
-                boundary[2].first.source_offset,
-                boundary[2].first.source_bytes,
-                boundary[2].last.request_index,
-                boundary[2].last.name,
-                boundary[2].last.shard_idx,
-                boundary[2].last.source_offset,
-                boundary[2].last.source_bytes,
-                boundary[3].first.request_index,
-                boundary[3].first.name,
-                boundary[3].first.shard_idx,
-                boundary[3].first.source_offset,
-                boundary[3].first.source_bytes,
-                boundary[3].last.request_index,
-                boundary[3].last.name,
-                boundary[3].last.shard_idx,
-                boundary[3].last.source_offset,
-                boundary[3].last.source_bytes,
-                device_name,
-                page_size,
-                GGUF_NO_COPY_ALIGNMENT,
-                max_buffer_length,
-                mapped_bytes,
-                profile.descriptor_layout_digest,
-                profile.inventory_digest,
-                timing.allocation_us,
-                timing.source_us,
-                timing.copy_us,
-                timing.binding_us,
-                timing.ready_us,
-                accounting.user_cpu_us,
-                accounting.system_cpu_us,
-                accounting.total_cpu_us,
-                accounting.timer_minor_faults,
-                accounting.timer_major_faults,
-                accounting.instructions_delta_raw,
-                accounting.cycles_delta_raw,
-            ));
-        }
-    }
+    let marker = parallel_copy_marker_label(plan, population, destination_length)?;
+    let page_size = plan.page_size;
+    let alignment = plan.alignment;
+    let max_buffer_length = plan.max_buffer_length;
+    let cuts = plan
+        .cuts
+        .iter()
+        .map(usize::to_string)
+        .collect::<Vec<_>>()
+        .join(",");
+    let tasks = plan
+        .task_counts
+        .iter()
+        .map(usize::to_string)
+        .collect::<Vec<_>>()
+        .join(",");
+    let worker_bytes = plan
+        .worker_bytes
+        .iter()
+        .map(u64::to_string)
+        .collect::<Vec<_>>()
+        .join(",");
+    let accounting = accounting.unwrap_or(ParallelCopyEndpointAccounting {
+        user_cpu_us: 0,
+        system_cpu_us: 0,
+        total_cpu_us: 0,
+        timer_minor_faults: 0,
+        timer_major_faults: 0,
+        instructions_delta_raw: 0,
+        cycles_delta_raw: 0,
+    });
+    emit_metal_load_line(format_args!(
+        concat!(
+            "{} schema=3 plan={} resources={} source_bytes={} destination_bytes={} ",
+            "padding_bytes={} padded_resources={} fallback_bytes={} workers={} cuts={} tasks={} ",
+            "worker_bytes={} create=shared,default_cache,default observed=shared,default_cache,tracked ",
+            "page={:?} alignment={} max_buffer={} allocation_us={} source_us={} copy_us={} ",
+            "binding_us={} ready_us={} user_cpu_us={} system_cpu_us={} total_cpu_us={} ",
+            "timer_minor_faults={} timer_major_faults={} instructions_delta_raw={} cycles_delta_raw={}"
+        ),
+        marker,
+        "descriptor-plan-v1",
+        plan.request_count,
+        plan.source_bytes,
+        plan.destination_bytes,
+        plan.padding_bytes,
+        plan.padded_resources,
+        plan.fallback_bytes,
+        plan.task_counts.len(),
+        cuts,
+        tasks,
+        worker_bytes,
+        page_size,
+        alignment,
+        max_buffer_length,
+        timing.allocation_us,
+        timing.source_us,
+        timing.copy_us,
+        timing.binding_us,
+        timing.ready_us,
+        accounting.user_cpu_us,
+        accounting.system_cpu_us,
+        accounting.total_cpu_us,
+        accounting.timer_minor_faults,
+        accounting.timer_major_faults,
+        accounting.instructions_delta_raw,
+        accounting.cycles_delta_raw,
+    ));
     Ok(())
 }
 
 pub(super) fn frozen_parallel_copy_order(
-    profile: &ParallelCopyProfile,
+    plan: &ParallelCopyLoadPlan,
     expected: &[ModelWeightStorageIdentity],
 ) -> Result<Vec<usize>, MfError> {
-    if expected.len() != profile.request_count
-        || expected.iter().any(|identity| {
-            identity.kind != ModelWeightStorageKind::Direct
-                || identity.source_bytes == 0
-                || identity.resident_bytes != identity.source_bytes
-        })
-    {
-        return Err(MfError::LoadPolicy(format!(
-            "parallel-copy {} request inventory is not all-direct and nonempty",
-            profile.id.label()
-        )));
+    if expected.len() != plan.request_count {
+        return Err(MfError::LoadPolicy(
+            "parallel-copy request count changed after planning".to_string(),
+        ));
     }
+    let schedule = plan_parallel_schedule(expected, plan.task_counts.len())?;
+    if schedule.cuts != plan.cuts
+        || schedule.worker_tasks != plan.task_counts
+        || schedule.worker_bytes != plan.worker_bytes
+        || expected.iter().try_fold(0u64, |total, identity| {
+            total.checked_add(identity.source_bytes)
+        }) != Some(plan.source_bytes)
+    {
+        return Err(MfError::LoadPolicy(
+            "parallel-copy load plan changed before realization".to_string(),
+        ));
+    }
+    Ok(schedule.sorted_request_indices)
+}
 
+#[derive(Debug, Eq, PartialEq)]
+pub(super) struct PlannedParallelSchedule {
+    pub sorted_request_indices: Vec<usize>,
+    pub cuts: Vec<usize>,
+    pub worker_bytes: Vec<u64>,
+    pub worker_tasks: Vec<usize>,
+}
+
+pub(super) fn plan_parallel_schedule(
+    expected: &[ModelWeightStorageIdentity],
+    worker_count: usize,
+) -> Result<PlannedParallelSchedule, MfError> {
+    if worker_count == 0 || expected.len() < worker_count {
+        return Err(MfError::LoadPolicy(
+            "parallel-copy plan needs at least one request per worker".to_string(),
+        ));
+    }
+    if expected.iter().any(|identity| {
+        identity.kind != ModelWeightStorageKind::Direct
+            || identity.source_bytes == 0
+            || identity.resident_bytes != identity.source_bytes
+    }) {
+        return Err(MfError::LoadPolicy(
+            "parallel-copy plan requires nonempty direct requests".to_string(),
+        ));
+    }
     let mut sorted_request_indices = (0..expected.len()).collect::<Vec<_>>();
-    sorted_request_indices.sort_by_key(|&request_index| {
-        let identity = &expected[request_index];
-        (identity.shard_idx, identity.data_offset, request_index)
+    sorted_request_indices.sort_by_key(|&index| {
+        let identity = &expected[index];
+        (identity.shard_idx, identity.data_offset, index)
     });
-    let mut permutation_check = sorted_request_indices.clone();
-    permutation_check.sort_unstable();
-    if permutation_check.iter().copied().ne(0..expected.len()) {
-        return Err(MfError::LoadPolicy(
-            "parallel-copy schedule is not a complete permutation".to_string(),
-        ));
-    }
-
-    let boundaries = [
-        0,
-        profile.cuts[0],
-        profile.cuts[1],
-        profile.cuts[2],
-        expected.len(),
-    ];
-    if boundaries[0] != 0
-        || boundaries[GGUF_OWNED_WORKERS] != expected.len()
-        || boundaries.windows(2).any(|pair| pair[0] >= pair[1])
-        || boundaries
-            .windows(2)
-            .map(|pair| pair[1] - pair[0])
-            .ne(profile.task_counts)
-        || profile.task_counts.iter().sum::<usize>() != expected.len()
-    {
-        return Err(MfError::LoadPolicy(
-            "parallel-copy frozen boundaries drifted".to_string(),
-        ));
-    }
-    let mut total_bytes = 0u64;
-    for worker in 0..GGUF_OWNED_WORKERS {
-        let partition = &sorted_request_indices[boundaries[worker]..boundaries[worker + 1]];
-        let worker_bytes = partition.iter().try_fold(0u64, |total, &request_index| {
+    let total_bytes = sorted_request_indices
+        .iter()
+        .try_fold(0u64, |total, &index| {
             total
-                .checked_add(expected[request_index].source_bytes)
+                .checked_add(expected[index].source_bytes)
                 .ok_or_else(|| {
-                    MfError::LoadPolicy("parallel-copy partition byte overflow".to_string())
+                    MfError::LoadPolicy("parallel-copy plan byte count overflow".to_string())
                 })
         })?;
-        let first = &expected[partition[0]];
-        let first_index = partition[0];
-        let last_index = *partition.last().expect("partition is nonempty");
-        let last = &expected[last_index];
-        let frozen = profile.boundaries[worker];
-        let first_matches = first_index == frozen.first.request_index
-            && first.name == frozen.first.name
-            && first.shard_idx == frozen.first.shard_idx
-            && first.data_offset == frozen.first.source_offset
-            && first.source_bytes == frozen.first.source_bytes;
-        let last_matches = last_index == frozen.last.request_index
-            && last.name == frozen.last.name
-            && last.shard_idx == frozen.last.shard_idx
-            && last.data_offset == frozen.last.source_offset
-            && last.source_bytes == frozen.last.source_bytes;
-        if partition.len() != profile.task_counts[worker]
-            || worker_bytes != profile.worker_bytes[worker]
-            || !first_matches
-            || !last_matches
-        {
-            return Err(MfError::LoadPolicy(format!(
-                "parallel-copy frozen partition {worker} drifted"
-            )));
+    let mut cuts = Vec::with_capacity(worker_count - 1);
+    let mut worker_bytes = Vec::with_capacity(worker_count);
+    let mut worker_tasks = Vec::with_capacity(worker_count);
+    let mut start = 0usize;
+    let mut prefix_bytes = 0u64;
+    for worker in 0..worker_count {
+        let workers_left = worker_count - worker;
+        if workers_left == 1 {
+            let bytes = sorted_request_indices[start..]
+                .iter()
+                .try_fold(0u64, |sum, &index| {
+                    sum.checked_add(expected[index].source_bytes)
+                        .ok_or_else(|| {
+                            MfError::LoadPolicy("parallel-copy partition byte overflow".to_string())
+                        })
+                })?;
+            worker_bytes.push(bytes);
+            worker_tasks.push(sorted_request_indices.len() - start);
+            break;
         }
-        total_bytes = total_bytes.checked_add(worker_bytes).ok_or_else(|| {
-            MfError::LoadPolicy("parallel-copy schedule byte overflow".to_string())
-        })?;
+        let target = (u128::from(total_bytes) * (worker as u128 + 1) / worker_count as u128) as u64;
+        let min_end = start + 1;
+        let max_end = sorted_request_indices.len() - (workers_left - 1);
+        let mut candidate_prefix = prefix_bytes;
+        let mut best_end = min_end;
+        let mut best_prefix = 0u64;
+        let mut best_distance = u64::MAX;
+        for end in min_end..=max_end {
+            candidate_prefix = candidate_prefix
+                .checked_add(expected[sorted_request_indices[end - 1]].source_bytes)
+                .ok_or_else(|| MfError::LoadPolicy("parallel-copy prefix overflow".to_string()))?;
+            let distance = candidate_prefix.abs_diff(target);
+            if distance < best_distance {
+                best_end = end;
+                best_prefix = candidate_prefix;
+                best_distance = distance;
+            }
+        }
+        worker_bytes.push(best_prefix - prefix_bytes);
+        worker_tasks.push(best_end - start);
+        cuts.push(best_end);
+        start = best_end;
+        prefix_bytes = best_prefix;
     }
-    if total_bytes != profile.source_bytes {
-        return Err(MfError::LoadPolicy(format!(
-            "parallel-copy schedule bytes drifted: {total_bytes}"
-        )));
-    }
-    Ok(sorted_request_indices)
+    Ok(PlannedParallelSchedule {
+        sorted_request_indices,
+        cuts,
+        worker_bytes,
+        worker_tasks,
+    })
 }
 
 pub(super) unsafe fn exclusive_buffer_bytes_mut(
@@ -750,448 +648,128 @@ pub(super) unsafe fn exclusive_buffer_bytes_mut(
     }
 }
 
-pub(super) fn owned_arena_four_worker_boundaries(
-    length: usize,
-    page_size: usize,
-) -> Result<[usize; 5], MfError> {
-    if page_size == 0 || !length.is_multiple_of(page_size) {
-        return Err(MfError::LoadPolicy(
-            "owned arena range is not page aligned".to_string(),
-        ));
-    }
-    let pages = length / page_size;
-    if pages < GGUF_OWNED_WORKERS {
-        return Err(MfError::LoadPolicy(
-            "owned arena range has fewer than four pages".to_string(),
-        ));
-    }
-    let boundaries =
-        std::array::from_fn(|worker| page_size * (worker * pages / GGUF_OWNED_WORKERS));
-    if boundaries[0] != 0 || boundaries[GGUF_OWNED_WORKERS] != length {
-        return Err(MfError::LoadPolicy(
-            "owned arena worker boundaries do not cover the range".to_string(),
-        ));
-    }
-    if boundaries.windows(2).any(|pair| pair[0] >= pair[1]) {
-        return Err(MfError::LoadPolicy(
-            "owned arena worker boundaries overlap or are empty".to_string(),
-        ));
-    }
-    Ok(boundaries)
-}
-
-pub(super) fn copy_owned_arena_four_workers(
-    source: &[u8],
-    destination: &Buffer,
-    page_size: usize,
-) -> Result<(), MfError> {
-    if source.len() != destination.length() {
-        return Err(MfError::LoadPolicy(format!(
-            "owned arena source {} differs from destination {}",
-            source.len(),
-            destination.length()
-        )));
-    }
-    let boundaries = owned_arena_four_worker_boundaries(source.len(), page_size)?;
-    // SAFETY: the anonymous shared buffer is retained by the caller, has exactly
-    // source.len() bytes, and no typed views exist until all scoped workers join.
-    let destination = unsafe {
-        std::slice::from_raw_parts_mut(destination.contents().as_ptr().cast::<u8>(), source.len())
-    };
-    std::thread::scope(|scope| {
-        let mut source_tail = source;
-        let mut destination_tail = destination;
-        let mut previous = 0usize;
-        for &boundary in boundaries.iter().skip(1) {
-            let length = boundary - previous;
-            let (source_chunk, next_source) = source_tail.split_at(length);
-            let (destination_chunk, next_destination) = destination_tail.split_at_mut(length);
-            scope.spawn(move || destination_chunk.copy_from_slice(source_chunk));
-            source_tail = next_source;
-            destination_tail = next_destination;
-            previous = boundary;
-        }
-    });
-    Ok(())
-}
-
-pub(super) fn copy_owned_arena_serial(source: &[u8], destination: &Buffer) -> Result<(), MfError> {
-    if source.len() != destination.length() {
-        return Err(MfError::LoadPolicy(format!(
-            "owned fallback source {} differs from destination {}",
-            source.len(),
-            destination.length()
-        )));
-    }
-    // SAFETY: the fallback buffer is retained, exact-sized, and has no live views.
-    let destination = unsafe {
-        std::slice::from_raw_parts_mut(destination.contents().as_ptr().cast::<u8>(), source.len())
-    };
-    destination.copy_from_slice(source);
-    Ok(())
-}
-
-pub(super) fn create_a10b_parallel_residency_set(
+pub(super) fn build_parallel_copy_plan(
     ctx: &MetalContext,
-    direct_storage: &DirectStorage,
-) -> Result<Option<MetalModelResidencySetGuard>, MfError> {
-    let DirectStorage::ForcedParallelCopied(storage) = direct_storage else {
-        return Ok(None);
-    };
-    if storage.profile.id != ParallelCopyProfileId::A10bQ4xlV1 {
-        return Ok(None);
-    }
-    if storage.resources.len() != storage.profile.request_count {
-        return Err(MfError::LoadPolicy(format!(
-            "A10B residency resource count drifted: {}/{}",
-            storage.resources.len(),
-            storage.profile.request_count
-        )));
-    }
-    if !ctx.device_facts().supports_metal_residency_sets() {
-        return Ok(None);
-    }
-
-    let descriptor = MTLResidencySetDescriptor::new();
-    descriptor.setLabel(Some(&NSString::from_str("qwen-a10b-parallel-pread")));
-    // SAFETY: initialCapacity is advisory and equals the authenticated resource count.
-    unsafe { descriptor.setInitialCapacity(storage.resources.len()) };
-    let set = ctx
-        .device
-        .newResidencySetWithDescriptor_error(&descriptor)
-        .map_err(|error| {
-            let error: Retained<NSError> = error;
-            MfError::LoadPolicy(format!(
-                "A10B residency set creation failed: {}",
-                error.localizedDescription()
-            ))
-        })?;
-    let mut expected_allocated_bytes = 0u64;
-    for buffer in &storage.resources {
-        let allocation: &ProtocolObject<dyn MTLAllocation> = ProtocolObject::from_ref(&**buffer);
-        let allocated_bytes = u64::try_from(allocation.allocatedSize()).map_err(|_| {
-            MfError::LoadPolicy("A10B residency allocation size does not fit u64".to_string())
-        })?;
-        expected_allocated_bytes = expected_allocated_bytes
-            .checked_add(allocated_bytes)
-            .ok_or_else(|| {
-                MfError::LoadPolicy("A10B residency allocated byte overflow".to_string())
-            })?;
-        set.addAllocation(allocation);
-    }
-    set.commit();
-    if set.allocationCount() != storage.resources.len()
-        || set.allocatedSize() != expected_allocated_bytes
-    {
-        let actual_count = set.allocationCount();
-        let actual_bytes = set.allocatedSize();
-        set.endResidency();
-        return Err(MfError::LoadPolicy(format!(
-            concat!(
-                "A10B residency set commitment drifted: allocations={}/{} ",
-                "bytes={}/{}"
-            ),
-            actual_count,
-            storage.resources.len(),
-            actual_bytes,
-            expected_allocated_bytes,
-        )));
-    }
-    let started = std::time::Instant::now();
-    set.requestResidency();
-    let residency_ms = started.elapsed().as_secs_f64() * 1e3;
-    ctx.queue.addResidencySet(&set);
-    emit_metal_load_line(format_args!(
-        concat!(
-            "[metal-gguf-parallel-residency] profile={} allocations={} ",
-            "allocated_bytes={} request_ms={:.3} rollback=QWEN_GGUF_PARALLEL_COPY=0"
-        ),
-        storage.profile.id.label(),
-        set.allocationCount(),
-        set.allocatedSize(),
-        residency_ms,
-    ));
-    Ok(Some(MetalModelResidencySetGuard {
-        queue: ctx.queue.clone(),
-        set,
-    }))
-}
-
-pub(super) fn matches_no_copy_27b_sentinel(gguf: &GgufFile, model: &Model<'_>) -> bool {
-    gguf.shard_count() == 1
-        && gguf.total_mapped_len() == GGUF_NO_COPY_27B_MAPPED_BYTES
-        && gguf.tensors.len() == GGUF_NO_COPY_27B_DESCRIPTOR_COUNT
-        && gguf_descriptor_layout_digest(gguf) == GGUF_NO_COPY_27B_LAYOUT_DIGEST
-        && !model.tied_embeddings
-        && model.mtp.is_none()
-        && native_quant_embedding_default_promoted(
-            &model.arch,
-            model.tied_embeddings,
-            model.token_embd.dtype,
-            &model.token_embd.shape,
-        )
-}
-
-pub(super) fn matches_owned_a3b_arch(model: &Model<'_>) -> bool {
-    let arch = model.arch;
-    arch.kind == ArchKind::Moe
-        && arch.n_layer == 40
-        && arch.hidden_size == 2048
-        && arch.intermediate_size == 0
-        && arch.vocab_size == 248_320
-        && arch.full_attention_interval == 4
-        && arch.n_q_heads == 16
-        && arch.n_kv_heads == 2
-        && arch.attn_head_dim == 256
-        && arch.rope_theta == 10_000_000.0
-        && arch.partial_rotary_factor == 0.25
-        && arch.gdn_n_v_heads == 32
-        && arch.gdn_n_k_heads == 16
-        && arch.gdn_head_dim == 128
-        && arch.gdn_conv_kernel == 4
-        && arch.expert_count == 256
-        && arch.expert_used_count == 8
-        && arch.expert_feed_forward_length == 512
-        && arch.expert_shared_feed_forward_length == 512
-        && arch.mtp_n_hidden_layers == 0
-}
-
-pub(super) fn select_unique_parallel_copy_profile<F>(
-    profiles: &[&'static ParallelCopyProfile],
-    mut matches: F,
-) -> Result<&'static ParallelCopyProfile, MfError>
-where
-    F: FnMut(&ParallelCopyProfile) -> Result<bool, MfError>,
-{
-    let mut ids = HashSet::with_capacity(profiles.len());
-    for profile in profiles {
-        if !ids.insert(profile.id) {
-            return Err(MfError::LoadPolicy(format!(
-                "duplicate parallel-copy profile id {}",
-                profile.id.label()
-            )));
-        }
-    }
-    let mut selected = None;
-    for profile in profiles {
-        if !matches(profile)? {
-            continue;
-        }
-        if selected.is_some() {
-            return Err(MfError::LoadPolicy(
-                "parallel-copy profile match is ambiguous".to_string(),
-            ));
-        }
-        selected = Some(*profile);
-    }
-    selected.ok_or_else(|| {
-        MfError::LoadPolicy("forced parallel copy rejects unsupported geometry".to_string())
-    })
-}
-
-fn parallel_copy_profile_matches_with_buffer_limit(
-    ctx: &MetalContext,
-    gguf: &GgufFile,
-    model: &Model<'_>,
+    _gguf: &GgufFile,
+    _model: &Model<'_>,
     expected: &[ModelWeightStorageRequest<'_>],
-    embedding_selection: NativeQuantEmbeddingSelection,
-    profile: &ParallelCopyProfile,
-    check_buffer_limit: bool,
-) -> Result<bool, MfError> {
-    if !ctx.device_facts().unified_memory {
-        return Ok(false);
+    _embedding_selection: NativeQuantEmbeddingSelection,
+) -> Result<ParallelCopyLoadPlan, MfError> {
+    if !ctx.device.hasUnifiedMemory() {
+        return Err(MfError::LoadPolicy(
+            "parallel population requires unified memory".to_string(),
+        ));
     }
-    if let ParallelCopyDeviceConstraint::ExactUnified(qualification) = profile.device_constraint
-        && !qualification.holds_for(ctx.device_facts())
-    {
-        if let Some(reason) = crate::metal::declined_reason_once(qualification, ctx.device_facts())
-        {
-            emit_metal_load_line(format_args!(
-                "[metal-gguf-parallel-qualification] path={} declined reason={reason:?}",
-                qualification.path
-            ));
-        }
-        return Ok(false);
+    let page_size = host_page_size_bytes()?;
+    if page_size == 0 {
+        return Err(MfError::LoadPolicy("host page size is zero".to_string()));
     }
-    let architecture = gguf.architecture();
-    if profile
-        .architecture_label
-        .is_some_and(|expected| architecture.as_deref() != Some(expected))
-    {
-        return Ok(false);
+    let identities = expected
+        .iter()
+        .map(expected_model_weight_identity)
+        .collect::<Vec<_>>();
+    if identities.iter().any(|identity| {
+        usize::try_from(identity.source_bytes).map_or(true, |bytes| bytes > ctx.max_buffer_length())
+    }) {
+        return Err(MfError::LoadPolicy(
+            "a parallel destination exceeds the device max buffer length".to_string(),
+        ));
     }
-    let shard_lengths = gguf.shard_mapped_lengths();
-    let embedding_qualified = match profile.id {
-        ParallelCopyProfileId::A10bQ4xlV1 => {
-            embedding_selection == NativeQuantEmbeddingSelection::Forced
-        }
-        ParallelCopyProfileId::A3bQ4kmV1 | ParallelCopyProfileId::Dense27bQ4kmV1 => {
-            embedding_selection == NativeQuantEmbeddingSelection::AutoPromoted
-                && native_quant_embedding_default_promoted(
-                    &model.arch,
-                    model.tied_embeddings,
-                    model.token_embd.dtype,
-                    &model.token_embd.shape,
-                )
-        }
-    };
-    if shard_lengths.as_slice() != profile.shard_mapped_lengths
-        || gguf_descriptor_layout_digest(gguf) != profile.descriptor_layout_digest
-        || model.arch != profile.arch
-        || model.tied_embeddings != profile.tied_embeddings
-        || model.mtp.is_some() != profile.mtp_present
-        || model.token_embd.dtype != profile.embedding_dtype
-        || model.token_embd.shape.as_slice() != profile.embedding_shape
-        || !embedding_qualified
-        || expected.len() != profile.request_count
-        || model_weight_storage_inventory_digest(expected) != profile.inventory_digest
-    {
-        return Ok(false);
+    if identities.is_empty() {
+        return Err(MfError::LoadPolicy(
+            "parallel plan has no direct storage requests".to_string(),
+        ));
     }
+    let shard_lengths = _gguf.shard_mapped_lengths();
     let mut source_bytes = 0u64;
+    let mut destination_bytes = 0u64;
     for request in expected {
-        let Some(shard_len) = profile.shard_mapped_lengths.get(request.desc.shard_idx) else {
-            return Ok(false);
+        let Some(shard_length) = shard_lengths.get(request.desc.shard_idx) else {
+            return Err(MfError::LoadPolicy(
+                "parallel request refers to a missing GGUF shard".to_string(),
+            ));
         };
-        let Some(source_end) = request.desc.data_offset.checked_add(request.desc.n_bytes) else {
-            return Ok(false);
-        };
+        let source_end = request
+            .desc
+            .data_offset
+            .checked_add(request.desc.n_bytes)
+            .ok_or_else(|| MfError::LoadPolicy("parallel source range overflow".to_string()))?;
         if request.kind != ModelWeightStorageKind::Direct
             || request.desc.n_bytes == 0
             || request.resident_bytes != request.desc.n_bytes
-            || source_end > *shard_len as u64
-            || (check_buffer_limit && request.desc.n_bytes > ctx.max_buffer_length() as u64)
-            || usize::try_from(request.desc.n_bytes).is_err()
+            || source_end > *shard_length as u64
         {
-            return Ok(false);
+            return Err(MfError::LoadPolicy(
+                "parallel plan requires in-bounds direct tensors".to_string(),
+            ));
+        }
+        let priced = ctx
+            .shared_buffer_size_and_align(request.resident_bytes)
+            .map_err(MfError::Metal)?;
+        if priced.size > ctx.max_buffer_length() as u64 {
+            return Err(MfError::LoadPolicy(format!(
+                "parallel destination {} exceeds max buffer {}",
+                priced.size,
+                ctx.max_buffer_length()
+            )));
         }
         source_bytes = source_bytes
             .checked_add(request.desc.n_bytes)
-            .ok_or_else(|| {
-                MfError::LoadPolicy("parallel-copy profile source byte overflow".to_string())
-            })?;
+            .ok_or_else(|| MfError::LoadPolicy("parallel source byte overflow".to_string()))?;
+        destination_bytes = destination_bytes
+            .checked_add(priced.size)
+            .ok_or_else(|| MfError::LoadPolicy("parallel destination byte overflow".to_string()))?;
     }
-    Ok(source_bytes == profile.source_bytes)
-}
-
-pub(super) fn parallel_copy_profile_matches(
-    ctx: &MetalContext,
-    gguf: &GgufFile,
-    model: &Model<'_>,
-    expected: &[ModelWeightStorageRequest<'_>],
-    embedding_selection: NativeQuantEmbeddingSelection,
-    profile: &ParallelCopyProfile,
-) -> Result<bool, MfError> {
-    parallel_copy_profile_matches_with_buffer_limit(
-        ctx,
-        gguf,
-        model,
-        expected,
-        embedding_selection,
-        profile,
-        true,
-    )
-}
-
-pub(super) fn select_parallel_copy_profile(
-    ctx: &MetalContext,
-    gguf: &GgufFile,
-    model: &Model<'_>,
-    expected: &[ModelWeightStorageRequest<'_>],
-    embedding_selection: NativeQuantEmbeddingSelection,
-) -> Result<&'static ParallelCopyProfile, MfError> {
-    select_unique_parallel_copy_profile(&PARALLEL_COPY_PROFILES, |profile| {
-        parallel_copy_profile_matches(ctx, gguf, model, expected, embedding_selection, profile)
+    let worker_count = std::thread::available_parallelism()
+        .map(usize::from)
+        .unwrap_or(1)
+        .min(PARALLEL_COPY_MAX_WORKERS)
+        .min(identities.len());
+    let schedule = plan_parallel_schedule(&identities, worker_count)?;
+    Ok(ParallelCopyLoadPlan {
+        request_count: identities.len(),
+        source_bytes,
+        page_size,
+        destination_bytes,
+        padding_bytes: 0,
+        padded_resources: 0,
+        fallback_bytes: 0,
+        max_buffer_length: ctx.max_buffer_length(),
+        alignment: GGUF_NO_COPY_ALIGNMENT,
+        cuts: schedule.cuts,
+        task_counts: schedule.worker_tasks,
+        worker_bytes: schedule.worker_bytes,
     })
 }
 
-pub(super) fn a3b_parallel_copy_auto_host_supported(facts: &crate::metal::DeviceFacts) -> bool {
-    let qualification = &crate::metal::A3B_PARALLEL_COPY_AUTO;
-    let holds = qualification.holds_for(facts);
-    if let Some(reason) = crate::metal::declined_reason_once(qualification, facts) {
-        emit_metal_load_line(format_args!(
-            "[metal-gguf-parallel-qualification] path={} declined reason={reason:?}",
-            qualification.path
-        ));
-    }
-    facts.unified_memory && holds
+pub(super) fn parallel_copy_auto_host_supported(facts: &crate::metal::DeviceFacts) -> bool {
+    facts.unified_memory
 }
 
-pub(super) enum AutoParallelCopyProfileSelection {
+pub(super) enum AutoParallelCopyLoadPlanSelection {
     NoMatch,
     HostPlanUnsupported,
-    Selected(&'static ParallelCopyProfile),
+    Selected(ParallelCopyLoadPlan),
 }
 
-pub(super) fn select_auto_parallel_copy_profile(
+pub(super) fn select_auto_parallel_copy_plan(
     ctx: &MetalContext,
     gguf: &GgufFile,
     model: &Model<'_>,
     expected: &[ModelWeightStorageRequest<'_>],
     embedding_selection: NativeQuantEmbeddingSelection,
-) -> Result<AutoParallelCopyProfileSelection, MfError> {
-    if !a3b_parallel_copy_auto_host_supported(ctx.device_facts()) {
-        return Ok(AutoParallelCopyProfileSelection::NoMatch);
+) -> Result<AutoParallelCopyLoadPlanSelection, MfError> {
+    if !parallel_copy_auto_host_supported(ctx.device_facts()) {
+        return Ok(AutoParallelCopyLoadPlanSelection::NoMatch);
     }
-    let artifact_matches = parallel_copy_profile_matches_with_buffer_limit(
-        ctx,
-        gguf,
-        model,
-        expected,
-        embedding_selection,
-        &A3B_PARALLEL_COPY_PROFILE,
-        false,
-    )?;
-    if !artifact_matches {
-        return Ok(AutoParallelCopyProfileSelection::NoMatch);
-    }
-    if !super::a3b_required_window_fits(ctx.max_buffer_length())
-        || crate::metal::host_page_size_bytes().is_err()
-        || authenticated_a3b_storage_plan(ctx, gguf, model, expected, embedding_selection).is_err()
-        || !parallel_copy_profile_matches(
-            ctx,
-            gguf,
-            model,
-            expected,
-            embedding_selection,
-            &A3B_PARALLEL_COPY_PROFILE,
-        )?
-    {
-        return Ok(AutoParallelCopyProfileSelection::HostPlanUnsupported);
-    }
-    Ok(AutoParallelCopyProfileSelection::Selected(
-        &A3B_PARALLEL_COPY_PROFILE,
-    ))
-}
-
-pub(super) fn auto_parallel_copy_population(
-    profile: ParallelCopyProfileId,
-) -> Option<ParallelPopulationMethod> {
-    match profile {
-        ParallelCopyProfileId::A3bQ4kmV1 => Some(ParallelPopulationMethod::Pread),
-        ParallelCopyProfileId::A10bQ4xlV1 => None,
-        ParallelCopyProfileId::Dense27bQ4kmV1 => None,
+    match build_parallel_copy_plan(ctx, gguf, model, expected, embedding_selection) {
+        Ok(plan) => Ok(AutoParallelCopyLoadPlanSelection::Selected(plan)),
+        Err(_) => Ok(AutoParallelCopyLoadPlanSelection::HostPlanUnsupported),
     }
 }
 
-pub(super) fn forced_a10b_parallel_pread_embedding_qualified(
-    parallel_mode: GgufParallelCopyMode,
-    gguf: &GgufFile,
-    model: &Model<'_>,
-) -> bool {
-    if parallel_mode != GgufParallelCopyMode::ForcedPread {
-        return false;
-    }
-    let profile = &A10B_PARALLEL_PREAD_PROFILE;
-    let architecture = gguf.architecture();
-    architecture.as_deref() == profile.architecture_label
-        && gguf.shard_mapped_lengths().as_slice() == profile.shard_mapped_lengths
-        && gguf_descriptor_layout_digest(gguf) == profile.descriptor_layout_digest
-        && model.arch == profile.arch
-        && model.tied_embeddings == profile.tied_embeddings
-        && model.mtp.is_some() == profile.mtp_present
-        && model.token_embd.dtype == profile.embedding_dtype
-        && model.token_embd.shape.as_slice() == profile.embedding_shape
+pub(super) fn auto_parallel_copy_population() -> Option<ParallelPopulationMethod> {
+    Some(ParallelPopulationMethod::Pread)
 }
 
 /// Helper: scatter `n` floats from `src[0..n]` into `dst[off..off+n]`.
@@ -1203,6 +781,7 @@ pub(super) fn forced_a10b_parallel_pread_embedding_qualified(
 /// replaces a per-row `encode_scatter_offset_f32` loop in the DFlash
 /// prefill hidden-capture tap (chunk_p dispatches per capture layer per
 /// chunk -> 1).
+#[allow(clippy::too_many_arguments)]
 pub fn encode_copy_rows_dst_strided_f32(
     ctx: &MetalContext,
     enc: &KernelEncoder,

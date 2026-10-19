@@ -955,20 +955,6 @@ impl MetalContext {
         Ok(buf)
     }
 
-    pub(crate) fn gguf_no_copy_backing(
-        &self,
-        mmap: Arc<Mmap>,
-        shard_idx: usize,
-        required_alignment: usize,
-    ) -> Result<MetalGgufBacking, MetalError> {
-        self.gguf_no_copy_backing_with_observer(
-            mmap,
-            shard_idx,
-            required_alignment,
-            |_pointer, _length| {},
-        )
-    }
-
     pub(crate) fn gguf_no_copy_window(
         &self,
         mmap: Arc<Mmap>,
@@ -1037,6 +1023,7 @@ impl MetalContext {
         Ok(DiagnosticGgufBlitSourceWindow { backing, probe })
     }
 
+    #[cfg(test)]
     pub(crate) fn gguf_no_copy_backing_with_observer<F>(
         &self,
         mmap: Arc<Mmap>,

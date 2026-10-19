@@ -343,73 +343,10 @@ mod tests {
         let actual = serde_json::to_value(unsupported.report()).unwrap();
         assert_eq!(actual["version"], DEVICE_FACTS_VERSION);
         let qualifications = actual["qualifications"].as_array().unwrap();
-        let exact = qualifications
-            .iter()
-            .find(|record| record["path"] == "metal_forward.exact_unified_parallel_copy_profiles")
-            .unwrap();
-        assert_eq!(exact["host_page_size_bytes"], serde_json::Value::Null);
-        assert_eq!(exact["max_buffer_length_bytes"], serde_json::Value::Null);
-        assert_eq!(exact["required_headroom_bytes"], 85_608_931_328_u64);
-        assert_eq!(exact["required_headroom_scope"], "a10b_q4xl_forced_pread");
-        assert!(
-            exact["correctness"]
-                .as_str()
-                .unwrap()
-                .starts_with("scope-only: cargo test")
-        );
-        assert_eq!(exact["correctness_kind"], "scope_only");
-        assert!(exact["performance"].as_str().unwrap().starts_with("none:"));
-        assert_eq!(exact["performance_kind"], "none");
-        assert_eq!(exact["capability_gate"], "apple_family7");
-        assert_eq!(exact["requires_unified_memory"], true);
-        assert_eq!(exact["decline_reason"]["facet"], "gpu_family");
-        assert_eq!(exact["measurements"][0]["device"], "Apple M4 Max");
-        assert_eq!(exact["measurements"][0]["date"], "2026-10-14");
-        assert_eq!(exact["measurements"][0]["correctness"], "not_run");
-        assert_eq!(exact["measurements"][0]["performance"], "not_recorded");
-        assert!(
-            exact["measurements"][0]["evidence"]
-                .as_str()
-                .unwrap()
-                .contains("sha256=")
-        );
-        assert!(exact["excluded"].as_array().unwrap().is_empty());
-        let residency = qualifications
-            .iter()
-            .find(|record| record["path"] == "deepseek_v4.residency_set")
-            .unwrap();
-        assert_eq!(residency["minimum_os_version"], "15.0");
-        assert_eq!(residency["decline_reason"]["facet"], "gpu_family");
-        let old_os = DeviceFacts {
-            os_version: Some("14.7.1".into()),
-            ..sample()
-        };
-        let old_os_qualifications = serde_json::to_value(old_os.report()).unwrap();
-        let residency = old_os_qualifications["qualifications"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .find(|record| record["path"] == "deepseek_v4.residency_set")
-            .unwrap();
-        assert_eq!(residency["decline_reason"]["facet"], "os_version");
-        let hca = qualifications
-            .iter()
-            .find(|record| record["path"] == "deepseek_v4.grouped_long_hca")
-            .unwrap();
-        assert_eq!(hca["capability_gate"], "apple_family7");
-        let m5_measurement = hca["measurements"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .find(|measurement| measurement["device"] == "Apple M5 Ultra")
-            .unwrap();
-        assert_eq!(m5_measurement["performance"], "failed");
-        assert!(
-            m5_measurement["note"]
-                .as_str()
-                .unwrap()
-                .contains("ungrouped-online comparison arm")
-        );
+        assert!(qualifications.iter().all(|record| {
+            record["path"] != "metal_forward.exact_unified_parallel_copy_profiles"
+                && record["required_headroom_scope"] != "a10b_q4xl_forced_pread"
+        }));
     }
 
     #[test]

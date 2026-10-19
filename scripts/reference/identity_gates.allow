@@ -6,7 +6,6 @@ crates/qwen-cli/src/full_lens.rs	*	lens_binding	all findings are lens artifact b
 crates/qwen-cli/src/full_lens/compare.rs	*	lens_binding	all findings are lens artifact binding
 crates/qwen-cli/src/full_lens/import.rs	*	lens_binding	all findings are lens artifact binding
 crates/qwen-cli/src/full_lens/readout.rs	*	lens_binding	all findings are lens artifact binding
-crates/qwen-cli/src/gguf_arena_floor.rs	*	frozen_experiment	pinned census evidence and frozen research records
 crates/qwen-cli/src/grammar_lm_head_row_floor.rs	*	frozen_experiment	pinned census evidence and frozen research records
 crates/qwen-cli/src/grammar_oracle.rs	*	frozen_experiment	pinned census evidence and frozen research records
 crates/qwen-cli/src/lens.rs	*	lens_binding	all findings are lens artifact binding
@@ -42,7 +41,6 @@ crates/qwen-llm/src/k2_horizon_chat.rs	2da7d47641f4509da4ae47711e31d8b5f0f3f801e
 crates/qwen-llm/src/k2_horizon_chat.rs	a892cd0b0195599f283a8c706787520d9a6747640efb2f4dec4144b0abb62590	provenance	upstream template digest recorded in the chat profile, never compared
 crates/qwen-llm/src/k2_horizon_chat.rs	f6e3cd6dbf0f95016fff531f41f921dee541025733c14580a881cf5a5f9fa750	renderer_format	the embedded chat template must match the format the native renderer reproduces; a mismatch refuses chat and raw input still works (kept by review, 2026-10-19)
 crates/qwen-llm/src/metal/qualification.rs	1ba1ce14804b9ada2330f374d792bf7b9396072ba0961785e6973801639eb2c2	provenance	measurement report digests are serialized as evidence and not read by holds_for
-crates/qwen-llm/src/metal/qualification.rs	85_608_931_328	temporary	trigger: replace the fixed A10B pread headroom threshold with structural admission
 crates/qwen-llm/src/metal/qualification.rs	Apple M1 Pro	frozen_experiment	device labels are stored in characterization records and are not read by holds_for
 crates/qwen-llm/src/metal/qualification.rs	Apple M4 Max	frozen_experiment	device labels are stored in characterization records and are not read by holds_for
 crates/qwen-llm/src/metal/qualification.rs	Apple M5 Ultra	frozen_experiment	device labels are stored in characterization records and are not read by holds_for
@@ -50,55 +48,6 @@ crates/qwen-llm/src/metal/qualification.rs	M1 Pro	frozen_experiment	device label
 crates/qwen-llm/src/metal/qualification.rs	M4 Max	frozen_experiment	device labels are stored in characterization records and are not read by holds_for
 crates/qwen-llm/src/metal/qualification.rs	aa186d57e040e263df0bec60531eead39beeafedd2d5705133db42ba8d83df8b	provenance	measurement report digests are serialized as evidence and not read by holds_for
 crates/qwen-llm/src/metal/qualification.rs	fc18b4f7ef79b7fe5f0586d964049f52ed7987679d64f28522ecd0edd8c9dd2c	provenance	measurement report digests are serialized as evidence and not read by holds_for
-crates/qwen-llm/src/metal_forward/mod.rs	11_004_937_952	temporary	trigger: replace with a structural property or keep by decision in the identity-pin review
-crates/qwen-llm/src/metal_forward/mod.rs	11_006_052_064	temporary	trigger: replace with a structural property or keep by decision in the identity-pin review
-crates/qwen-llm/src/metal_forward/mod.rs	12_551_299_936	temporary	trigger: replace with a structural property or keep by decision in the identity-pin review
-crates/qwen-llm/src/metal_forward/mod.rs	12_624_413_536	temporary	trigger: replace with a structural property or keep by decision in the identity-pin review
-crates/qwen-llm/src/metal_forward/mod.rs	16_450_579_424	temporary	trigger: replace with a structural property or keep by decision in the identity-pin review
-crates/qwen-llm/src/metal_forward/mod.rs	16_601_574_368	temporary	trigger: replace with a structural property or keep by decision in the identity-pin review
-crates/qwen-llm/src/metal_forward/mod.rs	16_806_250_496	temporary	trigger: replace with a structural property or keep by decision in the identity-pin review
-crates/qwen-llm/src/metal_forward/mod.rs	16_817_223_904	temporary	trigger: replace with a structural property or keep by decision in the identity-pin review
-crates/qwen-llm/src/metal_forward/mod.rs	16_817_244_384	temporary	trigger: replace with a structural property or keep by decision in the identity-pin review
-crates/qwen-llm/src/metal_forward/mod.rs	18_920_683_168	temporary	trigger: replace with a structural property or keep by decision in the identity-pin review
-crates/qwen-llm/src/metal_forward/mod.rs	19_084_053_504	temporary	trigger: replace with a structural property or keep by decision in the identity-pin review
-crates/qwen-llm/src/metal_forward/mod.rs	19_228_744_704	temporary	trigger: replace with a structural property or keep by decision in the identity-pin review
-crates/qwen-llm/src/metal_forward/mod.rs	19_231_902_720	temporary	trigger: replace with a structural property or keep by decision in the identity-pin review
-crates/qwen-llm/src/metal_forward/mod.rs	19_474_295_808	temporary	trigger: replace with a structural property or keep by decision in the identity-pin review
-crates/qwen-llm/src/metal_forward/mod.rs	19_474_331_296	temporary	trigger: replace with a structural property or keep by decision in the identity-pin review
-crates/qwen-llm/src/metal_forward/mod.rs	1_042_944_000	temporary	trigger: replace with a structural property or keep by decision in the identity-pin review
-crates/qwen-llm/src/metal_forward/mod.rs	22_123_530_752	temporary	trigger: replace with a structural property or keep by decision in the identity-pin review
-crates/qwen-llm/src/metal_forward/mod.rs	22_123_538_944	temporary	trigger: replace with a structural property or keep by decision in the identity-pin review
-crates/qwen-llm/src/metal_forward/mod.rs	22_123_544_576	temporary	trigger: replace with a structural property or keep by decision in the identity-pin review
-crates/qwen-llm/src/metal_forward/mod.rs	22_123_552_768	temporary	trigger: replace with a structural property or keep by decision in the identity-pin review
-crates/qwen-llm/src/metal_forward/mod.rs	22_126_297_088	temporary	trigger: replace with a structural property or keep by decision in the identity-pin review
-crates/qwen-llm/src/metal_forward/mod.rs	22_134_520_800	temporary	trigger: replace with a structural property or keep by decision in the identity-pin review
-crates/qwen-llm/src/metal_forward/mod.rs	22_134_528_992	temporary	trigger: replace with a structural property or keep by decision in the identity-pin review
-crates/qwen-llm/src/metal_forward/mod.rs	27_378_260_768	temporary	trigger: replace with a structural property or keep by decision in the identity-pin review
-crates/qwen-llm/src/metal_forward/mod.rs	27_378_273_056	temporary	trigger: replace with a structural property or keep by decision in the identity-pin review
-crates/qwen-llm/src/metal_forward/mod.rs	38_250_091_168	temporary	trigger: replace with a structural property or keep by decision in the identity-pin review
-crates/qwen-llm/src/metal_forward/mod.rs	38_703_076_000	temporary	trigger: replace with a structural property or keep by decision in the identity-pin review
-crates/qwen-llm/src/metal_forward/mod.rs	49_640_779_424	temporary	trigger: replace with a structural property or keep by decision in the identity-pin review
-crates/qwen-llm/src/metal_forward/mod.rs	4_192_830_848	temporary	trigger: replace with a structural property or keep by decision in the identity-pin review
-crates/qwen-llm/src/metal_forward/mod.rs	4_194_110_464	temporary	trigger: replace with a structural property or keep by decision in the identity-pin review
-crates/qwen-llm/src/metal_forward/mod.rs	4_204_933_376	temporary	trigger: replace with a structural property or keep by decision in the identity-pin review
-crates/qwen-llm/src/metal_forward/mod.rs	4_205_103_840	temporary	trigger: replace with a structural property or keep by decision in the identity-pin review
-crates/qwen-llm/src/metal_forward/mod.rs	4_205_104_352	temporary	trigger: replace with a structural property or keep by decision in the identity-pin review
-crates/qwen-llm/src/metal_forward/mod.rs	4_214_375_808	temporary	trigger: replace with a structural property or keep by decision in the identity-pin review
-crates/qwen-llm/src/metal_forward/mod.rs	50e9af4e4f590fc85687a71f5602ce035e7fdf0e2a31e928b2c7a2be10458a07	temporary	trigger: replace with a structural property or keep by decision in the identity-pin review
-crates/qwen-llm/src/metal_forward/mod.rs	5_392_741_344	temporary	trigger: replace with a structural property or keep by decision in the identity-pin review
-crates/qwen-llm/src/metal_forward/mod.rs	5_462_315_776	temporary	trigger: replace with a structural property or keep by decision in the identity-pin review
-crates/qwen-llm/src/metal_forward/mod.rs	5_532_746_240	temporary	trigger: replace with a structural property or keep by decision in the identity-pin review
-crates/qwen-llm/src/metal_forward/mod.rs	5_532_954_624	temporary	trigger: replace with a structural property or keep by decision in the identity-pin review
-crates/qwen-llm/src/metal_forward/mod.rs	5_543_736_288	temporary	trigger: replace with a structural property or keep by decision in the identity-pin review
-crates/qwen-llm/src/metal_forward/mod.rs	5_595_522_304	temporary	trigger: replace with a structural property or keep by decision in the identity-pin review
-crates/qwen-llm/src/metal_forward/mod.rs	77_018_996_736	temporary	trigger: replace with a structural property or keep by decision in the identity-pin review
-crates/qwen-llm/src/metal_forward/mod.rs	7_841_234_720	temporary	trigger: replace with a structural property or keep by decision in the identity-pin review
-crates/qwen-llm/src/metal_forward/mod.rs	8_294_219_552	temporary	trigger: replace with a structural property or keep by decision in the identity-pin review
-crates/qwen-llm/src/metal_forward/mod.rs	8_376_472_160	temporary	trigger: replace with a structural property or keep by decision in the identity-pin review
-crates/qwen-llm/src/metal_forward/mod.rs	8_419_480_160	temporary	trigger: replace with a structural property or keep by decision in the identity-pin review
-crates/qwen-llm/src/metal_forward/mod.rs	b331c475123dbee3bc862a495266dee3996c5f3adabcd6fbeaff9bbabd71a4f8	temporary	trigger: replace with a structural property or keep by decision in the identity-pin review
-crates/qwen-llm/src/metal_forward/mod.rs	f57153febec22463c7789b892d4d084041d722483a93191c81c40ab86be7d9e5	temporary	trigger: replace with a structural property or keep by decision in the identity-pin review
-crates/qwen-llm/src/metal_forward/support.rs	f57153febec22463c7789b892d4d084041d722483a93191c81c40ab86be7d9e5	provenance	inventory digest is only emitted in load telemetry; admission uses structural validation
 crates/qwen-llm/src/muse_ffn_packet.rs	*	frozen_experiment	pinned census evidence and frozen research records
 crates/qwen-llm/src/muse_glimmer_residency.rs	25_920_319_232	temporary	trigger: Muse load generalization
 crates/qwen-llm/src/muse_glimmer_residency.rs	29_612_957_984	temporary	trigger: Muse load generalization

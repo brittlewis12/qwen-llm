@@ -211,24 +211,28 @@ kernel void kernel_deepseek_v41_attention_softmax(
     constant uint4 &a [[buffer(0)]], constant uint2 &b [[buffer(1)]],
     device const uint *ids [[buffer(5)]], device const float *sink [[buffer(6)]],
     device float *scores [[buffer(7)]], constant uint &length [[buffer(9)]],
-    device atomic_uint *status [[buffer(10)]], uint h [[thread_position_in_grid]]) {
+    device atomic_uint *status [[buffer(10)]], uint h [[threadgroup_position_in_grid]],
+    uint lane [[thread_index_in_simdgroup]]) {
     // Last slot per head holds the denominator, or a local invalid-ID sentinel.
-    for (uint i = 0; i < b.x; ++i) {
-        if (ids[i] >= length) {
+    bool invalid = false;
+    for (uint i = lane; i < b.x; i += 32) invalid |= ids[i] >= length;
+    if (simd_any(invalid)) {
+        if (lane == 0) {
             atomic_fetch_or_explicit(status, 2u, memory_order_relaxed);
             scores[h * b.y + b.y - 1] = -1.0f;
-            return;
         }
+        return;
     }
     float maximum = sink[h];
-    for (uint i = 0; i < a.y + b.x; ++i) maximum = max(maximum, scores[h * b.y + i]);
+    for (uint i = lane; i < a.y + b.x; i += 32) maximum = max(maximum, scores[h * b.y + i]);
+    maximum = simd_max(maximum);
     float denom = 0;
-    for (uint i = 0; i < a.y + b.x; ++i) {
+    for (uint i = lane; i < a.y + b.x; i += 32) {
         float s = exp(scores[h * b.y + i] - maximum);
         scores[h * b.y + i] = s; denom += s;
     }
-    denom += exp(sink[h] - maximum);
-    scores[h * b.y + b.y - 1] = denom;
+    denom = simd_sum(denom) + exp(sink[h] - maximum);
+    if (lane == 0) scores[h * b.y + b.y - 1] = denom;
 }
 
 kernel void kernel_deepseek_v41_attention_output(

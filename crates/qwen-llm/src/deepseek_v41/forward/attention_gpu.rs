@@ -403,16 +403,20 @@ fn sink_passes(
             },
         );
     }
-    for (name, n) in [("softmax", heads), ("output", heads * dim)] {
-        if n == 0 {
+    let output_count = heads * dim;
+    let output_width = 1usize << output_count.trailing_zeros().min(5);
+    for (name, groups, width) in [
+        ("softmax", heads, 32),
+        ("output", output_count / output_width, output_width),
+    ] {
+        if groups == 0 {
             continue;
         }
         pipeline(ctx, enc, name)?;
         // Exact grids, including tiny toy geometries, need no padded-thread guard.
-        let width = 1usize << n.trailing_zeros().min(5);
         enc.dispatch(
             MTLSize {
-                width: n / width,
+                width: groups,
                 height: 1,
                 depth: 1,
             },

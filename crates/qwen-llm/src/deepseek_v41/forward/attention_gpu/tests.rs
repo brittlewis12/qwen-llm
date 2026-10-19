@@ -829,12 +829,16 @@ fn split_sink_real_geometry_same_run_witness() {
         });
         let census = metal::dispatch_census_take();
         let expected_passes = if nr + nk == 0 {
-            vec![("sink", heads), ("softmax", heads), ("output", heads * dim)]
+            vec![
+                ("sink", heads),
+                ("softmax", heads * 32),
+                ("output", heads * dim),
+            ]
         } else {
             vec![
                 ("sink", heads),
                 ("score", heads * (nr + nk).div_ceil(8) * 256),
-                ("softmax", heads),
+                ("softmax", heads * 32),
                 ("output", heads * dim),
             ]
         };
@@ -847,7 +851,7 @@ fn split_sink_real_geometry_same_run_witness() {
         }
         let actual = f32_slice(&split).unwrap();
         let incumbent = f32_slice(&serial).unwrap();
-        // SIMD score reduction changes addition order, not F32 operands.
+        // SIMD score/softmax reductions change addition order, not F32 operands.
         close(actual, incumbent);
         let rows: Vec<_> = (0..nr)
             .map(|i| raw[((17 + i) % window) * dim..((17 + i) % window + 1) * dim].to_vec())

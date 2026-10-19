@@ -574,7 +574,7 @@ fn gguf_native_f32_prefill_65_token_serial_snapshot_parity() -> Result<()> {
     let forward =
         Forward::from_resident(&ctx, &weights, weights.token_map.clone(), weights.raw_pad)
             .map_err(anyhow::Error::msg)?;
-    // Reuse the oracle prompt IDs: 65 rows cross two full 32-row chunks and a tail.
+    // Keep the real-weight comparison bounded while exercising batched reductions.
     let prompt: Vec<_> = TOKENS.into_iter().cycle().take(65).collect();
     let continuation = [223, 939, 23];
     let cancel = Some(qwen_cli::shutdown::cancellation_flag());

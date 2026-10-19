@@ -9,9 +9,7 @@ pub(crate) struct ChatCapability {
 impl ChatCapability {
     pub(crate) fn verify(source: &qwen_llm::gguf::GgufFile) -> Result<Self, k2::ChatError> {
         Ok(Self {
-            _profile: Some(k2::verify_profile_with_cancel(source, || {
-                crate::shutdown::checkpoint().is_err()
-            })?),
+            _profile: Some(k2::verify_profile(source)?),
         })
     }
 
@@ -88,10 +86,10 @@ pub(super) fn text(value: &Value, kind: &str) -> Result<String, ServeError> {
 }
 
 fn empty_array_if_present(map: &Map<String, Value>, key: &str) -> Result<(), ServeError> {
-    if let Some(value) = map.get(key) {
-        if !value.as_array().is_some_and(Vec::is_empty) {
-            return Err(invalid("input", format!("K2 supports only empty {key}")));
-        }
+    if let Some(value) = map.get(key)
+        && !value.as_array().is_some_and(Vec::is_empty)
+    {
+        return Err(invalid("input", format!("K2 supports only empty {key}")));
     }
     Ok(())
 }
@@ -123,7 +121,7 @@ pub(crate) fn parse_with_profile(
     profile.ok_or_else(|| {
         invalid(
             "input",
-            "K2 chat requires a verified checkpoint profile; this artifact is raw-only",
+            "K2 chat requires available marker tokens, stops, and supported template format; this artifact is raw-only",
         )
     })?;
     let map = fields(
@@ -185,20 +183,20 @@ pub(crate) fn parse_with_profile(
             "input",
         )?;
         empty_array_if_present(item, "summary")?;
-        if let Some(value) = item.get("type") {
-            if value.as_str() != Some(kind) {
-                return Err(invalid("input", "item type must be a string"));
-            }
+        if let Some(value) = item.get("type")
+            && value.as_str() != Some(kind)
+        {
+            return Err(invalid("input", "item type must be a string"));
         }
-        if let Some(value) = item.get("id") {
-            if !value.is_string() {
-                return Err(invalid("input", "item id must be a string"));
-            }
+        if let Some(value) = item.get("id")
+            && !value.is_string()
+        {
+            return Err(invalid("input", "item id must be a string"));
         }
-        if let Some(value) = item.get("status") {
-            if value.as_str() != Some("completed") {
-                return Err(invalid("input", "only completed history may be replayed"));
-            }
+        if let Some(value) = item.get("status")
+            && value.as_str() != Some("completed")
+        {
+            return Err(invalid("input", "only completed history may be replayed"));
         }
         if kind == "reasoning" {
             if pending_reasoning.is_some() {
@@ -290,7 +288,12 @@ pub(crate) fn render_with_profile(
     let Some(chat) = &request.k2_chat else {
         return super::render(request);
     };
-    profile.ok_or_else(|| invalid("input", "K2 chat requires a verified checkpoint profile"))?;
+    profile.ok_or_else(|| {
+        invalid(
+            "input",
+            "K2 chat requires available marker tokens, stops, and supported template format",
+        )
+    })?;
     if request.k2_raw_input.is_some()
         || request.k2_add_special_tokens != Some(true)
         || request.model_request.has_tool_surface()

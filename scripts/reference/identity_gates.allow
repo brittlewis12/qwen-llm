@@ -49,12 +49,8 @@ crates/qwen-llm/src/glm5_next_chat.rs	a4fddbbf0b432101a296c17094f8bc5a2b0d30713b
 crates/qwen-llm/src/glm5_next_chat.rs	eb9eb208eb0d988989d07a6a12d0fdeb5f52574a	provenance	records a reviewed source artifact identity
 crates/qwen-llm/src/k2_horizon_chat.rs	2c9659a84c4eea6f9f60462221fe762c8c84d75c	temporary	trigger: replace with a structural property or keep by decision in the identity-pin review
 crates/qwen-llm/src/k2_horizon_chat.rs	2da7d47641f4509da4ae47711e31d8b5f0f3f801ee08d87e7e9f07f814bdc4a3	temporary	trigger: replace with a structural property or keep by decision in the identity-pin review
-crates/qwen-llm/src/k2_horizon_chat.rs	51ebd8140ea2abd9	temporary	trigger: replace with a structural property or keep by decision in the identity-pin review
-crates/qwen-llm/src/k2_horizon_chat.rs	719ae3a7c9386c25db2c33b50be15d715f883aa5a762495d5a65776660179e99	temporary	trigger: replace with a structural property or keep by decision in the identity-pin review
-crates/qwen-llm/src/k2_horizon_chat.rs	a53e7e9ab4a9c2e82596b9526d837668fe4fd4145de085f9d9beafa3c0dfe3b1	temporary	trigger: replace with a structural property or keep by decision in the identity-pin review
 crates/qwen-llm/src/k2_horizon_chat.rs	a892cd0b0195599f283a8c706787520d9a6747640efb2f4dec4144b0abb62590	temporary	trigger: replace with a structural property or keep by decision in the identity-pin review
 crates/qwen-llm/src/k2_horizon_chat.rs	f6e3cd6dbf0f95016fff531f41f921dee541025733c14580a881cf5a5f9fa750	temporary	trigger: replace with a structural property or keep by decision in the identity-pin review
-crates/qwen-llm/src/k2_horizon_chat.rs	verified_checkpoint_content_identity_with_cancel	temporary	trigger: replace with a structural property or keep by decision in the identity-pin review
 crates/qwen-llm/src/metal/qualification.rs	1ba1ce14804b9ada2330f374d792bf7b9396072ba0961785e6973801639eb2c2	provenance	measurement report digests are serialized as evidence and not read by holds_for
 crates/qwen-llm/src/metal/qualification.rs	85_608_931_328	temporary	trigger: replace the fixed A10B pread headroom threshold with structural admission
 crates/qwen-llm/src/metal/qualification.rs	Apple M1 Pro	frozen_experiment	device labels are stored in characterization records and are not read by holds_for

@@ -1,5 +1,4 @@
 //! Pinned IFM final-checkpoint no-tools template. Raw checkpoints remain separate.
-use crate::checkpoint_identity::verified_checkpoint_content_identity_with_cancel;
 use crate::gguf::GgufFile;
 use serde::{Deserialize, Deserializer, Serialize};
 use sha2::{Digest, Sha256};
@@ -11,14 +10,20 @@ pub const TEMPLATE_SHA256: &str =
     "a892cd0b0195599f283a8c706787520d9a6747640efb2f4dec4144b0abb62590";
 pub const RENDERER: &str = "k2_horizon_ifm_no_tools_v1";
 pub const CHAT_STOPS: [i32; 2] = [1, 250019];
+const CHAT_MARKERS: [&str; 8] = [
+    "<|ifm|im_start|>",
+    "<|ifm|im_end|>",
+    "<ifm|think>",
+    "</ifm|think>",
+    "<ifm|think_fast>",
+    "</ifm|think_fast>",
+    "<ifm|think_faster>",
+    "</ifm|think_faster>",
+];
 pub const GGUF_TEMPLATE_SHA256: &str =
     "f6e3cd6dbf0f95016fff531f41f921dee541025733c14580a881cf5a5f9fa750";
 pub const GENERATION_CONFIG_SHA256: &str =
     "2da7d47641f4509da4ae47711e31d8b5f0f3f801ee08d87e7e9f07f814bdc4a3";
-const FINAL_CONTENT_IDS: [&str; 2] = [
-    "719ae3a7c9386c25db2c33b50be15d715f883aa5a762495d5a65776660179e99", // Q8_0
-    "a53e7e9ab4a9c2e82596b9526d837668fe4fd4145de085f9d9beafa3c0dfe3b1", // Q4_K_M
-];
 
 #[derive(Debug, thiserror::Error)]
 #[error("K2 chat: {0}")]
@@ -26,6 +31,14 @@ pub struct ChatError(String);
 type Result<T> = std::result::Result<T, ChatError>;
 fn error(message: impl Into<String>) -> ChatError {
     ChatError(message.into())
+}
+
+fn ensure_chat_markers(
+    encode: impl FnMut(&str) -> std::result::Result<Vec<i32>, String>,
+) -> Result<()> {
+    let markers = CHAT_MARKERS.map(|marker| (marker, None));
+    crate::tokenizer::require_single_token_markers(&markers, encode)
+        .map_err(|reason| error(format!("{reason}; use raw input")))
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
@@ -217,59 +230,35 @@ pub struct VerifiedChatProfile {
     template_sha256: &'static str,
     gguf_template_sha256: &'static str,
     generation_config_sha256: &'static str,
-    checkpoint_content_blake3: String,
-    tokenizer_metadata_id: String,
-    verification: &'static str,
     reference_policy: &'static str,
 }
 
-/// Chat eligibility is exact artifact provenance, not architecture/name/template
-/// heuristics. Other compatible checkpoints can always use native raw input.
+/// Chat eligibility depends on the native markers, stops, and embedded
+/// renderer template. Raw input remains available for other checkpoints.
 pub fn verify_profile(source: &GgufFile) -> Result<VerifiedChatProfile> {
-    verify_profile_with_cancel(source, || false)
-}
-
-/// Cancellation cannot produce a verified profile or substitute a cached identity.
-pub fn verify_profile_with_cancel(
-    source: &GgufFile,
-    mut should_cancel: impl FnMut() -> bool,
-) -> Result<VerifiedChatProfile> {
-    if should_cancel() {
-        return Err(error("verification cancelled"));
-    }
     crate::k2_horizon::K2HorizonModel::from_gguf(source).map_err(|e| error(e.to_string()))?;
-    let tokenizer = format!(
-        "{:016x}",
-        crate::runtime::tokenizer_metadata_identity(source)
-    );
-    if tokenizer != "51ebd8140ea2abd9" {
-        return Err(error(
-            "chat_profile_unverified: tokenizer profile; use raw input",
-        ));
+    let tokenizer = crate::tokenizer::NativeTokenizer::from_gguf(source)
+        .map_err(|e| error(format!("chat markers unavailable: {e}")))?;
+    ensure_chat_markers(|marker| tokenizer.encode(marker, false).map_err(|e| e.to_string()))?;
+    if tokenizer.eos() != Some(CHAT_STOPS[0])
+        || tokenizer
+            .encode("<|ifm|im_end|>", false)
+            .map_err(|e| error(e.to_string()))?
+            != [CHAT_STOPS[1]]
+    {
+        return Err(error(format!(
+            "chat stop tokens {:?} are unavailable; use raw input",
+            CHAT_STOPS
+        )));
     }
     let template = source
         .get_str("tokenizer.chat_template")
-        .ok_or_else(|| error("chat_profile_unverified: missing template"))?;
+        .ok_or_else(|| error("chat template unavailable; use raw input"))?;
     let template_digest = format!("{:x}", Sha256::digest(template.as_bytes()));
     if template_digest != GGUF_TEMPLATE_SHA256 {
         return Err(error(
-            "chat_profile_unverified: template differs from pinned release",
+            "chat template differs from pinned K2 renderer format; use raw input",
         ));
-    }
-    let report = verified_checkpoint_content_identity_with_cancel(source, &mut should_cancel)
-        .map_err(|e| error(e.to_string()))?;
-    let content: String = report
-        .content_id
-        .iter()
-        .map(|b| format!("{b:02x}"))
-        .collect();
-    if !identity_matches(&tokenizer, &template_digest, &content) {
-        return Err(error(
-            "chat_profile_unverified: checkpoint bytes; use raw input",
-        ));
-    }
-    if should_cancel() {
-        return Err(error("verification cancelled"));
     }
     Ok(VerifiedChatProfile {
         renderer: RENDERER,
@@ -277,17 +266,8 @@ pub fn verify_profile_with_cancel(
         template_sha256: TEMPLATE_SHA256,
         gguf_template_sha256: GGUF_TEMPLATE_SHA256,
         generation_config_sha256: GENERATION_CONFIG_SHA256,
-        checkpoint_content_blake3: content,
-        tokenizer_metadata_id: tokenizer,
-        verification: "retained_bytes_hashed_no_filename_cache_or_downloader_claims",
         reference_policy: "template_and_generation_config_from_pinned_upstream_revision_publisher_declares_conversion_source",
     })
-}
-
-fn identity_matches(tokenizer: &str, template: &str, content: &str) -> bool {
-    tokenizer == "51ebd8140ea2abd9"
-        && template == GGUF_TEMPLATE_SHA256
-        && FINAL_CONTENT_IDS.contains(&content)
 }
 
 #[cfg(test)]
@@ -297,36 +277,34 @@ mod tests {
         serde_json::from_str(include_str!("../tests/fixtures/k2_chat_hf.json")).unwrap()
     }
     #[test]
-    fn k2_chat_identity_requires_all_facts_not_header_similarity() {
-        for content in FINAL_CONTENT_IDS {
-            assert!(identity_matches(
-                "51ebd8140ea2abd9",
-                GGUF_TEMPLATE_SHA256,
-                content
-            ));
-            assert!(!identity_matches(
-                "pretraining",
-                GGUF_TEMPLATE_SHA256,
-                content
-            ));
-            assert!(!identity_matches(
-                "51ebd8140ea2abd9",
-                TEMPLATE_SHA256,
-                content
-            ));
-            let mut changed = content.to_owned();
-            changed.replace_range(0..1, "0");
-            assert!(!identity_matches(
-                "51ebd8140ea2abd9",
-                GGUF_TEMPLATE_SHA256,
-                &changed
-            ));
-        }
-        assert!(!identity_matches(
-            "51ebd8140ea2abd9",
-            GGUF_TEMPLATE_SHA256,
-            &"0".repeat(64)
-        ));
+    fn k2_chat_marker_gate_rejects_missing_and_split_markers_while_raw_input_works() {
+        let missing = ensure_chat_markers(|marker| {
+            Ok(if marker == CHAT_MARKERS[0] {
+                vec![]
+            } else {
+                vec![7]
+            })
+        });
+        assert!(
+            missing
+                .unwrap_err()
+                .to_string()
+                .contains("expected one token")
+        );
+        let split = ensure_chat_markers(|marker| {
+            Ok(if marker == CHAT_MARKERS[1] {
+                vec![7, 8]
+            } else {
+                vec![7]
+            })
+        });
+        assert!(
+            split
+                .unwrap_err()
+                .to_string()
+                .contains("expected one token")
+        );
+        assert!(render(&[Message::text("user", "raw works".into())], Effort::High).is_ok());
     }
     #[test]
     fn k2_chat_bytes_match_pinned_upstream_no_tools_template() {
@@ -375,58 +353,43 @@ mod tests {
         }
     }
     #[test]
-    #[ignore = "model witness: k2-horizon-7b-q8-0"]
-    fn cpu_k2_chat_artifact_identity_and_native_tokens() {
-        let source =
-            GgufFile::open(crate::test_fixtures::catalog::K2_HORIZON_7B_Q8_0.required()).unwrap();
-        let mut checkpoints = 0;
-        let cancelled = verify_profile_with_cancel(&source, || {
-            checkpoints += 1;
-            checkpoints == 4
-        });
-        assert!(cancelled.unwrap_err().to_string().contains("cancelled"));
-        assert_eq!(checkpoints, 4);
-        let template = source.get_str("tokenizer.chat_template").unwrap_or("");
-        let content =
-            crate::checkpoint_identity::verified_checkpoint_content_identity(&source).unwrap();
-        eprintln!(
-            "template SHA256={:x}; content={}; tokenizer={:016x}; template_bytes={}",
-            Sha256::digest(template.as_bytes()),
-            content
-                .content_id
+    fn cpu_k2_chat_artifact_structure_and_native_tokens() {
+        for file_fixture in [
+            crate::test_fixtures::catalog::K2_HORIZON_7B_Q8_0,
+            crate::test_fixtures::catalog::K2_HORIZON_7B_Q4_K_M,
+        ] {
+            let Some(path) = file_fixture.path_or_skip() else {
+                continue;
+            };
+            if path.file_name().and_then(|name| name.to_str()) != Some(file_fixture.filename()) {
+                eprintln!(
+                    "skipping: fixture alias for {} resolved a different published filename",
+                    file_fixture.id
+                );
+                continue;
+            }
+            let source = GgufFile::open(&path).unwrap();
+            verify_profile(&source).unwrap();
+            let tokenizer = crate::tokenizer::NativeTokenizer::from_gguf(&source).unwrap();
+            for case in fixture()["cases"]
+                .as_array()
+                .unwrap()
                 .iter()
-                .map(|b| format!("{b:02x}"))
-                .collect::<String>(),
-            crate::runtime::tokenizer_metadata_identity(&source),
-            template.len()
-        );
-        let tokenizer = crate::tokenizer::NativeTokenizer::from_gguf(&source).unwrap();
-        for case in fixture()["cases"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .filter(|c| c.get("error").is_none())
-        {
-            let body = render(
-                &parse_messages(&serde_json::to_vec(&case["messages"]).unwrap()).unwrap(),
-                Effort::parse(case["reasoning_effort"].as_str()).unwrap(),
-            )
-            .unwrap();
-            assert_eq!(
-                serde_json::json!(tokenizer.encode(&body, true).unwrap()),
-                case["token_ids"],
-                "{}",
-                case["name"]
-            );
+                .filter(|c| c.get("error").is_none())
+            {
+                let body = render(
+                    &parse_messages(&serde_json::to_vec(&case["messages"]).unwrap()).unwrap(),
+                    Effort::parse(case["reasoning_effort"].as_str()).unwrap(),
+                )
+                .unwrap();
+                assert_eq!(
+                    serde_json::json!(tokenizer.encode(&body, true).unwrap()),
+                    case["token_ids"],
+                    "{}",
+                    case["name"]
+                );
+            }
+            assert_eq!(tokenizer.encode("<|ifm|im_end|>", false).unwrap(), [250019]);
         }
-        assert_eq!(tokenizer.encode("<|ifm|im_end|>", false).unwrap(), [250019]);
-        assert_eq!(
-            verify_profile(&source).unwrap().checkpoint_content_blake3,
-            content
-                .content_id
-                .iter()
-                .map(|b| format!("{b:02x}"))
-                .collect::<String>()
-        );
     }
 }

@@ -51,24 +51,24 @@ fn project_reports(core: Value, generation: Value, chat: Option<Value>) -> Value
     execution["request_device"] = json!({"status":"not_evaluated",
         "requires":["request_options_and_token_budget","actual_device_buffer_limits","live_memory_admission"]});
     let can_generate = execution["artifact"]["generation"]["status"] == "passed";
-    let verified_chat = can_generate
+    let chat_available = can_generate
         && chat
             .as_ref()
             .is_some_and(|c| c["template"]["status"] == "identified");
-    execution["serve"]["chat"] = json!(verified_chat);
-    execution["serve"]["tools"] = json!(verified_chat);
-    execution["serve"]["input"] = json!(if verified_chat {
-        "raw_string_or_verified_chat_items"
+    execution["serve"]["chat"] = json!(chat_available);
+    execution["serve"]["tools"] = json!(chat_available);
+    execution["serve"]["input"] = json!(if chat_available {
+        "raw_string_or_chat_items"
     } else {
         "raw_string_only"
     });
-    execution["run"]["scope"] = json!(if verified_chat {
-        "raw_or_verified_chat_and_tools"
+    execution["run"]["scope"] = json!(if chat_available {
+        "raw_or_template_qualified_chat_and_tools"
     } else {
         "raw_only"
     });
-    let unsupported = json!({"status":"unsupported", "code":"chat_profile_unverified",
-        "message":"K2 chat requires admitted generation and a verified checkpoint profile"});
+    let unsupported = json!({"status":"unsupported", "code":"k2_chat_format_unavailable",
+        "message":"K2 chat requires available markers, stops, and supported template format"});
     let raw = if can_generate {
         json!({"status":"supported"})
     } else {
@@ -78,7 +78,7 @@ fn project_reports(core: Value, generation: Value, chat: Option<Value>) -> Value
     let mut result = json!({
         "execution":execution,
         "input":{"raw":raw,"user":unsupported,"messages":unsupported,
-            "tools":{"status":"unsupported","code":"chat_profile_unverified","message":"K2 tools require a verified checkpoint profile"}},
+            "tools":{"status":"unsupported","code":"k2_chat_format_unavailable","message":"K2 tools require available marker tokens, stops, and supported template format"}},
         "reasoning":unsupported,
         "template":{"status":"not_evaluated","rendered_as":null,"code":"k2_generation_not_admitted"}
     });
@@ -127,7 +127,7 @@ mod tests {
         let raw = project_reports(
             passed.clone(),
             passed.clone(),
-            Some(json!({"template":{"status":"unverified"}})),
+            Some(json!({"template":{"status":"unsupported"}})),
         );
         assert_eq!(raw["input"]["raw"]["status"], "supported");
         assert_eq!(raw["input"]["user"]["status"], "unsupported");

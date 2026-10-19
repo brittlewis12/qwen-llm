@@ -1,4 +1,4 @@
-//! Raw and verified K2 chat/tools; never falls through to Qwen protocols.
+//! Raw and native-format K2 chat/tools; never falls through to Qwen protocols.
 
 use super::*;
 use qwen_llm::k2_horizon_chat as chat;
@@ -16,12 +16,12 @@ use timing::{Phase, Timing};
 // Family implementation facts only. Publish artifact decisions through capability_projection.
 fn family_implementation() -> serde_json::Value {
     serde_json::json!({
-        "run": {"status": "supported", "scope": "raw_or_verified_chat_and_tools", "requires_profile": "dense_7b",
-            "chat_profile": "verified_final_artifact", "output": "decoded_text_or_format_responses",
+        "run": {"status": "supported", "scope": "raw_or_template_qualified_chat_and_tools", "requires_profile": "dense_7b",
+            "chat_profile": "supported_chat_format", "output": "decoded_text_or_format_responses",
             "capacity_policy": "checkpoint_context_and_device_memory", "native_tokenizer": true, "kv_storage": "f16"},
-        "serve": {"status": "partial", "endpoint": "/v1/responses", "input": "raw_string_or_verified_chat_items",
+        "serve": {"status": "partial", "endpoint": "/v1/responses", "input": "raw_string_or_chat_items",
             "capacity_policy": "checkpoint_context_and_device_memory", "snapshot_cache": false, "tools": true,
-            "chat": "verified_final_artifact_only", "special_token_control": "x_k2.add_special_tokens_raw_only"},
+            "chat": "supported_chat_format_only", "special_token_control": "x_k2.add_special_tokens_raw_only"},
         "bench": {"status": "partial", "command": "qwen-bench k2-request",
             "scope": "raw_greedy_request_wall", "capacity_policy": "checkpoint_context_and_device_memory",
             "llama_bench_comparable": false},
@@ -34,7 +34,7 @@ fn family_implementation() -> serde_json::Value {
 }
 
 pub(crate) fn chat_projection(gguf: &GgufFile) -> Result<serde_json::Value> {
-    let profile = chat::verify_profile_with_cancel(gguf, || shutdown::checkpoint().is_err());
+    let profile = chat::verify_profile(gguf);
     shutdown::checkpoint()?;
     Ok(match profile {
         Ok(profile) => serde_json::json!({
@@ -45,8 +45,8 @@ pub(crate) fn chat_projection(gguf: &GgufFile) -> Result<serde_json::Value> {
                 "thinking":{"status":"supported"},"scope":"run_and_serve"},
             "template":{"status":"identified","rendered_as":chat::RENDERER,"tool_renderer":chat::tools::TOOL_RENDERER,"profile":profile,"scope":"run_and_serve"}
         }),
-        Err(error) => serde_json::json!({"template":{"status":"unverified","rendered_as":null,
-            "code":"chat_profile_unverified","message":error.to_string()}}),
+        Err(error) => serde_json::json!({"template":{"status":"unsupported","rendered_as":null,
+            "code":"k2_chat_format_unavailable","message":error.to_string()}}),
     })
 }
 
@@ -222,9 +222,7 @@ fn prepare_input(
         // Bind the exact artifact before reading an input file or waiting on stdin.
         shutdown::checkpoint()?;
         let profile = timing.measure(Phase::ArtifactVerification, || {
-            Ok(chat::verify_profile_with_cancel(gguf, || {
-                shutdown::checkpoint().is_err()
-            })?)
+            Ok(chat::verify_profile(gguf)?)
         })?;
         let cli::Invocation::Run(run) = invocation else {
             unreachable!()
@@ -280,7 +278,7 @@ fn prepare_raw_timed(
         )?;
         ensure!(
             args.messages.is_none(),
-            "legacy K2 input is raw-only; use qwen run --messages for verified chat"
+            "legacy K2 input is raw-only; use qwen run --messages for native chat"
         );
         Ok(())
     })?;
@@ -294,7 +292,7 @@ fn prepare_raw_timed(
             match run.input {
                 cli::RunInput::RawPrompt(text) => Ok((text, PromptSource::Inline)),
                 _ => bail!(
-                    "K2 raw preparation requires --raw-prompt; chat uses separate verified preparation"
+                    "K2 raw preparation requires --raw-prompt; chat uses separate marker and template checks"
                 ),
             }
         }),
@@ -781,10 +779,7 @@ mod tests {
         }
         assert_eq!(capabilities["local_fitting"]["status"], "unsupported");
         assert_eq!(capabilities["serve"]["status"], "partial");
-        assert_eq!(
-            capabilities["serve"]["input"],
-            "raw_string_or_verified_chat_items"
-        );
+        assert_eq!(capabilities["serve"]["input"], "raw_string_or_chat_items");
         assert_eq!(capabilities["serve"]["snapshot_cache"], false);
         assert_eq!(capabilities["serve"]["tools"], true);
         assert_eq!(capabilities["bench"]["status"], "partial");

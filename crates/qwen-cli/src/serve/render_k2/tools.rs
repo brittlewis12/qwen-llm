@@ -212,7 +212,7 @@ pub(super) fn parse_with_profile(
     body: &Value,
     profile: Option<&ChatCapability>,
 ) -> Result<ServeRequest, ServeError> {
-    profile.ok_or_else(|| invalid("input", "K2 tools require a verified checkpoint profile"))?;
+    profile.ok_or_else(|| invalid("input", "K2 tools require an available chat format"))?;
     chat::fields(
         body,
         &[
@@ -302,7 +302,7 @@ pub(super) fn render_with_profile(
     request: &ServeRequest,
     profile: Option<&ChatCapability>,
 ) -> Result<String, ServeError> {
-    profile.ok_or_else(|| invalid("input", "K2 tools require a verified checkpoint profile"))?;
+    profile.ok_or_else(|| invalid("input", "K2 tools require an available chat format"))?;
     let chat = request.k2_tools.as_ref().unwrap();
     if request.k2_chat.is_some()
         || request.k2_raw_input.is_some()

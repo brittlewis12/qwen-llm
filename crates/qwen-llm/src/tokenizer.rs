@@ -213,6 +213,28 @@ pub trait Tokenize {
     fn eos(&self) -> Option<i32>;
 }
 
+/// Check that renderer markers each encode as one tokenizer token, optionally
+/// requiring a specific released token ID. The caller supplies marker-specific
+/// encoding so format adapters can share this structural gate.
+pub fn require_single_token_markers(
+    markers: &[(&str, Option<i32>)],
+    mut encode: impl FnMut(&str) -> Result<Vec<i32>, String>,
+) -> Result<(), String> {
+    for &(marker, expected) in markers {
+        let ids = encode(marker).map_err(|error| format!("encode {marker}: {error}"))?;
+        match expected {
+            Some(id) if ids != [id] => {
+                return Err(format!("{marker} encodes to {ids:?}, not [{id}]"));
+            }
+            None if ids.len() != 1 => {
+                return Err(format!("{marker} encodes to {ids:?}, expected one token"));
+            }
+            _ => {}
+        }
+    }
+    Ok(())
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum TokError {
     #[error("path is not valid UTF-8: {0:?}")]

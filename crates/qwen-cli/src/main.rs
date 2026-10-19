@@ -961,8 +961,8 @@ pub(crate) fn input_capability_for(
             match qwen_llm::k2_horizon_runtime::K2PreparedArtifact::inspect(gguf)
                 .and_then(|artifact| artifact.generation_stops()) {
                 Ok(_) => InputCapability::raw_only(
-                    "chat_profile_unverified",
-                    "K2 chat requires a verified final-artifact profile; compatible checkpoints retain raw input".into(),
+                    "k2_native_chat_renderer_required",
+                    "K2 structured chat uses its native marker and template checks; compatible checkpoints retain raw input".into(),
                 ),
                 Err(error) => InputCapability::none(error.code(), error.to_string()),
             }

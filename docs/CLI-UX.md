@@ -295,7 +295,7 @@ the chat-template re-implementation from `scripts/bench/text_capability_eval.py`
 (packet schema v2). Conversation-history rows remain deferred until a named
 consumer migrates.
 
-## K2 Horizon Verified Chat
+## K2 Horizon Native Chat Format
 
 No-model `qwen info --json` reports the metallib compiler's first version line
 and the macOS SDK version used to build the embedded Metal libraries. Its
@@ -303,10 +303,11 @@ device facts schema is `qwen_device_info_v6`; witness reports retain those
 fields from this command so they identify the shader-producing toolchain even
 when collected on a host without Xcode.
 
-K2's native raw lane remains available for compatible dense 7B checkpoints. The
-templated CLI profile is deliberately narrower: the verified final Q8_0 and
-standard Q4_K_M artifacts documented in `K2-HORIZON-PLAN.md`, not filename-based detection or a
-claim that every intermediate checkpoint was trained for chat.
+K2's native raw lane remains available for compatible dense 7B checkpoints.
+Chat checks that the IFM renderer's markers encode as single tokens, its stops
+are available, and the embedded template matches the supported format. These
+checks describe tokenizer and format compatibility; they do not authenticate
+weights or determine whether a checkpoint was chat-tuned.
 
 ```sh
 qwen run -m "$HOME/models/K2-Horizon-7B-Q8_0.gguf" \
@@ -356,25 +357,15 @@ reasoning exits normally with an explicit incomplete diagnostic on stderr
 (`reasoning_closed:false` in stats); EOS before the reasoning close is a
 protocol error (nonzero exit after the printed bytes). `--format responses`
 prints one Open Responses object instead (reasoning and message items).
-HTTP chat uses the same partitioner (see `SERVE.md#k2-horizon-verified-chat`).
+HTTP chat uses the same partitioner (see `SERVE.md#k2-horizon-native-chat-format`).
 Benchmarks and lens inputs remain raw-only. Upstream sampling recommendations
 shown above are explicit options, not a change to the existing CLI defaults.
 
-Chat preparation and `qwen info -m MODEL --json` hash retained checkpoint bytes to verify
-the profile. This is read-only CPU work but can be expensive, especially in a debug
-build; no filename, cached identity or downloader declaration substitutes for that
-read. The embedded GGUF template and upstream template have separate digests:
-the native renderer follows upstream byte fixtures, never executes embedded Jinja.
-The upstream generation-config digest is reference provenance, not a GGUF field.
-The conversion's source revision remains a publisher declaration, not proof of
-BF16-to-quantized fidelity. Request stats record the verified profile, selected
-effort, stops, BOS ownership, rendered-input token digest and `reasoning_closed`.
-
-CLI run, JSON inspection and server startup check termination between verification
-reads (at most 1 MiB per read) and before publishing a verified profile. Cancellation
-returns an error, never a partial identity or a raw-only server fallback. This is
-cooperative cancellation: it does not interrupt an in-progress filesystem read.
-Text `qwen info` remains metadata inspection without exhaustive chat verification.
+The embedded-template SHA selects the supported K2 renderer format; the upstream
+template and generation-config digests remain reference provenance. The native
+renderer follows upstream byte fixtures and never executes embedded Jinja.
+Request stats record the selected renderer, effort, stops, BOS ownership,
+rendered-input token digest and `reasoning_closed`.
 
 K2 JSON inspection reports `capabilities.execution` in three layers:
 `implementation_status` describes the family implementation; per-lane
@@ -386,7 +377,8 @@ retained ranges and tokenizer. Stable rejection codes identify those stages.
 Run/serve/bench additionally require raw generation EOS metadata `[1]`; lens does
 not sample, so an otherwise valid extra stop set alone does not disable it. Chat
 verification is never attempted after failed core/generation admission. The
-`execution.serve.chat` and `execution.serve.tools` booleans describe this artifact's verified eligibility.
+`execution.serve.chat` and `execution.serve.tools` booleans report whether
+K2's markers, stops, and supported template format are available.
 
 ### K2 Tools End To End
 

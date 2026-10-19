@@ -533,7 +533,7 @@ fn k2_chat_budget_and_malformed_stop_have_distinct_terminal_states() {
 }
 
 #[test]
-fn k2_chat_missing_profile_refuses_before_generation() {
+fn k2_chat_without_capability_refuses_before_generation() {
     let backend = K2Mock {
         profile: None,
         pieces: vec!["must not generate".into()],
@@ -547,6 +547,6 @@ fn k2_chat_missing_profile_refuses_before_generation() {
         ),
     );
     assert!(response.starts_with("HTTP/1.1 400"));
-    assert!(response.contains("verified checkpoint profile"));
+    assert!(response.contains("available marker tokens, stops, and supported template format"));
     assert!(!response.contains("must not generate"));
 }

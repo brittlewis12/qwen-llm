@@ -549,16 +549,15 @@ pub fn verify_profile(
             )));
         }
     };
-    for (marker, id) in MARKERS.into_iter().chain(tools::TOOL_MARKERS) {
-        let ids = tokenizer
-            .encode(marker, false)
-            .map_err(|e| unverified(format!("encode {marker}: {e}")))?;
-        if ids != [id] {
-            return Err(unverified(format!(
-                "{marker} encodes to {ids:?}, not [{id}]"
-            )));
-        }
-    }
+    let markers = MARKERS
+        .into_iter()
+        .chain(tools::TOOL_MARKERS)
+        .map(|(marker, id)| (marker, Some(id)))
+        .collect::<Vec<_>>();
+    crate::tokenizer::require_single_token_markers(&markers, |marker| {
+        tokenizer.encode(marker, false).map_err(|e| e.to_string())
+    })
+    .map_err(unverified)?;
     if stops != CHAT_STOPS {
         return Err(unverified(format!(
             "generation stops {stops:?} are not the released {CHAT_STOPS:?}"

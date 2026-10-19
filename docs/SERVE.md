@@ -14,9 +14,9 @@ gate records under `docs/bench/`, the successful real OpenCode session
 
 Private, single-box engine serving local clients over loopback.
 
-K2 Horizon dense 7B has separate raw-string and verified native chat/tools
+K2 Horizon dense 7B has separate raw-string and marker/template-qualified native chat/tools
 `/v1/responses` subsets: see [K2 Horizon Raw Profile](#k2-horizon-raw-profile)
-and [K2 Horizon Verified Chat](#k2-horizon-verified-chat). It does not inherit the
+and [K2 Horizon Native Chat Format](#k2-horizon-native-chat-format). It does not inherit the
 Qwen/DeepSeek chat, reasoning, tools, snapshots, or long-context capabilities.
 
 Operating goals, in order:
@@ -446,7 +446,7 @@ qwen serve -m MODEL --trace-sse "$trace_dir/serve-$(date +%Y%m%d-%H%M%S).jsonl"
   `Connection: close`; hand-rolled request parse (loopback threat model;
   request bodies are `Content-Length` JSON).
 - **Implemented families: Qwen3.5/3.6/3.8, Qwen3.8-Flash-Next, DeepSeek
-  V4, Muse Glimmer, and K2 Horizon raw/verified native chat/tools.** DS4 runs its own session and snapshot stack
+  V4, Muse Glimmer, and K2 Horizon raw/native-format chat and tools.** DS4 runs its own session and snapshot stack
   (`serve/backend_ds4.rs`) with a startup-fixed forward budget and a
   serve-owned snapshot cache (`serve/snapshot_cache.rs`; DS4 has no
   engine-side RAM prefix cache). Flash-Next (`serve/backend_qwen4exp.rs`, since 2026-09-17) holds
@@ -469,7 +469,7 @@ qwen serve -m MODEL --trace-sse "$trace_dir/serve-$(date +%Y%m%d-%H%M%S).jsonl"
   snapshots; `QWEN_MUSE_PREFIX_REUSE=0` disables).
   K2 keeps one live session and reuses its longest common token prefix (see
   [K2 Horizon Raw Profile](#k2-horizon-raw-profile)); it ignores the snapshot
-  budget and has no drafter. Its verified chat profile separates
+  budget and has no drafter. Its supported chat format separates
   reasoning and final answers without inheriting another family's parser.
 - **Stdout is never written.** All diagnostics via the existing stderr
   tracing surface; per-request `qwen_diag` stats line retained and
@@ -550,7 +550,7 @@ concurrent history/native routes and the capability-gated Bun browser client.
 K2 dense 7B supports completion-style raw text on `POST /v1/responses`, not a
 new `/v1/completions` endpoint. Choose an unused loopback address:
 
-The verified final artifact also supports [HTTP chat](#k2-horizon-verified-chat)
+A checkpoint with supported markers, stops, and template also supports [HTTP chat](#k2-horizon-native-chat-format)
 and local `qwen run --user/--messages`. Raw strings never opt into templating:
 their EOS-only stop set and literal output contract below are unchanged.
 
@@ -658,14 +658,15 @@ numerical qualification. Test reproduction is in
 [`scripts/reference/k2/README.md`](../scripts/reference/k2/README.md); development
 evidence remains in `K2-HORIZON-PLAN.md` and `K2-HORIZON-REVIEW.md`.
 
-## K2 Horizon Verified Chat
+## K2 Horizon Native Chat Format
 
-For verified final Q8_0 and standard Q4_K_M artifacts, array `input` selects the pinned IFM
-renderer; string `input` always remains raw. Startup verifies retained checkpoint
-bytes once, before accepting requests, and owns an opaque chat capability. An
-unverified artifact or verification failure emits a diagnostic and remains raw-only.
-No request field can authorize chat or trigger rehashing. Profile details and
-provenance limits are documented in `CLI-UX.md#k2-horizon-verified-chat`.
+Array `input` selects the native IFM renderer when its markers each encode as
+one token, the EOS and IFM end marker are available, and the embedded template
+matches the supported K2 chat format. The template SHA identifies the format
+variant reproduced by the native renderer. A failed check emits a diagnostic
+and leaves raw string input available. Chat eligibility does not authenticate
+the weights or establish whether they were chat-tuned; select a suitable file.
+Profile details are documented in `CLI-UX.md#k2-horizon-native-chat-format`.
 
 ```json
 {

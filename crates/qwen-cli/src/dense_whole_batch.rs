@@ -607,7 +607,7 @@ fn sessions_at_frontier(
         true,
     );
     ensure!(
-        prefill_admission.admitted,
+        prefill_admission.is_admitted(),
         "frontier setup admission denied: reason={} required={:?} working_set_headroom={:?} process_remaining={:?}",
         prefill_admission.reason.as_str(),
         prefill_admission.required_bytes,
@@ -667,7 +667,7 @@ fn sessions_at_frontier(
         true,
     );
     ensure!(
-        admission.admitted,
+        admission.is_admitted(),
         "long-frontier B=8 admission denied: reason={} required={:?} working_set_headroom={:?} process_remaining={:?}",
         admission.reason.as_str(),
         admission.required_bytes,
@@ -759,7 +759,7 @@ pub fn run(args: DecodeDenseWholeBatchArgs) -> Result<()> {
         true,
     );
     ensure!(
-        admission.admitted,
+        admission.is_admitted(),
         "whole-model B=8 admission denied: reason={} required={:?} working_set_headroom={:?} process_remaining={:?}",
         admission.reason.as_str(),
         admission.required_bytes,

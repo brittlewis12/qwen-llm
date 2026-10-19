@@ -346,7 +346,7 @@ fn muse_ffn_capture_and_fusion_screen() {
         true,
     );
     assert!(
-        admission.admitted,
+        admission.is_admitted(),
         "FFN packet aggregate admission {admission:?}"
     );
     let weights =

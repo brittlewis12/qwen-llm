@@ -859,16 +859,17 @@ fn headless_and_final_prefill_memory_refusals_stay_typed() {
             |state, tokens, _, with_logits| {
                 calls.push((tokens.len(), with_logits));
                 if with_logits == fail_with_logits {
-                    let denied = qwen_llm::metal::MemoryAdmissionDenied {
-                        reason: qwen_llm::metal::MetalMemoryAdmissionReason::WorkingSetInsufficient,
-                        required_bytes: Some(4096),
-                        signals: MetalMemorySignals {
+                    let denied = qwen_llm::metal::MemoryAdmissionDenied::new(
+                        qwen_llm::metal::MetalMemoryAdmissionReason::WorkingSetInsufficient,
+                        Some(4096),
+                        MetalMemorySignals {
                             recommended_max_bytes: 1024,
                             current_allocated_bytes: 0,
                             process_limit_remaining_bytes: Some(8192),
                         },
-                        working_set_headroom_bytes: Some(1024),
-                    };
+                        Some(1024),
+                    )
+                    .expect("test reason refuses admission");
                     return Err(state_error(
                         qwen_llm::deepseek_v41::forward::StateError::MemoryAdmissionDenied(denied),
                     ));

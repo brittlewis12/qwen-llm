@@ -39,16 +39,17 @@ fn prefill_retry_requires_a_resource_failure() {
         MetalMemoryAdmissionReason::ProcessSignalUnavailable,
         MetalMemoryAdmissionReason::RequiredBytesOverflow,
     ] {
-        let denied = MemoryAdmissionDenied {
+        let denied = MemoryAdmissionDenied::new(
             reason,
-            required_bytes: Some(4096),
-            signals: MetalMemorySignals {
+            Some(4096),
+            MetalMemorySignals {
                 recommended_max_bytes: 1024,
                 current_allocated_bytes: 0,
                 process_limit_remaining_bytes: Some(1024),
             },
-            working_set_headroom_bytes: Some(1024),
-        };
+            Some(1024),
+        )
+        .expect("test reason refuses admission");
         assert_eq!(
             session_allocation_can_narrow(&Qwen4ExpTextSessionError::MemoryAdmission(denied)),
             reason.is_pressure()
@@ -170,7 +171,7 @@ fn flash_prefill_pressure_plan_preserves_context_and_selection() {
     };
     assert!(
         matches!(select_prefill_plan(&ctx, full.clone(), unavailable, true, true),
-        Err(Qwen4ExpRuntimeError::MemoryAdmission(denied)) if denied.reason == MetalMemoryAdmissionReason::ProcessSignalUnavailable)
+        Err(Qwen4ExpRuntimeError::MemoryAdmission(denied)) if denied.reason() == MetalMemoryAdmissionReason::ProcessSignalUnavailable)
     );
     let exhausted = MetalMemorySignals {
         process_limit_remaining_bytes: Some(1),
@@ -178,7 +179,7 @@ fn flash_prefill_pressure_plan_preserves_context_and_selection() {
     };
     assert!(
         matches!(select_prefill_plan(&ctx, full, exhausted, true, true),
-        Err(Qwen4ExpRuntimeError::MemoryAdmission(denied)) if denied.reason.is_pressure())
+        Err(Qwen4ExpRuntimeError::MemoryAdmission(denied)) if denied.reason().is_pressure())
     );
 }
 

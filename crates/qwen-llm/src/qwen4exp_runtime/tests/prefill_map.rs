@@ -573,11 +573,11 @@ fn with_native_runner(
     emit(
         out,
         json!({"event": "diagnostic_memory_gate", "checkpoint_bytes": checkpoint_bytes,
-        "cpu_margin_bytes": cpu_margin, "admitted": cpu_gate.admitted,
+        "cpu_margin_bytes": cpu_margin, "admitted": cpu_gate.is_admitted(),
         "admission": format!("{cpu_gate:?}")}),
     );
     require(
-        cpu_gate.admitted,
+        cpu_gate.is_admitted(),
         "diagnostic memory gate refused; no model execution",
     )?;
     let mut moe = vec![

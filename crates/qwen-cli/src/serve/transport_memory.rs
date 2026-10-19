@@ -33,7 +33,7 @@ pub(crate) fn refusal_kind(
 /// The serve error for a typed memory refusal of `what` (a session, a
 /// request's state, a model).
 pub(crate) fn memory_refusal(what: &str, denied: &MemoryAdmissionDenied) -> ServeError {
-    let (status, error_type, code) = refusal_kind(denied.reason);
+    let (status, error_type, code) = refusal_kind(denied.reason());
     ServeError {
         status,
         error_type,
@@ -133,23 +133,14 @@ mod tests {
             ),
             (R::InvalidWorkingSetSignal, 500, "memory_signal_invalid"),
             (R::RequiredBytesOverflow, 500, "memory_size_overflow"),
-            (
-                R::AdmittedWithProcessBudget,
-                500,
-                "memory_admission_inconsistent",
-            ),
-            (
-                R::AdmittedProcessBudgetOmitted,
-                500,
-                "memory_admission_inconsistent",
-            ),
         ] {
-            let denied = MemoryAdmissionDenied {
+            let denied = MemoryAdmissionDenied::new(
                 reason,
-                required_bytes: (reason != R::RequiredBytesOverflow).then_some(1 << 31),
+                (reason != R::RequiredBytesOverflow).then_some(1 << 31),
                 signals,
-                working_set_headroom_bytes: Some(1 << 30),
-            };
+                Some(1 << 30),
+            )
+            .expect("test reason refuses admission");
             let error = memory_refusal("GLM-5.3-Flash session", &denied);
             assert_eq!(
                 (error.status, error.code),
@@ -182,11 +173,9 @@ mod tests {
             current_allocated_bytes: 0,
             process_limit_remaining_bytes: Some(0),
         };
-        let denied = |reason| MemoryAdmissionDenied {
-            reason,
-            required_bytes: Some(512),
-            signals,
-            working_set_headroom_bytes: Some(1 << 30),
+        let denied = |reason| {
+            MemoryAdmissionDenied::new(reason, Some(512), signals, Some(1 << 30))
+                .expect("test reason refuses admission")
         };
 
         let attempts = std::cell::Cell::new(0);

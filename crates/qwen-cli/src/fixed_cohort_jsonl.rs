@@ -2072,7 +2072,7 @@ fn fixed_cohort_memory_admission<const WIDTH: usize, E: FixedCohortExecutor<WIDT
             prefix_snapshot_required_bytes,
         )
         .map_err(anyhow::Error::from)?;
-    if admission.admitted || prefix_snapshot_required_bytes == 0 {
+    if admission.is_admitted() || prefix_snapshot_required_bytes == 0 {
         return Ok(admission);
     }
     loaded
@@ -2248,13 +2248,13 @@ fn run_fixed_cohort_file<const WIDTH: usize, E: FixedCohortExecutor<WIDTH>>(
     let mut denied_refill_admissions = Vec::new();
     let (plan, automatic_refill_admission) = admit_automatic_refill_plan(plan, |arena| {
         let admission = refill_arena_memory_admission::<WIDTH, E>(loaded, requests, args, arena)?;
-        if !admission.admitted {
+        if !admission.is_admitted() {
             denied_refill_admissions.push((
                 arena.request_indices.first().copied().unwrap_or(0),
                 admission,
             ));
         }
-        Ok(admission.admitted)
+        Ok(admission.is_admitted())
     })?;
     let (planned_work, rejected_refill_arenas) = match automatic_refill_admission {
         AutomaticRefillAdmission::Admitted => (plan.work, 0),
@@ -2265,13 +2265,13 @@ fn run_fixed_cohort_file<const WIDTH: usize, E: FixedCohortExecutor<WIDTH>>(
             rewrite_unadmitted_refill_arenas(plan.work, |arena| {
                 let admission =
                     refill_arena_memory_admission::<WIDTH, E>(loaded, requests, args, arena)?;
-                if !admission.admitted {
+                if !admission.is_admitted() {
                     denied_refill_admissions.push((
                         arena.request_indices.first().copied().unwrap_or(0),
                         admission,
                     ));
                 }
-                Ok(admission.admitted)
+                Ok(admission.is_admitted())
             })?
         }
     };
@@ -2283,10 +2283,10 @@ fn run_fixed_cohort_file<const WIDTH: usize, E: FixedCohortExecutor<WIDTH>>(
             args,
             plan.prefix_fanout_boundary_policy,
         )?;
-        if !admission.admitted {
+        if !admission.is_admitted() {
             denied_admissions.push((*indices, admission));
         }
-        Ok(admission.admitted)
+        Ok(admission.is_admitted())
     })?;
     let memory_rejected_cohorts = rejected_batches.len();
     let denied_refill_arena_count = denied_refill_admissions.len();
@@ -2445,7 +2445,7 @@ fn run_fixed_cohort_file<const WIDTH: usize, E: FixedCohortExecutor<WIDTH>>(
         root_telemetry.additional_memory_bytes = additional_memory_bytes;
         root_telemetry.memory_admission_required_bytes = admission.required_bytes;
         root_telemetry.memory_admission_reason = admission.reason.as_str();
-        if admission.admitted {
+        if admission.is_admitted() {
             let root_prompt = root_prompt_refs
                 .first()
                 .copied()
@@ -3111,14 +3111,14 @@ fn run_cohort<const WIDTH: usize, E: FixedCohortExecutor<WIDTH>>(
         loaded.context().memory_signals(),
         true,
     );
-    if !memory_admission.admitted && prefix_fanout.selected_prefix_tokens > 0 {
+    if !memory_admission.is_admitted() && prefix_fanout.selected_prefix_tokens > 0 {
         let without_fanout = evaluate_metal_memory_admission(
             remaining_sequence_required_bytes,
             TRANSIENT_RESERVE_BYTES,
             loaded.context().memory_signals(),
             true,
         );
-        if without_fanout.admitted {
+        if without_fanout.is_admitted() {
             prefix_fanout.selected_prefix_tokens = 0;
             prefix_fanout.reason = "memory_fallback";
             prefix_snapshot_required_bytes = 0;
@@ -3127,7 +3127,7 @@ fn run_cohort<const WIDTH: usize, E: FixedCohortExecutor<WIDTH>>(
         }
     }
     ensure!(
-        memory_admission.admitted,
+        memory_admission.is_admitted(),
         "{} memory admission denied: reason={} required_bytes={:?} working_set_headroom_bytes={:?} process_limit_remaining_bytes={:?}",
         E::DISPLAY_NAME,
         memory_admission.reason.as_str(),

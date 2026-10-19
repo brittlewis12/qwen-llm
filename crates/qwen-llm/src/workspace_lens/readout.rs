@@ -23,7 +23,7 @@ pub(super) fn admit_scalar_observer_allocations(
         context.memory_signals(),
         true,
     );
-    if !admission.admitted {
+    if !admission.is_admitted() {
         return Err(WorkspaceLensError::FullReadoutMemoryAdmissionDenied {
             reason: admission.reason,
             requested_bytes: gpu_bytes
@@ -1081,7 +1081,7 @@ impl<'model, 'sequence> WorkspaceLensSession<'model, 'sequence> {
         })?;
         let admission =
             evaluate_metal_memory_admission(priced_bytes, 0, context.memory_signals(), true);
-        if !admission.admitted {
+        if !admission.is_admitted() {
             return Err(WorkspaceLensError::FullReadoutMemoryAdmissionDenied {
                 reason: admission.reason,
                 requested_bytes: priced_bytes,

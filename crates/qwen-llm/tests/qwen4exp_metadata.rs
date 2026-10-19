@@ -156,11 +156,11 @@ fn realizes_released_q3_k_xl_as_read_only_metal_views() {
     let admitted = plan
         .admit(ctx.memory_signals())
         .expect("admit released Metal weights");
-    assert!(admitted.admission().admitted);
+    assert!(admitted.admission().is_admitted());
 
     let realized = Qwen4ExpMetalWeights::realize(&ctx, &gguf, admitted)
         .expect("realize released Metal weights");
-    assert!(realized.admission().admitted);
+    assert!(realized.admission().is_admitted());
     assert_eq!(realized.allocated_before(), baseline);
     assert!(realized.observed_allocation_delta() <= priced_upper);
     assert!(realized.allocated_after() >= realized.allocated_before());

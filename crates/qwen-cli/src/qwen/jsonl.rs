@@ -319,7 +319,7 @@ pub(crate) fn run_requests_jsonl(
                     requirements.prefill_scratch_upper_bytes,
                     executor_scratch_upper_bytes,
                 )?
-                .admitted)
+                .is_admitted())
         };
         let concurrency2_memory_admitted = admission(
             2,

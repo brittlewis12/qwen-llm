@@ -676,7 +676,7 @@ impl MuseGlimmerTextSession {
         )?;
         let _allocation_transaction = ctx.begin_allocation_transaction();
         let admission = memory_plan.admission(ctx.memory_signals());
-        if !admission.admitted {
+        if !admission.is_admitted() {
             return invalid(format!(
                 "Metal session admission denied: reason={} required={:?} working_set_headroom={:?} process_remaining={:?}",
                 admission.reason.as_str(),
@@ -1287,7 +1287,7 @@ impl<'ctx, 'model> MuseGlimmerTextForward<'ctx, 'model> {
         let plan = self.full_readout_workspace_plan(row_capacity)?;
         let _allocation_transaction = self.ctx.begin_allocation_transaction();
         let admission = plan.admission(self.ctx);
-        if !admission.admitted {
+        if !admission.is_admitted() {
             return Err(
                 MuseGlimmerTextSessionError::FullReadoutMemoryAdmissionDenied {
                     reason: admission.reason,
@@ -3634,7 +3634,7 @@ mod tests {
                     + plan.host_transport_reserve_bytes()
             )
         );
-        assert!(admission.admitted);
+        assert!(admission.is_admitted());
     }
 
     #[test]
@@ -3774,7 +3774,7 @@ mod tests {
         assert_eq!(session.next_position(), 0);
         assert_eq!(session.remaining_forwards(), 8);
         assert_eq!(session.memory_plan().allocations().len(), 32);
-        assert!(session.admission().admitted);
+        assert!(session.admission().is_admitted());
         session.reset().unwrap();
     }
 

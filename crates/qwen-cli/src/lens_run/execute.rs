@@ -44,7 +44,7 @@ pub(crate) fn ensure_qwen_sequence_admitted(
         .qwen_execution_memory_admission(1, capacity, 0, 0)
         .context("price Lens sequence memory")?;
     ensure!(
-        admission.admitted,
+        admission.is_admitted(),
         "Lens sequence memory admission denied: reason={} required={:?} working_set_headroom={:?} process_remaining={:?}",
         admission.reason.as_str(),
         admission.required_bytes,
@@ -238,7 +238,7 @@ pub(super) fn prepare_ordinary_prefill(
     let admission = loaded
         .qwen_execution_memory_admission(1, capacity, scratch_priced_upper_bytes, 0)
         .context("price dense packed Lens prefill memory")?;
-    if !admission.admitted {
+    if !admission.is_admitted() {
         return Ok(PreparedOrdinaryPrefill::serial(
             requested,
             schedule_basis,

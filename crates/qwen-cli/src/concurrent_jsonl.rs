@@ -679,7 +679,7 @@ pub(super) fn run_prepared(
             root_telemetry.additional_memory_bytes = additional_memory_bytes;
             root_telemetry.memory_admission_required_bytes = admission.required_bytes;
             root_telemetry.memory_admission_reason = admission.reason.as_str();
-            if admission.admitted {
+            if admission.is_admitted() {
                 let root_prompt = paired_prompt_refs
                     .first()
                     .copied()
@@ -1071,14 +1071,14 @@ fn plan_request_pairs<T: Ord>(
             }
             available.retain(|&index| !matched[index - window_start]);
             available.sort_by_key(|&index| (requested_tokens[index], index));
-            for pair in available.chunks_exact(WIDTH) {
+            for pair in available.as_chunks::<WIDTH>().0 {
                 let mut pair = [pair[0], pair[1]];
                 pair.sort_unstable();
                 window_work.push(PairWork::Pair(pair));
                 depth_balanced_pairs += 1;
             }
         } else {
-            for pair in available.chunks_exact(WIDTH) {
+            for pair in available.as_chunks::<WIDTH>().0 {
                 window_work.push(PairWork::Pair([pair[0], pair[1]]));
             }
         }
@@ -1349,7 +1349,7 @@ fn prepare_pair(
         .unwrap_or("file_root_pre_admitted");
     if prefix_memory_admission
         .as_ref()
-        .is_some_and(|admission| !admission.admitted)
+        .is_some_and(|admission| !admission.is_admitted())
     {
         plan.selected_prefix_tokens = 0;
         plan.reason = "memory_fallback";
@@ -2675,7 +2675,7 @@ fn run_deepseek_pair(
         );
         fanout_memory_admission_required_bytes = admission.required_bytes;
         fanout_memory_admission_reason = admission.reason.as_str();
-        if admission.admitted {
+        if admission.is_admitted() {
             transient_model_content_id =
                 Some(transient_deepseek_model_content_id(residency, pair_index)?);
         } else {
@@ -3084,7 +3084,7 @@ pub(super) fn run_deepseek_file(
         root_telemetry.metal_upper_bytes = metal_upper_bytes;
         root_telemetry.memory_admission_required_bytes = admission.required_bytes;
         root_telemetry.memory_admission_reason = admission.reason.as_str();
-        if admission.admitted {
+        if admission.is_admitted() {
             let model_content_id = transient_deepseek_model_content_id(&residency, usize::MAX)?;
             let root_prompt = schedule
                 .work

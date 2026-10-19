@@ -76,7 +76,7 @@ fn allocate_admitted_dflash<T>(
         true,
     );
     anyhow::ensure!(
-        admission.admitted,
+        admission.is_admitted(),
         "reason={} required={:?} working_set_headroom={:?} process_remaining={:?}",
         admission.reason.as_str(),
         admission.required_bytes,
@@ -705,7 +705,7 @@ fn allocate_single_chunk_request_state(
 /// snapshots do not hold Metal allocations, so evicting them cannot fix it.
 fn process_deficit(admission: &qwen_llm::metal::MetalMemoryAdmission) -> Option<u64> {
     use qwen_llm::metal::MetalMemoryAdmissionReason as Reason;
-    if admission.admitted || admission.reason != Reason::ProcessInsufficient {
+    if admission.is_admitted() || admission.reason != Reason::ProcessInsufficient {
         return None;
     }
     let deficit = admission
@@ -724,7 +724,7 @@ fn admit_optional_tail<P, E>(
             .as_ref()
             .map_or(baseline_price, |(_, price)| *price),
     )?;
-    if !admission.admitted && candidate.take().is_some() {
+    if !admission.is_admitted() && candidate.take().is_some() {
         admission = admit(baseline_price)?;
     }
     Ok((candidate.map(|(plan, _)| plan), admission))
@@ -2682,7 +2682,7 @@ mod tests {
         )
         .unwrap();
         assert!(plan.is_none());
-        assert!(admission.admitted);
+        assert!(admission.is_admitted());
         assert_eq!(prices, [(40, 152), (30, 152), (30, 152)]);
         assert_eq!(evicted, [132]);
     }
@@ -2871,23 +2871,13 @@ mod tests {
         let unavailable = evaluate_metal_memory_admission(60, 0, signals(None, 1000), false);
         assert_eq!(process_deficit(&unavailable), None);
         let admitted = evaluate_metal_memory_admission(60, 0, signals(Some(500), 1000), false);
-        assert!(admitted.admitted);
+        assert!(admitted.is_admitted());
         assert_eq!(process_deficit(&admitted), None);
 
-        let missing_budget = qwen_llm::metal::MetalMemoryAdmission {
-            admitted: false,
-            reason: Reason::ProcessInsufficient,
-            scratch_upper_bytes: 60,
-            reserve_bytes: 0,
-            required_bytes: Some(60),
-            signals: signals(None, 1000),
-            working_set_headroom_bytes: Some(1000),
-        };
+        let missing_budget = evaluate_metal_memory_admission(60, 0, signals(None, 1000), false);
         assert_eq!(process_deficit(&missing_budget), None);
-        let non_positive_deficit = qwen_llm::metal::MetalMemoryAdmission {
-            signals: signals(Some(60), 1000),
-            ..missing_budget
-        };
+        let non_positive_deficit =
+            evaluate_metal_memory_admission(60, 0, signals(Some(60), 1000), false);
         assert_eq!(process_deficit(&non_positive_deficit), None);
     }
 

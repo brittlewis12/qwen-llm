@@ -394,7 +394,7 @@ impl MuseGlimmerMetalWeightPlan {
         signals: MetalMemorySignals,
     ) -> Result<MuseGlimmerAdmittedMetalWeightPlan, MuseGlimmerResidencyError> {
         let admission = self.memory.admission(signals);
-        if !admission.admitted {
+        if !admission.is_admitted() {
             return invalid(format!(
                 "Metal weight admission denied: reason={} required={:?} working_set_headroom={:?} process_remaining={:?}",
                 admission.reason.as_str(),
@@ -452,7 +452,7 @@ impl MuseGlimmerMetalWeights {
         plan.revalidate(ctx, gguf)?;
         let _allocation_transaction = ctx.begin_allocation_transaction();
         let refreshed_admission = plan.memory.admission(ctx.memory_signals());
-        if !refreshed_admission.admitted {
+        if !refreshed_admission.is_admitted() {
             return invalid(format!(
                 "Metal weight admission changed before realization: reason={} required={:?} working_set_headroom={:?} process_remaining={:?}",
                 refreshed_admission.reason.as_str(),
@@ -1036,7 +1036,7 @@ fn preflight_authentication_admission(
         "authenticated source byte count",
     )?;
     let admission = evaluate_metal_memory_admission(source_bytes, 0, ctx.memory_signals(), true);
-    if !admission.admitted {
+    if !admission.is_admitted() {
         return invalid(format!(
             "Metal pre-admission denied before content authentication: reason={} required={:?} working_set_headroom={:?} process_remaining={:?}",
             admission.reason.as_str(),

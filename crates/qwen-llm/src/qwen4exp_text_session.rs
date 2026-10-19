@@ -1275,7 +1275,7 @@ impl Qwen4ExpTextSessionMetalWorkspace {
             current_allocated_bytes: ctx.current_allocated_size(),
             process_limit_remaining_bytes: Some(u64::MAX),
         });
-        if !admission.admitted {
+        if !admission.is_admitted() {
             return invalid(format!(
                 "test session memory admission denied: {}",
                 admission.reason.as_str()
@@ -5971,13 +5971,13 @@ mod tests {
                 baseline
                     .admission_before_residency(signals(available), 1)
                     .unwrap()
-                    .admitted
+                    .is_admitted()
             );
             assert!(
                 !optimized
                     .admission_before_residency(signals(available), 1)
                     .unwrap()
-                    .admitted
+                    .is_admitted()
             );
             assert!(
                 optimized
@@ -5989,7 +5989,7 @@ mod tests {
                         1
                     )
                     .unwrap()
-                    .admitted
+                    .is_admitted()
             );
             let fallback = plan.with_split_decode(&ctx, false).unwrap();
             assert_eq!(fallback.memory_plan(), &baseline);
@@ -5998,14 +5998,14 @@ mod tests {
                     .memory_plan()
                     .admission_before_residency(signals(available), 1)
                     .unwrap()
-                    .admitted
+                    .is_admitted()
             );
             assert!(
                 !fallback
                     .memory_plan()
                     .admission_before_residency(signals(available - 1), 1)
                     .unwrap()
-                    .admitted
+                    .is_admitted()
             );
         }
     }
@@ -6512,7 +6512,7 @@ mod tests {
         let admitted = plan
             .admission_before_residency(signals(required), sessions)
             .unwrap();
-        assert!(admitted.admitted);
+        assert!(admitted.is_admitted());
         assert_eq!(
             admitted.reason,
             MetalMemoryAdmissionReason::AdmittedWithProcessBudget
@@ -6522,7 +6522,7 @@ mod tests {
         let denied = plan
             .admission_before_residency(signals(required - 1), sessions)
             .unwrap();
-        assert!(!denied.admitted);
+        assert!(!denied.is_admitted());
         assert_eq!(denied.reason, MetalMemoryAdmissionReason::BothInsufficient);
         assert!(plan.priced_upper_bytes_for_sessions(0).is_err());
         assert!(plan.priced_upper_bytes_for_sessions(usize::MAX).is_err());
@@ -6635,7 +6635,7 @@ mod tests {
             .admission_before_residency(ctx.memory_signals(), 2)
             .unwrap();
         assert!(
-            aggregate.admitted,
+            aggregate.is_admitted(),
             "two-session aggregate admission failed: {aggregate:?}"
         );
         let admitted_weights = weight_plan.admit(ctx.memory_signals()).unwrap();
@@ -6832,7 +6832,7 @@ mod tests {
             .admission_before_residency(ctx.memory_signals(), 2)
             .unwrap();
         assert!(
-            aggregate.admitted,
+            aggregate.is_admitted(),
             "two-session aggregate admission failed: {aggregate:?}"
         );
         let admitted_weights = weight_plan.admit(ctx.memory_signals()).unwrap();
@@ -6944,7 +6944,7 @@ mod tests {
             .admission_before_residency(ctx.memory_signals(), 1)
             .unwrap();
         assert!(
-            aggregate.admitted,
+            aggregate.is_admitted(),
             "packed aggregate admission failed: {aggregate:?}"
         );
         let admitted_weights = weight_plan.admit(ctx.memory_signals()).unwrap();

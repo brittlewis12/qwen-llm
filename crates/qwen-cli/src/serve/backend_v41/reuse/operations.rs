@@ -38,7 +38,7 @@ pub(super) fn restore_candidate<S, V>(
                         .as_ref()
                         .err()?
                         .memory_admission()
-                        .map(|denied| (denied.reason, u64::MAX))
+                        .map(|denied| (denied.reason(), u64::MAX))
                 },
                 |bytes| cache.evict_for(bytes),
                 || Ok(None),

@@ -66,7 +66,7 @@ fn optional_tail_faults_preserve_baseline_admission_and_allocation() {
         admission,
         evaluate_metal_memory_admission(0, 8, signals, false)
     );
-    assert!(admission.admitted);
+    assert!(admission.is_admitted());
     let (plan, admission) = admit_optional_tail(Some(("packed", 64)), 0, |price| {
         Ok::<_, &str>(evaluate_metal_memory_admission(
             price,
@@ -79,13 +79,13 @@ fn optional_tail_faults_preserve_baseline_admission_and_allocation() {
         ))
     })
     .unwrap();
-    assert!(plan.is_none() && !admission.admitted);
+    assert!(plan.is_none() && !admission.is_admitted());
     let (plan, admission) = admit_optional_tail(Some(("packed", 16)), 0, |price| {
         Ok::<_, &str>(evaluate_metal_memory_admission(price, 8, signals, false))
     })
     .unwrap();
     assert_eq!(plan, Some("packed"));
-    assert!(admission.admitted);
+    assert!(admission.is_admitted());
     assert_eq!(
         admit_optional_tail(Some(("packed", 16)), 0, |_| Err("signal error")),
         Err("signal error")
@@ -176,7 +176,7 @@ fn optional_tail_failed_allocation_readmits_full_baseline() {
             Ok::<_, ServeError>(admit(price, Some(80)))
         })
         .unwrap();
-        assert!(plan.is_some() && admission.admitted);
+        assert!(plan.is_some() && admission.is_admitted());
         let baseline_allocations = Cell::new(0);
         let result = allocate_optional_tail(
             plan,
@@ -792,7 +792,7 @@ fn fresh_short_packed_matches_serial() {
                 loaded
                     .qwen_execution_memory_admission(1, width + 64, price, 0)
                     .unwrap()
-                    .admitted
+                    .is_admitted()
             );
             let before = loaded.context().current_allocated_size();
             let start = Instant::now();

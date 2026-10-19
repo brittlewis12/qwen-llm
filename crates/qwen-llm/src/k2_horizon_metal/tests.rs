@@ -191,7 +191,7 @@ fn gpu_online_attention_matches_f64_and_materialized_with_future_poison() {
         ctx.memory_signals(),
         true,
     );
-    assert!(admission.admitted, "{}", admission.reason.as_str());
+    assert!(admission.is_admitted(), "{}", admission.reason.as_str());
     let partials = MetalTensor::from_bytes(
         &ctx,
         bytemuck::cast_slice(&vec![f32::NAN; partial_floats as usize]),
@@ -248,7 +248,7 @@ fn gpu_online_attention_matches_f64_and_materialized_with_future_poison() {
             ctx.memory_signals(),
             true,
         );
-        assert!(admission.admitted, "{}", admission.reason.as_str());
+        assert!(admission.is_admitted(), "{}", admission.reason.as_str());
         let mut bytes = vec![half::f16::NAN; (buffer_bytes / 2) as usize];
         let planes = plan.layer_planes(35).unwrap();
         let mut keys = Vec::new();
@@ -416,7 +416,7 @@ fn gpu_q8_batch_projection_matches_singleton_bits_and_guards() {
             ctx.memory_signals(),
             true,
         );
-        assert!(admission.admitted, "{}", admission.reason.as_str());
+        assert!(admission.is_admitted(), "{}", admission.reason.as_str());
         let before = ctx.current_allocated_size();
         let mut weights = vec![0xffu8; weight_bytes];
         for (block, bytes) in weights[34..weight_bytes - 34]

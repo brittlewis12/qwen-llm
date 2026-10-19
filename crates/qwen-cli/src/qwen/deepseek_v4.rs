@@ -1323,7 +1323,7 @@ fn ds4_load_session<'a>(
     let memory_signals = memory_admission.signals;
     eprintln!(
         "deepseek_v4: memory admission admitted={} reason={} recommended={} current={} process_remaining={:?} working_set_headroom={:?} required={:?}",
-        memory_admission.admitted,
+        memory_admission.is_admitted(),
         memory_admission.reason.as_str(),
         memory_signals.recommended_max_bytes,
         memory_signals.current_allocated_bytes,
@@ -2416,7 +2416,7 @@ pub(crate) fn run_deepseek_v4_requests_jsonl(
         let two_session_memory_admitted = memory_plan
             .admission_for_sessions(initial_memory_signals, 2)
             .context("evaluate automatic DeepSeek V4 two-session admission")?
-            .admitted;
+            .is_admitted();
         let selection =
             execution_selector::select_deepseek(execution_selector::DeepSeekSelectionInput {
                 mode: args.execution_mode,
@@ -2459,7 +2459,7 @@ pub(crate) fn run_deepseek_v4_requests_jsonl(
     let memory_signals = memory_admission.signals;
     eprintln!(
         "deepseek_v4: memory admission admitted={} reason={} recommended={} current={} process_remaining={:?} working_set_headroom={:?} required={:?}",
-        memory_admission.admitted,
+        memory_admission.is_admitted(),
         memory_admission.reason.as_str(),
         memory_signals.recommended_max_bytes,
         memory_signals.current_allocated_bytes,

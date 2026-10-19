@@ -68,7 +68,7 @@ impl Outcome {
         let refusal = cause
             .chain()
             .find_map(|e| e.downcast_ref::<qwen_llm::metal::MemoryAdmissionDenied>())
-            .map(|denied| super::super::transport_memory::refusal_kind(denied.reason).2);
+            .map(|denied| super::super::transport_memory::refusal_kind(denied.reason()).2);
         let mut outcome = classify(counters, cause, None);
         if outcome.reason == StopReason::ExecutionError {
             outcome.error = Some(match refusal {
@@ -392,16 +392,17 @@ mod tests {
     };
 
     fn denied(reason: R) -> MemoryAdmissionDenied {
-        MemoryAdmissionDenied {
+        MemoryAdmissionDenied::new(
             reason,
-            required_bytes: Some(1 << 30),
-            signals: MetalMemorySignals {
+            Some(1 << 30),
+            MetalMemorySignals {
                 recommended_max_bytes: 1 << 34,
                 current_allocated_bytes: 1 << 34,
                 process_limit_remaining_bytes: Some(1 << 20),
             },
-            working_set_headroom_bytes: Some(0),
-        }
+            Some(0),
+        )
+        .expect("test reason refuses admission")
     }
 
     fn code(outcome: &Outcome) -> Option<&str> {

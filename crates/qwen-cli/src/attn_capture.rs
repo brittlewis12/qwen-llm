@@ -388,7 +388,7 @@ pub fn run(args: AttnCaptureArgs, build_identity: Value) -> Result<()> {
         ctx.memory_signals(),
         true,
     );
-    if !admission.admitted {
+    if !admission.is_admitted() {
         bail!(
             "capture memory admission denied: {}",
             admission.reason.as_str()
@@ -415,7 +415,7 @@ pub fn run(args: AttnCaptureArgs, build_identity: Value) -> Result<()> {
         })),
     });
     let admission_json = json!({
-        "admitted": admission.admitted, "reason": admission.reason.as_str(),
+        "admitted": admission.is_admitted(), "reason": admission.reason.as_str(),
         "scratch_upper_bytes": admission.scratch_upper_bytes,
         "capture_reserve_bytes": admission.reserve_bytes,
         "required_bytes": admission.required_bytes,

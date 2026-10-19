@@ -190,11 +190,11 @@ impl Capture {
             out,
             json!({"event":"capture_admission", "block":block, "rows":rows,
             "logical_bytes":lengths, "priced_gpu_bytes":priced, "cpu_reserve_bytes":cpu_reserve(rows),
-            "admitted":admission.admitted, "reason":admission.reason.as_str(),
+            "admitted":admission.is_admitted(), "reason":admission.reason.as_str(),
             "current_gpu_bytes":admission.signals.current_allocated_bytes,
             "working_set_headroom_bytes":admission.working_set_headroom_bytes}),
         );
-        assert!(admission.admitted, "capture memory admission refused");
+        assert!(admission.is_admitted(), "capture memory admission refused");
         Rc::new(Self {
             block,
             rows,
@@ -935,9 +935,9 @@ fn domain_cell(
             json!({"event":"domain_admission","phase":phase,"stream":stream,"rows":rows,"label":label,
             "capacity":capacity,"packed_rows":chunk_rows,"cpu_reserve_bytes":DOMAIN_CPU_RESERVE,
             "session_gpu_upper_bytes":ledger.peak_bytes()-weights.retained_bytes,
-            "admitted":admission.admitted,"reason":admission.reason.as_str()}),
+            "admitted":admission.is_admitted(),"reason":admission.reason.as_str()}),
         );
-        if !admission.admitted {
+        if !admission.is_admitted() {
             emit(
                 out,
                 json!({"event":"domain_cell_skipped","phase":phase,"stream":stream,"rows":rows,"label":label,

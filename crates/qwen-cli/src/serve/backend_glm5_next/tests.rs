@@ -949,16 +949,17 @@ fn gpu_live_session_extends_resumes_and_resets() {
 fn refusal(
     reason: qwen_llm::metal::MetalMemoryAdmissionReason,
 ) -> qwen_llm::metal::MemoryAdmissionDenied {
-    qwen_llm::metal::MemoryAdmissionDenied {
+    qwen_llm::metal::MemoryAdmissionDenied::new(
         reason,
-        required_bytes: Some(3 << 30),
-        signals: qwen_llm::metal::MetalMemorySignals {
+        Some(3 << 30),
+        qwen_llm::metal::MetalMemorySignals {
             recommended_max_bytes: 112 << 30,
             current_allocated_bytes: 111 << 30,
             process_limit_remaining_bytes: Some(8 << 30),
         },
-        working_set_headroom_bytes: Some(1 << 30),
-    }
+        Some(1 << 30),
+    )
+    .expect("test reason refuses admission")
 }
 
 /// Lane audit B3: only a typed pressure refusal of the session is a 503;
@@ -1262,7 +1263,7 @@ fn process_only_session_refusals_release_snapshots_and_keep_the_hit() {
     assert!(matches!(
         result.unwrap_err(),
         Glm5NextMetalError::MemoryAdmission { denied, .. }
-            if denied.reason == R::ProcessInsufficient
+            if denied.reason() == R::ProcessInsufficient
     ));
     assert_eq!(attempts, 2);
     assert_eq!(cache.len(), 0);
@@ -1276,7 +1277,7 @@ fn process_only_session_refusals_release_snapshots_and_keep_the_hit() {
     assert!(matches!(
         result.unwrap_err(),
         Glm5NextMetalError::MemoryAdmission { denied, .. }
-            if denied.reason == R::ProcessInsufficient
+            if denied.reason() == R::ProcessInsufficient
     ));
     assert_eq!(attempts, 1);
 
@@ -1288,7 +1289,7 @@ fn process_only_session_refusals_release_snapshots_and_keep_the_hit() {
     assert!(matches!(
         result.unwrap_err(),
         Glm5NextMetalError::MemoryAdmission { denied, .. }
-            if denied.reason == R::InvalidWorkingSetSignal
+            if denied.reason() == R::InvalidWorkingSetSignal
     ));
     assert_eq!(cache.len(), 2);
 }

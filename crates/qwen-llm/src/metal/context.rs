@@ -530,7 +530,7 @@ impl MetalMemoryAdmissionReason {
 /// ([`MetalMemoryAdmission::refusal`]).
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct MemoryAdmissionDenied {
-    pub reason: MetalMemoryAdmissionReason,
+    reason: MetalMemoryAdmissionReason,
     /// `None` when the required size overflows.
     pub required_bytes: Option<u64>,
     pub signals: MetalMemorySignals,
@@ -553,9 +553,49 @@ impl std::fmt::Display for MemoryAdmissionDenied {
 
 impl std::error::Error for MemoryAdmissionDenied {}
 
+impl MemoryAdmissionDenied {
+    /// Construct a refusal for a refusing reason; admitted reasons return
+    /// `None`.
+    pub fn new(
+        reason: MetalMemoryAdmissionReason,
+        required_bytes: Option<u64>,
+        signals: MetalMemorySignals,
+        working_set_headroom_bytes: Option<u64>,
+    ) -> Option<Self> {
+        (!reason.is_admitted()).then_some(Self {
+            reason,
+            required_bytes,
+            signals,
+            working_set_headroom_bytes,
+        })
+    }
+
+    /// The refusal reason. This type can never expose an admitted reason.
+    pub fn reason(&self) -> MetalMemoryAdmissionReason {
+        self.reason
+    }
+}
+
+/// ```compile_fail
+/// use qwen_llm::metal::{MetalMemoryAdmission, MetalMemoryAdmissionReason};
+/// # let signals = qwen_llm::metal::MetalMemorySignals {
+/// #     recommended_max_bytes: 1,
+/// #     current_allocated_bytes: 0,
+/// #     process_limit_remaining_bytes: Some(1),
+/// # };
+/// let _ = MetalMemoryAdmission {
+///     admitted: false,
+///     reason: MetalMemoryAdmissionReason::AdmittedWithProcessBudget,
+///     scratch_upper_bytes: 1,
+///     reserve_bytes: 0,
+///     required_bytes: Some(1),
+///     signals,
+///     working_set_headroom_bytes: Some(1),
+/// };
+/// ```
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[non_exhaustive]
 pub struct MetalMemoryAdmission {
-    pub admitted: bool,
     pub reason: MetalMemoryAdmissionReason,
     pub scratch_upper_bytes: u64,
     pub reserve_bytes: u64,
@@ -565,11 +605,33 @@ pub struct MetalMemoryAdmission {
 }
 
 impl MetalMemoryAdmission {
+    /// Build a reason-authoritative admission decision with its diagnostics.
+    pub fn new(
+        reason: MetalMemoryAdmissionReason,
+        scratch_upper_bytes: u64,
+        reserve_bytes: u64,
+        required_bytes: Option<u64>,
+        signals: MetalMemorySignals,
+        working_set_headroom_bytes: Option<u64>,
+    ) -> Self {
+        Self {
+            reason,
+            scratch_upper_bytes,
+            reserve_bytes,
+            required_bytes,
+            signals,
+            working_set_headroom_bytes,
+        }
+    }
+
+    pub fn is_admitted(&self) -> bool {
+        self.reason.is_admitted()
+    }
+
     /// The typed refusal of a decision that did not admit; `None` exactly
-    /// when it admitted. A contradictory decision (not admitted, admitted
-    /// reason) still refuses, and callers report it as inconsistent.
+    /// when its reason admits.
     pub fn refusal(&self) -> Option<MemoryAdmissionDenied> {
-        (!self.admitted).then_some(MemoryAdmissionDenied {
+        (!self.is_admitted()).then_some(MemoryAdmissionDenied {
             reason: self.reason,
             required_bytes: self.required_bytes,
             signals: self.signals,
@@ -624,19 +686,14 @@ pub fn evaluate_metal_memory_admission_with_cpu_bytes(
             }
         }
     };
-    MetalMemoryAdmission {
-        admitted: matches!(
-            reason,
-            MetalMemoryAdmissionReason::AdmittedWithProcessBudget
-                | MetalMemoryAdmissionReason::AdmittedProcessBudgetOmitted
-        ),
+    MetalMemoryAdmission::new(
         reason,
-        scratch_upper_bytes: metal_upper_bytes.saturating_add(cpu_upper_bytes),
+        metal_upper_bytes.saturating_add(cpu_upper_bytes),
         reserve_bytes,
         required_bytes,
         signals,
         working_set_headroom_bytes,
-    }
+    )
 }
 
 pub fn evaluate_metal_memory_admission(
@@ -1510,12 +1567,12 @@ mod tests {
             process_limit_remaining_bytes: Some(1_000),
         };
         let decision = evaluate_metal_memory_admission_with_cpu_bytes(200, 400, 50, signals, false);
-        assert!(decision.admitted);
+        assert!(decision.is_admitted());
         assert_eq!(decision.required_bytes, Some(650));
         assert_eq!(decision.working_set_headroom_bytes, Some(300));
 
         let denied = evaluate_metal_memory_admission_with_cpu_bytes(200, 800, 50, signals, false);
-        assert!(!denied.admitted);
+        assert!(!denied.is_admitted());
         assert_eq!(
             denied.reason,
             MetalMemoryAdmissionReason::ProcessInsufficient
@@ -1526,7 +1583,7 @@ mod tests {
     fn metal_memory_admission_requires_both_advisory_budgets() {
         let exact =
             evaluate_metal_memory_admission(400, 100, memory_signals(1500, 1000, Some(500)), false);
-        assert!(exact.admitted);
+        assert!(exact.is_admitted());
         assert_eq!(
             exact.reason,
             MetalMemoryAdmissionReason::AdmittedWithProcessBudget
@@ -1565,7 +1622,7 @@ mod tests {
             ),
         ] {
             let decision = evaluate_metal_memory_admission(400, 100, signals, false);
-            assert!(!decision.admitted);
+            assert!(!decision.is_admitted());
             assert_eq!(decision.reason, reason);
         }
     }
@@ -1578,7 +1635,7 @@ mod tests {
             memory_signals(u64::MAX, 1, Some(u64::MAX)),
             false,
         );
-        assert!(!decision.admitted);
+        assert!(!decision.is_admitted());
         assert_eq!(decision.required_bytes, None);
         assert_eq!(
             decision.reason,
@@ -1590,13 +1647,13 @@ mod tests {
     fn metal_memory_admission_omits_zero_process_budget_only_when_allowed() {
         let signals = memory_signals(1500, 1000, Some(0));
         let admitted = evaluate_metal_memory_admission(400, 100, signals, true);
-        assert!(admitted.admitted);
+        assert!(admitted.is_admitted());
         assert_eq!(
             admitted.reason,
             MetalMemoryAdmissionReason::AdmittedProcessBudgetOmitted
         );
         let denied = evaluate_metal_memory_admission(400, 100, signals, false);
-        assert!(!denied.admitted);
+        assert!(!denied.is_admitted());
         assert_eq!(
             denied.reason,
             MetalMemoryAdmissionReason::ProcessSignalUnavailable
@@ -1607,7 +1664,7 @@ mod tests {
     fn metal_memory_admission_rejects_zero_required_with_zero_headroom() {
         let decision =
             evaluate_metal_memory_admission(0, 0, memory_signals(1000, 1000, Some(1)), false);
-        assert!(!decision.admitted);
+        assert!(!decision.is_admitted());
         assert_eq!(
             decision.reason,
             MetalMemoryAdmissionReason::WorkingSetInsufficient
@@ -1703,7 +1760,7 @@ mod admission_refusal_tests {
         ];
         for (admission, expected) in cases {
             let refusal = admission.refusal();
-            assert_eq!(refusal.is_none(), admission.admitted, "{admission:?}");
+            assert_eq!(refusal.is_none(), admission.is_admitted(), "{admission:?}");
             match (refusal, expected) {
                 (None, None) => assert!(admission.reason.is_admitted()),
                 (Some(denied), Some((reason, pressure))) => {
@@ -1715,10 +1772,25 @@ mod admission_refusal_tests {
                 other => panic!("{other:?} for {admission:?}"),
             }
         }
-        // Never fails open: only `admitted` decides.
-        let mut contradictory = evaluate_metal_memory_admission(10, 0, signals(Some(50)), true);
-        contradictory.admitted = false;
-        let denied = contradictory.refusal().expect("not admitted refuses");
-        assert!(denied.reason.is_admitted() && !denied.reason.is_pressure());
+        // A denial cannot be constructed from an admitted reason, and refusal
+        // presence always matches the single reason-derived outcome.
+        for reason in [
+            R::AdmittedWithProcessBudget,
+            R::AdmittedProcessBudgetOmitted,
+            R::RequiredBytesOverflow,
+            R::InvalidWorkingSetSignal,
+            R::ProcessSignalUnavailable,
+            R::WorkingSetInsufficient,
+            R::ProcessInsufficient,
+            R::BothInsufficient,
+        ] {
+            let decision =
+                MetalMemoryAdmission::new(reason, 10, 0, Some(10), signals(Some(50)), Some(50));
+            assert_eq!(decision.refusal().is_none(), reason.is_admitted());
+            assert_eq!(
+                MemoryAdmissionDenied::new(reason, Some(10), signals(Some(50)), Some(50)).is_some(),
+                !reason.is_admitted(),
+            );
+        }
     }
 }

@@ -333,7 +333,7 @@ pub fn decide_gguf_storage_mode_with_signals(
         signals,
         true,
     );
-    let capacity_would_map = !admission.admitted;
+    let capacity_would_map = !admission.is_admitted();
     let (map_weights, reason) = match request {
         GgufStorageRequest::Map(reason) => (true, reason),
         GgufStorageRequest::Copy(reason) => (false, reason),
@@ -963,14 +963,14 @@ pub(super) fn validate_parallel_schedule_memory_admission(
         ),
         "descriptor-plan-v1",
         phase,
-        admission.admitted,
+        admission.is_admitted(),
         admission.reason.as_str(),
         required_headroom,
         admission.signals.recommended_max_bytes,
         admission.signals.current_allocated_bytes,
         admission.signals.process_limit_remaining_bytes,
     ));
-    if !admission.admitted {
+    if !admission.is_admitted() {
         return Err(MfError::LoadPolicy(format!(
             "parallel population memory admission failed during {phase}: {}",
             admission.reason.as_str()

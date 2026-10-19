@@ -1041,7 +1041,7 @@ fn handle_responses(
             response_id,
             request.model.clone(),
             created_at,
-            super::events::envelope_echo(&request),
+            super::events::envelope_echo(request),
         )?;
         response.set_allowed_tools(request.allowed_tools.clone());
         let mut sink = StreamingSink {
@@ -1064,7 +1064,7 @@ fn handle_responses(
                 response.finish(
                     response_stop_reason(outcome.end),
                     outcome.usage,
-                    ServeStats::echo_for(outcome.stats.as_ref(), &request).as_ref(),
+                    ServeStats::echo_for(outcome.stats.as_ref(), request).as_ref(),
                 )?;
                 sse.done()
             }
@@ -1911,16 +1911,17 @@ mod tests {
         let refusal = |reason| {
             super::super::transport_memory::memory_refusal(
                 "GLM-5.3-Flash session",
-                &MemoryAdmissionDenied {
+                &MemoryAdmissionDenied::new(
                     reason,
-                    required_bytes: Some(1 << 33),
-                    signals: MetalMemorySignals {
+                    Some(1 << 33),
+                    MetalMemorySignals {
                         recommended_max_bytes: 1 << 34,
                         current_allocated_bytes: 1 << 34,
                         process_limit_remaining_bytes: Some(1 << 30),
                     },
-                    working_set_headroom_bytes: Some(0),
-                },
+                    Some(0),
+                )
+                .expect("test reason refuses admission"),
             )
         };
         for (reason, status, code) in [

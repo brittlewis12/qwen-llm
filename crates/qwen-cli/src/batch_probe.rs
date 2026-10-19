@@ -193,7 +193,7 @@ fn require_incremental_admission(
     let admission =
         evaluate_metal_memory_admission(session_bytes, reserve_bytes, ctx.memory_signals(), true);
     ensure!(
-        admission.admitted,
+        admission.is_admitted(),
         "{label} memory admission denied for {clients} sessions: reason={} required={:?} working_set_headroom={:?} process_remaining={:?}",
         admission.reason.as_str(),
         admission.required_bytes,

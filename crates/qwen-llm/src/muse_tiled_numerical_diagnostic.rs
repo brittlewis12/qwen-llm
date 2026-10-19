@@ -231,7 +231,7 @@ fn tiled_prefill_numerical_diagnostic() {
         ctx.memory_signals(),
         true,
     );
-    assert!(admission.admitted, "diagnostic admission {admission:?}");
+    assert!(admission.is_admitted(), "diagnostic admission {admission:?}");
     let weights =
         MuseGlimmerMetalWeights::realize(&ctx, &gguf, plan.admit(ctx.memory_signals()).unwrap())
             .unwrap()

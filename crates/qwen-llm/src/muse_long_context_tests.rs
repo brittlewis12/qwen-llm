@@ -593,7 +593,7 @@ fn tiled_prefill_live_chunk_transfer() {
         ctx.memory_signals(),
         true,
     );
-    assert!(admission.admitted, "tiled transfer admission {admission:?}");
+    assert!(admission.is_admitted(), "tiled transfer admission {admission:?}");
     let weights =
         MuseGlimmerMetalWeights::realize(&ctx, &gguf, plan.admit(ctx.memory_signals()).unwrap())
             .unwrap()
@@ -763,7 +763,7 @@ fn long_prefill_fresh_qualification(count: usize) {
         true,
     );
     assert!(
-        admission.admitted,
+        admission.is_admitted(),
         "two-session qualification admission {admission:?}"
     );
     let weights =

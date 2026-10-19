@@ -446,7 +446,7 @@ pub(crate) fn trace_full_batch(args: TraceFullArgs) -> Result<()> {
         )
         .context("price trace-full cohort sequence and retained captures")?;
     ensure!(
-        admission.admitted,
+        admission.is_admitted(),
         "trace-full cohort memory admission denied: reason={} required={:?} working_set_headroom={:?} process_remaining={:?}",
         admission.reason.as_str(),
         admission.required_bytes,

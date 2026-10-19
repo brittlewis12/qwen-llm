@@ -215,9 +215,9 @@ fn allocate<'w>(
         "admission",
         c,
         json!({"capacity":capacity,"chunk_rows":chunk,"cpu_reserve_bytes":cpu,
-        "session_gpu_upper_bytes":bytes,"admitted":admission.admitted,"reason":admission.reason.as_str()}),
+        "session_gpu_upper_bytes":bytes,"admitted":admission.is_admitted(),"reason":admission.reason.as_str()}),
     );
-    if !admission.admitted {
+    if !admission.is_admitted() {
         return None;
     }
     let start = Instant::now();

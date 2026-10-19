@@ -24,7 +24,7 @@ fn optimized_live_prefix_math_composition() {
         ctx.memory_signals(),
         true,
     );
-    assert!(admission.admitted);
+    assert!(admission.is_admitted());
     let weights =
         MuseGlimmerMetalWeights::realize(&ctx, &gguf, plan.admit(ctx.memory_signals()).unwrap())
             .unwrap()

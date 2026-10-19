@@ -108,16 +108,17 @@ pub(crate) fn admit_request_memory(
     extra_cpu: u64,
     signals: MetalMemorySignals,
 ) -> std::result::Result<(), qwen_llm::metal::MemoryAdmissionDenied> {
-    let cpu = estimate.cpu_bytes.checked_add(extra_cpu).ok_or(
-        qwen_llm::metal::MemoryAdmissionDenied {
-            reason: qwen_llm::metal::MetalMemoryAdmissionReason::RequiredBytesOverflow,
-            required_bytes: None,
+    let cpu = estimate.cpu_bytes.checked_add(extra_cpu).ok_or_else(|| {
+        qwen_llm::metal::MemoryAdmissionDenied::new(
+            qwen_llm::metal::MetalMemoryAdmissionReason::RequiredBytesOverflow,
+            None,
             signals,
-            working_set_headroom_bytes: signals
+            signals
                 .recommended_max_bytes
                 .checked_sub(signals.current_allocated_bytes),
-        },
-    )?;
+        )
+        .expect("required byte overflow refuses admission")
+    })?;
     let decision = qwen_llm::metal::evaluate_metal_memory_admission_with_cpu_bytes(
         estimate.metal_bytes,
         cpu,

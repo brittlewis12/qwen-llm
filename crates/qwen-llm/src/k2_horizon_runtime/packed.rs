@@ -203,7 +203,7 @@ impl PrefillMode {
                     ctx.memory_signals(),
                     true,
                 )
-                .admitted)
+                .is_admitted())
             },
         )?;
         let info = selection.mode.info(usize::MAX);

@@ -183,7 +183,7 @@ fn sessions_at_frontier(
         true,
     );
     ensure!(
-        admission.admitted,
+        admission.is_admitted(),
         "repair admission denied: reason={} required={:?}",
         admission.reason.as_str(),
         admission.required_bytes

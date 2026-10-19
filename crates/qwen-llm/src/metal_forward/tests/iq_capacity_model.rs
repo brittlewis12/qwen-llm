@@ -129,12 +129,12 @@ pub(super) fn admit(
     emit(
         out,
         json!({"event":"admission","phase":phase,"metal_upper_bytes":metal,"cpu_upper_bytes":cpu,
-        "dynamic_reserve_bytes":reserve,"components":details,"admitted":a.admitted,"reason":a.reason.as_str(),
+        "dynamic_reserve_bytes":reserve,"components":details,"admitted":a.is_admitted(),"reason":a.reason.as_str(),
         "current_metal_allocated_bytes":signals.current_allocated_bytes,"recommended_working_set_bytes":signals.recommended_max_bytes,
         "process_limit_remaining_bytes":signals.process_limit_remaining_bytes}),
     );
     assert!(
-        a.admitted,
+        a.is_admitted(),
         "normal memory admission refused; record flushed"
     );
 }

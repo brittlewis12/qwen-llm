@@ -70,16 +70,17 @@ fn v41_typed_state_pressure_is_503_and_never_steps() {
         .profile()
         .parse(&json!({"model":"test","input":"hi","max_output_tokens":1}))
         .unwrap();
-    let denied = qwen_llm::metal::MemoryAdmissionDenied {
-        reason: qwen_llm::metal::MetalMemoryAdmissionReason::WorkingSetInsufficient,
-        required_bytes: Some(4096),
-        signals: MetalMemorySignals {
+    let denied = qwen_llm::metal::MemoryAdmissionDenied::new(
+        qwen_llm::metal::MetalMemoryAdmissionReason::WorkingSetInsufficient,
+        Some(4096),
+        MetalMemorySignals {
             recommended_max_bytes: 1024,
             current_allocated_bytes: 0,
             process_limit_remaining_bytes: Some(1024),
         },
-        working_set_headroom_bytes: Some(1024),
-    };
+        Some(1024),
+    )
+    .expect("test reason refuses admission");
     let result = backend.settings.execute::<()>(
         &request,
         "prompt",
@@ -113,16 +114,17 @@ fn v41_state_refusal_is_http_503_and_next_request_starts_fresh() {
     let mut backend = stub("answer");
     backend.state_failure = Some(
         qwen_llm::deepseek_v41::forward::StateError::MemoryAdmissionDenied(
-            qwen_llm::metal::MemoryAdmissionDenied {
-                reason: qwen_llm::metal::MetalMemoryAdmissionReason::ProcessInsufficient,
-                required_bytes: Some(4096),
-                signals: MetalMemorySignals {
+            qwen_llm::metal::MemoryAdmissionDenied::new(
+                qwen_llm::metal::MetalMemoryAdmissionReason::ProcessInsufficient,
+                Some(4096),
+                MetalMemorySignals {
                     recommended_max_bytes: 1 << 40,
                     current_allocated_bytes: 0,
                     process_limit_remaining_bytes: Some(1024),
                 },
-                working_set_headroom_bytes: Some(1 << 40),
-            },
+                Some(1 << 40),
+            )
+            .expect("test reason refuses admission"),
         ),
     );
     let body = json!({"model":"test","input":"hi","max_output_tokens":1});
@@ -890,7 +892,7 @@ fn v41_request_memory_splits_metal_cpu_and_preserves_typed_refusals() {
             },
         )
         .unwrap_err()
-        .reason,
+        .reason(),
         qwen_llm::metal::MetalMemoryAdmissionReason::ProcessSignalUnavailable
     );
     let cpu_short = MetalMemorySignals {
@@ -899,7 +901,7 @@ fn v41_request_memory_splits_metal_cpu_and_preserves_typed_refusals() {
     };
     let error = admit_request_memory(estimate, extra_cpu, cpu_short).unwrap_err();
     assert_eq!(
-        error.reason,
+        error.reason(),
         qwen_llm::metal::MetalMemoryAdmissionReason::ProcessInsufficient
     );
     let mapped = super::super::transport_memory::memory_refusal("V4.1 request", &error);
@@ -914,7 +916,7 @@ fn v41_request_memory_splits_metal_cpu_and_preserves_typed_refusals() {
     assert_eq!(
         admit_request_memory(estimate, extra_cpu, metal_short)
             .unwrap_err()
-            .reason,
+            .reason(),
         qwen_llm::metal::MetalMemoryAdmissionReason::WorkingSetInsufficient
     );
     assert_eq!(
@@ -927,13 +929,13 @@ fn v41_request_memory_splits_metal_cpu_and_preserves_typed_refusals() {
             },
         )
         .unwrap_err()
-        .reason,
+        .reason(),
         qwen_llm::metal::MetalMemoryAdmissionReason::WorkingSetInsufficient
     );
     assert_eq!(
         admit_request_memory(estimate, u64::MAX, signals)
             .unwrap_err()
-            .reason,
+            .reason(),
         qwen_llm::metal::MetalMemoryAdmissionReason::RequiredBytesOverflow
     );
     assert!(caller_cpu_reserve(u64::MAX, 1, 129280).is_none());

@@ -46,7 +46,7 @@ pub enum Glm5NextMetalError {
     /// telemetry or size. `advice` is evaluated for pressure refusals only.
     #[error(
         "GLM-5.3 session refused by memory admission ({}); budget {budget_bytes} bytes; {advice}",
-        denied.reason.as_str()
+        denied.reason().as_str()
     )]
     MemoryAdmission {
         #[source]
@@ -117,7 +117,7 @@ impl Glm5NextMetalError {
     /// A device memory refusal caused by memory pressure (retryable once
     /// memory frees), as opposed to telemetry, size or any other failure.
     pub fn is_memory_pressure(&self) -> bool {
-        matches!(self, Self::MemoryAdmission { denied, .. } if denied.reason.is_pressure())
+        matches!(self, Self::MemoryAdmission { denied, .. } if denied.reason().is_pressure())
     }
 }
 
@@ -196,7 +196,7 @@ pub fn preflight_session(
     };
     let budget = admission_budget(&admission);
     // A smaller capacity is advice only when memory, not telemetry, refused.
-    let advice = if denied.reason.is_pressure() {
+    let advice = if denied.reason().is_pressure() {
         match Glm5NextMemoryLedger::max_capacity_with_generic_hc(
             &model.config,
             retained,
@@ -339,7 +339,7 @@ impl Glm5NextWeights {
         let _allocation = ctx.begin_allocation_transaction();
         let admission =
             evaluate_metal_memory_admission(retained_bytes, 0, ctx.memory_signals(), true);
-        if !admission.admitted {
+        if !admission.is_admitted() {
             return invalid(format!(
                 "weights do not fit: reason={:?} required={retained_bytes}",
                 admission.reason

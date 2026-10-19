@@ -164,7 +164,7 @@ fn split_decode_plan_and_session_custody() {
     );
     assert_eq!(plan.with_split_decode(&ctx, false).unwrap().memory, off);
     let admission = on.admission_after_residency(ctx.memory_signals());
-    assert!(admission.admitted);
+    assert!(admission.is_admitted());
     let mut first =
         Qwen4ExpTextSessionMetalWorkspace::allocate(&ctx, geometry.clone(), on.clone(), admission)
             .unwrap();

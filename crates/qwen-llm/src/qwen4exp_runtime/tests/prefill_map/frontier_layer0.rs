@@ -136,10 +136,10 @@ fn allocation(
         "checkpoint_bytes":checkpoint_bytes,"cpu_capture_copies":2,"cpu_other_margin":MARGIN,
         "hc_weight_retention_bytes":if hc_enabled {Oracle::WEIGHT_CPU_BYTES} else {0},
         "hc_oracle_working_bytes":if hc_enabled {4<<20} else {0},
-        "admitted":admission.admitted,"admission":format!("{admission:?}")}),
+        "admitted":admission.is_admitted(),"admission":format!("{admission:?}")}),
     );
     require(
-        admission.admitted,
+        admission.is_admitted(),
         "capture admission refused; no diagnostic execution",
     )?;
     let bank = FrontierGdnCapture::new(r.ctx, weights)?;

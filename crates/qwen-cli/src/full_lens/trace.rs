@@ -697,7 +697,7 @@ pub(crate) fn trace_full(args: TraceFullArgs) -> Result<()> {
         )
         .context("price trace-full sequence and retained captures")?;
     ensure!(
-        admission.admitted,
+        admission.is_admitted(),
         "trace-full memory admission denied: reason={} required={:?} working_set_headroom={:?} process_remaining={:?}",
         admission.reason.as_str(),
         admission.required_bytes,

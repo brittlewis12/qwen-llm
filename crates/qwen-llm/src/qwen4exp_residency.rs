@@ -524,7 +524,7 @@ impl Qwen4ExpMetalWeightPlan {
         signals: MetalMemorySignals,
     ) -> Result<Qwen4ExpAdmittedMetalWeightPlan, Qwen4ExpResidencyError> {
         let admission = self.memory.admission(signals);
-        if !admission.admitted {
+        if !admission.is_admitted() {
             return invalid(format!(
                 "Metal weight admission denied: reason={} required={:?} working_set_headroom={:?} process_remaining={:?}",
                 admission.reason.as_str(),
@@ -577,7 +577,7 @@ impl Qwen4ExpMetalWeights {
         plan.revalidate(ctx, gguf)?;
         let _allocation_transaction = ctx.begin_allocation_transaction();
         let refreshed_admission = plan.memory.admission(ctx.memory_signals());
-        if !refreshed_admission.admitted {
+        if !refreshed_admission.is_admitted() {
             return invalid(format!(
                 "Metal weight admission changed before realization: reason={} required={:?} working_set_headroom={:?} process_remaining={:?}",
                 refreshed_admission.reason.as_str(),
@@ -1808,18 +1808,18 @@ mod tests {
             current_allocated_bytes: 100,
             process_limit_remaining_bytes: Some(1_000),
         };
-        assert!(memory.admission(exact).admitted);
+        assert!(memory.admission(exact).is_admitted());
 
         let working_set_short = MetalMemorySignals {
             recommended_max_bytes: 1_099,
             ..exact
         };
-        assert!(!memory.admission(working_set_short).admitted);
+        assert!(!memory.admission(working_set_short).is_admitted());
         let process_short = MetalMemorySignals {
             process_limit_remaining_bytes: Some(999),
             ..exact
         };
-        assert!(!memory.admission(process_short).admitted);
+        assert!(!memory.admission(process_short).is_admitted());
 
         assert_eq!(memory.reconcile(100, 1_100).unwrap(), 1_000);
         assert_eq!(memory.reconcile(101, 100).unwrap(), 0);

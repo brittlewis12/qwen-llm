@@ -107,10 +107,10 @@ fn admit(
         "current_metal_allocated_bytes":ctx.current_allocated_size(),
         "recommended_working_set_bytes":signals.recommended_max_bytes,
         "process_limit_remaining_bytes":signals.process_limit_remaining_bytes,
-        "admitted":a.admitted,"reason":a.reason.as_str()}),
+        "admitted":a.is_admitted(),"reason":a.reason.as_str()}),
     );
     assert!(
-        a.admitted,
+        a.is_admitted(),
         "ordinary memory admission refused; raw record flushed"
     );
 }

@@ -578,7 +578,7 @@ impl DeepSeekV4MetalLoadPlan {
         session_count: usize,
     ) -> Result<DeepSeekV4AdmittedLoadPlan, DeepSeekV4MetalError> {
         let admission = self.memory.admission_for_sessions(signals, session_count)?;
-        if !admission.admitted {
+        if !admission.is_admitted() {
             return invalid(format!(
                 "DeepSeek V4 {session_count}-session memory admission denied before Metal residency: reason={} required={:?} working_set_headroom={:?} process_remaining={:?}",
                 admission.reason.as_str(),
@@ -685,7 +685,7 @@ pub(super) fn deepseek_v4_residency_set_scope_qualified(
     facts: &crate::metal::DeviceFacts,
     admission: MetalMemoryAdmission,
 ) -> bool {
-    enabled && facts.supports_metal_residency_sets() && admission.admitted
+    enabled && facts.supports_metal_residency_sets() && admission.is_admitted()
 }
 
 pub(super) fn deepseek_v4_residency_set_memory_admission(
@@ -744,7 +744,7 @@ pub(super) fn create_deepseek_v4_residency_set(
         ctx.device_facts(),
         admission,
     ) {
-        if deepseek_v4_residency_set_enabled() && !admission.admitted {
+        if deepseek_v4_residency_set_enabled() && !admission.is_admitted() {
             eprintln!(
                 "deepseek_v4: residency set declined reason=working_set_budget required_bytes={:?} resident_weight_bytes={} session_estimate_bytes={} working_set_headroom_bytes={:?} process_remaining_bytes={:?}",
                 admission.required_bytes,
@@ -921,7 +921,7 @@ impl DeepSeekV4MetalResidency {
         let refreshed_admission = plan
             .memory
             .admission_for_sessions(ctx.memory_signals(), admitted_session_count)?;
-        if !refreshed_admission.admitted {
+        if !refreshed_admission.is_admitted() {
             return invalid(format!(
                 "DeepSeek V4 {admitted_session_count}-session memory admission changed before realization: reason={} required={:?} working_set_headroom={:?} process_remaining={:?}",
                 refreshed_admission.reason.as_str(),

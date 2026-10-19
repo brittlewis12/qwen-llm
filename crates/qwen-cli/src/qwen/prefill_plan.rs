@@ -866,9 +866,9 @@ pub(crate) fn allocate_prefill_request_state_with<A: PrefillRequestAllocator>(
         required_bytes: admission.required_bytes,
         signals: prefill_memory_signals_decision(signals, admission),
         evaluator_reason: admission.reason.as_str(),
-        admitted: admission.admitted,
+        admitted: admission.is_admitted(),
     });
-    if !admission.admitted {
+    if !admission.is_admitted() {
         let reason = if admission.required_bytes.is_none() {
             "candidate_required_bytes_overflow"
         } else {

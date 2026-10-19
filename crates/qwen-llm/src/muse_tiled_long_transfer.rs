@@ -40,7 +40,7 @@ fn tiled_prefill_short_delivery() {
         ctx.memory_signals(),
         true,
     );
-    assert!(admission.admitted);
+    assert!(admission.is_admitted());
     let weights =
         MuseGlimmerMetalWeights::realize(&ctx, &gguf, plan.admit(ctx.memory_signals()).unwrap())
             .unwrap()
@@ -197,7 +197,7 @@ fn tiled_prefill_32k_transfer(delivery: bool, profile: bool) {
         ctx.memory_signals(),
         true,
     );
-    assert!(admission.admitted, "32K replay admission {admission:?}");
+    assert!(admission.is_admitted(), "32K replay admission {admission:?}");
     let weights =
         MuseGlimmerMetalWeights::realize(&ctx, &gguf, plan.admit(ctx.memory_signals()).unwrap())
             .unwrap()

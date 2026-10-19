@@ -865,15 +865,18 @@ fn session_errors_map_typed_pressure_to_503_and_the_rest_to_500() {
     use qwen_llm::metal::{
         MemoryAdmissionDenied, MetalMemoryAdmissionReason as R, MetalMemorySignals,
     };
-    let denied = |reason| MemoryAdmissionDenied {
-        reason,
-        required_bytes: Some(1 << 30),
-        signals: MetalMemorySignals {
-            recommended_max_bytes: 1 << 34,
-            current_allocated_bytes: 1 << 34,
-            process_limit_remaining_bytes: None,
-        },
-        working_set_headroom_bytes: Some(0),
+    let denied = |reason| {
+        MemoryAdmissionDenied::new(
+            reason,
+            Some(1 << 30),
+            MetalMemorySignals {
+                recommended_max_bytes: 1 << 34,
+                current_allocated_bytes: 1 << 34,
+                process_limit_remaining_bytes: None,
+            },
+            Some(0),
+        )
+        .expect("test reason refuses admission")
     };
     let pressure = K2RuntimeError::MemoryAdmission(denied(R::WorkingSetInsufficient));
     assert!(pressure.is_memory_pressure());

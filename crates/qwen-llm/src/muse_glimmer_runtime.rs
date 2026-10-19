@@ -201,7 +201,7 @@ impl MuseGlimmerLoadedModel {
             ctx.memory_signals(),
             true,
         );
-        if !aggregate.admitted {
+        if !aggregate.is_admitted() {
             return invalid(format!(
                 "combined weight and session admission denied: reason={} required={:?} working_set_headroom={:?} process_remaining={:?}",
                 aggregate.reason.as_str(),

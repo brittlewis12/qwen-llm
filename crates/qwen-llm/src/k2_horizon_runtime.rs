@@ -72,14 +72,14 @@ pub enum K2RuntimeError {
     Poisoned,
     /// The device memory admission refused weights or a session; typed so a
     /// server can tell pressure from telemetry and size refusals.
-    #[error("K2 memory admission denied ({})", .0.reason.as_str())]
+    #[error("K2 memory admission denied ({})", .0.reason().as_str())]
     MemoryAdmission(#[source] crate::metal::MemoryAdmissionDenied),
 }
 
 impl K2RuntimeError {
     /// A device memory refusal caused by memory pressure.
     pub fn is_memory_pressure(&self) -> bool {
-        matches!(self, Self::MemoryAdmission(denied) if denied.reason.is_pressure())
+        matches!(self, Self::MemoryAdmission(denied) if denied.reason().is_pressure())
     }
 }
 
@@ -832,9 +832,12 @@ impl SessionBuffers {
                 let row = &cache[range.start as usize..range.end as usize];
                 match token.storage() {
                     K2KvStorage::F16 => {
-                        if row.chunks_exact(2).any(|bytes| {
-                            !half::f16::from_le_bytes(bytes.try_into().unwrap()).is_finite()
-                        }) {
+                        if row
+                            .as_chunks::<2>()
+                            .0
+                            .iter()
+                            .any(|bytes| !half::f16::from_le_bytes(*bytes).is_finite())
+                        {
                             return Err(invalid(format!("nonfinite stored K/V in layer {layer}")));
                         }
                     }

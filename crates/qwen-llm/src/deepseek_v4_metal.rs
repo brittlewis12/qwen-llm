@@ -87,7 +87,7 @@ pub use prefill::{DEEPSEEK_V4_PREFILL_DEFAULT_TOKENS, DEEPSEEK_V4_PREFILL_MAX_TO
 pub enum DeepSeekV4MetalError {
     #[error("invalid DeepSeek V4 Metal residency: {0}")]
     Invalid(String),
-    #[error("DeepSeek V4 Metal session refused by memory admission ({})", .0.reason.as_str())]
+    #[error("DeepSeek V4 Metal session refused by memory admission ({})", .0.reason().as_str())]
     MemoryAdmission(#[source] crate::metal::MemoryAdmissionDenied),
     #[error(
         "DeepSeek V4 Metal cannot execute tensor {tensor:?} for role {role} with dtype {dtype:?}"

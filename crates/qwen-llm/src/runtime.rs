@@ -1840,7 +1840,7 @@ impl LoadedModel {
             prefill_scratch_upper_bytes,
             0,
         )?;
-        if !admission.admitted {
+        if !admission.is_admitted() {
             return Err(QwenQueue2Error::Validation(format!(
                 "memory admission denied: reason={} required={:?} working_set_headroom={:?} process_remaining={:?}",
                 admission.reason.as_str(),

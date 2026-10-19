@@ -601,7 +601,7 @@ fn native_deepseek_v4_full_context_session_plan_is_exact_and_admitted() {
     assert_eq!(required, 111_573_090_304);
     let admission = memory.admission(ctx.memory_signals());
     assert!(
-        admission.admitted,
+        admission.is_admitted(),
         "full-context plan denied: {admission:?}"
     );
     let before_residency = admission.signals.current_allocated_bytes;
@@ -1319,7 +1319,7 @@ fn native_deepseek_v4_memory_plan_admits_and_reconciles() {
     let admission = memory_plan.admission(signals);
     eprintln!("memory_plan={memory_plan}");
     eprintln!("memory_signals={signals:?} admission={admission:?}");
-    assert!(admission.admitted, "admission denied: {admission:?}");
+    assert!(admission.is_admitted(), "admission denied: {admission:?}");
     assert_eq!(
         admission.reason,
         qwen_llm::metal::MetalMemoryAdmissionReason::AdmittedProcessBudgetOmitted
@@ -1330,7 +1330,7 @@ fn native_deepseek_v4_memory_plan_admits_and_reconciles() {
         .expect("realize admitted DS4 residency");
     let (residency, refreshed_admission, after_residency_bytes) = realized.into_parts();
     assert!(
-        refreshed_admission.admitted,
+        refreshed_admission.is_admitted(),
         "refreshed admission denied: {refreshed_admission:?}"
     );
     assert_eq!(

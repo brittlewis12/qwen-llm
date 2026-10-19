@@ -33,7 +33,7 @@ fn muse_prefill_equal_work_batch_screen() {
             ctx.memory_signals(),
             true,
         );
-        assert!(admission.admitted, "batch screen admission {admission:?}");
+        assert!(admission.is_admitted(), "batch screen admission {admission:?}");
         let weight = MetalTensor::from_gguf_tensor(&ctx, desc, gguf.slice(desc)).unwrap();
         let values: Vec<f32> = (0..512 * n_in)
             .map(|i| ((i * 17 + i / n_in * 13) % 251) as f32 * 0.0079 - 0.9871)

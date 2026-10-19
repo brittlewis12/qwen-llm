@@ -198,7 +198,7 @@ pub(super) fn load(
         ) {
             Ok(_) => break,
             Err(Glm5NextMetalError::MemoryAdmission { denied, .. })
-                if rows != 0 && denied.reason.is_pressure() =>
+                if rows != 0 && denied.reason().is_pressure() =>
             {
                 continue;
             }
@@ -495,7 +495,7 @@ fn with_snapshot_release<T, V>(
         FAMILY,
         first,
         |result| match result.as_ref().err()? {
-            Glm5NextMetalError::MemoryAdmission { denied, .. } => Some((denied.reason, u64::MAX)),
+            Glm5NextMetalError::MemoryAdmission { denied, .. } => Some((denied.reason(), u64::MAX)),
             _ => None,
         },
         |bytes| cache.evict_for_except(bytes, keep),

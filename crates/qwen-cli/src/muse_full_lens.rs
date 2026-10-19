@@ -1045,7 +1045,7 @@ pub(crate) fn trace_full(args: TraceFullArgs) -> Result<()> {
             .full_readout_workspace_plan(workspace_rows)
             .context("price batched Muse trace readout")?;
         let batched = muse_trace_composite_admission(&context, &plan, additional_host_bytes)?;
-        if batched.admitted {
+        if batched.is_admitted() {
             (false, false, batched)
         } else {
             let scalar_plan = runner
@@ -1053,7 +1053,7 @@ pub(crate) fn trace_full(args: TraceFullArgs) -> Result<()> {
                 .context("price scalar Muse trace fallback")?;
             let scalar =
                 muse_trace_composite_admission(&context, &scalar_plan, additional_host_bytes)?;
-            if scalar.admitted {
+            if scalar.is_admitted() {
                 eprintln!(
                     "Muse trace batched readout memory admission denied (reason={}, required={:?}); using the independently admitted scalar readout",
                     batched.reason.as_str(),
@@ -1064,7 +1064,7 @@ pub(crate) fn trace_full(args: TraceFullArgs) -> Result<()> {
         }
     };
     ensure!(
-        capture_admission.admitted,
+        capture_admission.is_admitted(),
         "Muse trace composite memory admission denied: reason={} required={:?} working_set_headroom={:?} process_remaining={:?}",
         capture_admission.reason.as_str(),
         capture_admission.required_bytes,

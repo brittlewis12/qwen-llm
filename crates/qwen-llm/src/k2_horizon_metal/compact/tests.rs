@@ -180,7 +180,7 @@ fn gpu_q8_store_bytes_and_inline_attention_match_independent_controls() {
         ctx.memory_signals(),
         true,
     );
-    assert!(admission.admitted, "{}", admission.reason.as_str());
+    assert!(admission.is_admitted(), "{}", admission.reason.as_str());
     let before = ctx.current_allocated_size();
     let backing =
         MetalTensor::from_bytes(&ctx, &vec![0xff; length], vec![length as u64], GgmlType::I8)

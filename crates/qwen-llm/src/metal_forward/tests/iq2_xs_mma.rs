@@ -84,12 +84,12 @@ fn admit(
     emit(
         out,
         json!({"event":"admission","phase":phase,"gpu_buffers":buffers,"cpu_components":cpu,
-        "gpu_upper_bytes":gpu_bytes,"cpu_upper_bytes":cpu_bytes,"admitted":decision.admitted,
+        "gpu_upper_bytes":gpu_bytes,"cpu_upper_bytes":cpu_bytes,"admitted":decision.is_admitted(),
         "reason":decision.reason.as_str(),"metal_current_allocated_bytes":signals.current_allocated_bytes,
         "recommended_working_set_bytes":signals.recommended_max_bytes,"process_limit_remaining_bytes":signals.process_limit_remaining_bytes}),
     );
     assert!(
-        decision.admitted,
+        decision.is_admitted(),
         "normal admission refused; record flushed"
     );
 }

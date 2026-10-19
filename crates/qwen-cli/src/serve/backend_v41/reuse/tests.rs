@@ -6,16 +6,19 @@ use std::rc::Rc;
 use std::sync::Arc;
 
 fn denied(reason: Reason) -> StateError {
-    StateError::MemoryAdmissionDenied(MemoryAdmissionDenied {
-        reason,
-        required_bytes: Some(4096),
-        signals: MetalMemorySignals {
-            recommended_max_bytes: 1024,
-            current_allocated_bytes: 0,
-            process_limit_remaining_bytes: Some(1024),
-        },
-        working_set_headroom_bytes: Some(1024),
-    })
+    StateError::MemoryAdmissionDenied(
+        MemoryAdmissionDenied::new(
+            reason,
+            Some(4096),
+            MetalMemorySignals {
+                recommended_max_bytes: 1024,
+                current_allocated_bytes: 0,
+                process_limit_remaining_bytes: Some(1024),
+            },
+            Some(1024),
+        )
+        .expect("test reason refuses admission"),
+    )
 }
 
 struct Tracked {

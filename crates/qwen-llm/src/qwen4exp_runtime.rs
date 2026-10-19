@@ -2064,7 +2064,7 @@ fn smaller_prefill_rows(rows: Option<usize>) -> Option<usize> {
 }
 
 fn session_allocation_can_narrow(error: &Qwen4ExpTextSessionError) -> bool {
-    matches!(error, Qwen4ExpTextSessionError::MemoryAdmission(denied) if denied.reason.is_pressure())
+    matches!(error, Qwen4ExpTextSessionError::MemoryAdmission(denied) if denied.reason().is_pressure())
         || matches!(
             error,
             Qwen4ExpTextSessionError::Metal(MetalError::NoBuffer(_))
@@ -2088,7 +2088,7 @@ fn select_prefill_plan(
             return Ok((plan, admission));
         };
         let rows = plan.memory_plan().packed_prefill_capacity();
-        if !adaptive || !denied.reason.is_pressure() || rows.is_none() {
+        if !adaptive || !denied.reason().is_pressure() || rows.is_none() {
             return Err(denied.into());
         }
         let smaller = smaller_prefill_rows(rows);
@@ -3425,7 +3425,7 @@ mod tests {
         let admission =
             evaluate_metal_memory_admission(priced_upper_bytes, reserve_bytes, before, true);
         assert!(
-            admission.admitted,
+            admission.is_admitted(),
             "IQ3 gate/up capture admission denied: {}",
             admission.reason.as_str()
         );

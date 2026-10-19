@@ -283,7 +283,7 @@ fn session_memory_admission_reserves_dynamic_headroom_at_the_boundary() {
     assert!(matches!(
         error,
         DeepSeekV4MetalError::MemoryAdmission(denied)
-            if denied.reason == Reason::ProcessInsufficient
+            if denied.reason() == Reason::ProcessInsufficient
                 && denied.required_bytes == Some(process_required)
     ));
 
@@ -294,7 +294,7 @@ fn session_memory_admission_reserves_dynamic_headroom_at_the_boundary() {
     assert!(matches!(
         check_session_memory_admission(100, 50, working_set_below),
         Err(DeepSeekV4MetalError::MemoryAdmission(denied))
-            if denied.reason == Reason::WorkingSetInsufficient
+            if denied.reason() == Reason::WorkingSetInsufficient
                 && denied.working_set_headroom_bytes == Some(metal_required - 1)
     ));
 
@@ -305,7 +305,7 @@ fn session_memory_admission_reserves_dynamic_headroom_at_the_boundary() {
     assert!(matches!(
         check_session_memory_admission(100, 50, telemetry),
         Err(DeepSeekV4MetalError::MemoryAdmission(denied))
-            if denied.reason == Reason::ProcessSignalUnavailable
+            if denied.reason() == Reason::ProcessSignalUnavailable
     ));
 }
 
@@ -423,7 +423,7 @@ fn model_residency_set_scope_uses_working_set_budget() {
         process_limit_remaining_bytes: Some(0),
     };
     let fits = deepseek_v4_residency_set_memory_admission(&report, 100, fit_signals);
-    assert!(fits.admitted);
+    assert!(fits.is_admitted());
     assert!(deepseek_v4_residency_set_scope_qualified(true, &m4, fits));
 
     let no_fit_signals = MetalMemorySignals {
@@ -431,7 +431,7 @@ fn model_residency_set_scope_uses_working_set_budget() {
         ..fit_signals
     };
     let does_not_fit = deepseek_v4_residency_set_memory_admission(&report, 100, no_fit_signals);
-    assert!(!does_not_fit.admitted);
+    assert!(!does_not_fit.is_admitted());
     assert_eq!(
         does_not_fit.working_set_headroom_bytes,
         Some(99 + DEEPSEEK_V4_DYNAMIC_MEMORY_RESERVE_BYTES)
@@ -6818,7 +6818,7 @@ fn memory_plan_admission_and_reconciliation_fail_closed() {
         current_allocated_bytes: baseline,
         process_limit_remaining_bytes: Some(0),
     });
-    assert!(exact.admitted);
+    assert!(exact.is_admitted());
     assert_eq!(
         exact.reason,
         crate::metal::MetalMemoryAdmissionReason::AdmittedProcessBudgetOmitted
@@ -6828,7 +6828,7 @@ fn memory_plan_admission_and_reconciliation_fail_closed() {
         current_allocated_bytes: baseline,
         process_limit_remaining_bytes: Some(0),
     });
-    assert!(!short.admitted);
+    assert!(!short.is_admitted());
     assert_eq!(
         short.reason,
         crate::metal::MetalMemoryAdmissionReason::WorkingSetInsufficient
@@ -6854,7 +6854,7 @@ fn memory_plan_admission_and_reconciliation_fail_closed() {
             3,
         )
         .unwrap();
-    assert!(three_exact.admitted);
+    assert!(three_exact.is_admitted());
     let error = plan
         .admission_for_sessions(
             MetalMemorySignals {

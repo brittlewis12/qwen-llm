@@ -881,7 +881,7 @@ impl DeepSeekV4Backend {
                 first,
                 |result| match result.as_ref().err()? {
                     qwen_llm::deepseek_v4_metal::DeepSeekV4MetalError::MemoryAdmission(denied) => {
-                        Some((denied.reason, u64::MAX))
+                        Some((denied.reason(), u64::MAX))
                     }
                     _ => None,
                 },
@@ -1347,12 +1347,8 @@ mod tests {
         };
         let denied = |reason| {
             qwen_llm::deepseek_v4_metal::DeepSeekV4MetalError::MemoryAdmission(
-                MemoryAdmissionDenied {
-                    reason,
-                    required_bytes: Some(100),
-                    signals,
-                    working_set_headroom_bytes: Some(1_000),
-                },
+                MemoryAdmissionDenied::new(reason, Some(100), signals, Some(1_000))
+                    .expect("test reason refuses admission"),
             )
         };
 

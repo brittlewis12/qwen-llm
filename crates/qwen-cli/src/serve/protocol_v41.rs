@@ -94,6 +94,75 @@ mod tests {
         partition.push(b"too big", &mut vec![]);
         assert!(partition.failure().is_some());
     }
+
+    #[test]
+    fn v41_shared_prelude_preserves_official_bytes_across_tasks_and_modes() {
+        use deepseek_recipe_encoding::v4::{ASSISTANT_SP_TOKEN, USER_SP_TOKEN};
+        let marker_text = format!("literal {ASSISTANT_SP_TOKEN}<think>{USER_SP_TOKEN}");
+        let profile = profile(OutputLimits::TEST);
+        for effort in ["none", "low", "high", "xhigh", "max"] {
+            for (system, tools) in [(false, false), (true, false), (false, true), (true, true)] {
+                let mut shared = None;
+                for task in ["task A", "different task B"] {
+                    let user = format!("{task} {marker_text}");
+                    let mut body = json!({"model":"m", "input":user,
+                        "reasoning":{"effort":effort}});
+                    if system {
+                        body["instructions"] = json!(marker_text);
+                    }
+                    if tools {
+                        body["tools"] = json!([{"type":"function", "name":"lookup",
+                            "description":marker_text, "parameters":{"type":"object"}}]);
+                    }
+                    let request = profile.parse(&body).unwrap();
+                    let mut official = Conversation {
+                        thinking_mode: effort != "none",
+                        reasoning_effort: thinking(&request).unwrap(),
+                        ..Default::default()
+                    };
+                    if system {
+                        official.messages.push(InputMessage::System {
+                            content: marker_text.clone(),
+                        });
+                    }
+                    if tools {
+                        let tool = &request.model_request.tools[0];
+                        official.tools.push(ToolDefinition {
+                            name: tool.name.clone(),
+                            description: tool.description.clone(),
+                            parameters: tool.parameters.clone(),
+                            strict: tool.strict,
+                        });
+                    }
+                    let encoder = DeepseekV41Encoding::new();
+                    let prelude = encoder.render_conversation(&official).prompt;
+                    official.messages.push(InputMessage::User {
+                        content: user.clone(),
+                        image_sources: vec![],
+                    });
+                    let (prompt, boundaries) = render_with_boundaries(&request).unwrap();
+                    assert_eq!(prompt, encoder.render_conversation(&official).prompt);
+                    let header = boundaries.generation_header_start.unwrap();
+                    assert!(prompt[..header].ends_with(&user));
+                    if system || tools {
+                        let end = boundaries.shared_prefix_end.unwrap();
+                        assert!(end > 0 && end < header);
+                        let prefix = &prompt[..end];
+                        assert_eq!(Some(prefix), prelude.strip_suffix(&prompt[header..]));
+                        assert!(prefix.contains(&marker_text));
+                        assert_eq!(prefix.contains("Available Tool Schemas"), tools);
+                        assert_eq!(prefix.contains("Reasoning Effort:"), effort != "none");
+                        if let Some(previous) = &shared {
+                            assert_eq!(prefix, previous);
+                        }
+                        shared = Some(prefix.to_owned());
+                    } else {
+                        assert_eq!(boundaries.shared_prefix_end, None);
+                    }
+                }
+            }
+        }
+    }
 }
 
 fn invalid(detail: impl Into<String>) -> ServeError {
@@ -143,6 +212,20 @@ pub(crate) fn render_with_boundaries(
             content: content.clone(),
         });
     }
+    conversation.tools = request
+        .model_request
+        .tools
+        .iter()
+        .map(|tool| ToolDefinition {
+            name: tool.name.clone(),
+            description: tool.description.clone(),
+            parameters: tool.parameters.clone(),
+            strict: tool.strict,
+        })
+        .collect();
+    let encoder = DeepseekV41Encoding::new();
+    let prelude = (!conversation.messages.is_empty() || !conversation.tools.is_empty())
+        .then(|| encoder.render_conversation(&conversation).prompt);
     for turn in &request.model_request.turns {
         match turn {
             Turn::User(content) => conversation.messages.push(InputMessage::User {
@@ -178,20 +261,7 @@ pub(crate) fn render_with_boundaries(
             }
         }
     }
-    conversation.tools = request
-        .model_request
-        .tools
-        .iter()
-        .map(|tool| ToolDefinition {
-            name: tool.name.clone(),
-            description: tool.description.clone(),
-            parameters: tool.parameters.clone(),
-            strict: tool.strict,
-        })
-        .collect();
-    let mut prompt = DeepseekV41Encoding::new()
-        .render_conversation(&conversation)
-        .prompt;
+    let prompt = encoder.render_conversation(&conversation).prompt;
     // The pinned recipe unconditionally appends this exact generation suffix
     // (tool choice is Auto here). Never search transcript text for markers.
     use deepseek_recipe_encoding::v4::{
@@ -209,12 +279,17 @@ pub(crate) fn render_with_boundaries(
         .strip_suffix(&header)
         .ok_or_else(|| ServeError::server_error("V4.1 recipe generation suffix changed"))?
         .len();
-    prompt.truncate(transcript_len);
+    let shared_prefix_end = prelude
+        .as_deref()
+        .and_then(|prelude| prelude.strip_suffix(&header))
+        .filter(|prefix| {
+            !prefix.is_empty() && prefix.len() < transcript_len && prompt.starts_with(prefix)
+        })
+        .map(str::len);
     let boundaries = super::http::PromptBoundaries {
-        generation_header_start: Some(prompt.len()),
-        shared_prefix_end: None,
+        generation_header_start: Some(transcript_len),
+        shared_prefix_end,
     };
-    prompt.push_str(&header);
     Ok((prompt, boundaries))
 }
 

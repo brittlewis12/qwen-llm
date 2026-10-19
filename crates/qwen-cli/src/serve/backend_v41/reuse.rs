@@ -19,7 +19,7 @@ pub(super) struct Restored<S> {
 
 pub(super) trait Reuse<S> {
     fn take(&mut self, ids: &[u32], required: usize) -> Result<Option<Restored<S>>, ServeError>;
-    fn checkpoint(&mut self, state: &S, ids: &[u32], logits: &[f32]);
+    fn checkpoint(&mut self, state: &S, ids: &[u32], logits: &[f32], reserve: u64);
     fn commit(&mut self, live: Live<S>);
     fn capacity(&self, state: &S, required: usize) -> usize;
 }
@@ -50,6 +50,7 @@ impl Store {
 pub(super) struct Session<'a, 'b> {
     pub forward: &'a Forward<'b>,
     pub store: &'a mut Store,
+    pub headroom: Headroom,
 }
 
 impl Reuse<State> for Session<'_, '_> {
@@ -107,12 +108,16 @@ impl Reuse<State> for Session<'_, '_> {
         }))
     }
 
-    fn checkpoint(&mut self, state: &State, ids: &[u32], logits: &[f32]) {
-        let logits_bytes = logits.len() as u64 * size_of::<f32>() as u64;
+    fn checkpoint(&mut self, state: &State, ids: &[u32], logits: &[f32], reserve: u64) {
+        let Some(logits_bytes) = (logits.len() as u64).checked_mul(size_of::<f32>() as u64) else {
+            return;
+        };
         operations::capture_checkpoint(
             &mut self.store.cache,
             ids,
             logits_bytes,
+            reserve,
+            self.headroom,
             || self.forward.snapshot_payload_bytes(state),
             |expected_bytes| {
                 let snapshot = self.forward.capture_snapshot(state)?;
@@ -144,7 +149,7 @@ impl<S> Reuse<S> for NoReuse {
     fn take(&mut self, _: &[u32], _: usize) -> Result<Option<Restored<S>>, ServeError> {
         Ok(None)
     }
-    fn checkpoint(&mut self, _: &S, _: &[u32], _: &[f32]) {}
+    fn checkpoint(&mut self, _: &S, _: &[u32], _: &[f32], _: u64) {}
     fn commit(&mut self, _: Live<S>) {}
     fn capacity(&self, _: &S, required: usize) -> usize {
         required

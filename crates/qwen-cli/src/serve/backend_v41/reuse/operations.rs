@@ -1,4 +1,4 @@
-use super::super::super::{memory_relief, snapshot_cache::PrefixHit};
+use super::super::super::{memory_relief, output_memory, snapshot_cache::PrefixHit};
 use super::*;
 use qwen_llm::deepseek_v41::forward::StateError;
 
@@ -65,6 +65,8 @@ pub(super) fn capture_checkpoint<V>(
     cache: &mut SnapshotCache<V>,
     ids: &[u32],
     logits_bytes: u64,
+    reserve: u64,
+    headroom: impl FnOnce() -> Option<u64>,
     measure: impl FnOnce() -> Result<usize, StateError>,
     capture: impl FnOnce(usize) -> Result<V, StateError>,
 ) {
@@ -85,6 +87,18 @@ pub(super) fn capture_checkpoint<V>(
     let Some(entry_bytes) = cache.strict_eligibility(ids, value_bytes) else {
         return;
     };
+    // Include forward::capture_snapshot's CPU bookkeeping allowance as well
+    // as the caller's outstanding reserve, without charging either to Metal.
+    let Some(required) = entry_bytes
+        .checked_add(4096)
+        .and_then(|bytes| bytes.checked_add(reserve))
+    else {
+        return;
+    };
+    if let Err(error) = output_memory::admit_growth(required, 0, headroom()) {
+        tracing::debug!("V4.1 checkpoint skipped: {}", error.message);
+        return;
+    }
     match capture(payload_bytes) {
         Ok(checkpoint) => {
             cache.insert_strict(ids.to_vec(), checkpoint, entry_bytes);

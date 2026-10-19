@@ -29,19 +29,30 @@ impl Settings {
             self.tokenizer.n_vocab(),
             "V4.1",
         )?;
-        let checkpoint_cut = boundaries
-            .and_then(|b| b.generation_header_start)
-            .and_then(|end| prompt.get(..end))
-            .and_then(|prefix| {
-                self.tokenizer
-                    .encode(prefix, false)
-                    .ok()
-                    .map(|ids| ids.into_iter().map(|id| id as u32).collect::<Vec<_>>())
-            })
-            .filter(|prefix| {
-                !prefix.is_empty() && prefix.len() < ids.len() && ids.starts_with(prefix)
-            })
-            .map(|prefix| prefix.len());
+        let mut checkpoint_cuts = Vec::new();
+        if let Some(boundaries) = boundaries {
+            for offset in [
+                boundaries.shared_prefix_end,
+                boundaries.generation_header_start,
+            ]
+            .into_iter()
+            .flatten()
+            {
+                let prefix = prompt.get(..offset).and_then(|prefix| {
+                    self.tokenizer
+                        .encode(prefix, false)
+                        .ok()
+                        .map(|ids| ids.into_iter().map(|id| id as u32).collect::<Vec<_>>())
+                });
+                if let Some(prefix) = prefix.filter(|prefix| {
+                    !prefix.is_empty() && prefix.len() < ids.len() && ids.starts_with(prefix)
+                }) {
+                    checkpoint_cuts.push(prefix.len());
+                }
+            }
+        }
+        checkpoint_cuts.sort_unstable();
+        checkpoint_cuts.dedup();
         let vocab = self.tokenizer.n_vocab() as usize;
         let required =
             super::super::decode_loop::required_forwards("V4.1", ids.len(), maximum, self.context)?;
@@ -124,8 +135,10 @@ impl Settings {
             super::super::output_memory::admit_growth(reserve, 0, (self.headroom)())?;
             let endpoint = (position + crate::family_options::V41_PREFILL_ROWS)
                 .min(
-                    checkpoint_cut
-                        .filter(|&cut| cut > position)
+                    checkpoint_cuts
+                        .iter()
+                        .copied()
+                        .find(|&cut| cut > position)
                         .unwrap_or(ids.len()),
                 )
                 .min(ids.len());
@@ -139,8 +152,8 @@ impl Settings {
             prefill_rows = prefill_rows.max(endpoint - position);
             prefill_chunks += 1;
             position = endpoint;
-            if checkpoint_cut == Some(position) {
-                reuse.checkpoint(&state, &ids[..position], &[]);
+            if checkpoint_cuts.contains(&position) {
+                reuse.checkpoint(&state, &ids[..position], &[], reserve);
             }
         }
         check(sink)?;
@@ -148,8 +161,8 @@ impl Settings {
         if logits.len() != vocab || !logits.iter().all(|v| v.is_finite()) {
             return Err(ServeError::server_error("V4.1 returned malformed logits").into());
         }
-        if checkpoint_cut.is_none() {
-            reuse.checkpoint(&state, &ids, &logits);
+        if checkpoint_cuts.is_empty() {
+            reuse.checkpoint(&state, &ids, &logits, reserve);
         }
         let mut consumed = ids.clone();
         let generation = {

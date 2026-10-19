@@ -147,6 +147,11 @@ This is not independent full-model correctness through 1,025 tokens. Independent
 GGUF full-model comparison still covers seven tokens. The registered 2K/10K
 replay is scalar, teacher-forced HF conversion characterization; its completion
 does not establish batched GGUF correctness or candidate-pruning coverage.
+The separate independent GGUF attention replay at `733d629f` compares 32 scalar
+and 56 batched checkpoints at 2K/10K and the real pruning boundary. All selected
+IDs and candidate sets match; worst batched attention-output error is 2.933e-5
+against the unchanged 1e-4 bound. This is conditional on captured normalized
+inputs, not independent long full-model logits; see the review packet for scope.
 The latest 65-token comparison has maximum logit error 2.737e-4 and KL 6.855e-10;
 same-arithmetic snapshot/growth continuation remains bitwise equal. SIMD and
 grouped reductions are F32, not bitwise scalar reduction order. Existing

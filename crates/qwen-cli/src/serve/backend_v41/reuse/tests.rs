@@ -55,7 +55,7 @@ impl Reuse<Tracked> for GrowthFixture {
             })
         })
     }
-    fn checkpoint(&mut self, _: &Tracked, _: &[u32], _: &[f32]) {}
+    fn checkpoint(&mut self, _: &Tracked, _: &[u32], _: &[f32], _: u64) {}
     fn commit(&mut self, live: Live<Tracked>) {
         self.live = Some(live);
     }
@@ -299,6 +299,8 @@ fn full_snapshot_payload_key_and_logits_must_fit_before_capture() {
             &mut cache,
             &[1, 2, 3],
             8,
+            0,
+            || Some(0),
             || {
                 measures.set(measures.get() + 1);
                 Ok(64)
@@ -317,6 +319,8 @@ fn full_snapshot_payload_key_and_logits_must_fit_before_capture() {
                 &mut cache,
                 &[1, 2, 3],
                 8,
+                0,
+                || panic!("existing checkpoint need not be readmitted"),
                 || panic!("existing checkpoint need not be remeasured"),
                 |_| panic!("duplicate capture"),
             );
@@ -327,8 +331,176 @@ fn full_snapshot_payload_key_and_logits_must_fit_before_capture() {
         &mut cache,
         &[1],
         u64::MAX,
+        0,
+        || panic!("overflow must precede admission"),
         || Ok(1),
         |_| panic!("overflow capture"),
     );
     assert_eq!(cache.len(), 0);
+}
+
+#[test]
+fn capture_admission_checks_full_entry_plus_reserve_and_overflow() {
+    // 64 payload + 12 key + 8 logits + forward's 4096 bookkeeping allowance.
+    let entry_peak = 64 + 12 + 8 + 4096;
+    for (reserve, headroom, expected) in [
+        (0, Some(entry_peak), true),
+        (100, Some(entry_peak), false),
+        (100, Some(entry_peak + 100), true),
+        (100, Some(entry_peak + 99), false),
+        (100, None, false),
+        (100, Some(0), true),
+        (u64::MAX, Some(0), false),
+    ] {
+        let mut cache = SnapshotCache::new(1 << 20, Default::default());
+        assert!(cache.insert_strict(vec![9], 3u8, 5));
+        let captures = Cell::new(0);
+        operations::capture_checkpoint(
+            &mut cache,
+            &[1, 2, 3],
+            8,
+            reserve,
+            || {
+                assert_ne!(reserve, u64::MAX, "overflow precedes telemetry");
+                headroom
+            },
+            || Ok(64),
+            |_| {
+                captures.set(captures.get() + 1);
+                Ok(7)
+            },
+        );
+        assert_eq!(captures.get(), usize::from(expected));
+        assert_eq!(cache.indexed_bytes(), 5 + if expected { 84 } else { 0 });
+        assert_eq!(*cache.best_prefix(&[9, 10]).unwrap().1, 3);
+    }
+}
+
+#[test]
+fn optional_capture_denial_preserves_request_cuts_and_prior_checkpoint() {
+    struct Fixture<'a> {
+        cache: SnapshotCache<u8>,
+        reserve: &'a Cell<u64>,
+        cuts: Vec<usize>,
+        live: Option<Live<usize>>,
+    }
+    impl Reuse<usize> for Fixture<'_> {
+        fn take(&mut self, _: &[u32], _: usize) -> Result<Option<Restored<usize>>, ServeError> {
+            Ok(None)
+        }
+        fn checkpoint(&mut self, state: &usize, ids: &[u32], logits: &[f32], reserve: u64) {
+            assert_eq!(*state, ids.len());
+            assert_eq!(reserve, self.reserve.get());
+            let logits_bytes = (logits.len() * size_of::<f32>()) as u64;
+            let snapshot_peak = 64 + ids.len() as u64 * 4 + logits_bytes + 4096;
+            assert!(
+                snapshot_peak <= reserve,
+                "snapshot alone fits process headroom"
+            );
+            self.cuts.push(*state);
+            operations::capture_checkpoint(
+                &mut self.cache,
+                ids,
+                logits_bytes,
+                reserve,
+                || Some(reserve),
+                || Ok(64),
+                |_| panic!("optional snapshot must not consume caller reserve"),
+            );
+        }
+        fn commit(&mut self, live: Live<usize>) {
+            self.live = Some(live);
+        }
+        fn capacity(&self, _: &usize, required: usize) -> usize {
+            required
+        }
+    }
+    struct Sink;
+    impl GenerationSink for Sink {
+        fn piece(&mut self, _: &[u8]) -> io::Result<()> {
+            Ok(())
+        }
+        fn tick(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+    let mut settings = Settings::new(
+        super::super::tokenizer_fixture::tokenizer(None),
+        128,
+        1,
+        SamplingConfig::default(),
+        256,
+        "test".into(),
+    )
+    .unwrap();
+    settings.headroom = || Some(0);
+    let request = settings
+        .profile()
+        .parse(&serde_json::json!({
+            "model":"test", "input":"abc", "max_output_tokens":1,
+        }))
+        .unwrap();
+    for boundaries in [
+        Some(super::super::super::http::PromptBoundaries {
+            shared_prefix_end: Some(1),
+            generation_header_start: Some(2),
+        }),
+        None,
+    ] {
+        let reserve = Cell::new(0);
+        let mut fixture = Fixture {
+            cache: SnapshotCache::new(1 << 20, Default::default()),
+            reserve: &reserve,
+            cuts: vec![],
+            live: None,
+        };
+        assert!(fixture.cache.insert_strict(vec![9], 3, 5));
+        let mut chunks = vec![];
+        let outcome = settings
+            .execute(
+                &request,
+                "abc",
+                boundaries,
+                &mut Sink,
+                |_, bytes| {
+                    reserve.set(bytes);
+                    Ok(())
+                },
+                |_| Ok(0),
+                &mut fixture,
+                |state, tokens, _, with_logits| {
+                    *state += tokens.len();
+                    chunks.push(*state);
+                    assert_eq!(with_logits, *state == 3);
+                    let mut logits = if with_logits { vec![0.; 257] } else { vec![] };
+                    if with_logits {
+                        logits[256] = 100.;
+                    }
+                    Ok(logits)
+                },
+                |_, _, _| panic!("EOS must not be consumed"),
+                || Duration::ZERO,
+            )
+            .unwrap();
+        assert_eq!(
+            chunks,
+            if boundaries.is_some() {
+                vec![1, 2, 3]
+            } else {
+                vec![3]
+            }
+        );
+        assert_eq!(
+            fixture.cuts,
+            if boundaries.is_some() {
+                vec![1, 2]
+            } else {
+                vec![3]
+            }
+        );
+        assert_eq!(outcome.usage.output_tokens, 1);
+        assert_eq!(fixture.live.unwrap().tokens, [97, 98, 99]);
+        assert_eq!(fixture.cache.len(), 1);
+        assert_eq!(*fixture.cache.best_prefix(&[9, 10]).unwrap().1, 3);
+    }
 }

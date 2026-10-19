@@ -259,6 +259,7 @@ impl Backend<'_> {
             &mut reuse::Session {
                 forward: &self.forward,
                 store: &mut self.reuse,
+                headroom: self.settings.headroom,
             },
             |state, tokens, cancel, with_logits| {
                 memory_io::observe_chunk(

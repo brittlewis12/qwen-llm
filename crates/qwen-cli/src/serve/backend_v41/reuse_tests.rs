@@ -142,12 +142,26 @@ fn renderer_boundary_ignores_marker_lookalikes_in_user_text() {
     );
 }
 
-#[derive(Default)]
 struct Recorded {
     live: Option<reuse::Live<Vec<u32>>>,
     checkpoint: Option<Vec<u32>>,
     checkpoint_logits: Vec<f32>,
+    checkpoint_positions: Vec<usize>,
+    cache: SnapshotCache<Vec<u32>>,
     restore_checkpoint: bool,
+}
+
+impl Default for Recorded {
+    fn default() -> Self {
+        Self {
+            live: None,
+            checkpoint: None,
+            checkpoint_logits: vec![],
+            checkpoint_positions: vec![],
+            cache: SnapshotCache::new(1 << 20, Default::default()),
+            restore_checkpoint: false,
+        }
+    }
 }
 
 impl reuse::Reuse<Vec<u32>> for Recorded {
@@ -165,22 +179,29 @@ impl reuse::Reuse<Vec<u32>> for Recorded {
                 source: "live_session",
             });
         Ok(live.or_else(|| {
-            let checkpoint = self.checkpoint.as_ref()?;
-            (self.restore_checkpoint && ids.len() > checkpoint.len() && ids.starts_with(checkpoint))
-                .then(|| reuse::Restored {
-                    live: reuse::Live {
-                        state: checkpoint.clone(),
-                        tokens: checkpoint.clone(),
-                        logits: vec![],
-                    },
-                    source: "snapshot_ram",
-                })
+            if !self.restore_checkpoint {
+                return None;
+            }
+            let (length, checkpoint) = self.cache.best_prefix(ids)?;
+            Some(reuse::Restored {
+                live: reuse::Live {
+                    state: (*checkpoint).clone(),
+                    tokens: ids[..length].to_vec(),
+                    logits: vec![],
+                },
+                source: "snapshot_ram",
+            })
         }))
     }
-    fn checkpoint(&mut self, state: &Vec<u32>, ids: &[u32], logits: &[f32]) {
+    fn checkpoint(&mut self, state: &Vec<u32>, ids: &[u32], logits: &[f32], reserve: u64) {
+        assert!(reserve > 0);
         assert_eq!(state, ids);
         self.checkpoint = Some(state.clone());
         self.checkpoint_logits = logits.to_vec();
+        self.checkpoint_positions.push(ids.len());
+        let bytes =
+            SnapshotCache::<Vec<u32>>::entry_bytes(ids.len(), (state.len() * 4) as u64).unwrap();
+        self.cache.insert_strict(ids.to_vec(), state.clone(), bytes);
     }
     fn commit(&mut self, live: reuse::Live<Vec<u32>>) {
         self.live = Some(live);
@@ -447,6 +468,220 @@ impl GenerationSink for BatchSink<'_> {
     }
     fn piece(&mut self, _: &[u8]) -> io::Result<()> {
         Ok(())
+    }
+}
+
+fn execute_checkpoint_fixture(
+    settings: &Settings,
+    request: &ServeRequest,
+    prompt: &str,
+    boundaries: Option<PromptBoundaries>,
+    recorded: &mut Recorded,
+) -> (GenerationOutcome, Vec<(usize, usize)>) {
+    let ids: Vec<_> = settings
+        .tokenizer
+        .encode(prompt, false)
+        .unwrap()
+        .into_iter()
+        .map(|id| id as u32)
+        .collect();
+    let ticks = std::cell::Cell::new(0);
+    let mut calls = vec![];
+    let outcome = settings
+        .execute(
+            request,
+            prompt,
+            boundaries,
+            &mut BatchSink {
+                ticks: &ticks,
+                cancel: Default::default(),
+            },
+            |_, _| Ok(()),
+            |_| Ok(vec![]),
+            recorded,
+            |state, tokens, _, with_logits| {
+                let start = state.len();
+                state.extend_from_slice(tokens);
+                assert_eq!(state, &ids[..state.len()]);
+                assert_eq!(with_logits, state.len() == ids.len());
+                calls.push((start, state.len()));
+                Ok(if with_logits { eos_logits() } else { vec![] })
+            },
+            |_, _, _| panic!("final logits must select EOS without a decode step"),
+            || Duration::ZERO,
+        )
+        .unwrap();
+    let live = recorded.live.as_ref().unwrap();
+    assert_eq!(live.state, ids);
+    assert_eq!(live.tokens, ids);
+    assert_eq!(live.logits, eos_logits());
+    assert_eq!(outcome.usage.output_tokens, 1);
+    (outcome, calls)
+}
+
+#[test]
+fn execution_sorts_dedups_and_verifies_both_byte_boundaries() {
+    let settings = batch_settings();
+    let request = settings
+        .profile()
+        .parse(&json!({"model":"fixture", "input":"x", "max_output_tokens":1}))
+        .unwrap();
+    let prompt = format!("a{}z", deepseek_recipe_encoding::v4::EOS_TOKEN);
+    let header = prompt.len() - 1;
+    let inside_utf8 = prompt.find('\u{ff5c}').unwrap() + 1;
+    for (shared, generation, cuts) in [
+        (Some(1), Some(header), vec![1, 2]),
+        (Some(header), Some(1), vec![1, 2]),
+        (Some(1), Some(1), vec![1]),
+        // Byte-prefix "a<" is not a token prefix: the full marker is one token.
+        (Some(2), Some(header), vec![2]),
+        (Some(1), Some(2), vec![1]),
+        (Some(0), Some(prompt.len()), vec![]),
+        (Some(inside_utf8), Some(prompt.len() + 1), vec![]),
+        (None, None, vec![]),
+    ] {
+        let mut recorded = Recorded::default();
+        let (_, calls) = execute_checkpoint_fixture(
+            &settings,
+            &request,
+            &prompt,
+            Some(PromptBoundaries {
+                shared_prefix_end: shared,
+                generation_header_start: generation,
+            }),
+            &mut recorded,
+        );
+        let endpoints: Vec<_> = cuts.iter().copied().chain([3]).collect();
+        assert_eq!(
+            calls.iter().map(|&(_, end)| end).collect::<Vec<_>>(),
+            endpoints
+        );
+        assert_eq!(
+            recorded.checkpoint_positions,
+            if cuts.is_empty() {
+                vec![3]
+            } else {
+                cuts.clone()
+            }
+        );
+        assert_eq!(recorded.checkpoint_logits.is_empty(), !cuts.is_empty());
+    }
+}
+
+#[test]
+fn different_user_restores_official_shared_prelude_with_cache_independent_cuts() {
+    let mut settings = batch_settings();
+    settings.context = 8192;
+    let profile = settings.profile();
+    let mut body = json!({"model":"fixture", "input":"task A", "max_output_tokens":1,
+        "instructions":"shared system", "reasoning":{"effort":"high"},
+        "tools":[{"type":"function", "name":"lookup", "parameters":{"type":"object"}}]});
+    let a = profile.parse(&body).unwrap();
+    body["input"] = json!("different task B");
+    let b = profile.parse(&body).unwrap();
+    let encode = |text: &str| {
+        settings
+            .tokenizer
+            .encode(text, false)
+            .unwrap()
+            .into_iter()
+            .map(|id| id as u32)
+            .collect::<Vec<_>>()
+    };
+    let mut cold_calls = vec![];
+    for budget in [0, 1 << 20] {
+        let mut recorded = Recorded {
+            cache: SnapshotCache::new(budget, Default::default()),
+            restore_checkpoint: true,
+            ..Default::default()
+        };
+        for (index, request) in [&a, &b].into_iter().enumerate() {
+            let (prompt, boundaries) = profile.render_prepared(request).unwrap();
+            let boundaries = boundaries.unwrap();
+            let shared = encode(&prompt[..boundaries.shared_prefix_end.unwrap()]).len();
+            let header = encode(&prompt[..boundaries.generation_header_start.unwrap()]).len();
+            let ids = encode(&prompt);
+            let matched = if index == 1 && budget > 0 { shared } else { 0 };
+            recorded.checkpoint_positions.clear();
+            let (outcome, calls) = execute_checkpoint_fixture(
+                &settings,
+                request,
+                &prompt,
+                Some(boundaries),
+                &mut recorded,
+            );
+            assert_eq!(calls[0].0, matched);
+            assert_eq!(calls.last().unwrap().1, ids.len());
+            assert_eq!(
+                calls.iter().map(|&(start, end)| end - start).sum::<usize>(),
+                ids.len() - matched
+            );
+            assert_eq!(
+                recorded.checkpoint_positions,
+                if matched == 0 {
+                    vec![shared, header]
+                } else {
+                    vec![header]
+                }
+            );
+            assert!(recorded.checkpoint_logits.is_empty());
+            let phases = outcome.stats.unwrap().phases.unwrap();
+            assert_eq!(phases["reused_tokens"], matched);
+            assert_eq!(phases["prefill_tokens"], ids.len() - matched);
+            assert_eq!(
+                phases["reuse_source"],
+                if matched == 0 { "none" } else { "snapshot_ram" }
+            );
+            if budget == 0 {
+                cold_calls.push(calls);
+            } else {
+                let expected: Vec<_> = cold_calls[index]
+                    .iter()
+                    .copied()
+                    .filter(|&(start, _)| start >= matched)
+                    .collect();
+                assert_eq!(
+                    calls, expected,
+                    "cache admission does not select execution cuts"
+                );
+            }
+        }
+        if budget > 0 {
+            assert_eq!(
+                recorded.cache.len(),
+                3,
+                "shared prelude and both transcripts survive"
+            );
+            for (pointer, value) in [
+                ("/instructions", json!("changed system")),
+                ("/tools/0/name", json!("changed_tool")),
+                (
+                    "/tools/0/parameters",
+                    json!({"type":"object", "properties":{"x":{"type":"string"}}}),
+                ),
+                ("/reasoning/effort", json!("none")),
+                ("/reasoning/effort", json!("low")),
+                ("/reasoning/effort", json!("max")),
+            ] {
+                let mut changed = body.clone();
+                *changed.pointer_mut(pointer).unwrap() = value;
+                let request = profile.parse(&changed).unwrap();
+                let prompt = profile.render(&request).unwrap();
+                assert!(
+                    recorded.cache.best_prefix(&encode(&prompt)).is_none(),
+                    "{pointer}"
+                );
+            }
+            // The official recipe intentionally maps high and xhigh to the same bytes.
+            let mut equivalent = body.clone();
+            equivalent["reasoning"]["effort"] = json!("xhigh");
+            assert_eq!(
+                profile
+                    .render(&profile.parse(&equivalent).unwrap())
+                    .unwrap(),
+                profile.render(&b).unwrap()
+            );
+        }
     }
 }
 

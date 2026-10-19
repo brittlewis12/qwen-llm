@@ -47,7 +47,7 @@
 
 use crate::gguf::GgufFile;
 use crate::model::{Arch, ArchKind, LayerKind};
-use crate::tensor::{GgmlType, TensorDesc};
+use crate::tensor::TensorDesc;
 
 #[derive(Debug, thiserror::Error)]
 pub enum LoadError {
@@ -73,8 +73,6 @@ pub enum LoadError {
         got: u64,
         expected: u64,
     },
-    #[error("unexpected layer kind for blk.{idx}: expected {expected:?} based on pattern")]
-    LayerKind { idx: u32, expected: LayerKind },
     #[error("metadata key {key:?} = {got} is out of range (must fit in u32)")]
     MetadataOverflow { key: &'static str, got: u64 },
     #[error("metadata key {key:?} = {got} is out of range (must fit in i32)")]
@@ -1604,21 +1602,6 @@ fn build_arch_from_metadata(g: &GgufFile, arch_name: &str) -> Result<Arch, LoadE
     })
 }
 
-/// Convenience: how many GDN-typed elements are stored across all layers,
-/// in F32 bytes? Useful for budget calculations.
-#[allow(dead_code)]
-pub fn gdn_state_bytes(arch: &Arch) -> u64 {
-    let n_gdn_layers = (0..arch.n_layer)
-        .filter(|&i| arch.layer_kind(i) == LayerKind::GatedDeltaNet)
-        .count() as u64;
-    n_gdn_layers
-        .checked_mul(arch.gdn_n_v_heads as u64)
-        .and_then(|v| v.checked_mul(arch.gdn_head_dim as u64))
-        .and_then(|v| v.checked_mul(arch.gdn_head_dim as u64))
-        .and_then(|v| v.checked_mul(std::mem::size_of::<f32>() as u64))
-        .unwrap_or(u64::MAX)
-}
-
 /// Best-effort summary string for diagnostics.
 pub fn summary(model: &Model<'_>) -> String {
     let n_gdn = model
@@ -1651,25 +1634,10 @@ pub fn summary(model: &Model<'_>) -> String {
     )
 }
 
-// Mark the `LayerKind` variant as referenced so it doesn't trip `dead_code`
-// in builds where only one error variant is constructed.
-#[allow(dead_code)]
-const _: fn() = || {
-    let _ = LoadError::LayerKind {
-        idx: 0,
-        expected: LayerKind::GatedAttention,
-    };
-    let _ = LoadError::ArchMismatch {
-        key: "_",
-        got: 0,
-        expected: 0,
-    };
-    let _: GgmlType = GgmlType::F32;
-};
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::tensor::GgmlType;
 
     #[test]
     fn metadata_narrowing_rejects_u32_overflow() {

@@ -69,7 +69,6 @@ impl From<anyhow::Error> for GgufError {
 /// header, tensor table, tensor-data start, and mmap. Tensor descriptors carry
 /// a shard index so the public [`GgufFile::slice`] API can stay one logical
 /// model view.
-#[allow(dead_code)] // Debug is used by tests via expect_err
 pub struct GgufShard {
     pub path: PathBuf,
     /// Original file description backing both the mmap and metadata parser.
@@ -127,7 +126,6 @@ impl GgufShard {
 /// * `model` is the gguf-rs decoded view of shard 0 metadata. llama.cpp's
 ///   `gguf-split` stores full model/tokenizer metadata only in shard 0; later
 ///   shard metadata is used only during split validation.
-#[allow(dead_code)]
 pub struct GgufFile {
     pub shards: Vec<GgufShard>,
     pub tensors: Vec<TensorDesc>,

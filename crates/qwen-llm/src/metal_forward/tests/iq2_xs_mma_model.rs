@@ -33,7 +33,7 @@ use serde_json::{Value, json};
 use std::{collections::BTreeMap, fs::File, time::Instant};
 const WIDTHS: [usize; 2] = [128, 4096];
 const NEXT: usize = 4;
-const PROSE: &str = include_str!("../../../../../docs/GLM53-FLASH-PLAN.md");
+const PROSE: &str = include_str!("../../../../../docs/archive/GLM53-FLASH-PLAN-2026-10-12.md");
 const CODE: &str = include_str!("../../../../qwen-cli/src/serve/backend_glm5_next.rs");
 const RENDER: &str = include_str!("../../../../qwen-cli/src/serve/render_glm5_next.rs");
 const ABBA: [(&str, bool); 4] = [("A1", false), ("B1", true), ("B2", true), ("A2", false)];

@@ -3,7 +3,7 @@
 //!
 //! This is an inspection API, not runtime admission. Binding a model enables no
 //! family dispatch, chat capability or Metal execution. Reference semantics are
-//! llama.cpp `src/models/glm5-next.cpp`; see `docs/GLM53-FLASH-PLAN.md`.
+//! llama.cpp `src/models/glm5-next.cpp`; see `docs/archive/GLM53-FLASH-PLAN-2026-10-12.md`.
 //!
 //! The release executes 45 trunk blocks. Storage may additionally declare one
 //! unused NextN (MTP) block; its tensors are optional, counted when present,

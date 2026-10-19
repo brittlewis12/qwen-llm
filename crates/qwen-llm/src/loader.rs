@@ -240,7 +240,7 @@ pub enum Block<'a> {
 /// the `blk.{n_layer}.nextn.*` tensor set. The MTP head is structurally
 /// a normal full-attention block at block index `n_layer` (one past the
 /// last base layer) plus four adornment tensors (`eh_proj`, `enorm`,
-/// `hnorm`, `shared_head_norm`). See `docs/H4-MTP.md` §1.1 for the
+/// `hnorm`, `shared_head_norm`). See `docs/archive/H4-MTP-2026-05-03.md` §1.1 for the
 /// per-tensor shape table.
 ///
 /// Note: `nextn.embed_tokens` and `nextn.shared_head_head` are
@@ -412,7 +412,7 @@ pub struct Model<'a> {
     /// `mtp-converter` lcpp branch. `None` for older GGUFs (rejected
     /// MTP tensors at convert time). Bound by tensor presence, not
     /// metadata — the upstream converter doesn't always write
-    /// `qwen35.nextn_predict_layers`. See `docs/H4-MTP.md` §2.
+    /// `qwen35.nextn_predict_layers`. See `docs/archive/H4-MTP-2026-05-03.md` §2.
     pub mtp: Option<MtpHead<'a>>,
 }
 

@@ -485,7 +485,7 @@ pub(crate) fn run_dflash_lazy(args: DflashLazyArgs) -> Result<()> {
     }
 
     eprintln!();
-    eprintln!("[dflash-lazy] GO/NO-GO gate (per docs/H5-DFLASH.md §H5.2.5):");
+    eprintln!("[dflash-lazy] GO/NO-GO gate (per docs/archive/H5-DFLASH-2026-10-05.md §H5.2.5):");
     eprintln!("[dflash-lazy]   α_pos1 ≥ 0.50 on code  → GO for H5.3 packed verify");
     eprintln!("[dflash-lazy]   α_pos1 ≥ 0.30 on prose → GO for H5.3 packed verify");
     eprintln!(

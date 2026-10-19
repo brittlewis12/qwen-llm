@@ -3,7 +3,7 @@
 `glm53_oracle` runs llama.cpp serially (one token per decode, positions from 0)
 on exact token IDs, against the same GGUF the native family executes. It writes
 full-vocabulary logits for every position and, optionally, named graph tensors.
-It is the integration oracle in `docs/GLM53-FLASH-PLAN.md`; operation-level
+It is the integration oracle in `docs/archive/GLM53-FLASH-PLAN-2026-10-12.md`; operation-level
 fixtures for new contracts are separate.
 
 ## Build

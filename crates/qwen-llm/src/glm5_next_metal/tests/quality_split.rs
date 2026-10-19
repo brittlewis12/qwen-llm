@@ -133,6 +133,9 @@ fn grid_cut(length: usize, offset: usize) -> usize {
 /// producer from `GLM53_PRODUCER_COMMIT`.
 #[test]
 #[ignore = "generator (map #12/#15 split qualification): CPU only; requires GLM53_GGUF (tokenizer), GLM53_SPLIT_OUT and GLM53_PRODUCER_COMMIT"]
+// Frozen quality-v1 token records are authoritative. This generator writes a
+// new split-cohort version from those tokens, not the frozen cohort; source
+// documents changed after the original freeze.
 fn quality_split_generate() {
     let out = PathBuf::from(std::env::var("GLM53_SPLIT_OUT").expect("GLM53_SPLIT_OUT"));
     let commit = std::env::var("GLM53_PRODUCER_COMMIT").expect("GLM53_PRODUCER_COMMIT");

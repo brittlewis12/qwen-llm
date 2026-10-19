@@ -34,15 +34,30 @@ pub(super) const TOOL_CAP: usize = 256;
 pub(super) const TOOL_SEEDS: [u64; 3] = [11, 12, 13];
 
 /// (stratum, repository path, prefix lengths).
+// Frozen JSON tokens remain authoritative for the registered cohort. These paths
+// regenerate a new cohort version, not that frozen one: several sources changed
+// after the freeze.
 const DOCUMENTS: [(&str, &str, &[usize]); 22] = [
-    ("prose", "docs/GLM53-FLASH-PLAN.md", &[512, 2048]),
+    (
+        "prose",
+        "docs/archive/GLM53-FLASH-PLAN-2026-10-12.md",
+        &[512, 2048],
+    ),
     ("prose", "docs/DEEPSEEK-V41-STRATEGY.md", &[512, 2048]),
-    ("prose", "docs/H4-MTP.md", &[512, 2048]),
+    ("prose", "docs/archive/H4-MTP-2026-05-03.md", &[512, 2048]),
     ("prose", "docs/CLI-UX.md", &[512, 2048]),
-    ("prose", "docs/PLAN.md", &[512, 2048]),
+    ("prose", "docs/archive/PLAN-2026-09-03.md", &[512, 2048]),
     ("prose", "docs/APPLE-GPU-OPTIMIZATION.md", &[512, 2048]),
-    ("prose", "docs/K2-HORIZON-REVIEW.md", &[512, 2048]),
-    ("prose", "docs/LENS-COMPARATIVE-PHYSIOLOGY.md", &[512, 2048]),
+    (
+        "prose",
+        "docs/archive/K2-HORIZON-REVIEW-2026-10-05.md",
+        &[512, 2048],
+    ),
+    (
+        "prose",
+        "docs/bench/2026-10-05-lens-comparative-physiology/README.md",
+        &[512, 2048],
+    ),
     ("code", "crates/qwen-llm/src/sampling.rs", &[512, 2048]),
     ("code", "crates/qwen-llm/src/tokenizer.rs", &[512, 2048]),
     ("code", "crates/qwen-llm/src/gguf.rs", &[512, 2048]),
@@ -52,8 +67,12 @@ const DOCUMENTS: [(&str, &str, &[usize]); 22] = [
     ("code", "kernels/mat_vec.metal", &[512, 2048]),
     ("code", "kernels/moe.metal", &[512, 2048]),
     ("long", "docs/SERVE.md", &[4352]),
-    ("long", "docs/H5-DFLASH.md", &[4352]),
-    ("long", "docs/DEEPSEEK-V4-STRATEGY.md", &[4352]),
+    ("long", "docs/archive/H5-DFLASH-2026-10-05.md", &[4352]),
+    (
+        "long",
+        "docs/archive/DEEPSEEK-V4-STRATEGY-2026-10-19.md",
+        &[4352],
+    ),
     ("long", "docs/ENV.md", &[4352]),
     ("long", "crates/qwen-llm/src/glm5_next_metal.rs", &[4352]),
     ("long", "crates/qwen-cli/src/serve/http.rs", &[4352]),

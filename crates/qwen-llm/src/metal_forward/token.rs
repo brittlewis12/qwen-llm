@@ -975,7 +975,7 @@ impl<'a> MetalForward<'a> {
     /// destination must not alias mutable session storage.
     ///
     /// Used by H5 to bootstrap `target_ctx` from prompt prefill: per
-    /// docs/H5-DFLASH.md §1.1, the DFlash drafter consumes K=5 target
+    /// docs/archive/H5-DFLASH-2026-10-05.md §1.1, the DFlash drafter consumes K=5 target
     /// layer hiddens fused via `dflash_fc`. Caller is responsible for
     /// stacking these K hiddens into the final
     /// `[K · H_target, ctx_len]` cross-context buffer.

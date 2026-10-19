@@ -158,7 +158,7 @@ fn dflash_draft_cpu_smoke() {
 }
 
 /// **H5.1.5** — plumbing cosine gate. NOT a DFlash correctness gate; see
-/// docs/H5-DFLASH.md §H5.1.5 for the full framing.
+/// docs/archive/H5-DFLASH-2026-10-05.md §H5.1.5 for the full framing.
 ///
 /// Validates that the Metal hybrid drafter and the CPU oracle produce
 /// the same `[N, V]` draft logits when fed the same

@@ -106,6 +106,8 @@ class SubsetTests(unittest.TestCase):
         self.assertTrue(result["arms"]["half_mma"]["truncated"])
         self.assertEqual(result["correct_delta"], -1)
 
+    # Frozen fixture paths preserve registration provenance; they are not live source paths.
+    # New cohort generation reads the current Rust source list.
     def test_fixed_document_selection(self):
         fixture = json.loads((analysis.HERE / "quality-v1.json").read_bytes())
         selected = analysis.selected_documents(fixture)

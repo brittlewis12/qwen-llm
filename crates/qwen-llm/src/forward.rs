@@ -91,7 +91,7 @@ impl<'a> Forward<'a> {
 
     /// Same as [`single_token`] but ALSO returns the pre-output_norm
     /// hidden state (the residual stream right before the final RMSNorm
-    /// + lm_head). This is the input to the MTP head per `docs/H4-MTP.md`
+    /// + lm_head). This is the input to the MTP head per `docs/archive/H4-MTP-2026-05-03.md`
     ///   §1.2 — `prev_hidden = h_i` for slot i.
     pub fn single_token_with_hidden(
         &self,
@@ -168,7 +168,7 @@ impl<'a> Forward<'a> {
     /// order as `layer_ids`). Used by the DFlash drafter to fuse
     /// multi-layer target hiddens into its cross-context conditioning.
     ///
-    /// Per docs/H5-DFLASH.md §1.1, target_layer_ids[i] indexes into
+    /// Per docs/archive/H5-DFLASH-2026-10-05.md §1.1, target_layer_ids[i] indexes into
     /// `model.blocks` (the BASE layer count, not including any MTP head).
     pub fn single_token_capture_layers(
         &self,
@@ -219,7 +219,7 @@ impl<'a> Forward<'a> {
         Ok(captured)
     }
 
-    /// Run the MTP head for one slot. Per `docs/H4-MTP.md` §1.2:
+    /// Run the MTP head for one slot. Per `docs/archive/H4-MTP-2026-05-03.md` §1.2:
     ///
     /// At sequence slot `position`, the MTP head consumes
     /// `(embed(next_tok), prev_hidden, position)` and predicts logits
@@ -352,7 +352,7 @@ impl<'a> Forward<'a> {
     // -------------- DFlash drafter forward (CPU oracle) --------------
 
     /// Run the DFlash drafter forward for one outer step. Per
-    /// `docs/H5-DFLASH.md` §1.3:
+    /// `docs/archive/H5-DFLASH-2026-10-05.md` §1.3:
     ///
     /// * `noise_ids` length = `block_size = N`. Position 0 holds
     ///   `carry_tok`; positions 1..N hold `mask_token_id` (placeholder).
@@ -1924,7 +1924,7 @@ mod tests {
 
         let n = ids.len();
 
-        // Streamed MTP-KV prefill per docs/H4-MTP.md §1.5: for each
+        // Streamed MTP-KV prefill per docs/archive/H4-MTP-2026-05-03.md §1.5: for each
         // base step that produces h_i, immediately call mtp_step for
         // slot i with (prompt[i+1], h_i, i) — except for the boundary
         // slot n-1 which is left for the first decode iteration.

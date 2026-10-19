@@ -266,9 +266,9 @@ Other documents:
   and tested
 - [docs/ENV.md](docs/ENV.md): environment variables
 - Per-family bring-up plans, such as
-  [docs/GLM53-FLASH-PLAN.md](docs/GLM53-FLASH-PLAN.md) and
-  [docs/K2-HORIZON-PLAN.md](docs/K2-HORIZON-PLAN.md)
-- [docs/PLAN.md](docs/PLAN.md): the original architecture plan, kept for
+  [docs/archive/GLM53-FLASH-PLAN-2026-10-12.md](docs/archive/GLM53-FLASH-PLAN-2026-10-12.md) and
+  [docs/archive/K2-HORIZON-PLAN-2026-10-08.md](docs/archive/K2-HORIZON-PLAN-2026-10-08.md)
+- [docs/archive/PLAN-2026-09-03.md](docs/archive/PLAN-2026-09-03.md): the original architecture plan, kept for
   history
 
 ## Development

@@ -1,7 +1,7 @@
 //! Metal MTP (Multi-Token-Prediction) head and speculative-decode driver.
 //!
 //! Mirrors `crate::forward::Forward::mtp_step` (CPU oracle) on Metal.
-//! See `docs/H4-MTP.md` §1.2 for the algorithmic contract:
+//! See `docs/archive/H4-MTP-2026-05-03.md` §1.2 for the algorithmic contract:
 //!
 //! At sequence slot `position`, the MTP head consumes
 //! `(embed(next_tok), prev_hidden, position)` and predicts logits for the
@@ -1481,7 +1481,7 @@ impl<'a> SpeculativeDecoder<'a> {
     }
 
     /// Same as `draft` but discards logits. Used by the inline accept-branch
-    /// bridge (`docs/H4-MTP.md` §1.4 step E) and prompt-time prefill (§1.5).
+    /// bridge (`docs/archive/H4-MTP-2026-05-03.md` §1.4 step E) and prompt-time prefill (§1.5).
     /// Identical GPU command ordering contract.
     pub fn draft_kv_only(
         &mut self,
@@ -2185,7 +2185,7 @@ impl<'a> SpeculativeDecoder<'a> {
     }
 
     /// Greedy generation with MTP-augmented speculative decoding.
-    /// Implements `docs/H4-MTP.md` §1.4 (lazy sequential verify with
+    /// Implements `docs/archive/H4-MTP-2026-05-03.md` §1.4 (lazy sequential verify with
     /// inline accept-branch bridge).
     ///
     /// `prompt_ids` are processed first via `prefill_prompt` (§1.5),

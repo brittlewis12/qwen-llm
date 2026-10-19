@@ -62,7 +62,7 @@ unicode-general-category = "=1.1.0"
 unicode-normalization = "=0.1.25"
 rustc-hash = "2"
 
-# dequant codec for tooling / re-pack-on-load (see docs/PLAN.md weight-format role table)
+# dequant codec for tooling / re-pack-on-load (see docs/archive/PLAN-2026-09-03.md weight-format role table)
 llama-cpp-sys-2 = { git = "https://github.com/brittlewis12/llama-cpp-rs.git", rev = "f312d1659f5c1777d0b8d240af46b2c8a02b39d2" }
 
 # error / logging

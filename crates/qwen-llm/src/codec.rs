@@ -4,7 +4,7 @@
 //!
 //! **Not for the GPU hot path.** The hot path consumes K-quant blocks in
 //! place via lifted Metal kernels (`kernel_mul_mv_q4_K_f32_impl` etc.).
-//! See `docs/PLAN.md` weight-format role table.
+//! See `docs/archive/PLAN-2026-09-03.md` weight-format role table.
 //!
 //! Used for:
 //! * GGUF metadata sanity checks (read a tensor, dump its histogram).

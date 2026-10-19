@@ -940,7 +940,7 @@ impl std::hash::Hash for ResidencyThreshold {
 /// `pread` warmup unlocks the drive's true ceiling (measured 6-7 GB/s
 /// on Apple Silicon internal SSD in the load_spike experiment).
 ///
-/// See `docs/PLAN.md` v0.591 for prior evidence that unconditional
+/// See `docs/archive/PLAN-2026-09-03.md` v0.591 for prior evidence that unconditional
 /// whole-shard prefault costs 1.8-1.9s and degrades warm-cache paths.
 /// `ColdOnly` gates on `mincore` residency to preserve warm-load
 /// performance; this is the recommended default when the loader

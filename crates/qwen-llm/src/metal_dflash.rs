@@ -1,7 +1,7 @@
 //! Metal DFlash drafter and speculative-decode driver.
 //!
 //! Mirrors `crate::forward::Forward::dflash_draft` (CPU oracle) on Metal.
-//! See `docs/H5-DFLASH.md` §1.3 for the algorithmic contract.
+//! See `docs/archive/H5-DFLASH-2026-10-05.md` §1.3 for the algorithmic contract.
 //!
 //! **v1 posture (correctness-first; perf is H5.3+).**  This module
 //! produces bit-tight cosine vs the CPU oracle but is intentionally
@@ -9566,7 +9566,7 @@ pub fn encode_packed_verify_layer_major_inner(
                 // beta_proj and alpha_proj
                 // stay per-token mat-vec because production stores them
                 // as F32 [hidden, n_v=48] — small, mat-mat dispatch
-                // overhead exceeds BW savings (see docs/H5-DFLASH.md
+                // overhead exceeds BW savings (see docs/archive/H5-DFLASH-2026-10-05.md
                 // rev 10).
                 let gdn_mat_mat_eligible = prefill_mat_mat_dispatch_eligible;
                 let gdn_batched = gdn_mat_mat_eligible(g.in_proj_qkv.dtype)

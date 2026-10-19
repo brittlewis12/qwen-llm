@@ -1056,7 +1056,7 @@ pub(crate) fn run_mtp(args: MtpArgs) -> Result<()> {
     );
 
     // Wall-time speedup: total-vs-total, the apples-to-apples ratio that
-    // matches docs/H4-MTP.md §3.2's `1/(1+ε)` prediction. The earlier
+    // matches docs/archive/H4-MTP-2026-05-03.md §3.2's `1/(1+ε)` prediction. The earlier
     // 'decode-only-vs-total' phrasing was misleading — let people see
     // both interpretations.
     let total_speedup = ref_total_ms / spec_total_ms;

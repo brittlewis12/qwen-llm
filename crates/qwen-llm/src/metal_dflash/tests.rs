@@ -13384,7 +13384,7 @@ fn dflash_layer_major_packed_gdn_checkpoint_replay_equivalence() {
 ///   * any per-vocab-row bias from a wrong scatter offset
 ///   * cosine that's strong but not perfect (e.g. F16 KV
 ///     accumulation paths in attn-v4) — G1 full's threshold of
-///     0.9999 is the H5.3 plan gate per docs/H5-DFLASH.md §3 H5.3.
+///     0.9999 is the H5.3 plan gate per docs/archive/H5-DFLASH-2026-10-05.md §3 H5.3.
 ///
 /// 0.8B-F32, M=2 prime + N=4 verify. Uses
 /// MetalDFlashDebugScratch (allocates the [N, V] buffer; debug-

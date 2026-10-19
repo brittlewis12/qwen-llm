@@ -408,6 +408,8 @@ fn half_latent_mma_quality() {
 fn frozen_subset_is_three_documents_and_four_tasks() {
     let f: Value = serde_json::from_slice(FROZEN).unwrap();
     let (docs, tasks) = selection(&f);
+    // Frozen JSON path values record the original registration locations;
+    // source regeneration uses the current list in quality.rs and creates a new cohort version.
     assert_eq!(
         docs.iter()
             .map(|(d, n)| (d["path"].as_str().unwrap(), *n))

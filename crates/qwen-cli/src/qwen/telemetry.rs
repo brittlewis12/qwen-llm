@@ -256,6 +256,9 @@ pub(crate) struct SamplingAttributionBounds {
 #[derive(Clone, Debug, Serialize)]
 pub(crate) struct SamplingAttribution {
     pub(crate) version: u32,
+    pub(crate) model_name: String,
+    pub(crate) model_file_size_bytes: Option<u64>,
+    pub(crate) model_architecture: String,
     pub(crate) prompt_token_ids_sha256: String,
     pub(crate) clock_probe: SamplingClockProbe,
     pub(crate) sampler: SamplerAttribution,
@@ -536,6 +539,9 @@ pub(crate) fn finalize_sampling_attribution(
     transitions: TransitionAttributionAccumulator,
     outer_transition_ms: f64,
     generation_ms: f64,
+    model_name: String,
+    model_file_size_bytes: Option<u64>,
+    model_architecture: String,
 ) -> SamplingAttribution {
     let sampler = sampler.finish();
     let transitions = transitions.finish(outer_transition_ms);
@@ -550,6 +556,9 @@ pub(crate) fn finalize_sampling_attribution(
     let structural_adjusted_ms = adjusted_bound(structural_raw_ms, observer_upper_ms);
     SamplingAttribution {
         version: 1,
+        model_name,
+        model_file_size_bytes,
+        model_architecture,
         prompt_token_ids_sha256: token_ids_sha256_i32le(prompt_ids),
         clock_probe,
         sampler,
@@ -874,8 +883,6 @@ pub(crate) fn validate_sampling_attribution_row(row: &RequestTimingRow) -> Resul
             && row.generated_tokens == 128
             && row.transition_count == 127
             && sampling.draws == 128
-            && row.runtime_model_id == "e6024ce53109fdf7"
-            && row.runtime_tokenizer_id == "a4b0b26f8a8c9917"
             && row.greedy_gpu_selection_reason == "ineligible_request",
         "sampling attribution request shape or terminal semantics changed"
     );

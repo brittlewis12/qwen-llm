@@ -454,13 +454,9 @@ pub(crate) fn run_single_turn(
                 && arch.n_layer == 40
                 && arch.hidden_size == 2048
                 && arch.vocab_size == 248_320
-                && loaded.gguf().get_str("general.base_model.0.name") == Some("Qwen3.6 35B A3B")
-                && loaded.gguf().get_u64("general.file_type") == Some(15)
                 && lm_head.dtype == GgmlType::Q6_K
-                && lm_head.shape.as_slice() == [2048, 248_320]
-                && std::fs::metadata(model_path)
-                    .is_ok_and(|metadata| metadata.len() == 22_134_528_992),
-            "--sampling-attribution requires the frozen Qwen3.6 35B A3B profile"
+                && lm_head.shape.as_slice() == [2048, 248_320],
+            "--sampling-attribution requires the A3B attribution kernel geometry"
         );
     }
     if args.sampled_structural {
@@ -1181,6 +1177,19 @@ pub(crate) fn execute_single_turn_request(
                     transition_attribution,
                     generation.transition_ms,
                     generation.wall_ms,
+                    loaded
+                        .gguf()
+                        .get_str("general.name")
+                        .or_else(|| loaded.gguf().get_str("general.base_model.0.name"))
+                        .unwrap_or("unknown")
+                        .to_owned(),
+                    std::fs::metadata(model_path)
+                        .ok()
+                        .map(|metadata| metadata.len()),
+                    loaded
+                        .gguf()
+                        .architecture()
+                        .unwrap_or_else(|| "unknown".into()),
                 );
                 (generation, Some(attribution), None)
             } else if args.sampled_structural {

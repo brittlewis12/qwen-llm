@@ -511,6 +511,12 @@ qwen run -m GLM-5.3-Flash-UD-IQ3_XXS-00001-of-00004.gguf --messages tools.json \
 kernel's resident-head geometry and Q6_K output head at runtime; model name and
 file length do not determine eligibility.
 
+`--sampling-attribution` keeps its fixed prompt-byte and prompt-token hashes as
+the experiment input. It requires the attribution kernel geometry, while its
+packet records the observed model name, model-file byte length when available,
+and GGUF architecture. Those fields describe the artifact used and do not
+refuse a run.
+
 ## Validation gate
 
 - Pin modern and legacy parser behavior, conflicts, help, and explicit-default

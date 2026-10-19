@@ -19,11 +19,8 @@ crates/qwen-cli/src/muse_published_full_lens_artifact.rs	*	lens_binding	all find
 crates/qwen-cli/src/plain_logit_lens.rs	*	lens_binding	all findings are lens artifact binding
 crates/qwen-cli/src/prefix_cache_vt_ab.rs	*	frozen_experiment	pinned census evidence and frozen research records
 crates/qwen-cli/src/qwen/deepseek_v4.rs	checkpoint_content_identity	durable_binding	strong content identity binds durable snapshots to the model weights
-crates/qwen-cli/src/qwen/single_turn.rs	22_134_528_992	temporary	trigger: replace with a structural property or keep by decision in the identity-pin review
 crates/qwen-cli/src/qwen/single_turn.rs	e265de9742d1b22e566fc108ae26331ccf46166c6f071e73f211e0a1a7e8b474	temporary	trigger: replace with a structural property or keep by decision in the identity-pin review
 crates/qwen-cli/src/qwen/single_turn.rs	fb4bbb4dc66ca7d219099e2974e787ef976f80789cde3e48b8a905dceece1f9f	temporary	trigger: replace with a structural property or keep by decision in the identity-pin review
-crates/qwen-cli/src/qwen/telemetry.rs	a4b0b26f8a8c9917	provenance	records a reviewed source artifact identity
-crates/qwen-cli/src/qwen/telemetry.rs	e6024ce53109fdf7	provenance	records a reviewed source artifact identity
 crates/qwen-cli/src/qwen/telemetry.rs	fb4bbb4dc66ca7d219099e2974e787ef976f80789cde3e48b8a905dceece1f9f	provenance	records a reviewed source artifact identity
 crates/qwen-cli/src/response_shape_runtime.rs	2a349e612d9cbec271b25c2afdc82f28d79b29015f755b5efc4a98af7f3846d0	provenance	records provenance for a reviewed artifact or execution
 crates/qwen-cli/src/response_shape_runtime.rs	58748dfe811c1710c732239ae59053f2888bf32c1c3ee4f8ec10f0ac089fdd60	provenance	records provenance for a reviewed artifact or execution

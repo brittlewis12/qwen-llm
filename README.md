@@ -284,7 +284,10 @@ finding models by file name in the directories listed in
 `scripts/qualification-witnesses.py --out PATH` runs the device qualification
 witnesses reported by `qwen info --json` and writes an evidence report.
 `scripts/check-contracts.sh` checks formatting, the generated knob reference,
-the numeric comparison rules and machine-specific paths without a GPU.
+unreviewed artifact-identity gates, the numeric comparison rules and
+machine-specific paths without a GPU. Artifact-identity findings and their
+review categories are maintained in
+[`scripts/reference/identity_gates.allow`](scripts/reference/identity_gates.allow).
 
 ## License
 

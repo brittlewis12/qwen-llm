@@ -194,12 +194,13 @@ struct PreparedInput {
 
 fn prepare_input(
     gguf: &GgufFile,
-    invocation: cli::Invocation,
+    input: super::ValidatedInput,
     args: &Args,
     explicit: ExplicitCliOptions,
     timing: &mut Timing,
+    io: &mut super::RunIo,
 ) -> Result<PreparedInput> {
-    if let cli::Invocation::Run(run) = &invocation
+    if let super::ValidatedInput::Modern(run) = &input
         && !matches!(run.input, cli::RunInput::RawPrompt(_))
     {
         let effort = timing.measure(Phase::RequestPreparation, || {
@@ -219,11 +220,11 @@ fn prepare_input(
         let profile = timing.measure(Phase::ArtifactVerification, || {
             Ok(chat::verify_profile(gguf)?)
         })?;
-        let cli::Invocation::Run(run) = invocation else {
+        let super::ValidatedInput::Modern(run) = input else {
             unreachable!()
         };
         let format = run.format;
-        let input = timing.measure(Phase::InputAcquisition, || run.acquire_input())?;
+        let input = timing.measure(Phase::InputAcquisition, || io.acquire_input(*run))?;
         let (text, tools) =
             timing.measure(Phase::Rendering, || render_chat_input_full(input, effort))?;
         let mut record = serde_json::json!({"profile":profile,"reasoning_effort":effort,"stops":chat::CHAT_STOPS,
@@ -239,7 +240,7 @@ fn prepare_input(
             format,
         });
     }
-    let (text, source) = prepare_raw_timed(invocation, args, explicit, timing)?;
+    let (text, source) = prepare_raw_timed(input, args, explicit, timing)?;
     Ok(PreparedInput {
         text,
         source,
@@ -255,11 +256,18 @@ fn prepare_raw(
     args: &Args,
     explicit: ExplicitCliOptions,
 ) -> Result<(String, PromptSource)> {
-    prepare_raw_timed(invocation, args, explicit, &mut Timing::default())
+    let input = match invocation {
+        cli::Invocation::Legacy => super::ValidatedInput::Legacy,
+        cli::Invocation::Run(run) => super::ValidatedInput::Modern(Box::new(run)),
+        cli::Invocation::Info(_) | cli::Invocation::Serve(_) => {
+            bail!("K2 raw preparation is a single-turn generation path")
+        }
+    };
+    prepare_raw_timed(input, args, explicit, &mut Timing::default())
 }
 
 fn prepare_raw_timed(
-    invocation: cli::Invocation,
+    input: super::ValidatedInput,
     args: &Args,
     explicit: ExplicitCliOptions,
     timing: &mut Timing,
@@ -272,8 +280,9 @@ fn prepare_raw_timed(
         );
         Ok(())
     })?;
-    match invocation {
-        cli::Invocation::Run(run) => timing.measure(Phase::RequestPreparation, || {
+    match input {
+        super::ValidatedInput::Modern(run) => timing.measure(Phase::RequestPreparation, || {
+            let run = *run;
             ensure!(
                 !run.no_thinking && run.reasoning_effort.is_none(),
                 "K2 Horizon raw input does not accept reasoning controls"
@@ -286,12 +295,11 @@ fn prepare_raw_timed(
                 ),
             }
         }),
-        cli::Invocation::Legacy => {
+        super::ValidatedInput::Legacy => {
             let (text, source, _) =
                 timing.measure(Phase::InputAcquisition, || prompt_text(args))?;
             Ok((text, source))
         }
-        _ => bail!("K2 raw preparation is a single-turn generation path"),
     }
 }
 
@@ -315,12 +323,36 @@ fn capacity(
     Ok(capacity)
 }
 
-pub(crate) fn run_raw(
+pub(crate) struct Prepared {
+    prompt: String,
+    source: PromptSource,
+    template_identity: Option<&'static str>,
+    add_special_tokens: bool,
+    format: crate::chat_output::RunFormat,
+    chat_record: Option<serde_json::Value>,
+    tool_chat: Option<chat::tools::ToolChatInput>,
+    config: qwen_llm::k2_horizon::K2HorizonConfig,
+    tokenizer: qwen_llm::tokenizer::NativeTokenizer,
+    tokens: Vec<u32>,
+    output_limit: usize,
+    capacity: usize,
+    stops: Vec<i32>,
+    tool_byte_budget: usize,
+    sampler: Sampler,
+    sampling: SamplingConfig,
+    stats_path: Option<std::path::PathBuf>,
+    model_name: String,
+    timing: Timing,
+    request_t0: Instant,
+}
+
+pub(crate) fn prepare(
     gguf: &GgufFile,
     args: &Args,
     explicit: ExplicitCliOptions,
-    invocation: cli::Invocation,
-) -> Result<()> {
+    input: super::ValidatedInput,
+    io: &mut super::RunIo,
+) -> Result<Prepared> {
     let request_t0 = Instant::now();
     let mut timing = Timing::default();
     let layout = timing.measure(Phase::ArtifactLayout, || {
@@ -340,7 +372,7 @@ pub(crate) fn run_raw(
         mut chat_record,
         tool_chat,
         format,
-    } = prepare_input(gguf, invocation, args, explicit, &mut timing)?;
+    } = prepare_input(gguf, input, args, explicit, &mut timing, io)?;
     let sampling = timing.measure(Phase::RequestPreparation, || cli_sampling_config(args))?;
     let sampling_echo = sampling;
     let tool_byte_budget = if tool_chat.is_some() {
@@ -361,29 +393,88 @@ pub(crate) fn run_raw(
         record["prompt_token_ids_sha256_i32le"] =
             serde_json::json!(qwen_llm::tokenizer::token_ids_sha256_i32le(&ids));
     }
-    let (tokens, capacity, stops, mut sampler) =
-        timing.measure(Phase::RequestPreparation, || {
-            let tokens = ids
-                .into_iter()
-                .enumerate()
-                .map(|(i, id)| checked_token_id(id, config.vocab_size, &format!("prompt[{i}]")))
-                .collect::<Result<Vec<_>>>()?;
-            let capacity = capacity(args, explicit, tokens.len(), config.context_length)?;
-            let stops = if chat_record.is_some() {
-                chat::CHAT_STOPS.to_vec()
-            } else {
-                raw_stops
-            };
-            for &stop in &stops {
-                checked_token_id(stop, config.vocab_size, "stop")?;
-            }
-            let sampler = Sampler::new(sampling)?;
-            Ok((tokens, capacity, stops, sampler))
-        })?;
+    let (tokens, capacity, stops, sampler) = timing.measure(Phase::RequestPreparation, || {
+        let tokens = ids
+            .into_iter()
+            .enumerate()
+            .map(|(i, id)| checked_token_id(id, config.vocab_size, &format!("prompt[{i}]")))
+            .collect::<Result<Vec<_>>>()?;
+        let capacity = capacity(args, explicit, tokens.len(), config.context_length)?;
+        let stops = if chat_record.is_some() {
+            chat::CHAT_STOPS.to_vec()
+        } else {
+            raw_stops
+        };
+        for &stop in &stops {
+            checked_token_id(stop, config.vocab_size, "stop")?;
+        }
+        let sampler = Sampler::new(sampling)?;
+        Ok((tokens, capacity, stops, sampler))
+    })?;
     shutdown::checkpoint()?;
+    Ok(Prepared {
+        prompt: text,
+        source,
+        template_identity: chat_record.as_ref().map(|_| {
+            if tool_chat.is_some() {
+                chat::tools::TOOL_RENDERER
+            } else {
+                chat::RENDERER
+            }
+        }),
+        add_special_tokens: !args.no_special_tokens,
+        format,
+        chat_record,
+        tool_chat,
+        config,
+        tokenizer,
+        tokens,
+        output_limit: args.tokens,
+        capacity,
+        stops,
+        tool_byte_budget,
+        sampler,
+        sampling: sampling_echo,
+        stats_path: args.request_stats_jsonl.clone(),
+        model_name: gguf.get_str("general.name").unwrap_or("k2-horizon").into(),
+        timing,
+        request_t0,
+    })
+}
+
+pub(crate) fn execute(
+    opened: super::OpenedModel,
+    prepared: Prepared,
+    io: &mut super::RunIo,
+) -> Result<()> {
+    let gguf = opened.gguf;
+    let _model_path = opened.path;
+    let Prepared {
+        prompt: _prompt,
+        source,
+        template_identity,
+        add_special_tokens,
+        format,
+        mut chat_record,
+        tool_chat,
+        config,
+        tokenizer,
+        tokens,
+        output_limit,
+        capacity,
+        stops,
+        tool_byte_budget,
+        mut sampler,
+        sampling: sampling_echo,
+        stats_path,
+        model_name,
+        mut timing,
+        request_t0,
+    } = prepared;
+    let _special_token_policy = add_special_tokens;
     let load_t0 = Instant::now();
     let ctx = MetalContext::new().context("initialize Metal for K2")?;
-    let model = K2LoadedModel::load(&ctx, gguf, u32::try_from(capacity)?)?;
+    let model = K2LoadedModel::load(&ctx, &gguf, u32::try_from(capacity)?)?;
     timing.record(Phase::ModelLoad, load_t0.elapsed());
     let prefill = model.prefill_info(tokens.len());
     eprintln!(
@@ -403,8 +494,7 @@ pub(crate) fn run_raw(
         }
     }
     let prefill_ms = prefill_t0.elapsed().as_secs_f64() * 1e3;
-    let stdout = std::io::stdout();
-    let mut stdout = stdout.lock();
+    let mut stdout = io.stdout();
     // Chat prints the decoded bytes (text) or one Responses object; raw
     // input prints the decoded bytes. With declared tools, the structured
     // format parses calls; text leaves tool syntax literal.
@@ -434,7 +524,7 @@ pub(crate) fn run_raw(
     let mut wrote = false;
     let generation = generate_serial(
         logits,
-        args.tokens,
+        output_limit,
         &stops,
         &mut sampler,
         |token| {
@@ -490,7 +580,7 @@ pub(crate) fn run_raw(
                 .map(str::to_owned);
             let request = || -> Result<crate::serve::items::ServeRequest> {
                 Ok(crate::serve::items::ServeRequest {
-                    model: gguf.get_str("general.name").unwrap_or("k2-horizon").into(),
+                    model: model_name.clone(),
                     k2_tools: tool_chat.clone(),
                     instructions: tool_chat
                         .as_ref()
@@ -502,7 +592,7 @@ pub(crate) fn run_raw(
                     parallel_tool_calls: true,
                     tool_choice: serde_json::json!("auto"),
                     reasoning: Some(serde_json::json!({"effort": effort})),
-                    max_output_tokens: Some(args.tokens),
+                    max_output_tokens: Some(output_limit),
                     temperature_echo: Some(f64::from(sampling_echo.temperature)),
                     top_p_echo: Some(f64::from(sampling_echo.top_p)),
                     ..Default::default()
@@ -542,7 +632,7 @@ pub(crate) fn run_raw(
         generation.wall_ms,
         request_t0.elapsed().as_secs_f64() * 1e3,
     );
-    if let Some(path) = args.request_stats_jsonl.as_ref() {
+    if let Some(path) = stats_path.as_ref() {
         let measured = RequestStatsMeasured {
             input_tokens: tokens.len() as u64,
             output_tokens: generation.tokens.len() as u64,
@@ -563,16 +653,7 @@ pub(crate) fn run_raw(
             path,
             0,
             ModelFamily::K2Horizon.record_label(),
-            request_stats_input(
-                source,
-                chat_record.as_ref().map(|_| {
-                    if tool_chat.is_some() {
-                        chat::tools::TOOL_RENDERER
-                    } else {
-                        chat::RENDERER
-                    }
-                }),
-            ),
+            request_stats_input(source, template_identity),
             &measured,
             Some(FamilyDiagnostics::K2Horizon(RequestStatsK2Diagnostics {
                 prefill,

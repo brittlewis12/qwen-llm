@@ -192,6 +192,73 @@ struct MuseGlimmerPreparedPrompt {
     add_special_tokens: bool,
 }
 
+/// A GGUF stays open from family detection through the family-owned run.
+struct OpenedModel {
+    path: PathBuf,
+    gguf: GgufFile,
+}
+
+/// Values that have passed clap and invocation normalization, but still need
+/// family-specific admission and request preparation.
+struct ValidatedRun {
+    args: Args,
+    explicit_options: ExplicitCliOptions,
+    input: ValidatedInput,
+}
+
+pub(crate) enum ValidatedInput {
+    Legacy,
+    Modern(Box<cli::RunInvocation>),
+}
+
+/// Shared command-line streams and input acquisition used by family lanes.
+struct RunIo {
+    stdout: std::io::Stdout,
+}
+
+impl RunIo {
+    fn new() -> Self {
+        Self {
+            stdout: std::io::stdout(),
+        }
+    }
+
+    fn stdout(&mut self) -> std::io::StdoutLock<'_> {
+        self.stdout.lock()
+    }
+
+    fn acquire_input(&mut self, invocation: cli::RunInvocation) -> Result<cli::AcquiredRunInput> {
+        invocation.acquire_input()
+    }
+}
+
+trait RunLane {
+    type Prepared;
+
+    fn prepare(model: &OpenedModel, run: ValidatedRun, io: &mut RunIo) -> Result<Self::Prepared>;
+
+    fn execute(model: OpenedModel, request: Self::Prepared, io: &mut RunIo) -> Result<()>;
+}
+
+fn drive<L: RunLane>(model: OpenedModel, run: ValidatedRun, io: &mut RunIo) -> Result<()> {
+    let request = L::prepare(&model, run, io)?;
+    L::execute(model, request, io)
+}
+
+struct K2Lane;
+
+impl RunLane for K2Lane {
+    type Prepared = k2_horizon::Prepared;
+
+    fn prepare(model: &OpenedModel, run: ValidatedRun, io: &mut RunIo) -> Result<Self::Prepared> {
+        k2_horizon::prepare(&model.gguf, &run.args, run.explicit_options, run.input, io)
+    }
+
+    fn execute(model: OpenedModel, request: Self::Prepared, io: &mut RunIo) -> Result<()> {
+        k2_horizon::execute(model, request, io)
+    }
+}
+
 fn main() -> std::process::ExitCode {
     if let Err(error) = qwen_llm::env_flag::check_perf_ablation_environment() {
         eprintln!("{error}");
@@ -343,7 +410,24 @@ fn run() -> Result<()> {
             return deepseek_v41::run(gguf, &args, explicit_options, invocation);
         }
         ModelFamily::K2Horizon => {
-            return k2_horizon::run_raw(&gguf, &args, explicit_options, invocation);
+            return drive::<K2Lane>(
+                OpenedModel {
+                    path: model_path.clone(),
+                    gguf,
+                },
+                ValidatedRun {
+                    args,
+                    explicit_options,
+                    input: match invocation {
+                        cli::Invocation::Legacy => ValidatedInput::Legacy,
+                        cli::Invocation::Run(run) => ValidatedInput::Modern(Box::new(run)),
+                        cli::Invocation::Info(_) | cli::Invocation::Serve(_) => {
+                            unreachable!("info and serve return before model opening")
+                        }
+                    },
+                },
+                &mut RunIo::new(),
+            );
         }
         ModelFamily::Glm5Next => {
             return glm5_next::run(&gguf, &args, explicit_options, invocation);
@@ -396,43 +480,38 @@ fn run() -> Result<()> {
             "--reasoning and --preserve-reasoning apply to DeepSeek V4 --messages requests only"
         );
     }
-    match family {
-        ModelFamily::DeepSeekV41 => unreachable!("V4.1 returned above"),
-        ModelFamily::K2Horizon => unreachable!("K2 Horizon returned above"),
-        ModelFamily::Glm5Next => unreachable!("GLM-5.3-Flash returned above"),
-        ModelFamily::MuseGlimmer => unreachable!("Muse Glimmer returned above"),
-        ModelFamily::DeepSeek4 if args.requests_jsonl.is_some() => {
+    if family == ModelFamily::DeepSeek4 {
+        return if args.requests_jsonl.is_some() {
             run_deepseek_v4_requests_jsonl(&model_path, gguf, &args, explicit_options)
-        }
-        ModelFamily::DeepSeek4 => run_deepseek_v4_single_turn(
-            &model_path,
-            gguf,
-            &args,
-            explicit_options,
-            staged_integrity,
-        ),
-        ModelFamily::Qwen4Exp => {
-            run_qwen4exp_single_turn(&model_path, &gguf, &args, explicit_options)
-        }
-        ModelFamily::Qwen35 | ModelFamily::Qwen35Moe => {
-            let supplied = admission::supplied(&args, explicit_options);
-            if has_single_turn_input(&args) {
-                let lane = &admission::ORDINARY_QWEN_SINGLE_TURN;
-                let mut unsupported = lane.unsupported(&supplied);
-                // These values only affect the durable store and must bind
-                // to an enabled cache instead of silently doing no work.
-                unsupported.extend(unbound_durable_prefix_options(&args, explicit_options));
-                lane.refuse(&unsupported)?;
-                return run_single_turn(&model_path, gguf, &args, staged_integrity, drafter);
-            }
-            let path = args
-                .requests_jsonl
-                .as_ref()
-                .expect("request mode was validated above");
-            admission::ORDINARY_QWEN_BATCH.admit(&supplied)?;
-            run_requests_jsonl(&model_path, path, gguf, &args, explicit_options)
-        }
+        } else {
+            run_deepseek_v4_single_turn(
+                &model_path,
+                gguf,
+                &args,
+                explicit_options,
+                staged_integrity,
+            )
+        };
     }
+    if family == ModelFamily::Qwen4Exp {
+        return run_qwen4exp_single_turn(&model_path, &gguf, &args, explicit_options);
+    }
+    let supplied = admission::supplied(&args, explicit_options);
+    if has_single_turn_input(&args) {
+        let lane = &admission::ORDINARY_QWEN_SINGLE_TURN;
+        let mut unsupported = lane.unsupported(&supplied);
+        // These values only affect the durable store and must bind
+        // to an enabled cache instead of silently doing no work.
+        unsupported.extend(unbound_durable_prefix_options(&args, explicit_options));
+        lane.refuse(&unsupported)?;
+        return run_single_turn(&model_path, gguf, &args, staged_integrity, drafter);
+    }
+    let path = args
+        .requests_jsonl
+        .as_ref()
+        .expect("request mode was validated above");
+    admission::ORDINARY_QWEN_BATCH.admit(&supplied)?;
+    run_requests_jsonl(&model_path, path, gguf, &args, explicit_options)
 }
 
 fn unbound_durable_prefix_options(args: &Args, explicit: ExplicitCliOptions) -> Vec<&'static str> {

@@ -8,10 +8,15 @@ See also: `docs/PERF-ROADMAP.md` for the current state and evidence index.
 
 ## 2026-10-19 - V4.1 Query Batching: 1.80-1.87x Warm Prefill
 
-- Experimental, not promoted: the separate 10K suite shows unexplained
-  repetition-by-repetition degradation in prefill and the following decode
-  control. Candidate pp samples 183.83/171.69/165.66 versus baseline
-  108.80/108.73/108.71; tg32 26.49/25.03/23.57 versus 26.70/26.69/26.66.
+- An initial 10K run held promotion: candidate pp fell 183.83/171.69/165.66
+  and following tg32 fell 26.49/25.03/23.57. These samples remain in the record.
+- Identical private telemetry in sustained ABBA blocks gives ten measured
+  repetitions per arm. Candidate settles at 158.6-159.3 pp10000 versus baseline
+  ~108.8, a ~46% gain; all ten candidate tg32 repetitions are 26.78-26.83.
+  Post-drop Metal allocation is exactly flat after warmup, footprint is bounded,
+  and timed candidate work has zero page-ins/physical reads. Two baseline decode
+  slowdowns coincide with physical reads. Thermal state is fair; causality of
+  the initial prefill drift remains unproven. Telemetry is not product code.
 - Five alternating REAP-272 pairs on M5 Ultra, NativeF32, resident weights,
   fresh KV, chunk 256, capacity 2048: median pp1024 rises 119.399 -> 223.557
   tokens/s; pp2048 rises 115.284 -> 207.055. Median paired gains are +87.25%
@@ -24,8 +29,8 @@ See also: `docs/PERF-ROADMAP.md` for the current state and evidence index.
   10 pruned rows. Seven-token independent execution, internal 1,025-token parity
   and wrapped snapshot/growth continuation also pass; their scopes differ.
 - [Measurements and qualification](bench/2026-10-19-v41-query-batching.md).
-  Measured `c959e511`; no mixed-precision default, sustained-throughput
-  qualification or task-quality claim.
+  Measured `c959e511`, with diagnostic overlays stated separately; no
+  mixed-precision default or task-quality claim.
 
 ## 2026-10-19 - V4.1 Matched Baselines; F32 MMA Tiles Rejected
 

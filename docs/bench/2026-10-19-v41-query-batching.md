@@ -3,9 +3,9 @@
 Measured baseline `81d6fdf1` and candidate `c959e511`, REAP-272 MXFP4/Q8 Engram,
 80-core M5 Ultra, macOS 27.0.1. The baseline adds qualification tests to
 `d302d083`; it changes no production arithmetic. The implementation is
-`3b04af60`, rebased unchanged as `34d1b72c` onto serving maintenance `54824458`.
-The candidate remains off main: sustained 10K repetitions expose unexplained
-slowdown that also affects the following decode control.
+`3b04af60`, rebased unchanged as `2166942e` onto main `ad3abd3d`, including
+serving maintenance `54824458`. The initial sustained slowdown held promotion;
+the follow-up below establishes a bounded lower plateau without allocation growth.
 
 ## Matched Throughput
 
@@ -48,6 +48,39 @@ monotonically across repetitions. The decode mean is 6.21% lower. Allocation
 growth, scheduling and thermal causes are unproven; absent OS warning flags do
 not exclude throttling. These samples do not establish sustained steady-state
 throughput or decode non-regression. No other Qwen workload was observed.
+
+### Sustained Memory And Thermal Follow-Up
+
+Identical private telemetry overlays baseline/candidate as `0e8c40c2`/`484502bc`;
+it changes neither GPU work nor allocation lifetimes. Four fresh processes run
+baseline, candidate, candidate, baseline. Each retains normal warmups and five
+measured repetitions per shape: ten per arm, with capacity 10000. Explicit
+forward/block timers exclude logging; outer benchmark rows are marked diagnostic,
+not canonical. Foundation thermal state and process/Metal counters are sampled
+at allocation, forward and post-state-drop boundaries.
+
+| Block | pp10000 samples, tokens/s | tg32 samples, tokens/s |
+| --- | --- | --- |
+| Baseline 1 | 108.723, 108.745, 108.776, 108.729, 108.785 | 26.683, 26.681, 26.705, 23.204, 23.306 |
+| Candidate 2 | 166.806, 161.626, 162.196, 162.690, 161.006 | 26.825, 26.794, 26.815, 26.806, 26.812 |
+| Candidate 3 | 158.585, 159.310, 158.690, 158.755, 158.827 | 26.812, 26.807, 26.812, 26.795, 26.784 |
+| Baseline 4 | 108.749, 108.727, 108.770, 108.829, 108.768 | 26.693, 26.682, 26.681, 26.686, 26.714 |
+
+After one 262,144-byte warmup increase, every post-drop Metal allocation is
+exactly 214,774,775,808 bytes in both arms. Candidate physical footprint remains
+bounded, approximately 0.66-0.72 GB after warmup. All timed prefills and candidate
+decode repetitions have zero process page-ins and physical reads. Baseline 1's
+two slow decode repetitions coincide with 24,219,648 and 23,871,488 physical
+read bytes; those samples remain in the record. This exposes an I/O/order
+confound rather than a reproduced candidate-specific decode penalty.
+
+The last candidate block is stable at 158.6-159.3 tokens/s, roughly 46% above
+baseline, with no accumulating allocation over this tested extent. Foundation
+thermal state changes from nominal to fair in baseline 1 and stays fair in the
+remaining blocks. These coarse categories do not identify GPU clock behavior or
+prove the cause of the earlier prefill drift. The initial samples remain
+unexplained; the follow-up establishes bounded sustained behavior, not a thermal
+fix or an indefinite-duration memory guarantee. Telemetry stays off main.
 
 ## Executed Change
 
@@ -99,6 +132,7 @@ Astra reviews cover source, boundary witnesses, census and measured claims.
 Evidence root: `~/qwen-runs/2026-10-19-v41-f32-mma/`. Raw pairs are
 `query-c959e511-pairs/pair-{1..5}-{baseline,candidate}.{json,log}`;
 the sustained check is `query-c959e511-long/{baseline,candidate}.{json,log}`;
+the telemetry follow-up is `sustained-484502bc/block-{1..4}-*.{json,log}`;
 qualification logs are `suffix-81d6fdf1-*` and `query-c959e511-*`. Logs identify
 retained captures, independent reports, continuation self-parity and actual
 dispatch census. The separate Q8 half-prefill experiment remains off main.

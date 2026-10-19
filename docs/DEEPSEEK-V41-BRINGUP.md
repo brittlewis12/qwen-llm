@@ -26,8 +26,10 @@ Serving uses the official recipe renderer/parser, common startup/request spine,
 typed HTTP 503 `memory_admission_denied` responses and automatic longest exact
 causal-prefix reuse from live state or RAM snapshots. CLI statistics use the v2
 schema and benchmarks use the shared family harness. Cold prefill uses 256-row
-layer-major chunks without unused prompt logits. Dense/shared projections and
-supported routed experts use shared NativeF32 operators. At 256 or more attended
+layer-major chunks without unused prompt logits. Attention uses bounded
+32-query tiles while compressor/index transitions remain sequential.
+Dense/shared projections and supported routed experts use shared NativeF32
+operators. At 256 or more attended
 rows, the 64-head attention value GEMM uses the shared scalar-F32 implementation,
 not MMA. Cache updates remain causal.
 IQ2_XXS routed experts lack grouped F32 gate/up and down support and fall back
@@ -61,10 +63,10 @@ keep GPU weights wired through the shared residency mechanism.
   and candidate sets match; worst batched output error is 2.933e-5 against 1e-4.
   This is conditional on captured normalized inputs, not long full-model logits.
    Internal serial/batched parity through position 1,025 is a different witness.
-- The off-main [query-batching experiment](bench/2026-10-19-v41-query-batching.md)
-  passes ring/pair and odd pruning-boundary suffix replays, actual dispatch
-  census, and wrapped snapshot/growth continuation self-parity. Its sustained
-  repetition slowdown remains unexplained; it is not installed production.
+- [Query batching](bench/2026-10-19-v41-query-batching.md) passes ring/pair and
+  odd pruning-boundary suffix replays, actual dispatch census, and wrapped
+  snapshot/growth continuation self-parity. Sustained diagnostics show a bounded
+  lower throughput plateau; the earlier prefill drift's cause remains unproven.
 - Short prefix smoke (492/494 reused) and real agent shared-prefix reuse
   (11,453 reused, about 0.59 s to first text) are distinct from cold prefill.
   The retained 20-second suffix outlier remains unreproduced and unexplained.

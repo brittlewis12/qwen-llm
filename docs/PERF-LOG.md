@@ -6,6 +6,35 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-10-19 — Descriptor-Derived GGUF Population Plan; Owned Arena Archived
+
+- Removed the three artifact-keyed parallel population profiles and the dense
+  27B retained-layout sentinel. Load-time plans sort direct tensor requests by
+  shard and offset, choose contiguous byte-balanced worker cuts, size rounded
+  destinations from the host page size, check every allocation against Metal's
+  maximum buffer length, and admit the plan using its computed destination
+  bytes plus the shared 256 MiB session reserve.
+- Header-only fixture comparisons use the published A3B, dense 27B, and A10B
+  filenames resolved through `QWEN_MODEL_SEARCH_PATH`. Dense 27B and A10B keep
+  their historical cuts, tasks, and worker byte counts. A3B moves one
+  2,097,152-byte tensor from worker 4 to worker 3: the third cut changes from
+  539 to 540 and the maximum worker-byte deviation remains 68,568,960 bytes.
+  The A3B page-rounded plan still allocates 2,758,144 padding bytes over 232
+  tensors. The computed headroom requirements are 22,391,974,400 bytes for
+  A3B, 17,074,685,952 for dense 27B, and 77,287,432,192 for A10B.
+- Bit-exact load witnesses pass for A3B and dense 27B with both mmap-copy and
+  pread. They compare logits, continuation state, and every planned resident
+  source byte against the ordinary copied path, and require the generic plan
+  marker and copied load ledger.
+- The force-only owned arena is archived. v0.598 passed its bit-exact state and
+  fresh first-byte gates, but loaded decode was 1204.60/1390.20/1390.25 ms for
+  copied/owned/retained, and complete request wall was 1.107–1.125× slower for
+  owned in every block. The experiment concluded that its one-window resource
+  topology caused the steady-state tax and recommended topology-preserving
+  parallel copy. Live arena allocation, A3B arena constants, and the frozen
+  `qwen bench gguf-arena-floor` implementation are deleted; the v0.597/v0.598
+  measurements and review remain archived in their existing bench records.
+
 ## 2026-10-17 - Three-Way GLM Pilot Finds No Q4 Quality Advantage
 
 - Preregistered eight public engineering cases, including two approximately

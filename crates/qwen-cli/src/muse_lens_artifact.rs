@@ -327,8 +327,10 @@ pub(crate) fn decode_payload(bytes: &[u8], manifest: &Manifest) -> Result<Vec<f3
         "Muse payload length mismatch"
     );
     let values = bytes
-        .chunks_exact(4)
-        .map(|chunk| f32::from_le_bytes(chunk.try_into().unwrap()))
+        .as_chunks::<4>()
+        .0
+        .iter()
+        .map(|chunk| f32::from_le_bytes(*chunk))
         .collect::<Vec<_>>();
     ensure!(
         bytes.len().is_multiple_of(4) && values.iter().all(|value| value.is_finite()),

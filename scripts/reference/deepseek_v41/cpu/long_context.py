@@ -156,12 +156,16 @@ def seed_history(m, attn, rows, position, batch):
 def metrics(actual, expected, atol, rtol):
     if (
         actual.shape != expected.shape
+        or actual.numel() == 0
         or not torch.isfinite(actual).all()
         or not torch.isfinite(expected).all()
     ):
         return {"pass": False, "reason": "shape/nonfinite"}
     delta = (actual - expected).double()
     return {
+        "elements": actual.numel(),
+        "atol": atol,
+        "rtol": rtol,
         "pass": bool(torch.allclose(actual, expected, atol=atol, rtol=rtol)),
         "max_abs": delta.abs().max().item(),
         "rmse": delta.square().mean().sqrt().item(),

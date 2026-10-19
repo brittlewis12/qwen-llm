@@ -1,5 +1,5 @@
 //! Separate GGUF execution-only logit acceptance and HF conversion characterization.
-//! Hidden states and long teacher-forced attention remain characterization only.
+//! Hidden states remain characterization; suffix qualification is attention-only.
 use anyhow::{Context, Result, ensure};
 use qwen_llm::deepseek_v41::{forward::Forward, gguf::ResidentWeights};
 use qwen_llm::{gguf::GgufFile, metal::MetalContext};
@@ -16,6 +16,8 @@ mod characterization;
 mod execution;
 #[path = "support/v41_prefill.rs"]
 mod prefill;
+#[path = "support/v41_suffix.rs"]
+mod suffix;
 #[path = "support/v41_trace.rs"]
 mod trace;
 use characterization::{
@@ -326,10 +328,42 @@ fn hf_conversion_ten_thousand_token_attention_characterization() -> Result<()> {
 #[test]
 #[ignore = "model characterization: deepseek-v4.1-reap-272e-mxfp4-q8engram"]
 fn independent_gguf_batched_attention_boundary_characterization() -> Result<()> {
+    let (output, report) = batched_attention_replay(&BATCH_POSITIONS, &[16386], false)?;
+    characterization::check_attention_characterization(&report, &BATCH_POSITIONS)?;
+    emit_characterization(
+        &output,
+        "independent_gguf_batched_teacher_forced_attention_with_pruning",
+        &report,
+    )
+}
+
+#[test]
+#[ignore = "model witness: deepseek-v4.1-reap-272e-mxfp4-q8engram"]
+fn independent_gguf_batched_attention_odd_pruning_suffix_qualification() -> Result<()> {
+    suffix::qualify(&BATCH_POSITIONS, &[16383, 3], false)
+}
+
+#[test]
+#[ignore = "model witness: deepseek-v4.1-reap-272e-mxfp4-q8engram"]
+fn independent_gguf_batched_attention_ring_suffix_qualification() -> Result<()> {
+    suffix::qualify(&suffix::RING_POSITIONS, &[127, 257], true)
+}
+
+fn batched_attention_replay(
+    positions: &[usize],
+    call_rows: &[usize],
+    check_wrapped_continuation: bool,
+) -> Result<(PathBuf, Value)> {
+    suffix::check_schedule(positions, call_rows)?;
+    ensure!(
+        !check_wrapped_continuation
+            || (positions == suffix::RING_POSITIONS && call_rows == [127, 257]),
+        "wrapped continuation is restricted to the bounded ring witness"
+    );
     qwen_cli::shutdown::install()?;
     qwen_cli::shutdown::checkpoint()?;
     let prefix = long_tokens(&manifest(LONG_TOKENS.required())?)?;
-    let count = BATCH_POSITIONS.last().unwrap() + 1;
+    let count = positions.last().unwrap() + 1;
     let tokens: Vec<_> = prefix.iter().copied().cycle().take(count).collect();
     let model = GGUF_MODEL.required();
     let output = std::env::temp_dir().join(format!(
@@ -341,7 +375,7 @@ fn independent_gguf_batched_attention_boundary_characterization() -> Result<()> 
     ));
     std::fs::create_dir(&output)?;
     eprintln!(
-        "independent GGUF batched attention characterization retained at {}",
+        "independent GGUF attention capture/replay calls={call_rows:?} retained at {}",
         output.display()
     );
     let capture_path = output.join("capture");
@@ -354,32 +388,56 @@ fn independent_gguf_batched_attention_boundary_characterization() -> Result<()> 
         let mut state = forward.new_state_with_gpu_step(tokens.len())?;
         let mut capture = capture::Writer::create(
             &capture_path,
-            &BATCH_POSITIONS,
-            json!({"gguf":model,"execution":"layer_major_batched_capture", "chunk_rows":qwen_llm::deepseek_v41::forward::PREFILL_CHUNK_ROWS, "tokens":"retained 10K fixture followed by its first 6386 tokens", "provenance_verified":false}),
+            positions,
+            json!({"gguf":model,"execution":"layer_major_batched_capture", "chunk_rows":qwen_llm::deepseek_v41::forward::PREFILL_CHUNK_ROWS, "prefill_call_rows":call_rows, "tokens":"cycled retained 10K fixture", "provenance_verified":false}),
         )?;
-        capture.begin_chunk(0, &tokens)?;
-        if let Err(error) = forward.prefill_with_capture(
-            &mut state,
-            &tokens,
-            Some(qwen_cli::shutdown::cancellation_flag()),
-            &mut capture,
-        ) {
-            capture.failure(
-                &error.to_string(),
-                qwen_cli::shutdown::checkpoint().is_err(),
-            );
-            return Err(error.into());
+        let mut start = 0;
+        for &rows in call_rows {
+            let end = start + rows;
+            ensure!(state.position() == start, "prefill call start mismatch");
+            capture.begin_chunk(start, &tokens[start..end])?;
+            if let Err(error) = forward.prefill_with_capture(
+                &mut state,
+                &tokens[start..end],
+                Some(qwen_cli::shutdown::cancellation_flag()),
+                &mut capture,
+            ) {
+                capture.failure(
+                    &error.to_string(),
+                    qwen_cli::shutdown::checkpoint().is_err(),
+                );
+                return Err(error.into());
+            }
+            ensure!(state.position() == end, "prefill call end mismatch");
+            start = end;
         }
         ensure!(
             state.position() == tokens.len(),
             "batched capture position mismatch"
         );
         capture.finish()?;
+        if check_wrapped_continuation {
+            let completed_capture = manifest(&capture_path.join("manifest.json"))?;
+            let parity =
+                suffix::wrapped_continuation(&forward, &mut state, &prefix[count..count + 3])?;
+            ensure!(
+                manifest(&capture_path.join("manifest.json"))? == completed_capture,
+                "self-parity continuation changed the completed attention capture"
+            );
+            let text = serde_json::to_string_pretty(&parity)?;
+            std::fs::write(
+                output.join("continuation-self-parity.json"),
+                format!("{text}\n"),
+            )?;
+            println!("{text}");
+        }
     }
     let captured = manifest(&capture_path.join("manifest.json"))?;
     ensure!(
-        captured["token_ids"] == json!(tokens),
-        "batched capture token mismatch"
+        captured["token_ids"] == json!(tokens)
+            && captured["requested_checkpoints"] == json!(positions)
+            && captured["status"] == "success",
+        "batched capture inventory mismatch"
     );
     let report_path = output.join("comparison.json");
     let status = attention_compare_command(model, &capture_path, true)
@@ -390,7 +448,6 @@ fn independent_gguf_batched_attention_boundary_characterization() -> Result<()> 
         "CPU attention replay failed: {status}"
     );
     let report = manifest(&report_path)?;
-    characterization::check_attention_characterization(&report, &BATCH_POSITIONS)?;
     for row in report.as_array().context("missing attention reports")? {
         ensure!(
             row["weight_backend"] == "independent_gguf"
@@ -398,11 +455,7 @@ fn independent_gguf_batched_attention_boundary_characterization() -> Result<()> 
             "wrong CPU replay backend or scope"
         );
     }
-    emit_characterization(
-        &output,
-        "independent_gguf_batched_teacher_forced_attention_with_pruning",
-        &report,
-    )
+    Ok((output, report))
 }
 
 #[test]

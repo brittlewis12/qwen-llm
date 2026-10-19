@@ -554,13 +554,16 @@ fn nonuniform_dynamic_schedule_preserves_all_causal_regions() {
     }
     for chunk in [1, 2, 3, 7, 32] {
         for prefix in [0, 1, 4] {
-            let mut serial = model.new_state(32).unwrap();
-            let mut batch = model.new_state(32).unwrap();
-            for i in 0..prefix {
-                model.advance(&mut serial, i, None).unwrap();
-                model.advance(&mut batch, i, None).unwrap();
-            }
             let tokens = [0, 3, 1, 4, 2, 0, 4, 7, 5, 6, 3, 2, 1];
+            let mut serial = model.new_state(32).unwrap();
+            let mut batch = model.new_state(prefix + tokens.len()).unwrap();
+            for i in 0..prefix {
+                model.advance(&mut serial, i as u32, None).unwrap();
+            }
+            if prefix != 0 {
+                let prefix_tokens = (0..prefix).map(|i| i as u32).collect::<Vec<_>>();
+                run(&model, &mut batch, &prefix_tokens, None, chunk, true).unwrap();
+            }
             let mut expected = Vec::new();
             for token in tokens {
                 expected = model.step(&mut serial, token, None).unwrap();
@@ -589,14 +592,20 @@ fn nonuniform_dynamic_schedule_preserves_all_causal_regions() {
                 close(&f32_slice(a).unwrap()[..*na], &f32_slice(b).unwrap()[..*nb]);
             }
             let snapshot = model.capture_snapshot(&batch).unwrap();
-            let mut restored = model.new_state(32).unwrap();
+            let mut restored = model.new_state(position).unwrap();
             model.restore_snapshot(&mut restored, &snapshot).unwrap();
-            for token in [5, 2, 7] {
-                let expected = model.step(&mut serial, token, None).unwrap();
-                let actual = model.step(&mut batch, token, None).unwrap();
-                close(&actual, &expected);
-                assert_eq!(actual, model.step(&mut restored, token, None).unwrap());
+            model.ensure_capacity(&mut batch, position + 3).unwrap();
+            model.ensure_capacity(&mut restored, position + 3).unwrap();
+            let suffix = [5, 2, 7];
+            for token in suffix {
+                expected = model.step(&mut serial, token, None).unwrap();
             }
+            let actual = run(&model, &mut batch, &suffix, None, chunk, true).unwrap();
+            close(&actual, &expected);
+            assert_eq!(
+                actual,
+                run(&model, &mut restored, &suffix, None, chunk, true).unwrap()
+            );
         }
     }
 }

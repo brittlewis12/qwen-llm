@@ -419,6 +419,13 @@ class LongContextTests(unittest.TestCase):
         self.assertTrue(metrics(x, x, 0, 0)["pass"])
         self.assertFalse(metrics(x + 1, x, 0.01, 0.01)["pass"])
         self.assertFalse(metrics(x * float("nan"), x, 1, 1)["pass"])
+        self.assertFalse(metrics(x[:0], x[:0], 1e-4, 0)["pass"])
+        self.assertFalse(metrics(x[:1], x, 1e-4, 0)["pass"])
+        report = metrics(torch.full((8,), 1e-4), torch.zeros(8), 1e-4, 0)
+        self.assertTrue(report["pass"])
+        self.assertEqual(report["elements"], 8)
+        self.assertEqual((report["atol"], report["rtol"]), (1e-4, 0))
+        self.assertFalse(metrics(x + 0.000101, x, 1e-4, 0)["pass"])
 
     @torch.inference_mode()
     def test_full_attention_seeded_replay_both_phases(self):

@@ -172,3 +172,70 @@ fn capture_library_records_explicit_checkpoints() {
     drop(writer);
     assert_eq!(manifest(&root)["status"], "incomplete");
 }
+
+#[test]
+fn capture_suffix_calls_preserve_all_history_and_checkpoint_inventory() {
+    for (positions, calls) in [
+        (&super::super::BATCH_POSITIONS[..], &[16383, 3][..]),
+        (&super::super::suffix::RING_POSITIONS[..], &[127, 257][..]),
+    ] {
+        let temp = Temp::new();
+        let root = temp.0.join("suffix");
+        let mut writer = Writer::create_inner(&root, positions, 2, json!({})).unwrap();
+        let count: usize = calls.iter().sum();
+        let tokens = (0..count).map(|p| (p % 13) as u32).collect::<Vec<_>>();
+        let mut start = 0;
+        for &rows in calls {
+            let end = start + rows;
+            assert!(writer.begin_chunk(start + 1, &tokens[start..end]).is_err());
+            writer.begin_chunk(start, &tokens[start..end]).unwrap();
+            for p in start..end {
+                for layer in LAYERS {
+                    let ids = (0..((p + 1) / if layer < 20 { 2 } else { 1 }).min(512))
+                        .map(|id| id as i32)
+                        .collect::<Vec<_>>();
+                    let mut mask = vec![1; (p + 1).div_ceil(8)];
+                    let discarded = mask.len().saturating_sub(2048);
+                    mask[..discarded].fill(0);
+                    writer
+                        .layer(AttentionCapture {
+                            position: p,
+                            layer,
+                            input: &[p as f32, layer as f32],
+                            checkpoint: positions.contains(&p).then_some(Checkpoint {
+                                output: &[1., 2.],
+                                kv_owner: layer.min(20),
+                                index_source: layer,
+                                compressed_ids: &ids,
+                                candidate_mask: (layer >= 20).then_some(&mask),
+                            }),
+                        })
+                        .unwrap();
+                }
+            }
+            assert_eq!(writer.rows, [end; 8]);
+            assert_eq!(writer.tokens, tokens[..end]);
+            start = end;
+        }
+        writer.finish().unwrap();
+        let m = manifest(&root);
+        assert_eq!(m["status"], "success");
+        assert_eq!(m["token_ids"], json!(tokens));
+        assert_eq!(m["requested_checkpoints"], json!(positions));
+        let checkpoints = m["checkpoints"].as_array().unwrap();
+        assert_eq!(checkpoints.len(), positions.len());
+        for (checkpoint, &p) in checkpoints.iter().zip(positions) {
+            assert_eq!(checkpoint["position"], p);
+            assert_eq!(checkpoint["layers"].as_object().unwrap().len(), 8);
+        }
+        for layer in LAYERS {
+            assert_eq!(m["inputs"][layer.to_string()]["rows"], count);
+            let bytes = fs::read(root.join(format!("input-{layer:02}.npy"))).unwrap();
+            assert_eq!(bytes.len(), HEADER + count * 2 * 4);
+            for (p, row) in bytes[HEADER..].chunks_exact(8).enumerate() {
+                assert_eq!(&row[..4], &(p as f32).to_le_bytes());
+                assert_eq!(&row[4..], &(layer as f32).to_le_bytes());
+            }
+        }
+    }
+}

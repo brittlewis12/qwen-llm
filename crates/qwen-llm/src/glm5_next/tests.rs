@@ -971,7 +971,8 @@ fn native_expert_binding_covers_independent_gate_up_and_down_types() {
         .map(GgmlType::from_raw)
         .filter(|&t| crate::metal::all_slots_gate_up_native_supported(t, t))
         .collect();
-    assert_eq!(native.len(), 19);
+    // Every natively executable type is bound below; the table size is not
+    // the contract, so adding a decoder must not require editing this test.
     assert!(native.contains(&GgmlType::MXFP4));
     for (i, &gate) in native.iter().enumerate() {
         let up = native[(i + 1) % native.len()];

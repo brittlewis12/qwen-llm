@@ -120,6 +120,134 @@ fn k2(chat: bool, max_piece_bytes: usize) -> RequestProfile {
     }
 }
 
+// This test was captured on main before the request/profile refactor. Keep
+// the fixture as the compatibility contract for normalization, protocol
+// selection (including current byte ceilings), prompt rendering, and seed
+// handling across all served families.
+#[test]
+fn all_family_request_profile_snapshot() {
+    fn digest(bytes: &[u8]) -> String {
+        // Small stable FNV-1a digest: unlike DefaultHasher this is a fixture
+        // format, not an implementation detail of the Rust standard library.
+        let hash = bytes.iter().fold(0xcbf29ce484222325u64, |hash, byte| {
+            (hash ^ u64::from(*byte)).wrapping_mul(0x100000001b3)
+        });
+        format!("{hash:016x}")
+    }
+    let tools = json!([{"type":"function","name":"lookup","parameters":{"type":"object","properties":{"q":{"type":"string"}}}}]);
+    let qwen = |template| RequestProfile::OrdinaryQwen {
+        template,
+        no_thinking_supported: true,
+        style: TemplateStyle::House,
+        sampling: Some(qwen_llm::sampling::SamplingConfig::qwen3_release(1.0, 42)),
+        limits: crate::serve::request_profile::OutputLimits::TEST,
+    };
+    let cases = vec![
+        (
+            "qwen-ordinary",
+            qwen(QwenTemplate::Generic),
+            json!({"model":"test","input":"Hello","x_qwen":{"seed":7}}),
+        ),
+        (
+            "flash-next",
+            RequestProfile::FlashNext {
+                style: TemplateStyle::House,
+                limits: crate::serve::request_profile::OutputLimits::TEST,
+            },
+            json!({"model":"test","input":"Hello","x_qwen":{"seed":7}}),
+        ),
+        (
+            "ds4-chat",
+            RequestProfile::DeepSeekV4 {
+                style: TemplateStyle::House,
+                sampling: None,
+                limits: crate::serve::request_profile::OutputLimits::TEST,
+            },
+            json!({"model":"test","input":"Hello","x_qwen":{"seed":7}}),
+        ),
+        (
+            "ds4-tools",
+            RequestProfile::DeepSeekV4 {
+                style: TemplateStyle::House,
+                sampling: None,
+                limits: crate::serve::request_profile::OutputLimits::TEST,
+            },
+            json!({"model":"test","input":"Hello","tools":tools.clone(),"x_qwen":{"seed":7}}),
+        ),
+        (
+            "v41",
+            crate::serve::protocol_v41::profile(crate::serve::request_profile::OutputLimits::TEST),
+            json!({"model":"test","input":"Hello","x_qwen":{"seed":7}}),
+        ),
+        (
+            "k2-raw",
+            k2(false, 64),
+            json!({"model":"test","input":"Hello","x_qwen":{"seed":7}}),
+        ),
+        (
+            "k2-chat",
+            k2(true, 64),
+            json!({"model":"test","input":[{"role":"user","content":"Hello"}],"x_qwen":{"seed":7}}),
+        ),
+        (
+            "k2-tools",
+            k2(true, 64),
+            json!({"model":"test","input":[{"role":"user","content":"Hello"}],"tools":[{"type":"function","name":"lookup","parameters":{"type":"object","properties":{"q":{"type":"string"}}}}],"x_qwen":{"seed":7}}),
+        ),
+        (
+            "glm-chat",
+            RequestProfile::Glm5Next {
+                default_max_tokens: 8,
+                capacity: 128,
+                max_piece_bytes: 64,
+            },
+            json!({"model":"test","input":"Hello","x_qwen":{"seed":7}}),
+        ),
+        (
+            "glm-tools",
+            RequestProfile::Glm5Next {
+                default_max_tokens: 8,
+                capacity: 128,
+                max_piece_bytes: 64,
+            },
+            json!({"model":"test","input":"Hello","tools":tools,"x_qwen":{"seed":7}}),
+        ),
+        (
+            "muse",
+            RequestProfile::Muse {
+                template: MuseGlimmerChatTemplateProfile::UnslothLaunch,
+                default_max_tokens: 8,
+                eos_token_id: 1,
+                eot_token_id: 2,
+            },
+            json!({"model":"test","input":"Hello","x_qwen":{"seed":7}}),
+        ),
+    ];
+    let mut actual = String::new();
+    for (name, profile, body) in cases {
+        let mut request = profile.parse(&body).unwrap();
+        request.template_style = profile.template_style_default();
+        profile.normalize(&mut request).unwrap();
+        let (prompt, _) = profile.render_prepared(&request).unwrap();
+        let output = profile.output(&request);
+        use std::fmt::Write as _;
+        writeln!(
+            actual,
+            "{name}|max={:?}|sampling={:?},{:?},{:?},{:?}|seed={:?}|protocol={output:?}|prompt={}",
+            request.max_output_tokens,
+            request.temperature,
+            request.top_k,
+            request.top_p,
+            request.min_p,
+            request.seed,
+            digest(prompt.as_bytes()),
+        )
+        .unwrap();
+    }
+    let expected = include_str!("fixtures/all_family_request_profile_snapshot.txt");
+    assert_eq!(actual, expected);
+}
+
 #[test]
 fn v41_http_tools_and_multiturn_use_official_recipe() {
     let profile =

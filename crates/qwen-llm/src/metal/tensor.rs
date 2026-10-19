@@ -368,6 +368,152 @@ pub fn plan_retained_storage(
     })
 }
 
+/// Realize retained windows and their ordered tensor entries. Family-specific
+/// policy stays at the call site: callers decide which descriptors participate
+/// and provide the permitted copy-fallback behavior.
+pub(crate) fn realize_retained_storage_views<E>(
+    ctx: &MetalContext,
+    gguf: &GgufFile,
+    plan: &RetainedStoragePlan,
+    descriptors: &[&TensorDesc],
+    binding_alignment: usize,
+    mut invalid: impl FnMut(String) -> E,
+    mut fallback: impl FnMut(
+        &MetalContext,
+        &GgufFile,
+        &TensorDesc,
+        RetainedStorageFallback,
+    ) -> Result<MetalTensor, E>,
+) -> Result<(Vec<MetalGgufBacking>, Vec<MetalTensor>), E>
+where
+    E: From<MetalError>,
+{
+    if descriptors.len() != plan.entries.len() {
+        return Err(invalid(format!(
+            "realization descriptor count {} differs from planned {}",
+            descriptors.len(),
+            plan.entries.len()
+        )));
+    }
+
+    let mut windows = Vec::with_capacity(plan.windows.len());
+    for (index, window) in plan.windows.iter().enumerate() {
+        let mmap = gguf.retained_shard_mmap(window.shard_idx).ok_or_else(|| {
+            invalid(format!(
+                "planned window {index} references missing shard {}",
+                window.shard_idx
+            ))
+        })?;
+        let mmap_offset = usize::try_from(window.mmap_offset)
+            .map_err(|_| invalid(format!("planned window {index} offset exceeds usize")))?;
+        let backing = ctx.gguf_no_copy_window(
+            mmap,
+            window.shard_idx,
+            mmap_offset,
+            window.length,
+            binding_alignment,
+        )?;
+        if backing.mmap_offset() != mmap_offset
+            || backing.exposed_len() != window.length
+            || backing.required_alignment() != binding_alignment
+        {
+            return Err(invalid(format!(
+                "retained window {index} realization drift"
+            )));
+        }
+        windows.push(backing);
+    }
+
+    let mut tensors = Vec::with_capacity(plan.entries.len());
+    for (index, (entry, desc)) in plan.entries.iter().zip(descriptors).enumerate() {
+        if entry.request_index != index
+            || entry.name != desc.name
+            || entry.shard_idx != desc.shard_idx
+            || entry.data_offset != desc.data_offset
+            || entry.n_bytes != desc.n_bytes
+        {
+            return Err(invalid(format!(
+                "planner descriptor drift at request {index}"
+            )));
+        }
+        let (tensor, provenance) = match entry.disposition {
+            RetainedStorageDisposition::View {
+                window_index,
+                buffer_offset,
+            } => {
+                let backing = windows.get(window_index).ok_or_else(|| {
+                    invalid(format!(
+                        "tensor {:?} references missing window {window_index}",
+                        desc.name
+                    ))
+                })?;
+                let (eligibility, tensor) = backing.tensor(desc)?;
+                let tensor = tensor.ok_or_else(|| {
+                    invalid(format!(
+                        "tensor {:?} failed retained realization: {eligibility:?}",
+                        desc.name
+                    ))
+                })?;
+                if tensor.offset != buffer_offset {
+                    return Err(invalid(format!(
+                        "retained offset drift for tensor {:?}",
+                        desc.name
+                    )));
+                }
+                (tensor, MetalTensorProvenance::RetainedGgufReadOnly)
+            }
+            RetainedStorageDisposition::CopyFallback { reason } => {
+                let tensor = fallback(ctx, gguf, desc, reason)?;
+                (tensor, MetalTensorProvenance::OwnedWeightReadOnly)
+            }
+            RetainedStorageDisposition::Alias {
+                source_request_index,
+            } => {
+                return Err(invalid(format!(
+                    "unexpected alias for {:?} to request {source_request_index}",
+                    desc.name
+                )));
+            }
+        };
+        validate_retained_realized_tensor(desc, &tensor, provenance, &mut invalid)?;
+        tensors.push(tensor);
+    }
+    Ok((windows, tensors))
+}
+
+fn validate_retained_realized_tensor<E>(
+    desc: &TensorDesc,
+    tensor: &MetalTensor,
+    expected_provenance: MetalTensorProvenance,
+    invalid: &mut impl FnMut(String) -> E,
+) -> Result<(), E> {
+    if tensor.shape != desc.shape
+        || tensor.dtype != desc.dtype
+        || tensor.n_bytes() != desc.n_bytes
+        || tensor.provenance() != expected_provenance
+        || tensor.is_writable()
+    {
+        return Err(invalid(format!(
+            "realized tensor metadata drift for {:?}",
+            desc.name
+        )));
+    }
+    let end = tensor.offset.checked_add(desc.n_bytes).ok_or_else(|| {
+        invalid(format!(
+            "realized tensor {:?} buffer range overflow",
+            desc.name
+        ))
+    })?;
+    if end > tensor.buffer.length() as u64 {
+        return Err(invalid(format!(
+            "realized tensor {:?} ends at {end}, beyond buffer length {}",
+            desc.name,
+            tensor.buffer.length()
+        )));
+    }
+    Ok(())
+}
+
 impl GgufBackingGeometry {
     #[cfg(test)]
     pub(crate) fn new(

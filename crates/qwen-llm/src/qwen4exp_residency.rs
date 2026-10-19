@@ -14,7 +14,7 @@ use crate::metal::{
     MetalContext, MetalError, MetalGgufBacking, MetalMemoryAdmission, MetalMemorySignals,
     MetalTensor, MetalTensorProvenance, RetainedStorageDisposition, RetainedStorageFallback,
     RetainedStoragePlan, RetainedStorageWindow, evaluate_metal_memory_admission,
-    host_page_size_bytes, plan_retained_storage,
+    host_page_size_bytes, plan_retained_storage, realize_retained_storage_views,
 };
 use crate::qwen4exp::Qwen4ExpConfig;
 use crate::qwen4exp_loader::{Qwen4ExpLoadError, Qwen4ExpModel};
@@ -588,9 +588,8 @@ impl Qwen4ExpMetalWeights {
         }
 
         let allocated_before = refreshed_admission.signals.current_allocated_bytes;
-        let windows = realize_windows(ctx, gguf, &plan.retained)?;
-        let (tensors, normalization_sources) =
-            realize_tensors(ctx, gguf, &plan.retained, &windows)?;
+        let (windows, tensors, normalization_sources) =
+            realize_retained(ctx, gguf, &plan.retained)?;
         let final_stamps = gguf.revalidate_retained_shard_stamps()?;
         if final_stamps != plan.shard_stamps {
             return invalid("GGUF shard identity changed during weight realization");
@@ -1067,115 +1066,46 @@ fn build_weight_memory_plan_with_pricer(
     })
 }
 
-fn realize_windows(
-    ctx: &MetalContext,
-    gguf: &GgufFile,
-    plan: &RetainedStoragePlan,
-) -> Result<Vec<MetalGgufBacking>, Qwen4ExpResidencyError> {
-    let mut windows = Vec::with_capacity(plan.windows.len());
-    for (index, window) in plan.windows.iter().enumerate() {
-        let mmap = gguf.retained_shard_mmap(window.shard_idx).ok_or_else(|| {
-            Qwen4ExpResidencyError::Invalid(format!(
-                "planned window {index} references missing shard {}",
-                window.shard_idx
-            ))
-        })?;
-        let mmap_offset = usize::try_from(window.mmap_offset).map_err(|_| {
-            Qwen4ExpResidencyError::Invalid(format!("planned window {index} offset exceeds usize"))
-        })?;
-        let backing = ctx.gguf_no_copy_window(
-            mmap,
-            window.shard_idx,
-            mmap_offset,
-            window.length,
-            QWEN4EXP_GGUF_BINDING_ALIGNMENT,
-        )?;
-        if backing.mmap_offset() != mmap_offset
-            || backing.exposed_len() != window.length
-            || backing.required_alignment() != QWEN4EXP_GGUF_BINDING_ALIGNMENT
-        {
-            return invalid(format!("retained window {index} realization drift"));
-        }
-        windows.push(backing);
-    }
-    Ok(windows)
-}
+type RealizedQwen4ExpStorage = (
+    Vec<MetalGgufBacking>,
+    BTreeMap<String, MetalTensor>,
+    Vec<MetalTensor>,
+);
 
-fn realize_tensors(
+fn realize_retained(
     ctx: &MetalContext,
     gguf: &GgufFile,
     plan: &RetainedStoragePlan,
-    windows: &[MetalGgufBacking],
-) -> Result<(BTreeMap<String, MetalTensor>, Vec<MetalTensor>), Qwen4ExpResidencyError> {
+) -> Result<RealizedQwen4ExpStorage, Qwen4ExpResidencyError> {
     let descriptors = gguf
         .tensors
         .iter()
         .filter(|desc| desc.name != "per_layer_token_embd.weight")
         .collect::<Vec<_>>();
-    if descriptors.len() != plan.entries.len() {
-        return invalid(format!(
-            "realization descriptor count {} differs from planned {}",
-            descriptors.len(),
-            plan.entries.len()
-        ));
-    }
-
-    let mut tensors = BTreeMap::new();
-    let mut normalization_sources = Vec::new();
-    for (index, (entry, desc)) in plan.entries.iter().zip(descriptors).enumerate() {
-        if entry.request_index != index
-            || entry.name != desc.name
-            || entry.shard_idx != desc.shard_idx
-            || entry.data_offset != desc.data_offset
-            || entry.n_bytes != desc.n_bytes
-        {
-            return invalid(format!("planner descriptor drift at request {index}"));
-        }
-        let (tensor, expected_provenance) = match entry.disposition {
-            RetainedStorageDisposition::View {
-                window_index,
-                buffer_offset,
-            } => {
-                let backing = windows.get(window_index).ok_or_else(|| {
-                    Qwen4ExpResidencyError::Invalid(format!(
-                        "tensor {:?} references missing window {window_index}",
-                        desc.name
-                    ))
-                })?;
-                let (eligibility, tensor) = backing.tensor(desc)?;
-                let tensor = tensor.ok_or_else(|| {
-                    Qwen4ExpResidencyError::Invalid(format!(
-                        "tensor {:?} failed retained realization: {eligibility:?}",
-                        desc.name
-                    ))
-                })?;
-                if tensor.offset != buffer_offset {
-                    return invalid(format!("retained offset drift for tensor {:?}", desc.name));
-                }
-                (tensor, MetalTensorProvenance::RetainedGgufReadOnly)
-            }
-            RetainedStorageDisposition::CopyFallback {
-                reason: RetainedStorageFallback::FinalPartialPage,
-            } => (
-                MetalTensor::copied_gguf_weight(ctx, desc, gguf.try_slice(desc)?)?,
-                MetalTensorProvenance::OwnedWeightReadOnly,
-            ),
-            RetainedStorageDisposition::CopyFallback { reason } => {
+    let (windows, realized) = realize_retained_storage_views(
+        ctx,
+        gguf,
+        plan,
+        &descriptors,
+        QWEN4EXP_GGUF_BINDING_ALIGNMENT,
+        Qwen4ExpResidencyError::Invalid,
+        |ctx, gguf, desc, reason| {
+            if reason != RetainedStorageFallback::FinalPartialPage {
                 return invalid(format!(
                     "disallowed {reason:?} fallback reached realization for {:?}",
                     desc.name
                 ));
             }
-            RetainedStorageDisposition::Alias {
-                source_request_index,
-            } => {
-                return invalid(format!(
-                    "unexpected alias for {:?} to request {source_request_index}",
-                    desc.name
-                ));
-            }
-        };
-        validate_realized_tensor(desc, &tensor, expected_provenance)?;
+            Ok(MetalTensor::copied_gguf_weight(
+                ctx,
+                desc,
+                gguf.try_slice(desc)?,
+            )?)
+        },
+    )?;
+    let mut tensors = BTreeMap::new();
+    let mut normalization_sources = Vec::new();
+    for (desc, tensor) in descriptors.into_iter().zip(realized) {
         let tensor = if let Some(normalized) = normalized_descriptor(desc)? {
             let n_bytes = usize::try_from(normalized.n_bytes).map_err(|_| {
                 Qwen4ExpResidencyError::Invalid("normalized size exceeds usize".into())
@@ -1216,7 +1146,7 @@ fn realize_tensors(
             return invalid(format!("duplicate realized tensor {:?}", desc.name));
         }
     }
-    Ok((tensors, normalization_sources))
+    Ok((windows, tensors, normalization_sources))
 }
 
 fn validate_realized_tensor(

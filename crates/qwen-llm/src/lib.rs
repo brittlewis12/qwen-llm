@@ -1,9 +1,8 @@
-//! qwen-llm: a from-scratch inference engine for Qwen 3.5 / 3.6 hybrid
-//! Gated DeltaNet (architecture name `qwen3_5` in HF transformers,
-//! `LLM_ARCH_QWEN35` in llama.cpp) on Apple Silicon.
+//! qwen-llm: inference runtimes and Metal kernels for Qwen, DeepSeek, GLM,
+//! Kimi, and Muse model families on Apple Silicon.
 //!
-//! See [`docs/PLAN.md`](../../../../docs/PLAN.md) for the full architectural
-//! decision record. This crate is structured around the v1 plan:
+//! The crate contains model loaders, runtimes, Metal kernels, and diagnostic
+//! tools for these model families.
 //!
 //! * [`gguf`]      — mmap-backed GGUF v3 reader. Tensor descriptor table
 //!                   indexes one or more mmap'd GGUF shards.
@@ -13,18 +12,11 @@
 //! * [`metal`]     — host-side Metal lifecycle: device, queue, library
 //!                   from embedded `kernels.metallib`, pipeline state cache,
 //!                   binary archive.
-//! * [`model`]     — Qwen3.5/3.6 architecture description: layer pattern,
-//!                   GDN/attn dims, tensor name conventions.
 //! * [`tensor`]    — backend-agnostic tensor descriptor for GGUF-backed
 //!                   tensors (shard/offset/shape/type).
 //! * Metal weights use persistent `StorageModeShared` `MTLBuffer`s. Load policy
 //!   may copy a tensor or retain a read-only view over its GGUF mapping.
-//! * [`tokenizer`] — Qwen2 byte-level BPE, vocab 248,320, embedded tokens
-//!                   read from GGUF metadata.
 //!
-//! The numerical oracle is `$LLAMA_CPP/build/bin/llama-cli` running
-//! against `$MODELS/Qwen3.5-0.8B.F32.gguf`. Logits-byte-equivalence on this
-//! pair is the v1 correctness bar.
 
 pub mod cache_probe;
 pub mod checkpoint_codec;
@@ -52,43 +44,11 @@ pub mod k2_horizon;
 pub mod k2_horizon_chat;
 pub mod k2_horizon_metal;
 pub mod k2_horizon_plan;
+#[cfg(test)]
 pub mod k2_horizon_reference;
 pub mod k2_horizon_runtime;
 pub mod loader;
 pub mod metal;
-/// Deployment target used to compile the product Metal library.
-pub const PRODUCT_METALLIB_TARGET: &str = env!("QWEN_PRODUCT_METALLIB_TARGET");
-/// Deployment target used to compile the research Metal library.
-pub const RESEARCH_METALLIB_TARGET: &str = env!("QWEN_RESEARCH_METALLIB_TARGET");
-/// Compiler and macOS SDK identity used to compile both Metal libraries.
-pub fn metallib_build_identity() -> (&'static str, &'static str) {
-    (
-        env!("QWEN_METALLIB_COMPILER_IDENTITY"),
-        env!("QWEN_METALLIB_SDK_VERSION"),
-    )
-}
-
-/// Cargo diagnostic features enabled in this qwen-llm build.
-pub fn enabled_diagnostic_features() -> &'static [&'static str] {
-    &[
-        #[cfg(feature = "dflash-k0s-diagnostics")]
-        "dflash-k0s-diagnostics",
-        #[cfg(feature = "dsv4-diagnostics")]
-        "dsv4-diagnostics",
-        #[cfg(feature = "perf-ablations")]
-        "perf-ablations",
-    ]
-}
-
-#[cfg(test)]
-mod metallib_identity_tests {
-    #[test]
-    fn metallib_build_identity_is_populated() {
-        let (compiler, sdk) = super::metallib_build_identity();
-        assert!(!compiler.is_empty());
-        assert!(!sdk.is_empty());
-    }
-}
 pub mod metal_dflash;
 pub mod metal_forward;
 pub mod metal_mtp;
@@ -117,7 +77,6 @@ pub mod qwen4exp_forward;
 pub mod qwen4exp_gdn;
 pub mod qwen4exp_layer_zero;
 pub mod qwen4exp_layers_zero_one;
-pub mod qwen4exp_layers_zero_three;
 pub mod qwen4exp_loader;
 pub mod qwen4exp_metal;
 pub mod qwen4exp_moe;
@@ -138,13 +97,38 @@ pub mod tensor;
 #[doc(hidden)]
 pub mod test_fixtures;
 pub mod tokenizer;
+
 pub mod tool_schema;
 pub mod trellis_ldlq;
 pub mod trellis_offline;
 pub mod workspace_lens;
 
+/// Deployment target used to compile the product Metal library.
+pub const PRODUCT_METALLIB_TARGET: &str = env!("QWEN_PRODUCT_METALLIB_TARGET");
+/// Deployment target used to compile the research Metal library.
+pub const RESEARCH_METALLIB_TARGET: &str = env!("QWEN_RESEARCH_METALLIB_TARGET");
+/// Compiler and macOS SDK identity used to compile both Metal libraries.
+pub fn metallib_build_identity() -> (&'static str, &'static str) {
+    (
+        env!("QWEN_METALLIB_COMPILER_IDENTITY"),
+        env!("QWEN_METALLIB_SDK_VERSION"),
+    )
+}
+
+/// Cargo diagnostic features enabled in this qwen-llm build.
+pub fn enabled_diagnostic_features() -> &'static [&'static str] {
+    &[
+        #[cfg(feature = "dflash-k0s-diagnostics")]
+        "dflash-k0s-diagnostics",
+        #[cfg(feature = "dsv4-diagnostics")]
+        "dsv4-diagnostics",
+        #[cfg(feature = "perf-ablations")]
+        "perf-ablations",
+    ]
+}
+
 /// Bytes of the compiled `.metallib` produced by `build.rs` from
-/// `../../kernels/*.metal`. Empty until the first kernel is added.
+/// `../../kernels/*.metal`.
 pub(crate) const KERNELS_METALLIB: &[u8] =
     include_bytes!(concat!(env!("OUT_DIR"), "/kernels.metallib"));
 /// Bench/research-only probe kernels from `../../kernels/research/*.metal`,
@@ -152,3 +136,13 @@ pub(crate) const KERNELS_METALLIB: &[u8] =
 /// them.
 pub(crate) const KERNELS_RESEARCH_METALLIB: &[u8] =
     include_bytes!(concat!(env!("OUT_DIR"), "/kernels_research.metallib"));
+
+#[cfg(test)]
+mod metallib_identity_tests {
+    #[test]
+    fn metallib_build_identity_is_populated() {
+        let (compiler, sdk) = super::metallib_build_identity();
+        assert!(!compiler.is_empty());
+        assert!(!sdk.is_empty());
+    }
+}

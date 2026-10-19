@@ -380,6 +380,36 @@ fn zero_decoder_piece_bound_is_server_configuration_error() {
 }
 
 #[test]
+fn normalized_sampling_draws_an_omitted_seed_once_and_keeps_explicit_seed() {
+    let profile = RequestProfile::OrdinaryQwen {
+        template: QwenTemplate::Generic,
+        no_thinking_supported: true,
+        style: TemplateStyle::House,
+        sampling: Some(qwen_llm::sampling::SamplingConfig::qwen3_release(1.0, 42)),
+        limits: crate::serve::request_profile::OutputLimits::TEST,
+    };
+    let mut omitted = profile
+        .parse(&json!({"model":"test","input":"Hello"}))
+        .unwrap();
+    profile.normalize(&mut omitted).unwrap();
+    let sampled = crate::serve::request_profile::sampling_with_defaults(
+        &omitted,
+        qwen_llm::sampling::SamplingConfig::qwen3_release(1.0, 42),
+    );
+    assert_eq!(omitted.seed, Some(sampled.seed));
+
+    let mut explicit = profile
+        .parse(&json!({"model":"test","input":"Hello","x_qwen":{"seed":7}}))
+        .unwrap();
+    profile.normalize(&mut explicit).unwrap();
+    let sampled = crate::serve::request_profile::sampling_with_defaults(
+        &explicit,
+        qwen_llm::sampling::SamplingConfig::qwen3_release(1.0, 42),
+    );
+    assert_eq!((explicit.seed, sampled.seed), (Some(7), 7));
+}
+
+#[test]
 fn v41_http_tools_and_multiturn_use_official_recipe() {
     let profile =
         crate::serve::protocol_v41::profile(crate::serve::request_profile::OutputLimits::TEST);
@@ -856,9 +886,7 @@ fn profile_delegates_keep_k2_tool_lexical_values_and_output_events() {
             decode_tool_json(call["arguments"].as_str().unwrap()).unwrap(),
             arguments
         );
-        let replay = format!(
-            r#"{{"model":"test","input":[{{"role":"user","content":"go"}},{{"type":"function_call","call_id":"c","name":"lookup","arguments":"{{}}"}},{{"type":"function_call_output","call_id":"c","output":{{"$serde_json::private::Number":"7","n":9007199254740993}}}}],"tools":[{{"type":"function","name":"lookup","parameters":{{}}}}]}}"#
-        );
+        let replay = r#"{"model":"test","input":[{"role":"user","content":"go"},{"type":"function_call","call_id":"c","name":"lookup","arguments":"{}"},{"type":"function_call_output","call_id":"c","output":{"$serde_json::private::Number":"7","n":9007199254740993}}],"tools":[{"type":"function","name":"lookup","parameters":{}}]}"#.to_string();
         let profile = k2(true, 128);
         let decoded = profile.decode(replay.as_bytes()).unwrap();
         assert!(decoded["input"][2]["output"].is_object());
@@ -875,9 +903,9 @@ fn profile_delegates_keep_k2_tool_lexical_values_and_output_events() {
         );
     }
     let profile = k2(true, usize::MAX);
-    let mut request = profile.parse(&json!({"model":"test","input":[{"role":"user","content":"go"}],"tools":[{"type":"function","name":"lookup","parameters":{"type":"object"}}]})).unwrap();
+    let request = profile.parse(&json!({"model":"test","input":[{"role":"user","content":"go"}],"tools":[{"type":"function","name":"lookup","parameters":{"type":"object"}}]})).unwrap();
     assert!(
-        profile.normalize(&mut request).is_err(),
+        profile.validate(request).is_err(),
         "K2 tool-byte budget must precede execution"
     );
 }

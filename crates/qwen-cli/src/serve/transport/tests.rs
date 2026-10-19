@@ -33,6 +33,9 @@ impl<F: FnMut(&mut dyn GenerationSink) -> Result<GenerationOutcome, BackendFailu
     fn model_id(&self) -> &str {
         "test"
     }
+    fn request_profile(&self) -> RequestProfile {
+        RequestProfile::test_qwen()
+    }
     fn generate(
         &mut self,
         _request: &ServeRequest,
@@ -53,7 +56,7 @@ fn pipeline() -> (OwnerActivity, HttpProxy, Receiver<Work>) {
             extra_cpu_reserve: 0,
             headroom: || Some(0),
             model_id: "test".into(),
-            profile: RequestProfile::UnboundQwen,
+            profile: RequestProfile::test_qwen(),
             work,
             control: control(),
             activity: Arc::new(guard),
@@ -67,7 +70,7 @@ fn prepared() -> Arc<PreparedResponse> {
         crate::serve::items::parse_request(&serde_json::json!({"model":"test", "input":"hi"}))
             .unwrap();
     Arc::new(PreparedResponse {
-        validated: crate::serve::request_profile::RequestProfile::UnboundQwen
+        validated: crate::serve::request_profile::RequestProfile::test_qwen()
             .validate(request)
             .unwrap(),
         prompt: "already rendered".into(),
@@ -397,6 +400,9 @@ fn only_server_side_failures_are_reported_to_the_backend() {
         fn model_id(&self) -> &str {
             "test"
         }
+        fn request_profile(&self) -> RequestProfile {
+            RequestProfile::test_qwen()
+        }
         fn generate(
             &mut self,
             _request: &ServeRequest,
@@ -655,6 +661,9 @@ fn http_side_output_refusals_cross_the_bridge_typed() {
     impl GenerationBackend for Emitting {
         fn model_id(&self) -> &str {
             "test"
+        }
+        fn request_profile(&self) -> RequestProfile {
+            RequestProfile::test_qwen()
         }
         fn generate(
             &mut self,

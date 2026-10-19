@@ -211,7 +211,18 @@ impl GenerationBackend for Backend<'_> {
         prompt: &str,
         sink: &mut dyn GenerationSink,
     ) -> std::result::Result<GenerationOutcome, BackendFailure> {
-        self.generate_prompt(request, prompt, None, sink)
+        let protocol = self
+            .settings
+            .profile()
+            .resolve_output(request)
+            .map_err(BackendFailure::Serve)?;
+        let super::output_partition::OutputProtocol::DeepSeekV41 { max_bytes, .. } = protocol
+        else {
+            return Err(BackendFailure::Serve(ServeError::server_error(
+                "V4.1 request resolved to a non-V4.1 output protocol",
+            )));
+        };
+        self.generate_prompt(request, prompt, None, max_bytes, sink)
     }
 
     fn generate_prepared(
@@ -219,10 +230,18 @@ impl GenerationBackend for Backend<'_> {
         prepared: std::sync::Arc<super::http::PreparedResponse>,
         sink: &mut dyn GenerationSink,
     ) -> std::result::Result<GenerationOutcome, BackendFailure> {
+        let super::output_partition::OutputProtocol::DeepSeekV41 { max_bytes, .. } =
+            prepared.validated.output()
+        else {
+            return Err(BackendFailure::Serve(ServeError::server_error(
+                "V4.1 prepared request has a non-V4.1 output protocol",
+            )));
+        };
         self.generate_prompt(
             prepared.request(),
             &prepared.prompt,
             prepared.boundaries,
+            *max_bytes,
             sink,
         )
     }
@@ -234,6 +253,7 @@ impl Backend<'_> {
         request: &ServeRequest,
         prompt: &str,
         boundaries: Option<super::http::PromptBoundaries>,
+        ceiling: super::output_memory::OutputByteCeiling,
         sink: &mut dyn GenerationSink,
     ) -> std::result::Result<GenerationOutcome, BackendFailure> {
         let epoch = Instant::now();
@@ -242,7 +262,8 @@ impl Backend<'_> {
         let mut prefill_observations = request
             .echo_stats
             .then(memory_io::ChunkObservations::default);
-        let mut outcome = self.settings.execute(
+        let mut outcome = self.settings.execute_with_ceiling(
+            ceiling,
             request,
             prompt,
             boundaries,

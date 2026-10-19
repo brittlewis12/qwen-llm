@@ -265,7 +265,7 @@ fn handle_api(stream: TcpStream, api: Arc<LensApi>) -> io::Result<()> {
     let profile = crate::serve::control::Profile {
         assets: None,
         model_id: "test-model".into(),
-        request: crate::serve::request_profile::RequestProfile::UnboundQwen,
+        request: crate::serve::request_profile::RequestProfile::test_qwen(),
         lens: api,
         classified: None,
         gate: Default::default(),

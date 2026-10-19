@@ -36,6 +36,9 @@ fn browser_baseline_child() {
         fn model_id(&self) -> &str {
             "test"
         }
+        fn request_profile(&self) -> RequestProfile {
+            RequestProfile::test_qwen()
+        }
         fn native_profile(&self) -> Result<Option<Arc<native::Profile>>> {
             Ok(Some(Arc::clone(&self.0)))
         }
@@ -119,7 +122,7 @@ impl GenerationBackend for Backend {
         self.control_reserve = bytes;
     }
     fn request_profile(&self) -> RequestProfile {
-        self.request.clone().unwrap_or(RequestProfile::UnboundQwen)
+        self.request.clone().unwrap_or(RequestProfile::test_qwen())
     }
     fn model_id(&self) -> &str {
         "test"
@@ -773,7 +776,7 @@ fn disconnected_startup_probe_does_not_close_the_control_service() {
             classified: None,
             assets: None,
             model_id: "test".into(),
-            request: RequestProfile::UnboundQwen,
+            request: RequestProfile::test_qwen(),
             lens: Arc::new(LensApi::new(
                 "test".into(),
                 Some(Arc::clone(&fixture.store)),
@@ -812,7 +815,7 @@ fn history_releases_activity_before_waiting_for_store_access() {
         classified: Some(classified),
         assets: None,
         model_id: "test".into(),
-        request: RequestProfile::UnboundQwen,
+        request: RequestProfile::test_qwen(),
         lens: Arc::new(LensApi::new(
             "test".into(),
             Some(Arc::clone(&fixture.store)),
@@ -938,7 +941,7 @@ fn blocked_static_write_releases_activity_and_shutdown_joins_its_worker() {
     let profile = Profile {
         model_id: "test".into(),
         classified: None,
-        request: RequestProfile::UnboundQwen,
+        request: RequestProfile::test_qwen(),
         lens: Arc::new(LensApi::new(
             "test".into(),
             Some(Arc::clone(&fixture.store)),
@@ -990,7 +993,7 @@ fn failed_delivery_drops_connection_and_execution_permit_outside_gate_lock() {
         let connection = transport::Connection::prepared(
             stream,
             "test".into(),
-            RequestProfile::UnboundQwen,
+            RequestProfile::test_qwen(),
             None,
             guard,
             http::HttpRequest {
@@ -1066,7 +1069,7 @@ fn partial_heads_and_rejected_lens_traffic_do_not_debounce_idle() {
         let profile = Profile {
             classified: None,
             model_id: "test".into(),
-            request: RequestProfile::UnboundQwen,
+            request: RequestProfile::test_qwen(),
             lens: Arc::new(LensApi::new(
                 "test".into(),
                 Some(fixture.store.clone()),

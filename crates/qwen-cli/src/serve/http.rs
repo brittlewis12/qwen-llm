@@ -110,9 +110,7 @@ pub(crate) trait GenerationBackend {
             "The resident backend has no native diagnostic executor.",
         )
     }
-    fn request_profile(&self) -> super::request_profile::RequestProfile {
-        super::request_profile::RequestProfile::UnboundQwen
-    }
+    fn request_profile(&self) -> super::request_profile::RequestProfile;
     /// Preserve family-owned JSON values before generic Value deserialization.
     fn decode_request_json(&self, body: &[u8]) -> Result<Value, ServeError> {
         self.request_profile().decode(body)
@@ -981,7 +979,7 @@ fn handle_responses(
     // Resolved before the mutable generate borrow.
     let output_protocol = validated.output().clone();
     // Said per request, before generation can fail.
-    if let Some(line) = history_reasoning_diagnostic(&request, &output_protocol) {
+    if let Some(line) = history_reasoning_diagnostic(request, &output_protocol) {
         eprintln!("{line}");
     }
     let prepared = Arc::new(PreparedResponse {
@@ -1186,6 +1184,9 @@ mod tests {
     impl GenerationBackend for MockBackend {
         fn model_id(&self) -> &str {
             &self.model
+        }
+        fn request_profile(&self) -> crate::serve::request_profile::RequestProfile {
+            crate::serve::request_profile::RequestProfile::test_qwen()
         }
         fn parse_request(&self, body: &Value) -> Result<ServeRequest, ServeError> {
             if self.protocol == OutputProtocol::RawText {

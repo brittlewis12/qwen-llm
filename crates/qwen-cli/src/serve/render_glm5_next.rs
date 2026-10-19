@@ -56,14 +56,13 @@ pub(crate) fn sampling(request: &ServeRequest) -> SamplingConfig {
     super::request_profile::sampling_with_defaults(request, glm_release())
 }
 
-/// Release sampling defaults, the output budget, and the normalized effort
-/// echo; the rendering checks run here too, so a refusal precedes any
-/// response bytes.
+/// Release sampling defaults and the normalized effort echo. Protocol
+/// resolution checks the tool byte budget before the prompt renderer runs.
 pub(crate) fn normalize_request(
     request: &mut ServeRequest,
     default_max_tokens: usize,
     capacity: usize,
-    max_piece_bytes: usize,
+    _max_piece_bytes: usize,
 ) -> Result<(), ServeError> {
     super::request_profile::fill_sampling_defaults(request, glm_release());
     let maximum = *request.max_output_tokens.get_or_insert(default_max_tokens);
@@ -79,10 +78,7 @@ pub(crate) fn normalize_request(
     let effort = effort(request)?;
     request.reasoning_effort = Some(effort.as_str().into());
     request.reasoning = Some(json!({"effort": effort.as_str()}));
-    if !request.model_request.tools.is_empty() {
-        tool_byte_budget(maximum, max_piece_bytes)?;
-    }
-    render(request).map(drop)
+    Ok(())
 }
 
 /// The buffered tool block's bound: every output token at its longest
@@ -111,19 +107,18 @@ pub(crate) fn try_output_protocol(
     use crate::serve::output_partition::OutputProtocol;
     let definitions = definitions(request)?;
     Ok(if !definitions.is_empty() {
+        let max_bytes = tool_byte_budget(request.max_output_tokens.unwrap_or(1), max_piece_bytes)?;
         OutputProtocol::Glm5NextTools {
             definitions,
-            // Normalization admitted this bound before any response bytes.
-            max_bytes: super::output_memory::OutputByteCeiling::from_bytes(tool_byte_budget(
-                request.max_output_tokens.unwrap_or(1),
-                max_piece_bytes,
-            )?)
-            .ok_or_else(|| {
-                invalid(
-                    "max_output_tokens",
-                    "GLM output byte bound is zero or too large",
-                )
-            })?,
+            // Resolution validates this bound before final prompt rendering.
+            max_bytes: super::output_memory::OutputByteCeiling::from_bytes(max_bytes).ok_or_else(
+                || {
+                    invalid(
+                        "max_output_tokens",
+                        "GLM output byte bound is zero or too large",
+                    )
+                },
+            )?,
         }
     } else {
         OutputProtocol::Glm5NextChat

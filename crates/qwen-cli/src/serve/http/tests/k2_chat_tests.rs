@@ -11,6 +11,14 @@ impl GenerationBackend for K2Mock {
     fn model_id(&self) -> &str {
         "k2-test"
     }
+    fn request_profile(&self) -> crate::serve::request_profile::RequestProfile {
+        crate::serve::request_profile::RequestProfile::K2 {
+            chat: Some(Arc::new(render_k2::mock_profile())),
+            default_max_tokens: 8,
+            capacity: 128,
+            max_piece_bytes: 128,
+        }
+    }
     fn decode_request_json(&self, body: &[u8]) -> Result<Value, ServeError> {
         render_k2::tools::decode_request_json(body)
     }

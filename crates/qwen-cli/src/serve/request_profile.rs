@@ -52,9 +52,6 @@ impl ValidatedRequest {
 
 #[derive(Clone)]
 pub(crate) enum RequestProfile {
-    /// The trait default for test backends: no output limits, so no tool
-    /// byte ceiling (every production backend declares its own profile).
-    UnboundQwen,
     OrdinaryQwen {
         template: QwenTemplate,
         no_thinking_supported: bool,
@@ -100,6 +97,17 @@ pub(crate) enum RequestProfile {
 }
 
 impl RequestProfile {
+    #[cfg(test)]
+    pub(crate) fn test_qwen() -> Self {
+        Self::OrdinaryQwen {
+            template: QwenTemplate::Generic,
+            no_thinking_supported: true,
+            style: TemplateStyle::House,
+            sampling: None,
+            limits: OutputLimits::TEST,
+        }
+    }
+
     #[cfg(test)]
     pub(crate) fn validate(
         &self,
@@ -175,7 +183,6 @@ impl RequestProfile {
             | Self::FlashNext { style, .. }
             | Self::DeepSeekV4 { style, .. } => Some(*style),
             Self::DeepSeekV41 { .. }
-            | Self::UnboundQwen
             | Self::Muse { .. }
             | Self::K2 { .. }
             | Self::Glm5Next { .. } => None,
@@ -197,7 +204,6 @@ impl RequestProfile {
             Self::Muse {
                 max_piece_bytes, ..
             } => Some(*max_piece_bytes),
-            Self::UnboundQwen => None,
         };
         if max_piece_bytes == Some(0) {
             return Err(ServeError::server_error(
@@ -208,31 +214,6 @@ impl RequestProfile {
             return Err(ServeError::invalid_request(
                 Some("x_qwen.prefill_lineage"),
                 "x_qwen.prefill_lineage is supported only by GLM-5.3-Flash; this family reads prompts one way",
-            ));
-        }
-        // The tool block's ceiling must be computable before generation
-        // whenever the output protocol parses tools: always for ordinary
-        // Qwen and Flash-Next (undeclared tool syntax still parses), for
-        // DeepSeek V4 when tools are declared.
-        let parses_tools = match self {
-            Self::DeepSeekV41 { .. } | Self::OrdinaryQwen { .. } | Self::FlashNext { .. } => true,
-            Self::DeepSeekV4 { .. } => !request.model_request.tools.is_empty(),
-            _ => false,
-        };
-        if let Self::OrdinaryQwen { limits, .. }
-        | Self::FlashNext { limits, .. }
-        | Self::DeepSeekV4 { limits, .. }
-        | Self::DeepSeekV41 { limits, .. } = self
-            && parses_tools
-            && super::output_memory::tool_byte_ceiling(
-                limits.max_tokens(request),
-                limits.max_piece_bytes,
-            )
-            .is_none()
-        {
-            return Err(ServeError::invalid_request(
-                Some("max_output_tokens"),
-                "max_output_tokens must be >= 1 and small enough to bound the tool block",
             ));
         }
         match self {
@@ -254,7 +235,6 @@ impl RequestProfile {
                     .get_or_insert(limits.default_max_tokens);
                 Ok(())
             }
-            Self::UnboundQwen => Ok(()),
             Self::OrdinaryQwen { sampling, .. } => {
                 if let Some(release) = sampling {
                     fill_sampling_defaults(request, *release);
@@ -283,7 +263,7 @@ impl RequestProfile {
                 chat,
                 default_max_tokens,
                 capacity,
-                max_piece_bytes,
+                ..
             } => {
                 render_k2::normalize_with_profile(
                     request,
@@ -291,12 +271,6 @@ impl RequestProfile {
                     *capacity,
                     chat.as_deref(),
                 )?;
-                if request.k2_tools.is_some() {
-                    render_k2::tools::byte_budget(
-                        request.max_output_tokens.unwrap(),
-                        *max_piece_bytes,
-                    )?;
-                }
                 Ok(())
             }
             Self::Glm5Next {
@@ -314,9 +288,7 @@ impl RequestProfile {
 
     pub(crate) fn render(&self, request: &ServeRequest) -> Result<String, ServeError> {
         match self {
-            Self::UnboundQwen | Self::FlashNext { .. } => {
-                Ok(render::render_qwen_serve_prompt(request))
-            }
+            Self::FlashNext { .. } => Ok(render::render_qwen_serve_prompt(request)),
             Self::OrdinaryQwen {
                 template,
                 no_thinking_supported,
@@ -365,22 +337,17 @@ impl RequestProfile {
                 limits.max_tokens(request),
                 limits.max_piece_bytes,
             )
+            .ok_or_else(|| {
+                ServeError::invalid_request(
+                    Some("max_output_tokens"),
+                    "max_output_tokens must be >= 1 and small enough to bound the tool block",
+                )
+            })
         };
         Ok(match self {
             Self::DeepSeekV41 { limits, .. } => OutputProtocol::DeepSeekV41 {
                 thinking: super::protocol_v41::thinking(request)?.is_some(),
-                max_bytes: ceiling(limits).ok_or_else(|| {
-                    ServeError::invalid_request(
-                        Some("max_output_tokens"),
-                        "max_output_tokens must be >= 1 and small enough to bound the tool block",
-                    )
-                })?,
-            },
-            Self::UnboundQwen => OutputProtocol::Qwen {
-                preopened_reasoning: false,
-                parse_tools: true,
-                tool_grammar: ToolGrammar::QwenXml,
-                tool_byte_ceiling: None,
+                max_bytes: ceiling(limits)?,
             },
             Self::OrdinaryQwen {
                 template, limits, ..
@@ -388,21 +355,28 @@ impl RequestProfile {
                 preopened_reasoning: qwen_preopens(*template, request),
                 parse_tools: true,
                 tool_grammar: ToolGrammar::QwenXml,
-                tool_byte_ceiling: ceiling(limits),
+                tool_byte_ceiling: Some(ceiling(limits)?),
             },
             Self::FlashNext { limits, .. } => OutputProtocol::Qwen {
                 preopened_reasoning: render::qwen_generation(request)
                     == render::QwenGeneration::PreOpen,
                 parse_tools: true,
                 tool_grammar: ToolGrammar::QwenXml,
-                tool_byte_ceiling: ceiling(limits),
+                tool_byte_ceiling: Some(ceiling(limits)?),
             },
-            Self::DeepSeekV4 { limits, .. } => OutputProtocol::Qwen {
-                preopened_reasoning: render_ds4::preopens_reasoning(request)?,
-                parse_tools: !request.model_request.tools.is_empty(),
-                tool_grammar: ToolGrammar::DeepSeekDsml,
-                tool_byte_ceiling: ceiling(limits),
-            },
+            Self::DeepSeekV4 { limits, .. } => {
+                let parses_tools = !request.model_request.tools.is_empty();
+                OutputProtocol::Qwen {
+                    preopened_reasoning: render_ds4::preopens_reasoning(request)?,
+                    parse_tools: parses_tools,
+                    tool_grammar: ToolGrammar::DeepSeekDsml,
+                    tool_byte_ceiling: match ceiling(limits) {
+                        Ok(ceiling) => Some(ceiling),
+                        Err(error) if parses_tools => return Err(error),
+                        Err(_) => None,
+                    },
+                }
+            }
             Self::Muse {
                 eos_token_id,
                 eot_token_id,
@@ -602,24 +576,24 @@ mod tests {
             }
             let mut body = serde_json::json!({"model": "m", "input": "hi", "tools": tools,
                 "max_output_tokens": u64::MAX});
-            if let Ok(mut request) = profile.parse(&body) {
-                let error = profile.normalize(&mut request).unwrap_err();
+            if let Ok(request) = profile.parse(&body) {
+                let error = profile.validate(request).err().unwrap();
                 assert_eq!(
                     (error.status, error.param.as_deref()),
                     (400, Some("max_output_tokens"))
                 );
             }
             body["max_output_tokens"] = (usize::MAX / 2).into();
-            let mut request = profile.parse(&body).unwrap();
-            let error = profile.normalize(&mut request).unwrap_err();
+            let request = profile.parse(&body).unwrap();
+            let error = profile.validate(request).err().unwrap();
             assert_eq!(error.status, 400);
             // Without declared tools: ordinary Qwen and Flash-Next still parse
             // tool syntax, so the ceiling is still required; DeepSeek V4 does
             // not parse tools then.
             let body = serde_json::json!({"model": "m", "input": "hi",
                 "max_output_tokens": usize::MAX / 2});
-            let mut request = profile.parse(&body).unwrap();
-            let refused = profile.normalize(&mut request).is_err();
+            let request = profile.parse(&body).unwrap();
+            let refused = profile.validate(request).is_err();
             assert_eq!(
                 refused,
                 !matches!(profile, RequestProfile::DeepSeekV4 { .. })
@@ -690,7 +664,7 @@ mod tests {
         }
         // Qwen keeps serde decoding; the sentinel in replayed arguments is
         // refused there (fail closed), not mis-rendered.
-        let qwen = RequestProfile::UnboundQwen;
+        let qwen = RequestProfile::test_qwen();
         let raw = body(&format!(r#"{{{sentinel}:"not-a-number"}}"#));
         let error = qwen
             .decode(raw.as_bytes())

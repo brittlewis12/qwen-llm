@@ -267,7 +267,7 @@ fn qwen_and_ds4_tool_block_peaks() {
     let families: [Family; 2] = [
         (
             "qwen-xml",
-            RequestProfile::UnboundQwen,
+            RequestProfile::test_qwen(),
             "<think>plan</think>",
             &qwen,
         ),

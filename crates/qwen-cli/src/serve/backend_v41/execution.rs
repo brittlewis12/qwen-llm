@@ -1,8 +1,43 @@
 use super::*;
 
 impl Settings {
+    #[cfg(test)]
     pub(super) fn execute<S>(
         &self,
+        request: &ServeRequest,
+        prompt: &str,
+        boundaries: Option<super::super::http::PromptBoundaries>,
+        sink: &mut dyn GenerationSink,
+        admit: impl FnMut(usize, u64) -> std::result::Result<(), StateError>,
+        new_state: impl FnOnce(usize) -> std::result::Result<S, ServeError>,
+        reuse: &mut impl reuse::Reuse<S>,
+        prefill: impl FnMut(
+            &mut S,
+            &[u32],
+            &AtomicBool,
+            bool,
+        ) -> std::result::Result<Vec<f32>, ServeError>,
+        step: impl FnMut(&mut S, u32, &AtomicBool) -> std::result::Result<Vec<f32>, String>,
+        now: impl FnMut() -> Duration,
+    ) -> std::result::Result<GenerationOutcome, BackendFailure> {
+        let ceiling = super::super::output_memory::OutputByteCeiling::from_tokens_and_piece(
+            self.limits.max_tokens(request),
+            self.limits.max_piece_bytes,
+        )
+        .ok_or_else(|| {
+            BackendFailure::Serve(ServeError::invalid_request(
+                Some("max_output_tokens"),
+                "V4.1 output byte budget overflow",
+            ))
+        })?;
+        self.execute_with_ceiling(
+            ceiling, request, prompt, boundaries, sink, admit, new_state, reuse, prefill, step, now,
+        )
+    }
+
+    pub(super) fn execute_with_ceiling<S>(
+        &self,
+        ceiling: super::super::output_memory::OutputByteCeiling,
         request: &ServeRequest,
         prompt: &str,
         boundaries: Option<super::super::http::PromptBoundaries>,
@@ -59,15 +94,7 @@ impl Settings {
         let vocab = self.tokenizer.n_vocab() as usize;
         let required =
             super::super::decode_loop::required_forwards("V4.1", ids.len(), maximum, self.context)?;
-        let ceiling =
-            super::super::output_memory::tool_byte_ceiling(maximum, self.limits.max_piece_bytes)
-                .ok_or_else(|| {
-                    ServeError::invalid_request(
-                        Some("max_output_tokens"),
-                        "V4.1 output byte budget overflow",
-                    )
-                })?;
-        let peak = qwen_llm::glm5_next_chat::checked_tool_block_peak_bytes(ceiling)
+        let peak = qwen_llm::tool_output_memory::checked_tool_block_peak_bytes(ceiling.get())
             .ok_or_else(|| super::super::output_memory::size_overflow("V4.1 output"))?;
         let reserve = u64::try_from(peak)
             .ok()
@@ -191,7 +218,7 @@ impl Settings {
                 sink,
                 cancel,
                 admit: || admit_output(reuse, reserve, self.headroom),
-                ceiling,
+                ceiling: ceiling.get(),
                 emitted: 0,
             };
             let result = super::super::decode_loop::decode_serial(

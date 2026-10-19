@@ -49,6 +49,9 @@ impl http::GenerationBackend for SignalBackend {
     fn model_id(&self) -> &str {
         "test"
     }
+    fn request_profile(&self) -> request_profile::RequestProfile {
+        request_profile::RequestProfile::test_qwen()
+    }
     fn generate(
         &mut self,
         _: &items::ServeRequest,

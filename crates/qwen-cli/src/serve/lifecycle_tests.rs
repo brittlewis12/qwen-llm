@@ -45,7 +45,7 @@ impl http::GenerationBackend for LifecycleBackend {
                 limits: crate::serve::request_profile::OutputLimits::TEST,
             };
         }
-        request_profile::RequestProfile::UnboundQwen
+        request_profile::RequestProfile::test_qwen()
     }
 
     fn generate(
@@ -328,7 +328,7 @@ impl http::GenerationBackend for PhaseBackend {
                 max_piece_bytes: 64,
             })
         } else {
-            request_profile::RequestProfile::UnboundQwen
+            request_profile::RequestProfile::test_qwen()
         }
     }
     fn model_id(&self) -> &str {
@@ -503,6 +503,9 @@ fn unsettled_accounting_still_flushes_backend_shutdown() {
     impl http::GenerationBackend for Backend {
         fn model_id(&self) -> &str {
             "shutdown-test"
+        }
+        fn request_profile(&self) -> request_profile::RequestProfile {
+            request_profile::RequestProfile::test_qwen()
         }
         fn generate(
             &mut self,

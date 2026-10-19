@@ -628,6 +628,7 @@ pub struct DeepSeekV4MetalResidency {
     pub(super) _residency_set: Option<DeepSeekV4ResidencySetGuard>,
     pub(super) tensors: BTreeMap<String, MetalTensor>,
     pub(super) report: DeepSeekV4ResidencyReport,
+    dtype_census: Vec<RoleDtype>,
     pub(super) device_registry_id: u64,
 }
 
@@ -700,15 +701,8 @@ pub(super) fn deepseek_v4_residency_set_qualification() -> &'static crate::metal
     &crate::metal::DEEPSEEK_V4_RESIDENCY_SET
 }
 
-/// Which qualified artifact this is, if any. Several prefill, MoE, indexer
-/// and attention fast paths are enabled only for these exact artifacts on an
-/// M4 Max because their numerics were validated there (see the 2026-09-24
-/// DS4 gate audit); say so once at load instead of declining silently.
-fn log_deepseek_v4_artifact_qualification(
-    ctx: &MetalContext,
-    config: &DeepSeekV4Config,
-    report: &DeepSeekV4ResidencyReport,
-) {
+/// Report that numerical dtype admission is evaluated at each fast-path gate.
+fn log_deepseek_v4_fast_path_qualification(ctx: &MetalContext, config: &DeepSeekV4Config) {
     let facts = ctx.device_facts();
     for qualification in crate::metal::DEEPSEEK_V4_QUALIFICATIONS {
         if let Some(reason) = crate::metal::declined_reason_once(qualification, facts) {
@@ -718,35 +712,10 @@ fn log_deepseek_v4_artifact_qualification(
             );
         }
     }
-    let profile = match (
-        report.tensor_count,
-        config.expert_count,
-        report.source_bytes,
-    ) {
-        (DEEPSEEK_V4_FLASH_0731_TENSOR_COUNT, 256, DEEPSEEK_V4_FRESH_SOURCE_BYTES) => "fresh",
-        (DEEPSEEK_V4_FLASH_0731_TENSOR_COUNT, 160, DEEPSEEK_V4_REAP_K160_SOURCE_BYTES) => {
-            "reap_k160"
-        }
-        (DEEPSEEK_V4_FLASH_0731_TENSOR_COUNT, 216, DEEPSEEK_V4_REAP_K216_SOURCE_BYTES) => {
-            "reap_k216"
-        }
-        _ => "none",
-    };
-    let qualified = profile != "none" && crate::metal::DEEPSEEK_V4_RESIDENCY_SET.holds_for(facts);
-    if profile != "none" && !qualified {
-        return;
-    }
     eprintln!(
-        "deepseek_v4: artifact profile={profile} tensor_count={} experts={} source_bytes={} device={:?} identity_gated_fast_paths={}",
-        report.tensor_count,
+        "deepseek_v4: experts={} device={:?} qualified_fast_paths=per_path_dtype_contracts",
         config.expert_count,
-        report.source_bytes,
         facts.name,
-        if qualified {
-            "on"
-        } else {
-            "off (packed Q8 matrices, grouped experts, all-slot Q3/Q4, multigroup selector, long HCA are validated only for the qualified artifacts on M4 Max)"
-        },
     );
 }
 
@@ -900,6 +869,7 @@ impl DeepSeekV4MetalResidency {
         }
         let model = DeepSeekV4Model::from_gguf_flash_0731(gguf)?;
         validate_strict_binding(gguf, &model)?;
+        let dtype_census = role_dtype_census(gguf).map_err(DeepSeekV4MetalError::Invalid)?;
         validate_operation_dtypes(&gguf.tensors)?;
         if model.config != plan.config {
             return invalid("DeepSeek V4 load-plan configuration differs from the GGUF binding");
@@ -945,7 +915,7 @@ impl DeepSeekV4MetalResidency {
         let tensors = realize_tensors(ctx, gguf, &plan.retained, &windows)?;
         validate_realization(gguf, &tensors, &plan.report)?;
         let residency_set = {
-            log_deepseek_v4_artifact_qualification(ctx, &plan.config, &plan.report);
+            log_deepseek_v4_fast_path_qualification(ctx, &plan.config);
             create_deepseek_v4_residency_set(ctx, &tensors, &plan.config, &plan.report)
         };
         let after_residency_bytes = ctx.current_allocated_size();
@@ -962,6 +932,7 @@ impl DeepSeekV4MetalResidency {
                 _residency_set: residency_set,
                 tensors,
                 report: plan.report,
+                dtype_census,
                 device_registry_id: ctx.device.registryID(),
             },
             admission: refreshed_admission,
@@ -1031,6 +1002,10 @@ impl DeepSeekV4MetalResidency {
 
     pub fn report(&self) -> &DeepSeekV4ResidencyReport {
         &self.report
+    }
+
+    pub(super) fn dtype_census(&self) -> &[RoleDtype] {
+        &self.dtype_census
     }
 
     pub fn device_registry_id(&self) -> u64 {

@@ -2862,6 +2862,91 @@ fn current_asset_packed_gpu_route_kill_packet() {
 
 #[cfg(feature = "dsv4-diagnostics")]
 #[test]
+#[ignore = "real-asset correctness and dispatch witness; run with QWEN_REQUIRE_METAL_TESTS=1"]
+fn current_asset_prefill_role_dtype_dispatch_witness() {
+    let model_path = crate::test_fixtures::DEEPSEEK_V4_IQ3_XXS.required();
+    let ctx = metal_context().expect("required Metal context");
+    let (gguf, model_content_id) = open_pinned_current_gguf(model_path);
+    let plan = DeepSeekV4MetalResidency::plan_for_forward_limit(&ctx, &gguf, 256)
+        .expect("plan current DS4 dispatch witness");
+    let admitted = plan
+        .admit(ctx.memory_signals())
+        .expect("admit current DS4 dispatch witness");
+    let realized = DeepSeekV4MetalResidency::load_from_plan(&ctx, &gguf, admitted)
+        .expect("realize current DS4 dispatch witness");
+    let residency = realized.into_residency();
+    assert!(prefill::packed_q8_compressor_matrix_for_chunk(
+        &ctx, &residency, 256
+    ));
+
+    let tokens = (0..256)
+        .map(|index| [35, 201, 200, 34][index % 4])
+        .collect::<Vec<_>>();
+    let run = |residency, model_content_id| {
+        let mut session =
+            DeepSeekV4Session::new_with_model_content_id(&ctx, residency, model_content_id)
+                .expect("construct current DS4 dispatch session");
+        crate::metal::dispatch_census_begin();
+        session
+            .prefill_tokens(&ctx, &tokens)
+            .expect("execute current DS4 packed prefill");
+        let dispatches = crate::metal::dispatch_census_take();
+        let logits = session
+            .copy_logits_f32()
+            .expect("copy current DS4 witness logits")
+            .into_iter()
+            .map(f32::to_bits)
+            .collect::<Vec<_>>();
+        let residency = session
+            .into_residency()
+            .expect("recover current DS4 residency");
+        (residency, logits, dispatches)
+    };
+    let (residency, first_logits, dispatches) = run(residency, model_content_id);
+    let (_residency, second_logits, repeated_dispatches) = run(residency, model_content_id);
+    assert_eq!(
+        first_logits, second_logits,
+        "fresh production prefills repeat bitwise"
+    );
+    assert!(
+        !dispatches.is_empty(),
+        "the packed prefill dispatched kernels"
+    );
+    assert_eq!(
+        dispatches
+            .iter()
+            .map(|row| row.kernel.as_str())
+            .collect::<Vec<_>>(),
+        repeated_dispatches
+            .iter()
+            .map(|row| row.kernel.as_str())
+            .collect::<Vec<_>>(),
+        "repeated production prefill dispatch sequence",
+    );
+
+    let mut kernel_counts = BTreeMap::<String, usize>::new();
+    for row in &dispatches {
+        *kernel_counts.entry(row.kernel.clone()).or_default() += 1;
+    }
+    let facts = ctx.device_facts();
+    let q8_matrix_qualified = crate::metal::DEEPSEEK_V4_PACKED_Q8_MATRIX_FAMILY.holds_for(facts);
+    let q8_matrix_dispatches = dispatches
+        .iter()
+        .filter(|row| row.kernel.starts_with("kernel_mat_mat_q8_0_f32"))
+        .count();
+    if q8_matrix_qualified {
+        assert!(
+            q8_matrix_dispatches > 0,
+            "qualified Q8 compressor matrix path dispatched no Q8 matrix kernels"
+        );
+    }
+    eprintln!(
+        "deepseek_v4_prefill_dispatch_witness experts=256 tokens=256 q8_matrix_qualified={q8_matrix_qualified} q8_matrix_dispatches={q8_matrix_dispatches} kernels={kernel_counts:?} repeated_bitwise=true",
+    );
+}
+
+#[cfg(feature = "dsv4-diagnostics")]
+#[test]
 #[ignore = "requires the current 97.05 GiB DS4 asset"]
 fn current_asset_packed_grouped_expert_integration_packet() {
     let _ = crate::test_fixtures::DEEPSEEK_V4_IQ3_XXS.required();

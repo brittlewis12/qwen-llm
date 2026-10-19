@@ -303,7 +303,6 @@ fn mhc_delete_oracle_plans_all_sites_and_arm_ownership() {
         hc_epsilon_bits: 1.0e-6f32.to_bits(),
         device_registry_id: ctx.device.registryID(),
         residency_tensor_count: 1_328,
-        residency_source_bytes: 89_920_886_108,
         expert_count: 160,
     };
     let ordinary = MetalTensor::zeros_f32(&ctx, vec![DEEPSEEK_V4_HC_PARAMETER_COUNT as u64, 1])
@@ -435,7 +434,6 @@ fn mhc_delete_oracle_requires_matching_capture_pair_and_endpoint() {
         hc_epsilon_bits: 1.0e-6f32.to_bits(),
         device_registry_id: ctx.device.registryID(),
         residency_tensor_count: 1_328,
-        residency_source_bytes: 89_920_886_108,
         expert_count: 160,
     };
     let capture = || {
@@ -1019,1006 +1017,208 @@ fn grouped_test_schedule(n_tokens: usize) -> (Vec<i32>, Vec<i32>, Vec<i32>, Vec<
     grouped_test_schedule_for_experts(n_tokens, MOE_EXPERT_COUNT)
 }
 
+fn census_for_path_roles(roles: &[QualifiedRoleDtypes]) -> Vec<RoleDtype> {
+    roles
+        .iter()
+        .flat_map(|requirement| {
+            requirement.dtypes.iter().copied().map(|dtype| RoleDtype {
+                role: requirement.role,
+                dtype,
+            })
+        })
+        .collect()
+}
+
 #[test]
-fn packed_grouped_expert_mode_has_an_isolated_fail_closed_rollback() {
-    assert_eq!(
-        DEEPSEEK_V4_PREFILL_MAX_TOKENS,
-        PACKED_GROUPED_EXPERT_MAX_TOKENS
-    );
-    let mma16 = PackedExpertPolicy::GroupedIq2XsIq3XxsMma16QualifiedChunk;
-    assert!(!mma16.uses_iq2_mma16(127));
-    assert!(mma16.uses_iq2_mma16(PACKED_GROUPED_IQ2_MMA16_NARROW_TOKENS));
-    assert!(!mma16.uses_iq2_mma16(129));
-    assert!(!mma16.uses_iq2_mma16(255));
-    assert!(mma16.uses_iq2_mma16(256));
-    assert!(mma16.uses_iq2_mma16(337));
-    assert!(mma16.uses_iq2_mma16(PACKED_GROUPED_IQ2_MMA16_MEDIUM_TOKENS));
-    assert!(mma16.uses_iq2_mma16(PACKED_GROUPED_IQ2_MMA16_WIDE_TOKENS - 1));
-    assert!(mma16.uses_iq2_mma16(PACKED_GROUPED_IQ2_MMA16_WIDE_TOKENS));
-    assert!(!mma16.uses_iq2_mma16(PACKED_GROUPED_IQ2_MMA16_WIDE_TOKENS + 1));
-    for tokens in [256, 337, 4_095] {
-        for (bytes, experts) in [
-            (
-                PACKED_Q8_COMPRESSOR_MATRIX_QUALIFIED_SOURCE_BYTES,
-                MOE_EXPERT_COUNT,
-            ),
-            (PACKED_Q8_MATRIX_REAP_K216_SOURCE_BYTES, 216),
-        ] {
-            assert!(packed_grouped_iq2_matrix_scope_qualified(
-                &scope_facts_for_apple7(true),
-                1_328,
-                bytes,
-                experts,
-                tokens,
-            ));
-        }
-    }
-    for (device, tensors, bytes, experts) in [
-        (false, 1_328, PACKED_Q8_MATRIX_REAP_K216_SOURCE_BYTES, 216),
-        (true, 1_327, PACKED_Q8_MATRIX_REAP_K216_SOURCE_BYTES, 216),
-        (true, 1_328, PACKED_Q8_MATRIX_REAP_K160_SOURCE_BYTES, 216),
-        (true, 1_328, PACKED_Q8_MATRIX_REAP_K160_SOURCE_BYTES, 160),
-        (true, 1_328, PACKED_Q8_MATRIX_REAP_K216_SOURCE_BYTES, 256),
-        (
-            true,
-            1_328,
-            PACKED_Q8_COMPRESSOR_MATRIX_QUALIFIED_SOURCE_BYTES,
-            216,
-        ),
-    ] {
-        assert!(!packed_grouped_iq2_matrix_scope_qualified(
-            &scope_facts_for_apple7(device),
-            tensors,
-            bytes,
+fn packed_fast_path_role_contracts_scope_only_consumed_tensors() {
+    let compressor = census_for_path_roles(COMPRESSOR_MATRIX_ROLE_DTYPES);
+    for experts in [160, 216, MOE_EXPERT_COUNT] {
+        assert!(packed_q8_compressor_matrix_scope_qualified(
+            &scope_facts_for_apple7(true),
+            &compressor,
             experts,
-            337,
+            256,
         ));
     }
-    assert!(!packed_grouped_iq2_matrix_scope_qualified(
+    let mut changed_elsewhere = compressor.clone();
+    changed_elsewhere.push(RoleDtype {
+        role: DeepSeekV4TensorRole::TokenEmbedding,
+        dtype: GgmlType::F32,
+    });
+    assert!(packed_q8_compressor_matrix_scope_qualified(
         &scope_facts_for_apple7(true),
-        1_328,
-        PACKED_Q8_MATRIX_REAP_K216_SOURCE_BYTES,
-        216,
-        255,
+        &changed_elsewhere,
+        256,
+        256,
     ));
-    assert!(!packed_grouped_iq2_matrix_scope_qualified(
+
+    let mut changed_consumed = compressor.clone();
+    changed_consumed.retain(|role| role.role != DeepSeekV4TensorRole::AttentionCompressorGate);
+    assert!(!packed_q8_compressor_matrix_scope_qualified(
         &scope_facts_for_apple7(true),
-        1_328,
-        PACKED_Q8_COMPRESSOR_MATRIX_QUALIFIED_SOURCE_BYTES,
-        MOE_EXPERT_COUNT,
-        255,
-    ));
-    assert!(!mma16.uses_iq3_target());
-    let gpu_compact = mma16.with_iq3_target();
-    assert_eq!(
-        gpu_compact,
-        PackedExpertPolicy::GroupedIq2XsIq3XxsMma16AndIq3XxsQualifiedChunk
-    );
-    assert!(gpu_compact.uses_iq2_mma16(PACKED_GROUPED_IQ2_MMA16_WIDE_TOKENS));
-    assert!(gpu_compact.uses_iq3_target());
-    assert!(packed_grouped_iq_expert_count_qualified(216));
-    assert!(packed_grouped_iq_expert_count_qualified(MOE_EXPERT_COUNT));
-    assert!(!packed_grouped_iq_expert_count_qualified(160));
-    assert!(!packed_grouped_iq_expert_count_qualified(200));
-    assert!(
-        packed_grouped_expert_scope(
-            PackedGroupedExpertMode::Auto,
-            PACKED_GROUPED_EXPERT_MAX_TOKENS,
-        )
-        .unwrap()
-    );
-    assert!(
-        packed_grouped_expert_scope(
-            PackedGroupedExpertMode::Auto,
-            DEEPSEEK_V4_PREFILL_MAX_TOKENS,
-        )
-        .unwrap()
-    );
-    assert!(
-        packed_grouped_expert_scope(
-            PackedGroupedExpertMode::ForceOn,
-            DEEPSEEK_V4_PREFILL_MAX_TOKENS + 1,
-        )
-        .unwrap_err()
-        .to_string()
-        .contains("qualified through 4096 tokens")
-    );
-    assert_eq!(
-        parse_packed_grouped_expert_mode(None),
-        PackedGroupedExpertMode::Auto
-    );
-    for enabled in ["1", "true", "TRUE", "yes", "YES"] {
-        assert_eq!(
-            parse_packed_grouped_expert_mode(Some(enabled)),
-            PackedGroupedExpertMode::ForceOn
-        );
-    }
-    for disabled in ["0", "false", "FALSE", "no", "NO", "invalid"] {
-        assert_eq!(
-            parse_packed_grouped_expert_mode(Some(disabled)),
-            PackedGroupedExpertMode::ForceOff
-        );
-    }
-    for automatic in ["auto", "AUTO"] {
-        assert_eq!(
-            parse_packed_grouped_expert_mode(Some(automatic)),
-            PackedGroupedExpertMode::Auto
-        );
-    }
-}
-
-#[test]
-fn packed_q8_qb_matrix_policy_and_scope_are_explicit() {
-    assert_eq!(
-        parse_packed_q8_qb_policy(None).unwrap(),
-        PackedQ8MatrixPolicy::Auto
-    );
-    assert_eq!(
-        parse_packed_q8_qb_policy(Some("auto")).unwrap(),
-        PackedQ8MatrixPolicy::Auto
-    );
-    assert_eq!(
-        parse_packed_q8_qb_policy(Some("exact")).unwrap(),
-        PackedQ8MatrixPolicy::Exact
-    );
-    assert_eq!(
-        parse_packed_q8_qb_policy(Some("f32_matrix")).unwrap(),
-        PackedQ8MatrixPolicy::F32Matrix
-    );
-    assert_eq!(
-        parse_packed_q8_qb_policy(Some("wide_f32_matrix")).unwrap(),
-        PackedQ8MatrixPolicy::WideF32Matrix
-    );
-    assert_eq!(
-        resolve_packed_q8_matrix_policy(PackedQ8MatrixPolicy::Auto, true, 512),
-        Q8PrecisionProjection::WideF32Matrix
-    );
-    assert_eq!(
-        resolve_packed_q8_matrix_policy(PackedQ8MatrixPolicy::Auto, true, 337),
-        Q8PrecisionProjection::F32Matrix
-    );
-    assert_eq!(
-        resolve_packed_q8_matrix_policy(PackedQ8MatrixPolicy::Auto, false, 337),
-        Q8PrecisionProjection::Exact
-    );
-    assert_eq!(
-        resolve_packed_q8_matrix_policy(PackedQ8MatrixPolicy::Exact, true, 512),
-        Q8PrecisionProjection::Exact
-    );
-    assert_eq!(
-        resolve_packed_q8_matrix_policy(PackedQ8MatrixPolicy::F32Matrix, false, 337),
-        Q8PrecisionProjection::F32Matrix
-    );
-    assert_eq!(
-        resolve_packed_q8_matrix_policy(PackedQ8MatrixPolicy::WideF32Matrix, false, 512),
-        Q8PrecisionProjection::WideF32Matrix
-    );
-    assert_eq!(
-        resolve_packed_q8_matrix_policy(PackedQ8MatrixPolicy::WideF32Matrix, false, 337),
-        Q8PrecisionProjection::F32Matrix
-    );
-    let matrix = Q8PrecisionProjection::F32Matrix;
-    assert!(matrix.uses_full_chunk_f32(337));
-    assert!(matrix.uses_full_chunk_f32(512));
-    assert!(matrix.uses_full_chunk_f32(PACKED_MATRIX_MIN_TOKENS));
-    assert!(matrix.uses_full_chunk_f32(DEEPSEEK_V4_PREFILL_MAX_TOKENS));
-    let wide = Q8PrecisionProjection::WideF32Matrix;
-    assert!(wide.uses_full_chunk_f32(512));
-    assert!(!wide.uses_full_chunk_f32(337));
-    assert!(wide.uses_full_chunk_f32(PACKED_MATRIX_MIN_TOKENS));
-    assert!(wide.uses_full_chunk_f32(DEEPSEEK_V4_PREFILL_MAX_TOKENS));
-    assert!(parse_packed_q8_qb_policy(Some("half_matrix")).is_err());
-}
-
-#[test]
-fn packed_q8_output_matrix_policy_is_explicit_and_qualified_width_only() {
-    assert_eq!(
-        parse_packed_q8_output_policy(None).unwrap(),
-        PackedQ8MatrixPolicy::Auto
-    );
-    assert_eq!(
-        parse_packed_q8_output_policy(Some("auto")).unwrap(),
-        PackedQ8MatrixPolicy::Auto
-    );
-    assert_eq!(
-        parse_packed_q8_output_policy(Some("exact")).unwrap(),
-        PackedQ8MatrixPolicy::Exact
-    );
-    assert_eq!(
-        parse_packed_q8_output_policy(Some("f32_matrix")).unwrap(),
-        PackedQ8MatrixPolicy::F32Matrix
-    );
-    assert_eq!(
-        parse_packed_q8_output_policy(Some("wide_f32_matrix")).unwrap(),
-        PackedQ8MatrixPolicy::WideF32Matrix
-    );
-    assert_eq!(
-        resolve_packed_q8_matrix_policy(PackedQ8MatrixPolicy::Auto, true, 512),
-        Q8PrecisionProjection::WideF32Matrix
-    );
-    assert_eq!(
-        resolve_packed_q8_matrix_policy(PackedQ8MatrixPolicy::Auto, true, 337),
-        Q8PrecisionProjection::F32Matrix
-    );
-    assert_eq!(
-        resolve_packed_q8_matrix_policy(PackedQ8MatrixPolicy::Auto, false, 337),
-        Q8PrecisionProjection::Exact
-    );
-    assert_eq!(
-        resolve_packed_q8_matrix_policy(PackedQ8MatrixPolicy::WideF32Matrix, false, 337),
-        Q8PrecisionProjection::F32Matrix
-    );
-    let matrix = Q8PrecisionProjection::F32Matrix;
-    assert!(matrix.uses_full_chunk_f32(512));
-    assert!(matrix.uses_full_chunk_f32(PACKED_MATRIX_MIN_TOKENS));
-    assert!(matrix.uses_full_chunk_f32(DEEPSEEK_V4_PREFILL_MAX_TOKENS));
-    assert!(parse_packed_q8_output_policy(Some("half_matrix")).is_err());
-}
-
-#[test]
-fn packed_q8_compressor_matrix_scope_is_exact() {
-    let qualified = |device, tensors, bytes, experts, tokens| {
-        packed_q8_compressor_matrix_scope_qualified(
-            &scope_facts_for_apple7(device),
-            tensors,
-            bytes,
-            experts,
-            tokens,
-        )
-    };
-    for tokens in [256, 337, 512, 2_048, 4_095, DEEPSEEK_V4_PREFILL_MAX_TOKENS] {
-        for (bytes, experts) in [
-            (
-                PACKED_Q8_COMPRESSOR_MATRIX_QUALIFIED_SOURCE_BYTES,
-                MOE_EXPERT_COUNT,
-            ),
-            (PACKED_Q8_MATRIX_REAP_K160_SOURCE_BYTES, 160),
-            (PACKED_Q8_MATRIX_REAP_K216_SOURCE_BYTES, 216),
-        ] {
-            assert!(qualified(true, 1_328, bytes, experts, tokens,));
-        }
-    }
-    for (bytes, experts) in [
-        (
-            PACKED_Q8_COMPRESSOR_MATRIX_QUALIFIED_SOURCE_BYTES,
-            MOE_EXPERT_COUNT,
-        ),
-        (PACKED_Q8_MATRIX_REAP_K160_SOURCE_BYTES, 160),
-        (PACKED_Q8_MATRIX_REAP_K216_SOURCE_BYTES, 216),
-    ] {
-        assert!(!qualified(true, 1_328, bytes, experts, 255,));
-    }
-    assert!(!qualified(
-        false,
-        1_328,
-        PACKED_Q8_COMPRESSOR_MATRIX_QUALIFIED_SOURCE_BYTES,
+        &changed_consumed,
         256,
-        DEEPSEEK_V4_PREFILL_MAX_TOKENS,
-    ));
-    assert!(!qualified(
-        true,
-        1_327,
-        PACKED_Q8_COMPRESSOR_MATRIX_QUALIFIED_SOURCE_BYTES,
         256,
-        DEEPSEEK_V4_PREFILL_MAX_TOKENS,
     ));
-    assert!(!qualified(
-        true,
-        1_328,
-        PACKED_Q8_COMPRESSOR_MATRIX_QUALIFIED_SOURCE_BYTES - 1,
-        256,
-        DEEPSEEK_V4_PREFILL_MAX_TOKENS,
-    ));
-    assert!(!qualified(
-        true,
-        1_328,
-        PACKED_Q8_MATRIX_REAP_K160_SOURCE_BYTES - 1,
+    assert!(!packed_q8_compressor_matrix_scope_qualified(
+        &scope_facts_for_apple7(true),
+        &compressor,
         160,
+        255,
+    ));
+}
+
+#[test]
+fn packed_attention_and_indexer_paths_check_their_own_roles() {
+    let qa_kv = census_for_path_roles(QA_KV_MATRIX_ROLE_DTYPES);
+    assert!(packed_q8_qa_kv_matrix_scope_qualified(
+        &scope_facts_for_apple7(true),
+        &qa_kv,
+        160,
+        256,
+    ));
+    assert!(!packed_q8_qa_kv_matrix_scope_qualified(
+        &scope_facts_for_apple7(true),
+        &qa_kv,
+        216,
+        256,
+    ));
+
+    let indexer = census_for_path_roles(INDEXER_Q_MATRIX_ROLE_DTYPES);
+    assert!(packed_indexer_q_matrix_scope_qualified(
+        &scope_facts_for_apple7(true),
+        &indexer,
+        256,
+        DEEPSEEK_V4_PREFILL_MAX_TOKENS,
+    ));
+    assert!(!packed_indexer_q_matrix_scope_qualified(
+        &scope_facts_for_apple7(true),
+        &indexer,
+        256,
         PACKED_MATRIX_MIN_TOKENS,
     ));
-    assert!(!qualified(
-        true,
-        1_328,
-        PACKED_Q8_MATRIX_REAP_K216_SOURCE_BYTES - 1,
-        216,
-        DEEPSEEK_V4_PREFILL_MAX_TOKENS,
-    ));
-    assert!(!qualified(
-        true,
-        1_328,
-        PACKED_Q8_COMPRESSOR_MATRIX_QUALIFIED_SOURCE_BYTES,
-        216,
-        337,
-    ));
-    assert!(!qualified(
-        true,
-        1_328,
-        PACKED_Q8_MATRIX_REAP_K216_SOURCE_BYTES,
+
+    let mut wrong = indexer;
+    wrong.retain(|role| role.role != DeepSeekV4TensorRole::IndexerProjection);
+    assert!(!packed_indexer_q_matrix_scope_qualified(
+        &scope_facts_for_apple7(true),
+        &wrong,
         256,
         DEEPSEEK_V4_PREFILL_MAX_TOKENS,
+    ));
+}
+
+#[test]
+fn compact_router_paths_keep_geometry_and_dtype_requirements() {
+    let router = census_for_path_roles(ROUTER_ROLE_DTYPES);
+    assert!(packed_router_e8p32_scope_qualified(
+        &scope_facts_for_apple7(true),
+        &router,
+        160,
+        256,
+    ));
+    assert!(!packed_router_e8p32_scope_qualified(
+        &scope_facts_for_apple7(true),
+        &router,
+        216,
+        256,
+    ));
+    assert!(packed_gpu_route_compact_scope_qualified(
+        &scope_facts_for_apple7(true),
+        &census_for_path_roles(ROUTE_COMPACTION_ROLE_DTYPES),
+        MOE_EXPERT_COUNT,
+        PACKED_MATRIX_MIN_TOKENS,
     ));
     assert!(!packed_gpu_route_compact_scope_qualified(
         &scope_facts_for_apple7(true),
-        1_328,
-        PACKED_Q8_COMPRESSOR_MATRIX_QUALIFIED_SOURCE_BYTES,
-        MOE_EXPERT_COUNT,
-        337,
+        &census_for_path_roles(ROUTE_COMPACTION_ROLE_DTYPES),
+        216,
+        PACKED_MATRIX_MIN_TOKENS,
     ));
-    assert!(packed_gpu_route_compact_scope_qualified(
+}
+
+#[test]
+fn routed_expert_fast_paths_check_only_the_expert_roles_they_read() {
+    let grouped_iq2 = census_for_path_roles(GROUPED_IQ2_ROLE_DTYPES);
+    for experts in [216, MOE_EXPERT_COUNT] {
+        assert!(packed_grouped_iq2_matrix_scope_qualified(
+            &scope_facts_for_apple7(true),
+            &grouped_iq2,
+            experts,
+            256,
+        ));
+    }
+    assert!(!packed_grouped_iq2_matrix_scope_qualified(
         &scope_facts_for_apple7(true),
-        1_328,
-        PACKED_Q8_COMPRESSOR_MATRIX_QUALIFIED_SOURCE_BYTES,
-        MOE_EXPERT_COUNT,
-        PACKED_MATRIX_MIN_TOKENS,
-    ));
-}
-
-#[test]
-fn packed_scope_helpers_use_their_named_device_qualifications() {
-    assert_eq!(
-        packed_grouped_expert_qualification().path,
-        "deepseek_v4.packed_grouped_expert"
-    );
-    assert_eq!(
-        packed_q8_matrix_family_qualification().path,
-        "deepseek_v4.packed_q8_matrix_family"
-    );
-    assert_eq!(
-        packed_gpu_route_compaction_qualification().path,
-        "deepseek_v4.packed_gpu_route_compaction"
-    );
-    assert_eq!(
-        packed_mxfp4_matrix_qualification().path,
-        "deepseek_v4.packed_mxfp4_matrix"
-    );
-    assert_eq!(
-        packed_e8p32_router_qualification().path,
-        "deepseek_v4.packed_e8p32_router"
-    );
-    assert_eq!(
-        packed_qa_raw_kv_matrix_qualification().path,
-        "deepseek_v4.packed_q_a_raw_kv_matrix"
-    );
-    assert_eq!(
-        packed_indexer_q_matrix_qualification().path,
-        "deepseek_v4.packed_indexer_q_matrix"
-    );
-    assert_eq!(
-        packed_grouped_q3q4_qualification().path,
-        "deepseek_v4.packed_grouped_q3q4"
-    );
-    assert_eq!(
-        packed_shared_route_overlap_qualification().path,
-        "deepseek_v4.packed_shared_route_overlap"
-    );
-
-    let m4 = scope_facts("Apple M4 Max", None, false);
-    let m4_pro = scope_facts("Apple M4 Pro", None, true);
-    let source = PACKED_Q8_MATRIX_REAP_K160_SOURCE_BYTES;
-    assert!(packed_q8_compressor_matrix_scope_qualified(
-        &m4, 1_328, source, 160, 337,
-    ));
-    assert!(packed_q8_compressor_matrix_scope_qualified(
-        &m4_pro, 1_328, source, 160, 337,
-    ));
-    assert!(packed_router_e8p32_scope_qualified(
-        &m4, 1_328, source, 160, 337
-    ));
-    assert!(packed_q8_qa_kv_matrix_scope_qualified(
-        &m4, 1_328, source, 160, 337
-    ));
-    assert!(packed_mxfp4_matrix_scope_qualified(
-        &m4,
-        1_328,
-        PACKED_Q8_MATRIX_REAP_K216_SOURCE_BYTES,
-        216,
-        PACKED_MATRIX_MIN_TOKENS,
-    ));
-    assert!(packed_indexer_q_matrix_scope_qualified(
-        &m4,
-        1_328,
-        source,
+        &grouped_iq2,
         160,
-        DEEPSEEK_V4_PREFILL_MAX_TOKENS,
+        256,
     ));
-    assert!(packed_grouped_q3q4_scope_qualified(
-        &m4,
-        1_328,
-        source,
-        160,
-        PACKED_MATRIX_MIN_TOKENS,
-        GgmlType::Q3_K,
-        GgmlType::Q3_K,
-        GgmlType::Q4_K,
-    ));
-    assert!(packed_shared_route_overlap_scope_qualified(
-        &m4,
-        1_328,
-        source,
+
+    assert!(packed_grouped_q3q4_identity_scope_qualified(
         160,
         256,
         GgmlType::Q3_K,
         GgmlType::Q3_K,
         GgmlType::Q4_K,
     ));
-    assert!(packed_gpu_route_compact_scope_qualified(
-        &m4,
-        1_328,
-        PACKED_Q8_COMPRESSOR_MATRIX_QUALIFIED_SOURCE_BYTES,
-        MOE_EXPERT_COUNT,
-        PACKED_MATRIX_MIN_TOKENS,
-    ));
-    assert!(packed_router_e8p32_scope_qualified(
-        &m4_pro, 1_328, source, 160, 337
-    ));
-    assert!(packed_q8_qa_kv_matrix_scope_qualified(
-        &m4_pro, 1_328, source, 160, 337
-    ));
-    assert!(packed_mxfp4_matrix_scope_qualified(
-        &m4_pro,
-        1_328,
-        PACKED_Q8_MATRIX_REAP_K216_SOURCE_BYTES,
-        216,
-        PACKED_MATRIX_MIN_TOKENS,
-    ));
-    assert!(packed_indexer_q_matrix_scope_qualified(
-        &m4_pro,
-        1_328,
-        source,
+    assert!(!packed_grouped_q3q4_identity_scope_qualified(
         160,
-        DEEPSEEK_V4_PREFILL_MAX_TOKENS,
-    ));
-
-    let force_off_device = scope_facts("Apple M4 Pro", None, false);
-    assert!(packed_grouped_expert_device_enabled(
-        PackedGroupedExpertMode::Auto,
-        &force_off_device,
-    ));
-    assert!(packed_grouped_expert_device_enabled(
-        PackedGroupedExpertMode::ForceOn,
-        &force_off_device,
-    ));
-    assert!(!packed_grouped_expert_device_enabled(
-        PackedGroupedExpertMode::ForceOff,
-        &m4,
-    ));
-
-    // These explicit Q8 policy values skip the automatic device qualification.
-    assert_eq!(
-        resolve_packed_q8_matrix_policy(
-            parse_packed_q8_qb_policy(Some("f32_matrix")).unwrap(),
-            false,
-            337,
-        ),
-        Q8PrecisionProjection::F32Matrix
-    );
-    assert_eq!(
-        resolve_packed_q8_matrix_policy(
-            parse_packed_q8_output_policy(Some("wide_f32_matrix")).unwrap(),
-            false,
-            512,
-        ),
-        Q8PrecisionProjection::WideF32Matrix
-    );
-}
-
-#[test]
-fn packed_router_e8p32_scope_is_exactly_k160_m4() {
-    assert_eq!(parse_packed_router_e8p32_strict_env(None), Ok(true));
-    for value in ["1", "true", "TRUE", " yes ", "On"] {
-        assert_eq!(parse_packed_router_e8p32_strict_env(Some(value)), Ok(true));
-    }
-    for value in ["0", "false", "FALSE", " no ", "Off"] {
-        assert_eq!(parse_packed_router_e8p32_strict_env(Some(value)), Ok(false));
-    }
-    for value in ["", "ture", "2"] {
-        assert!(parse_packed_router_e8p32_strict_env(Some(value)).is_err());
-    }
-    let qualified = |device, tensors, bytes, experts, tokens| {
-        packed_router_e8p32_scope_qualified(
-            &scope_facts_for_apple7(device),
-            tensors,
-            bytes,
-            experts,
-            tokens,
-        )
-    };
-    for tokens in [
         256,
-        337,
-        512,
-        PACKED_MATRIX_MIN_TOKENS,
-        4_095,
-        DEEPSEEK_V4_PREFILL_MAX_TOKENS,
-    ] {
-        assert!(qualified(
-            true,
-            1_328,
-            PACKED_Q8_MATRIX_REAP_K160_SOURCE_BYTES,
-            160,
-            tokens,
-        ));
-    }
-    assert!(!qualified(
-        false,
-        1_328,
-        PACKED_Q8_MATRIX_REAP_K160_SOURCE_BYTES,
-        160,
-        PACKED_MATRIX_MIN_TOKENS,
+        GgmlType::Q3_K,
+        GgmlType::Q3_K,
+        GgmlType::IQ3_XXS,
     ));
-    assert!(!qualified(
-        true,
-        1_327,
-        PACKED_Q8_MATRIX_REAP_K160_SOURCE_BYTES,
-        160,
-        PACKED_MATRIX_MIN_TOKENS,
-    ));
-    assert!(!qualified(
-        true,
-        1_328,
-        PACKED_Q8_MATRIX_REAP_K160_SOURCE_BYTES - 1,
-        160,
-        PACKED_MATRIX_MIN_TOKENS,
-    ));
-    assert!(!qualified(
-        true,
-        1_328,
-        PACKED_Q8_MATRIX_REAP_K160_SOURCE_BYTES,
+    assert!(!packed_grouped_q3q4_identity_scope_qualified(
         216,
-        PACKED_MATRIX_MIN_TOKENS,
-    ));
-    assert!(!qualified(
-        true,
-        1_328,
-        PACKED_Q8_MATRIX_REAP_K160_SOURCE_BYTES,
-        160,
-        255,
-    ));
-}
-
-#[test]
-fn packed_q8_qa_kv_matrix_policy_is_scoped_and_fail_closed() {
-    assert_eq!(
-        parse_packed_q8_qa_kv_matrix_mode(None),
-        Ok(PackedQaKvMatrixMode::Both)
-    );
-    for (value, expected) in [
-        ("off", PackedQaKvMatrixMode::Off),
-        ("qa", PackedQaKvMatrixMode::Qa),
-        ("kv", PackedQaKvMatrixMode::Kv),
-        ("both", PackedQaKvMatrixMode::Both),
-        (" TRUE ", PackedQaKvMatrixMode::Both),
-    ] {
-        assert_eq!(parse_packed_q8_qa_kv_matrix_mode(Some(value)), Ok(expected));
-    }
-    assert!(parse_packed_q8_qa_kv_matrix_mode(Some("qk")).is_err());
-
-    let qualified = |device, tensors, bytes, experts, tokens| {
-        packed_q8_qa_kv_matrix_scope_qualified(
-            &scope_facts_for_apple7(device),
-            tensors,
-            bytes,
-            experts,
-            tokens,
-        )
-    };
-    for tokens in [
         256,
-        337,
-        512,
-        PACKED_MATRIX_MIN_TOKENS,
-        4_095,
-        DEEPSEEK_V4_PREFILL_MAX_TOKENS,
-    ] {
-        assert!(qualified(
-            true,
-            1_328,
-            PACKED_Q8_MATRIX_REAP_K160_SOURCE_BYTES,
-            160,
-            tokens,
-        ));
-    }
-    assert!(!qualified(
-        false,
-        1_328,
-        PACKED_Q8_MATRIX_REAP_K160_SOURCE_BYTES,
-        160,
-        PACKED_MATRIX_MIN_TOKENS,
-    ));
-    assert!(!qualified(
-        true,
-        1_328,
-        PACKED_Q8_MATRIX_REAP_K216_SOURCE_BYTES,
-        216,
-        PACKED_MATRIX_MIN_TOKENS,
-    ));
-    assert!(!qualified(
-        true,
-        1_328,
-        PACKED_Q8_MATRIX_REAP_K160_SOURCE_BYTES,
-        160,
-        255,
+        GgmlType::Q3_K,
+        GgmlType::Q3_K,
+        GgmlType::Q4_K,
     ));
 }
 
 #[test]
-fn packed_mxfp4_matrix_scope_covers_both_fresh_and_k216_full_widths() {
-    let qualified = |device, tensors, bytes, experts, tokens| {
-        packed_mxfp4_matrix_scope_qualified(
-            &scope_facts_for_apple7(device),
-            tensors,
-            bytes,
-            experts,
-            tokens,
-        )
-    };
-    for tokens in [PACKED_MATRIX_MIN_TOKENS, DEEPSEEK_V4_PREFILL_MAX_TOKENS] {
-        assert!(qualified(
-            true,
-            1_328,
-            PACKED_Q8_COMPRESSOR_MATRIX_QUALIFIED_SOURCE_BYTES,
+fn matrix_projection_contracts_match_the_roles_read_by_each_projection() {
+    let qb = census_for_path_roles(QB_MATRIX_ROLE_DTYPES);
+    let output = census_for_path_roles(OUTPUT_MATRIX_ROLE_DTYPES);
+    let shared = census_for_path_roles(SHARED_MATRIX_ROLE_DTYPES);
+    for (path, roles) in [
+        ("packed_q8_qb_projection", QB_MATRIX_ROLE_DTYPES),
+        ("packed_q8_output_projection", OUTPUT_MATRIX_ROLE_DTYPES),
+        ("packed_q8_shared_matrix", SHARED_MATRIX_ROLE_DTYPES),
+    ] {
+        let census = match path {
+            "packed_q8_qb_projection" => qb.as_slice(),
+            "packed_q8_output_projection" => output.as_slice(),
+            _ => shared.as_slice(),
+        };
+        assert!(path_role_dtypes_qualified(census, path, roles));
+        assert!(packed_q8_projection_qualified(
+            census,
             MOE_EXPERT_COUNT,
-            tokens,
+            256,
+            path,
+            roles,
         ));
-        assert!(qualified(
-            true,
-            1_328,
-            PACKED_Q8_MATRIX_REAP_K216_SOURCE_BYTES,
-            216,
-            tokens,
-        ));
-    }
-    assert!(!qualified(
-        false,
-        1_328,
-        PACKED_Q8_MATRIX_REAP_K216_SOURCE_BYTES,
-        216,
-        PACKED_MATRIX_MIN_TOKENS,
-    ));
-    assert!(!qualified(
-        true,
-        1_327,
-        PACKED_Q8_MATRIX_REAP_K216_SOURCE_BYTES,
-        216,
-        PACKED_MATRIX_MIN_TOKENS,
-    ));
-    assert!(!qualified(
-        true,
-        1_328,
-        PACKED_Q8_MATRIX_REAP_K216_SOURCE_BYTES - 1,
-        216,
-        PACKED_MATRIX_MIN_TOKENS,
-    ));
-    assert!(!qualified(
-        true,
-        1_328,
-        PACKED_Q8_MATRIX_REAP_K216_SOURCE_BYTES,
-        160,
-        PACKED_MATRIX_MIN_TOKENS,
-    ));
-    assert!(!qualified(
-        true,
-        1_328,
-        PACKED_Q8_MATRIX_REAP_K216_SOURCE_BYTES,
-        216,
-        1_024,
-    ));
-    for tokens in [PACKED_MATRIX_MIN_TOKENS, DEEPSEEK_V4_PREFILL_MAX_TOKENS] {
-        assert!(!qualified(
-            true,
-            1_328,
-            PACKED_Q8_MATRIX_REAP_K160_SOURCE_BYTES,
-            160,
-            tokens,
+        assert!(!packed_q8_projection_qualified(
+            census,
+            MOE_EXPERT_COUNT,
+            255,
+            path,
+            roles,
         ));
     }
-    assert!(!qualified(
-        true,
-        1_328,
-        PACKED_Q8_COMPRESSOR_MATRIX_QUALIFIED_SOURCE_BYTES,
-        MOE_EXPERT_COUNT,
-        1_024,
-    ));
-    assert!(!qualified(
-        true,
-        1_328,
-        PACKED_Q8_COMPRESSOR_MATRIX_QUALIFIED_SOURCE_BYTES,
-        216,
-        DEEPSEEK_V4_PREFILL_MAX_TOKENS,
-    ));
-}
-
-#[test]
-fn packed_grouped_q3q4_scope_is_exact() {
-    let qualified = |device, tensors, bytes, experts, tokens, gate, up, down| {
-        packed_grouped_q3q4_scope_qualified(
-            &scope_facts_for_apple7(device),
-            tensors,
-            bytes,
-            experts,
-            tokens,
-            gate,
-            up,
-            down,
-        )
-    };
-    for tokens in [
-        PACKED_GROUPED_Q3Q4_NARROW_TOKENS,
-        256,
-        337,
-        512,
-        PACKED_MATRIX_MIN_TOKENS,
-        4_095,
-        DEEPSEEK_V4_PREFILL_MAX_TOKENS,
-    ] {
-        assert!(qualified(
-            true,
-            1_328,
-            PACKED_Q8_MATRIX_REAP_K160_SOURCE_BYTES,
-            160,
-            tokens,
-            GgmlType::Q3_K,
-            GgmlType::Q3_K,
-            GgmlType::Q4_K,
-        ));
-    }
-    for (device, tensors, bytes, experts, gate, up, down) in [
-        (
-            false,
-            1_328,
-            PACKED_Q8_MATRIX_REAP_K160_SOURCE_BYTES,
-            160,
-            GgmlType::Q3_K,
-            GgmlType::Q3_K,
-            GgmlType::Q4_K,
-        ),
-        (
-            true,
-            1_327,
-            PACKED_Q8_MATRIX_REAP_K160_SOURCE_BYTES,
-            160,
-            GgmlType::Q3_K,
-            GgmlType::Q3_K,
-            GgmlType::Q4_K,
-        ),
-        (
-            true,
-            1_328,
-            PACKED_Q8_MATRIX_REAP_K160_SOURCE_BYTES - 1,
-            160,
-            GgmlType::Q3_K,
-            GgmlType::Q3_K,
-            GgmlType::Q4_K,
-        ),
-        (
-            true,
-            1_328,
-            PACKED_Q8_MATRIX_REAP_K160_SOURCE_BYTES + 1,
-            160,
-            GgmlType::Q3_K,
-            GgmlType::Q3_K,
-            GgmlType::Q4_K,
-        ),
-        (
-            true,
-            1_328,
-            PACKED_Q8_MATRIX_REAP_K160_SOURCE_BYTES,
-            159,
-            GgmlType::Q3_K,
-            GgmlType::Q3_K,
-            GgmlType::Q4_K,
-        ),
-        (
-            true,
-            1_328,
-            PACKED_Q8_MATRIX_REAP_K160_SOURCE_BYTES,
-            161,
-            GgmlType::Q3_K,
-            GgmlType::Q3_K,
-            GgmlType::Q4_K,
-        ),
-        (
-            true,
-            1_328,
-            PACKED_Q8_MATRIX_REAP_K160_SOURCE_BYTES,
-            160,
-            GgmlType::Q4_K,
-            GgmlType::Q3_K,
-            GgmlType::Q4_K,
-        ),
-        (
-            true,
-            1_328,
-            PACKED_Q8_MATRIX_REAP_K160_SOURCE_BYTES,
-            160,
-            GgmlType::Q3_K,
-            GgmlType::Q4_K,
-            GgmlType::Q4_K,
-        ),
-        (
-            true,
-            1_328,
-            PACKED_Q8_MATRIX_REAP_K160_SOURCE_BYTES,
-            160,
-            GgmlType::Q3_K,
-            GgmlType::Q3_K,
-            GgmlType::Q3_K,
-        ),
-    ] {
-        assert!(!qualified(
-            device,
-            tensors,
-            bytes,
-            experts,
-            PACKED_GROUPED_Q3Q4_NARROW_TOKENS,
-            gate,
-            up,
-            down,
-        ));
-    }
-    assert!(!packed_shared_route_overlap_scope_qualified(
+    assert!(packed_mxfp4_matrix_scope_qualified(
         &scope_facts_for_apple7(true),
-        1_328,
-        PACKED_Q8_MATRIX_REAP_K160_SOURCE_BYTES,
-        160,
-        PACKED_GROUPED_Q3Q4_NARROW_TOKENS,
-        GgmlType::Q3_K,
-        GgmlType::Q3_K,
-        GgmlType::Q4_K,
+        &census_for_path_roles(MXFP4_MATRIX_ROLE_DTYPES),
+        216,
+        DEEPSEEK_V4_PREFILL_MAX_TOKENS,
     ));
-    assert!(packed_shared_route_overlap_scope_qualified(
+    assert!(!packed_mxfp4_matrix_scope_qualified(
         &scope_facts_for_apple7(true),
-        1_328,
-        PACKED_Q8_MATRIX_REAP_K160_SOURCE_BYTES,
+        &census_for_path_roles(MXFP4_MATRIX_ROLE_DTYPES),
         160,
-        256,
-        GgmlType::Q3_K,
-        GgmlType::Q3_K,
-        GgmlType::Q4_K,
-    ));
-    assert!(!qualified(
-        true,
-        1_328,
-        PACKED_Q8_MATRIX_REAP_K160_SOURCE_BYTES,
-        160,
-        PACKED_GROUPED_Q3Q4_NARROW_TOKENS - 1,
-        GgmlType::Q3_K,
-        GgmlType::Q3_K,
-        GgmlType::Q4_K,
-    ));
-    assert!(!qualified(
-        true,
-        1_328,
-        PACKED_Q8_MATRIX_REAP_K160_SOURCE_BYTES,
-        160,
-        PACKED_GROUPED_Q3Q4_NARROW_TOKENS + 1,
-        GgmlType::Q3_K,
-        GgmlType::Q3_K,
-        GgmlType::Q4_K,
-    ));
-    assert!(!qualified(
-        true,
-        1_328,
-        PACKED_Q8_MATRIX_REAP_K160_SOURCE_BYTES,
-        160,
-        255,
-        GgmlType::Q3_K,
-        GgmlType::Q3_K,
-        GgmlType::Q4_K,
-    ));
-    assert!(!qualified(
-        true,
-        1_328,
-        PACKED_Q8_MATRIX_REAP_K160_SOURCE_BYTES,
-        256,
-        PACKED_MATRIX_MIN_TOKENS,
-        GgmlType::Q3_K,
-        GgmlType::Q3_K,
-        GgmlType::Q4_K,
-    ));
-    assert!(!qualified(
-        true,
-        1_328,
-        PACKED_Q8_MATRIX_REAP_K216_SOURCE_BYTES,
-        216,
-        PACKED_MATRIX_MIN_TOKENS,
-        GgmlType::Q3_K,
-        GgmlType::Q3_K,
-        GgmlType::Q4_K,
-    ));
-    assert!(!qualified(
-        false,
-        1_328,
-        PACKED_Q8_MATRIX_REAP_K160_SOURCE_BYTES,
-        160,
-        PACKED_MATRIX_MIN_TOKENS,
-        GgmlType::Q3_K,
-        GgmlType::Q3_K,
-        GgmlType::Q4_K,
-    ));
-    assert!(!qualified(
-        true,
-        1_327,
-        PACKED_Q8_MATRIX_REAP_K160_SOURCE_BYTES,
-        160,
-        PACKED_MATRIX_MIN_TOKENS,
-        GgmlType::Q3_K,
-        GgmlType::Q3_K,
-        GgmlType::Q4_K,
-    ));
-    assert!(!qualified(
-        true,
-        1_328,
-        PACKED_Q8_COMPRESSOR_MATRIX_QUALIFIED_SOURCE_BYTES,
-        160,
-        PACKED_MATRIX_MIN_TOKENS,
-        GgmlType::Q3_K,
-        GgmlType::Q3_K,
-        GgmlType::Q4_K,
-    ));
-    assert!(!qualified(
-        true,
-        1_328,
-        PACKED_Q8_MATRIX_REAP_K160_SOURCE_BYTES,
-        160,
-        PACKED_MATRIX_MIN_TOKENS,
-        GgmlType::Q3_K,
-        GgmlType::Q4_K,
-        GgmlType::Q4_K,
-    ));
-}
-
-#[test]
-fn packed_indexer_q_matrix_scope_is_4096_only() {
-    let qualified = |device, tensors, bytes, experts, tokens| {
-        packed_indexer_q_matrix_scope_qualified(
-            &scope_facts_for_apple7(device),
-            tensors,
-            bytes,
-            experts,
-            tokens,
-        )
-    };
-    assert!(qualified(
-        true,
-        1_328,
-        PACKED_Q8_COMPRESSOR_MATRIX_QUALIFIED_SOURCE_BYTES,
-        256,
-        DEEPSEEK_V4_PREFILL_MAX_TOKENS,
-    ));
-    assert!(qualified(
-        true,
-        1_328,
-        PACKED_Q8_MATRIX_REAP_K160_SOURCE_BYTES,
-        160,
-        DEEPSEEK_V4_PREFILL_MAX_TOKENS,
-    ));
-    assert!(qualified(
-        true,
-        1_328,
-        PACKED_Q8_MATRIX_REAP_K216_SOURCE_BYTES,
-        216,
-        DEEPSEEK_V4_PREFILL_MAX_TOKENS,
-    ));
-    assert!(!qualified(
-        true,
-        1_328,
-        PACKED_Q8_COMPRESSOR_MATRIX_QUALIFIED_SOURCE_BYTES,
-        256,
-        PACKED_MATRIX_MIN_TOKENS,
-    ));
-    assert!(!qualified(
-        false,
-        1_328,
-        PACKED_Q8_COMPRESSOR_MATRIX_QUALIFIED_SOURCE_BYTES,
-        256,
-        DEEPSEEK_V4_PREFILL_MAX_TOKENS,
-    ));
-    assert!(!qualified(
-        true,
-        1_328,
-        PACKED_Q8_COMPRESSOR_MATRIX_QUALIFIED_SOURCE_BYTES + 1,
-        256,
         DEEPSEEK_V4_PREFILL_MAX_TOKENS,
     ));
 }

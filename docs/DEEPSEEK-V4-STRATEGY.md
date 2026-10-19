@@ -2351,9 +2351,9 @@ noise without reducing technical risk. Revisit after S5.
    all frozen values. Default the current asset's 124 eligible Q8 compressor
    projections in each complete N=2,048 chunk on Apple M4 Max with
    `QWEN_DSV4_PACKED_Q8_COMPRESSOR_MATRIX=0` as exact rollback. Tails, decode,
-   other asset/device profiles, non-Q8 weights, raw KV, q_b, outputs, and experts
-   remain exact. Selection qualifies the current 1,328-tensor /
-   104,202,502,492-byte payload profile without rehashing weights. The ledger's
+   other device capabilities, non-Q8 consumed weights, raw KV, q_b, outputs, and experts
+   remain exact. Selection qualifies the compressor tensor roles at Q8_0
+   and 256-expert geometry without inspecting unrelated tensor roles. The ledger's
    literal schema clause remains uncredited because its retained exact baseline
    also emits the arithmetic expression; paired token identity, not that
    impossible absolute clause, supplies the comparative quality evidence. This
@@ -2383,24 +2383,19 @@ noise without reducing technical risk. Revisit after S5.
 
 ## Identity-gated fast paths (audit 2026-09-24)
 
-Several DS4 fast paths run only for the three qualified artifacts (fresh 256
-experts, REAP k160, REAP k216: exact `source_bytes` and `tensor_count ==
-1328`) on an "Apple M4 Max". A read-only audit found most of these gates
-protect **numerics as well as speed** (half staging, reduction order,
-whole-model arithmetic validated on those artifacts), so replacing them with
-capability predicates is not a mechanical change: it needs a
-production-dispatch regression packet (packed widths 128/256/337/2048/4096,
-selected-implementation counts, logits/state/continuation, a sparse CSA
-suffix at N4096) and a shared production resolver, because `cfg(test)`
-branches currently override production selection for the multigroup
-selector, long HCA and the F16 scorer. Load now logs one line
-(`deepseek_v4: artifact profile=... identity_gated_fast_paths=on|off`) so an
-unqualified artifact is not silently slow.
+The 2026-09-24 audit found that several DS4 prefill gates protect **numerics as
+well as speed**: half staging and reduction order were validated with specific
+tensor dtypes. Each path now declares the roles it consumes and the dtypes
+qualified for those roles. Admission ignores roles the path does not consume,
+while retaining expert-count and width geometry. A dtype decline identifies
+the path, role, and observed dtype. The model-load log reports that these
+contracts are evaluated per path; it does not classify or label the full
+artifact.
 
 | Gate | Protects | Capability replacement |
 |---|---|---|
-| Compressor / shared / Q-A / raw-KV Q8 matrices | numerics + perf | per-role Q8 views and R2C capability, crossover and arithmetic policy |
-| Strict router | exact arithmetic + perf | F32 views, E % 8, 32-thread pipeline |
+| Compressor / shared / Q-A / raw-KV Q8 matrices | numerics + perf | consumed-role dtypes, Q8 views and R2C capability, crossover and arithmetic policy |
+| Strict router | exact arithmetic + perf | consumed F32 router role, E % 8, 32-thread pipeline |
 | Q-B / output Auto schedules | numerics + perf | wide/narrow capability, 128-token rule, strides |
 | Grouped IQ / IQ2 matrix / grouped Q3/Q4 / MXFP4 down | layout, numerics + perf | dtype triple, valid E/K/maps, arena and pipeline caps, N policy |
 | All-slot Q3/Q4 MoE | numerics + perf | K6, legal E, block geometry, alias and pipeline checks |

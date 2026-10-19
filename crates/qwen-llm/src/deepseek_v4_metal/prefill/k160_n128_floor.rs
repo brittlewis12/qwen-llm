@@ -338,13 +338,13 @@ fn k160_n128_grouped_q3q4_representative_layer_floor() {
     assert_eq!(ctx.device.name().to_string(), "Apple M4 Max");
     assert_eq!(gguf.tensors.len(), 1_328);
     assert_eq!(gguf.shard_count(), 4);
-    assert_eq!(
-        gguf.tensors
-            .iter()
-            .map(|descriptor| descriptor.n_bytes)
-            .sum::<u64>(),
-        89_920_886_108,
-    );
+    assert!(packed_grouped_q3q4_identity_scope_qualified(
+        EXPERTS,
+        N_TOKENS,
+        GgmlType::Q3_K,
+        GgmlType::Q3_K,
+        GgmlType::Q4_K,
+    ));
     let gate_bank = load_bank(
         &ctx,
         &gguf,

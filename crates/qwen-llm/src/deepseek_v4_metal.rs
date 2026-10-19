@@ -6,6 +6,7 @@
 
 #[cfg(feature = "dsv4-diagnostics")]
 mod diagnostics;
+mod dtype_census;
 mod prefill;
 
 #[cfg(feature = "dsv4-diagnostics")]
@@ -46,6 +47,7 @@ use crate::deepseek_v4::{
     AttentionKind, DeepSeekV4Config, DeepSeekV4Error, DeepSeekV4Model,
     flash_0731_expert_count_supported,
 };
+use crate::deepseek_v4_census::DeepSeekV4TensorRole;
 use crate::gguf::{GgufError, GgufFile};
 use crate::metal::{
     KernelEncoder, LearnedRoute, MetalContext, MetalError, MetalGgufBacking, MetalMemoryAdmission,
@@ -58,6 +60,7 @@ use crate::metal::{
     evaluate_metal_memory_admission, host_page_size_bytes, plan_retained_storage,
 };
 use crate::tensor::{GgmlType, ggml_type_layout};
+use dtype_census::{QualifiedRoleDtypes, RoleDtype, path_role_dtypes_qualified, role_dtype_census};
 use objc2::rc::Retained;
 use objc2::runtime::ProtocolObject;
 use objc2_foundation::{NSError, NSString};

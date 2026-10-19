@@ -235,7 +235,6 @@ pub struct DeepSeekV4MhcOracleIdentity {
     pub hc_epsilon_bits: u32,
     pub device_registry_id: u64,
     pub residency_tensor_count: usize,
-    pub residency_source_bytes: u64,
     pub expert_count: usize,
 }
 
@@ -2694,17 +2693,151 @@ fn packed_q8_qa_kv_matrix_mode() -> PackedQaKvMatrixMode {
     })
 }
 
-const PACKED_Q8_COMPRESSOR_MATRIX_QUALIFIED_SOURCE_BYTES: u64 = 104_202_502_492;
-const PACKED_Q8_MATRIX_REAP_K160_SOURCE_BYTES: u64 = 89_920_886_108;
-const PACKED_Q8_MATRIX_REAP_K216_SOURCE_BYTES: u64 = 89_060_075_612;
+const COMPRESSOR_MATRIX_ROLE_DTYPES: &[QualifiedRoleDtypes] = &[
+    QualifiedRoleDtypes {
+        role: DeepSeekV4TensorRole::AttentionCompressorKv,
+        dtypes: &[GgmlType::Q8_0],
+    },
+    QualifiedRoleDtypes {
+        role: DeepSeekV4TensorRole::AttentionCompressorGate,
+        dtypes: &[GgmlType::Q8_0],
+    },
+    QualifiedRoleDtypes {
+        role: DeepSeekV4TensorRole::IndexerCompressorKv,
+        dtypes: &[GgmlType::Q8_0],
+    },
+    QualifiedRoleDtypes {
+        role: DeepSeekV4TensorRole::IndexerCompressorGate,
+        dtypes: &[GgmlType::Q8_0],
+    },
+];
+const QB_MATRIX_ROLE_DTYPES: &[QualifiedRoleDtypes] = &[QualifiedRoleDtypes {
+    role: DeepSeekV4TensorRole::AttentionQb,
+    dtypes: &[GgmlType::Q8_0],
+}];
+const OUTPUT_MATRIX_ROLE_DTYPES: &[QualifiedRoleDtypes] = &[
+    QualifiedRoleDtypes {
+        role: DeepSeekV4TensorRole::AttentionOutputA,
+        dtypes: &[GgmlType::Q8_0],
+    },
+    QualifiedRoleDtypes {
+        role: DeepSeekV4TensorRole::AttentionOutputB,
+        dtypes: &[GgmlType::Q8_0],
+    },
+];
+const SHARED_MATRIX_ROLE_DTYPES: &[QualifiedRoleDtypes] = &[
+    QualifiedRoleDtypes {
+        role: DeepSeekV4TensorRole::SharedGate,
+        dtypes: &[GgmlType::Q8_0, GgmlType::Q6_K],
+    },
+    QualifiedRoleDtypes {
+        role: DeepSeekV4TensorRole::SharedUp,
+        dtypes: &[GgmlType::Q8_0, GgmlType::Q6_K],
+    },
+    QualifiedRoleDtypes {
+        role: DeepSeekV4TensorRole::SharedDown,
+        dtypes: &[GgmlType::Q8_0, GgmlType::Q6_K],
+    },
+];
+const ROUTER_ROLE_DTYPES: &[QualifiedRoleDtypes] = &[QualifiedRoleDtypes {
+    role: DeepSeekV4TensorRole::RoutedGateInput,
+    dtypes: &[GgmlType::F32],
+}];
+const ROUTE_COMPACTION_ROLE_DTYPES: &[QualifiedRoleDtypes] = &[
+    QualifiedRoleDtypes {
+        role: DeepSeekV4TensorRole::RoutedGateInput,
+        dtypes: &[GgmlType::BF16],
+    },
+    QualifiedRoleDtypes {
+        role: DeepSeekV4TensorRole::HashRouter,
+        dtypes: &[GgmlType::I32],
+    },
+    QualifiedRoleDtypes {
+        role: DeepSeekV4TensorRole::RouterCorrectionBias,
+        dtypes: &[GgmlType::F32],
+    },
+];
+const QA_KV_MATRIX_ROLE_DTYPES: &[QualifiedRoleDtypes] = &[
+    QualifiedRoleDtypes {
+        role: DeepSeekV4TensorRole::AttentionQa,
+        dtypes: &[GgmlType::Q8_0],
+    },
+    QualifiedRoleDtypes {
+        role: DeepSeekV4TensorRole::AttentionKv,
+        dtypes: &[GgmlType::Q8_0],
+    },
+];
+const INDEXER_Q_MATRIX_ROLE_DTYPES: &[QualifiedRoleDtypes] = &[
+    QualifiedRoleDtypes {
+        role: DeepSeekV4TensorRole::IndexerQ,
+        dtypes: &[GgmlType::Q8_0],
+    },
+    QualifiedRoleDtypes {
+        role: DeepSeekV4TensorRole::IndexerProjection,
+        dtypes: &[GgmlType::F32],
+    },
+];
+const GROUPED_IQ2_ROLE_DTYPES: &[QualifiedRoleDtypes] = &[
+    QualifiedRoleDtypes {
+        role: DeepSeekV4TensorRole::RoutedGate,
+        dtypes: &[GgmlType::IQ2_XS, GgmlType::IQ3_XXS, GgmlType::IQ3_S],
+    },
+    QualifiedRoleDtypes {
+        role: DeepSeekV4TensorRole::RoutedUp,
+        dtypes: &[GgmlType::IQ2_XS, GgmlType::IQ3_XXS, GgmlType::IQ3_S],
+    },
+    QualifiedRoleDtypes {
+        role: DeepSeekV4TensorRole::RoutedDown,
+        dtypes: &[GgmlType::IQ3_XXS, GgmlType::MXFP4],
+    },
+];
+const MXFP4_MATRIX_ROLE_DTYPES: &[QualifiedRoleDtypes] = &[QualifiedRoleDtypes {
+    role: DeepSeekV4TensorRole::RoutedDown,
+    dtypes: &[GgmlType::IQ3_XXS, GgmlType::MXFP4],
+}];
+const GROUPED_Q3Q4_ROLE_DTYPES: &[QualifiedRoleDtypes] = &[
+    QualifiedRoleDtypes {
+        role: DeepSeekV4TensorRole::RoutedGate,
+        dtypes: &[GgmlType::Q3_K],
+    },
+    QualifiedRoleDtypes {
+        role: DeepSeekV4TensorRole::RoutedUp,
+        dtypes: &[GgmlType::Q3_K],
+    },
+    QualifiedRoleDtypes {
+        role: DeepSeekV4TensorRole::RoutedDown,
+        dtypes: &[GgmlType::Q4_K],
+    },
+];
+const SHARED_ROUTE_OVERLAP_ROLE_DTYPES: &[QualifiedRoleDtypes] = &[
+    QualifiedRoleDtypes {
+        role: DeepSeekV4TensorRole::SharedGate,
+        dtypes: &[GgmlType::Q8_0],
+    },
+    QualifiedRoleDtypes {
+        role: DeepSeekV4TensorRole::SharedUp,
+        dtypes: &[GgmlType::Q8_0],
+    },
+    QualifiedRoleDtypes {
+        role: DeepSeekV4TensorRole::SharedDown,
+        dtypes: &[GgmlType::Q8_0],
+    },
+];
 
-fn packed_q8_matrix_asset_qualified(source_bytes: u64, expert_count: usize) -> bool {
-    matches!(
-        (source_bytes, expert_count),
-        (PACKED_Q8_COMPRESSOR_MATRIX_QUALIFIED_SOURCE_BYTES, 256)
-            | (PACKED_Q8_MATRIX_REAP_K160_SOURCE_BYTES, 160)
-            | (PACKED_Q8_MATRIX_REAP_K216_SOURCE_BYTES, 216)
-    )
+fn packed_q8_expert_geometry_qualified(expert_count: usize) -> bool {
+    flash_0731_expert_count_supported(expert_count as u32)
+}
+
+fn packed_q8_projection_qualified(
+    dtype_census: &[RoleDtype],
+    expert_count: usize,
+    n_tokens: usize,
+    path: &str,
+    roles: &[QualifiedRoleDtypes],
+) -> bool {
+    packed_q8_partial_matrix_chunk_qualified(n_tokens)
+        && flash_0731_expert_count_supported(expert_count as u32)
+        && path_role_dtypes_qualified(dtype_census, path, roles)
 }
 
 fn packed_q8_matrix_chunk_qualified(n_tokens: usize) -> bool {
@@ -2760,82 +2893,86 @@ fn packed_shared_route_overlap_qualification() -> &'static crate::metal::Qualifi
 
 fn packed_router_e8p32_scope_qualified(
     facts: &crate::metal::DeviceFacts,
-    tensor_count: usize,
-    source_bytes: u64,
+    dtype_census: &[RoleDtype],
     expert_count: usize,
     n_tokens: usize,
 ) -> bool {
     packed_e8p32_router_qualification().holds_for(facts)
-        && tensor_count == 1_328
-        && source_bytes == PACKED_Q8_MATRIX_REAP_K160_SOURCE_BYTES
         && expert_count == 160
+        && path_role_dtypes_qualified(dtype_census, "packed_e8p32_router", ROUTER_ROLE_DTYPES)
         && packed_q8_partial_matrix_chunk_qualified(n_tokens)
 }
 
 fn packed_q8_qa_kv_matrix_scope_qualified(
     facts: &crate::metal::DeviceFacts,
-    tensor_count: usize,
-    source_bytes: u64,
+    dtype_census: &[RoleDtype],
     expert_count: usize,
     n_tokens: usize,
 ) -> bool {
     packed_qa_raw_kv_matrix_qualification().holds_for(facts)
-        && tensor_count == 1_328
-        && source_bytes == PACKED_Q8_MATRIX_REAP_K160_SOURCE_BYTES
         && expert_count == 160
+        && path_role_dtypes_qualified(
+            dtype_census,
+            "packed_q8_qa_kv_matrix",
+            QA_KV_MATRIX_ROLE_DTYPES,
+        )
         && packed_q8_partial_matrix_chunk_qualified(n_tokens)
 }
 
 fn packed_q8_compressor_matrix_scope_qualified(
     facts: &crate::metal::DeviceFacts,
-    tensor_count: usize,
-    source_bytes: u64,
+    dtype_census: &[RoleDtype],
     expert_count: usize,
     n_tokens: usize,
 ) -> bool {
-    let chunk_qualified = if matches!(
-        (source_bytes, expert_count),
-        (PACKED_Q8_COMPRESSOR_MATRIX_QUALIFIED_SOURCE_BYTES, 256)
-            | (PACKED_Q8_MATRIX_REAP_K160_SOURCE_BYTES, 160)
-            | (PACKED_Q8_MATRIX_REAP_K216_SOURCE_BYTES, 216)
-    ) {
+    let chunk_qualified = if packed_q8_expert_geometry_qualified(expert_count) {
         packed_q8_partial_matrix_chunk_qualified(n_tokens)
     } else {
         packed_q8_matrix_chunk_qualified(n_tokens)
     };
     chunk_qualified
         && packed_q8_matrix_family_qualification().holds_for(facts)
-        && tensor_count == 1_328
-        && packed_q8_matrix_asset_qualified(source_bytes, expert_count)
+        && packed_q8_expert_geometry_qualified(expert_count)
+        && path_role_dtypes_qualified(
+            dtype_census,
+            "packed_q8_compressor_matrix",
+            COMPRESSOR_MATRIX_ROLE_DTYPES,
+        )
 }
 
 fn packed_gpu_route_compact_scope_qualified(
     facts: &crate::metal::DeviceFacts,
-    tensor_count: usize,
-    source_bytes: u64,
+    dtype_census: &[RoleDtype],
     expert_count: usize,
     n_tokens: usize,
 ) -> bool {
     packed_q8_matrix_chunk_qualified(n_tokens)
         && packed_gpu_route_compaction_qualification().holds_for(facts)
-        && tensor_count == 1_328
-        && packed_q8_matrix_asset_qualified(source_bytes, expert_count)
+        && expert_count == MOE_EXPERT_COUNT
+        && path_role_dtypes_qualified(
+            dtype_census,
+            "packed_gpu_route_compaction",
+            ROUTE_COMPACTION_ROLE_DTYPES,
+        )
 }
 
 fn packed_indexer_q_matrix_scope_qualified(
     facts: &crate::metal::DeviceFacts,
-    tensor_count: usize,
-    source_bytes: u64,
+    dtype_census: &[RoleDtype],
     expert_count: usize,
     n_tokens: usize,
 ) -> bool {
     n_tokens == DEEPSEEK_V4_PREFILL_MAX_TOKENS
         && packed_indexer_q_matrix_qualification().holds_for(facts)
-        && tensor_count == 1_328
-        && packed_q8_matrix_asset_qualified(source_bytes, expert_count)
+        && packed_q8_expert_geometry_qualified(expert_count)
+        && path_role_dtypes_qualified(
+            dtype_census,
+            "packed_indexer_q_matrix",
+            INDEXER_Q_MATRIX_ROLE_DTYPES,
+        )
 }
 
-fn packed_q8_compressor_matrix_for_chunk(
+pub(super) fn packed_q8_compressor_matrix_for_chunk(
     ctx: &MetalContext,
     residency: &DeepSeekV4MetalResidency,
     n_tokens: usize,
@@ -2843,8 +2980,7 @@ fn packed_q8_compressor_matrix_for_chunk(
     packed_q8_compressor_matrix_enabled()
         && packed_q8_compressor_matrix_scope_qualified(
             ctx.device_facts(),
-            residency.report().tensor_count,
-            residency.report().source_bytes,
+            residency.dtype_census(),
             residency.config().expert_count as usize,
             n_tokens,
         )
@@ -2856,12 +2992,13 @@ fn packed_q8_shared_matrix_for_chunk(
     n_tokens: usize,
 ) -> bool {
     packed_q8_shared_matrix_enabled()
-        && packed_q8_compressor_matrix_scope_qualified(
-            ctx.device_facts(),
-            residency.report().tensor_count,
-            residency.report().source_bytes,
+        && packed_q8_matrix_family_qualification().holds_for(ctx.device_facts())
+        && packed_q8_projection_qualified(
+            residency.dtype_census(),
             residency.config().expert_count as usize,
             n_tokens,
+            "packed_q8_shared_matrix",
+            SHARED_MATRIX_ROLE_DTYPES,
         )
 }
 
@@ -2900,13 +3037,14 @@ fn packed_q8_output_projection_for_chunk(
 ) -> Result<Q8PrecisionProjection, DeepSeekV4MetalError> {
     let value = std::env::var("QWEN_DSV4_PACKED_Q8_OUTPUT").ok();
     let policy = parse_packed_q8_output_policy(value.as_deref())?;
-    let profile_qualified = packed_q8_compressor_matrix_scope_qualified(
-        ctx.device_facts(),
-        residency.report().tensor_count,
-        residency.report().source_bytes,
-        residency.config().expert_count as usize,
-        n_tokens,
-    );
+    let profile_qualified = packed_q8_matrix_family_qualification().holds_for(ctx.device_facts())
+        && packed_q8_projection_qualified(
+            residency.dtype_census(),
+            residency.config().expert_count as usize,
+            n_tokens,
+            "packed_q8_output_projection",
+            OUTPUT_MATRIX_ROLE_DTYPES,
+        );
     Ok(resolve_packed_q8_matrix_policy(
         policy,
         profile_qualified,
@@ -2940,13 +3078,14 @@ fn packed_q8_qb_projection_for_chunk(
 ) -> Result<Q8PrecisionProjection, DeepSeekV4MetalError> {
     let value = std::env::var("QWEN_DSV4_PACKED_Q8_QB").ok();
     let policy = parse_packed_q8_qb_policy(value.as_deref())?;
-    let profile_qualified = packed_q8_compressor_matrix_scope_qualified(
-        ctx.device_facts(),
-        residency.report().tensor_count,
-        residency.report().source_bytes,
-        residency.config().expert_count as usize,
-        n_tokens,
-    );
+    let profile_qualified = packed_q8_matrix_family_qualification().holds_for(ctx.device_facts())
+        && packed_q8_projection_qualified(
+            residency.dtype_census(),
+            residency.config().expert_count as usize,
+            n_tokens,
+            "packed_q8_qb_projection",
+            QB_MATRIX_ROLE_DTYPES,
+        );
     Ok(resolve_packed_q8_matrix_policy(
         policy,
         profile_qualified,
@@ -6027,8 +6166,6 @@ fn packed_mxfp4_matrix_candidate_supported(ctx: &MetalContext) -> bool {
 #[allow(clippy::too_many_arguments)]
 fn packed_grouped_q3q4_scope_qualified(
     facts: &crate::metal::DeviceFacts,
-    tensor_count: usize,
-    source_bytes: u64,
     expert_count: usize,
     n_tokens: usize,
     gate_dtype: GgmlType,
@@ -6037,8 +6174,6 @@ fn packed_grouped_q3q4_scope_qualified(
 ) -> bool {
     packed_grouped_q3q4_qualification().holds_for(facts)
         && packed_grouped_q3q4_identity_scope_qualified(
-            tensor_count,
-            source_bytes,
             expert_count,
             n_tokens,
             gate_dtype,
@@ -6049,29 +6184,45 @@ fn packed_grouped_q3q4_scope_qualified(
 
 #[allow(clippy::too_many_arguments)]
 fn packed_grouped_q3q4_identity_scope_qualified(
-    tensor_count: usize,
-    source_bytes: u64,
     expert_count: usize,
     n_tokens: usize,
     gate_dtype: GgmlType,
     up_dtype: GgmlType,
     down_dtype: GgmlType,
 ) -> bool {
-    tensor_count == 1_328
-        && source_bytes == PACKED_Q8_MATRIX_REAP_K160_SOURCE_BYTES
-        && expert_count == 160
+    expert_count == 160
         && (n_tokens == PACKED_GROUPED_Q3Q4_NARROW_TOKENS
             || packed_q8_partial_matrix_chunk_qualified(n_tokens))
-        && gate_dtype == GgmlType::Q3_K
-        && up_dtype == GgmlType::Q3_K
-        && down_dtype == GgmlType::Q4_K
+        && routed_q3q4_roles_qualified("packed_grouped_q3q4", gate_dtype, up_dtype, down_dtype)
+}
+
+fn routed_q3q4_roles_qualified(
+    path: &str,
+    gate_dtype: GgmlType,
+    up_dtype: GgmlType,
+    down_dtype: GgmlType,
+) -> bool {
+    let tensors = [
+        RoleDtype {
+            role: DeepSeekV4TensorRole::RoutedGate,
+            dtype: gate_dtype,
+        },
+        RoleDtype {
+            role: DeepSeekV4TensorRole::RoutedUp,
+            dtype: up_dtype,
+        },
+        RoleDtype {
+            role: DeepSeekV4TensorRole::RoutedDown,
+            dtype: down_dtype,
+        },
+    ];
+    path_role_dtypes_qualified(&tensors, path, GROUPED_Q3Q4_ROLE_DTYPES)
 }
 
 #[allow(clippy::too_many_arguments)]
 fn packed_shared_route_overlap_scope_qualified(
     facts: &crate::metal::DeviceFacts,
-    tensor_count: usize,
-    source_bytes: u64,
+    dtype_census: &[RoleDtype],
     expert_count: usize,
     n_tokens: usize,
     gate_dtype: GgmlType,
@@ -6080,33 +6231,35 @@ fn packed_shared_route_overlap_scope_qualified(
 ) -> bool {
     packed_q8_partial_matrix_chunk_qualified(n_tokens)
         && packed_shared_route_overlap_qualification().holds_for(facts)
-        && packed_grouped_q3q4_identity_scope_qualified(
-            tensor_count,
-            source_bytes,
-            expert_count,
-            n_tokens,
+        && expert_count == 160
+        && (n_tokens == PACKED_GROUPED_Q3Q4_NARROW_TOKENS
+            || packed_q8_partial_matrix_chunk_qualified(n_tokens))
+        && routed_q3q4_roles_qualified(
+            "packed_shared_route_overlap",
             gate_dtype,
             up_dtype,
             down_dtype,
+        )
+        && path_role_dtypes_qualified(
+            dtype_census,
+            "packed_shared_route_overlap",
+            SHARED_ROUTE_OVERLAP_ROLE_DTYPES,
         )
 }
 
 fn packed_mxfp4_matrix_scope_qualified(
     facts: &crate::metal::DeviceFacts,
-    tensor_count: usize,
-    source_bytes: u64,
+    dtype_census: &[RoleDtype],
     expert_count: usize,
     n_tokens: usize,
 ) -> bool {
     packed_mxfp4_matrix_qualification().holds_for(facts)
-        && tensor_count == 1_328
         && (n_tokens == PACKED_MATRIX_MIN_TOKENS || n_tokens == DEEPSEEK_V4_PREFILL_MAX_TOKENS)
-        && matches!(
-            (source_bytes, expert_count),
-            (
-                PACKED_Q8_COMPRESSOR_MATRIX_QUALIFIED_SOURCE_BYTES,
-                MOE_EXPERT_COUNT,
-            ) | (PACKED_Q8_MATRIX_REAP_K216_SOURCE_BYTES, 216,)
+        && matches!(expert_count, 216 | MOE_EXPERT_COUNT)
+        && path_role_dtypes_qualified(
+            dtype_census,
+            "packed_mxfp4_matrix",
+            MXFP4_MATRIX_ROLE_DTYPES,
         )
 }
 
@@ -6178,18 +6331,15 @@ fn packed_grouped_iq2_matrix_execution_chunk_qualified(n_tokens: usize) -> bool 
 
 fn packed_grouped_iq2_matrix_scope_qualified(
     facts: &crate::metal::DeviceFacts,
-    tensor_count: usize,
-    source_bytes: u64,
+    dtype_census: &[RoleDtype],
     expert_count: usize,
     n_tokens: usize,
 ) -> bool {
-    let partial_asset_qualified = tensor_count == 1_328
-        && matches!(
-            (source_bytes, expert_count),
-            (
-                PACKED_Q8_COMPRESSOR_MATRIX_QUALIFIED_SOURCE_BYTES,
-                MOE_EXPERT_COUNT
-            ) | (PACKED_Q8_MATRIX_REAP_K216_SOURCE_BYTES, 216)
+    let partial_asset_qualified = matches!(expert_count, MOE_EXPERT_COUNT | 216)
+        && path_role_dtypes_qualified(
+            dtype_census,
+            "packed_grouped_iq2_matrix",
+            GROUPED_IQ2_ROLE_DTYPES,
         );
     packed_grouped_expert_qualification().holds_for(facts)
         && (packed_grouped_iq2_mma16_qualified(n_tokens)
@@ -6218,8 +6368,7 @@ fn packed_grouped_iq_expert_count_qualified(expert_count: usize) -> bool {
 fn packed_grouped_expert_policy(
     ctx: &MetalContext,
     n_tokens: usize,
-    tensor_count: usize,
-    source_bytes: u64,
+    dtype_census: &[RoleDtype],
     expert_count: usize,
 ) -> Result<PackedExpertPolicy, DeepSeekV4MetalError> {
     let enabled =
@@ -6238,8 +6387,7 @@ fn packed_grouped_expert_policy(
         && enabled
         && packed_grouped_iq2_matrix_scope_qualified(
             ctx.device_facts(),
-            tensor_count,
-            source_bytes,
+            dtype_census,
             expert_count,
             n_tokens,
         )
@@ -6259,12 +6407,22 @@ pub(super) fn packed_grouped_expert_enabled_for_test(ctx: &MetalContext) -> bool
     packed_grouped_expert_policy(
         ctx,
         PACKED_GROUPED_IQ2_MMA16_NARROW_TOKENS,
-        1_328,
-        PACKED_Q8_COMPRESSOR_MATRIX_QUALIFIED_SOURCE_BYTES,
+        &test_grouped_iq2_role_dtypes(),
         MOE_EXPERT_COUNT,
     )
     .expect("valid packed grouped expert policy")
     .uses_iq2_target()
+}
+
+#[cfg(all(test, feature = "dsv4-diagnostics"))]
+fn test_grouped_iq2_role_dtypes() -> Vec<RoleDtype> {
+    GROUPED_IQ2_ROLE_DTYPES
+        .iter()
+        .map(|requirement| RoleDtype {
+            role: requirement.role,
+            dtype: requirement.dtypes[0],
+        })
+        .collect()
 }
 
 #[cfg(all(test, feature = "dsv4-diagnostics"))]
@@ -9776,8 +9934,7 @@ impl DeepSeekV4Session {
         packed_grouped_expert_policy(
             ctx,
             n_tokens,
-            self.residency.report().tensor_count,
-            self.residency.report().source_bytes,
+            self.residency.dtype_census(),
             self.prefill.moe.expert_count,
         )
     }
@@ -9973,7 +10130,6 @@ impl DeepSeekV4Session {
             hc_epsilon_bits: config.hyper_connection_epsilon.to_bits(),
             device_registry_id: ctx.device.registryID(),
             residency_tensor_count: self.residency.report().tensor_count,
-            residency_source_bytes: self.residency.report().source_bytes,
             expert_count: self.prefill.moe.expert_count,
         })
     }
@@ -10421,8 +10577,7 @@ impl DeepSeekV4Session {
         }
         self.residency.validate_context(ctx)?;
         let n_tokens = checked_token_count(token_ids.len())?;
-        let residency_tensor_count = self.residency.report().tensor_count;
-        let residency_source_bytes = self.residency.report().source_bytes;
+        let dtype_census = self.residency.dtype_census();
         let expert_count = self.prefill.moe.expert_count;
         let route_policy = if route_policy == PackedRoutePolicy::Cpu
             && expert_count == MOE_EXPERT_COUNT
@@ -10430,8 +10585,7 @@ impl DeepSeekV4Session {
             && token_ids.len() <= PACKED_GPU_ROUTE_MAX_TOKENS
             && packed_gpu_route_compact_scope_qualified(
                 ctx.device_facts(),
-                residency_tensor_count,
-                residency_source_bytes,
+                dtype_census,
                 expert_count,
                 token_ids.len(),
             ) {
@@ -10448,8 +10602,7 @@ impl DeepSeekV4Session {
         let mxfp4_matrix = packed_mxfp4_matrix_enabled()
             && packed_mxfp4_matrix_scope_qualified(
                 ctx.device_facts(),
-                residency_tensor_count,
-                residency_source_bytes,
+                dtype_census,
                 expert_count,
                 token_ids.len(),
             )
@@ -10473,15 +10626,13 @@ impl DeepSeekV4Session {
         let router_e8p32_strict = packed_router_e8p32_strict_enabled()
             && packed_router_e8p32_scope_qualified(
                 ctx.device_facts(),
-                residency_tensor_count,
-                residency_source_bytes,
+                dtype_census,
                 expert_count,
                 token_ids.len(),
             );
         let q_a_kv_matrix = if packed_q8_qa_kv_matrix_scope_qualified(
             ctx.device_facts(),
-            residency_tensor_count,
-            residency_source_bytes,
+            dtype_census,
             expert_count,
             token_ids.len(),
         ) {
@@ -10492,8 +10643,7 @@ impl DeepSeekV4Session {
         let indexer_q_matrix = packed_indexer_q_matrix_enabled()
             && packed_indexer_q_matrix_scope_qualified(
                 ctx.device_facts(),
-                residency_tensor_count,
-                residency_source_bytes,
+                dtype_census,
                 expert_count,
                 token_ids.len(),
             );
@@ -10655,8 +10805,6 @@ impl DeepSeekV4Session {
         layer_completed: &mut impl FnMut(usize),
     ) -> Result<(), DeepSeekV4MetalError> {
         let n_tokens = token_ids.len();
-        let residency_tensor_count = self.residency.report().tensor_count;
-        let residency_source_bytes = self.residency.report().source_bytes;
         let expert_count = self.prefill.moe.expert_count;
         if packed_grouped_dense_attention_enabled() {
             static REPORTED: std::sync::atomic::AtomicBool =
@@ -10886,8 +11034,7 @@ impl DeepSeekV4Session {
                 && route_policy == PackedRoutePolicy::Cpu
                 && packed_shared_route_overlap_scope_qualified(
                     ctx.device_facts(),
-                    residency_tensor_count,
-                    residency_source_bytes,
+                    self.residency.dtype_census(),
                     expert_count,
                     n_tokens,
                     routed_gate_dtype,
@@ -10904,8 +11051,7 @@ impl DeepSeekV4Session {
                 && route_policy == PackedRoutePolicy::Cpu
                 && packed_shared_route_overlap_scope_qualified(
                     ctx.device_facts(),
-                    residency_tensor_count,
-                    residency_source_bytes,
+                    self.residency.dtype_census(),
                     expert_count,
                     n_tokens,
                     routed_gate_dtype,
@@ -11669,8 +11815,6 @@ impl DeepSeekV4Session {
             let grouped_q3q4_qualified = packed_grouped_q3q4_enabled()
                 && packed_grouped_q3q4_scope_qualified(
                     ctx.device_facts(),
-                    self.residency.report().tensor_count,
-                    self.residency.report().source_bytes,
                     self.prefill.moe.expert_count,
                     n_tokens,
                     routed_gate.dtype,

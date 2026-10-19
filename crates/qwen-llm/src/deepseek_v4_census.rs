@@ -109,6 +109,10 @@ pub enum DeepSeekV4TensorRole {
 }
 
 impl DeepSeekV4TensorRole {
+    pub const fn all() -> &'static [Self] {
+        &Self::ALL
+    }
+
     const ALL: [Self; 41] = [
         Self::TokenEmbedding,
         Self::OutputNorm,

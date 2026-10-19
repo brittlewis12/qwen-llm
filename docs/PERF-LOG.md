@@ -17,7 +17,8 @@ See also: `docs/PERF-ROADMAP.md` for the current state and evidence index.
   both lose to scalar in K640 pack/matmul/finite and whole-sink GPU timing.
   No full-model performance claim follows from the rejected tiles.
 - Exact threadgroup packing (`7afc6aa9`, rebased as `3be2e136`) measures matched
-  REAP pp1024/2048/10000 at 119.498/115.248/108.860 tokens/s, gains of 0.57-0.71%.
+  REAP pp1024/2048/10000 at 119.498/115.248/108.860 tokens/s, differences of
+  +0.57-0.71% across sessions about 2.5 hours apart, not isolated code effects.
   Five alternating tg32/depth2048 pairs give median +0.16%, effectively flat.
   Both arms show 22-to-25 tokens/s session variation; the first pair's +13.73%
   is retained, not attributed to the change. Fresh conditional

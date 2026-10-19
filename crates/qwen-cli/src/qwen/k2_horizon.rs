@@ -342,7 +342,7 @@ pub(crate) fn run_raw(
         format,
     } = prepare_input(gguf, invocation, args, explicit, &mut timing)?;
     let sampling = timing.measure(Phase::RequestPreparation, || cli_sampling_config(args))?;
-    let sampling_echo = sampling.clone();
+    let sampling_echo = sampling;
     let tool_byte_budget = if tool_chat.is_some() {
         crate::serve::render_k2::tools::byte_budget(
             args.tokens,

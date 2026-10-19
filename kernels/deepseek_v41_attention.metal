@@ -49,6 +49,12 @@ kernel void kernel_deepseek_v41_attention_finite(
 }
 
 // These deliberately simple F32 operators preserve the source cache format.
+inline void attention_rotate(device const float *input, device float *output, float angle) {
+    float c = cos(angle), s = sin(angle), u = input[0], v = input[1];
+    output[0] = u * c - v * s;
+    output[1] = u * s + v * c;
+}
+
 kernel void kernel_deepseek_v41_attention_rope(
     constant uint4 &a [[buffer(0)]], device float *x [[buffer(1)]],
     device const float *freq [[buffer(2)]], uint t [[thread_position_in_grid]]) {
@@ -56,9 +62,7 @@ kernel void kernel_deepseek_v41_attention_rope(
     uint h = t / a.y, j = t % a.y;
     uint offset = h * a.x + a.x - 2 * a.y + 2 * j;
     float angle = float(a.z) * freq[j] * (a.w ? -1.0f : 1.0f);
-    float c = cos(angle), s = sin(angle), u = x[offset], v = x[offset + 1];
-    x[offset] = u * c - v * s;
-    x[offset + 1] = u * s + v * c;
+    attention_rotate(x + offset, x + offset, angle);
 }
 
 kernel void kernel_deepseek_v41_attention_copy(
@@ -211,13 +215,9 @@ kernel void kernel_deepseek_v41_attention_sink(
     }
 }
 
-kernel void kernel_deepseek_v41_attention_score(
-    constant uint4 &a [[buffer(0)]], constant uint2 &b [[buffer(1)]],
-    device const float *q [[buffer(2)]], device const float *raw [[buffer(3)]],
-    device const float *compressed [[buffer(4)]], device const uint *ids [[buffer(5)]],
-    device float *scores [[buffer(7)]], constant uint &length [[buffer(9)]],
-    uint2 group [[threadgroup_position_in_grid]],
-    uint sg [[simdgroup_index_in_threadgroup]], uint lane [[thread_index_in_simdgroup]]) {
+inline void attention_score(uint4 a, uint2 b, device const float *q,
+    device const float *raw, device const float *compressed, device const uint *ids,
+    device float *scores, uint length, uint2 group, uint sg, uint lane) {
     uint count = a.y + b.x, h = group.y, i = group.x * 8 + sg;
     if (i >= count) return;
     if (i >= a.y && ids[i - a.y] >= length) return;
@@ -228,12 +228,9 @@ kernel void kernel_deepseek_v41_attention_score(
     if (lane == 0) scores[h * b.y + i] = dot * rsqrt(float(a.x));
 }
 
-kernel void kernel_deepseek_v41_attention_softmax(
-    constant uint4 &a [[buffer(0)]], constant uint2 &b [[buffer(1)]],
-    device const uint *ids [[buffer(5)]], device const float *sink [[buffer(6)]],
-    device float *scores [[buffer(7)]], constant uint &length [[buffer(9)]],
-    device atomic_uint *status [[buffer(10)]], uint h [[threadgroup_position_in_grid]],
-    uint lane [[thread_index_in_simdgroup]]) {
+inline void attention_softmax(uint4 a, uint2 b, device const uint *ids,
+    device const float *sink, device float *scores, uint length,
+    device atomic_uint *status, uint h, uint lane) {
     // Last slot per head holds the denominator, or a local invalid-ID sentinel.
     bool invalid = false;
     for (uint i = lane; i < b.x; i += 32) invalid |= ids[i] >= length;
@@ -256,14 +253,11 @@ kernel void kernel_deepseek_v41_attention_softmax(
     if (lane == 0) scores[h * b.y + b.y - 1] = denom;
 }
 
-kernel void kernel_deepseek_v41_attention_matrix_values(
-    constant uint4 &a [[buffer(0)]], constant uint2 &b [[buffer(1)]],
-    device const float *raw [[buffer(3)]], device const float *compressed [[buffer(4)]],
-    device const uint *ids [[buffer(5)]], device const float *scores [[buffer(7)]],
-    constant uint &length [[buffer(9)]], constant uint2 &m [[buffer(11)]],
-    device float *values [[buffer(12)]], device float *probabilities [[buffer(13)]],
-    uint2 group [[threadgroup_position_in_grid]], uint tid [[thread_index_in_threadgroup]]) {
-    threadgroup float tile[16][17];
+inline void attention_matrix_values(uint4 a, uint2 b,
+    device const float *raw, device const float *compressed, device const uint *ids,
+    device const float *scores, uint length, uint2 m, device float *values,
+    device float *probabilities, uint probability_stride, threadgroup float tile[16][17],
+    uint2 group, uint tid) {
     uint j = group.y * 16 + tid % 16, i = group.x * 16 + tid / 16, count = a.y + b.x;
     float v = 0;
     if (j < a.x) {
@@ -278,16 +272,13 @@ kernel void kernel_deepseek_v41_attention_matrix_values(
     if (j < a.x) values[j * m.x + i] = tile[tid % 16][tid / 16];
     if (j < m.y) {
         float denom = scores[j * b.y + b.y - 1];
-        probabilities[j * m.x + i] = i < count && denom != -1.0f ? scores[j * b.y + i] / denom : 0;
+        probabilities[j * probability_stride + i] = i < count && denom != -1.0f ? scores[j * b.y + i] / denom : 0;
     }
 }
 
-kernel void kernel_deepseek_v41_attention_output(
-    constant uint4 &a [[buffer(0)]], constant uint2 &b [[buffer(1)]],
-    device const float *raw [[buffer(3)]], device const float *compressed [[buffer(4)]],
-    device const uint *ids [[buffer(5)]], device const float *scores [[buffer(7)]],
-    device float *out [[buffer(8)]], device atomic_uint *status [[buffer(10)]],
-    uint t [[thread_position_in_grid]]) {
+inline void attention_output(uint4 a, uint2 b, device const float *raw,
+    device const float *compressed, device const uint *ids, device const float *scores,
+    device float *out, uint output_stride, device atomic_uint *status, uint t) {
     uint h = t / a.x, j = t % a.x;
     float denom = scores[h * b.y + b.y - 1], value = 0;
     if (denom != -1.0f) {
@@ -296,6 +287,135 @@ kernel void kernel_deepseek_v41_attention_output(
             value += row[j] * scores[h * b.y + i] / denom;
         }
     }
-    out[t] = value;
+    out[h * output_stride + j] = value;
     if (!isfinite(value)) atomic_fetch_or_explicit(status, 4u, memory_order_relaxed);
+}
+
+kernel void kernel_deepseek_v41_attention_score(
+    constant uint4 &a [[buffer(0)]], constant uint2 &b [[buffer(1)]],
+    device const float *q [[buffer(2)]], device const float *raw [[buffer(3)]],
+    device const float *compressed [[buffer(4)]], device const uint *ids [[buffer(5)]],
+    device float *scores [[buffer(7)]], constant uint &length [[buffer(9)]],
+    uint2 group [[threadgroup_position_in_grid]],
+    uint sg [[simdgroup_index_in_threadgroup]], uint lane [[thread_index_in_simdgroup]]) {
+    attention_score(a, b, q, raw, compressed, ids, scores, length, group, sg, lane);
+}
+
+kernel void kernel_deepseek_v41_attention_softmax(
+    constant uint4 &a [[buffer(0)]], constant uint2 &b [[buffer(1)]],
+    device const uint *ids [[buffer(5)]], device const float *sink [[buffer(6)]],
+    device float *scores [[buffer(7)]], constant uint &length [[buffer(9)]],
+    device atomic_uint *status [[buffer(10)]], uint h [[threadgroup_position_in_grid]],
+    uint lane [[thread_index_in_simdgroup]]) {
+    attention_softmax(a, b, ids, sink, scores, length, status, h, lane);
+}
+
+kernel void kernel_deepseek_v41_attention_matrix_values(
+    constant uint4 &a [[buffer(0)]], constant uint2 &b [[buffer(1)]],
+    device const float *raw [[buffer(3)]], device const float *compressed [[buffer(4)]],
+    device const uint *ids [[buffer(5)]], device const float *scores [[buffer(7)]],
+    constant uint &length [[buffer(9)]], constant uint2 &m [[buffer(11)]],
+    device float *values [[buffer(12)]], device float *probabilities [[buffer(13)]],
+    uint2 group [[threadgroup_position_in_grid]], uint tid [[thread_index_in_threadgroup]]) {
+    threadgroup float tile[16][17];
+    attention_matrix_values(a, b, raw, compressed, ids, scores, length, m,
+        values, probabilities, m.x, tile, group, tid);
+}
+
+kernel void kernel_deepseek_v41_attention_output(
+    constant uint4 &a [[buffer(0)]], constant uint2 &b [[buffer(1)]],
+    device const float *raw [[buffer(3)]], device const float *compressed [[buffer(4)]],
+    device const uint *ids [[buffer(5)]], device const float *scores [[buffer(7)]],
+    device float *out [[buffer(8)]], device atomic_uint *status [[buffer(10)]],
+    uint t [[thread_position_in_grid]]) {
+    attention_output(a, b, raw, compressed, ids, scores, out, a.x, status, t);
+}
+
+kernel void kernel_deepseek_v41_attention_rope_rows(
+    constant uint4 &a [[buffer(0)]], device const float *input [[buffer(1)]],
+    device const float *freq [[buffer(2)]], constant uint2 &b [[buffer(3)]],
+    device float *output [[buffer(4)]], uint t [[thread_position_in_grid]]) {
+    // a: dim, heads, pairs, absolute start; b: queries, inverse/grouped input.
+    uint j = t % a.x, h = (t / a.x) % a.y, q = t / (a.x * a.y);
+    uint source = b.y ? (h * b.x + q) * a.x + j : t;
+    uint rotary_start = a.x - 2 * a.z;
+    if (j < rotary_start) { output[t] = input[source]; return; }
+    if ((j - rotary_start) % 2) return;
+    float angle = float(a.w + q) * freq[(j - rotary_start) / 2] * (b.y ? -1.0f : 1.0f);
+    attention_rotate(input + source, output + t, angle);
+}
+
+kernel void kernel_deepseek_v41_attention_history(
+    constant uint4 &a [[buffer(0)]], device const float *ring [[buffer(1)]],
+    device const float *rows [[buffer(2)]], device float *history [[buffer(3)]],
+    uint t [[thread_position_in_grid]]) {
+    // a: dim, window, absolute chunk start, chunk rows.
+    uint old = min(a.z, a.y), row = t / a.x, j = t % a.x;
+    history[t] = row < old ? ring[((a.z - old + row) % a.y) * a.x + j]
+        : rows[(row - old) * a.x + j];
+}
+
+kernel void kernel_deepseek_v41_attention_publish_raw(
+    constant uint4 &a [[buffer(0)]], device float *ring [[buffer(1)]],
+    device const float *rows [[buffer(2)]], uint t [[thread_position_in_grid]]) {
+    uint row = a.w - min(a.w, a.y) + t / a.x, j = t % a.x;
+    ring[((a.z + row) % a.y) * a.x + j] = rows[row * a.x + j];
+}
+
+inline uint4 attention_row_raw(uint4 geometry, uint4 history, uint query) {
+    uint end = history.x + query + 1, count = min(end, geometry.y);
+    return uint4(geometry.x, count, end - count - history.y, history.z);
+}
+inline uint attention_row_length(uint4 history, uint query) {
+    return history.w ? (history.x + query + 1) / history.w : 0;
+}
+
+kernel void kernel_deepseek_v41_attention_score_rows(
+    constant uint4 &a [[buffer(0)]], constant uint4 &b [[buffer(1)]],
+    device const float *q [[buffer(2)]], device const float *raw [[buffer(3)]],
+    device const float *compressed [[buffer(4)]], device const uint *ids [[buffer(5)]],
+    device float *scores [[buffer(7)]], constant uint4 &m [[buffer(11)]],
+    uint3 group [[threadgroup_position_in_grid]],
+    uint sg [[simdgroup_index_in_threadgroup]], uint lane [[thread_index_in_simdgroup]]) {
+    uint r = group.z, length = attention_row_length(b, r);
+    attention_score(attention_row_raw(a, b, r), uint2(min(length, a.z), a.w),
+        q + r * m.y * a.x, raw, compressed, ids + r * a.z,
+        scores + r * m.y * a.w, length, group.xy, sg, lane);
+}
+
+kernel void kernel_deepseek_v41_attention_softmax_rows(
+    constant uint4 &a [[buffer(0)]], constant uint4 &b [[buffer(1)]],
+    device const uint *ids [[buffer(5)]], device const float *sink [[buffer(6)]],
+    device float *scores [[buffer(7)]], device atomic_uint *status [[buffer(10)]],
+    constant uint4 &m [[buffer(11)]], uint2 group [[threadgroup_position_in_grid]],
+    uint lane [[thread_index_in_simdgroup]]) {
+    uint r = group.y, length = attention_row_length(b, r);
+    attention_softmax(attention_row_raw(a, b, r), uint2(min(length, a.z), a.w),
+        ids + r * a.z, sink, scores + r * m.y * a.w, length, status, group.x, lane);
+}
+
+kernel void kernel_deepseek_v41_attention_matrix_values_rows(
+    constant uint4 &a [[buffer(0)]], constant uint4 &b [[buffer(1)]],
+    device const float *raw [[buffer(3)]], device const float *compressed [[buffer(4)]],
+    device const uint *ids [[buffer(5)]], device const float *scores [[buffer(7)]],
+    constant uint4 &m [[buffer(11)]], device float *values [[buffer(12)]],
+    device float *probabilities [[buffer(13)]], uint3 group [[threadgroup_position_in_grid]],
+    uint tid [[thread_index_in_threadgroup]]) {
+    threadgroup float tile[16][17];
+    uint r = group.z, length = attention_row_length(b, r);
+    attention_matrix_values(attention_row_raw(a, b, r), uint2(min(length, a.z), a.w),
+        raw, compressed, ids + r * a.z, scores + r * m.y * a.w, length, m.xy,
+        values + r * a.x * m.x, probabilities + r * m.x, m.x * m.z, tile, group.xy, tid);
+}
+
+kernel void kernel_deepseek_v41_attention_output_rows(
+    constant uint4 &a [[buffer(0)]], constant uint4 &b [[buffer(1)]],
+    device const float *raw [[buffer(3)]], device const float *compressed [[buffer(4)]],
+    device const uint *ids [[buffer(5)]], device const float *scores [[buffer(7)]],
+    device float *out [[buffer(8)]], device atomic_uint *status [[buffer(10)]],
+    constant uint4 &m [[buffer(11)]], uint t [[thread_position_in_grid]]) {
+    uint r = t / (m.y * a.x), local = t % (m.y * a.x), length = attention_row_length(b, r);
+    attention_output(attention_row_raw(a, b, r), uint2(min(length, a.z), a.w),
+        raw, compressed, ids + r * a.z, scores + r * m.y * a.w,
+        out + r * a.x, m.z * a.x, status, local);
 }

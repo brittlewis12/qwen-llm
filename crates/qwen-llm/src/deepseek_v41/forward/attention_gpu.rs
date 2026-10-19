@@ -4,6 +4,7 @@ use super::super::gguf::Schedule;
 use super::*;
 use objc2_metal::{MTLComputePipelineState, MTLSize};
 
+mod query_batch;
 #[cfg(test)]
 mod tests;
 
@@ -148,6 +149,7 @@ impl ValueMatrix {
 }
 
 pub(super) struct Rows {
+    tile: query_batch::Scratch,
     rank: MetalTensor,
     query: MetalTensor,
     latent: MetalTensor,
@@ -188,7 +190,11 @@ impl Rows {
         rows: usize,
     ) -> Result<Self> {
         let widths = Self::widths(c, capacity);
+        for &width in &widths {
+            checked_product(&[width, rows])?;
+        }
         Ok(Self {
+            tile: query_batch::Scratch::new(ctx, c, rows)?,
             rank: prefill::allocate(ctx, widths[0], rows, GgmlType::F32)?,
             query: prefill::allocate(ctx, widths[1], rows, GgmlType::F32)?,
             latent: prefill::allocate(ctx, widths[2], rows, GgmlType::F32)?,
@@ -1021,11 +1027,37 @@ impl Workspace {
                 row,
             ),
         );
+        // Sequential compressor/index transitions operate directly on prepared
+        // rows. Their mutations are scratch-only; decode retains its own buffers.
+        let latent = std::mem::replace(
+            &mut self.latent,
+            prefill::row(&rows.compressor_value, self.config.head_dim, row),
+        );
+        let gate = std::mem::replace(
+            &mut self.gate,
+            prefill::row(&rows.compressor_gate, self.config.head_dim, row),
+        );
+        let index_query = std::mem::replace(
+            &mut self.index_query,
+            prefill::row(
+                &rows.index_query,
+                self.config.index_heads * self.config.index_dim,
+                row,
+            ),
+        );
+        let index_weights = std::mem::replace(
+            &mut self.index_weights,
+            prefill::row(&rows.index_weights, self.config.index_heads, row),
+        );
         let result = self
             .encode_inner(ctx, enc, id, position, w, input, Some((rows, row)))
             .map(|_| ());
         self.selected = selected;
         self.candidates = candidates;
+        self.latent = latent;
+        self.gate = gate;
+        self.index_query = index_query;
+        self.index_weights = index_weights;
         result
     }
 
@@ -1109,29 +1141,7 @@ impl Workspace {
         validate_weights(c, id, w, &self.schedule)?;
         valid_view(input, c.hidden)?;
         let constants = &self.constants[id];
-        if let Some((rows, row)) = prepared {
-            copy(
-                ctx,
-                enc,
-                &prefill::row(&rows.rank, c.query_rank, row),
-                &self.query_rank,
-                c.query_rank,
-            )?;
-            copy(
-                ctx,
-                enc,
-                &prefill::row(&rows.query, c.heads * c.head_dim, row),
-                &self.query,
-                c.heads * c.head_dim,
-            )?;
-            copy(
-                ctx,
-                enc,
-                &prefill::row(&rows.latent, c.head_dim, row),
-                &self.latent,
-                c.head_dim,
-            )?;
-        } else {
+        if prepared.is_none() {
             linear(ctx, enc, &w.query_a, input, &self.query_rank)?;
             norm(
                 ctx,
@@ -1151,38 +1161,38 @@ impl Workspace {
                 c.head_dim,
                 w.eps,
             )?;
+            rope(
+                ctx,
+                enc,
+                &self.query,
+                &constants.frequencies,
+                c.head_dim,
+                c.heads,
+                c.rope_dim / 2,
+                position,
+                false,
+            )?;
+            rope(
+                ctx,
+                enc,
+                &self.latent,
+                &constants.frequencies,
+                c.head_dim,
+                1,
+                c.rope_dim / 2,
+                position,
+                false,
+            )?;
+            let raw = self.raw.view_subrange(
+                (id * c.window * c.head_dim) as u64,
+                vec![(c.window * c.head_dim) as u64],
+            );
+            let row = raw.view_subrange(
+                (position % c.window * c.head_dim) as u64,
+                vec![c.head_dim as u64],
+            );
+            copy(ctx, enc, &self.latent, &row, c.head_dim)?;
         }
-        rope(
-            ctx,
-            enc,
-            &self.query,
-            &constants.frequencies,
-            c.head_dim,
-            c.heads,
-            c.rope_dim / 2,
-            position,
-            false,
-        )?;
-        rope(
-            ctx,
-            enc,
-            &self.latent,
-            &constants.frequencies,
-            c.head_dim,
-            1,
-            c.rope_dim / 2,
-            position,
-            false,
-        )?;
-        let raw = self.raw.view_subrange(
-            (id * c.window * c.head_dim) as u64,
-            vec![(c.window * c.head_dim) as u64],
-        );
-        let row = raw.view_subrange(
-            (position % c.window * c.head_dim) as u64,
-            vec![c.head_dim as u64],
-        );
-        copy(ctx, enc, &self.latent, &row, c.head_dim)?;
         let owner = self.schedule.owner_slot(id);
         let mut selected_count = 0;
         if let Some(owner) = owner {
@@ -1191,27 +1201,11 @@ impl Workspace {
             let length = (position + 1) / ratio;
             if self.schedule.owns_kv(id) {
                 let compressor = w.compressor.as_ref().ok_or("missing compressor")?;
-                if let Some((rows, row)) = prepared {
-                    copy(
-                        ctx,
-                        enc,
-                        &prefill::row(&rows.compressor_value, c.head_dim, row),
-                        &self.latent,
-                        c.head_dim,
-                    )?;
-                } else {
+                if prepared.is_none() {
                     linear(ctx, enc, &compressor.kv, input, &self.latent)?;
                 }
                 if ratio == 2 {
-                    if let Some((rows, row)) = prepared {
-                        copy(
-                            ctx,
-                            enc,
-                            &prefill::row(&rows.compressor_gate, c.head_dim, row),
-                            &self.gate,
-                            c.head_dim,
-                        )?;
-                    } else {
+                    if prepared.is_none() {
                         linear(
                             ctx,
                             enc,
@@ -1310,36 +1304,21 @@ impl Workspace {
                     self.select_unpruned(ctx, enc, id, length)?;
                 } else {
                     let index = w.index.as_ref().ok_or("missing index")?;
-                    if let Some((rows, row)) = prepared {
-                        copy(
-                            ctx,
-                            enc,
-                            &prefill::row(&rows.index_query, c.index_heads * c.index_dim, row),
-                            &self.index_query,
-                            c.index_heads * c.index_dim,
-                        )?;
-                        copy(
-                            ctx,
-                            enc,
-                            &prefill::row(&rows.index_weights, c.index_heads, row),
-                            &self.index_weights,
-                            c.index_heads,
-                        )?;
-                    } else {
+                    if prepared.is_none() {
                         linear(ctx, enc, &index.query, &self.query_rank, &self.index_query)?;
                         linear(ctx, enc, &index.weights, input, &self.index_weights)?;
+                        rope(
+                            ctx,
+                            enc,
+                            &self.index_query,
+                            &constants.frequencies,
+                            c.index_dim,
+                            c.index_heads,
+                            c.rope_dim / 2,
+                            position,
+                            false,
+                        )?;
                     }
-                    rope(
-                        ctx,
-                        enc,
-                        &self.index_query,
-                        &constants.frequencies,
-                        c.index_dim,
-                        c.index_heads,
-                        c.rope_dim / 2,
-                        position,
-                        false,
-                    )?;
                     pipeline(ctx, enc, "index_heads")?;
                     enc.set_bytes(
                         0,
@@ -1386,64 +1365,59 @@ impl Workspace {
                 }
             }
         }
-        let raw_count = (position + 1).min(c.window);
-        enc.set_bytes(
-            0,
-            &[
-                c.head_dim as u32,
-                raw_count as u32,
-                ((position + 1 - raw_count) % c.window) as u32,
-                c.window as u32,
-            ],
-        );
-        enc.set_bytes(
-            1,
-            &[selected_count as u32, (c.window + c.index_topk + 1) as u32],
-        );
-        enc.set_tensor(2, &self.query);
-        enc.set_tensor(3, &raw);
-        enc.set_tensor(
-            4,
-            owner.map_or(&self.latent, |slot| &self.owners[slot].compressed),
-        );
-        enc.set_tensor(5, &self.selected);
-        enc.set_tensor(6, &constants.sink);
-        enc.set_tensor(7, &self.attention_scores);
-        enc.set_tensor(8, &self.attended);
-        let length = owner.map_or(0, |_| (position + 1) / self.schedule.ratio(id));
-        enc.set_bytes(9, &(length as u32));
-        enc.set_tensor(10, &self.status);
-        sink_passes(
-            ctx,
-            enc,
-            c.heads,
-            c.head_dim,
-            raw_count + selected_count,
-            self.value_matrix
-                .as_ref()
-                .map(|matrix| (matrix, &self.attended, &self.status)),
-        )?;
-        rope(
-            ctx,
-            enc,
-            &self.attended,
-            &constants.frequencies,
-            c.head_dim,
-            c.heads,
-            c.rope_dim / 2,
-            position,
-            true,
-        )?;
-        if let Some((rows, row)) = prepared {
-            // This query row has been consumed; reuse it for the attended row.
-            copy(
+        if prepared.is_none() {
+            let raw = self.raw.view_subrange(
+                (id * c.window * c.head_dim) as u64,
+                vec![(c.window * c.head_dim) as u64],
+            );
+            let raw_count = (position + 1).min(c.window);
+            enc.set_bytes(
+                0,
+                &[
+                    c.head_dim as u32,
+                    raw_count as u32,
+                    ((position + 1 - raw_count) % c.window) as u32,
+                    c.window as u32,
+                ],
+            );
+            enc.set_bytes(
+                1,
+                &[selected_count as u32, (c.window + c.index_topk + 1) as u32],
+            );
+            enc.set_tensor(2, &self.query);
+            enc.set_tensor(3, &raw);
+            enc.set_tensor(
+                4,
+                owner.map_or(&self.latent, |slot| &self.owners[slot].compressed),
+            );
+            enc.set_tensor(5, &self.selected);
+            enc.set_tensor(6, &constants.sink);
+            enc.set_tensor(7, &self.attention_scores);
+            enc.set_tensor(8, &self.attended);
+            let length = owner.map_or(0, |_| (position + 1) / self.schedule.ratio(id));
+            enc.set_bytes(9, &(length as u32));
+            enc.set_tensor(10, &self.status);
+            sink_passes(
+                ctx,
+                enc,
+                c.heads,
+                c.head_dim,
+                raw_count + selected_count,
+                self.value_matrix
+                    .as_ref()
+                    .map(|matrix| (matrix, &self.attended, &self.status)),
+            )?;
+            rope(
                 ctx,
                 enc,
                 &self.attended,
-                &prefill::row(&rows.query, c.heads * c.head_dim, row),
-                c.heads * c.head_dim,
+                &constants.frequencies,
+                c.head_dim,
+                c.heads,
+                c.rope_dim / 2,
+                position,
+                true,
             )?;
-        } else {
             let group_width = c.heads / c.groups * c.head_dim;
             for (group, projection) in w.output_a.iter().enumerate() {
                 linear(

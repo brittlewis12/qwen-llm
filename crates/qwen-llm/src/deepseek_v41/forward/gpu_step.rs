@@ -32,18 +32,23 @@ struct EngramWorkspace {
     gate: engram_gpu::BoundGate,
 }
 
-pub(super) fn chunk_widths(model: &Forward<'_>, capacity: usize) -> Vec<usize> {
+pub(super) fn chunk_widths(
+    model: &Forward<'_>,
+    capacity: usize,
+    rows: usize,
+) -> Result<Vec<usize>> {
     let c = &model.config;
     let mut widths = vec![4 * c.hidden, 4 * c.hidden, c.hidden, 4];
     widths.extend(prefill::HcRows::widths(c));
     widths.extend(ffn_gpu::Rows::widths(c, model.layers.len()));
     widths.extend(attention_gpu::Rows::widths(c, capacity));
+    widths.extend(attention_gpu::Rows::tile_widths(c, rows)?);
     for layer in &model.layers {
         if let Some(e) = &layer.engram {
             widths.extend([e.projection.input, e.projection.output]);
         }
     }
-    widths
+    Ok(widths)
 }
 
 pub(super) fn bytes_with_schedule(
@@ -205,23 +210,15 @@ impl Workspace {
                     &incoming,
                 )
                 .map_err(|e| e.to_string())?;
-                self.attention
-                    .prepare_rows(ctx, &enc, id, &layer.attention, &hc.normalized, &attention)
-                    .map_err(|e| e.to_string())?;
-                // Raw SWA writes and attention stay interleaved by absolute position.
-                // Selection/candidate bindings are per row and survive later layers.
-                for row in 0..n {
-                    self.attention.encode_batch_row(
-                        ctx,
-                        &enc,
-                        id,
-                        start + row,
-                        &layer.attention,
-                        &prefill::row(&hc.normalized, c.hidden, row),
-                        &attention,
-                        row,
-                    )?;
-                }
+                self.attention.encode_rows(
+                    ctx,
+                    &enc,
+                    id,
+                    start,
+                    &layer.attention,
+                    &hc.normalized,
+                    &attention,
+                )?;
                 self.attention
                     .finish_rows(ctx, &enc, &layer.attention, &attention, &outputs)?;
                 for (position, _, snapshot) in snapshots.iter().filter(|(_, layer, _)| *layer == id)

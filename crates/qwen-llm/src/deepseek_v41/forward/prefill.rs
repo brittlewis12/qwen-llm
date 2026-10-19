@@ -294,25 +294,23 @@ impl HcRows {
         incoming: &MetalTensor,
     ) -> std::result::Result<(), metal::MetalError> {
         projection.encode_rows(enc, x, &self.raw, self.rows)?;
-        for r in 0..self.rows {
-            enc.set_pipeline(&ctx.pipeline("kernel_deepseek_v41_projected_rms")?);
-            enc.set_bytes(0, &((4 * c.hidden) as u32));
-            enc.set_bytes(1, &c.norm_eps);
-            enc.set_tensor(2, &row(x, 4 * c.hidden, r));
-            enc.set_tensor(3, &row(&self.raw, 24, r));
-            enc.dispatch(
-                objc2_metal::MTLSize {
-                    width: 1,
-                    height: 1,
-                    depth: 1,
-                },
-                objc2_metal::MTLSize {
-                    width: 256,
-                    height: 1,
-                    depth: 1,
-                },
-            );
-        }
+        enc.set_pipeline(&ctx.pipeline("kernel_deepseek_v41_projected_rms")?);
+        enc.set_bytes(0, &((4 * c.hidden) as u32));
+        enc.set_bytes(1, &c.norm_eps);
+        enc.set_tensor(2, x);
+        enc.set_tensor(3, &self.raw);
+        enc.dispatch(
+            objc2_metal::MTLSize {
+                width: self.rows,
+                height: 1,
+                depth: 1,
+            },
+            objc2_metal::MTLSize {
+                width: 256,
+                height: 1,
+                depth: 1,
+            },
+        );
         metal::encode_mhc4_controls_rows(
             ctx,
             enc,
@@ -393,7 +391,7 @@ pub(super) fn run_captured(
     let rows = tokens.len().min(chunk_rows);
     if rows > 1 {
         let mut extra = 0u64;
-        for width in gpu_step::chunk_widths(model, state.capacity()) {
+        for width in gpu_step::chunk_widths(model, state.capacity(), rows)? {
             let bytes = width
                 .checked_mul(rows)
                 .and_then(|n| n.checked_mul(4))

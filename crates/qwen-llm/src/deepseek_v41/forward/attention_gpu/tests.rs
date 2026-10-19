@@ -1,6 +1,8 @@
 use super::*;
 use std::collections::BTreeMap;
 
+mod query_batch;
+
 fn scheduled_weights<'a>(
     ctx: &'a MetalContext,
     c: &Config,

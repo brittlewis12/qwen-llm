@@ -14,7 +14,9 @@ kernel void kernel_deepseek_v41_group_rows(
 kernel void kernel_deepseek_v41_projected_rms(
     constant uint &n [[buffer(0)]], constant float &eps [[buffer(1)]],
     device const float *x [[buffer(2)]], device float *mix [[buffer(3)]],
-    uint tid [[thread_index_in_threadgroup]]) {
+    uint tid [[thread_index_in_threadgroup]], uint row [[threadgroup_position_in_grid]]) {
+    x += row * n;
+    mix += row * 24;
     threadgroup float sums[256];
     float sum = 0.0f;
     for (uint i = tid; i < n; i += 256) sum += x[i] * x[i];

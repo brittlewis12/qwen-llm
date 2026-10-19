@@ -130,10 +130,21 @@ pp2048 repetition measures **114.636 tokens/s** (17.865 seconds). No validation
 layers or diagnostic ablations are enabled. These results still do not reach
 the roughly 500 tokens/s agent-prefill target. Evidence locations and the reuse
 review are recorded in [the review packet](bench/2026-10-19-v41-review.md).
+Three-repetition checks at `733d629f` measure 118.664, 114.549 and 108.079
+tokens/s at pp1024, pp2048 and pp10000 respectively, with resident weights and
+fresh KV. The 10K prompt takes 92.525 seconds on average.
 
 Exact prefix reuse is separately useful: a private HTTPS smoke request reuses
 492 of 494 prompt tokens in 0.21 seconds, and a follow-up reuses 495 tokens in
 0.73 seconds. Those are whole short-request timings, not cold-prefill throughput.
+The realistic agent screen exposed a missing system/tool-prefix checkpoint.
+`fbd5770c` fixes it through the official renderer and shared SnapshotCache:
+changed-task requests reuse 11,453 tokens and evaluate only 27 new tokens,
+reaching first text in 0.588 seconds over three screens, versus a 109-second
+baseline miss. Cold first text for 11,479 tokens still takes 113.6-124.0 seconds.
+The packet retains the baseline tool-call error, bounded tool-step limits and
+a 20-second prefill outlier; this is not a blanket agent-latency success claim.
+
 The grouped path passes the independent seven-token GGUF CPU comparison and the
 65-token serial/batched, capacity-growth and snapshot-continuation comparisons.
 The matrix path also passes continuation through position 257 with the same
@@ -160,7 +171,8 @@ The repeated seven-token oracle prompt is a correctness input, not a throughput
 proxy for the random-token shared benchmark or real agent prompts.
 A separate 1K stage sample attributes 9.84 of 13.13 GPU seconds to attention
 and 3.29 seconds to FFN, with 0.15 seconds of CPU encoding and no measured disk
-reads. Attention remains the dominant cold-prefill cost.
+reads. That sample predates the final value/index optimizations and is not a
+current-tree stage attribution.
 
 ## Conversion Status
 

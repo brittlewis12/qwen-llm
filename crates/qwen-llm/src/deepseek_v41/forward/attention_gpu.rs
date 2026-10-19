@@ -2,7 +2,7 @@
 //! or command completion requires the caller to poison/discard the workspace.
 use super::super::gguf::Schedule;
 use super::*;
-use objc2_metal::MTLSize;
+use objc2_metal::{MTLComputePipelineState, MTLSize};
 
 #[cfg(test)]
 mod tests;
@@ -138,11 +138,11 @@ impl ValueMatrix {
             heads,
         )
         .map_err(|e| e.to_string())?;
-        pipeline(ctx, enc, "finite")?;
+        let pso = pipeline(ctx, enc, "finite")?;
         enc.set_bytes(0, &((heads * dim) as u32));
         enc.set_tensor(1, output);
         enc.set_tensor(2, status);
-        dispatch(enc, heads * dim);
+        dispatch(enc, &pso, heads * dim);
         Ok(())
     }
 }
@@ -442,23 +442,27 @@ pub(super) fn bytes_with_schedule(c: &Config, capacity: usize, schedule: &Schedu
 fn tensor(ctx: &MetalContext, n: usize, dtype: GgmlType) -> Result<MetalTensor> {
     MetalTensor::zeros_dtype_unstaged(ctx, vec![n as u64], dtype).map_err(|e| e.to_string())
 }
-fn pipeline(ctx: &MetalContext, enc: &KernelEncoder, suffix: &str) -> Result<()> {
-    enc.set_pipeline(
-        &ctx.pipeline(&format!("kernel_deepseek_v41_attention_{suffix}"))
-            .map_err(|e| e.to_string())?,
-    );
-    Ok(())
+fn pipeline(ctx: &MetalContext, enc: &KernelEncoder, suffix: &str) -> Result<metal::Pipeline> {
+    let pso = ctx
+        .pipeline(&format!("kernel_deepseek_v41_attention_{suffix}"))
+        .map_err(|e| e.to_string())?;
+    enc.set_pipeline(&pso);
+    Ok(pso)
 }
-fn dispatch(enc: &KernelEncoder, n: usize) {
+fn dispatch(enc: &KernelEncoder, pso: &metal::Pipeline, n: usize) {
     if n > 0 {
+        // These kernels use only global IDs, with no collective operations.
+        // Keep the grid exact: RoPE has no padded-thread bounds check.
+        let limit = pso.maxTotalThreadsPerThreadgroup().min(128);
+        let width = 1usize << n.trailing_zeros().min(limit.ilog2());
         enc.dispatch(
             MTLSize {
-                width: n,
+                width: n / width,
                 height: 1,
                 depth: 1,
             },
             MTLSize {
-                width: 1,
+                width,
                 height: 1,
                 depth: 1,
             },
@@ -571,14 +575,14 @@ fn rope(
     if count == 0 {
         return Ok(());
     }
-    pipeline(ctx, enc, "rope")?;
+    let pso = pipeline(ctx, enc, "rope")?;
     enc.set_bytes(
         0,
         &[dim as u32, count as u32, position as u32, inverse as u32],
     );
     enc.set_tensor(1, x);
     enc.set_tensor(2, freq);
-    dispatch(enc, heads * count);
+    dispatch(enc, &pso, heads * count);
     Ok(())
 }
 fn copy(
@@ -588,11 +592,11 @@ fn copy(
     y: &MetalTensor,
     n: usize,
 ) -> Result<()> {
-    pipeline(ctx, enc, "copy")?;
+    let pso = pipeline(ctx, enc, "copy")?;
     enc.set_bytes(0, &(n as u32));
     enc.set_tensor(1, x);
     enc.set_tensor(2, y);
-    dispatch(enc, n);
+    dispatch(enc, &pso, n);
     Ok(())
 }
 
@@ -814,7 +818,7 @@ impl Workspace {
         if all == 0 && !publish_mask {
             return Ok(());
         }
-        pipeline(ctx, enc, "selection_prepare")?;
+        let pso = pipeline(ctx, enc, "selection_prepare")?;
         enc.set_bytes(
             0,
             &[
@@ -826,7 +830,7 @@ impl Workspace {
         );
         enc.set_tensor(1, &self.selected);
         enc.set_tensor(2, &self.candidates);
-        dispatch(enc, all.max(if publish_mask { blocks } else { 0 }));
+        dispatch(enc, &pso, all.max(if publish_mask { blocks } else { 0 }));
         Ok(())
     }
 
@@ -841,7 +845,7 @@ impl Workspace {
         // The shared radix selector rejects nonfinite scores. Here -Inf masked
         // rows still participate in top-k, and forced-last blocks use +Inf.
         let padded = n.max(1).next_power_of_two();
-        pipeline(ctx, enc, "sort_init")?;
+        let pso = pipeline(ctx, enc, "sort_init")?;
         enc.set_bytes(
             0,
             &[
@@ -856,7 +860,7 @@ impl Workspace {
         enc.set_tensor(3, &self.sort_scores);
         enc.set_tensor(4, &self.sort_ids);
         enc.set_tensor(5, &self.status);
-        dispatch(enc, padded);
+        dispatch(enc, &pso, padded);
         let tile = padded.min(1024);
         let sort_tile = |width, full| -> Result<()> {
             pipeline(ctx, enc, "sort_tile")?;
@@ -884,11 +888,11 @@ impl Workspace {
         while width <= padded {
             let mut stride = width / 2;
             while stride >= tile {
-                pipeline(ctx, enc, "sort_step")?;
+                let pso = pipeline(ctx, enc, "sort_step")?;
                 enc.set_bytes(0, &[padded as u32, stride as u32, width as u32, 0]);
                 enc.set_tensor(1, &self.sort_scores);
                 enc.set_tensor(2, &self.sort_ids);
-                dispatch(enc, padded);
+                dispatch(enc, &pso, padded);
                 stride /= 2;
             }
             sort_tile(width, false)?;
@@ -1072,11 +1076,11 @@ impl Workspace {
         w.output_b
             .encode_rows(enc, &rows.low, output, rows.rows)
             .map_err(|e| e.to_string())?;
-        pipeline(ctx, enc, "finite")?;
+        let pso = pipeline(ctx, enc, "finite")?;
         enc.set_bytes(0, &((self.config.hidden * rows.rows) as u32));
         enc.set_tensor(1, output);
         enc.set_tensor(2, &self.status);
-        dispatch(enc, self.config.hidden * rows.rows);
+        dispatch(enc, &pso, self.config.hidden * rows.rows);
         Ok(())
     }
 
@@ -1220,13 +1224,13 @@ impl Workspace {
                         copy(ctx, enc, &self.latent, &cache.pending_value, c.head_dim)?;
                         copy(ctx, enc, &self.gate, &cache.pending_gate, c.head_dim)?;
                     } else {
-                        pipeline(ctx, enc, "pool")?;
+                        let pso = pipeline(ctx, enc, "pool")?;
                         enc.set_bytes(0, &(c.head_dim as u32));
                         enc.set_tensor(1, &cache.pending_value);
                         enc.set_tensor(2, &cache.pending_gate);
                         enc.set_tensor(3, &self.latent);
                         enc.set_tensor(4, &self.gate);
-                        dispatch(enc, c.head_dim);
+                        dispatch(enc, &pso, c.head_dim);
                     }
                 }
                 if (position + 1) % ratio == 0 {
@@ -1348,17 +1352,17 @@ impl Workspace {
                     index_dispatch(enc, length);
                     if !unpruned && self.schedule.candidate_source_layer == Some(id) {
                         let blocks = length.div_ceil(c.candidate_block);
-                        pipeline(ctx, enc, "blocks")?;
+                        let pso = pipeline(ctx, enc, "blocks")?;
                         enc.set_bytes(0, &[length as u32, c.candidate_block as u32]);
                         enc.set_tensor(1, &self.index_scores);
                         enc.set_tensor(2, &self.block_scores);
-                        dispatch(enc, blocks);
+                        dispatch(enc, &pso, blocks);
                         self.sort(ctx, enc, &self.block_scores, blocks, false)?;
-                        pipeline(ctx, enc, "keep")?;
+                        let pso = pipeline(ctx, enc, "keep")?;
                         enc.set_bytes(0, &[blocks as u32, blocks.min(c.candidate_topk) as u32]);
                         enc.set_tensor(1, &self.sort_ids);
                         enc.set_tensor(2, &self.candidates);
-                        dispatch(enc, blocks);
+                        dispatch(enc, &pso, blocks);
                     }
                     if unpruned {
                         self.select_unpruned(ctx, enc, id, length)?;
@@ -1374,11 +1378,11 @@ impl Workspace {
                                 .candidate_source_layer
                                 .is_some_and(|source| id > source),
                     )?;
-                    pipeline(ctx, enc, "chronological")?;
+                    let pso = pipeline(ctx, enc, "chronological")?;
                     enc.set_bytes(0, &(selected_count as u32));
                     enc.set_tensor(1, &self.sort_ids);
                     enc.set_tensor(2, &self.selected);
-                    dispatch(enc, selected_count);
+                    dispatch(enc, &pso, selected_count);
                 }
             }
         }
@@ -1455,11 +1459,11 @@ impl Workspace {
                 )?;
             }
             linear(ctx, enc, &w.output_b, &self.low, &self.output)?;
-            pipeline(ctx, enc, "finite")?;
+            let pso = pipeline(ctx, enc, "finite")?;
             enc.set_bytes(0, &(c.hidden as u32));
             enc.set_tensor(1, &self.output);
             enc.set_tensor(2, &self.status);
-            dispatch(enc, c.hidden);
+            dispatch(enc, &pso, c.hidden);
         }
         if let Some(batch) = self.batch.as_mut() {
             batch.row += 1;
@@ -1497,14 +1501,14 @@ fn group_rows(
     groups: usize,
     rows: usize,
 ) -> Result<()> {
-    enc.set_pipeline(
-        &ctx.pipeline("kernel_deepseek_v41_group_rows")
-            .map_err(|e| e.to_string())?,
-    );
+    let pso = ctx
+        .pipeline("kernel_deepseek_v41_group_rows")
+        .map_err(|e| e.to_string())?;
+    enc.set_pipeline(&pso);
     enc.set_bytes(0, &[width as u32, groups as u32, rows as u32, 0]);
     enc.set_tensor(1, input);
     enc.set_tensor(2, output);
-    dispatch(enc, width * groups * rows);
+    dispatch(enc, &pso, width * groups * rows);
     Ok(())
 }
 

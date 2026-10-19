@@ -292,6 +292,244 @@ fn execute(ctx: &MetalContext, f: impl FnOnce(&KernelEncoder)) {
     metal::commit_and_wait(&command).unwrap();
 }
 
+#[test]
+fn exact_dispatch_geometry_census() {
+    let ctx = MetalContext::new().unwrap();
+    let pso = ctx.pipeline("kernel_deepseek_v41_group_rows").unwrap();
+    let dummy = upload(&ctx, &[0.0], vec![1]).unwrap();
+    let command = ctx.queue.commandBuffer().unwrap();
+    let enc = KernelEncoder::begin(&command);
+    enc.set_pipeline(&pso);
+    // Encoder-only census: zero logical work keeps the tiny bindings safe even
+    // for the real pack/unpack launch extents. This command is never submitted.
+    enc.set_bytes(0, &[0u32, 1, 1, 0]);
+    enc.set_tensor(1, &dummy);
+    enc.set_tensor(2, &dummy);
+    for n in [
+        0usize, 1, 3, 6, 63, 64, 127, 128, 129, 150, 192, 255, 256, 257, 258, 384, 8_388_608,
+        2_097_152,
+    ] {
+        metal::dispatch_census_begin();
+        dispatch(&enc, &pso, n);
+        let census = metal::dispatch_census_take();
+        if n == 0 {
+            assert!(census.is_empty());
+            continue;
+        }
+        let width = (1usize..=128)
+            .rev()
+            .find(|&w| {
+                w.is_power_of_two()
+                    && n.is_multiple_of(w)
+                    && w <= pso.maxTotalThreadsPerThreadgroup()
+            })
+            .unwrap();
+        assert_eq!(census.len(), 1, "n={n}");
+        let actual = &census[0];
+        assert_eq!(actual.kernel, "kernel_deepseek_v41_group_rows");
+        assert!(!actual.encoder_concurrent);
+        assert_eq!(
+            (actual.grid_width, actual.grid_height, actual.grid_depth),
+            ((n / width) as u64, 1, 1),
+            "n={n}"
+        );
+        assert_eq!(
+            (
+                actual.threads_width,
+                actual.threads_height,
+                actual.threads_depth
+            ),
+            (width as u64, 1, 1),
+            "n={n}"
+        );
+        assert_eq!(actual.grid_tgs * actual.tg_threads, n as u64);
+    }
+    enc.end();
+}
+
+const DISPATCH_CANARY: f32 = -12345.0;
+const DISPATCH_GUARD: usize = 8;
+
+fn guarded_dispatch_tensor(ctx: &MetalContext, values: &[f32]) -> (MetalTensor, MetalTensor) {
+    let mut data = vec![DISPATCH_CANARY; values.len() + 2 * DISPATCH_GUARD];
+    data[DISPATCH_GUARD..DISPATCH_GUARD + values.len()].copy_from_slice(values);
+    let backing = upload(ctx, &data, vec![data.len() as u64]).unwrap();
+    let view = backing.view_subrange(DISPATCH_GUARD as u64, vec![values.len() as u64]);
+    (backing, view)
+}
+
+fn assert_dispatch_contents(backing: &MetalTensor, expected: &[f32]) {
+    let actual = f32_slice(backing).unwrap();
+    assert_eq!(actual.len(), expected.len() + 2 * DISPATCH_GUARD);
+    for &value in actual[..DISPATCH_GUARD]
+        .iter()
+        .chain(&actual[DISPATCH_GUARD + expected.len()..])
+    {
+        assert_eq!(value.to_bits(), DISPATCH_CANARY.to_bits());
+    }
+    for (i, (&actual, &expected)) in actual[DISPATCH_GUARD..].iter().zip(expected).enumerate() {
+        assert_eq!(actual.to_bits(), expected.to_bits(), "element {i}");
+    }
+}
+
+#[test]
+fn exact_dispatch_copy_pack_canaries() {
+    let ctx = MetalContext::new().unwrap();
+    for (width, groups, rows) in [(1, 1, 1), (3, 3, 5), (5, 3, 10), (8, 4, 8), (257, 1, 1)] {
+        let n = width * groups * rows;
+        let values: Vec<_> = (0..n).map(|i| i as f32 - 17.0).collect();
+        let (input_backing, input) = guarded_dispatch_tensor(&ctx, &values);
+        let (copy_backing, copied) = guarded_dispatch_tensor(&ctx, &vec![0.0; n]);
+        let (pack_backing, packed) = guarded_dispatch_tensor(&ctx, &vec![0.0; n]);
+        let (roundtrip_backing, roundtrip) = guarded_dispatch_tensor(&ctx, &vec![0.0; n]);
+        execute(&ctx, |enc| {
+            copy(&ctx, enc, &input, &copied, n).unwrap();
+            group_rows(&ctx, enc, &copied, &packed, width, groups, rows).unwrap();
+            group_rows(&ctx, enc, &packed, &roundtrip, width, rows, groups).unwrap();
+            copy(&ctx, enc, &input, &roundtrip, 0).unwrap();
+        });
+        let mut expected = vec![0.0; n];
+        for row in 0..rows {
+            for group in 0..groups {
+                for col in 0..width {
+                    expected[(group * rows + row) * width + col] =
+                        values[(row * groups + group) * width + col];
+                }
+            }
+        }
+        assert_dispatch_contents(&input_backing, &values);
+        assert_dispatch_contents(&copy_backing, &values);
+        assert_dispatch_contents(&pack_backing, &expected);
+        assert_dispatch_contents(&roundtrip_backing, &values);
+    }
+}
+
+fn scalar_dispatch_reference(enc: &KernelEncoder, n: usize) {
+    enc.dispatch(
+        MTLSize {
+            width: n,
+            height: 1,
+            depth: 1,
+        },
+        MTLSize {
+            width: 1,
+            height: 1,
+            depth: 1,
+        },
+    );
+}
+
+#[test]
+fn exact_dispatch_rope_pool_match_scalar_with_canaries() {
+    let ctx = MetalContext::new().unwrap();
+    for (heads, pairs) in [(1, 1), (3, 5), (3, 2), (3, 64), (1, 129)] {
+        let dim = 2 * pairs + 3;
+        let n = heads * dim;
+        let values: Vec<_> = (0..n).map(|i| (i as f32 - 23.0) / 37.0).collect();
+        let frequencies: Vec<_> = (0..pairs).map(|i| 0.01 * (i + 1) as f32).collect();
+        let freq = upload(&ctx, &frequencies, vec![pairs as u64]).unwrap();
+        for inverse in [false, true] {
+            let (actual_backing, actual) = guarded_dispatch_tensor(&ctx, &values);
+            let (reference_backing, reference) = guarded_dispatch_tensor(&ctx, &values);
+            execute(&ctx, |enc| {
+                rope(&ctx, enc, &actual, &freq, dim, heads, pairs, 19, inverse).unwrap();
+                pipeline(&ctx, enc, "rope").unwrap();
+                enc.set_bytes(0, &[dim as u32, pairs as u32, 19, inverse as u32]);
+                enc.set_tensor(1, &reference);
+                enc.set_tensor(2, &freq);
+                scalar_dispatch_reference(enc, heads * pairs);
+            });
+            let expected = f32_slice(&reference).unwrap().to_vec();
+            assert_dispatch_contents(&reference_backing, &expected);
+            assert_dispatch_contents(&actual_backing, &expected);
+        }
+    }
+    for n in [1usize, 3, 128, 150, 256, 257, 258] {
+        let values: Vec<_> = (0..n).map(|i| (i as f32 - 23.0) / 37.0).collect();
+        let (v0_backing, v0) = guarded_dispatch_tensor(&ctx, &values);
+        let gates: Vec<_> = (0..n).map(|i| (i % 7) as f32 - 3.0).collect();
+        let (gate_backing, gate) = guarded_dispatch_tensor(&ctx, &gates);
+        let (actual_backing, actual) = guarded_dispatch_tensor(&ctx, &vec![0.25; n]);
+        let (reference_backing, reference) = guarded_dispatch_tensor(&ctx, &vec![0.25; n]);
+        execute(&ctx, |enc| {
+            for (output, scalar) in [(&actual, false), (&reference, true)] {
+                let pso = pipeline(&ctx, enc, "pool").unwrap();
+                enc.set_bytes(0, &(n as u32));
+                enc.set_tensor(1, &v0);
+                enc.set_tensor(2, &gate);
+                enc.set_tensor(3, output);
+                enc.set_tensor(4, &v0);
+                if scalar {
+                    scalar_dispatch_reference(enc, n);
+                } else {
+                    dispatch(enc, &pso, n);
+                }
+            }
+        });
+        let expected = f32_slice(&reference).unwrap().to_vec();
+        assert_dispatch_contents(&reference_backing, &expected);
+        assert_dispatch_contents(&actual_backing, &expected);
+        assert_dispatch_contents(&v0_backing, &values);
+        assert_dispatch_contents(&gate_backing, &gates);
+    }
+}
+
+#[test]
+fn exact_dispatch_sticky_status_and_sort_init_canaries() {
+    let ctx = MetalContext::new().unwrap();
+    for n in [3usize, 128, 256, 257, 258] {
+        let values: Vec<_> = (0..n)
+            .map(|i| [f32::NAN, f32::INFINITY, -0.0, 0.0, f32::NEG_INFINITY][i % 5])
+            .collect();
+        let (input_backing, input) = guarded_dispatch_tensor(&ctx, &values);
+        let padded = n.next_power_of_two();
+        let (scores_backing, scores) = guarded_dispatch_tensor(&ctx, &vec![0.0; padded]);
+        let ids_backing = MetalTensor::from_bytes(
+            &ctx,
+            bytemuck::cast_slice(&vec![0x12345678u32; padded + 2]),
+            vec![(padded + 2) as u64],
+            GgmlType::I32,
+        )
+        .unwrap();
+        let order = ids_backing.view_subrange(1, vec![padded as u64]);
+        let status_backing = MetalTensor::from_bytes(
+            &ctx,
+            bytemuck::cast_slice(&[0x12345678u32, 2, 0x12345678]),
+            vec![3],
+            GgmlType::I32,
+        )
+        .unwrap();
+        let status = status_backing.view_subrange(1, vec![1]);
+        execute(&ctx, |enc| {
+            let pso = pipeline(&ctx, enc, "finite").unwrap();
+            enc.set_bytes(0, &(n as u32));
+            enc.set_tensor(1, &input);
+            enc.set_tensor(2, &status);
+            dispatch(enc, &pso, n);
+            let pso = pipeline(&ctx, enc, "sort_init").unwrap();
+            enc.set_bytes(0, &[n as u32, padded as u32, 0, 8]);
+            enc.set_tensor(1, &input);
+            enc.set_tensor(2, &order);
+            enc.set_tensor(3, &scores);
+            enc.set_tensor(4, &order);
+            enc.set_tensor(5, &status);
+            dispatch(enc, &pso, padded);
+        });
+        let expected: Vec<_> = (0..padded)
+            .map(|i| match values.get(i) {
+                Some(&v) if !v.is_nan() => v,
+                _ => f32::NEG_INFINITY,
+            })
+            .collect();
+        assert_dispatch_contents(&input_backing, &values);
+        assert_dispatch_contents(&scores_backing, &expected);
+        assert_eq!(ids(&order, padded), (0..padded).collect::<Vec<_>>());
+        let all_ids = ids(&ids_backing, padded + 2);
+        assert_eq!((all_ids[0], all_ids[padded + 1]), (0x12345678, 0x12345678));
+        assert_eq!(ids(&status_backing, 3), [0x12345678, 7, 0x12345678]);
+    }
+}
+
 fn ids(t: &MetalTensor, n: usize) -> Vec<usize> {
     assert!(n <= t.n_elements() as usize);
     unsafe {
@@ -520,25 +758,25 @@ fn stable_gpu_selection_long_prefix_and_candidate_boundary() {
         let input = upload(&ctx, &scores, vec![n as u64]).unwrap();
         let blocks = n.div_ceil(8);
         execute(&ctx, |enc| {
-            pipeline(&ctx, enc, "blocks").unwrap();
+            let pso = pipeline(&ctx, enc, "blocks").unwrap();
             enc.set_bytes(0, &[n as u32, 8u32]);
             enc.set_tensor(1, &input);
             enc.set_tensor(2, &workspace.block_scores);
-            dispatch(enc, blocks);
+            dispatch(enc, &pso, blocks);
             workspace
                 .sort(&ctx, enc, &workspace.block_scores, blocks, false)
                 .unwrap();
-            pipeline(&ctx, enc, "keep").unwrap();
+            let pso = pipeline(&ctx, enc, "keep").unwrap();
             enc.set_bytes(0, &[blocks as u32, blocks.min(keep_blocks) as u32]);
             enc.set_tensor(1, &workspace.sort_ids);
             enc.set_tensor(2, &workspace.candidates);
-            dispatch(enc, blocks);
+            dispatch(enc, &pso, blocks);
             workspace.sort(&ctx, enc, &input, n, true).unwrap();
-            pipeline(&ctx, enc, "chronological").unwrap();
+            let pso = pipeline(&ctx, enc, "chronological").unwrap();
             enc.set_bytes(0, &512u32);
             enc.set_tensor(1, &workspace.sort_ids);
             enc.set_tensor(2, &workspace.selected);
-            dispatch(enc, 512);
+            dispatch(enc, &pso, 512);
         });
         let mask = op::candidate_blocks(&scores, 8, keep_blocks).unwrap();
         let actual = ids(&workspace.candidates, blocks);
@@ -663,7 +901,7 @@ fn native_512_dim_64_heads_sink_rope_and_invalid_ids() {
             enc.set_tensor(slot, t);
         }
         enc.set_bytes(9, &length);
-        dispatch(enc, heads);
+        scalar_dispatch_reference(enc, heads);
     };
     execute(&ctx, |enc| {
         rope(&ctx, enc, &query, &freq, dim, heads, 32, 16384, false).unwrap();
@@ -753,7 +991,7 @@ fn native_index_32_heads_128_dim_signed_weights() {
             enc.set_tensor(2, &w);
             enc.set_tensor(3, &k);
             enc.set_tensor(4, &output);
-            dispatch(enc, n);
+            scalar_dispatch_reference(enc, n);
         });
         let scale = (dim as f32).sqrt().recip() * (heads as f32).sqrt().recip();
         let expected: Vec<_> = keys
@@ -862,7 +1100,7 @@ fn split_sink_real_geometry_same_run_witness() {
                 .unwrap();
             } else {
                 pipeline(&ctx, enc, "sink").unwrap();
-                dispatch(enc, heads);
+                scalar_dispatch_reference(enc, heads);
             }
         };
     for (nr, nk) in [

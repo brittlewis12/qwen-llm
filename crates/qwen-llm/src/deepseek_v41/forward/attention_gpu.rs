@@ -466,6 +466,21 @@ fn dispatch(enc: &KernelEncoder, n: usize) {
     }
 }
 
+fn index_dispatch(enc: &KernelEncoder, length: usize) {
+    enc.dispatch(
+        MTLSize {
+            width: length.div_ceil(8),
+            height: 1,
+            depth: 1,
+        },
+        MTLSize {
+            width: 256,
+            height: 1,
+            depth: 1,
+        },
+    );
+}
+
 // Bindings 0..10 match the incumbent. Each head's last score slot is scratch.
 fn sink_passes(
     ctx: &MetalContext,
@@ -1294,7 +1309,7 @@ impl Workspace {
                         position,
                         false,
                     )?;
-                    pipeline(ctx, enc, "index")?;
+                    pipeline(ctx, enc, "index_heads")?;
                     enc.set_bytes(
                         0,
                         &[length as u32, c.index_dim as u32, c.index_heads as u32, 0],
@@ -1303,7 +1318,7 @@ impl Workspace {
                     enc.set_tensor(2, &self.index_weights);
                     enc.set_tensor(3, &cache.keys);
                     enc.set_tensor(4, &self.index_scores);
-                    dispatch(enc, length);
+                    index_dispatch(enc, length);
                     if !unpruned && self.schedule.candidate_source_layer == Some(id) {
                         let blocks = length.div_ceil(c.candidate_block);
                         pipeline(ctx, enc, "blocks")?;

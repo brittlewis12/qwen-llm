@@ -732,40 +732,62 @@ fn forty_layer_seven_token_chain_one_command() {
 #[test]
 fn native_index_32_heads_128_dim_signed_weights() {
     let ctx = MetalContext::new().unwrap();
-    let (n, dim, heads) = (513usize, 128usize, 32usize);
-    let make = |n, seed| {
-        (0..n)
-            .map(|i| (((i * seed) % 103) as f32 - 51.0) / 512.0)
-            .collect::<Vec<_>>()
-    };
-    let query = make(heads * dim, 13);
-    let keys = make(n * dim, 29);
-    let weights = make(heads, 31);
-    let q = upload(&ctx, &query, vec![(heads * dim) as u64]).unwrap();
-    let k = upload(&ctx, &keys, vec![(n * dim) as u64]).unwrap();
-    let w = upload(&ctx, &weights, vec![heads as u64]).unwrap();
-    let output = tensor(&ctx, n, GgmlType::F32).unwrap();
-    execute(&ctx, |enc| {
-        pipeline(&ctx, enc, "index").unwrap();
-        enc.set_bytes(0, &[n as u32, dim as u32, heads as u32, 0]);
-        enc.set_tensor(1, &q);
-        enc.set_tensor(2, &w);
-        enc.set_tensor(3, &k);
-        enc.set_tensor(4, &output);
-        dispatch(enc, n);
-    });
-    let scale = (dim as f32).sqrt().recip() * (heads as f32).sqrt().recip();
-    let expected: Vec<_> = keys
-        .chunks_exact(dim)
-        .map(|key| {
-            query
-                .chunks_exact(dim)
-                .zip(&weights)
-                .map(|(q, w)| op::dot(q, key).max(0.0) * (w * scale))
-                .sum()
-        })
-        .collect();
-    close(f32_slice(&output).unwrap(), &expected);
+    for heads in [1usize, 7, 32, 35, 64] {
+        let (n, dim) = (513usize, 128usize);
+        let make = |n, seed| {
+            (0..n)
+                .map(|i| (((i * seed) % 103) as f32 - 51.0) / 97.001)
+                .collect::<Vec<_>>()
+        };
+        let query = make(heads * dim, 13);
+        let keys = make(n * dim, 29);
+        let weights = make(heads, 31);
+        let q = upload(&ctx, &query, vec![(heads * dim) as u64]).unwrap();
+        let k = upload(&ctx, &keys, vec![(n * dim) as u64]).unwrap();
+        let w = upload(&ctx, &weights, vec![heads as u64]).unwrap();
+        let output = tensor(&ctx, n, GgmlType::F32).unwrap();
+        execute(&ctx, |enc| {
+            pipeline(&ctx, enc, "index").unwrap();
+            enc.set_bytes(0, &[n as u32, dim as u32, heads as u32, 0]);
+            enc.set_tensor(1, &q);
+            enc.set_tensor(2, &w);
+            enc.set_tensor(3, &k);
+            enc.set_tensor(4, &output);
+            dispatch(enc, n);
+        });
+        let scale = (dim as f32).sqrt().recip() * (heads as f32).sqrt().recip();
+        let expected: Vec<_> = keys
+            .chunks_exact(dim)
+            .map(|key| {
+                query
+                    .chunks_exact(dim)
+                    .zip(&weights)
+                    .map(|(q, w)| op::dot(q, key).max(0.0) * (w * scale))
+                    .sum()
+            })
+            .collect();
+        close(f32_slice(&output).unwrap(), &expected);
+        let incumbent = f32_slice(&output).unwrap().to_vec();
+        execute(&ctx, |enc| {
+            pipeline(&ctx, enc, "index_heads").unwrap();
+            enc.set_bytes(0, &[n as u32, dim as u32, heads as u32, 0]);
+            enc.set_tensor(1, &q);
+            enc.set_tensor(2, &w);
+            enc.set_tensor(3, &k);
+            enc.set_tensor(4, &output);
+            index_dispatch(enc, n);
+        });
+        let actual = f32_slice(&output).unwrap();
+        close(actual, &expected);
+        close(actual, &incumbent);
+        for keep in [1, 8, 32, 128, 512] {
+            assert_eq!(
+                op::topk(actual, keep),
+                op::topk(&incumbent, keep),
+                "heads={heads} keep={keep}"
+            );
+        }
+    }
 }
 
 #[test]

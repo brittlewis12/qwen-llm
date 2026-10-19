@@ -91,6 +91,27 @@ kernel void kernel_deepseek_v41_attention_index(
     scores[t] = score;
 }
 
+kernel void kernel_deepseek_v41_attention_index_heads(
+    constant uint4 &a [[buffer(0)]], device const float *q [[buffer(1)]],
+    device const float *weights [[buffer(2)]], device const float *keys [[buffer(3)]],
+    device float *scores [[buffer(4)]], uint group [[threadgroup_position_in_grid]],
+    uint sg [[simdgroup_index_in_threadgroup]], uint lane [[thread_index_in_simdgroup]]) {
+    uint t = group * 8 + sg;
+    if (t >= a.x) return;
+    float score = 0, scale = rsqrt(float(a.y)) * rsqrt(float(a.z));
+    for (uint base = 0; base < a.z; base += 32) {
+        uint h = base + lane;
+        float dot = 0;
+        if (h < a.z) {
+            for (uint j = 0; j < a.y; ++j) dot += q[h * a.y + j] * keys[t * a.y + j];
+        }
+        // Preserve the scalar head-sum order: selection depends on these scores.
+        for (uint head = 0; head < min(32u, a.z - base); ++head)
+            score += max(simd_shuffle(dot, head), 0.0f) * (weights[base + head] * scale);
+    }
+    if (lane == 0) scores[t] = score;
+}
+
 kernel void kernel_deepseek_v41_attention_blocks(
     constant uint2 &a [[buffer(0)]], device const float *scores [[buffer(1)]],
     device float *blocks [[buffer(2)]], uint t [[thread_position_in_grid]]) {

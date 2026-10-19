@@ -187,7 +187,7 @@ fn all_family_request_profile_snapshot() {
         template,
         no_thinking_supported: true,
         style: TemplateStyle::House,
-        sampling: Some(qwen_llm::sampling::SamplingConfig::qwen3_release(1.0, 42)),
+        sampling: Some(qwen_llm::sampling::SamplingConfig::qwen3_release(1.0, 42).into()),
         limits: crate::serve::request_profile::OutputLimits::TEST,
     };
     let cases = vec![
@@ -385,7 +385,7 @@ fn normalized_sampling_draws_an_omitted_seed_once_and_keeps_explicit_seed() {
         template: QwenTemplate::Generic,
         no_thinking_supported: true,
         style: TemplateStyle::House,
-        sampling: Some(qwen_llm::sampling::SamplingConfig::qwen3_release(1.0, 42)),
+        sampling: Some(qwen_llm::sampling::SamplingConfig::qwen3_release(1.0, 42).into()),
         limits: crate::serve::request_profile::OutputLimits::TEST,
     };
     let mut omitted = profile
@@ -518,10 +518,9 @@ fn family_profiles_drive_real_http_json_and_sse_without_hook_overrides() {
                 template,
                 no_thinking_supported: true,
                 style: TemplateStyle::House,
-                sampling: Some(qwen_llm::sampling::SamplingConfig::qwen3_release(
-                    temperature,
-                    42,
-                )),
+                sampling: Some(
+                    qwen_llm::sampling::SamplingConfig::qwen3_release(temperature, 42).into(),
+                ),
                 limits: crate::serve::request_profile::OutputLimits::TEST,
             },
             json!({"model":"test","input":"Hello","x_qwen":{"no_thinking":true}}),
@@ -546,7 +545,7 @@ fn family_profiles_drive_real_http_json_and_sse_without_hook_overrides() {
         cases.push((
             RequestProfile::DeepSeekV4 {
                 style,
-                sampling: Some(qwen_llm::sampling::SamplingConfig::deepseek_v4_0731(42)),
+                sampling: Some(qwen_llm::sampling::SamplingConfig::deepseek_v4_0731(42).into()),
                 limits: crate::serve::request_profile::OutputLimits::TEST,
             },
             json!({"model":"test","input":"Hello"}),
@@ -675,7 +674,7 @@ fn served_families_default_to_release_sampling_and_keep_explicit_fields() {
                 template: QwenTemplate::Qwen35,
                 no_thinking_supported: true,
                 style: TemplateStyle::House,
-                sampling: Some(qwen35_27b),
+                sampling: Some(qwen35_27b.into()),
                 limits: crate::serve::request_profile::OutputLimits::TEST,
             },
             qwen35_27b,
@@ -683,7 +682,7 @@ fn served_families_default_to_release_sampling_and_keep_explicit_fields() {
         (
             RequestProfile::DeepSeekV4 {
                 style: TemplateStyle::House,
-                sampling: Some(ds4),
+                sampling: Some(ds4.into()),
                 limits: crate::serve::request_profile::OutputLimits::TEST,
             },
             ds4,

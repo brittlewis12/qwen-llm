@@ -780,7 +780,7 @@ impl GenerationBackend for DeepSeekV4Backend {
     fn request_profile(&self) -> super::request_profile::RequestProfile {
         super::request_profile::RequestProfile::DeepSeekV4 {
             style: self.template_style,
-            sampling: self.release_sampling,
+            sampling: self.release_sampling.map(Into::into),
             limits: self.output_limits(),
         }
     }

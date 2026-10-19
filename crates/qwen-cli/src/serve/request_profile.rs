@@ -4,7 +4,7 @@ use super::items::{QwenTemplate, ServeError, ServeRequest, TemplateStyle};
 use super::output_partition::{OutputProtocol, ToolGrammar};
 use super::{render, render_ds4, render_glm5_next, render_k2, render_muse};
 use crate::release_identity::ReleaseIdentity;
-use crate::release_sampling::{decimal, fresh_seed, release_sampling};
+use crate::release_sampling::{SamplingDefaults, decimal, fresh_seed, release_sampling};
 use qwen_llm::muse_glimmer::MuseGlimmerChatTemplateProfile;
 use qwen_llm::sampling::SamplingConfig;
 use serde_json::Value;
@@ -58,7 +58,7 @@ pub(crate) enum RequestProfile {
         style: TemplateStyle,
         /// The identified release's defaults for omitted sampling fields;
         /// `None` leaves them to the backend's legacy greedy fallbacks.
-        sampling: Option<SamplingConfig>,
+        sampling: Option<SamplingDefaults>,
         limits: OutputLimits,
     },
     FlashNext {
@@ -68,12 +68,12 @@ pub(crate) enum RequestProfile {
     DeepSeekV4 {
         style: TemplateStyle,
         /// As for `OrdinaryQwen`.
-        sampling: Option<SamplingConfig>,
+        sampling: Option<SamplingDefaults>,
         limits: OutputLimits,
     },
     DeepSeekV41 {
         limits: OutputLimits,
-        sampling: Option<SamplingConfig>,
+        sampling: Option<SamplingDefaults>,
     },
     Muse {
         template: MuseGlimmerChatTemplateProfile,
@@ -422,8 +422,9 @@ pub(crate) fn flash_next_release() -> SamplingConfig {
 /// request that bypassed normalization still gets the release's defaults.
 pub(crate) fn sampling_with_defaults(
     request: &ServeRequest,
-    release: SamplingConfig,
+    release: impl Into<SamplingDefaults>,
 ) -> SamplingConfig {
+    let release = release.into();
     SamplingConfig {
         temperature: request.temperature.unwrap_or(release.temperature),
         top_k: request.top_k.unwrap_or(release.top_k),
@@ -436,7 +437,11 @@ pub(crate) fn sampling_with_defaults(
 /// Absent sampling fields take the release defaults and an absent seed a
 /// fresh draw; the response echoes what was sampled (the seed under
 /// `x_qwen.stats`).
-pub(crate) fn fill_sampling_defaults(request: &mut ServeRequest, release: SamplingConfig) {
+pub(crate) fn fill_sampling_defaults(
+    request: &mut ServeRequest,
+    release: impl Into<SamplingDefaults>,
+) {
+    let release = release.into();
     if request.temperature.is_none() {
         request.temperature = Some(release.temperature);
         request.temperature_echo = Some(decimal(release.temperature));

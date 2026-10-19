@@ -32,6 +32,17 @@ impl SamplingDefaults {
     }
 }
 
+impl From<SamplingConfig> for SamplingDefaults {
+    fn from(config: SamplingConfig) -> Self {
+        Self {
+            temperature: config.temperature,
+            top_k: config.top_k,
+            top_p: config.top_p,
+            min_p: config.min_p,
+        }
+    }
+}
+
 pub(crate) fn release_sampling_defaults(identity: ReleaseIdentity) -> SamplingDefaults {
     let seeded = match identity {
         // Qwen3.5-27B and Qwen3.5-122B-A10B generation_config.json.

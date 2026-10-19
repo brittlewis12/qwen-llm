@@ -179,7 +179,7 @@ impl Settings {
     fn profile(&self) -> RequestProfile {
         RequestProfile::DeepSeekV41 {
             limits: self.limits,
-            sampling: Some(self.sampling),
+            sampling: Some(self.sampling.into()),
         }
     }
 }

@@ -1483,7 +1483,7 @@ impl GenerationBackend for EngineBackend {
             template: self.template,
             no_thinking_supported: self.no_thinking_supported,
             style: self.template_style,
-            sampling: self.release_sampling,
+            sampling: self.release_sampling.map(Into::into),
             limits: self.output_limits(),
         }
     }

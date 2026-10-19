@@ -27,8 +27,6 @@ pub const QWEN4EXP_RELEASE_TENSOR_COUNT: usize = 1_224;
 pub const QWEN4EXP_METAL_TENSOR_COUNT: usize = QWEN4EXP_RELEASE_TENSOR_COUNT - 1;
 pub const QWEN4EXP_GGUF_BINDING_ALIGNMENT: usize = 32;
 pub const QWEN4EXP_RETAINED_WINDOW_CEILING_BYTES: usize = 8 * 1024 * 1024 * 1024;
-pub const QWEN4EXP_PLE_PHYSICAL_ROW_COUNT: u64 = 320_001_536;
-pub const QWEN4EXP_PLE_SOURCE_BYTES: u64 = 28_800_138_240;
 
 #[derive(Debug, thiserror::Error)]
 pub enum Qwen4ExpResidencyError {
@@ -678,12 +676,10 @@ impl Qwen4ExpMetalWeights {
 }
 
 fn validate_release_ple_geometry(desc: &TensorDesc) -> Result<(), Qwen4ExpResidencyError> {
-    if desc.shape != [160, QWEN4EXP_PLE_PHYSICAL_ROW_COUNT]
-        || desc.n_bytes != QWEN4EXP_PLE_SOURCE_BYTES
-    {
+    if desc.shape.len() != 2 || desc.shape[0] != 160 || desc.shape[1] == 0 {
         return invalid(format!(
-            "released PLE storage must have shape [160, {QWEN4EXP_PLE_PHYSICAL_ROW_COUNT}] and {QWEN4EXP_PLE_SOURCE_BYTES} bytes, got {:?} and {} bytes",
-            desc.shape, desc.n_bytes
+            "released PLE storage must have 160 columns and nonzero physical rows, got {:?}",
+            desc.shape
         ));
     }
     Ok(())
@@ -927,7 +923,7 @@ fn initialize_f32_auxiliary(
     {
         return invalid("invalid auxiliary normalization dtype or byte span");
     }
-    for (bytes, destination) in source.chunks_exact(2).zip(output) {
+    for (bytes, destination) in source.as_chunks::<2>().0.iter().zip(output) {
         let bits = u16::from_le_bytes([bytes[0], bytes[1]]);
         destination.write(match dtype {
             GgmlType::BF16 => f32::from_bits(u32::from(bits) << 16),
@@ -1788,20 +1784,16 @@ mod tests {
     }
 
     #[test]
-    fn release_profile_rejects_unpadded_ple_storage() {
+    fn release_profile_accepts_physical_ple_rows_beyond_logical_rows() {
         let desc = TensorDesc {
             name: "per_layer_token_embd.weight".into(),
-            shape: vec![160, 320_001_446],
+            shape: vec![160, 2],
             dtype: GgmlType::IQ4_NL,
             shard_idx: 1,
             data_offset: 0,
-            n_bytes: 28_800_130_140,
+            n_bytes: 360,
         };
-        let error = validate_release_ple_geometry(&desc)
-            .unwrap_err()
-            .to_string();
-        assert!(error.contains("320001536"));
-        assert!(error.contains("28800138240"));
+        validate_release_ple_geometry(&desc).unwrap();
     }
 
     #[test]

@@ -123,5 +123,4 @@ crates/qwen-llm/src/qwen4exp_moe_down_index_probe.rs	*	frozen_experiment	pinned 
 crates/qwen-llm/src/qwen4exp_moe_m128_index_probe.rs	*	frozen_experiment	pinned census evidence and frozen research records
 crates/qwen-llm/src/qwen4exp_moe_observe.rs	*	frozen_experiment	pinned census evidence and frozen research records
 crates/qwen-llm/src/qwen4exp_moe_remaining_index_probe.rs	*	frozen_experiment	pinned census evidence and frozen research records
-crates/qwen-llm/src/qwen4exp_residency.rs	28_800_138_240	temporary	trigger: replace with a structural property or keep by decision in the identity-pin review
 crates/qwen-llm/src/runtime.rs	1_000_000_000	durable_binding	timestamp unit conversion contributes shard metadata to snapshot weight identity; it is not a gate threshold

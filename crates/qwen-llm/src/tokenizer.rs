@@ -41,6 +41,7 @@ const NATIVE_MAX_INPUT_BYTES: usize = 8 * 1024 * 1024;
 ///
 /// Tokenizer compatibility is established structurally by [`NativeTokenizer`];
 /// this value must not be used to reject coherent finetunes or conversions.
+#[cfg(test)]
 pub const QWEN4EXP_RELEASE_TOKENIZER_IDENTITY_SHA256: [u8; 32] = [
     0x86, 0xa6, 0x19, 0x3d, 0x6a, 0x6c, 0x9b, 0x43, 0xa7, 0x1a, 0x20, 0x77, 0x65, 0xf8, 0x5f, 0xb3,
     0x90, 0x4a, 0xdd, 0xb3, 0xbb, 0xa6, 0xdc, 0xd5, 0x0b, 0x50, 0xbe, 0xf0, 0x76, 0xe5, 0xe8, 0x9f,
@@ -65,6 +66,7 @@ pub fn token_ids_sha256_i32le(tokens: &[i32]) -> String {
 ///
 /// This scans the complete vocabulary and merge table and is intentionally a
 /// qualification tool rather than a production request-admission check.
+#[cfg(test)]
 pub fn qwen4exp_tokenizer_identity_sha256(g: &GgufFile) -> Result<[u8; 32], TokError> {
     bpe_tokenizer_identity_sha256(g, b"qwen4exp-tokenizer-identity-v2\0")
 }

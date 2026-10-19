@@ -3,7 +3,9 @@ from pathlib import Path
 import re
 import struct
 import tempfile
+from types import SimpleNamespace
 import unittest
+from unittest.mock import patch
 
 import torch
 
@@ -40,6 +42,98 @@ def write_gguf(path, tensors, metadata=None):
 
 
 class GGUFTest(unittest.TestCase):
+    def test_attention_subtree_validation_is_atomic_and_scoped(self):
+        attn = torch.nn.Module()
+        attn.attn_sink = torch.nn.Parameter(torch.empty(2))
+        attn.q_norm = torch.nn.Module()
+        attn.q_norm.weight = torch.nn.Parameter(torch.empty(2))
+        attn.wq_a = torch.nn.Linear(3, 2, bias=False, device="meta")
+        module = SimpleNamespace(Linear=torch.nn.Linear)
+        prefix = "layers.2.attn."
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "tiny.gguf"
+            write_gguf(
+                path,
+                [
+                    ("blk.2.attn_sinks.weight", (2,), 0, b"\0" * 8),
+                    ("blk.2.attn_q_a_norm.weight", (2,), 0, b"\0" * 8),
+                    ("blk.2.attn_q_a.weight", (2, 3), 0, b"\0" * 24),
+                    ("blk.2.ffn.unrelated.weight", (1,), 0, b"\0" * 4),
+                    ("blk.3.attn.unrelated.weight", (1,), 0, b"\0" * 4),
+                ],
+            )
+            store = GGUFWeights(path)
+            try:
+                good = dict(store.names)
+                for key in ("attn_sink", "q_norm.weight", "wq_a.weight"):
+                    with self.assertRaisesRegex(ValueError, "validated non-lazy"):
+                        store.tensor(prefix + key)
+                with patch.object(store, "decode") as decode:
+                    store.validate_attention(attn, module, 2)
+                    decode.assert_not_called()
+                self.assertEqual(
+                    store.parameters, {prefix + "attn_sink", prefix + "q_norm.weight"}
+                )
+                self.assertEqual(store.tensor(prefix + "attn_sink").shape, (2,))
+                with self.assertRaisesRegex(ValueError, "validated non-lazy"):
+                    store.tensor(prefix + "wq_a.weight")
+                for key in ("attn_sink", "q_norm.weight", "wq_a.weight"):
+                    for failure in ("missing", "shape", "wrong_layer"):
+                        with self.subTest(key=key, failure=failure):
+                            store.names = dict(good)
+                            store.validate_attention(attn, module, 2)
+                            full = prefix + key
+                            shape, kind, offset = store.names.pop(full)
+                            if failure == "shape":
+                                store.names[full] = (
+                                    (shape[0] + 1, *shape[1:]),
+                                    kind,
+                                    offset,
+                                )
+                            elif failure == "wrong_layer":
+                                store.names["layers.12.attn." + key] = (
+                                    shape,
+                                    kind,
+                                    offset,
+                                )
+                            with self.assertRaisesRegex(ValueError, full):
+                                store.validate_attention(attn, module, 2)
+                            self.assertEqual(store.parameters, set())
+                            with self.assertRaisesRegex(
+                                ValueError, "validated non-lazy"
+                            ):
+                                store.tensor(prefix + "attn_sink")
+                store.names = dict(good)
+                store.names[prefix + "unexpected.weight"] = good[prefix + "attn_sink"]
+                with self.assertRaisesRegex(ValueError, "unbound GGUF attention"):
+                    store.validate_attention(attn, module, 2)
+                self.assertEqual(store.parameters, set())
+            finally:
+                store.close()
+
+    def test_native_projection_does_not_round_gguf_to_bf16(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "tiny.gguf"
+            weight = torch.tensor([[1.001, 2.003], [3.005, 4.007]])
+            write_gguf(
+                path,
+                [("blk.2.attn_output_a.weight", (2, 2), 0, weight.numpy().tobytes())],
+            )
+            store = GGUFWeights(path)
+            try:
+                actual = store.project(
+                    "layers.2.attn.wo_a.weight",
+                    torch.eye(2),
+                    1,
+                    2,
+                    quantize=False,
+                    bf16_weight=True,
+                )
+                torch.testing.assert_close(actual, weight[1:2].T, rtol=0, atol=0)
+                self.assertFalse(torch.equal(actual, weight[1:2].bfloat16().float().T))
+            finally:
+                store.close()
+
     def test_decoders(self):
         levels = [0, 0.5, 1, 1.5, 2, 3, 4, 6, -0.0, -0.5, -1, -1.5, -2, -3, -4, -6]
         packed = bytes(i | ((15 - i) << 4) for i in range(16))

@@ -188,6 +188,7 @@ const LONG_TOKENS: qwen_llm::test_fixtures::Fixture = qwen_llm::test_fixtures::F
 };
 const LONG_POSITIONS: [usize; 4] = capture::DEFAULT_CHECKPOINTS;
 const LONG_LAYERS: [usize; 8] = [2, 8, 14, 20, 24, 28, 32, 36];
+const BATCH_POSITIONS: [usize; 7] = [2046, 2047, 9998, 9999, 16383, 16384, 16385];
 
 fn long_tokens(meta: &Value) -> Result<Vec<u32>> {
     ensure!(
@@ -217,6 +218,10 @@ fn long_tokens(meta: &Value) -> Result<Vec<u32>> {
 }
 
 fn long_compare_command(model: &Path, capture: &Path) -> Command {
+    attention_compare_command(model, capture, false)
+}
+
+fn attention_compare_command(model: &Path, capture: &Path, gguf: bool) -> Command {
     let mut command = Command::new("uv");
     command
         .args(["run", "--offline", "--script"])
@@ -224,7 +229,7 @@ fn long_compare_command(model: &Path, capture: &Path) -> Command {
             Path::new(env!("CARGO_MANIFEST_DIR"))
                 .join("../../scripts/reference/deepseek_v41/cpu/long_context.py"),
         )
-        .arg("--model")
+        .arg(if gguf { "--gguf" } else { "--model" })
         .arg(model)
         .arg("--capture")
         .arg(capture)
@@ -319,6 +324,88 @@ fn hf_conversion_ten_thousand_token_attention_characterization() -> Result<()> {
 }
 
 #[test]
+#[ignore = "model characterization: deepseek-v4.1-reap-272e-mxfp4-q8engram"]
+fn independent_gguf_batched_attention_boundary_characterization() -> Result<()> {
+    qwen_cli::shutdown::install()?;
+    qwen_cli::shutdown::checkpoint()?;
+    let prefix = long_tokens(&manifest(LONG_TOKENS.required())?)?;
+    let count = BATCH_POSITIONS.last().unwrap() + 1;
+    let tokens: Vec<_> = prefix.iter().copied().cycle().take(count).collect();
+    let model = GGUF_MODEL.required();
+    let output = std::env::temp_dir().join(format!(
+        "qwen-v41-batched-attention-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)?
+            .as_nanos()
+    ));
+    std::fs::create_dir(&output)?;
+    eprintln!(
+        "independent GGUF batched attention characterization retained at {}",
+        output.display()
+    );
+    let capture_path = output.join("capture");
+    {
+        let ctx = MetalContext::new()?;
+        let weights = load_characterization_model(&ctx, model)?;
+        let forward =
+            Forward::from_resident(&ctx, &weights, weights.token_map.clone(), weights.raw_pad)
+                .map_err(anyhow::Error::msg)?;
+        let mut state = forward.new_state_with_gpu_step(tokens.len())?;
+        let mut capture = capture::Writer::create(
+            &capture_path,
+            &BATCH_POSITIONS,
+            json!({"gguf":model,"execution":"layer_major_batched_capture", "chunk_rows":qwen_llm::deepseek_v41::forward::PREFILL_CHUNK_ROWS, "tokens":"retained 10K fixture followed by its first 6386 tokens", "provenance_verified":false}),
+        )?;
+        capture.begin_chunk(0, &tokens)?;
+        if let Err(error) = forward.prefill_with_capture(
+            &mut state,
+            &tokens,
+            Some(qwen_cli::shutdown::cancellation_flag()),
+            &mut capture,
+        ) {
+            capture.failure(
+                &error.to_string(),
+                qwen_cli::shutdown::checkpoint().is_err(),
+            );
+            return Err(error.into());
+        }
+        ensure!(
+            state.position() == tokens.len(),
+            "batched capture position mismatch"
+        );
+        capture.finish()?;
+    }
+    let captured = manifest(&capture_path.join("manifest.json"))?;
+    ensure!(
+        captured["token_ids"] == json!(tokens),
+        "batched capture token mismatch"
+    );
+    let report_path = output.join("comparison.json");
+    let status = attention_compare_command(model, &capture_path, true)
+        .stdout(std::fs::File::create(&report_path)?)
+        .status()?;
+    ensure!(
+        matches!(status.code(), Some(0 | 1)),
+        "CPU attention replay failed: {status}"
+    );
+    let report = manifest(&report_path)?;
+    characterization::check_attention_characterization(&report, &BATCH_POSITIONS)?;
+    for row in report.as_array().context("missing attention reports")? {
+        ensure!(
+            row["weight_backend"] == "independent_gguf"
+                && row["comparison_scope"] == "attention_only_captured_normalized_inputs",
+            "wrong CPU replay backend or scope"
+        );
+    }
+    emit_characterization(
+        &output,
+        "independent_gguf_batched_teacher_forced_attention_with_pruning",
+        &report,
+    )
+}
+
+#[test]
 fn long_context_comparison_remains_independent_cpu() {
     let cpu = long_compare_command(Path::new("model"), Path::new("fresh"));
     let args: Vec<_> = cpu.get_args().map(|a| a.to_str().unwrap()).collect();
@@ -337,6 +424,13 @@ fn long_context_comparison_remains_independent_cpu() {
             "0"
         ]
     );
+    let gguf = attention_compare_command(Path::new("fixture.gguf"), Path::new("fresh"), true);
+    let args: Vec<_> = gguf.get_args().map(|a| a.to_str().unwrap()).collect();
+    assert_eq!(
+        &args[4..8],
+        ["--gguf", "fixture.gguf", "--capture", "fresh"]
+    );
+    assert!(!args.contains(&"--model"));
 }
 
 #[test]

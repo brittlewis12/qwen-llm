@@ -128,8 +128,8 @@ Parallel index heads at `b29d6991` measure **118.729 +/- 0.010 tokens/s pp1024**
 (8.625 seconds) and **26.746 +/- 0.021 tg32**, with three repetitions. A single
 pp2048 repetition measures **114.636 tokens/s** (17.865 seconds). No validation
 layers or diagnostic ablations are enabled. These results still do not reach
-the roughly 500 tokens/s agent-prefill target. Worker results are retained under
-`~/qwen-runs/2026-10-18-v41-optimization/attention-index/`.
+the roughly 500 tokens/s agent-prefill target. Evidence locations and the reuse
+review are recorded in [the review packet](bench/2026-10-19-v41-review.md).
 
 Exact prefix reuse is separately useful: a private HTTPS smoke request reuses
 492 of 494 prompt tokens in 0.21 seconds, and a follow-up reuses 495 tokens in
@@ -138,10 +138,15 @@ The grouped path passes the independent seven-token GGUF CPU comparison and the
 65-token serial/batched, capacity-growth and snapshot-continuation comparisons.
 The matrix path also passes continuation through position 257 with the same
 distribution limits (maximum logit error 2.360e-5, KL 5.568e-14).
-The index-head path extends that comparison through position 1,025, with maximum
-logit error 1.955e-5, KL 2.169e-12 and matching top-1. Index scores remain within
-the existing F32 tolerances, with exact selected-ID comparisons across tested
-head geometries; they are not claimed bitwise equal to scalar scores.
+The index-head path extends that internal serial/batched comparison through
+position 1,025, with maximum logit error 1.955e-5, KL 2.169e-12 and matching top-1.
+Index scores remain within the existing F32 tolerances, with exact selected-ID
+comparisons across tested head geometries; they are not claimed bitwise equal to
+scalar scores.
+This is not independent full-model correctness through 1,025 tokens. Independent
+GGUF full-model comparison still covers seven tokens. The registered 2K/10K
+replay is scalar, teacher-forced HF conversion characterization; its completion
+does not establish batched GGUF correctness or candidate-pruning coverage.
 The latest 65-token comparison has maximum logit error 2.737e-4 and KL 6.855e-10;
 same-arithmetic snapshot/growth continuation remains bitwise equal. SIMD and
 grouped reductions are F32, not bitwise scalar reduction order. Existing

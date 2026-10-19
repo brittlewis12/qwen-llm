@@ -39,6 +39,76 @@ pub(super) struct Snapshot {
     candidates: Option<MetalTensor>,
 }
 
+pub(super) fn batch_snapshots(
+    model: &Forward<'_>,
+    start: usize,
+    rows: usize,
+    sink: &dyn Capture,
+) -> Result<Vec<(usize, usize, Snapshot)>> {
+    let c = &model.config;
+    let schedule = &model.schedule;
+    let mut plan = Vec::new();
+    let mut bytes = 0u64;
+    for position in start..start + rows {
+        if !sink.wants_position(position) {
+            continue;
+        }
+        let checkpoint = sink.is_checkpoint(position);
+        for &layer in &schedule.index_source_layers {
+            let mut counts = vec![c.hidden];
+            if checkpoint {
+                counts.extend([
+                    c.hidden,
+                    ((position + 1) / schedule.ratio(layer))
+                        .min(c.index_topk)
+                        .max(1),
+                ]);
+                if schedule
+                    .candidate_source_layer
+                    .is_some_and(|source| layer >= source)
+                {
+                    counts.push((position + 1).div_ceil(c.candidate_block));
+                }
+            }
+            for count in counts {
+                let priced = model
+                    .ctx
+                    .price_shared_buffer_upper(
+                        (count as u64)
+                            .checked_mul(4)
+                            .ok_or("capture extent overflow")?,
+                    )
+                    .map_err(|e| e.to_string())?;
+                bytes = bytes
+                    .checked_add(priced.priced_upper_bytes)
+                    .ok_or("capture extent overflow")?;
+            }
+            plan.push((position, layer, checkpoint));
+        }
+    }
+    if !plan.is_empty() {
+        let admission = metal::evaluate_metal_memory_admission_with_cpu_bytes(
+            bytes,
+            0,
+            0,
+            model.ctx.memory_signals(),
+            true,
+        );
+        if let Some(reason) = admission.refusal() {
+            return Err(format!("attention capture memory admission: {reason:?}"));
+        }
+    }
+    plan.into_iter()
+        .map(|(position, layer, checkpoint)| {
+            Ok((
+                position,
+                layer,
+                Snapshot::new(model.ctx, c, position, layer, checkpoint, schedule)?,
+            ))
+        })
+        .collect()
+}
+
 impl Snapshot {
     pub(super) fn new(
         ctx: &MetalContext,

@@ -88,11 +88,19 @@ pub(super) fn check_characterization(report: &Value) -> Result<()> {
 }
 
 pub(super) fn check_long_characterization(report: &Value) -> Result<()> {
+    check_attention_characterization(report, &super::LONG_POSITIONS)
+}
+
+pub(super) fn check_attention_characterization(report: &Value, positions: &[usize]) -> Result<()> {
     let rows = report.as_array().context("missing attention reports")?;
-    ensure!(rows.len() == 32, "incomplete attention inventory");
+    ensure!(
+        rows.len() == positions.len() * super::LONG_LAYERS.len(),
+        "incomplete attention inventory"
+    );
     for (row, (position, layer)) in rows.iter().zip(
-        super::LONG_POSITIONS
-            .into_iter()
+        positions
+            .iter()
+            .copied()
             .flat_map(|p| super::LONG_LAYERS.into_iter().map(move |l| (p, l))),
     ) {
         ensure!(
@@ -141,7 +149,7 @@ pub(super) fn emit_characterization(output: &Path, scope: &str, report: &Value) 
     let evidence = json!({
         "kind":"characterization", "scope":scope,
         "report_validity":"complete_finite", "numerical_acceptance":"not_evaluated",
-        "note":"HF comparison measures converted-weight plus execution error, not tight GGUF execution parity; legacy long-attention pass flags are diagnostic only",
+        "note":"This report characterizes only its stated scope; finite metrics and legacy pass flags do not certify full-model numerical correctness",
         "metrics":report,
     });
     let text = serde_json::to_string_pretty(&evidence)?;
@@ -248,5 +256,23 @@ mod tests {
         let mut bad = valid;
         bad.as_array_mut().unwrap().pop();
         assert!(check_long_characterization(&bad).is_err());
+    }
+
+    #[test]
+    fn batched_attention_inventory_requires_pruning_checkpoints() {
+        let base = long_report();
+        let mut rows = Vec::new();
+        for position in super::super::BATCH_POSITIONS {
+            for row in &base.as_array().unwrap()[..super::super::LONG_LAYERS.len()] {
+                let mut row = row.clone();
+                row["position"] = json!(position);
+                rows.push(row);
+            }
+        }
+        let mut report = Value::Array(rows);
+        check_attention_characterization(&report, &super::super::BATCH_POSITIONS).unwrap();
+        assert!(check_long_characterization(&report).is_err());
+        report.as_array_mut().unwrap().pop();
+        assert!(check_attention_characterization(&report, &super::super::BATCH_POSITIONS).is_err());
     }
 }

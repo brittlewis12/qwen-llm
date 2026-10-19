@@ -2,15 +2,20 @@
 # requires-python = ">=3.11"
 # dependencies = ["torch>=2.10", "safetensors>=0.6", "numpy", "sympy", "tokenizers"]
 # ///
-"""Teacher-forced, attention-only NativeF32 checkpoint replay."""
+"""Teacher-forced NativeF32 attention replay conditional on captured normalized inputs.
+
+Neither weight backend establishes independent full-model correctness.
+"""
 
 import argparse
+from contextlib import closing, nullcontext
 import json
 from pathlib import Path
 
 import numpy as np
 import torch
 
+from gguf_weights import GGUFWeights
 from oracle import HERE, model_args, source_module
 from weights import Weights
 
@@ -78,6 +83,8 @@ def bind_attention(m, args, store, layer):
     # Only parameter allocation is meta: caches and rotary tables remain CPU.
     with m.set_dtype(torch.float32):
         attn = m.Attention(layer, args)
+    if isinstance(store, GGUFWeights):
+        store.validate_attention(attn, m, layer)
     for name, obj in attn.named_modules():
         obj.cpu_name = f"layers.{layer}.attn" + ("." + name if name else "")
         if isinstance(obj, m.Linear):
@@ -200,13 +207,35 @@ def selection_diagnostics(m, attn, x, position):
 
 
 @torch.inference_mode()
-def replay(model, capture, batch=256, atol=0.02, rtol=0.02):
+def replay(model=None, capture=None, batch=256, atol=0.02, rtol=0.02, *, gguf=None):
+    if (model is None) == (gguf is None):
+        raise ValueError("exactly one of model or gguf is required")
     cap = Capture(capture)
     m = source_module(stable_router=True)
     config = json.loads((HERE / "old_config.json").read_text())
     positions = [c["position"] for c in cap.meta["checkpoints"]]
     args = model_args(m, config, max(positions) + 1)
-    store = Weights([model], 128, "NativeF32")
+    resource = (
+        closing(GGUFWeights(gguf, 128, "NativeF32"))
+        if gguf is not None
+        else nullcontext(Weights([model], 128, "NativeF32"))
+    )
+    with resource as store:
+        if gguf is not None:
+            store.validate_config(config)
+        return _replay(
+            m,
+            args,
+            store,
+            cap,
+            batch,
+            atol,
+            rtol,
+            "independent_gguf" if gguf is not None else "hf_safetensors",
+        )
+
+
+def _replay(m, args, store, cap, batch, atol, rtol, backend):
     configure(m, store)
     reports = []
     for checkpoint in cap.meta["checkpoints"]:
@@ -235,6 +264,8 @@ def replay(model, capture, batch=256, atol=0.02, rtol=0.02):
             ).flatten()
             ids = (m.shared_attn.topk_idxs.flatten() - args.window_size).tolist()
             row = {
+                "weight_backend": backend,
+                "comparison_scope": "attention_only_captured_normalized_inputs",
                 "position": p,
                 "layer": layer,
                 "owner": owner,
@@ -259,7 +290,9 @@ def replay(model, capture, batch=256, atol=0.02, rtol=0.02):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--model", required=True)
+    backend = parser.add_mutually_exclusive_group(required=True)
+    backend.add_argument("--model", help="HF safetensors directory")
+    backend.add_argument("--gguf", help="GGUF weights decoded independently on CPU")
     parser.add_argument("--capture", required=True)
     parser.add_argument("--batch", type=int, default=256)
     parser.add_argument("--atol", type=float, default=0.02)
@@ -267,7 +300,9 @@ def main():
     args = parser.parse_args()
     if args.batch < 1:
         parser.error("batch must be positive")
-    rows = replay(args.model, args.capture, args.batch, args.atol, args.rtol)
+    rows = replay(
+        args.model, args.capture, args.batch, args.atol, args.rtol, gguf=args.gguf
+    )
     print(json.dumps(rows, indent=2))
     raise SystemExit(
         0

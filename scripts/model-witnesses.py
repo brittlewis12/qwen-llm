@@ -337,6 +337,7 @@ fn conversion_error() {}
     assert {oracle_identities[index][1] for index in conversion_indices} == {
         "hf_conversion_seven_token_characterization",
         "hf_conversion_ten_thousand_token_attention_characterization",
+        "independent_gguf_batched_attention_boundary_characterization",
     }
     assert all(
         annotation_fixture(reason) in local_fixture_ids(oracle_source)

@@ -355,6 +355,18 @@ pub(super) fn run(
     chunk_rows: usize,
     with_logits: bool,
 ) -> std::result::Result<Vec<f32>, StateError> {
+    run_captured(model, state, tokens, cancel, chunk_rows, with_logits, None)
+}
+
+pub(super) fn run_captured(
+    model: &Forward<'_>,
+    state: &mut State,
+    tokens: &[u32],
+    cancel: Option<&AtomicBool>,
+    chunk_rows: usize,
+    with_logits: bool,
+    mut capture: Option<&mut dyn capture::Capture>,
+) -> std::result::Result<Vec<f32>, StateError> {
     op::require(!tokens.is_empty(), "empty prefill suffix")?;
     op::require(
         (1..=DEFAULT_CHUNK_ROWS).contains(&chunk_rows),
@@ -427,12 +439,16 @@ pub(super) fn run(
         let start = state.position();
         let last = with_logits && start + chunk.len() == end;
         if chunk.len() == 1 {
-            logits = if last {
-                model.step(state, chunk[0], cancel)?
-            } else {
-                model.advance(state, chunk[0], cancel)?;
-                Vec::new()
-            };
+            logits = model.execute_token(
+                state,
+                chunk[0],
+                cancel,
+                None,
+                capture
+                    .as_mut()
+                    .map(|sink| &mut **sink as &mut dyn capture::Capture),
+                last,
+            )?;
             continue;
         }
         let mut next = state.addresses;
@@ -448,11 +464,17 @@ pub(super) fn run(
             next = addresses;
         }
         state.poisoned = true;
-        logits = state
-            .gpu_step
-            .as_mut()
-            .unwrap()
-            .run_chunk(model, start, chunk, &hashes, cancel, last)?;
+        logits = state.gpu_step.as_mut().unwrap().run_chunk(
+            model,
+            start,
+            chunk,
+            &hashes,
+            cancel,
+            last,
+            capture
+                .as_mut()
+                .map(|sink| &mut **sink as &mut dyn capture::Capture),
+        )?;
         state.addresses = next;
         state.poisoned = false;
     }

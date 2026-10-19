@@ -88,6 +88,10 @@ impl Writer {
     }
 
     pub(super) fn begin_step(&mut self, position: usize, token: u32) -> Result<()> {
+        self.begin_chunk(position, &[token])
+    }
+
+    pub(super) fn begin_chunk(&mut self, position: usize, tokens: &[u32]) -> Result<()> {
         if !self.wants_position(position) {
             return Ok(());
         }
@@ -97,7 +101,10 @@ impl Writer {
                 && self.tokens.len() == position,
             "capture history must be contiguous from zero"
         );
-        self.tokens.push(token);
+        let count = tokens
+            .len()
+            .min(self.checkpoints.last().unwrap() + 1 - position);
+        self.tokens.extend_from_slice(&tokens[..count]);
         Ok(())
     }
 
@@ -106,7 +113,7 @@ impl Writer {
         ensure!(
             c.layer == LAYERS[slot]
                 && c.position == self.rows[slot]
-                && self.tokens.len() == c.position + 1,
+                && self.tokens.len() > c.position,
             "capture callback order mismatch"
         );
         ensure!(c.input.len() == self.width, "capture input shape mismatch");
@@ -204,7 +211,9 @@ impl Writer {
     pub(super) fn finish(mut self) -> Result<()> {
         let count = self.checkpoints.last().unwrap() + 1;
         ensure!(
-            self.next_layer == 0 && self.rows.iter().all(|&n| n == count),
+            self.next_layer == 0
+                && self.rows.iter().all(|&n| n == count)
+                && self.tokens.len() == count,
             "capture ended before all requested checkpoints; manifest remains incomplete"
         );
         self.save("success")?;

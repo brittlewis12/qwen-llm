@@ -593,6 +593,26 @@ impl<'a> Forward<'a> {
         )
     }
 
+    /// Capture actual batched attention inputs and checkpoint outputs after GPU
+    /// completion. Diagnostic copies do not change the prefill arithmetic path.
+    pub fn prefill_with_capture(
+        &self,
+        state: &mut State,
+        tokens: &[u32],
+        cancel: Option<&AtomicBool>,
+        capture: &mut dyn capture::Capture,
+    ) -> std::result::Result<Vec<f32>, StateError> {
+        prefill::run_captured(
+            self,
+            state,
+            tokens,
+            cancel,
+            prefill::DEFAULT_CHUNK_ROWS,
+            true,
+            Some(capture),
+        )
+    }
+
     /// Consume a nonempty suffix without computing vocabulary logits.
     pub fn advance_prefill(
         &self,

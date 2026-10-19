@@ -660,6 +660,33 @@ impl Workspace {
         )
     }
 
+    pub(super) fn capture_row(
+        &self,
+        ctx: &MetalContext,
+        enc: &KernelEncoder,
+        snapshot: &capture::Snapshot,
+        input: &MetalTensor,
+        output: &MetalTensor,
+        rows: &Rows,
+        id: usize,
+        position: usize,
+        row: usize,
+    ) -> Result<()> {
+        snapshot.encode(
+            ctx,
+            enc,
+            input,
+            output,
+            &prefill::row(&rows.selected, self.config.index_topk, row),
+            &prefill::row(
+                &rows.candidates,
+                self.capacity.div_ceil(self.config.candidate_block),
+                row,
+            ),
+            self.selected_count(id, position),
+        )
+    }
+
     #[cfg(test)]
     pub(super) fn new(
         ctx: &MetalContext,

@@ -356,15 +356,9 @@ class GGUFWeights(Weights):
             ]
         )
 
-    def validate_model(self, model, module):
-        lazy = (
-            module.Linear,
-            module.ParallelEmbedding,
-            module.ParallelEngramEmbedding,
-            module.ParallelHead,
-        )
+    def _validate_parameters(self, model, lazy, prefix=""):
         used = set()
-        self.parameters = set()
+        parameters = set()
         for name, obj in model.named_modules():
             params = (
                 [("weight", obj.weight)]
@@ -372,7 +366,9 @@ class GGUFWeights(Weights):
                 else obj.named_parameters(recurse=False)
             )
             for key, param in params:
-                full = name + "." + key if name else key
+                full = ".".join(part for part in (prefix, name, key) if part)
+                if full not in self.names:
+                    raise ValueError("missing GGUF tensor: " + full)
                 expected = list(param.shape)
                 if param.dtype == torch.float4_e2m1fn_x2:
                     expected[-1] *= 2
@@ -382,7 +378,36 @@ class GGUFWeights(Weights):
                     )
                 used.add(full)
                 if not isinstance(obj, lazy):
-                    self.parameters.add(full)
+                    parameters.add(full)
+        return used, parameters
+
+    def validate_attention(self, attn, module, layer):
+        """Validate one attention subtree without allocating a transformer."""
+        prefix = f"layers.{layer}.attn"
+        self.parameters = {
+            name
+            for name in getattr(self, "parameters", set())
+            if not name.startswith(prefix + ".")
+        }
+        used, parameters = self._validate_parameters(attn, (module.Linear,), prefix)
+        extra = [
+            name
+            for name in self.names
+            if name.startswith(prefix + ".") and name not in used
+        ]
+        if extra:
+            raise ValueError("unbound GGUF attention tensors: " + str(extra[:10]))
+        self.parameters.update(parameters)
+
+    def validate_model(self, model, module):
+        lazy = (
+            module.Linear,
+            module.ParallelEmbedding,
+            module.ParallelEngramEmbedding,
+            module.ParallelHead,
+        )
+        self.parameters = set()
+        used, parameters = self._validate_parameters(model, lazy)
         layers = len(model.layers)
         extra = [
             n
@@ -401,3 +426,4 @@ class GGUFWeights(Weights):
                     expected = expected.flatten().tolist()
                 if self.metadata.get("deepseek41.engram." + key) != expected:
                     raise ValueError("GGUF/HF Engram mismatch: " + key)
+        self.parameters = parameters

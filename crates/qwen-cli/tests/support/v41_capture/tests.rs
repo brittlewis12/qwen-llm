@@ -27,14 +27,24 @@ fn manifest(p: &Path) -> Value {
 
 #[test]
 fn capture_npy_histories_sparse_checkpoints_and_collision() {
+    check_registration(false);
+    check_registration(true);
+}
+
+fn check_registration(batched: bool) {
     let temp = Temp::new();
     let root = temp.0.join("capture");
     let mut writer = Writer::create(&root, &[1, 2], json!({"native_revision":"test"})).unwrap();
     assert!(Writer::create(&root, &[1], json!({})).is_err());
     let input = vec![1.25; 5120];
     let output = vec![-0.5; 5120];
+    if batched {
+        writer.begin_chunk(0, &[0, 1, 2]).unwrap();
+    }
     for p in 0..3 {
-        writer.begin_step(p, p as u32).unwrap();
+        if !batched {
+            writer.begin_step(p, p as u32).unwrap();
+        }
         for layer in LAYERS {
             let ids = (0..(p + 1) / if layer < 20 { 2 } else { 1 })
                 .map(|id| id as i32)
@@ -106,7 +116,7 @@ fn capture_partial_failure_and_cancellation_remain_incomplete() {
     {
         let mut writer = Writer::create_inner(&root, &[1], 2, json!({})).unwrap();
         assert!(writer.begin_step(1, 0).is_err());
-        writer.begin_step(0, 0).unwrap();
+        writer.begin_chunk(0, &[0, 1]).unwrap();
         writer
             .layer(AttentionCapture {
                 position: 0,

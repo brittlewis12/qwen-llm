@@ -128,6 +128,32 @@ fn capture_full_gpu_step_replays_cpu_phases_ids_and_pruning() {
 }
 
 #[test]
+fn batched_capture_replays_cpu_without_changing_logits() {
+    let ctx = MetalContext::new().unwrap();
+    let weights = toy::Weights::new(&ctx);
+    let model = weights.model(&ctx);
+    let tokens = [0, 3, 1, 4, 2, 5, 6, 7];
+    for chunk in [1, 2, 3, 7, 8] {
+        let mut replay = Replay {
+            weights: model.layers.iter().map(|l| cpu(&l.attention)).collect(),
+            session: op::Session::default(),
+            calls: 0,
+            checkpoints: 0,
+        };
+        let mut state = model.new_state_with_gpu_step(tokens.len()).unwrap();
+        let mut plain = model.new_state_with_gpu_step(tokens.len()).unwrap();
+        for suffix in tokens.chunks(chunk) {
+            let actual = model
+                .prefill_with_capture(&mut state, suffix, None, &mut replay)
+                .unwrap();
+            assert_eq!(actual, model.prefill(&mut plain, suffix, None).unwrap());
+        }
+        assert_eq!((replay.calls, replay.checkpoints), (56, 40));
+        assert_eq!(state.position(), tokens.len());
+    }
+}
+
+#[test]
 fn capture_requires_gpu_and_callback_errors_poison_state() {
     struct Fail;
     impl Capture for Fail {
@@ -161,4 +187,14 @@ fn capture_requires_gpu_and_callback_errors_poison_state() {
     );
     assert!(state.is_poisoned());
     assert_eq!(state.position(), 0);
+    let mut batch = model.new_state_with_gpu_step(3).unwrap();
+    assert!(
+        model
+            .prefill_with_capture(&mut batch, &[0, 1, 2], None, &mut Fail)
+            .unwrap_err()
+            .to_string()
+            .contains("capture disk failure")
+    );
+    assert!(batch.is_poisoned());
+    assert_eq!(batch.position(), 0);
 }

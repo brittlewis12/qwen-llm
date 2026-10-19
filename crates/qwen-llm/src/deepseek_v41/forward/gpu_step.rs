@@ -117,6 +117,7 @@ impl Workspace {
         hashes: &[engram::LayerRows],
         cancel: Option<&AtomicBool>,
         with_logits: bool,
+        mut capture: Option<&mut dyn capture::Capture>,
     ) -> Result<Vec<f32>> {
         let ctx = model.ctx;
         let c = &model.config;
@@ -149,6 +150,10 @@ impl Workspace {
                 prefill::allocate(ctx, p.output, n, GgmlType::F32)?,
             ));
         }
+        let snapshots = match capture.as_ref() {
+            Some(sink) => capture::batch_snapshots(model, start, n, &**sink)?,
+            None => Vec::new(),
+        };
         self.attention.begin_batch(start, n)?;
         self.commands = 0;
         self.trace_copies = 0;
@@ -219,6 +224,21 @@ impl Workspace {
                 }
                 self.attention
                     .finish_rows(ctx, &enc, &layer.attention, &attention, &outputs)?;
+                for (position, _, snapshot) in snapshots.iter().filter(|(_, layer, _)| *layer == id)
+                {
+                    let row = position - start;
+                    self.attention.capture_row(
+                        ctx,
+                        &enc,
+                        snapshot,
+                        &prefill::row(&hc.normalized, c.hidden, row),
+                        &prefill::row(&outputs, c.hidden, row),
+                        &attention,
+                        id,
+                        *position,
+                        row,
+                    )?;
+                }
                 metal::encode_mhc4_post_rows(
                     ctx, &enc, c.hidden, n, &outputs, &x, &hc.post, &hc.comb, &half,
                 )
@@ -322,6 +342,12 @@ impl Workspace {
         };
         op::require(value == 0, &format!("GPU attention status {value}"))?;
         cancelled(cancel)?;
+        if let Some(sink) = capture.as_mut() {
+            for (position, layer, snapshot) in &snapshots {
+                snapshot.deliver(c, *position, *layer, &mut **sink)?;
+                cancelled(cancel)?;
+            }
+        }
         self.attention.validate_snapshot_position(start + n)?;
         if with_logits {
             let values = f32_slice(&self.logits)?;

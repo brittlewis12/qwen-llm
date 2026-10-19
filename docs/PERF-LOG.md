@@ -34,6 +34,13 @@ See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
   parallel copy. Live arena allocation, A3B arena constants, and the frozen
   `qwen bench gguf-arena-floor` implementation are deleted; the v0.597/v0.598
   measurements and review remain archived in their existing bench records.
+- Five interleaved A3B `MetalModel::load()` A/B pairs, main/branch in ms:
+  `601.326/603.619`, `610.678/605.922`, `604.982/603.296`,
+  `606.383/601.733`, `608.289/604.588`. Medians are `606.383/603.296 ms`
+  (branch `0.51%` faster). At the timing check, `uptime` reported
+  `3.42/4.59/4.23`; the process scan found no cargo, test, Qwen, or model
+  inference processes. The measured production Rust source delta is `-5,981`
+  lines from `f2f6b6d2`, excluding test source files.
 
 ## 2026-10-17 - Three-Way GLM Pilot Finds No Q4 Quality Advantage
 

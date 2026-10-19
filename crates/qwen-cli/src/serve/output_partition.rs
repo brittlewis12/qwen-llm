@@ -262,7 +262,7 @@ impl OutputPartition {
 ///
 /// Memory (map #14 packet 2, as GLM's tool block): before the tool buffer
 /// grows past its capacity, the capacity grows by whole
-/// [`super::partition_glm5_next::ADMISSION_STEP`]s and the process must have
+/// [`super::output_memory::OUTPUT_STEP_BYTES`]s and the process must have
 /// headroom for the block's whole outstanding peak at the new capacity,
 /// `tool_block_peak_bytes` (GLM's 256x model; Qwen XML and DSML measured
 /// within it, worst 147.5 for the same shapes) less what the buffer holds;
@@ -380,7 +380,7 @@ impl QwenOutputPartition {
     /// Before the tool buffer grows by `additional` bytes: admit and reserve
     /// whole steps; on refusal, store it and leave the buffer unchanged.
     fn grow_tool_buffer(&mut self, additional: usize) -> bool {
-        use super::partition_glm5_next::ADMISSION_STEP;
+        use super::output_memory::OUTPUT_STEP_BYTES;
         let Some(len) = self.tool_buffer.len().checked_add(additional) else {
             self.failure = Some(super::output_memory::size_overflow("tool block"));
             return false;
@@ -397,7 +397,10 @@ impl QwenOutputPartition {
         if len <= self.tool_buffer.capacity() {
             return true;
         }
-        let Some(capacity) = len.div_ceil(ADMISSION_STEP).checked_mul(ADMISSION_STEP) else {
+        let Some(capacity) = len
+            .div_ceil(OUTPUT_STEP_BYTES)
+            .checked_mul(OUTPUT_STEP_BYTES)
+        else {
             self.failure = Some(super::output_memory::size_overflow("tool block"));
             return false;
         };
@@ -574,7 +577,7 @@ mod tests {
     fn qwen_and_dsml_tool_buffers_admit_each_step_and_refuse_typed() {
         use std::sync::atomic::{AtomicU64, Ordering};
         static HEADROOM: AtomicU64 = AtomicU64::new(u64::MAX);
-        let step = super::super::partition_glm5_next::ADMISSION_STEP;
+        let step = super::super::output_memory::OUTPUT_STEP_BYTES;
         let peak = |bytes: usize| qwen_llm::glm5_next_chat::tool_block_peak_bytes(bytes) as u64;
         for (grammar, open, body) in [
             (
@@ -719,7 +722,7 @@ mod tests {
     /// leaves the held bytes unchanged and publishes no tool text.
     #[test]
     fn tool_byte_ceiling_holds_on_every_growth_path() {
-        let step = super::super::partition_glm5_next::ADMISSION_STEP;
+        let step = super::super::output_memory::OUTPUT_STEP_BYTES;
         let partition = |grammar, ceiling| {
             OutputPartition::with_headroom(
                 OutputProtocol::Qwen {

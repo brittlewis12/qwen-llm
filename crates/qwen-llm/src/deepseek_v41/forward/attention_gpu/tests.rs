@@ -833,7 +833,7 @@ fn split_sink_real_geometry_same_run_witness() {
         } else {
             vec![
                 ("sink", heads),
-                ("score", heads * (nr + nk)),
+                ("score", heads * (nr + nk).div_ceil(8) * 256),
                 ("softmax", heads),
                 ("output", heads * dim),
             ]
@@ -847,11 +847,8 @@ fn split_sink_real_geometry_same_run_witness() {
         }
         let actual = f32_slice(&split).unwrap();
         let incumbent = f32_slice(&serial).unwrap();
-        assert_eq!(
-            actual.iter().map(|v| v.to_bits()).collect::<Vec<_>>(),
-            incumbent.iter().map(|v| v.to_bits()).collect::<Vec<_>>(),
-            "serial mismatch {nr}+{nk}"
-        );
+        // SIMD score reduction changes addition order, not F32 operands.
+        close(actual, incumbent);
         let rows: Vec<_> = (0..nr)
             .map(|i| raw[((17 + i) % window) * dim..((17 + i) % window + 1) * dim].to_vec())
             .chain((0..nk).map(|i| compressed[(k - 1 - i) * dim..(k - i) * dim].to_vec()))
@@ -888,7 +885,7 @@ fn split_sink_real_geometry_same_run_witness() {
         }
         assert!(times.iter().all(|t| t[4] > 0.0));
         eprintln!(
-            "split sink {heads}x{dim} {nr}+{nk}: same-run median speedup {:.3}x, bitwise incumbent match",
+            "split sink {heads}x{dim} {nr}+{nk}: same-run median speedup {:.3}x, NativeF32 incumbent comparison",
             times[0][4] / times[1][4]
         );
     }

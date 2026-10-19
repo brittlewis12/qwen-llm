@@ -195,13 +195,16 @@ kernel void kernel_deepseek_v41_attention_score(
     device const float *q [[buffer(2)]], device const float *raw [[buffer(3)]],
     device const float *compressed [[buffer(4)]], device const uint *ids [[buffer(5)]],
     device float *scores [[buffer(7)]], constant uint &length [[buffer(9)]],
-    uint t [[thread_position_in_grid]]) {
-    uint count = a.y + b.x, h = t / count, i = t % count;
+    uint2 group [[threadgroup_position_in_grid]],
+    uint sg [[simdgroup_index_in_threadgroup]], uint lane [[thread_index_in_simdgroup]]) {
+    uint count = a.y + b.x, h = group.y, i = group.x * 8 + sg;
+    if (i >= count) return;
     if (i >= a.y && ids[i - a.y] >= length) return;
     device const float *row = i < a.y ? raw + ((a.z + i) % a.w) * a.x : compressed + ids[i - a.y] * a.x;
     float dot = 0;
-    for (uint j = 0; j < a.x; ++j) dot += q[h * a.x + j] * row[j];
-    scores[h * b.y + i] = dot * rsqrt(float(a.x));
+    for (uint j = lane; j < a.x; j += 32) dot += q[h * a.x + j] * row[j];
+    dot = simd_sum(dot);
+    if (lane == 0) scores[h * b.y + i] = dot * rsqrt(float(a.x));
 }
 
 kernel void kernel_deepseek_v41_attention_softmax(

@@ -388,11 +388,22 @@ fn sink_passes(
     dim: usize,
     count: usize,
 ) -> Result<()> {
-    for (name, n) in [
-        ("score", heads * count),
-        ("softmax", heads),
-        ("output", heads * dim),
-    ] {
+    if count > 0 {
+        pipeline(ctx, enc, "score")?;
+        enc.dispatch(
+            MTLSize {
+                width: count.div_ceil(8),
+                height: heads,
+                depth: 1,
+            },
+            MTLSize {
+                width: 256,
+                height: 1,
+                depth: 1,
+            },
+        );
+    }
+    for (name, n) in [("softmax", heads), ("output", heads * dim)] {
         if n == 0 {
             continue;
         }

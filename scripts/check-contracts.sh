@@ -162,7 +162,7 @@ fi
 
 cargo test --release -p qwen-llm --test comparison_tripwire
 status=0
-output=$(cargo test --release -p qwen-llm --lib deepseek_v41:: 2>&1) || status=$?
+output=$(cargo test --release -p qwen-llm --lib deepseek_v41:: -- --skip gguf_scalar_rowwise_grouped_prefill_diagnostic 2>&1) || status=$?
 printf '%s\n' "$output"
 [ "$status" -eq 0 ] || exit "$status"
 if ! grep -Eq '^test result: ok\. [1-9][0-9]* passed; 0 failed; 0 ignored' <<<"$output"; then

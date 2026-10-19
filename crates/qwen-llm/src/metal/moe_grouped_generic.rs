@@ -127,6 +127,38 @@ fn generic_layout_for(
         kernel,
         detail: format!("no generic grouped instantiation for {:?}", weight.dtype),
     })?;
+    checked_layout(kernel, weight, n_in, n_rows, n_expert, l)
+}
+
+fn f32x_layout_for(
+    kernel: &'static str,
+    weight: &MetalTensor,
+    n_in: usize,
+    n_rows: usize,
+    n_expert: usize,
+) -> Result<MoeGroupedGenericLayout, MetalError> {
+    if weight.dtype == GgmlType::MXFP4 {
+        checked_layout(
+            kernel,
+            weight,
+            n_in,
+            n_rows,
+            n_expert,
+            layout(GgmlType::MXFP4, "mxfp4", 32, 17),
+        )
+    } else {
+        generic_layout_for(kernel, weight, n_in, n_rows, n_expert)
+    }
+}
+
+fn checked_layout(
+    kernel: &'static str,
+    weight: &MetalTensor,
+    n_in: usize,
+    n_rows: usize,
+    n_expert: usize,
+    l: MoeGroupedGenericLayout,
+) -> Result<MoeGroupedGenericLayout, MetalError> {
     // The tile K-step is 32 elements; QK=256 formats additionally need whole
     // super-blocks per row.
     let k_align = l.block_elems.max(32);
@@ -230,6 +262,28 @@ fn generic_mm_args(
     max_count: u32,
 ) -> Result<GenericMmArgs, MetalError> {
     let l = generic_layout_for(kernel, weight, n_in, n_out, n_expert)?;
+    mm_args_with_layout(
+        kernel, l, src, counts, ids, out, n_in, n_out, n_expert, n_tokens, b_div, min_count,
+        max_count,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn mm_args_with_layout(
+    kernel: &'static str,
+    l: MoeGroupedGenericLayout,
+    src: &MetalTensor,
+    counts: &MetalTensor,
+    ids: &MetalTensor,
+    out: &MetalTensor,
+    n_in: usize,
+    n_out: usize,
+    n_expert: usize,
+    n_tokens: usize,
+    b_div: usize,
+    min_count: u32,
+    max_count: u32,
+) -> Result<GenericMmArgs, MetalError> {
     if n_out == 0 || b_div == 0 || n_tokens == 0 || n_expert == 0 {
         return Err(MetalError::BadShape {
             kernel,
@@ -927,6 +981,7 @@ const SWIGLU_F32X_THREADGROUP_BYTES: usize = 18 * 1024;
 /// support for fused gate/up or validate geometry, bindings, or the device.
 pub fn moe_down_f32x_grouped_slots_pipeline_name(dtype: GgmlType) -> Option<&'static str> {
     match dtype {
+        GgmlType::MXFP4 => Some("kernel_moe_down_mxfp4_f32x_grouped_slots"),
         GgmlType::Q2_0 => Some("kernel_moe_down_q2_0_f32x_grouped_slots"),
         GgmlType::Q2_K => Some("kernel_moe_down_q2_K_f32x_grouped_slots"),
         GgmlType::Q3_K => Some("kernel_moe_down_q3_K_f32x_grouped_slots"),
@@ -999,9 +1054,9 @@ pub(crate) fn check_moe_down_f32x_grouped_slots(
             ),
         });
     }
-    generic_mm_args(
+    mm_args_with_layout(
         KERNEL,
-        weight,
+        f32x_layout_for(KERNEL, weight, n_in, n_out, n_expert)?,
         inner,
         counts,
         ids,
@@ -1067,9 +1122,9 @@ pub fn encode_moe_down_f32x_grouped_slots(
     check_moe_down_f32x_grouped_slots(
         ctx, weight, inner, counts, ids, out, n_in, n_out, n_expert, n_tokens,
     )?;
-    let args = generic_mm_args(
+    let args = mm_args_with_layout(
         KERNEL,
-        weight,
+        f32x_layout_for(KERNEL, weight, n_in, n_out, n_expert)?,
         inner,
         counts,
         ids,
@@ -1099,8 +1154,12 @@ pub fn encode_moe_down_f32x_grouped_slots(
     )
 }
 
-/// Every check [`encode_moe_swiglu_clamped_f32x_grouped_slots`] makes before
-/// encoding, without encoding; returns the pipeline name.
+/// Storage types with a fused F32-operand clamped gate/up matrix kernel.
+pub fn moe_swiglu_clamped_f32x_grouped_slots_supported(dtype: GgmlType) -> bool {
+    matches!(dtype, GgmlType::MXFP4 | GgmlType::IQ2_S | GgmlType::IQ3_S)
+}
+
+/// Checks without encoding; returns the pipeline name.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn check_moe_swiglu_clamped_f32x_grouped_slots(
     ctx: &MetalContext,
@@ -1134,6 +1193,7 @@ pub(crate) fn check_moe_swiglu_clamped_f32x_grouped_slots(
         )));
     }
     let name = match w_gate.dtype {
+        GgmlType::MXFP4 => "kernel_moe_swiglu_clamped_mxfp4_f32x_grouped_slots",
         GgmlType::IQ2_S => "kernel_moe_swiglu_clamped_iq2_s_f32x_grouped_slots",
         GgmlType::IQ3_S => "kernel_moe_swiglu_clamped_iq3_s_f32x_grouped_slots",
         other => return Err(bad(format!("no F32-operand grouped SwiGLU for {other:?}"))),
@@ -1153,8 +1213,8 @@ pub(crate) fn check_moe_swiglu_clamped_f32x_grouped_slots(
             "degenerate shape or x/counts/ids/inner size mismatch".into()
         ));
     }
-    generic_layout_for(KERNEL, w_gate, n_hidden, n_ffn, n_expert)?;
-    generic_layout_for(KERNEL, w_up, n_hidden, n_ffn, n_expert)?;
+    f32x_layout_for(KERNEL, w_gate, n_hidden, n_ffn, n_expert)?;
+    f32x_layout_for(KERNEL, w_up, n_hidden, n_ffn, n_expert)?;
     check_f32x_bindings(
         ctx,
         KERNEL,
@@ -1179,7 +1239,7 @@ pub(crate) fn check_moe_swiglu_clamped_f32x_grouped_slots(
 /// (`kernels/moe_grouped_f32.metal`, map #12 accuracy lane): the contract of
 /// [`encode_moe_swiglu_clamped_f32_grouped_slots_generic`] with weights
 /// dequantized to F32, unrounded activations and F32 accumulation, for the
-/// GLM-5.3 gate/up types IQ2_S and IQ3_S. Bindings and device are checked
+/// gate/up types MXFP4, IQ2_S and IQ3_S. Bindings and device are checked
 /// before encoding ([`check_moe_swiglu_clamped_f32x_grouped_slots`]). 18 KiB
 /// of threadgroup memory.
 #[allow(clippy::too_many_arguments)]
@@ -1204,7 +1264,7 @@ pub fn encode_moe_swiglu_clamped_f32x_grouped_slots(
         ctx, w_gate, w_up, x_pack, counts, ids, inner, n_hidden, n_ffn, n_expert, topk, n_tokens,
         clamp,
     )?;
-    let l = generic_layout_for(KERNEL, w_gate, n_hidden, n_ffn, n_expert)?;
+    let l = f32x_layout_for(KERNEL, w_gate, n_hidden, n_ffn, n_expert)?;
     dispatch_fused_swiglu(
         ctx,
         enc,

@@ -15,6 +15,7 @@
 using namespace metal;
 #include "quant_tiles.h"
 #include "native_dequant_f32.h"
+#include "mxfp4_decode.metalh"
 
 #define F32X_FOR_UNROLL(x) _Pragma("clang loop unroll(full)") for (x)
 
@@ -425,6 +426,9 @@ kernel void kernel_moe_swiglu_clamped_grouped_slots_f32x(
 
 typedef decltype(kernel_moe_down_grouped_slots_f32x<QT_IQ3_S_BYTES, QT_IQ3_S_NL, f32x_dequantize_iq3_s>) f32x_down_t;
 typedef decltype(kernel_moe_swiglu_clamped_grouped_slots_f32x<QT_IQ2_S_BYTES, QT_IQ2_S_NL, f32x_dequantize_iq2_s>) f32x_swiglu_t;
+
+template [[host_name("kernel_moe_down_mxfp4_f32x_grouped_slots")]] kernel f32x_down_t kernel_moe_down_grouped_slots_f32x<17, 2, expert_dequantize_mxfp4>;
+template [[host_name("kernel_moe_swiglu_clamped_mxfp4_f32x_grouped_slots")]] kernel f32x_swiglu_t kernel_moe_swiglu_clamped_grouped_slots_f32x<17, 2, expert_dequantize_mxfp4>;
 
 template [[host_name("kernel_moe_down_q2_0_f32x_grouped_slots")]] kernel f32x_down_t kernel_moe_down_grouped_slots_f32x<QT_Q2_0_BYTES, QT_Q2_0_NL, latent_dequantize_q2_0>;
 template [[host_name("kernel_moe_down_q2_K_f32x_grouped_slots")]] kernel f32x_down_t kernel_moe_down_grouped_slots_f32x<QT_Q2_K_BYTES, QT_Q2_K_NL, latent_dequantize_q2_K>;

@@ -5,11 +5,11 @@ use super::*;
 #[cfg(test)]
 mod tests;
 
-pub(super) const DEFAULT_CHUNK_ROWS: usize = 32;
+pub const DEFAULT_CHUNK_ROWS: usize = 256;
 
 #[cfg(test)]
 thread_local! {
-    static ROWWISE_LINEAR_ROWS: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    pub(super) static ROWWISE_LINEAR_ROWS: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 
 #[cfg(test)]

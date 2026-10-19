@@ -470,15 +470,9 @@ fn batched_prefill_splits_verified_checkpoint_and_resumes_live_snapshot_and_equa
     let live = format!("{cold}abc");
     let changed = format!("{}{}", "x".repeat(45), "y".repeat(45));
     for (prompt, expected, matched, source, rows) in [
-        (
-            &cold,
-            vec![(0, 32), (32, 45), (45, 77), (77, 90)],
-            0,
-            "none",
-            32,
-        ),
+        (&cold, vec![(0, 45), (45, 90)], 0, "none", 45),
         (&live, vec![(90, 93)], 90, "live_session", 3),
-        (&changed, vec![(45, 77), (77, 90)], 45, "snapshot_ram", 32),
+        (&changed, vec![(45, 90)], 45, "snapshot_ram", 45),
         (&changed, vec![], 90, "live_session", 0),
     ] {
         let ids: Vec<_> = prompt.bytes().map(u32::from).collect();
@@ -566,7 +560,7 @@ fn failed_or_cancelled_chunks_never_publish_partial_state_or_overwrite_checkpoin
             |_| Ok(vec![]),
             &mut recorded,
             |state, tokens, _, with_logits| {
-                assert!(!with_logits);
+                assert_eq!(with_logits, calls == 1);
                 calls += 1;
                 if calls == 2 {
                     state.extend_from_slice(&tokens[..if completed { tokens.len() } else { 3 }]);
@@ -659,7 +653,7 @@ fn headless_and_final_prefill_memory_refusals_stay_typed() {
         );
         assert!(recorded.live.is_none());
         if fail_with_logits {
-            assert_eq!(calls, [(16, false), (32, false), (17, true)]);
+            assert_eq!(calls, [(16, false), (49, true)]);
             assert_eq!(recorded.checkpoint.unwrap(), vec![b'x' as u32; 16]);
             assert!(recorded.checkpoint_logits.is_empty());
         } else {

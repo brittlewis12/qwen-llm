@@ -29,7 +29,12 @@ kernel void kernel_deepseek_v41_route(
     constant RouteArgs &a [[buffer(0)]], device const float *logits [[buffer(1)]],
     device const float *bias [[buffer(2)]], device float *scores [[buffer(3)]],
     device int *ids [[buffer(4)]], device float *weights [[buffer(5)]],
-    device int *status [[buffer(6)]]) {
+    device int *status [[buffer(6)]], uint row [[threadgroup_position_in_grid]]) {
+    logits += row * a.experts;
+    scores += row * a.experts;
+    ids += row * a.topk;
+    weights += row * a.topk;
+    status += row;
     *status = -1;
     for (uint k = 0; k < a.topk; ++k) { ids[k] = -1; weights[k] = 0; }
     for (uint i = 0; i < a.experts; ++i) {
@@ -72,17 +77,20 @@ kernel void kernel_deepseek_v41_weight(
     constant uint &n [[buffer(0)]], constant uint &width [[buffer(1)]],
     device const float *x [[buffer(2)]], device const float *weights [[buffer(3)]],
     device float *out [[buffer(4)]], device const int *status [[buffer(5)]],
+    constant uint &topk [[buffer(6)]],
     uint i [[thread_position_in_grid]]) {
-    if (i < n) out[i] = *status == 1 ? x[i] * weights[i / width] : 0.0f;
+    if (i < n) out[i] = status[i / (width * topk)] == 1 ? x[i] * weights[i / width] : 0.0f;
 }
 
 kernel void kernel_deepseek_v41_sum(
     constant uint &hidden [[buffer(0)]], constant uint &topk [[buffer(1)]],
     device const float *slots [[buffer(2)]], device const float *shared [[buffer(3)]],
     device float *out [[buffer(4)]], device const int *status [[buffer(5)]],
+    constant uint &rows [[buffer(6)]],
     uint i [[thread_position_in_grid]]) {
-    if (i >= hidden) return;
+    if (i >= hidden * rows) return;
+    uint row = i / hidden, channel = i % hidden;
     float sum = 0;
-    if (*status == 1) for (uint k = 0; k < topk; ++k) sum += slots[k * hidden + i];
+    if (status[row] == 1) for (uint k = 0; k < topk; ++k) sum += slots[(row * topk + k) * hidden + channel];
     out[i] = sum + shared[i];
 }

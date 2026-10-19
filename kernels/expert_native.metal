@@ -5,6 +5,7 @@ using namespace metal;
 #include "native_dequant_f32.h"
 #include "iq2_xs_grid.metalh"
 #include "iq2_xxs_decode.metalh"
+#include "mxfp4_decode.metalh"
 
 inline void expert_dequantize_iq2_xxs(device const uchar * blk, short il,
                                      thread float4x4 & reg) {
@@ -27,22 +28,6 @@ inline void expert_dequantize_iq2_xs(device const uchar * blk, short il,
         const uint signs = uint(qt_ksigns_iq2xs[packed >> 9]);
         const float sign = (signs & uint(qt_kmask_iq2xs[i & 7u])) ? -1.0f : 1.0f;
         reg[i / 4][i % 4] = dl * float(grid[i & 7u]) * sign;
-    }
-}
-
-// GGML's half-scale convention keeps exponent 255 finite for small codes.
-// This is F32 throughout, including the subnormal scales at exponents 0/1.
-constant float expert_mxfp4_values[16] = {
-    0, 1, 2, 3, 4, 6, 8, 12, 0, -1, -2, -3, -4, -6, -8, -12
-};
-inline void expert_dequantize_mxfp4(device const uchar * blk, short il,
-                                   thread float4x4 & reg) {
-    const uint e = uint(blk[0]);
-    const float scale = as_type<float>(e == 0u ? 0x00200000u
-        : (e == 1u ? 0x00400000u : (e - 1u) << 23u));
-    QT_FOR_UNROLL (uint i = 0; i < 16; ++i) {
-        const uint code = (uint(blk[1 + i]) >> (4u * uint(il))) & 15u;
-        reg[i / 4][i % 4] = expert_mxfp4_values[code] * scale;
     }
 }
 

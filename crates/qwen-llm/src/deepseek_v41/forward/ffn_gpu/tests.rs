@@ -211,6 +211,7 @@ fn ordered_slots_then_shared_sum() {
         enc.set_pipeline(&ctx.pipeline("kernel_deepseek_v41_sum")?);
         enc.set_bytes(0, &1u32);
         enc.set_bytes(1, &3u32);
+        enc.set_bytes(6, &1u32);
         for (slot, tensor) in [&slots, &shared, &output, &status].iter().enumerate() {
             enc.set_tensor(slot + 2, tensor);
         }
@@ -219,4 +220,49 @@ fn ordered_slots_then_shared_sum() {
     })
     .unwrap();
     assert_eq!(f32_slice(&output).unwrap(), &[7.0]);
+}
+
+#[test]
+fn grouped_mxfp4_rows_match_scalar_weight_before_down() {
+    let ctx = MetalContext::new().unwrap();
+    let weights = toy::Weights::new(&ctx);
+    let model = weights.model(&ctx);
+    let c = &model.config;
+    let layer = &model.layers[0];
+    assert!(grouped_supported(c, layer));
+    let mut scalar = Workspace::new(&model).unwrap();
+    for n in [2, 17, 32, 64] {
+        let x: Vec<_> = (0..n * 4 * c.hidden)
+            .map(|i| ((i * 19 % 101) as f32 - 50.0) / 17.0)
+            .collect();
+        let pre = [0.7, 0.1, 0.3, 0.9].repeat(n);
+        let mut expected = Vec::new();
+        for row in 0..n {
+            expected.extend(
+                scalar
+                    .run(
+                        &ctx,
+                        c,
+                        layer,
+                        0,
+                        &x[row * 4 * c.hidden..(row + 1) * 4 * c.hidden],
+                        &pre[row * 4..(row + 1) * 4],
+                    )
+                    .unwrap()
+                    .0,
+            );
+        }
+        let scratch = Rows::new(&ctx, c, n, 1).unwrap();
+        let input = upload(&ctx, &x, vec![c.hidden as u64, 4, n as u64]).unwrap();
+        let incoming = upload(&ctx, &pre, vec![4, n as u64]).unwrap();
+        let output = prefill::allocate(&ctx, 4 * c.hidden, n, GgmlType::F32)
+            .unwrap()
+            .view_bytes(0, vec![c.hidden as u64, 4, n as u64]);
+        submit(&ctx, "grouped_mxfp4_test", [0; 4], |enc| {
+            scalar.encode_rows(&ctx, enc, c, layer, 0, &input, &incoming, &output, &scratch)
+        })
+        .unwrap();
+        scratch.validate_status().unwrap();
+        close(f32_slice(&output).unwrap(), &expected);
+    }
 }

@@ -736,7 +736,8 @@ fn v41_request_memory_admits_creation_once_and_checks_output_growth() {
     assert_eq!(backend.starts, 1);
     assert_eq!(
         backend.steps.load(Ordering::Acquire),
-        crate::family_options::V41_PREFILL_ROWS,
+        prompt_len(&backend, "one two three four five six")
+            .min(crate::family_options::V41_PREFILL_ROWS),
         "pressure must stop before the next bounded prefill chunk"
     );
     assert_eq!(backend.drops.load(Ordering::Acquire), 1);

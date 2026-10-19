@@ -107,8 +107,21 @@ fn chunk_dispatch_and_submission_census() {
                     .iter()
                     .filter(|d| d.kernel == "kernel_deepseek_v41_route")
                     .count(),
-                rows * model.layers.len()
+                chunks * model.layers.len()
             );
+            let grouped_chunks = tokens
+                .chunks(DEFAULT_CHUNK_ROWS)
+                .filter(|c| c.len() > 1)
+                .count();
+            for name in [
+                "kernel_moe_swiglu_clamped_mxfp4_f32x_grouped_slots",
+                "kernel_moe_down_mxfp4_f32x_grouped_slots",
+            ] {
+                assert_eq!(
+                    dispatches.iter().filter(|d| d.kernel == name).count(),
+                    grouped_chunks * model.layers.len()
+                );
+            }
             assert_eq!(
                 dispatches
                     .iter()
@@ -438,7 +451,7 @@ fn invalid_prefill_request_preserves_state() {
     for (tokens, chunk) in [
         (vec![], 1),
         (vec![0], 0),
-        (vec![0], 33),
+        (vec![0], DEFAULT_CHUNK_ROWS + 1),
         (vec![0, u32::MAX], 2),
         (vec![0; 4], 2),
     ] {

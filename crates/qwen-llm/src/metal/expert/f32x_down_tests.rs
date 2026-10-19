@@ -15,9 +15,10 @@ fn down_f32x_capability_matches_native_instantiations() {
         SOURCE
             .matches("template [[host_name(\"kernel_moe_down_")
             .count(),
-        17
+        18
     );
     assert!(SOURCE.contains("#include \"native_dequant_f32.h\""));
+    assert!(moe_down_f32x_grouped_slots_supported(GgmlType::MXFP4));
     for layout in MOE_GROUPED_GENERIC_LAYOUTS {
         let dtype = layout.dtype;
         assert!(moe_down_f32x_grouped_slots_supported(dtype));

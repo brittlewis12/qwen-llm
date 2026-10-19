@@ -11,7 +11,7 @@ use qwen_llm::muse_glimmer_runtime::MuseGlimmerRuntimeOptions;
 use qwen_llm::qwen4exp_runtime::Qwen4ExpDecodeOptions;
 
 /// Forward::prefill's bounded layer-major NativeF32 schedule.
-pub(crate) const V41_PREFILL_ROWS: usize = 32;
+pub(crate) const V41_PREFILL_ROWS: usize = qwen_llm::deepseek_v41::forward::PREFILL_CHUNK_ROWS;
 pub(crate) const V41_PREFILL_MODE: &str = "layer_major_batched+final_logits_copy";
 
 /// Enables HC up-mix for eligible Flash-Next singleton Q8 up projections.

@@ -372,6 +372,7 @@ impl Workspace {
         for (slot, tensor) in [&b[13], &b[11], &b[14], status].iter().enumerate() {
             enc.set_tensor(slot + 2, tensor);
         }
+        enc.set_bytes(6, &(c.topk as u32));
         dispatch(enc, c.intermediate * c.topk, 256);
         metal::encode_all_slots_down_native(
             ctx,
@@ -392,6 +393,7 @@ impl Workspace {
         for (slot, tensor) in [&b[15], shared, output, status].iter().enumerate() {
             enc.set_tensor(slot + 2, tensor);
         }
+        enc.set_bytes(6, &1u32);
         dispatch(enc, c.hidden, 256);
         Ok(())
     }
@@ -435,19 +437,23 @@ impl Workspace {
             c.clamp,
         )?;
         layer.shared[2].encode_rows(enc, &b[3], &b[4], n)?;
-        for row in 0..n {
-            self.encode_routed(
-                ctx,
-                enc,
-                c,
-                layer,
-                &self.constants[id][3],
-                &prefill::row(&scratch.hc.normalized, c.hidden, row),
-                &prefill::row(&b[0], c.experts, row),
-                &prefill::row(&b[4], c.hidden, row),
-                &prefill::row(&b[5], c.hidden, row),
-                &prefill::row(&b[6], 1, id * n + row),
-            )?;
+        if grouped_supported(c, layer) {
+            self.encode_grouped(ctx, enc, c, layer, id, scratch)?;
+        } else {
+            for row in 0..n {
+                self.encode_routed(
+                    ctx,
+                    enc,
+                    c,
+                    layer,
+                    &self.constants[id][3],
+                    &prefill::row(&scratch.hc.normalized, c.hidden, row),
+                    &prefill::row(&b[0], c.experts, row),
+                    &prefill::row(&b[4], c.hidden, row),
+                    &prefill::row(&b[5], c.hidden, row),
+                    &prefill::row(&b[6], 1, id * n + row),
+                )?;
+            }
         }
         metal::encode_mhc4_post_rows(
             ctx,
@@ -461,6 +467,107 @@ impl Workspace {
             output,
         )
     }
+
+    fn encode_grouped(
+        &self,
+        ctx: &MetalContext,
+        enc: &KernelEncoder,
+        c: &Config,
+        layer: &Layer<'_>,
+        id: usize,
+        scratch: &Rows,
+    ) -> std::result::Result<(), metal::MetalError> {
+        let n = scratch.hc.rows;
+        let b = &scratch.buffers;
+        let status = b[6].view_subrange((id * n) as u64, vec![n as u64]);
+        let counts = b[10].view_subrange(0, vec![c.experts as u64]);
+        enc.set_pipeline(&ctx.pipeline("kernel_deepseek_v41_route")?);
+        enc.set_bytes(
+            0,
+            &RouteArgs {
+                experts: c.experts as u32,
+                topk: c.topk as u32,
+                temperature: c.gate_temperature,
+                scale: c.route_scale,
+            },
+        );
+        for (slot, tensor) in [&b[0], &self.constants[id][3], &b[7], &b[8], &b[9], &status]
+            .iter()
+            .enumerate()
+        {
+            enc.set_tensor(slot + 1, tensor);
+        }
+        dispatch(enc, n, 1);
+        metal::encode_moe_route_bucket_slots_f32(
+            ctx, enc, &b[8], &counts, &b[11], c.experts, n, c.topk,
+        )?;
+        metal::encode_moe_swiglu_clamped_f32x_grouped_slots(
+            ctx,
+            enc,
+            layer.banks[0],
+            layer.banks[1],
+            &scratch.hc.normalized,
+            &counts,
+            &b[11],
+            &b[12],
+            c.hidden,
+            c.intermediate,
+            c.experts,
+            c.topk,
+            n,
+            c.clamp,
+        )?;
+        enc.set_pipeline(&ctx.pipeline("kernel_deepseek_v41_weight")?);
+        enc.set_bytes(0, &((c.intermediate * c.topk * n) as u32));
+        enc.set_bytes(1, &(c.intermediate as u32));
+        for (slot, tensor) in [&b[12], &b[9], &b[13], &status].iter().enumerate() {
+            enc.set_tensor(slot + 2, tensor);
+        }
+        enc.set_bytes(6, &(c.topk as u32));
+        dispatch(enc, c.intermediate * c.topk * n, 256);
+        metal::encode_moe_down_f32x_grouped_slots(
+            ctx,
+            enc,
+            layer.banks[2],
+            &b[13],
+            &counts,
+            &b[11],
+            &b[14],
+            c.intermediate,
+            c.hidden,
+            c.experts,
+            n,
+        )?;
+        enc.set_pipeline(&ctx.pipeline("kernel_deepseek_v41_sum")?);
+        enc.set_bytes(0, &(c.hidden as u32));
+        enc.set_bytes(1, &(c.topk as u32));
+        for (slot, tensor) in [&b[14], &b[4], &b[5], &status].iter().enumerate() {
+            enc.set_tensor(slot + 2, tensor);
+        }
+        enc.set_bytes(6, &(n as u32));
+        dispatch(enc, c.hidden * n, 256);
+        Ok(())
+    }
+}
+
+fn grouped_supported(c: &Config, layer: &Layer<'_>) -> bool {
+    #[cfg(test)]
+    if prefill::ROWWISE_LINEAR_ROWS.with(|flag| flag.get()) {
+        return false;
+    }
+    layer.banks[0].dtype == layer.banks[1].dtype
+        && metal::moe_swiglu_clamped_f32x_grouped_slots_supported(layer.banks[0].dtype)
+        && metal::moe_down_f32x_grouped_slots_supported(layer.banks[2].dtype)
+        && [
+            (c.hidden, layer.banks[0].dtype),
+            (c.intermediate, layer.banks[2].dtype),
+        ]
+        .iter()
+        .all(|&(k, dtype)| {
+            dtype
+                .storage_layout()
+                .is_some_and(|(block, _)| (k as u64).is_multiple_of(block.max(32)))
+        })
 }
 
 pub(super) struct Rows {
@@ -479,6 +586,14 @@ impl Rows {
             c.hidden,
             c.hidden,
             layers,
+            c.experts,
+            c.topk,
+            c.topk,
+            c.experts,
+            c.experts,
+            c.intermediate * c.topk,
+            c.intermediate * c.topk,
+            c.hidden * c.topk,
         ]);
         widths
     }
@@ -492,6 +607,14 @@ impl Rows {
             c.hidden,
             c.hidden,
             layers,
+            c.experts,
+            c.topk,
+            c.topk,
+            c.experts,
+            c.experts,
+            c.intermediate * c.topk,
+            c.intermediate * c.topk,
+            c.hidden * c.topk,
         ]
         .into_iter()
         .enumerate()
@@ -500,7 +623,11 @@ impl Rows {
                 ctx,
                 width,
                 rows,
-                if i == 6 { GgmlType::I32 } else { GgmlType::F32 },
+                if matches!(i, 6 | 8 | 10 | 11) {
+                    GgmlType::I32
+                } else {
+                    GgmlType::F32
+                },
             )
         })
         .collect::<Result<Vec<_>>>()?;

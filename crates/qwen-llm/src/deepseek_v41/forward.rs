@@ -5,6 +5,7 @@ mod attention_gpu;
 mod bind;
 mod engram_gpu;
 mod prefill;
+pub use prefill::DEFAULT_CHUNK_ROWS as PREFILL_CHUNK_ROWS;
 mod snapshot;
 pub use snapshot::Snapshot;
 pub mod error;

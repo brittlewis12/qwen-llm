@@ -7,7 +7,7 @@ impl Settings {
         prompt: &str,
         boundaries: Option<super::super::http::PromptBoundaries>,
         sink: &mut dyn GenerationSink,
-        mut admit: impl FnMut(usize, u64) -> std::result::Result<(), ServeError>,
+        mut admit: impl FnMut(usize, u64) -> std::result::Result<(), StateError>,
         new_state: impl FnOnce(usize) -> std::result::Result<S, ServeError>,
         reuse: &mut impl reuse::Reuse<S>,
         mut prefill: impl FnMut(
@@ -31,13 +31,11 @@ impl Settings {
         )?;
         let mut checkpoint_cuts = Vec::new();
         if let Some(boundaries) = boundaries {
-            for offset in [
-                boundaries.shared_prefix_end,
-                boundaries.generation_header_start,
-            ]
-            .into_iter()
-            .flatten()
-            {
+            for (name, offset) in [
+                ("shared_prefix", boundaries.shared_prefix_end),
+                ("generation_header", boundaries.generation_header_start),
+            ] {
+                let Some(offset) = offset else { continue };
                 let prefix = prompt.get(..offset).and_then(|prefix| {
                     self.tokenizer
                         .encode(prefix, false)
@@ -48,6 +46,11 @@ impl Settings {
                     !prefix.is_empty() && prefix.len() < ids.len() && ids.starts_with(prefix)
                 }) {
                     checkpoint_cuts.push(prefix.len());
+                } else {
+                    tracing::warn!(
+                        target: "qwen_diag",
+                        "serve: deepseek_v41 {name} boundary at byte {offset} is not a token prefix of the prompt; not split there"
+                    );
                 }
             }
         }
@@ -98,7 +101,7 @@ impl Settings {
             }
         };
         check(sink)?;
-        super::super::output_memory::admit_growth(reserve, 0, (self.headroom)())?;
+        admit_output(reuse, reserve, self.headroom)?;
         let restore_start = now();
         let restored = reuse.take(&ids, required)?;
         let restore_ms = (now() - restore_start).as_secs_f64() * 1e3;
@@ -110,7 +113,25 @@ impl Settings {
                 restored.source,
             )
         } else {
-            admit(required, reserve)?;
+            super::super::memory_relief::retry(
+                "deepseek_v41",
+                admit(required, reserve),
+                |result| {
+                    result
+                        .as_ref()
+                        .err()?
+                        .memory_admission()
+                        .map(|denied| (denied.reason(), u64::MAX))
+                },
+                |bytes| reuse.evict_for(bytes),
+                || admit(required, reserve),
+            )
+            .map_err(|error| match error.memory_admission() {
+                Some(denied) => {
+                    super::super::transport_memory::memory_refusal("V4.1 request", denied)
+                }
+                None => ServeError::server_error(format!("V4.1 request: {error}")),
+            })?;
             let state = new_state(required).map_err(|error| {
                 if cancel.load(Ordering::Acquire)
                     || crate::shutdown::cancellation_flag().load(Ordering::Acquire)
@@ -132,7 +153,7 @@ impl Settings {
         let mut prefill_chunks = 0;
         while position < ids.len() {
             check(sink)?;
-            super::super::output_memory::admit_growth(reserve, 0, (self.headroom)())?;
+            admit_output(reuse, reserve, self.headroom)?;
             let endpoint = (position + crate::family_options::V41_PREFILL_ROWS)
                 .min(
                     checkpoint_cuts
@@ -169,10 +190,9 @@ impl Settings {
             let mut budgeted = BudgetedSink {
                 sink,
                 cancel,
-                reserve,
+                admit: || admit_output(reuse, reserve, self.headroom),
                 ceiling,
                 emitted: 0,
-                headroom: self.headroom,
             };
             let result = super::super::decode_loop::decode_serial(
                 super::super::decode_loop::DecodeRequest {
@@ -235,6 +255,28 @@ impl Settings {
     }
 }
 
+pub(super) fn admit_output<S>(
+    reuse: &mut impl reuse::Reuse<S>,
+    reserve: u64,
+    headroom: impl Fn() -> Option<u64>,
+) -> Result<(), ServeError> {
+    let admit = || super::super::output_memory::admit_growth(reserve, 0, headroom());
+    super::super::memory_relief::retry(
+        "deepseek_v41",
+        admit(),
+        |result| {
+            let error = result.as_ref().err()?;
+            // Output admission is CPU-only, so its pressure is process-only.
+            (error.status == 503 && error.code == Some("memory_admission_denied")).then_some((
+                qwen_llm::metal::MetalMemoryAdmissionReason::ProcessInsufficient,
+                u64::MAX,
+            ))
+        },
+        |bytes| reuse.evict_for(bytes),
+        admit,
+    )
+}
+
 fn cancelled(cancel: &AtomicBool) -> bool {
     cancel.load(Ordering::Acquire) || crate::shutdown::cancellation_flag().load(Ordering::Acquire)
 }
@@ -243,16 +285,15 @@ fn interrupted() -> io::Error {
     io::Error::new(io::ErrorKind::Interrupted, "V4.1 request cancelled")
 }
 
-struct BudgetedSink<'a> {
+struct BudgetedSink<'a, A> {
     sink: &'a mut dyn GenerationSink,
     cancel: &'a AtomicBool,
-    reserve: u64,
+    admit: A,
     ceiling: usize,
     emitted: usize,
-    headroom: Headroom,
 }
 
-impl GenerationSink for BudgetedSink<'_> {
+impl<A: FnMut() -> Result<(), ServeError>> GenerationSink for BudgetedSink<'_, A> {
     fn piece(&mut self, bytes: &[u8]) -> io::Result<()> {
         use super::super::output_memory;
         if cancelled(self.cancel) {
@@ -265,8 +306,7 @@ impl GenerationSink for BudgetedSink<'_> {
         }
         // This adapter retains no output buffer; emitted bytes are not credit
         // against resident ownership (the transport admits its own buffers).
-        output_memory::admit_growth(self.reserve, 0, (self.headroom)())
-            .map_err(output_memory::refusal_error)?;
+        (self.admit)().map_err(output_memory::refusal_error)?;
         self.sink.piece(bytes)?;
         self.emitted += bytes.len();
         Ok(())

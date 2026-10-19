@@ -6,7 +6,7 @@ use super::items::{ServeError, ServeRequest};
 use super::output_partition::GenerationEnd;
 use super::request_profile::{OutputLimits, RequestProfile, sampling_with_defaults};
 use anyhow::{Context, Result, ensure};
-use qwen_llm::deepseek_v41::forward::{Forward, RequestMemoryEstimate};
+use qwen_llm::deepseek_v41::forward::{Forward, RequestMemoryEstimate, StateError};
 use qwen_llm::metal::{MetalContext, MetalMemorySignals};
 use qwen_llm::sampling::{Sampler, SamplingConfig};
 use std::io;
@@ -251,9 +251,9 @@ impl Backend<'_> {
                 let estimate = self
                     .forward
                     .estimate_request_memory_with_gpu_step(positions)
-                    .map_err(|e| ServeError::server_error(format!("V4.1 request estimate: {e}")))?;
+                    .map_err(|e| StateError::Invalid(format!("V4.1 request estimate: {e}")))?;
                 admit_request_memory(estimate, reserve, self.ctx.memory_signals())
-                    .map_err(|e| super::transport_memory::memory_refusal("V4.1 request", &e))
+                    .map_err(StateError::MemoryAdmissionDenied)
             },
             |capacity| {
                 self.forward
@@ -263,7 +263,7 @@ impl Backend<'_> {
             &mut reuse::Session {
                 forward: &self.forward,
                 store: &mut self.reuse,
-                headroom: self.settings.headroom,
+                ctx: self.ctx,
             },
             |state, tokens, cancel, with_logits| {
                 memory_io::observe_chunk(

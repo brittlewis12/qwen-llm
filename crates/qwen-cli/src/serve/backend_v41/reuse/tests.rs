@@ -5,6 +5,14 @@ use std::cell::Cell;
 use std::rc::Rc;
 use std::sync::Arc;
 
+fn capture_signals(process_limit_remaining_bytes: Option<u64>) -> MetalMemorySignals {
+    MetalMemorySignals {
+        recommended_max_bytes: u64::MAX,
+        current_allocated_bytes: 0,
+        process_limit_remaining_bytes,
+    }
+}
+
 fn denied(reason: Reason) -> StateError {
     StateError::MemoryAdmissionDenied(
         MemoryAdmissionDenied::new(
@@ -303,7 +311,7 @@ fn full_snapshot_payload_key_and_logits_must_fit_before_capture() {
             &[1, 2, 3],
             8,
             0,
-            || Some(0),
+            || capture_signals(Some(0)),
             || {
                 measures.set(measures.get() + 1);
                 Ok(64)
@@ -344,8 +352,7 @@ fn full_snapshot_payload_key_and_logits_must_fit_before_capture() {
 
 #[test]
 fn capture_admission_checks_full_entry_plus_reserve_and_overflow() {
-    // 64 payload + 12 key + 8 logits + forward's 4096 bookkeeping allowance.
-    let entry_peak = 64 + 12 + 8 + 4096;
+    let entry_peak = 64 + 12 + 8 + crate::serve::SNAPSHOT_CAPTURE_HEADROOM_BYTES;
     for (reserve, headroom, expected) in [
         (0, Some(entry_peak), true),
         (100, Some(entry_peak), false),
@@ -357,6 +364,7 @@ fn capture_admission_checks_full_entry_plus_reserve_and_overflow() {
     ] {
         let mut cache = SnapshotCache::new(1 << 20, Default::default());
         assert!(cache.insert_strict(vec![9], 3u8, 5));
+        let _held = cache.best_prefix(&[9, 10]).unwrap().1;
         let captures = Cell::new(0);
         operations::capture_checkpoint(
             &mut cache,
@@ -365,7 +373,7 @@ fn capture_admission_checks_full_entry_plus_reserve_and_overflow() {
             reserve,
             || {
                 assert_ne!(reserve, u64::MAX, "overflow precedes telemetry");
-                headroom
+                capture_signals(headroom)
             },
             || Ok(64),
             |_| {
@@ -380,12 +388,108 @@ fn capture_admission_checks_full_entry_plus_reserve_and_overflow() {
 }
 
 #[test]
-fn optional_capture_denial_preserves_request_cuts_and_prior_checkpoint() {
+fn capture_process_pressure_evicts_unpinned_payload_then_rechecks_once() {
+    let required = 84 + 100 + crate::serve::SNAPSHOT_CAPTURE_HEADROOM_BYTES;
+    for held in [false, true] {
+        for relieved in [false, true] {
+            let mut cache = SnapshotCache::new(1024, Default::default());
+            let old = Arc::new(3u8);
+            let weak = Arc::downgrade(&old);
+            assert!(cache.insert_shared_strict(vec![9], old.clone(), 20));
+            let _held = held.then_some(old);
+            let observations = Cell::new(0);
+            let captures = Cell::new(0);
+            operations::capture_checkpoint(
+                &mut cache,
+                &[1, 2, 3],
+                8,
+                100,
+                || {
+                    observations.set(observations.get() + 1);
+                    capture_signals(Some(if relieved && weak.upgrade().is_none() {
+                        required
+                    } else {
+                        required - 1
+                    }))
+                },
+                || Ok(64),
+                |_| {
+                    assert!(weak.upgrade().is_none(), "payload released before capture");
+                    assert_eq!(observations.get(), 2, "admission rechecked before capture");
+                    captures.set(captures.get() + 1);
+                    Ok(7)
+                },
+            );
+            let captured = !held && relieved;
+            assert_eq!(observations.get(), if held { 1 } else { 2 });
+            assert_eq!(captures.get(), usize::from(captured));
+            assert_eq!(weak.upgrade().is_none(), !held);
+            assert_eq!(cache.len(), usize::from(held || captured));
+            assert_eq!(cache.entry_for(&[1, 2, 3]).is_some(), captured);
+        }
+    }
+}
+
+#[test]
+fn capture_metal_telemetry_and_overflow_declines_do_not_evict_or_capture() {
+    let required = 84 + crate::serve::SNAPSHOT_CAPTURE_HEADROOM_BYTES;
+    let good = capture_signals(Some(0));
+    for (reserve, signals) in [
+        (
+            0,
+            MetalMemorySignals {
+                recommended_max_bytes: required - 1,
+                ..good
+            },
+        ),
+        (
+            0,
+            MetalMemorySignals {
+                recommended_max_bytes: 0,
+                ..good
+            },
+        ),
+        (
+            0,
+            MetalMemorySignals {
+                recommended_max_bytes: 1,
+                current_allocated_bytes: 2,
+                ..good
+            },
+        ),
+        (0, capture_signals(None)),
+        (u64::MAX - 84, good),
+        (u64::MAX, good),
+    ] {
+        let mut cache = SnapshotCache::new(1024, Default::default());
+        assert!(cache.insert_strict(vec![9], 3u8, 5));
+        let observations = Cell::new(0);
+        operations::capture_checkpoint(
+            &mut cache,
+            &[1, 2, 3],
+            8,
+            reserve,
+            || {
+                observations.set(observations.get() + 1);
+                signals
+            },
+            || Ok(64),
+            |_| panic!("declined capture must not allocate"),
+        );
+        assert_eq!(observations.get(), usize::from(reserve != u64::MAX));
+        assert_eq!(cache.indexed_bytes(), 5);
+        assert!(cache.entry_for(&[9]).is_some());
+    }
+}
+
+#[test]
+fn optional_capture_decline_preserves_request_schedule_and_live_state() {
     struct Fixture<'a> {
         cache: SnapshotCache<u8>,
         reserve: &'a Cell<u64>,
         cuts: Vec<usize>,
         live: Option<Live<usize>>,
+        process_pressure: bool,
     }
     impl Reuse<usize> for Fixture<'_> {
         fn take(&mut self, _: &[u32], _: usize) -> Result<Option<Restored<usize>>, ServeError> {
@@ -395,10 +499,10 @@ fn optional_capture_denial_preserves_request_cuts_and_prior_checkpoint() {
             assert_eq!(*state, ids.len());
             assert_eq!(reserve, self.reserve.get());
             let logits_bytes = (logits.len() * size_of::<f32>()) as u64;
-            let snapshot_peak = 64 + ids.len() as u64 * 4 + logits_bytes + 4096;
+            let snapshot_peak = 64 + ids.len() as u64 * 4 + logits_bytes;
             assert!(
                 snapshot_peak <= reserve,
-                "snapshot alone fits process headroom"
+                "snapshot alone fits available headroom"
             );
             self.cuts.push(*state);
             operations::capture_checkpoint(
@@ -406,9 +510,20 @@ fn optional_capture_denial_preserves_request_cuts_and_prior_checkpoint() {
                 ids,
                 logits_bytes,
                 reserve,
-                || Some(reserve),
+                || {
+                    let available = reserve + crate::serve::SNAPSHOT_CAPTURE_HEADROOM_BYTES;
+                    if self.process_pressure {
+                        capture_signals(Some(available))
+                    } else {
+                        MetalMemorySignals {
+                            recommended_max_bytes: available,
+                            current_allocated_bytes: 0,
+                            process_limit_remaining_bytes: Some(0),
+                        }
+                    }
+                },
                 || Ok(64),
-                |_| panic!("optional snapshot must not consume caller reserve"),
+                |_| panic!("optional snapshot must leave shared headroom plus caller reserve"),
             );
         }
         fn commit(&mut self, live: Live<usize>) {
@@ -443,19 +558,23 @@ fn optional_capture_denial_preserves_request_cuts_and_prior_checkpoint() {
             "model":"test", "input":"abc", "max_output_tokens":1,
         }))
         .unwrap();
-    for boundaries in [
+    for (boundaries, process_pressure) in [
         Some(super::super::super::http::PromptBoundaries {
             shared_prefix_end: Some(1),
             generation_header_start: Some(2),
         }),
         None,
-    ] {
+    ]
+    .into_iter()
+    .flat_map(|boundaries| [false, true].map(|pressure| (boundaries, pressure)))
+    {
         let reserve = Cell::new(0);
         let mut fixture = Fixture {
             cache: SnapshotCache::new(1 << 20, Default::default()),
             reserve: &reserve,
             cuts: vec![],
             live: None,
+            process_pressure,
         };
         assert!(fixture.cache.insert_strict(vec![9], 3, 5));
         let mut chunks = vec![];
@@ -503,7 +622,9 @@ fn optional_capture_denial_preserves_request_cuts_and_prior_checkpoint() {
         );
         assert_eq!(outcome.usage.output_tokens, 1);
         assert_eq!(fixture.live.unwrap().tokens, [97, 98, 99]);
-        assert_eq!(fixture.cache.len(), 1);
-        assert_eq!(*fixture.cache.best_prefix(&[9, 10]).unwrap().1, 3);
+        assert_eq!(fixture.cache.len(), usize::from(!process_pressure));
+        if !process_pressure {
+            assert_eq!(*fixture.cache.best_prefix(&[9, 10]).unwrap().1, 3);
+        }
     }
 }

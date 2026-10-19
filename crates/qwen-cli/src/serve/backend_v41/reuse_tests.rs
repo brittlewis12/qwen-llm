@@ -167,6 +167,10 @@ impl Default for Recorded {
 }
 
 impl reuse::Reuse<Vec<u32>> for Recorded {
+    fn evict_for(&mut self, bytes: u64) -> qwen_llm::snapshot_policy::Evicted {
+        self.cache.evict_for(bytes)
+    }
+
     fn take(
         &mut self,
         ids: &[u32],
@@ -470,6 +474,300 @@ impl GenerationSink for BatchSink<'_> {
     }
     fn piece(&mut self, _: &[u8]) -> io::Result<()> {
         Ok(())
+    }
+}
+
+#[test]
+fn request_admission_retries_only_after_process_cache_relief() {
+    use qwen_llm::metal::{MemoryAdmissionDenied, MetalMemoryAdmissionReason as Reason};
+    use std::{cell::Cell, sync::Arc};
+
+    let settings = batch_settings();
+    let request = settings
+        .profile()
+        .parse(&json!({"model":"fixture", "input":"x"}))
+        .unwrap();
+    for reason in [
+        Reason::ProcessInsufficient,
+        Reason::WorkingSetInsufficient,
+        Reason::BothInsufficient,
+        Reason::ProcessSignalUnavailable,
+        Reason::InvalidWorkingSetSignal,
+        Reason::RequiredBytesOverflow,
+    ] {
+        for (cached, held) in [(false, false), (true, false), (true, true)] {
+            for recover in [false, true] {
+                let mut recorded = Recorded::default();
+                let old = Arc::new(vec![9]);
+                let weak = Arc::downgrade(&old);
+                if cached {
+                    assert!(recorded.cache.insert_shared_strict(vec![9], old.clone(), 8));
+                }
+                let _held = held.then_some(old);
+                let attempts = Cell::new(0);
+                let creates = Cell::new(0);
+                let ticks = Cell::new(0);
+                let relief = cached && !held && reason == Reason::ProcessInsufficient;
+                let result = settings.execute(
+                    &request,
+                    "x",
+                    None,
+                    &mut BatchSink {
+                        ticks: &ticks,
+                        cancel: Default::default(),
+                    },
+                    |_, _| {
+                        attempts.set(attempts.get() + 1);
+                        if attempts.get() == 2 {
+                            assert!(
+                                weak.upgrade().is_none(),
+                                "retry must follow payload release"
+                            );
+                            if recover {
+                                return Ok(());
+                            }
+                        }
+                        Err(StateError::MemoryAdmissionDenied(
+                            MemoryAdmissionDenied::new(
+                                reason,
+                                Some(4096),
+                                MetalMemorySignals {
+                                    recommended_max_bytes: 1024,
+                                    current_allocated_bytes: 0,
+                                    process_limit_remaining_bytes: Some(1024),
+                                },
+                                Some(1024),
+                            )
+                            .unwrap(),
+                        ))
+                    },
+                    |_| {
+                        assert!(relief && recover);
+                        assert_eq!(attempts.get(), 2);
+                        creates.set(creates.get() + 1);
+                        Ok(vec![])
+                    },
+                    &mut recorded,
+                    |state, tokens, _, _| {
+                        state.extend_from_slice(tokens);
+                        Ok(eos_logits())
+                    },
+                    |_, _, _| panic!("EOS must not be consumed"),
+                    || Duration::ZERO,
+                );
+                assert_eq!(attempts.get(), if relief { 2 } else { 1 });
+                assert_eq!(creates.get(), usize::from(relief && recover));
+                assert_eq!(recorded.cache.entry_for(&[9]).is_some(), cached && !relief);
+                if relief && recover {
+                    assert_eq!(result.unwrap().usage.output_tokens, 1);
+                    assert_eq!(recorded.live.unwrap().tokens, [b'x' as u32]);
+                } else {
+                    let Err(BackendFailure::Serve(error)) = result else {
+                        panic!("expected original typed refusal");
+                    };
+                    let (status, _, code) = super::super::transport_memory::refusal_kind(reason);
+                    assert_eq!((error.status, error.code), (status, Some(code)));
+                    assert!(recorded.live.is_none());
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn output_admission_releases_snapshots_before_rechecking_process_headroom() {
+    use std::{cell::Cell, sync::Arc};
+    for held in [false, true] {
+        for recover in [false, true] {
+            let mut recorded = Recorded::default();
+            let old = Arc::new(vec![9]);
+            let weak = Arc::downgrade(&old);
+            assert!(recorded.cache.insert_shared_strict(vec![9], old.clone(), 8));
+            let _held = held.then_some(old);
+            let observations = Cell::new(0);
+            let result = execution::admit_output(&mut recorded, 100, || {
+                observations.set(observations.get() + 1);
+                Some(if recover && weak.upgrade().is_none() {
+                    100
+                } else {
+                    99
+                })
+            });
+            assert_eq!(observations.get(), if held { 1 } else { 2 });
+            assert_eq!(result.is_ok(), !held && recover);
+            assert_eq!(recorded.cache.len(), usize::from(held));
+            if let Err(error) = result {
+                assert_eq!(
+                    (error.status, error.code),
+                    (503, Some("memory_admission_denied"))
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn decode_output_admission_retries_same_piece_and_preserves_guards() {
+    use super::super::output_memory::refusal_in;
+    use std::{
+        cell::{Cell, RefCell},
+        sync::{Arc, Weak},
+    };
+
+    thread_local! {
+        static PRESSURE: Cell<bool> = const { Cell::new(false) };
+        static RECOVER: Cell<bool> = const { Cell::new(false) };
+        static OLD: RefCell<Weak<Vec<u32>>> = const { RefCell::new(Weak::new()) };
+        static OBSERVATIONS: Cell<usize> = const { Cell::new(0) };
+    }
+    #[derive(Clone, Copy)]
+    enum Case {
+        Recover,
+        Refuse,
+        Cancel,
+        Ceiling,
+    }
+    struct Sink {
+        pieces: Vec<Vec<u8>>,
+        cancel: Arc<AtomicBool>,
+    }
+    impl GenerationSink for Sink {
+        fn cancellation_flag(&self) -> Option<Arc<AtomicBool>> {
+            Some(self.cancel.clone())
+        }
+        fn tick(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+        fn piece(&mut self, bytes: &[u8]) -> io::Result<()> {
+            self.pieces.push(bytes.to_vec());
+            Ok(())
+        }
+    }
+    for case in [Case::Recover, Case::Refuse, Case::Cancel, Case::Ceiling] {
+        PRESSURE.set(false);
+        RECOVER.set(matches!(case, Case::Recover));
+        OBSERVATIONS.set(0);
+        let mut recorded = Recorded::default();
+        let old = Arc::new(vec![9]);
+        let weak = Arc::downgrade(&old);
+        OLD.with(|slot| *slot.borrow_mut() = weak.clone());
+        assert!(recorded.cache.insert_shared_strict(vec![9], old, 8));
+        let tokenizer = tokenizer_fixture::tokenizer(Some("oversized"));
+        let vocab = tokenizer.n_vocab() as usize;
+        let logits_for = |token: u32| {
+            let mut logits = vec![0.; vocab];
+            logits[token as usize] = 100.;
+            logits
+        };
+        let mut settings = Settings::new(
+            tokenizer,
+            256,
+            2,
+            SamplingConfig::default(),
+            tokenizer_fixture::EOS,
+            "fixture".into(),
+        )
+        .unwrap();
+        settings.headroom = || {
+            if !PRESSURE.get() {
+                return Some(u64::MAX);
+            }
+            OBSERVATIONS.set(OBSERVATIONS.get() + 1);
+            Some(
+                if RECOVER.get() && OLD.with(|old| old.borrow().upgrade().is_none()) {
+                    u64::MAX
+                } else {
+                    1
+                },
+            )
+        };
+        if matches!(case, Case::Ceiling) {
+            settings.limits.max_piece_bytes = 1;
+        }
+        let request = settings
+            .profile()
+            .parse(&json!({
+                "model":"fixture", "input":"p", "max_output_tokens":2, "temperature":0,
+            }))
+            .unwrap();
+        let cancel = Arc::new(AtomicBool::new(false));
+        let mut sink = Sink {
+            pieces: vec![],
+            cancel: cancel.clone(),
+        };
+        let admissions = Cell::new(0);
+        let steps = Cell::new(0);
+        let result = settings.execute(
+            &request,
+            "p",
+            None,
+            &mut sink,
+            |_, _| {
+                admissions.set(admissions.get() + 1);
+                Ok(())
+            },
+            |_| Ok(vec![]),
+            &mut recorded,
+            |state, tokens, _, _| {
+                assert!(!PRESSURE.get());
+                state.extend_from_slice(tokens);
+                Ok(logits_for(b'a' as u32))
+            },
+            |state, token, _| {
+                assert!(weak.upgrade().is_some(), "no relief before decode pressure");
+                assert_eq!(token, b'a' as u32);
+                steps.set(steps.get() + 1);
+                state.push(token);
+                PRESSURE.set(true);
+                cancel.store(matches!(case, Case::Cancel), Ordering::Release);
+                Ok(logits_for(if matches!(case, Case::Ceiling) {
+                    tokenizer_fixture::EMISSION
+                } else {
+                    b'b' as u32
+                }))
+            },
+            || Duration::ZERO,
+        );
+        assert_eq!(admissions.get(), 1);
+        assert_eq!(
+            steps.get(),
+            1,
+            "admission retry must not replay the forward"
+        );
+        let guard = matches!(case, Case::Cancel | Case::Ceiling);
+        assert_eq!(OBSERVATIONS.get(), if guard { 0 } else { 2 });
+        assert_eq!(weak.upgrade().is_some(), guard);
+        assert_eq!(recorded.cache.entry_for(&[9]).is_some(), guard);
+        if matches!(case, Case::Recover) {
+            assert_eq!(result.unwrap().usage.output_tokens, 2);
+            assert_eq!(sink.pieces, [b"a".to_vec(), b"b".to_vec()]);
+            assert_eq!(recorded.live.unwrap().tokens, [b'p' as u32, b'a' as u32]);
+        } else {
+            assert_eq!(
+                sink.pieces,
+                [b"a".to_vec()],
+                "failed piece must never reach transport"
+            );
+            assert!(recorded.live.is_none());
+            let Err(BackendFailure::Aborted(error)) = result else {
+                panic!("expected sink refusal")
+            };
+            if matches!(case, Case::Cancel) {
+                assert_eq!(error.kind(), io::ErrorKind::Interrupted);
+                assert!(refusal_in(&error).is_none());
+            } else {
+                let refusal = refusal_in(&error).expect("typed OutputRefusal must survive decode");
+                if matches!(case, Case::Refuse) {
+                    assert_eq!(
+                        (refusal.status, refusal.code),
+                        (503, Some("memory_admission_denied"))
+                    );
+                } else {
+                    assert_eq!(refusal.status, 500);
+                    assert!(refusal.message.contains("ceiling"));
+                }
+            }
+        }
     }
 }
 

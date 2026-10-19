@@ -460,7 +460,7 @@ impl GenerationBackend for Stub {
                         process_limit_remaining_bytes: remaining,
                     },
                 )
-                .map_err(|e| super::super::transport_memory::memory_refusal("V4.1 request", &e))
+                .map_err(StateError::MemoryAdmissionDenied)
             },
             |_| {
                 self.starts += 1;
@@ -648,7 +648,7 @@ fn v41_backend_tools_multiturn_non_generation_and_preflight_rejections() {
     assert!(wire.starts_with("HTTP/1.1 200") && wire.contains("test"));
     for body in [
         json!({"model":"test","input":"hi","max_output_tokens":16385}),
-        json!({"model":"test","input":"hi","x_qwen":{"prefix_reuse":true}}),
+        json!({"model":"test","input":"hi","x_qwen":{"history_thinking":"preserve"}}),
         json!({"model":"test","input":"hi","prompt_cache_key":"x"}),
     ] {
         let wire = exchange(&mut backend, post(&body));

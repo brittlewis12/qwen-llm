@@ -18,6 +18,9 @@ pub(super) struct Restored<S> {
 }
 
 pub(super) trait Reuse<S> {
+    fn evict_for(&mut self, _: u64) -> qwen_llm::snapshot_policy::Evicted {
+        Default::default()
+    }
     fn take(&mut self, ids: &[u32], required: usize) -> Result<Option<Restored<S>>, ServeError>;
     fn checkpoint(&mut self, state: &S, ids: &[u32], logits: &[f32], reserve: u64);
     fn commit(&mut self, live: Live<S>);
@@ -50,10 +53,14 @@ impl Store {
 pub(super) struct Session<'a, 'b> {
     pub forward: &'a Forward<'b>,
     pub store: &'a mut Store,
-    pub headroom: Headroom,
+    pub ctx: &'a MetalContext,
 }
 
 impl Reuse<State> for Session<'_, '_> {
+    fn evict_for(&mut self, bytes: u64) -> qwen_llm::snapshot_policy::Evicted {
+        self.store.cache.evict_for(bytes)
+    }
+
     fn take(
         &mut self,
         ids: &[u32],
@@ -117,7 +124,7 @@ impl Reuse<State> for Session<'_, '_> {
             ids,
             logits_bytes,
             reserve,
-            self.headroom,
+            || self.ctx.memory_signals(),
             || self.forward.snapshot_payload_bytes(state),
             |expected_bytes| {
                 let snapshot = self.forward.capture_snapshot(state)?;

@@ -52,9 +52,9 @@ fn only_message_fields(value: &serde_json::Value, scope: &str, fields: &[&str]) 
     let object = value
         .as_object()
         .with_context(|| format!("V4.1 {scope} must be an object"))?;
-    for key in object.keys() {
+    for (key, value) in object {
         ensure!(
-            fields.contains(&key.as_str()),
+            value.is_null() || fields.contains(&key.as_str()),
             "V4.1 {scope} field {key:?} is unsupported; --messages accepts conversation/render fields only, not generation, transport, or output controls"
         );
     }
@@ -71,10 +71,18 @@ fn messages_body(document: &str) -> Result<serde_json::Value> {
     only_message_fields(
         &body,
         "messages",
-        &["input", "messages", "instructions", "tools", "reasoning"],
+        &[
+            "input",
+            "messages",
+            "instructions",
+            "tools",
+            "reasoning",
+            "model",
+        ],
     )?;
     ensure!(
-        body.get("input").is_none() || body.get("messages").is_none(),
+        body.get("input").is_none_or(serde_json::Value::is_null)
+            || body.get("messages").is_none_or(serde_json::Value::is_null),
         "V4.1 messages cannot contain both input and messages"
     );
     if let Some(reasoning) = body.get("reasoning").filter(|value| !value.is_null()) {
@@ -89,9 +97,14 @@ fn messages_body(document: &str) -> Result<serde_json::Value> {
             )?;
         }
     }
-    if let Some(messages) = body.as_object_mut().and_then(|map| map.remove("messages")) {
+    if let Some(messages) = body
+        .as_object_mut()
+        .and_then(|map| map.remove("messages"))
+        .filter(|value| !value.is_null())
+    {
         body["input"] = messages;
     }
+    // Document model metadata never selects the artifact supplied by CLI --model.
     body["model"] = "v41".into();
     Ok(body)
 }
@@ -146,7 +159,7 @@ fn prepare_request_input(
     };
     if let Some(effort) = effort {
         ensure!(
-            body.get("reasoning").is_none(),
+            body.get("reasoning").is_none_or(serde_json::Value::is_null),
             "V4.1 --reasoning-effort conflicts with messages document reasoning; supply only one"
         );
         body["reasoning"] = serde_json::json!({"effort":effort});
@@ -303,6 +316,10 @@ mod tests {
         )
         .map(|(prompt, source)| {
             assert_eq!(source, PromptSource::Messages);
+            assert_eq!(
+                args.model.as_deref(),
+                Some(std::path::Path::new("model.gguf"))
+            );
             prompt
         })
     }
@@ -327,11 +344,64 @@ mod tests {
     }
 
     #[test]
+    fn v41_messages_model_metadata_never_replaces_cli_artifact() {
+        use serde_json::json;
+        let expected = prepare_document(json!({"input":"hello"}), &[]).unwrap();
+        for model in [json!("other-model.gguf"), serde_json::Value::Null] {
+            let document = json!({"input":"hello", "model":model});
+            let body = messages_body(&document.to_string()).unwrap();
+            assert_eq!(body["model"], "v41");
+            assert_eq!(prepare_document(document, &[]).unwrap(), expected);
+        }
+    }
+
+    #[test]
+    fn v41_messages_null_aliases_and_optional_fields_are_absent() {
+        use serde_json::json;
+        let history = json!([{"role":"user", "content":"hello"}]);
+        let expected = prepare_document(history.clone(), &[]).unwrap();
+        for document in [
+            json!({"input":"hello", "messages":null}),
+            json!({"input":null, "messages":history}),
+            json!({"input":"hello", "reasoning":null, "tools":null, "instructions":null}),
+            json!({"input":"hello", "reasoning":{"effort":null, "summary":null}}),
+        ] {
+            assert_eq!(prepare_document(document, &[]).unwrap(), expected);
+        }
+        for document in [
+            json!({}),
+            json!({"input":null}),
+            json!({"messages":null}),
+            json!({"input":null, "messages":null}),
+        ] {
+            let error = format!("{:#}", prepare_document(document, &[]).unwrap_err());
+            assert!(error.contains("input is required"), "{error}");
+        }
+        assert_eq!(
+            prepare_document(
+                json!({"input":"hello", "reasoning":null}),
+                &["--reasoning-effort", "high"]
+            )
+            .unwrap(),
+            prepare_document(json!({"input":"hello"}), &["--reasoning-effort", "high"]).unwrap()
+        );
+        assert!(
+            prepare_document(
+                json!({"input":"hello", "reasoning":{"effort":null}}),
+                &["--reasoning-effort", "high"],
+            )
+            .unwrap_err()
+            .to_string()
+            .contains("--reasoning-effort conflicts")
+        );
+    }
+
+    #[test]
     fn v41_messages_preserve_responses_history_tools_and_reasoning() {
         use serde_json::json;
         for alias in ["input", "messages"] {
             for effort in ["none", "low", "high", "xhigh", "max"] {
-                let document = json!({
+                let mut document = json!({
                     alias: [
                         {"role":"user", "content":[{"type":"input_text", "text":"question"}]},
                         {"type":"reasoning", "content":"plan"},
@@ -345,7 +415,12 @@ mod tests {
                         "parameters":{"type":"object", "properties":{"temperature":{"type":"number"}}}}],
                     "reasoning":{"effort":effort}
                 });
-                let prompt = prepare_document(document, &[]).unwrap();
+                let prompt = prepare_document(document.clone(), &[]).unwrap();
+                document["model"] = json!("other-model.gguf");
+                document["temperature"] = serde_json::Value::Null;
+                document["reasoning"]["summary"] = serde_json::Value::Null;
+                document["tools"][0]["unknown"] = serde_json::Value::Null;
+                assert_eq!(prepare_document(document, &[]).unwrap(), prompt);
                 for text in [
                     "be helpful",
                     "question",
@@ -364,8 +439,9 @@ mod tests {
     }
 
     #[test]
-    fn v41_messages_refuse_lost_controls_and_unknown_fields_even_when_null() {
+    fn v41_messages_refuse_nonnull_lost_controls_but_accept_null_fields() {
         use serde_json::json;
+        let expected = prepare_document(json!({"input":"hello"}), &[]).unwrap();
         for (key, value) in [
             ("temperature", json!(0.2)),
             ("temp", json!(0.2)),
@@ -378,6 +454,7 @@ mod tests {
             ("tokens", json!(12)),
             ("stream", json!(true)),
             ("store", json!(false)),
+            ("previous_response_id", json!("r")),
             ("truncation", json!("disabled")),
             ("parallel_tool_calls", json!(false)),
             ("response_format", json!({"type":"json_object"})),
@@ -394,33 +471,44 @@ mod tests {
             ("reasoning_effort", json!("high")),
             ("no_thinking", json!(false)),
             ("thinking", json!(true)),
-            ("model", json!("ignored-model")),
             ("meta", json!({"temperature":0.2})),
             ("unknown", json!(true)),
         ] {
-            for value in [value, serde_json::Value::Null] {
-                let document = json!({"input":"hello", key:value});
-                let error = format!("{:#}", prepare_document(document, &[]).unwrap_err());
-                assert!(
-                    error.contains(key) && error.contains("unsupported"),
-                    "{error}"
-                );
-            }
+            let document = json!({"input":"hello", key:value});
+            let error = format!("{:#}", prepare_document(document, &[]).unwrap_err());
+            assert!(
+                error.contains(key) && error.contains("unsupported"),
+                "{error}"
+            );
+            assert_eq!(
+                prepare_document(json!({"input":"hello", key:null}), &[]).unwrap(),
+                expected,
+                "{key}"
+            );
         }
     }
 
     #[test]
     fn v41_messages_refuse_nested_controls_without_restricting_schema_data() {
         use serde_json::json;
+        let expected =
+            prepare_document(json!({"input":"hello", "reasoning":{"effort":"high"}}), &[]).unwrap();
         for key in ["summary", "budget_tokens", "enabled", "unknown"] {
-            for value in [json!(true), serde_json::Value::Null] {
-                let document = json!({"input":"hello", "reasoning":{"effort":"high", key:value}});
-                let error = format!("{:#}", prepare_document(document, &[]).unwrap_err());
-                assert!(
-                    error.contains("reasoning") && error.contains(key),
-                    "{error}"
-                );
-            }
+            let document = json!({"input":"hello", "reasoning":{"effort":"high", key:true}});
+            let error = format!("{:#}", prepare_document(document, &[]).unwrap_err());
+            assert!(
+                error.contains("reasoning") && error.contains(key),
+                "{error}"
+            );
+            assert_eq!(
+                prepare_document(
+                    json!({"input":"hello", "reasoning":{"effort":"high", key:null}}),
+                    &[]
+                )
+                .unwrap(),
+                expected,
+                "{key}"
+            );
         }
         let document = json!({"input":"hello", "tools":[{"name":"lookup", "allowed":false}]});
         let error = format!("{:#}", prepare_document(document, &[]).unwrap_err());
@@ -428,24 +516,26 @@ mod tests {
             error.contains("tools[0]") && error.contains("allowed"),
             "{error}"
         );
+        assert_eq!(
+            prepare_document(json!({"input":"hello", "tools":[{"name":"lookup", "allowed":null,
+                "unknown":null, "type":null, "description":null, "parameters":null, "strict":null}]}), &[]).unwrap(),
+            prepare_document(json!({"input":"hello", "tools":[{"name":"lookup"}]}), &[]).unwrap()
+        );
+        assert!(prepare_document(json!({"input":"hello", "tools":[null]}), &[]).is_err());
+        assert!(prepare_document(json!({"input":"hello", "tools":[{"name":null}]}), &[]).is_err());
     }
 
     #[test]
     fn v41_messages_aliases_and_reasoning_sources_are_mutually_exclusive() {
         use serde_json::json;
-        for input in [json!("hello"), serde_json::Value::Null] {
+        for input in [json!("hello"), json!([])] {
             let error = format!(
                 "{:#}",
                 prepare_document(json!({"input":input, "messages":[]}), &[]).unwrap_err()
             );
             assert!(error.contains("both input and messages"), "{error}");
         }
-        for reasoning in [
-            json!({"effort":"low"}),
-            json!({"effort":"high"}),
-            json!({}),
-            serde_json::Value::Null,
-        ] {
+        for reasoning in [json!({"effort":"low"}), json!({"effort":"high"}), json!({})] {
             let error = prepare_document(
                 json!({"input":"hello", "reasoning":reasoning}),
                 &["--reasoning-effort", "high"],

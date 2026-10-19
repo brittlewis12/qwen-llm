@@ -549,10 +549,12 @@ pub(crate) fn run(args: LensRunArgs) -> Result<()> {
             );
         }
         ModelFamily::DeepSeek4 => bail!(
-            "qwen-lens run supports ordinary Qwen, Muse Glimmer, or Flash-Next; DeepSeek V4 has no lens runtime"
+            "qwen-lens run has no Lens runtime for {}",
+            family.record_label()
         ),
         ModelFamily::K2Horizon => bail!(
-            "qwen-lens run supports ordinary Qwen, Muse Glimmer, or Flash-Next; K2 Horizon is not supported by `qwen-lens run`; use its native `qwen-lens read-full --logit-lens` lane"
+            "qwen-lens run has no Lens runtime for {}; use its native `qwen-lens read-full --logit-lens` lane",
+            family.record_label()
         ),
         ModelFamily::Glm5Next => {
             return glm5_next::run_glm5_next(

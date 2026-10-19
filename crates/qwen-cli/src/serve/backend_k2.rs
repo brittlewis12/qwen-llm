@@ -210,10 +210,14 @@ impl GenerationBackend for K2Backend<'_, '_> {
             prompt,
             request.k2_add_special_tokens.unwrap_or(true),
             self.model.config().vocab_size,
-            "K2",
+            crate::family_profile::profile(qwen_llm::model_family::ModelFamily::K2Horizon).display,
         )?;
-        let required =
-            decode_loop::required_forwards("K2", tokens.len(), maximum, self.prepared.capacity)?;
+        let required = decode_loop::required_forwards(
+            crate::family_profile::profile(qwen_llm::model_family::ModelFamily::K2Horizon).display,
+            tokens.len(),
+            maximum,
+            self.prepared.capacity,
+        )?;
         let reserve = sink.transport_reserve_bytes();
         super::transport_memory::admit_resident_transport(
             reserve,

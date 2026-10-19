@@ -764,9 +764,19 @@ impl<'w, 'g> Glm5NextBackend<'w, 'g> {
         let vocab_size = self.prepared.artifact.config().vocab_size;
         let tokenizer = self.prepared.artifact.tokenizer();
         // The renderer writes [gMASK]<sop>; the glm4 tokenizer adds nothing.
-        let tokens = decode_loop::encode_checked(tokenizer, prompt, false, vocab_size, FAMILY)?;
-        let required =
-            decode_loop::required_forwards(FAMILY, tokens.len(), maximum, self.prepared.capacity)?;
+        let tokens = decode_loop::encode_checked(
+            tokenizer,
+            prompt,
+            false,
+            vocab_size,
+            crate::family_profile::profile(qwen_llm::model_family::ModelFamily::Glm5Next).display,
+        )?;
+        let required = decode_loop::required_forwards(
+            crate::family_profile::profile(qwen_llm::model_family::ModelFamily::Glm5Next).display,
+            tokens.len(),
+            maximum,
+            self.prepared.capacity,
+        )?;
         // A tool block's memory is admitted as it grows (the tools partition),
         // not reserved here at its rarely approached worst case.
         let reserve = sink.transport_reserve_bytes();

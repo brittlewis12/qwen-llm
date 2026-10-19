@@ -51,13 +51,13 @@ pub(crate) struct ServeArgs {
     #[arg(long = "max-tokens", value_parser = parse_positive_usize)]
     max_tokens: Option<usize>,
 
-    /// Fixed capacity for DS4/Muse/K2 within model context and device memory; Qwen is request-shaped.
+    /// Context limit for families with fixed serve capacity; request-shaped families set it per request.
     #[arg(long, value_parser = parse_positive_usize)]
     max_context_tokens: Option<usize>,
 
-    /// Qwen/Flash-Next/DS4/GLM-5.3-Flash RAM snapshot-cache MiB, or `auto`: min(25% of RAM,
+    /// RAM snapshot-cache MiB for families with snapshot warmth, or `auto`: min(25% of RAM,
     /// 50% of the Metal working set left after load), at least 1 GiB. Live-session families
-    /// (Muse, K2) keep no snapshots and accept only `auto` or 0.
+    /// keep no snapshots and accept only `auto` or 0.
     #[arg(long, value_name = "MIB|auto", default_value = "auto", value_parser = parse_snapshot_cache_mib)]
     snapshot_cache_mib: SnapshotCacheMib,
 
@@ -115,13 +115,12 @@ pub(crate) struct ServeArgs {
     #[arg(long, value_name = "PATH")]
     trace_sse: Option<PathBuf>,
 
-    /// Keep a family's no-copy weights wired for this long after the
+    /// Keep retained mapped GGUF weights wired for this long after the
     /// warm-up (or first request) and after each request, through ordinary
     /// keep-alive commands, so a request after a pause does not re-wire them
     /// (about 1 s for GLM-5.3-Flash). Suspended under host memory pressure;
-    /// 0 disables. GLM-5.3-Flash, K2 Horizon, DeepSeek V4, Muse Glimmer and
-    /// Qwen3.8-Flash-Next; Qwen serve loads Metal-allocated copies (always
-    /// wired) and refuses a nonzero value. Default:
+    /// 0 disables. Accepted when the model load retains mapped GGUF weight
+    /// buffers; copied storage is always wired and refuses a nonzero value. Default:
     /// QWEN_SERVE_IDLE_RESIDENCY_SECS, else 60.
     #[arg(long, value_name = "SECS")]
     idle_residency_secs: Option<u64>,
@@ -143,7 +142,7 @@ pub(crate) struct ServeArgs {
     lens_allowed_origin: Vec<crate::serve::lens_http::access::BrowserOrigin>,
 
     /// Whose conventions prompts follow where serve deliberately departs from
-    /// a release chat template (Qwen and DeepSeek V4). `house`: past turns
+    /// a release chat template for families that support upstream formatting. `house`: past turns
     /// render as they were generated whatever the current thinking mode, and
     /// reasoning history is kept. `upstream`: the release template's own
     /// rules. Requests may override with `x_qwen.template_style`.
@@ -574,6 +573,39 @@ mod tests {
         let invocation = normalize(&mut args);
         invocation.apply_option_overrides(&mut args);
         (args, invocation)
+    }
+
+    #[test]
+    fn serve_help_uses_profile_contract_terms() {
+        use crate::family_profile::{ServeCapacity, ServeWarmth, profile};
+        use qwen_llm::model_family::ModelFamily;
+
+        let mut command = Args::command();
+        let help = command
+            .find_subcommand_mut("serve")
+            .expect("serve subcommand")
+            .render_long_help()
+            .to_string();
+        assert!(help.contains("families with fixed serve capacity"));
+        assert!(help.contains("families with snapshot warmth"));
+        assert!(help.contains("mapped GGUF weight buffers"));
+        assert!(help.contains("families that support upstream formatting"));
+
+        let fixed = ModelFamily::ALL
+            .iter()
+            .filter(|family| profile(**family).serve_capacity != ServeCapacity::RequestShaped)
+            .count();
+        let snapshots = ModelFamily::ALL
+            .iter()
+            .filter(|family| profile(**family).serve_warmth != ServeWarmth::LiveSession)
+            .count();
+        let upstream = ModelFamily::ALL
+            .iter()
+            .filter(|family| profile(**family).upstream_template_style)
+            .count();
+        assert_eq!(fixed, 6);
+        assert_eq!(snapshots, 6);
+        assert_eq!(upstream, 4);
     }
 
     #[test]

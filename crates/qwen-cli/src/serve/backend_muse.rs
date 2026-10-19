@@ -277,11 +277,22 @@ impl GenerationBackend for MuseGlimmerBackend {
         let mut sampler = Sampler::new(sampling)
             .map_err(|error| ServeError::invalid_request(None, format!("sampling: {error}")))?;
         let tokenize_t0 = Instant::now();
-        let prompt_ids =
-            decode_loop::encode_checked(&self.tokenizer, prompt, false, self.vocab_size, "Muse")?;
+        let prompt_ids = decode_loop::encode_checked(
+            &self.tokenizer,
+            prompt,
+            false,
+            self.vocab_size,
+            crate::family_profile::profile(qwen_llm::model_family::ModelFamily::MuseGlimmer)
+                .display,
+        )?;
         let tokenize_ms = tokenize_t0.elapsed().as_secs_f64() * 1e3;
-        let required =
-            decode_loop::required_forwards("Muse", prompt_ids.len(), max_tokens, self.capacity)?;
+        let required = decode_loop::required_forwards(
+            crate::family_profile::profile(qwen_llm::model_family::ModelFamily::MuseGlimmer)
+                .display,
+            prompt_ids.len(),
+            max_tokens,
+            self.capacity,
+        )?;
         super::transport_memory::admit_resident_transport(
             sink.transport_reserve_bytes(),
             self.ctx.memory_signals().process_limit_remaining_bytes,

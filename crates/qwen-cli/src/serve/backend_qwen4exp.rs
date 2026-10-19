@@ -280,11 +280,16 @@ impl GenerationBackend for FlashNextBackend {
         ))
         .map_err(|error| ServeError::invalid_request(None, format!("sampling: {error}")))?;
         let tokenize_t0 = Instant::now();
-        let prompt_ids =
-            decode_loop::encode_checked(&self.tokenizer, prompt, false, self.vocab_size, FAMILY)?;
+        let prompt_ids = decode_loop::encode_checked(
+            &self.tokenizer,
+            prompt,
+            false,
+            self.vocab_size,
+            crate::family_profile::profile(qwen_llm::model_family::ModelFamily::Qwen4Exp).display,
+        )?;
         let tokenize_ms = tokenize_t0.elapsed().as_secs_f64() * 1e3;
         let required = decode_loop::required_forwards(
-            FAMILY,
+            crate::family_profile::profile(qwen_llm::model_family::ModelFamily::Qwen4Exp).display,
             prompt_ids.len(),
             max_tokens,
             self.forward_limit,

@@ -803,13 +803,13 @@ impl GenerationBackend for DeepSeekV4Backend {
             prompt,
             false,
             self.vocab_size,
-            "DeepSeek V4",
+            crate::family_profile::profile(qwen_llm::model_family::ModelFamily::DeepSeek4).display,
         )?;
         let tokenize_ms = tokenize_t0.elapsed().as_secs_f64() * 1e3;
         // Forward-budget admission (spec truncation:"disabled" semantics):
         // the startup budget is at most the promoted capacity.
         decode_loop::required_forwards(
-            "DeepSeek V4",
+            crate::family_profile::profile(qwen_llm::model_family::ModelFamily::DeepSeek4).display,
             prompt_ids.len(),
             max_tokens,
             self.session_capacity.forward_limit(),
@@ -1100,7 +1100,7 @@ impl DeepSeekV4Backend {
 
         tracing::info!(
             target: "qwen_diag",
-            "serve phases: tokenize_ms={tokenize_ms:.1} session_ms={session_ms:.1} restore_ms={restore_ms:.1} restore_source={restore_source} prefill_ms={prefill_ms:.1} prompt_capture_ms={capture_ms:.1} family=deepseek_v4",
+            "serve phases: family=deepseek_v4 tokenize_ms={tokenize_ms:.1} session_ms={session_ms:.1} restore_ms={restore_ms:.1} restore_source={restore_source} prefill_ms={prefill_ms:.1} prompt_capture_ms={capture_ms:.1}",
         );
         Ok(super::outcome::finish_generation(
             prompt_ids.len(),

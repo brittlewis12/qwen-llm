@@ -502,7 +502,6 @@ mod tests {
     #[test]
     fn v41_profile_is_ram_prefix_reuse_without_speculation() {
         let profile = family_profile::profile(ModelFamily::DeepSeekV41);
-        assert!(profile.serve_backend);
         assert_eq!(
             profile.serve_warmth,
             family_profile::ServeWarmth::SnapshotsRam

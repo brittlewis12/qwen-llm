@@ -322,10 +322,8 @@ pub(super) fn snapshot_capture_admission(
     Ok(())
 }
 
-/// Recognised is not served: a family is served when its profile declares a
-/// `GenerationBackend`.
 fn supports_serve_family(family: Option<ModelFamily>) -> bool {
-    family.is_some_and(|family| profile(family).serve_backend)
+    family.is_some()
 }
 
 /// Resolves the capacity contract declared by a family's profile.
@@ -340,7 +338,7 @@ fn resolve_serve_limits(
         ServeCapacity::RequestShaped => Ok(None),
         ServeCapacity::FixedContext => {
             let context_tokens = max_context_tokens.with_context(|| {
-                "DeepSeek V4 serve requires --max-context-tokens: the session forward budget is fixed at startup"
+                format!("{} serve requires --max-context-tokens: the session forward budget is fixed at startup", display)
             })?;
             Ok(Some(ServeLimits {
                 context_tokens,
@@ -393,12 +391,7 @@ pub(super) fn with_request_session<O, S, T, E>(
     result
 }
 
-/// `qwen serve` entry: resident model, serial accept loop.
-/// Refuse an explicit durable-tier request on a family that has none (the
-/// user would wait through a cold re-prefill after restart believing it was
-/// on); say once that the defaulted tier does not apply; warn that a
-/// snapshot budget means nothing to a live-session family.
-/// Rejects warmth settings a family cannot honour, so none is silently
+/// Reject warmth settings a family cannot honour, so none is silently
 /// ignored. Values are judged, not flag presence: an explicit default is
 /// indistinguishable from omission (clap `ValueSource` could tell them
 /// apart if that ever matters), and values that switch a feature off are
@@ -506,6 +499,9 @@ fn open_workbench(invocation: &crate::cli::ServeInvocation) -> Result<Option<Wor
 /// Lens payloads after bind but before Metal because the registry reads large
 /// payloads; Muse opens its llama.cpp tokenizer after Metal context creation
 /// because llama.cpp initializes its Metal backend there.
+/// `qwen serve` entry: resident model, serial accept loop.
+/// Refuses explicit durable-tier requests for families that have none and
+/// reports when defaults or snapshot budgets do not apply.
 pub(crate) fn run_serve(invocation: crate::cli::ServeInvocation) -> Result<()> {
     crate::shutdown::checkpoint()?;
     let gguf = GgufFile::open(&invocation.model)
@@ -568,8 +564,8 @@ pub(crate) fn run_serve(invocation: crate::cli::ServeInvocation) -> Result<()> {
     if !profile(family).upstream_template_style {
         ensure!(
             template_style == items::TemplateStyle::House,
-            "--template-style upstream is defined for Qwen and DeepSeek V4 serve; {} serve renders its release format",
-            family.architecture_name()
+            "--template-style upstream is not supported for {}; use house style",
+            profile(family).display
         );
     } else {
         tracing::info!(target: "qwen_diag", "serve: template_style={}", template_style.as_str());
@@ -1286,13 +1282,7 @@ mod tests {
     #[test]
     fn serve_family_gate_lists_backends_explicitly() {
         for family in ModelFamily::ALL {
-            assert_eq!(
-                supports_serve_family(Some(*family)),
-                profile(*family).serve_backend,
-                "{family:?}"
-            );
-            // Every recognised family has a backend.
-            assert!(profile(*family).serve_backend, "{family:?}");
+            assert!(supports_serve_family(Some(*family)), "{family:?}");
         }
         assert!(!supports_serve_family(None));
     }
@@ -1343,7 +1333,10 @@ mod tests {
                 ServeCapacity::RequestShaped => assert_eq!(missing.unwrap(), None),
                 ServeCapacity::FixedContext => assert_eq!(
                     missing.unwrap_err().to_string(),
-                    "DeepSeek V4 serve requires --max-context-tokens: the session forward budget is fixed at startup"
+                    format!(
+                        "{} serve requires --max-context-tokens: the session forward budget is fixed at startup",
+                        family_profile.display
+                    )
                 ),
                 ServeCapacity::FixedContextAndOutput => assert_eq!(
                     missing.unwrap_err().to_string(),

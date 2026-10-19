@@ -589,7 +589,13 @@ fn gguf_native_f32_prefill_65_token_serial_snapshot_parity() -> Result<()> {
     let expected = forward
         .step(&mut serial, *prompt.last().unwrap(), cancel)
         .map_err(anyhow::Error::msg)?;
+    let profile =
+        qwen_llm::deepseek_v41::forward::profile::Scope::begin().map_err(anyhow::Error::msg)?;
     let actual = forward.prefill(&mut batch, &prompt, cancel)?;
+    eprintln!(
+        "prefill profile: {}",
+        serde_json::to_string(&profile.finish())?
+    );
     ensure!(
         serial.position() == prompt.len() && batch.position() == prompt.len(),
         "prompt position mismatch"

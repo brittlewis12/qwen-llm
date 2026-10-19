@@ -81,12 +81,18 @@ impl MuseGlimmerRuntimeOptions {
     fn resolve(
         self,
         profile: MuseGlimmerArtifactProfile,
+        config: &MuseGlimmerConfig,
         unified: bool,
         capable: [bool; 2],
     ) -> Self {
+        let split_geometry = config.query_head_count == 32
+            && config.kv_head_count == 2
+            && config.key_head_dim == 128
+            && config.value_head_dim == 128;
         Self {
-            split_decode: self.split_decode && unified && capable[0],
+            split_decode: self.split_decode && split_geometry && unified && capable[0],
             matrix_prefill: self.matrix_prefill
+                && split_geometry
                 && unified
                 && capable[1]
                 && profile == MuseGlimmerArtifactProfile::UnslothQ8_0,
@@ -155,16 +161,21 @@ impl MuseGlimmerLoadedModel {
     ) -> Result<Self, MuseGlimmerRuntimeError> {
         let weight_plan = MuseGlimmerMetalWeightPlan::for_release(ctx, gguf)?;
         let requested = options;
+        let config = weight_plan.config();
         let options = options.resolve(
             weight_plan.artifact_profile(),
+            config,
             ctx.device.hasUnifiedMemory(),
             MuseGlimmerRuntimeOptions::pipeline_capability(ctx),
         );
         if options != requested {
             tracing::info!(
-                "muse: runtime options requested={requested:?} effective={options:?} profile={:?} device={:?}",
+                "muse: runtime options requested={requested:?} effective={options:?} attention_geometry={}/{}/{}/{} profile={:?}",
+                config.query_head_count,
+                config.kv_head_count,
+                config.key_head_dim,
+                config.value_head_dim,
                 weight_plan.artifact_profile(),
-                ctx.device.name().to_string(),
             );
         }
         let geometry = MuseGlimmerTextGeometry::from_config(weight_plan.config(), capacity)?;
@@ -703,6 +714,7 @@ mod tests {
         for profile in [
             MuseGlimmerArtifactProfile::UnslothQ8_0,
             MuseGlimmerArtifactProfile::UnslothBf16,
+            MuseGlimmerArtifactProfile::Mixed,
         ] {
             for unified in [false, true] {
                 for capable_bits in 0..4 {
@@ -713,6 +725,7 @@ mod tests {
                                 split_decode,
                                 matrix_prefill,
                             };
+                            let config = MuseGlimmerConfig::release_reference();
                             let expected = MuseGlimmerRuntimeOptions {
                                 split_decode: split_decode && unified && capable[0],
                                 matrix_prefill: matrix_prefill
@@ -720,16 +733,35 @@ mod tests {
                                     && capable[1]
                                     && profile == MuseGlimmerArtifactProfile::UnslothQ8_0,
                             };
-                            assert_eq!(requested.resolve(profile, unified, capable), expected);
+                            assert_eq!(
+                                requested.resolve(profile, &config, unified, capable),
+                                expected
+                            );
                         }
                     }
                 }
             }
         }
+        let mut unsupported = MuseGlimmerConfig::release_reference();
+        unsupported.query_head_count = 16;
+        assert_eq!(
+            MuseGlimmerRuntimeOptions::default().resolve(
+                MuseGlimmerArtifactProfile::UnslothQ8_0,
+                &unsupported,
+                true,
+                [true; 2],
+            ),
+            MuseGlimmerRuntimeOptions {
+                split_decode: false,
+                matrix_prefill: false,
+            },
+            "geometry-specific split decode and matrix prefill must decline visibly",
+        );
         // Rollback to the reference arithmetic always holds.
         assert_eq!(
             MuseGlimmerRuntimeOptions::REFERENCE.resolve(
                 MuseGlimmerArtifactProfile::UnslothQ8_0,
+                &MuseGlimmerConfig::release_reference(),
                 true,
                 [true; 2]
             ),
@@ -843,6 +875,10 @@ mod tests {
             assert_eq!(runner.next_position(), capacity);
             let census = crate::metal::dispatch_census_take();
             let kernels: Vec<_> = census.iter().map(|row| row.kernel.clone()).collect();
+            let mut dispatch_census = std::collections::BTreeMap::<String, usize>::new();
+            for kernel in &kernels {
+                *dispatch_census.entry(kernel.clone()).or_default() += 1;
+            }
             assert_eq!(
                 kernels
                     .iter()
@@ -855,15 +891,15 @@ mod tests {
                     .any(|k| k == "kernel_muse_split_attention_h128"),
                 optimized
             );
-            let result = (rows, ids, kernels, plan);
+            let result = (rows, ids.clone(), kernels, plan);
             if matches!(lane, "explicit" | "reference") {
                 expected = Some(result);
             } else {
                 assert_eq!(result, expected.take().unwrap(), "{lane} delivery differs");
             }
             eprintln!(
-                "MUSE_DEFAULT_DELIVERY lane={lane} prompt={} transitions=16 passed=true",
-                prompt.len()
+                "MUSE_DEFAULT_DELIVERY lane={lane} prompt={} transitions=16 tokens={ids:?} dispatch_census={dispatch_census:?} passed=true",
+                prompt.len(),
             );
         }
     }

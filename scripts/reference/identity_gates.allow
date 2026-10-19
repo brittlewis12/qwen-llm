@@ -49,10 +49,10 @@ crates/qwen-llm/src/metal/qualification.rs	M4 Max	frozen_experiment	device label
 crates/qwen-llm/src/metal/qualification.rs	aa186d57e040e263df0bec60531eead39beeafedd2d5705133db42ba8d83df8b	provenance	measurement report digests are serialized as evidence and not read by holds_for
 crates/qwen-llm/src/metal/qualification.rs	fc18b4f7ef79b7fe5f0586d964049f52ed7987679d64f28522ecd0edd8c9dd2c	provenance	measurement report digests are serialized as evidence and not read by holds_for
 crates/qwen-llm/src/muse_ffn_packet.rs	*	frozen_experiment	pinned census evidence and frozen research records
-crates/qwen-llm/src/muse_glimmer_residency.rs	25_920_319_232	temporary	trigger: Muse load generalization
-crates/qwen-llm/src/muse_glimmer_residency.rs	29_612_957_984	temporary	trigger: Muse load generalization
-crates/qwen-llm/src/muse_glimmer_residency.rs	29_805_191_936	temporary	trigger: Muse load generalization
-crates/qwen-llm/src/muse_glimmer_residency.rs	faa5b025c584459c13febfa5c59883516710ae39	provenance	release revision is reported as artifact provenance; shard sizes are temporary load gates
+crates/qwen-llm/src/muse_glimmer_residency.rs	25_920_319_232	frozen_experiment	authenticated frozen FFN experiment shard size
+crates/qwen-llm/src/muse_glimmer_residency.rs	29_612_957_984	frozen_experiment	authenticated frozen FFN experiment shard size
+crates/qwen-llm/src/muse_glimmer_residency.rs	29_805_191_936	frozen_experiment	authenticated frozen FFN experiment shard size
+crates/qwen-llm/src/muse_glimmer_residency.rs	faa5b025c584459c13febfa5c59883516710ae39	provenance	release revision is reported as artifact provenance; shard sizes apply only to authenticated frozen experiments
 crates/qwen-llm/src/qwen4exp_moe_down_index_probe.rs	*	frozen_experiment	pinned census evidence and frozen research records
 crates/qwen-llm/src/qwen4exp_moe_m128_index_probe.rs	*	frozen_experiment	pinned census evidence and frozen research records
 crates/qwen-llm/src/qwen4exp_moe_observe.rs	*	frozen_experiment	pinned census evidence and frozen research records

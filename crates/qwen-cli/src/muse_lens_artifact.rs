@@ -144,6 +144,7 @@ pub(crate) fn profile_name(profile: MuseGlimmerArtifactProfile) -> &'static str 
     match profile {
         MuseGlimmerArtifactProfile::UnslothQ8_0 => "unsloth_q8_0",
         MuseGlimmerArtifactProfile::UnslothBf16 => "unsloth_bf16",
+        MuseGlimmerArtifactProfile::Mixed => "mixed",
     }
 }
 

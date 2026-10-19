@@ -159,6 +159,12 @@ impl MuseGlimmerRequest {
         profile: MuseGlimmerChatTemplateProfile,
         requested: Option<MuseGlimmerReasoningStrength>,
     ) -> Result<AnnotatedMuseGlimmerPrompt, MuseGlimmerRequestError> {
+        if profile == MuseGlimmerChatTemplateProfile::Unknown {
+            return Err(MuseGlimmerRequestError::Contract(
+                "chat is unavailable for an unrecognized template; raw input remains available"
+                    .into(),
+            ));
+        }
         if self.current_date.is_some()
             && self.messages.first().is_some_and(|message| {
                 matches!(
@@ -257,6 +263,18 @@ fn reject_name(index: usize, name: Option<&str>) -> Result<(), MuseGlimmerReques
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn unknown_template_disables_chat_rendering() {
+        let request =
+            MuseGlimmerRequest::from_json(r#"{"messages":[{"role":"user","content":"hello"}]}"#)
+                .unwrap();
+        assert!(
+            request
+                .render(MuseGlimmerChatTemplateProfile::Unknown, None)
+                .is_err()
+        );
+    }
 
     #[test]
     fn parses_and_renders_structured_atem_history_with_annotations() {

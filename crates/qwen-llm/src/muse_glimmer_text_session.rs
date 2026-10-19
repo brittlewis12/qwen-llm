@@ -183,7 +183,7 @@ impl MuseGlimmerTextGeometry {
         config: &MuseGlimmerConfig,
         capacity: usize,
     ) -> Result<Self, MuseGlimmerTextSessionError> {
-        config.validate_release_profile()?;
+        config.validate_executor_support()?;
         if capacity == 0 || capacity > config.context_length as usize {
             return invalid(format!(
                 "capacity must be in 1..={} for the released model context, got {capacity}",

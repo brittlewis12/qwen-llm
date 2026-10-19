@@ -920,6 +920,7 @@ fn artifact_profile_label(profile: MuseGlimmerArtifactProfile) -> &'static str {
     match profile {
         MuseGlimmerArtifactProfile::UnslothQ8_0 => "unsloth_q8_0",
         MuseGlimmerArtifactProfile::UnslothBf16 => "unsloth_bf16",
+        MuseGlimmerArtifactProfile::Mixed => "mixed",
     }
 }
 
@@ -927,6 +928,7 @@ fn chat_template_profile_label(profile: MuseGlimmerChatTemplateProfile) -> &'sta
     match profile {
         MuseGlimmerChatTemplateProfile::MetaFixed => "meta_fixed",
         MuseGlimmerChatTemplateProfile::UnslothLaunch => "unsloth_launch",
+        MuseGlimmerChatTemplateProfile::Unknown => "unknown",
     }
 }
 

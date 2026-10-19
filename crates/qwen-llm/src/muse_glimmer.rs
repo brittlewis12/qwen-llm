@@ -13,24 +13,19 @@ use std::collections::HashSet;
 pub const ARCHITECTURE_NAME: &str = "muse-glimmer";
 pub const POST_NORM_EPSILON: f32 = 1e-8;
 
+const RELEASE_QUERY_HEADS: u32 = 32;
+const RELEASE_KV_HEADS: u32 = 2;
+const RELEASE_HEAD_DIM: u32 = 128;
 const RELEASE_LAYER_COUNT: u32 = 52;
 const RELEASE_CONTEXT_LENGTH: u32 = 131_072;
 const RELEASE_HIDDEN_SIZE: u32 = 6_656;
 const RELEASE_FEED_FORWARD_SIZE: u32 = 19_968;
 const RELEASE_VOCAB_SIZE: u32 = 202_048;
-const RELEASE_QUERY_HEADS: u32 = 32;
-const RELEASE_KV_HEADS: u32 = 2;
-const RELEASE_HEAD_DIM: u32 = 128;
 const RELEASE_SLIDING_WINDOW: u32 = 2_048;
 const RELEASE_ROPE_THETA: f32 = 500_000.0;
 const RELEASE_RMS_EPSILON: f32 = 1e-5;
 const RELEASE_LOGIT_SCALE: f32 = 0.196_116_13;
 const RELEASE_LOGIT_SOFTCAP: f32 = 20.0;
-const RELEASE_QK_SCALE: f32 = 3.87;
-const RELEASE_MERGE_COUNT: usize = 300_000;
-pub const RELEASE_TENSOR_COUNT: usize = 731;
-pub const RELEASE_MATRIX_TENSOR_COUNT: usize = 418;
-pub const RELEASE_NORM_TENSOR_COUNT: usize = 313;
 
 const META_FIXED_CHAT_SHA256: [u8; 32] = [
     0xcf, 0xc6, 0x7e, 0x5f, 0x34, 0x9f, 0x37, 0x69, 0x0d, 0xfd, 0x31, 0xed, 0x1f, 0x18, 0xbc, 0x44,
@@ -45,12 +40,17 @@ const UNSLOTH_LAUNCH_CHAT_SHA256: [u8; 32] = [
 pub enum MuseGlimmerChatTemplateProfile {
     MetaFixed,
     UnslothLaunch,
+    Unknown,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum MuseGlimmerArtifactProfile {
+    /// All block projections use Q8_0; retained for existing lens metadata.
     UnslothQ8_0,
+    /// All block projections use BF16; retained for existing lens metadata.
     UnslothBf16,
+    /// Block projections use more than one dtype.
+    Mixed,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -163,14 +163,6 @@ impl MuseGlimmerConfig {
         })?;
         validate_tokenizer_arrays(gguf, &tokens)?;
         let chat_template = required_str(gguf, "tokenizer.chat_template")?;
-        for marker in ["<|start|>assistant", "<|eom|>", "<atem:function_calls>"] {
-            if !chat_template.contains(marker) {
-                return Err(invalid(
-                    "tokenizer.chat_template",
-                    format!("missing Muse ATEM marker {marker:?}"),
-                ));
-            }
-        }
         let chat_template_sha256: [u8; 32] = Sha256::digest(chat_template.as_bytes()).into();
         let chat_template_profile = classify_chat_template(chat_template_sha256)?;
 
@@ -202,7 +194,7 @@ impl MuseGlimmerConfig {
             chat_template_sha256,
             chat_template_profile,
         };
-        config.validate_release_profile()?;
+        config.validate_executor_support()?;
         Ok(config)
     }
 
@@ -245,93 +237,63 @@ impl MuseGlimmerConfig {
         }
     }
 
-    pub fn validate_release_profile(&self) -> Result<(), MuseGlimmerError> {
-        require_exact(
-            "muse-glimmer.block_count",
-            self.layer_count,
-            RELEASE_LAYER_COUNT,
-        )?;
-        require_exact(
-            "muse-glimmer.context_length",
-            self.context_length,
-            RELEASE_CONTEXT_LENGTH,
-        )?;
-        require_exact(
-            "muse-glimmer.embedding_length",
-            self.hidden_size,
-            RELEASE_HIDDEN_SIZE,
-        )?;
-        require_exact(
-            "muse-glimmer.feed_forward_length",
-            self.feed_forward_size,
-            RELEASE_FEED_FORWARD_SIZE,
-        )?;
-        require_exact("tokenizer.ggml.tokens", self.vocab_size, RELEASE_VOCAB_SIZE)?;
-        require_exact(
-            "muse-glimmer.attention.head_count",
+    pub fn validate_executor_support(&self) -> Result<(), MuseGlimmerError> {
+        if (
             self.query_head_count,
-            RELEASE_QUERY_HEADS,
-        )?;
-        require_exact(
-            "muse-glimmer.attention.head_count_kv",
             self.kv_head_count,
-            RELEASE_KV_HEADS,
-        )?;
-        require_exact(
-            "muse-glimmer.attention.key_length",
             self.key_head_dim,
-            RELEASE_HEAD_DIM,
-        )?;
-        require_exact(
-            "muse-glimmer.attention.value_length",
             self.value_head_dim,
+        ) != (
+            RELEASE_QUERY_HEADS,
+            RELEASE_KV_HEADS,
             RELEASE_HEAD_DIM,
-        )?;
-        require_exact(
-            "muse-glimmer.attention.sliding_window",
-            self.sliding_window,
-            RELEASE_SLIDING_WINDOW,
-        )?;
-        require_f32(
-            "muse-glimmer.rope.freq_base",
-            self.rope_theta,
-            RELEASE_ROPE_THETA,
-        )?;
-        require_f32(
-            "muse-glimmer.attention.layer_norm_rms_epsilon",
-            self.rms_epsilon,
-            RELEASE_RMS_EPSILON,
-        )?;
-        require_f32(
-            "muse-glimmer.post_norm_epsilon",
-            self.post_norm_epsilon,
-            POST_NORM_EPSILON,
-        )?;
-        require_f32(
-            "muse-glimmer.logit_scale",
-            self.logit_scale,
-            RELEASE_LOGIT_SCALE,
-        )?;
-        require_f32(
-            "muse-glimmer.final_logit_softcapping",
-            self.final_logit_softcap,
-            RELEASE_LOGIT_SOFTCAP,
-        )?;
-
-        if !self
-            .query_head_count
-            .is_multiple_of(self.kv_head_count.max(1))
-        {
+            RELEASE_HEAD_DIM,
+        ) {
             return Err(invalid(
-                "muse-glimmer.attention.head_count",
-                "must be divisible by attention.head_count_kv",
+                "muse-glimmer.attention geometry",
+                format!(
+                    "Metal attention kernels require 32 query heads, 2 KV heads and head dimensions 128/128; got {}/{}/{}/{}",
+                    self.query_head_count,
+                    self.kv_head_count,
+                    self.key_head_dim,
+                    self.value_head_dim
+                ),
             ));
         }
-        if self.sliding_layers != release_sliding_pattern() {
+        if self.layer_count == 0
+            || self.context_length == 0
+            || self.hidden_size == 0
+            || self.feed_forward_size == 0
+            || self.vocab_size == 0
+            || self.sliding_window == 0
+        {
+            return Err(invalid(
+                "muse-glimmer geometry",
+                "layer, context, hidden, FFN, vocabulary and sliding-window sizes must be nonzero",
+            ));
+        }
+        if self.sliding_layers.len() != self.layer_count as usize {
             return Err(invalid(
                 "muse-glimmer.attention.sliding_window_pattern",
-                "expected [sliding, sliding, sliding, full] repeated 13 times",
+                "must contain one entry per layer",
             ));
+        }
+        for (key, value) in [
+            ("muse-glimmer.rope.freq_base", self.rope_theta),
+            (
+                "muse-glimmer.attention.layer_norm_rms_epsilon",
+                self.rms_epsilon,
+            ),
+            ("muse-glimmer.post_norm_epsilon", self.post_norm_epsilon),
+            ("muse-glimmer.logit_scale", self.logit_scale),
+            (
+                "muse-glimmer.final_logit_softcapping",
+                self.final_logit_softcap,
+            ),
+        ] {
+            if !value.is_finite() || value <= 0.0 {
+                return Err(invalid(key, "must be finite and positive"));
+            }
         }
         if self.tokenizer_model != "gpt2" || self.tokenizer_pre != "llama4" {
             return Err(invalid(
@@ -357,11 +319,10 @@ impl MuseGlimmerConfig {
         if !self.add_bos_token || self.add_sep_token {
             return Err(invalid(
                 "tokenizer.ggml.add_bos_token",
-                "released Muse tokenizer requires add_bos=true and add_sep=false",
+                "Muse tokenizer requires add_bos=true and add_sep=false",
             ));
         }
-        let classified = classify_chat_template(self.chat_template_sha256)?;
-        if classified != self.chat_template_profile {
+        if classify_chat_template(self.chat_template_sha256)? != self.chat_template_profile {
             return Err(invalid(
                 "tokenizer.chat_template",
                 "template hash/profile mismatch",
@@ -430,12 +391,19 @@ impl<'a> MuseGlimmerModel<'a> {
         let head = config.key_head_dim as u64;
         let mut used = HashSet::with_capacity(expected_tensor_count(config.layer_count));
 
-        let token_embedding = bind_matrix(
+        let token_embedding = bind_shape(
             gguf,
             &mut used,
             "token_embd.weight".into(),
             &[hidden, vocab],
         )?;
+        validate_weight_storage(token_embedding)?;
+        if crate::metal::get_rows_pipeline_name(token_embedding.dtype).is_none() {
+            return Err(MuseGlimmerError::UnsupportedArtifactProfile(format!(
+                "token_embd.weight dtype {:?} has no Metal get-rows kernel",
+                token_embedding.dtype
+            )));
+        }
         let output_norm = bind_norm(gguf, &mut used, "output_norm.weight".into(), &[hidden])?;
         let output = bind_matrix(gguf, &mut used, "output.weight".into(), &[hidden, vocab])?;
 
@@ -450,8 +418,6 @@ impl<'a> MuseGlimmerModel<'a> {
             };
             let query_norm = norm("attn_q_norm.weight", &[head], &mut used)?;
             let key_norm = norm("attn_k_norm.weight", &[head], &mut used)?;
-            validate_constant_f32(gguf, query_norm, RELEASE_QK_SCALE)?;
-            validate_constant_f32(gguf, key_norm, 1.0)?;
             layers.push(MuseGlimmerLayer {
                 attention_norm: norm("attn_norm.weight", &[hidden], &mut used)?,
                 attention_query: matrix("attn_q.weight", &[hidden, query], &mut used)?,
@@ -491,12 +457,7 @@ impl<'a> MuseGlimmerModel<'a> {
                 ),
             ));
         }
-        let artifact_profile = classify_artifact_profile(
-            token_embedding,
-            output,
-            &layers,
-            config.chat_template_profile,
-        )?;
+        let artifact_profile = classify_artifact_profile(&layers)?;
 
         Ok(Self {
             config,
@@ -608,7 +569,7 @@ fn release_sliding_pattern() -> Vec<bool> {
         .collect()
 }
 
-fn expected_tensor_count(layer_count: u32) -> usize {
+pub(crate) fn expected_tensor_count(layer_count: u32) -> usize {
     3 + layer_count as usize * 14
 }
 
@@ -618,21 +579,14 @@ fn classify_chat_template(
     match sha256 {
         META_FIXED_CHAT_SHA256 => Ok(MuseGlimmerChatTemplateProfile::MetaFixed),
         UNSLOTH_LAUNCH_CHAT_SHA256 => Ok(MuseGlimmerChatTemplateProfile::UnslothLaunch),
-        other => Err(invalid(
-            "tokenizer.chat_template",
-            format!("unrecognized SHA-256 {}", hex_digest(other)),
-        )),
+        _ => Ok(MuseGlimmerChatTemplateProfile::Unknown),
     }
 }
 
 fn classify_artifact_profile(
-    token_embedding: &TensorDesc,
-    output: &TensorDesc,
     layers: &[MuseGlimmerLayer<'_>],
-    chat_profile: MuseGlimmerChatTemplateProfile,
 ) -> Result<MuseGlimmerArtifactProfile, MuseGlimmerError> {
-    let mut dtypes = Vec::with_capacity(RELEASE_MATRIX_TENSOR_COUNT);
-    dtypes.extend([token_embedding.dtype, output.dtype]);
+    let mut dtypes = Vec::with_capacity(layers.len() * 8);
     for layer in layers {
         dtypes.extend([
             layer.attention_query.dtype,
@@ -645,74 +599,22 @@ fn classify_artifact_profile(
             layer.feed_forward_down.dtype,
         ]);
     }
-    classify_matrix_dtypes(&dtypes, chat_profile)
+    classify_matrix_dtypes(&dtypes)
 }
 
 fn classify_matrix_dtypes(
     dtypes: &[GgmlType],
-    chat_profile: MuseGlimmerChatTemplateProfile,
 ) -> Result<MuseGlimmerArtifactProfile, MuseGlimmerError> {
-    if dtypes.len() != RELEASE_MATRIX_TENSOR_COUNT {
-        return Err(MuseGlimmerError::UnsupportedArtifactProfile(format!(
-            "expected {RELEASE_MATRIX_TENSOR_COUNT} matrices, got {}",
-            dtypes.len()
-        )));
+    if dtypes.iter().all(|&dtype| dtype == GgmlType::Q8_0) {
+        Ok(MuseGlimmerArtifactProfile::UnslothQ8_0)
+    } else if dtypes.iter().all(|&dtype| dtype == GgmlType::BF16) {
+        Ok(MuseGlimmerArtifactProfile::UnslothBf16)
+    } else {
+        Ok(MuseGlimmerArtifactProfile::Mixed)
     }
-    if chat_profile == MuseGlimmerChatTemplateProfile::UnslothLaunch
-        && dtypes.iter().all(|&dtype| dtype == GgmlType::Q8_0)
-    {
-        return Ok(MuseGlimmerArtifactProfile::UnslothQ8_0);
-    }
-    if chat_profile == MuseGlimmerChatTemplateProfile::UnslothLaunch
-        && dtypes.iter().all(|&dtype| dtype == GgmlType::BF16)
-    {
-        return Ok(MuseGlimmerArtifactProfile::UnslothBf16);
-    }
-    let mut census = std::collections::BTreeMap::<String, usize>::new();
-    for dtype in dtypes {
-        *census.entry(format!("{dtype:?}")).or_default() += 1;
-    }
-    Err(MuseGlimmerError::UnsupportedArtifactProfile(format!(
-        "initial lane requires UnslothLaunch chat plus uniform Q8_0 or BF16 matrices; got chat={chat_profile:?}, matrices={census:?}"
-    )))
-}
-
-fn validate_constant_f32(
-    gguf: &GgufFile,
-    tensor: &TensorDesc,
-    expected: f32,
-) -> Result<(), MuseGlimmerError> {
-    let bytes = gguf.try_slice(tensor)?;
-    let width = std::mem::size_of::<f32>();
-    let mut chunks = bytes.chunks_exact(width);
-    for (index, chunk) in chunks.by_ref().enumerate() {
-        let value = f32::from_le_bytes(chunk.try_into().expect("four-byte F32 chunk"));
-        if value.to_bits() != expected.to_bits() {
-            return Err(MuseGlimmerError::InvalidTensorValue {
-                tensor: tensor.name.clone(),
-                detail: format!("entry {index} expected {expected}, got {value}"),
-            });
-        }
-    }
-    if !chunks.remainder().is_empty() {
-        return Err(MuseGlimmerError::InvalidTensorValue {
-            tensor: tensor.name.clone(),
-            detail: "F32 payload has a non-four-byte remainder".into(),
-        });
-    }
-    Ok(())
 }
 
 fn validate_tokenizer_arrays(gguf: &GgufFile, tokens: &[&str]) -> Result<(), MuseGlimmerError> {
-    if tokens.len() != RELEASE_VOCAB_SIZE as usize {
-        return Err(invalid(
-            "tokenizer.ggml.tokens",
-            format!(
-                "expected {RELEASE_VOCAB_SIZE} strings, got {}",
-                tokens.len()
-            ),
-        ));
-    }
     let token_types = gguf.get_i64_array("tokenizer.ggml.token_type")?.ok_or(
         MuseGlimmerError::MissingMetadata("tokenizer.ggml.token_type"),
     )?;
@@ -724,15 +626,7 @@ fn validate_tokenizer_arrays(gguf: &GgufFile, tokens: &[&str]) -> Result<(), Mus
         ));
     }
     let merges = required_string_array(gguf, "tokenizer.ggml.merges")?;
-    if merges.len() != RELEASE_MERGE_COUNT {
-        return Err(invalid(
-            "tokenizer.ggml.merges",
-            format!(
-                "expected {RELEASE_MERGE_COUNT} strings, got {}",
-                merges.len()
-            ),
-        ));
-    }
+    let _ = merges;
     for (id, expected) in [
         (200_000, "<|begin_of_text|>"),
         (200_001, "<|end_of_text|>"),
@@ -745,10 +639,16 @@ fn validate_tokenizer_arrays(gguf: &GgufFile, tokens: &[&str]) -> Result<(), Mus
         (200_091, "<|video|>"),
         (200_092, "<|patch|>"),
     ] {
-        if tokens[id] != expected {
+        let actual = tokens.get(id).ok_or_else(|| {
+            invalid(
+                "tokenizer.ggml.tokens",
+                format!("vocabulary has no required Muse marker at token {id}"),
+            )
+        })?;
+        if *actual != expected {
             return Err(invalid(
                 "tokenizer.ggml.tokens",
-                format!("token {id} expected {expected:?}, got {:?}", tokens[id]),
+                format!("token {id} expected {expected:?}, got {actual:?}"),
             ));
         }
     }
@@ -778,15 +678,6 @@ fn required_string_array<'a>(
         .collect()
 }
 
-fn hex_digest(bytes: [u8; 32]) -> String {
-    let mut output = String::with_capacity(64);
-    for byte in bytes {
-        use std::fmt::Write;
-        write!(&mut output, "{byte:02x}").expect("writing to String cannot fail");
-    }
-    output
-}
-
 fn bind_norm<'a>(
     gguf: &'a GgufFile,
     used: &mut HashSet<String>,
@@ -810,8 +701,19 @@ fn bind_matrix<'a>(
     expected: &[u64],
 ) -> Result<&'a TensorDesc, MuseGlimmerError> {
     let tensor = bind_shape(gguf, used, name, expected)?;
-    validate_weight_storage(tensor)?;
+    validate_matrix_admission(tensor)?;
     Ok(tensor)
+}
+
+fn validate_matrix_admission(tensor: &TensorDesc) -> Result<(), MuseGlimmerError> {
+    validate_weight_storage(tensor)?;
+    if !crate::metal_forward::mat_vec_dispatch_supported(tensor.dtype) {
+        return Err(MuseGlimmerError::UnsupportedArtifactProfile(format!(
+            "matrix {:?} dtype {:?} has no shared Metal mat-vec dispatch",
+            tensor.name, tensor.dtype
+        )));
+    }
+    Ok(())
 }
 
 fn bind_shape<'a>(
@@ -903,13 +805,6 @@ fn require_exact(key: &'static str, actual: u32, expected: u32) -> Result<(), Mu
     Ok(())
 }
 
-fn require_f32(key: &'static str, actual: f32, expected: f32) -> Result<(), MuseGlimmerError> {
-    if !actual.is_finite() || actual.to_bits() != expected.to_bits() {
-        return Err(invalid(key, format!("expected {expected}, got {actual}")));
-    }
-    Ok(())
-}
-
 fn checked_mul(a: u64, b: u64, label: &'static str) -> Result<u64, MuseGlimmerError> {
     a.checked_mul(b)
         .ok_or(MuseGlimmerError::DimensionOverflow(label))
@@ -940,9 +835,9 @@ mod tests {
     }
 
     #[test]
-    fn release_profile_has_exact_geometry_and_schedule() {
+    fn executor_geometry_and_config_sizing_are_supported() {
         let config = MuseGlimmerConfig::release_reference();
-        config.validate_release_profile().unwrap();
+        config.validate_executor_support().unwrap();
         assert_eq!(config.query_width().unwrap(), 4_096);
         assert_eq!(config.kv_width().unwrap(), 256);
         assert_eq!(config.query_head_count / config.kv_head_count, 16);
@@ -951,17 +846,24 @@ mod tests {
         assert!(config.is_sliding_layer(2).unwrap());
         assert!(!config.is_sliding_layer(3).unwrap());
         assert!(!config.is_sliding_layer(51).unwrap());
-        assert_eq!(
-            expected_tensor_count(config.layer_count),
-            RELEASE_TENSOR_COUNT
-        );
+        assert_eq!(expected_tensor_count(config.layer_count), 3 + 52 * 14);
 
         let unsloth = MuseGlimmerConfig::unsloth_release_reference();
-        unsloth.validate_release_profile().unwrap();
+        unsloth.validate_executor_support().unwrap();
         assert_eq!(
             unsloth.chat_template_profile,
             MuseGlimmerChatTemplateProfile::UnslothLaunch
         );
+
+        let mut smaller = MuseGlimmerConfig::release_reference();
+        smaller.layer_count = 3;
+        smaller.context_length = 4_096;
+        smaller.hidden_size = 128;
+        smaller.feed_forward_size = 256;
+        smaller.vocab_size = 200_100;
+        smaller.sliding_layers = vec![true, true, false];
+        smaller.validate_executor_support().unwrap();
+        assert_eq!(expected_tensor_count(smaller.layer_count), 45);
     }
 
     #[test]
@@ -990,15 +892,20 @@ mod tests {
     fn release_profile_rejects_semantic_drift() {
         let mut config = MuseGlimmerConfig::release_reference();
         config.sliding_layers[3] = true;
-        assert!(config.validate_release_profile().is_err());
+        assert!(config.validate_executor_support().is_ok());
+
+        let mut config = MuseGlimmerConfig::release_reference();
+        config.query_head_count = 16;
+        let error = config.validate_executor_support().unwrap_err().to_string();
+        assert!(error.contains("Metal attention kernels require 32 query heads"));
 
         let mut config = MuseGlimmerConfig::release_reference();
         config.tokenizer_pre = "qwen35".into();
-        assert!(config.validate_release_profile().is_err());
+        assert!(config.validate_executor_support().is_err());
 
         let mut config = MuseGlimmerConfig::release_reference();
         config.eot_token_id = config.vocab_size;
-        assert!(config.validate_release_profile().is_err());
+        assert!(config.validate_executor_support().is_err());
     }
 
     #[test]
@@ -1016,35 +923,56 @@ mod tests {
     }
 
     #[test]
-    fn only_initial_q8_and_bf16_matrix_profiles_are_admitted() {
+    fn q4_k_and_q6_k_matrices_pass_executor_admission() {
+        for dtype in [GgmlType::Q4_K, GgmlType::Q6_K] {
+            let tensor = TensorDesc {
+                name: "blk.0.ffn_gate.weight".into(),
+                shape: vec![256, 64],
+                dtype,
+                shard_idx: 0,
+                data_offset: 0,
+                n_bytes: 0,
+            };
+            validate_matrix_admission(&tensor).unwrap();
+        }
+    }
+
+    #[test]
+    fn matrix_dtype_facts_do_not_gate_template_or_model_admission() {
         assert_eq!(
-            classify_matrix_dtypes(
-                &vec![GgmlType::Q8_0; RELEASE_MATRIX_TENSOR_COUNT],
-                MuseGlimmerChatTemplateProfile::UnslothLaunch,
-            )
-            .unwrap(),
+            classify_matrix_dtypes(&[GgmlType::Q8_0]).unwrap(),
             MuseGlimmerArtifactProfile::UnslothQ8_0
         );
         assert_eq!(
-            classify_matrix_dtypes(
-                &vec![GgmlType::BF16; RELEASE_MATRIX_TENSOR_COUNT],
-                MuseGlimmerChatTemplateProfile::UnslothLaunch,
-            )
-            .unwrap(),
+            classify_matrix_dtypes(&[GgmlType::BF16]).unwrap(),
             MuseGlimmerArtifactProfile::UnslothBf16
         );
-        let mut mixed = vec![GgmlType::Q8_0; RELEASE_MATRIX_TENSOR_COUNT];
-        mixed[17] = GgmlType::Q6_K;
-        assert!(
-            classify_matrix_dtypes(&mixed, MuseGlimmerChatTemplateProfile::UnslothLaunch).is_err()
+        assert_eq!(
+            classify_matrix_dtypes(&[GgmlType::Q8_0, GgmlType::Q6_K]).unwrap(),
+            MuseGlimmerArtifactProfile::Mixed
         );
-        assert!(
-            classify_matrix_dtypes(
-                &vec![GgmlType::Q8_0; RELEASE_MATRIX_TENSOR_COUNT],
-                MuseGlimmerChatTemplateProfile::MetaFixed,
-            )
-            .is_err()
-        );
+        assert!(crate::metal_forward::mat_vec_dispatch_supported(
+            GgmlType::Q4_K
+        ));
+        assert!(crate::metal_forward::mat_vec_dispatch_supported(
+            GgmlType::Q6_K
+        ));
+    }
+
+    #[test]
+    fn known_and_unknown_templates_do_not_gate_projection_dtype_admission() {
+        let meta = classify_chat_template(META_FIXED_CHAT_SHA256).unwrap();
+        let unknown = classify_chat_template([0; 32]).unwrap();
+        for template in [meta, unknown] {
+            let hash = match template {
+                MuseGlimmerChatTemplateProfile::MetaFixed => META_FIXED_CHAT_SHA256,
+                MuseGlimmerChatTemplateProfile::UnslothLaunch => UNSLOTH_LAUNCH_CHAT_SHA256,
+                MuseGlimmerChatTemplateProfile::Unknown => [0; 32],
+            };
+            assert_eq!(classify_chat_template(hash).unwrap(), template);
+            let profile = classify_matrix_dtypes(&[GgmlType::Q8_0]).unwrap();
+            assert_eq!(profile, MuseGlimmerArtifactProfile::UnslothQ8_0);
+        }
     }
 
     #[test]
@@ -1057,7 +985,14 @@ mod tests {
             classify_chat_template(UNSLOTH_LAUNCH_CHAT_SHA256).unwrap(),
             MuseGlimmerChatTemplateProfile::UnslothLaunch
         );
-        assert!(classify_chat_template([0; 32]).is_err());
+        assert_eq!(
+            classify_chat_template([0; 32]).unwrap(),
+            MuseGlimmerChatTemplateProfile::Unknown
+        );
+        let mut unknown = MuseGlimmerConfig::release_reference();
+        unknown.chat_template_sha256 = [0; 32];
+        unknown.chat_template_profile = MuseGlimmerChatTemplateProfile::Unknown;
+        unknown.validate_executor_support().unwrap();
     }
 
     #[test]

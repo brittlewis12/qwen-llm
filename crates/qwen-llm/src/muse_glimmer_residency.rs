@@ -13,7 +13,6 @@ use crate::metal::{
 };
 use crate::muse_glimmer::{
     MuseGlimmerArtifactProfile, MuseGlimmerConfig, MuseGlimmerError, MuseGlimmerModel,
-    RELEASE_MATRIX_TENSOR_COUNT, RELEASE_NORM_TENSOR_COUNT, RELEASE_TENSOR_COUNT,
 };
 use crate::tensor::{GgmlType, TensorDesc};
 use objc2_metal::{MTLBuffer, MTLDevice};
@@ -75,23 +74,12 @@ pub struct MuseGlimmerDtypeCensus {
     f32: usize,
     q8_0: usize,
     bf16: usize,
+    other: usize,
 }
 
 impl MuseGlimmerDtypeCensus {
-    pub const UNSLOTH_Q8_0: Self = Self {
-        f32: RELEASE_NORM_TENSOR_COUNT,
-        q8_0: RELEASE_MATRIX_TENSOR_COUNT,
-        bf16: 0,
-    };
-
-    pub const UNSLOTH_BF16: Self = Self {
-        f32: RELEASE_NORM_TENSOR_COUNT,
-        q8_0: 0,
-        bf16: RELEASE_MATRIX_TENSOR_COUNT,
-    };
-
     pub fn total(self) -> usize {
-        self.f32 + self.q8_0 + self.bf16
+        self.f32 + self.q8_0 + self.bf16 + self.other
     }
 
     pub fn f32(self) -> usize {
@@ -106,17 +94,18 @@ impl MuseGlimmerDtypeCensus {
         self.bf16
     }
 
-    fn record(&mut self, dtype: GgmlType) -> Result<(), MuseGlimmerResidencyError> {
+    pub fn other(self) -> usize {
+        self.other
+    }
+
+    fn record(&mut self, dtype: GgmlType) {
         let count = match dtype {
             GgmlType::F32 => &mut self.f32,
             GgmlType::Q8_0 => &mut self.q8_0,
             GgmlType::BF16 => &mut self.bf16,
-            other => return invalid(format!("unsupported released weight dtype {other:?}")),
+            _ => &mut self.other,
         };
-        *count = count
-            .checked_add(1)
-            .ok_or_else(|| MuseGlimmerResidencyError::Invalid("dtype census overflow".into()))?;
-        Ok(())
+        *count += 1;
     }
 }
 
@@ -304,22 +293,25 @@ impl MuseGlimmerMetalWeightPlan {
     ) -> Result<Self, MuseGlimmerResidencyError> {
         let shard_stamps = gguf.revalidate_retained_shard_stamps()?;
         let model = MuseGlimmerModel::from_gguf(gguf)?;
-        if gguf.tensors.len() != RELEASE_TENSOR_COUNT {
-            return invalid(format!(
-                "released model requires {RELEASE_TENSOR_COUNT} tensors, got {}",
-                gguf.tensors.len()
-            ));
-        }
-        let expected_shards = expected_release_shards(model.artifact_profile);
-        validate_release_shard_sizes(gguf, expected_shards)?;
-        if authenticate_contents {
-            preflight_authentication_admission(ctx, expected_shards)?;
-            authenticate_release_shards(gguf, expected_shards)?;
-            if gguf.revalidate_retained_shard_stamps()? != shard_stamps {
-                return invalid("GGUF shard identity changed during content authentication");
+        let expected_shards = if contents_authenticated {
+            let shards = expected_release_shards(model.artifact_profile)?;
+            validate_release_shard_size_policy(
+                contents_authenticated,
+                &gguf.shard_mapped_lengths(),
+                shards,
+            )?;
+            if authenticate_contents {
+                preflight_authentication_admission(ctx, shards)?;
+                authenticate_release_shards(gguf, shards)?;
             }
+            Some(shards)
+        } else {
+            None
+        };
+        if authenticate_contents && gguf.revalidate_retained_shard_stamps()? != shard_stamps {
+            return invalid("GGUF shard identity changed during content authentication");
         }
-        let dtype_census = validate_release_dtype_census(&gguf.tensors, model.artifact_profile)?;
+        let dtype_census = dtype_census(&gguf.tensors);
         let page_size = host_page_size_bytes()?;
         let device_max_buffer_length = ctx.max_buffer_length();
         let planning_max_buffer_length =
@@ -332,7 +324,10 @@ impl MuseGlimmerMetalWeightPlan {
             planning_max_buffer_length,
             MUSE_GLIMMER_GGUF_BINDING_ALIGNMENT,
         )?;
-        validate_retained_policy(&retained)?;
+        validate_retained_policy(
+            &retained,
+            crate::muse_glimmer::expected_tensor_count(model.config.layer_count),
+        )?;
         let report = report_for_plan(
             gguf,
             &retained,
@@ -356,7 +351,7 @@ impl MuseGlimmerMetalWeightPlan {
             memory,
             device_registry_id: ctx.device.registryID(),
             shard_stamps,
-            authenticated_shards: expected_shards.to_vec(),
+            authenticated_shards: expected_shards.map_or_else(Vec::new, <[_]>::to_vec),
             contents_authenticated,
         })
     }
@@ -613,35 +608,21 @@ impl<'a> MuseGlimmerMetalModelWeights<'a> {
     }
 }
 
-fn validate_release_dtype_census(
-    tensors: &[TensorDesc],
-    profile: MuseGlimmerArtifactProfile,
-) -> Result<MuseGlimmerDtypeCensus, MuseGlimmerResidencyError> {
+fn dtype_census(tensors: &[TensorDesc]) -> MuseGlimmerDtypeCensus {
     let mut census = MuseGlimmerDtypeCensus::default();
     for desc in tensors {
-        census.record(desc.dtype)?;
+        census.record(desc.dtype);
     }
-    let expected = expected_dtype_census(profile);
-    if census != expected {
-        return invalid(format!(
-            "released {:?} dtype census mismatch: expected {expected:?}, got {census:?}",
-            profile
-        ));
-    }
-    Ok(census)
+    census
 }
 
-fn expected_dtype_census(profile: MuseGlimmerArtifactProfile) -> MuseGlimmerDtypeCensus {
-    match profile {
-        MuseGlimmerArtifactProfile::UnslothQ8_0 => MuseGlimmerDtypeCensus::UNSLOTH_Q8_0,
-        MuseGlimmerArtifactProfile::UnslothBf16 => MuseGlimmerDtypeCensus::UNSLOTH_BF16,
-    }
-}
-
-fn validate_retained_policy(plan: &RetainedStoragePlan) -> Result<(), MuseGlimmerResidencyError> {
-    if plan.entries.len() != RELEASE_TENSOR_COUNT {
+fn validate_retained_policy(
+    plan: &RetainedStoragePlan,
+    expected_entries: usize,
+) -> Result<(), MuseGlimmerResidencyError> {
+    if plan.entries.len() != expected_entries {
         return invalid(format!(
-            "retained planner produced {} entries, expected {RELEASE_TENSOR_COUNT}",
+            "retained planner produced {} entries, expected {expected_entries}",
             plan.entries.len()
         ));
     }
@@ -894,9 +875,11 @@ fn validate_realized_weights(
     gguf: &GgufFile,
     tensors: &BTreeMap<String, MetalTensor>,
 ) -> Result<(), MuseGlimmerResidencyError> {
-    if tensors.len() != RELEASE_TENSOR_COUNT {
+    let expected =
+        crate::muse_glimmer::expected_tensor_count(MuseGlimmerConfig::from_gguf(gguf)?.layer_count);
+    if tensors.len() != expected {
         return invalid(format!(
-            "realized map has {} tensors, expected {RELEASE_TENSOR_COUNT}",
+            "realized map has {} tensors, expected {expected}",
             tensors.len()
         ));
     }
@@ -984,18 +967,26 @@ fn report_for_plan(
     })
 }
 
-fn expected_release_shards(profile: MuseGlimmerArtifactProfile) -> &'static [ReleaseShardIdentity] {
+fn expected_release_shards(
+    profile: MuseGlimmerArtifactProfile,
+) -> Result<&'static [ReleaseShardIdentity], MuseGlimmerResidencyError> {
     match profile {
-        MuseGlimmerArtifactProfile::UnslothQ8_0 => &UNSLOTH_Q8_SHARDS,
-        MuseGlimmerArtifactProfile::UnslothBf16 => &UNSLOTH_BF16_SHARDS,
+        MuseGlimmerArtifactProfile::UnslothQ8_0 => Ok(&UNSLOTH_Q8_SHARDS),
+        MuseGlimmerArtifactProfile::UnslothBf16 => Ok(&UNSLOTH_BF16_SHARDS),
+        MuseGlimmerArtifactProfile::Mixed => {
+            invalid("authenticated release requires a frozen uniform-dtype artifact")
+        }
     }
 }
 
-fn validate_release_shard_sizes(
-    gguf: &GgufFile,
+fn validate_release_shard_size_policy(
+    authenticated_experiment: bool,
+    observed: &[usize],
     expected: &[ReleaseShardIdentity],
 ) -> Result<(), MuseGlimmerResidencyError> {
-    let observed = gguf.shard_mapped_lengths();
+    if !authenticated_experiment {
+        return Ok(());
+    }
     if observed.len() != expected.len() {
         return invalid(format!(
             "pinned Unsloth revision {MUSE_GLIMMER_UNSLOTH_REVISION} requires {} shards, got {}",
@@ -1003,10 +994,10 @@ fn validate_release_shard_sizes(
             observed.len()
         ));
     }
-    for (index, (&observed, expected)) in observed.iter().zip(expected).enumerate() {
-        if observed as u64 != expected.size {
+    for (index, (&observed_size, expected)) in observed.iter().zip(expected).enumerate() {
+        if observed_size as u64 != expected.size {
             return invalid(format!(
-                "pinned shard {index} requires {} bytes, got {observed}",
+                "pinned shard {index} requires {} bytes, got {observed_size}",
                 expected.size
             ));
         }
@@ -1081,17 +1072,35 @@ mod tests {
     use super::*;
 
     #[test]
-    fn released_dtype_censuses_cover_exact_tensor_inventory() {
-        assert_eq!(MuseGlimmerDtypeCensus::UNSLOTH_Q8_0.total(), 731);
-        assert_eq!(MuseGlimmerDtypeCensus::UNSLOTH_BF16.total(), 731);
-        assert_eq!(
-            expected_dtype_census(MuseGlimmerArtifactProfile::UnslothQ8_0),
-            MuseGlimmerDtypeCensus::UNSLOTH_Q8_0
-        );
-        assert_eq!(
-            expected_dtype_census(MuseGlimmerArtifactProfile::UnslothBf16),
-            MuseGlimmerDtypeCensus::UNSLOTH_BF16
-        );
+    fn dtype_census_reports_observed_types_without_admission_pins() {
+        let tensors = [
+            TensorDesc {
+                name: "a".into(),
+                shape: vec![],
+                dtype: GgmlType::F32,
+                shard_idx: 0,
+                data_offset: 0,
+                n_bytes: 0,
+            },
+            TensorDesc {
+                name: "b".into(),
+                shape: vec![],
+                dtype: GgmlType::Q4_K,
+                shard_idx: 0,
+                data_offset: 0,
+                n_bytes: 0,
+            },
+        ];
+        let census = dtype_census(&tensors);
+        assert_eq!(census.total(), 2);
+        assert_eq!(census.f32(), 1);
+        assert_eq!(census.other, 1);
+    }
+
+    #[test]
+    fn product_shard_size_policy_admits_resharded_inputs() {
+        assert!(validate_release_shard_size_policy(false, &[17, 23], &UNSLOTH_Q8_SHARDS).is_ok());
+        assert!(validate_release_shard_size_policy(true, &[17, 23], &UNSLOTH_Q8_SHARDS).is_err());
     }
 
     #[test]

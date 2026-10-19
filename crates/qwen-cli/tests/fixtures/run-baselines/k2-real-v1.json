@@ -1,0 +1,70 @@
+{
+  "baseline_commit": "548244584ae79002c408ca58cbbba77557aee08c",
+  "fixture_filename": "K2-Horizon-7B-Q8_0.gguf",
+  "command": [
+    "qwen",
+    "run",
+    "--raw-prompt",
+    "Answer with one word: yes.",
+    "--max-tokens",
+    "5",
+    "--seed",
+    "314159",
+    "--temp",
+    "0",
+    "--request-stats-jsonl",
+    "<stats-path>"
+  ],
+  "rendered_prompt_utf8": "Answer with one word: yes.",
+  "bos_inserted": true,
+  "prompt_token_ids": [
+    0,
+    19163,
+    458,
+    1027,
+    5512,
+    27,
+    17512,
+    15
+  ],
+  "stdout_utf8": " The question is whether the\n",
+  "stdout_has_final_newline": true,
+  "generated_token_ids": [
+    589,
+    4758,
+    395,
+    4969,
+    293
+  ],
+  "stop_reason": "token_limit",
+  "stderr_shape": [
+    "k2 prefill: mode=<mode> chunk_tokens=<n> temporary_activation_bytes=<n> reason=default",
+    "k2_horizon: prefill=<mode> chunk_tokens=<n> commands=<n> temporary_activation_bytes=<n>",
+    "k2_horizon stats: prompt_tokens=8 generated_tokens=5 transitions=4 stop_reason=token_limit tokenizer_ms=<timing> load_ms=<timing> prefill_mode=<mode> prefill_ms=<timing> prefill_tps=<timing> generation_ms=<timing> decode_tps=<timing> total_ms=<timing> weights_first_use=true"
+  ],
+  "stats_jsonl_keys": [
+    "build",
+    "diagnostics",
+    "finish",
+    "input",
+    "invocation_id",
+    "model",
+    "output_fingerprint",
+    "record_type",
+    "request_index",
+    "schema",
+    "schema_version",
+    "status",
+    "throughput_tps",
+    "timing_ms",
+    "usage"
+  ],
+  "stats_jsonl_template_label": "k2_horizon",
+  "stats_jsonl_output_fingerprint": "192c9ec0b91bb437e226984010b356e1907819efeed34c2b93884beb4b056c74",
+  "stats_jsonl_timing_fields": [
+    "decode",
+    "prefill",
+    "tokenization",
+    "total"
+  ]
+}

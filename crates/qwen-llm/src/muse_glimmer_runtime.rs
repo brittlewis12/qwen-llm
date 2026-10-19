@@ -1155,14 +1155,14 @@ mod tests {
                 &[0, 1],
             )
             .expect("batched readout");
-        for row in 0..2 {
+        for (row, scalar_row) in scalar.iter().enumerate().take(2) {
             assert_eq!(
                 batched.transported_rows[row]
                     .values
                     .iter()
                     .map(|value| value.to_bits())
                     .collect::<Vec<_>>(),
-                scalar[row]
+                scalar_row
                     .0
                     .iter()
                     .map(|value| value.to_bits())

@@ -16,7 +16,9 @@ use crate::metal::{
     encode_sigmoid_mul_f32, encode_silu_mul_f32, encode_topk16_f32,
     evaluate_metal_memory_admission, evaluate_metal_memory_admission_with_cpu_bytes,
 };
-use crate::metal_forward::{MfError, encode_mat_vec_dispatch};
+use crate::metal_forward::{
+    MfError, encode_mat_mat_dispatch, encode_mat_vec_dispatch, mat_mat_dispatch_supported,
+};
 use crate::muse_glimmer::{MuseGlimmerConfig, MuseGlimmerError};
 use crate::muse_glimmer_lens::{
     MUSE_GLIMMER_LENS_MAX_PROMPT_TOKENS, MuseGlimmerLensCapture, MuseGlimmerLensCaptureBank,
@@ -582,8 +584,8 @@ impl MuseGlimmerPackedPrefillWorkspace {
         geometry: &MuseGlimmerTextGeometry,
         rows: usize,
     ) -> Result<MuseGlimmerPackedPrefillViews, MuseGlimmerTextSessionError> {
-        if rows < MUSE_GLIMMER_PACKED_PREFILL_QUANTUM
-            || rows > MUSE_GLIMMER_PACKED_PREFILL_MAX_TOKENS
+        if !(MUSE_GLIMMER_PACKED_PREFILL_QUANTUM..=MUSE_GLIMMER_PACKED_PREFILL_MAX_TOKENS)
+            .contains(&rows)
             || !rows.is_multiple_of(MUSE_GLIMMER_PACKED_PREFILL_QUANTUM)
         {
             return invalid(format!(
@@ -1731,8 +1733,7 @@ impl<'ctx, 'model> MuseGlimmerTextForward<'ctx, 'model> {
         let mut chunk_index = 0;
         while chunk_start < packed_tokens.len() {
             let chunk_end = chunk_start
-                .checked_add(MUSE_GLIMMER_PACKED_PREFILL_MAX_TOKENS)
-                .unwrap_or(usize::MAX)
+                .saturating_add(MUSE_GLIMMER_PACKED_PREFILL_MAX_TOKENS)
                 .min(packed_tokens.len());
             let chunk = &packed_tokens[chunk_start..chunk_end];
             checkpoint()?;
@@ -2450,6 +2451,10 @@ impl<'ctx, 'model> MuseGlimmerTextForward<'ctx, 'model> {
             )?;
             return Ok(());
         }
+        if mat_mat_dispatch_supported(weight.dtype) {
+            encode_mat_mat_dispatch(self.ctx, encoder, weight, input, output, n_in, n_out, rows)?;
+            return Ok(());
+        }
         for row in 0..rows {
             let input = packed_row(input, row, n_in);
             let output = packed_row(output, row, n_out);
@@ -2515,9 +2520,7 @@ impl<'ctx, 'model> MuseGlimmerTextForward<'ctx, 'model> {
             encoder.end();
             Ok::<(), MuseGlimmerTextSessionError>(())
         })();
-        if let Err(error) = encode_result {
-            return Err(error);
-        }
+        encode_result?;
 
         command.commit();
         crate::metal::wait_unchecked(&command);
@@ -3476,8 +3479,8 @@ fn validate_f16_transport(
             transport_bytes.len()
         ));
     }
-    for (index, chunk) in transport_bytes.chunks_exact(2).enumerate() {
-        let value = half::f16::from_bits(u16::from_le_bytes(chunk.try_into().unwrap()));
+    for (index, chunk) in transport_bytes.as_chunks::<2>().0.iter().enumerate() {
+        let value = half::f16::from_bits(u16::from_le_bytes(*chunk));
         if !value.is_finite() {
             return invalid(format!(
                 "F16 post-block transport contains a non-finite value at index {index}"
@@ -3655,7 +3658,7 @@ mod tests {
     }
 
     #[test]
-    fn bf16_head_rows_match_separate_scalar_commands_bitwise() {
+    fn bf16_matmat_prefill_matches_the_row_loop() {
         let ctx = MetalContext::new().unwrap();
         let n_in = 64;
         let n_out = 7;
@@ -3685,18 +3688,8 @@ mod tests {
 
         let command = ctx.queue.commandBuffer().unwrap();
         let encoder = KernelEncoder::begin(&command);
-        for row in 0..rows {
-            encode_mat_vec_dispatch(
-                &ctx,
-                &encoder,
-                &weight,
-                &packed_row(&input, row, n_in),
-                &packed_row(&batched, row, n_out),
-                n_in,
-                n_out,
-            )
+        encode_mat_mat_dispatch(&ctx, &encoder, &weight, &input, &batched, n_in, n_out, rows)
             .unwrap();
-        }
         encoder.end();
         command.commit();
         crate::metal::wait_completed(&command).expect("command buffer completed");
@@ -3720,16 +3713,15 @@ mod tests {
             crate::metal::wait_completed(&command).expect("command buffer completed");
             assert_eq!(command.status(), MTLCommandBufferStatus::Completed);
         }
-        assert_eq!(
-            read_f32(&batched)
-                .iter()
-                .map(|value| value.to_bits())
-                .collect::<Vec<_>>(),
-            read_f32(&scalar)
-                .iter()
-                .map(|value| value.to_bits())
-                .collect::<Vec<_>>()
-        );
+        let batched = read_f32(&batched);
+        let scalar = read_f32(&scalar);
+        for (index, (&actual, &expected)) in batched.iter().zip(&scalar).enumerate() {
+            let tolerance = 2e-4_f32 * expected.abs().max(1.0);
+            assert!(
+                (actual - expected).abs() <= tolerance,
+                "BF16 matmat row {index}: {actual} vs row-loop {expected}, tolerance {tolerance}"
+            );
+        }
     }
 
     #[test]
@@ -5111,8 +5103,8 @@ mod tests {
                 let prefix_hash = hash_prefix(&session, count);
                 let mut logits = endpoint;
                 let mut emitted = Vec::new();
-                for step in 0..17 {
-                    let comparison = compare_logits(&logits, &reference_logits[step]);
+                for (step, expected_logits) in reference_logits.iter().enumerate().take(17) {
+                    let comparison = compare_logits(&logits, expected_logits);
                     let (rms, abs) = if step == 0 {
                         (0.002, 0.1)
                     } else {
@@ -5125,7 +5117,7 @@ mod tests {
                         "whole prefill step={step} {comparison:?}"
                     );
                     let token = greedy_argmax(&logits);
-                    assert_eq!(token, greedy_argmax(&reference_logits[step]));
+                    assert_eq!(token, greedy_argmax(expected_logits));
                     emitted.push(token);
                     eprintln!(
                         "MUSE_WHOLE_PREFILL_JSON {}",
@@ -5905,8 +5897,10 @@ mod tests {
             logits.len() * std::mem::size_of::<f32>()
         );
         let oracle = oracle_bytes
-            .chunks_exact(4)
-            .map(|bytes| f32::from_le_bytes(bytes.try_into().unwrap()))
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .map(|bytes| f32::from_le_bytes(*bytes))
             .collect::<Vec<_>>();
         let oracle_argmax = oracle
             .iter()

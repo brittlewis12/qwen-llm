@@ -31,7 +31,7 @@ questions the evidence has closed. Dated measurements remain in
   [2026-10-13 entry](PERF-LOG.md#2026-10-13---replayssm-precision-separation-works-keep-production-fp32).
 - Whole-model DeepSeek residency remains closed because forced termination left
   system-wide wired memory. See the
-  [2026-08-13 entry](archive/perf-log/2026-08.md#2026-08-13-whole-model-residency-optimization-lane-closed).
+  [2026-08-13 entry](PERF-LOG.md#2026-08-13-whole-model-residency-optimization-lane-closed).
 
 ## Historical planning maps
 

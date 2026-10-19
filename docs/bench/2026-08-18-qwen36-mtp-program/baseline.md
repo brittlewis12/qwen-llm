@@ -12,10 +12,10 @@ the original text is retained for the audit trail.
    of investigation is closed for the correct reason (there was never a
    native-MTP p02 α to regress from), not the wrong one (a bug was
    introduced). The nearest actual native-MTP narrative anchor is v0.510
-   ([PERF-LOG.md:10431-10435](../../archive/perf-log/2026-07.md#2026-07-07---v0510-mtp-hidden-semantics-reopen-acceptance)) — not p02-comparable.
+   ([PERF-LOG.md:10431-10435](../../PERF-LOG.md#2026-07-07---v0510-mtp-hidden-semantics-reopen-acceptance)) — not p02-comparable.
 
 2. **The p01 D7 prompt-construction fix has a named attribution.**
-   [PERF-LOG.md:210-215](../../archive/perf-log/2026-08.md#2026-08-15-qwen38-packed-d1-reframe-and-exact-redundancy-kill), commit `026de74` "repair packed D1 verification"
+   [PERF-LOG.md:210-215](../../PERF-LOG.md#2026-08-15-qwen38-packed-d1-reframe-and-exact-redundancy-kill), commit `026de74` "repair packed D1 verification"
    (2026-08-15): "Packed base prefill captures every final residual row in
    one target pass … speculative prefill moves `992.0 → 369.9 ms`; decode is
    unchanged; total moves from `0.868×` rollback to `1.061×` candidate."
@@ -69,7 +69,7 @@ s (σ ≈ 0.13 s, 0.5%); p02 all cells σ ≤ 6 ms.
 
 **Preregistered correctness gate PASSES for all 18 invocations** (`identical=true`
 ∧ `continuation_argmax_equal=true` — greedy-semantic + numerical-state
-equivalence per v0.587's [PERF-LOG.md:8237-8238](../../archive/perf-log/2026-07.md#2026-07-13---v0587-v0588-dense-mtp-committed-tail-falsifier) policy).
+equivalence per v0.587's [PERF-LOG.md:8237-8238](../../PERF-LOG.md#2026-07-13---v0587-v0588-dense-mtp-committed-tail-falsifier) policy).
 
 **`resume_audit_pass` fails on p01** (all three D configs, all three reps). Root
 cause: `bench.rs:10652-10656` requires `kv_payload_cosine ≥ 0.99999`; we
@@ -80,7 +80,7 @@ KV-numerical drift only.
 
 ## Delta vs perflog anchors — the story
 
-### p01 vs v0.587 anchor ([PERF-LOG.md:8258-8264](../../archive/perf-log/2026-07.md#2026-07-13---v0587-v0588-dense-mtp-committed-tail-falsifier))
+### p01 vs v0.587 anchor ([PERF-LOG.md:8258-8264](../../PERF-LOG.md#2026-07-13---v0587-v0588-dense-mtp-committed-tail-falsifier))
 
 | Metric | v0.587 (2026-07-13, b818986) | HEAD (2026-08-18, 98aba93) | Δ |
 | --- | ---: | ---: | ---: |
@@ -107,7 +107,7 @@ announces this fix under an obvious keyword (`MTP prompt construction`, `lazy
 MTP prefill`, `batched flush`, etc. — none match). The change must have landed
 as a side-effect of another line of work between 2026-07-13 and 2026-08-17.
 
-### p02 vs v0.556 anchor ([PERF-LOG.md:8867-8877](../../archive/perf-log/2026-07.md#2026-07-10---v0556-physical-n8-denominator-splits-dense-and-moe))
+### p02 vs v0.556 anchor ([PERF-LOG.md:8867-8877](../../PERF-LOG.md#2026-07-10---v0556-physical-n8-denominator-splits-dense-and-moe))
 
 | Metric | v0.556 (2026-07-10) | HEAD (2026-08-18) | Δ |
 | --- | ---: | ---: | ---: |
@@ -190,7 +190,7 @@ chain    : 135.0 ms/pkt (of which 3.05 serial-equiv per v0.556 economics; here
                           vs serial 39.3 ms/tok on ref → dec× 1.26 checks out)
 ```
 
-Weight-pass floor at 474 GB/s measured M4 Max stream ([PERF-LOG.md:17473-17476](../../archive/perf-log/2026-07.md#2026-07-05---v0484-gdn-update-dot-loop-falsifier)):
+Weight-pass floor at 474 GB/s measured M4 Max stream ([PERF-LOG.md:17473-17476](../../PERF-LOG.md#2026-07-05---v0484-gdn-update-dot-loop-falsifier)):
 16.74 GB / 474 GB/s = **35.3 ms** per full model pass. Verify at N=8 does one
 weight pass per packet plus per-position work. Observed verify 111.3 ms/pkt =
 35.3 ms weight-pass floor + **~76 ms** unexplained per-packet overhead. This is

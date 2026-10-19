@@ -9,17 +9,17 @@ supersede; the original text is retained for the audit trail.
    Verified in-tree at `target/profiles/v0555-n8-oracle-final/27b-run1.json`:
    `probe=Oracle`, `mtp_calls=0`, `acceptance_rate=1.0`, `emitted_per_step=8.0`,
    `phase_ms.draft=0.0`. The 2.60× decode-only was priced with a *perfect*
-   proposer to establish the verifier denominator ([PERF-LOG.md:8876-8881](../../archive/perf-log/2026-07.md#2026-07-10---v0556-physical-n8-denominator-splits-dense-and-moe):
+   proposer to establish the verifier denominator ([PERF-LOG.md:8876-8881](../../PERF-LOG.md#2026-07-10---v0556-physical-n8-denominator-splits-dense-and-moe):
    "one N8 packet costs about 3.047 serial transitions"). There is no
    native-MTP α to regress from. The nearest actual native-MTP narrative
-   anchor is v0.510 at [PERF-LOG.md:10431-10435](../../archive/perf-log/2026-07.md#2026-07-07---v0510-mtp-hidden-semantics-reopen-acceptance) (α=0.429 on a 28-token prompt
+   anchor is v0.510 at [PERF-LOG.md:10431-10435](../../PERF-LOG.md#2026-07-07---v0510-mtp-hidden-semantics-reopen-acceptance) (α=0.429 on a 28-token prompt
    with `single_cb_draft=true`, not p02-comparable).
    Cheap follow-up if needed: rerun p02 D7 with `--mtp-probe oracle` on HEAD.
    Prediction: ~16 packets, ~8 tok/pkt, ~2.5× dec× reproduces since verify
    is unchanged.
 
 2. **The p01 prompt-construction fix has a named attribution in the perflog.**
-   [PERF-LOG.md:210-215](../../archive/perf-log/2026-08.md#2026-08-15-qwen38-packed-d1-reframe-and-exact-redundancy-kill) (2026-08-15 "Qwen3.8 Packed D1 Reframe", commit
+   [PERF-LOG.md:210-215](../../PERF-LOG.md#2026-08-15-qwen38-packed-d1-reframe-and-exact-redundancy-kill) (2026-08-15 "Qwen3.8 Packed D1 Reframe", commit
    `026de74` "repair packed D1 verification"): "Packed base prefill captures
    every final residual row in one target pass, then executes only the
    shifted MTP KV bridge calls required by official post/post semantics …
@@ -31,13 +31,13 @@ supersede; the original text is retained for the audit trail.
    17.49s ≈ packed prefill 17.15s + ~340 ms bridge. My original "no perflog
    entry announces this" claim was a keyword-search miss.
 
-3. **The 3.8 vs 3.6-MTP wall delta cannot be bytes.** [PERF-LOG.md:257-259](../../archive/perf-log/2026-08.md#2026-08-15-qwen38-packed-d1-reframe-and-exact-redundancy-kill):
+3. **The 3.8 vs 3.6-MTP wall delta cannot be bytes.** [PERF-LOG.md:257-259](../../PERF-LOG.md#2026-08-15-qwen38-packed-d1-reframe-and-exact-redundancy-kill):
    "The 64-layer text backbone has exactly the same 16,806,250,496 base
    source bytes and 851 base requests as Qwen3.6-27B. Qwen3.8 adds one
    detached 289,527,808-byte MTP head." The +270 MB in the load ledger *is*
    the MTP head. Serial reference never reads it, so it cannot explain a
    6-8% serial regression. Live hypotheses: (a) **thermal / process order
-   drift** — [PERF-LOG.md:216-219](../../archive/perf-log/2026-08.md#2026-08-15-qwen38-packed-d1-reframe-and-exact-redundancy-kill) records a 19.95s → 25.95s baseline swing
+   drift** — [PERF-LOG.md:216-219](../../PERF-LOG.md#2026-08-15-qwen38-packed-d1-reframe-and-exact-redundancy-kill) records a 19.95s → 25.95s baseline swing
    in consecutive processes on this machine class, larger than the entire
    cross-model delta I measured; my 3.6 and 3.8 sweeps ran back-to-back,
    confounding order; (b) identity-keyed code paths (`a4f7564` embedding
@@ -67,7 +67,7 @@ Additional reframes:
 Adversarial review's ranked next actions:
 
 1. **PLD probe on p01 + p02** (`qwen-bench pld`, v0.558 gates at
-   [PERF-LOG.md:8846-8849](../../archive/perf-log/2026-07.md#2026-07-10---v0556-physical-n8-denominator-splits-dense-and-moe)). Cheapest possible experiment. `qwen-bench pld`
+   [PERF-LOG.md:8846-8849](../../PERF-LOG.md#2026-07-10---v0556-physical-n8-denominator-splits-dense-and-moe)). Cheapest possible experiment. `qwen-bench pld`
    is in-tree with `MATCH=8, DRAFT=7` aligning with physical-N8. p01 is a
    code-refactor prompt — output copies prompt chunks with edits, the
    exact-copy/periodic regime where v0.558 measured high ceilings. PLD has
@@ -87,7 +87,7 @@ Adversarial review's ranked next actions:
    through `e35f12d` era) is not ported to dense Qwen and would outrank P4
    entirely. p01 wall is 59-63% prefill; MTP adds nothing there.
 5. **N=8 verifier kernel shape audit for Q4_K_M.** Precedent:
-   [PERF-LOG.md:163-166](../../archive/perf-log/2026-08.md#2026-08-15-ridge-pareto-point-q6-embedding-go-low-bit-n2-repair) Ridge N2 32-column-tile fix moved 5240.6 → 2255.4
+   [PERF-LOG.md:163-166](../../PERF-LOG.md#2026-08-15-ridge-pareto-point-q6-embedding-go-low-bit-n2-repair) Ridge N2 32-column-tile fix moved 5240.6 → 2255.4
    ms (2.324×). Nobody has screened Q4_K N=8 packet kernels for the same
    class of shape cliff.
 6. **P4 (one-launch T-scan) only if P3 attributes the 12.2 ms/position term
@@ -95,7 +95,7 @@ Adversarial review's ranked next actions:
 
 Also on the table but not immediate:
 
-- **Calibrated sidecar draft head** ([PERF-LOG.md:8265-8270](../../archive/perf-log/2026-07.md#2026-07-09---v0539-q4k-mtp-draft-head-falsifier) MTPLX
+- **Calibrated sidecar draft head** ([PERF-LOG.md:8265-8270](../../PERF-LOG.md#2026-07-09---v0539-q4k-mtp-draft-head-falsifier) MTPLX
   affine-INT4 g32 clue). Highest ceiling on α (attacks acceptance itself,
   not cost). Highest cost (training pipeline).
 - **Boundary-fused chain / memoized QK-norm** (Layr-Labs leaderboard-style):
@@ -234,7 +234,7 @@ Proposed post-`X` targets (X = next candidate optimization, to be named):
 | all cells | correctness gate | 18/18 PASS | must remain 18/18 |
 | serial reference | median regression | — | ≤ 3% |
 
-Anti-guardrail (MTLResidencySet exclusion per [PERF-LOG.md:322-350](../../archive/perf-log/2026-08.md#2026-08-13-whole-model-residency-optimization-lane-closed)) stands.
+Anti-guardrail (MTLResidencySet exclusion per [PERF-LOG.md:322-350](../../PERF-LOG.md#2026-08-13-whole-model-residency-optimization-lane-closed)) stands.
 
 ## Program correction
 

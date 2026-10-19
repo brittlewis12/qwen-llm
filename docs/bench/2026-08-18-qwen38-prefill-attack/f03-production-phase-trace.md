@@ -88,7 +88,7 @@ FFN gate matmul: M=17408, N=512, K=5120.
 ## Two structural gap sources vs MLX
 
 1. **Tile shape at prefill N** (2× available). Precedent
-   [PERF-LOG.md:163-166](../../archive/perf-log/2026-08.md#2026-08-15-ridge-pareto-point-q6-embedding-go-low-bit-n2-repair): Ridge N=16 32-column tile fix moved 5240.6 →
+   [PERF-LOG.md:163-166](../../PERF-LOG.md#2026-08-15-ridge-pareto-point-q6-embedding-go-low-bit-n2-repair): Ridge N=16 32-column tile fix moved 5240.6 →
    2255.4 ms (2.32×). Same class of shape cliff, different N. This is real
    kernel work but bounded scope. Anchored to n64 at prefill shapes; try
    MMA-based variants at variable N (currently N=8-locked), or a tile
@@ -111,7 +111,7 @@ FFN gate matmul: M=17408, N=512, K=5120.
 M=5120, N=512, K=17408 for down). Microbench-style: run current `n64` at
 these exact shapes as baseline, then measure MMA8 with a variable-N dispatch,
 plus one or two hand-tuned candidates. This is the "tile-shape cliff repair"
-precedented at v0.500 Ridge N=16 ([PERF-LOG.md:163-166](../../archive/perf-log/2026-08.md#2026-08-15-ridge-pareto-point-q6-embedding-go-low-bit-n2-repair)); expected win 1.5-2×
+precedented at v0.500 Ridge N=16 ([PERF-LOG.md:163-166](../../PERF-LOG.md#2026-08-15-ridge-pareto-point-q6-embedding-go-low-bit-n2-repair)); expected win 1.5-2×
 FFN alone = 10-13% of total prefill wall. Bounded scope, correctness-cheap
 (compare against existing n64 output), maps directly onto the observed
 half-of-peak throughput gap.

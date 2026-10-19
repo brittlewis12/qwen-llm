@@ -109,7 +109,7 @@ serial denominator drifted.
 ### Anti-guardrail: MTLResidencySet exclusion
 
 No milestone in this program enables whole-model MTLResidencySet or
-wired-residency mechanism, per [PERF-LOG.md:322-350](../../archive/perf-log/2026-08.md#2026-08-13-whole-model-residency-optimization-lane-closed) closure (98.7 GiB wired
+wired-residency mechanism, per [PERF-LOG.md:322-350](../../PERF-LOG.md#2026-08-13-whole-model-residency-optimization-lane-closed) closure (98.7 GiB wired
 after SIGKILL, machine reboot required). Any candidate implicating it exits
 this program and enters a separate reopen review before measurement.
 

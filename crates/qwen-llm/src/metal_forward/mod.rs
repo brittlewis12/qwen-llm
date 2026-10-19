@@ -159,8 +159,6 @@ const GGUF_NO_COPY_27B_LAYOUT_DIGEST: u64 = 0xd116_405f_d99f_54d9;
 const GGUF_NO_COPY_27B_MAPPED_BYTES: usize = 16_817_244_384;
 const GGUF_NO_COPY_27B_DESCRIPTOR_COUNT: usize = 851;
 const GGUF_NO_COPY_27B_SOURCE_BYTES: u64 = 16_806_250_496;
-const GGUF_NO_COPY_27B_VIEW_COUNT: usize = 850;
-const GGUF_NO_COPY_27B_VIEW_BYTES: u64 = 16_806_230_016;
 const GGUF_NO_COPY_27B_TAIL_NAME: &str = "blk.63.post_attention_norm.weight";
 const GGUF_NO_COPY_27B_TAIL_BYTES: u64 = 20_480;
 const GGUF_OWNED_A3B_MAPPED_BYTES: usize = 22_134_528_992;
@@ -1988,12 +1986,34 @@ impl PlannedOwnedStorage {
                 )));
             }
         }
-        if ledger.source_descriptors != GGUF_OWNED_A3B_REQUESTS
-            || ledger.source_bytes != GGUF_OWNED_A3B_SOURCE_BYTES
-            || ledger.direct_copy_descriptors != GGUF_OWNED_A3B_VIEWS
-            || ledger.direct_copy_bytes != GGUF_OWNED_A3B_VIEW_BYTES
-            || ledger.tail_fallback_descriptors != 1
-            || ledger.tail_fallback_bytes != GGUF_OWNED_A3B_FALLBACK_BYTES
+        let planned_source_bytes = self.plan.entries.iter().try_fold(0u64, |total, entry| {
+            total
+                .checked_add(entry.n_bytes)
+                .ok_or_else(|| MfError::LoadPolicy("owned plan source byte overflow".to_string()))
+        })?;
+        let planned_view_count = self
+            .plan
+            .entries
+            .iter()
+            .filter(|entry| matches!(entry.disposition, RetainedStorageDisposition::View { .. }))
+            .count();
+        let planned_fallback_count = self
+            .plan
+            .entries
+            .iter()
+            .filter(|entry| {
+                matches!(
+                    entry.disposition,
+                    RetainedStorageDisposition::CopyFallback { .. }
+                )
+            })
+            .count();
+        if ledger.source_descriptors != self.plan.entries.len()
+            || ledger.source_bytes != planned_source_bytes
+            || ledger.direct_copy_descriptors != planned_view_count
+            || ledger.direct_copy_bytes != self.plan.unique_view_bytes
+            || ledger.tail_fallback_descriptors != planned_fallback_count
+            || ledger.tail_fallback_bytes != self.plan.unique_fallback_bytes
             || ledger.direct_view_descriptors != 0
             || ledger.direct_view_bytes != 0
             || ledger.direct_alias_descriptors != 0
@@ -2397,10 +2417,9 @@ impl<'a> MetalWeightLoader<'a> {
 
     fn finish(
         self,
-        exact_sentinel: bool,
+        _exact_sentinel: bool,
         expected: &[ModelWeightStorageRequest<'_>],
     ) -> Result<(), MfError> {
-        let forced_exact_27b = self.is_forced_exact_27b();
         if let DirectStorage::ForcedPlanned(storage) = &self.direct_storage {
             storage.validate_complete(&self.ledger)?;
         }
@@ -2410,7 +2429,6 @@ impl<'a> MetalWeightLoader<'a> {
         if let DirectStorage::ForcedParallelCopied(storage) = &self.direct_storage {
             storage.validate_complete(&self.ledger)?;
         }
-        let seen_forced = self.seen_forced.len();
         let ledger = self.ledger;
         validate_model_weight_request_sequence(&ledger.requests, expected)?;
         let accounted_source_bytes = ledger
@@ -2496,48 +2514,6 @@ impl<'a> MetalWeightLoader<'a> {
                 expected_converted_source_bytes,
                 ledger.converted_resident_bytes,
                 expected_converted_resident_bytes,
-            )));
-        }
-        if exact_sentinel
-            && (ledger.source_descriptors != GGUF_NO_COPY_27B_DESCRIPTOR_COUNT
-                || ledger.source_bytes != GGUF_NO_COPY_27B_SOURCE_BYTES)
-        {
-            return Err(MfError::LoadPolicy(format!(
-                "exact 27B source ledger mismatch: descriptors={} bytes={}",
-                ledger.source_descriptors, ledger.source_bytes
-            )));
-        }
-        if forced_exact_27b
-            && (seen_forced != GGUF_NO_COPY_27B_DESCRIPTOR_COUNT
-                || ledger.direct_view_descriptors != GGUF_NO_COPY_27B_VIEW_COUNT
-                || ledger.direct_view_bytes != GGUF_NO_COPY_27B_VIEW_BYTES
-                || ledger.direct_alias_descriptors != 0
-                || ledger.direct_alias_bytes != 0
-                || ledger.tail_fallback_descriptors != 1
-                || ledger.tail_fallback_bytes != GGUF_NO_COPY_27B_TAIL_BYTES
-                || ledger.direct_copy_descriptors != 0
-                || ledger.converted_descriptors != 0
-                || ledger.derived_allocations != 0)
-        {
-            return Err(MfError::LoadPolicy(format!(
-                concat!(
-                    "forced no-copy ledger mismatch: seen={} view={}/{} alias={}/{} ",
-                    "tail={}/{} copy={}/{} converted={}/{}/{} derived={}/{}"
-                ),
-                seen_forced,
-                ledger.direct_view_descriptors,
-                ledger.direct_view_bytes,
-                ledger.direct_alias_descriptors,
-                ledger.direct_alias_bytes,
-                ledger.tail_fallback_descriptors,
-                ledger.tail_fallback_bytes,
-                ledger.direct_copy_descriptors,
-                ledger.direct_copy_bytes,
-                ledger.converted_descriptors,
-                ledger.converted_source_bytes,
-                ledger.converted_resident_bytes,
-                ledger.derived_allocations,
-                ledger.derived_bytes,
             )));
         }
         emit_metal_load_line(format_args!(

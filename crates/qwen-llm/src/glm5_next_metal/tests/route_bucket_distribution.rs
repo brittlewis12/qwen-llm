@@ -41,7 +41,7 @@ fn maya_iq2_s_pp2048_bucket_distribution() {
     let mut session =
         Glm5NextSession::with_prefill_rows(&ctx, &weights, PROMPT + 8, CHUNK).unwrap();
     let logits = session.prefill_packed(&ctx, &tokens).unwrap();
-    assert_finite("bucket capture logits", &logits);
+    assert!(logits.iter().all(|value| value.is_finite()));
     assert_eq!(session.position(), PROMPT);
     let (capture, samples, n_experts) = route_bucket_capture::take().expect("capture");
     assert_eq!(n_experts, experts);

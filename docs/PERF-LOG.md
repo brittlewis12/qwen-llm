@@ -6,6 +6,36 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the current state and evidence index.
 
+## 2026-10-20 - V4.1 Complete Native Rows And Practical Grouped Acceptance
+
+- `1388793d` versus grouped `a86fe231`, M5 Ultra, NativeF32, default wired limit:
+  Q2 + Q6 PP1024 87.252 -> 162.796 tok/s (+86.58%), PP2048 84.501 -> 148.453
+  (+75.68%); IQ3 PP1024 141.331 -> 185.029 (+30.92%), PP2048 134.355 -> 170.613
+  (+26.99%). Both order-pair prefill comparisons favor the candidate. TG32 at
+  depth 2048 changes -0.18%/-0.37%; no decode gain claimed.
+- Six samples/arm in two process blocks; A/B/B/A order reuses an earlier matching
+  A1 block, with intervening experiments. PP capacity is 2048, TG capacity 2080.
+  Candidate prefill drift is substantial and retained (Q2 PP2048 160.921 down to
+  133.794). No scoped I/O or clock measurements establish its cause; these are
+  observed warmed rates, not a stable sustained peak. All raw samples remain.
+- IQ2_XS/IQ2_XXS gate/up and IQ2_XXS down reuse existing native row kernels;
+  actual full chunks now use grouped/native rows in all 40 layers. No shader
+  arithmetic, buffer, operand-precision or TensorOps change accompanies the IQ2
+  extension. Native rows below 128 for eligible IQ3/Q3 chunks are a speed choice;
+  all common 7/31/65/129/257-token exploratory shapes improve versus both prior arms.
+- The 22-task screen has identical visible answers on both quants through all
+  three revisions: code 8/10, reasoning 1/8, JSON 0/4. Six-document held-text NLL
+  changes native-to-grouped by +2.45e-7/-5.59e-7 nats/target; no top-1 changes in
+  384 targets per quant. IQ2 batching matches all those full-vocabulary rows
+  bitwise. These bounded checks are not comprehensive model quality.
+- Retain the grouped path on practical evidence, not universal baseline route
+  identity. Historical equivalence failures remain intact. Full source-138
+  contracts/workspace pass: 3,151 passed, zero failed, 651 ignored; Astra source
+  review finds no blocker. M5 targeted validation and both task runs complete.
+- [Source, protocols, numerical tradeoffs, drift and evidence](bench/2026-10-20-v41-complete-row-batching.md).
+  [Earlier grouped-only speed and stage attribution](bench/2026-10-20-v41-grouped-tradeoffs.md)
+  retains the intermediate measured revisions rather than relabeling them.
+
 ## 2026-10-20 - V4.1 Native Row Batching: Bitwise, 1.47-2.11x PP1024
 
 - Pure `fa40b081` versus common `abefb0af`, M5 Ultra, NativeF32 and default wired

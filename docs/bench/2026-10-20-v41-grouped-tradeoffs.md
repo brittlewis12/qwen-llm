@@ -7,6 +7,10 @@ remains valid evidence: the implementations are not baseline-equivalent under
 that contract. It does not establish that the grouped implementation has worse
 task accuracy.
 
+Follow-up: [complete native rows and practical acceptance](2026-10-20-v41-complete-row-batching.md)
+records the completed task/likelihood screen, IQ2 row extension and measured
+small-chunk selection. This checkpoint retains its original source identities.
+
 ## Source And Scope
 
 Production candidate `a86fe231` carries the retained `f1708acd` grouped kernels

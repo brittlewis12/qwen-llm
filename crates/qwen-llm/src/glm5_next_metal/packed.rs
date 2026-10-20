@@ -68,6 +68,10 @@ mod latent_mma_ab;
 mod prefill_cost;
 
 #[cfg(test)]
+#[path = "tests/route_bucket_distribution.rs"]
+mod route_bucket_distribution;
+
+#[cfg(test)]
 thread_local! {
     static ABSORB_TAIL: std::cell::Cell<(Option<bool>, usize)> = const { std::cell::Cell::new((None, 0)) };
 }
@@ -993,6 +997,95 @@ fn encode_experts(
     Ok(mode)
 }
 
+/// Test-only capture of live grouped-expert bucket counts. Packed scratch is
+/// reused by every layer, so the observer copies each layer's counts before
+/// the next layer overwrites them. Encoder splits occur only while enabled.
+#[cfg(test)]
+pub(crate) mod route_bucket_capture {
+    use super::*;
+    use std::cell::RefCell;
+
+    #[derive(Clone, Debug, serde::Serialize)]
+    pub(crate) struct Sample {
+        pub chunk: usize,
+        pub layer: usize,
+        pub rows: usize,
+    }
+
+    struct Capture {
+        values: MetalTensor,
+        experts: usize,
+        capacity: usize,
+        samples: Vec<Sample>,
+        layer_chunks: std::collections::BTreeMap<usize, usize>,
+    }
+
+    thread_local! {
+        static CAPTURE: RefCell<Option<Capture>> = const { RefCell::new(None) };
+    }
+
+    pub(crate) fn begin(ctx: &MetalContext, experts: usize, max_samples: usize) -> Result<()> {
+        let values = MetalTensor::zeros_i32(ctx, vec![(experts * max_samples) as u64])?;
+        CAPTURE.with(|capture| {
+            *capture.borrow_mut() = Some(Capture {
+                values,
+                experts,
+                capacity: max_samples,
+                samples: Vec::with_capacity(max_samples),
+                layer_chunks: std::collections::BTreeMap::new(),
+            });
+        });
+        Ok(())
+    }
+
+    pub(crate) fn active() -> bool {
+        CAPTURE.with(|capture| capture.borrow().is_some())
+    }
+
+    pub(crate) fn after_layer(
+        enc: &mut KernelEncoder,
+        counts: &MetalTensor,
+        layer: usize,
+        rows: usize,
+    ) {
+        CAPTURE.with(|capture| {
+            let mut capture = capture.borrow_mut();
+            let Some(capture) = capture.as_mut() else {
+                return;
+            };
+            let event = capture.samples.len();
+            assert!(event < capture.capacity, "route bucket capture capacity");
+            let chunk = capture.layer_chunks.entry(layer).or_default();
+            let sample = Sample {
+                chunk: *chunk,
+                layer,
+                rows,
+            };
+            *chunk += 1;
+            let destination = capture.values.view_subrange(
+                (event * capture.experts) as u64,
+                vec![capture.experts as u64],
+            );
+            let command = enc.parent_command_buffer();
+            enc.finish();
+            let blit = crate::metal::BlitEncoder::begin(&command);
+            blit.copy_tensor(counts, &destination);
+            blit.end();
+            *enc = KernelEncoder::begin(&command);
+            capture.samples.push(sample);
+        });
+    }
+
+    pub(crate) fn take() -> Option<(MetalTensor, Vec<Sample>, usize)> {
+        CAPTURE.with(|capture| {
+            capture
+                .borrow_mut()
+                .take()
+                .map(|capture| (capture.values, capture.samples, capture.experts))
+        })
+    }
+}
+
 /// Reuses one token's existing decode scratch for every packed row. No new
 /// buffers, expert repacking, host readback, or half activation staging.
 struct ExpertRowBuffers<'a> {
@@ -1682,6 +1775,10 @@ impl Glm5NextSession<'_> {
                             moe.down_experts.dtype,
                             p,
                         )?;
+                    }
+                    #[cfg(test)]
+                    if route_bucket_capture::active() {
+                        route_bucket_capture::after_layer(&mut enc, &p.counts, index, rows);
                     }
                     self.stage(&mut enc, Glm5NextStage::SharedExpert, Some(index))?;
                     let sf = c.shared_expert_ffn_size as usize;

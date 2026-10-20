@@ -2,7 +2,7 @@
 //! separate 384/top-6 geometry. This is not real-artifact qualification.
 use super::*;
 
-fn bank(
+pub(super) fn bank(
     ctx: &MetalContext,
     dtype: GgmlType,
     k: usize,
@@ -171,8 +171,12 @@ fn compare_native_rows(
                 }
             };
             if which == 0 {
-                with_native_rows(encode);
+                with_native_rows(|| {
+                    assert!(!grouped_selected(c, layer, n));
+                    encode();
+                });
             } else {
+                assert!(grouped_selected(c, layer, n));
                 encode();
             }
             enc.end();
@@ -248,6 +252,7 @@ fn witness(
         .map(|i| (i % 17) as f32 * 0.000137 - 0.001)
         .collect();
     let run_grouped = |start: usize, rows: usize| {
+        assert!(grouped_selected(c, layer, rows));
         let scratch = Rows::new(ctx, c, rows, 1).unwrap();
         write(&scratch.hc.normalized, &x[start * h..(start + rows) * h]);
         write(&scratch.buffers[0], &logits[start * e..(start + rows) * e]);
@@ -502,10 +507,17 @@ fn witness(
         write(&repeated.hc.normalized, &x.repeat(11));
         write(&repeated.buffers[0], &logits.repeat(11));
         write(&repeated.buffers[4], &shared.repeat(11));
+        metal::dispatch_census_begin();
         submit(ctx, "v41_grouped_repeated_rows", [0; 4], |enc| {
             ws.encode_routed_rows(ctx, enc, c, layer, 0, &repeated)
         })
         .unwrap();
+        let census = metal::dispatch_census_take();
+        assert_eq!(census.len(), 6);
+        assert!(census[1].kernel.contains("bucket"));
+        for index in [2, 4] {
+            assert!(census[index].kernel.ends_with("_f32x_grouped_slots"));
+        }
         repeated.validate_status().unwrap();
         compare_native_rows(ctx, &ws, c, layer, &repeated);
     }
@@ -522,7 +534,7 @@ fn new_dtype_triples_v41_widths_frozen_composition_and_dispatch() {
         (GgmlType::Q3_K, GgmlType::MXFP4),
         (GgmlType::Q3_K, GgmlType::Q3_K),
     ] {
-        witness(&ctx, gate, down, 5120, 2304, 3, 2, 3);
+        with_grouped_rows(|| witness(&ctx, gate, down, 5120, 2304, 3, 2, 3));
     }
 }
 
@@ -531,6 +543,6 @@ fn new_dtype_triples_384_top6_frozen_routes_and_partition() {
     let _lease = production_lease();
     let ctx = MetalContext::new().unwrap();
     for gate in [GgmlType::IQ3_XXS, GgmlType::Q3_K] {
-        witness(&ctx, gate, GgmlType::MXFP4, 256, 256, 384, 6, 33);
+        with_grouped_rows(|| witness(&ctx, gate, GgmlType::MXFP4, 256, 256, 384, 6, 33));
     }
 }

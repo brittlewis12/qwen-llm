@@ -499,7 +499,7 @@ impl Workspace {
             c.clamp,
         )?;
         layer.shared[2].encode_rows(enc, &b[3], &b[4], n)?;
-        if grouped_supported(c, layer) || native_rows_supported(c, layer) {
+        if grouped_selected(c, layer, n) || native_rows_supported(c, layer) {
             self.encode_routed_rows(ctx, enc, c, layer, id, scratch)?;
         } else {
             for row in 0..n {
@@ -556,7 +556,7 @@ impl Workspace {
             &b[9],
             &status,
         )?;
-        let grouped = grouped_supported(c, layer);
+        let grouped = grouped_selected(c, layer, n);
         if grouped {
             metal::encode_moe_route_bucket_slots_f32(
                 ctx, enc, &b[8], &counts, &b[11], c.experts, n, c.topk,
@@ -643,6 +643,20 @@ impl Workspace {
         dispatch(enc, extents.output as usize, 256);
         Ok(())
     }
+}
+
+fn grouped_selected(c: &Config, layer: &Layer<'_>, rows: usize) -> bool {
+    if !grouped_supported(c, layer) {
+        return false;
+    }
+    #[cfg(test)]
+    if tests::FORCE_GROUPED_ROWS.with(|flag| flag.get()) {
+        return true;
+    }
+    // Paired small-chunk curves favor native rows below 128, not a precision fallback.
+    !(rows < 128
+        && matches!(layer.banks[0].dtype, GgmlType::IQ3_XXS | GgmlType::Q3_K)
+        && native_rows_supported(c, layer))
 }
 
 fn grouped_supported(c: &Config, layer: &Layer<'_>) -> bool {

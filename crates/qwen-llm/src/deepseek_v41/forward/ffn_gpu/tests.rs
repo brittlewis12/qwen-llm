@@ -7,8 +7,23 @@ mod native_f32;
 #[path = "tests/native_rows.rs"]
 mod native_rows;
 
+#[path = "tests/strategy.rs"]
+mod strategy;
+
 thread_local! {
     pub(super) static NATIVE_ROWS_ONLY: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    pub(super) static FORCE_GROUPED_ROWS: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+fn with_grouped_rows<T>(f: impl FnOnce() -> T) -> T {
+    struct Restore(bool);
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            FORCE_GROUPED_ROWS.with(|flag| flag.set(self.0));
+        }
+    }
+    let _restore = Restore(FORCE_GROUPED_ROWS.with(|flag| flag.replace(true)));
+    f()
 }
 
 fn with_native_rows<T>(f: impl FnOnce() -> T) -> T {

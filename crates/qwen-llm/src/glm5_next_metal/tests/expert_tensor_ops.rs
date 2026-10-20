@@ -35,6 +35,34 @@ fn read_f32(tensor: &MetalTensor) -> Vec<f32> {
     }
 }
 
+fn iq2s_expert_f16_values(tensor: &MetalTensor, expert: usize, experts: usize) -> Vec<f32> {
+    let expert_bytes = tensor.n_bytes() as usize / experts;
+    let bytes = unsafe {
+        std::slice::from_raw_parts(
+            tensor
+                .buffer
+                .contents()
+                .as_ptr()
+                .cast::<u8>()
+                .add(tensor.offset as usize + expert * expert_bytes),
+            expert_bytes,
+        )
+    };
+    let desc = crate::tensor::TensorDesc {
+        name: "Maya IQ2_S expert probe".into(),
+        shape: tensor.shape[..2].to_vec(),
+        dtype: GgmlType::IQ2_S,
+        shard_idx: 0,
+        data_offset: 0,
+        n_bytes: expert_bytes as u64,
+    };
+    crate::codec::dequant_to_f32(&desc, bytes)
+        .expect("GGML IQ2_S expert dequant")
+        .into_iter()
+        .map(|value| half::f16::from_f32(value).to_f32())
+        .collect()
+}
+
 fn production_call(
     ctx: &MetalContext,
     gate: &MetalTensor,
@@ -263,10 +291,29 @@ fn maya_iq2_s_glm_shaped_expert_tensor_ab() {
         let production_values = read_f32(&production_output);
         let tensor_values = read_f32(&tensor_output);
         if rows == 10 {
+            let gate_values = iq2s_expert_f16_values(gate, chosen_expert, experts);
+            let up_values = iq2s_expert_f16_values(up, chosen_expert, experts);
+            let rounded_input = input_values
+                .iter()
+                .map(|&value| half::f16::from_f32(value).to_f32())
+                .collect::<Vec<_>>();
+            let mut cpu_head = Vec::new();
+            for channel in 0..8 {
+                let mut g = 0.0f32;
+                let mut u = 0.0f32;
+                for k in 0..hidden {
+                    g += gate_values[channel * hidden + k] * rounded_input[k];
+                    u += up_values[channel * hidden + k] * rounded_input[k];
+                }
+                let g = g.min(clamp_value);
+                let u = u.clamp(-clamp_value, clamp_value);
+                cpu_head.push((g / (1.0 + (-g).exp())) * u);
+            }
             eprintln!(
-                "production_head={:?} tensor_ops_head={:?}",
+                "production_head={:?} tensor_ops_head={:?} cpu_head={:?}",
                 &production_values[..8],
                 &tensor_values[..8],
+                cpu_head,
             );
         }
         let mut max_abs = 0.0f32;

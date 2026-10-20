@@ -662,8 +662,8 @@ impl Workspace {
 /// The half-staged grouped expert tiles GLM and DeepSeek V4 prefill use:
 /// operands rounded to half inside the tile, F32 sums, weights read once per
 /// tile rather than once per row. Covers every expert storage type with a
-/// generic grouped layout (IQ2_S, IQ3_XXS, IQ3_S, Q2_K, Q3_K, MXFP4, ...);
-/// IQ2_XXS/IQ2_XS layers keep the native-row path.
+/// generic grouped layout (IQ2_S, IQ3_XXS, IQ3_S, Q2_K, Q3_K, ...); MXFP4
+/// banks stay on the F32-operand tiles and IQ2_XXS/IQ2_XS on native rows.
 pub(super) fn half_grouped_supported(c: &Config, layer: &Layer<'_>) -> bool {
     #[cfg(test)]
     if tests::NATIVE_ROWS_ONLY.with(|flag| flag.get()) {

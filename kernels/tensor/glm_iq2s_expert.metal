@@ -78,7 +78,7 @@ kernel void kernel_tensor_glm_iq2s_expert_partial(
     tensor<threadgroup half, extents<int, 32, 16>, tensor_inline> left_gate(
         a, extents<int, 32, 16>());
     tensor<device float, extents<int, 16, 16>, tensor_inline> out_gate(
-        partial + ulong(group.z) * args.padded_rows * args.padded_ffn + ulong(row0) * args.padded_ffn + col0,
+        partial + ulong(group.z) * args.padded_rows * args.padded_ffn + ulong(col0) * args.padded_rows + row0,
         extents<int, 16, 16>());
     auto gate_destination = operation.get_destination_cooperative_tensor<
         decltype(left_gate), decltype(right), float>();
@@ -102,7 +102,7 @@ kernel void kernel_tensor_glm_iq2s_expert_partial(
     tensor<threadgroup half, extents<int, 32, 16>, tensor_inline> left_up(
         a, extents<int, 32, 16>());
     tensor<device float, extents<int, 16, 16>, tensor_inline> out_up(
-        partial + ulong(args.hidden / 32u + group.z) * args.padded_rows * args.padded_ffn + ulong(row0) * args.padded_ffn + col0,
+        partial + ulong(args.hidden / 32u + group.z) * args.padded_rows * args.padded_ffn + ulong(col0) * args.padded_rows + row0,
         extents<int, 16, 16>());
     auto up_destination = operation.get_destination_cooperative_tensor<
         decltype(left_up), decltype(right), float>();
@@ -123,9 +123,9 @@ kernel void kernel_tensor_glm_iq2s_expert_finish(
     float gate_total = 0.0f;
     float up_total = 0.0f;
     for (uint k = 0; k < tiles; ++k) {
-        const ulong tile_offset = ulong(k) * args.padded_rows * args.padded_ffn + ulong(row) * args.padded_ffn + channel;
+        const ulong tile_offset = ulong(k) * args.padded_rows * args.padded_ffn + ulong(channel) * args.padded_rows + row;
         gate_total += partial[tile_offset];
-        up_total += partial[ulong(tiles + k) * args.padded_rows * args.padded_ffn + ulong(row) * args.padded_ffn + channel];
+        up_total += partial[ulong(tiles + k) * args.padded_rows * args.padded_ffn + ulong(channel) * args.padded_rows + row];
     }
     const float g = min(gate_total, args.clamp_value);
     const float u = clamp(up_total, -args.clamp_value, args.clamp_value);

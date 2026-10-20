@@ -99,14 +99,18 @@ row warmups read 25,182,208 bytes each; their measurements remain in the logs.
 The accepted Q2 measurement prioritizes the FFN stage. Source/inventory analysis
 finds only 10/40 routed layers grouped in each artifact; the other 30 loop the
 routed path per token. All gate/up pairs match in dtype and satisfy geometry.
-Missing grouped gate/up support, not mixed storage, blocks them. Shared/router/HC
-work remains batched. Single-token decode uses native per-token kernels throughout.
+Missing grouped gate/up support, not mixed storage, blocks them; three Q2 layers
+also lack grouped IQ2_XXS down support. Shared-expert, router-projection and HC
+work remains batched, but routing/selection is per-token in fallback layers.
+Single-token decode uses native per-token kernels throughout.
 
 Reusing existing F32 grouped decoders for IQ3_XXS and Q3_K gate/up would raise
 eligibility to 25/40 layers for Q2 and 35/40 for IQ3. Eligibility is not a speedup
 prediction: bucket occupancy, tile utilization, and newly reachable down paths
-need qualification. Preserve weight-before-down, asymmetric clamp, routing/slot
-order and full F32 operands. Independent codec/F64 tests and same-artifact
+need qualification. Twenty newly eligible IQ3 layers use MXFP4 down; exponent-0/1
+equivalence is a promotion blocker until qualified. Preserve weight-before-down,
+asymmetric clamp, routing/slot order and full F32 operands. Independent codec/F64
+tests and same-artifact
 numerical/performance comparisons must precede promotion. This is separate from
 the parallel Metal 4.1 tensor infrastructure and its F16 witness.
 

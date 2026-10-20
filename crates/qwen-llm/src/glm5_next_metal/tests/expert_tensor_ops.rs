@@ -262,6 +262,13 @@ fn maya_iq2_s_glm_shaped_expert_tensor_ab() {
         tensor_run();
         let production_values = read_f32(&production_output);
         let tensor_values = read_f32(&tensor_output);
+        if rows == 10 {
+            eprintln!(
+                "production_head={:?} tensor_ops_head={:?}",
+                &production_values[..8],
+                &tensor_values[..8],
+            );
+        }
         let mut max_abs = 0.0f32;
         let mut error_square = 0.0f64;
         let mut reference_square = 0.0f64;

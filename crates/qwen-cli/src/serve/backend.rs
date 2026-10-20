@@ -373,7 +373,7 @@ pub(super) fn start(
                 crate::drafter_policy::Lane::Serve,
             )?
             .expect("drafter path was present")
-            .priced_metal_bytes(runtime.context(), &gguf)
+            .priced_metal_bytes(runtime.context())
         })
         .transpose()?;
     let load_started = Instant::now();

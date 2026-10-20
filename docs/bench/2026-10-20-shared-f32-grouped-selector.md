@@ -328,5 +328,51 @@ greedy, cache-disabled screen is a bounded regression comparison, not a claim
 about the model's best achievable task quality. Full evidence is retained in
 `task-comparison.json` and `likelihood-comparison.json`.
 
-These completed operator and quality measurements do not themselves establish
-whole-model throughput or an installation result.
+### M5 Whole-Model Comparison
+
+The same campaign completed fresh baseline/candidate/candidate/baseline blocks,
+alternating quant order in successive blocks. No earlier A1 is reused. Baseline
+is `1388793d`, candidate `25d67da6`; production chunk256 and NativeF32 throughout.
+PP1024/2048 share capacity2048; TG32 starts at depth2048 with capacity2080. Seed1,
+three repetitions per row/process, normal warmup and lease, validation flags
+unset, wired limit0. `timing-comparison.json` and all original suite JSON/logs
+remain in the campaign directory. No samples are filtered or retried.
+
+Means +/- sample SD in tok/s; six repetitions per arm are nested in two process
+blocks, not six independent experiments. Pair changes compare A1/B2 and B3/A4.
+
+| Quant | Workload | Baseline | Candidate | Mean change | Pair changes |
+| --- | --- | ---: | ---: | ---: | ---: |
+| Q2 + Q6 | PP1024 | 162.550 +/- 9.059 | 165.336 +/- 4.509 | +1.71% | -5.54%, +9.75% |
+| Q2 + Q6 | PP2048 | 138.566 +/- 6.543 | 152.640 +/- 7.583 | +10.16% | +4.87%, +15.65% |
+| Q2 + Q6 | TG32 at 2048 | 21.482 +/- 0.073 | 21.470 +/- 0.090 | -0.05% | -0.06%, -0.05% |
+| IQ3 | PP1024 | 182.352 +/- 12.329 | 200.053 +/- 5.748 | +9.71% | +5.80%, +14.13% |
+| IQ3 | PP2048 | 168.940 +/- 13.036 | 182.556 +/- 6.397 | +8.06% | +1.99%, +15.03% |
+| IQ3 | TG32 at 2048 | 21.032 +/- 0.109 | 21.102 +/- 0.054 | +0.33% | -0.13%, +0.80% |
+
+Both order pairs favor batched attention at PP2048 in both quants and at IQ3
+PP1024. Q2 PP1024 is order-sensitive: its small pooled gain is not a demonstrated
+repeatable improvement. Singleton decode is unchanged by the selector; no decode
+gain follows from its small observed differences.
+
+Drift remains substantial in both arms. Q2 baseline PP1024 block means fall
+170.818 -> 154.281, while candidate means rise 161.355 -> 169.316. IQ3 baseline
+PP1024 falls 193.606 -> 171.097, candidate 204.834 -> 195.273. Within the last
+Q2 baseline PP2048 block, samples fall 143.404 -> 128.490; IQ3 candidate's second
+PP2048 block falls 191.100 -> 173.209. All observations remain in the averages.
+Host before/after process/power/thermal snapshots are not continuous isolation,
+clock or scoped physical-I/O evidence; the cause is not established. Do not turn
+these warmed observations into stationary peak or long-context claims.
+
+The separate exploratory short curve uses capacity257, one fresh block per arm
+and quant, three repetitions, baseline then candidate (not ABBA). Shapes
+7/31/65/127/128/129 change by at most 0.25% in either direction; PP257 improves
+0.82% in Q2 and 1.08% in IQ3. This is not a threshold-only causal experiment.
+
+Retain the shared F32 selector on the practical quality results, affected-caller
+operator evidence on M4/M5, and repeatable direction of the larger-prefill gains.
+No baseline-bitwise requirement or arbitrary KL cutoff vetoes the numerical
+changes. The existing scalar path remains for shapes where batching does not
+pay, not as a fallback for uncertainty about every possible model output.
+Installation and integrated-workspace verification are separate delivery steps;
+this table records the actual measured revisions, not a later integration build.

@@ -6,6 +6,28 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the current state and evidence index.
 
+## 2026-10-20 - V4.1 Shared F32 Batched Attention
+
+- Fresh A/B/B/A on M5 Ultra, `25d67da6` versus complete-row `1388793d`, NativeF32
+  and default wired limit. Q2 + Q6 PP2048 138.566 -> 152.640 tok/s (+10.16%);
+  IQ3 PP1024 182.352 -> 200.053 (+9.71%), PP2048 168.940 -> 182.556 (+8.06%).
+  Both order pairs favor these gains. Q2 PP1024's +1.71% pooled result changes
+  sign by order (-5.54%/+9.75%); do not claim a repeatable 1K gain there.
+- Scalar decode is unchanged; TG32 at depth2048 changes -0.05%/+0.33%. All 72
+  canonical samples remain, nested in two process blocks/arm. Significant drift
+  affects both arms; no clock or scoped I/O evidence establishes its cause.
+  Separate short shapes through129 are effectively unchanged; PP257 +0.82%/+1.08%.
+- Reuse the shared grouped F32 selector and direct-F32 MMA; no operand narrowing,
+  new model backend or TensorOps dependency. M5 batched Sink improves 1.215-1.458x;
+  affected GLM shared projection geometries improve 3.820-5.659x, not whole GLM.
+  M4 also benefits. All 684 M5 microprobe samples are retained; singleton controls
+  remain scalar. M5 targeted correctness: 63 passed, three performance probes ignored.
+- Same six frozen documents, 384 teacher-forced targets/quant: mean NLL changes
+  -4.20e-7/+3.87e-8, no top-1 changes. All 22 visible task answers remain identical,
+  including existing failures/truncation. These bounded checks are not broad quality.
+  Retain the measured fast path on practical evidence, not universal route identity.
+- [Protocols, all gains, numerical differences, drift and limits](bench/2026-10-20-shared-f32-grouped-selector.md).
+
 ## 2026-10-20 - DFlash2 Gameplay Replay: Keep Speculation Opt-In
 
 - Clean `0f6f4436`, M4 Max, normal lease and Metal validation. Saved-message

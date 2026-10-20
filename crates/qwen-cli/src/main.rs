@@ -370,12 +370,24 @@ fn run() -> Result<()> {
     // family before any lane allocates on the GPU (or opens the drafter):
     // unsupported families are refused here with the shared code, so no lane
     // can accept and silently ignore `--drafter`.
-    let drafter = drafter_policy::PreparedDrafter::prepare(
-        args.drafter.as_deref(),
-        &gguf,
+    if let drafter_policy::DrafterDecision::Unsupported(reason) = drafter_policy::resolve_drafter(
         model_family,
         drafter_policy::Lane::CliSingleTurn,
-    )?;
+        args.drafter.is_some(),
+    ) {
+        bail!("{reason}");
+    }
+    // Specialized targets bind dimensions from their own validated configuration.
+    let drafter = if matches!(family, ModelFamily::Qwen35 | ModelFamily::Qwen35Moe) {
+        drafter_policy::PreparedDrafter::prepare(
+            args.drafter.as_deref(),
+            &gguf,
+            model_family,
+            drafter_policy::Lane::CliSingleTurn,
+        )?
+    } else {
+        None
+    };
     // Structured run output is a verified-chat format: settled here, before
     // any lane loads, so no family can accept and ignore it.
     if let cli::Invocation::Run(run) = &invocation

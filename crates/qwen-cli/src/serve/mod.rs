@@ -570,15 +570,25 @@ pub(crate) fn run_serve(invocation: crate::cli::ServeInvocation) -> Result<()> {
     } else {
         tracing::info!(target: "qwen_diag", "serve: template_style={}", template_style.as_str());
     }
-    // Drafter admission checks the model header before family preparation.
-    // EngineBackend::new performs the GPU copy from the path.
-    let drafter = crate::drafter_policy::PreparedDrafter::prepare(
-        invocation.drafter.as_deref(),
-        &gguf,
-        Some(family),
-        crate::drafter_policy::Lane::Serve,
-    )?;
-    drop(drafter);
+    // Settle support before family preparation; specialized engines bind their
+    // drafter against dimensions from their own validated target configuration.
+    if let crate::drafter_policy::DrafterDecision::Unsupported(reason) =
+        crate::drafter_policy::resolve_drafter(
+            Some(family),
+            crate::drafter_policy::Lane::Serve,
+            invocation.drafter.is_some(),
+        )
+    {
+        anyhow::bail!("{reason}");
+    }
+    if matches!(family, ModelFamily::Qwen35 | ModelFamily::Qwen35Moe) {
+        crate::drafter_policy::PreparedDrafter::prepare(
+            invocation.drafter.as_deref(),
+            &gguf,
+            Some(family),
+            crate::drafter_policy::Lane::Serve,
+        )?;
+    }
     match family {
         ModelFamily::DeepSeekV41 => {
             let prepared = backend_v41::Prepared::new(&gguf, &invocation)?;

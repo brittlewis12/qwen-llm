@@ -120,6 +120,64 @@ See also: `docs/PERF-ROADMAP.md` for the current state and evidence index.
   next slice; Flash-Next needs GDN/PLE/QSA rollback, GLM-Flash KDA/MLA rollback
   and mean-stream captures. Full GLM5.3 also needs target-engine bring-up.
 
+## 2026-10-20 - Flash-Next: Split Decode Attention +29-43% At Depth; PLE Cache Warm Halves New-Text Prefill
+
+- **Split decode attention** (`perf/flashnext-split-qsa`, `abef82a1`): the
+  released 24/2/256 QSA geometry decodes attention with the value
+  accumulation split over up to 64 key ranges per KV head once 256 keys are
+  selected, replacing the one-threadgroup-per-head kernel that looped over
+  every selected key. The path had been retired on 2026-09-16 on a 1e-3
+  max-abs bound (worst step 1.0000004e-3); it is judged here by next-token
+  distribution: 32 teacher-forced steps at depth 2,179, mean KL between arms
+  1.6e-11 nats, zero arg-max flips, F16 caches within one half-ulp.
+- tg128 between clean binaries, ABBA, three reps per arm. M4 Max,
+  UD-Q3_K_XL: +36.5% at depth 2K, +29% at 8K, +33.5% at 16K (first pass;
+  arm 1 shared the machine with a build). M5 Ultra, GSQ-RCO IQ3_S:
+  31.36 -> 44.96 tok/s at 2K (+43.4%), 31.06 -> 43.96 at 8K (+41.5%),
+  30.42 -> 42.40 at 16K (+39.4%), depth 0 unchanged (44.4 both arms, the
+  path is not eligible below 256 keys), pp2048 unchanged within spread.
+  Decode at 16K now sits within ~5% of depth 0 on the M5. Model-free leaf:
+  0.49 -> 0.116 ms per layer at 2,051 keys, closer to the F64 oracle than
+  the incumbent; slower below ~64 keys, hence the threshold.
+  [Packet](bench/2026-10-20-flashnext-split-qsa-decode.md).
+- **PLE table cache warm** (`0893c2e2`): every token gathers 16 n-gram rows
+  from the 27 GiB memory-mapped table; text whose rows the page cache has
+  not seen paid a disk fault per row on the prefill's CPU path. M5 Ultra,
+  `qwen serve`, 2.2-2.9K-token prompts of new text: 4.8-5.5 s cold versus
+  2.5-3.1 s with the rows cached (460-520 -> 900-925 tok/s; synthetic pp2048
+  is ~1,190). The runtime now reads the table's byte range once through the
+  parallel pread warmer in the background after load (skipped when a
+  residency probe already finds it resident; no allocation; cancelled on
+  drop). With it a fresh process prefills new text at ~900 tok/s.
+- **Serve warm-up** (`a38507b8`): one short packed prefill on a throwaway
+  runner before the listener accepts, as GLM does, so the first request is
+  not charged the weights' first GPU use: first 2.3K-token request of a
+  fresh process 8.1 s -> 2.5 s, warm-up 0.6 s at startup. Prefix reuse is
+  unchanged (restore 3-5 ms, TTFT 0.22 s).
+- **HC combine fusion** (`1260c5fe`): inject projection and injection add in
+  one kernel per branch. One profiled token at depth 2,570 on the M5:
+  command GPU 20.93 -> 20.54 ms, about 4 us per deleted dispatch in situ. A
+  fused norm/down/SiLU read front was measured slower (20.9 -> 29.0 ms:
+  every output row re-read the normalized input) and is not kept.
+- **Where the M5 step goes** (same token, 20.5 ms): GDN blocks 0.355 ms x 34,
+  QSA blocks 0.594 ms x 12, layers 0-1 + PLE 1.0 ms, LM head tail 0.5 ms.
+  Weight bytes are ~6 ms at the 854 GB/s stream rate; the B0 topology probe
+  puts a dispatch boundary at 1.7-5.2 us on this GPU; the rest is kernel
+  fill/drain over ~1,670 dispatches. Quiet-machine CPU encode is 2.2 ms per
+  token (the earlier 6.7 ms was a loaded M4), so overlapping encode with GPU
+  execution is bounded near 9% here.
+- **Dense requant screen** (not promoted): UD-Q3_K_XL with the Q8_0
+  always-on projections requantized by llama-quantize (fork fix `d3f2715f6`
+  so same-type copies need no imatrix). Against the incumbent over a 60K-token
+  code/prose corpus: Q6_K-dense PPL ratio 1.0004, mean KL 0.041, same top-1
+  92.2%, -12% bytes/token; Q5_K 1.015 / 0.078 / 89.2%; Q4_K 1.050 / 0.172 /
+  84.8%. Per-class at Q5_K: attention projections cost the most per byte,
+  then GDN, then shared experts. The per-token KL is heavy-tailed
+  (expert-routing flips near ties), so PPL and task outcomes carry the
+  verdict on this family. The GSQ-RCO IQ3_S artifact (per-tensor sensitivity
+  search; HC at BF16, 4.77 GiB/token versus 5.37) loads through the native
+  role admission unchanged and is the candidate M4 default pending its A/B.
+
 ## 2026-10-20 - V4.1 Native Row Batching: Bitwise, 1.47-2.11x PP1024
 
 - Pure `fa40b081` versus common `abefb0af`, M5 Ultra, NativeF32 and default wired

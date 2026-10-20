@@ -920,7 +920,7 @@ pub fn grouped_projection_supported(dtype: GgmlType) -> bool {
     GROUPED_PROJECTION_DTYPES.contains(&dtype)
 }
 
-/// Scalar baseline pipeline name, independent of specialized Q8 and Q6_K MMA dispatch.
+/// Scalar baseline pipeline name, independent of specialized Q8 and MMA dispatch.
 pub fn grouped_projection_pipeline_name(dtype: GgmlType) -> Option<String> {
     let suffix = match dtype {
         GgmlType::Q2_0 => "q2_0",
@@ -961,6 +961,25 @@ struct GroupedProjectionArgs {
 const GROUPED_Q6_SCALAR8_KERNEL: &str = "kernel_latent_grouped_q6_K_f32_scalar8";
 const GROUPED_Q6_MMA_KERNEL: &str = "kernel_latent_grouped_q6_K_f32_r2c16k64";
 const GROUPED_MMA_SCRATCH_BYTES: usize = 16 * 64 * std::mem::size_of::<f32>();
+const GROUPED_F32_MMA_KERNEL: &str = "kernel_latent_grouped_f32_f32_m16n64k32";
+
+// Batched F32 PV wins at 8/32 groups, not at one. Require at least the 256
+// threadgroups in the smallest measured winning grid (M512, rows64, groups8).
+// This is a portable work heuristic, not a model/device whitelist or a promise
+// of speed at unmeasured K/M/row counts. Count complete tiles, excluding tails.
+fn grouped_projection_f32_mma_eligible(dtype: GgmlType, args: &GroupedProjectionArgs) -> bool {
+    dtype == GgmlType::F32
+        && args.k >= 256
+        && args.k.is_multiple_of(32)
+        && args.m > 0
+        && args.m.is_multiple_of(16)
+        && args.groups >= 8
+        && args.rows >= 64
+        && (args.m / 16)
+            .checked_mul(args.rows / 64)
+            .and_then(|tiles| tiles.checked_mul(args.groups))
+            .is_some_and(|tiles| tiles >= 256)
+}
 
 // This checks storage/tile geometry, not a model-family or head-count whitelist.
 fn grouped_projection_mma_eligible(dtype: GgmlType, args: &GroupedProjectionArgs) -> bool {
@@ -1058,16 +1077,29 @@ fn grouped_projection_scalar_preflight(
     device_bytes: usize,
 ) -> Result<Pipeline, MetalError> {
     let pso = candidate?;
-    if pso.threadExecutionWidth() != 32
-        || pso.maxTotalThreadsPerThreadgroup() < 128
-        || pso.staticThreadgroupMemoryLength() > device_bytes
-    {
+    grouped_projection_scalar_capacity(
+        pso.threadExecutionWidth(),
+        pso.maxTotalThreadsPerThreadgroup(),
+        pso.staticThreadgroupMemoryLength(),
+        device_bytes,
+    )?;
+    Ok(pso)
+}
+
+// Also used by direct F32 MMA: four simdgroups and no dynamic scratch.
+fn grouped_projection_scalar_capacity(
+    simd_width: usize,
+    max_threads: usize,
+    static_bytes: usize,
+    device_bytes: usize,
+) -> Result<(), MetalError> {
+    if simd_width != 32 || max_threads < 128 || static_bytes > device_bytes {
         return Err(bad_shape(
             "grouped_projection",
             "needs four 32-lane simdgroups",
         ));
     }
-    Ok(pso)
+    Ok(())
 }
 
 fn grouped_projection_mma_capacity(
@@ -1256,7 +1288,12 @@ fn validate_grouped_projection(
 /// Ineligible Q6_K calls and the test-scoped baseline override retain the
 /// whole-call scalar4 path. Scalar8 is retained only as an explicit test-only
 /// experiment; production fallback and MMA remainders always use scalar4.
-/// Other formats and decode are unchanged.
+/// F32 weights use a direct-F32 16-output x 64-row MMA prefix when K >= 256
+/// aligns to 32, M aligns to 16, groups >= 8, and the complete prefix contains
+/// at least 256 threadgroups. Operands, K32 partials and totals stay F32; scalar4
+/// handles remainders and optimization misses. This performance heuristic is
+/// grounded in batched PV measurements, not a quality gate or model whitelist.
+/// In particular singleton groups retain scalar. Other formats/decode are unchanged.
 /// This public encoder delegates with `allow_mma = true`.
 #[allow(clippy::too_many_arguments)]
 pub fn encode_mat_mat_grouped_f32(
@@ -1278,7 +1315,7 @@ pub fn encode_mat_mat_grouped_f32(
 /// [`encode_mat_mat_grouped_f32`] with caller-controlled MMA permission.
 /// `allow_mma = false` selects scalar4; it does not change operands, shapes,
 /// or Q8 dispatch. Scalar8 is available only through its explicit test scope.
-/// `true` permits the existing Q6_K MMA prefix plus scalar4 remainder.
+/// `true` permits eligible Q6_K/F32 MMA prefixes plus scalar4 remainders.
 /// Test override `Some(true)` forces old scalar4; `Some(false)` permits MMA
 /// regardless of this argument; `None` follows this argument. Missing/unsupported
 /// scalar8 candidates fall back to scalar4 before any dispatch. Whole-call
@@ -1295,6 +1332,35 @@ pub(crate) fn encode_mat_mat_grouped_f32_with_policy(
     groups: usize,
     rows: usize,
     allow_mma: bool,
+) -> Result<(), MetalError> {
+    encode_mat_mat_grouped_f32_inner(
+        ctx,
+        enc,
+        weight,
+        input,
+        output,
+        n_in,
+        n_out,
+        groups,
+        rows,
+        allow_mma,
+        grouped_projection_scalar_baseline(),
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn encode_mat_mat_grouped_f32_inner(
+    ctx: &MetalContext,
+    enc: &KernelEncoder,
+    weight: &MetalTensor,
+    input: &MetalTensor,
+    output: &MetalTensor,
+    n_in: usize,
+    n_out: usize,
+    groups: usize,
+    rows: usize,
+    allow_mma: bool,
+    baseline: Option<bool>,
 ) -> Result<(), MetalError> {
     const K: &str = "grouped_projection";
     require_serial(K, enc)?;
@@ -1329,14 +1395,21 @@ pub(crate) fn encode_mat_mat_grouped_f32_with_policy(
             }
         }
     }
-    let (allow_mma, _force_scalar4) =
-        grouped_projection_policy(allow_mma, grouped_projection_scalar_baseline());
+    let (allow_mma, _force_scalar4) = grouped_projection_policy(allow_mma, baseline);
     // Resolve both candidates before creating views or encoding any dispatch.
-    let mma = if allow_mma && grouped_projection_mma_eligible(weight.dtype, &args) {
+    let mma = if allow_mma && grouped_projection_f32_mma_eligible(weight.dtype, &args) {
+        grouped_projection_scalar_preflight(
+            ctx.pipeline(GROUPED_F32_MMA_KERNEL),
+            ctx.device.maxThreadgroupMemoryLength(),
+        )
+        .ok()
+        .map(|pso| (pso, 64, 0))
+    } else if allow_mma && grouped_projection_mma_eligible(weight.dtype, &args) {
         grouped_projection_mma_preflight(
             ctx.pipeline(GROUPED_Q6_MMA_KERNEL),
             ctx.device.maxThreadgroupMemoryLength(),
         )
+        .map(|pso| (pso, 128, GROUPED_MMA_SCRATCH_BYTES))
     } else {
         None
     };
@@ -1369,8 +1442,8 @@ pub(crate) fn encode_mat_mat_grouped_f32_with_policy(
             None => (pso, scalar_tokens),
         }
     };
-    let (args, scalar_tail) = if let Some(mma) = mma {
-        let prefix_rows = rows / 128 * 128;
+    let (args, scalar_tail) = if let Some((mma, tile_rows, scratch_bytes)) = mma {
+        let prefix_rows = rows / tile_rows * tile_rows;
         let tail_rows = rows - prefix_rows;
         // view_subrange checks the logical bounds and preserves buffer offsets
         // and provenance. Full validation above proved all extent products and
@@ -1398,10 +1471,12 @@ pub(crate) fn encode_mat_mat_grouped_f32_with_policy(
         enc.set_tensor(1, weight);
         enc.set_tensor(2, &prefix_input);
         enc.set_tensor(3, &prefix_output);
-        enc.set_threadgroup_memory(0, GROUPED_MMA_SCRATCH_BYTES);
+        if scratch_bytes > 0 {
+            enc.set_threadgroup_memory(0, scratch_bytes);
+        }
         enc.dispatch(
             MTLSize {
-                width: prefix_rows / 128,
+                width: prefix_rows / tile_rows,
                 height: n_out / 16,
                 depth: groups,
             },
@@ -1495,6 +1570,13 @@ pub fn encode_mat_vec_grouped_f32(
         1,
     )
 }
+
+#[cfg(test)]
+#[path = "latent/grouped_f32_tests.rs"]
+mod grouped_f32_tests;
+
+#[cfg(test)]
+pub(crate) use grouped_f32_tests::{GroupedF32TestVariant, encode_mat_mat_grouped_f32_for_test};
 
 #[cfg(test)]
 #[path = "latent/grouped_native_tests.rs"]

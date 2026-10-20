@@ -2020,3 +2020,77 @@ fn q8_latent_dispatch_is_unchanged_across_fast_precisions() {
         }
     }
 }
+
+#[test]
+fn f32_latent_production_mma_preserves_exact_and_dense_policies() {
+    use crate::metal::{dispatch_census_begin, dispatch_census_take};
+    let Some(ctx) = crate::test_fixtures::metal_context_or_skip() else {
+        return;
+    };
+    let groups = 64usize;
+    for (k, m) in [(256usize, 512usize), (512, 256)] {
+        let (weight, decoded) = bank(&ctx, GgmlType::F32, vec![k as u64, m as u64, groups as u64]);
+        for rows in [64usize, 65] {
+            let values: Vec<f32> = (0..k * groups * rows)
+                .map(|i| ((i * 13 + i / k) % 89) as f32 * 0.01719 - 0.7)
+                .collect();
+            let input = tensor(&ctx, &values, vec![(k * groups) as u64, rows as u64]);
+            let output = empty(&ctx, vec![(m * groups) as u64, rows as u64]);
+            let mut baseline: Option<Vec<f32>> = None;
+            for lineage in [PackedLineage::Exact, PackedLineage::Fast] {
+                for precision in FastPrecision::ALL {
+                    let arith = Arith { lineage, precision };
+                    dispatch_census_begin();
+                    run(&ctx, |enc| {
+                        absorb_rows(
+                            &ctx, enc, arith, &weight, &input, &output, k, m, groups, rows,
+                        )
+                        .unwrap()
+                    });
+                    let census = dispatch_census_take();
+                    let mma = lineage == PackedLineage::Fast
+                        && matches!(precision, FastPrecision::Half | FastPrecision::F32);
+                    let scalar = "kernel_latent_grouped_f32_f32";
+                    let expected = if mma {
+                        let mut names = vec!["kernel_latent_grouped_f32_f32_m16n64k32"];
+                        if rows == 65 {
+                            names.push(scalar);
+                        }
+                        names
+                    } else {
+                        vec![scalar]
+                    };
+                    assert_eq!(
+                        census.iter().map(|r| r.kernel.as_str()).collect::<Vec<_>>(),
+                        expected
+                    );
+                    let got = read_f32(&output).unwrap();
+                    if let Some(ref reference) = baseline {
+                        close("F32 latent scalar/MMA", &got, reference, 2e-5);
+                        if !mma {
+                            assert_eq!(&got, reference);
+                        }
+                    } else {
+                        baseline = Some(got.clone());
+                    }
+                    for row in [0, 63, rows - 1] {
+                        for g in [0, 7, groups - 1] {
+                            for out in [0, 15, m - 1] {
+                                let expected: f64 = (0..k)
+                                    .map(|i| {
+                                        f64::from(decoded[(g * m + out) * k + i])
+                                            * f64::from(values[(row * groups + g) * k + i])
+                                    })
+                                    .sum();
+                                let actual = f64::from(got[(row * groups + g) * m + out]);
+                                assert!(
+                                    (actual - expected).abs() <= 2e-5 * expected.abs().max(1.0)
+                                );
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}

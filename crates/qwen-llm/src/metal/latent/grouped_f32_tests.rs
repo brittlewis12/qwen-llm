@@ -7,6 +7,9 @@ use crate::metal::test_support::{
 const PREFIX: usize = 20;
 const SENTINEL: f32 = -777.0;
 
+#[path = "grouped_f32_glm_bench.rs"]
+mod glm_bench;
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum GroupedF32TestVariant {
     Scalar,
@@ -252,6 +255,7 @@ struct Fixture {
     output: MetalTensor,
     scalar: MetalTensor,
     scale: f32,
+    prefix: usize,
     suffix: usize,
 }
 
@@ -264,6 +268,28 @@ impl Fixture {
         suffix: usize,
         variant: GroupedF32TestVariant,
     ) -> Self {
+        Self::with_prefix(ctx, s, scale, positive, PREFIX, suffix, variant)
+    }
+
+    fn with_prefix(
+        ctx: &MetalContext,
+        s: Shape,
+        scale: f32,
+        positive: bool,
+        prefix: usize,
+        suffix: usize,
+        variant: GroupedF32TestVariant,
+    ) -> Self {
+        let f32_tensor = |ctx, values: &[f32], shape, suffix| {
+            offset_tensor(
+                ctx,
+                prefix,
+                bytemuck::cast_slice(values),
+                suffix,
+                shape,
+                GgmlType::F32,
+            )
+        };
         let weights: Vec<f32> = (0..s.k * s.m * s.groups)
             .map(|i| {
                 let lane = i % s.k;
@@ -335,6 +361,7 @@ impl Fixture {
             output,
             scalar,
             scale,
+            prefix,
             suffix,
         }
     }
@@ -428,8 +455,8 @@ impl Fixture {
                 }
             }
         }
-        assert_offset_guards(&self.output, PREFIX, self.suffix);
-        assert_offset_guards(&self.scalar, PREFIX, self.suffix);
+        assert_offset_guards(&self.output, self.prefix, self.suffix);
+        assert_offset_guards(&self.scalar, self.prefix, self.suffix);
     }
 }
 

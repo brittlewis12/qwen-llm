@@ -1169,7 +1169,7 @@ fn project_info(model: &Path, gguf: &GgufFile) -> Result<serde_json::Value> {
                 "status": "permitted",
                 "target": match target {
                     DrafterTarget::Dense => "dense",
-                    DrafterTarget::MoeCliSerial => "moe_cli_serial",
+                    DrafterTarget::Moe => "moe",
                 },
             }),
             DrafterDecision::Unsupported(reason) => serde_json::json!({

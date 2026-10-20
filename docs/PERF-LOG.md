@@ -6,6 +6,45 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the current state and evidence index.
 
+## 2026-10-20 - Compatible Qwen Post-Trains and MoE DFlash Serving
+
+- Ornith-1.5-122B's inspected GGUF is ordinary `qwen35moe`, with the existing
+  122B-A10B geometry and Qwen tokenizer. Its embedded template matches the
+  standalone preserving-reasoning template, not the older template in its
+  tokenizer config. Native Rust rendering now recognizes that complete chat
+  contract independently of release identity, preserving deliberate history
+  overrides. Unknown Qwen releases use validated GGUF sampling declarations;
+  run, serve and info agree. No runtime Jinja, Ornith name exception, or inferred
+  official release/Lens qualification. See [contract and CPU oracle](QWEN-XML-PRESERVE-CONTRACT.md).
+- `a7b10382` normalizes v2 DFlash layer-input IDs to post-block captures, uses
+  metadata causality, and fixes SWA to distance `< W`. Legacy capture IDs stay
+  unchanged. Persisted old capture payloads are discarded without losing target
+  state. Independent f64 attention references and leased Metal tests cover the
+  dispatch variants; this repairs proposal fidelity, not target verification.
+- Ordinary MoE now uses shared served capture, packed verification, recurrent
+  rollback and restored-tail seeding. Optional allocation still falls back to
+  serial; its second admission no longer double-counts the resident capture.
+  Stats expose actual draft, verify and restore counts. The stale CLI "serial"
+  label is removed: the CLI already executed speculation.
+- M4 Max, Metal validation and the ordinary lease: local Qwen3.6-35B-A3B
+  UD-Q4_K_M plus converted incoai BF16 DFlash2 passes cold greedy/serial output
+  parity, restored speculation, disconnect/retry and completed next-turn reuse.
+  Cold/restored/retry each emit 98 tokens with 13 spec/verify calls, 85/91 accepted
+  drafts and two restores; next turn reuses 133 tokens and emits 19 with three
+  spec/verify calls and one restore. No serial backoff or fallback in this test.
+- Separate 128-token CLI comparisons match serial output for both A3B (17 spec
+  steps, 110/119 accepted) and existing Qwen3.8-27B Q4_K_M + Q8_0 drafter (19,
+  109/133). Each exercises one numerical fallback. These are bounded correctness
+  witnesses, not balanced performance measurements or universal equivalence.
+  Integrated CLI library/binary regressions: 1,421 passed, 59 ignored; the
+  opt-in served regression above was run separately. Local logs:
+  `target/dflash-moe-2026-10-20/`.
+- Ornith full weights have not been inference-tested. Muse, Flash-Next and
+  GLM-Flash drafters still need their own target capture/verify adapters; shared
+  drafting alone cannot enable them. Muse's KV rewind makes it the smallest
+  next slice; Flash-Next needs GDN/PLE/QSA rollback, GLM-Flash KDA/MLA rollback
+  and mean-stream captures. Full GLM5.3 also needs target-engine bring-up.
+
 ## 2026-10-20 - V4.1 Native Row Batching: Bitwise, 1.47-2.11x PP1024
 
 - Pure `fa40b081` versus common `abefb0af`, M5 Ultra, NativeF32 and default wired

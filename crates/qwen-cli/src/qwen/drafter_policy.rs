@@ -10,9 +10,8 @@
 //! (Muse's dispatch had skipped it).
 //!
 //! The decision is a projection of what the implementation supports; it is
-//! not a capability table maintained by hand. Lane differences that are real
-//! (ordinary MoE targets are accepted serially on the CLI but refused by
-//! serve) stay explicit rather than being flattened into a global rule.
+//! not a capability table maintained by hand. Ordinary dense and MoE Qwen
+//! targets share capture, verification, and rollback in both execution lanes.
 
 use std::fmt;
 use std::path::{Path, PathBuf};
@@ -60,10 +59,8 @@ pub(crate) enum DrafterDecision {
 pub(crate) enum DrafterTarget {
     /// Dense Qwen3.5/3.6/3.8 target: the qualified DFlash lane.
     Dense,
-    /// MoE Qwen target on the CLI: accepted today (binder enforces hidden
-    /// size), but speculation runs serially and is unqualified. Serve refuses
-    /// this shape; the CLI keeps its historical acceptance.
-    MoeCliSerial,
+    /// Ordinary MoE Qwen target using packed verification and recurrent rollback.
+    Moe,
 }
 
 /// Why a drafter request is refused. `code()` is the stable identifier for
@@ -72,8 +69,6 @@ pub(crate) enum DrafterTarget {
 pub(crate) enum DrafterUnsupported {
     /// The family has no speculative-decode implementation in this lane.
     FamilyNoSpeculation { family: ModelFamily, lane: Lane },
-    /// Serve speculation is qualified for dense targets only.
-    ServeMoeTarget,
     /// Architecture is not one this binary recognises.
     UnknownFamily,
 }
@@ -87,7 +82,6 @@ impl DrafterUnsupported {
                     _ => unreachable!("family refusal requires unsupported profile"),
                 }
             }
-            DrafterUnsupported::ServeMoeTarget => "serve_moe_target",
             DrafterUnsupported::UnknownFamily => "unknown_family",
         }
     }
@@ -112,10 +106,6 @@ impl fmt::Display for DrafterUnsupported {
                     }
                 )
             }
-            DrafterUnsupported::ServeMoeTarget => write!(
-                f,
-                "serve DFlash speculation currently supports dense targets only; this MoE model would run serially, so omit --drafter"
-            ),
             DrafterUnsupported::UnknownFamily => {
                 write!(
                     f,
@@ -139,10 +129,7 @@ pub(crate) fn resolve_drafter(
     match family {
         Some(family) => match profile(family).drafter {
             DrafterSupport::Dense => DrafterDecision::Permitted(DrafterTarget::Dense),
-            DrafterSupport::MoeCliSerial => match lane {
-                Lane::CliSingleTurn => DrafterDecision::Permitted(DrafterTarget::MoeCliSerial),
-                Lane::Serve => DrafterDecision::Unsupported(DrafterUnsupported::ServeMoeTarget),
-            },
+            DrafterSupport::Moe => DrafterDecision::Permitted(DrafterTarget::Moe),
             DrafterSupport::Unsupported(_) => {
                 DrafterDecision::Unsupported(DrafterUnsupported::FamilyNoSpeculation {
                     family,
@@ -257,15 +244,13 @@ mod tests {
     }
 
     #[test]
-    fn moe_qwen_keeps_the_lane_distinction() {
-        assert_eq!(
-            resolve_drafter(Some(ModelFamily::Qwen35Moe), Lane::CliSingleTurn, true),
-            DrafterDecision::Permitted(DrafterTarget::MoeCliSerial)
-        );
-        assert_eq!(
-            resolve_drafter(Some(ModelFamily::Qwen35Moe), Lane::Serve, true),
-            DrafterDecision::Unsupported(DrafterUnsupported::ServeMoeTarget)
-        );
+    fn moe_qwen_is_permitted_in_both_lanes() {
+        for lane in [Lane::CliSingleTurn, Lane::Serve] {
+            assert_eq!(
+                resolve_drafter(Some(ModelFamily::Qwen35Moe), lane, true),
+                DrafterDecision::Permitted(DrafterTarget::Moe)
+            );
+        }
     }
 
     #[test]
@@ -307,17 +292,9 @@ mod tests {
                 lane: Lane::Serve,
             }
             .code(),
-            DrafterUnsupported::ServeMoeTarget.code(),
             DrafterUnsupported::UnknownFamily.code(),
         ];
-        assert_eq!(
-            codes,
-            [
-                "family_no_speculation",
-                "serve_moe_target",
-                "unknown_family"
-            ]
-        );
+        assert_eq!(codes, ["family_no_speculation", "unknown_family"]);
     }
 
     #[test]
@@ -337,11 +314,6 @@ mod tests {
         assert_eq!(
             ds4.to_string(),
             "--drafter is not supported for DeepSeek V4 run (family_no_speculation)"
-        );
-        assert!(
-            DrafterUnsupported::ServeMoeTarget
-                .to_string()
-                .contains("dense targets only")
         );
     }
 

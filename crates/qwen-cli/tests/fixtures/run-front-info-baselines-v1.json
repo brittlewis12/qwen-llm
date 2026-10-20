@@ -115,12 +115,11 @@
       "drafter": {
         "run": {
           "status": "permitted",
-          "target": "moe_cli_serial"
+          "target": "moe"
         },
         "serve": {
-          "status": "unsupported",
-          "code": "serve_moe_target",
-          "message": "serve DFlash speculation currently supports dense targets only; this MoE model would run serially, so omit --drafter"
+          "status": "permitted",
+          "target": "moe"
         }
       },
       "prompt_lookup": {
@@ -202,7 +201,7 @@
     },
     "text_capability_lines": [
       "drafter run: permitted",
-      "drafter serve: unsupported (serve_moe_target)",
+      "drafter serve: permitted",
       "prompt lookup: permitted",
       "sampling: temperature 1.0 top-k 20 top-p 0.95 min-p 0.0 (qwen_unidentified/other_shape)",
       "os_build: <device-derived>",

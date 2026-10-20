@@ -259,3 +259,74 @@ both new row counts. The local Run B command instead used
 only rows 65/2048 (48 samples, 4 medians). The existing 15-geometry PV probe was
 not rerun for this extension. No merge/rebase of maintained row-batching history,
 production change, installation, remote GPU worker or model execution occurred.
+
+## Completed M5 Operator And Quality Measurements
+
+Clean source `25d67da6c69b37bc10d236a59cb1450eaa21768e`, Apple M5 Ultra,
+normal release Cargo build and production Metal lease. These are new measurements
+of the production selector, not the older explicit experimental MMA entry point.
+Worker evidence is under
+`~/qwen-runs/2026-10-20-v41-unsloth-profile/attention-current-evaluation-25d67da6/`;
+local copies are in `/tmp/v41-attention-current-evaluation-25d67da6/`.
+
+The four correctness filters in the campaign passed 63 tests, with three
+performance tests ignored, under API validation and require-Metal flags. Timing
+then ran with validation flags unset. All 684 samples and 57 medians from the
+PV and full GLM probes are retained. The CPU analyzer
+`/tmp/v41-attention-m5-operator-analysis.py` reconciles every geometry, ABBA arm
+order, repetition and printed median; it produces `operator-summary.json` and
+`operator-samples.json`. Each geometry has three ABBA repetitions and four
+serial launches per command, not independent process-level trials.
+
+### M5 Operator Results
+
+Median GPU speedups, forced scalar / ordinary production selection:
+
+| Scope | Eligible geometry | GPU speedup |
+| --- | --- | ---: |
+| V4.1 PV | 8 or 32 queries, K256/512/640 | 2.504-5.168x |
+| V4.1 pack/PV/finite | same | 1.905-3.285x |
+| V4.1 Sink | 8 queries | 1.215-1.258x |
+| V4.1 Sink | 32 queries | 1.398-1.458x |
+| GLM shared projection | G64, K256/M512, rows64/65/128/256/512/2048 | 4.602-5.659x |
+| GLM shared projection | G64, K512/M256, same row counts | 3.820-5.334x |
+
+Every eligible geometry also improves host-wall median and each ABBA repeat's
+mean GPU comparison. Singleton V4.1 remains a scalar/scalar control, with Sink
+GPU median ratios 0.997-1.004x. Sink excludes inverse RoPE and model execution;
+the GLM scope is the shared projection, not GLM attention or end-to-end inference.
+The 2048-row GLM checks retain the previously documented sampled coverage.
+
+No samples are dropped. In particular, the first K256 singleton Sink crosses a
+large timing change within its last ABBA repeat (scalar 75.031 then 51.156 us;
+production 53.823 then 50.958 us). These controls do not establish stationary
+device peaks or explain the cause of the change. Per-arm ranges and all three
+repeat-level comparisons remain in the derived JSON.
+
+### M5 Model Quality
+
+Compared with complete-row baseline `1388793d`, using the same six frozen
+documents, native-tokenized 512-token prefixes and 64 teacher-forced targets
+per document. Identical additive helper sources are built on each production
+revision: baseline `cd4534d8`, candidate `9235fd84`. Retained full-vocabulary
+logits are scored in F64; this is 384 targets per quant, not broad quality or a
+higher-precision execution oracle.
+
+| Quant | Baseline mean NLL | Candidate mean NLL | NLL delta | Top-1 changes | Max TV | Max KL baseline to candidate |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| Q2_K_XL + Q6 Engram | 2.160671733098 | 2.160671312989 | -4.201095e-7 | 0 | 2.369355e-5 | 1.148125e-9 |
+| IQ3_XXS | 2.146361600884 | 2.146361639566 | +3.868189e-8 | 0 | 5.419262e-5 | 1.012083e-8 |
+
+Target correctness remains 214/384 and 222/384 respectively. Maximum absolute
+logit changes are 0.004138947 and 0.001425743; arithmetic is not bitwise identical.
+These numerical differences are observations, not baseline-exactness vetoes.
+
+The unchanged 22-task greedy screen produces identical visible answers in both
+quants: 8/10 code, 1/8 reasoning and 0/4 JSON, or 9/22 overall. Its existing r1
+truncation remains counted; no task is removed or retried. The fixed none-effort,
+greedy, cache-disabled screen is a bounded regression comparison, not a claim
+about the model's best achievable task quality. Full evidence is retained in
+`task-comparison.json` and `likelihood-comparison.json`.
+
+These completed operator and quality measurements do not themselves establish
+whole-model throughput or an installation result.

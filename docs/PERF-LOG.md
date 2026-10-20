@@ -6,6 +6,27 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the current state and evidence index.
 
+## 2026-10-20 - V4.1 Native Row Batching: Bitwise, 1.47-2.11x PP1024
+
+- Pure `fa40b081` versus common `abefb0af`, M5 Ultra, NativeF32 and default wired
+  limit. Matched ABBA arms, alternating quant order, six samples per shape/arm
+  within two fresh-process blocks. PP shares capacity 2048; TG32 uses depth
+  2048/capacity 2080. Validation is off for timing, with the production lease.
+- Q2 + Q6 Engram: PP1024 54.920 -> 80.803 tok/s (+47.13%); PP2048 53.770 ->
+  78.411 (+45.83%). IQ3: PP1024 52.998 -> 111.677 (+110.72%); PP2048 51.950 ->
+  106.818 (+105.62%). Both order-balanced comparisons agree; short/tail gains
+  also pass. Decode remains about 21-22 tok/s with no observed regression.
+- Both quants match saved pre-change outputs bitwise across 98 logit files,
+  22 route ID/weight captures, and the real-bank native stages. Existing grouped
+  controls match their saved grouped outputs. Full contracts/workspace pass:
+  3,129 passed, zero failed, 651 ignored; M5 targeted validation passes 22 tests.
+- Six routed dispatches per eligible chunk replace six per token without
+  changing reductions or adding buffers. Coverage is 15 Q2 / 25 IQ3 layers;
+  existing ten grouped layers and IQ2_XS/IQ2_XXS exclusions remain unchanged.
+- Canonical rows lack scoped physical-I/O counters; no isolated bandwidth,
+  long-context or fresh task-quality claim. The failed MMA path stays off main.
+  [Protocol, exactness, measurements and limits](bench/2026-10-20-v41-native-row-batch.md).
+
 ## 2026-10-20 - V4.1 Grouped MMA: Full-Model Numerical Rejection
 
 - Identical private replay on common `abefb0af`: baseline `1cfb311e` versus

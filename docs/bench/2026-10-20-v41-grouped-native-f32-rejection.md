@@ -92,12 +92,36 @@ conditional replay does not isolate the upstream cause. A routing-boundary
 crossing caused by small F32 differences is plausible, not yet established.
 Same-slot weight differences after IDs change are not same-expert error metrics.
 
+## Bounded Routing Diagnostic
+
+Private baseline `7ee95efc` and MMA `67655d87` apply the same probe patch to
+the original comparison arms. All four runs reproduce their original endpoint,
+three teacher continuations, and complete route ID/weight arrays bitwise. The
+probe copies actual GPU-transformed scores, raw logits, bias, status and routes
+before reuse, then uses GPU F32 addition for the bias-corrected selection scores.
+It does not recompute the score transform on CPU or alter routing.
+
+At both original divergence points, the baseline corrected-score boundary gap
+is `1.9073486328125e-6`, and the largest corrected-score perturbation is the same
+amount. Bias and temperature/scale bits are identical across arms. The competing
+pair becomes an exact tie in the MMA arm:
+
+| Quant / original point | Baseline pair advantage | MMA pair advantage | Selection change |
+| --- | ---: | ---: | --- |
+| Q2, position 13/layer 34 | 355 minus 354: 1.907e-6 | 0 | 355 to 354 |
+| IQ3, position 133/layer 33 | 252 minus 199: 1.907e-6 | 0 | 252 to 199 |
+
+The unchanged lower-ID tie rule reproduces both observed selections. This
+establishes the selection-boundary change, not the earliest upstream arithmetic
+cause or gate/up alone as its source. There is no unexplained selector/margin
+contradiction, so the optional normalized-input capture and wider diagnosis are
+not run. The MMA rejection remains unchanged. Evidence is retained under
+`router-diagnostic-7ee95efc-67655d87/` in the same worker evidence root.
+
 ## Next Experiment
 
-Retain this rejection and capture only the two known router divergence points
-with their original request shape. Compare actual transformed GPU scores plus
-bias, selection margins, and selected IDs, without freezing full-model routes.
-The next candidate starts from `abefb0af` and batches existing native GEMV
+Retain this rejection and the bounded diagnostic without freezing full-model
+routes. The next candidate starts from `abefb0af` and batches existing native GEMV
 over token/slot while retaining each output's FMA and reduction order, both
 gate/up passes, weight-before-down, and ordered summation. Existing grouped
 layers stay unchanged. IQ2_XS/IQ2_XXS batching and the compensated MMA arithmetic

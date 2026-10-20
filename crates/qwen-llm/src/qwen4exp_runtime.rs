@@ -554,6 +554,97 @@ pub struct Qwen4ExpLoadedModel<'gguf> {
     admission: Qwen4ExpRuntimeAdmission,
     observed_weight_bytes: u64,
     device_registry_id: u64,
+    _ple_warm: Option<PleCacheWarm>,
+}
+
+/// Background page-cache warm of the PLE table's byte range.
+///
+/// Every token gathers 16 n-gram rows from the memory-mapped table, so a
+/// prompt with new text touches tens of thousands of pages the cache has not
+/// seen, and each cold row costs a disk fault on the prefill's CPU path.
+/// Reading the range once through the parallel `pread` warmer populates the
+/// unified buffer cache without allocating: the OS may still reclaim those
+/// pages under pressure, in which case rows fall back to faulting as before.
+struct PleCacheWarm {
+    cancel: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    thread: Option<std::thread::JoinHandle<()>>,
+}
+
+impl PleCacheWarm {
+    /// Fraction of the table already resident above which no warm is started.
+    const RESIDENT_SKIP: f64 = 0.95;
+
+    fn start(
+        gguf: &GgufFile,
+        plan: &crate::qwen4exp_residency::Qwen4ExpPleSourcePlan,
+    ) -> Option<Self> {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        let shard = gguf.shards.get(plan.shard_idx())?;
+        let start = plan.data_offset();
+        let end = start.checked_add(plan.n_bytes())?;
+        let mapped = shard
+            .mmap
+            .get(usize::try_from(start).ok()?..usize::try_from(end).ok()?)?;
+        let resident = crate::cache_probe::probe_mapped_range_residency_sampled(mapped)
+            .map(|report| report.resident_fraction())
+            .unwrap_or(0.0);
+        let gib = plan.n_bytes() as f64 / f64::from(1u32 << 30);
+        if resident >= Self::RESIDENT_SKIP {
+            tracing::info!(
+                "qwen4exp: PLE table ({gib:.1} GiB) is {:.0}% resident; no cache warm",
+                resident * 100.0
+            );
+            return None;
+        }
+        let file = shard.file.clone();
+        let cancel = std::sync::Arc::new(AtomicBool::new(false));
+        let flag = cancel.clone();
+        let thread = std::thread::Builder::new()
+            .name("qwen4exp-ple-warm".into())
+            .spawn(move || {
+                let started = Instant::now();
+                let outcome = crate::prefetch::prefetch_fd_range_with_cancel(
+                    &file,
+                    start,
+                    end,
+                    crate::prefetch::DEFAULT_WORKERS,
+                    crate::prefetch::DEFAULT_CHUNK_BYTES,
+                    &|| flag.load(Ordering::Relaxed),
+                );
+                match outcome {
+                    Ok(report) => tracing::info!(
+                        "qwen4exp: PLE table cache warm read {:.1} GiB in {:.1} s",
+                        report.bytes as f64 / f64::from(1u32 << 30),
+                        started.elapsed().as_secs_f64()
+                    ),
+                    Err(error) if error.kind() == std::io::ErrorKind::Interrupted => {
+                        tracing::info!("qwen4exp: PLE table cache warm cancelled")
+                    }
+                    Err(error) => {
+                        tracing::warn!("qwen4exp: PLE table cache warm failed: {error}")
+                    }
+                }
+            })
+            .ok()?;
+        tracing::info!(
+            "qwen4exp: PLE table ({gib:.1} GiB) is {:.0}% resident; warming the page cache in the background",
+            resident * 100.0
+        );
+        Some(Self {
+            cancel,
+            thread: Some(thread),
+        })
+    }
+}
+
+impl Drop for PleCacheWarm {
+    fn drop(&mut self) {
+        self.cancel
+            .store(true, std::sync::atomic::Ordering::Relaxed);
+        if let Some(thread) = self.thread.take() {
+            let _ = thread.join();
+        }
+    }
 }
 
 /// Allow qualified singleton optimizations; device and pipeline checks may retain
@@ -797,6 +888,7 @@ impl<'gguf> Qwen4ExpLoadedModel<'gguf> {
         let observed_weight_bytes = realized.observed_allocation_delta();
         let weights = realized.into_weights();
         let ple_table = weights.ple_source().bind(gguf)?;
+        let ple_warm = PleCacheWarm::start(gguf, weights.ple_source());
         let mut workspace = loop {
             (session_plan, _) = select_prefill_plan_with_floor(
                 ctx,
@@ -862,6 +954,7 @@ impl<'gguf> Qwen4ExpLoadedModel<'gguf> {
             },
             observed_weight_bytes,
             device_registry_id: ctx.device.registryID(),
+            _ple_warm: ple_warm,
         })
     }
 

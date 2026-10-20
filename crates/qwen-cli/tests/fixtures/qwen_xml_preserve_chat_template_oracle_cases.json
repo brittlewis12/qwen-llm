@@ -1,0 +1,69 @@
+[
+  {
+    "id": "default_open",
+    "messages": [{"role": "user", "content": " Hi "}],
+    "add_generation_prompt": true
+  },
+  {
+    "id": "explicit_no_thinking",
+    "messages": [{"role": "system", "content": " Be concise. "}, {"role": "user", "content": "Hi"}],
+    "enable_thinking": false,
+    "add_generation_prompt": true
+  },
+  {
+    "id": "distinct_reasoning_before_later_users",
+    "messages": [
+      {"role": "user", "content": "One"},
+      {"role": "assistant", "content": "Answer one", "reasoning_content": " first reasoning "},
+      {"role": "user", "content": "Two"},
+      {"role": "assistant", "content": "Answer two", "reasoning_content": "second reasoning"},
+      {"role": "user", "content": "Three"},
+      {"role": "assistant", "content": "No reasoning supplied"},
+      {"role": "user", "content": "Four"}
+    ],
+    "add_generation_prompt": true
+  },
+  {
+    "id": "no_thinking_preserves_inline_and_missing_history",
+    "messages": [
+      {"role": "user", "content": "One"},
+      {"role": "assistant", "content": "<think> first reasoning </think>\n\nAnswer one"},
+      {"role": "user", "content": "Two"},
+      {"role": "assistant", "content": "Answer two", "reasoning_content": "second reasoning"},
+      {"role": "user", "content": "Three"},
+      {"role": "assistant", "content": "No reasoning supplied"},
+      {"role": "user", "content": "Four"}
+    ],
+    "enable_thinking": false,
+    "add_generation_prompt": true
+  },
+  {
+    "id": "tool_replay_python_scalars_json_compounds",
+    "tools": [{"type": "function", "function": {"name": "inspect", "description": "Inspect values", "parameters": {"type": "object"}}}],
+    "messages": [
+      {"role": "system", "content": " Be precise. "},
+      {"role": "user", "content": "Inspect."},
+      {"role": "assistant", "content": "Checking", "reasoning_content": "tool reasoning", "tool_calls": [
+        {"function": {"name": "inspect", "arguments": {"yes": true, "no": false, "nothing": null, "text": "quotes: \"x\"\nand slash \\", "nested": {"text": "a'b\"c", "flag": true, "empty": null}, "list": [false, null, "line\nbreak", {"a": "b"}]}}},
+        {"function": {"name": "inspect", "arguments": {"number": 3, "fraction": 1.25}}}
+      ]},
+      {"role": "tool", "content": " first result "},
+      {"role": "tool", "content": "second result"},
+      {"role": "assistant", "content": "Done", "reasoning_content": "result reasoning"},
+      {"role": "user", "content": "Again"}
+    ],
+    "enable_thinking": true,
+    "add_generation_prompt": true
+  },
+  {
+    "id": "tool_replay_no_thinking",
+    "tools": [{"type": "function", "function": {"name": "inspect", "parameters": {"type": "object"}}}],
+    "messages": [
+      {"role": "user", "content": "Inspect."},
+      {"role": "assistant", "content": "", "tool_calls": [{"function": {"name": "inspect", "arguments": {"flag": true, "nothing": null, "nested": ["str", {"flag": false}]}}}]},
+      {"role": "tool", "content": "result"}
+    ],
+    "enable_thinking": false,
+    "add_generation_prompt": true
+  }
+]

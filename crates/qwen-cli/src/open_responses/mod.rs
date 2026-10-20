@@ -68,10 +68,10 @@ pub fn bind_qwen_request(
         // Qwen history is already mode-independent in the released
         // templates; upstream only restores each template's own default for
         // history reasoning (Qwen3.5 has no preserve option, Qwen3.6
-        // defaults it off, Qwen3.8 on). An explicit history_thinking wins.
+        // defaults it off, Qwen3.8 and XML-preserve on). An explicit
+        // history_thinking wins.
         if request.history_thinking.is_none() && !request.strip_history_thinking {
-            request.strip_history_thinking =
-                matches!(template, QwenTemplate::Qwen35 | QwenTemplate::Qwen36);
+            request.strip_history_thinking = !template.upstream_preserves_reasoning();
         }
     }
     // Tools and tool history: the same family rule `qwen run --messages`

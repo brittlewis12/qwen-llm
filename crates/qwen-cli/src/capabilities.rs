@@ -63,7 +63,7 @@ pub fn template_for(
 ) -> Value {
     match family {
         Some(ModelFamily::Qwen35 | ModelFamily::Qwen35Moe | ModelFamily::Qwen4Exp) => {
-            match prompt_template::identify_qwen_release_for_gguf(gguf) {
+            match prompt_template::resolve_qwen_contract_for_gguf(gguf) {
                 Ok(identity) if family == Some(ModelFamily::Qwen4Exp) => {
                     qwen4exp_template_projection(&identity)
                 }
@@ -71,6 +71,15 @@ pub fn template_for(
                     let mut value =
                         serde_json::to_value(&identity.status).expect("serialize release status");
                     value["rendered_as"] = json!(identity.template.renderer_name());
+                    value["rendering_contract"] = json!({
+                        "status": if identity.template.serve_template().verified() { "recognized" } else { "unknown" },
+                        "name": identity.template.serve_template().label(),
+                        "source": match identity.template {
+                            prompt_template::QwenPromptTemplate::QwenXmlPreserve => Some("tokenizer.chat_template"),
+                            prompt_template::QwenPromptTemplate::UnknownChatMl => None,
+                            _ => Some("release_name_fallback"),
+                        },
+                    });
                     value
                 }
                 Err(error) => json!({"status":"unresolved", "message":error.to_string()}),

@@ -806,12 +806,7 @@ pub(crate) fn validate_lens_input_spec(spec: LensInputSpec<'_>) -> Result<()> {
 
 /// Serve-renderer template for a resolved prompt protocol.
 pub(crate) fn serve_template_for_protocol(protocol: QwenPromptTemplate) -> QwenTemplate {
-    match protocol {
-        QwenPromptTemplate::Qwen38 | QwenPromptTemplate::Qwen4Next => QwenTemplate::Qwen38,
-        QwenPromptTemplate::Qwen35 => QwenTemplate::Qwen35,
-        QwenPromptTemplate::Qwen36 => QwenTemplate::Qwen36,
-        QwenPromptTemplate::UnknownChatMl => QwenTemplate::Generic,
-    }
+    protocol.serve_template()
 }
 
 fn detect_qwen_message_protocol(
@@ -1127,7 +1122,10 @@ fn render_qwen_structured_messages(
             render_qwen_messages_prompt_for_template(
                 messages,
                 serve_template_for_protocol(protocol),
-                protocol == QwenPromptTemplate::Qwen36,
+                matches!(
+                    protocol,
+                    QwenPromptTemplate::Qwen36 | QwenPromptTemplate::QwenXmlPreserve
+                ),
                 true,
                 mode,
             )?,
@@ -1249,7 +1247,9 @@ fn resolve_qwen_message_mode(
                 mode.to_possible_value().unwrap().get_name()
             ),
         },
-        QwenPromptTemplate::Qwen35 | QwenPromptTemplate::Qwen36 => match requested {
+        QwenPromptTemplate::Qwen35
+        | QwenPromptTemplate::Qwen36
+        | QwenPromptTemplate::QwenXmlPreserve => match requested {
             None | Some(LensMessageMode::Auto) => {
                 Ok(ResolvedMessageMode::Qwen36(QwenGenerationMode::Auto))
             }

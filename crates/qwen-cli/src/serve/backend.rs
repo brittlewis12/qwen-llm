@@ -304,7 +304,7 @@ impl Prepared {
             "{} serve requires request-shaped capacity",
             super::profile(family).display
         );
-        let identity = crate::prompt_template::identify_qwen_release_for_gguf(gguf)
+        let identity = crate::prompt_template::resolve_qwen_contract_for_gguf(gguf)
             .context("identify the loaded model's Qwen release")?;
         if let Some(warning) = identity.warning() {
             tracing::warn!(target: "qwen_diag", "serve: {warning}");
@@ -329,10 +329,11 @@ impl Prepared {
         Ok(Self {
             template,
             no_thinking_supported: template.verified(),
-            release_sampling: crate::release_sampling::release_sampling(
+            release_sampling: crate::release_sampling::gguf_sampling_defaults(
                 crate::release_identity::ReleaseIdentity::detect(family, gguf),
-                42,
-            ),
+                gguf,
+            )
+            .with_seed(42),
             declared_context,
         })
     }
@@ -2542,6 +2543,65 @@ impl EngineBackend {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn xml_preserve_preparation_shares_sampling_and_refuses_native_lens() {
+        use crate::qwen_contract_fixture::{TEMPLATE, Value::*, gguf};
+        use clap::Parser;
+        let gguf = gguf(
+            "arbitrary posttrain",
+            TEMPLATE,
+            &[
+                ("general.sampling.temp", Float(0.6)),
+                ("general.sampling.top_k", Unsigned(20)),
+                ("general.sampling.top_p", Float(0.95)),
+            ],
+        );
+        let mut args = crate::Args::try_parse_from([
+            "qwen",
+            "serve",
+            "-m",
+            "unused.gguf",
+            "--template-style",
+            "upstream",
+        ])
+        .unwrap();
+        let crate::cli::Invocation::Serve(mut invocation) = crate::cli::normalize(&mut args) else {
+            panic!("serve")
+        };
+        let prepared = super::Prepared::new(
+            qwen_llm::model_family::ModelFamily::Qwen35Moe,
+            &gguf,
+            &invocation,
+        )
+        .unwrap();
+        assert_eq!(prepared.template, super::QwenTemplate::QwenXmlPreserve);
+        assert!(prepared.no_thinking_supported);
+        let id = crate::release_identity::ReleaseIdentity::detect(
+            qwen_llm::model_family::ModelFamily::Qwen35Moe,
+            &gguf,
+        );
+        assert_eq!(
+            prepared.release_sampling,
+            crate::release_sampling::gguf_sampling_defaults(id, &gguf).with_seed(42)
+        );
+        assert_eq!(
+            crate::release_sampling::projection(id, &gguf)["temperature"],
+            0.6
+        );
+        invocation.lens_config = Some("unused-lens.json".into());
+        assert!(
+            super::Prepared::new(
+                qwen_llm::model_family::ModelFamily::Qwen35Moe,
+                &gguf,
+                &invocation
+            )
+            .err()
+            .unwrap()
+            .to_string()
+            .contains("native protocol")
+        );
+    }
+
     #[test]
     fn qwen_idle_keep_alive_uses_the_loaded_storage_result() {
         assert!(super::idle_keep_alive_storage_eligible(false, false));

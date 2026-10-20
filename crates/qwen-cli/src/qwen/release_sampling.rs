@@ -1,5 +1,6 @@
 //! Day-to-day sampling defaults for `qwen run` and `qwen serve`, decided by
-//! release identity (`release_identity` owns detection). Each entry follows
+//! release identity (`release_identity` owns detection), with validated GGUF
+//! declarations overlaid only for unknown Qwen releases. Each release entry follows
 //! the release's own published `generation_config.json` or model card; the
 //! sampler has no penalties, so penalty-dependent card presets are not
 //! represented. A request that chooses no seed gets a fresh one
@@ -9,6 +10,7 @@
 
 use crate::release_identity::{QwenShape, QwenVersion, ReleaseIdentity};
 use crate::{Args, ExplicitCliOptions};
+use qwen_llm::gguf::GgufFile;
 use qwen_llm::sampling::SamplingConfig;
 
 /// Seedless release policy, shared by serving and the seeded run API.
@@ -75,6 +77,47 @@ pub(crate) fn release_sampling(identity: ReleaseIdentity, seed: u64) -> Sampling
     release_sampling_defaults(identity).with_seed(seed)
 }
 
+/// Unknown Qwen releases may declare defaults without acquiring a release
+/// identity. Invalid or absent fields individually retain the fallback.
+pub(crate) fn gguf_sampling_defaults(
+    identity: ReleaseIdentity,
+    gguf: &GgufFile,
+) -> SamplingDefaults {
+    let mut defaults = release_sampling_defaults(identity);
+    if !matches!(
+        identity,
+        ReleaseIdentity::Qwen {
+            version: QwenVersion::Unknown,
+            ..
+        }
+    ) {
+        return defaults;
+    }
+    let number = |key| gguf.get_f64(key).ok().flatten();
+    if let Some(value) = number("general.sampling.temp")
+        .filter(|v| v.is_finite() && *v >= 0.0 && *v <= f64::from(f32::MAX))
+    {
+        defaults.temperature = value as f32;
+    }
+    if let Some(value) = gguf
+        .get_u64("general.sampling.top_k")
+        .and_then(|v| usize::try_from(v).ok())
+    {
+        defaults.top_k = value;
+    }
+    if let Some(value) = number("general.sampling.top_p")
+        .filter(|v| v.is_finite() && *v > 0.0 && *v <= 1.0 && (*v as f32) > 0.0)
+    {
+        defaults.top_p = value as f32;
+    }
+    if let Some(value) =
+        number("general.sampling.min_p").filter(|v| v.is_finite() && (0.0..=1.0).contains(v))
+    {
+        defaults.min_p = value as f32;
+    }
+    defaults
+}
+
 /// A fresh seed for a request that chose none: the standard library's
 /// OS-seeded hasher keys mixed with a per-process counter and the clock.
 /// Callers record it (stderr for `qwen run`, `x_qwen.stats` for serve).
@@ -98,9 +141,9 @@ pub(crate) fn decimal(value: f32) -> f64 {
     value.to_string().parse().unwrap_or(f64::from(value))
 }
 
-/// The release decision as `qwen info -m MODEL --json` reports it.
-pub(crate) fn projection(identity: ReleaseIdentity) -> serde_json::Value {
-    let release = release_sampling(identity, 42);
+/// The effective defaults as `qwen info -m MODEL --json` reports them.
+pub(crate) fn projection(identity: ReleaseIdentity, gguf: &GgufFile) -> serde_json::Value {
+    let release = gguf_sampling_defaults(identity, gguf);
     serde_json::json!({
         "identity": identity.label(),
         "temperature": decimal(release.temperature),
@@ -153,6 +196,94 @@ mod tests {
 
     fn qwen(version: QwenVersion, shape: QwenShape) -> ReleaseIdentity {
         ReleaseIdentity::Qwen { version, shape }
+    }
+
+    #[test]
+    fn unknown_qwen_gguf_defaults_validate_each_field_without_qualifying_release() {
+        use crate::qwen_contract_fixture::{TEMPLATE, Value::*, gguf};
+        let declared = [
+            ("general.sampling.temp", Float(0.60000002384)),
+            ("general.sampling.top_k", Unsigned(20)),
+            ("general.sampling.top_p", Float(0.949999988)),
+            ("general.sampling.min_p", Float(0.05)),
+        ];
+        for name in ["Ornith 1.5 122B", "arbitrary posttrain"] {
+            let gguf = gguf(name, TEMPLATE, &declared);
+            let id = ReleaseIdentity::detect(ModelFamily::Qwen35Moe, &gguf);
+            assert_eq!(id, qwen(Unknown, Moe122bA10b));
+            let defaults = gguf_sampling_defaults(id, &gguf);
+            assert_eq!(
+                defaults,
+                SamplingDefaults {
+                    temperature: 0.6,
+                    top_k: 20,
+                    top_p: 0.95,
+                    min_p: 0.05
+                }
+            );
+            assert_eq!(defaults.with_seed(7).seed, 7);
+            assert_eq!(projection(id, &gguf)["temperature"], 0.6);
+            let (mut args, explicit) = run_args(&[]);
+            assert_eq!(
+                apply_run_defaults(&mut args, explicit, defaults.with_seed(42)),
+                Some(args.seed)
+            );
+            assert_eq!(effective(&args), (0.6, 20, 0.95, 0.05));
+        }
+        let fallback = release_sampling_defaults(qwen(Unknown, Moe122bA10b));
+        for bad in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY, -0.1, f64::MAX] {
+            let gguf = gguf(
+                "posttrain",
+                TEMPLATE,
+                &[
+                    ("general.sampling.temp", Float(bad)),
+                    ("general.sampling.top_p", Float(bad)),
+                    ("general.sampling.min_p", Float(bad)),
+                    ("general.sampling.top_k", Signed(-1)),
+                ],
+            );
+            assert_eq!(
+                gguf_sampling_defaults(qwen(Unknown, Moe122bA10b), &gguf),
+                fallback
+            );
+        }
+        for invalid in [Float(1.5), Float(f64::INFINITY), Text("20")] {
+            let gguf = gguf(
+                "posttrain",
+                TEMPLATE,
+                &[("general.sampling.top_k", invalid)],
+            );
+            assert_eq!(
+                gguf_sampling_defaults(qwen(Unknown, Moe122bA10b), &gguf),
+                fallback
+            );
+        }
+        let edges = gguf(
+            "posttrain",
+            TEMPLATE,
+            &[
+                ("general.sampling.temp", Float(0.0)),
+                ("general.sampling.top_k", Unsigned(0)),
+                ("general.sampling.top_p", Float(0.0)),
+                ("general.sampling.min_p", Float(1.0)),
+            ],
+        );
+        assert_eq!(
+            gguf_sampling_defaults(qwen(Unknown, Moe122bA10b), &edges),
+            SamplingDefaults {
+                temperature: 0.0,
+                top_k: 0,
+                top_p: 0.95,
+                min_p: 1.0
+            }
+        );
+        let official = gguf("Qwen3.6", TEMPLATE, &declared);
+        let id = ReleaseIdentity::detect(ModelFamily::Qwen35Moe, &official);
+        assert_eq!(id, qwen(Qwen36, Moe122bA10b));
+        assert_eq!(
+            gguf_sampling_defaults(id, &official),
+            release_sampling_defaults(id)
+        );
     }
 
     #[test]

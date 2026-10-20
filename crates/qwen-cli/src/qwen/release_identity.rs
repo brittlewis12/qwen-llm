@@ -3,10 +3,10 @@
 //! Detection only: every heuristic that reads header facts to decide what a
 //! model is lives here, and decisions consume the resulting identity (see
 //! `release_sampling`). Converter-written fields that restate a decision,
-//! such as `general.sampling.*`, are deliberately not inputs; they serve as
-//! test cross-checks at most.
+//! such as `general.sampling.*`, are deliberately not identity inputs.
+//! Unknown releases may still use them as sampling defaults.
 
-use crate::prompt_template::{QwenPromptTemplate, identify_qwen_release_for_gguf};
+use crate::prompt_template::{QwenReleaseStatus, identify_qwen_release_for_gguf};
 use qwen_llm::gguf::GgufFile;
 use qwen_llm::model_family::ModelFamily;
 
@@ -88,14 +88,17 @@ impl ReleaseIdentity {
     pub(crate) fn detect(family: ModelFamily, gguf: &GgufFile) -> Self {
         match family {
             ModelFamily::Qwen35 | ModelFamily::Qwen35Moe => Self::Qwen {
-                version: match identify_qwen_release_for_gguf(gguf).map(|id| id.template) {
-                    Ok(QwenPromptTemplate::Qwen35) => QwenVersion::Qwen35,
-                    Ok(QwenPromptTemplate::Qwen36) => QwenVersion::Qwen36,
-                    Ok(QwenPromptTemplate::Qwen38) => QwenVersion::Qwen38,
-                    // Flash-Next identity is the qwen4exp architecture, never
-                    // an ordinary Qwen header.
-                    Ok(QwenPromptTemplate::Qwen4Next | QwenPromptTemplate::UnknownChatMl)
-                    | Err(_) => QwenVersion::Unknown,
+                version: match identify_qwen_release_for_gguf(gguf).map(|id| id.status) {
+                    Ok(QwenReleaseStatus::Identified {
+                        version: "qwen3.5", ..
+                    }) => QwenVersion::Qwen35,
+                    Ok(QwenReleaseStatus::Identified {
+                        version: "qwen3.6", ..
+                    }) => QwenVersion::Qwen36,
+                    Ok(QwenReleaseStatus::Identified {
+                        version: "qwen3.8", ..
+                    }) => QwenVersion::Qwen38,
+                    _ => QwenVersion::Unknown,
                 },
                 shape: QwenShape::from_header(family, gguf),
             },

@@ -45,12 +45,12 @@
           "no_thinking": {
             "status": "unsupported",
             "code": "release_unknown",
-            "message": "requires an identified Qwen release (Qwen3.5/3.6/3.8 in the model's name metadata); this model's release is unknown"
+            "message": "requires a recognized Qwen rendering contract or identified Qwen release; this model has neither"
           },
           "thinking": {
             "status": "unsupported",
             "code": "release_unknown",
-            "message": "requires an identified Qwen release (Qwen3.5/3.6/3.8 in the model's name metadata); this model's release is unknown"
+            "message": "requires a recognized Qwen rendering contract or identified Qwen release; this model has neither"
           }
         },
         "input": {
@@ -66,7 +66,7 @@
           "tools": {
             "status": "unsupported",
             "code": "tools_require_known_release",
-            "message": "tools and tool history requires an identified Qwen release (Qwen3.5/3.6/3.8 in the model's name metadata); this model's release is unknown"
+            "message": "tools and tool history requires a recognized Qwen rendering contract or identified Qwen release; this model has neither"
           }
         },
         "template": {
@@ -83,7 +83,12 @@
             "general.base_model.0.repo_url",
             "general.license.link"
           ],
-          "rendered_as": "qwen_chatml_messages_v1"
+          "rendered_as": "qwen_chatml_messages_v1",
+          "rendering_contract": {
+            "status": "unknown",
+            "name": "generic",
+            "source": null
+          }
         }
       },
       "os_build": "<device-derived>"
@@ -96,7 +101,8 @@
       "os_build: <device-derived>",
       "reasoning: no effort levels; no-thinking unsupported (release_unknown)",
       "input: raw supported, user supported, messages supported, tools unsupported (tools_require_known_release)",
-      "template: unknown as qwen_chatml_messages_v1"
+      "template: unknown as qwen_chatml_messages_v1",
+      "rendering contract: unknown (generic)"
     ]
   },
   "qwen35moe": {
@@ -146,12 +152,12 @@
           "no_thinking": {
             "status": "unsupported",
             "code": "release_unknown",
-            "message": "requires an identified Qwen release (Qwen3.5/3.6/3.8 in the model's name metadata); this model's release is unknown"
+            "message": "requires a recognized Qwen rendering contract or identified Qwen release; this model has neither"
           },
           "thinking": {
             "status": "unsupported",
             "code": "release_unknown",
-            "message": "requires an identified Qwen release (Qwen3.5/3.6/3.8 in the model's name metadata); this model's release is unknown"
+            "message": "requires a recognized Qwen rendering contract or identified Qwen release; this model has neither"
           }
         },
         "input": {
@@ -167,7 +173,7 @@
           "tools": {
             "status": "unsupported",
             "code": "tools_require_known_release",
-            "message": "tools and tool history requires an identified Qwen release (Qwen3.5/3.6/3.8 in the model's name metadata); this model's release is unknown"
+            "message": "tools and tool history requires a recognized Qwen rendering contract or identified Qwen release; this model has neither"
           }
         },
         "template": {
@@ -184,7 +190,12 @@
             "general.base_model.0.repo_url",
             "general.license.link"
           ],
-          "rendered_as": "qwen_chatml_messages_v1"
+          "rendered_as": "qwen_chatml_messages_v1",
+          "rendering_contract": {
+            "status": "unknown",
+            "name": "generic",
+            "source": null
+          }
         }
       },
       "os_build": "<device-derived>"
@@ -197,7 +208,8 @@
       "os_build: <device-derived>",
       "reasoning: no effort levels; no-thinking unsupported (release_unknown)",
       "input: raw supported, user supported, messages supported, tools unsupported (tools_require_known_release)",
-      "template: unknown as qwen_chatml_messages_v1"
+      "template: unknown as qwen_chatml_messages_v1",
+      "rendering contract: unknown (generic)"
     ]
   },
   "qwen4exp": {

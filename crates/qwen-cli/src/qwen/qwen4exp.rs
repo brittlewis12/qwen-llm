@@ -2,6 +2,9 @@
 
 use super::*;
 
+#[path = "qwen4exp/dflash.rs"]
+mod dflash;
+
 fn request_stats_preparation_ms(initial_ms: f64, packed_capacity_validation_ms: f64) -> f64 {
     initial_ms + packed_capacity_validation_ms
 }
@@ -517,6 +520,11 @@ pub(crate) fn run_qwen4exp_single_turn(
         qwen_llm::env_flag::read_default_off(QWEN4EXP_PACKED_PREFILL_PROFILE_ENV);
     let full_shard_prefetch_enabled =
         qwen_llm::env_flag::read_default_off(QWEN4EXP_FULL_SHARD_PREFETCH_ENV);
+    dflash::validate_profiles(
+        args.drafter.is_some(),
+        layer_profile_enabled,
+        packed_profile_enabled,
+    )?;
     ensure!(
         !layer_profile_enabled || !packed_profile_enabled,
         "{QWEN4EXP_LAYER_PROFILE_ENV} and {QWEN4EXP_PACKED_PREFILL_PROFILE_ENV} are mutually exclusive"
@@ -526,10 +534,36 @@ pub(crate) fn run_qwen4exp_single_turn(
         "{QWEN4EXP_PACKED_PREFILL_PROFILE_ENV} requires at least two prompt tokens"
     );
     validate_qwen4exp_full_shard_prefetch_scope(full_shard_prefetch_enabled, gguf.shard_count())?;
+    let drafter = crate::drafter_policy::PreparedDrafter::prepare_for_target(
+        args.drafter.as_deref(),
+        qwen_llm::loader::DFlashTargetShape {
+            hidden_size: config.hidden_size,
+            vocab_size: config.vocab_size,
+            n_layer: config.layer_count,
+        },
+        Some(ModelFamily::Qwen4Exp),
+        crate::drafter_policy::Lane::CliSingleTurn,
+    )?;
+    let draft_plan = drafter
+        .as_ref()
+        .map(|prepared| {
+            dflash::RequestPlan::new(
+                &prepared.bound_head()?,
+                prompt_tokens.len(),
+                args.tokens,
+                logical_forward_limit,
+                sampling.temperature,
+                &config,
+                capacity,
+            )
+        })
+        .transpose()?;
     let packed_prefill_requested =
         !layer_profile_enabled && (packed_profile_enabled || prompt_tokens.len() > 1);
     let mut preparation_ms = preparation_t0.elapsed().as_secs_f64() * 1e3;
-    let prefill_request = if packed_profile_enabled {
+    let prefill_request = if draft_plan.is_some() {
+        "dflash_capture"
+    } else if packed_profile_enabled {
         "packed_profile"
     } else if packed_prefill_requested {
         "packed"
@@ -595,7 +629,23 @@ pub(crate) fn run_qwen4exp_single_turn(
     }
     let load_t0 = Instant::now();
     let ctx = MetalContext::new().context("initialize Metal for Qwen3.8-Flash-Next")?;
-    let mut loaded = if packed_prefill_requested && !packed_profile_enabled {
+    let dflash_load = drafter
+        .as_ref()
+        .zip(draft_plan.as_ref())
+        .map(|(prepared, plan)| dflash::load_head(&ctx, gguf, capacity, prepared, plan))
+        .transpose()?;
+    drop(drafter);
+    let mut loaded = if let Some((head_load, plan)) = dflash_load.as_ref().zip(draft_plan.as_ref())
+    {
+        Qwen4ExpLoadedModel::load_with_adaptive_prefill_plan(
+            &ctx,
+            gguf,
+            capacity,
+            head_load.session.clone(),
+            decode_options,
+            plan.minimum_packed_rows(),
+        )
+    } else if packed_prefill_requested && !packed_profile_enabled {
         Qwen4ExpLoadedModel::load_with_adaptive_prefill(
             &ctx,
             gguf,
@@ -613,6 +663,7 @@ pub(crate) fn run_qwen4exp_single_turn(
         )
     }
     .context("load admitted Qwen3.8-Flash-Next weights and text session")?;
+    let dflash_head = dflash_load.map(|loaded| loaded.head);
     let packed_fallback = packed_prefill_requested && loaded.packed_prefill_capacity().is_none();
     let load_ms = load_t0.elapsed().as_secs_f64() * 1e3;
     eprintln!(
@@ -625,6 +676,9 @@ pub(crate) fn run_qwen4exp_single_turn(
     );
     let admission = loaded.admission();
     let packed_prefill_capacity = loaded.packed_prefill_capacity();
+    if let Some(plan) = &draft_plan {
+        plan.validate_packed_capacity(packed_prefill_capacity)?;
+    }
     let packed_selected_requested = loaded.packed_selected_requested();
     let packed_selected_capable = loaded.packed_selected_capable();
     let packed_selected_active = loaded.packed_selected_active();
@@ -661,194 +715,232 @@ pub(crate) fn run_qwen4exp_single_turn(
         );
     }
 
+    let stdout_handle = std::io::stdout();
+    let mut stdout = stdout_handle.lock();
+    let mut on_token = |token| {
+        let piece = tokenizer
+            .try_decode_piece_bytes_exact(token)
+            .with_context(|| format!("decode Qwen3.8-Flash-Next token {token}"))?;
+        stdout
+            .write_all(piece)
+            .with_context(|| format!("write Qwen3.8-Flash-Next token {token}"))?;
+        stdout.flush().context("flush Qwen3.8-Flash-Next token")?;
+        Ok(())
+    };
     let prefill_t0 = Instant::now();
-    let mut measured_prefill_ms = None;
     let mut prefill_timing = Qwen4ExpTimingTotals::default();
     let mut prefill_packed_tokens = 0;
     let mut prefill_scalar_tail_commands = prompt_tokens.len();
     let mut prefill_contains_selection = false;
-    let mut layer_profile_report = None;
-    let logits = if layer_profile_enabled {
-        let mut logits = None;
-        for (index, &token) in prompt_tokens.iter().enumerate() {
-            shutdown::checkpoint()?;
-            let (next_logits, timing) = if index + 1 == prompt_tokens.len() {
+    let mut decode_timing = Qwen4ExpTimingTotals::default();
+    let (generation, prefill_ms, prefill_mode, reported_pass, weights_first_use, generator_return) =
+        if let Some(head) = &dflash_head {
+            let execution = dflash::generate(
+                &mut runner,
+                head,
+                &prompt_tokens,
+                Sampler::new(sampling).context("initialize Qwen3.8-Flash-Next sampler")?,
+                args.tokens,
+                &stop_tokens,
+                &mut on_token,
+            )?;
+            dflash::emit_stats(&execution.stats);
+            (
+                execution.generation,
+                execution.prefill_ms,
+                "dflash_capture",
+                None,
+                true,
+                execution.generator_return,
+            )
+        } else {
+            let mut measured_prefill_ms = None;
+            let mut layer_profile_report = None;
+            let logits = if layer_profile_enabled {
+                let mut logits = None;
+                for (index, &token) in prompt_tokens.iter().enumerate() {
+                    shutdown::checkpoint()?;
+                    let (next_logits, timing) = if index + 1 == prompt_tokens.len() {
+                        let outcome =
+                            runner
+                                .forward_token_layer_profiled(token)
+                                .with_context(|| {
+                                    format!(
+                                        "profile Qwen3.8-Flash-Next prompt token {index} by layer"
+                                    )
+                                })?;
+                        let next_logits = runner.logits()?.to_vec();
+                        let timing = outcome.token;
+                        layer_profile_report = Some(outcome.profile);
+                        (next_logits, timing)
+                    } else {
+                        let next_logits = runner
+                            .forward_token(token)
+                            .with_context(|| {
+                                format!("forward Qwen3.8-Flash-Next prompt token {index}")
+                            })?
+                            .to_vec();
+                        let timing = runner
+                            .last_token_timing()
+                            .expect("successful Flash-Next forward records timing");
+                        (next_logits, timing)
+                    };
+                    prefill_timing.record(timing);
+                    logits = Some(next_logits);
+                }
+                logits.expect("nonempty prompt produced endpoint logits")
+            } else if packed_profile_enabled {
+                let packet_t0 = Instant::now();
+
+                shutdown::checkpoint()?;
+                let first_completed = runner
+                    .prefill(&prompt_tokens)
+                    .context("run first unprofiled Flash-Next packed prefill")?;
+                let first_copy_t0 = Instant::now();
+                let first_logits = first_completed.to_vec();
+                let first_copy_ms = first_copy_t0.elapsed().as_secs_f64() * 1e3;
+                let first_timing = runner
+                    .last_prefill_timing()
+                    .expect("successful first packed prefill records timing");
+                let reset_t0 = Instant::now();
+                runner
+                    .reset()
+                    .context("reset Flash-Next after first packed profile pass")?;
+                let first_reset_ms = reset_t0.elapsed().as_secs_f64() * 1e3;
+
+                shutdown::checkpoint()?;
+                let warm_completed = runner
+                    .prefill(&prompt_tokens)
+                    .context("run warm unprofiled Flash-Next packed prefill")?;
+                let warm_copy_t0 = Instant::now();
+                let warm_logits = warm_completed.to_vec();
+                let warm_copy_ms = warm_copy_t0.elapsed().as_secs_f64() * 1e3;
+                let warm_timing = runner
+                    .last_prefill_timing()
+                    .expect("successful warm packed prefill records timing");
+                let reset_t0 = Instant::now();
+                runner
+                    .reset()
+                    .context("reset Flash-Next before profiled packed pass")?;
+                let warm_reset_ms = reset_t0.elapsed().as_secs_f64() * 1e3;
+
+                shutdown::checkpoint()?;
+                let profiled_t0 = Instant::now();
                 let outcome = runner
-                    .forward_token_layer_profiled(token)
-                    .with_context(|| {
-                        format!("profile Qwen3.8-Flash-Next prompt token {index} by layer")
-                    })?;
-                let next_logits = runner.logits()?.to_vec();
-                let timing = outcome.token;
-                layer_profile_report = Some(outcome.profile);
-                (next_logits, timing)
+                    .prefill_packed_profiled(&prompt_tokens)
+                    .context("profile Flash-Next packed prefill")?;
+                let profiled_copy_t0 = Instant::now();
+                let logits = runner.logits()?.to_vec();
+                let profiled_copy_ms = profiled_copy_t0.elapsed().as_secs_f64() * 1e3;
+                let profiled_ms = profiled_t0.elapsed().as_secs_f64() * 1e3;
+                ensure!(
+                    qwen4exp_logits_bitwise_equal(&first_logits, &warm_logits)
+                        && qwen4exp_logits_bitwise_equal(&warm_logits, &logits),
+                    "Flash-Next packed profile passes produced different endpoint logits"
+                );
+                let timing = runner
+                    .last_prefill_timing()
+                    .expect("successful profiled packed prefill records timing");
+                debug_assert_eq!(timing.token_count, prompt_tokens.len());
+                prefill_packed_tokens = timing.packed_token_count;
+                prefill_scalar_tail_commands = timing.token_count - timing.packed_token_count;
+                prefill_contains_selection = timing.contains_selection;
+                prefill_timing.record_prefill(timing);
+                let packet_ms = packet_t0.elapsed().as_secs_f64() * 1e3;
+                emit_qwen4exp_packed_profile(
+                    &outcome,
+                    first_timing,
+                    warm_timing,
+                    first_copy_ms,
+                    warm_copy_ms,
+                    profiled_copy_ms,
+                    first_reset_ms,
+                    warm_reset_ms,
+                    packet_ms,
+                );
+                match &outcome.profile {
+                    Ok(profile) => emit_qwen4exp_packed_timestamp_profile(profile),
+                    Err(error) => eprintln!("qwen4exp packed_profile_warning: {error}"),
+                }
+                measured_prefill_ms = Some(profiled_ms);
+                logits
             } else {
-                let next_logits = runner
-                    .forward_token(token)
-                    .with_context(|| format!("forward Qwen3.8-Flash-Next prompt token {index}"))?
+                let logits = runner
+                    .prefill_with_command_checkpoint(&prompt_tokens, || {
+                        shutdown::checkpoint()
+                            .map_err(|error| Qwen4ExpRuntimeError::Checkpoint(error.to_string()))
+                    })
+                    .context("prefill Qwen3.8-Flash-Next prompt")?
                     .to_vec();
                 let timing = runner
-                    .last_token_timing()
-                    .expect("successful Flash-Next forward records timing");
-                (next_logits, timing)
+                    .last_prefill_timing()
+                    .expect("successful Flash-Next prefill records timing");
+                debug_assert_eq!(timing.token_count, prompt_tokens.len());
+                prefill_packed_tokens = timing.packed_token_count;
+                prefill_scalar_tail_commands = timing
+                    .token_count
+                    .checked_sub(timing.packed_token_count)
+                    .expect("packed prefill token count cannot exceed the prompt");
+                prefill_contains_selection = timing.contains_selection;
+                prefill_timing.record_prefill(timing);
+                logits
             };
-            prefill_timing.record(timing);
-            logits = Some(next_logits);
-        }
-        logits.expect("nonempty prompt produced endpoint logits")
-    } else if packed_profile_enabled {
-        let packet_t0 = Instant::now();
-
-        shutdown::checkpoint()?;
-        let first_completed = runner
-            .prefill(&prompt_tokens)
-            .context("run first unprofiled Flash-Next packed prefill")?;
-        let first_copy_t0 = Instant::now();
-        let first_logits = first_completed.to_vec();
-        let first_copy_ms = first_copy_t0.elapsed().as_secs_f64() * 1e3;
-        let first_timing = runner
-            .last_prefill_timing()
-            .expect("successful first packed prefill records timing");
-        let reset_t0 = Instant::now();
-        runner
-            .reset()
-            .context("reset Flash-Next after first packed profile pass")?;
-        let first_reset_ms = reset_t0.elapsed().as_secs_f64() * 1e3;
-
-        shutdown::checkpoint()?;
-        let warm_completed = runner
-            .prefill(&prompt_tokens)
-            .context("run warm unprofiled Flash-Next packed prefill")?;
-        let warm_copy_t0 = Instant::now();
-        let warm_logits = warm_completed.to_vec();
-        let warm_copy_ms = warm_copy_t0.elapsed().as_secs_f64() * 1e3;
-        let warm_timing = runner
-            .last_prefill_timing()
-            .expect("successful warm packed prefill records timing");
-        let reset_t0 = Instant::now();
-        runner
-            .reset()
-            .context("reset Flash-Next before profiled packed pass")?;
-        let warm_reset_ms = reset_t0.elapsed().as_secs_f64() * 1e3;
-
-        shutdown::checkpoint()?;
-        let profiled_t0 = Instant::now();
-        let outcome = runner
-            .prefill_packed_profiled(&prompt_tokens)
-            .context("profile Flash-Next packed prefill")?;
-        let profiled_copy_t0 = Instant::now();
-        let logits = runner.logits()?.to_vec();
-        let profiled_copy_ms = profiled_copy_t0.elapsed().as_secs_f64() * 1e3;
-        let profiled_ms = profiled_t0.elapsed().as_secs_f64() * 1e3;
-        ensure!(
-            qwen4exp_logits_bitwise_equal(&first_logits, &warm_logits)
-                && qwen4exp_logits_bitwise_equal(&warm_logits, &logits),
-            "Flash-Next packed profile passes produced different endpoint logits"
-        );
-        let timing = runner
-            .last_prefill_timing()
-            .expect("successful profiled packed prefill records timing");
-        debug_assert_eq!(timing.token_count, prompt_tokens.len());
-        prefill_packed_tokens = timing.packed_token_count;
-        prefill_scalar_tail_commands = timing.token_count - timing.packed_token_count;
-        prefill_contains_selection = timing.contains_selection;
-        prefill_timing.record_prefill(timing);
-        let packet_ms = packet_t0.elapsed().as_secs_f64() * 1e3;
-        emit_qwen4exp_packed_profile(
-            &outcome,
-            first_timing,
-            warm_timing,
-            first_copy_ms,
-            warm_copy_ms,
-            profiled_copy_ms,
-            first_reset_ms,
-            warm_reset_ms,
-            packet_ms,
-        );
-        match &outcome.profile {
-            Ok(profile) => emit_qwen4exp_packed_timestamp_profile(profile),
-            Err(error) => eprintln!("qwen4exp packed_profile_warning: {error}"),
-        }
-        measured_prefill_ms = Some(profiled_ms);
-        logits
-    } else {
-        let logits = runner
-            .prefill_with_command_checkpoint(&prompt_tokens, || {
-                shutdown::checkpoint()
-                    .map_err(|error| Qwen4ExpRuntimeError::Checkpoint(error.to_string()))
-            })
-            .context("prefill Qwen3.8-Flash-Next prompt")?
-            .to_vec();
-        let timing = runner
-            .last_prefill_timing()
-            .expect("successful Flash-Next prefill records timing");
-        debug_assert_eq!(timing.token_count, prompt_tokens.len());
-        prefill_packed_tokens = timing.packed_token_count;
-        prefill_scalar_tail_commands = timing
-            .token_count
-            .checked_sub(timing.packed_token_count)
-            .expect("packed prefill token count cannot exceed the prompt");
-        prefill_contains_selection = timing.contains_selection;
-        prefill_timing.record_prefill(timing);
-        logits
-    };
-    let prefill_mode = qwen4exp_prefill_execution_mode(
-        packed_profile_enabled,
-        layer_profile_enabled,
-        packed_fallback,
-        prefill_packed_tokens,
-        prefill_scalar_tail_commands,
-        prefill_contains_selection,
-    );
-    // The packed profiling path reports its third (warmed) prefill; only
-    // the ordinary path measures the process's first use of the weights.
-    let weights_first_use = measured_prefill_ms.is_none();
-    let prefill_ms =
-        measured_prefill_ms.unwrap_or_else(|| prefill_t0.elapsed().as_secs_f64() * 1e3);
-    // In packed profile mode `prefill_ms` is only the reported third pass;
-    // setup and the two comparison passes are outside the record total.
-    let post_prefill_t0 = Instant::now();
-    let mut sampler = Sampler::new(sampling).context("initialize Qwen3.8-Flash-Next sampler")?;
-    let stdout_handle = std::io::stdout();
-    let mut stdout = stdout_handle.lock();
-    let mut decode_timing = Qwen4ExpTimingTotals::default();
-    let generation = generate_serial(
-        logits,
-        args.tokens,
-        &stop_tokens,
-        &mut sampler,
-        |token| {
-            let piece = tokenizer
-                .try_decode_piece_bytes_exact(token)
-                .with_context(|| format!("decode Qwen3.8-Flash-Next token {token}"))?;
-            stdout
-                .write_all(piece)
-                .with_context(|| format!("write Qwen3.8-Flash-Next token {token}"))?;
-            stdout.flush().context("flush Qwen3.8-Flash-Next token")?;
-            Ok(())
-        },
-        |token| {
-            let token = checked_token_id(token, vocab_size, "generated")?;
-            let next_logits = runner
-                .forward_token(token)
-                .context("forward generated Qwen3.8-Flash-Next token")?
-                .to_vec();
-            decode_timing.record(
-                runner
-                    .last_token_timing()
-                    .expect("successful Flash-Next forward records timing"),
+            let prefill_mode = qwen4exp_prefill_execution_mode(
+                packed_profile_enabled,
+                layer_profile_enabled,
+                packed_fallback,
+                prefill_packed_tokens,
+                prefill_scalar_tail_commands,
+                prefill_contains_selection,
             );
-            Ok(next_logits)
-        },
-    )?;
-    let generator_return = Instant::now();
-    let reported_pass = measured_prefill_ms.map(|reported_ms| (reported_ms, post_prefill_t0));
-    if let Some(profile) = layer_profile_report {
-        match profile {
-            Ok(profile) => emit_qwen4exp_layer_profile(&profile),
-            Err(error) => eprintln!("qwen4exp layer_profile_warning: {error}"),
-        }
-    }
+            // The packed profiling path reports its third (warmed) prefill; only
+            // the ordinary path measures the process's first use of the weights.
+            let weights_first_use = measured_prefill_ms.is_none();
+            let prefill_ms =
+                measured_prefill_ms.unwrap_or_else(|| prefill_t0.elapsed().as_secs_f64() * 1e3);
+            // In packed profile mode `prefill_ms` is only the reported third pass;
+            // setup and the two comparison passes are outside the record total.
+            let post_prefill_t0 = Instant::now();
+            let mut sampler =
+                Sampler::new(sampling).context("initialize Qwen3.8-Flash-Next sampler")?;
+            let generation = generate_serial(
+                logits,
+                args.tokens,
+                &stop_tokens,
+                &mut sampler,
+                &mut on_token,
+                |token| {
+                    let token = checked_token_id(token, vocab_size, "generated")?;
+                    let next_logits = runner
+                        .forward_token(token)
+                        .context("forward generated Qwen3.8-Flash-Next token")?
+                        .to_vec();
+                    decode_timing.record(
+                        runner
+                            .last_token_timing()
+                            .expect("successful Flash-Next forward records timing"),
+                    );
+                    Ok(next_logits)
+                },
+            )?;
+            let generator_return = Instant::now();
+            let reported_pass =
+                measured_prefill_ms.map(|reported_ms| (reported_ms, post_prefill_t0));
+            if let Some(profile) = layer_profile_report {
+                match profile {
+                    Ok(profile) => emit_qwen4exp_layer_profile(&profile),
+                    Err(error) => eprintln!("qwen4exp layer_profile_warning: {error}"),
+                }
+            }
+            (
+                generation,
+                prefill_ms,
+                prefill_mode,
+                reported_pass,
+                weights_first_use,
+                generator_return,
+            )
+        };
     if !generation.tokens.is_empty() {
         writeln!(stdout)?;
         stdout
@@ -865,37 +957,56 @@ pub(crate) fn run_qwen4exp_single_turn(
     } else {
         0.0
     };
-    eprintln!(
-        "qwen4exp stats: prompt_tokens={} generated_tokens={} transitions={} stop_reason={} tokenizer_ms={:.1} load_ms={:.1} prefill_mode={} prefill_ms={:.1} prefill_tps={:.2} prefill_commands={} prefill_packed_tokens={} prefill_scalar_tail_commands={} prefill_encode_cpu_ms={:.1} prefill_completion_wait_ms={:.1} prefill_gpu_ms={:?} prefill_gpu_samples={}/{} prefill_outside_gpu_ms={:?} generation_ms={:.1} decode_tps={:.2} decode_encode_cpu_ms={:.1} decode_completion_wait_ms={:.1} decode_gpu_ms={:?} decode_gpu_samples={}/{} decode_outside_gpu_ms={:?} total_ms={:.1} weights_first_use={}",
-        prompt_tokens.len(),
-        generation.tokens.len(),
-        generation.transitions,
-        generation.stop_reason.as_str(),
-        tokenizer_ms,
-        load_ms,
-        prefill_mode,
-        prefill_ms,
-        prefill_tps,
-        prefill_timing.forwards,
-        prefill_packed_tokens,
-        prefill_scalar_tail_commands,
-        prefill_timing.encode_cpu_ms,
-        prefill_timing.completion_wait_ms,
-        prefill_timing.complete_gpu_ms(),
-        prefill_timing.gpu_samples,
-        prefill_timing.forwards,
-        prefill_timing.outside_gpu_ms(),
-        generation.wall_ms,
-        decode_tps,
-        decode_timing.encode_cpu_ms,
-        decode_timing.completion_wait_ms,
-        decode_timing.complete_gpu_ms(),
-        decode_timing.gpu_samples,
-        decode_timing.forwards,
-        decode_timing.outside_gpu_ms(),
-        request_t0.elapsed().as_secs_f64() * 1e3,
-        weights_first_use,
-    );
+    if dflash_head.is_some() {
+        eprintln!(
+            "qwen4exp stats: prompt_tokens={} generated_tokens={} transitions={} stop_reason={} tokenizer_ms={:.1} load_ms={:.1} prefill_mode={} prefill_ms={:.1} prefill_tps={:.2} generation_ms={:.1} decode_tps={:.2} total_ms={:.1} weights_first_use={} target_command_timings=unavailable",
+            prompt_tokens.len(),
+            generation.tokens.len(),
+            generation.transitions,
+            generation.stop_reason.as_str(),
+            tokenizer_ms,
+            load_ms,
+            prefill_mode,
+            prefill_ms,
+            prefill_tps,
+            generation.wall_ms,
+            decode_tps,
+            request_t0.elapsed().as_secs_f64() * 1e3,
+            weights_first_use,
+        );
+    } else {
+        eprintln!(
+            "qwen4exp stats: prompt_tokens={} generated_tokens={} transitions={} stop_reason={} tokenizer_ms={:.1} load_ms={:.1} prefill_mode={} prefill_ms={:.1} prefill_tps={:.2} prefill_commands={} prefill_packed_tokens={} prefill_scalar_tail_commands={} prefill_encode_cpu_ms={:.1} prefill_completion_wait_ms={:.1} prefill_gpu_ms={:?} prefill_gpu_samples={}/{} prefill_outside_gpu_ms={:?} generation_ms={:.1} decode_tps={:.2} decode_encode_cpu_ms={:.1} decode_completion_wait_ms={:.1} decode_gpu_ms={:?} decode_gpu_samples={}/{} decode_outside_gpu_ms={:?} total_ms={:.1} weights_first_use={}",
+            prompt_tokens.len(),
+            generation.tokens.len(),
+            generation.transitions,
+            generation.stop_reason.as_str(),
+            tokenizer_ms,
+            load_ms,
+            prefill_mode,
+            prefill_ms,
+            prefill_tps,
+            prefill_timing.forwards,
+            prefill_packed_tokens,
+            prefill_scalar_tail_commands,
+            prefill_timing.encode_cpu_ms,
+            prefill_timing.completion_wait_ms,
+            prefill_timing.complete_gpu_ms(),
+            prefill_timing.gpu_samples,
+            prefill_timing.forwards,
+            prefill_timing.outside_gpu_ms(),
+            generation.wall_ms,
+            decode_tps,
+            decode_timing.encode_cpu_ms,
+            decode_timing.completion_wait_ms,
+            decode_timing.complete_gpu_ms(),
+            decode_timing.gpu_samples,
+            decode_timing.forwards,
+            decode_timing.outside_gpu_ms(),
+            request_t0.elapsed().as_secs_f64() * 1e3,
+            weights_first_use,
+        );
+    }
     if let Some(path) = args.request_stats_jsonl.as_ref() {
         let transition_tps = if generation.transition_ms > 0.0 {
             generation.transitions as f64 / (generation.transition_ms / 1e3)

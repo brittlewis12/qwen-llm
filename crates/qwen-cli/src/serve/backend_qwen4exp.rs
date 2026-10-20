@@ -2,7 +2,7 @@
 //!
 //! The text session's workspace is allocated once at load for a fixed
 //! forward limit; each request takes it as a runner and hands it back reset
-//! (`Qwen4ExpLoadedModel::restore_workspace`), so no per-request allocation.
+//! (`Qwen4ExpLoadedModel::restore_workspace`). Optional DFlash scratch is request-local.
 //! History carries across requests only through a serve-owned RAM snapshot
 //! cache keyed by exact token prefix: a request restores the longest cached
 //! strictly-shorter prefix, then prefills the rest. As on the Qwen backend,
@@ -19,11 +19,13 @@ use super::snapshot_cache::SnapshotCache;
 use anyhow::Context as _;
 use qwen_llm::gguf::GgufFile;
 use qwen_llm::metal::MetalContext;
+use qwen_llm::metal_dflash::MetalDFlashHead;
 use qwen_llm::qwen4exp::Qwen4ExpConfig;
+use qwen_llm::qwen4exp_residency::Qwen4ExpMetalWeightPlan;
 use qwen_llm::qwen4exp_runtime::{
     Qwen4ExpLoadedModel, Qwen4ExpRuntimeError, Qwen4ExpSessionCapacity, Qwen4ExpTextRunner,
 };
-use qwen_llm::qwen4exp_text_session::Qwen4ExpTextSnapshot;
+use qwen_llm::qwen4exp_text_session::{Qwen4ExpTextSessionPlan, Qwen4ExpTextSnapshot};
 use qwen_llm::sampling::Sampler;
 use qwen_llm::snapshot_policy::SnapshotPolicyConfig;
 use qwen_llm::tokenizer::Tokenizer;
@@ -31,6 +33,8 @@ use std::io;
 use std::time::Instant;
 
 const FAMILY: &str = "Qwen3.8-Flash-Next";
+
+mod dflash;
 
 pub(super) struct Prepared {
     context_limit: usize,
@@ -40,6 +44,7 @@ pub(super) struct Prepared {
     im_start: Option<u32>,
     capacity: Qwen4ExpSessionCapacity,
     decode_options: qwen_llm::qwen4exp_runtime::Qwen4ExpDecodeOptions,
+    drafter: Option<crate::drafter_policy::PreparedDrafter>,
 }
 
 impl Prepared {
@@ -90,6 +95,16 @@ impl Prepared {
         let capacity = Qwen4ExpSessionCapacity::for_forward_limit(&config, context_limit)
             .context("derive Qwen3.8-Flash-Next resident session capacity")?;
         let decode_options = crate::family_options::qwen4exp_decode_options_from_env()?;
+        let drafter = crate::drafter_policy::PreparedDrafter::prepare_for_target(
+            invocation.drafter.as_deref(),
+            qwen_llm::loader::DFlashTargetShape {
+                hidden_size: config.hidden_size,
+                vocab_size: config.vocab_size,
+                n_layer: config.layer_count,
+            },
+            Some(qwen_llm::model_family::ModelFamily::Qwen4Exp),
+            crate::drafter_policy::Lane::Serve,
+        )?;
         Ok(Self {
             context_limit,
             default_max_tokens,
@@ -98,6 +113,7 @@ impl Prepared {
             im_start,
             capacity,
             decode_options,
+            drafter,
         })
     }
 }
@@ -135,6 +151,7 @@ pub(crate) struct FlashNextBackend {
     ctx: MetalContext,
     tokenizer: Tokenizer,
     loaded: Qwen4ExpLoadedModel<'static>,
+    dflash_head: Option<MetalDFlashHead>,
     model_id: String,
     default_max_tokens: usize,
     /// Longest decoded piece of one token (output ceilings).
@@ -173,16 +190,62 @@ impl FlashNextBackend {
         snapshot_policy: SnapshotPolicyConfig,
     ) -> anyhow::Result<Self> {
         let vocab_size = prepared.tokenizer.n_vocab();
+        // Head residency must be visible when adaptive target scratch is chosen.
+        let dflash_head = prepared
+            .drafter
+            .as_ref()
+            .map(|prepared| dflash::load_head(&ctx, prepared))
+            .transpose()?;
+        drop(prepared.drafter);
         // The context determines selected-QSA needs, not packed row count.
         // Narrow reusable scratch under pressure before scalarizing prefill.
-        let loaded = Qwen4ExpLoadedModel::load_with_adaptive_prefill(
-            &ctx,
-            gguf,
-            prepared.capacity,
-            prepared.context_limit,
-            prepared.decode_options,
-        )
+        let loaded = if let Some(head) = &dflash_head {
+            let weights = Qwen4ExpMetalWeightPlan::for_native(&ctx, gguf)?;
+            let plan = if prepared.context_limit > 1 {
+                Qwen4ExpTextSessionPlan::for_config_with_packed_prefill_tokens(
+                    &ctx,
+                    weights.config(),
+                    prepared.capacity.qsa_physical_capacity(),
+                    weights.memory_plan(),
+                    prepared.context_limit,
+                )?
+            } else {
+                Qwen4ExpTextSessionPlan::for_config(
+                    &ctx,
+                    weights.config(),
+                    prepared.capacity.qsa_physical_capacity(),
+                    weights.memory_plan(),
+                )?
+            };
+            let width = (head.config.block_size as usize)
+                .min(prepared.capacity.forward_limit().saturating_sub(1));
+            Qwen4ExpLoadedModel::load_with_adaptive_prefill_plan(
+                &ctx,
+                gguf,
+                prepared.capacity,
+                plan,
+                prepared.decode_options,
+                if width > 1 { width } else { 0 },
+            )
+        } else {
+            Qwen4ExpLoadedModel::load_with_adaptive_prefill(
+                &ctx,
+                gguf,
+                prepared.capacity,
+                prepared.context_limit,
+                prepared.decode_options,
+            )
+        }
         .context("load Qwen3.8-Flash-Next serve session")?;
+        if let Some(head) = &dflash_head {
+            let width = (head.config.block_size as usize)
+                .min(prepared.capacity.forward_limit().saturating_sub(1));
+            anyhow::ensure!(
+                width <= 1 || loaded.packed_prefill_capacity().is_some_and(|n| n >= width),
+                "Flash-Next DFlash requires packed verification width {width}; resident workspace has {:?}",
+                loaded.packed_prefill_capacity()
+            );
+        }
         tracing::info!(
             target: "qwen_diag",
             "serve: qwen4exp resident forward_limit={} qsa_physical_capacity={} packed_prefill_capacity={:?} packed_fallback={:?} guarded_topk={} hc_up_mix={}",
@@ -204,6 +267,7 @@ impl FlashNextBackend {
             max_piece_bytes: prepared.tokenizer.max_decoded_piece_bytes(),
             tokenizer: prepared.tokenizer,
             loaded,
+            dflash_head,
             model_id,
             default_max_tokens: prepared.default_max_tokens,
             forward_limit: prepared.capacity.forward_limit(),
@@ -294,16 +358,61 @@ impl GenerationBackend for FlashNextBackend {
             max_tokens,
             self.forward_limit,
         )?;
-        super::transport_memory::admit_resident_transport(
-            sink.transport_reserve_bytes(),
-            self.ctx.memory_signals().process_limit_remaining_bytes,
-        )?;
+        if self.dflash_head.is_none() {
+            super::transport_memory::admit_resident_transport(
+                sink.transport_reserve_bytes(),
+                self.ctx.memory_signals().process_limit_remaining_bytes,
+            )?;
+        }
         let mut runner = self
             .loaded
             .create_runner(&self.ctx)
             .map_err(|error| ServeError::server_error(format!("bind {FAMILY} runner: {error}")))?;
 
         let mut run = || -> Result<GenerationOutcome, BackendFailure> {
+            if let Some(head) = &self.dflash_head {
+                sink.tick().map_err(BackendFailure::Aborted)?;
+                let reserve = sink.transport_reserve_bytes();
+                let admit = || {
+                    qwen_llm::qwen4exp_runtime::Qwen4ExpDFlashAdapter::admit_request(
+                        &runner,
+                        head,
+                        prompt_ids.len(),
+                        max_tokens,
+                        reserve,
+                    )
+                };
+                super::memory_relief::retry(
+                    FAMILY,
+                    admit(),
+                    dflash::relief_request,
+                    |deficit| self.cache.evict_for(deficit),
+                    admit,
+                )
+                .map_err(dflash::map_error)?;
+                let (generation, stats) = dflash::generate_cold(
+                    &mut runner,
+                    head,
+                    &prompt_ids,
+                    sampler.clone(),
+                    max_tokens,
+                    &self.stop_tokens,
+                    &self.tokenizer,
+                    sink,
+                    reserve,
+                )?;
+                tracing::info!(target: "qwen_diag",
+                    "serve phases: family=qwen4exp mode=dflash_cold tokenize_ms={tokenize_ms:.1} matched_tokens=0 restore_ms=0 prefill_tokens={} prefill_ms={:.1} decode_ms={:.1} transitions={} required_forwards={required} forward_limit={}",
+                    prompt_ids.len(), stats.prefill.as_secs_f64() * 1e3,
+                    generation.wall_ms, generation.transitions, self.forward_limit);
+                dflash::log_stats(&stats);
+                return Ok(super::outcome::finish_generation(
+                    prompt_ids.len(),
+                    &generation,
+                    0,
+                    0.0,
+                ));
+            }
             let restore_t0 = Instant::now();
             let matched_tokens = restore_best_prefix(
                 &mut self.cache,

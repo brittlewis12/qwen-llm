@@ -162,7 +162,10 @@ fi
 
 cargo test --release -p qwen-llm --test comparison_tripwire
 status=0
-output=$(cargo test --release -p qwen-llm --lib deepseek_v41:: -- --skip gguf_scalar_rowwise_grouped_prefill_diagnostic 2>&1) || status=$?
+# Keep validation-incompatible opt-in timing probes outside correctness coverage.
+output=$(cargo test --release -p qwen-llm --lib deepseek_v41:: -- \
+  --skip gguf_scalar_rowwise_grouped_prefill_diagnostic \
+  --skip deepseek_v41::forward::attention_gpu::tests::f32_pv_batch::f32_pv_batch_performance 2>&1) || status=$?
 printf '%s\n' "$output"
 [ "$status" -eq 0 ] || exit "$status"
 if ! grep -Eq '^test result: ok\. [1-9][0-9]* passed; 0 failed; 0 ignored' <<<"$output"; then

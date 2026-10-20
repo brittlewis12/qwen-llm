@@ -664,7 +664,7 @@ impl Workspace {
 /// tile rather than once per row. Covers every expert storage type with a
 /// generic grouped layout (IQ2_S, IQ3_XXS, IQ3_S, Q2_K, Q3_K, MXFP4, ...);
 /// IQ2_XXS/IQ2_XS layers keep the native-row path.
-fn half_grouped_supported(c: &Config, layer: &Layer<'_>) -> bool {
+pub(super) fn half_grouped_supported(c: &Config, layer: &Layer<'_>) -> bool {
     #[cfg(test)]
     if tests::NATIVE_ROWS_ONLY.with(|flag| flag.get()) {
         return false;
@@ -688,10 +688,12 @@ fn half_grouped_supported(c: &Config, layer: &Layer<'_>) -> bool {
         })
 }
 
-fn half_grouped_selected(c: &Config, layer: &Layer<'_>, rows: usize) -> bool {
+pub(super) fn half_grouped_selected(c: &Config, layer: &Layer<'_>, rows: usize) -> bool {
+    // Forcing the grouped route in tests means the F32-operand tiles, whose
+    // frozen witnesses hold a 1e-5 contract the half tiles do not claim.
     #[cfg(test)]
     if tests::FORCE_GROUPED_ROWS.with(|flag| flag.get()) {
-        return half_grouped_supported(c, layer);
+        return false;
     }
     // One row is a GEMV; the tiles only pay off once an expert sees several.
     rows > 1 && half_grouped_supported(c, layer)

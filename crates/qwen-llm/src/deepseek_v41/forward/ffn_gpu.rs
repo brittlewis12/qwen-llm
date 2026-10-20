@@ -499,7 +499,10 @@ impl Workspace {
             c.clamp,
         )?;
         layer.shared[2].encode_rows(enc, &b[3], &b[4], n)?;
-        if grouped_selected(c, layer, n) || native_rows_supported(c, layer) {
+        if half_grouped_selected(c, layer, n)
+            || grouped_selected(c, layer, n)
+            || native_rows_supported(c, layer)
+        {
             self.encode_routed_rows(ctx, enc, c, layer, id, scratch)?;
         } else {
             for row in 0..n {
@@ -556,12 +559,18 @@ impl Workspace {
             &b[9],
             &status,
         )?;
-        let grouped = grouped_selected(c, layer, n);
+        let half = half_grouped_selected(c, layer, n);
+        let grouped = half || grouped_selected(c, layer, n);
         if grouped {
             metal::encode_moe_route_bucket_slots_f32(
                 ctx, enc, &b[8], &counts, &b[11], c.experts, n, c.topk,
             )?;
-            metal::encode_moe_swiglu_clamped_f32x_grouped_slots(
+            let gate_up = if half {
+                metal::encode_moe_swiglu_clamped_f32_grouped_slots_generic
+            } else {
+                metal::encode_moe_swiglu_clamped_f32x_grouped_slots
+            };
+            gate_up(
                 ctx,
                 enc,
                 layer.banks[0],
@@ -604,7 +613,12 @@ impl Workspace {
         enc.set_bytes(6, &(c.topk as u32));
         dispatch(enc, extents.weighted as usize, 256);
         if grouped {
-            metal::encode_moe_down_f32x_grouped_slots(
+            let down = if half {
+                metal::encode_moe_down_f32_grouped_slots_generic
+            } else {
+                metal::encode_moe_down_f32x_grouped_slots
+            };
+            down(
                 ctx,
                 enc,
                 layer.banks[2],
@@ -643,6 +657,44 @@ impl Workspace {
         dispatch(enc, extents.output as usize, 256);
         Ok(())
     }
+}
+
+/// The half-staged grouped expert tiles GLM and DeepSeek V4 prefill use:
+/// operands rounded to half inside the tile, F32 sums, weights read once per
+/// tile rather than once per row. Covers every expert storage type with a
+/// generic grouped layout (IQ2_S, IQ3_XXS, IQ3_S, Q2_K, Q3_K, MXFP4, ...);
+/// IQ2_XXS/IQ2_XS layers keep the native-row path.
+fn half_grouped_supported(c: &Config, layer: &Layer<'_>) -> bool {
+    #[cfg(test)]
+    if tests::NATIVE_ROWS_ONLY.with(|flag| flag.get()) {
+        return false;
+    }
+    #[cfg(test)]
+    if prefill::ROWWISE_LINEAR_ROWS.with(|flag| flag.get()) {
+        return false;
+    }
+    metal::moe_grouped_clamped_recipe(layer.banks[0].dtype, layer.banks[1].dtype).is_some()
+        && metal::moe_grouped_generic_supported(layer.banks[2].dtype)
+        && [
+            (c.hidden, layer.banks[0].dtype),
+            (c.hidden, layer.banks[1].dtype),
+            (c.intermediate, layer.banks[2].dtype),
+        ]
+        .iter()
+        .all(|&(k, dtype)| {
+            dtype
+                .storage_layout()
+                .is_some_and(|(block, _)| (k as u64).is_multiple_of(block.max(32)))
+        })
+}
+
+fn half_grouped_selected(c: &Config, layer: &Layer<'_>, rows: usize) -> bool {
+    #[cfg(test)]
+    if tests::FORCE_GROUPED_ROWS.with(|flag| flag.get()) {
+        return half_grouped_supported(c, layer);
+    }
+    // One row is a GEMV; the tiles only pay off once an expert sees several.
+    rows > 1 && half_grouped_supported(c, layer)
 }
 
 fn grouped_selected(c: &Config, layer: &Layer<'_>, rows: usize) -> bool {

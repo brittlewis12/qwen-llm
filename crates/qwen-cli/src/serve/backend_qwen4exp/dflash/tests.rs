@@ -293,7 +293,6 @@ fn aggregate_pressure_counts_cpu_reserve_and_releases_only_process_pressure() {
 #[test]
 #[ignore = "exclusive GPU lease; local QWEN4EXP_Q3_K_XL_RUNTIME_GGUF and QWEN4EXP_DFLASH_GGUF"]
 fn real_cold_backend_packets_cancel_and_reuse_workspace() {
-    use qwen_llm::loader::{DFlashTargetShape, open_dflash_drafter_for_target};
     assert_eq!(std::env::var("MTL_DEBUG_LAYER").as_deref(), Ok("1"));
     let path = qwen_llm::test_fixtures::QWEN4EXP_Q3_K_XL.required();
     let gguf = Box::leak(Box::new(GgufFile::open(&path).unwrap()));
@@ -309,36 +308,13 @@ fn real_cold_backend_packets_cancel_and_reuse_workspace() {
         snapshot_cache_mib: Some(0),
         snapshot_policy: Default::default(),
         durable: crate::serve::durable::DurableSnapshotConfig::off(),
-        drafter: None,
+        drafter: Some(std::env::var("QWEN4EXP_DFLASH_GGUF").unwrap().into()),
         trace_sse: None,
         template_style: Default::default(),
         idle_residency_secs: None,
     };
     let prepared = Prepared::new(gguf, &invocation).unwrap();
     let ctx = MetalContext::new().unwrap();
-    let draft = GgufFile::open(std::env::var("QWEN4EXP_DFLASH_GGUF").unwrap()).unwrap();
-    let cfg = Qwen4ExpConfig::from_gguf(gguf).unwrap();
-    let bound = open_dflash_drafter_for_target(
-        &draft,
-        DFlashTargetShape {
-            hidden_size: cfg.hidden_size,
-            vocab_size: cfg.vocab_size,
-            n_layer: cfg.layer_count,
-        },
-    )
-    .unwrap();
-    let price = MetalDFlashHead::priced_metal_weight_bytes(&ctx, &bound).unwrap();
-    assert!(
-        evaluate_metal_memory_admission(
-            price,
-            QWEN4EXP_TEXT_SESSION_DYNAMIC_RESERVE_BYTES,
-            ctx.memory_signals(),
-            true
-        )
-        .is_admitted()
-    );
-    // Test injection keeps family policy off. Head is resident before target load.
-    let head = MetalDFlashHead::load(&ctx, &draft, &bound).unwrap();
     let mut backend = FlashNextBackend::new(
         ctx,
         gguf,
@@ -348,7 +324,7 @@ fn real_cold_backend_packets_cancel_and_reuse_workspace() {
         Default::default(),
     )
     .unwrap();
-    backend.dflash_head = Some(head);
+    assert!(backend.dflash_head.is_some());
     backend.stop_tokens.clear();
     for (temperature, abort_tick, abort_piece) in [
         (0.0, None, None),

@@ -220,14 +220,12 @@
       "family": "qwen4exp",
       "drafter": {
         "run": {
-          "status": "unsupported",
-          "code": "family_no_speculation",
-          "message": "--drafter is not supported for Qwen3.8-Flash-Next run (family_no_speculation)"
+          "status": "permitted",
+          "target": "moe"
         },
         "serve": {
-          "status": "unsupported",
-          "code": "family_no_speculation",
-          "message": "--drafter is not supported for Qwen3.8-Flash-Next serve (family_no_speculation)"
+          "status": "permitted",
+          "target": "moe"
         }
       },
       "prompt_lookup": {
@@ -290,8 +288,8 @@
       "os_build": "<device-derived>"
     },
     "text_capability_lines": [
-      "drafter run: unsupported (family_no_speculation)",
-      "drafter serve: unsupported (family_no_speculation)",
+      "drafter run: permitted",
+      "drafter serve: permitted",
       "prompt lookup: unsupported (family_no_prompt_lookup)",
       "sampling: temperature 1.0 top-k 20 top-p 0.95 min-p 0.0 (qwen3.8_flash_next)",
       "os_build: <device-derived>",
@@ -753,14 +751,12 @@
       "family": "glm5_next",
       "drafter": {
         "run": {
-          "status": "unsupported",
-          "code": "family_no_speculation",
-          "message": "--drafter is not supported for GLM-5.3-Flash run (family_no_speculation)"
+          "status": "permitted",
+          "target": "moe"
         },
         "serve": {
-          "status": "unsupported",
-          "code": "family_no_speculation",
-          "message": "--drafter is not supported for GLM-5.3-Flash serve (family_no_speculation)"
+          "status": "permitted",
+          "target": "moe"
         }
       },
       "prompt_lookup": {
@@ -858,8 +854,8 @@
       "os_build": "<device-derived>"
     },
     "text_capability_lines": [
-      "drafter run: unsupported (family_no_speculation)",
-      "drafter serve: unsupported (family_no_speculation)",
+      "drafter run: permitted",
+      "drafter serve: permitted",
       "prompt lookup: unsupported (family_no_prompt_lookup)",
       "sampling: temperature 1.0 top-k 0 top-p 0.95 min-p 0.0 (glm_5.3_flash)",
       "os_build: <device-derived>",

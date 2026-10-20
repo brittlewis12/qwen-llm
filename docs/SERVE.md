@@ -135,6 +135,9 @@ qwen serve -m MODEL [--addr 127.0.0.1:8737] [--max-tokens N] \
 # 262,144 hard default and the GGUF's declared context length; --drafter is
 # accepted for ordinary dense and MoE targets. Optional speculation state is
 # memory-admitted per request; failed admission falls back to serial decode.
+# Native Flash-Next/GLM-5.3-Flash also accept --drafter, but always cold-prefill
+# with matched_tokens=0 and no snapshot restore or publication. Sampled decode
+# requires a DFlash2 selector. No-drafter serial/cache paths are unchanged.
 # DeepSeek V4 additionally requires --max-context-tokens (startup-fixed forward budget)
 # Muse Glimmer and Qwen3.8-Flash-Next require both --max-context-tokens and
 # --max-tokens (resident session capacity is fixed at load); admitted capacity
@@ -398,7 +401,23 @@ qwen serve -m MODEL --trace-sse "$trace_dir/serve-$(date +%Y%m%d-%H%M%S).jsonl"
   Its synthesized system prompt is stamped with the current
   UTC date for each request; when callers provide `instructions` or a system
   item, that explicit system text owns any date policy instead.
-- **Speculative decode (`--drafter`, v0.77 DFlash):** a request
+- **Speculative decode (`--drafter`):** opt-in on `qwen run` and `qwen serve`
+  for ordinary Qwen dense/MoE, Qwen3.8-Flash-Next, and GLM-5.3-Flash.
+  Native Flash-Next/GLM-Flash sampled decoding requires a DFlash2 selector;
+  native heads without a selector are greedy-only. Ordinary Qwen retains its
+  deterministic-proposal sampling path too. Muse Glimmer, full GLM, and other
+  families remain unsupported.
+  Native Flash-Next/GLM-Flash use packed target verification, family-specific
+  rollback, and scalar replay of retained inputs when needed. Packed arithmetic
+  is not a promise of bit-identical serial output, even for greedy decoding.
+  These native paths make no acceleration claim until measured against the
+  corresponding no-drafter path.
+  Native drafter serving cold-prefills every request, reports
+  `matched_tokens=0` (zero cached input tokens), and neither restores nor
+  publishes snapshots: target-only snapshots do not contain the drafter's
+  conditioning features. Reusing healthy workspace storage is not prefix reuse.
+  Omitting `--drafter` preserves each family's existing serial/cache behavior.
+- **Ordinary Qwen speculation and backoff:** a request
   speculates after a cold prefill or when a restored RAM-cache entry carries a
   compatible target-hidden capture tail. Missing or malformed tails fall back
   to serial decode while refreshing the tail for the next turn. Greedy requests
@@ -456,9 +475,9 @@ qwen serve -m MODEL --trace-sse "$trace_dir/serve-$(date +%Y%m%d-%H%M%S).jsonl"
   Absent sampling fields take the release `generation_config.json` (temperature
   1.0, top-p 0.95, top-k 20, min-p 0; a fresh seed) at every effort, `no_thinking`
   included, and are echoed (see the wire subset's sampling defaults).
-  Since 2026-09-23 it reuses prefixes through the shared serve snapshot
-  cache: a request restores the longest cached strictly-shorter token prefix
-  into the reset workspace and prefills the rest, with the Qwen
+  Without a drafter, it reuses prefixes through the shared serve snapshot
+  cache (since 2026-09-23): a request restores the longest cached strictly-shorter
+  token prefix into the reset workspace and prefills the rest, with the Qwen
   transcript-boundary split below. A snapshot holds only state later tokens
   read — 36 GDN conv+delta states, PLE conv and n-gram history, and per QSA
   layer its pending index-key block, `n/4` compressed index keys, and `n` F16
@@ -955,9 +974,16 @@ and parses it, and never runs a tool.
 after a pause pays ~1 s to re-wire GLM's 109.5 GiB: a 27-token prefill takes
 1.6-1.7 s instead of 0.6 s. The window opens after the warm-up.
 
-**Live session.** The one resident session is reused when a request's
-prompt strictly extends exactly the tokens it consumed; otherwise a snapshot
-may restore a shared prefix or document checkpoint (below), or the healthy,
+**Drafter mode.** `--drafter DRAFTER.gguf` opts into native packed verification
+with rollback/scalar replay. Sampled requests require a DFlash2 selector.
+Every drafter request cold-prefills with `matched_tokens=0`, no live-prefix
+reuse, and no snapshot restore or publication. The live-session and snapshot
+contracts below describe the unchanged no-drafter path, not drafter mode.
+There is no bit-identical serial-output or acceleration claim for drafter mode.
+
+**Live session (without a drafter).** The one resident session is reused when
+a request's prompt strictly extends exactly the tokens it consumed; otherwise
+a snapshot may restore a shared prefix or document checkpoint (below), or the healthy,
 compatible session resets and prefills from the start. Reset retains workspace and cache allocations,
 clears recurrent state and pending pooling rings, and publishes position zero;
 it is not secure erasure of invisible cache tails. Incompatible arithmetic or
@@ -974,9 +1000,9 @@ clears the session. `QWEN_GLM_PREFIX_REUSE=0` disables token-prefix reuse (live
 session and snapshots), not reuse of reset storage. Reset reports zero cached
 tokens and does not change the request's arithmetic policy.
 
-**Snapshots.** GLM keeps a RAM snapshot cache under `--snapshot-cache-mib`
-(default `auto`) and the shared expiry and eviction flags; there is no
-durable tier. A snapshot holds the session's recurrent and attention state
+**Snapshots (without a drafter).** GLM keeps a RAM snapshot cache under
+`--snapshot-cache-mib` (default `auto`) and the shared expiry and eviction flags;
+there is no durable tier. A snapshot holds the session's recurrent and attention state
 at a committed position: about 0.14 GiB fixed plus ~11.7 KiB per token
 (0.27 GiB at an 11K-token instructions-and-tools prefix). The renderer
 records two boundaries while it renders: the end of the shared prefix (the
@@ -1253,12 +1279,13 @@ because client model-pickers probe it).
   (skipped if it cannot fit beside it). A resend or regeneration that restores
   exactly at the transcript boundary treats the restored entry the same way
   (phases: `transcript_restored=true`), so its captures cannot evict it.
-  With a DFlash drafter loaded, the capture window starts a few columns early
-  so the transcript snapshot also carries the drafter's window ending at the
-  boundary, then rebases onto the full-prompt window; restored thinking turns
+  On ordinary Qwen with a DFlash drafter loaded, the capture window starts a
+  few columns early so the transcript snapshot also carries the drafter's window
+  ending at the boundary, then rebases onto the full-prompt window; restored thinking turns
   keep speculating (27B + DFlash2, turn 2: 1559/1628 tokens reused, 1.83 s vs
-  8.41 s before, greedy output unchanged). Flash-Next applies the same split,
-  resend handling and pin. DS4 captures prompt and completed boundaries and
+  8.41 s before, greedy output unchanged). Without a drafter, Flash-Next applies
+  the same split, resend handling and pin; its drafter mode always cold-prefills
+  without snapshots. DS4 captures prompt and completed boundaries and
   skips a completed boundary with no transition or a truncation inside open
   reasoning. Eligible boundaries enter the **RAM** prefix cache (8–42 ms each
   per S0). Evidence: PERF-LOG 2026-09-23 transcript-boundary entry.

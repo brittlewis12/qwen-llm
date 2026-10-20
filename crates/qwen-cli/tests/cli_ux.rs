@@ -137,9 +137,8 @@ fn every_family_without_speculation_refuses_drafter_before_dispatch() {
     for (architecture, display) in [
         ("muse-glimmer", "Muse Glimmer"),
         ("k2-horizon", "K2 Horizon"),
-        ("glm5-next", "GLM-5.3-Flash"),
-        ("qwen4exp", "Qwen3.8-Flash-Next"),
         ("deepseek4", "DeepSeek V4"),
+        ("deepseek41", "DeepSeek V4.1"),
     ] {
         let model = HeaderOnlyGguf::new(architecture);
         let path = model.0.to_str().unwrap();
@@ -188,6 +187,27 @@ fn every_family_without_speculation_refuses_drafter_before_dispatch() {
     }
 }
 
+#[test]
+fn native_drafter_info_permits_both_lanes_without_valid_target_config() {
+    for architecture in ["qwen4exp", "glm5-next", "glm5next"] {
+        let model = HeaderOnlyGguf::new(architecture);
+        let output = run_with_stdin_held_open(&["info", "-m", model.0.to_str().unwrap(), "--json"]);
+        assert!(
+            output.status.success(),
+            "{architecture}: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let info: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+        for lane in ["run", "serve"] {
+            assert_eq!(
+                info["drafter"][lane],
+                serde_json::json!({"status": "permitted", "target": "moe"}),
+                "{architecture} {lane}"
+            );
+        }
+    }
+}
+
 /// Text `qwen info` reports each family as itself: its own name and its own
 /// `<architecture>.*` metadata, never the Qwen hybrid block split or
 /// `qwen35.*` keys (MoE reports `qwen35moe.*`). The header and metadata do
@@ -222,6 +242,14 @@ fn text_info_describes_each_family_as_itself() {
             "{architecture}: {stdout}"
         );
         assert!(stdout.contains("capabilities"), "{architecture}: {stdout}");
+        if matches!(architecture, "qwen4exp" | "glm5-next" | "glm5next") {
+            for lane in ["run", "serve"] {
+                assert!(
+                    stdout.contains(&format!("drafter {lane}: permitted")),
+                    "{architecture}: {stdout}"
+                );
+            }
+        }
         if !architecture.starts_with("qwen35") {
             assert!(!stdout.contains("GDN"), "{architecture}: {stdout}");
             assert!(!stdout.contains("qwen35."), "{architecture}: {stdout}");

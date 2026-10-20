@@ -162,26 +162,35 @@ detail.
 |---|---|---|---|
 | Qwen (qwen35) | none (request-shaped) | RAM and disk | `run`, `serve` |
 | Qwen MoE (qwen35moe) | none (request-shaped) | RAM and disk | `run`, `serve` |
-| Qwen3.8-Flash-Next | `--max-context-tokens`, `--max-tokens` | RAM | no |
+| Qwen3.8-Flash-Next | `--max-context-tokens`, `--max-tokens` | RAM | `run`, `serve` |
 | DeepSeek V4 | `--max-context-tokens` | RAM and disk | no |
 | DeepSeek V4.1 | `--max-context-tokens`, `--max-tokens` | RAM | no |
 | Muse Glimmer | `--max-context-tokens`, `--max-tokens` | none | no |
 | K2 Horizon | `--max-context-tokens`, `--max-tokens` | none | no |
-| GLM-5.3-Flash | `--max-context-tokens`, `--max-tokens` | RAM | no |
+| GLM-5.3-Flash | `--max-context-tokens`, `--max-tokens` | RAM | `run`, `serve` |
 <!-- END GENERATED FAMILY PROFILE TABLE -->
 
 - **Snapshots.** A snapshot saves model state at a conversation boundary; a
   later request restores the longest matching prefix. The disk tier writes
   under `~/.cache/qwen-llm/serve-checkpoints` by default.
 - **Live-session reuse.** Muse Glimmer and K2 Horizon rewind their resident
-  session to the longest common prefix. GLM-5.3-Flash continues its session
-  when the new prompt extends the previous one exactly; otherwise it restores
-  a compatible snapshot when one is cached, or prefills a fresh session.
+  session to the longest common prefix. Without a drafter, GLM-5.3-Flash
+  continues its session when the new prompt extends the previous one exactly;
+  otherwise it restores a compatible snapshot when one is cached, or prefills
+  a fresh session.
   With its default Fast prefill, GLM snapshots only at
   the end of the shared instructions-and-tools prefix; with Exact prefill
   (`x_qwen.prefill_lineage: "exact"`) it also snapshots at the start of the
   generation header.
-- **DFlash drafter.** `--drafter DRAFTER.gguf` enables speculative decoding.
+- **DFlash drafter.** Opt in with `--drafter DRAFTER.gguf` on `run` or `serve`
+  for ordinary Qwen dense/MoE, Qwen3.8-Flash-Next, or GLM-5.3-Flash. For
+  Flash-Next/GLM-Flash, sampled decoding requires a DFlash2 selector. These paths
+  use packed target verification with rollback and scalar replay as needed;
+  they do not promise bit-identical serial output or acceleration without
+  measurements. Native drafter serving always cold-prefills (`matched_tokens=0`)
+  and neither restores nor publishes snapshots. Ordinary Qwen's restored-prefix
+  speculation/backoff and all no-drafter serial/cache paths are unchanged.
+  Muse Glimmer, full GLM, and other families remain unsupported for `--drafter`.
 
 ## Lens
 

@@ -79,7 +79,7 @@
         "--concurrency",
         "--batch-size"
       ],
-      "message": "Qwen3.8-Flash-Next currently supports request-shaped serial single-turn generation only; unsupported options: --concurrency, --batch-size"
+      "message": "Qwen3.8-Flash-Next currently supports request-shaped single-turn generation only; unsupported options: --concurrency, --batch-size"
     },
     "stats_jsonl_top_level_keys": [
       "build",
@@ -249,7 +249,7 @@
         "--concurrency",
         "--batch-size"
       ],
-      "message": "GLM-5.3-Flash currently supports bounded serial single-turn generation (raw or text chat) only; unsupported options: --concurrency, --batch-size"
+      "message": "GLM-5.3-Flash currently supports bounded single-turn generation (raw or text chat) only; unsupported options: --concurrency, --batch-size"
     },
     "stats_jsonl_top_level_keys": [
       "build",

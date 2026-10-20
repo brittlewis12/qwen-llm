@@ -99,15 +99,17 @@ pub(crate) struct ServeArgs {
     #[arg(long, value_name = "SECS", default_value_t = crate::serve::durable::DEFAULT_SHUTDOWN_SECS)]
     durable_shutdown_secs: u64,
 
-    /// DFlash drafter GGUF for speculative decode.
+    /// Opt-in DFlash drafter GGUF for ordinary Qwen dense/MoE,
+    /// Qwen3.8-Flash-Next, or GLM-5.3-Flash speculative decode.
     ///
-    /// Greedy and sampled proposals are verified by the target model. Sampled
-    /// verification uses the packed target forward, whose floating-point
-    /// arithmetic can differ slightly from serial token-major decoding.
-    /// Speculation needs the relevant target-hidden window. Restored requests
-    /// speculate when the cache entry carries a compatible capture tail;
-    /// otherwise they decode serially while refreshing that tail. The
-    /// per-request `serve phases:` line reports `decode_path=dflash|serial`.
+    /// Greedy and sampled proposals are verified by the target model. Native
+    /// Flash-Next/GLM-Flash sampled decoding requires a DFlash2 selector.
+    /// Packed verification's arithmetic can differ from serial decoding.
+    /// Ordinary Qwen restored requests speculate with a compatible capture
+    /// tail; otherwise they decode serially while refreshing that tail.
+    /// Native Flash-Next/GLM-Flash drafter requests always cold-prefill:
+    /// matched_tokens=0, no snapshot restore or publication. Without a drafter,
+    /// serial/cache paths are unchanged. No speedup is promised.
     #[arg(long, value_name = "GGUF")]
     drafter: Option<PathBuf>,
 
@@ -373,8 +375,12 @@ struct GenerationOverrides {
     #[arg(long, conflicts_with = "drafter")]
     prompt_lookup: bool,
 
-    /// DFlash drafter GGUF for speculative decode. Sampled DFlash2 proposals
-    /// use sparse rejection sampling against the packed target verifier.
+    /// Opt-in DFlash drafter GGUF for ordinary Qwen dense/MoE,
+    /// Qwen3.8-Flash-Next, or GLM-5.3-Flash speculative decode.
+    ///
+    /// DFlash2 sampled proposals use sparse rejection against the packed target
+    /// verifier. Native Flash-Next/GLM-Flash sampled decoding requires a selector.
+    /// Packed verification can differ from serial decoding; no speedup is promised.
     #[arg(long, value_name = "GGUF")]
     drafter: Option<PathBuf>,
 

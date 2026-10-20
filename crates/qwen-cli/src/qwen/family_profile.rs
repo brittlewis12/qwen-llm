@@ -91,7 +91,7 @@ static QWEN35_MOE: FamilyProfile = FamilyProfile {
 static QWEN4EXP: FamilyProfile = FamilyProfile {
     family: ModelFamily::Qwen4Exp,
     display: "Qwen3.8-Flash-Next",
-    drafter: DrafterSupport::Unsupported("family_no_speculation"),
+    drafter: DrafterSupport::Moe,
     fixed_cohort: FixedCohort::None,
     serve_capacity: ServeCapacity::FixedContextAndOutput,
     serve_warmth: ServeWarmth::SnapshotsRam,
@@ -156,7 +156,7 @@ static K2_HORIZON: FamilyProfile = FamilyProfile {
 static GLM5_NEXT: FamilyProfile = FamilyProfile {
     family: ModelFamily::Glm5Next,
     display: "GLM-5.3-Flash",
-    drafter: DrafterSupport::Unsupported("family_no_speculation"),
+    drafter: DrafterSupport::Moe,
     fixed_cohort: FixedCohort::None,
     serve_capacity: ServeCapacity::FixedContextAndOutput,
     serve_warmth: ServeWarmth::SnapshotsRam,

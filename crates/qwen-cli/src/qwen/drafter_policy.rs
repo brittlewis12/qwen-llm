@@ -59,7 +59,8 @@ pub(crate) enum DrafterDecision {
 pub(crate) enum DrafterTarget {
     /// Dense Qwen3.5/3.6/3.8 target: the qualified DFlash lane.
     Dense,
-    /// Ordinary MoE Qwen target using packed verification and recurrent rollback.
+    /// Ordinary Qwen MoE or native Flash-Next/GLM-Flash target using packed
+    /// verification and family-specific rollback.
     Moe,
 }
 
@@ -107,10 +108,7 @@ impl fmt::Display for DrafterUnsupported {
                 )
             }
             DrafterUnsupported::UnknownFamily => {
-                write!(
-                    f,
-                    "--drafter requires a recognised Qwen target architecture"
-                )
+                write!(f, "--drafter requires a recognised target architecture")
             }
         }
     }
@@ -354,13 +352,25 @@ mod tests {
     }
 
     #[test]
+    fn native_moe_targets_are_permitted_in_both_lanes() {
+        for family in [ModelFamily::Qwen4Exp, ModelFamily::Glm5Next] {
+            for lane in [Lane::CliSingleTurn, Lane::Serve] {
+                assert_eq!(
+                    resolve_drafter(Some(family), lane, true),
+                    DrafterDecision::Permitted(DrafterTarget::Moe),
+                    "{family:?} {lane:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
     fn families_without_speculation_are_refused_in_both_lanes() {
         for family in [
             ModelFamily::DeepSeek4,
+            ModelFamily::DeepSeekV41,
             ModelFamily::MuseGlimmer,
-            ModelFamily::Qwen4Exp,
             ModelFamily::K2Horizon,
-            ModelFamily::Glm5Next,
         ] {
             for lane in [Lane::CliSingleTurn, Lane::Serve] {
                 let decision = resolve_drafter(Some(family), lane, true);
@@ -378,9 +388,15 @@ mod tests {
 
     #[test]
     fn unknown_architecture_is_refused() {
+        for lane in [Lane::CliSingleTurn, Lane::Serve] {
+            assert_eq!(
+                resolve_drafter(None, lane, true),
+                DrafterDecision::Unsupported(DrafterUnsupported::UnknownFamily)
+            );
+        }
         assert_eq!(
-            resolve_drafter(None, Lane::CliSingleTurn, true),
-            DrafterDecision::Unsupported(DrafterUnsupported::UnknownFamily)
+            DrafterUnsupported::UnknownFamily.to_string(),
+            "--drafter requires a recognised target architecture"
         );
     }
 
@@ -418,10 +434,10 @@ mod tests {
     }
 
     #[test]
-    fn shared_refusal_covers_k2_and_glm() {
+    fn shared_refusal_covers_k2_and_v41() {
         for (family, label) in [
             (ModelFamily::K2Horizon, "K2 Horizon"),
-            (ModelFamily::Glm5Next, "GLM-5.3-Flash"),
+            (ModelFamily::DeepSeekV41, "DeepSeek V4.1"),
         ] {
             let DrafterDecision::Unsupported(reason) =
                 resolve_drafter(Some(family), Lane::CliSingleTurn, true)

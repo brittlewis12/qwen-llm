@@ -163,14 +163,12 @@
       "family": "glm5_next",
       "drafter": {
         "run": {
-          "status": "unsupported",
-          "code": "family_no_speculation",
-          "message": "--drafter is not supported for GLM-5.3-Flash run (family_no_speculation)"
+          "status": "permitted",
+          "target": "moe"
         },
         "serve": {
-          "status": "unsupported",
-          "code": "family_no_speculation",
-          "message": "--drafter is not supported for GLM-5.3-Flash serve (family_no_speculation)"
+          "status": "permitted",
+          "target": "moe"
         }
       },
       "prompt_lookup": {
@@ -267,7 +265,7 @@
       },
       "os_build": "<device-derived>"
     },
-    "text_utf8": "loaded <model>: arch=glm5-next 36 tensors, 1 shard(s), mmap=0 MiB, primary tensor-data starts at 3008\nfamily: GLM-5.3-Flash (glm5_next)\nblocks: 3\nmetadata (glm5-next.*):\n  glm5-next.attention.head_count = 1\n  glm5-next.attention.head_count_kv = 1\n  glm5-next.attention.key_length = 2\n  glm5-next.block_count = 3\n  glm5-next.embedding_length = 2\n  glm5-next.expert_count = 2\n  glm5-next.expert_feed_forward_length = 4\n  glm5-next.expert_shared_feed_forward_length = 4\n  glm5-next.expert_used_count = 1\n  glm5-next.feed_forward_length = 4\n  glm5-next.full_attention_interval = 1\n  glm5-next.ssm.conv_kernel = 4\n  glm5-next.ssm.group_count = 1\n  glm5-next.ssm.state_size = 2\n  glm5-next.ssm.time_step_rank = 1\ncapabilities:\n  drafter run: unsupported (family_no_speculation)\n  drafter serve: unsupported (family_no_speculation)\n  prompt lookup: unsupported (family_no_prompt_lookup)\n  sampling: temperature 1.0 top-k 0 top-p 0.95 min-p 0.0 (glm_5.3_flash)\n  os_build: <device-derived>\n  reasoning: no effort levels; no-thinking unsupported (glm5_next_configuration)\n  input: raw unsupported (glm5_next_configuration), user unsupported (glm5_next_configuration), messages unsupported (glm5_next_configuration), tools unsupported (glm5_next_configuration)\n  template: unsupported\n  run: unsupported\n  bench: unsupported\n  serve: unsupported (glm5_next_configuration)\n  lens: unsupported (glm5_next_configuration)\n  request_device: not_evaluated\n"
+    "text_utf8": "loaded <model>: arch=glm5-next 36 tensors, 1 shard(s), mmap=0 MiB, primary tensor-data starts at 3008\nfamily: GLM-5.3-Flash (glm5_next)\nblocks: 3\nmetadata (glm5-next.*):\n  glm5-next.attention.head_count = 1\n  glm5-next.attention.head_count_kv = 1\n  glm5-next.attention.key_length = 2\n  glm5-next.block_count = 3\n  glm5-next.embedding_length = 2\n  glm5-next.expert_count = 2\n  glm5-next.expert_feed_forward_length = 4\n  glm5-next.expert_shared_feed_forward_length = 4\n  glm5-next.expert_used_count = 1\n  glm5-next.feed_forward_length = 4\n  glm5-next.full_attention_interval = 1\n  glm5-next.ssm.conv_kernel = 4\n  glm5-next.ssm.group_count = 1\n  glm5-next.ssm.state_size = 2\n  glm5-next.ssm.time_step_rank = 1\ncapabilities:\n  drafter run: permitted\n  drafter serve: permitted\n  prompt lookup: unsupported (family_no_prompt_lookup)\n  sampling: temperature 1.0 top-k 0 top-p 0.95 min-p 0.0 (glm_5.3_flash)\n  os_build: <device-derived>\n  reasoning: no effort levels; no-thinking unsupported (glm5_next_configuration)\n  input: raw unsupported (glm5_next_configuration), user unsupported (glm5_next_configuration), messages unsupported (glm5_next_configuration), tools unsupported (glm5_next_configuration)\n  template: unsupported\n  run: unsupported\n  bench: unsupported\n  serve: unsupported (glm5_next_configuration)\n  lens: unsupported (glm5_next_configuration)\n  request_device: not_evaluated\n"
   },
   "k2-horizon": {
     "json": {
@@ -706,14 +704,12 @@
       "family": "qwen4exp",
       "drafter": {
         "run": {
-          "status": "unsupported",
-          "code": "family_no_speculation",
-          "message": "--drafter is not supported for Qwen3.8-Flash-Next run (family_no_speculation)"
+          "status": "permitted",
+          "target": "moe"
         },
         "serve": {
-          "status": "unsupported",
-          "code": "family_no_speculation",
-          "message": "--drafter is not supported for Qwen3.8-Flash-Next serve (family_no_speculation)"
+          "status": "permitted",
+          "target": "moe"
         }
       },
       "prompt_lookup": {
@@ -775,6 +771,6 @@
       },
       "os_build": "<device-derived>"
     },
-    "text_utf8": "loaded <model>: arch=qwen4exp 36 tensors, 1 shard(s), mmap=0 MiB, primary tensor-data starts at 2976\nfamily: Qwen3.8-Flash-Next (qwen4exp)\nblocks: 3\nmetadata (qwen4exp.*):\n  qwen4exp.attention.head_count = 1\n  qwen4exp.attention.head_count_kv = 1\n  qwen4exp.attention.key_length = 2\n  qwen4exp.block_count = 3\n  qwen4exp.embedding_length = 2\n  qwen4exp.expert_count = 2\n  qwen4exp.expert_feed_forward_length = 4\n  qwen4exp.expert_shared_feed_forward_length = 4\n  qwen4exp.expert_used_count = 1\n  qwen4exp.feed_forward_length = 4\n  qwen4exp.full_attention_interval = 1\n  qwen4exp.ssm.conv_kernel = 4\n  qwen4exp.ssm.group_count = 1\n  qwen4exp.ssm.state_size = 2\n  qwen4exp.ssm.time_step_rank = 1\ncapabilities:\n  drafter run: unsupported (family_no_speculation)\n  drafter serve: unsupported (family_no_speculation)\n  prompt lookup: unsupported (family_no_prompt_lookup)\n  sampling: temperature 1.0 top-k 20 top-p 0.95 min-p 0.0 (qwen3.8_flash_next)\n  os_build: <device-derived>\n  reasoning: unsupported (prompt_protocol_unsupported)\n  input: raw supported, user unsupported (prompt_protocol_unsupported), messages unsupported (prompt_protocol_unsupported), tools unsupported (prompt_protocol_unsupported)\n  template: unknown\n"
+    "text_utf8": "loaded <model>: arch=qwen4exp 36 tensors, 1 shard(s), mmap=0 MiB, primary tensor-data starts at 2976\nfamily: Qwen3.8-Flash-Next (qwen4exp)\nblocks: 3\nmetadata (qwen4exp.*):\n  qwen4exp.attention.head_count = 1\n  qwen4exp.attention.head_count_kv = 1\n  qwen4exp.attention.key_length = 2\n  qwen4exp.block_count = 3\n  qwen4exp.embedding_length = 2\n  qwen4exp.expert_count = 2\n  qwen4exp.expert_feed_forward_length = 4\n  qwen4exp.expert_shared_feed_forward_length = 4\n  qwen4exp.expert_used_count = 1\n  qwen4exp.feed_forward_length = 4\n  qwen4exp.full_attention_interval = 1\n  qwen4exp.ssm.conv_kernel = 4\n  qwen4exp.ssm.group_count = 1\n  qwen4exp.ssm.state_size = 2\n  qwen4exp.ssm.time_step_rank = 1\ncapabilities:\n  drafter run: permitted\n  drafter serve: permitted\n  prompt lookup: unsupported (family_no_prompt_lookup)\n  sampling: temperature 1.0 top-k 20 top-p 0.95 min-p 0.0 (qwen3.8_flash_next)\n  os_build: <device-derived>\n  reasoning: unsupported (prompt_protocol_unsupported)\n  input: raw supported, user unsupported (prompt_protocol_unsupported), messages unsupported (prompt_protocol_unsupported), tools unsupported (prompt_protocol_unsupported)\n  template: unknown\n"
   }
 }

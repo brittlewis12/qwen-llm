@@ -174,8 +174,12 @@ pub(crate) struct Args {
     #[arg(long, hide_short_help = true)]
     pub(crate) prompt_lookup: bool,
 
-    /// DFlash drafter GGUF for speculative decode. Sampled DFlash2 proposals
-    /// use sparse rejection sampling against the packed target verifier.
+    /// Opt-in DFlash drafter GGUF for ordinary Qwen dense/MoE,
+    /// Qwen3.8-Flash-Next, or GLM-5.3-Flash speculative decode.
+    ///
+    /// DFlash2 sampled proposals use sparse rejection against the packed target
+    /// verifier. Native Flash-Next/GLM-Flash sampled decoding requires a selector.
+    /// Packed verification can differ from serial decoding; no speedup is promised.
     #[arg(long, value_name = "GGUF")]
     pub(crate) drafter: Option<PathBuf>,
 

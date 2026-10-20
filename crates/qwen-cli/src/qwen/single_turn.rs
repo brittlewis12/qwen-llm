@@ -412,7 +412,7 @@ pub(crate) fn run_single_turn(
     let runtime = Runtime::metal().context("init Metal runtime")?;
     let additional_metal_weight_bytes = drafter
         .as_ref()
-        .map(|prepared| prepared.priced_metal_bytes(runtime.context(), &gguf))
+        .map(|prepared| prepared.priced_metal_bytes(runtime.context()))
         .transpose()?
         .unwrap_or(0);
     let loaded = runtime
@@ -432,7 +432,7 @@ pub(crate) fn run_single_turn(
     let dflash_head = match drafter.as_ref() {
         Some(prepared) => {
             let t0 = Instant::now();
-            let head = prepared.load(loaded.context(), loaded.gguf())?;
+            let head = prepared.load(loaded.context())?;
             tracing::info!(
                 target: "qwen_diag",
                 drafter = %prepared.path().display(),

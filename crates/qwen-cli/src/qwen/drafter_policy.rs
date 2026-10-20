@@ -18,7 +18,7 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
 use qwen_llm::gguf::GgufFile;
-use qwen_llm::loader::{Model, open_dflash_drafter};
+use qwen_llm::loader::{DFlashTargetShape, Model, open_dflash_drafter_for_target};
 use qwen_llm::metal::MetalContext;
 use qwen_llm::metal_dflash::MetalDFlashHead;
 use qwen_llm::model_family::ModelFamily;
@@ -142,12 +142,13 @@ pub(crate) fn resolve_drafter(
 }
 
 /// A drafter whose GGUF has been opened and whose metadata has been bound
-/// against the target's header, all before the target's weights exist on the
-/// GPU. Holding the opened file means the later Metal load reuses the same
+/// against validated target dimensions, before the target's GPU weights exist.
+/// Holding the opened file means the later Metal load reuses the same
 /// inspected asset rather than reopening a path that may have changed.
 pub(crate) struct PreparedDrafter {
     path: PathBuf,
     gguf: GgufFile,
+    target_shape: DFlashTargetShape,
 }
 
 impl PreparedDrafter {
@@ -160,6 +161,35 @@ impl PreparedDrafter {
         family: Option<ModelFamily>,
         lane: Lane,
     ) -> Result<Option<Self>> {
+        Self::prepare_with_shape(path, family, lane, || {
+            let target_model =
+                Model::from_gguf(target).context("parse target arch for drafter binding")?;
+            Ok(DFlashTargetShape {
+                hidden_size: target_model.arch.hidden_size,
+                vocab_size: target_model.arch.vocab_size,
+                n_layer: target_model.arch.n_layer,
+            })
+        })
+    }
+
+    /// Prepare using dimensions from a caller-validated target configuration,
+    /// without parsing an ordinary Qwen model. This still enforces lane/family
+    /// policy; dimensions alone do not establish generation support.
+    pub(crate) fn prepare_for_target(
+        path: Option<&Path>,
+        target_shape: DFlashTargetShape,
+        family: Option<ModelFamily>,
+        lane: Lane,
+    ) -> Result<Option<Self>> {
+        Self::prepare_with_shape(path, family, lane, || Ok(target_shape))
+    }
+
+    fn prepare_with_shape(
+        path: Option<&Path>,
+        family: Option<ModelFamily>,
+        lane: Lane,
+        target_shape: impl FnOnce() -> Result<DFlashTargetShape>,
+    ) -> Result<Option<Self>> {
         let Some(path) = path else {
             return Ok(None);
         };
@@ -170,13 +200,13 @@ impl PreparedDrafter {
         }
         let gguf =
             GgufFile::open(path).with_context(|| format!("open drafter {}", path.display()))?;
-        let target_model =
-            Model::from_gguf(target).context("parse target arch for drafter binding")?;
-        open_dflash_drafter(&gguf, &target_model)
+        let target_shape = target_shape()?;
+        open_dflash_drafter_for_target(&gguf, target_shape)
             .with_context(|| format!("bind drafter {}", path.display()))?;
         Ok(Some(Self {
             path: path.to_path_buf(),
             gguf,
+            target_shape,
         }))
     }
 
@@ -184,26 +214,25 @@ impl PreparedDrafter {
         &self.path
     }
 
-    pub(crate) fn priced_metal_bytes(&self, ctx: &MetalContext, target: &GgufFile) -> Result<u64> {
-        let target_model =
-            Model::from_gguf(target).context("parse target arch for drafter pricing")?;
-        let head = open_dflash_drafter(&self.gguf, &target_model)
-            .with_context(|| format!("bind drafter {}", self.path.display()))?;
+    pub(crate) fn bound_head(&self) -> Result<qwen_llm::loader::DFlashHead<'_>> {
+        open_dflash_drafter_for_target(&self.gguf, self.target_shape)
+            .with_context(|| format!("bind drafter {}", self.path.display()))
+    }
+
+    pub(crate) fn priced_metal_bytes(&self, ctx: &MetalContext) -> Result<u64> {
+        let head = self.bound_head()?;
         MetalDFlashHead::priced_metal_weight_bytes(ctx, &head)
             .context("price drafter Metal weights")
     }
 
-    /// Bind again (header-only, cheap) and copy the drafter to the GPU. The
-    /// target `GgufFile` must be the same asset `prepare` bound against.
-    pub(crate) fn load(&self, ctx: &MetalContext, target: &GgufFile) -> Result<MetalDFlashHead> {
+    /// Rebind the retained drafter against the prepared dimensions and copy it
+    /// to the GPU. No target weights or target metadata parsing are needed.
+    pub(crate) fn load(&self, ctx: &MetalContext) -> Result<MetalDFlashHead> {
         qwen_llm::runtime::prefetch_opened_gguf(
             &self.gguf,
             &qwen_llm::runtime::LoadedModelConfig::default(),
         );
-        let target_model =
-            Model::from_gguf(target).context("parse target arch for drafter binding")?;
-        let bound = open_dflash_drafter(&self.gguf, &target_model)
-            .with_context(|| format!("bind drafter {}", self.path.display()))?;
+        let bound = self.bound_head()?;
         MetalDFlashHead::load(ctx, &self.gguf, &bound).context("metal-load drafter")
     }
 }
@@ -211,6 +240,77 @@ impl PreparedDrafter {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn preparation_without_a_drafter_skips_target_dimensions() {
+        for family in std::iter::once(None).chain(ModelFamily::ALL.iter().copied().map(Some)) {
+            for lane in [Lane::CliSingleTurn, Lane::Serve] {
+                assert!(
+                    PreparedDrafter::prepare_with_shape(None, family, lane, || {
+                        panic!("absent drafter must not parse target dimensions")
+                    })
+                    .unwrap()
+                    .is_none()
+                );
+                assert!(
+                    PreparedDrafter::prepare_for_target(
+                        None,
+                        DFlashTargetShape {
+                            hidden_size: 0,
+                            vocab_size: 0,
+                            n_layer: 0,
+                        },
+                        family,
+                        lane,
+                    )
+                    .unwrap()
+                    .is_none()
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn preparation_refuses_policy_before_drafter_io_or_target_dimensions() {
+        let shape = DFlashTargetShape {
+            hidden_size: 32,
+            vocab_size: 64,
+            n_layer: 4,
+        };
+        for family in std::iter::once(None).chain(ModelFamily::ALL.iter().copied().map(Some)) {
+            for lane in [Lane::CliSingleTurn, Lane::Serve] {
+                let DrafterDecision::Unsupported(reason) = resolve_drafter(family, lane, true)
+                else {
+                    continue;
+                };
+                let error =
+                    PreparedDrafter::prepare_with_shape(Some(Path::new("")), family, lane, || {
+                        panic!("refused drafter must not parse target dimensions")
+                    })
+                    .err()
+                    .expect("unsupported family must be refused");
+                assert_eq!(error.to_string(), reason.to_string());
+                let error =
+                    PreparedDrafter::prepare_for_target(Some(Path::new("")), shape, family, lane)
+                        .err()
+                        .expect("validated dimensions must not bypass policy");
+                assert_eq!(error.to_string(), reason.to_string());
+            }
+        }
+    }
+
+    #[test]
+    fn unreadable_drafter_still_fails_before_ordinary_target_parsing() {
+        let error = PreparedDrafter::prepare_with_shape(
+            Some(Path::new("")),
+            Some(ModelFamily::Qwen35),
+            Lane::CliSingleTurn,
+            || panic!("unreadable drafter must fail before parsing the target"),
+        )
+        .err()
+        .expect("empty drafter path cannot be opened");
+        assert_eq!(error.to_string(), "open drafter ");
+    }
 
     #[test]
     fn absent_request_is_not_requested_for_every_family_and_lane() {

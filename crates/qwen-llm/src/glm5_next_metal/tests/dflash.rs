@@ -390,6 +390,7 @@ fn metal_postcommit_context_append_failure_aborts_without_publication() {
             ));
             drop(runner);
             assert!(target.is_poisoned());
+            assert!(matches!(target.reset(), Err(Glm5NextMetalError::Poisoned)));
         } else {
             let packet = result.unwrap();
             assert_eq!(
@@ -656,6 +657,9 @@ fn metal_packets_limits_eos_and_sampled_cancellation_cleanup() {
         ));
     }
     assert!(target.is_poisoned());
+    assert!(matches!(target.reset(), Err(Glm5NextMetalError::Poisoned)));
+    drop(target);
+    let mut target = Glm5NextSession::with_prefill_rows(&ctx, &weights, 64, width).unwrap();
     let mut serial_result = None;
     for verification in [
         Glm5NextDFlashVerification::Serial,
@@ -697,8 +701,9 @@ fn metal_packets_limits_eos_and_sampled_cancellation_cleanup() {
         }
         serial_result = Some((result, state));
     }
+    drop(target);
     for boundary in 1..=4 {
-        target.reset().unwrap();
+        let mut target = Glm5NextSession::with_prefill_rows(&ctx, &weights, 64, width).unwrap();
         let mut runner = Glm5NextDFlashRunner::new(
             &ctx,
             &mut target,
@@ -728,8 +733,15 @@ fn metal_packets_limits_eos_and_sampled_cancellation_cleanup() {
             runner.prefill(&prompt, &mut || false),
             Err(Glm5NextDFlashError::Closed)
         ));
+        drop(runner);
+        if boundary == 1 {
+            target.reset().unwrap();
+        } else {
+            assert!(matches!(target.reset(), Err(Glm5NextMetalError::Poisoned)));
+        }
+        drop(target);
     }
-    target.reset().unwrap();
+    let mut target = Glm5NextSession::with_prefill_rows(&ctx, &weights, 64, width).unwrap();
     {
         let long_prompt: Vec<u32> = (1..=(2 * width + 1) as u32).collect();
         let mut runner = Glm5NextDFlashRunner::new(
@@ -763,7 +775,9 @@ fn metal_packets_limits_eos_and_sampled_cancellation_cleanup() {
             Err(Glm5NextDFlashError::Closed)
         ));
     }
-    target.reset().unwrap();
+    assert!(matches!(target.reset(), Err(Glm5NextMetalError::Poisoned)));
+    drop(target);
+    let mut target = Glm5NextSession::with_prefill_rows(&ctx, &weights, 64, width).unwrap();
     {
         let mut runner = Glm5NextDFlashRunner::new(
             &ctx,
@@ -779,6 +793,7 @@ fn metal_packets_limits_eos_and_sampled_cancellation_cleanup() {
         assert!(runner.target_is_poisoned());
         assert_eq!(runner.draft.target_ctx_n, 0);
     }
+    assert!(matches!(target.reset(), Err(Glm5NextMetalError::Poisoned)));
     drop(target);
     let mut target =
         Glm5NextSession::with_prefill_rows(&ctx, &weights, prompt.len(), width.min(prompt.len()))

@@ -651,17 +651,16 @@ fn metal_checkpoint_command_failures_verify_restore_replay_are_terminal() {
     let ctx = MetalContext::new().unwrap();
     let gguf = GgufFile::open(crate::test_fixtures::GLM53_FLASH_UD_IQ3_XXS.required()).unwrap();
     let weights = Glm5NextWeights::load(&ctx, &gguf).unwrap();
-    let mut session = Glm5NextSession::with_prefill_rows(&ctx, &weights, 64, 8).unwrap();
     let mut bank = Glm5NextRowBank::new(
         &ctx,
         &weights,
         Glm5NextRowBankPlan::new(&weights.config, &[5], 8, 8).unwrap(),
     )
     .unwrap();
-    let mut checkpoint = Glm5NextAppendCheckpoint::new(&ctx, &session).unwrap();
     let inputs = [2; 8];
     for failure in ["packed verify", "serial verify", "restore", "replay"] {
-        session.reset().unwrap();
+        let mut session = Glm5NextSession::with_prefill_rows(&ctx, &weights, 64, 8).unwrap();
+        let mut checkpoint = Glm5NextAppendCheckpoint::new(&ctx, &session).unwrap();
         session.prefill_packed(&ctx, &[1; 3]).unwrap();
         {
             let mut tx = session
@@ -734,5 +733,8 @@ fn metal_checkpoint_command_failures_verify_restore_replay_are_terminal() {
                 .begin_append(&ctx, &mut checkpoint, &mut bank, &inputs)
                 .is_err()
         );
+        assert!(matches!(session.reset(), Err(Glm5NextMetalError::Poisoned)));
+        drop(checkpoint);
+        drop(session);
     }
 }

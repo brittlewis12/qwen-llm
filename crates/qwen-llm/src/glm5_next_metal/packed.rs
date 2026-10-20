@@ -72,6 +72,10 @@ mod prefill_cost;
 mod route_bucket_distribution;
 
 #[cfg(test)]
+#[path = "tests/expert_tensor_ops.rs"]
+mod expert_tensor_ops;
+
+#[cfg(test)]
 thread_local! {
     static ABSORB_TAIL: std::cell::Cell<(Option<bool>, usize)> = const { std::cell::Cell::new((None, 0)) };
 }

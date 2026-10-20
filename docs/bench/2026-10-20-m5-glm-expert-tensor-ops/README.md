@@ -43,14 +43,31 @@ selected `kernel_tensor_matmul2d_f16_f32`; it compared only the existing
 16x16x32 F16 witness shape against the portable kernel. It does not represent
 GLM expert shapes or quantized in-kernel decoding.
 
-## Not measured
+## Maya pp2048 route buckets
 
-This run does not provide per-layer/per-chunk rows per active expert, p10/p50/
-p90/max buckets, or full/tail tile shares. It also does not provide pp512 or
-pp4096 stage profiles, expert-shape tensor-op timings, five-repeat interleaved
-A/B measurements, or tensor-vs-production numerical deltas. Therefore it
-cannot answer whether TensorOps win for Maya's real bucket sizes. No test-only
-expert kernel was added and no production behavior changed.
+`maya-pp2048-bucket-distribution.json` records the rows per active expert for
+all 168 layer/chunk pairs: 42 routed layers over four 512-row chunks. The
+percentile population is 40,214 positive expert bucket counts. Active experts
+per layer/chunk ranged from 199 to 287 (mean 239.37; median 232).
+
+| Bucket rows | p10 | p50 | p90 | max |
+| --- | ---: | ---: | ---: | ---: |
+| Active expert rows | 1 | 10 | 39 | 333 |
+
+| Production path | Active buckets | Full tiles | Tail tiles |
+| --- | ---: | ---: | ---: |
+| 16-row path (bucket <17) | 27,412 | 871 | 26,541 |
+| 32-row path (bucket >=17) | 12,802 | 8,760 | 12,507 |
+
+The tile counts sum across all captured layer/chunk buckets; the raw JSON
+contains each per-expert count and per-layer active-expert count per chunk.
+Counts conserve `512 * top_k` routed rows per full chunk and layer.
+
+## Still not measured
+
+The GLM-shaped TensorOps benchmark, five-repeat interleaved A/B timings and
+numerical deltas are still pending. Consequently there is not yet a tensor
+crossover verdict. No production behavior changed.
 
 Before considering promotion, capture the per-layer routing counts for every
 512-row chunk at pp512, pp2048 and pp4096, then compare the production grouped

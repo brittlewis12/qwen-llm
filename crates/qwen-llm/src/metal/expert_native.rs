@@ -9,6 +9,8 @@
 //! are 16-byte aligned; activations, IDs and status are 4-byte aligned.
 //! Serial encoders are required. Output must be writable and disjoint from
 //! every input. Invalid IDs and any status other than READY produce zeros.
+//! Row-batched entrypoints add only a grid-depth/token axis, retaining the
+//! native per-output reduction and the separate gate/up passes and F32 store.
 
 use super::checks::{
     bad_shape, check_disjoint, check_expert_bank, check_tensor, require_serial, to_u32,
@@ -54,6 +56,20 @@ pub fn all_slots_down_native_supported(dtype: GgmlType) -> bool {
     native_pipeline_name(dtype).is_some()
 }
 
+/// Initial row-batched gate/up coverage; single-token capability is unchanged.
+pub fn all_slots_gate_up_native_rows_supported(gate: GgmlType, up: GgmlType) -> bool {
+    [gate, up]
+        .into_iter()
+        .all(|t| matches!(t, GgmlType::IQ3_XXS | GgmlType::Q3_K))
+}
+
+pub fn all_slots_down_native_rows_supported(dtype: GgmlType) -> bool {
+    matches!(
+        dtype,
+        GgmlType::IQ3_XXS | GgmlType::IQ3_S | GgmlType::Q3_K | GgmlType::MXFP4
+    )
+}
+
 #[repr(C)]
 #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
 struct NativeArgs {
@@ -97,6 +113,10 @@ fn bank_pipeline(
     args: &NativeArgs,
     name: &str,
 ) -> Result<(Pipeline, u64), MetalError> {
+    u64::from(args.n_in)
+        .checked_mul(u64::from(args.n_out))
+        .and_then(|n| n.checked_mul(u64::from(args.experts)))
+        .ok_or_else(|| bad_shape(kernel, "expert bank element count overflow"))?;
     let pipeline = native_pipeline_name(bank.dtype).ok_or_else(|| {
         bad_shape(
             kernel,
@@ -132,27 +152,49 @@ fn check_views(
     output: &MetalTensor,
     args: &NativeArgs,
     down: bool,
+    rows: Option<usize>,
 ) -> Result<(), MetalError> {
+    let n = to_u32(kernel, rows.unwrap_or(1), "rows")?;
+    if n == 0 {
+        return Err(bad_shape(kernel, "positive rows required"));
+    }
+    let slots = u64::from(args.top_k) * u64::from(n);
+    for (width, count) in [
+        (args.n_in, if down { slots } else { u64::from(n) }),
+        (args.n_out, slots),
+    ] {
+        u64::from(width)
+            .checked_mul(count)
+            .and_then(|v| v.checked_mul(4))
+            .ok_or_else(|| bad_shape(kernel, "row-batched byte extent overflow"))?;
+    }
     let input_shape = if down {
-        vec![u64::from(args.n_in), u64::from(args.top_k)]
+        vec![u64::from(args.n_in), slots]
+    } else if rows.is_some() {
+        vec![u64::from(args.n_in), u64::from(n)]
     } else {
         vec![u64::from(args.n_in)]
     };
+    let ids_shape = if rows.is_some() {
+        vec![u64::from(args.top_k), u64::from(n)]
+    } else {
+        vec![u64::from(args.top_k)]
+    };
     check_tensor(kernel, input, GgmlType::F32, &input_shape, false, "input")?;
+    check_tensor(kernel, ids, GgmlType::I32, &ids_shape, false, "expert ids")?;
     check_tensor(
         kernel,
-        ids,
+        status,
         GgmlType::I32,
-        &[u64::from(args.top_k)],
+        &[u64::from(n)],
         false,
-        "expert ids",
+        "route status",
     )?;
-    check_tensor(kernel, status, GgmlType::I32, &[1], false, "route status")?;
     check_tensor(
         kernel,
         output,
         GgmlType::F32,
-        &[u64::from(args.n_out), u64::from(args.top_k)],
+        &[u64::from(args.n_out), slots],
         true,
         "output",
     )?;
@@ -167,6 +209,26 @@ fn check_views(
     )
 }
 
+fn check_device(
+    ctx: &MetalContext,
+    enc: &KernelEncoder,
+    kernel: &'static str,
+    tensors: &[&MetalTensor],
+) -> Result<(), MetalError> {
+    let device = ctx.device.registryID();
+    if enc.parent_command_buffer().device().registryID() != device
+        || tensors
+            .iter()
+            .any(|t| t.buffer.device().registryID() != device)
+    {
+        return Err(bad_shape(
+            kernel,
+            "encoder and bindings must belong to the context device",
+        ));
+    }
+    Ok(())
+}
+
 #[allow(clippy::too_many_arguments)]
 fn dispatch(
     enc: &KernelEncoder,
@@ -177,6 +239,7 @@ fn dispatch(
     ids: &MetalTensor,
     status: &MetalTensor,
     output: &MetalTensor,
+    rows: usize,
 ) {
     enc.set_pipeline(pso);
     enc.set_bytes(0, args);
@@ -189,7 +252,7 @@ fn dispatch(
         MTLSize {
             width: (args.n_out as usize).div_ceil(4),
             height: args.top_k as usize,
-            depth: 1,
+            depth: rows,
         },
         MTLSize {
             width: 128,
@@ -220,22 +283,115 @@ pub fn encode_all_slots_gate_up_swiglu_native(
     top_k: usize,
     clamp: f32,
 ) -> Result<(), MetalError> {
+    encode_gate_up(
+        ctx, enc, gate_bank, up_bank, input, ids, status, output, n_in, n_out, experts, top_k,
+        clamp, None,
+    )
+}
+
+/// Token-batched native GEMV. Input `[K, rows]`, IDs `[top_k, rows]`, status
+/// `[rows]`, output `[M, top_k * rows]`. Both banks/pipelines are preflighted
+/// before either pass. No buckets, MMA, new scratch, or precision substitution.
+#[allow(clippy::too_many_arguments)]
+pub fn encode_all_slots_gate_up_swiglu_native_rows(
+    ctx: &MetalContext,
+    enc: &KernelEncoder,
+    gate_bank: &MetalTensor,
+    up_bank: &MetalTensor,
+    input: &MetalTensor,
+    ids: &MetalTensor,
+    status: &MetalTensor,
+    output: &MetalTensor,
+    n_in: usize,
+    n_out: usize,
+    experts: usize,
+    top_k: usize,
+    rows: usize,
+    clamp: f32,
+) -> Result<(), MetalError> {
+    if !all_slots_gate_up_native_rows_supported(gate_bank.dtype, up_bank.dtype) {
+        return Err(bad_shape(
+            "all_slots_gate_up_swiglu_native_rows",
+            "unsupported row-batched gate/up storage",
+        ));
+    }
+    encode_gate_up(
+        ctx,
+        enc,
+        gate_bank,
+        up_bank,
+        input,
+        ids,
+        status,
+        output,
+        n_in,
+        n_out,
+        experts,
+        top_k,
+        clamp,
+        Some(rows),
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn encode_gate_up(
+    ctx: &MetalContext,
+    enc: &KernelEncoder,
+    gate_bank: &MetalTensor,
+    up_bank: &MetalTensor,
+    input: &MetalTensor,
+    ids: &MetalTensor,
+    status: &MetalTensor,
+    output: &MetalTensor,
+    n_in: usize,
+    n_out: usize,
+    experts: usize,
+    top_k: usize,
+    clamp: f32,
+    rows: Option<usize>,
+) -> Result<(), MetalError> {
     const K: &str = "all_slots_gate_up_swiglu_native";
     require_serial(K, enc)?;
     if !clamp.is_finite() || clamp <= 0.0 {
         return Err(bad_shape(K, "clamp must be finite and positive"));
     }
     let mut args = dimensions(K, n_in, n_out, experts, top_k)?;
-    check_views(K, input, ids, status, output, &args, false)?;
+    check_views(K, input, ids, status, output, &args, false, rows)?;
+    check_device(
+        ctx,
+        enc,
+        K,
+        &[gate_bank, up_bank, input, ids, status, output],
+    )?;
     let (gate, gate_bytes) = bank_pipeline(ctx, K, gate_bank, &args, "gate bank")?;
     let (up, up_bytes) = bank_pipeline(ctx, K, up_bank, &args, "up bank")?;
     check_disjoint(K, output, &[(gate_bank, "gate bank"), (up_bank, "up bank")])?;
     args.clamp = clamp;
     args.row_bytes = gate_bytes;
-    dispatch(enc, &gate, &args, gate_bank, input, ids, status, output);
+    dispatch(
+        enc,
+        &gate,
+        &args,
+        gate_bank,
+        input,
+        ids,
+        status,
+        output,
+        rows.unwrap_or(1),
+    );
     args.mode = 1;
     args.row_bytes = up_bytes;
-    dispatch(enc, &up, &args, up_bank, input, ids, status, output);
+    dispatch(
+        enc,
+        &up,
+        &args,
+        up_bank,
+        input,
+        ids,
+        status,
+        output,
+        rows.unwrap_or(1),
+    );
     Ok(())
 }
 
@@ -255,15 +411,85 @@ pub fn encode_all_slots_down_native(
     experts: usize,
     top_k: usize,
 ) -> Result<(), MetalError> {
+    encode_down(
+        ctx, enc, bank, input, ids, status, output, n_in, n_out, experts, top_k, None,
+    )
+}
+
+/// Token/slot-batched down with the baseline native reduction. Input is
+/// `[K, top_k * rows]`; other shapes match the row-batched gate/up entrypoint.
+#[allow(clippy::too_many_arguments)]
+pub fn encode_all_slots_down_native_rows(
+    ctx: &MetalContext,
+    enc: &KernelEncoder,
+    bank: &MetalTensor,
+    input: &MetalTensor,
+    ids: &MetalTensor,
+    status: &MetalTensor,
+    output: &MetalTensor,
+    n_in: usize,
+    n_out: usize,
+    experts: usize,
+    top_k: usize,
+    rows: usize,
+) -> Result<(), MetalError> {
+    if !all_slots_down_native_rows_supported(bank.dtype) {
+        return Err(bad_shape(
+            "all_slots_down_native_rows",
+            "unsupported row-batched down storage",
+        ));
+    }
+    encode_down(
+        ctx,
+        enc,
+        bank,
+        input,
+        ids,
+        status,
+        output,
+        n_in,
+        n_out,
+        experts,
+        top_k,
+        Some(rows),
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn encode_down(
+    ctx: &MetalContext,
+    enc: &KernelEncoder,
+    bank: &MetalTensor,
+    input: &MetalTensor,
+    ids: &MetalTensor,
+    status: &MetalTensor,
+    output: &MetalTensor,
+    n_in: usize,
+    n_out: usize,
+    experts: usize,
+    top_k: usize,
+    rows: Option<usize>,
+) -> Result<(), MetalError> {
     const K: &str = "all_slots_down_native";
     require_serial(K, enc)?;
     let mut args = dimensions(K, n_in, n_out, experts, top_k)?;
-    check_views(K, input, ids, status, output, &args, true)?;
+    check_views(K, input, ids, status, output, &args, true, rows)?;
+    check_device(ctx, enc, K, &[bank, input, ids, status, output])?;
     let (pso, row_bytes) = bank_pipeline(ctx, K, bank, &args, "down bank")?;
     check_disjoint(K, output, &[(bank, "down bank")])?;
     args.mode = 2;
     args.row_bytes = row_bytes;
-    dispatch(enc, &pso, &args, bank, input, ids, status, output);
+    dispatch(
+        enc,
+        &pso,
+        &args,
+        bank,
+        input,
+        ids,
+        status,
+        output,
+        rows.unwrap_or(1),
+    );
     Ok(())
 }
 

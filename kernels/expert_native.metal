@@ -59,22 +59,24 @@ kernel void kernel_expert_native_f32(
         ushort simd [[simdgroup_index_in_threadgroup]]) {
     const uint channel = group.x * 4u + uint(simd);
     const uint slot = group.y;
+    const uint token = group.z;
     if (channel >= args.n_out || slot >= args.top_k) return;
-    const ulong out_index = ulong(slot) * args.n_out + channel;
+    const ulong selected = ulong(token) * args.top_k + slot;
+    const ulong out_index = selected * args.n_out + channel;
     // Do not even read ids until READY. Both exits precede bank/input reads
     // and the up epilogue's read of the previous gate output.
-    if (status[0] != 1) {
+    if (status[token] != 1) {
         if (lane == 0) output[out_index] = 0.0f;
         return;
     }
-    const int expert = ids[slot];
+    const int expert = ids[selected];
     if (expert < 0 || uint(expert) >= args.experts) {
         if (lane == 0) output[out_index] = 0.0f;
         return;
     }
     device const uchar * row = bank
         + (ulong(expert) * args.n_out + channel) * args.row_bytes;
-    device const float * x = input + (args.mode == 2 ? ulong(slot) * args.n_in : 0ul);
+    device const float * x = input + (args.mode == 2 ? selected : ulong(token)) * args.n_in;
     float sum = 0.0f;
     for (ulong k = ulong(lane) * 16u; k < args.n_in; k += 512u) {
         float4x4 decoded;

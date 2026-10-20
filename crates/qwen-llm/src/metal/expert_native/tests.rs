@@ -8,6 +8,13 @@ const SOURCE: &str = include_str!("../../../../../kernels/expert_native.metal");
 const EXPERTS: usize = 3;
 const IDS: [i32; 7] = [2, 0, 2, -1, EXPERTS as i32, i32::MIN, i32::MAX];
 
+#[path = "rows_tests.rs"]
+mod rows;
+
+fn production_lease() -> impl Sized {
+    crate::metal::acquire_metal_benchmark_lease().expect("production GPU lease")
+}
+
 #[test]
 fn native_mxfp4_top6_large_banks_real_widths_and_dispatch() {
     large_banks_case(GgmlType::MXFP4, &[32, 2304, 5120]);
@@ -19,6 +26,7 @@ fn native_iq2_xxs_high_ids_generic_geometry_and_dispatch() {
 }
 
 fn large_banks_case(dtype: GgmlType, widths: &[usize]) {
+    let _lease = production_lease();
     let Some(ctx) = metal_test_context() else {
         return;
     };
@@ -112,6 +120,7 @@ fn large_banks_case(dtype: GgmlType, widths: &[usize]) {
 
 #[test]
 fn native_mxfp4_ggml_scale_edges_f32_precision_and_clamp_asymmetry() {
+    let _lease = production_lease();
     let Some(ctx) = metal_test_context() else {
         return;
     };
@@ -241,8 +250,8 @@ fn native_capabilities_match_actual_dispatch_and_abi() {
         }
     }
     // Route rejection must precede all bank/activation/gate-result reads.
-    let status = SOURCE.find("if (status[0] != 1)").unwrap();
-    let ids = SOURCE.find("const int expert = ids[slot]").unwrap();
+    let status = SOURCE.find("if (status[token] != 1)").unwrap();
+    let ids = SOURCE.find("const int expert = ids[selected]").unwrap();
     let invalid = SOURCE.find("if (expert < 0").unwrap();
     let bank = SOURCE.find("device const uchar * row = bank").unwrap();
     assert!(status < ids && ids < invalid && invalid < bank);
@@ -442,6 +451,7 @@ fn gate_up_case(
 
 #[test]
 fn native_mixed_gate_up_cpu_oracles_and_route_rejection() {
+    let _lease = production_lease();
     let Some(ctx) = metal_test_context() else {
         return;
     };
@@ -482,6 +492,7 @@ fn native_mixed_gate_up_cpu_oracles_and_route_rejection() {
 
 #[test]
 fn native_all_down_formats_cpu_oracle_offsets_and_slot_isolation() {
+    let _lease = production_lease();
     let Some(ctx) = metal_test_context() else {
         return;
     };
@@ -556,6 +567,7 @@ fn native_all_down_formats_cpu_oracle_offsets_and_slot_isolation() {
 
 #[test]
 fn native_validation_rejects_before_any_dispatch() {
+    let _lease = production_lease();
     let Some(ctx) = metal_test_context() else {
         return;
     };
@@ -711,6 +723,7 @@ fn native_validation_rejects_before_any_dispatch() {
 
 #[test]
 fn native_dense_preserves_f32_operands_and_range() {
+    let _lease = production_lease();
     let Some(ctx) = metal_test_context() else {
         return;
     };

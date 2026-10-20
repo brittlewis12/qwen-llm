@@ -8,7 +8,6 @@ const SOURCE: &str = include_str!("../../../../../kernels/expert_native.metal");
 const EXPERTS: usize = 3;
 const IDS: [i32; 7] = [2, 0, 2, -1, EXPERTS as i32, i32::MIN, i32::MAX];
 
-#[path = "rows_tests.rs"]
 mod rows;
 
 fn production_lease() -> impl Sized {

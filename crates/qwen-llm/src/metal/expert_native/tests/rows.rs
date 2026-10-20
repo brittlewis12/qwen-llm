@@ -1,6 +1,10 @@
 use super::*;
 use std::collections::BTreeMap;
 
+/// Caller-provided path for ignored native-row GPU capture/replay tests.
+/// Capture creates a new file; replay expects a pre-change capture from the same device.
+const FIXTURE_ENV: &str = "QWEN_NATIVE_ROWS_FIXTURE";
+
 fn bits(t: &MetalTensor) -> Vec<u32> {
     tensor_f32_at_offset(t)
         .iter()
@@ -248,7 +252,7 @@ fn snapshot(ctx: &MetalContext, batched: bool) -> BTreeMap<String, Vec<u32>> {
 fn capture_native_row_baseline() {
     let _lease = production_lease();
     let ctx = MetalContext::new().unwrap();
-    let path = std::env::var("QWEN_NATIVE_ROWS_FIXTURE").expect("fixture output path");
+    let path = std::env::var(FIXTURE_ENV).expect("fixture output path");
     let file = std::fs::OpenOptions::new()
         .write(true)
         .create_new(true)
@@ -262,7 +266,7 @@ fn capture_native_row_baseline() {
 fn native_rows_match_saved_prechange_gpu_outputs() {
     let _lease = production_lease();
     let ctx = MetalContext::new().unwrap();
-    let path = std::env::var("QWEN_NATIVE_ROWS_FIXTURE").expect("pre-change fixture path");
+    let path = std::env::var(FIXTURE_ENV).expect("pre-change fixture path");
     let expected: BTreeMap<String, Vec<u32>> =
         serde_json::from_reader(std::fs::File::open(path).unwrap()).unwrap();
     assert_eq!(

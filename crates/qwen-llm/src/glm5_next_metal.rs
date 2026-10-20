@@ -67,6 +67,8 @@ pub enum Glm5NextMetalError {
     /// Nothing was written.
     #[error("GLM-5.3 snapshot refused: {0}")]
     SnapshotMismatch(String),
+    #[error("GLM-5.3 append checkpoint refused: {0}")]
+    AppendCheckpointMismatch(String),
     /// A kernel reported a validation status for one block (and row, in a
     /// packed chunk): routing or sparse selection did not complete.
     #[error(
@@ -1022,6 +1024,7 @@ struct StageRecorder {
 
 pub struct Glm5NextSession<'w> {
     weights: &'w Glm5NextWeights,
+    instance: u64,
     capacity: usize,
     position: usize,
     poisoned: bool,
@@ -1138,6 +1141,7 @@ impl<'w> Glm5NextSession<'w> {
         let observed_allocation_delta = ctx.current_allocated_size().saturating_sub(before);
         Ok(Self {
             weights,
+            instance: checkpoint::next_session_instance()?,
             capacity,
             position: 0,
             poisoned: false,
@@ -1494,6 +1498,19 @@ impl<'w> Glm5NextSession<'w> {
         observer: &mut dyn FnMut(Glm5NextProbe, usize, &[f32]),
         hooks: &mut interventions::Hooks<'_, '_>,
     ) -> Result<Option<Vec<f32>>> {
+        self.step_with_row_output(ctx, token, logits, probes, observer, hooks, None)
+    }
+
+    fn step_with_row_output(
+        &mut self,
+        ctx: &MetalContext,
+        token: u32,
+        logits: bool,
+        probes: &[Glm5NextProbe],
+        observer: &mut dyn FnMut(Glm5NextProbe, usize, &[f32]),
+        hooks: &mut interventions::Hooks<'_, '_>,
+        output: Option<&capture::RowOutput<'_>>,
+    ) -> Result<Option<Vec<f32>>> {
         if self.poisoned {
             return Err(Glm5NextMetalError::Poisoned);
         }
@@ -1526,7 +1543,7 @@ impl<'w> Glm5NextSession<'w> {
             let mla = c.block_count(MixerKind::Mla);
             write_i32(&s.select_status, &vec![-1; mla])?;
         }
-        self.encode_token(ctx, token, logits, probes, observer, hooks)?;
+        self.encode_token(ctx, token, logits, probes, observer, hooks, output)?;
         for (layer, route) in self.routes.iter().enumerate() {
             if let Some(route) = route {
                 let status = read_i32(&route.status)?[0];
@@ -1569,6 +1586,7 @@ impl<'w> Glm5NextSession<'w> {
         probes: &[Glm5NextProbe],
         observer: &mut dyn FnMut(Glm5NextProbe, usize, &[f32]),
         hooks: &mut interventions::Hooks<'_, '_>,
+        output: Option<&capture::RowOutput<'_>>,
     ) -> Result<()> {
         let w = self.weights;
         let c = &w.config;
@@ -1787,6 +1805,9 @@ impl<'w> Glm5NextSession<'w> {
             )?;
             self.stage(&mut enc, Glm5NextStage::FfnPost, Some(index))?;
             encode_mhc4_post(ctx, &enc, h, &s.block_out, b, &s.post, &s.comb, a)?;
+            if let Some(output) = output {
+                output.encode_capture(ctx, &enc, &s.quarter, index, self.position, 1, a)?;
+            }
             if observed && probes.contains(&Glm5NextProbe::BlockResidual) {
                 enc.end();
                 command.commit();
@@ -1801,25 +1822,11 @@ impl<'w> Glm5NextSession<'w> {
         }
         if logits {
             self.stage(&mut enc, Glm5NextStage::Head, None)?;
-            // Head: mean of the four streams, output norm, logits.
-            encode_mhc4_collapse(ctx, &enc, h, &s.residual[0], &s.quarter, &s.final_hidden)?;
-            encode_rms_norm_mul_f32(
-                ctx,
-                &enc,
-                &s.final_hidden,
-                &w.output_norm,
-                &s.final_normed,
-                c.rms_epsilon,
-            )?;
-            matvec(
-                ctx,
-                &enc,
-                &w.output,
-                &s.final_normed,
-                &s.logits,
-                h,
-                c.vocab_size as usize,
-            )?;
+            self.encode_output_tail(ctx, &enc, &s.residual[0], &s.logits)?;
+        }
+        if let Some(dst) = output.and_then(|output| output.logits_at(self.position)) {
+            self.stage(&mut enc, Glm5NextStage::Head, None)?;
+            self.encode_output_tail(ctx, &enc, &s.residual[0], &dst)?;
         }
         enc.end();
         command.commit();
@@ -1828,6 +1835,37 @@ impl<'w> Glm5NextSession<'w> {
             recorder.command_gpu_ms = (command.GPUEndTime() - command.GPUStartTime()) * 1e3;
         }
         Ok(())
+    }
+
+    fn encode_output_tail(
+        &self,
+        ctx: &MetalContext,
+        enc: &KernelEncoder,
+        residual: &MetalTensor,
+        logits: &MetalTensor,
+    ) -> Result<()> {
+        let w = self.weights;
+        let c = &w.config;
+        let s = &self.s;
+        let h = c.hidden_size as usize;
+        encode_mhc4_collapse(ctx, enc, h, residual, &s.quarter, &s.final_hidden)?;
+        encode_rms_norm_mul_f32(
+            ctx,
+            enc,
+            &s.final_hidden,
+            &w.output_norm,
+            &s.final_normed,
+            c.rms_epsilon,
+        )?;
+        matvec(
+            ctx,
+            enc,
+            &w.output,
+            &s.final_normed,
+            logits,
+            h,
+            c.vocab_size as usize,
+        )
     }
 
     /// mHC pre for one sub-block. Q8 keeps the fused path; other native
@@ -2349,9 +2387,22 @@ fn matvec(
     Ok(())
 }
 
+mod capture;
+mod checkpoint;
+mod dflash;
 mod interventions;
 mod lens;
 mod packed;
+pub use capture::{Glm5NextCapturedRows, Glm5NextRowBank, Glm5NextRowBankPlan};
+pub use checkpoint::{
+    Glm5NextAppendCheckpoint, Glm5NextAppendTransaction, Glm5NextCommittedRows,
+    Glm5NextVerificationArithmetic, Glm5NextVerificationRows,
+};
+pub use dflash::{
+    Glm5NextDFlashCarry, Glm5NextDFlashCosts, Glm5NextDFlashCounters, Glm5NextDFlashError,
+    Glm5NextDFlashOptions, Glm5NextDFlashPacket, Glm5NextDFlashRunner, Glm5NextDFlashStop,
+    Glm5NextDFlashVerification,
+};
 pub use interventions::{
     Glm5NextCapturePoint, Glm5NextModuleIntervention, Glm5NextSite, Glm5NextSiteCapture,
 };

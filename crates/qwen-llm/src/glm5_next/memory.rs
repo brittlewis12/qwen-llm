@@ -325,9 +325,18 @@ pub fn mla_state_specs(c: &Glm5NextConfig, capacity: u64) -> Vec<BufferSpec> {
     let id = c.indexer_head_dim as u64;
     vec![
         BufferSpec::zeros("latent", F16, &[c.kv_lora_rank as u64, capacity]),
-        BufferSpec::zeros("pending", F16, &[id, 2, c.indexer_pool as u64]),
+        mla_pending_spec(c),
         BufferSpec::zeros("pooled", F16, &[id, pools]),
     ]
+}
+
+/// The bounded MLA key|gate ring, also retained by append checkpoints.
+pub fn mla_pending_spec(c: &Glm5NextConfig) -> BufferSpec {
+    BufferSpec::zeros(
+        "pending",
+        F16,
+        &[c.indexer_head_dim as u64, 2, c.indexer_pool as u64],
+    )
 }
 
 /// Sparse-selection scratch for single-token decode, needed only when the

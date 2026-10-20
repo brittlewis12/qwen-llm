@@ -1371,21 +1371,25 @@ impl Glm5NextSession<'_> {
         tokens: &[u32],
         want_logits: bool,
     ) -> Result<Option<Vec<f32>>> {
-        if self.poisoned {
-            return Err(Glm5NextMetalError::Poisoned);
-        }
-        let c = &self.weights.config;
-        if let Some(&bad) = tokens.iter().find(|&&t| t >= c.vocab_size) {
-            return invalid(format!("token {bad} outside vocabulary"));
-        }
-        if self.position + tokens.len() > self.capacity {
+        self.step_packed_with_row_output(ctx, tokens, want_logits, None)
+    }
+
+    pub(super) fn step_packed_with_row_output(
+        &mut self,
+        ctx: &MetalContext,
+        tokens: &[u32],
+        want_logits: bool,
+        output: Option<&capture::RowOutput<'_>>,
+    ) -> Result<Option<Vec<f32>>> {
+        self.validate_request(tokens)?;
+        let rows = self.packed.as_ref().map_or(0, |p| p.rows);
+        if tokens.len() > rows {
             return invalid(format!(
-                "positions {}..{} exceed capacity {}",
-                self.position,
-                self.position + tokens.len(),
-                self.capacity
+                "packed chunk has {} tokens, scratch holds {rows}",
+                tokens.len()
             ));
         }
+        let c = &self.weights.config;
         // Rows from `dense` on attend over the indexer's selection.
         let dense = self.dense_rows_remaining().min(tokens.len());
         let pool = c.indexer_pool as usize;
@@ -1410,7 +1414,7 @@ impl Glm5NextSession<'_> {
             write_i32(&sp.select_status, &vec![-1; mla * sp.rows])?;
         }
         self.poisoned = true;
-        self.encode_chunk(ctx, tokens, want_logits)?;
+        self.encode_chunk(ctx, tokens, want_logits, output)?;
         let packed = self.packed.as_ref().expect("packed scratch");
         for (layer, route) in packed.routes.iter().enumerate() {
             if let Some(route) = route {
@@ -1452,7 +1456,13 @@ impl Glm5NextSession<'_> {
         Ok(logits)
     }
 
-    fn encode_chunk(&self, ctx: &MetalContext, tokens: &[u32], want_logits: bool) -> Result<()> {
+    fn encode_chunk(
+        &self,
+        ctx: &MetalContext,
+        tokens: &[u32],
+        want_logits: bool,
+        output: Option<&capture::RowOutput<'_>>,
+    ) -> Result<()> {
         let w = self.weights;
         let c = &w.config;
         let p = self.packed.as_ref().expect("packed scratch");
@@ -1747,30 +1757,34 @@ impl Glm5NextSession<'_> {
                 &v(&p.comb),
                 &a,
             )?;
+            if let Some(output) = output {
+                output.encode_capture(
+                    ctx,
+                    &enc,
+                    &self.s.quarter,
+                    index,
+                    self.position,
+                    rows,
+                    &a,
+                )?;
+            }
         }
         if want_logits {
             self.stage(&mut enc, Glm5NextStage::Head, None)?;
             // Head on the last row only.
             let s = &self.s;
             let last = p.residual[0].view_subrange(((rows - 1) * h * 4) as u64, vec![h as u64, 4]);
-            encode_mhc4_collapse(ctx, &enc, h, &last, &s.quarter, &s.final_hidden)?;
-            encode_rms_norm_mul_f32(
-                ctx,
-                &enc,
-                &s.final_hidden,
-                &w.output_norm,
-                &s.final_normed,
-                c.rms_epsilon,
-            )?;
-            super::matvec(
-                ctx,
-                &enc,
-                &w.output,
-                &s.final_normed,
-                &s.logits,
-                h,
-                c.vocab_size as usize,
-            )?;
+            self.encode_output_tail(ctx, &enc, &last, &s.logits)?;
+        }
+        if let Some(output) = output {
+            for row in 0..rows {
+                if let Some(dst) = output.logits_at(self.position + row) {
+                    self.stage(&mut enc, Glm5NextStage::Head, None)?;
+                    let residual =
+                        p.residual[0].view_subrange((row * h * 4) as u64, vec![h as u64, 4]);
+                    self.encode_output_tail(ctx, &enc, &residual, &dst)?;
+                }
+            }
         }
         enc.end();
         command.commit();

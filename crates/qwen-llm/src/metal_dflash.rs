@@ -75,6 +75,12 @@ use std::cell::Cell;
 use std::sync::OnceLock;
 use std::time::Instant;
 
+mod accept;
+pub use accept::{
+    DFlashAcceptDecision, DFlashAcceptError, DFlashAcceptStopReason, DFlashNextCarry,
+    decide_dflash_accept_prefix,
+};
+
 #[derive(Clone, Debug)]
 pub struct AttentionCaptureProvenance {
     pub position: usize,

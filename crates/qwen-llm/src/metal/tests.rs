@@ -14,6 +14,125 @@ fn diagnostics_observers_return_to_inactive_state() {
     assert_eq!(diagnostics_observer_active_counts(), [0, 0, 0]);
 }
 
+#[test]
+fn tensor_ops_matmul2d_witness_selects_and_matches_portable() {
+    let Some(ctx) = crate::test_fixtures::metal_context_or_skip() else {
+        return;
+    };
+    const N_IN: usize = 32;
+    const N_OUT: usize = 16;
+    const N_QUERY: usize = 16;
+    let left_values = (0..N_OUT * N_IN)
+        .map(|index| half::f16::from_f32(((index * 13 % 29) as f32 - 14.0) / 32.0))
+        .collect::<Vec<_>>();
+    let right_values = (0..N_QUERY * N_IN)
+        .map(|index| half::f16::from_f32(((index * 7 % 31) as f32 - 15.0) / 37.0))
+        .collect::<Vec<_>>();
+    let left = MetalTensor::from_bytes(
+        &ctx,
+        bytemuck::cast_slice(&left_values),
+        vec![N_IN as u64, N_OUT as u64],
+        GgmlType::F16,
+    )
+    .unwrap();
+    let right = MetalTensor::from_bytes(
+        &ctx,
+        bytemuck::cast_slice(&right_values),
+        vec![N_IN as u64, N_QUERY as u64],
+        GgmlType::F16,
+    )
+    .unwrap();
+    let selected = MetalTensor::zeros_f32(&ctx, vec![N_QUERY as u64, N_OUT as u64]).unwrap();
+    let portable = MetalTensor::zeros_f32(&ctx, vec![N_QUERY as u64, N_OUT as u64]).unwrap();
+
+    dispatch_census_begin();
+    let selected_cmd = ctx.queue.commandBuffer().expect("selected command buffer");
+    let selected_enc = KernelEncoder::begin(&selected_cmd);
+    encode_matmul2d_f16_f32(
+        &ctx,
+        &selected_enc,
+        &left,
+        &right,
+        &selected,
+        N_IN,
+        N_OUT,
+        N_QUERY,
+    )
+    .unwrap();
+    selected_enc.end();
+    selected_cmd.commit();
+    wait_completed(&selected_cmd).expect("selected matmul2d command buffer");
+    let selected_census = dispatch_census_take();
+
+    dispatch_census_begin();
+    let portable_cmd = ctx.queue.commandBuffer().expect("portable command buffer");
+    let portable_enc = KernelEncoder::begin(&portable_cmd);
+    crate::metal::mat_mat::encode_matmul2d_f16_f32_portable(
+        &ctx,
+        &portable_enc,
+        &left,
+        &right,
+        &portable,
+        N_IN,
+        N_OUT,
+        N_QUERY,
+    )
+    .unwrap();
+    portable_enc.end();
+    portable_cmd.commit();
+    wait_completed(&portable_cmd).expect("portable matmul2d command buffer");
+    let portable_census = dispatch_census_take();
+
+    let selected_kernel = selected_census
+        .first()
+        .expect("selected dispatch census row")
+        .kernel
+        .as_str();
+    let portable_kernel = portable_census
+        .first()
+        .expect("portable dispatch census row")
+        .kernel
+        .as_str();
+    let facts = ctx.device_facts();
+    if facts.gpu_families.metal4
+        && facts.gpu_families.apple10
+        && facts.os_is_at_least(crate::TENSOR_METALLIB_TARGET) == Some(true)
+    {
+        assert_eq!(ctx.tensor_ops_status(), &TensorOpsStatus::Available);
+    }
+    let expected_selected = if ctx.tensor_ops_status().is_available() {
+        "kernel_tensor_matmul2d_f16_f32"
+    } else {
+        "kernel_matmul2d_f16_f32_portable"
+    };
+    assert_eq!(selected_census.len(), 1);
+    assert_eq!(portable_census.len(), 1);
+    if !facts.gpu_families.metal4 || !facts.gpu_families.apple10 {
+        assert!(matches!(
+            ctx.tensor_ops_status(),
+            TensorOpsStatus::Unavailable {
+                reason: TensorOpsUnavailableReason::GpuFamilyAbsent { .. }
+            }
+        ));
+    }
+    assert_eq!(selected_kernel, expected_selected);
+    assert_eq!(portable_kernel, "kernel_matmul2d_f16_f32_portable");
+    let selected_values = tensor_f32_at_offset(&selected);
+    let portable_values = tensor_f32_at_offset(&portable);
+    let diff =
+        crate::compare::report_max_abs_diff_f32(selected_values.iter(), portable_values.iter());
+    assert!(
+        diff <= 0.02,
+        "F16 matmul2d max abs diff {diff} exceeds 0.02"
+    );
+    eprintln!(
+        "tensor_ops_witness status={:?} selected_kernel={} portable_kernel={} max_abs_diff={diff:.6} bound=0.02",
+        ctx.tensor_ops_status(),
+        selected_kernel,
+        portable_kernel,
+    );
+}
+
 /// Serve's idle residency renews only after a request that submitted compute
 /// work, measured by this counter: every compute encoder constructor counts
 /// (serial and concurrent), blit encoders do not.

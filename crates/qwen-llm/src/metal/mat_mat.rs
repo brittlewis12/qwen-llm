@@ -328,6 +328,122 @@ pub fn encode_mat_mat_f16_f32(
     )
 }
 
+/// Shared selector for the F16 × F16 → F32 matmul2d witness. Metal 4's
+/// fixed 16 × 16 × 32 tile is selected only when the loaded tensor library
+/// is usable; all other cases use the portable implementation.
+pub fn encode_matmul2d_f16_f32(
+    ctx: &MetalContext,
+    enc: &KernelEncoder,
+    left: &MetalTensor,
+    right: &MetalTensor,
+    output: &MetalTensor,
+    n_in: usize,
+    n_out: usize,
+    n_query: usize,
+) -> Result<(), MetalError> {
+    const KERNEL: &str = "matmul2d_f16_f32";
+    if n_in == 0
+        || n_out == 0
+        || n_query == 0
+        || left.dtype != GgmlType::F16
+        || right.dtype != GgmlType::F16
+        || output.dtype != GgmlType::F32
+        || left.shape.as_slice() != [n_in as u64, n_out as u64]
+        || right.shape.as_slice() != [n_in as u64, n_query as u64]
+        || output.shape.as_slice() != [n_query as u64, n_out as u64]
+    {
+        return Err(MetalError::BadShape {
+            kernel: KERNEL,
+            detail: format!(
+                "expected F16/F16/F32 shapes [{n_in},{n_out}]/[{n_in},{n_query}]/[{n_query},{n_out}], got {:?}/{:?}/{:?} and {:?}/{:?}/{:?}",
+                left.dtype, right.dtype, output.dtype, left.shape, right.shape, output.shape,
+            ),
+        });
+    }
+    if ctx.tensor_ops_status().is_available() && (n_in, n_out, n_query) == (32, 16, 16) {
+        let pipeline = ctx.tensor_pipeline("kernel_tensor_matmul2d_f16_f32")?;
+        enc.set_pipeline(&pipeline);
+        enc.set_tensor(0, left);
+        enc.set_tensor(1, right);
+        enc.set_tensor(2, output);
+        enc.dispatch(
+            MTLSize {
+                width: 1,
+                height: 1,
+                depth: 1,
+            },
+            MTLSize {
+                width: 32,
+                height: 1,
+                depth: 1,
+            },
+        );
+    } else {
+        encode_matmul2d_f16_f32_portable(ctx, enc, left, right, output, n_in, n_out, n_query)?;
+    }
+    Ok(())
+}
+
+pub(crate) fn encode_matmul2d_f16_f32_portable(
+    ctx: &MetalContext,
+    enc: &KernelEncoder,
+    left: &MetalTensor,
+    right: &MetalTensor,
+    output: &MetalTensor,
+    n_in: usize,
+    n_out: usize,
+    n_query: usize,
+) -> Result<(), MetalError> {
+    const KERNEL: &str = "matmul2d_f16_f32_portable";
+    let pipeline = ctx.pipeline("kernel_matmul2d_f16_f32_portable")?;
+    enc.set_pipeline(&pipeline);
+    #[repr(C)]
+    #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+    struct Args {
+        n_in: u32,
+        n_out: u32,
+        n_query: u32,
+    }
+    let args = Args {
+        n_in: u32::try_from(n_in).map_err(|_| MetalError::BadShape {
+            kernel: KERNEL,
+            detail: format!("n_in={n_in} exceeds u32"),
+        })?,
+        n_out: u32::try_from(n_out).map_err(|_| MetalError::BadShape {
+            kernel: KERNEL,
+            detail: format!("n_out={n_out} exceeds u32"),
+        })?,
+        n_query: u32::try_from(n_query).map_err(|_| MetalError::BadShape {
+            kernel: KERNEL,
+            detail: format!("n_query={n_query} exceeds u32"),
+        })?,
+    };
+    enc.set_bytes(0, &args);
+    enc.set_tensor(1, left);
+    enc.set_tensor(2, right);
+    enc.set_tensor(3, output);
+    let total = n_out
+        .checked_mul(n_query)
+        .ok_or_else(|| MetalError::BadShape {
+            kernel: KERNEL,
+            detail: "output element count overflow".into(),
+        })?;
+    const THREADS: usize = 256;
+    enc.dispatch(
+        MTLSize {
+            width: total.div_ceil(THREADS),
+            height: 1,
+            depth: 1,
+        },
+        MTLSize {
+            width: THREADS,
+            height: 1,
+            depth: 1,
+        },
+    );
+    Ok(())
+}
+
 crate::env_flag!(default_on matmat_f16_half_act_env_default, "QWEN_MATMAT_F16_HALF_ACT");
 
 pub(crate) fn mat_mat_f16_half_act_enabled() -> bool {

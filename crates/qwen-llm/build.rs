@@ -12,6 +12,8 @@ use std::process::Command;
 // newer language feature.
 const DEFAULT_METALLIB_TARGET: &str = "14.0";
 const METAL_LANGUAGE: &str = "metal3.1";
+const TENSOR_METAL_LANGUAGE: &str = "metal4.0";
+const TENSOR_METAL_TARGET: &str = "26.0";
 
 fn main() -> anyhow::Result<()> {
     // MTLResidencySetDescriptor is available on macOS 15 and newer. Keep the
@@ -60,6 +62,65 @@ fn main() -> anyhow::Result<()> {
     );
     println!("cargo:rustc-env=QWEN_METALLIB_COMPILER_IDENTITY={compiler_identity}");
     println!("cargo:rustc-env=QWEN_METALLIB_SDK_VERSION={sdk_version}");
+    let out_dir = PathBuf::from(std::env::var("OUT_DIR")?);
+
+    // Select Metal 4 tiers from compiler support, not SDK branding. Each
+    // probe compiles real MSL with the standard the corresponding library
+    // will use; a failed optional tier is recorded and reported, not fatal.
+    let tensor_dir = workspace_root.join("kernels/tensor");
+    let watched_tensor_dir = watched_kernels_dir.join("tensor");
+    let tensor_out = out_dir.join("kernels_tensor.metallib");
+    let tensor4_probe = probe_msl("metal4.0", "26.0", &out_dir, "tensor4");
+    let tensor41_probe = probe_msl("metal4.1", "27.0", &out_dir, "tensor41");
+    let tensor_tier = if tensor4_probe.is_ok() {
+        "metal4.0@26.0"
+    } else {
+        "none"
+    };
+    let tensor40_probe_status = if tensor4_probe.is_ok() {
+        "accepted"
+    } else {
+        "rejected"
+    };
+    let tensor41_probe_status = if tensor41_probe.is_ok() {
+        "accepted"
+    } else {
+        "rejected"
+    };
+    println!("cargo:rustc-env=QWEN_TENSOR_METALLIB_TIERS={tensor_tier}");
+    println!("cargo:rustc-env=QWEN_TENSOR_METAL40_PROBE={tensor40_probe_status}");
+    println!("cargo:rustc-env=QWEN_TENSOR_METAL41_PROBE={tensor41_probe_status}");
+    println!(
+        "cargo:rustc-env=QWEN_TENSOR_METALLIB_TARGET={}",
+        if tensor4_probe.is_ok() {
+            TENSOR_METAL_TARGET
+        } else {
+            ""
+        }
+    );
+    match tensor4_probe {
+        Ok(()) => compile_metallib_with_language(
+            &tensor_dir,
+            &watched_tensor_dir,
+            &out_dir,
+            "kernels_tensor",
+            TENSOR_METAL_TARGET,
+            TENSOR_METAL_LANGUAGE,
+        )?,
+        Err(reason) => {
+            println!(
+                "cargo:warning=Metal tensor-op kernels skipped: MSL 4.0 compiler probe failed: {reason}"
+            );
+            std::fs::write(tensor_out, [])?;
+        }
+    }
+    if let Err(reason) = tensor41_probe {
+        println!("cargo:warning=Metal 4.1 tensor-op tier skipped: compiler probe failed: {reason}");
+    } else {
+        println!(
+            "cargo:warning=Metal 4.1 compiler probe passed; no 4.1-only tensor sources are present"
+        );
+    }
 
     // Pin the language and deployment target: without them the compiler
     // derives the target from the build host, so a library built on a newer
@@ -80,7 +141,6 @@ fn main() -> anyhow::Result<()> {
     println!("cargo:rustc-env=QWEN_PRODUCT_METALLIB_TARGET={target}");
     println!("cargo:rustc-env=QWEN_RESEARCH_METALLIB_TARGET={target}");
 
-    let out_dir = PathBuf::from(std::env::var("OUT_DIR")?);
     verify_effective_target(&kernels_dir, &target, &metal_target)?;
     // Product kernels live at the top level; bench/research-only probes under
     // kernels/research/ compile into a second metallib the runtime loads
@@ -120,6 +180,17 @@ fn compile_metallib(
     name: &str,
     target: &str,
 ) -> anyhow::Result<()> {
+    compile_metallib_with_language(dir, watched_dir, out_dir, name, target, METAL_LANGUAGE)
+}
+
+fn compile_metallib_with_language(
+    dir: &Path,
+    watched_dir: &Path,
+    out_dir: &Path,
+    name: &str,
+    target: &str,
+    language: &str,
+) -> anyhow::Result<()> {
     let metallib = out_dir.join(format!("{name}.metallib"));
     if !dir.exists() {
         std::fs::write(&metallib, [])?;
@@ -154,7 +225,7 @@ fn compile_metallib(
             .args(["-sdk", "macosx", "metal", "-c"])
             .arg("-O3")
             .arg("-ffast-math")
-            .arg(format!("-std={METAL_LANGUAGE}"))
+            .arg(format!("-std={language}"))
             .arg(format!("-mmacosx-version-min={target}"))
             .arg(src)
             .arg("-o")
@@ -174,6 +245,35 @@ fn compile_metallib(
         anyhow::bail!("metallib link failed for {name}");
     }
     Ok(())
+}
+
+fn probe_msl(language: &str, target: &str, out_dir: &Path, name: &str) -> Result<(), String> {
+    let source = out_dir.join(format!("{name}_probe.metal"));
+    let air = out_dir.join(format!("{name}_probe.air"));
+    std::fs::write(
+        &source,
+        "#include <metal_stdlib>\nusing namespace metal;\nkernel void qwen_tensor_probe() {}\n",
+    )
+    .map_err(|error| error.to_string())?;
+    let output = Command::new("xcrun")
+        .args([
+            "-sdk",
+            "macosx",
+            "metal",
+            "-c",
+            &format!("-std={language}"),
+            &format!("-mmacosx-version-min={target}"),
+        ])
+        .arg(&source)
+        .arg("-o")
+        .arg(&air)
+        .output()
+        .map_err(|error| error.to_string())?;
+    if output.status.success() {
+        Ok(())
+    } else {
+        Err(String::from_utf8_lossy(&output.stderr).trim().to_string())
+    }
 }
 
 fn verify_effective_target(kernels_dir: &Path, target: &str, expected: &str) -> anyhow::Result<()> {

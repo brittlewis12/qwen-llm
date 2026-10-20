@@ -146,6 +146,11 @@ pub struct QualificationStatus {
 pub struct DeviceFactsReport<'a> {
     #[serde(flatten)]
     pub facts: &'a DeviceFacts,
+    pub metallib_tensor_tiers: &'static str,
+    pub metallib_tensor_target: &'static str,
+    pub metallib_metal40_probe: &'static str,
+    pub metallib_metal41_probe: &'static str,
+    pub tensor_ops: super::TensorOpsStatus,
     pub qualifications: Vec<QualificationStatus>,
 }
 
@@ -1064,6 +1069,11 @@ impl DeviceFacts {
     pub fn report(&self) -> DeviceFactsReport<'_> {
         DeviceFactsReport {
             facts: self,
+            metallib_tensor_tiers: crate::TENSOR_METALLIB_TIERS,
+            metallib_tensor_target: crate::TENSOR_METALLIB_TARGET,
+            metallib_metal40_probe: crate::TENSOR_METAL40_PROBE,
+            metallib_metal41_probe: crate::TENSOR_METAL41_PROBE,
+            tensor_ops: super::probe_tensor_ops_status(),
             qualifications: qualification_statuses(self),
         }
     }

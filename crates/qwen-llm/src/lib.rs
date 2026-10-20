@@ -108,6 +108,14 @@ pub mod workspace_lens;
 pub const PRODUCT_METALLIB_TARGET: &str = env!("QWEN_PRODUCT_METALLIB_TARGET");
 /// Deployment target used to compile the research Metal library.
 pub const RESEARCH_METALLIB_TARGET: &str = env!("QWEN_RESEARCH_METALLIB_TARGET");
+/// MSL tiers compiled into the optional tensor library, including targets.
+pub const TENSOR_METALLIB_TIERS: &str = env!("QWEN_TENSOR_METALLIB_TIERS");
+/// Deployment target for the embedded tensor library, or empty when not built.
+pub const TENSOR_METALLIB_TARGET: &str = env!("QWEN_TENSOR_METALLIB_TARGET");
+/// Compiler probe outcomes for Metal 4 language tiers.
+pub const TENSOR_METAL40_PROBE: &str = env!("QWEN_TENSOR_METAL40_PROBE");
+/// Whether the local compiler accepts the MSL 4.1 language tier.
+pub const TENSOR_METAL41_PROBE: &str = env!("QWEN_TENSOR_METAL41_PROBE");
 /// Compiler and macOS SDK identity used to compile both Metal libraries.
 pub fn metallib_build_identity() -> (&'static str, &'static str) {
     (
@@ -137,6 +145,9 @@ pub(crate) const KERNELS_METALLIB: &[u8] =
 /// them.
 pub(crate) const KERNELS_RESEARCH_METALLIB: &[u8] =
     include_bytes!(concat!(env!("OUT_DIR"), "/kernels_research.metallib"));
+/// Optional Metal 4 TensorOps library, separate from the portable MSL 3.1 set.
+pub(crate) const KERNELS_TENSOR_METALLIB: &[u8] =
+    include_bytes!(concat!(env!("OUT_DIR"), "/kernels_tensor.metallib"));
 
 #[cfg(test)]
 mod metallib_identity_tests {
@@ -145,5 +156,7 @@ mod metallib_identity_tests {
         let (compiler, sdk) = super::metallib_build_identity();
         assert!(!compiler.is_empty());
         assert!(!sdk.is_empty());
+        assert!(!super::TENSOR_METALLIB_TIERS.is_empty());
+        assert!(matches!(super::TENSOR_METALLIB_TARGET, "" | "26.0"));
     }
 }

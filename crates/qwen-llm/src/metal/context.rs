@@ -360,6 +360,8 @@ pub struct MetalContext {
     device_facts: Arc<super::DeviceFacts>,
     pub queue: Queue,
     pub library: Library,
+    tensor_library: Arc<Option<Library>>,
+    tensor_ops_status: super::TensorOpsStatus,
     /// Research/bench probe kernels, loaded on first miss (see `pipeline`).
     research_library: Arc<Mutex<Option<Library>>>,
     pub(crate) pso_cache: Arc<Mutex<MetalPipelineCache>>,
@@ -826,12 +828,19 @@ impl MetalContext {
             return Err(MetalError::EmptyLibrary);
         }
         let library = load_library(&device, metallib_bytes)?;
+        let (tensor_library, tensor_ops_status) =
+            match super::tensor_ops::load_tensor_library(&device, &device_facts) {
+                Ok(library) => (Some(library), super::TensorOpsStatus::Available),
+                Err(status) => (None, status),
+            };
 
         Ok(Self {
             device,
             device_facts,
             queue,
             library,
+            tensor_library: Arc::new(tensor_library),
+            tensor_ops_status,
             research_library: Arc::new(Mutex::new(None)),
             pso_cache: Arc::new(Mutex::new(MetalPipelineCache::default())),
             _process_lease: process_lease,
@@ -848,6 +857,8 @@ impl MetalContext {
             device_facts: self.device_facts.clone(),
             queue,
             library: self.library.clone(),
+            tensor_library: self.tensor_library.clone(),
+            tensor_ops_status: self.tensor_ops_status.clone(),
             research_library: self.research_library.clone(),
             pso_cache: self.pso_cache.clone(),
             _process_lease: self._process_lease.clone(),
@@ -856,6 +867,30 @@ impl MetalContext {
 
     pub fn device_facts(&self) -> &super::DeviceFacts {
         &self.device_facts
+    }
+
+    pub fn tensor_ops_status(&self) -> &super::TensorOpsStatus {
+        &self.tensor_ops_status
+    }
+
+    pub(crate) fn tensor_pipeline(&self, name: &str) -> Result<Pipeline, MetalError> {
+        let Some(library) = self.tensor_library.as_ref() else {
+            return Err(MetalError::NoFunction(name.to_string()));
+        };
+        let function_name = NSString::from_str(name);
+        let function = library
+            .newFunctionWithName(&function_name)
+            .ok_or_else(|| MetalError::NoFunction(name.to_string()))?;
+        let pso = self
+            .device
+            .newComputePipelineStateWithFunction_error(&function)
+            .map_err(|error| {
+                MetalError::Pipeline(name.to_string(), error.localizedDescription().to_string())
+            })?;
+        Ok(Pipeline {
+            raw: pso,
+            name: Arc::from(name),
+        })
     }
 
     /// Resolve a function from the research metallib, loading it on first use.

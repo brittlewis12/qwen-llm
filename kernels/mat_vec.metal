@@ -3579,6 +3579,26 @@ kernel void kernel_mat_mat_f16_f32(
     }
 }
 
+// Portable counterpart of the Metal 4 TensorOps witness. Inputs are
+// row-major [n_out, n_in] and [n_query, n_in]; output is row-major
+// [n_out, n_query].
+kernel void kernel_matmul2d_f16_f32_portable(
+        constant mat_mat_args & args [[buffer(0)]],
+        device const half * left [[buffer(1)]],
+        device const half * right [[buffer(2)]],
+        device float * output [[buffer(3)]],
+        uint index [[thread_position_in_grid]]) {
+    const uint total = args.n_out * args.n_query;
+    if (index >= total) return;
+    const uint row = index / args.n_query;
+    const uint query = index % args.n_query;
+    float sum = 0.0f;
+    for (uint k = 0; k < args.n_in; ++k) {
+        sum += float(left[row * args.n_in + k]) * float(right[query * args.n_in + k]);
+    }
+    output[index] = sum;
+}
+
 kernel void kernel_mat_mat_bf16_f32(
         constant mat_mat_args & args [[buffer(0)]],
         device const ushort  * weight [[buffer(1)]],

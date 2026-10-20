@@ -318,6 +318,7 @@ mod rope;
 mod routing;
 mod sparse;
 mod tensor;
+mod tensor_ops;
 #[cfg(test)]
 mod test_support;
 mod testing;
@@ -369,6 +370,7 @@ pub use rope::*;
 pub use routing::*;
 pub use sparse::*;
 pub use tensor::*;
+pub use tensor_ops::{TensorOpsStatus, TensorOpsUnavailableReason, probe_tensor_ops_status};
 pub use testing::*;
 pub use vjp::*;
 

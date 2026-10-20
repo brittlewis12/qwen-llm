@@ -23,7 +23,7 @@ pub struct GpuFamilySupport {
 
 /// Stable identifier of the serialized report; bump it when a field's
 /// name or meaning changes.
-pub const DEVICE_FACTS_VERSION: &str = "qwen_device_info_v8";
+pub const DEVICE_FACTS_VERSION: &str = "qwen_device_info_v9";
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 pub struct DeviceFacts {
@@ -147,6 +147,18 @@ impl DeviceFacts {
                 None => "unavailable",
             },
         );
+        report.push_str(&format!(
+            "\nmetallib_tensor_tiers: {}\nmetallib_tensor_target: {}\nmetallib_metal40_probe: {}\nmetallib_metal41_probe: {}\ntensor_ops: {}",
+            crate::TENSOR_METALLIB_TIERS,
+            if crate::TENSOR_METALLIB_TARGET.is_empty() {
+                "not_built"
+            } else {
+                crate::TENSOR_METALLIB_TARGET
+            },
+            crate::TENSOR_METAL40_PROBE,
+            crate::TENSOR_METAL41_PROBE,
+            tensor_ops_status_text(&super::probe_tensor_ops_status())
+        ));
         report.push_str("\nqualifications:");
         for status in super::qualification::qualification_statuses(self) {
             let memory = match status.memory {
@@ -180,6 +192,13 @@ impl DeviceFacts {
             ));
         }
         report
+    }
+}
+
+fn tensor_ops_status_text(status: &super::TensorOpsStatus) -> String {
+    match status {
+        super::TensorOpsStatus::Available => "available".to_string(),
+        super::TensorOpsStatus::Unavailable { reason } => format!("unavailable ({reason:?})"),
     }
 }
 
@@ -299,7 +318,7 @@ mod tests {
     /// contract; additive fields are compatible with this version.
     #[test]
     fn device_facts_json_is_pinned() {
-        let expected_prefix = r#"{"version":"qwen_device_info_v8","features":"#;
+        let expected_prefix = r#"{"version":"qwen_device_info_v9","features":"#;
         let expected_suffix = concat!(
             r#","name":"Test GPU","architecture":"test-arch","#,
             r#""registry_id":42,"gpu_families":{"apple7":true,"apple8":false,"apple9":false,"#,
@@ -334,6 +353,8 @@ mod tests {
             "metallib_compiler_identity: Apple metal version 32023.98 (metalfe-32023.98.1)"
         ));
         assert!(report.contains("metallib_sdk_version: 15.7"));
+        assert!(report.contains("metallib_tensor_tiers:"));
+        assert!(report.contains("tensor_ops: "));
         assert!(report.contains("os_supports_metallib: yes"));
         assert!(report.contains("deepseek_v4.multigroup_selector: capability_gate=AppleFamily7"));
         assert!(report.contains("holds_for_device=false"));
@@ -364,6 +385,15 @@ mod tests {
         unsupported.gpu_families.apple7 = false;
         let actual = serde_json::to_value(unsupported.report()).unwrap();
         assert_eq!(actual["version"], DEVICE_FACTS_VERSION);
+        assert_eq!(
+            actual["metallib_tensor_tiers"],
+            crate::TENSOR_METALLIB_TIERS
+        );
+        assert_eq!(
+            actual["metallib_tensor_target"],
+            crate::TENSOR_METALLIB_TARGET
+        );
+        assert!(actual["tensor_ops"]["status"].is_string());
         let qualifications = actual["qualifications"].as_array().unwrap();
         assert!(qualifications.iter().all(|record| {
             record["path"] != "metal_forward.exact_unified_parallel_copy_profiles"

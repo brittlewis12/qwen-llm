@@ -72,6 +72,16 @@ This puts `qwen`, `qwen-bench`, `qwen-lens` and a few smaller tools in
 `target/release/`. The examples below assume they are on your `PATH`.
 
 The Metal kernels are compiled during the build and embedded in the binaries.
+The build also compiles a separate Metal 4 TensorOps library when the local
+`metal` compiler accepts `-std=metal4.0`; that tier targets macOS 26.0. The
+build records whether `metal4.1` is accepted for future features that require
+it; 4.1-only sources would target macOS 27.0. Runtime enables the library only
+on Apple10 plus Metal4 GPUs, on a supported macOS version, after the library
+loads. `qwen info` reports this status and its reason. No SDK version pin or
+extra toolchain is required: each build uses the Metal language features
+available in its local Xcode toolchain, and portable kernels remain available
+when TensorOps cannot be used.
+
 llama.cpp is linked as a library for tokenization and CPU-side dequantization;
 models do not run through it.
 

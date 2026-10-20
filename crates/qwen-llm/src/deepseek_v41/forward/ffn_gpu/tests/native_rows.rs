@@ -126,21 +126,32 @@ fn ints(t: &MetalTensor) -> Vec<i32> {
 
 #[test]
 fn native_rows_v41_live_route_stages_dispatch_and_partition_are_bitwise() {
+    with_native_rows(|| {
+        native_rows_live_route_witness(&[
+            (GgmlType::IQ3_XXS, GgmlType::IQ3_XXS, GgmlType::IQ3_XXS),
+            (GgmlType::IQ3_XXS, GgmlType::IQ3_XXS, GgmlType::IQ3_S),
+            (GgmlType::IQ3_XXS, GgmlType::IQ3_XXS, GgmlType::MXFP4),
+            (GgmlType::Q3_K, GgmlType::Q3_K, GgmlType::Q3_K),
+            (GgmlType::Q3_K, GgmlType::Q3_K, GgmlType::MXFP4),
+        ]);
+    });
+}
+
+#[test]
+fn native_rows_v41_mixed_types_keep_live_fallback_bitwise() {
+    native_rows_live_route_witness(&[(GgmlType::IQ3_XXS, GgmlType::Q3_K, GgmlType::MXFP4)]);
+}
+
+fn native_rows_live_route_witness(types: &[(GgmlType, GgmlType, GgmlType)]) {
     let _lease = production_lease();
     let ctx = MetalContext::new().unwrap();
     const H: usize = 256;
     const E: usize = 384;
     const N: usize = 257;
-    for (gate_type, down_type) in [
-        (GgmlType::IQ3_XXS, GgmlType::IQ3_XXS),
-        (GgmlType::IQ3_XXS, GgmlType::IQ3_S),
-        (GgmlType::IQ3_XXS, GgmlType::MXFP4),
-        (GgmlType::Q3_K, GgmlType::Q3_K),
-        (GgmlType::Q3_K, GgmlType::MXFP4),
-    ] {
+    for &(gate_type, up_type, down_type) in types {
         let banks = [
             bank(&ctx, gate_type, H, E, 3),
-            bank(&ctx, gate_type, H, E, 7),
+            bank(&ctx, up_type, H, E, 7),
             bank(&ctx, down_type, H, E, 11),
         ];
         let weights = toy::Weights::new(&ctx);
@@ -346,8 +357,8 @@ fn native_rows_v41_eligibility_keeps_grouped_and_deferred_paths() {
     for (g, d, grouped, native) in [
         (GgmlType::IQ2_S, GgmlType::MXFP4, true, false),
         (GgmlType::IQ3_S, GgmlType::IQ3_S, true, false),
-        (GgmlType::IQ3_XXS, GgmlType::IQ3_S, false, true),
-        (GgmlType::Q3_K, GgmlType::MXFP4, false, true),
+        (GgmlType::IQ3_XXS, GgmlType::IQ3_S, true, true),
+        (GgmlType::Q3_K, GgmlType::MXFP4, true, true),
         (GgmlType::IQ2_XS, GgmlType::MXFP4, false, false),
         (GgmlType::IQ2_XXS, GgmlType::IQ3_XXS, false, false),
         (GgmlType::Q3_K, GgmlType::IQ2_XXS, false, false),

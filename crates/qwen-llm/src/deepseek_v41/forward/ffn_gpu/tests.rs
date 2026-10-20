@@ -1,8 +1,42 @@
 use super::super::toy;
 use super::*;
 
+#[path = "tests/native_f32.rs"]
+mod native_f32;
+
 #[path = "tests/native_rows.rs"]
 mod native_rows;
+
+thread_local! {
+    pub(super) static NATIVE_ROWS_ONLY: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+fn with_native_rows<T>(f: impl FnOnce() -> T) -> T {
+    struct Restore(bool);
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            NATIVE_ROWS_ONLY.with(|flag| flag.set(self.0));
+        }
+    }
+    let _restore = Restore(NATIVE_ROWS_ONLY.with(|flag| flag.replace(true)));
+    f()
+}
+
+#[test]
+fn native_rows_selector_is_scoped_nested_and_unwind_safe() {
+    with_native_rows(|| {
+        with_native_rows(|| assert!(NATIVE_ROWS_ONLY.with(|flag| flag.get())));
+        assert!(NATIVE_ROWS_ONLY.with(|flag| flag.get()));
+        assert!(
+            !std::thread::spawn(|| NATIVE_ROWS_ONLY.with(|flag| flag.get()))
+                .join()
+                .unwrap()
+        );
+    });
+    assert!(!NATIVE_ROWS_ONLY.with(|flag| flag.get()));
+    assert!(std::panic::catch_unwind(|| with_native_rows(|| panic!("restore"))).is_err());
+    assert!(!NATIVE_ROWS_ONLY.with(|flag| flag.get()));
+}
 
 fn production_lease() -> impl Sized {
     crate::metal::acquire_metal_benchmark_lease().expect("production GPU lease")

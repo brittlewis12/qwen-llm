@@ -647,6 +647,10 @@ impl Workspace {
 
 fn grouped_supported(c: &Config, layer: &Layer<'_>) -> bool {
     #[cfg(test)]
+    if tests::NATIVE_ROWS_ONLY.with(|flag| flag.get()) {
+        return false;
+    }
+    #[cfg(test)]
     if prefill::ROWWISE_LINEAR_ROWS.with(|flag| flag.get()) {
         return false;
     }

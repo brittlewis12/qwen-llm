@@ -128,11 +128,10 @@ fn arm_agreement(baseline: &[f32], candidate: &[f32]) -> ArmAgreement {
         } else {
             f64::from(baseline[b]) - f64::from(baseline[c])
         },
-        max_abs: baseline
-            .iter()
-            .zip(candidate)
-            .map(|(&x, &y)| (f64::from(x) - f64::from(y)).abs())
-            .fold(0.0, f64::max),
+        max_abs: f64::from(crate::compare::report_max_abs_diff_f32(
+            candidate.iter().copied(),
+            baseline.iter().copied(),
+        )),
     }
 }
 

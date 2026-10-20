@@ -144,6 +144,9 @@ pub(super) fn start(
     let load_ms = load_started.elapsed().as_secs_f64() * 1e3;
     tracing::info!(target: "qwen_diag", "serve limits: family=qwen4exp max_context_tokens={context_limit} default_max_tokens={default_max_tokens} {}", backend.snapshot_cache_plan);
     crate::shutdown::checkpoint()?;
+    let warm_up_ms = backend.warm_up()?;
+    tracing::info!(target: "qwen_diag", "serve startup: family=qwen4exp load_ms={load_ms:.1} warm_up_ms={warm_up_ms:.1}");
+    crate::shutdown::checkpoint()?;
     listening.serve(load_ms, &mut backend)
 }
 
@@ -179,6 +182,42 @@ impl FlashNextBackend {
     /// (the CPU-read PLE table stays in the page cache, outside the pulse).
     pub(super) fn set_idle_residency(&mut self, window: std::time::Duration) {
         self.idle_residency = super::idle_residency::IdleResidency::new("qwen4exp", window);
+    }
+
+    /// One short packed prefill on a throwaway runner before the listener
+    /// accepts, so the first request is not charged the weights' first GPU
+    /// use. Every layer's dense projections and expert banks are bound by any
+    /// prompt; the row count only needs to take the packed path.
+    pub(super) fn warm_up(&mut self) -> anyhow::Result<f64> {
+        let started = Instant::now();
+        let tokens = self
+            .tokenizer
+            .encode(
+                "Warm-up prompt: the server binds every weight it will need before the first request arrives.",
+                false,
+            )
+            .context("warm-up tokens")?
+            .into_iter()
+            .map(|id| u32::try_from(id).context("warm-up token id"))
+            .collect::<anyhow::Result<Vec<_>>>()?;
+        let mut runner = self
+            .loaded
+            .create_runner(&self.ctx)
+            .context("bind Qwen3.8-Flash-Next warm-up runner")?;
+        let outcome = runner
+            .prefill(&tokens)
+            .map(|_| ())
+            .context("Qwen3.8-Flash-Next serve warm-up");
+        // The workspace goes back to the loaded model whatever the prefill
+        // did; a workspace that cannot be reset is a startup failure.
+        let workspace = runner.into_workspace();
+        self.loaded
+            .restore_workspace(workspace)
+            .context("return Qwen3.8-Flash-Next warm-up workspace")?;
+        outcome?;
+        // The server is about to accept: open the idle-residency window.
+        self.idle_residency.note_activity();
+        Ok(started.elapsed().as_secs_f64() * 1e3)
     }
 
     pub(super) fn new(

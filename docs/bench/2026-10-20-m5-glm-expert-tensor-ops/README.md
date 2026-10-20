@@ -53,10 +53,10 @@ per layer/chunk ranged from 199 to 287 (mean 239.37; median 232).
 | --- | ---: | ---: | ---: | ---: |
 | Active expert rows | 1 | 10 | 39 | 333 |
 
-| Production path | Active buckets | Full tiles | Tail tiles |
-| --- | ---: | ---: | ---: |
-| 16-row path (bucket <17) | 27,412 | 871 | 26,541 |
-| 32-row path (bucket >=17) | 12,802 | 8,760 | 12,507 |
+| Production path | Active buckets | Tiles | Full tiles | Tail tiles |
+| --- | ---: | ---: | ---: | ---: |
+| 16-row path (bucket <17) | 27,412 | 27,412 | 871 (3.18%) | 26,541 (96.82%) |
+| 32-row path (bucket >=17) | 12,802 | 21,267 | 8,760 (41.19%) | 12,507 (58.81%) |
 
 The tile counts sum across all captured layer/chunk buckets; the raw JSON
 contains each per-expert count and per-layer active-expert count per chunk.

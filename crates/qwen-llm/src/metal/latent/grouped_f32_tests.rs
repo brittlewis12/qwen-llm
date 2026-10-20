@@ -541,11 +541,11 @@ fn exercise(
     f.check_values();
     assert_eq!(tensor_backing_bytes(&f.weight), weight_before);
     assert_eq!(tensor_backing_bytes(&f.input), input_before);
-    let max_abs = tensor_f32_at_offset(&f.output)
-        .iter()
-        .zip(tensor_f32_at_offset(&f.scalar))
-        .map(|(&a, b)| (a - b).abs())
-        .fold(0.0f32, f32::max);
+    let max_abs = crate::compare::assert_max_abs_diff_f32(
+        "grouped F32 production versus scalar diagnostic",
+        tensor_f32_at_offset(&f.output),
+        tensor_f32_at_offset(&f.scalar),
+    );
     eprintln!(
         "F32 correctness {variant:?} {s:?} scale={scale}: max_abs_vs_scalar={max_abs:e} (not performance)"
     );

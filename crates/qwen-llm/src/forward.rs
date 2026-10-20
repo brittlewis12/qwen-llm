@@ -430,7 +430,7 @@ impl<'a> Forward<'a> {
         let hidden_norm_w = dequant_drafter(head.hidden_norm)?;
         for c in 0..ctx_len {
             let s = c * h;
-            let normed = rms_norm(&ctx_h[s..s + h], &hidden_norm_w, RMS_EPS);
+            let normed = rms_norm(&ctx_h[s..s + h], &hidden_norm_w, cfg.rms_norm_eps);
             ctx_h[s..s + h].copy_from_slice(&normed);
         }
 
@@ -455,7 +455,7 @@ impl<'a> Forward<'a> {
             let mut noise_norm = vec![0.0f32; n * h];
             for i in 0..n {
                 let s = i * h;
-                let nn = rms_norm(&x[s..s + h], &attn_norm_w, RMS_EPS);
+                let nn = rms_norm(&x[s..s + h], &attn_norm_w, cfg.rms_norm_eps);
                 noise_norm[s..s + h].copy_from_slice(&nn);
             }
 
@@ -493,7 +493,7 @@ impl<'a> Forward<'a> {
             for i in 0..n {
                 for hi in 0..n_q {
                     let s = i * q_dim + hi * head_dim;
-                    let nn = rms_norm(&q_full[s..s + head_dim], &q_norm_w, RMS_EPS);
+                    let nn = rms_norm(&q_full[s..s + head_dim], &q_norm_w, cfg.rms_norm_eps);
                     q_full[s..s + head_dim].copy_from_slice(&nn);
                 }
             }
@@ -502,14 +502,14 @@ impl<'a> Forward<'a> {
             for i in 0..n {
                 for hi in 0..n_kv {
                     let s = i * kv_dim + hi * head_dim;
-                    let nn = rms_norm(&k_noise[s..s + head_dim], &k_norm_w, RMS_EPS);
+                    let nn = rms_norm(&k_noise[s..s + head_dim], &k_norm_w, cfg.rms_norm_eps);
                     k_noise[s..s + head_dim].copy_from_slice(&nn);
                 }
             }
             for i in 0..ctx_len {
                 for hi in 0..n_kv {
                     let s = i * kv_dim + hi * head_dim;
-                    let nn = rms_norm(&k_ctx[s..s + head_dim], &k_norm_w, RMS_EPS);
+                    let nn = rms_norm(&k_ctx[s..s + head_dim], &k_norm_w, cfg.rms_norm_eps);
                     k_ctx[s..s + head_dim].copy_from_slice(&nn);
                 }
             }
@@ -622,7 +622,7 @@ impl<'a> Forward<'a> {
             let mut h2 = vec![0.0f32; n * h];
             for i in 0..n {
                 let s = i * h;
-                let nn = rms_norm(&x[s..s + h], &post_norm_w, RMS_EPS);
+                let nn = rms_norm(&x[s..s + h], &post_norm_w, cfg.rms_norm_eps);
                 h2[s..s + h].copy_from_slice(&nn);
             }
 
@@ -654,7 +654,7 @@ impl<'a> Forward<'a> {
         let v = arch.vocab_size as usize;
         let mut logits = vec![0.0f32; n * v];
         for i in 0..n {
-            let normed = rms_norm(&x[i * h..(i + 1) * h], &on_w, RMS_EPS);
+            let normed = rms_norm(&x[i * h..(i + 1) * h], &on_w, cfg.rms_norm_eps);
             let logits_row = mat_vec(&lm_w, h, v, &normed);
             logits[i * v..(i + 1) * v].copy_from_slice(&logits_row);
         }

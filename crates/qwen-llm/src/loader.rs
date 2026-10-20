@@ -349,6 +349,7 @@ pub struct DFlashConfig {
     pub n_kv_heads: u32,
     pub head_dim: u32,
     pub rope_theta: f32,
+    pub rms_norm_eps: f32,
     /// GGUF attention.causal; absent metadata retains the legacy causal default.
     pub causal: bool,
     /// Sliding-window size (in tokens) for SWA layers. 0 if no SWA layers.
@@ -808,6 +809,36 @@ pub fn open_dflash_drafter<'a>(
     drafter_gguf: &'a GgufFile,
     target_model: &Model<'_>,
 ) -> Result<DFlashHead<'a>, LoadError> {
+    open_dflash_drafter_for_target(
+        drafter_gguf,
+        DFlashTargetShape {
+            hidden_size: target_model.arch.hidden_size,
+            vocab_size: target_model.arch.vocab_size,
+            n_layer: target_model.arch.n_layer,
+        },
+    )
+}
+
+/// Dimensions needed to bind a drafter without constructing an ordinary-Qwen model.
+/// The target runtime owns capture semantics, verification, and rollback.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct DFlashTargetShape {
+    pub hidden_size: u32,
+    pub vocab_size: u32,
+    pub n_layer: u32,
+}
+
+/// Bind a drafter against target dimensions. Capture IDs use the same post-block
+/// convention as [`open_dflash_drafter`], independently of target execution APIs.
+pub fn open_dflash_drafter_for_target<'a>(
+    drafter_gguf: &'a GgufFile,
+    target: DFlashTargetShape,
+) -> Result<DFlashHead<'a>, LoadError> {
+    if target.hidden_size == 0 || target.vocab_size == 0 || target.n_layer == 0 {
+        return Err(LoadError::BadMetadata(
+            "DFlash target dimensions must be nonzero",
+        ));
+    }
     /// Metadata-key + tensor-name table for the two drafter GGUF
     /// conventions:
     /// * v1 — arch `dflash-draft` (spiritbuun converter): KV under
@@ -827,6 +858,7 @@ pub fn open_dflash_drafter<'a>(
         head_count_kv: &'static str,
         key_length: &'static str,
         freq_base: &'static str,
+        rms_norm_eps: &'static str,
         causal: &'static str,
         sliding_window: &'static str,
         sliding_window_pattern: &'static str,
@@ -849,6 +881,7 @@ pub fn open_dflash_drafter<'a>(
         head_count_kv: "dflash-draft.attention.head_count_kv",
         key_length: "dflash-draft.attention.key_length",
         freq_base: "dflash-draft.rope.freq_base",
+        rms_norm_eps: "dflash-draft.attention.layer_norm_rms_epsilon",
         causal: "dflash-draft.attention.causal",
         sliding_window: "dflash-draft.attention.sliding_window",
         sliding_window_pattern: "dflash-draft.attention.sliding_window_pattern",
@@ -868,6 +901,7 @@ pub fn open_dflash_drafter<'a>(
         head_count_kv: "dflash.attention.head_count_kv",
         key_length: "dflash.attention.key_length",
         freq_base: "dflash.rope.freq_base",
+        rms_norm_eps: "dflash.attention.layer_norm_rms_epsilon",
         causal: "dflash.attention.causal",
         sliding_window: "dflash.attention.sliding_window",
         sliding_window_pattern: "dflash.attention.sliding_window_pattern",
@@ -913,6 +947,18 @@ pub fn open_dflash_drafter<'a>(
         .ok_or(LoadError::BadMetadata(keys.key_length))?;
     let head_dim = u64_to_u32(keys.key_length, head_dim_raw)?;
     let rope_theta = drafter_gguf.get_f32(keys.freq_base).unwrap_or(10_000_000.0);
+    let rms_norm_eps = drafter_gguf
+        .get_f64(keys.rms_norm_eps)
+        .map_err(|_| LoadError::BadMetadata(keys.rms_norm_eps))?
+        .unwrap_or(1e-6);
+    if !rms_norm_eps.is_finite()
+        || rms_norm_eps <= 0.0
+        || rms_norm_eps > f64::from(f32::MAX)
+        || (rms_norm_eps as f32) == 0.0
+    {
+        return Err(LoadError::BadMetadata(keys.rms_norm_eps));
+    }
+    let rms_norm_eps = rms_norm_eps as f32;
     let causal = drafter_gguf
         .get_bool(keys.causal)
         .map_err(|_| LoadError::BadMetadata(keys.causal))?
@@ -928,6 +974,9 @@ pub fn open_dflash_drafter<'a>(
         .get_u64(keys.mask_token_id)
         .ok_or(LoadError::BadMetadata(keys.mask_token_id))?;
     let mask_token_id = u64_to_i32(keys.mask_token_id, mask_token_id)?;
+    if mask_token_id as u32 >= target.vocab_size {
+        return Err(LoadError::BadMetadata(keys.mask_token_id));
+    }
     let target_layer_ids: Vec<u32> = drafter_gguf
         .get_u64_array(keys.target_layer_ids)
         .map_err(|_| LoadError::BadMetadata(keys.target_layer_ids))?
@@ -947,7 +996,7 @@ pub fn open_dflash_drafter<'a>(
         None => {
             let derived = checked_mul_dim(
                 target_layer_ids.len() as u64,
-                target_model.arch.hidden_size as u64,
+                target.hidden_size as u64,
                 "dflash target_layer_ids.len * target_h",
             )?;
             u64_to_u32(keys.target_layer_ids, derived)?
@@ -1013,7 +1062,7 @@ pub fn open_dflash_drafter<'a>(
     };
 
     // -------- Compatibility validation --------
-    let target_h = target_model.arch.hidden_size;
+    let target_h = target.hidden_size;
     ensure_cap("dflash-draft.block_count", n_layer, MAX_ARCH_LAYERS)?;
     ensure_nonzero("dflash-draft.block_count", n_layer)?;
     ensure_cap("dflash-draft.embedding_length", hidden_size, MAX_ARCH_DIM)?;
@@ -1084,7 +1133,7 @@ pub fn open_dflash_drafter<'a>(
         ));
     }
     for &lid in &target_layer_ids {
-        if lid >= target_model.arch.n_layer {
+        if lid >= target.n_layer {
             return Err(LoadError::BadMetadata(
                 "dflash-draft.dflash.target_layer_ids references a layer past target's n_layer",
             ));
@@ -1132,7 +1181,7 @@ pub fn open_dflash_drafter<'a>(
 
     // -------- DFlash 2 selector tensors --------
     let selector: Option<DFlashSelectorTensors<'a>> = if is_dflash2 {
-        let v_target = target_model.arch.vocab_size as u64;
+        let v_target = target.vocab_size as u64;
         let rank = selector_rank as u64;
         let predecessor = need(drafter_gguf, "selector_predecessor.weight")?;
         check_shape(predecessor, &[rank, v_target])?;
@@ -1227,6 +1276,7 @@ pub fn open_dflash_drafter<'a>(
             n_kv_heads,
             head_dim,
             rope_theta,
+            rms_norm_eps,
             causal,
             swa_window,
             block_size,

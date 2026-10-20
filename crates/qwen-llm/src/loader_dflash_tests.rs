@@ -9,6 +9,15 @@ fn string(out: &mut Vec<u8>, value: &str) {
 
 // Tiny, real GGUF with one draft block and an independently sized capture list.
 fn fixture(arch: &str, ids: &[u32], causal: Option<(u32, Vec<u8>)>) -> GgufFile {
+    fixture_with_epsilon(arch, ids, causal, None)
+}
+
+fn fixture_with_epsilon(
+    arch: &str,
+    ids: &[u32],
+    causal: Option<(u32, Vec<u8>)>,
+    epsilon: Option<(u32, Vec<u8>)>,
+) -> GgufFile {
     let v2 = arch == "dflash";
     let mut metadata = Vec::new();
     let mut arch_value = Vec::new();
@@ -76,6 +85,13 @@ fn fixture(arch: &str, ids: &[u32], causal: Option<(u32, Vec<u8>)>) -> GgufFile 
     ));
     if let Some((kind, value)) = causal {
         metadata.push((format!("{arch}.attention.causal"), kind, value));
+    }
+    if let Some((kind, value)) = epsilon {
+        metadata.push((
+            format!("{arch}.attention.layer_norm_rms_epsilon"),
+            kind,
+            value,
+        ));
     }
 
     let mut tensors = vec![
@@ -246,6 +262,140 @@ fn dflash_metadata_capture_conventions_preserve_order_and_tap_count() {
             "format semantics, not selector presence"
         );
     }
+}
+
+#[test]
+fn dflash_binds_without_an_ordinary_qwen_model() {
+    let g = fixture("dflash", &[3, 1], Some((7, vec![0])));
+    let shape = DFlashTargetShape {
+        hidden_size: 32,
+        vocab_size: 2,
+        n_layer: 45,
+    };
+    let head = open_dflash_drafter_for_target(&g, shape).unwrap();
+    let ordinary = open_dflash_drafter(&g, &target(&g)).unwrap();
+    assert_eq!(head.target_layer_ids, vec![2, 0]);
+    assert_eq!(head.target_layer_ids, ordinary.target_layer_ids);
+    assert_eq!(head.fc.shape, ordinary.fc.shape);
+    assert_eq!(head.config.causal, ordinary.config.causal);
+    for invalid in [
+        DFlashTargetShape {
+            hidden_size: 64,
+            ..shape
+        },
+        DFlashTargetShape {
+            n_layer: 2,
+            ..shape
+        },
+        DFlashTargetShape {
+            hidden_size: 0,
+            ..shape
+        },
+        DFlashTargetShape {
+            vocab_size: 0,
+            ..shape
+        },
+        DFlashTargetShape {
+            vocab_size: 1,
+            ..shape
+        },
+        DFlashTargetShape {
+            n_layer: 0,
+            ..shape
+        },
+    ] {
+        assert!(open_dflash_drafter_for_target(&g, invalid).is_err());
+    }
+}
+
+#[test]
+fn dflash_rms_epsilon_is_validated_per_artifact() {
+    for arch in ["dflash", "dflash-draft"] {
+        let g = fixture(arch, &[1], None);
+        assert_eq!(
+            open_dflash_drafter(&g, &target(&g))
+                .unwrap()
+                .config
+                .rms_norm_eps,
+            1e-6
+        );
+        for epsilon in [1e-6_f64, 1e-5] {
+            let g =
+                fixture_with_epsilon(arch, &[1], None, Some((12, epsilon.to_le_bytes().to_vec())));
+            assert_eq!(
+                open_dflash_drafter(&g, &target(&g))
+                    .unwrap()
+                    .config
+                    .rms_norm_eps,
+                epsilon as f32
+            );
+        }
+        for epsilon in [
+            0.0_f64,
+            -1.0,
+            f64::NAN,
+            f64::INFINITY,
+            f64::MAX,
+            f64::MIN_POSITIVE,
+        ] {
+            let g =
+                fixture_with_epsilon(arch, &[1], None, Some((12, epsilon.to_le_bytes().to_vec())));
+            assert!(open_dflash_drafter(&g, &target(&g)).is_err());
+        }
+        let g = fixture_with_epsilon(arch, &[1], None, Some((7, vec![1])));
+        assert!(open_dflash_drafter(&g, &target(&g)).is_err());
+    }
+}
+
+#[test]
+#[ignore = "Metal shared drafter/CPU reference; run under the ordinary lease"]
+fn shared_draft_core_obeys_artifact_epsilon() {
+    use crate::metal::{MetalContext, MetalTensor};
+    use crate::metal_dflash::{
+        MetalDFlashDraftDecoder, MetalDFlashDraftTarget, MetalDFlashHead, MetalDFlashSession,
+    };
+    let ctx = MetalContext::new().unwrap();
+    let mut results = Vec::new();
+    for epsilon in [1e-6_f32, 1e-5, 1.0] {
+        let g = fixture_with_epsilon(
+            "dflash-draft",
+            &[1],
+            Some((7, vec![0])),
+            Some((6, epsilon.to_le_bytes().to_vec())),
+        );
+        let model = target(&g);
+        let head = open_dflash_drafter(&g, &model).unwrap();
+        let reference = crate::forward::Forward::new(&g, &model)
+            .dflash_draft(&head, &g, &[0, 1, 1, 1, 1, 1, 1, 1], &[], 0, &[], 0)
+            .unwrap();
+        let metal_head = MetalDFlashHead::load(&ctx, &g, &head).unwrap();
+        let embedding =
+            MetalTensor::from_gguf_tensor(&ctx, model.token_embd, g.slice(model.token_embd))
+                .unwrap();
+        let mut session = MetalDFlashSession::fresh(&ctx, &metal_head, 32, 2, 8).unwrap();
+        let mut decoder = MetalDFlashDraftDecoder::new(
+            MetalDFlashDraftTarget {
+                ctx: &ctx,
+                hidden_size: 32,
+                vocab_size: 2,
+                token_embedding: &embedding,
+                output: &embedding,
+            },
+            &metal_head,
+            &mut session,
+        );
+        let actual = decoder.draft_block_with_logits(0, 0).unwrap();
+        assert_eq!(actual.len(), reference.len());
+        for (a, b) in actual.iter().zip(&reference) {
+            assert!(
+                a.is_finite() && b.is_finite() && (a - b).abs() < 5e-5,
+                "epsilon={epsilon}: {a} != {b}"
+            );
+        }
+        results.push(actual);
+    }
+    assert_ne!(results[0], results[1]);
+    assert!((results[0][0] - results[2][0]).abs() > 0.1);
 }
 
 #[test]

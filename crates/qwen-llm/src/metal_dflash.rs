@@ -8247,7 +8247,62 @@ impl MetalDFlashLayerMajorScratch {
     }
 }
 
-/// Top-level DFlash speculative-decode driver.
+/// Target resources borrowed by the family-neutral draft forward pass.
+///
+/// This is an execution seam, not a loader or admission check. The adapter must
+/// supply compatible, same-device tensors with GGML shape `[hidden_size,
+/// vocab_size]`, supported embedding/output dtypes, and a head whose hidden size
+/// matches the target. Tied embeddings may use the same tensor for both fields.
+/// Attention semantics come from `head.config.causal`, not the target family.
+#[derive(Clone, Copy)]
+pub struct MetalDFlashDraftTarget<'a> {
+    pub ctx: &'a MetalContext,
+    pub hidden_size: u32,
+    pub vocab_size: u32,
+    pub token_embedding: &'a MetalTensor,
+    pub output: &'a MetalTensor,
+}
+
+/// Family-neutral drafting over an already admitted head and session.
+///
+/// No buffers are allocated or replaced by construction. Allocate/price the
+/// session with the existing `MetalDFlashSession` APIs using the target hidden
+/// and vocabulary sizes. Capture columns must follow `head.target_layer_ids`
+/// exactly, with absolute positions and the existing capture-window policy.
+/// The target adapter owns capture, verification, acceptance and rollback;
+/// drop this borrow to append accepted columns to the session.
+///
+/// Greedy, sampled, selector-replay and full-logit paths share this core.
+/// Fixed-profile K0-S observation/extraction remains on [`DFlashDecoder`];
+/// it is not a family-neutral diagnostic contract.
+pub struct MetalDFlashDraftDecoder<'a, 's> {
+    target: MetalDFlashDraftTarget<'a>,
+    head: &'a MetalDFlashHead,
+    session: &'s mut MetalDFlashSession,
+    #[cfg(feature = "dflash-k0s-diagnostics")]
+    k0s_live_event: Option<u64>,
+}
+
+impl<'a, 's> MetalDFlashDraftDecoder<'a, 's> {
+    /// Borrow an existing compatible session without changing admission or
+    /// allocation. The caller must keep head/target geometry and session
+    /// capacity consistent, as for [`DFlashDecoder::new`].
+    pub fn new(
+        target: MetalDFlashDraftTarget<'a>,
+        head: &'a MetalDFlashHead,
+        session: &'s mut MetalDFlashSession,
+    ) -> Self {
+        Self {
+            target,
+            head,
+            session,
+            #[cfg(feature = "dflash-k0s-diagnostics")]
+            k0s_live_event: None,
+        }
+    }
+}
+
+/// Top-level Qwen DFlash speculative-decode driver.
 pub struct DFlashDecoder<'a> {
     pub base: &'a MetalForward<'a>,
     pub head: &'a MetalDFlashHead,
@@ -16208,10 +16263,6 @@ impl<'a> DFlashDecoder<'a> {
     ///
     /// `noise_start_pos` = absolute sequence position of `carry_tok`
     /// (i.e., `processed_pos + 1`).
-    // v0.74.1 phase 2 ctx-cache RoPE delta loop:
-    // `for c in phase2_ctx_start..ctx_len { pos_ctx_cpu[c]; view_subrange(c * kv_dim, ...) }`.
-    // `c` is multi-purpose (positional arg + stride math).
-    #[allow(clippy::needless_range_loop)]
     pub fn draft_block(
         &mut self,
         carry_tok: i32,
@@ -16221,10 +16272,47 @@ impl<'a> DFlashDecoder<'a> {
         {
             dflash_k0s_require_no_live_event(self.k0s_live_event)?;
         }
+        self.draft_decoder().draft_block(carry_tok, noise_start_pos)
+    }
+
+    fn draft_decoder(&mut self) -> MetalDFlashDraftDecoder<'a, '_> {
         let arch = &self.base.model.arch;
+        MetalDFlashDraftDecoder {
+            target: MetalDFlashDraftTarget {
+                ctx: self.base.ctx,
+                hidden_size: arch.hidden_size,
+                vocab_size: arch.vocab_size,
+                token_embedding: &self.base.model.token_embd,
+                output: &self.base.model.lm_head,
+            },
+            head: self.head,
+            session: &mut self.session,
+            // Preserve the guard in sampled/diagnostic paths, including their
+            // validation order, without transferring observation ownership.
+            #[cfg(feature = "dflash-k0s-diagnostics")]
+            k0s_live_event: self.k0s_live_event,
+        }
+    }
+}
+
+impl MetalDFlashDraftDecoder<'_, '_> {
+    // v0.74.1 phase 2 ctx-cache RoPE delta loop:
+    // `for c in phase2_ctx_start..ctx_len { pos_ctx_cpu[c]; view_subrange(c * kv_dim, ...) }`.
+    // `c` is multi-purpose (positional arg + stride math).
+    #[allow(clippy::needless_range_loop)]
+    fn draft_block_inner(
+        &mut self,
+        carry_tok: i32,
+        noise_start_pos: u32,
+    ) -> Result<Vec<i32>, DFlashError> {
+        #[cfg(feature = "dflash-k0s-diagnostics")]
+        {
+            dflash_k0s_require_no_live_event(self.k0s_live_event)?;
+        }
+        let target = self.target;
         let cfg = self.head.config;
-        if carry_tok < 0 || (carry_tok as u32) >= arch.vocab_size {
-            return Err(DFlashError::BadToken(carry_tok, arch.vocab_size));
+        if carry_tok < 0 || (carry_tok as u32) >= target.vocab_size {
+            return Err(DFlashError::BadToken(carry_tok, target.vocab_size));
         }
         let n = cfg.block_size as usize;
         let h = cfg.hidden_size as usize;
@@ -16238,9 +16326,9 @@ impl<'a> DFlashDecoder<'a> {
         let n_rot = head_dim;
         let theta = cfg.rope_theta;
         let ctx_len = self.session.target_ctx_n;
-        let v = arch.vocab_size as usize;
+        let v = target.vocab_size as usize;
         let k_layers = self.head.target_layer_ids.len();
-        let n_target_features = k_layers * arch.hidden_size as usize;
+        let n_target_features = k_layers * target.hidden_size as usize;
         // DFlash 2 conv dims (0 / unused for DFlash 1 drafters).
         let conv_kernel = cfg.conv_kernel_size as usize;
         let conv_group = cfg.conv_group_size as usize;
@@ -16259,7 +16347,7 @@ impl<'a> DFlashDecoder<'a> {
             }
         }
 
-        let ctx_metal = self.base.ctx;
+        let ctx_metal = target.ctx;
 
         // v0.77 single-command-buffer mode: no data dependency requires
         // CPU intervention between phases (all per-layer constants are
@@ -16355,7 +16443,7 @@ impl<'a> DFlashDecoder<'a> {
                     &dst,
                     phase1_delta,
                     h,
-                    RMS_EPS,
+                    cfg.rms_norm_eps,
                 )?;
             } else {
                 for c in phase1_start..ctx_len {
@@ -16390,7 +16478,7 @@ impl<'a> DFlashDecoder<'a> {
                         &view,
                         &self.head.hidden_norm,
                         &view,
-                        RMS_EPS,
+                        cfg.rms_norm_eps,
                     )?;
                 }
             }
@@ -16416,7 +16504,7 @@ impl<'a> DFlashDecoder<'a> {
         encode_get_rows_f32(
             ctx_metal,
             &enc,
-            &self.base.model.token_embd,
+            target.token_embedding,
             &self.session.noise_ids,
             &self.session.x,
             n,
@@ -16468,7 +16556,7 @@ impl<'a> DFlashDecoder<'a> {
                 &self.session.h,
                 n,
                 h,
-                RMS_EPS,
+                cfg.rms_norm_eps,
             )?;
             // DFlash 2 attention conv: dynamic coefficients from the
             // PRE-conv normed input (shared by both sides), then the
@@ -16642,7 +16730,7 @@ impl<'a> DFlashDecoder<'a> {
                 &self.session.q_buf,
                 n * n_q,
                 head_dim,
-                RMS_EPS,
+                cfg.rms_norm_eps,
             )?;
             encode_rms_norm_batched_f32(
                 ctx_metal,
@@ -16652,7 +16740,7 @@ impl<'a> DFlashDecoder<'a> {
                 &self.session.k_noise,
                 n * n_kv,
                 head_dim,
-                RMS_EPS,
+                cfg.rms_norm_eps,
             )?;
             // v0.74.1: K_ctx norm — only the new delta. Pre-cached rows
             // were normed on a prior outer step's pass and retain their
@@ -16670,7 +16758,7 @@ impl<'a> DFlashDecoder<'a> {
                     &view,
                     phase2_ctx_delta * n_kv,
                     head_dim,
-                    RMS_EPS,
+                    cfg.rms_norm_eps,
                 )?;
             }
             if batched_proj {
@@ -17122,7 +17210,7 @@ impl<'a> DFlashDecoder<'a> {
                 &self.session.h,
                 n,
                 h,
-                RMS_EPS,
+                cfg.rms_norm_eps,
             )?;
             // DFlash 2 FFN conv: dynamic coefficients from the pre-conv
             // normed input, then side-0. gate/up read the conv'd result.
@@ -17359,15 +17447,15 @@ impl<'a> DFlashDecoder<'a> {
             &self.session.h,
             n,
             h,
-            RMS_EPS,
+            cfg.rms_norm_eps,
         )?;
-        let lm_dtype = self.base.model.lm_head.dtype;
+        let lm_dtype = target.output.dtype;
         let lm_mat_mat_path = prefill_mat_mat_dispatch_eligible(lm_dtype);
         if lm_mat_mat_path {
             encode_mat_mat_dispatch(
                 ctx_metal,
                 &enc,
-                &self.base.model.lm_head,
+                target.output,
                 &self.session.h,
                 &self.session.draft_logits,
                 h,
@@ -17381,15 +17469,7 @@ impl<'a> DFlashDecoder<'a> {
                     .session
                     .draft_logits
                     .view_subrange((i * v) as u64, vec![v as u64]);
-                encode_mat_vec_dispatch(
-                    ctx_metal,
-                    &enc,
-                    &self.base.model.lm_head,
-                    &row_in,
-                    &row_out,
-                    h,
-                    v,
-                )?;
+                encode_mat_vec_dispatch(ctx_metal, &enc, target.output, &row_in, &row_out, h, v)?;
             }
         }
         if let Some(sel) = self.head.selector.as_ref() {
@@ -17544,6 +17624,18 @@ impl<'a> DFlashDecoder<'a> {
             sel.predecessor.dequant_row(chosen as usize, &mut pred)?;
         }
         Ok(out)
+    }
+
+    /// Run one draft block. Slot 0 is the anchor's top-1 (unused by the
+    /// driver); slots `1..N` are candidates. `noise_start_pos` is the absolute
+    /// position of `carry_tok`. Attention uses the loaded head's causal/SWA
+    /// policy, and selector heads retain their predecessor-conditioned walk.
+    pub fn draft_block(
+        &mut self,
+        carry_tok: i32,
+        noise_start_pos: u32,
+    ) -> Result<Vec<i32>, DFlashError> {
+        self.draft_block_inner(carry_tok, noise_start_pos)
     }
 
     /// Run DFlash 2 and sample its predecessor-conditioned sparse selector
@@ -17775,6 +17867,49 @@ impl<'a> DFlashDecoder<'a> {
             draft_tokens,
             depths,
         })
+    }
+
+    /// Same as `draft_block` but returns full `[N, V]` logits (CPU readback)
+    /// for cosine validation against `Forward::dflash_draft`. Used by the
+    /// H5.1.5 cosine gate.
+    pub fn draft_block_with_logits(
+        &mut self,
+        carry_tok: i32,
+        noise_start_pos: u32,
+    ) -> Result<Vec<f32>, DFlashError> {
+        let _argmaxes = self.draft_block(carry_tok, noise_start_pos)?;
+        let n = self.head.config.block_size as usize;
+        let v = self.target.vocab_size as usize;
+        let mut logits = vec![0.0f32; n * v];
+        unsafe {
+            let src = self.session.draft_logits.buffer.contents().as_ptr() as *const f32;
+            std::ptr::copy_nonoverlapping(src, logits.as_mut_ptr(), logits.len());
+        }
+        Ok(logits)
+    }
+}
+
+impl DFlashDecoder<'_> {
+    /// Sample the shared predecessor-conditioned proposal distribution.
+    /// Only positive temperature is allowed; target filters belong to verify.
+    pub fn draft_block_sampled(
+        &mut self,
+        carry_tok: i32,
+        noise_start_pos: u32,
+        proposal_sampler: &mut Sampler,
+    ) -> Result<DFlash2SparseProposalBlock, DFlashError> {
+        self.draft_decoder()
+            .draft_block_sampled(carry_tok, noise_start_pos, proposal_sampler)
+    }
+
+    /// Run the shared draft and replay synchronized selector buffers.
+    pub fn draft_block_with_selector_diagnostic(
+        &mut self,
+        carry_tok: i32,
+        noise_start_pos: u32,
+    ) -> Result<DFlash2SelectorDiagnostic, DFlashError> {
+        self.draft_decoder()
+            .draft_block_with_selector_diagnostic(carry_tok, noise_start_pos)
     }
 
     /// Hash every CPU-readable DFlash session tensor and relevant CPU state
@@ -18174,15 +18309,8 @@ impl<'a> DFlashDecoder<'a> {
         carry_tok: i32,
         noise_start_pos: u32,
     ) -> Result<Vec<f32>, DFlashError> {
-        let _argmaxes = self.draft_block(carry_tok, noise_start_pos)?;
-        let n = self.head.config.block_size as usize;
-        let v = self.base.model.arch.vocab_size as usize;
-        let mut logits = vec![0.0f32; n * v];
-        unsafe {
-            let src = self.session.draft_logits.buffer.contents().as_ptr() as *const f32;
-            std::ptr::copy_nonoverlapping(src, logits.as_mut_ptr(), logits.len());
-        }
-        Ok(logits)
+        self.draft_decoder()
+            .draft_block_with_logits(carry_tok, noise_start_pos)
     }
 }
 const ATTN_PREFILL_V4_PACKED_ROWS: usize = 8;
@@ -18193,6 +18321,10 @@ const ATTN_PREFILL_V4_PACKED_ROWS: usize = 8;
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+#[path = "metal_dflash/draft_core_tests.rs"]
+mod draft_core_tests;
 
 #[cfg(test)]
 #[path = "metal_dflash/online_verify_pilot.rs"]

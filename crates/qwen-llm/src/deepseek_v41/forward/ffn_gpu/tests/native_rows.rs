@@ -138,11 +138,32 @@ fn native_rows_v41_live_route_stages_dispatch_and_partition_are_bitwise() {
 }
 
 #[test]
+fn native_rows_v41_iq2_actual_cohorts_and_mixed_gate_up_are_bitwise() {
+    native_rows_live_route_witness_with_chunks(
+        &[
+            (GgmlType::IQ2_XS, GgmlType::IQ2_XS, GgmlType::MXFP4),
+            (GgmlType::IQ2_XXS, GgmlType::IQ2_XXS, GgmlType::IQ2_XXS),
+            (GgmlType::IQ2_XXS, GgmlType::IQ2_XXS, GgmlType::IQ3_XXS),
+            (GgmlType::IQ2_XXS, GgmlType::IQ2_XXS, GgmlType::MXFP4),
+            (GgmlType::IQ2_XS, GgmlType::IQ2_XXS, GgmlType::IQ2_XXS),
+        ],
+        &[1, 3, 7, 33, 257],
+    );
+}
+
+#[test]
 fn native_rows_v41_mixed_types_keep_live_fallback_bitwise() {
     native_rows_live_route_witness(&[(GgmlType::IQ3_XXS, GgmlType::Q3_K, GgmlType::MXFP4)]);
 }
 
 fn native_rows_live_route_witness(types: &[(GgmlType, GgmlType, GgmlType)]) {
+    native_rows_live_route_witness_with_chunks(types, &[31, 32, 33, 127, 128, 129, 255, 256, 257]);
+}
+
+fn native_rows_live_route_witness_with_chunks(
+    types: &[(GgmlType, GgmlType, GgmlType)],
+    chunks: &[usize],
+) {
     let _lease = production_lease();
     let ctx = MetalContext::new().unwrap();
     const H: usize = 256;
@@ -214,6 +235,19 @@ fn native_rows_live_route_witness(types: &[(GgmlType, GgmlType, GgmlType)]) {
             .position(|r| r.kernel == "kernel_deepseek_v41_route")
             .unwrap();
         let routed = &census[at..at + 6];
+        assert_eq!(
+            census
+                .iter()
+                .filter(|r| r.kernel.starts_with("kernel_expert_native_")
+                    || matches!(
+                        r.kernel.as_str(),
+                        "kernel_deepseek_v41_route"
+                            | "kernel_deepseek_v41_weight"
+                            | "kernel_deepseek_v41_sum"
+                    ))
+                .count(),
+            6
+        );
         assert_eq!(
             (routed[0].grid_width, routed[0].threads_width),
             (N as u64, 1)
@@ -309,7 +343,7 @@ fn native_rows_live_route_witness(types: &[(GgmlType, GgmlType, GgmlType)]) {
         })
         .unwrap();
         assert_eq!(bits(&output), bits(&expected_hc));
-        for chunk in [31, 32, 33, 127, 128, 129, 255, 256, 257] {
+        for &chunk in chunks {
             for start in (0..N).step_by(chunk) {
                 let rows = chunk.min(N - start);
                 let mut part = Rows::new(&ctx, c, rows, 2).unwrap();
@@ -321,10 +355,19 @@ fn native_rows_live_route_witness(types: &[(GgmlType, GgmlType, GgmlType)]) {
                     part.buffers[index] = b[index]
                         .view_subrange((start * width) as u64, vec![width as u64, rows as u64]);
                 }
+                metal::dispatch_census_begin();
                 submit(&ctx, "native_rows_partition", [0; 4], |enc| {
                     ws.encode_routed_rows(&ctx, enc, c, layer, 1, &part)
                 })
                 .unwrap();
+                let partition_census = metal::dispatch_census_take();
+                assert_eq!(partition_census.len(), 6);
+                for (actual, full) in partition_census.iter().zip(routed) {
+                    assert_eq!(actual.kernel, full.kernel);
+                }
+                for i in [1, 2, 4] {
+                    assert_eq!(partition_census[i].grid_depth, rows as u64);
+                }
                 assert_eq!(
                     ints(&part.buffers[8]),
                     ints(&b[8])[start * c.topk..(start + rows) * c.topk]
@@ -359,9 +402,13 @@ fn native_rows_v41_eligibility_keeps_grouped_and_deferred_paths() {
         (GgmlType::IQ3_S, GgmlType::IQ3_S, true, false),
         (GgmlType::IQ3_XXS, GgmlType::IQ3_S, true, true),
         (GgmlType::Q3_K, GgmlType::MXFP4, true, true),
-        (GgmlType::IQ2_XS, GgmlType::MXFP4, false, false),
-        (GgmlType::IQ2_XXS, GgmlType::IQ3_XXS, false, false),
-        (GgmlType::Q3_K, GgmlType::IQ2_XXS, false, false),
+        (GgmlType::IQ2_XS, GgmlType::MXFP4, false, true),
+        (GgmlType::IQ2_XXS, GgmlType::IQ2_XXS, false, true),
+        (GgmlType::IQ2_XXS, GgmlType::IQ3_XXS, false, true),
+        (GgmlType::IQ2_XXS, GgmlType::MXFP4, false, true),
+        (GgmlType::Q3_K, GgmlType::IQ2_XXS, false, true),
+        (GgmlType::Q3_K, GgmlType::IQ2_XS, false, false),
+        (GgmlType::IQ2_XS, GgmlType::IQ2_XS, false, false),
     ] {
         let banks = [
             MetalTensor {

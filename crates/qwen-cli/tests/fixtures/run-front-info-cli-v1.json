@@ -553,12 +553,12 @@
           "no_thinking": {
             "status": "unsupported",
             "code": "release_unknown",
-            "message": "requires an identified Qwen release (Qwen3.5/3.6/3.8 in the model's name metadata); this model's release is unknown"
+            "message": "requires a recognized Qwen rendering contract or identified Qwen release; this model has neither"
           },
           "thinking": {
             "status": "unsupported",
             "code": "release_unknown",
-            "message": "requires an identified Qwen release (Qwen3.5/3.6/3.8 in the model's name metadata); this model's release is unknown"
+            "message": "requires a recognized Qwen rendering contract or identified Qwen release; this model has neither"
           }
         },
         "input": {
@@ -574,7 +574,7 @@
           "tools": {
             "status": "unsupported",
             "code": "tools_require_known_release",
-            "message": "tools and tool history requires an identified Qwen release (Qwen3.5/3.6/3.8 in the model's name metadata); this model's release is unknown"
+            "message": "tools and tool history requires a recognized Qwen rendering contract or identified Qwen release; this model has neither"
           }
         },
         "template": {
@@ -591,12 +591,17 @@
             "general.base_model.0.repo_url",
             "general.license.link"
           ],
-          "rendered_as": "qwen_chatml_messages_v1"
+          "rendered_as": "qwen_chatml_messages_v1",
+          "rendering_contract": {
+            "status": "unknown",
+            "name": "generic",
+            "source": null
+          }
         }
       },
       "os_build": "<device-derived>"
     },
-    "text_utf8": "loaded <model>: arch=qwen35 36 tensors, 1 shard(s), mmap=0 MiB, primary tensor-data starts at 2944\nfamily: Qwen (qwen)\nblocks: 3 total — 0 GDN, 3 full-attn\nblk.0 tensors (11):\n  blk.0.attn_norm.weight\n  blk.0.post_attention_norm.weight\n  blk.0.attn_q.weight\n  blk.0.attn_k.weight\n  blk.0.attn_v.weight\n  blk.0.attn_output.weight\n  blk.0.attn_q_norm.weight\n  blk.0.attn_k_norm.weight\n  blk.0.ffn_gate.weight\n  blk.0.ffn_up.weight\n  blk.0.ffn_down.weight\nmetadata (qwen35.*):\n  qwen35.attention.head_count = 1\n  qwen35.attention.head_count_kv = 1\n  qwen35.attention.key_length = 2\n  qwen35.block_count = 3\n  qwen35.embedding_length = 2\n  qwen35.expert_count = 2\n  qwen35.expert_feed_forward_length = 4\n  qwen35.expert_shared_feed_forward_length = 4\n  qwen35.expert_used_count = 1\n  qwen35.feed_forward_length = 4\n  qwen35.full_attention_interval = 1\n  qwen35.ssm.conv_kernel = 4\n  qwen35.ssm.group_count = 1\n  qwen35.ssm.state_size = 2\n  qwen35.ssm.time_step_rank = 1\ncapabilities:\n  drafter run: permitted\n  drafter serve: permitted\n  prompt lookup: permitted\n  sampling: temperature 1.0 top-k 20 top-p 0.95 min-p 0.0 (qwen_unidentified/other_shape)\n  os_build: <device-derived>\n  reasoning: no effort levels; no-thinking unsupported (release_unknown)\n  input: raw supported, user supported, messages supported, tools unsupported (tools_require_known_release)\n  template: unknown as qwen_chatml_messages_v1\n"
+    "text_utf8": "loaded <model>: arch=qwen35 36 tensors, 1 shard(s), mmap=0 MiB, primary tensor-data starts at 2944\nfamily: Qwen (qwen)\nblocks: 3 total — 0 GDN, 3 full-attn\nblk.0 tensors (11):\n  blk.0.attn_norm.weight\n  blk.0.post_attention_norm.weight\n  blk.0.attn_q.weight\n  blk.0.attn_k.weight\n  blk.0.attn_v.weight\n  blk.0.attn_output.weight\n  blk.0.attn_q_norm.weight\n  blk.0.attn_k_norm.weight\n  blk.0.ffn_gate.weight\n  blk.0.ffn_up.weight\n  blk.0.ffn_down.weight\nmetadata (qwen35.*):\n  qwen35.attention.head_count = 1\n  qwen35.attention.head_count_kv = 1\n  qwen35.attention.key_length = 2\n  qwen35.block_count = 3\n  qwen35.embedding_length = 2\n  qwen35.expert_count = 2\n  qwen35.expert_feed_forward_length = 4\n  qwen35.expert_shared_feed_forward_length = 4\n  qwen35.expert_used_count = 1\n  qwen35.feed_forward_length = 4\n  qwen35.full_attention_interval = 1\n  qwen35.ssm.conv_kernel = 4\n  qwen35.ssm.group_count = 1\n  qwen35.ssm.state_size = 2\n  qwen35.ssm.time_step_rank = 1\ncapabilities:\n  drafter run: permitted\n  drafter serve: permitted\n  prompt lookup: permitted\n  sampling: temperature 1.0 top-k 20 top-p 0.95 min-p 0.0 (qwen_unidentified/other_shape)\n  os_build: <device-derived>\n  reasoning: no effort levels; no-thinking unsupported (release_unknown)\n  input: raw supported, user supported, messages supported, tools unsupported (tools_require_known_release)\n  template: unknown as qwen_chatml_messages_v1\n  rendering contract: unknown (generic)\n"
   },
   "qwen35moe": {
     "json": {
@@ -607,12 +612,11 @@
       "drafter": {
         "run": {
           "status": "permitted",
-          "target": "moe_cli_serial"
+          "target": "moe"
         },
         "serve": {
-          "status": "unsupported",
-          "code": "serve_moe_target",
-          "message": "serve DFlash speculation currently supports dense targets only; this MoE model would run serially, so omit --drafter"
+          "status": "permitted",
+          "target": "moe"
         }
       },
       "prompt_lookup": {
@@ -644,12 +648,12 @@
           "no_thinking": {
             "status": "unsupported",
             "code": "release_unknown",
-            "message": "requires an identified Qwen release (Qwen3.5/3.6/3.8 in the model's name metadata); this model's release is unknown"
+            "message": "requires a recognized Qwen rendering contract or identified Qwen release; this model has neither"
           },
           "thinking": {
             "status": "unsupported",
             "code": "release_unknown",
-            "message": "requires an identified Qwen release (Qwen3.5/3.6/3.8 in the model's name metadata); this model's release is unknown"
+            "message": "requires a recognized Qwen rendering contract or identified Qwen release; this model has neither"
           }
         },
         "input": {
@@ -665,7 +669,7 @@
           "tools": {
             "status": "unsupported",
             "code": "tools_require_known_release",
-            "message": "tools and tool history requires an identified Qwen release (Qwen3.5/3.6/3.8 in the model's name metadata); this model's release is unknown"
+            "message": "tools and tool history requires a recognized Qwen rendering contract or identified Qwen release; this model has neither"
           }
         },
         "template": {
@@ -682,12 +686,17 @@
             "general.base_model.0.repo_url",
             "general.license.link"
           ],
-          "rendered_as": "qwen_chatml_messages_v1"
+          "rendered_as": "qwen_chatml_messages_v1",
+          "rendering_contract": {
+            "status": "unknown",
+            "name": "generic",
+            "source": null
+          }
         }
       },
       "os_build": "<device-derived>"
     },
-    "text_utf8": "loaded <model>: arch=qwen35moe 51 tensors, 1 shard(s), mmap=0 MiB, primary tensor-data starts at 4096\nfamily: Qwen MoE (qwen)\nblocks: 3 total — 0 GDN, 3 full-attn\nblk.0 tensors (16):\n  blk.0.attn_norm.weight\n  blk.0.post_attention_norm.weight\n  blk.0.attn_q.weight\n  blk.0.attn_k.weight\n  blk.0.attn_v.weight\n  blk.0.attn_output.weight\n  blk.0.attn_q_norm.weight\n  blk.0.attn_k_norm.weight\n  blk.0.ffn_gate_inp.weight\n  blk.0.ffn_gate_exps.weight\n  blk.0.ffn_up_exps.weight\n  blk.0.ffn_down_exps.weight\n  blk.0.ffn_gate_inp_shexp.weight\n  blk.0.ffn_gate_shexp.weight\n  blk.0.ffn_up_shexp.weight\n  blk.0.ffn_down_shexp.weight\nmetadata (qwen35moe.*):\n  qwen35moe.attention.head_count = 1\n  qwen35moe.attention.head_count_kv = 1\n  qwen35moe.attention.key_length = 2\n  qwen35moe.block_count = 3\n  qwen35moe.embedding_length = 2\n  qwen35moe.expert_count = 2\n  qwen35moe.expert_feed_forward_length = 4\n  qwen35moe.expert_shared_feed_forward_length = 4\n  qwen35moe.expert_used_count = 1\n  qwen35moe.feed_forward_length = 4\n  qwen35moe.full_attention_interval = 1\n  qwen35moe.ssm.conv_kernel = 4\n  qwen35moe.ssm.group_count = 1\n  qwen35moe.ssm.state_size = 2\n  qwen35moe.ssm.time_step_rank = 1\ncapabilities:\n  drafter run: permitted\n  drafter serve: unsupported (serve_moe_target)\n  prompt lookup: permitted\n  sampling: temperature 1.0 top-k 20 top-p 0.95 min-p 0.0 (qwen_unidentified/other_shape)\n  os_build: <device-derived>\n  reasoning: no effort levels; no-thinking unsupported (release_unknown)\n  input: raw supported, user supported, messages supported, tools unsupported (tools_require_known_release)\n  template: unknown as qwen_chatml_messages_v1\n"
+    "text_utf8": "loaded <model>: arch=qwen35moe 51 tensors, 1 shard(s), mmap=0 MiB, primary tensor-data starts at 4096\nfamily: Qwen MoE (qwen)\nblocks: 3 total — 0 GDN, 3 full-attn\nblk.0 tensors (16):\n  blk.0.attn_norm.weight\n  blk.0.post_attention_norm.weight\n  blk.0.attn_q.weight\n  blk.0.attn_k.weight\n  blk.0.attn_v.weight\n  blk.0.attn_output.weight\n  blk.0.attn_q_norm.weight\n  blk.0.attn_k_norm.weight\n  blk.0.ffn_gate_inp.weight\n  blk.0.ffn_gate_exps.weight\n  blk.0.ffn_up_exps.weight\n  blk.0.ffn_down_exps.weight\n  blk.0.ffn_gate_inp_shexp.weight\n  blk.0.ffn_gate_shexp.weight\n  blk.0.ffn_up_shexp.weight\n  blk.0.ffn_down_shexp.weight\nmetadata (qwen35moe.*):\n  qwen35moe.attention.head_count = 1\n  qwen35moe.attention.head_count_kv = 1\n  qwen35moe.attention.key_length = 2\n  qwen35moe.block_count = 3\n  qwen35moe.embedding_length = 2\n  qwen35moe.expert_count = 2\n  qwen35moe.expert_feed_forward_length = 4\n  qwen35moe.expert_shared_feed_forward_length = 4\n  qwen35moe.expert_used_count = 1\n  qwen35moe.feed_forward_length = 4\n  qwen35moe.full_attention_interval = 1\n  qwen35moe.ssm.conv_kernel = 4\n  qwen35moe.ssm.group_count = 1\n  qwen35moe.ssm.state_size = 2\n  qwen35moe.ssm.time_step_rank = 1\ncapabilities:\n  drafter run: permitted\n  drafter serve: permitted\n  prompt lookup: permitted\n  sampling: temperature 1.0 top-k 20 top-p 0.95 min-p 0.0 (qwen_unidentified/other_shape)\n  os_build: <device-derived>\n  reasoning: no effort levels; no-thinking unsupported (release_unknown)\n  input: raw supported, user supported, messages supported, tools unsupported (tools_require_known_release)\n  template: unknown as qwen_chatml_messages_v1\n  rendering contract: unknown (generic)\n"
   },
   "qwen4exp": {
     "json": {

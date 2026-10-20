@@ -128,6 +128,38 @@ struct RouteArgs {
     scale: f32,
 }
 
+fn encode_route_rows(
+    ctx: &MetalContext,
+    enc: &KernelEncoder,
+    c: &Config,
+    rows: usize,
+    logits: &MetalTensor,
+    bias: &MetalTensor,
+    scores: &MetalTensor,
+    ids: &MetalTensor,
+    weights: &MetalTensor,
+    status: &MetalTensor,
+) -> std::result::Result<(), metal::MetalError> {
+    enc.set_pipeline(&ctx.pipeline("kernel_deepseek_v41_route")?);
+    enc.set_bytes(
+        0,
+        &RouteArgs {
+            experts: c.experts as u32,
+            topk: c.topk as u32,
+            temperature: c.gate_temperature,
+            scale: c.route_scale,
+        },
+    );
+    for (slot, tensor) in [logits, bias, scores, ids, weights, status]
+        .iter()
+        .enumerate()
+    {
+        enc.set_tensor(slot + 1, tensor);
+    }
+    dispatch(enc, rows, 1);
+    Ok(())
+}
+
 impl Workspace {
     pub(super) fn new(model: &Forward<'_>) -> std::result::Result<Self, StateError> {
         let c = &model.config;
@@ -334,23 +366,7 @@ impl Workspace {
         status: &MetalTensor,
     ) -> std::result::Result<(), metal::MetalError> {
         let b = &self.buffers;
-        enc.set_pipeline(&ctx.pipeline("kernel_deepseek_v41_route")?);
-        enc.set_bytes(
-            0,
-            &RouteArgs {
-                experts: c.experts as u32,
-                topk: c.topk as u32,
-                temperature: c.gate_temperature,
-                scale: c.route_scale,
-            },
-        );
-        for (slot, tensor) in [logits, bias, &b[9], &b[10], &b[11], status]
-            .iter()
-            .enumerate()
-        {
-            enc.set_tensor(slot + 1, tensor);
-        }
-        dispatch(enc, 1, 1);
+        encode_route_rows(ctx, enc, c, 1, logits, bias, &b[9], &b[10], &b[11], status)?;
         metal::encode_all_slots_gate_up_swiglu_native(
             ctx,
             enc,
@@ -437,8 +453,8 @@ impl Workspace {
             c.clamp,
         )?;
         layer.shared[2].encode_rows(enc, &b[3], &b[4], n)?;
-        if grouped_supported(c, layer) {
-            self.encode_grouped(ctx, enc, c, layer, id, scratch)?;
+        if grouped_supported(c, layer) || native_rows_supported(c, layer) {
+            self.encode_routed_rows(ctx, enc, c, layer, id, scratch)?;
         } else {
             for row in 0..n {
                 self.encode_routed(
@@ -468,7 +484,7 @@ impl Workspace {
         )
     }
 
-    fn encode_grouped(
+    fn encode_routed_rows(
         &self,
         ctx: &MetalContext,
         enc: &KernelEncoder,
@@ -481,42 +497,57 @@ impl Workspace {
         let b = &scratch.buffers;
         let status = b[6].view_subrange((id * n) as u64, vec![n as u64]);
         let counts = b[10].view_subrange(0, vec![c.experts as u64]);
-        enc.set_pipeline(&ctx.pipeline("kernel_deepseek_v41_route")?);
-        enc.set_bytes(
-            0,
-            &RouteArgs {
-                experts: c.experts as u32,
-                topk: c.topk as u32,
-                temperature: c.gate_temperature,
-                scale: c.route_scale,
-            },
-        );
-        for (slot, tensor) in [&b[0], &self.constants[id][3], &b[7], &b[8], &b[9], &status]
-            .iter()
-            .enumerate()
-        {
-            enc.set_tensor(slot + 1, tensor);
-        }
-        dispatch(enc, n, 1);
-        metal::encode_moe_route_bucket_slots_f32(
-            ctx, enc, &b[8], &counts, &b[11], c.experts, n, c.topk,
-        )?;
-        metal::encode_moe_swiglu_clamped_f32x_grouped_slots(
+        encode_route_rows(
             ctx,
             enc,
-            layer.banks[0],
-            layer.banks[1],
-            &scratch.hc.normalized,
-            &counts,
-            &b[11],
-            &b[12],
-            c.hidden,
-            c.intermediate,
-            c.experts,
-            c.topk,
+            c,
             n,
-            c.clamp,
+            &b[0],
+            &self.constants[id][3],
+            &b[7],
+            &b[8],
+            &b[9],
+            &status,
         )?;
+        let grouped = grouped_supported(c, layer);
+        if grouped {
+            metal::encode_moe_route_bucket_slots_f32(
+                ctx, enc, &b[8], &counts, &b[11], c.experts, n, c.topk,
+            )?;
+            metal::encode_moe_swiglu_clamped_f32x_grouped_slots(
+                ctx,
+                enc,
+                layer.banks[0],
+                layer.banks[1],
+                &scratch.hc.normalized,
+                &counts,
+                &b[11],
+                &b[12],
+                c.hidden,
+                c.intermediate,
+                c.experts,
+                c.topk,
+                n,
+                c.clamp,
+            )?;
+        } else {
+            metal::encode_all_slots_gate_up_swiglu_native_rows(
+                ctx,
+                enc,
+                layer.banks[0],
+                layer.banks[1],
+                &scratch.hc.normalized,
+                &b[8],
+                &status,
+                &b[12].view_subrange(0, vec![c.intermediate as u64, (c.topk * n) as u64]),
+                c.hidden,
+                c.intermediate,
+                c.experts,
+                c.topk,
+                n,
+                c.clamp,
+            )?;
+        }
         enc.set_pipeline(&ctx.pipeline("kernel_deepseek_v41_weight")?);
         enc.set_bytes(0, &((c.intermediate * c.topk * n) as u32));
         enc.set_bytes(1, &(c.intermediate as u32));
@@ -525,19 +556,36 @@ impl Workspace {
         }
         enc.set_bytes(6, &(c.topk as u32));
         dispatch(enc, c.intermediate * c.topk * n, 256);
-        metal::encode_moe_down_f32x_grouped_slots(
-            ctx,
-            enc,
-            layer.banks[2],
-            &b[13],
-            &counts,
-            &b[11],
-            &b[14],
-            c.intermediate,
-            c.hidden,
-            c.experts,
-            n,
-        )?;
+        if grouped {
+            metal::encode_moe_down_f32x_grouped_slots(
+                ctx,
+                enc,
+                layer.banks[2],
+                &b[13],
+                &counts,
+                &b[11],
+                &b[14],
+                c.intermediate,
+                c.hidden,
+                c.experts,
+                n,
+            )?;
+        } else {
+            metal::encode_all_slots_down_native_rows(
+                ctx,
+                enc,
+                layer.banks[2],
+                &b[13].view_subrange(0, vec![c.intermediate as u64, (c.topk * n) as u64]),
+                &b[8],
+                &status,
+                &b[14].view_subrange(0, vec![c.hidden as u64, (c.topk * n) as u64]),
+                c.intermediate,
+                c.hidden,
+                c.experts,
+                c.topk,
+                n,
+            )?;
+        }
         enc.set_pipeline(&ctx.pipeline("kernel_deepseek_v41_sum")?);
         enc.set_bytes(0, &(c.hidden as u32));
         enc.set_bytes(1, &(c.topk as u32));
@@ -567,6 +615,26 @@ fn grouped_supported(c: &Config, layer: &Layer<'_>) -> bool {
             dtype
                 .storage_layout()
                 .is_some_and(|(block, _)| (k as u64).is_multiple_of(block.max(32)))
+        })
+}
+
+fn native_rows_supported(c: &Config, layer: &Layer<'_>) -> bool {
+    #[cfg(test)]
+    if prefill::ROWWISE_LINEAR_ROWS.with(|flag| flag.get()) {
+        return false;
+    }
+    metal::all_slots_gate_up_native_rows_supported(layer.banks[0].dtype, layer.banks[1].dtype)
+        && metal::all_slots_down_native_rows_supported(layer.banks[2].dtype)
+        && [
+            (c.hidden, layer.banks[0]),
+            (c.hidden, layer.banks[1]),
+            (c.intermediate, layer.banks[2]),
+        ]
+        .iter()
+        .all(|&(k, bank)| {
+            bank.dtype
+                .storage_layout()
+                .is_some_and(|(block, _)| (k as u64).is_multiple_of(block))
         })
 }
 

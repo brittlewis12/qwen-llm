@@ -1,6 +1,13 @@
 use super::super::toy;
 use super::*;
 
+#[path = "tests/native_rows.rs"]
+mod native_rows;
+
+fn production_lease() -> impl Sized {
+    crate::metal::acquire_metal_benchmark_lease().expect("production GPU lease")
+}
+
 fn close(a: &[f32], b: &[f32]) {
     assert_eq!(a.len(), b.len());
     for (i, (&a, &b)) in a.iter().zip(b).enumerate() {
@@ -13,6 +20,7 @@ fn close(a: &[f32], b: &[f32]) {
 
 #[test]
 fn stages_lagged_pre_weight_before_down_and_nonalias() {
+    let _lease = production_lease();
     let ctx = MetalContext::new().unwrap();
     let weights = toy::Weights::new(&ctx);
     let mut model = weights.model(&ctx);
@@ -80,6 +88,7 @@ fn stages_lagged_pre_weight_before_down_and_nonalias() {
 
 #[test]
 fn routing_ties_bias_absorption_temperature_extremes_and_top1() {
+    let _lease = production_lease();
     let ctx = MetalContext::new().unwrap();
     for (logits, bias, topk, temperature, scale) in [
         (
@@ -177,6 +186,7 @@ fn routing_ties_bias_absorption_temperature_extremes_and_top1() {
 
 #[test]
 fn asymmetric_clamps_preserve_negative_gate_tail() {
+    let _lease = production_lease();
     let ctx = MetalContext::new().unwrap();
     let gate = [-20.0, -2.0, -0.2, 0.2, 2.0, 20.0];
     let up = [-20.0, 20.0, -2.0, 2.0, -20.0, 20.0];
@@ -196,6 +206,7 @@ fn asymmetric_clamps_preserve_negative_gate_tail() {
 
 #[test]
 fn ordered_slots_then_shared_sum() {
+    let _lease = production_lease();
     let ctx = MetalContext::new().unwrap();
     let slots = upload(&ctx, &[1e20, -1e20, 3.0], vec![1, 3]).unwrap();
     let shared = upload(&ctx, &[4.0], vec![1]).unwrap();
@@ -224,6 +235,7 @@ fn ordered_slots_then_shared_sum() {
 
 #[test]
 fn grouped_mxfp4_rows_match_scalar_weight_before_down() {
+    let _lease = production_lease();
     let ctx = MetalContext::new().unwrap();
     let weights = toy::Weights::new(&ctx);
     let model = weights.model(&ctx);

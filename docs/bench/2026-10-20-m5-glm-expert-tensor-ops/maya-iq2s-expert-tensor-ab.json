@@ -1,0 +1,103 @@
+{
+  "schema": "glm53.maya_iq2_s_expert_tensor_ab.v1",
+  "model": "GLM-5.3-Flash-Maya-M-IQ2_S",
+  "layer": 3,
+  "gate_shape": [
+    4096,
+    2048,
+    288
+  ],
+  "up_shape": [
+    4096,
+    2048,
+    288
+  ],
+  "weight_dtype": "IQ2_S",
+  "input_dtype": "F32, rounded to F16 inside both paths",
+  "accumulation": "F32",
+  "repetitions_per_arm": 5,
+  "order": "warm production,tensor; then five interleaved AB/BA pairs; then untimed comparison calls",
+  "cases": [
+    {
+      "M": 10,
+      "layer": 3,
+      "expert": 0,
+      "input": "same deterministic F32 rows, cast to F16 by each kernel",
+      "production_kernel": "kernel_moe_swiglu_clamped_iq2_s_f32_grouped_slots_generic plus n32 split at M>=17",
+      "production_ms": [
+        0.654709,
+        0.840792,
+        0.7511249999999999,
+        0.828042,
+        0.737542
+      ],
+      "production_mean_ms": 0.762442,
+      "production_tflops": 0.44009160041026074,
+      "tensor_ops_ms": [
+        0.68,
+        0.537417,
+        0.544375,
+        0.528458,
+        0.5533750000000001
+      ],
+      "tensor_ops_mean_ms": 0.568725,
+      "tensor_ops_tflops": 0.5899939689656688,
+      "max_abs": 0.00000166893,
+      "relative_rms": 1.0130911551546867e-6
+    },
+    {
+      "M": 39,
+      "layer": 3,
+      "expert": 0,
+      "input": "same deterministic F32 rows, cast to F16 by each kernel",
+      "production_kernel": "kernel_moe_swiglu_clamped_iq2_s_f32_grouped_slots_generic plus n32 split at M>=17",
+      "production_ms": [
+        0.983208,
+        0.9022910000000001,
+        0.8885,
+        0.860667,
+        0.90525
+      ],
+      "production_mean_ms": 0.9079832,
+      "production_tflops": 1.4412412564461545,
+      "tensor_ops_ms": [
+        0.9890000000000001,
+        0.977375,
+        0.9977919999999999,
+        0.983792,
+        0.976584
+      ],
+      "tensor_ops_mean_ms": 0.9849086,
+      "tensor_ops_tflops": 1.328674404914324,
+      "max_abs": 0.000002861023,
+      "relative_rms": 1.0020948369290668e-6
+    },
+    {
+      "M": 256,
+      "layer": 3,
+      "expert": 0,
+      "input": "same deterministic F32 rows, cast to F16 by each kernel",
+      "production_kernel": "kernel_moe_swiglu_clamped_iq2_s_f32_grouped_slots_generic plus n32 split at M>=17",
+      "production_ms": [
+        1.4176250000000001,
+        1.440042,
+        1.528,
+        1.169875,
+        1.296917
+      ],
+      "production_mean_ms": 1.3704918,
+      "production_tflops": 6.26777525556884,
+      "tensor_ops_ms": [
+        5.368125,
+        5.2692499999999995,
+        4.273458,
+        3.804667,
+        3.4162500000000002
+      ],
+      "tensor_ops_mean_ms": 4.42635,
+      "tensor_ops_tflops": 1.9406360979136308,
+      "max_abs": 0.0000031590462,
+      "relative_rms": 9.985240554840278e-7
+    }
+  ]
+}

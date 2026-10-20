@@ -309,20 +309,10 @@ fn maya_iq2_s_glm_shaped_expert_tensor_ab() {
                 let u = u.clamp(-clamp_value, clamp_value);
                 cpu_head.push((g / (1.0 + (-g).exp())) * u);
             }
-            eprintln!(
-                "production_head={:?} tensor_ops_head={:?} cpu_head={:?}",
-                &production_values[..8],
-                &tensor_values[..8],
-                cpu_head,
-            );
-            eprintln!(
-                "production_row0={:?} production_col0={:?} tensor_row0={:?}",
-                &production_values[..16],
-                (0..8)
-                    .map(|row| production_values[row * ffn])
-                    .collect::<Vec<_>>(),
-                &tensor_values[..16],
-            );
+            for (channel, expected) in cpu_head.iter().enumerate() {
+                assert!((production_values[channel] - expected).abs() < 1e-4);
+                assert!((tensor_values[channel] - expected).abs() < 1e-4);
+            }
         }
         let mut max_abs = 0.0f32;
         let mut error_square = 0.0f64;
@@ -333,6 +323,10 @@ fn maya_iq2_s_glm_shaped_expert_tensor_ab() {
             reference_square += f64::from(reference).powi(2);
         }
         let relative_rms = (error_square / reference_square).sqrt();
+        assert!(
+            max_abs < 1e-4 && relative_rms < 1e-5,
+            "M={rows}: TensorOps mismatch max_abs={max_abs} relative_rms={relative_rms}"
+        );
         let production_mean = production_ms.iter().sum::<f64>() / production_ms.len() as f64;
         let tensor_mean = tensor_ms.iter().sum::<f64>() / tensor_ms.len() as f64;
         let flops = 4.0 * rows as f64 * hidden as f64 * ffn as f64;

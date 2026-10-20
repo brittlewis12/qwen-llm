@@ -2,11 +2,10 @@
 
 ## Status
 
-The first Maya IQ2_S pp2048 profile shows routed experts consume a large
-share of the profiled chunk, but the requested bucket-distribution capture
-and GLM-shaped tensor-op A/B benchmark were not completed. There is no
-measured crossover or performance recommendation in this packet. Do not
-promote a tensor expert path from the witness result below.
+The pp2048 route capture and test-only GLM-shaped TensorOps A/B are complete.
+The microbenchmark wins at M10 and loses at M39 and M256; because production
+groups many experts in one call, this per-expert result does not justify
+production promotion.
 
 ## Measurement collected
 
@@ -63,19 +62,33 @@ The tile counts sum across all captured layer/chunk buckets; the raw JSON
 contains each per-expert count and per-layer active-expert count per chunk.
 Counts conserve `512 * top_k` routed rows per full chunk and layer.
 
-## Still not measured
+## GLM-shaped expert microbenchmark
 
-The GLM-shaped TensorOps benchmark, five-repeat interleaved A/B timings and
-numerical deltas are still pending. Consequently there is not yet a tensor
-crossover verdict. No production behavior changed.
+`maya-iq2s-expert-tensor-ab.json` uses Maya's first routed layer and its GGUF
+gate/up dimensions `[hidden=4096, ffn=2048, experts=288]`, IQ2_S for both
+banks. Each arm receives the same deterministic F32 input rows, rounded to
+F16 by the kernels; the TensorOps path decodes the IQ2_S weight tile in-kernel
+to threadgroup F16 and reduces K tiles in F32. The production arm is the
+existing grouped clamped gate/up encoder, with its 16/32-row split at M=17.
+Each case has five interleaved A/B repetitions after warmup.
 
-Before considering promotion, capture the per-layer routing counts for every
-512-row chunk at pp512, pp2048 and pp4096, then compare the production grouped
-expert path with the quantized-weight TensorOps prototype at observed p50,
-p90 and full-chunk bucket sizes. Re-verify that expert outputs are independent
-of bucket size and that Fast-mode results remain reproducible across snapshot
-restores. A future grouping experiment should first establish whether merging
-small expert buckets can move enough rows into a measured winning regime.
+| M | Production ms / TFLOP/s | TensorOps ms / TFLOP/s | Max abs | Relative RMS |
+| ---: | ---: | ---: | ---: | ---: |
+| 10 (measured p50) | 0.7624 / 0.440 | 0.5687 / 0.590 | 1.67e-6 | 1.01e-6 |
+| 39 (measured p90) | 0.9080 / 1.441 | 0.9849 / 1.329 | 2.86e-6 | 1.00e-6 |
+| 256 | 1.3705 / 6.268 | 4.4264 / 1.941 | 3.16e-6 | 9.99e-7 |
+
+The TensorOps path wins only at M=10 in this single-expert-call microbenchmark
+(about 1.34x); it loses at M=39 and M=256. This does not establish a layer
+speedup: production groups all active expert buckets in one dispatch, while
+the prototype measures one expert per call, and a layer/chunk averages about
+239 active experts. Do not merge p50 buckets into M39-or-larger buckets for
+this TensorOps kernel; those measured sizes lose. To exploit M10 buckets,
+the next prototype should put many small expert buckets into one TensorOps
+dispatch grid, rather than issue one call per expert or grow token chunks.
+Before promotion, verify that expert output is independent of bucket size and
+that Fast mode remains reproducible across snapshot restores. No production
+behavior changed.
 
 ## Reproduction
 
@@ -87,6 +100,23 @@ QWEN_METAL_LEASE_WAIT=1 \
 GLM53_GGUF=$HOME/models/glm-5.3-flash-maya-m/GLM-5.3-Flash-Maya-M-IQ2_S-00001-of-00003.gguf \
 GLM53_STAGE_OUT=docs/bench/2026-10-20-m5-glm-expert-tensor-ops/maya-2048-prefill-cost.jsonl \
 cargo test -p qwen-llm --release glm5_next_metal::packed::prefill_cost::current_half_2048_cost -- --ignored --nocapture
+```
+
+Bucket capture and the expert A/B use the same fixture variables and release
+lease:
+
+```sh
+QWEN_MODEL_SEARCH_PATH=$HOME/models \
+QWEN_METAL_LEASE_WAIT=1 \
+GLM53_GGUF=$HOME/models/glm-5.3-flash-maya-m/GLM-5.3-Flash-Maya-M-IQ2_S-00001-of-00003.gguf \
+GLM53_STAGE_OUT=docs/bench/2026-10-20-m5-glm-expert-tensor-ops/maya-pp2048-bucket-distribution.json \
+cargo test -p qwen-llm --release glm5_next_metal::packed::route_bucket_distribution::maya_iq2_s_pp2048_bucket_distribution -- --ignored --nocapture
+
+QWEN_MODEL_SEARCH_PATH=$HOME/models \
+QWEN_METAL_LEASE_WAIT=1 \
+GLM53_GGUF=$HOME/models/glm-5.3-flash-maya-m/GLM-5.3-Flash-Maya-M-IQ2_S-00001-of-00003.gguf \
+GLM53_STAGE_OUT=docs/bench/2026-10-20-m5-glm-expert-tensor-ops/maya-iq2s-expert-tensor-ab.json \
+cargo test -p qwen-llm --release glm5_next_metal::packed::expert_tensor_ops::maya_iq2_s_glm_shaped_expert_tensor_ab -- --ignored --nocapture
 ```
 
 The witness used `QWEN_METAL_LEASE_WAIT=1 QWEN_REQUIRE_METAL_TESTS=1` with

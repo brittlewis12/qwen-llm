@@ -567,21 +567,15 @@ impl<'a> Forward<'a> {
                     // Scores against every K position with mask gating.
                     let mut scores = vec![f32::NEG_INFINITY; n_kv_total];
                     for k_idx in 0..n_kv_total {
-                        let allowed = if k_idx < ctx_len {
-                            // Context slot: real position pos_ctx[k_idx].
-                            let k_pos = pos_ctx[k_idx];
-                            if !layer.is_swa {
-                                true // full-attn layer: any context slot
-                            } else {
-                                // SWA layer: q_pos - k_pos <= window.
-                                q_pos.saturating_sub(k_pos) <= cfg.swa_window
-                            }
+                        let k_pos = if k_idx < ctx_len {
+                            pos_ctx[k_idx]
                         } else {
-                            // Noise slot: index in noise = k_idx - ctx_len.
-                            let n_idx = k_idx - ctx_len;
-                            // Block-causal: noise q can only attend to noise k <= q.
-                            n_idx <= q_idx
+                            noise_start_pos + (k_idx - ctx_len) as u32
                         };
+                        let allowed = (!cfg.causal || k_pos <= q_pos)
+                            && (!layer.is_swa
+                                || cfg.swa_window == 0
+                                || q_pos.abs_diff(k_pos) < cfg.swa_window);
                         if !allowed {
                             continue;
                         }

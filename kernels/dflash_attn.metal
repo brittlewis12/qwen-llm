@@ -10,21 +10,10 @@
 //   * Cross-context K, V come from the per-layer K/V projection of
 //     `target_ctx` (the ctx_len target hidden columns); noise K, V from
 //     the noise rows themselves.
-//   * Mask is per-layer (sliding_window_pattern[layer]):
-//     * SWA layers (Qwen3.6: layers 0..3): allow ctx key k iff
-//       `k_pos <= q_pos` AND `q_pos - k_pos <= swa_window`. Noise key
-//       k iff `k_pos == k - ctx_len <= q_idx` (block-causal over noise).
-//     * Full-attn layer (Qwen3.6: layer 4): allow every ctx key. Noise
-//       keys remain block-causal as in the SWA layers.
-//   * Q/K-norm + RoPE are applied OUTSIDE this kernel (already Metal
-//     since v0.51). This kernel just does scoring + softmax + V agg.
-//
-// Codex's "mask defensiveness" flag (v0.72-design): require
-// `k_pos <= q_pos` for ctx keys explicitly. The current CPU
-// fallback uses `q_pos.saturating_sub(k_pos) <= swa_window` which
-// would allow future ctx positions (k_pos > q_pos) if an invariant
-// slipped. This kernel's mask is `(k_pos <= q_pos) AND (q_pos - k_pos
-// <= swa_window OR full_attn)` — both clauses required.
+//   * attention.causal controls visibility for context and noise keys.
+//   * SWA W admits distance < W: causal 0 <= q-k < W, otherwise |q-k| < W.
+//     W=0 means full attention. Noise and context use the same position mask.
+//   * Q/K-norm and NeoX RoPE are applied outside this kernel.
 //
 // Tile/thread layout (codex Q2 design B — custom small-N fused):
 //
@@ -101,20 +90,17 @@ struct dflash_attn_args {
                                  // `q_idx >= n_q_heads * 16` guard (no n_rows
                                  // arg). Real bound is q_idx < n_rows.
     uint  noise_start_pos;
-    uint  swa_window;            // 0 means full-attn layer (no SWA over ctx);
-                                 // codex flag: full-attn ALSO drops the causal
-                                 // restriction over ctx, matching the CPU
-                                 // oracle in `forward.rs::dflash_draft`.
-    uint  ctx_scan_start;        // first context row worth scanning for SWA;
-                                 // ignored for full-attn layers.
-    float scale;                 // 1/sqrt(head_dim)
-    uint  noncausal_noise;       // A/B experiment (QWEN_DFLASH_NONCAUSAL_NOISE):
-                                 // nonzero drops the block-causal restriction
-                                 // over noise keys (llama.cpp sets
-                                 // `causal_attn=false` for the DFlash drafter;
-                                 // this engine has historically masked
-                                 // noise_idx > q_idx).
+    uint  swa_window;            // 0 means full attention.
+    uint  ctx_scan_start;        // safe context suffix hint; ignored for full attention.
+    float scale;                // 1/sqrt(head_dim)
+    uint  noncausal_noise;       // !model.attention.causal, applies to all keys.
 };
+
+inline bool dflash_key_allowed(constant dflash_attn_args & args, uint q_pos, uint k_pos) {
+    if (args.noncausal_noise == 0 && k_pos > q_pos) return false;
+    const uint distance = max(q_pos, k_pos) - min(q_pos, k_pos);
+    return args.swa_window == 0 || distance < args.swa_window;
+}
 
 kernel void kernel_dflash_attn_f32(
         constant dflash_attn_args & args [[buffer(0)]],
@@ -155,40 +141,16 @@ kernel void kernel_dflash_attn_f32(
     // K/V row stride (in floats).
     const ulong k_stride = (ulong)args.n_kv_heads * head_dim;
 
-    // Helper: compute s = (Q · K[k_global, kv_head]) * scale, with
-    // simd_sum reduction across lanes. Returns the same scalar to all
-    // lanes in the simdgroup.
-    //
-    // Mask check: returns false (and -inf score) if denied; mask
-    // logic is inlined per pass to avoid a separate branch barrier.
-
-    // ---- PASS 1: running max ----
-    //
-    // Mask semantics (codex code-review v0.72.2 — match CPU oracle in
-    // forward.rs::dflash_draft):
-    //   * full-attn ctx key: ALWAYS allowed (no causal restriction).
-    //     CPU oracle treats ctx as committed past + the dflash recipe
-    //     allows the full-attn layer to peek.
-    //   * SWA ctx key: allowed iff causal (k_pos <= q_pos) AND
-    //                  windowed (q_pos - k_pos <= swa_window).
-    //     causal short-circuits FIRST so the unsigned subtraction
-    //     never wraps.
-    //   * Noise key: block-causal (noise_idx <= q_idx).
+    // Three-pass softmax uses the same position mask in each pass.
     float m_run = -INFINITY;
     const uint kk_start = full_attn ? 0 : min(args.ctx_scan_start, args.ctx_len);
     for (uint kk = kk_start; kk < args.n_kv_total; ++kk) {
         bool allowed;
         if (kk < args.ctx_len) {
-            if (full_attn) {
-                allowed = true;
-            } else {
-                const uint k_pos = (uint)pos_k[kk];
-                const bool causal = (k_pos <= q_pos);
-                allowed = causal && ((q_pos - k_pos) <= args.swa_window);
-            }
+            allowed = dflash_key_allowed(args, q_pos, (uint)pos_k[kk]);
         } else {
             const uint noise_idx = kk - args.ctx_len;
-            allowed = (args.noncausal_noise != 0) || (noise_idx <= q_idx);
+            allowed = dflash_key_allowed(args, q_pos, args.noise_start_pos + noise_idx);
         }
         if (!allowed) continue;
         device const float * k_row = k + (ulong)kk * k_stride
@@ -207,16 +169,10 @@ kernel void kernel_dflash_attn_f32(
     for (uint kk = kk_start; kk < args.n_kv_total; ++kk) {
         bool allowed;
         if (kk < args.ctx_len) {
-            if (full_attn) {
-                allowed = true;
-            } else {
-                const uint k_pos = (uint)pos_k[kk];
-                const bool causal = (k_pos <= q_pos);
-                allowed = causal && ((q_pos - k_pos) <= args.swa_window);
-            }
+            allowed = dflash_key_allowed(args, q_pos, (uint)pos_k[kk]);
         } else {
             const uint noise_idx = kk - args.ctx_len;
-            allowed = (args.noncausal_noise != 0) || (noise_idx <= q_idx);
+            allowed = dflash_key_allowed(args, q_pos, args.noise_start_pos + noise_idx);
         }
         if (!allowed) continue;
         device const float * k_row = k + (ulong)kk * k_stride
@@ -238,16 +194,10 @@ kernel void kernel_dflash_attn_f32(
     for (uint kk = kk_start; kk < args.n_kv_total; ++kk) {
         bool allowed;
         if (kk < args.ctx_len) {
-            if (full_attn) {
-                allowed = true;
-            } else {
-                const uint k_pos = (uint)pos_k[kk];
-                const bool causal = (k_pos <= q_pos);
-                allowed = causal && ((q_pos - k_pos) <= args.swa_window);
-            }
+            allowed = dflash_key_allowed(args, q_pos, (uint)pos_k[kk]);
         } else {
             const uint noise_idx = kk - args.ctx_len;
-            allowed = (args.noncausal_noise != 0) || (noise_idx <= q_idx);
+            allowed = dflash_key_allowed(args, q_pos, args.noise_start_pos + noise_idx);
         }
         if (!allowed) continue;
         device const float * k_row = k + (ulong)kk * k_stride
@@ -316,17 +266,11 @@ kernel void kernel_dflash_attn_two_range_f32(
         bool allowed;
         device const float * k_row;
         if (kk < args.ctx_len) {
-            if (full_attn) {
-                allowed = true;
-            } else {
-                const uint k_pos = (uint)pos_ctx[kk];
-                const bool causal = (k_pos <= q_pos);
-                allowed = causal && ((q_pos - k_pos) <= args.swa_window);
-            }
+            allowed = dflash_key_allowed(args, q_pos, (uint)pos_ctx[kk]);
             k_row = k_ctx + (ulong)kk * k_stride + (ulong)kv_head * head_dim;
         } else {
             const uint noise_idx = kk - args.ctx_len;
-            allowed = (args.noncausal_noise != 0) || (noise_idx <= q_idx);
+            allowed = dflash_key_allowed(args, q_pos, args.noise_start_pos + noise_idx);
             k_row = k_noise + (ulong)noise_idx * k_stride + (ulong)kv_head * head_dim;
         }
         if (!allowed) continue;
@@ -343,17 +287,11 @@ kernel void kernel_dflash_attn_two_range_f32(
         bool allowed;
         device const float * k_row;
         if (kk < args.ctx_len) {
-            if (full_attn) {
-                allowed = true;
-            } else {
-                const uint k_pos = (uint)pos_ctx[kk];
-                const bool causal = (k_pos <= q_pos);
-                allowed = causal && ((q_pos - k_pos) <= args.swa_window);
-            }
+            allowed = dflash_key_allowed(args, q_pos, (uint)pos_ctx[kk]);
             k_row = k_ctx + (ulong)kk * k_stride + (ulong)kv_head * head_dim;
         } else {
             const uint noise_idx = kk - args.ctx_len;
-            allowed = (args.noncausal_noise != 0) || (noise_idx <= q_idx);
+            allowed = dflash_key_allowed(args, q_pos, args.noise_start_pos + noise_idx);
             k_row = k_noise + (ulong)noise_idx * k_stride + (ulong)kv_head * head_dim;
         }
         if (!allowed) continue;
@@ -374,18 +312,12 @@ kernel void kernel_dflash_attn_two_range_f32(
         device const float * k_row;
         device const float * v_row;
         if (kk < args.ctx_len) {
-            if (full_attn) {
-                allowed = true;
-            } else {
-                const uint k_pos = (uint)pos_ctx[kk];
-                const bool causal = (k_pos <= q_pos);
-                allowed = causal && ((q_pos - k_pos) <= args.swa_window);
-            }
+            allowed = dflash_key_allowed(args, q_pos, (uint)pos_ctx[kk]);
             k_row = k_ctx + (ulong)kk * k_stride + (ulong)kv_head * head_dim;
             v_row = v_ctx + (ulong)kk * k_stride + (ulong)kv_head * head_dim;
         } else {
             const uint noise_idx = kk - args.ctx_len;
-            allowed = (args.noncausal_noise != 0) || (noise_idx <= q_idx);
+            allowed = dflash_key_allowed(args, q_pos, args.noise_start_pos + noise_idx);
             k_row = k_noise + (ulong)noise_idx * k_stride + (ulong)kv_head * head_dim;
             v_row = v_noise + (ulong)noise_idx * k_stride + (ulong)kv_head * head_dim;
         }
@@ -454,18 +386,12 @@ kernel void kernel_dflash_attn_online_two_range_f32(
         device const float * k_row;
         device const float * v_row;
         if (kk < args.ctx_len) {
-            if (full_attn) {
-                allowed = true;
-            } else {
-                const uint k_pos = (uint)pos_ctx[kk];
-                const bool causal = (k_pos <= q_pos);
-                allowed = causal && ((q_pos - k_pos) <= args.swa_window);
-            }
+            allowed = dflash_key_allowed(args, q_pos, (uint)pos_ctx[kk]);
             k_row = k_ctx + (ulong)kk * k_stride + (ulong)kv_head * head_dim;
             v_row = v_ctx + (ulong)kk * k_stride + (ulong)kv_head * head_dim;
         } else {
             const uint noise_idx = kk - args.ctx_len;
-            allowed = (args.noncausal_noise != 0) || (noise_idx <= q_idx);
+            allowed = dflash_key_allowed(args, q_pos, args.noise_start_pos + noise_idx);
             k_row = k_noise + (ulong)noise_idx * k_stride + (ulong)kv_head * head_dim;
             v_row = v_noise + (ulong)noise_idx * k_stride + (ulong)kv_head * head_dim;
         }
@@ -497,7 +423,7 @@ kernel void kernel_dflash_attn_online_two_range_f32(
 // Fixed Qwen3.6 DFlash full-attention path. One simdgroup handles the four
 // sibling Q heads for a KV head, so each K/V value is loaded once instead of
 // once per sibling. Four context partitions preserve the baseline's 512 main
-// threadgroups. The final partition also consumes the causal noise prefix.
+// threadgroups. The final partition also consumes the visible noise rows.
 [[max_total_threads_per_threadgroup(32)]]
 kernel void kernel_dflash_attn_full_gqa_split4_main_f32(
         constant dflash_attn_args & args [[buffer(0)]],
@@ -508,6 +434,7 @@ kernel void kernel_dflash_attn_full_gqa_split4_main_f32(
         device const float * v_noise    [[buffer(5)]],
         device       float * o_partial  [[buffer(6)]],
         device       float * ml_partial [[buffer(7)]],
+        device const int   * pos_ctx    [[buffer(8)]],
         uint3  tgpig [[threadgroup_position_in_grid]],
         ushort tiisg [[thread_index_in_simdgroup]]) {
     constexpr uint NKV = 8;
@@ -541,17 +468,21 @@ kernel void kernel_dflash_attn_full_gqa_split4_main_f32(
     float4 o3 = float4(0.0f);
     const uint ctx_begin = uint(((ulong)args.ctx_len * part) / SPLIT);
     const uint ctx_end = uint(((ulong)args.ctx_len * (part + 1)) / SPLIT);
-    const uint scan_end = ctx_end + ((part == SPLIT - 1) ? q_idx + 1 : 0);
+    const uint noise_rows = (args.noncausal_noise != 0) ? args.n_rows : q_idx + 1;
+    const uint scan_end = ctx_end + ((part == SPLIT - 1) ? noise_rows : 0);
+    const uint q_pos = args.noise_start_pos + q_idx;
     const ulong kv_stride = NKV * HD;
 
     for (uint kk = ctx_begin; kk < scan_end; ++kk) {
         device const float * k_row;
         device const float * v_row;
         if (kk < ctx_end) {
+            if (!dflash_key_allowed(args, q_pos, (uint)pos_ctx[kk])) continue;
             k_row = k_ctx + (ulong)kk * kv_stride + (ulong)kv_head * HD;
             v_row = v_ctx + (ulong)kk * kv_stride + (ulong)kv_head * HD;
         } else {
             const uint noise_idx = kk - ctx_end;
+            if (!dflash_key_allowed(args, q_pos, args.noise_start_pos + noise_idx)) continue;
             k_row = k_noise + (ulong)noise_idx * kv_stride + (ulong)kv_head * HD;
             v_row = v_noise + (ulong)noise_idx * kv_stride + (ulong)kv_head * HD;
         }
@@ -717,14 +648,12 @@ kernel void kernel_dflash_attn_swa_split4_main_f32(
         device const float * k_row;
         device const float * v_row;
         if (kk < ctx_end) {
-            if (!full_attn) {
-                const uint k_pos = (uint)pos_ctx[kk];
-                if (k_pos > q_pos || (q_pos - k_pos) > args.swa_window) continue;
-            }
+            if (!dflash_key_allowed(args, q_pos, (uint)pos_ctx[kk])) continue;
             k_row = k_ctx + (ulong)kk * kv_stride + (ulong)kv_head * HD;
             v_row = v_ctx + (ulong)kk * kv_stride + (ulong)kv_head * HD;
         } else {
             const uint noise_idx = kk - ctx_end;
+            if (!dflash_key_allowed(args, q_pos, args.noise_start_pos + noise_idx)) continue;
             k_row = k_noise + (ulong)noise_idx * kv_stride + (ulong)kv_head * HD;
             v_row = v_noise + (ulong)noise_idx * kv_stride + (ulong)kv_head * HD;
         }

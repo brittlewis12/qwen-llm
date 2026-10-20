@@ -24,6 +24,10 @@ const FLAG_FINAL_LOGITS: u64 = 1 << 1;
 /// without the flag keep the legacy layout byte-for-byte.
 const FLAG_CAPTURE_TAIL: u64 = 1 << 2;
 const KNOWN_FLAGS: u64 = FLAG_PENDING_TOKEN | FLAG_FINAL_LOGITS | FLAG_CAPTURE_TAIL;
+// Version 1 binds captures to the corrected DFlash layer convention: v2
+// target_layers are shifted by -1 to post-block IDs; v1 IDs stay unchanged.
+// Legacy (0) and unknown versions lose only the optional capture payload.
+const CAPTURE_SEMANTICS_VERSION: u32 = 1;
 
 const OFF_MAGIC: usize = 0x00;
 const OFF_VERSION: usize = 0x08;
@@ -54,7 +58,8 @@ const OFF_GDN_STATE_BYTES: usize = 0x98;
 const OFF_LOGITS_BYTES: usize = 0xa0;
 const OFF_COMPATIBILITY_ID: usize = 0xa8;
 const OFF_CAPTURE_TAIL_BYTES: usize = 0xc8;
-const OFF_RESERVED: usize = 0xd0;
+const OFF_CAPTURE_SEMANTICS: usize = 0xd0;
+const OFF_RESERVED: usize = 0xd4;
 
 #[derive(Clone, Copy, Debug)]
 pub struct SnapshotCodecConstraints<'a> {
@@ -382,7 +387,9 @@ pub fn decode_snapshot<R: Read>(
     } else {
         None
     };
-    let capture_tail = if layout.flags & FLAG_CAPTURE_TAIL != 0 {
+    let capture_tail = if layout.flags & FLAG_CAPTURE_TAIL != 0
+        && get_u32(&header, OFF_CAPTURE_SEMANTICS) == CAPTURE_SEMANTICS_VERSION
+    {
         Some(parse_f32_le("capture_tail", &capture_tail_raw)?)
     } else {
         None
@@ -473,6 +480,13 @@ fn build_header(
         OFF_CAPTURE_TAIL_BYTES,
         layout.capture_tail_bytes,
     );
+    if snapshot.capture_tail.is_some() {
+        put_u32(
+            &mut header,
+            OFF_CAPTURE_SEMANTICS,
+            CAPTURE_SEMANTICS_VERSION,
+        );
+    }
     header[OFF_COMPATIBILITY_ID..OFF_COMPATIBILITY_ID + 32].copy_from_slice(compatibility_id);
     header
 }
@@ -502,6 +516,11 @@ fn parse_and_validate_header(
     }
     if header[OFF_RESERVED..].iter().any(|&byte| byte != 0) {
         return Err(SnapshotCodecError::InvalidHeader("reserved bytes"));
+    }
+    if flags & FLAG_CAPTURE_TAIL == 0 && get_u32(header, OFF_CAPTURE_SEMANTICS) != 0 {
+        return Err(SnapshotCodecError::InvalidHeader(
+            "capture semantics without tail",
+        ));
     }
     if &header[OFF_COMPATIBILITY_ID..OFF_COMPATIBILITY_ID + 32]
         != constraints.expected_compatibility_id
@@ -902,16 +921,76 @@ mod tests {
     #[test]
     fn capture_tail_round_trips_bits_and_sets_flag() {
         let mut snapshot = snapshot(identity());
-        snapshot.capture_tail = Some(vec![0.25, -1.5, f32::INFINITY, 7.0]);
+        snapshot.capture_tail = Some(vec![-0.0, -1.5, f32::INFINITY, f32::from_bits(0x7fc0_1234)]);
         let record = encode(&snapshot);
         assert_eq!(
             get_u64(&record, OFF_FLAGS) & FLAG_CAPTURE_TAIL,
             FLAG_CAPTURE_TAIL
         );
         assert_eq!(get_u64(&record, OFF_CAPTURE_TAIL_BYTES), 16);
+        assert_eq!(
+            get_u32(&record, OFF_CAPTURE_SEMANTICS),
+            CAPTURE_SEMANTICS_VERSION
+        );
         let decoded = decode(&record, &identity());
         assert_snapshot_bits_eq(&snapshot, &decoded);
         assert_eq!(decoded.capture_tail.as_ref().map(Vec::len), Some(4));
+        assert_eq!(encode(&decoded), record);
+    }
+
+    #[test]
+    fn incompatible_capture_semantics_drop_only_tail() {
+        let mut snapshot = snapshot(identity());
+        snapshot.capture_tail = Some(vec![0.25, -1.5, f32::INFINITY, 7.0]);
+        let current = encode(&snapshot);
+        let mut expected = snapshot.clone();
+        expected.capture_tail = None;
+
+        // The same right-sized payload must not be accepted merely by length.
+        // Zero reproduces the legacy header, whose reserved bytes were zero.
+        for version in [0, CAPTURE_SEMANTICS_VERSION + 1, u32::MAX] {
+            let mut record = current.clone();
+            put_u32(&mut record, OFF_CAPTURE_SEMANTICS, version);
+            refresh_digest(&mut record);
+            let decoded = decode(&record, &identity());
+            assert_snapshot_bits_eq(&expected, &decoded);
+            assert_eq!(decoded.n_bytes(), snapshot.n_bytes() - 16);
+            assert_eq!(decoded.matched_prefix_len(), snapshot.matched_prefix_len());
+            // Republishing cannot relabel an old capture as current.
+            assert_eq!(encode(&decoded), encode(&expected));
+        }
+    }
+
+    #[test]
+    fn incompatible_capture_tail_still_requires_valid_digest() {
+        let mut snapshot = snapshot(identity());
+        snapshot.capture_tail = Some(vec![1.0; 4]);
+        let mut record = encode(&snapshot);
+        put_u32(&mut record, OFF_CAPTURE_SEMANTICS, 0);
+        refresh_digest(&mut record);
+        let tail_end = record.len() - DIGEST_BYTES;
+        record[tail_end - 1] ^= 1;
+        assert!(matches!(
+            decode_snapshot(&mut Cursor::new(&record), constraints(&identity())),
+            Err(SnapshotCodecError::DigestMismatch)
+        ));
+    }
+
+    #[test]
+    fn capture_semantics_without_tail_is_rejected() {
+        let mut record = encode(&snapshot(identity()));
+        put_u32(
+            &mut record,
+            OFF_CAPTURE_SEMANTICS,
+            CAPTURE_SEMANTICS_VERSION,
+        );
+        refresh_digest(&mut record);
+        assert!(matches!(
+            decode_snapshot(&mut Cursor::new(&record), constraints(&identity())),
+            Err(SnapshotCodecError::InvalidHeader(
+                "capture semantics without tail"
+            ))
+        ));
     }
 
     #[test]
@@ -920,6 +999,11 @@ mod tests {
         let record = encode(&snapshot);
         assert_eq!(get_u64(&record, OFF_FLAGS), 3);
         assert_eq!(get_u64(&record, OFF_CAPTURE_TAIL_BYTES), 0);
+        assert!(
+            record[OFF_CAPTURE_SEMANTICS..HEADER_BYTES]
+                .iter()
+                .all(|&b| b == 0)
+        );
         let decoded = decode(&record, &identity());
         assert!(decoded.capture_tail.is_none());
         assert_snapshot_bits_eq(&snapshot, &decoded);

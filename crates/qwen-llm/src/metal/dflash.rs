@@ -112,11 +112,10 @@ pub fn encode_dflash2_conv_f32(
     Ok(())
 }
 
-crate::env_flag!(default_off dflash_noncausal_noise_enabled, "QWEN_DFLASH_NONCAUSAL_NOISE");
-
 /// **DFlash drafter attention** (v0.72.1) — fused small-N attention
 /// with per-layer SWA mask. Replaces the CPU phase-3 attention in
 /// `draft_block`. See `kernels/dflash_attn.metal` for design.
+/// `causal` comes from the drafter config and applies to context and noise keys.
 ///
 /// Threadgroup grid: `(n_q_heads, N)` per drafter layer per outer step.
 /// Threads per TG: 32 (one simdgroup; head_dim/32=4 dims per lane).
@@ -136,6 +135,7 @@ pub fn encode_dflash_attn_f32(
     ctx_len: usize,
     noise_start_pos: u32,
     swa_window: u32,
+    causal: bool,
 ) -> Result<(), MetalError> {
     if !head_dim.is_multiple_of(32) {
         return Err(MetalError::BadShape {
@@ -239,7 +239,7 @@ pub fn encode_dflash_attn_f32(
             swa_window,
             ctx_scan_start: 0,
             scale,
-            noncausal_noise: dflash_noncausal_noise_enabled() as u32,
+            noncausal_noise: (!causal) as u32,
         },
     );
     enc.set_tensor(1, q);
@@ -283,6 +283,7 @@ pub fn encode_dflash_attn_two_range_f32(
     ctx_len: usize,
     noise_start_pos: u32,
     swa_window: u32,
+    causal: bool,
 ) -> Result<(), MetalError> {
     encode_dflash_attn_two_range_pipeline(
         ctx,
@@ -304,6 +305,7 @@ pub fn encode_dflash_attn_two_range_f32(
         0,
         "dflash_attn_two_range",
         "kernel_dflash_attn_two_range_f32",
+        causal,
     )
 }
 
@@ -327,6 +329,7 @@ pub fn encode_dflash_attn_online_two_range_scan_f32(
     noise_start_pos: u32,
     swa_window: u32,
     ctx_scan_start: usize,
+    causal: bool,
 ) -> Result<(), MetalError> {
     encode_dflash_attn_two_range_pipeline(
         ctx,
@@ -348,6 +351,7 @@ pub fn encode_dflash_attn_online_two_range_scan_f32(
         ctx_scan_start,
         "dflash_attn_online_two_range",
         "kernel_dflash_attn_online_two_range_f32",
+        causal,
     )
 }
 
@@ -371,6 +375,7 @@ pub(crate) fn encode_dflash_attn_two_range_pipeline(
     ctx_scan_start: usize,
     kernel_label: &'static str,
     pipeline_name: &'static str,
+    causal: bool,
 ) -> Result<(), MetalError> {
     if !head_dim.is_multiple_of(32) {
         return Err(MetalError::BadShape {
@@ -480,7 +485,7 @@ pub(crate) fn encode_dflash_attn_two_range_pipeline(
             swa_window,
             ctx_scan_start: ctx_scan_start as u32,
             scale,
-            noncausal_noise: dflash_noncausal_noise_enabled() as u32,
+            noncausal_noise: (!causal) as u32,
         },
     );
     enc.set_tensor(1, q);
@@ -524,6 +529,9 @@ pub fn encode_dflash_attn_full_gqa_split4_f32(
     n_kv_heads: usize,
     head_dim: usize,
     ctx_len: usize,
+    pos_ctx: &MetalTensor,
+    noise_start_pos: u32,
+    causal: bool,
 ) -> Result<(), MetalError> {
     const N: usize = 16;
     const N_Q: usize = 32;
@@ -548,7 +556,9 @@ pub fn encode_dflash_attn_full_gqa_split4_f32(
             ),
         });
     }
-    let tensors = [q, k_ctx, v_ctx, k_noise, v_noise, o_partial, ml_partial, o];
+    let tensors = [
+        q, k_ctx, v_ctx, k_noise, v_noise, pos_ctx, o_partial, ml_partial, o,
+    ];
     if tensors.iter().any(|tensor| tensor.dtype != GgmlType::F32) {
         return Err(MetalError::BadShape {
             kernel: KERNEL,
@@ -567,6 +577,7 @@ pub fn encode_dflash_attn_full_gqa_split4_f32(
     let o_partial_elems = N * N_KV * SPLIT * GROUP * HEAD_DIM;
     let ml_partial_elems = N * N_KV * SPLIT * GROUP * 2;
     if q.n_elements() as usize != q_elems
+        || (pos_ctx.n_elements() as usize) < ctx_len
         || o.n_elements() as usize != q_elems
         || (k_ctx.n_elements() as usize) < ctx_elems
         || (v_ctx.n_elements() as usize) < ctx_elems
@@ -595,6 +606,12 @@ pub fn encode_dflash_attn_full_gqa_split4_f32(
         kernel: KERNEL,
         detail: "ctx_len + N overflow".into(),
     })?;
+    noise_start_pos
+        .checked_add(N as u32 - 1)
+        .ok_or_else(|| MetalError::BadShape {
+            kernel: KERNEL,
+            detail: "noise position overflow".into(),
+        })?;
     let n_kv_total = u32::try_from(total_rows).map_err(|_| MetalError::BadShape {
         kernel: KERNEL,
         detail: "ctx_len + N does not fit u32".into(),
@@ -625,11 +642,11 @@ pub fn encode_dflash_attn_full_gqa_split4_f32(
             detail: "ctx_len does not fit u32".into(),
         })?,
         n_rows: N as u32,
-        noise_start_pos: 0,
+        noise_start_pos,
         swa_window: 0,
         ctx_scan_start: 0,
         scale: 1.0 / (HEAD_DIM as f32).sqrt(),
-        noncausal_noise: dflash_noncausal_noise_enabled() as u32,
+        noncausal_noise: (!causal) as u32,
     };
 
     let main = ctx.pipeline("kernel_dflash_attn_full_gqa_split4_main_f32")?;
@@ -642,6 +659,7 @@ pub fn encode_dflash_attn_full_gqa_split4_f32(
     enc.set_tensor(5, v_noise);
     enc.set_tensor(6, o_partial);
     enc.set_tensor(7, ml_partial);
+    enc.set_tensor(8, pos_ctx);
     enc.dispatch(
         MTLSize {
             width: N_KV,
@@ -706,47 +724,7 @@ pub fn encode_dflash_attn_swa_split4_f32(
     noise_start_pos: u32,
     swa_window: u32,
     ctx_scan_start: usize,
-) -> Result<(), MetalError> {
-    encode_dflash_attn_swa_split4_with_noncausal_f32(
-        ctx,
-        enc,
-        q,
-        k_ctx,
-        v_ctx,
-        k_noise,
-        v_noise,
-        pos_ctx,
-        o_partial,
-        ml_partial,
-        o,
-        n,
-        ctx_len,
-        noise_start_pos,
-        swa_window,
-        ctx_scan_start,
-        dflash_noncausal_noise_enabled(),
-    )
-}
-
-#[allow(clippy::too_many_arguments)]
-pub(crate) fn encode_dflash_attn_swa_split4_with_noncausal_f32(
-    ctx: &MetalContext,
-    enc: &KernelEncoder,
-    q: &MetalTensor,
-    k_ctx: &MetalTensor,
-    v_ctx: &MetalTensor,
-    k_noise: &MetalTensor,
-    v_noise: &MetalTensor,
-    pos_ctx: &MetalTensor,
-    o_partial: &MetalTensor,
-    ml_partial: &MetalTensor,
-    o: &MetalTensor,
-    n: usize,
-    ctx_len: usize,
-    noise_start_pos: u32,
-    swa_window: u32,
-    ctx_scan_start: usize,
-    noncausal_noise: bool,
+    causal: bool,
 ) -> Result<(), MetalError> {
     const KERNEL: &str = "dflash_attn_swa_split4";
     const N_Q: usize = 32;
@@ -960,7 +938,7 @@ pub(crate) fn encode_dflash_attn_swa_split4_with_noncausal_f32(
         swa_window,
         ctx_scan_start: ctx_scan_start_u32,
         scale: 1.0 / (HEAD_DIM as f32).sqrt(),
-        noncausal_noise: noncausal_noise as u32,
+        noncausal_noise: (!causal) as u32,
     };
 
     let main = ctx.pipeline("kernel_dflash_attn_swa_split4_main_f32")?;
@@ -1014,14 +992,12 @@ mod tests {
     use crate::metal::test_support::*;
 
     /// **v0.72.2 codex code-review test #1**: dflash attention kernel
-    /// matches the CPU oracle bit-tight under each mask regime.
+    /// matches the independent f64 CPU oracle under both causal modes.
     ///
     /// Exercises:
     ///   * `ctx_len == 0` (degenerate: noise-only attention)
     ///   * `ctx_len > 0, swa_window > 0` (SWA layer)
-    ///   * `ctx_len > 0, swa_window == 0` (full-attn layer; codex
-    ///     mask-semantics flag — full-attn allows ALL ctx keys, no
-    ///     causal restriction)
+    ///   * `ctx_len > 0, swa_window == 0` (full-attn layer)
     ///   * `ctx_len > swa_window` (SWA boundary; some ctx keys
     ///     denied by the window even though causal)
     ///   * `ctx_len > 0` with non-contiguous / gapped pos_k
@@ -1114,31 +1090,39 @@ mod tests {
                 pos_ctx: pos_gapped,
             },
             Case {
-                label: "swa, q_pos == k_pos boundary",
-                ctx_len: 4,
-                swa_window: 2048,
-                // pos_recent constructs ctx positions
-                // [noise_start - ctx_len .. noise_start). With
-                // noise_start=4, ctx pos = [0,1,2,3]. q_pos at q_idx=0
-                // = 4. So q_pos > k_pos — no exact equality.
-                // To exercise q_pos == k_pos: shift noise_start_pos so
-                // pos_ctx ends at exactly noise_start_pos (= q_pos at
-                // q_idx=0). Set ctx_len=4, noise_start_pos=4 →
-                // pos_ctx = [0..4); the last ctx is at pos=3, q_pos at
-                // q_idx=0 is 4 → still strict. Make ctx_len=5 and
-                // noise_start_pos=4 → pos_ctx = [-1..4); ctx[4]=3.
-                // Hmm same. This case structurally enforces k_pos < q_pos
-                // unless we allow ctx that overlaps noise positions
-                // (semantically a contract violation per codex flag).
-                //
-                // Instead, this case tests q_pos > all ctx positions
-                // by a margin of 1 — boundary-adjacent without overlap.
-                noise_start_pos: 4,
+                label: "swa, equality and symmetric future boundary",
+                ctx_len: 6,
+                swa_window: 3,
+                noise_start_pos: 10,
+                pos_ctx: |_, _| vec![6, 7, 8, 10, 12, 13],
+            },
+            Case {
+                label: "full, future context mask",
+                ctx_len: 3,
+                swa_window: 0,
+                noise_start_pos: 10,
+                pos_ctx: |_, _| vec![7, 10, 13],
+            },
+            Case {
+                label: "full, empty context",
+                ctx_len: 0,
+                swa_window: 0,
+                noise_start_pos: 0,
+                pos_ctx: pos_recent,
+            },
+            Case {
+                label: "SWA W=1, noise-only self attention",
+                ctx_len: 0,
+                swa_window: 1,
+                noise_start_pos: 0,
                 pos_ctx: pos_recent,
             },
         ];
 
-        for c in &cases {
+        for (c, noncausal_noise) in cases
+            .iter()
+            .flat_map(|c| [false, true].map(|mode| (c, mode)))
+        {
             let pos_ctx_vec = (c.pos_ctx)(c.ctx_len, c.noise_start_pos);
             let n_kv_total = c.ctx_len + n;
             // Build pos_k = pos_ctx ++ [noise_start..noise_start+N].
@@ -1176,7 +1160,7 @@ mod tests {
                 c.ctx_len,
                 c.noise_start_pos,
                 c.swa_window,
-                false,
+                noncausal_noise,
             );
             let gpu = dflash_attn_readback(
                 &ctx,
@@ -1192,6 +1176,7 @@ mod tests {
                 c.ctx_len,
                 c.noise_start_pos,
                 c.swa_window,
+                noncausal_noise,
             )
             .expect("dflash_attn dispatch");
             let gpu_two_range = dflash_attn_two_range_readback(
@@ -1212,7 +1197,7 @@ mod tests {
                 false,
                 false,
                 false,
-                false,
+                noncausal_noise,
                 0,
             )
             .expect("dflash_attn_two_range dispatch");
@@ -1234,12 +1219,12 @@ mod tests {
                 true,
                 false,
                 false,
-                false,
+                noncausal_noise,
                 0,
             )
             .expect("dflash_attn_online_two_range dispatch");
             let ctx_scan_start = if c.swa_window > 0 && c.ctx_len > 0 {
-                let min_pos = c.noise_start_pos.saturating_sub(c.swa_window);
+                let min_pos = c.noise_start_pos.saturating_sub(c.swa_window - 1);
                 pos_ctx_vec.partition_point(|&pos| pos >= 0 && (pos as u32) < min_pos)
             } else {
                 0
@@ -1262,7 +1247,7 @@ mod tests {
                 true,
                 false,
                 false,
-                false,
+                noncausal_noise,
                 ctx_scan_start,
             )
             .expect("dflash_attn_online_two_range scan dispatch");
@@ -1286,7 +1271,7 @@ mod tests {
                         false,
                         true,
                         false,
-                        false,
+                        noncausal_noise,
                         0,
                     )
                     .expect("dflash_attn_full_gqa_split4 dispatch"),
@@ -1408,6 +1393,98 @@ mod tests {
     }
 
     #[test]
+    fn dflash_attn_oracle_strict_window_and_future_noise_sentinel() {
+        // q=10: context at distance W is excluded; distance W-1 is included.
+        // Future noise at +1/+2 is visible only in noncausal mode; +3 is not.
+        let values = [128.0, 10.0, 1.0, 4.0, 16.0, 64.0, 2.0, 2.0, 2.0, 2.0];
+        let positions = [7, 8, 10, 11, 12, 13, 14, 15, 16, 17];
+        for (noncausal, expected) in [(false, 5.5), (true, 7.75)] {
+            let out = dflash_attn_cpu_oracle(
+                &[0.0; 8], &[0.0; 10], &values, &positions, 8, 1, 1, 1, 10, 2, 10, 3, noncausal,
+            );
+            assert_eq!(out[0], expected);
+        }
+    }
+
+    #[test]
+    fn dflash_attn_swa_split4_strict_window_and_future_noise_sentinel() {
+        let Some(ctx) = crate::test_fixtures::metal_context_or_skip() else {
+            return;
+        };
+        let (n, nq, nkv, hd, ctx_len) = (8, 32, 8, 128, 2);
+        let stride = nkv * hd;
+        let q = vec![0.0; n * nq * hd];
+        let k = vec![0.0; (ctx_len + n) * stride];
+        let v: Vec<f32> = [128.0, 10.0, 1.0, 4.0, 16.0, 64.0, 2.0, 2.0, 2.0, 2.0]
+            .into_iter()
+            .flat_map(|v| std::iter::repeat_n(v, stride))
+            .collect();
+        let positions = [7, 8, 10, 11, 12, 13, 14, 15, 16, 17];
+        for window in [1, 3] {
+            for noncausal in [false, true] {
+                let expected = dflash_attn_cpu_oracle(
+                    &q,
+                    &k,
+                    &v,
+                    &positions,
+                    n,
+                    nq,
+                    nkv,
+                    hd,
+                    ctx_len + n,
+                    ctx_len,
+                    10,
+                    window,
+                    noncausal,
+                );
+                let concat = dflash_attn_readback(
+                    &ctx,
+                    &q,
+                    &k,
+                    &v,
+                    &positions,
+                    n,
+                    nq,
+                    nkv,
+                    hd,
+                    ctx_len + n,
+                    ctx_len,
+                    10,
+                    window,
+                    noncausal,
+                )
+                .unwrap();
+                assert!(max_abs_diff_finite("concat sentinel", &concat, &expected) < 1e-4);
+                for (online, split) in [(false, false), (true, false), (false, true)] {
+                    let got = dflash_attn_two_range_readback(
+                        &ctx,
+                        &q,
+                        &k[..ctx_len * stride],
+                        &v[..ctx_len * stride],
+                        &k[ctx_len * stride..],
+                        &v[ctx_len * stride..],
+                        &positions[..ctx_len],
+                        n,
+                        nq,
+                        nkv,
+                        hd,
+                        ctx_len,
+                        10,
+                        window,
+                        online,
+                        false,
+                        split,
+                        noncausal,
+                        if window == 1 { 2 } else { 1 },
+                    )
+                    .unwrap();
+                    assert!(max_abs_diff_finite("two-range sentinel", &got, &expected) < 1e-4);
+                }
+            }
+        }
+    }
+
+    #[test]
     fn dflash_attn_swa_split4_matches_cpu_oracle_n8() {
         let Some(ctx) = crate::test_fixtures::metal_context_or_skip() else {
             return;
@@ -1434,10 +1511,13 @@ mod tests {
         let v_ctx = make_buf(13, ctx_len * kv_stride);
         let k_noise = make_buf(14, n * kv_stride);
         let v_noise = make_buf(15, n * kv_stride);
-        let pos_ctx: Vec<i32> = (0..ctx_len)
-            .map(|index| noise_start_pos as i32 - ctx_len as i32 + index as i32)
+        let mut pos_ctx: Vec<i32> = (0..ctx_len)
+            .map(|index| noise_start_pos as i32 - 2 * ctx_len as i32 + 2 * index as i32)
             .collect();
-        let min_pos = noise_start_pos.saturating_sub(swa_window);
+        // Gapped past keys plus future keys exactly at W-1 and W for query zero.
+        pos_ctx[ctx_len - 2] = (noise_start_pos + swa_window - 1) as i32;
+        pos_ctx[ctx_len - 1] = (noise_start_pos + swa_window) as i32;
+        let min_pos = noise_start_pos.saturating_sub(swa_window - 1);
         let ctx_scan_start = pos_ctx.partition_point(|&pos| pos >= 0 && (pos as u32) < min_pos);
         let mut k = k_ctx.clone();
         k.extend_from_slice(&k_noise);
@@ -1584,6 +1664,7 @@ mod tests {
             32,
             16,
             0,
+            true,
         )
         .expect_err("concurrent main/reduce must be rejected");
         concurrent.end();
@@ -1608,13 +1689,14 @@ mod tests {
             32,
             16,
             0,
+            true,
         )
         .expect_err("short positions must be rejected");
         assert!(short_pos_error.to_string().contains("shape mismatch"));
 
         let alias_error = encode_dflash_attn_swa_split4_f32(
             &ctx, &enc, &q, &k_ctx, &v_ctx, &k_noise, &v_noise, &pos_ctx, &o_partial, &o_partial,
-            &o, n, ctx_len, 32, 16, 0,
+            &o, n, ctx_len, 32, 16, 0, true,
         )
         .expect_err("aliased partials must be rejected");
         assert!(alias_error.to_string().contains("disjoint"));
@@ -1636,6 +1718,7 @@ mod tests {
             u32::MAX,
             16,
             0,
+            true,
         )
         .expect_err("overflowing noise positions must be rejected");
         assert!(position_error.to_string().contains("overflow"));
@@ -1669,6 +1752,7 @@ mod tests {
             1,    // ctx_len
             0,    // noise_start_pos
             2048, // swa_window
+            true,
         );
         enc.end();
         match res {

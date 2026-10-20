@@ -1142,6 +1142,7 @@ fn k0s_synthetic_head(ctx: &MetalContext) -> MetalDFlashHead {
             n_kv_heads: 1,
             head_dim: 1,
             rope_theta: 10_000.0,
+            causal: true,
             swa_window: 0,
             block_size: DFLASH_K0S_BLOCK_SIZE as u32,
             mask_token_id: 99,
@@ -2228,6 +2229,7 @@ fn memory_estimate_config() -> crate::loader::DFlashConfig {
         n_kv_heads: 2,
         head_dim: 4,
         rope_theta: 10_000.0,
+        causal: true,
         swa_window: 0,
         block_size: 4,
         mask_token_id: 0,
@@ -2664,21 +2666,33 @@ fn dflash_capture_window_span_and_complete_edges() {
 }
 
 #[test]
+fn dflash_swa_scan_uses_strict_distance_and_handles_gaps() {
+    let positions = [0, 6, 7, 8, 10, 12, 13];
+    assert_eq!(dflash_swa_ctx_scan_start(&positions, 7, 10, 3), 3);
+    assert_eq!(dflash_swa_ctx_scan_start(&positions, 7, 10, 1), 4);
+    assert_eq!(dflash_swa_ctx_scan_start(&positions, 7, 1, 3), 0);
+    assert_eq!(dflash_swa_ctx_scan_start(&positions, 7, 10, 0), 0);
+    assert_eq!(dflash_swa_ctx_scan_start(&[], 0, 10, 3), 0);
+    assert_eq!(dflash_swa_ctx_scan_start(&[8, 7], 2, 10, 3), 0);
+    assert_eq!(dflash_swa_ctx_scan_start(&[-1, 8], 2, 10, 3), 0);
+}
+
+#[test]
 fn dflash_swa_split4_scope_matches_measured_product_cell() {
     assert!(dflash_swa_split4_eligible(
-        true, 8, 32, 8, 128, 2048, 0, true, 2048, 16
+        true, 8, 32, 8, 128, 2047, 0, true, 2048, 16
     ));
     assert!(dflash_swa_split4_eligible(
-        true, 8, 32, 8, 128, 8853, 6805, true, 2048, 16
+        true, 8, 32, 8, 128, 8853, 6806, true, 2048, 16
     ));
     assert!(!dflash_swa_split4_eligible(
-        false, 8, 32, 8, 128, 8853, 6805, true, 2048, 16
+        false, 8, 32, 8, 128, 8853, 6806, true, 2048, 16
     ));
     assert!(!dflash_swa_split4_eligible(
-        true, 16, 32, 8, 128, 8853, 6805, true, 2048, 16
+        true, 16, 32, 8, 128, 8853, 6806, true, 2048, 16
     ));
     assert!(!dflash_swa_split4_eligible(
-        true, 8, 32, 8, 128, 2047, 0, true, 2048, 16
+        true, 8, 32, 8, 128, 2046, 0, true, 2048, 16
     ));
     assert!(!dflash_swa_split4_eligible(
         true, 8, 32, 8, 128, 8853, 0, true, 2048, 16
@@ -2687,20 +2701,20 @@ fn dflash_swa_split4_scope_matches_measured_product_cell() {
         true, 8, 32, 8, 128, 8853, 8837, true, 16, 16
     ));
     assert!(!dflash_swa_split4_eligible(
-        true, 8, 32, 8, 128, 8853, 6805, true, 2048, 0
+        true, 8, 32, 8, 128, 8853, 6806, true, 2048, 0
     ));
     assert!(!dflash_swa_split4_eligible(
-        true, 8, 24, 4, 256, 8853, 6805, true, 2048, 16
+        true, 8, 24, 4, 256, 8853, 6806, true, 2048, 16
     ));
     assert!(!dflash_swa_split4_eligible(
-        true, 8, 32, 8, 128, 8853, 6805, false, 2048, 16
+        true, 8, 32, 8, 128, 8853, 6806, false, 2048, 16
     ));
 
     let exact_positions: Vec<i32> = (0..8853).collect();
     assert!(dflash_swa_exact_visible_suffix(
         &exact_positions,
         8853,
-        6805,
+        6806,
         8853,
         2048,
     ));
@@ -2709,7 +2723,7 @@ fn dflash_swa_split4_scope_matches_measured_product_cell() {
     assert!(!dflash_swa_exact_visible_suffix(
         &gapped_positions,
         8853,
-        6805,
+        6806,
         8853,
         2048,
     ));

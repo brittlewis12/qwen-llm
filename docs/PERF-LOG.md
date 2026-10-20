@@ -6,6 +6,24 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the current state and evidence index.
 
+## 2026-10-20 - Unsloth V4.1: FFN-Dominated Prefill, GPU-Dominated Decode
+
+- Installed `10a57719`, default wired limit, NativeF32. Six canonical samples
+  per workload/quant in ABBA quant order: Q2_K_XL + Q6_K Engram averages 55.288
+  PP1024 and 21.532 TG32 at depth 2048; IQ3_XXS averages 53.259 and 21.048.
+  Capacities are 1024/2080, not long-context qualification or task quality.
+- Accepted warmed Q2 stage capture: FFN 86.26% of wall, attention 12.46%,
+  CPU encoding 0.56%; 0.136% profiling inflation, zero measured reads/page-ins,
+  bitwise endpoint parity. Stages are composite, not per-operator GPU costs.
+  Both original cold-instrumentation captures and the warmed IQ3 stage capture
+  fail their I/O gates and remain rejected; their percentages are not used.
+- Both fixed-input populated decode brackets pass: GPU command duration is
+  ~96.6% of wall, CPU encoding ~1.8%, profiling overhead ~0.1%, zero measured
+  reads/page-ins and all 32 outputs bitwise equal. No bandwidth-saturation claim.
+- Both artifacts have 30/40 routed layers falling back per token. Shared F32
+  grouped gate/up coverage is the next experiment, not yet a measured gain.
+  [Protocol, limits and retained evidence](bench/2026-10-20-v41-unsloth-bottlenecks.md).
+
 ## 2026-10-19 - V4.1 Query Batching: 1.80-1.87x Warm Prefill
 
 - An initial 10K run held promotion: candidate pp fell 183.83/171.69/165.66

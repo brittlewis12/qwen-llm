@@ -25,6 +25,11 @@ p = argparse.ArgumentParser()
 p.add_argument("--binary", required=True)
 p.add_argument("--model", required=True)
 p.add_argument("--drafter")
+p.add_argument(
+    "--durable-snapshot-dir",
+    default="off",
+    help="Keep probes out of production disk caches",
+)
 p.add_argument("--off-ctx")
 p.add_argument("--requests", type=Path, required=True)
 p.add_argument("--out", type=Path, required=True)
@@ -53,6 +58,8 @@ command = [
     "128",
     "--snapshot-cache-mib",
     "4096",
+    "--durable-snapshot-dir",
+    a.durable_snapshot_dir,
 ]
 if a.drafter:
     command += ["--drafter", a.drafter]

@@ -6,6 +6,29 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the current state and evidence index.
 
+## 2026-10-20 - DFlash2 Gameplay Replay: Keep Speculation Opt-In
+
+- Clean `0f6f4436`, M4 Max, normal lease and Metal validation. Saved-message
+  prefixes remain unchanged; sampled 256-token slices are timing/acceptance
+  evidence, not completed-turn quality. Historical terse/chaos ABBA controls
+  show A3B decode ratios 0.679x/0.745x and dense Q4 ratios 0.978x/1.022x.
+- Native House replay of the current Claude Flash-Next save, temperature 1.0 /
+  seed 42, confirms the result: A3B 72.52 -> 55.74 tok/s; dense 27B Q4 + Q8
+  drafter 21.06 -> 19.67. Both back off on low acceptance. Cold dense requests
+  are prefill-dominated; apparent wall-time parity is not a decode improvement.
+- Actual restored serving reuses 11,507/11,545 prompt tokens, with output replay
+  and disk snapshots disabled. A3B wall 3.738 -> 5.172 s; dense 12.903 -> 13.728 s.
+  Nonzero draft/verify/restore counters prove real speculation after reuse.
+  Two warm observations per arm; no precise production-speedup claim.
+- `4e98210d` extracts borrowed draft execution and geometry-only binding for
+  Flash-Next/GLM without enabling family flags. Artifact-local RMS epsilon now
+  reaches every CPU/Metal draft norm; GLM requires 1e-5, not Qwen's 1e-6.
+  CPU binding/API tests and a validated tiny Metal/CPU comparison pass.
+- User priority is Flash-Next and GLM-Flash, not Muse. Their target-owned
+  capture/all-row verification/checkpoint adapters are under implementation;
+  loading their released drafters alone is not execution support.
+  [Workloads, measurements, interpretation and limits](bench/2026-10-20-dflash-current-rollouts/README.md).
+
 ## 2026-10-20 - V4.1 Complete Native Rows And Practical Grouped Acceptance
 
 - `1388793d` versus grouped `a86fe231`, M5 Ultra, NativeF32, default wired limit:

@@ -154,6 +154,18 @@ fn compare_case(ctx: &MetalContext, c: &Config, schedule: &Schedule, start: usiz
                     .iter()
                     .any(|d| d.kernel == "kernel_deepseek_v41_attention_score")
             );
+            if c.heads == 64 && c.head_dim == 512 {
+                assert_eq!(
+                    census
+                        .iter()
+                        .filter(|d| d.kernel == "kernel_latent_grouped_f32_f32_m16n64k32")
+                        .count(),
+                    sink_spans(c, schedule.ratio(id), start, n)
+                        .iter()
+                        .filter(|&&(_, queries, matrix)| matrix && queries >= 8)
+                        .count()
+                );
+            }
             batched
                 .finish_rows(ctx, enc, &weights[id], &rows, &output)
                 .unwrap();
@@ -237,6 +249,25 @@ fn query_batch_normalized_inputs_awkward_rows_wrap_pair_phase_and_followers() {
         candidate_source_layer: Some(0),
     };
     compare_case(&ctx, &c, &nonuniform, 3, 129);
+}
+
+#[test]
+fn query_batch_f32_mma_ring_pair_followers_and_decode_continuation() {
+    let ctx = MetalContext::new().unwrap();
+    let c = Config {
+        heads: 64,
+        head_dim: 512,
+        index_topk: 512,
+        ..config()
+    };
+    let schedule = Schedule {
+        layers: 2,
+        kv_source_layers: vec![0],
+        index_source_layers: vec![0],
+        compression_ratios: vec![2, 2],
+        candidate_source_layer: None,
+    };
+    compare_case(&ctx, &c, &schedule, 257, 33);
 }
 
 #[test]
@@ -762,9 +793,28 @@ fn sink_case(
                     .map(|&(_, n, _)| n as u64)
                     .collect::<Vec<_>>()
             );
-            for dispatch in &grouped {
+            for (dispatch, &(_, queries, _)) in grouped.iter().zip(spans.iter().filter(|s| s.2)) {
                 assert!(dispatch.grid_depth <= TILE as u64);
-                assert_eq!(dispatch.grid_height, c.heads.div_ceil(4) as u64);
+                let mma = queries >= 8
+                    && c.head_dim.is_multiple_of(16)
+                    && c.heads >= 64
+                    && (c.head_dim / 16) * (c.heads / 64) * queries >= 256;
+                assert_eq!(
+                    dispatch.kernel,
+                    if mma {
+                        "kernel_latent_grouped_f32_f32_m16n64k32"
+                    } else {
+                        "kernel_latent_grouped_f32_f32"
+                    }
+                );
+                assert_eq!(
+                    (dispatch.grid_width, dispatch.grid_height),
+                    if mma {
+                        ((c.heads / 64) as u64, (c.head_dim / 16) as u64)
+                    } else {
+                        (c.head_dim.div_ceil(4) as u64, c.heads.div_ceil(4) as u64)
+                    }
+                );
             }
         });
         depths
@@ -882,7 +932,12 @@ fn query_batch_group_specific_pv_padding_canaries_and_sticky_errors() {
     c.heads = 64;
     c.head_dim = 512;
     c.index_topk = 512;
-    sink_case(&ctx, &c, 513, 33, 1);
+    for n in [1, 7, 8, 32, 33] {
+        sink_case(&ctx, &c, 513, n, 1);
+    }
+    // Inverse RoPE, moving raw window and pair visibility on the production MMA
+    // branch, followed by a one-query scalar tail. No tolerance changes.
+    sink_case(&ctx, &c, 257, 33, 2);
 }
 
 #[test]

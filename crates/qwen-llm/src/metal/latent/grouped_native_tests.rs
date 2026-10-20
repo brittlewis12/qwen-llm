@@ -246,21 +246,45 @@ fn exercise_scaled(
     })
     .unwrap();
     let census = dispatch_census_take();
-    let composed_tail = dtype == GgmlType::Q6_K && rows >= 128 && !rows.is_multiple_of(128);
+    let f32_mma = dtype == GgmlType::F32
+        && k >= 256
+        && k.is_multiple_of(32)
+        && m.is_multiple_of(16)
+        && groups >= 8
+        && rows >= 64
+        && (m / 16) * (rows / 64) * groups >= 256;
+    let tile = if f32_mma {
+        64
+    } else if dtype == GgmlType::Q6_K && rows >= 128 {
+        128
+    } else {
+        0
+    };
+    let composed_tail = tile > 0 && !rows.is_multiple_of(tile);
     assert_eq!(census.len(), if composed_tail { 2 } else { 1 });
-    assert_eq!(census[0].kernel, expected_pipeline(dtype, rows));
-    if dtype == GgmlType::Q6_K && rows >= 128 {
+    assert_eq!(
+        census[0].kernel,
+        if f32_mma {
+            GROUPED_F32_MMA_KERNEL.into()
+        } else {
+            expected_pipeline(dtype, rows)
+        }
+    );
+    if tile > 0 {
         assert_eq!(
             (
                 census[0].grid_width,
                 census[0].grid_height,
                 census[0].grid_depth
             ),
-            ((rows / 128) as u64, (m / 16) as u64, groups as u64)
+            ((rows / tile) as u64, (m / 16) as u64, groups as u64)
         );
         assert_eq!(census[0].tg_threads, 128);
         if composed_tail {
-            assert_eq!(census[1].kernel, "kernel_latent_grouped_q6_K_f32");
+            assert_eq!(
+                census[1].kernel,
+                grouped_projection_pipeline_name(dtype).unwrap()
+            );
             assert_eq!(
                 (
                     census[1].grid_width,
@@ -269,7 +293,7 @@ fn exercise_scaled(
                 ),
                 (
                     m.div_ceil(4) as u64,
-                    (rows % 128).div_ceil(4) as u64,
+                    (rows % tile).div_ceil(4) as u64,
                     groups as u64
                 ),
             );
@@ -336,7 +360,7 @@ fn exercise_scaled(
         assert_offset_guards(&y_last, 20, 28);
     }
     assert_offset_guards(&output, 20, suffix);
-    if dtype == GgmlType::Q6_K && rows >= 128 {
+    if tile > 0 {
         // Same binary, same native bytes and bindings: only the test-scoped
         // dispatch choice changes. Check the actual encoded pipeline too.
         dispatch_census_begin();
@@ -348,11 +372,14 @@ fn exercise_scaled(
         .unwrap();
         let census = dispatch_census_take();
         assert_eq!(census.len(), 1);
-        assert_eq!(census[0].kernel, "kernel_latent_grouped_q6_K_f32");
+        assert_eq!(
+            census[0].kernel,
+            grouped_projection_pipeline_name(dtype).unwrap()
+        );
         let baseline = tensor_f32_at_offset(&output);
         assert!(baseline.iter().all(|v| v.is_finite()));
         if composed_tail {
-            let start = (rows / 128 * 128) * m * groups;
+            let start = (rows / tile * tile) * m * groups;
             assert_eq!(
                 &actual[start..],
                 &baseline[start..],

@@ -124,3 +124,73 @@ kernel void kernel_latent_grouped_native_f32_r2c16k64(
 // Other native formats retain their existing scalar dispatches.
 typedef decltype(kernel_latent_grouped_native_f32_r2c16k64<QT_Q6_K_BYTES, QT_Q6_K_NL, latent_dequantize_q6_K>) latent_grouped_mma_t;
 template [[host_name("kernel_latent_grouped_q6_K_f32_r2c16k64")]] kernel latent_grouped_mma_t kernel_latent_grouped_native_f32_r2c16k64<QT_Q6_K_BYTES, QT_Q6_K_NL, latent_dequantize_q6_K>;
+
+// Uncompressed F32 operands need no decode staging. Complete 16-output by
+// 64-row tiles load both operands directly; K32 partials retain F32 precision
+// and cover every K alignment admitted by the shared grouped interface.
+[[max_total_threads_per_threadgroup(128)]]
+kernel void kernel_latent_grouped_f32_f32_m16n64k32(
+        constant latent_grouped_mma_args & args [[buffer(0)]],
+        device const float * weights [[buffer(1)]],
+        device const float * input [[buffer(2)]],
+        device float * output [[buffer(3)]],
+        uint3 tile [[threadgroup_position_in_grid]],
+        ushort simd [[simdgroup_index_in_threadgroup]]) {
+    const uint group = tile.z;
+    if (group >= args.groups) return;
+    const uint m0 = tile.y * 16u;
+    const uint n0 = tile.x * 64u + uint(simd) * 16u;
+    device const float * group_weights = weights + ulong(group) * args.m * args.k;
+
+    simdgroup_float8x8 acc[2][2];
+    QT_FOR_UNROLL (short mt = 0; mt < 2; ++mt) {
+        QT_FOR_UNROLL (short nt = 0; nt < 2; ++nt) {
+            acc[mt][nt] = make_filled_simdgroup_matrix<float, 8>(0.0f);
+        }
+    }
+    for (uint k0 = 0; k0 < args.k; k0 += 32u) {
+        simdgroup_float8x8 partial[2][2];
+        QT_FOR_UNROLL (short mt = 0; mt < 2; ++mt) {
+            QT_FOR_UNROLL (short nt = 0; nt < 2; ++nt) {
+                partial[mt][nt] = make_filled_simdgroup_matrix<float, 8>(0.0f);
+            }
+        }
+        QT_FOR_UNROLL (short kt = 0; kt < 4; ++kt) {
+            simdgroup_float8x8 activation[2];
+            QT_FOR_UNROLL (short nt = 0; nt < 2; ++nt) {
+                simdgroup_load(
+                    activation[nt],
+                    input + ulong(n0 + uint(nt) * 8u) * args.input_stride
+                        + ulong(group) * args.k + k0 + uint(kt) * 8u,
+                    args.input_stride, ulong2(0, 0), true);
+            }
+            QT_FOR_UNROLL (short mt = 0; mt < 2; ++mt) {
+                simdgroup_float8x8 weight;
+                simdgroup_load(
+                    weight,
+                    group_weights + ulong(m0 + uint(mt) * 8u) * args.k
+                        + k0 + uint(kt) * 8u,
+                    args.k);
+                QT_FOR_UNROLL (short nt = 0; nt < 2; ++nt) {
+                    simdgroup_multiply_accumulate(partial[mt][nt], weight, activation[nt], partial[mt][nt]);
+                }
+            }
+        }
+        QT_FOR_UNROLL (short mt = 0; mt < 2; ++mt) {
+            QT_FOR_UNROLL (short nt = 0; nt < 2; ++nt) {
+                QT_FOR_UNROLL (short element = 0; element < 2; ++element) {
+                    acc[mt][nt].thread_elements()[element] += partial[mt][nt].thread_elements()[element];
+                }
+            }
+        }
+    }
+    QT_FOR_UNROLL (short mt = 0; mt < 2; ++mt) {
+        QT_FOR_UNROLL (short nt = 0; nt < 2; ++nt) {
+            simdgroup_store(
+                acc[mt][nt],
+                output + ulong(n0 + uint(nt) * 8u) * args.output_stride
+                    + ulong(group) * args.m + m0 + uint(mt) * 8u,
+                args.output_stride, ulong2(0, 0), true);
+        }
+    }
+}

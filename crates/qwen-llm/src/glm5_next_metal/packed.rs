@@ -1195,7 +1195,7 @@ fn latent_mma_allowed(arith: Arith) -> bool {
 /// Per-head latent absorption or expansion over `rows` token-major rows:
 /// Q8 retains its existing tiles in Fast and per-row GEMV in Exact. Other
 /// native dtypes use grouped F32-operand dispatch in both lineages, with no
-/// activation rounding, repacking, or expanded weight bank. Q6 MMA is allowed
+/// activation rounding, repacking, or expanded weight bank. Q6/F32 MMA is allowed
 /// in Fast Half/F32; DenseF32 and Exact retain scalar arithmetic.
 #[allow(clippy::too_many_arguments)]
 fn absorb_rows(

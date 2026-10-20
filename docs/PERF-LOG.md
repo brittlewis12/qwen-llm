@@ -6,6 +6,22 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the current state and evidence index.
 
+## 2026-10-20 - V4.1 Grouped MMA: Full-Model Numerical Rejection
+
+- Identical private replay on common `abefb0af`: baseline `1cfb311e` versus
+  candidate `6d981291` (uninstrumented candidate `f1708acd`), NativeF32,
+  default wired limit, validated M5 execution under the production lease.
+- Both artifacts pass 22-case capture/observer checks and five-layer real-bank
+  frozen replay. Native replay remains bitwise equal to saved baseline native
+  outputs; grouped-stage error bounds pass, but grouped outputs are not bitwise.
+- Live full-model comparisons reject both quants: Q2 fails 4/98 logit files,
+  maximum absolute error 0.00727; IQ3 fails 13/98, maximum 0.00162, versus 0.001.
+  Selected expert IDs diverge in four/three cases. Frozen passes do not override
+  this result; no timing campaign, installation, or relaxed bounds follow.
+- Next: bounded router-margin diagnosis and order-preserving native GEMV
+  batching, not a new precision mode or IQ2_XS/IQ2_XXS batching expansion.
+  [Protocol, failures and retained evidence](bench/2026-10-20-v41-grouped-native-f32-rejection.md).
+
 ## 2026-10-20 - Unsloth V4.1: FFN-Dominated Prefill, GPU-Dominated Decode
 
 - Installed `10a57719`, default wired limit, NativeF32. Six canonical samples

@@ -125,6 +125,26 @@ fn owner_sink_includes_control_allowance_exactly_once() {
             )
             .is_err()
         );
+        let scratch = 1024;
+        let safety = 512;
+        let signals = qwen_llm::metal::MetalMemorySignals {
+            recommended_max_bytes: scratch + safety,
+            current_allocated_bytes: 0,
+            process_limit_remaining_bytes: Some(scratch + safety + expected),
+        };
+        let admit = |cpu| {
+            qwen_llm::metal::evaluate_metal_memory_admission_with_cpu_bytes(
+                scratch, cpu, safety, signals, true,
+            )
+        };
+        assert!(admit(sink.transport_reserve_bytes()).refusal().is_none());
+        if extra_cpu_reserve > 0 {
+            assert!(
+                admit(sink.transport_reserve_bytes() + extra_cpu_reserve)
+                    .refusal()
+                    .is_some()
+            );
+        }
     }
 }
 

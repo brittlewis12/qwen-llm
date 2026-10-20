@@ -1,4 +1,4 @@
-//! GLM-5.3-Flash: bounded serial generation up to the checkpoint context
+//! GLM-5.3-Flash: bounded serial or DFlash generation up to the checkpoint context
 //! (dense attention below visible length 2052, sparse DSA selection from
 //! there on) within device memory, from a raw prompt or a text chat
 //! rendered by `qwen_llm::glm5_next_chat`, with or without declared tools.
@@ -21,6 +21,9 @@ use qwen_llm::glm5_next_metal::{
     prefetch_retained_with_cancel, preflight_session,
 };
 use serde_json::{Value, json};
+
+#[path = "glm5_next/dflash.rs"]
+mod dflash;
 
 const FAMILY: &str = "GLM-5.3-Flash";
 
@@ -405,10 +408,26 @@ fn preflight(
     prompt_tokens: usize,
     capacity: usize,
     prefill_rows: usize,
+    drafter_request_bytes: u64,
 ) -> Result<()> {
     match preflight_session(ctx, gguf, prepared.model(), capacity, prefill_rows) {
-        Ok(_) => Ok(()),
+        Ok(plan) => {
+            if drafter_request_bytes > 0 {
+                dflash::admit_bytes(
+                    ctx,
+                    dflash::aggregate_bytes(&[plan.ledger.peak_bytes(), drafter_request_bytes])?,
+                    0,
+                    "GLM target and DFlash request scratch",
+                )?;
+            }
+            Ok(())
+        }
         Err(error @ Glm5NextMetalError::MemoryAdmission { advice, .. }) => {
+            if drafter_request_bytes > 0 {
+                return Err(error).context(format!(
+                    "admit GLM target: any target-only capacity advice excludes {drafter_request_bytes} bytes of DFlash request scratch; the aggregate must also fit"
+                ));
+            }
             let required = required_forwards(FAMILY, prompt_tokens, args.tokens, None)?;
             Err(error).context(format!(
                 "admit GLM-5.3 session: {}",
@@ -442,6 +461,22 @@ pub(crate) fn run(
     })?;
     let stops = prepared.generation_stops()?;
     let vocab_size = prepared.config().vocab_size;
+    let drafter = timing.measure(Phase::ArtifactVerification, || {
+        drafter_policy::PreparedDrafter::prepare_for_target(
+            args.drafter.as_deref(),
+            qwen_llm::loader::DFlashTargetShape {
+                hidden_size: prepared.config().hidden_size,
+                vocab_size,
+                n_layer: prepared.config().executed_block_count(),
+            },
+            Some(ModelFamily::Glm5Next),
+            drafter_policy::Lane::CliSingleTurn,
+        )
+    })?;
+    ensure!(
+        drafter.is_none() || prepared.packed_prefill(),
+        "{FAMILY} --drafter requires packed target execution for these weight types"
+    );
     let mut tools: Vec<chat::ToolDefinition> = Vec::new();
     let mut chat_effort = None;
     let mut format = crate::chat_output::RunFormat::Text;
@@ -523,7 +558,34 @@ pub(crate) fn run(
     let ctx = timing.measure(Phase::DeviceSetup, || {
         MetalContext::new().context("initialize Metal for GLM-5.3")
     })?;
+    // Head-first loading makes ordinary target admission see the resident head.
+    let head = timing.measure(Phase::ModelLoad, || {
+        drafter
+            .as_ref()
+            .map(|drafter| dflash::load_head(&ctx, drafter, sampling))
+            .transpose()
+    })?;
+    drop(drafter);
+    let prefill_rows = match &head {
+        Some(head) => dflash::packed_rows(prefill_rows, capacity, head.config.block_size as usize)?,
+        None => prefill_rows,
+    };
     timing.measure(Phase::MemoryPreflight, || {
+        let request_bytes = head
+            .as_ref()
+            .map(|head| {
+                dflash::request_bytes(
+                    &ctx,
+                    prepared.config(),
+                    head,
+                    tokens.len(),
+                    args.tokens,
+                    capacity,
+                    prefill_rows,
+                )
+            })
+            .transpose()?
+            .unwrap_or(0);
         preflight(
             &ctx,
             gguf,
@@ -532,6 +594,7 @@ pub(crate) fn run(
             tokens.len(),
             capacity,
             prefill_rows,
+            request_bytes,
         )
     })?;
     // Warm cold retained windows with parallel reads before the zero-copy
@@ -556,11 +619,6 @@ pub(crate) fn run(
             .context("create GLM-5.3 session")
     })?;
 
-    let resident_t0 = Instant::now();
-    let logits = session.prefill_packed_with_checkpoint(&ctx, &tokens, &mut || {
-        shutdown::checkpoint().map_err(|e| e.to_string())
-    })?;
-    let prefill_ms = resident_t0.elapsed().as_secs_f64() * 1e3;
     let stdout = std::io::stdout();
     let mut stdout = stdout.lock();
     // Chat prints the decoded bytes (text) or one Responses object; raw
@@ -592,30 +650,59 @@ pub(crate) fn run(
         })
         .transpose()?;
     let mut wrote = false;
-    let generation = generate_serial(
-        logits,
-        args.tokens,
-        &stops,
-        &mut sampler,
-        |token| {
-            let bytes = prepared.tokenizer().try_decode_piece_bytes_exact(token)?;
-            match &mut output {
-                Some(output) => output.piece(bytes, &mut stdout)?,
-                None => {
-                    stdout.write_all(bytes)?;
-                    stdout.flush()?;
-                    wrote |= !bytes.is_empty();
-                }
+    let on_token = |token| {
+        let bytes = prepared.tokenizer().try_decode_piece_bytes_exact(token)?;
+        match &mut output {
+            Some(output) => output.piece(bytes, &mut stdout)?,
+            None => {
+                stdout.write_all(bytes)?;
+                stdout.flush()?;
+                wrote |= !bytes.is_empty();
             }
-            Ok(())
-        },
-        |token| {
-            shutdown::checkpoint()?;
-            let token = checked_token_id(token, vocab_size, "generated")?;
-            session.forward(&ctx, token).map_err(anyhow::Error::from)
-        },
-    );
-    let generation = match generation {
+        }
+        Ok(())
+    };
+    let generation = if let Some(head) = &head {
+        let mut runner = timing.measure(Phase::SessionSetup, || {
+            dflash::runner(
+                &ctx,
+                &mut session,
+                head,
+                tokens.len(),
+                args.tokens,
+                &stops,
+                sampler,
+            )
+        })?;
+        let resident_t0 = Instant::now();
+        let result = dflash::generate(&mut runner, &tokens, args.tokens, on_token);
+        timing.record(Phase::ResidentExecution, resident_t0.elapsed());
+        result
+    } else {
+        let resident_t0 = Instant::now();
+        let result = (|| {
+            let logits = session.prefill_packed_with_checkpoint(&ctx, &tokens, &mut || {
+                shutdown::checkpoint().map_err(|e| e.to_string())
+            })?;
+            let prefill_ms = resident_t0.elapsed().as_secs_f64() * 1e3;
+            let generation = generate_serial(
+                logits,
+                args.tokens,
+                &stops,
+                &mut sampler,
+                on_token,
+                |token| {
+                    shutdown::checkpoint()?;
+                    let token = checked_token_id(token, vocab_size, "generated")?;
+                    session.forward(&ctx, token).map_err(anyhow::Error::from)
+                },
+            )?;
+            Ok((generation, prefill_ms))
+        })();
+        timing.record(Phase::ResidentExecution, resident_t0.elapsed());
+        result
+    };
+    let (generation, prefill_ms) = match generation {
         Ok(generation) => generation,
         Err(error) => {
             // Leave the terminal on a fresh line; the original error stands.
@@ -630,7 +717,6 @@ pub(crate) fn run(
             return Err(error);
         }
     };
-    timing.record(Phase::ResidentExecution, resident_t0.elapsed());
     let report = timing.finish(lane_t0.elapsed());
     match output {
         Some(output) => {
@@ -688,7 +774,9 @@ pub(crate) fn run(
         None => {}
     }
 
-    let prefill_mode = if prefill_rows > 0 {
+    let prefill_mode = if head.is_some() {
+        "dflash_capture"
+    } else if prefill_rows > 0 {
         "packed_fast"
     } else {
         "serial"

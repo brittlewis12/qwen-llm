@@ -51,6 +51,7 @@ use std::sync::Arc;
 use std::time::Instant;
 
 mod chunk_checkpoint;
+mod dflash;
 mod prefill_plan;
 
 /// Default-on rollback lever for live-session and snapshot reuse.
@@ -127,6 +128,7 @@ pub(super) struct Prepared<'g> {
     max_piece_bytes: usize,
     /// Operand precision of every Fast session ([`FAST_PRECISION_ENV`]).
     fast_precision: FastPrecision,
+    drafter: Option<crate::drafter_policy::PreparedDrafter>,
 }
 
 impl<'g> Prepared<'g> {
@@ -157,6 +159,20 @@ impl<'g> Prepared<'g> {
         let max_piece_bytes = artifact.tokenizer().max_decoded_piece_bytes();
         let fast_precision =
             parse_fast_precision(std::env::var(FAST_PRECISION_ENV).ok().as_deref())?;
+        let drafter = crate::drafter_policy::PreparedDrafter::prepare_for_target(
+            invocation.drafter.as_deref(),
+            qwen_llm::loader::DFlashTargetShape {
+                hidden_size: artifact.config().hidden_size,
+                vocab_size: artifact.config().vocab_size,
+                n_layer: artifact.config().executed_block_count(),
+            },
+            Some(ModelFamily::Glm5Next),
+            crate::drafter_policy::Lane::Serve,
+        )?;
+        anyhow::ensure!(
+            drafter.is_none() || artifact.packed_prefill(),
+            "{FAMILY} --drafter requires packed target execution"
+        );
         crate::shutdown::checkpoint()?;
         Ok(Self {
             artifact,
@@ -166,6 +182,7 @@ impl<'g> Prepared<'g> {
             profile,
             max_piece_bytes,
             fast_precision,
+            drafter,
         })
     }
 
@@ -243,6 +260,13 @@ pub(super) fn start(
     crate::shutdown::checkpoint()?;
     let ctx = MetalContext::new()?;
     let started = std::time::Instant::now();
+    // Load the retained, CPU-validated head first so ordinary target admission
+    // sees its resident allocation. Never reopen the invocation's path here.
+    let drafter = prepared
+        .drafter
+        .as_ref()
+        .map(|head| dflash::load_head(&ctx, head))
+        .transpose()?;
     let weights = load(&ctx, gguf, &prepared)?;
     let load_ms = started.elapsed().as_secs_f64() * 1e3;
     let snapshot_cache_plan = super::SnapshotCachePlan::resolve(
@@ -259,6 +283,7 @@ pub(super) fn start(
         idle_window,
         snapshot_cache_plan,
     );
+    backend.drafter = drafter;
     tracing::info!(target: "qwen_diag", "serve limits: {limits} {}", backend.describe_snapshots());
     let warm_up_ms = backend.warm_up()?;
     tracing::info!(target: "qwen_diag", "serve startup: family=glm5_next load_ms={load_ms:.1} warm_up_ms={warm_up_ms:.1}");
@@ -271,6 +296,7 @@ pub(super) struct Glm5NextBackend<'w, 'g> {
     prepared: Prepared<'g>,
     model_id: String,
     session: Option<Glm5NextSession<'w>>,
+    drafter: Option<qwen_llm::metal_dflash::MetalDFlashHead>,
     /// Exactly the tokens `session` has consumed, or empty when unknown.
     history: Vec<u32>,
     prefix_reuse: bool,
@@ -615,6 +641,7 @@ impl<'w, 'g> Glm5NextBackend<'w, 'g> {
             prepared,
             model_id,
             session: None,
+            drafter: None,
             history: Vec::new(),
             prefix_reuse: qwen_llm::env_flag::read_default_on(PREFIX_REUSE_ENV),
             idle_residency: super::idle_residency::IdleResidency::new("glm5_next", idle_residency),
@@ -679,6 +706,12 @@ impl<'w, 'g> Glm5NextBackend<'w, 'g> {
     /// The `serve limits` fragment for snapshots: the schedules that run
     /// (none without a cache budget).
     pub(super) fn describe_snapshots(&self) -> String {
+        if self.drafter.is_some() {
+            return format!(
+                "{} snapshot_schedules=none dflash_mode=cold_prefill prefix_reuse=disabled",
+                self.snapshot_cache_plan
+            );
+        }
         let schedules = match (self.cache.max_bytes() > 0, self.fast_snapshots) {
             (false, _) => "none",
             (true, true) => "exact,fast_shared_split",
@@ -777,6 +810,9 @@ impl<'w, 'g> Glm5NextBackend<'w, 'g> {
             maximum,
             self.prepared.capacity,
         )?;
+        if self.prepared.drafter.is_some() || self.drafter.is_some() {
+            return self.generate_dflash(request, &tokens, maximum, sampler, sink);
+        }
         // A tool block's memory is admitted as it grows (the tools partition),
         // not reserved here at its rarely approached worst case.
         let reserve = sink.transport_reserve_bytes();

@@ -6,6 +6,7 @@ use serde_json::{Value, json};
 
 mod chunk_checkpoint_ab;
 mod chunk_checkpoint_cancel;
+mod dflash_smoke;
 
 #[test]
 #[ignore = "GLM53_GGUF leased session-recreation cost screen; MTL_DEBUG_LAYER=1"]

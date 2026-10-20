@@ -1,5 +1,91 @@
 use super::*;
 
+#[test]
+fn native_rows_v41_composition_rejects_oversized_metadata_without_gpu() {
+    for (name, hidden, intermediate, experts, topk, rows) in [
+        ("router", 5120, 2304, 1 << 24, 6, 256),
+        ("IDs/weights", 1, 1, 16, 16, 1 << 28),
+        ("weighted activation", 5120, 1 << 20, 384, 16, 256),
+        ("down slots", 1 << 20, 2304, 384, 16, 256),
+        ("HC streams", 1 << 20, 2304, 384, 1, 1024),
+        ("HC mixes", 1, 1, 1, 1, u32::MAX as usize / 24 + 1),
+        ("IDs/weights", 1, 1, 16, 16, usize::MAX),
+    ] {
+        let c = Config {
+            hidden,
+            intermediate,
+            experts,
+            topk,
+            ..Config::default()
+        };
+        // These pass the existing individual-dimension limits. Only the composed
+        // row spans overflow; no model, tensor allocation or Metal context is used.
+        validate(&c).unwrap();
+        match composition_extents(&c, rows).unwrap_err() {
+            metal::MetalError::BadShape { kernel, detail } => {
+                assert_eq!(kernel, "v41_ffn_composition");
+                assert_eq!(detail, format!("{name} extent exceeds host/GPU domains"));
+            }
+            other => panic!("unexpected error: {other}"),
+        }
+    }
+    assert!(composition_extents(&Config::default(), 0).is_err());
+    for (hidden, intermediate, experts, topk) in [
+        (0, 2304, 384, 6),
+        (5120, 0, 384, 6),
+        (5120, 2304, 0, 6),
+        (5120, 2304, 384, 0),
+        (usize::MAX, 2304, 384, 6),
+        (5120, usize::MAX, 384, 6),
+        (5120, 2304, usize::MAX, 6),
+        (5120, 2304, 384, usize::MAX),
+    ] {
+        let c = Config {
+            hidden,
+            intermediate,
+            experts,
+            topk,
+            ..Config::default()
+        };
+        assert!(composition_extents(&c, 1).is_err());
+    }
+}
+
+#[test]
+fn native_rows_v41_composition_accepts_actual_geometry_and_u32_boundaries() {
+    let c = Config::default();
+    for rows in [1, 31, 32, 33, 127, 128, 129, 255, 256, 257] {
+        let extents = composition_extents(&c, rows).unwrap();
+        assert_eq!(extents.slots as usize, 6 * rows);
+        assert_eq!(extents.weighted as usize, 2304 * 6 * rows);
+        assert_eq!(extents.output as usize, 5120 * rows);
+    }
+    let extents = composition_extents(&c, 256).unwrap();
+    assert_eq!(extents.weighted.div_ceil(256), 13_824);
+    assert_eq!(extents.output.div_ceil(256), 5120);
+
+    let mut c = Config {
+        topk: 16,
+        intermediate: u32::MAX as usize / (16 * 256),
+        ..Config::default()
+    };
+    assert_eq!(composition_extents(&c, 256).unwrap().weighted, 0xfffff000);
+    c.intermediate += 1;
+    assert!(composition_extents(&c, 256).is_err());
+    c.intermediate = 2304;
+    c.hidden = u32::MAX as usize / (16 * 256);
+    composition_extents(&c, 256).unwrap();
+    c.hidden += 1;
+    assert!(composition_extents(&c, 256).is_err());
+
+    c.hidden = 5120;
+    c.experts = u32::MAX as usize / 255;
+    assert_eq!(c.experts * 255, u32::MAX as usize);
+    composition_extents(&c, 255).unwrap();
+    c.experts += 1;
+    assert!(composition_extents(&c, 255).is_err());
+}
+
 fn bank(ctx: &MetalContext, dtype: GgmlType, h: usize, e: usize, seed: usize) -> MetalTensor {
     let (block, size) = dtype.storage_layout().unwrap();
     let mut bytes = Vec::new();

@@ -74,6 +74,49 @@ fn validate(c: &Config) -> Result<()> {
     Ok(())
 }
 
+#[derive(Debug)]
+struct CompositionExtents {
+    slots: u32,
+    weighted: u32,
+    output: u32,
+}
+
+fn composition_extents(
+    c: &Config,
+    rows: usize,
+) -> std::result::Result<CompositionExtents, metal::MetalError> {
+    let bad = |detail| metal::MetalError::BadShape {
+        kernel: "v41_ffn_composition",
+        detail,
+    };
+    validate(c).map_err(bad)?;
+    if rows == 0 {
+        return Err(bad("nonempty rows required".into()));
+    }
+    // The native GEMV uses ulong offsets, but route/weight/sum and HC use uint.
+    // Validate the entire composition before encoding, not just each projection.
+    let extent = |name, factors: &[usize]| {
+        factors
+            .iter()
+            .try_fold(1usize, |n, &factor| n.checked_mul(factor))
+            .filter(|n| n.checked_mul(4).is_some())
+            .and_then(|n| u32::try_from(n).ok())
+            .ok_or_else(|| bad(format!("{name} extent exceeds host/GPU domains")))
+    };
+    let slots = extent("IDs/weights", &[rows, c.topk])?;
+    extent("router", &[rows, c.experts])?;
+    let weighted = extent("weighted activation", &[rows, c.topk, c.intermediate])?;
+    extent("down slots", &[rows, c.topk, c.hidden])?;
+    let output = extent("output", &[rows, c.hidden])?;
+    extent("HC streams", &[rows, 4, c.hidden])?;
+    extent("HC mixes", &[rows, 24])?;
+    Ok(CompositionExtents {
+        slots,
+        weighted,
+        output,
+    })
+}
+
 // Includes per-buffer page slack, constants retained for the loaded layers, and
 // host-side tensor descriptors. Dense resident weights are not counted twice.
 pub(super) fn bytes_for_layers(c: &Config, layers: usize) -> Result<u64> {
@@ -300,6 +343,7 @@ impl Workspace {
         pre: &MetalTensor,
         output: &MetalTensor,
     ) -> std::result::Result<(), metal::MetalError> {
+        composition_extents(c, 1)?;
         let b = &self.buffers;
         let constants = &self.constants[id];
         layer.ffn_hc.projection.encode(enc, x, &b[2])?;
@@ -365,6 +409,7 @@ impl Workspace {
         output: &MetalTensor,
         status: &MetalTensor,
     ) -> std::result::Result<(), metal::MetalError> {
+        let extents = composition_extents(c, 1)?;
         let b = &self.buffers;
         encode_route_rows(ctx, enc, c, 1, logits, bias, &b[9], &b[10], &b[11], status)?;
         metal::encode_all_slots_gate_up_swiglu_native(
@@ -383,13 +428,13 @@ impl Workspace {
             c.clamp,
         )?;
         enc.set_pipeline(&ctx.pipeline("kernel_deepseek_v41_weight")?);
-        enc.set_bytes(0, &((c.intermediate * c.topk) as u32));
+        enc.set_bytes(0, &extents.weighted);
         enc.set_bytes(1, &(c.intermediate as u32));
         for (slot, tensor) in [&b[13], &b[11], &b[14], status].iter().enumerate() {
             enc.set_tensor(slot + 2, tensor);
         }
         enc.set_bytes(6, &(c.topk as u32));
-        dispatch(enc, c.intermediate * c.topk, 256);
+        dispatch(enc, extents.weighted as usize, 256);
         metal::encode_all_slots_down_native(
             ctx,
             enc,
@@ -410,7 +455,7 @@ impl Workspace {
             enc.set_tensor(slot + 2, tensor);
         }
         enc.set_bytes(6, &1u32);
-        dispatch(enc, c.hidden, 256);
+        dispatch(enc, extents.output as usize, 256);
         Ok(())
     }
 
@@ -427,6 +472,7 @@ impl Workspace {
         scratch: &Rows,
     ) -> std::result::Result<(), metal::MetalError> {
         let n = scratch.hc.rows;
+        composition_extents(c, n)?;
         let b = &scratch.buffers;
         scratch.hc.encode(
             ctx,
@@ -494,6 +540,7 @@ impl Workspace {
         scratch: &Rows,
     ) -> std::result::Result<(), metal::MetalError> {
         let n = scratch.hc.rows;
+        let extents = composition_extents(c, n)?;
         let b = &scratch.buffers;
         let status = b[6].view_subrange((id * n) as u64, vec![n as u64]);
         let counts = b[10].view_subrange(0, vec![c.experts as u64]);
@@ -539,7 +586,7 @@ impl Workspace {
                 &scratch.hc.normalized,
                 &b[8],
                 &status,
-                &b[12].view_subrange(0, vec![c.intermediate as u64, (c.topk * n) as u64]),
+                &b[12].view_subrange(0, vec![c.intermediate as u64, extents.slots as u64]),
                 c.hidden,
                 c.intermediate,
                 c.experts,
@@ -549,13 +596,13 @@ impl Workspace {
             )?;
         }
         enc.set_pipeline(&ctx.pipeline("kernel_deepseek_v41_weight")?);
-        enc.set_bytes(0, &((c.intermediate * c.topk * n) as u32));
+        enc.set_bytes(0, &extents.weighted);
         enc.set_bytes(1, &(c.intermediate as u32));
         for (slot, tensor) in [&b[12], &b[9], &b[13], &status].iter().enumerate() {
             enc.set_tensor(slot + 2, tensor);
         }
         enc.set_bytes(6, &(c.topk as u32));
-        dispatch(enc, c.intermediate * c.topk * n, 256);
+        dispatch(enc, extents.weighted as usize, 256);
         if grouped {
             metal::encode_moe_down_f32x_grouped_slots(
                 ctx,
@@ -575,10 +622,10 @@ impl Workspace {
                 ctx,
                 enc,
                 layer.banks[2],
-                &b[13].view_subrange(0, vec![c.intermediate as u64, (c.topk * n) as u64]),
+                &b[13].view_subrange(0, vec![c.intermediate as u64, extents.slots as u64]),
                 &b[8],
                 &status,
-                &b[14].view_subrange(0, vec![c.hidden as u64, (c.topk * n) as u64]),
+                &b[14].view_subrange(0, vec![c.hidden as u64, extents.slots as u64]),
                 c.intermediate,
                 c.hidden,
                 c.experts,
@@ -593,7 +640,7 @@ impl Workspace {
             enc.set_tensor(slot + 2, tensor);
         }
         enc.set_bytes(6, &(n as u32));
-        dispatch(enc, c.hidden * n, 256);
+        dispatch(enc, extents.output as usize, 256);
         Ok(())
     }
 }
@@ -666,6 +713,7 @@ impl Rows {
         widths
     }
     pub(super) fn new(ctx: &MetalContext, c: &Config, rows: usize, layers: usize) -> Result<Self> {
+        composition_extents(c, rows).map_err(|e| e.to_string())?;
         let hc = prefill::HcRows::new(ctx, c, rows)?;
         let buffers = [
             c.experts,

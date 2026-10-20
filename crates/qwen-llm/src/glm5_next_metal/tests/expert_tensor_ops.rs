@@ -169,7 +169,9 @@ fn tensor_call(
 #[test]
 #[ignore = "release, leased GPU; Maya IQ2_S and new GLM53_STAGE_OUT JSON path"]
 fn maya_iq2_s_glm_shaped_expert_tensor_ab() {
-    assert!(!cfg!(debug_assertions), "requires release test binary");
+    if cfg!(debug_assertions) {
+        panic!("requires release test binary");
+    }
     let _lease = perf_lease();
     let model_path = std::env::var_os("GLM53_GGUF").expect("GLM53_GGUF must name Maya");
     let output_path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))

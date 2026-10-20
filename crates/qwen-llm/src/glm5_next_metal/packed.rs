@@ -2642,7 +2642,9 @@ mod absorb_tail_policy_tests {
         };
         let (k, m, groups) = (64usize, 16usize, 2usize);
         let mut bytes = vec![0u8; k / 32 * 34 * m * groups];
-        for (i, block) in bytes.chunks_exact_mut(34).enumerate() {
+        let (blocks, remainder) = bytes.as_chunks_mut::<34>();
+        assert!(remainder.is_empty());
+        for (i, block) in blocks.iter_mut().enumerate() {
             block[..2].copy_from_slice(&half::f16::from_f32(0.007).to_bits().to_le_bytes());
             for (j, q) in block[2..].iter_mut().enumerate() {
                 *q = (((i * 13 + j * 7) % 63) as i8 - 31) as u8;

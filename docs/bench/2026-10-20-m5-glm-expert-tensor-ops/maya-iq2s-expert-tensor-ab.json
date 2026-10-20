@@ -25,23 +25,23 @@
       "input": "same deterministic F32 rows, cast to F16 by each kernel",
       "production_kernel": "kernel_moe_swiglu_clamped_iq2_s_f32_grouped_slots_generic plus n32 split at M>=17",
       "production_ms": [
-        0.654709,
-        0.840792,
-        0.7511249999999999,
-        0.828042,
-        0.737542
+        0.727958,
+        0.7545419999999999,
+        0.858084,
+        0.737584,
+        0.792458
       ],
-      "production_mean_ms": 0.762442,
-      "production_tflops": 0.44009160041026074,
+      "production_mean_ms": 0.7741252,
+      "production_tflops": 0.43344967971589093,
       "tensor_ops_ms": [
-        0.68,
-        0.537417,
-        0.544375,
-        0.528458,
-        0.5533750000000001
+        0.532208,
+        0.611042,
+        0.561834,
+        0.645042,
+        0.472166
       ],
-      "tensor_ops_mean_ms": 0.568725,
-      "tensor_ops_tflops": 0.5899939689656688,
+      "tensor_ops_mean_ms": 0.5644584,
+      "tensor_ops_tflops": 0.5944535859507095,
       "max_abs": 0.00000166893,
       "relative_rms": 1.0130911551546867e-6
     },
@@ -52,23 +52,23 @@
       "input": "same deterministic F32 rows, cast to F16 by each kernel",
       "production_kernel": "kernel_moe_swiglu_clamped_iq2_s_f32_grouped_slots_generic plus n32 split at M>=17",
       "production_ms": [
-        0.983208,
-        0.9022910000000001,
-        0.8885,
-        0.860667,
-        0.90525
+        1.240833,
+        1.214041,
+        1.142458,
+        1.485875,
+        1.1564590000000001
       ],
-      "production_mean_ms": 0.9079832,
-      "production_tflops": 1.4412412564461545,
+      "production_mean_ms": 1.2479331999999999,
+      "production_tflops": 1.0486321287068894,
       "tensor_ops_ms": [
-        0.9890000000000001,
-        0.977375,
-        0.9977919999999999,
-        0.983792,
-        0.976584
+        1.358292,
+        1.403958,
+        1.365167,
+        1.3610829999999998,
+        1.326334
       ],
-      "tensor_ops_mean_ms": 0.9849086,
-      "tensor_ops_tflops": 1.328674404914324,
+      "tensor_ops_mean_ms": 1.3629668,
+      "tensor_ops_tflops": 0.9601281909434625,
       "max_abs": 0.000002861023,
       "relative_rms": 1.0020948369290668e-6
     },
@@ -79,23 +79,23 @@
       "input": "same deterministic F32 rows, cast to F16 by each kernel",
       "production_kernel": "kernel_moe_swiglu_clamped_iq2_s_f32_grouped_slots_generic plus n32 split at M>=17",
       "production_ms": [
-        1.4176250000000001,
-        1.440042,
-        1.528,
-        1.169875,
-        1.296917
+        2.038708,
+        1.705625,
+        1.6302079999999999,
+        1.1496250000000001,
+        1.137541
       ],
-      "production_mean_ms": 1.3704918,
-      "production_tflops": 6.26777525556884,
+      "production_mean_ms": 1.5323414,
+      "production_tflops": 5.605757693422627,
       "tensor_ops_ms": [
-        5.368125,
-        5.2692499999999995,
-        4.273458,
-        3.804667,
-        3.4162500000000002
+        7.393875,
+        6.953791,
+        5.3787080000000005,
+        4.78525,
+        3.811417
       ],
-      "tensor_ops_mean_ms": 4.42635,
-      "tensor_ops_tflops": 1.9406360979136308,
+      "tensor_ops_mean_ms": 5.664608199999999,
+      "tensor_ops_tflops": 1.5164216639025452,
       "max_abs": 0.0000031590462,
       "relative_rms": 9.985240554840278e-7
     }

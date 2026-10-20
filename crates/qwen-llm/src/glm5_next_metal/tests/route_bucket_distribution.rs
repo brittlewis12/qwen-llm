@@ -6,7 +6,9 @@ use std::io::Write;
 #[test]
 #[ignore = "release, leased GPU; GLM53_GGUF=Maya and GLM53_STAGE_OUT=new JSON path"]
 fn maya_iq2_s_pp2048_bucket_distribution() {
-    assert!(!cfg!(debug_assertions), "requires release test binary");
+    if cfg!(debug_assertions) {
+        panic!("requires release test binary");
+    }
     let _lease = perf_lease();
     let model_path = std::env::var_os("GLM53_GGUF").expect("GLM53_GGUF must name Maya");
     let output_path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))

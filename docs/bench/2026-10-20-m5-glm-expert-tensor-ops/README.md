@@ -74,12 +74,13 @@ Each case has five interleaved A/B repetitions after warmup.
 
 | M | Production ms / TFLOP/s | TensorOps ms / TFLOP/s | Max abs | Relative RMS |
 | ---: | ---: | ---: | ---: | ---: |
-| 10 (measured p50) | 0.7624 / 0.440 | 0.5687 / 0.590 | 1.67e-6 | 1.01e-6 |
-| 39 (measured p90) | 0.9080 / 1.441 | 0.9849 / 1.329 | 2.86e-6 | 1.00e-6 |
-| 256 | 1.3705 / 6.268 | 4.4264 / 1.941 | 3.16e-6 | 9.99e-7 |
+| 10 (measured p50) | 0.7741 / 0.433 | 0.5645 / 0.594 | 1.67e-6 | 1.01e-6 |
+| 39 (measured p90) | 1.2479 / 1.049 | 1.3630 / 0.960 | 2.86e-6 | 1.00e-6 |
+| 256 | 1.5323 / 5.606 | 5.6646 / 1.516 | 3.16e-6 | 9.99e-7 |
 
 The TensorOps path wins only at M=10 in this single-expert-call microbenchmark
-(about 1.34x); it loses at M=39 and M=256. This does not establish a layer
+(about 1.37x); it loses at M=39 (about 1.09x slower) and M=256 (about 3.70x
+slower). This does not establish a layer
 speedup: production groups all active expert buckets in one dispatch, while
 the prototype measures one expert per call, and a layer/chunk averages about
 239 active experts. Do not merge p50 buckets into M39-or-larger buckets for

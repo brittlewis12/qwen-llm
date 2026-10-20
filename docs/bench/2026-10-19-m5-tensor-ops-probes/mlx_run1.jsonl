@@ -1,0 +1,98 @@
+{"probe": "device", "name": "Apple M5 Ultra", "arch": "applegpu_g17d", "mlx": "0.32.4"}
+{"probe": "stream_scale", "GiB": 1, "ms": 2.215, "sd": 7.149, "gbps": 969.4}
+{"probe": "stream_scale", "GiB": 4, "ms": 8.064, "sd": 36.632, "gbps": 1065.2}
+{"probe": "gemm", "dtype": "float32", "shape": "expert_up 5120->2304", "M": 256, "K": 5120, "N": 2304, "ms": 0.5216, "sd": 0.0222, "tflops": 11.58}
+{"probe": "gemm", "dtype": "float32", "shape": "expert_up 5120->2304", "M": 1024, "K": 5120, "N": 2304, "ms": 0.5108, "sd": 0.0928, "tflops": 47.3}
+{"probe": "gemm", "dtype": "float32", "shape": "expert_up 5120->2304", "M": 2048, "K": 5120, "N": 2304, "ms": 0.8283, "sd": 0.1012, "tflops": 58.34}
+{"probe": "gemm", "dtype": "float32", "shape": "expert_down 2304->5120", "M": 256, "K": 2304, "N": 5120, "ms": 0.61, "sd": 0.0688, "tflops": 9.9}
+{"probe": "gemm", "dtype": "float32", "shape": "expert_down 2304->5120", "M": 1024, "K": 2304, "N": 5120, "ms": 0.4934, "sd": 0.0188, "tflops": 48.97}
+{"probe": "gemm", "dtype": "float32", "shape": "expert_down 2304->5120", "M": 2048, "K": 2304, "N": 5120, "ms": 0.8228, "sd": 0.231, "tflops": 58.72}
+{"probe": "gemm", "dtype": "float32", "shape": "q_b 1280->32768", "M": 256, "K": 1280, "N": 32768, "ms": 0.6469, "sd": 0.0342, "tflops": 33.19}
+{"probe": "gemm", "dtype": "float32", "shape": "q_b 1280->32768", "M": 1024, "K": 1280, "N": 32768, "ms": 1.3525, "sd": 0.0305, "tflops": 63.51}
+{"probe": "gemm", "dtype": "float32", "shape": "q_b 1280->32768", "M": 2048, "K": 1280, "N": 32768, "ms": 2.4087, "sd": 0.0294, "tflops": 71.32}
+{"probe": "gemm", "dtype": "float32", "shape": "o_b 8192->5120", "M": 256, "K": 8192, "N": 5120, "ms": 0.7278, "sd": 0.033, "tflops": 29.51}
+{"probe": "gemm", "dtype": "float32", "shape": "o_b 8192->5120", "M": 1024, "K": 8192, "N": 5120, "ms": 1.2265, "sd": 0.0352, "tflops": 70.03}
+{"probe": "gemm", "dtype": "float32", "shape": "o_b 8192->5120", "M": 2048, "K": 8192, "N": 5120, "ms": 2.3113, "sd": 0.037, "tflops": 74.33}
+{"probe": "gemm", "dtype": "float32", "shape": "square 4096", "M": 256, "K": 4096, "N": 4096, "ms": 0.3074, "sd": 0.0435, "tflops": 27.94}
+{"probe": "gemm", "dtype": "float32", "shape": "square 4096", "M": 1024, "K": 4096, "N": 4096, "ms": 0.7378, "sd": 0.0344, "tflops": 46.57}
+{"probe": "gemm", "dtype": "float32", "shape": "square 4096", "M": 2048, "K": 4096, "N": 4096, "ms": 1.0411, "sd": 0.0298, "tflops": 66.01}
+{"probe": "gemm", "dtype": "float32", "shape": "square 8192", "M": 256, "K": 8192, "N": 8192, "ms": 0.9837, "sd": 0.0287, "tflops": 34.93}
+{"probe": "gemm", "dtype": "float32", "shape": "square 8192", "M": 1024, "K": 8192, "N": 8192, "ms": 1.894, "sd": 0.0285, "tflops": 72.57}
+{"probe": "gemm", "dtype": "float32", "shape": "square 8192", "M": 2048, "K": 8192, "N": 8192, "ms": 3.3985, "sd": 0.0818, "tflops": 80.88}
+{"probe": "gemm", "dtype": "float16", "shape": "expert_up 5120->2304", "M": 256, "K": 5120, "N": 2304, "ms": 0.3658, "sd": 0.0267, "tflops": 16.51}
+{"probe": "gemm", "dtype": "float16", "shape": "expert_up 5120->2304", "M": 1024, "K": 5120, "N": 2304, "ms": 0.5538, "sd": 0.0975, "tflops": 43.63}
+{"probe": "gemm", "dtype": "float16", "shape": "expert_up 5120->2304", "M": 2048, "K": 5120, "N": 2304, "ms": 0.6525, "sd": 0.0234, "tflops": 74.05}
+{"probe": "gemm", "dtype": "float16", "shape": "expert_down 2304->5120", "M": 256, "K": 2304, "N": 5120, "ms": 0.5093, "sd": 0.0304, "tflops": 11.86}
+{"probe": "gemm", "dtype": "float16", "shape": "expert_down 2304->5120", "M": 1024, "K": 2304, "N": 5120, "ms": 0.4698, "sd": 0.0672, "tflops": 51.43}
+{"probe": "gemm", "dtype": "float16", "shape": "expert_down 2304->5120", "M": 2048, "K": 2304, "N": 5120, "ms": 0.6695, "sd": 0.0343, "tflops": 72.17}
+{"probe": "gemm", "dtype": "float16", "shape": "q_b 1280->32768", "M": 256, "K": 1280, "N": 32768, "ms": 0.4723, "sd": 0.0293, "tflops": 45.47}
+{"probe": "gemm", "dtype": "float16", "shape": "q_b 1280->32768", "M": 1024, "K": 1280, "N": 32768, "ms": 1.0216, "sd": 0.0485, "tflops": 84.08}
+{"probe": "gemm", "dtype": "float16", "shape": "q_b 1280->32768", "M": 2048, "K": 1280, "N": 32768, "ms": 1.7508, "sd": 0.0271, "tflops": 98.13}
+{"probe": "gemm", "dtype": "float16", "shape": "o_b 8192->5120", "M": 256, "K": 8192, "N": 5120, "ms": 0.6535, "sd": 0.0406, "tflops": 32.86}
+{"probe": "gemm", "dtype": "float16", "shape": "o_b 8192->5120", "M": 1024, "K": 8192, "N": 5120, "ms": 1.0442, "sd": 0.0412, "tflops": 82.26}
+{"probe": "gemm", "dtype": "float16", "shape": "o_b 8192->5120", "M": 2048, "K": 8192, "N": 5120, "ms": 1.7347, "sd": 0.0398, "tflops": 99.04}
+{"probe": "gemm", "dtype": "float16", "shape": "square 4096", "M": 256, "K": 4096, "N": 4096, "ms": 0.2784, "sd": 0.02, "tflops": 30.86}
+{"probe": "gemm", "dtype": "float16", "shape": "square 4096", "M": 1024, "K": 4096, "N": 4096, "ms": 0.5242, "sd": 0.0205, "tflops": 65.55}
+{"probe": "gemm", "dtype": "float16", "shape": "square 4096", "M": 2048, "K": 4096, "N": 4096, "ms": 0.7943, "sd": 0.0165, "tflops": 86.52}
+{"probe": "gemm", "dtype": "float16", "shape": "square 8192", "M": 256, "K": 8192, "N": 8192, "ms": 0.6614, "sd": 0.0157, "tflops": 51.95}
+{"probe": "gemm", "dtype": "float16", "shape": "square 8192", "M": 1024, "K": 8192, "N": 8192, "ms": 1.4485, "sd": 0.0416, "tflops": 94.88}
+{"probe": "gemm", "dtype": "float16", "shape": "square 8192", "M": 2048, "K": 8192, "N": 8192, "ms": 2.5707, "sd": 0.0369, "tflops": 106.93}
+{"probe": "gemm", "dtype": "bfloat16", "shape": "expert_up 5120->2304", "M": 256, "K": 5120, "N": 2304, "ms": 0.3064, "sd": 0.036, "tflops": 19.71}
+{"probe": "gemm", "dtype": "bfloat16", "shape": "expert_up 5120->2304", "M": 1024, "K": 5120, "N": 2304, "ms": 0.4262, "sd": 0.0259, "tflops": 56.68}
+{"probe": "gemm", "dtype": "bfloat16", "shape": "expert_up 5120->2304", "M": 2048, "K": 5120, "N": 2304, "ms": 0.6414, "sd": 0.0333, "tflops": 75.34}
+{"probe": "gemm", "dtype": "bfloat16", "shape": "expert_down 2304->5120", "M": 256, "K": 2304, "N": 5120, "ms": 0.515, "sd": 0.0216, "tflops": 11.73}
+{"probe": "gemm", "dtype": "bfloat16", "shape": "expert_down 2304->5120", "M": 1024, "K": 2304, "N": 5120, "ms": 0.4889, "sd": 0.0636, "tflops": 49.42}
+{"probe": "gemm", "dtype": "bfloat16", "shape": "expert_down 2304->5120", "M": 2048, "K": 2304, "N": 5120, "ms": 0.6089, "sd": 0.0362, "tflops": 79.35}
+{"probe": "gemm", "dtype": "bfloat16", "shape": "q_b 1280->32768", "M": 256, "K": 1280, "N": 32768, "ms": 0.4501, "sd": 0.0501, "tflops": 47.71}
+{"probe": "gemm", "dtype": "bfloat16", "shape": "q_b 1280->32768", "M": 1024, "K": 1280, "N": 32768, "ms": 1.0412, "sd": 0.0182, "tflops": 82.5}
+{"probe": "gemm", "dtype": "bfloat16", "shape": "q_b 1280->32768", "M": 2048, "K": 1280, "N": 32768, "ms": 1.7256, "sd": 0.0366, "tflops": 99.56}
+{"probe": "gemm", "dtype": "bfloat16", "shape": "o_b 8192->5120", "M": 256, "K": 8192, "N": 5120, "ms": 0.593, "sd": 0.042, "tflops": 36.21}
+{"probe": "gemm", "dtype": "bfloat16", "shape": "o_b 8192->5120", "M": 1024, "K": 8192, "N": 5120, "ms": 1.0104, "sd": 0.0411, "tflops": 85.01}
+{"probe": "gemm", "dtype": "bfloat16", "shape": "o_b 8192->5120", "M": 2048, "K": 8192, "N": 5120, "ms": 1.7607, "sd": 0.0509, "tflops": 97.58}
+{"probe": "gemm", "dtype": "bfloat16", "shape": "square 4096", "M": 256, "K": 4096, "N": 4096, "ms": 0.2946, "sd": 0.0242, "tflops": 29.15}
+{"probe": "gemm", "dtype": "bfloat16", "shape": "square 4096", "M": 1024, "K": 4096, "N": 4096, "ms": 0.5143, "sd": 0.0177, "tflops": 66.81}
+{"probe": "gemm", "dtype": "bfloat16", "shape": "square 4096", "M": 2048, "K": 4096, "N": 4096, "ms": 0.7839, "sd": 0.0316, "tflops": 87.66}
+{"probe": "gemm", "dtype": "bfloat16", "shape": "square 8192", "M": 256, "K": 8192, "N": 8192, "ms": 0.6719, "sd": 0.0306, "tflops": 51.14}
+{"probe": "gemm", "dtype": "bfloat16", "shape": "square 8192", "M": 1024, "K": 8192, "N": 8192, "ms": 1.5155, "sd": 0.0486, "tflops": 90.69}
+{"probe": "gemm", "dtype": "bfloat16", "shape": "square 8192", "M": 2048, "K": 8192, "N": 8192, "ms": 2.5687, "sd": 0.0404, "tflops": 107.01}
+{"probe": "qmm", "mode": "mxfp4", "shape": "expert_up 5120->2304", "M": 1, "K": 5120, "N": 2304, "ms": 0.255, "sd": 0.0255, "tflops": 0.09, "weight_gbps": 24.6}
+{"probe": "qmm", "mode": "mxfp4", "shape": "expert_up 5120->2304", "M": 256, "K": 5120, "N": 2304, "ms": 0.5183, "sd": 0.0242, "tflops": 11.65}
+{"probe": "qmm", "mode": "mxfp4", "shape": "expert_up 5120->2304", "M": 1024, "K": 5120, "N": 2304, "ms": 0.5598, "sd": 0.1116, "tflops": 43.15}
+{"probe": "qmm", "mode": "mxfp4", "shape": "o_b 8192->5120", "M": 1, "K": 8192, "N": 5120, "ms": 0.2522, "sd": 0.0325, "tflops": 0.33, "weight_gbps": 88.3}
+{"probe": "qmm", "mode": "mxfp4", "shape": "o_b 8192->5120", "M": 256, "K": 8192, "N": 5120, "ms": 0.4744, "sd": 0.0454, "tflops": 45.27}
+{"probe": "qmm", "mode": "mxfp4", "shape": "o_b 8192->5120", "M": 1024, "K": 8192, "N": 5120, "ms": 1.0747, "sd": 0.0209, "tflops": 79.93}
+{"probe": "qmm", "mode": "mxfp4", "shape": "square 8192", "M": 1, "K": 8192, "N": 8192, "ms": 0.2583, "sd": 0.0132, "tflops": 0.52, "weight_gbps": 138.1}
+{"probe": "qmm", "mode": "mxfp4", "shape": "square 8192", "M": 256, "K": 8192, "N": 8192, "ms": 0.5938, "sd": 0.0527, "tflops": 57.87}
+{"probe": "qmm", "mode": "mxfp4", "shape": "square 8192", "M": 1024, "K": 8192, "N": 8192, "ms": 1.5269, "sd": 0.0323, "tflops": 90.01}
+{"probe": "qmm", "mode": "affine4_g64", "shape": "expert_up 5120->2304", "M": 1, "K": 5120, "N": 2304, "ms": 0.2425, "sd": 0.0309, "tflops": 0.1, "weight_gbps": 27.4}
+{"probe": "qmm", "mode": "affine4_g64", "shape": "expert_up 5120->2304", "M": 256, "K": 5120, "N": 2304, "ms": 0.5234, "sd": 0.0309, "tflops": 11.54}
+{"probe": "qmm", "mode": "affine4_g64", "shape": "expert_up 5120->2304", "M": 1024, "K": 5120, "N": 2304, "ms": 0.5372, "sd": 0.0678, "tflops": 44.97}
+{"probe": "qmm", "mode": "affine4_g64", "shape": "o_b 8192->5120", "M": 1, "K": 8192, "N": 5120, "ms": 0.2568, "sd": 0.0226, "tflops": 0.33, "weight_gbps": 91.9}
+{"probe": "qmm", "mode": "affine4_g64", "shape": "o_b 8192->5120", "M": 256, "K": 8192, "N": 5120, "ms": 0.4533, "sd": 0.0328, "tflops": 47.38}
+{"probe": "qmm", "mode": "affine4_g64", "shape": "o_b 8192->5120", "M": 1024, "K": 8192, "N": 5120, "ms": 1.1274, "sd": 0.0335, "tflops": 76.19}
+{"probe": "qmm", "mode": "affine4_g64", "shape": "square 8192", "M": 1, "K": 8192, "N": 8192, "ms": 0.2547, "sd": 0.0238, "tflops": 0.53, "weight_gbps": 148.2}
+{"probe": "qmm", "mode": "affine4_g64", "shape": "square 8192", "M": 256, "K": 8192, "N": 8192, "ms": 0.6451, "sd": 0.0368, "tflops": 53.26}
+{"probe": "qmm", "mode": "affine4_g64", "shape": "square 8192", "M": 1024, "K": 8192, "N": 8192, "ms": 1.5914, "sd": 0.0244, "tflops": 86.36}
+{"probe": "qmm", "mode": "affine8_g64", "shape": "expert_up 5120->2304", "M": 1, "K": 5120, "N": 2304, "ms": 0.2582, "sd": 0.0558, "tflops": 0.09, "weight_gbps": 48.5}
+{"probe": "qmm", "mode": "affine8_g64", "shape": "expert_up 5120->2304", "M": 256, "K": 5120, "N": 2304, "ms": 0.5362, "sd": 0.0342, "tflops": 11.26}
+{"probe": "qmm", "mode": "affine8_g64", "shape": "expert_up 5120->2304", "M": 1024, "K": 5120, "N": 2304, "ms": 0.5801, "sd": 0.0505, "tflops": 41.64}
+{"probe": "qmm", "mode": "affine8_g64", "shape": "o_b 8192->5120", "M": 1, "K": 8192, "N": 5120, "ms": 0.2541, "sd": 0.0143, "tflops": 0.33, "weight_gbps": 175.4}
+{"probe": "qmm", "mode": "affine8_g64", "shape": "o_b 8192->5120", "M": 256, "K": 8192, "N": 5120, "ms": 0.5204, "sd": 0.0132, "tflops": 41.27}
+{"probe": "qmm", "mode": "affine8_g64", "shape": "o_b 8192->5120", "M": 1024, "K": 8192, "N": 5120, "ms": 1.1824, "sd": 0.0613, "tflops": 72.65}
+{"probe": "qmm", "mode": "affine8_g64", "shape": "square 8192", "M": 1, "K": 8192, "N": 8192, "ms": 0.2586, "sd": 0.0364, "tflops": 0.52, "weight_gbps": 275.7}
+{"probe": "qmm", "mode": "affine8_g64", "shape": "square 8192", "M": 256, "K": 8192, "N": 8192, "ms": 0.625, "sd": 0.0377, "tflops": 54.97}
+{"probe": "qmm", "mode": "affine8_g64", "shape": "square 8192", "M": 1024, "K": 8192, "N": 8192, "ms": 1.7476, "sd": 0.0377, "tflops": 78.64}
+{"probe": "gemv_f16", "shape": "o_b 8192->5120", "K": 8192, "N": 5120, "ms": 0.5056, "sd": 0.018, "weight_gbps": 165.9}
+{"probe": "gemv_f16", "shape": "square 8192", "K": 8192, "N": 8192, "ms": 0.5415, "sd": 0.026, "weight_gbps": 247.9}
+{"probe": "gemv_f16", "shape": "vocab 5120->129280", "K": 5120, "N": 129280, "ms": 1.4384, "sd": 0.0296, "weight_gbps": 920.4}
+{"probe": "sdpa_causal", "dtype": "float16", "L": 1024, "heads": 32, "head_dim": 128, "ms": 0.6589, "tflops": 13.04}
+{"probe": "sdpa_causal", "dtype": "float32", "L": 1024, "heads": 32, "head_dim": 128, "ms": 0.7167, "tflops": 11.99}
+{"probe": "sdpa_causal", "dtype": "float16", "L": 4096, "heads": 32, "head_dim": 128, "ms": 1.7646, "tflops": 77.89}
+{"probe": "sdpa_causal", "dtype": "float32", "L": 4096, "heads": 32, "head_dim": 128, "ms": 2.9183, "tflops": 47.1}
+{"probe": "precision", "dtype": "float32", "M": 256, "K": 5120, "N": 2304, "rel_rms": 0.0007696432969946034, "max_abs": 0.0038193079950845643}
+{"probe": "precision", "dtype": "float16", "M": 256, "K": 5120, "N": 2304, "rel_rms": 0.0003591813699983837, "max_abs": 0.0021826000265274814}
+{"probe": "precision", "dtype": "bfloat16", "M": 256, "K": 5120, "N": 2304, "rel_rms": 0.0028741521854284647, "max_abs": 0.019937730395235498}
+{"probe": "precision", "dtype": "float32", "M": 256, "K": 1280, "N": 4096, "rel_rms": 0.0007699546357173339, "max_abs": 0.00401564427180201}
+{"probe": "precision", "dtype": "float16", "M": 256, "K": 1280, "N": 4096, "rel_rms": 0.0003599034136763304, "max_abs": 0.0022688546613300886}
+{"probe": "precision", "dtype": "bfloat16", "M": 256, "K": 1280, "N": 4096, "rel_rms": 0.002874931940678874, "max_abs": 0.02001745745823147}
+done

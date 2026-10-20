@@ -421,6 +421,11 @@ impl Qwen4ExpPostPleMixerMetalWorkspace {
     }
 }
 
+pub(crate) enum Qwen4ExpCompactMixerState {
+    GatedDeltaNet { recurrent: Vec<MetalTensor> },
+    QwenSparseAttention { pending_index_keys: MetalTensor },
+}
+
 pub struct Qwen4ExpPostPleBlockMetalWorkspace {
     geometry: Qwen4ExpPostPleBlockMetalGeometry,
     mixer_output: MetalTensor,
@@ -597,6 +602,50 @@ impl Qwen4ExpPostPleBlockMetalWorkspace {
 
     pub fn is_poisoned(&self) -> bool {
         self.state_poisoned
+    }
+
+    pub(crate) fn compact_checkpoint_state(
+        &self,
+    ) -> Result<Qwen4ExpCompactMixerState, Qwen4ExpPostPleBlockError> {
+        self.validate_checkpoint_rewind(self.mixer.committed_length().unwrap_or(0))?;
+        Ok(match &self.mixer {
+            Qwen4ExpPostPleMixerMetalWorkspace::GatedDeltaNet(workspace) => {
+                Qwen4ExpCompactMixerState::GatedDeltaNet {
+                    recurrent: workspace.persistent_state_tensors(),
+                }
+            }
+            Qwen4ExpPostPleMixerMetalWorkspace::QwenSparseAttention(workspace) => {
+                Qwen4ExpCompactMixerState::QwenSparseAttention {
+                    pending_index_keys: workspace.checkpoint_pending_index_keys()?,
+                }
+            }
+        })
+    }
+
+    pub(crate) fn validate_checkpoint_rewind(
+        &self,
+        length: usize,
+    ) -> Result<(), Qwen4ExpPostPleBlockError> {
+        self.require_idle()?;
+        if self.state_poisoned || self.encode_failed {
+            return invalid("checkpoint rewind requires a healthy released block");
+        }
+        if let Qwen4ExpPostPleMixerMetalWorkspace::QwenSparseAttention(workspace) = &self.mixer {
+            workspace.validate_checkpoint_rewind(length)?;
+        }
+        Ok(())
+    }
+
+    pub(crate) fn rewind_checkpoint_length(
+        &mut self,
+        length: usize,
+    ) -> Result<(), Qwen4ExpPostPleBlockError> {
+        self.validate_checkpoint_rewind(length)?;
+        if let Qwen4ExpPostPleMixerMetalWorkspace::QwenSparseAttention(workspace) = &mut self.mixer
+        {
+            workspace.rewind_checkpoint_length(length)?;
+        }
+        Ok(())
     }
 
     pub fn reset(&mut self) -> Result<(), Qwen4ExpPostPleBlockError> {

@@ -808,6 +808,10 @@ impl QwenSparseAttentionMetalGeometry {
             + 2 * length * self.kv_width() * size_of::<u16>()
     }
 
+    pub(crate) fn checkpoint_pending_bytes(self) -> usize {
+        self.index_head_dim * self.ratio * size_of::<f32>()
+    }
+
     fn plan_packed_range(
         self,
         start_position: usize,
@@ -1623,6 +1627,39 @@ impl QwenSparseAttentionMetalWorkspace {
 
     pub fn committed_length(&self) -> usize {
         self.committed_length
+    }
+
+    /// The only overwrite-in-place causal region needed by compact rollback.
+    /// KV and completed index blocks are append-only and bounded by visibility.
+    pub(crate) fn checkpoint_pending_index_keys(&self) -> Result<MetalTensor, Qwen4ExpQsaError> {
+        self.validate_checkpoint_rewind(self.committed_length)?;
+        Ok(self.pending_index_keys.clone())
+    }
+
+    pub(crate) fn validate_checkpoint_rewind(&self, length: usize) -> Result<(), Qwen4ExpQsaError> {
+        self.require_idle()?;
+        if self.state_poisoned
+            || self.pending_length.is_some()
+            || self.pending_selected_bands.is_some()
+        {
+            return invalid("QSA checkpoint rewind requires healthy released state");
+        }
+        if length > self.committed_length {
+            return invalid("QSA checkpoint rewind cannot advance visible length");
+        }
+        Ok(())
+    }
+
+    /// Pending keys must already match `length`. Reads expose only KV [0,length)
+    /// and index blocks [0,length/ratio); subsequent appends overwrite suffix rows
+    /// and publish compressed blocks starting at floor(length/ratio).
+    pub(crate) fn rewind_checkpoint_length(
+        &mut self,
+        length: usize,
+    ) -> Result<(), Qwen4ExpQsaError> {
+        self.validate_checkpoint_rewind(length)?;
+        self.committed_length = length;
+        Ok(())
     }
 
     #[cfg(test)]

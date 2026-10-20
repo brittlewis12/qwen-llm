@@ -29,6 +29,134 @@ fn narrower_prefill_candidates_are_bounded_and_end_at_scalar() {
     }
 }
 
+fn controlled_signals(available: u64) -> MetalMemorySignals {
+    MetalMemorySignals {
+        recommended_max_bytes: u64::MAX / 2,
+        current_allocated_bytes: 0,
+        process_limit_remaining_bytes: Some(available),
+    }
+}
+
+#[test]
+fn floor_preflight_prices_future_head_and_narrows_2048_to_512() {
+    const WEIGHTS: u64 = 10_000;
+    const SESSION: u64 = 2_000;
+    const HEAD: u64 = 24_576;
+    const ROW_BYTES: u64 = 16;
+    let budget =
+        WEIGHTS + SESSION + HEAD + 512 * ROW_BYTES + QWEN4EXP_TEXT_SESSION_DYNAMIC_RESERVE_BYTES;
+    let signals = controlled_signals(budget);
+    let bytes = |rows: usize| WEIGHTS + SESSION + rows as u64 * ROW_BYTES;
+    assert!(
+        prefill_admission_with_extra(bytes(2048), HEAD, signals)
+            .unwrap()
+            .refusal()
+            .is_some()
+    );
+    assert!(
+        prefill_admission_with_extra(bytes(2048), 0, signals)
+            .unwrap()
+            .refusal()
+            .is_none()
+    );
+    let mut attempted = Vec::new();
+    let (rows, admission) = select_prefill_rows(Some(2048), true, 8, |rows| {
+        let rows = rows.expect("verification floor forbids scalar fallback");
+        attempted.push(rows);
+        prefill_admission_with_extra(bytes(rows), HEAD, signals)
+    })
+    .unwrap();
+    assert_eq!(attempted, [2048, 1024, 512]);
+    assert_eq!(rows, Some(512));
+    assert_eq!(admission.required_bytes, Some(budget));
+
+    // Loading starts at the selected plan, with the head resident rather than
+    // priced as future bytes. Neither the plan nor admission may grow rows.
+    let after_head = MetalMemorySignals {
+        current_allocated_bytes: HEAD,
+        ..controlled_signals(budget - HEAD)
+    };
+    let (loaded_rows, _) = select_prefill_rows(rows, true, 8, |rows| {
+        prefill_admission_with_extra(bytes(rows.unwrap()), 0, after_head)
+    })
+    .unwrap();
+    assert_eq!(loaded_rows, Some(512));
+    let after_target = MetalMemorySignals {
+        current_allocated_bytes: HEAD + WEIGHTS,
+        ..controlled_signals(budget - HEAD - WEIGHTS)
+    };
+    let (resident_rows, _) = select_prefill_rows(loaded_rows, true, 8, |rows| {
+        prefill_admission_with_extra(SESSION + rows.unwrap() as u64 * ROW_BYTES, 0, after_target)
+    })
+    .unwrap();
+    assert_eq!(resident_rows, Some(512));
+    let (relieved_rows, _) = select_prefill_rows(rows, true, 8, |rows| {
+        prefill_admission_with_extra(bytes(rows.unwrap()), 0, controlled_signals(u64::MAX / 4))
+    })
+    .unwrap();
+    assert_eq!(relieved_rows, Some(512));
+}
+
+#[test]
+fn packed_floor_refuses_instead_of_falling_below_verification_width() {
+    let mut attempted = Vec::new();
+    let signals = controlled_signals(QWEN4EXP_TEXT_SESSION_DYNAMIC_RESERVE_BYTES + 4);
+    let result = select_prefill_rows(Some(2048), true, 8, |rows| {
+        let rows = rows.expect("floor forbids scalar fallback");
+        attempted.push(rows);
+        prefill_admission_with_extra(rows as u64, 0, signals)
+    });
+    assert!(
+        matches!(result, Err(Qwen4ExpRuntimeError::MemoryAdmission(denied)) if denied.reason().is_pressure())
+    );
+    assert_eq!(attempted, [2048, 1024, 512, 256, 128, 64, 32, 16, 8]);
+    assert_eq!(next_prefill_rows(Some(16), 10), Some(Some(10)));
+    assert_eq!(next_prefill_rows(Some(10), 10), None);
+    assert_eq!(next_prefill_rows(Some(8), 8), None);
+    assert_eq!(next_prefill_rows(Some(2), 2), None);
+    assert_eq!(next_prefill_rows(Some(2), 0), Some(None));
+}
+
+#[test]
+fn floor_validation_and_unavailable_signals_do_not_retry() {
+    for (rows, floor) in [(Some(8), 1), (Some(8), 16), (None, 8)] {
+        assert!(
+            select_prefill_rows(rows, true, floor, |_| panic!(
+                "invalid floor must not price"
+            ))
+            .is_err()
+        );
+    }
+    let mut attempts = 0;
+    let result = select_prefill_rows(Some(2048), true, 8, |_| {
+        attempts += 1;
+        prefill_admission_with_extra(
+            100,
+            200,
+            MetalMemorySignals {
+                process_limit_remaining_bytes: None,
+                ..controlled_signals(1000)
+            },
+        )
+    });
+    assert!(
+        matches!(result, Err(Qwen4ExpRuntimeError::MemoryAdmission(denied)) if denied.reason() == MetalMemoryAdmissionReason::ProcessSignalUnavailable)
+    );
+    assert_eq!(attempts, 1);
+    assert!(prefill_admission_with_extra(u64::MAX, 1, controlled_signals(u64::MAX)).is_err());
+}
+
+#[test]
+fn legacy_adaptive_can_still_scalarize_but_strict_prefill_cannot_narrow() {
+    let signals = controlled_signals(QWEN4EXP_TEXT_SESSION_DYNAMIC_RESERVE_BYTES + 100);
+    let price = |rows: Option<usize>| {
+        prefill_admission_with_extra(100 + rows.unwrap_or(0) as u64, 0, signals)
+    };
+    let (rows, _) = select_prefill_rows(Some(2048), true, 0, price).unwrap();
+    assert_eq!(rows, None);
+    assert!(select_prefill_rows(Some(2048), false, 0, price).is_err());
+}
+
 #[test]
 fn prefill_retry_requires_a_resource_failure() {
     for reason in [
@@ -127,6 +255,25 @@ fn flash_prefill_pressure_plan_preserves_context_and_selection() {
     );
     assert!(full.with_prefill_rows(&ctx, Some(1)).is_err());
     assert!(full.with_prefill_rows(&ctx, Some(4096)).is_err());
+    let narrow = full.with_prefill_rows(&ctx, Some(512)).unwrap();
+    let head_bytes = 16 * 1024 * 1024;
+    let budget = narrow
+        .memory_plan()
+        .priced_upper_bytes_for_sessions(1)
+        .unwrap()
+        + head_bytes
+        + QWEN4EXP_TEXT_SESSION_DYNAMIC_RESERVE_BYTES;
+    let (selected, _) = select_qwen4exp_prefill_plan_with_floor(
+        &ctx,
+        full.clone(),
+        controlled_signals(budget),
+        8,
+        head_bytes,
+    )
+    .unwrap();
+    assert_eq!(selected.memory_plan().packed_prefill_capacity(), Some(512));
+    assert_eq!(selected.geometry(), full.geometry());
+    assert!(selected.memory_plan().packed_selected_capable());
     for rows in [Some(2048), Some(1024), Some(512), Some(256), Some(2), None] {
         let plan = full.with_prefill_rows(&ctx, rows).unwrap();
         assert_eq!(plan.geometry(), full.geometry());

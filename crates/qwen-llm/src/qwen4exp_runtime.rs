@@ -16,13 +16,19 @@ pub use crate::qwen4exp_profile::{Qwen4ExpPackedProfileLabel, Qwen4ExpPackedProf
 use crate::qwen4exp_residency::{
     Qwen4ExpMetalWeightPlan, Qwen4ExpMetalWeights, Qwen4ExpResidencyError,
 };
+pub use crate::qwen4exp_text_session::{
+    Qwen4ExpCaptureBank, Qwen4ExpCapturePlan, Qwen4ExpCapturedFeatures,
+    Qwen4ExpDeviceCheckpointBank, Qwen4ExpRowLogits, Qwen4ExpRowLogitsBank, Qwen4ExpRowLogitsPlan,
+};
 use crate::qwen4exp_text_session::{
-    Qwen4ExpCompletedLogits, Qwen4ExpFixedHyperAddTensor, Qwen4ExpPackedEncodeCpuTiming,
-    Qwen4ExpPostLayerHyperProbe, Qwen4ExpTextSessionError, Qwen4ExpTextSessionMetalWeights,
-    Qwen4ExpTextSessionMetalWorkspace, Qwen4ExpTextSessionPending, Qwen4ExpTextSessionPlan,
-    Qwen4ExpTextSessionReleaseTiming, Qwen4ExpTextSnapshot, encode_qwen4exp_text_packed,
-    encode_qwen4exp_text_packed_layer_sampled, encode_qwen4exp_text_packed_profiled,
-    encode_qwen4exp_text_token, encode_qwen4exp_text_token_layer_sampled,
+    Qwen4ExpCaptureSink, Qwen4ExpCompletedLogits, Qwen4ExpFixedHyperAddTensor,
+    Qwen4ExpPackedEncodeCpuTiming, Qwen4ExpPostLayerHyperProbe, Qwen4ExpRowLogitsSink,
+    Qwen4ExpTextSessionError, Qwen4ExpTextSessionMetalWeights, Qwen4ExpTextSessionMetalWorkspace,
+    Qwen4ExpTextSessionPending, Qwen4ExpTextSessionPlan, Qwen4ExpTextSessionReleaseTiming,
+    Qwen4ExpTextSnapshot, encode_qwen4exp_text_packed_layer_sampled,
+    encode_qwen4exp_text_packed_profiled, encode_qwen4exp_text_packed_with_captures,
+    encode_qwen4exp_text_packed_with_row_outputs, encode_qwen4exp_text_token_layer_sampled,
+    encode_qwen4exp_text_token_with_captures,
     encode_qwen4exp_text_token_with_post_layer_hyper_probe,
 };
 use crate::tensor::GgmlType;
@@ -31,6 +37,12 @@ use objc2::runtime::ProtocolObject;
 use objc2_metal::{MTLBuffer, MTLCommandBuffer, MTLCommandQueue, MTLDevice};
 use std::ops::Range;
 use std::time::Instant;
+
+mod dflash;
+pub use dflash::{
+    Qwen4ExpDFlashAdapter, Qwen4ExpDFlashError, Qwen4ExpDFlashFinish, Qwen4ExpDFlashPacket,
+    Qwen4ExpDFlashState, Qwen4ExpDFlashStats,
+};
 
 #[cfg(test)]
 #[path = "qwen4exp_prefill_admission_tests.rs"]
@@ -656,7 +668,15 @@ impl<'gguf> Qwen4ExpLoadedModel<'gguf> {
         packed_prefill_tokens: Option<usize>,
         decode: Qwen4ExpDecodeOptions,
     ) -> Result<Self, Qwen4ExpRuntimeError> {
-        Self::load_with_prefill_policy(ctx, gguf, capacity, packed_prefill_tokens, decode, false)
+        Self::load_with_prefill_policy(
+            ctx,
+            gguf,
+            capacity,
+            packed_prefill_tokens,
+            decode,
+            false,
+            None,
+        )
     }
 
     /// Preserve packed execution under memory pressure by narrowing reusable
@@ -679,6 +699,30 @@ impl<'gguf> Qwen4ExpLoadedModel<'gguf> {
             (prompt_extent > 1).then_some(prompt_extent),
             decode,
             true,
+            None,
+        )
+    }
+
+    /// Load a preflighted plan, retaining its context and selected-QSA geometry.
+    /// Recheck admission with current residency and narrow further if necessary,
+    /// including allocation retries, but never below `minimum_packed_rows`.
+    /// Zero retains ordinary adaptive scalar fallback; a packed floor must be >= 2.
+    pub fn load_with_adaptive_prefill_plan(
+        ctx: &MetalContext,
+        gguf: &'gguf GgufFile,
+        capacity: Qwen4ExpSessionCapacity,
+        session_plan: Qwen4ExpTextSessionPlan,
+        decode: Qwen4ExpDecodeOptions,
+        minimum_packed_rows: usize,
+    ) -> Result<Self, Qwen4ExpRuntimeError> {
+        Self::load_with_prefill_policy(
+            ctx,
+            gguf,
+            capacity,
+            None,
+            decode,
+            true,
+            Some((session_plan, minimum_packed_rows)),
         )
     }
 
@@ -689,6 +733,7 @@ impl<'gguf> Qwen4ExpLoadedModel<'gguf> {
         packed_prefill_tokens: Option<usize>,
         decode: Qwen4ExpDecodeOptions,
         adaptive: bool,
+        prepared_session: Option<(Qwen4ExpTextSessionPlan, usize)>,
     ) -> Result<Self, Qwen4ExpRuntimeError> {
         if let Some(tokens) = packed_prefill_tokens
             && !(2..=capacity.forward_limit).contains(&tokens)
@@ -704,7 +749,21 @@ impl<'gguf> Qwen4ExpLoadedModel<'gguf> {
             return invalid("session capacity differs from the released model geometry");
         }
         let decode = decode.resolve(ctx)?;
-        let session_plan = if let Some(prompt_tokens) = packed_prefill_tokens {
+        let minimum_packed_rows = prepared_session.as_ref().map_or(0, |(_, floor)| *floor);
+        let session_plan = if let Some((plan, _)) = prepared_session {
+            let expected_geometry =
+                crate::qwen4exp_text_session::Qwen4ExpTextSessionMetalGeometry::from_config(
+                    weight_plan.config(),
+                    capacity.qsa_physical_capacity,
+                )?;
+            if plan.geometry() != &expected_geometry
+                || plan.memory_plan().residency_priced_upper_bytes()
+                    != weight_plan.memory_plan().priced_upper_bytes()
+            {
+                return invalid("preflighted session differs from target geometry or residency");
+            }
+            plan
+        } else if let Some(prompt_tokens) = packed_prefill_tokens {
             Qwen4ExpTextSessionPlan::for_config_with_packed_prefill_tokens(
                 ctx,
                 weight_plan.config(),
@@ -731,8 +790,15 @@ impl<'gguf> Qwen4ExpLoadedModel<'gguf> {
         let _allocation_transaction = ctx.begin_allocation_transaction();
         #[cfg(test)]
         let session_plan = session_plan.with_split_decode(ctx, decode.split_qsa)?;
-        let (mut session_plan, aggregate) =
-            select_prefill_plan(ctx, session_plan, ctx.memory_signals(), true, adaptive)?;
+        let (mut session_plan, aggregate) = select_prefill_plan_with_floor(
+            ctx,
+            session_plan,
+            ctx.memory_signals(),
+            true,
+            adaptive,
+            minimum_packed_rows,
+            0,
+        )?;
         let admitted_weights = weight_plan.admit(ctx.memory_signals())?;
         let realized = Qwen4ExpMetalWeights::realize(ctx, gguf, admitted_weights)?;
         let weight_admission = realized.admission();
@@ -740,8 +806,15 @@ impl<'gguf> Qwen4ExpLoadedModel<'gguf> {
         let weights = realized.into_weights();
         let ple_table = weights.ple_source().bind(gguf)?;
         let mut workspace = loop {
-            (session_plan, _) =
-                select_prefill_plan(ctx, session_plan, ctx.memory_signals(), false, adaptive)?;
+            (session_plan, _) = select_prefill_plan_with_floor(
+                ctx,
+                session_plan,
+                ctx.memory_signals(),
+                false,
+                adaptive,
+                minimum_packed_rows,
+                0,
+            )?;
             let result = (|| {
                 #[cfg(test)]
                 prefill_admission_tests::allocation_checkpoint()?;
@@ -755,13 +828,17 @@ impl<'gguf> Qwen4ExpLoadedModel<'gguf> {
                 Err(error)
                     if adaptive
                         && session_allocation_can_narrow(&error)
-                        && session_plan
-                            .memory_plan()
-                            .packed_prefill_capacity()
-                            .is_some() =>
+                        && next_prefill_rows(
+                            session_plan.memory_plan().packed_prefill_capacity(),
+                            minimum_packed_rows,
+                        )
+                        .is_some() =>
                 {
-                    let rows =
-                        smaller_prefill_rows(session_plan.memory_plan().packed_prefill_capacity());
+                    let rows = next_prefill_rows(
+                        session_plan.memory_plan().packed_prefill_capacity(),
+                        minimum_packed_rows,
+                    )
+                    .expect("retry guard requires a smaller admissible row count");
                     tracing::info!(
                         "qwen4exp: workspace allocation refused ({error}); retrying packed rows={rows:?}"
                     );
@@ -912,7 +989,176 @@ pub struct Qwen4ExpTextRunner<'ctx, 'model, 'gguf> {
     last_prefill_timing: Option<Qwen4ExpPrefillTiming>,
 }
 
+/// Completed all-inputs-committed forward, not a speculative transaction. Both
+/// banks remain borrowed. The DFlash adapter owns prefix acceptance and rollback.
+pub struct Qwen4ExpCapturedRows<'a> {
+    features: Qwen4ExpCapturedFeatures<'a>,
+    logits: Qwen4ExpRowLogits<'a>,
+}
+
+impl Qwen4ExpCapturedRows<'_> {
+    pub fn features(&self) -> &Qwen4ExpCapturedFeatures<'_> {
+        &self.features
+    }
+    pub fn logits(&self) -> &Qwen4ExpRowLogits<'_> {
+        &self.logits
+    }
+}
+
 impl Qwen4ExpTextRunner<'_, '_, '_> {
+    /// Separately admit one fixed-size device bank for this workspace. Includes
+    /// no historical KV or compressed-index rows and no logits.
+    pub fn allocate_device_checkpoint_bank(
+        &self,
+    ) -> Result<Qwen4ExpDeviceCheckpointBank, Qwen4ExpRuntimeError> {
+        Ok(self.workspace.allocate_device_checkpoint_bank(self.ctx)?)
+    }
+
+    pub fn capture_device_checkpoint(
+        &mut self,
+        bank: &mut Qwen4ExpDeviceCheckpointBank,
+    ) -> Result<(), Qwen4ExpRuntimeError> {
+        Ok(self.workspace.capture_device_checkpoint(self.ctx, bank)?)
+    }
+
+    /// Rewind healthy completed appends to block entry without resetting device
+    /// state. Consumes this entry and invalidates sibling checkpoints. The next
+    /// forward must replay retained inputs; logits are unavailable until then.
+    /// GPU-failed/poisoned sessions are refused, not silently repaired.
+    pub fn restore_device_checkpoint(
+        &mut self,
+        bank: &mut Qwen4ExpDeviceCheckpointBank,
+    ) -> Result<usize, Qwen4ExpRuntimeError> {
+        let position = self.workspace.restore_device_checkpoint(self.ctx, bank)?;
+        self.last_token_timing = None;
+        self.last_prefill_timing = None;
+        Ok(position)
+    }
+
+    /// Optional readout allocation; no change to ordinary prefill scratch.
+    pub fn allocate_row_logits_bank(
+        &self,
+        capacity: usize,
+    ) -> Result<Qwen4ExpRowLogitsBank, Qwen4ExpRuntimeError> {
+        let plan = Qwen4ExpRowLogitsPlan::new(&self.weights.geometry, capacity)?;
+        Ok(Qwen4ExpRowLogitsBank::allocate(self.ctx, plan)?)
+    }
+
+    /// Run one packed command (scalar for one input), returning every row's
+    /// full vocabulary logits and mean-only conditioning features. Uses the
+    /// native learned gated-residual output head, not the conditioning mean.
+    ///
+    /// ALL input rows advance target state. This is the readout foundation for
+    /// verification, not yet a speculative accept/reject API. Capacity errors
+    /// refuse before writes; command failures follow ordinary session poisoning.
+    pub fn forward_rows_with_captures_and_logits<'a>(
+        &mut self,
+        token_ids: &[u32],
+        captures: &'a mut Qwen4ExpCaptureBank,
+        logits: &'a mut Qwen4ExpRowLogitsBank,
+    ) -> Result<Qwen4ExpCapturedRows<'a>, Qwen4ExpRuntimeError> {
+        self.validate_prefill_request(token_ids)?;
+        captures.validate(self.ctx, &self.weights.geometry)?;
+        logits.validate(self.ctx, self.weights.geometry.vocab_size())?;
+        let positions = logits.plan().validate_rows(
+            self.next_position(),
+            token_ids.len(),
+            captures.plan().capacity(),
+        )?;
+        if token_ids.len() > 1
+            && self
+                .workspace
+                .packed_prefill_capacity()
+                .is_none_or(|capacity| token_ids.len() > capacity)
+        {
+            return invalid(
+                "all-row forward requires an admitted packed capacity covering the entire block",
+            );
+        }
+        let captures = captures.sink(positions.clone());
+        let logits = logits.sink(positions)?;
+        let timing = execute_qwen4exp_text_packed_with_row_outputs_sync(
+            self.ctx,
+            token_ids,
+            self.ple_table,
+            &self.weights,
+            &mut self.workspace,
+            Some(&captures),
+            Some(&logits),
+        )?;
+        self.last_token_timing = (token_ids.len() == 1).then_some(timing);
+        self.last_prefill_timing = None;
+        Ok(Qwen4ExpCapturedRows {
+            features: captures.complete(),
+            logits: logits.complete(),
+        })
+    }
+
+    /// Allocate reusable incremental capture storage after target residency.
+    /// `layers` are completed block IDs, kept in caller feature order.
+    pub fn allocate_capture_bank(
+        &self,
+        layers: Vec<u32>,
+        tail_capacity: usize,
+    ) -> Result<Qwen4ExpCaptureBank, Qwen4ExpRuntimeError> {
+        let plan = Qwen4ExpCapturePlan::new(&self.weights.geometry, layers, tail_capacity)?;
+        Ok(Qwen4ExpCaptureBank::allocate(self.ctx, plan)?)
+    }
+
+    /// Consume one token and capture its stream means. Target logits remain
+    /// available through `logits`; features borrow only the caller's bank.
+    pub fn forward_token_with_captures<'a>(
+        &mut self,
+        token_id: u32,
+        bank: &'a mut Qwen4ExpCaptureBank,
+    ) -> Result<Qwen4ExpCapturedFeatures<'a>, Qwen4ExpRuntimeError> {
+        self.validate_prefill_request(&[token_id])?;
+        bank.validate(self.ctx, &self.weights.geometry)?;
+        let range = bank.plan().tail_range(self.next_position(), 1)?;
+        let capture = bank.sink(range);
+        let timing = execute_qwen4exp_text_token_with_captures_sync(
+            self.ctx,
+            token_id,
+            self.ple_table,
+            &self.weights,
+            &mut self.workspace,
+            Some(&capture),
+        )?;
+        self.last_token_timing = Some(timing);
+        Ok(capture.complete())
+    }
+
+    /// Prefill a suffix using the ordinary packed/scalar schedule, retaining
+    /// only the last `bank.plan().capacity()` rows of this call. No earlier
+    /// snapshot features are implied. On error no capture view is published;
+    /// the ordinary prefill committed-count/poisoning rules still apply.
+    pub fn prefill_continuation_with_captures<'a>(
+        &mut self,
+        token_ids: &[u32],
+        bank: &'a mut Qwen4ExpCaptureBank,
+    ) -> Result<Qwen4ExpCapturedFeatures<'a>, Qwen4ExpRuntimeError> {
+        self.prefill_continuation_with_captures_and_checkpoint(token_ids, bank, || Ok(()))
+    }
+
+    pub fn prefill_continuation_with_captures_and_checkpoint<'a, F>(
+        &mut self,
+        token_ids: &[u32],
+        bank: &'a mut Qwen4ExpCaptureBank,
+        checkpoint: F,
+    ) -> Result<Qwen4ExpCapturedFeatures<'a>, Qwen4ExpRuntimeError>
+    where
+        F: FnMut() -> Result<(), Qwen4ExpRuntimeError>,
+    {
+        self.validate_prefill_request(token_ids)?;
+        bank.validate(self.ctx, &self.weights.geometry)?;
+        let range = bank
+            .plan()
+            .tail_range(self.next_position(), token_ids.len())?;
+        let capture = bank.sink(range);
+        self.prefill_continuation_inner(token_ids, checkpoint, Some(&capture))?;
+        Ok(capture.complete())
+    }
+
     pub fn capacity(&self) -> Qwen4ExpSessionCapacity {
         self.capacity
     }
@@ -925,6 +1171,10 @@ impl Qwen4ExpTextRunner<'_, '_, '_> {
         self.capacity
             .forward_limit
             .saturating_sub(self.next_position())
+    }
+
+    pub fn is_poisoned(&self) -> bool {
+        self.workspace.is_poisoned()
     }
 
     pub fn logits(&self) -> Result<Qwen4ExpCompletedLogits<'_>, Qwen4ExpRuntimeError> {
@@ -1070,8 +1320,21 @@ impl Qwen4ExpTextRunner<'_, '_, '_> {
     pub fn prefill_continuation_with_command_checkpoint<F>(
         &mut self,
         token_ids: &[u32],
-        mut checkpoint: F,
+        checkpoint: F,
     ) -> Result<Qwen4ExpCompletedLogits<'_>, Qwen4ExpRuntimeError>
+    where
+        F: FnMut() -> Result<(), Qwen4ExpRuntimeError>,
+    {
+        self.prefill_continuation_inner(token_ids, checkpoint, None)?;
+        self.logits()
+    }
+
+    fn prefill_continuation_inner<F>(
+        &mut self,
+        token_ids: &[u32],
+        mut checkpoint: F,
+        capture: Option<&Qwen4ExpCaptureSink<'_>>,
+    ) -> Result<(), Qwen4ExpRuntimeError>
     where
         F: FnMut() -> Result<(), Qwen4ExpRuntimeError>,
     {
@@ -1095,12 +1358,13 @@ impl Qwen4ExpTextRunner<'_, '_, '_> {
         );
         for range in &plan.packed_ranges {
             self.run_prefill_checkpoint(start, token_ids.len(), &mut checkpoint)?;
-            match execute_qwen4exp_text_packed_sync(
+            match execute_qwen4exp_text_packed_with_captures_sync(
                 self.ctx,
                 &token_ids[range.start - start..range.end - start],
                 self.ple_table,
                 &self.weights,
                 &mut self.workspace,
+                capture,
             ) {
                 Ok(timing) => {
                     if self.next_position() != range.end {
@@ -1128,12 +1392,13 @@ impl Qwen4ExpTextRunner<'_, '_, '_> {
         }
         for (index, &token_id) in token_ids[plan.scalar_start - start..].iter().enumerate() {
             self.run_prefill_checkpoint(start, token_ids.len(), &mut checkpoint)?;
-            match execute_qwen4exp_text_token_sync(
+            match execute_qwen4exp_text_token_with_captures_sync(
                 self.ctx,
                 token_id,
                 self.ple_table,
                 &self.weights,
                 &mut self.workspace,
+                capture,
             ) {
                 Ok(timing) => {
                     let expected = plan.scalar_start + index + 1;
@@ -1160,7 +1425,7 @@ impl Qwen4ExpTextRunner<'_, '_, '_> {
             }
         }
         self.last_prefill_timing = Some(prefill_timing);
-        self.logits()
+        Ok(())
     }
 
     pub fn prefill_packed_profiled(
@@ -1563,12 +1828,38 @@ fn packed_profile_command_timing(
     }
 }
 
+#[cfg(test)]
 fn execute_qwen4exp_text_packed_sync(
     ctx: &MetalContext,
     token_ids: &[u32],
     table: PleIq4NlTable<'_>,
     weights: &Qwen4ExpTextSessionMetalWeights<'_>,
     workspace: &mut Qwen4ExpTextSessionMetalWorkspace,
+) -> Result<Qwen4ExpTokenTiming, Qwen4ExpRuntimeError> {
+    execute_qwen4exp_text_packed_with_captures_sync(ctx, token_ids, table, weights, workspace, None)
+}
+
+fn execute_qwen4exp_text_packed_with_captures_sync(
+    ctx: &MetalContext,
+    token_ids: &[u32],
+    table: PleIq4NlTable<'_>,
+    weights: &Qwen4ExpTextSessionMetalWeights<'_>,
+    workspace: &mut Qwen4ExpTextSessionMetalWorkspace,
+    capture: Option<&Qwen4ExpCaptureSink<'_>>,
+) -> Result<Qwen4ExpTokenTiming, Qwen4ExpRuntimeError> {
+    execute_qwen4exp_text_packed_with_row_outputs_sync(
+        ctx, token_ids, table, weights, workspace, capture, None,
+    )
+}
+
+fn execute_qwen4exp_text_packed_with_row_outputs_sync(
+    ctx: &MetalContext,
+    token_ids: &[u32],
+    table: PleIq4NlTable<'_>,
+    weights: &Qwen4ExpTextSessionMetalWeights<'_>,
+    workspace: &mut Qwen4ExpTextSessionMetalWorkspace,
+    capture: Option<&Qwen4ExpCaptureSink<'_>>,
+    row_logits: Option<&Qwen4ExpRowLogitsSink<'_>>,
 ) -> Result<Qwen4ExpTokenTiming, Qwen4ExpRuntimeError> {
     let start_position = workspace.committed_length();
     let position = start_position
@@ -1584,15 +1875,31 @@ fn execute_qwen4exp_text_packed_sync(
         Qwen4ExpRuntimeError::Invalid("Metal command queue returned no command buffer".into())
     })?;
     let encoder = KernelEncoder::begin(&command);
-    let pending = match encode_qwen4exp_text_packed(
-        ctx,
-        &encoder,
-        token_ids,
-        start_position,
-        table,
-        weights,
-        workspace,
-    ) {
+    let encoded = if row_logits.is_some() {
+        encode_qwen4exp_text_packed_with_row_outputs(
+            ctx,
+            &encoder,
+            token_ids,
+            start_position,
+            table,
+            weights,
+            workspace,
+            capture,
+            row_logits,
+        )
+    } else {
+        encode_qwen4exp_text_packed_with_captures(
+            ctx,
+            &encoder,
+            token_ids,
+            start_position,
+            table,
+            weights,
+            workspace,
+            capture,
+        )
+    };
+    let pending = match encoded {
         Ok(pending) => pending,
         Err(error) => {
             encoder.end();
@@ -1634,14 +1941,25 @@ fn execute_qwen4exp_text_token_sync(
     weights: &Qwen4ExpTextSessionMetalWeights<'_>,
     workspace: &mut Qwen4ExpTextSessionMetalWorkspace,
 ) -> Result<Qwen4ExpTokenTiming, Qwen4ExpRuntimeError> {
+    execute_qwen4exp_text_token_with_captures_sync(ctx, token_id, table, weights, workspace, None)
+}
+
+fn execute_qwen4exp_text_token_with_captures_sync(
+    ctx: &MetalContext,
+    token_id: u32,
+    table: PleIq4NlTable<'_>,
+    weights: &Qwen4ExpTextSessionMetalWeights<'_>,
+    workspace: &mut Qwen4ExpTextSessionMetalWorkspace,
+    capture: Option<&Qwen4ExpCaptureSink<'_>>,
+) -> Result<Qwen4ExpTokenTiming, Qwen4ExpRuntimeError> {
     let position = workspace.committed_length();
     let wall_started = Instant::now();
     let command = ctx.queue.commandBuffer().ok_or_else(|| {
         Qwen4ExpRuntimeError::Invalid("Metal command queue returned no command buffer".into())
     })?;
     let encoder = KernelEncoder::begin(&command);
-    let pending = match encode_qwen4exp_text_token(
-        ctx, &encoder, token_id, position, table, weights, workspace,
+    let pending = match encode_qwen4exp_text_token_with_captures(
+        ctx, &encoder, token_id, position, table, weights, workspace, capture,
     ) {
         Ok(pending) => pending,
         Err(error) => {
@@ -2063,6 +2381,19 @@ fn smaller_prefill_rows(rows: Option<usize>) -> Option<usize> {
         .map(|n| 1 << (usize::BITS - 1 - (n - 1).leading_zeros()))
 }
 
+fn next_prefill_rows(rows: Option<usize>, minimum: usize) -> Option<Option<usize>> {
+    let current = rows?;
+    if current <= minimum {
+        return None;
+    }
+    let smaller = smaller_prefill_rows(rows);
+    Some(if minimum == 0 {
+        smaller
+    } else {
+        Some(smaller.unwrap_or(minimum).max(minimum))
+    })
+}
+
 fn session_allocation_can_narrow(error: &Qwen4ExpTextSessionError) -> bool {
     matches!(error, Qwen4ExpTextSessionError::MemoryAdmission(denied) if denied.reason().is_pressure())
         || matches!(
@@ -2071,31 +2402,110 @@ fn session_allocation_can_narrow(error: &Qwen4ExpTextSessionError) -> bool {
         )
 }
 
+/// Preflight target residency, one session and additional not-yet-resident
+/// weights (for example a drafter head). Narrow only reusable packed rows,
+/// preserving the original context and selected-QSA extent. Load the returned
+/// plan with `load_with_adaptive_prefill_plan` after the extra weights reside.
+pub fn select_qwen4exp_prefill_plan_with_floor(
+    ctx: &MetalContext,
+    plan: Qwen4ExpTextSessionPlan,
+    signals: crate::metal::MetalMemorySignals,
+    minimum_packed_rows: usize,
+    additional_resident_bytes: u64,
+) -> Result<(Qwen4ExpTextSessionPlan, MetalMemoryAdmission), Qwen4ExpRuntimeError> {
+    let _allocation = ctx.begin_allocation_transaction();
+    select_prefill_plan_with_floor(
+        ctx,
+        plan,
+        signals,
+        true,
+        true,
+        minimum_packed_rows,
+        additional_resident_bytes,
+    )
+}
+
+#[cfg(test)]
 fn select_prefill_plan(
+    ctx: &MetalContext,
+    plan: Qwen4ExpTextSessionPlan,
+    signals: crate::metal::MetalMemorySignals,
+    before_residency: bool,
+    adaptive: bool,
+) -> Result<(Qwen4ExpTextSessionPlan, MetalMemoryAdmission), Qwen4ExpRuntimeError> {
+    select_prefill_plan_with_floor(ctx, plan, signals, before_residency, adaptive, 0, 0)
+}
+
+fn select_prefill_plan_with_floor(
     ctx: &MetalContext,
     mut plan: Qwen4ExpTextSessionPlan,
     signals: crate::metal::MetalMemorySignals,
     before_residency: bool,
     adaptive: bool,
+    minimum_packed_rows: usize,
+    additional_resident_bytes: u64,
 ) -> Result<(Qwen4ExpTextSessionPlan, MetalMemoryAdmission), Qwen4ExpRuntimeError> {
+    let (_, admission) = select_prefill_rows(
+        plan.memory_plan().packed_prefill_capacity(),
+        adaptive,
+        minimum_packed_rows,
+        |rows| {
+            if rows != plan.memory_plan().packed_prefill_capacity() {
+                plan = plan.with_prefill_rows(ctx, rows)?;
+            }
+            let bytes = if before_residency {
+                plan.memory_plan().priced_upper_bytes_for_sessions(1)?
+            } else {
+                plan.memory_plan().session_priced_upper_bytes()
+            };
+            prefill_admission_with_extra(bytes, additional_resident_bytes, signals)
+        },
+    )?;
+    Ok((plan, admission))
+}
+
+fn prefill_admission_with_extra(
+    bytes: u64,
+    additional_resident_bytes: u64,
+    signals: crate::metal::MetalMemorySignals,
+) -> Result<MetalMemoryAdmission, Qwen4ExpRuntimeError> {
+    let bytes = bytes
+        .checked_add(additional_resident_bytes)
+        .ok_or_else(|| {
+            Qwen4ExpRuntimeError::Invalid("target plus additional residency price overflow".into())
+        })?;
+    Ok(crate::metal::evaluate_metal_memory_admission(
+        bytes,
+        crate::qwen4exp_text_session::QWEN4EXP_TEXT_SESSION_DYNAMIC_RESERVE_BYTES,
+        signals,
+        true,
+    ))
+}
+
+fn select_prefill_rows(
+    mut rows: Option<usize>,
+    adaptive: bool,
+    minimum: usize,
+    mut admit: impl FnMut(Option<usize>) -> Result<MetalMemoryAdmission, Qwen4ExpRuntimeError>,
+) -> Result<(Option<usize>, MetalMemoryAdmission), Qwen4ExpRuntimeError> {
+    if minimum == 1 || (minimum > 0 && rows.is_none_or(|rows| rows < minimum)) {
+        return invalid("packed prefill floor must be >= 2 and fit the initial workspace");
+    }
     loop {
-        let admission = if before_residency {
-            plan.memory_plan().admission_before_residency(signals, 1)?
-        } else {
-            plan.memory_plan().admission_after_residency(signals)
-        };
+        let admission = admit(rows)?;
         let Some(denied) = admission.refusal() else {
-            return Ok((plan, admission));
+            return Ok((rows, admission));
         };
-        let rows = plan.memory_plan().packed_prefill_capacity();
-        if !adaptive || !denied.reason().is_pressure() || rows.is_none() {
+        if !adaptive || !denied.reason().is_pressure() {
             return Err(denied.into());
         }
-        let smaller = smaller_prefill_rows(rows);
+        let Some(smaller) = next_prefill_rows(rows, minimum) else {
+            return Err(denied.into());
+        };
         tracing::info!(
             "qwen4exp: prefill admission refused ({denied}); narrowing packed rows={rows:?} to {smaller:?}"
         );
-        plan = plan.with_prefill_rows(ctx, smaller)?;
+        rows = smaller;
     }
 }
 
@@ -3847,6 +4257,574 @@ mod tests {
         assert!((profile.stages[2].gpu_ms - 1.0).abs() < 1e-12);
         assert!((profile.encoder_boundary_ms - 1.0).abs() < 1e-12);
         assert!(resolve_qwen4exp_layer_profile(token, &stages, &[10, 9]).is_err());
+    }
+
+    fn native_readout_of_saved_hyper_rows(
+        runner: &Qwen4ExpTextRunner<'_, '_, '_>,
+        saved_hyper: &[f32],
+        command_rows: usize,
+    ) -> Vec<Vec<f32>> {
+        use crate::metal_forward::encode_mat_vec_dispatch;
+        use crate::qwen4exp_metal::{
+            GatedResidualMetalScratch, encode_final_gated_residual_mix_with_policy,
+        };
+
+        let g = &runner.weights.geometry;
+        assert_eq!(saved_hyper.len(), command_rows * g.hyper_width());
+        let input = MetalTensor::from_bytes(
+            runner.ctx,
+            bytemuck::cast_slice(saved_hyper),
+            vec![g.hyper_width() as u64, command_rows as u64],
+            GgmlType::F32,
+        )
+        .unwrap();
+        let logits = MetalTensor::zeros_f32(runner.ctx, vec![g.vocab_size() as u64]).unwrap();
+        let mut scratch = GatedResidualMetalScratch::new(
+            runner.ctx,
+            g.branch_count(),
+            g.hidden_size(),
+            g.low_rank(),
+        )
+        .unwrap();
+        scratch.bind_hc_up_mix(runner.workspace.hc_up_mix_enabled());
+        let mut rows = Vec::new();
+        for row in 0..command_rows {
+            let hyper =
+                input.view_subrange((row * g.hyper_width()) as u64, vec![g.hyper_width() as u64]);
+            let command = runner.ctx.queue.commandBuffer().unwrap();
+            let enc = KernelEncoder::begin(&command);
+            // Separate scratch/output and one completed head per row: no target
+            // state, production tail loop, row sink, or bank scatter is reused.
+            let read = encode_final_gated_residual_mix_with_policy(
+                runner.ctx,
+                &enc,
+                &hyper,
+                g.eps(),
+                runner.weights.final_read,
+                &mut scratch,
+                command_rows == 1,
+            )
+            .unwrap();
+            encode_mat_vec_dispatch(
+                runner.ctx,
+                &enc,
+                runner.weights.output,
+                read.mixed(),
+                &logits,
+                g.hidden_size(),
+                g.vocab_size(),
+            )
+            .unwrap();
+            drop(read);
+            enc.end();
+            command.commit();
+            crate::metal::wait_completed(&command).unwrap();
+            scratch.release_after().unwrap();
+            rows.push(read_f32_tensor(&logits));
+        }
+        rows
+    }
+
+    #[test]
+    #[ignore = "exclusive GPU lease + released target; all-row readout/state/continuation oracle"]
+    fn released_all_row_readouts_preserve_state_at_qsa_compression_boundaries() {
+        let _lease = crate::metal::acquire_metal_benchmark_lease().unwrap();
+        let gguf = GgufFile::open(crate::test_fixtures::QWEN4EXP_Q3_K_XL.required()).unwrap();
+        let tokenizer = Tokenizer::from_gguf(&gguf).unwrap();
+        let tokens: Vec<u32> = tokenizer.encode(
+            "<|im_start|>user\nCount: one two three four five six seven eight nine ten.<|im_end|>\n<|im_start|>assistant\n",
+            false,
+        ).unwrap().into_iter().map(|id| u32::try_from(id).unwrap()).collect();
+        assert!(tokens.len() > 12);
+        let ctx = MetalContext::new().unwrap();
+        let capacity =
+            Qwen4ExpSessionCapacity::for_forward_limit(&Qwen4ExpConfig::flash_next_reference(), 64)
+                .unwrap();
+        let mut loaded =
+            Qwen4ExpLoadedModel::load_with_packed_prefill(&ctx, &gguf, capacity, 32).unwrap();
+        let mut runner = loaded.create_runner(&ctx).unwrap();
+        let mut captures = runner
+            .allocate_capture_bank(vec![45, 5, 25, 15, 35], 4)
+            .unwrap();
+        let mut logits = runner.allocate_row_logits_bank(4).unwrap();
+        let mut short_captures = runner.allocate_capture_bank(vec![5], 1).unwrap();
+
+        for (prefix, rows) in [(3, 1), (3, 4), (4, 4), (7, 4)] {
+            runner.reset().unwrap();
+            zero_persistent_state(&runner);
+            runner.prefill(&tokens[..prefix]).unwrap();
+            // Whole-prefix host snapshots are used only as this test's oracle.
+            let entry = runner.capture_snapshot().unwrap();
+            let block = &tokens[prefix..prefix + rows];
+            if rows > 1 {
+                assert!(
+                    runner
+                        .forward_rows_with_captures_and_logits(
+                            block,
+                            &mut short_captures,
+                            &mut logits
+                        )
+                        .is_err()
+                );
+                assert_eq!(runner.next_position(), prefix);
+                assert!(!runner.workspace.is_poisoned());
+            }
+            execute_qwen4exp_text_packed_sync(
+                runner.ctx,
+                block,
+                runner.ple_table,
+                &runner.weights,
+                &mut runner.workspace,
+            )
+            .unwrap();
+            let capture_off_last = runner.logits().unwrap().to_vec();
+            let capture_off_state = snapshot_persistent_state(&runner);
+            let capture_off_history = runner.workspace.ple_prior_tokens().to_vec();
+            let capture_off_lengths = runner.workspace.qsa_committed_lengths();
+            let native_hyper = runner.workspace.completed_final_hyper_rows_for_tests(rows);
+            let native_rows = native_readout_of_saved_hyper_rows(&runner, &native_hyper, rows);
+            assert_f32_bits_eq(
+                "independent native head endpoint",
+                &capture_off_last,
+                &native_rows[rows - 1],
+            );
+            assert_state_bytes_eq(
+                "independent head leaves target state unchanged",
+                &capture_off_state,
+                &snapshot_persistent_state(&runner),
+            );
+            assert_eq!(runner.next_position(), prefix + rows);
+            assert_eq!(runner.workspace.ple_prior_tokens(), capture_off_history);
+            assert_eq!(
+                runner.workspace.qsa_committed_lengths(),
+                capture_off_lengths
+            );
+            assert_f32_bits_eq(
+                "independent head leaves target logits unchanged",
+                &capture_off_last,
+                runner.logits().unwrap().as_slice(),
+            );
+            assert_f32_bits_eq(
+                "independent head leaves native hyper unchanged",
+                &native_hyper,
+                &runner.workspace.completed_final_hyper_rows_for_tests(rows),
+            );
+            let capture_off_continuation = runner
+                .forward_token(tokens[prefix + rows])
+                .unwrap()
+                .to_vec();
+            let capture_off_continuation_state = snapshot_persistent_state(&runner);
+            runner.reset().unwrap();
+            zero_persistent_state(&runner);
+            runner.restore_snapshot(&entry).unwrap();
+
+            let sink = captures.sink(prefix..prefix + rows);
+            execute_qwen4exp_text_packed_with_captures_sync(
+                runner.ctx,
+                block,
+                runner.ple_table,
+                &runner.weights,
+                &mut runner.workspace,
+                Some(&sink),
+            )
+            .unwrap();
+            let expected_features = read_f32_tensor(sink.complete().tensor());
+            let expected_last = runner.logits().unwrap().to_vec();
+            let expected_state = snapshot_persistent_state(&runner);
+            let expected_history = runner.workspace.ple_prior_tokens().to_vec();
+            let expected_continuation = runner
+                .forward_token(tokens[prefix + rows])
+                .unwrap()
+                .to_vec();
+            let expected_continuation_state = snapshot_persistent_state(&runner);
+
+            assert_f32_bits_eq(
+                "capture-OFF same-width endpoint",
+                &capture_off_last,
+                &expected_last,
+            );
+            assert_state_bytes_eq(
+                "capture-OFF same-width state",
+                &capture_off_state,
+                &expected_state,
+            );
+            assert_f32_bits_eq(
+                "capture-OFF continuation",
+                &capture_off_continuation,
+                &expected_continuation,
+            );
+            assert_state_bytes_eq(
+                "capture-OFF continuation state",
+                &capture_off_continuation_state,
+                &expected_continuation_state,
+            );
+
+            runner.reset().unwrap();
+            zero_persistent_state(&runner);
+            runner.restore_snapshot(&entry).unwrap();
+            let output = runner
+                .forward_rows_with_captures_and_logits(block, &mut captures, &mut logits)
+                .unwrap();
+            assert_eq!(output.logits().positions(), prefix..prefix + rows);
+            assert_eq!(output.features().positions(), prefix..prefix + rows);
+            assert!(output.logits().row(rows).is_none());
+            let row_values: Vec<Vec<f32>> = (0..rows)
+                .map(|row| {
+                    let values = output.logits().row(row).unwrap();
+                    assert_eq!(values.len(), 248320);
+                    assert!(values.iter().all(|v| v.is_finite()));
+                    assert_f32_bits_eq(
+                        &format!("same-width native head prefix={prefix} rows={rows} row={row}"),
+                        &native_rows[row],
+                        values,
+                    );
+                    values.to_vec()
+                })
+                .collect();
+            assert_f32_bits_eq(
+                "all-row conditioning features",
+                &expected_features,
+                &read_f32_tensor(output.features().tensor()),
+            );
+            assert_f32_bits_eq(
+                "all-row final logits",
+                &expected_last,
+                &row_values[rows - 1],
+            );
+            drop(output);
+            assert_f32_bits_eq(
+                "target final logits retained",
+                &expected_last,
+                runner.logits().unwrap().as_slice(),
+            );
+            assert_state_bytes_eq(
+                "all-row target state",
+                &expected_state,
+                &snapshot_persistent_state(&runner),
+            );
+            assert_eq!(runner.workspace.ple_prior_tokens(), expected_history);
+            assert!(
+                runner
+                    .workspace
+                    .qsa_committed_lengths()
+                    .iter()
+                    .all(|(_, n)| *n == prefix + rows)
+            );
+            assert_f32_bits_eq(
+                "all-row continuation",
+                &expected_continuation,
+                runner
+                    .forward_token(tokens[prefix + rows])
+                    .unwrap()
+                    .as_slice(),
+            );
+            assert_state_bytes_eq(
+                "all-row continuation state",
+                &expected_continuation_state,
+                &snapshot_persistent_state(&runner),
+            );
+
+            // Readout qualification is the exact SAME-WIDTH oracle above.
+            // Characterize native width changes separately: width one uses
+            // scalar projections/QSA and may enable fused HC-up; wider calls
+            // use packed projections/dense attention and disable fused HC-up.
+            // This is not a serial-equivalence or native-causality qualification.
+            for (row, native) in native_rows.iter().enumerate() {
+                runner.reset().unwrap();
+                zero_persistent_state(&runner);
+                runner.restore_snapshot(&entry).unwrap();
+                execute_qwen4exp_text_packed_sync(
+                    runner.ctx,
+                    &block[..=row],
+                    runner.ple_table,
+                    &runner.weights,
+                    &mut runner.workspace,
+                )
+                .unwrap();
+                if row + 1 == rows {
+                    assert_f32_bits_eq(
+                        "ordinary same-width endpoint replay",
+                        native,
+                        runner.logits().unwrap().as_slice(),
+                    );
+                }
+                report_logit_arms(
+                    &format!(
+                        "native cross-width characterization prefix={prefix} full_width={rows} endpoint_width={} row={row}",
+                        row + 1
+                    ),
+                    runner.logits().unwrap().as_slice(),
+                    native,
+                );
+            }
+        }
+        let workspace = runner.into_workspace();
+        loaded.restore_workspace(workspace).unwrap();
+        let runner = loaded.create_runner(&ctx).unwrap();
+        assert_eq!(runner.next_position(), 0);
+        let workspace = runner.into_workspace();
+        loaded.restore_workspace(workspace).unwrap();
+    }
+
+    #[test]
+    #[ignore = "exclusive GPU lease + released target; bounded native width-4 suffix causality discriminator"]
+    fn released_native_packed_width4_suffix_mutation_preserves_earlier_rows() {
+        const PREFIX: usize = 4;
+        const ROWS: usize = 4;
+        const UNCHANGED: usize = 2;
+        let _lease = crate::metal::acquire_metal_benchmark_lease().unwrap();
+        let gguf = GgufFile::open(crate::test_fixtures::QWEN4EXP_Q3_K_XL.required()).unwrap();
+        let tokenizer = Tokenizer::from_gguf(&gguf).unwrap();
+        let tokens: Vec<u32> = tokenizer.encode(
+            "<|im_start|>user\nCount: one two three four five six seven eight nine ten.<|im_end|>\n<|im_start|>assistant\n",
+            false,
+        ).unwrap().into_iter().map(|id| u32::try_from(id).unwrap()).collect();
+        assert!(tokens.len() >= PREFIX + ROWS);
+        let alternatives: Vec<u32> = tokenizer
+            .encode(" volcano submarine telescope", false)
+            .unwrap()
+            .into_iter()
+            .map(|id| u32::try_from(id).unwrap())
+            .collect();
+        let baseline = tokens[PREFIX..PREFIX + ROWS].to_vec();
+        let mut mutated = baseline.clone();
+        for row in UNCHANGED..ROWS {
+            mutated[row] = *alternatives
+                .iter()
+                .find(|&&id| id != baseline[row])
+                .expect("suffix mutation needs a distinct valid token");
+            assert_ne!(mutated[row], baseline[row]);
+        }
+        assert_eq!(&baseline[..UNCHANGED], &mutated[..UNCHANGED]);
+        eprintln!(
+            "native suffix discriminator prefix={PREFIX} width={ROWS} unchanged_rows={UNCHANGED} baseline={baseline:?} mutated={mutated:?}"
+        );
+
+        let ctx = MetalContext::new().unwrap();
+        let capacity =
+            Qwen4ExpSessionCapacity::for_forward_limit(&Qwen4ExpConfig::flash_next_reference(), 64)
+                .unwrap();
+        let mut loaded =
+            Qwen4ExpLoadedModel::load_with_packed_prefill(&ctx, &gguf, capacity, 32).unwrap();
+        let mut runner = loaded.create_runner(&ctx).unwrap();
+        zero_persistent_state(&runner);
+        runner.prefill(&tokens[..PREFIX]).unwrap();
+        // Test-only entry snapshot: each arm has identical visible history and
+        // zeroed invisible storage. Neither capture nor all-row readout is enabled.
+        let entry = runner.capture_snapshot().unwrap();
+        let width = runner.weights.geometry.hyper_width();
+        let mut arms = Vec::new();
+        for block in [&baseline, &mutated, &baseline] {
+            runner.reset().unwrap();
+            zero_persistent_state(&runner);
+            runner.restore_snapshot(&entry).unwrap();
+            assert_eq!(runner.next_position(), PREFIX);
+            execute_qwen4exp_text_packed_sync(
+                runner.ctx,
+                block,
+                runner.ple_table,
+                &runner.weights,
+                &mut runner.workspace,
+            )
+            .unwrap();
+            assert_eq!(runner.next_position(), PREFIX + ROWS);
+            let hyper = runner.workspace.completed_final_hyper_rows_for_tests(ROWS);
+            let logits = native_readout_of_saved_hyper_rows(&runner, &hyper, ROWS);
+            assert_f32_bits_eq(
+                "suffix discriminator independent head endpoint",
+                runner.logits().unwrap().as_slice(),
+                &logits[ROWS - 1],
+            );
+            arms.push((hyper, logits));
+        }
+        let workspace = runner.into_workspace();
+        loaded.restore_workspace(workspace).unwrap();
+
+        let (baseline_hyper, baseline_logits) = &arms[0];
+        let (mutated_hyper, mutated_logits) = &arms[1];
+        let (repeated_hyper, repeated_logits) = &arms[2];
+        assert_f32_bits_eq(
+            "native A/B/A baseline hyper repeat",
+            baseline_hyper,
+            repeated_hyper,
+        );
+        for row in 0..ROWS {
+            assert_f32_bits_eq(
+                &format!("native A/B/A baseline logits repeat row={row}"),
+                &baseline_logits[row],
+                &repeated_logits[row],
+            );
+        }
+        assert!(
+            baseline_hyper[UNCHANGED * width..]
+                .iter()
+                .zip(&mutated_hyper[UNCHANGED * width..])
+                .any(|(a, b)| a.to_bits() != b.to_bits()),
+            "suffix mutation must affect a changed row"
+        );
+
+        // Bucket slots are emitted in token order, so future routes cannot
+        // renumber these earlier slots. At fixed width four, grouped expert
+        // tiles retain their arithmetic; route counts change tail/padding work.
+        // Require exact invariance initially, not a numerical-tolerance waiver.
+        // A failure is a discriminator needing localization, not by itself proof
+        // of semantic future-token access. A pass covers only this fixed fixture.
+        for row in 0..UNCHANGED {
+            let range = row * width..(row + 1) * width;
+            report_logit_arms(
+                &format!("native suffix discriminator final hyper row={row}"),
+                &baseline_hyper[range.clone()],
+                &mutated_hyper[range],
+            );
+            report_logit_arms(
+                &format!("native suffix discriminator logits row={row}"),
+                &baseline_logits[row],
+                &mutated_logits[row],
+            );
+        }
+        for row in 0..UNCHANGED {
+            let range = row * width..(row + 1) * width;
+            assert_f32_bits_eq(
+                &format!("native fixed-width suffix-invariant logits row={row}"),
+                &baseline_logits[row],
+                &mutated_logits[row],
+            );
+            assert_f32_bits_eq(
+                &format!("native fixed-width suffix-invariant hyper row={row}"),
+                &baseline_hyper[range.clone()],
+                &mutated_hyper[range],
+            );
+        }
+    }
+
+    #[test]
+    #[ignore = "exclusive GPU lease + released target; compact rollback and serial retained-prefix replay"]
+    fn released_compact_checkpoint_replays_retained_inputs_at_qsa_boundaries() {
+        let _lease = crate::metal::acquire_metal_benchmark_lease().unwrap();
+        let gguf = GgufFile::open(crate::test_fixtures::QWEN4EXP_Q3_K_XL.required()).unwrap();
+        let tokenizer = Tokenizer::from_gguf(&gguf).unwrap();
+        let seed: Vec<u32> = tokenizer
+            .encode(
+                "Count one two three four five six seven eight nine ten.\n",
+                false,
+            )
+            .unwrap()
+            .into_iter()
+            .map(|id| u32::try_from(id).unwrap())
+            .collect();
+        assert!(!seed.is_empty());
+        let tokens: Vec<u32> = seed.iter().copied().cycle().take(2060).collect();
+        let ctx = MetalContext::new().unwrap();
+        let capacity = Qwen4ExpSessionCapacity::for_forward_limit(
+            &Qwen4ExpConfig::flash_next_reference(),
+            2064,
+        )
+        .unwrap();
+        let mut loaded =
+            Qwen4ExpLoadedModel::load_with_packed_prefill(&ctx, &gguf, capacity, 2060).unwrap();
+        let mut runner = loaded.create_runner(&ctx).unwrap();
+        let mut checkpoint = runner.allocate_device_checkpoint_bank().unwrap();
+        let mut captures = runner
+            .allocate_capture_bank(vec![45, 5, 25, 15, 35], 4)
+            .unwrap();
+        let mut row_logits = runner.allocate_row_logits_bank(4).unwrap();
+        let visible_state = |runner: &Qwen4ExpTextRunner<'_, '_, '_>| {
+            runner
+                .workspace
+                .checkpoint_visible_regions_for_tests()
+                .unwrap()
+                .iter()
+                .map(|tensor| {
+                    // SAFETY: completed test session; checked visible state views.
+                    unsafe {
+                        std::slice::from_raw_parts(
+                            tensor
+                                .buffer
+                                .contents()
+                                .as_ptr()
+                                .cast::<u8>()
+                                .add(tensor.offset as usize),
+                            tensor.n_bytes() as usize,
+                        )
+                        .to_vec()
+                    }
+                })
+                .collect::<Vec<_>>()
+        };
+        for (prefix, retained) in [(0, 0), (3, 0), (3, 1), (3, 3), (4, 2), (7, 4), (2050, 2)] {
+            runner.reset().unwrap();
+            if prefix > 0 {
+                runner.prefill(&tokens[..prefix]).unwrap();
+            }
+            let block = &tokens[prefix..prefix + 4];
+            let correction = tokens[prefix + 4];
+            let mut expected_rows = Vec::new();
+            for &token in &block[..retained] {
+                expected_rows.push(runner.forward_token(token).unwrap().to_vec());
+            }
+            expected_rows.push(runner.forward_token(correction).unwrap().to_vec());
+            let expected_state = visible_state(&runner);
+            let expected_history = runner.workspace.ple_prior_tokens().to_vec();
+
+            runner.reset().unwrap();
+            if prefix > 0 {
+                runner.prefill(&tokens[..prefix]).unwrap();
+            }
+            runner.capture_device_checkpoint(&mut checkpoint).unwrap();
+            assert_eq!(checkpoint.captured_position(), Some(prefix));
+            let output = runner
+                .forward_rows_with_captures_and_logits(block, &mut captures, &mut row_logits)
+                .unwrap();
+            assert_eq!(output.logits().positions(), prefix..prefix + 4);
+            drop(output);
+            assert_eq!(
+                runner.restore_device_checkpoint(&mut checkpoint).unwrap(),
+                prefix
+            );
+            assert_eq!(runner.next_position(), prefix);
+            assert!(runner.logits().is_err());
+            assert_eq!(checkpoint.captured_position(), None);
+            assert!(runner.restore_device_checkpoint(&mut checkpoint).is_err());
+            assert_eq!(runner.next_position(), prefix);
+            assert!(!runner.workspace.is_poisoned());
+            for (row, &token) in block[..retained].iter().enumerate() {
+                assert_f32_bits_eq(
+                    "compact retained replay",
+                    &expected_rows[row],
+                    runner.forward_token(token).unwrap().as_slice(),
+                );
+            }
+            assert_f32_bits_eq(
+                "compact correction continuation",
+                expected_rows.last().unwrap(),
+                runner.forward_token(correction).unwrap().as_slice(),
+            );
+            assert_state_bytes_eq(
+                "compact restored visible state",
+                &expected_state,
+                &visible_state(&runner),
+            );
+            assert_eq!(runner.workspace.ple_prior_tokens(), expected_history);
+            assert!(
+                runner
+                    .workspace
+                    .qsa_committed_lengths()
+                    .iter()
+                    .all(|(_, n)| *n == prefix + retained + 1)
+            );
+
+            runner.capture_device_checkpoint(&mut checkpoint).unwrap();
+            runner.reset().unwrap();
+            assert!(runner.restore_device_checkpoint(&mut checkpoint).is_err());
+            assert_eq!(runner.next_position(), 0);
+        }
+        let workspace = runner.into_workspace();
+        loaded.restore_workspace(workspace).unwrap();
+        let mut runner = loaded.create_runner(&ctx).unwrap();
+        assert!(runner.restore_device_checkpoint(&mut checkpoint).is_err());
+        assert_eq!(runner.next_position(), 0);
+        let workspace = runner.into_workspace();
+        loaded.restore_workspace(workspace).unwrap();
     }
 
     #[test]

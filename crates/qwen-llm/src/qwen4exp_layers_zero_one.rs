@@ -381,6 +381,39 @@ impl Qwen4ExpLayersZeroOneMetalWorkspace {
         &self.history
     }
 
+    /// Only recurrent/convolution state; no position-growing cache regions.
+    pub(crate) fn compact_checkpoint_state(
+        &self,
+    ) -> Result<Vec<MetalTensor>, Qwen4ExpLayersZeroOneError> {
+        self.validate_checkpoint_history(&self.history)?;
+        Ok(self.persistent_state_tensors())
+    }
+
+    pub(crate) fn validate_checkpoint_history(
+        &self,
+        history: &PleHistory,
+    ) -> Result<(), Qwen4ExpLayersZeroOneError> {
+        self.require_idle()?;
+        if self.state_poisoned || self.encode_failed || self.pending_history.is_some() {
+            return invalid("checkpoint history requires healthy released bootstrap layers");
+        }
+        if history.next_position().unwrap_or(0) > self.history.next_position().unwrap_or(0) {
+            return invalid("checkpoint history cannot advance the bootstrap position");
+        }
+        Ok(())
+    }
+
+    /// Caller has restored the corresponding device state. Does not zero state
+    /// or clear poison; failed GPU work is not recoverable through this path.
+    pub(crate) fn rewind_checkpoint_history(
+        &mut self,
+        history: PleHistory,
+    ) -> Result<(), Qwen4ExpLayersZeroOneError> {
+        self.validate_checkpoint_history(&history)?;
+        self.history = history;
+        Ok(())
+    }
+
     /// Install a snapshot's PLE history into freshly reset bootstrap layers.
     pub(crate) fn restore_history(
         &mut self,

@@ -270,6 +270,7 @@ impl Qwen4ExpTextSessionMetalWorkspace {
             self.logits.buffer.contents().as_ptr() as usize
         );
         assert!(checkpoint.length <= self.committed_length);
+        self.checkpoint_lineage = self.checkpoint_lineage.next_branch().unwrap();
         let tensors = self.checkpoint_tensors();
         assert_eq!(tensors.len(), checkpoint.storage.len());
         for (tensor, bytes) in tensors.iter().zip(&checkpoint.storage) {

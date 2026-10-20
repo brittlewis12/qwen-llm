@@ -55,10 +55,19 @@ use std::fmt;
 use std::mem::size_of;
 use std::time::Instant;
 
+mod capture;
 #[cfg(test)]
 mod checkpoint;
+mod device_checkpoint;
+mod row_logits;
 mod snapshot;
 
+pub(crate) use capture::Qwen4ExpCaptureSink;
+pub use capture::{Qwen4ExpCaptureBank, Qwen4ExpCapturePlan, Qwen4ExpCapturedFeatures};
+use device_checkpoint::CheckpointLineage;
+pub use device_checkpoint::Qwen4ExpDeviceCheckpointBank;
+pub(crate) use row_logits::Qwen4ExpRowLogitsSink;
+pub use row_logits::{Qwen4ExpRowLogits, Qwen4ExpRowLogitsBank, Qwen4ExpRowLogitsPlan};
 pub use snapshot::Qwen4ExpTextSnapshot;
 
 #[inline(always)]
@@ -1076,6 +1085,7 @@ impl Qwen4ExpTextPackedScratch {
 use crate::qwen4exp_metal::encode_final_gated_residual_mix;
 
 pub struct Qwen4ExpTextSessionMetalWorkspace {
+    checkpoint_lineage: CheckpointLineage,
     geometry: Qwen4ExpTextSessionMetalGeometry,
     #[cfg(test)]
     split_decode_scratch: Option<MetalTensor>,
@@ -1192,6 +1202,7 @@ impl Qwen4ExpTextSessionMetalWorkspace {
             None
         };
         let workspace = Self {
+            checkpoint_lineage: CheckpointLineage::fresh()?,
             #[cfg(test)]
             split_decode_scratch,
             zero_one: Qwen4ExpLayersZeroOneMetalWorkspace::new(ctx, geometry.zero_one)?,
@@ -1317,6 +1328,9 @@ impl Qwen4ExpTextSessionMetalWorkspace {
         if enabled {
             crate::qwen4exp_moe::guarded_topk::preflight(ctx)?;
         }
+        if self.guarded_topk_enabled() != enabled {
+            self.checkpoint_lineage = self.checkpoint_lineage.next_branch()?;
+        }
         self.zero_one.bind_guarded_topk(enabled);
         for block in &mut self.post_ple {
             block.bind_guarded_topk(enabled);
@@ -1340,6 +1354,9 @@ impl Qwen4ExpTextSessionMetalWorkspace {
         self.final_read.validate_hc_up_binding(ctx)?;
         if enabled {
             crate::qwen4exp_metal::hc_up::preflight(ctx)?;
+        }
+        if self.hc_up_mix_enabled() != enabled {
+            self.checkpoint_lineage = self.checkpoint_lineage.next_branch()?;
         }
         self.zero_one.bind_hc_up_mix(enabled);
         for block in &mut self.post_ple {
@@ -1369,6 +1386,7 @@ impl Qwen4ExpTextSessionMetalWorkspace {
         for block in &self.post_ple {
             block.validate_split_binding(ctx, scratch)?;
         }
+        self.checkpoint_lineage = self.checkpoint_lineage.next_branch()?;
         for block in &mut self.post_ple {
             block.bind_split_scratch(scratch);
         }
@@ -1453,6 +1471,7 @@ impl Qwen4ExpTextSessionMetalWorkspace {
         if self.pending_length.is_some() {
             return invalid("cannot reset while a token update is pending");
         }
+        self.checkpoint_lineage = self.checkpoint_lineage.next_branch()?;
         self.committed_length = 0;
         self.state_poisoned = true;
         self.encode_failed = true;
@@ -1711,7 +1730,7 @@ pub fn encode_qwen4exp_text_token<'a>(
     workspace: &'a mut Qwen4ExpTextSessionMetalWorkspace,
 ) -> Result<Qwen4ExpTextSessionPending<'a>, Qwen4ExpTextSessionError> {
     encode_qwen4exp_text_token_inner(
-        ctx, enc, token_id, position, table, weights, workspace, None,
+        ctx, enc, token_id, position, table, weights, workspace, None, None, None,
     )
 }
 
@@ -1735,6 +1754,24 @@ pub(crate) fn encode_qwen4exp_text_token_with_post_layer_hyper_probe<'a>(
         weights,
         workspace,
         Some(probe),
+        None,
+        None,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn encode_qwen4exp_text_token_with_captures<'a>(
+    ctx: &MetalContext,
+    enc: &KernelEncoder,
+    token_id: u32,
+    position: usize,
+    table: PleIq4NlTable<'_>,
+    weights: &Qwen4ExpTextSessionMetalWeights<'_>,
+    workspace: &'a mut Qwen4ExpTextSessionMetalWorkspace,
+    capture: Option<&Qwen4ExpCaptureSink<'_>>,
+) -> Result<Qwen4ExpTextSessionPending<'a>, Qwen4ExpTextSessionError> {
+    encode_qwen4exp_text_token_inner(
+        ctx, enc, token_id, position, table, weights, workspace, None, capture, None,
     )
 }
 
@@ -1748,6 +1785,8 @@ fn encode_qwen4exp_text_token_inner<'a>(
     weights: &Qwen4ExpTextSessionMetalWeights<'_>,
     workspace: &'a mut Qwen4ExpTextSessionMetalWorkspace,
     probe: Option<&Qwen4ExpPostLayerHyperProbe<'_>>,
+    capture: Option<&Qwen4ExpCaptureSink<'_>>,
+    row_logits: Option<&Qwen4ExpRowLogitsSink<'_>>,
 ) -> Result<Qwen4ExpTextSessionPending<'a>, Qwen4ExpTextSessionError> {
     #[cfg(test)]
     let _child_command = crate::qwen4exp_child_profile::command(enc);
@@ -1770,6 +1809,8 @@ fn encode_qwen4exp_text_token_inner<'a>(
         weights,
         workspace,
         probe,
+        capture,
+        row_logits,
     ) {
         workspace.encode_failed = true;
         workspace.state_poisoned = true;
@@ -1801,6 +1842,61 @@ pub fn encode_qwen4exp_text_packed<'a>(
         workspace,
         None,
         None,
+        None,
+        None,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn encode_qwen4exp_text_packed_with_captures<'a>(
+    ctx: &MetalContext,
+    enc: &KernelEncoder,
+    token_ids: &[u32],
+    start_position: usize,
+    table: PleIq4NlTable<'_>,
+    weights: &Qwen4ExpTextSessionMetalWeights<'_>,
+    workspace: &'a mut Qwen4ExpTextSessionMetalWorkspace,
+    capture: Option<&Qwen4ExpCaptureSink<'_>>,
+) -> Result<Qwen4ExpTextSessionPending<'a>, Qwen4ExpTextSessionError> {
+    encode_qwen4exp_text_packed_inner(
+        ctx,
+        enc,
+        token_ids,
+        start_position,
+        table,
+        weights,
+        workspace,
+        None,
+        None,
+        capture,
+        None,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn encode_qwen4exp_text_packed_with_row_outputs<'a>(
+    ctx: &MetalContext,
+    enc: &KernelEncoder,
+    token_ids: &[u32],
+    start_position: usize,
+    table: PleIq4NlTable<'_>,
+    weights: &Qwen4ExpTextSessionMetalWeights<'_>,
+    workspace: &'a mut Qwen4ExpTextSessionMetalWorkspace,
+    capture: Option<&Qwen4ExpCaptureSink<'_>>,
+    row_logits: Option<&Qwen4ExpRowLogitsSink<'_>>,
+) -> Result<Qwen4ExpTextSessionPending<'a>, Qwen4ExpTextSessionError> {
+    encode_qwen4exp_text_packed_inner(
+        ctx,
+        enc,
+        token_ids,
+        start_position,
+        table,
+        weights,
+        workspace,
+        None,
+        None,
+        capture,
+        row_logits,
     )
 }
 
@@ -1830,6 +1926,8 @@ pub(crate) fn encode_qwen4exp_text_packed_profiled<'a>(
         workspace,
         Some(recorder),
         Some(cpu_timing),
+        None,
+        None,
     )
 }
 
@@ -1946,9 +2044,11 @@ fn encode_qwen4exp_text_packed_inner<'a>(
     workspace: &'a mut Qwen4ExpTextSessionMetalWorkspace,
     profile: Option<&mut Qwen4ExpPackedProfileRecorder<'_>>,
     mut cpu_timing: Option<&mut Qwen4ExpPackedEncodeCpuTiming>,
+    capture: Option<&Qwen4ExpCaptureSink<'_>>,
+    row_logits: Option<&Qwen4ExpRowLogitsSink<'_>>,
 ) -> Result<Qwen4ExpTextSessionPending<'a>, Qwen4ExpTextSessionError> {
     if token_ids.len() == 1 {
-        return encode_qwen4exp_text_token(
+        return encode_qwen4exp_text_token_inner(
             ctx,
             enc,
             token_ids[0],
@@ -1956,6 +2056,9 @@ fn encode_qwen4exp_text_packed_inner<'a>(
             table,
             weights,
             workspace,
+            None,
+            capture,
+            row_logits,
         );
     }
     let encode = || {
@@ -1993,6 +2096,8 @@ fn encode_qwen4exp_text_packed_inner<'a>(
                 workspace,
                 token_ids.len(),
                 profile,
+                capture,
+                row_logits,
             )
         } {
             workspace.encode_failed = true;
@@ -2346,6 +2451,8 @@ unsafe fn encode_packed_step(
     workspace: &mut Qwen4ExpTextSessionMetalWorkspace,
     tokens: usize,
     mut profile: Option<&mut Qwen4ExpPackedProfileRecorder<'_>>,
+    capture: Option<&Qwen4ExpCaptureSink<'_>>,
+    row_logits: Option<&Qwen4ExpRowLogitsSink<'_>>,
 ) -> Result<(), Qwen4ExpTextSessionError> {
     let views = workspace
         .packed_scratch()?
@@ -2430,6 +2537,9 @@ unsafe fn encode_packed_step(
         )
     }?;
     end_optional(&mut profile, enc, marker)?;
+    if let Some(capture) = capture {
+        capture.encode(ctx, enc, 1, &views.hyper_residual, start_position, tokens)?;
+    }
     for index in 0..weights.post_ple.len() {
         let block_weights = weights.post_ple.get(index).copied().ok_or_else(|| {
             Qwen4ExpTextSessionError::Invalid(format!(
@@ -2485,17 +2595,34 @@ unsafe fn encode_packed_step(
             }?;
         }
         end_optional(&mut profile, enc, marker)?;
+        if let Some(capture) = capture {
+            capture.encode(
+                ctx,
+                enc,
+                layer,
+                &views.hyper_residual,
+                start_position,
+                tokens,
+            )?;
+        }
     }
-    let last_hyper = views.hyper_residual.view_subrange(
-        ((tokens - 1) * workspace.geometry.hyper_width()) as u64,
-        vec![workspace.geometry.hyper_width() as u64],
-    );
     let marker = begin_optional(
         &mut profile,
         enc,
         Qwen4ExpPackedProfileLabel::coarse("tail", None, None),
     )?;
-    encode_tail_stage(ctx, enc, &last_hyper, weights, workspace, false)?;
+    // Keep the ordinary last-row-only tail unchanged when readouts are absent.
+    let first_row = if row_logits.is_some() { 0 } else { tokens - 1 };
+    for row in first_row..tokens {
+        let hyper = views.hyper_residual.view_subrange(
+            (row * workspace.geometry.hyper_width()) as u64,
+            vec![workspace.geometry.hyper_width() as u64],
+        );
+        encode_tail_stage(ctx, enc, &hyper, weights, workspace, false)?;
+        if let Some(logits) = row_logits {
+            logits.encode_row(ctx, enc, start_position + row, &workspace.logits)?;
+        }
+    }
     end_optional(&mut profile, enc, marker)?;
     Ok(())
 }
@@ -2826,6 +2953,8 @@ fn encode_step(
     weights: &Qwen4ExpTextSessionMetalWeights<'_>,
     workspace: &mut Qwen4ExpTextSessionMetalWorkspace,
     probe: Option<&Qwen4ExpPostLayerHyperProbe<'_>>,
+    capture: Option<&Qwen4ExpCaptureSink<'_>>,
+    row_logits: Option<&Qwen4ExpRowLogitsSink<'_>>,
 ) -> Result<(), Qwen4ExpTextSessionError> {
     encode_zero_one_stage(
         ctx,
@@ -2837,6 +2966,9 @@ fn encode_step(
         workspace,
     )?;
     encode_post_layer_hyper_probe(ctx, enc, 1, &workspace.hyper_residual, probe)?;
+    if let Some(capture) = capture {
+        capture.encode(ctx, enc, 1, &workspace.hyper_residual, position, 1)?;
+    }
     for index in 0..weights.post_ple.len() {
         encode_post_ple_stage(ctx, enc, position, index, weights, workspace)?;
         encode_post_layer_hyper_probe(
@@ -2846,9 +2978,23 @@ fn encode_step(
             &workspace.hyper_residual,
             probe,
         )?;
+        if let Some(capture) = capture {
+            capture.encode(
+                ctx,
+                enc,
+                index as u32 + 2,
+                &workspace.hyper_residual,
+                position,
+                1,
+            )?;
+        }
     }
     let hyper_residual = workspace.hyper_residual.clone();
-    encode_tail_stage(ctx, enc, &hyper_residual, weights, workspace, true)
+    encode_tail_stage(ctx, enc, &hyper_residual, weights, workspace, true)?;
+    if let Some(logits) = row_logits {
+        logits.encode_row(ctx, enc, position, &workspace.logits)?;
+    }
+    Ok(())
 }
 
 fn validate_post_layer_hyper_probe(
@@ -3074,6 +3220,7 @@ fn reserve_command(
     pending_length: usize,
 ) -> Result<(), Qwen4ExpTextSessionError> {
     workspace.require_idle()?;
+    workspace.checkpoint_lineage.record_append()?;
     workspace.active_command = Some(enc.parent_command_buffer());
     workspace.pending_length = Some(pending_length);
     workspace.encode_failed = false;

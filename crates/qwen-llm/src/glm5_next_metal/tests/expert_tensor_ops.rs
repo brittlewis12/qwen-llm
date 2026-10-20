@@ -315,6 +315,14 @@ fn maya_iq2_s_glm_shaped_expert_tensor_ab() {
                 &tensor_values[..8],
                 cpu_head,
             );
+            eprintln!(
+                "production_row0={:?} production_col0={:?} tensor_row0={:?}",
+                &production_values[..16],
+                (0..8)
+                    .map(|row| production_values[row * ffn])
+                    .collect::<Vec<_>>(),
+                &tensor_values[..16],
+            );
         }
         let mut max_abs = 0.0f32;
         let mut error_square = 0.0f64;

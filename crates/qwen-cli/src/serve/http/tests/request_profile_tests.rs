@@ -269,7 +269,10 @@ fn all_family_request_profile_snapshot() {
                 eos_token_id: 1,
                 eot_token_id: 2,
             },
-            json!({"model":"test","input":"Hello","x_qwen":{"seed":7}}),
+            // An explicit system prompt owns its date; without one the Muse renderer
+            // inserts today's UTC date, which would make this snapshot depend on the
+            // clock. The synthesized-date path has its own test in render_muse.
+            json!({"model":"test","instructions":"You are a test assistant.","input":"Hello","x_qwen":{"seed":7}}),
         ),
     ];
     let mut actual = String::new();

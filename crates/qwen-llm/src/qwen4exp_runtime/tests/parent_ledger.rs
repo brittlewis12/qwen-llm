@@ -54,20 +54,8 @@ fn settled_default_parent_ledger() {
     let capacity = Qwen4ExpSessionCapacity::for_forward_limit(&config, PREFIX + 1).unwrap();
     let mut loaded =
         Qwen4ExpLoadedModel::load_with_packed_prefill(&ctx, &gguf, capacity, PREFIX).unwrap();
-    assert!(
-        loaded.guarded_topk_enabled()
-            && loaded.hc_up_mix_enabled()
-            && !loaded.split_decode_enabled()
-    );
+    assert!(loaded.guarded_topk_enabled() && loaded.hc_up_mix_enabled());
     let mut runner = loaded.create_runner(&ctx).unwrap();
-    assert!(
-        !runner
-            .workspace
-            .memory_plan()
-            .allocations()
-            .iter()
-            .any(|a| a.name == "session.qsa_split")
-    );
     let _selected = Qwen4ExpPackedSelectedQsaOverride::set(true);
     runner.prefill(&tokens[..PREFIX]).unwrap();
     assert_eq!(
@@ -116,7 +104,7 @@ fn settled_default_parent_ledger() {
                 .unwrap();
             }
         }
-        defaults::witness(&census, 1, [true, false, true]);
+        defaults::witness(&census, 1, [true, true]);
         let shapes: Vec<_> = census
             .iter()
             .map(|r| {

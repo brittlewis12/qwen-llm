@@ -470,6 +470,16 @@ impl Qwen4ExpPostPleBlockMetalWorkspace {
         self.mixer.committed_length()
     }
 
+    /// Whether a QSA mixer can take split decode attention; `None` for GDN.
+    pub fn qsa_split_decode_capable(&self) -> Option<bool> {
+        match &self.mixer {
+            Qwen4ExpPostPleMixerMetalWorkspace::QwenSparseAttention(w) => {
+                Some(w.split_decode_capable())
+            }
+            _ => None,
+        }
+    }
+
     pub(crate) fn validate_hc_up_binding(
         &self,
         ctx: &MetalContext,
@@ -518,40 +528,6 @@ impl Qwen4ExpPostPleBlockMetalWorkspace {
         command: Option<Retained<ProtocolObject<dyn MTLCommandBuffer>>>,
     ) {
         self.active_command = command;
-    }
-
-    #[cfg(test)]
-    pub(crate) fn validate_split_binding(
-        &self,
-        ctx: &MetalContext,
-        scratch: Option<&MetalTensor>,
-    ) -> Result<(), Qwen4ExpPostPleBlockError> {
-        self.require_idle()?;
-        if self.state_poisoned || self.encode_failed {
-            return invalid("split binding requires a healthy released block");
-        }
-        if let Qwen4ExpPostPleMixerMetalWorkspace::QwenSparseAttention(workspace) = &self.mixer {
-            workspace.validate_split_binding(ctx, scratch)?;
-        }
-        Ok(())
-    }
-
-    #[cfg(test)]
-    pub(crate) fn bind_split_scratch(&mut self, scratch: Option<&MetalTensor>) {
-        if let Qwen4ExpPostPleMixerMetalWorkspace::QwenSparseAttention(workspace) = &mut self.mixer
-        {
-            workspace.bind_split_scratch(scratch);
-        }
-    }
-
-    #[cfg(test)]
-    pub(crate) fn split_scratch_identity(&self) -> Option<usize> {
-        match &self.mixer {
-            Qwen4ExpPostPleMixerMetalWorkspace::QwenSparseAttention(w) => {
-                w.split_scratch_identity()
-            }
-            _ => None,
-        }
     }
 
     #[cfg(test)]

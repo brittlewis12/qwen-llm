@@ -106,19 +106,9 @@ fn packed_router_n1024_native_qualification() {
     let capacity = Qwen4ExpSessionCapacity::for_forward_limit(&config, ROWS + 4).unwrap();
     let mut loaded =
         Qwen4ExpLoadedModel::load_with_packed_prefill(&ctx, &gguf, capacity, ROWS).unwrap();
-    assert!(
-        loaded.guarded_topk_enabled()
-            && loaded.hc_up_mix_enabled()
-            && !loaded.split_decode_enabled()
-    );
+    assert!(loaded.guarded_topk_enabled() && loaded.hc_up_mix_enabled());
     let mut runner = loaded.create_runner(&ctx).unwrap();
     let plan = runner.workspace.memory_plan().clone();
-    assert!(
-        !plan
-            .allocations()
-            .iter()
-            .any(|a| a.name == "session.qsa_split")
-    );
     let tensors = runner.workspace.persistent_state_tensors();
     assert_eq!(tensors.len(), 121);
     let state_bytes: usize = tensors.iter().map(|t| t.n_bytes() as usize).sum();
@@ -172,7 +162,7 @@ fn packed_router_n1024_native_qualification() {
                     format!("{}\n{census:#?}", causal_metadata(&runner)),
                 )
                 .unwrap();
-                defaults::witness(&census, 1, [true, false, true]);
+                defaults::witness(&census, 1, [true, true]);
                 if strict {
                     assert_continuation_replay(&artifact, step, &baseline[step + 1], &observed);
                     assert_eq!(metadata[step + 1], causal_metadata(&runner));

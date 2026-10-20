@@ -172,7 +172,7 @@ fn qualify_split_attention(timing: bool) {
             "split_qsa correctness count={count} amplitude={amplitude} id_mode={id_mode} splits={splits} max_abs_f64={max_abs:.9e}"
         );
 
-        if timing && matches!(count, 128 | 2_048 | 2_051) && amplitude == 1.0 && id_mode == 0 {
+        if timing && matches!(count, 32 | 33 | 128 | 2_048 | 2_051) && amplitude == 1.0 && id_mode == 0 {
             for candidate_arm in [false, true, true, false] {
                 run(candidate_arm, 12);
             }

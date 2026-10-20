@@ -44,7 +44,6 @@ fn native_parallel_topk_shared_prefix() {
         Some(PREFIX),
         Qwen4ExpDecodeOptions {
             guarded_topk: false,
-            split_qsa: true,
             hc_up_mix: false,
         },
     )

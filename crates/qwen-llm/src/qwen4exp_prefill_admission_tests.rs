@@ -245,14 +245,6 @@ fn flash_prefill_pressure_plan_preserves_context_and_selection() {
         Qwen4ExpSessionCapacity::for_forward_limit(&Qwen4ExpConfig::flash_next_reference(), 32768)
             .unwrap();
     let full = measured_plan(&ctx, &gguf, capacity, 32768);
-    let split = full.clone().with_split_decode(&ctx, true).unwrap();
-    assert!(
-        split
-            .with_prefill_rows(&ctx, Some(512))
-            .unwrap()
-            .memory_plan()
-            .split_decode_enabled()
-    );
     assert!(full.with_prefill_rows(&ctx, Some(1)).is_err());
     assert!(full.with_prefill_rows(&ctx, Some(4096)).is_err());
     let narrow = full.with_prefill_rows(&ctx, Some(512)).unwrap();

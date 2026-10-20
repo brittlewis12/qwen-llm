@@ -17,11 +17,7 @@ fn scalar_validation_cpu_ceiling() {
     let config = Qwen4ExpConfig::flash_next_reference();
     let capacity = Qwen4ExpSessionCapacity::for_forward_limit(&config, 2180).unwrap();
     let mut loaded = Qwen4ExpLoadedModel::load(&ctx, &gguf, capacity).unwrap();
-    assert!(
-        loaded.guarded_topk_enabled()
-            && loaded.hc_up_mix_enabled()
-            && !loaded.split_decode_enabled()
-    );
+    assert!(loaded.guarded_topk_enabled() && loaded.hc_up_mix_enabled());
     let runner = loaded.create_runner(&ctx).unwrap();
     let before = snapshot_persistent_state(&runner);
     let command = ctx.queue.commandBuffer().unwrap();

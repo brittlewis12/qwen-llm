@@ -23,7 +23,6 @@ fn saved_moe_parallel_topk_screen() {
         None,
         Qwen4ExpDecodeOptions {
             guarded_topk: false,
-            split_qsa: false,
             hc_up_mix: false,
         },
     )
@@ -57,7 +56,6 @@ fn saved_moe_interval_budget_v2() {
         None,
         Qwen4ExpDecodeOptions {
             guarded_topk: false,
-            split_qsa: false,
             hc_up_mix: false,
         },
     )
@@ -93,7 +91,6 @@ fn saved_moe_stage_interval_diagnostic() {
         None,
         Qwen4ExpDecodeOptions {
             guarded_topk: false,
-            split_qsa: false,
             hc_up_mix: false,
         },
     )
@@ -151,7 +148,6 @@ fn native_moe_observation(guarded: bool) {
         Some(PREFIX),
         Qwen4ExpDecodeOptions {
             guarded_topk: guarded,
-            split_qsa: true,
             hc_up_mix: false,
         },
     )

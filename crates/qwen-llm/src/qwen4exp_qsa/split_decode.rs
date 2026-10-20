@@ -1,9 +1,29 @@
+//! Decode attention with the value accumulation split across key ranges.
+//!
+//! The incumbent kernel runs one threadgroup per query head looping over
+//! every selected key, so at the 2,048-key budget it occupies 24
+//! threadgroups and reads each value row once per query head. The split
+//! path keeps the incumbent logits and global softmax, then accumulates
+//! values over `splits` key ranges per KV head (up to 128 threadgroups,
+//! each value row read once per KV head) and merges the partials with the
+//! sigmoid gate. Only the F32 summation order of the value sum changes.
 use super::*;
 
-pub(crate) const SCRATCH_FLOATS: usize = 24 * 64 * 258;
+/// Per head: `splits` partial records of `[denominator, pad, 256 dims]`.
+pub(crate) const SCRATCH_FLOATS: usize = 24 * MAX_SPLITS * 258;
+const MAX_SPLITS: usize = 64;
+const KEYS_PER_SPLIT: usize = 32;
+/// Below this many selected keys the incumbent single-pass kernel is used:
+/// the split path costs two extra dispatches, and short key lists finish
+/// inside one threadgroup's loop before that overhead pays back.
+pub(crate) const MIN_IDS: usize = 256;
 
 pub(crate) fn eligible(g: QwenSparseAttentionMetalGeometry, ids: usize) -> bool {
-    g.supports_split_decode() && (2048..=2051).contains(&ids)
+    g.supports_split_decode() && ids >= MIN_IDS
+}
+
+pub(crate) fn splits_for(ids: usize) -> usize {
+    ids.div_ceil(KEYS_PER_SPLIT).clamp(1, MAX_SPLITS)
 }
 
 pub(crate) fn preflight(ctx: &MetalContext) -> Result<(), Qwen4ExpQsaError> {
@@ -59,7 +79,7 @@ pub(super) fn encode_to(
     output: &MetalTensor,
     ids: usize,
 ) -> Result<(), MetalError> {
-    let splits = ids.div_ceil(32).clamp(1, 64);
+    let splits = splits_for(ids);
     let args = Args {
         ids: ids as u32,
         capacity: workspace.geometry.capacity as u32,

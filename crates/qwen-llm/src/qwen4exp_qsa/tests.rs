@@ -10,34 +10,31 @@ use sha2::{Digest, Sha256};
 mod split_decode;
 
 #[test]
-fn product_split_binding_and_route_boundaries() {
+fn product_split_route_boundaries() {
     let _benchmark_lease =
         crate::metal::acquire_metal_benchmark_lease().expect("production GPU lease required");
     let ctx = MetalContext::new().unwrap();
     let g = selected_attention_test_geometry(2052);
+    let min = super::split_decode::MIN_IDS;
     for (ids, enabled) in [
-        (2047, false),
+        (1, false),
+        (min - 1, false),
+        (min, true),
+        (2047, true),
         (2048, true),
-        (2049, true),
-        (2050, true),
         (2051, true),
-        (2052, false),
     ] {
         assert_eq!(super::split_decode::eligible(g, ids), enabled);
     }
-    let mut w = QwenSparseAttentionMetalWorkspace::new(&ctx, g).unwrap();
-    let scratch =
-        MetalTensor::zeros_f32(&ctx, vec![super::split_decode::SCRATCH_FLOATS as u64]).unwrap();
-    assert!(w.validate_split_binding(&ctx, Some(&w.query)).is_err());
-    let saved = w.output.clone();
-    w.output = scratch.view_subrange(0, vec![g.hidden_size as u64]);
-    assert!(w.validate_split_binding(&ctx, Some(&scratch)).is_err());
-    w.output = saved;
-    w.validate_split_binding(&ctx, Some(&scratch)).unwrap();
-    w.bind_split_scratch(Some(&scratch));
+    let w = QwenSparseAttentionMetalWorkspace::new(&ctx, g).unwrap();
+    assert!(w.split_decode_capable());
+    assert_eq!(
+        g.workspace_logical_allocations().unwrap().last().copied(),
+        Some(super::split_decode::SCRATCH_FLOATS * 4)
+    );
     let weights = test_weights(&ctx, g);
     let input = MetalTensor::zeros_f32(&ctx, vec![g.hidden_size as u64]).unwrap();
-    for length in [1, 2047, 2048, 2049, 2050, 2051] {
+    for length in [1, min - 1, min, 2047, 2048, 2049, 2050, 2051] {
         let cmd = ctx.queue.commandBuffer().unwrap();
         let enc = KernelEncoder::begin(&cmd);
         crate::metal::dispatch_census_begin();
@@ -62,7 +59,7 @@ fn product_split_binding_and_route_boundaries() {
         // then runs split softmax/value/merge instead of the fused
         // softmax-value kernel.
         let count = |kernel: &str| rows.iter().filter(|r| r.kernel == kernel).count();
-        let split = length >= 2048;
+        let split = length >= min;
         assert_eq!(count("kernel_qwen4exp_qsa_attention_logits_f16"), 1);
         for kernel in [
             "kernel_qwen4exp_qsa_split_softmax_f32",

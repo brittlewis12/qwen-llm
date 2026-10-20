@@ -99,7 +99,6 @@ fn product_guarded_topk_shared_prefix() {
         Some(PREFIX),
         Qwen4ExpDecodeOptions {
             guarded_topk: true,
-            split_qsa: true,
             hc_up_mix: false,
         },
     )
@@ -126,7 +125,6 @@ fn product_guarded_topk_shared_prefix() {
         r.workspace.restore_checkpoint_for_tests(&empty);
     }
     r.workspace.configure_guarded_topk(&ctx, true).unwrap();
-    r.workspace.set_split_decode_for_tests(&ctx, true).unwrap();
     let _selected = Qwen4ExpPackedSelectedQsaOverride::set(true);
     crate::metal::dispatch_census_begin();
     r.prefill(&tokens[..PREFIX]).unwrap();

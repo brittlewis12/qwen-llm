@@ -1,6 +1,8 @@
 // Split/GQA decode adapted from antirez/ds4 9139e2a, metal/qwen4.metal.
-// Retired compatibility experiment; not a production route.
-// Incumbent QK/global-softmax order; split only the value accumulation.
+// Production decode attention for the released 24/2/256 QSA geometry:
+// incumbent QK logits and global softmax order; the value accumulation is
+// split across key ranges (one threadgroup per split and KV head, each
+// SIMD-group owning three query heads) and merged with the gate.
 // MIT License
 // Copyright (c) 2026 The ds4.c authors
 // Copyright (c) 2023-2026 The ggml authors

@@ -48,7 +48,6 @@ const SELECTED_AUDIT_ORDER_MISMATCH_STATUS: i32 = 5;
 const SELECTOR_SCRATCH_BYTES: usize = 2 * ATTENTION_THREADS * size_of::<u32>();
 const DENSE_PACKED_QUERY_TILE: usize = 32;
 
-#[cfg(test)]
 pub(crate) mod split_decode;
 #[cfg(test)]
 pub(crate) mod split_decode_probe;
@@ -370,7 +369,8 @@ pub struct QwenSparseAttentionWorkspaceByteEstimate {
 }
 
 impl QwenSparseAttentionMetalGeometry {
-    #[cfg(test)]
+    /// The released 24/2/256 geometry whose decode attention has a split
+    /// value-accumulation kernel.
     pub(crate) fn supports_split_decode(self) -> bool {
         (
             self.query_heads,
@@ -683,7 +683,14 @@ impl QwenSparseAttentionMetalGeometry {
             })?)?,
             f32_bytes(self.query_width())?,
             f32_bytes(self.hidden_size)?,
-        ])
+        ]
+        .into_iter()
+        .chain(
+            self.supports_split_decode()
+                .then(|| f32_bytes(split_decode::SCRATCH_FLOATS))
+                .transpose()?,
+        )
+        .collect())
     }
 
     pub(crate) fn packed_scratch_logical_allocations(
@@ -932,7 +939,8 @@ impl<'a> QwenSparseAttentionMetalWeights<'a> {
 
 pub struct QwenSparseAttentionMetalWorkspace {
     geometry: QwenSparseAttentionMetalGeometry,
-    #[cfg(test)]
+    /// Split value-accumulation partials for decode attention; present on the
+    /// released 24/2/256 geometry only (`split_decode`).
     split_decode_scratch: Option<MetalTensor>,
     index_query_raw: MetalTensor,
     index_query: MetalTensor,
@@ -1565,8 +1573,15 @@ impl QwenSparseAttentionMetalWorkspace {
             )?,
             attention: MetalTensor::zeros_f32(ctx, vec![geometry.query_width() as u64])?,
             output: MetalTensor::zeros_f32(ctx, vec![geometry.hidden_size as u64])?,
-            #[cfg(test)]
-            split_decode_scratch: None,
+            split_decode_scratch: if geometry.supports_split_decode() {
+                split_decode::preflight(ctx)?;
+                Some(MetalTensor::zeros_f32(
+                    ctx,
+                    vec![split_decode::SCRATCH_FLOATS as u64],
+                )?)
+            } else {
+                None
+            },
             committed_length: 0,
             pending_length: None,
             pending_selected_bands: None,
@@ -1579,50 +1594,9 @@ impl QwenSparseAttentionMetalWorkspace {
         self.geometry
     }
 
-    #[cfg(test)]
-    pub(crate) fn validate_split_binding(
-        &self,
-        ctx: &MetalContext,
-        scratch: Option<&MetalTensor>,
-    ) -> Result<(), Qwen4ExpQsaError> {
-        self.require_idle()?;
-        if self.state_poisoned
-            || self.pending_length.is_some()
-            || self.pending_selected_bands.is_some()
-        {
-            return invalid("split binding requires a healthy released QSA workspace");
-        }
-        if let Some(scratch) = scratch {
-            if !self.geometry.supports_split_decode() {
-                return invalid("split QSA requires released 24/2/256 geometry");
-            }
-            require_tensor(
-                "QSA split scratch",
-                scratch,
-                GgmlType::F32,
-                &[split_decode::SCRATCH_FLOATS as u64],
-                true,
-            )?;
-            require_same_device(ctx, &[("QSA split scratch", scratch)])?;
-            let mut tensors = workspace_tensors(self);
-            tensors.retain(|(name, _)| *name != "QSA split scratch");
-            tensors.push(("QSA split scratch", scratch));
-            require_disjoint(&tensors)?;
-            split_decode::preflight(ctx)?;
-        }
-        Ok(())
-    }
-
-    #[cfg(test)]
-    pub(crate) fn bind_split_scratch(&mut self, scratch: Option<&MetalTensor>) {
-        self.split_decode_scratch = scratch.cloned();
-    }
-
-    #[cfg(test)]
-    pub(crate) fn split_scratch_identity(&self) -> Option<usize> {
-        self.split_decode_scratch
-            .as_ref()
-            .map(|s| s.buffer.contents().as_ptr() as usize)
+    /// Whether decode attention can take the split value-accumulation path.
+    pub fn split_decode_capable(&self) -> bool {
+        self.split_decode_scratch.is_some()
     }
 
     pub fn committed_length(&self) -> usize {
@@ -4355,22 +4329,19 @@ fn encode_step(
     let child_attention = crate::qwen4exp_child_profile::span(enc, "attention_logits_value");
     let active_id_count =
         visible_blocks.min(g.block_budget()) * g.ratio + sequence_length % g.ratio;
-    #[cfg(test)]
-    let override_split =
-        split_decode_probe::try_encode(ctx, enc, workspace, position, active_id_count)?;
-    #[cfg(test)]
-    let split = if let Some(split) = override_split {
-        split
-    } else if let Some(scratch) = workspace.split_decode_scratch.as_ref()
-        && split_decode::eligible(g, active_id_count)
-    {
-        split_decode::encode(ctx, enc, workspace, scratch, active_id_count)?;
-        true
-    } else {
-        false
+    let split = match workspace.split_decode_scratch.as_ref() {
+        Some(scratch) if split_decode::eligible(g, active_id_count) => {
+            #[cfg(test)]
+            let split = split_decode_probe::observe(position, active_id_count);
+            #[cfg(not(test))]
+            let split = true;
+            if split {
+                split_decode::encode(ctx, enc, workspace, scratch, active_id_count)?;
+            }
+            split
+        }
+        _ => false,
     };
-    #[cfg(not(test))]
-    let split = false;
     if !split {
         encode_attention_logits(ctx, enc, workspace, active_id_count)?;
         encode_attention_softmax_value(ctx, enc, workspace, active_id_count)?;
@@ -4498,11 +4469,10 @@ fn validate_workspace_tensors(
     workspace: &QwenSparseAttentionMetalWorkspace,
 ) -> Result<(), Qwen4ExpQsaError> {
     let g = workspace.geometry;
-    #[cfg(test)]
+    if workspace.split_decode_scratch.is_some() != g.supports_split_decode() {
+        return invalid("split scratch presence must follow released QSA geometry");
+    }
     if let Some(scratch) = &workspace.split_decode_scratch {
-        if !g.supports_split_decode() {
-            return invalid("split scratch on unsupported QSA geometry");
-        }
         require_tensor(
             "QSA split scratch",
             scratch,
@@ -4683,14 +4653,10 @@ fn workspace_tensors(
         ("QSA attention", &workspace.attention),
         ("QSA output", &workspace.output),
     ];
-    #[cfg(test)]
-    let tensors = {
-        let mut tensors = tensors;
-        if let Some(scratch) = &workspace.split_decode_scratch {
-            tensors.push(("QSA split scratch", scratch));
-        }
-        tensors
-    };
+    let mut tensors = tensors;
+    if let Some(scratch) = &workspace.split_decode_scratch {
+        tensors.push(("QSA split scratch", scratch));
+    }
     tensors
 }
 

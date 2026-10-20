@@ -59,7 +59,7 @@ fn witness(census: &[crate::metal::DispatchCensusRow], steps: usize, split: bool
             .iter()
             .filter(|r| r.kernel == "kernel_qwen4exp_qsa_attention_logits_f16")
             .count(),
-        if split { 0 } else { steps * 12 }
+        steps * 12
     );
 }
 
@@ -115,13 +115,11 @@ fn qualify_hc_product(guarded: bool, split_baseline: bool) {
         Some(PREFIX),
         Qwen4ExpDecodeOptions {
             guarded_topk: guarded,
-            split_qsa: split_baseline,
             hc_up_mix: true,
         },
     )
     .unwrap();
     assert!(loaded.hc_up_mix_enabled());
-    assert_eq!(loaded.split_decode_enabled(), split_baseline);
     assert_eq!(loaded.guarded_topk_enabled(), guarded);
     let mut runner = loaded.create_runner(&ctx).unwrap();
     let tensors = runner.workspace.persistent_state_tensors();
@@ -151,10 +149,6 @@ fn qualify_hc_product(guarded: bool, split_baseline: bool) {
         eprintln!("product_hc empty_state_scalar_prefix PASS steps=4");
     }
     runner.workspace.configure_hc_up_mix(&ctx, true).unwrap();
-    runner
-        .workspace
-        .set_split_decode_for_tests(&ctx, split_baseline)
-        .unwrap();
     let _selected = Qwen4ExpPackedSelectedQsaOverride::set(true);
     crate::metal::dispatch_census_begin();
     let endpoint = runner.prefill(&tokens[..PREFIX]).unwrap().to_vec();

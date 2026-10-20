@@ -4,12 +4,10 @@ use super::*;
 fn decode_policy_defaults_and_independent_qualification() {
     let on = Qwen4ExpDecodeOptions {
         guarded_topk: true,
-        split_qsa: false,
         hc_up_mix: true,
     };
     let off = Qwen4ExpDecodeOptions {
         guarded_topk: false,
-        split_qsa: false,
         hc_up_mix: false,
     };
     assert_eq!(Qwen4ExpDecodeOptions::default(), on);
@@ -20,7 +18,6 @@ fn decode_policy_defaults_and_independent_qualification() {
         let flags = [bits & 1 != 0, bits & 2 != 0];
         let expected = Qwen4ExpDecodeOptions {
             guarded_topk: flags[0],
-            split_qsa: false,
             hc_up_mix: flags[1],
         };
         assert_eq!(on.qualified(flags), expected);
@@ -29,13 +26,17 @@ fn decode_policy_defaults_and_independent_qualification() {
     }
 }
 
-pub(super) fn witness(census: &[DispatchCensusRow], steps: usize, flags: [bool; 3]) {
+/// Dispatch witness for product decode past the split-attention threshold:
+/// guarded top-k and HC up-mix follow their flags; split attention is a
+/// property of the released geometry and always runs at this depth.
+pub(super) fn witness(census: &[DispatchCensusRow], steps: usize, flags: [bool; 2]) {
     for (name, per_step, enabled) in [
         (crate::qwen4exp_moe::guarded_topk::KERNEL, 48, flags[0]),
-        ("kernel_qwen4exp_qsa_split_f16", 12, flags[1]),
-        ("kernel_qwen4exp_qsa_split_merge_f32", 12, flags[1]),
-        ("kernel_qwen4exp_qsa_split_softmax_f32", 12, flags[1]),
-        ("kernel_qwen4exp_hc_up_mix_q8_k320", 97, flags[2]),
+        ("kernel_qwen4exp_qsa_split_f16", 12, true),
+        ("kernel_qwen4exp_qsa_split_merge_f32", 12, true),
+        ("kernel_qwen4exp_qsa_split_softmax_f32", 12, true),
+        ("kernel_qwen4exp_qsa_attention_softmax_value_f16", 12, false),
+        ("kernel_qwen4exp_hc_up_mix_q8_k320", 97, flags[1]),
         ("kernel_qwen4exp_qsa_attention_logits_f16", 12, true),
     ] {
         assert_eq!(
@@ -86,19 +87,14 @@ fn qualified_defaults_final_closure() {
     let capacity = Qwen4ExpSessionCapacity::for_forward_limit(&config, 2578 + 8).unwrap();
     let mut loaded =
         Qwen4ExpLoadedModel::load_with_packed_prefill(&ctx, &gguf, capacity, 2578).unwrap();
-    assert!(
-        loaded.guarded_topk_enabled()
-            && !loaded.split_decode_enabled()
-            && loaded.hc_up_mix_enabled()
-    );
+    assert!(loaded.guarded_topk_enabled() && loaded.hc_up_mix_enabled());
     let mut runner = loaded.create_runner(&ctx).unwrap();
     assert!(
-        !runner
+        runner
             .workspace
-            .memory_plan()
-            .allocations()
+            .qsa_split_decode_capable()
             .iter()
-            .any(|a| a.name == "session.qsa_split")
+            .all(|(_, capable)| *capable)
     );
     let tensors = runner.workspace.persistent_state_tensors();
     assert_eq!(tensors.len(), 121);
@@ -126,17 +122,13 @@ fn qualified_defaults_final_closure() {
         let old_prefix = prefix_bytes(&runner);
         crate::metal::dispatch_census_begin();
         let defaults = observe_product_at(&mut runner, &tokens[PREFIX..], true, PREFIX);
-        witness(
-            &crate::metal::dispatch_census_take(),
-            32,
-            [true, false, true],
-        );
+        witness(&crate::metal::dispatch_census_take(), 32, [true, true]);
         save(&artifact, "defaults-32x248320", &defaults);
         assert_state_bytes_eq("default old prefix", &old_prefix, &prefix_bytes(&runner));
         for (name, flags) in [
-            ("explicit", [true, false, true]),
-            ("topk-off", [false, false, true]),
-            ("hc-off", [true, false, false]),
+            ("explicit", [true, true]),
+            ("topk-off", [false, true]),
+            ("hc-off", [true, false]),
         ] {
             runner.workspace.restore_checkpoint_for_tests(&checkpoint);
             runner
@@ -145,17 +137,13 @@ fn qualified_defaults_final_closure() {
                 .unwrap();
             runner
                 .workspace
-                .set_split_decode_for_tests(&ctx, flags[1])
-                .unwrap();
-            runner
-                .workspace
-                .configure_hc_up_mix(&ctx, flags[2])
+                .configure_hc_up_mix(&ctx, flags[1])
                 .unwrap();
             crate::metal::dispatch_census_begin();
             let observed = observe_product_at(&mut runner, &tokens[PREFIX..], true, PREFIX);
             witness(&crate::metal::dispatch_census_take(), 32, flags);
             save(&artifact, name, &observed);
-            if flags[2] {
+            if flags[1] {
                 assert_replay(name, &defaults, &observed);
             } else {
                 assert_numeric(&observed, &defaults, &tensors);
@@ -168,10 +156,6 @@ fn qualified_defaults_final_closure() {
     drop(empty);
     runner.workspace.configure_guarded_topk(&ctx, true).unwrap();
     runner.workspace.configure_hc_up_mix(&ctx, true).unwrap();
-    runner
-        .workspace
-        .set_split_decode_for_tests(&ctx, false)
-        .unwrap();
     let bytes = include_bytes!(
         "../../../../../docs/bench/2026-08-29-qwen4exp-selected-semantic/known-answer.u32le"
     );
@@ -207,21 +191,13 @@ fn qualified_defaults_final_closure() {
         baseline.logits.append(&mut observed.logits);
         baseline.hyper.append(&mut observed.hyper);
     }
-    witness(
-        &crate::metal::dispatch_census_take(),
-        8,
-        [true, false, false],
-    );
+    witness(&crate::metal::dispatch_census_take(), 8, [true, false]);
     baseline.state = snapshot_persistent_state(&runner);
     runner.workspace.restore_checkpoint_for_tests(&checkpoint);
     runner.workspace.configure_hc_up_mix(&ctx, true).unwrap();
     crate::metal::dispatch_census_begin();
     let candidate = observe_product_at(&mut runner, &continuation, true, prompt.len());
-    witness(
-        &crate::metal::dispatch_census_take(),
-        8,
-        [true, false, true],
-    );
+    witness(&crate::metal::dispatch_census_take(), 8, [true, true]);
     save(&artifact, "known-answer-hc-off-8x248320", &baseline);
     save(&artifact, "known-answer-hc-on-8x248320", &candidate);
     std::fs::write(

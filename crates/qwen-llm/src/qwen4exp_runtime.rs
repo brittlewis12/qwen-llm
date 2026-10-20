@@ -561,8 +561,6 @@ pub struct Qwen4ExpLoadedModel<'gguf> {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct Qwen4ExpDecodeOptions {
     pub guarded_topk: bool,
-    #[cfg(test)]
-    pub split_qsa: bool,
     pub hc_up_mix: bool,
 }
 
@@ -570,8 +568,6 @@ impl Default for Qwen4ExpDecodeOptions {
     fn default() -> Self {
         Self {
             guarded_topk: true,
-            #[cfg(test)]
-            split_qsa: false,
             hc_up_mix: true,
         }
     }
@@ -582,8 +578,6 @@ impl Qwen4ExpDecodeOptions {
     fn qualified(self, capabilities: [bool; 2]) -> Self {
         Self {
             guarded_topk: self.guarded_topk && capabilities[0],
-            #[cfg(test)]
-            split_qsa: self.split_qsa,
             hc_up_mix: self.hc_up_mix && capabilities[1],
         }
     }
@@ -788,8 +782,6 @@ impl<'gguf> Qwen4ExpLoadedModel<'gguf> {
             crate::qwen4exp_metal::hc_up::preflight(ctx).map_err(Qwen4ExpTextSessionError::from)?;
         }
         let _allocation_transaction = ctx.begin_allocation_transaction();
-        #[cfg(test)]
-        let session_plan = session_plan.with_split_decode(ctx, decode.split_qsa)?;
         let (mut session_plan, aggregate) = select_prefill_plan_with_floor(
             ctx,
             session_plan,
@@ -910,13 +902,6 @@ impl<'gguf> Qwen4ExpLoadedModel<'gguf> {
 
     pub fn packed_selected_requested(&self) -> bool {
         qwen4exp_packed_selected_qsa_enabled()
-    }
-
-    #[cfg(test)]
-    pub fn split_decode_enabled(&self) -> bool {
-        self.workspace
-            .as_ref()
-            .is_some_and(Qwen4ExpTextSessionMetalWorkspace::split_decode_enabled)
     }
 
     pub fn hc_up_mix_enabled(&self) -> bool {

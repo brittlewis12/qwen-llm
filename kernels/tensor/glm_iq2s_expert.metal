@@ -127,7 +127,7 @@ kernel void kernel_tensor_glm_iq2s_expert_finish(
         gate_total += partial[tile_offset];
         up_total += partial[ulong(tiles + k) * args.padded_rows * args.padded_ffn + ulong(row) * args.padded_ffn + channel];
     }
-    const float g = clamp(gate_total, -args.clamp_value, args.clamp_value);
+    const float g = min(gate_total, args.clamp_value);
     const float u = clamp(up_total, -args.clamp_value, args.clamp_value);
     output[tid] = (g / (1.0f + exp(-g))) * u;
 }

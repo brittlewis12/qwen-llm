@@ -396,6 +396,20 @@ impl GatedResidualMetalRead<'_, '_, '_> {
     }
 
     pub fn encode_combine(self) -> Result<(), Qwen4ExpMetalError> {
+        if self.inject.dtype == GgmlType::F32 {
+            encode_hc_combine(
+                self.ctx,
+                self.encoder,
+                self.inject,
+                &self.scratch.normalized,
+                self.block_output,
+                self.hyper_input,
+                &self.scratch.injection,
+                self.scratch.branch_count,
+                self.scratch.hidden_size,
+            )?;
+            return Ok(());
+        }
         let hyper_hidden = self.scratch.branch_count * self.scratch.hidden_size;
         encode_mat_vec_dispatch(
             self.ctx,
@@ -1727,6 +1741,50 @@ struct HcNormArgs {
     eps: f32,
 }
 
+/// Inject projection and injection add in one dispatch, one threadgroup per
+/// branch.
+fn encode_hc_combine(
+    ctx: &MetalContext,
+    enc: &KernelEncoder,
+    inject: &MetalTensor,
+    normalized: &MetalTensor,
+    block_output: &MetalTensor,
+    residual: &MetalTensor,
+    raw_injection: &MetalTensor,
+    branch_count: usize,
+    hidden_size: usize,
+) -> Result<(), MetalError> {
+    let pipeline = ctx.pipeline("kernel_qwen4exp_hc_combine_f32")?;
+    enc.set_pipeline(&pipeline);
+    enc.set_bytes(
+        0,
+        &HcBranchArgs {
+            branch_count: branch_count as u32,
+            hidden_size: hidden_size as u32,
+        },
+    );
+    enc.set_tensor(1, inject);
+    enc.set_tensor(2, normalized);
+    enc.set_tensor(3, block_output);
+    enc.set_tensor(4, residual);
+    enc.set_tensor(5, raw_injection);
+    let threads = pipeline.maxTotalThreadsPerThreadgroup().min(256);
+    enc.set_threadgroup_memory(0, 32 * size_of::<f32>());
+    enc.dispatch(
+        MTLSize {
+            width: branch_count,
+            height: 1,
+            depth: 1,
+        },
+        MTLSize {
+            width: threads,
+            height: 1,
+            depth: 1,
+        },
+    );
+    Ok(())
+}
+
 fn encode_hc_norm(
     ctx: &MetalContext,
     enc: &KernelEncoder,
@@ -2525,6 +2583,108 @@ mod tests {
         assert_close(&final_mixed, &expected_mixed, 3e-5);
     }
 
+    /// BF16 down projection (GSQ-RCO layout) and the fused combine against
+    /// the CPU golden at a geometry wider than the released-geometry Q8 case.
+    #[test]
+    fn bf16_projections_and_fused_combine_match_cpu() {
+        let Some(ctx) = crate::test_fixtures::metal_context_or_skip() else {
+            return;
+        };
+        const BRANCHES: usize = 4;
+        const HIDDEN: usize = 96;
+        const RANK: usize = 40;
+        const HYPER: usize = BRANCHES * HIDDEN;
+        let input = (0..HYPER)
+            .map(|index| ((index * 13 + 5) % 61) as f32 * 0.004 - 0.12)
+            .collect::<Vec<_>>();
+        let norm = (0..HYPER)
+            .map(|index| 0.8 + (index % 9) as f32 * 0.05)
+            .collect::<Vec<_>>();
+        let inject = (0..HYPER * BRANCHES)
+            .map(|index| ((index * 5 + 1) % 17) as f32 * 0.002 - 0.016)
+            .collect::<Vec<_>>();
+        let block_output = (0..HIDDEN)
+            .map(|index| ((index * 7 + 2) % 23) as f32 * 0.006 - 0.066)
+            .collect::<Vec<_>>();
+        let down_bits = (0..HYPER * RANK)
+            .map(|index| {
+                half::bf16::from_f32(((index * 11 + 3) % 29) as f32 * 0.01 - 0.14).to_bits()
+            })
+            .collect::<Vec<_>>();
+        let down = down_bits
+            .iter()
+            .map(|&bits| half::bf16::from_bits(bits).to_f32())
+            .collect::<Vec<_>>();
+        let up = (0..RANK * HYPER)
+            .map(|index| ((index * 3 + 7) % 19) as f32 * 0.01 - 0.09)
+            .collect::<Vec<_>>();
+        let (expected_mixed, state) = gated_residual_mix(
+            &input,
+            BRANCHES,
+            HIDDEN,
+            RANK,
+            1e-6,
+            GatedResidualReadWeights {
+                norm: &norm,
+                down: &down,
+                up: &up,
+            },
+        )
+        .unwrap();
+        let expected_output = gated_residual_combine(&block_output, &state, &inject).unwrap();
+
+        let input_gpu = tensor(&ctx, &input, vec![HYPER as u64]);
+        let norm_gpu = tensor(&ctx, &norm, vec![HYPER as u64]);
+        let down_gpu = offset_tensor(
+            &ctx,
+            6,
+            bytemuck::cast_slice(&down_bits),
+            10,
+            vec![HYPER as u64, RANK as u64],
+            GgmlType::BF16,
+        );
+        let up_gpu = tensor(&ctx, &up, vec![RANK as u64, HYPER as u64]);
+        let inject_gpu = tensor(&ctx, &inject, vec![HYPER as u64, BRANCHES as u64]);
+        let block_gpu = tensor(&ctx, &block_output, vec![HIDDEN as u64]);
+        let mut scratch = GatedResidualMetalScratch::new(&ctx, BRANCHES, HIDDEN, RANK).unwrap();
+        let command = ctx.queue.commandBuffer().expect("command buffer");
+        let encoder = KernelEncoder::begin(&command);
+        crate::metal::dispatch_census_begin();
+        let read = encode_gated_residual_mix(
+            &ctx,
+            &encoder,
+            &input_gpu,
+            &block_gpu,
+            1e-6,
+            GatedResidualMetalReadWeights {
+                norm: &norm_gpu,
+                down: &down_gpu,
+                up: &up_gpu,
+            },
+            &inject_gpu,
+            &mut scratch,
+        )
+        .unwrap();
+        read.encode_combine().unwrap();
+        let census = crate::metal::dispatch_census_take();
+        encoder.end();
+        command.commit();
+        crate::metal::wait_completed(&command).expect("command buffer completed");
+        assert!(command.error().is_none(), "{:?}", command.error());
+        scratch.release_after().unwrap();
+        let kernels: Vec<&str> = census.iter().map(|row| row.kernel.as_str()).collect();
+        assert!(
+            kernels.contains(&"kernel_qwen4exp_hc_combine_f32"),
+            "{kernels:?}"
+        );
+        assert!(
+            !kernels.contains(&"kernel_qwen4exp_hc_inject_f32"),
+            "{kernels:?}"
+        );
+        assert_close(&read_f32(&scratch.mixed), &expected_mixed, 3e-5);
+        assert_close(&read_f32(&input_gpu), &expected_output, 3e-5);
+    }
+
     #[test]
     fn nonzero_q8_projections_and_offset_views_match_cpu() {
         let Some(ctx) = crate::test_fixtures::metal_context_or_skip() else {
@@ -3003,12 +3163,21 @@ mod tests {
                     residual: packed_residual.clone(),
                 });
             }
-            assert_bits_eq(
-                &format!("packed HC N={tokens} normalized"),
-                &normalized,
-                expected_normalized,
-            );
+            // The serial route's fused read front reduces the RMS over four
+            // SIMD-groups; the packed norm kernel uses its own order.
+            assert_eq!(normalized.len(), expected_normalized.len());
+            for (index, (&actual, &expected)) in
+                normalized.iter().zip(expected_normalized).enumerate()
+            {
+                assert!(
+                    (actual - expected).abs() <= 1e-6,
+                    "packed HC N={tokens} normalized[{index}]: expected {expected}, got {actual}"
+                );
+            }
             if tokens == 1 {
+                // Serial decode fuses norm/down/SiLU and inject/add into single
+                // kernels, so a one-token packed chunk agrees with it to F32
+                // reduction order, not to the bit.
                 for (stage, actual, expected) in [
                     ("low", low.as_slice(), expected_low),
                     ("raw gate", raw_gate.as_slice(), expected_raw_gate),
@@ -3016,7 +3185,13 @@ mod tests {
                     ("injection", injection.as_slice(), expected_injection),
                     ("residual", packed_residual.as_slice(), expected_residual),
                 ] {
-                    assert_bits_eq(&format!("packed HC N=1 {stage}"), actual, expected);
+                    assert_eq!(actual.len(), expected.len(), "packed HC N=1 {stage}");
+                    for (index, (&actual, &expected)) in actual.iter().zip(expected).enumerate() {
+                        assert!(
+                            (actual - expected).abs() <= 1e-5,
+                            "packed HC N=1 {stage}[{index}]: expected {expected}, got {actual}"
+                        );
+                    }
                 }
             } else {
                 assert!(

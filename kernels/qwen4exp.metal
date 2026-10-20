@@ -129,6 +129,49 @@ kernel void kernel_qwen4exp_hc_inject_f32(
     residual[(ulong)branch * args.hidden_size + hidden] += block_output[hidden] * injection;
 }
 
+// Fused hyper-connection combine: one threadgroup per branch computes that
+// branch's injection coefficient from the F32 inject projection over the
+// normalized hyper vector, then adds the block output into its residual
+// branch, replacing the inject mat-vec and the injection add.
+kernel void kernel_qwen4exp_hc_combine_f32(
+        constant hc_branch_args & args [[buffer(0)]],
+        device const float * inject_weight [[buffer(1)]],
+        device const float * normalized [[buffer(2)]],
+        device const float * block_output [[buffer(3)]],
+        device float * residual [[buffer(4)]],
+        device float * raw_injection [[buffer(5)]],
+        threadgroup float * partial [[threadgroup(0)]],
+        uint branch [[threadgroup_position_in_grid]],
+        uint tid [[thread_position_in_threadgroup]],
+        uint thread_count [[threads_per_threadgroup]],
+        ushort simdgroup [[simdgroup_index_in_threadgroup]],
+        ushort lane [[thread_index_in_simdgroup]]) {
+    if (branch >= args.branch_count) return;
+    const uint hyper = args.branch_count * args.hidden_size;
+    device const float * weight = inject_weight + (ulong)branch * hyper;
+    float dot = 0.0f;
+    for (uint k = tid; k < hyper; k += thread_count) {
+        dot += weight[k] * normalized[k];
+    }
+    dot = simd_sum(dot);
+    if (lane == 0) partial[simdgroup] = dot;
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    const uint simdgroups = (thread_count + 31u) / 32u;
+    if (simdgroup == 0) {
+        float total = lane < simdgroups ? partial[lane] : 0.0f;
+        total = simd_sum(total);
+        if (lane == 0) partial[0] = total;
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    if (tid == 0) raw_injection[branch] = partial[0];
+    const float value = partial[0] / float(args.branch_count);
+    const float injection = 2.0f / (1.0f + exp(-value));
+    device float * branch_residual = residual + (ulong)branch * args.hidden_size;
+    for (uint hidden = tid; hidden < args.hidden_size; hidden += thread_count) {
+        branch_residual[hidden] += block_output[hidden] * injection;
+    }
+}
+
 kernel void kernel_qwen4exp_hc_inject_packed_f32(
         constant hc_packed_branch_args & args [[buffer(0)]],
         device const float * block_output [[buffer(1)]],

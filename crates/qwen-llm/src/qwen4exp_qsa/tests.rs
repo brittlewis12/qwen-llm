@@ -3667,7 +3667,7 @@ fn released_workspace_estimate_prices_large_f16_caches_and_logits() {
             .unwrap();
     let estimate = geometry.checked_workspace_byte_estimate().unwrap();
     let allocations = geometry.workspace_logical_allocations().unwrap();
-    assert_eq!(allocations.len(), 22);
+    assert_eq!(allocations.len(), 23);
     assert_eq!(
         allocations.iter().sum::<usize>(),
         estimate.total_workspace_bytes

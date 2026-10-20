@@ -6275,14 +6275,14 @@ mod tests {
                 &ctx, &geometry, 0,
             )
             .unwrap();
-            let expected = 143_207_764_u64 + 25_356_u64 * capacity as u64;
+            let expected = 162_229_588_u64 + 25_356_u64 * capacity as u64;
             assert_eq!(geometry.layer_count(), 48);
             assert_eq!(geometry.qsa_layers().len(), 12);
             assert_eq!(
                 geometry.qsa_layers(),
                 &[3, 7, 11, 15, 19, 23, 27, 31, 35, 39, 43, 47]
             );
-            assert_eq!(plan.allocations().len(), 1_523);
+            assert_eq!(plan.allocations().len(), 1_535);
             assert_eq!(plan.packed_prefill_capacity(), None);
             assert!(
                 plan.allocations()
@@ -6319,11 +6319,11 @@ mod tests {
                 total_allocations,
                 expected_packed_allocations,
             ) = match packed_capacity {
-                4 => (4_477_600_u64, false, 1_578, 55),
-                2_048 => (1_917_948_672_u64, true, 1_587, 64),
+                4 => (4_477_600_u64, false, 1_590, 55),
+                2_048 => (1_917_948_672_u64, true, 1_599, 64),
                 other => panic!("unexpected packed capacity {other}"),
             };
-            let scalar_expected = 143_207_764_u64 + 25_356_u64 * capacity as u64;
+            let scalar_expected = 162_229_588_u64 + 25_356_u64 * capacity as u64;
             let packed_allocations = plan
                 .allocations()
                 .iter()

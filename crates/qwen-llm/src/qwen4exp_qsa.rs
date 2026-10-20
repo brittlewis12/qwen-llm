@@ -614,6 +614,12 @@ impl QwenSparseAttentionMetalGeometry {
             checked_mul(i32_elements, 4, "I32 workspace")?,
             "non-cache workspace",
         )?;
+        let split_scratch_bytes = if self.supports_split_decode() {
+            checked_mul(split_decode::SCRATCH_FLOATS, 4, "split decode scratch")?
+        } else {
+            0
+        };
+        let other_bytes = checked_add(other_bytes, split_scratch_bytes, "non-cache workspace")?;
         let total_workspace_bytes = [
             main_key_cache_bytes,
             main_value_cache_bytes,

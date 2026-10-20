@@ -56,17 +56,20 @@ pub fn all_slots_down_native_supported(dtype: GgmlType) -> bool {
     native_pipeline_name(dtype).is_some()
 }
 
-/// Initial row-batched gate/up coverage; single-token capability is unchanged.
+/// Row-batched gate/up coverage; single-token capability is unchanged.
 pub fn all_slots_gate_up_native_rows_supported(gate: GgmlType, up: GgmlType) -> bool {
-    [gate, up]
-        .into_iter()
-        .all(|t| matches!(t, GgmlType::IQ3_XXS | GgmlType::Q3_K))
+    [gate, up].into_iter().all(|t| {
+        matches!(
+            t,
+            GgmlType::IQ3_XXS | GgmlType::Q3_K | GgmlType::IQ2_XS | GgmlType::IQ2_XXS
+        )
+    })
 }
 
 pub fn all_slots_down_native_rows_supported(dtype: GgmlType) -> bool {
     matches!(
         dtype,
-        GgmlType::IQ3_XXS | GgmlType::IQ3_S | GgmlType::Q3_K | GgmlType::MXFP4
+        GgmlType::IQ3_XXS | GgmlType::IQ3_S | GgmlType::Q3_K | GgmlType::MXFP4 | GgmlType::IQ2_XXS
     )
 }
 

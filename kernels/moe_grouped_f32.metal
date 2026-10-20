@@ -5,6 +5,7 @@
 // native decoder in native_dequant_f32.h, without half narrowing. Existing
 // IQ3_S/IQ4_XS down and fused gate/up retain their original dequantizers
 // and arithmetic. The half-staged product kernels are untouched.
+// Same-type IQ3_XXS/Q3_K fused gate/up reuse the native F32 down decoders.
 //
 // Each output row's K reduction runs in a fixed order over its own weight row
 // and its own slot's activation row; rows and slots past a tile's edge are
@@ -141,7 +142,51 @@ struct f32x_moe_mm_args {
     uint slot_limit; // number of valid slots (output rows)
 };
 
-template <int BYTES, short NL, void (*DEQ)(device const uchar *, short, thread float4x4 &)>
+inline void f32x_edge_add(float term, thread float & sum, thread float & correction) {
+    #pragma clang fp reassociate(off)
+    #pragma clang fp contract(off)
+    const float next = sum + term;
+    const float error = abs(sum) >= abs(term) ? (sum - next) + term : (term - next) + sum;
+    correction = correction + error;
+    sum = next;
+}
+
+// Only exponent-0/1 contributions use this F32 compensated reduction. Scaling
+// the entire reduction (not just its operands) keeps small partial sums normal.
+// With finite x and host-checked K <= INT_MAX, sum(abs(edge products)) < 2^36;
+// scaled by 2^64 it stays below 2^100. Products flushed in the scaled domain
+// total less than 2^-159 unscaled, below one ulp of any normal F32 result.
+// The ordinary matrix's rounding/FTZ/overflow is not repaired here. Subnormal
+// final outputs and arbitrary ill-conditioned relative accuracy are not promised.
+inline float f32x_mxfp4_edge_reduce(device const uchar * row, device const float * x,
+                                    uint K, float ordinary) {
+    #pragma clang fp reassociate(off)
+    #pragma clang fp contract(off)
+    // Even the absolute edge sum is below half an ulp here. Avoid overflowing
+    // an otherwise finite ordinary value when moving it to the scaled domain.
+    if (abs(ordinary) >= 0x1p64f) return ordinary;
+    float sum = 0.0f;
+    float correction = 0.0f;
+    for (uint k = 0; k < K; k += 32u) {
+        device const uchar * block = row + (ulong)(k / 32u) * 17u;
+        if (block[0] > 1u) continue;
+        const float scale = as_type<float>((uint(block[0]) + 63u) << 23u);
+        F32X_FOR_UNROLL (uint l = 0; l < 32u; ++l) {
+            const uint code = (uint(block[1u + l % 16u]) >> (4u * (l / 16u))) & 15u;
+            const float w = expert_mxfp4_values[code] * scale;
+            const float product = w * x[k + l];
+            const float product_error = fma(w, x[k + l], -product);
+            f32x_edge_add(product, sum, correction);
+            correction = correction + product_error;
+        }
+    }
+    // Keep the low part across cancellation with the ordinary result: rounding
+    // the edge sum to one unscaled float first would lose that residual again.
+    f32x_edge_add(ldexp(ordinary, 64), sum, correction);
+    return ldexp(sum + correction, -64);
+}
+
+template <int BYTES, short NL, void (*DEQ)(device const uchar *, short, thread float4x4 &), bool MXFP4 = false>
 kernel void kernel_moe_down_grouped_slots_f32x(
         constant f32x_moe_mm_args & args [[buffer(0)]],
         device const uchar * srcA         [[buffer(1)]],
@@ -185,13 +230,21 @@ kernel void kernel_moe_down_grouped_slots_f32x(
     simdgroup_float8x8 ma[4];
     simdgroup_float8x8 mb[2];
     simdgroup_float8x8 mc[8];
+    bool subnormal_blocks = false;
     F32X_FOR_UNROLL (short i = 0; i < 8; ++i) {
         mc[i] = make_filled_simdgroup_matrix<float, 8>(0.0f);
     }
 
     for (uint loop_k = 0; loop_k < args.K; loop_k += F32X_NK) {
         float4x4 temp_a;
-        DEQ(x_ptr, il, temp_a);
+        if (MXFP4 && x_ptr[0] <= 1u) {
+            // A subnormal scale is flushed even when its decoded code would
+            // be normal. Defer the whole block to the compensated F32 pass.
+            subnormal_blocks = true;
+            temp_a = float4x4(0.0f);
+        } else {
+            DEQ(x_ptr, il, temp_a);
+        }
 
         threadgroup_barrier(mem_flags::mem_threadgroup);
 
@@ -241,6 +294,9 @@ kernel void kernel_moe_down_grouped_slots_f32x(
     // Stage the 64 x 32 result (slot-major) over the weight tile, then store
     // the in-range outputs of valid slots.
     threadgroup_barrier(mem_flags::mem_threadgroup);
+    // The activation tile is dead; retain one flag per weight row there while
+    // the matrix result overwrites only the weight tile. No additional scratch.
+    if (MXFP4 && il0 == 0) sb[tiitg / F32X_NL0] = subnormal_blocks ? 1.0f : 0.0f;
     threadgroup float * temp_str = shmem + 32 * (sgitg & 1) + (16 * (sgitg >> 1)) * F32X_NR0;
     F32X_FOR_UNROLL (short i = 0; i < 8; ++i) {
         simdgroup_store(mc[i], temp_str + 8 * (i % 4) + 8 * F32X_NR0 * (i / 4), F32X_NR0, 0, false);
@@ -254,7 +310,14 @@ kernel void kernel_moe_down_grouped_slots_f32x(
         device float * D = dst + (ulong)slot * args.M + (ulong)r0;
         threadgroup const float * C = shmem + j * F32X_NR0;
         for (short i = (short)tiisg; i < nr0; i += 32) {
-            D[i] = C[i];
+            float value = C[i];
+            if (MXFP4 && sb[i] != 0.0f) {
+                device const uchar * row = srcA + expert_stride * (ulong)im
+                    + (ulong)args.nb01 * (ulong)(r0 + i);
+                device const float * x = srcB + (ulong)args.stride_b * (ulong)(slot / int(args.b_div));
+                value = f32x_mxfp4_edge_reduce(row, x, args.K, value);
+            }
+            D[i] = value;
         }
     }
 }
@@ -427,7 +490,7 @@ kernel void kernel_moe_swiglu_clamped_grouped_slots_f32x(
 typedef decltype(kernel_moe_down_grouped_slots_f32x<QT_IQ3_S_BYTES, QT_IQ3_S_NL, f32x_dequantize_iq3_s>) f32x_down_t;
 typedef decltype(kernel_moe_swiglu_clamped_grouped_slots_f32x<QT_IQ2_S_BYTES, QT_IQ2_S_NL, f32x_dequantize_iq2_s>) f32x_swiglu_t;
 
-template [[host_name("kernel_moe_down_mxfp4_f32x_grouped_slots")]] kernel f32x_down_t kernel_moe_down_grouped_slots_f32x<17, 2, expert_dequantize_mxfp4>;
+template [[host_name("kernel_moe_down_mxfp4_f32x_grouped_slots")]] kernel f32x_down_t kernel_moe_down_grouped_slots_f32x<17, 2, expert_dequantize_mxfp4, true>;
 template [[host_name("kernel_moe_swiglu_clamped_mxfp4_f32x_grouped_slots")]] kernel f32x_swiglu_t kernel_moe_swiglu_clamped_grouped_slots_f32x<17, 2, expert_dequantize_mxfp4>;
 
 template [[host_name("kernel_moe_down_q2_0_f32x_grouped_slots")]] kernel f32x_down_t kernel_moe_down_grouped_slots_f32x<QT_Q2_0_BYTES, QT_Q2_0_NL, latent_dequantize_q2_0>;
@@ -450,3 +513,5 @@ template [[host_name("kernel_moe_down_iq3_s_f32x_grouped_slots")]] kernel f32x_d
 template [[host_name("kernel_moe_down_iq4_xs_f32x_grouped_slots")]] kernel f32x_down_t kernel_moe_down_grouped_slots_f32x<QT_IQ4_XS_BYTES, QT_IQ4_XS_NL, f32x_dequantize_iq4_xs>;
 template [[host_name("kernel_moe_swiglu_clamped_iq2_s_f32x_grouped_slots")]] kernel f32x_swiglu_t kernel_moe_swiglu_clamped_grouped_slots_f32x<QT_IQ2_S_BYTES, QT_IQ2_S_NL, f32x_dequantize_iq2_s>;
 template [[host_name("kernel_moe_swiglu_clamped_iq3_s_f32x_grouped_slots")]] kernel f32x_swiglu_t kernel_moe_swiglu_clamped_grouped_slots_f32x<QT_IQ3_S_BYTES, QT_IQ3_S_NL, f32x_dequantize_iq3_s>;
+template [[host_name("kernel_moe_swiglu_clamped_iq3_xxs_f32x_grouped_slots")]] kernel f32x_swiglu_t kernel_moe_swiglu_clamped_grouped_slots_f32x<QT_IQ3_XXS_BYTES, QT_IQ3_XXS_NL, latent_dequantize_iq3_xxs>;
+template [[host_name("kernel_moe_swiglu_clamped_q3_K_f32x_grouped_slots")]] kernel f32x_swiglu_t kernel_moe_swiglu_clamped_grouped_slots_f32x<QT_Q3_K_BYTES, QT_Q3_K_NL, latent_dequantize_q3_K>;

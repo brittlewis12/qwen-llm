@@ -23,6 +23,21 @@ fn fixture(
     e: usize,
     batch: Option<usize>,
 ) -> Vec<u32> {
+    fixture_types(ctx, dtype, dtype, down, edge, n, k, m, e, batch)
+}
+
+fn fixture_types(
+    ctx: &MetalContext,
+    dtype: GgmlType,
+    up_type: GgmlType,
+    down: bool,
+    edge: bool,
+    n: usize,
+    k: usize,
+    m: usize,
+    e: usize,
+    batch: Option<usize>,
+) -> Vec<u32> {
     const TOP: usize = 6;
     let mut bytes = bank_bytes_for_experts(dtype, k, m, 3, e);
     if edge {
@@ -41,10 +56,10 @@ fn fixture(
     let up = offset_tensor(
         ctx,
         32,
-        &bank_bytes_for_experts(dtype, k, m, 7, e),
+        &bank_bytes_for_experts(up_type, k, m, 7, e),
         16,
         bank.shape.clone(),
-        dtype,
+        up_type,
     );
     let width = if down { k * TOP } else { k };
     let x: Vec<_> = (0..width * n)
@@ -152,8 +167,9 @@ fn fixture(
         .iter()
         .zip(census.chunks_exact(if down { 1 } else { 2 }))
     {
-        for record in records {
-            assert_eq!(record.kernel, native_pipeline_name(dtype).unwrap());
+        for (pass, record) in records.iter().enumerate() {
+            let pass_type = if pass == 0 { dtype } else { up_type };
+            assert_eq!(record.kernel, native_pipeline_name(pass_type).unwrap());
             assert_eq!(
                 (record.grid_width, record.grid_height, record.grid_depth),
                 (m.div_ceil(4) as u64, TOP as u64, *chunk as u64)
@@ -298,19 +314,23 @@ fn native_rows_arithmetic_source_and_capability_contract() {
             all_slots_down_native_rows_supported(dtype),
             matches!(
                 dtype,
-                GgmlType::IQ3_XXS | GgmlType::IQ3_S | GgmlType::Q3_K | GgmlType::MXFP4
+                GgmlType::IQ3_XXS
+                    | GgmlType::IQ3_S
+                    | GgmlType::Q3_K
+                    | GgmlType::MXFP4
+                    | GgmlType::IQ2_XXS
             )
         );
-        for other in [
-            GgmlType::IQ3_XXS,
-            GgmlType::Q3_K,
-            GgmlType::IQ2_XS,
-            GgmlType::IQ2_XXS,
-        ] {
+        for other in (0..=255).map(GgmlType::from_raw) {
+            let gate_types = [
+                GgmlType::IQ3_XXS,
+                GgmlType::Q3_K,
+                GgmlType::IQ2_XS,
+                GgmlType::IQ2_XXS,
+            ];
             assert_eq!(
                 all_slots_gate_up_native_rows_supported(dtype, other),
-                matches!(dtype, GgmlType::IQ3_XXS | GgmlType::Q3_K)
-                    && matches!(other, GgmlType::IQ3_XXS | GgmlType::Q3_K)
+                gate_types.contains(&dtype) && gate_types.contains(&other)
             );
         }
     }
@@ -341,11 +361,110 @@ fn native_rows_bitwise_partitions_high_ids_status_views_and_extremes() {
 }
 
 #[test]
+fn native_rows_iq2_bitwise_tails_mixed_types_status_and_guards() {
+    let _lease = production_lease();
+    let ctx = MetalContext::new().unwrap();
+    for (gate, up, down) in [
+        (GgmlType::IQ2_XS, GgmlType::IQ2_XS, false),
+        (GgmlType::IQ2_XXS, GgmlType::IQ2_XXS, false),
+        (GgmlType::IQ2_XS, GgmlType::IQ2_XXS, false),
+        (GgmlType::IQ2_XXS, GgmlType::IQ2_XS, false),
+        (GgmlType::IQ2_XS, GgmlType::Q3_K, false),
+        (GgmlType::IQ3_XXS, GgmlType::IQ2_XXS, false),
+        (GgmlType::IQ2_XXS, GgmlType::IQ2_XXS, true),
+    ] {
+        for (k, m) in [(256, 1), (768, 7)] {
+            for n in [1, 3, 7, 33, 257] {
+                let expected = fixture_types(&ctx, gate, up, down, false, n, k, m, 384, None);
+                for chunk in [n, 33.min(n)] {
+                    assert_eq!(
+                        fixture_types(&ctx, gate, up, down, false, n, k, m, 384, Some(chunk)),
+                        expected,
+                        "{gate:?}/{up:?} down={down} K={k} M={m} rows={n} chunk={chunk}"
+                    );
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn native_rows_iq2_cpu_codec_f64_oracle() {
+    let _lease = production_lease();
+    let ctx = MetalContext::new().unwrap();
+    let (k, m, n, top) = (768, 7, 7, IDS.len());
+    let statuses = [ROUTE_STATUS_READY, 0, -7, 1, 1, 1, 1];
+    let ids = i32_view(&ctx, &IDS.repeat(n)).view_subrange(0, vec![top as u64, n as u64]);
+    let status = i32_view(&ctx, &statuses);
+    for (gate_type, up_type, down) in [
+        (GgmlType::IQ2_XS, GgmlType::IQ2_XS, false),
+        (GgmlType::IQ2_XXS, GgmlType::IQ2_XXS, false),
+        (GgmlType::IQ2_XS, GgmlType::IQ2_XXS, false),
+        (GgmlType::IQ2_XXS, GgmlType::IQ2_XS, false),
+        (GgmlType::IQ2_XXS, GgmlType::IQ2_XXS, true),
+    ] {
+        let gb = bank_bytes(gate_type, k, m, 3);
+        let ub = bank_bytes(up_type, k, m, 7);
+        let gate = bank(&ctx, &gb, gate_type, k, m);
+        let up = bank(&ctx, &ub, up_type, k, m);
+        let width = if down { k * top } else { k };
+        let x = values(width * n, 9);
+        let input = f32_view(&ctx, &x, &[k, if down { top * n } else { n }], 28);
+        let output = f32_view(&ctx, &vec![f32::NAN; m * top * n], &[m, top * n], 28);
+        one_shot(&ctx, |enc| {
+            if down {
+                encode_all_slots_down_native_rows(
+                    &ctx, enc, &gate, &input, &ids, &status, &output, k, m, EXPERTS, top, n,
+                )
+            } else {
+                encode_all_slots_gate_up_swiglu_native_rows(
+                    &ctx, enc, &gate, &up, &input, &ids, &status, &output, k, m, EXPERTS, top, n,
+                    0.37,
+                )
+            }
+        })
+        .unwrap();
+        let mut expected = vec![0.0; m * top * n];
+        for row in 0..n {
+            for (slot, &id) in IDS.iter().enumerate() {
+                if statuses[row] != ROUTE_STATUS_READY || id < 0 || id as usize >= EXPERTS {
+                    continue;
+                }
+                let gw = dequant_expert(&gb, gate_type, k, m, id as usize);
+                let uw = dequant_expert(&ub, up_type, k, m, id as usize);
+                let start = row * width + if down { slot * k } else { 0 };
+                for channel in 0..m {
+                    let g = dot(&gw[channel * k..][..k], &x[start..][..k]);
+                    expected[(row * top + slot) * m + channel] = if down {
+                        g
+                    } else {
+                        let u = dot(&uw[channel * k..][..k], &x[start..][..k]);
+                        let g = g.min(0.37);
+                        g / (1.0 + (-g).exp()) * u.clamp(-0.37, 0.37)
+                    };
+                }
+            }
+        }
+        close(
+            &format!("row-batched {gate_type:?}/{up_type:?} down={down}"),
+            &tensor_f32_at_offset(&output),
+            &expected,
+        );
+        assert_offset_guards(&output, 20, 28);
+    }
+}
+
+#[test]
 fn native_rows_bitwise_real_widths_top6() {
     let _lease = production_lease();
     let ctx = MetalContext::new().unwrap();
     assert_eq!(snapshot(&ctx, true), snapshot(&ctx, false));
-    for dtype in [GgmlType::IQ3_XXS, GgmlType::Q3_K] {
+    for dtype in [
+        GgmlType::IQ3_XXS,
+        GgmlType::Q3_K,
+        GgmlType::IQ2_XS,
+        GgmlType::IQ2_XXS,
+    ] {
         assert_eq!(
             fixture(&ctx, dtype, false, false, 3, 5120, 2304, 6, Some(3)),
             fixture(&ctx, dtype, false, false, 3, 5120, 2304, 6, None)
@@ -356,6 +475,7 @@ fn native_rows_bitwise_real_widths_top6() {
         GgmlType::IQ3_S,
         GgmlType::Q3_K,
         GgmlType::MXFP4,
+        GgmlType::IQ2_XXS,
     ] {
         assert_eq!(
             fixture(&ctx, dtype, true, false, 3, 2304, 5120, 6, Some(3)),
@@ -366,22 +486,32 @@ fn native_rows_bitwise_real_widths_top6() {
 
 #[test]
 fn native_rows_preflight_is_atomic_for_both_passes() {
+    preflight_case(GgmlType::IQ3_XXS, GgmlType::IQ3_XXS, GgmlType::IQ3_XXS);
+}
+
+#[test]
+fn native_rows_iq2_preflight_is_atomic_for_both_passes() {
+    preflight_case(GgmlType::IQ2_XS, GgmlType::IQ2_XXS, GgmlType::IQ2_XXS);
+    preflight_case(GgmlType::IQ2_XXS, GgmlType::IQ2_XS, GgmlType::IQ2_XXS);
+}
+
+fn preflight_case(gate_type: GgmlType, up_type: GgmlType, down_type: GgmlType) {
     let _lease = production_lease();
     let ctx = MetalContext::new().unwrap();
     let (k, m, e, top, n) = (256, 7, 3, 6, 3);
-    let bank = |seed| {
+    let bank = |dtype, seed| {
         offset_tensor(
             &ctx,
             32,
-            &bank_bytes_for_experts(GgmlType::IQ3_XXS, k, m, seed, e),
+            &bank_bytes_for_experts(dtype, k, m, seed, e),
             16,
             vec![k as u64, m as u64, e as u64],
-            GgmlType::IQ3_XXS,
+            dtype,
         )
     };
     let original = [
-        bank(3),
-        bank(7),
+        bank(gate_type, 3),
+        bank(up_type, 7),
         f32_view(&ctx, &values(k * n, 9), &[k, n], 28),
         i32_view(&ctx, &vec![0; top * n]).view_subrange(0, vec![top as u64, n as u64]),
         i32_view(&ctx, &vec![1; n]),
@@ -454,19 +584,24 @@ fn native_rows_preflight_is_atomic_for_both_passes() {
         assert!(encode(&original, k, m, e, top, n, 0.37).is_err());
     }
     for dtype in [
-        GgmlType::IQ2_XS,
-        GgmlType::IQ2_XXS,
+        GgmlType::IQ3_S,
+        GgmlType::Q4_K,
         GgmlType::IQ2_S,
         GgmlType::MXFP4,
     ] {
         let mut t = original.clone();
         t[0].dtype = dtype;
         t[1].dtype = dtype;
-        assert!(encode(&t, k, m, e, top, n, 0.37).is_err());
+        assert!(
+            encode(&t, k, m, e, top, n, 0.37)
+                .unwrap_err()
+                .to_string()
+                .contains("unsupported row-batched gate/up storage")
+        );
     }
     let input = f32_view(&ctx, &values(k * top * n, 5), &[k, top * n], 28);
     let original_down = [
-        original[0].clone(),
+        bank(down_type, 3),
         input,
         original[3].clone(),
         original[4].clone(),
@@ -487,6 +622,16 @@ fn native_rows_preflight_is_atomic_for_both_passes() {
     }
     for rows in [0, usize::MAX] {
         assert!(down(&original_down, rows).is_err());
+    }
+    for dtype in [GgmlType::IQ2_XS, GgmlType::IQ2_S, GgmlType::Q4_K] {
+        let mut t = original_down.clone();
+        t[0].dtype = dtype;
+        assert!(
+            down(&t, n)
+                .unwrap_err()
+                .to_string()
+                .contains("unsupported row-batched down storage")
+        );
     }
     for which in 0..4 {
         let mut t = original_down.clone();
@@ -574,7 +719,12 @@ fn native_rows_gate_and_up_projection_stores_are_bitwise() {
     let ids = i32_view(&ctx, &[383, 271, 383, 0, 1, 0].repeat(n))
         .view_subrange(0, vec![top as u64, n as u64]);
     let status = i32_view(&ctx, &vec![ROUTE_STATUS_READY; n]);
-    for dtype in [GgmlType::IQ3_XXS, GgmlType::Q3_K] {
+    for dtype in [
+        GgmlType::IQ3_XXS,
+        GgmlType::Q3_K,
+        GgmlType::IQ2_XS,
+        GgmlType::IQ2_XXS,
+    ] {
         for seed in [3, 7] {
             let bank = offset_tensor(
                 &ctx,

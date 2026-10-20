@@ -1102,7 +1102,14 @@ pub(crate) fn check_moe_down_f32x_grouped_slots(
 /// block elements); M may have a partial tile. Counts outside 0..=n_tokens
 /// and slot ids outside the output's slot range are skipped. Each slot's outputs
 /// depend only on its own activation row: not on its expert's count or place in the
-/// bucket. Bindings and device are checked before encoding
+/// bucket. Each output slot must have a unique bucket owner. MXFP4 exponent-0/1
+/// blocks use an edge-only, scaled F32 compensated reduction, merged with the
+/// ordinary result before unscaling. Ordinary blocks retain the matrix reduction.
+/// Qualification retains relative RMS <= 1e-5 and max error <= 2e-5 times the
+/// reference peak for finite, normal-result witnesses; this is not a uniform
+/// relative-error guarantee for arbitrary ill-conditioned dots. Ordinary-path
+/// FTZ/overflow and subnormal final outputs are not repaired by the edge epilogue.
+/// Bindings and device are checked before encoding
 /// ([`check_moe_down_f32x_grouped_slots`]). 12 KiB of threadgroup memory.
 #[allow(clippy::too_many_arguments)]
 pub fn encode_moe_down_f32x_grouped_slots(
@@ -1156,7 +1163,10 @@ pub fn encode_moe_down_f32x_grouped_slots(
 
 /// Storage types with a fused F32-operand clamped gate/up matrix kernel.
 pub fn moe_swiglu_clamped_f32x_grouped_slots_supported(dtype: GgmlType) -> bool {
-    matches!(dtype, GgmlType::MXFP4 | GgmlType::IQ2_S | GgmlType::IQ3_S)
+    matches!(
+        dtype,
+        GgmlType::MXFP4 | GgmlType::IQ2_S | GgmlType::IQ3_S | GgmlType::IQ3_XXS | GgmlType::Q3_K
+    )
 }
 
 /// Checks without encoding; returns the pipeline name.
@@ -1196,6 +1206,8 @@ pub(crate) fn check_moe_swiglu_clamped_f32x_grouped_slots(
         GgmlType::MXFP4 => "kernel_moe_swiglu_clamped_mxfp4_f32x_grouped_slots",
         GgmlType::IQ2_S => "kernel_moe_swiglu_clamped_iq2_s_f32x_grouped_slots",
         GgmlType::IQ3_S => "kernel_moe_swiglu_clamped_iq3_s_f32x_grouped_slots",
+        GgmlType::IQ3_XXS => "kernel_moe_swiglu_clamped_iq3_xxs_f32x_grouped_slots",
+        GgmlType::Q3_K => "kernel_moe_swiglu_clamped_q3_K_f32x_grouped_slots",
         other => return Err(bad(format!("no F32-operand grouped SwiGLU for {other:?}"))),
     };
     let slots = n_tokens.checked_mul(topk);
@@ -1239,9 +1251,10 @@ pub(crate) fn check_moe_swiglu_clamped_f32x_grouped_slots(
 /// (`kernels/moe_grouped_f32.metal`, map #12 accuracy lane): the contract of
 /// [`encode_moe_swiglu_clamped_f32_grouped_slots_generic`] with weights
 /// dequantized to F32, unrounded activations and F32 accumulation, for the
-/// gate/up types MXFP4, IQ2_S and IQ3_S. Bindings and device are checked
-/// before encoding ([`check_moe_swiglu_clamped_f32x_grouped_slots`]). 18 KiB
-/// of threadgroup memory.
+/// same-type gate/up pairs MXFP4, IQ2_S, IQ3_S, IQ3_XXS and Q3_K. Counts outside
+/// 0..=n_tokens and invalid slot IDs are skipped. Bindings and device are checked
+/// before encoding ([`check_moe_swiglu_clamped_f32x_grouped_slots`]).
+/// 18 KiB of threadgroup memory.
 #[allow(clippy::too_many_arguments)]
 pub fn encode_moe_swiglu_clamped_f32x_grouped_slots(
     ctx: &MetalContext,
@@ -1284,7 +1297,7 @@ pub fn encode_moe_swiglu_clamped_f32x_grouped_slots(
         topk,
         n_tokens,
         0,
-        i32::MAX as u32,
+        n_tokens as u32,
         Some(clamp),
     )
 }

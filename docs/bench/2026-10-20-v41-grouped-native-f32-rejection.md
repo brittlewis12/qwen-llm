@@ -1,5 +1,10 @@
 # V4.1 Grouped NativeF32 MMA: Full-Model Rejection
 
+Historical baseline-equivalence decision. The failures below remain unchanged;
+[the later practical acceptance record](2026-10-20-v41-complete-row-batching.md)
+adds measured speed, task outcomes and held-text likelihood rather than treating
+route identity as a universal quality requirement.
+
 The IQ3_XXS/Q3_K grouped gate/up prototype is not qualified for promotion.
 Real-bank conditional replay passes, but live full-model routing and logit
 comparisons fail. No timing campaign, installation, tolerance relaxation, or

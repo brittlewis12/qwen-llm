@@ -8,6 +8,9 @@ use crate::metal::moe_grouped_generic::{
 const SOURCE: &str = include_str!("../../../../../kernels/moe_grouped_f32.metal");
 const DECODERS: &str = include_str!("../../../../../kernels/native_dequant_f32.h");
 
+#[path = "f32x_mxfp4_reduction_tests.rs"]
+mod reduction;
+
 #[test]
 fn down_f32x_capability_matches_native_instantiations() {
     assert_eq!(MOE_GROUPED_GENERIC_LAYOUTS.len(), 17);
@@ -54,7 +57,7 @@ fn down_f32x_capability_matches_native_instantiations() {
 
 /// Arbitrary native payloads with finite storage scales. Expected weights
 /// come from the independent CPU codec, never from a GPU dequant/matvec.
-fn native_bank(dtype: GgmlType, k: usize, m: usize, experts: usize) -> Vec<u8> {
+pub(super) fn native_bank(dtype: GgmlType, k: usize, m: usize, experts: usize) -> Vec<u8> {
     let mut state = 0x1234_5678_9abc_def1u64;
     let mut next = || {
         state ^= state << 13;
@@ -88,6 +91,10 @@ fn native_bank(dtype: GgmlType, k: usize, m: usize, experts: usize) -> Vec<u8> {
         _ => &[0],
     };
     for (ordinal, block) in bytes.chunks_exact_mut(block_bytes as usize).enumerate() {
+        if dtype == GgmlType::MXFP4 {
+            block[0] = 116 + (ordinal % 7) as u8;
+            continue;
+        }
         for (j, &offset) in offsets.iter().enumerate() {
             let sign = if (ordinal + j) % 2 == 0 { 1.0 } else { -1.0 };
             let d = sign * (1 + (ordinal + j) % 7) as f32 * 0.00013;
@@ -237,6 +244,7 @@ fn exercise_down(ctx: &MetalContext, dtype: GgmlType, k: usize, m: usize, n: usi
 
 #[test]
 fn down_f32x_all_native_decoders_match_cpu_and_preserve_slot_independence() {
+    let _lease = production_lease();
     let Some(ctx) = crate::test_fixtures::metal_context_or_skip() else {
         return;
     };
@@ -253,10 +261,20 @@ fn down_f32x_all_native_decoders_match_cpu_and_preserve_slot_independence() {
             }
         }
     }
+    let mut first = None;
+    for n in [3, 15, 16, 17, 31, 32, 33] {
+        let bits = exercise_down(&ctx, GgmlType::MXFP4, 64, 65, n);
+        if let Some(ref first) = first {
+            assert_eq!(&bits, first, "MXFP4 bucket size {n}");
+        } else {
+            first = Some(bits);
+        }
+    }
 }
 
 #[test]
 fn down_f32x_iq3_xxs_glm_dimensions_match_cpu() {
+    let _lease = production_lease();
     let Some(ctx) = crate::test_fixtures::metal_context_or_skip() else {
         return;
     };
@@ -266,6 +284,7 @@ fn down_f32x_iq3_xxs_glm_dimensions_match_cpu() {
 /// Dense F32/BF16 weights also retain values outside half's finite range.
 #[test]
 fn down_f32x_dense_weights_preserve_large_and_small_f32_range() {
+    let _lease = production_lease();
     let Some(ctx) = crate::test_fixtures::metal_context_or_skip() else {
         return;
     };
@@ -323,7 +342,303 @@ fn down_f32x_dense_weights_preserve_large_and_small_f32_range() {
 }
 
 #[test]
+fn down_f32x_mxfp4_subnormal_weights_produce_normal_results() {
+    let _lease = production_lease();
+    let Some(ctx) = crate::test_fixtures::metal_context_or_skip() else {
+        return;
+    };
+    for exponent in [0u8, 1] {
+        let mut bytes = vec![0u8; 17 * 16];
+        for (code, block) in bytes.chunks_exact_mut(17).enumerate() {
+            block[0] = exponent;
+            block[1] = code as u8;
+            block[16] = (code as u8) << 4;
+        }
+        let weight = offset_tensor(&ctx, 18, &bytes, 22, vec![32, 16, 1], GgmlType::MXFP4);
+        let decoded = dequant_expert(&bytes, GgmlType::MXFP4, 32, 16, 0);
+        assert!(decoded.iter().any(|w| w.is_subnormal()));
+        let mut x = vec![0.0; 64];
+        x[0] = 2.0f32.powi(126);
+        x[63] = -2.0f32.powi(126);
+        let inner = f32_tensor(&ctx, &x, vec![32, 2]);
+        let counts = offset_tensor(
+            &ctx,
+            12,
+            bytemuck::cast_slice(&[2i32]),
+            20,
+            vec![1],
+            GgmlType::I32,
+        );
+        let ids = offset_tensor(
+            &ctx,
+            12,
+            bytemuck::cast_slice(&[1i32, 0]),
+            20,
+            vec![2],
+            GgmlType::I32,
+        );
+        let out = f32_tensor(&ctx, &[f32::NAN; 32], vec![16, 2]);
+        run(&ctx, |enc| {
+            encode_moe_down_f32x_grouped_slots(
+                &ctx, enc, &weight, &inner, &counts, &ids, &out, 32, 16, 1, 2,
+            )
+            .unwrap();
+        });
+        let exact: Vec<f64> = x
+            .chunks_exact(32)
+            .flat_map(|x| {
+                decoded.chunks_exact(32).map(move |w| {
+                    w.iter()
+                        .zip(x)
+                        .map(|(&w, &x)| f64::from(w) * f64::from(x))
+                        .sum()
+                })
+            })
+            .collect();
+        assert!(
+            exact
+                .iter()
+                .filter(|&&v| v != 0.0)
+                .all(|&v| (v as f32).is_normal() && v.abs() >= 0.25)
+        );
+        let actual = read_f32(&out);
+        let native_ids = offset_tensor(
+            &ctx,
+            12,
+            bytemuck::cast_slice(&[0i32, 0]),
+            20,
+            vec![2],
+            GgmlType::I32,
+        );
+        let ready = offset_tensor(
+            &ctx,
+            12,
+            bytemuck::cast_slice(&[ROUTE_STATUS_READY]),
+            20,
+            vec![1],
+            GgmlType::I32,
+        );
+        let scalar = f32_tensor(&ctx, &[f32::NAN; 32], vec![16, 2]);
+        let scalar_weight = offset_tensor(&ctx, 32, &bytes, 22, vec![32, 16, 1], GgmlType::MXFP4);
+        run(&ctx, |enc| {
+            crate::metal::encode_all_slots_down_native(
+                &ctx,
+                enc,
+                &scalar_weight,
+                &inner,
+                &native_ids,
+                &ready,
+                &scalar,
+                32,
+                16,
+                1,
+                2,
+            )
+            .unwrap();
+        });
+        assert_eq!(
+            actual,
+            read_f32(&scalar),
+            "MXFP4 exponent={exponent}: unchanged scalar path"
+        );
+        let rms = relative_rms(&actual, &exact);
+        let peak = exact.iter().map(|v| v.abs()).fold(0.0, f64::max);
+        let error = crate::compare::assert_max_abs_diff_f64(
+            "MXFP4 subnormal weights",
+            actual.iter().map(|&v| f64::from(v)),
+            exact.iter(),
+        );
+        eprintln!("MXFP4 exponent={exponent}: RMS={rms:e}, max={error:e}, reference peak={peak:e}");
+        assert!(rms <= 1e-5 && error <= 2e-5 * peak);
+        assert_offset_guards(&out, 16, 20);
+    }
+}
+
+#[test]
+fn down_f32x_mxfp4_normal_blocks_keep_matrix_arithmetic_bitwise() {
+    let _lease = production_lease();
+    let Some(ctx) = crate::test_fixtures::metal_context_or_skip() else {
+        return;
+    };
+    let (k, m, n) = (2304, 65, 33);
+    let bytes = native_bank(GgmlType::MXFP4, k, m, 1);
+    let decoded = dequant_expert(&bytes, GgmlType::MXFP4, k, m, 0);
+    let quant = offset_tensor(
+        &ctx,
+        18,
+        &bytes,
+        22,
+        vec![k as u64, m as u64, 1],
+        GgmlType::MXFP4,
+    );
+    let dense = f32_tensor(&ctx, &decoded, vec![k as u64, m as u64, 1]);
+    let x: Vec<_> = (0..k * n)
+        .map(|i| (((i * 17 + i / k * 53) % 89) as f32 - 44.0) * 0.030013 * 70000.125)
+        .collect();
+    let input = f32_tensor(&ctx, &x, vec![(k * n) as u64]);
+    let counts = offset_tensor(
+        &ctx,
+        12,
+        bytemuck::cast_slice(&[n as i32]),
+        20,
+        vec![1],
+        GgmlType::I32,
+    );
+    let ids: Vec<_> = (0..n as i32).rev().collect();
+    let ids = offset_tensor(
+        &ctx,
+        12,
+        bytemuck::cast_slice(&ids),
+        20,
+        vec![n as u64],
+        GgmlType::I32,
+    );
+    let mut outputs = Vec::new();
+    for weight in [&quant, &dense] {
+        let out = f32_tensor(&ctx, &vec![f32::NAN; m * n], vec![(m * n) as u64]);
+        run(&ctx, |enc| {
+            encode_moe_down_f32x_grouped_slots(
+                &ctx, enc, weight, &input, &counts, &ids, &out, k, m, 1, n,
+            )
+            .unwrap()
+        });
+        outputs.push(
+            read_f32(&out)
+                .iter()
+                .map(|v| v.to_bits())
+                .collect::<Vec<_>>(),
+        );
+        assert_offset_guards(&out, 16, 20);
+    }
+    assert_eq!(
+        outputs[0], outputs[1],
+        "normal MXFP4 uses the unchanged matrix reduction"
+    );
+}
+
+#[test]
+fn down_f32x_mxfp4_mixed_exponents_real_k_tails_and_partition() {
+    let _lease = production_lease();
+    let Some(ctx) = crate::test_fixtures::metal_context_or_skip() else {
+        return;
+    };
+    const K: usize = 2304;
+    const M: usize = 65;
+    const N: usize = 33;
+    let mut bytes = native_bank(GgmlType::MXFP4, K, M, 2);
+    for (ordinal, block) in bytes.chunks_exact_mut(17).enumerate() {
+        let row = ordinal / (K / 32);
+        // Adjacent normal-only, edge-only and mixed rows share one tile.
+        block[0] = match row % 3 {
+            0 => 2 + (ordinal % 2) as u8,
+            1 => (ordinal % 2) as u8,
+            _ => (ordinal % 4) as u8,
+        };
+    }
+    let weight = offset_tensor(
+        &ctx,
+        18,
+        &bytes,
+        22,
+        vec![K as u64, M as u64, 2],
+        GgmlType::MXFP4,
+    );
+    let x: Vec<_> = (0..K * (N + 17))
+        .map(|i| (((i * 17 + i / K * 53) % 89) as f32 - 44.0) * 0.030013 * 2.0f32.powi(100))
+        .collect();
+    let input = f32_tensor(&ctx, &x, vec![(K * (N + 17)) as u64]);
+    let ints = |values: &[i32]| {
+        offset_tensor(
+            &ctx,
+            12,
+            bytemuck::cast_slice(values),
+            20,
+            vec![values.len() as u64],
+            GgmlType::I32,
+        )
+    };
+    let counts = ints(&[N as i32, 17]);
+    let mut ids = vec![-1; 2 * N];
+    for slot in 0..N {
+        ids[slot] = (N - 1 - slot) as i32;
+    }
+    for slot in 0..17 {
+        ids[N + slot] = (N + slot) as i32;
+    }
+    let slots = ints(&ids);
+    let out = f32_tensor(
+        &ctx,
+        &vec![f32::NAN; M * (N + 17)],
+        vec![(M * (N + 17)) as u64],
+    );
+    let inputs = [&weight, &input, &counts, &slots];
+    let before: Vec<_> = inputs.iter().map(|t| tensor_backing_bytes(t)).collect();
+    run(&ctx, |enc| {
+        encode_moe_down_f32x_grouped_slots(
+            &ctx, enc, &weight, &input, &counts, &slots, &out, K, M, 2, N,
+        )
+        .unwrap()
+    });
+    let actual = read_f32(&out);
+    for (expert, range) in [(0, 0..N), (1, N..N + 17)] {
+        let decoded = dequant_expert(&bytes, GgmlType::MXFP4, K, M, expert);
+        for slot in range {
+            let exact: Vec<f64> = decoded
+                .chunks_exact(K)
+                .map(|w| {
+                    w.iter()
+                        .zip(&x[slot * K..(slot + 1) * K])
+                        .map(|(&w, &x)| f64::from(w) * f64::from(x))
+                        .sum()
+                })
+                .collect();
+            assert!(exact.iter().all(|&v| (v as f32).is_normal()));
+            let a = &actual[slot * M..(slot + 1) * M];
+            let rms = relative_rms(a, &exact);
+            let peak = exact.iter().map(|v| v.abs()).fold(0.0, f64::max);
+            let error = crate::compare::assert_max_abs_diff_f64(
+                "mixed MXFP4",
+                a.iter().map(|&v| f64::from(v)),
+                exact.iter(),
+            );
+            assert!(
+                rms <= 1e-5 && error <= peak * 2e-5,
+                "slot {slot}: RMS={rms:e}, error={error:e}/{peak:e}"
+            );
+        }
+    }
+    let again = f32_tensor(&ctx, &vec![f32::NAN; actual.len()], out.shape.clone());
+    ids[..N].reverse();
+    for range in [0..16, 16..N] {
+        let mut part = vec![-1; 2 * N];
+        part[..range.len()].copy_from_slice(&ids[range.clone()]);
+        part[N..N + 17].copy_from_slice(&ids[N..N + 17]);
+        let counts = ints(&[range.len() as i32, if range.start == 0 { 17 } else { 0 }]);
+        let slots = ints(&part);
+        run(&ctx, |enc| {
+            encode_moe_down_f32x_grouped_slots(
+                &ctx, enc, &weight, &input, &counts, &slots, &again, K, M, 2, N,
+            )
+            .unwrap()
+        });
+    }
+    assert_eq!(
+        actual.iter().map(|v| v.to_bits()).collect::<Vec<_>>(),
+        read_f32(&again)
+            .iter()
+            .map(|v| v.to_bits())
+            .collect::<Vec<_>>()
+    );
+    for (t, before) in inputs.iter().zip(before) {
+        assert_eq!(tensor_backing_bytes(t), before);
+    }
+    assert_offset_guards(&out, 16, 20);
+    assert_offset_guards(&again, 16, 20);
+}
+
+#[test]
 fn down_f32x_native_preflight_rejects_bad_shapes_types_and_alignment() {
+    let _lease = production_lease();
     let Some(ctx) = crate::test_fixtures::metal_context_or_skip() else {
         return;
     };

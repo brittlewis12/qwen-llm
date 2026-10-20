@@ -133,8 +133,8 @@ qwen serve -m MODEL [--addr 127.0.0.1:8737] [--max-tokens N] \
   [--lens-data-dir PATH] [--web-root web/dist]
 # Qwen: without --max-context-tokens the admission ceiling is the smaller of the
 # 262,144 hard default and the GGUF's declared context length; --drafter is
-# accepted for dense targets only (an MoE target fails startup rather than
-# silently running serially)
+# accepted for ordinary dense and MoE targets. Optional speculation state is
+# memory-admitted per request; failed admission falls back to serial decode.
 # DeepSeek V4 additionally requires --max-context-tokens (startup-fixed forward budget)
 # Muse Glimmer and Qwen3.8-Flash-Next require both --max-context-tokens and
 # --max-tokens (resident session capacity is fixed at load); admitted capacity

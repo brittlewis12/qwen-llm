@@ -161,7 +161,7 @@ detail.
 | Family | `qwen serve` sizing flags | Snapshots | DFlash drafter |
 |---|---|---|---|
 | Qwen (qwen35) | none (request-shaped) | RAM and disk | `run`, `serve` |
-| Qwen MoE (qwen35moe) | none (request-shaped) | RAM and disk | `run` |
+| Qwen MoE (qwen35moe) | none (request-shaped) | RAM and disk | `run`, `serve` |
 | Qwen3.8-Flash-Next | `--max-context-tokens`, `--max-tokens` | RAM | no |
 | DeepSeek V4 | `--max-context-tokens` | RAM and disk | no |
 | DeepSeek V4.1 | `--max-context-tokens`, `--max-tokens` | RAM | no |

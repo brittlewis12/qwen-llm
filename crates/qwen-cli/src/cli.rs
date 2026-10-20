@@ -305,8 +305,8 @@ pub(crate) struct RunArgs {
 
     /// Render the model's released non-thinking prompt transition; does not suppress CLI diagnostics.
     ///
-    /// Supported on any GGUF identified as a Qwen3.5, Qwen3.6, Qwen3.8, or
-    /// Flash-Next release; unidentified releases fail closed. DeepSeek
+    /// Supported on recognized Qwen chat contracts and identified Qwen3.5,
+    /// Qwen3.6, Qwen3.8, or Flash-Next releases. DeepSeek
     /// ordinary chat is already non-thinking, so this is an idempotent
     /// guarantee there. This is not an output filter.
     #[arg(long, conflicts_with = "raw_prompt")]

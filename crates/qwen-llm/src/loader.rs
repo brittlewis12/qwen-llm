@@ -349,6 +349,8 @@ pub struct DFlashConfig {
     pub n_kv_heads: u32,
     pub head_dim: u32,
     pub rope_theta: f32,
+    /// GGUF attention.causal; absent metadata retains the legacy causal default.
+    pub causal: bool,
     /// Sliding-window size (in tokens) for SWA layers. 0 if no SWA layers.
     pub swa_window: u32,
     /// `block_size` from GGUF — number of noise tokens fed to the drafter
@@ -379,7 +381,7 @@ pub struct DFlashConfig {
 /// the target — the drafter GGUF doesn't carry its own.
 pub struct DFlashHead<'a> {
     pub config: DFlashConfig,
-    /// K target layer indices whose hiddens get fused.
+    /// K post-block target layer indices whose hiddens get fused, in capture order.
     pub target_layer_ids: Vec<u32>,
     /// `dflash_fc.weight` (v1) / `fc.weight` (v2), shape `[K · H_target, H_drafter]`.
     pub fc: &'a TensorDesc,
@@ -825,6 +827,7 @@ pub fn open_dflash_drafter<'a>(
         head_count_kv: &'static str,
         key_length: &'static str,
         freq_base: &'static str,
+        causal: &'static str,
         sliding_window: &'static str,
         sliding_window_pattern: &'static str,
         block_size: &'static str,
@@ -846,6 +849,7 @@ pub fn open_dflash_drafter<'a>(
         head_count_kv: "dflash-draft.attention.head_count_kv",
         key_length: "dflash-draft.attention.key_length",
         freq_base: "dflash-draft.rope.freq_base",
+        causal: "dflash-draft.attention.causal",
         sliding_window: "dflash-draft.attention.sliding_window",
         sliding_window_pattern: "dflash-draft.attention.sliding_window_pattern",
         block_size: "dflash-draft.dflash.block_size",
@@ -864,6 +868,7 @@ pub fn open_dflash_drafter<'a>(
         head_count_kv: "dflash.attention.head_count_kv",
         key_length: "dflash.attention.key_length",
         freq_base: "dflash.rope.freq_base",
+        causal: "dflash.attention.causal",
         sliding_window: "dflash.attention.sliding_window",
         sliding_window_pattern: "dflash.attention.sliding_window_pattern",
         block_size: "dflash.block_size",
@@ -908,6 +913,10 @@ pub fn open_dflash_drafter<'a>(
         .ok_or(LoadError::BadMetadata(keys.key_length))?;
     let head_dim = u64_to_u32(keys.key_length, head_dim_raw)?;
     let rope_theta = drafter_gguf.get_f32(keys.freq_base).unwrap_or(10_000_000.0);
+    let causal = drafter_gguf
+        .get_bool(keys.causal)
+        .map_err(|_| LoadError::BadMetadata(keys.causal))?
+        .unwrap_or(true);
     let swa_window = drafter_gguf
         .get_u64(keys.sliding_window)
         .map_or(Ok(0), |v| u64_to_u32(keys.sliding_window, v))?;
@@ -949,21 +958,14 @@ pub fn open_dflash_drafter<'a>(
         .map_err(|_| LoadError::BadMetadata(keys.sliding_window_pattern))?
         .ok_or(LoadError::BadMetadata(keys.sliding_window_pattern))?;
 
-    // A/B experiment (adversarial review F1, QWEN_DFLASH2_CAPTURE_SHIFT=1,
-    // v2 drafters only): llama.cpp feeds the drafter the INPUT to target
-    // layer `lid` (`llama_get_embeddings_layer_inp` = output of `lid-1`),
-    // while this engine's capture machinery snapshots the OUTPUT of layer
-    // `lid`. Shifting the ids by -1 makes our post-layer capture deliver
-    // the reference's features. The v1 (`dflash-draft`) GGUF's ids are
-    // trusted as already matching this engine's convention.
-    let target_layer_ids = if keys.n_target_features.is_none()
-        && std::env::var("QWEN_DFLASH2_CAPTURE_SHIFT").as_deref() == Ok("1")
-    {
+    // The dflash format stores layer-input indices (HF post-block index + 1).
+    // Our captures are post-block; legacy dflash-draft already uses that convention.
+    let target_layer_ids = if arch_str.as_deref() == Some("dflash") {
         target_layer_ids
             .into_iter()
             .map(|lid| {
                 lid.checked_sub(1).ok_or(LoadError::BadMetadata(
-                    "QWEN_DFLASH2_CAPTURE_SHIFT cannot shift target layer id 0",
+                    "dflash.target_layers cannot capture layer input 0 as a post-block state",
                 ))
             })
             .collect::<Result<Vec<_>, _>>()?
@@ -1225,6 +1227,7 @@ pub fn open_dflash_drafter<'a>(
             n_kv_heads,
             head_dim,
             rope_theta,
+            causal,
             swa_window,
             block_size,
             mask_token_id,
@@ -1633,6 +1636,10 @@ pub fn summary(model: &Model<'_>) -> String {
         if model.tied_embeddings { " (tied)" } else { "" },
     )
 }
+
+#[cfg(test)]
+#[path = "loader_dflash_tests.rs"]
+mod dflash_metadata_tests;
 
 #[cfg(test)]
 mod tests {

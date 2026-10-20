@@ -60,6 +60,8 @@ mod prompt_lookup;
 use qwen_cli::{messages, model_request, open_responses, prompt_template};
 #[path = "qwen/qwen4exp.rs"]
 mod qwen4exp;
+#[cfg(test)]
+mod qwen_contract_fixture;
 mod qwen_file_root;
 #[path = "qwen/release_identity.rs"]
 mod release_identity;
@@ -394,7 +396,8 @@ fn run() -> Result<()> {
     // batches and sampling attribution keep their explicit sampler contracts.
     if args.requests_jsonl.is_none() && !args.sampling_attribution {
         let identity = release_identity::ReleaseIdentity::detect(family, &gguf);
-        let release = release_sampling::release_sampling(identity, args.seed);
+        let release =
+            release_sampling::gguf_sampling_defaults(identity, &gguf).with_seed(args.seed);
         let drawn = release_sampling::apply_run_defaults(&mut args, explicit_options, release);
         if let Some(seed) = drawn.filter(|_| args.temperature > 0.0) {
             eprintln!("qwen: sampling seed {seed} (drawn; pass --seed {seed} to reproduce)");
@@ -1166,7 +1169,7 @@ fn project_info(model: &Path, gguf: &GgufFile) -> Result<serde_json::Value> {
                 "status": "permitted",
                 "target": match target {
                     DrafterTarget::Dense => "dense",
-                    DrafterTarget::MoeCliSerial => "moe_cli_serial",
+                    DrafterTarget::Moe => "moe",
                 },
             }),
             DrafterDecision::Unsupported(reason) => serde_json::json!({
@@ -1240,9 +1243,10 @@ fn project_info(model: &Path, gguf: &GgufFile) -> Result<serde_json::Value> {
     };
     // Run and serve defaults for every sampling field a request omits.
     let sampling = match family {
-        Some(family) => {
-            release_sampling::projection(release_identity::ReleaseIdentity::detect(family, gguf))
-        }
+        Some(family) => release_sampling::projection(
+            release_identity::ReleaseIdentity::detect(family, gguf),
+            gguf,
+        ),
         None => serde_json::Value::Null,
     };
     let projection = qwen_cli::info::assemble_projection(qwen_cli::info::ProjectionInput {

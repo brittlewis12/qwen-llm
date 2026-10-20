@@ -6,7 +6,7 @@ use serde_json::{Value, json};
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum DrafterSupport {
     Dense,
-    MoeCliSerial,
+    Moe,
     Unsupported(&'static str),
 }
 
@@ -78,7 +78,7 @@ static QWEN35: FamilyProfile = FamilyProfile {
 static QWEN35_MOE: FamilyProfile = FamilyProfile {
     family: ModelFamily::Qwen35Moe,
     display: "Qwen MoE",
-    drafter: DrafterSupport::MoeCliSerial,
+    drafter: DrafterSupport::Moe,
     fixed_cohort: FixedCohort::Moe16,
     serve_capacity: ServeCapacity::RequestShaped,
     serve_warmth: ServeWarmth::SnapshotsDurable,
@@ -386,7 +386,7 @@ mod tests {
             };
             let drafter = match family_profile.drafter {
                 DrafterSupport::Dense => "`run`, `serve`",
-                DrafterSupport::MoeCliSerial => "`run`",
+                DrafterSupport::Moe => "`run`, `serve`",
                 DrafterSupport::Unsupported(_) => "no",
             };
             rows.push(format!(

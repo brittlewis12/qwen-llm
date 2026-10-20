@@ -54,6 +54,10 @@ mod durable_tier;
 #[cfg(test)]
 #[path = "restored_tail_pilot.rs"]
 mod restored_tail_pilot;
+
+#[cfg(test)]
+#[path = "moe_dflash_tests.rs"]
+mod moe_dflash_tests;
 use durable_tier::restore_source;
 const DFLASH_PREFIX_REPLAY_ENV: &str = "QWEN_DFLASH_PREFIX_REPLAY";
 const DFLASH_PREFIX_REPLAY_MAX_ENTRIES: usize = 4;
@@ -218,7 +222,6 @@ impl DflashPrefixReplayCache {
 struct PreparedRequestFront {
     cpu_reserved: u64,
     needs_scratch: bool,
-    dense: bool,
     chunk: usize,
     scratch: Option<MetalDFlashLayerMajorScratch>,
     sequence: Sequence,
@@ -304,7 +307,7 @@ impl Prepared {
             "{} serve requires request-shaped capacity",
             super::profile(family).display
         );
-        let identity = crate::prompt_template::identify_qwen_release_for_gguf(gguf)
+        let identity = crate::prompt_template::resolve_qwen_contract_for_gguf(gguf)
             .context("identify the loaded model's Qwen release")?;
         if let Some(warning) = identity.warning() {
             tracing::warn!(target: "qwen_diag", "serve: {warning}");
@@ -329,10 +332,11 @@ impl Prepared {
         Ok(Self {
             template,
             no_thinking_supported: template.verified(),
-            release_sampling: crate::release_sampling::release_sampling(
+            release_sampling: crate::release_sampling::gguf_sampling_defaults(
                 crate::release_identity::ReleaseIdentity::detect(family, gguf),
-                42,
-            ),
+                gguf,
+            )
+            .with_seed(42),
             declared_context,
         })
     }
@@ -476,10 +480,6 @@ impl EngineBackend {
         no_thinking_supported: bool,
     ) -> anyhow::Result<Self> {
         let tokenizer = loaded.tokenizer().context("initialize serve tokenizer")?;
-        anyhow::ensure!(
-            drafter.is_none() || loaded.arch().kind == qwen_llm::model::ArchKind::Dense,
-            "serve DFlash speculation currently supports dense targets only; this MoE model would run serially, so omit --drafter"
-        );
         let dflash_head = match drafter {
             Some(path) => {
                 let t0 = Instant::now();
@@ -602,22 +602,12 @@ fn serial_tail_max(kind: qwen_llm::model::ArchKind) -> usize {
     }
 }
 
-fn use_serial_tail(
-    remaining: usize,
-    threshold: usize,
-    speculate: bool,
-    capture_supported: bool,
-) -> bool {
-    remaining <= threshold && (!speculate || capture_supported)
-}
-
 fn should_plan_dflash(
     has_head: bool,
     matched_tokens: usize,
     restore_capture_complete: bool,
-    dense: bool,
 ) -> bool {
-    has_head && dense && (matched_tokens == 0 || restore_capture_complete)
+    has_head && (matched_tokens == 0 || restore_capture_complete)
 }
 
 /// Whether the request prefills a chunk (and so needs prefill scratch):
@@ -947,27 +937,16 @@ fn prefill_remaining(
         |start| {
             sink.tick().map_err(BackendFailure::Aborted)?;
             let remaining = prompt_ids.len() - start;
-            // The per-token multi-hidden API is currently dense-only. MoE
-            // speculative requests keep the packed capture path even for a short
-            // prompt rather than entering DFlash with missing context.
-            let serial_capture_supported = loaded.arch().kind == qwen_llm::model::ArchKind::Dense;
             let single_chunk = scratch
                 .as_ref()
                 .is_some_and(|s| s.prefill_scratch_plan().is_single_chunk());
-            if !single_chunk
-                && use_serial_tail(
-                    remaining,
-                    serial_tail_max(loaded.arch().kind),
-                    dflash_capture.is_some(),
-                    serial_capture_supported,
-                )
-            {
+            if !single_chunk && remaining <= serial_tail_max(loaded.arch().kind) {
                 let mut prompt_logits = None;
                 for (offset, &token) in prompt_ids[start..].iter().enumerate() {
                     let position = start + offset;
                     let position_u32 = u32::try_from(position)
                         .map_err(|_| ServeError::server_error("position overflow"))?;
-                    let skip_tail = serial_capture_supported && position + 1 < prompt_ids.len();
+                    let skip_tail = position + 1 < prompt_ids.len();
                     let logits = match (dflash_head, dflash_capture.as_mut()) {
                         (Some(head), Some((dst, capture_start, captured, n_features, _ring)))
                             if position >= *capture_start =>
@@ -1011,14 +990,18 @@ fn prefill_remaining(
                             *captured += 1;
                             logits
                         }
-                        _ if skip_tail => loaded
-                            .prefill_token_prompt_only(sequence, token)
-                            .map(|()| None)
-                            .map_err(|error| {
-                                ServeError::server_error(format!(
-                                    "serial no-tail prefill: {error:#}"
-                                ))
-                            })?,
+                        _ if skip_tail
+                            && loaded.arch().kind == qwen_llm::model::ArchKind::Dense =>
+                        {
+                            loaded
+                                .prefill_token_prompt_only(sequence, token)
+                                .map(|()| None)
+                                .map_err(|error| {
+                                    ServeError::server_error(format!(
+                                        "serial no-tail prefill: {error:#}"
+                                    ))
+                                })?
+                        }
                         _ => loaded
                             .decode_token(sequence, token)
                             .map(Some)
@@ -1132,7 +1115,6 @@ impl EngineBackend {
         let exact_cached = cached_lookup
             .as_ref()
             .is_some_and(|lookup| lookup.is_exact_with_final_logits());
-        let dense = self.loaded.arch().kind == qwen_llm::model::ArchKind::Dense;
         let serial_tail_max = serial_tail_max(self.loaded.arch().kind);
         let needs_scratch = needs_prefill_scratch(
             serial_tail_max,
@@ -1341,7 +1323,6 @@ impl EngineBackend {
         Ok(PreparedRequestFront {
             cpu_reserved,
             needs_scratch,
-            dense,
             chunk,
             scratch,
             sequence,
@@ -1556,7 +1537,6 @@ impl GenerationBackend for EngineBackend {
         )?;
         let cpu_reserved = front.cpu_reserved;
         let needs_scratch = front.needs_scratch;
-        let dense = front.dense;
         let mut chunk = front.chunk;
         let mut scratch = front.scratch;
         let mut sequence = front.sequence;
@@ -1569,7 +1549,7 @@ impl GenerationBackend for EngineBackend {
         let mut prompt_logits = front.prompt_logits;
         let forward = self.loaded.forward();
 
-        // Windowed capture window for dense requests with a drafter head.
+        // Capture window for ordinary Qwen requests with a drafter head.
         // Doubles as (a) the drafter seed source on speculative requests and
         // (b) the rolling capture ring that keeps completed-boundary tails
         // fresh during serial decode. Allocated before the speculate decision
@@ -1593,11 +1573,7 @@ impl GenerationBackend for EngineBackend {
         let capture_ext = |window_limit: usize| {
             transcript_capture_extension(prompt_ids.len(), window_limit, split_at)
         };
-        let mut dflash_capture: Option<DflashPromptCapture> = match self
-            .dflash_head
-            .as_ref()
-            .filter(|_| dense)
-        {
+        let mut dflash_capture: Option<DflashPromptCapture> = match self.dflash_head.as_ref() {
             Some(head) => {
                 let n_features = head
                     .target_layer_ids
@@ -1724,7 +1700,6 @@ impl GenerationBackend for EngineBackend {
             self.dflash_head.is_some(),
             matched_tokens,
             restore_capture_complete,
-            dense,
         ) && dflash_capture.is_some();
         // Optional DFlash state is admitted only after restore establishes an
         // eligible capture window. Denial disables speculation rather than
@@ -1734,29 +1709,11 @@ impl GenerationBackend for EngineBackend {
                 let window_limit = dflash_capture_window_limit(head);
                 let (_, capture_window) =
                     dflash_capture_window_span(prompt_ids.len(), window_limit);
-                let capture_columns = if window_limit == usize::MAX {
-                    prompt_ids.len()
-                } else {
-                    window_limit
-                } + capture_ext(window_limit);
                 let n_features = head
                     .target_layer_ids
                     .len()
                     .checked_mul(self.loaded.arch().hidden_size as usize)
                     .context("DFlash feature count overflow")?;
-                let capture_elements = capture_columns
-                    .checked_mul(n_features)
-                    .context("DFlash prompt capture element count overflow")?;
-                let capture_logical_bytes = u64::try_from(capture_elements)
-                    .ok()
-                    .and_then(|elements| elements.checked_mul(size_of::<f32>() as u64))
-                    .context("DFlash capture byte count overflow")?;
-                let capture_bytes = self
-                    .loaded
-                    .context()
-                    .shared_buffer_size_and_align(capture_logical_bytes)
-                    .context("price DFlash capture allocation")?
-                    .size;
                 let session_capacity = capture_window
                     .checked_add(max_tokens)
                     .and_then(|value| value.checked_add(16))
@@ -1799,9 +1756,9 @@ impl GenerationBackend for EngineBackend {
                 } else {
                     0
                 };
-                let optional_bytes = capture_bytes
-                    .checked_add(session_bytes)
-                    .and_then(|bytes| bytes.checked_add(verify_scratch_bytes))
+                // Fresh memory signals already include the resident capture buffer.
+                let optional_bytes = session_bytes
+                    .checked_add(verify_scratch_bytes)
                     .and_then(|bytes| bytes.checked_add(layer_scratch_bytes))
                     .and_then(|bytes| bytes.checked_add(sampled_logits_bytes))
                     .context("DFlash optional byte total overflow")?;
@@ -2497,7 +2454,7 @@ impl EngineBackend {
             restore_ms,
             decode_tps,
         );
-        if let Some(stats) = dflash {
+        if let Some(stats) = dflash.as_ref() {
             tracing::info!(
                 target: "qwen_diag",
                 "serve dflash: off_ctx={} spec_steps={} off_steps={} accepted={}/{} prefix_replay={}/{}/{}/{} drafter_calls={} alpha_backoff={} reason={} backoff_probes={} probe_ms={:.1} fallback={}/{:.1}ms draft_first_ms={:.1} draft_steady_ms={:.1} verify_ms={:.1}",
@@ -2534,7 +2491,21 @@ impl EngineBackend {
                 restore_ms,
                 prompt_tokens: prompt_ids.len(),
                 seed: None,
-                phases: None,
+                phases: dflash.as_ref().map(|stats| {
+                    serde_json::json!({
+                        "dflash": {
+                            "spec_steps": stats.spec_steps,
+                            "drafter_calls": stats.drafter_calls,
+                            "verify_calls": stats.verify_calls,
+                            "restore_calls": stats.restore_calls,
+                            "off_steps": stats.off_steps,
+                            "accepted_drafts": stats.accepted_drafts,
+                            "drafts_scored": stats.drafts_scored,
+                            "fallback_calls": stats.fallback_calls,
+                            "alpha_backoff": stats.alpha_backoff,
+                        }
+                    })
+                }),
             }),
         })
     }
@@ -2542,6 +2513,65 @@ impl EngineBackend {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn xml_preserve_preparation_shares_sampling_and_refuses_native_lens() {
+        use crate::qwen_contract_fixture::{TEMPLATE, Value::*, gguf};
+        use clap::Parser;
+        let gguf = gguf(
+            "arbitrary posttrain",
+            TEMPLATE,
+            &[
+                ("general.sampling.temp", Float(0.6)),
+                ("general.sampling.top_k", Unsigned(20)),
+                ("general.sampling.top_p", Float(0.95)),
+            ],
+        );
+        let mut args = crate::Args::try_parse_from([
+            "qwen",
+            "serve",
+            "-m",
+            "unused.gguf",
+            "--template-style",
+            "upstream",
+        ])
+        .unwrap();
+        let crate::cli::Invocation::Serve(mut invocation) = crate::cli::normalize(&mut args) else {
+            panic!("serve")
+        };
+        let prepared = super::Prepared::new(
+            qwen_llm::model_family::ModelFamily::Qwen35Moe,
+            &gguf,
+            &invocation,
+        )
+        .unwrap();
+        assert_eq!(prepared.template, super::QwenTemplate::QwenXmlPreserve);
+        assert!(prepared.no_thinking_supported);
+        let id = crate::release_identity::ReleaseIdentity::detect(
+            qwen_llm::model_family::ModelFamily::Qwen35Moe,
+            &gguf,
+        );
+        assert_eq!(
+            prepared.release_sampling,
+            crate::release_sampling::gguf_sampling_defaults(id, &gguf).with_seed(42)
+        );
+        assert_eq!(
+            crate::release_sampling::projection(id, &gguf)["temperature"],
+            0.6
+        );
+        invocation.lens_config = Some("unused-lens.json".into());
+        assert!(
+            super::Prepared::new(
+                qwen_llm::model_family::ModelFamily::Qwen35Moe,
+                &gguf,
+                &invocation
+            )
+            .err()
+            .unwrap()
+            .to_string()
+            .contains("native protocol")
+        );
+    }
+
     #[test]
     fn qwen_idle_keep_alive_uses_the_loaded_storage_result() {
         assert!(super::idle_keep_alive_storage_eligible(false, false));
@@ -2817,17 +2847,11 @@ mod tests {
         assert!(!complete_dflash_capture(0, 3076, 3076, w));
         assert!(!complete_dflash_capture(1028, 2047, 3076, w));
         assert!(!complete_dflash_capture(1029, 2048, 3076, w));
-        assert!(use_serial_tail(12, 12, true, true));
-        assert!(!use_serial_tail(12, 12, true, false));
-        assert!(use_serial_tail(12, 12, false, false));
-        assert!(!use_serial_tail(13, 12, false, true));
-        assert!(should_plan_dflash(true, 0, false, true));
-        assert!(!should_plan_dflash(true, 0, false, false));
-        assert!(!should_plan_dflash(true, 1, false, true));
-        assert!(should_plan_dflash(true, 5, true, true));
-        assert!(!should_plan_dflash(true, 5, true, false));
-        assert!(!should_plan_dflash(true, 5, false, true));
-        assert!(!should_plan_dflash(false, 0, true, true));
+        assert!(should_plan_dflash(true, 0, false));
+        assert!(!should_plan_dflash(true, 1, false));
+        assert!(should_plan_dflash(true, 5, true));
+        assert!(!should_plan_dflash(true, 5, false));
+        assert!(!should_plan_dflash(false, 0, true));
         assert!(restored_dflash_capture_complete(5, 0, 5));
         assert!(!restored_dflash_capture_complete(5, 0, 0));
         assert!(restored_dflash_capture_complete(5, 10, 0));

@@ -7,6 +7,8 @@ pub mod messages;
 pub mod model_request;
 pub mod open_responses;
 pub mod prompt_template;
+#[cfg(test)]
+mod qwen_contract_fixture;
 pub mod response_shape_runtime;
 pub mod shutdown;
 pub mod tracing_init;

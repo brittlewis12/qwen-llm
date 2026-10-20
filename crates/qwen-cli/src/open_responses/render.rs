@@ -37,7 +37,7 @@ impl QwenTemplate {
     /// majority released rule to keep the renderer total.
     pub(crate) fn argument_style(self) -> ArgumentStyle {
         match self {
-            Self::Qwen36 => ArgumentStyle::PythonStr,
+            Self::Qwen36 | Self::QwenXmlPreserve => ArgumentStyle::PythonStr,
             Self::Generic | Self::Qwen35 | Self::Qwen38 => ArgumentStyle::ToJson,
         }
     }
@@ -75,7 +75,7 @@ pub fn qwen_generation(request: &ServeRequest) -> QwenGeneration {
             Some(Qwen38GenerationMode::NoThinking) => QwenGeneration::PreClosed,
             _ => QwenGeneration::PreOpen,
         },
-        QwenTemplate::Qwen36 => QwenGeneration::PreOpen,
+        QwenTemplate::Qwen36 | QwenTemplate::QwenXmlPreserve => QwenGeneration::PreOpen,
         QwenTemplate::Qwen35 => {
             if request.thinking_requested {
                 QwenGeneration::PreOpen
@@ -1240,7 +1240,7 @@ mod tests {
             thinking_requested: input["enable_thinking"] == json!(true),
             // Each template's own default when `preserve_thinking` is
             // unset: Qwen3.8 preserves, Qwen3.5/3.6 strip.
-            strip_history_thinking: if template == QwenTemplate::Qwen38 {
+            strip_history_thinking: if template.upstream_preserves_reasoning() {
                 input["preserve_thinking"] == json!(false)
             } else {
                 input["preserve_thinking"] != json!(true)
@@ -1369,6 +1369,93 @@ mod tests {
             &[],
             24,
         );
+    }
+
+    #[test]
+    fn qwen_xml_preserve_matches_pinned_jinja_in_both_styles() {
+        use super::super::items::TemplateStyle;
+        let fixture: Value = serde_json::from_str(include_str!(
+            "../../tests/fixtures/qwen_xml_preserve_chat_template_oracle_v1.json"
+        ))
+        .unwrap();
+        let template = QwenTemplate::QwenXmlPreserve;
+        for case in fixture["cases"].as_array().unwrap() {
+            for style in [TemplateStyle::House, TemplateStyle::Upstream] {
+                let mut request = oracle_request(template, &case["input"]).unwrap();
+                request.template_style = Some(style);
+                let request = super::super::bind_qwen_request(&request, template, true).unwrap();
+                assert!(!request.strip_history_thinking);
+                assert_eq!(
+                    render_qwen_serve_prompt(&request),
+                    case["rendered"].as_str().unwrap(),
+                    "{} {style:?}",
+                    case["id"]
+                );
+                let messages: Vec<crate::messages::ChatMessage> =
+                    serde_json::from_value(case["input"]["messages"].clone()).unwrap();
+                // Tool-call ingestion is covered through the strict CLI parser separately.
+                if !request.model_request.has_tool_surface() {
+                    let mode = if request.no_thinking {
+                        crate::messages::QwenGenerationMode::NoThinking
+                    } else {
+                        crate::messages::QwenGenerationMode::Auto
+                    };
+                    let rendered = crate::messages::render_qwen_messages_prompt_for_template(
+                        &messages, template, true, true, mode,
+                    )
+                    .unwrap();
+                    assert_eq!(rendered.text, case["rendered"].as_str().unwrap());
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn qwen_xml_preserve_explicit_strip_is_an_intentional_override() {
+        for style in ["house", "upstream"] {
+            let body = json!({
+                "model": "arbitrary",
+                "input": [
+                    {"role": "user", "content": "One"},
+                    {"type": "reasoning", "content": [{"type": "reasoning_text", "text": "old reasoning"}]},
+                    {"role": "assistant", "content": "Answer"},
+                    {"role": "user", "content": "Two"}
+                ],
+                "x_qwen": {"template_style": style, "history_thinking": "strip"}
+            });
+            let request = parse_request(&body).unwrap();
+            let bound =
+                super::super::bind_qwen_request(&request, QwenTemplate::QwenXmlPreserve, true)
+                    .unwrap();
+            assert!(bound.strip_history_thinking);
+            let rendered = render_qwen_serve_prompt(&bound);
+            assert!(!rendered.contains("old reasoning"));
+            assert!(rendered.contains("<|im_start|>assistant\nAnswer<|im_end|>"));
+            assert!(rendered.ends_with("assistant\n<think>\n"));
+        }
+    }
+
+    #[test]
+    fn qwen_xml_preserve_message_loader_defaults_do_not_depend_on_model_name() {
+        use crate::messages::{MessagesThinkingMode, load_messages_prompt_with_policy};
+        let (path, mut file) = crate::qwen_contract_fixture::temp_file();
+        let doc = json!({"model": "arbitrary", "messages": [
+            {"role": "user", "content": "One"},
+            {"role": "assistant", "content": "Answer", "reasoning_content": "old reasoning"},
+            {"role": "user", "content": "Two"}
+        ]});
+        std::io::Write::write_all(&mut file, doc.to_string().as_bytes()).unwrap();
+        let render = |mode| {
+            load_messages_prompt_with_policy(&path, None, QwenTemplate::QwenXmlPreserve, mode, true)
+                .unwrap()
+        };
+        let (auto, preserved) = render(MessagesThinkingMode::Auto);
+        let (strip, stripped) = render(MessagesThinkingMode::Strip);
+        std::fs::remove_file(path).unwrap();
+        assert!(preserved);
+        assert!(!stripped);
+        assert!(auto.contains("old reasoning"));
+        assert!(!strip.contains("old reasoning"));
     }
 
     /// Digest-verified Qwen3.8 rendering: effort instruction placement,

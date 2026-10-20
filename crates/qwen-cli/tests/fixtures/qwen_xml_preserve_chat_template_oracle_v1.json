@@ -1,0 +1,255 @@
+{
+  "schema": "qwen.chat_template_oracle",
+  "schema_version": 1,
+  "engine": "jinja2 3.1.4 ImmutableSandboxedEnvironment(trim_blocks, lstrip_blocks)",
+  "template": "qwen_xml_preserve_chat_template.jinja",
+  "template_sha256": "9dd2fbd270feaa1fbef2d4f634d7887c9c506e3bde140f8e7351c8944e8fd235",
+  "cases": [
+    {
+      "id": "default_open",
+      "input": {
+        "messages": [
+          {
+            "role": "user",
+            "content": " Hi "
+          }
+        ],
+        "add_generation_prompt": true
+      },
+      "rendered": "<|im_start|>user\nHi<|im_end|>\n<|im_start|>assistant\n<think>\n"
+    },
+    {
+      "id": "explicit_no_thinking",
+      "input": {
+        "messages": [
+          {
+            "role": "system",
+            "content": " Be concise. "
+          },
+          {
+            "role": "user",
+            "content": "Hi"
+          }
+        ],
+        "enable_thinking": false,
+        "add_generation_prompt": true
+      },
+      "rendered": "<|im_start|>system\nBe concise.<|im_end|>\n<|im_start|>user\nHi<|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n\n"
+    },
+    {
+      "id": "distinct_reasoning_before_later_users",
+      "input": {
+        "messages": [
+          {
+            "role": "user",
+            "content": "One"
+          },
+          {
+            "role": "assistant",
+            "content": "Answer one",
+            "reasoning_content": " first reasoning "
+          },
+          {
+            "role": "user",
+            "content": "Two"
+          },
+          {
+            "role": "assistant",
+            "content": "Answer two",
+            "reasoning_content": "second reasoning"
+          },
+          {
+            "role": "user",
+            "content": "Three"
+          },
+          {
+            "role": "assistant",
+            "content": "No reasoning supplied"
+          },
+          {
+            "role": "user",
+            "content": "Four"
+          }
+        ],
+        "add_generation_prompt": true
+      },
+      "rendered": "<|im_start|>user\nOne<|im_end|>\n<|im_start|>assistant\n<think>\nfirst reasoning\n</think>\n\nAnswer one<|im_end|>\n<|im_start|>user\nTwo<|im_end|>\n<|im_start|>assistant\n<think>\nsecond reasoning\n</think>\n\nAnswer two<|im_end|>\n<|im_start|>user\nThree<|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n\nNo reasoning supplied<|im_end|>\n<|im_start|>user\nFour<|im_end|>\n<|im_start|>assistant\n<think>\n"
+    },
+    {
+      "id": "no_thinking_preserves_inline_and_missing_history",
+      "input": {
+        "messages": [
+          {
+            "role": "user",
+            "content": "One"
+          },
+          {
+            "role": "assistant",
+            "content": "<think> first reasoning </think>\n\nAnswer one"
+          },
+          {
+            "role": "user",
+            "content": "Two"
+          },
+          {
+            "role": "assistant",
+            "content": "Answer two",
+            "reasoning_content": "second reasoning"
+          },
+          {
+            "role": "user",
+            "content": "Three"
+          },
+          {
+            "role": "assistant",
+            "content": "No reasoning supplied"
+          },
+          {
+            "role": "user",
+            "content": "Four"
+          }
+        ],
+        "enable_thinking": false,
+        "add_generation_prompt": true
+      },
+      "rendered": "<|im_start|>user\nOne<|im_end|>\n<|im_start|>assistant\n<think>\nfirst reasoning\n</think>\n\nAnswer one<|im_end|>\n<|im_start|>user\nTwo<|im_end|>\n<|im_start|>assistant\n<think>\nsecond reasoning\n</think>\n\nAnswer two<|im_end|>\n<|im_start|>user\nThree<|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n\nNo reasoning supplied<|im_end|>\n<|im_start|>user\nFour<|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n\n"
+    },
+    {
+      "id": "tool_replay_python_scalars_json_compounds",
+      "input": {
+        "tools": [
+          {
+            "type": "function",
+            "function": {
+              "name": "inspect",
+              "description": "Inspect values",
+              "parameters": {
+                "type": "object"
+              }
+            }
+          }
+        ],
+        "messages": [
+          {
+            "role": "system",
+            "content": " Be precise. "
+          },
+          {
+            "role": "user",
+            "content": "Inspect."
+          },
+          {
+            "role": "assistant",
+            "content": "Checking",
+            "reasoning_content": "tool reasoning",
+            "tool_calls": [
+              {
+                "function": {
+                  "name": "inspect",
+                  "arguments": {
+                    "yes": true,
+                    "no": false,
+                    "nothing": null,
+                    "text": "quotes: \"x\"\nand slash \\",
+                    "nested": {
+                      "text": "a'b\"c",
+                      "flag": true,
+                      "empty": null
+                    },
+                    "list": [
+                      false,
+                      null,
+                      "line\nbreak",
+                      {
+                        "a": "b"
+                      }
+                    ]
+                  }
+                }
+              },
+              {
+                "function": {
+                  "name": "inspect",
+                  "arguments": {
+                    "number": 3,
+                    "fraction": 1.25
+                  }
+                }
+              }
+            ]
+          },
+          {
+            "role": "tool",
+            "content": " first result "
+          },
+          {
+            "role": "tool",
+            "content": "second result"
+          },
+          {
+            "role": "assistant",
+            "content": "Done",
+            "reasoning_content": "result reasoning"
+          },
+          {
+            "role": "user",
+            "content": "Again"
+          }
+        ],
+        "enable_thinking": true,
+        "add_generation_prompt": true
+      },
+      "rendered": "<|im_start|>system\n# Tools\n\nYou have access to the following functions:\n\n<tools>\n{\"type\": \"function\", \"function\": {\"name\": \"inspect\", \"description\": \"Inspect values\", \"parameters\": {\"type\": \"object\"}}}\n</tools>\n\nIf you choose to call a function ONLY reply in the following format with NO suffix:\n\n<tool_call>\n<function=example_function_name>\n<parameter=example_parameter_1>\nvalue_1\n</parameter>\n<parameter=example_parameter_2>\nThis is the value for the second parameter\nthat can span\nmultiple lines\n</parameter>\n</function>\n</tool_call>\n\n<IMPORTANT>\nReminder:\n- Function calls MUST follow the specified format: an inner <function=...></function> block must be nested within <tool_call></tool_call> XML tags\n- Required parameters MUST be specified\n- You may provide optional reasoning for your function call in natural language BEFORE the function call, but NOT after\n- If there is no function call available, answer the question like normal with your current knowledge and do not tell the user about function calls\n</IMPORTANT>\n\nBe precise.<|im_end|>\n<|im_start|>user\nInspect.<|im_end|>\n<|im_start|>assistant\n<think>\ntool reasoning\n</think>\n\nChecking\n\n<tool_call>\n<function=inspect>\n<parameter=yes>\nTrue\n</parameter>\n<parameter=no>\nFalse\n</parameter>\n<parameter=nothing>\nNone\n</parameter>\n<parameter=text>\nquotes: \"x\"\nand slash \\\n</parameter>\n<parameter=nested>\n{\"text\": \"a'b\\\"c\", \"flag\": true, \"empty\": null}\n</parameter>\n<parameter=list>\n[false, null, \"line\\nbreak\", {\"a\": \"b\"}]\n</parameter>\n</function>\n</tool_call>\n<tool_call>\n<function=inspect>\n<parameter=number>\n3\n</parameter>\n<parameter=fraction>\n1.25\n</parameter>\n</function>\n</tool_call><|im_end|>\n<|im_start|>user\n<tool_response>\nfirst result\n</tool_response>\n<tool_response>\nsecond result\n</tool_response><|im_end|>\n<|im_start|>assistant\n<think>\nresult reasoning\n</think>\n\nDone<|im_end|>\n<|im_start|>user\nAgain<|im_end|>\n<|im_start|>assistant\n<think>\n"
+    },
+    {
+      "id": "tool_replay_no_thinking",
+      "input": {
+        "tools": [
+          {
+            "type": "function",
+            "function": {
+              "name": "inspect",
+              "parameters": {
+                "type": "object"
+              }
+            }
+          }
+        ],
+        "messages": [
+          {
+            "role": "user",
+            "content": "Inspect."
+          },
+          {
+            "role": "assistant",
+            "content": "",
+            "tool_calls": [
+              {
+                "function": {
+                  "name": "inspect",
+                  "arguments": {
+                    "flag": true,
+                    "nothing": null,
+                    "nested": [
+                      "str",
+                      {
+                        "flag": false
+                      }
+                    ]
+                  }
+                }
+              }
+            ]
+          },
+          {
+            "role": "tool",
+            "content": "result"
+          }
+        ],
+        "enable_thinking": false,
+        "add_generation_prompt": true
+      },
+      "rendered": "<|im_start|>system\n# Tools\n\nYou have access to the following functions:\n\n<tools>\n{\"type\": \"function\", \"function\": {\"name\": \"inspect\", \"parameters\": {\"type\": \"object\"}}}\n</tools>\n\nIf you choose to call a function ONLY reply in the following format with NO suffix:\n\n<tool_call>\n<function=example_function_name>\n<parameter=example_parameter_1>\nvalue_1\n</parameter>\n<parameter=example_parameter_2>\nThis is the value for the second parameter\nthat can span\nmultiple lines\n</parameter>\n</function>\n</tool_call>\n\n<IMPORTANT>\nReminder:\n- Function calls MUST follow the specified format: an inner <function=...></function> block must be nested within <tool_call></tool_call> XML tags\n- Required parameters MUST be specified\n- You may provide optional reasoning for your function call in natural language BEFORE the function call, but NOT after\n- If there is no function call available, answer the question like normal with your current knowledge and do not tell the user about function calls\n</IMPORTANT><|im_end|>\n<|im_start|>user\nInspect.<|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n\n<tool_call>\n<function=inspect>\n<parameter=flag>\nTrue\n</parameter>\n<parameter=nothing>\nNone\n</parameter>\n<parameter=nested>\n[\"str\", {\"flag\": false}]\n</parameter>\n</function>\n</tool_call><|im_end|>\n<|im_start|>user\n<tool_response>\nresult\n</tool_response><|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n\n"
+    }
+  ]
+}

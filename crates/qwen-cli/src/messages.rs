@@ -167,7 +167,7 @@ const QWEN38_REASONING_EFFORT_LOW: &str = "Reasoning effort is set to low. Keep 
 /// derivatives, Flash-Next).
 pub fn supports_qwen38_release_prompt_protocol(family: ModelFamily, gguf: &GgufFile) -> bool {
     matches!(family, ModelFamily::Qwen35 | ModelFamily::Qwen4Exp)
-        && crate::prompt_template::identify_qwen_release_for_gguf(gguf).is_ok_and(|identity| {
+        && crate::prompt_template::resolve_qwen_contract_for_gguf(gguf).is_ok_and(|identity| {
             matches!(
                 identity.template,
                 crate::prompt_template::QwenPromptTemplate::Qwen38
@@ -397,6 +397,9 @@ pub fn load_messages_prompt_with_policy(
     let preserve_thinking = match thinking_mode {
         MessagesThinkingMode::Preserve => true,
         MessagesThinkingMode::Strip => false,
+        MessagesThinkingMode::Auto if template == QwenTemplate::QwenXmlPreserve => {
+            meta["preserve_thinking"].as_bool().unwrap_or(true)
+        }
         MessagesThinkingMode::Auto => messages_auto_preserve_thinking(&meta),
     };
     let prompt = render_qwen_messages_prompt_for_template(

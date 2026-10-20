@@ -535,7 +535,7 @@ fn dflash_swa_split4_eligible(
         && swa_window == 2048
         && selector_top_k == 16
         && ctx_scan_start <= ctx_len
-        && ctx_len - ctx_scan_start == swa_window as usize
+        && ctx_len - ctx_scan_start == swa_window.saturating_sub(1) as usize
         && exact_visible_suffix
 }
 
@@ -546,10 +546,10 @@ fn dflash_swa_exact_visible_suffix(
     noise_start_pos: u32,
     swa_window: u32,
 ) -> bool {
-    let Ok(window) = usize::try_from(swa_window) else {
+    let Ok(window) = usize::try_from(swa_window.saturating_sub(1)) else {
         return false;
     };
-    let Some(first_pos) = noise_start_pos.checked_sub(swa_window) else {
+    let Some(first_pos) = noise_start_pos.checked_sub(swa_window.saturating_sub(1)) else {
         return false;
     };
     if window == 0 || ctx_len > pos_ctx.len() || ctx_scan_start.checked_add(window) != Some(ctx_len)
@@ -602,7 +602,7 @@ fn dflash_swa_ctx_scan_start(
         }
         prev = Some(pos);
     }
-    let min_pos = noise_start_pos.saturating_sub(swa_window);
+    let min_pos = noise_start_pos.saturating_sub(swa_window - 1);
     rows.partition_point(|&pos| (pos as u32) < min_pos)
 }
 
@@ -16867,6 +16867,9 @@ impl<'a> DFlashDecoder<'a> {
                     n_kv,
                     head_dim,
                     ctx_len,
+                    &self.session.pos_k,
+                    noise_start_pos,
+                    cfg.causal,
                 )?;
             } else if swa_split4_attn {
                 // Same borrowed partials as the split4 path (k_full/v_full
@@ -16899,6 +16902,7 @@ impl<'a> DFlashDecoder<'a> {
                     noise_start_pos,
                     swa_window_arg,
                     ctx_scan_start,
+                    cfg.causal,
                 )?;
             } else if online_two_range_attn {
                 let pos_ctx_view = self.session.pos_k.view_subrange(0, vec![ctx_len as u64]);
@@ -16920,6 +16924,7 @@ impl<'a> DFlashDecoder<'a> {
                     noise_start_pos,
                     swa_window_arg,
                     ctx_scan_start,
+                    cfg.causal,
                 )?;
             } else if two_range_attn {
                 let pos_ctx_view = self.session.pos_k.view_subrange(0, vec![ctx_len as u64]);
@@ -16940,6 +16945,7 @@ impl<'a> DFlashDecoder<'a> {
                     ctx_len,
                     noise_start_pos,
                     swa_window_arg,
+                    cfg.causal,
                 )?;
             } else {
                 // Concat K_ctx + K_noise into k_full; same for V.
@@ -17008,6 +17014,7 @@ impl<'a> DFlashDecoder<'a> {
                     ctx_len,
                     noise_start_pos,
                     swa_window_arg,
+                    cfg.causal,
                 )?;
             }
 

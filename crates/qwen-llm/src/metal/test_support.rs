@@ -2269,92 +2269,42 @@ pub(super) fn dflash_attn_cpu_oracle(
     let group = n_q_heads / n_kv_heads;
     let q_dim = n_q_heads * head_dim;
     let kv_stride = n_kv_heads * head_dim;
-    let scale = 1.0_f32 / (head_dim as f32).sqrt();
+    let scale = 1.0 / (head_dim as f64).sqrt();
     let mut o = vec![0.0_f32; n * q_dim];
-    let full_attn = swa_window == 0;
     for q_idx in 0..n {
-        let q_pos = noise_start_pos + q_idx as u32;
+        let q_pos = i64::from(noise_start_pos) + q_idx as i64;
         for q_head in 0..n_q_heads {
             let kv_head = q_head / group;
-            // Q vector for this (q_idx, q_head).
             let q_off = q_idx * q_dim + q_head * head_dim;
-            // PASS 1: max.
-            let mut m_run = f32::NEG_INFINITY;
+            let mut scores = vec![f64::NEG_INFINITY; n_kv_total];
             for kk in 0..n_kv_total {
-                let allowed = if kk < ctx_len {
-                    if full_attn {
-                        true
-                    } else {
-                        let k_pos = pos_k[kk] as u32;
-                        k_pos <= q_pos && (q_pos - k_pos) <= swa_window
-                    }
+                let key_pos = if kk < ctx_len {
+                    i64::from(pos_k[kk])
                 } else {
-                    noncausal_noise || (kk - ctx_len) <= q_idx
+                    i64::from(noise_start_pos) + (kk - ctx_len) as i64
                 };
-                if !allowed {
+                let delta = q_pos - key_pos;
+                if (!noncausal_noise && delta < 0)
+                    || (swa_window != 0 && delta.abs() >= i64::from(swa_window))
+                {
                     continue;
                 }
                 let k_off = kk * kv_stride + kv_head * head_dim;
-                let mut s = 0.0_f32;
-                for d in 0..head_dim {
-                    s += q[q_off + d] * k[k_off + d];
-                }
-                s *= scale;
-                if s > m_run {
-                    m_run = s;
-                }
+                scores[kk] = (0..head_dim)
+                    .map(|d| f64::from(q[q_off + d]) * f64::from(k[k_off + d]))
+                    .sum::<f64>()
+                    * scale;
             }
-            // PASS 2: sum.
-            let mut l_sum = 0.0_f32;
-            for kk in 0..n_kv_total {
-                let allowed = if kk < ctx_len {
-                    if full_attn {
-                        true
-                    } else {
-                        let k_pos = pos_k[kk] as u32;
-                        k_pos <= q_pos && (q_pos - k_pos) <= swa_window
-                    }
-                } else {
-                    noncausal_noise || (kk - ctx_len) <= q_idx
-                };
-                if !allowed {
-                    continue;
-                }
-                let k_off = kk * kv_stride + kv_head * head_dim;
-                let mut s = 0.0_f32;
-                for d in 0..head_dim {
-                    s += q[q_off + d] * k[k_off + d];
-                }
-                s *= scale;
-                l_sum += (s - m_run).exp();
-            }
-            let inv_l = if l_sum > 0.0 { 1.0 / l_sum } else { 0.0 };
-            // PASS 3: V agg.
-            for kk in 0..n_kv_total {
-                let allowed = if kk < ctx_len {
-                    if full_attn {
-                        true
-                    } else {
-                        let k_pos = pos_k[kk] as u32;
-                        k_pos <= q_pos && (q_pos - k_pos) <= swa_window
-                    }
-                } else {
-                    noncausal_noise || (kk - ctx_len) <= q_idx
-                };
-                if !allowed {
-                    continue;
-                }
-                let k_off = kk * kv_stride + kv_head * head_dim;
-                let v_off = kk * kv_stride + kv_head * head_dim;
-                let mut s = 0.0_f32;
-                for d in 0..head_dim {
-                    s += q[q_off + d] * k[k_off + d];
-                }
-                s *= scale;
-                let w = (s - m_run).exp() * inv_l;
-                for d in 0..head_dim {
-                    o[q_off + d] += w * v[v_off + d];
-                }
+            let max_score = scores.iter().copied().fold(f64::NEG_INFINITY, f64::max);
+            let weights: Vec<f64> = scores.iter().map(|s| (s - max_score).exp()).collect();
+            let denom: f64 = weights.iter().sum();
+            for d in 0..head_dim {
+                o[q_off + d] = (weights
+                    .iter()
+                    .enumerate()
+                    .map(|(kk, w)| w * f64::from(v[kk * kv_stride + kv_head * head_dim + d]))
+                    .sum::<f64>()
+                    / denom) as f32;
             }
         }
     }
@@ -2377,6 +2327,7 @@ pub(super) fn dflash_attn_readback(
     ctx_len: usize,
     noise_start_pos: u32,
     swa_window: u32,
+    noncausal_noise: bool,
 ) -> Result<Vec<f32>, MetalError> {
     let q_t = MetalTensor::from_bytes(
         ctx,
@@ -2420,6 +2371,7 @@ pub(super) fn dflash_attn_readback(
             ctx_len,
             noise_start_pos,
             swa_window,
+            !noncausal_noise,
         )
     })?;
     Ok(read_back_f32(&o_t.buffer, n * n_q_heads * head_dim))
@@ -2505,7 +2457,7 @@ pub(super) fn dflash_attn_two_range_readback(
     )?;
     one_shot(ctx, |enc| {
         if swa_split4 {
-            encode_dflash_attn_swa_split4_with_noncausal_f32(
+            encode_dflash_attn_swa_split4_f32(
                 ctx,
                 enc,
                 &q_t,
@@ -2522,7 +2474,7 @@ pub(super) fn dflash_attn_two_range_readback(
                 noise_start_pos,
                 swa_window,
                 ctx_scan_start,
-                noncausal_noise,
+                !noncausal_noise,
             )
         } else if full_gqa_split4 {
             encode_dflash_attn_full_gqa_split4_f32(
@@ -2541,6 +2493,9 @@ pub(super) fn dflash_attn_two_range_readback(
                 n_kv_heads,
                 head_dim,
                 ctx_len,
+                &pos_t,
+                noise_start_pos,
+                !noncausal_noise,
             )
         } else if online {
             encode_dflash_attn_online_two_range_scan_f32(
@@ -2561,6 +2516,7 @@ pub(super) fn dflash_attn_two_range_readback(
                 noise_start_pos,
                 swa_window,
                 ctx_scan_start,
+                !noncausal_noise,
             )
         } else {
             encode_dflash_attn_two_range_f32(
@@ -2580,6 +2536,7 @@ pub(super) fn dflash_attn_two_range_readback(
                 ctx_len,
                 noise_start_pos,
                 swa_window,
+                !noncausal_noise,
             )
         }
     })?;

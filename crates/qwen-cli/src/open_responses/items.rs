@@ -97,9 +97,8 @@ impl ServeError {
     }
 }
 
-/// Which family template renders this request. Resolved from the loaded
-/// GGUF identity, mirroring the CLI's dispatch — serve must not render a
-/// Qwen3.8 model with the generic ChatML contract.
+/// Which contract renders this request. Complete template recognition takes
+/// precedence over the release-name fallback, identically in run and serve.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum QwenTemplate {
     /// No identified Qwen release. Keeps the legacy bare
@@ -111,10 +110,12 @@ pub enum QwenTemplate {
     /// Released Qwen3.6 template: thinking unless explicitly disabled.
     Qwen36,
     Qwen38,
+    /// XML tools, Python scalar arguments, and all assistant reasoning kept.
+    QwenXmlPreserve,
 }
 
 impl QwenTemplate {
-    /// Released templates, byte-checked against the Jinja oracle fixtures.
+    /// Supported contracts, byte-checked against the Jinja oracle fixtures.
     pub fn verified(self) -> bool {
         self != Self::Generic
     }
@@ -126,7 +127,12 @@ impl QwenTemplate {
             Self::Qwen35 => "qwen35",
             Self::Qwen36 => "qwen36",
             Self::Qwen38 => "qwen38",
+            Self::QwenXmlPreserve => "qwen_xml_preserve",
         }
+    }
+
+    pub(crate) fn upstream_preserves_reasoning(self) -> bool {
+        matches!(self, Self::Qwen38 | Self::QwenXmlPreserve)
     }
 }
 

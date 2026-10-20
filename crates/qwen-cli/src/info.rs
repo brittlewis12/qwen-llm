@@ -119,6 +119,13 @@ pub fn capability_lines(projection: &Value) -> Vec<String> {
             .and_then(Value::as_str)
             .map_or(String::new(), |name| format!(" as {name}"));
         lines.push(format!("template: {}{rendered}", status(template)));
+        if let Some(contract) = template.get("rendering_contract") {
+            lines.push(format!(
+                "rendering contract: {} ({})",
+                status(contract),
+                contract["name"].as_str().unwrap_or("-")
+            ));
+        }
     }
     if let Some(execution) = capabilities.get("execution") {
         if execution.get("status").is_some() {

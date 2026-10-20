@@ -515,6 +515,7 @@ fn family_profiles_drive_real_http_json_and_sse_without_hook_overrides() {
         (QwenTemplate::Qwen35, 0.6),
         (QwenTemplate::Qwen36, 1.0),
         (QwenTemplate::Qwen38, 1.0),
+        (QwenTemplate::QwenXmlPreserve, 0.6),
     ] {
         cases.push((
             RequestProfile::OrdinaryQwen {

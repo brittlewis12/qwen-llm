@@ -5417,7 +5417,8 @@ mod jsonl_templated_rows {
             resolve_jsonl_request_input(&row(r#"{"user":"hi","no_thinking":true}"#), 3, &generic)
                 .unwrap_err();
         assert!(
-            format!("{err:#}").contains("no-thinking requires an identified Qwen release"),
+            format!("{err:#}")
+                .contains("no-thinking requires a recognized Qwen rendering contract"),
             "{err:#}"
         );
     }
@@ -5711,5 +5712,78 @@ mod legacy_option_admission {
             assert_eq!(if ok { A } else { R }, *expected, "{flags:?}");
         }
         std::fs::remove_file(&requests).unwrap();
+    }
+}
+#[test]
+fn qwen_xml_preserve_modern_run_uses_contract_for_user_messages_and_raw() {
+    use crate::qwen_contract_fixture::{TEMPLATE, gguf};
+    let fixture: serde_json::Value = serde_json::from_str(include_str!(
+        "../../tests/fixtures/qwen_xml_preserve_chat_template_oracle_v1.json"
+    ))
+    .unwrap();
+    for name in ["Ornith 1.5 122B", "arbitrary posttrain"] {
+        let gguf = gguf(name, TEMPLATE, &[]);
+        let render = |options: &[&str]| {
+            let mut argv = vec!["qwen", "run", "-m", "unused.gguf"];
+            argv.extend_from_slice(options);
+            let mut args = Args::try_parse_from(argv).unwrap();
+            let invocation = cli::normalize(&mut args);
+            let cli::Invocation::Run(run) = invocation else {
+                panic!("run")
+            };
+            prepare_modern_run_prompt(run, Some(ModelFamily::Qwen35Moe), &gguf, &args)
+        };
+        assert_eq!(
+            render(&["--user", " Hi "]).unwrap().text,
+            "<|im_start|>user\nHi<|im_end|>\n<|im_start|>assistant\n<think>\n"
+        );
+        assert!(
+            render(&["--user", "Hi", "--no-thinking"])
+                .unwrap()
+                .text
+                .ends_with("<think>\n\n</think>\n\n")
+        );
+        assert_eq!(
+            render(&["--raw-prompt", "raw <think>\n"]).unwrap().text,
+            "raw <think>\n"
+        );
+        assert!(render(&["--user", "Hi", "--reasoning-effort", "xhigh"]).is_err());
+        for case in fixture["cases"].as_array().unwrap() {
+            let input = &case["input"];
+            let mut doc = serde_json::json!({"messages": input["messages"]});
+            // Strict run input carries reasoning separately, not inline tags.
+            for message in doc["messages"].as_array_mut().unwrap() {
+                if message["role"] == "assistant"
+                    && let Some(content) = message["content"].as_str()
+                    && let Some((reasoning, visible)) = content
+                        .strip_prefix("<think>")
+                        .and_then(|text| text.split_once("</think>"))
+                {
+                    let reasoning = reasoning.to_owned();
+                    let visible = visible.to_owned();
+                    message["reasoning_content"] = reasoning.into();
+                    message["content"] = visible.into();
+                }
+            }
+            if let Some(tools) = input.get("tools") {
+                doc["tools"] = tools.clone();
+            }
+            let (path, mut file) = crate::qwen_contract_fixture::temp_file();
+            std::io::Write::write_all(&mut file, &serde_json::to_vec(&doc).unwrap()).unwrap();
+            let mut options = vec!["--messages", path.to_str().unwrap()];
+            if input["enable_thinking"] == false {
+                options.push("--no-thinking");
+            }
+            let prompt = render(&options);
+            std::fs::remove_file(path).unwrap();
+            let prompt = prompt.unwrap();
+            assert_eq!(prompt.template, Some("qwen_xml_preserve"));
+            assert_eq!(
+                prompt.text,
+                case["rendered"].as_str().unwrap(),
+                "{name}: {}",
+                case["id"]
+            );
+        }
     }
 }

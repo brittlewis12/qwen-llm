@@ -55,6 +55,10 @@ kernel void kernel_tensor_glm_iq2s_expert_partial(
     const uint row0 = group.y * 16u;
     const uint col0 = group.x * 16u;
     const uint k0 = group.z * 32u;
+    const uint tile_columns = args.padded_ffn / 16u;
+    const ulong tile_index = ulong(group.y) * tile_columns + group.x;
+    const ulong plane = ulong(args.padded_rows) * args.padded_ffn;
+    const ulong tile_output_offset = tile_index * 256u;
     const uint row_bytes = (args.hidden / IQ2S_QK) * IQ2S_BYTES;
     device const uchar * gate_tile = gate + ulong(args.expert) * args.expert_stride_bytes;
     device const uchar * up_tile = up + ulong(args.expert) * args.expert_stride_bytes;
@@ -78,7 +82,7 @@ kernel void kernel_tensor_glm_iq2s_expert_partial(
     tensor<threadgroup half, extents<int, 32, 16>, tensor_inline> left_gate(
         a, extents<int, 32, 16>());
     tensor<device float, extents<int, 16, 16>, tensor_inline> out_gate(
-        partial + ulong(group.z) * args.padded_rows * args.padded_ffn + ulong(col0) * args.padded_rows + row0,
+        partial + ulong(group.z) * plane + tile_output_offset,
         extents<int, 16, 16>());
     auto gate_destination = operation.get_destination_cooperative_tensor<
         decltype(left_gate), decltype(right), float>();
@@ -102,7 +106,7 @@ kernel void kernel_tensor_glm_iq2s_expert_partial(
     tensor<threadgroup half, extents<int, 32, 16>, tensor_inline> left_up(
         a, extents<int, 32, 16>());
     tensor<device float, extents<int, 16, 16>, tensor_inline> out_up(
-        partial + ulong(args.hidden / 32u + group.z) * args.padded_rows * args.padded_ffn + ulong(col0) * args.padded_rows + row0,
+        partial + ulong(args.hidden / 32u + group.z) * plane + tile_output_offset,
         extents<int, 16, 16>());
     auto up_destination = operation.get_destination_cooperative_tensor<
         decltype(left_up), decltype(right), float>();
@@ -120,12 +124,20 @@ kernel void kernel_tensor_glm_iq2s_expert_finish(
     const uint row = tid / args.ffn;
     const uint channel = tid % args.ffn;
     const uint tiles = args.hidden / 32u;
+    const uint tile_columns = args.padded_ffn / 16u;
+    const uint tile_row = row / 16u;
+    const uint tile_column = channel / 16u;
+    const uint local_row = row % 16u;
+    const uint local_column = channel % 16u;
+    const ulong tile_index = ulong(tile_row) * tile_columns + tile_column;
+    const ulong plane = ulong(args.padded_rows) * args.padded_ffn;
+    const ulong local_offset = tile_index * 256u + local_column * 16u + local_row;
     float gate_total = 0.0f;
     float up_total = 0.0f;
     for (uint k = 0; k < tiles; ++k) {
-        const ulong tile_offset = ulong(k) * args.padded_rows * args.padded_ffn + ulong(channel) * args.padded_rows + row;
+        const ulong tile_offset = ulong(k) * plane + local_offset;
         gate_total += partial[tile_offset];
-        up_total += partial[ulong(tiles + k) * args.padded_rows * args.padded_ffn + ulong(channel) * args.padded_rows + row];
+        up_total += partial[ulong(tiles + k) * plane + local_offset];
     }
     const float g = min(gate_total, args.clamp_value);
     const float u = clamp(up_total, -args.clamp_value, args.clamp_value);

@@ -2,6 +2,8 @@ use super::*;
 use std::io::Write;
 
 mod ownership_metadata;
+mod ple_engram;
+mod ple_split;
 
 #[derive(Clone)]
 enum Value<'a> {
@@ -9,6 +11,7 @@ enum Value<'a> {
     Bool(bool),
     F32s(Vec<f32>),
     U32(u32),
+    U32s(Vec<u32>),
     Str(&'a str),
     Ints(Vec<i32>),
     U64s(Vec<u64>),
@@ -167,6 +170,16 @@ fn write_fixture_payload(
     pad_end: bool,
     payload: impl Fn(&str, &[u64], GgmlType) -> Option<Vec<u8>>,
 ) -> Arc<GgufFile> {
+    let file = fixture_file(kv, tensors, pad_end, payload);
+    Arc::new(GgufFile::from_opened_file(file, "synthetic-v41.gguf").unwrap())
+}
+
+fn fixture_file(
+    kv: Vec<(&str, Value<'_>)>,
+    tensors: Vec<(String, Vec<u64>, GgmlType)>,
+    pad_end: bool,
+    payload: impl Fn(&str, &[u64], GgmlType) -> Option<Vec<u8>>,
+) -> std::fs::File {
     let alignment = kv
         .iter()
         .find_map(|(k, v)| {
@@ -207,6 +220,14 @@ fn write_fixture_payload(
             Value::U32(v) => {
                 out.extend(4u32.to_le_bytes());
                 out.extend(v.to_le_bytes());
+            }
+            Value::U32s(v) => {
+                out.extend(9u32.to_le_bytes());
+                out.extend(4u32.to_le_bytes());
+                out.extend((v.len() as u64).to_le_bytes());
+                for n in v {
+                    out.extend(n.to_le_bytes());
+                }
             }
             Value::Str(v) => {
                 out.extend(8u32.to_le_bytes());
@@ -275,7 +296,7 @@ fn write_fixture_payload(
             .unwrap();
         file.write_all(&data).unwrap();
     }
-    Arc::new(GgufFile::from_opened_file(file, "synthetic-v41.gguf").unwrap())
+    file
 }
 
 #[test]
@@ -1402,21 +1423,23 @@ fn singleton_expert_axes_are_restored_on_direct_views() {
 
 #[test]
 fn unpadded_and_engram_shared_pages_use_private_boundary_pages() {
+    for name in ["blk.0.engram_embd.weight", "per_layer_token_embd.weight"] {
+        assert_private_engram_boundary_pages(name);
+    }
+}
+
+fn assert_private_engram_boundary_pages(table_name: &str) {
     use std::os::unix::fs::FileExt;
     let g = write_fixture_layout(
         vec![("general.alignment", Value::U32(32))],
         vec![
             ("prefix".into(), vec![32], GgmlType::F32),
-            (
-                "blk.0.engram_embd.weight".into(),
-                vec![256, 100],
-                GgmlType::Q8_0,
-            ),
+            (table_name.into(), vec![256, 100], GgmlType::Q8_0),
             ("suffix".into(), vec![32, 1024], GgmlType::F32),
         ],
         false,
     );
-    let table = g.find("blk.0.engram_embd.weight").unwrap().clone();
+    let table = g.find(table_name).unwrap().clone();
     let suffix = g.find("suffix").unwrap().clone();
     // Populate this tiny fixture before reopening its immutable parsed handle.
     g.shards[0]

@@ -199,6 +199,7 @@ pub struct Plan {
     pub kv_source_layers: Vec<u64>,
     pub index_source_layers: Vec<u64>,
     pub compression_ratios: Vec<u64>,
+    engram_tables: Vec<engram::TableView>,
 }
 
 pub fn plan(g: &GgufFile) -> Result<Plan, LoadError> {
@@ -211,12 +212,10 @@ pub fn plan(g: &GgufFile) -> Result<Plan, LoadError> {
             .entry(format!("{:?}", t.dtype))
             .or_default();
         *count = add(*count, t.n_bytes)?;
-        if p.engram_layers
+        if p.engram_tables
             .iter()
-            .any(|layer| t.name == format!("blk.{layer}.engram_embd.weight"))
+            .any(|table| table.tensor.name == t.name)
         {
-            engram::validate(g, t)?;
-            validate_storage(t)?;
             p.bytes.disk_engram = add(p.bytes.disk_engram, t.n_bytes)?;
         } else if let Some((layer, part)) = names::bank(&t.name) {
             if layer >= p.layers {
@@ -260,11 +259,6 @@ pub fn plan(g: &GgufFile) -> Result<Plan, LoadError> {
             }
         }
     }
-    for &layer in &p.engram_layers {
-        if g.find(&format!("blk.{layer}.engram_embd.weight")).is_none() {
-            return Err(invalid("missing Engram table"));
-        }
-    }
     add(p.bytes.packed_experts, p.bytes.dense_bytes)?;
     names::validate_inventory(&p, &dense)?;
     Ok(p)
@@ -273,8 +267,9 @@ fn dense_supported(t: GgmlType) -> bool {
     super::forward::dense_linear_supported(t)
 }
 fn resident_tensor(t: &TensorDesc, layers: usize) -> bool {
-    names::bank(&t.name).is_some_and(|(layer, _)| layer < layers)
-        || names::dense(&t.name, layers).is_some()
+    !engram::is_table(&t.name)
+        && (names::bank(&t.name).is_some_and(|(layer, _)| layer < layers)
+            || names::dense(&t.name, layers).is_some())
 }
 fn shape_matches(actual: &[u64], expected: &[u64]) -> bool {
     fn trimmed(mut shape: &[u64]) -> &[u64] {
@@ -431,7 +426,7 @@ impl ResidentWeights {
             engram_hash: p.engram_hash,
             banks,
             dense,
-            engram: DiskEngram::for_layers(g, &p.engram_layers)?,
+            engram: DiskEngram::for_tables(g, p.engram_tables),
             token_map: p.token_map,
             raw_pad: p.raw_pad,
             bytes: p.bytes,

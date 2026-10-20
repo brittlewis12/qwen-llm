@@ -2,8 +2,100 @@ use super::*;
 
 const MAX_OUTPUT_BYTES: usize = 32 * 1024 * 1024;
 const ROW_WIDTH: usize = 256;
+const COMBINED_TABLE: &str = "per_layer_token_embd.weight";
+
+#[derive(Debug)]
+pub(super) struct TableView {
+    pub(super) layer: usize,
+    pub(super) tensor: TensorDesc,
+    pub(super) row_base: u64,
+    pub(super) row_count: u64,
+}
+
 pub(super) fn is_table(name: &str) -> bool {
-    name.starts_with("blk.") && name.ends_with(".engram_embd.weight")
+    name == COMBINED_TABLE || (name.starts_with("blk.") && name.ends_with(".engram_embd.weight"))
+}
+
+pub(super) fn resolve_tables(
+    g: &GgufFile,
+    hash: &HashConfig,
+    main_layers: usize,
+) -> Result<Vec<TableView>, LoadError> {
+    let mut combined = None;
+    let mut separate = BTreeMap::new();
+    for t in g.tensors.iter().filter(|t| is_table(&t.name)) {
+        if t.name == COMBINED_TABLE {
+            if combined.replace(t).is_some() {
+                return Err(invalid("duplicate combined Engram table"));
+            }
+        } else {
+            let layer: usize = t
+                .name
+                .strip_prefix("blk.")
+                .and_then(|name| name.strip_suffix(".engram_embd.weight"))
+                .and_then(|layer| layer.parse().ok())
+                .ok_or_else(|| invalid(format!("invalid Engram table name: {}", t.name)))?;
+            if layer >= main_layers {
+                continue;
+            }
+            if separate.insert(layer, t).is_some() {
+                return Err(invalid(format!("duplicate Engram table for layer {layer}")));
+            }
+        }
+    }
+    let mut tables = Vec::with_capacity(hash.layers.len());
+    if let Some(t) = combined {
+        if !separate.is_empty() {
+            return Err(invalid("ambiguous combined and separate Engram tables"));
+        }
+        if hash.layers.is_empty() {
+            return Err(invalid("undeclared combined Engram table"));
+        }
+        validate(g, t)?;
+        let mut end = 0u64;
+        for layer in &hash.layers {
+            let row_base = end;
+            end = end
+                .checked_add(layer.rows)
+                .ok_or_else(|| invalid("combined Engram row extent overflow"))?;
+            tables.push(TableView {
+                layer: layer.layer,
+                tensor: t.clone(),
+                row_base,
+                row_count: layer.rows,
+            });
+        }
+        if end != t.shape[1] {
+            return Err(invalid("combined Engram rows differ from bucket total"));
+        }
+    } else {
+        for &layer in separate.keys() {
+            if !hash.layers.iter().any(|l| l.layer == layer) {
+                return Err(invalid(format!(
+                    "undeclared Engram table for layer {layer}"
+                )));
+            }
+        }
+        for layer in &hash.layers {
+            let t = separate.get(&layer.layer).ok_or_else(|| {
+                invalid(format!("missing Engram table for layer {}", layer.layer))
+            })?;
+            validate(g, t)?;
+            if t.shape[1] != layer.rows {
+                return Err(invalid(format!(
+                    "Engram table rows differ from bucket total: {}",
+                    t.name
+                )));
+            }
+            tables.push(TableView {
+                layer: layer.layer,
+                tensor: (*t).clone(),
+                row_base: 0,
+                row_count: layer.rows,
+            });
+        }
+    }
+    Ok(tables)
 }
 pub(super) fn validate(g: &GgufFile, t: &TensorDesc) -> Result<(), LoadError> {
     validate_encoding(g)?;
@@ -84,29 +176,21 @@ pub(super) fn validate_encoding(g: &GgufFile) -> Result<(), LoadError> {
 /// table into Metal or materializes a full table in host memory.
 pub struct DiskEngram {
     gguf: Arc<GgufFile>,
-    tables: BTreeMap<usize, TensorDesc>,
+    tables: BTreeMap<usize, TableView>,
 }
 impl DiskEngram {
     pub fn new(gguf: Arc<GgufFile>) -> Result<Self, LoadError> {
-        let layers = metadata::array(&gguf, &["engram.layers", "engram.layer_ids"])?
-            .unwrap_or_else(|| vec![1, 14]);
-        Self::for_layers(gguf, &layers)
+        let p = metadata::parse(&gguf)?;
+        Ok(Self::for_tables(gguf, p.engram_tables))
     }
-    pub(super) fn for_layers(gguf: Arc<GgufFile>, layers: &[u64]) -> Result<Self, LoadError> {
-        validate_encoding(&gguf)?;
-        let mut tables = BTreeMap::new();
-        for &layer in layers {
-            let name = format!("blk.{layer}.engram_embd.weight");
-            let t = gguf
-                .find(&name)
-                .ok_or_else(|| invalid(format!("missing Engram table {name}")))?;
-            validate(&gguf, t)?;
-            tables.insert(
-                usize::try_from(layer).map_err(|_| invalid("Engram layer overflow"))?,
-                t.clone(),
-            );
+    pub(super) fn for_tables(gguf: Arc<GgufFile>, tables: Vec<TableView>) -> Self {
+        Self {
+            gguf,
+            tables: tables
+                .into_iter()
+                .map(|table| (table.layer, table))
+                .collect(),
         }
-        Ok(Self { gguf, tables })
     }
     pub fn decode_rows(&self, layer: usize, ids: &[u64]) -> Result<Vec<f32>, String> {
         self.read_rows(layer, ids).map_err(|e| e.to_string())
@@ -115,13 +199,14 @@ impl DiskEngram {
         if ids.len() > MAX_OUTPUT_BYTES / (ROW_WIDTH * std::mem::size_of::<f32>()) {
             return Err(invalid("Engram request exceeds bounded output"));
         }
-        let t = self
+        let table = self
             .tables
             .get(&layer)
             .ok_or_else(|| invalid("missing Engram layer"))?;
-        if ids.iter().any(|&id| id >= t.shape[1]) {
+        if ids.iter().any(|&id| id >= table.row_count) {
             return Err(invalid("Engram row outside table"));
         }
+        let t = &table.tensor;
         let stride = row_stride(t)?;
         let mut raw = vec![0u8; stride];
         let row = TensorDesc {
@@ -139,7 +224,8 @@ impl DiskEngram {
         output.resize(ids.len() * ROW_WIDTH, 0.0);
         for (&id, destination) in ids.iter().zip(output.chunks_exact_mut(ROW_WIDTH)) {
             let offset = id
-                .checked_mul(stride as u64)
+                .checked_add(table.row_base)
+                .and_then(|n| n.checked_mul(stride as u64))
                 .and_then(|n| t.data_offset.checked_add(n))
                 .ok_or_else(|| invalid("Engram row offset overflow"))?;
             self.gguf

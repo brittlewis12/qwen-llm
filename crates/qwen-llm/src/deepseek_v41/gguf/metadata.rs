@@ -106,6 +106,26 @@ fn sources(
     }
     Ok(values)
 }
+fn local_ple_offsets(mut offsets: Vec<u64>, primes: &[u64]) -> Result<Vec<u64>, LoadError> {
+    let mut end = 0u64;
+    for (offsets, primes) in offsets.chunks_exact_mut(24).zip(primes.chunks_exact(24)) {
+        let base = end;
+        for (offset, &prime) in offsets.iter_mut().zip(primes) {
+            if *offset != end {
+                return Err(invalid(
+                    "ple.head_offsets must be contiguous global offsets starting at zero",
+                ));
+            }
+            *offset = offset
+                .checked_sub(base)
+                .ok_or_else(|| invalid("PLE local offset underflow"))?;
+            end = end
+                .checked_add(prime)
+                .ok_or_else(|| invalid("PLE global offset overflow"))?;
+        }
+    }
+    Ok(offsets)
+}
 pub(super) fn parse(g: &GgufFile) -> Result<Plan, LoadError> {
     if g.architecture().as_deref() != Some("deepseek41") {
         return Err(invalid("general.architecture must be deepseek41"));
@@ -351,13 +371,32 @@ pub(super) fn parse(g: &GgufFile) -> Result<Plan, LoadError> {
     };
     schedule.validate()?;
     let engram_layers = sources_alias(g, layers)?;
-    if !engram_layers.is_empty()
-        && (uint(g, &["engram.head_count", "engram.n_heads"], None)? != 8
-            || uint(g, &["engram.max_ngram_size"], None)? != 4)
-    {
-        return Err(invalid(
-            "Engram projection requires three n-gram orders with eight heads each",
-        ));
+    for (keys, expected) in [
+        (
+            &["engram.head_count", "engram.n_heads", "ple.heads_per_ngram"][..],
+            8,
+        ),
+        (&["engram.max_ngram_size", "ple.ngram_size"][..], 4),
+        (
+            &[
+                "engram.head_dim",
+                "engram.key_length",
+                "embedding_length_per_layer_input",
+            ][..],
+            256,
+        ),
+    ] {
+        let declared = optional_uint_aliases(g, keys)?;
+        if !engram_layers.is_empty() {
+            let declared =
+                declared.ok_or_else(|| invalid(format!("missing deepseek41.{}", keys[0])))?;
+            if declared != expected {
+                return Err(invalid(format!(
+                    "unsupported Engram geometry: {} must be {expected}",
+                    keys[0]
+                )));
+            }
+        }
     }
     let token_map = g
         .get_i64_array("deepseek41.engram.token_map")?
@@ -394,24 +433,45 @@ pub(super) fn parse(g: &GgufFile) -> Result<Plan, LoadError> {
             return Err(invalid("conflicting Engram pad aliases"));
         }
     }
-    if !engram_layers.is_empty() && uint(g, &["engram.head_dim", "engram.key_length"], None)? != 256
-    {
-        return Err(invalid("Engram row decoder requires head_dim 256"));
-    }
-    let hash_array = |key, width| -> Result<Vec<u64>, LoadError> {
-        let values = match array(g, &[key])? {
-            Some(values) => values,
-            None if engram_layers.is_empty() => Vec::new(),
-            None => return Err(invalid(format!("missing deepseek41.{key}"))),
-        };
-        if values.len() != engram_layers.len() * width {
-            return Err(invalid("Engram hash metadata length"));
+    let hash_array = |keys: &[&str], width| -> Result<Option<Vec<u64>>, LoadError> {
+        let values = array(g, keys)?;
+        let count = engram_layers
+            .len()
+            .checked_mul(width)
+            .ok_or_else(|| invalid("Engram hash metadata length overflow"))?;
+        if values.as_ref().is_some_and(|values| values.len() != count) {
+            return Err(invalid(format!("Engram hash metadata length: {}", keys[0])));
         }
         Ok(values)
     };
-    let primes = hash_array("engram.primes", 24)?;
-    let offsets = hash_array("engram.offsets", 24)?;
-    let multipliers = hash_array("engram.multipliers", 4)?;
+    let required_hash = |values: Option<Vec<u64>>, key| -> Result<Vec<u64>, LoadError> {
+        match values {
+            Some(values) => Ok(values),
+            None if engram_layers.is_empty() => Ok(Vec::new()),
+            None => Err(invalid(format!("missing deepseek41.{key}"))),
+        }
+    };
+    let primes = required_hash(
+        hash_array(&["engram.primes", "ple.head_vocab_sizes"], 24)?,
+        "engram.primes or ple.head_vocab_sizes",
+    )?;
+    let legacy_offsets = hash_array(&["engram.offsets"], 24)?;
+    let ple_offsets = hash_array(&["ple.head_offsets"], 24)?
+        .map(|offsets| local_ple_offsets(offsets, &primes))
+        .transpose()?;
+    if let (Some(legacy), Some(ple)) = (&legacy_offsets, &ple_offsets) {
+        if legacy != ple {
+            return Err(invalid("conflicting Engram/PLE offset aliases"));
+        }
+    }
+    let offsets = required_hash(
+        legacy_offsets.or(ple_offsets),
+        "engram.offsets or ple.head_offsets",
+    )?;
+    let multipliers = required_hash(
+        hash_array(&["engram.multipliers", "ple.layer_multipliers"], 4)?,
+        "engram.multipliers or ple.layer_multipliers",
+    )?;
     let compressed_vocab_size = optional_uint(g, "engram.compressed_vocab_size")?
         .unwrap_or(u64::from(token_map.iter().copied().max().unwrap_or(0)) + 1);
     let mut engram_hash = HashConfig {
@@ -428,16 +488,14 @@ pub(super) fn parse(g: &GgufFile) -> Result<Plan, LoadError> {
         return Err(invalid("Engram rows metadata length"));
     }
     for (i, &layer) in engram_layers.iter().enumerate() {
-        let t = g
-            .find(&format!("blk.{layer}.engram_embd.weight"))
-            .ok_or_else(|| invalid("missing Engram table"))?;
-        if t.shape.len() != 2 {
-            return Err(invalid("Engram table rank"));
+        let primes: [u64; 24] = primes[i * 24..(i + 1) * 24].try_into().unwrap();
+        let rows = primes.iter().try_fold(0u64, |end, &prime| {
+            end.checked_add(prime)
+                .ok_or_else(|| invalid("Engram layer rows overflow"))
+        })?;
+        if declared_rows.as_ref().is_some_and(|v| v[i] != rows) {
+            return Err(invalid("Engram rows metadata differs from bucket total"));
         }
-        if declared_rows.as_ref().is_some_and(|v| v[i] != t.shape[1]) {
-            return Err(invalid("Engram rows metadata differs from tensor"));
-        }
-        let primes = primes[i * 24..(i + 1) * 24].try_into().unwrap();
         let multipliers = multipliers[i * 4..(i + 1) * 4].try_into().unwrap();
         let offsets = offsets[i * 24..(i + 1) * 24].try_into().unwrap();
         engram_hash.layers.push(super::super::engram::LayerHash {
@@ -445,12 +503,13 @@ pub(super) fn parse(g: &GgufFile) -> Result<Plan, LoadError> {
             primes,
             offsets,
             multipliers,
-            rows: t.shape[1],
+            rows,
         });
     }
     engram_hash
         .validate()
         .map_err(|e| invalid(format!("Engram hash configuration: {e:?}")))?;
+    let engram_tables = engram::resolve_tables(g, &engram_hash, layers)?;
     let engram_primes = engram_hash.layers.iter().flat_map(|l| l.primes).collect();
     let engram_offsets = engram_hash.layers.iter().flat_map(|l| l.offsets).collect();
     let engram_multipliers = engram_hash
@@ -462,6 +521,7 @@ pub(super) fn parse(g: &GgufFile) -> Result<Plan, LoadError> {
         config,
         schedule,
         engram_hash,
+        engram_tables,
         dtype_inventory: BTreeMap::new(),
         bytes: ByteCounters::default(),
         token_map,
@@ -477,7 +537,7 @@ pub(super) fn parse(g: &GgufFile) -> Result<Plan, LoadError> {
     })
 }
 fn sources_alias(g: &GgufFile, layers: usize) -> Result<Vec<u64>, LoadError> {
-    let ids = array(g, &["engram.layers", "engram.layer_ids"])?
+    let ids = array(g, &["engram.layers", "engram.layer_ids", "ple.layers"])?
         .ok_or_else(|| invalid("missing deepseek41.engram.layer_ids"))?;
     if ids.iter().any(|&n| n >= layers as u64) || ids.windows(2).any(|w| w[0] >= w[1]) {
         return Err(invalid("invalid Engram layers"));

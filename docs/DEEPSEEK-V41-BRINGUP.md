@@ -14,13 +14,23 @@ metadata; base and pruned expert counts are not an allowlist. No adjacent HF
 configuration, safetensors loader, converted-weight cache or conversion command
 exists in the engine.
 
-The convention is llama.cpp PR 28696: standard GGML expert/dense types and Engram
-tables `[256, rows]` decoded through the shared GGML codec. MXFP4 experts stay
-packed. Engram reads only requested rows from disk, outside resident Metal weight
+The conventions include llama.cpp PRs 28696 and 30817: standard GGML expert/dense
+types and Engram tables `[256, rows]` decoded through the shared GGML codec.
+MXFP4 experts stay packed. Engram reads only requested rows from disk, outside resident Metal weight
 banks; its dtype is a codec capability, not a quantization-quality policy.
 Known metadata spellings are aliases; unsupported consumed encodings produce
 named errors. Unused vision/MTP tensors and vision router biases are not bound.
 Converter revision is provenance, not an accepted-file restriction.
+
+The loader accepts legacy per-layer Engram tables and PLE metadata with one
+`per_layer_token_embd.weight` table. Global `ple.head_offsets` normalize to
+layer-local hash coordinates; checked disk views add the physical row base back
+when reading. Equivalent dual metadata is accepted, conflicting declarations or
+combined/separate table ambiguity are rejected. The supported profile remains
+orders 2-4, eight heads per order, width 256, and contiguous ranges covering the
+table exactly; arbitrary sparse PLE layouts or trailing unused rows are not
+supported. Combined table bytes count once and stay outside Metal residency,
+including shared boundary pages. This does not add an MXFP8 codec.
 
 Serving uses the official recipe renderer/parser, common startup/request spine,
 typed HTTP 503 `memory_admission_denied` responses and automatic longest exact
@@ -91,6 +101,25 @@ all-shard Q2_K check also passes: 186.260 GiB resident, 60.083 GiB disk Engram,
 each reads about 5.8 MB of headers, no model payload, without initializing Metal.
 Fixtures also cover nonzero load-to-forward at 272/320/384 experts, quantized
 projections, ownership transitions, bounded Engram reads and shared contracts.
+
+Header inspection of Unsloth `DeepSeek-V4.1-Flash-1017-GGUF` at revision
+`f924b94f19c1fea02c06a65c8475b0a45e2b88b1` finds 1,043 tensors in both
+`UD-Q2_K_XL` and `UD-IQ3_XXS`, with identical names/shapes but mixed per-tensor
+quantization. Each shard 7 contains only `per_layer_token_embd.weight`, shape
+`[256, 768022850]`, with matching split counts and inventory totals. It is Q5_K
+in the published Q2 set and Q6_K in IQ3. The inspected first-shard architecture
+metadata, including token mapping and hash parameters, agrees across both sets;
+those locally downloaded first headers were not independently revision-pinned.
+
+Using Q2 shards 1-6 with IQ3's shard 7 is deliberately **Q2_K_XL + Q6_K Engram**,
+not the exact published Q2 configuration. No header edit is needed for these
+matching seven-shard sets. Keep shared hardlinks immutable and verify complete
+downloads before inference. Q6_K does not add resident GPU table weights, but
+its 210-byte rows contain 19.3% more packed bytes than Q5_K's 176-byte rows;
+physical I/O also depends on caching and filesystem read granularity.
+Header compatibility and synthetic row tests do not establish real-artifact
+inference, task quality, or local memory admission. IQ3 admission may require a
+separately authorized wired-memory change; no limit is changed by this support.
 
 The [output-only converter patch](../scripts/convert_v41_gguf.md) reuses the
 pinned converter's lazy experts/chunked tensors, removing writer spool and

@@ -85,8 +85,15 @@ pub(super) fn stages() -> bool {
     STAGES.with(|enabled| enabled.get())
 }
 
-pub(super) fn gpu_interval(name: &'static str, rows: usize, start: u64, end: u64) {
-    record(name, [rows, 0, 0, 0], |op| {
+/// Per-layer sampled GPU interval; the layer lands in `dimensions[1]`.
+pub(super) fn gpu_interval_layer(
+    name: &'static str,
+    rows: usize,
+    layer: usize,
+    start: u64,
+    end: u64,
+) {
+    record(name, [rows, layer, 0, 0], |op| {
         op.count += 1;
         if start > 0 && end > start && end != u64::MAX {
             *op.gpu_ms.get_or_insert(0.0) += (end - start) as f64 / 1e6;

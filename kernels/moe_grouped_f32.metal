@@ -28,7 +28,6 @@ constant constexpr short F32X_NL0 = 2;         // 16-element dequant calls per r
 constant constexpr short F32X_NL1 = 4;         // 8-wide activation chunks per slot per step
 constant constexpr short F32X_NR1_DOWN = 32;   // slots per down tile
 constant constexpr short F32X_NR1_SWIGLU = 16; // slots per gate/up tile
-constant constexpr short F32X_NR1_SWIGLU_WIDE = 32; // slots per wide gate/up tile
 
 // ---------------------------------------------------------------------------
 // F32 tile dequantizers (16 consecutive elements of sub-block il).
@@ -514,151 +513,8 @@ kernel void kernel_moe_swiglu_clamped_grouped_slots_f32x(
     }
 }
 
-// 32-slot gate/up tile: each weight dequantization serves twice as many
-// routed slots. Per-slot K order and epilogue are unchanged, so the result is
-// bitwise equal to two 16-slot tiles.
-template <int BYTES, short NL, void (*DEQ)(device const uchar *, short, thread float4x4 &)>
-kernel void kernel_moe_swiglu_wide_grouped_slots_f32x(
-        constant f32x_moe_swiglu_args & args [[buffer(0)]],
-        device const uchar * srcA_gate     [[buffer(1)]],
-        device const uchar * srcA_up       [[buffer(2)]],
-        device const float * srcB          [[buffer(3)]],
-        device const int   * counts        [[buffer(4)]],
-        device const int   * ids           [[buffer(5)]],
-        device       float * dst           [[buffer(6)]],
-        constant     float & limit         [[buffer(7)]],
-        threadgroup  float * shmem         [[threadgroup(0)]],
-        uint3  tgpig [[threadgroup_position_in_grid]],
-        uint tiitg_wide [[thread_index_in_threadgroup]],
-        ushort sgitg [[simdgroup_index_in_threadgroup]],
-        ushort tiisg [[thread_index_in_simdgroup]]) {
-    const ushort tiitg = ushort(tiitg_wide);
-    threadgroup float * sa_g = shmem;                            // 64 rows x 32 K
-    threadgroup float * sa_u = shmem + F32X_NR0 * F32X_NK;       // 64 rows x 32 K
-    threadgroup float * sb   = shmem + 2 * F32X_NR0 * F32X_NK;   // 32 slots x 32 K
-
-    const int im = tgpig.z;
-    const int r0 = tgpig.y * F32X_NR0;
-    const int r1 = tgpig.x * F32X_NR1_SWIGLU_WIDE;
-
-    const int count = counts[im];
-    if (count < int(args.min_count) || count > int(args.max_count) || r1 >= count) return;
-
-    const short nr0 = (short)min((int)F32X_NR0, (int)args.ffn - r0);
-    const short nr1 = (short)min((int)F32X_NR1_SWIGLU_WIDE, count - r1);
-
-    const short lr0 = min((short)(tiitg / F32X_NL0), (short)(nr0 - 1));
-    const short il0 = tiitg % F32X_NL0;
-    short il = il0;
-    const short lr1 = min((short)(tiitg / F32X_NL1), (short)(nr1 - 1));
-    const short iy = 8 * (tiitg % F32X_NL1);
-
-    const ulong expert_stride = (ulong)args.nb01 * args.ffn;
-    device const uchar * x_ptr_g = srcA_gate + expert_stride * (ulong)im + (ulong)args.nb01 * (ulong)(r0 + lr0);
-    device const uchar * x_ptr_u = srcA_up   + expert_stride * (ulong)im + (ulong)args.nb01 * (ulong)(r0 + lr0);
-    const int slot_limit = int(args.n_tokens * args.topk);
-    const int slot_id = ids[(ulong)im * args.n_tokens + (ulong)(r1 + lr1)];
-    const bool slot_valid = slot_id >= 0 && slot_id < slot_limit;
-    const int token = (slot_valid ? slot_id : 0) / int(args.topk);
-    device const float * y_ptr = srcB + (ulong)args.stride_b * (ulong)token + (ulong)iy;
-
-    simdgroup_float8x8 ma_g[4];
-    simdgroup_float8x8 ma_u[4];
-    simdgroup_float8x8 mb[2];
-    simdgroup_float8x8 mc_g[8];
-    simdgroup_float8x8 mc_u[8];
-    F32X_FOR_UNROLL (short i = 0; i < 8; ++i) {
-        mc_g[i] = make_filled_simdgroup_matrix<float, 8>(0.0f);
-        mc_u[i] = make_filled_simdgroup_matrix<float, 8>(0.0f);
-    }
-
-    for (uint loop_k = 0; loop_k < args.hidden; loop_k += F32X_NK) {
-        float4x4 temp_g;
-        float4x4 temp_u;
-        DEQ(x_ptr_g, il, temp_g);
-        DEQ(x_ptr_u, il, temp_u);
-
-        threadgroup_barrier(mem_flags::mem_threadgroup);
-
-        F32X_FOR_UNROLL (short i = 0; i < 16; ++i) {
-            const short sx = 2 * il0 + i / 8;
-            const short sy = (tiitg / F32X_NL0) / 8;
-            const short lx = (tiitg / F32X_NL0) % 8;
-            const short ly = i % 8;
-            const short ib = 8 * sx + sy;
-            sa_g[64 * ib + 8 * ly + lx] = temp_g[i / 4][i % 4];
-            sa_u[64 * ib + 8 * ly + lx] = temp_u[i / 4][i % 4];
-        }
-        {
-            const short sx = tiitg % F32X_NL1;
-            const short sy = (tiitg / F32X_NL1) / 8;
-            const short ly = (tiitg / F32X_NL1) % 8;
-            const short ib = 4 * sx + sy;
-            *(threadgroup float2x4 *)(sb + 64 * ib + 8 * ly) =
-                *((device const float2x4 *)y_ptr);
-        }
-
-        il = (il + 2 < NL) ? il + 2 : il % 2;
-        x_ptr_g = (il < 2) ? x_ptr_g + BYTES * ((2 + NL - 1) / NL) : x_ptr_g;
-        x_ptr_u = (il < 2) ? x_ptr_u + BYTES * ((2 + NL - 1) / NL) : x_ptr_u;
-        y_ptr += F32X_NK;
-
-        threadgroup_barrier(mem_flags::mem_threadgroup);
-
-        threadgroup const float * lsma_g = sa_g + 4 * 64 * (sgitg % 2);
-        threadgroup const float * lsma_u = sa_u + 4 * 64 * (sgitg % 2);
-        threadgroup const float * lsmb   = sb   + 2 * 64 * (sgitg / 2);
-        F32X_FOR_UNROLL (short ik = 0; ik < F32X_NK / 8; ++ik) {
-            simdgroup_barrier(mem_flags::mem_none);
-            F32X_FOR_UNROLL (short i = 0; i < 4; ++i) {
-                simdgroup_load(ma_g[i], lsma_g + 64 * i, 8, 0, false);
-                simdgroup_load(ma_u[i], lsma_u + 64 * i, 8, 0, false);
-            }
-            simdgroup_barrier(mem_flags::mem_none);
-            F32X_FOR_UNROLL (short i = 0; i < 2; ++i) {
-                simdgroup_load(mb[i], lsmb + 64 * i, 8, 0, false);
-            }
-            simdgroup_barrier(mem_flags::mem_none);
-            F32X_FOR_UNROLL (short i = 0; i < 8; ++i) {
-                simdgroup_multiply_accumulate(mc_g[i], mb[i / 4], ma_g[i % 4], mc_g[i]);
-                simdgroup_multiply_accumulate(mc_u[i], mb[i / 4], ma_u[i % 4], mc_u[i]);
-            }
-            lsma_g += 8 * 64;
-            lsma_u += 8 * 64;
-            lsmb   += 4 * 64;
-        }
-    }
-
-    threadgroup_barrier(mem_flags::mem_threadgroup);
-    threadgroup float * temp_str_g = shmem
-                                     + 32 * (sgitg & 1)
-                                     + (16 * (sgitg >> 1)) * F32X_NR0;
-    threadgroup float * temp_str_u = shmem + F32X_NR0 * F32X_NR1_SWIGLU_WIDE
-                                     + 32 * (sgitg & 1)
-                                     + (16 * (sgitg >> 1)) * F32X_NR0;
-    F32X_FOR_UNROLL (short i = 0; i < 8; ++i) {
-        simdgroup_store(mc_g[i], temp_str_g + 8 * (i % 4) + 8 * F32X_NR0 * (i / 4), F32X_NR0, 0, false);
-        simdgroup_store(mc_u[i], temp_str_u + 8 * (i % 4) + 8 * F32X_NR0 * (i / 4), F32X_NR0, 0, false);
-    }
-    threadgroup_barrier(mem_flags::mem_threadgroup);
-
-    for (short j = (short)sgitg; j < nr1; j += 4) {
-        const int slot = ids[(ulong)im * args.n_tokens + (ulong)(r1 + j)];
-        if (slot < 0 || slot >= slot_limit) {
-            continue;
-        }
-        device float * D = dst + (ulong)slot * args.ffn + (ulong)r0;
-        threadgroup const float * C_g = shmem + j * F32X_NR0;
-        threadgroup const float * C_u = shmem + F32X_NR0 * F32X_NR1_SWIGLU_WIDE + j * F32X_NR0;
-        for (short i = (short)tiisg; i < nr0; i += 32) {
-            D[i] = f32x_silu(min(C_g[i], limit)) * clamp(C_u[i], -limit, limit);
-        }
-    }
-}
-
 typedef decltype(kernel_moe_down_grouped_slots_f32x<QT_IQ3_S_BYTES, QT_IQ3_S_NL, f32x_dequantize_iq3_s>) f32x_down_t;
 typedef decltype(kernel_moe_swiglu_clamped_grouped_slots_f32x<QT_IQ2_S_BYTES, QT_IQ2_S_NL, f32x_dequantize_iq2_s>) f32x_swiglu_t;
-typedef decltype(kernel_moe_swiglu_wide_grouped_slots_f32x<QT_IQ2_S_BYTES, QT_IQ2_S_NL, f32x_dequantize_iq2_s>) f32x_swiglu_wide_t;
 
 template [[host_name("kernel_moe_down_mxfp4_f32x_grouped_slots")]] kernel f32x_down_t kernel_moe_down_grouped_slots_f32x<17, 2, expert_dequantize_mxfp4, true>;
 template [[host_name("kernel_moe_swiglu_clamped_mxfp4_f32x_grouped_slots")]] kernel f32x_swiglu_t kernel_moe_swiglu_clamped_grouped_slots_f32x<17, 2, expert_dequantize_mxfp4>;
@@ -686,13 +542,6 @@ template [[host_name("kernel_moe_swiglu_clamped_iq3_s_f32x_grouped_slots")]] ker
 template [[host_name("kernel_moe_swiglu_clamped_iq3_xxs_f32x_grouped_slots")]] kernel f32x_swiglu_t kernel_moe_swiglu_clamped_grouped_slots_f32x<QT_IQ3_XXS_BYTES, QT_IQ3_XXS_NL, latent_dequantize_iq3_xxs>;
 template [[host_name("kernel_moe_swiglu_clamped_q3_K_f32x_grouped_slots")]] kernel f32x_swiglu_t kernel_moe_swiglu_clamped_grouped_slots_f32x<QT_Q3_K_BYTES, QT_Q3_K_NL, latent_dequantize_q3_K>;
 template [[host_name("kernel_moe_swiglu_clamped_iq2_xxs_f32x_grouped_slots")]] kernel f32x_swiglu_t kernel_moe_swiglu_clamped_grouped_slots_f32x<66, 16, f32x_dequantize_iq2_xxs>;
-template [[host_name("kernel_moe_swiglu_wide_mxfp4_f32x_grouped_slots")]] kernel f32x_swiglu_wide_t kernel_moe_swiglu_wide_grouped_slots_f32x<17, 2, expert_dequantize_mxfp4>;
-template [[host_name("kernel_moe_swiglu_wide_iq2_s_f32x_grouped_slots")]] kernel f32x_swiglu_wide_t kernel_moe_swiglu_wide_grouped_slots_f32x<QT_IQ2_S_BYTES, QT_IQ2_S_NL, f32x_dequantize_iq2_s>;
-template [[host_name("kernel_moe_swiglu_wide_iq3_s_f32x_grouped_slots")]] kernel f32x_swiglu_wide_t kernel_moe_swiglu_wide_grouped_slots_f32x<QT_IQ3_S_BYTES, QT_IQ3_S_NL, f32x_dequantize_iq3_s>;
-template [[host_name("kernel_moe_swiglu_wide_iq3_xxs_f32x_grouped_slots")]] kernel f32x_swiglu_wide_t kernel_moe_swiglu_wide_grouped_slots_f32x<QT_IQ3_XXS_BYTES, QT_IQ3_XXS_NL, latent_dequantize_iq3_xxs>;
-template [[host_name("kernel_moe_swiglu_wide_q3_K_f32x_grouped_slots")]] kernel f32x_swiglu_wide_t kernel_moe_swiglu_wide_grouped_slots_f32x<QT_Q3_K_BYTES, QT_Q3_K_NL, latent_dequantize_q3_K>;
-template [[host_name("kernel_moe_swiglu_wide_iq2_xxs_f32x_grouped_slots")]] kernel f32x_swiglu_wide_t kernel_moe_swiglu_wide_grouped_slots_f32x<66, 16, f32x_dequantize_iq2_xxs>;
-template [[host_name("kernel_moe_swiglu_wide_iq2_xs_f32x_grouped_slots")]] kernel f32x_swiglu_wide_t kernel_moe_swiglu_wide_grouped_slots_f32x<74, 16, f32x_dequantize_iq2_xs>;
 template [[host_name("kernel_moe_swiglu_clamped_iq2_xs_f32x_grouped_slots")]] kernel f32x_swiglu_t kernel_moe_swiglu_clamped_grouped_slots_f32x<74, 16, f32x_dequantize_iq2_xs>;
 template [[host_name("kernel_moe_down_iq2_xxs_f32x_grouped_slots")]] kernel f32x_down_t kernel_moe_down_grouped_slots_f32x<66, 16, f32x_dequantize_iq2_xxs>;
 template [[host_name("kernel_moe_down_iq2_xs_f32x_grouped_slots")]] kernel f32x_down_t kernel_moe_down_grouped_slots_f32x<74, 16, f32x_dequantize_iq2_xs>;

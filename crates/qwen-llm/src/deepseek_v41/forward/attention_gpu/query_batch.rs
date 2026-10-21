@@ -283,7 +283,7 @@ impl Workspace {
             pipeline(ctx, enc, "score_rows")?;
             enc.dispatch(
                 MTLSize {
-                    width: count(position + n - 1).div_ceil(8),
+                    width: count(position + n - 1).div_ceil(32),
                     height: c.heads,
                     depth: n,
                 },

@@ -393,12 +393,27 @@ kernel void kernel_deepseek_v41_attention_score_rows(
     uint sg [[simdgroup_index_in_threadgroup]], uint lane [[thread_index_in_simdgroup]],
     uint tid [[thread_index_in_threadgroup]]) {
     uint r = group.z, length = attention_row_length(b, r);
-    device const float *q_row = q + r * m.y * a.x + group.y * a.x;
+    uint4 ar = attention_row_raw(a, b, r);
+    uint2 br = uint2(min(length, a.z), a.w);
+    uint count = ar.y + br.x, h = group.y;
+    device const float *q_row = q + r * m.y * a.x + h * a.x;
+    device const uint *row_ids = ids + r * a.z;
+    device float *score_row = scores + r * m.y * a.w;
     for (uint j = tid; j < a.x; j += 256) q_shared[j] = q_row[j];
     threadgroup_barrier(mem_flags::mem_threadgroup);
-    attention_score_shared(attention_row_raw(a, b, r), uint2(min(length, a.z), a.w),
-        q_shared, raw, compressed, ids + r * a.z,
-        scores + r * m.y * a.w, length, group.xy, sg, lane);
+    // Four keys per simdgroup: 4x fewer threadgroups, same per-key dot order.
+    for (uint k = 0; k < 4; ++k) {
+        uint i = group.x * 32 + k * 8 + sg;
+        if (i >= count) continue;
+        if (i >= ar.y && row_ids[i - ar.y] >= length) continue;
+        device const float *row = i < ar.y
+            ? raw + ((ar.z + i) % ar.w) * ar.x
+            : compressed + row_ids[i - ar.y] * ar.x;
+        float dot = 0;
+        for (uint j = lane; j < ar.x; j += 32) dot += q_shared[j] * row[j];
+        dot = simd_sum(dot);
+        if (lane == 0) score_row[h * br.y + i] = dot * rsqrt(float(ar.x));
+    }
 }
 
 kernel void kernel_deepseek_v41_attention_softmax_rows(

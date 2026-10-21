@@ -347,6 +347,56 @@ fn routed_decode_attribution_probe() {
             }
         }
         report(&format!("production {gate_up:?}/{down:?}"), &f, stage, gate);
+        // Same kernels with a decode-token-sized CPU gap before each command
+        // buffer, as the real loop has (sample, encode, Engram reads).
+        for gap_ms in [0.5f64, 1.0, 2.0, 5.0] {
+            let mut stage = Vec::new();
+            let mut gate = Vec::new();
+            for it in 0..ITERS + 2 {
+                write_ids(&f.ids, it + 31);
+                std::thread::sleep(std::time::Duration::from_secs_f64(gap_ms * 1e-3));
+                let s = timed(&ctx, |enc| {
+                    encode_all_slots_gate_up_swiglu_native(
+                        &ctx,
+                        enc,
+                        &f.gate,
+                        &f.up,
+                        &f.x,
+                        &f.ids,
+                        &f.status,
+                        &f.inner,
+                        K,
+                        M,
+                        BANK_EXPERTS,
+                        TOP_K,
+                        10.0,
+                    )?;
+                    encode_all_slots_down_native(
+                        &ctx,
+                        enc,
+                        &f.down,
+                        &f.inner,
+                        &f.ids,
+                        &f.status,
+                        &f.out,
+                        M,
+                        K,
+                        BANK_EXPERTS,
+                        TOP_K,
+                    )
+                });
+                if it >= 2 {
+                    stage.push(s);
+                    gate.push(0.0);
+                }
+            }
+            report(
+                &format!("production {gate_up:?}/{down:?} gap {gap_ms} ms"),
+                &f,
+                stage,
+                gate,
+            );
+        }
     }
 
     // Research variants on Q3_K (gate/up/down all Q3_K) and Q8_0.

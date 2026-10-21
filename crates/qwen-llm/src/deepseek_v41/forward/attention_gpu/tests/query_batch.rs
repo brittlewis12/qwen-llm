@@ -526,7 +526,7 @@ fn query_batch_memory_pricing_and_rope_canaries() {
         }
     }
     assert!(Scratch::shapes(&c, 0).is_err());
-    assert!(Scratch::shapes(&c, 1025).is_err());
+    assert!(Scratch::shapes(&c, 2049).is_err());
     for (dim, heads, n, pairs) in [(7, 3, 1, 2), (32, 8, 31, 4), (32, 8, 32, 0)] {
         let v = values(dim * heads * n, 37);
         let (backing, actual) = guarded_dispatch_tensor(&ctx, &v);

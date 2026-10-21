@@ -342,11 +342,11 @@ impl Workspace {
             let times = ctx
                 .resolve_timestamp_samples(samples, model.layers.len() * 8)
                 .map_err(|e| e.to_string())?;
-            for t in times.chunks_exact(8) {
-                profile::gpu_interval("prefill_attention_hc", n, t[0], t[1]);
-                profile::gpu_interval("prefill_attention_rows", n, t[2], t[3]);
-                profile::gpu_interval("prefill_attention_finish_post", n, t[4], t[5]);
-                profile::gpu_interval("prefill_ffn", n, t[6], t[7]);
+            for (layer, t) in times.chunks_exact(8).enumerate() {
+                profile::gpu_interval_layer("prefill_attention_hc", n, layer, t[0], t[1]);
+                profile::gpu_interval_layer("prefill_attention_rows", n, layer, t[2], t[3]);
+                profile::gpu_interval_layer("prefill_attention_finish_post", n, layer, t[4], t[5]);
+                profile::gpu_interval_layer("prefill_ffn", n, layer, t[6], t[7]);
             }
         }
         ffn.validate_status()?;

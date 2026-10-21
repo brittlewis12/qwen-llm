@@ -36,6 +36,11 @@ pub(crate) struct AllSlotsDownRecipe {
 }
 
 /// Gate/up dtypes with a fused all-slot `silu(min(g, c)) * clamp(u, -c, c)`.
+/// All recipes use F32 operands, decoded weight arithmetic, accumulation and
+/// scratch; only stored half scales are widened. IQ recipes factor scales
+/// around partial sums, so they are not bitwise native-reduction equivalents.
+/// Each requires K divisible by 256. Keep this precision contract when adding
+/// recipes: NativeF32 callers also use this selector.
 const GATE_UP_KERNELS: &[(GgmlType, &str)] = &[
     (
         GgmlType::IQ2_XS,

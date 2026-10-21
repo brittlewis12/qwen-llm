@@ -699,6 +699,28 @@ pub(super) fn half_grouped_selected(c: &Config, layer: &Layer<'_>, rows: usize) 
     rows > 1 && half_grouped_supported(c, layer)
 }
 
+/// Layers per routed-expert route for a chunk of `rows`: half-staged
+/// grouped, F32-operand grouped, native rows, per-row replay.
+pub(super) fn routed_route_census(c: &Config, layers: &[Layer<'_>], rows: usize) -> [usize; 4] {
+    let mut census = [0; 4];
+    for layer in layers
+        .iter()
+        .filter(|layer| layer.banks[0].n_elements() > 0)
+    {
+        let route = if half_grouped_selected(c, layer, rows) {
+            0
+        } else if grouped_selected(c, layer, rows) {
+            1
+        } else if native_rows_supported(c, layer) {
+            2
+        } else {
+            3
+        };
+        census[route] += 1;
+    }
+    census
+}
+
 fn grouped_selected(c: &Config, layer: &Layer<'_>, rows: usize) -> bool {
     if !grouped_supported(c, layer) {
         return false;

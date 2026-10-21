@@ -182,6 +182,8 @@ impl Workspace {
         };
         let skip_engram = std::env::var_os("QWEN_V41_SKIP_ENGRAM").is_some();
         let skip_hc = std::env::var_os("QWEN_V41_SKIP_HC").is_some();
+        let skip_hc_pre = skip_hc || std::env::var_os("QWEN_V41_SKIP_HC_PRE").is_some();
+        let skip_hc_post = skip_hc || std::env::var_os("QWEN_V41_SKIP_HC_POST").is_some();
         let encoded = (|| -> Result<()> {
             for (id, layer) in model.layers.iter().enumerate() {
                 cancelled(cancel)?;
@@ -203,7 +205,7 @@ impl Workspace {
                         .gate
                         .encode(ctx, &enc, &x, projected, n)?;
                 }
-                if !skip_hc {
+                if !skip_hc_pre {
                     hc.encode(
                         ctx,
                         &enc,
@@ -241,7 +243,7 @@ impl Workspace {
                         row,
                     )?;
                 }
-                if !skip_hc {
+                if !skip_hc_post {
                     metal::encode_mhc4_post_rows(
                         ctx, &enc, c.hidden, n, &outputs, &x, &hc.post, &hc.comb, &half,
                     )

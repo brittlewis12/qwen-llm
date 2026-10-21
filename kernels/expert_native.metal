@@ -78,11 +78,13 @@ kernel void kernel_expert_native_f32(
         + (ulong(expert) * args.n_out + channel) * args.row_bytes;
     device const float * x = input + (args.mode == 2 ? selected : ulong(token)) * args.n_in;
     float sum = 0.0f;
-    for (ulong k = ulong(lane) * 16u; k < args.n_in; k += 512u) {
+    // 32-bit loop index: n_in is u32, and 64-bit index arithmetic is emulated
+    // on the GPU. Only the block byte offset widens to 64 bits.
+    for (uint k = uint(lane) * 16u; k < args.n_in; k += 512u) {
         float4x4 decoded;
         if (DENSE != 0 && k + 16u > args.n_in) {
             // Last dense fragment may end at the physical buffer boundary.
-            for (uint i = 0; i < uint(args.n_in - k); ++i) {
+            for (uint i = 0; i < args.n_in - k; ++i) {
                 float w;
                 if (DENSE == 1) w = ((device const float *)row)[k + i];
                 else if (DENSE == 2) w = float(((device const half *)row)[k + i]);
@@ -90,7 +92,7 @@ kernel void kernel_expert_native_f32(
                 sum = fma(w, x[k + i], sum);
             }
         } else {
-            device const uchar * block = row + (k / (16u * NL)) * BYTES;
+            device const uchar * block = row + ulong(k / (16u * NL)) * BYTES;
             const short il = short((k / 16u) % NL);
             if (MXFP4 && block[0] <= 1u) {
                 // Metal flushes subnormal operands. Move an exact power of two
@@ -104,19 +106,24 @@ kernel void kernel_expert_native_f32(
                 }
                 continue;
             }
+            // Vector loads of the lane's 16 contiguous activations, issued
+            // before the block decode: the same values and FMA order as 16
+            // scalar loads, at a quarter of the load instructions.
+            // packed_float4 keeps the 4-byte activation alignment contract.
+            // Measured on the routed decode stage against the scalar form
+            // (research/expert_decode_probe.metal): Q3_K 378 -> 161 us.
+            device const packed_float4 * xp = (device const packed_float4 *)(x + k);
+            float4x4 xv;
+            xv[0] = float4(xp[0]);
+            xv[1] = float4(xp[1]);
+            xv[2] = float4(xp[2]);
+            xv[3] = float4(xp[3]);
             DEQ(block, il, decoded);
-            // Vector loads of the lane's 16 contiguous activations: the same
-            // values and FMA order as 16 scalar loads, at a quarter of the
-            // load instructions. packed_float4 keeps the 4-byte activation
-            // alignment contract. Measured 2.2x (Q3_K) / 1.9x (Q8_0) on the
-            // routed decode stage (research/expert_decode_probe.metal).
-            device const packed_float4 * xv = (device const packed_float4 *)(x + k);
             QT_FOR_UNROLL (uint i = 0; i < 4; ++i) {
-                const float4 xi = float4(xv[i]);
-                sum = fma(decoded[i][0], xi[0], sum);
-                sum = fma(decoded[i][1], xi[1], sum);
-                sum = fma(decoded[i][2], xi[2], sum);
-                sum = fma(decoded[i][3], xi[3], sum);
+                sum = fma(decoded[i][0], xv[i][0], sum);
+                sum = fma(decoded[i][1], xv[i][1], sum);
+                sum = fma(decoded[i][2], xv[i][2], sum);
+                sum = fma(decoded[i][3], xv[i][3], sum);
             }
         }
     }

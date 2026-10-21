@@ -990,6 +990,7 @@ fn check_f32x_bindings(
 
 const DOWN_F32X_THREADGROUP_BYTES: usize = 12 * 1024;
 const SWIGLU_F32X_THREADGROUP_BYTES: usize = 18 * 1024;
+const SWIGLU_F32X_WIDE_THREADGROUP_BYTES: usize = 20 * 1024;
 
 /// Native-storage pipeline with F32 weight/activation operands and accumulation.
 /// This is the source of truth for DOWN dtype capability; it does not imply
@@ -1192,6 +1193,19 @@ pub fn moe_swiglu_clamped_f32x_grouped_slots_supported(dtype: GgmlType) -> bool 
     )
 }
 
+fn moe_swiglu_wide_pipeline_name(dtype: GgmlType) -> Option<&'static str> {
+    match dtype {
+        GgmlType::MXFP4 => Some("kernel_moe_swiglu_wide_mxfp4_f32x_grouped_slots"),
+        GgmlType::IQ2_S => Some("kernel_moe_swiglu_wide_iq2_s_f32x_grouped_slots"),
+        GgmlType::IQ2_XXS => Some("kernel_moe_swiglu_wide_iq2_xxs_f32x_grouped_slots"),
+        GgmlType::IQ2_XS => Some("kernel_moe_swiglu_wide_iq2_xs_f32x_grouped_slots"),
+        GgmlType::IQ3_S => Some("kernel_moe_swiglu_wide_iq3_s_f32x_grouped_slots"),
+        GgmlType::IQ3_XXS => Some("kernel_moe_swiglu_wide_iq3_xxs_f32x_grouped_slots"),
+        GgmlType::Q3_K => Some("kernel_moe_swiglu_wide_q3_K_f32x_grouped_slots"),
+        _ => None,
+    }
+}
+
 /// Checks without encoding; returns the pipeline name.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn check_moe_swiglu_clamped_f32x_grouped_slots(
@@ -1304,6 +1318,58 @@ pub fn encode_moe_swiglu_clamped_f32x_grouped_slots(
         clamp,
     )?;
     let l = f32x_layout_for(KERNEL, w_gate, n_hidden, n_ffn, n_expert)?;
+    // A 2048-row chunk routes ~32 slots per expert on average; a 1024-row
+    // chunk routes ~16. The wide tile pays off only when the expected count
+    // exceeds a tile's useful fill.
+    let wide = match std::env::var("QWEN_V41_SWIGLU_WIDE").ok().as_deref() {
+        Some("0") => false,
+        Some("1") => true,
+        _ => n_tokens
+            .checked_mul(topk)
+            .is_some_and(|slots| slots >= n_expert.saturating_mul(24)),
+    };
+    if wide && let Some(wide_name) = moe_swiglu_wide_pipeline_name(w_gate.dtype) {
+        let slots = n_tokens.checked_mul(topk);
+        check_f32x_bindings(
+            ctx,
+            KERNEL,
+            wide_name,
+            SWIGLU_F32X_WIDE_THREADGROUP_BYTES,
+            &[w_gate, w_up],
+            x_pack,
+            counts,
+            ids,
+            inner,
+            &[
+                (Some(n_hidden), "n_hidden"),
+                (Some(n_ffn), "n_ffn"),
+                (slots, "slot count"),
+                (n_expert.checked_mul(n_tokens), "ids"),
+            ],
+        )?;
+        return dispatch_fused_swiglu(
+            ctx,
+            enc,
+            wide_name,
+            SWIGLU_F32X_WIDE_THREADGROUP_BYTES,
+            32,
+            l,
+            w_gate,
+            w_up,
+            x_pack,
+            counts,
+            ids,
+            inner,
+            n_hidden,
+            n_ffn,
+            n_expert,
+            topk,
+            n_tokens,
+            0,
+            n_tokens as u32,
+            Some(clamp),
+        );
+    }
     dispatch_fused_swiglu(
         ctx,
         enc,

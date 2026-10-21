@@ -264,7 +264,7 @@ fn native_f32_gate_up_cpu_f64_slots_buckets_and_partition() {
         GgmlType::IQ2_XXS,
         GgmlType::IQ2_XS,
     ] {
-        for n in [3, 15, 16, 17, 31, 32, 33] {
+        for n in [3, 15, 16, 17, 31, 32, 33, 64] {
             exercise(&ctx, dtype, 512, 65, n);
         }
     }

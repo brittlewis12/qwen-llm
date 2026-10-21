@@ -181,6 +181,7 @@ impl Workspace {
         let pso = pipeline(ctx, enc, "publish_raw")?;
         dispatch(enc, &pso, rows.rows.min(c.window) * c.head_dim);
 
+        if std::env::var_os("QWEN_V41_SKIP_SELECT").is_none() {
         for row in 0..rows.rows {
             self.encode_batch_row(
                 ctx,
@@ -192,6 +193,7 @@ impl Workspace {
                 rows,
                 row,
             )?;
+        }
         }
         for first in (0..rows.rows).step_by(TILE) {
             self.sink_tile(

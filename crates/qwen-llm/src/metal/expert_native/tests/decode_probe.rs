@@ -325,7 +325,7 @@ fn route_probe(ctx: &MetalContext) {
                     depth: 1,
                 },
                 MTLSize {
-                    width: 1,
+                    width: 256,
                     height: 1,
                     depth: 1,
                 },
@@ -344,7 +344,7 @@ fn route_probe(ctx: &MetalContext) {
         let med = median(us.clone());
         let min = us.iter().cloned().fold(f64::INFINITY, f64::min);
         eprintln!(
-            "xprobe route x{n:<3} (384 experts, top-6, 1 thread)   total {med:8.1} us (min {min:7.1})  per-route {:6.1} us",
+            "xprobe route x{n:<3} (384 experts, top-6, 256 threads)   total {med:8.1} us (min {min:7.1})  per-route {:6.1} us",
             med / n as f64
         );
     }

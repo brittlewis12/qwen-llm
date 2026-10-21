@@ -26,7 +26,7 @@ expected effect, status. Status is one of `open`, `in flight (branch)`,
 `in flight` with your branch; a second lane finding it claimed reads the branch
 before building anything adjacent. This replaces relaying between sessions.
 
-### DeepSeek V4.1-Flash (`main` code `a7de76ab`: pp2048 Q2 341 / IQ3 339 tok/s, pp4096 Q2 320 / IQ3 319; decode unchanged at tg32 40.8, tg32@d2048 41.6)
+### DeepSeek V4.1-Flash (IQ3_XXS, main after 2026-10-21 prefill landing: pp2048 380 tok/s at depth 0, 335 at depth 2048; tg32 40.8, tg32@d2048 41.6)
 
 Decode budget at depth 2048, 22.3 ms/token: ~10.2 ms bytes (11.1 GiB at the
 ~1.09 TB/s the GEMV probe reaches), ~8 ms dispatch floor (~1,600 dispatches),
@@ -35,36 +35,36 @@ Decode budget at depth 2048, 22.3 ms/token: ~10.2 ms bytes (11.1 GiB at the
 (QK^T/softmax/PV) 32%, owner/producer per-row loops 13%, output projections
 8%, prepare 6%, HC 2%.
 
-- Attention tiles via simdgroup MMA (half-staged Q/K/V, F32 sums), replacing
-  the scalar `score_rows` and the gather+GEMM PV: in flight
-  (`perf/v41-prefill-attn`, scalar-equivalence tests pass; pp2048 pending).
-  Supersedes scalar score-kernel tuning if it wins.
-- IQ2_XXS/IQ2_XS expert layers off the native-rows path: landed with the
-  F32-operand grouped tiles (`perf/v41-prefill-land`, `b3b71bb3`); the merged
-  base moved Q2 +59.8% and IQ3 +25.4% at pp1024. The half generic layout on
-  `perf/v41-prefill-attn` was not isolated for a one-ABBA comparison; reconcile
-  before both land.
-- MXFP4 generic half layout: +1.6% alone (negative-ish, packet 2026-10-21);
-  needed for the IQ2 half route on layers whose down is MXFP4.
-- Expert tile efficiency (~15 TFLOPS effective on grouped F32x at pp1024,
-  ~8.7 TFLOPS on half-staged tiles at 32 rows/expert): open. Tried:
-  2048-row chunks +5.6% (landed); 32-slot gate/up tile +0.25-0.9% at pp2048
-  but -1.3%/-1.6% at pp1024 (negative, packet 2026-10-21); 4096-row chunks
+- Attention tiles via simdgroup MMA (half-staged Q/K/V, F32 sums): landed
+  (2026-10-21 prefill entry; pp2048 324 -> 380). Supersedes the scalar
+  score-kernel tuning on `perf/v41-chunk-1024` (+3-4%); that branch should
+  drop those commits on rebase. Tiles are now ~20% of prefill; the next
+  step there is a fused score+softmax+PV kernel (saves the slab round trip
+  and three dispatches per tile): open.
+- IQ2_XXS/IQ2_XS expert layers: landed as half generic layouts (same
+  entry). The F32-operand tiles on `perf/v41-chunk-1024` (`2c51322f`)
+  duplicate this; one ABBA on both artifacts decides which stays, the
+  other is dropped on rebase.
+- MXFP4 generic half layout: landed with the IQ2 layouts (needed for layers
+  whose down is MXFP4); +1.6% on its own.
+- Expert tile efficiency (~8.7 TFLOPS on half-staged tiles, decode-bound at
+  32 rows/expert): open. Tried: 2048-row chunks +5.6% (landed); 32-slot
+  gate/up tile +0.25-0.9% (negative, `perf/v41-chunk-1024`); 4096-row chunks
   untested.
 - Owner/producer per-row loops (compressor, index key, selection; 8 layers,
-  grows with prompt length): compressor prep landed (`a7de76ab`): key norm +
-  key/latent RoPE + both cache copies fused 5 -> 1, +0.5-0.8%, census
-  50,710 -> 40,470. Selection batching is open: `selection_prepare` 6,141,
-  `sort_init`/`sort_tile` 2,560 each, `chronological` 2,560, `index_heads`
-  2,560 per Q2 PP1024.
-- Scalar score kernel tuning: landed (`b992694a`). 4 keys/simdgroup +3.0%,
-  8-lane +1.2-1.4% on the merged base; 8 heads/threadgroup and fatter key
-  loops were negative. The MMA tile still supersedes this if it wins.
+  grows with prompt length): open. Partial: fuse per-group norm+RoPE+copies
+  (`perf/v41-chunk-1024`, in progress).
+- Scalar score kernel tuning: 4 keys/simdgroup +3.0%, 8-lane +1.2%
+  (`perf/v41-chunk-1024`); moot if the MMA tile lands.
 - Decode: fused attention core, routed gate/up fusion, rope/copy fusion are
   each <= 1 ms/token: open, low priority. Fused decode expert chain: +1%/+0%
   (negative, packet 2026-10-20). Q8_0 attention projections (5.1 GB/token)
   requant to Q6_K: ~-1 ms, quality-sensitive, open.
-- Prefill dispatch census tool: landed (`c4125c6b`, `QWEN_V41_CENSUS=1`).
+- Prefill dispatch census tool (`perf/v41-chunk-1024`, `6b46594e`): worth
+  landing with its branch.
+- Six-span prefill profiler (`QWEN_V41_PREFILL_STAGES=1`, per-layer HC /
+  prepare / serial / tiles / finish / FFN): landed; use it before claiming
+  a prefill bet.
 
 ### Qwen3.8 Flash-Next
 

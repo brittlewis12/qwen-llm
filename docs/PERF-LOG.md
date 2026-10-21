@@ -6,43 +6,30 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the current state and evidence index.
 
-## 2026-10-21 - V4.1: Compressor Prep Fusion +0.5-0.8%
+## 2026-10-21 - V4.1 Prefill +40-45%: IQ2/MXFP4 Half Tiles And An MMA Attention Sink Tile
 
-- The owner/producer group end ran key RMS norm, key RoPE, latent RoPE and
-  both cache copies as five dispatches. One 256-thread kernel now does all
-  five; the latent norm and key projection stay separate because the
-  projection consumes the normalized latent.
-- Same-binary ABBA (fused versus a split control, M5 Ultra, runs 2):
-  Q2 PP1024/2048/4096 341.9 -> 343.5 (+0.47%), 338.8 -> 341.5 (+0.80%),
-  318.2 -> 320.4 (+0.69%); IQ3 343.1 -> 344.8 (+0.50%), 337.4 -> 339.1
-  (+0.49%), 316.8 -> 318.6 (+0.58%).
-- Census 50,710 -> 40,470 dispatches (-20.2%). Six-document IQ3 witness:
-  all NLL and top-1 values identical to the landed candidate.
-- Remaining owner/producer work is the per-row selection loop
-  (`selection_prepare` 6,141 dispatches at PP1024); batch it next.
-- [ABBA, census, witness and limits](bench/2026-10-21-v41-prefill-compressor-prep.md).
-
-## 2026-10-21 - V4.1: Grouped IQ2 Experts And 8-Lane Score +60% Q2 / +25% IQ3 Prefill
-
-- Merged the lane onto main `24ec157e` and rebased the surviving work on the
-  roadmap commit. IQ2_XXS/IQ2_XS routed layers now take the F32-operand
-  grouped expert tiles; the prefill score default processes four keys in
-  parallel per simdgroup with 8-lane reductions. The ignored chunk-1024
-  commit is superseded by main's 2048-row chunks.
-- Q2_K_XL and IQ3_XXS ABBA on M5 Ultra, `--pp 1024,2048,4096 --runs 2`:
-  Q2 213.6 -> 341.4, 206.6 -> 339.2, 198.0 -> 318.9 tok/s
-  (+59.8/+64.2/+61.1%); IQ3 273.5 -> 342.9, 265.9 -> 337.0, 251.7 -> 316.3
-  (+25.4/+26.7/+25.7%). Both artifacts now prefill at the same rate.
-- Held text (six frozen documents, 384 IQ3 targets): mean NLL
-  2.14695 -> 2.14816 (+0.056%), top-1 215 -> 220/384, no target loses its
-  argmax. The grouped tiles and the score tree are F32 reduction order, not
-  bitwise. The 22-task screen and the 257-token ring witness were not rerun.
-- Bounded negatives: eight heads per score threadgroup -0.9%/-1.2%; score
-  keys per simdgroup 8/16/32 = 0/-0.7%/-1.6%; 32-slot gate/up tile +0.25%
-  Q2 / +0.9% IQ3 at pp2048 but -1.3%/-1.6% at pp1024, below the bar.
-- Remaining budget at Q2 PP1024: FFN 39%, score 22%, PV/softmax/output 18%,
-  owner/producer prepare+selection 12%. Census 50,720 dispatches.
-- [ABBA, attribution, negatives and witness](bench/2026-10-21-v41-prefill-merged-main.md).
+- Per-layer prefill spans found five IQ3_XXS layers (IQ2_XS/IQ2_XXS gate/up,
+  MXFP4 down) on the native-rows path at 312-329 ms each per 2048-row chunk,
+  21% of prefill. Generic half layouts for MXFP4, IQ2_XS and IQ2_XXS put all
+  40 layers on the half-staged tiles: 60-63 ms per layer, pp2048 266 -> 324.
+- The sink tile (QK^T as scalar dot products, PV through a 42 MB gathered
+  matrix and an F32 GEMM) cost 47-51 ms per layer, 32% of prefill, ~3
+  TFLOPS. A simdgroup-MMA tile with Q and 16-key blocks staged as half in
+  threadgroup memory (F32 sums, unchanged softmax/sink/invalid-id handling,
+  normalize+finite pass) cuts a 640-key 32-query tile from ~1.0-1.7 ms to
+  0.64 ms: pp2048 324 -> 380 at depth 0. An F32-operand first version was
+  latency-bound on device Q loads (340).
+- IQ3_XXS ABBA on M5 Ultra, main `24ec157e` versus candidate, prefills after
+  a 2,048-token context: pp2048 240.1 -> 335.4 (+39.7%), pp4096 224.2 ->
+  325.6 (+45.2%); tg32 35.4 -> 36.7 (decode untouched, within spread).
+  Cumulative today from `4b1fca04`: pp2048 192 -> 380, tg32 22.3 -> 40.8.
+- Held text: mean NLL 2.14695 -> 2.14987 (+0.14%, both signs per document),
+  top-1 215 -> 219 of 384; task screen 9/22 on both with the identical
+  pattern, 19/22 answers character-identical.
+- The six-span profiler (prepare / serial / tiles split) lands with it. The
+  other V4.1 lane's F32-operand IQ2 tiles and scalar score tuning overlap
+  this; the open map in PERF-ROADMAP records the duplicate for one ABBA.
+- [Spans, per-dispatch timings, ABBA, witness and limits](bench/2026-10-21-v41-prefill-attention-mma.md).
 
 ## 2026-10-21 - V4.1: Fused mHC Pre-Block And Grouped output_a +23-25% Decode; 2048-Row Chunks +4-6% Prefill
 

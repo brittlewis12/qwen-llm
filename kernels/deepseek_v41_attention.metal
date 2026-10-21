@@ -228,6 +228,19 @@ inline void attention_score(uint4 a, uint2 b, device const float *q,
     if (lane == 0) scores[h * b.y + i] = dot * rsqrt(float(a.x));
 }
 
+inline void attention_score_shared(uint4 a, uint2 b, threadgroup const float *q,
+    device const float *raw, device const float *compressed, device const uint *ids,
+    device float *scores, uint length, uint2 group, uint sg, uint lane) {
+    uint count = a.y + b.x, h = group.y, i = group.x * 8 + sg;
+    if (i >= count) return;
+    if (i >= a.y && ids[i - a.y] >= length) return;
+    device const float *row = i < a.y ? raw + ((a.z + i) % a.w) * a.x : compressed + ids[i - a.y] * a.x;
+    float dot = 0;
+    for (uint j = lane; j < a.x; j += 32) dot += q[j] * row[j];
+    dot = simd_sum(dot);
+    if (lane == 0) scores[h * b.y + i] = dot * rsqrt(float(a.x));
+}
+
 inline void attention_softmax(uint4 a, uint2 b, device const uint *ids,
     device const float *sink, device float *scores, uint length,
     device atomic_uint *status, uint h, uint lane) {
@@ -375,11 +388,16 @@ kernel void kernel_deepseek_v41_attention_score_rows(
     device const float *q [[buffer(2)]], device const float *raw [[buffer(3)]],
     device const float *compressed [[buffer(4)]], device const uint *ids [[buffer(5)]],
     device float *scores [[buffer(7)]], constant uint4 &m [[buffer(11)]],
+    threadgroup float *q_shared [[threadgroup(0)]],
     uint3 group [[threadgroup_position_in_grid]],
-    uint sg [[simdgroup_index_in_threadgroup]], uint lane [[thread_index_in_simdgroup]]) {
+    uint sg [[simdgroup_index_in_threadgroup]], uint lane [[thread_index_in_simdgroup]],
+    uint tid [[thread_index_in_threadgroup]]) {
     uint r = group.z, length = attention_row_length(b, r);
-    attention_score(attention_row_raw(a, b, r), uint2(min(length, a.z), a.w),
-        q + r * m.y * a.x, raw, compressed, ids + r * a.z,
+    device const float *q_row = q + r * m.y * a.x + group.y * a.x;
+    for (uint j = tid; j < a.x; j += 256) q_shared[j] = q_row[j];
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    attention_score_shared(attention_row_raw(a, b, r), uint2(min(length, a.z), a.w),
+        q_shared, raw, compressed, ids + r * a.z,
         scores + r * m.y * a.w, length, group.xy, sg, lane);
 }
 

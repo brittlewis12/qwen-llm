@@ -184,6 +184,7 @@ impl Workspace {
         let skip_hc = std::env::var_os("QWEN_V41_SKIP_HC").is_some();
         let skip_hc_pre = skip_hc || std::env::var_os("QWEN_V41_SKIP_HC_PRE").is_some();
         let skip_hc_post = skip_hc || std::env::var_os("QWEN_V41_SKIP_HC_POST").is_some();
+        let skip_ffn = std::env::var_os("QWEN_V41_SKIP_FFN").is_some();
         let encoded = (|| -> Result<()> {
             for (id, layer) in model.layers.iter().enumerate() {
                 cancelled(cancel)?;
@@ -259,12 +260,14 @@ impl Workspace {
                         false,
                     );
                 }
-                self.ffn
-                    .encode_rows(ctx, &enc, c, layer, id, &half, &hc.pre, &x, &ffn)
-                    .map_err(|e| e.to_string())?;
-                // Lagged incoming pre is the previous block's mix for this same token.
-                metal::encode_copy_offset_f32(ctx, &enc, &ffn.hc.pre, 0, &incoming, 4 * n)
-                    .map_err(|e| e.to_string())?;
+                if !skip_ffn {
+                    self.ffn
+                        .encode_rows(ctx, &enc, c, layer, id, &half, &hc.pre, &x, &ffn)
+                        .map_err(|e| e.to_string())?;
+                    // Lagged incoming pre is the previous block's mix for this same token.
+                    metal::encode_copy_offset_f32(ctx, &enc, &ffn.hc.pre, 0, &incoming, 4 * n)
+                        .map_err(|e| e.to_string())?;
+                }
                 if with_logits && id + 1 == model.layers.len() {
                     let last = prefill::row(&x, 4 * c.hidden, n - 1)
                         .view_bytes(0, vec![c.hidden as u64, 4]);
@@ -336,7 +339,9 @@ impl Workspace {
                 profile::gpu_interval("prefill_ffn", n, t[2], t[3]);
             }
         }
-        ffn.validate_status()?;
+        if !skip_ffn {
+            ffn.validate_status()?;
+        }
         let status = self.attention.status();
         let value = unsafe {
             *status

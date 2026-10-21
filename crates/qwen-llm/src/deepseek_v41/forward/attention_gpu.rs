@@ -1356,10 +1356,9 @@ impl Workspace {
                         ((length - 1) * c.index_dim) as u64,
                         vec![c.index_dim as u64],
                     );
-                    let cache_latent = cache.compressed.view_subrange(
-                        ((length - 1) * c.head_dim) as u64,
-                        vec![c.head_dim as u64],
-                    );
+                    let cache_latent = cache
+                        .compressed
+                        .view_subrange(((length - 1) * c.head_dim) as u64, vec![c.head_dim as u64]);
                     if c.index_dim <= 128 && pairs <= 128 && pairs * 2 <= c.index_dim {
                         compress_publish(
                             ctx,

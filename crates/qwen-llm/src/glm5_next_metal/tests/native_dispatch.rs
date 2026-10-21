@@ -856,7 +856,8 @@ fn packed_fallback_policy_preserves_available_fast_paths() {
             assert!(expert_row_fallback(PackedLineage::Exact, gate, gate, down));
         }
     }
-    assert!(expert_row_fallback(
+    // MXFP4 down has a generic grouped layout now, so this pair is grouped.
+    assert!(!expert_row_fallback(
         PackedLineage::Fast,
         GgmlType::IQ2_S,
         GgmlType::IQ2_S,

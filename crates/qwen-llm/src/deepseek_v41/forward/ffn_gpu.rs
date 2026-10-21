@@ -162,6 +162,10 @@ fn dispatch(enc: &KernelEncoder, n: usize, width: usize) {
     );
 }
 
+/// Threadgroup width of the parallel router; must match ROUTE_THREADS in
+/// kernels/deepseek_v41_ffn.metal.
+const ROUTE_THREADS: usize = 256;
+
 #[repr(C)]
 #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
 struct RouteArgs {
@@ -199,7 +203,19 @@ fn encode_route_rows(
     {
         enc.set_tensor(slot + 1, tensor);
     }
-    dispatch(enc, rows, 1);
+    // One ROUTE_THREADS-wide threadgroup per row (kernel_deepseek_v41_route).
+    enc.dispatch(
+        MTLSize {
+            width: rows,
+            height: 1,
+            depth: 1,
+        },
+        MTLSize {
+            width: ROUTE_THREADS,
+            height: 1,
+            depth: 1,
+        },
+    );
     Ok(())
 }
 

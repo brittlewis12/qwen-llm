@@ -201,7 +201,7 @@ fn routing_ties_bias_absorption_temperature_extremes_and_top1() {
             {
                 enc.set_tensor(slot + 1, tensor);
             }
-            dispatch(enc, 1, 1);
+            dispatch(enc, ROUTE_THREADS, ROUTE_THREADS);
             Ok(())
         })
         .unwrap();
@@ -230,6 +230,107 @@ fn routing_ties_bias_absorption_temperature_extremes_and_top1() {
             }
             Err(_) => assert!(status < 0),
         }
+    }
+}
+
+#[test]
+fn parallel_router_is_bitwise_equal_to_the_serial_reference() {
+    // Random rows with ties, duplicates, extreme logits and non-finite
+    // entries at varying indices (logits and bias, same and different
+    // indices), across REAP and 1017 expert counts and top-k widths.
+    let _lease = production_lease();
+    let ctx = MetalContext::new().unwrap();
+    let mut seed = 0x9e37_79b9u32;
+    let mut next = || {
+        seed ^= seed << 13;
+        seed ^= seed >> 17;
+        seed ^= seed << 5;
+        seed
+    };
+    let mut rows = Vec::new();
+    for &experts in &[272usize, 384, 8, 257] {
+        for case in 0..24 {
+            let mut logits: Vec<f32> = (0..experts)
+                .map(|_| ((next() % 2001) as f32 - 1000.0) * 0.01)
+                .collect();
+            let mut bias: Vec<f32> = (0..experts)
+                .map(|_| ((next() % 201) as f32 - 100.0) * 0.001)
+                .collect();
+            match case % 8 {
+                1 => logits
+                    .iter_mut()
+                    .for_each(|v| *v = (*v * 4.0).round() / 4.0),
+                2 => logits.fill(0.0),
+                3 => bias.fill(0.0),
+                4 => logits[(next() as usize) % experts] = f32::NAN,
+                5 => bias[(next() as usize) % experts] = f32::INFINITY,
+                6 => {
+                    let i = (next() as usize) % experts;
+                    logits[i] = f32::NEG_INFINITY;
+                    bias[i] = f32::NAN;
+                }
+                7 => logits.iter_mut().for_each(|v| *v *= 1e3),
+                _ => {}
+            }
+            let topk = [1usize, 2, 6, 6, 8][case % 5].min(experts);
+            let temperature = [1.0f32, 0.5, 2.0][case % 3];
+            rows.push((logits, bias, topk, temperature, 1.5f32));
+        }
+    }
+    for (logits, bias, topk, temperature, scale) in rows {
+        let n = logits.len();
+        let run = |kernel: &str| {
+            let input = upload(&ctx, &logits, vec![n as u64]).unwrap();
+            let bias_gpu = upload(&ctx, &bias, vec![n as u64]).unwrap();
+            let scores = MetalTensor::zeros_f32(&ctx, vec![n as u64]).unwrap();
+            let ids =
+                MetalTensor::zeros_dtype_unstaged(&ctx, vec![topk as u64], GgmlType::I32).unwrap();
+            let weights = MetalTensor::zeros_f32(&ctx, vec![topk as u64]).unwrap();
+            let status = MetalTensor::zeros_dtype_unstaged(&ctx, vec![1], GgmlType::I32).unwrap();
+            let width = if kernel.ends_with("_serial") {
+                1
+            } else {
+                ROUTE_THREADS
+            };
+            submit(&ctx, "route_parity", [0; 4], |enc| {
+                enc.set_pipeline(&ctx.pipeline(kernel)?);
+                enc.set_bytes(
+                    0,
+                    &RouteArgs {
+                        experts: n as u32,
+                        topk: topk as u32,
+                        temperature,
+                        scale,
+                    },
+                );
+                for (slot, tensor) in [&input, &bias_gpu, &scores, &ids, &weights, &status]
+                    .iter()
+                    .enumerate()
+                {
+                    enc.set_tensor(slot + 1, tensor);
+                }
+                dispatch(enc, width, width);
+                Ok(())
+            })
+            .unwrap();
+            let status = unsafe { *status.buffer.contents().as_ptr().cast::<i32>() };
+            let ids = unsafe {
+                std::slice::from_raw_parts(ids.buffer.contents().as_ptr().cast::<i32>(), topk)
+            }
+            .to_vec();
+            let weights: Vec<u32> = f32_slice(&weights)
+                .unwrap()
+                .iter()
+                .map(|w| w.to_bits())
+                .collect();
+            (status, ids, weights)
+        };
+        let serial = run("kernel_deepseek_v41_route_serial");
+        let parallel = run("kernel_deepseek_v41_route");
+        assert_eq!(
+            parallel, serial,
+            "experts={n} topk={topk} temperature={temperature}: parallel != serial"
+        );
     }
 }
 

@@ -250,7 +250,7 @@ fn native_rows_live_route_witness_with_chunks(
         );
         assert_eq!(
             (routed[0].grid_width, routed[0].threads_width),
-            (N as u64, 1)
+            (N as u64, ROUTE_THREADS as u64)
         );
         assert_eq!(routed[3].kernel, "kernel_deepseek_v41_weight");
         assert_eq!(routed[5].kernel, "kernel_deepseek_v41_sum");

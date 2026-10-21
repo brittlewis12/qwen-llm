@@ -719,23 +719,10 @@ pub(super) fn half_grouped_selected(c: &Config, layer: &Layer<'_>, rows: usize) 
 /// grouped, F32-operand grouped, native rows, per-row replay.
 pub(super) fn routed_route_census(c: &Config, layers: &[Layer<'_>], rows: usize) -> [usize; 4] {
     let mut census = [0; 4];
-    for (index, layer) in layers
+    for layer in layers
         .iter()
-        .enumerate()
-        .filter(|(_, layer)| layer.banks[0].n_elements() > 0)
+        .filter(|layer| layer.banks[0].n_elements() > 0)
     {
-        if rows > 1 && !half_grouped_supported(c, layer) {
-            tracing::info!(
-                target: "qwen_diag",
-                "deepseek41: layer {index} routed experts gate={:?} up={:?} down={:?}: no half-staged route (recipe={} down_generic={})",
-                layer.banks[0].dtype,
-                layer.banks[1].dtype,
-                layer.banks[2].dtype,
-                metal::moe_grouped_clamped_recipe(layer.banks[0].dtype, layer.banks[1].dtype)
-                    .is_some(),
-                metal::moe_grouped_generic_supported(layer.banks[2].dtype)
-            );
-        }
         let route = if half_grouped_selected(c, layer, rows) {
             0
         } else if grouped_selected(c, layer, rows) {

@@ -440,15 +440,21 @@ pub(super) fn run_captured(
     cancelled(cancel)?;
     let rows = tokens.len().min(chunk_rows);
     if rows > 1 {
-        let census = super::ffn_gpu::routed_route_census(&model.config, &model.layers, rows);
-        tracing::info!(
-            target: "qwen_diag",
-            "deepseek41: prefill rows={rows} routed experts: half_grouped={} f32_grouped={} native_rows={} per_row={}",
-            census[0],
-            census[1],
-            census[2],
-            census[3]
-        );
+        // One summary per process: which routed-expert route each layer takes
+        // at the production chunk width (artifact-dependent; see PERF-LOG).
+        static ROUTE_CENSUS_ONCE: std::sync::Once = std::sync::Once::new();
+        ROUTE_CENSUS_ONCE.call_once(|| {
+            let census =
+                super::ffn_gpu::routed_route_census(&model.config, &model.layers, rows);
+            tracing::info!(
+                target: "qwen_diag",
+                "deepseek41: prefill rows={rows} routed experts: half_grouped={} f32_grouped={} native_rows={} per_row={}",
+                census[0],
+                census[1],
+                census[2],
+                census[3]
+            );
+        });
         let mut extra = 0u64;
         for width in gpu_step::chunk_widths(model, state.capacity(), rows)? {
             let bytes = width

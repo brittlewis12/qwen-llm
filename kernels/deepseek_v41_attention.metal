@@ -370,81 +370,179 @@ inline uint attention_row_length(uint4 history, uint query) {
     return history.w ? (history.x + query + 1) / history.w : 0;
 }
 
+// Simdgroup-MMA sink tile: QK^T and PV for one query row and a block of 16
+// heads. Keys are the row's raw ring prefix followed by its selected
+// compressed rows (K = V = the same 512-wide latent), gathered sixteen at a
+// time into threadgroup memory as half; Q is staged once per threadgroup as
+// half. Products accumulate in F32; softmax (shared kernel) and the final
+// normalization stay F32. QK^T writes the row's score slab exactly where
+// attention_score does (scaled by rsqrt(dim); invalid selected ids are
+// zero keys here and are rejected by softmax as before); PV accumulates the
+// unnormalized exp-weighted sum and attention_normalize_rows divides by the
+// softmax denominator while checking finiteness.
+#define V41_MMA_HEADS 16
+#define V41_MMA_KEYS 16
+#define V41_MMA_DIM 512
+
+inline device const float *attention_row_key(uint4 raw, device const float *history,
+    device const float *compressed, device const uint *ids, uint i) {
+    return i < raw.y ? history + ((raw.z + i) % raw.w) * raw.x
+        : compressed + ids[i - raw.y] * raw.x;
+}
+
+kernel void kernel_deepseek_v41_attention_score_mma(
+    constant uint4 &a [[buffer(0)]], constant uint4 &b [[buffer(1)]],
+    device const float *q [[buffer(2)]], device const float *raw [[buffer(3)]],
+    device const float *compressed [[buffer(4)]], device const uint *ids [[buffer(5)]],
+    device float *scores [[buffer(7)]], constant uint4 &m [[buffer(11)]],
+    uint2 group [[threadgroup_position_in_grid]], uint tid [[thread_index_in_threadgroup]],
+    uint sg [[simdgroup_index_in_threadgroup]]) {
+    // group.x: head block, group.y: query row. 128 threads = 4 simdgroups, one
+    // 8-head x 8-key output tile each per 16-key block.
+    threadgroup half qblk[V41_MMA_HEADS * V41_MMA_DIM];
+    threadgroup half kblk[V41_MMA_KEYS * V41_MMA_DIM];
+    const uint r = group.y;
+    const uint4 rr = attention_row_raw(a, b, r);
+    const uint length = attention_row_length(b, r);
+    const uint selected = min(length, a.z);
+    const uint count = rr.y + selected;
+    device const uint *row_ids = ids + r * a.z;
+    device const float *qrow = q + r * m.y * a.x + group.x * V41_MMA_HEADS * a.x;
+    device float *srow = scores + r * m.y * a.w + group.x * V41_MMA_HEADS * a.w;
+    const float scale = rsqrt(float(a.x));
+    for (uint e = tid; e < V41_MMA_HEADS * V41_MMA_DIM / 4; e += 128) {
+        ((threadgroup half4 *)qblk)[e] = half4(((device const float4 *)qrow)[e]);
+    }
+    const uint hb = sg >> 1, kb = sg & 1;
+    for (uint k0 = 0; k0 < count; k0 += V41_MMA_KEYS) {
+        for (uint e = tid; e < V41_MMA_KEYS * V41_MMA_DIM / 4; e += 128) {
+            const uint key = e / (V41_MMA_DIM / 4), c4 = e % (V41_MMA_DIM / 4);
+            const uint i = k0 + key;
+            float4 v = float4(0.0f);
+            if (i < count && (i < rr.y || row_ids[i - rr.y] < length)) {
+                v = ((device const float4 *)attention_row_key(rr, raw, compressed, row_ids, i))[c4];
+            }
+            ((threadgroup half4 *)kblk)[e] = half4(v);
+        }
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+        simdgroup_float8x8 acc = simdgroup_float8x8(0.0f);
+        threadgroup const half *qa = qblk + hb * 8 * V41_MMA_DIM;
+        threadgroup const half *kt = kblk + kb * 8 * V41_MMA_DIM;
+        for (uint d = 0; d < V41_MMA_DIM; d += 8) {
+            simdgroup_half8x8 A, B;
+            simdgroup_load(A, qa + d, V41_MMA_DIM);                              // [8 heads x 8 dims]
+            simdgroup_load(B, kt + d, V41_MMA_DIM, ulong2(0, 0), true);         // K^T [8 dims x 8 keys]
+            simdgroup_multiply_accumulate(acc, A, B, acc);
+        }
+        acc.thread_elements()[0] *= scale;
+        acc.thread_elements()[1] *= scale;
+        if (k0 + V41_MMA_KEYS <= count) {
+            simdgroup_store(acc, srow + hb * 8 * a.w + k0 + kb * 8, a.w);
+        } else {
+            // Partial last block (uniform across the threadgroup): once every
+            // simdgroup is done with the key block, reuse it as F32 scratch and
+            // scatter only the valid keys.
+            threadgroup_barrier(mem_flags::mem_threadgroup);
+            threadgroup float *tail = (threadgroup float *)kblk;
+            simdgroup_store(acc, tail + sg * 64, 8);
+            simdgroup_barrier(mem_flags::mem_threadgroup);
+            for (uint e = tid & 31; e < 64; e += 32) {
+                const uint h = hb * 8 + e / 8, kk = kb * 8 + e % 8;
+                if (k0 + kk < count) srow[h * a.w + k0 + kk] = tail[sg * 64 + e];
+            }
+        }
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+    }
+}
+
+kernel void kernel_deepseek_v41_attention_pv_mma(
+    constant uint4 &a [[buffer(0)]], constant uint4 &b [[buffer(1)]],
+    device const float *raw [[buffer(3)]], device const float *compressed [[buffer(4)]],
+    device const uint *ids [[buffer(5)]], device const float *scores [[buffer(7)]],
+    device float *out [[buffer(8)]], constant uint4 &m [[buffer(11)]],
+    uint2 group [[threadgroup_position_in_grid]], uint tid [[thread_index_in_threadgroup]],
+    uint sg [[simdgroup_index_in_threadgroup]]) {
+    // group.x: head block, group.y: query row. 256 threads = 8 simdgroups;
+    // each owns 2 head tiles x 8 dim tiles of the [16 x 512] output.
+    threadgroup half vblk[V41_MMA_KEYS * V41_MMA_DIM];
+    threadgroup half pblk[V41_MMA_HEADS * V41_MMA_KEYS];
+    const uint r = group.y;
+    const uint4 rr = attention_row_raw(a, b, r);
+    const uint length = attention_row_length(b, r);
+    const uint selected = min(length, a.z);
+    const uint count = rr.y + selected;
+    device const uint *row_ids = ids + r * a.z;
+    device const float *srow = scores + r * m.y * a.w + group.x * V41_MMA_HEADS * a.w;
+    const bool invalid = srow[a.w - 1] == -1.0f;
+    simdgroup_float8x8 acc[16];
+    for (uint i = 0; i < 16; ++i) acc[i] = simdgroup_float8x8(0.0f);
+    const uint dim0 = sg * 64;
+    if (!invalid) {
+        for (uint k0 = 0; k0 < count; k0 += V41_MMA_KEYS) {
+            for (uint e = tid; e < V41_MMA_KEYS * V41_MMA_DIM / 4; e += 256) {
+                const uint key = e / (V41_MMA_DIM / 4), c4 = e % (V41_MMA_DIM / 4);
+                const uint i = k0 + key;
+                float4 v = float4(0.0f);
+                if (i < count) v = ((device const float4 *)attention_row_key(rr, raw, compressed, row_ids, i))[c4];
+                ((threadgroup half4 *)vblk)[e] = half4(v);
+            }
+            // P block [16 heads x 16 keys], zero past count (the slab tail is
+            // unspecified there).
+            {
+                const uint h = tid / V41_MMA_KEYS, kk = tid % V41_MMA_KEYS;
+                pblk[tid] = half(k0 + kk < count ? srow[h * a.w + k0 + kk] : 0.0f);
+            }
+            threadgroup_barrier(mem_flags::mem_threadgroup);
+            for (uint ks = 0; ks < V41_MMA_KEYS; ks += 8) {
+                simdgroup_half8x8 P0, P1;
+                simdgroup_load(P0, pblk + ks, V41_MMA_KEYS);
+                simdgroup_load(P1, pblk + 8 * V41_MMA_KEYS + ks, V41_MMA_KEYS);
+                for (uint t = 0; t < 8; ++t) {
+                    simdgroup_half8x8 V;
+                    simdgroup_load(V, vblk + ks * V41_MMA_DIM + dim0 + t * 8, V41_MMA_DIM); // [8 keys x 8 dims]
+                    simdgroup_multiply_accumulate(acc[t], P0, V, acc[t]);
+                    simdgroup_multiply_accumulate(acc[8 + t], P1, V, acc[8 + t]);
+                }
+            }
+            threadgroup_barrier(mem_flags::mem_threadgroup);
+        }
+    }
+    device float *orow = out + r * a.x + (group.x * V41_MMA_HEADS) * m.z * a.x;
+    for (uint t = 0; t < 8; ++t) {
+        simdgroup_store(acc[t], orow + dim0 + t * 8, m.z * a.x);
+        simdgroup_store(acc[8 + t], orow + 8 * m.z * a.x + dim0 + t * 8, m.z * a.x);
+    }
+}
+
+// out[h][r][j] /= denominator(h, r); zero and flag invalid rows; finite check.
+kernel void kernel_deepseek_v41_attention_normalize_rows(
+    constant uint4 &a [[buffer(0)]], device const float *scores [[buffer(7)]],
+    device float *out [[buffer(8)]], device atomic_uint *status [[buffer(10)]],
+    constant uint4 &m [[buffer(11)]], uint t [[thread_position_in_grid]]) {
+    // m: padded, heads, n; a.x = dim, a.w = score stride.
+    const uint total = m.y * m.z * a.x;
+    if (t >= total) return;
+    const uint h = t / (m.z * a.x), rem = t % (m.z * a.x), r = rem / a.x;
+    const float denom = scores[(r * m.y + h) * a.w + a.w - 1];
+    float value = out[t];
+    value = denom == -1.0f ? 0.0f : value / denom;
+    out[t] = value;
+    if (!isfinite(value)) atomic_fetch_or_explicit(status, 4u, memory_order_relaxed);
+}
+
 kernel void kernel_deepseek_v41_attention_score_rows(
     constant uint4 &a [[buffer(0)]], constant uint4 &b [[buffer(1)]],
     device const float *q [[buffer(2)]], device const float *raw [[buffer(3)]],
     device const float *compressed [[buffer(4)]], device const uint *ids [[buffer(5)]],
     device float *scores [[buffer(7)]], constant uint4 &m [[buffer(11)]],
-    threadgroup float *q_shared [[threadgroup(0)]],
     uint3 group [[threadgroup_position_in_grid]],
-    uint sg [[simdgroup_index_in_threadgroup]], uint lane [[thread_index_in_simdgroup]],
-    uint tid [[thread_index_in_threadgroup]]) {
+    uint sg [[simdgroup_index_in_threadgroup]], uint lane [[thread_index_in_simdgroup]]) {
     uint r = group.z, length = attention_row_length(b, r);
-    uint4 ar = attention_row_raw(a, b, r);
-    uint2 br = uint2(min(length, a.z), a.w);
-    uint count = ar.y + br.x, h = group.y;
-    device const float *q_row = q + r * m.y * a.x + h * a.x;
-    device const uint *row_ids = ids + r * a.z;
-    device float *score_row = scores + r * m.y * a.w;
-    for (uint j = tid; j < a.x; j += 256) q_shared[j] = q_row[j];
-    threadgroup_barrier(mem_flags::mem_threadgroup);
-    // Four keys per simdgroup: 4x fewer threadgroups, same per-key dot order.
-    for (uint k = 0; k < 4; ++k) {
-        uint i = group.x * 32 + k * 8 + sg;
-        if (i >= count) continue;
-        if (i >= ar.y && row_ids[i - ar.y] >= length) continue;
-        device const float *row = i < ar.y
-            ? raw + ((ar.z + i) % ar.w) * ar.x
-            : compressed + row_ids[i - ar.y] * ar.x;
-        float dot = 0;
-        for (uint j = lane; j < ar.x; j += 32) dot += q_shared[j] * row[j];
-        dot = simd_sum(dot);
-        if (lane == 0) score_row[h * br.y + i] = dot * rsqrt(float(ar.x));
-    }
+    attention_score(attention_row_raw(a, b, r), uint2(min(length, a.z), a.w),
+        q + r * m.y * a.x, raw, compressed, ids + r * a.z,
+        scores + r * m.y * a.w, length, group.xy, sg, lane);
 }
 
-// Four keys in parallel per simdgroup: each 8-lane group owns one key, so a
-// 512-wide dot needs 64 FMAs and a 3-step group reduction instead of four
-// 32-lane dots with 5-step reductions. Per-key K order changes only in the
-// final lane tree.
-kernel void kernel_deepseek_v41_attention_score_rows_lane8(
-    constant uint4 &a [[buffer(0)]], constant uint4 &b [[buffer(1)]],
-    device const float *q [[buffer(2)]], device const float *raw [[buffer(3)]],
-    device const float *compressed [[buffer(4)]], device const uint *ids [[buffer(5)]],
-    device float *scores [[buffer(7)]], constant uint4 &m [[buffer(11)]],
-    threadgroup float *q_shared [[threadgroup(0)]],
-    uint3 group [[threadgroup_position_in_grid]],
-    uint sg [[simdgroup_index_in_threadgroup]], uint lane [[thread_index_in_simdgroup]],
-    uint tid [[thread_index_in_threadgroup]]) {
-    uint r = group.z, length = attention_row_length(b, r);
-    uint4 ar = attention_row_raw(a, b, r);
-    uint2 br = uint2(min(length, a.z), a.w);
-    uint count = ar.y + br.x, h = group.y;
-    device const float *q_row = q + r * m.y * a.x + h * a.x;
-    device const uint *row_ids = ids + r * a.z;
-    device float *score_row = scores + r * m.y * a.w;
-    for (uint j = tid; j < a.x; j += 256) q_shared[j] = q_row[j];
-    threadgroup_barrier(mem_flags::mem_threadgroup);
-    uint lane8 = lane & 7u;
-    uint i = group.x * 32 + sg * 4 + (lane >> 3);
-    if (i >= count) return;
-    if (i >= ar.y && row_ids[i - ar.y] >= length) return;
-    device const float *row = i < ar.y
-        ? raw + ((ar.z + i) % ar.w) * ar.x
-        : compressed + row_ids[i - ar.y] * ar.x;
-    float dot = 0;
-    for (uint j = lane8; j < ar.x; j += 8) dot += q_shared[j] * row[j];
-    dot += simd_shuffle_down(dot, 4);
-    dot += simd_shuffle_down(dot, 2);
-    dot += simd_shuffle_down(dot, 1);
-    if (lane8 == 0) score_row[h * br.y + i] = dot * rsqrt(float(ar.x));
-}
-
-// One dispatch replaces key RMS norm + key RoPE + latent RoPE + both cache
-// copies. The key path uses 128 threads for the index-width reduction; the
-// latent path copies its row and rotates the final 2*pairs values. The latent
-// norm and key projection stay separate because the projection consumes the
-// normalized latent.
 kernel void kernel_deepseek_v41_attention_compress_publish(
     constant uint4 &a [[buffer(0)]], constant float &eps [[buffer(1)]],
     device const float *key [[buffer(2)]], device const float *key_norm [[buffer(3)]],

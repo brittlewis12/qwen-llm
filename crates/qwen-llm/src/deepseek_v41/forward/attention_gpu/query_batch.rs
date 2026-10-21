@@ -96,6 +96,10 @@ pub(super) fn rope_rows(
     Ok(())
 }
 
+/// Geometry the simdgroup-MMA sink tile kernels are written for.
+const MMA_DIM: usize = 512;
+const MMA_HEADS: usize = 16;
+
 impl Workspace {
     /// The three steps below in order; production composes them itself so
     /// the stage profiler can sample each.
@@ -270,9 +274,17 @@ impl Workspace {
         )?;
         let position = start + first;
         let count = |p: usize| (p + 1).min(c.window) + self.selected_count(id, p);
+        // Simdgroup-MMA QK^T and PV for the released geometry (512-wide
+        // latent, head count a multiple of 16); other geometries keep the
+        // scalar/gathered-GEMM path below.
+        let mma = c.head_dim == MMA_DIM && c.heads.is_multiple_of(MMA_HEADS);
         // Preserve the incumbent per-query PV branch. Counts are monotone, so
         // at most one fixed tile per layer/chunk needs this extra boundary split.
-        if rows.tile.matrix.is_some() && count(position) < 256 && count(position + n - 1) >= 256 {
+        if !mma
+            && rows.tile.matrix.is_some()
+            && count(position) < 256
+            && count(position + n - 1) >= 256
+        {
             let split = (1..n).find(|&q| count(position + q) >= 256).unwrap();
             self.sink_tile(ctx, enc, id, start, rows, first, split)?;
             return self.sink_tile(ctx, enc, id, start, rows, first + split, n - split);
@@ -324,20 +336,35 @@ impl Workspace {
         enc.set_tensor(7, &rows.tile.scores);
         enc.set_tensor(8, &attended);
         enc.set_tensor(10, &self.status);
-        enc.set_threadgroup_memory(0, c.head_dim * std::mem::size_of::<f32>());
-        pipeline(ctx, enc, "score_rows_lane8")?;
-        enc.dispatch(
-            MTLSize {
-                width: count(position + n - 1).div_ceil(32),
-                height: c.heads,
-                depth: n,
-            },
-            MTLSize {
-                width: 256,
-                height: 1,
-                depth: 1,
-            },
-        );
+        if mma {
+            pipeline(ctx, enc, "score_mma")?;
+            enc.dispatch(
+                MTLSize {
+                    width: c.heads / MMA_HEADS,
+                    height: n,
+                    depth: 1,
+                },
+                MTLSize {
+                    width: 128,
+                    height: 1,
+                    depth: 1,
+                },
+            );
+        } else {
+            pipeline(ctx, enc, "score_rows")?;
+            enc.dispatch(
+                MTLSize {
+                    width: count(position + n - 1).div_ceil(8),
+                    height: c.heads,
+                    depth: n,
+                },
+                MTLSize {
+                    width: 256,
+                    height: 1,
+                    depth: 1,
+                },
+            );
+        }
         pipeline(ctx, enc, "softmax_rows")?;
         enc.dispatch(
             MTLSize {
@@ -351,7 +378,23 @@ impl Workspace {
                 depth: 1,
             },
         );
-        if let Some(matrix) = matrix {
+        if mma {
+            pipeline(ctx, enc, "pv_mma")?;
+            enc.dispatch(
+                MTLSize {
+                    width: c.heads / MMA_HEADS,
+                    height: n,
+                    depth: 1,
+                },
+                MTLSize {
+                    width: 256,
+                    height: 1,
+                    depth: 1,
+                },
+            );
+            let pso = pipeline(ctx, enc, "normalize_rows")?;
+            dispatch(enc, &pso, n * c.heads * c.head_dim);
+        } else if let Some(matrix) = matrix {
             pipeline(ctx, enc, "matrix_values_rows")?;
             enc.set_tensor(12, &matrix.values);
             enc.set_tensor(13, &matrix.probabilities);
@@ -404,7 +447,6 @@ impl Workspace {
             position,
             n,
             true,
-        )?;
-        Ok(())
+        )
     }
 }

@@ -181,34 +181,19 @@ impl Workspace {
         let pso = pipeline(ctx, enc, "publish_raw")?;
         dispatch(enc, &pso, rows.rows.min(c.window) * c.head_dim);
 
-        if std::env::var_os("QWEN_V41_SKIP_SELECT").is_some() {
-            // Probe only: valid zero ids keep score/softmax/PV finite.
-            unsafe {
-                std::ptr::write_bytes(
-                    rows.selected
-                        .buffer
-                        .contents()
-                        .as_ptr()
-                        .cast::<u8>()
-                        .add(rows.selected.offset as usize),
-                    0,
-                    rows.selected.n_elements() as usize * std::mem::size_of::<u32>(),
-                );
-            }
-        }
         if std::env::var_os("QWEN_V41_SKIP_SELECT").is_none() {
-            for row in 0..rows.rows {
-                self.encode_batch_row(
-                    ctx,
-                    enc,
-                    id,
-                    start + row,
-                    w,
-                    &prefill::row(input, self.config.hidden, row),
-                    rows,
-                    row,
-                )?;
-            }
+        for row in 0..rows.rows {
+            self.encode_batch_row(
+                ctx,
+                enc,
+                id,
+                start + row,
+                w,
+                &prefill::row(input, self.config.hidden, row),
+                rows,
+                row,
+            )?;
+        }
         }
         for first in (0..rows.rows).step_by(TILE) {
             self.sink_tile(

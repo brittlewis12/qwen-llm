@@ -153,7 +153,11 @@ fn native_rows_v41_iq2_actual_cohorts_and_mixed_gate_up_are_bitwise() {
 
 #[test]
 fn native_rows_v41_mixed_types_keep_live_fallback_bitwise() {
-    native_rows_live_route_witness(&[(GgmlType::IQ3_XXS, GgmlType::Q3_K, GgmlType::MXFP4)]);
+    // Mixed gate/up with generic layouts now take the half-staged tiles in
+    // production; the native-rows path stays bitwise when pinned.
+    with_native_rows(|| {
+        native_rows_live_route_witness(&[(GgmlType::IQ3_XXS, GgmlType::Q3_K, GgmlType::MXFP4)])
+    });
 }
 
 fn native_rows_live_route_witness(types: &[(GgmlType, GgmlType, GgmlType)]) {

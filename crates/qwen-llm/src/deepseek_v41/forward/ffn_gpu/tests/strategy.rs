@@ -245,13 +245,10 @@ fn selected_strategy_threshold_legacy_fallback_and_entrypoints() {
         assert_eq!(grouped_supported(c, layer), grouped_cap);
         assert_eq!(native_rows_supported(c, layer), native_cap);
         // Half-staged generic layouts exist for every listed storage type
-        // except IQ2_XS/IQ2_XXS (native rows) and MXFP4 (F32-operand tiles).
-        let half_cap = ![gate, up, down].iter().any(|dtype| {
-            matches!(
-                dtype,
-                GgmlType::IQ2_XS | GgmlType::IQ2_XXS | GgmlType::MXFP4
-            )
-        });
+        // except IQ2_XS/IQ2_XXS (native rows).
+        let half_cap = ![gate, up, down]
+            .iter()
+            .any(|dtype| matches!(dtype, GgmlType::IQ2_XS | GgmlType::IQ2_XXS));
         assert_eq!(half_grouped_supported(c, layer), half_cap);
         let ws = Workspace::new(&model).unwrap();
         for n in [1, 3, 7, 31, 33, 65, 127, 128, 129, 257] {

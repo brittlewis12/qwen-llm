@@ -15,7 +15,7 @@ thread_local! {
     pub(super) static FORCE_GROUPED_ROWS: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 
-fn with_grouped_rows<T>(f: impl FnOnce() -> T) -> T {
+pub(in crate::deepseek_v41::forward) fn with_grouped_rows<T>(f: impl FnOnce() -> T) -> T {
     struct Restore(bool);
     impl Drop for Restore {
         fn drop(&mut self) {
@@ -26,7 +26,7 @@ fn with_grouped_rows<T>(f: impl FnOnce() -> T) -> T {
     f()
 }
 
-fn with_native_rows<T>(f: impl FnOnce() -> T) -> T {
+pub(in crate::deepseek_v41::forward) fn with_native_rows<T>(f: impl FnOnce() -> T) -> T {
     struct Restore(bool);
     impl Drop for Restore {
         fn drop(&mut self) {
@@ -385,6 +385,12 @@ fn ordered_slots_then_shared_sum() {
 
 #[test]
 fn grouped_mxfp4_rows_match_scalar_weight_before_down() {
+    // The F32-operand grouped tiles against the scalar path; the half-staged
+    // MXFP4 tiles have their own CPU-codec equivalence test.
+    with_grouped_rows(grouped_mxfp4_rows_match_scalar_weight_before_down_body);
+}
+
+fn grouped_mxfp4_rows_match_scalar_weight_before_down_body() {
     let _lease = production_lease();
     let ctx = MetalContext::new().unwrap();
     let weights = toy::Weights::new(&ctx);

@@ -3,7 +3,7 @@ use super::*;
 use objc2_metal::MTLSize;
 
 #[cfg(test)]
-mod tests;
+pub(super) mod tests;
 
 pub(super) struct Workspace {
     // 0 X, 1 incoming pre, 2 projected mixes, 3 next pre, 4 post, 5 comb,

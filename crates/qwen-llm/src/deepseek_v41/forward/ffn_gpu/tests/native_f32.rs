@@ -466,14 +466,14 @@ fn witness(
     })
     .unwrap();
     let census = metal::dispatch_census_take();
-    let fused = metal::all_slots_gate_up_weight_native_supported(
+    let fused = metal::all_slots_gate_up_weight2_native_supported(
         layer.banks[0].dtype,
         layer.banks[1].dtype,
-    ) && metal::all_slots_down_sum_native_supported(layer.banks[2].dtype);
+    ) && metal::all_slots_down_sum2_native_supported(layer.banks[2].dtype);
     if fused {
         assert_eq!(census.len(), 3);
-        assert!(census[1].kernel.contains("gate_up_weight"));
-        assert!(census[2].kernel.contains("down_sum"));
+        assert!(census[1].kernel.contains("gate_up_weight2"));
+        assert!(census[2].kernel.contains("down_sum2"));
     } else {
         assert_eq!(census.len(), 6);
         assert!(

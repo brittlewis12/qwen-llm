@@ -11,7 +11,9 @@ const ROUTE_WEIGHTS: [f32; 5] = [-0.5, -0.25, 1.75, -1.5, 0.125];
 
 fn chain_supported(dtype: GgmlType) -> bool {
     all_slots_gate_up_weight_native_supported(dtype, dtype)
+        && all_slots_gate_up_weight2_native_supported(dtype, dtype)
         && all_slots_down_sum_native_supported(dtype)
+        && all_slots_down_sum2_native_supported(dtype)
 }
 
 #[test]
@@ -60,45 +62,53 @@ fn fused_gate_up_weight_matches_native_passes_bitwise() {
             .unwrap();
             let native = tensor_f32_at_offset(&native);
 
-            let fused = f32_view(
-                &ctx,
-                &vec![f32::NAN; m * ROUTES.len()],
-                &[m, ROUTES.len()],
-                28,
-            );
-            dispatch_census_begin();
-            one_shot(&ctx, |enc| {
-                encode_all_slots_gate_up_swiglu_weight_native(
+            for rows in 1..=2 {
+                let fused = f32_view(
                     &ctx,
-                    enc,
-                    &gate,
-                    &up,
-                    &input,
-                    &ids,
-                    &status,
-                    &weights,
-                    &fused,
-                    k,
-                    m,
-                    EXPERTS,
-                    ROUTES.len(),
-                    clamp,
-                )
-            })
-            .unwrap();
-            let census = dispatch_census_take();
-            assert_eq!(census.len(), 1);
-            assert!(census[0].kernel.contains("gate_up_weight"), "{dtype:?}");
-            let fused = tensor_f32_at_offset(&fused);
-            for slot in 0..ROUTES.len() {
-                for row in 0..m {
-                    let index = slot * m + row;
-                    let expected = native[index] * ROUTE_WEIGHTS[slot];
-                    assert_eq!(
-                        fused[index].to_bits(),
-                        expected.to_bits(),
-                        "{dtype:?} k={k} slot={slot} row={row}"
-                    );
+                    &vec![f32::NAN; m * ROUTES.len()],
+                    &[m, ROUTES.len()],
+                    28 + rows * 8,
+                );
+                dispatch_census_begin();
+                one_shot(&ctx, |enc| {
+                    encode_all_slots_gate_up_swiglu_weight_native(
+                        &ctx,
+                        enc,
+                        &gate,
+                        &up,
+                        &input,
+                        &ids,
+                        &status,
+                        &weights,
+                        &fused,
+                        k,
+                        m,
+                        EXPERTS,
+                        ROUTES.len(),
+                        clamp,
+                        rows,
+                    )
+                })
+                .unwrap();
+                let census = dispatch_census_take();
+                assert_eq!(census.len(), 1);
+                assert!(census[0].kernel.contains("gate_up_weight"), "{dtype:?}");
+                assert_eq!(
+                    census[0].kernel.contains("weight2"),
+                    rows == 2,
+                    "{dtype:?} rows={rows}"
+                );
+                let fused = tensor_f32_at_offset(&fused);
+                for slot in 0..ROUTES.len() {
+                    for row in 0..m {
+                        let index = slot * m + row;
+                        let expected = native[index] * ROUTE_WEIGHTS[slot];
+                        assert_eq!(
+                            fused[index].to_bits(),
+                            expected.to_bits(),
+                            "{dtype:?} k={k} rows={rows} slot={slot} row={row}"
+                        );
+                    }
                 }
             }
         }
@@ -175,35 +185,43 @@ fn fused_down_sum_matches_native_down_then_sum_bitwise() {
             .unwrap();
             let native = tensor_f32_at_offset(&native);
 
-            let fused = f32_view(&ctx, &vec![f32::NAN; m], &[m], 36);
-            dispatch_census_begin();
-            one_shot(&ctx, |enc| {
-                encode_all_slots_down_sum_native(
-                    &ctx,
-                    enc,
-                    &down,
-                    &input,
-                    &ids,
-                    &status,
-                    &shared,
-                    &fused,
-                    k,
-                    m,
-                    EXPERTS,
-                    ROUTES.len(),
-                )
-            })
-            .unwrap();
-            let census = dispatch_census_take();
-            assert_eq!(census.len(), 1);
-            assert!(census[0].kernel.contains("down_sum"), "{dtype:?}");
-            let fused = tensor_f32_at_offset(&fused);
-            for row in 0..m {
+            for rows in 1..=2 {
+                let fused = f32_view(&ctx, &vec![f32::NAN; m], &[m], 32 + rows * 8);
+                dispatch_census_begin();
+                one_shot(&ctx, |enc| {
+                    encode_all_slots_down_sum_native(
+                        &ctx,
+                        enc,
+                        &down,
+                        &input,
+                        &ids,
+                        &status,
+                        &shared,
+                        &fused,
+                        k,
+                        m,
+                        EXPERTS,
+                        ROUTES.len(),
+                        rows,
+                    )
+                })
+                .unwrap();
+                let census = dispatch_census_take();
+                assert_eq!(census.len(), 1);
+                assert!(census[0].kernel.contains("down_sum"), "{dtype:?}");
                 assert_eq!(
-                    fused[row].to_bits(),
-                    native[row].to_bits(),
-                    "{dtype:?} k={k} row={row}"
+                    census[0].kernel.contains("down_sum2"),
+                    rows == 2,
+                    "{dtype:?} rows={rows}"
                 );
+                let fused = tensor_f32_at_offset(&fused);
+                for row in 0..m {
+                    assert_eq!(
+                        fused[row].to_bits(),
+                        native[row].to_bits(),
+                        "{dtype:?} k={k} rows={rows} row={row}"
+                    );
+                }
             }
         }
     }

@@ -246,6 +246,20 @@ fn native_capabilities_match_actual_dispatch_and_abi() {
             .count(),
         formats().len() - 1
     );
+    assert_eq!(
+        SOURCE
+            .matches(
+                "]] kernel expert_native_gate_up_weight2_t kernel_expert_native_gate_up_weight2_f32<"
+            )
+            .count(),
+        formats().len() - 1
+    );
+    assert_eq!(
+        SOURCE
+            .matches("]] kernel expert_native_down_sum2_t kernel_expert_native_down_sum2_f32<")
+            .count(),
+        formats().len() - 1
+    );
     for raw in 0..=255 {
         let dtype = GgmlType::from_raw(raw);
         assert_eq!(
@@ -257,7 +271,12 @@ fn native_capabilities_match_actual_dispatch_and_abi() {
             all_slots_gate_up_weight_native_supported(dtype, dtype),
             fused
         );
+        assert_eq!(
+            all_slots_gate_up_weight2_native_supported(dtype, dtype),
+            fused
+        );
         assert_eq!(all_slots_down_sum_native_supported(dtype), fused);
+        assert_eq!(all_slots_down_sum2_native_supported(dtype), fused);
         if let Some(name) = native_pipeline_name(dtype) {
             assert!(
                 SOURCE.contains(&format!("host_name(\"{name}\")")),
@@ -266,8 +285,10 @@ fn native_capabilities_match_actual_dispatch_and_abi() {
         }
         if fused {
             for name in [
-                gate_up_weight_pipeline_name(dtype).unwrap(),
-                down_sum_pipeline_name(dtype).unwrap(),
+                gate_up_weight_pipeline_name(dtype, 1).unwrap(),
+                gate_up_weight_pipeline_name(dtype, 2).unwrap(),
+                down_sum_pipeline_name(dtype, 1).unwrap(),
+                down_sum_pipeline_name(dtype, 2).unwrap(),
             ] {
                 assert!(
                     SOURCE.contains(&format!("host_name(\"{name}\")")),

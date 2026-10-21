@@ -46,31 +46,54 @@ fn native_pipeline_name(dtype: GgmlType) -> Option<String> {
     Some(format!("kernel_expert_native_{suffix}_f32"))
 }
 
-fn fused_pipeline_name(dtype: GgmlType, family: &str) -> Option<String> {
+fn fused_pipeline_name(dtype: GgmlType, family: &str, rows: usize) -> Option<String> {
     let native = native_pipeline_name(dtype)?;
     let suffix = native
         .strip_prefix("kernel_expert_native_")?
         .strip_suffix("_f32")?;
-    Some(format!("kernel_expert_native_{family}_{suffix}_f32"))
+    Some(if rows == 1 {
+        format!("kernel_expert_native_{family}_{suffix}_f32")
+    } else {
+        format!("kernel_expert_native_{family}{rows}_{suffix}_f32")
+    })
 }
 
-fn gate_up_weight_pipeline_name(dtype: GgmlType) -> Option<String> {
-    fused_pipeline_name(dtype, "gate_up_weight")
+fn gate_up_weight_pipeline_name(dtype: GgmlType, rows: usize) -> Option<String> {
+    fused_pipeline_name(dtype, "gate_up_weight", rows)
 }
 
-fn down_sum_pipeline_name(dtype: GgmlType) -> Option<String> {
-    fused_pipeline_name(dtype, "down_sum")
+fn down_sum_pipeline_name(dtype: GgmlType, rows: usize) -> Option<String> {
+    fused_pipeline_name(dtype, "down_sum", rows)
 }
 
-/// Fused decode gate/up + SwiGLU + route weight. Equal storage types only;
-/// MXFP4 keeps the native path because its subnormal rescaling is per bank.
+fn gate_up_weight_supported(gate: GgmlType, up: GgmlType, rows: usize) -> bool {
+    gate == up && gate != GgmlType::MXFP4 && gate_up_weight_pipeline_name(gate, rows).is_some()
+}
+
+fn down_sum_supported(dtype: GgmlType, rows: usize) -> bool {
+    dtype != GgmlType::MXFP4 && down_sum_pipeline_name(dtype, rows).is_some()
+}
+
+/// Fused decode gate/up + SwiGLU + route weight, one output row per SIMD group.
+/// Equal storage types only; MXFP4 keeps the native path because its subnormal
+/// rescaling is per bank.
 pub fn all_slots_gate_up_weight_native_supported(gate: GgmlType, up: GgmlType) -> bool {
-    gate == up && gate != GgmlType::MXFP4 && gate_up_weight_pipeline_name(gate).is_some()
+    gate_up_weight_supported(gate, up, 1)
 }
 
-/// Fused decode down + ordered top-k sum + shared branch.
+/// Fused decode gate/up + SwiGLU + route weight, two output rows per group.
+pub fn all_slots_gate_up_weight2_native_supported(gate: GgmlType, up: GgmlType) -> bool {
+    gate_up_weight_supported(gate, up, 2)
+}
+
+/// Fused decode down + ordered top-k sum + shared branch, one row per group.
 pub fn all_slots_down_sum_native_supported(dtype: GgmlType) -> bool {
-    dtype != GgmlType::MXFP4 && down_sum_pipeline_name(dtype).is_some()
+    down_sum_supported(dtype, 1)
+}
+
+/// Fused decode down + ordered top-k sum + shared branch, two rows per group.
+pub fn all_slots_down_sum2_native_supported(dtype: GgmlType) -> bool {
+    down_sum_supported(dtype, 2)
 }
 
 /// Independently typed native gate/up capability. Shape constraints still apply.
@@ -567,17 +590,21 @@ pub fn encode_all_slots_gate_up_swiglu_weight_native(
     experts: usize,
     top_k: usize,
     clamp: f32,
+    rows: usize,
 ) -> Result<(), MetalError> {
     const K: &str = "all_slots_gate_up_swiglu_weight_native";
     require_serial(K, enc)?;
-    if !all_slots_gate_up_weight_native_supported(gate_bank.dtype, up_bank.dtype) {
+    if !gate_up_weight_supported(gate_bank.dtype, up_bank.dtype, rows) {
         return Err(bad_shape(
             K,
             format!(
-                "unsupported fused gate/up storage {:?}/{:?}",
+                "unsupported fused gate/up storage {:?}/{:?} rows {rows}",
                 gate_bank.dtype, up_bank.dtype
             ),
         ));
+    }
+    if !matches!(rows, 1 | 2) {
+        return Err(bad_shape(K, "rows per SIMD group must be 1 or 2"));
     }
     if !clamp.is_finite() || clamp <= 0.0 {
         return Err(bad_shape(K, "clamp must be finite and positive"));
@@ -639,7 +666,7 @@ pub fn encode_all_slots_gate_up_swiglu_weight_native(
     if gate_bytes != up_bytes {
         return Err(bad_shape(K, "gate and up banks must share a row stride"));
     }
-    let name = gate_up_weight_pipeline_name(gate_bank.dtype)
+    let name = gate_up_weight_pipeline_name(gate_bank.dtype, rows)
         .ok_or_else(|| bad_shape(K, "no fused gate/up kernel"))?;
     let pso = ctx.pipeline(&name)?;
     if pso.threadExecutionWidth() != 32 || pso.maxTotalThreadsPerThreadgroup() < 128 {
@@ -669,7 +696,7 @@ pub fn encode_all_slots_gate_up_swiglu_weight_native(
     enc.set_tensor(7, output);
     enc.dispatch(
         MTLSize {
-            width: dims.n_out as usize / 4 + usize::from(!dims.n_out.is_multiple_of(4)),
+            width: (dims.n_out as usize).div_ceil(4 * rows),
             height: dims.top_k as usize,
             depth: 1,
         },
@@ -699,14 +726,21 @@ pub fn encode_all_slots_down_sum_native(
     n_out: usize,
     experts: usize,
     top_k: usize,
+    rows: usize,
 ) -> Result<(), MetalError> {
     const K: &str = "all_slots_down_sum_native";
     require_serial(K, enc)?;
-    if !all_slots_down_sum_native_supported(bank.dtype) {
+    if !down_sum_supported(bank.dtype, rows) {
         return Err(bad_shape(
             K,
-            format!("unsupported fused down storage {:?}", bank.dtype),
+            format!(
+                "unsupported fused down storage {:?} rows {rows}",
+                bank.dtype
+            ),
         ));
+    }
+    if !matches!(rows, 1 | 2) {
+        return Err(bad_shape(K, "rows per SIMD group must be 1 or 2"));
     }
     let dims = dimensions(K, n_in, n_out, experts, top_k)?;
     check_tensor(
@@ -755,7 +789,7 @@ pub fn encode_all_slots_down_sum_native(
     )?;
     check_device(ctx, enc, K, &[bank, input, ids, status, shared, output])?;
     let (_, row_bytes) = bank_pipeline(ctx, K, bank, &dims, "down bank")?;
-    let name = down_sum_pipeline_name(bank.dtype)
+    let name = down_sum_pipeline_name(bank.dtype, rows)
         .ok_or_else(|| bad_shape(K, "no fused down/sum kernel"))?;
     let pso = ctx.pipeline(&name)?;
     if pso.threadExecutionWidth() != 32 || pso.maxTotalThreadsPerThreadgroup() < 128 {
@@ -781,7 +815,7 @@ pub fn encode_all_slots_down_sum_native(
     enc.set_tensor(6, output);
     enc.dispatch(
         MTLSize {
-            width: dims.n_out as usize / 4 + usize::from(!dims.n_out.is_multiple_of(4)),
+            width: (dims.n_out as usize).div_ceil(4 * rows),
             height: 1,
             depth: 1,
         },

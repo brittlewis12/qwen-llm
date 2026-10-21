@@ -52,9 +52,10 @@ Decode budget at depth 2048, 22.3 ms/token: ~10.2 ms bytes (11.1 GiB at the
   but -1.3%/-1.6% at pp1024 (negative, packet 2026-10-21); 4096-row chunks
   untested.
 - Owner/producer per-row loops (compressor, index key, selection; 8 layers,
-  grows with prompt length): open, next bet. Census: `attention_copy` 8,192,
-  `selection_prepare` 6,141, `attention_rope` 5,120, `rope_rows` 4,038 per
-  Q2 PP1024. Candidate: fuse per-group norm+RoPE+copies; batch selection.
+  grows with prompt length): in flight (`perf/v41-compressor-prep`). Census:
+  `attention_copy` 8,192, `selection_prepare` 6,141, `attention_rope` 5,120,
+  `rope_rows` 4,038 per Q2 PP1024. First bet: fuse per-group norm+RoPE+copies;
+  selection batching follows.
 - Scalar score kernel tuning: landed (`b992694a`). 4 keys/simdgroup +3.0%,
   8-lane +1.2-1.4% on the merged base; 8 heads/threadgroup and fatter key
   loops were negative. The MMA tile still supersedes this if it wins.

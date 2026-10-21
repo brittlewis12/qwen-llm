@@ -165,6 +165,46 @@ impl Fixture {
         }
     }
 
+    /// Sustained GPU work so clocks are at their steady state before timing.
+    fn heat(&self, ctx: &MetalContext) {
+        let start = std::time::Instant::now();
+        let mut it = 0;
+        while start.elapsed() < std::time::Duration::from_millis(400) {
+            write_ids(&self.ids, it);
+            it += 1;
+            timed(ctx, |enc| {
+                encode_all_slots_gate_up_swiglu_native(
+                    ctx,
+                    enc,
+                    &self.gate,
+                    &self.up,
+                    &self.x,
+                    &self.ids,
+                    &self.status,
+                    &self.inner,
+                    K,
+                    M,
+                    BANK_EXPERTS,
+                    TOP_K,
+                    10.0,
+                )?;
+                encode_all_slots_down_native(
+                    ctx,
+                    enc,
+                    &self.down,
+                    &self.inner,
+                    &self.ids,
+                    &self.status,
+                    &self.out,
+                    M,
+                    K,
+                    BANK_EXPERTS,
+                    TOP_K,
+                )
+            });
+        }
+    }
+
     fn stage_bytes(&self) -> f64 {
         (TOP_K as f64)
             * ((M as f64) * row_bytes(self.gate.dtype, K) as f64 * 2.0
@@ -248,6 +288,7 @@ fn routed_decode_attribution_probe() {
     ] {
         let f = Fixture::new(&ctx, gate_up, down);
         f.warm(&ctx);
+        f.heat(&ctx);
         let mut stage = Vec::new();
         let mut gate = Vec::new();
         for it in 0..ITERS + 2 {
@@ -345,16 +386,17 @@ fn routed_decode_attribution_probe() {
     ] {
         let f = Fixture::new(&ctx, dtype, dtype);
         f.warm(&ctx);
-        for &(variant, rows) in variants {
-            let name = if variant == "prod" {
-                format!("kernel_xprobe_prod_{suffix}")
-            } else {
-                format!("kernel_xprobe_{suffix}_{variant}")
-            };
-            let mut stage = Vec::new();
-            let mut gate = Vec::new();
-            for it in 0..ITERS + 2 {
-                write_ids(&f.ids, it + 7);
+        f.heat(&ctx);
+        let mut stage: Vec<Vec<f64>> = vec![Vec::new(); variants.len()];
+        let mut gate: Vec<Vec<f64>> = vec![Vec::new(); variants.len()];
+        for it in 0..ITERS + 2 {
+            for (v, &(variant, rows)) in variants.iter().enumerate() {
+                let name = if variant == "prod" {
+                    format!("kernel_xprobe_prod_{suffix}")
+                } else {
+                    format!("kernel_xprobe_{suffix}_{variant}")
+                };
+                write_ids(&f.ids, it * variants.len() + v + 7);
                 let s = timed(&ctx, |enc| {
                     probe_dispatch(
                         &ctx,
@@ -393,7 +435,7 @@ fn routed_decode_attribution_probe() {
                         2,
                     )
                 });
-                write_ids(&f.ids, it + 1007);
+                write_ids(&f.ids, it * variants.len() + v + 1007);
                 let g = timed(&ctx, |enc| {
                     probe_dispatch(
                         &ctx,
@@ -409,11 +451,18 @@ fn routed_decode_attribution_probe() {
                     )
                 });
                 if it >= 2 {
-                    stage.push(s);
-                    gate.push(g);
+                    stage[v].push(s);
+                    gate[v].push(g);
                 }
             }
-            report(&format!("{suffix} {variant}"), &f, stage, gate);
+        }
+        for (v, &(variant, _)) in variants.iter().enumerate() {
+            report(
+                &format!("{suffix} {variant}"),
+                &f,
+                stage[v].clone(),
+                gate[v].clone(),
+            );
         }
     }
 }

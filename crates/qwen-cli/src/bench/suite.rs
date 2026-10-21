@@ -86,11 +86,26 @@ pub(crate) fn run_suite_pp_row(
                 .context("suite pp depth fill")?;
             std::hint::black_box(logits);
         }
+        let stage_scope = if std::env::var_os("QWEN_V41_STAGES").is_some() {
+            Some(
+                qwen_llm::deepseek_v41::forward::profile::Scope::begin_stages()
+                    .map_err(anyhow::Error::msg)?,
+            )
+        } else {
+            None
+        };
         let t0 = Instant::now();
         let logits = loaded
             .prefill(&mut seq, &mut scratch, &ids)
             .context("suite pp timed prefill")?;
         let wall_ms = t0.elapsed().as_secs_f64() * 1e3;
+        if let Some(scope) = stage_scope {
+            let report = scope.finish();
+            eprintln!(
+                "[suite] v41 stages {}",
+                serde_json::to_string(&report).context("encode suite stage report")?
+            );
+        }
         std::hint::black_box(logits);
         Ok(QwenPpSample {
             wall_ms,

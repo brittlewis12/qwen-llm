@@ -1071,43 +1071,45 @@ impl Workspace {
     ) -> Result<()> {
         let c = &self.config;
         let group_width = c.heads * c.head_dim / c.groups;
-        group_rows(
-            ctx,
-            enc,
-            &rows.query,
-            &rows.grouped_input,
-            group_width,
-            c.groups,
-            rows.rows,
-        )?;
-        for (group, projection) in w.output_a.iter().enumerate() {
-            projection
-                .encode_rows(
-                    enc,
-                    &rows.grouped_input.view_subrange(
-                        (group * group_width * rows.rows) as u64,
-                        vec![group_width as u64, rows.rows as u64],
-                    ),
-                    &rows.grouped_low.view_subrange(
-                        (group * c.output_rank * rows.rows) as u64,
-                        vec![c.output_rank as u64, rows.rows as u64],
-                    ),
-                    rows.rows,
-                )
+        if std::env::var_os("QWEN_V41_SKIP_ATTN_OUT").is_none() {
+            group_rows(
+                ctx,
+                enc,
+                &rows.query,
+                &rows.grouped_input,
+                group_width,
+                c.groups,
+                rows.rows,
+            )?;
+            for (group, projection) in w.output_a.iter().enumerate() {
+                projection
+                    .encode_rows(
+                        enc,
+                        &rows.grouped_input.view_subrange(
+                            (group * group_width * rows.rows) as u64,
+                            vec![group_width as u64, rows.rows as u64],
+                        ),
+                        &rows.grouped_low.view_subrange(
+                            (group * c.output_rank * rows.rows) as u64,
+                            vec![c.output_rank as u64, rows.rows as u64],
+                        ),
+                        rows.rows,
+                    )
+                    .map_err(|e| e.to_string())?;
+            }
+            group_rows(
+                ctx,
+                enc,
+                &rows.grouped_low,
+                &rows.low,
+                c.output_rank,
+                rows.rows,
+                c.groups,
+            )?;
+            w.output_b
+                .encode_rows(enc, &rows.low, output, rows.rows)
                 .map_err(|e| e.to_string())?;
         }
-        group_rows(
-            ctx,
-            enc,
-            &rows.grouped_low,
-            &rows.low,
-            c.output_rank,
-            rows.rows,
-            c.groups,
-        )?;
-        w.output_b
-            .encode_rows(enc, &rows.low, output, rows.rows)
-            .map_err(|e| e.to_string())?;
         let pso = pipeline(ctx, enc, "finite")?;
         enc.set_bytes(0, &((self.config.hidden * rows.rows) as u32));
         enc.set_tensor(1, output);

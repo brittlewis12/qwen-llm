@@ -6,6 +6,34 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the current state and evidence index.
 
+## 2026-10-21 - V4.1 Prefill +12%: MMA Attention Sink Tile (And Half Layouts For MXFP4/IQ2)
+
+- Per-layer prefill spans (six per layer, landed with this) put the sink tile
+  (QK^T as scalar dot products, PV through a 42 MB gathered matrix and an
+  F32 GEMM) at 47-51 ms per layer per 2048-row chunk, 32% of prefill, ~3
+  TFLOPS. A simdgroup-MMA tile with Q and 16-key blocks staged as half in
+  threadgroup memory (F32 sums; softmax, sink, denominators and invalid-id
+  rejection unchanged; a normalize+finite pass) cuts a 640-key 32-query
+  tile from ~1.0-1.7 ms to 0.64 ms. An F32-operand first version was
+  latency-bound on device Q loads and only reached 340 tok/s.
+- ABBA on M5 Ultra against main `b69809fc` (which already carries the
+  F32-operand IQ2 tiles, the 8-lane score kernel and the compressor
+  fusion), `--pp 2048,4096 --tg 32 --runs 2`: IQ3_XXS pp2048 339.8 -> 382.7
+  (+12.6%), pp4096 318.8 -> 358.0 (+12.3%); Q2_K_XL pp2048 341.4 -> 381.3
+  (+11.7%), pp4096 319.8 -> 356.0 (+11.3%); tg32 unchanged (41.3/41.5,
+  44.1/44.0). Against the pre-landing main `24ec157e` the same branch
+  measured pp2048@d2048 240 -> 335 (+40%). Cumulative today from
+  `4b1fca04`: pp2048 192 -> 382, tg32 22.3 -> 41.
+- The same five IQ2_XS/IQ2_XXS layers the other lane moved off native rows
+  (312-329 ms each, 21% of prefill) also get half generic layouts here,
+  with MXFP4; production takes the half route like every other routed
+  layer, the F32-operand tiles remain the NativeF32 witness path. Per-layer
+  FFN is 60-63 ms either way; not ABBA'd against each other.
+- Held text against `24ec157e` (384 IQ3 targets): mean NLL 2.14695 ->
+  2.14987 (+0.14%, both signs per document), top-1 215 -> 219; task screen
+  9/22 on both with the identical pattern, 19/22 answers identical.
+- [Spans, per-dispatch timings, ABBA, witness and limits](bench/2026-10-21-v41-prefill-attention-mma.md).
+
 ## 2026-10-21 - V4.1: Compressor Prep Fusion +0.5-0.8%
 
 - The owner/producer group end ran key RMS norm, key RoPE, latent RoPE and

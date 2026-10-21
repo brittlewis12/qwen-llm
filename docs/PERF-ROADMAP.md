@@ -26,30 +26,34 @@ expected effect, status. Status is one of `open`, `in flight (branch)`,
 `in flight` with your branch; a second lane finding it claimed reads the branch
 before building anything adjacent. This replaces relaying between sessions.
 
-### DeepSeek V4.1-Flash (`main` code `a7de76ab`: pp2048 Q2 341 / IQ3 339 tok/s, pp4096 Q2 320 / IQ3 319; decode unchanged at tg32 40.8, tg32@d2048 41.6)
+### DeepSeek V4.1-Flash (main after the MMA sink tile: pp2048 Q2 381 / IQ3 383 tok/s, pp4096 Q2 356 / IQ3 358; decode tg32 44 / 41.5, tg32@d2048 41.6)
 
 Decode budget at depth 2048, 22.3 ms/token: ~10.2 ms bytes (11.1 GiB at the
 ~1.09 TB/s the GEMV probe reaches), ~8 ms dispatch floor (~1,600 dispatches),
-~4 ms spread thin. Prefill budget per 2048-token chunk, sampled spans
-(`QWEN_V41_PREFILL_STAGES=1`, packet 2026-10-21): FFN 39%, attention tiles
-(QK^T/softmax/PV) 32%, owner/producer per-row loops 13%, output projections
-8%, prepare 6%, HC 2%.
+~4 ms spread thin. Prefill budget per 2048-token chunk before the MMA tile,
+sampled spans (`QWEN_V41_PREFILL_STAGES=1`, packet 2026-10-21): FFN 39%,
+attention tiles (QK^T/softmax/PV) 32%, owner/producer per-row loops 13%,
+output projections 8%, prepare 6%, HC 2%. After it, FFN is roughly half of
+prefill and the tiles about a fifth; re-sample before claiming.
 
-- Attention tiles via simdgroup MMA (half-staged Q/K/V, F32 sums), replacing
-  the scalar `score_rows` and the gather+GEMM PV: in flight
-  (`perf/v41-prefill-attn`, scalar-equivalence tests pass; pp2048 pending).
-  Supersedes scalar score-kernel tuning if it wins.
-- IQ2_XXS/IQ2_XS expert layers off the native-rows path: landed with the
-  F32-operand grouped tiles (`perf/v41-prefill-land`, `b3b71bb3`); the merged
-  base moved Q2 +59.8% and IQ3 +25.4% at pp1024. The half generic layout on
-  `perf/v41-prefill-attn` was not isolated for a one-ABBA comparison; reconcile
-  before both land.
-- MXFP4 generic half layout: +1.6% alone (negative-ish, packet 2026-10-21);
-  needed for the IQ2 half route on layers whose down is MXFP4.
-- Expert tile efficiency (~15 TFLOPS effective on grouped F32x at pp1024,
-  ~8.7 TFLOPS on half-staged tiles at 32 rows/expert): open. Tried:
-  2048-row chunks +5.6% (landed); 32-slot gate/up tile +0.25-0.9% at pp2048
-  but -1.3%/-1.6% at pp1024 (negative, packet 2026-10-21); 4096-row chunks
+- Attention tiles via simdgroup MMA (half-staged Q/K/V, F32 sums),
+  replacing the scalar score kernel and the gather+GEMM PV for the released
+  geometry: landed (2026-10-21 attention entry). Supersedes the scalar
+  score tuning (`b992694a`) on that geometry; other geometries keep it.
+  Next there: a fused score+softmax+PV kernel (saves the slab round trip
+  and three dispatches per tile): open.
+- IQ2_XXS/IQ2_XS expert layers off the native-rows path: landed twice, as
+  F32-operand grouped tiles (`b3b71bb3`, the NativeF32 witness path) and as
+  half generic layouts (attention entry; production takes the half route
+  like every other routed layer). Not ABBA'd against each other; the
+  per-layer FFN time is 60-63 ms either way.
+- MXFP4 generic half layout: landed with the IQ2 layouts (needed for layers
+  whose down is MXFP4); +1.6% on its own. Widens DFlash/GLM grouped
+  eligibility on MXFP4 artifacts (unmeasured there).
+- Expert tile efficiency (~8.7 TFLOPS on half-staged tiles, decode-bound at
+  32 rows/expert): open. Tried: 2048-row chunks +5.6% (landed); 32-slot
+  gate/up tile +0.25-0.9% at pp2048 but -1.3%/-1.6% at pp1024 (negative,
+  packet 2026-10-21); 4096-row chunks
   untested.
 - Owner/producer per-row loops (compressor, index key, selection; 8 layers,
   grows with prompt length): compressor prep landed (`a7de76ab`): key norm +
@@ -65,6 +69,9 @@ Decode budget at depth 2048, 22.3 ms/token: ~10.2 ms bytes (11.1 GiB at the
   (negative, packet 2026-10-20). Q8_0 attention projections (5.1 GB/token)
   requant to Q6_K: ~-1 ms, quality-sensitive, open.
 - Prefill dispatch census tool: landed (`c4125c6b`, `QWEN_V41_CENSUS=1`).
+- Six-span prefill profiler (`QWEN_V41_PREFILL_STAGES=1`, per-layer HC /
+  prepare / serial / tiles / finish / FFN): landed; use it before claiming
+  a prefill bet.
 
 ### Qwen3.8 Flash-Next
 

@@ -673,9 +673,24 @@ pub(crate) fn run_family_pp_row(
         } else {
             None
         };
+        let census = std::env::var_os("QWEN_V41_CENSUS").is_some();
+        if census {
+            qwen_llm::metal::dispatch_census_begin();
+        }
         let t0 = Instant::now();
         bench.prefill(&ids)?;
         let wall_ms = t0.elapsed().as_secs_f64() * 1e3;
+        if census {
+            let rows = qwen_llm::metal::dispatch_census_take();
+            let mut counts = std::collections::BTreeMap::new();
+            for row in &rows {
+                *counts.entry(row.kernel.clone()).or_insert(0usize) += 1;
+            }
+            let mut top: Vec<_> = counts.into_iter().collect();
+            top.sort_by_key(|(_, n)| std::cmp::Reverse(*n));
+            top.truncate(30);
+            eprintln!("[suite] v41 census dispatches={} top={:?}", rows.len(), top);
+        }
         if let Some(scope) = stage_scope {
             let report = scope.finish();
             eprintln!(

@@ -53,6 +53,17 @@ fn seed(ctx: &MetalContext, w: &mut Workspace, position: usize) {
     w.next_position = position;
 }
 
+/// Half-operand MMA products against the F32 reference.
+fn close_half(a: &[f32], b: &[f32]) {
+    assert_eq!(a.len(), b.len());
+    for (i, (&a, &b)) in a.iter().zip(b).enumerate() {
+        assert!(
+            a.is_finite() && (a - b).abs() <= 2e-3 + 4e-3 * b.abs(),
+            "{i}: {a} != {b}"
+        );
+    }
+}
+
 fn sink_spans(c: &Config, ratio: usize, start: usize, n: usize) -> Vec<(usize, usize, bool)> {
     let matrix = |row: usize| {
         let end = start + row + 1;
@@ -140,47 +151,47 @@ fn compare_case(ctx: &MetalContext, c: &Config, schedule: &Schedule, start: usiz
                 .encode_rows(ctx, enc, id, start, &weights[id], &inputs[id], &rows)
                 .unwrap();
             let census = metal::dispatch_census_take();
-            assert_eq!(
+            let mma = c.head_dim == 512 && c.heads.is_multiple_of(16);
+            let count = |suffix: &str| {
                 census
                     .iter()
-                    .filter(|d| d.kernel.starts_with("kernel_deepseek_v41_attention_score_rows"))
-                    .count(),
-                sink_spans(c, schedule.ratio(id), start, n).len()
-            );
-            for suffix in ["softmax_rows"] {
-                assert_eq!(
-                    census
-                        .iter()
-                        .filter(|d| d.kernel == format!("kernel_deepseek_v41_attention_{suffix}"))
-                        .count(),
-                    sink_spans(c, schedule.ratio(id), start, n).len()
-                );
+                    .filter(|d| d.kernel == format!("kernel_deepseek_v41_attention_{suffix}"))
+                    .count()
+            };
+            if mma {
+                // One MMA sink per 32-query tile; no per-query PV branch.
+                for suffix in ["score_mma", "softmax_rows", "pv_mma", "normalize_rows"] {
+                    assert_eq!(count(suffix), n.div_ceil(TILE), "{suffix}");
+                }
+                assert_eq!(count("score_rows"), 0);
+            } else {
+                for suffix in ["score_rows", "softmax_rows"] {
+                    assert_eq!(
+                        count(suffix),
+                        sink_spans(c, schedule.ratio(id), start, n).len()
+                    );
+                }
             }
             assert!(
                 !census
                     .iter()
                     .any(|d| d.kernel == "kernel_deepseek_v41_attention_score")
             );
-            if c.heads == 64 && c.head_dim == 512 {
-                assert_eq!(
-                    census
-                        .iter()
-                        .filter(|d| d.kernel == "kernel_latent_grouped_f32_f32_m16n64k32")
-                        .count(),
-                    sink_spans(c, schedule.ratio(id), start, n)
-                        .iter()
-                        .filter(|&&(_, queries, matrix)| matrix && queries >= 8)
-                        .count()
-                );
-            }
             batched
                 .finish_rows(ctx, enc, &weights[id], &rows, &output)
                 .unwrap();
         });
-        close(
-            f32_slice(&output).unwrap(),
-            f32_slice(&expected[id][0]).unwrap(),
-        );
+        if c.head_dim == 512 && c.heads.is_multiple_of(16) {
+            close_half(
+                f32_slice(&output).unwrap(),
+                f32_slice(&expected[id][0]).unwrap(),
+            );
+        } else {
+            close(
+                f32_slice(&output).unwrap(),
+                f32_slice(&expected[id][0]).unwrap(),
+            );
+        }
         for row in 0..n {
             let count = batched.selected_count(id, start + row);
             assert_eq!(
@@ -754,7 +765,18 @@ fn sink_case(
             .unwrap();
         }
     });
-    let spans = sink_spans(c, ratio, start, n);
+    // The MMA sink tile (512-wide latent, heads a multiple of 16) has no
+    // per-query PV branch, so its spans are plain 32-query tiles.
+    let mma = c.head_dim == 512 && c.heads.is_multiple_of(16);
+    let spans = if mma {
+        (0..n)
+            .step_by(TILE)
+            .map(|first| (first, (n - first).min(TILE), true))
+            .collect::<Vec<_>>()
+    } else {
+        sink_spans(c, ratio, start, n)
+    };
+    let tolerance = if mma { close_half } else { close };
     let run = |rows: &Rows| {
         let mut depths = (Vec::new(), Vec::new());
         execute(ctx, |enc| {
@@ -772,13 +794,34 @@ fn sink_case(
                     .filter(|d| d.kernel == format!("kernel_deepseek_v41_attention_{suffix}"))
                     .count()
             };
-            assert_eq!(
-                census
-                    .iter()
-                    .filter(|d| d.kernel.starts_with("kernel_deepseek_v41_attention_score_rows"))
-                    .count(),
-                spans.len()
-            );
+            if mma {
+                for suffix in [
+                    "score_mma",
+                    "softmax_rows",
+                    "pv_mma",
+                    "normalize_rows",
+                    "rope_rows",
+                ] {
+                    assert_eq!(count(suffix), spans.len(), "{suffix}");
+                }
+                for suffix in ["score_rows", "matrix_values_rows", "output_rows", "finite"] {
+                    assert_eq!(count(suffix), 0, "{suffix}");
+                }
+                let heights = |suffix: &str| {
+                    census
+                        .iter()
+                        .filter(|d| d.kernel == format!("kernel_deepseek_v41_attention_{suffix}"))
+                        .map(|d| d.grid_height)
+                        .collect::<Vec<_>>()
+                };
+                depths.0 = heights("score_mma");
+                depths.1 = heights("pv_mma");
+                let tiles = spans.iter().map(|&(_, n, _)| n as u64).collect::<Vec<_>>();
+                assert_eq!(depths.0, tiles);
+                assert_eq!(depths.1, tiles);
+                return;
+            }
+            assert_eq!(count("score_rows"), spans.len());
             assert_eq!(count("softmax_rows"), spans.len());
             assert_eq!(count("rope_rows"), spans.len());
             let grouped = census
@@ -790,7 +833,7 @@ fn sink_case(
             assert_eq!(count("output_rows") + grouped.len(), spans.len());
             depths.0 = census
                 .iter()
-                .filter(|d| d.kernel.starts_with("kernel_deepseek_v41_attention_score_rows"))
+                .filter(|d| d.kernel == "kernel_deepseek_v41_attention_score_rows")
                 .map(|d| d.grid_depth)
                 .collect();
             depths.1 = grouped.iter().map(|d| d.grid_depth).collect();
@@ -833,13 +876,13 @@ fn sink_case(
         depths
     };
     let depths = run(&rows);
-    close(
+    tolerance(
         f32_slice(&rows.query).unwrap(),
         f32_slice(&expected).unwrap(),
     );
     assert_eq!(ids(&workspace.status, 1), [0]);
     let &(first, tile, matrix) = spans.last().unwrap();
-    if let Some(matrix) = rows.tile.matrix.as_ref().filter(|_| matrix) {
+    if let Some(matrix) = rows.tile.matrix.as_ref().filter(|_| matrix && !mma) {
         let padded =
             ((start + n).min(c.window) + ((start + n) / ratio).min(c.index_topk)).div_ceil(32) * 32;
         let v = f32_slice(&matrix.values).unwrap();
@@ -898,11 +941,11 @@ fn sink_case(
             .iter()
             .all(|&v| v == 0.0)
     );
-    close(
+    tolerance(
         &f32_slice(&rows.query).unwrap()[..bad_row * width],
         &f32_slice(&expected).unwrap()[..bad_row * width],
     );
-    close(
+    tolerance(
         &f32_slice(&rows.query).unwrap()[(bad_row + 1) * width..],
         &f32_slice(&expected).unwrap()[(bad_row + 1) * width..],
     );
@@ -954,7 +997,9 @@ fn query_batch_group_specific_pv_padding_canaries_and_sticky_errors() {
 }
 
 #[test]
-fn query_batch_native_mixed_threshold_preserves_pv_branch_and_split_census() {
+fn query_batch_mma_geometry_tiles_without_pv_branch_split() {
+    // The released geometry crosses the old 256-key PV threshold inside the
+    // first tile; the MMA sink tile keeps whole 32-query tiles.
     let ctx = MetalContext::new().unwrap();
     let c = Config {
         heads: 64,
@@ -962,13 +1007,12 @@ fn query_batch_native_mixed_threshold_preserves_pv_branch_and_split_census() {
         index_topk: 512,
         ..config()
     };
-    assert_eq!(sink_spans(&c, 1, 126, 32), [(0, 1, false), (1, 31, true)]);
     let (score, pv) = sink_case(&ctx, &c, 126, 32, 1);
-    assert_eq!(score, [1, 31]);
-    assert_eq!(pv, [31]);
+    assert_eq!(score, [32]);
+    assert_eq!(pv, [32]);
     let (score, pv) = sink_case(&ctx, &c, 126, 33, 1);
-    assert_eq!(score, [1, 31, 1]);
-    assert_eq!(pv, [31, 1]);
+    assert_eq!(score, [32, 1]);
+    assert_eq!(pv, [32, 1]);
 }
 
 #[test]

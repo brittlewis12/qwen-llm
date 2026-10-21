@@ -533,3 +533,178 @@ fn f32_pv_batch_performance() {
         }
     }
 }
+
+fn close_half(a: &[f32], b: &[f32]) {
+    assert_eq!(a.len(), b.len());
+    for (i, (&a, &b)) in a.iter().zip(b).enumerate() {
+        assert!(
+            a.is_finite() && (a - b).abs() <= 2e-3 + 4e-3 * b.abs(),
+            "{i}: {a} != {b}"
+        );
+    }
+}
+
+impl Fixture {
+    /// The simdgroup-MMA sink tile: QK^T into the score slab, the shared
+    /// softmax, PV straight from gathered latent rows, then normalize/finite.
+    fn encode_mma(&self, ctx: &MetalContext, enc: &KernelEncoder) {
+        self.bind(enc);
+        pipeline(ctx, enc, "score_mma").unwrap();
+        grid(enc, H / 16, self.n, 1, 128);
+        pipeline(ctx, enc, "softmax_rows").unwrap();
+        grid(enc, H, self.n, 1, 32);
+        pipeline(ctx, enc, "pv_mma").unwrap();
+        grid(enc, H / 16, self.n, 1, 256);
+        let pso = pipeline(ctx, enc, "normalize_rows").unwrap();
+        dispatch(enc, &pso, self.n * H * M);
+    }
+}
+
+#[test]
+fn mma_sink_tile_matches_scalar_sink() {
+    let Some(ctx) = crate::test_fixtures::metal_context_or_skip() else {
+        return;
+    };
+    for (k, n, ragged, first) in cases() {
+        let f = Fixture::new(&ctx, k, n, ragged, first);
+        f.checked(&ctx, Scalar, Scope::Sink);
+        let scalar = f32_slice(&f.output).unwrap().to_vec();
+        let scalar_scores = f32_slice(&f.scores).unwrap().to_vec();
+        execute(&ctx, |enc| f.encode_mma(&ctx, enc));
+        assert_eq!(ids(&f.status, 1), [0], "k={k} n={n} ragged={ragged}");
+        // Half-operand products: scores (post-softmax exp values and
+        // denominators) and outputs agree with the F32 scalar sink at a
+        // half-rounding tolerance.
+        let mma_scores = f32_slice(&f.scores).unwrap();
+        for q in 0..n {
+            let count = f.count(q);
+            for h in 0..H {
+                let base = (q * H + h) * SCORE_STRIDE;
+                close_half(
+                    &mma_scores[base..base + count],
+                    &scalar_scores[base..base + count],
+                );
+                close_half(
+                    &mma_scores[base + SCORE_STRIDE - 1..base + SCORE_STRIDE],
+                    &scalar_scores[base + SCORE_STRIDE - 1..base + SCORE_STRIDE],
+                );
+            }
+        }
+        close_half(f32_slice(&f.output).unwrap(), &scalar);
+        f.check_guards();
+    }
+}
+
+#[test]
+fn mma_sink_tile_invalid_visibility_and_finite_guards() {
+    let Some(ctx) = crate::test_fixtures::metal_context_or_skip() else {
+        return;
+    };
+    let mut f = Fixture::new(&ctx, 512, 8, true, 0);
+    execute(&ctx, |enc| f.encode_mma(&ctx, enc));
+    let valid = f32_slice(&f.output).unwrap().to_vec();
+    let mut selected: Vec<u32> = ids(&f.selected, f.topk * f.n)
+        .into_iter()
+        .map(|id| id as u32)
+        .collect();
+    selected[f.topk] = ((f.start + 2) / f.ratio) as u32; // Populated but not visible to query 1.
+    f.selected = MetalTensor::from_bytes(
+        &ctx,
+        bytemuck::cast_slice(&selected),
+        vec![f.topk as u64, f.n as u64],
+        GgmlType::I32,
+    )
+    .unwrap();
+    execute(&ctx, |enc| f.encode_mma(&ctx, enc));
+    assert_eq!(ids(&f.status, 1), [2]);
+    let got = f32_slice(&f.output).unwrap();
+    for h in 0..H {
+        for q in 0..f.n {
+            let off = (h * f.n + q) * M;
+            if q == 1 {
+                assert!(got[off..off + M].iter().all(|&v| v == 0.0));
+            } else {
+                assert_eq!(got[off..off + M], valid[off..off + M]);
+            }
+        }
+    }
+    let poison = upload(&ctx, &[f32::NAN], vec![1]).unwrap();
+    execute(&ctx, |enc| {
+        copy(
+            &ctx,
+            enc,
+            &poison,
+            &f.history.view_subrange(M as u64, vec![1]),
+            1,
+        )
+        .unwrap()
+    });
+    execute(&ctx, |enc| f.encode_mma(&ctx, enc));
+    assert_eq!(ids(&f.status, 1), [6]);
+    f.check_guards();
+}
+
+/// Opt-in timing of each sink-tile dispatch, old path versus MMA, at the
+/// production tile shape. `QWEN_V41_SINK_TIMING=1`; prints, asserts nothing.
+#[test]
+fn mma_sink_tile_dispatch_timing() {
+    if std::env::var_os("QWEN_V41_SINK_TIMING").is_none() {
+        return;
+    }
+    let ctx = MetalContext::new().expect("Metal");
+    let timed = |label: &str, f: &Fixture, encode: &dyn Fn(&KernelEncoder)| {
+        let mut us = Vec::new();
+        for _ in 0..12 {
+            let command = ctx.queue.commandBuffer().unwrap();
+            let enc = KernelEncoder::begin(&command);
+            encode(&enc);
+            enc.end();
+            metal::commit_and_wait(&command).unwrap();
+            us.push((command.GPUEndTime() - command.GPUStartTime()) * 1e6);
+        }
+        us.sort_by(f64::total_cmp);
+        eprintln!(
+            "sink_timing k={} n={} {label:<26} median {:8.1} us  min {:8.1}",
+            f.k, f.n, us[6], us[0]
+        );
+    };
+    for (k, n) in [(640usize, 32usize), (512, 32), (256, 32)] {
+        let f = Fixture::new(&ctx, k, n, k == 640, 0);
+        // Heat.
+        for _ in 0..20 {
+            execute(&ctx, |enc| f.encode_mma(&ctx, enc));
+        }
+        timed("old score_rows", &f, &|enc| {
+            f.bind(enc);
+            pipeline(&ctx, enc, "score_rows").unwrap();
+            grid(enc, f.count(f.n - 1).div_ceil(8), H, f.n, 256);
+        });
+        timed("mma score", &f, &|enc| {
+            f.bind(enc);
+            pipeline(&ctx, enc, "score_mma").unwrap();
+            grid(enc, H / 16, f.n, 1, 128);
+        });
+        timed("softmax_rows", &f, &|enc| {
+            f.bind(enc);
+            pipeline(&ctx, enc, "softmax_rows").unwrap();
+            grid(enc, H, f.n, 1, 32);
+        });
+        timed("old gather+pv(F32 MMA)+finite", &f, &|enc| {
+            f.encode(&ctx, enc, Production, Scope::PackPvFinite);
+        });
+        timed("mma pv", &f, &|enc| {
+            f.bind(enc);
+            pipeline(&ctx, enc, "pv_mma").unwrap();
+            grid(enc, H / 16, f.n, 1, 256);
+        });
+        timed("normalize_rows", &f, &|enc| {
+            f.bind(enc);
+            let pso = pipeline(&ctx, enc, "normalize_rows").unwrap();
+            dispatch(enc, &pso, f.n * H * M);
+        });
+        timed("full old sink", &f, &|enc| {
+            f.encode(&ctx, enc, Production, Scope::Sink)
+        });
+        timed("full mma sink", &f, &|enc| f.encode_mma(&ctx, enc));
+    }
+}

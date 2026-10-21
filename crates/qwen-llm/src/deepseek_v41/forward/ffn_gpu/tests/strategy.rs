@@ -27,7 +27,18 @@ fn with_rowwise_rows<T>(f: impl FnOnce() -> T) -> T {
     f()
 }
 
-fn assert_census(census: &[metal::DispatchCensusRow], rows: usize, grouped: bool) {
+/// Which routed-expert route a chunk takes.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Route {
+    /// Half-staged generic grouped tiles (the production default above one row).
+    Half,
+    /// F32-operand grouped tiles.
+    F32Grouped,
+    /// Per-row native GEMV with a row axis.
+    Native,
+}
+
+fn assert_census(census: &[metal::DispatchCensusRow], rows: usize, route: Route) {
     let routed: Vec<_> = census
         .iter()
         .filter(|r| {
@@ -41,21 +52,46 @@ fn assert_census(census: &[metal::DispatchCensusRow], rows: usize, grouped: bool
                 )
         })
         .collect();
-    assert_eq!(routed.len(), 6, "{routed:?}");
     assert_eq!(routed[0].kernel, "kernel_deepseek_v41_route");
     assert_eq!(routed[0].grid_width, rows as u64);
-    assert_eq!(routed[3].kernel, "kernel_deepseek_v41_weight");
-    assert_eq!(routed[5].kernel, "kernel_deepseek_v41_sum");
-    if grouped {
-        assert!(routed[1].kernel.contains("bucket"));
-        assert!(routed[2].kernel.starts_with("kernel_moe_swiglu_clamped_"));
-        for i in [2, 4] {
-            assert!(routed[i].kernel.ends_with("_f32x_grouped_slots"));
+    assert_eq!(routed.last().unwrap().kernel, "kernel_deepseek_v41_sum");
+    match route {
+        Route::Half => {
+            // Fused same-type gate/up is one dispatch; other pairs run gate
+            // into the inner scratch, then up with the clamped epilogue.
+            assert!(matches!(routed.len(), 6 | 7), "{routed:?}");
+            assert!(routed[1].kernel.contains("bucket"));
+            let weight = routed.len() - 3;
+            assert_eq!(routed[weight].kernel, "kernel_deepseek_v41_weight");
+            for r in &routed[2..weight] {
+                assert!(
+                    r.kernel.starts_with("kernel_moe_") && !r.kernel.contains("_f32x_"),
+                    "{r:?}"
+                );
+            }
+            assert!(
+                routed[weight + 1]
+                    .kernel
+                    .ends_with("_f32_grouped_slots_generic"),
+                "{routed:?}"
+            );
         }
-    } else {
-        for i in [1, 2, 4] {
-            assert!(routed[i].kernel.starts_with("kernel_expert_native_"));
-            assert_eq!(routed[i].grid_depth, rows as u64);
+        Route::F32Grouped => {
+            assert_eq!(routed.len(), 6, "{routed:?}");
+            assert_eq!(routed[3].kernel, "kernel_deepseek_v41_weight");
+            assert!(routed[1].kernel.contains("bucket"));
+            assert!(routed[2].kernel.starts_with("kernel_moe_swiglu_clamped_"));
+            for i in [2, 4] {
+                assert!(routed[i].kernel.ends_with("_f32x_grouped_slots"));
+            }
+        }
+        Route::Native => {
+            assert_eq!(routed.len(), 6, "{routed:?}");
+            assert_eq!(routed[3].kernel, "kernel_deepseek_v41_weight");
+            for i in [1, 2, 4] {
+                assert!(routed[i].kernel.starts_with("kernel_expert_native_"));
+                assert_eq!(routed[i].grid_depth, rows as u64);
+            }
         }
     }
 }
@@ -208,10 +244,28 @@ fn selected_strategy_threshold_legacy_fallback_and_entrypoints() {
         let layer = &model.layers[0];
         assert_eq!(grouped_supported(c, layer), grouped_cap);
         assert_eq!(native_rows_supported(c, layer), native_cap);
+        // Half-staged generic layouts exist for every listed storage type
+        // except IQ2_XS/IQ2_XXS (native rows) and MXFP4 (F32-operand tiles).
+        let half_cap = ![gate, up, down].iter().any(|dtype| {
+            matches!(
+                dtype,
+                GgmlType::IQ2_XS | GgmlType::IQ2_XXS | GgmlType::MXFP4
+            )
+        });
+        assert_eq!(half_grouped_supported(c, layer), half_cap);
         let ws = Workspace::new(&model).unwrap();
         for n in [1, 3, 7, 31, 33, 65, 127, 128, 129, 257] {
             let grouped = grouped_cap && (!threshold || n >= 128);
             assert_eq!(grouped_selected(c, layer, n), grouped);
+            let half = half_cap && n > 1;
+            assert_eq!(half_grouped_selected(c, layer, n), half);
+            let route = if half {
+                Route::Half
+            } else if grouped {
+                Route::F32Grouped
+            } else {
+                Route::Native
+            };
             let x: Vec<_> = (0..4 * H * n)
                 .map(|i| ((i * 19 + i / (4 * H) * 31) % 101) as f32 / 17.0 - 3.0)
                 .collect();
@@ -230,25 +284,34 @@ fn selected_strategy_threshold_legacy_fallback_and_entrypoints() {
                 assert!(f32_slice(&output).unwrap().iter().all(|v| v.is_finite()));
                 metal::dispatch_census_take()
             };
-            assert_census(&encode(), n, grouped);
+            assert_census(&encode(), n, route);
             let expected: Vec<_> = [9, 12, 13, 14, 5].map(|i| bits(&scratch.buffers[i])).into();
             metal::dispatch_census_begin();
             submit(&ctx, "selected_strategy_routed_ffn", [0; 4], |enc| {
                 ws.encode_routed_rows(&ctx, enc, c, layer, 0, &scratch)
             })
             .unwrap();
-            assert_census(&metal::dispatch_census_take(), n, grouped);
+            assert_census(&metal::dispatch_census_take(), n, route);
             for (i, expected) in [9, 12, 13, 14, 5].into_iter().zip(expected) {
                 assert_eq!(bits(&scratch.buffers[i]), expected);
             }
             if n == 3 {
                 with_grouped_rows(|| {
                     assert_eq!(grouped_selected(c, layer, n), grouped_cap);
-                    assert_census(&encode(), n, grouped_cap);
+                    assert!(!half_grouped_selected(c, layer, n));
+                    assert_census(
+                        &encode(),
+                        n,
+                        if grouped_cap {
+                            Route::F32Grouped
+                        } else {
+                            Route::Native
+                        },
+                    );
                     if native_cap {
                         with_native_rows(|| {
                             assert!(!grouped_selected(c, layer, n));
-                            assert_census(&encode(), n, false);
+                            assert_census(&encode(), n, Route::Native);
                         });
                     }
                     with_rowwise_rows(|| {

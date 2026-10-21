@@ -55,6 +55,10 @@ pub(super) struct Workspace {
     low: MetalTensor,
     output: MetalTensor,
     status: MetalTensor,
+    /// Constant slot ids 0..groups and a READY status, so the eight
+    /// output_a group GEMVs dispatch once through the native expert kernel.
+    group_ids: MetalTensor,
+    ready: MetalTensor,
 }
 
 struct BatchCursor {
@@ -406,6 +410,8 @@ fn shapes(c: &Config, capacity: usize, schedule: &Schedule) -> Result<Vec<usize>
         c.heads * c.head_dim,
         c.groups * c.output_rank,
         c.hidden,
+        1,
+        c.groups,
         1,
     ];
     for &owner in &schedule.kv_source_layers {
@@ -807,6 +813,56 @@ impl Workspace {
             low: f(c.groups * c.output_rank)?,
             output: f(c.hidden)?,
             status: i(1)?,
+            group_ids: {
+                let ids = i(c.groups)?;
+                let p = ids.buffer.contents().as_ptr() as *mut i32;
+                for g in 0..c.groups {
+                    unsafe { p.add(g).write(g as i32) };
+                }
+                ids
+            },
+            ready: {
+                let ready = i(1)?;
+                unsafe {
+                    (ready.buffer.contents().as_ptr() as *mut i32).write(metal::ROUTE_STATUS_READY)
+                };
+                ready
+            },
+        })
+    }
+
+    /// The eight output_a group matrices as one contiguous [group_input,
+    /// output_rank, groups] bank, when their views are adjacent slices of one
+    /// resident tensor (how `bind` creates them).
+    fn output_a_bank(w: &Weights<'_>, c: &Config) -> Option<MetalTensor> {
+        let first = &w.output_a.first()?.tensor;
+        let group_input = c.heads / c.groups * c.head_dim;
+        let (block, block_bytes) = first.dtype.storage_layout()?;
+        if !(group_input as u64).is_multiple_of(block) || w.output_a.len() != c.groups {
+            return None;
+        }
+        let row_bytes = group_input as u64 / block * block_bytes;
+        let group_bytes = row_bytes * c.output_rank as u64;
+        for (g, linear) in w.output_a.iter().enumerate() {
+            let t = &linear.tensor;
+            if !std::ptr::eq(&*t.buffer, &*first.buffer)
+                || t.offset != first.offset + g as u64 * group_bytes
+                || t.dtype != first.dtype
+                || linear.input != group_input
+                || linear.output != c.output_rank
+            {
+                return None;
+            }
+        }
+        if first.offset + group_bytes * c.groups as u64 > first.buffer.length() as u64 {
+            return None;
+        }
+        Some(MetalTensor {
+            buffer: first.buffer.clone(),
+            offset: first.offset,
+            shape: vec![group_input as u64, c.output_rank as u64, c.groups as u64],
+            dtype: first.dtype,
+            provenance: first.provenance(),
         })
     }
 
@@ -1421,18 +1477,47 @@ impl Workspace {
                 true,
             )?;
             let group_width = c.heads / c.groups * c.head_dim;
-            for (group, projection) in w.output_a.iter().enumerate() {
-                linear(
+            match Self::output_a_bank(w, c)
+                .filter(|bank| metal::all_slots_down_native_supported(bank.dtype))
+            {
+                // One dispatch over all groups: slot g reads attended group g
+                // and writes low group g through the same native F32 GEMV the
+                // per-group path uses (experts = groups, ids = 0..groups).
+                Some(bank) => metal::encode_all_slots_down_native(
                     ctx,
                     enc,
-                    projection,
+                    &bank,
                     &self
                         .attended
-                        .view_subrange((group * group_width) as u64, vec![group_width as u64]),
+                        .view_bytes(0, vec![group_width as u64, c.groups as u64]),
+                    &self.group_ids,
+                    &self.ready,
                     &self
                         .low
-                        .view_subrange((group * c.output_rank) as u64, vec![c.output_rank as u64]),
-                )?;
+                        .view_bytes(0, vec![c.output_rank as u64, c.groups as u64]),
+                    group_width,
+                    c.output_rank,
+                    c.groups,
+                    c.groups,
+                )
+                .map_err(|e| e.to_string())?,
+                None => {
+                    for (group, projection) in w.output_a.iter().enumerate() {
+                        linear(
+                            ctx,
+                            enc,
+                            projection,
+                            &self.attended.view_subrange(
+                                (group * group_width) as u64,
+                                vec![group_width as u64],
+                            ),
+                            &self.low.view_subrange(
+                                (group * c.output_rank) as u64,
+                                vec![c.output_rank as u64],
+                            ),
+                        )?;
+                    }
+                }
             }
             linear(ctx, enc, &w.output_b, &self.low, &self.output)?;
             let pso = pipeline(ctx, enc, "finite")?;

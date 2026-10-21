@@ -5,11 +5,36 @@ use super::*;
 #[cfg(test)]
 mod tests;
 
-pub const DEFAULT_CHUNK_ROWS: usize = 1024;
+pub const DEFAULT_CHUNK_ROWS: usize = 2048;
 
 #[cfg(test)]
 thread_local! {
     pub(super) static ROWWISE_LINEAR_ROWS: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    /// Tests holding the F32-operand (NativeF32) contract pin the scalar F32
+    /// grouped projection; production prefers the shared half-staged MMA tiles.
+    pub(super) static F32_LINEAR_ROWS: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+#[cfg(test)]
+pub(super) fn with_f32_linears<T>(f: impl FnOnce() -> T) -> T {
+    struct Restore(bool);
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            F32_LINEAR_ROWS.with(|flag| flag.set(self.0));
+        }
+    }
+    let _restore = Restore(F32_LINEAR_ROWS.with(|flag| flag.replace(true)));
+    f()
+}
+
+/// Multi-row dense projections take the shared half-staged simdgroup-MMA
+/// tiles for packed and BF16 weights. F32 weights (router, mHC projections)
+/// keep the F32-operand grouped kernel: they are small and route-sensitive.
+fn mma_linear_rows_selected(dtype: GgmlType, input: usize, rows: usize) -> bool {
+    rows > 1
+        && dtype != GgmlType::F32
+        && crate::metal_forward::mat_mat_dispatch_supported(dtype)
+        && input.is_multiple_of(32)
 }
 
 #[cfg(test)]
@@ -41,6 +66,31 @@ impl Linear<'_> {
             return Err(metal::MetalError::BadShape {
                 kernel: "v41_linear_rows",
                 detail: "nonempty matching F32 row extents required".into(),
+            });
+        }
+        let mma = mma_linear_rows_selected(self.tensor.dtype, self.input, rows);
+        #[cfg(test)]
+        let mma = mma
+            && !ROWWISE_LINEAR_ROWS.with(|flag| flag.get())
+            && !F32_LINEAR_ROWS.with(|flag| flag.get());
+        if mma {
+            return crate::metal_forward::encode_mat_mat_dispatch_with_policy(
+                self.ctx,
+                enc,
+                &self.tensor,
+                &x.view_bytes(0, vec![self.input as u64, rows as u64]),
+                &y.view_bytes(0, vec![self.output as u64, rows as u64]),
+                self.input,
+                self.output,
+                rows,
+                false,
+            )
+            .map_err(|error| match error {
+                crate::metal_forward::MfError::Metal(error) => error,
+                other => metal::MetalError::BadShape {
+                    kernel: "v41_linear_rows",
+                    detail: format!("mma projection: {other}"),
+                },
             });
         }
         let grouped = metal::grouped_projection_supported(self.tensor.dtype)
@@ -390,6 +440,21 @@ pub(super) fn run_captured(
     cancelled(cancel)?;
     let rows = tokens.len().min(chunk_rows);
     if rows > 1 {
+        // One summary per process: which routed-expert route each layer takes
+        // at the production chunk width (artifact-dependent; see PERF-LOG).
+        static ROUTE_CENSUS_ONCE: std::sync::Once = std::sync::Once::new();
+        ROUTE_CENSUS_ONCE.call_once(|| {
+            let census =
+                super::ffn_gpu::routed_route_census(&model.config, &model.layers, rows);
+            tracing::info!(
+                target: "qwen_diag",
+                "deepseek41: prefill rows={rows} routed experts: half_grouped={} f32_grouped={} native_rows={} per_row={}",
+                census[0],
+                census[1],
+                census[2],
+                census[3]
+            );
+        });
         let mut extra = 0u64;
         for width in gpu_step::chunk_widths(model, state.capacity(), rows)? {
             let bytes = width

@@ -122,9 +122,35 @@ pub(crate) fn with_family_bench<R>(
                 create: || Ok(forward.new_state_with_gpu_step(extent.forwards)?),
                 prefill: |state: &mut qwen_llm::deepseek_v41::forward::State, ids: &[u32]| {
                     shutdown::checkpoint()?;
-                    forward
+                    // Measurement hook (not a product flag): per-layer sampled
+                    // stage envelopes for one prefill, printed to stderr.
+                    let scope = std::env::var_os("QWEN_V41_PREFILL_STAGES")
+                        .map(|_| qwen_llm::deepseek_v41::forward::profile::Scope::begin_stages())
+                        .transpose()
+                        .map_err(anyhow::Error::msg)?;
+                    let logits = forward
                         .prefill(state, ids, Some(shutdown::cancellation_flag()))
-                        .map_err(anyhow::Error::from)
+                        .map_err(anyhow::Error::from)?;
+                    if let Some(scope) = scope {
+                        let report = scope.finish();
+                        eprintln!(
+                            "[v41-prefill-stages] rows={} wall_ms={:.3}",
+                            ids.len(),
+                            report.token_wall_ms
+                        );
+                        for op in &report.operations {
+                            eprintln!(
+                                "[v41-prefill-stages] {} dims={:?} count={} gpu_ms={:?} encode_ms={:.3} wait_ms={:.3}",
+                                op.operation,
+                                op.dimensions,
+                                op.count,
+                                op.gpu_ms,
+                                op.encode_ms,
+                                op.commit_wait_ms
+                            );
+                        }
+                    }
+                    Ok(logits)
                 },
                 step: |state: &mut qwen_llm::deepseek_v41::forward::State, token| {
                     shutdown::checkpoint()?;

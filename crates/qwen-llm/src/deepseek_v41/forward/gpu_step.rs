@@ -166,7 +166,7 @@ impl Workspace {
         let started = profile::start();
         let samples = if profile::stages() {
             Some(
-                ctx.timestamp_sample_buffer(model.layers.len() * 4)
+                ctx.timestamp_sample_buffer(model.layers.len() * 8)
                     .map_err(|e| e.to_string())?,
             )
         } else {
@@ -217,6 +217,16 @@ impl Workspace {
                         &incoming,
                     )
                     .map_err(|e| e.to_string())?;
+                    if let Some(samples) = &samples {
+                        enc.finish();
+                        enc = KernelEncoder::begin_sampled(
+                            &command,
+                            samples,
+                            id * 8 + 2,
+                            id * 8 + 3,
+                            false,
+                        );
+                    }
                 }
                 self.attention.encode_rows(
                     ctx,
@@ -227,6 +237,16 @@ impl Workspace {
                     &hc.normalized,
                     &attention,
                 )?;
+                if let Some(samples) = &samples {
+                    enc.finish();
+                    enc = KernelEncoder::begin_sampled(
+                        &command,
+                        samples,
+                        id * 8 + 4,
+                        id * 8 + 5,
+                        false,
+                    );
+                }
                 self.attention
                     .finish_rows(ctx, &enc, &layer.attention, &attention, &outputs)?;
                 for (position, _, snapshot) in snapshots.iter().filter(|(_, layer, _)| *layer == id)
@@ -255,8 +275,8 @@ impl Workspace {
                     enc = KernelEncoder::begin_sampled(
                         &command,
                         samples,
-                        id * 4 + 2,
-                        id * 4 + 3,
+                        id * 8 + 6,
+                        id * 8 + 7,
                         false,
                     );
                 }
@@ -302,8 +322,8 @@ impl Workspace {
                         enc = KernelEncoder::begin_sampled(
                             &command,
                             samples,
-                            (id + 1) * 4,
-                            (id + 1) * 4 + 1,
+                            (id + 1) * 8,
+                            (id + 1) * 8 + 1,
                             false,
                         );
                     }
@@ -332,11 +352,13 @@ impl Workspace {
         result?;
         if let Some(samples) = &samples {
             let times = ctx
-                .resolve_timestamp_samples(samples, model.layers.len() * 4)
+                .resolve_timestamp_samples(samples, model.layers.len() * 8)
                 .map_err(|e| e.to_string())?;
-            for t in times.chunks_exact(4) {
-                profile::gpu_interval("prefill_attention", n, t[0], t[1]);
-                profile::gpu_interval("prefill_ffn", n, t[2], t[3]);
+            for t in times.chunks_exact(8) {
+                profile::gpu_interval("prefill_attention_hc", n, t[0], t[1]);
+                profile::gpu_interval("prefill_attention_rows", n, t[2], t[3]);
+                profile::gpu_interval("prefill_attention_finish_post", n, t[4], t[5]);
+                profile::gpu_interval("prefill_ffn", n, t[6], t[7]);
             }
         }
         if !skip_ffn {
@@ -496,6 +518,25 @@ impl Workspace {
             self.ffn.next_pre()
         };
         let encode = || -> std::result::Result<(), metal::MetalError> {
+            if hc_gpu::fused_supported(&l.attn_hc) {
+                return hc_gpu::encode_pre(
+                    ctx,
+                    enc,
+                    c,
+                    &l.attn_hc,
+                    &self.constants[id],
+                    &self.x,
+                    hc_gpu::HcPreSite {
+                        mix: &self.raw,
+                        pre: &self.pre,
+                        post: &self.post,
+                        combination: &self.comb,
+                        incoming_pre: incoming,
+                        collapsed: &self.collapsed,
+                        normalized: &self.normalized,
+                    },
+                );
+            }
             l.attn_hc.projection.encode(enc, &self.x, &self.raw)?;
             enc.set_pipeline(&ctx.pipeline("kernel_deepseek_v41_projected_rms")?);
             enc.set_bytes(0, &((4 * c.hidden) as u32));

@@ -378,6 +378,23 @@ fn hybrid_reference_matches_layer_major() {
 
 #[test]
 fn linear_rows_native_f32_q8_and_bf16_with_offsets() {
+    // The F32-operand contract (3e-5) is pinned on the grouped path.
+    with_f32_linears(|| linear_rows_with_offsets(close));
+}
+
+#[test]
+fn linear_rows_mma_q8_and_bf16_with_offsets() {
+    // Production multi-row route: half-staged MMA tiles, judged at a
+    // half-activation tolerance; offsets and untouched rows still hold.
+    linear_rows_with_offsets(|a, b| {
+        assert_eq!(a.len(), b.len());
+        for (i, (&a, &b)) in a.iter().zip(b).enumerate() {
+            assert!((a - b).abs() <= 2e-3 + 4e-3 * b.abs(), "{i}: {a} != {b}");
+        }
+    });
+}
+
+fn linear_rows_with_offsets(check: impl Fn(&[f32], &[f32])) {
     let ctx = MetalContext::new().unwrap();
     let (input, output) = (32, 8);
     for dtype in [GgmlType::F32, GgmlType::Q8_0, GgmlType::BF16] {
@@ -430,7 +447,7 @@ fn linear_rows_native_f32_q8_and_bf16_with_offsets() {
                 .chunks(input)
                 .flat_map(|row| linear.forward(row).unwrap())
                 .collect::<Vec<_>>();
-            close(f32_slice(&view).unwrap(), &expected);
+            check(f32_slice(&view).unwrap(), &expected);
             let all = f32_slice(&y).unwrap();
             assert!(
                 all[..output]

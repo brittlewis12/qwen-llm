@@ -3,7 +3,7 @@ use super::*;
 use objc2_metal::MTLSize;
 
 #[cfg(test)]
-mod tests;
+pub(super) mod tests;
 
 pub(super) struct Workspace {
     // 0 X, 1 incoming pre, 2 projected mixes, 3 next pre, 4 post, 5 comb,
@@ -162,6 +162,10 @@ fn dispatch(enc: &KernelEncoder, n: usize, width: usize) {
     );
 }
 
+/// Threadgroup width of the parallel router; must match ROUTE_THREADS in
+/// kernels/deepseek_v41_ffn.metal.
+const ROUTE_THREADS: usize = 256;
+
 #[repr(C)]
 #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
 struct RouteArgs {
@@ -199,7 +203,19 @@ fn encode_route_rows(
     {
         enc.set_tensor(slot + 1, tensor);
     }
-    dispatch(enc, rows, 1);
+    // One ROUTE_THREADS-wide threadgroup per row (kernel_deepseek_v41_route).
+    enc.dispatch(
+        MTLSize {
+            width: rows,
+            height: 1,
+            depth: 1,
+        },
+        MTLSize {
+            width: ROUTE_THREADS,
+            height: 1,
+            depth: 1,
+        },
+    );
     Ok(())
 }
 
@@ -346,35 +362,55 @@ impl Workspace {
         composition_extents(c, 1)?;
         let b = &self.buffers;
         let constants = &self.constants[id];
-        layer.ffn_hc.projection.encode(enc, x, &b[2])?;
-        enc.set_pipeline(&ctx.pipeline("kernel_deepseek_v41_projected_rms")?);
-        enc.set_bytes(0, &((4 * c.hidden) as u32));
-        enc.set_bytes(1, &c.norm_eps);
-        enc.set_tensor(2, x);
-        enc.set_tensor(3, &b[2]);
-        dispatch(enc, 256, 256);
-        metal::encode_mhc4_controls(
-            ctx,
-            enc,
-            c.hc_eps,
-            &b[2],
-            &constants[0],
-            &constants[1],
-            &b[3],
-            &b[4],
-            &b[5],
-        )?;
-        metal::encode_mhc4_collapse(ctx, enc, c.hidden, x, pre, &b[6])?;
-        metal::encode_rms_norm_mul_rows_f32(
-            ctx,
-            enc,
-            &b[6],
-            &constants[2],
-            &b[7],
-            1,
-            c.hidden,
-            c.norm_eps,
-        )?;
+        if hc_gpu::fused_supported(&layer.ffn_hc) {
+            hc_gpu::encode_pre(
+                ctx,
+                enc,
+                c,
+                &layer.ffn_hc,
+                constants,
+                x,
+                hc_gpu::HcPreSite {
+                    mix: &b[2],
+                    pre: &b[3],
+                    post: &b[4],
+                    combination: &b[5],
+                    incoming_pre: pre,
+                    collapsed: &b[6],
+                    normalized: &b[7],
+                },
+            )?;
+        } else {
+            layer.ffn_hc.projection.encode(enc, x, &b[2])?;
+            enc.set_pipeline(&ctx.pipeline("kernel_deepseek_v41_projected_rms")?);
+            enc.set_bytes(0, &((4 * c.hidden) as u32));
+            enc.set_bytes(1, &c.norm_eps);
+            enc.set_tensor(2, x);
+            enc.set_tensor(3, &b[2]);
+            dispatch(enc, 256, 256);
+            metal::encode_mhc4_controls(
+                ctx,
+                enc,
+                c.hc_eps,
+                &b[2],
+                &constants[0],
+                &constants[1],
+                &b[3],
+                &b[4],
+                &b[5],
+            )?;
+            metal::encode_mhc4_collapse(ctx, enc, c.hidden, x, pre, &b[6])?;
+            metal::encode_rms_norm_mul_rows_f32(
+                ctx,
+                enc,
+                &b[6],
+                &constants[2],
+                &b[7],
+                1,
+                c.hidden,
+                c.norm_eps,
+            )?;
+        }
         layer.router.encode(enc, &b[7], &b[8])?;
         for j in 0..2 {
             layer.shared[j].encode(enc, &b[7], &b[16 + j])?;
@@ -540,7 +576,10 @@ impl Workspace {
             c.clamp,
         )?;
         layer.shared[2].encode_rows(enc, &b[3], &b[4], n)?;
-        if grouped_selected(c, layer, n) || native_rows_supported(c, layer) {
+        if half_grouped_selected(c, layer, n)
+            || grouped_selected(c, layer, n)
+            || native_rows_supported(c, layer)
+        {
             self.encode_routed_rows(ctx, enc, c, layer, id, scratch)?;
         } else {
             for row in 0..n {
@@ -598,12 +637,18 @@ impl Workspace {
             &b[9],
             &status,
         )?;
-        let grouped = grouped_selected(c, layer, n);
+        let half = half_grouped_selected(c, layer, n);
+        let grouped = half || grouped_selected(c, layer, n);
         if grouped {
             metal::encode_moe_route_bucket_slots_f32(
                 ctx, enc, &b[8], &counts, &b[11], c.experts, n, c.topk,
             )?;
-            metal::encode_moe_swiglu_clamped_f32x_grouped_slots(
+            let gate_up = if half {
+                metal::encode_moe_swiglu_clamped_f32_grouped_slots_generic
+            } else {
+                metal::encode_moe_swiglu_clamped_f32x_grouped_slots
+            };
+            gate_up(
                 ctx,
                 enc,
                 layer.banks[0],
@@ -646,7 +691,12 @@ impl Workspace {
         enc.set_bytes(6, &(c.topk as u32));
         dispatch(enc, extents.weighted as usize, 256);
         if grouped {
-            metal::encode_moe_down_f32x_grouped_slots(
+            let down = if half {
+                metal::encode_moe_down_f32_grouped_slots_generic
+            } else {
+                metal::encode_moe_down_f32x_grouped_slots
+            };
+            down(
                 ctx,
                 enc,
                 layer.banks[2],
@@ -685,6 +735,68 @@ impl Workspace {
         dispatch(enc, extents.output as usize, 256);
         Ok(())
     }
+}
+
+/// The half-staged grouped expert tiles GLM and DeepSeek V4 prefill use:
+/// operands rounded to half inside the tile, F32 sums, weights read once per
+/// tile rather than once per row. Covers every expert storage type with a
+/// generic grouped layout (IQ2_S, IQ3_XXS, IQ3_S, Q2_K, Q3_K, ...); MXFP4
+/// banks stay on the F32-operand tiles and IQ2_XXS/IQ2_XS on native rows.
+pub(super) fn half_grouped_supported(c: &Config, layer: &Layer<'_>) -> bool {
+    #[cfg(test)]
+    if tests::NATIVE_ROWS_ONLY.with(|flag| flag.get()) {
+        return false;
+    }
+    #[cfg(test)]
+    if prefill::ROWWISE_LINEAR_ROWS.with(|flag| flag.get()) {
+        return false;
+    }
+    metal::moe_grouped_clamped_recipe(layer.banks[0].dtype, layer.banks[1].dtype).is_some()
+        && metal::moe_grouped_generic_supported(layer.banks[2].dtype)
+        && [
+            (c.hidden, layer.banks[0].dtype),
+            (c.hidden, layer.banks[1].dtype),
+            (c.intermediate, layer.banks[2].dtype),
+        ]
+        .iter()
+        .all(|&(k, dtype)| {
+            dtype
+                .storage_layout()
+                .is_some_and(|(block, _)| (k as u64).is_multiple_of(block.max(32)))
+        })
+}
+
+pub(super) fn half_grouped_selected(c: &Config, layer: &Layer<'_>, rows: usize) -> bool {
+    // Forcing the grouped route in tests means the F32-operand tiles, whose
+    // frozen witnesses hold a 1e-5 contract the half tiles do not claim.
+    #[cfg(test)]
+    if tests::FORCE_GROUPED_ROWS.with(|flag| flag.get()) {
+        return false;
+    }
+    // One row is a GEMV; the tiles only pay off once an expert sees several.
+    rows > 1 && half_grouped_supported(c, layer)
+}
+
+/// Layers per routed-expert route for a chunk of `rows`: half-staged
+/// grouped, F32-operand grouped, native rows, per-row replay.
+pub(super) fn routed_route_census(c: &Config, layers: &[Layer<'_>], rows: usize) -> [usize; 4] {
+    let mut census = [0; 4];
+    for layer in layers
+        .iter()
+        .filter(|layer| layer.banks[0].n_elements() > 0)
+    {
+        let route = if half_grouped_selected(c, layer, rows) {
+            0
+        } else if grouped_selected(c, layer, rows) {
+            1
+        } else if native_rows_supported(c, layer) {
+            2
+        } else {
+            3
+        };
+        census[route] += 1;
+    }
+    census
 }
 
 fn grouped_selected(c: &Config, layer: &Layer<'_>, rows: usize) -> bool {

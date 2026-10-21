@@ -389,125 +389,129 @@ kernel void kernel_moe_swiglu_clamped_grouped_slots_f32x(
 
     const int im = tgpig.z;
     const int r0 = tgpig.y * F32X_NR0;
-    const int r1 = tgpig.x * F32X_NR1_SWIGLU;
 
     const int count = counts[im];
-    if (count < int(args.min_count) || count > int(args.max_count) || r1 >= count) return;
+    if (count < int(args.min_count) || count > int(args.max_count)) return;
 
     const short nr0 = (short)min((int)F32X_NR0, (int)args.ffn - r0);
-    const short nr1 = (short)min((int)F32X_NR1_SWIGLU, count - r1);
-
     const short lr0 = min((short)(tiitg / F32X_NL0), (short)(nr0 - 1));
     const short il0 = tiitg % F32X_NL0;
-    short il = il0;
-    const short lr1 = min((short)(tiitg / F32X_NL1), (short)(nr1 - 1));
     const short iy = 8 * (tiitg % F32X_NL1);
 
     const ulong expert_stride = (ulong)args.nb01 * args.ffn;
-    device const uchar * x_ptr_g = srcA_gate + expert_stride * (ulong)im + (ulong)args.nb01 * (ulong)(r0 + lr0);
-    device const uchar * x_ptr_u = srcA_up   + expert_stride * (ulong)im + (ulong)args.nb01 * (ulong)(r0 + lr0);
     const int slot_limit = int(args.n_tokens * args.topk);
-    const int slot_id = ids[(ulong)im * args.n_tokens + (ulong)(r1 + lr1)];
-    const bool slot_valid = slot_id >= 0 && slot_id < slot_limit;
-    const int token = (slot_valid ? slot_id : 0) / int(args.topk);
-    device const float * y_ptr = srcB + (ulong)args.stride_b * (ulong)token + (ulong)iy;
 
-    simdgroup_float8x8 ma_g[4];
-    simdgroup_float8x8 ma_u[4];
-    simdgroup_float8x8 mb;
-    simdgroup_float8x8 mc_g[4];
-    simdgroup_float8x8 mc_u[4];
-    F32X_FOR_UNROLL (short i = 0; i < 4; ++i) {
-        mc_g[i] = make_filled_simdgroup_matrix<float, 8>(0.0f);
-        mc_u[i] = make_filled_simdgroup_matrix<float, 8>(0.0f);
-    }
+    // One threadgroup walks the expert's whole bucket in 16-slot tiles.
+    // The grid no longer pays for empty x bins (average 16 slots per expert
+    // out of a 1024-row prompt).
+    for (int r1 = 0; r1 < count; r1 += F32X_NR1_SWIGLU) {
+        const short nr1 = (short)min((int)F32X_NR1_SWIGLU, count - r1);
+        const short lr1 = min((short)(tiitg / F32X_NL1), (short)(nr1 - 1));
+        short il = il0;
+        device const uchar * x_ptr_g = srcA_gate + expert_stride * (ulong)im + (ulong)args.nb01 * (ulong)(r0 + lr0);
+        device const uchar * x_ptr_u = srcA_up   + expert_stride * (ulong)im + (ulong)args.nb01 * (ulong)(r0 + lr0);
+        const int slot_id = ids[(ulong)im * args.n_tokens + (ulong)(r1 + lr1)];
+        const bool slot_valid = slot_id >= 0 && slot_id < slot_limit;
+        const int token = (slot_valid ? slot_id : 0) / int(args.topk);
+        device const float * y_ptr = srcB + (ulong)args.stride_b * (ulong)token + (ulong)iy;
 
-    for (uint loop_k = 0; loop_k < args.hidden; loop_k += F32X_NK) {
-        float4x4 temp_g;
-        float4x4 temp_u;
-        DEQ(x_ptr_g, il, temp_g);
-        DEQ(x_ptr_u, il, temp_u);
+        simdgroup_float8x8 ma_g[4];
+        simdgroup_float8x8 ma_u[4];
+        simdgroup_float8x8 mb;
+        simdgroup_float8x8 mc_g[4];
+        simdgroup_float8x8 mc_u[4];
+        F32X_FOR_UNROLL (short i = 0; i < 4; ++i) {
+            mc_g[i] = make_filled_simdgroup_matrix<float, 8>(0.0f);
+            mc_u[i] = make_filled_simdgroup_matrix<float, 8>(0.0f);
+        }
 
+        for (uint loop_k = 0; loop_k < args.hidden; loop_k += F32X_NK) {
+            float4x4 temp_g;
+            float4x4 temp_u;
+            DEQ(x_ptr_g, il, temp_g);
+            DEQ(x_ptr_u, il, temp_u);
+
+            threadgroup_barrier(mem_flags::mem_threadgroup);
+
+            F32X_FOR_UNROLL (short i = 0; i < 16; ++i) {
+                const short sx = 2 * il0 + i / 8;
+                const short sy = (tiitg / F32X_NL0) / 8;
+                const short lx = (tiitg / F32X_NL0) % 8;
+                const short ly = i % 8;
+                const short ib = 8 * sx + sy;
+                sa_g[64 * ib + 8 * ly + lx] = temp_g[i / 4][i % 4];
+                sa_u[64 * ib + 8 * ly + lx] = temp_u[i / 4][i % 4];
+            }
+            if (tiitg < F32X_NR1_SWIGLU * F32X_NL1) {
+                const short sx = tiitg % F32X_NL1;
+                const short sy = (tiitg / F32X_NL1) / 8;
+                const short ly = (tiitg / F32X_NL1) % 8;
+                const short ib = 2 * sx + sy;
+                *(threadgroup float2x4 *)(sb + 64 * ib + 8 * ly) =
+                    *((device const float2x4 *)y_ptr);
+            }
+
+            il = (il + 2 < NL) ? il + 2 : il % 2;
+            x_ptr_g = (il < 2) ? x_ptr_g + BYTES * ((2 + NL - 1) / NL) : x_ptr_g;
+            x_ptr_u = (il < 2) ? x_ptr_u + BYTES * ((2 + NL - 1) / NL) : x_ptr_u;
+            y_ptr += F32X_NK;
+
+            threadgroup_barrier(mem_flags::mem_threadgroup);
+
+            threadgroup const float * lsma_g = sa_g + 4 * 64 * (sgitg % 2);
+            threadgroup const float * lsma_u = sa_u + 4 * 64 * (sgitg % 2);
+            threadgroup const float * lsmb   = sb   + 1 * 64 * (sgitg / 2);
+            F32X_FOR_UNROLL (short ik = 0; ik < F32X_NK / 8; ++ik) {
+                simdgroup_barrier(mem_flags::mem_none);
+                F32X_FOR_UNROLL (short i = 0; i < 4; ++i) {
+                    simdgroup_load(ma_g[i], lsma_g + 64 * i, 8, 0, false);
+                    simdgroup_load(ma_u[i], lsma_u + 64 * i, 8, 0, false);
+                }
+                simdgroup_barrier(mem_flags::mem_none);
+                simdgroup_load(mb, lsmb, 8, 0, false);
+                simdgroup_barrier(mem_flags::mem_none);
+                F32X_FOR_UNROLL (short i = 0; i < 4; ++i) {
+                    simdgroup_multiply_accumulate(mc_g[i], mb, ma_g[i], mc_g[i]);
+                    simdgroup_multiply_accumulate(mc_u[i], mb, ma_u[i], mc_u[i]);
+                }
+                lsma_g += 8 * 64;
+                lsma_u += 8 * 64;
+                lsmb   += 2 * 64;
+            }
+        }
+
+        // Stage gate and up results (slot-major, 64 x 16 each) over the gate
+        // tile, then apply the epilogue to in-range outputs of valid slots.
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+        threadgroup float * temp_str_g = shmem
+                                         + 32 * (sgitg & 1)
+                                         + (8 * (sgitg >> 1)) * F32X_NR0;
+        threadgroup float * temp_str_u = shmem + F32X_NR0 * F32X_NR1_SWIGLU
+                                         + 32 * (sgitg & 1)
+                                         + (8 * (sgitg >> 1)) * F32X_NR0;
+        F32X_FOR_UNROLL (short i = 0; i < 4; ++i) {
+            simdgroup_store(mc_g[i], temp_str_g + 8 * i, F32X_NR0, 0, false);
+            simdgroup_store(mc_u[i], temp_str_u + 8 * i, F32X_NR0, 0, false);
+        }
         threadgroup_barrier(mem_flags::mem_threadgroup);
 
-        F32X_FOR_UNROLL (short i = 0; i < 16; ++i) {
-            const short sx = 2 * il0 + i / 8;
-            const short sy = (tiitg / F32X_NL0) / 8;
-            const short lx = (tiitg / F32X_NL0) % 8;
-            const short ly = i % 8;
-            const short ib = 8 * sx + sy;
-            sa_g[64 * ib + 8 * ly + lx] = temp_g[i / 4][i % 4];
-            sa_u[64 * ib + 8 * ly + lx] = temp_u[i / 4][i % 4];
-        }
-        if (tiitg < F32X_NR1_SWIGLU * F32X_NL1) {
-            const short sx = tiitg % F32X_NL1;
-            const short sy = (tiitg / F32X_NL1) / 8;
-            const short ly = (tiitg / F32X_NL1) % 8;
-            const short ib = 2 * sx + sy;
-            *(threadgroup float2x4 *)(sb + 64 * ib + 8 * ly) =
-                *((device const float2x4 *)y_ptr);
-        }
-
-        il = (il + 2 < NL) ? il + 2 : il % 2;
-        x_ptr_g = (il < 2) ? x_ptr_g + BYTES * ((2 + NL - 1) / NL) : x_ptr_g;
-        x_ptr_u = (il < 2) ? x_ptr_u + BYTES * ((2 + NL - 1) / NL) : x_ptr_u;
-        y_ptr += F32X_NK;
-
-        threadgroup_barrier(mem_flags::mem_threadgroup);
-
-        threadgroup const float * lsma_g = sa_g + 4 * 64 * (sgitg % 2);
-        threadgroup const float * lsma_u = sa_u + 4 * 64 * (sgitg % 2);
-        threadgroup const float * lsmb   = sb   + 1 * 64 * (sgitg / 2);
-        F32X_FOR_UNROLL (short ik = 0; ik < F32X_NK / 8; ++ik) {
-            simdgroup_barrier(mem_flags::mem_none);
-            F32X_FOR_UNROLL (short i = 0; i < 4; ++i) {
-                simdgroup_load(ma_g[i], lsma_g + 64 * i, 8, 0, false);
-                simdgroup_load(ma_u[i], lsma_u + 64 * i, 8, 0, false);
-            }
-            simdgroup_barrier(mem_flags::mem_none);
-            simdgroup_load(mb, lsmb, 8, 0, false);
-            simdgroup_barrier(mem_flags::mem_none);
-            F32X_FOR_UNROLL (short i = 0; i < 4; ++i) {
-                simdgroup_multiply_accumulate(mc_g[i], mb, ma_g[i], mc_g[i]);
-                simdgroup_multiply_accumulate(mc_u[i], mb, ma_u[i], mc_u[i]);
-            }
-            lsma_g += 8 * 64;
-            lsma_u += 8 * 64;
-            lsmb   += 2 * 64;
-        }
-    }
-
-    // Stage gate and up results (slot-major, 64 x 16 each) over the gate
-    // tile, then apply the epilogue to in-range outputs of valid slots.
-    threadgroup_barrier(mem_flags::mem_threadgroup);
-    threadgroup float * temp_str_g = shmem
-                                     + 32 * (sgitg & 1)
-                                     + (8 * (sgitg >> 1)) * F32X_NR0;
-    threadgroup float * temp_str_u = shmem + F32X_NR0 * F32X_NR1_SWIGLU
-                                     + 32 * (sgitg & 1)
-                                     + (8 * (sgitg >> 1)) * F32X_NR0;
-    F32X_FOR_UNROLL (short i = 0; i < 4; ++i) {
-        simdgroup_store(mc_g[i], temp_str_g + 8 * i, F32X_NR0, 0, false);
-        simdgroup_store(mc_u[i], temp_str_u + 8 * i, F32X_NR0, 0, false);
-    }
-    threadgroup_barrier(mem_flags::mem_threadgroup);
-
-    const short m_off = 32 * (sgitg & 1);
-    const short n_off = 8 * (sgitg >> 1);
-    const short m_local = (short)tiitg & 31;
-    const short tile_i = m_local >> 3;
-    const short mr = m_local & 7;
-    const int global_m = r0 + m_off + m_local;
-    const bool m_in = global_m < (int)args.ffn;
-    for (short c = 0; c < 8; ++c) {
-        const int global_n = r1 + n_off + c;
-        if (m_in && global_n < count) {
-            const float g_val = temp_str_g[(8 * tile_i + mr) + c * F32X_NR0];
-            const float u_val = temp_str_u[(8 * tile_i + mr) + c * F32X_NR0];
-            const int slot = ids[(ulong)im * args.n_tokens + (ulong)global_n];
-            if (slot >= 0 && slot < slot_limit) {
-                dst[(ulong)global_m + (ulong)slot * args.ffn] =
-                    f32x_silu(min(g_val, limit)) * clamp(u_val, -limit, limit);
+        const short m_off = 32 * (sgitg & 1);
+        const short n_off = 8 * (sgitg >> 1);
+        const short m_local = (short)tiitg & 31;
+        const short tile_i = m_local >> 3;
+        const short mr = m_local & 7;
+        const int global_m = r0 + m_off + m_local;
+        const bool m_in = global_m < (int)args.ffn;
+        for (short c = 0; c < 8; ++c) {
+            const int global_n = r1 + n_off + c;
+            if (m_in && global_n < count) {
+                const float g_val = temp_str_g[(8 * tile_i + mr) + c * F32X_NR0];
+                const float u_val = temp_str_u[(8 * tile_i + mr) + c * F32X_NR0];
+                const int slot = ids[(ulong)im * args.n_tokens + (ulong)global_n];
+                if (slot >= 0 && slot < slot_limit) {
+                    dst[(ulong)global_m + (ulong)slot * args.ffn] =
+                        f32x_silu(min(g_val, limit)) * clamp(u_val, -limit, limit);
+                }
             }
         }
     }

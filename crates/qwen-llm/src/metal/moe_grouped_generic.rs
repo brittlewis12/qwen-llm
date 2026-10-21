@@ -601,8 +601,8 @@ fn encode_fused_swiglu(
         }
     };
     dispatch_fused_swiglu(
-        ctx, enc, &name, 16384, 16, l, w_gate, w_up, x_pack, counts, ids, inner, n_hidden, n_ffn,
-        n_expert, topk, n_tokens, min_count, max_count, clamp,
+        ctx, enc, &name, 16384, 16, false, l, w_gate, w_up, x_pack, counts, ids, inner, n_hidden,
+        n_ffn, n_expert, topk, n_tokens, min_count, max_count, clamp,
     )
 }
 
@@ -615,6 +615,7 @@ fn dispatch_fused_swiglu(
     name: &str,
     threadgroup_bytes: usize,
     tokens_per_tile: usize,
+    compact: bool,
     l: MoeGroupedGenericLayout,
     w_gate: &MetalTensor,
     w_up: &MetalTensor,
@@ -672,7 +673,11 @@ fn dispatch_fused_swiglu(
     enc.set_threadgroup_memory(0, threadgroup_bytes);
     enc.dispatch(
         MTLSize {
-            width: n_tokens.div_ceil(tokens_per_tile),
+            width: if compact {
+                1
+            } else {
+                n_tokens.div_ceil(tokens_per_tile)
+            },
             height: n_ffn.div_ceil(64),
             depth: n_expert,
         },
@@ -1310,6 +1315,7 @@ pub fn encode_moe_swiglu_clamped_f32x_grouped_slots(
         name,
         SWIGLU_F32X_THREADGROUP_BYTES,
         16,
+        true,
         l,
         w_gate,
         w_up,
@@ -1444,6 +1450,7 @@ pub fn encode_moe_swiglu_clamped_f32_grouped_slots_split(
             name,
             16384,
             tokens_per_tile,
+            false,
             l,
             w_gate,
             w_up,

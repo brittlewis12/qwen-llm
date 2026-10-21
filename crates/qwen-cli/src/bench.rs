@@ -72,6 +72,8 @@ mod prefix_cache_vt_ab;
 #[path = "bench/proj_micro.rs"]
 mod proj_micro;
 use qwen_cli::{messages, prompt_template};
+#[path = "bench/fat_gemv.rs"]
+mod fat_gemv;
 mod q4_mma_ceiling;
 mod residency_kill_child;
 #[path = "bench/roofline.rs"]
@@ -673,6 +675,7 @@ fn run() -> Result<()> {
         Cmd::MoeGateupMicro(a) => run_moe_gateup_micro(a),
         Cmd::MoeBatchSweep(a) => run_moe_batch_sweep(a),
         Cmd::Roofline(a) => run_roofline(a),
+        Cmd::GemvFat(a) => fat_gemv::run(a),
         Cmd::RopeMicro(a) => rope_micro::run(a, serde_json::to_value(recorded_build_identity())?),
         Cmd::ResidencyKillChild(a) => residency_kill_child::run(a),
         Cmd::SamplerReplay(a) => {

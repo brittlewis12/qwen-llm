@@ -120,6 +120,8 @@ pub(crate) enum Cmd {
     MoeBatchSweep(MoeBatchSweepArgs),
     /// Calibrate simple device bandwidth and arithmetic ceilings.
     Roofline(RooflineArgs),
+    /// Compare native, tuned, and fat Q8_0 decode GEMV geometry at a production shape.
+    GemvFat(GemvFatArgs),
     /// Compare native, shared-head, and minimax RoPE kernels without a model.
     RopeMicro(rope_micro::RopeMicroArgs),
     /// Attribute the production-grid Q4_K N64 schedule with synthetic bounds.
@@ -919,6 +921,31 @@ pub(crate) struct RooflineArgs {
     pub(crate) mat_query: usize,
     /// Timed repetitions after one warmup dispatch per kernel.
     #[arg(long, default_value = "5")]
+    pub(crate) runs: usize,
+    /// `text` or compact `json`.
+    #[arg(short = 'o', long, value_enum, default_value = "text")]
+    pub(crate) output: OutputFormat,
+}
+
+#[derive(Parser, Debug)]
+pub(crate) struct GemvFatArgs {
+    /// Weight storage. Only `q8_0` is implemented in this probe.
+    #[arg(long, default_value = "q8_0")]
+    pub(crate) dtype: String,
+    /// Input width (Q8_0 requires a positive multiple of 32).
+    #[arg(long, default_value = "5120")]
+    pub(crate) n_in: usize,
+    /// Output width.
+    #[arg(long, default_value = "32768")]
+    pub(crate) n_out: usize,
+    /// Fat-kernel output rows per simdgroup: 2, 4, or 8.
+    #[arg(long, default_value = "4")]
+    pub(crate) rows_per_simdgroup: usize,
+    /// Fat-kernel simdgroups per threadgroup: 1, 2, or 4.
+    #[arg(long, default_value = "2")]
+    pub(crate) simdgroups: usize,
+    /// Timed repetitions after warmup.
+    #[arg(long, default_value = "20")]
     pub(crate) runs: usize,
     /// `text` or compact `json`.
     #[arg(short = 'o', long, value_enum, default_value = "text")]

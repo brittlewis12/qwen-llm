@@ -107,6 +107,22 @@ impl Workspace {
         input: &MetalTensor,
         rows: &Rows,
     ) -> Result<()> {
+        self.encode_rows_prepare(ctx, enc, id, start, w, input, rows)?;
+        self.encode_rows_serial(ctx, enc, id, start, w, input, rows)?;
+        self.encode_rows_tiles(ctx, enc, id, start, rows)
+    }
+
+    /// Projections, RoPE, history gather and raw-ring publish for the chunk.
+    pub(in super::super) fn encode_rows_prepare(
+        &mut self,
+        ctx: &MetalContext,
+        enc: &KernelEncoder,
+        id: usize,
+        start: usize,
+        w: &Weights<'_>,
+        input: &MetalTensor,
+        rows: &Rows,
+    ) -> Result<()> {
         op::require(!enc.is_concurrent(), "query batch requires serial encoder")?;
         op::require(
             self.batch.as_ref().is_some_and(|b| {
@@ -180,7 +196,21 @@ impl Workspace {
         // still gathers its old prefix. Each physical slot has one writer.
         let pso = pipeline(ctx, enc, "publish_raw")?;
         dispatch(enc, &pso, rows.rows.min(c.window) * c.head_dim);
+        Ok(())
+    }
 
+    /// Position-ordered compressor, index and selection transitions, one row
+    /// at a time (no dispatches on layers that own neither).
+    pub(in super::super) fn encode_rows_serial(
+        &mut self,
+        ctx: &MetalContext,
+        enc: &KernelEncoder,
+        id: usize,
+        start: usize,
+        w: &Weights<'_>,
+        input: &MetalTensor,
+        rows: &Rows,
+    ) -> Result<()> {
         for row in 0..rows.rows {
             self.encode_batch_row(
                 ctx,
@@ -193,6 +223,19 @@ impl Workspace {
                 row,
             )?;
         }
+        Ok(())
+    }
+
+    /// Scores, softmax with sink, value accumulation and inverse RoPE per
+    /// 32-query tile.
+    pub(in super::super) fn encode_rows_tiles(
+        &self,
+        ctx: &MetalContext,
+        enc: &KernelEncoder,
+        id: usize,
+        start: usize,
+        rows: &Rows,
+    ) -> Result<()> {
         for first in (0..rows.rows).step_by(TILE) {
             self.sink_tile(
                 ctx,

@@ -166,7 +166,7 @@ impl Workspace {
         let started = profile::start();
         let samples = if profile::stages() {
             Some(
-                ctx.timestamp_sample_buffer(model.layers.len() * 8)
+                ctx.timestamp_sample_buffer(model.layers.len() * 12)
                     .map_err(|e| e.to_string())?,
             )
         } else {
@@ -215,12 +215,12 @@ impl Workspace {
                     enc = KernelEncoder::begin_sampled(
                         &command,
                         samples,
-                        id * 8 + 2,
-                        id * 8 + 3,
+                        id * 12 + 2,
+                        id * 12 + 3,
                         false,
                     );
                 }
-                self.attention.encode_rows(
+                self.attention.encode_rows_prepare(
                     ctx,
                     &enc,
                     id,
@@ -234,8 +234,39 @@ impl Workspace {
                     enc = KernelEncoder::begin_sampled(
                         &command,
                         samples,
-                        id * 8 + 4,
-                        id * 8 + 5,
+                        id * 12 + 4,
+                        id * 12 + 5,
+                        false,
+                    );
+                }
+                self.attention.encode_rows_serial(
+                    ctx,
+                    &enc,
+                    id,
+                    start,
+                    &layer.attention,
+                    &hc.normalized,
+                    &attention,
+                )?;
+                if let Some(samples) = &samples {
+                    enc.finish();
+                    enc = KernelEncoder::begin_sampled(
+                        &command,
+                        samples,
+                        id * 12 + 6,
+                        id * 12 + 7,
+                        false,
+                    );
+                }
+                self.attention
+                    .encode_rows_tiles(ctx, &enc, id, start, &attention)?;
+                if let Some(samples) = &samples {
+                    enc.finish();
+                    enc = KernelEncoder::begin_sampled(
+                        &command,
+                        samples,
+                        id * 12 + 8,
+                        id * 12 + 9,
                         false,
                     );
                 }
@@ -265,8 +296,8 @@ impl Workspace {
                     enc = KernelEncoder::begin_sampled(
                         &command,
                         samples,
-                        id * 8 + 6,
-                        id * 8 + 7,
+                        id * 12 + 10,
+                        id * 12 + 11,
                         false,
                     );
                 }
@@ -310,8 +341,8 @@ impl Workspace {
                         enc = KernelEncoder::begin_sampled(
                             &command,
                             samples,
-                            (id + 1) * 8,
-                            (id + 1) * 8 + 1,
+                            (id + 1) * 12,
+                            (id + 1) * 12 + 1,
                             false,
                         );
                     }
@@ -340,7 +371,7 @@ impl Workspace {
         result?;
         if let Some(samples) = &samples {
             let times = ctx
-                .resolve_timestamp_samples(samples, model.layers.len() * 8)
+                .resolve_timestamp_samples(samples, model.layers.len() * 12)
                 .map_err(|e| e.to_string())?;
             for (layer, t) in times.chunks_exact(8).enumerate() {
                 profile::gpu_interval_layer("prefill_attention_hc", n, layer, t[0], t[1]);

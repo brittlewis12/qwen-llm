@@ -18,6 +18,61 @@ questions the evidence has closed. Dated measurements remain in
   [DEEPSEEK-V41-STRATEGY](DEEPSEEK-V41-STRATEGY.md) and
   [DEEPSEEK-V41-BRINGUP](DEEPSEEK-V41-BRINGUP.md).
 
+## Open leverage map (living; read before starting a bet, update when you start or finish one)
+
+Numbers are M5 Ultra unless noted. A bet is one line: what, measured or
+expected effect, status. Status is one of `open`, `in flight (branch)`,
+`landed (entry)`, or `negative (packet)`. Claim a bet by setting it to
+`in flight` with your branch; a second lane finding it claimed reads the branch
+before building anything adjacent. This replaces relaying between sessions.
+
+### DeepSeek V4.1-Flash (IQ3_XXS, `main 24ec157e`: pp2048 266 tok/s, tg32 40.8, tg32@d2048 41.6)
+
+Decode budget at depth 2048, 22.3 ms/token: ~10.2 ms bytes (11.1 GiB at the
+~1.09 TB/s the GEMV probe reaches), ~8 ms dispatch floor (~1,600 dispatches),
+~4 ms spread thin. Prefill budget per 2048-token chunk, sampled spans
+(`QWEN_V41_PREFILL_STAGES=1`, packet 2026-10-21): FFN 39%, attention tiles
+(QK^T/softmax/PV) 32%, owner/producer per-row loops 13%, output projections
+8%, prepare 6%, HC 2%.
+
+- Attention tiles via simdgroup MMA (half-staged Q/K/V, F32 sums), replacing
+  the scalar `score_rows` and the gather+GEMM PV: in flight
+  (`perf/v41-prefill-attn`, scalar-equivalence tests pass; pp2048 pending).
+  Supersedes scalar score-kernel tuning if it wins.
+- IQ2_XXS/IQ2_XS expert layers off the native-rows path (five IQ3 layers were
+  21% of prefill at 312-329 ms each): two implementations exist, F32-operand
+  grouped tiles (`perf/v41-chunk-1024`, `2c51322f`) and half generic layouts
+  (`perf/v41-prefill-attn`); keep the faster on one ABBA, drop the other.
+- MXFP4 generic half layout: +1.6% alone (negative-ish, packet 2026-10-21);
+  needed for the IQ2 half route on layers whose down is MXFP4.
+- Expert tile efficiency (~8.7 TFLOPS on half-staged tiles, decode-bound at
+  32 rows/expert): open. Tried: 2048-row chunks +5.6% (landed); 32-slot
+  gate/up tile +0.25-0.9% (negative, `perf/v41-chunk-1024`); 4096-row chunks
+  untested.
+- Owner/producer per-row loops (compressor, index key, selection; 8 layers,
+  grows with prompt length): open. Partial: fuse per-group norm+RoPE+copies
+  (`perf/v41-chunk-1024`, in progress).
+- Scalar score kernel tuning: 4 keys/simdgroup +3.0%, 8-lane +1.2%
+  (`perf/v41-chunk-1024`); moot if the MMA tile lands.
+- Decode: fused attention core, routed gate/up fusion, rope/copy fusion are
+  each <= 1 ms/token: open, low priority. Fused decode expert chain: +1%/+0%
+  (negative, packet 2026-10-20). Q8_0 attention projections (5.1 GB/token)
+  requant to Q6_K: ~-1 ms, quality-sensitive, open.
+- Prefill dispatch census tool (`perf/v41-chunk-1024`, `6b46594e`): worth
+  landing with its branch.
+
+### Qwen3.8 Flash-Next
+
+- Native MTP heads (Unsloth): acceptance probe is the gate before building;
+  open.
+- GSQ-RCO IQ3_S artifact: M5 quality option, -7 to -11% decode on M4; not an
+  M4 default (packet 2026-10-20).
+
+### GLM-5.3-Flash
+
+- Near the M4 bandwidth wall; M5 expert tensor-ops tier is owned by the
+  maintainability lane.
+
 ## Closed questions
 
 - The owned-arena loader did not pass loaded-decode and whole-request gates;

@@ -267,7 +267,12 @@ fn f16_scale_offsets(dtype: GgmlType) -> &'static [usize] {
         GgmlType::Q2_K => &[80, 82],
         GgmlType::Q3_K => &[108],
         GgmlType::Q6_K => &[208],
-        GgmlType::IQ2_S | GgmlType::IQ3_XXS | GgmlType::IQ3_S | GgmlType::IQ4_XS => &[0],
+        GgmlType::IQ2_S
+        | GgmlType::IQ2_XS
+        | GgmlType::IQ2_XXS
+        | GgmlType::IQ3_XXS
+        | GgmlType::IQ3_S
+        | GgmlType::IQ4_XS => &[0],
         GgmlType::MXFP4 => &[],
         other => panic!("no synthetic block recipe for {other:?}"),
     }
@@ -706,6 +711,8 @@ generic_grouped_moe_cases! {
     generic_grouped_moe_down_iq3_xxs_matches_cpu, generic_grouped_moe_gate_up_iq3_xxs_matches_cpu => GgmlType::IQ3_XXS;
     generic_grouped_moe_down_iq3_s_matches_cpu, generic_grouped_moe_gate_up_iq3_s_matches_cpu => GgmlType::IQ3_S;
     generic_grouped_moe_down_mxfp4_matches_cpu, generic_grouped_moe_gate_up_mxfp4_matches_cpu => GgmlType::MXFP4;
+    generic_grouped_moe_down_iq2_xs_matches_cpu, generic_grouped_moe_gate_up_iq2_xs_matches_cpu => GgmlType::IQ2_XS;
+    generic_grouped_moe_down_iq2_xxs_matches_cpu, generic_grouped_moe_gate_up_iq2_xxs_matches_cpu => GgmlType::IQ2_XXS;
     generic_grouped_moe_down_iq4_nl_matches_cpu, generic_grouped_moe_gate_up_iq4_nl_matches_cpu => GgmlType::IQ4_NL;
     generic_grouped_moe_down_iq4_xs_matches_cpu, generic_grouped_moe_gate_up_iq4_xs_matches_cpu => GgmlType::IQ4_XS;
     generic_grouped_moe_down_f32_matches_cpu, generic_grouped_moe_gate_up_f32_matches_cpu => GgmlType::F32;

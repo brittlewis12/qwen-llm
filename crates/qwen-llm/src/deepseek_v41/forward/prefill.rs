@@ -148,6 +148,7 @@ fn run_hybrid(
     if rows > 1 {
         let census = super::ffn_gpu::routed_route_census(&model.config, &model.layers, rows);
         tracing::info!(
+            target: "qwen_diag",
             "deepseek41: prefill rows={rows} routed experts: half_grouped={} f32_grouped={} native_rows={} per_row={}",
             census[0],
             census[1],

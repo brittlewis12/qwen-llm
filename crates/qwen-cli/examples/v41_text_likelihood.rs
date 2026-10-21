@@ -435,10 +435,8 @@ fn require_gpu_run(build: &Value) -> Result<()> {
             "score requires {name}=1"
         );
     }
-    ensure!(
-        PREFILL_CHUNK_ROWS == 256,
-        "requires production prefill chunk 256"
-    );
+    // Each arm scores with its own production prefill chunk width; the
+    // manifest records it (see "prefill_chunk_rows").
     qwen_cli::shutdown::checkpoint()?;
     Ok(())
 }

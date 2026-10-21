@@ -266,6 +266,95 @@ fn report(label: &str, f: &Fixture, stage_us: Vec<f64>, gate_us: Vec<f64>) {
     );
 }
 
+#[repr(C)]
+#[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+struct RouteArgs {
+    experts: u32,
+    topk: u32,
+    temperature: f32,
+    scale: f32,
+}
+
+/// The production single-thread router at the V4.1 decode shape
+/// (kernel_deepseek_v41_route: 384 experts, top-6, one row).
+fn route_probe(ctx: &MetalContext) {
+    const EXPERTS: usize = 384;
+    let logits: Vec<f32> = (0..EXPERTS)
+        .map(|i| (((i * 37 + 11) % 101) as f32 - 50.0) * 0.07)
+        .collect();
+    let bias: Vec<f32> = (0..EXPERTS)
+        .map(|i| ((i % 13) as f32 - 6.0) * 0.01)
+        .collect();
+    let logits_t = f32_tensor(ctx, &logits, &[EXPERTS as u64]);
+    let bias_t = f32_tensor(ctx, &bias, &[EXPERTS as u64]);
+    let scores_t = MetalTensor::zeros_f32(ctx, vec![EXPERTS as u64]).expect("scores");
+    let ids_t = MetalTensor::from_bytes(
+        ctx,
+        bytemuck::cast_slice(&[0i32; TOP_K]),
+        vec![TOP_K as u64],
+        GgmlType::I32,
+    )
+    .expect("ids");
+    let weights_t = MetalTensor::zeros_f32(ctx, vec![TOP_K as u64]).expect("weights");
+    let status_t =
+        MetalTensor::from_bytes(ctx, bytemuck::cast_slice(&[0i32]), vec![1], GgmlType::I32)
+            .expect("status");
+    let encode = |enc: &KernelEncoder, n: usize| -> Result<(), MetalError> {
+        let pso = ctx.pipeline("kernel_deepseek_v41_route")?;
+        for _ in 0..n {
+            enc.set_pipeline(&pso);
+            enc.set_bytes(
+                0,
+                &RouteArgs {
+                    experts: EXPERTS as u32,
+                    topk: TOP_K as u32,
+                    temperature: 1.0,
+                    scale: 1.5,
+                },
+            );
+            for (slot, t) in [&logits_t, &bias_t, &scores_t, &ids_t, &weights_t, &status_t]
+                .iter()
+                .enumerate()
+            {
+                enc.set_tensor(slot + 1, t);
+            }
+            enc.dispatch(
+                MTLSize {
+                    width: 1,
+                    height: 1,
+                    depth: 1,
+                },
+                MTLSize {
+                    width: 1,
+                    height: 1,
+                    depth: 1,
+                },
+            );
+        }
+        Ok(())
+    };
+    for n in [1usize, 10, 40] {
+        let mut us = Vec::new();
+        for it in 0..ITERS + 2 {
+            let t = timed(ctx, |enc| encode(enc, n));
+            if it >= 2 {
+                us.push(t);
+            }
+        }
+        let med = median(us.clone());
+        let min = us.iter().cloned().fold(f64::INFINITY, f64::min);
+        eprintln!(
+            "xprobe route x{n:<3} (384 experts, top-6, 1 thread)   total {med:8.1} us (min {min:7.1})  per-route {:6.1} us",
+            med / n as f64
+        );
+    }
+    let ids = unsafe {
+        std::slice::from_raw_parts(ids_t.buffer.contents().as_ptr() as *const i32, TOP_K)
+    };
+    let status = unsafe { *(status_t.buffer.contents().as_ptr() as *const i32) };
+    eprintln!("xprobe route ids={ids:?} status={status}");
+}
+
 #[test]
 fn routed_decode_attribution_probe() {
     if std::env::var_os("QWEN_EXPERT_DECODE_PROBE").is_none() {
@@ -278,6 +367,7 @@ fn routed_decode_attribution_probe() {
     eprintln!(
         "xprobe shape K={K} M={M} top_k={TOP_K} bank_experts={BANK_EXPERTS} iters={ITERS} (median GPU us)"
     );
+    route_probe(&ctx);
 
     // Production cohorts: the kernels V4.1 decode runs today.
     for (gate_up, down) in [

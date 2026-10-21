@@ -279,7 +279,7 @@ impl Workspace {
         enc.set_tensor(8, &attended);
         enc.set_tensor(10, &self.status);
         if std::env::var_os("QWEN_V41_SKIP_SCORE").is_none() {
-            let lane8 = std::env::var_os("QWEN_V41_SCORE_LANE8").is_some();
+            let lane8 = std::env::var_os("QWEN_V41_SCORE_SCALAR").is_none();
             enc.set_threadgroup_memory(0, c.head_dim * std::mem::size_of::<f32>());
             pipeline(ctx, enc, if lane8 { "score_rows_lane8" } else { "score_rows" })?;
             enc.dispatch(

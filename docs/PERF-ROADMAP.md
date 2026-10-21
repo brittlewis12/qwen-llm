@@ -26,7 +26,7 @@ expected effect, status. Status is one of `open`, `in flight (branch)`,
 `in flight` with your branch; a second lane finding it claimed reads the branch
 before building anything adjacent. This replaces relaying between sessions.
 
-### DeepSeek V4.1-Flash (IQ3_XXS, `main 24ec157e`: pp2048 266 tok/s, tg32 40.8, tg32@d2048 41.6)
+### DeepSeek V4.1-Flash (IQ3_XXS, main after 2026-10-21 prefill landing: pp2048 380 tok/s at depth 0, 335 at depth 2048; tg32 40.8, tg32@d2048 41.6)
 
 Decode budget at depth 2048, 22.3 ms/token: ~10.2 ms bytes (11.1 GiB at the
 ~1.09 TB/s the GEMV probe reaches), ~8 ms dispatch floor (~1,600 dispatches),
@@ -35,16 +35,18 @@ Decode budget at depth 2048, 22.3 ms/token: ~10.2 ms bytes (11.1 GiB at the
 (QK^T/softmax/PV) 32%, owner/producer per-row loops 13%, output projections
 8%, prepare 6%, HC 2%.
 
-- Attention tiles via simdgroup MMA (half-staged Q/K/V, F32 sums), replacing
-  the scalar `score_rows` and the gather+GEMM PV: in flight
-  (`perf/v41-prefill-attn`, scalar-equivalence tests pass; pp2048 pending).
-  Supersedes scalar score-kernel tuning if it wins.
-- IQ2_XXS/IQ2_XS expert layers off the native-rows path (five IQ3 layers were
-  21% of prefill at 312-329 ms each): two implementations exist, F32-operand
-  grouped tiles (`perf/v41-chunk-1024`, `2c51322f`) and half generic layouts
-  (`perf/v41-prefill-attn`); keep the faster on one ABBA, drop the other.
-- MXFP4 generic half layout: +1.6% alone (negative-ish, packet 2026-10-21);
-  needed for the IQ2 half route on layers whose down is MXFP4.
+- Attention tiles via simdgroup MMA (half-staged Q/K/V, F32 sums): landed
+  (2026-10-21 prefill entry; pp2048 324 -> 380). Supersedes the scalar
+  score-kernel tuning on `perf/v41-chunk-1024` (+3-4%); that branch should
+  drop those commits on rebase. Tiles are now ~20% of prefill; the next
+  step there is a fused score+softmax+PV kernel (saves the slab round trip
+  and three dispatches per tile): open.
+- IQ2_XXS/IQ2_XS expert layers: landed as half generic layouts (same
+  entry). The F32-operand tiles on `perf/v41-chunk-1024` (`2c51322f`)
+  duplicate this; one ABBA on both artifacts decides which stays, the
+  other is dropped on rebase.
+- MXFP4 generic half layout: landed with the IQ2 layouts (needed for layers
+  whose down is MXFP4); +1.6% on its own.
 - Expert tile efficiency (~8.7 TFLOPS on half-staged tiles, decode-bound at
   32 rows/expert): open. Tried: 2048-row chunks +5.6% (landed); 32-slot
   gate/up tile +0.25-0.9% (negative, `perf/v41-chunk-1024`); 4096-row chunks
@@ -60,6 +62,9 @@ Decode budget at depth 2048, 22.3 ms/token: ~10.2 ms bytes (11.1 GiB at the
   requant to Q6_K: ~-1 ms, quality-sensitive, open.
 - Prefill dispatch census tool (`perf/v41-chunk-1024`, `6b46594e`): worth
   landing with its branch.
+- Six-span prefill profiler (`QWEN_V41_PREFILL_STAGES=1`, per-layer HC /
+  prepare / serial / tiles / finish / FFN): landed; use it before claiming
+  a prefill bet.
 
 ### Qwen3.8 Flash-Next
 

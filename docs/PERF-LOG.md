@@ -6,6 +6,31 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the current state and evidence index.
 
+## 2026-10-21 - V4.1 Prefill +40-45%: IQ2/MXFP4 Half Tiles And An MMA Attention Sink Tile
+
+- Per-layer prefill spans found five IQ3_XXS layers (IQ2_XS/IQ2_XXS gate/up,
+  MXFP4 down) on the native-rows path at 312-329 ms each per 2048-row chunk,
+  21% of prefill. Generic half layouts for MXFP4, IQ2_XS and IQ2_XXS put all
+  40 layers on the half-staged tiles: 60-63 ms per layer, pp2048 266 -> 324.
+- The sink tile (QK^T as scalar dot products, PV through a 42 MB gathered
+  matrix and an F32 GEMM) cost 47-51 ms per layer, 32% of prefill, ~3
+  TFLOPS. A simdgroup-MMA tile with Q and 16-key blocks staged as half in
+  threadgroup memory (F32 sums, unchanged softmax/sink/invalid-id handling,
+  normalize+finite pass) cuts a 640-key 32-query tile from ~1.0-1.7 ms to
+  0.64 ms: pp2048 324 -> 380 at depth 0. An F32-operand first version was
+  latency-bound on device Q loads (340).
+- IQ3_XXS ABBA on M5 Ultra, main `24ec157e` versus candidate, prefills after
+  a 2,048-token context: pp2048 240.1 -> 335.4 (+39.7%), pp4096 224.2 ->
+  325.6 (+45.2%); tg32 35.4 -> 36.7 (decode untouched, within spread).
+  Cumulative today from `4b1fca04`: pp2048 192 -> 380, tg32 22.3 -> 40.8.
+- Held text: mean NLL 2.14695 -> 2.14987 (+0.14%, both signs per document),
+  top-1 215 -> 219 of 384; task screen 9/22 on both with the identical
+  pattern, 19/22 answers character-identical.
+- The six-span profiler (prepare / serial / tiles split) lands with it. The
+  other V4.1 lane's F32-operand IQ2 tiles and scalar score tuning overlap
+  this; the open map in PERF-ROADMAP records the duplicate for one ABBA.
+- [Spans, per-dispatch timings, ABBA, witness and limits](bench/2026-10-21-v41-prefill-attention-mma.md).
+
 ## 2026-10-21 - V4.1: Fused mHC Pre-Block And Grouped output_a +23-25% Decode; 2048-Row Chunks +4-6% Prefill
 
 - Sampled per-layer attribution after the router landing put the mHC

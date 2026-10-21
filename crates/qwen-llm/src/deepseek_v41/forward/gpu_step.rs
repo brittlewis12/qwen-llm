@@ -180,11 +180,14 @@ impl Workspace {
             Some(samples) => KernelEncoder::begin_sampled(&command, samples, 0, 1, false),
             None => KernelEncoder::begin(&command),
         };
+        let skip_engram = std::env::var_os("QWEN_V41_SKIP_ENGRAM").is_some();
+        let skip_hc = std::env::var_os("QWEN_V41_SKIP_HC").is_some();
         let encoded = (|| -> Result<()> {
             for (id, layer) in model.layers.iter().enumerate() {
                 cancelled(cancel)?;
-                if let Some((_, input, projected)) =
-                    engrams.iter().find(|(layer, _, _)| *layer == id)
+                if !skip_engram
+                    && let Some((_, input, projected)) =
+                        engrams.iter().find(|(layer, _, _)| *layer == id)
                 {
                     layer
                         .engram
@@ -200,16 +203,18 @@ impl Workspace {
                         .gate
                         .encode(ctx, &enc, &x, projected, n)?;
                 }
-                hc.encode(
-                    ctx,
-                    &enc,
-                    c,
-                    &layer.attn_hc.projection,
-                    &self.constants[id],
-                    &x,
-                    &incoming,
-                )
-                .map_err(|e| e.to_string())?;
+                if !skip_hc {
+                    hc.encode(
+                        ctx,
+                        &enc,
+                        c,
+                        &layer.attn_hc.projection,
+                        &self.constants[id],
+                        &x,
+                        &incoming,
+                    )
+                    .map_err(|e| e.to_string())?;
+                }
                 self.attention.encode_rows(
                     ctx,
                     &enc,
@@ -236,10 +241,12 @@ impl Workspace {
                         row,
                     )?;
                 }
-                metal::encode_mhc4_post_rows(
-                    ctx, &enc, c.hidden, n, &outputs, &x, &hc.post, &hc.comb, &half,
-                )
-                .map_err(|e| e.to_string())?;
+                if !skip_hc {
+                    metal::encode_mhc4_post_rows(
+                        ctx, &enc, c.hidden, n, &outputs, &x, &hc.post, &hc.comb, &half,
+                    )
+                    .map_err(|e| e.to_string())?;
+                }
                 if let Some(samples) = &samples {
                     enc.finish();
                     enc = KernelEncoder::begin_sampled(

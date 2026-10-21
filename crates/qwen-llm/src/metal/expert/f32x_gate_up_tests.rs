@@ -36,6 +36,8 @@ fn same_type_native_f32_gate_up_capability_matches_instantiations() {
     let supported = [
         GgmlType::MXFP4,
         GgmlType::IQ2_S,
+        GgmlType::IQ2_XXS,
+        GgmlType::IQ2_XS,
         GgmlType::IQ3_S,
         GgmlType::IQ3_XXS,
         GgmlType::Q3_K,
@@ -63,6 +65,18 @@ fn same_type_native_f32_gate_up_capability_matches_instantiations() {
             })
             .unwrap();
         assert!(line.contains(&format!("latent_dequantize_{suffix}>")));
+    }
+    for suffix in ["iq2_xxs", "iq2_xs"] {
+        let line = source
+            .lines()
+            .find(|l| {
+                l.contains(&format!(
+                    "host_name(\"kernel_moe_swiglu_clamped_{suffix}_f32x_grouped_slots\")"
+                ))
+            })
+            .unwrap();
+        assert!(line.contains(&format!("f32x_dequantize_{suffix}>")));
+        assert!(source.contains(&format!("inline void f32x_dequantize_{suffix}(")));
     }
     // Shared primitive expansion is not a GLM composition precision policy change.
     for dtype in [
@@ -244,7 +258,12 @@ fn native_f32_gate_up_cpu_f64_slots_buckets_and_partition() {
     let Some(ctx) = crate::test_fixtures::metal_context_or_skip() else {
         return;
     };
-    for dtype in [GgmlType::IQ3_XXS, GgmlType::Q3_K] {
+    for dtype in [
+        GgmlType::IQ3_XXS,
+        GgmlType::Q3_K,
+        GgmlType::IQ2_XXS,
+        GgmlType::IQ2_XS,
+    ] {
         for n in [3, 15, 16, 17, 31, 32, 33] {
             exercise(&ctx, dtype, 512, 65, n);
         }
@@ -257,7 +276,12 @@ fn native_f32_gate_up_v41_widths_reduced_banks() {
     let Some(ctx) = crate::test_fixtures::metal_context_or_skip() else {
         return;
     };
-    for dtype in [GgmlType::IQ3_XXS, GgmlType::Q3_K] {
+    for dtype in [
+        GgmlType::IQ3_XXS,
+        GgmlType::Q3_K,
+        GgmlType::IQ2_XXS,
+        GgmlType::IQ2_XS,
+    ] {
         exercise(&ctx, dtype, 5120, 2304, 3);
     }
 }

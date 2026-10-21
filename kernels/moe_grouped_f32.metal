@@ -17,6 +17,8 @@ using namespace metal;
 #include "quant_tiles.h"
 #include "native_dequant_f32.h"
 #include "mxfp4_decode.metalh"
+#include "iq2_xs_grid.metalh"
+#include "iq2_xxs_decode.metalh"
 
 #define F32X_FOR_UNROLL(x) _Pragma("clang loop unroll(full)") for (x)
 
@@ -57,6 +59,30 @@ inline void f32x_dequantize_iq2_s(device const uchar * blk_bytes,
         const float s2 = ((uint(signs[1]) & uint(qt_kmask_iq2xs[i])) != 0u) ? -1.0f : 1.0f;
         reg[i / 4 + 0][i % 4] = dl * float(grid1[i]) * s1;
         reg[i / 4 + 2][i % 4] = dl * float(grid2[i]) * s2;
+    }
+}
+
+inline void f32x_dequantize_iq2_xxs(device const uchar * blk_bytes,
+                                   short il,
+                                   thread float4x4 & reg) {
+    iq2_xxs_dequant16(blk_bytes, uint(il), reg);
+}
+
+inline void f32x_dequantize_iq2_xs(device const uchar * blk_bytes,
+                                  short il,
+                                  thread float4x4 & reg) {
+    const float d = float(*((device const half *)blk_bytes));
+    device const ushort * qs = (device const ushort *)(blk_bytes + 2);
+    device const uchar * scales = blk_bytes + 66;
+    const uint ib32 = uint(il) >> 1;
+    const uint ih = uint(il) & 1u;
+    const float dl = d * (0.5f + float((uint(scales[ib32]) >> (4u * ih)) & 15u)) * 0.25f;
+    F32X_FOR_UNROLL (uint i = 0; i < 16; ++i) {
+        const uint packed = uint(qs[4u * ib32 + 2u * ih + (i >> 3)]);
+        constant uchar * grid = (constant uchar *)(mv_iq2xs_grid + (packed & 511u));
+        const uint signs = uint(qt_ksigns_iq2xs[packed >> 9]);
+        const float sign = (signs & uint(qt_kmask_iq2xs[i & 7u])) ? -1.0f : 1.0f;
+        reg[i / 4][i % 4] = dl * float(grid[i & 7u]) * sign;
     }
 }
 
@@ -515,3 +541,7 @@ template [[host_name("kernel_moe_swiglu_clamped_iq2_s_f32x_grouped_slots")]] ker
 template [[host_name("kernel_moe_swiglu_clamped_iq3_s_f32x_grouped_slots")]] kernel f32x_swiglu_t kernel_moe_swiglu_clamped_grouped_slots_f32x<QT_IQ3_S_BYTES, QT_IQ3_S_NL, f32x_dequantize_iq3_s>;
 template [[host_name("kernel_moe_swiglu_clamped_iq3_xxs_f32x_grouped_slots")]] kernel f32x_swiglu_t kernel_moe_swiglu_clamped_grouped_slots_f32x<QT_IQ3_XXS_BYTES, QT_IQ3_XXS_NL, latent_dequantize_iq3_xxs>;
 template [[host_name("kernel_moe_swiglu_clamped_q3_K_f32x_grouped_slots")]] kernel f32x_swiglu_t kernel_moe_swiglu_clamped_grouped_slots_f32x<QT_Q3_K_BYTES, QT_Q3_K_NL, latent_dequantize_q3_K>;
+template [[host_name("kernel_moe_swiglu_clamped_iq2_xxs_f32x_grouped_slots")]] kernel f32x_swiglu_t kernel_moe_swiglu_clamped_grouped_slots_f32x<66, 16, f32x_dequantize_iq2_xxs>;
+template [[host_name("kernel_moe_swiglu_clamped_iq2_xs_f32x_grouped_slots")]] kernel f32x_swiglu_t kernel_moe_swiglu_clamped_grouped_slots_f32x<74, 16, f32x_dequantize_iq2_xs>;
+template [[host_name("kernel_moe_down_iq2_xxs_f32x_grouped_slots")]] kernel f32x_down_t kernel_moe_down_grouped_slots_f32x<66, 16, f32x_dequantize_iq2_xxs>;
+template [[host_name("kernel_moe_down_iq2_xs_f32x_grouped_slots")]] kernel f32x_down_t kernel_moe_down_grouped_slots_f32x<74, 16, f32x_dequantize_iq2_xs>;

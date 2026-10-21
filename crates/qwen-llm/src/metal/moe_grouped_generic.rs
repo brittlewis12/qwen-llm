@@ -137,17 +137,32 @@ fn f32x_layout_for(
     n_rows: usize,
     n_expert: usize,
 ) -> Result<MoeGroupedGenericLayout, MetalError> {
-    if weight.dtype == GgmlType::MXFP4 {
-        checked_layout(
+    match weight.dtype {
+        GgmlType::MXFP4 => checked_layout(
             kernel,
             weight,
             n_in,
             n_rows,
             n_expert,
             layout(GgmlType::MXFP4, "mxfp4", 32, 17),
-        )
-    } else {
-        generic_layout_for(kernel, weight, n_in, n_rows, n_expert)
+        ),
+        GgmlType::IQ2_XXS => checked_layout(
+            kernel,
+            weight,
+            n_in,
+            n_rows,
+            n_expert,
+            layout(GgmlType::IQ2_XXS, "iq2_xxs", 256, 66),
+        ),
+        GgmlType::IQ2_XS => checked_layout(
+            kernel,
+            weight,
+            n_in,
+            n_rows,
+            n_expert,
+            layout(GgmlType::IQ2_XS, "iq2_xs", 256, 74),
+        ),
+        _ => generic_layout_for(kernel, weight, n_in, n_rows, n_expert),
     }
 }
 
@@ -992,6 +1007,8 @@ pub fn moe_down_f32x_grouped_slots_pipeline_name(dtype: GgmlType) -> Option<&'st
         GgmlType::Q4_0 => Some("kernel_moe_down_q4_0_f32x_grouped_slots"),
         GgmlType::Q4_1 => Some("kernel_moe_down_q4_1_f32x_grouped_slots"),
         GgmlType::IQ2_S => Some("kernel_moe_down_iq2_s_f32x_grouped_slots"),
+        GgmlType::IQ2_XXS => Some("kernel_moe_down_iq2_xxs_f32x_grouped_slots"),
+        GgmlType::IQ2_XS => Some("kernel_moe_down_iq2_xs_f32x_grouped_slots"),
         GgmlType::IQ3_XXS => Some("kernel_moe_down_iq3_xxs_f32x_grouped_slots"),
         GgmlType::IQ3_S => Some("kernel_moe_down_iq3_s_f32x_grouped_slots"),
         GgmlType::IQ4_NL => Some("kernel_moe_down_iq4_nl_f32x_grouped_slots"),
@@ -1165,7 +1182,13 @@ pub fn encode_moe_down_f32x_grouped_slots(
 pub fn moe_swiglu_clamped_f32x_grouped_slots_supported(dtype: GgmlType) -> bool {
     matches!(
         dtype,
-        GgmlType::MXFP4 | GgmlType::IQ2_S | GgmlType::IQ3_S | GgmlType::IQ3_XXS | GgmlType::Q3_K
+        GgmlType::MXFP4
+            | GgmlType::IQ2_S
+            | GgmlType::IQ2_XXS
+            | GgmlType::IQ2_XS
+            | GgmlType::IQ3_S
+            | GgmlType::IQ3_XXS
+            | GgmlType::Q3_K
     )
 }
 
@@ -1205,6 +1228,8 @@ pub(crate) fn check_moe_swiglu_clamped_f32x_grouped_slots(
     let name = match w_gate.dtype {
         GgmlType::MXFP4 => "kernel_moe_swiglu_clamped_mxfp4_f32x_grouped_slots",
         GgmlType::IQ2_S => "kernel_moe_swiglu_clamped_iq2_s_f32x_grouped_slots",
+        GgmlType::IQ2_XXS => "kernel_moe_swiglu_clamped_iq2_xxs_f32x_grouped_slots",
+        GgmlType::IQ2_XS => "kernel_moe_swiglu_clamped_iq2_xs_f32x_grouped_slots",
         GgmlType::IQ3_S => "kernel_moe_swiglu_clamped_iq3_s_f32x_grouped_slots",
         GgmlType::IQ3_XXS => "kernel_moe_swiglu_clamped_iq3_xxs_f32x_grouped_slots",
         GgmlType::Q3_K => "kernel_moe_swiglu_clamped_q3_K_f32x_grouped_slots",
@@ -1251,7 +1276,8 @@ pub(crate) fn check_moe_swiglu_clamped_f32x_grouped_slots(
 /// (`kernels/moe_grouped_f32.metal`, map #12 accuracy lane): the contract of
 /// [`encode_moe_swiglu_clamped_f32_grouped_slots_generic`] with weights
 /// dequantized to F32, unrounded activations and F32 accumulation, for the
-/// same-type gate/up pairs MXFP4, IQ2_S, IQ3_S, IQ3_XXS and Q3_K. Counts outside
+/// same-type gate/up pairs MXFP4, IQ2_S, IQ2_XXS, IQ2_XS, IQ3_S, IQ3_XXS and
+/// Q3_K. Counts outside
 /// 0..=n_tokens and invalid slot IDs are skipped. Bindings and device are checked
 /// before encoding ([`check_moe_swiglu_clamped_f32x_grouped_slots`]).
 /// 18 KiB of threadgroup memory.

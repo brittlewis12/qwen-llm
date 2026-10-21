@@ -665,9 +665,25 @@ pub(crate) fn run_family_pp_row(
         if depth > 0 {
             bench.prefill(&depth_ids)?;
         }
+        let stage_scope = if std::env::var_os("QWEN_V41_STAGES").is_some() {
+            Some(
+                qwen_llm::deepseek_v41::forward::profile::Scope::begin_stages()
+                    .map_err(anyhow::Error::msg)?,
+            )
+        } else {
+            None
+        };
         let t0 = Instant::now();
         bench.prefill(&ids)?;
-        Ok(t0.elapsed().as_secs_f64() * 1e3)
+        let wall_ms = t0.elapsed().as_secs_f64() * 1e3;
+        if let Some(scope) = stage_scope {
+            let report = scope.finish();
+            eprintln!(
+                "[suite] v41 stages {}",
+                serde_json::to_string(&report).context("encode family stage report")?
+            );
+        }
+        Ok(wall_ms)
     };
     if !no_warmup {
         rep(bench).context("family pp warmup")?;

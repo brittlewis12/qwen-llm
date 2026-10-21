@@ -489,6 +489,25 @@ impl Workspace {
             self.ffn.next_pre()
         };
         let encode = || -> std::result::Result<(), metal::MetalError> {
+            if hc_gpu::fused_supported(&l.attn_hc) {
+                return hc_gpu::encode_pre(
+                    ctx,
+                    enc,
+                    c,
+                    &l.attn_hc,
+                    &self.constants[id],
+                    &self.x,
+                    hc_gpu::HcPreSite {
+                        mix: &self.raw,
+                        pre: &self.pre,
+                        post: &self.post,
+                        combination: &self.comb,
+                        incoming_pre: incoming,
+                        collapsed: &self.collapsed,
+                        normalized: &self.normalized,
+                    },
+                );
+            }
             l.attn_hc.projection.encode(enc, &self.x, &self.raw)?;
             enc.set_pipeline(&ctx.pipeline("kernel_deepseek_v41_projected_rms")?);
             enc.set_bytes(0, &((4 * c.hidden) as u32));

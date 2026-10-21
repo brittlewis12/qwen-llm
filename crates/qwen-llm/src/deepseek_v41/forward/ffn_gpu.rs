@@ -378,6 +378,25 @@ impl Workspace {
         composition_extents(c, 1)?;
         let b = &self.buffers;
         let constants = &self.constants[id];
+        if hc_gpu::fused_supported(&layer.ffn_hc) {
+            return hc_gpu::encode_pre(
+                ctx,
+                enc,
+                c,
+                &layer.ffn_hc,
+                constants,
+                x,
+                hc_gpu::HcPreSite {
+                    mix: &b[2],
+                    pre: &b[3],
+                    post: &b[4],
+                    combination: &b[5],
+                    incoming_pre: pre,
+                    collapsed: &b[6],
+                    normalized: &b[7],
+                },
+            );
+        }
         layer.ffn_hc.projection.encode(enc, x, &b[2])?;
         enc.set_pipeline(&ctx.pipeline("kernel_deepseek_v41_projected_rms")?);
         enc.set_bytes(0, &((4 * c.hidden) as u32));

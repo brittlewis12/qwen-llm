@@ -5,7 +5,7 @@ use super::*;
 #[cfg(test)]
 mod tests;
 
-pub const DEFAULT_CHUNK_ROWS: usize = 256;
+pub const DEFAULT_CHUNK_ROWS: usize = 1024;
 
 #[cfg(test)]
 thread_local! {

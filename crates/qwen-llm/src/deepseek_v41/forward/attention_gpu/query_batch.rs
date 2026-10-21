@@ -294,19 +294,21 @@ impl Workspace {
                 },
             );
         }
-        pipeline(ctx, enc, "softmax_rows")?;
-        enc.dispatch(
-            MTLSize {
-                width: c.heads,
-                height: n,
-                depth: 1,
-            },
-            MTLSize {
-                width: 32,
-                height: 1,
-                depth: 1,
-            },
-        );
+        if std::env::var_os("QWEN_V41_SKIP_SOFTMAX").is_none() {
+            pipeline(ctx, enc, "softmax_rows")?;
+            enc.dispatch(
+                MTLSize {
+                    width: c.heads,
+                    height: n,
+                    depth: 1,
+                },
+                MTLSize {
+                    width: 32,
+                    height: 1,
+                    depth: 1,
+                },
+            );
+        }
         if let Some(matrix) = matrix {
             if std::env::var_os("QWEN_V41_SKIP_PV").is_none() {
                 pipeline(ctx, enc, "matrix_values_rows")?;
@@ -350,18 +352,21 @@ impl Workspace {
             let pso = pipeline(ctx, enc, "output_rows")?;
             dispatch(enc, &pso, n * c.heads * c.head_dim);
         }
-        rope_rows(
-            ctx,
-            enc,
-            &attended,
-            &query,
-            &self.constants[id].frequencies,
-            c.head_dim,
-            c.heads,
-            c.rope_dim / 2,
-            position,
-            n,
-            true,
-        )
+        if std::env::var_os("QWEN_V41_SKIP_ROPE").is_none() {
+            rope_rows(
+                ctx,
+                enc,
+                &attended,
+                &query,
+                &self.constants[id].frequencies,
+                c.head_dim,
+                c.heads,
+                c.rope_dim / 2,
+                position,
+                n,
+                true,
+            )?;
+        }
+        Ok(())
     }
 }

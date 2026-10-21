@@ -533,13 +533,23 @@ fn f32_pv_batch_performance() {
     }
 }
 
+fn close_half(a: &[f32], b: &[f32]) {
+    assert_eq!(a.len(), b.len());
+    for (i, (&a, &b)) in a.iter().zip(b).enumerate() {
+        assert!(
+            a.is_finite() && (a - b).abs() <= 2e-3 + 4e-3 * b.abs(),
+            "{i}: {a} != {b}"
+        );
+    }
+}
+
 impl Fixture {
     /// The simdgroup-MMA sink tile: QK^T into the score slab, the shared
     /// softmax, PV straight from gathered latent rows, then normalize/finite.
     fn encode_mma(&self, ctx: &MetalContext, enc: &KernelEncoder) {
         self.bind(enc);
         pipeline(ctx, enc, "score_mma").unwrap();
-        grid(enc, H / 16, self.n, 1, 64);
+        grid(enc, H / 16, self.n, 1, 128);
         pipeline(ctx, enc, "softmax_rows").unwrap();
         grid(enc, H, self.n, 1, 32);
         pipeline(ctx, enc, "pv_mma").unwrap();
@@ -561,23 +571,25 @@ fn mma_sink_tile_matches_scalar_sink() {
         let scalar_scores = f32_slice(&f.scores).unwrap().to_vec();
         execute(&ctx, |enc| f.encode_mma(&ctx, enc));
         assert_eq!(ids(&f.status, 1), [0], "k={k} n={n} ragged={ragged}");
-        // Scores (post-softmax exp values and denominators) agree per row.
+        // Half-operand products: scores (post-softmax exp values and
+        // denominators) and outputs agree with the F32 scalar sink at a
+        // half-rounding tolerance.
         let mma_scores = f32_slice(&f.scores).unwrap();
         for q in 0..n {
             let count = f.count(q);
             for h in 0..H {
                 let base = (q * H + h) * SCORE_STRIDE;
-                close(
+                close_half(
                     &mma_scores[base..base + count],
                     &scalar_scores[base..base + count],
                 );
-                close(
+                close_half(
                     &mma_scores[base + SCORE_STRIDE - 1..base + SCORE_STRIDE],
                     &scalar_scores[base + SCORE_STRIDE - 1..base + SCORE_STRIDE],
                 );
             }
         }
-        close(f32_slice(&f.output).unwrap(), &scalar);
+        close_half(f32_slice(&f.output).unwrap(), &scalar);
         f.check_guards();
     }
 }
@@ -611,7 +623,7 @@ fn mma_sink_tile_invalid_visibility_and_finite_guards() {
             if q == 1 {
                 assert!(got[off..off + M].iter().all(|&v| v == 0.0));
             } else {
-                close(&got[off..off + M], &valid[off..off + M]);
+                assert_eq!(got[off..off + M], valid[off..off + M]);
             }
         }
     }
@@ -669,7 +681,7 @@ fn mma_sink_tile_dispatch_timing() {
         timed("mma score", &f, &|enc| {
             f.bind(enc);
             pipeline(&ctx, enc, "score_mma").unwrap();
-            grid(enc, H / 16, f.n, 1, 64);
+            grid(enc, H / 16, f.n, 1, 128);
         });
         timed("softmax_rows", &f, &|enc| {
             f.bind(enc);

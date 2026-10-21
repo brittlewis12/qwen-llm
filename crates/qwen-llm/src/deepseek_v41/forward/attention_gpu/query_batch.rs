@@ -342,7 +342,7 @@ impl Workspace {
                     depth: 1,
                 },
                 MTLSize {
-                    width: 64,
+                    width: 128,
                     height: 1,
                     depth: 1,
                 },

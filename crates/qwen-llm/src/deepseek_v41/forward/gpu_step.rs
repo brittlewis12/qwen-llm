@@ -373,11 +373,13 @@ impl Workspace {
             let times = ctx
                 .resolve_timestamp_samples(samples, model.layers.len() * 12)
                 .map_err(|e| e.to_string())?;
-            for (layer, t) in times.chunks_exact(8).enumerate() {
+            for (layer, t) in times.chunks_exact(12).enumerate() {
                 profile::gpu_interval_layer("prefill_attention_hc", n, layer, t[0], t[1]);
-                profile::gpu_interval_layer("prefill_attention_rows", n, layer, t[2], t[3]);
-                profile::gpu_interval_layer("prefill_attention_finish_post", n, layer, t[4], t[5]);
-                profile::gpu_interval_layer("prefill_ffn", n, layer, t[6], t[7]);
+                profile::gpu_interval_layer("prefill_attention_prepare", n, layer, t[2], t[3]);
+                profile::gpu_interval_layer("prefill_attention_serial", n, layer, t[4], t[5]);
+                profile::gpu_interval_layer("prefill_attention_tiles", n, layer, t[6], t[7]);
+                profile::gpu_interval_layer("prefill_attention_finish_post", n, layer, t[8], t[9]);
+                profile::gpu_interval_layer("prefill_ffn", n, layer, t[10], t[11]);
             }
         }
         ffn.validate_status()?;

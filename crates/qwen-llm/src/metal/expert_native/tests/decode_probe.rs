@@ -127,6 +127,44 @@ impl Fixture {
         }
     }
 
+    /// Touch every expert's rows in all three banks from the GPU before any
+    /// timing, so fresh-allocation page mapping is not attributed to a kernel.
+    fn warm(&self, ctx: &MetalContext) {
+        for it in 0..(BANK_EXPERTS / TOP_K + 1) {
+            write_ids(&self.ids, it);
+            timed(ctx, |enc| {
+                encode_all_slots_gate_up_swiglu_native(
+                    ctx,
+                    enc,
+                    &self.gate,
+                    &self.up,
+                    &self.x,
+                    &self.ids,
+                    &self.status,
+                    &self.inner,
+                    K,
+                    M,
+                    BANK_EXPERTS,
+                    TOP_K,
+                    10.0,
+                )?;
+                encode_all_slots_down_native(
+                    ctx,
+                    enc,
+                    &self.down,
+                    &self.inner,
+                    &self.ids,
+                    &self.status,
+                    &self.out,
+                    M,
+                    K,
+                    BANK_EXPERTS,
+                    TOP_K,
+                )
+            });
+        }
+    }
+
     fn stage_bytes(&self) -> f64 {
         (TOP_K as f64)
             * ((M as f64) * row_bytes(self.gate.dtype, K) as f64 * 2.0
@@ -179,11 +217,12 @@ fn probe_dispatch(
 }
 
 fn report(label: &str, f: &Fixture, stage_us: Vec<f64>, gate_us: Vec<f64>) {
+    let stage_min = stage_us.iter().cloned().fold(f64::INFINITY, f64::min);
     let stage = median(stage_us);
     let gate = median(gate_us);
     let gbps = f.stage_bytes() / (stage * 1e-6) / 1e9;
     eprintln!(
-        "xprobe {label:<34} stage {stage:8.1} us  gate-only {gate:7.1} us  eff {gbps:6.0} GB/s"
+        "xprobe {label:<34} stage {stage:8.1} us (min {stage_min:7.1})  gate-only {gate:7.1} us  eff {gbps:6.0} GB/s"
     );
 }
 
@@ -208,6 +247,7 @@ fn routed_decode_attribution_probe() {
         (GgmlType::Q8_0, GgmlType::Q8_0),
     ] {
         let f = Fixture::new(&ctx, gate_up, down);
+        f.warm(&ctx);
         let mut stage = Vec::new();
         let mut gate = Vec::new();
         for it in 0..ITERS + 2 {
@@ -304,6 +344,7 @@ fn routed_decode_attribution_probe() {
         ),
     ] {
         let f = Fixture::new(&ctx, dtype, dtype);
+        f.warm(&ctx);
         for &(variant, rows) in variants {
             let name = if variant == "prod" {
                 format!("kernel_xprobe_prod_{suffix}")

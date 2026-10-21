@@ -46,6 +46,33 @@ fn native_pipeline_name(dtype: GgmlType) -> Option<String> {
     Some(format!("kernel_expert_native_{suffix}_f32"))
 }
 
+fn fused_pipeline_name(dtype: GgmlType, family: &str) -> Option<String> {
+    let native = native_pipeline_name(dtype)?;
+    let suffix = native
+        .strip_prefix("kernel_expert_native_")?
+        .strip_suffix("_f32")?;
+    Some(format!("kernel_expert_native_{family}_{suffix}_f32"))
+}
+
+fn gate_up_weight_pipeline_name(dtype: GgmlType) -> Option<String> {
+    fused_pipeline_name(dtype, "gate_up_weight")
+}
+
+fn down_sum_pipeline_name(dtype: GgmlType) -> Option<String> {
+    fused_pipeline_name(dtype, "down_sum")
+}
+
+/// Fused decode gate/up + SwiGLU + route weight. Equal storage types only;
+/// MXFP4 keeps the native path because its subnormal rescaling is per bank.
+pub fn all_slots_gate_up_weight_native_supported(gate: GgmlType, up: GgmlType) -> bool {
+    gate == up && gate != GgmlType::MXFP4 && gate_up_weight_pipeline_name(gate).is_some()
+}
+
+/// Fused decode down + ordered top-k sum + shared branch.
+pub fn all_slots_down_sum_native_supported(dtype: GgmlType) -> bool {
+    dtype != GgmlType::MXFP4 && down_sum_pipeline_name(dtype).is_some()
+}
+
 /// Independently typed native gate/up capability. Shape constraints still apply.
 pub fn all_slots_gate_up_native_supported(gate: GgmlType, up: GgmlType) -> bool {
     native_pipeline_name(gate).is_some() && native_pipeline_name(up).is_some()
@@ -83,6 +110,30 @@ struct NativeArgs {
     top_k: u32,
     mode: u32,
     clamp: f32,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+struct GateUpWeightArgs {
+    gate_row_bytes: u64,
+    up_row_bytes: u64,
+    n_in: u32,
+    n_out: u32,
+    experts: u32,
+    top_k: u32,
+    clamp: f32,
+    /// Matches the shader struct's trailing alignment padding.
+    _padding: u32,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+struct DownSumArgs {
+    row_bytes: u64,
+    n_in: u32,
+    n_out: u32,
+    experts: u32,
+    top_k: u32,
 }
 
 fn dimensions(
@@ -492,6 +543,253 @@ fn encode_down(
         status,
         output,
         rows.unwrap_or(1),
+    );
+    Ok(())
+}
+
+/// One fused decode pass: `output[:,s] = (silu(min(gate_s x, clamp)) *
+/// clamp(up_s x, -clamp, clamp)) * weights[s]`. Gate and up decode share each
+/// activation load; the arithmetic and SIMD reduction match the native gate,
+/// up and weight passes. Equal storage types only. Route contents stay on GPU.
+#[allow(clippy::too_many_arguments)]
+pub fn encode_all_slots_gate_up_swiglu_weight_native(
+    ctx: &MetalContext,
+    enc: &KernelEncoder,
+    gate_bank: &MetalTensor,
+    up_bank: &MetalTensor,
+    input: &MetalTensor,
+    ids: &MetalTensor,
+    status: &MetalTensor,
+    weights: &MetalTensor,
+    output: &MetalTensor,
+    n_in: usize,
+    n_out: usize,
+    experts: usize,
+    top_k: usize,
+    clamp: f32,
+) -> Result<(), MetalError> {
+    const K: &str = "all_slots_gate_up_swiglu_weight_native";
+    require_serial(K, enc)?;
+    if !all_slots_gate_up_weight_native_supported(gate_bank.dtype, up_bank.dtype) {
+        return Err(bad_shape(
+            K,
+            format!(
+                "unsupported fused gate/up storage {:?}/{:?}",
+                gate_bank.dtype, up_bank.dtype
+            ),
+        ));
+    }
+    if !clamp.is_finite() || clamp <= 0.0 {
+        return Err(bad_shape(K, "clamp must be finite and positive"));
+    }
+    let dims = dimensions(K, n_in, n_out, experts, top_k)?;
+    check_tensor(
+        K,
+        input,
+        GgmlType::F32,
+        &[u64::from(dims.n_in)],
+        false,
+        "input",
+    )?;
+    check_tensor(
+        K,
+        ids,
+        GgmlType::I32,
+        &[u64::from(dims.top_k)],
+        false,
+        "expert ids",
+    )?;
+    check_tensor(K, status, GgmlType::I32, &[1], false, "route status")?;
+    check_tensor(
+        K,
+        weights,
+        GgmlType::F32,
+        &[u64::from(dims.top_k)],
+        false,
+        "route weights",
+    )?;
+    check_tensor(
+        K,
+        output,
+        GgmlType::F32,
+        &[u64::from(dims.n_out), u64::from(dims.top_k)],
+        true,
+        "output",
+    )?;
+    check_disjoint(
+        K,
+        output,
+        &[
+            (gate_bank, "gate bank"),
+            (up_bank, "up bank"),
+            (input, "input"),
+            (ids, "expert ids"),
+            (status, "route status"),
+            (weights, "route weights"),
+        ],
+    )?;
+    check_device(
+        ctx,
+        enc,
+        K,
+        &[gate_bank, up_bank, input, ids, status, weights, output],
+    )?;
+    let (_, gate_bytes) = bank_pipeline(ctx, K, gate_bank, &dims, "gate bank")?;
+    let (_, up_bytes) = bank_pipeline(ctx, K, up_bank, &dims, "up bank")?;
+    if gate_bytes != up_bytes {
+        return Err(bad_shape(K, "gate and up banks must share a row stride"));
+    }
+    let name = gate_up_weight_pipeline_name(gate_bank.dtype)
+        .ok_or_else(|| bad_shape(K, "no fused gate/up kernel"))?;
+    let pso = ctx.pipeline(&name)?;
+    if pso.threadExecutionWidth() != 32 || pso.maxTotalThreadsPerThreadgroup() < 128 {
+        return Err(bad_shape(
+            K,
+            "fused gate/up kernel needs SIMD width 32 and 128 threads",
+        ));
+    }
+    let args = GateUpWeightArgs {
+        gate_row_bytes: gate_bytes,
+        up_row_bytes: up_bytes,
+        n_in: dims.n_in,
+        n_out: dims.n_out,
+        experts: dims.experts,
+        top_k: dims.top_k,
+        clamp,
+        _padding: 0,
+    };
+    enc.set_pipeline(&pso);
+    enc.set_bytes(0, &args);
+    enc.set_tensor(1, gate_bank);
+    enc.set_tensor(2, up_bank);
+    enc.set_tensor(3, input);
+    enc.set_tensor(4, ids);
+    enc.set_tensor(5, status);
+    enc.set_tensor(6, weights);
+    enc.set_tensor(7, output);
+    enc.dispatch(
+        MTLSize {
+            width: dims.n_out as usize / 4 + usize::from(!dims.n_out.is_multiple_of(4)),
+            height: dims.top_k as usize,
+            depth: 1,
+        },
+        MTLSize {
+            width: 128,
+            height: 1,
+            depth: 1,
+        },
+    );
+    Ok(())
+}
+
+/// One fused decode pass: `output[:,r] = shared[:,r] + sum_s down_s input[:,s]`
+/// with the top-k additions in slot order. Matches the native down reduction,
+/// the ordered-sum kernel and the shared add. Input is `[K, top_k]`.
+#[allow(clippy::too_many_arguments)]
+pub fn encode_all_slots_down_sum_native(
+    ctx: &MetalContext,
+    enc: &KernelEncoder,
+    bank: &MetalTensor,
+    input: &MetalTensor,
+    ids: &MetalTensor,
+    status: &MetalTensor,
+    shared: &MetalTensor,
+    output: &MetalTensor,
+    n_in: usize,
+    n_out: usize,
+    experts: usize,
+    top_k: usize,
+) -> Result<(), MetalError> {
+    const K: &str = "all_slots_down_sum_native";
+    require_serial(K, enc)?;
+    if !all_slots_down_sum_native_supported(bank.dtype) {
+        return Err(bad_shape(
+            K,
+            format!("unsupported fused down storage {:?}", bank.dtype),
+        ));
+    }
+    let dims = dimensions(K, n_in, n_out, experts, top_k)?;
+    check_tensor(
+        K,
+        input,
+        GgmlType::F32,
+        &[u64::from(dims.n_in), u64::from(dims.top_k)],
+        false,
+        "input",
+    )?;
+    check_tensor(
+        K,
+        ids,
+        GgmlType::I32,
+        &[u64::from(dims.top_k)],
+        false,
+        "expert ids",
+    )?;
+    check_tensor(K, status, GgmlType::I32, &[1], false, "route status")?;
+    check_tensor(
+        K,
+        shared,
+        GgmlType::F32,
+        &[u64::from(dims.n_out)],
+        false,
+        "shared output",
+    )?;
+    check_tensor(
+        K,
+        output,
+        GgmlType::F32,
+        &[u64::from(dims.n_out)],
+        true,
+        "output",
+    )?;
+    check_disjoint(
+        K,
+        output,
+        &[
+            (bank, "down bank"),
+            (input, "input"),
+            (ids, "expert ids"),
+            (status, "route status"),
+            (shared, "shared output"),
+        ],
+    )?;
+    check_device(ctx, enc, K, &[bank, input, ids, status, shared, output])?;
+    let (_, row_bytes) = bank_pipeline(ctx, K, bank, &dims, "down bank")?;
+    let name = down_sum_pipeline_name(bank.dtype)
+        .ok_or_else(|| bad_shape(K, "no fused down/sum kernel"))?;
+    let pso = ctx.pipeline(&name)?;
+    if pso.threadExecutionWidth() != 32 || pso.maxTotalThreadsPerThreadgroup() < 128 {
+        return Err(bad_shape(
+            K,
+            "fused down/sum kernel needs SIMD width 32 and 128 threads",
+        ));
+    }
+    let args = DownSumArgs {
+        row_bytes,
+        n_in: dims.n_in,
+        n_out: dims.n_out,
+        experts: dims.experts,
+        top_k: dims.top_k,
+    };
+    enc.set_pipeline(&pso);
+    enc.set_bytes(0, &args);
+    enc.set_tensor(1, bank);
+    enc.set_tensor(2, input);
+    enc.set_tensor(3, ids);
+    enc.set_tensor(4, status);
+    enc.set_tensor(5, shared);
+    enc.set_tensor(6, output);
+    enc.dispatch(
+        MTLSize {
+            width: dims.n_out as usize / 4 + usize::from(!dims.n_out.is_multiple_of(4)),
+            height: 1,
+            depth: 1,
+        },
+        MTLSize {
+            width: 128,
+            height: 1,
+            depth: 1,
+        },
     );
     Ok(())
 }

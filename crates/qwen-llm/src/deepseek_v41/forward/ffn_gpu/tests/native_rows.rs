@@ -302,6 +302,7 @@ fn native_rows_live_route_witness_with_chunks(
                     &prefill::row(&b[4], H, row),
                     &prefill::row(&expected_sum, H, row),
                     &ws.statuses[1],
+                    false,
                 )
             })
             .unwrap();

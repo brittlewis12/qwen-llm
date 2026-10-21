@@ -446,7 +446,8 @@ fn witness(
         }
         start += rows;
     }
-    // The decode entry remains the native one-row route/weight/down composition.
+    // The decode entry fuses gate/up/weight and down/sum when the banks support
+    // it; MXFP4 keeps the native route/weight/down composition.
     metal::dispatch_census_begin();
     submit(ctx, "v41_decode_dispatch", [0; 4], |enc| {
         ws.encode_routed(
@@ -460,17 +461,28 @@ fn witness(
             &prefill::row(&b[4], h, 0),
             &ws.buffers[20],
             &ws.statuses[0],
+            true,
         )
     })
     .unwrap();
     let census = metal::dispatch_census_take();
-    assert_eq!(census.len(), 6);
-    assert!(
-        census[1..3]
-            .iter()
-            .all(|r| r.kernel.starts_with("kernel_expert_native_"))
-    );
-    assert!(census[4].kernel.starts_with("kernel_expert_native_"));
+    let fused = metal::all_slots_gate_up_weight_native_supported(
+        layer.banks[0].dtype,
+        layer.banks[1].dtype,
+    ) && metal::all_slots_down_sum_native_supported(layer.banks[2].dtype);
+    if fused {
+        assert_eq!(census.len(), 3);
+        assert!(census[1].kernel.contains("gate_up_weight"));
+        assert!(census[2].kernel.contains("down_sum"));
+    } else {
+        assert_eq!(census.len(), 6);
+        assert!(
+            census[1..3]
+                .iter()
+                .all(|r| r.kernel.starts_with("kernel_expert_native_"))
+        );
+        assert!(census[4].kernel.starts_with("kernel_expert_native_"));
+    }
     close(f32_slice(&ws.buffers[20]).unwrap(), &output[..h]);
     let residual: Vec<_> = (0..4 * h * n)
         .map(|i| (i % 31) as f32 * 0.013 - 0.2)

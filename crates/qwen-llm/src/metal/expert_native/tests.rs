@@ -8,6 +8,7 @@ const SOURCE: &str = include_str!("../../../../../kernels/expert_native.metal");
 const EXPERTS: usize = 3;
 const IDS: [i32; 7] = [2, 0, 2, -1, EXPERTS as i32, i32::MIN, i32::MAX];
 
+mod fused_chain;
 mod rows;
 
 fn production_lease() -> impl Sized {
@@ -221,10 +222,29 @@ fn native_capabilities_match_actual_dispatch_and_abi() {
     assert_eq!(std::mem::offset_of!(NativeArgs, row_bytes), 0);
     assert_eq!(std::mem::offset_of!(NativeArgs, mode), 24);
     assert_eq!(std::mem::offset_of!(NativeArgs, clamp), 28);
+    assert_eq!(std::mem::size_of::<GateUpWeightArgs>(), 40);
+    assert_eq!(std::mem::offset_of!(GateUpWeightArgs, clamp), 32);
+    assert_eq!(std::mem::size_of::<DownSumArgs>(), 24);
     assert_eq!(ROUTE_STATUS_READY, 1);
     assert_eq!(
-        SOURCE.matches("template [[host_name(").count(),
+        SOURCE
+            .matches("]] kernel expert_native_t kernel_expert_native_f32<")
+            .count(),
         formats().len()
+    );
+    assert_eq!(
+        SOURCE
+            .matches(
+                "]] kernel expert_native_gate_up_weight_t kernel_expert_native_gate_up_weight_f32<"
+            )
+            .count(),
+        formats().len() - 1
+    );
+    assert_eq!(
+        SOURCE
+            .matches("]] kernel expert_native_down_sum_t kernel_expert_native_down_sum_f32<")
+            .count(),
+        formats().len() - 1
     );
     for raw in 0..=255 {
         let dtype = GgmlType::from_raw(raw);
@@ -232,11 +252,28 @@ fn native_capabilities_match_actual_dispatch_and_abi() {
             all_slots_down_native_supported(dtype),
             formats().contains(&dtype)
         );
+        let fused = formats().contains(&dtype) && dtype != GgmlType::MXFP4;
+        assert_eq!(
+            all_slots_gate_up_weight_native_supported(dtype, dtype),
+            fused
+        );
+        assert_eq!(all_slots_down_sum_native_supported(dtype), fused);
         if let Some(name) = native_pipeline_name(dtype) {
             assert!(
                 SOURCE.contains(&format!("host_name(\"{name}\")")),
                 "{dtype:?}"
             );
+        }
+        if fused {
+            for name in [
+                gate_up_weight_pipeline_name(dtype).unwrap(),
+                down_sum_pipeline_name(dtype).unwrap(),
+            ] {
+                assert!(
+                    SOURCE.contains(&format!("host_name(\"{name}\")")),
+                    "{dtype:?}"
+                );
+            }
         }
         for other in formats()
             .into_iter()

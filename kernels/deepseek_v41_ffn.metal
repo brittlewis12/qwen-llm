@@ -29,6 +29,154 @@ kernel void kernel_deepseek_v41_projected_rms(
     if (tid < 24) mix[tid] *= rsqrt(sums[0] / float(n) + eps);
 }
 
+// mHC pre-block for one decode row, as two dispatches instead of five.
+//
+// Projection: the 24 mixing logits are a 4*hidden -> 24 F32 GEMV. One
+// simdgroup per output row (the generic F32 mat-vec) leaves 24 simdgroups
+// on the GPU, each walking a 160-deep load chain; here one 1024-thread
+// threadgroup owns each output and strides K, so the 2 MB of weights are in
+// flight at once.
+constant uint V41_HC_PROJECTION_THREADS = 1024;
+kernel void kernel_deepseek_v41_hc_projection(
+    constant uint &n_in [[buffer(0)]], constant uint &n_out [[buffer(1)]],
+    device const float *weight [[buffer(2)]], device const float *x [[buffer(3)]],
+    device float *y [[buffer(4)]],
+    uint row [[threadgroup_position_in_grid]], uint tid [[thread_index_in_threadgroup]],
+    uint lane [[thread_index_in_simdgroup]], uint sg [[simdgroup_index_in_threadgroup]]) {
+    threadgroup float partial[V41_HC_PROJECTION_THREADS / 32];
+    if (row >= n_out) return;
+    device const float4 *w4 = (device const float4 *)(weight + ulong(row) * n_in);
+    device const float4 *x4 = (device const float4 *)x;
+    const uint n4 = n_in / 4;
+    float sum = 0.0f;
+    for (uint i = tid; i < n4; i += V41_HC_PROJECTION_THREADS) {
+        const float4 a = w4[i];
+        const float4 b = x4[i];
+        sum += a.x * b.x + a.y * b.y + a.z * b.z + a.w * b.w;
+    }
+    for (uint i = n4 * 4 + tid; i < n_in; i += V41_HC_PROJECTION_THREADS) sum += weight[ulong(row) * n_in + i] * x[i];
+    sum = simd_sum(sum);
+    if (lane == 0) partial[sg] = sum;
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    if (tid == 0) {
+        float total = 0.0f;
+        for (uint s = 0; s < V41_HC_PROJECTION_THREADS / 32; ++s) total += partial[s];
+        y[row] = total;
+    }
+}
+
+// Fused: projected RMS of the residual scales the 24 mixes; sigmoid pre/post
+// and the Sinkhorn-normalized 4x4 combination (same arithmetic as
+// kernel_deepseek_v4_hc_controls, in registers instead of device
+// read-modify-write); collapse of the four streams with the *incoming*
+// (lagged) pre; weighted RMS norm of the collapsed row. One 1024-thread
+// threadgroup; reductions change F32 summation order relative to the
+// separate kernels, nothing else.
+struct HcPreArgs { uint hidden; float norm_eps; float hc_eps; };
+constant uint V41_HC_PRE_THREADS = 1024;
+constant uint V41_HC_CONNECTIONS = 4;
+constant uint V41_HC_SINKHORN_ITERATIONS = 20;
+inline float v41_hc_tg_sum(float v, threadgroup float *partial, uint lane, uint sg) {
+    v = simd_sum(v);
+    if (lane == 0) partial[sg] = v;
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    float total = 0.0f;
+    for (uint s = 0; s < V41_HC_PRE_THREADS / 32; ++s) total += partial[s];
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    return total;
+}
+kernel void kernel_deepseek_v41_hc_pre(
+    constant HcPreArgs &a [[buffer(0)]],
+    device const float *x [[buffer(1)]],            // residual [4*hidden]
+    device float *mix [[buffer(2)]],                // [24] raw in, scaled out
+    device const float *scale [[buffer(3)]],        // [3]
+    device const float *base [[buffer(4)]],         // [24]
+    device float *pre [[buffer(5)]],                // [4]
+    device float *post [[buffer(6)]],               // [4]
+    device float *combination [[buffer(7)]],        // [16]
+    device const float *incoming_pre [[buffer(8)]], // [4] lagged
+    device float *collapsed [[buffer(9)]],          // [hidden]
+    device const float *norm_weight [[buffer(10)]], // [hidden]
+    device float *normalized [[buffer(11)]],        // [hidden]
+    uint tid [[thread_index_in_threadgroup]], uint lane [[thread_index_in_simdgroup]],
+    uint sg [[simdgroup_index_in_threadgroup]]) {
+    threadgroup float partial[V41_HC_PRE_THREADS / 32];
+    const uint n = V41_HC_CONNECTIONS * a.hidden;
+    // A. projected RMS over the whole residual scales the mixes.
+    float ss = 0.0f;
+    for (uint i = tid; i < n; i += V41_HC_PRE_THREADS) ss += x[i] * x[i];
+    const float inv = rsqrt(v41_hc_tg_sum(ss, partial, lane, sg) / float(n) + a.norm_eps);
+    if (tid < 24) mix[tid] *= inv;
+    threadgroup_barrier(mem_flags::mem_device);
+    // B. controls (one thread; 24 inputs, 24 outputs).
+    if (tid == 0) {
+        const float eps = a.hc_eps;
+        for (uint stream = 0; stream < V41_HC_CONNECTIONS; ++stream) {
+            pre[stream] = 1.0f / (1.0f + exp(-(mix[stream] * scale[0] + base[stream]))) + eps;
+            post[stream] = 2.0f / (1.0f + exp(-(mix[4 + stream] * scale[1] + base[4 + stream])));
+        }
+        float comb[16];
+        for (uint source = 0; source < V41_HC_CONNECTIONS; ++source) {
+            float row_max = -INFINITY;
+            for (uint destination = 0; destination < V41_HC_CONNECTIONS; ++destination) {
+                const uint index = source * V41_HC_CONNECTIONS + destination;
+                const float value = mix[8 + index] * scale[2] + base[8 + index];
+                comb[index] = value;
+                row_max = max(row_max, value);
+            }
+            float sum = 0.0f;
+            for (uint destination = 0; destination < V41_HC_CONNECTIONS; ++destination) {
+                const uint index = source * V41_HC_CONNECTIONS + destination;
+                comb[index] = exp(comb[index] - row_max);
+                sum += comb[index];
+            }
+            const float inverse = 1.0f / sum;
+            for (uint destination = 0; destination < V41_HC_CONNECTIONS; ++destination) {
+                const uint index = source * V41_HC_CONNECTIONS + destination;
+                comb[index] = comb[index] * inverse + eps;
+            }
+        }
+        for (uint destination = 0; destination < V41_HC_CONNECTIONS; ++destination) {
+            float sum = 0.0f;
+            for (uint source = 0; source < V41_HC_CONNECTIONS; ++source) sum += comb[source * V41_HC_CONNECTIONS + destination];
+            const float inverse = 1.0f / (sum + eps);
+            for (uint source = 0; source < V41_HC_CONNECTIONS; ++source) comb[source * V41_HC_CONNECTIONS + destination] *= inverse;
+        }
+        for (uint iteration = 1; iteration < V41_HC_SINKHORN_ITERATIONS; ++iteration) {
+            for (uint source = 0; source < V41_HC_CONNECTIONS; ++source) {
+                float sum = 0.0f;
+                for (uint destination = 0; destination < V41_HC_CONNECTIONS; ++destination) sum += comb[source * V41_HC_CONNECTIONS + destination];
+                const float inverse = 1.0f / (sum + eps);
+                for (uint destination = 0; destination < V41_HC_CONNECTIONS; ++destination) comb[source * V41_HC_CONNECTIONS + destination] *= inverse;
+            }
+            for (uint destination = 0; destination < V41_HC_CONNECTIONS; ++destination) {
+                float sum = 0.0f;
+                for (uint source = 0; source < V41_HC_CONNECTIONS; ++source) sum += comb[source * V41_HC_CONNECTIONS + destination];
+                const float inverse = 1.0f / (sum + eps);
+                for (uint source = 0; source < V41_HC_CONNECTIONS; ++source) comb[source * V41_HC_CONNECTIONS + destination] *= inverse;
+            }
+        }
+        for (uint i = 0; i < 16; ++i) combination[i] = comb[i];
+    }
+    // C. collapse with the lagged incoming pre (independent of phase B).
+    const float p0 = incoming_pre[0], p1 = incoming_pre[1], p2 = incoming_pre[2], p3 = incoming_pre[3];
+    float ss2 = 0.0f;
+    for (uint d = tid; d < a.hidden; d += V41_HC_PRE_THREADS) {
+        float v = 0.0f;
+        v += x[d] * p0;
+        v += x[a.hidden + d] * p1;
+        v += x[2 * a.hidden + d] * p2;
+        v += x[3 * a.hidden + d] * p3;
+        collapsed[d] = v;
+        ss2 += v * v;
+    }
+    // D. weighted RMS norm of the collapsed row.
+    const float inv2 = rsqrt(v41_hc_tg_sum(ss2, partial, lane, sg) / float(a.hidden) + a.norm_eps);
+    for (uint d = tid; d < a.hidden; d += V41_HC_PRE_THREADS) {
+        normalized[d] = (collapsed[d] * inv2) * norm_weight[d];
+    }
+}
+
 struct RouteArgs { uint experts; uint topk; float temperature; float scale; };
 inline bool finite_bits(float v) { return (as_type<uint>(v) & 0x7f800000u) != 0x7f800000u; }
 // MSL has no log1p. Preserve tiny softplus tails instead of rounding 1+x to 1.

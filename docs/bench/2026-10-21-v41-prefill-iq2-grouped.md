@@ -1,3 +1,8 @@
+> Historical measurement on the pre-merge base. Candidate `2c51322f` is on
+> `backup/v41-chunk-1024-966bcae8`, not in the landed branch. The landed base
+> and the merged-main numbers are in
+> [2026-10-21-v41-prefill-merged-main.md](2026-10-21-v41-prefill-merged-main.md).
+
 # V4.1 prefill: grouped IQ2_XXS/IQ2_XS experts
 
 Candidate `2c51322f` adds F32-operand grouped tiles for IQ2_XXS/IQ2_XS gate/up

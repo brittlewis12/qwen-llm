@@ -6,6 +6,28 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the current state and evidence index.
 
+## 2026-10-21 - V4.1: Grouped IQ2 Experts And 8-Lane Score +60% Q2 / +25% IQ3 Prefill
+
+- Merged the lane onto main `24ec157e` and rebased the surviving work on the
+  roadmap commit. IQ2_XXS/IQ2_XS routed layers now take the F32-operand
+  grouped expert tiles; the prefill score default processes four keys in
+  parallel per simdgroup with 8-lane reductions. The ignored chunk-1024
+  commit is superseded by main's 2048-row chunks.
+- Q2_K_XL and IQ3_XXS ABBA on M5 Ultra, `--pp 1024,2048,4096 --runs 2`:
+  Q2 213.6 -> 341.4, 206.6 -> 339.2, 198.0 -> 318.9 tok/s
+  (+59.8/+64.2/+61.1%); IQ3 273.5 -> 342.9, 265.9 -> 337.0, 251.7 -> 316.3
+  (+25.4/+26.7/+25.7%). Both artifacts now prefill at the same rate.
+- Held text (six frozen documents, 384 IQ3 targets): mean NLL
+  2.14695 -> 2.14816 (+0.056%), top-1 215 -> 220/384, no target loses its
+  argmax. The grouped tiles and the score tree are F32 reduction order, not
+  bitwise. The 22-task screen and the 257-token ring witness were not rerun.
+- Bounded negatives: eight heads per score threadgroup -0.9%/-1.2%; score
+  keys per simdgroup 8/16/32 = 0/-0.7%/-1.6%; 32-slot gate/up tile +0.25%
+  Q2 / +0.9% IQ3 at pp2048 but -1.3%/-1.6% at pp1024, below the bar.
+- Remaining budget at Q2 PP1024: FFN 39%, score 22%, PV/softmax/output 18%,
+  owner/producer prepare+selection 12%. Census 50,720 dispatches.
+- [ABBA, attribution, negatives and witness](bench/2026-10-21-v41-prefill-merged-main.md).
+
 ## 2026-10-21 - V4.1: Fused mHC Pre-Block And Grouped output_a +23-25% Decode; 2048-Row Chunks +4-6% Prefill
 
 - Sampled per-layer attribution after the router landing put the mHC

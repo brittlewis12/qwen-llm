@@ -630,3 +630,68 @@ fn mma_sink_tile_invalid_visibility_and_finite_guards() {
     assert_eq!(ids(&f.status, 1), [6]);
     f.check_guards();
 }
+
+/// Opt-in timing of each sink-tile dispatch, old path versus MMA, at the
+/// production tile shape. `QWEN_V41_SINK_TIMING=1`; prints, asserts nothing.
+#[test]
+fn mma_sink_tile_dispatch_timing() {
+    if std::env::var_os("QWEN_V41_SINK_TIMING").is_none() {
+        return;
+    }
+    let ctx = MetalContext::new().expect("Metal");
+    let timed = |label: &str, f: &Fixture, encode: &dyn Fn(&KernelEncoder)| {
+        let mut us = Vec::new();
+        for _ in 0..12 {
+            let command = ctx.queue.commandBuffer().unwrap();
+            let enc = KernelEncoder::begin(&command);
+            encode(&enc);
+            enc.end();
+            metal::commit_and_wait(&command).unwrap();
+            us.push((command.GPUEndTime() - command.GPUStartTime()) * 1e6);
+        }
+        us.sort_by(f64::total_cmp);
+        eprintln!(
+            "sink_timing k={} n={} {label:<26} median {:8.1} us  min {:8.1}",
+            f.k, f.n, us[6], us[0]
+        );
+    };
+    for (k, n) in [(640usize, 32usize), (512, 32), (256, 32)] {
+        let f = Fixture::new(&ctx, k, n, k == 640, 0);
+        // Heat.
+        for _ in 0..20 {
+            execute(&ctx, |enc| f.encode_mma(&ctx, enc));
+        }
+        timed("old score_rows", &f, &|enc| {
+            f.bind(enc);
+            pipeline(&ctx, enc, "score_rows").unwrap();
+            grid(enc, f.count(f.n - 1).div_ceil(8), H, f.n, 256);
+        });
+        timed("mma score", &f, &|enc| {
+            f.bind(enc);
+            pipeline(&ctx, enc, "score_mma").unwrap();
+            grid(enc, H / 16, f.n, 1, 64);
+        });
+        timed("softmax_rows", &f, &|enc| {
+            f.bind(enc);
+            pipeline(&ctx, enc, "softmax_rows").unwrap();
+            grid(enc, H, f.n, 1, 32);
+        });
+        timed("old gather+pv(F32 MMA)+finite", &f, &|enc| {
+            f.encode(&ctx, enc, Production, Scope::PackPvFinite);
+        });
+        timed("mma pv", &f, &|enc| {
+            f.bind(enc);
+            pipeline(&ctx, enc, "pv_mma").unwrap();
+            grid(enc, H / 16, f.n, 1, 256);
+        });
+        timed("normalize_rows", &f, &|enc| {
+            f.bind(enc);
+            let pso = pipeline(&ctx, enc, "normalize_rows").unwrap();
+            dispatch(enc, &pso, f.n * H * M);
+        });
+        timed("full old sink", &f, &|enc| {
+            f.encode(&ctx, enc, Production, Scope::Sink)
+        });
+        timed("full mma sink", &f, &|enc| f.encode_mma(&ctx, enc));
+    }
+}

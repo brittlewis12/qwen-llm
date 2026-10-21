@@ -415,11 +415,11 @@ impl Workspace {
         let b = &self.buffers;
         encode_route_rows(ctx, enc, c, 1, logits, bias, &b[9], &b[10], &b[11], status)?;
         if fuse_chain
-            && metal::all_slots_gate_up_weight2_native_supported(
+            && metal::all_slots_gate_up_weight_native_supported(
                 layer.banks[0].dtype,
                 layer.banks[1].dtype,
             )
-            && metal::all_slots_down_sum2_native_supported(layer.banks[2].dtype)
+            && metal::all_slots_down_sum_native_supported(layer.banks[2].dtype)
         {
             metal::encode_all_slots_gate_up_swiglu_weight_native(
                 ctx,
@@ -436,7 +436,6 @@ impl Workspace {
                 c.experts,
                 c.topk,
                 c.clamp,
-                2,
             )?;
             metal::encode_all_slots_down_sum_native(
                 ctx,
@@ -451,7 +450,6 @@ impl Workspace {
                 c.hidden,
                 c.experts,
                 c.topk,
-                2,
             )?;
             return Ok(());
         }

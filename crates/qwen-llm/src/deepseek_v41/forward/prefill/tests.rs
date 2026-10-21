@@ -113,13 +113,15 @@ fn chunk_dispatch_and_submission_census() {
                 .chunks(DEFAULT_CHUNK_ROWS)
                 .filter(|c| c.len() > 1)
                 .count();
-            for name in [
-                "kernel_moe_swiglu_clamped_mxfp4_f32x_grouped_slots",
-                "kernel_moe_down_mxfp4_f32x_grouped_slots",
+            // Half-staged MXFP4 route: generic down tile for the gate pass and
+            // the down pass, clamped up tile in between.
+            for (name, per_layer) in [
+                ("kernel_moe_down_mxfp4_f32_grouped_slots_generic", 2),
+                ("kernel_moe_up_clamped_mxfp4_f32_grouped_slots_clamped", 1),
             ] {
                 assert_eq!(
                     dispatches.iter().filter(|d| d.kernel == name).count(),
-                    grouped_chunks * model.layers.len()
+                    per_layer * grouped_chunks * model.layers.len()
                 );
             }
             assert_eq!(
@@ -508,6 +510,14 @@ fn vary(linear: &mut Linear<'_>, seed: usize) {
 
 #[test]
 fn nonuniform_dynamic_schedule_preserves_all_causal_regions() {
+    // Serial steps versus chunked prefill at the F32-operand contract; the
+    // routed experts are pinned to the F32 tiles for that comparison.
+    super::super::ffn_gpu::tests::with_grouped_rows(
+        nonuniform_dynamic_schedule_preserves_all_causal_regions_body,
+    );
+}
+
+fn nonuniform_dynamic_schedule_preserves_all_causal_regions_body() {
     let ctx = MetalContext::new().unwrap();
     let weights = toy::Weights::new(&ctx);
     let mut model = weights.model(&ctx);

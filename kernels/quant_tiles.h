@@ -73,6 +73,12 @@
 #define QT_F16_NL         2
 #define QT_BF16_BYTES     64
 #define QT_BF16_NL        2
+#define QT_MXFP4_BYTES    17
+#define QT_MXFP4_NL       2
+#define QT_IQ2_XS_BYTES   74
+#define QT_IQ2_XS_NL      16
+#define QT_IQ2_XXS_BYTES  66
+#define QT_IQ2_XXS_NL     16
 
 #define QT_QK_K 256
 
@@ -869,6 +875,60 @@ inline void qt_dequantize_f16(device const uchar * blk_bytes,
 }
 
 // Source: moe.metal moe_bf16_to_float.
+// MXFP4: one E8M0 shared exponent byte, then 32 FP4 (E2M1) codes packed two
+// per byte, element i in the low nibble of byte 1+i and element 16+i in the
+// high nibble. The code table holds the E2M1 values doubled and the scale is
+// 2^(e-128) to compensate (GGML's convention; exponents 0 and 1 map to the
+// two smallest F32 normals, as in expert_dequantize_mxfp4). Half output
+// flushes the sub-half-range products that only the F32 kernels keep.
+constant float qt_mxfp4_values[16] = {
+    0, 1, 2, 3, 4, 6, 8, 12, 0, -1, -2, -3, -4, -6, -8, -12
+};
+inline void qt_dequantize_mxfp4(device const uchar * blk,
+                                short il,
+                                thread half4x4 & reg) {
+    const uint e = uint(blk[0]);
+    const float scale = as_type<float>(e == 0u ? 0x00200000u
+        : (e == 1u ? 0x00400000u : (e - 1u) << 23u));
+    QT_FOR_UNROLL (int i = 0; i < 16; ++i) {
+        const uint code = (uint(blk[1 + i]) >> (4u * uint(il))) & 15u;
+        reg[i / 4][i % 4] = half(qt_mxfp4_values[code] * scale);
+    }
+}
+
+// IQ2_XS: the same grid/sign/scale interpretation as the native F32 expert
+// decoder (expert_native.metal), narrowed to half after the F32 arithmetic.
+#include "iq2_xs_grid.metalh"
+inline void qt_dequantize_iq2_xs(device const uchar * blk,
+                                 short il,
+                                 thread half4x4 & reg) {
+    const float d = float(*((device const half *)blk));
+    device const ushort * qs = (device const ushort *)(blk + 2);
+    device const uchar * scales = blk + 66;
+    const uint ib32 = uint(il) >> 1;
+    const uint ih = uint(il) & 1u;
+    const float dl = d * (0.5f + float((uint(scales[ib32]) >> (4u * ih)) & 15u)) * 0.25f;
+    QT_FOR_UNROLL (uint i = 0; i < 16; ++i) {
+        const uint packed = uint(qs[4u * ib32 + 2u * ih + (i >> 3)]);
+        constant uchar * grid = (constant uchar *)(mv_iq2xs_grid + (packed & 511u));
+        const uint signs = uint(qt_ksigns_iq2xs[packed >> 9]);
+        const float sign = (signs & uint(qt_kmask_iq2xs[i & 7u])) ? -1.0f : 1.0f;
+        reg[i / 4][i % 4] = half(dl * float(grid[i & 7u]) * sign);
+    }
+}
+
+// IQ2_XXS: the shared F32 decoder, narrowed to half.
+#include "iq2_xxs_decode.metalh"
+inline void qt_dequantize_iq2_xxs(device const uchar * blk,
+                                  short il,
+                                  thread half4x4 & reg) {
+    float4x4 w;
+    iq2_xxs_dequant16(blk, uint(il), w);
+    QT_FOR_UNROLL (uint i = 0; i < 16; ++i) {
+        reg[i / 4][i % 4] = half(w[i / 4][i % 4]);
+    }
+}
+
 inline void qt_dequantize_bf16(device const uchar * blk_bytes,
                                short il,
                                thread half4x4 & reg) {

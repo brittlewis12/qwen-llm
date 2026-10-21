@@ -139,25 +139,31 @@ fn native_rows_v41_live_route_stages_dispatch_and_partition_are_bitwise() {
 
 #[test]
 fn native_rows_v41_iq2_actual_cohorts_and_mixed_gate_up_are_bitwise() {
-    // The IQ2 cohorts are grouped F32x in production now; force the native
-    // row path so this witness keeps testing its bitwise reference.
-    with_native_rows(|| {
-        native_rows_live_route_witness_with_chunks(
-            &[
-                (GgmlType::IQ2_XS, GgmlType::IQ2_XS, GgmlType::MXFP4),
-                (GgmlType::IQ2_XXS, GgmlType::IQ2_XXS, GgmlType::IQ2_XXS),
-                (GgmlType::IQ2_XXS, GgmlType::IQ2_XXS, GgmlType::IQ3_XXS),
-                (GgmlType::IQ2_XXS, GgmlType::IQ2_XXS, GgmlType::MXFP4),
-                (GgmlType::IQ2_XS, GgmlType::IQ2_XXS, GgmlType::IQ2_XXS),
-            ],
-            &[1, 3, 7, 33, 257],
-        );
-    });
+    // These cohorts take the half-staged tiles in production now; the
+    // native-rows path stays bitwise when pinned.
+    with_native_rows(|| native_rows_v41_iq2_actual_cohorts_and_mixed_gate_up_body());
+}
+
+fn native_rows_v41_iq2_actual_cohorts_and_mixed_gate_up_body() {
+    native_rows_live_route_witness_with_chunks(
+        &[
+            (GgmlType::IQ2_XS, GgmlType::IQ2_XS, GgmlType::MXFP4),
+            (GgmlType::IQ2_XXS, GgmlType::IQ2_XXS, GgmlType::IQ2_XXS),
+            (GgmlType::IQ2_XXS, GgmlType::IQ2_XXS, GgmlType::IQ3_XXS),
+            (GgmlType::IQ2_XXS, GgmlType::IQ2_XXS, GgmlType::MXFP4),
+            (GgmlType::IQ2_XS, GgmlType::IQ2_XXS, GgmlType::IQ2_XXS),
+        ],
+        &[1, 3, 7, 33, 257],
+    );
 }
 
 #[test]
 fn native_rows_v41_mixed_types_keep_live_fallback_bitwise() {
-    native_rows_live_route_witness(&[(GgmlType::IQ3_XXS, GgmlType::Q3_K, GgmlType::MXFP4)]);
+    // Mixed gate/up with generic layouts now take the half-staged tiles in
+    // production; the native-rows path stays bitwise when pinned.
+    with_native_rows(|| {
+        native_rows_live_route_witness(&[(GgmlType::IQ3_XXS, GgmlType::Q3_K, GgmlType::MXFP4)])
+    });
 }
 
 fn native_rows_live_route_witness(types: &[(GgmlType, GgmlType, GgmlType)]) {
@@ -406,13 +412,13 @@ fn native_rows_v41_eligibility_keeps_grouped_and_deferred_paths() {
         (GgmlType::IQ3_S, GgmlType::IQ3_S, true, false),
         (GgmlType::IQ3_XXS, GgmlType::IQ3_S, true, true),
         (GgmlType::Q3_K, GgmlType::MXFP4, true, true),
-        (GgmlType::IQ2_XS, GgmlType::MXFP4, true, true),
-        (GgmlType::IQ2_XXS, GgmlType::IQ2_XXS, true, true),
-        (GgmlType::IQ2_XXS, GgmlType::IQ3_XXS, true, true),
-        (GgmlType::IQ2_XXS, GgmlType::MXFP4, true, true),
-        (GgmlType::Q3_K, GgmlType::IQ2_XXS, true, true),
-        (GgmlType::Q3_K, GgmlType::IQ2_XS, true, false),
-        (GgmlType::IQ2_XS, GgmlType::IQ2_XS, true, false),
+        (GgmlType::IQ2_XS, GgmlType::MXFP4, false, true),
+        (GgmlType::IQ2_XXS, GgmlType::IQ2_XXS, false, true),
+        (GgmlType::IQ2_XXS, GgmlType::IQ3_XXS, false, true),
+        (GgmlType::IQ2_XXS, GgmlType::MXFP4, false, true),
+        (GgmlType::Q3_K, GgmlType::IQ2_XXS, false, true),
+        (GgmlType::Q3_K, GgmlType::IQ2_XS, false, false),
+        (GgmlType::IQ2_XS, GgmlType::IQ2_XS, false, false),
     ] {
         let banks = [
             MetalTensor {

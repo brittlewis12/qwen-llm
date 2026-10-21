@@ -7295,6 +7295,15 @@ template [[host_name("kernel_moe_swiglu_f16_f32_grouped_slots_generic")]] kernel
 template [[host_name("kernel_moe_down_bf16_f32_grouped_slots_generic")]] kernel moe_grouped_slots_mm_generic_t kernel_moe_grouped_slots_mm_generic<QT_BF16_BYTES, QT_BF16_NL, qt_dequantize_bf16, 0>;
 template [[host_name("kernel_moe_up_silu_mul_bf16_f32_grouped_slots_generic")]] kernel moe_grouped_slots_mm_generic_t kernel_moe_grouped_slots_mm_generic<QT_BF16_BYTES, QT_BF16_NL, qt_dequantize_bf16, 1>;
 template [[host_name("kernel_moe_swiglu_bf16_f32_grouped_slots_generic")]] kernel moe_swiglu_grouped_slots_generic_t kernel_moe_swiglu_grouped_slots_n16_generic<QT_BF16_BYTES, QT_BF16_NL, qt_dequantize_bf16>;
+template [[host_name("kernel_moe_down_mxfp4_f32_grouped_slots_generic")]] kernel moe_grouped_slots_mm_generic_t kernel_moe_grouped_slots_mm_generic<QT_MXFP4_BYTES, QT_MXFP4_NL, qt_dequantize_mxfp4, 0>;
+template [[host_name("kernel_moe_up_silu_mul_mxfp4_f32_grouped_slots_generic")]] kernel moe_grouped_slots_mm_generic_t kernel_moe_grouped_slots_mm_generic<QT_MXFP4_BYTES, QT_MXFP4_NL, qt_dequantize_mxfp4, 1>;
+template [[host_name("kernel_moe_swiglu_mxfp4_f32_grouped_slots_generic")]] kernel moe_swiglu_grouped_slots_generic_t kernel_moe_swiglu_grouped_slots_n16_generic<QT_MXFP4_BYTES, QT_MXFP4_NL, qt_dequantize_mxfp4>;
+template [[host_name("kernel_moe_down_iq2_xs_f32_grouped_slots_generic")]] kernel moe_grouped_slots_mm_generic_t kernel_moe_grouped_slots_mm_generic<QT_IQ2_XS_BYTES, QT_IQ2_XS_NL, qt_dequantize_iq2_xs, 0>;
+template [[host_name("kernel_moe_up_silu_mul_iq2_xs_f32_grouped_slots_generic")]] kernel moe_grouped_slots_mm_generic_t kernel_moe_grouped_slots_mm_generic<QT_IQ2_XS_BYTES, QT_IQ2_XS_NL, qt_dequantize_iq2_xs, 1>;
+template [[host_name("kernel_moe_swiglu_iq2_xs_f32_grouped_slots_generic")]] kernel moe_swiglu_grouped_slots_generic_t kernel_moe_swiglu_grouped_slots_n16_generic<QT_IQ2_XS_BYTES, QT_IQ2_XS_NL, qt_dequantize_iq2_xs>;
+template [[host_name("kernel_moe_down_iq2_xxs_f32_grouped_slots_generic")]] kernel moe_grouped_slots_mm_generic_t kernel_moe_grouped_slots_mm_generic<QT_IQ2_XXS_BYTES, QT_IQ2_XXS_NL, qt_dequantize_iq2_xxs, 0>;
+template [[host_name("kernel_moe_up_silu_mul_iq2_xxs_f32_grouped_slots_generic")]] kernel moe_grouped_slots_mm_generic_t kernel_moe_grouped_slots_mm_generic<QT_IQ2_XXS_BYTES, QT_IQ2_XXS_NL, qt_dequantize_iq2_xxs, 1>;
+template [[host_name("kernel_moe_swiglu_iq2_xxs_f32_grouped_slots_generic")]] kernel moe_swiglu_grouped_slots_generic_t kernel_moe_swiglu_grouped_slots_n16_generic<QT_IQ2_XXS_BYTES, QT_IQ2_XXS_NL, qt_dequantize_iq2_xxs>;
 
 // Clamped fused SwiGLU (DeepSeek V4 / GLM-5.3), for the expert dtypes those
 // releases use; add a line per dtype with evidence.
@@ -7320,3 +7329,6 @@ template [[host_name("kernel_moe_up_clamped_iq4_xs_f32_grouped_slots_clamped")]]
 template [[host_name("kernel_moe_up_clamped_f32_f32_grouped_slots_clamped")]] kernel moe_up_clamped_grouped_slots_generic_t kernel_moe_up_clamped_grouped_slots_generic<QT_F32_BYTES, QT_F32_NL, qt_dequantize_f32, 2>;
 template [[host_name("kernel_moe_up_clamped_f16_f32_grouped_slots_clamped")]] kernel moe_up_clamped_grouped_slots_generic_t kernel_moe_up_clamped_grouped_slots_generic<QT_F16_BYTES, QT_F16_NL, qt_dequantize_f16, 2>;
 template [[host_name("kernel_moe_up_clamped_bf16_f32_grouped_slots_clamped")]] kernel moe_up_clamped_grouped_slots_generic_t kernel_moe_up_clamped_grouped_slots_generic<QT_BF16_BYTES, QT_BF16_NL, qt_dequantize_bf16, 2>;
+template [[host_name("kernel_moe_up_clamped_mxfp4_f32_grouped_slots_clamped")]] kernel moe_up_clamped_grouped_slots_generic_t kernel_moe_up_clamped_grouped_slots_generic<QT_MXFP4_BYTES, QT_MXFP4_NL, qt_dequantize_mxfp4, 2>;
+template [[host_name("kernel_moe_up_clamped_iq2_xs_f32_grouped_slots_clamped")]] kernel moe_up_clamped_grouped_slots_generic_t kernel_moe_up_clamped_grouped_slots_generic<QT_IQ2_XS_BYTES, QT_IQ2_XS_NL, qt_dequantize_iq2_xs, 2>;
+template [[host_name("kernel_moe_up_clamped_iq2_xxs_f32_grouped_slots_clamped")]] kernel moe_up_clamped_grouped_slots_generic_t kernel_moe_up_clamped_grouped_slots_generic<QT_IQ2_XXS_BYTES, QT_IQ2_XXS_NL, qt_dequantize_iq2_xxs, 2>;

@@ -359,6 +359,22 @@ impl Workspace {
         pre: &MetalTensor,
         output: &MetalTensor,
     ) -> std::result::Result<(), metal::MetalError> {
+        self.encode_mhc_pre(ctx, enc, c, layer, id, x, pre)?;
+        self.encode_router_shared(ctx, enc, c, layer)?;
+        self.encode_routed_stage(ctx, enc, c, layer, id)?;
+        self.encode_mhc_post(ctx, enc, c, x, output)
+    }
+
+    pub(super) fn encode_mhc_pre(
+        &self,
+        ctx: &MetalContext,
+        enc: &KernelEncoder,
+        c: &Config,
+        layer: &Layer<'_>,
+        id: usize,
+        x: &MetalTensor,
+        pre: &MetalTensor,
+    ) -> std::result::Result<(), metal::MetalError> {
         composition_extents(c, 1)?;
         let b = &self.buffers;
         let constants = &self.constants[id];
@@ -390,13 +406,35 @@ impl Workspace {
             1,
             c.hidden,
             c.norm_eps,
-        )?;
+        )
+    }
+
+    pub(super) fn encode_router_shared(
+        &self,
+        ctx: &MetalContext,
+        enc: &KernelEncoder,
+        c: &Config,
+        layer: &Layer<'_>,
+    ) -> std::result::Result<(), metal::MetalError> {
+        let b = &self.buffers;
         layer.router.encode(enc, &b[7], &b[8])?;
         for j in 0..2 {
             layer.shared[j].encode(enc, &b[7], &b[16 + j])?;
         }
         metal::encode_clamped_swiglu(ctx, enc, &b[16], &b[17], &b[18], c.clamp)?;
-        layer.shared[2].encode(enc, &b[18], &b[19])?;
+        layer.shared[2].encode(enc, &b[18], &b[19])
+    }
+
+    pub(super) fn encode_routed_stage(
+        &self,
+        ctx: &MetalContext,
+        enc: &KernelEncoder,
+        c: &Config,
+        layer: &Layer<'_>,
+        id: usize,
+    ) -> std::result::Result<(), metal::MetalError> {
+        let b = &self.buffers;
+        let constants = &self.constants[id];
         self.encode_routed(
             ctx,
             enc,
@@ -408,7 +446,18 @@ impl Workspace {
             &b[19],
             &b[20],
             &self.statuses[id],
-        )?;
+        )
+    }
+
+    pub(super) fn encode_mhc_post(
+        &self,
+        ctx: &MetalContext,
+        enc: &KernelEncoder,
+        c: &Config,
+        x: &MetalTensor,
+        output: &MetalTensor,
+    ) -> std::result::Result<(), metal::MetalError> {
+        let b = &self.buffers;
         metal::encode_mhc4_post(ctx, enc, c.hidden, &b[20], x, &b[4], &b[5], output)
     }
 

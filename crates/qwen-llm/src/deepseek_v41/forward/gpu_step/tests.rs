@@ -1,6 +1,172 @@
 use super::*;
 
 #[test]
+fn private_coarse_decode_restored_observer_is_bitwise_and_one_command() {
+    let ctx = MetalContext::new().unwrap();
+    let weights = toy::Weights::new(&ctx);
+    for use_engram in [false, true] {
+        let mut model = weights.model(&ctx);
+        if !use_engram {
+            model.engram_hash.layers.clear();
+            for layer in &mut model.layers {
+                layer.engram = None;
+            }
+        }
+        let engrams: Vec<_> = model.engram_hash.layers.iter().map(|l| l.layer).collect();
+        let layout = profile::decode::layout(40, &engrams, false, true).unwrap();
+        for depth in [0, 3, 6] {
+            let mut state = model.new_state_with_gpu_step(40).unwrap();
+            if depth > 0 {
+                model
+                    .prefill(
+                        &mut state,
+                        &(0..depth).map(|i| (i % 5) as u32).collect::<Vec<_>>(),
+                        None,
+                    )
+                    .unwrap();
+            }
+            let snapshot = model.capture_snapshot(&state).unwrap();
+            let mut reference = Vec::new();
+            let mut reference_dispatches = Vec::new();
+            let mut cached = None;
+            for profiled in [false, true, false, true] {
+                model.restore_snapshot(&mut state, &snapshot).unwrap();
+                let scope = if profiled {
+                    profile::Scope::begin_stages()
+                } else {
+                    profile::Scope::begin()
+                }
+                .unwrap();
+                let mut rows = Vec::new();
+                for step in 0..32 {
+                    metal::dispatch_census_begin();
+                    let logits = model
+                        .step(&mut state, ((step * 3) % 5) as u32, None)
+                        .unwrap();
+                    let census = metal::dispatch_census_take();
+                    assert!(!census.is_empty());
+                    assert!(census.iter().all(|r| !r.encoder_concurrent));
+                    let encoders: std::collections::BTreeSet<_> =
+                        census.iter().map(|r| r.encoder_ordinal).collect();
+                    assert_eq!(encoders.len(), if profiled { layout.len() } else { 1 });
+                    let dispatches: Vec<_> = census
+                        .into_iter()
+                        .map(|r| {
+                            (
+                                r.kernel,
+                                [r.grid_width, r.grid_height, r.grid_depth],
+                                [r.threads_width, r.threads_height, r.threads_depth],
+                                r.grid_tgs,
+                                r.tg_threads,
+                            )
+                        })
+                        .collect();
+                    if reference_dispatches.len() == step {
+                        reference_dispatches.push(dispatches);
+                    } else {
+                        assert_eq!(reference_dispatches[step], dispatches);
+                    }
+                    assert!(logits.iter().all(|v| v.is_finite()));
+                    rows.push(logits.iter().map(|v| v.to_bits()).collect::<Vec<_>>());
+                    assert_eq!(state.diagnostic_gpu_counts(), Some((1, 0)));
+                    assert_eq!(state.position(), depth + step + 1);
+                }
+                if reference.is_empty() {
+                    reference = rows;
+                } else {
+                    assert_eq!(reference, rows);
+                }
+                let report = scope.finish();
+                assert_eq!(
+                    report.decode_intervals.len(),
+                    if profiled { 32 * layout.len() } else { 0 }
+                );
+                let mut overlaps = 0;
+                for intervals in report.decode_intervals.chunks_exact(layout.len()) {
+                    let spans: Vec<_> = intervals.iter().map(|i| (i.start_ns, i.end_ns)).collect();
+                    let summary = profile::decode::summarize_envelopes(&spans).unwrap();
+                    overlaps += usize::from(!summary.exclusive);
+                    assert_eq!(
+                        summary.interval_union_ns + summary.overlap_multiplicity_ns,
+                        summary.sum_inclusive_durations_ns
+                    );
+                    assert_eq!(
+                        summary.interval_union_ns + summary.uncovered_sampled_envelope_ns,
+                        summary.sampled_envelope_ns
+                    );
+                    assert!(summary.covered_by_two_or_more_ns <= summary.overlap_multiplicity_ns);
+                }
+                eprintln!(
+                    "private fixture: engram={use_engram} depth={depth} profiled={profiled} nonexclusive_positions={overlaps}; valid inclusive envelopes, nonadditive and not proof of concurrent execution"
+                );
+                assert_eq!(
+                    report.operations.len(),
+                    32 * (1 + if profiled { layout.len() } else { 0 })
+                );
+                assert_eq!(
+                    report
+                        .operations
+                        .iter()
+                        .map(|o| o.completed_submits)
+                        .sum::<usize>(),
+                    32
+                );
+                assert!(
+                    report
+                        .operations
+                        .iter()
+                        .all(|o| o.invalid_gpu_timestamps == 0
+                            && o.gpu_ms.is_some_and(|ms| ms > 0.0 && ms.is_finite()))
+                );
+                if profiled {
+                    let samples = state
+                        .gpu_step
+                        .as_ref()
+                        .unwrap()
+                        .decode_samples
+                        .as_ref()
+                        .unwrap();
+                    assert_eq!(samples.sample_count(), profile::decode::MAX_SAMPLES);
+                    let address = std::rc::Rc::as_ptr(samples);
+                    if let Some(previous) = cached {
+                        assert_eq!(previous, address);
+                    }
+                    cached = Some(address);
+                    for position in depth..depth + 32 {
+                        for &(name, layer) in &layout {
+                            let op = report
+                                .operations
+                                .iter()
+                                .find(|o| {
+                                    o.operation == name && o.dimensions == [position, layer, 1, 0]
+                                })
+                                .unwrap();
+                            assert_eq!((op.count, op.completed_submits), (1, 0));
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn private_coarse_decode_rejects_trace_and_clears_scope_on_failure() {
+    let ctx = MetalContext::new().unwrap();
+    let weights = toy::Weights::new(&ctx);
+    let model = weights.model(&ctx);
+    let mut state = model.new_state_with_gpu_step(1).unwrap();
+    let scope = profile::Scope::begin_stages().unwrap();
+    let error = model
+        .step_with_trace(&mut state, 0, None, Some(&mut |_| Ok(())))
+        .unwrap_err();
+    assert!(error.contains("forbids trace/capture"));
+    assert_eq!(state.diagnostic_gpu_counts(), Some((0, 0)));
+    assert!(scope.finish().operations.is_empty());
+    profile::Scope::begin().unwrap().finish();
+}
+
+#[test]
 fn metadata_schedule_drives_full_gpu_graph_and_engram_at_zero() {
     let ctx = MetalContext::new().unwrap();
     let weights = toy::Weights::new(&ctx);

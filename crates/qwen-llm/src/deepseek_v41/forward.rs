@@ -500,6 +500,11 @@ pub struct State {
     identity: Arc<()>,
 }
 impl State {
+    /// PRIVATE diagnostic: completed step submissions and trace copies.
+    pub fn diagnostic_gpu_counts(&self) -> Option<(usize, usize)> {
+        self.gpu_step.as_ref().map(|ws| ws.diagnostic_counts())
+    }
+
     pub fn capacity(&self) -> usize {
         self.max_context
     }

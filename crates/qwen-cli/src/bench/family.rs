@@ -7,6 +7,8 @@
 //! what the timed call executed (`prefill_mode`, `decode_mode`).
 
 use super::*;
+#[path = "decode_private.rs"]
+mod decode_private;
 use crate::family_options::{
     deepseek_v4_prefill_chunk_ranges, deepseek_v4_prefill_chunk_tokens,
     muse_runtime_options_from_env, qwen4exp_decode_options_from_env,
@@ -42,6 +44,12 @@ pub(crate) trait FamilyBench {
     /// One step through the production generated-token path, including its
     /// logits copy.
     fn decode(&mut self, id: u32) -> Result<()>;
+    fn private_restored_decode(&self) -> bool {
+        false
+    }
+    fn restored_decode_row(&mut self, _depth: usize) -> Result<Vec<f64>> {
+        bail!("not a private restored decode adapter")
+    }
     /// Labels for the most recent prefill and decode calls.
     fn semantics(&self) -> FamilySemantics;
 }
@@ -105,7 +113,12 @@ pub(crate) fn with_family_bench<R>(
 ) -> Result<R> {
     match family {
         ModelFamily::DeepSeekV41 => {
+            let Cmd::Suite(args) = Args::try_parse()?.cmd else {
+                bail!("PRIVATE decode diagnostic requires suite");
+            };
+            decode_private::validate_recipe(&args, extent)?;
             let plan = v41_weights::plan(gguf)?;
+            ensure!(plan.layers == 40, "PRIVATE decode requires 40 layers");
             validate_v41_extent(extent, plan.engram_hash.max_position)?;
             let weights = v41_weights::ResidentWeights::load(ctx, gguf.clone())
                 .context("load DeepSeek V4.1 weights")?;
@@ -116,24 +129,15 @@ pub(crate) fn with_family_bench<R>(
                 weights.raw_pad,
             )
             .map_err(anyhow::Error::msg)?;
-            let mut bench = DeepSeekV41Bench {
-                vocab: weights.config.vocab,
-                state: None,
-                create: || Ok(forward.new_state_with_gpu_step(extent.forwards)?),
-                prefill: |state: &mut qwen_llm::deepseek_v41::forward::State, ids: &[u32]| {
-                    shutdown::checkpoint()?;
-                    forward
-                        .prefill(state, ids, Some(shutdown::cancellation_flag()))
-                        .map_err(anyhow::Error::from)
-                },
-                step: |state: &mut qwen_llm::deepseek_v41::forward::State, token| {
-                    shutdown::checkpoint()?;
-                    forward
-                        .step(state, token, Some(shutdown::cancellation_flag()))
-                        .map_err(anyhow::Error::msg)
-                },
-            };
-            body(&mut bench)
+            let mut bench = decode_private::Bench::new(
+                &forward,
+                ctx,
+                weights.config.vocab,
+                plan.engram_hash.layers.iter().map(|l| l.layer).collect(),
+            );
+            let result = body(&mut bench);
+            bench.finish(result.as_ref().err())?;
+            result
         }
         ModelFamily::Qwen4Exp => {
             for name in QWEN4EXP_PROFILE_ONLY_ENV {
@@ -289,6 +293,7 @@ fn validate_v41_extent(extent: FamilyBenchExtent, max_position: u64) -> Result<(
     Ok(())
 }
 
+#[cfg(test)]
 struct DeepSeekV41Bench<S, Create, Step, Prefill> {
     vocab: usize,
     state: Option<S>,
@@ -297,6 +302,7 @@ struct DeepSeekV41Bench<S, Create, Step, Prefill> {
     prefill: Prefill,
 }
 
+#[cfg(test)]
 impl<S, Create, Step, Prefill> FamilyBench for DeepSeekV41Bench<S, Create, Step, Prefill>
 where
     Create: FnMut() -> Result<S>,
@@ -699,6 +705,25 @@ pub(crate) fn run_family_tg_row(
     seed: u64,
 ) -> Result<BenchRow> {
     ensure!(n_gen > 0, "--tg values must be >= 1");
+    if bench.private_restored_decode() {
+        ensure!(
+            n_gen == 32 && runs == 3 && !no_warmup && seed == 3,
+            "PRIVATE restored decode row recipe"
+        );
+        let wall = bench.restored_decode_row(depth)?;
+        return Ok(family_row(
+            row_ctx,
+            bench.semantics(),
+            format!(
+                "private_restored_fixed_diagnostic_not_canonical:{}",
+                shape_label("tg", n_gen, depth)
+            ),
+            n_gen,
+            depth,
+            &wall,
+            false,
+        ));
+    }
     let vocab = bench.vocab_size();
     let depth_ids = synthetic_ids(depth, vocab, seed ^ DEPTH_SEED_SALT);
     let mut rep_index = 0u64;

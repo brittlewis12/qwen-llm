@@ -478,7 +478,7 @@ pub(crate) fn run_suite(args: SuiteArgs) -> Result<()> {
         let extent = FamilyBenchExtent::for_shapes(&pp, &tg, &depths, (warmup_pp, WARMUP_TG))?;
         rows = with_family_bench(family, &ctx, &probe, extent, &mut |bench| {
             let mut rows = Vec::with_capacity((pp.len() + tg.len()) * depths.len());
-            if !no_warmup {
+            if !no_warmup && !bench.private_restored_decode() {
                 crate::text_log!(json_mode, "[suite] model warm-up (untimed)");
                 run_family_pp_row(bench, &row_ctx, warmup_pp, 0, 1, true, seed)
                     .context("suite model warm-up pp")?;

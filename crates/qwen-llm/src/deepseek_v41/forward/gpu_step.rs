@@ -23,6 +23,7 @@ pub(super) struct Workspace {
     commands: usize,
     trace_copies: usize,
     engrams: Vec<EngramWorkspace>,
+    decode_samples: Option<std::rc::Rc<metal::MetalTimestampSampleBuffer>>,
 }
 
 struct EngramWorkspace {
@@ -359,6 +360,10 @@ impl Workspace {
         &self.attention
     }
 
+    pub(super) fn diagnostic_counts(&self) -> (usize, usize) {
+        (self.commands, self.trace_copies)
+    }
+
     pub(super) fn attention_mut(&mut self) -> &mut attention_gpu::Workspace {
         &mut self.attention
     }
@@ -445,6 +450,7 @@ impl Workspace {
             constants,
             commands: 0,
             trace_copies: 0,
+            decode_samples: None,
             engrams: model
                 .engram_hash
                 .layers
@@ -468,7 +474,7 @@ impl Workspace {
     fn layer(
         &mut self,
         model: &Forward<'_>,
-        enc: &KernelEncoder,
+        enc: &mut profile::decode::Encoder<'_>,
         id: usize,
         position: usize,
         snapshot: Option<&capture::Snapshot>,
@@ -476,6 +482,7 @@ impl Workspace {
         let ctx = model.ctx;
         let c = &model.config;
         let l = &model.layers[id];
+        enc.stage("decode_attention_mhc_pre", id)?;
         let incoming = if id == 0 {
             &self.initial_pre
         } else {
@@ -524,9 +531,11 @@ impl Workspace {
             )
         };
         encode().map_err(|e| e.to_string())?;
+        enc.stage("decode_attention_operator_composite", id)?;
         let output =
             self.attention
                 .encode(ctx, enc, id, position, &l.attention, &self.normalized)?;
+        enc.stage("decode_attention_mhc_post", id)?;
         metal::encode_mhc4_post(
             ctx, enc, c.hidden, output, &self.x, &self.post, &self.comb, &self.half,
         )
@@ -535,6 +544,27 @@ impl Workspace {
             self.attention
                 .capture(ctx, enc, snapshot, &self.normalized, id, position)?;
         }
+        if enc.sampled() && profile::decode::FFN_LAYERS.contains(&id) {
+            let names = profile::decode::FFN_STAGES;
+            enc.stage(names[0], id)?;
+            self.ffn
+                .encode_mhc_pre(ctx, enc, c, l, id, &self.half, &self.pre)
+                .map_err(|e| e.to_string())?;
+            enc.stage(names[1], id)?;
+            self.ffn
+                .encode_router_shared(ctx, enc, c, l)
+                .map_err(|e| e.to_string())?;
+            enc.stage(names[2], id)?;
+            self.ffn
+                .encode_routed_stage(ctx, enc, c, l, id)
+                .map_err(|e| e.to_string())?;
+            enc.stage(names[3], id)?;
+            return self
+                .ffn
+                .encode_mhc_post(ctx, enc, c, &self.half, &self.x)
+                .map_err(|e| e.to_string());
+        }
+        enc.stage("decode_ffn_composite_including_mhc", id)?;
         self.ffn
             .encode(ctx, enc, c, l, id, &self.half, &self.pre, &self.x)
             .map_err(|e| e.to_string())
@@ -578,6 +608,27 @@ impl Workspace {
     ) -> Result<Vec<f32>> {
         let c = &model.config;
         let ctx = model.ctx;
+        let (samples, stages) = if profile::stages() {
+            op::require(
+                trace.is_none() && capture.is_none(),
+                "private decode forbids trace/capture",
+            )?;
+            let stages = profile::decode::layout(
+                model.layers.len(),
+                &self.engrams.iter().map(|e| e.layer).collect::<Vec<_>>(),
+                prepared.is_some(),
+                with_logits,
+            )?;
+            if self.decode_samples.is_none() {
+                self.decode_samples = Some(std::rc::Rc::new(
+                    ctx.timestamp_sample_buffer(profile::decode::MAX_SAMPLES)
+                        .map_err(|e| e.to_string())?,
+                ));
+            }
+            (self.decode_samples.clone(), stages)
+        } else {
+            (None, Vec::new())
+        };
         let snapshots = if let Some(sink) = capture.as_ref().filter(|s| s.wants_position(position))
         {
             model
@@ -643,8 +694,11 @@ impl Workspace {
                 .queue
                 .commandBuffer()
                 .ok_or("Metal command buffer allocation")?;
-            let enc = KernelEncoder::begin(&command);
+            let mut enc = profile::decode::Encoder::new(&command, samples, stages)?;
             let encoded = (|| -> Result<()> {
+                if prepared.is_none() && !self.engrams.is_empty() {
+                    enc.stage("decode_engram_projections", end)?;
+                }
                 for slot in &self.engrams {
                     if prepared.is_some() {
                         continue;
@@ -656,6 +710,7 @@ impl Workspace {
                 for id in start..end {
                     cancelled(cancel)?;
                     if let Some(slot) = self.engrams.iter().find(|slot| slot.layer == id) {
+                        enc.stage("decode_engram_gate", id)?;
                         let projected = match prepared {
                             Some(rows) => {
                                 &rows
@@ -670,7 +725,7 @@ impl Workspace {
                     }
                     self.layer(
                         model,
-                        &enc,
+                        &mut enc,
                         id,
                         position,
                         snapshots
@@ -701,6 +756,7 @@ impl Workspace {
                     }
                 }
                 if with_logits {
+                    enc.stage("decode_head_collapse", end)?;
                     metal::encode_mhc4_collapse(
                         ctx,
                         &enc,
@@ -710,6 +766,7 @@ impl Workspace {
                         &self.collapsed,
                     )
                     .map_err(|e| e.to_string())?;
+                    enc.stage("decode_head_norm", end)?;
                     metal::encode_rms_norm_mul_rows_f32(
                         ctx,
                         &enc,
@@ -721,6 +778,7 @@ impl Workspace {
                         c.norm_eps,
                     )
                     .map_err(|e| e.to_string())?;
+                    enc.stage("decode_head_projection", end)?;
                     model
                         .head
                         .encode(&enc, &self.normalized, &self.logits)
@@ -728,8 +786,9 @@ impl Workspace {
                 }
                 Ok(())
             })();
-            enc.end();
+            let ended = enc.end();
             encoded?;
+            ended?;
             let encode_ms = started.map(|s| s.elapsed().as_secs_f64() * 1000.0);
             let wait = std::time::Instant::now();
             let result = metal::commit_and_wait(&command).map_err(|e| e.to_string());
@@ -746,6 +805,7 @@ impl Workspace {
                 );
             }
             result?;
+            enc.resolve(ctx, position)?;
             cancelled(cancel)?;
             let status = unsafe {
                 *self

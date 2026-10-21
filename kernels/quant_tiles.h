@@ -73,6 +73,8 @@
 #define QT_F16_NL         2
 #define QT_BF16_BYTES     64
 #define QT_BF16_NL        2
+#define QT_MXFP4_BYTES    17
+#define QT_MXFP4_NL       2
 
 #define QT_QK_K 256
 
@@ -869,6 +871,27 @@ inline void qt_dequantize_f16(device const uchar * blk_bytes,
 }
 
 // Source: moe.metal moe_bf16_to_float.
+// MXFP4: one E8M0 shared exponent byte, then 32 FP4 (E2M1) codes packed two
+// per byte, element i in the low nibble of byte 1+i and element 16+i in the
+// high nibble. The code table holds the E2M1 values doubled and the scale is
+// 2^(e-128) to compensate (GGML's convention; exponents 0 and 1 map to the
+// two smallest F32 normals, as in expert_dequantize_mxfp4). Half output
+// flushes the sub-half-range products that only the F32 kernels keep.
+constant float qt_mxfp4_values[16] = {
+    0, 1, 2, 3, 4, 6, 8, 12, 0, -1, -2, -3, -4, -6, -8, -12
+};
+inline void qt_dequantize_mxfp4(device const uchar * blk,
+                                short il,
+                                thread half4x4 & reg) {
+    const uint e = uint(blk[0]);
+    const float scale = as_type<float>(e == 0u ? 0x00200000u
+        : (e == 1u ? 0x00400000u : (e - 1u) << 23u));
+    QT_FOR_UNROLL (int i = 0; i < 16; ++i) {
+        const uint code = (uint(blk[1 + i]) >> (4u * uint(il))) & 15u;
+        reg[i / 4][i % 4] = half(qt_mxfp4_values[code] * scale);
+    }
+}
+
 inline void qt_dequantize_bf16(device const uchar * blk_bytes,
                                short il,
                                thread half4x4 & reg) {

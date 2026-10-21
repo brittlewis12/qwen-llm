@@ -280,6 +280,7 @@ fn routed_decode_attribution_probe() {
                 ("r1_x3", 1),
                 ("r1_x4", 1),
                 ("r1_x5", 1),
+                ("prod", 1),
                 ("r2_x1", 2),
                 ("r4_x0", 4),
                 ("r4_x1", 4),
@@ -292,12 +293,23 @@ fn routed_decode_attribution_probe() {
         (
             GgmlType::Q8_0,
             "q8_0",
-            &[("r1_x0", 1usize), ("r1_x3", 1), ("r4_x1", 4), ("r1_x1", 1), ("r1_x5", 1)][..],
+            &[
+                ("r1_x0", 1usize),
+                ("r1_x3", 1),
+                ("r4_x1", 4),
+                ("r1_x1", 1),
+                ("r1_x5", 1),
+                ("prod", 1),
+            ][..],
         ),
     ] {
         let f = Fixture::new(&ctx, dtype, dtype);
         for &(variant, rows) in variants {
-            let name = format!("kernel_xprobe_{suffix}_{variant}");
+            let name = if variant == "prod" {
+                format!("kernel_xprobe_prod_{suffix}")
+            } else {
+                format!("kernel_xprobe_{suffix}_{variant}")
+            };
             let mut stage = Vec::new();
             let mut gate = Vec::new();
             for it in 0..ITERS + 2 {

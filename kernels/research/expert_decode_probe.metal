@@ -16,6 +16,7 @@
 #include <metal_stdlib>
 using namespace metal;
 #include "../native_dequant_f32.h"
+#include "../mxfp4_decode.metalh"
 
 #define XP_MAX_K 5120
 
@@ -128,6 +129,109 @@ kernel void kernel_xprobe(
         }
     }
 }
+
+// Verbatim copy of the production template (expert_native.metal) compiled
+// into the research library, to separate kernel-code effects from library
+// provenance when production timings disagree with the variants.
+template <ushort BYTES, ushort NL,
+          void (*DEQ)(device const uchar *, short, thread float4x4 &),
+          ushort DENSE = 0, bool MXFP4 = false>
+[[max_total_threads_per_threadgroup(128)]]
+kernel void kernel_xprobe_prod(
+        constant xprobe_args & args [[buffer(0)]],
+        device const uchar * bank [[buffer(1)]],
+        device const float * input [[buffer(2)]],
+        device const int * ids [[buffer(3)]],
+        device const int * status [[buffer(4)]],
+        device float * output [[buffer(5)]],
+        uint3 group [[threadgroup_position_in_grid]],
+        ushort lane [[thread_index_in_simdgroup]],
+        ushort simd [[simdgroup_index_in_threadgroup]]) {
+    const uint channel = group.x * 4u + uint(simd);
+    const uint slot = group.y;
+    const uint token = group.z;
+    if (channel >= args.n_out || slot >= args.top_k) return;
+    const ulong selected = ulong(token) * args.top_k + slot;
+    const ulong out_index = selected * args.n_out + channel;
+    // Do not even read ids until READY. Both exits precede bank/input reads
+    // and the up epilogue's read of the previous gate output.
+    if (status[token] != 1) {
+        if (lane == 0) output[out_index] = 0.0f;
+        return;
+    }
+    const int expert = ids[selected];
+    if (expert < 0 || uint(expert) >= args.experts) {
+        if (lane == 0) output[out_index] = 0.0f;
+        return;
+    }
+    device const uchar * row = bank
+        + (ulong(expert) * args.n_out + channel) * args.row_bytes;
+    device const float * x = input + (args.mode == 2 ? selected : ulong(token)) * args.n_in;
+    float sum = 0.0f;
+    // 32-bit loop index: n_in is u32, and 64-bit index arithmetic is emulated
+    // on the GPU. Only the block byte offset widens to 64 bits.
+    for (uint k = uint(lane) * 16u; k < args.n_in; k += 512u) {
+        float4x4 decoded;
+        if (DENSE != 0 && k + 16u > args.n_in) {
+            // Last dense fragment may end at the physical buffer boundary.
+            for (uint i = 0; i < args.n_in - k; ++i) {
+                float w;
+                if (DENSE == 1) w = ((device const float *)row)[k + i];
+                else if (DENSE == 2) w = float(((device const half *)row)[k + i]);
+                else w = as_type<float>(uint(((device const ushort *)row)[k + i]) << 16);
+                sum = fma(w, x[k + i], sum);
+            }
+        } else {
+            device const uchar * block = row + ulong(k / (16u * NL)) * BYTES;
+            const short il = short((k / 16u) % NL);
+            if (MXFP4 && block[0] <= 1u) {
+                // Metal flushes subnormal operands. Move an exact power of two
+                // from x to the decoded weight so GGML's subnormal F32 weights
+                // still produce normal products with large F32 activations.
+                const float scale = as_type<float>((uint(block[0]) + 23u) << 23u);
+                QT_FOR_UNROLL (uint i = 0; i < 16; ++i) {
+                    const uint code = (uint(block[1 + i]) >> (4u * uint(il))) & 15u;
+                    const float w = expert_mxfp4_values[code] * scale;
+                    sum = fma(w, ldexp(x[k + i], -24), sum);
+                }
+                continue;
+            }
+            // Vector loads of the lane's 16 contiguous activations, issued
+            // before the block decode: the same values and FMA order as 16
+            // scalar loads, at a quarter of the load instructions.
+            // packed_float4 keeps the 4-byte activation alignment contract.
+            // Measured on the routed decode stage against the scalar form
+            // (research/expert_decode_probe.metal): Q3_K 378 -> 161 us.
+            device const packed_float4 * xp = (device const packed_float4 *)(x + k);
+            float4x4 xv;
+            xv[0] = float4(xp[0]);
+            xv[1] = float4(xp[1]);
+            xv[2] = float4(xp[2]);
+            xv[3] = float4(xp[3]);
+            DEQ(block, il, decoded);
+            QT_FOR_UNROLL (uint i = 0; i < 4; ++i) {
+                sum = fma(decoded[i][0], xv[i][0], sum);
+                sum = fma(decoded[i][1], xv[i][1], sum);
+                sum = fma(decoded[i][2], xv[i][2], sum);
+                sum = fma(decoded[i][3], xv[i][3], sum);
+            }
+        }
+    }
+    const float value = simd_sum(sum);
+    if (lane == 0) {
+        if (args.mode == 1) {
+            const float g = min(output[out_index], args.clamp);
+            const float u = clamp(value, -args.clamp, args.clamp);
+            output[out_index] = (g / (1.0f + exp(-g))) * u;
+        } else {
+            output[out_index] = value;
+        }
+    }
+}
+
+
+template [[host_name("kernel_xprobe_prod_q3_K")]] kernel void kernel_xprobe_prod<QT_Q3_K_BYTES, QT_Q3_K_NL, latent_dequantize_q3_K>(constant xprobe_args &, device const uchar *, device const float *, device const int *, device const int *, device float *, uint3, ushort, ushort);
+template [[host_name("kernel_xprobe_prod_q8_0")]] kernel void kernel_xprobe_prod<QT_Q8_0_BYTES, QT_Q8_0_NL, latent_dequantize_q8_0>(constant xprobe_args &, device const uchar *, device const float *, device const int *, device const int *, device float *, uint3, ushort, ushort);
 
 #define XPROBE(NAME, BYTES, NL, DEQ, ROWS, XMODE) \
     template [[host_name(NAME)]] kernel void kernel_xprobe<BYTES, NL, DEQ, ROWS, XMODE>( \

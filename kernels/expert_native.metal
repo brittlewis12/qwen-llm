@@ -105,8 +105,18 @@ kernel void kernel_expert_native_f32(
                 continue;
             }
             DEQ(block, il, decoded);
-            QT_FOR_UNROLL (uint i = 0; i < 16; ++i) {
-                sum = fma(decoded[i / 4][i % 4], x[k + i], sum);
+            // Vector loads of the lane's 16 contiguous activations: the same
+            // values and FMA order as 16 scalar loads, at a quarter of the
+            // load instructions. packed_float4 keeps the 4-byte activation
+            // alignment contract. Measured 2.2x (Q3_K) / 1.9x (Q8_0) on the
+            // routed decode stage (research/expert_decode_probe.metal).
+            device const packed_float4 * xv = (device const packed_float4 *)(x + k);
+            QT_FOR_UNROLL (uint i = 0; i < 4; ++i) {
+                const float4 xi = float4(xv[i]);
+                sum = fma(decoded[i][0], xi[0], sum);
+                sum = fma(decoded[i][1], xi[1], sum);
+                sum = fma(decoded[i][2], xi[2], sum);
+                sum = fma(decoded[i][3], xi[3], sum);
             }
         }
     }

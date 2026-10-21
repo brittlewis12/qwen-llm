@@ -9,6 +9,7 @@
 //         2 x staged once per threadgroup into threadgroup memory as half
 //         3 no x loads at all (E-test: weight stream + decode only)
 //         4 x staged once per threadgroup into threadgroup memory as float
+//         5 packed_float4 device loads (4-byte alignment contract)
 //
 // Grid: (ceil(n_out / (4*ROWS)), top_k, 1), 128 threads. Arguments and buffer
 // slots match expert_native_args so the harness can bind the same buffers.
@@ -93,6 +94,10 @@ kernel void kernel_xprobe(
         } else if (XMODE == 4) {
             threadgroup const float4 * xf = (threadgroup const float4 *)(xs_f + k);
             xv[0] = xf[0]; xv[1] = xf[1]; xv[2] = xf[2]; xv[3] = xf[3];
+        } else if (XMODE == 5) {
+            device const packed_float4 * x4 = (device const packed_float4 *)(x + k);
+            xv[0] = float4(x4[0]); xv[1] = float4(x4[1]);
+            xv[2] = float4(x4[2]); xv[3] = float4(x4[3]);
         } else {
             QT_FOR_UNROLL (uint i = 0; i < 16; ++i) xv[i / 4][i % 4] = 1.0f;
         }
@@ -134,6 +139,7 @@ XPROBE("kernel_xprobe_q3_K_r1_x1", QT_Q3_K_BYTES, QT_Q3_K_NL, latent_dequantize_
 XPROBE("kernel_xprobe_q3_K_r1_x2", QT_Q3_K_BYTES, QT_Q3_K_NL, latent_dequantize_q3_K, 1, 2)
 XPROBE("kernel_xprobe_q3_K_r1_x3", QT_Q3_K_BYTES, QT_Q3_K_NL, latent_dequantize_q3_K, 1, 3)
 XPROBE("kernel_xprobe_q3_K_r1_x4", QT_Q3_K_BYTES, QT_Q3_K_NL, latent_dequantize_q3_K, 1, 4)
+XPROBE("kernel_xprobe_q3_K_r1_x5", QT_Q3_K_BYTES, QT_Q3_K_NL, latent_dequantize_q3_K, 1, 5)
 XPROBE("kernel_xprobe_q3_K_r2_x1", QT_Q3_K_BYTES, QT_Q3_K_NL, latent_dequantize_q3_K, 2, 1)
 XPROBE("kernel_xprobe_q3_K_r4_x0", QT_Q3_K_BYTES, QT_Q3_K_NL, latent_dequantize_q3_K, 4, 0)
 XPROBE("kernel_xprobe_q3_K_r4_x1", QT_Q3_K_BYTES, QT_Q3_K_NL, latent_dequantize_q3_K, 4, 1)
@@ -144,3 +150,5 @@ XPROBE("kernel_xprobe_q3_K_r8_x2", QT_Q3_K_BYTES, QT_Q3_K_NL, latent_dequantize_
 XPROBE("kernel_xprobe_q8_0_r1_x0", QT_Q8_0_BYTES, QT_Q8_0_NL, latent_dequantize_q8_0, 1, 0)
 XPROBE("kernel_xprobe_q8_0_r1_x3", QT_Q8_0_BYTES, QT_Q8_0_NL, latent_dequantize_q8_0, 1, 3)
 XPROBE("kernel_xprobe_q8_0_r4_x1", QT_Q8_0_BYTES, QT_Q8_0_NL, latent_dequantize_q8_0, 4, 1)
+XPROBE("kernel_xprobe_q8_0_r1_x1", QT_Q8_0_BYTES, QT_Q8_0_NL, latent_dequantize_q8_0, 1, 1)
+XPROBE("kernel_xprobe_q8_0_r1_x5", QT_Q8_0_BYTES, QT_Q8_0_NL, latent_dequantize_q8_0, 1, 5)

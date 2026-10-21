@@ -228,19 +228,6 @@ inline void attention_score(uint4 a, uint2 b, device const float *q,
     if (lane == 0) scores[h * b.y + i] = dot * rsqrt(float(a.x));
 }
 
-inline void attention_score_shared(uint4 a, uint2 b, threadgroup const float *q,
-    device const float *raw, device const float *compressed, device const uint *ids,
-    device float *scores, uint length, uint2 group, uint sg, uint lane) {
-    uint count = a.y + b.x, h = group.y, i = group.x * 8 + sg;
-    if (i >= count) return;
-    if (i >= a.y && ids[i - a.y] >= length) return;
-    device const float *row = i < a.y ? raw + ((a.z + i) % a.w) * a.x : compressed + ids[i - a.y] * a.x;
-    float dot = 0;
-    for (uint j = lane; j < a.x; j += 32) dot += q[j] * row[j];
-    dot = simd_sum(dot);
-    if (lane == 0) scores[h * b.y + i] = dot * rsqrt(float(a.x));
-}
-
 inline void attention_softmax(uint4 a, uint2 b, device const uint *ids,
     device const float *sink, device float *scores, uint length,
     device atomic_uint *status, uint h, uint lane) {

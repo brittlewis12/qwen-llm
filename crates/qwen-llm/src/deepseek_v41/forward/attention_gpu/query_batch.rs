@@ -278,14 +278,41 @@ impl Workspace {
         enc.set_tensor(7, &rows.tile.scores);
         enc.set_tensor(8, &attended);
         enc.set_tensor(10, &self.status);
-        if std::env::var_os("QWEN_V41_SKIP_SCORE").is_none() {
-            let lane8 = std::env::var_os("QWEN_V41_SCORE_SCALAR").is_none();
-            enc.set_threadgroup_memory(0, c.head_dim * std::mem::size_of::<f32>());
-            pipeline(ctx, enc, if lane8 { "score_rows_lane8" } else { "score_rows" })?;
+        enc.set_threadgroup_memory(0, c.head_dim * std::mem::size_of::<f32>());
+        pipeline(ctx, enc, "score_rows_lane8")?;
+        enc.dispatch(
+            MTLSize {
+                width: count(position + n - 1).div_ceil(32),
+                height: c.heads,
+                depth: n,
+            },
+            MTLSize {
+                width: 256,
+                height: 1,
+                depth: 1,
+            },
+        );
+        pipeline(ctx, enc, "softmax_rows")?;
+        enc.dispatch(
+            MTLSize {
+                width: c.heads,
+                height: n,
+                depth: 1,
+            },
+            MTLSize {
+                width: 32,
+                height: 1,
+                depth: 1,
+            },
+        );
+        if let Some(matrix) = matrix {
+            pipeline(ctx, enc, "matrix_values_rows")?;
+            enc.set_tensor(12, &matrix.values);
+            enc.set_tensor(13, &matrix.probabilities);
             enc.dispatch(
                 MTLSize {
-                    width: count(position + n - 1).div_ceil(32),
-                    height: c.heads,
+                    width: padded / 16,
+                    height: c.head_dim.max(c.heads).div_ceil(16),
                     depth: n,
                 },
                 MTLSize {
@@ -294,80 +321,44 @@ impl Workspace {
                     depth: 1,
                 },
             );
-        }
-        if std::env::var_os("QWEN_V41_SKIP_SOFTMAX").is_none() {
-            pipeline(ctx, enc, "softmax_rows")?;
-            enc.dispatch(
-                MTLSize {
-                    width: c.heads,
-                    height: n,
-                    depth: 1,
-                },
-                MTLSize {
-                    width: 32,
-                    height: 1,
-                    depth: 1,
-                },
-            );
-        }
-        if let Some(matrix) = matrix {
-            if std::env::var_os("QWEN_V41_SKIP_PV").is_none() {
-                pipeline(ctx, enc, "matrix_values_rows")?;
-                enc.set_tensor(12, &matrix.values);
-                enc.set_tensor(13, &matrix.probabilities);
-                enc.dispatch(
-                    MTLSize {
-                        width: padded / 16,
-                        height: c.head_dim.max(c.heads).div_ceil(16),
-                        depth: n,
-                    },
-                    MTLSize {
-                        width: 256,
-                        height: 1,
-                        depth: 1,
-                    },
-                );
-                metal::encode_mat_mat_grouped_f32(
-                    ctx,
-                    enc,
-                    &matrix
-                        .values
-                        .view_subrange(0, vec![padded as u64, c.head_dim as u64, n as u64]),
-                    &matrix
-                        .probabilities
-                        .view_subrange(0, vec![(padded * n) as u64, c.heads as u64]),
-                    &attended,
-                    padded,
-                    c.head_dim,
-                    n,
-                    c.heads,
-                )
-                .map_err(|e| e.to_string())?;
-            }
+            metal::encode_mat_mat_grouped_f32(
+                ctx,
+                enc,
+                &matrix
+                    .values
+                    .view_subrange(0, vec![padded as u64, c.head_dim as u64, n as u64]),
+                &matrix
+                    .probabilities
+                    .view_subrange(0, vec![(padded * n) as u64, c.heads as u64]),
+                &attended,
+                padded,
+                c.head_dim,
+                n,
+                c.heads,
+            )
+            .map_err(|e| e.to_string())?;
             let pso = pipeline(ctx, enc, "finite")?;
             enc.set_bytes(0, &((n * c.heads * c.head_dim) as u32));
             enc.set_tensor(1, &attended);
             enc.set_tensor(2, &self.status);
             dispatch(enc, &pso, n * c.heads * c.head_dim);
-        } else if std::env::var_os("QWEN_V41_SKIP_PV").is_none() {
+        } else {
             let pso = pipeline(ctx, enc, "output_rows")?;
             dispatch(enc, &pso, n * c.heads * c.head_dim);
         }
-        if std::env::var_os("QWEN_V41_SKIP_ROPE").is_none() {
-            rope_rows(
-                ctx,
-                enc,
-                &attended,
-                &query,
-                &self.constants[id].frequencies,
-                c.head_dim,
-                c.heads,
-                c.rope_dim / 2,
-                position,
-                n,
-                true,
-            )?;
-        }
+        rope_rows(
+            ctx,
+            enc,
+            &attended,
+            &query,
+            &self.constants[id].frequencies,
+            c.head_dim,
+            c.heads,
+            c.rope_dim / 2,
+            position,
+            n,
+            true,
+        )?;
         Ok(())
     }
 }

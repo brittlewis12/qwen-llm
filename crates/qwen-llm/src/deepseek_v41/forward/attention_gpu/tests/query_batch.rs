@@ -140,20 +140,15 @@ fn compare_case(ctx: &MetalContext, c: &Config, schedule: &Schedule, start: usiz
                 .encode_rows(ctx, enc, id, start, &weights[id], &inputs[id], &rows)
                 .unwrap();
             let census = metal::dispatch_census_take();
-            assert_eq!(
-                census
-                    .iter()
-                    .filter(|d| d.kernel.starts_with("kernel_deepseek_v41_attention_score_rows"))
-                    .count(),
-                sink_spans(c, schedule.ratio(id), start, n).len()
-            );
-            assert_eq!(
-                census
-                    .iter()
-                    .filter(|d| d.kernel == "kernel_deepseek_v41_attention_softmax_rows")
-                    .count(),
-                sink_spans(c, schedule.ratio(id), start, n).len()
-            );
+            for suffix in ["score_rows", "softmax_rows"] {
+                assert_eq!(
+                    census
+                        .iter()
+                        .filter(|d| d.kernel == format!("kernel_deepseek_v41_attention_{suffix}"))
+                        .count(),
+                    sink_spans(c, schedule.ratio(id), start, n).len()
+                );
+            }
             assert!(
                 !census
                     .iter()
@@ -770,13 +765,7 @@ fn sink_case(
                     .filter(|d| d.kernel == format!("kernel_deepseek_v41_attention_{suffix}"))
                     .count()
             };
-            assert_eq!(
-                census
-                    .iter()
-                    .filter(|d| d.kernel.starts_with("kernel_deepseek_v41_attention_score_rows"))
-                    .count(),
-                spans.len()
-            );
+            assert_eq!(count("score_rows"), spans.len());
             assert_eq!(count("softmax_rows"), spans.len());
             assert_eq!(count("rope_rows"), spans.len());
             let grouped = census
@@ -788,7 +777,7 @@ fn sink_case(
             assert_eq!(count("output_rows") + grouped.len(), spans.len());
             depths.0 = census
                 .iter()
-                .filter(|d| d.kernel.starts_with("kernel_deepseek_v41_attention_score_rows"))
+                .filter(|d| d.kernel == "kernel_deepseek_v41_attention_score_rows")
                 .map(|d| d.grid_depth)
                 .collect();
             depths.1 = grouped.iter().map(|d| d.grid_depth).collect();

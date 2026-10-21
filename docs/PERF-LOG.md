@@ -6,6 +6,31 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the current state and evidence index.
 
+## 2026-10-21 - V4.1: Fused mHC Pre-Block And Grouped output_a +23-25% Decode; 2048-Row Chunks +4-6% Prefill
+
+- Sampled per-layer attribution after the router landing put the mHC
+  pre-block at 0.079 ms per site (two sites per layer, ~6.3 ms of a 28 ms
+  token): a 20480 -> 24 F32 GEMV on 24 simdgroups plus four small launches
+  with single-thread Sinkhorn read-modify-writes. Two dispatches replace
+  five (tall projection, one fused threadgroup): 0.021 ms per site. The
+  eight output_a GEMVs dispatch once through the native expert kernel.
+  Decode controls 28.05 -> 23.26 -> 22.30 ms per token at depth 2048.
+- IQ3_XXS ABBA on M5 Ultra, main `e0c3ac0f` versus candidate: tg32 32.7 ->
+  40.8 tok/s (+24.7%), tg32@d2048 33.8 -> 41.6 (+23.2%); pp2048 251.9 ->
+  266.0 (+5.6%), pp2048@d2048 230.0 -> 239.5 (+4.2%, the chunk change).
+  Cumulative today from `4b1fca04`: tg32 22.3 -> 40.8, pp2048 192 -> 266.
+- Held text: mean NLL 2.14696 -> 2.14695 (reduction order), top-1 unchanged
+  on 384 targets; 22-task screen identical pattern, 22/22 identical answers.
+- Prefill attribution (four spans per layer): attention rows 39%, FFN 52%,
+  output projections 7%, HC 1%. The expert GEMMs run at ~8.7 TFLOPS on the
+  half-staged tiles. Two bounded negatives: an MXFP4 generic half layout
+  (35/40 layers half, CPU-codec equivalence tests pass) gained +1.6% and is
+  not landed (branch `perf/v41-mxfp4-half`; it would also widen DFlash/GLM
+  eligibility on MXFP4 artifacts); 2048-row chunks gained +5.6% and are.
+  The expert tile and the scalar attention core are the remaining prefill
+  levers and overlap other lanes' TensorOps and expert-GEMM work.
+- [Attribution tables, ABBA, witness and limits](bench/2026-10-21-v41-decode-hc-outa.md).
+
 ## 2026-10-20 - V4.1: Parallel Router +47-52% Decode; 1024-Row Chunks, Half Expert Tiles, MMA Dense Rows +31-33% Prefill
 
 - The V4.1 router ran one GPU thread per row. Isolated on M5 Ultra it cost

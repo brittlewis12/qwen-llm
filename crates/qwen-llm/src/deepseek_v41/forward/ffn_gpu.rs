@@ -392,7 +392,6 @@ impl Workspace {
             &b[19],
             &b[20],
             &self.statuses[id],
-            true,
         )?;
         metal::encode_mhc4_post(ctx, enc, c.hidden, &b[20], x, &b[4], &b[5], output)
     }
@@ -409,19 +408,11 @@ impl Workspace {
         shared: &MetalTensor,
         output: &MetalTensor,
         status: &MetalTensor,
-        fuse_gate_up: bool,
     ) -> std::result::Result<(), metal::MetalError> {
         let extents = composition_extents(c, 1)?;
         let b = &self.buffers;
         encode_route_rows(ctx, enc, c, 1, logits, bias, &b[9], &b[10], &b[11], status)?;
-        // The shared selector's equal-type fusions retain F32 operands. Keep
-        // scalar prefill fallback native, and leave down's arithmetic unchanged.
-        let gate_up = if fuse_gate_up && c.hidden.is_multiple_of(256) {
-            metal::encode_all_slots_gate_up_swiglu
-        } else {
-            metal::encode_all_slots_gate_up_swiglu_native
-        };
-        gate_up(
+        metal::encode_all_slots_gate_up_swiglu_native(
             ctx,
             enc,
             layer.banks[0],
@@ -523,7 +514,6 @@ impl Workspace {
                     &prefill::row(&b[4], c.hidden, row),
                     &prefill::row(&b[5], c.hidden, row),
                     &prefill::row(&b[6], 1, id * n + row),
-                    false,
                 )?;
             }
         }

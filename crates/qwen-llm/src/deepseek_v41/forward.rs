@@ -13,6 +13,7 @@ pub use error::StateError;
 pub mod capture;
 mod ffn_gpu;
 mod gpu_step;
+mod hc_gpu;
 mod memory;
 pub mod profile;
 mod token_map;

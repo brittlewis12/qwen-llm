@@ -362,35 +362,55 @@ impl Workspace {
         composition_extents(c, 1)?;
         let b = &self.buffers;
         let constants = &self.constants[id];
-        layer.ffn_hc.projection.encode(enc, x, &b[2])?;
-        enc.set_pipeline(&ctx.pipeline("kernel_deepseek_v41_projected_rms")?);
-        enc.set_bytes(0, &((4 * c.hidden) as u32));
-        enc.set_bytes(1, &c.norm_eps);
-        enc.set_tensor(2, x);
-        enc.set_tensor(3, &b[2]);
-        dispatch(enc, 256, 256);
-        metal::encode_mhc4_controls(
-            ctx,
-            enc,
-            c.hc_eps,
-            &b[2],
-            &constants[0],
-            &constants[1],
-            &b[3],
-            &b[4],
-            &b[5],
-        )?;
-        metal::encode_mhc4_collapse(ctx, enc, c.hidden, x, pre, &b[6])?;
-        metal::encode_rms_norm_mul_rows_f32(
-            ctx,
-            enc,
-            &b[6],
-            &constants[2],
-            &b[7],
-            1,
-            c.hidden,
-            c.norm_eps,
-        )?;
+        if hc_gpu::fused_supported(&layer.ffn_hc) {
+            hc_gpu::encode_pre(
+                ctx,
+                enc,
+                c,
+                &layer.ffn_hc,
+                constants,
+                x,
+                hc_gpu::HcPreSite {
+                    mix: &b[2],
+                    pre: &b[3],
+                    post: &b[4],
+                    combination: &b[5],
+                    incoming_pre: pre,
+                    collapsed: &b[6],
+                    normalized: &b[7],
+                },
+            )?;
+        } else {
+            layer.ffn_hc.projection.encode(enc, x, &b[2])?;
+            enc.set_pipeline(&ctx.pipeline("kernel_deepseek_v41_projected_rms")?);
+            enc.set_bytes(0, &((4 * c.hidden) as u32));
+            enc.set_bytes(1, &c.norm_eps);
+            enc.set_tensor(2, x);
+            enc.set_tensor(3, &b[2]);
+            dispatch(enc, 256, 256);
+            metal::encode_mhc4_controls(
+                ctx,
+                enc,
+                c.hc_eps,
+                &b[2],
+                &constants[0],
+                &constants[1],
+                &b[3],
+                &b[4],
+                &b[5],
+            )?;
+            metal::encode_mhc4_collapse(ctx, enc, c.hidden, x, pre, &b[6])?;
+            metal::encode_rms_norm_mul_rows_f32(
+                ctx,
+                enc,
+                &b[6],
+                &constants[2],
+                &b[7],
+                1,
+                c.hidden,
+                c.norm_eps,
+            )?;
+        }
         layer.router.encode(enc, &b[7], &b[8])?;
         for j in 0..2 {
             layer.shared[j].encode(enc, &b[7], &b[16 + j])?;

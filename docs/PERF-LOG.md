@@ -6,6 +6,44 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the current state and evidence index.
 
+## 2026-10-20 - V4.1: Parallel Router +47-52% Decode; 1024-Row Chunks, Half Expert Tiles, MMA Dense Rows +31-33% Prefill
+
+- The V4.1 router ran one GPU thread per row. Isolated on M5 Ultra it cost
+  ~0.40 ms per layer back to back (0.64 ms standalone), ~16 ms of a 41 ms
+  decode token, and was the quant-independent bulk of the "routed experts"
+  stage the sampled attribution could not place; the expert GEMVs themselves
+  already stream at 560-1,090 GB/s. One 256-thread threadgroup per row
+  keeps the arithmetic, tie-breaks and status codes: ids, weights and status
+  are bitwise equal to the retained serial kernel (96-row parity test), and
+  the route costs 19-28 us.
+- IQ3_XXS, main `4b1fca04` versus candidate, clean binaries, A/B/B/A, 3
+  runs/arm, seed 1: tg32 22.3 -> 32.8 tok/s (+46.9%), tg32@d2048 23.2 -> 35.3
+  (+51.8%); pp2048 192.1 -> 251.0 (+30.6%), pp2048@d2048 170.5 -> 227.4
+  (+33.4%). Candidate arm spreads are within 0.1-0.3%.
+- Prefill: DEFAULT_CHUNK_ROWS 256 -> 1024; routed layers with a clamped
+  recipe and a generic grouped down layout take the half-staged generic
+  tiles GLM/DS4 prefill use (10/40 IQ3_XXS layers, 20/40 Q2_K_XL; MXFP4
+  down has no generic half layout yet); packed/BF16 dense rows take the
+  shared half-staged MMA tiles (F32 router and mHC projections stay F32).
+  Chunk + half tiles alone measured 190 -> 239 earlier in the lane.
+- Held text (six frozen documents, 512+64, 384 targets, IQ3): mean NLL
+  2.14636 -> 2.14696 (+0.03%, per-document deltas of both signs); top-1
+  222 -> 215 of 384 (near-tie flips; the router is bitwise). The 22-task screen is 9/22 on both arms with the
+  identical per-task pattern and 21/22 character-identical answers.
+- Two measurement traps now built into the opt-in decode probe: command
+  buffers issued before the GPU clock settles after seconds of CPU work read
+  ~2x slower (a first pass wrongly credited vectorized activation loads with
+  2.2x; heated and interleaved, they change nothing and were not landed),
+  and a fresh buffer's first GPU touch is slower than steady state. The Q8_0
+  GEMV floor at 1.09 TB/s shows the M5 Ultra DRAM ceiling is above the 854
+  GB/s single-kernel stream figure used so far.
+- Flash-Next clean M4 rerun of the split decode attention against its true
+  parent `168c25ef`: tg128 +35.5%/+26.2%/+34.1% at 2K/8K/16K. GSQ-RCO IQ3_S
+  vs UD-Q3_K_XL on M4: prefill within 1%, decode -7 to -11% (heavier IQ3_S
+  dequant on the bandwidth-poorer M4, under load from other lanes); not an
+  M4 default.
+- [Protocol, attribution tables, witness and limits](bench/2026-10-20-v41-parallel-router.md).
+
 ## 2026-10-20 - V4.1 Shared F32 Batched Attention
 
 - Fresh A/B/B/A on M5 Ultra, `25d67da6` versus complete-row `1388793d`, NativeF32

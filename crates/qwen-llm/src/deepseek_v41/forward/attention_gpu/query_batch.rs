@@ -279,35 +279,12 @@ impl Workspace {
         enc.set_tensor(8, &attended);
         enc.set_tensor(10, &self.status);
         if std::env::var_os("QWEN_V41_SKIP_SCORE").is_none() {
-            let requested = std::env::var("QWEN_V41_SCORE_HEADS")
-                .ok()
-                .and_then(|v| v.parse::<usize>().ok())
-                .unwrap_or(1);
-            let heads_per_tg = if requested > 1 && c.heads % requested == 0 {
-                requested
-            } else {
-                1
-            };
-            enc.set_threadgroup_memory(
-                0,
-                heads_per_tg * c.head_dim * std::mem::size_of::<f32>(),
-            );
-            if heads_per_tg > 1 {
-                enc.set_bytes(14, &(heads_per_tg as u32));
-            }
-            pipeline(
-                ctx,
-                enc,
-                if heads_per_tg > 1 {
-                    "score_rows_heads"
-                } else {
-                    "score_rows"
-                },
-            )?;
+            enc.set_threadgroup_memory(0, c.head_dim * std::mem::size_of::<f32>());
+            pipeline(ctx, enc, "score_rows")?;
             enc.dispatch(
                 MTLSize {
                     width: count(position + n - 1).div_ceil(32),
-                    height: c.heads / heads_per_tg,
+                    height: c.heads,
                     depth: n,
                 },
                 MTLSize {

@@ -26,17 +26,18 @@ expected effect, status. Status is one of `open`, `in flight (branch)`,
 `in flight` with your branch; a second lane finding it claimed reads the branch
 before building anything adjacent. This replaces relaying between sessions.
 
-### DeepSeek V4.1-Flash (main after the tensor expert tile: pp2048 Q2 476 / IQ3 475 tok/s, pp4096 Q2 438 / IQ3 437; decode tg32 43 / 41, tg32@d2048 41.6)
+### DeepSeek V4.1-Flash (main after the tensor dense projections: pp2048 Q2 545 / IQ3 542 tok/s, pp4096 Q2 496 / IQ3 493; decode tg32 43 / 41, tg32@d2048 41.6)
 
 Decode budget at depth 2048, 22.3 ms/token: ~10.2 ms bytes (11.1 GiB at the
 ~1.09 TB/s the GEMV probe reaches), ~8 ms dispatch floor (~1,600 dispatches),
-~4 ms spread thin. Prefill budget per 2048-token chunk before the tensor
-expert tile, sampled spans (`QWEN_V41_PREFILL_STAGES=1`, 2026-10-21
-tile-ceiling entry): FFN 47%, attention tiles (QK^T/softmax/PV) 20%,
-owner/producer per-row loops 15%, output projections 10%, prepare 7%, HC
-2%. The tensor tile roughly halves the expert GEMMs, so the remaining
-budget is closer to FFN 30%, tiles 26%, per-row loops 20%, projections
-13%, prepare 9%; re-sample before claiming.
+~4 ms spread thin. Prefill budget per 2048-token chunk after the tensor
+expert tile, sampled spans (`QWEN_V41_PREFILL_STAGES=1`, packet
+2026-10-22 tensor expert tile): FFN 33% (33 ms/layer: expert tiles ~20,
+shared expert ~7, router/bucket/weight/sum), attention tiles
+(QK^T/softmax/PV) 25% (26.5 ms/layer), owner/producer per-row loops 18%
+(98 ms x 8 layers), output projections 12.5%, prepare 8.6%, HC 2.6%. The
+dense projections then dropped from ~24 to ~11 ms/layer (dense entry);
+re-sample before claiming.
 
 - Attention tiles via simdgroup MMA (half-staged Q/K/V, F32 sums),
   replacing the scalar score kernel and the gather+GEMM PV for the released
@@ -66,13 +67,22 @@ budget is closer to FFN 30%, tiles 26%, per-row loops 20%, projections
   steps (the tile wants small resident threadgroups). What remains in the
   tile is dequant + staging + the F32 activation path (each tile re-reads
   and half-casts its 32 x K activation block per 64-row weight tile, 4.5x
-  the weight bytes): open, ablate first. Native MXFP4 right operands
+  the weight bytes). Half activations converted once per input
+  (`_f16act` kernels, probe branch `perf/v41-tensor-f16act`, bitwise
+  identical output): routed tiles +9-24% per dispatch (IQ3_XXS gate+up
+  13.1 -> 10.7 ms, down 6.7 -> 5.9), dense tiles +14-41% (q_a 494 -> 350
+  us, output_b 2.97 -> 2.24 ms); ~+4-5% prefill once the one-time
+  conversions have scratch in the attention/FFN encoders: in flight
+  (`perf/v41-tensor-f16act`). Native MXFP4 right operands
   (`metal_fp4_e2m1_format` + `ue8m0` block-32 scales, 27.0 entry points)
-  would drop the dequant for MXFP4 layers: open.
-- Tensor ops for the dense prefill GEMMs (output projections ~13% of the
-  post-tile budget, the Q8_0 attention projections in `prepare`): the
-  `mat_mat` MMA kernels are the same simdgroup path the expert tile left;
-  open.
+  would drop the dequant for the 30 MXFP4 down layers: open.
+- Dense prefill projections on the tensor tile (q_a/q_b/kv, output_a/b,
+  shared expert; the Q8_0 `mat_mat` path at 24-29 TFLOPS): landed
+  (2026-10-22 dense entry, bench/2026-10-22-v41-tensor-dense-projections.md).
+  54-68 TFLOPS, 2.05-2.42x per dispatch, pp2048 +14.3% / pp4096 +13.2%
+  on both artifacts. Larger dense tiles (64 x 64, more operand reuse) and
+  the activation re-read per column tile: open. Other families' dense
+  prefill GEMMs still take `mat_mat`: open.
 - Tensor ops for the attention sink tile (`score_mma`/`pv_mma`, 16-key
   gathered blocks): the tile is gather-bound as much as MMA-bound; measure
   with the fused score+softmax+PV bet rather than alone: open.

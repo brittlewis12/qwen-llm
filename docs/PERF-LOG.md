@@ -6,6 +6,24 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the current state and evidence index.
 
+## 2026-10-22 - V4.1: Dense Projections On The Tensor Tile, +14% Prefill
+
+- The six-span re-sample after the expert tile put the dense Q8_0
+  projections (q_a/q_b/kv, output_a/b, shared expert) at about a quarter
+  of a 2048-token prefill: ~324 MFLOP per token per layer on the
+  simdgroup `mat_mat` tiles at 24-29 TFLOPS. The tensor tile's dense form
+  (`kernel_mat_mat_<dtype>_f32_tensor`, slot == row) runs them at 54-68
+  TFLOPS, 2.05-2.42x per dispatch; per layer ~23.9 -> ~10.7 ms.
+- ABBA against the tile landing: IQ3 pp2048 473.9 -> 541.7 (+14.3%),
+  pp4096 435.6 -> 493.0 (+13.2%); Q2 pp2048 477.0 -> 545.2 (+14.3%),
+  pp4096 438.1 -> 496.2 (+13.2%); decode unchanged. From this morning's
+  main: pp2048 383 -> 542 (+41.5%). Cumulative from `4b1fca04`: 192 ->
+  542 tok/s.
+- Q8_0's byte-to-half dequant lets the dense tile run 1.5x the routed
+  tile's TFLOPS: the routed tile's remaining cost is its K/I-quant
+  decoders, not the matmul.
+- [Packet](bench/2026-10-22-v41-tensor-dense-projections.md).
+
 ## 2026-10-22 - V4.1: Metal 4 Tensor-Ops Expert Tile, +24% Prefill
 
 - `mpp::tensor_ops::matmul2d` on threadgroup-resident half operands
@@ -28,6 +46,7 @@ See also: `docs/PERF-ROADMAP.md` for the current state and evidence index.
   the generic tile. Probes: `matmul2d_peak_timing`,
   `tensor_tile_production_shape_timing` (`QWEN_V41_TILE_TIMING=1`).
 - [Packet](bench/2026-10-22-v41-tensor-expert-tile.md).
+
 ## 2026-10-22 - GLM Short Packets Improve, But Native NextN Still Needs Cheaper Verification
 
 - M4 Max, API validation enabled: `ce075a09` replaces underfilled grouped

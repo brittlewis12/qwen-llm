@@ -873,10 +873,16 @@ impl MetalContext {
         &self.tensor_ops_status
     }
 
+    /// Pipeline from the Metal 4 tensor library, cached alongside the main
+    /// library's pipelines (tensor kernel names carry their own suffix, so
+    /// the one cache cannot alias). `NoFunction` when the tier is absent.
     pub(crate) fn tensor_pipeline(&self, name: &str) -> Result<Pipeline, MetalError> {
         let Some(library) = self.tensor_library.as_ref() else {
             return Err(MetalError::NoFunction(name.to_string()));
         };
+        if let Some(p) = self.pso_cache.lock().pipelines.get(name) {
+            return Ok(p.clone());
+        }
         let function_name = NSString::from_str(name);
         let function = library
             .newFunctionWithName(&function_name)
@@ -887,10 +893,15 @@ impl MetalContext {
             .map_err(|error| {
                 MetalError::Pipeline(name.to_string(), error.localizedDescription().to_string())
             })?;
-        Ok(Pipeline {
+        let pso = Pipeline {
             raw: pso,
             name: Arc::from(name),
-        })
+        };
+        self.pso_cache
+            .lock()
+            .pipelines
+            .insert(Arc::clone(&pso.name), pso.clone());
+        Ok(pso)
     }
 
     /// Resolve a function from the research metallib, loading it on first use.

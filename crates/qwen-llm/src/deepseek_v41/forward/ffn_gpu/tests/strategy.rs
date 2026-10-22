@@ -38,7 +38,18 @@ enum Route {
     Native,
 }
 
-fn assert_census(census: &[metal::DispatchCensusRow], rows: usize, route: Route) {
+fn assert_census(
+    ctx: &MetalContext,
+    census: &[metal::DispatchCensusRow],
+    rows: usize,
+    route: Route,
+) {
+    // The half route runs the tensor tile where the tier exists.
+    let half_suffix = if metal::moe_grouped_tensor_selected(ctx) {
+        "_f32_grouped_slots_tensor"
+    } else {
+        "_f32_grouped_slots_generic"
+    };
     let routed: Vec<_> = census
         .iter()
         .filter(|r| {
@@ -70,9 +81,7 @@ fn assert_census(census: &[metal::DispatchCensusRow], rows: usize, route: Route)
                 );
             }
             assert!(
-                routed[weight + 1]
-                    .kernel
-                    .ends_with("_f32_grouped_slots_generic"),
+                routed[weight + 1].kernel.ends_with(half_suffix),
                 "{routed:?}"
             );
         }
@@ -278,14 +287,14 @@ fn selected_strategy_threshold_legacy_fallback_and_entrypoints() {
                 assert!(f32_slice(&output).unwrap().iter().all(|v| v.is_finite()));
                 metal::dispatch_census_take()
             };
-            assert_census(&encode(), n, route);
+            assert_census(&ctx, &encode(), n, route);
             let expected: Vec<_> = [9, 12, 13, 14, 5].map(|i| bits(&scratch.buffers[i])).into();
             metal::dispatch_census_begin();
             submit(&ctx, "selected_strategy_routed_ffn", [0; 4], |enc| {
                 ws.encode_routed_rows(&ctx, enc, c, layer, 0, &scratch)
             })
             .unwrap();
-            assert_census(&metal::dispatch_census_take(), n, route);
+            assert_census(&ctx, &metal::dispatch_census_take(), n, route);
             for (i, expected) in [9, 12, 13, 14, 5].into_iter().zip(expected) {
                 assert_eq!(bits(&scratch.buffers[i]), expected);
             }
@@ -294,6 +303,7 @@ fn selected_strategy_threshold_legacy_fallback_and_entrypoints() {
                     assert_eq!(grouped_selected(c, layer, n), grouped_cap);
                     assert!(!half_grouped_selected(c, layer, n));
                     assert_census(
+                        &ctx,
                         &encode(),
                         n,
                         if grouped_cap {
@@ -305,7 +315,7 @@ fn selected_strategy_threshold_legacy_fallback_and_entrypoints() {
                     if native_cap {
                         with_native_rows(|| {
                             assert!(!grouped_selected(c, layer, n));
-                            assert_census(&encode(), n, Route::Native);
+                            assert_census(&ctx, &encode(), n, Route::Native);
                         });
                     }
                     with_rowwise_rows(|| {

@@ -596,32 +596,55 @@ impl Workspace {
             &status,
         )?;
         let half = half_grouped_selected(c, layer, n);
+        // The Metal 4 tensor tile is the half route's production form where
+        // the tier exists: same operands and contract, matmul2d instead of
+        // simdgroup MMA.
+        let tensor = half && metal::moe_grouped_tensor_selected(ctx);
         let grouped = half || grouped_selected(c, layer, n);
         if grouped {
             metal::encode_moe_route_bucket_slots_f32(
                 ctx, enc, &b[8], &counts, &b[11], c.experts, n, c.topk,
             )?;
-            let gate_up = if half {
-                metal::encode_moe_swiglu_clamped_f32_grouped_slots_generic
+            if tensor {
+                metal::encode_moe_swiglu_f32_grouped_slots_tensor(
+                    ctx,
+                    enc,
+                    layer.banks[0],
+                    layer.banks[1],
+                    &scratch.hc.normalized,
+                    &counts,
+                    &b[11],
+                    &b[12],
+                    c.hidden,
+                    c.intermediate,
+                    c.experts,
+                    c.topk,
+                    n,
+                    Some(c.clamp),
+                )?;
             } else {
-                metal::encode_moe_swiglu_clamped_f32x_grouped_slots
-            };
-            gate_up(
-                ctx,
-                enc,
-                layer.banks[0],
-                layer.banks[1],
-                &scratch.hc.normalized,
-                &counts,
-                &b[11],
-                &b[12],
-                c.hidden,
-                c.intermediate,
-                c.experts,
-                c.topk,
-                n,
-                c.clamp,
-            )?;
+                let gate_up = if half {
+                    metal::encode_moe_swiglu_clamped_f32_grouped_slots_generic
+                } else {
+                    metal::encode_moe_swiglu_clamped_f32x_grouped_slots
+                };
+                gate_up(
+                    ctx,
+                    enc,
+                    layer.banks[0],
+                    layer.banks[1],
+                    &scratch.hc.normalized,
+                    &counts,
+                    &b[11],
+                    &b[12],
+                    c.hidden,
+                    c.intermediate,
+                    c.experts,
+                    c.topk,
+                    n,
+                    c.clamp,
+                )?;
+            }
         } else {
             metal::encode_all_slots_gate_up_swiglu_native_rows(
                 ctx,
@@ -649,7 +672,9 @@ impl Workspace {
         enc.set_bytes(6, &(c.topk as u32));
         dispatch(enc, extents.weighted as usize, 256);
         if grouped {
-            let down = if half {
+            let down = if tensor {
+                metal::encode_moe_down_f32_grouped_slots_tensor
+            } else if half {
                 metal::encode_moe_down_f32_grouped_slots_generic
             } else {
                 metal::encode_moe_down_f32x_grouped_slots
@@ -698,8 +723,9 @@ impl Workspace {
 /// The half-staged grouped expert tiles GLM and DeepSeek V4 prefill use:
 /// operands rounded to half inside the tile, F32 sums, weights read once per
 /// tile rather than once per row. Covers every expert storage type with a
-/// generic grouped layout (IQ2_S, IQ3_XXS, IQ3_S, Q2_K, Q3_K, ...); MXFP4
-/// banks stay on the F32-operand tiles and IQ2_XXS/IQ2_XS on native rows.
+/// generic grouped layout (IQ2_S, IQ3_XXS, IQ3_S, Q2_K, Q3_K, MXFP4,
+/// IQ2_XXS, IQ2_XS, ...). Where the Metal 4 tensor tier exists the route
+/// runs the same operands through the tensor tile.
 pub(super) fn half_grouped_supported(c: &Config, layer: &Layer<'_>) -> bool {
     #[cfg(test)]
     if tests::NATIVE_ROWS_ONLY.with(|flag| flag.get()) {

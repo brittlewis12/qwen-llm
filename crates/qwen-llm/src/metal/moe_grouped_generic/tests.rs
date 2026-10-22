@@ -9,6 +9,10 @@ const QUANT_TILES_H: &str = include_str!(concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/../../kernels/quant_tiles.h"
 ));
+const TENSOR_METAL: &str = include_str!(concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/../../kernels/tensor/moe_grouped_slots_tensor.metal"
+));
 
 /// Every `GgmlType` variant (the enum has no iterator).
 const ALL_GGML_TYPES: &[GgmlType] = &[
@@ -233,6 +237,63 @@ fn moe_grouped_generic_mapping_matches_metal_source() {
     );
 }
 
+/// The tensor tile instantiates the same dtype list through
+/// `TT_INSTANTIATE(suffix, BYTES, NL, DEQ)`, with the same block geometry
+/// and dequant function as the Rust layout, and shares the generic kernel's
+/// argument struct field for field.
+#[test]
+fn moe_grouped_tensor_mapping_matches_metal_source() {
+    let instantiations: Vec<Vec<&str>> = TENSOR_METAL
+        .lines()
+        .filter_map(|line| line.strip_prefix("TT_INSTANTIATE("))
+        .map(|rest| {
+            rest.trim_end_matches(')')
+                .split(',')
+                .map(str::trim)
+                .collect()
+        })
+        .collect();
+    assert_eq!(
+        instantiations.len(),
+        MOE_GROUPED_GENERIC_LAYOUTS.len(),
+        "tensor instantiations {instantiations:?}"
+    );
+    for l in MOE_GROUPED_GENERIC_LAYOUTS {
+        let args = instantiations
+            .iter()
+            .find(|a| a[0] == l.suffix)
+            .unwrap_or_else(|| panic!("no TT_INSTANTIATE for {}", l.suffix));
+        assert_eq!(header_define(args[1]), l.block_bytes, "{}: bytes", l.suffix);
+        assert_eq!(
+            header_define(args[2]),
+            l.block_elems / 16,
+            "{}: NL",
+            l.suffix
+        );
+        assert_eq!(args[3], format!("qt_dequantize_{}", l.suffix));
+        for role in MoeGroupedTensorRole::ALL {
+            let name = moe_grouped_tensor_pipeline_name(role, l.dtype).unwrap();
+            let (prefix, rest) = name.split_once(l.suffix).unwrap();
+            assert!(
+                TENSOR_METAL.contains(&format!("host_name(\"{prefix}\" #suffix \"{rest}\")")),
+                "{name}: no host_name pattern in the tensor instantiation macro"
+            );
+        }
+    }
+    let struct_fields = |source: &str| -> Vec<String> {
+        let start = source
+            .find("struct moe_group_generic_mm_args {")
+            .expect("args struct");
+        source[start..]
+            .lines()
+            .skip(1)
+            .take_while(|l| !l.starts_with('}'))
+            .map(|l| l.split("//").next().unwrap().trim().to_string())
+            .collect()
+    };
+    assert_eq!(struct_fields(TENSOR_METAL), struct_fields(MOE_METAL));
+}
+
 // ---------------------------------------------------------------------------
 // GPU equivalence tests on synthetic, valid quant blocks (no model fixtures).
 // Filter: `generic_grouped_moe_`.
@@ -408,6 +469,17 @@ fn i32_tensor(ctx: &MetalContext, v: &[i32]) -> MetalTensor {
     .expect("i32 tensor")
 }
 
+/// I32-typed index tensor (the clamped generic recipe checks the dtype).
+fn i32_typed_tensor(ctx: &MetalContext, v: &[i32]) -> MetalTensor {
+    MetalTensor::from_bytes(
+        ctx,
+        bytemuck::cast_slice(v),
+        vec![v.len() as u64],
+        GgmlType::I32,
+    )
+    .expect("i32 tensor")
+}
+
 fn f32_tensor(ctx: &MetalContext, v: &[f32]) -> MetalTensor {
     MetalTensor::from_bytes(
         ctx,
@@ -489,21 +561,60 @@ fn cpu_swiglu(
     r: &Routing,
     x: &[f32],
 ) -> Vec<f32> {
+    cpu_swiglu_with_clamp(gate_dtype, gate_bank, up_dtype, up_bank, r, x, None)
+}
+
+/// Per-slot gate and up projections (concatenated over slots) on the CPU
+/// dequantized banks.
+fn cpu_gate_up(
+    gate_dtype: GgmlType,
+    gate_bank: &[u8],
+    up_dtype: GgmlType,
+    up_bank: &[u8],
+    r: &Routing,
+    x: &[f32],
+) -> (Vec<f32>, Vec<f32>) {
     let gates: Vec<Vec<f32>> = (0..r.n_expert)
         .map(|e| cpu_expert(gate_dtype, gate_bank, GU_N_HIDDEN, GU_N_FFN, e))
         .collect();
     let ups: Vec<Vec<f32>> = (0..r.n_expert)
         .map(|e| cpu_expert(up_dtype, up_bank, GU_N_HIDDEN, GU_N_FFN, e))
         .collect();
-    let mut out = Vec::with_capacity(r.slot_expert.len() * GU_N_FFN);
+    let mut g_all = Vec::with_capacity(r.slot_expert.len() * GU_N_FFN);
+    let mut u_all = Vec::with_capacity(r.slot_expert.len() * GU_N_FFN);
     for (slot, &e) in r.slot_expert.iter().enumerate() {
         let t = slot / r.topk;
         let xt = &x[t * GU_N_HIDDEN..(t + 1) * GU_N_HIDDEN];
-        let g = matvec(&gates[e], GU_N_HIDDEN, xt);
-        let u = matvec(&ups[e], GU_N_HIDDEN, xt);
-        out.extend(g.iter().zip(&u).map(|(g, u)| (g / (1.0 + (-g).exp())) * u));
+        g_all.extend(matvec(&gates[e], GU_N_HIDDEN, xt));
+        u_all.extend(matvec(&ups[e], GU_N_HIDDEN, xt));
     }
-    out
+    (g_all, u_all)
+}
+
+/// `silu(g) * u`, or `silu(min(g, c)) * clamp(u, -c, c)` with a clamp.
+fn swiglu_epilogue(g: &[f32], u: &[f32], clamp: Option<f32>) -> Vec<f32> {
+    let silu = |g: f32| g / (1.0 + (-g).exp());
+    g.iter()
+        .zip(u)
+        .map(|(&g, &u)| match clamp {
+            None => silu(g) * u,
+            Some(c) => silu(g.min(c)) * u.clamp(-c, c),
+        })
+        .collect()
+}
+
+#[allow(clippy::too_many_arguments)]
+fn cpu_swiglu_with_clamp(
+    gate_dtype: GgmlType,
+    gate_bank: &[u8],
+    up_dtype: GgmlType,
+    up_bank: &[u8],
+    r: &Routing,
+    x: &[f32],
+    clamp: Option<f32>,
+) -> Vec<f32> {
+    let (g, u) = cpu_gate_up(gate_dtype, gate_bank, up_dtype, up_bank, r, x);
+    swiglu_epilogue(&g, &u, clamp)
 }
 
 fn run_generic_down_case(dtype: GgmlType) {
@@ -718,6 +829,268 @@ generic_grouped_moe_cases! {
     generic_grouped_moe_down_f32_matches_cpu, generic_grouped_moe_gate_up_f32_matches_cpu => GgmlType::F32;
     generic_grouped_moe_down_f16_matches_cpu, generic_grouped_moe_gate_up_f16_matches_cpu => GgmlType::F16;
     generic_grouped_moe_down_bf16_matches_cpu, generic_grouped_moe_gate_up_bf16_matches_cpu => GgmlType::BF16;
+}
+
+// ---------------------------------------------------------------------------
+// Metal 4 tensor tile: same contracts, checked against the CPU reference and
+// against the generic tile it replaces. Filter: `tensor_grouped_moe_`.
+// Skipped (silently passing) where the tensor tier is absent.
+
+/// Tensor vs generic: both stage identical half operands and sum in F32, so
+/// only the reduction order differs.
+fn assert_tile_agreement(label: &str, tensor: &[f32], generic: &[f32]) {
+    assert_eq!(tensor.len(), generic.len());
+    let ref_max = generic.iter().map(|v| v.abs()).fold(0f32, f32::max);
+    let max_abs = tensor
+        .iter()
+        .zip(generic)
+        .map(|(a, b)| (a - b).abs())
+        .fold(0f32, f32::max);
+    eprintln!("[{label}] tensor-vs-generic max|delta|={max_abs:.3e} ref_max={ref_max:.3e}");
+    assert!(
+        max_abs <= 2e-3 * ref_max + 1e-5,
+        "{label}: tensor tile departs from the generic tile: max|delta|={max_abs} ref_max={ref_max}"
+    );
+}
+
+fn run_tensor_down_case(dtype: GgmlType) {
+    let Some(ctx) = metal_test_context() else {
+        return;
+    };
+    if !moe_grouped_tensor_available(&ctx) {
+        eprintln!("tensor tier unavailable: {:?}", ctx.tensor_ops_status());
+        return;
+    }
+    let r = routing();
+    let n_slots = r.n_tokens * r.topk;
+    let bank = synthetic_bank(
+        dtype,
+        DOWN_N_IN,
+        DOWN_N_OUT,
+        r.n_expert,
+        0x5eed ^ dtype as u64,
+    );
+    let mut rng = Lcg(0xd0 ^ dtype as u64);
+    let inner: Vec<f32> = (0..n_slots * DOWN_N_IN).map(|_| rng.signed(0.5)).collect();
+    let cpu = cpu_down(dtype, &bank, &r, &inner);
+
+    let w = bank_tensor(&ctx, dtype, &bank, DOWN_N_IN, DOWN_N_OUT, r.n_expert);
+    let inner_t = f32_tensor(&ctx, &inner);
+    let counts_t = i32_typed_tensor(&ctx, &r.counts);
+    let ids_t = i32_typed_tensor(&ctx, &r.ids);
+    let out_tensor = MetalTensor::zeros_f32(&ctx, vec![(n_slots * DOWN_N_OUT) as u64]).unwrap();
+    let out_generic = MetalTensor::zeros_f32(&ctx, vec![(n_slots * DOWN_N_OUT) as u64]).unwrap();
+    one_shot(&ctx, |enc| {
+        encode_moe_down_f32_grouped_slots_tensor(
+            &ctx,
+            enc,
+            &w,
+            &inner_t,
+            &counts_t,
+            &ids_t,
+            &out_tensor,
+            DOWN_N_IN,
+            DOWN_N_OUT,
+            r.n_expert,
+            r.n_tokens,
+        )?;
+        encode_moe_down_f32_grouped_slots_generic(
+            &ctx,
+            enc,
+            &w,
+            &inner_t,
+            &counts_t,
+            &ids_t,
+            &out_generic,
+            DOWN_N_IN,
+            DOWN_N_OUT,
+            r.n_expert,
+            r.n_tokens,
+        )
+    })
+    .expect("tensor grouped down");
+    let gpu = read_back_f32(&out_tensor.buffer, n_slots * DOWN_N_OUT);
+    let generic = read_back_f32(&out_generic.buffer, n_slots * DOWN_N_OUT);
+    assert_close(&format!("tensor-down-{dtype:?}"), &gpu, &cpu);
+    assert_tile_agreement(&format!("tensor-down-{dtype:?}"), &gpu, &generic);
+}
+
+fn run_tensor_gate_up_case(dtype: GgmlType) {
+    let Some(ctx) = metal_test_context() else {
+        return;
+    };
+    if !moe_grouped_tensor_available(&ctx) {
+        eprintln!("tensor tier unavailable: {:?}", ctx.tensor_ops_status());
+        return;
+    }
+    let r = routing();
+    let n_slots = r.n_tokens * r.topk;
+    let gate_bank = synthetic_bank(
+        dtype,
+        GU_N_HIDDEN,
+        GU_N_FFN,
+        r.n_expert,
+        0x9a7e ^ dtype as u64,
+    );
+    let up_bank = synthetic_bank(
+        dtype,
+        GU_N_HIDDEN,
+        GU_N_FFN,
+        r.n_expert,
+        0x0b ^ ((dtype as u64) << 8),
+    );
+    let mut rng = Lcg(0x11 ^ dtype as u64);
+    let x: Vec<f32> = (0..r.n_tokens * GU_N_HIDDEN)
+        .map(|_| rng.signed(0.5))
+        .collect();
+    let g = bank_tensor(&ctx, dtype, &gate_bank, GU_N_HIDDEN, GU_N_FFN, r.n_expert);
+    let u = bank_tensor(&ctx, dtype, &up_bank, GU_N_HIDDEN, GU_N_FFN, r.n_expert);
+    let x_t = f32_tensor(&ctx, &x);
+    // The generic clamped recipe checks the index dtypes, so type them.
+    let counts_t = i32_typed_tensor(&ctx, &r.counts);
+    let ids_t = i32_typed_tensor(&ctx, &r.ids);
+    let (cpu_g, cpu_u) = cpu_gate_up(dtype, &gate_bank, dtype, &up_bank, &r, &x);
+    // A clamp at a third of the projection range clips a good share of both
+    // operands while keeping the reference comparable to the half-operand
+    // rounding of the pre-clamp sums (a tiny clamp would not).
+    let range = cpu_g
+        .iter()
+        .chain(&cpu_u)
+        .map(|v| v.abs())
+        .fold(0f32, f32::max);
+    for clamp in [None, Some(0.3 * range)] {
+        let cpu = swiglu_epilogue(&cpu_g, &cpu_u, clamp);
+        let out_tensor = MetalTensor::zeros_f32(&ctx, vec![(n_slots * GU_N_FFN) as u64]).unwrap();
+        let out_generic = MetalTensor::zeros_f32(&ctx, vec![(n_slots * GU_N_FFN) as u64]).unwrap();
+        one_shot(&ctx, |enc| {
+            encode_moe_swiglu_f32_grouped_slots_tensor(
+                &ctx,
+                enc,
+                &g,
+                &u,
+                &x_t,
+                &counts_t,
+                &ids_t,
+                &out_tensor,
+                GU_N_HIDDEN,
+                GU_N_FFN,
+                r.n_expert,
+                r.topk,
+                r.n_tokens,
+                clamp,
+            )?;
+            // The generic two-pass recipe with the matching epilogue.
+            match clamp {
+                None => {
+                    encode_generic_mm(
+                        &ctx,
+                        enc,
+                        MoeGroupedGenericRole::Down,
+                        "test_gate_pass",
+                        &g,
+                        &x_t,
+                        &counts_t,
+                        &ids_t,
+                        &out_generic,
+                        GU_N_HIDDEN,
+                        GU_N_FFN,
+                        r.n_expert,
+                        r.n_tokens,
+                        r.topk,
+                        0,
+                        i32::MAX as u32,
+                    )?;
+                    encode_generic_mm(
+                        &ctx,
+                        enc,
+                        MoeGroupedGenericRole::UpSiluMul,
+                        "test_up_pass",
+                        &u,
+                        &x_t,
+                        &counts_t,
+                        &ids_t,
+                        &out_generic,
+                        GU_N_HIDDEN,
+                        GU_N_FFN,
+                        r.n_expert,
+                        r.n_tokens,
+                        r.topk,
+                        0,
+                        i32::MAX as u32,
+                    )
+                }
+                Some(c) => encode_moe_swiglu_clamped_f32_grouped_slots_generic(
+                    &ctx,
+                    enc,
+                    &g,
+                    &u,
+                    &x_t,
+                    &counts_t,
+                    &ids_t,
+                    &out_generic,
+                    GU_N_HIDDEN,
+                    GU_N_FFN,
+                    r.n_expert,
+                    r.topk,
+                    r.n_tokens,
+                    c,
+                ),
+            }
+        })
+        .expect("tensor grouped gate/up");
+        let gpu = read_back_f32(&out_tensor.buffer, n_slots * GU_N_FFN);
+        let generic = read_back_f32(&out_generic.buffer, n_slots * GU_N_FFN);
+        let label = format!("tensor-gate-up-{dtype:?}-clamp{clamp:?}");
+        assert_close(&label, &gpu, &cpu);
+        assert_tile_agreement(&label, &gpu, &generic);
+    }
+}
+
+macro_rules! tensor_grouped_moe_cases {
+    ($($down:ident, $gate_up:ident => $dtype:expr;)*) => {
+        $(
+            #[test]
+            fn $down() {
+                run_tensor_down_case($dtype);
+            }
+
+            #[test]
+            fn $gate_up() {
+                run_tensor_gate_up_case($dtype);
+            }
+        )*
+
+        #[test]
+        fn tensor_grouped_moe_case_list_covers_mapping() {
+            let listed = [$($dtype),*];
+            for l in MOE_GROUPED_GENERIC_LAYOUTS {
+                assert!(listed.contains(&l.dtype), "no tensor GPU equivalence test for {:?}", l.dtype);
+            }
+        }
+    };
+}
+
+tensor_grouped_moe_cases! {
+    tensor_grouped_moe_down_q2_0_matches, tensor_grouped_moe_gate_up_q2_0_matches => GgmlType::Q2_0;
+    tensor_grouped_moe_down_q2_k_matches, tensor_grouped_moe_gate_up_q2_k_matches => GgmlType::Q2_K;
+    tensor_grouped_moe_down_q3_k_matches, tensor_grouped_moe_gate_up_q3_k_matches => GgmlType::Q3_K;
+    tensor_grouped_moe_down_q4_k_matches, tensor_grouped_moe_gate_up_q4_k_matches => GgmlType::Q4_K;
+    tensor_grouped_moe_down_q5_k_matches, tensor_grouped_moe_gate_up_q5_k_matches => GgmlType::Q5_K;
+    tensor_grouped_moe_down_q6_k_matches, tensor_grouped_moe_gate_up_q6_k_matches => GgmlType::Q6_K;
+    tensor_grouped_moe_down_q8_0_matches, tensor_grouped_moe_gate_up_q8_0_matches => GgmlType::Q8_0;
+    tensor_grouped_moe_down_q4_0_matches, tensor_grouped_moe_gate_up_q4_0_matches => GgmlType::Q4_0;
+    tensor_grouped_moe_down_q4_1_matches, tensor_grouped_moe_gate_up_q4_1_matches => GgmlType::Q4_1;
+    tensor_grouped_moe_down_iq2_s_matches, tensor_grouped_moe_gate_up_iq2_s_matches => GgmlType::IQ2_S;
+    tensor_grouped_moe_down_iq3_xxs_matches, tensor_grouped_moe_gate_up_iq3_xxs_matches => GgmlType::IQ3_XXS;
+    tensor_grouped_moe_down_iq3_s_matches, tensor_grouped_moe_gate_up_iq3_s_matches => GgmlType::IQ3_S;
+    tensor_grouped_moe_down_mxfp4_matches, tensor_grouped_moe_gate_up_mxfp4_matches => GgmlType::MXFP4;
+    tensor_grouped_moe_down_iq2_xs_matches, tensor_grouped_moe_gate_up_iq2_xs_matches => GgmlType::IQ2_XS;
+    tensor_grouped_moe_down_iq2_xxs_matches, tensor_grouped_moe_gate_up_iq2_xxs_matches => GgmlType::IQ2_XXS;
+    tensor_grouped_moe_down_iq4_nl_matches, tensor_grouped_moe_gate_up_iq4_nl_matches => GgmlType::IQ4_NL;
+    tensor_grouped_moe_down_iq4_xs_matches, tensor_grouped_moe_gate_up_iq4_xs_matches => GgmlType::IQ4_XS;
+    tensor_grouped_moe_down_f32_matches, tensor_grouped_moe_gate_up_f32_matches => GgmlType::F32;
+    tensor_grouped_moe_down_f16_matches, tensor_grouped_moe_gate_up_f16_matches => GgmlType::F16;
+    tensor_grouped_moe_down_bf16_matches, tensor_grouped_moe_gate_up_bf16_matches => GgmlType::BF16;
 }
 
 #[test]
@@ -1031,115 +1404,412 @@ fn generic_grouped_moe_rejects_bad_contracts() {
     enc.end();
 }
 
-/// Opt-in timing of the generic half-staged expert tiles at the DeepSeek
-/// V4.1 prefill shape (384 experts, 2048 tokens x top-6, ~32 slots per
-/// expert; gate/up K=5120 M=2304, down K=2304 M=5120). Prints TFLOPS and
-/// effective weight bandwidth; asserts nothing. `QWEN_V41_TILE_TIMING=1`.
+/// DeepSeek V4.1 prefill shape (384 experts, 2048 tokens x top-6, ~32 slots
+/// per expert; gate/up K=5120 M=2304, down K=2304 M=5120) with round-robin
+/// routing (token t, k -> expert (t*7+k*53)%E), shared by the tile timing
+/// probes.
+struct ProductionShape {
+    counts_t: MetalTensor,
+    ids_t: MetalTensor,
+    x_t: MetalTensor,
+    inner_t: MetalTensor,
+    out_t: MetalTensor,
+}
+
+impl ProductionShape {
+    const EXPERTS: usize = 384;
+    const TOKENS: usize = 2048;
+    const TOPK: usize = 6;
+    const HIDDEN: usize = 5120;
+    const FFN: usize = 2304;
+    const SLOTS: usize = Self::TOKENS * Self::TOPK;
+
+    fn new(ctx: &MetalContext) -> Self {
+        let mut counts = vec![0i32; Self::EXPERTS];
+        let mut ids = vec![-1i32; Self::EXPERTS * Self::TOKENS];
+        for t in 0..Self::TOKENS {
+            for k in 0..Self::TOPK {
+                let e = (t * 7 + k * 53) % Self::EXPERTS;
+                ids[e * Self::TOKENS + counts[e] as usize] = (t * Self::TOPK + k) as i32;
+                counts[e] += 1;
+            }
+        }
+        let mut rng = Lcg(0x7ab5);
+        let x: Vec<f32> = (0..Self::TOKENS * Self::HIDDEN)
+            .map(|_| rng.signed(0.5))
+            .collect();
+        Self {
+            counts_t: i32_typed_tensor(ctx, &counts),
+            ids_t: i32_typed_tensor(ctx, &ids),
+            x_t: f32_tensor(ctx, &x),
+            inner_t: MetalTensor::zeros_f32(ctx, vec![(Self::SLOTS * Self::FFN) as u64]).unwrap(),
+            out_t: MetalTensor::zeros_f32(ctx, vec![(Self::SLOTS * Self::HIDDEN) as u64]).unwrap(),
+        }
+    }
+
+    fn banks(&self, ctx: &MetalContext, dtype: GgmlType) -> ProductionBanks {
+        let gate = synthetic_bank(
+            dtype,
+            Self::HIDDEN,
+            Self::FFN,
+            Self::EXPERTS,
+            0x11 ^ dtype as u64,
+        );
+        let up = synthetic_bank(
+            dtype,
+            Self::HIDDEN,
+            Self::FFN,
+            Self::EXPERTS,
+            0x22 ^ dtype as u64,
+        );
+        let down = synthetic_bank(
+            dtype,
+            Self::FFN,
+            Self::HIDDEN,
+            Self::EXPERTS,
+            0x33 ^ dtype as u64,
+        );
+        ProductionBanks {
+            gate_bytes: 2.0 * gate.len() as f64,
+            down_bytes: down.len() as f64,
+            gate_t: bank_tensor(ctx, dtype, &gate, Self::HIDDEN, Self::FFN, Self::EXPERTS),
+            up_t: bank_tensor(ctx, dtype, &up, Self::HIDDEN, Self::FFN, Self::EXPERTS),
+            down_t: bank_tensor(ctx, dtype, &down, Self::FFN, Self::HIDDEN, Self::EXPERTS),
+        }
+    }
+
+    /// FLOPs of one gate+up (two GEMMs) and of one down.
+    fn flops() -> (f64, f64) {
+        let mac = (Self::SLOTS * Self::HIDDEN * Self::FFN) as f64;
+        (2.0 * 2.0 * mac, 2.0 * mac)
+    }
+}
+
+struct ProductionBanks {
+    gate_bytes: f64,
+    down_bytes: f64,
+    gate_t: MetalTensor,
+    up_t: MetalTensor,
+    down_t: MetalTensor,
+}
+
+/// Median GPU time of `samples` one-encoder command buffers, printed as
+/// TFLOPS and effective weight bandwidth.
+fn timed_tile(
+    ctx: &MetalContext,
+    label: &str,
+    samples: usize,
+    flops: f64,
+    bytes: f64,
+    encode: &dyn Fn(&KernelEncoder),
+) -> f64 {
+    let mut us = Vec::new();
+    for _ in 0..samples {
+        let command = ctx.queue.commandBuffer().unwrap();
+        let enc = KernelEncoder::begin(&command);
+        encode(&enc);
+        enc.end();
+        commit_and_wait(&command).unwrap();
+        us.push((command.GPUEndTime() - command.GPUStartTime()) * 1e6);
+    }
+    us.sort_by(f64::total_cmp);
+    let med = us[samples / 2];
+    eprintln!(
+        "tile_timing {label:<40} median {med:9.1} us  {:6.1} TFLOPS  weights {:6.0} GB/s",
+        flops / (med * 1e-6) / 1e12,
+        bytes / (med * 1e-6) / 1e9
+    );
+    med
+}
+
+fn heat(ctx: &MetalContext, rounds: usize, encoders: &[&dyn Fn(&KernelEncoder)]) {
+    for _ in 0..rounds {
+        let command = ctx.queue.commandBuffer().unwrap();
+        let enc = KernelEncoder::begin(&command);
+        for encode in encoders {
+            encode(&enc);
+        }
+        enc.end();
+        commit_and_wait(&command).unwrap();
+    }
+}
+
+/// Opt-in timing of the generic half-staged expert tiles at the production
+/// shape. Prints TFLOPS and effective weight bandwidth; asserts nothing.
+/// `QWEN_V41_TILE_TIMING=1`.
 #[test]
 fn generic_tile_production_shape_timing() {
     if std::env::var_os("QWEN_V41_TILE_TIMING").is_none() {
         return;
     }
     let ctx = MetalContext::new().expect("Metal");
-    const EXPERTS: usize = 384;
-    const TOKENS: usize = 2048;
-    const TOPK: usize = 6;
-    const HIDDEN: usize = 5120;
-    const FFN: usize = 2304;
-    let slots = TOKENS * TOPK;
-    // Round-robin routing: every expert gets 32 slots, slot ids spread over
-    // the chunk like real top-6 routing (token t, k -> expert (t*7+k*53)%E).
-    let mut counts = vec![0i32; EXPERTS];
-    let mut ids = vec![-1i32; EXPERTS * TOKENS];
-    for t in 0..TOKENS {
-        for k in 0..TOPK {
-            let e = (t * 7 + k * 53) % EXPERTS;
-            ids[e * TOKENS + counts[e] as usize] = (t * TOPK + k) as i32;
-            counts[e] += 1;
-        }
-    }
-    let i32_typed = |v: &[i32]| {
-        MetalTensor::from_bytes(
-            &ctx,
-            bytemuck::cast_slice(v),
-            vec![v.len() as u64],
-            GgmlType::I32,
-        )
-        .unwrap()
-    };
-    let counts_t = i32_typed(&counts);
-    let ids_t = i32_typed(&ids);
-    let mut rng = Lcg(0x7ab5);
-    let x: Vec<f32> = (0..TOKENS * HIDDEN).map(|_| rng.signed(0.5)).collect();
-    let x_t = f32_tensor(&ctx, &x);
-    let inner_t = MetalTensor::zeros_f32(&ctx, vec![(slots * FFN) as u64]).unwrap();
-    let out_t = MetalTensor::zeros_f32(&ctx, vec![(slots * HIDDEN) as u64]).unwrap();
-    let timed = |label: &str, flops: f64, bytes: f64, encode: &dyn Fn(&KernelEncoder)| {
-        let mut us = Vec::new();
-        for _ in 0..8 {
-            let command = ctx.queue.commandBuffer().unwrap();
-            let enc = KernelEncoder::begin(&command);
-            encode(&enc);
-            enc.end();
-            commit_and_wait(&command).unwrap();
-            us.push((command.GPUEndTime() - command.GPUStartTime()) * 1e6);
-        }
-        us.sort_by(f64::total_cmp);
-        let med = us[4];
-        eprintln!(
-            "tile_timing {label:<34} median {med:9.1} us  {:6.1} TFLOPS  weights {:6.0} GB/s",
-            flops / (med * 1e-6) / 1e12,
-            bytes / (med * 1e-6) / 1e9
-        );
-    };
+    let shape = ProductionShape::new(&ctx);
+    let (gate_up_flops, down_flops) = ProductionShape::flops();
     for dtype in [
         GgmlType::Q3_K,
         GgmlType::IQ3_XXS,
         GgmlType::IQ2_S,
         GgmlType::MXFP4,
     ] {
-        let gate = synthetic_bank(dtype, HIDDEN, FFN, EXPERTS, 0x11 ^ dtype as u64);
-        let up = synthetic_bank(dtype, HIDDEN, FFN, EXPERTS, 0x22 ^ dtype as u64);
-        let down = synthetic_bank(dtype, FFN, HIDDEN, EXPERTS, 0x33 ^ dtype as u64);
-        let gate_t = bank_tensor(&ctx, dtype, &gate, HIDDEN, FFN, EXPERTS);
-        let up_t = bank_tensor(&ctx, dtype, &up, HIDDEN, FFN, EXPERTS);
-        let down_t = bank_tensor(&ctx, dtype, &down, FFN, HIDDEN, EXPERTS);
+        let b = shape.banks(&ctx, dtype);
         let gate_up = |enc: &KernelEncoder| {
             encode_moe_swiglu_clamped_f32_grouped_slots_generic(
-                &ctx, enc, &gate_t, &up_t, &x_t, &counts_t, &ids_t, &inner_t, HIDDEN, FFN, EXPERTS,
-                TOPK, TOKENS, 10.0,
+                &ctx,
+                enc,
+                &b.gate_t,
+                &b.up_t,
+                &shape.x_t,
+                &shape.counts_t,
+                &shape.ids_t,
+                &shape.inner_t,
+                ProductionShape::HIDDEN,
+                ProductionShape::FFN,
+                ProductionShape::EXPERTS,
+                ProductionShape::TOPK,
+                ProductionShape::TOKENS,
+                10.0,
             )
             .unwrap();
         };
         let down_enc = |enc: &KernelEncoder| {
             encode_moe_down_f32_grouped_slots_generic(
-                &ctx, enc, &down_t, &inner_t, &counts_t, &ids_t, &out_t, FFN, HIDDEN, EXPERTS,
-                TOKENS,
+                &ctx,
+                enc,
+                &b.down_t,
+                &shape.inner_t,
+                &shape.counts_t,
+                &shape.ids_t,
+                &shape.out_t,
+                ProductionShape::FFN,
+                ProductionShape::HIDDEN,
+                ProductionShape::EXPERTS,
+                ProductionShape::TOKENS,
             )
             .unwrap();
         };
-        // Heat.
-        for _ in 0..6 {
-            let command = ctx.queue.commandBuffer().unwrap();
-            let enc = KernelEncoder::begin(&command);
-            gate_up(&enc);
-            down_enc(&enc);
-            enc.end();
-            commit_and_wait(&command).unwrap();
-        }
-        let mac = (slots * HIDDEN * FFN) as f64;
-        timed(
+        heat(&ctx, 6, &[&gate_up, &down_enc]);
+        timed_tile(
+            &ctx,
             &format!("{dtype:?} gate+up (2 GEMMs)"),
-            2.0 * 2.0 * mac,
-            2.0 * gate.len() as f64,
+            8,
+            gate_up_flops,
+            b.gate_bytes,
             &gate_up,
         );
-        timed(
+        timed_tile(
+            &ctx,
             &format!("{dtype:?} down"),
-            2.0 * mac,
-            down.len() as f64,
+            8,
+            down_flops,
+            b.down_bytes,
             &down_enc,
         );
+    }
+}
+
+/// Opt-in A/B of the Metal 4 tensor tile against the generic tile at the
+/// production shape, interleaved per role (generic, tensor, generic,
+/// tensor) on a heated GPU. `QWEN_V41_TILE_TIMING=1`; skipped where the
+/// tensor tier is absent.
+#[test]
+fn tensor_tile_production_shape_timing() {
+    if std::env::var_os("QWEN_V41_TILE_TIMING").is_none() {
+        return;
+    }
+    let ctx = MetalContext::new().expect("Metal");
+    if !moe_grouped_tensor_available(&ctx) {
+        eprintln!("tensor tier unavailable: {:?}", ctx.tensor_ops_status());
+        return;
+    }
+    let shape = ProductionShape::new(&ctx);
+    let (gate_up_flops, down_flops) = ProductionShape::flops();
+    for dtype in [
+        GgmlType::Q3_K,
+        GgmlType::IQ3_XXS,
+        GgmlType::IQ2_XS,
+        GgmlType::MXFP4,
+    ] {
+        let b = shape.banks(&ctx, dtype);
+        let gate_up_generic = |enc: &KernelEncoder| {
+            encode_moe_swiglu_clamped_f32_grouped_slots_generic(
+                &ctx,
+                enc,
+                &b.gate_t,
+                &b.up_t,
+                &shape.x_t,
+                &shape.counts_t,
+                &shape.ids_t,
+                &shape.inner_t,
+                ProductionShape::HIDDEN,
+                ProductionShape::FFN,
+                ProductionShape::EXPERTS,
+                ProductionShape::TOPK,
+                ProductionShape::TOKENS,
+                10.0,
+            )
+            .unwrap();
+        };
+        let gate_up_tensor = |enc: &KernelEncoder| {
+            encode_moe_swiglu_f32_grouped_slots_tensor(
+                &ctx,
+                enc,
+                &b.gate_t,
+                &b.up_t,
+                &shape.x_t,
+                &shape.counts_t,
+                &shape.ids_t,
+                &shape.inner_t,
+                ProductionShape::HIDDEN,
+                ProductionShape::FFN,
+                ProductionShape::EXPERTS,
+                ProductionShape::TOPK,
+                ProductionShape::TOKENS,
+                Some(10.0),
+            )
+            .unwrap();
+        };
+        let down_generic = |enc: &KernelEncoder| {
+            encode_moe_down_f32_grouped_slots_generic(
+                &ctx,
+                enc,
+                &b.down_t,
+                &shape.inner_t,
+                &shape.counts_t,
+                &shape.ids_t,
+                &shape.out_t,
+                ProductionShape::FFN,
+                ProductionShape::HIDDEN,
+                ProductionShape::EXPERTS,
+                ProductionShape::TOKENS,
+            )
+            .unwrap();
+        };
+        let down_tensor = |enc: &KernelEncoder| {
+            encode_moe_down_f32_grouped_slots_tensor(
+                &ctx,
+                enc,
+                &b.down_t,
+                &shape.inner_t,
+                &shape.counts_t,
+                &shape.ids_t,
+                &shape.out_t,
+                ProductionShape::FFN,
+                ProductionShape::HIDDEN,
+                ProductionShape::EXPERTS,
+                ProductionShape::TOKENS,
+            )
+            .unwrap();
+        };
+        heat(
+            &ctx,
+            4,
+            &[
+                &gate_up_generic,
+                &gate_up_tensor,
+                &down_generic,
+                &down_tensor,
+            ],
+        );
+        for round in 0..2 {
+            let tag = |role: &str, path: &str| format!("{dtype:?} {role} {path} r{round}");
+            timed_tile(
+                &ctx,
+                &tag("gate+up", "generic"),
+                6,
+                gate_up_flops,
+                b.gate_bytes,
+                &gate_up_generic,
+            );
+            timed_tile(
+                &ctx,
+                &tag("gate+up", "tensor"),
+                6,
+                gate_up_flops,
+                b.gate_bytes,
+                &gate_up_tensor,
+            );
+            timed_tile(
+                &ctx,
+                &tag("down", "generic"),
+                6,
+                down_flops,
+                b.down_bytes,
+                &down_generic,
+            );
+            timed_tile(
+                &ctx,
+                &tag("down", "tensor"),
+                6,
+                down_flops,
+                b.down_bytes,
+                &down_tensor,
+            );
+        }
+    }
+}
+
+/// Raw Metal 4 matmul2d ceiling with threadgroup-resident half operands at
+/// the tile shapes the tensor expert tile could use (research kernel, no
+/// device traffic in the loop). `QWEN_V41_TILE_TIMING=1`; prints TFLOPS.
+#[test]
+fn matmul2d_peak_timing() {
+    if std::env::var_os("QWEN_V41_TILE_TIMING").is_none() {
+        return;
+    }
+    let ctx = MetalContext::new().expect("Metal");
+    if !moe_grouped_tensor_available(&ctx) {
+        eprintln!("tensor tier unavailable: {:?}", ctx.tensor_ops_status());
+        return;
+    }
+    let out = MetalTensor::zeros_f32(&ctx, vec![4096]).unwrap();
+    let shapes: [(usize, usize, usize, usize); 8] = [
+        (32, 64, 32, 4),
+        (64, 32, 32, 4),
+        (64, 64, 32, 4),
+        (32, 64, 64, 4),
+        (64, 64, 64, 4),
+        (128, 64, 32, 4),
+        (32, 32, 32, 1),
+        (16, 64, 32, 4),
+    ];
+    for pass in 0..2 {
+        for (m, n, k, sg) in shapes {
+            let name = format!("kernel_tensor_peak_m{m}_n{n}_k{k}_sg{sg}");
+            let pso = ctx.tensor_pipeline(&name).unwrap();
+            for tgs in [320usize, 2560] {
+                let iters: u32 = 1000;
+                let mut us = Vec::new();
+                for _ in 0..6 {
+                    let command = ctx.queue.commandBuffer().unwrap();
+                    let enc = KernelEncoder::begin(&command);
+                    enc.set_pipeline(&pso);
+                    enc.set_bytes(0, &iters);
+                    enc.set_tensor(1, &out);
+                    enc.dispatch(
+                        MTLSize {
+                            width: tgs,
+                            height: 1,
+                            depth: 1,
+                        },
+                        MTLSize {
+                            width: 32 * sg,
+                            height: 1,
+                            depth: 1,
+                        },
+                    );
+                    enc.end();
+                    commit_and_wait(&command).unwrap();
+                    us.push((command.GPUEndTime() - command.GPUStartTime()) * 1e6);
+                }
+                us.sort_by(f64::total_cmp);
+                let med = us[3];
+                let flops = tgs as f64 * iters as f64 * 2.0 * (m * n * k) as f64;
+                eprintln!(
+                    "matmul2d_peak pass{pass} {name:<36} tgs={tgs:<5} median {med:9.1} us  {:6.1} TFLOPS",
+                    flops / (med * 1e-6) / 1e12
+                );
+            }
+        }
     }
 }
 

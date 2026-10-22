@@ -1467,6 +1467,9 @@ pub fn encode_moe_swiglu_clamped_f32_grouped_slots_split(
     Ok(())
 }
 
+mod tensor;
+pub use tensor::*;
+
 #[cfg(test)]
 mod tests;
 

@@ -113,12 +113,21 @@ fn chunk_dispatch_and_submission_census() {
                 .chunks(DEFAULT_CHUNK_ROWS)
                 .filter(|c| c.len() > 1)
                 .count();
-            // Half-staged MXFP4 route: generic down tile for the gate pass and
-            // the down pass, clamped up tile in between.
-            for (name, per_layer) in [
-                ("kernel_moe_down_mxfp4_f32_grouped_slots_generic", 2),
-                ("kernel_moe_up_clamped_mxfp4_f32_grouped_slots_clamped", 1),
-            ] {
+            // Half-staged MXFP4 route: down tile for the gate pass and the
+            // down pass, clamped up tile in between; the tensor tile where
+            // the tier exists, the generic tile elsewhere.
+            let (down_name, up_name) = if metal::moe_grouped_tensor_selected(&ctx) {
+                (
+                    "kernel_moe_down_mxfp4_f32_grouped_slots_tensor",
+                    "kernel_moe_up_clamped_mxfp4_f32_grouped_slots_tensor",
+                )
+            } else {
+                (
+                    "kernel_moe_down_mxfp4_f32_grouped_slots_generic",
+                    "kernel_moe_up_clamped_mxfp4_f32_grouped_slots_clamped",
+                )
+            };
+            for (name, per_layer) in [(down_name, 2), (up_name, 1)] {
                 assert_eq!(
                     dispatches.iter().filter(|d| d.kernel == name).count(),
                     per_layer * grouped_chunks * model.layers.len()

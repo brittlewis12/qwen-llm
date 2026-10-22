@@ -50,11 +50,12 @@ prefill and the tiles about a fifth; re-sample before claiming.
 - MXFP4 generic half layout: landed with the IQ2 layouts (needed for layers
   whose down is MXFP4); +1.6% on its own. Widens DFlash/GLM grouped
   eligibility on MXFP4 artifacts (unmeasured there).
-- Expert tile efficiency (~8.7 TFLOPS on half-staged tiles, decode-bound at
-  32 rows/expert): open. Tried: 2048-row chunks +5.6% (landed); 32-slot
-  gate/up tile +0.25-0.9% at pp2048 but -1.3%/-1.6% at pp1024 (negative,
-  packet 2026-10-21); 4096-row chunks
-  untested.
+- Expert tile efficiency (~8.7 TFLOPS on half-staged tiles; per-layer FFN
+  time is 52-64 ms regardless of storage type, so not decode-bound): in
+  flight (`perf/v41-expert-tiles`, isolated tile microbench first). Tried:
+  2048-row chunks +5.6% (landed); 32-slot gate/up tile +0.25-0.9% at
+  pp2048 but -1.3%/-1.6% at pp1024 (negative, packet 2026-10-21);
+  4096-row chunks untested.
 - Owner/producer per-row loops (compressor, index key, selection; 8 layers,
   grows with prompt length): compressor prep landed (`a7de76ab`): key norm +
   key/latent RoPE + both cache copies fused 5 -> 1, +0.5-0.8%, census

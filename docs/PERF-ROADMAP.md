@@ -30,19 +30,12 @@ before building anything adjacent. This replaces relaying between sessions.
 
 Decode budget at depth 2048, 22.3 ms/token: ~10.2 ms bytes (11.1 GiB at the
 ~1.09 TB/s the GEMV probe reaches), ~8 ms dispatch floor (~1,600 dispatches),
-~4 ms spread thin. Prefill budget per 2048-token chunk after the tensor
-expert tile, sampled spans (`QWEN_V41_PREFILL_STAGES=1`, packet
-2026-10-22 tensor expert tile): FFN 33% (33 ms/layer: expert tiles ~20,
-shared expert ~7, router/bucket/weight/sum), attention tiles
-(QK^T/softmax/PV) 25% (26.5 ms/layer), owner/producer per-row loops 18%
-(98 ms x 8 layers), output projections 12.5%, prepare 8.6%, HC 2.6%. The
-dense projections then dropped from ~24 to ~11 ms/layer (dense entry);
-re-sample before claiming.
-- Post-dense attribution: the 33/25/18/12.5/8.6/2.6 split predates tensor
-  dense; dense removed ~13 ms/layer from its projection set. Re-sample
-  `QWEN_V41_PREFILL_STAGES=1` and `QWEN_V41_CENSUS=1` at pp2048/4096 on both
-  artifacts; unchanged attention/serial shares estimate ~29%/~21%, not
-  measured: open.
+~4 ms spread thin. Prefill split per 2048-token chunk, fresh post-selection six-span sample
+(`QWEN_V41_PREFILL_STAGES=1`, PP2048, shares only; sampling inflates wall
+~2.8x): FFN 35.1% Q2 / 36.6% IQ3, attention tiles 29.8/29.4, owner/producer
+serial 18.7/18.5, finish/post 8.4/7.9, prepare 5.5/5.2, HC 2.5/2.5. The
+serial span still includes compressor, index key, publication, selection and
+sorting, so not all of it is removable. Re-sample after the next landing.
 
 - Attention tiles via simdgroup MMA (half-staged Q/K/V, F32 sums),
   replacing the scalar score kernel and the gather+GEMM PV for the released

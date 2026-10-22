@@ -33,6 +33,24 @@ launches. The per-row `sort_init`, `sort_tile`, `sort_step` and
 At PP2048 the visible lengths stay below 16,385 keys, so the pruning path
 (`blocks > candidate_topk`) is not reached.
 
+## Post-selection span split
+
+Fresh `QWEN_V41_PREFILL_STAGES=1` sample at PP2048, shares only (sampling
+inflates wall about 2.8x):
+
+| span | Q2 | IQ3 |
+|---|---:|---:|
+| FFN | 35.1% | 36.6% |
+| attention tiles (QK^T/softmax/PV) | 29.8% | 29.4% |
+| owner/producer serial | 18.7% | 18.5% |
+| attention finish/post | 8.4% | 7.9% |
+| attention prepare | 5.5% | 5.2% |
+| attention HC | 2.5% | 2.5% |
+
+The serial share still includes compressor, index-key publication, selection
+and sorting; selection batching removed about 3.5% of wall, not the whole
+serial span.
+
 ## What changed
 
 Compressor and index-key publication remain position-ordered, one row at a

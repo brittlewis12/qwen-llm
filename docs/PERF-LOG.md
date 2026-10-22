@@ -6,6 +6,15 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the current state and evidence index.
 
+## 2026-10-22 - V4.1 Post-Selection Prefill Split
+
+- Fresh six-span sample at PP2048 after the selection landing (shares only;
+  sampling inflates wall ~2.8x): FFN 35.1% Q2 / 36.6% IQ3, attention tiles
+  29.8/29.4, owner/producer serial 18.7/18.5, finish/post 8.4/7.9, prepare
+  5.5/5.2, HC 2.5/2.5. Attention is now ~65% of sampled prefill; FFN ~36%.
+- The serial span still includes compressor/index publication, selection and
+  sorting; the selection batching removed ~3.5% of wall, not the whole span.
+
 ## 2026-10-22 - V4.1 Prefill: Batched Unpruned Selection +3.0-3.8%
 
 - Compressor/index-key publication stays position-ordered; selection then

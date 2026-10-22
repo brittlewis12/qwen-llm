@@ -558,6 +558,117 @@ impl Fixture {
         let pso = pipeline(ctx, enc, "normalize_rows").unwrap();
         dispatch(enc, &pso, self.n * H * M);
     }
+
+    /// The Metal 4 tensor-ops form of the same tile (same slabs, softmax
+    /// and normalization; matmul2d per key block).
+    fn encode_tensor(&self, ctx: &MetalContext, enc: &KernelEncoder) {
+        self.bind(enc);
+        tensor_pipeline(ctx, enc, "score_tensor").unwrap();
+        grid(enc, H / 16, self.n, 1, 128);
+        pipeline(ctx, enc, "softmax_rows").unwrap();
+        grid(enc, H, self.n, 1, 32);
+        tensor_pipeline(ctx, enc, "pv_tensor").unwrap();
+        grid(enc, H / 16, self.n, 1, 128);
+        let pso = pipeline(ctx, enc, "normalize_rows").unwrap();
+        dispatch(enc, &pso, self.n * H * M);
+    }
+}
+
+/// The tensor tile against the scalar sink (half tolerance) and against
+/// the MMA tile it replaces (same half operands, F32 sums, different
+/// reduction order), with the MMA tile's visibility and finite guards.
+#[test]
+fn tensor_sink_tile_matches_mma_sink() {
+    let Some(ctx) = crate::test_fixtures::metal_context_or_skip() else {
+        return;
+    };
+    if !metal::moe_grouped_tensor_available(&ctx) {
+        eprintln!("tensor tier unavailable: {:?}", ctx.tensor_ops_status());
+        return;
+    }
+    for (k, n, ragged, first) in cases() {
+        let f = Fixture::new(&ctx, k, n, ragged, first);
+        f.checked(&ctx, Scalar, Scope::Sink);
+        let scalar = f32_slice(&f.output).unwrap().to_vec();
+        execute(&ctx, |enc| f.encode_mma(&ctx, enc));
+        let mma = f32_slice(&f.output).unwrap().to_vec();
+        let mma_scores = f32_slice(&f.scores).unwrap().to_vec();
+        execute(&ctx, |enc| f.encode_tensor(&ctx, enc));
+        assert_eq!(ids(&f.status, 1), [0], "k={k} n={n} ragged={ragged}");
+        let tensor_scores = f32_slice(&f.scores).unwrap();
+        for q in 0..n {
+            let count = f.count(q);
+            for h in 0..H {
+                let base = (q * H + h) * SCORE_STRIDE;
+                close_tile(
+                    &tensor_scores[base..base + count],
+                    &mma_scores[base..base + count],
+                );
+                close_tile(
+                    &tensor_scores[base + SCORE_STRIDE - 1..base + SCORE_STRIDE],
+                    &mma_scores[base + SCORE_STRIDE - 1..base + SCORE_STRIDE],
+                );
+            }
+        }
+        let got = f32_slice(&f.output).unwrap();
+        close_tile(got, &mma);
+        close_half(got, &scalar);
+        f.check_guards();
+    }
+    // Invalid-selection visibility and the finite guard, as for the MMA tile.
+    let mut f = Fixture::new(&ctx, 512, 8, true, 0);
+    execute(&ctx, |enc| f.encode_tensor(&ctx, enc));
+    let valid = f32_slice(&f.output).unwrap().to_vec();
+    let mut selected: Vec<u32> = ids(&f.selected, f.topk * f.n)
+        .into_iter()
+        .map(|id| id as u32)
+        .collect();
+    selected[f.topk] = ((f.start + 2) / f.ratio) as u32;
+    f.selected = MetalTensor::from_bytes(
+        &ctx,
+        bytemuck::cast_slice(&selected),
+        vec![f.topk as u64, f.n as u64],
+        GgmlType::I32,
+    )
+    .unwrap();
+    execute(&ctx, |enc| f.encode_tensor(&ctx, enc));
+    assert_eq!(ids(&f.status, 1), [2]);
+    let got = f32_slice(&f.output).unwrap();
+    for h in 0..H {
+        for q in 0..f.n {
+            let off = (h * f.n + q) * M;
+            if q == 1 {
+                assert!(got[off..off + M].iter().all(|&v| v == 0.0));
+            } else {
+                assert_eq!(got[off..off + M], valid[off..off + M]);
+            }
+        }
+    }
+    let poison = upload(&ctx, &[f32::NAN], vec![1]).unwrap();
+    execute(&ctx, |enc| {
+        copy(
+            &ctx,
+            enc,
+            &poison,
+            &f.history.view_subrange(M as u64, vec![1]),
+            1,
+        )
+        .unwrap()
+    });
+    execute(&ctx, |enc| f.encode_tensor(&ctx, enc));
+    assert_eq!(ids(&f.status, 1), [6]);
+    f.check_guards();
+}
+
+/// Two half-operand F32-sum tiles differing only in reduction order.
+fn close_tile(a: &[f32], b: &[f32]) {
+    assert_eq!(a.len(), b.len());
+    for (i, (&a, &b)) in a.iter().zip(b).enumerate() {
+        assert!(
+            a.is_finite() && (a - b).abs() <= 1e-4 + 2e-3 * b.abs(),
+            "{i}: {a} != {b}"
+        );
+    }
 }
 
 #[test]
@@ -702,9 +813,27 @@ fn mma_sink_tile_dispatch_timing() {
             let pso = pipeline(&ctx, enc, "normalize_rows").unwrap();
             dispatch(enc, &pso, f.n * H * M);
         });
+        if metal::moe_grouped_tensor_available(&ctx) {
+            for _ in 0..8 {
+                execute(&ctx, |enc| f.encode_tensor(&ctx, enc));
+            }
+            timed("tensor score", &f, &|enc| {
+                f.bind(enc);
+                tensor_pipeline(&ctx, enc, "score_tensor").unwrap();
+                grid(enc, H / 16, f.n, 1, 128);
+            });
+            timed("tensor pv", &f, &|enc| {
+                f.bind(enc);
+                tensor_pipeline(&ctx, enc, "pv_tensor").unwrap();
+                grid(enc, H / 16, f.n, 1, 128);
+            });
+        }
         timed("full old sink", &f, &|enc| {
             f.encode(&ctx, enc, Production, Scope::Sink)
         });
         timed("full mma sink", &f, &|enc| f.encode_mma(&ctx, enc));
+        if metal::moe_grouped_tensor_available(&ctx) {
+            timed("full tensor sink", &f, &|enc| f.encode_tensor(&ctx, enc));
+        }
     }
 }

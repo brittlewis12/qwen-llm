@@ -278,6 +278,9 @@ impl Workspace {
         // latent, head count a multiple of 16); other geometries keep the
         // scalar/gathered-GEMM path below.
         let mma = c.head_dim == MMA_DIM && c.heads.is_multiple_of(MMA_HEADS);
+        // The Metal 4 tensor-ops form of the MMA tile where the tier exists:
+        // same slabs, softmax and normalization, matmul2d per key block.
+        let tensor = mma && metal::moe_grouped_tensor_selected(ctx);
         // Preserve the incumbent per-query PV branch. Counts are monotone, so
         // at most one fixed tile per layer/chunk needs this extra boundary split.
         if !mma
@@ -336,7 +339,21 @@ impl Workspace {
         enc.set_tensor(7, &rows.tile.scores);
         enc.set_tensor(8, &attended);
         enc.set_tensor(10, &self.status);
-        if mma {
+        if tensor {
+            tensor_pipeline(ctx, enc, "score_tensor")?;
+            enc.dispatch(
+                MTLSize {
+                    width: c.heads / MMA_HEADS,
+                    height: n,
+                    depth: 1,
+                },
+                MTLSize {
+                    width: 128,
+                    height: 1,
+                    depth: 1,
+                },
+            );
+        } else if mma {
             pipeline(ctx, enc, "score_mma")?;
             enc.dispatch(
                 MTLSize {
@@ -380,7 +397,11 @@ impl Workspace {
             },
         );
         if mma {
-            pipeline(ctx, enc, "pv_mma")?;
+            if tensor {
+                tensor_pipeline(ctx, enc, "pv_tensor")?;
+            } else {
+                pipeline(ctx, enc, "pv_mma")?;
+            }
             enc.dispatch(
                 MTLSize {
                     width: c.heads / MMA_HEADS,
@@ -388,7 +409,7 @@ impl Workspace {
                     depth: 1,
                 },
                 MTLSize {
-                    width: 256,
+                    width: if tensor { 128 } else { 256 },
                     height: 1,
                     depth: 1,
                 },

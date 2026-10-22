@@ -1,6 +1,6 @@
-//! Native GPU-indexed expert projections with F32 weights after decode,
-//! activations and accumulation. No weight materialization, ID readback or
-//! additional scratch. Exact refers to operand precision, not reduction order.
+//! Native GPU-indexed expert projections. Existing entrypoints use F32 weights
+//! after decode, activations and accumulation. No weight materialization, ID
+//! readback or additional scratch. Exact refers to operand precision, not reduction order.
 //!
 //! Banks are contiguous `[K, M, experts]`; gate/up input is `[K]`, their
 //! output is `[M, top_k]`. Down reads `[K, top_k]` and writes `[M, top_k]`.
@@ -11,6 +11,11 @@
 //! every input. Invalid IDs and any status other than READY produce zeros.
 //! Row-batched entrypoints add only a grid-depth/token axis, retaining the
 //! native per-output reduction and the separate gate/up passes and F32 store.
+//! Explicit `*_half_rows` entrypoints instead round each decoded coefficient and
+//! activation to F16 before F32 FMA. The inner SwiGLU store stays F32; down rounds
+//! it again on load. This matches Fast/Half operand storage, NOT grouped MMA bits:
+//! each SIMD lane accumulates 16-element fragments, then SIMD-sums 32 partials.
+//! No global precision policy is selected here and existing entrypoints stay F32.
 
 use super::checks::{
     bad_shape, check_disjoint, check_expert_bank, check_tensor, require_serial, to_u32,
@@ -71,6 +76,44 @@ pub fn all_slots_down_native_rows_supported(dtype: GgmlType) -> bool {
         dtype,
         GgmlType::IQ3_XXS | GgmlType::IQ3_S | GgmlType::Q3_K | GgmlType::MXFP4 | GgmlType::IQ2_XXS
     )
+}
+
+/// Bounded half-operand coverage for released GLM gate/up banks only.
+pub fn all_slots_gate_up_native_half_rows_supported(gate: GgmlType, up: GgmlType) -> bool {
+    [gate, up]
+        .into_iter()
+        .all(|t| matches!(t, GgmlType::IQ2_S | GgmlType::IQ3_S))
+}
+
+pub fn all_slots_down_native_half_rows_supported(dtype: GgmlType) -> bool {
+    matches!(dtype, GgmlType::IQ3_S | GgmlType::IQ4_XS)
+}
+
+// Shared with expert_native.metal. Projection values 0/1/2 and the 32-byte ABI
+// remain unchanged; never replace the flags when advancing gate to up.
+const NATIVE_HALF_OPERANDS: u32 = 1 << 8;
+
+#[derive(Clone, Copy)]
+enum NativeOperands {
+    F32,
+    Half,
+}
+
+impl NativeOperands {
+    fn mode(self, projection: u32) -> u32 {
+        projection
+            | match self {
+                Self::F32 => 0,
+                Self::Half => NATIVE_HALF_OPERANDS,
+            }
+    }
+}
+
+fn check_half_rows(kernel: &'static str, rows: usize) -> Result<(), MetalError> {
+    if !(1..=8).contains(&rows) {
+        return Err(bad_shape(kernel, "half-operand packets require 1..=8 rows"));
+    }
+    Ok(())
 }
 
 #[repr(C)]
@@ -287,8 +330,21 @@ pub fn encode_all_slots_gate_up_swiglu_native(
     clamp: f32,
 ) -> Result<(), MetalError> {
     encode_gate_up(
-        ctx, enc, gate_bank, up_bank, input, ids, status, output, n_in, n_out, experts, top_k,
-        clamp, None,
+        ctx,
+        enc,
+        gate_bank,
+        up_bank,
+        input,
+        ids,
+        status,
+        output,
+        n_in,
+        n_out,
+        experts,
+        top_k,
+        clamp,
+        None,
+        NativeOperands::F32,
     )
 }
 
@@ -333,6 +389,54 @@ pub fn encode_all_slots_gate_up_swiglu_native_rows(
         top_k,
         clamp,
         Some(rows),
+        NativeOperands::F32,
+    )
+}
+
+/// Two serial half-operand GEMVs, not a grouped MMA or an F32 fallback.
+/// Accepts 1..=8 rows: input `[K, rows]`, IDs `[top_k, rows]`, status `[rows]`,
+/// caller-provided inner/output `[M, top_k * rows]` (slot varies before token).
+/// All bindings and both pipelines are preflighted before any dispatch. No
+/// allocation, routing readback, buckets, or full-expert tiled grid is needed.
+/// Clamp and SwiGLU use F32; results need not match grouped MMA bit-for-bit.
+#[allow(clippy::too_many_arguments)]
+pub fn encode_all_slots_gate_up_swiglu_native_half_rows(
+    ctx: &MetalContext,
+    enc: &KernelEncoder,
+    gate_bank: &MetalTensor,
+    up_bank: &MetalTensor,
+    input: &MetalTensor,
+    ids: &MetalTensor,
+    status: &MetalTensor,
+    output: &MetalTensor,
+    n_in: usize,
+    n_out: usize,
+    experts: usize,
+    top_k: usize,
+    rows: usize,
+    clamp: f32,
+) -> Result<(), MetalError> {
+    const K: &str = "all_slots_gate_up_swiglu_native_half_rows";
+    check_half_rows(K, rows)?;
+    if !all_slots_gate_up_native_half_rows_supported(gate_bank.dtype, up_bank.dtype) {
+        return Err(bad_shape(K, "unsupported half-operand gate/up storage"));
+    }
+    encode_gate_up(
+        ctx,
+        enc,
+        gate_bank,
+        up_bank,
+        input,
+        ids,
+        status,
+        output,
+        n_in,
+        n_out,
+        experts,
+        top_k,
+        clamp,
+        Some(rows),
+        NativeOperands::Half,
     )
 }
 
@@ -352,6 +456,7 @@ fn encode_gate_up(
     top_k: usize,
     clamp: f32,
     rows: Option<usize>,
+    operands: NativeOperands,
 ) -> Result<(), MetalError> {
     const K: &str = "all_slots_gate_up_swiglu_native";
     require_serial(K, enc)?;
@@ -370,6 +475,7 @@ fn encode_gate_up(
     let (up, up_bytes) = bank_pipeline(ctx, K, up_bank, &args, "up bank")?;
     check_disjoint(K, output, &[(gate_bank, "gate bank"), (up_bank, "up bank")])?;
     args.clamp = clamp;
+    args.mode = operands.mode(0);
     args.row_bytes = gate_bytes;
     dispatch(
         enc,
@@ -382,7 +488,7 @@ fn encode_gate_up(
         output,
         rows.unwrap_or(1),
     );
-    args.mode = 1;
+    args.mode = operands.mode(1);
     args.row_bytes = up_bytes;
     dispatch(
         enc,
@@ -415,7 +521,19 @@ pub fn encode_all_slots_down_native(
     top_k: usize,
 ) -> Result<(), MetalError> {
     encode_down(
-        ctx, enc, bank, input, ids, status, output, n_in, n_out, experts, top_k, None,
+        ctx,
+        enc,
+        bank,
+        input,
+        ids,
+        status,
+        output,
+        n_in,
+        n_out,
+        experts,
+        top_k,
+        None,
+        NativeOperands::F32,
     )
 }
 
@@ -455,6 +573,49 @@ pub fn encode_all_slots_down_native_rows(
         experts,
         top_k,
         Some(rows),
+        NativeOperands::F32,
+    )
+}
+
+/// One half-operand down GEMV for each token/slot, including duplicate IDs.
+/// Input `[K, top_k * rows]`, output `[M, top_k * rows]`; routes and row bounds
+/// match `encode_all_slots_gate_up_swiglu_native_half_rows`. Caller owns scratch.
+/// Both decoded weights and F32 inner activations narrow to half before F32 FMA.
+/// Slot weighting/reduction is deliberately left to the existing rows helper.
+#[allow(clippy::too_many_arguments)]
+pub fn encode_all_slots_down_native_half_rows(
+    ctx: &MetalContext,
+    enc: &KernelEncoder,
+    bank: &MetalTensor,
+    input: &MetalTensor,
+    ids: &MetalTensor,
+    status: &MetalTensor,
+    output: &MetalTensor,
+    n_in: usize,
+    n_out: usize,
+    experts: usize,
+    top_k: usize,
+    rows: usize,
+) -> Result<(), MetalError> {
+    const K: &str = "all_slots_down_native_half_rows";
+    check_half_rows(K, rows)?;
+    if !all_slots_down_native_half_rows_supported(bank.dtype) {
+        return Err(bad_shape(K, "unsupported half-operand down storage"));
+    }
+    encode_down(
+        ctx,
+        enc,
+        bank,
+        input,
+        ids,
+        status,
+        output,
+        n_in,
+        n_out,
+        experts,
+        top_k,
+        Some(rows),
+        NativeOperands::Half,
     )
 }
 
@@ -472,6 +633,7 @@ fn encode_down(
     experts: usize,
     top_k: usize,
     rows: Option<usize>,
+    operands: NativeOperands,
 ) -> Result<(), MetalError> {
     const K: &str = "all_slots_down_native";
     require_serial(K, enc)?;
@@ -480,7 +642,7 @@ fn encode_down(
     check_device(ctx, enc, K, &[bank, input, ids, status, output])?;
     let (pso, row_bytes) = bank_pipeline(ctx, K, bank, &args, "down bank")?;
     check_disjoint(K, output, &[(bank, "down bank")])?;
-    args.mode = 2;
+    args.mode = operands.mode(2);
     args.row_bytes = row_bytes;
     dispatch(
         enc,

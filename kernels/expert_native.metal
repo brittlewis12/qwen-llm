@@ -1,4 +1,4 @@
-// GPU-indexed, F32-operand baseline. Four simdgroups own four output rows.
+// GPU-indexed projections. Four simdgroups own four output channels.
 // Gate writes the existing inner buffer; up consumes it in-place. No scratch.
 #include <metal_stdlib>
 using namespace metal;
@@ -37,9 +37,32 @@ struct expert_native_args {
     uint n_out;
     uint experts;
     uint top_k;
-    uint mode; // 0: gate; 1: up + in-place clamped SwiGLU; 2: slotwise down
+    uint mode; // low bits: 0 gate, 1 up + SwiGLU, 2 down; bit 8: half operands
     float clamp;
 };
+
+constant uint EXPERT_NATIVE_HALF_OPERANDS = 1u << 8;
+constant uint EXPERT_NATIVE_PROJECTION_MASK = 3u;
+
+// Same final coefficient narrowing as grouped half tiles, but a native SIMD
+// reduction, not MMA. Keep the baseline F32 arithmetic body unchanged below.
+template <ushort BYTES, ushort NL,
+          void (*DEQ)(device const uchar *, short, thread float4x4 &)>
+inline float expert_native_half_dot(device const uchar * row,
+                                    device const float * x,
+                                    uint n_in, ushort lane) {
+    float partial = 0.0f;
+    for (ulong k = ulong(lane) * 16u; k < n_in; k += 512u) {
+        float4x4 decoded;
+        DEQ(row + (k / (16u * NL)) * BYTES, short((k / 16u) % NL), decoded);
+        QT_FOR_UNROLL (uint i = 0; i < 16; ++i) {
+            const half w = half(decoded[i / 4][i % 4]);
+            const half activation = half(x[k + i]);
+            partial = fma(float(w), float(activation), partial);
+        }
+    }
+    return simd_sum(partial);
+}
 
 // DENSE: 0=quantized, 1=F32, 2=F16, 3=BF16. Dense tails permit any K;
 // quantized K is an integral number of storage blocks, checked by the host.
@@ -76,7 +99,21 @@ kernel void kernel_expert_native_f32(
     }
     device const uchar * row = bank
         + (ulong(expert) * args.n_out + channel) * args.row_bytes;
-    device const float * x = input + (args.mode == 2 ? selected : ulong(token)) * args.n_in;
+    const uint projection = args.mode & EXPERT_NATIVE_PROJECTION_MASK;
+    device const float * x = input + (projection == 2 ? selected : ulong(token)) * args.n_in;
+    if ((args.mode & EXPERT_NATIVE_HALF_OPERANDS) != 0) {
+        const float value = expert_native_half_dot<BYTES, NL, DEQ>(row, x, args.n_in, lane);
+        if (lane == 0) {
+            if (projection == 1) {
+                const float g = min(output[out_index], args.clamp);
+                const float u = clamp(value, -args.clamp, args.clamp);
+                output[out_index] = (g / (1.0f + exp(-g))) * u;
+            } else {
+                output[out_index] = value;
+            }
+        }
+        return;
+    }
     float sum = 0.0f;
     for (ulong k = ulong(lane) * 16u; k < args.n_in; k += 512u) {
         float4x4 decoded;

@@ -404,11 +404,14 @@ def run(args):
     )
     output = output.resolve()
     for name in ("binary", "source", "model", "drafter"):
-        path = getattr(args, name).resolve(strict=True)
+        path = getattr(args, name).absolute()
+        resolved = path.resolve(strict=True)
         require(path.is_file(), f"{name} must be a regular file")
         require(
-            path != output and output not in path.parents, f"{name}/output collision"
+            resolved != output and output not in resolved.parents,
+            f"{name}/output collision",
         )
+        # Split GGUF discovery depends on the supplied shard name, not a symlink's backing name.
         setattr(args, name, path)
     require(os.access(args.binary, os.X_OK), "binary must be executable")
     source_bytes = args.source.read_bytes()

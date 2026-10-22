@@ -97,6 +97,17 @@ class ReplayTests(unittest.TestCase):
     def manifest(self):
         return json.loads((self.args.output_dir / "manifest.json").read_text())
 
+    def test_split_model_symlink_name_is_preserved_for_shard_discovery(self):
+        alias = self.root / "model-00001-of-00002.gguf"
+        alias.symlink_to(self.args.model)
+        self.args.model = alias
+        with patch.object(replay.subprocess, "Popen", side_effect=self.fake_popen):
+            result = replay.run(self.args)
+        self.assertEqual(result["assets"]["model"]["path"], str(alias))
+        for record in result["runs"]:
+            cmd = record["command"]
+            self.assertEqual(cmd[cmd.index("--model") + 1], str(alias))
+
     def fake_popen(self, cmd, **kwargs):
         self.calls.append((cmd, kwargs))
         snapshot = self.manifest()

@@ -97,6 +97,10 @@ prefill and the tiles about a fifth; re-sample before claiming.
 
 ### Qwen3.8 Flash-Next
 
+- Native DFlash2 saved-gameplay serial/spec ABBA on the current M4 baseline:
+  in flight (main, native DFlash lane). Revalidate native packets after the
+  split-QSA/HC changes; measure before recommending speculation. Shared packet:
+  `bench/2026-10-20-dflash-native-targets/README.md`.
 - Native MTP heads (Unsloth): acceptance probe is the gate before building;
   open.
 - GSQ-RCO IQ3_S artifact: M5 quality option, -7 to -11% decode on M4; not an
@@ -104,6 +108,9 @@ prefill and the tiles about a fifth; re-sample before claiming.
 
 ### GLM-5.3-Flash
 
+- Native DFlash2 saved-gameplay serial/spec ABBA: in flight (main, native
+  DFlash lane), paired with the Flash-Next measurement above. Full GLM-5.3
+  and Muse are outside this measurement.
 - Near the M4 bandwidth wall; the M5 expert tensor-ops tier is the V4.1
   tensor tile bet above (the generic grouped tile serves GLM's grouped
   layers too).

@@ -1,5 +1,9 @@
 # DFlash2 on The Current Rollouts
 
+Retention note (October 22): the `target/` directory was cleared after these
+measurements. The aggregates and protocols below remain, but the referenced
+local scripts, manifests, outputs, and raw logs are no longer available.
+
 ## Historical Replay Controls
 
 Binary: clean `0f6f4436`, M4 Max, ordinary Metal lease, API validation enabled.

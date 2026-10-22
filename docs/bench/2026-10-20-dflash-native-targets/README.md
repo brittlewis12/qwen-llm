@@ -25,9 +25,10 @@ checks are complete; rollout measurements are pending.
 
 ## Verification evidence
 
-Local logs and retained test binaries are under
-`target/dflash-adapters-2026-10-20/`. All real-model checks use Metal API
-validation and the production GPU lease.
+The October 20 checks below completed with Metal API validation and the
+production GPU lease. Their logs and test binaries were stored under
+`target/dflash-adapters-2026-10-20/`, which was cleared before the October 22
+continuation; those ephemeral raw records are no longer available.
 
 - The CLI library/binary and selected public CLI/info suites passed 1,489 tests,
   with 61 ignored. The first
@@ -65,8 +66,10 @@ validation and the production GPU lease.
 
 ## Rollout measurement
 
-Pending. The prepared runner reuses the same frozen first 14 messages from
-`claude_flash_next_gsq.json` as the earlier native Qwen comparison. It runs native
+Pending. The October 22 continuation reconstructs the first 14 messages from
+`~/code/llm/game/claude_flash_next_gsq.json`, the same saved source and message
+count as the earlier native Qwen comparison; the old frozen wrapper was cleared
+with `target/`, so a fresh input hash is recorded. It runs native
 renderers, temperature 1, seed 42, a 256-token cap, and serial/spec/spec/serial
 fresh-process ordering. Each family first receives a separate 16-token warmup
 per arm, excluded from measurements: switching these large targets can otherwise

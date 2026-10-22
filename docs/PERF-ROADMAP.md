@@ -97,7 +97,9 @@ re-sample before claiming.
   tile (branch name reserved: `perf/v41-select-batch`). Per-row census:
   `selection_prepare` 6,141,
   `sort_init`/`sort_tile` 2,560 each, `chronological` 2,560, `index_heads`
-  2,560 per Q2 PP1024.
+  2,560 per Q2 PP1024. In flight (`perf/v41-select-batch`): batch the index
+  scores per layer, one threadgroup per row for top-k, and batched
+  chronological/prepare.
 - Scalar score kernel tuning: superseded on the released geometry by the
   MMA tile; the 8-lane scalar kernel remains the fallback for other
   geometry. The 4-key/8-lane variants measured +3.0%/+1.2-1.4% on the old

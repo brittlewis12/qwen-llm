@@ -779,7 +779,13 @@ fn mma_sink_tile_dispatch_timing() {
             f.k, f.n, us[6], us[0]
         );
     };
-    for (k, n) in [(640usize, 32usize), (640, 128), (640, 256), (512, 32), (256, 32)] {
+    for (k, n) in [
+        (640usize, 32usize),
+        (640, 128),
+        (640, 256),
+        (512, 32),
+        (256, 32),
+    ] {
         let f = Fixture::new(&ctx, k, n, k == 640, 0);
         // Heat.
         for _ in 0..20 {

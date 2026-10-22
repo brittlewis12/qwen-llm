@@ -4,7 +4,13 @@
 //! KV/keys remain append-only, with each follower bounded by its query's length.
 use super::*;
 
-pub(super) const TILE: usize = 32;
+/// Query rows per sink tile. The sink kernels run one threadgroup per
+/// (head block, row), so the tile width sets the dispatch's occupancy:
+/// 32 rows is ~1.6 threadgroups per M5 Ultra core and 13.7 us per row at
+/// 640 keys, 256 rows 8.0 us per row (fixture `mma_sink_tile_dispatch_timing`).
+/// The score and attended slabs scale with it (42 + 34 MB at 256 rows for
+/// the released geometry).
+pub(super) const TILE: usize = 256;
 
 pub(super) struct Scratch {
     pub(super) history: MetalTensor,
@@ -35,8 +41,12 @@ impl Scratch {
             ])?,
             checked_product(&[tile, c.heads, c.head_dim])?,
         ];
-        for size in ValueMatrix::shapes(c)? {
-            sizes.push(checked_product(&[tile, size])?);
+        // The gathered value matrix serves the non-MMA PV path only; the
+        // released geometry's tiles gather straight from the latent rows.
+        if !mma_geometry(c) {
+            for size in ValueMatrix::shapes(c)? {
+                sizes.push(checked_product(&[tile, size])?);
+            }
         }
         Ok(sizes)
     }
@@ -99,6 +109,10 @@ pub(super) fn rope_rows(
 /// Geometry the simdgroup-MMA sink tile kernels are written for.
 const MMA_DIM: usize = 512;
 const MMA_HEADS: usize = 16;
+
+pub(super) fn mma_geometry(c: &Config) -> bool {
+    c.head_dim == MMA_DIM && c.heads.is_multiple_of(MMA_HEADS)
+}
 
 impl Workspace {
     /// The three steps below in order; production composes them itself so
@@ -277,7 +291,7 @@ impl Workspace {
         // Simdgroup-MMA QK^T and PV for the released geometry (512-wide
         // latent, head count a multiple of 16); other geometries keep the
         // scalar/gathered-GEMM path below.
-        let mma = c.head_dim == MMA_DIM && c.heads.is_multiple_of(MMA_HEADS);
+        let mma = mma_geometry(c);
         // The Metal 4 tensor-ops form of the MMA tile where the tier exists:
         // same slabs, softmax and normalization, matmul2d per key block.
         let tensor = mma && metal::moe_grouped_tensor_selected(ctx);

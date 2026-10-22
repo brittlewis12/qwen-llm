@@ -628,7 +628,7 @@ fn compress_publish(
     position: usize,
     eps: f32,
 ) -> Result<()> {
-    let pso = pipeline(ctx, enc, "compress_publish")?;
+    pipeline(ctx, enc, "compress_publish")?;
     enc.set_bytes(
         0,
         &[

@@ -1794,6 +1794,46 @@ pub(crate) fn q8_0_fewrow_tiling(n_in: usize, n_out: usize) -> (usize, usize) {
     (nt, nsg)
 }
 
+fn validate_q8_0_fewrow_addressing(
+    n_in: usize,
+    n_out: usize,
+    n_cols: usize,
+) -> Result<(), MetalError> {
+    const KERNEL: &str = "mat_mat_q8_0_fewrow";
+    if n_in == 0 || !n_in.is_multiple_of(32) || n_out == 0 || !(1..=8).contains(&n_cols) {
+        return Err(super::checks::bad_shape(
+            KERNEL,
+            format!(
+                "n_in={n_in} (positive multiple of 32), n_out={n_out} (> 0), n_cols={n_cols} (1..=8)"
+            ),
+        ));
+    }
+    // The shader uses signed int tile coordinates and block offsets (ib*17
+    // and ib*16), although row-base pointer arithmetic uses ulong.
+    for (name, value) in [("n_in", n_in), ("n_out", n_out)] {
+        if i32::try_from(value).is_err() {
+            return Err(super::checks::bad_shape(
+                KERNEL,
+                format!("{name}={value} exceeds signed shader addressing"),
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn q8_0_fewrow_capacity_supported(
+    execution_width: usize,
+    max_threads: usize,
+    static_bytes: usize,
+    device_bytes: usize,
+    nsg: usize,
+) -> bool {
+    matches!(nsg, 8 | 16 | 32)
+        && execution_width == 32
+        && max_threads >= 32 * nsg
+        && static_bytes <= device_bytes
+}
+
 /// Few-row Q8_0 mat-mat for 1..=8 activation rows (x = [n_cols, n_in],
 /// y = [n_cols, n_out]), adapted from llama.cpp's few-row MMA kernel
 /// (`kernels/mat_mat_q8_0_fewrow.metal`). Each weight is read once for all
@@ -1809,38 +1849,53 @@ pub fn encode_mat_mat_q8_0_fewrow_f32(
     n_out: usize,
     n_cols: usize,
 ) -> Result<(), MetalError> {
+    use super::checks::{bad_shape, check_disjoint};
+    use super::moe::{checked_moe_product, validate_moe_decode_tensor};
     use objc2_metal::MTLComputePipelineState as _;
-    let bad = |detail: String| MetalError::BadShape {
-        kernel: "mat_mat_q8_0_fewrow",
-        detail,
-    };
-    if weight.dtype != GgmlType::Q8_0 || x.dtype != GgmlType::F32 || y.dtype != GgmlType::F32 {
-        return Err(bad(format!(
-            "dtypes weight/x/y = {:?}/{:?}/{:?}, expected Q8_0/F32/F32",
-            weight.dtype, x.dtype, y.dtype
-        )));
+    const KERNEL: &str = "mat_mat_q8_0_fewrow";
+    validate_q8_0_fewrow_addressing(n_in, n_out, n_cols)?;
+    // Preserve flattened views; the shader only needs contiguous physical
+    // extents. Its typed loads require ushort/float2/float alignment.
+    for (name, tensor, dims, dtype, writable, alignment) in [
+        ("weight", weight, [n_in, n_out], GgmlType::Q8_0, false, 2),
+        ("input", x, [n_in, n_cols], GgmlType::F32, false, 8),
+        ("output", y, [n_out, n_cols], GgmlType::F32, true, 4),
+    ] {
+        let count = checked_moe_product(KERNEL, name, &dims)?;
+        validate_moe_decode_tensor(KERNEL, name, tensor, count, &[dtype], writable, alignment)?;
     }
-    if n_in == 0 || !n_in.is_multiple_of(32) || n_out == 0 || !(1..=8).contains(&n_cols) {
-        return Err(bad(format!(
-            "n_in={n_in} (multiple of 32), n_out={n_out} (> 0), n_cols={n_cols} (1..=8)"
-        )));
-    }
-    if weight.n_elements() as usize != n_in * n_out
-        || x.n_elements() as usize != n_cols * n_in
-        || y.n_elements() as usize != n_cols * n_out
+    check_disjoint(KERNEL, y, &[(weight, "weight"), (x, "input")])?;
+    let device = ctx.device.registryID();
+    if enc.parent_command_buffer().device().registryID() != device
+        || [weight, x, y]
+            .into_iter()
+            .any(|tensor| tensor.buffer.device().registryID() != device)
     {
-        return Err(bad(format!(
-            "elements weight/x/y = {}/{}/{} for n_in={n_in} n_out={n_out} n_cols={n_cols}",
-            weight.n_elements(),
-            x.n_elements(),
-            y.n_elements()
-        )));
+        return Err(bad_shape(
+            KERNEL,
+            "encoder and bindings must belong to the context device",
+        ));
     }
     let (nt, mut nsg) = q8_0_fewrow_tiling(n_in, n_out);
     let mut pso = ctx.pipeline(&format!("kernel_mat_mat_q8_0_fewrow_nt{nt}_nsg{nsg}_f32"))?;
     while nsg > 8 && pso.maxTotalThreadsPerThreadgroup() < 32 * nsg {
         nsg /= 2;
         pso = ctx.pipeline(&format!("kernel_mat_mat_q8_0_fewrow_nt{nt}_nsg{nsg}_f32"))?;
+    }
+    if !q8_0_fewrow_capacity_supported(
+        pso.threadExecutionWidth(),
+        pso.maxTotalThreadsPerThreadgroup(),
+        pso.staticThreadgroupMemoryLength(),
+        ctx.device.maxThreadgroupMemoryLength(),
+        nsg,
+    ) {
+        return Err(bad_shape(
+            KERNEL,
+            format!(
+                "few-row pipeline needs SIMD32, {} threads and sufficient static threadgroup memory",
+                32 * nsg
+            ),
+        ));
     }
     enc.set_pipeline(&pso);
 
@@ -3454,6 +3509,66 @@ mod tests {
         assert_eq!(q8_0_fewrow_tiling(5120, 248320), (4, 8));
         assert_eq!(q8_0_fewrow_tiling(512, 9), (1, 16));
         assert_eq!(q8_0_fewrow_tiling(64, 9), (1, 8));
+    }
+
+    #[test]
+    fn q8_0_fewrow_addressing_preserves_odd_rows_and_tails() {
+        for n_in in [32, 64, 96, 256, 4096] {
+            for n_out in [1, 7, 17, 4096] {
+                for rows in 1..=8 {
+                    validate_q8_0_fewrow_addressing(n_in, n_out, rows).unwrap();
+                }
+            }
+        }
+        let signed_limit = i32::MAX as usize;
+        validate_q8_0_fewrow_addressing(signed_limit / 32 * 32, signed_limit, 8).unwrap();
+        for (n_in, n_out, rows) in [
+            (0, 7, 3),
+            (31, 7, 3),
+            (33, 7, 3),
+            (96, 0, 3),
+            (96, 17, 0),
+            (96, 17, 9),
+            (signed_limit + 1, 7, 3),
+            (96, signed_limit + 1, 3),
+            (usize::MAX, 7, 3),
+            (96, usize::MAX, 3),
+            (96, 17, usize::MAX),
+        ] {
+            assert!(
+                validate_q8_0_fewrow_addressing(n_in, n_out, rows).is_err(),
+                "accepted {n_in}/{n_out}/{rows}"
+            );
+        }
+    }
+
+    #[test]
+    fn q8_0_fewrow_capacity_checks_final_pipeline() {
+        for nsg in [8, 16, 32] {
+            let threads = 32 * nsg;
+            assert!(q8_0_fewrow_capacity_supported(
+                32, threads, 16384, 16384, nsg
+            ));
+            assert!(!q8_0_fewrow_capacity_supported(
+                16, threads, 16384, 16384, nsg
+            ));
+            assert!(!q8_0_fewrow_capacity_supported(
+                32,
+                threads - 1,
+                16384,
+                16384,
+                nsg
+            ));
+            assert!(!q8_0_fewrow_capacity_supported(
+                32, threads, 16385, 16384, nsg
+            ));
+        }
+        // Even the smallest fallback must fit; a larger reported budget is OK.
+        assert!(!q8_0_fewrow_capacity_supported(32, 128, 2048, 32768, 8));
+        assert!(q8_0_fewrow_capacity_supported(32, 1024, 2048, 32768, 8));
+        for nsg in [0, 4, 64, usize::MAX] {
+            assert!(!q8_0_fewrow_capacity_supported(32, 1024, 0, 32768, nsg));
+        }
     }
 
     /// Largest |got - expected| after checking lengths and that every output

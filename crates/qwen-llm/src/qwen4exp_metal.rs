@@ -24,6 +24,9 @@ pub(crate) mod frontier_hc;
 mod packet_hc_tests;
 
 #[cfg(test)]
+pub(crate) mod strict_inject_probe;
+
+#[cfg(test)]
 pub(crate) mod packet_hc {
     use super::*;
 
@@ -652,6 +655,18 @@ impl GatedResidualPackedRead<'_, '_, '_> {
         )?;
         #[cfg(not(test))]
         let overridden = false;
+        #[cfg(test)]
+        let overridden = overridden
+            || strict_inject_probe::encode(
+                self.ctx,
+                enc,
+                self.inject,
+                &self.normalized,
+                &injection,
+                hyper_hidden,
+                self.scratch.branch_count,
+                self.tokens,
+            )?;
         if !overridden {
             encode_mat_mat_dispatch_without_fewrow(
                 self.ctx,

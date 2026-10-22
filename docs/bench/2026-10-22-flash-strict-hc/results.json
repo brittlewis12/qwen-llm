@@ -1,0 +1,417 @@
+{
+  "schema": "qwen-llm.flash-strict-hc-screen.v1",
+  "base_commit": "1c8b37357ecbb23699d62e22b33bd43ca88b01c6",
+  "candidate_dirty": true,
+  "device": "M4 Max",
+  "memory_gib": 128,
+  "validation": true,
+  "production_lease": true,
+  "host_profile": "debug test driver; Metal shader optimized by normal build",
+  "verdict": "not promoted; no repeatable ordinary prefill gain",
+  "kernel_medians": [
+    {
+      "rows": 128,
+      "baseline_gpu_us": 662.203,
+      "candidate_gpu_us": 631.823
+    },
+    {
+      "rows": 512,
+      "baseline_gpu_us": 718.812,
+      "candidate_gpu_us": 685.75
+    },
+    {
+      "rows": 2048,
+      "baseline_gpu_us": 864.219,
+      "candidate_gpu_us": 806.948
+    }
+  ],
+  "screens": [
+    {
+      "name": "packed-hyper-screen",
+      "records": [
+        {
+          "rows": 128,
+          "index": 0,
+          "strict": false,
+          "measured": false,
+          "wall_ms": 2766.538792,
+          "gpu_ms": 500.5264999344945,
+          "exact": true
+        },
+        {
+          "rows": 128,
+          "index": 1,
+          "strict": true,
+          "measured": false,
+          "wall_ms": 520.511625,
+          "gpu_ms": 504.47745830751956,
+          "exact": true
+        },
+        {
+          "rows": 128,
+          "index": 2,
+          "strict": false,
+          "measured": true,
+          "wall_ms": 519.1764169999999,
+          "gpu_ms": 503.3572500105947,
+          "exact": true
+        },
+        {
+          "rows": 128,
+          "index": 3,
+          "strict": true,
+          "measured": true,
+          "wall_ms": 523.467208,
+          "gpu_ms": 507.36924982629716,
+          "exact": true
+        },
+        {
+          "rows": 128,
+          "index": 4,
+          "strict": true,
+          "measured": true,
+          "wall_ms": 521.070708,
+          "gpu_ms": 505.35537488758564,
+          "exact": true
+        },
+        {
+          "rows": 128,
+          "index": 5,
+          "strict": false,
+          "measured": true,
+          "wall_ms": 510.7015,
+          "gpu_ms": 493.6912083067,
+          "exact": true
+        },
+        {
+          "rows": 512,
+          "index": 0,
+          "strict": false,
+          "measured": false,
+          "wall_ms": 1079.488375,
+          "gpu_ms": 1004.9992082640529,
+          "exact": true
+        },
+        {
+          "rows": 512,
+          "index": 1,
+          "strict": true,
+          "measured": false,
+          "wall_ms": 1026.195167,
+          "gpu_ms": 1008.2572498358786,
+          "exact": true
+        },
+        {
+          "rows": 512,
+          "index": 2,
+          "strict": false,
+          "measured": true,
+          "wall_ms": 1021.288958,
+          "gpu_ms": 1003.6157499998808,
+          "exact": true
+        },
+        {
+          "rows": 512,
+          "index": 3,
+          "strict": true,
+          "measured": true,
+          "wall_ms": 1026.966375,
+          "gpu_ms": 1009.332041721791,
+          "exact": true
+        },
+        {
+          "rows": 512,
+          "index": 4,
+          "strict": true,
+          "measured": true,
+          "wall_ms": 1030.385833,
+          "gpu_ms": 1012.8182915505022,
+          "exact": true
+        },
+        {
+          "rows": 512,
+          "index": 5,
+          "strict": false,
+          "measured": true,
+          "wall_ms": 1022.867333,
+          "gpu_ms": 1004.2837499640882,
+          "exact": true
+        },
+        {
+          "rows": 2048,
+          "index": 0,
+          "strict": false,
+          "measured": false,
+          "wall_ms": 3548.0754169999996,
+          "gpu_ms": 3510.1246249396354,
+          "exact": true
+        },
+        {
+          "rows": 2048,
+          "index": 1,
+          "strict": true,
+          "measured": false,
+          "wall_ms": 3753.764375,
+          "gpu_ms": 3729.397708317265,
+          "exact": true
+        },
+        {
+          "rows": 2048,
+          "index": 2,
+          "strict": false,
+          "measured": true,
+          "wall_ms": 3758.813583,
+          "gpu_ms": 3730.6886250153184,
+          "exact": true
+        },
+        {
+          "rows": 2048,
+          "index": 3,
+          "strict": true,
+          "measured": true,
+          "wall_ms": 3771.981292,
+          "gpu_ms": 3747.567833168432,
+          "exact": true
+        },
+        {
+          "rows": 2048,
+          "index": 4,
+          "strict": true,
+          "measured": true,
+          "wall_ms": 3750.68825,
+          "gpu_ms": 3725.7728748954833,
+          "exact": true
+        },
+        {
+          "rows": 2048,
+          "index": 5,
+          "strict": false,
+          "measured": true,
+          "wall_ms": 3737.6826250000004,
+          "gpu_ms": 3713.112416677177,
+          "exact": true
+        }
+      ],
+      "means": [
+        {
+          "rows": 128,
+          "baseline_gpu_ms": 498.52422915864736,
+          "candidate_gpu_ms": 506.3623123569414,
+          "candidate_time_change_pct": 1.5722572223866083
+        },
+        {
+          "rows": 512,
+          "baseline_gpu_ms": 1003.9497499819845,
+          "candidate_gpu_ms": 1011.0751666361466,
+          "candidate_time_change_pct": 0.7097383762773024
+        },
+        {
+          "rows": 2048,
+          "baseline_gpu_ms": 3721.9005208462477,
+          "candidate_gpu_ms": 3736.6703540319577,
+          "candidate_time_change_pct": 0.39683578599118974
+        }
+      ]
+    },
+    {
+      "name": "live-state-closure",
+      "records": [
+        {
+          "rows": 128,
+          "index": 0,
+          "strict": false,
+          "measured": false,
+          "wall_ms": 3828.359458,
+          "gpu_ms": 503.58125008642673,
+          "exact": true
+        },
+        {
+          "rows": 128,
+          "index": 1,
+          "strict": true,
+          "measured": false,
+          "wall_ms": 522.000375,
+          "gpu_ms": 506.1985000502318,
+          "exact": true
+        },
+        {
+          "rows": 128,
+          "index": 2,
+          "strict": false,
+          "measured": true,
+          "wall_ms": 516.450958,
+          "gpu_ms": 500.80675003118813,
+          "exact": true
+        },
+        {
+          "rows": 128,
+          "index": 3,
+          "strict": true,
+          "measured": true,
+          "wall_ms": 523.390625,
+          "gpu_ms": 507.7064165379852,
+          "exact": true
+        },
+        {
+          "rows": 128,
+          "index": 4,
+          "strict": true,
+          "measured": true,
+          "wall_ms": 521.106041,
+          "gpu_ms": 505.17741683870554,
+          "exact": true
+        },
+        {
+          "rows": 128,
+          "index": 5,
+          "strict": false,
+          "measured": true,
+          "wall_ms": 520.058625,
+          "gpu_ms": 504.23016655258834,
+          "exact": true
+        },
+        {
+          "rows": 512,
+          "index": 0,
+          "strict": false,
+          "measured": false,
+          "wall_ms": 1030.514417,
+          "gpu_ms": 1008.7740416638553,
+          "exact": true
+        },
+        {
+          "rows": 512,
+          "index": 1,
+          "strict": true,
+          "measured": false,
+          "wall_ms": 1027.78525,
+          "gpu_ms": 1009.5937501173466,
+          "exact": true
+        },
+        {
+          "rows": 512,
+          "index": 2,
+          "strict": false,
+          "measured": true,
+          "wall_ms": 1024.785458,
+          "gpu_ms": 1007.4901250191033,
+          "exact": true
+        },
+        {
+          "rows": 512,
+          "index": 3,
+          "strict": true,
+          "measured": true,
+          "wall_ms": 1025.628666,
+          "gpu_ms": 1008.2852083723992,
+          "exact": true
+        },
+        {
+          "rows": 512,
+          "index": 4,
+          "strict": true,
+          "measured": true,
+          "wall_ms": 1025.703375,
+          "gpu_ms": 1007.8154583461583,
+          "exact": true
+        },
+        {
+          "rows": 512,
+          "index": 5,
+          "strict": false,
+          "measured": true,
+          "wall_ms": 1022.843167,
+          "gpu_ms": 1005.3964583203197,
+          "exact": true
+        },
+        {
+          "rows": 2048,
+          "index": 0,
+          "strict": false,
+          "measured": false,
+          "wall_ms": 3434.359958,
+          "gpu_ms": 3397.142000030726,
+          "exact": true
+        },
+        {
+          "rows": 2048,
+          "index": 1,
+          "strict": true,
+          "measured": false,
+          "wall_ms": 3510.748584,
+          "gpu_ms": 3486.14687519148,
+          "exact": true
+        },
+        {
+          "rows": 2048,
+          "index": 2,
+          "strict": false,
+          "measured": true,
+          "wall_ms": 3729.222041,
+          "gpu_ms": 3702.8008750639856,
+          "exact": true
+        },
+        {
+          "rows": 2048,
+          "index": 3,
+          "strict": true,
+          "measured": true,
+          "wall_ms": 3715.1641670000004,
+          "gpu_ms": 3690.958166727796,
+          "exact": true
+        },
+        {
+          "rows": 2048,
+          "index": 4,
+          "strict": true,
+          "measured": true,
+          "wall_ms": 3739.20725,
+          "gpu_ms": 3714.8990416899323,
+          "exact": true
+        },
+        {
+          "rows": 2048,
+          "index": 5,
+          "strict": false,
+          "measured": true,
+          "wall_ms": 3730.279083,
+          "gpu_ms": 3706.0951250605285,
+          "exact": true
+        }
+      ],
+      "means": [
+        {
+          "rows": 128,
+          "baseline_gpu_ms": 502.51845829188824,
+          "candidate_gpu_ms": 506.4419166883454,
+          "candidate_time_change_pct": 0.7807590610289905
+        },
+        {
+          "rows": 512,
+          "baseline_gpu_ms": 1006.4432916697115,
+          "candidate_gpu_ms": 1008.0503333592787,
+          "candidate_time_change_pct": 0.15967533420597757
+        },
+        {
+          "rows": 2048,
+          "baseline_gpu_ms": 3704.448000062257,
+          "candidate_gpu_ms": 3702.9286042088643,
+          "candidate_time_change_pct": -0.04101544557697512
+        }
+      ]
+    }
+  ],
+  "native_witness": {
+    "prompt_sha256": "874537119c68f6c566c4288ba17c1099694416edb001c4003249570894438e97",
+    "matched": "prefill logits, final packed hyper row, active persistent state before and after four scalar continuation tokens, four continuation logits",
+    "dispatches": 96,
+    "widths": [
+      128,
+      512,
+      2048
+    ]
+  },
+  "discarded_run": {
+    "reason": "initial witness observed stale singleton scratch after packed prefill; no measured ABBA completed; fixed observer, not a kernel change"
+  }
+}

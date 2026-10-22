@@ -114,6 +114,10 @@ re-sample before claiming.
 
 ### Qwen3.8 Flash-Next
 
+- Ordinary packed HC injection, strict four-output projection: negative
+  (2026-10-22, M4). Bitwise kernel and native-state witnesses pass; isolated
+  projection time -5 to -7% does not improve full prefill at 128/512/2048.
+  Production unchanged; `bench/2026-10-22-flash-strict-hc/README.md`.
 - Native DFlash2 sampled gameplay: negative (2026-10-22, M4, API validation
   enabled). Decode 30.51 -> 8.81 tok/s; request latency +58.3%. Acceptance
   21.4%; native verification/replay dominate, not drafter compute. Keep opt-in.

@@ -6,6 +6,21 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the current state and evidence index.
 
+## 2026-10-22 - Flash Strict HC Projection: Kernel Gain Does Not Survive Native Prefill
+
+- Test-only K=10,240 -> four F32 gates, four accumulators per query lane,
+  ascending-K safe math and no barriers. Thirty-six bitwise/offset/input cases
+  and checked binding/refusal tests pass. Real-model prefill logits, packed
+  hyper row, active state and four scalar-token continuation states match at
+  128/512/2048; dispatch witness confirms 96 replacements per command.
+- M4 Max, API validation, production lease: synthetic medians improve 4.6%,
+  4.6%, 6.6%. Native ABBA GPU means instead change +1.57%, +0.71%, +0.40%;
+  live-state closure gives +0.78%, +0.16%, -0.04%. No consistent native gain.
+  Debug-host GPU screening, not a precise release-request regression estimate.
+- Keep production unchanged and the bounded research witness. This closes the
+  strict four-output synchronization bet, not all HC or other architectures.
+  [Protocol and samples](bench/2026-10-22-flash-strict-hc/README.md).
+
 ## 2026-10-22 - GLM Ordinary Requests: Adaptive Workspace Cuts Prefill Time 20%
 
 - Close a deployment gap: ordinary `qwen run` and family benchmarks capped

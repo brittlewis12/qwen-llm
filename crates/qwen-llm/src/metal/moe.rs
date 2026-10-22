@@ -3,6 +3,9 @@
 use super::*;
 
 #[cfg(test)]
+pub(crate) mod hc4_strict;
+
+#[cfg(test)]
 fn diagnostic_max_abs(a: &[f32], b: &[f32]) -> f32 {
     crate::compare::report_max_abs_diff_f32(a.iter(), b.iter())
 }

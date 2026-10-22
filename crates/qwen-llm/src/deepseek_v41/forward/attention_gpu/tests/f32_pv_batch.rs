@@ -35,7 +35,7 @@ struct Fixture {
 
 impl Fixture {
     fn new(ctx: &MetalContext, k: usize, n: usize, ragged: bool, first: usize) -> Self {
-        assert!([256, 512, 640].contains(&k) && [1, 8, 32, 128, 256].contains(&n));
+        assert!([256, 512, 640].contains(&k) && [1, 8, 32, 128, 256, 512].contains(&n));
         let topk = TOPK;
         // K256 cannot have count<256 on the current matrix branch. It still has
         // distinct selection per query; larger K also has ragged visibility.
@@ -783,6 +783,7 @@ fn mma_sink_tile_dispatch_timing() {
         (640usize, 32usize),
         (640, 128),
         (640, 256),
+        (640, 512),
         (512, 32),
         (256, 32),
     ] {

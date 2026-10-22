@@ -45,8 +45,10 @@ prefill and the tiles about a fifth; re-sample before claiming.
 - IQ2_XXS/IQ2_XS expert layers off the native-rows path: landed twice, as
   F32-operand grouped tiles (`b3b71bb3`, the NativeF32 witness path) and as
   half generic layouts (attention entry; production takes the half route
-  like every other routed layer). Not ABBA'd against each other; the
-  per-layer FFN time is 60-63 ms either way.
+  like every other routed layer). One ABBA on the MMA path: Q2 tie
+  (378.6 vs 378.45), IQ3 half +1.0% (380.25 vs 376.55); half stays
+  production and the F32x tiles stay the NativeF32 witness.
+  (bench/2026-10-21-v41-prefill-mma-final.md).
 - MXFP4 generic half layout: landed with the IQ2 layouts (needed for layers
   whose down is MXFP4); +1.6% on its own. Widens DFlash/GLM grouped
   eligibility on MXFP4 artifacts (unmeasured there).
@@ -58,13 +60,15 @@ prefill and the tiles about a fifth; re-sample before claiming.
   4096-row chunks untested.
 - Owner/producer per-row loops (compressor, index key, selection; 8 layers,
   grows with prompt length): compressor prep landed (`a7de76ab`): key norm +
-  key/latent RoPE + both cache copies fused 5 -> 1, +0.5-0.8%, census
-  50,710 -> 40,470. Selection batching is open: `selection_prepare` 6,141,
+  key/latent RoPE + both cache copies fused 5 -> 1, +0.5-1.0% on top of the
+  MMA series, census 50,710 -> 39,563 with the MMA tile. Selection batching
+  is open: `selection_prepare` 6,141,
   `sort_init`/`sort_tile` 2,560 each, `chronological` 2,560, `index_heads`
   2,560 per Q2 PP1024.
-- Scalar score kernel tuning: landed (`b992694a`). 4 keys/simdgroup +3.0%,
-  8-lane +1.2-1.4% on the merged base; 8 heads/threadgroup and fatter key
-  loops were negative. The MMA tile still supersedes this if it wins.
+- Scalar score kernel tuning: superseded on the released geometry by the
+  MMA tile; the 8-lane scalar kernel remains the fallback for other
+  geometry. The 4-key/8-lane variants measured +3.0%/+1.2-1.4% on the old
+  scalar path; 8 heads/threadgroup and fatter key loops were negative.
 - Decode: fused attention core, routed gate/up fusion, rope/copy fusion are
   each <= 1 ms/token: open, low priority. Fused decode expert chain: +1%/+0%
   (negative, packet 2026-10-20). Q8_0 attention projections (5.1 GB/token)
@@ -73,6 +77,7 @@ prefill and the tiles about a fifth; re-sample before claiming.
 - Six-span prefill profiler (`QWEN_V41_PREFILL_STAGES=1`, per-layer HC /
   prepare / serial / tiles / finish / FFN): landed; use it before claiming
   a prefill bet.
+- Final reconciliation: `bench/2026-10-21-v41-prefill-mma-final.md`.
 
 ### Qwen3.8 Flash-Next
 

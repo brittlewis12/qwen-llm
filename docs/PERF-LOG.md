@@ -6,6 +6,24 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the current state and evidence index.
 
+## 2026-10-21 - V4.1 Prefill Final: 381 tok/s And The IQ2 Duplicate Decision
+
+- The rebased final branch combines the MMA sink tile and half layouts with
+  this lane's compressor prep and census. Against the other lane's
+  uncombined series, same-binary ABBA: Q2 PP1024/2048/4096 373.3 -> 375.3
+  (+0.54%), 377.9 -> 380.5 (+0.70%), 353.6 -> 356.4 (+0.81%); IQ3 373.7 ->
+  377.5 (+1.02%), 377.7 -> 381.0 (+0.89%), 354.0 -> 356.6 (+0.72%). The
+  gain is the compressor prep; the MMA tile supplies the rest.
+- IQ2 duplicate decided on the MMA path, PP2048: Q2 half 378.6 vs F32x
+  378.45 (tie), IQ3 half 380.25 vs F32x 376.55 (half +1.0%). Half layouts
+  stay production; the F32-operand grouped tiles stay the NativeF32
+  witness. Final NLL 2.14987 (+0.136%), top-1 219/384; census 39,563.
+- Main landed the same series as `1fe2da7e`..`bbe2e655` and keeps the
+  8-lane scalar fallback for non-released geometry; the measured branch
+  used the original eight-key fallback. Production geometry takes the MMA
+  tile either way.
+- [Final ABBA, duplicate decision, witness and limits](bench/2026-10-21-v41-prefill-mma-final.md).
+
 ## 2026-10-21 - V4.1 Prefill +12%: MMA Attention Sink Tile (And Half Layouts For MXFP4/IQ2)
 
 - Per-layer prefill spans (six per layer, landed with this) put the sink tile

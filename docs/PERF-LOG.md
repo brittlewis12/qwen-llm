@@ -6,6 +6,26 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the current state and evidence index.
 
+## 2026-10-22 - V4.1: Half Activation Copies For The Tensor Tiles, +5% Prefill
+
+- Both tensor tile forms re-read and half-cast their F32 activation
+  block once per 64-column weight tile (4.5x the weight bytes). The
+  `_f16act` kernels read half activations; the host converts each
+  distinct prefill input once into a per-row-set F16 scratch and every
+  tensor-routed consumer reads the copy (attention input and rank,
+  grouped output_a input, output_b input, FFN normalized input, shared
+  and routed down inputs). Output bitwise identical to the F32-input
+  tiles.
+- Per dispatch: dense Q8_0 projections 1.16-1.41x (75-79 TFLOPS), routed
+  tiles 1.09-1.24x (IQ3_XXS gate+up 13.1 -> 10.7 ms). ABBA against the
+  dense landing `545318d3`: IQ3 pp2048 540.0 -> 567.7 (+5.1%), pp4096
+  491.3 -> 513.1 (+4.4%); Q2 pp2048 544.9 -> 571.9 (+5.0%), pp4096
+  494.8 -> 517.1 (+4.5%); decode unchanged. From this morning's main:
+  pp2048 383 -> 572 (+49%). Cumulative from `4b1fca04`: 192 -> 572.
+- The routed tiles' remainder is their K/I-quant decoders (47-57 TFLOPS
+  vs 75-79 for Q8_0 at the same geometry).
+- [Packet](bench/2026-10-22-v41-tensor-half-activations.md).
+
 ## 2026-10-22 - V4.1: Dense Projections On The Tensor Tile, +14% Prefill
 
 - The six-span re-sample after the expert tile put the dense Q8_0

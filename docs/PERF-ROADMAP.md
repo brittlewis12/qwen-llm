@@ -26,7 +26,7 @@ expected effect, status. Status is one of `open`, `in flight (branch)`,
 `in flight` with your branch; a second lane finding it claimed reads the branch
 before building anything adjacent. This replaces relaying between sessions.
 
-### DeepSeek V4.1-Flash (main after the tensor dense projections: pp2048 Q2 545 / IQ3 542 tok/s, pp4096 Q2 496 / IQ3 493; decode tg32 43 / 41, tg32@d2048 41.6)
+### DeepSeek V4.1-Flash (main after the half activation copies: pp2048 Q2 572 / IQ3 568 tok/s, pp4096 Q2 517 / IQ3 513; decode tg32 43 / 41, tg32@d2048 41.6)
 
 Decode budget at depth 2048, 22.3 ms/token: ~10.2 ms bytes (11.1 GiB at the
 ~1.09 TB/s the GEMV probe reaches), ~8 ms dispatch floor (~1,600 dispatches),
@@ -68,14 +68,16 @@ re-sample before claiming.
   tile is dequant + staging + the F32 activation path (each tile re-reads
   and half-casts its 32 x K activation block per 64-row weight tile, 4.5x
   the weight bytes). Half activations converted once per input
-  (`_f16act` kernels, probe branch `perf/v41-tensor-f16act`, bitwise
-  identical output): routed tiles +9-24% per dispatch (IQ3_XXS gate+up
-  13.1 -> 10.7 ms, down 6.7 -> 5.9), dense tiles +14-41% (q_a 494 -> 350
-  us, output_b 2.97 -> 2.24 ms); ~+4-5% prefill once the one-time
-  conversions have scratch in the attention/FFN encoders: in flight
-  (`perf/v41-tensor-f16act`). Native MXFP4 right operands
-  (`metal_fp4_e2m1_format` + `ue8m0` block-32 scales, 27.0 entry points)
-  would drop the dequant for the 30 MXFP4 down layers: open.
+  (`_f16act` kernels + `prefill::HalfScratch`, bitwise identical output):
+  landed (2026-10-22 half-activation entry,
+  bench/2026-10-22-v41-tensor-half-activations.md): routed tiles
+  +9-24% per dispatch, dense tiles +16-41%, pp2048 +5.0-5.1% / pp4096
+  +4.4-4.5%. The routed tiles' remainder is their K/I-quant decoders
+  (47-57 TFLOPS vs 75-79 for Q8_0 at the same geometry). Native MXFP4
+  right operands (`metal_fp4_e2m1_format` + `ue8m0` block-32 scales,
+  27.0 entry points) would drop the dequant for the 30 MXFP4 down
+  layers: open. Cheaper IQ3_XXS/Q3_K decoders (table-driven half output
+  straight to the slab): open.
 - Dense prefill projections on the tensor tile (q_a/q_b/kv, output_a/b,
   shared expert; the Q8_0 `mat_mat` path at 24-29 TFLOPS): landed
   (2026-10-22 dense entry, bench/2026-10-22-v41-tensor-dense-projections.md).

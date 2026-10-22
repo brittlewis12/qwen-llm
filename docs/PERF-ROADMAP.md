@@ -26,7 +26,7 @@ expected effect, status. Status is one of `open`, `in flight (branch)`,
 `in flight` with your branch; a second lane finding it claimed reads the branch
 before building anything adjacent. This replaces relaying between sessions.
 
-### DeepSeek V4.1-Flash (`main e78f1d60`, code `c4125c6b`: pp2048 Q2 339 / IQ3 337 tok/s, pp4096 Q2 319 / IQ3 316; decode unchanged at tg32 40.8, tg32@d2048 41.6)
+### DeepSeek V4.1-Flash (`main` code `a7de76ab`: pp2048 Q2 341 / IQ3 339 tok/s, pp4096 Q2 320 / IQ3 319; decode unchanged at tg32 40.8, tg32@d2048 41.6)
 
 Decode budget at depth 2048, 22.3 ms/token: ~10.2 ms bytes (11.1 GiB at the
 ~1.09 TB/s the GEMV probe reaches), ~8 ms dispatch floor (~1,600 dispatches),
@@ -52,10 +52,11 @@ Decode budget at depth 2048, 22.3 ms/token: ~10.2 ms bytes (11.1 GiB at the
   but -1.3%/-1.6% at pp1024 (negative, packet 2026-10-21); 4096-row chunks
   untested.
 - Owner/producer per-row loops (compressor, index key, selection; 8 layers,
-  grows with prompt length): in flight (`perf/v41-compressor-prep`). Census:
-  `attention_copy` 8,192, `selection_prepare` 6,141, `attention_rope` 5,120,
-  `rope_rows` 4,038 per Q2 PP1024. First bet: fuse per-group norm+RoPE+copies;
-  selection batching follows.
+  grows with prompt length): compressor prep landed (`a7de76ab`): key norm +
+  key/latent RoPE + both cache copies fused 5 -> 1, +0.5-0.8%, census
+  50,710 -> 40,470. Selection batching is open: `selection_prepare` 6,141,
+  `sort_init`/`sort_tile` 2,560 each, `chronological` 2,560, `index_heads`
+  2,560 per Q2 PP1024.
 - Scalar score kernel tuning: landed (`b992694a`). 4 keys/simdgroup +3.0%,
   8-lane +1.2-1.4% on the merged base; 8 heads/threadgroup and fatter key
   loops were negative. The MMA tile still supersedes this if it wins.

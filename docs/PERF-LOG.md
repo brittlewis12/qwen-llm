@@ -6,6 +6,22 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the current state and evidence index.
 
+## 2026-10-21 - V4.1: Compressor Prep Fusion +0.5-0.8%
+
+- The owner/producer group end ran key RMS norm, key RoPE, latent RoPE and
+  both cache copies as five dispatches. One 256-thread kernel now does all
+  five; the latent norm and key projection stay separate because the
+  projection consumes the normalized latent.
+- Same-binary ABBA (fused versus a split control, M5 Ultra, runs 2):
+  Q2 PP1024/2048/4096 341.9 -> 343.5 (+0.47%), 338.8 -> 341.5 (+0.80%),
+  318.2 -> 320.4 (+0.69%); IQ3 343.1 -> 344.8 (+0.50%), 337.4 -> 339.1
+  (+0.49%), 316.8 -> 318.6 (+0.58%).
+- Census 50,710 -> 40,470 dispatches (-20.2%). Six-document IQ3 witness:
+  all NLL and top-1 values identical to the landed candidate.
+- Remaining owner/producer work is the per-row selection loop
+  (`selection_prepare` 6,141 dispatches at PP1024); batch it next.
+- [ABBA, census, witness and limits](bench/2026-10-21-v41-prefill-compressor-prep.md).
+
 ## 2026-10-21 - V4.1: Grouped IQ2 Experts And 8-Lane Score +60% Q2 / +25% IQ3 Prefill
 
 - Merged the lane onto main `24ec157e` and rebased the surviving work on the

@@ -38,6 +38,11 @@ shared expert ~7, router/bucket/weight/sum), attention tiles
 (98 ms x 8 layers), output projections 12.5%, prepare 8.6%, HC 2.6%. The
 dense projections then dropped from ~24 to ~11 ms/layer (dense entry);
 re-sample before claiming.
+- Post-dense attribution: the 33/25/18/12.5/8.6/2.6 split predates tensor
+  dense; dense removed ~13 ms/layer from its projection set. Re-sample
+  `QWEN_V41_PREFILL_STAGES=1` and `QWEN_V41_CENSUS=1` at pp2048/4096 on both
+  artifacts; unchanged attention/serial shares estimate ~29%/~21%, not
+  measured: open.
 
 - Attention tiles via simdgroup MMA (half-staged Q/K/V, F32 sums),
   replacing the scalar score kernel and the gather+GEMM PV for the released
@@ -55,51 +60,59 @@ re-sample before claiming.
 - MXFP4 generic half layout: landed with the IQ2 layouts (needed for layers
   whose down is MXFP4); +1.6% on its own. Widens DFlash/GLM grouped
   eligibility on MXFP4 artifacts (unmeasured there).
-- Simdgroup-MMA expert tile efficiency: bounded (2026-10-21 tile-ceiling
-  entry): 20-22 TFLOPS against a ~30 TFLOPS ceiling; staging layout and
-  32-slot gate/up tiles are not levers. Superseded on M5 by the tensor tile.
+- Simdgroup-MMA expert tile efficiency: negative (packet 2026-10-21):
+  20-22 TFLOPS against a ~30 TFLOPS ceiling; staging layout and 32-slot
+  gate/up tiles were not levers. Superseded on M5 by the tensor tile.
 - Metal 4 tensor-ops expert tile: landed (2026-10-22 entry,
   bench/2026-10-22-v41-tensor-expert-tile.md). matmul2d on threadgroup
   half operands reaches ~130 TFLOPS (4.3x simdgroup MMA); the tile runs
-  the expert GEMMs at 37-46 TFLOPS, 1.86-2.19x per dispatch, pp2048 +24%
-  / pp4096 +22% on both artifacts. M5-class only; `QWEN_EXPERT_TENSOR_TILE=0`
-  keeps the generic tile. Negative there: double-buffered slabs, 64-k
-  steps (the tile wants small resident threadgroups). What remains in the
-  tile is dequant + staging + the F32 activation path (each tile re-reads
-  and half-casts its 32 x K activation block per 64-row weight tile, 4.5x
-  the weight bytes). Half activations converted once per input
-  (`_f16act` kernels, probe branch `perf/v41-tensor-f16act`, bitwise
-  identical output): routed tiles +9-24% per dispatch (IQ3_XXS gate+up
-  13.1 -> 10.7 ms, down 6.7 -> 5.9), dense tiles +14-41% (q_a 494 -> 350
-  us, output_b 2.97 -> 2.24 ms); ~+4-5% prefill once the one-time
-  conversions have scratch in the attention/FFN encoders: in flight
-  (`perf/v41-tensor-f16act`). Native MXFP4 right operands
-  (`metal_fp4_e2m1_format` + `ue8m0` block-32 scales, 27.0 entry points)
-  would drop the dequant for the 30 MXFP4 down layers: open.
+  the expert GEMMs at 37-46 TFLOPS, 1.86-2.19x per dispatch, pp2048
+  +24.1-24.9% / pp4096 +21.9-23.1% on both artifacts. M5-class only;
+  `QWEN_EXPERT_TENSOR_TILE=0` keeps the generic tile. Negative there:
+  double-buffered slabs, 64-k steps (the tile wants small resident
+  threadgroups). What remains is dequant + staging + the F32 activation
+  path.
+- Half activation copies (`_f16act` + HalfScratch): branch ABBA reports
+  pp2048 +5.0-5.1% / pp4096 +4.4-4.5% against main 545318d3, including the
+  conversion scratch, with byte-identical held-text logits: in flight
+  (`perf/v41-tensor-f16act`). Per dispatch, routed tiles +9-24% (IQ3_XXS
+  gate+up 13.1 -> 10.7 ms, down 6.7 -> 5.9) and dense tiles +14-41%
+  (q_a 494 -> 350 us, output_b 2.97 -> 2.24 ms).
+- Native MXFP4 right operands (`metal_fp4_e2m1_format` + `ue8m0` block-32
+  scales, 27.0 entry points) would replace the software dequant for the 30
+  MXFP4 down layers if packed values/scales map exactly; unmeasured: open.
 - Dense prefill projections on the tensor tile (q_a/q_b/kv, output_a/b,
   shared expert; the Q8_0 `mat_mat` path at 24-29 TFLOPS): landed
   (2026-10-22 dense entry, bench/2026-10-22-v41-tensor-dense-projections.md).
   54-68 TFLOPS, 2.05-2.42x per dispatch, pp2048 +14.3% / pp4096 +13.2%
-  on both artifacts. Larger dense tiles (64 x 64, more operand reuse) and
-  the activation re-read per column tile: open. Other families' dense
-  prefill GEMMs still take `mat_mat`: open.
-- Tensor ops for the attention sink tile (`score_mma`/`pv_mma`, 16-key
-  gathered blocks): the tile is gather-bound as much as MMA-bound; measure
-  with the fused score+softmax+PV bet rather than alone: open.
+  on both artifacts. Larger dense tiles (64 x 64, more operand reuse):
+  open; the activation re-read per column tile is owned by
+  `perf/v41-tensor-f16act`, not an independent bet. Other families' dense
+  prefill GEMMs still take `mat_mat`; unmeasured there and outside the
+  V4.1 gain budget: open.
+- Attention sink fusion (`score_mma` + `softmax_rows` + `pv_mma` +
+  `normalize_rows`): target the slab traffic, repeated gathers and up to
+  three dispatches per tile; gain unmeasured: open.
+- Attention sink tensor ops: independently time `score_mma`/`pv_mma`
+  substitution before combining with fusion; gather-vs-MMA attribution is
+  not measured and shares the fusion budget: open.
 - Owner/producer per-row loops (compressor, index key, selection; 8 layers,
   grows with prompt length): compressor prep landed (`a7de76ab`): key norm +
   key/latent RoPE + both cache copies fused 5 -> 1, +0.5-1.0% on top of the
-  MMA series, census 50,710 -> 39,563 with the MMA tile. Selection batching
+  MMA series. Selection batching
   (one dispatch per layer for index scores, one threadgroup per row for the
   top-k select, batched chronological/prepare; the eight owner/producer
-  layers cost 75-121 ms each = 15% of a 2048-token prefill, mostly dispatch
-  floor, and it grows with prompt length): open, queued behind the tensor
-  tile (branch name reserved: `perf/v41-select-batch`). Per-row census:
-  `selection_prepare` 6,141,
-  `sort_init`/`sort_tile` 2,560 each, `chronological` 2,560, `index_heads`
-  2,560 per Q2 PP1024. In flight (`perf/v41-select-batch`): batch the index
-  scores per layer, one threadgroup per row for top-k, and batched
-  chronological/prepare.
+  layers cost 75-121 ms each; the serial span includes compressor pooling,
+  norm, key projection, publication, indexing and sorting, so not all of it
+  is removable). Compressor standalone census 50,710 -> 40,470; final
+  MMA-series census 39,563. Selection batching: in flight
+  (`perf/v41-select-batch`). Keep position-ordered compressor/key
+  publication; batch `index_heads` in 32-row tiles, then fuse selection for
+  padded visible length <=2048; incumbent fallback above 2048. Historical
+  PP1024 selection families total 16,381 dispatches (`selection_prepare`
+  6,141 + four families x 2,560), not ~19k. First validate a three-arm
+  producer replay (incumbent; batched index/prepare; + fused
+  sort/chronological).
 - Scalar score kernel tuning: superseded on the released geometry by the
   MMA tile; the 8-lane scalar kernel remains the fallback for other
   geometry. The 4-key/8-lane variants measured +3.0%/+1.2-1.4% on the old

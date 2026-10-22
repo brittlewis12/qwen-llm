@@ -1058,8 +1058,17 @@ fn generic_tile_production_shape_timing() {
             counts[e] += 1;
         }
     }
-    let counts_t = i32_tensor(&ctx, &counts);
-    let ids_t = i32_tensor(&ctx, &ids);
+    let i32_typed = |v: &[i32]| {
+        MetalTensor::from_bytes(
+            &ctx,
+            bytemuck::cast_slice(v),
+            vec![v.len() as u64],
+            GgmlType::I32,
+        )
+        .unwrap()
+    };
+    let counts_t = i32_typed(&counts);
+    let ids_t = i32_typed(&ids);
     let mut rng = Lcg(0x7ab5);
     let x: Vec<f32> = (0..TOKENS * HIDDEN).map(|_| rng.signed(0.5)).collect();
     let x_t = f32_tensor(&ctx, &x);

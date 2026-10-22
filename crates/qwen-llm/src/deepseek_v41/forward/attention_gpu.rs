@@ -612,6 +612,55 @@ fn copy(
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
+fn compress_publish(
+    ctx: &MetalContext,
+    enc: &KernelEncoder,
+    key: &MetalTensor,
+    key_norm: &MetalTensor,
+    latent: &MetalTensor,
+    freq: &MetalTensor,
+    out_key: &MetalTensor,
+    out_latent: &MetalTensor,
+    index_dim: usize,
+    head_dim: usize,
+    pairs: usize,
+    position: usize,
+    eps: f32,
+) -> Result<()> {
+    let pso = pipeline(ctx, enc, "compress_publish")?;
+    enc.set_bytes(
+        0,
+        &[
+            index_dim as u32,
+            head_dim as u32,
+            pairs as u32,
+            position as u32,
+        ],
+    );
+    enc.set_bytes(1, &eps);
+    enc.set_tensor(2, key);
+    enc.set_tensor(3, key_norm);
+    enc.set_tensor(4, latent);
+    enc.set_tensor(5, freq);
+    enc.set_tensor(6, out_key);
+    enc.set_tensor(7, out_latent);
+    enc.set_threadgroup_memory(0, 136 * std::mem::size_of::<f32>());
+    enc.dispatch(
+        MTLSize {
+            width: 1,
+            height: 1,
+            depth: 1,
+        },
+        MTLSize {
+            width: 256,
+            height: 1,
+            depth: 1,
+        },
+    );
+    Ok(())
+}
+
 fn projection(w: &Linear<'_>, input: usize, output: usize) -> Result<()> {
     let t = &w.tensor;
     checked_product(&[input, output])?;
@@ -1300,57 +1349,60 @@ impl Workspace {
                         &self.latent,
                         &self.key,
                     )?;
-                    norm(
-                        ctx,
-                        enc,
-                        &self.key,
-                        constants.key_norm.as_ref().ok_or("missing key norm")?,
-                        c.index_dim,
-                        w.eps,
-                    )?;
+                    let key_norm = constants.key_norm.as_ref().ok_or("missing key norm")?;
                     let group_position = position + 1 - ratio;
-                    rope(
-                        ctx,
-                        enc,
-                        &self.key,
-                        &constants.frequencies,
-                        c.index_dim,
-                        1,
-                        c.rope_dim / 2,
-                        group_position,
-                        false,
-                    )?;
-                    rope(
-                        ctx,
-                        enc,
-                        &self.latent,
-                        &constants.frequencies,
-                        c.head_dim,
-                        1,
-                        c.rope_dim / 2,
-                        group_position,
-                        false,
-                    )?;
-                    copy(
-                        ctx,
-                        enc,
-                        &self.key,
-                        &cache.keys.view_subrange(
-                            ((length - 1) * c.index_dim) as u64,
-                            vec![c.index_dim as u64],
-                        ),
-                        c.index_dim,
-                    )?;
-                    copy(
-                        ctx,
-                        enc,
-                        &self.latent,
-                        &cache.compressed.view_subrange(
-                            ((length - 1) * c.head_dim) as u64,
-                            vec![c.head_dim as u64],
-                        ),
-                        c.head_dim,
-                    )?;
+                    let pairs = c.rope_dim / 2;
+                    let cache_key = cache.keys.view_subrange(
+                        ((length - 1) * c.index_dim) as u64,
+                        vec![c.index_dim as u64],
+                    );
+                    let cache_latent = cache.compressed.view_subrange(
+                        ((length - 1) * c.head_dim) as u64,
+                        vec![c.head_dim as u64],
+                    );
+                    if c.index_dim <= 128 && pairs <= 128 && pairs * 2 <= c.index_dim {
+                        compress_publish(
+                            ctx,
+                            enc,
+                            &self.key,
+                            key_norm,
+                            &self.latent,
+                            &constants.frequencies,
+                            &cache_key,
+                            &cache_latent,
+                            c.index_dim,
+                            c.head_dim,
+                            pairs,
+                            group_position,
+                            w.eps,
+                        )?;
+                    } else {
+                        norm(ctx, enc, &self.key, key_norm, c.index_dim, w.eps)?;
+                        rope(
+                            ctx,
+                            enc,
+                            &self.key,
+                            &constants.frequencies,
+                            c.index_dim,
+                            1,
+                            pairs,
+                            group_position,
+                            false,
+                        )?;
+                        rope(
+                            ctx,
+                            enc,
+                            &self.latent,
+                            &constants.frequencies,
+                            c.head_dim,
+                            1,
+                            pairs,
+                            group_position,
+                            false,
+                        )?;
+                        copy(ctx, enc, &self.key, &cache_key, c.index_dim)?;
+                        copy(ctx, enc, &self.latent, &cache_latent, c.head_dim)?;
+                    }
                 }
             }
             selected_count = length.min(c.index_topk);

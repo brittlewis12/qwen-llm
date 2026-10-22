@@ -440,6 +440,66 @@ kernel void kernel_deepseek_v41_attention_score_rows_lane8(
     if (lane8 == 0) score_row[h * br.y + i] = dot * rsqrt(float(ar.x));
 }
 
+// One dispatch replaces key RMS norm + key RoPE + latent RoPE + both cache
+// copies. The key path uses 128 threads for the index-width reduction; the
+// latent path copies its row and rotates the final 2*pairs values. The latent
+// norm and key projection stay separate because the projection consumes the
+// normalized latent.
+kernel void kernel_deepseek_v41_attention_compress_publish(
+    constant uint4 &a [[buffer(0)]], constant float &eps [[buffer(1)]],
+    device const float *key [[buffer(2)]], device const float *key_norm [[buffer(3)]],
+    device const float *latent [[buffer(4)]], device const float *freq [[buffer(5)]],
+    device float *out_key [[buffer(6)]], device float *out_latent [[buffer(7)]],
+    threadgroup float *shmem [[threadgroup(0)]],
+    uint tid [[thread_position_in_threadgroup]],
+    ushort sg [[simdgroup_index_in_threadgroup]],
+    ushort lane [[thread_index_in_simdgroup]]) {
+    uint kd = a.x, ld = a.y, pairs = a.z, position = a.w;
+    threadgroup float *normed = shmem;
+    threadgroup float *scratch = shmem + 128;
+    bool key_path = tid < 128;
+    float v = 0.0f;
+    if (key_path) {
+        if (tid < kd) v = key[tid];
+        float sumsq = simd_sum(v * v);
+        if (lane == 0) scratch[sg] = sumsq;
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    if (tid == 0) {
+        float total = scratch[0] + scratch[1] + scratch[2] + scratch[3];
+        scratch[4] = rsqrt(total / float(kd) + eps);
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    if (key_path) {
+        if (tid < kd) normed[tid] = (v * scratch[4]) * key_norm[tid];
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    if (key_path) {
+        uint rope_start = kd - 2 * pairs;
+        if (tid < kd && tid < rope_start) out_key[tid] = normed[tid];
+        if (tid < pairs) {
+            uint off = rope_start + 2 * tid;
+            float angle = float(position) * freq[tid];
+            float c = cos(angle), s = sin(angle);
+            float u = normed[off], w = normed[off + 1];
+            out_key[off] = u * c - w * s;
+            out_key[off + 1] = u * s + w * c;
+        }
+    } else {
+        uint lt = tid - 128;
+        uint rope_start = ld - 2 * pairs;
+        for (uint i = lt; i < rope_start; i += 128) out_latent[i] = latent[i];
+        if (lt < pairs) {
+            uint off = rope_start + 2 * lt;
+            float angle = float(position) * freq[lt];
+            float c = cos(angle), s = sin(angle);
+            float u = latent[off], w = latent[off + 1];
+            out_latent[off] = u * c - w * s;
+            out_latent[off + 1] = u * s + w * c;
+        }
+    }
+}
+
 kernel void kernel_deepseek_v41_attention_softmax_rows(
     constant uint4 &a [[buffer(0)]], constant uint4 &b [[buffer(1)]],
     device const uint *ids [[buffer(5)]], device const float *sink [[buffer(6)]],

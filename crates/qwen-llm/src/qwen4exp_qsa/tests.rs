@@ -7,6 +7,7 @@ use objc2_metal::MTLCommandQueue;
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 
+mod selected_value_product;
 mod split_decode;
 
 #[test]
@@ -1138,8 +1139,9 @@ fn packed_range_plan_separates_dense_shoulder_and_selected_suffix() {
     let selected = maximum
         .selected_packed_scratch_logical_allocations(2_048)
         .unwrap();
-    assert_eq!(selected.len(), 9);
-    assert_eq!(selected.iter().sum::<usize>(), 23_406_336);
+    assert_eq!(selected.len(), 10);
+    assert_eq!(selected.last(), Some(&(24 * 32 * size_of::<f32>())));
+    assert_eq!(selected.iter().sum::<usize>(), 23_409_408);
 }
 
 #[test]
@@ -1626,7 +1628,24 @@ fn selected_attention_packet_matches_repeated_scalar_kernels() {
     for (query_count, repetitions) in [(1, 1), (32, 3)] {
         let fixture = selected_attention_fixture(&ctx, query_count);
         let g = fixture.geometry;
-        let (value_kernel, value_grid) = if configured_qwen4exp_qsa_gqa4_value_enabled() {
+        let product_value = selected_value::eligible(
+            g,
+            g.output_width(),
+            query_count,
+            configured_qwen4exp_qsa_gqa4_value_enabled(),
+        ) && fixture
+            .scratch
+            .selected
+            .as_ref()
+            .unwrap()
+            .value_pipelines
+            .is_some();
+        let (value_kernel, value_grid) = if product_value {
+            (
+                selected_value::VALUE,
+                [1, g.kv_heads as u64, query_count as u64],
+            )
+        } else if configured_qwen4exp_qsa_gqa4_value_enabled() {
             (
                 "kernel_qwen4exp_qsa_attention_softmax_value_packed_gqa4_f16",
                 [
@@ -1750,6 +1769,17 @@ fn selected_attention_packet_matches_repeated_scalar_kernels() {
                 read_tensor_bytes(&packed.attention),
                 read_tensor_bytes(&reference_attention)
             );
+            let mut expected_kernels = vec![
+                "kernel_qwen4exp_qsa_norm_rope_packed_f32",
+                "kernel_qwen4exp_qsa_index_scores_packed_4x128_f16",
+                "kernel_deepseek_v4_select_top_k_radix4_ids_f32",
+                "kernel_qwen4exp_qsa_expand_ids_packed_i32",
+                "kernel_qwen4exp_qsa_attention_logits_packed_gqa4_f16",
+            ];
+            if product_value {
+                expected_kernels.push(selected_value::SOFTMAX);
+            }
+            expected_kernels.push(value_kernel);
             assert_eq!(
                 census
                     .iter()
@@ -1758,15 +1788,17 @@ fn selected_attention_packet_matches_repeated_scalar_kernels() {
                     })
                     .map(|row| row.kernel.as_str())
                     .collect::<Vec<_>>(),
-                [
-                    "kernel_qwen4exp_qsa_norm_rope_packed_f32",
-                    "kernel_qwen4exp_qsa_index_scores_packed_4x128_f16",
-                    "kernel_deepseek_v4_select_top_k_radix4_ids_f32",
-                    "kernel_qwen4exp_qsa_expand_ids_packed_i32",
-                    "kernel_qwen4exp_qsa_attention_logits_packed_gqa4_f16",
-                    value_kernel,
-                ]
+                expected_kernels
             );
+            if product_value {
+                assert_dispatch_shape(
+                    &census,
+                    "qwen4exp.qsa.selected_attention.packet",
+                    selected_value::SOFTMAX,
+                    [3, 2, query_count as u64],
+                    [256, 1, 1],
+                );
+            }
             assert_dispatch_shape(
                 &census,
                 "qwen4exp.qsa.selected_attention.packet",
@@ -2015,6 +2047,7 @@ fn selected_attention_faults_overwrite_outputs_without_cache_reads() {
         g,
         start_position,
         QUERIES,
+        None,
     )
     .unwrap();
     drop(packet_tag);

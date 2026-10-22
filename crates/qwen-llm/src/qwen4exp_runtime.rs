@@ -54,6 +54,9 @@ mod packet_cost;
 #[cfg(test)]
 mod strict_inject_probe;
 
+#[cfg(test)]
+mod selected_value_probe;
+
 // Selected-range packed QSA prefill. Default-on since 2026-09-03: the
 // 08-28 N=4,099 trace showed its distance from the scalar-selected path is the
 // same packed-HC arithmetic distance the already-default dense packed path

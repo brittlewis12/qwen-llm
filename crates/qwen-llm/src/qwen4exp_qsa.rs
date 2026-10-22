@@ -48,9 +48,14 @@ const SELECTED_AUDIT_ORDER_MISMATCH_STATUS: i32 = 5;
 const SELECTOR_SCRATCH_BYTES: usize = 2 * ATTENTION_THREADS * size_of::<u32>();
 const DENSE_PACKED_QUERY_TILE: usize = 32;
 
+mod selected_value;
 pub(crate) mod split_decode;
 #[cfg(test)]
 pub(crate) mod split_decode_probe;
+#[cfg(test)]
+pub(crate) mod value_mma_probe;
+#[cfg(test)]
+pub(crate) mod value_probe_binding;
 
 crate::env_flag!(
     default_on configured_qwen4exp_qsa_gqa4_logits_enabled,
@@ -781,6 +786,7 @@ impl QwenSparseAttentionMetalGeometry {
                 "attention logits",
                 &[self.output_width(), self.query_heads, query_tile],
             )?,
+            bytes("attention denominators", &[self.query_heads, query_tile])?,
         ])
     }
 
@@ -1003,6 +1009,8 @@ struct QwenSparseAttentionSelectedPackedScratch {
     selector_status: MetalTensor,
     token_ids: MetalTensor,
     attention_logits: MetalTensor,
+    attention_denominators: MetalTensor,
+    value_pipelines: Option<selected_value::Pipelines>,
 }
 
 struct QwenSparseAttentionSelectedPackedViews {
@@ -1229,6 +1237,15 @@ impl QwenSparseAttentionSelectedPackedScratch {
         query_tile: usize,
     ) -> Result<Self, Qwen4ExpQsaError> {
         geometry.selected_packed_scratch_logical_allocations(capacity)?;
+        if query_tile != capacity.min(DENSE_PACKED_QUERY_TILE) || query_tile == 0 {
+            return invalid("selected packed QSA query tile differs from bounded capacity");
+        }
+        let value_pipelines = selected_value::Pipelines::prepare_for(
+            ctx,
+            geometry,
+            query_tile,
+            configured_qwen4exp_qsa_gqa4_value_enabled(),
+        )?;
         let scratch = Self {
             index_query_raw: MetalTensor::zeros_f32(
                 ctx,
@@ -1269,6 +1286,11 @@ impl QwenSparseAttentionSelectedPackedScratch {
                     query_tile as u64,
                 ],
             )?,
+            attention_denominators: MetalTensor::zeros_f32(
+                ctx,
+                vec![geometry.query_heads as u64, query_tile as u64],
+            )?,
+            value_pipelines,
         };
         scratch.validate(geometry, capacity, query_tile)?;
         Ok(scratch)
@@ -1280,6 +1302,9 @@ impl QwenSparseAttentionSelectedPackedScratch {
         capacity: usize,
         query_tile: usize,
     ) -> Result<(), Qwen4ExpQsaError> {
+        if query_tile != capacity.min(DENSE_PACKED_QUERY_TILE) || query_tile == 0 {
+            return invalid("selected packed QSA query tile differs from bounded capacity");
+        }
         for (name, tensor, dtype, shape) in [
             (
                 "selected packed QSA raw index query",
@@ -1346,6 +1371,12 @@ impl QwenSparseAttentionSelectedPackedScratch {
                     geometry.query_heads as u64,
                     query_tile as u64,
                 ],
+            ),
+            (
+                "selected packed QSA attention denominators",
+                &self.attention_denominators,
+                GgmlType::F32,
+                vec![geometry.query_heads as u64, query_tile as u64],
             ),
         ] {
             require_tensor(name, tensor, dtype, &shape, true)?;
@@ -2592,6 +2623,18 @@ fn validate_packed_contract(
                         "packed QSA selected band local offset overflow".into(),
                     )
                 })?;
+            let band_start = start_position.checked_add(local_offset).ok_or_else(|| {
+                Qwen4ExpQsaError::Invalid("packed QSA selected band start overflow".into())
+            })?;
+            if selected_value::eligible(
+                g,
+                band_start,
+                band_rows,
+                configured_qwen4exp_qsa_gqa4_value_enabled(),
+            ) && let Some(pipelines) = &selected.value_pipelines
+            {
+                pipelines.validate_support(ctx)?;
+            }
             for (name, width, tensor) in [
                 ("input", g.hidden_size, input),
                 ("query", g.query_width(), &views.query),
@@ -2737,6 +2780,10 @@ fn dense_packed_scratch_tensors(
             (
                 "selected packed QSA attention-logit scratch",
                 &selected.attention_logits,
+            ),
+            (
+                "selected packed QSA attention-denominator scratch",
+                &selected.attention_denominators,
             ),
         ]);
     }
@@ -3122,11 +3169,39 @@ fn validate_selected_attention_packet(
             "selected packed QSA attention logits",
             &views.attention_logits,
         ),
+        (
+            "selected packed QSA attention denominators",
+            &selected.attention_denominators,
+        ),
     ];
     require_same_device(ctx, &tensors)?;
     require_disjoint(&tensors)?;
     preflight_selected_index_primitives(ctx)?;
-    preflight_selected_attention_primitives(ctx)
+    preflight_selected_attention_primitives(ctx)?;
+    if selected_value::eligible(
+        g,
+        start_position,
+        query_count,
+        configured_qwen4exp_qsa_gqa4_value_enabled(),
+    ) && let Some(pipelines) = &selected.value_pipelines
+    {
+        pipelines.validate(
+            ctx,
+            enc,
+            query_gate_projection,
+            value_cache,
+            &views.token_ids,
+            &views.selected_count,
+            &views.selector_status,
+            &views.attention_logits,
+            attention,
+            &selected.attention_denominators,
+            g,
+            start_position,
+            query_count,
+        )?;
+    }
+    Ok(())
 }
 
 fn encode_selected_index_primitives(
@@ -3335,6 +3410,12 @@ fn encode_selected_attention_packet(
         scratch.geometry,
         start_position,
         query_count,
+        scratch.selected.as_ref().and_then(|selected| {
+            selected
+                .value_pipelines
+                .as_ref()
+                .map(|pipelines| (pipelines, &selected.attention_denominators))
+        }),
     )?;
     Ok(views)
 }
@@ -5622,8 +5703,80 @@ fn encode_attention_softmax_value_packed(
     geometry: QwenSparseAttentionMetalGeometry,
     start_position: usize,
     query_count: usize,
+    selected_value_scratch: Option<(&selected_value::Pipelines, &MetalTensor)>,
 ) -> Result<(), MetalError> {
-    if configured_qwen4exp_qsa_gqa4_value_enabled() {
+    #[cfg(test)]
+    if value_probe_binding::encode(
+        ctx,
+        enc,
+        query_gate_projection,
+        value_cache,
+        token_ids,
+        selected_count,
+        selector_status,
+        logits,
+        attention,
+        geometry,
+        start_position,
+        query_count,
+    )? {
+        return Ok(());
+    }
+    encode_attention_softmax_value_packed_route(
+        ctx,
+        enc,
+        query_gate_projection,
+        value_cache,
+        token_ids,
+        selected_count,
+        selector_status,
+        logits,
+        attention,
+        geometry,
+        start_position,
+        query_count,
+        selected_value_scratch,
+        configured_qwen4exp_qsa_gqa4_value_enabled(),
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn encode_attention_softmax_value_packed_route(
+    ctx: &MetalContext,
+    enc: &KernelEncoder,
+    query_gate_projection: &MetalTensor,
+    value_cache: &MetalTensor,
+    token_ids: &MetalTensor,
+    selected_count: &MetalTensor,
+    selector_status: &MetalTensor,
+    logits: &MetalTensor,
+    attention: &MetalTensor,
+    geometry: QwenSparseAttentionMetalGeometry,
+    start_position: usize,
+    query_count: usize,
+    selected_value_scratch: Option<(&selected_value::Pipelines, &MetalTensor)>,
+    gqa4_enabled: bool,
+) -> Result<(), MetalError> {
+    if gqa4_enabled {
+        if selected_value::eligible(geometry, start_position, query_count, true)
+            && let Some((pipelines, denominators)) = selected_value_scratch
+        {
+            return pipelines.encode(
+                ctx,
+                enc,
+                query_gate_projection,
+                value_cache,
+                token_ids,
+                selected_count,
+                selector_status,
+                logits,
+                attention,
+                denominators,
+                geometry,
+                start_position,
+                query_count,
+            );
+        }
         return encode_attention_softmax_value_packed_gqa4(
             ctx,
             enc,

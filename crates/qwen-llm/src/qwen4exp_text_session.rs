@@ -3536,6 +3536,7 @@ fn add_packed_allocations(
             "selector_status",
             "token_ids",
             "attention_logits",
+            "attention_denominators",
         ];
         let allocations = geometry
             .packed_qsa_geometry()?
@@ -6320,7 +6321,7 @@ mod tests {
                 expected_packed_allocations,
             ) = match packed_capacity {
                 4 => (4_477_600_u64, false, 1_590, 55),
-                2_048 => (1_917_948_672_u64, true, 1_599, 64),
+                2_048 => (1_917_951_744_u64, true, 1_600, 65),
                 other => panic!("unexpected packed capacity {other}"),
             };
             let scalar_expected = 162_229_588_u64 + 25_356_u64 * capacity as u64;
@@ -6381,7 +6382,7 @@ mod tests {
         assert!(maximum_plan.packed_selected_capable());
         assert_eq!(
             maximum_plan.allocations().len(),
-            prompt_plan.allocations().len() + 9
+            prompt_plan.allocations().len() + 10
         );
         assert!(
             prompt_plan
@@ -6395,8 +6396,15 @@ mod tests {
                 .iter()
                 .filter(|allocation| allocation.name.starts_with("packed.qsa.selected."))
                 .count(),
-            9
+            10
         );
+        let denominators = maximum_plan
+            .allocations()
+            .iter()
+            .find(|allocation| allocation.name == "packed.qsa.selected.attention_denominators")
+            .unwrap();
+        assert_eq!(denominators.logical_bytes, 24 * 32 * 4);
+        assert!(denominators.priced_bytes >= denominators.logical_bytes);
         assert!(prompt_plan.session_logical_bytes() < maximum_plan.session_logical_bytes());
         assert!(
             Qwen4ExpTextSessionMemoryPlan::for_geometry_with_options(

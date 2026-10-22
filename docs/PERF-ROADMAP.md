@@ -123,6 +123,14 @@ sorting, so not all of it is removable. Re-sample after the next landing.
 
 ### Qwen3.8 Flash-Next
 
+- Ordinary selected-QSA value accumulation: chronological twelve-head reuse
+  landed (2026-10-22, M4). Two saved-rollout brackets give prefill -4 to -6%,
+  request -3 to -4%, same 256 tokens; final means 26.87 -> 25.36 s prefill and
+  35.51 -> 33.97 s request. Actual N32 bands only, unchanged precision/order,
+  one admitted 3 KiB logical denominator buffer; tails and decode unchanged.
+  F32 MMA remains unqualified: larger leaf gain but routing
+  amplification and inconclusive native timing.
+  Packet: `bench/2026-10-22-flash-selected-value/README.md`.
 - Ordinary packed HC injection, strict four-output projection: negative
   (2026-10-22, M4). Bitwise kernel and native-state witnesses pass; isolated
   projection time -5 to -7% does not improve full prefill at 128/512/2048.

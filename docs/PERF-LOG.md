@@ -15,6 +15,30 @@ See also: `docs/PERF-ROADMAP.md` for the current state and evidence index.
 - The serial span still includes compressor/index publication, selection and
   sorting; the selection batching removed ~3.5% of wall, not the whole span.
 
+## 2026-10-22 - Flash Chronological Value Reuse Cuts Saved Request Time 3-4%
+
+- Ordinary selected-QSA N32 bands now share gathered values across twelve heads
+  rather than three groups of four, retaining each F32 scalar accumulation chain,
+  softmax reduction and F16 cache precision. One session-shared denominator
+  buffer costs 3072 logical bytes, 16 KiB priced on the measured device. Existing
+  admission, ownership, flag-off behavior and small-row/decode paths remain.
+- M4 Max, UD-Q3_K_XL, API validation and production lease: native-rendered
+  11,550-token saved gameplay prompt, temp 1/seed 42, 256-token cap, context 11,808.
+  Final warmed fresh-process ABBA mean prefill 26.87 -> 25.36 s (-5.65%), request
+  35.51 -> 33.97 s (-4.34%). Earlier bracket: -4.12% / -3.17%; both are retained,
+  not pooled. All pairs improve and all eight outputs match at the cap. Final
+  baseline prefill has 4.8% spread; no fixed global gain or decode gain is claimed.
+  Loading is outside request timing.
+- Product-metallib bitwise leaf tests pass 18 cases. Actual product native
+  snapshot-anchored ABBA/BAAB gives -3.60% selected-suffix GPU time, with identical
+  32 held-token logit rows. Cancellation/retry, boundary snapshot replay,
+  selected audits/faults/reuse, inventory and 1166 CLI/benchmark unit tests pass.
+- F32-operand MMA is not promoted: its approximately 43% leaf saving produces
+  reproducible model drift (worst KL 0.0244, one of 32 top-token flips), while
+  native timing is inconclusive. Chronological reuse gives a smaller component
+  gain that survives product and request gates without that drift.
+- [Protocol, negative MMA screen, native samples and request records](bench/2026-10-22-flash-selected-value/README.md).
+
 ## 2026-10-22 - V4.1 Prefill: Batched Unpruned Selection +3.0-3.8%
 
 - Compressor/index-key publication stays position-ordered; selection then
@@ -37,27 +61,45 @@ See also: `docs/PERF-ROADMAP.md` for the current state and evidence index.
   gated by a three-arm producer replay (incumbent, current batching, fused).
 - [ABBA, census, correctness and limits](bench/2026-10-22-v41-select-batch.md).
 
-## 2026-10-22 - V4.1 Prefill: Batched Unpruned Selection +3.0-3.8%
+## 2026-10-22 - Flash Strict HC Projection: Kernel Gain Does Not Survive Native Prefill
 
-- Compressor/index-key publication stays position-ordered; selection then
-  batches over 32-row tiles. One prepare dispatch writes all-selected IDs
-  and the source mask; one index-score dispatch covers rows above
-  `index_topk`; the incumbent per-row sort/chronological pass is unchanged.
-  The pruning path above 16,385 visible keys keeps the old selector.
-- Same-binary ABBA (batched versus `QWEN_V41_SELECT_PER_ROW=1`): Q2 pp2048
-  545.3 -> 561.9 (+3.05%), pp4096 495.4 -> 513.1 (+3.57%); IQ3 pp2048
-  540.3 -> 559.0 (+3.46%), pp4096 490.8 -> 509.4 (+3.80%). Census Q2 pp2048
-  105,202 -> 88,133 (-16.2%).
-- Two bugs were caught by the new 65-row batch-vs-incumbent regression:
-  tile-local row addressing for selected/candidates/index query/weights, and
-  a prepare grid bounded by the last row instead of the tile-wide all-selected
-  extent. Both are fixed; 31 attention and 14 prefill tests pass.
-- Same-binary held-text witness (IQ3, 384 targets): all six NLL values and
-  top-1 values identical between batched and per-row selection; mean
-  2.146367194.
-- Next: a fused one-threadgroup-per-row sort/chronological for padded <=2048,
-  gated by a three-arm producer replay (incumbent, current batching, fused).
-- [ABBA, census, correctness and limits](bench/2026-10-22-v41-select-batch.md).
+- Test-only K=10,240 -> four F32 gates, four accumulators per query lane,
+  ascending-K safe math and no barriers. Thirty-six bitwise/offset/input cases
+  and checked binding/refusal tests pass. Real-model prefill logits, packed
+  hyper row, active state and four scalar-token continuation states match at
+  128/512/2048; dispatch witness confirms 96 replacements per command.
+- M4 Max, API validation, production lease: synthetic medians improve 4.6%,
+  4.6%, 6.6%. Native ABBA GPU means instead change +1.57%, +0.71%, +0.40%;
+  live-state closure gives +0.78%, +0.16%, -0.04%. No consistent native gain.
+  Debug-host GPU screening, not a precise release-request regression estimate.
+- Keep production unchanged and the bounded research witness. This closes the
+  strict four-output synchronization bet, not all HC or other architectures.
+  [Protocol and samples](bench/2026-10-22-flash-strict-hc/README.md).
+
+## 2026-10-22 - GLM Ordinary Requests: Adaptive Workspace Cuts Prefill Time 20%
+
+- Close a deployment gap: ordinary `qwen run` and family benchmarks capped
+  prefill at 512 rows while serving already selected up to 2048. Share the
+  bounded candidate order, price complete weights/session/reserve before loading,
+  and retry resident session creation only on typed pressure. Context never
+  shrinks; successful widths freeze. DFlash and serving policy stay unchanged.
+- M4 Max, UD-IQ3_XXS, Metal validation, native 11,105-token saved-rollout prompt,
+  256-token cap, temp 1/seed 42, capacity 11,360: warmed fresh-process ABBA selects
+  512/2048/2048/512. Mean prefill 62.51 -> 49.82 s (-20.3%, throughput +25.5%);
+  both pairs improve about 20%. Observed request means 74.19 -> 59.66 s (-19.6%).
+  A1 has a decode-time outlier; no decode gain or sole attribution of all request
+  savings. Every measured run reports zero cold prefetch and the same output hash.
+- Fixed quality-v1 first prose/code/long cases, 64 held tokens each: Fast512
+  and Fast2048 have identical NLL/hit vectors and measured KL zero; both retain
+  the same differences from Exact512. Descriptive coverage, not formal
+  noninferiority, universal state identity, or completed-game quality.
+- Actual 2048-row admission, cold/snapshot equality, cancellation/retry and
+  continuation pass. At the state witness's 4096-token capacity, session buffers
+  grow by 1.70 GiB; cancellation waits for the larger command boundary. Four
+  planner tests and 1166 CLI/benchmark unit tests pass; actual `pp2048` reports
+  the new width. No memory override or new kernel.
+- [Request records, quality/state witnesses and reproduction](bench/2026-10-22-glm-ordinary-workspace/README.md).
+
 ## 2026-10-22 - V4.1: Dense Projections On The Tensor Tile, +14% Prefill
 
 - The six-span re-sample after the expert tile put the dense Q8_0

@@ -8,7 +8,7 @@ fn fingerprint(values: &[f32]) -> String {
     format!("{:x}", Sha256::digest(bytemuck::cast_slice(values)))
 }
 
-fn state(runner: &Qwen4ExpTextRunner<'_, '_, '_>) -> Vec<String> {
+pub(super) fn state(runner: &Qwen4ExpTextRunner<'_, '_, '_>) -> Vec<String> {
     assert!(!runner.workspace.is_poisoned());
     let position = runner.next_position();
     let mut active_qsa = Vec::new();

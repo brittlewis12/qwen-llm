@@ -166,6 +166,9 @@ pub(super) struct Rows {
     compressor_gate: MetalTensor,
     index_query: MetalTensor,
     index_weights: MetalTensor,
+    /// Half copies of projection inputs for the tensor tile; `None` when
+    /// the tier is not selected.
+    half: Option<prefill::HalfScratch>,
     rows: usize,
 }
 
@@ -211,8 +214,41 @@ impl Rows {
             compressor_gate: prefill::allocate(ctx, widths[9], rows, GgmlType::F32)?,
             index_query: prefill::allocate(ctx, widths[10], rows, GgmlType::F32)?,
             index_weights: prefill::allocate(ctx, widths[11], rows, GgmlType::F32)?,
+            // Widest projection input: the layer input, the query rank, the
+            // grouped output_a input or the output_b input.
+            half: prefill::HalfScratch::new(
+                ctx,
+                checked_product(&[
+                    [c.hidden, widths[0], widths[6], widths[5]]
+                        .into_iter()
+                        .max()
+                        .unwrap_or(0),
+                    rows,
+                ])?,
+            )?,
             rows,
         })
+    }
+
+    /// Half copy of the first `width * rows` elements of `x` when the
+    /// tensor tile would read it (the scratch exists and at least one of
+    /// `consumers` takes the tensor route); `None` leaves every consumer
+    /// on its F32 input.
+    fn half_input(
+        &self,
+        ctx: &MetalContext,
+        enc: &KernelEncoder,
+        x: &MetalTensor,
+        width: usize,
+        consumers: &[&Linear<'_>],
+    ) -> std::result::Result<Option<MetalTensor>, metal::MetalError> {
+        let Some(half) = self.half.as_ref() else {
+            return Ok(None);
+        };
+        if !consumers.iter().any(|w| w.tensor_rows_selected(self.rows)) {
+            return Ok(None);
+        }
+        half.convert(ctx, enc, x, width * self.rows).map(Some)
     }
 }
 
@@ -1054,7 +1090,50 @@ impl Workspace {
         rows: &Rows,
     ) -> std::result::Result<(), metal::MetalError> {
         let c = &self.config;
-        w.query_a.encode_rows(enc, input, &rows.rank, rows.rows)?;
+        let index = if self.schedule.produces_index(id) {
+            let needs_index = self.batch.as_ref().is_none_or(|batch| {
+                let length = (batch.start + batch.rows) / self.schedule.ratio(id);
+                length > c.index_topk || length.div_ceil(c.candidate_block) > c.candidate_topk
+            });
+            w.index.as_ref().filter(|_| needs_index)
+        } else {
+            None
+        };
+        // Every projection of the layer input first (one half copy serves
+        // them all), then the rank-fed ones after the query norm. The
+        // order is free: the rank consumers depend only on query_a.
+        let mut input_consumers = vec![&w.query_a, &w.kv];
+        if let Some(compressor) = &w.compressor {
+            input_consumers.push(&compressor.kv);
+            input_consumers.extend(compressor.gate.as_ref());
+        }
+        input_consumers.extend(index.map(|index| &index.weights));
+        let input_half = rows.half_input(ctx, enc, input, c.hidden, &input_consumers)?;
+        let input_half = input_half.as_ref();
+        w.query_a
+            .encode_rows_with(enc, input, input_half, &rows.rank, rows.rows)?;
+        w.kv.encode_rows_with(enc, input, input_half, &rows.latent, rows.rows)?;
+        if let Some(compressor) = &w.compressor {
+            compressor.kv.encode_rows_with(
+                enc,
+                input,
+                input_half,
+                &rows.compressor_value,
+                rows.rows,
+            )?;
+            if let Some(gate) = &compressor.gate {
+                gate.encode_rows_with(enc, input, input_half, &rows.compressor_gate, rows.rows)?;
+            }
+        }
+        if let Some(index) = index {
+            index.weights.encode_rows_with(
+                enc,
+                input,
+                input_half,
+                &rows.index_weights,
+                rows.rows,
+            )?;
+        }
         metal::encode_rms_norm_mul_rows_f32(
             ctx,
             enc,
@@ -1065,9 +1144,6 @@ impl Workspace {
             c.query_rank,
             w.eps,
         )?;
-        w.query_b
-            .encode_rows(enc, &rows.rank, &rows.query, rows.rows)?;
-        w.kv.encode_rows(enc, input, &rows.latent, rows.rows)?;
         metal::encode_rms_norm_mul_rows_f32(
             ctx,
             enc,
@@ -1078,27 +1154,20 @@ impl Workspace {
             c.head_dim,
             w.eps,
         )?;
-        if let Some(compressor) = &w.compressor {
-            compressor
-                .kv
-                .encode_rows(enc, input, &rows.compressor_value, rows.rows)?;
-            if let Some(gate) = &compressor.gate {
-                gate.encode_rows(enc, input, &rows.compressor_gate, rows.rows)?;
-            }
-        }
-        if self.schedule.produces_index(id) {
-            let needs_index = self.batch.as_ref().is_none_or(|batch| {
-                let length = (batch.start + batch.rows) / self.schedule.ratio(id);
-                length > c.index_topk || length.div_ceil(c.candidate_block) > c.candidate_topk
-            });
-            if let Some(index) = w.index.as_ref().filter(|_| needs_index) {
-                index
-                    .query
-                    .encode_rows(enc, &rows.rank, &rows.index_query, rows.rows)?;
-                index
-                    .weights
-                    .encode_rows(enc, input, &rows.index_weights, rows.rows)?;
-            }
+        let mut rank_consumers = vec![&w.query_b];
+        rank_consumers.extend(index.map(|index| &index.query));
+        let rank_half = rows.half_input(ctx, enc, &rows.rank, c.query_rank, &rank_consumers)?;
+        let rank_half = rank_half.as_ref();
+        w.query_b
+            .encode_rows_with(enc, &rows.rank, rank_half, &rows.query, rows.rows)?;
+        if let Some(index) = index {
+            index.query.encode_rows_with(
+                enc,
+                &rows.rank,
+                rank_half,
+                &rows.index_query,
+                rows.rows,
+            )?;
         }
         Ok(())
     }
@@ -1185,14 +1254,29 @@ impl Workspace {
             c.groups,
             rows.rows,
         )?;
+        // One half copy of the whole grouped input serves every group's
+        // output_a; the per-group views are the same offsets in halves.
+        let output_a: Vec<&Linear<'_>> = w.output_a.iter().collect();
+        let grouped_half = rows
+            .half_input(
+                ctx,
+                enc,
+                &rows.grouped_input,
+                group_width * c.groups,
+                &output_a,
+            )
+            .map_err(|e| e.to_string())?;
         for (group, projection) in w.output_a.iter().enumerate() {
+            let offset = (group * group_width * rows.rows) as u64;
+            let shape = vec![group_width as u64, rows.rows as u64];
+            let group_half = grouped_half
+                .as_ref()
+                .map(|h| h.view_subrange(offset, shape.clone()));
             projection
-                .encode_rows(
+                .encode_rows_with(
                     enc,
-                    &rows.grouped_input.view_subrange(
-                        (group * group_width * rows.rows) as u64,
-                        vec![group_width as u64, rows.rows as u64],
-                    ),
+                    &rows.grouped_input.view_subrange(offset, shape),
+                    group_half.as_ref(),
                     &rows.grouped_low.view_subrange(
                         (group * c.output_rank * rows.rows) as u64,
                         vec![c.output_rank as u64, rows.rows as u64],
@@ -1210,8 +1294,17 @@ impl Workspace {
             rows.rows,
             c.groups,
         )?;
+        let low_half = rows
+            .half_input(
+                ctx,
+                enc,
+                &rows.low,
+                c.groups * c.output_rank,
+                &[&w.output_b],
+            )
+            .map_err(|e| e.to_string())?;
         w.output_b
-            .encode_rows(enc, &rows.low, output, rows.rows)
+            .encode_rows_with(enc, &rows.low, low_half.as_ref(), output, rows.rows)
             .map_err(|e| e.to_string())?;
         let pso = pipeline(ctx, enc, "finite")?;
         enc.set_bytes(0, &((self.config.hidden * rows.rows) as u32));

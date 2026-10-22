@@ -38,18 +38,49 @@ impl MoeGroupedTensorRole {
     }
 }
 
-/// `kernel_moe_<role>_<suffix>_f32_grouped_slots_tensor` for every dtype
-/// with a generic layout (the tensor file instantiates the same list; a
-/// CPU test checks that).
+/// Activation operand storage the tensor tile reads: F32 rows cast to half
+/// inside the tile, or rows already converted to half (`_f16act`). The
+/// staged operand is the same half value either way.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TensorActivation {
+    F32,
+    F16,
+}
+
+impl TensorActivation {
+    fn infix(self) -> &'static str {
+        match self {
+            Self::F32 => "f32",
+            Self::F16 => "f16act",
+        }
+    }
+
+    fn of(src: &MetalTensor, kernel: &'static str) -> Result<Self, MetalError> {
+        match src.dtype {
+            GgmlType::F32 => Ok(Self::F32),
+            GgmlType::F16 => Ok(Self::F16),
+            other => Err(MetalError::BadShape {
+                kernel,
+                detail: format!("activations must be F32 or F16, got {other:?}"),
+            }),
+        }
+    }
+}
+
+/// `kernel_moe_<role>_<suffix>_<f32|f16act>_grouped_slots_tensor` for
+/// every dtype with a generic layout (the tensor file instantiates the
+/// same list; a CPU test checks that).
 pub fn moe_grouped_tensor_pipeline_name(
     role: MoeGroupedTensorRole,
     dtype: GgmlType,
+    activation: TensorActivation,
 ) -> Option<String> {
     let l = moe_grouped_generic_layout(dtype)?;
     Some(format!(
-        "{}{}_f32_grouped_slots_tensor",
+        "{}{}_{}_grouped_slots_tensor",
         role.prefix(),
-        l.suffix
+        l.suffix,
+        activation.infix()
     ))
 }
 
@@ -147,8 +178,10 @@ pub fn encode_moe_down_f32_grouped_slots_tensor(
         0,
         i32::MAX as u32,
     )?;
-    let name = moe_grouped_tensor_pipeline_name(MoeGroupedTensorRole::Down, weight.dtype)
-        .expect("layout lookup succeeded in generic_mm_args");
+    let activation = TensorActivation::of(inner, KERNEL)?;
+    let name =
+        moe_grouped_tensor_pipeline_name(MoeGroupedTensorRole::Down, weight.dtype, activation)
+            .expect("layout lookup succeeded in generic_mm_args");
     dispatch_tensor_mm(
         ctx, enc, &name, &args, weight, inner, counts, ids, out, n_out, n_expert, n_tokens, None,
     )
@@ -216,14 +249,16 @@ pub fn encode_moe_swiglu_f32_grouped_slots_tensor(
         0,
         i32::MAX as u32,
     )?;
-    let gate = moe_grouped_tensor_pipeline_name(MoeGroupedTensorRole::Down, w_gate.dtype)
-        .expect("layout lookup succeeded in generic_mm_args");
+    let activation = TensorActivation::of(x_pack, KERNEL)?;
+    let gate =
+        moe_grouped_tensor_pipeline_name(MoeGroupedTensorRole::Down, w_gate.dtype, activation)
+            .expect("layout lookup succeeded in generic_mm_args");
     let up_role = if clamp.is_some() {
         MoeGroupedTensorRole::UpClamped
     } else {
         MoeGroupedTensorRole::UpSiluMul
     };
-    let up = moe_grouped_tensor_pipeline_name(up_role, w_up.dtype)
+    let up = moe_grouped_tensor_pipeline_name(up_role, w_up.dtype, activation)
         .expect("layout lookup succeeded in generic_mm_args");
     // Resolve both pipelines before the first dispatch so a missing up
     // instantiation cannot leave the gate projection half applied.
@@ -239,17 +274,25 @@ pub fn encode_moe_swiglu_f32_grouped_slots_tensor(
 
 /// `kernel_mat_mat_<suffix>_f32_tensor`: the dense form of the tensor tile
 /// (one weight matrix, slot == row, no routing buffers).
-pub fn mat_mat_tensor_pipeline_name(dtype: GgmlType) -> Option<String> {
+pub fn mat_mat_tensor_pipeline_name(
+    dtype: GgmlType,
+    activation: TensorActivation,
+) -> Option<String> {
     let l = moe_grouped_generic_layout(dtype)?;
-    Some(format!("kernel_mat_mat_{}_f32_tensor", l.suffix))
+    Some(format!(
+        "kernel_mat_mat_{}_{}_tensor",
+        l.suffix,
+        activation.infix()
+    ))
 }
 
 /// Dense `y[row] = W x[row]` on the tensor tile with the `mat_mat`
 /// contract: `weight` is `[n_in, n_out]` in any dtype with a generic
-/// layout, `x` is `[n_in, n_query]` F32 and `y` is `[n_out, n_query]` F32
-/// (row-major rows of `n_in` / `n_out`), `n_in` a multiple of 32 and of
-/// the dtype's block. Half operands, F32 sums; output rows past `n_query`
-/// are untouched. Callers gate on [`moe_grouped_tensor_selected`].
+/// layout, `x` is `[n_in, n_query]` F32 (or F16, already converted) and
+/// `y` is `[n_out, n_query]` F32 (row-major rows of `n_in` / `n_out`),
+/// `n_in` a multiple of 32 and of the dtype's block. Half operands, F32
+/// sums; output rows past `n_query` are untouched. Callers gate on
+/// [`moe_grouped_tensor_selected`].
 #[allow(clippy::too_many_arguments)]
 pub fn encode_mat_mat_tensor_f32(
     ctx: &MetalContext,
@@ -281,11 +324,11 @@ pub fn encode_mat_mat_tensor_f32(
             weight.dtype, l.block_elems
         )));
     }
+    let activation = TensorActivation::of(x, KERNEL)?;
     let nb01 = (n_in / l.block_elems) * l.block_bytes;
     if weight.n_bytes() < (nb01 as u64) * n_out as u64
         || x.n_elements() < (n_in * n_query) as u64
         || y.n_elements() < (n_out * n_query) as u64
-        || x.dtype != GgmlType::F32
         || y.dtype != GgmlType::F32
     {
         return Err(bad(format!(
@@ -311,7 +354,7 @@ pub fn encode_mat_mat_tensor_f32(
         b_div: 1,
         slot_limit: n_query as u32,
     };
-    let name = mat_mat_tensor_pipeline_name(weight.dtype).expect("layout found above");
+    let name = mat_mat_tensor_pipeline_name(weight.dtype, activation).expect("layout found above");
     let pso = ctx.tensor_pipeline(&name)?;
     enc.set_pipeline(&pso);
     enc.set_bytes(0, &args);

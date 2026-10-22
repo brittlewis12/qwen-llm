@@ -271,20 +271,22 @@ fn moe_grouped_tensor_mapping_matches_metal_source() {
             l.suffix
         );
         assert_eq!(args[3], format!("qt_dequantize_{}", l.suffix));
-        for role in MoeGroupedTensorRole::ALL {
-            let name = moe_grouped_tensor_pipeline_name(role, l.dtype).unwrap();
-            let (prefix, rest) = name.split_once(l.suffix).unwrap();
+        for activation in [TensorActivation::F32, TensorActivation::F16] {
+            for role in MoeGroupedTensorRole::ALL {
+                let name = moe_grouped_tensor_pipeline_name(role, l.dtype, activation).unwrap();
+                let (prefix, rest) = name.split_once(l.suffix).unwrap();
+                assert!(
+                    TENSOR_METAL.contains(&format!("host_name(\"{prefix}\" #suffix \"{rest}\")")),
+                    "{name}: no host_name pattern in the tensor instantiation macro"
+                );
+            }
+            let dense = mat_mat_tensor_pipeline_name(l.dtype, activation).unwrap();
+            let (prefix, rest) = dense.split_once(l.suffix).unwrap();
             assert!(
                 TENSOR_METAL.contains(&format!("host_name(\"{prefix}\" #suffix \"{rest}\")")),
-                "{name}: no host_name pattern in the tensor instantiation macro"
+                "{dense}: no host_name pattern in the tensor instantiation macro"
             );
         }
-        let dense = mat_mat_tensor_pipeline_name(l.dtype).unwrap();
-        let (prefix, rest) = dense.split_once(l.suffix).unwrap();
-        assert!(
-            TENSOR_METAL.contains(&format!("host_name(\"{prefix}\" #suffix \"{rest}\")")),
-            "{dense}: no host_name pattern in the tensor instantiation macro"
-        );
     }
     let struct_fields = |source: &str| -> Vec<String> {
         let start = source
@@ -484,6 +486,16 @@ fn i32_typed_tensor(ctx: &MetalContext, v: &[i32]) -> MetalTensor {
         GgmlType::I32,
     )
     .expect("i32 tensor")
+}
+
+/// F16 tensor holding `v` rounded to half (the tile's own activation
+/// rounding, done once up front).
+fn f16_tensor(ctx: &MetalContext, v: &[f32]) -> MetalTensor {
+    let bytes: Vec<u8> = v
+        .iter()
+        .flat_map(|&x| half::f16::from_f32(x).to_bits().to_le_bytes())
+        .collect();
+    MetalTensor::from_bytes(ctx, &bytes, vec![v.len() as u64], GgmlType::F16).expect("f16 tensor")
 }
 
 fn f32_tensor(ctx: &MetalContext, v: &[f32]) -> MetalTensor {
@@ -1132,6 +1144,20 @@ fn run_tensor_dense_case(dtype: GgmlType) {
     let gpu = read_back_f32(&y_tensor.buffer, ROWS * N_OUT);
     let label = format!("tensor-dense-{dtype:?}");
     assert_close(&label, &gpu, &cpu);
+    // Half activations converted up front stage the same operand values,
+    // so the result is bitwise identical.
+    let xh = f16_tensor(&ctx, &x);
+    let xh_v = xh.view_bytes(0, vec![N_IN as u64, ROWS as u64]);
+    let y_half = MetalTensor::zeros_f32(&ctx, vec![N_OUT as u64, ROWS as u64]).unwrap();
+    one_shot(&ctx, |enc| {
+        encode_mat_mat_tensor_f32(&ctx, enc, &w, &xh_v, &y_half, N_IN, N_OUT, ROWS)
+    })
+    .expect("tensor dense mat-mat, half activations");
+    assert_eq!(
+        read_back_f32(&y_half.buffer, ROWS * N_OUT),
+        gpu,
+        "{label}: f16act differs from f32act"
+    );
     if crate::metal_forward::mat_mat_dispatch_supported(dtype) {
         let y_mma = MetalTensor::zeros_f32(&ctx, vec![N_OUT as u64, ROWS as u64]).unwrap();
         one_shot(&ctx, |enc| {
@@ -1222,6 +1248,8 @@ fn tensor_dense_production_shape_timing() {
         let x: Vec<f32> = (0..ROWS * n_in).map(|_| rng.signed(0.5)).collect();
         let x_t = f32_tensor(&ctx, &x);
         let x_v = x_t.view_bytes(0, vec![n_in as u64, ROWS as u64]);
+        let xh_t = f16_tensor(&ctx, &x);
+        let xh_v = xh_t.view_bytes(0, vec![n_in as u64, ROWS as u64]);
         let y = MetalTensor::zeros_f32(&ctx, vec![n_out as u64, ROWS as u64]).unwrap();
         let mma = |enc: &KernelEncoder| {
             crate::metal_forward::encode_mat_mat_dispatch_with_policy(
@@ -1232,7 +1260,10 @@ fn tensor_dense_production_shape_timing() {
         let tensor = |enc: &KernelEncoder| {
             encode_mat_mat_tensor_f32(&ctx, enc, &w, &x_v, &y, n_in, n_out, ROWS).unwrap();
         };
-        heat(&ctx, 4, &[&mma, &tensor]);
+        let tensor_f16 = |enc: &KernelEncoder| {
+            encode_mat_mat_tensor_f32(&ctx, enc, &w, &xh_v, &y, n_in, n_out, ROWS).unwrap();
+        };
+        heat(&ctx, 4, &[&mma, &tensor, &tensor_f16]);
         let flops = 2.0 * (ROWS * n_in * n_out) as f64;
         let bytes = bank.len() as f64;
         for round in 0..2 {
@@ -1251,6 +1282,14 @@ fn tensor_dense_production_shape_timing() {
                 flops,
                 bytes,
                 &tensor,
+            );
+            timed_tile(
+                &ctx,
+                &format!("{label} tensor f16act r{round}"),
+                6,
+                flops,
+                bytes,
+                &tensor_f16,
             );
         }
     }
@@ -1575,7 +1614,10 @@ struct ProductionShape {
     counts_t: MetalTensor,
     ids_t: MetalTensor,
     x_t: MetalTensor,
+    /// `x_t` rounded to half once (the `_f16act` operand).
+    x_h: MetalTensor,
     inner_t: MetalTensor,
+    inner_h: MetalTensor,
     out_t: MetalTensor,
 }
 
@@ -1601,10 +1643,19 @@ impl ProductionShape {
         let x: Vec<f32> = (0..Self::TOKENS * Self::HIDDEN)
             .map(|_| rng.signed(0.5))
             .collect();
+        let inner_h = MetalTensor::from_bytes(
+            ctx,
+            &vec![0u8; Self::SLOTS * Self::FFN * 2],
+            vec![(Self::SLOTS * Self::FFN) as u64],
+            GgmlType::F16,
+        )
+        .unwrap();
         Self {
             counts_t: i32_typed_tensor(ctx, &counts),
             ids_t: i32_typed_tensor(ctx, &ids),
+            x_h: f16_tensor(ctx, &x),
             x_t: f32_tensor(ctx, &x),
+            inner_h,
             inner_t: MetalTensor::zeros_f32(ctx, vec![(Self::SLOTS * Self::FFN) as u64]).unwrap(),
             out_t: MetalTensor::zeros_f32(ctx, vec![(Self::SLOTS * Self::HIDDEN) as u64]).unwrap(),
         }
@@ -1863,14 +1914,51 @@ fn tensor_tile_production_shape_timing() {
             )
             .unwrap();
         };
+        let gate_up_tensor_f16 = |enc: &KernelEncoder| {
+            encode_moe_swiglu_f32_grouped_slots_tensor(
+                &ctx,
+                enc,
+                &b.gate_t,
+                &b.up_t,
+                &shape.x_h,
+                &shape.counts_t,
+                &shape.ids_t,
+                &shape.inner_t,
+                ProductionShape::HIDDEN,
+                ProductionShape::FFN,
+                ProductionShape::EXPERTS,
+                ProductionShape::TOPK,
+                ProductionShape::TOKENS,
+                Some(10.0),
+            )
+            .unwrap();
+        };
+        let down_tensor_f16 = |enc: &KernelEncoder| {
+            encode_moe_down_f32_grouped_slots_tensor(
+                &ctx,
+                enc,
+                &b.down_t,
+                &shape.inner_h,
+                &shape.counts_t,
+                &shape.ids_t,
+                &shape.out_t,
+                ProductionShape::FFN,
+                ProductionShape::HIDDEN,
+                ProductionShape::EXPERTS,
+                ProductionShape::TOKENS,
+            )
+            .unwrap();
+        };
         heat(
             &ctx,
             4,
             &[
                 &gate_up_generic,
                 &gate_up_tensor,
+                &gate_up_tensor_f16,
                 &down_generic,
                 &down_tensor,
+                &down_tensor_f16,
             ],
         );
         for round in 0..2 {
@@ -1893,6 +1981,14 @@ fn tensor_tile_production_shape_timing() {
             );
             timed_tile(
                 &ctx,
+                &tag("gate+up", "tensor f16act"),
+                6,
+                gate_up_flops,
+                b.gate_bytes,
+                &gate_up_tensor_f16,
+            );
+            timed_tile(
+                &ctx,
                 &tag("down", "generic"),
                 6,
                 down_flops,
@@ -1906,6 +2002,14 @@ fn tensor_tile_production_shape_timing() {
                 down_flops,
                 b.down_bytes,
                 &down_tensor,
+            );
+            timed_tile(
+                &ctx,
+                &tag("down", "tensor f16act"),
+                6,
+                down_flops,
+                b.down_bytes,
+                &down_tensor_f16,
             );
         }
     }

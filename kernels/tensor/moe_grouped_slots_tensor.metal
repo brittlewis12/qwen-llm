@@ -57,13 +57,15 @@ inline float tt_silu(float x) {
 
 // DENSE: one weight matrix (grid depth 1), slot == activation row ==
 // output row, no counts/ids; args.N = rows, b_div = 1, slot_limit = rows.
+// HALF_ACT: srcB holds half activations (converted once by the caller)
+// instead of F32; the staged operand is the same half value either way.
 template <int BYTES, short NL,
           void (*DEQ)(device const uchar *, short, thread half4x4 &),
-          short EPI, bool DENSE>
+          short EPI, bool DENSE, bool HALF_ACT>
 inline void moe_grouped_slots_mm_tensor_body(
         constant moe_group_generic_mm_args & args,
         device const uchar * srcA,
-        device const float * srcB,
+        device const uchar * srcB_bytes,
         device const int   * counts,
         device const int   * ids,
         device       float * dst,
@@ -104,7 +106,9 @@ inline void moe_grouped_slots_mm_tensor_body(
     const int slot_id = DENSE ? r1 + lr1 : ids[(ulong)im * args.N + (r1 + lr1)];
     const bool slot_valid = slot_id >= 0 && slot_id < slot_limit;
     const int b_row = (slot_valid ? slot_id : 0) / int(args.b_div);
-    device const float * y_ptr = srcB + (ulong)args.stride_b * b_row + (ulong)iy;
+    const ulong y_off = (ulong)args.stride_b * b_row + (ulong)iy;
+    device const float * y_ptr = (device const float *)srcB_bytes + y_off;
+    device const half * yh_ptr = (device const half *)srcB_bytes + y_off;
 
     threadgroup half * stage_a = sa + lr0 * TT_NK + 16 * il0;
     threadgroup half * stage_b = sb + lr1 * TT_NK + iy;
@@ -128,7 +132,8 @@ inline void moe_grouped_slots_mm_tensor_body(
     for (uint loop_k = 0; loop_k < args.K; loop_k += TT_NK) {
         half4x4 temp_a;
         DEQ(x_ptr, il, temp_a);
-        const half2x4 yv = (half2x4)(*((device const float2x4 *)y_ptr));
+        const half2x4 yv = HALF_ACT ? *((device const half2x4 *)yh_ptr)
+                                    : (half2x4)(*((device const float2x4 *)y_ptr));
 
         // The previous step's matmul must be done reading the slabs.
         threadgroup_barrier(mem_flags::mem_threadgroup);
@@ -141,6 +146,7 @@ inline void moe_grouped_slots_mm_tensor_body(
         il = (il + 2 < NL) ? il + 2 : il % 2;
         x_ptr = (il < 2) ? x_ptr + BYTES * ((2 + NL - 1) / NL) : x_ptr;
         y_ptr += TT_NK;
+        yh_ptr += TT_NK;
 
         threadgroup_barrier(mem_flags::mem_threadgroup);
         op.run(left, right, acc);
@@ -188,8 +194,26 @@ kernel void kernel_moe_grouped_slots_mm_tensor(
         threadgroup  uchar * shmem        [[threadgroup(0)]],
         uint3  tgpig [[threadgroup_position_in_grid]],
         uint tiitg_wide [[thread_index_in_threadgroup]]) {
-    moe_grouped_slots_mm_tensor_body<BYTES, NL, DEQ, EPI, false>(
-        args, srcA, srcB, counts, ids, dst, shmem, tgpig, tiitg_wide, 0.0f);
+    moe_grouped_slots_mm_tensor_body<BYTES, NL, DEQ, EPI, false, false>(
+        args, srcA, (device const uchar *)srcB, counts, ids, dst, shmem, tgpig, tiitg_wide, 0.0f);
+}
+
+// Half-activation twin (srcB is half).
+template <int BYTES, short NL,
+          void (*DEQ)(device const uchar *, short, thread half4x4 &),
+          short EPI>
+kernel void kernel_moe_grouped_slots_mm_tensor_f16act(
+        constant moe_group_generic_mm_args & args [[buffer(0)]],
+        device const uchar * srcA         [[buffer(1)]],
+        device const half  * srcB         [[buffer(2)]],
+        device const int   * counts       [[buffer(3)]],
+        device const int   * ids          [[buffer(4)]],
+        device       float * dst          [[buffer(5)]],
+        threadgroup  uchar * shmem        [[threadgroup(0)]],
+        uint3  tgpig [[threadgroup_position_in_grid]],
+        uint tiitg_wide [[thread_index_in_threadgroup]]) {
+    moe_grouped_slots_mm_tensor_body<BYTES, NL, DEQ, EPI, false, true>(
+        args, srcA, (device const uchar *)srcB, counts, ids, dst, shmem, tgpig, tiitg_wide, 0.0f);
 }
 
 template <int BYTES, short NL,
@@ -205,8 +229,25 @@ kernel void kernel_moe_up_clamped_grouped_slots_tensor(
         threadgroup  uchar * shmem        [[threadgroup(0)]],
         uint3  tgpig [[threadgroup_position_in_grid]],
         uint tiitg_wide [[thread_index_in_threadgroup]]) {
-    moe_grouped_slots_mm_tensor_body<BYTES, NL, DEQ, 2, false>(
-        args, srcA, srcB, counts, ids, dst, shmem, tgpig, tiitg_wide, limit);
+    moe_grouped_slots_mm_tensor_body<BYTES, NL, DEQ, 2, false, false>(
+        args, srcA, (device const uchar *)srcB, counts, ids, dst, shmem, tgpig, tiitg_wide, limit);
+}
+
+template <int BYTES, short NL,
+          void (*DEQ)(device const uchar *, short, thread half4x4 &)>
+kernel void kernel_moe_up_clamped_grouped_slots_tensor_f16act(
+        constant moe_group_generic_mm_args & args [[buffer(0)]],
+        device const uchar * srcA         [[buffer(1)]],
+        device const half  * srcB         [[buffer(2)]],
+        device const int   * counts       [[buffer(3)]],
+        device const int   * ids          [[buffer(4)]],
+        device       float * dst          [[buffer(5)]],
+        constant float & limit            [[buffer(6)]],
+        threadgroup  uchar * shmem        [[threadgroup(0)]],
+        uint3  tgpig [[threadgroup_position_in_grid]],
+        uint tiitg_wide [[thread_index_in_threadgroup]]) {
+    moe_grouped_slots_mm_tensor_body<BYTES, NL, DEQ, 2, false, true>(
+        args, srcA, (device const uchar *)srcB, counts, ids, dst, shmem, tgpig, tiitg_wide, limit);
 }
 
 // Dense mat-mat: dst[row, :] = W * src[row, :] for args.N rows (the
@@ -222,13 +263,30 @@ kernel void kernel_mat_mat_tensor(
         threadgroup  uchar * shmem        [[threadgroup(0)]],
         uint3  tgpig [[threadgroup_position_in_grid]],
         uint tiitg_wide [[thread_index_in_threadgroup]]) {
-    moe_grouped_slots_mm_tensor_body<BYTES, NL, DEQ, 0, true>(
-        args, srcA, srcB, nullptr, nullptr, dst, shmem, tgpig, tiitg_wide, 0.0f);
+    moe_grouped_slots_mm_tensor_body<BYTES, NL, DEQ, 0, true, false>(
+        args, srcA, (device const uchar *)srcB, nullptr, nullptr, dst, shmem, tgpig, tiitg_wide, 0.0f);
+}
+
+template <int BYTES, short NL,
+          void (*DEQ)(device const uchar *, short, thread half4x4 &)>
+kernel void kernel_mat_mat_tensor_f16act(
+        constant moe_group_generic_mm_args & args [[buffer(0)]],
+        device const uchar * srcA         [[buffer(1)]],
+        device const half  * srcB         [[buffer(2)]],
+        device       float * dst          [[buffer(3)]],
+        threadgroup  uchar * shmem        [[threadgroup(0)]],
+        uint3  tgpig [[threadgroup_position_in_grid]],
+        uint tiitg_wide [[thread_index_in_threadgroup]]) {
+    moe_grouped_slots_mm_tensor_body<BYTES, NL, DEQ, 0, true, true>(
+        args, srcA, (device const uchar *)srcB, nullptr, nullptr, dst, shmem, tgpig, tiitg_wide, 0.0f);
 }
 
 typedef decltype(kernel_moe_grouped_slots_mm_tensor<QT_Q4_K_BYTES, QT_Q4_K_NL, qt_dequantize_q4_K, 0>) moe_grouped_slots_mm_tensor_t;
 typedef decltype(kernel_moe_up_clamped_grouped_slots_tensor<QT_Q4_K_BYTES, QT_Q4_K_NL, qt_dequantize_q4_K>) moe_up_clamped_grouped_slots_tensor_t;
 typedef decltype(kernel_mat_mat_tensor<QT_Q4_K_BYTES, QT_Q4_K_NL, qt_dequantize_q4_K>) mat_mat_tensor_t;
+typedef decltype(kernel_moe_grouped_slots_mm_tensor_f16act<QT_Q4_K_BYTES, QT_Q4_K_NL, qt_dequantize_q4_K, 0>) moe_grouped_slots_mm_tensor_f16act_t;
+typedef decltype(kernel_moe_up_clamped_grouped_slots_tensor_f16act<QT_Q4_K_BYTES, QT_Q4_K_NL, qt_dequantize_q4_K>) moe_up_clamped_grouped_slots_tensor_f16act_t;
+typedef decltype(kernel_mat_mat_tensor_f16act<QT_Q4_K_BYTES, QT_Q4_K_NL, qt_dequantize_q4_K>) mat_mat_tensor_f16act_t;
 
 // One down / up_silu_mul / up_clamped / dense quadruple per dtype. Keep the
 // list in sync with MOE_GROUPED_GENERIC_LAYOUTS (a CPU test parses it).
@@ -236,7 +294,11 @@ typedef decltype(kernel_mat_mat_tensor<QT_Q4_K_BYTES, QT_Q4_K_NL, qt_dequantize_
     template [[host_name("kernel_moe_down_" #suffix "_f32_grouped_slots_tensor")]] kernel moe_grouped_slots_mm_tensor_t kernel_moe_grouped_slots_mm_tensor<BYTES, NL, DEQ, 0>; \
     template [[host_name("kernel_moe_up_silu_mul_" #suffix "_f32_grouped_slots_tensor")]] kernel moe_grouped_slots_mm_tensor_t kernel_moe_grouped_slots_mm_tensor<BYTES, NL, DEQ, 1>; \
     template [[host_name("kernel_moe_up_clamped_" #suffix "_f32_grouped_slots_tensor")]] kernel moe_up_clamped_grouped_slots_tensor_t kernel_moe_up_clamped_grouped_slots_tensor<BYTES, NL, DEQ>; \
-    template [[host_name("kernel_mat_mat_" #suffix "_f32_tensor")]] kernel mat_mat_tensor_t kernel_mat_mat_tensor<BYTES, NL, DEQ>;
+    template [[host_name("kernel_mat_mat_" #suffix "_f32_tensor")]] kernel mat_mat_tensor_t kernel_mat_mat_tensor<BYTES, NL, DEQ>; \
+    template [[host_name("kernel_moe_down_" #suffix "_f16act_grouped_slots_tensor")]] kernel moe_grouped_slots_mm_tensor_f16act_t kernel_moe_grouped_slots_mm_tensor_f16act<BYTES, NL, DEQ, 0>; \
+    template [[host_name("kernel_moe_up_silu_mul_" #suffix "_f16act_grouped_slots_tensor")]] kernel moe_grouped_slots_mm_tensor_f16act_t kernel_moe_grouped_slots_mm_tensor_f16act<BYTES, NL, DEQ, 1>; \
+    template [[host_name("kernel_moe_up_clamped_" #suffix "_f16act_grouped_slots_tensor")]] kernel moe_up_clamped_grouped_slots_tensor_f16act_t kernel_moe_up_clamped_grouped_slots_tensor_f16act<BYTES, NL, DEQ>; \
+    template [[host_name("kernel_mat_mat_" #suffix "_f16act_tensor")]] kernel mat_mat_tensor_f16act_t kernel_mat_mat_tensor_f16act<BYTES, NL, DEQ>;
 
 TT_INSTANTIATE(q2_0,    QT_Q2_0_BYTES,    QT_Q2_0_NL,    qt_dequantize_q2_0)
 TT_INSTANTIATE(q2_K,    QT_Q2_K_BYTES,    QT_Q2_K_NL,    qt_dequantize_q2_K)

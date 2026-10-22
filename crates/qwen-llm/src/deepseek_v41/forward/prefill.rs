@@ -49,11 +49,84 @@ fn with_rowwise_linears<T>(f: impl FnOnce() -> T) -> T {
     f()
 }
 
+/// Half copies of prefill activations for the tensor tile (`_f16act`):
+/// one scratch per row set, converted once per distinct input and read by
+/// every tensor-routed projection of that input. The tile rounds its
+/// operand to half either way, so the results are bitwise identical to
+/// the F32-input form; this only removes the per-tile re-read and cast.
+pub(super) struct HalfScratch {
+    tensor: MetalTensor,
+}
+
+impl HalfScratch {
+    /// Scratch for up to `elements` activations when the tensor tier is
+    /// selected on `ctx`; `None` otherwise (nothing would read it).
+    pub(super) fn new(ctx: &MetalContext, elements: usize) -> Result<Option<Self>> {
+        if !metal::moe_grouped_tensor_selected(ctx) || elements == 0 {
+            return Ok(None);
+        }
+        Ok(Some(Self {
+            tensor: allocate(ctx, elements, 1, GgmlType::F16)?,
+        }))
+    }
+
+    /// Convert the first `elements` of `x` (F32) into the scratch and
+    /// return the half view. Serial encoders only: every projection that
+    /// reads the view must be encoded before the next `convert`.
+    pub(super) fn convert(
+        &self,
+        ctx: &MetalContext,
+        enc: &KernelEncoder,
+        x: &MetalTensor,
+        elements: usize,
+    ) -> std::result::Result<MetalTensor, metal::MetalError> {
+        if elements == 0 || (elements as u64) > self.tensor.n_elements() {
+            return Err(metal::MetalError::BadShape {
+                kernel: "v41_half_scratch",
+                detail: format!(
+                    "{elements} activations exceed the {} element half scratch",
+                    self.tensor.n_elements()
+                ),
+            });
+        }
+        let src = x.view_subrange(0, vec![elements as u64]);
+        let dst = self.tensor.view_subrange(0, vec![elements as u64]);
+        metal::encode_scatter_offset_f32_to_f16(ctx, enc, &src, &dst, 0, elements)?;
+        Ok(dst)
+    }
+}
+
 impl Linear<'_> {
+    /// True when `encode_rows` would take the dense tensor tile for `rows`.
+    pub(super) fn tensor_rows_selected(&self, rows: usize) -> bool {
+        let mma = mma_linear_rows_selected(self.tensor.dtype, self.input, rows);
+        #[cfg(test)]
+        let mma = mma
+            && !ROWWISE_LINEAR_ROWS.with(|flag| flag.get())
+            && !F32_LINEAR_ROWS.with(|flag| flag.get());
+        mma && metal::moe_grouped_tensor_selected(self.ctx)
+            && metal::moe_grouped_generic_layout(self.tensor.dtype)
+                .is_some_and(|l| self.input.is_multiple_of(l.block_elems))
+    }
+
     pub(super) fn encode_rows(
         &self,
         enc: &KernelEncoder,
         x: &MetalTensor,
+        y: &MetalTensor,
+        rows: usize,
+    ) -> std::result::Result<(), metal::MetalError> {
+        self.encode_rows_with(enc, x, None, y, rows)
+    }
+
+    /// `encode_rows` with an optional half copy of `x` (`x_half`, the first
+    /// `input * rows` elements already converted) that the dense tensor
+    /// tile reads instead of re-casting `x`; ignored on every other route.
+    pub(super) fn encode_rows_with(
+        &self,
+        enc: &KernelEncoder,
+        x: &MetalTensor,
+        x_half: Option<&MetalTensor>,
         y: &MetalTensor,
         rows: usize,
     ) -> std::result::Result<(), metal::MetalError> {
@@ -78,15 +151,28 @@ impl Linear<'_> {
             let y = y.view_bytes(0, vec![self.output as u64, rows as u64]);
             // The dense form of the Metal 4 tensor tile where the tier
             // exists: same half operands and F32 sums as the MMA tile.
-            if metal::moe_grouped_tensor_selected(self.ctx)
-                && metal::moe_grouped_generic_layout(self.tensor.dtype)
-                    .is_some_and(|l| self.input.is_multiple_of(l.block_elems))
-            {
+            if self.tensor_rows_selected(rows) {
+                let elements = (self.input * rows) as u64;
+                let x_half = x_half.map(|h| {
+                    if h.dtype == GgmlType::F16 && h.n_elements() >= elements {
+                        Ok(h.view_bytes(0, vec![self.input as u64, rows as u64]))
+                    } else {
+                        Err(metal::MetalError::BadShape {
+                            kernel: "v41_linear_rows",
+                            detail: format!(
+                                "half input must be F16 with >= {elements} elements, got {:?} x {}",
+                                h.dtype,
+                                h.n_elements()
+                            ),
+                        })
+                    }
+                });
+                let x_half = x_half.transpose()?;
                 return metal::encode_mat_mat_tensor_f32(
                     self.ctx,
                     enc,
                     &self.tensor,
-                    &x,
+                    x_half.as_ref().unwrap_or(&x),
                     &y,
                     self.input,
                     self.output,

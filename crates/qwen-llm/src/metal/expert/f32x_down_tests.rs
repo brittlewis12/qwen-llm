@@ -13,18 +13,26 @@ mod reduction;
 
 #[test]
 fn down_f32x_capability_matches_native_instantiations() {
-    assert_eq!(MOE_GROUPED_GENERIC_LAYOUTS.len(), 17);
+    assert_eq!(MOE_GROUPED_GENERIC_LAYOUTS.len(), 20);
     assert_eq!(
         SOURCE
             .matches("template [[host_name(\"kernel_moe_down_")
             .count(),
-        18
+        20
     );
     assert!(SOURCE.contains("#include \"native_dequant_f32.h\""));
     assert!(moe_down_f32x_grouped_slots_supported(GgmlType::MXFP4));
     for layout in MOE_GROUPED_GENERIC_LAYOUTS {
         let dtype = layout.dtype;
         assert!(moe_down_f32x_grouped_slots_supported(dtype));
+        // MXFP4 and the IQ2 grid types keep their own F32 decoders (checked
+        // below and in the MXFP4 reduction tests), not the latent copies.
+        if matches!(
+            dtype,
+            GgmlType::MXFP4 | GgmlType::IQ2_XS | GgmlType::IQ2_XXS
+        ) {
+            continue;
+        }
         let name = moe_down_f32x_grouped_slots_pipeline_name(dtype).unwrap();
         let entry = SOURCE
             .lines()
@@ -44,12 +52,13 @@ fn down_f32x_capability_matches_native_instantiations() {
         )));
         assert!(DECODERS.contains(&format!("inline void latent_dequantize_{}(", layout.suffix)));
     }
-    for dtype in [
-        GgmlType::I32,
-        GgmlType::Q5_0,
-        GgmlType::IQ2_XXS,
-        GgmlType::Unknown,
-    ] {
+    for (dtype, suffix) in [(GgmlType::IQ2_XXS, "iq2_xxs"), (GgmlType::IQ2_XS, "iq2_xs")] {
+        assert!(moe_down_f32x_grouped_slots_supported(dtype));
+        let name = moe_down_f32x_grouped_slots_pipeline_name(dtype).unwrap();
+        assert!(SOURCE.contains(&format!("host_name(\"{name}\")")));
+        assert!(SOURCE.contains(&format!("inline void f32x_dequantize_{suffix}(")));
+    }
+    for dtype in [GgmlType::I32, GgmlType::Q5_0, GgmlType::Unknown] {
         assert!(!moe_down_f32x_grouped_slots_supported(dtype));
         assert!(moe_down_f32x_grouped_slots_pipeline_name(dtype).is_none());
     }
@@ -279,6 +288,25 @@ fn down_f32x_iq3_xxs_glm_dimensions_match_cpu() {
         return;
     };
     exercise_down(&ctx, GgmlType::IQ3_XXS, 2048, 4096, 3);
+}
+
+#[test]
+fn down_f32x_iq2_xxs_and_xs_match_cpu_and_preserve_slot_independence() {
+    let _lease = production_lease();
+    let Some(ctx) = crate::test_fixtures::metal_context_or_skip() else {
+        return;
+    };
+    for dtype in [GgmlType::IQ2_XXS, GgmlType::IQ2_XS] {
+        let mut first = None;
+        for n in [1, 3, 17, 32, 33] {
+            let bits = exercise_down(&ctx, dtype, 512, 65, n);
+            if let Some(ref first) = first {
+                assert_eq!(&bits, first, "{dtype:?}: bucket size {n}");
+            } else {
+                first = Some(bits);
+            }
+        }
+    }
 }
 
 /// Dense F32/BF16 weights also retain values outside half's finite range.

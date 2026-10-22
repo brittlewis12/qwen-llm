@@ -6,6 +6,28 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the current state and evidence index.
 
+## 2026-10-22 - V4.1: Metal 4 Tensor-Ops Expert Tile, +24% Prefill
+
+- `mpp::tensor_ops::matmul2d` on threadgroup-resident half operands
+  sustains ~130 TFLOPS on the M5 Ultra at the expert tile shape
+  (32 x 64 x 32, 4 simdgroups), 4.3x the ~30 TFLOPS simdgroup-MMA ceiling.
+  The tensor expert tile stages the same operands as the generic half tile
+  and swaps the MMA loop for one matmul2d per 32-k step into a float
+  cooperative tensor; same contract, three roles, all 20 dtypes.
+- Per dispatch at the production shape: gate+up 26-29 -> 12.5-15.0 ms,
+  down 13-15 -> 6.4-7.9 ms (1.86-2.19x; 37-46 TFLOPS). ABBA against main
+  `14377c46`: IQ3 pp2048 382.9 -> 475.2 (+24.1%), pp4096 358.5 -> 437.0
+  (+21.9%); Q2 pp2048 381.2 -> 476.2 (+24.9%), pp4096 356.2 -> 438.3
+  (+23.1%); decode unchanged. Cumulative from `4b1fca04`: pp2048 192 ->
+  476 tok/s.
+- Tile-loop variants are negative: double-buffered slabs -0.4 to -3.6%,
+  64-k steps -3 to -18%, both -12 to -32%. The tile is bound by dequant,
+  staging and the activation path now, and wants small resident
+  threadgroups; the next tile levers are those paths, not the MMA.
+- M5-class only (`tensor_ops_status`); `QWEN_EXPERT_TENSOR_TILE=0` keeps
+  the generic tile. Probes: `matmul2d_peak_timing`,
+  `tensor_tile_production_shape_timing` (`QWEN_V41_TILE_TIMING=1`).
+- [Packet](bench/2026-10-22-v41-tensor-expert-tile.md).
 ## 2026-10-22 - GLM Short Packets Improve, But Native NextN Still Needs Cheaper Verification
 
 - M4 Max, API validation enabled: `ce075a09` replaces underfilled grouped

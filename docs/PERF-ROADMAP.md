@@ -26,15 +26,17 @@ expected effect, status. Status is one of `open`, `in flight (branch)`,
 `in flight` with your branch; a second lane finding it claimed reads the branch
 before building anything adjacent. This replaces relaying between sessions.
 
-### DeepSeek V4.1-Flash (main after the MMA sink tile: pp2048 Q2 381 / IQ3 383 tok/s, pp4096 Q2 356 / IQ3 358; decode tg32 44 / 41.5, tg32@d2048 41.6)
+### DeepSeek V4.1-Flash (main after the tensor expert tile: pp2048 Q2 476 / IQ3 475 tok/s, pp4096 Q2 438 / IQ3 437; decode tg32 43 / 41, tg32@d2048 41.6)
 
 Decode budget at depth 2048, 22.3 ms/token: ~10.2 ms bytes (11.1 GiB at the
 ~1.09 TB/s the GEMV probe reaches), ~8 ms dispatch floor (~1,600 dispatches),
-~4 ms spread thin. Prefill budget per 2048-token chunk before the MMA tile,
-sampled spans (`QWEN_V41_PREFILL_STAGES=1`, packet 2026-10-21): FFN 39%,
-attention tiles (QK^T/softmax/PV) 32%, owner/producer per-row loops 13%,
-output projections 8%, prepare 6%, HC 2%. After it, FFN is roughly half of
-prefill and the tiles about a fifth; re-sample before claiming.
+~4 ms spread thin. Prefill budget per 2048-token chunk before the tensor
+expert tile, sampled spans (`QWEN_V41_PREFILL_STAGES=1`, 2026-10-21
+tile-ceiling entry): FFN 47%, attention tiles (QK^T/softmax/PV) 20%,
+owner/producer per-row loops 15%, output projections 10%, prepare 7%, HC
+2%. The tensor tile roughly halves the expert GEMMs, so the remaining
+budget is closer to FFN 30%, tiles 26%, per-row loops 20%, projections
+13%, prepare 9%; re-sample before claiming.
 
 - Attention tiles via simdgroup MMA (half-staged Q/K/V, F32 sums),
   replacing the scalar score kernel and the gather+GEMM PV for the released
@@ -52,23 +54,28 @@ prefill and the tiles about a fifth; re-sample before claiming.
 - MXFP4 generic half layout: landed with the IQ2 layouts (needed for layers
   whose down is MXFP4); +1.6% on its own. Widens DFlash/GLM grouped
   eligibility on MXFP4 artifacts (unmeasured there).
-- Expert tile efficiency: bounded (2026-10-21 tile-ceiling entry). The
-  generic half-staged tiles run at 20-22 TFLOPS for every storage type at
-  the V4.1 shape; the device's raw simdgroup-MMA ceiling is ~30 TFLOPS, and
-  the tile with decode and activation loads removed reaches 25. Staging
-  layout (+1-3%) and 32-slot gate/up tiles (+0.25-0.9%) are not levers;
-  4096-row chunks untested. The remaining FFN lever on M5 is the Metal 4
-  tensor-ops path, and it is the only path to MLX-Serve-class prefill: a
-  2048-token prefill is ~40.6 TFLOP of expert work (384 experts, top-6 +
-  shared, 5120x2304 gate/up/down, 40 layers), >= 1.9 s at 20-22 TFLOPS
-  (~1,050 tok/s ceiling with everything else free, ~1,500 at the 30 TFLOPS
-  simdgroup peak). Metal 4 expert tile (`tensor_ops::matmul2d` on the
-  threadgroup-staged half operands the generic tile already produces;
-  matmul2d peak probe and a production-shape tile microbench first, the
-  tile behind the existing device gate only if the MMA phase gains >= 1.5x;
-  the MMA sink tile is the same swap afterwards): in flight
-  (`perf/v41-tensor-tile`). Nobody else is on the tensor tier; the
-  16x16x32 witness is the only kernel there.
+- Simdgroup-MMA expert tile efficiency: bounded (2026-10-21 tile-ceiling
+  entry): 20-22 TFLOPS against a ~30 TFLOPS ceiling; staging layout and
+  32-slot gate/up tiles are not levers. Superseded on M5 by the tensor tile.
+- Metal 4 tensor-ops expert tile: landed (2026-10-22 entry,
+  bench/2026-10-22-v41-tensor-expert-tile.md). matmul2d on threadgroup
+  half operands reaches ~130 TFLOPS (4.3x simdgroup MMA); the tile runs
+  the expert GEMMs at 37-46 TFLOPS, 1.86-2.19x per dispatch, pp2048 +24%
+  / pp4096 +22% on both artifacts. M5-class only; `QWEN_EXPERT_TENSOR_TILE=0`
+  keeps the generic tile. Negative there: double-buffered slabs, 64-k
+  steps (the tile wants small resident threadgroups). What remains in the
+  tile is dequant + staging + the F32 activation path (each tile re-reads
+  and half-casts its 32 x K activation block per 64-row weight tile, 4.5x
+  the weight bytes): open, ablate first. Native MXFP4 right operands
+  (`metal_fp4_e2m1_format` + `ue8m0` block-32 scales, 27.0 entry points)
+  would drop the dequant for MXFP4 layers: open.
+- Tensor ops for the dense prefill GEMMs (output projections ~13% of the
+  post-tile budget, the Q8_0 attention projections in `prepare`): the
+  `mat_mat` MMA kernels are the same simdgroup path the expert tile left;
+  open.
+- Tensor ops for the attention sink tile (`score_mma`/`pv_mma`, 16-key
+  gathered blocks): the tile is gather-bound as much as MMA-bound; measure
+  with the fused score+softmax+PV bet rather than alone: open.
 - Owner/producer per-row loops (compressor, index key, selection; 8 layers,
   grows with prompt length): compressor prep landed (`a7de76ab`): key norm +
   key/latent RoPE + both cache copies fused 5 -> 1, +0.5-1.0% on top of the

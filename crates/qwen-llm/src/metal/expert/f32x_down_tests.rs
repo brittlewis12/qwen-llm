@@ -13,7 +13,7 @@ mod reduction;
 
 #[test]
 fn down_f32x_capability_matches_native_instantiations() {
-    assert_eq!(MOE_GROUPED_GENERIC_LAYOUTS.len(), 17);
+    assert_eq!(MOE_GROUPED_GENERIC_LAYOUTS.len(), 20);
     assert_eq!(
         SOURCE
             .matches("template [[host_name(\"kernel_moe_down_")
@@ -25,6 +25,14 @@ fn down_f32x_capability_matches_native_instantiations() {
     for layout in MOE_GROUPED_GENERIC_LAYOUTS {
         let dtype = layout.dtype;
         assert!(moe_down_f32x_grouped_slots_supported(dtype));
+        // MXFP4 and the IQ2 grid types keep their own F32 decoders (checked
+        // below and in the MXFP4 reduction tests), not the latent copies.
+        if matches!(
+            dtype,
+            GgmlType::MXFP4 | GgmlType::IQ2_XS | GgmlType::IQ2_XXS
+        ) {
+            continue;
+        }
         let name = moe_down_f32x_grouped_slots_pipeline_name(dtype).unwrap();
         let entry = SOURCE
             .lines()

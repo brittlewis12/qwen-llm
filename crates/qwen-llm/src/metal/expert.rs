@@ -1518,7 +1518,7 @@ fn expert_capability_names_have_shader_implementations() {
     assert!(all_slots_down_supported(GgmlType::IQ3_XXS));
     assert!(grouped_expert_down_supported(GgmlType::IQ3_XXS));
     assert!(all_slots_down_supported(GgmlType::MXFP4));
-    assert!(!grouped_expert_down_supported(GgmlType::MXFP4));
+    assert!(grouped_expert_down_supported(GgmlType::MXFP4));
     assert!(all_slots_gate_up_supported(
         GgmlType::IQ2_S,
         GgmlType::IQ3_S

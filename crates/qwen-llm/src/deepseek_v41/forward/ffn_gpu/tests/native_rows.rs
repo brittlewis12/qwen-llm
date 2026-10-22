@@ -412,13 +412,13 @@ fn native_rows_v41_eligibility_keeps_grouped_and_deferred_paths() {
         (GgmlType::IQ3_S, GgmlType::IQ3_S, true, false),
         (GgmlType::IQ3_XXS, GgmlType::IQ3_S, true, true),
         (GgmlType::Q3_K, GgmlType::MXFP4, true, true),
-        (GgmlType::IQ2_XS, GgmlType::MXFP4, false, true),
-        (GgmlType::IQ2_XXS, GgmlType::IQ2_XXS, false, true),
-        (GgmlType::IQ2_XXS, GgmlType::IQ3_XXS, false, true),
-        (GgmlType::IQ2_XXS, GgmlType::MXFP4, false, true),
-        (GgmlType::Q3_K, GgmlType::IQ2_XXS, false, true),
-        (GgmlType::Q3_K, GgmlType::IQ2_XS, false, false),
-        (GgmlType::IQ2_XS, GgmlType::IQ2_XS, false, false),
+        (GgmlType::IQ2_XS, GgmlType::MXFP4, true, true),
+        (GgmlType::IQ2_XXS, GgmlType::IQ2_XXS, true, true),
+        (GgmlType::IQ2_XXS, GgmlType::IQ3_XXS, true, true),
+        (GgmlType::IQ2_XXS, GgmlType::MXFP4, true, true),
+        (GgmlType::Q3_K, GgmlType::IQ2_XXS, true, true),
+        (GgmlType::Q3_K, GgmlType::IQ2_XS, true, false),
+        (GgmlType::IQ2_XS, GgmlType::IQ2_XS, true, false),
     ] {
         let banks = [
             MetalTensor {

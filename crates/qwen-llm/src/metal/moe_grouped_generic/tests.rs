@@ -279,6 +279,12 @@ fn moe_grouped_tensor_mapping_matches_metal_source() {
                 "{name}: no host_name pattern in the tensor instantiation macro"
             );
         }
+        let dense = mat_mat_tensor_pipeline_name(l.dtype).unwrap();
+        let (prefix, rest) = dense.split_once(l.suffix).unwrap();
+        assert!(
+            TENSOR_METAL.contains(&format!("host_name(\"{prefix}\" #suffix \"{rest}\")")),
+            "{dense}: no host_name pattern in the tensor instantiation macro"
+        );
     }
     let struct_fields = |source: &str| -> Vec<String> {
         let start = source
@@ -1091,6 +1097,163 @@ tensor_grouped_moe_cases! {
     tensor_grouped_moe_down_f32_matches, tensor_grouped_moe_gate_up_f32_matches => GgmlType::F32;
     tensor_grouped_moe_down_f16_matches, tensor_grouped_moe_gate_up_f16_matches => GgmlType::F16;
     tensor_grouped_moe_down_bf16_matches, tensor_grouped_moe_gate_up_bf16_matches => GgmlType::BF16;
+}
+
+/// Dense tensor mat-mat against the CPU reference and the simdgroup
+/// `mat_mat` dispatch at a ragged shape (rows not a multiple of 32, M not
+/// a multiple of 64).
+fn run_tensor_dense_case(dtype: GgmlType) {
+    let Some(ctx) = metal_test_context() else {
+        return;
+    };
+    if !moe_grouped_tensor_available(&ctx) {
+        eprintln!("tensor tier unavailable: {:?}", ctx.tensor_ops_status());
+        return;
+    }
+    const N_IN: usize = 512;
+    const N_OUT: usize = 320;
+    const ROWS: usize = 45;
+    let bank = synthetic_bank(dtype, N_IN, N_OUT, 1, 0xde ^ dtype as u64);
+    let w_cpu = cpu_expert(dtype, &bank, N_IN, N_OUT, 0);
+    let mut rng = Lcg(0xa1 ^ dtype as u64);
+    let x: Vec<f32> = (0..ROWS * N_IN).map(|_| rng.signed(0.5)).collect();
+    let cpu: Vec<f32> = (0..ROWS)
+        .flat_map(|r| matvec(&w_cpu, N_IN, &x[r * N_IN..(r + 1) * N_IN]))
+        .collect();
+    let w = MetalTensor::from_bytes(&ctx, &bank, vec![N_IN as u64, N_OUT as u64], dtype)
+        .expect("weight tensor");
+    let x_t = f32_tensor(&ctx, &x);
+    let x_v = x_t.view_bytes(0, vec![N_IN as u64, ROWS as u64]);
+    let y_tensor = MetalTensor::zeros_f32(&ctx, vec![N_OUT as u64, ROWS as u64]).unwrap();
+    one_shot(&ctx, |enc| {
+        encode_mat_mat_tensor_f32(&ctx, enc, &w, &x_v, &y_tensor, N_IN, N_OUT, ROWS)
+    })
+    .expect("tensor dense mat-mat");
+    let gpu = read_back_f32(&y_tensor.buffer, ROWS * N_OUT);
+    let label = format!("tensor-dense-{dtype:?}");
+    assert_close(&label, &gpu, &cpu);
+    if crate::metal_forward::mat_mat_dispatch_supported(dtype) {
+        let y_mma = MetalTensor::zeros_f32(&ctx, vec![N_OUT as u64, ROWS as u64]).unwrap();
+        one_shot(&ctx, |enc| {
+            crate::metal_forward::encode_mat_mat_dispatch_with_policy(
+                &ctx, enc, &w, &x_v, &y_mma, N_IN, N_OUT, ROWS, false,
+            )
+            .map_err(|e| MetalError::BadShape {
+                kernel: "test_mat_mat",
+                detail: e.to_string(),
+            })
+        })
+        .expect("mma mat-mat");
+        let mma = read_back_f32(&y_mma.buffer, ROWS * N_OUT);
+        assert_tile_agreement(&label, &gpu, &mma);
+    }
+}
+
+macro_rules! tensor_dense_cases {
+    ($($name:ident => $dtype:expr;)*) => {
+        $(
+            #[test]
+            fn $name() {
+                run_tensor_dense_case($dtype);
+            }
+        )*
+
+        #[test]
+        fn tensor_dense_case_list_covers_mapping() {
+            let listed = [$($dtype),*];
+            for l in MOE_GROUPED_GENERIC_LAYOUTS {
+                assert!(listed.contains(&l.dtype), "no dense tensor test for {:?}", l.dtype);
+            }
+        }
+    };
+}
+
+tensor_dense_cases! {
+    tensor_dense_q2_0_matches => GgmlType::Q2_0;
+    tensor_dense_q2_k_matches => GgmlType::Q2_K;
+    tensor_dense_q3_k_matches => GgmlType::Q3_K;
+    tensor_dense_q4_k_matches => GgmlType::Q4_K;
+    tensor_dense_q5_k_matches => GgmlType::Q5_K;
+    tensor_dense_q6_k_matches => GgmlType::Q6_K;
+    tensor_dense_q8_0_matches => GgmlType::Q8_0;
+    tensor_dense_q4_0_matches => GgmlType::Q4_0;
+    tensor_dense_q4_1_matches => GgmlType::Q4_1;
+    tensor_dense_iq2_s_matches => GgmlType::IQ2_S;
+    tensor_dense_iq3_xxs_matches => GgmlType::IQ3_XXS;
+    tensor_dense_iq3_s_matches => GgmlType::IQ3_S;
+    tensor_dense_mxfp4_matches => GgmlType::MXFP4;
+    tensor_dense_iq2_xs_matches => GgmlType::IQ2_XS;
+    tensor_dense_iq2_xxs_matches => GgmlType::IQ2_XXS;
+    tensor_dense_iq4_nl_matches => GgmlType::IQ4_NL;
+    tensor_dense_iq4_xs_matches => GgmlType::IQ4_XS;
+    tensor_dense_f32_matches => GgmlType::F32;
+    tensor_dense_f16_matches => GgmlType::F16;
+    tensor_dense_bf16_matches => GgmlType::BF16;
+}
+
+/// Opt-in A/B of the dense tensor tile against the simdgroup `mat_mat`
+/// dispatch at the V4.1 dense projection shapes (Q8_0, 2048 rows),
+/// interleaved on a heated GPU. `QWEN_V41_TILE_TIMING=1`.
+#[test]
+fn tensor_dense_production_shape_timing() {
+    if std::env::var_os("QWEN_V41_TILE_TIMING").is_none() {
+        return;
+    }
+    let ctx = MetalContext::new().expect("Metal");
+    if !moe_grouped_tensor_available(&ctx) {
+        eprintln!("tensor tier unavailable: {:?}", ctx.tensor_ops_status());
+        return;
+    }
+    const ROWS: usize = 2048;
+    let mut rng = Lcg(0x5e1f);
+    for (label, n_in, n_out) in [
+        ("q_b 1280->32768", 1280usize, 32768usize),
+        ("output_a 4096->8192", 4096, 8192),
+        ("output_b 8192->5120", 8192, 5120),
+        ("shexp gate 5120->2304", 5120, 2304),
+        ("shexp down 2304->5120", 2304, 5120),
+        ("q_a 5120->1280", 5120, 1280),
+        ("kv 5120->512", 5120, 512),
+    ] {
+        let dtype = GgmlType::Q8_0;
+        let bank = synthetic_bank(dtype, n_in, n_out, 1, 0x77 ^ n_out as u64);
+        let w = MetalTensor::from_bytes(&ctx, &bank, vec![n_in as u64, n_out as u64], dtype)
+            .expect("weight tensor");
+        let x: Vec<f32> = (0..ROWS * n_in).map(|_| rng.signed(0.5)).collect();
+        let x_t = f32_tensor(&ctx, &x);
+        let x_v = x_t.view_bytes(0, vec![n_in as u64, ROWS as u64]);
+        let y = MetalTensor::zeros_f32(&ctx, vec![n_out as u64, ROWS as u64]).unwrap();
+        let mma = |enc: &KernelEncoder| {
+            crate::metal_forward::encode_mat_mat_dispatch_with_policy(
+                &ctx, enc, &w, &x_v, &y, n_in, n_out, ROWS, false,
+            )
+            .unwrap();
+        };
+        let tensor = |enc: &KernelEncoder| {
+            encode_mat_mat_tensor_f32(&ctx, enc, &w, &x_v, &y, n_in, n_out, ROWS).unwrap();
+        };
+        heat(&ctx, 4, &[&mma, &tensor]);
+        let flops = 2.0 * (ROWS * n_in * n_out) as f64;
+        let bytes = bank.len() as f64;
+        for round in 0..2 {
+            timed_tile(
+                &ctx,
+                &format!("{label} mma r{round}"),
+                6,
+                flops,
+                bytes,
+                &mma,
+            );
+            timed_tile(
+                &ctx,
+                &format!("{label} tensor r{round}"),
+                6,
+                flops,
+                bytes,
+                &tensor,
+            );
+        }
+    }
 }
 
 #[test]

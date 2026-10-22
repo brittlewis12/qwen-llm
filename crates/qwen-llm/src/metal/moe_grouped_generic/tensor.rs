@@ -236,3 +236,100 @@ pub fn encode_moe_swiglu_f32_grouped_slots_tensor(
         ctx, enc, &up, &up_args, w_up, x_pack, counts, ids, inner, n_ffn, n_expert, n_tokens, clamp,
     )
 }
+
+/// `kernel_mat_mat_<suffix>_f32_tensor`: the dense form of the tensor tile
+/// (one weight matrix, slot == row, no routing buffers).
+pub fn mat_mat_tensor_pipeline_name(dtype: GgmlType) -> Option<String> {
+    let l = moe_grouped_generic_layout(dtype)?;
+    Some(format!("kernel_mat_mat_{}_f32_tensor", l.suffix))
+}
+
+/// Dense `y[row] = W x[row]` on the tensor tile with the `mat_mat`
+/// contract: `weight` is `[n_in, n_out]` in any dtype with a generic
+/// layout, `x` is `[n_in, n_query]` F32 and `y` is `[n_out, n_query]` F32
+/// (row-major rows of `n_in` / `n_out`), `n_in` a multiple of 32 and of
+/// the dtype's block. Half operands, F32 sums; output rows past `n_query`
+/// are untouched. Callers gate on [`moe_grouped_tensor_selected`].
+#[allow(clippy::too_many_arguments)]
+pub fn encode_mat_mat_tensor_f32(
+    ctx: &MetalContext,
+    enc: &KernelEncoder,
+    weight: &MetalTensor,
+    x: &MetalTensor,
+    y: &MetalTensor,
+    n_in: usize,
+    n_out: usize,
+    n_query: usize,
+) -> Result<(), MetalError> {
+    const KERNEL: &str = "mat_mat_tensor";
+    let l = moe_grouped_generic_layout(weight.dtype).ok_or_else(|| MetalError::BadShape {
+        kernel: KERNEL,
+        detail: format!("no tensor tile layout for {:?}", weight.dtype),
+    })?;
+    let bad = |detail: String| MetalError::BadShape {
+        kernel: KERNEL,
+        detail,
+    };
+    if n_in == 0 || n_out == 0 || n_query == 0 {
+        return Err(bad(format!(
+            "degenerate shape n_in={n_in} n_out={n_out} n_query={n_query}"
+        )));
+    }
+    if !n_in.is_multiple_of(32) || !n_in.is_multiple_of(l.block_elems) {
+        return Err(bad(format!(
+            "n_in={n_in} must be a multiple of 32 and of the {:?} block ({})",
+            weight.dtype, l.block_elems
+        )));
+    }
+    let nb01 = (n_in / l.block_elems) * l.block_bytes;
+    if weight.n_bytes() < (nb01 as u64) * n_out as u64
+        || x.n_elements() < (n_in * n_query) as u64
+        || y.n_elements() < (n_out * n_query) as u64
+        || x.dtype != GgmlType::F32
+        || y.dtype != GgmlType::F32
+    {
+        return Err(bad(format!(
+            "operand extents: weight {} bytes (need {}), x {} ({:?}, need {}), y {} ({:?}, need {})",
+            weight.n_bytes(),
+            nb01 * n_out,
+            x.n_elements(),
+            x.dtype,
+            n_in * n_query,
+            y.n_elements(),
+            y.dtype,
+            n_out * n_query
+        )));
+    }
+    let args = GenericMmArgs {
+        m: n_out as u32,
+        n: n_query as u32,
+        k: n_in as u32,
+        nb01: nb01 as u32,
+        stride_b: n_in as u32,
+        min_count: 0,
+        max_count: i32::MAX as u32,
+        b_div: 1,
+        slot_limit: n_query as u32,
+    };
+    let name = mat_mat_tensor_pipeline_name(weight.dtype).expect("layout found above");
+    let pso = ctx.tensor_pipeline(&name)?;
+    enc.set_pipeline(&pso);
+    enc.set_bytes(0, &args);
+    enc.set_tensor(1, weight);
+    enc.set_tensor(2, x);
+    enc.set_tensor(3, y);
+    enc.set_threadgroup_memory(0, TENSOR_THREADGROUP_BYTES);
+    enc.dispatch(
+        MTLSize {
+            width: n_query.div_ceil(32),
+            height: n_out.div_ceil(64),
+            depth: 1,
+        },
+        MTLSize {
+            width: 128,
+            height: 1,
+            depth: 1,
+        },
+    );
+    Ok(())
+}

@@ -74,12 +74,31 @@ impl Linear<'_> {
             && !ROWWISE_LINEAR_ROWS.with(|flag| flag.get())
             && !F32_LINEAR_ROWS.with(|flag| flag.get());
         if mma {
+            let x = x.view_bytes(0, vec![self.input as u64, rows as u64]);
+            let y = y.view_bytes(0, vec![self.output as u64, rows as u64]);
+            // The dense form of the Metal 4 tensor tile where the tier
+            // exists: same half operands and F32 sums as the MMA tile.
+            if metal::moe_grouped_tensor_selected(self.ctx)
+                && metal::moe_grouped_generic_layout(self.tensor.dtype)
+                    .is_some_and(|l| self.input.is_multiple_of(l.block_elems))
+            {
+                return metal::encode_mat_mat_tensor_f32(
+                    self.ctx,
+                    enc,
+                    &self.tensor,
+                    &x,
+                    &y,
+                    self.input,
+                    self.output,
+                    rows,
+                );
+            }
             return crate::metal_forward::encode_mat_mat_dispatch_with_policy(
                 self.ctx,
                 enc,
                 &self.tensor,
-                &x.view_bytes(0, vec![self.input as u64, rows as u64]),
-                &y.view_bytes(0, vec![self.output as u64, rows as u64]),
+                &x,
+                &y,
                 self.input,
                 self.output,
                 rows,

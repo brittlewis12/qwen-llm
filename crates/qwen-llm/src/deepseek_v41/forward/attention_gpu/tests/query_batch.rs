@@ -177,6 +177,21 @@ fn compare_case(ctx: &MetalContext, c: &Config, schedule: &Schedule, start: usiz
                     .iter()
                     .any(|d| d.kernel == "kernel_deepseek_v41_attention_score")
             );
+            let ratio = schedule.ratio(id);
+            if c.index_topk == 512
+                && c.candidate_topk == 2048
+                && schedule.produces_index(id)
+                && ratio > 0
+                && (start + n) / ratio > c.index_topk
+                && (start + n) / ratio <= 2048
+            {
+                assert!(
+                    census
+                        .iter()
+                        .any(|d| d.kernel == "kernel_deepseek_v41_attention_select_fused_rows"),
+                    "fused selector not dispatched layer={id} start={start} n={n}"
+                );
+            }
             batched
                 .finish_rows(ctx, enc, &weights[id], &rows, &output)
                 .unwrap();

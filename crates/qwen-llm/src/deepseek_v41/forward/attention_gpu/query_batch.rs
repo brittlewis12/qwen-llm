@@ -367,35 +367,67 @@ impl Workspace {
                     depth: 1,
                 },
             );
-            for row in first..first + n {
-                let length = (start + row + 1) / ratio;
-                if length <= c.index_topk {
-                    continue;
+            let fused = last_length <= 2048
+                && c.index_topk <= 2048
+                && std::env::var_os("QWEN_V41_SELECT_SPLIT_SORT").is_none();
+            if fused {
+                pipeline(ctx, enc, "select_fused_rows")?;
+                enc.set_bytes(
+                    0,
+                    &[
+                        start as u32,
+                        ratio as u32,
+                        c.index_topk as u32,
+                        select_width as u32,
+                    ],
+                );
+                enc.set_bytes(1, &[first as u32, n as u32, 0, 0]);
+                enc.set_tensor(2, &rows.select_scores);
+                enc.set_tensor(3, &rows.selected);
+                enc.set_tensor(4, &self.status);
+                enc.dispatch(
+                    MTLSize {
+                        width: 1,
+                        height: n,
+                        depth: 1,
+                    },
+                    MTLSize {
+                        width: 256,
+                        height: 1,
+                        depth: 1,
+                    },
+                );
+            } else {
+                for row in first..first + n {
+                    let length = (start + row + 1) / ratio;
+                    if length <= c.index_topk {
+                        continue;
+                    }
+                    let scores = rows.select_scores.view_subrange(
+                        ((row - first) * select_width) as u64,
+                        vec![select_width as u64],
+                    );
+                    let selected = std::mem::replace(
+                        &mut self.selected,
+                        prefill::row(&rows.selected, selected_stride, row),
+                    );
+                    let candidates = std::mem::replace(
+                        &mut self.candidates,
+                        prefill::row(&rows.candidates, candidates_stride, row),
+                    );
+                    let result = (|| -> Result<()> {
+                        self.sort(ctx, enc, &scores, length, false)?;
+                        let pso = pipeline(ctx, enc, "chronological")?;
+                        enc.set_bytes(0, &(c.index_topk as u32));
+                        enc.set_tensor(1, &self.sort_ids);
+                        enc.set_tensor(2, &self.selected);
+                        dispatch(enc, &pso, c.index_topk);
+                        Ok(())
+                    })();
+                    self.selected = selected;
+                    self.candidates = candidates;
+                    result?;
                 }
-                let scores = rows.select_scores.view_subrange(
-                    ((row - first) * select_width) as u64,
-                    vec![select_width as u64],
-                );
-                let selected = std::mem::replace(
-                    &mut self.selected,
-                    prefill::row(&rows.selected, selected_stride, row),
-                );
-                let candidates = std::mem::replace(
-                    &mut self.candidates,
-                    prefill::row(&rows.candidates, candidates_stride, row),
-                );
-                let result = (|| -> Result<()> {
-                    self.sort(ctx, enc, &scores, length, false)?;
-                    let pso = pipeline(ctx, enc, "chronological")?;
-                    enc.set_bytes(0, &(c.index_topk as u32));
-                    enc.set_tensor(1, &self.sort_ids);
-                    enc.set_tensor(2, &self.selected);
-                    dispatch(enc, &pso, c.index_topk);
-                    Ok(())
-                })();
-                self.selected = selected;
-                self.candidates = candidates;
-                result?;
             }
         }
         Ok(())

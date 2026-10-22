@@ -1,0 +1,716 @@
+{
+  "schema": "native-dflash-gameplay-results-v1",
+  "date": "2026-10-22",
+  "hardware": {
+    "soc": "Apple M4 Max",
+    "ram_gib": 128
+  },
+  "build_commit": "7048f18189e4308452dd8659f24b46145ac4f4b1",
+  "binary_sha256": "314958d24ca29bba5146a4e6abaad1c6779ee6ba25b16c677fe01a3263f8326e",
+  "metal_api_validation": true,
+  "production_gpu_lease": true,
+  "source": "claude_flash_next_gsq.json",
+  "message_count": 14,
+  "temperature": 1,
+  "seed": 42,
+  "measured_order": [
+    "serial",
+    "spec",
+    "spec",
+    "serial"
+  ],
+  "warmup_cap": 16,
+  "measured_cap": 256,
+  "families": {
+    "flash-next": {
+      "target": "Qwen3.8-Flash-Next-UD-Q3_K_XL-00001-of-00003.gguf",
+      "drafter": "Qwen3.8-Flash-Next-DFlash2-Q8_0.gguf",
+      "runner_sha256": "23066784d3dfb6c70c012ac78c0400cc81588d7f4668793c4b9e7b93376e1e98",
+      "template": "qwen38",
+      "sampling": {
+        "temperature": 1,
+        "seed": 42,
+        "top_k": 20,
+        "top_p": 0.95,
+        "min_p": 0
+      },
+      "runs": [
+        {
+          "id": "01-warmup-serial",
+          "phase": "warmup",
+          "mode": "serial",
+          "output_cap": 16,
+          "metrics": {
+            "input_tokens": 11550,
+            "output_tokens": 16,
+            "total_ms": 52121.593916000005,
+            "tokenization_ms": 2.962333,
+            "prefill_ms": 51627.117625,
+            "decode_ms": 491.09575,
+            "prefill_tps": 223.71963672066423,
+            "decode_tps": 32.580204573140776
+          },
+          "counters": {},
+          "finish": {
+            "reason": "token_limit"
+          },
+          "output_fingerprint": {
+            "algorithm": "sha256-qwen-generated-token-ids-v1",
+            "value": "bd80da6bee05519fa6f9b7d11345c98516ae0e580021a0c83b221665128341e3"
+          },
+          "process_elapsed_seconds": 52.57835108391009,
+          "artifact_sha256": {
+            "stdout": "7181a7c99eac80ba912537376de5e85b413ad89f747246974018f48e29c072d7",
+            "stderr": "8421ed9cb546b51f51c2a12eabfcd3a4f162e4c713dd600ba03f74ed1dd9c4b4",
+            "stats": "b6ddb3e6a34a286c1eb5af4074d8a42f3ba3e86d12d45a2c4feba06019759a4e"
+          }
+        },
+        {
+          "id": "02-warmup-spec",
+          "phase": "warmup",
+          "mode": "spec",
+          "output_cap": 16,
+          "metrics": {
+            "input_tokens": 11550,
+            "output_tokens": 16,
+            "total_ms": 30765.177917,
+            "tokenization_ms": 3.116667,
+            "prefill_ms": 28323.031958,
+            "decode_ms": 2393.3807920000004,
+            "prefill_tps": 407.7953242127257,
+            "decode_tps": 6.685104206351464
+          },
+          "counters": {
+            "emitted_tokens": 16,
+            "packets": 9,
+            "draft_calls": 9,
+            "proposed_tokens": 63,
+            "verified_inputs": 57,
+            "accepted_drafts": 6,
+            "retained_inputs": 15,
+            "replay_inputs": 13,
+            "restores": 8,
+            "full_retention_packets": 1,
+            "target_draws": 24,
+            "proposal_draws": 63
+          },
+          "finish": {
+            "reason": "token_limit"
+          },
+          "output_fingerprint": {
+            "algorithm": "sha256-qwen-generated-token-ids-v1",
+            "value": "b9af20b8da459b8b3fa9083350c701a9b3bf8afc36935ff5823be86780ee3960"
+          },
+          "process_elapsed_seconds": 31.401332292007282,
+          "artifact_sha256": {
+            "stdout": "4c31898738d05113b147931264113d434a2c5062d7958efb9765f717beb8ac7e",
+            "stderr": "0f0050089f1741df9ac46200676a121239aa271bbe3b5d7c16207190f97584bd",
+            "stats": "bad3255af333a4a6cb0573c0163014006544f4da1e15ee2094cfc8062bc67bc1"
+          },
+          "adapter_host_ms": {
+            "target_prefill_ms": 28315.543,
+            "first_token_selection_ms": 0.717,
+            "draft_ms": 88.778,
+            "checkpoint_ms": 10.389,
+            "verify_ms": 1853.949,
+            "acceptance_ms": 10.319,
+            "restore_ms": 9.251,
+            "replay_ms": 417.103,
+            "context_append_ms": 8.307,
+            "adapter_ms": 30716.116
+          }
+        },
+        {
+          "id": "03-measured-serial",
+          "phase": "measured",
+          "mode": "serial",
+          "output_cap": 256,
+          "metrics": {
+            "input_tokens": 11550,
+            "output_tokens": 256,
+            "total_ms": 36070.025582,
+            "tokenization_ms": 2.8722079999999997,
+            "prefill_ms": 27706.374667,
+            "decode_ms": 8360.411708000001,
+            "prefill_tps": 416.8715733768216,
+            "decode_tps": 30.620501590254936
+          },
+          "counters": {},
+          "finish": {
+            "reason": "token_limit"
+          },
+          "output_fingerprint": {
+            "algorithm": "sha256-qwen-generated-token-ids-v1",
+            "value": "75fba2bc69c1b55b7a5076fb8e617986415b4ffd8e4f0729d01fa7756a96d6cf"
+          },
+          "process_elapsed_seconds": 36.54643633286469,
+          "artifact_sha256": {
+            "stdout": "f8cf5362c331a521902b0993cfe1efc4f0e6f0002ddbc0510f462f790e732240",
+            "stderr": "0813fb61d347e3e82540aeb9ad5c395f31a75222c40234bd2e2061b31c5dca12",
+            "stats": "13cb3fc248a18c4644dc7970cce30943b463b011048b2581f2dc21b02baa1c26"
+          }
+        },
+        {
+          "id": "04-measured-spec",
+          "phase": "measured",
+          "mode": "spec",
+          "output_cap": 256,
+          "metrics": {
+            "input_tokens": 11550,
+            "output_tokens": 256,
+            "total_ms": 56903.470416000004,
+            "tokenization_ms": 3.23325,
+            "prefill_ms": 27860.724125,
+            "decode_ms": 29008.83625,
+            "prefill_tps": 414.5620892041333,
+            "decode_tps": 8.82489727591192
+          },
+          "counters": {
+            "emitted_tokens": 256,
+            "packets": 102,
+            "draft_calls": 102,
+            "proposed_tokens": 714,
+            "verified_inputs": 813,
+            "accepted_drafts": 153,
+            "retained_inputs": 255,
+            "replay_inputs": 226,
+            "restores": 98,
+            "full_retention_packets": 4,
+            "target_draws": 354,
+            "proposal_draws": 714
+          },
+          "finish": {
+            "reason": "token_limit"
+          },
+          "output_fingerprint": {
+            "algorithm": "sha256-qwen-generated-token-ids-v1",
+            "value": "cf622e57ba21b6fb8d6881e5d3f23239ed8f58d21799993e0b536ef8764d9175"
+          },
+          "process_elapsed_seconds": 57.4723581247963,
+          "artifact_sha256": {
+            "stdout": "140c65019982f2e544d7164a6ab2fa57111ba5fde485a1bbb1431de0eae69982",
+            "stderr": "d8ec3977a2b2d6ce58b0ce626c6c09c106a6911d59c6ec1112a49f12dd51b26c",
+            "stats": "f4e853a2475db9d21d8a0c47f2f690881d2e58062729ba6cd86f57f5042d3f9a"
+          },
+          "adapter_host_ms": {
+            "target_prefill_ms": 27856.076,
+            "first_token_selection_ms": 0.738,
+            "draft_ms": 711.51,
+            "checkpoint_ms": 90.855,
+            "verify_ms": 20444.365,
+            "acceptance_ms": 205.263,
+            "restore_ms": 125.185,
+            "replay_ms": 7379.277,
+            "context_append_ms": 51.765,
+            "adapter_ms": 56865.904
+          }
+        },
+        {
+          "id": "05-measured-spec",
+          "phase": "measured",
+          "mode": "spec",
+          "output_cap": 256,
+          "metrics": {
+            "input_tokens": 11550,
+            "output_tokens": 256,
+            "total_ms": 56342.952041,
+            "tokenization_ms": 3.13,
+            "prefill_ms": 27200.995958,
+            "decode_ms": 29105.630458,
+            "prefill_tps": 424.61680512852934,
+            "decode_tps": 8.79554903885051
+          },
+          "counters": {
+            "emitted_tokens": 256,
+            "packets": 102,
+            "draft_calls": 102,
+            "proposed_tokens": 714,
+            "verified_inputs": 813,
+            "accepted_drafts": 153,
+            "retained_inputs": 255,
+            "replay_inputs": 226,
+            "restores": 98,
+            "full_retention_packets": 4,
+            "target_draws": 354,
+            "proposal_draws": 714
+          },
+          "finish": {
+            "reason": "token_limit"
+          },
+          "output_fingerprint": {
+            "algorithm": "sha256-qwen-generated-token-ids-v1",
+            "value": "cf622e57ba21b6fb8d6881e5d3f23239ed8f58d21799993e0b536ef8764d9175"
+          },
+          "process_elapsed_seconds": 56.90724762505852,
+          "artifact_sha256": {
+            "stdout": "140c65019982f2e544d7164a6ab2fa57111ba5fde485a1bbb1431de0eae69982",
+            "stderr": "709ad88da33bd741019865342b10d32823b3ada73e3876d00f59221100b08f9d",
+            "stats": "c73cdbe4ed4b34e72aa583ab2ba85a9766deb48439202de508f5bda4dc7bdd24"
+          },
+          "adapter_host_ms": {
+            "target_prefill_ms": 27195.701,
+            "first_token_selection_ms": 0.732,
+            "draft_ms": 698.403,
+            "checkpoint_ms": 85.924,
+            "verify_ms": 20524.477,
+            "acceptance_ms": 204.168,
+            "restore_ms": 125.567,
+            "replay_ms": 7419.215,
+            "context_append_ms": 49.221,
+            "adapter_ms": 56304.253
+          }
+        },
+        {
+          "id": "06-measured-serial",
+          "phase": "measured",
+          "mode": "serial",
+          "output_cap": 256,
+          "metrics": {
+            "input_tokens": 11550,
+            "output_tokens": 256,
+            "total_ms": 35490.154418,
+            "tokenization_ms": 3.238334,
+            "prefill_ms": 27067.42225,
+            "decode_ms": 8419.122958999998,
+            "prefill_tps": 426.7122259859821,
+            "decode_tps": 30.40696771465219
+          },
+          "counters": {},
+          "finish": {
+            "reason": "token_limit"
+          },
+          "output_fingerprint": {
+            "algorithm": "sha256-qwen-generated-token-ids-v1",
+            "value": "75fba2bc69c1b55b7a5076fb8e617986415b4ffd8e4f0729d01fa7756a96d6cf"
+          },
+          "process_elapsed_seconds": 35.940052499994636,
+          "artifact_sha256": {
+            "stdout": "f8cf5362c331a521902b0993cfe1efc4f0e6f0002ddbc0510f462f790e732240",
+            "stderr": "e9410ba21c23bdfd50fe76f62382ddce20ca3cad049fa52dd234ca0670632fd2",
+            "stats": "7f62a097737d7dfde87e114dbdaa6d713a71ef1950a7e99a09289b0c8cebcfc5"
+          }
+        }
+      ],
+      "aggregate": {
+        "arithmetic_means": {
+          "serial": {
+            "input_tokens": 11550,
+            "output_tokens": 256,
+            "total_ms": 35780.09,
+            "tokenization_ms": 3.055271,
+            "prefill_ms": 27386.8984585,
+            "decode_ms": 8389.7673335,
+            "prefill_tps": 421.79189968140184,
+            "decode_tps": 30.513734652453564,
+            "process_elapsed_seconds": 36.24324441642966
+          },
+          "spec": {
+            "input_tokens": 11550,
+            "output_tokens": 256,
+            "total_ms": 56623.211228500004,
+            "tokenization_ms": 3.181625,
+            "prefill_ms": 27530.8600415,
+            "decode_ms": 29057.233354,
+            "prefill_tps": 419.5894471663313,
+            "decode_tps": 8.810223157381216,
+            "process_elapsed_seconds": 57.18980287492741
+          }
+        },
+        "spec_over_serial": {
+          "input_tokens": 1.0,
+          "output_tokens": 1.0,
+          "total_ms": 1.5825340637348875,
+          "tokenization_ms": 1.041356069559787,
+          "prefill_ms": 1.005256585853201,
+          "decode_ms": 3.4634134891888655,
+          "prefill_tps": 0.9947783432618451,
+          "decode_tps": 0.2887297558862661,
+          "process_elapsed_seconds": 1.5779438015489122
+        },
+        "notes": [
+          "Warmups excluded; ratios divide means, not paired observations.",
+          "TPS ratios above 1 favor spec; time ratios below 1 indicate lower observed latency.",
+          "Differing continuations or lengths prevent an equal-work speedup interpretation.",
+          "EOS may yield unequal output lengths; tokens are not forced to the cap.",
+          "Request timing excludes model load; process elapsed includes startup and lease wait.",
+          "Native sampled packed verification need not reproduce serial output tokens."
+        ]
+      }
+    },
+    "glm-flash": {
+      "target": "GLM-5.3-Flash-UD-IQ3_XXS-00001-of-00004.gguf",
+      "drafter": "GLM-5.3-Flash-DFlash2-Q8_0.gguf",
+      "runner_sha256": "be27202c34ae30fadb4128b5a42c89d493d1caf62d762277b1ccb38129b84d3a",
+      "template": "glm53_flash_chat_v2",
+      "sampling": {
+        "temperature": 1,
+        "seed": 42,
+        "top_k": 0,
+        "top_p": 0.95,
+        "min_p": 0
+      },
+      "runs": [
+        {
+          "id": "01-warmup-serial",
+          "phase": "warmup",
+          "mode": "serial",
+          "output_cap": 16,
+          "metrics": {
+            "input_tokens": 11105,
+            "output_tokens": 16,
+            "total_ms": 116170.51775,
+            "tokenization_ms": 1.180042,
+            "prefill_ms": 115591.04245800001,
+            "decode_ms": 578.2381250000001,
+            "prefill_tps": 96.07145816714129,
+            "decode_tps": 27.67026127860386
+          },
+          "counters": {},
+          "finish": {
+            "reason": "token_limit"
+          },
+          "output_fingerprint": {
+            "algorithm": "sha256-qwen-generated-token-ids-v1",
+            "value": "ff414fd926dbaac7ccae7f13edcc53e9adf37be292eadb85875806d6dccb6545"
+          },
+          "process_elapsed_seconds": 188.21635299990885,
+          "artifact_sha256": {
+            "stdout": "a86bc3ddded1dc8bc8a05251476986117d76b6853cbfc0474ff23790ea7b7a16",
+            "stderr": "d761b33cc15fc6b6be3004b4f82d4302dcaacd166ec61d05380d4bf7d3c42ee6",
+            "stats": "748db14bebfc65e36b0351abf66e05d03216e65877ff2a74e6482ce15c3a26ac"
+          },
+          "native_diagnostics": {
+            "prefill_mode": "packed_fast",
+            "prefill_rows": 512,
+            "capacity": 11120,
+            "prefetch": {
+              "windows": 3,
+              "cold_windows": 3,
+              "bytes_read": 117530607616
+            }
+          },
+          "prefetch_ms": 71323.499666
+        },
+        {
+          "id": "02-warmup-spec",
+          "phase": "warmup",
+          "mode": "spec",
+          "output_cap": 16,
+          "metrics": {
+            "input_tokens": 11105,
+            "output_tokens": 16,
+            "total_ms": 65414.880583,
+            "tokenization_ms": 1.6831669999999999,
+            "prefill_ms": 62637.388,
+            "decode_ms": 2775.5496660000003,
+            "prefill_tps": 177.2902790901817,
+            "decode_tps": 5.764623921523442
+          },
+          "counters": {
+            "prefill_tokens": 11105,
+            "attempts": 12,
+            "packets": 12,
+            "draft_calls": 6,
+            "drafted_tokens": 42,
+            "verified_rows": 54,
+            "serial_verifications": 0,
+            "anchor_only_packets": 6,
+            "accepted_drafts": 3,
+            "retained_inputs": 15,
+            "replayed_inputs": 9,
+            "full_commits": 6,
+            "output_tokens": 16,
+            "callback_tokens": 16,
+            "target_draws": 22,
+            "proposal_draws": 42,
+            "cancellations": 0,
+            "failures": 0
+          },
+          "finish": {
+            "reason": "token_limit"
+          },
+          "output_fingerprint": {
+            "algorithm": "sha256-qwen-generated-token-ids-v1",
+            "value": "78ea83827796f5a9d7dee96fdc6568bffb4be68d78f953b77283d06d071546eb"
+          },
+          "process_elapsed_seconds": 66.97640449996106,
+          "artifact_sha256": {
+            "stdout": "eca3e9983a217ef65fbc084d60aed12fae17f7a0f09cb7aaea083004d3fc13d5",
+            "stderr": "3fa29f42d7e4deade00202028b27ed16ad9ace435f5b26dae47e06356c3f3e0e",
+            "stats": "e7c29a215a32c9fe2fecabebc99182267c5af770d35882cfa738d64881b01acd"
+          },
+          "native_diagnostics": {
+            "prefill_mode": "dflash_capture",
+            "prefill_rows": 512,
+            "capacity": 11120,
+            "prefetch": {
+              "windows": 3,
+              "cold_windows": 0,
+              "bytes_read": 0
+            }
+          },
+          "prefetch_ms": 4.53675
+        },
+        {
+          "id": "03-measured-serial",
+          "phase": "measured",
+          "mode": "serial",
+          "output_cap": 256,
+          "metrics": {
+            "input_tokens": 11105,
+            "output_tokens": 256,
+            "total_ms": 72270.91591600001,
+            "tokenization_ms": 1.664666,
+            "prefill_ms": 62438.461958,
+            "decode_ms": 9830.760875,
+            "prefill_tps": 177.85511769123838,
+            "decode_tps": 26.04071070948514
+          },
+          "counters": {},
+          "finish": {
+            "reason": "token_limit"
+          },
+          "output_fingerprint": {
+            "algorithm": "sha256-qwen-generated-token-ids-v1",
+            "value": "b1924683aee1225040a421a1317156e17ed39dc680c0772aff9454ecf38a392c"
+          },
+          "process_elapsed_seconds": 73.35815383284353,
+          "artifact_sha256": {
+            "stdout": "e4e7a4ce0c4d56032bd171cc0d131109766f7fd6c5090931aa9922d6d0df12de",
+            "stderr": "395f2331e9178ba3542bc19bb88a351851a819b1cbb4fbf3c48188a47bd6b868",
+            "stats": "b69cda748fc2443ff16fb824a0de62173a153b07afd87201849a8cbbeaf2d83c"
+          },
+          "native_diagnostics": {
+            "prefill_mode": "packed_fast",
+            "prefill_rows": 512,
+            "capacity": 11360,
+            "prefetch": {
+              "windows": 3,
+              "cold_windows": 0,
+              "bytes_read": 0
+            }
+          },
+          "prefetch_ms": 4.618042
+        },
+        {
+          "id": "04-measured-spec",
+          "phase": "measured",
+          "mode": "spec",
+          "output_cap": 256,
+          "metrics": {
+            "input_tokens": 11105,
+            "output_tokens": 256,
+            "total_ms": 114363.80245799999,
+            "tokenization_ms": 1.63475,
+            "prefill_ms": 64438.167167,
+            "decode_ms": 49922.465208,
+            "prefill_tps": 172.3357520585576,
+            "decode_tps": 5.127951893669233
+          },
+          "counters": {
+            "prefill_tokens": 11105,
+            "attempts": 131,
+            "packets": 131,
+            "draft_calls": 126,
+            "drafted_tokens": 882,
+            "verified_rows": 1013,
+            "serial_verifications": 0,
+            "anchor_only_packets": 5,
+            "accepted_drafts": 124,
+            "retained_inputs": 255,
+            "replayed_inputs": 250,
+            "full_commits": 5,
+            "output_tokens": 256,
+            "callback_tokens": 256,
+            "target_draws": 382,
+            "proposal_draws": 882,
+            "cancellations": 0,
+            "failures": 0
+          },
+          "finish": {
+            "reason": "token_limit"
+          },
+          "output_fingerprint": {
+            "algorithm": "sha256-qwen-generated-token-ids-v1",
+            "value": "d33888ebf6d3f34ffb302b9c6b225e67c510f4192d46921a1b559882e2bc599f"
+          },
+          "process_elapsed_seconds": 115.93568558292463,
+          "artifact_sha256": {
+            "stdout": "5784c6631a00869c57ad21e88ac068f1dde37572ca2e0b2e272ca0869d63d35e",
+            "stderr": "167b953b45f9085859d9688daaecdfb9d59ee724ef2c24d518f4aab78be2842b",
+            "stats": "ef93d8c74d8df63b838278ba999935c4e26dc7ed04b50985d49bee55d8575f82"
+          },
+          "native_diagnostics": {
+            "prefill_mode": "dflash_capture",
+            "prefill_rows": 512,
+            "capacity": 11360,
+            "prefetch": {
+              "windows": 3,
+              "cold_windows": 0,
+              "bytes_read": 0
+            }
+          },
+          "prefetch_ms": 4.40875
+        },
+        {
+          "id": "05-measured-spec",
+          "phase": "measured",
+          "mode": "spec",
+          "output_cap": 256,
+          "metrics": {
+            "input_tokens": 11105,
+            "output_tokens": 256,
+            "total_ms": 109599.624583,
+            "tokenization_ms": 1.5578750000000001,
+            "prefill_ms": 63751.419624999995,
+            "decode_ms": 45844.334793,
+            "prefill_tps": 174.19219941017903,
+            "decode_tps": 5.584114180212487
+          },
+          "counters": {
+            "prefill_tokens": 11105,
+            "attempts": 131,
+            "packets": 131,
+            "draft_calls": 126,
+            "drafted_tokens": 882,
+            "verified_rows": 1013,
+            "serial_verifications": 0,
+            "anchor_only_packets": 5,
+            "accepted_drafts": 124,
+            "retained_inputs": 255,
+            "replayed_inputs": 250,
+            "full_commits": 5,
+            "output_tokens": 256,
+            "callback_tokens": 256,
+            "target_draws": 382,
+            "proposal_draws": 882,
+            "cancellations": 0,
+            "failures": 0
+          },
+          "finish": {
+            "reason": "token_limit"
+          },
+          "output_fingerprint": {
+            "algorithm": "sha256-qwen-generated-token-ids-v1",
+            "value": "d33888ebf6d3f34ffb302b9c6b225e67c510f4192d46921a1b559882e2bc599f"
+          },
+          "process_elapsed_seconds": 111.39124900009483,
+          "artifact_sha256": {
+            "stdout": "5784c6631a00869c57ad21e88ac068f1dde37572ca2e0b2e272ca0869d63d35e",
+            "stderr": "78e246e4ca21e83f03c514dd2229ba8f8ba5c55d802dabcbf7eed5ec54285fb5",
+            "stats": "7a7bbdb94fa7e654b1d42684edd66f4f8843ab187096193404c406aeef137ed5"
+          },
+          "native_diagnostics": {
+            "prefill_mode": "dflash_capture",
+            "prefill_rows": 512,
+            "capacity": 11360,
+            "prefetch": {
+              "windows": 3,
+              "cold_windows": 0,
+              "bytes_read": 0
+            }
+          },
+          "prefetch_ms": 4.4641660000000005
+        },
+        {
+          "id": "06-measured-serial",
+          "phase": "measured",
+          "mode": "serial",
+          "output_cap": 256,
+          "metrics": {
+            "input_tokens": 11105,
+            "output_tokens": 256,
+            "total_ms": 71507.417792,
+            "tokenization_ms": 1.3877920000000001,
+            "prefill_ms": 61718.476458,
+            "decode_ms": 9787.521667,
+            "prefill_tps": 179.92991138653684,
+            "decode_tps": 26.155753081307584
+          },
+          "counters": {},
+          "finish": {
+            "reason": "token_limit"
+          },
+          "output_fingerprint": {
+            "algorithm": "sha256-qwen-generated-token-ids-v1",
+            "value": "b1924683aee1225040a421a1317156e17ed39dc680c0772aff9454ecf38a392c"
+          },
+          "process_elapsed_seconds": 72.32294062478468,
+          "artifact_sha256": {
+            "stdout": "e4e7a4ce0c4d56032bd171cc0d131109766f7fd6c5090931aa9922d6d0df12de",
+            "stderr": "83bb4f961b8529e4a20d10975f160eb7d69868af812c19bec713a44af2e85ae0",
+            "stats": "6fb9844cbf8469bdd248b4f43e2d7d82b22f0d0bca57abac39b3e1735db5980a"
+          },
+          "native_diagnostics": {
+            "prefill_mode": "packed_fast",
+            "prefill_rows": 512,
+            "capacity": 11360,
+            "prefetch": {
+              "windows": 3,
+              "cold_windows": 0,
+              "bytes_read": 0
+            }
+          },
+          "prefetch_ms": 4.496333
+        }
+      ],
+      "aggregate": {
+        "arithmetic_means": {
+          "serial": {
+            "input_tokens": 11105,
+            "output_tokens": 256,
+            "total_ms": 71889.16685400001,
+            "tokenization_ms": 1.526229,
+            "prefill_ms": 62078.469207999995,
+            "decode_ms": 9809.141271,
+            "prefill_tps": 178.8925145388876,
+            "decode_tps": 26.09823189539636,
+            "process_elapsed_seconds": 72.8405472288141
+          },
+          "spec": {
+            "input_tokens": 11105,
+            "output_tokens": 256,
+            "total_ms": 111981.7135205,
+            "tokenization_ms": 1.5963125,
+            "prefill_ms": 64094.793395999994,
+            "decode_ms": 47883.4000005,
+            "prefill_tps": 173.26397573436833,
+            "decode_tps": 5.35603303694086,
+            "process_elapsed_seconds": 113.66346729150973
+          }
+        },
+        "spec_over_serial": {
+          "input_tokens": 1.0,
+          "output_tokens": 1.0,
+          "total_ms": 1.557699420107679,
+          "tokenization_ms": 1.0459193869334156,
+          "prefill_ms": 1.032480249814861,
+          "decode_ms": 4.881507838210438,
+          "prefill_tps": 0.9685367561687678,
+          "decode_tps": 0.20522589646717204,
+          "process_elapsed_seconds": 1.5604422483875435
+        },
+        "notes": [
+          "Warmups excluded; ratios divide means, not paired observations.",
+          "TPS ratios above 1 favor spec; time ratios below 1 indicate lower observed latency.",
+          "Differing continuations or lengths prevent an equal-work speedup interpretation.",
+          "EOS may yield unequal output lengths; tokens are not forced to the cap.",
+          "Request timing excludes model load; process elapsed includes startup and lease wait.",
+          "Native sampled packed verification need not reproduce serial output tokens."
+        ]
+      }
+    }
+  },
+  "source_sha256": "ddb1fd6d6571b499c38e8513763fd7457e76ab639af5c829deb3abb2e2d44651",
+  "messages_sha256": "d127138bf829efd89c7fccc04e2389c68d02b766b9a3b3e8f72dcab20bddef1b",
+  "exclusions": [
+    "Warmups excluded from aggregates.",
+    "Initial GLM attempt rejected the resolved backing-file shard suffix before inference; fixed runner preserves supplied paths."
+  ],
+  "limits": [
+    "One saved gameplay prefix, two measured observations per arm, API validation enabled.",
+    "All measured runs hit the cap; no completed-turn quality or EOS-latency claim.",
+    "Native sampled packed verification is not serial-token-equivalent.",
+    "Model identity is artifact name and private path/size/mtime records, not full-content hashes."
+  ]
+}

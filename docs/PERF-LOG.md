@@ -6,6 +6,22 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the current state and evidence index.
 
+## 2026-10-22 - Native Flash-Next And GLM-Flash DFlash2 Slow Down Sampled Gameplay
+
+- Clean `7048f181`, M4 Max, API validation enabled: native-rendered first 14
+  saved gameplay messages, temperature 1, seed 42, native remaining filters,
+  256-token cap, fresh-process serial/spec/spec/serial after per-arm warmups.
+- Flash-Next Q3_K_XL / Q8_0 head: decode 30.51 -> 8.81 tok/s (0.289x),
+  request 35.78 -> 56.62 s. Acceptance 153/714 (21.4%); verification costs
+  20.48 s and replay 7.40 s versus 0.70 s drafting.
+- GLM-Flash IQ3_XXS / Q8_0 head: decode 26.10 -> 5.36 tok/s (0.205x),
+  request 71.89 -> 111.98 s. Acceptance 124/882 (14.1%); 250 replayed
+  inputs. All measured GLM arms use 512 prefill rows and report no cold prefetch.
+- Five focused real-model tests pass after intervening native/shared kernel
+  changes. Keep speculation opt-in: these timings show no acceleration and
+  do not establish completed-turn quality or serial-token equivalence.
+- [Protocol, per-run records and reproduction](bench/2026-10-20-dflash-native-targets/README.md).
+
 ## 2026-10-21 - V4.1 Expert Tiles Are At 70% Of The simdgroup-MMA Ceiling
 
 - At the V4.1 prefill shape (384 experts, 2048 tokens x top-6, ~32 slots

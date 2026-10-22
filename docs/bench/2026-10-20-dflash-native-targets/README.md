@@ -3,7 +3,7 @@
 Scope: Qwen3.8-Flash-Next and GLM-5.3-Flash, not full GLM-5.3 or Muse.
 The native target owns verification and rollback; only drafting and
 proposal-aware prefix acceptance are shared. The opt-in paths and public-startup
-checks are complete; rollout measurements are pending.
+checks are complete. Gameplay measurements below determine whether to use them.
 
 ## Execution contract
 
@@ -64,9 +64,24 @@ continuation; those ephemeral raw records are no longer available.
   startup, repeated requests, cancellation, and subsequent reuse/recreation.
   They assert zero prefix reuse for drafter mode.
 
+### October 22 revalidation
+
+The resumed baseline includes the intervening split-QSA decode, HC injection
+fusion, PLE page warming, and shared grouped-expert changes. Five focused
+real-model tests passed again, serialized with Metal validation and the normal
+lease: Flash-Next same-width readouts, fixed-width suffix-mutation causality,
+compact rollback/continuation, greedy/sampled packets and cancellation; and GLM
+greedy/sampled seeded packets and counters. The earlier cross-width Flash-Next
+difference remains (relative RMS about 0.0684 at the same boundary); it is not
+silently reclassified as numerical noise or a serial-equivalence guarantee.
+
+Fresh raw records live in a private benchmark archive outside the disposable
+build tree. The library tests used source `14377c46`; the release baseline
+`7048f181` adds only documentation.
+
 ## Rollout measurement
 
-Pending. The October 22 continuation reconstructs the first 14 messages from
+The October 22 replay reconstructs the first 14 messages from
 `~/code/llm/game/claude_flash_next_gsq.json`, the same saved source and message
 count as the earlier native Qwen comparison; the old frozen wrapper was cleared
 with `target/`, so a fresh input hash is recorded. It runs native
@@ -78,5 +93,84 @@ request preparation remain measured. Other filters use native release defaults.
 It records the frozen binary hash, clean build commit, input hash, request stats,
 full commands, output, diagnostics, and evidence of actual draft calls.
 
-No native-family acceleration or gameplay-quality claim is made yet. Earlier
+The release baseline is clean `7048f181` on an M4 Max with 128 GiB RAM. Metal
+validation is enabled; these are exploratory timings, not production-performance
+qualification. No competing GPU workload was intentionally launched. Top-k
+is 20 for Flash-Next and 0 (disabled) for GLM; both use top-p 0.95 and
+min-p 0. Request time excludes model loading; process wall includes startup,
+loading and any lease wait. Both arms use native admission and prefill geometry.
+
+[`results.json`](results.json) retains per-run timings, acceptance counters,
+warmup exclusions, native geometry, and binary/input/output hashes without
+gameplay text or machine-specific paths. The binary SHA-256 is
+`314958d24ca29bba5146a4e6abaad1c6779ee6ba25b16c677fe01a3263f8326e`.
+
+### Flash-Next result
+
+The Q3_K_XL target with Q8_0 DFlash2 head is slower on this prefix:
+
+| Mode | Prompt tokens | Output tokens | Decode tok/s | Request seconds | Process seconds |
+|---|---:|---:|---:|---:|---:|
+| Serial | 11,550 | 256 | 30.51 | 35.78 | 36.24 |
+| DFlash2 | 11,550 | 256 | 8.81 | 56.62 | 57.19 |
+
+Values are means of two observations. Speculative decode is **0.289x** serial;
+request latency increases **58.3%**. Both speculative repetitions accept
+153/714 proposed tokens (21.4%), with 102 draft calls, 98 restores and 226
+replayed inputs; only four packets retain the full verified prefix. The dominant
+cost is target work: about 20.48 s verification plus 7.40 s replay, versus
+0.70 s drafting. This is real speculation, not a silent serial fallback.
+
+All measured runs reach the cap. Each arm repeats its own output fingerprint,
+but serial and speculative continuations differ. A capped continuation does not
+establish completed-turn gameplay quality or EOS latency. Keep speculation
+opt-in; these results do not support enabling it by default. Earlier
 ordinary-Qwen results remain in `../2026-10-20-dflash-current-rollouts/README.md`.
+
+### GLM-Flash result
+
+The IQ3_XXS target with Q8_0 DFlash2 head is also slower:
+
+| Mode | Prompt tokens | Output tokens | Decode tok/s | Request seconds | Process seconds |
+|---|---:|---:|---:|---:|---:|
+| Serial | 11,105 | 256 | 26.10 | 71.89 | 72.84 |
+| DFlash2 | 11,105 | 256 | 5.36 | 111.98 | 113.66 |
+
+Speculative decode is **0.205x** serial; request latency increases **55.8%**.
+Each speculative repetition accepts 124/882 drafts (14.1%), makes 126 draft
+calls and replays 250 retained inputs. Five tail packets are anchor-only;
+there are no serial-verification fallbacks, cancellations or failures. Both
+arms retain the same 512-row prefill workspace and 11,360-token capacity.
+The initial serial warmup reads 117.5 GB during prefetch; every measured run
+reports zero cold prefetch windows and zero bytes read. The slowdown is not
+explained by one arm paying that initial cold read or receiving fewer prefill
+rows.
+
+All measured runs reach 256 tokens and repeat their arm's own output fingerprint.
+As with Flash-Next, this is one sampled prefix, not a gameplay-quality result.
+Keep native DFlash2 opt-in for both families. The initial GLM attempt failed
+before inference because the runner resolved a split-shard symlink to a backing
+filename without the required suffix; the corrected runner preserves supplied
+paths, and the failed attempt contributes no timing sample.
+
+### Reproduction
+
+The durable runner is `scripts/bench/dflash_native_replay.py` (19 CPU tests).
+It accepts explicit local model paths and refuses existing output directories:
+
+```sh
+uv run --script scripts/bench/dflash_native_replay.py \
+  --binary "$FROZEN_QWEN" --expected-commit "$BUILD_COMMIT" \
+  --source "$HOME/code/llm/game/claude_flash_next_gsq.json" \
+  --output-dir "$NEW_PRIVATE_OUTPUT_DIR" \
+  --family flash-next --model "$FLASH_TARGET" --drafter "$FLASH_DRAFTER"
+```
+
+For GLM use `--family glm-flash` and its target/head paths. Each invocation runs
+both warmups and all four measured arms. The runner fixes Metal validation and
+lease waiting, drops ambient tuning overrides, and checks successful v2 request
+stats, clean build identity, native template, and nonzero speculative draft
+calls. It preserves failed/interrupted manifests and waits for graceful shutdown
+of its owned GPU process; it does not force-kill after a timeout. Input, binary,
+stdout, stderr and stats have hashes. Target/head identity is path/size/mtime,
+not a full-content hash. Gameplay content and generated output stay private.

@@ -274,7 +274,10 @@ impl Workspace {
         n: usize,
     ) -> Result<()> {
         let c = &self.config;
-        let owner = self.schedule.owner_slot(id).ok_or("missing selection owner")?;
+        let owner = self
+            .schedule
+            .owner_slot(id)
+            .ok_or("missing selection owner")?;
         let ratio = self.schedule.ratio(id);
         let publish = self.schedule.candidate_source_layer == Some(id);
         let last_length = (start + first + n) / ratio;

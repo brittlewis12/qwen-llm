@@ -6,6 +6,30 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the current state and evidence index.
 
+## 2026-10-21 - V4.1 Expert Tiles Are At 70% Of The simdgroup-MMA Ceiling
+
+- At the V4.1 prefill shape (384 experts, 2048 tokens x top-6, ~32 slots
+  per expert) the generic half-staged tiles run at 20.1 (Q3_K), 21.1
+  (IQ3_XXS), 20.6 (IQ2_S) and 22.1 (MXFP4) TFLOPS; gate+up 26-29 ms and
+  down 13-15 ms per layer, ~42 of the ~60 ms per-layer FFN. Storage type
+  does not matter, so the decoders are not the bound.
+- Register-resident 8x8x8 half-operand products with 8-16 independent
+  accumulators peak at ~30 TFLOPS on the M5 Ultra; 4 accumulators reach
+  it only at full occupancy. The tile with its weight decode and activation
+  loads ablated reaches 24.8 TFLOPS: the loop structure (threadgroup
+  staging, 6 loads per 8 products, two barriers per 32-K step) sits at
+  ~83% of the ceiling and the real kernel at ~70%.
+- A row-major staging variant (four contiguous half4 stores per thread
+  instead of sixteen stride-8 scalar stores, B loaded transposed) is
+  bitwise identical and +1-3%; not landed. With the other lane's 32-slot
+  gate/up tile at +0.25-0.9%, the simdgroup-MMA tile is within ~15% of
+  what it can give; the FFN lever on M5 is the Metal 4 tensor-ops path.
+- Current prefill budget on main (six spans, 2048 tokens, IQ3): FFN 47%,
+  attention tiles 20%, owner/producer per-row loops 15%, output
+  projections 10%, prepare 7%, HC 2%. Selection batching is next.
+- Probes land as opt-in tests (`QWEN_V41_TILE_TIMING=1`):
+  `generic_tile_production_shape_timing`, `simdgroup_mma_peak_timing`.
+
 ## 2026-10-21 - V4.1 Prefill Final: 381 tok/s And The IQ2 Duplicate Decision
 
 - The rebased final branch combines the MMA sink tile and half layouts with

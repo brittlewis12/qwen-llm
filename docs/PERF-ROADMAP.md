@@ -52,17 +52,22 @@ prefill and the tiles about a fifth; re-sample before claiming.
 - MXFP4 generic half layout: landed with the IQ2 layouts (needed for layers
   whose down is MXFP4); +1.6% on its own. Widens DFlash/GLM grouped
   eligibility on MXFP4 artifacts (unmeasured there).
-- Expert tile efficiency (~8.7 TFLOPS on half-staged tiles; per-layer FFN
-  time is 52-64 ms regardless of storage type, so not decode-bound): in
-  flight (`perf/v41-expert-tiles`, isolated tile microbench first). Tried:
-  2048-row chunks +5.6% (landed); 32-slot gate/up tile +0.25-0.9% at
-  pp2048 but -1.3%/-1.6% at pp1024 (negative, packet 2026-10-21);
-  4096-row chunks untested.
+- Expert tile efficiency: bounded (2026-10-21 tile-ceiling entry). The
+  generic half-staged tiles run at 20-22 TFLOPS for every storage type at
+  the V4.1 shape; the device's raw simdgroup-MMA ceiling is ~30 TFLOPS, and
+  the tile with decode and activation loads removed reaches 25. Staging
+  layout (+1-3%) and 32-slot gate/up tiles (+0.25-0.9%) are not levers;
+  4096-row chunks untested. The remaining FFN lever on M5 is the Metal 4
+  tensor-ops path (maintainability lane's tier): open there, not here.
 - Owner/producer per-row loops (compressor, index key, selection; 8 layers,
   grows with prompt length): compressor prep landed (`a7de76ab`): key norm +
   key/latent RoPE + both cache copies fused 5 -> 1, +0.5-1.0% on top of the
   MMA series, census 50,710 -> 39,563 with the MMA tile. Selection batching
-  is open: `selection_prepare` 6,141,
+  (one dispatch per layer for index scores, one threadgroup per row for the
+  top-k select, batched chronological/prepare; the eight owner/producer
+  layers cost 75-121 ms each = 15% of a 2048-token prefill, mostly dispatch
+  floor, and it grows with prompt length): in flight
+  (`perf/v41-select-batch`). Per-row census: `selection_prepare` 6,141,
   `sort_init`/`sort_tile` 2,560 each, `chronological` 2,560, `index_heads`
   2,560 per Q2 PP1024.
 - Scalar score kernel tuning: superseded on the released geometry by the

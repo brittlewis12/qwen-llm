@@ -101,12 +101,13 @@ sorting, so not all of it is removable. Re-sample after the next landing.
   +3.46%/+3.80%; census 105,202 -> 88,133 at Q2 pp2048; same-binary
   held-text witness identical. The eight owner/producer layers still cost
   75-121 ms each; the serial span includes non-selection work.
-- Fused selection sort/chronological for padded visible length <=2048: open.
-  The per-row sort init/tile/step/chronological passes are now the dominant
-  selection dispatches. Gate it with a three-arm producer replay
-  (incumbent, current batching, fused) and measure producer-stage time and
-  exact selection agreement, not census alone; keep the incumbent fallback
-  above 2048.
+- Fused selection sort/chronological for padded visible length <=2048: in
+  flight (`perf/v41-select-fuse`). One threadgroup per row loads the score
+  slab, runs the incumbent bitonic network in threadgroup memory, and emits
+  chronological IDs without the global sort scratch round trip. Gate with a
+  three-arm producer replay (incumbent, batched prepare/index + per-row
+  sort, fused) and measure producer-stage time and exact selection
+  agreement, not census alone; keep the incumbent fallback above 2048.
 - Scalar score kernel tuning: superseded on the released geometry by the
   MMA tile; the 8-lane scalar kernel remains the fallback for other
   geometry. The 4-key/8-lane variants measured +3.0%/+1.2-1.4% on the old

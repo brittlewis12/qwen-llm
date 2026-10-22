@@ -101,9 +101,8 @@ const MMA_DIM: usize = 512;
 const MMA_HEADS: usize = 16;
 
 impl Workspace {
-    /// The three steps below in order; production composes them itself so
-    /// the stage profiler can sample each.
-    #[cfg(test)]
+    /// The three steps below in order. Production calls this wrapper; the
+    /// split entry points remain available to the stage profiler.
     pub(in super::super) fn encode_rows(
         &mut self,
         ctx: &MetalContext,

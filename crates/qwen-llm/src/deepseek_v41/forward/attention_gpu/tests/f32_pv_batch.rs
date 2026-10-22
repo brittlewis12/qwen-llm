@@ -175,8 +175,7 @@ impl Fixture {
     fn prepare(&self, ctx: &MetalContext, enc: &KernelEncoder) {
         self.bind(enc);
         pipeline(ctx, enc, "score_rows").unwrap();
-        enc.set_threadgroup_memory(0, M * std::mem::size_of::<f32>());
-        grid(enc, self.count(self.n - 1).div_ceil(32), H, self.n, 256);
+        grid(enc, self.count(self.n - 1).div_ceil(8), H, self.n, 256);
         pipeline(ctx, enc, "softmax_rows").unwrap();
         grid(enc, H, self.n, 1, 32);
     }

@@ -539,7 +539,7 @@ fn warm(
         };
         let dense_calls = census.iter().filter(dense_tensor).count();
         let counts = [GgmlType::Q6_K, GgmlType::Q8_0].map(|dtype| {
-            let name = crate::metal::mat_mat_tensor_pipeline_name(dtype).unwrap();
+            let name = crate::metal::mat_mat_tensor_pipeline_name(dtype, crate::metal::TensorActivation::F32).unwrap();
             let count = census.iter().filter(|r| r.kernel == name).count();
             if arm.dense {
                 assert!(

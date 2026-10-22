@@ -365,7 +365,7 @@ fn native_rows_live_route_witness_with_chunks(
                 }
                 metal::dispatch_census_begin();
                 submit(&ctx, "native_rows_partition", [0; 4], |enc| {
-                    ws.encode_routed_rows(&ctx, enc, c, layer, 1, &part)
+                    ws.encode_routed_rows(&ctx, enc, c, layer, 1, &part, None)
                 })
                 .unwrap();
                 let partition_census = metal::dispatch_census_take();

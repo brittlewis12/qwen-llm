@@ -522,8 +522,26 @@ impl Workspace {
         layer
             .router
             .encode_rows(enc, &scratch.hc.normalized, &b[0], n)?;
+        // One half copy of the normalized input for the shared gate/up here
+        // and the routed gate/up below.
+        let input_half = match &scratch.half_input {
+            Some(half)
+                if layer.shared[..2].iter().any(|w| w.tensor_rows_selected(n))
+                    || (half_grouped_selected(c, layer, n)
+                        && metal::moe_grouped_tensor_selected(ctx)) =>
+            {
+                Some(half.convert(ctx, enc, &scratch.hc.normalized, c.hidden * n)?)
+            }
+            _ => None,
+        };
         for j in 0..2 {
-            layer.shared[j].encode_rows(enc, &scratch.hc.normalized, &b[1 + j], n)?;
+            layer.shared[j].encode_rows_with(
+                enc,
+                &scratch.hc.normalized,
+                input_half.as_ref(),
+                &b[1 + j],
+                n,
+            )?;
         }
         let shape = vec![(c.intermediate * n) as u64];
         metal::encode_clamped_swiglu(
@@ -534,12 +552,18 @@ impl Workspace {
             &b[3].view_bytes(0, shape),
             c.clamp,
         )?;
-        layer.shared[2].encode_rows(enc, &b[3], &b[4], n)?;
+        let shared_half = match &scratch.half_inner {
+            Some(half) if layer.shared[2].tensor_rows_selected(n) => {
+                Some(half.convert(ctx, enc, &b[3], c.intermediate * n)?)
+            }
+            _ => None,
+        };
+        layer.shared[2].encode_rows_with(enc, &b[3], shared_half.as_ref(), &b[4], n)?;
         if half_grouped_selected(c, layer, n)
             || grouped_selected(c, layer, n)
             || native_rows_supported(c, layer)
         {
-            self.encode_routed_rows(ctx, enc, c, layer, id, scratch)?;
+            self.encode_routed_rows(ctx, enc, c, layer, id, scratch, input_half.as_ref())?;
         } else {
             for row in 0..n {
                 self.encode_routed(
@@ -577,6 +601,7 @@ impl Workspace {
         layer: &Layer<'_>,
         id: usize,
         scratch: &Rows,
+        input_half: Option<&MetalTensor>,
     ) -> std::result::Result<(), metal::MetalError> {
         let n = scratch.hc.rows;
         let extents = composition_extents(c, n)?;
@@ -606,12 +631,23 @@ impl Workspace {
                 ctx, enc, &b[8], &counts, &b[11], c.experts, n, c.topk,
             )?;
             if tensor {
+                // The caller's half copy of the normalized input when it made
+                // one (the shared gate/up read it too); otherwise convert here.
+                let owned_half = match (input_half, &scratch.half_input) {
+                    (None, Some(half)) => {
+                        Some(half.convert(ctx, enc, &scratch.hc.normalized, c.hidden * n)?)
+                    }
+                    _ => None,
+                };
+                let x_pack = input_half
+                    .or(owned_half.as_ref())
+                    .unwrap_or(&scratch.hc.normalized);
                 metal::encode_moe_swiglu_f32_grouped_slots_tensor(
                     ctx,
                     enc,
                     layer.banks[0],
                     layer.banks[1],
-                    &scratch.hc.normalized,
+                    x_pack,
                     &counts,
                     &b[11],
                     &b[12],
@@ -679,11 +715,17 @@ impl Workspace {
             } else {
                 metal::encode_moe_down_f32x_grouped_slots
             };
+            let inner_half = match &scratch.half_inner {
+                Some(half) if tensor => {
+                    Some(half.convert(ctx, enc, &b[13], c.intermediate * c.topk * n)?)
+                }
+                _ => None,
+            };
             down(
                 ctx,
                 enc,
                 layer.banks[2],
-                &b[13],
+                inner_half.as_ref().unwrap_or(&b[13]),
                 &counts,
                 &b[11],
                 &b[14],
@@ -845,6 +887,11 @@ pub(super) struct Rows {
     pub(super) hc: prefill::HcRows,
     // Activations are reused; buffer 6 retains layer-major [layer][row] statuses.
     buffers: Vec<MetalTensor>,
+    /// Half copy of the normalized input (shared and routed gate/up read
+    /// it, with the shared down in between) and of the down inputs (the
+    /// shared, then the routed slots); `None` when the tier is not selected.
+    half_input: Option<prefill::HalfScratch>,
+    half_inner: Option<prefill::HalfScratch>,
 }
 impl Rows {
     pub(super) fn widths(c: &Config, layers: usize) -> Vec<usize> {
@@ -903,7 +950,19 @@ impl Rows {
             )
         })
         .collect::<Result<Vec<_>>>()?;
-        Ok(Self { hc, buffers })
+        let extent = |width: usize| {
+            width
+                .checked_mul(rows)
+                .ok_or_else(|| "half scratch extent overflow".to_string())
+        };
+        let half_input = prefill::HalfScratch::new(ctx, extent(c.hidden)?)?;
+        let half_inner = prefill::HalfScratch::new(ctx, extent(c.intermediate * c.topk.max(1))?)?;
+        Ok(Self {
+            hc,
+            buffers,
+            half_input,
+            half_inner,
+        })
     }
     pub(super) fn validate_status(&self) -> Result<()> {
         let t = &self.buffers[6];

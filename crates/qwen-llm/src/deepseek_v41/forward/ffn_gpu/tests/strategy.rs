@@ -44,9 +44,10 @@ fn assert_census(
     rows: usize,
     route: Route,
 ) {
-    // The half route runs the tensor tile where the tier exists.
+    // The half route runs the tensor tile where the tier exists (on half
+    // activation copies when the scratch provides them).
     let half_suffix = if metal::moe_grouped_tensor_selected(ctx) {
-        "_f32_grouped_slots_tensor"
+        "_grouped_slots_tensor"
     } else {
         "_f32_grouped_slots_generic"
     };
@@ -291,7 +292,7 @@ fn selected_strategy_threshold_legacy_fallback_and_entrypoints() {
             let expected: Vec<_> = [9, 12, 13, 14, 5].map(|i| bits(&scratch.buffers[i])).into();
             metal::dispatch_census_begin();
             submit(&ctx, "selected_strategy_routed_ffn", [0; 4], |enc| {
-                ws.encode_routed_rows(&ctx, enc, c, layer, 0, &scratch)
+                ws.encode_routed_rows(&ctx, enc, c, layer, 0, &scratch, None)
             })
             .unwrap();
             assert_census(&ctx, &metal::dispatch_census_take(), n, route);

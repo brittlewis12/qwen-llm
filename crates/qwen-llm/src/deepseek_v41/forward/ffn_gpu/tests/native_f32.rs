@@ -97,7 +97,7 @@ fn compare_native_rows(
     metal::dispatch_census_begin();
     with_native_rows(|| {
         submit(ctx, "v41_compare_native_rows", [0; 4], |enc| {
-            ws.encode_routed_rows(ctx, enc, c, layer, 0, &native)
+            ws.encode_routed_rows(ctx, enc, c, layer, 0, &native, None)
         })
         .unwrap();
     });
@@ -166,6 +166,7 @@ fn compare_native_rows(
                         layer,
                         0,
                         if which == 0 { &native } else { grouped },
+                        None,
                     )
                     .unwrap();
                 }
@@ -259,7 +260,7 @@ fn witness(
         write(&scratch.buffers[4], &shared[start * h..(start + rows) * h]);
         metal::dispatch_census_begin();
         submit(ctx, "v41_frozen_grouped", [0; 4], |enc| {
-            ws.encode_routed_rows(ctx, enc, c, layer, 0, &scratch)
+            ws.encode_routed_rows(ctx, enc, c, layer, 0, &scratch, None)
         })
         .unwrap();
         let census = metal::dispatch_census_take();
@@ -509,7 +510,7 @@ fn witness(
         write(&repeated.buffers[4], &shared.repeat(11));
         metal::dispatch_census_begin();
         submit(ctx, "v41_grouped_repeated_rows", [0; 4], |enc| {
-            ws.encode_routed_rows(ctx, enc, c, layer, 0, &repeated)
+            ws.encode_routed_rows(ctx, enc, c, layer, 0, &repeated, None)
         })
         .unwrap();
         let census = metal::dispatch_census_take();

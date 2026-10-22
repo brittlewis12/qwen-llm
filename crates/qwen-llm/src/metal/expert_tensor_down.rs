@@ -276,7 +276,7 @@ pub(crate) fn prepare<'a>(
             (ids, "ids"),
         ],
     )?;
-    let name = moe_grouped_tensor_pipeline_name(MoeGroupedTensorRole::Down, GgmlType::IQ3_S)
+    let name = moe_grouped_tensor_pipeline_name(MoeGroupedTensorRole::Down, GgmlType::IQ3_S, TensorActivation::F32)
         .ok_or_else(|| bad_shape(KERNEL, "no IQ3_S tensor down pipeline"))?;
     #[cfg(test)]
     let name = if matches!(

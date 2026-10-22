@@ -141,7 +141,7 @@ fn capacity_supported(width: usize, threads: usize, static_bytes: usize, limit: 
 /// Resolve/cache the pipeline without touching the encoder. Pipeline failures
 /// are errors, not permission to hide a broken candidate behind the baseline.
 fn prepare(ctx: &MetalContext, dtype: GgmlType) -> Result<bool, MetalError> {
-    let name = metal::mat_mat_tensor_pipeline_name(dtype)
+    let name = metal::mat_mat_tensor_pipeline_name(dtype, metal::TensorActivation::F32)
         .ok_or_else(|| bad_shape(KERNEL, "no dense tensor pipeline"))?;
     let p = ctx.tensor_pipeline(&name)?;
     Ok(capacity_supported(

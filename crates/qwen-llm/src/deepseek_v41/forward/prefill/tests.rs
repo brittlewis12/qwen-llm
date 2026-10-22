@@ -114,12 +114,13 @@ fn chunk_dispatch_and_submission_census() {
                 .filter(|c| c.len() > 1)
                 .count();
             // Half-staged MXFP4 route: down tile for the gate pass and the
-            // down pass, clamped up tile in between; the tensor tile where
-            // the tier exists, the generic tile elsewhere.
+            // down pass, clamped up tile in between; the tensor tile on half
+            // activation copies where the tier exists, the generic tile
+            // elsewhere.
             let (down_name, up_name) = if metal::moe_grouped_tensor_selected(&ctx) {
                 (
-                    "kernel_moe_down_mxfp4_f32_grouped_slots_tensor",
-                    "kernel_moe_up_clamped_mxfp4_f32_grouped_slots_tensor",
+                    "kernel_moe_down_mxfp4_f16act_grouped_slots_tensor",
+                    "kernel_moe_up_clamped_mxfp4_f16act_grouped_slots_tensor",
                 )
             } else {
                 (

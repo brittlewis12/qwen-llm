@@ -6,6 +6,30 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the current state and evidence index.
 
+## 2026-10-22 - GLM Ordinary Requests: Adaptive Workspace Cuts Prefill Time 20%
+
+- Close a deployment gap: ordinary `qwen run` and family benchmarks capped
+  prefill at 512 rows while serving already selected up to 2048. Share the
+  bounded candidate order, price complete weights/session/reserve before loading,
+  and retry resident session creation only on typed pressure. Context never
+  shrinks; successful widths freeze. DFlash and serving policy stay unchanged.
+- M4 Max, UD-IQ3_XXS, Metal validation, native 11,105-token saved-rollout prompt,
+  256-token cap, temp 1/seed 42, capacity 11,360: warmed fresh-process ABBA selects
+  512/2048/2048/512. Mean prefill 62.51 -> 49.82 s (-20.3%, throughput +25.5%);
+  both pairs improve about 20%. Observed request means 74.19 -> 59.66 s (-19.6%).
+  A1 has a decode-time outlier; no decode gain or sole attribution of all request
+  savings. Every measured run reports zero cold prefetch and the same output hash.
+- Fixed quality-v1 first prose/code/long cases, 64 held tokens each: Fast512
+  and Fast2048 have identical NLL/hit vectors and measured KL zero; both retain
+  the same differences from Exact512. Descriptive coverage, not formal
+  noninferiority, universal state identity, or completed-game quality.
+- Actual 2048-row admission, cold/snapshot equality, cancellation/retry and
+  continuation pass. At the state witness's 4096-token capacity, session buffers
+  grow by 1.70 GiB; cancellation waits for the larger command boundary. Four
+  planner tests and 1166 CLI/benchmark unit tests pass; actual `pp2048` reports
+  the new width. No memory override or new kernel.
+- [Request records, quality/state witnesses and reproduction](bench/2026-10-22-glm-ordinary-workspace/README.md).
+
 ## 2026-10-22 - V4.1: Dense Projections On The Tensor Tile, +14% Prefill
 
 - The six-span re-sample after the expert tile put the dense Q8_0

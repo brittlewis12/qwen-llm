@@ -4,12 +4,7 @@ use qwen_llm::glm5_next_metal::DEFAULT_PREFILL_ROWS;
 use qwen_llm::metal::{MetalMemorySignals, evaluate_metal_memory_admission_with_cpu_bytes};
 
 pub(super) fn candidates(capacity: usize, packed: bool) -> Vec<usize> {
-    let mut rows: Vec<_> = [2048, 1024, 512, 256, 128, 64, 32, 16, 8, 4, 2, 1, 0]
-        .into_iter()
-        .map(|n| if packed { n.min(capacity) } else { 0 })
-        .collect();
-    rows.dedup();
-    rows
+    qwen_llm::glm5_next_metal::prefill_plan::candidates(capacity, packed)
 }
 
 #[derive(Clone, Copy, Debug)]

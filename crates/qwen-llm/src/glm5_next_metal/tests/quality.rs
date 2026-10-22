@@ -16,6 +16,7 @@
 //!    or a Fast prefill and record whether the call is right.
 
 mod latent_mma;
+mod workspace;
 
 use super::natural::{
     Generation, OBSERVATION, artifact_layout, currency_tool, ids, parse_ids, parse_turn, render,

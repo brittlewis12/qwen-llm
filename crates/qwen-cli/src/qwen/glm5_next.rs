@@ -18,7 +18,7 @@ use qwen_llm::glm5_next::{
 use qwen_llm::glm5_next_chat::{self as chat, Effort, Message, RenderOptions};
 use qwen_llm::glm5_next_metal::{
     CapacityAdvice, DEFAULT_PREFILL_ROWS, Glm5NextMetalError, Glm5NextSession, Glm5NextWeights,
-    prefetch_retained_with_cancel, preflight_session,
+    prefetch_retained_with_cancel, prefill_plan, preflight_session,
 };
 use serde_json::{Value, json};
 
@@ -398,6 +398,29 @@ fn admission_advice(advice: CapacityAdvice, required: usize) -> String {
     }
 }
 
+fn request_prefill_rows(prompt_tokens: usize, packed: bool, has_drafter: bool) -> usize {
+    if !packed {
+        0
+    } else if has_drafter {
+        prompt_tokens.min(DEFAULT_PREFILL_ROWS)
+    } else {
+        prefill_plan::candidates(prompt_tokens, true)[0]
+    }
+}
+
+/// DFlash keeps its fixed packed_rows/aggregate-admission contract.
+fn with_prefill_policy<T>(
+    rows: usize,
+    has_head: bool,
+    mut attempt: impl FnMut(usize) -> qwen_llm::glm5_next_metal::Result<T>,
+) -> qwen_llm::glm5_next_metal::Result<(usize, T)> {
+    if has_head {
+        attempt(rows).map(|value| (rows, value))
+    } else {
+        prefill_plan::select(rows, attempt)
+    }
+}
+
 /// Admits the session against current device memory before prefetch and
 /// load; on refusal, says what fits.
 fn preflight(
@@ -408,10 +431,13 @@ fn preflight(
     prompt_tokens: usize,
     capacity: usize,
     prefill_rows: usize,
+    has_head: bool,
     drafter_request_bytes: u64,
-) -> Result<()> {
-    match preflight_session(ctx, gguf, prepared.model(), capacity, prefill_rows) {
-        Ok(plan) => {
+) -> Result<usize> {
+    match with_prefill_policy(prefill_rows, has_head, |rows| {
+        preflight_session(ctx, gguf, prepared.model(), capacity, rows)
+    }) {
+        Ok((rows, plan)) => {
             if drafter_request_bytes > 0 {
                 dflash::admit_bytes(
                     ctx,
@@ -420,7 +446,7 @@ fn preflight(
                     "GLM target and DFlash request scratch",
                 )?;
             }
-            Ok(())
+            Ok(rows)
         }
         Err(error @ Glm5NextMetalError::MemoryAdmission { advice, .. }) => {
             if drafter_request_bytes > 0 {
@@ -545,11 +571,7 @@ pub(crate) fn run(
     }
     let (capacity, prefill_rows) = timing.measure(Phase::RequestPreparation, || {
         let capacity = capacity(args, tokens.len(), prepared.config().context_length)?;
-        let rows = if prepared.packed_prefill() {
-            tokens.len().min(DEFAULT_PREFILL_ROWS)
-        } else {
-            0
-        };
+        let rows = request_prefill_rows(tokens.len(), prepared.packed_prefill(), drafter.is_some());
         Ok((capacity, rows))
     })?;
     let mut sampler = Sampler::new(sampling)?;
@@ -570,7 +592,7 @@ pub(crate) fn run(
         Some(head) => dflash::packed_rows(prefill_rows, capacity, head.config.block_size as usize)?,
         None => prefill_rows,
     };
-    timing.measure(Phase::MemoryPreflight, || {
+    let prefill_rows = timing.measure(Phase::MemoryPreflight, || {
         let request_bytes = head
             .as_ref()
             .map(|head| {
@@ -594,6 +616,7 @@ pub(crate) fn run(
             tokens.len(),
             capacity,
             prefill_rows,
+            head.is_some(),
             request_bytes,
         )
     })?;
@@ -614,9 +637,11 @@ pub(crate) fn run(
     let weights = timing.measure(Phase::ModelLoad, || {
         Glm5NextWeights::load(&ctx, gguf).context("load GLM-5.3 weights")
     })?;
-    let mut session = timing.measure(Phase::SessionSetup, || {
-        Glm5NextSession::with_prefill_rows(&ctx, &weights, capacity, prefill_rows)
-            .context("create GLM-5.3 session")
+    let (prefill_rows, mut session) = timing.measure(Phase::SessionSetup, || {
+        with_prefill_policy(prefill_rows, head.is_some(), |rows| {
+            Glm5NextSession::with_prefill_rows(&ctx, &weights, capacity, rows)
+        })
+        .context("create GLM-5.3 session")
     })?;
 
     let stdout = std::io::stdout();
@@ -940,6 +965,85 @@ mod tests {
             .chain(extra)
             .map(|s| s.to_string())
             .collect()
+    }
+
+    #[test]
+    fn ordinary_prefill_is_prompt_bounded_without_selecting_dflash_policy() {
+        for (prompt, expected) in [(0, 0), (1, 1), (3, 3), (300, 300), (8192, 2048)] {
+            let maximum = request_prefill_rows(prompt, true, false);
+            assert_eq!(maximum, expected);
+            let (rows, value) = with_prefill_policy(maximum, false, |rows| Ok(rows)).unwrap();
+            assert_eq!((rows, value), (expected, expected));
+            assert_eq!(request_prefill_rows(prompt, false, false), 0);
+        }
+        let mut attempts = Vec::new();
+        let (rows, _) =
+            with_prefill_policy(request_prefill_rows(4096, true, false), false, |rows| {
+                attempts.push(rows);
+                if rows > 1024 {
+                    Err(test_memory_pressure())
+                } else {
+                    Ok(())
+                }
+            })
+            .unwrap();
+        assert_eq!(attempts, [2048, 1024]);
+        assert_eq!(rows, 1024);
+    }
+
+    fn test_memory_pressure() -> Glm5NextMetalError {
+        let denied = qwen_llm::metal::evaluate_metal_memory_admission(
+            2,
+            0,
+            qwen_llm::metal::MetalMemorySignals {
+                recommended_max_bytes: 1,
+                current_allocated_bytes: 0,
+                process_limit_remaining_bytes: Some(1),
+            },
+            true,
+        )
+        .refusal()
+        .unwrap();
+        Glm5NextMetalError::MemoryAdmission {
+            denied,
+            budget_bytes: 1,
+            advice: CapacityAdvice::Fits(123),
+        }
+    }
+
+    #[test]
+    fn dflash_retains_fixed_default_packet_floor_and_no_pressure_retry() {
+        assert_eq!(DEFAULT_PREFILL_ROWS, 512);
+        let rows = request_prefill_rows(4096, true, true);
+        assert_eq!(rows, 512);
+        assert_eq!(dflash::packed_rows(rows, 8192, 16).unwrap(), 512);
+        let short = request_prefill_rows(1, true, true);
+        assert_eq!(dflash::packed_rows(short, 128, 16).unwrap(), 16);
+        assert_eq!(dflash::packed_rows(short, 1, 16).unwrap(), 1);
+        let mut attempts = Vec::new();
+        let error = with_prefill_policy(rows, true, |rows| {
+            attempts.push(rows);
+            Err::<(), _>(test_memory_pressure())
+        })
+        .unwrap_err();
+        assert_eq!(attempts, [512]);
+        assert!(error.is_memory_pressure());
+        assert_eq!(
+            with_prefill_policy(512, true, |rows| Ok(rows)).unwrap(),
+            (512, 512)
+        );
+    }
+
+    #[test]
+    fn ordinary_final_refusal_keeps_capacity_advice() {
+        let error =
+            with_prefill_policy(2048, false, |_| Err::<(), _>(test_memory_pressure())).unwrap_err();
+        let Glm5NextMetalError::MemoryAdmission { advice, .. } = error else {
+            panic!("typed final admission refusal");
+        };
+        assert_eq!(advice, CapacityAdvice::Fits(123));
+        assert!(admission_advice(advice, 100).contains("--max-context-tokens 123"));
+        assert!(admission_advice(advice, 200).contains("needs 200 positions"));
     }
 
     fn admitted(extra: &[&str]) -> Result<Request> {

@@ -131,6 +131,14 @@ re-sample before claiming.
 
 ### GLM-5.3-Flash
 
+- Ordinary run/benchmark workspace selection: landed (2026-10-22 ordinary
+  workspace entry). Existing serving range replaces the fixed 512-row cap;
+  saved-rollout prefill 62.51 -> 49.82 s (-20.3%), observed request mean -19.6%
+  with a baseline decode outlier. Context unchanged, typed-pressure fallback,
+  frozen width; all four 256-token outputs match. Three held-text cases show
+  unchanged NLL/hits versus 512. Costs: larger scratch/cancellation intervals;
+  serving and DFlash policy unchanged.
+  Packet: `bench/2026-10-22-glm-ordinary-workspace/README.md`.
 - Native DFlash2 sampled gameplay: negative (2026-10-22, M4, API validation
   enabled). Decode 26.10 -> 5.36 tok/s; request latency +55.8%, acceptance
   14.1%. Same native prefill geometry, no reported cold prefetch. Keep

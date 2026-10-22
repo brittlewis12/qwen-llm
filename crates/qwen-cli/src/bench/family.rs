@@ -14,7 +14,7 @@ use crate::family_options::{
 use anyhow::{bail, ensure};
 use qwen_llm::deepseek_v4_metal::{DeepSeekV4MetalResidency, DeepSeekV4Session};
 use qwen_llm::deepseek_v41::{forward::Forward as V41Forward, gguf as v41_weights};
-use qwen_llm::glm5_next_metal::{Glm5NextSession, Glm5NextWeights};
+use qwen_llm::glm5_next_metal::{Glm5NextSession, Glm5NextWeights, prefill_plan};
 use qwen_llm::k2_horizon_runtime::{K2LoadedModel, K2Session};
 use qwen_llm::model_family::ModelFamily;
 use qwen_llm::muse_glimmer_runtime::{MuseGlimmerLoadedModel, MuseGlimmerTextRunner};
@@ -274,20 +274,19 @@ pub(crate) fn with_family_bench<R>(
                 "GLM-5.3-Flash rows must stay within the checkpoint context {context} (need {})",
                 extent.forwards
             );
-            let prefill_rows = if layout.packed_prefill() {
-                extent
-                    .prefill_endpoint
-                    .clamp(1, qwen_llm::glm5_next_metal::DEFAULT_PREFILL_ROWS)
-            } else {
-                0
-            };
-            qwen_llm::glm5_next_metal::preflight_session(
-                ctx,
-                gguf,
-                layout.model(),
-                extent.forwards,
-                prefill_rows,
-            )
+            let maximum = prefill_plan::candidates(
+                extent.prefill_endpoint.min(extent.forwards),
+                layout.packed_prefill(),
+            )[0];
+            let (prefill_rows, _) = prefill_plan::select(maximum, |rows| {
+                qwen_llm::glm5_next_metal::preflight_session(
+                    ctx,
+                    gguf,
+                    layout.model(),
+                    extent.forwards,
+                    rows,
+                )
+            })
             .context("admit the GLM-5.3-Flash bench session")?;
             let weights = Glm5NextWeights::load(ctx, gguf).context("load GLM-5.3-Flash weights")?;
             let mut bench = Glm5NextBench {
@@ -296,6 +295,7 @@ pub(crate) fn with_family_bench<R>(
                 weights: &weights,
                 capacity: extent.forwards,
                 prefill_rows,
+                prefill_frozen: false,
                 session: None,
             };
             body(&mut bench)
@@ -368,7 +368,24 @@ struct Glm5NextBench<'ctx, 'w> {
     session: Option<Glm5NextSession<'w>>,
     capacity: usize,
     prefill_rows: usize,
+    prefill_frozen: bool,
     vocab: usize,
+}
+
+/// Freeze only after creation succeeds, including the first warm-up session.
+/// Later repetitions re-admit that same width rather than mixing execution modes.
+fn create_glm_bench_session<T>(
+    rows: &mut usize,
+    frozen: &mut bool,
+    mut create: impl FnMut(usize) -> qwen_llm::glm5_next_metal::Result<T>,
+) -> qwen_llm::glm5_next_metal::Result<T> {
+    if *frozen {
+        return create(*rows);
+    }
+    let (selected, session) = prefill_plan::select(*rows, create)?;
+    *rows = selected;
+    *frozen = true;
+    Ok(session)
 }
 
 impl<'w> Glm5NextBench<'_, 'w> {
@@ -387,11 +404,10 @@ impl FamilyBench for Glm5NextBench<'_, '_> {
     /// `qwen run` creates one per request.
     fn begin_rep(&mut self) -> Result<()> {
         self.session = None;
-        self.session = Some(Glm5NextSession::with_prefill_rows(
-            self.ctx,
-            self.weights,
-            self.capacity,
-            self.prefill_rows,
+        self.session = Some(create_glm_bench_session(
+            &mut self.prefill_rows,
+            &mut self.prefill_frozen,
+            |rows| Glm5NextSession::with_prefill_rows(self.ctx, self.weights, self.capacity, rows),
         )?);
         Ok(())
     }
@@ -408,7 +424,11 @@ impl FamilyBench for Glm5NextBench<'_, '_> {
     }
     fn semantics(&self) -> FamilySemantics {
         FamilySemantics {
-            prefill_mode: "packed_fast+last_logits",
+            prefill_mode: if self.prefill_rows > 0 {
+                "packed_fast+last_logits"
+            } else {
+                "serial+logits_copy+route_status_checks"
+            },
             decode_mode: "serial+logits_copy+route_status_checks",
             prefill_chunk: Some(self.prefill_rows),
         }
@@ -835,6 +855,106 @@ fn family_row(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn glm_pressure() -> qwen_llm::glm5_next_metal::Glm5NextMetalError {
+        let denied = qwen_llm::metal::evaluate_metal_memory_admission(
+            2,
+            0,
+            qwen_llm::metal::MetalMemorySignals {
+                recommended_max_bytes: 1,
+                current_allocated_bytes: 0,
+                process_limit_remaining_bytes: Some(1),
+            },
+            true,
+        )
+        .refusal()
+        .unwrap();
+        qwen_llm::glm5_next_metal::Glm5NextMetalError::MemoryAdmission {
+            denied,
+            budget_bytes: 1,
+            advice: qwen_llm::glm5_next_metal::CapacityAdvice::NotEvaluated,
+        }
+    }
+
+    #[test]
+    fn glm_bench_freezes_only_successful_creation_and_never_changes_later_reps() {
+        let (mut rows, mut frozen) = (2048, false);
+        let mut attempts = Vec::new();
+        let error = create_glm_bench_session(&mut rows, &mut frozen, |rows| {
+            attempts.push(rows);
+            Err::<(), _>(glm_pressure())
+        })
+        .unwrap_err();
+        assert!(error.is_memory_pressure());
+        assert_eq!(attempts, prefill_plan::candidates(2048, true));
+        assert_eq!((rows, frozen), (2048, false));
+
+        attempts.clear();
+        let session = create_glm_bench_session(&mut rows, &mut frozen, |rows| {
+            attempts.push(rows);
+            if rows > 512 {
+                Err(glm_pressure())
+            } else {
+                Ok(rows)
+            }
+        })
+        .unwrap();
+        assert_eq!(attempts, [2048, 1024, 512]);
+        assert_eq!((rows, frozen, session), (512, true, 512));
+
+        attempts.clear();
+        assert!(
+            create_glm_bench_session(&mut rows, &mut frozen, |rows| {
+                attempts.push(rows);
+                Err::<(), _>(glm_pressure())
+            })
+            .unwrap_err()
+            .is_memory_pressure()
+        );
+        assert_eq!(attempts, [512]);
+        assert_eq!((rows, frozen), (512, true));
+        assert_eq!(
+            create_glm_bench_session(&mut rows, &mut frozen, |rows| Ok(rows)).unwrap(),
+            512
+        );
+    }
+
+    #[test]
+    fn glm_bench_nonpressure_creation_does_not_freeze_or_retry() {
+        let (mut rows, mut frozen) = (2048, false);
+        let mut attempts = Vec::new();
+        let error = create_glm_bench_session(&mut rows, &mut frozen, |rows| {
+            attempts.push(rows);
+            Err::<(), _>(qwen_llm::glm5_next_metal::Glm5NextMetalError::Metal(
+                qwen_llm::metal::MetalError::NoBuffer(4096),
+            ))
+        })
+        .unwrap_err();
+        assert!(!error.is_memory_pressure());
+        assert_eq!(attempts, [2048]);
+        assert_eq!((rows, frozen), (2048, false));
+    }
+
+    #[test]
+    fn glm_bench_workspace_is_capped_to_prefill_endpoint_not_decode_extent() {
+        let extent = FamilyBenchExtent::for_shapes(&[3], &[8192], &[0], (1, 1)).unwrap();
+        assert_eq!(extent.forwards, 8192);
+        let maximum = prefill_plan::candidates(extent.prefill_endpoint, true)[0];
+        assert_eq!(maximum, 3);
+        let (mut rows, mut frozen) = (maximum, false);
+        assert_eq!(
+            create_glm_bench_session(&mut rows, &mut frozen, |rows| Ok(rows)).unwrap(),
+            3
+        );
+        assert_eq!((rows, frozen), (3, true));
+        let (mut rows, mut frozen) = (0, false);
+        create_glm_bench_session(&mut rows, &mut frozen, |rows| {
+            assert_eq!(rows, 0);
+            Ok(())
+        })
+        .unwrap();
+        assert_eq!((rows, frozen), (0, true));
+    }
 
     #[test]
     fn v41_standard_harness_keeps_fresh_state_depth_and_common_columns() {

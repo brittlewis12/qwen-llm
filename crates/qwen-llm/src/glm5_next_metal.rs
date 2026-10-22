@@ -2393,6 +2393,7 @@ mod dflash;
 mod interventions;
 mod lens;
 mod packed;
+pub mod prefill_plan;
 pub use capture::{Glm5NextCapturedRows, Glm5NextRowBank, Glm5NextRowBankPlan};
 pub use checkpoint::{
     Glm5NextAppendCheckpoint, Glm5NextAppendTransaction, Glm5NextCommittedRows,

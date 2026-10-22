@@ -189,12 +189,18 @@ impl Rows {
         ]
     }
 
+    /// Selection never reaches the pruning path above this many visible keys,
+    /// so the tiled score scratch is bounded by the unpruned window.
+    pub(super) fn select_width(c: &Config, capacity: usize) -> usize {
+        capacity.min(c.candidate_topk.saturating_mul(c.candidate_block))
+    }
+
     /// Admission width for the tiled selection score scratch. The actual
-    /// allocation is `capacity * min(rows, TILE)`; this per-row width prices
-    /// at least that many bytes when multiplied by `rows`.
-    pub(super) fn select_widths(capacity: usize, rows: usize) -> Vec<usize> {
+    /// allocation is `select_width * min(rows, TILE)`; this per-row width
+    /// prices at least that many bytes when multiplied by `rows`.
+    pub(super) fn select_widths(c: &Config, capacity: usize, rows: usize) -> Vec<usize> {
         let tile = rows.min(query_batch::TILE);
-        vec![(capacity.saturating_mul(tile)).div_ceil(rows.max(1))]
+        vec![(Self::select_width(c, capacity).saturating_mul(tile)).div_ceil(rows.max(1))]
     }
 
     pub(super) fn new(
@@ -223,7 +229,7 @@ impl Rows {
             index_weights: prefill::allocate(ctx, widths[11], rows, GgmlType::F32)?,
             select_scores: prefill::allocate(
                 ctx,
-                capacity,
+                Self::select_width(c, capacity),
                 rows.min(query_batch::TILE),
                 GgmlType::F32,
             )?,

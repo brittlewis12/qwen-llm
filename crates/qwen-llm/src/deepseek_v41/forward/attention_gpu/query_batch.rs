@@ -280,13 +280,16 @@ impl Workspace {
         let last_length = (start + first + n) / ratio;
         let selected_stride = c.index_topk;
         let candidates_stride = self.capacity.div_ceil(c.candidate_block);
-        let grid_w = last_length
-            .min(c.index_topk)
-            .max(if publish {
-                last_length.div_ceil(c.candidate_block)
-            } else {
-                0
-            });
+        let select_width = Rows::select_width(c, self.capacity);
+        // The tile can contain both all-selected rows (length <= top_k) and
+        // top-k rows. The last row may be top-k, so bound the x grid by the
+        // tile's maximum visible all-selected extent, not by the last row.
+        let all_bound = last_length.min(c.index_topk);
+        let grid_w = all_bound.max(if publish {
+            last_length.div_ceil(c.candidate_block)
+        } else {
+            0
+        });
         if grid_w > 0 {
             pipeline(ctx, enc, "selection_prepare_rows")?;
             enc.set_bytes(
@@ -343,7 +346,7 @@ impl Workspace {
                     c.index_heads as u32,
                 ],
             );
-            enc.set_bytes(2, &[self.capacity as u32, n as u32, 0, 0]);
+            enc.set_bytes(2, &[select_width as u32, n as u32, 0, 0]);
             enc.set_tensor(3, &rows.index_query);
             enc.set_tensor(4, &rows.index_weights);
             enc.set_tensor(5, &self.owners[owner].keys);
@@ -367,8 +370,8 @@ impl Workspace {
                     continue;
                 }
                 let scores = rows.select_scores.view_subrange(
-                    ((row - first) * self.capacity) as u64,
-                    vec![self.capacity as u64],
+                    ((row - first) * select_width) as u64,
+                    vec![select_width as u64],
                 );
                 let selected = std::mem::replace(
                     &mut self.selected,

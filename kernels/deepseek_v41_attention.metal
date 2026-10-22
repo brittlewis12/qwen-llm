@@ -21,7 +21,7 @@ kernel void kernel_deepseek_v41_attention_selection_prepare_rows(
     if (local >= b.z) return;
     uint row = row0 + local;
     uint length = (a.x + row + 1) / a.y;
-    uint all = min(length, a.z);
+    uint all = length <= a.z ? length : 0;
     uint blocks = (length + a.w - 1) / a.w;
     if (t.x < all) selected[(ulong)row * b.x + t.x] = t.x;
     if (b.w && t.x < blocks) candidates[(ulong)row * b.y + t.x] = 1;

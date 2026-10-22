@@ -270,6 +270,27 @@ fn query_batch_normalized_inputs_awkward_rows_wrap_pair_phase_and_followers() {
 }
 
 #[test]
+fn query_batch_batched_selection_matches_incumbent_across_tiles() {
+    let ctx = MetalContext::new().unwrap();
+    // Unpruned at every row (16385 is the pruning boundary), with index_topk
+    // 512 so the 512 -> 513 transition falls inside the second 32-row tile.
+    let mut c = config();
+    c.index_topk = 512;
+    c.candidate_block = 8;
+    c.candidate_topk = 2048;
+    let schedule = Schedule {
+        layers: 7,
+        kv_source_layers: vec![1, 3],
+        index_source_layers: vec![1, 3, 5],
+        compression_ratios: vec![0, 2, 2, 1, 1, 1, 1],
+        candidate_source_layer: Some(3),
+    };
+    for (start, n) in [(479usize, 65usize), (991, 65)] {
+        compare_case(&ctx, &c, &schedule, start, n);
+    }
+}
+
+#[test]
 fn query_batch_f32_mma_ring_pair_followers_and_decode_continuation() {
     let ctx = MetalContext::new().unwrap();
     let c = Config {

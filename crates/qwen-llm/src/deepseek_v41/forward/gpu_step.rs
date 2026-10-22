@@ -42,7 +42,7 @@ pub(super) fn chunk_widths(
     widths.extend(prefill::HcRows::widths(c));
     widths.extend(ffn_gpu::Rows::widths(c, model.layers.len()));
     widths.extend(attention_gpu::Rows::widths(c, capacity));
-    widths.extend(attention_gpu::Rows::select_widths(capacity, rows));
+    widths.extend(attention_gpu::Rows::select_widths(c, capacity, rows));
     widths.extend(attention_gpu::Rows::tile_widths(c, rows)?);
     for layer in &model.layers {
         if let Some(e) = &layer.engram {

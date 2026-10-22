@@ -20,6 +20,10 @@
 //! availability baselines, not optimized batched implementations: encoding
 //! work and kernel launches grow with rows. They reuse admitted decode
 //! scratch; packed buffers remain allocated and fully priced.
+//! Short Fast/Half packets use native half-operand experts and per-row F32
+//! routers. Q8 projections at 2..=4 rows use the existing F32-activation MMA
+//! few-row kernel, like other few-row dtype paths. These are measured choices,
+//! not bitwise-equivalent replacements for the old grouped/half tiles.
 
 use super::*;
 use crate::metal::{
@@ -66,6 +70,10 @@ mod latent_mma_ab;
 #[cfg(test)]
 #[path = "tests/prefill_cost.rs"]
 mod prefill_cost;
+
+#[cfg(test)]
+#[path = "tests/packet_policy.rs"]
+mod packet_policy;
 
 #[cfg(test)]
 thread_local! {
@@ -154,7 +162,8 @@ fn stage_lineage(lineage: PackedLineage, stage: Stage) -> PackedLineage {
 pub(super) enum StageMode {
     /// The decode kernels, row by row (bitwise equal to serial decode).
     Exact,
-    /// Batched mat-mat tiles with half-staged operands.
+    /// Fast dispatch: usually half-staged tiles, with measured native/few-row
+    /// paths for short packets.
     Fast,
     /// Batched mat-mat with F32 operands where an F32-operand tile exists
     /// for the weight type and geometry (Q8_0, Q6_K); otherwise use native
@@ -179,9 +188,9 @@ pub(super) enum CensusPath {
     F32Narrow,
     /// The batched kernel of an F32 weight (F32 operands already).
     F32Native,
-    /// A half-staged batched kernel.
+    /// A half-operand kernel (grouped tile or native packet rows).
     Half,
-    /// Fast requested, but only per-row decode meets capability/precision.
+    /// Per-row decode dispatch: capability fallback or a short F32 router.
     RowBaseline,
 }
 
@@ -291,6 +300,80 @@ thread_local! {
 /// bitwise equal per token to the wide tiles; tests may lower it
 /// ([`F32NarrowRows`]) to compare the two.
 const F32_NARROW_MAX_ROWS: usize = 8;
+
+#[cfg(test)]
+thread_local! {
+    static PACKET_Q8_FEWROW: std::cell::Cell<Option<bool>> = const { std::cell::Cell::new(None) };
+    static PACKET_HALF_EXPERTS: std::cell::Cell<Option<bool>> = const { std::cell::Cell::new(None) };
+    static PACKET_ROUTER_ROWS: std::cell::Cell<Option<bool>> = const { std::cell::Cell::new(None) };
+}
+
+/// Same-binary A/B control. None exercises production; legacy disables only
+/// packet selections, leaving configured precision and other diagnostics alone.
+#[cfg(test)]
+pub(super) struct PacketPolicy([Option<bool>; 3]);
+
+#[cfg(test)]
+impl PacketPolicy {
+    fn replace(value: Option<bool>) -> Self {
+        Self([
+            PACKET_HALF_EXPERTS.with(|flag| flag.replace(value)),
+            PACKET_Q8_FEWROW.with(|flag| flag.replace(value)),
+            PACKET_ROUTER_ROWS.with(|flag| flag.replace(value)),
+        ])
+    }
+
+    pub(super) fn legacy() -> Self {
+        Self::replace(Some(false))
+    }
+
+    pub(super) fn production() -> Self {
+        Self::replace(None)
+    }
+}
+
+#[cfg(test)]
+impl Drop for PacketPolicy {
+    fn drop(&mut self) {
+        PACKET_HALF_EXPERTS.with(|flag| flag.set(self.0[0]));
+        PACKET_Q8_FEWROW.with(|flag| flag.set(self.0[1]));
+        PACKET_ROUTER_ROWS.with(|flag| flag.set(self.0[2]));
+    }
+}
+
+#[cfg(test)]
+pub(super) struct PacketHalfExperts(Option<bool>);
+
+#[cfg(test)]
+impl PacketHalfExperts {
+    pub(super) fn set() -> Self {
+        Self(PACKET_HALF_EXPERTS.with(|flag| flag.replace(Some(true))))
+    }
+}
+
+#[cfg(test)]
+impl Drop for PacketHalfExperts {
+    fn drop(&mut self) {
+        PACKET_HALF_EXPERTS.with(|flag| flag.set(self.0));
+    }
+}
+
+#[cfg(test)]
+pub(super) struct PacketQ8Fewrow(Option<bool>);
+
+#[cfg(test)]
+impl PacketQ8Fewrow {
+    pub(super) fn set() -> Self {
+        Self(PACKET_Q8_FEWROW.with(|flag| flag.replace(Some(true))))
+    }
+}
+
+#[cfg(test)]
+impl Drop for PacketQ8Fewrow {
+    fn drop(&mut self) {
+        PACKET_Q8_FEWROW.with(|flag| flag.set(self.0));
+    }
+}
 
 #[cfg(test)]
 thread_local! {
@@ -460,12 +543,12 @@ impl Drop for ExactStages {
 /// restore); sessions of different precisions never share state.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub enum FastPrecision {
-    /// Half-staged mat-mat tiles (the original Fast).
+    /// Half-staged tiles, with measured short-packet dispatch exceptions.
     #[default]
     Half,
     /// All dense projections (including routers) keep F32 operands, using
     /// native F32 kernels or row GEMV when no eligible F32 tile exists.
-    /// Routed experts retain Half's policy.
+    /// Routed experts retain the original grouped Half policy.
     DenseF32,
     /// Dense projections and routed experts keep F32 operands. Missing
     /// F32 tiles use the slower decode composition per row.
@@ -920,8 +1003,73 @@ fn expert_mode(arith: Arith, gate: GgmlType, up: GgmlType, down: GgmlType) -> St
     }
 }
 
-/// Shared by the session and synthetic dispatch tests. Returns the actual
-/// path so the existing grouped-only diagnostic hook stays on that path.
+fn packet_fast_half(arith: Arith, mode: StageMode) -> bool {
+    arith.lineage == PackedLineage::Fast
+        && arith.precision == FastPrecision::Half
+        && mode == StageMode::Fast
+}
+
+/// Half weights and inputs, F32 accumulation and SwiGLU. The native reduction
+/// differs from grouped MMA; retain the primitive's supported row counts.
+fn packet_half_experts_selected(
+    arith: Arith,
+    mode: StageMode,
+    gate: GgmlType,
+    up: GgmlType,
+    down: GgmlType,
+    rows: usize,
+) -> bool {
+    #[cfg(test)]
+    if PACKET_HALF_EXPERTS.with(std::cell::Cell::get) == Some(false) {
+        return false;
+    }
+    packet_fast_half(arith, mode)
+        && (1..=8).contains(&rows)
+        && crate::metal::all_slots_gate_up_native_half_rows_supported(gate, up)
+        && crate::metal::all_slots_down_native_half_rows_supported(down)
+}
+
+fn packet_router_rows_selected(
+    arith: Arith,
+    mode: StageMode,
+    stage: Stage,
+    dtype: GgmlType,
+    rows: usize,
+) -> bool {
+    #[cfg(test)]
+    if PACKET_ROUTER_ROWS.with(std::cell::Cell::get) == Some(false) {
+        return false;
+    }
+    packet_fast_half(arith, mode)
+        && stage == Stage::Router
+        && dtype == GgmlType::F32
+        && (1..=8).contains(&rows)
+}
+
+fn packet_q8_fewrow_selected(
+    arith: Arith,
+    mode: StageMode,
+    dtype: GgmlType,
+    n_in: usize,
+    rows: usize,
+) -> bool {
+    // The original diagnostic includes N8 for reproducibility. Production
+    // stops at N4: N8 was slower and showed materially larger logit drift.
+    let max_rows = 4;
+    #[cfg(test)]
+    let max_rows = match PACKET_Q8_FEWROW.with(std::cell::Cell::get) {
+        Some(false) => return false,
+        Some(true) => 8,
+        None => max_rows,
+    };
+    packet_fast_half(arith, mode)
+        && dtype == GgmlType::Q8_0
+        && (2..=max_rows).contains(&rows)
+        && n_in > 0
+        && n_in.is_multiple_of(32)
+}
+
+/// Shared by the session and synthetic dispatch tests; returns arithmetic mode.
 #[allow(clippy::too_many_arguments)]
 fn encode_experts(
     ctx: &MetalContext,
@@ -939,6 +1087,51 @@ fn encode_experts(
     clamp: f32,
 ) -> Result<StageMode> {
     let mode = expert_mode(arith, b.gate_bank.dtype, b.up_bank.dtype, b.down_bank.dtype);
+    if packet_half_experts_selected(
+        arith,
+        mode,
+        b.gate_bank.dtype,
+        b.up_bank.dtype,
+        b.down_bank.dtype,
+        rows,
+    ) {
+        #[cfg(test)]
+        record_census(Stage::RoutedExperts, "experts".into(), CensusPath::Half);
+        crate::metal::encode_all_slots_gate_up_swiglu_native_half_rows(
+            ctx,
+            enc,
+            b.gate_bank,
+            b.up_bank,
+            b.input,
+            b.ids,
+            status,
+            b.inner,
+            h,
+            f,
+            e,
+            k,
+            rows,
+            clamp,
+        )?;
+        crate::metal::encode_all_slots_down_native_half_rows(
+            ctx,
+            enc,
+            b.down_bank,
+            b.inner,
+            b.ids,
+            status,
+            b.slot_out,
+            f,
+            h,
+            e,
+            k,
+            rows,
+        )?;
+        crate::metal::encode_moe_weighted_sum_packed_f32(
+            ctx, enc, b.slot_out, b.weights, b.output, h, k, rows,
+        )?;
+        return Ok(StageMode::Fast);
+    }
     #[cfg(test)]
     if stage_lineage(arith.lineage, Stage::RoutedExperts) == PackedLineage::Fast {
         record_census(
@@ -1061,6 +1254,13 @@ fn matmat(
     rows: usize,
 ) -> Result<()> {
     let mode = projection_mode(arith, stage, weight.dtype, n_in, n_out);
+    // F32 routers already have F32 operands: this changes launch geometry,
+    // not quantized precision or the configured lineage of any other stage.
+    let mode = if packet_router_rows_selected(arith, mode, stage, weight.dtype, rows) {
+        StageMode::Exact
+    } else {
+        mode
+    };
     #[cfg(test)]
     if mode == StageMode::Exact && stage_lineage(arith.lineage, stage) == PackedLineage::Fast {
         record_census(
@@ -1137,6 +1337,15 @@ fn matmat(
             let yr = y.view_subrange((row * n_out) as u64, vec![n_out as u64]);
             crate::metal_forward::encode_mat_vec_dispatch(ctx, enc, weight, &xr, &yr, n_in, n_out)?;
         }
+        return Ok(());
+    }
+    if packet_q8_fewrow_selected(arith, mode, weight.dtype, n_in, rows) {
+        // This primitive keeps F32 activations and uses MMA, rather than the
+        // old half-staged tile. Its own preflight checks bindings/geometry;
+        // n_out need not be tile-aligned, and private views remain eligible.
+        crate::metal::encode_mat_mat_q8_0_fewrow_f32(ctx, enc, weight, x, y, n_in, n_out, rows)?;
+        #[cfg(test)]
+        record_census(stage, format!("{:?}", weight.dtype), CensusPath::F32Tile);
         return Ok(());
     }
     #[cfg(test)]
@@ -1683,7 +1892,16 @@ impl Glm5NextSession<'_> {
                         c.swiglu_clamp,
                     )?;
                     #[cfg(test)]
-                    if _expert_mode == StageMode::Fast {
+                    if _expert_mode == StageMode::Fast
+                        && !packet_half_experts_selected(
+                            p.arith(),
+                            _expert_mode,
+                            grouped.gate_bank.dtype,
+                            grouped.up_bank.dtype,
+                            grouped.down_bank.dtype,
+                            rows,
+                        )
+                    {
                         expert_down::after_grouped(
                             ctx,
                             &enc,

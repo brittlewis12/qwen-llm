@@ -1498,14 +1498,19 @@ pub(super) fn f32_selections() -> [F32Selection; 3] {
 /// stage family and weight kind (coverage); in selected stages every call of
 /// an enabled tile's kind took the tile and, for a complete selection, no
 /// call stayed half-staged; unselected stages kept their paths; each enabled
-/// tile ran. Returns the selection's census as JSON.
+/// tile ran. The Half baseline may use Q8 packet tiles only at eligible matrix
+/// spans of a fresh prompt, including the sparse portion of a frontier chunk.
+/// Returns the selection's census as JSON.
 pub(super) fn assert_f32_census(
     label: &str,
     half: &super::super::packed::CensusCounts,
     selected: &super::super::packed::CensusCounts,
     selection: &F32Selection,
+    weights: &Glm5NextWeights,
+    prompt_tokens: usize,
+    chunk_rows: usize,
 ) -> Value {
-    use super::super::packed::{CensusPath, F32Tile};
+    use super::super::packed::{CensusCounts, CensusPath, F32Tile, Stage};
     let totals = |census: &super::super::packed::CensusCounts| {
         let mut totals = std::collections::BTreeMap::new();
         for ((stage, kind, _), n) in census {
@@ -1519,9 +1524,98 @@ pub(super) fn assert_f32_census(
         "{label}: call coverage differs"
     );
     let f32_path = |path: &CensusPath| matches!(path, CensusPath::F32Tile | CensusPath::F32Narrow);
-    assert!(
-        half.keys().all(|(_, _, path)| !f32_path(path)),
-        "{label}: the half-staged run used an F32 tile"
+    assert!(chunk_rows > 0);
+    let dense_end = weights.config.sparse_frontier() as usize - 1;
+    let (mut packet_chunks, mut sparse_packets) = (0, 0);
+    for start in (0..prompt_tokens).step_by(chunk_rows) {
+        let rows = chunk_rows.min(prompt_tokens - start);
+        packet_chunks += usize::from((2..=4).contains(&rows));
+        let sparse_rows = rows - dense_end.saturating_sub(start).min(rows);
+        sparse_packets += usize::from((2..=4).contains(&sparse_rows));
+    }
+    // Count only the matrices actually projected by packed.rs, not every Q8
+    // tensor in the model (HC, absorption and serial continuation are excluded).
+    let mut expected_packet = CensusCounts::new();
+    let mut add = |stage, matrices: &[&MetalTensor], calls| {
+        for matrix in matrices {
+            if calls > 0
+                && matrix.dtype == GgmlType::Q8_0
+                && matrix.shape[0] > 0
+                && matrix.shape[0].is_multiple_of(32)
+                && matrix.shape[1] > 0
+            {
+                *expected_packet
+                    .entry((stage, "Q8_0".into(), CensusPath::F32Tile))
+                    .or_default() += calls;
+            }
+        }
+    };
+    for block in &weights.blocks {
+        match &block.mixer {
+            MixerTensors::Kda(kda) => {
+                add(
+                    Stage::KdaProjection,
+                    &[
+                        &kda.query,
+                        &kda.key,
+                        &kda.value,
+                        &kda.decay_a,
+                        &kda.beta,
+                        &kda.gate_a,
+                        &kda.output,
+                    ],
+                    packet_chunks,
+                );
+                add(
+                    Stage::KdaExpand,
+                    &[&kda.decay_b, &kda.gate_b],
+                    packet_chunks,
+                );
+            }
+            MixerTensors::Mla(mla) => {
+                add(
+                    Stage::MlaProjection,
+                    &[&mla.query_a, &mla.query_b, &mla.latent, &mla.output],
+                    packet_chunks,
+                );
+                add(
+                    Stage::IndexerProjection,
+                    &[&mla.indexer.key, &mla.indexer.pool_gate],
+                    packet_chunks,
+                );
+                add(
+                    Stage::IndexerProjection,
+                    &[&mla.indexer.query, &mla.indexer.head_weights],
+                    sparse_packets,
+                );
+            }
+        }
+        match &block.ffn {
+            FfnTensors::Dense(dense) => {
+                add(
+                    Stage::DenseFfn,
+                    &[&dense.gate, &dense.up, &dense.down],
+                    packet_chunks,
+                );
+            }
+            FfnTensors::Moe(moe) => {
+                add(Stage::Router, &[&moe.router], packet_chunks);
+                add(
+                    Stage::SharedExpert,
+                    &[&moe.shared.gate, &moe.shared.up, &moe.shared.down],
+                    packet_chunks,
+                );
+            }
+        }
+    }
+    let actual_packet: CensusCounts = half
+        .iter()
+        .filter(|((_, _, path), _)| f32_path(path))
+        .map(|(key, &n)| (key.clone(), n))
+        .collect();
+    assert_eq!(
+        actual_packet, expected_packet,
+        "{label}: Half F32 tiles must exactly cover eligible Q8 packet projections"
     );
     let tile_of = |kind: &str| match kind {
         "Q8_0" => Some(F32Tile::Q8_0),
@@ -1649,7 +1743,18 @@ fn reuse_natural_f32_operand_probe() {
                     let half = half_census
                         .as_ref()
                         .expect("the half-staged arm runs first");
-                    (logits, assert_f32_census(&label, half, &counts, selection))
+                    (
+                        logits,
+                        assert_f32_census(
+                            &label,
+                            half,
+                            &counts,
+                            selection,
+                            &weights,
+                            turn2.len(),
+                            512,
+                        ),
+                    )
                 }
             };
             let drift = Drift::measure(&format!("{} {label}", case.id), &exact, &logits);
@@ -1765,7 +1870,15 @@ fn fast_f32_operands_keep_chunk_identities() {
             let _scope = all.scope();
             let logits = run(rows);
             let counts = census.take();
-            let value = assert_f32_census(&format!("{rows} rows"), &half_counts, &counts, &all);
+            let value = assert_f32_census(
+                &format!("{rows} rows"),
+                &half_counts,
+                &counts,
+                &all,
+                &weights,
+                prompt.len(),
+                rows,
+            );
             eprintln!("{rows} rows: census {value}");
             (rows, logits)
         })

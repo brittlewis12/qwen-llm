@@ -1659,7 +1659,8 @@ fn mixed_native_experts_dispatch_by_capability_and_match_oracle() {
         (Q8_0, Q8_0, BF16, 3),
         (Q5_K, Q4_0, Q4_1, 3),
         (F32, BF16, IQ4_NL, 3),
-        // Down has an F32 tile, but mixed gate/up must still use row decode.
+        // Down has an F32 tile, but mixed gate/up must still use row decode
+        // for F32 requests; Fast/Half packets have a native half path.
         (IQ2_S, IQ3_S, IQ4_XS, 2),
     ] {
         let (gate, gcpu) = bank(&ctx, gate_type, vec![h as u64, f as u64, e as u64]);
@@ -1706,10 +1707,17 @@ fn mixed_native_experts_dispatch_by_capability_and_match_oracle() {
                 slot_out: &slot_out,
                 output: &output,
             };
-            let grouped = lineage == PackedLineage::Fast
+            let half_mode = lineage == PackedLineage::Fast
                 && precision != FastPrecision::F32
                 && grouped_clamped_gate_up_supported(gate_type, up_type)
                 && grouped_expert_down_supported(down_type);
+            let packet_half = half_mode
+                && precision == FastPrecision::Half
+                && (1..=8).contains(&rows)
+                && matches!(gate_type, IQ2_S | IQ3_S)
+                && matches!(up_type, IQ2_S | IQ3_S)
+                && matches!(down_type, IQ3_S | IQ4_XS);
+            let grouped = half_mode && !packet_half;
             let mut kernels = Vec::new();
             run(&ctx, |enc| {
                 dispatch_census_begin();
@@ -1731,7 +1739,7 @@ fn mixed_native_experts_dispatch_by_capability_and_match_oracle() {
                 .unwrap();
                 assert_eq!(
                     mode,
-                    if grouped {
+                    if half_mode {
                         StageMode::Fast
                     } else {
                         StageMode::Exact
@@ -1739,7 +1747,24 @@ fn mixed_native_experts_dispatch_by_capability_and_match_oracle() {
                 );
                 kernels = dispatch_census_take();
             });
-            if grouped {
+            if packet_half {
+                let native = |dtype: GgmlType| {
+                    format!(
+                        "kernel_expert_native_{}_f32",
+                        format!("{dtype:?}").to_lowercase()
+                    )
+                };
+                assert_eq!(
+                    kernels.iter().map(|r| r.kernel.clone()).collect::<Vec<_>>(),
+                    vec![
+                        native(gate_type),
+                        native(up_type),
+                        native(down_type),
+                        "kernel_moe_weighted_sum_packed_f32".into(),
+                    ],
+                    "{kernels:?}"
+                );
+            } else if grouped {
                 assert!(
                     kernels.iter().any(|r| r.kernel.contains("grouped_slots")),
                     "{kernels:?}"
@@ -1775,16 +1800,16 @@ fn mixed_native_experts_dispatch_by_capability_and_match_oracle() {
             assert!(scale > 1e-7 && expected.iter().chain(&got).all(|v| v.is_finite()));
             let worst = crate::compare::assert_max_abs_diff_f32(
                 &format!(
-                    "expert dispatch {gate_type:?}/{up_type:?}/{down_type:?}/{lineage:?}/{precision:?}/{grouped}"
+                    "expert dispatch {gate_type:?}/{up_type:?}/{down_type:?}/{lineage:?}/{precision:?}/grouped={grouped}/packet_half={packet_half}"
                 ),
                 got.iter(),
                 &expected,
             );
             assert!(
-                worst <= (if grouped { 5e-3 } else { 2e-4 }) * scale,
+                worst <= (if half_mode { 5e-3 } else { 2e-4 }) * scale,
                 "{gate_type:?}/{up_type:?}/{down_type:?} {lineage:?}/{precision:?}: error {worst}, scale {scale}"
             );
-            if !grouped {
+            if !half_mode {
                 let bits: Vec<u32> = got.iter().map(|v| v.to_bits()).collect();
                 if let Some(reference) = &decode_bits {
                     assert_eq!(&bits, reference);

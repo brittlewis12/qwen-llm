@@ -9,6 +9,23 @@ kernel void kernel_deepseek_v41_attention_selection_prepare(
     if (a.z && t < a.y) mask[t] = 1;
 }
 
+// Batched selection preparation: one 2-D grid over (visible key, row).
+// a: start, ratio, top_k, candidate_block. b: selected stride, candidates
+// stride, rows, publish_mask. Unpruned rows write ids 0..length-1; the
+// source layer writes an all-ones block mask for its unpruned rows.
+kernel void kernel_deepseek_v41_attention_selection_prepare_rows(
+    constant uint4 &a [[buffer(0)]], constant uint4 &b [[buffer(1)]],
+    device uint *selected [[buffer(2)]], device uint *candidates [[buffer(3)]],
+    uint2 t [[thread_position_in_grid]]) {
+    uint row = t.y;
+    if (row >= b.z) return;
+    uint length = (a.x + row + 1) / a.y;
+    uint all = min(length, a.z);
+    uint blocks = (length + a.w - 1) / a.w;
+    if (t.x < all) selected[(ulong)row * b.x + t.x] = t.x;
+    if (b.w && t.x < blocks) candidates[(ulong)row * b.y + t.x] = 1;
+}
+
 kernel void kernel_deepseek_v41_attention_sort_tile(
     constant uint4 &a [[buffer(0)]], device float *scores [[buffer(1)]],
     device uint *ids [[buffer(2)]], threadgroup float *values [[threadgroup(0)]],
@@ -114,6 +131,37 @@ kernel void kernel_deepseek_v41_attention_index_heads(
             score += max(simd_shuffle(dot, head), 0.0f) * (weights[base + head] * scale);
     }
     if (lane == 0) scores[t] = score;
+}
+
+// Batched index scores: one row per group.y, eight keys per threadgroup.
+// a: start, ratio, top_k, max_length. b: dim, heads, q stride, weight stride.
+// c: score stride, rows, 0, 0. Rows at or below top_k are unpruned and skip.
+kernel void kernel_deepseek_v41_attention_index_heads_rows(
+    constant uint4 &a [[buffer(0)]], constant uint4 &b [[buffer(1)]],
+    constant uint4 &c [[buffer(2)]], device const float *q [[buffer(3)]],
+    device const float *weights [[buffer(4)]], device const float *keys [[buffer(5)]],
+    device float *scores [[buffer(6)]], uint3 group [[threadgroup_position_in_grid]],
+    uint sg [[simdgroup_index_in_threadgroup]], uint lane [[thread_index_in_simdgroup]]) {
+    uint row = group.y;
+    if (row >= c.y) return;
+    uint length = (a.x + row + 1) / a.y;
+    if (length <= a.z) return;
+    uint t = group.x * 8 + sg;
+    if (t >= length) return;
+    device const float *qrow = q + (ulong)row * b.z;
+    device const float *wrow = weights + (ulong)row * b.w;
+    device float *srow = scores + (ulong)row * c.x;
+    float score = 0, scale = rsqrt(float(b.x)) * rsqrt(float(b.y));
+    for (uint base = 0; base < b.y; base += 32) {
+        uint h = base + lane;
+        float dot = 0;
+        if (h < b.y) {
+            for (uint j = 0; j < b.x; ++j) dot += qrow[h * b.x + j] * keys[t * b.x + j];
+        }
+        for (uint head = 0; head < min(32u, b.y - base); ++head)
+            score += max(simd_shuffle(dot, head), 0.0f) * (wrow[base + head] * scale);
+    }
+    if (lane == 0) srow[t] = score;
 }
 
 kernel void kernel_deepseek_v41_attention_blocks(

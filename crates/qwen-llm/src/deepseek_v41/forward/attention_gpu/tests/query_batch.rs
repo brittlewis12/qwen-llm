@@ -461,7 +461,7 @@ fn query_batch_error_restores_all_six_temporary_binding_identities() {
     // replacements, rather than at encode_batch_row's pre-replacement guard.
     metal::dispatch_census_begin();
     let error = workspace
-        .encode_batch_row(&ctx, &enc, 0, 0, &weights[0], &invalid_input, &rows, 0)
+        .encode_batch_row(&ctx, &enc, 0, 0, &weights[0], &invalid_input, &rows, 0, true)
         .unwrap_err();
     assert_eq!(error, "GPU attention buffer bounds/dtype");
     assert!(metal::dispatch_census_take().is_empty());

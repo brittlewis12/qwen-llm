@@ -166,6 +166,8 @@ pub(super) struct Rows {
     compressor_gate: MetalTensor,
     index_query: MetalTensor,
     index_weights: MetalTensor,
+    /// One index-score row per selection tile row (capacity elements each).
+    select_scores: MetalTensor,
     rows: usize,
 }
 
@@ -185,6 +187,14 @@ impl Rows {
             c.index_heads * c.index_dim,
             c.index_heads,
         ]
+    }
+
+    /// Admission width for the tiled selection score scratch. The actual
+    /// allocation is `capacity * min(rows, TILE)`; this per-row width prices
+    /// at least that many bytes when multiplied by `rows`.
+    pub(super) fn select_widths(capacity: usize, rows: usize) -> Vec<usize> {
+        let tile = rows.min(query_batch::TILE);
+        vec![(capacity.saturating_mul(tile)).div_ceil(rows.max(1))]
     }
 
     pub(super) fn new(
@@ -211,6 +221,12 @@ impl Rows {
             compressor_gate: prefill::allocate(ctx, widths[9], rows, GgmlType::F32)?,
             index_query: prefill::allocate(ctx, widths[10], rows, GgmlType::F32)?,
             index_weights: prefill::allocate(ctx, widths[11], rows, GgmlType::F32)?,
+            select_scores: prefill::allocate(
+                ctx,
+                capacity,
+                rows.min(query_batch::TILE),
+                GgmlType::F32,
+            )?,
             rows,
         })
     }
@@ -1026,7 +1042,7 @@ impl Workspace {
         input: &MetalTensor,
     ) -> Result<&MetalTensor> {
         op::require(self.batch.is_none(), "decode during attention batch")?;
-        self.encode_inner(ctx, enc, id, position, w, input, None)
+        self.encode_inner(ctx, enc, id, position, w, input, None, true)
     }
 
     pub(super) fn begin_batch(&mut self, start: usize, rows: usize) -> Result<()> {
@@ -1113,6 +1129,7 @@ impl Workspace {
         input: &MetalTensor,
         rows: &Rows,
         row: usize,
+        select: bool,
     ) -> Result<()> {
         op::require(
             self.batch.as_ref().is_some_and(|b| {
@@ -1155,7 +1172,7 @@ impl Workspace {
             prefill::row(&rows.index_weights, self.config.index_heads, row),
         );
         let result = self
-            .encode_inner(ctx, enc, id, position, w, input, Some((rows, row)))
+            .encode_inner(ctx, enc, id, position, w, input, Some((rows, row)), select)
             .map(|_| ());
         self.selected = selected;
         self.candidates = candidates;
@@ -1230,6 +1247,7 @@ impl Workspace {
         w: &Weights<'_>,
         input: &MetalTensor,
         prepared: Option<(&Rows, usize)>,
+        select: bool,
     ) -> Result<&MetalTensor> {
         op::require(
             !enc.is_concurrent(),
@@ -1405,7 +1423,7 @@ impl Workspace {
                 }
             }
             selected_count = length.min(c.index_topk);
-            if self.schedule.produces_index(id) && length > 0 {
+            if select && self.schedule.produces_index(id) && length > 0 {
                 let unpruned = length.div_ceil(c.candidate_block) <= c.candidate_topk;
                 if unpruned && length <= c.index_topk {
                     self.select_unpruned(ctx, enc, id, length)?;

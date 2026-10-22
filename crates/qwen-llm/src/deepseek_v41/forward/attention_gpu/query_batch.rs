@@ -206,8 +206,10 @@ impl Workspace {
         Ok(())
     }
 
-    /// Position-ordered compressor, index and selection transitions, one row
-    /// at a time (no dispatches on layers that own neither).
+    /// Position-ordered compressor, index and selection transitions. For
+    /// unpruned rows the per-row compressor/key publication stays ordered,
+    /// then selection is batched over 32-row tiles. The pruning path (from
+    /// 16,385 visible keys) keeps the incumbent per-row selector.
     pub(in super::super) fn encode_rows_serial(
         &mut self,
         ctx: &MetalContext,
@@ -218,6 +220,16 @@ impl Workspace {
         input: &MetalTensor,
         rows: &Rows,
     ) -> Result<()> {
+        let c = &self.config;
+        let hidden = c.hidden;
+        let owner = self.schedule.owner_slot(id);
+        let ratio = self.schedule.ratio(id);
+        let last_length = (start + rows.rows) / ratio.max(1);
+        let batched = self.schedule.produces_index(id)
+            && owner.is_some()
+            && ratio > 0
+            && last_length.div_ceil(c.candidate_block) <= c.candidate_topk
+            && std::env::var_os("QWEN_V41_SELECT_PER_ROW").is_none();
         for row in 0..rows.rows {
             self.encode_batch_row(
                 ctx,
@@ -225,10 +237,158 @@ impl Workspace {
                 id,
                 start + row,
                 w,
-                &prefill::row(input, self.config.hidden, row),
+                &prefill::row(input, hidden, row),
                 rows,
                 row,
+                !batched,
             )?;
+        }
+        if batched {
+            for first in (0..rows.rows).step_by(TILE) {
+                self.select_rows_unpruned(
+                    ctx,
+                    enc,
+                    id,
+                    start,
+                    rows,
+                    first,
+                    (rows.rows - first).min(TILE),
+                )?;
+            }
+        }
+        Ok(())
+    }
+
+    /// Batched unpruned selection: prepare ids/masks, compute index scores,
+    /// then run the incumbent per-row sort and chronological pass. Pruning
+    /// (block scores/keep) is not reached before 16,385 visible keys and
+    /// stays on the per-row path.
+    fn select_rows_unpruned(
+        &mut self,
+        ctx: &MetalContext,
+        enc: &KernelEncoder,
+        id: usize,
+        start: usize,
+        rows: &Rows,
+        first: usize,
+        n: usize,
+    ) -> Result<()> {
+        let c = &self.config;
+        let owner = self.schedule.owner_slot(id).ok_or("missing selection owner")?;
+        let ratio = self.schedule.ratio(id);
+        let publish = self.schedule.candidate_source_layer == Some(id);
+        let last_length = (start + first + n) / ratio;
+        let selected_stride = c.index_topk;
+        let candidates_stride = self.capacity.div_ceil(c.candidate_block);
+        let grid_w = last_length
+            .min(c.index_topk)
+            .max(if publish {
+                last_length.div_ceil(c.candidate_block)
+            } else {
+                0
+            });
+        if grid_w > 0 {
+            pipeline(ctx, enc, "selection_prepare_rows")?;
+            enc.set_bytes(
+                0,
+                &[
+                    (start + first) as u32,
+                    ratio as u32,
+                    c.index_topk as u32,
+                    c.candidate_block as u32,
+                ],
+            );
+            enc.set_bytes(
+                1,
+                &[
+                    selected_stride as u32,
+                    candidates_stride as u32,
+                    n as u32,
+                    publish as u32,
+                ],
+            );
+            enc.set_tensor(2, &rows.selected);
+            enc.set_tensor(3, &rows.candidates);
+            enc.dispatch(
+                MTLSize {
+                    width: grid_w,
+                    height: n,
+                    depth: 1,
+                },
+                MTLSize {
+                    width: 256,
+                    height: 1,
+                    depth: 1,
+                },
+            );
+        }
+        if last_length > c.index_topk {
+            pipeline(ctx, enc, "index_heads_rows")?;
+            enc.set_bytes(
+                0,
+                &[
+                    (start + first) as u32,
+                    ratio as u32,
+                    c.index_topk as u32,
+                    last_length as u32,
+                ],
+            );
+            enc.set_bytes(
+                1,
+                &[
+                    c.index_dim as u32,
+                    c.index_heads as u32,
+                    (c.index_heads * c.index_dim) as u32,
+                    c.index_heads as u32,
+                ],
+            );
+            enc.set_bytes(2, &[self.capacity as u32, n as u32, 0, 0]);
+            enc.set_tensor(3, &rows.index_query);
+            enc.set_tensor(4, &rows.index_weights);
+            enc.set_tensor(5, &self.owners[owner].keys);
+            enc.set_tensor(6, &rows.select_scores);
+            enc.dispatch(
+                MTLSize {
+                    width: last_length.div_ceil(8),
+                    height: n,
+                    depth: 1,
+                },
+                MTLSize {
+                    width: 256,
+                    height: 1,
+                    depth: 1,
+                },
+            );
+            for row in first..first + n {
+                let length = (start + row + 1) / ratio;
+                if length <= c.index_topk {
+                    continue;
+                }
+                let scores = rows.select_scores.view_subrange(
+                    ((row - first) * self.capacity) as u64,
+                    vec![self.capacity as u64],
+                );
+                let selected = std::mem::replace(
+                    &mut self.selected,
+                    prefill::row(&rows.selected, selected_stride, row),
+                );
+                let candidates = std::mem::replace(
+                    &mut self.candidates,
+                    prefill::row(&rows.candidates, candidates_stride, row),
+                );
+                let result = (|| -> Result<()> {
+                    self.sort(ctx, enc, &scores, length, false)?;
+                    let pso = pipeline(ctx, enc, "chronological")?;
+                    enc.set_bytes(0, &(c.index_topk as u32));
+                    enc.set_tensor(1, &self.sort_ids);
+                    enc.set_tensor(2, &self.selected);
+                    dispatch(enc, &pso, c.index_topk);
+                    Ok(())
+                })();
+                self.selected = selected;
+                self.candidates = candidates;
+                result?;
+            }
         }
         Ok(())
     }

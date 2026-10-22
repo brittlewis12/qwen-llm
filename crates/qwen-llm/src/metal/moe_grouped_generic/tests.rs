@@ -1030,3 +1030,106 @@ fn generic_grouped_moe_rejects_bad_contracts() {
     );
     enc.end();
 }
+
+/// Opt-in timing of the generic half-staged expert tiles at the DeepSeek
+/// V4.1 prefill shape (384 experts, 2048 tokens x top-6, ~32 slots per
+/// expert; gate/up K=5120 M=2304, down K=2304 M=5120). Prints TFLOPS and
+/// effective weight bandwidth; asserts nothing. `QWEN_V41_TILE_TIMING=1`.
+#[test]
+fn generic_tile_production_shape_timing() {
+    if std::env::var_os("QWEN_V41_TILE_TIMING").is_none() {
+        return;
+    }
+    let ctx = MetalContext::new().expect("Metal");
+    const EXPERTS: usize = 384;
+    const TOKENS: usize = 2048;
+    const TOPK: usize = 6;
+    const HIDDEN: usize = 5120;
+    const FFN: usize = 2304;
+    let slots = TOKENS * TOPK;
+    // Round-robin routing: every expert gets 32 slots, slot ids spread over
+    // the chunk like real top-6 routing (token t, k -> expert (t*7+k*53)%E).
+    let mut counts = vec![0i32; EXPERTS];
+    let mut ids = vec![-1i32; EXPERTS * TOKENS];
+    for t in 0..TOKENS {
+        for k in 0..TOPK {
+            let e = (t * 7 + k * 53) % EXPERTS;
+            ids[e * TOKENS + counts[e] as usize] = (t * TOPK + k) as i32;
+            counts[e] += 1;
+        }
+    }
+    let counts_t = i32_tensor(&ctx, &counts);
+    let ids_t = i32_tensor(&ctx, &ids);
+    let mut rng = Lcg(0x7ab5);
+    let x: Vec<f32> = (0..TOKENS * HIDDEN).map(|_| rng.signed(0.5)).collect();
+    let x_t = f32_tensor(&ctx, &x);
+    let inner_t = MetalTensor::zeros_f32(&ctx, vec![(slots * FFN) as u64]).unwrap();
+    let out_t = MetalTensor::zeros_f32(&ctx, vec![(slots * HIDDEN) as u64]).unwrap();
+    let timed = |label: &str, flops: f64, bytes: f64, encode: &dyn Fn(&KernelEncoder)| {
+        let mut us = Vec::new();
+        for _ in 0..8 {
+            let command = ctx.queue.commandBuffer().unwrap();
+            let enc = KernelEncoder::begin(&command);
+            encode(&enc);
+            enc.end();
+            commit_and_wait(&command).unwrap();
+            us.push((command.GPUEndTime() - command.GPUStartTime()) * 1e6);
+        }
+        us.sort_by(f64::total_cmp);
+        let med = us[4];
+        eprintln!(
+            "tile_timing {label:<34} median {med:9.1} us  {:6.1} TFLOPS  weights {:6.0} GB/s",
+            flops / (med * 1e-6) / 1e12,
+            bytes / (med * 1e-6) / 1e9
+        );
+    };
+    for dtype in [
+        GgmlType::Q3_K,
+        GgmlType::IQ3_XXS,
+        GgmlType::IQ2_S,
+        GgmlType::MXFP4,
+    ] {
+        let gate = synthetic_bank(dtype, HIDDEN, FFN, EXPERTS, 0x11 ^ dtype as u64);
+        let up = synthetic_bank(dtype, HIDDEN, FFN, EXPERTS, 0x22 ^ dtype as u64);
+        let down = synthetic_bank(dtype, FFN, HIDDEN, EXPERTS, 0x33 ^ dtype as u64);
+        let gate_t = bank_tensor(&ctx, dtype, &gate, HIDDEN, FFN, EXPERTS);
+        let up_t = bank_tensor(&ctx, dtype, &up, HIDDEN, FFN, EXPERTS);
+        let down_t = bank_tensor(&ctx, dtype, &down, FFN, HIDDEN, EXPERTS);
+        let gate_up = |enc: &KernelEncoder| {
+            encode_moe_swiglu_clamped_f32_grouped_slots_generic(
+                &ctx, enc, &gate_t, &up_t, &x_t, &counts_t, &ids_t, &inner_t, HIDDEN, FFN, EXPERTS,
+                TOPK, TOKENS, 10.0,
+            )
+            .unwrap();
+        };
+        let down_enc = |enc: &KernelEncoder| {
+            encode_moe_down_f32_grouped_slots_generic(
+                &ctx, enc, &down_t, &inner_t, &counts_t, &ids_t, &out_t, FFN, HIDDEN, EXPERTS,
+                TOKENS,
+            )
+            .unwrap();
+        };
+        // Heat.
+        for _ in 0..6 {
+            let command = ctx.queue.commandBuffer().unwrap();
+            let enc = KernelEncoder::begin(&command);
+            gate_up(&enc);
+            down_enc(&enc);
+            enc.end();
+            commit_and_wait(&command).unwrap();
+        }
+        let mac = (slots * HIDDEN * FFN) as f64;
+        timed(
+            &format!("{dtype:?} gate+up (2 GEMMs)"),
+            2.0 * 2.0 * mac,
+            2.0 * gate.len() as f64,
+            &gate_up,
+        );
+        timed(
+            &format!("{dtype:?} down"),
+            2.0 * mac,
+            down.len() as f64,
+            &down_enc,
+        );
+    }
+}

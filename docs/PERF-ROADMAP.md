@@ -58,7 +58,17 @@ prefill and the tiles about a fifth; re-sample before claiming.
   the tile with decode and activation loads removed reaches 25. Staging
   layout (+1-3%) and 32-slot gate/up tiles (+0.25-0.9%) are not levers;
   4096-row chunks untested. The remaining FFN lever on M5 is the Metal 4
-  tensor-ops path (maintainability lane's tier): open there, not here.
+  tensor-ops path, and it is the only path to MLX-Serve-class prefill: a
+  2048-token prefill is ~40.6 TFLOP of expert work (384 experts, top-6 +
+  shared, 5120x2304 gate/up/down, 40 layers), >= 1.9 s at 20-22 TFLOPS
+  (~1,050 tok/s ceiling with everything else free, ~1,500 at the 30 TFLOPS
+  simdgroup peak). Metal 4 expert tile (`tensor_ops::matmul2d` on the
+  threadgroup-staged half operands the generic tile already produces;
+  matmul2d peak probe and a production-shape tile microbench first, the
+  tile behind the existing device gate only if the MMA phase gains >= 1.5x;
+  the MMA sink tile is the same swap afterwards): in flight
+  (`perf/v41-tensor-tile`). Nobody else is on the tensor tier; the
+  16x16x32 witness is the only kernel there.
 - Owner/producer per-row loops (compressor, index key, selection; 8 layers,
   grows with prompt length): compressor prep landed (`a7de76ab`): key norm +
   key/latent RoPE + both cache copies fused 5 -> 1, +0.5-1.0% on top of the
@@ -66,8 +76,9 @@ prefill and the tiles about a fifth; re-sample before claiming.
   (one dispatch per layer for index scores, one threadgroup per row for the
   top-k select, batched chronological/prepare; the eight owner/producer
   layers cost 75-121 ms each = 15% of a 2048-token prefill, mostly dispatch
-  floor, and it grows with prompt length): in flight
-  (`perf/v41-select-batch`). Per-row census: `selection_prepare` 6,141,
+  floor, and it grows with prompt length): open, queued behind the tensor
+  tile (branch name reserved: `perf/v41-select-batch`). Per-row census:
+  `selection_prepare` 6,141,
   `sort_init`/`sort_tile` 2,560 each, `chronological` 2,560, `index_heads`
   2,560 per Q2 PP1024.
 - Scalar score kernel tuning: superseded on the released geometry by the
@@ -93,8 +104,9 @@ prefill and the tiles about a fifth; re-sample before claiming.
 
 ### GLM-5.3-Flash
 
-- Near the M4 bandwidth wall; M5 expert tensor-ops tier is owned by the
-  maintainability lane.
+- Near the M4 bandwidth wall; the M5 expert tensor-ops tier is the V4.1
+  tensor tile bet above (the generic grouped tile serves GLM's grouped
+  layers too).
 
 ## Closed questions
 

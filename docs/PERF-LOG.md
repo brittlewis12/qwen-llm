@@ -6,6 +6,29 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the current state and evidence index.
 
+## 2026-10-22 - V4.1 Prefill: Fused Selection +15-20%
+
+- One threadgroup per top-k row now loads the index-score slab, runs the
+  incumbent bitonic network and tie-break in threadgroup memory, and emits
+  chronological top-k IDs directly to the row's selected buffer. Padded
+  visible lengths above 2048 keep the per-row fallback.
+- Three-arm same-binary ABCCBA (incumbent / batched split / fused):
+  Q2 pp2048 545.8 -> 565.6 -> 653.2 (+19.7% vs incumbent, +15.5% vs split);
+  Q2 pp4096 496.7 -> 514.2 -> 572.1 (+15.2%/+11.3%); IQ3 pp2048 541.5 ->
+  559.2 -> 644.9 (+19.1%/+15.3%); IQ3 pp4096 492.9 -> 510.6 -> 565.7
+  (+14.8%/+10.8%).
+- Census 88,133 -> 45,982 (-47.8%). Producer serial span 1,895.8 -> 452.5
+  ms (-76.1%); total sampled prefill -14.2%. Post-fused split: FFN 40.9/42.9%,
+  attention tiles 34.7/34.0, serial 5.2/5.1, finish/post 9.8/9.2, prepare
+  6.4/6.0, HC 2.9/2.9.
+- Same-binary IQ3 held-text witness: incumbent, split and fused all give
+  mean NLL 2.146367194 and top-1 0.5677 with identical per-document values.
+  31 attention and 14 prefill tests pass; the 65-row regression asserts the
+  fused kernel is dispatched.
+- PP4096 ratio-one layers still fall back above padded 2048; extending the
+  fused selector to 4096 is the next selection step.
+- [ABBA, census, producer split and witness](bench/2026-10-22-v41-select-fuse.md).
+
 ## 2026-10-22 - V4.1 Post-Selection Prefill Split
 
 - Fresh six-span sample at PP2048 after the selection landing (shares only;

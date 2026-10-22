@@ -26,16 +26,16 @@ expected effect, status. Status is one of `open`, `in flight (branch)`,
 `in flight` with your branch; a second lane finding it claimed reads the branch
 before building anything adjacent. This replaces relaying between sessions.
 
-### DeepSeek V4.1-Flash (main after batched selection: pp2048 Q2 562 / IQ3 559 tok/s, pp4096 Q2 513 / IQ3 509; decode tg32 43 / 41, tg32@d2048 41.6)
+### DeepSeek V4.1-Flash (main after fused selection: pp2048 Q2 653 / IQ3 645 tok/s, pp4096 Q2 572 / IQ3 566; decode tg32 43 / 41, tg32@d2048 41.6)
 
 Decode budget at depth 2048, 22.3 ms/token: ~10.2 ms bytes (11.1 GiB at the
 ~1.09 TB/s the GEMV probe reaches), ~8 ms dispatch floor (~1,600 dispatches),
-~4 ms spread thin. Prefill split per 2048-token chunk, fresh post-selection six-span sample
+~4 ms spread thin. Prefill split per 2048-token chunk, fresh post-fused six-span sample
 (`QWEN_V41_PREFILL_STAGES=1`, PP2048, shares only; sampling inflates wall
-~2.8x): FFN 35.1% Q2 / 36.6% IQ3, attention tiles 29.8/29.4, owner/producer
-serial 18.7/18.5, finish/post 8.4/7.9, prepare 5.5/5.2, HC 2.5/2.5. The
-serial span still includes compressor, index key, publication, selection and
-sorting, so not all of it is removable. Re-sample after the next landing.
+~2.4x): FFN 40.9% Q2 / 42.9% IQ3, attention tiles 34.7/34.0, owner/producer
+serial 5.2/5.1, finish/post 9.8/9.2, prepare 6.4/6.0, HC 2.9/2.9. Serial GPU
+time fell 1,895.8 -> 452.5 ms (-76.1%); total sampled prefill fell 14.2%.
+Re-sample after the next landing.
 
 - Attention tiles via simdgroup MMA (half-staged Q/K/V, F32 sums),
   replacing the scalar score kernel and the gather+GEMM PV for the released
@@ -95,19 +95,20 @@ sorting, so not all of it is removable. Re-sample after the next landing.
   MMA series. Compressor standalone census 50,710 -> 40,470; final
   MMA-series census 39,563. Selection batching landed (2026-10-22 entry,
   bench/2026-10-22-v41-select-batch.md): compressor/index publication stays
-  ordered; prepare and index scores batch over 32-row tiles; the incumbent
-  per-row sort/chronological remains; pruning above 16,385 keys keeps the
-  old selector. Same-binary ABBA: Q2 pp2048 +3.05%, pp4096 +3.57%; IQ3
-  +3.46%/+3.80%; census 105,202 -> 88,133 at Q2 pp2048; same-binary
-  held-text witness identical. The eight owner/producer layers still cost
-  75-121 ms each; the serial span includes non-selection work.
-- Fused selection sort/chronological for padded visible length <=2048: in
-  flight (`perf/v41-select-fuse`). One threadgroup per row loads the score
-  slab, runs the incumbent bitonic network in threadgroup memory, and emits
-  chronological IDs without the global sort scratch round trip. Gate with a
-  three-arm producer replay (incumbent, batched prepare/index + per-row
-  sort, fused) and measure producer-stage time and exact selection
-  agreement, not census alone; keep the incumbent fallback above 2048.
+  ordered; prepare and index scores batch over 32-row tiles; pruning above
+  16,385 keys keeps the old selector. Same-binary ABBA: Q2 pp2048 +3.05%,
+  pp4096 +3.57%; IQ3 +3.46%/+3.80%; census 105,202 -> 88,133; witness
+  identical. Fused selection landed (2026-10-22 entry,
+  bench/2026-10-22-v41-select-fuse.md): one threadgroup per top-k row runs
+  the bitonic network in threadgroup memory and emits chronological IDs
+  directly, padded visible length <=2048. Three-arm ABBA: fused vs split
+  +15.5%/+11.3% Q2 pp2048/4096, +15.3%/+10.8% IQ3; vs incumbent
+  +19.7%/+15.2%, +19.1%/+14.8%; census 88,133 -> 45,982; serial span
+  18.7% -> 5.2%; witness identical across all three arms.
+- Selection padded-4096 extension: open. At PP4096 ratio-one producer
+  layers reach visible length 4096 and still take the per-row sort; a
+  32 KiB threadgroup variant or two-pass merge needs an occupancy check
+  before claiming.
 - Scalar score kernel tuning: superseded on the released geometry by the
   MMA tile; the 8-lane scalar kernel remains the fallback for other
   geometry. The 4-key/8-lane variants measured +3.0%/+1.2-1.4% on the old

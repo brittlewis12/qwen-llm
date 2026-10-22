@@ -26,7 +26,7 @@ expected effect, status. Status is one of `open`, `in flight (branch)`,
 `in flight` with your branch; a second lane finding it claimed reads the branch
 before building anything adjacent. This replaces relaying between sessions.
 
-### DeepSeek V4.1-Flash (main after the half activation copies: pp2048 Q2 572 / IQ3 568 tok/s, pp4096 Q2 517 / IQ3 513; decode tg32 43 / 41, tg32@d2048 41.6)
+### DeepSeek V4.1-Flash (main after the 256-row sink tiles: pp2048 Q2 649 / IQ3 641 tok/s, pp4096 Q2 585 / IQ3 579; decode tg32 43 / 41, tg32@d2048 41.6)
 
 Decode budget at depth 2048, 22.3 ms/token: ~10.2 ms bytes (11.1 GiB at the
 ~1.09 TB/s the GEMV probe reaches), ~8 ms dispatch floor (~1,600 dispatches),
@@ -43,8 +43,14 @@ re-sample before claiming.
   replacing the scalar score kernel and the gather+GEMM PV for the released
   geometry: landed (2026-10-21 attention entry). Supersedes the scalar
   score tuning (`b992694a`) on that geometry; other geometries keep it.
-  Next there: a fused score+softmax+PV kernel (saves the slab round trip
-  and three dispatches per tile): open.
+- 256-row sink tiles + tensor-ops score/PV: landed (2026-10-22 sink-tile
+  entry, bench/2026-10-22-v41-sink-tile-256.md). The 32-row tile was an
+  occupancy bound (128 threadgroups per dispatch); 8.0 vs 13.7 us per
+  row in the fixture, pp2048 +13.4-13.5% / pp4096 +13.0-13.1%. Next
+  there: a fused score+softmax+PV kernel over all heads of a row (each
+  key row is gathered once for QK^T, once for PV and once per 16-head
+  block today; saves the slab round trip and three dispatches per tile):
+  open.
 - IQ2_XXS/IQ2_XS expert layers off the native-rows path: landed twice, as
   F32-operand grouped tiles (`b3b71bb3`, the NativeF32 witness path) and as
   half generic layouts (attention entry; production takes the half route
@@ -85,9 +91,9 @@ re-sample before claiming.
   on both artifacts. Larger dense tiles (64 x 64, more operand reuse) and
   the activation re-read per column tile: open. Other families' dense
   prefill GEMMs still take `mat_mat`: open.
-- Tensor ops for the attention sink tile (`score_mma`/`pv_mma`, 16-key
-  gathered blocks): the tile is gather-bound as much as MMA-bound; measure
-  with the fused score+softmax+PV bet rather than alone: open.
+- Tensor ops for the attention sink tile alone: measured (sink-tile
+  entry): not faster at 32-row tiles, 6% faster at 256; landed with the
+  tile width.
 - Owner/producer per-row loops (compressor, index key, selection; 8 layers,
   grows with prompt length): compressor prep landed (`a7de76ab`): key norm +
   key/latent RoPE + both cache copies fused 5 -> 1, +0.5-1.0% on top of the

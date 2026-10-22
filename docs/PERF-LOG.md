@@ -6,6 +6,27 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the current state and evidence index.
 
+## 2026-10-22 - V4.1: 256-Row Sink Tiles, +13% Prefill
+
+- The attention sink tile dispatched 128 threadgroups per 32-query tile
+  (one per head block and row) on 80 cores, so the dependent `ids ->
+  row` gather and the serial accumulator chain ran unhidden. The fixture
+  cost per query row at 640 keys: 13.7 us at 32 rows, 9.3 at 128, 8.0 at
+  256 (simdgroup MMA); the tensor-ops score/PV pair is 6% faster than
+  the MMA pair at 256 rows and not faster at 32. `TILE` is now 256 (42 +
+  34 MB slabs for the released geometry; the never-taken value matrix of
+  the non-MMA branch is no longer allocated there) and the released
+  geometry runs `score_tensor` / `pv_tensor` where the tier exists.
+- ABBA against the half-activation landing: IQ3 pp2048 565.2 -> 641.4
+  (+13.5%), pp4096 512.5 -> 579.1 (+13.0%); Q2 pp2048 572.3 -> 648.9
+  (+13.4%), pp4096 517.0 -> 584.5 (+13.1%); decode within noise. From
+  this morning's main: pp2048 383 -> 649 (+69%). Cumulative from
+  `4b1fca04`: 192 -> 649 tok/s.
+- Each key row is still gathered once for QK^T, once for PV and once per
+  16-head block; a fused score+softmax+PV kernel over all heads of a row
+  is the next sink-tile lever.
+- [Packet](bench/2026-10-22-v41-sink-tile-256.md).
+
 ## 2026-10-22 - V4.1: Half Activation Copies For The Tensor Tiles, +5% Prefill
 
 - Both tensor tile forms re-read and half-cast their F32 activation

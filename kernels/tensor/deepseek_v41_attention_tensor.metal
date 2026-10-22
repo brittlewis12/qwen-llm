@@ -33,7 +33,9 @@ kernel void kernel_deepseek_v41_attention_score_tensor(
     uint2 group [[threadgroup_position_in_grid]], uint tid [[thread_index_in_threadgroup]]) {
     threadgroup half qblk[V41_TT_HEADS * V41_TT_DIM];
     threadgroup half kblk[V41_TT_KEYS * V41_TT_DIM];
-    threadgroup float sblk[V41_TT_HEADS * V41_TT_KEYS];
+    // The 16 x 16 score block is staged over the key slab once the matmul
+    // has consumed it (Q + K already fill the 32 KiB threadgroup budget).
+    threadgroup float *sblk = (threadgroup float *)kblk;
     const uint r = group.y;
     const uint4 rr = attention_row_raw(a, b, r);
     const uint length = attention_row_length(b, r);
@@ -73,6 +75,8 @@ kernel void kernel_deepseek_v41_attention_score_tensor(
         threadgroup_barrier(mem_flags::mem_threadgroup);
         auto acc = op.get_destination_cooperative_tensor<q_t, k_t, float>();
         op.run(qt, kt, acc);
+        // Every simdgroup is done reading the key slab before it is reused.
+        threadgroup_barrier(mem_flags::mem_threadgroup);
         acc.store(st);
         threadgroup_barrier(mem_flags::mem_threadgroup);
         // sblk is [head][key]; two elements per thread.

@@ -64,6 +64,15 @@ fn close_half(a: &[f32], b: &[f32]) {
     }
 }
 
+/// The sink kernels the released geometry dispatches on this context.
+fn sink_kernels(ctx: &MetalContext) -> (&'static str, &'static str) {
+    if metal::moe_grouped_tensor_selected(ctx) {
+        ("score_tensor", "pv_tensor")
+    } else {
+        ("score_mma", "pv_mma")
+    }
+}
+
 fn sink_spans(c: &Config, ratio: usize, start: usize, n: usize) -> Vec<(usize, usize, bool)> {
     let matrix = |row: usize| {
         let end = start + row + 1;
@@ -159,8 +168,10 @@ fn compare_case(ctx: &MetalContext, c: &Config, schedule: &Schedule, start: usiz
                     .count()
             };
             if mma {
-                // One MMA sink per 32-query tile; no per-query PV branch.
-                for suffix in ["score_mma", "softmax_rows", "pv_mma", "normalize_rows"] {
+                // One sink per query tile; no per-query PV branch. The tensor
+                // kernels where the tier exists, the simdgroup-MMA ones elsewhere.
+                let (score, pv) = sink_kernels(ctx);
+                for suffix in [score, "softmax_rows", pv, "normalize_rows"] {
                     assert_eq!(count(suffix), n.div_ceil(TILE), "{suffix}");
                 }
                 assert_eq!(count("score_rows_lane8"), 0);
@@ -795,13 +806,8 @@ fn sink_case(
                     .count()
             };
             if mma {
-                for suffix in [
-                    "score_mma",
-                    "softmax_rows",
-                    "pv_mma",
-                    "normalize_rows",
-                    "rope_rows",
-                ] {
+                let (score, pv) = sink_kernels(ctx);
+                for suffix in [score, "softmax_rows", pv, "normalize_rows", "rope_rows"] {
                     assert_eq!(count(suffix), spans.len(), "{suffix}");
                 }
                 for suffix in [
@@ -820,8 +826,8 @@ fn sink_case(
                         .map(|d| d.grid_height)
                         .collect::<Vec<_>>()
                 };
-                depths.0 = heights("score_mma");
-                depths.1 = heights("pv_mma");
+                depths.0 = heights(score);
+                depths.1 = heights(pv);
                 let tiles = spans.iter().map(|&(_, n, _)| n as u64).collect::<Vec<_>>();
                 assert_eq!(depths.0, tiles);
                 assert_eq!(depths.1, tiles);
@@ -1008,7 +1014,7 @@ fn query_batch_group_specific_pv_padding_canaries_and_sticky_errors() {
 #[test]
 fn query_batch_mma_geometry_tiles_without_pv_branch_split() {
     // The released geometry crosses the old 256-key PV threshold inside the
-    // first tile; the MMA sink tile keeps whole 32-query tiles.
+    // first tile; the MMA sink tile keeps whole TILE-query tiles.
     let ctx = MetalContext::new().unwrap();
     let c = Config {
         heads: 64,
@@ -1019,9 +1025,9 @@ fn query_batch_mma_geometry_tiles_without_pv_branch_split() {
     let (score, pv) = sink_case(&ctx, &c, 126, 32, 1);
     assert_eq!(score, [32]);
     assert_eq!(pv, [32]);
-    let (score, pv) = sink_case(&ctx, &c, 126, 33, 1);
-    assert_eq!(score, [32, 1]);
-    assert_eq!(pv, [32, 1]);
+    let (score, pv) = sink_case(&ctx, &c, 126, TILE + 1, 1);
+    assert_eq!(score, [TILE as u64, 1]);
+    assert_eq!(pv, [TILE as u64, 1]);
 }
 
 #[test]
@@ -1030,17 +1036,22 @@ fn query_batch_threshold_split_source_census_expectation() {
     let schedule = Schedule::default();
     let mut tiles = 0;
     let mut splits = 0;
+    let whole = 256usize.div_ceil(TILE);
     for start in (0..2048).step_by(256) {
         for id in 0..schedule.layers {
             let spans = sink_spans(&c, schedule.ratio(id), start, 256);
-            assert!((8..=9).contains(&spans.len()));
+            assert!((whole..=whole + 1).contains(&spans.len()));
             tiles += spans.len();
-            splits += spans.len() - 8;
+            splits += spans.len() - whole;
         }
     }
     // Source expectation only: each of the 38 compressed-attention layers
     // crosses the threshold once, inside a fixed tile of the first chunk.
-    assert_eq!((tiles, splits), (2598, 38));
+    assert_eq!(
+        (tiles, splits),
+        (8 * schedule.layers * whole + 38, 38),
+        "whole tiles per 256-row span: {whole}"
+    );
 }
 
 #[test]

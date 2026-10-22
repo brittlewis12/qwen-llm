@@ -7000,7 +7000,7 @@ inline void moe_grouped_slots_mm_generic_body(
 // grouping per 8x8x8 step.
 template <int BYTES, short NL,
           void (*DEQ)(device const uchar *, short, thread half4x4 &),
-          short EPI>
+          short EPI, short ABLATE = 0>
 inline void moe_grouped_slots_mm_rowmajor_body(
         constant moe_group_generic_mm_args & args,
         device const uchar * srcA,
@@ -7052,8 +7052,19 @@ inline void moe_grouped_slots_mm_rowmajor_body(
 
     for (uint loop_k = 0; loop_k < args.K; loop_k += NK_MM) {
         half4x4 temp_a;
-        DEQ(x_ptr, il, temp_a);
-        const half2x4 temp_b = (half2x4)(*((device const float2x4 *)y_ptr));
+        if (ABLATE & 1) {
+            // Measurement only: no weight loads or decode.
+            const half v = half(float(il + 1) * 0.001f);
+            temp_a = half4x4(half4(v), half4(v), half4(v), half4(v));
+        } else {
+            DEQ(x_ptr, il, temp_a);
+        }
+        half2x4 temp_b;
+        if (ABLATE & 2) {
+            temp_b = half2x4(half4(half(0.25f)), half4(half(0.5f)));
+        } else {
+            temp_b = (half2x4)(*((device const float2x4 *)y_ptr));
+        }
         threadgroup_barrier(mem_flags::mem_threadgroup);
         dst_a[0] = temp_a[0]; dst_a[1] = temp_a[1]; dst_a[2] = temp_a[2]; dst_a[3] = temp_a[3];
         dst_b[0] = temp_b[0]; dst_b[1] = temp_b[1];
@@ -7106,7 +7117,7 @@ inline void moe_grouped_slots_mm_rowmajor_body(
 
 template <int BYTES, short NL,
           void (*DEQ)(device const uchar *, short, thread half4x4 &),
-          short EPI>
+          short EPI, short ABLATE = 0>
 kernel void kernel_moe_grouped_slots_mm_rowmajor(
         constant moe_group_generic_mm_args & args [[buffer(0)]],
         device const uchar * srcA         [[buffer(1)]],
@@ -7118,13 +7129,13 @@ kernel void kernel_moe_grouped_slots_mm_rowmajor(
         uint3  tgpig [[threadgroup_position_in_grid]],
         uint tiitg_wide [[thread_index_in_threadgroup]],
         ushort sgitg [[simdgroup_index_in_threadgroup]]) {
-    moe_grouped_slots_mm_rowmajor_body<BYTES, NL, DEQ, EPI>(
+    moe_grouped_slots_mm_rowmajor_body<BYTES, NL, DEQ, EPI, ABLATE>(
         args, srcA, srcB, counts, ids, dst, shmem, tgpig, tiitg_wide, sgitg, 0.0f);
 }
 
 template <int BYTES, short NL,
           void (*DEQ)(device const uchar *, short, thread half4x4 &),
-          short EPI>
+          short EPI, short ABLATE = 0>
 kernel void kernel_moe_up_clamped_grouped_slots_rowmajor(
         constant moe_group_generic_mm_args & args [[buffer(0)]],
         device const uchar * srcA         [[buffer(1)]],
@@ -7137,7 +7148,7 @@ kernel void kernel_moe_up_clamped_grouped_slots_rowmajor(
         uint3  tgpig [[threadgroup_position_in_grid]],
         uint tiitg_wide [[thread_index_in_threadgroup]],
         ushort sgitg [[simdgroup_index_in_threadgroup]]) {
-    moe_grouped_slots_mm_rowmajor_body<BYTES, NL, DEQ, EPI>(
+    moe_grouped_slots_mm_rowmajor_body<BYTES, NL, DEQ, EPI, ABLATE>(
         args, srcA, srcB, counts, ids, dst, shmem, tgpig, tiitg_wide, sgitg, limit);
 }
 
@@ -7471,6 +7482,13 @@ template [[host_name("kernel_moe_up_clamped_iq2_s_f32_grouped_slots_clamped_rowm
 template [[host_name("kernel_moe_down_mxfp4_f32_grouped_slots_generic_rowmajor")]] kernel moe_grouped_slots_mm_rowmajor_t kernel_moe_grouped_slots_mm_rowmajor<QT_MXFP4_BYTES, QT_MXFP4_NL, qt_dequantize_mxfp4, 0>;
 template [[host_name("kernel_moe_up_silu_mul_mxfp4_f32_grouped_slots_generic_rowmajor")]] kernel moe_grouped_slots_mm_rowmajor_t kernel_moe_grouped_slots_mm_rowmajor<QT_MXFP4_BYTES, QT_MXFP4_NL, qt_dequantize_mxfp4, 1>;
 template [[host_name("kernel_moe_up_clamped_mxfp4_f32_grouped_slots_clamped_rowmajor")]] kernel moe_up_clamped_grouped_slots_rowmajor_t kernel_moe_up_clamped_grouped_slots_rowmajor<QT_MXFP4_BYTES, QT_MXFP4_NL, qt_dequantize_mxfp4, 2>;
+
+template [[host_name("kernel_moe_down_q3_K_f32_grouped_slots_generic_rowmajor_nodeq")]] kernel moe_grouped_slots_mm_rowmajor_t kernel_moe_grouped_slots_mm_rowmajor<QT_Q3_K_BYTES, QT_Q3_K_NL, qt_dequantize_q3_K, 0, 1>;
+template [[host_name("kernel_moe_up_clamped_q3_K_f32_grouped_slots_clamped_rowmajor_nodeq")]] kernel moe_up_clamped_grouped_slots_rowmajor_t kernel_moe_up_clamped_grouped_slots_rowmajor<QT_Q3_K_BYTES, QT_Q3_K_NL, qt_dequantize_q3_K, 2, 1>;
+template [[host_name("kernel_moe_down_q3_K_f32_grouped_slots_generic_rowmajor_noact")]] kernel moe_grouped_slots_mm_rowmajor_t kernel_moe_grouped_slots_mm_rowmajor<QT_Q3_K_BYTES, QT_Q3_K_NL, qt_dequantize_q3_K, 0, 2>;
+template [[host_name("kernel_moe_up_clamped_q3_K_f32_grouped_slots_clamped_rowmajor_noact")]] kernel moe_up_clamped_grouped_slots_rowmajor_t kernel_moe_up_clamped_grouped_slots_rowmajor<QT_Q3_K_BYTES, QT_Q3_K_NL, qt_dequantize_q3_K, 2, 2>;
+template [[host_name("kernel_moe_down_q3_K_f32_grouped_slots_generic_rowmajor_noload")]] kernel moe_grouped_slots_mm_rowmajor_t kernel_moe_grouped_slots_mm_rowmajor<QT_Q3_K_BYTES, QT_Q3_K_NL, qt_dequantize_q3_K, 0, 3>;
+template [[host_name("kernel_moe_up_clamped_q3_K_f32_grouped_slots_clamped_rowmajor_noload")]] kernel moe_up_clamped_grouped_slots_rowmajor_t kernel_moe_up_clamped_grouped_slots_rowmajor<QT_Q3_K_BYTES, QT_Q3_K_NL, qt_dequantize_q3_K, 2, 3>;
 
 // Clamped fused SwiGLU (DeepSeek V4 / GLM-5.3), for the expert dtypes those
 // releases use; add a line per dtype with evidence.

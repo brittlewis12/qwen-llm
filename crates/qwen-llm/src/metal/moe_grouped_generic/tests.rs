@@ -1150,7 +1150,18 @@ fn generic_tile_production_shape_timing() {
             commit_and_wait(&command).unwrap();
         }
         let mac = (slots * HIDDEN * FFN) as f64;
-        for suffix in ["", "_rowmajor"] {
+        let suffixes: &[&'static str] = if dtype == GgmlType::Q3_K {
+            &[
+                "",
+                "_rowmajor",
+                "_rowmajor_nodeq",
+                "_rowmajor_noact",
+                "_rowmajor_noload",
+            ]
+        } else {
+            &["", "_rowmajor"]
+        };
+        for &suffix in suffixes {
             with_pipeline_suffix(suffix, || {
                 timed(
                     &format!("{dtype:?} gate+up{suffix}"),

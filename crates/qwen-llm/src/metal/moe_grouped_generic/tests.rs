@@ -1208,3 +1208,54 @@ fn generic_tile_production_shape_timing() {
         );
     }
 }
+
+/// Raw simdgroup-MMA ceiling of the device (research kernel, no memory
+/// traffic in the loop). `QWEN_V41_TILE_TIMING=1`; prints TFLOPS.
+#[test]
+fn simdgroup_mma_peak_timing() {
+    if std::env::var_os("QWEN_V41_TILE_TIMING").is_none() {
+        return;
+    }
+    let ctx = MetalContext::new().expect("Metal");
+    let out = MetalTensor::zeros_f32(&ctx, vec![4096]).unwrap();
+    for (name, acc) in [
+        ("kernel_mma_peak_acc4", 4u32),
+        ("kernel_mma_peak_acc8", 8),
+        ("kernel_mma_peak_acc16", 16),
+    ] {
+        for tgs in [320usize, 1280, 2560] {
+            let iters: u32 = 2000;
+            let mut us = Vec::new();
+            for _ in 0..6 {
+                let command = ctx.queue.commandBuffer().unwrap();
+                let enc = KernelEncoder::begin(&command);
+                let pso = ctx.pipeline(name).unwrap();
+                enc.set_pipeline(&pso);
+                enc.set_bytes(0, &iters);
+                enc.set_tensor(1, &out);
+                enc.dispatch(
+                    MTLSize {
+                        width: tgs,
+                        height: 1,
+                        depth: 1,
+                    },
+                    MTLSize {
+                        width: 128,
+                        height: 1,
+                        depth: 1,
+                    },
+                );
+                enc.end();
+                commit_and_wait(&command).unwrap();
+                us.push((command.GPUEndTime() - command.GPUStartTime()) * 1e6);
+            }
+            us.sort_by(f64::total_cmp);
+            let med = us[3];
+            let flops = tgs as f64 * 4.0 * iters as f64 * acc as f64 * 1024.0;
+            eprintln!(
+                "mma_peak {name:<22} tgs={tgs:<5} median {med:9.1} us  {:6.1} TFLOPS",
+                flops / (med * 1e-6) / 1e12
+            );
+        }
+    }
+}

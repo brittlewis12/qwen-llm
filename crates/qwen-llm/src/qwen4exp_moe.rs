@@ -66,6 +66,10 @@ pub(crate) mod guarded_topk;
 #[cfg(test)]
 #[path = "qwen4exp_moe_observe.rs"]
 pub(crate) mod singleton_observe;
+
+#[cfg(test)]
+#[path = "qwen4exp_moe/router_capture.rs"]
+pub(crate) mod router_capture;
 const MAX_PACKED_TOKENS: usize = 2_048;
 const PACKED_ROUTER_E8P32_STRICT_HIDDEN: usize = 2_560;
 const PACKED_ROUTER_E8P32_STRICT_EXPERTS: usize = 512;
@@ -2572,6 +2576,17 @@ unsafe fn encode_qwen4exp_moe_packed_motor_inner(
         tokens,
     };
     execution.encode_route(ctx, enc, layer, mixer, profile.as_deref_mut())?;
+    #[cfg(test)]
+    router_capture::encode(
+        ctx,
+        enc,
+        layer,
+        tokens,
+        profile.is_some(),
+        &execution.views.router_logits,
+        &execution.views.topk_ids,
+        &execution.views.topk_weights,
+    )?;
     #[cfg(test)]
     execution.encode_iq3_gate_up_capture(ctx, enc, layer)?;
     #[cfg(test)]

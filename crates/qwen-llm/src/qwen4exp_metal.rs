@@ -19,6 +19,178 @@ mod projection_tests;
 #[cfg(test)]
 pub(crate) mod frontier_hc;
 
+#[cfg(test)]
+#[path = "qwen4exp_metal/tests/packet_hc.rs"]
+mod packet_hc_tests;
+
+#[cfg(test)]
+pub(crate) mod packet_hc {
+    use super::*;
+
+    #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+    pub(crate) enum Mode {
+        #[default]
+        Baseline,
+        InjectRows,
+        MixFewrow,
+        MixFewrowInjectRows,
+    }
+
+    impl Mode {
+        pub(crate) fn name(self) -> &'static str {
+            match self {
+                Self::Baseline => "baseline",
+                Self::InjectRows => "inject_rows",
+                Self::MixFewrow => "mix_fewrow",
+                Self::MixFewrowInjectRows => "mix_fewrow_inject_rows",
+            }
+        }
+    }
+
+    #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+    pub(super) enum Role {
+        Down,
+        Up,
+        Inject,
+    }
+
+    thread_local! {
+        static MODE: std::cell::Cell<Mode> = const { std::cell::Cell::new(Mode::Baseline) };
+    }
+
+    pub(super) fn active_mode() -> Mode {
+        MODE.get()
+    }
+
+    pub(crate) struct Scope(Mode, std::marker::PhantomData<std::rc::Rc<()>>);
+    impl Scope {
+        pub(crate) fn new(mode: Mode) -> Self {
+            assert!(
+                !qwen4exp_hc_packed_projection_override_active(),
+                "conflicting HC experiment"
+            );
+            Self(
+                MODE.with(|slot| slot.replace(mode)),
+                std::marker::PhantomData,
+            )
+        }
+    }
+    impl Drop for Scope {
+        fn drop(&mut self) {
+            MODE.with(|slot| slot.set(self.0));
+        }
+    }
+
+    pub(super) fn selected(mode: Mode, role: Role, dtype: GgmlType, rows: usize) -> bool {
+        if !matches!(rows, 2 | 4 | 8) {
+            return false;
+        }
+        match role {
+            Role::Inject => {
+                dtype == GgmlType::F32
+                    && matches!(mode, Mode::InjectRows | Mode::MixFewrowInjectRows)
+            }
+            Role::Down | Role::Up => {
+                dtype == GgmlType::Q8_0
+                    && matches!(mode, Mode::MixFewrow | Mode::MixFewrowInjectRows)
+            }
+        }
+    }
+
+    pub(super) fn pipeline_supported(
+        width: usize,
+        max_threads: usize,
+        needed: usize,
+        static_bytes: usize,
+        max_bytes: usize,
+    ) -> bool {
+        width == SIMD_WIDTH && max_threads >= needed && static_bytes <= max_bytes
+    }
+
+    pub(super) fn preflight(
+        ctx: &MetalContext,
+        role: Role,
+        dtype: GgmlType,
+        n_in: usize,
+        n_out: usize,
+        rows: usize,
+    ) -> Result<(), Qwen4ExpMetalError> {
+        if !selected(active_mode(), role, dtype, rows) {
+            return Ok(());
+        }
+        validate_projection_addressing(dtype, n_in, n_out, rows)?;
+        if role == Role::Inject {
+            return preflight_projection(ctx, dtype);
+        }
+        if !n_in.is_multiple_of(32) {
+            return Err(invalid("HC fewrow requires K divisible by 32"));
+        }
+        let (nt, mut nsg) = crate::metal::q8_0_fewrow_tiling(n_in, n_out);
+        let mut pipeline =
+            ctx.pipeline(&format!("kernel_mat_mat_q8_0_fewrow_nt{nt}_nsg{nsg}_f32"))?;
+        while nsg > 8 && pipeline.maxTotalThreadsPerThreadgroup() < 32 * nsg {
+            nsg /= 2;
+            pipeline = ctx.pipeline(&format!("kernel_mat_mat_q8_0_fewrow_nt{nt}_nsg{nsg}_f32"))?;
+        }
+        if !pipeline_supported(
+            pipeline.threadExecutionWidth(),
+            pipeline.maxTotalThreadsPerThreadgroup(),
+            32 * nsg,
+            pipeline.staticThreadgroupMemoryLength(),
+            ctx.device.maxThreadgroupMemoryLength(),
+        ) {
+            return Err(invalid(
+                "HC fewrow pipeline lacks SIMD/thread/memory capacity",
+            ));
+        }
+        Ok(())
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn encode(
+        ctx: &MetalContext,
+        enc: &KernelEncoder,
+        role: Role,
+        weight: &MetalTensor,
+        input: &MetalTensor,
+        output: &MetalTensor,
+        n_in: usize,
+        n_out: usize,
+        rows: usize,
+    ) -> Result<bool, Qwen4ExpMetalError> {
+        if !selected(active_mode(), role, weight.dtype, rows) {
+            return Ok(false);
+        }
+        validate_encoder(ctx, enc)?;
+        require_projection("packet HC weight", weight, n_in, n_out)?;
+        require_f32_shape("packet HC input", input, &[n_in as u64, rows as u64], false)?;
+        require_f32_shape(
+            "packet HC output",
+            output,
+            &[n_out as u64, rows as u64],
+            true,
+        )?;
+        let tensors = [("weight", weight), ("input", input), ("output", output)];
+        require_same_device(ctx, &tensors)?;
+        require_disjoint(&tensors)?;
+        preflight(ctx, role, weight.dtype, n_in, n_out, rows)?;
+        let _tag =
+            crate::metal::dispatch_census_tag_scope(|| format!("qwen4exp.packet_hc.{role:?}"));
+        if role == Role::Inject {
+            for row in 0..rows {
+                let x = input.view_subrange((row * n_in) as u64, vec![n_in as u64]);
+                let y = output.view_subrange((row * n_out) as u64, vec![n_out as u64]);
+                encode_mat_vec_dispatch(ctx, enc, weight, &x, &y, n_in, n_out)?;
+            }
+        } else {
+            crate::metal::encode_mat_mat_q8_0_fewrow_f32(
+                ctx, enc, weight, input, output, n_in, n_out, rows,
+            )?;
+        }
+        Ok(true)
+    }
+}
+
 const SIMD_WIDTH: usize = 32;
 
 #[path = "qwen4exp_hc_up.rs"]
@@ -466,9 +638,11 @@ impl GatedResidualPackedRead<'_, '_, '_> {
             self.scratch.branch_count,
             self.tokens,
         )?;
-        encode_mat_mat_dispatch_without_fewrow(
+        #[cfg(test)]
+        let overridden = packet_hc::encode(
             self.ctx,
             enc,
+            packet_hc::Role::Inject,
             self.inject,
             &self.normalized,
             &injection,
@@ -476,6 +650,20 @@ impl GatedResidualPackedRead<'_, '_, '_> {
             self.scratch.branch_count,
             self.tokens,
         )?;
+        #[cfg(not(test))]
+        let overridden = false;
+        if !overridden {
+            encode_mat_mat_dispatch_without_fewrow(
+                self.ctx,
+                enc,
+                self.inject,
+                &self.normalized,
+                &injection,
+                hyper_hidden,
+                self.scratch.branch_count,
+                self.tokens,
+            )?;
+        }
         encode_hc_injection_packed(
             self.ctx,
             enc,
@@ -816,6 +1004,16 @@ pub(crate) unsafe fn encode_gated_residual_packed_mix<'scratch, 'resources, 'ctx
         hyper_hidden,
         scratch.low_rank,
         tokens,
+    )? || packet_hc::encode(
+        ctx,
+        enc,
+        packet_hc::Role::Down,
+        weights.down,
+        &normalized,
+        &low,
+        hyper_hidden,
+        scratch.low_rank,
+        tokens,
     )?;
     #[cfg(not(test))]
     let down_overridden = false;
@@ -848,6 +1046,16 @@ pub(crate) unsafe fn encode_gated_residual_packed_mix<'scratch, 'resources, 'ctx
         ctx,
         enc,
         Qwen4ExpHcPackedProjectionRole::Up,
+        weights.up,
+        &low,
+        &raw_gate,
+        scratch.low_rank,
+        hyper_hidden,
+        tokens,
+    )? || packet_hc::encode(
+        ctx,
+        enc,
+        packet_hc::Role::Up,
         weights.up,
         &low,
         &raw_gate,
@@ -1000,6 +1208,29 @@ pub(crate) fn validate_and_preflight_gated_residual_packed_mix(
     validate_projection_addressing(inject.dtype, hyper_hidden, scratch.branch_count, tokens)?;
     #[cfg(test)]
     preflight_hc_packed_projection_override(ctx, weights, hyper_hidden, scratch.low_rank, tokens)?;
+    #[cfg(test)]
+    for (role, weight, n_in, n_out) in [
+        (
+            packet_hc::Role::Down,
+            weights.down,
+            hyper_hidden,
+            scratch.low_rank,
+        ),
+        (
+            packet_hc::Role::Up,
+            weights.up,
+            scratch.low_rank,
+            hyper_hidden,
+        ),
+        (
+            packet_hc::Role::Inject,
+            inject,
+            hyper_hidden,
+            scratch.branch_count,
+        ),
+    ] {
+        packet_hc::preflight(ctx, role, weight.dtype, n_in, n_out, tokens)?;
+    }
     for (name, tensor, width) in [
         (
             "packed HC normalized scratch",

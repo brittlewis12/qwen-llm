@@ -48,6 +48,9 @@ pub use dflash::{
 #[path = "qwen4exp_prefill_admission_tests.rs"]
 mod prefill_admission_tests;
 
+#[cfg(test)]
+mod packet_cost;
+
 // Selected-range packed QSA prefill. Default-on since 2026-09-03: the
 // 08-28 N=4,099 trace showed its distance from the scalar-selected path is the
 // same packed-HC arithmetic distance the already-default dense packed path

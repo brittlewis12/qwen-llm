@@ -311,7 +311,7 @@ impl Workspace {
         op::require(size == payload_len, "snapshot payload extent")?;
         op::require(
             self.status.dtype == GgmlType::I32
-                && self.status.offset % 4 == 0
+                && self.status.offset.is_multiple_of(4)
                 && self.status.buffer.storageMode() == objc2_metal::MTLStorageMode::Shared
                 && self
                     .status
@@ -396,8 +396,8 @@ fn validate(c: &Config, capacity: usize, schedule: &Schedule) -> Result<()> {
         ]
         .iter()
         .all(|&x| x > 0 && x <= u32::MAX as usize / 4)
-            && c.heads % c.groups == 0
-            && c.rope_dim % 2 == 0
+            && c.heads.is_multiple_of(c.groups)
+            && c.rope_dim.is_multiple_of(2)
             && c.rope_dim <= c.head_dim
             && c.rope_dim <= c.index_dim
             && c.norm_eps.is_finite()
@@ -566,11 +566,12 @@ fn sink_passes(
         if groups == 0 {
             continue;
         }
-        if name == "output" && count >= 256 {
-            if let Some((matrix, output, status)) = matrix {
-                matrix.encode(ctx, enc, [heads, dim, count], output, status)?;
-                continue;
-            }
+        if name == "output"
+            && count >= 256
+            && let Some((matrix, output, status)) = matrix
+        {
+            matrix.encode(ctx, enc, [heads, dim, count], output, status)?;
+            continue;
         }
         pipeline(ctx, enc, name)?;
         // Exact grids, including tiny toy geometries, need no padded-thread guard.
@@ -713,7 +714,7 @@ fn projection(w: &Linear<'_>, input: usize, output: usize) -> Result<()> {
             && w.output == output
             && t.shape == [input as u64, output as u64]
             && dense_linear_supported(t.dtype)
-            && t.offset % alignment == 0
+            && t.offset.is_multiple_of(alignment)
             && end.is_some_and(|end| end <= t.buffer.length() as u64),
         "GPU attention projection geometry/storage bounds",
     )
@@ -727,7 +728,7 @@ fn valid_view(t: &MetalTensor, count: usize) -> Result<()> {
     op::require(
         t.dtype == GgmlType::F32
             && elements == Some(count as u64)
-            && t.offset % 4 == 0
+            && t.offset.is_multiple_of(4)
             && end.is_some_and(|end| end <= t.buffer.length() as u64),
         "GPU attention buffer bounds/dtype",
     )
@@ -1412,7 +1413,7 @@ impl Workspace {
                             &self.gate,
                         )?;
                     }
-                    if position % 2 == 0 {
+                    if position.is_multiple_of(2) {
                         copy(ctx, enc, &self.latent, &cache.pending_value, c.head_dim)?;
                         copy(ctx, enc, &self.gate, &cache.pending_gate, c.head_dim)?;
                     } else {
@@ -1425,7 +1426,7 @@ impl Workspace {
                         dispatch(enc, &pso, c.head_dim);
                     }
                 }
-                if (position + 1) % ratio == 0 {
+                if (position + 1).is_multiple_of(ratio) {
                     norm(
                         ctx,
                         enc,

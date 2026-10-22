@@ -361,6 +361,10 @@ fn dispatch_generic_mm(
     n_expert: usize,
     n_tokens: usize,
 ) -> Result<(), MetalError> {
+    #[cfg(test)]
+    let suffixed = format!("{name}{}", tests::pipeline_suffix());
+    #[cfg(test)]
+    let name = suffixed.as_str();
     let pso = ctx.pipeline(name)?;
     enc.set_pipeline(&pso);
     enc.set_bytes(0, args);

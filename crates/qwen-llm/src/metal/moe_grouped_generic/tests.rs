@@ -1031,6 +1031,28 @@ fn generic_grouped_moe_rejects_bad_contracts() {
     enc.end();
 }
 
+thread_local! {
+    /// Appended to every generic grouped pipeline name dispatched on this
+    /// thread; research variants only.
+    static PIPELINE_SUFFIX: std::cell::RefCell<&'static str> = const { std::cell::RefCell::new("") };
+}
+
+pub(super) fn pipeline_suffix() -> &'static str {
+    PIPELINE_SUFFIX.with(|s| *s.borrow())
+}
+
+fn with_pipeline_suffix<T>(suffix: &'static str, f: impl FnOnce() -> T) -> T {
+    struct Restore(&'static str);
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            PIPELINE_SUFFIX.with(|s| *s.borrow_mut() = self.0);
+        }
+    }
+    let _restore =
+        Restore(PIPELINE_SUFFIX.with(|s| std::mem::replace(&mut *s.borrow_mut(), suffix)));
+    f()
+}
+
 /// Opt-in timing of the generic half-staged expert tiles at the DeepSeek
 /// V4.1 prefill shape (384 experts, 2048 tokens x top-6, ~32 slots per
 /// expert; gate/up K=5120 M=2304, down K=2304 M=5120). Prints TFLOPS and
@@ -1128,17 +1150,50 @@ fn generic_tile_production_shape_timing() {
             commit_and_wait(&command).unwrap();
         }
         let mac = (slots * HIDDEN * FFN) as f64;
-        timed(
-            &format!("{dtype:?} gate+up (2 GEMMs)"),
-            2.0 * 2.0 * mac,
-            2.0 * gate.len() as f64,
-            &gate_up,
-        );
-        timed(
-            &format!("{dtype:?} down"),
-            2.0 * mac,
-            down.len() as f64,
-            &down_enc,
+        for suffix in ["", "_rowmajor"] {
+            with_pipeline_suffix(suffix, || {
+                timed(
+                    &format!("{dtype:?} gate+up{suffix}"),
+                    2.0 * 2.0 * mac,
+                    2.0 * gate.len() as f64,
+                    &gate_up,
+                );
+                timed(
+                    &format!("{dtype:?} down{suffix}"),
+                    2.0 * mac,
+                    down.len() as f64,
+                    &down_enc,
+                );
+            });
+        }
+        // Equivalence of the row-major variant (same decoders and 8x8x8
+        // steps; only the staging layout and tile orientation differ).
+        let run = |suffix: &'static str| {
+            with_pipeline_suffix(suffix, || {
+                let command = ctx.queue.commandBuffer().unwrap();
+                let enc = KernelEncoder::begin(&command);
+                gate_up(&enc);
+                down_enc(&enc);
+                enc.end();
+                commit_and_wait(&command).unwrap();
+            });
+            (
+                read_back_f32(&inner_t.buffer, slots * FFN),
+                read_back_f32(&out_t.buffer, slots * HIDDEN),
+            )
+        };
+        let (inner_g, out_g) = run("");
+        let (inner_r, out_r) = run("_rowmajor");
+        let worst = |a: &[f32], b: &[f32]| {
+            a.iter()
+                .zip(b)
+                .map(|(&x, &y)| ((x - y).abs() / (1e-3 + y.abs())))
+                .fold(0.0f32, f32::max)
+        };
+        eprintln!(
+            "tile_timing {dtype:?} rowmajor vs generic worst rel err: inner {:.2e} out {:.2e}",
+            worst(&inner_r, &inner_g),
+            worst(&out_r, &out_g)
         );
     }
 }

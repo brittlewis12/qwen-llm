@@ -16,9 +16,10 @@ kernel void kernel_deepseek_v41_attention_selection_prepare(
 kernel void kernel_deepseek_v41_attention_selection_prepare_rows(
     constant uint4 &a [[buffer(0)]], constant uint4 &b [[buffer(1)]],
     device uint *selected [[buffer(2)]], device uint *candidates [[buffer(3)]],
-    uint2 t [[thread_position_in_grid]]) {
-    uint row = t.y;
-    if (row >= b.z) return;
+    constant uint &row0 [[buffer(4)]], uint2 t [[thread_position_in_grid]]) {
+    uint local = t.y;
+    if (local >= b.z) return;
+    uint row = row0 + local;
     uint length = (a.x + row + 1) / a.y;
     uint all = min(length, a.z);
     uint blocks = (length + a.w - 1) / a.w;
@@ -140,17 +141,19 @@ kernel void kernel_deepseek_v41_attention_index_heads_rows(
     constant uint4 &a [[buffer(0)]], constant uint4 &b [[buffer(1)]],
     constant uint4 &c [[buffer(2)]], device const float *q [[buffer(3)]],
     device const float *weights [[buffer(4)]], device const float *keys [[buffer(5)]],
-    device float *scores [[buffer(6)]], uint3 group [[threadgroup_position_in_grid]],
+    device float *scores [[buffer(6)]], constant uint &row0 [[buffer(7)]],
+    uint3 group [[threadgroup_position_in_grid]],
     uint sg [[simdgroup_index_in_threadgroup]], uint lane [[thread_index_in_simdgroup]]) {
-    uint row = group.y;
-    if (row >= c.y) return;
+    uint local = group.y;
+    if (local >= c.y) return;
+    uint row = row0 + local;
     uint length = (a.x + row + 1) / a.y;
     if (length <= a.z) return;
     uint t = group.x * 8 + sg;
     if (t >= length) return;
     device const float *qrow = q + (ulong)row * b.z;
     device const float *wrow = weights + (ulong)row * b.w;
-    device float *srow = scores + (ulong)row * c.x;
+    device float *srow = scores + (ulong)local * c.x;
     float score = 0, scale = rsqrt(float(b.x)) * rsqrt(float(b.y));
     for (uint base = 0; base < b.y; base += 32) {
         uint h = base + lane;

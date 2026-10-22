@@ -292,7 +292,7 @@ impl Workspace {
             enc.set_bytes(
                 0,
                 &[
-                    (start + first) as u32,
+                    start as u32,
                     ratio as u32,
                     c.index_topk as u32,
                     c.candidate_block as u32,
@@ -309,9 +309,10 @@ impl Workspace {
             );
             enc.set_tensor(2, &rows.selected);
             enc.set_tensor(3, &rows.candidates);
+            enc.set_bytes(4, &(first as u32));
             enc.dispatch(
                 MTLSize {
-                    width: grid_w,
+                    width: grid_w.div_ceil(256),
                     height: n,
                     depth: 1,
                 },
@@ -327,7 +328,7 @@ impl Workspace {
             enc.set_bytes(
                 0,
                 &[
-                    (start + first) as u32,
+                    start as u32,
                     ratio as u32,
                     c.index_topk as u32,
                     last_length as u32,
@@ -347,6 +348,7 @@ impl Workspace {
             enc.set_tensor(4, &rows.index_weights);
             enc.set_tensor(5, &self.owners[owner].keys);
             enc.set_tensor(6, &rows.select_scores);
+            enc.set_bytes(7, &(first as u32));
             enc.dispatch(
                 MTLSize {
                     width: last_length.div_ceil(8),

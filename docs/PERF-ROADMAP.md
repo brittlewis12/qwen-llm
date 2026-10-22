@@ -26,7 +26,7 @@ expected effect, status. Status is one of `open`, `in flight (branch)`,
 `in flight` with your branch; a second lane finding it claimed reads the branch
 before building anything adjacent. This replaces relaying between sessions.
 
-### DeepSeek V4.1-Flash (main after the tensor dense projections: pp2048 Q2 545 / IQ3 542 tok/s, pp4096 Q2 496 / IQ3 493; decode tg32 43 / 41, tg32@d2048 41.6)
+### DeepSeek V4.1-Flash (main after batched selection: pp2048 Q2 562 / IQ3 559 tok/s, pp4096 Q2 513 / IQ3 509; decode tg32 43 / 41, tg32@d2048 41.6)
 
 Decode budget at depth 2048, 22.3 ms/token: ~10.2 ms bytes (11.1 GiB at the
 ~1.09 TB/s the GEMV probe reaches), ~8 ms dispatch floor (~1,600 dispatches),
@@ -99,20 +99,21 @@ re-sample before claiming.
 - Owner/producer per-row loops (compressor, index key, selection; 8 layers,
   grows with prompt length): compressor prep landed (`a7de76ab`): key norm +
   key/latent RoPE + both cache copies fused 5 -> 1, +0.5-1.0% on top of the
-  MMA series. Selection batching
-  (one dispatch per layer for index scores, one threadgroup per row for the
-  top-k select, batched chronological/prepare; the eight owner/producer
-  layers cost 75-121 ms each; the serial span includes compressor pooling,
-  norm, key projection, publication, indexing and sorting, so not all of it
-  is removable). Compressor standalone census 50,710 -> 40,470; final
-  MMA-series census 39,563. Selection batching: in flight
-  (`perf/v41-select-batch`). Keep position-ordered compressor/key
-  publication; batch `index_heads` in 32-row tiles, then fuse selection for
-  padded visible length <=2048; incumbent fallback above 2048. Historical
-  PP1024 selection families total 16,381 dispatches (`selection_prepare`
-  6,141 + four families x 2,560), not ~19k. First validate a three-arm
-  producer replay (incumbent; batched index/prepare; + fused
-  sort/chronological).
+  MMA series. Compressor standalone census 50,710 -> 40,470; final
+  MMA-series census 39,563. Selection batching landed (2026-10-22 entry,
+  bench/2026-10-22-v41-select-batch.md): compressor/index publication stays
+  ordered; prepare and index scores batch over 32-row tiles; the incumbent
+  per-row sort/chronological remains; pruning above 16,385 keys keeps the
+  old selector. Same-binary ABBA: Q2 pp2048 +3.05%, pp4096 +3.57%; IQ3
+  +3.46%/+3.80%; census 105,202 -> 88,133 at Q2 pp2048; same-binary
+  held-text witness identical. The eight owner/producer layers still cost
+  75-121 ms each; the serial span includes non-selection work.
+- Fused selection sort/chronological for padded visible length <=2048: open.
+  The per-row sort init/tile/step/chronological passes are now the dominant
+  selection dispatches. Gate it with a three-arm producer replay
+  (incumbent, current batching, fused) and measure producer-stage time and
+  exact selection agreement, not census alone; keep the incumbent fallback
+  above 2048.
 - Scalar score kernel tuning: superseded on the released geometry by the
   MMA tile; the 8-lane scalar kernel remains the fallback for other
   geometry. The 4-key/8-lane variants measured +3.0%/+1.2-1.4% on the old

@@ -1,0 +1,413 @@
+{
+  "schema": "qwen.native-short-packets.v1",
+  "date": "2026-10-22",
+  "targets": {
+    "glm": "GLM-5.3-Flash UD-IQ3_XXS",
+    "flash": "Qwen3.8-Flash-Next Q3_K_XL"
+  },
+  "hardware": {
+    "family": "Apple M4 Max",
+    "memory_gib": 128,
+    "metal_api_validation": true
+  },
+  "input": {
+    "source_sha256": "ddb1fd6d6571b499c38e8513763fd7457e76ab639af5c829deb3abb2e2d44651",
+    "text_sha256": "1522c9f6f0b8b3c3806df3560c6a419a5d7471384eedb5846353eea780098b90",
+    "transform": "join first14 message content strings with two newlines; no chat renderer; target-only cost probe",
+    "tokenization": "native target tokenizer; encode(add_special_tokens=false)"
+  },
+  "method": {
+    "target_only": true,
+    "depths": [64, 2179, 8192],
+    "widths": [1, 2, 4, 8],
+    "arms": ["serial", "packed_last", "verify_all", "verify_features"],
+    "warmup_per_arm": 1,
+    "measured_repeats_per_arm": 2,
+    "orders": ["A B C D", "D C B A"],
+    "wall_includes": "native execution and readback of every requested logit row; packed_last reads one head; verify_features adds five captures without feature readback",
+    "outside_timing": "prefill, snapshot restore, correctness checks, held continuation",
+    "prefix": "same legacy-policy prefix snapshot per depth; each arm restores identical base",
+    "admission": "production weights/session plans and GPU lease; no bypass",
+    "prefill_capacity_rows": {
+      "glm": 512,
+      "flash": 2048
+    },
+    "flash_baseline_capacity": 8201,
+    "flash_variant_capacity": 2188,
+    "quality64_capacity": 2244,
+    "profile": "separate packed_last call; encoder boundaries perturb timing; Flash detailed labels cover layers 5 and 7 only and nested spans overlap",
+    "comparison_limit": "Older baseline and three-depth production timings are cross-build and indicative. Final depth2179 baseline/production share a binary but serial controls drift; neither establishes a fixed speedup.",
+    "paired_current_baseline": "final_same_binary_depth2179; same executable, sequential processes, not balanced cross-process ABBA",
+    "statistics": "timing tables retain two measured wall-ms samples in iteration order; README uses their arithmetic mean; no confidence interval"
+  },
+  "wall_ms_samples": {
+    "columns": ["run", "depth", "width", "serial", "packed_last", "verify_all", "verify_features"],
+    "rows": [
+      ["glm-baseline", 64, 1, [36.7945, 36.803], [82.263625, 82.584083], [82.358959, 83.870709], [82.317375, 83.590333]],
+      ["glm-baseline", 64, 2, [73.170583, 73.767541], [137.042792, 135.189459], [138.037708, 137.672959], [138.222417, 137.889375]],
+      ["glm-baseline", 64, 4, [148.119708, 147.91075], [193.603333, 197.119209], [197.082667, 196.429833], [196.560708, 196.545542]],
+      ["glm-baseline", 64, 8, [295.639583, 296.299167], [227.444667, 226.828208], [233.810541, 233.976458], [234.89575, 235.033125]],
+      ["glm-baseline", 2179, 1, [39.0835, 38.908083], [85.635792, 85.121625], [85.084459, 85.299625], [86.108333, 85.320042]],
+      ["glm-baseline", 2179, 2, [78.560584, 79.117333], [145.772584, 146.7305], [146.516458, 146.359375], [145.334041, 147.51225]],
+      ["glm-baseline", 2179, 4, [156.937, 155.448166], [203.298417, 201.338375], [204.735875, 203.731542], [205.049125, 204.801542]],
+      ["glm-baseline", 2179, 8, [307.313542, 312.533208], [237.61175, 242.887208], [247.77125, 249.955917], [247.675, 248.722458]],
+      ["glm-baseline", 8192, 1, [38.667625, 38.370375], [83.384167, 84.171458], [84.806375, 84.524292], [86.036625, 84.401875]],
+      ["glm-baseline", 8192, 2, [77.292125, 76.255834], [141.626875, 141.715333], [142.824959, 143.088042], [142.867042, 142.398917]],
+      ["glm-baseline", 8192, 4, [153.196333, 152.999208], [199.172292, 199.219625], [201.815208, 202.903709], [202.536791, 202.118291]],
+      ["glm-baseline", 8192, 8, [315.022084, 308.045666], [237.5435, 239.877875], [246.99475, 247.961708], [247.621125, 247.103125]],
+      ["glm-production", 64, 1, [37.022417, 37.054709], [43.699834, 44.23175], [44.144708, 43.768333], [44.162875, 44.127458]],
+      ["glm-production", 64, 2, [73.841625, 73.065834], [64.198292, 64.27975], [65.437167, 65.230584], [65.566584, 65.539542]],
+      ["glm-production", 64, 4, [145.428625, 147.787083], [109.901791, 111.159084], [114.144541, 114.405333], [114.214083, 114.348875]],
+      ["glm-production", 64, 8, [296.664708, 298.590208], [158.622833, 162.257709], [166.752792, 170.168125], [168.209416, 169.739959]],
+      ["glm-production", 2179, 1, [39.045083, 39.300584], [46.186, 46.173666], [45.843083, 46.232167], [46.403125, 46.286333]],
+      ["glm-production", 2179, 2, [78.220375, 78.292208], [69.8505, 69.840917], [70.856041, 71.13075], [70.8135, 70.924334]],
+      ["glm-production", 2179, 4, [158.361375, 156.801542], [121.007292, 121.591041], [125.640792, 123.265375], [126.496167, 123.570167]],
+      ["glm-production", 2179, 8, [320.655292, 319.977], [171.30875, 179.107333], [183.062917, 187.364917], [185.183834, 187.347167]],
+      ["glm-production", 8192, 1, [40.878792, 38.363958], [45.651958, 45.198833], [45.623083, 45.307917], [45.379292, 45.673833]],
+      ["glm-production", 8192, 2, [79.039209, 78.794625], [70.833625, 71.81], [72.039625, 72.542], [71.750917, 72.7125]],
+      ["glm-production", 8192, 4, [157.808292, 157.921833], [123.59025, 126.581708], [127.140084, 129.037375], [127.915875, 128.170917]],
+      ["glm-production", 8192, 8, [312.772708, 314.498208], [170.142125, 180.402], [180.383458, 185.486625], [183.377834, 184.136375]],
+      ["flash-baseline", 64, 1, [37.216333, 38.533083], [37.785375, 37.332833], [37.402, 38.140583], [36.5325, 36.737792]],
+      ["flash-baseline", 64, 2, [72.468, 76.857958], [200.01, 203.055125], [207.2635, 203.478375], [205.299791, 205.223375]],
+      ["flash-baseline", 64, 4, [152.793166, 153.485333], [217.183792, 217.323334], [218.110291, 220.735709], [220.351417, 221.468917]],
+      ["flash-baseline", 64, 8, [308.265667, 302.907958], [188.768041, 187.601708], [195.80575, 195.793041], [196.920083, 197.224667]],
+      ["flash-baseline", 2179, 1, [40.639542, 40.811708], [41.204, 40.087917], [40.561959, 40.316709], [40.022375, 40.678083]],
+      ["flash-baseline", 2179, 2, [79.015416, 79.16925], [212.76375, 212.453208], [215.071291, 213.467042], [214.04625, 214.65625]],
+      ["flash-baseline", 2179, 4, [156.979417, 156.438], [225.033917, 224.438083], [228.465125, 229.000958], [228.093375, 228.080583]],
+      ["flash-baseline", 2179, 8, [317.891208, 313.846875], [206.346625, 205.948583], [214.209208, 214.180417], [214.665125, 213.889584]],
+      ["flash-baseline", 8192, 1, [38.705209, 38.930791], [38.770042, 38.673375], [39.248875, 38.829791], [39.1975, 39.215209]],
+      ["flash-baseline", 8192, 2, [78.193791, 78.00025], [208.187042, 208.33475], [209.111167, 210.22375], [208.726417, 208.792583]],
+      ["flash-baseline", 8192, 4, [157.978583, 159.721458], [224.083583, 225.704625], [227.211417, 229.422458], [227.242625, 227.393375]],
+      ["flash-baseline", 8192, 8, [319.758791, 317.480167], [199.440083, 199.73025], [207.427209, 208.742458], [207.518292, 207.626208]]
+    ]
+  },
+  "variant_wall_ms_samples": {
+    "columns": ["run", "depth", "width", "serial", "packed_last", "verify_all", "verify_features"],
+    "rows": [
+      ["glm-q8_fewrow", 2179, 2, [76.082292, 75.827375], [126.194292, 126.085834], [126.427917, 127.375375], [127.121416, 127.574542]],
+      ["glm-q8_fewrow", 2179, 4, [152.239208, 154.338875], [182.2845, 182.475041], [186.348292, 185.854041], [186.466375, 185.549]],
+      ["glm-q8_fewrow", 2179, 8, [309.451792, 309.633542], [232.352459, 238.389042], [242.372833, 245.570959], [244.124959, 244.757375]],
+      ["glm-narrow_projections", 2179, 2, [77.960708, 78.232542], [158.877834, 159.632209], [159.316292, 161.201167], [160.092833, 161.03125]],
+      ["glm-narrow_projections", 2179, 4, [157.142167, 156.922375], [204.540792, 205.264792], [210.198375, 208.220042], [207.791833, 209.318958]],
+      ["glm-narrow_projections", 2179, 8, [313.170083, 318.18125], [282.706541, 284.227667], [291.206875, 292.027292], [289.194042, 293.098959]],
+      ["glm-combined", 2179, 2, [78.570709, 79.670875], [92.454917, 92.271625], [93.764084, 92.5795], [94.400625, 94.315541]],
+      ["glm-combined", 2179, 4, [159.929708, 160.999375], [122.645916, 124.190083], [126.617875, 127.151042], [127.199042, 127.89925]],
+      ["glm-combined", 2179, 8, [327.61525, 330.136], [184.749958, 185.480666], [192.670875, 195.115542], [192.31925, 191.184458]],
+      ["glm-native_experts_router", 2179, 2, [76.43475, 77.709125], [79.809833, 81.648417], [81.087541, 80.857667], [81.046542, 80.733792]],
+      ["glm-native_experts_router", 2179, 4, [153.068709, 156.287667], [123.586042, 125.091917], [127.684416, 127.402791], [127.922833, 128.169375]],
+      ["glm-native_experts_router", 2179, 8, [312.260166, 313.209917], [140.457167, 140.528917], [149.073541, 147.930959], [151.737125, 148.276291]],
+      ["glm-native_experts_router_q8", 2179, 2, [78.264458, 77.492541], [63.350209, 63.212208], [64.196708, 64.493459], [64.773541, 63.449542]],
+      ["glm-native_experts_router_q8", 2179, 4, [156.60675, 153.135833], [108.177042, 108.056458], [111.299583, 111.549917], [111.561125, 111.735375]],
+      ["glm-native_experts_router_q8", 2179, 8, [313.758625, 309.378167], [144.500167, 143.835333], [151.357625, 150.138042], [152.610666, 152.623334]],
+      ["glm-half_experts_router", 2179, 2, [76.526792, 77.167708], [86.445167, 86.573333], [87.629166, 87.584417], [87.428583, 87.641083]],
+      ["glm-half_experts_router", 2179, 4, [154.342875, 152.20375], [135.299292, 134.321875], [138.34775, 137.432875], [138.840083, 137.80275]],
+      ["glm-half_experts_router", 2179, 8, [304.97025, 315.941833], [164.102917, 168.91575], [172.662292, 175.263084], [174.423208, 174.939958]],
+      ["glm-half_experts_router_q8", 2179, 2, [79.147584, 78.727125], [69.95175, 70.703042], [70.932833, 71.530875], [71.1765, 71.517292]],
+      ["glm-half_experts_router_q8", 2179, 4, [154.443916, 154.215084], [123.302292, 123.483875], [126.800833, 126.714583], [126.572916, 126.91075]],
+      ["glm-half_experts_router_q8", 2179, 8, [309.520958, 308.844875], [175.930708, 176.298292], [186.561209, 183.71225], [183.68425, 186.266875]],
+      ["flash-inject_rows", 2179, 2, [80.288458, 81.278458], [150.77325, 149.963], [151.573917, 149.670375], [151.255083, 150.174875]],
+      ["flash-inject_rows", 2179, 4, [161.040416, 161.490208], [162.216541, 163.574958], [167.129417, 167.912625], [166.735958, 166.931083]],
+      ["flash-inject_rows", 2179, 8, [318.469708, 325.585542], [147.193875, 147.555], [155.940708, 158.873666], [159.402917, 155.11975]],
+      ["flash-mix_fewrow", 2179, 2, [87.064625, 82.175875], [189.45975, 187.551959], [189.835, 188.455875], [189.4305, 189.905083]],
+      ["flash-mix_fewrow", 2179, 4, [157.772208, 158.081833], [199.344209, 201.645583], [203.11325, 203.496834], [204.156917, 203.777208]],
+      ["flash-mix_fewrow", 2179, 8, [316.280833, 317.273917], [200.887417, 200.266334], [208.148166, 208.161292], [208.00275, 208.515084]],
+      ["flash-mix_fewrow_inject_rows", 2179, 2, [79.051958, 78.694917], [121.896541, 121.549875], [122.024958, 122.930792], [122.201, 123.180583]],
+      ["flash-mix_fewrow_inject_rows", 2179, 4, [156.8085, 157.230541], [135.122791, 135.161167], [138.79925, 138.625208], [139.063334, 139.163791]],
+      ["flash-mix_fewrow_inject_rows", 2179, 8, [312.839125, 315.925167], [141.312917, 140.945375], [149.32775, 149.019167], [148.897, 149.041875]]
+    ]
+  },
+  "glm_production": {
+    "policy": "Fast/Half only: supported half-operand experts and router at packed rows 1..8; Q8 few-row at rows 2..4; scalar decode and chunks >8 unchanged; ragged small prefill tails intentionally change",
+    "half_primitive_commit": "27c4a5ad",
+    "comparison": "same-width legacy Fast/Half at identical legacy prefix, in current executable; not scalar identity",
+    "allrow_max_kl_reference_candidate": 3.0668013891329947e-07,
+    "allrow_max_kl_candidate_reference": 3.067232416913726e-07,
+    "continuation_max_kl_reference_candidate": 2.097759819461616e-07,
+    "allrow_top1_flips": 0,
+    "continuation_top1_flips": 0,
+    "rows_compared": 45,
+    "continuations_compared": 12,
+    "per_case": {
+      "columns": ["depth", "width", "max_kl_reference_candidate", "max_kl_candidate_reference", "continuation_kl"],
+      "rows": [
+        [64, 1, 7.585152159690009e-08, 7.58587461977647e-08, 5.416640545563184e-10],
+        [64, 2, 6.52598602564213e-08, 6.526802915271144e-08, 7.1539946223617e-08],
+        [64, 4, 8.999756785888173e-08, 9.000632038313757e-08, 2.060689240767733e-08],
+        [64, 8, 1.3370451413135327e-07, 1.3371615481840943e-07, 4.303967030396226e-08],
+        [2179, 1, 2.2785737746074368e-08, 2.2781503403018335e-08, 8.083485350608579e-09],
+        [2179, 2, 1.445704697990552e-07, 1.445683174143498e-07, 6.662890847757908e-08],
+        [2179, 4, 1.887366478285199e-07, 1.887620560568813e-07, 1.010222949693756e-09],
+        [2179, 8, 2.652468574345945e-07, 2.652620950024311e-07, 2.6452421784495567e-09],
+        [8192, 1, 1.227931679578246e-07, 1.2278897122960297e-07, 9.372389445310667e-09],
+        [8192, 2, 2.4875071818635986e-07, 2.4882479046741744e-07, 2.097759819461616e-07],
+        [8192, 4, 2.516816310226621e-07, 2.5175053027186277e-07, 1.3237531819790637e-07],
+        [8192, 8, 3.0668013891329947e-07, 3.067232416913726e-07, 4.158173334588607e-08]
+      ]
+    }
+  },
+  "profile_gpu_ms": {
+    "depth": 2179,
+    "glm": {
+      "columns": ["run", "width", "RoutedExperts", "Router", "PackedKdaInputProjections", "MlaProjection", "PackedKdaRecurrence", "Head"],
+      "rows": [
+        ["glm-baseline", 2, 74.488126, 11.29604, 23.036083, 15.946334, 0.669081, 1.035167],
+        ["glm-baseline", 4, 109.148456, 11.451789, 32.492833, 20.661791, 0.842709, 1.037458],
+        ["glm-baseline", 8, 170.733332, 12.022999, 14.090834, 20.189748, 1.365209, 1.031542],
+        ["glm-production", 2, 26.723834, 0.981628, 10.977286, 10.217251, 0.67042, 1.034167],
+        ["glm-production", 4, 54.150229, 1.433915, 20.655657, 15.301327, 0.854541, 1.037833],
+        ["glm-production", 8, 107.679627, 2.264505, 14.081251, 19.899668, 1.348791, 1.035792]
+      ]
+    },
+    "flash_sampled_labels_not_full_model_totals": {
+      "columns": ["run", "width", "1:block.attention_hc", "1:block.ffn_hc", "1:block.mixer_bridge_attention_combine", "1:block.moe_bridge_ffn_combine"],
+      "rows": [
+        ["flash-baseline", 2, 0.63325, 0.637916, 1.429458, 1.440584],
+        ["flash-baseline", 4, 0.62875, 0.626126, 1.432999, 1.457958],
+        ["flash-baseline", 8, 0.215167, 0.214541, 1.4805, 1.437875],
+        ["flash-mix_fewrow_inject_rows", 2, 0.067458, 0.065667, 0.056833, 0.056292],
+        ["flash-mix_fewrow_inject_rows", 4, 0.071209, 0.066375, 0.091375, 0.089667],
+        ["flash-mix_fewrow_inject_rows", 8, 0.070876, 0.06725, 0.163501, 0.160334]
+      ]
+    }
+  },
+  "flash_test_only": {
+    "mode": "mix_fewrow_inject_rows",
+    "scope": "Q8 HC down/up few-row; F32 HC injection per-row matvec; no production enable",
+    "forensics": "baseline A/A/A, after serial-N, after packed-last, and candidate A/B/A preserve baseline logits, continuation and snapshot-owned active state bitwise; stable candidate differences are real",
+    "first_feature_jumps": {
+      "columns": ["width", "layer", "row", "relative_rms", "changed_expert_histogram_entries"],
+      "rows": [
+        [2, 19, 0, 0.0004370676297006506, 0],
+        [2, 19, 1, 0.0003642591980673499, 0],
+        [2, 20, 0, 0.00043833188644765554, 2],
+        [2, 20, 1, 0.04878689716570153, 2],
+        [2, 30, 0, 0.0007350261904827093, 0],
+        [2, 30, 1, 0.024346974385039064, 0],
+        [2, 31, 0, 0.05716952817936291, 4],
+        [2, 31, 1, 0.043290580665536475, 4]
+      ]
+    },
+    "capture_boundaries": "47 completed means (layers 1..47); layer 0 is internal bootstrap, but route counts cover all 48 layers",
+    "router_witness": {
+      "depth": 2179,
+      "layers": [20, 31],
+      "topk_matches_raw_scores": true,
+      "max_selected_softmax_f64_abs_error": 2.8892249176459828e-08,
+      "switches": {
+        "columns": ["width", "layer", "row", "baseline_cut_margin", "candidate_cut_margin", "max_raw_score_delta", "changed_expert_count"],
+        "rows": [
+          [2, 20, 1, 0.00024127960205078125, 6.723403930664062e-05, 0.0005249977111816406, 2],
+          [2, 31, 0, 0.00010442733764648438, 8.058547973632812e-05, 0.0033025741577148438, 2],
+          [2, 31, 1, 0.0007834434509277344, 0.0025568008422851562, 0.1644601821899414, 2],
+          [4, 20, 1, 0.00024127960205078125, 6.723403930664062e-05, 0.0005249977111816406, 2],
+          [4, 31, 0, 0.00010442733764648438, 8.058547973632812e-05, 0.0033025741577148438, 2],
+          [4, 31, 1, 0.0007834434509277344, 0.0025568008422851562, 0.1644601821899414, 2],
+          [4, 31, 2, 0.0017032623291015625, 0.00023126602172851562, 0.01416778564453125, 2]
+        ]
+      },
+      "interpretation": "observed score-order crossings at the selected/excluded cutoff; not a universal near-tie threshold or rounding-safety claim"
+    },
+    "quality64": {
+      "depth": 2179,
+      "held_tokens": 64,
+      "serial_mean_nll": 3.2434875186329837,
+      "serial_continuation_nll": 0.1847038368518703,
+      "route_layers": [20, 31],
+      "method": "common corpus inputs; one prefix restore per arm; normal continuation between packets; native scalar is a precision reference, not author truth",
+      "summary": {
+        "columns": ["width", "arm", "mean_nll", "mean_nll_delta", "mean_kl_serial_actual", "mean_kl_actual_serial", "top1_agreements_of_64", "changed_layer_token_route_sets_of_128", "continuation_nll", "continuation_kl_serial_actual", "continuation_top1_agrees"],
+        "rows": [
+          [2, "baseline_packed", 3.2550961691890192, 0.011608650556035549, 0.010808509238794239, 0.012626844577796961, 61, 0, 0.17629748339728124, 0.0002658084891382133, true],
+          [2, "candidate_packed", 3.263940872844449, 0.020453354211465324, 0.00425753394884926, 0.005167887331348377, 62, 5, 0.18511797550102926, 0.0005179278062622501, true],
+          [4, "baseline_packed", 3.255096169189019, 0.011608650556035105, 0.01080850923879424, 0.01262684457779696, 61, 0, 0.17629748339728124, 0.0002658084891382133, true],
+          [4, "candidate_packed", 3.26394087284445, 0.020453354211466213, 0.004257533948849259, 0.005167887331348377, 62, 5, 0.18511797550102926, 0.0005179278062622501, true],
+          [8, "baseline_packed", 3.2571990448103856, 0.0137115261774019, 0.007156154010638248, 0.008046676389099236, 60, 0, 0.1777021131572667, 0.00021561322004030984, true],
+          [8, "candidate_packed", 3.2858727478419234, 0.04238522920893972, 0.005542586361584772, 0.006318972174023798, 62, 2, 0.18273911765837525, 0.0005903031028133599, true]
+        ]
+      },
+      "interpretation": "candidate closer to scalar in mean KL but higher held-token mean NLL at all widths; no gameplay-quality conclusion or numeric promotion threshold"
+    }
+  },
+  "glm_nextn_provisional": {
+    "prompt_tokens": 11105,
+    "target_on_policy_rows": 128,
+    "hidden_kind": "post-norm",
+    "sampling": {
+      "temperature": 1.0,
+      "top_k": 0,
+      "top_p": 0.95,
+      "min_p": 0.0,
+      "seed": 42,
+      "algorithm_version": 1,
+      "distribution_api": "Sampler::diagnose"
+    },
+    "filtered_overlap_mean": 0.715890986527905,
+    "greedy_agreements": 96,
+    "full_kl_p_q_mean": 0.6578405266173932,
+    "full_kl_q_p_mean": 0.6992608205776468,
+    "reference_head_ms_median_excluding_first": 2.362791,
+    "reference_first_compile_step_ms": 200.030625,
+    "reference_history512_ms": 1881.680375,
+    "reference_startup_ms": 12355.781333,
+    "cost_scope": "external reference head, synchronization and full-logit retrieval; not native head cost",
+    "history_batch_1_vs_512": {
+      "rows": 128,
+      "max_abs": 0.05661940574645996,
+      "relative_l2": 0.00027415801429264285,
+      "mean_kl": 8.836452167491381e-08,
+      "max_kl": 2.359037499889647e-06,
+      "greedy_agreements": 128,
+      "bit_identical": false
+    },
+    "optimistic_break_even": {
+      "acceptance": 0.715890986527905,
+      "serial_ms": 39.17,
+      "verify2_ms": 70.99,
+      "free_head_budget_ms": 67.21144994229805,
+      "head_and_other_overhead_budget_ms": -3.778550057701949,
+      "decision": "no single-token NextN integration justified even with free head under these assumed costs",
+      "cost_compatibility": "indicative cross-context comparison; target cost at depth 2179, acceptance at prompt length 11105; not a matched end-to-end experiment"
+    },
+    "limits": ["one prompt and 128 correlated on-policy rows", "one-step conditional overlap, not recursive acceptance", "no gameplay-quality or measured speedup claim", "raw-hidden control is measured on the same bounded capture; no broad architecture or quality ranking"],
+    "final_hidden_and_history_controls": {
+      "columns": ["hidden_kind", "history_batch", "filtered_overlap_mean", "greedy_agreement_fraction", "full_kl_p_q_mean", "full_kl_q_p_mean"],
+      "rows": [
+        ["post-norm", 1, 0.7158919253936669, 0.75, 0.657820727815498, 0.6992953157553095],
+        ["post-norm", 512, 0.715890986527905, 0.75, 0.6578405266173932, 0.6992608205776468],
+        ["raw", 512, 0.6935570781246377, 0.703125, 0.8046956298232285, 0.8722604066264558]
+      ]
+    }
+  },
+  "verification": {
+    "cli_regression": {"command": "cargo test -p qwen-cli", "status": "passed", "metal_api_validation": true},
+    "columns": ["run", "passed", "failed", "ignored"],
+    "rows": [
+      ["half-expert-primitives-v5", 8, 0, 0],
+      ["glm-packet-policy-final", 7, 0, 0],
+      ["glm-native-dispatch-final", 22, 0, 0],
+      ["q8-fewrow-final", 1, 0, 0],
+      ["glm-capture-regression-final", 1, 0, 0],
+      ["flash-hc-final", 3, 0, 0],
+      ["flash-routing-quality", 1, 0, 0],
+      ["glm-dflash-regression-final", 1, 0, 0],
+      ["nextn-capture", 1, 0, 0]
+    ]
+  },
+  "run_manifests": {
+    "columns": ["run", "binary_sha256", "base_commit_not_clean_tree_identity", "returncode"],
+    "rows": [
+      ["glm-baseline", "ec67fa8ae4e309268df512923b401cb57a9636b9eba87854c6d1f7a472e880d5", "faa6b70fef57d2d00ee27c4b9485e74e09e7d80d", 0],
+      ["flash-baseline", "3d9b5823642dfae62d0fb510024e956074e441646337db6d7008eeb7be88c55e", "faa6b70fef57d2d00ee27c4b9485e74e09e7d80d", 0],
+      ["glm-q8_fewrow", "2ed70885ae1cb84f55c7347ba1894c4b433709372cee7a4398b61cd7639fda7f", null, 0],
+      ["glm-narrow_projections", "1e364f62746c5eb8d569096b1e3ae712afcc8ff651d8dc2bd9a853bd315683da", null, 0],
+      ["glm-combined", "1e364f62746c5eb8d569096b1e3ae712afcc8ff651d8dc2bd9a853bd315683da", null, 0],
+      ["glm-native_experts_router", "1e364f62746c5eb8d569096b1e3ae712afcc8ff651d8dc2bd9a853bd315683da", null, 0],
+      ["glm-native_experts_router_q8", "2ed70885ae1cb84f55c7347ba1894c4b433709372cee7a4398b61cd7639fda7f", null, 0],
+      ["glm-half_experts_router", "4c88201d59dcae14b7c9312fb2e2ef97d2393977051a810e52e83862dc630a4e", null, 0],
+      ["glm-half_experts_router_q8", "4c88201d59dcae14b7c9312fb2e2ef97d2393977051a810e52e83862dc630a4e", null, 0],
+      ["flash-inject_rows", "2ed70885ae1cb84f55c7347ba1894c4b433709372cee7a4398b61cd7639fda7f", null, 0],
+      ["flash-mix_fewrow", "2ed70885ae1cb84f55c7347ba1894c4b433709372cee7a4398b61cd7639fda7f", null, 0],
+      ["flash-mix_fewrow_inject_rows", "2ed70885ae1cb84f55c7347ba1894c4b433709372cee7a4398b61cd7639fda7f", null, 0],
+      ["glm-final-baseline", "8e54c1aa1f614e512a5c63bb940daf13eb06dd1393eca8889f2dac57447e6325", "2e1bfb7eeee543af0947bfe22c292c7128cfcd18", 0],
+      ["glm-final-production", "8e54c1aa1f614e512a5c63bb940daf13eb06dd1393eca8889f2dac57447e6325", "2e1bfb7eeee543af0947bfe22c292c7128cfcd18", 0]
+    ]
+  },
+  "source_note": "Baseline manifests record probe-only worktree changes; later runs include candidate worktree changes. No clean production-source or binary identity is inferred where a manifest is absent. Raw logs remain private.",
+  "source_artifacts": {
+    "columns": ["artifact", "sha256"],
+    "rows": [
+      ["flash-audit2-baseline.log", "7614880f572e5f16d5820862cfa2e754446373a6efb5de5bc0a92a4c897a1221"],
+      ["flash-audit2-mix_fewrow_inject_rows.log", "7dbcccda34e4d52a0430124572d2287d956000b2db0bd5ce2c4b156ce86c4777"],
+      ["flash-baseline.json", "08f0c42854c6645faf4f304275b59aa22b264f246bada2c377f922067aeb1478"],
+      ["flash-baseline.log", "89ce89176ab04632fab6f664df32ac5c8593f3326a77a0f6049688cb1c5835d3"],
+      ["flash-hc-final.log", "7d47ce9de1956184804bb7fa9db6b8b0aeb6f2ea0d20964a4c21527a3efba74a"],
+      ["flash-inject_rows.json", "78d6e254581ba0e97a43ce4463be4879806d74e209c2a01d97dc65963808f9b0"],
+      ["flash-inject_rows.log", "b4b51e1edc02b8c5531e77b8ed99eb32b74b3486ea60dff22f395b94d97a5e73"],
+      ["flash-localize-hc.log", "3d01f0b6ba3ddd86c2aff3679fcf3f42d07e3d20025f3c52de6d74efae6ce73d"],
+      ["flash-mix_fewrow.json", "392bdc183c4af5a0bc117dc04c7b8fade51c1b4c85ca32d0466866eeaeaab327"],
+      ["flash-mix_fewrow.log", "c743b45cc19288ce1e381520ff8670fb7147a6b91b5e92418f6d3470bdcf7321"],
+      ["flash-mix_fewrow_inject_rows.json", "f67ac867e3faa88b6a2340e8bbae235298c9d4301864cc4d92eff8dc2a7b6793"],
+      ["flash-mix_fewrow_inject_rows.log", "358d4f9f2f029be4552e6780bd28f70dfa95007fec0eb8f3f4c6dbffff184708"],
+      ["flash-routing-quality.log", "806f17c075c37a3fbb4db72382abd97b67cf7ebcf4c4bd8059e4eaaf022883ee"],
+      ["glm-baseline.json", "85d2a5e7c42afa237df6bf5dac770e6298f6c53d3fa8b85ed3d015404f185aa9"],
+      ["glm-baseline.log", "b42342f157ea3bd97fd8f592e3a682777c974e8ac0d32248d6c998b94afc36d9"],
+      ["glm-capture-regression-final.log", "67443d3a56d3c4a3f89e23d3c26dafd0a7f5329fc766d51c9352dc6cec5747d0"],
+      ["glm-combined.json", "6c46d0ded1cff31b81373db3ea885e77e427cb46530ff5d881f97298b27b0708"],
+      ["glm-combined.log", "124e96c8d47f32d8a2d65530c3a7c75c0d95caced565dda6ceec84a7a4a6ef2e"],
+      ["glm-half_experts_router.json", "fdb664ec16726c75c84d8941082b1629bbe37ef7f4d46914df4738024d5aa0ec"],
+      ["glm-half_experts_router.log", "1d69c96983d143041bc0f36690f4a864729725e9d2b8387e362bfc01b57fe8a1"],
+      ["glm-half_experts_router_q8.json", "34791c64c166a932523d3cccc659ff641c7827a195679c88671bf71e8a82492f"],
+      ["glm-half_experts_router_q8.log", "16dd3f0395382dc31daf5cf570c131ce8ef272881272ad5d9466ee521a6058b5"],
+      ["glm-narrow_projections.json", "3ff71f59f39d403ff35417cbb222c20f1f9f257dd8de0d0a1614714d933b8577"],
+      ["glm-narrow_projections.log", "53371f7d3fdec2b7601c80ae89c629d5941f8568bc81f5f0f7d4580961c218a1"],
+      ["glm-native-dispatch-final.log", "79e52f4fe8b62815d6a49b1f64c85d1dc64b0039c31742ee3ccff937f30d5ad0"],
+      ["glm-native_experts_router.json", "ceb81075ef3e9e58bb94cb22cc7fd48695ff5c230ef96a6895a3869dea609a00"],
+      ["glm-native_experts_router.log", "6f6ab1202fa707ab355c73a79cf28c2ff8d97f8236d9770ad94d67b752e3dbdd"],
+      ["glm-native_experts_router_q8.json", "a4506c5957876418616dada5ea9d92a7b7ac87000357ec5f6fc01edafea2e72c"],
+      ["glm-native_experts_router_q8.log", "e4b0615b4acbdfa99519e4463297cce901eb1e04e0699f4d2eb72f571279e06a"],
+      ["glm-packet-policy-final.log", "d1086dbc54dbdbbdb9e231f66dbdd573b4557ce18595813e5e883c97a5b26956"],
+      ["glm-production.log", "7188416dd25a4cb33c7fe351b26a7acec6f44770d6624daa7bb931b1f4e4edac"],
+      ["glm-q8_fewrow.json", "d8cd92eaef5bd603b6596f9c1e58d983dca36e5bbb7cb474a8cf8f6e9c1f46d7"],
+      ["glm-q8_fewrow.log", "1d7eff24b626e197ab5cdfa0362e0d36237eddf5776f599f04a23bbbfc414c50"],
+      ["half-expert-primitives-v5.log", "860885c63f27200d3e5abcb9da2f48187b073bc7992176095245c33eb4ee8c6d"],
+      ["input.json", "72d1806e7bfa9b179b7fb875b8dae99581b06207cba94d3a7c5584733fb95f1b"],
+      ["nextn-history-witness.json", "dc08207370dbea50f18b838c0c8f2cb35be832955f82dac606bcb6b1cbb9b1ad"],
+      ["nextn-post-512-analysis.json", "24e4703794b196127e190f78e019bf6c2fc11a68b4b35b12c32679de32b259ec"],
+      ["q8-fewrow-final.log", "9168cb339402732a57c1714002bd4ce94a1dfae155534927af86dd0a5f49ec49"],
+      ["glm-dflash-regression-final.log", "35cd767ffb709bc891e865f95c541c27d7200f112ee18a6d6652e0059f735d1a"],
+      ["glm-final-baseline.json", "f36f50e17db6b8ac75d4cb7d3dd63a8f22543f843e04acb214d1402055157afa"],
+      ["glm-final-baseline.log", "e22aa188f4423563c51bdb6a6da9505789c8d8550cb7a85670c0b7e7b609aca3"],
+      ["glm-final-production.json", "45acbc0c02fd14bf878f228af44f5d7cc716a556ca91149ce2ea187379d53e17"],
+      ["glm-final-production.log", "7493f2d2b343fce0f1642219f9d8373a794c7ad540073bfd12e0d66382534dc8"],
+      ["nextn-capture.log", "c96c393ee9a1dd47fe7a2984f0a52ce81d825c0e5d5abdfa82eb55106585cfb4"],
+      ["nextn-post-1-analysis.json", "255a30789f6e5ad51fc9e284548a3fd052cf478762d4d80117d2dda7fde4c6c4"],
+      ["nextn-raw-512-analysis.json", "e18f4801125985ef990555ffe5339642981fd8fe5d1fa1947fe61e7e54941abc"]
+    ]
+  },
+  "final_same_binary_depth2179": {
+    "binary_sha256": "8e54c1aa1f614e512a5c63bb940daf13eb06dd1393eca8889f2dac57447e6325",
+    "manifest_base_commit": "2e1bfb7eeee543af0947bfe22c292c7128cfcd18",
+    "manifest_working_tree": true,
+    "production_commit": "ce075a09",
+    "half_primitive_commit": "27c4a5ad",
+    "q8_preflight_commit": "2e1bfb7e",
+    "order": "baseline process then production process; per-process arm order balanced, cross-process order not ABBA",
+    "wall_ms_samples": {
+      "columns": ["run", "depth", "width", "serial", "packed_last", "verify_all", "verify_features"],
+      "rows": [
+        ["glm-final-baseline", 2179, 1, [38.173125, 38.3155], [83.560541, 83.114833], [84.152917, 83.772792], [84.794833, 84.068666]],
+        ["glm-final-baseline", 2179, 2, [76.312417, 76.1535], [143.888, 144.33575], [144.975459, 145.633], [145.034042, 145.381792]],
+        ["glm-final-baseline", 2179, 4, [152.494, 153.09225], [208.548334, 209.439042], [211.410958, 213.576958], [212.13775, 212.609584]],
+        ["glm-final-baseline", 2179, 8, [310.592541, 315.203791], [261.046375, 264.131125], [270.438125, 267.872209], [268.176, 271.471375]],
+        ["glm-final-production", 2179, 1, [39.045666, 39.946292], [45.813333, 46.147584], [45.971541, 46.168375], [46.100417, 46.293334]],
+        ["glm-final-production", 2179, 2, [81.102542, 86.61975], [75.931334, 81.124042], [79.255542, 81.201791], [80.708958, 81.128875]],
+        ["glm-final-production", 2179, 4, [181.474583, 178.640083], [139.934042, 140.357791], [143.7275, 143.739958], [145.192333, 144.242667]],
+        ["glm-final-production", 2179, 8, [348.185792, 409.753083], [188.282583, 199.242709], [200.580792, 208.2175], [204.732958, 206.827208]]
+      ]
+    },
+    "serial_drift_percent": {
+      "columns": ["width", "later_production_vs_baseline"],
+      "rows": [
+        [1, 3.2728173633661095],
+        [2, 10.006416712792277],
+        [4, 17.84387092023938],
+        [8, 21.115902449872472]
+      ]
+    },
+    "production_verify2_saving_vs_same_run_serial_percent": 4.331540496715835,
+    "earlier_production_verify2_saving_vs_same_run_serial_percent": 9.280910021145072,
+    "interpretation": "Production verify cost decreases at every width versus same-binary baseline, but later serial controls drift +3..21%; report trend and observed range, not a fixed 2.05x speedup. Two-row target cost remains the gate with only about 4..9% margin versus same-run serial-N across earlier/final runs."
+  },
+  "final_verification_detail": {
+    "glm_capture": "same-width 1/2/8 GPU witness passed",
+    "glm_dflash": "greedy/sampled seeded native DFlash and counters passed; not speedup evidence",
+    "native_nextn_capture": "128-row GPU witness passed",
+    "additional_reported_checks": {
+      "flash_cpu_passed": 5,
+      "nextn_cpu_passed": 2,
+      "q8_cpu_passed": 2,
+      "q8_tiling_passed": true,
+      "provenance": "final validation report; separate raw CPU/tiling logs not part of this packet"
+    }
+  }
+}

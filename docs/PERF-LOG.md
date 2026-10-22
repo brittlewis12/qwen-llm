@@ -6,6 +6,35 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the current state and evidence index.
 
+## 2026-10-22 - GLM Short Packets Improve, But Native NextN Still Needs Cheaper Verification
+
+- M4 Max, API validation enabled: `ce075a09` replaces underfilled grouped
+  expert tiles with bounded half-operand rows and F32 row routers for Fast/Half
+  spans of 1-8 rows; Q8 fewrow projections apply only at 2-4. Scalar execution,
+  larger spans and other precision modes retain their paths; small prefill tails
+  intentionally share the new policy.
+- At depth 2179, two-row verification measures 71-80 ms versus 145-146 ms
+  legacy and 78-84 ms for two serial steps. The final same-binary comparison
+  has serial-reference drift, so this is not a fixed speedup estimate. Across
+  three depths, worst old/new full-softmax KL is 3.07e-7 with no top-token flips.
+  Primitive, dispatch, capture/continuation and seeded native packet tests pass.
+- Flash's test-only HC candidate cuts two-row verification from about 214 to
+  122 ms, still above 79 ms serial. A/B/A and snapshots are repeatable; measured
+  router cutoff crossings explain amplification. The candidate is closer to
+  scalar logits on the bounded fixture, but held-token NLL is mixed. No default
+  HC change or gameplay-quality claim.
+- GLM native NextN: 128 fresh target-on-policy rows after 11,105 native prompt
+  tokens give 71.59% filtered one-step overlap and 75% greedy agreement. The
+  head-only reference costs 2.36 ms warmed median and 1.88 s history initialization.
+  Scalar and 512-row history agree on all top tokens, not all bits. Raw hidden
+  conditioning drops overlap to 69.36%; post-output-norm remains the contract.
+- Even a free head cannot offset the measured two-row target cost at this
+  overlap; checkpoint/rejection replay makes the budget tighter. Keep NextN
+  integration deferred. Prioritize packet weight/dispatch amortization and
+  retained-prefix recovery, not more drafter plumbing. These are conditional
+  overlap and component costs, not recursive acceptance or end-to-end speedup.
+- [Protocol, measurements, numerical witnesses and reproduction](bench/2026-10-22-native-short-packets/README.md).
+
 ## 2026-10-22 - Native Flash-Next And GLM-Flash DFlash2 Slow Down Sampled Gameplay
 
 - Clean `7048f181`, M4 Max, API validation enabled: native-rendered first 14

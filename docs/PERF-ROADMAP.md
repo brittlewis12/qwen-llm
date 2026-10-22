@@ -102,7 +102,13 @@ prefill and the tiles about a fifth; re-sample before claiming.
   21.4%; native verification/replay dominate, not drafter compute. Keep opt-in.
   Packet: `bench/2026-10-20-dflash-native-targets/README.md`.
 - Native MTP heads (Unsloth): acceptance probe is the gate before building;
-  open.
+  open, behind short-packet target economics.
+- Native short-packet verification: measured (2026-10-22). Test-only HC changes
+  cut two-row cost from 214 to 122 ms, still above 79 ms serial. Router cutoff
+  crossings explain stable numerical amplification; scalar KL improves on the
+  bounded fixture but held-token NLL is mixed. HC stays experimental. Further
+  packet weight/dispatch amortization is open, ahead of drafter integration.
+  Packet: `bench/2026-10-22-native-short-packets/README.md`.
 - GSQ-RCO IQ3_S artifact: M5 quality option, -7 to -11% decode on M4; not an
   M4 default (packet 2026-10-20).
 
@@ -115,6 +121,20 @@ prefill and the tiles about a fifth; re-sample before claiming.
 - Near the M4 bandwidth wall; the M5 expert tensor-ops tier is the V4.1
   tensor tile bet above (the generic grouped tile serves GLM's grouped
   layers too).
+- Fast/Half short packets: landed (`ce075a09`, 2026-10-22). Half-operand native
+  experts/F32 routers at 1-8 rows and Q8 fewrow at 2-4 cut two-row verification
+  from 145-146 to 71-80 ms, versus 78-84 ms serial. Worst measured KL 3.07e-7,
+  no top-token flips. Other precision modes and spans above eight stay unchanged.
+- Native NextN block 45: measured, integration deferred. Native on-policy
+  one-step overlap 71.59%, greedy agreement 75% (128 rows); reference head
+  2.36 ms warmed, not a native cost. Even free drafting loses at current two-row
+  verification cost before rejection replay. Post-output-norm conditioning and
+  full head history are verified; raw conditioning is not equivalent.
+  Packet: `bench/2026-10-22-native-short-packets/README.md`.
+- Two-row weight/dispatch amortization and retaining the accepted prefix without
+  full recurrent replay: open, highest speculation leverage. At observed overlap,
+  verification needs to fall below roughly 65 ms even before checkpoint/replay
+  overhead with the reference head cost; do not build a native head executor first.
 
 ## Closed questions
 

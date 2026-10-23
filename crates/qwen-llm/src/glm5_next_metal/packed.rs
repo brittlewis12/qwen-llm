@@ -612,15 +612,18 @@ pub enum PackedLineage {
     Exact,
 }
 
-fn grouped_down_policy(
-    lineage: PackedLineage,
+pub(super) fn grouped_down_policy(
+    arith: Arith,
+    mode: StageMode,
     dtype: GgmlType,
     ffn: usize,
     hidden: usize,
     experts: usize,
     rows: usize,
 ) -> GroupedDownPolicy {
-    if lineage == PackedLineage::Fast
+    if super::tensor_down::selected(arith, mode, dtype, rows) {
+        GroupedDownPolicy::Iq3STensor
+    } else if arith.lineage == PackedLineage::Fast
         && dtype == GgmlType::IQ3_S
         && (ffn, hidden, experts) == (2048, 4096, 288)
         && (32..=512).contains(&rows)
@@ -1180,7 +1183,7 @@ fn encode_experts(
             k,
             rows,
             clamp,
-            grouped_down_policy(arith.lineage, b.down_bank.dtype, f, h, e, rows),
+            grouped_down_policy(arith, mode, b.down_bank.dtype, f, h, e, rows),
         )?,
     }
     Ok(mode)
@@ -2655,6 +2658,13 @@ impl Glm5NextSession<'_> {
 mod down_policy_tests {
     use super::*;
 
+    fn half(lineage: PackedLineage) -> Arith {
+        Arith {
+            lineage,
+            precision: FastPrecision::Half,
+        }
+    }
+
     #[test]
     fn iq3_s_down_policy_uses_actual_command_width_and_fast_lineage() {
         for rows in 0..=1024 {
@@ -2664,19 +2674,43 @@ mod down_policy_tests {
                 GroupedDownPolicy::Incumbent
             };
             assert_eq!(
-                grouped_down_policy(PackedLineage::Fast, GgmlType::IQ3_S, 2048, 4096, 288, rows),
+                grouped_down_policy(
+                    half(PackedLineage::Fast),
+                    StageMode::Fast,
+                    GgmlType::IQ3_S,
+                    2048,
+                    4096,
+                    288,
+                    rows
+                ),
                 expected,
                 "rows={rows}"
             );
             assert_eq!(
-                grouped_down_policy(PackedLineage::Exact, GgmlType::IQ3_S, 2048, 4096, 288, rows),
+                grouped_down_policy(
+                    half(PackedLineage::Exact),
+                    StageMode::Exact,
+                    GgmlType::IQ3_S,
+                    2048,
+                    4096,
+                    288,
+                    rows
+                ),
                 GroupedDownPolicy::Incumbent,
                 "Exact rows={rows}"
             );
         }
         for rows in [4096, usize::MAX] {
             assert_eq!(
-                grouped_down_policy(PackedLineage::Fast, GgmlType::IQ3_S, 2048, 4096, 288, rows),
+                grouped_down_policy(
+                    half(PackedLineage::Fast),
+                    StageMode::Fast,
+                    GgmlType::IQ3_S,
+                    2048,
+                    4096,
+                    288,
+                    rows
+                ),
                 GroupedDownPolicy::Incumbent
             );
         }
@@ -2695,7 +2729,8 @@ mod down_policy_tests {
             ] {
                 assert_eq!(
                     grouped_down_policy(
-                        PackedLineage::Fast,
+                        half(PackedLineage::Fast),
+                        StageMode::Fast,
                         GgmlType::IQ3_S,
                         ffn,
                         hidden,
@@ -2716,7 +2751,15 @@ mod down_policy_tests {
                 GgmlType::Q8_0,
             ] {
                 assert_eq!(
-                    grouped_down_policy(PackedLineage::Fast, dtype, 2048, 4096, 288, rows),
+                    grouped_down_policy(
+                        half(PackedLineage::Fast),
+                        StageMode::Fast,
+                        dtype,
+                        2048,
+                        4096,
+                        288,
+                        rows
+                    ),
                     GroupedDownPolicy::Incumbent
                 );
             }

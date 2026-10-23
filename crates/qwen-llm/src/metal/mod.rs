@@ -296,6 +296,7 @@ mod elementwise;
 mod encoder;
 mod expert;
 mod expert_native;
+pub(crate) mod expert_tensor_down;
 mod gdn;
 mod indexer_pool;
 mod iq1;

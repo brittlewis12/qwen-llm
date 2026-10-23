@@ -586,6 +586,7 @@ fn check_grouped_routed_experts(
 pub(crate) enum GroupedDownPolicy {
     Incumbent,
     Iq3SSmallCounts,
+    Iq3STensor,
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -602,6 +603,11 @@ pub(crate) fn encode_grouped_routed_experts_with_down_policy(
     down_policy: GroupedDownPolicy,
 ) -> Result<(), MetalError> {
     const K: &str = "grouped_routed_experts";
+    if down_policy == GroupedDownPolicy::Iq3STensor {
+        super::expert_tensor_down::preflight_grouped(
+            ctx, enc, b, hidden, ffn, experts, top_k, rows, clamp,
+        )?;
+    }
     check_grouped_routed_experts(K, enc, b, hidden, ffn, experts, top_k, rows)?;
     if !grouped_clamped_gate_up_supported(b.gate_bank.dtype, b.up_bank.dtype)
         || !grouped_expert_down_supported(b.down_bank.dtype)
@@ -620,8 +626,26 @@ pub(crate) fn encode_grouped_routed_experts_with_down_policy(
     };
     let down_inner = flat(b.inner);
     let down_out = flat(b.slot_out);
+    let tensor_down = if down_policy == GroupedDownPolicy::Iq3STensor {
+        super::expert_tensor_down::prepare(
+            ctx,
+            enc,
+            b.down_bank,
+            &down_inner,
+            b.counts,
+            b.slots,
+            &down_out,
+            ffn,
+            hidden,
+            experts,
+            top_k,
+            rows,
+        )?
+    } else {
+        None
+    };
     let prepared_down = match down_policy {
-        GroupedDownPolicy::Incumbent => None,
+        GroupedDownPolicy::Incumbent | GroupedDownPolicy::Iq3STensor => None,
         GroupedDownPolicy::Iq3SSmallCounts => super::iq3_s_down_retile::prepare_small_counts(
             ctx,
             enc,
@@ -683,7 +707,9 @@ pub(crate) fn encode_grouped_routed_experts_with_down_policy(
             clamp,
         )?,
     }
-    if let Some(down) = prepared_down {
+    if let Some(down) = tensor_down {
+        down.encode()?;
+    } else if let Some(down) = prepared_down {
         down.encode()?;
     } else if b.down_bank.dtype == GgmlType::IQ4_XS {
         encode_moe_down_iq4_xs_f32_grouped_slots(

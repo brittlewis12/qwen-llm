@@ -230,3 +230,157 @@ fn current_half_2048_cost() {
         json!({"event":"complete","execution_complete":true,"performance_verdict":null}),
     );
 }
+
+#[test]
+#[ignore = "release validated stock R2048 profile; GLM53_GGUF, new GLM53_TENSOR_DOWN_PROFILE_REPORT, MTL_DEBUG_LAYER=1, QWEN_METAL_LEASE_WAIT=1"]
+fn tensor_down_stock_dense_baseline_cost() {
+    use std::os::unix::fs::OpenOptionsExt;
+
+    assert!(!cfg!(debug_assertions));
+    assert_eq!(std::env::var("QWEN_METAL_LEASE_WAIT").as_deref(), Ok("1"));
+    assert_eq!(
+        std::env::var("QWEN_MATMAT_Q6_K_N64_MIN_N").as_deref(),
+        Ok("1024")
+    );
+    let _lease = production_lease();
+    let _dense = super::super::tensor_prefill::Scope::new(true);
+    let _down = super::super::tensor_down::Scope::new(false);
+    const ROWS: usize = 2048;
+    let fixture_bytes = include_bytes!("../../../../../scripts/reference/glm53/quality-v1.json");
+    let fixture: Value = serde_json::from_slice(fixture_bytes).unwrap();
+    let document = fixture["documents"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|d| d["stratum"] == "long")
+        .unwrap();
+    let tokens = super::natural::parse_ids(&document["tokens"]);
+    let tokens = &tokens[..ROWS];
+    let gguf = GgufFile::open(std::env::var_os("GLM53_GGUF").unwrap()).unwrap();
+    assert_eq!(
+        super::natural::artifact_layout(&gguf),
+        fixture["artifact_layout"]
+    );
+    let stamps = gguf.revalidate_retained_shard_stamps().unwrap();
+    let ctx = MetalContext::new().unwrap();
+    assert!(crate::metal::moe_grouped_tensor_selected(&ctx));
+    assert_eq!(crate::metal::mat_mat_q6_k_n64_min_query(), 1024);
+    let artifact = crate::glm5_next::admission::Glm5NextArtifactLayout::inspect(&gguf).unwrap();
+    let cpu = (128 << 20) + 2 * u64::from(artifact.config().vocab_size) * 4;
+    let weights = {
+        let _allocation = ctx.begin_allocation_transaction();
+        let preflight = preflight_session(&ctx, &gguf, artifact.model(), ROWS, ROWS).unwrap();
+        let admission = crate::metal::evaluate_metal_memory_admission(
+            preflight.ledger.peak_bytes().checked_add(cpu).unwrap(),
+            0,
+            ctx.memory_signals(),
+            true,
+        );
+        assert!(admission.is_admitted(), "{admission:?}");
+        Glm5NextWeights::load(&ctx, &gguf).unwrap()
+    };
+    assert!(tokens.iter().all(|&t| t < weights.config.vocab_size));
+    let mut out = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(std::env::var_os("GLM53_TENSOR_DOWN_PROFILE_REPORT").unwrap())
+        .unwrap();
+    emit(
+        &mut out,
+        json!({"event":"header", "schema":"glm53.tensor_down_stock_profile.v1",
+        "fixture_sha256":sha(fixture_bytes), "document":document["path"],
+        "tokens_sha256":sha(bytemuck::cast_slice(tokens)), "artifact_layout":fixture["artifact_layout"],
+        "rows":ROWS, "capacity":ROWS, "lineage":"Fast", "precision":"Half",
+        "dense_tensor":true, "down_tensor":false, "cpu_reserve_bytes":cpu,
+        "candidate_sha256":sha(include_bytes!("../tensor_down.rs")),
+        "dense_source_sha256":sha(include_bytes!("../tensor_prefill.rs")),
+        "packed_source_sha256":sha(include_bytes!("../packed.rs")),
+        "mtl_debug_layer":"1", "timing":"diagnostic: warm census, two plain calls, one stage-profiled call; allocation/readback comparison/JSON excluded; plain includes GPU wait and logits readback; profile shares are not ordinary absolute time"}),
+    );
+    let mut reference: Option<Vec<f32>> = None;
+    let mut plain = Vec::new();
+    for label in ["warm", "plain1", "plain2", "profiled"] {
+        let mut s =
+            Glm5NextSession::with_prefill_rows_and_cpu_reserve(&ctx, &weights, ROWS, ROWS, cpu)
+                .unwrap();
+        assert_eq!(s.packed_lineage(), Some(PackedLineage::Fast));
+        assert_eq!(s.fast_precision(), Some(FastPrecision::Half));
+        assert_eq!(s.ledger().prefill_rows(), ROWS as u64);
+        assert!(!crate::metal::dispatch_census_is_active());
+        if label == "warm" {
+            dispatch_census_begin();
+        }
+        let started = Instant::now();
+        let (logits, report) = if label == "profiled" {
+            let (logits, report) = s.prefill_chunk_stage_profiled(&ctx, tokens).unwrap();
+            (logits, Some(report))
+        } else {
+            (s.prefill_packed(&ctx, tokens).unwrap(), None)
+        };
+        let wall_ms = started.elapsed().as_secs_f64() * 1e3;
+        let census = if label == "warm" {
+            dispatch_census_take()
+        } else {
+            Vec::new()
+        };
+        assert!(!crate::metal::dispatch_census_is_active());
+        assert_eq!(s.position(), ROWS);
+        assert!(!s.is_poisoned());
+        assert_eq!(logits.len(), weights.config.vocab_size as usize);
+        assert!(logits.iter().all(|v| v.is_finite()));
+        let equal = reference.as_ref().is_none_or(|a| {
+            a.iter()
+                .zip(&logits)
+                .all(|(a, b)| a.to_bits() == b.to_bits())
+        });
+        assert!(equal, "profiling or fresh-session execution changed logits");
+        emit(
+            &mut out,
+            json!({"event":"run", "label":label, "wall_ms":wall_ms,
+            "position":s.position(), "actual_prefill_rows":s.ledger().prefill_rows(),
+            "logits_finite":true, "bits_equal_warm":equal,
+            "plain_timing":label.starts_with("plain"), "logits_sha256":sha(bytemuck::cast_slice(&logits))}),
+        );
+        if label == "warm" {
+            let mut kernels = BTreeMap::<&str, usize>::new();
+            for row in &census {
+                *kernels.entry(&row.kernel).or_default() += 1;
+            }
+            assert_eq!(
+                kernels.get("kernel_moe_down_iq3_s_f32_grouped_slots_generic"),
+                Some(&39)
+            );
+            assert!(!kernels.contains_key("kernel_moe_down_iq3_s_f32_grouped_slots_tensor"));
+            assert_eq!(kernels.get("kernel_mat_mat_q6_K_f32_tensor"), Some(&288));
+            assert_eq!(kernels.get("kernel_mat_mat_q8_0_f32_tensor"), Some(&219));
+            emit(
+                &mut out,
+                json!({"event":"warm_census", "kernel_counts":kernels, "dispatches":census.len(), "timed":false}),
+            );
+            reference = Some(logits);
+        }
+        if label.starts_with("plain") {
+            plain.push(wall_ms);
+        }
+        if let Some(report) = report {
+            let mut stages = BTreeMap::<&str, f64>::new();
+            for span in &report.spans {
+                *stages.entry(span.stage.as_str()).or_default() += span.gpu_ms;
+            }
+            let total = stages.values().sum::<f64>();
+            assert!(total.is_finite() && total > 0.0);
+            emit(
+                &mut out,
+                json!({"event":"profile", "plain_wall_ms":plain,
+                "profiled_wall_ms":wall_ms, "profiled_over_plain_mean":wall_ms/((plain[0]+plain[1])*0.5),
+                "command_gpu_ms":report.command_gpu_ms, "scaled_span_sum_ms":report.span_sum_ms,
+                "stages_ms":stages, "stage_shares":stages.iter().map(|(k,v)|(*k,v/total)).collect::<BTreeMap<_,_>>(),
+                "warning":"encoder splitting and sample resolution perturb execution; shares diagnose this artifact/baseline, not independent leaf costs or ordinary absolute time"}),
+            );
+        }
+    }
+    assert_eq!(gguf.revalidate_retained_shard_stamps().unwrap(), stamps);
+    emit(&mut out, json!({"event":"complete"}));
+    out.sync_all().unwrap();
+}

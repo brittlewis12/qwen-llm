@@ -1,5 +1,5 @@
 //! Same-binary Fast/Half2048 screen; all wall times are diagnostic with validation on.
-use super::super::super::tensor_prefill::Scope;
+use super::super::super::{tensor_down, tensor_prefill};
 use super::*;
 use crate::glm5_next::admission::Glm5NextArtifactLayout;
 use crate::metal::{
@@ -20,14 +20,65 @@ const ROWS: usize = 2048;
 const CENSUS_BYTES: u64 = 128 << 20;
 const REPORT_BYTES: u64 = 8 << 20;
 const TOKENIZER_BYTES: u64 = 128 << 20;
-const ARMS: [(&str, bool); 2] = [("old", false), ("tensor", true)];
+
+#[derive(Clone, Copy)]
+struct Arm {
+    label: &'static str,
+    dense: bool,
+    down: bool,
+}
+
+const ORIGINAL: Arm = Arm {
+    label: "original",
+    dense: false,
+    down: false,
+};
+const DENSE_ONLY: Arm = Arm {
+    label: "dense_only",
+    dense: true,
+    down: false,
+};
+const DENSE_AND_DOWN: Arm = Arm {
+    label: "dense_and_down",
+    dense: true,
+    down: true,
+};
+const ARMS: [Arm; 2] = [
+    Arm {
+        label: "old",
+        ..ORIGINAL
+    },
+    Arm {
+        label: "tensor",
+        ..DENSE_ONLY
+    },
+];
+const DOWN_ARMS: [Arm; 3] = [ORIGINAL, DENSE_ONLY, DENSE_AND_DOWN];
+const DOWN_PLAIN_ARMS: [Arm; 2] = [DENSE_ONLY, DENSE_AND_DOWN];
 const LONG_TASKS: [&str; 4] = ["T09", "T10", "T11", "T12"];
+
+struct ArmScope {
+    _dense: tensor_prefill::Scope,
+    _down: tensor_down::Scope,
+}
+
+impl ArmScope {
+    fn new(arm: Arm) -> Self {
+        Self {
+            _dense: tensor_prefill::Scope::new(arm.dense),
+            _down: tensor_down::Scope::new(arm.down),
+        }
+    }
+}
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Packet {
     Quality,
     Plain,
     Extended,
+    DownQuality,
+    DownPlain,
+    DownExtended,
 }
 
 impl Packet {
@@ -36,6 +87,9 @@ impl Packet {
             Self::Quality => "GLM53_TENSOR_QUALITY_REPORT",
             Self::Plain => "GLM53_TENSOR_TIMING_REPORT",
             Self::Extended => "GLM53_TENSOR_EXTENDED_REPORT",
+            Self::DownQuality => "GLM53_TENSOR_DOWN_QUALITY_REPORT",
+            Self::DownPlain => "GLM53_TENSOR_DOWN_TIMING_REPORT",
+            Self::DownExtended => "GLM53_TENSOR_DOWN_EXTENDED_REPORT",
         }
     }
 
@@ -44,7 +98,37 @@ impl Packet {
             Self::Quality => "glm53.tensor_quality.v1",
             Self::Plain => "glm53.tensor_plain_abba.v1",
             Self::Extended => "glm53.tensor_extended_quality.v1",
+            Self::DownQuality => "glm53.tensor_down_quality.v1",
+            Self::DownPlain => "glm53.tensor_down_plain_abba.v1",
+            Self::DownExtended => "glm53.tensor_down_extended_quality.v1",
         }
+    }
+
+    fn down(self) -> bool {
+        matches!(
+            self,
+            Self::DownQuality | Self::DownPlain | Self::DownExtended
+        )
+    }
+
+    fn quality(self) -> bool {
+        !matches!(self, Self::Plain | Self::DownPlain)
+    }
+
+    fn extended(self) -> bool {
+        matches!(self, Self::Extended | Self::DownExtended)
+    }
+
+    fn tools(self) -> bool {
+        self.extended() || (self.down() && self.quality())
+    }
+
+    fn arms(self) -> &'static [Arm] {
+        if self.down() { &DOWN_ARMS } else { &ARMS }
+    }
+
+    fn plain_arms(self) -> &'static [Arm; 2] {
+        if self.down() { &DOWN_PLAIN_ARMS } else { &ARMS }
     }
 }
 
@@ -300,9 +384,9 @@ fn binary_hash() -> String {
     format!("{:x}", hash.finalize())
 }
 
-fn cpu_terms(vocab: u32) -> [(&'static str, u64); 6] {
+fn cpu_terms(vocab: u32, down: bool) -> Vec<(&'static str, u64)> {
     let v = u64::from(vocab);
-    [
+    let mut terms = vec![
         (
             "one_retained_64_row_baseline_f32",
             CONTINUATION as u64 * v * 4,
@@ -315,7 +399,20 @@ fn cpu_terms(vocab: u32) -> [(&'static str, u64); 6] {
         ),
         ("dispatch_census_rows_and_strings", CENSUS_BYTES),
         ("report_hashes_metrics_and_census_aggregation", REPORT_BYTES),
-    ]
+    ];
+    if down {
+        terms.extend([
+            (
+                "second_retained_64_row_dense_baseline_f32",
+                CONTINUATION as u64 * v * 4,
+            ),
+            (
+                "dense_baseline_row_headers",
+                CONTINUATION as u64 * size_of::<Vec<f32>>() as u64,
+            ),
+        ]);
+    }
+    terms
 }
 
 fn fresh<'w>(
@@ -364,17 +461,18 @@ fn observed_prefill(
     ctx: &MetalContext,
     s: &mut Glm5NextSession<'_>,
     tokens: &[u32],
-    enabled: bool,
+    arm: Arm,
 ) -> (Vec<f32>, Vec<usize>) {
     check_session(s, 0);
-    let _scope = Scope::new(enabled);
     let mut commits = Vec::with_capacity(tokens.len().div_ceil(ROWS));
-    let logits = s
-        .prefill_packed_with_observer(ctx, tokens, &mut || Ok(()), &mut |s, count| {
+    let logits = {
+        let _scope = ArmScope::new(arm);
+        s.prefill_packed_with_observer(ctx, tokens, &mut || Ok(()), &mut |s, count| {
             commits.push(count);
             check_session(s, commits.iter().sum());
         })
-        .unwrap();
+        .unwrap()
+    };
     assert_eq!(commits, chunks(tokens.len()));
     check_session(s, tokens.len());
     (logits, commits)
@@ -400,11 +498,24 @@ impl Drop for Census {
     }
 }
 
-fn warm(ctx: &MetalContext, weights: &Glm5NextWeights, tokens: &[u32], cpu: u64, out: &mut Report) {
-    for (arm, enabled) in ARMS {
-        let mut s = fresh(ctx, weights, tokens.len(), cpu, arm, "warm", out);
+fn warm(
+    ctx: &MetalContext,
+    weights: &Glm5NextWeights,
+    tokens: &[u32],
+    cpu: u64,
+    out: &mut Report,
+    kind: Packet,
+) {
+    let arms: &[Arm] = if kind.quality() {
+        kind.arms()
+    } else {
+        kind.plain_arms()
+    };
+    let mut dense_only_controls = None;
+    for &arm in arms {
+        let mut s = fresh(ctx, weights, tokens.len(), cpu, arm.label, "warm", out);
         let census = Census::begin();
-        let (logits, commits) = observed_prefill(ctx, &mut s, tokens, enabled);
+        let (logits, commits) = observed_prefill(ctx, &mut s, tokens, arm);
         let census = census.finish();
         assert_plain();
         check_logits(&logits, weights.config.vocab_size as usize);
@@ -430,7 +541,7 @@ fn warm(ctx: &MetalContext, weights: &Glm5NextWeights, tokens: &[u32], cpu: u64,
         let counts = [GgmlType::Q6_K, GgmlType::Q8_0].map(|dtype| {
             let name = crate::metal::mat_mat_tensor_pipeline_name(dtype).unwrap();
             let count = census.iter().filter(|r| r.kernel == name).count();
-            if enabled {
+            if arm.dense {
                 assert!(
                     count >= tokens.len().div_ceil(ROWS),
                     "missing dense {dtype:?} tensor dispatches"
@@ -448,7 +559,7 @@ fn warm(ctx: &MetalContext, weights: &Glm5NextWeights, tokens: &[u32], cpu: u64,
             }
             (name, count)
         });
-        if enabled {
+        if arm.dense {
             assert_eq!(dense_calls, counts.iter().map(|(_, n)| n).sum::<usize>());
         } else {
             assert_eq!(
@@ -470,12 +581,164 @@ fn warm(ctx: &MetalContext, weights: &Glm5NextWeights, tokens: &[u32], cpu: u64,
                 "old Q8_0 route missing"
             );
         }
-        out.emit(json!({"event":"warm_census", "arm":arm, "prompt_tokens":tokens.len(),
+        out.emit(json!({"event":"warm_census", "arm":arm.label, "prompt_tokens":tokens.len(),
             "prefill_chunks":commits, "dispatches":census.len(), "dense_tensor_calls":dense_calls,
             "dense_tensor_kernel_counts":counts, "kernel_counts":kernels, "census_heap_bytes":heap_bytes,
             "census_upper_including_vec_growth_bytes":census_upper_bytes,
             "census_reserve_bytes":CENSUS_BYTES, "timed":false,
             "scope":"kernel selection/geometry only; no routing-data equality claim"}));
+        if kind.down() {
+            let full_chunks = tokens.len() / ROWS;
+            assert_eq!(tokens.len() % ROWS, 0);
+            let count = |name: &str| kernels.get(name).copied().unwrap_or(0);
+            let iq3_generic = count("kernel_moe_down_iq3_s_f32_grouped_slots_generic");
+            let iq3_tensor = count("kernel_moe_down_iq3_s_f32_grouped_slots_tensor");
+            let iq4_incumbent = count("kernel_moe_down_iq4_xs_f32_grouped_slots");
+            assert_eq!(iq3_generic, if arm.down { 0 } else { 39 * full_chunks });
+            assert_eq!(iq3_tensor, if arm.down { 39 * full_chunks } else { 0 });
+            assert_eq!(iq4_incumbent, 3 * full_chunks);
+            assert_eq!(count("kernel_moe_down_iq4_xs_f32_grouped_slots_tensor"), 0);
+            let controls: BTreeMap<String, usize> = kernels
+                .iter()
+                .filter(|(name, _)| {
+                    (name.starts_with("kernel_mat_mat_") && name.ends_with("_f32_tensor"))
+                        || name.starts_with("kernel_moe_swiglu_")
+                })
+                .map(|(name, count)| ((*name).to_owned(), *count))
+                .collect();
+            let fused_calls: usize = controls
+                .iter()
+                .filter(|(name, _)| name.starts_with("kernel_moe_swiglu_"))
+                .map(|(_, count)| count)
+                .sum();
+            assert_eq!(fused_calls, 84 * full_chunks);
+            if arm.dense {
+                assert_eq!(
+                    dense_calls,
+                    match tokens.len() {
+                        2048 => 507,
+                        4096 => 1025,
+                        _ => panic!("unexpected warm width"),
+                    }
+                );
+                if arm.down {
+                    assert_eq!(
+                        dense_only_controls.as_ref(),
+                        Some(&controls),
+                        "dense and fused gate/up kernel counts must stay unchanged"
+                    );
+                } else {
+                    dense_only_controls = Some(controls.clone());
+                }
+            }
+            out.emit(json!({"event":"warm_down_attribution", "arm":arm.label,
+                "prompt_tokens":tokens.len(), "prefill_chunks":commits,
+                "down_eligible_chunks":commits.iter().filter(|&&n| matches!(n, 1024 | 2048)).count(),
+                "iq3_s_generic_calls":iq3_generic,"iq3_s_tensor_calls":iq3_tensor,
+                "iq4_xs_incumbent_calls":iq4_incumbent,"fused_gate_up_dispatches":fused_calls,
+                "unchanged_kernel_counts":controls,"dense_tensor_calls":dense_calls,
+                "expected_per_full_chunk":{"iq3_s_down":39,"iq4_xs_down":3,"fused_gate_up_dispatches":84},
+                "timed":false,"scope":"dispatch-count attribution only, not routed-data or numerical identity"}));
+        }
+    }
+}
+
+#[derive(Default)]
+struct QualityTotals {
+    nll: f64,
+    hits: usize,
+    kl: [f64; 2],
+    max_kl: [f64; 2],
+    agreements: [usize; 2],
+    reference_nll: [f64; 2],
+    reference_hits: [usize; 2],
+}
+
+impl QualityTotals {
+    fn token(
+        &mut self,
+        arm: Arm,
+        d: &Document,
+        i: usize,
+        logits: &[f32],
+        original: &[f32],
+        dense: Option<&[f32]>,
+        out: &mut Report,
+    ) {
+        let token = d.tokens[d.prefix + i];
+        let nll = -log_prob(logits, token);
+        let prediction = argmax(logits);
+        let original_argmax = argmax(original);
+        assert!(nll.is_finite());
+        self.nll += nll;
+        self.hits += usize::from(prediction == token as usize);
+        let mut references = serde_json::Map::new();
+        let mut original_kl = 0.0;
+        for (index, reference) in [Some(original), dense].into_iter().enumerate() {
+            let Some(reference) = reference else { continue };
+            let reference_self = if index == 0 {
+                !arm.dense
+            } else {
+                arm.dense && !arm.down
+            };
+            let kl = if reference_self {
+                0.0
+            } else {
+                kl_divergence(reference, logits)
+            };
+            assert!(kl.is_finite());
+            if index == 0 {
+                original_kl = kl;
+            }
+            let reference_argmax = if index == 0 {
+                original_argmax
+            } else {
+                argmax(reference)
+            };
+            self.kl[index] += kl;
+            self.max_kl[index] = self.max_kl[index].max(kl);
+            self.agreements[index] += usize::from(prediction == reference_argmax);
+            if dense.is_some() {
+                let reference_nll = -log_prob(reference, token);
+                assert!(reference_nll.is_finite());
+                self.reference_nll[index] += reference_nll;
+                self.reference_hits[index] += usize::from(reference_argmax == token as usize);
+                references.insert(if index == 0 { "original" } else { "dense_only" }.into(), json!({
+                    "nll":reference_nll,"top1_hit":reference_argmax == token as usize,
+                    "argmax":reference_argmax,"top1_agrees":prediction == reference_argmax,
+                    "kl_reference_to_arm":kl,"nll_delta":nll-reference_nll,"reference_self":reference_self}));
+            }
+        }
+        let mut event = json!({"event":"document_token", "arm":arm.label, "path":d.path,
+            "stratum":d.stratum, "prefix":d.prefix, "index":i, "target_position":d.prefix+i,
+            "target_token":token, "nll":nll, "top1_hit":prediction == token as usize,
+            "argmax":prediction, "baseline_argmax":original_argmax,
+            "top1_agrees_baseline":prediction == original_argmax,
+            "kl_baseline_to_arm":original_kl,
+            "reference_self":!arm.dense, "logits_finite":true});
+        if dense.is_some() {
+            event["references"] = Value::Object(references);
+        }
+        out.emit(event);
+    }
+
+    fn finish(&self, event: &mut Value, down: bool) {
+        assert!(self.nll.is_finite() && self.kl.iter().all(|n| n.is_finite()));
+        event["mean_nll"] = json!(self.nll / CONTINUATION as f64);
+        event["top1_hits"] = json!(self.hits);
+        event["top1_baseline_agreements"] = json!(self.agreements[0]);
+        event["mean_kl_baseline_to_arm"] = json!(self.kl[0] / CONTINUATION as f64);
+        event["max_kl_baseline_to_arm"] = json!(self.max_kl[0]);
+        if down {
+            for (index, label) in ["original", "dense_only"].into_iter().enumerate() {
+                event["references"][label] = json!({
+                    "mean_nll":self.reference_nll[index] / CONTINUATION as f64,
+                    "top1_hits":self.reference_hits[index], "top1_agreements":self.agreements[index],
+                    "mean_kl_reference_to_arm":self.kl[index] / CONTINUATION as f64,
+                    "max_kl_reference_to_arm":self.max_kl[index],
+                    "mean_nll_delta":(self.nll-self.reference_nll[index]) / CONTINUATION as f64});
+            }
+        }
     }
 }
 
@@ -485,53 +748,69 @@ fn quality(
     documents: &[Document],
     cpu: u64,
     out: &mut Report,
+    kind: Packet,
 ) {
     let long = documents.iter().find(|d| d.stratum == "long").unwrap();
-    warm(ctx, weights, &long.tokens[..ROWS], cpu, out);
+    warm(ctx, weights, &long.tokens[..ROWS], cpu, out, kind);
     let vocab = weights.config.vocab_size as usize;
     for d in documents {
         let n = d.prefix;
         let mut baseline = Vec::<Vec<f32>>::with_capacity(CONTINUATION);
-        for (arm, enabled) in ARMS {
-            assert_eq!(baseline.len(), if enabled { CONTINUATION } else { 0 });
-            out.emit(json!({"event":"document_begin", "arm":arm, "path":d.path,
-                "stratum":d.stratum, "prefix":n, "continuation":CONTINUATION}));
-            let mut s = fresh(ctx, weights, n + CONTINUATION, cpu, arm, "quality", out);
+        let mut dense_baseline =
+            Vec::<Vec<f32>>::with_capacity(if kind.down() { CONTINUATION } else { 0 });
+        let mut pending_original = None;
+        let mut original_totals = QualityTotals::default();
+        for &arm in kind.arms() {
+            assert_eq!(baseline.len(), if arm.dense { CONTINUATION } else { 0 });
+            out.emit(
+                json!({"event":"document_begin", "arm":arm.label, "path":d.path,
+                "stratum":d.stratum, "prefix":n, "continuation":CONTINUATION}),
+            );
+            let mut s = fresh(
+                ctx,
+                weights,
+                n + CONTINUATION,
+                cpu,
+                arm.label,
+                "quality",
+                out,
+            );
             assert_plain();
             let started = Instant::now();
-            let (mut logits, commits) = observed_prefill(ctx, &mut s, &d.tokens[..n], enabled);
+            let (mut logits, commits) = observed_prefill(ctx, &mut s, &d.tokens[..n], arm);
             let prefill_ms = started.elapsed().as_secs_f64() * 1e3;
-            let (mut nll_sum, mut kl_sum, mut kl_max) = (0.0, 0.0, 0.0f64);
-            let (mut hits, mut agreements) = (0usize, 0usize);
+            let mut totals = QualityTotals::default();
             let mut decode_ms = 0.0;
             for (i, &token) in d.tokens[n..n + CONTINUATION].iter().enumerate() {
                 check_session(&s, n + i);
                 check_logits(&logits, vocab);
-                let nll = -log_prob(&logits, token);
-                assert!(nll.is_finite());
-                let prediction = argmax(&logits);
-                if !enabled {
+                if !arm.dense {
                     baseline.push(logits.clone());
                 }
-                let reference = &baseline[i];
-                let reference_argmax = argmax(reference);
-                let kl = if enabled {
-                    kl_divergence(reference, &logits)
-                } else {
-                    0.0
-                };
-                assert!(kl.is_finite());
-                nll_sum += nll;
-                kl_sum += kl;
-                kl_max = kl_max.max(kl);
-                hits += usize::from(prediction == token as usize);
-                agreements += usize::from(prediction == reference_argmax);
-                out.emit(json!({"event":"document_token", "arm":arm, "path":d.path,
-                    "stratum":d.stratum, "prefix":n, "index":i, "target_position":n+i,
-                    "target_token":token, "nll":nll, "top1_hit":prediction == token as usize,
-                    "argmax":prediction, "baseline_argmax":reference_argmax,
-                    "top1_agrees_baseline":prediction == reference_argmax,
-                    "kl_baseline_to_arm":kl, "reference_self":!enabled, "logits_finite":true}));
+                if kind.down() && arm.dense && !arm.down {
+                    dense_baseline.push(logits.clone());
+                    // Delay original metrics until both immutable references exist.
+                    original_totals.token(
+                        ORIGINAL,
+                        d,
+                        i,
+                        &baseline[i],
+                        &baseline[i],
+                        Some(&dense_baseline[i]),
+                        out,
+                    );
+                }
+                if !kind.down() || arm.dense {
+                    totals.token(
+                        arm,
+                        d,
+                        i,
+                        &logits,
+                        &baseline[i],
+                        kind.down().then(|| dense_baseline[i].as_slice()),
+                        out,
+                    );
+                }
                 if i + 1 < CONTINUATION {
                     let started = Instant::now();
                     logits = s.forward(ctx, token).unwrap();
@@ -539,19 +818,37 @@ fn quality(
                 }
             }
             check_session(&s, n + CONTINUATION - 1);
-            assert!(nll_sum.is_finite() && kl_sum.is_finite());
-            out.emit(json!({"event":"document_arm", "arm":arm, "path":d.path,
+            let mut event = json!({"event":"document_arm", "arm":arm.label, "path":d.path,
                 "stratum":d.stratum, "prefix":n, "capacity":n+CONTINUATION,
                 "continuation_tokens":&d.tokens[n..n+CONTINUATION], "logit_rows":CONTINUATION,
-                "vocab":vocab, "mean_nll":nll_sum / CONTINUATION as f64, "top1_hits":hits,
-                "top1_baseline_agreements":agreements, "mean_kl_baseline_to_arm":kl_sum / CONTINUATION as f64,
-                "max_kl_baseline_to_arm":kl_max, "reference_self":!enabled,
+                "vocab":vocab, "reference_self":!arm.dense,
                 "kl_scope":"per-token descriptive KL(baseline || arm); baseline self is zero",
                 "actual_prefill_rows":s.ledger().prefill_rows(), "prefill_chunks":commits,
                 "final_position":s.position(), "decode_calls":CONTINUATION-1,
                 "lineage":"Fast", "precision":"Half", "prefill_ms":prefill_ms, "decode_ms":decode_ms,
-                "timing_scope":"diagnostic only; validation on; allocation excluded; no census or profiler"}));
+                "timing_scope":"diagnostic only; validation on; allocation excluded; no census or profiler"});
+            if kind.down() {
+                event["down_eligible_chunks"] = json!(
+                    commits
+                        .iter()
+                        .filter(|&&n| matches!(n, 1024 | 2048))
+                        .count()
+                );
+                assert_eq!(baseline.len(), CONTINUATION);
+                if !arm.dense {
+                    pending_original = Some(event);
+                    continue;
+                }
+                assert_eq!(dense_baseline.len(), CONTINUATION);
+                if let Some(mut original) = pending_original.take() {
+                    original_totals.finish(&mut original, true);
+                    out.emit(original);
+                }
+            }
+            totals.finish(&mut event, kind.down());
+            out.emit(event);
         }
+        assert!(pending_original.is_none());
     }
 }
 
@@ -563,6 +860,7 @@ fn tool_quality(
     definitions: &[ToolDefinition],
     cpu: u64,
     out: &mut Report,
+    kind: Packet,
 ) {
     let vocab = weights.config.vocab_size as usize;
     for task in tasks {
@@ -575,18 +873,39 @@ fn tool_quality(
                 cap: TOOL_CAP,
             },
         ] {
-            for (arm, enabled) in ARMS {
-                out.emit(json!({"event":"task_begin","arm":arm,"id":task.id,
+            for &arm in kind.arms() {
+                out.emit(json!({"event":"task_begin","arm":arm.label,"id":task.id,
                     "context_level":task.context_level,"expected":task.expected,
                     "generation":generation.describe(),"prompt_tokens":n,"prompt_sha256":prompt_hash,
                     "token_hash_encoding":"u32 little-endian","requested_capacity":n+TOOL_CAP,
                     "capacity":task.capacity(),"workspace_rows":ROWS}));
-                let mut s = fresh(ctx, weights, task.capacity(), cpu, arm, "tool_quality", out);
+                let mut s = fresh(
+                    ctx,
+                    weights,
+                    task.capacity(),
+                    cpu,
+                    arm.label,
+                    "tool_quality",
+                    out,
+                );
                 assert_plain();
-                let (mut logits, commits) = observed_prefill(ctx, &mut s, &task.prompt, enabled);
-                out.emit(json!({"event":"task_prefill","arm":arm,"id":task.id,
+                let (mut logits, commits) = observed_prefill(ctx, &mut s, &task.prompt, arm);
+                let mut prefill = json!({"event":"task_prefill","arm":arm.label,"id":task.id,
                     "generation":generation.describe(),"prefill_chunks":commits,"position":s.position(),
-                    "actual_prefill_rows":s.ledger().prefill_rows()}));
+                    "actual_prefill_rows":s.ledger().prefill_rows()});
+                if kind.down() {
+                    let eligible = commits
+                        .iter()
+                        .filter(|&&n| matches!(n, 1024 | 2048))
+                        .count();
+                    prefill["down_eligible_chunks"] = json!(eligible);
+                    prefill["expected_down_iq3_s_tensor_calls"] =
+                        json!(if arm.down { 39 * eligible } else { 0 });
+                    prefill["scope"] = json!(
+                        "down-policy eligibility from actual committed chunk lengths, not a dispatch census; exact 1024/2048 rows only; T09/T10 1455-row prefixes are unchanged controls for dense_only versus dense_and_down only; original still differs in dense policy"
+                    );
+                }
+                out.emit(prefill);
                 let mut sampler = Sampler::new(generation.sampling()).unwrap();
                 let mut emitted = Vec::with_capacity(TOOL_CAP);
                 let mut sampled = Vec::with_capacity(TOOL_CAP);
@@ -599,7 +918,7 @@ fn tool_quality(
                     assert!((token as usize) < vocab);
                     let is_stop = chat::CHAT_STOPS.contains(&i32::try_from(token).unwrap());
                     sampled.push(token);
-                    out.emit(json!({"event":"task_token","arm":arm,"id":task.id,
+                    out.emit(json!({"event":"task_token","arm":arm.label,"id":task.id,
                         "generation":generation.describe(),"sample_index":sampled.len()-1,
                         "position":s.position(),"token":token,"is_stop":is_stop,"logits_finite":true}));
                     if is_stop {
@@ -639,7 +958,7 @@ fn tool_quality(
                     }
                     Err(error) => (None, None, Vec::new(), Some(error)),
                 };
-                out.emit(json!({"event":"task_generation","arm":arm,"id":task.id,
+                out.emit(json!({"event":"task_generation","arm":arm.label,"id":task.id,
                     "context_level":task.context_level,"expected":task.expected,
                     "generation":generation.describe(),"prompt_tokens":n,"prompt_sha256":prompt_hash,
                     "token_hash_encoding":"u32 little-endian","emitted_ids":emitted,
@@ -665,28 +984,32 @@ fn plain_abba(
     long: &Document,
     cpu: u64,
     out: &mut Report,
+    kind: Packet,
 ) {
+    let arms = kind.plain_arms();
     for n in [2048, 4096] {
         let tokens = &long.tokens[..n];
-        warm(ctx, weights, tokens, cpu, out);
+        warm(ctx, weights, tokens, cpu, out, kind);
         let mut walls = Vec::with_capacity(8);
         for (sample, enabled) in [false, true, true, false, true, false, false, true]
             .into_iter()
             .enumerate()
         {
-            let arm = if enabled { ARMS[1].0 } else { ARMS[0].0 };
-            let mut s = fresh(ctx, weights, n, cpu, arm, "plain", out);
+            let arm = arms[usize::from(enabled)];
+            let mut s = fresh(ctx, weights, n, cpu, arm.label, "plain", out);
             assert_plain();
-            let _scope = Scope::new(enabled);
-            let started = Instant::now();
-            let logits = s.prefill_packed(ctx, tokens).unwrap();
-            let wall_ms = started.elapsed().as_secs_f64() * 1e3;
+            let (logits, wall_ms) = {
+                let _scope = ArmScope::new(arm);
+                let started = Instant::now();
+                let logits = s.prefill_packed(ctx, tokens).unwrap();
+                (logits, started.elapsed().as_secs_f64() * 1e3)
+            };
             assert_plain();
             check_session(&s, n);
             check_logits(&logits, weights.config.vocab_size as usize);
             assert!(wall_ms.is_finite() && wall_ms > 0.0);
             walls.push(wall_ms);
-            out.emit(json!({"event":"plain_sample", "arm":arm, "prompt_tokens":n,
+            out.emit(json!({"event":"plain_sample", "arm":arm.label, "prompt_tokens":n,
                 "sample":sample, "block":if sample < 4 { "ABBA" } else { "BAAB" },
                 "wall_ms":wall_ms, "final_position":s.position(), "logits_finite":true,
                 "actual_prefill_rows":s.ledger().prefill_rows(), "expected_prefill_chunks":chunks(n),
@@ -694,22 +1017,28 @@ fn plain_abba(
         }
         out.emit(
             json!({"event":"plain_width", "prompt_tokens":n, "workspace_rows":ROWS,
-            "order":["old","tensor","tensor","old","tensor","old","old","tensor"],
+            "order":[arms[0].label,arms[1].label,arms[1].label,arms[0].label,arms[1].label,arms[0].label,arms[0].label,arms[1].label],
             "wall_ms":walls, "samples_per_arm":4, "performance_verdict":null}),
         );
     }
 }
 
 fn packet(kind: Packet) {
-    let quality_screen = kind != Packet::Plain;
-    let extended = kind == Packet::Extended;
-    let mut out = Report::new(kind.report_env(), quality_screen);
+    let quality_screen = kind.quality();
+    let extended = kind.extended();
+    let tools = kind.tools();
+    let arms: &[Arm] = if quality_screen {
+        kind.arms()
+    } else {
+        kind.plain_arms()
+    };
+    let mut out = Report::new(kind.report_env(), quality_screen || kind.down());
     let documents = if extended {
         all_documents()
     } else {
         documents()
     };
-    let (tasks, definitions) = if extended {
+    let (tasks, definitions) = if tools {
         long_tasks()
     } else {
         (Vec::new(), Vec::new())
@@ -717,6 +1046,13 @@ fn packet(kind: Packet) {
     // Preserve the shard symlink name: GGUF uses it to find sibling shards.
     let path = PathBuf::from(std::env::var_os("GLM53_GGUF").unwrap());
     let gguf = GgufFile::open(&path).unwrap();
+    let fixture: Value = serde_json::from_slice(FROZEN).unwrap();
+    let layout = artifact_layout(&gguf);
+    assert_eq!(
+        fixture["artifact_layout"], layout,
+        "frozen fixture artifact layout must match before loading weights"
+    );
+    drop(fixture);
     let stamps = gguf.revalidate_retained_shard_stamps().unwrap();
     let artifact = Glm5NextArtifactLayout::inspect(&gguf).unwrap();
     assert!(artifact.packed_prefill());
@@ -732,7 +1068,7 @@ fn packet(kind: Packet) {
                 .all(|&t| t < vocab && i32::try_from(t).is_ok())
         );
     }
-    if extended {
+    if tools {
         assert!(
             chat::CHAT_STOPS
                 .iter()
@@ -750,8 +1086,14 @@ fn packet(kind: Packet) {
         4096
     };
     assert!(capacity <= artifact.config().context_length as usize);
-    let mut terms = Vec::from(cpu_terms(vocab));
-    if extended {
+    if kind.down() {
+        assert!(capacity <= 5264);
+        if tools {
+            assert_eq!(capacity, 5264);
+        }
+    }
+    let mut terms = cpu_terms(vocab, kind.down());
+    if tools {
         terms.extend([
             (
                 "native_tokenizer_construction_retained_and_decode_peak",
@@ -783,7 +1125,7 @@ fn packet(kind: Packet) {
             .or_default() += 1;
     }
     let mut header = json!({"event":"header", "schema":kind.schema(),
-        "model":path, "artifact_layout":artifact_layout(&gguf), "tensor_shape_counts":shapes,
+        "model":path, "artifact_layout":layout, "tensor_shape_counts":shapes,
         "config":format!("{:?}", artifact.config()), "binary":std::env::current_exe().unwrap(),
         "binary_sha256":binary_hash(), "fixture_sha256":sha256_hex(FROZEN),
         "packet_sha256":sha256_hex(include_bytes!("tensor_prefill.rs")),
@@ -806,6 +1148,55 @@ fn packet(kind: Packet) {
             "documents":22,"strata":{"prose":8,"code":8,"long":6},
             "overlap":"includes the original three bounded cases; not independent replication",
             "bounded_cases":self::documents().iter().map(|d|json!({"path":d.path,"prefix":d.prefix})).collect::<Vec<_>>()});
+    }
+    header["arms"] = json!(arms.iter().map(|arm| arm.label).collect::<Vec<_>>());
+    header["arm_flags"] = json!(
+        arms.iter()
+            .map(|arm| json!({"arm":arm.label,"dense":arm.dense,"down":arm.down}))
+            .collect::<Vec<_>>()
+    );
+    header["capacity"] = json!(capacity);
+    header["artifact_layout_matches_frozen_fixture"] = json!(true);
+    header["dense_source_sha256"] = json!(sha256_hex(include_bytes!("../../tensor_prefill.rs")));
+    header["down_source_sha256"] = json!(sha256_hex(include_bytes!("../../tensor_down.rs")));
+    header["down_adapter_source_sha256"] = json!(sha256_hex(include_bytes!(
+        "../../../metal/expert_tensor_down.rs"
+    )));
+    header["prefill_overrides"] = json!(
+        "both dense and down explicitly overridden on this thread during prefill only; legacy old/tensor arms always force down OFF; decode unchanged"
+    );
+    header["environment_flags"] = json!({
+        "QWEN_EXPERT_TENSOR_TILE":std::env::var("QWEN_EXPERT_TENSOR_TILE").ok(),
+        "QWEN_MATMAT_Q6_K_N64":std::env::var("QWEN_MATMAT_Q6_K_N64").ok(),
+        "QWEN_MATMAT_Q6_K_N64_MIN_N":std::env::var("QWEN_MATMAT_Q6_K_N64_MIN_N").unwrap(),
+        "MTL_DEBUG_LAYER":std::env::var("MTL_DEBUG_LAYER").unwrap(),
+        "QWEN_METAL_LEASE_WAIT":std::env::var("QWEN_METAL_LEASE_WAIT").unwrap()});
+    if kind.down() {
+        header["candidate_source_sha256"] = header["down_source_sha256"].clone();
+        header["control"] = json!(
+            "same-thread ArmScope installs independent dense and down overrides around prefill only; no capability/precision/bounds bypass"
+        );
+        header["selection"] = json!(
+            "original=denseOFF/downOFF; dense_only=denseON/downOFF; dense_and_down=denseON/downON; explicit overrides independent of future production defaults; plain compares dense_only/dense_and_down"
+        );
+        header["down_policy"] = json!({"dtype":"IQ3_S","rows":[1024,2048],"lineage":"Fast","precision":"Half","mode":"Fast",
+            "scope":"ordinary down only; IQ4_XS and fused gate/up unchanged; no new buffers, staging or shader"});
+        header["quality_references"] = json!({"retained":["original","dense_only"],"rows_each":CONTINUATION,
+            "full_vocab":vocab,"direction":"KL(reference || arm) to both frozen same-document baselines; never renormalize cumulative drift against dense_only alone",
+            "original_reporting":"original token metrics are delayed until dense_only rows exist; original logits and timing remain from original run"});
+        if !extended {
+            header["document_selection"] = json!({"method":"frozen first document in each stratum, maximum frozen prefix; the same original three bounded cases",
+                "documents":3,"strata":{"prose":1,"code":1,"long":1}});
+        } else {
+            header["document_selection"]["not_cherry_picked"] = json!(true);
+        }
+        header["plain_prompt_lengths"] = json!(if quality_screen {
+            vec![]
+        } else {
+            vec![2048, 4096]
+        });
+    }
+    if tools {
         header["tool_tasks"] = json!(tasks.iter().map(|t|json!({"id":t.id,"context_level":t.context_level,
             "prompt_tokens":t.prompt.len(),"prompt_sha256":token_hash(&t.prompt),"expected":t.expected,
             "requested_capacity":t.prompt.len()+TOOL_CAP,"capacity":t.capacity()})).collect::<Vec<_>>());
@@ -826,6 +1217,11 @@ fn packet(kind: Packet) {
             "cpu_reserve_bytes":TOKENIZER_BYTES,"construction":"after full CPU/GPU admission, before weight load",
             "scope":"decodes generated IDs only; frozen input IDs remain authoritative; no tokenizer compatibility claim"});
         header["plain_prompt_lengths"] = json!([]);
+        if kind.down() {
+            header["tool_down_scope"] = json!(
+                "T09/T10: 1455-row chunks are down-only unchanged controls for dense_only versus dense_and_down, not for original's dense policy; T11/T12: 2048/2048/912 chunks, two down-eligible chunks; actual committed chunk counts are recorded, not all tasks claimed affected"
+            );
+        }
     }
     out.emit(header);
     let (tokenizer, weights) = {
@@ -844,6 +1240,7 @@ fn packet(kind: Packet) {
             "full_preflight_peak_bytes":preflight.ledger.peak_bytes(), "ledger":preflight.ledger.terms(),
             "cpu_reserve_bytes":cpu, "admitted":admission.is_admitted(), "reason":admission.reason.as_str(),
             "required_bytes":admission.required_bytes, "allow_zero_process_budget":true,
+            "cpu_charged_to_nonzero_process_budget":true,
             "cpu_charged_to_working_set_headroom":true,
             "current_gpu_bytes":admission.signals.current_allocated_bytes,
             "process_limit_remaining_bytes":admission.signals.process_limit_remaining_bytes,
@@ -853,7 +1250,7 @@ fn packet(kind: Packet) {
             "mandatory full model + session + CPU admission refused: {:?}",
             admission.reason
         );
-        let tokenizer = extended.then(|| {
+        let tokenizer = tools.then(|| {
             let tokenizer = NativeTokenizer::from_gguf(&gguf).unwrap();
             assert_eq!(tokenizer.n_vocab(), vocab);
             tokenizer
@@ -862,8 +1259,8 @@ fn packet(kind: Packet) {
     };
     assert_eq!(weights.config.vocab_size, vocab);
     if quality_screen {
-        quality(&ctx, &weights, &documents, cpu, &mut out);
-        if extended {
+        quality(&ctx, &weights, &documents, cpu, &mut out, kind);
+        if tools {
             tool_quality(
                 &ctx,
                 &weights,
@@ -872,22 +1269,23 @@ fn packet(kind: Packet) {
                 &definitions,
                 cpu,
                 &mut out,
+                kind,
             );
         }
     } else {
-        plain_abba(&ctx, &weights, &documents[2], cpu, &mut out);
+        plain_abba(&ctx, &weights, &documents[2], cpu, &mut out, kind);
     }
     assert_plain();
     assert_eq!(gguf.revalidate_retained_shard_stamps().unwrap(), stamps);
     let mut complete = json!({"event":"complete", "execution_complete":true,
         "documents_per_arm":if quality_screen { documents.len() } else { 0 },
         "quality_rows_per_document_arm":if quality_screen { CONTINUATION } else { 0 },
-        "plain_samples":if quality_screen { 0 } else { 16 }, "arms":2,
+        "plain_samples":if quality_screen { 0 } else { 16 }, "arms":arms.len(),
         "quality_verdict":null, "performance_verdict":null});
-    if extended {
+    if tools {
         complete["tool_tasks_per_arm"] = json!(tasks.len());
         complete["tool_generations_per_task_arm"] = json!(2);
-        complete["tool_generations"] = json!(tasks.len() * 2 * ARMS.len());
+        complete["tool_generations"] = json!(tasks.len() * 2 * arms.len());
     }
     out.emit(complete);
     out.sync();
@@ -915,4 +1313,28 @@ fn tensor_prefill_extended_quality() {
     environment();
     let _lease = production_lease();
     packet(Packet::Extended);
+}
+
+#[test]
+#[ignore = "release down-only ABBA/BAAB diagnostic with dense ON in both arms: MTL_DEBUG_LAYER=1, QWEN_METAL_LEASE_WAIT=1, QWEN_MATMAT_Q6_K_N64_MIN_N=1024, actual M5 tensor tier, GLM53_GGUF and new GLM53_TENSOR_DOWN_TIMING_REPORT"]
+fn tensor_down_plain_abba() {
+    environment();
+    let _lease = production_lease();
+    packet(Packet::DownPlain);
+}
+
+#[test]
+#[ignore = "release three-arm down quality: original three frozen documents and T09-T12 greedy/seed11; MTL_DEBUG_LAYER=1, QWEN_METAL_LEASE_WAIT=1, QWEN_MATMAT_Q6_K_N64_MIN_N=1024, actual M5 tensor tier, GLM53_GGUF and new GLM53_TENSOR_DOWN_QUALITY_REPORT"]
+fn tensor_down_quality_screen() {
+    environment();
+    let _lease = production_lease();
+    packet(Packet::DownQuality);
+}
+
+#[test]
+#[ignore = "release three-arm down extended quality: all 22 frozen documents, including the original three, and T09-T12 greedy/seed11; MTL_DEBUG_LAYER=1, QWEN_METAL_LEASE_WAIT=1, QWEN_MATMAT_Q6_K_N64_MIN_N=1024, actual M5 tensor tier, GLM53_GGUF and new GLM53_TENSOR_DOWN_EXTENDED_REPORT"]
+fn tensor_down_extended_quality() {
+    environment();
+    let _lease = production_lease();
+    packet(Packet::DownExtended);
 }

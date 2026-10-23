@@ -2394,6 +2394,7 @@ mod interventions;
 mod lens;
 mod packed;
 pub mod prefill_plan;
+pub(crate) mod tensor_down;
 mod tensor_prefill;
 pub use capture::{Glm5NextCapturedRows, Glm5NextRowBank, Glm5NextRowBankPlan};
 pub use checkpoint::{

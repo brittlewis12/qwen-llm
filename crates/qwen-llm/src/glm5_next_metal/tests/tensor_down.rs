@@ -872,14 +872,17 @@ impl Composition {
 }
 
 fn assert_no_mutation(ctx: &MetalContext, body: impl FnOnce(&KernelEncoder)) {
-    let command = ctx.queue.commandBuffer().unwrap();
-    let enc = KernelEncoder::begin(&command);
-    dispatch_census_begin();
-    body(&enc);
-    assert!(dispatch_census_take().is_empty());
-    assert!(enc.bound_pipeline_name.borrow().is_none());
-    enc.end();
-    // Failed/declined preparations must never be submitted.
+    // Drain unsubmitted autoreleased buffers before the refusal sweep exhausts
+    // the command queue's bounded pool. Failed preparations stay unsubmitted.
+    objc2::rc::autoreleasepool(|_| {
+        let command = ctx.queue.commandBuffer().unwrap();
+        let enc = KernelEncoder::begin(&command);
+        dispatch_census_begin();
+        body(&enc);
+        assert!(dispatch_census_take().is_empty());
+        assert!(enc.bound_pipeline_name.borrow().is_none());
+        enc.end();
+    });
 }
 
 #[test]

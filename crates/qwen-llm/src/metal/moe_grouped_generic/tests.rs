@@ -1945,6 +1945,7 @@ fn tensor_tile_production_shape_timing() {
         GgmlType::IQ3_XXS,
         GgmlType::IQ2_XS,
         GgmlType::MXFP4,
+        GgmlType::Q8_0,
     ] {
         let b = shape.banks(&ctx, dtype);
         let gate_up_generic = |enc: &KernelEncoder| {

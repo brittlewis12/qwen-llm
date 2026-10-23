@@ -26,7 +26,7 @@ expected effect, status. Status is one of `open`, `in flight (branch)`,
 `in flight` with your branch; a second lane finding it claimed reads the branch
 before building anything adjacent. This replaces relaying between sessions.
 
-### DeepSeek V4.1-Flash (main after 512-row sink tiles: pp2048 Q2 768 / IQ3 757 tok/s, pp4096 Q2 736 / IQ3 727; decode rechecked tg32 Q2 43.1 / IQ3 40.5, depth tg32@d2048 41.6 from the prior landing)
+### DeepSeek V4.1-Flash (main after the 64-slot dense tile: pp2048 Q2 793 / IQ3 791 tok/s, pp4096 Q2 758 / IQ3 758; decode untouched by the dense change, rechecked tg32 Q2 43.1 / IQ3 40.5, depth tg32@d2048 41.6 from the prior landing)
 
 CED encoder-only bulk prefill is the leading architectural opportunity.
 Design/dependency recon: landed (2026-10-23 CED entry;
@@ -89,11 +89,16 @@ attention tiles at 34.7%. Re-sample after the next landing.
   shared expert; the Q8_0 `mat_mat` path at 24-29 TFLOPS): landed
   (2026-10-22 dense entry, bench/2026-10-22-v41-tensor-dense-projections.md).
   54-68 TFLOPS, 2.05-2.42x per dispatch, pp2048 +14.3% / pp4096 +13.2%
-  on both artifacts. Larger dense tiles (64 x 64, more operand reuse):
-  open; the activation re-read per column tile is owned by
-  `perf/v41-tensor-f16act`, not an independent bet. Other families' dense
-  prefill GEMMs still take `mat_mat`; unmeasured there and outside the
-  V4.1 gain budget: open.
+  on both artifacts. The 64-slot form (one 64-row weight slab reused for
+  two 32-slot activation groups) landed 2026-10-23
+  (bench/2026-10-23-v41-dense-wide.md): -16 to -29% per dense dispatch,
+  pp2048 +3.64% / pp4096 +3.43% combined (IQ3 +4.15/+3.98, Q2
+  +3.14/+2.88), bitwise identical to the 32-slot tile. Enabled at >=128
+  query rows; 64/96 rows are 12-14% slower from padding.
+  `QWEN_V41_DENSE_NARROW=1` forces the 32-slot form for A/B. The
+  activation re-read per column tile is still owned by
+  `perf/v41-tensor-f16act`. Other families' dense prefill GEMMs still take
+  `mat_mat`; unmeasured there and outside the V4.1 gain budget: open.
 - Attention sink tile occupancy: landed (2026-10-22 sink-tile entry,
   bench/2026-10-22-v41-sink-tile.md). A 32-row tile dispatched
   `heads/16 * 32` threadgroups (128 at 64 heads) against 80 cores and paid

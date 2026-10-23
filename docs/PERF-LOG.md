@@ -6,6 +6,24 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the current state and evidence index.
 
+## 2026-10-23 - V4.1 Prefill: 64-Slot Dense Tile +3.4-3.6%
+
+- The dense Q8_0 tensor tile now stages one 64-row weight slab for two
+  32-slot activation groups, halving weight dequant/staging per output
+  row. The output tile grows to [64][64] F32 (16 KiB); per-output
+  arithmetic is unchanged and the wide/narrow tiles are bitwise equal.
+- Same-binary ABCCBA (`QWEN_V41_DENSE_NARROW=1` versus default wide):
+  IQ3 pp2048 759.4 -> 790.9 (+4.15%), pp4096 729.0 -> 758.0 (+3.98%);
+  Q2 pp2048 768.4 -> 792.5 (+3.14%), pp4096 736.9 -> 758.1 (+2.88%).
+  Combined +3.64% / +3.43%.
+- Per dense dispatch: q_b -24.4%, output_a -21.7%, output_b -26.2%,
+  shared-expert gate/down -20.7/-20.6%, q_a -29.0%, kv -15.6%.
+- Enabled at >=128 query rows; 64/96 rows are 12-14% slower from the
+  padded second slot group, so those keep the 32-slot tile.
+- IQ3 held-text witness: narrow and wide produce identical logits and NLL
+  2.146367194. 69 tests pass (31 attention, 14 prefill, 23 dense).
+- [ABBA, dispatch table, short batches and witness](bench/2026-10-23-v41-dense-wide.md).
+
 ## 2026-10-23 - GLM Down-Only Tensor Transfer Converts To Native Request Gains
 
 - Fast/Half IQ3_S down at actual widths 1024/2048 reuses the M5 tensor tile.

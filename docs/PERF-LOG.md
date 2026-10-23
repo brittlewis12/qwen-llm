@@ -6,6 +6,20 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the current state and evidence index.
 
+## 2026-10-23 - V4.1 Sink Fusion Probes: Both Routes Negative
+
+- Online 8-key fusion (gather once, online max/sum, PV from the same block)
+  is correct but 4.6-10.8x slower: 36.9 ms vs 3.43 ms at 512 rows. The
+  25 KB threadgroup allows one resident threadgroup per core; five barriers
+  per key block serialize the work and only two simdgroups score.
+- Folding the softmax denominator into `pv_mma` is also negative:
+  `pv_mma` 1,049 -> 19,187 us (direct division) or 19,496 us (reciprocal)
+  at 512 rows. Removing the finite guard does not help; removing the
+  scaling returns to 1,294 us. Keep the separate normalize pass (134 us).
+- Branches `perf/v41-sink-fuse` and `perf/v41-pv-normalize` are retained
+  as evidence; neither is landed.
+- [Timing table and attribution](bench/2026-10-23-v41-sink-fusion-probes.md).
+
 ## 2026-10-22 - V4.1 Prefill: 512-Row Sink Tiles +17-18%
 
 - A 32-row sink tile dispatched `heads/16 * 32` = 128 threadgroups against

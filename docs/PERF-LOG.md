@@ -22,7 +22,9 @@ See also: `docs/PERF-ROADMAP.md` for the current state and evidence index.
   sink family 2,560 -> 160. Post-tile split: FFN 50.4%, attention tiles
   23.2, finish/post 11.0, prepare 6.7, serial 5.3, HC 3.5.
 - IQ3 held-text witness at 32/256/512: identical logits and mean NLL
-  2.146367194, top-1 0.5677. 45 V4.1 tests pass.
+  2.146367194, top-1 0.5677. A 2048-token diagnostic prefix (512-token
+  packet prefix repeated four times) also gives identical logits at 32 and
+  512 rows. 45 V4.1 tests pass. Decode rechecked: tg32 Q2 43.1 / IQ3 40.5.
 - [Same-binary ABBA, census, split and witness](bench/2026-10-22-v41-sink-tile.md).
 
 ## 2026-10-22 - Maya-S Artifact: +4.4% Prefill At +0.080 NLL

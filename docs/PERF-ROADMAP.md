@@ -26,7 +26,7 @@ expected effect, status. Status is one of `open`, `in flight (branch)`,
 `in flight` with your branch; a second lane finding it claimed reads the branch
 before building anything adjacent. This replaces relaying between sessions.
 
-### DeepSeek V4.1-Flash (main after 512-row sink tiles: pp2048 Q2 768 / IQ3 757 tok/s, pp4096 Q2 736 / IQ3 727; decode untouched by the tile change, previous tg32 43 / 41, tg32@d2048 41.6)
+### DeepSeek V4.1-Flash (main after 512-row sink tiles: pp2048 Q2 768 / IQ3 757 tok/s, pp4096 Q2 736 / IQ3 727; decode rechecked tg32 Q2 43.1 / IQ3 40.5, depth tg32@d2048 41.6 from the prior landing)
 
 Decode budget at depth 2048, 22.3 ms/token: ~10.2 ms bytes (11.1 GiB at the
 ~1.09 TB/s the GEMV probe reaches), ~8 ms dispatch floor (~1,600 dispatches),
@@ -91,7 +91,8 @@ attention tiles at 34.7%. Re-sample after the next landing.
   artifacts; 512 beats 256 by 1.8-2.0%. Census 45,982 -> 27,592 (-40.0%);
   IQ3 held-text witness identical. The gathered value matrix (about 755 MB
   at 512 rows) leaves admission on the MMA geometry, where it is
-  unreachable. 1024 rows: open.
+  unreachable. 1024 rows measured flat (+0.3% pp2048, +0.1% pp4096) and is
+  not worth the extra scratch: negative (sink-tile packet).
 - Attention sink fusion (`score_mma` + `softmax_rows` + `pv_mma` +
   `normalize_rows`): with the tile now at production occupancy, each key
   row is still gathered once for QK^T and again for PV, and the score slab

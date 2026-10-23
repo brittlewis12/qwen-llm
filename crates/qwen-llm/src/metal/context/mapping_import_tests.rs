@@ -1,8 +1,11 @@
-//! Model-free import witness. Run alone, in release mode, under an external
-//! watchdog. The raw counters overlap and are not distinct resident-byte totals;
-//! fixture creation warms the file cache, and other process activity adds noise.
+//! Model-free blit and compute import witness. Run alone, in release mode,
+//! under an external watchdog. The raw counters overlap and are not distinct
+//! resident-byte totals; fixture creation warms the file cache, and other process
+//! activity adds noise. The compute PSO is warmed before fixture creation;
+//! context/PSO and driver bookkeeping are not planned fixture resource costs.
 //! Phases: 0 before mmap/import, 1 after import, 2 after all checked GPU blits,
-//! 3 after dropping case resources and draining their autorelease pool.
+//! 3 after all checked GPU compute copies, 4 after dropping case resources and
+//! draining their autorelease pool. The historical test name is kept for scripts.
 
 use super::*;
 use mach2::task_info::{TASK_EVENTS_INFO, TASK_EVENTS_INFO_COUNT, task_events_info};
@@ -312,33 +315,104 @@ fn blit_check_mapping_import(ctx: &MetalContext, source: &Buffer, readback: &Buf
             blit.end();
             command.commit();
             crate::metal::wait_completed(&command).expect("import blit completed");
-            // SAFETY: checked completion precedes reading this shared destination.
-            let bytes = unsafe {
-                std::slice::from_raw_parts(
-                    readback.contents().as_ptr().cast::<u8>(),
-                    READBACK_BYTES,
-                )
-            };
-            assert!(
-                bytes[..GUARD_BYTES].iter().all(|&byte| byte == 0xa5),
-                "leading canary"
-            );
-            assert!(
-                bytes[GUARD_BYTES + length..]
-                    .iter()
-                    .all(|&byte| byte == 0xa5),
-                "trailing canary"
-            );
-            for (index, &byte) in bytes[GUARD_BYTES..GUARD_BYTES + length].iter().enumerate() {
-                let offset = start + index;
-                let expected = if offset < FILE_BYTES {
-                    fixture_byte(offset)
-                } else {
-                    0
-                };
-                assert_eq!(byte, expected, "blit payload/EOF padding at byte {offset}");
-            }
+            check_mapping_import_readback(readback, start, length);
         });
+    }
+}
+
+fn compute_check_mapping_import(
+    ctx: &MetalContext,
+    source: &Buffer,
+    readback: &Buffer,
+    span: usize,
+) {
+    assert_eq!(source.length(), span);
+    assert_eq!(readback.length(), READBACK_BYTES);
+    assert!(span.is_multiple_of(4) && READBACK_BYTES.is_multiple_of(4));
+    let source = MetalTensor {
+        buffer: source.clone(),
+        offset: 0,
+        shape: vec![(span / 4) as u64],
+        dtype: GgmlType::I32,
+        provenance: MetalTensorProvenance::RetainedGgufReadOnly,
+    };
+    let readback_tensor = MetalTensor {
+        buffer: readback.clone(),
+        offset: 0,
+        shape: vec![(READBACK_BYTES / 4) as u64],
+        dtype: GgmlType::I32,
+        provenance: MetalTensorProvenance::OwnedWritable,
+    };
+    assert_eq!(
+        source.provenance(),
+        MetalTensorProvenance::RetainedGgufReadOnly
+    );
+    assert!(!source.is_writable());
+    for start in (0..span).step_by(COPY_BYTES) {
+        let length = (span - start).min(COPY_BYTES);
+        assert!(start.is_multiple_of(4) && length.is_multiple_of(4));
+        objc2::rc::autoreleasepool(|_| {
+            let destination =
+                readback_tensor.view_subrange((GUARD_BYTES / 4) as u64, vec![(length / 4) as u64]);
+            assert_eq!(destination.offset, GUARD_BYTES as u64);
+            assert_eq!(destination.n_bytes(), length as u64);
+            assert_eq!(
+                destination.provenance(),
+                MetalTensorProvenance::OwnedWritable
+            );
+            assert!(destination.is_writable());
+            // SAFETY: the same owned shared destination is idle after the prior
+            // checked completion. The retained source is never CPU-accessed.
+            unsafe {
+                readback
+                    .contents()
+                    .as_ptr()
+                    .cast::<u8>()
+                    .write_bytes(0xa5, READBACK_BYTES)
+            };
+            let command = ctx.queue.commandBuffer().expect("import compute command");
+            assert!(command.retainedReferences());
+            let encoder = KernelEncoder::begin(&command);
+            encoder.note_read(&source);
+            encoder.note_write(&destination);
+            // The production helper binds both tensors through set_tensor;
+            // integer copies preserve every raw bit, including float NaN bits.
+            encode_copy_offset_i32(ctx, &encoder, &source, start / 4, &destination, length / 4)
+                .expect("read-only import compute copy");
+            encoder.end();
+            command.commit();
+            crate::metal::wait_completed(&command).expect("import compute completed");
+            check_mapping_import_readback(readback, start, length);
+        });
+    }
+}
+
+fn check_mapping_import_readback(readback: &Buffer, start: usize, length: usize) {
+    // SAFETY: callers check GPU completion before reading this shared destination.
+    let bytes = unsafe {
+        std::slice::from_raw_parts(readback.contents().as_ptr().cast::<u8>(), READBACK_BYTES)
+    };
+    assert!(
+        bytes[..GUARD_BYTES].iter().all(|&byte| byte == 0xa5),
+        "leading canary"
+    );
+    assert!(
+        bytes[GUARD_BYTES + length..]
+            .iter()
+            .all(|&byte| byte == 0xa5),
+        "trailing canary"
+    );
+    for (index, &byte) in bytes[GUARD_BYTES..GUARD_BYTES + length].iter().enumerate() {
+        let offset = start + index;
+        let expected = if offset < FILE_BYTES {
+            fixture_byte(offset)
+        } else {
+            0
+        };
+        assert_eq!(
+            byte, expected,
+            "GPU copy payload/EOF padding at byte {offset}"
+        );
     }
 }
 
@@ -436,6 +510,13 @@ fn run_mapping_import_case(
                 "mapping must survive GPU reads"
             );
             assert_eq!(calls.load(Ordering::Acquire), 0);
+            compute_check_mapping_import(ctx, &backing.buffer, &readback, span);
+            mapping_import_snapshot(ctx, kind, span, 3, Some(&backing.buffer), Some(&readback));
+            assert!(
+                mmap_weak.upgrade().is_some(),
+                "mapping must survive GPU compute reads"
+            );
+            assert_eq!(calls.load(Ordering::Acquire), 0);
             drop(backing);
             drop(readback);
             (
@@ -447,7 +528,7 @@ fn run_mapping_import_case(
                 alive_at_release,
             )
         });
-    objc2::rc::autoreleasepool(|_| mapping_import_snapshot(ctx, kind, span, 3, None, None));
+    objc2::rc::autoreleasepool(|_| mapping_import_snapshot(ctx, kind, span, 4, None, None));
     assert!(
         source_weak.load().is_none(),
         "source buffer survived pool drain"
@@ -498,7 +579,7 @@ fn admit_mapping_import(ctx: &MetalContext) {
 }
 
 #[test]
-#[ignore = "release-only, self-leased Metal mmap import witness; external watchdog required"]
+#[ignore = "release-only, self-leased Metal mmap blit/compute import witness; external watchdog required"]
 fn metal_mmap_import_blit_witness_release() {
     assert!(
         !cfg!(debug_assertions),
@@ -520,6 +601,10 @@ fn metal_mmap_import_blit_witness_release() {
             let _transaction = ctx.begin_allocation_transaction();
             admit_mapping_import(&ctx);
         }
+        objc2::rc::autoreleasepool(|_| {
+            ctx.pipeline("kernel_copy_offset_i32")
+                .expect("warm raw-bit compute copy PSO before import baselines");
+        });
         let fixture = ImmutableFixture::new();
         for kind in [
             MapKind::SharedAligned,

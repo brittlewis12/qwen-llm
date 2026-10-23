@@ -35,17 +35,17 @@ including shared boundary pages. This does not add an MXFP8 codec.
 Serving uses the official recipe renderer/parser, common startup/request spine,
 typed HTTP 503 `memory_admission_denied` responses and automatic longest exact
 causal-prefix reuse from live state or RAM snapshots. CLI statistics use the v2
-schema and benchmarks use the shared family harness. Cold prefill uses 256-row
-layer-major chunks without unused prompt logits. Attention uses bounded
-32-query tiles while compressor/index transitions remain sequential.
-Dense/shared projections and supported routed experts use shared NativeF32
-operators. At 256 or more attended
-rows, the 64-head attention value GEMM uses the shared scalar-F32 implementation,
-not MMA. Cache updates remain causal.
-IQ2_XXS routed experts lack grouped F32 gate/up and down support and fall back
-per token; dense/shared work remains batched. This is not measured attribution
-of the artifact's speed gap. Vision execution, CED, speculation and Lens are
-not implemented.
+schema and benchmarks use the shared family harness. Cold prefill uses bounded
+layer-major chunks (current maximum 2048 rows) without unused prompt logits.
+Attention uses bounded 32-query tiles. Supported fast dense/grouped work and
+attention now use Half-staged MMA, with the tensor-ops tier on capable M5-class
+devices; NativeF32 remains a distinct qualification path. Cache updates remain
+causal. Current dispatch scope and dated performance evidence live in the
+[roadmap](PERF-ROADMAP.md), rather than the initial NativeF32 bring-up profile.
+Vision execution, optimized CED, speculation and Lens are not implemented.
+The [CED design](DEEPSEEK-V41-CED-DESIGN.md) specifies the proposed encoder-only
+bulk and decoder reconstruction contracts; its CPU witness is not a native
+executor or model-quality qualification.
 
 The V4.1 family profile keeps `idle_residency_eligible = false`: shared GPU
 idle-keepalive integration and lifecycle/admission qualification are not

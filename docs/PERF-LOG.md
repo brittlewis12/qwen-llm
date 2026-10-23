@@ -6,6 +6,35 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the current state and evidence index.
 
+## 2026-10-23 - CED Recon Establishes A Shrinking Dependency-Preserving Plan
+
+- Current native prefill still runs all layers for every prompt row. The
+  encoder-19/decoder-20 seam is four residual streams plus outgoing FFN-19
+  pre-mix; owner-20 global KV/index-key publication can be separated from
+  decoder-local attention and MoE. Global query visibility and physical
+  publication must remain distinct.
+- With fixed encoder globals and the default schedule, SWA128 adds 127
+  preceding decoder inputs per layer. The full boundary cone is 2541 rows;
+  shrinking complete-output ranges plus KV-only initialization need at most
+  24150 decoder layer-output rows and 2540 seed rows for long prompts, not
+  a full 2541-by-20 rectangle. At 2K the complete decoder count is 23433
+  versus 40960 full forward. These are work proxies, not measured speedups.
+- Eight executable CPU witness groups cover physical rings in every layer,
+  continuation, validity bands, B-1, bounded-128, wrong mix, future visibility,
+  missing seeds and misaligned candidates. They establish a conditional
+  integer dependency model, not native arithmetic/quality or whole-model parity.
+- Primary-source refresh finds executable shrinking exact reconstruction in
+  ds4, official DeepInfer compaction, merged bounded replay in vLLM/oMLX,
+  and an open late-cut exact halo. Distinguish deferral or same-policy
+  mask/compact tests from full-forward equivalence; vendor performance and
+  task claims were not rerun or transferred to GGUF/Metal.
+- Recommendation: a cold opt-in shrinking executor with explicit publication,
+  local initialization, provisional state and final commitment; bounded128
+  follows as a separate quality arm. Preserve the original full-forward
+  reference, normal memory admission, and typed cache lineage. No native CED
+  executor/default has been enabled.
+- [Source pins, dependency proof, memory/state contracts and acceptance plan](DEEPSEEK-V41-CED-DESIGN.md).
+
 ## 2026-10-22 - GLM M5 Dense Tensor Prefill Cuts Saved Request Time 10%
 
 - Ordinary Fast/Half Q6_K/Q8_0 projections at >=1024 active rows reuse the

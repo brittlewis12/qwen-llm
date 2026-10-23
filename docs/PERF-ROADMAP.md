@@ -28,12 +28,14 @@ before building anything adjacent. This replaces relaying between sessions.
 
 ### DeepSeek V4.1-Flash (main after 512-row sink tiles: pp2048 Q2 768 / IQ3 757 tok/s, pp4096 Q2 736 / IQ3 727; decode rechecked tg32 Q2 43.1 / IQ3 40.5, depth tg32@d2048 41.6 from the prior landing)
 
-CED encoder-only bulk prefill and decoder-state construction are the leading
-architectural opportunity: in flight (`perf/v41-ced-recon`). Establish current
-prior art, exact dependency versus trained bounded-replay policies, cache and
-handoff contracts, and a staged implementation/quality plan before changing
-production execution. Attention and activation-staging kernel lanes remain
-independent; no wall-time gain is established for CED yet.
+CED encoder-only bulk prefill is the leading architectural opportunity.
+Design/dependency recon: landed (2026-10-23 CED entry;
+`DEEPSEEK-V41-CED-DESIGN.md`). The first recommended executor is cold shrinking
+dependency-preserving reconstruction: at most 2541 boundary rows, but only
+24150 complete decoder layer-output rows for long prompts, plus KV-only seeds.
+Trained bounded-128 replay is a separate policy using the same primitives.
+Native implementation is open; no CED wall-time gain is established yet.
+Attention and activation-staging kernel lanes remain independent.
 
 Decode budget at depth 2048, 22.3 ms/token: ~10.2 ms bytes (11.1 GiB at the
 ~1.09 TB/s the GEMV probe reaches), ~8 ms dispatch floor (~1,600 dispatches),

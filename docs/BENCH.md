@@ -79,3 +79,40 @@ For priorities: `docs/PERF-ROADMAP.md`.
 - The runner is secondary protection, not permission to exceed loader admission
   or rely on cancellation after the kernel stalls. Native binaries already take
   the production Metal lease; do not wrap them in another lease holder.
+
+## Native V4.1 Full/CED Pair
+
+`qwen-bench suite --v41-ced-pair` is an experimental, pp-only comparison using
+one resident import and a fresh request state for each native call. It accepts
+exactly one `--pp` in 2..=8192, `--depth 0`, no `--tg`, no chunk override and
+even `--runs 2..=16` retained samples per policy. Warmup is mandatory.
+
+- A is Full forward; B is shrinking CED. Untimed AB warms both, an excluded
+  ABBA pilot collects two samples per policy, then retained BAAB/ABBA blocks
+  alternate. The CLI checks each policy's finite, positive max/min <=1.5,
+  including its pilot baseline, before scheduling further cases. It never
+  treats the intended difference between policies as instability.
+- Pre-import planning uses the public `preflight_cold_prefill` ledger: exact
+  resident windows and private shadows, binding allocations, one request state,
+  the sequential Full/CED workspace envelope and caller CPU storage. The pair
+  supports at most 256 layers and 1,048,576 logits. This is not a reservation;
+  normal loader, state and prefill admission remain active.
+- Every completed native report must name the requested policy without
+  fallback. CED must finish all encoded commands and report observed incremental
+  Metal allocation no larger than its accepted estimate. Every finite endpoint
+  head must match warm Full bitwise; state and autoreleases drain between cases,
+  including on validation errors and cancellation.
+- Timings cover host-wall production prefill and the endpoint logits copy, not
+  state allocation, GPU-only time or model loading. Schema-v4 output has one row
+  per policy. Warmup/pilot are excluded from statistics but retained in both
+  rows' chronological diagnostics, along with reports, fingerprints and budgets.
+- Use `MTL_DEBUG_LAYER=1`, the production lease and the stock runtime/arithmetic
+  environment. Profiling overrides and an active dispatch observer are refused.
+  Run under external continuous host supervision, such as `pilot.Session`;
+  the CLI's timing gate does not monitor global VM health. A nonzero exit or
+  unhealthy/missing telemetry invalidates the run; do not automatically retry.
+
+This measures synthetic cold-KV prefill, not artifact quality, sampled
+continuation or the separate bounded-128 policy. A matching endpoint fingerprint
+is not a replacement for the strict full-vocabulary and causal-state CED
+qualification. Ordered cold Full-then-CED diagnostics are not speedup evidence.

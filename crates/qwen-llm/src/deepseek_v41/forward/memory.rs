@@ -42,7 +42,7 @@ fn rows(count: u64, width: u64) -> Result<u64> {
     ])
 }
 
-fn estimate_gpu_step(
+pub(super) fn estimate_gpu_step(
     c: &Config,
     positions: usize,
     schedule: &super::super::gguf::Schedule,

@@ -39,17 +39,64 @@ pub(super) fn chunk_widths(
     capacity: usize,
     rows: usize,
 ) -> Result<Vec<usize>> {
-    let c = &model.config;
+    chunk_widths_from_geometry(
+        &model.config,
+        model.layers.len(),
+        &engram_projections(model),
+        capacity,
+        rows,
+    )
+}
+
+pub(super) fn engram_projections(model: &Forward<'_>) -> Vec<(usize, usize)> {
+    model
+        .layers
+        .iter()
+        .filter_map(|layer| {
+            layer
+                .engram
+                .as_ref()
+                .map(|e| (e.projection.input, e.projection.output))
+        })
+        .collect()
+}
+
+pub(super) fn validate_chunk_geometry(c: &Config, capacity: usize, rows: usize) -> Result<()> {
+    op::require(
+        capacity > 0 && rows > 0 && rows <= capacity,
+        "invalid chunk geometry",
+    )?;
+    op::require(c.candidate_block > 0, "zero candidate block")?;
+    for (a, b) in [
+        (4, c.hidden),
+        (c.heads, c.head_dim),
+        (c.groups, c.output_rank),
+        (c.index_heads, c.index_dim),
+        (c.intermediate, c.topk),
+        (c.hidden, c.topk),
+        (c.candidate_topk, c.candidate_block),
+    ] {
+        a.checked_mul(b).ok_or("chunk width overflow")?;
+    }
+    Ok(())
+}
+
+pub(super) fn chunk_widths_from_geometry(
+    c: &Config,
+    layers: usize,
+    engram_projections: &[(usize, usize)],
+    capacity: usize,
+    rows: usize,
+) -> Result<Vec<usize>> {
+    validate_chunk_geometry(c, capacity, rows)?;
     let mut widths = vec![4 * c.hidden, 4 * c.hidden, c.hidden, 4];
     widths.extend(prefill::HcRows::widths(c));
-    widths.extend(ffn_gpu::Rows::widths(c, model.layers.len()));
+    widths.extend(ffn_gpu::Rows::widths(c, layers));
     widths.extend(attention_gpu::Rows::widths(c, capacity));
     widths.extend(attention_gpu::Rows::select_widths(c, capacity, rows));
     widths.extend(attention_gpu::Rows::tile_widths(c, rows)?);
-    for layer in &model.layers {
-        if let Some(e) = &layer.engram {
-            widths.extend([e.projection.input, e.projection.output]);
-        }
+    for &(input, output) in engram_projections {
+        widths.extend([input, output]);
     }
     Ok(widths)
 }

@@ -225,7 +225,31 @@ fn estimate(model: &Forward<'_>, capacity: usize, plan: &CedPlan) -> Result<CedM
             .map(|p| p.priced_upper_bytes)
             .map_err(|e| e.to_string())
     };
-    let c = &model.config;
+    let mut estimate = estimate_from_parts(
+        &model.config,
+        model.layers.len(),
+        &gpu_step::engram_projections(model),
+        model.engram_hash.layers.len(),
+        capacity,
+        plan,
+        metal::moe_grouped_tensor_selected(model.ctx),
+        &price,
+    )?;
+    estimate.process_ru_maxrss_before_bytes = process_peak_rss_bytes();
+    estimate.observation_method = "Metal allocation samples after allocation, encoding and completion; cumulative process ru_maxrss, not an isolated CED or continuous driver peak";
+    Ok(estimate)
+}
+
+pub(super) fn estimate_from_parts(
+    c: &Config,
+    layers: usize,
+    projections: &[(usize, usize)],
+    hash_count: usize,
+    capacity: usize,
+    plan: &CedPlan,
+    half_selected: bool,
+    price: &impl Fn(u64) -> Result<u64>,
+) -> Result<CedMemoryEstimate> {
     let rows = plan.prompt_rows.min(prefill::DEFAULT_CHUNK_ROWS);
     let mut retained = 0;
     for bytes in [
@@ -237,7 +261,7 @@ fn estimate(model: &Forward<'_>, capacity: usize, plan: &CedPlan) -> Result<CedM
         retained = checked_add(retained, price(bytes)?)?;
     }
     let mut chunk = 0;
-    for width in gpu_step::chunk_widths(model, capacity, rows)? {
+    for width in gpu_step::chunk_widths_from_geometry(c, layers, projections, capacity, rows)? {
         chunk = checked_add(chunk, price(row_bytes(width, rows)?)?)?;
     }
     let decoder_rows = plan
@@ -248,10 +272,12 @@ fn estimate(model: &Forward<'_>, capacity: usize, plan: &CedPlan) -> Result<CedM
         .len()
         .min(prefill::DEFAULT_CHUNK_ROWS);
     let mut decoder = 0;
-    for width in gpu_step::ced::decoder_chunk_widths(model, capacity, decoder_rows)? {
+    for width in
+        gpu_step::ced::decoder_chunk_widths_from_geometry(c, layers, capacity, decoder_rows)?
+    {
         decoder = checked_add(decoder, price(row_bytes(width, decoder_rows)?)?)?;
     }
-    let half_chunk = prefill::half_scratch_budget(model.ctx, c, rows)?;
+    let half_chunk = prefill::half_scratch_budget_with(c, rows, half_selected, price)?;
     chunk = checked_add(chunk.max(decoder), half_chunk)?;
     let publication = price(row_bytes(c.head_dim, rows)?)?;
     let seed_rows = plan
@@ -269,25 +295,10 @@ fn estimate(model: &Forward<'_>, capacity: usize, plan: &CedPlan) -> Result<CedM
     let metal = [retained, chunk, publication, seed, reserve]
         .into_iter()
         .try_fold(0, checked_add)?;
-    let upload_width = model
-        .layers
-        .iter()
-        .filter_map(|l| l.engram.as_ref())
-        .map(|e| e.projection.input)
-        .max()
-        .unwrap_or(0)
-        .checked_add(c.hidden.checked_mul(4).ok_or("CED upload overflow")?)
-        .ok_or("CED upload overflow")?;
     let controls_cpu = attention_gpu::QueryControls::cpu_bytes(plan.candidate_rows.clone())?;
-    let hash_cpu = (model.engram_hash.layers.len() as u64)
-        .checked_mul(1024)
-        .and_then(|n| n.checked_add(4096))
-        .and_then(|n| n.checked_mul(rows as u64))
-        .ok_or("CED hash upload overflow")?;
+    let hash_cpu = prefill::chunk_hash_cpu_bytes(hash_count, rows)?;
     let cpu = [
-        row_bytes(upload_width, rows)?
-            .checked_mul(2)
-            .ok_or("CED upload overflow")?,
+        prefill::upload_cpu_bytes(c, projections, rows)?,
         row_bytes(1, plan.prompt_rows)?,
         row_bytes(c.vocab, 2)?,
         hash_cpu,
@@ -311,9 +322,9 @@ fn estimate(model: &Forward<'_>, capacity: usize, plan: &CedPlan) -> Result<CedM
         incremental_cpu_bytes: cpu,
         retained_control_cpu_bytes: controls_cpu,
         chunk_hash_cpu_bytes: hash_cpu,
-        process_ru_maxrss_before_bytes: process_peak_rss_bytes(),
+        process_ru_maxrss_before_bytes: None,
         process_ru_maxrss_after_bytes: None,
-        observation_method: "Metal allocation samples after allocation, encoding and completion; cumulative process ru_maxrss, not an isolated CED or continuous driver peak",
+        observation_method: "metadata-only preload plan; no execution or process RSS observations",
     })
 }
 

@@ -140,7 +140,20 @@ pub(super) fn ffn_half_scratch_elements(c: &Config, rows: usize) -> Result<[usiz
 /// Incremental half buffers owned by one attention/FFN row set. Price each
 /// allocation separately, including buffers unused by arithmetic overrides.
 pub(super) fn half_scratch_budget(ctx: &MetalContext, c: &Config, rows: usize) -> Result<u64> {
-    if !HalfScratch::selected(ctx) || rows == 0 {
+    half_scratch_budget_with(c, rows, HalfScratch::selected(ctx), &|bytes| {
+        ctx.price_shared_buffer_upper(bytes)
+            .map(|p| p.priced_upper_bytes)
+            .map_err(|e| e.to_string())
+    })
+}
+
+pub(super) fn half_scratch_budget_with(
+    c: &Config,
+    rows: usize,
+    selected: bool,
+    price: &impl Fn(u64) -> Result<u64>,
+) -> Result<u64> {
+    if !selected || rows == 0 {
         return Ok(0);
     }
     let attention = attention_half_scratch_elements(c, rows)?;
@@ -149,13 +162,67 @@ pub(super) fn half_scratch_budget(ctx: &MetalContext, c: &Config, rows: usize) -
         .into_iter()
         .filter(|&elements| elements != 0)
         .try_fold(0u64, |total, elements| {
-            let priced = ctx
-                .price_shared_buffer_upper(HalfScratch::logical_bytes(elements)?)
-                .map_err(|e| e.to_string())?;
+            let priced = price(HalfScratch::logical_bytes(elements)?)?;
             total
-                .checked_add(priced.priced_upper_bytes)
+                .checked_add(priced)
                 .ok_or_else(|| "half scratch budget overflow".into())
         })
+}
+
+pub(super) fn full_scratch_budget_with(
+    c: &Config,
+    layers: usize,
+    projections: &[(usize, usize)],
+    capacity: usize,
+    rows: usize,
+    half_selected: bool,
+    price: &impl Fn(u64) -> Result<u64>,
+) -> Result<(u64, u64)> {
+    gpu_step::validate_chunk_geometry(c, capacity, rows)?;
+    // A scalar chunk executes the already-budgeted token workspace.
+    if rows == 1 {
+        return Ok((0, 0));
+    }
+    let mut metal = half_scratch_budget_with(c, rows, half_selected, price)?;
+    for width in gpu_step::chunk_widths_from_geometry(c, layers, projections, capacity, rows)? {
+        let bytes = width
+            .checked_mul(rows)
+            .and_then(|n| n.checked_mul(4))
+            .ok_or("prefill scratch overflow")?;
+        metal = metal
+            .checked_add(price(bytes as u64)?)
+            .ok_or("prefill scratch overflow")?;
+    }
+    let cpu = upload_cpu_bytes(c, projections, rows)?
+        .checked_add(chunk_hash_cpu_bytes(projections.len(), rows)?)
+        .ok_or("prefill upload overflow")?;
+    Ok((metal, cpu))
+}
+
+pub(super) fn upload_cpu_bytes(
+    c: &Config,
+    projections: &[(usize, usize)],
+    rows: usize,
+) -> Result<u64> {
+    let upload_width = projections
+        .iter()
+        .map(|&(input, _)| input)
+        .max()
+        .unwrap_or(0)
+        .checked_add(c.hidden.checked_mul(4).ok_or("prefill upload overflow")?)
+        .ok_or("prefill upload overflow")?;
+    (rows as u64)
+        .checked_mul(upload_width as u64)
+        .and_then(|n| n.checked_mul(8))
+        .ok_or_else(|| "prefill upload overflow".into())
+}
+
+pub(super) fn chunk_hash_cpu_bytes(hash_count: usize, rows: usize) -> Result<u64> {
+    (hash_count as u64)
+        .checked_mul(1024)
+        .and_then(|n| n.checked_add(4096))
+        .and_then(|n| n.checked_mul(rows as u64))
+        .ok_or_else(|| "chunk hash upload overflow".into())
 }
 
 impl HalfScratch {
@@ -734,35 +801,23 @@ pub(super) fn run_captured(
                 census[3]
             );
         });
-        let mut extra = half_scratch_budget(model.ctx, &model.config, rows)?;
-        for width in gpu_step::chunk_widths(model, state.capacity(), rows)? {
-            let bytes = width
-                .checked_mul(rows)
-                .and_then(|n| n.checked_mul(4))
-                .ok_or("prefill scratch overflow")? as u64;
-            let priced = model
-                .ctx
-                .price_shared_buffer_upper(bytes)
-                .map_err(|e| e.to_string())?;
-            extra = extra
-                .checked_add(priced.priced_upper_bytes)
-                .ok_or("prefill scratch overflow")?;
-        }
         // State and resident weights already exist and are reflected in device signals.
         // Charge only the incremental chunk buffers and bounded upload temporaries.
-        let upload_width = model
-            .layers
-            .iter()
-            .filter_map(|l| l.engram.as_ref())
-            .map(|e| e.projection.input)
-            .max()
-            .unwrap_or(0)
-            .checked_add(4 * model.config.hidden)
-            .ok_or("prefill upload overflow")?;
-        let cpu = (rows as u64)
-            .checked_mul(upload_width as u64)
-            .and_then(|n| n.checked_mul(8))
-            .ok_or("prefill upload overflow")?;
+        let (extra, cpu) = full_scratch_budget_with(
+            &model.config,
+            model.layers.len(),
+            &gpu_step::engram_projections(model),
+            state.capacity(),
+            rows,
+            HalfScratch::selected(model.ctx),
+            &|bytes| {
+                model
+                    .ctx
+                    .price_shared_buffer_upper(bytes)
+                    .map(|p| p.priced_upper_bytes)
+                    .map_err(|e| e.to_string())
+            },
+        )?;
         let admission = metal::evaluate_metal_memory_admission_with_cpu_bytes(
             extra,
             cpu,

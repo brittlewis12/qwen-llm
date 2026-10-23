@@ -374,6 +374,82 @@ fn nonuniform_model<'a>(
     model
 }
 
+#[test]
+fn bounded_metadata_parts_match_loaded_request_full_and_ced_ledgers() {
+    let ctx = MetalContext::new().unwrap();
+    let weights = toy::Weights::new(&ctx);
+    let embedding = embeddings(&ctx);
+    let model = nonuniform_model(&weights, &ctx, &embedding);
+    let projections = gpu_step::engram_projections(&model);
+    let price = |bytes| -> Result<u64> {
+        if bytes == 0 {
+            return Ok(0);
+        }
+        ctx.price_shared_buffer_upper(bytes)
+            .map(|p| p.priced_upper_bytes)
+            .map_err(|e| e.to_string())
+    };
+    for n in [1, 3, 17, 33] {
+        let (request, full, planned) = preflight::runtime_from_parts(
+            &model.config,
+            &model.schedule,
+            &model.engram_hash,
+            &projections,
+            n,
+            33,
+            &[
+                PrefillExecution::FullForward,
+                PrefillExecution::ShrinkingCed,
+            ],
+            metal::moe_grouped_tensor_selected(&ctx),
+            &price,
+        )
+        .unwrap();
+        assert_eq!(
+            request,
+            model.estimate_request_memory_with_gpu_step(33).unwrap()
+        );
+        assert_eq!(
+            gpu_step::chunk_widths(&model, 33, n).unwrap(),
+            gpu_step::chunk_widths_from_geometry(
+                &model.config,
+                model.layers.len(),
+                &projections,
+                33,
+                n
+            )
+            .unwrap()
+        );
+        assert_eq!(
+            gpu_step::ced::decoder_chunk_widths(&model, 33, n).unwrap(),
+            gpu_step::ced::decoder_chunk_widths_from_geometry(
+                &model.config,
+                model.layers.len(),
+                33,
+                n
+            )
+            .unwrap()
+        );
+        if n == 1 {
+            assert_eq!(full, (0, 0));
+        }
+        let plan = CedPlan::shrinking(
+            &model.config,
+            &model.schedule,
+            &model.engram_hash,
+            &CedRequest::cold(n, 33),
+        )
+        .unwrap();
+        let mut runtime = estimate(&model, 33, &plan).unwrap();
+        let planned = planned.unwrap();
+        assert!(planned.process_ru_maxrss_before_bytes.is_none());
+        assert!(planned.process_ru_maxrss_after_bytes.is_none());
+        runtime.process_ru_maxrss_before_bytes = None;
+        runtime.observation_method = planned.observation_method;
+        assert_eq!(runtime, planned);
+    }
+}
+
 fn vary_model<'a>(model: &mut Forward<'a>, embeddings: &'a MetalTensor) {
     model.embedding = embeddings;
     vary(&mut model.head, 91);

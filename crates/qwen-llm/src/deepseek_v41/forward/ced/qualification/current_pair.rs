@@ -97,82 +97,6 @@ struct RuntimeUpper {
     metal_bytes: u64,
 }
 
-fn runtime_upper(
-    ctx: &MetalContext,
-    p: &v41_gguf::Plan,
-    g: &Geometry,
-    plan: &CedPlan,
-    metadata_bytes: u64,
-) -> AResult<RuntimeUpper> {
-    let c = &p.config;
-    let capacity = g.n + STEPS;
-    // Canonical schedule/hash are checked before using Config's stock estimator.
-    let request = c
-        .estimate_request_memory_with_gpu_step(capacity)
-        .map_err(anyhow::Error::msg)?;
-    let rows = g.n.min(PREFILL_CHUNK_ROWS);
-    let mut widths = vec![4 * c.hidden, 4 * c.hidden, c.hidden, 4];
-    widths.extend(prefill::HcRows::widths(c));
-    widths.extend(ffn_gpu::Rows::widths(c, g.layers));
-    widths.extend(attention_gpu::Rows::widths(c, capacity));
-    widths.extend(attention_gpu::Rows::select_widths(c, capacity, rows));
-    widths.extend(attention_gpu::Rows::tile_widths(c, rows).map_err(anyhow::Error::msg)?);
-    for _ in &p.engram_hash.layers {
-        widths.extend([6144, 5 * c.hidden]);
-    }
-    let counts = widths
-        .into_iter()
-        .map(|w| w.checked_mul(rows).context("chunk extent overflow"))
-        .collect::<AResult<Vec<_>>>()?;
-    let chunk_metal_bytes = price(ctx, counts)?;
-    let half_chunk_metal_bytes =
-        prefill::half_scratch_budget(ctx, c, rows).map_err(anyhow::Error::msg)?;
-    let mut retained_and_seed_metal_bytes = 16 * 1024 * 1024;
-    for bytes in [
-        plan.memory.boundary_residual_bytes,
-        plan.memory.boundary_mix_bytes,
-        plan.memory.selected_bytes,
-        plan.memory.candidate_bytes,
-        product(&[rows as u64, c.hidden as u64, 4])?,
-        product(&[rows as u64, c.hidden as u64, 4])?,
-        product(&[rows as u64, c.head_dim as u64, 4])?,
-        product(&[rows as u64, c.head_dim as u64, 4])?,
-    ] {
-        retained_and_seed_metal_bytes = add(&[
-            retained_and_seed_metal_bytes,
-            ctx.price_shared_buffer_upper(bytes)?.priced_upper_bytes,
-        ])?;
-    }
-    let binding_upload_hash_cpu_bytes = add(&[
-        product(&[metadata_bytes, 8])?,
-        product(&[c.vocab as u64, 32])?,
-        product(&[rows as u64, (6144 + 4 * c.hidden) as u64, 8])?,
-        product(&[
-            rows as u64,
-            (p.engram_hash.layers.len() * 1024 + 4096) as u64,
-        ])?,
-        attention_gpu::QueryControls::cpu_bytes(plan.candidate_rows.clone())
-            .map_err(anyhow::Error::msg)?,
-        64 * 1024 * 1024,
-    ])?;
-    Ok(RuntimeUpper {
-        request_cpu_bytes: request.cpu_bytes,
-        request_metal_bytes: request.metal_bytes,
-        chunk_metal_bytes,
-        half_chunk_metal_bytes,
-        retained_and_seed_metal_bytes,
-        binding_upload_hash_cpu_bytes,
-        cpu_bytes: add(&[request.cpu_bytes, binding_upload_hash_cpu_bytes])?,
-        // Full and CED never overlap; sum their disjoint scratch as a conservative bound.
-        metal_bytes: add(&[
-            request.metal_bytes,
-            chunk_metal_bytes,
-            half_chunk_metal_bytes,
-            retained_and_seed_metal_bytes,
-        ])?,
-    })
-}
-
 #[derive(Debug, serde::Serialize)]
 struct ResidentPreloadUpper {
     storage_view_metal_bytes: u64,
@@ -181,20 +105,28 @@ struct ResidentPreloadUpper {
     planner_evidence: Value,
 }
 
-fn resident_preload_upper(
-    ctx: &MetalContext,
-    gguf: &crate::gguf::GgufFile,
-    p: &v41_gguf::Plan,
-) -> AResult<ResidentPreloadUpper> {
-    let storage = v41_gguf::resident_storage_plan(
-        gguf,
-        metal::host_page_size_bytes()?,
-        ctx.max_buffer_length(),
-    )?;
-    ensure!(
-        storage.bytes == p.bytes,
-        "resident storage payload inventory"
-    );
+fn preload_report(cold: &ColdPrefillPreflight) -> AResult<(RuntimeUpper, ResidentPreloadUpper)> {
+    let storage = &cold.resident_storage;
+    let half_chunk_metal_bytes = cold
+        .ced
+        .as_ref()
+        .context("missing CED preload ledger")?
+        .priced_half_chunk_bytes;
+    let runtime = RuntimeUpper {
+        request_cpu_bytes: cold.request.cpu_bytes,
+        request_metal_bytes: cold.request.metal_bytes,
+        chunk_metal_bytes: cold
+            .full_incremental_metal_bytes
+            .checked_sub(half_chunk_metal_bytes)
+            .context("Full half ledger exceeds chunk ledger")?,
+        half_chunk_metal_bytes,
+        retained_and_seed_metal_bytes: cold.ced.as_ref().map_or(0, |ced| {
+            ced.incremental_metal_bytes - ced.priced_chunk_bytes
+        }),
+        binding_upload_hash_cpu_bytes: cold.runtime_cpu_bytes - cold.request.cpu_bytes,
+        cpu_bytes: cold.runtime_cpu_bytes,
+        metal_bytes: cold.runtime_metal_bytes,
+    };
     let windows: Vec<_> = storage
         .windows
         .iter()
@@ -204,39 +136,18 @@ fn resident_preload_upper(
             "private_shadow_bytes": planned.mapping_kind.private_bytes()})
         })
         .collect();
-    Ok(ResidentPreloadUpper {
+    let resident = ResidentPreloadUpper {
         storage_view_metal_bytes: storage.metal_view_bytes,
         private_shadow_cpu_bytes: storage.private_shadow_bytes,
-        bookkeeping_cpu_bytes: add(&[
-            64 * 1024 * 1024,
-            product(&[storage.windows.len() as u64, 4096])?,
-            product(&[gguf.tensors.len() as u64, 1024])?,
-        ])?,
-        // Shared source mappings alias the charged views, not another resident
-        // copy. Disk Engram is not prefetched; runtime rows have their own budget.
+        bookkeeping_cpu_bytes: cold.binding_cpu_bytes,
         planner_evidence: json!({"page_size": storage.page_size,
             "max_buffer_length": storage.max_buffer_length, "windows": windows,
             "shared_eof_window_count": storage.shared_eof_window_count,
             "private_window_count": storage.private_window_count,
             "disk_engram_bytes": storage.bytes.disk_engram,
             "source_mapping_charge": "shared views overlap; only full private shadow exposure is additional"}),
-    })
-}
-
-fn combined_upper(
-    resident: &ResidentPreloadUpper,
-    runtime: &RuntimeUpper,
-    capture: &CaptureCpuPlan,
-) -> AResult<(u64, u64)> {
-    Ok((
-        add(&[resident.storage_view_metal_bytes, runtime.metal_bytes])?,
-        add(&[
-            resident.private_shadow_cpu_bytes,
-            resident.bookkeeping_cpu_bytes,
-            runtime.cpu_bytes,
-            capture.total_bytes,
-        ])?,
-    ))
+    };
+    Ok((runtime, resident))
 }
 
 fn admission(ctx: &MetalContext, metal_bytes: u64, cpu_bytes: u64) -> AResult<Value> {
@@ -246,13 +157,16 @@ fn admission(ctx: &MetalContext, metal_bytes: u64, cpu_bytes: u64) -> AResult<Va
     if let Some(reason) = a.refusal() {
         return Err(reason.into());
     }
-    Ok(
-        json!({"metal_bytes": metal_bytes, "cpu_bytes": cpu_bytes, "reason": a.reason.as_str(),
+    Ok(admission_report(&a, metal_bytes, cpu_bytes))
+}
+
+fn admission_report(a: &metal::MetalMemoryAdmission, metal_bytes: u64, cpu_bytes: u64) -> Value {
+    let s = a.signals;
+    json!({"metal_bytes": metal_bytes, "cpu_bytes": cpu_bytes, "reason": a.reason.as_str(),
         "recommended_max_bytes": s.recommended_max_bytes, "current_allocated_bytes": s.current_allocated_bytes,
         "process_limit_remaining_bytes": s.process_limit_remaining_bytes,
         "host_budget": format!("{:?}", s.host_budget), "host_remaining_bytes": s.host_remaining_bytes(),
-        "raw_zero_process_limit_uses_validated_host_budget": true}),
-    )
+        "raw_zero_process_limit_uses_validated_host_budget": true})
 }
 
 fn geometry(gguf: &crate::gguf::GgufFile, p: &v41_gguf::Plan, n: usize) -> AResult<Geometry> {
@@ -307,6 +221,34 @@ fn source_identity() -> AResult<(PathBuf, Value)> {
     let (root, mut source) = provenance::source()?;
     let sources: &[(&str, &[u8])] = &[
         (SOURCE_PATH, include_bytes!("current_pair.rs")),
+        (
+            "crates/qwen-llm/src/deepseek_v41/forward.rs",
+            include_bytes!("../../../forward.rs"),
+        ),
+        (
+            "crates/qwen-llm/src/deepseek_v41/forward/preflight.rs",
+            include_bytes!("../../preflight.rs"),
+        ),
+        (
+            "crates/qwen-llm/src/deepseek_v41/forward/memory.rs",
+            include_bytes!("../../memory.rs"),
+        ),
+        (
+            "crates/qwen-llm/src/deepseek_v41/forward/prefill.rs",
+            include_bytes!("../../prefill.rs"),
+        ),
+        (
+            "crates/qwen-llm/src/deepseek_v41/forward/gpu_step.rs",
+            include_bytes!("../../gpu_step.rs"),
+        ),
+        (
+            "crates/qwen-llm/src/deepseek_v41/forward/gpu_step/ced.rs",
+            include_bytes!("../../gpu_step/ced.rs"),
+        ),
+        (
+            "crates/qwen-llm/src/deepseek_v41/forward/ced.rs",
+            include_bytes!("../../ced.rs"),
+        ),
         (
             "crates/qwen-llm/src/metal/host_budget.rs",
             include_bytes!(concat!(
@@ -652,13 +594,26 @@ fn run_pair() -> AResult<()> {
             &CedRequest::cold(n, n + STEPS),
         )?;
         let capture = capture_cpu_plan(g.vocab)?;
-        let runtime = runtime_upper(
+        let cold = preflight_cold_prefill(
             &ctx,
-            &planned,
-            &g,
-            &plan,
-            serde_json::to_vec(gguf.model.metadata())?.len() as u64,
+            &gguf,
+            n,
+            n + STEPS,
+            &[
+                PrefillExecution::FullForward,
+                PrefillExecution::ShrinkingCed,
+            ],
+            capture.total_bytes,
         )?;
+        ensure!(
+            cold.resident_storage.bytes == planned.bytes,
+            "resident storage payload inventory"
+        );
+        ensure!(
+            cold.ced.is_some(),
+            "current pair requires supported CED geometry"
+        );
+        let (runtime, resident) = preload_report(&cold)?;
         report["input"] = json!({"path": input_path, "source_raw_json_sha256": archive::sha(&bytes),
             "source_prompt_ids": frozen.prompt.len(), "source_continuation_ids": frozen.continuation.len(),
             "selected_ids_sha256": archive::json_sha(&serde_json::to_value(&input)?)?,
@@ -666,17 +621,26 @@ fn run_pair() -> AResult<()> {
             "source_stream": "frozen.prompt concatenated with frozen.continuation; no retokenization, sampling or argmax feedback"});
         report["memory"] = json!({"runtime_upper": runtime, "capture_cpu_plan": capture,
             "resident_storage_plan": null, "combined_preweight_admission": null,
+            "core_preflight": {"full_incremental_metal_bytes": cold.full_incremental_metal_bytes,
+                "full_incremental_cpu_bytes": cold.full_incremental_cpu_bytes, "ced": cold.ced,
+                "runtime_metal_bytes": cold.runtime_metal_bytes, "runtime_cpu_bytes": cold.runtime_cpu_bytes,
+                "binding_cpu_bytes": cold.binding_cpu_bytes, "caller_cpu_bytes": cold.caller_cpu_bytes,
+                "aggregation": "request plus max(Full, CED), one state at a time; not a sum over policies or repetitions",
+                "legacy_report_fields": "resident bookkeeping includes all binding CPU; runtime binding_upload_hash_cpu is incremental runtime CPU only",
+                "reservation": "none; all later loader, state and prefill gates remain required"},
             "strategy": "one resident import, one live KV state; retain Full logits+hashes only, consume during CED; no full-state archives"});
         report["artifact_before"] = artifact_identity(&gguf, &planned)?;
         report["device_facts"] = serde_json::to_value(ctx.device_facts())?;
         report["tensor_ops_status"] = json!(format!("{:?}", ctx.tensor_ops_status()));
         write_report(&mut report_file, &report)?;
-        let resident = resident_preload_upper(&ctx, &gguf, &planned)?;
-        let (metal_bytes, cpu_bytes) = combined_upper(&resident, &runtime, &capture)?;
         report["memory"]["resident_storage_plan"] = serde_json::to_value(&resident)?;
         report["memory"]["combined_upper"] =
-            json!({"metal_bytes": metal_bytes, "cpu_bytes": cpu_bytes});
-        report["memory"]["combined_preweight_admission"] = admission(&ctx, metal_bytes, cpu_bytes)?;
+            json!({"metal_bytes": cold.required_metal_bytes, "cpu_bytes": cold.required_cpu_bytes});
+        report["memory"]["combined_preweight_admission"] = admission_report(
+            &cold.admission,
+            cold.required_metal_bytes,
+            cold.required_cpu_bytes,
+        );
         report["stage"] = json!("preweight_admitted_not_complete");
         write_report(&mut report_file, &report)?;
         drop(bytes);
@@ -786,31 +750,6 @@ fn capture_and_combined_budget_charge_all_257_full_vocab_vectors() {
     assert_eq!(capture.total_bytes, 132_899_840 + 192 * 1024 * 1024);
     assert!(capture_cpu_plan(0).is_err());
     assert!(capture_cpu_plan(usize::MAX).is_err());
-    let resident = ResidentPreloadUpper {
-        storage_view_metal_bytes: 100,
-        private_shadow_cpu_bytes: 200,
-        bookkeeping_cpu_bytes: 400,
-        planner_evidence: Value::Null,
-    };
-    let runtime = RuntimeUpper {
-        request_cpu_bytes: 0,
-        request_metal_bytes: 0,
-        chunk_metal_bytes: 0,
-        half_chunk_metal_bytes: 0,
-        retained_and_seed_metal_bytes: 0,
-        binding_upload_hash_cpu_bytes: 0,
-        cpu_bytes: 500,
-        metal_bytes: 600,
-    };
-    assert_eq!(
-        combined_upper(&resident, &runtime, &capture).unwrap(),
-        (700, 1100 + capture.total_bytes)
-    );
-    let overflowing = ResidentPreloadUpper {
-        storage_view_metal_bytes: u64::MAX,
-        ..resident
-    };
-    assert!(combined_upper(&overflowing, &runtime, &capture).is_err());
 }
 
 #[test]

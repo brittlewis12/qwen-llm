@@ -8,10 +8,19 @@ pub(in super::super) fn decoder_chunk_widths(
     capacity: usize,
     rows: usize,
 ) -> Result<Vec<usize>> {
-    let c = &model.config;
+    decoder_chunk_widths_from_geometry(&model.config, model.layers.len(), capacity, rows)
+}
+
+pub(in super::super) fn decoder_chunk_widths_from_geometry(
+    c: &Config,
+    layers: usize,
+    capacity: usize,
+    rows: usize,
+) -> Result<Vec<usize>> {
+    validate_chunk_geometry(c, capacity, rows)?;
     let mut widths = vec![4 * c.hidden, c.hidden];
     widths.extend(prefill::HcRows::widths(c));
-    widths.extend(ffn_gpu::Rows::widths(c, model.layers.len()));
+    widths.extend(ffn_gpu::Rows::widths(c, layers));
     widths.extend(attention_gpu::Rows::widths_with_controls(c, capacity));
     widths.extend(attention_gpu::Rows::select_widths(c, capacity, rows));
     widths.extend(attention_gpu::Rows::tile_widths(c, rows)?);

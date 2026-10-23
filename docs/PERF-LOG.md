@@ -6,6 +6,22 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the current state and evidence index.
 
+## 2026-10-23 - V4.1 Attention Sink: Tensor-Ops Score/PV, +1.7-2.3%
+
+- Ported the stalled attention-tensor lane's `score_tensor`/`pv_tensor`
+  onto the 512-row sink tile. Same half-staged Q/K/V, slabs, softmax and
+  normalize; `matmul2d` per 16-key block. Selected only where the Metal 4
+  tensor tier exists and the tile has >=128 rows; `QWEN_V41_SINK_TENSOR=0`
+  restores the MMA kernels.
+- Same-binary ABCCBA: IQ3 pp2048 837.9 -> 852.3 (+1.72%), pp4096 796.9
+  -> 814.9 (+2.26%); Q2 838.2 -> 852.6 (+1.72%), 797.6 -> 816.0
+  (+2.31%). Fixture at 512 rows 3,418 -> 3,303 us (-3.4%); 256 rows
+  -6.1%; 32 rows +18% slower (hence the 128-row gate).
+- Held-text witness: mean NLL 2.146367 -> 2.154291 (+0.007924, +0.37%),
+  top-1 unchanged (218/384); reduction-order change, documented per
+  document. 46 V4.1 tests pass.
+- [ABBA, fixture, quality table and limits](bench/2026-10-23-v41-attn-tensor.md).
+
 ## 2026-10-23 - Fused Routed Gate+Up: Negative
 
 - One kernel staging the half activation once, running gate and up

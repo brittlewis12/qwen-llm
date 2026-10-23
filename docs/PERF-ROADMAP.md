@@ -26,7 +26,7 @@ expected effect, status. Status is one of `open`, `in flight (branch)`,
 `in flight` with your branch; a second lane finding it claimed reads the branch
 before building anything adjacent. This replaces relaying between sessions.
 
-### DeepSeek V4.1-Flash (main after the half activation copies: pp2048 Q2 839 / IQ3 837 tok/s, pp4096 Q2 805 / IQ3 799; decode rechecked tg32 Q2 43.2 / IQ3 41.0, depth tg32@d2048 41.6 from the prior landing)
+### DeepSeek V4.1-Flash (main after the tensor-ops attention sink: pp2048 Q2 853 / IQ3 852 tok/s, pp4096 Q2 816 / IQ3 815; decode rechecked tg32 Q2 43.2 / IQ3 41.0, depth tg32@d2048 41.6 from the prior landing)
 
 CED encoder-only bulk prefill is the leading architectural opportunity.
 Design/dependency recon: landed (2026-10-23 CED entry;
@@ -146,9 +146,15 @@ attention tiles at 34.7%. Re-sample after the next landing.
   at 512 rows; dropping the finite guard does not recover it, while
   removing the scaling returns to 1,294 us. The separate normalize pass
   (134 us, 134 MB read/write) is already the cheap form; keep it.
-- Attention sink tensor ops: independently time `score_mma`/`pv_mma`
-  substitution at the 512-row tile; the fusion route is closed and the
-  gather-vs-MMA attribution is still unmeasured: open.
+- Attention sink tensor ops: landed (2026-10-23 tensor-sink entry,
+  bench/2026-10-23-v41-attn-tensor.md). The Metal 4 tensor-ops
+  `score_tensor`/`pv_tensor` tile (matmul2d per 16-key block, same slabs,
+  softmax and normalize) runs at 512 rows: IQ3 pp2048 837.9 -> 852.3
+  (+1.72%), pp4096 796.9 -> 814.9 (+2.26%); Q2 838.2 -> 852.6 (+1.72%),
+  797.6 -> 816.0 (+2.31%). Fixture: 512 rows -3.4%, 256 rows -6.1%, 32
+  rows +18% slower, so selected only at >=128 rows on the tensor tier.
+  Held-text mean NLL +0.0079 (+0.37%), top-1 unchanged;
+  `QWEN_V41_SINK_TENSOR=0` restores the MMA kernels.
 - Maya-S artifact (`peasantsmith/DeepSeek-V4.1-Flash-1017-Maya-GGUF`,
   six shards, 339.5 GB): evaluated (2026-10-22 Maya entry,
   bench/2026-10-22-maya-s-eval.md). All 40 routed layers on the

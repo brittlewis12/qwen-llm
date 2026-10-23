@@ -238,6 +238,12 @@ fn aggregate_pressure_counts_cpu_reserve_and_releases_only_process_pressure() {
         current_allocated_bytes: 0,
         recommended_max_bytes: 1_000,
         process_limit_remaining_bytes: Some(remaining.get()),
+        host_budget: Some(qwen_llm::metal::HostMemoryBudget {
+            physical_bytes: 1024 << 30,
+            conservative_available_bytes: 1024 << 30,
+            external_gap_bytes: 0,
+            private_shadow_bytes: 0,
+        }),
     };
     let attempt = || {
         evaluate_metal_memory_admission_with_cpu_bytes(80, 30, 0, signals(), true)

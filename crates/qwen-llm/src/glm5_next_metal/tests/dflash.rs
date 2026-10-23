@@ -15,6 +15,12 @@ fn cpu_aggregate_admission_includes_cpu_and_one_safety_reserve() {
     use crate::metal::{MetalMemoryAdmissionReason, MetalMemorySignals};
     let safety = memory::DYNAMIC_RESERVE_BYTES;
     let signals = MetalMemorySignals {
+        host_budget: Some(crate::metal::HostMemoryBudget {
+            physical_bytes: 1024 << 30,
+            conservative_available_bytes: 1024 << 30,
+            external_gap_bytes: 0,
+            private_shadow_bytes: 0,
+        }),
         recommended_max_bytes: safety + 6,
         current_allocated_bytes: 0,
         process_limit_remaining_bytes: Some(safety + 11),
@@ -51,6 +57,12 @@ fn cpu_aggregate_admission_includes_cpu_and_one_safety_reserve() {
         ),
         (
             MetalMemorySignals {
+                host_budget: Some(crate::metal::HostMemoryBudget {
+                    physical_bytes: 1024 << 30,
+                    conservative_available_bytes: 1024 << 30,
+                    external_gap_bytes: 0,
+                    private_shadow_bytes: 0,
+                }),
                 recommended_max_bytes: safety + 5,
                 ..signals
             },

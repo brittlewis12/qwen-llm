@@ -4028,6 +4028,7 @@ mod tests {
                     .gguf_no_copy_geometry_with_observer(
                         Arc::clone(&mmap),
                         geometry,
+                        GgufMappingOwnership::Shared,
                         move |pointer, length| {
                             if pointer.as_ptr() as usize != expected_pointer
                                 || length != expected_length
@@ -4162,6 +4163,7 @@ mod tests {
                         window.mmap_offset as usize,
                         window.length,
                         32,
+                        GgufMappingOwnership::Shared,
                         move |pointer, length| {
                             calls[window_index].fetch_add(1, Ordering::Relaxed);
                             if pointer.as_ptr() as usize != expected_pointer

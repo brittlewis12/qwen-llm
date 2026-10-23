@@ -861,6 +861,12 @@ mod tests {
             2,
             0,
             qwen_llm::metal::MetalMemorySignals {
+                host_budget: Some(qwen_llm::metal::HostMemoryBudget {
+                    physical_bytes: 1024 << 30,
+                    conservative_available_bytes: 1024 << 30,
+                    external_gap_bytes: 0,
+                    private_shadow_bytes: 0,
+                }),
                 recommended_max_bytes: 1,
                 current_allocated_bytes: 0,
                 process_limit_remaining_bytes: Some(1),

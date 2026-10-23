@@ -817,7 +817,7 @@ impl GenerationBackend for DeepSeekV4Backend {
 
         super::transport_memory::admit_resident_transport(
             sink.transport_reserve_bytes(),
-            self.ctx.memory_signals().process_limit_remaining_bytes,
+            qwen_llm::metal::effective_host_memory_remaining_bytes(),
         )?;
 
         let residency = self.residency.take().ok_or_else(|| {
@@ -921,7 +921,7 @@ impl DeepSeekV4Backend {
                 // model work; session scratch was admitted before construction.
                 super::transport_memory::admit_resident_transport(
                     sink.transport_reserve_bytes(),
-                    owner.ctx.memory_signals().process_limit_remaining_bytes,
+                    qwen_llm::metal::effective_host_memory_remaining_bytes(),
                 )?;
                 owner.decode_with_session(
                     session,
@@ -1341,6 +1341,12 @@ mod tests {
         };
 
         let signals = MetalMemorySignals {
+            host_budget: Some(qwen_llm::metal::HostMemoryBudget {
+                physical_bytes: 1024 << 30,
+                conservative_available_bytes: 1024 << 30,
+                external_gap_bytes: 0,
+                private_shadow_bytes: 0,
+            }),
             recommended_max_bytes: 1_000,
             current_allocated_bytes: 0,
             process_limit_remaining_bytes: Some(0),

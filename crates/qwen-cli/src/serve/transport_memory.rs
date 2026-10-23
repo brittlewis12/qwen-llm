@@ -9,7 +9,7 @@
 //! input and GPU failures never reach these mappers.
 
 use super::items::ServeError;
-use qwen_llm::metal::{MemoryAdmissionDenied, MetalMemoryAdmissionReason};
+use qwen_llm::metal::{HostMemoryHeadroom, MemoryAdmissionDenied, MetalMemoryAdmissionReason};
 
 /// Status, error type and code of a refused admission's reason.
 pub(crate) fn refusal_kind(
@@ -17,14 +17,20 @@ pub(crate) fn refusal_kind(
 ) -> (u16, &'static str, &'static str) {
     use MetalMemoryAdmissionReason as R;
     match reason {
-        R::WorkingSetInsufficient | R::ProcessInsufficient | R::BothInsufficient => {
-            (503, "server_busy", "memory_admission_denied")
+        R::WorkingSetInsufficient
+        | R::ProcessInsufficient
+        | R::BothInsufficient
+        | R::HostInsufficient
+        | R::HostAvailabilityInsufficient => (503, "server_busy", "memory_admission_denied"),
+        R::ProcessSignalUnavailable | R::HostSignalUnavailable => {
+            (500, "server_error", "memory_signal_unavailable")
         }
-        R::ProcessSignalUnavailable => (500, "server_error", "memory_signal_unavailable"),
-        R::InvalidWorkingSetSignal => (500, "server_error", "memory_signal_invalid"),
+        R::InvalidWorkingSetSignal | R::InvalidHostSignal => {
+            (500, "server_error", "memory_signal_invalid")
+        }
         R::RequiredBytesOverflow => (500, "server_error", "memory_size_overflow"),
         // A refusal is built only from a decision that did not admit.
-        R::AdmittedWithProcessBudget | R::AdmittedProcessBudgetOmitted => {
+        R::AdmittedWithProcessBudget | R::AdmittedWithHostBudget => {
             (500, "server_error", "memory_admission_inconsistent")
         }
     }
@@ -49,21 +55,57 @@ pub(super) fn combined_reserve(durable: u64, transport: u64) -> Result<u64, Serv
         .ok_or_else(|| ServeError::server_error("combined CPU reservation overflow"))
 }
 
-pub(super) fn admit_resident_transport(
+#[derive(Debug)]
+pub(super) struct CpuMemoryRefusal {
+    pub(super) reason: MetalMemoryAdmissionReason,
+    pub(super) error: ServeError,
+}
+
+/// Keep the binding CPU limit typed until snapshot relief and fresh admission
+/// finish. HTTP pressure alone does not say whether CPU eviction can help.
+pub(super) fn admit_resident_transport_with_headroom(
     bytes: u64,
-    process_remaining: Option<u64>,
-) -> Result<(), ServeError> {
-    // Match the resident loaders' convention: a reported zero means this OS
-    // omits the process budget, not zero usable RAM. A missing signal fails
-    // closed as unavailable telemetry (500), not as memory pressure (503).
-    if bytes == 0 || process_remaining.is_some_and(|remaining| remaining == 0 || remaining >= bytes)
-    {
+    headroom: Option<HostMemoryHeadroom>,
+) -> Result<(), CpuMemoryRefusal> {
+    if bytes == 0 {
         return Ok(());
     }
-    let reason = if process_remaining.is_none() {
-        MetalMemoryAdmissionReason::ProcessSignalUnavailable
+    let reason = headroom.map_or(
+        MetalMemoryAdmissionReason::HostSignalUnavailable,
+        |headroom| headroom.admission_reason(bytes),
+    );
+    if reason.is_admitted() {
+        return Ok(());
+    }
+    let (status, error_type, code) = refusal_kind(reason);
+    Err(CpuMemoryRefusal {
+        reason,
+        error: ServeError {
+            status,
+            error_type,
+            code: Some(code),
+            param: None,
+            message: format!(
+                "transport CPU memory admission denied ({}): required={bytes} headroom={headroom:?}",
+                reason.as_str(),
+            ),
+        },
+    })
+}
+
+pub(super) fn admit_resident_transport(
+    bytes: u64,
+    host_remaining: Option<u64>,
+) -> Result<(), ServeError> {
+    // This is effective headroom, not the raw Mach process-limit field.
+    // A derived zero is exhaustion and cannot omit the host budget.
+    if bytes == 0 || host_remaining.is_some_and(|remaining| remaining >= bytes) {
+        return Ok(());
+    }
+    let reason = if host_remaining.is_none() {
+        MetalMemoryAdmissionReason::HostSignalUnavailable
     } else {
-        MetalMemoryAdmissionReason::ProcessInsufficient
+        MetalMemoryAdmissionReason::HostInsufficient
     };
     let (status, error_type, code) = refusal_kind(reason);
     Err(ServeError {
@@ -72,7 +114,7 @@ pub(super) fn admit_resident_transport(
         code: Some(code),
         param: None,
         message: format!(
-            "transport CPU memory admission denied: required={bytes} process_remaining={process_remaining:?}"
+            "transport CPU memory admission denied: required={bytes} host_remaining={host_remaining:?}"
         ),
     })
 }
@@ -82,6 +124,39 @@ mod tests {
     use super::*;
 
     #[test]
+    fn typed_cpu_transport_keeps_binding_reason_and_zero_allowance() {
+        use qwen_llm::metal::{HostMemoryBudget, MetalMemoryAdmissionReason as R};
+        assert!(admit_resident_transport_with_headroom(0, None).is_ok());
+        let missing = admit_resident_transport_with_headroom(100, None).unwrap_err();
+        assert_eq!(missing.reason, R::HostSignalUnavailable);
+        assert_eq!(missing.error.status, 500);
+        for (available, current, process, reason) in [
+            (1_000, 701, 0, R::HostInsufficient),
+            (299, 100, 0, R::HostAvailabilityInsufficient),
+            (1_000, 100, 99, R::ProcessInsufficient),
+        ] {
+            let headroom = HostMemoryHeadroom::from_budget(
+                HostMemoryBudget {
+                    physical_bytes: 1_000,
+                    conservative_available_bytes: available,
+                    external_gap_bytes: 0,
+                    private_shadow_bytes: 0,
+                },
+                current,
+                process,
+            );
+            let denied = admit_resident_transport_with_headroom(100, headroom).unwrap_err();
+            assert_eq!(denied.reason, reason);
+            assert_eq!(
+                (denied.error.status, denied.error.code),
+                (503, Some("memory_admission_denied"))
+            );
+            assert!(denied.error.message.contains(reason.as_str()));
+            assert!(admit_resident_transport_with_headroom(99, headroom).is_ok());
+        }
+    }
+
+    #[test]
     fn transport_and_durable_reservations_add_without_overflow() {
         assert_eq!(combined_reserve(100, 25).unwrap(), 125);
         assert_eq!(combined_reserve(100, 0).unwrap(), 100);
@@ -89,12 +164,12 @@ mod tests {
     }
 
     #[test]
-    fn resident_transport_uses_process_budget_without_pricing_cpu_as_metal() {
+    fn resident_transport_uses_effective_host_budget_without_pricing_cpu_as_metal() {
         assert!(admit_resident_transport(0, None).is_ok());
         assert!(admit_resident_transport(100, None).is_err());
         assert!(admit_resident_transport(100, Some(99)).is_err());
         assert!(admit_resident_transport(100, Some(100)).is_ok());
-        assert!(admit_resident_transport(100, Some(0)).is_ok());
+        assert!(admit_resident_transport(100, Some(0)).is_err());
     }
 
     /// Pressure is 503; a missing process signal is unavailable telemetry
@@ -105,6 +180,11 @@ mod tests {
         assert_eq!(
             (pressure.status, pressure.error_type, pressure.code),
             (503, "server_busy", Some("memory_admission_denied"))
+        );
+        let exhausted = admit_resident_transport(1, Some(0)).unwrap_err();
+        assert_eq!(
+            (exhausted.status, exhausted.code),
+            (503, Some("memory_admission_denied"))
         );
         let missing = admit_resident_transport(100, None).unwrap_err();
         assert_eq!(
@@ -118,6 +198,12 @@ mod tests {
     fn memory_refusals_map_by_reason() {
         use qwen_llm::metal::{MetalMemoryAdmissionReason as R, MetalMemorySignals};
         let signals = MetalMemorySignals {
+            host_budget: Some(qwen_llm::metal::HostMemoryBudget {
+                physical_bytes: 1024 << 30,
+                conservative_available_bytes: 1024 << 30,
+                external_gap_bytes: 0,
+                private_shadow_bytes: 0,
+            }),
             recommended_max_bytes: 1 << 30,
             current_allocated_bytes: 0,
             process_limit_remaining_bytes: Some(1 << 20),
@@ -126,12 +212,20 @@ mod tests {
             (R::WorkingSetInsufficient, 503, "memory_admission_denied"),
             (R::ProcessInsufficient, 503, "memory_admission_denied"),
             (R::BothInsufficient, 503, "memory_admission_denied"),
+            (R::HostInsufficient, 503, "memory_admission_denied"),
+            (
+                R::HostAvailabilityInsufficient,
+                503,
+                "memory_admission_denied",
+            ),
             (
                 R::ProcessSignalUnavailable,
                 500,
                 "memory_signal_unavailable",
             ),
             (R::InvalidWorkingSetSignal, 500, "memory_signal_invalid"),
+            (R::HostSignalUnavailable, 500, "memory_signal_unavailable"),
+            (R::InvalidHostSignal, 500, "memory_signal_invalid"),
             (R::RequiredBytesOverflow, 500, "memory_size_overflow"),
         ] {
             let denied = MemoryAdmissionDenied::new(
@@ -164,78 +258,53 @@ mod tests {
 
     #[test]
     fn pressure_release_retries_once_but_telemetry_refusal_does_not_release() {
-        use qwen_llm::metal::{
-            MemoryAdmissionDenied, MetalMemoryAdmissionReason as Reason, MetalMemorySignals,
-        };
-
-        let signals = MetalMemorySignals {
-            recommended_max_bytes: 1 << 30,
-            current_allocated_bytes: 0,
-            process_limit_remaining_bytes: Some(0),
-        };
-        let denied = |reason| {
-            MemoryAdmissionDenied::new(reason, Some(512), signals, Some(1 << 30))
-                .expect("test reason refuses admission")
-        };
-
-        let attempts = std::cell::Cell::new(0);
-        let releases = std::cell::Cell::new(0);
-        let attempt = || {
-            let attempt = attempts.get() + 1;
-            attempts.set(attempt);
-            if attempt == 1 {
-                Err(memory_refusal(
-                    "DS4 session",
-                    &denied(Reason::ProcessInsufficient),
-                ))
+        for missing in [false, true] {
+            let attempts = std::cell::Cell::new(0);
+            let releases = std::cell::Cell::new(0);
+            let attempt = || {
+                attempts.set(attempts.get() + 1);
+                let headroom = (!missing).then(|| {
+                    HostMemoryHeadroom::from_budget(
+                        qwen_llm::metal::HostMemoryBudget {
+                            physical_bytes: 1_000,
+                            conservative_available_bytes: 1_000,
+                            external_gap_bytes: 0,
+                            private_shadow_bytes: 0,
+                        },
+                        100,
+                        if releases.get() > 0 { 100 } else { 99 },
+                    )
+                    .unwrap()
+                });
+                admit_resident_transport_with_headroom(100, headroom)
+            };
+            let result = crate::serve::memory_relief::retry(
+                "test",
+                attempt(),
+                |result| {
+                    result
+                        .as_ref()
+                        .err()
+                        .map(|denied| (denied.reason, u64::MAX))
+                },
+                |_| {
+                    releases.set(releases.get() + 1);
+                    crate::serve::memory_relief::test_evicted(10)
+                },
+                attempt,
+            );
+            assert_eq!(attempts.get(), if missing { 1 } else { 2 });
+            assert_eq!(releases.get(), usize::from(!missing));
+            if missing {
+                let denied = result.unwrap_err();
+                assert_eq!(
+                    denied.reason,
+                    MetalMemoryAdmissionReason::HostSignalUnavailable
+                );
+                assert_eq!(denied.error.status, 500);
             } else {
-                Ok("admitted")
+                assert!(result.is_ok());
             }
-        };
-        let result = crate::serve::memory_relief::retry(
-            "test",
-            attempt(),
-            |result| {
-                result.as_ref().err().and_then(|error| {
-                    (error.status == 503 && error.code == Some("memory_admission_denied"))
-                        .then_some((Reason::ProcessInsufficient, u64::MAX))
-                })
-            },
-            |bytes| {
-                releases.set(releases.get() + 1);
-                crate::serve::memory_relief::test_evicted(bytes)
-            },
-            attempt,
-        );
-        assert_eq!(result.unwrap(), "admitted");
-        assert_eq!(attempts.get(), 2);
-        assert_eq!(releases.get(), 1);
-
-        let attempts = std::cell::Cell::new(0);
-        let releases = std::cell::Cell::new(0);
-        let expected = memory_refusal("DS4 session", &denied(Reason::ProcessSignalUnavailable));
-        let attempt = || {
-            attempts.set(attempts.get() + 1);
-            Err(expected.clone())
-        };
-        let result: Result<(), ServeError> = crate::serve::memory_relief::retry(
-            "test",
-            attempt(),
-            |result| {
-                result.as_ref().err().and_then(|error| {
-                    (error.status == 503 && error.code == Some("memory_admission_denied"))
-                        .then_some((Reason::ProcessInsufficient, u64::MAX))
-                })
-            },
-            |bytes| {
-                releases.set(releases.get() + 1);
-                crate::serve::memory_relief::test_evicted(bytes)
-            },
-            attempt,
-        );
-        let error = result.unwrap_err();
-        assert_eq!(error, expected);
-        assert_eq!(attempts.get(), 1);
-        assert_eq!(releases.get(), 0);
+        }
     }
 }

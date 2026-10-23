@@ -158,8 +158,8 @@ mod tests {
             (unreadable.status, unreadable.code),
             (500, Some("memory_signal_unavailable"))
         );
-        // A reported zero is an omitted budget (Batch 3a convention).
-        assert!(admit_growth(30, 10, Some(0)).is_ok());
+        // Effective zero is exhausted even on a host whose raw limit is zero.
+        assert!(admit_growth(30, 10, Some(0)).is_err());
         assert_eq!(grown_capacity(0, 1, 64), Some(64));
         assert_eq!(grown_capacity(64, 65, 64), Some(128));
         assert_eq!(grown_capacity(64, 1000, 64), Some(1000));

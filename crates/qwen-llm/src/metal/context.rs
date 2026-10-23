@@ -258,16 +258,6 @@ pub(crate) fn open_metal_process_lease(
     })
 }
 
-pub fn host_physical_memory_bytes() -> Option<u64> {
-    // SAFETY: sysconf has no pointer arguments for these selectors.
-    let pages = unsafe { libc::sysconf(libc::_SC_PHYS_PAGES) };
-    // SAFETY: sysconf has no pointer arguments for these selectors.
-    let page_bytes = unsafe { libc::sysconf(libc::_SC_PAGESIZE) };
-    (pages > 0 && page_bytes > 0)
-        .then(|| (pages as u64).checked_mul(page_bytes as u64))
-        .flatten()
-}
-
 pub(crate) fn host_wired_memory_is_unsafe(wired_bytes: u64, physical_bytes: u64) -> bool {
     physical_bytes > 0 && wired_bytes >= physical_bytes / UNSAFE_WIRED_MEMORY_DIVISOR
 }
@@ -391,10 +381,12 @@ impl MetalDeviceProbe {
     }
 
     pub fn memory_signals(&self) -> MetalMemorySignals {
+        let _transaction = METAL_ALLOCATION_TRANSACTION.lock();
         MetalMemorySignals {
             recommended_max_bytes: self.facts.recommended_max_working_set_bytes,
             current_allocated_bytes: self.device.currentAllocatedSize() as u64,
             process_limit_remaining_bytes: MetalContext::process_limit_bytes_remaining(),
+            host_budget: capture_host_memory_budget(),
         }
     }
 
@@ -479,38 +471,59 @@ pub struct MetalMemorySignals {
     pub recommended_max_bytes: u64,
     pub current_allocated_bytes: u64,
     pub process_limit_remaining_bytes: Option<u64>,
+    pub host_budget: Option<HostMemoryBudget>,
+}
+
+impl MetalMemorySignals {
+    pub fn effective_device_usage(self) -> Option<u64> {
+        self.host_budget?
+            .effective_device_usage(self.current_allocated_bytes)
+    }
+
+    pub fn host_remaining_bytes(self) -> Option<u64> {
+        self.host_budget?
+            .remaining_bytes(self.current_allocated_bytes)
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum MetalMemoryAdmissionReason {
     AdmittedWithProcessBudget,
-    AdmittedProcessBudgetOmitted,
+    AdmittedWithHostBudget,
     RequiredBytesOverflow,
     InvalidWorkingSetSignal,
     ProcessSignalUnavailable,
+    HostSignalUnavailable,
+    InvalidHostSignal,
     WorkingSetInsufficient,
     ProcessInsufficient,
     BothInsufficient,
+    HostInsufficient,
+    HostAvailabilityInsufficient,
 }
 
 impl MetalMemoryAdmissionReason {
     pub fn as_str(self) -> &'static str {
         match self {
             Self::AdmittedWithProcessBudget => "admitted_with_process_budget",
-            Self::AdmittedProcessBudgetOmitted => "admitted_process_budget_omitted",
+            Self::AdmittedWithHostBudget => "admitted_with_host_budget",
             Self::RequiredBytesOverflow => "required_bytes_overflow",
             Self::InvalidWorkingSetSignal => "invalid_working_set_signal",
             Self::ProcessSignalUnavailable => "process_signal_unavailable",
+            Self::HostSignalUnavailable => "host_signal_unavailable",
+            Self::InvalidHostSignal => "invalid_host_signal",
             Self::WorkingSetInsufficient => "working_set_insufficient",
             Self::ProcessInsufficient => "process_insufficient",
             Self::BothInsufficient => "both_insufficient",
+            Self::HostInsufficient => "host_insufficient",
+            Self::HostAvailabilityInsufficient => "host_availability_insufficient",
         }
     }
 
     pub fn is_admitted(self) -> bool {
         matches!(
             self,
-            Self::AdmittedWithProcessBudget | Self::AdmittedProcessBudgetOmitted
+            Self::AdmittedWithProcessBudget | Self::AdmittedWithHostBudget
         )
     }
 
@@ -520,7 +533,11 @@ impl MetalMemoryAdmissionReason {
     pub fn is_pressure(self) -> bool {
         matches!(
             self,
-            Self::WorkingSetInsufficient | Self::ProcessInsufficient | Self::BothInsufficient
+            Self::WorkingSetInsufficient
+                | Self::ProcessInsufficient
+                | Self::BothInsufficient
+                | Self::HostInsufficient
+                | Self::HostAvailabilityInsufficient
         )
     }
 }
@@ -544,11 +561,13 @@ impl std::fmt::Display for MemoryAdmissionDenied {
         let bytes = |value: Option<u64>| value.map_or("unknown".to_string(), |b| b.to_string());
         write!(
             f,
-            "memory admission denied ({}): required {} bytes, working-set headroom {} bytes, process remaining {} bytes",
+            "memory admission denied ({}): required {} bytes, working-set headroom {} bytes, process remaining {} bytes, host remaining {} bytes, host budget {:?}",
             self.reason.as_str(),
             bytes(self.required_bytes),
             bytes(self.working_set_headroom_bytes),
             bytes(self.signals.process_limit_remaining_bytes),
+            bytes(self.signals.host_remaining_bytes()),
+            self.signals.host_budget,
         )
     }
 }
@@ -584,6 +603,12 @@ impl MemoryAdmissionDenied {
 /// #     recommended_max_bytes: 1,
 /// #     current_allocated_bytes: 0,
 /// #     process_limit_remaining_bytes: Some(1),
+/// #     host_budget: Some(qwen_llm::metal::HostMemoryBudget {
+/// #         physical_bytes: 1024,
+/// #         conservative_available_bytes: 1024,
+/// #         external_gap_bytes: 0,
+/// #         private_shadow_bytes: 0,
+/// #     }),
 /// # };
 /// let _ = MetalMemoryAdmission {
 ///     admitted: false,
@@ -649,33 +674,90 @@ pub fn evaluate_metal_memory_admission_with_cpu_bytes(
     signals: MetalMemorySignals,
     allow_zero_process_budget: bool,
 ) -> MetalMemoryAdmission {
+    evaluate_memory_admission(
+        metal_upper_bytes,
+        cpu_upper_bytes,
+        reserve_bytes,
+        signals,
+        allow_zero_process_budget,
+        false,
+    )
+}
+
+fn evaluate_memory_admission(
+    metal_upper_bytes: u64,
+    cpu_upper_bytes: u64,
+    reserve_bytes: u64,
+    signals: MetalMemorySignals,
+    allow_zero_process_budget: bool,
+    allocation_complete: bool,
+) -> MetalMemoryAdmission {
     let required_bytes = metal_upper_bytes
         .checked_add(cpu_upper_bytes)
         .and_then(|bytes| bytes.checked_add(reserve_bytes));
     let metal_required_bytes = metal_upper_bytes.checked_add(reserve_bytes);
-    let working_set_headroom_bytes = signals
-        .recommended_max_bytes
-        .checked_sub(signals.current_allocated_bytes);
+    let working_set_headroom_bytes = signals.recommended_max_bytes.checked_sub(
+        signals
+            .effective_device_usage()
+            .unwrap_or(signals.current_allocated_bytes),
+    );
     let reason = match (
         required_bytes,
         metal_required_bytes,
         working_set_headroom_bytes,
     ) {
         (None, _, _) | (_, None, _) => MetalMemoryAdmissionReason::RequiredBytesOverflow,
+        _ if signals.host_budget.is_none() => MetalMemoryAdmissionReason::HostSignalUnavailable,
+        _ if signals.host_remaining_bytes().is_none() => {
+            MetalMemoryAdmissionReason::InvalidHostSignal
+        }
+        _ if signals.host_budget.is_some_and(|host| {
+            host.within_ceiling(signals.current_allocated_bytes)
+                .is_none()
+                || host.within_availability().is_none()
+        }) =>
+        {
+            MetalMemoryAdmissionReason::InvalidHostSignal
+        }
         (Some(_), Some(_), _) if signals.recommended_max_bytes == 0 => {
             MetalMemoryAdmissionReason::InvalidWorkingSetSignal
         }
         (Some(_), Some(_), None) => MetalMemoryAdmissionReason::InvalidWorkingSetSignal,
         (Some(required), Some(metal_required), Some(working_set_headroom)) => {
-            let working_set_fits =
-                working_set_headroom > 0 && metal_required <= working_set_headroom;
+            let working_set_fits = (allocation_complete || working_set_headroom > 0)
+                && metal_required <= working_set_headroom;
+            let host_remaining = signals
+                .host_remaining_bytes()
+                .expect("validated host signal");
+            let host = signals.host_budget.expect("validated host signal");
+            let host_ceiling_fits = host.within_ceiling(signals.current_allocated_bytes)
+                == Some(true)
+                && required
+                    <= host
+                        .ceiling_remaining_bytes(signals.current_allocated_bytes)
+                        .expect("validated host signal");
+            let host_availability_fits = host.within_availability() == Some(true)
+                && (allocation_complete || host_remaining > 0)
+                && required <= host_remaining;
             match signals.process_limit_remaining_bytes {
                 None => MetalMemoryAdmissionReason::ProcessSignalUnavailable,
-                Some(0) => match (working_set_fits, allow_zero_process_budget) {
-                    (true, true) => MetalMemoryAdmissionReason::AdmittedProcessBudgetOmitted,
-                    (false, true) => MetalMemoryAdmissionReason::WorkingSetInsufficient,
-                    (_, false) => MetalMemoryAdmissionReason::ProcessSignalUnavailable,
-                },
+                Some(0) if !allow_zero_process_budget => {
+                    MetalMemoryAdmissionReason::ProcessSignalUnavailable
+                }
+                Some(_) if !host_ceiling_fits => MetalMemoryAdmissionReason::HostInsufficient,
+                Some(_) if !host_availability_fits && working_set_fits => {
+                    MetalMemoryAdmissionReason::HostAvailabilityInsufficient
+                }
+                Some(_) if !host_availability_fits => {
+                    MetalMemoryAdmissionReason::WorkingSetInsufficient
+                }
+                Some(0) => {
+                    if working_set_fits {
+                        MetalMemoryAdmissionReason::AdmittedWithHostBudget
+                    } else {
+                        MetalMemoryAdmissionReason::WorkingSetInsufficient
+                    }
+                }
                 Some(process_available) => {
                     let process_fits = required <= process_available;
                     match (working_set_fits, process_fits) {
@@ -713,6 +795,12 @@ pub fn evaluate_metal_memory_admission(
     )
 }
 
+fn completed_external_import_admission(signals: MetalMemorySignals) -> MetalMemoryAdmission {
+    // No new demand remains. Exact exhaustion is valid, but a saturated
+    // remaining-byte counter alone cannot distinguish it from overshoot.
+    evaluate_memory_admission(0, 0, 0, signals, true, true)
+}
+
 unsafe impl Send for MetalContext {}
 unsafe impl Sync for MetalContext {}
 
@@ -731,6 +819,7 @@ impl MetalContext {
         let mut info = std::mem::MaybeUninit::<TaskVmInfo>::zeroed();
         let mut count =
             u32::try_from(std::mem::size_of::<TaskVmInfo>() / std::mem::size_of::<u32>()).ok()?;
+        let capacity = count;
         // SAFETY: `info` is writable and large enough for `count` natural_t
         // words. The Mach call initializes the returned revision on success.
         let result = unsafe {
@@ -746,7 +835,7 @@ impl MetalContext {
                 / std::mem::size_of::<u32>(),
         )
         .ok()?;
-        if result != 0 || count < limit_count {
+        if result != 0 || count < limit_count || count > capacity {
             return None;
         }
         // SAFETY: A successful rev4 response initialized the packed field.
@@ -754,10 +843,12 @@ impl MetalContext {
     }
 
     pub fn memory_signals(&self) -> MetalMemorySignals {
+        let _transaction = METAL_ALLOCATION_TRANSACTION.lock();
         MetalMemorySignals {
             recommended_max_bytes: self.recommended_max_working_set_size(),
             current_allocated_bytes: self.current_allocated_size(),
             process_limit_remaining_bytes: Self::process_limit_bytes_remaining(),
+            host_budget: capture_host_memory_budget(),
         }
     }
 
@@ -1058,6 +1149,8 @@ impl MetalContext {
         Ok(buf)
     }
 
+    /// The caller must pass an immutable MAP_SHARED mapping. Private mappings
+    /// must use gguf_no_copy_window_with_ownership and declare their full span.
     pub(crate) fn gguf_no_copy_window(
         &self,
         mmap: Arc<Mmap>,
@@ -1072,6 +1165,27 @@ impl MetalContext {
             mmap_offset,
             length,
             required_alignment,
+            GgufMappingOwnership::Shared,
+            |_pointer, _length| {},
+        )
+    }
+
+    pub(crate) fn gguf_no_copy_window_with_ownership(
+        &self,
+        mmap: Arc<Mmap>,
+        shard_idx: usize,
+        mmap_offset: usize,
+        length: usize,
+        required_alignment: usize,
+        ownership: GgufMappingOwnership,
+    ) -> Result<MetalGgufBacking, MetalError> {
+        self.gguf_no_copy_window_with_observer(
+            mmap,
+            shard_idx,
+            mmap_offset,
+            length,
+            required_alignment,
+            ownership,
             |_pointer, _length| {},
         )
     }
@@ -1111,13 +1225,17 @@ impl MetalContext {
         let deallocator_mismatches = Arc::new(AtomicUsize::new(0));
         let calls = Arc::clone(&deallocator_calls);
         let mismatches = Arc::clone(&deallocator_mismatches);
-        let backing =
-            self.gguf_no_copy_geometry_with_observer(mmap, geometry, move |pointer, length| {
+        let backing = self.gguf_no_copy_geometry_with_observer(
+            mmap,
+            geometry,
+            GgufMappingOwnership::Shared,
+            move |pointer, length| {
                 if pointer.as_ptr() as usize != expected_pointer || length != expected_length {
                     mismatches.fetch_add(1, Ordering::Relaxed);
                 }
                 calls.fetch_add(1, Ordering::Release);
-            })?;
+            },
+        )?;
         let probe = DiagnosticGgufBlitReleaseProbe {
             weak: Weak::from_retained(&backing.buffer),
             deallocator_calls,
@@ -1141,9 +1259,15 @@ impl MetalContext {
         let mapped_len = mmap.len();
         let geometry =
             GgufBackingGeometry::new(shard_idx, mapped_len, page_size, required_alignment)?;
-        self.gguf_no_copy_geometry_with_observer(mmap, geometry, observer)
+        self.gguf_no_copy_geometry_with_observer(
+            mmap,
+            geometry,
+            GgufMappingOwnership::Shared,
+            observer,
+        )
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn gguf_no_copy_window_with_observer<F>(
         &self,
         mmap: Arc<Mmap>,
@@ -1151,6 +1275,7 @@ impl MetalContext {
         mmap_offset: usize,
         length: usize,
         required_alignment: usize,
+        ownership: GgufMappingOwnership,
         observer: F,
     ) -> Result<MetalGgufBacking, MetalError>
     where
@@ -1164,13 +1289,14 @@ impl MetalContext {
             host_page_size()?,
             required_alignment,
         )?;
-        self.gguf_no_copy_geometry_with_observer(mmap, geometry, observer)
+        self.gguf_no_copy_geometry_with_observer(mmap, geometry, ownership, observer)
     }
 
     pub(crate) fn gguf_no_copy_geometry_with_observer<F>(
         &self,
         mmap: Arc<Mmap>,
         geometry: GgufBackingGeometry,
+        ownership: GgufMappingOwnership,
         observer: F,
     ) -> Result<MetalGgufBacking, MetalError>
     where
@@ -1198,11 +1324,20 @@ impl MetalContext {
             )));
         }
 
+        let length = u64::try_from(geometry.exposed_len())
+            .map_err(|_| MetalError::GgufNoCopy("import length exceeds u64".into()))?;
+        let shadow = ownership.shadow_bytes(length)?;
+        let before = self.memory_signals();
+        admit_external_import(length, shadow, before)?;
+        let charge = ExternalMemoryCharge::reserve(length, shadow)?;
+        let resource_charge = Arc::clone(&charge);
+
         fn assert_send_sync<T: Send + Sync>(_: &T) {}
         assert_send_sync(&mmap);
         let keepalive = Arc::clone(&mmap);
         let deallocator: RcBlock<dyn Fn(NonNull<c_void>, usize)> =
             RcBlock::new(move |pointer: NonNull<c_void>, length: usize| {
+                resource_charge.release();
                 observer(pointer, length);
                 let _ = &keepalive;
             });
@@ -1219,8 +1354,24 @@ impl MetalContext {
                     MTLResourceOptions::StorageModeShared,
                     Some(&deallocator),
                 )
+        };
+        let Some(buffer) = buffer else {
+            charge.release();
+            return Err(MetalError::NoBuffer(geometry.exposed_len()));
+        };
+        // The M4 tiny witness matched these counters, not all drivers or sizes.
+        // Contradictory observations receive no accounting credit. This ledger
+        // corrects API coverage; it does not measure distinct physical pages.
+        let allocated = (buffer.allocatedSize() as u64).min(length);
+        let observed = self
+            .current_allocated_size()
+            .saturating_sub(before.current_allocated_bytes);
+        if observed >= allocated {
+            charge.credit_allocated(allocated);
         }
-        .ok_or(MetalError::NoBuffer(geometry.exposed_len()))?;
+        if let Some(denied) = completed_external_import_admission(self.memory_signals()).refusal() {
+            return Err(denied.into());
+        }
         Ok(MetalGgufBacking { buffer, geometry })
     }
 
@@ -1608,6 +1759,12 @@ mod tests {
     #[test]
     fn cpu_only_admission_bytes_do_not_consume_metal_headroom() {
         let signals = MetalMemorySignals {
+            host_budget: Some(crate::metal::HostMemoryBudget {
+                physical_bytes: 1024 << 30,
+                conservative_available_bytes: 1024 << 30,
+                external_gap_bytes: 0,
+                private_shadow_bytes: 0,
+            }),
             recommended_max_bytes: 1_000,
             current_allocated_bytes: 700,
             process_limit_remaining_bytes: Some(1_000),
@@ -1690,13 +1847,13 @@ mod tests {
     }
 
     #[test]
-    fn metal_memory_admission_omits_zero_process_budget_only_when_allowed() {
+    fn metal_memory_admission_uses_host_fallback_for_zero_process_budget_only_when_allowed() {
         let signals = memory_signals(1500, 1000, Some(0));
         let admitted = evaluate_metal_memory_admission(400, 100, signals, true);
         assert!(admitted.is_admitted());
         assert_eq!(
             admitted.reason,
-            MetalMemoryAdmissionReason::AdmittedProcessBudgetOmitted
+            MetalMemoryAdmissionReason::AdmittedWithHostBudget
         );
         let denied = evaluate_metal_memory_admission(400, 100, signals, false);
         assert!(!denied.is_admitted());
@@ -1751,10 +1908,68 @@ mod admission_refusal_tests {
 
     fn signals(process: Option<u64>) -> MetalMemorySignals {
         MetalMemorySignals {
+            host_budget: Some(crate::metal::HostMemoryBudget {
+                physical_bytes: 1024 << 30,
+                conservative_available_bytes: 1024 << 30,
+                external_gap_bytes: 0,
+                private_shadow_bytes: 0,
+            }),
             recommended_max_bytes: 100,
             current_allocated_bytes: 40,
             process_limit_remaining_bytes: process,
         }
+    }
+
+    #[test]
+    fn completed_import_accepts_exact_bounds_but_not_saturated_overshoot() {
+        use MetalMemoryAdmissionReason as R;
+        let mut before = MetalMemorySignals {
+            recommended_max_bytes: 800,
+            current_allocated_bytes: 100,
+            process_limit_remaining_bytes: Some(0),
+            host_budget: Some(HostMemoryBudget {
+                physical_bytes: 1_000,
+                conservative_available_bytes: 900,
+                external_gap_bytes: 0,
+                private_shadow_bytes: 0,
+            }),
+        };
+        assert!(evaluate_metal_memory_admission(700, 0, before, true).is_admitted());
+        before.current_allocated_bytes = 800;
+        before
+            .host_budget
+            .as_mut()
+            .unwrap()
+            .conservative_available_bytes = 200;
+        assert_eq!(before.host_remaining_bytes(), Some(0));
+        assert!(completed_external_import_admission(before).is_admitted());
+        assert!(!evaluate_metal_memory_admission(0, 0, before, true).is_admitted());
+
+        let mut after = before;
+        after.current_allocated_bytes = 801;
+        assert!(!completed_external_import_admission(after).is_admitted());
+        after.recommended_max_bytes = 900;
+        assert_eq!(
+            completed_external_import_admission(after).reason,
+            R::HostInsufficient
+        );
+        after = before;
+        after
+            .host_budget
+            .as_mut()
+            .unwrap()
+            .conservative_available_bytes = 199;
+        assert_eq!(after.host_remaining_bytes(), Some(0));
+        assert_eq!(
+            completed_external_import_admission(after).reason,
+            R::HostAvailabilityInsufficient
+        );
+        after = before;
+        after.host_budget.as_mut().unwrap().private_shadow_bytes = 1;
+        assert_eq!(
+            completed_external_import_admission(after).reason,
+            R::HostInsufficient
+        );
     }
 
     /// An admitted decision never becomes a refusal; every refused decision
@@ -1796,6 +2011,12 @@ mod admission_refusal_tests {
                     10,
                     0,
                     MetalMemorySignals {
+                        host_budget: Some(crate::metal::HostMemoryBudget {
+                            physical_bytes: 1024 << 30,
+                            conservative_available_bytes: 1024 << 30,
+                            external_gap_bytes: 0,
+                            private_shadow_bytes: 0,
+                        }),
                         recommended_max_bytes: 0,
                         ..signals(Some(50))
                     },
@@ -1822,13 +2043,17 @@ mod admission_refusal_tests {
         // presence always matches the single reason-derived outcome.
         for reason in [
             R::AdmittedWithProcessBudget,
-            R::AdmittedProcessBudgetOmitted,
+            R::AdmittedWithHostBudget,
             R::RequiredBytesOverflow,
             R::InvalidWorkingSetSignal,
             R::ProcessSignalUnavailable,
             R::WorkingSetInsufficient,
             R::ProcessInsufficient,
             R::BothInsufficient,
+            R::HostInsufficient,
+            R::HostAvailabilityInsufficient,
+            R::HostSignalUnavailable,
+            R::InvalidHostSignal,
         ] {
             let decision =
                 MetalMemoryAdmission::new(reason, 10, 0, Some(10), signals(Some(50)), Some(50));

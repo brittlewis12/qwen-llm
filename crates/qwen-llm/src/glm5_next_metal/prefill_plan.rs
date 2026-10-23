@@ -51,6 +51,12 @@ mod tests {
 
     fn signals(budget: u64) -> MetalMemorySignals {
         MetalMemorySignals {
+            host_budget: Some(crate::metal::HostMemoryBudget {
+                physical_bytes: 1024 << 30,
+                conservative_available_bytes: 1024 << 30,
+                external_gap_bytes: 0,
+                private_shadow_bytes: 0,
+            }),
             recommended_max_bytes: budget,
             current_allocated_bytes: 0,
             process_limit_remaining_bytes: Some(budget),
@@ -145,6 +151,12 @@ mod tests {
             256
         );
         let pressured = MetalMemorySignals {
+            host_budget: Some(crate::metal::HostMemoryBudget {
+                physical_bytes: 1024 << 30,
+                conservative_available_bytes: 1024 << 30,
+                external_gap_bytes: 0,
+                private_shadow_bytes: 0,
+            }),
             recommended_max_bytes: budget - scratch(128),
             process_limit_remaining_bytes: Some(budget - weights - scratch(128)),
             ..resident
@@ -198,6 +210,12 @@ mod tests {
             ..signals(10)
         };
         let invalid = MetalMemorySignals {
+            host_budget: Some(crate::metal::HostMemoryBudget {
+                physical_bytes: 1024 << 30,
+                conservative_available_bytes: 1024 << 30,
+                external_gap_bytes: 0,
+                private_shadow_bytes: 0,
+            }),
             recommended_max_bytes: 0,
             ..signals(10)
         };

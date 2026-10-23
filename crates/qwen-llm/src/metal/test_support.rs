@@ -915,6 +915,12 @@ pub(super) fn memory_signals(
         recommended_max_bytes,
         current_allocated_bytes,
         process_limit_remaining_bytes,
+        host_budget: Some(HostMemoryBudget {
+            physical_bytes: 1024 << 30,
+            conservative_available_bytes: 1024 << 30,
+            external_gap_bytes: 0,
+            private_shadow_bytes: 0,
+        }),
     }
 }
 

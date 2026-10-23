@@ -400,7 +400,7 @@ impl GenerationBackend for FlashNextBackend {
         if self.dflash_head.is_none() {
             super::transport_memory::admit_resident_transport(
                 sink.transport_reserve_bytes(),
-                self.ctx.memory_signals().process_limit_remaining_bytes,
+                qwen_llm::metal::effective_host_memory_remaining_bytes(),
             )?;
         }
         let mut runner = self

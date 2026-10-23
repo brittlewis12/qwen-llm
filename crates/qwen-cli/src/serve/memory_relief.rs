@@ -1,7 +1,8 @@
 use qwen_llm::metal::MetalMemoryAdmissionReason;
 use qwen_llm::snapshot_policy::Evicted;
 
-/// Apply process-only cache relief to one computed admission outcome.
+/// Relieve process or host-availability pressure once. Device/host-ceiling
+/// shortfalls cannot be relieved by releasing CPU snapshots.
 ///
 /// The classifier keeps each operation's error shape local and supplies its
 /// requested release size. Pass `u64::MAX` when that operation releases all
@@ -18,7 +19,11 @@ pub(super) fn retry<T>(
     let Some((reason, requested_bytes)) = classify(&first) else {
         return first;
     };
-    if reason != MetalMemoryAdmissionReason::ProcessInsufficient {
+    if !matches!(
+        reason,
+        MetalMemoryAdmissionReason::ProcessInsufficient
+            | MetalMemoryAdmissionReason::HostAvailabilityInsufficient
+    ) {
         return first;
     }
     let evicted = release(requested_bytes);
@@ -83,11 +88,15 @@ mod tests {
             Reason::ProcessInsufficient,
             Reason::WorkingSetInsufficient,
             Reason::BothInsufficient,
+            Reason::HostInsufficient,
+            Reason::HostAvailabilityInsufficient,
             Reason::ProcessSignalUnavailable,
+            Reason::HostSignalUnavailable,
             Reason::InvalidWorkingSetSignal,
+            Reason::InvalidHostSignal,
             Reason::RequiredBytesOverflow,
             Reason::AdmittedWithProcessBudget,
-            Reason::AdmittedProcessBudgetOmitted,
+            Reason::AdmittedWithHostBudget,
         ];
         for reason in reasons {
             for deficit in [None, Some(5)] {
@@ -126,7 +135,10 @@ mod tests {
                         },
                     );
 
-                    let relievable = reason == Reason::ProcessInsufficient;
+                    let relievable = matches!(
+                        reason,
+                        Reason::ProcessInsufficient | Reason::HostAvailabilityInsufficient
+                    );
                     let some_releasable = cache_state == CacheState::SomeReleasable;
                     assert_eq!(requests.borrow().len(), usize::from(relievable));
                     if relievable {

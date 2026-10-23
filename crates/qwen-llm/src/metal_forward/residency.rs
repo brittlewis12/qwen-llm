@@ -297,18 +297,27 @@ pub fn decide_gguf_storage_mode(
     request: GgufStorageRequest,
     mapping_unsupported_reason: Option<&'static str>,
 ) -> GgufNoCopyDecision {
-    decide_gguf_storage_mode_with_signals(
+    // Legacy performance-only projection: these inputs cannot establish host
+    // admission. Actual imports always pass the central live admission check.
+    let margin =
+        recommended_working_set_bytes.saturating_mul(GGUF_COPY_HEADROOM_MARGIN_PERCENT) / 100;
+    let required = copied_bytes
+        .checked_add(session_reserve_bytes.unwrap_or(GGUF_COPY_SESSION_RESERVE_BYTES))
+        .and_then(|bytes| bytes.checked_add(margin));
+    let headroom = recommended_working_set_bytes.checked_sub(current_allocated_bytes);
+    let capacity_would_map = required
+        .and_then(|bytes| bytes.checked_add(auxiliary_weight_bytes))
+        .is_none()
+        || !matches!((required, headroom), (Some(required), Some(headroom)) if recommended_working_set_bytes > 0 && headroom > 0 && required <= headroom);
+    gguf_storage_decision(
         copied_bytes,
         auxiliary_weight_bytes,
-        session_reserve_bytes,
-        crate::metal::MetalMemorySignals {
-            recommended_max_bytes: recommended_working_set_bytes,
-            current_allocated_bytes,
-            process_limit_remaining_bytes: Some(u64::MAX),
-        },
+        recommended_working_set_bytes,
         unified_memory,
         request,
         mapping_unsupported_reason,
+        capacity_would_map,
+        "copy_exceeds_working_set_headroom",
     )
 }
 
@@ -334,6 +343,42 @@ pub fn decide_gguf_storage_mode_with_signals(
         true,
     );
     let capacity_would_map = !admission.is_admitted();
+    let capacity_reason = match admission.reason {
+        crate::metal::MetalMemoryAdmissionReason::ProcessInsufficient => {
+            "copy_exceeds_process_headroom"
+        }
+        crate::metal::MetalMemoryAdmissionReason::BothInsufficient => {
+            "copy_exceeds_working_set_and_process_headroom"
+        }
+        crate::metal::MetalMemoryAdmissionReason::HostInsufficient
+        | crate::metal::MetalMemoryAdmissionReason::HostAvailabilityInsufficient => {
+            "copy_exceeds_host_headroom"
+        }
+        _ => "copy_exceeds_working_set_headroom",
+    };
+    gguf_storage_decision(
+        copied_bytes,
+        auxiliary_weight_bytes,
+        recommended_working_set_bytes,
+        unified_memory,
+        request,
+        mapping_unsupported_reason,
+        capacity_would_map,
+        capacity_reason,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn gguf_storage_decision(
+    copied_bytes: u64,
+    auxiliary_weight_bytes: u64,
+    recommended_working_set_bytes: u64,
+    unified_memory: bool,
+    request: GgufStorageRequest,
+    mapping_unsupported_reason: Option<&'static str>,
+    capacity_would_map: bool,
+    capacity_reason: &'static str,
+) -> GgufNoCopyDecision {
     let (map_weights, reason) = match request {
         GgufStorageRequest::Map(reason) => (true, reason),
         GgufStorageRequest::Copy(reason) => (false, reason),
@@ -345,15 +390,7 @@ pub fn decide_gguf_storage_mode_with_signals(
         {
             (false, mapping_unsupported_reason.unwrap())
         }
-        GgufStorageRequest::Automatic if capacity_would_map => match admission.reason {
-            crate::metal::MetalMemoryAdmissionReason::ProcessInsufficient => {
-                (true, "copy_exceeds_process_headroom")
-            }
-            crate::metal::MetalMemoryAdmissionReason::BothInsufficient => {
-                (true, "copy_exceeds_working_set_and_process_headroom")
-            }
-            _ => (true, "copy_exceeds_working_set_headroom"),
-        },
+        GgufStorageRequest::Automatic if capacity_would_map => (true, capacity_reason),
         GgufStorageRequest::Automatic => (false, "copy_fits_with_headroom"),
     };
     GgufNoCopyDecision {
@@ -363,15 +400,7 @@ pub fn decide_gguf_storage_mode_with_signals(
         copied_bytes,
         auxiliary_weight_bytes,
         working_set_bytes: recommended_working_set_bytes,
-        reason: if !capacity_would_map
-            && (recommended_working_set_bytes == 0
-                || admission.working_set_headroom_bytes.is_none())
-            && request == GgufStorageRequest::Automatic
-        {
-            "working_set_signal_invalid"
-        } else {
-            reason
-        },
+        reason,
     }
 }
 

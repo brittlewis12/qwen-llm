@@ -74,6 +74,12 @@ fn v41_typed_state_pressure_is_503_and_never_steps() {
         qwen_llm::metal::MetalMemoryAdmissionReason::WorkingSetInsufficient,
         Some(4096),
         MetalMemorySignals {
+            host_budget: Some(qwen_llm::metal::HostMemoryBudget {
+                physical_bytes: 1024 << 30,
+                conservative_available_bytes: 1024 << 30,
+                external_gap_bytes: 0,
+                private_shadow_bytes: 0,
+            }),
             recommended_max_bytes: 1024,
             current_allocated_bytes: 0,
             process_limit_remaining_bytes: Some(1024),
@@ -118,6 +124,12 @@ fn v41_state_refusal_is_http_503_and_next_request_starts_fresh() {
                 qwen_llm::metal::MetalMemoryAdmissionReason::ProcessInsufficient,
                 Some(4096),
                 MetalMemorySignals {
+                    host_budget: Some(qwen_llm::metal::HostMemoryBudget {
+                        physical_bytes: 1024 << 30,
+                        conservative_available_bytes: 1024 << 30,
+                        external_gap_bytes: 0,
+                        private_shadow_bytes: 0,
+                    }),
                     recommended_max_bytes: 1 << 40,
                     current_allocated_bytes: 0,
                     process_limit_remaining_bytes: Some(1024),
@@ -345,6 +357,7 @@ impl Drop for State {
 
 struct Stub {
     settings: Settings,
+    output_headroom: super::super::http::Headroom,
     starts: usize,
     emission: u32,
     state_failure: Option<qwen_llm::deepseek_v41::forward::StateError>,
@@ -370,9 +383,10 @@ fn stub(emission: &str) -> Stub {
         "test".into(),
     )
     .unwrap();
-    settings.headroom = || Some(0);
+    settings.headroom = || finite_headroom(1 << 30);
     Stub {
         settings,
+        output_headroom: || Some(1 << 30),
         starts: 0,
         emission: tokenizer_fixture::EMISSION,
         state_failure: None,
@@ -394,8 +408,8 @@ impl GenerationBackend for Stub {
     fn request_profile(&self) -> RequestProfile {
         self.settings.profile()
     }
-    fn output_headroom(&self) -> Headroom {
-        self.settings.headroom
+    fn output_headroom(&self) -> super::super::http::Headroom {
+        self.output_headroom
     }
     fn generate(
         &mut self,
@@ -447,14 +461,20 @@ impl GenerationBackend for Stub {
                 let estimate = qwen_llm::deepseek_v41::forward::Config::default()
                     .estimate_request_memory(positions)
                     .unwrap();
-                let remaining = headroom().map(|n| {
+                let remaining = headroom().map(|headroom| {
                     let current = self.available.load(Ordering::Acquire);
-                    if n == 0 { current } else { current.min(n) }
+                    current.min(headroom.effective_remaining_bytes())
                 });
                 admit_request_memory(
                     estimate,
                     reserve,
                     MetalMemorySignals {
+                        host_budget: Some(qwen_llm::metal::HostMemoryBudget {
+                            physical_bytes: 1024 << 30,
+                            conservative_available_bytes: 1024 << 30,
+                            external_gap_bytes: 0,
+                            private_shadow_bytes: 0,
+                        }),
                         recommended_max_bytes: 1 << 40,
                         current_allocated_bytes: 0,
                         process_limit_remaining_bytes: remaining,
@@ -654,7 +674,8 @@ fn v41_backend_tools_multiturn_non_generation_and_preflight_rejections() {
         let wire = exchange(&mut backend, post(&body));
         assert!(wire.starts_with("HTTP/1.1 400"), "{wire}");
     }
-    backend.settings.headroom = || Some(1);
+    backend.settings.headroom = || finite_headroom(1);
+    backend.output_headroom = || Some(1);
     let wire = exchange(&mut backend, post(&json!({"model":"test","input":"hi"})));
     assert!(wire.starts_with("HTTP/1.1 503"), "{wire}");
     assert_eq!(backend.starts, starts);
@@ -808,7 +829,8 @@ fn v41_request_memory_admits_creation_once_and_checks_output_growth() {
     backend.settings.context = 256;
     backend.drop_after = Some(1);
     OUTPUT_HEADROOM.with(|value| value.set(128 << 20));
-    backend.settings.headroom = || Some(OUTPUT_HEADROOM.with(|value| value.get()));
+    backend.settings.headroom = || finite_headroom(OUTPUT_HEADROOM.with(|value| value.get()));
+    backend.output_headroom = || Some(OUTPUT_HEADROOM.with(|value| value.get()));
     let wire = exchange(
         &mut backend,
         post(&json!({"model":"test","input":"one two three four five six","max_output_tokens":1})),
@@ -870,6 +892,12 @@ fn v41_request_memory_splits_metal_cpu_and_preserves_typed_refusals() {
         .unwrap();
     let extra_cpu = 4096;
     let signals = MetalMemorySignals {
+        host_budget: Some(qwen_llm::metal::HostMemoryBudget {
+            physical_bytes: 1024 << 30,
+            conservative_available_bytes: 1024 << 30,
+            external_gap_bytes: 0,
+            private_shadow_bytes: 0,
+        }),
         recommended_max_bytes: (200 << 30) + estimate.metal_bytes,
         current_allocated_bytes: 200 << 30,
         process_limit_remaining_bytes: Some(estimate.total_bytes + extra_cpu),
@@ -882,6 +910,19 @@ fn v41_request_memory_splits_metal_cpu_and_preserves_typed_refusals() {
         ..signals
     };
     admit_request_memory(estimate, extra_cpu, omitted).unwrap();
+    let mut host_short = omitted;
+    let host = host_short.host_budget.as_mut().unwrap();
+    host.conservative_available_bytes =
+        host.physical_bytes - host.ceiling_bytes().unwrap() + estimate.metal_bytes + extra_cpu;
+    let denied = admit_request_memory(estimate, extra_cpu, host_short).unwrap_err();
+    assert_eq!(
+        denied.reason(),
+        qwen_llm::metal::MetalMemoryAdmissionReason::HostAvailabilityInsufficient
+    );
+    assert_eq!(
+        super::super::transport_memory::memory_refusal("V4.1 request", &denied).status,
+        503
+    );
     assert_eq!(
         admit_request_memory(
             estimate,

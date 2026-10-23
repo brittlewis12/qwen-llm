@@ -50,6 +50,12 @@ fn optional_tail_faults_preserve_baseline_admission_and_allocation() {
     use qwen_llm::metal::MetalMemorySignals;
     use std::cell::Cell;
     let signals = MetalMemorySignals {
+        host_budget: Some(qwen_llm::metal::HostMemoryBudget {
+            physical_bytes: 1024 << 30,
+            conservative_available_bytes: 1024 << 30,
+            external_gap_bytes: 0,
+            private_shadow_bytes: 0,
+        }),
         recommended_max_bytes: 1024,
         current_allocated_bytes: 0,
         process_limit_remaining_bytes: Some(32),
@@ -165,6 +171,12 @@ fn optional_tail_failed_allocation_readmits_full_baseline() {
                 cpu_reserved,
                 0,
                 MetalMemorySignals {
+                    host_budget: Some(qwen_llm::metal::HostMemoryBudget {
+                        physical_bytes: 1024 << 30,
+                        conservative_available_bytes: 1024 << 30,
+                        external_gap_bytes: 0,
+                        private_shadow_bytes: 0,
+                    }),
                     recommended_max_bytes: 1024,
                     current_allocated_bytes: 0,
                     process_limit_remaining_bytes: remaining,

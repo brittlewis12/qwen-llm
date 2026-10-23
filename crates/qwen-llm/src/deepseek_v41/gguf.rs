@@ -146,6 +146,7 @@ impl LoadError {
     pub fn as_memory_admission(&self) -> Option<&metal::MemoryAdmissionDenied> {
         match self {
             Self::MemoryAdmissionDenied(e) => Some(e),
+            Self::Metal(metal::MetalError::MemoryAdmission(e)) => Some(e),
             _ => None,
         }
     }
@@ -327,9 +328,10 @@ impl ResidentWeights {
             .iter()
             .filter(|t| resident_tensor(t, p.layers))
             .collect();
+        let _allocation_transaction = ctx.begin_allocation_transaction();
         if let Some(e) = metal::evaluate_metal_memory_admission_with_cpu_bytes(
             storage.metal_view_bytes,
-            0,
+            storage.private_shadow_bytes,
             0,
             ctx.memory_signals(),
             true,
@@ -342,13 +344,24 @@ impl ResidentWeights {
         for planned in windows {
             let w = &planned.window;
             let (mmap, local) = storage::mapping(&g, w, page)?;
+            let ownership = match planned.mapping_kind {
+                ResidentMappingKind::OriginalShared | ResidentMappingKind::SharedEof => {
+                    metal::GgufMappingOwnership::Shared
+                }
+                ResidentMappingKind::PrivateBoundary { bytes } => {
+                    metal::GgufMappingOwnership::PrivateCow {
+                        shadow_bytes: bytes,
+                    }
+                }
+            };
             backings.push(
-                ctx.gguf_no_copy_window(
+                ctx.gguf_no_copy_window_with_ownership(
                     mmap,
                     w.shard_idx,
                     if local { 0 } else { w.mmap_offset as usize },
                     w.length,
                     16,
+                    ownership,
                 )
                 .map(|backing| (backing, local))?,
             );

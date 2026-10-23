@@ -1176,6 +1176,12 @@ impl Qwen4ExpTextSessionMetalWorkspace {
             }
         };
         let admission = memory.admission_after_residency(MetalMemorySignals {
+            host_budget: Some(crate::metal::HostMemoryBudget {
+                physical_bytes: 1024 << 30,
+                conservative_available_bytes: 1024 << 30,
+                external_gap_bytes: 0,
+                private_shadow_bytes: 0,
+            }),
             recommended_max_bytes: u64::MAX,
             current_allocated_bytes: ctx.current_allocated_size(),
             process_limit_remaining_bytes: Some(u64::MAX),
@@ -5939,6 +5945,12 @@ mod tests {
 
     fn signals(available: u64) -> MetalMemorySignals {
         MetalMemorySignals {
+            host_budget: Some(crate::metal::HostMemoryBudget {
+                physical_bytes: 1024 << 30,
+                conservative_available_bytes: 1024 << 30,
+                external_gap_bytes: 0,
+                private_shadow_bytes: 0,
+            }),
             recommended_max_bytes: available,
             current_allocated_bytes: 0,
             process_limit_remaining_bytes: Some(available),

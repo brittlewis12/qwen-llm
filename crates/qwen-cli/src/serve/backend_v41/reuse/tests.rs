@@ -7,6 +7,12 @@ use std::sync::Arc;
 
 fn capture_signals(process_limit_remaining_bytes: Option<u64>) -> MetalMemorySignals {
     MetalMemorySignals {
+        host_budget: Some(qwen_llm::metal::HostMemoryBudget {
+            physical_bytes: 1024 << 30,
+            conservative_available_bytes: 1024 << 30,
+            external_gap_bytes: 0,
+            private_shadow_bytes: 0,
+        }),
         recommended_max_bytes: u64::MAX,
         current_allocated_bytes: 0,
         process_limit_remaining_bytes,
@@ -19,6 +25,12 @@ fn denied(reason: Reason) -> StateError {
             reason,
             Some(4096),
             MetalMemorySignals {
+                host_budget: Some(qwen_llm::metal::HostMemoryBudget {
+                    physical_bytes: 1024 << 30,
+                    conservative_available_bytes: 1024 << 30,
+                    external_gap_bytes: 0,
+                    private_shadow_bytes: 0,
+                }),
                 recommended_max_bytes: 1024,
                 current_allocated_bytes: 0,
                 process_limit_remaining_bytes: Some(1024),
@@ -95,7 +107,7 @@ fn growth_pressure_drops_old_state_before_normal_cold_allocation_but_invalid_is_
         "test".into(),
     )
     .unwrap();
-    settings.headroom = || Some(0);
+    settings.headroom = || finite_headroom(1 << 30);
     let request = settings
         .profile()
         .parse(&serde_json::json!({"model":"test", "input":"ab", "max_output_tokens":1}))
@@ -438,6 +450,12 @@ fn capture_metal_telemetry_and_overflow_declines_do_not_evict_or_capture() {
         (
             0,
             MetalMemorySignals {
+                host_budget: Some(qwen_llm::metal::HostMemoryBudget {
+                    physical_bytes: 1024 << 30,
+                    conservative_available_bytes: 1024 << 30,
+                    external_gap_bytes: 0,
+                    private_shadow_bytes: 0,
+                }),
                 recommended_max_bytes: required - 1,
                 ..good
             },
@@ -445,6 +463,12 @@ fn capture_metal_telemetry_and_overflow_declines_do_not_evict_or_capture() {
         (
             0,
             MetalMemorySignals {
+                host_budget: Some(qwen_llm::metal::HostMemoryBudget {
+                    physical_bytes: 1024 << 30,
+                    conservative_available_bytes: 1024 << 30,
+                    external_gap_bytes: 0,
+                    private_shadow_bytes: 0,
+                }),
                 recommended_max_bytes: 0,
                 ..good
             },
@@ -452,6 +476,12 @@ fn capture_metal_telemetry_and_overflow_declines_do_not_evict_or_capture() {
         (
             0,
             MetalMemorySignals {
+                host_budget: Some(qwen_llm::metal::HostMemoryBudget {
+                    physical_bytes: 1024 << 30,
+                    conservative_available_bytes: 1024 << 30,
+                    external_gap_bytes: 0,
+                    private_shadow_bytes: 0,
+                }),
                 recommended_max_bytes: 1,
                 current_allocated_bytes: 2,
                 ..good
@@ -516,6 +546,12 @@ fn optional_capture_decline_preserves_request_schedule_and_live_state() {
                         capture_signals(Some(available))
                     } else {
                         MetalMemorySignals {
+                            host_budget: Some(qwen_llm::metal::HostMemoryBudget {
+                                physical_bytes: 1024 << 30,
+                                conservative_available_bytes: 1024 << 30,
+                                external_gap_bytes: 0,
+                                private_shadow_bytes: 0,
+                            }),
                             recommended_max_bytes: available,
                             current_allocated_bytes: 0,
                             process_limit_remaining_bytes: Some(0),
@@ -551,7 +587,7 @@ fn optional_capture_decline_preserves_request_schedule_and_live_state() {
         "test".into(),
     )
     .unwrap();
-    settings.headroom = || Some(0);
+    settings.headroom = || finite_headroom(1 << 30);
     let request = settings
         .profile()
         .parse(&serde_json::json!({

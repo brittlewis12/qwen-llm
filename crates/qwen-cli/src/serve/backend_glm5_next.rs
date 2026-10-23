@@ -529,28 +529,26 @@ fn with_snapshot_release<T, V>(
     )
 }
 
-/// Transport admission prices process CPU only; a transport refusal is
-/// therefore process-only and may use the same cached-snapshot relief.
+/// CPU transport admission retains its binding limit through snapshot relief.
 fn with_transport_snapshot_release<T, V>(
     cache: &mut SnapshotCache<V, CacheNamespace>,
     keep: Option<EntryId>,
-    mut attempt: impl FnMut() -> Result<T, ServeError>,
+    mut attempt: impl FnMut() -> Result<T, super::transport_memory::CpuMemoryRefusal>,
 ) -> Result<T, ServeError> {
     let first = attempt();
     super::memory_relief::retry(
         FAMILY,
         first,
         |result| {
-            result.as_ref().err().and_then(|error| {
-                is_pressure_refusal(error).then_some((
-                    qwen_llm::metal::MetalMemoryAdmissionReason::ProcessInsufficient,
-                    u64::MAX,
-                ))
-            })
+            result
+                .as_ref()
+                .err()
+                .map(|denied| (denied.reason, u64::MAX))
         },
         |bytes| cache.evict_for_except(bytes, keep),
         attempt,
     )
+    .map_err(|denied| denied.error)
 }
 
 /// A session of the serve geometry reading prompts with `lineage`.
@@ -818,9 +816,9 @@ impl<'w, 'g> Glm5NextBackend<'w, 'g> {
         let reserve = sink.transport_reserve_bytes();
         // Cached snapshots are optional: released before a pressure refusal.
         with_transport_snapshot_release(&mut self.cache, None, || {
-            super::transport_memory::admit_resident_transport(
+            super::transport_memory::admit_resident_transport_with_headroom(
                 reserve,
-                MetalContext::process_limit_bytes_remaining(),
+                qwen_llm::metal::host_memory_headroom(),
             )
         })?;
         sink.tick().map_err(BackendFailure::Aborted)?;
@@ -1423,3 +1421,82 @@ impl GenerationBackend for Glm5NextBackend<'_, '_> {
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod transport_relief_tests {
+    use super::*;
+    use qwen_llm::metal::{HostMemoryBudget, HostMemoryHeadroom};
+
+    fn headroom(available: u64, current: u64) -> Option<HostMemoryHeadroom> {
+        HostMemoryHeadroom::from_budget(
+            HostMemoryBudget {
+                physical_bytes: 1_000,
+                conservative_available_bytes: available,
+                external_gap_bytes: 0,
+                private_shadow_bytes: 0,
+            },
+            current,
+            0,
+        )
+    }
+
+    fn namespace() -> CacheNamespace {
+        CacheNamespace {
+            lineage: PackedLineage::Exact,
+            schedule: Schedule::ExactV1,
+            rows: 512,
+        }
+    }
+
+    #[test]
+    fn transport_host_ceiling_refusal_keeps_snapshots_without_retry() {
+        let mut cache = SnapshotCache::new(1024, Default::default());
+        assert!(cache.insert_strict_in(namespace(), vec![1], 1u8, 10));
+        let mut observations = 0;
+        let error = with_transport_snapshot_release(&mut cache, None, || {
+            observations += 1;
+            super::super::transport_memory::admit_resident_transport_with_headroom(
+                100,
+                headroom(1_000, 701),
+            )
+        })
+        .unwrap_err();
+        assert_eq!(observations, 1);
+        assert_eq!(cache.len(), 1);
+        assert_eq!(error.status, 503);
+        assert!(error.message.contains("host_insufficient"));
+    }
+
+    #[test]
+    fn transport_availability_relief_requires_release_and_fresh_readmission() {
+        for held in [false, true] {
+            for recover in [false, true] {
+                let mut cache = SnapshotCache::new(1024, Default::default());
+                let value = Arc::new(1u8);
+                let weak = Arc::downgrade(&value);
+                assert!(cache.insert_shared_strict_in(namespace(), vec![1], value.clone(), 10));
+                let _held = held.then_some(value);
+                let mut observations = 0;
+                let result = with_transport_snapshot_release(&mut cache, None, || {
+                    observations += 1;
+                    let available = if recover && weak.upgrade().is_none() {
+                        300
+                    } else {
+                        299
+                    };
+                    super::super::transport_memory::admit_resident_transport_with_headroom(
+                        100,
+                        headroom(available, 100),
+                    )
+                });
+                assert_eq!(observations, if held { 1 } else { 2 });
+                assert_eq!(result.is_ok(), !held && recover);
+                assert_eq!(cache.len(), usize::from(held));
+                if let Err(error) = result {
+                    assert_eq!(error.status, 503);
+                    assert!(error.message.contains("host_availability_insufficient"));
+                }
+            }
+        }
+    }
+}

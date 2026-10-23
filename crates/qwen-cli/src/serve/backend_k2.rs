@@ -221,7 +221,7 @@ impl GenerationBackend for K2Backend<'_, '_> {
         let reserve = sink.transport_reserve_bytes();
         super::transport_memory::admit_resident_transport(
             reserve,
-            qwen_llm::metal::MetalContext::process_limit_bytes_remaining(),
+            qwen_llm::metal::effective_host_memory_remaining_bytes(),
         )?;
         sink.tick().map_err(BackendFailure::Aborted)?;
         let prefill_t0 = std::time::Instant::now();

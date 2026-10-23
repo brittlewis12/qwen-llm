@@ -32,6 +32,12 @@ fn qwen_info_storage_policy_report_projects_mode_and_capacity() {
 #[test]
 fn qwen_info_storage_decision_matches_load_with_short_process_headroom() {
     let signals = MetalMemorySignals {
+        host_budget: Some(qwen_llm::metal::HostMemoryBudget {
+            physical_bytes: 1024 << 30,
+            conservative_available_bytes: 1024 << 30,
+            external_gap_bytes: 0,
+            private_shadow_bytes: 0,
+        }),
         recommended_max_bytes: 1_000,
         current_allocated_bytes: 100,
         process_limit_remaining_bytes: Some(349),
@@ -771,6 +777,12 @@ fn fake_allocator(
             recommended_max_bytes,
             current_allocated_bytes: current_allocated.get(1).copied().unwrap_or(0),
             process_limit_remaining_bytes: Some(0),
+            host_budget: Some(qwen_llm::metal::HostMemoryBudget {
+                physical_bytes: 1024 << 30,
+                conservative_available_bytes: 1024 << 30,
+                external_gap_bytes: 0,
+                private_shadow_bytes: 0,
+            }),
         },
         candidate_error,
     )
@@ -3342,6 +3354,12 @@ fn auto_prefill_memory_boundaries_reach_the_cli_telemetry() {
     for (signals, expected_reason, admitted) in [
         (
             MetalMemorySignals {
+                host_budget: Some(qwen_llm::metal::HostMemoryBudget {
+                    physical_bytes: 1024 << 30,
+                    conservative_available_bytes: 1024 << 30,
+                    external_gap_bytes: 0,
+                    private_shadow_bytes: 0,
+                }),
                 recommended_max_bytes: 200 + required,
                 current_allocated_bytes: 200,
                 process_limit_remaining_bytes: Some(required),
@@ -3351,6 +3369,12 @@ fn auto_prefill_memory_boundaries_reach_the_cli_telemetry() {
         ),
         (
             MetalMemorySignals {
+                host_budget: Some(qwen_llm::metal::HostMemoryBudget {
+                    physical_bytes: 1024 << 30,
+                    conservative_available_bytes: 1024 << 30,
+                    external_gap_bytes: 0,
+                    private_shadow_bytes: 0,
+                }),
                 recommended_max_bytes: 200 + required,
                 current_allocated_bytes: 200,
                 process_limit_remaining_bytes: Some(required - 1),
@@ -3360,6 +3384,12 @@ fn auto_prefill_memory_boundaries_reach_the_cli_telemetry() {
         ),
         (
             MetalMemorySignals {
+                host_budget: Some(qwen_llm::metal::HostMemoryBudget {
+                    physical_bytes: 1024 << 30,
+                    conservative_available_bytes: 1024 << 30,
+                    external_gap_bytes: 0,
+                    private_shadow_bytes: 0,
+                }),
                 recommended_max_bytes: 200 + required,
                 current_allocated_bytes: 200,
                 process_limit_remaining_bytes: None,
@@ -3369,6 +3399,12 @@ fn auto_prefill_memory_boundaries_reach_the_cli_telemetry() {
         ),
         (
             MetalMemorySignals {
+                host_budget: Some(qwen_llm::metal::HostMemoryBudget {
+                    physical_bytes: 1024 << 30,
+                    conservative_available_bytes: 1024 << 30,
+                    external_gap_bytes: 0,
+                    private_shadow_bytes: 0,
+                }),
                 recommended_max_bytes: 0,
                 current_allocated_bytes: 200,
                 process_limit_remaining_bytes: Some(required),
@@ -3378,6 +3414,12 @@ fn auto_prefill_memory_boundaries_reach_the_cli_telemetry() {
         ),
         (
             MetalMemorySignals {
+                host_budget: Some(qwen_llm::metal::HostMemoryBudget {
+                    physical_bytes: 1024 << 30,
+                    conservative_available_bytes: 1024 << 30,
+                    external_gap_bytes: 0,
+                    private_shadow_bytes: 0,
+                }),
                 recommended_max_bytes: 200 + required - 1,
                 current_allocated_bytes: 200,
                 process_limit_remaining_bytes: Some(0),
@@ -3387,11 +3429,17 @@ fn auto_prefill_memory_boundaries_reach_the_cli_telemetry() {
         ),
         (
             MetalMemorySignals {
+                host_budget: Some(qwen_llm::metal::HostMemoryBudget {
+                    physical_bytes: 1024 << 30,
+                    conservative_available_bytes: 1024 << 30,
+                    external_gap_bytes: 0,
+                    private_shadow_bytes: 0,
+                }),
                 recommended_max_bytes: 200 + required,
                 current_allocated_bytes: 200,
                 process_limit_remaining_bytes: Some(0),
             },
-            "admitted_process_budget_omitted",
+            "admitted_with_host_budget",
             true,
         ),
     ] {

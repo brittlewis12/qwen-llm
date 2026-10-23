@@ -269,6 +269,12 @@ fn session_memory_admission_reserves_dynamic_headroom_at_the_boundary() {
     let process_required = 100 + 50 + dynamic_reserve;
     let metal_required = 100 + dynamic_reserve;
     let at_boundary = MetalMemorySignals {
+        host_budget: Some(crate::metal::HostMemoryBudget {
+            physical_bytes: 1024 << 30,
+            conservative_available_bytes: 1024 << 30,
+            external_gap_bytes: 0,
+            private_shadow_bytes: 0,
+        }),
         recommended_max_bytes: 200 + metal_required,
         current_allocated_bytes: 200,
         process_limit_remaining_bytes: Some(process_required),
@@ -288,6 +294,12 @@ fn session_memory_admission_reserves_dynamic_headroom_at_the_boundary() {
     ));
 
     let working_set_below = MetalMemorySignals {
+        host_budget: Some(crate::metal::HostMemoryBudget {
+            physical_bytes: 1024 << 30,
+            conservative_available_bytes: 1024 << 30,
+            external_gap_bytes: 0,
+            private_shadow_bytes: 0,
+        }),
         recommended_max_bytes: 200 + metal_required - 1,
         ..at_boundary
     };
@@ -419,6 +431,12 @@ fn model_residency_set_scope_uses_working_set_budget() {
         required_alignment: GGUF_BINDING_ALIGNMENT,
     };
     let fit_signals = MetalMemorySignals {
+        host_budget: Some(crate::metal::HostMemoryBudget {
+            physical_bytes: 1024 << 30,
+            conservative_available_bytes: 1024 << 30,
+            external_gap_bytes: 0,
+            private_shadow_bytes: 0,
+        }),
         recommended_max_bytes: 400 + 100 + DEEPSEEK_V4_DYNAMIC_MEMORY_RESERVE_BYTES,
         current_allocated_bytes: 100,
         process_limit_remaining_bytes: Some(0),
@@ -428,6 +446,12 @@ fn model_residency_set_scope_uses_working_set_budget() {
     assert!(deepseek_v4_residency_set_scope_qualified(true, &m4, fits));
 
     let no_fit_signals = MetalMemorySignals {
+        host_budget: Some(crate::metal::HostMemoryBudget {
+            physical_bytes: 1024 << 30,
+            conservative_available_bytes: 1024 << 30,
+            external_gap_bytes: 0,
+            private_shadow_bytes: 0,
+        }),
         recommended_max_bytes: 400 + 99 + DEEPSEEK_V4_DYNAMIC_MEMORY_RESERVE_BYTES,
         ..fit_signals
     };
@@ -6815,6 +6839,12 @@ fn memory_plan_admission_and_reconciliation_fail_closed() {
     let required = plan.required_with_reserve_bytes().unwrap();
     let baseline = 100_u64;
     let exact = plan.admission(MetalMemorySignals {
+        host_budget: Some(crate::metal::HostMemoryBudget {
+            physical_bytes: 1024 << 30,
+            conservative_available_bytes: 1024 << 30,
+            external_gap_bytes: 0,
+            private_shadow_bytes: 0,
+        }),
         recommended_max_bytes: baseline + required,
         current_allocated_bytes: baseline,
         process_limit_remaining_bytes: Some(0),
@@ -6822,9 +6852,15 @@ fn memory_plan_admission_and_reconciliation_fail_closed() {
     assert!(exact.is_admitted());
     assert_eq!(
         exact.reason,
-        crate::metal::MetalMemoryAdmissionReason::AdmittedProcessBudgetOmitted
+        crate::metal::MetalMemoryAdmissionReason::AdmittedWithHostBudget
     );
     let short = plan.admission(MetalMemorySignals {
+        host_budget: Some(crate::metal::HostMemoryBudget {
+            physical_bytes: 1024 << 30,
+            conservative_available_bytes: 1024 << 30,
+            external_gap_bytes: 0,
+            private_shadow_bytes: 0,
+        }),
         recommended_max_bytes: baseline + required - 1,
         current_allocated_bytes: baseline,
         process_limit_remaining_bytes: Some(0),
@@ -6848,6 +6884,12 @@ fn memory_plan_admission_and_reconciliation_fail_closed() {
     let three_exact = plan
         .admission_for_sessions(
             MetalMemorySignals {
+                host_budget: Some(crate::metal::HostMemoryBudget {
+                    physical_bytes: 1024 << 30,
+                    conservative_available_bytes: 1024 << 30,
+                    external_gap_bytes: 0,
+                    private_shadow_bytes: 0,
+                }),
                 recommended_max_bytes: baseline + three_required,
                 current_allocated_bytes: baseline,
                 process_limit_remaining_bytes: Some(0),
@@ -6859,6 +6901,12 @@ fn memory_plan_admission_and_reconciliation_fail_closed() {
     let error = plan
         .admission_for_sessions(
             MetalMemorySignals {
+                host_budget: Some(crate::metal::HostMemoryBudget {
+                    physical_bytes: 1024 << 30,
+                    conservative_available_bytes: 1024 << 30,
+                    external_gap_bytes: 0,
+                    private_shadow_bytes: 0,
+                }),
                 recommended_max_bytes: u64::MAX,
                 current_allocated_bytes: 0,
                 process_limit_remaining_bytes: Some(0),

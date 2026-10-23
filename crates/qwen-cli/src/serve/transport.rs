@@ -418,7 +418,7 @@ impl Connection {
             control: Arc::clone(&control),
             activity: Arc::new(guard),
             extra_cpu_reserve,
-            headroom: qwen_llm::metal::MetalContext::process_limit_bytes_remaining,
+            headroom: qwen_llm::metal::effective_host_memory_remaining_bytes,
         };
         #[cfg(test)]
         if let Some(headroom) = PROXY_HEADROOM.take() {

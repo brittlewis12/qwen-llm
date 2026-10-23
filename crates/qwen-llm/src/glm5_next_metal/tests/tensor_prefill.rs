@@ -263,7 +263,7 @@ impl Fixture {
             cpu,
             crate::glm5_next::memory::DYNAMIC_RESERVE_BYTES,
             ctx.memory_signals(),
-            true,
+            false,
         );
         assert!(admission.is_admitted(), "{admission:?}");
 

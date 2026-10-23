@@ -16,6 +16,7 @@
 //!    or a Fast prefill and record whether the call is right.
 
 mod latent_mma;
+mod tensor_prefill;
 mod workspace;
 
 use super::natural::{

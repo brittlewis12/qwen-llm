@@ -1,11 +1,14 @@
-//! Model-free blit and compute import witness. Run alone, in release mode,
+//! Model-free CPU, blit and compute import witness. Run alone, in release mode,
 //! under an external watchdog. The raw counters overlap and are not distinct
 //! resident-byte totals; fixture creation warms the file cache, and other process
 //! activity adds noise. The compute PSO is warmed before fixture creation;
 //! context/PSO and driver bookkeeping are not planned fixture resource costs.
-//! Phases: 0 before mmap/import, 1 after import, 2 after all checked GPU blits,
-//! 3 after all checked GPU compute copies, 4 after dropping case resources and
-//! draining their autorelease pool. The historical test name is kept for scripts.
+//! Phases: 0 before mmap/import, 1 after import, 2 after obtaining the Metal
+//! contents pointer without dereferencing it, 3 after checked volatile CPU page
+//! and tail reads, 4 after all checked GPU blits, 5 after all checked GPU compute
+//! copies, 6 after dropping case resources and draining their autorelease pool.
+//! The historical test name is kept for scripts. These primitive accesses do not
+//! establish a driver mechanism or reproduce a model-level memory failure.
 
 use super::*;
 use mach2::task_info::{TASK_EVENTS_INFO, TASK_EVENTS_INFO_COUNT, task_events_info};
@@ -294,7 +297,7 @@ fn blit_check_mapping_import(ctx: &MetalContext, source: &Buffer, readback: &Buf
         assert!(start.is_multiple_of(4) && length.is_multiple_of(4));
         objc2::rc::autoreleasepool(|_| {
             // SAFETY: this is the owned shared destination, idle between checked
-            // completions. No CPU access ever reads or writes the source mmap.
+            // completions. This blit phase never CPU-accesses the source.
             unsafe {
                 readback
                     .contents()
@@ -362,7 +365,7 @@ fn compute_check_mapping_import(
             );
             assert!(destination.is_writable());
             // SAFETY: the same owned shared destination is idle after the prior
-            // checked completion. The retained source is never CPU-accessed.
+            // checked completion. This compute phase never CPU-accesses the source.
             unsafe {
                 readback
                     .contents()
@@ -503,15 +506,37 @@ fn run_mapping_import_case(
             assert!(mmap_weak.upgrade().is_some(), "import must retain mapping");
             assert_eq!(calls.load(Ordering::Acquire), 0);
             mapping_import_snapshot(ctx, kind, span, 1, Some(&backing.buffer), Some(&readback));
-            blit_check_mapping_import(ctx, &backing.buffer, &readback, span);
+            let source_pointer = backing.buffer.contents().as_ptr().cast::<u8>();
             mapping_import_snapshot(ctx, kind, span, 2, Some(&backing.buffer), Some(&readback));
+            let real_end = span.min(FILE_BYTES);
+            assert!(real_end >= 37);
+            for offset in (0..span).step_by(page).chain(real_end - 37..span) {
+                // SAFETY: the retained shared Metal buffer exposes span bytes;
+                // each offset is in bounds, including only the mapped final
+                // partial file page. Read the actual Metal CPU view, not mmap.
+                let byte = unsafe { std::ptr::read_volatile(source_pointer.add(offset)) };
+                let expected = if offset < FILE_BYTES {
+                    fixture_byte(offset)
+                } else {
+                    0
+                };
+                assert_eq!(byte, expected, "CPU page/tail read at byte {offset}");
+            }
+            mapping_import_snapshot(ctx, kind, span, 3, Some(&backing.buffer), Some(&readback));
+            assert!(
+                mmap_weak.upgrade().is_some(),
+                "mapping must survive Metal CPU view reads"
+            );
+            assert_eq!(calls.load(Ordering::Acquire), 0);
+            blit_check_mapping_import(ctx, &backing.buffer, &readback, span);
+            mapping_import_snapshot(ctx, kind, span, 4, Some(&backing.buffer), Some(&readback));
             assert!(
                 mmap_weak.upgrade().is_some(),
                 "mapping must survive GPU reads"
             );
             assert_eq!(calls.load(Ordering::Acquire), 0);
             compute_check_mapping_import(ctx, &backing.buffer, &readback, span);
-            mapping_import_snapshot(ctx, kind, span, 3, Some(&backing.buffer), Some(&readback));
+            mapping_import_snapshot(ctx, kind, span, 5, Some(&backing.buffer), Some(&readback));
             assert!(
                 mmap_weak.upgrade().is_some(),
                 "mapping must survive GPU compute reads"
@@ -528,7 +553,7 @@ fn run_mapping_import_case(
                 alive_at_release,
             )
         });
-    objc2::rc::autoreleasepool(|_| mapping_import_snapshot(ctx, kind, span, 4, None, None));
+    objc2::rc::autoreleasepool(|_| mapping_import_snapshot(ctx, kind, span, 6, None, None));
     assert!(
         source_weak.load().is_none(),
         "source buffer survived pool drain"
@@ -579,7 +604,7 @@ fn admit_mapping_import(ctx: &MetalContext) {
 }
 
 #[test]
-#[ignore = "release-only, self-leased Metal mmap blit/compute import witness; external watchdog required"]
+#[ignore = "release-only, self-leased Metal mmap CPU/blit/compute import witness; external watchdog required"]
 fn metal_mmap_import_blit_witness_release() {
     assert!(
         !cfg!(debug_assertions),

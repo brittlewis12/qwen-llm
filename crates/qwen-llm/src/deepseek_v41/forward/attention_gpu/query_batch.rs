@@ -4,7 +4,7 @@
 //! KV/keys remain append-only, with each follower bounded by its query's length.
 use super::*;
 
-pub(super) const TILE: usize = 256;
+pub(super) const TILE: usize = 512;
 
 /// Rows per query batch tile. The default is the production width; the
 /// environment override exists for same-binary A/B measurement of the width

@@ -1080,17 +1080,17 @@ fn query_batch_threshold_split_source_census_expectation() {
     let schedule = Schedule::default();
     let mut tiles = 0;
     let mut splits = 0;
-    for start in (0..2048).step_by(256) {
+    for start in (0..2048).step_by(TILE) {
         for id in 0..schedule.layers {
-            let spans = sink_spans(&c, schedule.ratio(id), start, 256);
+            let spans = sink_spans(&c, schedule.ratio(id), start, TILE);
             assert!((1..=2).contains(&spans.len()));
             tiles += spans.len();
             splits += spans.len() - 1;
         }
     }
-    // Source expectation only: 8 fixed tiles per layer, and each of the 38
+    // Source expectation only: 4 fixed tiles per layer, and each of the 38
     // compressed-attention layers crosses the threshold once inside one tile.
-    assert_eq!((tiles, splits), (358, 38));
+    assert_eq!((tiles, splits), (198, 38));
 }
 
 #[test]

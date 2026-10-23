@@ -58,7 +58,7 @@ fn prepared_transport_includes_static_or_history_control_reserve_once_at_boundar
         let activity = owner_activity::OwnerActivity::default();
         let gate = control::ExecutionGate::default();
         let extra = control::cpu_reserve(history);
-        transport::inject_proxy_headroom(|| Some(0));
+        transport::inject_proxy_headroom(|| Some(1 << 30));
         let mut connection = transport::Connection::prepared(
             stream,
             "test".into(),
@@ -98,6 +98,12 @@ fn prepared_transport_includes_static_or_history_control_reserve_once_at_boundar
 
 fn signals(budget: u64, resident: u64) -> MetalMemorySignals {
     MetalMemorySignals {
+        host_budget: Some(qwen_llm::metal::HostMemoryBudget {
+            physical_bytes: 1024 << 30,
+            conservative_available_bytes: 1024 << 30,
+            external_gap_bytes: 0,
+            private_shadow_bytes: 0,
+        }),
         recommended_max_bytes: budget,
         current_allocated_bytes: resident,
         process_limit_remaining_bytes: Some(budget - resident),

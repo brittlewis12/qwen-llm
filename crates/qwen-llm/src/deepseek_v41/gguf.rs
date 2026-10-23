@@ -142,6 +142,7 @@ impl LoadError {
     pub fn as_memory_admission(&self) -> Option<&metal::MemoryAdmissionDenied> {
         match self {
             Self::MemoryAdmissionDenied(e) => Some(e),
+            Self::Metal(metal::MetalError::MemoryAdmission(e)) => Some(e),
             _ => None,
         }
     }
@@ -348,9 +349,17 @@ impl ResidentWeights {
             windows.extend(storage.windows);
         }
         let view_bytes = windows.iter().try_fold(0, |n, w| add(n, w.length as u64))?;
+        let mapping_kinds = windows
+            .iter()
+            .map(|window| storage::mapping_kind(&g, window, page))
+            .collect::<Result<Vec<_>, _>>()?;
+        let private_bytes = mapping_kinds
+            .iter()
+            .try_fold(0, |total, kind| add(total, kind.private_bytes()))?;
+        let _allocation_transaction = ctx.begin_allocation_transaction();
         if let Some(e) = metal::evaluate_metal_memory_admission_with_cpu_bytes(
             view_bytes,
-            0,
+            private_bytes,
             0,
             ctx.memory_signals(),
             true,
@@ -360,15 +369,26 @@ impl ResidentWeights {
             return Err(e.into());
         }
         let mut backings = Vec::new();
-        for w in &windows {
+        for (w, kind) in windows.iter().zip(mapping_kinds) {
             let (mmap, local) = storage::mapping(&g, w, page)?;
+            let ownership = match kind {
+                storage::MappingKind::OriginalShared | storage::MappingKind::SharedEof => {
+                    metal::GgufMappingOwnership::Shared
+                }
+                storage::MappingKind::PrivateBoundary { bytes } => {
+                    metal::GgufMappingOwnership::PrivateCow {
+                        shadow_bytes: bytes,
+                    }
+                }
+            };
             backings.push(
-                ctx.gguf_no_copy_window(
+                ctx.gguf_no_copy_window_with_ownership(
                     mmap,
                     w.shard_idx,
                     if local { 0 } else { w.mmap_offset as usize },
                     w.length,
                     16,
+                    ownership,
                 )
                 .map(|backing| (backing, local))?,
             );

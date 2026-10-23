@@ -241,7 +241,7 @@ fn execution_retains_only_consumed_tokens_and_final_logits() {
         "fixture".into(),
     )
     .unwrap();
-    settings.headroom = || Some(0);
+    settings.headroom = || finite_headroom(1 << 30);
     for (maximum, stop, fail) in [
         (1, false, false),
         (3, false, false),
@@ -337,7 +337,7 @@ fn native_byte_pieces_use_shared_decode_without_lossy_utf8_conversion() {
         "fixture".into(),
     )
     .unwrap();
-    settings.headroom = || Some(0);
+    settings.headroom = || finite_headroom(1 << 30);
     let request = settings
         .profile()
         .parse(&json!({"model":"fixture", "input":"x", "max_output_tokens":4}))
@@ -399,7 +399,7 @@ fn cancelled_partial_decode_discards_live_state_but_keeps_prompt_checkpoint() {
         "fixture".into(),
     )
     .unwrap();
-    settings.headroom = || Some(0);
+    settings.headroom = || finite_headroom(1 << 30);
     let request = settings
         .profile()
         .parse(&json!({"model":"fixture", "input":"x", "max_output_tokens":3}))
@@ -450,7 +450,7 @@ fn batch_settings() -> Settings {
         "fixture".into(),
     )
     .unwrap();
-    settings.headroom = || Some(0);
+    settings.headroom = || finite_headroom(1 << 30);
     settings
 }
 
@@ -532,6 +532,12 @@ fn request_admission_retries_only_after_process_cache_relief() {
                                 reason,
                                 Some(4096),
                                 MetalMemorySignals {
+                                    host_budget: Some(qwen_llm::metal::HostMemoryBudget {
+                                        physical_bytes: 1024 << 30,
+                                        conservative_available_bytes: 1024 << 30,
+                                        external_gap_bytes: 0,
+                                        private_shadow_bytes: 0,
+                                    }),
                                     recommended_max_bytes: 1024,
                                     current_allocated_bytes: 0,
                                     process_limit_remaining_bytes: Some(1024),
@@ -575,35 +581,100 @@ fn request_admission_retries_only_after_process_cache_relief() {
 }
 
 #[test]
-fn output_admission_releases_snapshots_before_rechecking_process_headroom() {
+fn output_admission_releases_snapshots_before_rechecking_cpu_headroom() {
     use std::{cell::Cell, sync::Arc};
-    for held in [false, true] {
-        for recover in [false, true] {
-            let mut recorded = Recorded::default();
-            let old = Arc::new(vec![9]);
-            let weak = Arc::downgrade(&old);
-            assert!(recorded.cache.insert_shared_strict(vec![9], old.clone(), 8));
-            let _held = held.then_some(old);
-            let observations = Cell::new(0);
-            let result = execution::admit_output(&mut recorded, 100, || {
-                observations.set(observations.get() + 1);
-                Some(if recover && weak.upgrade().is_none() {
-                    100
-                } else {
-                    99
-                })
-            });
-            assert_eq!(observations.get(), if held { 1 } else { 2 });
-            assert_eq!(result.is_ok(), !held && recover);
-            assert_eq!(recorded.cache.len(), usize::from(held));
-            if let Err(error) = result {
-                assert_eq!(
-                    (error.status, error.code),
-                    (503, Some("memory_admission_denied"))
-                );
+    for process_limited in [false, true] {
+        for held in [false, true] {
+            for recover in [false, true] {
+                let mut recorded = Recorded::default();
+                let old = Arc::new(vec![9]);
+                let weak = Arc::downgrade(&old);
+                assert!(recorded.cache.insert_shared_strict(vec![9], old.clone(), 8));
+                let _held = held.then_some(old);
+                let observations = Cell::new(0);
+                let result = execution::admit_output(&mut recorded, 100, || {
+                    observations.set(observations.get() + 1);
+                    let remaining = if recover && weak.upgrade().is_none() {
+                        100
+                    } else {
+                        99
+                    };
+                    if process_limited {
+                        HostMemoryHeadroom::from_budget(
+                            qwen_llm::metal::HostMemoryBudget {
+                                physical_bytes: 1_000,
+                                conservative_available_bytes: 1_000,
+                                external_gap_bytes: 0,
+                                private_shadow_bytes: 0,
+                            },
+                            100,
+                            remaining,
+                        )
+                    } else {
+                        finite_headroom(remaining)
+                    }
+                });
+                assert_eq!(observations.get(), if held { 1 } else { 2 });
+                assert_eq!(result.is_ok(), !held && recover);
+                assert_eq!(recorded.cache.len(), usize::from(held));
+                if let Err(error) = result {
+                    assert_eq!(
+                        (error.status, error.code),
+                        (503, Some("memory_admission_denied"))
+                    );
+                    let reason = if process_limited {
+                        "process_insufficient"
+                    } else {
+                        "host_availability_insufficient"
+                    };
+                    assert!(error.message.contains(reason));
+                }
             }
         }
     }
+}
+
+#[test]
+fn output_host_ceiling_refusal_keeps_snapshots_without_retry() {
+    let mut recorded = Recorded::default();
+    assert!(recorded.cache.insert_strict(vec![9], vec![9], 8));
+    let observations = std::cell::Cell::new(0);
+    let error = execution::admit_output(&mut recorded, 100, || {
+        observations.set(observations.get() + 1);
+        HostMemoryHeadroom::from_budget(
+            qwen_llm::metal::HostMemoryBudget {
+                physical_bytes: 1_000,
+                conservative_available_bytes: 1_000,
+                external_gap_bytes: 0,
+                private_shadow_bytes: 0,
+            },
+            701,
+            0,
+        )
+    })
+    .unwrap_err();
+    assert_eq!(observations.get(), 1);
+    assert_eq!(recorded.cache.len(), 1);
+    assert_eq!(error.status, 503);
+    assert!(error.message.contains("host_insufficient"));
+}
+
+#[test]
+fn output_unknown_headroom_keeps_snapshots_without_retry() {
+    let mut recorded = Recorded::default();
+    assert!(recorded.cache.insert_strict(vec![9], vec![9], 8));
+    let observations = std::cell::Cell::new(0);
+    let error = execution::admit_output(&mut recorded, 100, || {
+        observations.set(observations.get() + 1);
+        None
+    })
+    .unwrap_err();
+    assert_eq!(observations.get(), 1);
+    assert_eq!(recorded.cache.len(), 1);
+    assert_eq!(
+        (error.status, error.code),
+        (500, Some("memory_signal_unavailable"))
+    );
 }
 
 #[test]
@@ -670,12 +741,12 @@ fn decode_output_admission_retries_same_piece_and_preserves_guards() {
         .unwrap();
         settings.headroom = || {
             if !PRESSURE.get() {
-                return Some(u64::MAX);
+                return finite_headroom(1 << 30);
             }
             OBSERVATIONS.set(OBSERVATIONS.get() + 1);
-            Some(
+            finite_headroom(
                 if RECOVER.get() && OLD.with(|old| old.borrow().upgrade().is_none()) {
-                    u64::MAX
+                    1 << 30
                 } else {
                     1
                 },
@@ -1161,6 +1232,12 @@ fn headless_and_final_prefill_memory_refusals_stay_typed() {
                         qwen_llm::metal::MetalMemoryAdmissionReason::WorkingSetInsufficient,
                         Some(4096),
                         MetalMemorySignals {
+                            host_budget: Some(qwen_llm::metal::HostMemoryBudget {
+                                physical_bytes: 1024 << 30,
+                                conservative_available_bytes: 1024 << 30,
+                                external_gap_bytes: 0,
+                                private_shadow_bytes: 0,
+                            }),
                             recommended_max_bytes: 1024,
                             current_allocated_bytes: 0,
                             process_limit_remaining_bytes: Some(8192),

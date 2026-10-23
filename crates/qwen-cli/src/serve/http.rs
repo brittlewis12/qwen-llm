@@ -189,7 +189,7 @@ pub(crate) trait GenerationBackend {
     fn request_failed_on_server(&mut self) {}
     /// Headroom the HTTP side admits output buffers against (tests inject).
     fn output_headroom(&self) -> Headroom {
-        qwen_llm::metal::MetalContext::process_limit_bytes_remaining
+        qwen_llm::metal::effective_host_memory_remaining_bytes
     }
 }
 
@@ -1216,8 +1216,7 @@ mod tests {
             Ok(self.protocol.clone())
         }
         fn output_headroom(&self) -> Headroom {
-            self.headroom
-                .unwrap_or(qwen_llm::metal::MetalContext::process_limit_bytes_remaining)
+            self.headroom.unwrap_or(|| Some(1 << 30))
         }
         fn request_failed_on_server(&mut self) {
             self.server_failures
@@ -1342,7 +1341,7 @@ mod tests {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let _client = TcpStream::connect(listener.local_addr().unwrap()).unwrap();
         let (stream, _) = listener.accept().unwrap();
-        let mut sink = CollectSink::new(&stream, || Some(0));
+        let mut sink = CollectSink::new(&stream, || Some(1 << 30));
         assert!(sink.piece_fragment(b"x", None).is_err(), "no piece yet");
         sink.piece_fragment(b"abc", Some(7)).unwrap();
         let pointer = sink.bytes.as_ptr();
@@ -1938,6 +1937,12 @@ mod tests {
                     reason,
                     Some(1 << 33),
                     MetalMemorySignals {
+                        host_budget: Some(qwen_llm::metal::HostMemoryBudget {
+                            physical_bytes: 1024 << 30,
+                            conservative_available_bytes: 1024 << 30,
+                            external_gap_bytes: 0,
+                            private_shadow_bytes: 0,
+                        }),
                         recommended_max_bytes: 1 << 34,
                         current_allocated_bytes: 1 << 34,
                         process_limit_remaining_bytes: Some(1 << 30),

@@ -84,6 +84,12 @@ fn head_residency_and_request_scratch_share_ordinary_working_set_budget() {
     use qwen_llm::metal::MetalMemorySignals;
     const GIB: u64 = 1 << 30;
     let signals = MetalMemorySignals {
+        host_budget: Some(qwen_llm::metal::HostMemoryBudget {
+            physical_bytes: 1024 << 30,
+            conservative_available_bytes: 1024 << 30,
+            external_gap_bytes: 0,
+            private_shadow_bytes: 0,
+        }),
         recommended_max_bytes: 118 * GIB,
         current_allocated_bytes: 2 * GIB,
         process_limit_remaining_bytes: Some(200 * GIB),

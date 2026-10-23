@@ -50,6 +50,12 @@ mod tests {
     #[test]
     fn refusal_keeps_typed_reason_and_signals() {
         let signals = crate::metal::MetalMemorySignals {
+            host_budget: Some(crate::metal::HostMemoryBudget {
+                physical_bytes: 1024 << 30,
+                conservative_available_bytes: 1024 << 30,
+                external_gap_bytes: 0,
+                private_shadow_bytes: 0,
+            }),
             recommended_max_bytes: 100,
             current_allocated_bytes: 90,
             process_limit_remaining_bytes: Some(5),

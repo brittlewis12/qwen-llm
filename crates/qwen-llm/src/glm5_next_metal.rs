@@ -123,10 +123,14 @@ impl Glm5NextMetalError {
     }
 }
 
-/// Budget a refused admission saw: working-set headroom, capped by the
-/// process limit when the process reports one.
+/// Budget a refused admission saw: the smaller of working-set and validated
+/// host headroom, capped by a positive process limit. Unknown host headroom
+/// provides no advice budget.
 fn admission_budget(admission: &crate::metal::MetalMemoryAdmission) -> u64 {
-    let headroom = admission.working_set_headroom_bytes.unwrap_or(0);
+    let headroom = admission
+        .working_set_headroom_bytes
+        .unwrap_or(0)
+        .min(admission.signals.host_remaining_bytes().unwrap_or(0));
     match admission.signals.process_limit_remaining_bytes {
         Some(process) if process > 0 => headroom.min(process),
         _ => headroom,
@@ -171,7 +175,8 @@ pub struct Glm5NextPreflight {
 /// chunks against current device memory before any weight is mapped or
 /// prefetched: retained windows, session buffers and reserve, priced with the
 /// device. On refusal, reports the largest capacity that fits the same
-/// budget (the smaller of working-set headroom and the process limit).
+/// combined budget (the smallest of working-set headroom, validated host
+/// headroom and any positive process limit).
 pub fn preflight_session(
     ctx: &MetalContext,
     gguf: &GgufFile,

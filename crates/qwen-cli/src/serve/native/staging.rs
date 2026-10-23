@@ -163,14 +163,16 @@ mod tests {
     fn staging_preserves_full_authorized_reserve_at_every_checkpoint() {
         let (_files, plan) = plan();
         let reserve = plan.matrix_bytes + super::super::registry::STAGING_OVERHEAD_BYTES + 12345;
-        for remaining in [None, Some(0), Some(reserve - 1), Some(reserve)] {
+        for (remaining, fits) in [
+            (None, false),
+            (Some(0), false),
+            (Some(reserve - 1), false),
+            (Some(reserve), true),
+        ] {
             let (work, response, _guard) = request(&plan, reserve).unwrap();
             work.run(|| Ok(()), || remaining);
             let result = response.recv().unwrap();
-            assert_eq!(
-                result.is_ok(),
-                matches!(remaining, Some(0)) || remaining == Some(reserve)
-            );
+            assert_eq!(result.is_ok(), fits, "remaining: {remaining:?}");
         }
         assert!(request(&plan, plan.matrix_bytes).is_err());
         let (work, response, _guard) = request(&plan, reserve).unwrap();

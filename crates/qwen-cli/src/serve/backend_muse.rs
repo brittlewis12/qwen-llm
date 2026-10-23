@@ -309,7 +309,7 @@ impl GenerationBackend for MuseGlimmerBackend {
         )?;
         super::transport_memory::admit_resident_transport(
             sink.transport_reserve_bytes(),
-            self.ctx.memory_signals().process_limit_remaining_bytes,
+            qwen_llm::metal::effective_host_memory_remaining_bytes(),
         )?;
         let stop_tokens = [self.eos_token_id, self.eot_token_id];
         let prefill_t0 = Instant::now();

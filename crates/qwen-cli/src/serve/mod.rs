@@ -258,12 +258,13 @@ pub(super) enum SnapshotCaptureDenial {
     MetalHeadroom,
     ProcessSignalUnavailable,
     ProcessHeadroom { deficit_bytes: u64 },
+    HostSignalUnavailable,
+    HostHeadroom { deficit_bytes: u64 },
+    HostAvailabilityHeadroom { deficit_bytes: u64 },
 }
 
-/// [`snapshot_capture_admission`], first relieving a process-footprint
-/// deficit by evicting cached snapshots and re-checking once. A Metal
-/// headroom denial is not retried: snapshots live in CPU arenas, so evicting
-/// them does not change the Metal allocation signal.
+/// Relieve a process or host-availability deficit by evicting CPU snapshots
+/// and re-checking once. Metal and host-ceiling denials are not retried.
 pub(super) fn admit_snapshot_capture_for(
     family: &str,
     bytes: u64,
@@ -284,6 +285,10 @@ pub(super) fn admit_snapshot_capture_for(
                     qwen_llm::metal::MetalMemoryAdmissionReason::ProcessInsufficient,
                     *deficit_bytes,
                 )),
+                SnapshotCaptureDenial::HostAvailabilityHeadroom { deficit_bytes } => Some((
+                    qwen_llm::metal::MetalMemoryAdmissionReason::HostAvailabilityInsufficient,
+                    *deficit_bytes,
+                )),
                 _ => None,
             })
         },
@@ -301,15 +306,40 @@ pub(super) fn snapshot_capture_admission(
         .ok_or(SnapshotCaptureDenial::EstimateOverflow)?;
     let metal_available = signals
         .recommended_max_bytes
-        .checked_sub(signals.current_allocated_bytes)
+        .checked_sub(
+            signals
+                .effective_device_usage()
+                .ok_or(SnapshotCaptureDenial::HostSignalUnavailable)?,
+        )
         .filter(|_| signals.recommended_max_bytes != 0)
         .ok_or(SnapshotCaptureDenial::InvalidMetalSignal)?;
     if required > metal_available {
         return Err(SnapshotCaptureDenial::MetalHeadroom);
     }
+    let host_available = signals
+        .host_remaining_bytes()
+        .ok_or(SnapshotCaptureDenial::HostSignalUnavailable)?;
+    let host_ceiling_available = signals
+        .host_budget
+        .and_then(|host| host.ceiling_remaining_bytes(signals.current_allocated_bytes))
+        .ok_or(SnapshotCaptureDenial::HostSignalUnavailable)?;
+    if required > host_ceiling_available {
+        return Err(SnapshotCaptureDenial::HostHeadroom {
+            deficit_bytes: required - host_ceiling_available,
+        });
+    }
+    if required > host_available {
+        let relievable_available = match signals.process_limit_remaining_bytes {
+            Some(0) => host_available,
+            Some(process) => host_available.min(process),
+            None => return Err(SnapshotCaptureDenial::ProcessSignalUnavailable),
+        };
+        return Err(SnapshotCaptureDenial::HostAvailabilityHeadroom {
+            deficit_bytes: required - relievable_available,
+        });
+    }
     match signals.process_limit_remaining_bytes {
-        // Darwin reports zero when this advisory budget is omitted. Match the
-        // engine admission contract: Metal headroom remains authoritative.
+        // A raw zero can omit only the process constraint, never the host check.
         Some(0) => {}
         Some(process_available) if required > process_available => {
             return Err(SnapshotCaptureDenial::ProcessHeadroom {
@@ -1489,6 +1519,12 @@ mod tests {
     #[test]
     fn snapshot_capture_admission_fails_closed() {
         let signals = |metal, process| MetalMemorySignals {
+            host_budget: Some(qwen_llm::metal::HostMemoryBudget {
+                physical_bytes: 1024 << 30,
+                conservative_available_bytes: 1024 << 30,
+                external_gap_bytes: 0,
+                private_shadow_bytes: 0,
+            }),
             recommended_max_bytes: metal,
             current_allocated_bytes: 0,
             process_limit_remaining_bytes: process,
@@ -1513,6 +1549,12 @@ mod tests {
     fn auto_snapshot_budget_scales_with_machine_and_resident_model() {
         let policy = SnapshotPolicyConfig::default();
         let signals = |recommended, resident| MetalMemorySignals {
+            host_budget: Some(qwen_llm::metal::HostMemoryBudget {
+                physical_bytes: 1024 << 30,
+                conservative_available_bytes: 1024 << 30,
+                external_gap_bytes: 0,
+                private_shadow_bytes: 0,
+            }),
             recommended_max_bytes: recommended,
             current_allocated_bytes: resident,
             process_limit_remaining_bytes: Some(0),
@@ -1545,8 +1587,45 @@ mod tests {
     }
 
     #[test]
+    fn snapshot_capture_never_omits_combined_host_headroom() {
+        let mut signals = MetalMemorySignals {
+            recommended_max_bytes: 20 * GIB,
+            current_allocated_bytes: 2 * GIB,
+            process_limit_remaining_bytes: Some(0),
+            host_budget: Some(qwen_llm::metal::HostMemoryBudget {
+                physical_bytes: 10 * GIB,
+                conservative_available_bytes: 10 * GIB,
+                external_gap_bytes: 0,
+                private_shadow_bytes: 0,
+            }),
+        };
+        let exact = 6 * GIB - SNAPSHOT_CAPTURE_HEADROOM_BYTES;
+        assert!(snapshot_capture_admission(exact, signals).is_ok());
+        assert_eq!(
+            snapshot_capture_admission(exact + 1, signals),
+            Err(SnapshotCaptureDenial::HostHeadroom { deficit_bytes: 1 })
+        );
+        signals.process_limit_remaining_bytes = Some(u64::MAX);
+        assert_eq!(
+            snapshot_capture_admission(exact + 1, signals),
+            Err(SnapshotCaptureDenial::HostHeadroom { deficit_bytes: 1 })
+        );
+        signals.host_budget = None;
+        assert_eq!(
+            snapshot_capture_admission(1, signals),
+            Err(SnapshotCaptureDenial::HostSignalUnavailable)
+        );
+    }
+
+    #[test]
     fn capture_admission_evicts_only_for_process_deficit() {
         let signals = |process| MetalMemorySignals {
+            host_budget: Some(qwen_llm::metal::HostMemoryBudget {
+                physical_bytes: 1024 << 30,
+                conservative_available_bytes: 1024 << 30,
+                external_gap_bytes: 0,
+                private_shadow_bytes: 0,
+            }),
             recommended_max_bytes: 10 * GIB,
             current_allocated_bytes: 0,
             process_limit_remaining_bytes: Some(process),
@@ -1593,6 +1672,58 @@ mod tests {
     }
 
     #[test]
+    fn capture_relief_rechecks_host_availability_but_never_spends_device_ceiling() {
+        let required = 100 + SNAPSHOT_CAPTURE_HEADROOM_BYTES;
+        let observed = std::cell::Cell::new(MetalMemorySignals {
+            recommended_max_bytes: 20 * GIB,
+            current_allocated_bytes: GIB,
+            process_limit_remaining_bytes: Some(required - 60),
+            host_budget: Some(qwen_llm::metal::HostMemoryBudget {
+                physical_bytes: 10 * GIB,
+                conservative_available_bytes: 2 * GIB + required - 40,
+                external_gap_bytes: 0,
+                private_shadow_bytes: 0,
+            }),
+        });
+        let reads = std::cell::Cell::new(0);
+        let result = admit_snapshot_capture_for(
+            "host-availability",
+            100,
+            || {
+                reads.set(reads.get() + 1);
+                observed.get()
+            },
+            |deficit| {
+                assert_eq!(deficit, 60);
+                let mut signals = observed.get();
+                signals
+                    .host_budget
+                    .as_mut()
+                    .unwrap()
+                    .conservative_available_bytes += 64;
+                signals.process_limit_remaining_bytes = Some(required);
+                observed.set(signals);
+                memory_relief::test_evicted(64)
+            },
+        );
+        assert!(result.is_ok());
+        assert_eq!(reads.get(), 2);
+
+        let mut signals = observed.get();
+        signals.current_allocated_bytes = 8 * GIB - required + 1;
+        let result = admit_snapshot_capture_for(
+            "host-ceiling",
+            100,
+            || signals,
+            |_| panic!("CPU snapshots cannot relieve a device-ceiling shortfall"),
+        );
+        assert_eq!(
+            result.unwrap_err().0,
+            SnapshotCaptureDenial::HostHeadroom { deficit_bytes: 1 }
+        );
+    }
+
+    #[test]
     fn capture_admission_does_not_retry_when_snapshot_payload_is_held() {
         use super::snapshot_cache::SnapshotCache;
 
@@ -1608,6 +1739,12 @@ mod tests {
             || {
                 signal_reads.set(signal_reads.get() + 1);
                 MetalMemorySignals {
+                    host_budget: Some(qwen_llm::metal::HostMemoryBudget {
+                        physical_bytes: 1024 << 30,
+                        conservative_available_bytes: 1024 << 30,
+                        external_gap_bytes: 0,
+                        private_shadow_bytes: 0,
+                    }),
                     recommended_max_bytes: u64::MAX,
                     current_allocated_bytes: 0,
                     process_limit_remaining_bytes: Some(process_remaining),

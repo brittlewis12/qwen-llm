@@ -155,9 +155,9 @@ impl Glm5NextBackend<'_, '_> {
             .map_err(|error| fail(format!("proposal sampler: {error}")))?;
         let reserve = cpu_reserve(sink.transport_reserve_bytes(), maximum)?;
         with_transport_snapshot_release(&mut self.cache, None, || {
-            super::super::transport_memory::admit_resident_transport(
+            super::super::transport_memory::admit_resident_transport_with_headroom(
                 reserve,
-                MetalContext::process_limit_bytes_remaining(),
+                qwen_llm::metal::host_memory_headroom(),
             )
         })?;
         sink.tick().map_err(BackendFailure::Aborted)?;

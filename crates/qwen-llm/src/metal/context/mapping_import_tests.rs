@@ -409,6 +409,12 @@ fn run_mapping_import_case(
                     0,
                     span,
                     4,
+                    match kind {
+                        MapKind::SharedAligned | MapKind::SharedEof => GgufMappingOwnership::Shared,
+                        MapKind::OldPrivateEof => GgufMappingOwnership::PrivateCow {
+                            shadow_bytes: span as u64,
+                        },
+                    },
                     move |pointer, length| {
                         if pointer.as_ptr() as usize != expected_pointer || length != span {
                             observer_mismatches.fetch_add(1, Ordering::Relaxed);

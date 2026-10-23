@@ -285,23 +285,24 @@ impl Settings {
 pub(super) fn admit_output<S>(
     reuse: &mut impl reuse::Reuse<S>,
     reserve: u64,
-    headroom: impl Fn() -> Option<u64>,
+    headroom: impl Fn() -> Option<HostMemoryHeadroom>,
 ) -> Result<(), ServeError> {
-    let admit = || super::super::output_memory::admit_growth(reserve, 0, headroom());
+    let admit = || {
+        super::super::transport_memory::admit_resident_transport_with_headroom(reserve, headroom())
+    };
     super::super::memory_relief::retry(
         "deepseek_v41",
         admit(),
         |result| {
-            let error = result.as_ref().err()?;
-            // Output admission is CPU-only, so its pressure is process-only.
-            (error.status == 503 && error.code == Some("memory_admission_denied")).then_some((
-                qwen_llm::metal::MetalMemoryAdmissionReason::ProcessInsufficient,
-                u64::MAX,
-            ))
+            result
+                .as_ref()
+                .err()
+                .map(|denied| (denied.reason, u64::MAX))
         },
         |bytes| reuse.evict_for(bytes),
         admit,
     )
+    .map_err(|denied| denied.error)
 }
 
 fn cancelled(cancel: &AtomicBool) -> bool {

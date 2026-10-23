@@ -103,7 +103,7 @@ impl State {
                                     &self.server,
                                 )
                             },
-                            qwen_llm::metal::MetalContext::process_limit_bytes_remaining,
+                            qwen_llm::metal::effective_host_memory_remaining_bytes,
                         );
                     }
                     continue;

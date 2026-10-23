@@ -1322,7 +1322,7 @@ fn native_deepseek_v4_memory_plan_admits_and_reconciles() {
     assert!(admission.is_admitted(), "admission denied: {admission:?}");
     assert_eq!(
         admission.reason,
-        qwen_llm::metal::MetalMemoryAdmissionReason::AdmittedProcessBudgetOmitted
+        qwen_llm::metal::MetalMemoryAdmissionReason::AdmittedWithHostBudget
     );
 
     let admitted_load_plan = load_plan.admit(signals).expect("admit DS4 load plan");
@@ -1335,7 +1335,7 @@ fn native_deepseek_v4_memory_plan_admits_and_reconciles() {
     );
     assert_eq!(
         refreshed_admission.reason,
-        qwen_llm::metal::MetalMemoryAdmissionReason::AdmittedProcessBudgetOmitted
+        qwen_llm::metal::MetalMemoryAdmissionReason::AdmittedWithHostBudget
     );
     let before_residency_bytes = refreshed_admission.signals.current_allocated_bytes;
     memory_plan

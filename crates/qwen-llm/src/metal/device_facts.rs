@@ -76,7 +76,7 @@ impl DeviceFacts {
             recommended_max_working_set_bytes: device.recommendedMaxWorkingSetSize(),
             unified_memory: device.hasUnifiedMemory(),
             host_page_size_bytes: super::host_page_size_bytes().ok(),
-            physical_memory_bytes: query_sysctl_value("hw.memsize"),
+            physical_memory_bytes: super::host_physical_memory_bytes(),
             os_version: query_sysctl_string("kern.osproductversion"),
             os_build: os_build_version(),
             product_metallib_deployment_target: PRODUCT_METALLIB_TARGET,
@@ -230,24 +230,6 @@ fn version_at_least(actual: &str, required: &str) -> Option<bool> {
         }
     }
     Some(true)
-}
-
-fn query_sysctl_value(name: &str) -> Option<u64> {
-    let name = std::ffi::CString::new(name).ok()?;
-    let mut value = 0_u64;
-    let mut length = std::mem::size_of_val(&value);
-    // SAFETY: the output buffer is valid for `length` writable bytes and the
-    // sysctl name is a nul-terminated static string at each call site.
-    let status = unsafe {
-        libc::sysctlbyname(
-            name.as_ptr(),
-            (&mut value as *mut u64).cast(),
-            &mut length,
-            std::ptr::null_mut(),
-            0,
-        )
-    };
-    (status == 0 && length == std::mem::size_of_val(&value)).then_some(value)
 }
 
 fn query_sysctl_string(name: &str) -> Option<String> {

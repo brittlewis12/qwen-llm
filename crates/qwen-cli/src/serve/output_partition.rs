@@ -132,7 +132,7 @@ impl OutputPartition {
     pub(crate) fn new(protocol: OutputProtocol) -> Self {
         Self::with_headroom(
             protocol,
-            qwen_llm::metal::MetalContext::process_limit_bytes_remaining,
+            qwen_llm::metal::effective_host_memory_remaining_bytes,
         )
     }
 
@@ -691,7 +691,7 @@ mod tests {
         let close = "\n</parameter>\n</function>\n</tool_call>";
         let block = format!("{open}1{close}");
         // Exactly at the ceiling: parses, and the buffer stays within it.
-        let mut p = OutputPartition::with_headroom(protocol(block.len()), || Some(0));
+        let mut p = OutputPartition::with_headroom(protocol(block.len()), || Some(1 << 30));
         let mut events = Vec::new();
         p.push(format!("x{block}").as_bytes(), &mut events);
         if let OutputPartition::Qwen(qwen) = &p {
@@ -704,7 +704,7 @@ mod tests {
                 .any(|e| matches!(e, PartitionEvent::FunctionCall(_)))
         );
         // One byte past it: typed 500, no raw tool text.
-        let mut p = OutputPartition::with_headroom(protocol(block.len() - 1), || Some(0));
+        let mut p = OutputPartition::with_headroom(protocol(block.len() - 1), || Some(1 << 30));
         let mut events = Vec::new();
         p.push(format!("x{block}").as_bytes(), &mut events);
         let failure = p.failure().cloned().expect("ceiling exceeded");
@@ -738,7 +738,7 @@ mod tests {
                         ceiling,
                     ),
                 },
-                || Some(0),
+                || Some(1 << 30),
             )
         };
         let held = |p: &OutputPartition| match p {

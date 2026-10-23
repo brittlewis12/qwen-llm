@@ -1734,6 +1734,12 @@ mod tests {
             priced_upper_bytes: 1_000,
         };
         let exact = MetalMemorySignals {
+            host_budget: Some(crate::metal::HostMemoryBudget {
+                physical_bytes: 1024 << 30,
+                conservative_available_bytes: 1024 << 30,
+                external_gap_bytes: 0,
+                private_shadow_bytes: 0,
+            }),
             recommended_max_bytes: 1_100,
             current_allocated_bytes: 100,
             process_limit_remaining_bytes: Some(1_000),
@@ -1741,6 +1747,12 @@ mod tests {
         assert!(memory.admission(exact).is_admitted());
 
         let working_set_short = MetalMemorySignals {
+            host_budget: Some(crate::metal::HostMemoryBudget {
+                physical_bytes: 1024 << 30,
+                conservative_available_bytes: 1024 << 30,
+                external_gap_bytes: 0,
+                private_shadow_bytes: 0,
+            }),
             recommended_max_bytes: 1_099,
             ..exact
         };

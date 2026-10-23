@@ -689,18 +689,22 @@ fn allocate_single_chunk_request_state(
     Ok((chunk, Some(scratch), sequence))
 }
 
-/// Bytes of process memory a denied admission is short by, when releasing
-/// cached snapshots (process memory) could admit it; `None` otherwise. A
-/// Metal working-set shortfall (alone or with a process one) is excluded:
-/// snapshots do not hold Metal allocations, so evicting them cannot fix it.
+/// CPU snapshot bytes that could relieve a process or host-availability
+/// shortfall. Device working-set and host-ceiling shortfalls are excluded.
 fn process_deficit(admission: &qwen_llm::metal::MetalMemoryAdmission) -> Option<u64> {
     use qwen_llm::metal::MetalMemoryAdmissionReason as Reason;
-    if admission.is_admitted() || admission.reason != Reason::ProcessInsufficient {
-        return None;
-    }
-    let deficit = admission
-        .required_bytes?
-        .checked_sub(admission.signals.process_limit_remaining_bytes?)?;
+    let available = match admission.reason {
+        Reason::ProcessInsufficient => admission.signals.process_limit_remaining_bytes?,
+        Reason::HostAvailabilityInsufficient => {
+            let host = admission.signals.host_remaining_bytes()?;
+            match admission.signals.process_limit_remaining_bytes? {
+                0 => host,
+                process => host.min(process),
+            }
+        }
+        _ => return None,
+    };
+    let deficit = admission.required_bytes?.checked_sub(available)?;
     (deficit > 0).then_some(deficit)
 }
 
@@ -755,12 +759,7 @@ fn admit_with_pressure_relief<P, E>(
         Ok::<_, E>(admission),
         |result| {
             result.as_ref().ok().and_then(|admission| {
-                process_deficit(admission).map(|bytes| {
-                    (
-                        qwen_llm::metal::MetalMemoryAdmissionReason::ProcessInsufficient,
-                        bytes,
-                    )
-                })
+                process_deficit(admission).map(|bytes| (admission.reason, bytes))
             })
         },
         release,
@@ -2621,6 +2620,12 @@ mod tests {
                         cpu,
                         0,
                         MetalMemorySignals {
+                            host_budget: Some(qwen_llm::metal::HostMemoryBudget {
+                                physical_bytes: 1024 << 30,
+                                conservative_available_bytes: 1024 << 30,
+                                external_gap_bytes: 0,
+                                private_shadow_bytes: 0,
+                            }),
                             recommended_max_bytes: u64::MAX,
                             current_allocated_bytes: 0,
                             process_limit_remaining_bytes: Some(remaining.get()),
@@ -2658,6 +2663,12 @@ mod tests {
         let reserve = super::super::control::CPU_RESERVE_BYTES;
         let remaining = bytes + super::DFLASH_FIXED_SCRATCH_RESERVE_BYTES + 1;
         let signals = MetalMemorySignals {
+            host_budget: Some(qwen_llm::metal::HostMemoryBudget {
+                physical_bytes: 1024 << 30,
+                conservative_available_bytes: 1024 << 30,
+                external_gap_bytes: 0,
+                private_shadow_bytes: 0,
+            }),
             recommended_max_bytes: u64::MAX,
             current_allocated_bytes: 0,
             process_limit_remaining_bytes: Some(remaining),
@@ -2696,6 +2707,12 @@ mod tests {
                     cpu,
                     0,
                     MetalMemorySignals {
+                        host_budget: Some(qwen_llm::metal::HostMemoryBudget {
+                            physical_bytes: 1024 << 30,
+                            conservative_available_bytes: 1024 << 30,
+                            external_gap_bytes: 0,
+                            private_shadow_bytes: 0,
+                        }),
                         recommended_max_bytes: 1000,
                         current_allocated_bytes: 0,
                         process_limit_remaining_bytes: Some(remaining.get()),
@@ -2876,6 +2893,12 @@ mod tests {
             evaluate_metal_memory_admission,
         };
         let signals = |process: Option<u64>, headroom: u64| MetalMemorySignals {
+            host_budget: Some(qwen_llm::metal::HostMemoryBudget {
+                physical_bytes: 1024 << 30,
+                conservative_available_bytes: 1024 << 30,
+                external_gap_bytes: 0,
+                private_shadow_bytes: 0,
+            }),
             recommended_max_bytes: 100 + headroom,
             current_allocated_bytes: 100,
             process_limit_remaining_bytes: process,

@@ -54,7 +54,7 @@ fn pipeline() -> (OwnerActivity, HttpProxy, Receiver<Work>) {
         activity,
         HttpProxy {
             extra_cpu_reserve: 0,
-            headroom: || Some(0),
+            headroom: || Some(1 << 30),
             model_id: "test".into(),
             profile: RequestProfile::test_qwen(),
             work,
@@ -128,6 +128,12 @@ fn owner_sink_includes_control_allowance_exactly_once() {
         let scratch = 1024;
         let safety = 512;
         let signals = qwen_llm::metal::MetalMemorySignals {
+            host_budget: Some(qwen_llm::metal::HostMemoryBudget {
+                physical_bytes: 1024 << 30,
+                conservative_available_bytes: 1024 << 30,
+                external_gap_bytes: 0,
+                private_shadow_bytes: 0,
+            }),
             recommended_max_bytes: scratch + safety,
             current_allocated_bytes: 0,
             process_limit_remaining_bytes: Some(scratch + safety + expected),

@@ -276,6 +276,12 @@ fn flash_next_capture_admission_retries_after_process_headroom_eviction() {
 
     let process_remaining = Cell::new(1_u64);
     let signals = || MetalMemorySignals {
+        host_budget: Some(qwen_llm::metal::HostMemoryBudget {
+            physical_bytes: 1024 << 30,
+            conservative_available_bytes: 1024 << 30,
+            external_gap_bytes: 0,
+            private_shadow_bytes: 0,
+        }),
         recommended_max_bytes: u64::MAX,
         current_allocated_bytes: 0,
         process_limit_remaining_bytes: Some(process_remaining.get()),

@@ -31,6 +31,12 @@ fn narrower_prefill_candidates_are_bounded_and_end_at_scalar() {
 
 fn controlled_signals(available: u64) -> MetalMemorySignals {
     MetalMemorySignals {
+        host_budget: Some(crate::metal::HostMemoryBudget {
+            physical_bytes: 1024 << 30,
+            conservative_available_bytes: 1024 << 30,
+            external_gap_bytes: 0,
+            private_shadow_bytes: 0,
+        }),
         recommended_max_bytes: u64::MAX / 2,
         current_allocated_bytes: 0,
         process_limit_remaining_bytes: Some(available),
@@ -171,6 +177,12 @@ fn prefill_retry_requires_a_resource_failure() {
             reason,
             Some(4096),
             MetalMemorySignals {
+                host_budget: Some(crate::metal::HostMemoryBudget {
+                    physical_bytes: 1024 << 30,
+                    conservative_available_bytes: 1024 << 30,
+                    external_gap_bytes: 0,
+                    private_shadow_bytes: 0,
+                }),
                 recommended_max_bytes: 1024,
                 current_allocated_bytes: 0,
                 process_limit_remaining_bytes: Some(1024),
@@ -284,6 +296,12 @@ fn flash_prefill_pressure_plan_preserves_context_and_selection() {
                 plan.memory_plan().session_priced_upper_bytes()
             } + QWEN4EXP_TEXT_SESSION_DYNAMIC_RESERVE_BYTES;
             let signals = MetalMemorySignals {
+                host_budget: Some(crate::metal::HostMemoryBudget {
+                    physical_bytes: 1024 << 30,
+                    conservative_available_bytes: 1024 << 30,
+                    external_gap_bytes: 0,
+                    private_shadow_bytes: 0,
+                }),
                 recommended_max_bytes: u64::MAX / 2,
                 current_allocated_bytes: 0,
                 process_limit_remaining_bytes: Some(budget),
@@ -304,6 +322,12 @@ fn flash_prefill_pressure_plan_preserves_context_and_selection() {
         }
     }
     let unavailable = MetalMemorySignals {
+        host_budget: Some(crate::metal::HostMemoryBudget {
+            physical_bytes: 1024 << 30,
+            conservative_available_bytes: 1024 << 30,
+            external_gap_bytes: 0,
+            private_shadow_bytes: 0,
+        }),
         recommended_max_bytes: u64::MAX / 2,
         current_allocated_bytes: 0,
         process_limit_remaining_bytes: None,

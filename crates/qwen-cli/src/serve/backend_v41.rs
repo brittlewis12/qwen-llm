@@ -1,13 +1,13 @@
 //! Exact-prefix GGUF HTTP backend. Forward borrows the caller's resident
 //! weights/context; neither they nor the backend move to an HTTP worker.
-use super::http::{BackendFailure, GenerationBackend, GenerationOutcome, GenerationSink, Headroom};
+use super::http::{BackendFailure, GenerationBackend, GenerationOutcome, GenerationSink};
 use super::items::{ServeError, ServeRequest};
 #[cfg(test)]
 use super::output_partition::GenerationEnd;
 use super::request_profile::{OutputLimits, RequestProfile, sampling_with_defaults};
 use anyhow::{Context, Result, ensure};
 use qwen_llm::deepseek_v41::forward::{Forward, RequestMemoryEstimate, StateError};
-use qwen_llm::metal::{MetalContext, MetalMemorySignals};
+use qwen_llm::metal::{HostMemoryHeadroom, MetalContext, MetalMemorySignals};
 use qwen_llm::sampling::{Sampler, SamplingConfig};
 use std::io;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -139,7 +139,7 @@ pub(crate) struct Settings {
     sampling: SamplingConfig,
     eos: u32,
     model_id: String,
-    headroom: Headroom,
+    headroom: fn() -> Option<HostMemoryHeadroom>,
 }
 
 impl Settings {
@@ -172,7 +172,7 @@ impl Settings {
             sampling,
             eos,
             model_id,
-            headroom: qwen_llm::metal::MetalContext::process_limit_bytes_remaining,
+            headroom: qwen_llm::metal::host_memory_headroom,
         })
     }
 
@@ -182,6 +182,20 @@ impl Settings {
             sampling: Some(self.sampling.into()),
         }
     }
+}
+
+#[cfg(test)]
+fn finite_headroom(remaining: u64) -> Option<HostMemoryHeadroom> {
+    HostMemoryHeadroom::from_budget(
+        qwen_llm::metal::HostMemoryBudget {
+            physical_bytes: 5 << 40,
+            conservative_available_bytes: (1 << 40) + remaining,
+            external_gap_bytes: 0,
+            private_shadow_bytes: 0,
+        },
+        0,
+        0,
+    )
 }
 
 impl<'a> Backend<'a> {

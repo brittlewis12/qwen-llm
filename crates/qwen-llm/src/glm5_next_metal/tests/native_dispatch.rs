@@ -200,6 +200,102 @@ fn generic_hc_capacity_advice_includes_actual_chunk_capacity() {
     }
 }
 
+#[test]
+fn host_limited_capacity_advice_fits_combined_admission_budget() {
+    use crate::metal::{HostMemoryBudget, MetalMemoryAdmissionReason, MetalMemorySignals};
+
+    let c = config();
+    let price = memory::apple_16k_price;
+    let retained = 1234;
+    let rows = 512;
+    let peak = |capacity| {
+        Glm5NextMemoryLedger::new_with_generic_hc(&c, retained, capacity, rows, true, &price)
+            .unwrap()
+            .peak_bytes()
+    };
+    let requested = u64::from(c.context_length);
+    let required = peak(requested);
+    let host_remaining = peak(1024);
+    assert!(host_remaining < required);
+    let physical = required * 10;
+    let signals = MetalMemorySignals {
+        recommended_max_bytes: required * 2,
+        current_allocated_bytes: 0,
+        process_limit_remaining_bytes: Some(required * 2),
+        host_budget: Some(HostMemoryBudget {
+            physical_bytes: physical,
+            conservative_available_bytes: physical / 5 + host_remaining,
+            external_gap_bytes: 0,
+            private_shadow_bytes: 0,
+        }),
+    };
+    let denied = evaluate_metal_memory_admission(required, 0, signals, true);
+    assert_eq!(
+        denied.reason,
+        MetalMemoryAdmissionReason::HostAvailabilityInsufficient
+    );
+    assert_eq!(signals.host_remaining_bytes(), Some(host_remaining));
+    assert!(denied.working_set_headroom_bytes.unwrap() > required);
+    assert!(signals.process_limit_remaining_bytes.unwrap() > required);
+    let budget = admission_budget(&denied);
+    assert_eq!(budget, host_remaining);
+    let fitting = Glm5NextMemoryLedger::max_capacity_with_generic_hc(
+        &c, retained, rows, budget, true, &price,
+    )
+    .unwrap()
+    .unwrap();
+    assert!((1024..requested).contains(&fitting));
+    assert!(evaluate_metal_memory_admission(peak(fitting), 0, signals, true).is_admitted());
+    assert_eq!(
+        evaluate_metal_memory_admission(peak(fitting + 1), 0, signals, true).reason,
+        MetalMemoryAdmissionReason::HostAvailabilityInsufficient
+    );
+    assert_eq!(
+        Glm5NextMemoryLedger::max_capacity_with_generic_hc(
+            &c,
+            retained,
+            rows,
+            denied.working_set_headroom_bytes.unwrap(),
+            true,
+            &price,
+        )
+        .unwrap(),
+        Some(requested)
+    );
+}
+
+#[test]
+fn capacity_advice_budget_is_zero_without_valid_host_headroom() {
+    use crate::metal::{HostMemoryBudget, MetalMemorySignals};
+
+    for host_budget in [
+        None,
+        Some(HostMemoryBudget {
+            physical_bytes: 0,
+            conservative_available_bytes: 0,
+            external_gap_bytes: 0,
+            private_shadow_bytes: 0,
+        }),
+        Some(HostMemoryBudget {
+            physical_bytes: 1000,
+            conservative_available_bytes: 1001,
+            external_gap_bytes: 0,
+            private_shadow_bytes: 0,
+        }),
+    ] {
+        let signals = MetalMemorySignals {
+            recommended_max_bytes: 1000,
+            current_allocated_bytes: 0,
+            process_limit_remaining_bytes: Some(1000),
+            host_budget,
+        };
+        let admission = evaluate_metal_memory_admission(100, 0, signals, true);
+        assert_eq!(signals.host_remaining_bytes(), None);
+        assert!(!admission.is_admitted());
+        assert_eq!(admission_budget(&admission), 0);
+    }
+}
+
 fn tensor(ctx: &MetalContext, values: &[f32], shape: Vec<u64>) -> MetalTensor {
     MetalTensor::from_bytes(ctx, bytemuck::cast_slice(values), shape, GgmlType::F32).unwrap()
 }

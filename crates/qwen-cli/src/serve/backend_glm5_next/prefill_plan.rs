@@ -90,6 +90,10 @@ fn capture(
         .current_allocated_bytes
         .checked_add(buffers)
         .ok_or(SnapshotCaptureDenial::EstimateOverflow)?;
+    if let Some(host) = signals.host_budget.as_mut() {
+        host.conservative_available_bytes =
+            host.conservative_available_bytes.saturating_sub(buffers);
+    }
     signals.process_limit_remaining_bytes = match signals.process_limit_remaining_bytes {
         Some(0) => Some(0),
         // A finite budget consumed by the session must not turn into Darwin's
@@ -166,7 +170,9 @@ pub(super) fn select(
             }
             Err(
                 SnapshotCaptureDenial::MetalHeadroom
-                | SnapshotCaptureDenial::ProcessHeadroom { .. },
+                | SnapshotCaptureDenial::ProcessHeadroom { .. }
+                | SnapshotCaptureDenial::HostHeadroom { .. }
+                | SnapshotCaptureDenial::HostAvailabilityHeadroom { .. },
             ) => {}
             Err(reason) => return Err(invalid(format!("GLM prefill capture plan: {reason:?}"))),
         }
@@ -179,6 +185,12 @@ mod tests {
     use super::*;
     fn signals(n: u64) -> MetalMemorySignals {
         MetalMemorySignals {
+            host_budget: Some(qwen_llm::metal::HostMemoryBudget {
+                physical_bytes: 1024 << 30,
+                conservative_available_bytes: 1024 << 30,
+                external_gap_bytes: 0,
+                private_shadow_bytes: 0,
+            }),
             recommended_max_bytes: n,
             current_allocated_bytes: 0,
             process_limit_remaining_bytes: Some(n),

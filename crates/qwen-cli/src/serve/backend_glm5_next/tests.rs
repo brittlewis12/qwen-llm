@@ -224,6 +224,12 @@ fn cpu_prefill_plan_generic_hc_and_sparse_ledger() {
         "dynamic reserve stays in admission"
     );
     let signals = MetalMemorySignals {
+        host_budget: Some(qwen_llm::metal::HostMemoryBudget {
+            physical_bytes: 1024 << 30,
+            conservative_available_bytes: 1024 << 30,
+            external_gap_bytes: 0,
+            private_shadow_bytes: 0,
+        }),
         recommended_max_bytes: price.admission - 1,
         current_allocated_bytes: 0,
         process_limit_remaining_bytes: Some(0),
@@ -954,6 +960,12 @@ fn refusal(
         reason,
         Some(3 << 30),
         qwen_llm::metal::MetalMemorySignals {
+            host_budget: Some(qwen_llm::metal::HostMemoryBudget {
+                physical_bytes: 1024 << 30,
+                conservative_available_bytes: 1024 << 30,
+                external_gap_bytes: 0,
+                private_shadow_bytes: 0,
+            }),
             recommended_max_bytes: 112 << 30,
             current_allocated_bytes: 111 << 30,
             process_limit_remaining_bytes: Some(8 << 30),

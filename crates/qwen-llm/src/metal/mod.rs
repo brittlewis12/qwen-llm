@@ -298,6 +298,7 @@ mod expert;
 mod expert_native;
 pub(crate) mod expert_tensor_down;
 mod gdn;
+mod host_budget;
 mod indexer_pool;
 mod iq1;
 mod iq2_xs;
@@ -339,6 +340,7 @@ pub use encoder::*;
 pub use expert::*;
 pub use expert_native::*;
 pub use gdn::*;
+pub use host_budget::*;
 pub use indexer_pool::*;
 pub use iq1::*;
 pub(crate) use iq2_xs::encode_mat_mat_iq2_xs_f32_scalar;
@@ -421,6 +423,8 @@ pub enum MetalError {
     CommandBufferFailed { status: String, error: String },
     #[error("could not inspect host memory before Metal initialization: {0}")]
     HostMemoryTelemetry(String),
+    #[error("Metal allocation refused: {0}")]
+    MemoryAdmission(#[from] MemoryAdmissionDenied),
     #[error(
         "refusing Metal initialization after wired memory remained unsafe for 15 seconds: wired={wired_bytes} physical={physical_bytes}; reboot if no large Metal process remains"
     )]

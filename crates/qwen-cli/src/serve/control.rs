@@ -311,7 +311,7 @@ pub(super) fn handle(stream: TcpStream, profile: &Profile) -> io::Result<()> {
 pub(super) fn admit_memory(bytes: u64) -> Result<()> {
     super::transport_memory::admit_resident_transport(
         bytes,
-        qwen_llm::metal::MetalContext::process_limit_bytes_remaining(),
+        qwen_llm::metal::effective_host_memory_remaining_bytes(),
     )
     .map_err(|cause| anyhow::anyhow!("{}", cause.message))
 }

@@ -8,6 +8,10 @@ use super::*;
 #[path = "query_batch/arithmetic.rs"]
 mod arithmetic_tests;
 
+#[cfg(test)]
+#[path = "query_batch/lineage.rs"]
+mod lineage_tests;
+
 pub(super) const TILE: usize = 512;
 
 /// Rows per query batch tile. The default is the production width; the
@@ -22,6 +26,57 @@ pub(super) fn tile_rows() -> usize {
             .filter(|&rows| (1..=prefill::DEFAULT_CHUNK_ROWS).contains(&rows))
             .unwrap_or(TILE)
     })
+}
+
+/// The cold Full prefill tile containing an absolute query position. Tiles
+/// restart at each original chunk, even when the width does not divide it.
+fn original_query_tile(
+    prompt_rows: usize,
+    position: usize,
+    tile_rows: usize,
+) -> Result<std::ops::Range<usize>> {
+    op::require(
+        (1..=prefill::DEFAULT_CHUNK_ROWS).contains(&tile_rows),
+        "original query tile width",
+    )?;
+    op::require(position < prompt_rows, "original query position")?;
+    let chunk_start = position - position % prefill::DEFAULT_CHUNK_ROWS;
+    let chunk_end = chunk_start
+        .checked_add((prompt_rows - chunk_start).min(prefill::DEFAULT_CHUNK_ROWS))
+        .ok_or("original query chunk overflow")?;
+    let tile_start = chunk_start
+        .checked_add((position - chunk_start) / tile_rows * tile_rows)
+        .ok_or("original query tile overflow")?;
+    let tile_end = tile_start
+        .checked_add((chunk_end - tile_start).min(tile_rows))
+        .ok_or("original query tile end overflow")?;
+    Ok(tile_start..tile_end)
+}
+
+/// Physical span length and its Full arithmetic arity. Only CED decoder Rows
+/// supply prompt_rows; ordinary Full and the uncompacted encoder stay physical.
+fn query_tile_span(
+    prompt_rows: Option<usize>,
+    position: usize,
+    remaining: usize,
+    tile_rows: usize,
+) -> Result<(usize, usize)> {
+    op::require(
+        (1..=prefill::DEFAULT_CHUNK_ROWS).contains(&remaining)
+            && (1..=prefill::DEFAULT_CHUNK_ROWS).contains(&tile_rows),
+        "query span geometry",
+    )?;
+    let end = position
+        .checked_add(remaining)
+        .ok_or("query span overflow")?;
+    if let Some(prompt_rows) = prompt_rows {
+        op::require(end <= prompt_rows, "query span outside original prompt")?;
+        let original = original_query_tile(prompt_rows, position, tile_rows)?;
+        Ok((remaining.min(original.end - position), original.len()))
+    } else {
+        let n = remaining.min(tile_rows);
+        Ok((n, n))
+    }
 }
 
 #[cfg(test)]
@@ -48,6 +103,10 @@ fn mma_geometry(c: &Config) -> bool {
         return false;
     }
     c.head_dim == MMA_DIM && c.heads.is_multiple_of(MMA_HEADS)
+}
+
+fn tensor_arithmetic(mma: bool, logical_arity: usize) -> bool {
+    mma && logical_arity >= 128
 }
 
 pub(super) struct Scratch {
@@ -521,16 +580,13 @@ impl Workspace {
         rows: &Rows,
     ) -> Result<()> {
         let tile = tile_rows();
-        for first in (0..rows.rows).step_by(tile) {
-            self.sink_tile(
-                ctx,
-                enc,
-                id,
-                start,
-                rows,
-                first,
-                (rows.rows - first).min(tile),
-            )?;
+        let prompt_rows = self.ced_decoder_prompt_rows(id, start, rows.rows)?;
+        let mut first = 0;
+        while first < rows.rows {
+            let position = start.checked_add(first).ok_or("query position overflow")?;
+            let (n, _) = query_tile_span(prompt_rows, position, rows.rows - first, tile)?;
+            self.sink_tile(ctx, enc, id, start, rows, first, n)?;
+            first += n;
         }
         Ok(())
     }
@@ -547,10 +603,13 @@ impl Workspace {
     ) -> Result<()> {
         let c = &self.config;
         op::require(
-            n > 0 && n <= tile_rows() && first + n <= rows.rows,
+            n > 0 && n <= tile_rows() && first.checked_add(n).is_some_and(|end| end <= rows.rows),
             "query tile extent",
         )?;
-        let position = start + first;
+        let position = start.checked_add(first).ok_or("query position overflow")?;
+        let prompt_rows = self.ced_decoder_prompt_rows(id, start, rows.rows)?;
+        let (span, logical_arity) = query_tile_span(prompt_rows, position, n, tile_rows())?;
+        op::require(span == n, "query tile crosses original Full tile")?;
         let history = match rows.history.get() {
             Some(history) => history,
             None if self.ced.is_none() => ced::HistoryRange {
@@ -632,8 +691,9 @@ impl Workspace {
         enc.set_tensor(7, &rows.tile.scores);
         enc.set_tensor(8, &attended);
         enc.set_tensor(10, &self.status);
-        let tensor = mma
-            && n >= 128
+        // Compaction must not change Full's QK/PV reduction tree. A physical
+        // singleton can descend from a Tensor tile or from a short MMA tail.
+        let tensor = tensor_arithmetic(mma, logical_arity)
             && metal::moe_grouped_tensor_selected(ctx)
             && std::env::var_os("QWEN_V41_SINK_TENSOR").is_none_or(|v| v != "0");
         // The wider-N score tile is the default tensor-tier form from 128

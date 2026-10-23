@@ -1,6 +1,8 @@
 use super::super::super::ced_plan::CedRequest;
 use super::*;
 
+mod sink_lineage;
+
 fn fixture(n: usize) -> (Config, Schedule, CedPlan) {
     let c = Config {
         window: 3,

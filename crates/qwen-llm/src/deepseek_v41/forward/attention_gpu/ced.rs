@@ -634,6 +634,23 @@ impl Workspace {
         }
     }
 
+    pub(super) fn ced_decoder_prompt_rows(
+        &self,
+        id: usize,
+        start: usize,
+        rows: usize,
+    ) -> Result<Option<usize>> {
+        let Some(ced) = &self.ced else {
+            return Ok(None);
+        };
+        let p = ced.pending.as_ref().ok_or("CED has no attention intent")?;
+        if matches!(p.phase, Phase::Decoder(_)) {
+            ced.matches(Phase::Decoder(id), start, rows)?;
+            return Ok(Some(ced.plan.prompt_rows));
+        }
+        Ok(None)
+    }
+
     pub(super) fn global_mode(
         &self,
         id: usize,

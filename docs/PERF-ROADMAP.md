@@ -34,10 +34,12 @@ Design/dependency recon: landed (2026-10-23 CED entry;
 dependency-preserving reconstruction: at most 2541 boundary rows, but only
 24150 complete decoder layer-output rows for long prompts, plus KV-only seeds.
 Trained bounded-128 replay is a separate policy using the same primitives.
-Cold shrinking native implementation: in flight (`perf/v41-ced`). Preserve
-full forward as the fixed reference; qualify publication, every decoder ring,
-continuation and priced peak memory before the first 8K timing claim. No CED
-wall-time gain is established yet; bounded128 remains a separate policy arm.
+Cold shrinking native implementation: in flight (`perf/v41-ced`). Current
+Full/CED equivalence passes on fitting Maya-S at 128/2048/8192: all 257 full
+vocabulary vectors are bitwise equal and all 56 causal regions match at every
+position, with exact publication/completion counters. Warmed native A/B remains
+in flight (`perf/v41-ced-bench`); ordered diagnostic timings are not a speedup
+claim. Bounded128 remains a separate policy arm.
 Attention and activation-staging kernel lanes remain independent.
 
 Mapping/admission repair: landed (2026-10-23 memory-safety entry and
@@ -47,10 +49,12 @@ pass on M4/M5. Full IQ3 still does not fit the 80%-physical ownership ceiling
 on 256 GiB: 217.414 GiB resident views versus 204.8 GiB before runtime demand.
 The hold includes 2K/4K; shorter prompts do not shrink resident weights.
 Metadata-only plans report Maya-S 165.950 GiB and Q2 185.907 GiB, both with
-zero private shadow. CED qualification remains in flight: prove completed-chunk
-lifetimes and current Full/compacted attention lineage, then use a fitting
-artifact with one resident model and fresh KV states. No waiver or speedup claim
-follows from prior successful runs or a passing Metal-only budget.
+zero private shadow. Completed-chunk/scalar lifetimes now return to a fixed
+device baseline on M4/M5; Full also prices 202 MiB of logical half staging at
+2048 rows. Current Full/compacted attention lineage and fitting-model causal
+equivalence pass. The controller credits only conservative inactive non-anonymous
+cache availability, not raw free pages alone. No waiver or speedup claim follows
+from prior successful runs or a passing Metal-only budget.
 
 Decode budget at depth 2048, 22.3 ms/token: ~10.2 ms bytes (11.1 GiB at the
 ~1.09 TB/s the GEMV probe reaches), ~8 ms dispatch floor (~1,600 dispatches),
@@ -204,7 +208,13 @@ attention tiles at 34.7%. Re-sample after the next landing.
   2048-entry selector; a 32 KiB 4096-entry kernel handles late tiles with
   visible length 2049-4096. Q2 pp4096 570.2 -> 622.2 (+9.1%), IQ3 567.2 ->
   616.8 (+8.7%); census 173,913 -> 92,313; same-binary witness identical.
-  Above padded 4096 the per-row fallback remains.
+   Above padded 4096 the per-row fallback remains.
+- Exact hierarchical top-512 selection above 4096 visible keys: in flight
+  (`perf/v41-select-hier`). Source audit finds 6,990 CED producer queries at
+  8192 expand into 83,880 legacy sort/chronological dispatches. Partition-local
+  top-512 plus exact merge is a bounded experiment, not measured wall-time
+  attribution. Preserve comparator/NaN/causal semantics, price tile scratch,
+  retain <=4K and pruning fallbacks, and prove exact IDs before model timing.
 - Scalar score kernel tuning: superseded on the released geometry by the
   MMA tile; the 8-lane scalar kernel remains the fallback for other
   geometry. The 4-key/8-lane variants measured +3.0%/+1.2-1.4% on the old

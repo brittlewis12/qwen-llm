@@ -6,6 +6,32 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the current state and evidence index.
 
+## 2026-10-23 - V4.1 Full Lifetime Repair And Fitting CED Equivalence
+
+- Intrinsic pools drain completed Full chunks, scalar tails and scalar steps;
+  the bounded production-loop fixture shows zero post-completion device growth
+  on M4/M5 across 2/4/8 chunks and 256 scalar steps. Full now prices the actual
+  202 MiB logical half staging at 2048 rows using shared checked geometry.
+- Both hardware classes pass 37 pure policy/planning/geometry tests and the
+  lifetime/half allocation fixtures. M4 additionally passes 84 legacy forward
+  and 17 separately self-leased FFN tests.
+- Frozen CED source `01983b7b` matches current Full on Maya-S at 128/2048/8192:
+  all 257 complete vocabulary vectors are bitwise equal, and all 56 causal
+  regions match at every position. The 8K CED run completes all 47 commands,
+  8,192 publication rows and 24,150 decoder output rows without fallback.
+- Supervised fitting cases retain at least 68.54 GiB sampled conservative host
+  availability. The controller now uses the same inactive non-anonymous cache
+  lower bound as core admission, not raw free pages alone; all 24 tests pass on
+  M4/M5. Existing ownership, host reserve and wired/compressor limits remain.
+- Current-runtime causal equivalence is not an older-golden or artifact-quality
+  result. Ordered timings remain unqualified; warmed, balanced native A/B is
+  in flight under `perf/v41-ced-bench`, with one resident import and fresh KV.
+- Next kernel bet: exact hierarchical top-512 above 4K (`perf/v41-select-hier`).
+  A source-derived 8K census identifies 83,880 legacy sort/chronological
+  dispatches in CED; this is motivation for bounded exactness tests, not a
+  measured bottleneck or a predicted speedup.
+- [Lifetime, allocation, causal checks and measurement limits](bench/2026-10-23-v41-memory-safety.md).
+
 ## 2026-10-23 - Shared EOF And Combined Host Admission
 
 - Replace private partial-EOF windows with shared read-only mappings; retain

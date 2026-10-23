@@ -122,3 +122,64 @@ authorize timing repetitions only after stable native samples and healthy host
 telemetry. The secondary pilot controller stops scheduling on unstable or bad
 evidence and signals only its owned child. Cancellation is not a recovery plan
 for an already wedged VM/driver. No CED speedup is established by this repair.
+
+## Completed-Work Lifetime And Allocation Coverage
+
+Full prefill now drains an intrinsic autorelease pool after every completed
+chunk and scalar-tail iteration; ordinary scalar steps do the same. Previously,
+an enclosing caller pool could retain completed command buffers and their
+scratch across chunks even though admission priced one chunk. Persistent KV
+buffers remain owned by state, and completion, poison and address-commit rules
+are unchanged. Source: `203018dd`.
+
+A synthetic production-loop fixture runs two, four and eight 16-row chunks,
+a scalar tail and 256 teacher-forced scalar steps. On both M4 and M5, device
+allocation returns to the same baseline after every completed chunk and step.
+Weak scratch probes, capture errors and capture unwinding also pass. Its explicit
+buffer bound is 8,905,376 bytes, with 16 MiB CPU allowance; context, pipelines and
+driver overhead are separate.
+
+Full admission also prices the actual half-activation allocations using shared
+checked geometry: 128 MiB attention, 20 MiB FFN input and 54 MiB FFN inner at
+2048 rows, totaling 202 MiB logical storage before allocation pricing. The
+tiny allocation-ledger fixture selects real half staging on M5; M4's unsupported
+tier is explicitly not claimed as half-path coverage. Source: `e4828fa1`.
+
+The updated baseline passes 37 pure policy/planning/geometry tests on each
+hardware class, plus the lifetime and half-allocation fixtures. M4's legacy
+forward suite passes 84 tests and its separately self-leased FFN suite passes 17.
+
+## Fitting Current-Full Versus CED Qualification
+
+Frozen source `01983b7b` passes native current-Full versus shrinking-CED checks
+on Maya-S at 128, 2048 and 8192 prompt tokens. Each case imports one resident
+model and holds only one KV state at a time. It checks all 257 full-vocabulary
+vectors (129,280 logits each) bitwise and all 56 existing causal state regions
+by SHA-256 at every position, including 256 teacher-forced continuation steps.
+Address/history, readiness, per-arm origin and completed publication/counters
+also match; CED does not fall back.
+
+The 8192 case completes 163,840 encoder output rows, 8,192 publication rows,
+24,150 decoder output rows, 2,540 seed rows and all 47 encoded commands. The
+current Tensor/MMA attention route preserves original Full tile lineage during
+compaction. These are current-runtime equivalence results, not a pass against
+the older frozen arithmetic or a new artifact-quality evaluation.
+
+The secondary controller initially stopped a 128-token pilot on low raw free
+pages despite ample reusable inactive cache. It now uses the core policy's
+conservative availability rule rather than free pages alone; raw free remains
+recorded, invalid required counters refuse execution, and the existing host,
+wired/compressor and timing-spread limits remain unchanged. All 24 controller
+tests pass on both hardware classes. Source: `f05c9b61`.
+
+Across the three completed supervised cases, minimum sampled conservative
+availability is 68.54 GiB and maximum sampled wired plus compressor usage is
+176.77 GiB. Samples are not a continuous peak bound or an OS reservation.
+Debug validation, the production lease and normal admission remain enabled.
+
+The ordered Full-then-CED diagnostic timings are deliberately not a throughput
+claim: initial wiring, pipeline and Engram access can favor the second arm.
+Performance qualification needs both policies warmed inside one resident model,
+fresh KV per case, balanced native samples, separate per-policy stability checks
+and continuous host supervision. No CED speedup or default-policy promotion is
+established here.

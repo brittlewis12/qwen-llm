@@ -196,10 +196,10 @@ impl Rows {
     }
 
     /// Admission width for the tiled selection score scratch. The actual
-    /// allocation is `select_width * min(rows, TILE)`; this per-row width
+    /// allocation is `select_width * min(rows, tile_rows)`; this per-row width
     /// prices at least that many bytes when multiplied by `rows`.
     pub(super) fn select_widths(c: &Config, capacity: usize, rows: usize) -> Vec<usize> {
-        let tile = rows.min(query_batch::TILE);
+        let tile = rows.min(query_batch::tile_rows());
         vec![(Self::select_width(c, capacity).saturating_mul(tile)).div_ceil(rows.max(1))]
     }
 
@@ -230,7 +230,7 @@ impl Rows {
             select_scores: prefill::allocate(
                 ctx,
                 Self::select_width(c, capacity),
-                rows.min(query_batch::TILE),
+                rows.min(query_batch::tile_rows()),
                 GgmlType::F32,
             )?,
             rows,

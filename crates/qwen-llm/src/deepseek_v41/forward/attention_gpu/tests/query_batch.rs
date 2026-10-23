@@ -159,7 +159,7 @@ fn compare_case(ctx: &MetalContext, c: &Config, schedule: &Schedule, start: usiz
                     .count()
             };
             if mma {
-                // One MMA sink per 32-query tile; no per-query PV branch.
+                // One MMA sink per query tile; no per-query PV branch.
                 for suffix in ["score_mma", "softmax_rows", "pv_mma", "normalize_rows"] {
                     assert_eq!(count(suffix), n.div_ceil(TILE), "{suffix}");
                 }
@@ -288,7 +288,8 @@ fn query_batch_normalized_inputs_awkward_rows_wrap_pair_phase_and_followers() {
 fn query_batch_batched_selection_matches_incumbent_across_tiles() {
     let ctx = MetalContext::new().unwrap();
     // Unpruned at every row (16385 is the pruning boundary), with index_topk
-    // 512 so the 512 -> 513 transition falls inside the second 32-row tile.
+    // 512 so the 512 -> 513 transition falls inside the first tile; the first
+    // case also crosses a tile boundary.
     let mut c = config();
     c.index_topk = 512;
     c.candidate_block = 8;
@@ -300,7 +301,7 @@ fn query_batch_batched_selection_matches_incumbent_across_tiles() {
         compression_ratios: vec![0, 2, 2, 1, 1, 1, 1],
         candidate_source_layer: Some(3),
     };
-    for (start, n) in [(479usize, 65usize), (991, 65), (3000, 65)] {
+    for (start, n) in [(479usize, TILE + 65), (991, 65), (3000, 65)] {
         compare_case(&ctx, &c, &schedule, start, n);
     }
 }
@@ -812,7 +813,7 @@ fn sink_case(
         }
     });
     // The MMA sink tile (512-wide latent, heads a multiple of 16) has no
-    // per-query PV branch, so its spans are plain 32-query tiles.
+    // per-query PV branch, so its spans are whole query tiles.
     let mma = c.head_dim == 512 && c.heads.is_multiple_of(16);
     let spans = if mma {
         (0..n)
@@ -1054,7 +1055,7 @@ fn query_batch_group_specific_pv_padding_canaries_and_sticky_errors() {
 #[test]
 fn query_batch_mma_geometry_tiles_without_pv_branch_split() {
     // The released geometry crosses the old 256-key PV threshold inside the
-    // first tile; the MMA sink tile keeps whole 32-query tiles.
+    // first tile; the MMA sink tile keeps whole query tiles.
     let ctx = MetalContext::new().unwrap();
     let c = Config {
         heads: 64,
@@ -1066,8 +1067,11 @@ fn query_batch_mma_geometry_tiles_without_pv_branch_split() {
     assert_eq!(score, [32]);
     assert_eq!(pv, [32]);
     let (score, pv) = sink_case(&ctx, &c, 126, 33, 1);
-    assert_eq!(score, [32, 1]);
-    assert_eq!(pv, [32, 1]);
+    assert_eq!(score, [33]);
+    assert_eq!(pv, [33]);
+    let (score, pv) = sink_case(&ctx, &c, 126, TILE + 1, 1);
+    assert_eq!(score, [TILE as u64, 1]);
+    assert_eq!(pv, [TILE as u64, 1]);
 }
 
 #[test]
@@ -1079,14 +1083,14 @@ fn query_batch_threshold_split_source_census_expectation() {
     for start in (0..2048).step_by(256) {
         for id in 0..schedule.layers {
             let spans = sink_spans(&c, schedule.ratio(id), start, 256);
-            assert!((8..=9).contains(&spans.len()));
+            assert!((1..=2).contains(&spans.len()));
             tiles += spans.len();
-            splits += spans.len() - 8;
+            splits += spans.len() - 1;
         }
     }
-    // Source expectation only: each of the 38 compressed-attention layers
-    // crosses the threshold once, inside a fixed tile of the first chunk.
-    assert_eq!((tiles, splits), (2598, 38));
+    // Source expectation only: 8 fixed tiles per layer, and each of the 38
+    // compressed-attention layers crosses the threshold once inside one tile.
+    assert_eq!((tiles, splits), (358, 38));
 }
 
 #[test]

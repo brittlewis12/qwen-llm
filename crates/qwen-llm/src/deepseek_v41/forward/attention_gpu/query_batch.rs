@@ -4,7 +4,27 @@
 //! KV/keys remain append-only, with each follower bounded by its query's length.
 use super::*;
 
-pub(super) const TILE: usize = 32;
+pub(super) const TILE: usize = 256;
+
+/// Rows per query batch tile. The default is the production width; the
+/// environment override exists for same-binary A/B measurement of the width
+/// itself and is read once per process.
+pub(super) fn tile_rows() -> usize {
+    static ROWS: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
+    *ROWS.get_or_init(|| {
+        std::env::var("QWEN_V41_SINK_TILE")
+            .ok()
+            .and_then(|value| value.parse().ok())
+            .filter(|&rows| (1..=prefill::DEFAULT_CHUNK_ROWS).contains(&rows))
+            .unwrap_or(TILE)
+    })
+}
+
+/// The released geometry runs the simdgroup-MMA sink tile, whose per-query
+/// PV branch (and its gathered value matrix) is unreachable.
+fn mma_geometry(c: &Config) -> bool {
+    c.head_dim == MMA_DIM && c.heads.is_multiple_of(MMA_HEADS)
+}
 
 pub(super) struct Scratch {
     pub(super) history: MetalTensor,
@@ -19,7 +39,7 @@ impl Scratch {
             (1..=prefill::DEFAULT_CHUNK_ROWS).contains(&rows),
             "query batch scratch rows",
         )?;
-        let tile = rows.min(TILE);
+        let tile = rows.min(tile_rows());
         let mut sizes = vec![
             checked_product(&[
                 c.window.checked_add(rows).ok_or("raw history extent")?,
@@ -35,8 +55,10 @@ impl Scratch {
             ])?,
             checked_product(&[tile, c.heads, c.head_dim])?,
         ];
-        for size in ValueMatrix::shapes(c)? {
-            sizes.push(checked_product(&[tile, size])?);
+        if !mma_geometry(c) {
+            for size in ValueMatrix::shapes(c)? {
+                sizes.push(checked_product(&[tile, size])?);
+            }
         }
         Ok(sizes)
     }
@@ -147,8 +169,9 @@ impl Workspace {
             let length = (start + rows.rows) / self.schedule.ratio(id);
             length > c.index_topk || length.div_ceil(c.candidate_block) > c.candidate_topk
         };
-        for first in (0..rows.rows).step_by(TILE) {
-            let n = (rows.rows - first).min(TILE);
+        let tile = tile_rows();
+        for first in (0..rows.rows).step_by(tile) {
+            let n = (rows.rows - first).min(tile);
             for (tensor, dim, heads) in [
                 (&rows.query, c.head_dim, c.heads),
                 (&rows.latent, c.head_dim, 1),
@@ -208,7 +231,7 @@ impl Workspace {
 
     /// Position-ordered compressor, index and selection transitions. For
     /// unpruned rows the per-row compressor/key publication stays ordered,
-    /// then selection is batched over 32-row tiles. The pruning path (from
+    /// then selection is batched over query tiles. The pruning path (from
     /// 16,385 visible keys) keeps the incumbent per-row selector.
     pub(in super::super) fn encode_rows_serial(
         &mut self,
@@ -244,7 +267,8 @@ impl Workspace {
             )?;
         }
         if batched {
-            for first in (0..rows.rows).step_by(TILE) {
+            let tile = tile_rows();
+            for first in (0..rows.rows).step_by(tile) {
                 self.select_rows_unpruned(
                     ctx,
                     enc,
@@ -252,7 +276,7 @@ impl Workspace {
                     start,
                     rows,
                     first,
-                    (rows.rows - first).min(TILE),
+                    (rows.rows - first).min(tile),
                 )?;
             }
         }
@@ -445,7 +469,7 @@ impl Workspace {
     }
 
     /// Scores, softmax with sink, value accumulation and inverse RoPE per
-    /// 32-query tile.
+    /// query tile.
     pub(in super::super) fn encode_rows_tiles(
         &self,
         ctx: &MetalContext,
@@ -454,7 +478,8 @@ impl Workspace {
         start: usize,
         rows: &Rows,
     ) -> Result<()> {
-        for first in (0..rows.rows).step_by(TILE) {
+        let tile = tile_rows();
+        for first in (0..rows.rows).step_by(tile) {
             self.sink_tile(
                 ctx,
                 enc,
@@ -462,7 +487,7 @@ impl Workspace {
                 start,
                 rows,
                 first,
-                (rows.rows - first).min(TILE),
+                (rows.rows - first).min(tile),
             )?;
         }
         Ok(())
@@ -480,7 +505,7 @@ impl Workspace {
     ) -> Result<()> {
         let c = &self.config;
         op::require(
-            n > 0 && n <= TILE && first + n <= rows.rows,
+            n > 0 && n <= tile_rows() && first + n <= rows.rows,
             "query tile extent",
         )?;
         let position = start + first;

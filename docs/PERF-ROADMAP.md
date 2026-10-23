@@ -83,9 +83,17 @@ Re-sample after the next landing.
   `perf/v41-tensor-f16act`, not an independent bet. Other families' dense
   prefill GEMMs still take `mat_mat`; unmeasured there and outside the
   V4.1 gain budget: open.
+- Attention sink tile occupancy: a 32-row tile dispatches
+  `heads/16 * 32` threadgroups (128 at 64 heads) against 80 cores, and each
+  threadgroup pays the dependent `ids -> latent row` gather serially.
+  Widen the sink tile to 256 rows, keep the arithmetic per row unchanged,
+  and stop admitting the gathered value matrix on the MMA geometry (that
+  branch is unreachable there and the allocation grows linearly with the
+  tile): in flight (`perf/v41-sink-tile`).
 - Attention sink fusion (`score_mma` + `softmax_rows` + `pv_mma` +
   `normalize_rows`): target the slab traffic, repeated gathers and up to
-  three dispatches per tile; gain unmeasured: open.
+  three dispatches per tile; gain unmeasured: open (after the tile width,
+  so fusion is measured at production occupancy).
 - Attention sink tensor ops: independently time `score_mma`/`pv_mma`
   substitution before combining with fusion; gather-vs-MMA attribution is
   not measured and shares the fusion budget: open.

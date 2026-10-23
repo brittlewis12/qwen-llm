@@ -178,11 +178,21 @@ attention tiles at 34.7%. Re-sample after the next landing.
 
 ### GLM-5.3-Flash
 
-- M5 tensor-ops transfer for ordinary Fast/Half prefill: in flight
-  (`perf/glm-tensor-prefill`). Reuse the existing dense/routed tensor kernels
-  with family-local eligibility; keep Exact, F32-sensitive work and short
-  packets on their current paths. Actual GLM quality and request timing gate
-  promotion; V4.1 attention and activation-staging lanes remain separate.
+- M5 dense tensor-ops transfer for ordinary Fast/Half prefill: landed
+  (2026-10-22 dense tensor entry). Existing Q6_K/Q8_0 tiles at >=1024 active
+  rows cut ordinary 2048/4096 prefill wall 15.1%/14.3%; saved 11K gameplay
+  prefill 22.915 -> 20.002 s (-12.7%), request 29.067 -> 26.167 s (-10.0%).
+  No buffers, new precision mode, or context change; Exact/F32, short packets
+  and M4 keep their paths. All 22 frozen documents give +0.0040 mean NLL
+  (central 90% [-0.0003,+0.0081]), one fewer hit/1408; eight tool pairs are
+  correct and token-identical. Not a model-wide noninferiority claim.
+  Packet: `bench/2026-10-22-glm-tensor-prefill/README.md`.
+- M5 routed IQ3_S down-only tensor transfer: open. The existing down-policy
+  seam can replace 39 stock grouped down calls while preserving fused
+  gate/up and GLM's post-down weighting; three IQ4_XS layers keep their
+  dedicated incumbent. Gain unmeasured against the dense checkpoint.
+  Activation staging is a separate follow-on to the shared V4.1 API, not
+  duplicate family-local staging infrastructure.
 - Ordinary run/benchmark workspace selection: landed (2026-10-22 ordinary
   workspace entry). Existing serving range replaces the fixed 512-row cap;
   saved-rollout prefill 62.51 -> 49.82 s (-20.3%), observed request mean -19.6%

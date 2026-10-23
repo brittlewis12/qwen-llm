@@ -1,0 +1,110 @@
+{
+  "schema": "glm53.tensor_extended_descriptive.v1",
+  "report_sha256": "e8146bcc6608a346a311553e6f8608107a4bfd022528fa41ffd035bf5d168d5b",
+  "fixture_sha256": "7f9ac936b08ee0f4e47fbbb42dbfd46c3055f058b4f36fa5d832fbefcad43057",
+  "method": "paired document bootstrap from quality_analysis.py; 20,000 resamples, seed 20261008, stratified; one max-prefix item per document; central90 intervals are descriptive, not a noninferiority verdict",
+  "overlap": "includes the original three bounded cases; not independent replication",
+  "summaries": {
+    "overall": {
+      "documents": 22,
+      "targets": 1408,
+      "nll_delta": {
+        "observed_mean": 0.004000981259989793,
+        "central90": [
+          -0.00026312114825908774,
+          0.008126715533704722
+        ]
+      },
+      "top1_delta": {
+        "observed_mean": -0.0007102272727272727,
+        "central90": [
+          -0.004971590909090909,
+          0.0035511363636363635
+        ]
+      },
+      "old_nll": 1.4643495842213694,
+      "tensor_nll": 1.4683505654813593,
+      "mean_kl": 0.006033491304303013,
+      "old_hits": 970,
+      "tensor_hits": 969,
+      "argmax_agreements": 1363,
+      "max_kl": 0.11287027733607306
+    },
+    "prose": {
+      "documents": 8,
+      "targets": 512,
+      "nll_delta": {
+        "observed_mean": 0.004411007307205006,
+        "central90": [
+          -0.004289507387393338,
+          0.0122347433015644
+        ]
+      },
+      "top1_delta": {
+        "observed_mean": -0.001953125,
+        "central90": [
+          -0.01171875,
+          0.009765625
+        ]
+      },
+      "old_nll": 2.577238554879062,
+      "tensor_nll": 2.581649562186267,
+      "mean_kl": 0.009366091372270915,
+      "old_hits": 239,
+      "tensor_hits": 238,
+      "argmax_agreements": 480,
+      "max_kl": 0.11287027733607306
+    },
+    "code": {
+      "documents": 8,
+      "targets": 512,
+      "nll_delta": {
+        "observed_mean": -0.00011663830372548082,
+        "central90": [
+          -0.004115805538654302,
+          0.003162116143316427
+        ]
+      },
+      "top1_delta": {
+        "observed_mean": -0.001953125,
+        "central90": [
+          -0.005859375,
+          0.0
+        ]
+      },
+      "old_nll": 0.46690157213862393,
+      "tensor_nll": 0.4667849338348985,
+      "mean_kl": 0.0024521023205527097,
+      "old_hits": 457,
+      "tensor_hits": 456,
+      "argmax_agreements": 510,
+      "max_kl": 0.10741878183054433
+    },
+    "long": {
+      "documents": 6,
+      "targets": 384,
+      "nll_delta": {
+        "observed_mean": 0.008944439281989874,
+        "central90": [
+          -0.0007457751950879962,
+          0.01840674875768526
+        ]
+      },
+      "top1_delta": {
+        "observed_mean": 0.0026041666666666665,
+        "central90": [
+          -0.005208333333333333,
+          0.010416666666666666
+        ]
+      },
+      "old_nll": 1.31042830612144,
+      "tensor_nll": 1.3193727454034299,
+      "mean_kl": 0.006365209858679552,
+      "old_hits": 274,
+      "tensor_hits": 275,
+      "argmax_agreements": 373,
+      "max_kl": 0.09354204802277823
+    }
+  },
+  "quality_verdict": null
+}

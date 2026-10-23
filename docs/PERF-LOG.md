@@ -6,6 +6,38 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the current state and evidence index.
 
+## 2026-10-22 - GLM M5 Dense Tensor Prefill Cuts Saved Request Time 10%
+
+- Ordinary Fast/Half Q6_K/Q8_0 projections at >=1024 active rows reuse the
+  existing M5 tensor tile, with complete binding/geometry/pipeline preflight.
+  Half operands/F32 sums stay; reduction order changes. No new buffers,
+  precision mode, context limit, or memory exception. Exact/F32-sensitive,
+  short-packet, grouped MLA absorption, other storage and M4 paths remain;
+  the existing global tensor rollback keeps the incumbent.
+- Validation-on M5 Ultra, stock UD-IQ3_XXS, production lease: warmed plain
+  same-binary ABBA/BAAB gives 2048-token prefill 3604.874 -> 3061.376 ms
+  (-15.08% wall, +17.75% throughput), 4096-token 7613.441 -> 6524.326 ms
+  (-14.31%, +16.69%). Untimed census confirms 507/1025 dense substitutions
+  with total dispatch counts and non-dense counts unchanged.
+- Native saved gameplay, 11,105 input/256 output tokens, context 11,360,
+  frozen R2048, temperature 1/seed 42: both brackets improve. All eight
+  samples give prefill 22.915 -> 20.002 s (-12.71%), loaded request
+  29.067 -> 26.167 s (-9.98%). Later controls are slower; no samples are
+  dropped. No cold prefetch is reported. Outputs are stable within arms,
+  different between arms; capped reasoning is not a gameplay quality score.
+- Expanded frozen quality-v1: all 22 documents at maximum prefix, 64 true
+  continuation targets each. Mean NLL 1.464350 -> 1.468351; delta +0.004001,
+  stratified document-bootstrap central 90% [-0.000263,+0.008127]. Top-1
+  970 -> 969 of 1408, argmax agreement 1363/1408. All four long tool tasks,
+  greedy and seed 11, are strict-correct and token-identical in eight pairs.
+  This is bounded support for Fast/Half, not exact logits or established
+  model-wide noninferiority; strict precision modes remain unchanged.
+- Native shape/F64/tail/guard/refusal/global-rollback witnesses, actual M4
+  fallback, 22 precision/native tests, seven packet tests, adaptive reuse and
+  deep checkpoint cancel/restore pass. Production CLI serial unit run: 957
+  pass. Private inputs and filesystem details remain outside the packet.
+- [Protocol, all timing samples, full cohort, strict tool scoring and limits](bench/2026-10-22-glm-tensor-prefill/README.md).
+
 ## 2026-10-22 - V4.1 Prefill: 512-Row Sink Tiles +17-18%
 
 - A 32-row sink tile dispatched `heads/16 * 32` = 128 threadgroups against

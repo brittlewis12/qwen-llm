@@ -1,0 +1,7 @@
+path,stratum,prefix,arm,mean_nll,top1_hits,top1_baseline_agreements,mean_kl_baseline_to_arm,max_kl_baseline_to_arm
+docs/GLM53-FLASH-PLAN.md,prose,2048,old,1.730008749135852,38,64,0.0,0.0
+docs/GLM53-FLASH-PLAN.md,prose,2048,tensor,1.7463120904367522,38,63,0.0056716043809679605,0.048771317564120696
+crates/qwen-llm/src/sampling.rs,code,2048,old,1.239073028267203,46,64,0.0,0.0
+crates/qwen-llm/src/sampling.rs,code,2048,tensor,1.224034362663996,46,64,0.00503003571211828,0.10741878183054433
+docs/SERVE.md,long,4352,old,2.957708510120458,26,64,0.0,0.0
+docs/SERVE.md,long,4352,tensor,2.985913226251184,27,61,0.018240571036174807,0.09354204802277823

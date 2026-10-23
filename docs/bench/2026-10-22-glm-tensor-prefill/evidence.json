@@ -1,0 +1,70 @@
+{
+  "hardware": {
+    "gpu": "M5 Ultra",
+    "unified_memory_gib": 256,
+    "metal_api_validation": true
+  },
+  "builds": {
+    "baseline": {
+      "build_commit": "8b7f2f000142028be3b678add4942138e228ceb0",
+      "build_source_state": "git-source-sha256-v2:892004c5b2be4d42413827ce712a83e7004fecb5e1ba86bd3a29bd693f915697",
+      "metallib_compiler_identity": "Apple metal version 32023.921 (metalfe-32023.921.6)",
+      "metallib_sdk_version": "27.0",
+      "status": "match"
+    },
+    "candidate": {
+      "build_commit": "7a7012f797d3ad2641628a724ec837c7854919ee",
+      "build_source_state": "git-source-sha256-v2:7d7fabb13fcaeaca01d16563bab239082d9625dd531fca7d66ed1a62ee00b782",
+      "metallib_compiler_identity": "Apple metal version 32023.921 (metalfe-32023.921.6)",
+      "metallib_sdk_version": "27.0",
+      "status": "match"
+    }
+  },
+  "fixture_sha256": "7f9ac936b08ee0f4e47fbbb42dbfd46c3055f058b4f36fa5d832fbefcad43057",
+  "probe_binary_sha256": "5defa7caab3fcdc70fad6f5888ce108c47de5e33ab1cabf482ed99d9f330a1fa",
+  "probe_commit": "babdeff3",
+  "reports": {
+    "plain-v3.jsonl": "9eefcc41ae360d6ff24248f6288fed259ebd9c7a631c3a1cfdb5b930479bf135",
+    "quality-v3.jsonl": "c81f21c46080009136a3a29a67956cfcf8a9ed8bc2fee72f30bc78d812cb5add",
+    "extended-v1.jsonl": "e8146bcc6608a346a311553e6f8608107a4bfd022528fa41ffd035bf5d168d5b"
+  },
+  "private_messages_sha256": "d127138bf829efd89c7fccc04e2389c68d02b766b9a3b3e8f72dcab20bddef1b",
+  "request_manifests": [
+    {
+      "sample": "A1",
+      "sha256": "f892047577199e8485a4394f5e57c689e668fd89f233157d267f3b448973a332"
+    },
+    {
+      "sample": "B1",
+      "sha256": "1d4c3cc0cc08f4d9405af8a29a71377060b35f6f46471afe381302e2ab23292e"
+    },
+    {
+      "sample": "B2",
+      "sha256": "fc64cba25ade541cadd5f34b6cc6031f048705991b209dee3474290cb77de651"
+    },
+    {
+      "sample": "A2",
+      "sha256": "906a22e34407b4c98bb69f060713eeee252b2f018330968fc5aa697876fdb800"
+    },
+    {
+      "sample": "B3",
+      "sha256": "2b177c1c646aa3b7865cd1c8d6f398fb166de9ba65e3a40e944861c351f102d1"
+    },
+    {
+      "sample": "A3",
+      "sha256": "53612256b72a7727e683e4436923cd016308c8a6c8a4a513c2ee00b406e641f7"
+    },
+    {
+      "sample": "A4",
+      "sha256": "d42a16faf4c167684bb35fa3cb0e59ed8bbb927e4a5d3f084706ccafc25eec00"
+    },
+    {
+      "sample": "B4",
+      "sha256": "d0ee66a3b5a273bc4cdf3708bea9f81910d2abfec542d8eea1436b8dd665ab02"
+    }
+  ],
+  "extended_commit": "5289a3dd",
+  "extended_binary_sha256": "5136f2ae21efd825b9bf50e43658e6009575a52b0fd483dcb2c0fb5a0eb8ef97",
+  "strict_tool_scorer_sha256": "44ee0c82e3fdbb212be30ac88b0663d3a3e929b77b7c2b6251cd9f5942bb946f",
+  "candidate_final_identity_status": "match"
+}

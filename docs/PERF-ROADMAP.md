@@ -95,10 +95,13 @@ attention tiles at 34.7%. Re-sample after the next landing.
   pp2048 +3.64% / pp4096 +3.43% combined (IQ3 +4.15/+3.98, Q2
   +3.14/+2.88), bitwise identical to the 32-slot tile. Enabled at >=128
   query rows; 64/96 rows are 12-14% slower from padding.
-  `QWEN_V41_DENSE_NARROW=1` forces the 32-slot form for A/B. The
-  activation re-read per column tile is still owned by
-  `perf/v41-tensor-f16act`. Other families' dense prefill GEMMs still take
-  `mat_mat`; unmeasured there and outside the V4.1 gain budget: open.
+  `QWEN_V41_DENSE_NARROW=1` forces the 32-slot form for A/B. A
+  64-slot x 128-row combined probe is bitwise correct but 22-57% slower
+  (32 KiB output staging, 64-float accumulator); 64x64 is the knee:
+  negative (`perf/v41-dense-combined`). The activation re-read per column
+  tile is still owned by `perf/v41-tensor-f16act`. Other families' dense
+  prefill GEMMs still take `mat_mat`; unmeasured there and outside the
+  V4.1 gain budget: open.
 - Attention sink tile occupancy: landed (2026-10-22 sink-tile entry,
   bench/2026-10-22-v41-sink-tile.md). A 32-row tile dispatched
   `heads/16 * 32` threadgroups (128 at 64 heads) against 80 cores and paid

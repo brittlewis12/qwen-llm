@@ -6,6 +6,23 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the current state and evidence index.
 
+## 2026-10-23 - Native MXFP4 Blockwise Tensor Op: Negative
+
+- Added an optional Metal 4.1 tensor library (only when the 4.1 compiler
+  probe passes) and a numeric/throughput probe for half x packed MXFP4
+  weights with an E8M0 block-32 scale plane. The op compiles and matches
+  a CPU reference; the packed K extent must be 256 FP4 elements.
+- Throughput at the production tile (32 slots x 64 rows, K-loop over
+  2304/5120, 1024 threadgroups): 9.7 / 9.2 TFLOPS. The existing
+  half-staged MXFP4 expert tile is 47.3 (down) / 51.2 (gate+up) TFLOPS
+  with f16act, so the native blockwise path is ~5x slower. Single
+  threadgroups take ~650 us at K=2304; not an occupancy artifact.
+- Do not integrate. The routed tiles remain weight-byte-bound, but the
+  4.1 blockwise FP4 op is not the lever; a lower-bit artifact or a
+  different staging scheme is. Probe branch `perf/v41-mxfp4-probe`
+  retained locally.
+- [Compile/numeric/throughput gate](bench/2026-10-23-v41-mxfp4-blockwise-negative.md).
+
 ## 2026-10-23 - V4.1 Expert Decoder Attribution: Not The Lever
 
 - Same-shape control (384 experts, 2048 tokens, top-6, 32 slots, f16act

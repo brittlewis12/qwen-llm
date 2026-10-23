@@ -93,9 +93,14 @@ attention tiles at 34.7%. Re-sample after the next landing.
   weight-byte/staging-bound, not decoder-ALU bound. Remaining routed
   lever: fewer staged weight bytes (native MXFP4 or a lower-bit
   artifact), not a faster decoder.
-- Native MXFP4 right operands (`metal_fp4_e2m1_format` + `ue8m0` block-32
-  scales, 27.0 entry points) would replace the software dequant for the 30
-  MXFP4 down layers if packed values/scales map exactly; unmeasured: open.
+- Native MXFP4 blockwise right operands: negative (2026-10-23 probe,
+  bench/2026-10-23-v41-mxfp4-blockwise-negative.md; branch
+  `perf/v41-mxfp4-probe`). The Metal 4.1 `metal_fp4_e2m1_format` +
+  E8M0 block-32 scale-plane path compiles and matches a CPU reference
+  (K tile must be 256 FP4 elements), but runs at 9.7 TFLOPS (K=2304) /
+  9.2 (K=5120) versus 47.3 for the existing half-staged MXFP4 down tile
+  at the production shape. Do not integrate; the weight-byte bound needs
+  a different route (lower-bit artifact or staging), not this op.
 - Dense prefill projections on the tensor tile (q_a/q_b/kv, output_a/b,
   shared expert; the Q8_0 `mat_mat` path at 24-29 TFLOPS): landed
   (2026-10-22 dense entry, bench/2026-10-22-v41-tensor-dense-projections.md).

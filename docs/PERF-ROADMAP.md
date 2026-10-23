@@ -102,15 +102,23 @@ attention tiles at 34.7%. Re-sample after the next landing.
   at 512 rows) leaves admission on the MMA geometry, where it is
   unreachable. 1024 rows measured flat (+0.3% pp2048, +0.1% pp4096) and is
   not worth the extra scratch: negative (sink-tile packet).
-- Attention sink fusion (`score_mma` + `softmax_rows` + `pv_mma` +
-  `normalize_rows`): with the tile now at production occupancy, each key
-  row is still gathered once for QK^T and again for PV, and the score slab
-  makes a full round trip. Fusing over all heads of a row (or an
-  online-softmax tile) targets those two costs; gain unmeasured: open.
+- Attention sink online fusion: negative (2026-10-23 probe,
+  bench/2026-10-23-v41-sink-fusion-probes.md). One threadgroup per
+  (16-head block, row) gathering an 8-key block once and running online
+  softmax plus PV is 4.6-10.8x slower (36.9 ms vs 3.43 ms at 512 rows):
+  the 25 KB threadgroup allows one resident threadgroup per core, the
+  per-block barriers serialize gather/score/softmax/PV, and only two of
+  eight simdgroups are active in score. Do not rebuild the online route
+  without a smaller footprint or more residency.
+- Normalize fold into `pv_mma`: negative (same packet). Moving the
+  denominator division and finite check into the PV accumulator store
+  makes `pv_mma` 1,049 -> 19,187 us (divide) or 19,496 us (reciprocal)
+  at 512 rows; dropping the finite guard does not recover it, while
+  removing the scaling returns to 1,294 us. The separate normalize pass
+  (134 us, 134 MB read/write) is already the cheap form; keep it.
 - Attention sink tensor ops: independently time `score_mma`/`pv_mma`
-  substitution at the 512-row tile before combining with fusion; the
-  gather-vs-MMA attribution is still unmeasured and shares the fusion
-  budget: open.
+  substitution at the 512-row tile; the fusion route is closed and the
+  gather-vs-MMA attribution is still unmeasured: open.
 - Maya-S artifact (`peasantsmith/DeepSeek-V4.1-Flash-1017-Maya-GGUF`,
   six shards, 339.5 GB): evaluated (2026-10-22 Maya entry,
   bench/2026-10-22-maya-s-eval.md). All 40 routed layers on the

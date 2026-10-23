@@ -84,7 +84,11 @@ attention tiles at 34.7%. Re-sample after the next landing.
   pp4096 757.7 -> 799.3 (+5.49%); Q2 788.3 -> 838.9 (+6.42%), 754.5 ->
   805.4 (+6.75%). Held-text logits bitwise identical; 173 tests pass.
   The wide dense Q8_0 form has an `_f16act` twin, so the two landings
-  stack. 
+  stack. Fused routed gate+up (one activation staging, two weight slabs,
+  no gate intermediate) is bitwise correct but flat (IQ3_XXS 9.87 ->
+  9.85 ms, MXFP4 10.43 -> 10.44, Q3_K 12.74 -> 12.75, Q8_0 14.35 ->
+  14.57): negative (2026-10-23 probe, branch `perf/v41-gateup-fuse`,
+  local). The pair is weight-staging/MMA bound; keep two dispatches.
 - Cheaper IQ3_XXS/Q3_K expert decoders: negative (2026-10-23 attribution
   packet, bench/2026-10-23-v41-expert-decoder-attribution.md). At the
   same 32-slot shape with f16act operands, simplest-decoder Q8_0 is the

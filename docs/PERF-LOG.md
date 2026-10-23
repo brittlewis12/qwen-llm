@@ -6,6 +6,18 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the current state and evidence index.
 
+## 2026-10-23 - Fused Routed Gate+Up: Negative
+
+- One kernel staging the half activation once, running gate and up
+  matmuls against two weight slabs, and writing the SwiGLU product
+  directly is bitwise correct but flat at the production shape:
+  IQ3_XXS 9.868 -> 9.853 ms, MXFP4 10.434 -> 10.443, Q3_K 12.736 ->
+  12.748, Q8_0 14.350 -> 14.571. The pair is weight-staging/MMA bound;
+  the duplicated activation staging and gate intermediate are not
+  material. Keep the two dispatches; branch `perf/v41-gateup-fuse`
+  stays local.
+- [Probe and limits](bench/2026-10-23-v41-gateup-fuse-negative.md).
+
 ## 2026-10-23 - Native MXFP4 Blockwise Tensor Op: Negative
 
 - Added an optional Metal 4.1 tensor library (only when the 4.1 compiler

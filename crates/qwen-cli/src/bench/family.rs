@@ -53,6 +53,14 @@ pub(crate) trait FamilyBench {
     fn v41_prefill_diagnostics(&self) -> Option<V41BenchPrefillRep> {
         None
     }
+    /// Explicit per-case policy; only the paired V4.1 harness uses this.
+    fn set_pair_execution(&mut self, _execution: PrefillExecution) -> Result<()> {
+        bail!("paired execution requires the V4.1 adapter")
+    }
+    fn last_logits(&self) -> Option<&[f32]> {
+        None
+    }
+    fn end_pair_case(&mut self) {}
 }
 
 /// Extent the loaded model and its session must hold for these shapes.
@@ -134,6 +142,8 @@ pub(crate) fn with_family_bench<R>(
                 ced_allowed: true,
                 last_execution: PrefillExecution::FullForward,
                 reports: Vec::new(),
+                paired: false,
+                last_logits: None,
                 create: || Ok(forward.new_state_with_gpu_step(extent.forwards)?),
                 prefill: |state: &mut qwen_llm::deepseek_v41::forward::State,
                           ids: &[u32],
@@ -348,12 +358,65 @@ struct DeepSeekV41Bench<S, Create, Step, Prefill> {
     ced_allowed: bool,
     last_execution: PrefillExecution,
     reports: Vec<V41BenchPrefillCall>,
+    paired: bool,
+    last_logits: Option<Vec<f32>>,
 }
 
 #[derive(Clone, Debug, serde::Serialize)]
 pub(crate) struct V41BenchPrefillRep {
     requested_execution: PrefillExecution,
     calls: Vec<V41BenchPrefillCall>,
+}
+
+impl V41BenchPrefillRep {
+    pub(crate) fn validate_pair(&self, execution: PrefillExecution, tokens: usize) -> Result<()> {
+        ensure!(
+            self.requested_execution == execution,
+            "paired requested policy changed"
+        );
+        ensure!(
+            self.calls.len() == 1,
+            "paired case must execute one whole cold prefill"
+        );
+        let call = &self.calls[0];
+        ensure!(
+            call.start_position == 0 && call.tokens == tokens,
+            "paired prompt extent changed"
+        );
+        ensure!(
+            call.diagnostics.report.execution == execution,
+            "paired actual policy differs from requested policy"
+        );
+        ensure!(
+            call.diagnostics.report.fallback.is_none(),
+            "paired prefill fallback: {:?}",
+            call.diagnostics.report.fallback
+        );
+        if execution == PrefillExecution::ShrinkingCed {
+            let report = &call.diagnostics.report;
+            let counters = report
+                .counters
+                .as_ref()
+                .context("paired CED omitted work counters")?;
+            ensure!(
+                counters.encoded_commands > 0
+                    && counters.encoded_commands == counters.completed_commands,
+                "paired CED has incomplete command coverage"
+            );
+            let memory = report
+                .memory
+                .as_ref()
+                .context("paired CED omitted its memory ledger")?;
+            let observed = report
+                .observed_incremental_metal_bytes
+                .context("paired CED omitted allocation observations")?;
+            ensure!(
+                memory.incremental_metal_bytes > 0 && observed <= memory.incremental_metal_bytes,
+                "paired CED allocation observation exceeds its accepted bound"
+            );
+        }
+        Ok(())
+    }
 }
 
 #[derive(Clone, Debug, serde::Serialize)]
@@ -380,6 +443,7 @@ where
         self.ced_allowed = true;
         self.last_execution = PrefillExecution::FullForward;
         self.reports.clear();
+        self.last_logits = None;
         Ok(())
     }
     fn begin_pp_rep(&mut self, depth: usize) -> Result<()> {
@@ -398,7 +462,11 @@ where
             PrefillExecution::FullForward
         };
         let (logits, mut report) = (self.prefill)(state, ids, execution)?;
-        std::hint::black_box(logits);
+        if self.paired {
+            self.last_logits = Some(logits);
+        } else {
+            std::hint::black_box(logits);
+        }
         if execution != self.requested_execution {
             report.fallback = Some(
                 "CED is cold whole-prompt only; nonzero-depth pp and suffix calls use full forward"
@@ -406,9 +474,15 @@ where
             );
         }
         self.last_execution = report.execution;
-        if let Some(diagnostics) =
+        let diagnostics = if self.paired {
+            Some(crate::family_options::V41PrefillDiagnostics {
+                requested_execution: self.requested_execution,
+                report,
+            })
+        } else {
             crate::family_options::V41PrefillDiagnostics::new(self.requested_execution, report)
-        {
+        };
+        if let Some(diagnostics) = diagnostics {
             self.reports.push(V41BenchPrefillCall {
                 start_position: self.position,
                 tokens: ids.len(),
@@ -441,6 +515,22 @@ where
                 requested_execution: self.requested_execution,
                 calls: self.reports.clone(),
             })
+    }
+    fn set_pair_execution(&mut self, execution: PrefillExecution) -> Result<()> {
+        ensure!(
+            self.state.is_none(),
+            "paired policy must be selected without a live state"
+        );
+        self.paired = true;
+        self.requested_execution = execution;
+        Ok(())
+    }
+    fn last_logits(&self) -> Option<&[f32]> {
+        self.last_logits.as_deref()
+    }
+    fn end_pair_case(&mut self) {
+        self.state = None;
+        self.last_logits = None;
     }
 }
 
@@ -890,7 +980,7 @@ pub(crate) fn run_family_tg_row(
     Ok(row)
 }
 
-fn attach_v41_diagnostics(row: &mut BenchRow, repetitions: Vec<V41BenchPrefillRep>) {
+pub(crate) fn attach_v41_diagnostics(row: &mut BenchRow, repetitions: Vec<V41BenchPrefillRep>) {
     if repetitions.is_empty() {
         return;
     }
@@ -914,7 +1004,7 @@ fn attach_v41_diagnostics(row: &mut BenchRow, repetitions: Vec<V41BenchPrefillRe
         prefill_report=%row.diagnostics.as_ref().unwrap(), "bench cold prefill execution");
 }
 
-fn family_row(
+pub(crate) fn family_row(
     row_ctx: &SuiteRowContext,
     semantics: FamilySemantics,
     test: String,
@@ -968,6 +1058,27 @@ fn family_row(
         power: row_ctx.power.clone(),
         qwen_env: row_ctx.qwen_env.clone(),
         diagnostics: None,
+    }
+}
+
+#[cfg(test)]
+pub(crate) fn v41_pair_test_bench<S>(
+    create: impl FnMut() -> Result<S>,
+    prefill: impl FnMut(&mut S, &[u32], PrefillExecution) -> Result<(Vec<f32>, PrefillReport)>,
+) -> impl FamilyBench {
+    DeepSeekV41Bench {
+        vocab: 257,
+        state: None,
+        create,
+        step: |_: &mut S, _| bail!("paired fixture must not decode"),
+        prefill,
+        requested_execution: PrefillExecution::FullForward,
+        position: 0,
+        ced_allowed: true,
+        last_execution: PrefillExecution::FullForward,
+        reports: Vec::new(),
+        paired: false,
+        last_logits: None,
     }
 }
 
@@ -1028,6 +1139,8 @@ mod tests {
             ced_allowed: true,
             last_execution: PrefillExecution::FullForward,
             reports: Vec::new(),
+            paired: false,
+            last_logits: None,
             create: || Ok(0usize),
             prefill,
             step: |position: &mut usize, _| {
@@ -1275,6 +1388,8 @@ mod tests {
             ced_allowed: true,
             last_execution: PrefillExecution::FullForward,
             reports: Vec::new(),
+            paired: false,
+            last_logits: None,
             create: || {
                 repetitions.borrow_mut().push(vec![]);
                 Ok(0usize)

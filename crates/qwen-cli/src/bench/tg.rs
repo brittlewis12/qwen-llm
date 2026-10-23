@@ -16,6 +16,7 @@ pub(crate) fn run_tg(args: TgArgs) -> Result<()> {
     }
     if !experimental {
         return crate::suite::run_suite(SuiteArgs {
+            v41_ced_pair: false,
             model: args.model,
             pp: Vec::new(),
             tg: vec![args.n_gen],

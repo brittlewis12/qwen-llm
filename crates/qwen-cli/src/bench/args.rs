@@ -476,6 +476,18 @@ pub(crate) struct TgArgs {
 pub(crate) struct SuiteArgs {
     #[arg(short = 'm', long)]
     pub(crate) model: PathBuf,
+    /// Native V4.1 Full/CED pair: exactly one --pp (2..=8192), no --tg,
+    /// depth 0, warmup enabled, no chunk override, even --runs 2..=16 per
+    /// policy. Warms both policies, gates an ABBA pilot (2 samples/policy),
+    /// then alternates retained BAAB/ABBA blocks. Warmup/pilot are excluded
+    /// from statistics; per-policy max/min must stay <=1.5, including pilot
+    /// evidence, after every main case. Requires MTL_DEBUG_LAYER=1, a stock
+    /// arithmetic/profiling environment and external continuous host-validity
+    /// monitoring. Supports vocab <=1048576 and <=256 layers. Timings are
+    /// host-wall native prefill plus endpoint logits, not GPU-only or quality
+    /// evidence; every endpoint head must match warm Full bitwise.
+    #[arg(long)]
+    pub(crate) v41_ced_pair: bool,
     /// Prompt-only prefill shapes. Accepts repeated flags or comma lists.
     #[arg(long = "pp", value_delimiter = ',')]
     pub(crate) pp: Vec<usize>,

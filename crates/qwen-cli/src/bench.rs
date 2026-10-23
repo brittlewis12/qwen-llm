@@ -91,6 +91,8 @@ mod timing;
 mod tok;
 #[path = "bench/topology.rs"]
 mod topology;
+#[path = "bench/v41_ced_pair.rs"]
+mod v41_ced_pair;
 use qwen_cli::tracing_init;
 #[path = "bench/vocab_audit.rs"]
 mod vocab_audit;

@@ -344,6 +344,7 @@ fn log_row(json_mode: bool, row: &BenchRow) {
 pub(crate) fn run_suite(args: SuiteArgs) -> Result<()> {
     let SuiteArgs {
         model,
+        v41_ced_pair,
         pp,
         tg,
         depth: depths,
@@ -372,7 +373,19 @@ pub(crate) fn run_suite(args: SuiteArgs) -> Result<()> {
             probe.get_str("general.architecture")
         )
     })?;
-    let v41_prefill_execution = if family == ModelFamily::DeepSeekV41 {
+    if v41_ced_pair {
+        crate::v41_ced_pair::validate_args(
+            family,
+            &pp,
+            &tg,
+            &depths,
+            runs,
+            no_warmup,
+            prefill_chunk,
+        )?;
+        crate::v41_ced_pair::check_environment()?;
+    }
+    let v41_prefill_execution = if family == ModelFamily::DeepSeekV41 && !v41_ced_pair {
         crate::family_options::v41_prefill_execution_from_env()?
     } else {
         Default::default()
@@ -482,7 +495,19 @@ pub(crate) fn run_suite(args: SuiteArgs) -> Result<()> {
             power,
             qwen_env: capture_qwen_env(),
         };
-        let extent = FamilyBenchExtent::for_shapes(&pp, &tg, &depths, (warmup_pp, WARMUP_TG))?;
+        let extent = if v41_ced_pair {
+            FamilyBenchExtent {
+                forwards: pp[0],
+                prefill_endpoint: pp[0],
+            }
+        } else {
+            FamilyBenchExtent::for_shapes(&pp, &tg, &depths, (warmup_pp, WARMUP_TG))?
+        };
+        let paired_preweight = if v41_ced_pair {
+            Some(crate::v41_ced_pair::preweight_plan(&ctx, &probe, extent)?)
+        } else {
+            None
+        };
         rows = with_family_bench(
             family,
             &ctx,
@@ -490,6 +515,19 @@ pub(crate) fn run_suite(args: SuiteArgs) -> Result<()> {
             extent,
             v41_prefill_execution,
             &mut |bench| {
+                if let Some(preweight) = &paired_preweight {
+                    let rows =
+                        crate::v41_ced_pair::run(bench, &row_ctx, pp[0], runs, seed, preweight)?;
+                    for row in &rows {
+                        crate::text_log!(
+                            json_mode,
+                            "[suite] paired prefill_mode={}",
+                            row.prefill_mode.unwrap_or("unreported"),
+                        );
+                        log_row(json_mode, row);
+                    }
+                    return Ok(rows);
+                }
                 let mut rows = Vec::with_capacity((pp.len() + tg.len()) * depths.len());
                 if !no_warmup {
                     crate::text_log!(json_mode, "[suite] model warm-up (untimed)");

@@ -468,6 +468,7 @@ pub(crate) fn run_pp(args: PpArgs) -> Result<()> {
         // The suite always times the endpoint head and logits, so
         // `--with-tail` is satisfied rather than ignored.
         return crate::suite::run_suite(SuiteArgs {
+            v41_ced_pair: false,
             model: args.model,
             pp: vec![args.n_prompt],
             tg: Vec::new(),

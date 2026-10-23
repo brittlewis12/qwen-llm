@@ -1174,6 +1174,7 @@ fn run_tensor_dense_wide_case(n_out: usize, rows: usize, seed: u64) {
     let x_v = x_t.view_bytes(0, vec![N_IN as u64, rows as u64]);
     let narrow = MetalTensor::zeros_f32(&ctx, vec![n_out as u64, rows as u64]).unwrap();
     let wide = MetalTensor::zeros_f32(&ctx, vec![n_out as u64, rows as u64]).unwrap();
+    let combined = MetalTensor::zeros_f32(&ctx, vec![n_out as u64, rows as u64]).unwrap();
     one_shot(&ctx, |enc| {
         encode_mat_mat_tensor_f32_narrow(&ctx, enc, &w, &x_v, &narrow, N_IN, n_out, rows)
     })
@@ -1182,15 +1183,26 @@ fn run_tensor_dense_wide_case(n_out: usize, rows: usize, seed: u64) {
         encode_mat_mat_tensor_f32_wide(&ctx, enc, &w, &x_v, &wide, N_IN, n_out, rows)
     })
     .expect("wide dense mat-mat");
+    one_shot(&ctx, |enc| {
+        encode_mat_mat_tensor_f32_combined(&ctx, enc, &w, &x_v, &combined, N_IN, n_out, rows)
+    })
+    .expect("combined dense mat-mat");
     let narrow = read_back_f32(&narrow.buffer, rows * n_out);
     let wide = read_back_f32(&wide.buffer, rows * n_out);
+    let combined = read_back_f32(&combined.buffer, rows * n_out);
     let label = format!("tensor-dense-wide-{n_out}x{rows}");
     assert_close(&label, &wide, &cpu);
+    assert_close(&label, &combined, &cpu);
     let bits = |values: &[f32]| values.iter().map(|v| v.to_bits()).collect::<Vec<_>>();
     assert_eq!(
         bits(&wide),
         bits(&narrow),
         "wide and narrow dense tiles differ at {n_out}x{rows}"
+    );
+    assert_eq!(
+        bits(&combined),
+        bits(&narrow),
+        "combined and narrow dense tiles differ at {n_out}x{rows}"
     );
 }
 

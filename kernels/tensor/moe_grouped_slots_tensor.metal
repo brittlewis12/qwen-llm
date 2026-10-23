@@ -353,6 +353,147 @@ kernel void kernel_mat_mat_tensor_wide(
         args, srcA, srcB, dst, shmem, tgpig, tiitg_wide);
 }
 
+// Dense 64-slot x 128-row form: a 128-row weight slab with two 32-slot
+// activation groups. Against the 32-slot narrow tile it halves both weight
+// and activation reads per output row; against the 64-slot wide tile it
+// keeps the weight reuse and halves the activation reads. Dense only
+// (EPI 0); the [64][128] F32 output staging is 32 KiB.
+template <int BYTES, short NL,
+          void (*DEQ)(device const uchar *, short, thread half4x4 &)>
+inline void moe_mat_mat_tensor_combined_body(
+        constant moe_group_generic_mm_args & args,
+        device const uchar * srcA,
+        device const float * srcB,
+        device       float * dst,
+        threadgroup  uchar * shmem,
+        uint3  tgpig,
+        uint tiitg_wide) {
+    const ushort tiitg = ushort(tiitg_wide);
+    threadgroup half * sa = (threadgroup half *)(shmem);          // [128][32]
+    threadgroup half * sb = (threadgroup half *)(shmem + 8192);   // [64][32]
+
+    const int r0 = tgpig.y * 128;
+    const int r1 = tgpig.x * 64;
+    const int count = int(args.N);
+    if (r1 >= count) return;
+
+    const short nr0 = ((int)args.M - r0 < 128) ? (short)((int)args.M - r0) : 128;
+    const short nr1 = (count - r1 < 64) ? (short)(count - r1) : 64;
+
+    const short lr0a = (short)tiitg / TT_NL0;
+    const short lr0b = lr0a + 64;
+    const short il0 = (tiitg % TT_NL0);
+    short il = il0;
+    const short rowa = lr0a < nr0 ? lr0a : nr0 - 1;
+    const short rowb = lr0b < nr0 ? lr0b : nr0 - 1;
+
+    const short lr1 = (short)tiitg / TT_NL1; // 0..31, two slots per thread
+    const short iy = 8 * (tiitg % TT_NL1);
+    const short slot0 = (short)min((int)lr1, (int)nr1 - 1);
+    const short slot1 = (short)min((int)lr1 + 32, (int)nr1 - 1);
+    const short phys0 = lr1;
+    const short phys1 = lr1 + 32;
+    const bool valid0 = lr1 < nr1;
+    const bool valid1 = (int)lr1 + 32 < (int)nr1;
+
+    const short offset1 = il0 / NL;
+    device const uchar * x_ptr0 = srcA + (ulong)args.nb01 * (r0 + rowa)
+                                        + (ulong)offset1 * BYTES;
+    device const uchar * x_ptr1 = srcA + (ulong)args.nb01 * (r0 + rowb)
+                                        + (ulong)offset1 * BYTES;
+    device const float * y_ptr0 = srcB + (ulong)args.stride_b * (r1 + slot0) + (ulong)iy;
+    device const float * y_ptr1 = srcB + (ulong)args.stride_b * (r1 + slot1) + (ulong)iy;
+
+    threadgroup half * stage_a0 = sa + rowa * TT_NK + 16 * il0;
+    threadgroup half * stage_a1 = sa + rowb * TT_NK + 16 * il0;
+    threadgroup half * stage_b0 = sb + phys0 * TT_NK + iy;
+    threadgroup half * stage_b1 = sb + phys1 * TT_NK + iy;
+
+    constexpr auto desc = tensor_ops::matmul2d_descriptor(
+        64, 128, TT_NK, false, true, false,
+        tensor_ops::matmul2d_descriptor::mode::multiply_accumulate);
+    tensor_ops::matmul2d<desc, execution_simdgroups<4>> op;
+    using left_t = tensor<threadgroup half, extents<int, TT_NK, 64>, tensor_inline>;
+    using right_t = tensor<threadgroup half, extents<int, TT_NK, 128>, tensor_inline>;
+    left_t left(sb, extents<int, TT_NK, 64>());
+    right_t right(sa, extents<int, TT_NK, 128>());
+    auto acc = op.template get_destination_cooperative_tensor<left_t, right_t, float>();
+#pragma clang loop unroll(full)
+    for (ushort i = 0; i < acc.get_capacity(); ++i) {
+        acc[i] = 0.0f;
+    }
+
+    for (uint loop_k = 0; loop_k < args.K; loop_k += TT_NK) {
+        half4x4 ta0, ta1;
+        DEQ(x_ptr0, il, ta0);
+        DEQ(x_ptr1, il, ta1);
+        const half2x4 yv0 = (half2x4)(*((device const float2x4 *)y_ptr0));
+        const half2x4 yv1 = (half2x4)(*((device const float2x4 *)y_ptr1));
+
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+        *(threadgroup half4 *)(stage_a0 + 0)  = ta0[0];
+        *(threadgroup half4 *)(stage_a0 + 4)  = ta0[1];
+        *(threadgroup half4 *)(stage_a0 + 8)  = ta0[2];
+        *(threadgroup half4 *)(stage_a0 + 12) = ta0[3];
+        *(threadgroup half4 *)(stage_a1 + 0)  = ta1[0];
+        *(threadgroup half4 *)(stage_a1 + 4)  = ta1[1];
+        *(threadgroup half4 *)(stage_a1 + 8)  = ta1[2];
+        *(threadgroup half4 *)(stage_a1 + 12) = ta1[3];
+        if (valid0) *(threadgroup half2x4 *)(stage_b0) = yv0;
+        else *(threadgroup half2x4 *)(stage_b0) = half2x4(0.0h);
+        if (valid1) *(threadgroup half2x4 *)(stage_b1) = yv1;
+        else *(threadgroup half2x4 *)(stage_b1) = half2x4(0.0h);
+
+        il = (il + 2 < NL) ? il + 2 : il % 2;
+        if (il < 2) {
+            x_ptr0 += BYTES * ((2 + NL - 1) / NL);
+            x_ptr1 += BYTES * ((2 + NL - 1) / NL);
+        }
+        y_ptr0 += TT_NK;
+        y_ptr1 += TT_NK;
+
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+        op.run(left, right, acc);
+    }
+
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    threadgroup float * temp_str = (threadgroup float *)shmem;   // [64][128]
+    tensor<threadgroup float, extents<int, 128, 64>, tensor_inline> out_tile(
+        temp_str, extents<int, 128, 64>());
+    acc.store(out_tile);
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+
+    const short j = tiitg / 4;
+    const short c0 = (tiitg % 4) * 32;
+#pragma clang loop unroll(full)
+    for (short s = 0; s < 64; s += 32) {
+        const short js = j + s;
+        if (js < nr1) {
+            const int slot = r1 + js;
+            device float * D = dst + (ulong)slot * args.M + r0;
+            threadgroup const float * C = temp_str + js * 128;
+            const short c1 = (c0 + 32 < nr0) ? c0 + 32 : nr0;
+            for (short i = c0; i < c1; ++i) {
+                D[i] = C[i];
+            }
+        }
+    }
+}
+
+template <int BYTES, short NL,
+          void (*DEQ)(device const uchar *, short, thread half4x4 &)>
+kernel void kernel_mat_mat_tensor_combined(
+        constant moe_group_generic_mm_args & args [[buffer(0)]],
+        device const uchar * srcA         [[buffer(1)]],
+        device const float * srcB         [[buffer(2)]],
+        device       float * dst          [[buffer(3)]],
+        threadgroup  uchar * shmem        [[threadgroup(0)]],
+        uint3  tgpig [[threadgroup_position_in_grid]],
+        uint tiitg_wide [[thread_index_in_threadgroup]]) {
+    moe_mat_mat_tensor_combined_body<BYTES, NL, DEQ>(
+        args, srcA, srcB, dst, shmem, tgpig, tiitg_wide);
+}
+
 typedef decltype(kernel_moe_grouped_slots_mm_tensor<QT_Q4_K_BYTES, QT_Q4_K_NL, qt_dequantize_q4_K, 0>) moe_grouped_slots_mm_tensor_t;
 typedef decltype(kernel_moe_up_clamped_grouped_slots_tensor<QT_Q4_K_BYTES, QT_Q4_K_NL, qt_dequantize_q4_K>) moe_up_clamped_grouped_slots_tensor_t;
 typedef decltype(kernel_mat_mat_tensor<QT_Q4_K_BYTES, QT_Q4_K_NL, qt_dequantize_q4_K>) mat_mat_tensor_t;
@@ -390,3 +531,5 @@ TT_INSTANTIATE(iq2_xxs, QT_IQ2_XXS_BYTES, QT_IQ2_XXS_NL, qt_dequantize_iq2_xxs)
 // (q/kv/output and the shared expert); other dtypes keep the 32-slot form.
 typedef decltype(kernel_mat_mat_tensor_wide<QT_Q8_0_BYTES, QT_Q8_0_NL, qt_dequantize_q8_0>) mat_mat_tensor_wide_t;
 template [[host_name("kernel_mat_mat_q8_0_f32_tensor_wide")]] kernel mat_mat_tensor_wide_t kernel_mat_mat_tensor_wide<QT_Q8_0_BYTES, QT_Q8_0_NL, qt_dequantize_q8_0>;
+typedef decltype(kernel_mat_mat_tensor_combined<QT_Q8_0_BYTES, QT_Q8_0_NL, qt_dequantize_q8_0>) mat_mat_tensor_combined_t;
+template [[host_name("kernel_mat_mat_q8_0_f32_tensor_combined")]] kernel mat_mat_tensor_combined_t kernel_mat_mat_tensor_combined<QT_Q8_0_BYTES, QT_Q8_0_NL, qt_dequantize_q8_0>;

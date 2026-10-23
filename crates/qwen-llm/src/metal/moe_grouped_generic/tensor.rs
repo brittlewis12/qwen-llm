@@ -72,6 +72,7 @@ pub fn moe_grouped_tensor_selected(ctx: &MetalContext) -> bool {
 
 const TENSOR_THREADGROUP_BYTES: usize = 8192;
 const TENSOR_THREADGROUP_BYTES_WIDE: usize = 16384;
+const TENSOR_THREADGROUP_BYTES_COMBINED: usize = 32768;
 
 #[allow(clippy::too_many_arguments)]
 fn dispatch_tensor_mm(
@@ -251,6 +252,11 @@ pub fn mat_mat_tensor_wide_pipeline_name(dtype: GgmlType) -> Option<String> {
     (dtype == GgmlType::Q8_0).then(|| "kernel_mat_mat_q8_0_f32_tensor_wide".to_string())
 }
 
+/// 64-slot x 128-row dense form; Q8_0 only.
+pub fn mat_mat_tensor_combined_pipeline_name(dtype: GgmlType) -> Option<String> {
+    (dtype == GgmlType::Q8_0).then(|| "kernel_mat_mat_q8_0_f32_tensor_combined".to_string())
+}
+
 /// Dense `y[row] = W x[row]` on the tensor tile with the `mat_mat`
 /// contract: `weight` is `[n_in, n_out]` in any dtype with a generic
 /// layout, `x` is `[n_in, n_query]` F32 and `y` is `[n_out, n_query]` F32
@@ -273,10 +279,14 @@ pub fn encode_mat_mat_tensor_f32(
     n_out: usize,
     n_query: usize,
 ) -> Result<(), MetalError> {
-    let wide = n_query >= 128
+    let combined = n_query >= 128
+        && mat_mat_tensor_combined_pipeline_name(weight.dtype).is_some()
+        && std::env::var_os("QWEN_V41_DENSE_COMBINED").is_some();
+    let wide = !combined
+        && n_query >= 128
         && mat_mat_tensor_wide_pipeline_name(weight.dtype).is_some()
         && std::env::var_os("QWEN_V41_DENSE_NARROW").is_none();
-    encode_mat_mat_tensor_f32_impl(ctx, enc, weight, x, y, n_in, n_out, n_query, wide)
+    encode_mat_mat_tensor_f32_impl(ctx, enc, weight, x, y, n_in, n_out, n_query, wide, combined)
 }
 
 /// Force the 64-slot dense form; test and probe entry point.
@@ -291,7 +301,22 @@ pub fn encode_mat_mat_tensor_f32_wide(
     n_out: usize,
     n_query: usize,
 ) -> Result<(), MetalError> {
-    encode_mat_mat_tensor_f32_impl(ctx, enc, weight, x, y, n_in, n_out, n_query, true)
+    encode_mat_mat_tensor_f32_impl(ctx, enc, weight, x, y, n_in, n_out, n_query, true, false)
+}
+
+/// Force the 64-slot x 128-row dense form; test and probe entry point.
+#[allow(clippy::too_many_arguments)]
+pub fn encode_mat_mat_tensor_f32_combined(
+    ctx: &MetalContext,
+    enc: &KernelEncoder,
+    weight: &MetalTensor,
+    x: &MetalTensor,
+    y: &MetalTensor,
+    n_in: usize,
+    n_out: usize,
+    n_query: usize,
+) -> Result<(), MetalError> {
+    encode_mat_mat_tensor_f32_impl(ctx, enc, weight, x, y, n_in, n_out, n_query, false, true)
 }
 
 /// Force the 32-slot dense form; test and probe entry point.
@@ -306,7 +331,7 @@ pub fn encode_mat_mat_tensor_f32_narrow(
     n_out: usize,
     n_query: usize,
 ) -> Result<(), MetalError> {
-    encode_mat_mat_tensor_f32_impl(ctx, enc, weight, x, y, n_in, n_out, n_query, false)
+    encode_mat_mat_tensor_f32_impl(ctx, enc, weight, x, y, n_in, n_out, n_query, false, false)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -320,6 +345,7 @@ fn encode_mat_mat_tensor_f32_impl(
     n_out: usize,
     n_query: usize,
     wide: bool,
+    combined: bool,
 ) -> Result<(), MetalError> {
     const KERNEL: &str = "mat_mat_tensor";
     let l = moe_grouped_generic_layout(weight.dtype).ok_or_else(|| MetalError::BadShape {
@@ -371,17 +397,21 @@ fn encode_mat_mat_tensor_f32_impl(
         b_div: 1,
         slot_limit: n_query as u32,
     };
-    let wide = wide && mat_mat_tensor_wide_pipeline_name(weight.dtype).is_some();
-    let name = if wide {
+    let combined = combined && mat_mat_tensor_combined_pipeline_name(weight.dtype).is_some();
+    let wide = wide && !combined && mat_mat_tensor_wide_pipeline_name(weight.dtype).is_some();
+    let name = if combined {
+        mat_mat_tensor_combined_pipeline_name(weight.dtype).expect("layout found above")
+    } else if wide {
         mat_mat_tensor_wide_pipeline_name(weight.dtype).expect("layout found above")
     } else {
         mat_mat_tensor_pipeline_name(weight.dtype).expect("layout found above")
     };
-    let slots = if wide { 64 } else { 32 };
-    let threadgroup_bytes = if wide {
-        TENSOR_THREADGROUP_BYTES_WIDE
+    let (slots, rows, threadgroup_bytes) = if combined {
+        (64, 128, TENSOR_THREADGROUP_BYTES_COMBINED)
+    } else if wide {
+        (64, 64, TENSOR_THREADGROUP_BYTES_WIDE)
     } else {
-        TENSOR_THREADGROUP_BYTES
+        (32, 64, TENSOR_THREADGROUP_BYTES)
     };
     let pso = ctx.tensor_pipeline(&name)?;
     enc.set_pipeline(&pso);
@@ -393,7 +423,7 @@ fn encode_mat_mat_tensor_f32_impl(
     enc.dispatch(
         MTLSize {
             width: n_query.div_ceil(slots),
-            height: n_out.div_ceil(64),
+            height: n_out.div_ceil(rows),
             depth: 1,
         },
         MTLSize {

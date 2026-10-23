@@ -6,6 +6,22 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the current state and evidence index.
 
+## 2026-10-22 - V4.1 Prefill: 4K Fused Selection +9% At PP4096
+
+- The 2048-entry fused selector left the late ratio-one tiles (visible
+  length 2049-4096) on the per-row sort. A second 32 KiB threadgroup kernel
+  with 4096-entry bitonic arrays covers them, while the common path keeps
+  the 16 KiB 2048 kernel so occupancy is not reduced for short rows.
+- Same-binary ABBA at PP4096 against `QWEN_V41_SELECT_FUSE_2048=1`:
+  Q2 570.2 -> 622.2 (+9.1%), IQ3 567.2 -> 616.8 (+8.7%). Census 173,913 ->
+  92,313 (-46.9%). PP2048 is unchanged.
+- Same-binary IQ3 held-text witness: 2K and 4K cutoffs give identical NLL
+  (mean 2.146367194) and top-1 (0.5677). The 65-row regression now includes
+  a start=3000 case that crosses into the 4K selector; 31 attention and 14
+  prefill tests pass.
+- Above padded 4096 the per-row fallback remains.
+- [ABBA, census, witness and limits](bench/2026-10-22-v41-select-fuse4k.md).
+
 ## 2026-10-22 - V4.1 Prefill: Fused Selection +15-20%
 
 - One threadgroup per top-k row now loads the index-score slab, runs the

@@ -212,6 +212,7 @@ impl Rows {
         capacity: usize,
         rows: usize,
     ) -> Result<Self> {
+        let half_elements = prefill::attention_half_scratch_elements(c, rows)?;
         let widths = Self::widths(c, capacity);
         for &width in &widths {
             checked_product(&[width, rows])?;
@@ -236,18 +237,7 @@ impl Rows {
                 rows.min(query_batch::tile_rows()),
                 GgmlType::F32,
             )?,
-            // Widest projection input: the layer input, the query rank, the
-            // grouped output_a input or the output_b input.
-            half: prefill::HalfScratch::new(
-                ctx,
-                checked_product(&[
-                    [c.hidden, widths[0], widths[6], widths[5]]
-                        .into_iter()
-                        .max()
-                        .unwrap_or(0),
-                    rows,
-                ])?,
-            )?,
+            half: prefill::HalfScratch::new(ctx, half_elements)?,
             rows,
         })
     }

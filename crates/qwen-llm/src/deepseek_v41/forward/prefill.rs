@@ -58,13 +58,67 @@ pub(super) struct HalfScratch {
     tensor: MetalTensor,
 }
 
+fn half_scratch_extent(factors: &[usize]) -> Result<usize> {
+    let elements = factors.iter().try_fold(1usize, |n, &factor| {
+        n.checked_mul(factor).ok_or("half scratch extent overflow")
+    })?;
+    HalfScratch::logical_bytes(elements)?;
+    Ok(elements)
+}
+
+pub(super) fn attention_half_scratch_elements(c: &Config, rows: usize) -> Result<usize> {
+    let grouped = half_scratch_extent(&[c.heads, c.head_dim])?;
+    let low = half_scratch_extent(&[c.groups, c.output_rank])?;
+    half_scratch_extent(&[c.hidden.max(c.query_rank).max(grouped).max(low), rows])
+}
+
+pub(super) fn ffn_half_scratch_elements(c: &Config, rows: usize) -> Result<[usize; 2]> {
+    Ok([
+        half_scratch_extent(&[c.hidden, rows])?,
+        half_scratch_extent(&[c.intermediate, c.topk.max(1), rows])?,
+    ])
+}
+
+/// Incremental half buffers owned by one attention/FFN row set. Price each
+/// allocation separately, including buffers unused by arithmetic overrides.
+pub(super) fn half_scratch_budget(ctx: &MetalContext, c: &Config, rows: usize) -> Result<u64> {
+    if !HalfScratch::selected(ctx) || rows == 0 {
+        return Ok(0);
+    }
+    let attention = attention_half_scratch_elements(c, rows)?;
+    let [input, inner] = ffn_half_scratch_elements(c, rows)?;
+    [attention, input, inner]
+        .into_iter()
+        .filter(|&elements| elements != 0)
+        .try_fold(0u64, |total, elements| {
+            let priced = ctx
+                .price_shared_buffer_upper(HalfScratch::logical_bytes(elements)?)
+                .map_err(|e| e.to_string())?;
+            total
+                .checked_add(priced.priced_upper_bytes)
+                .ok_or_else(|| "half scratch budget overflow".into())
+        })
+}
+
 impl HalfScratch {
+    fn selected(ctx: &MetalContext) -> bool {
+        metal::moe_grouped_tensor_selected(ctx)
+    }
+
+    fn logical_bytes(elements: usize) -> Result<u64> {
+        u64::try_from(elements)
+            .ok()
+            .and_then(|n| n.checked_mul(2))
+            .ok_or_else(|| "half scratch byte overflow".into())
+    }
+
     /// Scratch for up to `elements` activations when the tensor tier is
     /// selected on `ctx`; `None` otherwise (nothing would read it).
     pub(super) fn new(ctx: &MetalContext, elements: usize) -> Result<Option<Self>> {
-        if !metal::moe_grouped_tensor_selected(ctx) || elements == 0 {
+        if !Self::selected(ctx) || elements == 0 {
             return Ok(None);
         }
+        Self::logical_bytes(elements)?;
         Ok(Some(Self {
             tensor: allocate(ctx, elements, 1, GgmlType::F16)?,
         }))
@@ -563,7 +617,7 @@ pub(super) fn run_captured(
                 census[3]
             );
         });
-        let mut extra = 0u64;
+        let mut extra = half_scratch_budget(model.ctx, &model.config, rows)?;
         for width in gpu_step::chunk_widths(model, state.capacity(), rows)? {
             let bytes = width
                 .checked_mul(rows)

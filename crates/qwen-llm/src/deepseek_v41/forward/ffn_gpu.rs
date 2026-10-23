@@ -917,6 +917,7 @@ impl Rows {
     }
     pub(super) fn new(ctx: &MetalContext, c: &Config, rows: usize, layers: usize) -> Result<Self> {
         composition_extents(c, rows).map_err(|e| e.to_string())?;
+        let [input_elements, inner_elements] = prefill::ffn_half_scratch_elements(c, rows)?;
         let hc = prefill::HcRows::new(ctx, c, rows)?;
         let buffers = [
             c.experts,
@@ -950,13 +951,8 @@ impl Rows {
             )
         })
         .collect::<Result<Vec<_>>>()?;
-        let extent = |width: usize| {
-            width
-                .checked_mul(rows)
-                .ok_or_else(|| "half scratch extent overflow".to_string())
-        };
-        let half_input = prefill::HalfScratch::new(ctx, extent(c.hidden)?)?;
-        let half_inner = prefill::HalfScratch::new(ctx, extent(c.intermediate * c.topk.max(1))?)?;
+        let half_input = prefill::HalfScratch::new(ctx, input_elements)?;
+        let half_inner = prefill::HalfScratch::new(ctx, inner_elements)?;
         Ok(Self {
             hc,
             buffers,

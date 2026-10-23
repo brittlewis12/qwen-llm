@@ -4,6 +4,7 @@ use std::io::Write;
 mod ownership_metadata;
 mod ple_engram;
 mod ple_split;
+mod resident_storage;
 mod storage_mapping;
 
 #[derive(Clone)]

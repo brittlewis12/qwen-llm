@@ -11,9 +11,13 @@ use std::{collections::BTreeMap, sync::Arc};
 mod engram;
 mod metadata;
 mod names;
+mod resident_storage;
 mod storage;
 pub use super::engram::HashConfig;
 pub use engram::DiskEngram;
+pub use resident_storage::{
+    ResidentMappingKind, ResidentStoragePlan, ResidentStorageWindow, resident_storage_plan,
+};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Schedule {
@@ -315,41 +319,16 @@ impl ResidentWeights {
     pub fn load(ctx: &MetalContext, g: Arc<GgufFile>) -> Result<Self, LoadError> {
         let p = plan(&g)?;
         g.revalidate_retained_shard_stamps()?;
+        let page = metal::host_page_size_bytes()?;
+        let storage = resident_storage::for_plan(&g, &p, page, ctx.max_buffer_length())?;
+        let windows = &storage.windows;
         let requests: Vec<_> = g
             .tensors
             .iter()
             .filter(|t| resident_tensor(t, p.layers))
             .collect();
-        // Do not coalesce across disk-only or unused tensors (including MTP).
-        let mut segments = BTreeMap::<(usize, usize), Vec<&TensorDesc>>::new();
-        for &t in &requests {
-            let segment = g
-                .tensors
-                .iter()
-                .filter(|other| {
-                    !resident_tensor(other, p.layers)
-                        && other.shard_idx == t.shard_idx
-                        && other.data_offset < t.data_offset
-                })
-                .count();
-            segments.entry((t.shard_idx, segment)).or_default().push(t);
-        }
-        let mut windows = Vec::new();
-        let page = metal::host_page_size_bytes()?;
-        let lengths = storage::padded_lengths(&g, page)?;
-        for segment in segments.values() {
-            let storage =
-                metal::plan_retained_storage(&lengths, segment, page, ctx.max_buffer_length(), 16)?;
-            if storage.unique_fallback_bytes != 0 {
-                return Err(invalid(
-                    "tensor cannot be directly bound: device maximum buffer length or binding alignment",
-                ));
-            }
-            windows.extend(storage.windows);
-        }
-        let view_bytes = windows.iter().try_fold(0, |n, w| add(n, w.length as u64))?;
         if let Some(e) = metal::evaluate_metal_memory_admission_with_cpu_bytes(
-            view_bytes,
+            storage.metal_view_bytes,
             0,
             0,
             ctx.memory_signals(),
@@ -360,7 +339,8 @@ impl ResidentWeights {
             return Err(e.into());
         }
         let mut backings = Vec::new();
-        for w in &windows {
+        for planned in windows {
+            let w = &planned.window;
             let (mmap, local) = storage::mapping(&g, w, page)?;
             backings.push(
                 ctx.gguf_no_copy_window(
@@ -377,7 +357,8 @@ impl ResidentWeights {
         let mut dense = BTreeMap::new();
         for t in requests {
             let mut tensor = None;
-            for (w, (backing, local)) in windows.iter().zip(&backings) {
+            for (planned, (backing, local)) in windows.iter().zip(&backings) {
+                let w = &planned.window;
                 if w.shard_idx == t.shard_idx
                     && t.data_offset >= w.mmap_offset
                     && t.data_offset + t.n_bytes <= w.mmap_offset + w.length as u64

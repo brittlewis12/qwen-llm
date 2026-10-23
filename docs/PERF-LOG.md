@@ -6,6 +6,28 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the current state and evidence index.
 
+## 2026-10-23 - Shared EOF And Combined Host Admission
+
+- Replace private partial-EOF windows with shared read-only mappings; retain
+  private ownership only for real Engram boundary clears and price their full
+  spans. Whole-load and per-import admission constrain CPU plus Metal demand
+  even when the raw process-limit signal is zero. Resource-owned debt survives
+  Metal retains and retires on final release.
+- The combined policy preserves host headroom, distinguishes post-import exact
+  fits from overshoot, and keeps CPU-relievable availability/process shortages
+  separate from immutable device/host-ceiling shortages. GLM capacity advice
+  and CPU snapshot relief use those same bounds and causes.
+- Both M4 and M5 pass 34 pure policy/planning tests and the bounded import plus
+  two-page lifetime/debt proofs. All 1,493 CLI library/binary tests, 21 pilot
+  tests and affected release all-target checks pass.
+- Metadata-only planning reports Maya-S 165.950 GiB, Q2 185.907 GiB and IQ3
+  217.414 GiB of resident views, all with zero private shadow. Full IQ3 remains
+  refused under the 204.8 GiB ownership ceiling on 256 GiB, including 2K/4K
+  prefill. Select a fitting artifact and use one resident model with fresh KV.
+- CED performance qualification still needs the matched current-Full comparison
+  and completed-chunk lifetime proof; no wall-time gain is claimed here.
+- [Failure analysis, policy, bounded observations and limits](bench/2026-10-23-v41-memory-safety.md).
+
 ## 2026-10-23 - V4.1 Memory Repair: Bounded EOF Proof, Full-IQ3 Hold Remains
 
 - Shared, read-only partial-EOF windows pass immutable payload, zero-padding,

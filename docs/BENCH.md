@@ -55,6 +55,15 @@ For priorities: `docs/PERF-ROADMAP.md`.
 - New mapping or residency behavior starts with a tiny representative fixture,
   then one fitting pilot, then repetitions. File size and virtual mapped bytes
   are not physical-memory bounds; private/COW exposure must be priced explicitly.
+- Combined host admission remains mandatory when the raw process-limit signal
+  is zero. Device/import ownership and full private shadows must fit the
+  80%-physical ceiling, while fresh conservative availability preserves host
+  headroom. Unknown telemetry is not a zero-cost allowance.
+- V4.1's `deepseek_v41_storage_plan` example reports the loader's exact windows
+  and private exposure using supplied page/device geometry, without importing
+  weights or reading tensor payloads. It is a storage audit, not runtime fit;
+  runtime buffers and CPU demand still need admission. See the
+  [memory-safety packet](bench/2026-10-23-v41-memory-safety.md).
 - Compare execution policies inside one resident model when possible, resetting
   request state between repetitions. Distinguish cold KV from cold model loading.
 - `scripts/bench/pilot.py` supplies a reusable pilot runner. It requires stable

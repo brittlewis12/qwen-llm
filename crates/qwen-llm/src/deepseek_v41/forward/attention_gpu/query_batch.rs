@@ -572,7 +572,25 @@ impl Workspace {
         enc.set_tensor(7, &rows.tile.scores);
         enc.set_tensor(8, &attended);
         enc.set_tensor(10, &self.status);
-        if mma {
+        let tensor = mma
+            && n >= 128
+            && metal::moe_grouped_tensor_selected(ctx)
+            && std::env::var_os("QWEN_V41_SINK_TENSOR").is_none_or(|v| v != "0");
+        if tensor {
+            tensor_pipeline(ctx, enc, "score_tensor")?;
+            enc.dispatch(
+                MTLSize {
+                    width: c.heads / MMA_HEADS,
+                    height: n,
+                    depth: 1,
+                },
+                MTLSize {
+                    width: 128,
+                    height: 1,
+                    depth: 1,
+                },
+            );
+        } else if mma {
             pipeline(ctx, enc, "score_mma")?;
             enc.dispatch(
                 MTLSize {
@@ -616,7 +634,11 @@ impl Workspace {
             },
         );
         if mma {
-            pipeline(ctx, enc, "pv_mma")?;
+            if tensor {
+                tensor_pipeline(ctx, enc, "pv_tensor")?;
+            } else {
+                pipeline(ctx, enc, "pv_mma")?;
+            }
             enc.dispatch(
                 MTLSize {
                     width: c.heads / MMA_HEADS,
@@ -624,7 +646,7 @@ impl Workspace {
                     depth: 1,
                 },
                 MTLSize {
-                    width: 256,
+                    width: if tensor { 128 } else { 256 },
                     height: 1,
                     depth: 1,
                 },

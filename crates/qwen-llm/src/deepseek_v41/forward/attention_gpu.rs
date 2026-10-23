@@ -519,6 +519,19 @@ fn pipeline(ctx: &MetalContext, enc: &KernelEncoder, suffix: &str) -> Result<met
     enc.set_pipeline(&pso);
     Ok(pso)
 }
+/// Same names in the Metal 4 tensor library
+/// (`tensor/deepseek_v41_attention_tensor.metal`).
+fn tensor_pipeline(
+    ctx: &MetalContext,
+    enc: &KernelEncoder,
+    suffix: &str,
+) -> Result<metal::Pipeline> {
+    let pso = ctx
+        .tensor_pipeline(&format!("kernel_deepseek_v41_attention_{suffix}"))
+        .map_err(|e| e.to_string())?;
+    enc.set_pipeline(&pso);
+    Ok(pso)
+}
 fn dispatch(enc: &KernelEncoder, pso: &metal::Pipeline, n: usize) {
     if n > 0 {
         // These kernels use only global IDs, with no collective operations.

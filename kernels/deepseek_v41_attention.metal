@@ -1,5 +1,6 @@
 #include <metal_stdlib>
 using namespace metal;
+#include "deepseek_v41_attention.h"
 
 kernel void kernel_deepseek_v41_attention_selection_prepare(
     constant uint4 &a [[buffer(0)]], device uint *ids [[buffer(1)]],
@@ -525,13 +526,6 @@ kernel void kernel_deepseek_v41_attention_publish_raw(
     ring[((a.z + row) % a.y) * a.x + j] = rows[row * a.x + j];
 }
 
-inline uint4 attention_row_raw(uint4 geometry, uint4 history, uint query) {
-    uint end = history.x + query + 1, count = min(end, geometry.y);
-    return uint4(geometry.x, count, end - count - history.y, history.z);
-}
-inline uint attention_row_length(uint4 history, uint query) {
-    return history.w ? (history.x + query + 1) / history.w : 0;
-}
 
 // Simdgroup-MMA sink tile: QK^T and PV for one query row and a block of 16
 // heads. Keys are the row's raw ring prefix followed by its selected
@@ -547,11 +541,6 @@ inline uint attention_row_length(uint4 history, uint query) {
 #define V41_MMA_KEYS 16
 #define V41_MMA_DIM 512
 
-inline device const float *attention_row_key(uint4 raw, device const float *history,
-    device const float *compressed, device const uint *ids, uint i) {
-    return i < raw.y ? history + ((raw.z + i) % raw.w) * raw.x
-        : compressed + ids[i - raw.y] * raw.x;
-}
 
 kernel void kernel_deepseek_v41_attention_score_mma(
     constant uint4 &a [[buffer(0)]], constant uint4 &b [[buffer(1)]],

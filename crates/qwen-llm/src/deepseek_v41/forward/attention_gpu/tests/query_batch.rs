@@ -159,8 +159,13 @@ fn compare_case(ctx: &MetalContext, c: &Config, schedule: &Schedule, start: usiz
                     .count()
             };
             if mma {
-                // One MMA sink per query tile; no per-query PV branch.
-                for suffix in ["score_mma", "softmax_rows", "pv_mma", "normalize_rows"] {
+                // One sink per query tile; the tensor and MMA forms are
+                // selected per tile width/tier, so count both.
+                let score = count("score_mma") + count("score_tensor");
+                let pv = count("pv_mma") + count("pv_tensor");
+                assert_eq!(score, n.div_ceil(TILE), "score");
+                assert_eq!(pv, n.div_ceil(TILE), "pv");
+                for suffix in ["softmax_rows", "normalize_rows"] {
                     assert_eq!(count(suffix), n.div_ceil(TILE), "{suffix}");
                 }
                 assert_eq!(count("score_rows_lane8"), 0);
@@ -842,13 +847,11 @@ fn sink_case(
                     .count()
             };
             if mma {
-                for suffix in [
-                    "score_mma",
-                    "softmax_rows",
-                    "pv_mma",
-                    "normalize_rows",
-                    "rope_rows",
-                ] {
+                let score = count("score_mma") + count("score_tensor");
+                let pv = count("pv_mma") + count("pv_tensor");
+                assert_eq!(score, spans.len(), "score");
+                assert_eq!(pv, spans.len(), "pv");
+                for suffix in ["softmax_rows", "normalize_rows", "rope_rows"] {
                     assert_eq!(count(suffix), spans.len(), "{suffix}");
                 }
                 for suffix in [
@@ -860,15 +863,19 @@ fn sink_case(
                 ] {
                     assert_eq!(count(suffix), 0, "{suffix}");
                 }
-                let heights = |suffix: &str| {
+                let heights = |suffixes: [&str; 2]| {
                     census
                         .iter()
-                        .filter(|d| d.kernel == format!("kernel_deepseek_v41_attention_{suffix}"))
+                        .filter(|d| {
+                            suffixes.iter().any(|suffix| {
+                                d.kernel == format!("kernel_deepseek_v41_attention_{suffix}")
+                            })
+                        })
                         .map(|d| d.grid_height)
                         .collect::<Vec<_>>()
                 };
-                depths.0 = heights("score_mma");
-                depths.1 = heights("pv_mma");
+                depths.0 = heights(["score_mma", "score_tensor"]);
+                depths.1 = heights(["pv_mma", "pv_tensor"]);
                 let tiles = spans.iter().map(|&(_, n, _)| n as u64).collect::<Vec<_>>();
                 assert_eq!(depths.0, tiles);
                 assert_eq!(depths.1, tiles);

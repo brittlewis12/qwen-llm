@@ -558,6 +558,20 @@ impl Fixture {
         let pso = pipeline(ctx, enc, "normalize_rows").unwrap();
         dispatch(enc, &pso, self.n * H * M);
     }
+
+    /// The Metal 4 tensor-ops form of the same tile (same slabs, softmax
+    /// and normalization; matmul2d per key block).
+    fn encode_tensor(&self, ctx: &MetalContext, enc: &KernelEncoder) {
+        self.bind(enc);
+        tensor_pipeline(ctx, enc, "score_tensor").unwrap();
+        grid(enc, H / 16, self.n, 1, 128);
+        pipeline(ctx, enc, "softmax_rows").unwrap();
+        grid(enc, H, self.n, 1, 32);
+        tensor_pipeline(ctx, enc, "pv_tensor").unwrap();
+        grid(enc, H / 16, self.n, 1, 128);
+        let pso = pipeline(ctx, enc, "normalize_rows").unwrap();
+        dispatch(enc, &pso, self.n * H * M);
+    }
 }
 
 #[test]
@@ -592,6 +606,60 @@ fn mma_sink_tile_matches_scalar_sink() {
         }
         close_half(f32_slice(&f.output).unwrap(), &scalar);
         f.check_guards();
+    }
+}
+
+/// The tensor tile against the scalar sink (half tolerance) and against
+/// the MMA tile it replaces (same half operands, F32 sums, different
+/// reduction order), with the MMA tile's visibility and finite guards.
+#[test]
+fn tensor_sink_tile_matches_mma_sink() {
+    let Some(ctx) = crate::test_fixtures::metal_context_or_skip() else {
+        return;
+    };
+    if !metal::moe_grouped_tensor_available(&ctx) {
+        eprintln!("tensor tier unavailable: {:?}", ctx.tensor_ops_status());
+        return;
+    }
+    for (k, n, ragged, first) in cases() {
+        let f = Fixture::new(&ctx, k, n, ragged, first);
+        f.checked(&ctx, Scalar, Scope::Sink);
+        let scalar = f32_slice(&f.output).unwrap().to_vec();
+        execute(&ctx, |enc| f.encode_mma(&ctx, enc));
+        let mma = f32_slice(&f.output).unwrap().to_vec();
+        let mma_scores = f32_slice(&f.scores).unwrap().to_vec();
+        execute(&ctx, |enc| f.encode_tensor(&ctx, enc));
+        assert_eq!(ids(&f.status, 1), [0], "k={k} n={n} ragged={ragged}");
+        let tensor_scores = f32_slice(&f.scores).unwrap();
+        for q in 0..n {
+            let count = f.count(q);
+            for h in 0..H {
+                let base = (q * H + h) * SCORE_STRIDE;
+                close_tile(
+                    &tensor_scores[base..base + count],
+                    &mma_scores[base..base + count],
+                );
+                close_tile(
+                    &tensor_scores[base + SCORE_STRIDE - 1..base + SCORE_STRIDE],
+                    &mma_scores[base + SCORE_STRIDE - 1..base + SCORE_STRIDE],
+                );
+            }
+        }
+        let got = f32_slice(&f.output).unwrap();
+        close_tile(got, &mma);
+        close_half(got, &scalar);
+        f.check_guards();
+    }
+}
+
+/// Two half-operand F32-sum tiles differing only in reduction order.
+fn close_tile(a: &[f32], b: &[f32]) {
+    assert_eq!(a.len(), b.len());
+    for (i, (&a, &b)) in a.iter().zip(b).enumerate() {
+        assert!(
+            a.is_finite() && (a - b).abs() <= 1e-4 + 2e-3 * b.abs(),
+            "{i}: {a} != {b}"
+        );
     }
 }
 
@@ -714,5 +782,8 @@ fn mma_sink_tile_dispatch_timing() {
             f.encode(&ctx, enc, Production, Scope::Sink)
         });
         timed("full mma sink", &f, &|enc| f.encode_mma(&ctx, enc));
+        if metal::moe_grouped_tensor_available(&ctx) {
+            timed("full tensor sink", &f, &|enc| f.encode_tensor(&ctx, enc));
+        }
     }
 }

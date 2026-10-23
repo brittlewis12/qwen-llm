@@ -26,23 +26,22 @@ expected effect, status. Status is one of `open`, `in flight (branch)`,
 `in flight` with your branch; a second lane finding it claimed reads the branch
 before building anything adjacent. This replaces relaying between sessions.
 
-### DeepSeek V4.1-Flash (main after 4K fused selection: pp2048 Q2 653 / IQ3 645 tok/s, pp4096 Q2 622 / IQ3 617; decode tg32 43 / 41, tg32@d2048 41.6)
+### DeepSeek V4.1-Flash (main after 512-row sink tiles: pp2048 Q2 768 / IQ3 757 tok/s, pp4096 Q2 736 / IQ3 727; decode untouched by the tile change, previous tg32 43 / 41, tg32@d2048 41.6)
 
 Decode budget at depth 2048, 22.3 ms/token: ~10.2 ms bytes (11.1 GiB at the
 ~1.09 TB/s the GEMV probe reaches), ~8 ms dispatch floor (~1,600 dispatches),
-~4 ms spread thin. Prefill split per 2048-token chunk, fresh post-fused six-span sample
-(`QWEN_V41_PREFILL_STAGES=1`, PP2048, shares only; sampling inflates wall
-~2.4x): FFN 40.9% Q2 / 42.9% IQ3, attention tiles 34.7/34.0, owner/producer
-serial 5.2/5.1, finish/post 9.8/9.2, prepare 6.4/6.0, HC 2.9/2.9. Serial GPU
-time fell 1,895.8 -> 452.5 ms (-76.1%); total sampled prefill fell 14.2%.
-Re-sample after the next landing.
+~4 ms spread thin. Prefill split per 2048-token chunk, fresh post-tile six-span sample
+(`QWEN_V41_PREFILL_STAGES=1`, PP2048, shares only; the profiler's per-span
+waits inflate wall): FFN 50.4%, attention tiles 23.2, finish/post 11.0,
+prepare 6.7, owner/producer serial 5.3, HC 3.5. The 32-row sink tile had
+attention tiles at 34.7%. Re-sample after the next landing.
 
 - Attention tiles via simdgroup MMA (half-staged Q/K/V, F32 sums),
   replacing the scalar score kernel and the gather+GEMM PV for the released
   geometry: landed (2026-10-21 attention entry). Supersedes the scalar
   score tuning (`b992694a`) on that geometry; other geometries keep it.
-  Next there: a fused score+softmax+PV kernel (saves the slab round trip
-  and three dispatches per tile): open.
+  The tile width followed in the 2026-10-22 sink-tile entry; fusion is the
+  next attention bet below.
 - IQ2_XXS/IQ2_XS expert layers off the native-rows path: landed twice, as
   F32-operand grouped tiles (`b3b71bb3`, the NativeF32 witness path) and as
   half generic layouts (attention entry; production takes the half route
@@ -83,20 +82,34 @@ Re-sample after the next landing.
   `perf/v41-tensor-f16act`, not an independent bet. Other families' dense
   prefill GEMMs still take `mat_mat`; unmeasured there and outside the
   V4.1 gain budget: open.
-- Attention sink tile occupancy: a 32-row tile dispatches
-  `heads/16 * 32` threadgroups (128 at 64 heads) against 80 cores, and each
-  threadgroup pays the dependent `ids -> latent row` gather serially.
-  Widen the sink tile to 256 rows, keep the arithmetic per row unchanged,
-  and stop admitting the gathered value matrix on the MMA geometry (that
-  branch is unreachable there and the allocation grows linearly with the
-  tile): in flight (`perf/v41-sink-tile`).
+- Attention sink tile occupancy: landed (2026-10-22 sink-tile entry,
+  bench/2026-10-22-v41-sink-tile.md). A 32-row tile dispatched
+  `heads/16 * 32` threadgroups (128 at 64 heads) against 80 cores and paid
+  the dependent `ids -> latent row` gather in each; 512 rows dispatches
+  2,048 and costs 6.7 vs 17.2 us per row in the fixture. Same-binary
+  ABCCBA (32/256/512): 512 vs 32 pp2048 +17.4-17.6%, pp4096 +18.1% on both
+  artifacts; 512 beats 256 by 1.8-2.0%. Census 45,982 -> 27,592 (-40.0%);
+  IQ3 held-text witness identical. The gathered value matrix (about 755 MB
+  at 512 rows) leaves admission on the MMA geometry, where it is
+  unreachable. 1024 rows: open.
 - Attention sink fusion (`score_mma` + `softmax_rows` + `pv_mma` +
-  `normalize_rows`): target the slab traffic, repeated gathers and up to
-  three dispatches per tile; gain unmeasured: open (after the tile width,
-  so fusion is measured at production occupancy).
+  `normalize_rows`): with the tile now at production occupancy, each key
+  row is still gathered once for QK^T and again for PV, and the score slab
+  makes a full round trip. Fusing over all heads of a row (or an
+  online-softmax tile) targets those two costs; gain unmeasured: open.
 - Attention sink tensor ops: independently time `score_mma`/`pv_mma`
-  substitution before combining with fusion; gather-vs-MMA attribution is
-  not measured and shares the fusion budget: open.
+  substitution at the 512-row tile before combining with fusion; the
+  gather-vs-MMA attribution is still unmeasured and shares the fusion
+  budget: open.
+- Maya-S artifact (`peasantsmith/DeepSeek-V4.1-Flash-1017-Maya-GGUF`,
+  six shards, 339.5 GB): evaluated (2026-10-22 Maya entry,
+  bench/2026-10-22-maya-s-eval.md). All 40 routed layers on the
+  half-staged grouped route, no fallback; IQ2_XXS/IQ3_XXS in the middle
+  layers and IQ2_S/IQ3_S in the first/last four. Same-binary A/B/B/A vs
+  UD-IQ3_XXS: pp2048 788.5 vs 755.6 (+4.4%), pp4096 755.3 vs 723.8
+  (+4.3%) with a 14.0% smaller file; held-text mean NLL 2.2260 vs 2.1464
+  (+0.0797) and top-1 0.5521 vs 0.5677. A memory/speed trade, not a
+  quality substitute. Maya-XS (IQ1_S) remains unsupported.
 - Owner/producer per-row loops (compressor, index key, selection; 8 layers,
   grows with prompt length): compressor prep landed (`a7de76ab`): key norm +
   key/latent RoPE + both cache copies fused 5 -> 1, +0.5-1.0% on top of the

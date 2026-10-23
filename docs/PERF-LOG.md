@@ -6,6 +6,41 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the current state and evidence index.
 
+## 2026-10-22 - V4.1 Prefill: 512-Row Sink Tiles +17-18%
+
+- A 32-row sink tile dispatched `heads/16 * 32` = 128 threadgroups against
+  80 cores and paid the dependent `ids -> latent row` gather in every one.
+  The query batch tile is now 512 rows (2,048 threadgroups) with unchanged
+  per-row arithmetic on the released MMA geometry; the unreachable gathered
+  value matrix (about 755 MB at 512 rows) leaves admission there.
+- Same-binary ABCCBA (`QWEN_V41_SINK_TILE=32/256/512`): IQ3 pp2048 644.8
+  -> 743.4 -> 756.9 (+17.4% vs 32, +1.8% vs 256), pp4096 615.5 -> 713.9 ->
+  727.1 (+18.1%, +1.9%); Q2 pp2048 652.7 -> 753.2 -> 767.9 (+17.6%,
+  +2.0%), pp4096 623.4 -> 722.9 -> 736.1 (+18.1%, +1.8%). Four samples per
+  cell.
+- Census 45,982 -> 27,592 (-40.0%); attention RoPE 8,192 -> 512 and each
+  sink family 2,560 -> 160. Post-tile split: FFN 50.4%, attention tiles
+  23.2, finish/post 11.0, prepare 6.7, serial 5.3, HC 3.5.
+- IQ3 held-text witness at 32/256/512: identical logits and mean NLL
+  2.146367194, top-1 0.5677. 45 V4.1 tests pass.
+- [Same-binary ABBA, census, split and witness](bench/2026-10-22-v41-sink-tile.md).
+
+## 2026-10-22 - Maya-S Artifact: +4.4% Prefill At +0.080 NLL
+
+- The Maya-S GGUF (six shards, 339.5 GB) loads all 40 routed-expert layers
+  on the half-staged grouped route: IQ2_XXS/IQ3_XXS in the middle layers,
+  IQ2_S/IQ3_S in the first/last four, Q8_0 attention/shared/embeddings and
+  Q6_K Engram tables read by row. `general.file_type` says IQ1_S but no
+  routed expert is IQ1.
+- Same-binary A/B/B/A vs Unsloth UD-IQ3_XXS at the 512-row tile: pp2048
+  788.5 vs 755.6 (+4.4%), pp4096 755.3 vs 723.8 (+4.3%), with 14.0% fewer
+  bytes.
+- Six-document held-text witness: mean NLL 2.226027 vs 2.146367 (+0.079659,
+  +3.7% relative), top-1 0.5521 vs 0.5677, mean rank 53.44 vs 50.38. A
+  memory/speed trade, not a quality-equivalent substitute. Maya-XS (IQ1_S
+  experts) is unsupported by the grouped path and was not evaluated.
+- [Artifact, routing, throughput and quality](bench/2026-10-22-maya-s-eval.md).
+
 ## 2026-10-22 - V4.1 Prefill: 4K Fused Selection +9% At PP4096
 
 - The 2048-entry fused selector left the late ratio-one tiles (visible

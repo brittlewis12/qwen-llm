@@ -287,7 +287,7 @@ use crate::tensor::{GgmlType, TensorDesc, checked_shape_elements, ggml_type_layo
 mod attn;
 mod bench;
 mod census;
-mod checks;
+pub(crate) mod checks;
 mod completion;
 mod context;
 mod device_facts;

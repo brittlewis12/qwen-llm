@@ -1241,7 +1241,7 @@ fn encode_expert_rows(
 }
 
 #[allow(clippy::too_many_arguments)]
-fn matmat(
+pub(super) fn matmat(
     ctx: &MetalContext,
     enc: &KernelEncoder,
     arith: Arith,
@@ -1346,6 +1346,11 @@ fn matmat(
         crate::metal::encode_mat_mat_q8_0_fewrow_f32(ctx, enc, weight, x, y, n_in, n_out, rows)?;
         #[cfg(test)]
         record_census(stage, format!("{:?}", weight.dtype), CensusPath::F32Tile);
+        return Ok(());
+    }
+    if super::tensor_prefill::try_encode(ctx, enc, arith, mode, weight, x, y, n_in, n_out, rows)? {
+        #[cfg(test)]
+        record_census(stage, format!("{:?}", weight.dtype), CensusPath::Half);
         return Ok(());
     }
     #[cfg(test)]

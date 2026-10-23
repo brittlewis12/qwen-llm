@@ -6,6 +6,19 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the current state and evidence index.
 
+## 2026-10-23 - V4.1 Expert Decoder Attribution: Not The Lever
+
+- Same-shape control (384 experts, 2048 tokens, top-6, 32 slots, f16act
+  operands): Q8_0, the simplest decoder, is the slowest tile at 39.1
+  gate+up / 39.7 down TFLOPS while streaming 649-659 GB/s of staged
+  weights. IQ3_XXS reaches 54.1/49.5 at 324/296 GB/s; IQ2_XS 56.9/52.4 at
+  257/237; MXFP4 51.2/47.3 at 425/392; Q3_K 44.1/41.1 at 296/276.
+- The routed tile is weight-byte/staging-bound, not decoder-ALU bound. A
+  cheaper IQ3_XXS/Q3_K decoder fails the 10% headroom gate and is closed.
+  The remaining lever is fewer staged weight bytes (native MXFP4 or a
+  lower-bit artifact), not decoder arithmetic.
+- [Table, harness and limits](bench/2026-10-23-v41-expert-decoder-attribution.md).
+
 ## 2026-10-23 - V4.1: Half Activation Copies Landed, +6% Prefill
 
 - Took over `perf/v41-tensor-f16act`, rebased it onto the 64-slot dense
@@ -23,9 +36,9 @@ See also: `docs/PERF-ROADMAP.md` for the current state and evidence index.
   2.146367194, top-1 0.5677). 173 tests pass across tensor, V4.1
   attention/prefill and GLM tensor-prefill filters. Decode rechecked:
   tg32 Q2 43.2 / IQ3 41.0.
-- The routed tiles' remaining cost is their K/I-quant decoders (47-57
-  TFLOPS vs 75-79 for Q8_0 at the same geometry); that is the next open
-  lever.
+- The routed tiles' remaining cost is weight-byte staging, not decoder
+  ALU: the same-shape Q8_0 control is the slowest tile (see the
+  2026-10-23 expert-decoder attribution entry).
 - [Rebased ABBA, witness and packet](bench/2026-10-22-v41-tensor-half-activations.md).
 
 ## 2026-10-23 - V4.1 Prefill: 64-Slot Dense Tile +3.4-3.6%

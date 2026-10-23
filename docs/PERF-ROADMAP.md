@@ -85,9 +85,14 @@ attention tiles at 34.7%. Re-sample after the next landing.
   805.4 (+6.75%). Held-text logits bitwise identical; 173 tests pass.
   The wide dense Q8_0 form has an `_f16act` twin, so the two landings
   stack. 
-- Cheaper IQ3_XXS/Q3_K decoders (vectorized packed extraction, table-driven
-  half output): the routed tiles' remainder is their K/I-quant decoders
-  (47-57 TFLOPS vs 75-79 for Q8_0 at the same geometry): open.
+- Cheaper IQ3_XXS/Q3_K expert decoders: negative (2026-10-23 attribution
+  packet, bench/2026-10-23-v41-expert-decoder-attribution.md). At the
+  same 32-slot shape with f16act operands, simplest-decoder Q8_0 is the
+  slowest tile (39.1/39.7 TFLOPS at 649/659 GB/s) while IQ3_XXS reaches
+  54.1/49.5 at 324/296 and IQ2_XS 56.9/52.4 at 257/237; the tile is
+  weight-byte/staging-bound, not decoder-ALU bound. Remaining routed
+  lever: fewer staged weight bytes (native MXFP4 or a lower-bit
+  artifact), not a faster decoder.
 - Native MXFP4 right operands (`metal_fp4_e2m1_format` + `ue8m0` block-32
   scales, 27.0 entry points) would replace the software dequant for the 30
   MXFP4 down layers if packed values/scales map exactly; unmeasured: open.

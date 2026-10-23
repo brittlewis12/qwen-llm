@@ -171,8 +171,10 @@ fn metadata_storage_plan_charges_entire_private_engram_boundary_windows() {
                 .min(t.data_offset + t.n_bytes)
                 - w.window.mmap_offset.max(t.data_offset);
             assert!(overlap > 0 && overlap <= PAGE as u64);
-            assert!(w.window.mmap_offset > t.data_offset
-                || w.window.mmap_offset + w.window.length as u64 < t.data_offset + t.n_bytes);
+            assert!(
+                w.window.mmap_offset > t.data_offset
+                    || w.window.mmap_offset + (w.window.length as u64) < t.data_offset + t.n_bytes
+            );
         }
     }
 }

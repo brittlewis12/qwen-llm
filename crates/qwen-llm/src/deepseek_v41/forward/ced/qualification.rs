@@ -18,6 +18,7 @@ use std::path::{Path, PathBuf};
 use std::rc::Rc;
 
 mod archive;
+mod current_pair;
 mod metrics;
 mod provenance;
 

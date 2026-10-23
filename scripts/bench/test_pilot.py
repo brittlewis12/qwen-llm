@@ -94,6 +94,7 @@ Pages speculative: 50.
 Pages wired down: 200.
 Pages purgeable: 300.
 File-backed pages: 1000.
+Anonymous pages: 600.
 Pages stored in compressor: 2000.
 Pages occupied by compressor: 150.
 """
@@ -105,9 +106,56 @@ Pages occupied by compressor: 150.
         ):
             snapshot = pilot.sample_host_health()
         self.assertEqual(snapshot.free_bytes, 100 * 16384)
-        self.assertEqual(snapshot.available_bytes, snapshot.free_bytes)
+        self.assertEqual(snapshot.available_bytes, 300 * 16384)
         self.assertEqual(snapshot.nonreclaimable_bytes, 350 * 16384)
         self.assertEqual(read.call_count, 2)
+
+    def test_idle_file_cache_is_not_a_free_page_exhaustion(self):
+        pages_per_gib = GIB // 16384
+        snapshot = pilot.snapshot_from_vm_stat(
+            256 * GIB,
+            f"""Mach Virtual Memory Statistics: (page size of 16384 bytes)
+Pages free: {3 * pages_per_gib}.
+Pages inactive: {220 * pages_per_gib}.
+Anonymous pages: {4 * pages_per_gib}.
+Pages wired down: {8 * pages_per_gib}.
+Pages occupied by compressor: {pages_per_gib}.
+""",
+        )
+        self.assertLess(snapshot.free_bytes, 4 * GIB)
+        self.assertGreater(snapshot.available_bytes, 200 * GIB)
+        self.assertTrue(self.assess([10, 10], snapshot, snapshot).passed)
+
+    def test_anonymous_inactive_pages_never_receive_file_cache_credit(self):
+        snapshot = pilot.snapshot_from_vm_stat(
+            16 * GIB,
+            """Mach Virtual Memory Statistics: (page size of 16384 bytes)
+Pages free: 100.
+Pages inactive: 800.
+Anonymous pages: 900.
+Pages wired down: 200.
+Pages occupied by compressor: 150.
+""",
+        )
+        self.assertEqual(snapshot.available_bytes, snapshot.free_bytes)
+        self.assertFalse(self.assess([10, 10], snapshot, snapshot).passed)
+
+    def test_sampler_refuses_missing_or_invalid_availability_categories(self):
+        text = """Mach Virtual Memory Statistics: (page size of 16384 bytes)
+Pages free: 100.
+Pages inactive: 800.
+Anonymous pages: 600.
+Pages wired down: 200.
+Pages occupied by compressor: 150.
+"""
+        for bad in (
+            text.replace("Anonymous pages: 600.\n", ""),
+            text.replace("Pages inactive: 800.\n", ""),
+            text.replace("page size of 16384", "page size of 3"),
+            text.replace("Pages inactive: 800.", f"Pages inactive: {16 * GIB}."),
+        ):
+            with self.subTest(bad=bad), self.assertRaises((KeyError, ValueError)):
+                pilot.snapshot_from_vm_stat(16 * GIB, bad)
 
     def test_telemetry_timeout_also_never_forces_a_kill(self):
         child = Mock(pid=123, returncode=None)

@@ -112,22 +112,39 @@ def _host_output(argv):
         child.stdout.close()
 
 
-def sample_host_health() -> Snapshot:
-    """Conservative macOS health: available=free; nonreclaimable=wired+compressor.
-    Never sum overlapping speculative/file-backed/active/purgeable counters or
-    use logical compressed-page counts as resident bytes.
+def snapshot_from_vm_stat(physical: int, text: str) -> Snapshot:
+    """Use the core policy's free + lower-bound inactive-file availability.
+    Subtract all resident anonymous pages, not an assumed inactive proportion.
+    Never add active/file-backed/speculative/purgeable pools or logical
+    compressed-page counts to resident availability.
     """
+    page_size = int(re.search(r"page size of (\d+) bytes", text).group(1))
+    if physical <= 0 or page_size <= 0 or page_size & (page_size - 1):
+        raise ValueError("invalid physical memory or page size")
+    counts = dict(re.findall(r"^([^:\n]+):\s+(\d+)\.", text, re.MULTILINE))
+    free, inactive, anonymous, wired, compressed = (
+        int(counts[key]) * page_size
+        for key in (
+            "Pages free",
+            "Pages inactive",
+            "Anonymous pages",
+            "Pages wired down",
+            "Pages occupied by compressor",
+        )
+    )
+    if any(
+        value > physical for value in (free, inactive, anonymous, wired, compressed)
+    ):
+        raise ValueError("VM category exceeds physical memory")
+    available = free + max(inactive - anonymous, 0)
+    return Snapshot(free, available, wired, compressed, physical)
+
+
+def sample_host_health() -> Snapshot:
     if sys.platform != "darwin":
         raise OSError("macOS telemetry unavailable; inject a host sampler")
-    command = ["/usr/sbin/sysctl", "-n", "hw.memsize"]
-    physical = int(_host_output(command))
-    text = _host_output(["/usr/bin/vm_stat"])
-    page_size = int(re.search(r"page size of (\d+) bytes", text).group(1))
-    counts = dict(re.findall(r"^([^:\n]+):\s+(\d+)\.", text, re.MULTILINE))
-    free = int(counts["Pages free"]) * page_size
-    wired = int(counts["Pages wired down"]) * page_size
-    compressed = int(counts["Pages occupied by compressor"]) * page_size
-    return Snapshot(free, free, wired, compressed, physical)
+    physical = int(_host_output(["/usr/sbin/sysctl", "-n", "hw.memsize"]))
+    return snapshot_from_vm_stat(physical, _host_output(["/usr/bin/vm_stat"]))
 
 
 @dataclass(frozen=True)

@@ -512,10 +512,11 @@ kernel void kernel_deepseek_v41_attention_rope_rows(
 kernel void kernel_deepseek_v41_attention_history(
     constant uint4 &a [[buffer(0)]], device const float *ring [[buffer(1)]],
     device const float *rows [[buffer(2)]], device float *history [[buffer(3)]],
+    constant uint2 &prefix [[buffer(4)]],
     uint t [[thread_position_in_grid]]) {
-    // a: dim, window, absolute chunk start, chunk rows.
-    uint old = min(a.z, a.y), row = t / a.x, j = t % a.x;
-    history[t] = row < old ? ring[((a.z - old + row) % a.y) * a.x + j]
+    // a: dim, window, absolute chunk start, chunk rows; prefix: count, floor.
+    uint old = prefix.x, row = t / a.x, j = t % a.x;
+    history[t] = row < old ? ring[((prefix.y + row) % a.y) * a.x + j]
         : rows[(row - old) * a.x + j];
 }
 

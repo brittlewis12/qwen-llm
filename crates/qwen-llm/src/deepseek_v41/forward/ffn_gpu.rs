@@ -1,9 +1,14 @@
 //! FFN component of the full GPU graph. No CPU routes or intermediate readbacks.
+use super::prefill::RowsArithmetic;
 use super::*;
 use objc2_metal::MTLSize;
 
 #[cfg(test)]
 pub(super) mod tests;
+
+#[cfg(test)]
+#[path = "ffn_gpu/tests/arithmetic.rs"]
+mod arithmetic_tests;
 
 pub(super) struct Workspace {
     // 0 X, 1 incoming pre, 2 projected mixes, 3 next pre, 4 post, 5 comb,
@@ -510,7 +515,7 @@ impl Workspace {
         let n = scratch.hc.rows;
         composition_extents(c, n)?;
         let b = &scratch.buffers;
-        scratch.hc.encode(
+        scratch.hc.encode_with_arithmetic(
             ctx,
             enc,
             c,
@@ -518,16 +523,23 @@ impl Workspace {
             &self.constants[id],
             x,
             incoming,
+            scratch.arithmetic,
         )?;
-        layer
-            .router
-            .encode_rows(enc, &scratch.hc.normalized, &b[0], n)?;
+        layer.router.encode_rows_with_arithmetic(
+            enc,
+            &scratch.hc.normalized,
+            &b[0],
+            n,
+            scratch.arithmetic,
+        )?;
         // One half copy of the normalized input for the shared gate/up here
         // and the routed gate/up below.
         let input_half = match &scratch.half_input {
             Some(half)
-                if layer.shared[..2].iter().any(|w| w.tensor_rows_selected(n))
-                    || (half_grouped_selected(c, layer, n)
+                if layer.shared[..2]
+                    .iter()
+                    .any(|w| w.tensor_rows_selected_with_arithmetic(n, scratch.arithmetic))
+                    || (half_grouped_selected_with_arithmetic(c, layer, n, scratch.arithmetic)
                         && metal::moe_grouped_tensor_selected(ctx)) =>
             {
                 Some(half.convert(ctx, enc, &scratch.hc.normalized, c.hidden * n)?)
@@ -535,12 +547,13 @@ impl Workspace {
             _ => None,
         };
         for j in 0..2 {
-            layer.shared[j].encode_rows_with(
+            layer.shared[j].encode_rows_with_arithmetic_and_half(
                 enc,
                 &scratch.hc.normalized,
                 input_half.as_ref(),
                 &b[1 + j],
                 n,
+                scratch.arithmetic,
             )?;
         }
         let shape = vec![(c.intermediate * n) as u64];
@@ -553,13 +566,22 @@ impl Workspace {
             c.clamp,
         )?;
         let shared_half = match &scratch.half_inner {
-            Some(half) if layer.shared[2].tensor_rows_selected(n) => {
+            Some(half)
+                if layer.shared[2].tensor_rows_selected_with_arithmetic(n, scratch.arithmetic) =>
+            {
                 Some(half.convert(ctx, enc, &b[3], c.intermediate * n)?)
             }
             _ => None,
         };
-        layer.shared[2].encode_rows_with(enc, &b[3], shared_half.as_ref(), &b[4], n)?;
-        if half_grouped_selected(c, layer, n)
+        layer.shared[2].encode_rows_with_arithmetic_and_half(
+            enc,
+            &b[3],
+            shared_half.as_ref(),
+            &b[4],
+            n,
+            scratch.arithmetic,
+        )?;
+        if half_grouped_selected_with_arithmetic(c, layer, n, scratch.arithmetic)
             || grouped_selected(c, layer, n)
             || native_rows_supported(c, layer)
         {
@@ -620,7 +642,7 @@ impl Workspace {
             &b[9],
             &status,
         )?;
-        let half = half_grouped_selected(c, layer, n);
+        let half = half_grouped_selected_with_arithmetic(c, layer, n, scratch.arithmetic);
         // The Metal 4 tensor tile is the half route's production form where
         // the tier exists: same operands and contract, matmul2d instead of
         // simdgroup MMA.
@@ -793,14 +815,22 @@ pub(super) fn half_grouped_supported(c: &Config, layer: &Layer<'_>) -> bool {
 }
 
 pub(super) fn half_grouped_selected(c: &Config, layer: &Layer<'_>, rows: usize) -> bool {
+    half_grouped_selected_with_arithmetic(c, layer, rows, RowsArithmetic::Ordinary)
+}
+
+pub(super) fn half_grouped_selected_with_arithmetic(
+    c: &Config,
+    layer: &Layer<'_>,
+    rows: usize,
+    arithmetic: RowsArithmetic,
+) -> bool {
     // Forcing the grouped route in tests means the F32-operand tiles, whose
     // frozen witnesses hold a 1e-5 contract the half tiles do not claim.
     #[cfg(test)]
     if tests::FORCE_GROUPED_ROWS.with(|flag| flag.get()) {
         return false;
     }
-    // One row is a GEMV; the tiles only pay off once an expert sees several.
-    rows > 1 && half_grouped_supported(c, layer)
+    arithmetic.packed_operands(rows) && half_grouped_supported(c, layer)
 }
 
 /// Layers per routed-expert route for a chunk of `rows`: half-staged
@@ -885,6 +915,7 @@ fn native_rows_supported(c: &Config, layer: &Layer<'_>) -> bool {
 
 pub(super) struct Rows {
     pub(super) hc: prefill::HcRows,
+    arithmetic: RowsArithmetic,
     // Activations are reused; buffer 6 retains layer-major [layer][row] statuses.
     buffers: Vec<MetalTensor>,
     /// Half copy of the normalized input (shared and routed gate/up read
@@ -916,6 +947,16 @@ impl Rows {
         widths
     }
     pub(super) fn new(ctx: &MetalContext, c: &Config, rows: usize, layers: usize) -> Result<Self> {
+        Self::with_arithmetic(ctx, c, rows, layers, RowsArithmetic::Ordinary)
+    }
+
+    pub(super) fn with_arithmetic(
+        ctx: &MetalContext,
+        c: &Config,
+        rows: usize,
+        layers: usize,
+        arithmetic: RowsArithmetic,
+    ) -> Result<Self> {
         composition_extents(c, rows).map_err(|e| e.to_string())?;
         let [input_elements, inner_elements] = prefill::ffn_half_scratch_elements(c, rows)?;
         let hc = prefill::HcRows::new(ctx, c, rows)?;
@@ -955,12 +996,17 @@ impl Rows {
         let half_inner = prefill::HalfScratch::new(ctx, inner_elements)?;
         Ok(Self {
             hc,
+            arithmetic,
             buffers,
             half_input,
             half_inner,
         })
     }
     pub(super) fn validate_status(&self) -> Result<()> {
+        self.validate_status_layers(0..self.buffers[6].n_elements() as usize / self.hc.rows)
+    }
+
+    pub(super) fn validate_status_layers(&self, layers: std::ops::Range<usize>) -> Result<()> {
         let t = &self.buffers[6];
         let values = unsafe {
             std::slice::from_raw_parts(
@@ -972,7 +1018,16 @@ impl Rows {
                 t.n_elements() as usize,
             )
         };
-        for (index, &status) in values.iter().enumerate() {
+        op::require(
+            layers.start <= layers.end && layers.end <= values.len() / self.hc.rows,
+            "prefill FFN status layer range",
+        )?;
+        for (index, &status) in values
+            .iter()
+            .enumerate()
+            .take(layers.end * self.hc.rows)
+            .skip(layers.start * self.hc.rows)
+        {
             if status != metal::ROUTE_STATUS_READY {
                 return Err(format!(
                     "prefill FFN layer {} row {} route status {status}",

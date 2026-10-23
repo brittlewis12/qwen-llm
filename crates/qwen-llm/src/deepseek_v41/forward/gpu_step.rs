@@ -2,6 +2,8 @@
 use super::*;
 use objc2_metal::MTLSize;
 
+pub(super) mod ced;
+
 #[cfg(test)]
 mod tests;
 
@@ -521,22 +523,17 @@ impl Workspace {
         })
     }
 
-    fn layer(
-        &mut self,
+    fn normalize_scalar_input(
+        &self,
         model: &Forward<'_>,
         enc: &KernelEncoder,
         id: usize,
-        position: usize,
-        snapshot: Option<&capture::Snapshot>,
+        x: &MetalTensor,
+        incoming: &MetalTensor,
     ) -> Result<()> {
         let ctx = model.ctx;
         let c = &model.config;
         let l = &model.layers[id];
-        let incoming = if id == 0 {
-            &self.initial_pre
-        } else {
-            self.ffn.next_pre()
-        };
         let encode = || -> std::result::Result<(), metal::MetalError> {
             if hc_gpu::fused_supported(&l.attn_hc) {
                 return hc_gpu::encode_pre(
@@ -545,7 +542,7 @@ impl Workspace {
                     c,
                     &l.attn_hc,
                     &self.constants[id],
-                    &self.x,
+                    x,
                     hc_gpu::HcPreSite {
                         mix: &self.raw,
                         pre: &self.pre,
@@ -557,11 +554,11 @@ impl Workspace {
                     },
                 );
             }
-            l.attn_hc.projection.encode(enc, &self.x, &self.raw)?;
+            l.attn_hc.projection.encode(enc, x, &self.raw)?;
             enc.set_pipeline(&ctx.pipeline("kernel_deepseek_v41_projected_rms")?);
             enc.set_bytes(0, &((4 * c.hidden) as u32));
             enc.set_bytes(1, &c.norm_eps);
-            enc.set_tensor(2, &self.x);
+            enc.set_tensor(2, x);
             enc.set_tensor(3, &self.raw);
             enc.dispatch(
                 MTLSize {
@@ -586,7 +583,7 @@ impl Workspace {
                 &self.post,
                 &self.comb,
             )?;
-            metal::encode_mhc4_collapse(ctx, enc, c.hidden, &self.x, incoming, &self.collapsed)?;
+            metal::encode_mhc4_collapse(ctx, enc, c.hidden, x, incoming, &self.collapsed)?;
             metal::encode_rms_norm_mul_rows_f32(
                 ctx,
                 enc,
@@ -598,10 +595,40 @@ impl Workspace {
                 c.norm_eps,
             )
         };
-        encode().map_err(|e| e.to_string())?;
-        let output =
+        encode().map_err(|e| e.to_string())
+    }
+
+    fn layer(
+        &mut self,
+        model: &Forward<'_>,
+        enc: &KernelEncoder,
+        id: usize,
+        position: usize,
+        snapshot: Option<&capture::Snapshot>,
+        ced: bool,
+    ) -> Result<()> {
+        let ctx = model.ctx;
+        let c = &model.config;
+        let l = &model.layers[id];
+        let incoming = if id == 0 {
+            &self.initial_pre
+        } else {
+            self.ffn.next_pre()
+        };
+        self.normalize_scalar_input(model, enc, id, &self.x, incoming)?;
+        let output = if ced {
+            self.attention.encode_ced_scalar(
+                ctx,
+                enc,
+                id,
+                position,
+                &l.attention,
+                &self.normalized,
+            )?
+        } else {
             self.attention
-                .encode(ctx, enc, id, position, &l.attention, &self.normalized)?;
+                .encode(ctx, enc, id, position, &l.attention, &self.normalized)?
+        };
         metal::encode_mhc4_post(
             ctx, enc, c.hidden, output, &self.x, &self.post, &self.comb, &self.half,
         )
@@ -752,6 +779,7 @@ impl Workspace {
                             .iter()
                             .find(|(layer, _)| *layer == id)
                             .map(|(_, s)| s),
+                        false,
                     )?;
                     if !captures.is_empty() {
                         metal::encode_copy_offset_f32(

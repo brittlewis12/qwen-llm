@@ -5,6 +5,15 @@ use std::cell::Cell;
 use std::rc::Rc;
 use std::sync::Arc;
 
+#[test]
+fn initial_reuse_requires_ready_full_forward_origin() {
+    assert!(reuse_eligible(true, PrefillExecution::FullForward));
+    // Both provisional and poisoned states report !is_ready().
+    assert!(!reuse_eligible(false, PrefillExecution::FullForward));
+    assert!(!reuse_eligible(false, PrefillExecution::ShrinkingCed));
+    assert!(!reuse_eligible(true, PrefillExecution::ShrinkingCed));
+}
+
 fn capture_signals(process_limit_remaining_bytes: Option<u64>) -> MetalMemorySignals {
     MetalMemorySignals {
         host_budget: Some(qwen_llm::metal::HostMemoryBudget {

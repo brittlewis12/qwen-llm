@@ -573,6 +573,7 @@ fn query_batch_memory_pricing_and_rope_canaries() {
                 enc.set_tensor(1, &ring);
                 enc.set_tensor(2, &new_rows);
                 enc.set_tensor(3, &history);
+                enc.set_bytes(4, &[old as u32, (start - old) as u32]);
                 dispatch(enc, &pso, (old + n) * dim);
                 let pso = pipeline(&ctx, enc, "publish_raw").unwrap();
                 dispatch(enc, &pso, n.min(c.window) * dim);

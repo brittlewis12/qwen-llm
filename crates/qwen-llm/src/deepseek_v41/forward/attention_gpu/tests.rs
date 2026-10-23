@@ -1,6 +1,7 @@
 use super::*;
 use std::collections::BTreeMap;
 
+mod ced;
 mod f32_pv_batch;
 mod query_batch;
 

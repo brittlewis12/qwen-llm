@@ -538,6 +538,9 @@ struct BenchRow {
     prefill_mode: Option<&'static str>,
     power: Option<PowerSnapshot>,
     qwen_env: std::collections::BTreeMap<String, String>,
+    /// Opt-in execution reports; omitted to preserve ordinary row JSON.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    diagnostics: Option<serde_json::Value>,
 }
 
 #[derive(Debug, Clone, Default, serde::Serialize)]

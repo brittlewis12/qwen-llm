@@ -746,6 +746,7 @@ pub(crate) fn run_pp(args: PpArgs) -> Result<()> {
             prefill_mode: Some("packed"),
             power,
             qwen_env: capture_qwen_env(),
+            diagnostics: None,
         };
         // Wrap in an array to match `llama-bench -o json`.
         let arr = vec![row];
@@ -1039,6 +1040,7 @@ pub(crate) fn run_pp_wait(args: PpWaitArgs) -> Result<()> {
             prefill_mode: Some("packed"),
             power,
             qwen_env: capture_qwen_env(),
+            diagnostics: None,
         };
         println!(
             "{}",

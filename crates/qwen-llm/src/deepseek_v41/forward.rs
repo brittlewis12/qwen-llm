@@ -3,6 +3,9 @@
 mod attention;
 mod attention_gpu;
 mod bind;
+mod ced;
+mod ced_plan;
+pub use ced::{CedCounters, CedLayerCounters, CedMemoryEstimate, PrefillExecution, PrefillReport};
 mod engram_gpu;
 mod prefill;
 pub use prefill::DEFAULT_CHUNK_ROWS as PREFILL_CHUNK_ROWS;
@@ -512,8 +515,16 @@ pub struct State {
     attention: attention::Session,
     addresses: engram::AddressState,
     max_context: usize,
-    poisoned: bool,
+    phase: StatePhase,
+    prefill_origin: PrefillExecution,
     identity: Arc<()>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum StatePhase {
+    Ready,
+    Provisional,
+    Poisoned,
 }
 impl State {
     pub fn capacity(&self) -> usize {
@@ -524,7 +535,15 @@ impl State {
         self.addresses.position() as usize
     }
     pub fn is_poisoned(&self) -> bool {
-        self.poisoned
+        self.phase == StatePhase::Poisoned
+    }
+
+    pub fn is_ready(&self) -> bool {
+        self.phase == StatePhase::Ready
+    }
+
+    pub fn prefill_origin(&self) -> PrefillExecution {
+        self.prefill_origin
     }
 }
 
@@ -554,7 +573,8 @@ impl<'a> Forward<'a> {
             addresses: engram::AddressState::new_with_config(self.pad, &self.engram_hash)
                 .map_err(|e| format!("{e:?}"))?,
             max_context,
-            poisoned: false,
+            phase: StatePhase::Ready,
+            prefill_origin: PrefillExecution::FullForward,
             identity: Arc::clone(&self.identity),
         })
     }
@@ -690,8 +710,8 @@ impl<'a> Forward<'a> {
             "attention capture requires GPU step",
         )?;
         op::require(
-            !state.poisoned,
-            "sequence poisoned by a failed partial token",
+            state.is_ready(),
+            "sequence is provisional or poisoned by partial execution",
         )?;
         op::require(
             Arc::ptr_eq(&state.identity, &self.identity),
@@ -710,7 +730,7 @@ impl<'a> Forward<'a> {
             .addresses
             .step_with_config(engram::Token::Compressed(compressed), &self.engram_hash)
             .map_err(|e| format!("{e:?}"))?;
-        state.poisoned = true;
+        state.phase = StatePhase::Poisoned;
         // The synchronous step returns CPU values; persistent device state owns
         // Retained buffers. Completed commands must not outlive the priced step.
         let result = objc2::rc::autoreleasepool(|_| {
@@ -725,7 +745,7 @@ impl<'a> Forward<'a> {
             )
         })?;
         state.addresses = next;
-        state.poisoned = false;
+        state.phase = StatePhase::Ready;
         Ok(result)
     }
 

@@ -1,7 +1,7 @@
 //! Production option and chunking decisions for the non-Qwen families, shared
 //! by `qwen run`, `qwen serve` and `qwen-bench` so every frontend executes and
-//! measures the same path. Compiled into both binaries: explicit imports only,
-//! no CLI types.
+//! measures the same ordinary path. Cold-only V4.1 execution selection is not
+//! read by serving. Compiled into both binaries: explicit imports only, no CLI types.
 
 use anyhow::{Context, Result, bail, ensure};
 use qwen_llm::deepseek_v4_metal::{
@@ -14,6 +14,59 @@ use qwen_llm::qwen4exp_runtime::Qwen4ExpDecodeOptions;
 /// selected per resident size (4096 for fitting artifacts, 2048 for IQ3-class).
 pub(crate) const V41_PREFILL_ROWS: usize = qwen_llm::deepseek_v41::forward::MAX_PREFILL_CHUNK_ROWS;
 pub(crate) const V41_PREFILL_MODE: &str = "layer_major_batched+final_logits_copy";
+
+pub(crate) const V41_PREFILL_EXECUTION_ENV: &str = "QWEN_V41_PREFILL_EXECUTION";
+
+/// Cold run/bench only. Serving deliberately does not read this control.
+pub(crate) fn v41_prefill_execution_from_env()
+-> Result<qwen_llm::deepseek_v41::forward::PrefillExecution> {
+    parse_v41_prefill_execution(std::env::var_os(V41_PREFILL_EXECUTION_ENV).as_deref())
+}
+
+pub(crate) fn parse_v41_prefill_execution(
+    value: Option<&std::ffi::OsStr>,
+) -> Result<qwen_llm::deepseek_v41::forward::PrefillExecution> {
+    use qwen_llm::deepseek_v41::forward::PrefillExecution;
+    match value {
+        None => Ok(PrefillExecution::FullForward),
+        Some(value) if value == "full_forward" => Ok(PrefillExecution::FullForward),
+        Some(value) if value == "shrinking_ced" => Ok(PrefillExecution::ShrinkingCed),
+        _ => bail!(
+            "{V41_PREFILL_EXECUTION_ENV} must be full_forward or shrinking_ced, got {value:?}"
+        ),
+    }
+}
+
+#[derive(Clone, Debug, serde::Serialize)]
+pub(crate) struct V41PrefillDiagnostics {
+    pub(crate) requested_execution: qwen_llm::deepseek_v41::forward::PrefillExecution,
+    #[serde(flatten)]
+    pub(crate) report: qwen_llm::deepseek_v41::forward::PrefillReport,
+}
+
+impl V41PrefillDiagnostics {
+    pub(crate) fn new(
+        requested_execution: qwen_llm::deepseek_v41::forward::PrefillExecution,
+        report: qwen_llm::deepseek_v41::forward::PrefillReport,
+    ) -> Option<Self> {
+        use qwen_llm::deepseek_v41::forward::PrefillExecution::ShrinkingCed;
+        (requested_execution == ShrinkingCed || report.execution == ShrinkingCed).then_some(Self {
+            requested_execution,
+            report,
+        })
+    }
+}
+
+pub(crate) fn v41_prefill_mode(
+    execution: qwen_llm::deepseek_v41::forward::PrefillExecution,
+) -> &'static str {
+    match execution {
+        qwen_llm::deepseek_v41::forward::PrefillExecution::FullForward => V41_PREFILL_MODE,
+        qwen_llm::deepseek_v41::forward::PrefillExecution::ShrinkingCed => {
+            "shrinking_ced+final_logits_copy"
+        }
+    }
+}
 
 /// Enables HC up-mix for eligible Flash-Next singleton Q8 up projections.
 /// Defaults on; accepts `0` (off) or `1` (on); any other value, including
@@ -164,6 +217,105 @@ pub(crate) fn deepseek_v4_prefill_chunk_ranges(
 mod tests {
     use super::*;
     use std::ffi::OsStr;
+
+    #[test]
+    fn v41_cold_prefill_parser_defaults_and_valid_values() {
+        use qwen_llm::deepseek_v41::forward::PrefillExecution;
+        for (value, expected) in [
+            (None, PrefillExecution::FullForward),
+            (Some("full_forward"), PrefillExecution::FullForward),
+            (Some("shrinking_ced"), PrefillExecution::ShrinkingCed),
+        ] {
+            assert_eq!(
+                parse_v41_prefill_execution(value.map(OsStr::new)).unwrap(),
+                expected
+            );
+        }
+    }
+
+    #[test]
+    fn v41_cold_prefill_parser_rejects_invalid_and_non_utf8_values() {
+        for value in [
+            "",
+            "1",
+            "0",
+            "true",
+            "ced",
+            "ShrinkingCed",
+            " shrinking_ced",
+            "full_forward ",
+        ] {
+            let error = parse_v41_prefill_execution(Some(OsStr::new(value))).unwrap_err();
+            assert!(
+                error
+                    .to_string()
+                    .contains("QWEN_V41_PREFILL_EXECUTION must be full_forward or shrinking_ced")
+            );
+        }
+        #[cfg(unix)]
+        {
+            use std::os::unix::ffi::OsStringExt;
+            let value = std::ffi::OsString::from_vec(vec![0xff]);
+            assert!(parse_v41_prefill_execution(Some(&value)).is_err());
+        }
+    }
+
+    #[test]
+    fn v41_prefill_diagnostics_preserve_actual_report_and_default_omission() {
+        use qwen_llm::deepseek_v41::forward::{
+            CedCounters, CedMemoryEstimate, PrefillExecution, PrefillReport,
+        };
+        let full = PrefillReport {
+            execution: PrefillExecution::FullForward,
+            fallback: None,
+            counters: None,
+            memory: None,
+            observed_incremental_metal_bytes: None,
+        };
+        assert!(V41PrefillDiagnostics::new(PrefillExecution::FullForward, full.clone()).is_none());
+        let fallback = PrefillReport {
+            fallback: Some("unsupported structure".into()),
+            ..full
+        };
+        let json = serde_json::to_value(
+            V41PrefillDiagnostics::new(PrefillExecution::ShrinkingCed, fallback).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(json["requested_execution"], "shrinking_ced");
+        assert_eq!(json["execution"], "full_forward");
+        assert_eq!(json["fallback"], "unsupported structure");
+        assert!(json["counters"].is_null());
+        let ced = PrefillReport {
+            execution: PrefillExecution::ShrinkingCed,
+            fallback: None,
+            counters: Some(CedCounters {
+                completed_commands: 7,
+                ..Default::default()
+            }),
+            memory: Some(CedMemoryEstimate {
+                priced_retained_bytes: 123,
+                ..Default::default()
+            }),
+            observed_incremental_metal_bytes: Some(456),
+        };
+        let json = serde_json::to_value(
+            V41PrefillDiagnostics::new(PrefillExecution::ShrinkingCed, ced).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(json["execution"], "shrinking_ced");
+        assert!(json["fallback"].is_null());
+        assert_eq!(json["counters"]["completed_commands"], 7);
+        assert_eq!(json["memory"]["priced_retained_bytes"], 123);
+        assert_eq!(json["observed_incremental_metal_bytes"], 456);
+        assert_eq!(
+            v41_prefill_mode(PrefillExecution::FullForward),
+            V41_PREFILL_MODE
+        );
+        assert_eq!(
+            v41_prefill_mode(PrefillExecution::ShrinkingCed),
+            "shrinking_ced+final_logits_copy"
+        );
+    }
 
     #[test]
     fn qwen4exp_decode_flags_follow_the_documented_contract() {

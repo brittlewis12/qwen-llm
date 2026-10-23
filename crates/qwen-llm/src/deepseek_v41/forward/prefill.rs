@@ -5,11 +5,41 @@ use super::*;
 #[cfg(test)]
 mod tests;
 
+#[cfg(test)]
+#[path = "ced/arithmetic.rs"]
+mod arithmetic_tests;
+
+#[cfg(test)]
+#[path = "prefill/half_staging.rs"]
+mod half_staging_tests;
+
 pub const DEFAULT_CHUNK_ROWS: usize = 2048;
 /// Upper bound for a fitting artifact's Full-forward chunk. The selector in
 /// `Forward` uses this only when resident weights leave enough headroom;
 /// IQ3-class residents stay at `DEFAULT_CHUNK_ROWS`.
 pub const MAX_CHUNK_ROWS: usize = 4096;
+
+/// Operand lineage of logical rows, independent of a CED replay tile's size.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(super) enum RowsArithmetic {
+    #[default]
+    Ordinary,
+    Packed,
+}
+
+impl RowsArithmetic {
+    pub(super) fn packed_operands(self, rows: usize) -> bool {
+        match self {
+            Self::Ordinary => rows > 1,
+            Self::Packed => rows > 0,
+        }
+    }
+}
+
+/// Absolute position of the genuine scalar final chunk in cold Full prefill.
+pub(super) fn original_scalar_tail(prompt_rows: usize) -> Option<usize> {
+    (prompt_rows % DEFAULT_CHUNK_ROWS == 1).then(|| prompt_rows - 1)
+}
 
 #[cfg(test)]
 thread_local! {
@@ -31,14 +61,38 @@ pub(super) fn with_f32_linears<T>(f: impl FnOnce() -> T) -> T {
     f()
 }
 
+/// Controlled batched F32 operands, not a claim of identical reduction trees.
+/// Keep this scope active during both scratch admission/allocation and encoding.
+/// Prefer F32 grouped experts; an explicit native-rows override still wins.
+#[cfg(test)]
+pub(super) fn with_batched_f32<T>(f: impl FnOnce() -> T) -> T {
+    with_f32_linears(|| {
+        ffn_gpu::tests::with_grouped_rows(|| {
+            attention_gpu::with_f32_attention(|| {
+                metal::with_grouped_projection_scalar_baseline_override(true, f)
+            })
+        })
+    })
+}
+
 /// Multi-row dense projections take the shared half-staged simdgroup-MMA
 /// tiles for packed and BF16 weights. F32 weights (router, mHC projections)
 /// keep the F32-operand grouped kernel: they are small and route-sensitive.
-fn mma_linear_rows_selected(dtype: GgmlType, input: usize, rows: usize) -> bool {
-    rows > 1
+fn mma_linear_rows_selected(
+    dtype: GgmlType,
+    input: usize,
+    rows: usize,
+    arithmetic: RowsArithmetic,
+) -> bool {
+    let selected = arithmetic.packed_operands(rows)
         && dtype != GgmlType::F32
         && crate::metal_forward::mat_mat_dispatch_supported(dtype)
-        && input.is_multiple_of(32)
+        && input.is_multiple_of(32);
+    #[cfg(test)]
+    let selected = selected
+        && !ROWWISE_LINEAR_ROWS.with(|flag| flag.get())
+        && !F32_LINEAR_ROWS.with(|flag| flag.get());
+    selected
 }
 
 #[cfg(test)]
@@ -138,11 +192,16 @@ impl HalfScratch {
         x: &MetalTensor,
         elements: usize,
     ) -> std::result::Result<MetalTensor, metal::MetalError> {
-        if elements == 0 || (elements as u64) > self.tensor.n_elements() {
+        if enc.is_concurrent()
+            || x.dtype != GgmlType::F32
+            || elements == 0
+            || (elements as u64) > x.n_elements()
+            || (elements as u64) > self.tensor.n_elements()
+        {
             return Err(metal::MetalError::BadShape {
                 kernel: "v41_half_scratch",
                 detail: format!(
-                    "{elements} activations exceed the {} element half scratch",
+                    "serial F32 input with {elements} elements within the {} element half scratch required",
                     self.tensor.n_elements()
                 ),
             });
@@ -155,13 +214,13 @@ impl HalfScratch {
 }
 
 impl Linear<'_> {
-    /// True when `encode_rows` would take the dense tensor tile for `rows`.
-    pub(super) fn tensor_rows_selected(&self, rows: usize) -> bool {
-        let mma = mma_linear_rows_selected(self.tensor.dtype, self.input, rows);
-        #[cfg(test)]
-        let mma = mma
-            && !ROWWISE_LINEAR_ROWS.with(|flag| flag.get())
-            && !F32_LINEAR_ROWS.with(|flag| flag.get());
+    /// Eligibility uses logical operand lineage, not just the replay tile size.
+    pub(super) fn tensor_rows_selected_with_arithmetic(
+        &self,
+        rows: usize,
+        arithmetic: RowsArithmetic,
+    ) -> bool {
+        let mma = mma_linear_rows_selected(self.tensor.dtype, self.input, rows, arithmetic);
         mma && metal::moe_grouped_tensor_selected(self.ctx)
             && metal::moe_grouped_generic_layout(self.tensor.dtype)
                 .is_some_and(|l| self.input.is_multiple_of(l.block_elems))
@@ -177,6 +236,17 @@ impl Linear<'_> {
         self.encode_rows_with(enc, x, None, y, rows)
     }
 
+    pub(super) fn encode_rows_with_arithmetic(
+        &self,
+        enc: &KernelEncoder,
+        x: &MetalTensor,
+        y: &MetalTensor,
+        rows: usize,
+        arithmetic: RowsArithmetic,
+    ) -> std::result::Result<(), metal::MetalError> {
+        self.encode_rows_with_arithmetic_and_half(enc, x, None, y, rows, arithmetic)
+    }
+
     /// `encode_rows` with an optional half copy of `x` (`x_half`, the first
     /// `input * rows` elements already converted) that the dense tensor
     /// tile reads instead of re-casting `x`; ignored on every other route.
@@ -187,6 +257,18 @@ impl Linear<'_> {
         x_half: Option<&MetalTensor>,
         y: &MetalTensor,
         rows: usize,
+    ) -> std::result::Result<(), metal::MetalError> {
+        self.encode_rows_with_arithmetic_and_half(enc, x, x_half, y, rows, RowsArithmetic::Ordinary)
+    }
+
+    pub(super) fn encode_rows_with_arithmetic_and_half(
+        &self,
+        enc: &KernelEncoder,
+        x: &MetalTensor,
+        x_half: Option<&MetalTensor>,
+        y: &MetalTensor,
+        rows: usize,
+        arithmetic: RowsArithmetic,
     ) -> std::result::Result<(), metal::MetalError> {
         if rows == 0
             || x.dtype != GgmlType::F32
@@ -199,17 +281,13 @@ impl Linear<'_> {
                 detail: "nonempty matching F32 row extents required".into(),
             });
         }
-        let mma = mma_linear_rows_selected(self.tensor.dtype, self.input, rows);
-        #[cfg(test)]
-        let mma = mma
-            && !ROWWISE_LINEAR_ROWS.with(|flag| flag.get())
-            && !F32_LINEAR_ROWS.with(|flag| flag.get());
+        let mma = mma_linear_rows_selected(self.tensor.dtype, self.input, rows, arithmetic);
         if mma {
             let x = x.view_bytes(0, vec![self.input as u64, rows as u64]);
             let y = y.view_bytes(0, vec![self.output as u64, rows as u64]);
             // The dense form of the Metal 4 tensor tile where the tier
             // exists: same half operands and F32 sums as the MMA tile.
-            if self.tensor_rows_selected(rows) {
+            if self.tensor_rows_selected_with_arithmetic(rows, arithmetic) {
                 let elements = (self.input * rows) as u64;
                 let x_half = x_half.map(|h| {
                     if h.dtype == GgmlType::F16 && h.n_elements() >= elements {
@@ -306,8 +384,8 @@ fn run_hybrid(
         "invalid prefill chunk rows",
     )?;
     op::require(
-        !state.poisoned,
-        "sequence poisoned by a failed partial token",
+        state.is_ready(),
+        "sequence is provisional or poisoned by partial execution",
     )?;
     op::require(
         Arc::ptr_eq(&state.identity, &model.identity),
@@ -437,7 +515,7 @@ fn run_hybrid(
                     )
                 })
                 .collect::<Vec<_>>();
-            state.poisoned = true;
+            state.phase = StatePhase::Poisoned;
             logits = state.gpu_step.as_mut().unwrap().run_prepared(
                 model,
                 position,
@@ -450,7 +528,7 @@ fn run_hybrid(
                 Some(&prepared),
             )?;
             state.addresses = next_addresses[row];
-            state.poisoned = false;
+            state.phase = StatePhase::Ready;
         }
     }
     Ok(logits)
@@ -509,7 +587,30 @@ impl HcRows {
         x: &MetalTensor,
         incoming: &MetalTensor,
     ) -> std::result::Result<(), metal::MetalError> {
-        projection.encode_rows(enc, x, &self.raw, self.rows)?;
+        self.encode_with_arithmetic(
+            ctx,
+            enc,
+            c,
+            projection,
+            constants,
+            x,
+            incoming,
+            RowsArithmetic::Ordinary,
+        )
+    }
+
+    pub(super) fn encode_with_arithmetic(
+        &self,
+        ctx: &MetalContext,
+        enc: &KernelEncoder,
+        c: &Config,
+        projection: &Linear<'_>,
+        constants: &[MetalTensor],
+        x: &MetalTensor,
+        incoming: &MetalTensor,
+        arithmetic: RowsArithmetic,
+    ) -> std::result::Result<(), metal::MetalError> {
+        projection.encode_rows_with_arithmetic(enc, x, &self.raw, self.rows, arithmetic)?;
         enc.set_pipeline(&ctx.pipeline("kernel_deepseek_v41_projected_rms")?);
         enc.set_bytes(0, &((4 * c.hidden) as u32));
         enc.set_bytes(1, &c.norm_eps);
@@ -539,6 +640,18 @@ impl HcRows {
             &self.post,
             &self.comb,
         )?;
+        self.normalize_input(ctx, enc, c, &constants[2], x, incoming)
+    }
+
+    pub(super) fn normalize_input(
+        &self,
+        ctx: &MetalContext,
+        enc: &KernelEncoder,
+        c: &Config,
+        norm: &MetalTensor,
+        x: &MetalTensor,
+        incoming: &MetalTensor,
+    ) -> std::result::Result<(), metal::MetalError> {
         metal::encode_mhc4_collapse_rows(
             ctx,
             enc,
@@ -552,7 +665,7 @@ impl HcRows {
             ctx,
             enc,
             &self.collapsed,
-            &constants[2],
+            norm,
             &self.normalized,
             self.rows,
             c.hidden,
@@ -587,8 +700,8 @@ pub(super) fn run_captured(
         "invalid prefill chunk rows",
     )?;
     op::require(
-        !state.poisoned,
-        "sequence poisoned by a failed partial token",
+        state.is_ready(),
+        "sequence is provisional or poisoned by partial execution",
     )?;
     op::require(
         Arc::ptr_eq(&state.identity, &model.identity),
@@ -694,7 +807,7 @@ pub(super) fn run_captured(
                 hashes.push(rows);
                 next = addresses;
             }
-            state.poisoned = true;
+            state.phase = StatePhase::Poisoned;
             let logits = state.gpu_step.as_mut().unwrap().run_chunk(
                 model,
                 start,
@@ -707,7 +820,7 @@ pub(super) fn run_captured(
                     .map(|sink| &mut **sink as &mut dyn capture::Capture),
             )?;
             state.addresses = next;
-            state.poisoned = false;
+            state.phase = StatePhase::Ready;
             Ok(logits)
         })?;
         #[cfg(test)]

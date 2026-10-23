@@ -4,6 +4,10 @@
 //! KV/keys remain append-only, with each follower bounded by its query's length.
 use super::*;
 
+#[cfg(test)]
+#[path = "query_batch/arithmetic.rs"]
+mod arithmetic_tests;
+
 pub(super) const TILE: usize = 512;
 
 /// Rows per query batch tile. The default is the production width; the
@@ -20,9 +24,29 @@ pub(super) fn tile_rows() -> usize {
     })
 }
 
-/// The released geometry runs the simdgroup-MMA sink tile, whose per-query
-/// PV branch (and its gathered value matrix) is unreachable.
+#[cfg(test)]
+thread_local! {
+    static F32_ATTENTION_ROWS: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+#[cfg(test)]
+pub(in super::super) fn with_f32_attention<T>(f: impl FnOnce() -> T) -> T {
+    struct Restore(bool);
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            F32_ATTENTION_ROWS.with(|flag| flag.set(self.0));
+        }
+    }
+    let _restore = Restore(F32_ATTENTION_ROWS.with(|flag| flag.replace(true)));
+    f()
+}
+
+/// Scratch planning and execution must agree on whether gathered F32 PV is reachable.
 fn mma_geometry(c: &Config) -> bool {
+    #[cfg(test)]
+    if F32_ATTENTION_ROWS.with(|flag| flag.get()) {
+        return false;
+    }
     c.head_dim == MMA_DIM && c.heads.is_multiple_of(MMA_HEADS)
 }
 
@@ -154,14 +178,17 @@ impl Workspace {
     ) -> Result<()> {
         op::require(!enc.is_concurrent(), "query batch requires serial encoder")?;
         op::require(
-            self.batch.as_ref().is_some_and(|b| {
+            self.active_batch().is_some_and(|b| {
                 b.start == start && b.rows == rows.rows && b.layer == id && b.row == 0
             }),
             "query batch layer order",
         )?;
         validate_weights(&self.config, id, w, &self.schedule)?;
         valid_view(input, checked_product(&[self.config.hidden, rows.rows])?)?;
-        self.prepare_rows(ctx, enc, id, w, input, rows)
+        let mode = self.global_mode(id, start, rows.rows)?;
+        self.bind_ced_rows(id, start, rows)?;
+        let history = self.row_history(id, start, rows.rows)?;
+        self.prepare_rows_mode(ctx, enc, id, w, input, rows, mode)
             .map_err(|e| e.to_string())?;
         let c = &self.config;
         let constants = &self.constants[id];
@@ -207,7 +234,7 @@ impl Workspace {
             (id * c.window * c.head_dim) as u64,
             vec![(c.window * c.head_dim) as u64],
         );
-        let old = start.min(c.window);
+        let old = start - history.floor;
         let pso = pipeline(ctx, enc, "history")?;
         enc.set_bytes(
             0,
@@ -221,11 +248,13 @@ impl Workspace {
         enc.set_tensor(1, &raw);
         enc.set_tensor(2, &rows.latent);
         enc.set_tensor(3, &rows.tile.history);
+        enc.set_bytes(4, &[old as u32, history.floor as u32]);
         dispatch(enc, &pso, (old + rows.rows) * c.head_dim);
         // Separate dispatch: no thread may overwrite the ring while another
         // still gathers its old prefix. Each physical slot has one writer.
         let pso = pipeline(ctx, enc, "publish_raw")?;
         dispatch(enc, &pso, rows.rows.min(c.window) * c.head_dim);
+        rows.history.set(Some(history));
         Ok(())
     }
 
@@ -243,6 +272,8 @@ impl Workspace {
         input: &MetalTensor,
         rows: &Rows,
     ) -> Result<()> {
+        let mode = self.global_mode(id, start, rows.rows)?;
+        self.validate_global_mode(id, start + rows.rows - 1, mode)?;
         let c = &self.config;
         let hidden = c.hidden;
         let owner = self.schedule.owner_slot(id);
@@ -254,7 +285,7 @@ impl Workspace {
             && last_length.div_ceil(c.candidate_block) <= c.candidate_topk
             && std::env::var_os("QWEN_V41_SELECT_PER_ROW").is_none();
         for row in 0..rows.rows {
-            self.encode_batch_row(
+            self.encode_batch_row_mode(
                 ctx,
                 enc,
                 id,
@@ -264,6 +295,7 @@ impl Workspace {
                 rows,
                 row,
                 !batched,
+                mode,
             )?;
         }
         if batched {
@@ -280,6 +312,16 @@ impl Workspace {
                 )?;
             }
         }
+        #[cfg(test)]
+        super::super::ced::tests::chunked::encode_control_probes(
+            ctx,
+            enc,
+            id,
+            start,
+            rows.rows,
+            &rows.selected,
+            &rows.candidates,
+        )?;
         Ok(())
     }
 
@@ -509,11 +551,29 @@ impl Workspace {
             "query tile extent",
         )?;
         let position = start + first;
+        let history = match rows.history.get() {
+            Some(history) => history,
+            None if self.ced.is_none() => ced::HistoryRange {
+                layer: id,
+                start,
+                floor: start - start.min(c.window),
+                extent: start.min(c.window) + rows.rows,
+            },
+            None => return Err("CED history was not prepared".into()),
+        };
+        history.validate(id, start, rows.rows, c.window)?;
         let count = |p: usize| (p + 1).min(c.window) + self.selected_count(id, p);
         // Simdgroup-MMA QK^T and PV for the released geometry (512-wide
         // latent, head count a multiple of 16); other geometries keep the
         // scalar/gathered-GEMM path below.
-        let mma = c.head_dim == MMA_DIM && c.heads.is_multiple_of(MMA_HEADS);
+        let mma = mma_geometry(c);
+        #[cfg(test)]
+        if !mma && !ValueMatrix::shapes(c)?.is_empty() {
+            op::require(
+                rows.tile.matrix.is_some(),
+                "F32 attention scratch must be planned and allocated inside its arithmetic scope",
+            )?;
+        }
         // Preserve the incumbent per-query PV branch. Counts are monotone, so
         // at most one fixed tile per layer/chunk needs this extra boundary split.
         if !mma
@@ -553,8 +613,8 @@ impl Workspace {
             1,
             &[
                 position as u32,
-                (start - start.min(c.window)) as u32,
-                (start.min(c.window) + rows.rows) as u32,
+                history.floor as u32,
+                history.extent as u32,
                 self.schedule.ratio(id) as u32,
             ],
         );

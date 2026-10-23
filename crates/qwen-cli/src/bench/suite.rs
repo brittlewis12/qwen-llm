@@ -175,6 +175,7 @@ pub(crate) fn run_suite_pp_row(
         prefill_mode: Some("production_prefill+endpoint_logits"),
         power: row_ctx.power.clone(),
         qwen_env: row_ctx.qwen_env.clone(),
+        diagnostics: None,
     })
 }
 
@@ -323,6 +324,7 @@ pub(crate) fn run_suite_tg_row(
         prefill_mode: None,
         power: row_ctx.power.clone(),
         qwen_env: row_ctx.qwen_env.clone(),
+        diagnostics: None,
     })
 }
 
@@ -370,6 +372,11 @@ pub(crate) fn run_suite(args: SuiteArgs) -> Result<()> {
             probe.get_str("general.architecture")
         )
     })?;
+    let v41_prefill_execution = if family == ModelFamily::DeepSeekV41 {
+        crate::family_options::v41_prefill_execution_from_env()?
+    } else {
+        Default::default()
+    };
     let (commit, dirty) = qwen_build_identity();
     let power = capture_power_snapshot();
     crate::text_log!(
@@ -476,31 +483,40 @@ pub(crate) fn run_suite(args: SuiteArgs) -> Result<()> {
             qwen_env: capture_qwen_env(),
         };
         let extent = FamilyBenchExtent::for_shapes(&pp, &tg, &depths, (warmup_pp, WARMUP_TG))?;
-        rows = with_family_bench(family, &ctx, &probe, extent, &mut |bench| {
-            let mut rows = Vec::with_capacity((pp.len() + tg.len()) * depths.len());
-            if !no_warmup {
-                crate::text_log!(json_mode, "[suite] model warm-up (untimed)");
-                run_family_pp_row(bench, &row_ctx, warmup_pp, 0, 1, true, seed)
-                    .context("suite model warm-up pp")?;
-                run_family_tg_row(bench, &row_ctx, WARMUP_TG, 0, 1, true, seed)
-                    .context("suite model warm-up tg")?;
-            }
-            for &depth in &depths {
-                for &n_prompt in &pp {
-                    let row =
-                        run_family_pp_row(bench, &row_ctx, n_prompt, depth, runs, no_warmup, seed)?;
-                    log_row(json_mode, &row);
-                    rows.push(row);
+        rows = with_family_bench(
+            family,
+            &ctx,
+            &probe,
+            extent,
+            v41_prefill_execution,
+            &mut |bench| {
+                let mut rows = Vec::with_capacity((pp.len() + tg.len()) * depths.len());
+                if !no_warmup {
+                    crate::text_log!(json_mode, "[suite] model warm-up (untimed)");
+                    run_family_pp_row(bench, &row_ctx, warmup_pp, 0, 1, true, seed)
+                        .context("suite model warm-up pp")?;
+                    run_family_tg_row(bench, &row_ctx, WARMUP_TG, 0, 1, true, seed)
+                        .context("suite model warm-up tg")?;
                 }
-                for &n_gen in &tg {
-                    let row =
-                        run_family_tg_row(bench, &row_ctx, n_gen, depth, runs, no_warmup, seed)?;
-                    log_row(json_mode, &row);
-                    rows.push(row);
+                for &depth in &depths {
+                    for &n_prompt in &pp {
+                        let row = run_family_pp_row(
+                            bench, &row_ctx, n_prompt, depth, runs, no_warmup, seed,
+                        )?;
+                        log_row(json_mode, &row);
+                        rows.push(row);
+                    }
+                    for &n_gen in &tg {
+                        let row = run_family_tg_row(
+                            bench, &row_ctx, n_gen, depth, runs, no_warmup, seed,
+                        )?;
+                        log_row(json_mode, &row);
+                        rows.push(row);
+                    }
                 }
-            }
-            Ok(rows)
-        })?;
+                Ok(rows)
+            },
+        )?;
     }
 
     if json_mode {

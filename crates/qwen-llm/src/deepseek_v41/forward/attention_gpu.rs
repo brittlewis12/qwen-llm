@@ -1,10 +1,15 @@
 //! Encode-only F32 attention. Workspace metadata is provisional: a failed encode
 //! or command completion requires the caller to poison/discard the workspace.
 use super::super::gguf::Schedule;
+use super::prefill::RowsArithmetic;
 use super::*;
 use objc2_metal::{MTLComputePipelineState, MTLSize};
 
+mod ced;
 mod query_batch;
+pub(super) use ced::{GlobalKvMode, PublicationRows, QueryControlView, QueryControls, SeedRows};
+#[cfg(test)]
+pub(super) use query_batch::with_f32_attention;
 #[cfg(test)]
 mod tests;
 
@@ -33,6 +38,7 @@ pub(super) struct Workspace {
     next_layer: usize,
     next_position: usize,
     batch: Option<BatchCursor>,
+    ced: Option<ced::Cursor>,
     constants: Vec<Constants>,
     raw: MetalTensor,
     owners: Vec<OwnerCache>,
@@ -172,9 +178,27 @@ pub(super) struct Rows {
     /// the tier is not selected.
     half: Option<prefill::HalfScratch>,
     rows: usize,
+    arithmetic: RowsArithmetic,
+    controls: Option<QueryControlView>,
+    history: std::cell::Cell<Option<ced::HistoryRange>>,
 }
 
 impl Rows {
+    /// CED borrows the two retained I32 controls instead of allocating them.
+    pub(super) fn widths_with_controls(c: &Config, capacity: usize) -> Vec<usize> {
+        Self::widths(c, capacity)
+            .into_iter()
+            .enumerate()
+            .filter_map(|(i, width)| (!matches!(i, 3 | 4)).then_some(width))
+            .collect()
+    }
+
+    /// Grouped buffers are rewritten in full by finish_rows. A changed tile
+    /// starts with no valid history or derived layout from its previous origin.
+    pub(super) fn reset_grouped_layouts(&self) {
+        self.history.set(None);
+    }
+
     pub(super) fn widths(c: &Config, capacity: usize) -> Vec<usize> {
         vec![
             c.query_rank,
@@ -212,6 +236,26 @@ impl Rows {
         capacity: usize,
         rows: usize,
     ) -> Result<Self> {
+        Self::allocate(ctx, c, capacity, rows, None)
+    }
+
+    pub(super) fn with_controls(
+        ctx: &MetalContext,
+        c: &Config,
+        capacity: usize,
+        controls: &QueryControlView,
+    ) -> Result<Self> {
+        controls.validate_geometry(c, capacity)?;
+        Self::allocate(ctx, c, capacity, controls.rows(), Some(controls.clone()))
+    }
+
+    fn allocate(
+        ctx: &MetalContext,
+        c: &Config,
+        capacity: usize,
+        rows: usize,
+        controls: Option<QueryControlView>,
+    ) -> Result<Self> {
         let half_elements = prefill::attention_half_scratch_elements(c, rows)?;
         let widths = Self::widths(c, capacity);
         for &width in &widths {
@@ -222,8 +266,14 @@ impl Rows {
             rank: prefill::allocate(ctx, widths[0], rows, GgmlType::F32)?,
             query: prefill::allocate(ctx, widths[1], rows, GgmlType::F32)?,
             latent: prefill::allocate(ctx, widths[2], rows, GgmlType::F32)?,
-            selected: prefill::allocate(ctx, widths[3], rows, GgmlType::I32)?,
-            candidates: prefill::allocate(ctx, widths[4], rows, GgmlType::I32)?,
+            selected: match &controls {
+                Some(view) => view.selected.clone(),
+                None => prefill::allocate(ctx, widths[3], rows, GgmlType::I32)?,
+            },
+            candidates: match &controls {
+                Some(view) => view.candidates.clone(),
+                None => prefill::allocate(ctx, widths[4], rows, GgmlType::I32)?,
+            },
             low: prefill::allocate(ctx, widths[5], rows, GgmlType::F32)?,
             grouped_input: prefill::allocate(ctx, widths[6], rows, GgmlType::F32)?,
             grouped_low: prefill::allocate(ctx, widths[7], rows, GgmlType::F32)?,
@@ -239,6 +289,13 @@ impl Rows {
             )?,
             half: prefill::HalfScratch::new(ctx, half_elements)?,
             rows,
+            arithmetic: if controls.is_some() {
+                RowsArithmetic::Packed
+            } else {
+                RowsArithmetic::Ordinary
+            },
+            controls,
+            history: std::cell::Cell::new(None),
         })
     }
 
@@ -257,10 +314,19 @@ impl Rows {
         let Some(half) = self.half.as_ref() else {
             return Ok(None);
         };
-        if !consumers.iter().any(|w| w.tensor_rows_selected(self.rows)) {
+        if !consumers
+            .iter()
+            .any(|w| w.tensor_rows_selected_with_arithmetic(self.rows, self.arithmetic))
+        {
             return Ok(None);
         }
-        half.convert(ctx, enc, x, width * self.rows).map(Some)
+        let elements = width
+            .checked_mul(self.rows)
+            .ok_or_else(|| metal::MetalError::BadShape {
+                kernel: "v41_half_scratch",
+                detail: "attention half input extent overflow".into(),
+            })?;
+        half.convert(ctx, enc, x, elements).map(Some)
     }
 }
 
@@ -270,6 +336,11 @@ impl Workspace {
     }
     /// Physical rings, completed owner rows, and pending pooling operands only.
     pub(super) fn causal_regions(&self, position: usize) -> Result<Vec<(&MetalTensor, usize)>> {
+        op::require(self.ced.is_none(), "snapshot during active CED")?;
+        self.causal_region_views(position)
+    }
+
+    fn causal_region_views(&self, position: usize) -> Result<Vec<(&MetalTensor, usize)>> {
         op::require(
             position <= self.capacity,
             "snapshot exceeds attention capacity",
@@ -305,7 +376,10 @@ impl Workspace {
 
     pub(super) fn validate_snapshot_position(&self, position: usize) -> Result<()> {
         op::require(
-            self.batch.is_none() && self.next_layer == 0 && self.next_position == position,
+            self.ced.is_none()
+                && self.batch.is_none()
+                && self.next_layer == 0
+                && self.next_position == position,
             "snapshot requires committed attention state",
         )
     }
@@ -315,6 +389,7 @@ impl Workspace {
         position: usize,
         payload_len: usize,
     ) -> Result<()> {
+        op::require(self.ced.is_none(), "restore during active CED")?;
         let regions = self.causal_regions(position)?;
         let size = regions
             .iter()
@@ -902,6 +977,7 @@ impl Workspace {
             next_layer: 0,
             next_position: 0,
             batch: None,
+            ced: None,
             constants,
             raw: f(schedule.layers * c.window * c.head_dim)?,
             owners,
@@ -1088,7 +1164,20 @@ impl Workspace {
         input: &MetalTensor,
     ) -> Result<&MetalTensor> {
         op::require(self.batch.is_none(), "decode during attention batch")?;
-        self.encode_inner(ctx, enc, id, position, w, input, None, true)
+        if self.ced.is_some() {
+            return self.encode_ced_scalar(ctx, enc, id, position, w, input);
+        }
+        self.encode_inner(
+            ctx,
+            enc,
+            id,
+            position,
+            w,
+            input,
+            None,
+            true,
+            GlobalKvMode::Ordinary,
+        )
     }
 
     pub(super) fn begin_batch(&mut self, start: usize, rows: usize) -> Result<()> {
@@ -1115,9 +1204,28 @@ impl Workspace {
         input: &MetalTensor,
         rows: &Rows,
     ) -> std::result::Result<(), metal::MetalError> {
+        if self.ced.is_some() {
+            return Err(metal::MetalError::BadShape {
+                kernel: "v41_attention_prepare_rows",
+                detail: "CED requires typed encode_rows_prepare".into(),
+            });
+        }
+        self.prepare_rows_mode(ctx, enc, id, w, input, rows, GlobalKvMode::Ordinary)
+    }
+
+    fn prepare_rows_mode(
+        &self,
+        ctx: &MetalContext,
+        enc: &KernelEncoder,
+        id: usize,
+        w: &Weights<'_>,
+        input: &MetalTensor,
+        rows: &Rows,
+        mode: GlobalKvMode,
+    ) -> std::result::Result<(), metal::MetalError> {
         let c = &self.config;
         let index = if self.schedule.produces_index(id) {
-            let needs_index = self.batch.as_ref().is_none_or(|batch| {
+            let needs_index = self.active_batch().is_none_or(|batch| {
                 let length = (batch.start + batch.rows) / self.schedule.ratio(id);
                 length > c.index_topk || length.div_ceil(c.candidate_block) > c.candidate_topk
             });
@@ -1125,39 +1233,65 @@ impl Workspace {
         } else {
             None
         };
+        let compressor = w
+            .compressor
+            .as_ref()
+            .filter(|_| mode == GlobalKvMode::Ordinary);
         // Every projection of the layer input first (one half copy serves
         // them all), then the rank-fed ones after the query norm. The
         // order is free: the rank consumers depend only on query_a.
         let mut input_consumers = vec![&w.query_a, &w.kv];
-        if let Some(compressor) = &w.compressor {
+        if let Some(compressor) = compressor {
             input_consumers.push(&compressor.kv);
             input_consumers.extend(compressor.gate.as_ref());
         }
         input_consumers.extend(index.map(|index| &index.weights));
         let input_half = rows.half_input(ctx, enc, input, c.hidden, &input_consumers)?;
         let input_half = input_half.as_ref();
-        w.query_a
-            .encode_rows_with(enc, input, input_half, &rows.rank, rows.rows)?;
-        w.kv.encode_rows_with(enc, input, input_half, &rows.latent, rows.rows)?;
-        if let Some(compressor) = &w.compressor {
-            compressor.kv.encode_rows_with(
+        w.query_a.encode_rows_with_arithmetic_and_half(
+            enc,
+            input,
+            input_half,
+            &rows.rank,
+            rows.rows,
+            rows.arithmetic,
+        )?;
+        w.kv.encode_rows_with_arithmetic_and_half(
+            enc,
+            input,
+            input_half,
+            &rows.latent,
+            rows.rows,
+            rows.arithmetic,
+        )?;
+        if let Some(compressor) = compressor {
+            compressor.kv.encode_rows_with_arithmetic_and_half(
                 enc,
                 input,
                 input_half,
                 &rows.compressor_value,
                 rows.rows,
+                rows.arithmetic,
             )?;
             if let Some(gate) = &compressor.gate {
-                gate.encode_rows_with(enc, input, input_half, &rows.compressor_gate, rows.rows)?;
+                gate.encode_rows_with_arithmetic_and_half(
+                    enc,
+                    input,
+                    input_half,
+                    &rows.compressor_gate,
+                    rows.rows,
+                    rows.arithmetic,
+                )?;
             }
         }
         if let Some(index) = index {
-            index.weights.encode_rows_with(
+            index.weights.encode_rows_with_arithmetic_and_half(
                 enc,
                 input,
                 input_half,
                 &rows.index_weights,
                 rows.rows,
+                rows.arithmetic,
             )?;
         }
         metal::encode_rms_norm_mul_rows_f32(
@@ -1184,15 +1318,22 @@ impl Workspace {
         rank_consumers.extend(index.map(|index| &index.query));
         let rank_half = rows.half_input(ctx, enc, &rows.rank, c.query_rank, &rank_consumers)?;
         let rank_half = rank_half.as_ref();
-        w.query_b
-            .encode_rows_with(enc, &rows.rank, rank_half, &rows.query, rows.rows)?;
+        w.query_b.encode_rows_with_arithmetic_and_half(
+            enc,
+            &rows.rank,
+            rank_half,
+            &rows.query,
+            rows.rows,
+            rows.arithmetic,
+        )?;
         if let Some(index) = index {
-            index.query.encode_rows_with(
+            index.query.encode_rows_with_arithmetic_and_half(
                 enc,
                 &rows.rank,
                 rank_half,
                 &rows.index_query,
                 rows.rows,
+                rows.arithmetic,
             )?;
         }
         Ok(())
@@ -1210,8 +1351,25 @@ impl Workspace {
         row: usize,
         select: bool,
     ) -> Result<()> {
+        let mode = self.global_mode(id, position, rows.rows)?;
+        self.encode_batch_row_mode(ctx, enc, id, position, w, input, rows, row, select, mode)
+    }
+
+    fn encode_batch_row_mode(
+        &mut self,
+        ctx: &MetalContext,
+        enc: &KernelEncoder,
+        id: usize,
+        position: usize,
+        w: &Weights<'_>,
+        input: &MetalTensor,
+        rows: &Rows,
+        row: usize,
+        select: bool,
+        mode: GlobalKvMode,
+    ) -> Result<()> {
         op::require(
-            self.batch.as_ref().is_some_and(|b| {
+            self.active_batch().is_some_and(|b| {
                 b.rows == rows.rows && b.row == row && b.layer == id && b.start + row == position
             }),
             "attention batch row order",
@@ -1251,7 +1409,17 @@ impl Workspace {
             prefill::row(&rows.index_weights, self.config.index_heads, row),
         );
         let result = self
-            .encode_inner(ctx, enc, id, position, w, input, Some((rows, row)), select)
+            .encode_inner(
+                ctx,
+                enc,
+                id,
+                position,
+                w,
+                input,
+                Some((rows, row)),
+                select,
+                mode,
+            )
             .map(|_| ());
         self.selected = selected;
         self.candidates = candidates;
@@ -1300,7 +1468,7 @@ impl Workspace {
                 .as_ref()
                 .map(|h| h.view_subrange(offset, shape.clone()));
             projection
-                .encode_rows_with(
+                .encode_rows_with_arithmetic_and_half(
                     enc,
                     &rows.grouped_input.view_subrange(offset, shape),
                     group_half.as_ref(),
@@ -1309,6 +1477,7 @@ impl Workspace {
                         vec![c.output_rank as u64, rows.rows as u64],
                     ),
                     rows.rows,
+                    rows.arithmetic,
                 )
                 .map_err(|e| e.to_string())?;
         }
@@ -1331,13 +1500,21 @@ impl Workspace {
             )
             .map_err(|e| e.to_string())?;
         w.output_b
-            .encode_rows_with(enc, &rows.low, low_half.as_ref(), output, rows.rows)
+            .encode_rows_with_arithmetic_and_half(
+                enc,
+                &rows.low,
+                low_half.as_ref(),
+                output,
+                rows.rows,
+                rows.arithmetic,
+            )
             .map_err(|e| e.to_string())?;
         let pso = pipeline(ctx, enc, "finite")?;
         enc.set_bytes(0, &((self.config.hidden * rows.rows) as u32));
         enc.set_tensor(1, output);
         enc.set_tensor(2, &self.status);
         dispatch(enc, &pso, self.config.hidden * rows.rows);
+        self.finish_ced_rows(rows)?;
         Ok(())
     }
 
@@ -1351,6 +1528,7 @@ impl Workspace {
         input: &MetalTensor,
         prepared: Option<(&Rows, usize)>,
         select: bool,
+        mode: GlobalKvMode,
     ) -> Result<&MetalTensor> {
         op::require(
             !enc.is_concurrent(),
@@ -1358,12 +1536,13 @@ impl Workspace {
         )?;
         let c = &self.config;
         op::require(
-            self.batch.as_ref().map_or(
+            self.active_batch().map_or(
                 id == self.next_layer && position == self.next_position,
                 |b| id == b.layer && position == b.start + b.row,
             ) && position < self.capacity,
             "GPU attention order/capacity",
         )?;
+        self.validate_global_mode(id, position, mode)?;
         validate_weights(c, id, w, &self.schedule)?;
         valid_view(input, c.hidden)?;
         let constants = &self.constants[id];
@@ -1426,103 +1605,18 @@ impl Workspace {
             let ratio = self.schedule.ratio(id);
             let length = (position + 1) / ratio;
             if self.schedule.owns_kv(id) {
-                let compressor = w.compressor.as_ref().ok_or("missing compressor")?;
-                if prepared.is_none() {
-                    linear(ctx, enc, &compressor.kv, input, &self.latent)?;
-                }
-                if ratio == 2 {
-                    if prepared.is_none() {
-                        linear(
-                            ctx,
-                            enc,
-                            compressor.gate.as_ref().ok_or("missing gate")?,
-                            input,
-                            &self.gate,
-                        )?;
-                    }
-                    if position.is_multiple_of(2) {
-                        copy(ctx, enc, &self.latent, &cache.pending_value, c.head_dim)?;
-                        copy(ctx, enc, &self.gate, &cache.pending_gate, c.head_dim)?;
-                    } else {
-                        let pso = pipeline(ctx, enc, "pool")?;
-                        enc.set_bytes(0, &(c.head_dim as u32));
-                        enc.set_tensor(1, &cache.pending_value);
-                        enc.set_tensor(2, &cache.pending_gate);
-                        enc.set_tensor(3, &self.latent);
-                        enc.set_tensor(4, &self.gate);
-                        dispatch(enc, &pso, c.head_dim);
-                    }
-                }
-                if (position + 1).is_multiple_of(ratio) {
-                    norm(
+                if mode == GlobalKvMode::Ordinary {
+                    self.publish_owner_transition(
                         ctx,
                         enc,
+                        id,
+                        position,
+                        w,
+                        input,
                         &self.latent,
-                        constants.compressor_norm.as_ref().ok_or("missing norm")?,
-                        c.head_dim,
-                        w.eps,
+                        &self.gate,
+                        prepared.is_some(),
                     )?;
-                    let index = w.index.as_ref().ok_or("missing index")?;
-                    linear(
-                        ctx,
-                        enc,
-                        index.key.as_ref().ok_or("missing key")?,
-                        &self.latent,
-                        &self.key,
-                    )?;
-                    let key_norm = constants.key_norm.as_ref().ok_or("missing key norm")?;
-                    let group_position = position + 1 - ratio;
-                    let pairs = c.rope_dim / 2;
-                    let cache_key = cache.keys.view_subrange(
-                        ((length - 1) * c.index_dim) as u64,
-                        vec![c.index_dim as u64],
-                    );
-                    let cache_latent = cache
-                        .compressed
-                        .view_subrange(((length - 1) * c.head_dim) as u64, vec![c.head_dim as u64]);
-                    if c.index_dim <= 128 && pairs <= 128 && pairs * 2 <= c.index_dim {
-                        compress_publish(
-                            ctx,
-                            enc,
-                            &self.key,
-                            key_norm,
-                            &self.latent,
-                            &constants.frequencies,
-                            &cache_key,
-                            &cache_latent,
-                            c.index_dim,
-                            c.head_dim,
-                            pairs,
-                            group_position,
-                            w.eps,
-                        )?;
-                    } else {
-                        norm(ctx, enc, &self.key, key_norm, c.index_dim, w.eps)?;
-                        rope(
-                            ctx,
-                            enc,
-                            &self.key,
-                            &constants.frequencies,
-                            c.index_dim,
-                            1,
-                            pairs,
-                            group_position,
-                            false,
-                        )?;
-                        rope(
-                            ctx,
-                            enc,
-                            &self.latent,
-                            &constants.frequencies,
-                            c.head_dim,
-                            1,
-                            pairs,
-                            group_position,
-                            false,
-                        )?;
-                        copy(ctx, enc, &self.key, &cache_key, c.index_dim)?;
-                        copy(ctx, enc, &self.latent, &cache_latent, c.head_dim)?;
-                    }
                 }
             }
             selected_count = length.min(c.index_topk);
@@ -1592,6 +1686,18 @@ impl Workspace {
                     dispatch(enc, &pso, selected_count);
                 }
             }
+        }
+        #[cfg(test)]
+        if prepared.is_none() {
+            super::ced::tests::chunked::encode_control_probes(
+                ctx,
+                enc,
+                id,
+                position,
+                1,
+                &self.selected,
+                &self.candidates,
+            )?;
         }
         if prepared.is_none() {
             let raw = self.raw.view_subrange(
@@ -1696,28 +1802,33 @@ impl Workspace {
             enc.set_tensor(2, &self.status);
             dispatch(enc, &pso, c.hidden);
         }
-        if let Some(batch) = self.batch.as_mut() {
-            batch.row += 1;
-            if batch.row == batch.rows {
-                batch.row = 0;
-                batch.layer += 1;
-            }
-            if batch.layer == self.schedule.layers {
-                self.next_position = batch.start + batch.rows;
-                self.next_layer = 0;
-                self.batch = None;
-            }
+        if self.ced.is_some() {
+            self.advance_ced_row()?;
         } else {
-            self.next_layer = (id + 1) % self.schedule.layers;
-            if self.next_layer == 0 {
-                self.next_position += 1;
+            if let Some(batch) = self.batch.as_mut() {
+                batch.row += 1;
+                if batch.row == batch.rows {
+                    batch.row = 0;
+                    batch.layer += 1;
+                }
+                if batch.layer == self.schedule.layers {
+                    self.next_position = batch.start + batch.rows;
+                    self.next_layer = 0;
+                    self.batch = None;
+                }
+            } else {
+                self.next_layer = (id + 1) % self.schedule.layers;
+                if self.next_layer == 0 {
+                    self.next_position += 1;
+                }
             }
         }
         Ok(&self.output)
     }
 
     /// Sticky device error bits: 1 NaN selection score, 2 invalid selected ID,
-    /// 4 nonfinite attention. Inspect only after the caller's command completes.
+    /// 4 nonfinite attention/published or seeded KV. Inspect only after the
+    /// caller's command completes.
     pub(super) fn status(&self) -> &MetalTensor {
         &self.status
     }

@@ -629,8 +629,6 @@ impl Workspace {
                     depth: 1,
                 },
             );
-            let pso = pipeline(ctx, enc, "normalize_rows")?;
-            dispatch(enc, &pso, n * c.heads * c.head_dim);
         } else if let Some(matrix) = matrix {
             pipeline(ctx, enc, "matrix_values_rows")?;
             enc.set_tensor(12, &matrix.values);

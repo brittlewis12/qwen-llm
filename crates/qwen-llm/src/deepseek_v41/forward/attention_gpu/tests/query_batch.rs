@@ -159,11 +159,13 @@ fn compare_case(ctx: &MetalContext, c: &Config, schedule: &Schedule, start: usiz
                     .count()
             };
             if mma {
-                // One MMA sink per query tile; no per-query PV branch.
-                for suffix in ["score_mma", "softmax_rows", "pv_mma", "normalize_rows"] {
+                // One MMA sink per query tile; no per-query PV branch and no
+                // separate normalize pass (PV applies the denominator).
+                for suffix in ["score_mma", "softmax_rows", "pv_mma"] {
                     assert_eq!(count(suffix), n.div_ceil(TILE), "{suffix}");
                 }
                 assert_eq!(count("score_rows_lane8"), 0);
+                assert_eq!(count("normalize_rows"), 0);
             } else {
                 for suffix in ["score_rows_lane8", "softmax_rows"] {
                     assert_eq!(
@@ -842,13 +844,7 @@ fn sink_case(
                     .count()
             };
             if mma {
-                for suffix in [
-                    "score_mma",
-                    "softmax_rows",
-                    "pv_mma",
-                    "normalize_rows",
-                    "rope_rows",
-                ] {
+                for suffix in ["score_mma", "softmax_rows", "pv_mma", "rope_rows"] {
                     assert_eq!(count(suffix), spans.len(), "{suffix}");
                 }
                 for suffix in [
@@ -857,6 +853,7 @@ fn sink_case(
                     "matrix_values_rows",
                     "output_rows",
                     "finite",
+                    "normalize_rows",
                 ] {
                     assert_eq!(count(suffix), 0, "{suffix}");
                 }

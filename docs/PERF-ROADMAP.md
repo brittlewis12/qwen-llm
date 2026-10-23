@@ -93,11 +93,18 @@ attention tiles at 34.7%. Re-sample after the next landing.
   at 512 rows) leaves admission on the MMA geometry, where it is
   unreachable. 1024 rows measured flat (+0.3% pp2048, +0.1% pp4096) and is
   not worth the extra scratch: negative (sink-tile packet).
-- Attention sink fusion (`score_mma` + `softmax_rows` + `pv_mma` +
-  `normalize_rows`): with the tile now at production occupancy, each key
-  row is still gathered once for QK^T and again for PV, and the score slab
-  makes a full round trip. Fusing over all heads of a row (or an
-  online-softmax tile) targets those two costs; gain unmeasured: open.
+- Attention sink online fusion: negative (`perf/v41-sink-fuse` probe). One
+  threadgroup per (16-head block, row) gathering an 8-key block once and
+  running online softmax plus PV is 5-10x slower than the three-kernel
+  path (36.9 ms vs 3.43 ms at 512 rows): the 25 KB threadgroup holds one
+  resident threadgroup per core, the per-block barriers serialize
+  gather/score/softmax/PV, and only two simdgroups are active in score.
+  Branch retained as evidence; do not rebuild the online route without a
+  fundamentally smaller threadgroup footprint.
+- Normalize folded into `pv_mma`: drop the separate full read/write pass
+  and its dispatch; the F32 division moves to the accumulator store. Gain
+  bounded by the standalone normalize time (134 us of 3,426 us at 512
+  rows): in flight (`perf/v41-pv-normalize`).
 - Attention sink tensor ops: independently time `score_mma`/`pv_mma`
   substitution at the 512-row tile before combining with fusion; the
   gather-vs-MMA attribution is still unmeasured and shares the fusion

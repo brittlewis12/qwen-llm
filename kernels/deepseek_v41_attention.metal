@@ -618,11 +618,17 @@ kernel void kernel_deepseek_v41_attention_score_mma(
     }
 }
 
+// Row owned by `lane` in a simdgroup_float8x8 accumulator fragment.
+inline uint v41_accumulator_row(uint lane) {
+    return ((lane >> 2) & 4) + ((lane >> 1) & 3);
+}
+
 kernel void kernel_deepseek_v41_attention_pv_mma(
     constant uint4 &a [[buffer(0)]], constant uint4 &b [[buffer(1)]],
     device const float *raw [[buffer(3)]], device const float *compressed [[buffer(4)]],
     device const uint *ids [[buffer(5)]], device const float *scores [[buffer(7)]],
-    device float *out [[buffer(8)]], constant uint4 &m [[buffer(11)]],
+    device float *out [[buffer(8)]], device atomic_uint *status [[buffer(10)]],
+    constant uint4 &m [[buffer(11)]],
     uint2 group [[threadgroup_position_in_grid]], uint tid [[thread_index_in_threadgroup]],
     uint sg [[simdgroup_index_in_threadgroup]]) {
     // group.x: head block, group.y: query row. 256 threads = 8 simdgroups;
@@ -640,6 +646,7 @@ kernel void kernel_deepseek_v41_attention_pv_mma(
     simdgroup_float8x8 acc[16];
     for (uint i = 0; i < 16; ++i) acc[i] = simdgroup_float8x8(0.0f);
     const uint dim0 = sg * 64;
+    const uint accrow = v41_accumulator_row(tid & 31);
     if (!invalid) {
         for (uint k0 = 0; k0 < count; k0 += V41_MMA_KEYS) {
             for (uint e = tid; e < V41_MMA_KEYS * V41_MMA_DIM / 4; e += 256) {
@@ -670,8 +677,21 @@ kernel void kernel_deepseek_v41_attention_pv_mma(
             threadgroup_barrier(mem_flags::mem_threadgroup);
         }
     }
+    const float denom0 = srow[accrow * a.w + a.w - 1];
+    const float denom1 = srow[(8 + accrow) * a.w + a.w - 1];
     device float *orow = out + r * a.x + (group.x * V41_MMA_HEADS) * m.z * a.x;
     for (uint t = 0; t < 8; ++t) {
+        float v0 = denom0 == -1.0f ? 0.0f : acc[t].thread_elements()[0] / denom0;
+        float v1 = denom0 == -1.0f ? 0.0f : acc[t].thread_elements()[1] / denom0;
+        float v8 = denom1 == -1.0f ? 0.0f : acc[8 + t].thread_elements()[0] / denom1;
+        float v9 = denom1 == -1.0f ? 0.0f : acc[8 + t].thread_elements()[1] / denom1;
+        if (!isfinite(v0) || !isfinite(v1) || !isfinite(v8) || !isfinite(v9)) {
+            atomic_fetch_or_explicit(status, 4u, memory_order_relaxed);
+        }
+        acc[t].thread_elements()[0] = v0;
+        acc[t].thread_elements()[1] = v1;
+        acc[8 + t].thread_elements()[0] = v8;
+        acc[8 + t].thread_elements()[1] = v9;
         simdgroup_store(acc[t], orow + dim0 + t * 8, m.z * a.x);
         simdgroup_store(acc[8 + t], orow + 8 * m.z * a.x + dim0 + t * 8, m.z * a.x);
     }

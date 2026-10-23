@@ -546,7 +546,7 @@ fn close_half(a: &[f32], b: &[f32]) {
 
 impl Fixture {
     /// The simdgroup-MMA sink tile: QK^T into the score slab, the shared
-    /// softmax, PV straight from gathered latent rows, then normalize/finite.
+    /// softmax, then PV with the denominator applied at the store.
     fn encode_mma(&self, ctx: &MetalContext, enc: &KernelEncoder) {
         self.bind(enc);
         pipeline(ctx, enc, "score_mma").unwrap();
@@ -555,8 +555,6 @@ impl Fixture {
         grid(enc, H, self.n, 1, 32);
         pipeline(ctx, enc, "pv_mma").unwrap();
         grid(enc, H / 16, self.n, 1, 256);
-        let pso = pipeline(ctx, enc, "normalize_rows").unwrap();
-        dispatch(enc, &pso, self.n * H * M);
     }
 }
 

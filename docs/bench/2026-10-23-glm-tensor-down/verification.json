@@ -1,0 +1,210 @@
+{
+  "schema": "glm53.tensor_down_verification.v1",
+  "native_builds": {
+    "baseline": {
+      "schema_version": 4,
+      "features": [],
+      "metallib_compiler_identity": "Apple metal version 32023.921 (metalfe-32023.921.6)",
+      "metallib_sdk_version": "27.0",
+      "build_commit": "7a7012f797d3ad2641628a724ec837c7854919ee",
+      "build_commit_short": "7a7012f79",
+      "build_dirty": false,
+      "build_source_state": "git-source-sha256-v2:7d7fabb13fcaeaca01d16563bab239082d9625dd531fca7d66ed1a62ee00b782",
+      "stamp_source": "git",
+      "stamp_error": null,
+      "runtime_commit": "7a7012f797d3ad2641628a724ec837c7854919ee",
+      "runtime_dirty": false,
+      "runtime_source_state": "git-source-sha256-v2:7d7fabb13fcaeaca01d16563bab239082d9625dd531fca7d66ed1a62ee00b782",
+      "status": "match",
+      "problems": [],
+      "overrides": []
+    },
+    "candidate": {
+      "schema_version": 4,
+      "features": [],
+      "metallib_compiler_identity": "Apple metal version 32023.921 (metalfe-32023.921.6)",
+      "metallib_sdk_version": "27.0",
+      "build_commit": "5dc38d308ec767e30dba4e5ec818c0ef7f0b80fc",
+      "build_commit_short": "5dc38d308",
+      "build_dirty": false,
+      "build_source_state": "git-source-sha256-v2:fab9906937afcad0dd053ab2f757144cddb8d94bf799fc2831d6c34aeb597ba2",
+      "stamp_source": "git",
+      "stamp_error": null,
+      "runtime_commit": "5dc38d308ec767e30dba4e5ec818c0ef7f0b80fc",
+      "runtime_dirty": false,
+      "runtime_source_state": "git-source-sha256-v2:fab9906937afcad0dd053ab2f757144cddb8d94bf799fc2831d6c34aeb597ba2",
+      "status": "match",
+      "problems": [],
+      "overrides": []
+    }
+  },
+  "m5_probe_commit": "5dc38d308ec767e30dba4e5ec818c0ef7f0b80fc",
+  "m5_probe_sha256": "bdae6c82f2c55469a4ac2baa1b74aed3757a55e9d59fde924a25af3b310eb06f",
+  "m4_probe_sha256": "bf6297b6316739c06afe93650f99a788a60dbb46d57612bfc27d1c91829f9dad",
+  "groups": [
+    {
+      "group": "m5-cpu-final",
+      "passed": 5,
+      "failed": 0,
+      "ignored": 0,
+      "log_sha256": "d97ca6cb029fb68ed0a370484a4ec09455e500e388d5fb5f1c6b737e3b7d800b"
+    },
+    {
+      "group": "m5-policy-final",
+      "passed": 2,
+      "failed": 0,
+      "ignored": 0,
+      "log_sha256": "0bd970746cb5a52180a4a4157a37b57432d29e848fda1a719b9655f6ecbded10"
+    },
+    {
+      "group": "m5-primitives-final",
+      "passed": 5,
+      "failed": 0,
+      "ignored": 0,
+      "log_sha256": "7a0ec487a456018033ec0fade251a769bab5a1be2742ab04fa2aaa68f0e30348"
+    },
+    {
+      "group": "m5-rollback-final",
+      "passed": 1,
+      "failed": 0,
+      "ignored": 0,
+      "log_sha256": "146af381961c6af13c49fa7683f7f6bb3613cf40e7065347fc73466d033f1629"
+    },
+    {
+      "group": "local-down-cpu-final",
+      "passed": 5,
+      "failed": 0,
+      "ignored": 0,
+      "log_sha256": "940ab9e98aa934d607ecb249af26cc81aae9173b4f0cbaa0a944cfefac358505"
+    },
+    {
+      "group": "local-dense-cpu-final",
+      "passed": 6,
+      "failed": 0,
+      "ignored": 0,
+      "log_sha256": "d87356c35c4ad44409494daf0537dd1a0f14e653a292016dd08bd164890105be"
+    },
+    {
+      "group": "local-down-policy-final",
+      "passed": 2,
+      "failed": 0,
+      "ignored": 0,
+      "log_sha256": "0bd970746cb5a52180a4a4157a37b57432d29e848fda1a719b9655f6ecbded10"
+    },
+    {
+      "group": "local-m4-final",
+      "passed": 1,
+      "failed": 0,
+      "ignored": 0,
+      "log_sha256": "18c8a727d5030dead9e9941d8ba9f701bd19fb2da311c2728c0a90abd21dd07b"
+    },
+    {
+      "group": "local-native-dispatch-final",
+      "passed": 22,
+      "failed": 0,
+      "ignored": 0,
+      "log_sha256": "c59004fb889572808088b5a69ede2ee6165eae668227ae6ea2f74c97850561a7"
+    },
+    {
+      "group": "local-packet-final",
+      "passed": 7,
+      "failed": 0,
+      "ignored": 0,
+      "log_sha256": "1c8a19a2225856fc9118db1b5ba3109d030ea6068f05713f611bda4cc6c8a40a"
+    },
+    {
+      "group": "cli-adaptive-final",
+      "passed": 1,
+      "failed": 0,
+      "ignored": 0,
+      "log_sha256": "f47bc9f5d2dd925669e04ef32fe73f34024783f3a85fff901fc0d8b82ee26516"
+    },
+    {
+      "group": "cli-checkpoint-final",
+      "passed": 1,
+      "failed": 0,
+      "ignored": 0,
+      "log_sha256": "bd9f2392b64d30dc63729f0bdceefed48d9f0b24708a645b29828ca594521345"
+    },
+    {
+      "group": "cli-unit-final",
+      "passed": 957,
+      "failed": 0,
+      "ignored": 50,
+      "log_sha256": "cadc9503f0fb7d65f642fba4fc0e72f212e20dafd6901c5ae45429091ea8544d"
+    }
+  ],
+  "local_cli": {
+    "passed": 1526,
+    "failed": 0,
+    "ignored": 70,
+    "targets": [
+      {
+        "target": "cli_ux",
+        "passed": 8,
+        "failed": 0,
+        "ignored": 0
+      },
+      {
+        "target": "deepseek_v41_oracle",
+        "passed": 31,
+        "failed": 0,
+        "ignored": 8
+      },
+      {
+        "target": "qwen",
+        "passed": 957,
+        "failed": 0,
+        "ignored": 50
+      },
+      {
+        "target": "qwen-bench",
+        "passed": 90,
+        "failed": 0,
+        "ignored": 0
+      },
+      {
+        "target": "qwen-census",
+        "passed": 8,
+        "failed": 0,
+        "ignored": 0
+      },
+      {
+        "target": "qwen-grammar-oracle",
+        "passed": 9,
+        "failed": 0,
+        "ignored": 0
+      },
+      {
+        "target": "qwen-lens",
+        "passed": 302,
+        "failed": 0,
+        "ignored": 6
+      },
+      {
+        "target": "qwen-tok",
+        "passed": 1,
+        "failed": 0,
+        "ignored": 0
+      },
+      {
+        "target": "qwen_cli",
+        "passed": 119,
+        "failed": 0,
+        "ignored": 5
+      },
+      {
+        "target": "run_baselines",
+        "passed": 0,
+        "failed": 0,
+        "ignored": 1
+      },
+      {
+        "target": "run_front_info",
+        "passed": 1,
+        "failed": 0,
+        "ignored": 0
+      }
+    ]
+  }
+}

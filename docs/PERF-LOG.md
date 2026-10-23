@@ -6,6 +6,42 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the current state and evidence index.
 
+## 2026-10-23 - GLM Down-Only Tensor Transfer Converts To Native Request Gains
+
+- Fast/Half IQ3_S down at actual widths 1024/2048 reuses the M5 tensor tile.
+  Fused clamped gate/up, post-down route weighting, three stock IQ4_XS down
+  layers, strict precision modes, short packets and M4 keep their paths.
+  Checked preparation precedes bucket mutation; capacity/tier/global rollback
+  retain the generic route. No buffers, staging copies, shader or memory bypass.
+- Validation-on M5 Ultra, stock UD-IQ3_XXS, production lease: dense-fixed
+  plain ABBA/BAAB gives 2K 3059.063 -> 2779.583 ms (-9.14%), 4K 6521.773 ->
+  5955.757 ms (-8.68%). Census confirms only 39 IQ3_S down substitutions per
+  full chunk; dense and fused gate/up counts remain unchanged. The separate
+  stock profile assigns 56.9% to routed experts, with 6.7% profiling overhead;
+  these are diagnostic shares, not independent leaf costs.
+- Saved gameplay, 11,105 input/256 output, context 11,360, frozen R2048,
+  temperature 1/seed 42: both brackets improve. All eight samples give prefill
+  20.261 -> 19.033 s (-6.06%), loaded request 26.483 -> 25.283 s (-4.53%).
+  No cold prefetch; no samples dropped. Decode kernels stay unchanged;
+  observed decode wall is +0.44%.
+  Tokens repeat within each arm, differ between arms, and cap in reasoning;
+  this is latency conversion, not a completed gameplay quality score.
+- Three fixed quality arms retain original and dense-only full-vocabulary
+  references. All 22 maximum-prefix documents/1408 targets give NLL
+  1.464350 / 1.468351 / 1.463745. Candidate-minus-original delta -0.000605,
+  document-bootstrap central90 [-0.003375,+0.002132]; candidate-minus-dense
+  -0.004606 [-0.007796,-0.001604]. Hits 970/969/968. Code NLL rises versus
+  original and long top-1 loses two hits; this is not uniform improvement or
+  model-wide noninferiority. Original/dense observations reproduce the prior
+  checkpoint exactly. T09-T12 greedy/seed11 are strict-correct and identical
+  across all arms; T09/T10 are down-ineligible controls, T11/T12 exercise it.
+- Final M5 native/F64/tail/guard/composition/refusal/global-rollback witnesses,
+  actual M4 fallback, 22 precision tests, seven packet tests, adaptive reuse
+  and deep checkpoint cancellation/restore pass. Serial CLI/integration suite:
+  1526 pass; evidence analyzer: 24 tests pass. Enable only the bounded
+  Fast/Half route; activation staging remains an independent follow-on.
+- [Protocol, all samples, dual-reference quality, strict scoring and limits](bench/2026-10-23-glm-tensor-down/README.md).
+
 ## 2026-10-23 - CED Recon Establishes A Shrinking Dependency-Preserving Plan
 
 - Current native prefill still runs all layers for every prompt row. The

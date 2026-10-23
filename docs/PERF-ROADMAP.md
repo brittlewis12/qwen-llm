@@ -196,11 +196,15 @@ attention tiles at 34.7%. Re-sample after the next landing.
   (central 90% [-0.0003,+0.0081]), one fewer hit/1408; eight tool pairs are
   correct and token-identical. Not a model-wide noninferiority claim.
   Packet: `bench/2026-10-22-glm-tensor-prefill/README.md`.
-- M5 routed IQ3_S down-only tensor transfer: in flight
-  (`perf/glm-tensor-down`). The existing down-policy
-  seam can replace 39 stock grouped down calls while preserving fused
-  gate/up and GLM's post-down weighting; three IQ4_XS layers keep their
-  dedicated incumbent. Gain unmeasured against the dense checkpoint.
+- M5 routed IQ3_S down-only tensor transfer: landed (2026-10-23 down entry).
+  Actual Fast/Half widths 1024/2048 replace 39 stock down calls per chunk;
+  fused gate/up, post-down weighting and three IQ4_XS layers stay unchanged.
+  Against dense-only, plain 2K/4K wall falls 9.1%/8.7%; saved 11K prefill
+  20.261 -> 19.033 s (-6.1%), request 26.483 -> 25.283 s (-4.5%). Cumulative
+  22-document NLL delta versus original is -0.0006, central90
+  [-0.0034,+0.0021], with mixed strata and two fewer hits/1408; tool outputs
+  remain correct and identical. Not exact logits or model-wide noninferiority.
+  Packet: `bench/2026-10-23-glm-tensor-down/README.md`.
   Activation staging is a separate follow-on to the shared V4.1 API, not
   duplicate family-local staging infrastructure.
 - Ordinary run/benchmark workspace selection: landed (2026-10-22 ordinary

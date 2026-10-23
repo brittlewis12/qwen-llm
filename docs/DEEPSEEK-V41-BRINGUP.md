@@ -37,7 +37,7 @@ typed HTTP 503 `memory_admission_denied` responses and automatic longest exact
 causal-prefix reuse from live state or RAM snapshots. CLI statistics use the v2
 schema and benchmarks use the shared family harness. Cold prefill uses bounded
 layer-major chunks (current maximum 2048 rows) without unused prompt logits.
-Attention uses bounded 32-query tiles. Supported fast dense/grouped work and
+Attention uses bounded query tiles. Supported fast dense/grouped work and
 attention now use Half-staged MMA, with the tensor-ops tier on capable M5-class
 devices; NativeF32 remains a distinct qualification path. Cache updates remain
 causal. Current dispatch scope and dated performance evidence live in the

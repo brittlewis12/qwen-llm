@@ -1,0 +1,2512 @@
+{
+  "schema": "glm53.tensor_down_descriptive_analysis.v1",
+  "descriptive_only": true,
+  "arm_flags": {
+    "original": {
+      "dense": false,
+      "down": false
+    },
+    "dense_only": {
+      "dense": true,
+      "down": false
+    },
+    "dense_and_down": {
+      "dense": true,
+      "down": true
+    }
+  },
+  "fixture_sha256": "7f9ac936b08ee0f4e47fbbb42dbfd46c3055f058b4f36fa5d832fbefcad43057",
+  "analyzer_sha256": "4f4067e48002a880324f7cb3d3126fee5912c5ff46c2a331444e616a35c69c07",
+  "quality_helpers_sha256": "44ee0c82e3fdbb212be30ac88b0663d3a3e929b77b7c2b6251cd9f5942bb946f",
+  "numpy_version": "2.4.4",
+  "bootstrap": {
+    "resamples": 20000,
+    "seed": 20261008,
+    "unit": "document",
+    "stratified": true,
+    "percentiles": [
+      5,
+      95
+    ],
+    "applies_to": "extended only",
+    "weights": "equal documents (one maximum-prefix item each); overall strata 8/22,8/22,6/22"
+  },
+  "extended_status": "included",
+  "reports": {
+    "plain": {
+      "metadata": {
+        "report": "plain",
+        "schema": "glm53.tensor_down_plain_abba.v1",
+        "report_sha256": "3e01740fe31b9ef7f1748ab0aa1f74768f834f0febce74d6df24affbccc6d6f7",
+        "binary_sha256": "77ff3f6ae36231db23d285265df7f5fff95cbbb5b3f38288da1e711f607f4419",
+        "fixture_sha256": "7f9ac936b08ee0f4e47fbbb42dbfd46c3055f058b4f36fa5d832fbefcad43057",
+        "packet_sha256": "f1751f95b98646bf58c38600777aba47d35b5d74805a93acbb5c65a3623d47ac",
+        "candidate_source_sha256": "d6d52c435390013b48618796d1f9a9daa592ef1f105f56a105c62ee7246ddde3",
+        "packed_source_sha256": "cc15148bb50938631d4c89acbd2980c8d47b4e032e2ea882a61b6043dac12edd",
+        "dense_source_sha256": "6484b7d922bf4bd5f1362080457f02ffd87385c40376444a7b7bc82c5ff8032c",
+        "down_source_sha256": "d6d52c435390013b48618796d1f9a9daa592ef1f105f56a105c62ee7246ddde3",
+        "down_adapter_source_sha256": "eb1284df5958dc5a668de5f0a3962ede3e74985c3d725e50dda29440cc143367",
+        "lineage": "Fast",
+        "precision": "Half",
+        "mtl_debug_layer": "1",
+        "workspace_rows": 2048,
+        "tensor_table_sha256": "0a1b3662cc2c9c87e078af7da5c52e718c8322e609dd59601bf0dbffb058873d",
+        "q6_k_n64_min_n": 1024,
+        "tensor_tier": "Available",
+        "metal_lease_wait": "1"
+      },
+      "artifact_layout": {
+        "shards": [
+          {
+            "file": "GLM-5.3-Flash-UD-IQ3_XXS-00001-of-00004.gguf",
+            "bytes": 9429984
+          },
+          {
+            "file": "GLM-5.3-Flash-UD-IQ3_XXS-00002-of-00004.gguf",
+            "bytes": 49261511584
+          },
+          {
+            "file": "GLM-5.3-Flash-UD-IQ3_XXS-00003-of-00004.gguf",
+            "bytes": 49075832480
+          },
+          {
+            "file": "GLM-5.3-Flash-UD-IQ3_XXS-00004-of-00004.gguf",
+            "bytes": 22020797792
+          }
+        ],
+        "tensors": 1412,
+        "tensor_table_sha256": "0a1b3662cc2c9c87e078af7da5c52e718c8322e609dd59601bf0dbffb058873d"
+      },
+      "tensor_shape_counts": {
+        "F32 [128, 4]": 12,
+        "F32 [128]": 58,
+        "F32 [1536]": 12,
+        "F32 [24]": 90,
+        "F32 [288]": 43,
+        "F32 [3]": 90,
+        "F32 [4, 1, 8192]": 102,
+        "F32 [4096, 288]": 43,
+        "F32 [4096, 32]": 12,
+        "F32 [4096]": 96,
+        "F32 [512]": 12,
+        "F32 [64]": 34,
+        "F32 [8192]": 34,
+        "IQ2_S [4096, 2048, 288]": 82,
+        "IQ3_S [2048, 4096, 288]": 39,
+        "IQ3_S [4096, 2048, 288]": 2,
+        "IQ4_XS [2048, 4096, 288]": 3,
+        "Q2_K [4096, 2048, 288]": 2,
+        "Q3_K [2048, 4096, 288]": 1,
+        "Q6_K [12288, 4096]": 3,
+        "Q6_K [16384, 4096]": 11,
+        "Q6_K [2048, 4096]": 42,
+        "Q6_K [4096, 12288]": 6,
+        "Q6_K [4096, 1536]": 11,
+        "Q6_K [4096, 154880]": 2,
+        "Q6_K [4096, 2048]": 84,
+        "Q6_K [4096, 8192]": 102,
+        "Q6_K [8192, 4096]": 34,
+        "Q8_0 [128, 8192]": 68,
+        "Q8_0 [1536, 16384]": 12,
+        "Q8_0 [1536, 4096]": 12,
+        "Q8_0 [16384, 24]": 90,
+        "Q8_0 [16384, 4096]": 1,
+        "Q8_0 [2048, 4096]": 1,
+        "Q8_0 [256, 512, 64]": 12,
+        "Q8_0 [4096, 128]": 92,
+        "Q8_0 [4096, 1536]": 1,
+        "Q8_0 [4096, 2048]": 2,
+        "Q8_0 [4096, 512]": 12,
+        "Q8_0 [4096, 64]": 34,
+        "Q8_0 [512, 256, 64]": 12,
+        "Q8_0 [8192, 4096]": 1
+      },
+      "analysis": [
+        {
+          "prompt_tokens": 2048,
+          "samples_per_arm": 4,
+          "mean_wall_ms": {
+            "dense_only": 3059.0625312500006,
+            "dense_and_down": 2779.5826975000004
+          },
+          "candidate_change_percent": -9.136126865500804
+        },
+        {
+          "prompt_tokens": 4096,
+          "samples_per_arm": 4,
+          "mean_wall_ms": {
+            "dense_only": 6521.772875,
+            "dense_and_down": 5955.75685425
+          },
+          "candidate_change_percent": -8.678867412260194
+        }
+      ]
+    },
+    "profile": {
+      "metadata": {
+        "report": "profile",
+        "schema": "glm53.tensor_down_stock_profile.v1",
+        "report_sha256": "6d139f5adf8dfd0afe065c749eb2c2c257ed3a6f6df2f7fb3f87189bc0f44459",
+        "fixture_sha256": "7f9ac936b08ee0f4e47fbbb42dbfd46c3055f058b4f36fa5d832fbefcad43057",
+        "candidate_sha256": "d6d52c435390013b48618796d1f9a9daa592ef1f105f56a105c62ee7246ddde3",
+        "packed_source_sha256": "cc15148bb50938631d4c89acbd2980c8d47b4e032e2ea882a61b6043dac12edd",
+        "dense_source_sha256": "6484b7d922bf4bd5f1362080457f02ffd87385c40376444a7b7bc82c5ff8032c",
+        "lineage": "Fast",
+        "precision": "Half",
+        "mtl_debug_layer": "1",
+        "workspace_rows": 2048,
+        "tensor_table_sha256": "0a1b3662cc2c9c87e078af7da5c52e718c8322e609dd59601bf0dbffb058873d"
+      },
+      "artifact_layout": {
+        "shards": [
+          {
+            "file": "GLM-5.3-Flash-UD-IQ3_XXS-00001-of-00004.gguf",
+            "bytes": 9429984
+          },
+          {
+            "file": "GLM-5.3-Flash-UD-IQ3_XXS-00002-of-00004.gguf",
+            "bytes": 49261511584
+          },
+          {
+            "file": "GLM-5.3-Flash-UD-IQ3_XXS-00003-of-00004.gguf",
+            "bytes": 49075832480
+          },
+          {
+            "file": "GLM-5.3-Flash-UD-IQ3_XXS-00004-of-00004.gguf",
+            "bytes": 22020797792
+          }
+        ],
+        "tensors": 1412,
+        "tensor_table_sha256": "0a1b3662cc2c9c87e078af7da5c52e718c8322e609dd59601bf0dbffb058873d"
+      },
+      "tensor_shape_counts": null,
+      "analysis": {
+        "plain_wall_ms": [
+          3061.737584,
+          3059.0445
+        ],
+        "profiled_wall_ms": 3264.2951249999996,
+        "profiled_over_plain_mean": 1.066626806902018,
+        "command_gpu_ms": 3239.527875033673,
+        "scaled_span_sum_ms": 3033.6173584254916,
+        "stage_shares": {
+          "attention_post": 0.00445797461362068,
+          "attention_pre": 0.009493287043864847,
+          "dense_ffn": 0.012079309001308049,
+          "embed": 0.00020528297880366796,
+          "ffn_post": 0.004620802666039632,
+          "ffn_pre": 0.009412071790254679,
+          "head": 0.00016491598881034872,
+          "mla_projection": 0.13379524876921525,
+          "packed_kda_input_projections": 0.09357432828739255,
+          "packed_kda_output_norm": 0.0018445938988771336,
+          "packed_kda_output_projection": 0.030783450629824335,
+          "packed_kda_prepare": 0.026418007792756142,
+          "packed_kda_recurrence": 0.062192129757487044,
+          "routed_experts": 0.5687449664877309,
+          "router": 0.01204896832537863,
+          "shared_expert": 0.030164661968636194
+        },
+        "warning": "encoder splitting and sample resolution perturb execution; shares diagnose this artifact/baseline, not independent leaf costs or ordinary absolute time",
+        "profiling_overhead_percent": 6.662680690201794
+      }
+    },
+    "quality": {
+      "metadata": {
+        "report": "quality",
+        "schema": "glm53.tensor_down_quality.v1",
+        "report_sha256": "10f7c0e512bc41f7e8f412f613797a3a3370c691eae0dbfa2dc306e8b52b6b3c",
+        "binary_sha256": "77ff3f6ae36231db23d285265df7f5fff95cbbb5b3f38288da1e711f607f4419",
+        "fixture_sha256": "7f9ac936b08ee0f4e47fbbb42dbfd46c3055f058b4f36fa5d832fbefcad43057",
+        "packet_sha256": "f1751f95b98646bf58c38600777aba47d35b5d74805a93acbb5c65a3623d47ac",
+        "candidate_source_sha256": "d6d52c435390013b48618796d1f9a9daa592ef1f105f56a105c62ee7246ddde3",
+        "packed_source_sha256": "cc15148bb50938631d4c89acbd2980c8d47b4e032e2ea882a61b6043dac12edd",
+        "dense_source_sha256": "6484b7d922bf4bd5f1362080457f02ffd87385c40376444a7b7bc82c5ff8032c",
+        "down_source_sha256": "d6d52c435390013b48618796d1f9a9daa592ef1f105f56a105c62ee7246ddde3",
+        "down_adapter_source_sha256": "eb1284df5958dc5a668de5f0a3962ede3e74985c3d725e50dda29440cc143367",
+        "lineage": "Fast",
+        "precision": "Half",
+        "mtl_debug_layer": "1",
+        "workspace_rows": 2048,
+        "tensor_table_sha256": "0a1b3662cc2c9c87e078af7da5c52e718c8322e609dd59601bf0dbffb058873d",
+        "q6_k_n64_min_n": 1024,
+        "tensor_tier": "Available",
+        "metal_lease_wait": "1"
+      },
+      "artifact_layout": {
+        "shards": [
+          {
+            "file": "GLM-5.3-Flash-UD-IQ3_XXS-00001-of-00004.gguf",
+            "bytes": 9429984
+          },
+          {
+            "file": "GLM-5.3-Flash-UD-IQ3_XXS-00002-of-00004.gguf",
+            "bytes": 49261511584
+          },
+          {
+            "file": "GLM-5.3-Flash-UD-IQ3_XXS-00003-of-00004.gguf",
+            "bytes": 49075832480
+          },
+          {
+            "file": "GLM-5.3-Flash-UD-IQ3_XXS-00004-of-00004.gguf",
+            "bytes": 22020797792
+          }
+        ],
+        "tensors": 1412,
+        "tensor_table_sha256": "0a1b3662cc2c9c87e078af7da5c52e718c8322e609dd59601bf0dbffb058873d"
+      },
+      "tensor_shape_counts": {
+        "F32 [128, 4]": 12,
+        "F32 [128]": 58,
+        "F32 [1536]": 12,
+        "F32 [24]": 90,
+        "F32 [288]": 43,
+        "F32 [3]": 90,
+        "F32 [4, 1, 8192]": 102,
+        "F32 [4096, 288]": 43,
+        "F32 [4096, 32]": 12,
+        "F32 [4096]": 96,
+        "F32 [512]": 12,
+        "F32 [64]": 34,
+        "F32 [8192]": 34,
+        "IQ2_S [4096, 2048, 288]": 82,
+        "IQ3_S [2048, 4096, 288]": 39,
+        "IQ3_S [4096, 2048, 288]": 2,
+        "IQ4_XS [2048, 4096, 288]": 3,
+        "Q2_K [4096, 2048, 288]": 2,
+        "Q3_K [2048, 4096, 288]": 1,
+        "Q6_K [12288, 4096]": 3,
+        "Q6_K [16384, 4096]": 11,
+        "Q6_K [2048, 4096]": 42,
+        "Q6_K [4096, 12288]": 6,
+        "Q6_K [4096, 1536]": 11,
+        "Q6_K [4096, 154880]": 2,
+        "Q6_K [4096, 2048]": 84,
+        "Q6_K [4096, 8192]": 102,
+        "Q6_K [8192, 4096]": 34,
+        "Q8_0 [128, 8192]": 68,
+        "Q8_0 [1536, 16384]": 12,
+        "Q8_0 [1536, 4096]": 12,
+        "Q8_0 [16384, 24]": 90,
+        "Q8_0 [16384, 4096]": 1,
+        "Q8_0 [2048, 4096]": 1,
+        "Q8_0 [256, 512, 64]": 12,
+        "Q8_0 [4096, 128]": 92,
+        "Q8_0 [4096, 1536]": 1,
+        "Q8_0 [4096, 2048]": 2,
+        "Q8_0 [4096, 512]": 12,
+        "Q8_0 [4096, 64]": 34,
+        "Q8_0 [512, 256, 64]": 12,
+        "Q8_0 [8192, 4096]": 1
+      },
+      "analysis": {
+        "documents": 3,
+        "quality_token_rows": 576,
+        "intervals": "none: one document per stratum",
+        "comparisons": [
+          {
+            "arm": "original",
+            "baseline": "original",
+            "stratum": "overall",
+            "documents": 3,
+            "tokens": 192,
+            "mean_nll": {
+              "mean": 1.9755967625078377
+            },
+            "top1_accuracy": {
+              "mean": 0.5729166666666666
+            },
+            "nll_delta": {
+              "mean": 0.0
+            },
+            "top1_accuracy_delta": {
+              "mean": 0.0
+            },
+            "top1_agreement": {
+              "mean": 1.0
+            },
+            "mean_kl_reference_to_arm": {
+              "mean": 0.0
+            },
+            "max_kl_reference_to_arm": 0.0
+          },
+          {
+            "arm": "original",
+            "baseline": "original",
+            "stratum": "prose",
+            "documents": 1,
+            "tokens": 64,
+            "mean_nll": {
+              "mean": 1.730008749135852
+            },
+            "top1_accuracy": {
+              "mean": 0.59375
+            },
+            "nll_delta": {
+              "mean": 0.0
+            },
+            "top1_accuracy_delta": {
+              "mean": 0.0
+            },
+            "top1_agreement": {
+              "mean": 1.0
+            },
+            "mean_kl_reference_to_arm": {
+              "mean": 0.0
+            },
+            "max_kl_reference_to_arm": 0.0
+          },
+          {
+            "arm": "original",
+            "baseline": "original",
+            "stratum": "code",
+            "documents": 1,
+            "tokens": 64,
+            "mean_nll": {
+              "mean": 1.239073028267203
+            },
+            "top1_accuracy": {
+              "mean": 0.71875
+            },
+            "nll_delta": {
+              "mean": 0.0
+            },
+            "top1_accuracy_delta": {
+              "mean": 0.0
+            },
+            "top1_agreement": {
+              "mean": 1.0
+            },
+            "mean_kl_reference_to_arm": {
+              "mean": 0.0
+            },
+            "max_kl_reference_to_arm": 0.0
+          },
+          {
+            "arm": "original",
+            "baseline": "original",
+            "stratum": "long",
+            "documents": 1,
+            "tokens": 64,
+            "mean_nll": {
+              "mean": 2.957708510120458
+            },
+            "top1_accuracy": {
+              "mean": 0.40625
+            },
+            "nll_delta": {
+              "mean": 0.0
+            },
+            "top1_accuracy_delta": {
+              "mean": 0.0
+            },
+            "top1_agreement": {
+              "mean": 1.0
+            },
+            "mean_kl_reference_to_arm": {
+              "mean": 0.0
+            },
+            "max_kl_reference_to_arm": 0.0
+          },
+          {
+            "arm": "original",
+            "baseline": "dense_only",
+            "stratum": "overall",
+            "documents": 3,
+            "tokens": 192,
+            "mean_nll": {
+              "mean": 1.9755967625078377
+            },
+            "top1_accuracy": {
+              "mean": 0.5729166666666666
+            },
+            "nll_delta": {
+              "mean": -0.009823130609473077
+            },
+            "top1_accuracy_delta": {
+              "mean": -0.005208333333333333
+            },
+            "top1_agreement": {
+              "mean": 0.9791666666666666
+            },
+            "mean_kl_reference_to_arm": {
+              "mean": 0.009560557246394276
+            },
+            "max_kl_reference_to_arm": 0.09528296564988491
+          },
+          {
+            "arm": "original",
+            "baseline": "dense_only",
+            "stratum": "prose",
+            "documents": 1,
+            "tokens": 64,
+            "mean_nll": {
+              "mean": 1.730008749135852
+            },
+            "top1_accuracy": {
+              "mean": 0.59375
+            },
+            "nll_delta": {
+              "mean": -0.016303341300900165
+            },
+            "top1_accuracy_delta": {
+              "mean": 0.0
+            },
+            "top1_agreement": {
+              "mean": 0.984375
+            },
+            "mean_kl_reference_to_arm": {
+              "mean": 0.0056604578110475865
+            },
+            "max_kl_reference_to_arm": 0.05058314103987115
+          },
+          {
+            "arm": "original",
+            "baseline": "dense_only",
+            "stratum": "code",
+            "documents": 1,
+            "tokens": 64,
+            "mean_nll": {
+              "mean": 1.239073028267203
+            },
+            "top1_accuracy": {
+              "mean": 0.71875
+            },
+            "nll_delta": {
+              "mean": 0.01503866560320688
+            },
+            "top1_accuracy_delta": {
+              "mean": 0.0
+            },
+            "top1_agreement": {
+              "mean": 1.0
+            },
+            "mean_kl_reference_to_arm": {
+              "mean": 0.004730171832003808
+            },
+            "max_kl_reference_to_arm": 0.0872538532761677
+          },
+          {
+            "arm": "original",
+            "baseline": "dense_only",
+            "stratum": "long",
+            "documents": 1,
+            "tokens": 64,
+            "mean_nll": {
+              "mean": 2.957708510120458
+            },
+            "top1_accuracy": {
+              "mean": 0.40625
+            },
+            "nll_delta": {
+              "mean": -0.02820471613072595
+            },
+            "top1_accuracy_delta": {
+              "mean": -0.015625
+            },
+            "top1_agreement": {
+              "mean": 0.953125
+            },
+            "mean_kl_reference_to_arm": {
+              "mean": 0.018291042096131433
+            },
+            "max_kl_reference_to_arm": 0.09528296564988491
+          },
+          {
+            "arm": "dense_only",
+            "baseline": "original",
+            "stratum": "overall",
+            "documents": 3,
+            "tokens": 192,
+            "mean_nll": {
+              "mean": 1.9854198931173108
+            },
+            "top1_accuracy": {
+              "mean": 0.578125
+            },
+            "nll_delta": {
+              "mean": 0.009823130609473077
+            },
+            "top1_accuracy_delta": {
+              "mean": 0.005208333333333333
+            },
+            "top1_agreement": {
+              "mean": 0.9791666666666666
+            },
+            "mean_kl_reference_to_arm": {
+              "mean": 0.009647403709753683
+            },
+            "max_kl_reference_to_arm": 0.10741878183054433
+          },
+          {
+            "arm": "dense_only",
+            "baseline": "original",
+            "stratum": "prose",
+            "documents": 1,
+            "tokens": 64,
+            "mean_nll": {
+              "mean": 1.7463120904367522
+            },
+            "top1_accuracy": {
+              "mean": 0.59375
+            },
+            "nll_delta": {
+              "mean": 0.016303341300900165
+            },
+            "top1_accuracy_delta": {
+              "mean": 0.0
+            },
+            "top1_agreement": {
+              "mean": 0.984375
+            },
+            "mean_kl_reference_to_arm": {
+              "mean": 0.0056716043809679605
+            },
+            "max_kl_reference_to_arm": 0.048771317564120696
+          },
+          {
+            "arm": "dense_only",
+            "baseline": "original",
+            "stratum": "code",
+            "documents": 1,
+            "tokens": 64,
+            "mean_nll": {
+              "mean": 1.224034362663996
+            },
+            "top1_accuracy": {
+              "mean": 0.71875
+            },
+            "nll_delta": {
+              "mean": -0.01503866560320688
+            },
+            "top1_accuracy_delta": {
+              "mean": 0.0
+            },
+            "top1_agreement": {
+              "mean": 1.0
+            },
+            "mean_kl_reference_to_arm": {
+              "mean": 0.00503003571211828
+            },
+            "max_kl_reference_to_arm": 0.10741878183054433
+          },
+          {
+            "arm": "dense_only",
+            "baseline": "original",
+            "stratum": "long",
+            "documents": 1,
+            "tokens": 64,
+            "mean_nll": {
+              "mean": 2.985913226251184
+            },
+            "top1_accuracy": {
+              "mean": 0.421875
+            },
+            "nll_delta": {
+              "mean": 0.02820471613072595
+            },
+            "top1_accuracy_delta": {
+              "mean": 0.015625
+            },
+            "top1_agreement": {
+              "mean": 0.953125
+            },
+            "mean_kl_reference_to_arm": {
+              "mean": 0.018240571036174807
+            },
+            "max_kl_reference_to_arm": 0.09354204802277823
+          },
+          {
+            "arm": "dense_only",
+            "baseline": "dense_only",
+            "stratum": "overall",
+            "documents": 3,
+            "tokens": 192,
+            "mean_nll": {
+              "mean": 1.9854198931173108
+            },
+            "top1_accuracy": {
+              "mean": 0.578125
+            },
+            "nll_delta": {
+              "mean": 0.0
+            },
+            "top1_accuracy_delta": {
+              "mean": 0.0
+            },
+            "top1_agreement": {
+              "mean": 1.0
+            },
+            "mean_kl_reference_to_arm": {
+              "mean": 0.0
+            },
+            "max_kl_reference_to_arm": 0.0
+          },
+          {
+            "arm": "dense_only",
+            "baseline": "dense_only",
+            "stratum": "prose",
+            "documents": 1,
+            "tokens": 64,
+            "mean_nll": {
+              "mean": 1.7463120904367522
+            },
+            "top1_accuracy": {
+              "mean": 0.59375
+            },
+            "nll_delta": {
+              "mean": 0.0
+            },
+            "top1_accuracy_delta": {
+              "mean": 0.0
+            },
+            "top1_agreement": {
+              "mean": 1.0
+            },
+            "mean_kl_reference_to_arm": {
+              "mean": 0.0
+            },
+            "max_kl_reference_to_arm": 0.0
+          },
+          {
+            "arm": "dense_only",
+            "baseline": "dense_only",
+            "stratum": "code",
+            "documents": 1,
+            "tokens": 64,
+            "mean_nll": {
+              "mean": 1.224034362663996
+            },
+            "top1_accuracy": {
+              "mean": 0.71875
+            },
+            "nll_delta": {
+              "mean": 0.0
+            },
+            "top1_accuracy_delta": {
+              "mean": 0.0
+            },
+            "top1_agreement": {
+              "mean": 1.0
+            },
+            "mean_kl_reference_to_arm": {
+              "mean": 0.0
+            },
+            "max_kl_reference_to_arm": 0.0
+          },
+          {
+            "arm": "dense_only",
+            "baseline": "dense_only",
+            "stratum": "long",
+            "documents": 1,
+            "tokens": 64,
+            "mean_nll": {
+              "mean": 2.985913226251184
+            },
+            "top1_accuracy": {
+              "mean": 0.421875
+            },
+            "nll_delta": {
+              "mean": 0.0
+            },
+            "top1_accuracy_delta": {
+              "mean": 0.0
+            },
+            "top1_agreement": {
+              "mean": 1.0
+            },
+            "mean_kl_reference_to_arm": {
+              "mean": 0.0
+            },
+            "max_kl_reference_to_arm": 0.0
+          },
+          {
+            "arm": "dense_and_down",
+            "baseline": "original",
+            "stratum": "overall",
+            "documents": 3,
+            "tokens": 192,
+            "mean_nll": {
+              "mean": 1.973896761602387
+            },
+            "top1_accuracy": {
+              "mean": 0.5677083333333334
+            },
+            "nll_delta": {
+              "mean": -0.0017000009054507121
+            },
+            "top1_accuracy_delta": {
+              "mean": -0.005208333333333333
+            },
+            "top1_agreement": {
+              "mean": 0.984375
+            },
+            "mean_kl_reference_to_arm": {
+              "mean": 0.007124092351398148
+            },
+            "max_kl_reference_to_arm": 0.07131339590456044
+          },
+          {
+            "arm": "dense_and_down",
+            "baseline": "original",
+            "stratum": "prose",
+            "documents": 1,
+            "tokens": 64,
+            "mean_nll": {
+              "mean": 1.7248274681870597
+            },
+            "top1_accuracy": {
+              "mean": 0.59375
+            },
+            "nll_delta": {
+              "mean": -0.005181280948792333
+            },
+            "top1_accuracy_delta": {
+              "mean": 0.0
+            },
+            "top1_agreement": {
+              "mean": 0.984375
+            },
+            "mean_kl_reference_to_arm": {
+              "mean": 0.004207196879587751
+            },
+            "max_kl_reference_to_arm": 0.02441783458340983
+          },
+          {
+            "arm": "dense_and_down",
+            "baseline": "original",
+            "stratum": "code",
+            "documents": 1,
+            "tokens": 64,
+            "mean_nll": {
+              "mean": 1.2409511604751904
+            },
+            "top1_accuracy": {
+              "mean": 0.71875
+            },
+            "nll_delta": {
+              "mean": 0.001878132207987493
+            },
+            "top1_accuracy_delta": {
+              "mean": 0.0
+            },
+            "top1_agreement": {
+              "mean": 1.0
+            },
+            "mean_kl_reference_to_arm": {
+              "mean": 0.003536232708727502
+            },
+            "max_kl_reference_to_arm": 0.03468697198573546
+          },
+          {
+            "arm": "dense_and_down",
+            "baseline": "original",
+            "stratum": "long",
+            "documents": 1,
+            "tokens": 64,
+            "mean_nll": {
+              "mean": 2.955911656144911
+            },
+            "top1_accuracy": {
+              "mean": 0.390625
+            },
+            "nll_delta": {
+              "mean": -0.0017968539755472968
+            },
+            "top1_accuracy_delta": {
+              "mean": -0.015625
+            },
+            "top1_agreement": {
+              "mean": 0.96875
+            },
+            "mean_kl_reference_to_arm": {
+              "mean": 0.01362884746587919
+            },
+            "max_kl_reference_to_arm": 0.07131339590456044
+          },
+          {
+            "arm": "dense_and_down",
+            "baseline": "dense_only",
+            "stratum": "overall",
+            "documents": 3,
+            "tokens": 192,
+            "mean_nll": {
+              "mean": 1.973896761602387
+            },
+            "top1_accuracy": {
+              "mean": 0.5677083333333334
+            },
+            "nll_delta": {
+              "mean": -0.01152313151492379
+            },
+            "top1_accuracy_delta": {
+              "mean": -0.010416666666666666
+            },
+            "top1_agreement": {
+              "mean": 0.984375
+            },
+            "mean_kl_reference_to_arm": {
+              "mean": 0.007102407538357935
+            },
+            "max_kl_reference_to_arm": 0.0620816710145276
+          },
+          {
+            "arm": "dense_and_down",
+            "baseline": "dense_only",
+            "stratum": "prose",
+            "documents": 1,
+            "tokens": 64,
+            "mean_nll": {
+              "mean": 1.7248274681870597
+            },
+            "top1_accuracy": {
+              "mean": 0.59375
+            },
+            "nll_delta": {
+              "mean": -0.021484622249692498
+            },
+            "top1_accuracy_delta": {
+              "mean": 0.0
+            },
+            "top1_agreement": {
+              "mean": 1.0
+            },
+            "mean_kl_reference_to_arm": {
+              "mean": 0.005879616839848896
+            },
+            "max_kl_reference_to_arm": 0.05650951589062036
+          },
+          {
+            "arm": "dense_and_down",
+            "baseline": "dense_only",
+            "stratum": "code",
+            "documents": 1,
+            "tokens": 64,
+            "mean_nll": {
+              "mean": 1.2409511604751904
+            },
+            "top1_accuracy": {
+              "mean": 0.71875
+            },
+            "nll_delta": {
+              "mean": 0.016916797811194373
+            },
+            "top1_accuracy_delta": {
+              "mean": 0.0
+            },
+            "top1_agreement": {
+              "mean": 1.0
+            },
+            "mean_kl_reference_to_arm": {
+              "mean": 0.0034285914579696986
+            },
+            "max_kl_reference_to_arm": 0.03400832264087377
+          },
+          {
+            "arm": "dense_and_down",
+            "baseline": "dense_only",
+            "stratum": "long",
+            "documents": 1,
+            "tokens": 64,
+            "mean_nll": {
+              "mean": 2.955911656144911
+            },
+            "top1_accuracy": {
+              "mean": 0.390625
+            },
+            "nll_delta": {
+              "mean": -0.030001570106273245
+            },
+            "top1_accuracy_delta": {
+              "mean": -0.03125
+            },
+            "top1_agreement": {
+              "mean": 0.953125
+            },
+            "mean_kl_reference_to_arm": {
+              "mean": 0.01199901431725521
+            },
+            "max_kl_reference_to_arm": 0.0620816710145276
+          }
+        ],
+        "tool_summary": [
+          {
+            "arm": "original",
+            "mode": "greedy",
+            "group": "all",
+            "correct": 4,
+            "total": 4
+          },
+          {
+            "arm": "original",
+            "mode": "greedy",
+            "group": "down_unaffected_control",
+            "correct": 2,
+            "total": 2
+          },
+          {
+            "arm": "original",
+            "mode": "greedy",
+            "group": "down_eligible",
+            "correct": 2,
+            "total": 2
+          },
+          {
+            "arm": "original",
+            "mode": "sampled",
+            "group": "all",
+            "correct": 4,
+            "total": 4
+          },
+          {
+            "arm": "original",
+            "mode": "sampled",
+            "group": "down_unaffected_control",
+            "correct": 2,
+            "total": 2
+          },
+          {
+            "arm": "original",
+            "mode": "sampled",
+            "group": "down_eligible",
+            "correct": 2,
+            "total": 2
+          },
+          {
+            "arm": "dense_only",
+            "mode": "greedy",
+            "group": "all",
+            "correct": 4,
+            "total": 4
+          },
+          {
+            "arm": "dense_only",
+            "mode": "greedy",
+            "group": "down_unaffected_control",
+            "correct": 2,
+            "total": 2
+          },
+          {
+            "arm": "dense_only",
+            "mode": "greedy",
+            "group": "down_eligible",
+            "correct": 2,
+            "total": 2
+          },
+          {
+            "arm": "dense_only",
+            "mode": "sampled",
+            "group": "all",
+            "correct": 4,
+            "total": 4
+          },
+          {
+            "arm": "dense_only",
+            "mode": "sampled",
+            "group": "down_unaffected_control",
+            "correct": 2,
+            "total": 2
+          },
+          {
+            "arm": "dense_only",
+            "mode": "sampled",
+            "group": "down_eligible",
+            "correct": 2,
+            "total": 2
+          },
+          {
+            "arm": "dense_and_down",
+            "mode": "greedy",
+            "group": "all",
+            "correct": 4,
+            "total": 4
+          },
+          {
+            "arm": "dense_and_down",
+            "mode": "greedy",
+            "group": "down_unaffected_control",
+            "correct": 2,
+            "total": 2
+          },
+          {
+            "arm": "dense_and_down",
+            "mode": "greedy",
+            "group": "down_eligible",
+            "correct": 2,
+            "total": 2
+          },
+          {
+            "arm": "dense_and_down",
+            "mode": "sampled",
+            "group": "all",
+            "correct": 4,
+            "total": 4
+          },
+          {
+            "arm": "dense_and_down",
+            "mode": "sampled",
+            "group": "down_unaffected_control",
+            "correct": 2,
+            "total": 2
+          },
+          {
+            "arm": "dense_and_down",
+            "mode": "sampled",
+            "group": "down_eligible",
+            "correct": 2,
+            "total": 2
+          }
+        ],
+        "tool_generations": 24,
+        "identical_token_pairs": 24,
+        "token_pairs": 24
+      }
+    },
+    "extended": {
+      "metadata": {
+        "report": "extended",
+        "schema": "glm53.tensor_down_extended_quality.v1",
+        "report_sha256": "800b4923598ccb30df613d73dc66496b588b5aa2e06e95e754c92391b93e93ee",
+        "binary_sha256": "77ff3f6ae36231db23d285265df7f5fff95cbbb5b3f38288da1e711f607f4419",
+        "fixture_sha256": "7f9ac936b08ee0f4e47fbbb42dbfd46c3055f058b4f36fa5d832fbefcad43057",
+        "packet_sha256": "f1751f95b98646bf58c38600777aba47d35b5d74805a93acbb5c65a3623d47ac",
+        "candidate_source_sha256": "d6d52c435390013b48618796d1f9a9daa592ef1f105f56a105c62ee7246ddde3",
+        "packed_source_sha256": "cc15148bb50938631d4c89acbd2980c8d47b4e032e2ea882a61b6043dac12edd",
+        "dense_source_sha256": "6484b7d922bf4bd5f1362080457f02ffd87385c40376444a7b7bc82c5ff8032c",
+        "down_source_sha256": "d6d52c435390013b48618796d1f9a9daa592ef1f105f56a105c62ee7246ddde3",
+        "down_adapter_source_sha256": "eb1284df5958dc5a668de5f0a3962ede3e74985c3d725e50dda29440cc143367",
+        "lineage": "Fast",
+        "precision": "Half",
+        "mtl_debug_layer": "1",
+        "workspace_rows": 2048,
+        "tensor_table_sha256": "0a1b3662cc2c9c87e078af7da5c52e718c8322e609dd59601bf0dbffb058873d",
+        "q6_k_n64_min_n": 1024,
+        "tensor_tier": "Available",
+        "metal_lease_wait": "1"
+      },
+      "artifact_layout": {
+        "shards": [
+          {
+            "file": "GLM-5.3-Flash-UD-IQ3_XXS-00001-of-00004.gguf",
+            "bytes": 9429984
+          },
+          {
+            "file": "GLM-5.3-Flash-UD-IQ3_XXS-00002-of-00004.gguf",
+            "bytes": 49261511584
+          },
+          {
+            "file": "GLM-5.3-Flash-UD-IQ3_XXS-00003-of-00004.gguf",
+            "bytes": 49075832480
+          },
+          {
+            "file": "GLM-5.3-Flash-UD-IQ3_XXS-00004-of-00004.gguf",
+            "bytes": 22020797792
+          }
+        ],
+        "tensors": 1412,
+        "tensor_table_sha256": "0a1b3662cc2c9c87e078af7da5c52e718c8322e609dd59601bf0dbffb058873d"
+      },
+      "tensor_shape_counts": {
+        "F32 [128, 4]": 12,
+        "F32 [128]": 58,
+        "F32 [1536]": 12,
+        "F32 [24]": 90,
+        "F32 [288]": 43,
+        "F32 [3]": 90,
+        "F32 [4, 1, 8192]": 102,
+        "F32 [4096, 288]": 43,
+        "F32 [4096, 32]": 12,
+        "F32 [4096]": 96,
+        "F32 [512]": 12,
+        "F32 [64]": 34,
+        "F32 [8192]": 34,
+        "IQ2_S [4096, 2048, 288]": 82,
+        "IQ3_S [2048, 4096, 288]": 39,
+        "IQ3_S [4096, 2048, 288]": 2,
+        "IQ4_XS [2048, 4096, 288]": 3,
+        "Q2_K [4096, 2048, 288]": 2,
+        "Q3_K [2048, 4096, 288]": 1,
+        "Q6_K [12288, 4096]": 3,
+        "Q6_K [16384, 4096]": 11,
+        "Q6_K [2048, 4096]": 42,
+        "Q6_K [4096, 12288]": 6,
+        "Q6_K [4096, 1536]": 11,
+        "Q6_K [4096, 154880]": 2,
+        "Q6_K [4096, 2048]": 84,
+        "Q6_K [4096, 8192]": 102,
+        "Q6_K [8192, 4096]": 34,
+        "Q8_0 [128, 8192]": 68,
+        "Q8_0 [1536, 16384]": 12,
+        "Q8_0 [1536, 4096]": 12,
+        "Q8_0 [16384, 24]": 90,
+        "Q8_0 [16384, 4096]": 1,
+        "Q8_0 [2048, 4096]": 1,
+        "Q8_0 [256, 512, 64]": 12,
+        "Q8_0 [4096, 128]": 92,
+        "Q8_0 [4096, 1536]": 1,
+        "Q8_0 [4096, 2048]": 2,
+        "Q8_0 [4096, 512]": 12,
+        "Q8_0 [4096, 64]": 34,
+        "Q8_0 [512, 256, 64]": 12,
+        "Q8_0 [8192, 4096]": 1
+      },
+      "analysis": {
+        "documents": 22,
+        "quality_token_rows": 4224,
+        "intervals": "central90 stratified document bootstrap",
+        "comparisons": [
+          {
+            "arm": "original",
+            "baseline": "original",
+            "stratum": "overall",
+            "documents": 22,
+            "tokens": 1408,
+            "mean_nll": {
+              "mean": 1.4643495842213694,
+              "central90": [
+                1.185912247497881,
+                1.7583102379514821
+              ]
+            },
+            "top1_accuracy": {
+              "mean": 0.6889204545454546,
+              "central90": [
+                0.6377840909090909,
+                0.7372159090909091
+              ]
+            },
+            "nll_delta": {
+              "mean": 0.0,
+              "central90": [
+                0.0,
+                0.0
+              ]
+            },
+            "top1_accuracy_delta": {
+              "mean": 0.0,
+              "central90": [
+                0.0,
+                0.0
+              ]
+            },
+            "top1_agreement": {
+              "mean": 1.0,
+              "central90": [
+                1.0,
+                1.0
+              ]
+            },
+            "mean_kl_reference_to_arm": {
+              "mean": 0.0,
+              "central90": [
+                0.0,
+                0.0
+              ]
+            },
+            "max_kl_reference_to_arm": 0.0
+          },
+          {
+            "arm": "original",
+            "baseline": "original",
+            "stratum": "prose",
+            "documents": 8,
+            "tokens": 512,
+            "mean_nll": {
+              "mean": 2.577238554879062,
+              "central90": [
+                2.0722367285912915,
+                3.094343843339927
+              ]
+            },
+            "top1_accuracy": {
+              "mean": 0.466796875,
+              "central90": [
+                0.400390625,
+                0.53515625
+              ]
+            },
+            "nll_delta": {
+              "mean": 0.0,
+              "central90": [
+                0.0,
+                0.0
+              ]
+            },
+            "top1_accuracy_delta": {
+              "mean": 0.0,
+              "central90": [
+                0.0,
+                0.0
+              ]
+            },
+            "top1_agreement": {
+              "mean": 1.0,
+              "central90": [
+                1.0,
+                1.0
+              ]
+            },
+            "mean_kl_reference_to_arm": {
+              "mean": 0.0,
+              "central90": [
+                0.0,
+                0.0
+              ]
+            },
+            "max_kl_reference_to_arm": 0.0
+          },
+          {
+            "arm": "original",
+            "baseline": "original",
+            "stratum": "code",
+            "documents": 8,
+            "tokens": 512,
+            "mean_nll": {
+              "mean": 0.46690157213862393,
+              "central90": [
+                0.161353870515748,
+                0.8051768753794796
+              ]
+            },
+            "top1_accuracy": {
+              "mean": 0.892578125,
+              "central90": [
+                0.818359375,
+                0.958984375
+              ]
+            },
+            "nll_delta": {
+              "mean": 0.0,
+              "central90": [
+                0.0,
+                0.0
+              ]
+            },
+            "top1_accuracy_delta": {
+              "mean": 0.0,
+              "central90": [
+                0.0,
+                0.0
+              ]
+            },
+            "top1_agreement": {
+              "mean": 1.0,
+              "central90": [
+                1.0,
+                1.0
+              ]
+            },
+            "mean_kl_reference_to_arm": {
+              "mean": 0.0,
+              "central90": [
+                0.0,
+                0.0
+              ]
+            },
+            "max_kl_reference_to_arm": 0.0
+          },
+          {
+            "arm": "original",
+            "baseline": "original",
+            "stratum": "long",
+            "documents": 6,
+            "tokens": 384,
+            "mean_nll": {
+              "mean": 1.31042830612144,
+              "central90": [
+                0.6400829707258509,
+                2.0349560486723495
+              ]
+            },
+            "top1_accuracy": {
+              "mean": 0.7135416666666666,
+              "central90": [
+                0.578125,
+                0.8385416666666666
+              ]
+            },
+            "nll_delta": {
+              "mean": 0.0,
+              "central90": [
+                0.0,
+                0.0
+              ]
+            },
+            "top1_accuracy_delta": {
+              "mean": 0.0,
+              "central90": [
+                0.0,
+                0.0
+              ]
+            },
+            "top1_agreement": {
+              "mean": 1.0,
+              "central90": [
+                1.0,
+                1.0
+              ]
+            },
+            "mean_kl_reference_to_arm": {
+              "mean": 0.0,
+              "central90": [
+                0.0,
+                0.0
+              ]
+            },
+            "max_kl_reference_to_arm": 0.0
+          },
+          {
+            "arm": "original",
+            "baseline": "dense_only",
+            "stratum": "overall",
+            "documents": 22,
+            "tokens": 1408,
+            "mean_nll": {
+              "mean": 1.4643495842213694,
+              "central90": [
+                1.185912247497881,
+                1.7583102379514821
+              ]
+            },
+            "top1_accuracy": {
+              "mean": 0.6889204545454546,
+              "central90": [
+                0.6377840909090909,
+                0.7372159090909091
+              ]
+            },
+            "nll_delta": {
+              "mean": -0.004000981259989793,
+              "central90": [
+                -0.008126715533704726,
+                0.0002631211482590862
+              ]
+            },
+            "top1_accuracy_delta": {
+              "mean": 0.0007102272727272727,
+              "central90": [
+                -0.0035511363636363635,
+                0.004971590909090909
+              ]
+            },
+            "top1_agreement": {
+              "mean": 0.9680397727272727,
+              "central90": [
+                0.9588068181818182,
+                0.9765625
+              ]
+            },
+            "mean_kl_reference_to_arm": {
+              "mean": 0.006009826188518468,
+              "central90": [
+                0.004791491791948976,
+                0.007397756955833098
+              ]
+            },
+            "max_kl_reference_to_arm": 0.1009063654059297
+          },
+          {
+            "arm": "original",
+            "baseline": "dense_only",
+            "stratum": "prose",
+            "documents": 8,
+            "tokens": 512,
+            "mean_nll": {
+              "mean": 2.577238554879062,
+              "central90": [
+                2.0722367285912915,
+                3.094343843339927
+              ]
+            },
+            "top1_accuracy": {
+              "mean": 0.466796875,
+              "central90": [
+                0.400390625,
+                0.53515625
+              ]
+            },
+            "nll_delta": {
+              "mean": -0.004411007307205006,
+              "central90": [
+                -0.012234743301564406,
+                0.004289507387393338
+              ]
+            },
+            "top1_accuracy_delta": {
+              "mean": 0.001953125,
+              "central90": [
+                -0.009765625,
+                0.01171875
+              ]
+            },
+            "top1_agreement": {
+              "mean": 0.9375,
+              "central90": [
+                0.9140625,
+                0.9609375
+              ]
+            },
+            "mean_kl_reference_to_arm": {
+              "mean": 0.009343825688794083,
+              "central90": [
+                0.007649683696969817,
+                0.010962310751313653
+              ]
+            },
+            "max_kl_reference_to_arm": 0.1009063654059297
+          },
+          {
+            "arm": "original",
+            "baseline": "dense_only",
+            "stratum": "code",
+            "documents": 8,
+            "tokens": 512,
+            "mean_nll": {
+              "mean": 0.46690157213862393,
+              "central90": [
+                0.161353870515748,
+                0.8051768753794796
+              ]
+            },
+            "top1_accuracy": {
+              "mean": 0.892578125,
+              "central90": [
+                0.818359375,
+                0.958984375
+              ]
+            },
+            "nll_delta": {
+              "mean": 0.00011663830372548082,
+              "central90": [
+                -0.003162116143316427,
+                0.004115805538654302
+              ]
+            },
+            "top1_accuracy_delta": {
+              "mean": 0.001953125,
+              "central90": [
+                0.0,
+                0.005859375
+              ]
+            },
+            "top1_agreement": {
+              "mean": 0.99609375,
+              "central90": [
+                0.9921875,
+                1.0
+              ]
+            },
+            "mean_kl_reference_to_arm": {
+              "mean": 0.0024240389954734544,
+              "central90": [
+                0.0012958617291934356,
+                0.0036105750099464933
+              ]
+            },
+            "max_kl_reference_to_arm": 0.0872538532761677
+          },
+          {
+            "arm": "original",
+            "baseline": "dense_only",
+            "stratum": "long",
+            "documents": 6,
+            "tokens": 384,
+            "mean_nll": {
+              "mean": 1.31042830612144,
+              "central90": [
+                0.6400829707258509,
+                2.0349560486723495
+              ]
+            },
+            "top1_accuracy": {
+              "mean": 0.7135416666666666,
+              "central90": [
+                0.578125,
+                0.8385416666666666
+              ]
+            },
+            "nll_delta": {
+              "mean": -0.008944439281989874,
+              "central90": [
+                -0.01840674875768526,
+                0.0007457751950879962
+              ]
+            },
+            "top1_accuracy_delta": {
+              "mean": -0.0026041666666666665,
+              "central90": [
+                -0.010416666666666666,
+                0.005208333333333333
+              ]
+            },
+            "top1_agreement": {
+              "mean": 0.9713541666666666,
+              "central90": [
+                0.9583333333333334,
+                0.984375
+              ]
+            },
+            "mean_kl_reference_to_arm": {
+              "mean": 0.006345543112210999,
+              "central90": [
+                0.0028742320868635576,
+                0.01069345513725635
+              ]
+            },
+            "max_kl_reference_to_arm": 0.09528296564988491
+          },
+          {
+            "arm": "dense_only",
+            "baseline": "original",
+            "stratum": "overall",
+            "documents": 22,
+            "tokens": 1408,
+            "mean_nll": {
+              "mean": 1.4683505654813593,
+              "central90": [
+                1.188511446293861,
+                1.76380976555009
+              ]
+            },
+            "top1_accuracy": {
+              "mean": 0.6882102272727273,
+              "central90": [
+                0.6377840909090909,
+                0.7365056818181818
+              ]
+            },
+            "nll_delta": {
+              "mean": 0.004000981259989793,
+              "central90": [
+                -0.00026312114825908774,
+                0.008126715533704722
+              ]
+            },
+            "top1_accuracy_delta": {
+              "mean": -0.0007102272727272727,
+              "central90": [
+                -0.004971590909090909,
+                0.0035511363636363635
+              ]
+            },
+            "top1_agreement": {
+              "mean": 0.9680397727272727,
+              "central90": [
+                0.9588068181818182,
+                0.9765625
+              ]
+            },
+            "mean_kl_reference_to_arm": {
+              "mean": 0.006033491304303013,
+              "central90": [
+                0.004818118680944292,
+                0.00742056486898031
+              ]
+            },
+            "max_kl_reference_to_arm": 0.11287027733607306
+          },
+          {
+            "arm": "dense_only",
+            "baseline": "original",
+            "stratum": "prose",
+            "documents": 8,
+            "tokens": 512,
+            "mean_nll": {
+              "mean": 2.581649562186267,
+              "central90": [
+                2.0763334446557398,
+                3.1009004283077486
+              ]
+            },
+            "top1_accuracy": {
+              "mean": 0.46484375,
+              "central90": [
+                0.396484375,
+                0.533203125
+              ]
+            },
+            "nll_delta": {
+              "mean": 0.004411007307205006,
+              "central90": [
+                -0.004289507387393338,
+                0.0122347433015644
+              ]
+            },
+            "top1_accuracy_delta": {
+              "mean": -0.001953125,
+              "central90": [
+                -0.01171875,
+                0.009765625
+              ]
+            },
+            "top1_agreement": {
+              "mean": 0.9375,
+              "central90": [
+                0.9140625,
+                0.9609375
+              ]
+            },
+            "mean_kl_reference_to_arm": {
+              "mean": 0.009366091372270915,
+              "central90": [
+                0.007692271032184421,
+                0.010969705687808546
+              ]
+            },
+            "max_kl_reference_to_arm": 0.11287027733607306
+          },
+          {
+            "arm": "dense_only",
+            "baseline": "original",
+            "stratum": "code",
+            "documents": 8,
+            "tokens": 512,
+            "mean_nll": {
+              "mean": 0.4667849338348985,
+              "central90": [
+                0.16307688428880288,
+                0.80558623939106
+              ]
+            },
+            "top1_accuracy": {
+              "mean": 0.890625,
+              "central90": [
+                0.81640625,
+                0.95703125
+              ]
+            },
+            "nll_delta": {
+              "mean": -0.00011663830372548082,
+              "central90": [
+                -0.004115805538654302,
+                0.003162116143316427
+              ]
+            },
+            "top1_accuracy_delta": {
+              "mean": -0.001953125,
+              "central90": [
+                -0.005859375,
+                0.0
+              ]
+            },
+            "top1_agreement": {
+              "mean": 0.99609375,
+              "central90": [
+                0.9921875,
+                1.0
+              ]
+            },
+            "mean_kl_reference_to_arm": {
+              "mean": 0.0024521023205527097,
+              "central90": [
+                0.0012882583353543047,
+                0.003669445649302225
+              ]
+            },
+            "max_kl_reference_to_arm": 0.10741878183054433
+          },
+          {
+            "arm": "dense_only",
+            "baseline": "original",
+            "stratum": "long",
+            "documents": 6,
+            "tokens": 384,
+            "mean_nll": {
+              "mean": 1.3193727454034299,
+              "central90": [
+                0.6482591390256641,
+                2.0495553136062568
+              ]
+            },
+            "top1_accuracy": {
+              "mean": 0.7161458333333334,
+              "central90": [
+                0.5833333333333334,
+                0.8385416666666666
+              ]
+            },
+            "nll_delta": {
+              "mean": 0.008944439281989874,
+              "central90": [
+                -0.0007457751950879962,
+                0.01840674875768526
+              ]
+            },
+            "top1_accuracy_delta": {
+              "mean": 0.0026041666666666665,
+              "central90": [
+                -0.005208333333333333,
+                0.010416666666666666
+              ]
+            },
+            "top1_agreement": {
+              "mean": 0.9713541666666666,
+              "central90": [
+                0.9583333333333334,
+                0.984375
+              ]
+            },
+            "mean_kl_reference_to_arm": {
+              "mean": 0.006365209858679552,
+              "central90": [
+                0.0028889835219105854,
+                0.010710514724751723
+              ]
+            },
+            "max_kl_reference_to_arm": 0.09354204802277823
+          },
+          {
+            "arm": "dense_only",
+            "baseline": "dense_only",
+            "stratum": "overall",
+            "documents": 22,
+            "tokens": 1408,
+            "mean_nll": {
+              "mean": 1.4683505654813593,
+              "central90": [
+                1.188511446293861,
+                1.76380976555009
+              ]
+            },
+            "top1_accuracy": {
+              "mean": 0.6882102272727273,
+              "central90": [
+                0.6377840909090909,
+                0.7365056818181818
+              ]
+            },
+            "nll_delta": {
+              "mean": 0.0,
+              "central90": [
+                0.0,
+                0.0
+              ]
+            },
+            "top1_accuracy_delta": {
+              "mean": 0.0,
+              "central90": [
+                0.0,
+                0.0
+              ]
+            },
+            "top1_agreement": {
+              "mean": 1.0,
+              "central90": [
+                1.0,
+                1.0
+              ]
+            },
+            "mean_kl_reference_to_arm": {
+              "mean": 0.0,
+              "central90": [
+                0.0,
+                0.0
+              ]
+            },
+            "max_kl_reference_to_arm": 0.0
+          },
+          {
+            "arm": "dense_only",
+            "baseline": "dense_only",
+            "stratum": "prose",
+            "documents": 8,
+            "tokens": 512,
+            "mean_nll": {
+              "mean": 2.581649562186267,
+              "central90": [
+                2.0763334446557398,
+                3.1009004283077486
+              ]
+            },
+            "top1_accuracy": {
+              "mean": 0.46484375,
+              "central90": [
+                0.396484375,
+                0.533203125
+              ]
+            },
+            "nll_delta": {
+              "mean": 0.0,
+              "central90": [
+                0.0,
+                0.0
+              ]
+            },
+            "top1_accuracy_delta": {
+              "mean": 0.0,
+              "central90": [
+                0.0,
+                0.0
+              ]
+            },
+            "top1_agreement": {
+              "mean": 1.0,
+              "central90": [
+                1.0,
+                1.0
+              ]
+            },
+            "mean_kl_reference_to_arm": {
+              "mean": 0.0,
+              "central90": [
+                0.0,
+                0.0
+              ]
+            },
+            "max_kl_reference_to_arm": 0.0
+          },
+          {
+            "arm": "dense_only",
+            "baseline": "dense_only",
+            "stratum": "code",
+            "documents": 8,
+            "tokens": 512,
+            "mean_nll": {
+              "mean": 0.4667849338348985,
+              "central90": [
+                0.16307688428880288,
+                0.80558623939106
+              ]
+            },
+            "top1_accuracy": {
+              "mean": 0.890625,
+              "central90": [
+                0.81640625,
+                0.95703125
+              ]
+            },
+            "nll_delta": {
+              "mean": 0.0,
+              "central90": [
+                0.0,
+                0.0
+              ]
+            },
+            "top1_accuracy_delta": {
+              "mean": 0.0,
+              "central90": [
+                0.0,
+                0.0
+              ]
+            },
+            "top1_agreement": {
+              "mean": 1.0,
+              "central90": [
+                1.0,
+                1.0
+              ]
+            },
+            "mean_kl_reference_to_arm": {
+              "mean": 0.0,
+              "central90": [
+                0.0,
+                0.0
+              ]
+            },
+            "max_kl_reference_to_arm": 0.0
+          },
+          {
+            "arm": "dense_only",
+            "baseline": "dense_only",
+            "stratum": "long",
+            "documents": 6,
+            "tokens": 384,
+            "mean_nll": {
+              "mean": 1.3193727454034299,
+              "central90": [
+                0.6482591390256641,
+                2.0495553136062568
+              ]
+            },
+            "top1_accuracy": {
+              "mean": 0.7161458333333334,
+              "central90": [
+                0.5833333333333334,
+                0.8385416666666666
+              ]
+            },
+            "nll_delta": {
+              "mean": 0.0,
+              "central90": [
+                0.0,
+                0.0
+              ]
+            },
+            "top1_accuracy_delta": {
+              "mean": 0.0,
+              "central90": [
+                0.0,
+                0.0
+              ]
+            },
+            "top1_agreement": {
+              "mean": 1.0,
+              "central90": [
+                1.0,
+                1.0
+              ]
+            },
+            "mean_kl_reference_to_arm": {
+              "mean": 0.0,
+              "central90": [
+                0.0,
+                0.0
+              ]
+            },
+            "max_kl_reference_to_arm": 0.0
+          },
+          {
+            "arm": "dense_and_down",
+            "baseline": "original",
+            "stratum": "overall",
+            "documents": 22,
+            "tokens": 1408,
+            "mean_nll": {
+              "mean": 1.4637447064239957,
+              "central90": [
+                1.184646805417846,
+                1.7579681869045038
+              ]
+            },
+            "top1_accuracy": {
+              "mean": 0.6875,
+              "central90": [
+                0.6363636363636364,
+                0.7350852272727273
+              ]
+            },
+            "nll_delta": {
+              "mean": -0.0006048777973737332,
+              "central90": [
+                -0.0033749247829012604,
+                0.002132325020455496
+              ]
+            },
+            "top1_accuracy_delta": {
+              "mean": -0.0014204545454545455,
+              "central90": [
+                -0.004261363636363636,
+                0.002130681818181818
+              ]
+            },
+            "top1_agreement": {
+              "mean": 0.9715909090909091,
+              "central90": [
+                0.9666193181818182,
+                0.9765625
+              ]
+            },
+            "mean_kl_reference_to_arm": {
+              "mean": 0.005798623192057251,
+              "central90": [
+                0.004648148908085469,
+                0.007019060505724268
+              ]
+            },
+            "max_kl_reference_to_arm": 0.12239178149085744
+          },
+          {
+            "arm": "dense_and_down",
+            "baseline": "original",
+            "stratum": "prose",
+            "documents": 8,
+            "tokens": 512,
+            "mean_nll": {
+              "mean": 2.5700458843949745,
+              "central90": [
+                2.06393168946338,
+                3.0884422286631454
+              ]
+            },
+            "top1_accuracy": {
+              "mean": 0.466796875,
+              "central90": [
+                0.40234375,
+                0.533203125
+              ]
+            },
+            "nll_delta": {
+              "mean": -0.00719267048408781,
+              "central90": [
+                -0.013621866513119021,
+                -0.0009157061324053806
+              ]
+            },
+            "top1_accuracy_delta": {
+              "mean": 0.0,
+              "central90": [
+                -0.005859375,
+                0.005859375
+              ]
+            },
+            "top1_agreement": {
+              "mean": 0.947265625,
+              "central90": [
+                0.9375,
+                0.958984375
+              ]
+            },
+            "mean_kl_reference_to_arm": {
+              "mean": 0.00954542748358627,
+              "central90": [
+                0.007245337401592437,
+                0.011948566018944444
+              ]
+            },
+            "max_kl_reference_to_arm": 0.11766708149274155
+          },
+          {
+            "arm": "dense_and_down",
+            "baseline": "original",
+            "stratum": "code",
+            "documents": 8,
+            "tokens": 512,
+            "mean_nll": {
+              "mean": 0.469177853279554,
+              "central90": [
+                0.16389857018600582,
+                0.8058208458412031
+              ]
+            },
+            "top1_accuracy": {
+              "mean": 0.892578125,
+              "central90": [
+                0.818359375,
+                0.958984375
+              ]
+            },
+            "nll_delta": {
+              "mean": 0.0022762811409300864,
+              "central90": [
+                0.0006758381637342555,
+                0.00422263722512424
+              ]
+            },
+            "top1_accuracy_delta": {
+              "mean": 0.0,
+              "central90": [
+                0.0,
+                0.0
+              ]
+            },
+            "top1_agreement": {
+              "mean": 0.998046875,
+              "central90": [
+                0.994140625,
+                1.0
+              ]
+            },
+            "mean_kl_reference_to_arm": {
+              "mean": 0.0019517883863776116,
+              "central90": [
+                0.0009957887308994664,
+                0.0029449815902522305
+              ]
+            },
+            "max_kl_reference_to_arm": 0.06837082765184743
+          },
+          {
+            "arm": "dense_and_down",
+            "baseline": "original",
+            "stratum": "long",
+            "documents": 6,
+            "tokens": 384,
+            "mean_nll": {
+              "mean": 1.31476560665528,
+              "central90": [
+                0.6457827570122319,
+                2.037797758454138
+              ]
+            },
+            "top1_accuracy": {
+              "mean": 0.7083333333333334,
+              "central90": [
+                0.5703125,
+                0.8359375
+              ]
+            },
+            "nll_delta": {
+              "mean": 0.004337300533839942,
+              "central90": [
+                -0.0006834108296742322,
+                0.009358011897354116
+              ]
+            },
+            "top1_accuracy_delta": {
+              "mean": -0.005208333333333333,
+              "central90": [
+                -0.013020833333333334,
+                0.0026041666666666665
+              ]
+            },
+            "top1_agreement": {
+              "mean": 0.96875,
+              "central90": [
+                0.9583333333333334,
+                0.9791666666666666
+              ]
+            },
+            "mean_kl_reference_to_arm": {
+              "mean": 0.005931997210924744,
+              "central90": [
+                0.0033657010188241736,
+                0.008690411282299791
+              ]
+            },
+            "max_kl_reference_to_arm": 0.12239178149085744
+          },
+          {
+            "arm": "dense_and_down",
+            "baseline": "dense_only",
+            "stratum": "overall",
+            "documents": 22,
+            "tokens": 1408,
+            "mean_nll": {
+              "mean": 1.4637447064239957,
+              "central90": [
+                1.184646805417846,
+                1.7579681869045038
+              ]
+            },
+            "top1_accuracy": {
+              "mean": 0.6875,
+              "central90": [
+                0.6363636363636364,
+                0.7350852272727273
+              ]
+            },
+            "nll_delta": {
+              "mean": -0.004605859057363527,
+              "central90": [
+                -0.00779616241960812,
+                -0.0016041047575781383
+              ]
+            },
+            "top1_accuracy_delta": {
+              "mean": -0.0007102272727272727,
+              "central90": [
+                -0.004971590909090909,
+                0.0035511363636363635
+              ]
+            },
+            "top1_agreement": {
+              "mean": 0.9708806818181818,
+              "central90": [
+                0.9616477272727273,
+                0.9801136363636364
+              ]
+            },
+            "mean_kl_reference_to_arm": {
+              "mean": 0.004971166220442061,
+              "central90": [
+                0.0038402826199358227,
+                0.006240030702582123
+              ]
+            },
+            "max_kl_reference_to_arm": 0.1178359483976963
+          },
+          {
+            "arm": "dense_and_down",
+            "baseline": "dense_only",
+            "stratum": "prose",
+            "documents": 8,
+            "tokens": 512,
+            "mean_nll": {
+              "mean": 2.5700458843949745,
+              "central90": [
+                2.06393168946338,
+                3.0884422286631454
+              ]
+            },
+            "top1_accuracy": {
+              "mean": 0.466796875,
+              "central90": [
+                0.40234375,
+                0.533203125
+              ]
+            },
+            "nll_delta": {
+              "mean": -0.011603677791292816,
+              "central90": [
+                -0.015513929148464917,
+                -0.0075695975610128585
+              ]
+            },
+            "top1_accuracy_delta": {
+              "mean": 0.001953125,
+              "central90": [
+                -0.005859375,
+                0.009765625
+              ]
+            },
+            "top1_agreement": {
+              "mean": 0.94140625,
+              "central90": [
+                0.91796875,
+                0.966796875
+              ]
+            },
+            "mean_kl_reference_to_arm": {
+              "mean": 0.008574235343896255,
+              "central90": [
+                0.006143277972019844,
+                0.011352516919226459
+              ]
+            },
+            "max_kl_reference_to_arm": 0.1178359483976963
+          },
+          {
+            "arm": "dense_and_down",
+            "baseline": "dense_only",
+            "stratum": "code",
+            "documents": 8,
+            "tokens": 512,
+            "mean_nll": {
+              "mean": 0.469177853279554,
+              "central90": [
+                0.16389857018600582,
+                0.8058208458412031
+              ]
+            },
+            "top1_accuracy": {
+              "mean": 0.892578125,
+              "central90": [
+                0.818359375,
+                0.958984375
+              ]
+            },
+            "nll_delta": {
+              "mean": 0.0023929194446555674,
+              "central90": [
+                -0.00083556269173522,
+                0.006280289962992373
+              ]
+            },
+            "top1_accuracy_delta": {
+              "mean": 0.001953125,
+              "central90": [
+                0.0,
+                0.005859375
+              ]
+            },
+            "top1_agreement": {
+              "mean": 0.99609375,
+              "central90": [
+                0.9921875,
+                1.0
+              ]
+            },
+            "mean_kl_reference_to_arm": {
+              "mean": 0.0018035699810889543,
+              "central90": [
+                0.0009532546493429566,
+                0.002734879149706951
+              ]
+            },
+            "max_kl_reference_to_arm": 0.040978124147522735
+          },
+          {
+            "arm": "dense_and_down",
+            "baseline": "dense_only",
+            "stratum": "long",
+            "documents": 6,
+            "tokens": 384,
+            "mean_nll": {
+              "mean": 1.31476560665528,
+              "central90": [
+                0.6457827570122319,
+                2.037797758454138
+              ]
+            },
+            "top1_accuracy": {
+              "mean": 0.7083333333333334,
+              "central90": [
+                0.5703125,
+                0.8359375
+              ]
+            },
+            "nll_delta": {
+              "mean": -0.004607138748149932,
+              "central90": [
+                -0.014472628798159498,
+                0.0036875414908163484
+              ]
+            },
+            "top1_accuracy_delta": {
+              "mean": -0.0078125,
+              "central90": [
+                -0.018229166666666668,
+                0.0026041666666666665
+              ]
+            },
+            "top1_agreement": {
+              "mean": 0.9765625,
+              "central90": [
+                0.9635416666666666,
+                0.9869791666666666
+              ]
+            },
+            "mean_kl_reference_to_arm": {
+              "mean": 0.004390535708307279,
+              "central90": [
+                0.0024103863838775058,
+                0.007219156212570899
+              ]
+            },
+            "max_kl_reference_to_arm": 0.08804542861632751
+          }
+        ],
+        "tool_summary": [
+          {
+            "arm": "original",
+            "mode": "greedy",
+            "group": "all",
+            "correct": 4,
+            "total": 4
+          },
+          {
+            "arm": "original",
+            "mode": "greedy",
+            "group": "down_unaffected_control",
+            "correct": 2,
+            "total": 2
+          },
+          {
+            "arm": "original",
+            "mode": "greedy",
+            "group": "down_eligible",
+            "correct": 2,
+            "total": 2
+          },
+          {
+            "arm": "original",
+            "mode": "sampled",
+            "group": "all",
+            "correct": 4,
+            "total": 4
+          },
+          {
+            "arm": "original",
+            "mode": "sampled",
+            "group": "down_unaffected_control",
+            "correct": 2,
+            "total": 2
+          },
+          {
+            "arm": "original",
+            "mode": "sampled",
+            "group": "down_eligible",
+            "correct": 2,
+            "total": 2
+          },
+          {
+            "arm": "dense_only",
+            "mode": "greedy",
+            "group": "all",
+            "correct": 4,
+            "total": 4
+          },
+          {
+            "arm": "dense_only",
+            "mode": "greedy",
+            "group": "down_unaffected_control",
+            "correct": 2,
+            "total": 2
+          },
+          {
+            "arm": "dense_only",
+            "mode": "greedy",
+            "group": "down_eligible",
+            "correct": 2,
+            "total": 2
+          },
+          {
+            "arm": "dense_only",
+            "mode": "sampled",
+            "group": "all",
+            "correct": 4,
+            "total": 4
+          },
+          {
+            "arm": "dense_only",
+            "mode": "sampled",
+            "group": "down_unaffected_control",
+            "correct": 2,
+            "total": 2
+          },
+          {
+            "arm": "dense_only",
+            "mode": "sampled",
+            "group": "down_eligible",
+            "correct": 2,
+            "total": 2
+          },
+          {
+            "arm": "dense_and_down",
+            "mode": "greedy",
+            "group": "all",
+            "correct": 4,
+            "total": 4
+          },
+          {
+            "arm": "dense_and_down",
+            "mode": "greedy",
+            "group": "down_unaffected_control",
+            "correct": 2,
+            "total": 2
+          },
+          {
+            "arm": "dense_and_down",
+            "mode": "greedy",
+            "group": "down_eligible",
+            "correct": 2,
+            "total": 2
+          },
+          {
+            "arm": "dense_and_down",
+            "mode": "sampled",
+            "group": "all",
+            "correct": 4,
+            "total": 4
+          },
+          {
+            "arm": "dense_and_down",
+            "mode": "sampled",
+            "group": "down_unaffected_control",
+            "correct": 2,
+            "total": 2
+          },
+          {
+            "arm": "dense_and_down",
+            "mode": "sampled",
+            "group": "down_eligible",
+            "correct": 2,
+            "total": 2
+          }
+        ],
+        "tool_generations": 24,
+        "identical_token_pairs": 24,
+        "token_pairs": 24,
+        "dense_checkpoint_reproduction": {
+          "checkpoint": "2026-10-22-glm-tensor-prefill",
+          "arm_mapping": {
+            "original": "old",
+            "dense_only": "tensor"
+          },
+          "exact_recorded_metrics_match": true,
+          "checked_document_arms": 44,
+          "checked_token_rows": 2816,
+          "checkpoint_file_sha256": {
+            "extended-tokens.csv": "f7c90f62264f0455c9e46e7ea044659ca51dad42b60dd93e3562076383d46feb",
+            "extended-documents.csv": "45ee62b65032542d83e10253347969e865d82ab8585143ae21f030144a7ad7fe",
+            "extended-summary.json": "4025da8038493b915e55798b1015f61f3c72be66c93d0a3487ec1f013b3d2b20",
+            "evidence.json": "1865ed674fc00e925fa6ccefc8dd554612e03be545d97d0b9c55ed6af3c7d525"
+          },
+          "checkpoint_report_sha256": "e8146bcc6608a346a311553e6f8608107a4bfd022528fa41ffd035bf5d168d5b",
+          "checkpoint_binary_sha256": "5136f2ae21efd825b9bf50e43658e6009575a52b0fd483dcb2c0fb5a0eb8ef97",
+          "scope": "exact recorded token NLL/top1/argmax/alignment and original-reference KL plus document summaries; not raw-logit or model-wide quality identity"
+        }
+      }
+    }
+  }
+}

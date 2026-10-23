@@ -34,7 +34,10 @@ Design/dependency recon: landed (2026-10-23 CED entry;
 dependency-preserving reconstruction: at most 2541 boundary rows, but only
 24150 complete decoder layer-output rows for long prompts, plus KV-only seeds.
 Trained bounded-128 replay is a separate policy using the same primitives.
-Native implementation is open; no CED wall-time gain is established yet.
+Cold shrinking native implementation: in flight (`perf/v41-ced`). Preserve
+full forward as the fixed reference; qualify publication, every decoder ring,
+continuation and priced peak memory before the first 8K timing claim. No CED
+wall-time gain is established yet; bounded128 remains a separate policy arm.
 Attention and activation-staging kernel lanes remain independent.
 
 Decode budget at depth 2048, 22.3 ms/token: ~10.2 ms bytes (11.1 GiB at the

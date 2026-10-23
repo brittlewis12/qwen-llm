@@ -6,6 +6,39 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the current state and evidence index.
 
+## 2026-10-23 - V4.1 Memory Repair: Bounded EOF Proof, Full-IQ3 Hold Remains
+
+- Shared, read-only partial-EOF windows pass immutable payload, zero-padding,
+  import/use and final-release checks on M4 and M5. The synthetic witness
+  plans 26,411,008 bytes of explicit resources; context/driver overhead is
+  separate. No large-model reload is part of this proof.
+- The old private 8 MiB control produces full-span COW events on M4. On M5,
+  explicit CPU reads add approximately 8 MiB to process footprint without
+  new COW events; shared EOF does not show that charge. This is an accounting
+  observation, not proof of distinct copied pages or the crash's exact cause.
+- Combined host/import admission is implemented in `fix/v41-mapping-safety`;
+  integrated validation is still in progress. It prices full private shadows,
+  retains a host bound when the raw process limit is zero, and rejects the
+  217.414 GiB resident plan under the 80%-of-256-GiB ownership ceiling before
+  import. Do not waive the bound to reproduce old benchmark settings.
+- The full-IQ3 hold includes 2K/4K prefill, not only the failed 8K sequence:
+  reducing prompt length does not shrink resident weights or private-window
+  exposure. Select a fitting artifact with the loader's metadata-only storage
+  plan, then use fresh KV states inside one resident model for CED comparisons.
+- The pilot controller's 21 CPU tests pass, including unstable samples,
+  missing/unhealthy telemetry and stopping only its owned child. No CED
+  wall-time gain or full-model memory-safety qualification is established.
+
+## 2026-10-23 - Ratio-2 Compressor Pair Pool: Negative/Mixed
+
+- Batch prefill pair pooling is correct (state and kernel tests pass) and
+  removes ~9k small serial dispatches, but model-level ABCCBA is mixed:
+  Q2 pp2048/4096 +1.4%/+1.4%, IQ3 pp4096 +1.3%, while IQ3 pp2048
+  regresses 5.5% (control 848.9 -> 802.5; recheck 846.8/850.0 vs 803.0).
+  The 1024-thread-per-pair kernel's cache/occupancy footprint costs more
+  than the dispatches it removes. Not landed.
+- [Probe and interpretation](bench/2026-10-23-v41-pair-pool-negative.md).
+
 ## 2026-10-23 - V4.1 Cold-Load Memory Safety: Performance Qualification Blocked
 
 - Repeated cold 8K full-IQ3 validation on 256 GiB ended in a watchdog

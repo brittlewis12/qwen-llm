@@ -1,6 +1,6 @@
 //! CPU policy/contract tests and opt-in primitive witnesses, not model gates.
 //! GPU tests require MTL_DEBUG_LAYER=1 QWEN_METAL_LEASE_WAIT=1, an explicit
-//! production lease, and a parent-coordinated test binary. No timing here.
+//! production lease, and a release test binary. No timing here.
 
 use super::*;
 use crate::glm5_next_metal::packed;
@@ -123,30 +123,30 @@ fn cpu_geometry_uses_storage_layout_at_actual_shapes_and_genuine_m_tail() {
 }
 
 #[test]
-fn cpu_scope_is_default_off_nested_unwind_safe_and_thread_local() {
+fn cpu_scope_is_default_on_nested_unwind_safe_and_thread_local() {
     let selected = || eligible(HALF, StageMode::Fast, GgmlType::Q6_K, 4096, 1536, 1024).unwrap();
-    assert!(!selected());
-    with_override(true, || {
-        assert!(selected());
-        with_override(false, || assert!(!selected()));
-        assert!(selected());
+    assert!(selected());
+    with_override(false, || {
+        assert!(!selected());
+        with_override(true, || assert!(selected()));
+        assert!(!selected());
         let unwind = std::panic::catch_unwind(|| {
-            let _scope = Scope::new(false);
-            assert!(!selected());
+            let _scope = Scope::new(true);
+            assert!(selected());
             panic!("scope restoration");
         });
         assert!(unwind.is_err());
-        assert!(selected());
+        assert!(!selected());
         std::thread::spawn(|| {
-            assert!(!enabled());
-            with_override(true, || assert!(enabled()));
-            assert!(!enabled());
+            assert!(enabled());
+            with_override(false, || assert!(!enabled()));
+            assert!(enabled());
         })
         .join()
         .unwrap();
-        assert!(selected());
+        assert!(!selected());
     });
-    assert!(!selected());
+    assert!(selected());
 }
 
 #[test]
@@ -422,7 +422,7 @@ fn run(ctx: &MetalContext, body: impl FnOnce(&KernelEncoder)) -> Vec<metal::Disp
 }
 
 #[test]
-#[ignore = "actual M5 + tensor tier, validation ON, production lease; parent coordinates build/GPU"]
+#[ignore = "actual M5 + tensor tier, validation ON, production lease"]
 fn m5_glm_shapes_baseline_vs_tensor_and_f64_oracles() {
     let _lease = validation_lease();
     let ctx = MetalContext::new().expect("Metal is required, not skipped");

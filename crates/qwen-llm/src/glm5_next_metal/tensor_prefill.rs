@@ -1,4 +1,4 @@
-//! Bounded dense Half-operand TensorOps candidate. No expert/MLA absorption
+//! Bounded dense Half-operand TensorOps route. No expert/MLA absorption
 //! routing, buffers, activation staging, or production environment switch.
 
 use super::packed::{Arith, FastPrecision, PackedLineage, StageMode};
@@ -12,8 +12,7 @@ use objc2_metal::{MTLBuffer, MTLCommandBuffer, MTLComputePipelineState, MTLDevic
 
 const KERNEL: &str = "glm5_dense_tensor_prefill";
 const MIN_ROWS: usize = 1024;
-// Parent promotes only after M5 primitive and native-model qualification.
-const DEFAULT_ENABLED: bool = false;
+const DEFAULT_ENABLED: bool = true;
 const THREADGROUP_BYTES: usize = 8192;
 
 #[cfg(test)]
@@ -22,7 +21,7 @@ thread_local! {
 }
 
 /// Same-thread, panic-safe, nestable A/B control. Cannot bypass arithmetic,
-/// geometry, global rollback, tier, or binding checks; absent a scope is OFF.
+/// geometry, global rollback, tier, or binding checks.
 #[cfg(test)]
 pub(crate) struct Scope {
     previous: Option<bool>,
@@ -142,9 +141,6 @@ fn capacity_supported(width: usize, threads: usize, static_bytes: usize, limit: 
 /// Resolve/cache the pipeline without touching the encoder. Pipeline failures
 /// are errors, not permission to hide a broken candidate behind the baseline.
 fn prepare(ctx: &MetalContext, dtype: GgmlType) -> Result<bool, MetalError> {
-    if !metal::moe_grouped_tensor_selected(ctx) {
-        return Ok(false);
-    }
     let name = metal::mat_mat_tensor_pipeline_name(dtype)
         .ok_or_else(|| bad_shape(KERNEL, "no dense tensor pipeline"))?;
     let p = ctx.tensor_pipeline(&name)?;
@@ -226,7 +222,7 @@ pub(super) fn try_encode(
     m: usize,
     n: usize,
 ) -> Result<bool, MetalError> {
-    if !eligible(arith, mode, weight.dtype, k, m, n)? {
+    if !eligible(arith, mode, weight.dtype, k, m, n)? || !metal::moe_grouped_tensor_selected(ctx) {
         return Ok(false);
     }
     check_bindings(ctx, enc, weight, x, y, k, m, n)?;

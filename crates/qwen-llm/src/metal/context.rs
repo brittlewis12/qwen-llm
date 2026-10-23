@@ -1840,3 +1840,6 @@ mod admission_refusal_tests {
         }
     }
 }
+
+#[cfg(test)]
+mod mapping_import_tests;

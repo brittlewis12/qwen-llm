@@ -49,3 +49,19 @@ For priorities: `docs/PERF-ROADMAP.md`.
   plus suffix prefill, then first-token selection and one additional forward
   pass after that token is chosen.
 - No census-to-active-bytes exporter in the bench tooling yet.
+
+## Bounded memory experiments
+
+- New mapping or residency behavior starts with a tiny representative fixture,
+  then one fitting pilot, then repetitions. File size and virtual mapped bytes
+  are not physical-memory bounds; private/COW exposure must be priced explicitly.
+- Compare execution policies inside one resident model when possible, resetting
+  request state between repetitions. Distinguish cold KV from cold model loading.
+- `scripts/bench/pilot.py` supplies a reusable pilot runner. It requires stable
+  native timing samples and healthy host telemetry before further launches,
+  monitors health every two seconds, and supports a deadline and stop file.
+  Cancellation signals only the owned child, with bounded graceful waits; it
+  does not retry, signal process groups, or force-kill an unresponsive child.
+- The runner is secondary protection, not permission to exceed loader admission
+  or rely on cancellation after the kernel stalls. Native binaries already take
+  the production Metal lease; do not wrap them in another lease holder.

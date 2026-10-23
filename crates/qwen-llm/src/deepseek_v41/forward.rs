@@ -3,6 +3,7 @@
 mod attention;
 mod attention_gpu;
 mod bind;
+pub(super) mod binding;
 mod ced;
 mod ced_plan;
 pub use ced::{CedCounters, CedLayerCounters, CedMemoryEstimate, PrefillExecution, PrefillReport};
@@ -140,25 +141,13 @@ struct Linear<'a> {
     output: usize,
 }
 fn native_control(ctx: &MetalContext, dtype: GgmlType) -> Result<Option<MetalTensor>> {
-    op::require(
-        dense_linear_supported(dtype),
-        &format!("unsupported NativeF32 linear storage: {dtype:?}"),
-    )?;
-    if matches!(
-        dtype,
-        GgmlType::F32
-            | GgmlType::F16
-            | GgmlType::BF16
-            | GgmlType::IQ2_XXS
-            | GgmlType::IQ1_S
-            | GgmlType::IQ1_M
-    ) {
+    if binding::native_control_bytes(dtype)? == 0 {
         return Ok(None);
     }
     MetalTensor::from_bytes(
         ctx,
-        bytemuck::cast_slice(&[0i32, metal::ROUTE_STATUS_READY]),
-        vec![2],
+        bytemuck::cast_slice(&binding::NATIVE_CONTROL_INITIAL),
+        vec![binding::NATIVE_CONTROL_INITIAL.len() as u64],
         GgmlType::I32,
     )
     .map(Some)

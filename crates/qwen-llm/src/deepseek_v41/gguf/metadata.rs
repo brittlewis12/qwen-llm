@@ -523,6 +523,7 @@ pub(super) fn parse(g: &GgufFile) -> Result<Plan, LoadError> {
         engram_hash,
         engram_tables,
         dtype_inventory: BTreeMap::new(),
+        binding_linears: BTreeMap::new(),
         bytes: ByteCounters::default(),
         token_map,
         raw_pad,

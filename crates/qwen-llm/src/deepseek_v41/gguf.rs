@@ -193,6 +193,8 @@ pub struct Plan {
     pub engram_hash: HashConfig,
     /// Serialized bytes by GGML dtype, including auxiliary and disk tensors.
     pub dtype_inventory: BTreeMap<String, u64>,
+    /// Exact retained Binder::linear calls, keyed by internal binding name.
+    pub(in crate::deepseek_v41) binding_linears: BTreeMap<String, GgmlType>,
     pub bytes: ByteCounters,
     pub token_map: Vec<u32>,
     pub raw_pad: u32,
@@ -250,7 +252,7 @@ pub fn plan(g: &GgufFile) -> Result<Plan, LoadError> {
                 )));
             }
             validate_storage(t)?;
-            if dense.insert(key, ()).is_some() {
+            if dense.insert(key, t).is_some() {
                 return Err(invalid("duplicate internal dense key"));
             }
             names::validate_shape(t, &p.config)?;
@@ -266,6 +268,15 @@ pub fn plan(g: &GgufFile) -> Result<Plan, LoadError> {
     }
     add(p.bytes.packed_experts, p.bytes.dense_bytes)?;
     names::validate_inventory(&p, &dense)?;
+    for spec in super::forward::binding::linear_inventory(&p.config, &p.schedule, &p.engram_hash) {
+        let t = dense
+            .get(&spec.name)
+            .ok_or_else(|| invalid(format!("missing binding linear {}", spec.name)))?;
+        if !shape_matches(&t.shape, &[spec.input as u64, spec.output as u64]) {
+            return Err(invalid(format!("invalid binding linear shape: {}", t.name)));
+        }
+        p.binding_linears.insert(spec.name, t.dtype);
+    }
     Ok(p)
 }
 fn dense_supported(t: GgmlType) -> bool {

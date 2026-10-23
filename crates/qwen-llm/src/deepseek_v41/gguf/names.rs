@@ -173,7 +173,10 @@ pub(super) fn required_dense(schedule: &Schedule, engram_layers: &[usize]) -> Ve
     names
 }
 
-pub(super) fn validate_inventory(p: &Plan, dense: &BTreeMap<String, ()>) -> Result<(), LoadError> {
+pub(super) fn validate_inventory(
+    p: &Plan,
+    dense: &BTreeMap<String, &TensorDesc>,
+) -> Result<(), LoadError> {
     let layers: Vec<_> = p.engram_hash.layers.iter().map(|l| l.layer).collect();
     for name in required_dense(&p.schedule, &layers) {
         let key = self::dense(&name, p.layers).unwrap();

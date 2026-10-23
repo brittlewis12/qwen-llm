@@ -140,7 +140,17 @@ fn policy_repetitions_are_peaks_not_sums() {
             &price,
         )
         .unwrap();
-        combine(storage(), request, full, ced, 400, 334_226_432, signals()).unwrap()
+        combine(
+            storage(),
+            request,
+            full,
+            ced,
+            400,
+            800,
+            334_226_432,
+            signals(),
+        )
+        .unwrap()
     };
     let both = estimate(&policies);
     let repeated = estimate(&policies.repeat(4));
@@ -169,7 +179,8 @@ fn policy_repetitions_are_peaks_not_sums() {
                 .full_incremental_cpu_bytes
                 .max(ced.incremental_cpu_bytes)
     );
-    assert_eq!(both.required_metal_bytes, 100 + both.runtime_metal_bytes);
+    assert_eq!(both.binding_metal_bytes, 800);
+    assert_eq!(both.required_metal_bytes, 900 + both.runtime_metal_bytes);
     assert_eq!(
         both.required_cpu_bytes,
         200 + 400 + both.runtime_cpu_bytes + 334_226_432
@@ -191,14 +202,27 @@ fn combined_budget_keeps_the_original_pair_sum_and_overflow_regression() {
         total_bytes: 1100,
     };
     let capture = 132_899_840 + 192 * 1024 * 1024;
-    let cold = combine(storage(), request, (0, 0), None, 400, capture, signals()).unwrap();
+    let cold = combine(storage(), request, (0, 0), None, 400, 0, capture, signals()).unwrap();
     assert_eq!(
         (cold.required_metal_bytes, cold.required_cpu_bytes),
         (700, 1100 + capture)
     );
     let mut resident = storage();
     resident.metal_view_bytes = u64::MAX;
-    assert!(combine(resident, request, (0, 0), None, 400, capture, signals()).is_err());
+    assert!(combine(resident, request, (0, 0), None, 400, 0, capture, signals()).is_err());
+    assert!(
+        combine(
+            storage(),
+            request,
+            (0, 0),
+            None,
+            400,
+            u64::MAX,
+            0,
+            signals()
+        )
+        .is_err()
+    );
     assert!(
         binding_vectors_bytes(
             &Config {
@@ -262,8 +286,17 @@ fn checked_geometry_context_and_pricing_fail_closed() {
     );
     let scalar = run(&c, &schedule(), &hash, 1, 24, &full).unwrap();
     assert_eq!(scalar.1, (0, 0));
-    let overflow =
-        combine(storage(), scalar.0, (0, 0), None, 400, u64::MAX, signals()).unwrap_err();
+    let overflow = combine(
+        storage(),
+        scalar.0,
+        (0, 0),
+        None,
+        400,
+        0,
+        u64::MAX,
+        signals(),
+    )
+    .unwrap_err();
     assert_eq!(
         overflow.as_memory_admission().unwrap().reason(),
         metal::MetalMemoryAdmissionReason::RequiredBytesOverflow
@@ -312,5 +345,166 @@ fn default_half_scratch_is_202_mib_without_gpu_family_guesses() {
             &Ok
         )
         .is_err()
+    );
+}
+
+#[test]
+fn binding_controls_price_each_quantized_resource_and_skip_direct_types() {
+    let quantized = [
+        GgmlType::Q2_0,
+        GgmlType::Q2_K,
+        GgmlType::Q3_K,
+        GgmlType::Q4_K,
+        GgmlType::Q5_K,
+        GgmlType::Q6_K,
+        GgmlType::Q8_0,
+        GgmlType::Q4_0,
+        GgmlType::Q4_1,
+        GgmlType::IQ2_S,
+        GgmlType::IQ3_XXS,
+        GgmlType::IQ3_S,
+        GgmlType::IQ4_NL,
+        GgmlType::IQ4_XS,
+        GgmlType::IQ2_XS,
+        GgmlType::MXFP4,
+    ];
+    let direct = [
+        GgmlType::F32,
+        GgmlType::F16,
+        GgmlType::BF16,
+        GgmlType::IQ2_XXS,
+        GgmlType::IQ1_S,
+        GgmlType::IQ1_M,
+    ];
+    let calls = std::cell::Cell::new(0);
+    let price_control = |bytes| {
+        assert_eq!(bytes, 8);
+        calls.set(calls.get() + 1);
+        Ok(16_384 + 1024)
+    };
+    assert_eq!(
+        binding_metal_bytes(quantized.into_iter().chain(direct), &price_control).unwrap(),
+        16 * (16_384 + 1024)
+    );
+    assert_eq!(calls.get(), 16);
+    assert_eq!(
+        binding_metal_bytes(direct, &|_| panic!("direct linear allocated a control")).unwrap(),
+        0
+    );
+    for dtype in [
+        GgmlType::Unknown,
+        GgmlType::I32,
+        GgmlType::Q8_1,
+        GgmlType::Q5_0,
+    ] {
+        assert!(binding_metal_bytes([dtype], &Ok).is_err());
+    }
+    assert!(binding_metal_bytes([GgmlType::Q8_0], &|_| Err("pricing refused".into())).is_err());
+    assert!(binding_metal_bytes([GgmlType::Q8_0; 2], &|_| Ok(u64::MAX)).is_err());
+}
+
+#[test]
+fn ratio_two_256_layer_binding_controls_cost_64_mib_plus_one_page() {
+    let schedule = gguf::Schedule {
+        layers: 256,
+        kv_source_layers: (0..256).collect(),
+        index_source_layers: (0..256).collect(),
+        compression_ratios: vec![2; 256],
+        candidate_source_layer: None,
+    };
+    schedule.validate().unwrap();
+    let specs: Vec<_> =
+        binding::linear_inventory(&Config::default(), &schedule, &hash(0)).collect();
+    // Per layer: five attention, two compressor, three indexer, two HC,
+    // one router and three shared experts. The head is one more allocation.
+    assert_eq!(specs.len(), 4097);
+    let unique: std::collections::BTreeSet<_> = specs.iter().map(|s| &s.name).collect();
+    assert_eq!(unique.len(), 4097);
+    let calls = std::cell::Cell::new(0);
+    let bytes = binding_metal_bytes(specs.iter().map(|_| GgmlType::Q8_0), &|n| {
+        assert_eq!(n, 8);
+        calls.set(calls.get() + 1);
+        Ok(16_384)
+    })
+    .unwrap();
+    assert_eq!(calls.get(), 4097);
+    assert_eq!(bytes, 64 * 1024 * 1024 + 16_384);
+    assert!(bytes > (4097u64 * 8).next_multiple_of(16_384));
+}
+
+#[test]
+fn binding_inventory_has_exact_schedule_roles_and_one_grouped_output_control() {
+    let c = Config::default();
+    let specs: std::collections::BTreeMap<_, _> =
+        binding::linear_inventory(&c, &schedule(), &hash(2))
+            .map(|s| (s.name, (s.input, s.output)))
+            .collect();
+    let base = [
+        "attn.wq_a.weight",
+        "attn.wq_b.weight",
+        "attn.wkv.weight",
+        "attn.wo_a.weight",
+        "attn.wo_b.weight",
+        "hc_attn_fn",
+        "hc_ffn_fn",
+        "ffn.gate.weight",
+        "ffn.shared_experts.w1.weight",
+        "ffn.shared_experts.w3.weight",
+        "ffn.shared_experts.w2.weight",
+    ];
+    let mut expected = std::collections::BTreeSet::from(["head.weight".to_string()]);
+    for layer in 0..4 {
+        expected.extend(base.iter().map(|tail| format!("layers.{layer}.{tail}")));
+    }
+    for (layer, tails) in [
+        (
+            0,
+            vec![
+                "attn.compressor.wkv.weight",
+                "attn.compressor.wgate.weight",
+                "attn.indexer.wk.weight",
+                "attn.indexer.wq_b.weight",
+                "attn.indexer.weights_proj.weight",
+                "engram.wkv.weight",
+            ],
+        ),
+        (1, vec!["engram.wkv.weight"]),
+        (
+            2,
+            vec![
+                "attn.compressor.wkv.weight",
+                "attn.indexer.wk.weight",
+                "attn.indexer.wq_b.weight",
+                "attn.indexer.weights_proj.weight",
+            ],
+        ),
+        (
+            3,
+            vec![
+                "attn.indexer.wq_b.weight",
+                "attn.indexer.weights_proj.weight",
+            ],
+        ),
+    ] {
+        expected.extend(
+            tails
+                .into_iter()
+                .map(|tail| format!("layers.{layer}.{tail}")),
+        );
+    }
+    assert_eq!(
+        specs
+            .keys()
+            .cloned()
+            .collect::<std::collections::BTreeSet<_>>(),
+        expected
+    );
+    assert_eq!(specs.len(), 58);
+    assert_eq!(specs["layers.0.attn.wo_a.weight"], (4096, 8192));
+    assert_eq!(specs["layers.1.engram.wkv.weight"], (6144, 25_600));
+    assert_eq!(specs["layers.0.hc_attn_fn"], (20_480, 24));
+    assert_eq!(
+        binding_metal_bytes(specs.values().map(|_| GgmlType::Q8_0), &|_| Ok(16_384)).unwrap(),
+        58 * 16_384
     );
 }

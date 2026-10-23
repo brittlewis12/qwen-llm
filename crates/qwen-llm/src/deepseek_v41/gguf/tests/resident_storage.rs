@@ -1,9 +1,9 @@
 use super::*;
 
-const PAGE: usize = 16_384;
-const M5_MAX_BUFFER_LENGTH: usize = 179_357_827_072;
+pub(super) const PAGE: usize = 16_384;
+pub(super) const M5_MAX_BUFFER_LENGTH: usize = 179_357_827_072;
 
-fn preflight_signals() -> metal::MetalMemorySignals {
+pub(super) fn preflight_signals() -> metal::MetalMemorySignals {
     metal::MetalMemorySignals {
         recommended_max_bytes: 1 << 40,
         current_allocated_bytes: 0,
@@ -42,6 +42,7 @@ fn cold_preflight_uses_validated_small_metadata_without_import_or_new_maps() {
         .unwrap();
         assert_eq!(cold.resident_storage, storage);
         assert_eq!(cold.caller_cpu_bytes, 334_226_432);
+        assert_eq!(cold.binding_metal_bytes, 0);
         assert_eq!(Arc::strong_count(&g.shards[0].mmap), refs);
         assert!(cold.ced.is_none()); // One-layer metadata has no decoder split.
         assert_eq!(
@@ -54,7 +55,7 @@ fn cold_preflight_uses_validated_small_metadata_without_import_or_new_maps() {
         );
         assert_eq!(
             cold.required_metal_bytes,
-            storage.metal_view_bytes + cold.runtime_metal_bytes
+            storage.metal_view_bytes + cold.binding_metal_bytes + cold.runtime_metal_bytes
         );
         assert_eq!(
             cold.required_cpu_bytes,

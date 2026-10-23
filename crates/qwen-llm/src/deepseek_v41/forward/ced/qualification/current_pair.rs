@@ -101,6 +101,7 @@ struct RuntimeUpper {
 struct ResidentPreloadUpper {
     storage_view_metal_bytes: u64,
     private_shadow_cpu_bytes: u64,
+    binding_control_metal_bytes: u64,
     bookkeeping_cpu_bytes: u64,
     planner_evidence: Value,
 }
@@ -139,6 +140,7 @@ fn preload_report(cold: &ColdPrefillPreflight) -> AResult<(RuntimeUpper, Residen
     let resident = ResidentPreloadUpper {
         storage_view_metal_bytes: storage.metal_view_bytes,
         private_shadow_cpu_bytes: storage.private_shadow_bytes,
+        binding_control_metal_bytes: cold.binding_metal_bytes,
         bookkeeping_cpu_bytes: cold.binding_cpu_bytes,
         planner_evidence: json!({"page_size": storage.page_size,
             "max_buffer_length": storage.max_buffer_length, "windows": windows,
@@ -228,6 +230,10 @@ fn source_identity() -> AResult<(PathBuf, Value)> {
         (
             "crates/qwen-llm/src/deepseek_v41/forward/preflight.rs",
             include_bytes!("../../preflight.rs"),
+        ),
+        (
+            "crates/qwen-llm/src/deepseek_v41/forward/binding.rs",
+            include_bytes!("../../binding.rs"),
         ),
         (
             "crates/qwen-llm/src/deepseek_v41/forward/memory.rs",

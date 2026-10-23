@@ -15,6 +15,9 @@ pub struct ColdPrefillPreflight {
     pub runtime_cpu_bytes: u64,
     /// Conservative binding vectors, metadata copies and descriptor bookkeeping.
     pub binding_cpu_bytes: u64,
+    /// Retained per-linear native controls, priced as separate Metal resources.
+    /// Excludes shared resident weight views and per-request runtime buffers.
+    pub binding_metal_bytes: u64,
     pub caller_cpu_bytes: u64,
     pub required_metal_bytes: u64,
     pub required_cpu_bytes: u64,
@@ -189,15 +192,18 @@ pub(in crate::deepseek_v41) fn preflight_with_pricing(
             product(resident_storage.windows.len() as u64, 4096)?,
             product(gguf.tensors.len() as u64, 1024)?,
         ])?;
-        Ok((request, full, ced, binding_cpu_bytes))
+        let binding_metal_bytes = binding_metal_bytes(p.binding_linears.values().copied(), price)?;
+        Ok((request, full, ced, binding_cpu_bytes, binding_metal_bytes))
     };
-    let (request, full, ced, binding_cpu_bytes) = calculate().map_err(LoadError::Invalid)?;
+    let (request, full, ced, binding_cpu_bytes, binding_metal_bytes) =
+        calculate().map_err(LoadError::Invalid)?;
     let result = combine(
         resident_storage,
         request,
         full,
         ced,
         binding_cpu_bytes,
+        binding_metal_bytes,
         caller_cpu_bytes,
         signals,
     )?;
@@ -205,6 +211,20 @@ pub(in crate::deepseek_v41) fn preflight_with_pricing(
         return Err(reason.into());
     }
     Ok(result)
+}
+
+fn binding_metal_bytes(
+    dtypes: impl IntoIterator<Item = GgmlType>,
+    price: &impl Fn(u64) -> Result<u64>,
+) -> Result<u64> {
+    dtypes.into_iter().try_fold(0, |total, dtype| {
+        let bytes = binding::native_control_bytes(dtype)?;
+        if bytes == 0 {
+            return Ok(total);
+        }
+        // Each call allocates its own buffer; rounding the aggregate underprices it.
+        sum(&[total, price(bytes)?])
+    })
 }
 
 fn binding_vectors_bytes(c: &Config, layers: usize) -> Result<u64> {
@@ -232,6 +252,7 @@ fn combine(
     full: (u64, u64),
     ced: Option<CedMemoryEstimate>,
     binding_cpu_bytes: u64,
+    binding_metal_bytes: u64,
     caller_cpu_bytes: u64,
     signals: metal::MetalMemorySignals,
 ) -> std::result::Result<ColdPrefillPreflight, LoadError> {
@@ -260,7 +281,11 @@ fn combine(
         full.1
             .max(ced.as_ref().map_or(0, |c| c.incremental_cpu_bytes)),
     ])?;
-    let required_metal_bytes = sum(&[resident_storage.metal_view_bytes, runtime_metal_bytes])?;
+    let required_metal_bytes = sum(&[
+        resident_storage.metal_view_bytes,
+        binding_metal_bytes,
+        runtime_metal_bytes,
+    ])?;
     let required_cpu_bytes = sum(&[
         resident_storage.private_shadow_bytes,
         binding_cpu_bytes,
@@ -283,6 +308,7 @@ fn combine(
         runtime_metal_bytes,
         runtime_cpu_bytes,
         binding_cpu_bytes,
+        binding_metal_bytes,
         caller_cpu_bytes,
         required_metal_bytes,
         required_cpu_bytes,

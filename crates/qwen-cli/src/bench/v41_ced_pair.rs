@@ -500,6 +500,219 @@ mod tests {
         }
     }
 
+    #[cfg(target_os = "macos")]
+    fn caller_envelope_peak_rss_bytes() -> u64 {
+        let mut usage = std::mem::MaybeUninit::<libc::rusage>::uninit();
+        // Darwin reports ru_maxrss in bytes; no allocator or Metal observer is installed.
+        assert_eq!(
+            unsafe { libc::getrusage(libc::RUSAGE_SELF, usage.as_mut_ptr()) },
+            0
+        );
+        u64::try_from(unsafe { usage.assume_init() }.ru_maxrss).unwrap()
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn caller_cpu_envelope_worst_case_isolated_rss_regression() {
+        let module = module_path!().split_once("::").unwrap().1;
+        let child_test = format!("{module}::caller_cpu_envelope_worst_case_rss_child");
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                &child_test,
+                "--ignored",
+                "--nocapture",
+                "--test-threads=1",
+            ])
+            .output()
+            .expect("run the exact CPU-only envelope child");
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            output.status.success() && stdout.contains("paired-caller-envelope-rss"),
+            "CPU-only envelope child failed or did not run: {}\n{stdout}\n{stderr}",
+            output.status
+        );
+        eprint!("{stdout}{stderr}");
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    #[ignore = "CPU-only RSS child; run by the isolated envelope regression"]
+    fn caller_cpu_envelope_worst_case_rss_child() {
+        use qwen_llm::deepseek_v41::forward::CedLayerCounters;
+
+        const RUNS: usize = 16;
+        const LAYERS: usize = 256;
+        const VOCAB: usize = 1_048_576;
+
+        let head: Vec<f32> = (0..VOCAB).map(|i| (i + 1) as f32).collect();
+        let bits: Vec<i32> = head.iter().map(|v| v.to_bits() as i32).collect();
+        let fingerprint = token_ids_sha256_i32le(&bits);
+        assert_eq!(fingerprint.len(), 64);
+        let head_and_bits_bytes = u64::try_from(
+            head.capacity() * std::mem::size_of::<f32>()
+                + bits.capacity() * std::mem::size_of::<i32>(),
+        )
+        .unwrap();
+        assert!(head_and_bits_bytes >= 8 << 20);
+        let remaining_bytes = CALLER_CPU_BYTES.checked_sub(head_and_bits_bytes).unwrap();
+        // Charge live head/bits capacities explicitly, then measure the remaining
+        // workload in a fresh single-test process. RSS deltas are observational:
+        // startup high-water and allocator reuse prevent a formal heap proof.
+        let before = caller_envelope_peak_rss_bytes();
+
+        let ids: Vec<u32> = synthetic_prompt_ids(MAX_PP, VOCAB as u32, u64::MAX)
+            .into_iter()
+            .map(|id| id as u32)
+            .collect();
+        let mut bench = v41_pair_test_bench(
+            || Ok(()),
+            |_, ids, execution| {
+                assert_eq!(ids.len(), MAX_PP);
+                let mut actual = report(execution);
+                if let Some(counters) = actual.counters.as_mut() {
+                    // Saturated numeric payloads stress JSON digit storage, not
+                    // execution geometry; no GPU work or allocation occurs.
+                    *counters = CedCounters {
+                        encoder_output_rows: usize::MAX,
+                        publication_rows: usize::MAX,
+                        decoder_output_rows: usize::MAX,
+                        decoder_seed_rows: usize::MAX,
+                        encoded_commands: usize::MAX,
+                        completed_commands: usize::MAX,
+                        layers: (0..LAYERS)
+                            .map(|layer| CedLayerCounters {
+                                layer,
+                                encoder_output_rows: usize::MAX,
+                                decoder_output_rows: usize::MAX,
+                                seed_rows: usize::MAX,
+                                publication_rows: usize::MAX,
+                                selection_producer_rows: usize::MAX,
+                            })
+                            .collect(),
+                    };
+                    actual.memory = Some(CedMemoryEstimate {
+                        retained_residual_bytes: u64::MAX,
+                        retained_mix_bytes: u64::MAX,
+                        retained_selected_bytes: u64::MAX,
+                        retained_candidate_bytes: u64::MAX,
+                        priced_retained_bytes: u64::MAX,
+                        priced_chunk_bytes: u64::MAX,
+                        priced_half_chunk_bytes: u64::MAX,
+                        priced_publication_bytes: u64::MAX,
+                        priced_seed_bytes: u64::MAX,
+                        command_reserve_bytes: u64::MAX,
+                        incremental_metal_bytes: u64::MAX,
+                        incremental_cpu_bytes: u64::MAX,
+                        retained_control_cpu_bytes: u64::MAX,
+                        chunk_hash_cpu_bytes: u64::MAX,
+                        process_ru_maxrss_before_bytes: Some(u64::MAX),
+                        process_ru_maxrss_after_bytes: Some(u64::MAX),
+                        observation_method: "Metal allocation samples after allocation, encoding and completion; cumulative process ru_maxrss, not an isolated CED or continuous driver peak",
+                    });
+                    actual.observed_incremental_metal_bytes = Some(u64::MAX);
+                }
+                Ok((Vec::new(), actual))
+            },
+        );
+        let evidence = collect(
+            RUNS,
+            || Ok(()),
+            |case| {
+                let execution = case.policy.execution();
+                bench.set_pair_execution(execution)?;
+                bench.begin_pp_rep(0)?;
+                bench.prefill(&ids)?;
+                let report = bench.v41_prefill_diagnostics().unwrap();
+                report.validate_pair(execution, MAX_PP)?;
+                let sample = NativeCase {
+                    sample_ns: 100_000_000,
+                    semantics: bench.semantics(),
+                    report,
+                    logits_sha256_f32le: fingerprint.clone(),
+                };
+                bench.end_pair_case();
+                Ok(sample)
+            },
+        )
+        .unwrap();
+        assert_eq!(evidence.len(), 38);
+        let preweight = serde_json::json!({
+            "accepted": true,
+            "prompt_rows": MAX_PP,
+            "capacity": MAX_PP,
+            "executions": [PrefillExecution::FullForward, PrefillExecution::ShrinkingCed],
+            "resident_metal_view_bytes": u64::MAX,
+            "resident_private_shadow_bytes": u64::MAX,
+            "ced_incremental_metal_bytes": u64::MAX,
+            "ced_incremental_cpu_bytes": u64::MAX,
+            "full_incremental_metal_bytes": u64::MAX,
+            "full_incremental_cpu_bytes": u64::MAX,
+            "runtime_metal_bytes": u64::MAX,
+            "runtime_cpu_bytes": u64::MAX,
+            "binding_cpu_bytes": u64::MAX,
+            "caller_cpu_bytes": CALLER_CPU_BYTES,
+            "required_metal_bytes": u64::MAX,
+            "required_cpu_bytes": u64::MAX,
+            "admission_reason": "AdmittedWithHostBudget",
+            "admission_required_bytes": u64::MAX,
+            "working_set_headroom_bytes": u64::MAX,
+            "scope": "preweight_budget_not_reservation_later_state_and_prefill_gates_retained",
+        });
+        let rows = aggregate(
+            &row_context(),
+            MAX_PP,
+            RUNS,
+            u64::MAX,
+            VOCAB,
+            &preweight,
+            &evidence,
+        )
+        .unwrap();
+        assert_eq!(rows.len(), 2);
+        for row in &rows {
+            assert_eq!(row.n_repetitions, RUNS);
+            assert_eq!(row.samples_ns.len(), RUNS);
+            let diagnostics = &row.diagnostics.as_ref().unwrap()["deepseek_v41"];
+            assert_eq!(
+                diagnostics["prefill_repetitions"].as_array().unwrap().len(),
+                RUNS
+            );
+            let chronology = diagnostics["paired_benchmark"]["native_chronological_cases"]
+                .as_array()
+                .unwrap();
+            assert_eq!(chronology.len(), 38);
+            for (case, (expected, _)) in chronology.iter().zip(&evidence) {
+                let layers = &case["prefill_report"]["calls"][0]["counters"]["layers"];
+                if expected.policy == Policy::B {
+                    assert_eq!(layers.as_array().unwrap().len(), LAYERS);
+                } else {
+                    assert!(layers.is_null());
+                }
+            }
+        }
+        // Exercise the suite's final serialization without constructing an
+        // additional parsed DOM that production does not retain.
+        let json = serde_json::to_string(&rows).unwrap();
+        assert_eq!(json.matches("\"native_chronological_cases\"").count(), 2);
+        assert_eq!(json.matches("\"layers\":[").count(), 2 * 19 + RUNS);
+        std::hint::black_box((&head, &bits, &rows, &evidence, &json));
+        let result_peak_delta = caller_envelope_peak_rss_bytes()
+            .checked_sub(before)
+            .unwrap();
+        let charged_bytes = head_and_bits_bytes.checked_add(result_peak_delta).unwrap();
+        println!(
+            "paired-caller-envelope-rss head_and_bits_bytes={head_and_bits_bytes} result_peak_delta_bytes={result_peak_delta} remaining_bytes={remaining_bytes} charged_bytes={charged_bytes} limit_bytes={CALLER_CPU_BYTES} json_bytes={} measurement=observational_not_heap_proof",
+            json.len()
+        );
+        assert!(
+            result_peak_delta <= remaining_bytes,
+            "caller envelope exceeded: live head/bits {head_and_bits_bytes} + result RSS delta {result_peak_delta} = {charged_bytes} > {CALLER_CPU_BYTES}; no extra tolerance"
+        );
+        drop((head, bits, rows, evidence, json));
+    }
+
     #[test]
     fn bounded_schedule_is_two_policies_with_both_warm_before_pilot() {
         use Policy::{A, B};

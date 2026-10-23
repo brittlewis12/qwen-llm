@@ -40,6 +40,15 @@ continuation and priced peak memory before the first 8K timing claim. No CED
 wall-time gain is established yet; bounded128 remains a separate policy arm.
 Attention and activation-staging kernel lanes remain independent.
 
+Memory safety repair: in flight (`fix/v41-mapping-safety`). Repeated cold 8K
+validation of the full IQ3 artifact on 256 GiB exposed a watchdog failure;
+CED performance qualification is blocked. Its 217.414 GiB resident-window
+plan includes 156.059 GiB of whole-window private EOF mappings for only
+30,496 padding bytes. Do not repeat near-capacity full-model loads until
+shared EOF mapping, combined host admission and bounded import probes are
+validated. A passing Metal-only budget or an earlier successful run is not
+a physical-memory safety argument; see the 2026-10-23 memory-safety entry.
+
 Decode budget at depth 2048, 22.3 ms/token: ~10.2 ms bytes (11.1 GiB at the
 ~1.09 TB/s the GEMV probe reaches), ~8 ms dispatch floor (~1,600 dispatches),
 ~4 ms spread thin. Prefill split per 2048-token chunk, fresh post-tile six-span sample

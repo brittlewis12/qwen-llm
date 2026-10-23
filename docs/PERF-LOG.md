@@ -6,6 +6,29 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the current state and evidence index.
 
+## 2026-10-23 - V4.1 Cold-Load Memory Safety: Performance Qualification Blocked
+
+- Repeated cold 8K full-IQ3 validation on 256 GiB ended in a watchdog
+  timeout. The experimental CED pilot deteriorated from 18.52 to 34.16 s
+  against approximately 12.38 s full forward; this interrupted sequence is
+  not a qualified throughput comparison or a CED speedup.
+- Archived metadata reconstructs 217.414 GiB of resident windows. Five
+  windows totaling 156.059 GiB enter `map_copy` solely for 30,496 bytes of
+  partial-EOF padding. Engram is separate and has no intersection with
+  these windows. Private read-only mappings are not equivalent to shared
+  file-backed mappings; whether Metal materializes their interiors needs
+  a bounded import witness, not another large load.
+- Recorded admission accepted `admitted_process_budget_omitted` with a
+  zero process-headroom signal. CPU estimates therefore did not constrain
+  that decision. The crash process's approximately 139 GiB-equivalent COW
+  and page-in counters are cumulative events, not distinct resident totals
+  or proof of the driver's exact failure mechanism.
+- Repair shared EOF ownership and combined admission, then validate tiny
+  immutable files through import/use/release before any fitting-model
+  pilot. Long repetition sequences need an early-stop decision between
+  cases. No memory bypass, near-capacity reload or performance promotion
+  follows from the earlier numerical checks.
+
 ## 2026-10-23 - V4.1 Attention Sink: Tensor-Ops Score/PV, +1.7-2.3%
 
 - Ported the stalled attention-tensor lane's `score_tensor`/`pv_tensor`

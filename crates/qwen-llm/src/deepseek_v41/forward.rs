@@ -696,15 +696,19 @@ impl<'a> Forward<'a> {
             .step_with_config(engram::Token::Compressed(compressed), &self.engram_hash)
             .map_err(|e| format!("{e:?}"))?;
         state.poisoned = true;
-        let result = self.step_inner(
-            state,
-            token as usize,
-            &rows,
-            cancel,
-            trace,
-            capture,
-            with_logits,
-        )?;
+        // The synchronous step returns CPU values; persistent device state owns
+        // Retained buffers. Completed commands must not outlive the priced step.
+        let result = objc2::rc::autoreleasepool(|_| {
+            self.step_inner(
+                state,
+                token as usize,
+                &rows,
+                cancel,
+                trace,
+                capture,
+                with_logits,
+            )
+        })?;
         state.addresses = next;
         state.poisoned = false;
         Ok(result)

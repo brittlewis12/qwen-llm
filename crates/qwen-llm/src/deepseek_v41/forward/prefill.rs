@@ -404,8 +404,11 @@ pub(super) fn allocate(
     rows: usize,
     dtype: GgmlType,
 ) -> Result<MetalTensor> {
-    MetalTensor::zeros_dtype_unstaged(ctx, vec![width as u64, rows as u64], dtype)
-        .map_err(|e| e.to_string())
+    let tensor = MetalTensor::zeros_dtype_unstaged(ctx, vec![width as u64, rows as u64], dtype)
+        .map_err(|e| e.to_string())?;
+    #[cfg(test)]
+    tests::lifetime::allocated(ctx, &tensor);
+    Ok(tensor)
 }
 
 pub(super) fn row(t: &MetalTensor, width: usize, row: usize) -> MetalTensor {
@@ -603,48 +606,54 @@ pub(super) fn run_captured(
     let end = state.position() + tokens.len();
     let mut logits = Vec::new();
     for chunk in tokens.chunks(chunk_rows) {
-        cancelled(cancel)?;
-        let start = state.position();
-        let last = with_logits && start + chunk.len() == end;
-        if chunk.len() == 1 {
-            logits = model.execute_token(
-                state,
-                chunk[0],
+        // Admission prices one chunk, not the whole suffix. Drop its completed
+        // commands and their resource autoreleases before allocating the next.
+        logits = objc2::rc::autoreleasepool(|_| -> std::result::Result<Vec<f32>, StateError> {
+            cancelled(cancel)?;
+            let start = state.position();
+            let last = with_logits && start + chunk.len() == end;
+            if chunk.len() == 1 {
+                return Ok(model.execute_token(
+                    state,
+                    chunk[0],
+                    cancel,
+                    None,
+                    capture
+                        .as_mut()
+                        .map(|sink| &mut **sink as &mut dyn capture::Capture),
+                    last,
+                )?);
+            }
+            let mut next = state.addresses;
+            let mut hashes = Vec::with_capacity(chunk.len());
+            for &token in chunk {
+                let (rows, addresses) = next
+                    .step_with_config(
+                        engram::Token::Compressed(model.token_map[token as usize]),
+                        &model.engram_hash,
+                    )
+                    .map_err(|e| format!("{e:?}"))?;
+                hashes.push(rows);
+                next = addresses;
+            }
+            state.poisoned = true;
+            let logits = state.gpu_step.as_mut().unwrap().run_chunk(
+                model,
+                start,
+                chunk,
+                &hashes,
                 cancel,
-                None,
+                last,
                 capture
                     .as_mut()
                     .map(|sink| &mut **sink as &mut dyn capture::Capture),
-                last,
             )?;
-            continue;
-        }
-        let mut next = state.addresses;
-        let mut hashes = Vec::with_capacity(chunk.len());
-        for &token in chunk {
-            let (rows, addresses) = next
-                .step_with_config(
-                    engram::Token::Compressed(model.token_map[token as usize]),
-                    &model.engram_hash,
-                )
-                .map_err(|e| format!("{e:?}"))?;
-            hashes.push(rows);
-            next = addresses;
-        }
-        state.poisoned = true;
-        logits = state.gpu_step.as_mut().unwrap().run_chunk(
-            model,
-            start,
-            chunk,
-            &hashes,
-            cancel,
-            last,
-            capture
-                .as_mut()
-                .map(|sink| &mut **sink as &mut dyn capture::Capture),
-        )?;
-        state.addresses = next;
-        state.poisoned = false;
+            state.addresses = next;
+            state.poisoned = false;
+            Ok(logits)
+        })?;
+        #[cfg(test)]
+        tests::lifetime::completed_chunk(model.ctx, state, chunk.len());
     }
     Ok(logits)
 }

@@ -1,5 +1,6 @@
 use super::*;
 
+pub(super) mod lifetime;
 mod real;
 
 #[test]

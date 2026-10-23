@@ -8,6 +8,30 @@ binaries (`build_identity.status = match` on every arm), A/B/B/A, 2 runs
 per arm, seed 1. Raw: `metagross:~/qwen-runs/2026-10-22-tensor-tile/`
 (`abba-f16act/`, `f16act.log`, `quality-f16act/`).
 
+## 2026-10-23 takeover on the 64-slot dense tile
+
+The series was rebased onto `e75cce0a` and integrated with the 64-slot
+dense tile: the wide Q8_0 form has an `_f16act` twin
+(`kernel_mat_mat_q8_0_f16act_tensor_wide`), so the dense re-read removal
+and the half activation copies stack. Same build-vs-build ABCCBA
+(main `e75cce0a` vs this branch, both source-matched, build identity
+`match`), 2 runs per arm, seed 1:
+
+| artifact | shape | main e75cce0a | f16act | change |
+|---|---|---:|---:|---:|
+| IQ3_XXS | pp2048 | 790.2 | **836.9** | **+5.91%** |
+| IQ3_XXS | pp4096 | 757.7 | **799.3** | **+5.49%** |
+| Q2_K_XL | pp2048 | 788.3 | **838.9** | **+6.42%** |
+| Q2_K_XL | pp4096 | 754.5 | **805.4** | **+6.75%** |
+
+The six-document IQ3 witness is bitwise identical to the baseline
+(concatenated SHA-256
+`b90633d032d9eb12616ff970ea47b16a0730c4a267bb02b2c24b36ef60d853cd`,
+mean NLL 2.146367194, top-1 0.5677). 173 tests pass across the tensor,
+V4.1 attention/prefill and GLM tensor-prefill filters. Decode rechecked:
+tg32 Q2 43.2 / IQ3 41.0. Raw:
+`metagross:~/qwen-runs/2026-10-23-f16act-takeover/`.
+
 ## What changed
 
 Both tensor tile forms read F32 activations and cast each 32 x 32 block

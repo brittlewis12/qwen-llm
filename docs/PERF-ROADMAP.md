@@ -26,7 +26,7 @@ expected effect, status. Status is one of `open`, `in flight (branch)`,
 `in flight` with your branch; a second lane finding it claimed reads the branch
 before building anything adjacent. This replaces relaying between sessions.
 
-### DeepSeek V4.1-Flash (main after the 64-slot dense tile: pp2048 Q2 793 / IQ3 791 tok/s, pp4096 Q2 758 / IQ3 758; decode untouched by the dense change, rechecked tg32 Q2 43.1 / IQ3 40.5, depth tg32@d2048 41.6 from the prior landing)
+### DeepSeek V4.1-Flash (main after the half activation copies: pp2048 Q2 839 / IQ3 837 tok/s, pp4096 Q2 805 / IQ3 799; decode rechecked tg32 Q2 43.2 / IQ3 41.0, depth tg32@d2048 41.6 from the prior landing)
 
 CED encoder-only bulk prefill is the leading architectural opportunity.
 Design/dependency recon: landed (2026-10-23 CED entry;
@@ -76,12 +76,18 @@ attention tiles at 34.7%. Re-sample after the next landing.
   double-buffered slabs, 64-k steps (the tile wants small resident
   threadgroups). What remains is dequant + staging + the F32 activation
   path.
-- Half activation copies (`_f16act` + HalfScratch): branch ABBA reports
-  pp2048 +5.0-5.1% / pp4096 +4.4-4.5% against main 545318d3, including the
-  conversion scratch, with byte-identical held-text logits: in flight
-  (`perf/v41-tensor-f16act`). Per dispatch, routed tiles +9-24% (IQ3_XXS
-  gate+up 13.1 -> 10.7 ms, down 6.7 -> 5.9) and dense tiles +14-41%
-  (q_a 494 -> 350 us, output_b 2.97 -> 2.24 ms).
+- Half activation copies (`_f16act` + `prefill::HalfScratch`): landed
+  (2026-10-22 half-activation entry,
+  bench/2026-10-22-v41-tensor-half-activations.md; rebased and integrated
+  with the 64-slot dense tile 2026-10-23). The rebased build-vs-build
+  ABCCBA against the dense landing: IQ3 pp2048 790.2 -> 836.9 (+5.91%),
+  pp4096 757.7 -> 799.3 (+5.49%); Q2 788.3 -> 838.9 (+6.42%), 754.5 ->
+  805.4 (+6.75%). Held-text logits bitwise identical; 173 tests pass.
+  The wide dense Q8_0 form has an `_f16act` twin, so the two landings
+  stack. 
+- Cheaper IQ3_XXS/Q3_K decoders (vectorized packed extraction, table-driven
+  half output): the routed tiles' remainder is their K/I-quant decoders
+  (47-57 TFLOPS vs 75-79 for Q8_0 at the same geometry): open.
 - Native MXFP4 right operands (`metal_fp4_e2m1_format` + `ue8m0` block-32
   scales, 27.0 entry points) would replace the software dequant for the 30
   MXFP4 down layers if packed values/scales map exactly; unmeasured: open.
@@ -98,10 +104,9 @@ attention tiles at 34.7%. Re-sample after the next landing.
   `QWEN_V41_DENSE_NARROW=1` forces the 32-slot form for A/B. A
   64-slot x 128-row combined probe is bitwise correct but 22-57% slower
   (32 KiB output staging, 64-float accumulator); 64x64 is the knee:
-  negative (`perf/v41-dense-combined`). The activation re-read per column
-  tile is still owned by `perf/v41-tensor-f16act`. Other families' dense
-  prefill GEMMs still take `mat_mat`; unmeasured there and outside the
-  V4.1 gain budget: open.
+  negative (`perf/v41-dense-combined`). The half activation copies
+  (below) now feed this tile. Other families' dense prefill GEMMs still
+  take `mat_mat`; unmeasured there and outside the V4.1 gain budget: open.
 - Attention sink tile occupancy: landed (2026-10-22 sink-tile entry,
   bench/2026-10-22-v41-sink-tile.md). A 32-row tile dispatched
   `heads/16 * 32` threadgroups (128 at 64 heads) against 80 cores and paid

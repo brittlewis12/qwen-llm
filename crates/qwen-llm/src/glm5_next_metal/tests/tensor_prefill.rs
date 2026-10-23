@@ -461,7 +461,8 @@ fn m5_glm_shapes_baseline_vs_tensor_and_f64_oracles() {
                 assert_eq!(candidate.len(), 1);
                 assert_eq!(
                     candidate[0].kernel,
-                    metal::mat_mat_tensor_pipeline_name(dtype, metal::TensorActivation::F32).unwrap()
+                    metal::mat_mat_tensor_pipeline_name(dtype, metal::TensorActivation::F32)
+                        .unwrap()
                 );
                 assert_eq!(
                     [

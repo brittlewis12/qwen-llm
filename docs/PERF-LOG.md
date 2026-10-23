@@ -6,6 +6,28 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the current state and evidence index.
 
+## 2026-10-23 - V4.1: Half Activation Copies Landed, +6% Prefill
+
+- Took over `perf/v41-tensor-f16act`, rebased it onto the 64-slot dense
+  landing (`e75cce0a`), and integrated it: the wide Q8_0 dense form has an
+  `_f16act` twin, so the weight-reuse and activation-copy landings stack.
+  Each distinct prefill input is converted to F16 once; every tensor tile
+  reads the copy instead of re-reading F32 and half-casting per weight
+  tile. The staged half operand is the same, so outputs are bitwise
+  identical.
+- Build-vs-build ABCCBA (main `e75cce0a` vs the rebased branch, 2 runs per
+  arm, source-matched, identity `match`): IQ3 pp2048 790.2 -> 836.9
+  (+5.91%), pp4096 757.7 -> 799.3 (+5.49%); Q2 pp2048 788.3 -> 838.9
+  (+6.42%), pp4096 754.5 -> 805.4 (+6.75%).
+- IQ3 held-text witness bitwise identical (SHA-256 b90633d0..., mean NLL
+  2.146367194, top-1 0.5677). 173 tests pass across tensor, V4.1
+  attention/prefill and GLM tensor-prefill filters. Decode rechecked:
+  tg32 Q2 43.2 / IQ3 41.0.
+- The routed tiles' remaining cost is their K/I-quant decoders (47-57
+  TFLOPS vs 75-79 for Q8_0 at the same geometry); that is the next open
+  lever.
+- [Rebased ABBA, witness and packet](bench/2026-10-22-v41-tensor-half-activations.md).
+
 ## 2026-10-23 - V4.1 Prefill: 64-Slot Dense Tile +3.4-3.6%
 
 - The dense Q8_0 tensor tile now stages one 64-row weight slab for two

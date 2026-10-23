@@ -109,7 +109,7 @@ the next selection step.
 - One artifact pair, one M5 Ultra. The fused selector is exact on the
   held-text and synthetic selection protocols, but it is a rewritten sort,
   so keep the regression and witness checks with any future change.
-- PP4080/4096 ratio-one layers fall back above padded 2048; PP2048 has full
-  coverage.
-- The 16 KiB threadgroup footprint is fixed; the 4096 variant needs a
-  measured occupancy check before landing.
+- PP4096 late ratio-one tiles fell back above padded 2048; the 4K follow-up
+  covers them (bench/2026-10-22-v41-select-fuse4k.md).
+- The 16 KiB common-path threadgroup footprint is unchanged; the 4K follow-up
+  adds the 32 KiB late-tile variant.

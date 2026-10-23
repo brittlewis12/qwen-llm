@@ -593,8 +593,10 @@ mod tests {
                 &CedRequest::cold(8, 8),
             )
         };
-        let mut s = Schedule::default();
-        s.candidate_source_layer = None;
+        let mut s = Schedule {
+            candidate_source_layer: None,
+            ..Schedule::default()
+        };
         assert!(matches!(
             check(&s),
             Err(CedPlanError::UnsupportedSchedule(_))
@@ -736,8 +738,10 @@ mod tests {
             )
         };
         let r = CedRequest::cold(8192, 8192);
-        let mut c = Config::default();
-        c.window = 0;
+        let mut c = Config {
+            window: 0,
+            ..Config::default()
+        };
         assert_eq!(check(&c, &r), Err(CedPlanError::UnsupportedWindow(0)));
         if let Some(window) = (u32::MAX as usize).checked_add(1) {
             c.window = window;

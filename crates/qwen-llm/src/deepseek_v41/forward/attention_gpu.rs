@@ -1195,24 +1195,6 @@ impl Workspace {
         Ok(())
     }
 
-    pub(super) fn prepare_rows(
-        &self,
-        ctx: &MetalContext,
-        enc: &KernelEncoder,
-        id: usize,
-        w: &Weights<'_>,
-        input: &MetalTensor,
-        rows: &Rows,
-    ) -> std::result::Result<(), metal::MetalError> {
-        if self.ced.is_some() {
-            return Err(metal::MetalError::BadShape {
-                kernel: "v41_attention_prepare_rows",
-                detail: "CED requires typed encode_rows_prepare".into(),
-            });
-        }
-        self.prepare_rows_mode(ctx, enc, id, w, input, rows, GlobalKvMode::Ordinary)
-    }
-
     fn prepare_rows_mode(
         &self,
         ctx: &MetalContext,
@@ -1339,6 +1321,7 @@ impl Workspace {
         Ok(())
     }
 
+    #[cfg(test)]
     pub(super) fn encode_batch_row(
         &mut self,
         ctx: &MetalContext,
@@ -1604,20 +1587,18 @@ impl Workspace {
             let cache = &self.owners[owner];
             let ratio = self.schedule.ratio(id);
             let length = (position + 1) / ratio;
-            if self.schedule.owns_kv(id) {
-                if mode == GlobalKvMode::Ordinary {
-                    self.publish_owner_transition(
-                        ctx,
-                        enc,
-                        id,
-                        position,
-                        w,
-                        input,
-                        &self.latent,
-                        &self.gate,
-                        prepared.is_some(),
-                    )?;
-                }
+            if self.schedule.owns_kv(id) && mode == GlobalKvMode::Ordinary {
+                self.publish_owner_transition(
+                    ctx,
+                    enc,
+                    id,
+                    position,
+                    w,
+                    input,
+                    &self.latent,
+                    &self.gate,
+                    prepared.is_some(),
+                )?;
             }
             selected_count = length.min(c.index_topk);
             if select && self.schedule.produces_index(id) && length > 0 {

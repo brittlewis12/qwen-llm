@@ -472,8 +472,8 @@ fn ced_scalar_error_restores_control_bindings_and_finite_publication_blocks_comp
     ced.begin_ced(&plan(&c, 1, 2)).unwrap();
     ced.begin_ced_encoder(0, 1).unwrap();
     execute(&ctx, |enc| {
-        for id in 0..20 {
-            ced.encode(&ctx, enc, id, 0, &weights[id], &input).unwrap();
+        for (id, weight) in weights[..20].iter().enumerate() {
+            ced.encode(&ctx, enc, id, 0, weight, &input).unwrap();
         }
         ced.publish_ced_scalar(&ctx, enc, 20, 0, &weights[20], &input)
             .unwrap();
@@ -509,8 +509,8 @@ fn ced_scalar_error_restores_control_bindings_and_finite_publication_blocks_comp
     bad.begin_ced_encoder(0, 1).unwrap();
     let nan = upload(&ctx, &[f32::NAN; 8], vec![8]).unwrap();
     execute(&ctx, |enc| {
-        for id in 0..20 {
-            bad.encode(&ctx, enc, id, 0, &weights[id], &input).unwrap();
+        for (id, weight) in weights[..20].iter().enumerate() {
+            bad.encode(&ctx, enc, id, 0, weight, &input).unwrap();
         }
         bad.publish_ced_scalar(&ctx, enc, 20, 0, &weights[20], &nan)
             .unwrap();

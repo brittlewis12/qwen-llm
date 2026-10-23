@@ -440,7 +440,7 @@ fn checked_i32(t: &MetalTensor) -> AResult<&[i32]> {
     let count = usize::try_from(t.n_elements())?;
     ensure!(
         t.dtype == GgmlType::I32
-            && t.offset % 4 == 0
+            && t.offset.is_multiple_of(4)
             && t.buffer.storageMode() == objc2_metal::MTLStorageMode::Shared
             && t.offset
                 .checked_add(

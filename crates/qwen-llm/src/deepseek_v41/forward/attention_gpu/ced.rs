@@ -243,14 +243,17 @@ impl QueryControlView {
     pub(in super::super) fn rows(&self) -> usize {
         self.range.len()
     }
+    #[cfg(test)]
     pub(in super::super) fn absolute_rows(&self) -> Range<usize> {
         self.range.clone()
     }
 
+    #[cfg(test)]
     pub(in super::super) fn selected(&self) -> &MetalTensor {
         &self.selected
     }
 
+    #[cfg(test)]
     pub(in super::super) fn candidates(&self) -> &MetalTensor {
         &self.candidates
     }
@@ -728,16 +731,16 @@ impl Workspace {
     }
 
     pub(super) fn finish_ced_rows(&self, rows: &Rows) -> Result<()> {
-        if let Some(p) = self.ced.as_ref().and_then(|c| c.pending.as_ref()) {
-            if let Phase::Decoder(_) = p.phase {
-                op::require(
-                    p.encoded
-                        && Cursor::attention_done(p)
-                        && rows.controls.as_ref().is_some_and(|v| v.range == p.range),
-                    "CED finish rows range/order",
-                )?;
-                p.finished.set(true);
-            }
+        if let Some(p) = self.ced.as_ref().and_then(|c| c.pending.as_ref())
+            && let Phase::Decoder(_) = p.phase
+        {
+            op::require(
+                p.encoded
+                    && Cursor::attention_done(p)
+                    && rows.controls.as_ref().is_some_and(|v| v.range == p.range),
+                "CED finish rows range/order",
+            )?;
+            p.finished.set(true);
         }
         Ok(())
     }
@@ -1173,7 +1176,7 @@ impl Workspace {
                     gate,
                 )?;
             }
-            if position % 2 == 0 {
+            if position.is_multiple_of(2) {
                 copy(ctx, enc, value, &cache.pending_value, c.head_dim)?;
                 copy(ctx, enc, gate, &cache.pending_gate, c.head_dim)?;
             } else {
@@ -1186,7 +1189,7 @@ impl Workspace {
                 dispatch(enc, &pso, c.head_dim);
             }
         }
-        if (position + 1) % ratio == 0 {
+        if (position + 1).is_multiple_of(ratio) {
             norm(
                 ctx,
                 enc,

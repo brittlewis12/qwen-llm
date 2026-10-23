@@ -105,10 +105,11 @@ Re-sample after the next landing.
   +15.5%/+11.3% Q2 pp2048/4096, +15.3%/+10.8% IQ3; vs incumbent
   +19.7%/+15.2%, +19.1%/+14.8%; census 88,133 -> 45,982; serial span
   18.7% -> 5.2%; witness identical across all three arms.
-- Selection padded-4096 extension: open. At PP4096 ratio-one producer
-  layers reach visible length 4096 and still take the per-row sort; a
-  32 KiB threadgroup variant or two-pass merge needs an occupancy check
-  before claiming.
+- Selection padded-4096 extension: in flight (`perf/v41-select-fuse4k`).
+  At PP4096 the late ratio-one tiles reach padded 4096 and still take the
+  per-row sort. Test a 32 KiB threadgroup variant (one threadgroup per row,
+  4096-entry bitonic arrays) and keep it only if the reduced occupancy still
+  beats the fallback; otherwise record the negative and keep 2048.
 - Scalar score kernel tuning: superseded on the released geometry by the
   MMA tile; the 8-lane scalar kernel remains the fallback for other
   geometry. The 4-key/8-lane variants measured +3.0%/+1.2-1.4% on the old

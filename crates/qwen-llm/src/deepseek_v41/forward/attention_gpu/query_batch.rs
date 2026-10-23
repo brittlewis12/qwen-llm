@@ -367,11 +367,22 @@ impl Workspace {
                     depth: 1,
                 },
             );
-            let fused = last_length <= 2048
+            let allow_4k = last_length > 2048
+                && last_length <= 4096
+                && std::env::var_os("QWEN_V41_SELECT_FUSE_2048").is_none();
+            let fused = (last_length <= 2048 || allow_4k)
                 && c.index_topk <= 2048
                 && std::env::var_os("QWEN_V41_SELECT_SPLIT_SORT").is_none();
             if fused {
-                pipeline(ctx, enc, "select_fused_rows")?;
+                pipeline(
+                    ctx,
+                    enc,
+                    if allow_4k {
+                        "select_fused_rows_4k"
+                    } else {
+                        "select_fused_rows"
+                    },
+                )?;
                 enc.set_bytes(
                     0,
                     &[

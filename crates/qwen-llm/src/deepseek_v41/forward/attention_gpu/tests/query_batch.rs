@@ -183,12 +183,12 @@ fn compare_case(ctx: &MetalContext, c: &Config, schedule: &Schedule, start: usiz
                 && schedule.produces_index(id)
                 && ratio > 0
                 && (start + n) / ratio > c.index_topk
-                && (start + n) / ratio <= 2048
+                && (start + n) / ratio <= 4096
             {
                 assert!(
-                    census
-                        .iter()
-                        .any(|d| d.kernel == "kernel_deepseek_v41_attention_select_fused_rows"),
+                    census.iter().any(|d| d
+                        .kernel
+                        .starts_with("kernel_deepseek_v41_attention_select_fused_rows")),
                     "fused selector not dispatched layer={id} start={start} n={n}"
                 );
             }
@@ -300,7 +300,7 @@ fn query_batch_batched_selection_matches_incumbent_across_tiles() {
         compression_ratios: vec![0, 2, 2, 1, 1, 1, 1],
         candidate_source_layer: Some(3),
     };
-    for (start, n) in [(479usize, 65usize), (991, 65)] {
+    for (start, n) in [(479usize, 65usize), (991, 65), (3000, 65)] {
         compare_case(&ctx, &c, &schedule, start, n);
     }
 }

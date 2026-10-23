@@ -263,6 +263,62 @@ kernel void kernel_deepseek_v41_attention_select_fused_rows(
     }
 }
 
+// One threadgroup per top-k row: load the row's score slab, run the same
+// bitonic network and tie-break as sort_init/sort_tile in threadgroup memory,
+// then emit chronological IDs directly. Padded visible lengths up to 4096.
+kernel void kernel_deepseek_v41_attention_select_fused_rows_4k(
+    constant uint4 &a [[buffer(0)]], constant uint4 &b [[buffer(1)]],
+    device const float *scores [[buffer(2)]], device uint *selected [[buffer(3)]],
+    device atomic_uint *status [[buffer(4)]],
+    uint3 group [[threadgroup_position_in_grid]],
+    uint tid [[thread_index_in_threadgroup]]) {
+    // a: start, ratio, index_top_k, score stride. b: row0, rows, 0, 0.
+    uint local = group.y;
+    if (local >= b.y) return;
+    uint row = b.x + local;
+    uint length = (a.x + row + 1) / a.y;
+    if (length <= a.z) return; // all-selected rows are already prepared
+    uint padded = 1;
+    while (padded < length) padded <<= 1;
+    if (padded > 4096) return; // host keeps the per-row fallback
+    threadgroup float values[4096];
+    threadgroup uint order[4096];
+    device const float *srow = scores + (ulong)local * a.w;
+    for (uint t = tid; t < padded; t += 256) {
+        float v = t < length ? srow[t] : -INFINITY;
+        if (isnan(v)) {
+            atomic_fetch_or_explicit(status, 1u, memory_order_relaxed);
+            v = -INFINITY;
+        }
+        values[t] = v;
+        order[t] = t;
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    for (uint width = 2; width <= padded; width <<= 1) {
+        for (uint stride = width >> 1; stride > 0; stride >>= 1) {
+            for (uint j = tid; j < padded; j += 256) {
+                uint other = j ^ stride;
+                if (other <= j) continue;
+                float l = values[j], r = values[other];
+                uint li = order[j], ri = order[other];
+                bool better = l > r || (l == r && (as_type<uint>(l) == as_type<uint>(r)
+                    ? li < ri : as_type<uint>(l) < as_type<uint>(r)));
+                if (better != ((j & width) == 0)) {
+                    values[j] = r; values[other] = l;
+                    order[j] = ri; order[other] = li;
+                }
+            }
+            threadgroup_barrier(mem_flags::mem_threadgroup);
+        }
+    }
+    for (uint t = tid; t < a.z; t += 256) {
+        uint id = order[t];
+        uint rank = 0;
+        for (uint j = 0; j < a.z; ++j) rank += order[j] < id;
+        selected[(ulong)row * a.z + rank] = id;
+    }
+}
+
 kernel void kernel_deepseek_v41_attention_keep(
     constant uint2 &a [[buffer(0)]], device const uint *ids [[buffer(1)]],
     device uint *mask [[buffer(2)]], uint t [[thread_position_in_grid]]) {

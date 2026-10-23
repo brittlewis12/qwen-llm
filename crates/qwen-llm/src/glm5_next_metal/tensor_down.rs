@@ -1,10 +1,10 @@
-//! Default-off, down-only transfer. GLM weights the slots after down, never
+//! Bounded down-only transfer. GLM weights the slots after down, never
 //! the gate/up activations. The shared adapter owns binding/capability checks.
 
 use super::packed::{Arith, FastPrecision, PackedLineage, StageMode};
 use crate::tensor::GgmlType;
 
-const DEFAULT_ENABLED: bool = false;
+const DEFAULT_ENABLED: bool = true;
 
 #[cfg(test)]
 thread_local! {

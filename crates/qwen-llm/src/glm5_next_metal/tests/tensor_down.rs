@@ -103,35 +103,36 @@ fn cpu_down_policy_protects_all_arithmetic_modes_types_and_actual_rows() {
 }
 
 #[test]
-fn cpu_down_scope_is_default_off_nested_thread_local_and_unwind_safe() {
+fn cpu_down_scope_is_default_on_nested_thread_local_and_unwind_safe() {
     let requested = || selected(HALF, StageMode::Fast, GgmlType::IQ3_S, 1024);
-    assert!(!requested());
+    assert!(requested());
     {
-        let _on = Scope::new(true);
-        assert!(requested());
+        let _off = Scope::new(false);
+        assert!(!requested());
         {
-            let _off = Scope::new(false);
-            assert!(!requested());
+            let _on = Scope::new(true);
+            assert!(requested());
         }
-        assert!(requested());
+        assert!(!requested());
         assert!(
             std::panic::catch_unwind(|| {
-                let _off = Scope::new(false);
+                let _on = Scope::new(true);
+                assert!(requested());
                 panic!("restore down policy");
             })
             .is_err()
         );
-        assert!(requested());
+        assert!(!requested());
         std::thread::spawn(|| {
-            assert!(!enabled());
-            let _on = Scope::new(true);
             assert!(enabled());
+            let _off = Scope::new(false);
+            assert!(!enabled());
         })
         .join()
         .unwrap();
-        assert!(requested());
+        assert!(!requested());
     }
-    assert!(!requested());
+    assert!(requested());
 }
 
 #[test]

@@ -156,6 +156,11 @@ Re-sample after the next landing.
 
 ### GLM-5.3-Flash
 
+- M5 tensor-ops transfer for ordinary Fast/Half prefill: in flight
+  (`perf/glm-tensor-prefill`). Reuse the existing dense/routed tensor kernels
+  with family-local eligibility; keep Exact, F32-sensitive work and short
+  packets on their current paths. Actual GLM quality and request timing gate
+  promotion; V4.1 attention and activation-staging lanes remain separate.
 - Ordinary run/benchmark workspace selection: landed (2026-10-22 ordinary
   workspace entry). Existing serving range replaces the fixed 512-row cap;
   saved-rollout prefill 62.51 -> 49.82 s (-20.3%), observed request mean -19.6%

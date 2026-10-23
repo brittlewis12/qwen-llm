@@ -513,18 +513,19 @@ fn packet(quality_screen: bool) {
         let _allocation = ctx.begin_allocation_transaction();
         let preflight = preflight_session(&ctx, &gguf, artifact.model(), capacity, ROWS).unwrap();
         assert_eq!(preflight.ledger.prefill_rows(), ROWS as u64);
-        let admission = crate::metal::evaluate_metal_memory_admission_with_cpu_bytes(
-            preflight.ledger.peak_bytes(),
-            cpu,
+        // CPU payload also consumes working-set headroom, conservatively
+        // preserving its bound when macOS omits the process budget.
+        let admission = crate::metal::evaluate_metal_memory_admission(
+            preflight.ledger.peak_bytes().checked_add(cpu).unwrap(),
             0,
             ctx.memory_signals(),
-            // CPU scratch must fit a live process budget, not an omitted signal.
-            false,
+            true,
         );
         out.emit(json!({"event":"preload_admission", "capacity":capacity, "workspace_rows":ROWS,
             "full_preflight_peak_bytes":preflight.ledger.peak_bytes(), "ledger":preflight.ledger.terms(),
             "cpu_reserve_bytes":cpu, "admitted":admission.is_admitted(), "reason":admission.reason.as_str(),
-            "required_bytes":admission.required_bytes, "allow_zero_process_budget":false,
+            "required_bytes":admission.required_bytes, "allow_zero_process_budget":true,
+            "cpu_charged_to_working_set_headroom":true,
             "current_gpu_bytes":admission.signals.current_allocated_bytes,
             "process_limit_remaining_bytes":admission.signals.process_limit_remaining_bytes,
             "working_set_headroom_bytes":admission.working_set_headroom_bytes}));

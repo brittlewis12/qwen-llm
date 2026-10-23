@@ -258,12 +258,13 @@ impl Fixture {
         // Native upload copies, readbacks, compact CPU dequant/oracles and
         // retained A output are priced separately from the device buffers.
         let cpu = 4 * logical.iter().sum::<usize>() as u64 + (16 << 20);
-        let admission = metal::evaluate_metal_memory_admission_with_cpu_bytes(
-            priced,
-            cpu,
+        // Charge CPU payload against both budgets, including when macOS omits
+        // the process limit (the production gate represents that as Some(0)).
+        let admission = metal::evaluate_metal_memory_admission(
+            priced.checked_add(cpu).unwrap(),
             crate::glm5_next::memory::DYNAMIC_RESERVE_BYTES,
             ctx.memory_signals(),
-            false,
+            true,
         );
         assert!(admission.is_admitted(), "{admission:?}");
 

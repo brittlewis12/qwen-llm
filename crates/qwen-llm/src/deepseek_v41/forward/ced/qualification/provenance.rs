@@ -144,15 +144,11 @@ pub(super) fn artifact(
     Ok(json!(actual_stamps))
 }
 
-pub(super) fn frozen(v: &Value) -> AResult<()> {
-    ensure!(
-        v["runtime_source_commit"] == archive::HARNESS
-            && v["original_runtime_pin"] == archive::RUNTIME
-            && v["baseline_diff_sha256"]
-                == "300702d2d97fcfc2efc38694847e8e19bb2a4f4cd1e67661e732e177e910e101",
-        "frozen runtime/source diff mismatch"
-    );
-    let expected = [
+const FROZEN_BASELINE_DIFF_SHA256: &str =
+    "1b2bf6b0384435d7cb551f4df7444beb52da51ed62bd52f3e2626bf0f1c675c5";
+
+fn frozen_compiled_sources() -> &'static [(&'static str, &'static str)] {
+    &[
         (
             "crates/qwen-llm/src/deepseek_v41/forward.rs",
             "d6026f611855834642ec47ac95be06b9339e299d4e32572635e8387009e5e3b5",
@@ -167,19 +163,19 @@ pub(super) fn frozen(v: &Value) -> AResult<()> {
         ),
         (
             "crates/qwen-llm/src/deepseek_v41/forward/ced_reference.rs",
-            "b6acb5546c563f9cee40ac40dc5d8eb0a713327a3b94fa901197e145ac8dcaef",
+            "b59e23f8120a14dcec393cfb28c7efbc834270cb868ee31b93cc8072644f2abe",
         ),
         (
             "crates/qwen-llm/src/deepseek_v41/forward/ced_reference/hook.rs",
-            "cfe266d7e00868469f636eaf5c28e384cd883fe55ff2894d5765e4a3ccd930fe",
+            "53357ae1b9b6fc8e69a8ae47dcf2802e3fc3602ead574445f67855dbaea1e9cb",
         ),
         (
             "crates/qwen-llm/src/deepseek_v41/forward/ced_reference/archive.rs",
-            "3e6e66ef89c0a11b80f7b297ccd1a08d6c4ffd1f72180e09fadef7d11b44bd8a",
+            "ccddb16aeffab7270fc0615645a09068af2a3920d3dcd34427434448bd5083ba",
         ),
         (
             "crates/qwen-llm/src/deepseek_v41/forward/ced_reference/plan.rs",
-            "f562a44345e1cd652c8badb6ce4e36bf7fb46747a30c50e77c0258e27391ef33",
+            "773b2ce7acdc99ae5e11472692f8f018ba5999eed92d2507461c6843910de95f",
         ),
         (
             "crates/qwen-llm/src/deepseek_v41/forward/ced_reference/input.rs",
@@ -187,13 +183,35 @@ pub(super) fn frozen(v: &Value) -> AResult<()> {
         ),
         (
             "crates/qwen-llm/src/deepseek_v41/forward/ced_reference/provenance.rs",
-            "7766a0fed0cbef2371c03de264c0477ab95ecd2a09ffcd2beb211b49b34fb6f7",
+            "f89dd2b18bde1713d5031ab573480ef5d6582194eca92d33bd18febd3bbe6ef1",
+        ),
+        (
+            "crates/qwen-llm/src/deepseek_v41/forward/ced_reference/copy_extent.rs",
+            "f03cd611c557abfa6f55f575cb3e5bc2b1b5f046b09d8e54dd55b081d2d36624",
+        ),
+        (
+            "crates/qwen-llm/src/deepseek_v41/forward/ced_reference/smoke.rs",
+            "cf86d4cda5d44a9abaad7169ce9e09fab2b6059a70777335bd9f8bab1024859e",
+        ),
+        (
+            "crates/qwen-llm/src/deepseek_v41/forward/ced_reference/artifact_cache.rs",
+            "ac335f94f1b1795afe670a3f5dc7039c347ccefc2210944f7234a2a4571d29f8",
         ),
         (
             "Cargo.lock",
             "71089d1061368c463c1d7aee966004057ed6106a9101c2d49ca59930fab54a69",
         ),
-    ];
+    ]
+}
+
+pub(super) fn frozen(v: &Value) -> AResult<()> {
+    ensure!(
+        v["runtime_source_commit"] == archive::HARNESS
+            && v["original_runtime_pin"] == archive::RUNTIME
+            && v["baseline_diff_sha256"] == FROZEN_BASELINE_DIFF_SHA256,
+        "frozen runtime/source diff mismatch"
+    );
+    let expected = frozen_compiled_sources();
     let compiled = v["compiled_sources"]
         .as_array()
         .context("frozen compiled sources")?;
@@ -201,13 +219,48 @@ pub(super) fn frozen(v: &Value) -> AResult<()> {
         compiled.len() == expected.len(),
         "frozen source inventory mismatch"
     );
-    for (actual, (path, hash)) in compiled.iter().zip(expected) {
+    for (actual, &(path, hash)) in compiled.iter().zip(expected) {
         ensure!(
             actual["path"] == path && actual["sha256"] == hash,
             "frozen compiled source mismatch: {path}"
         );
     }
     Ok(())
+}
+
+#[test]
+fn frozen_reference_requires_complete_reviewed_harness_identity() {
+    let sources = frozen_compiled_sources()
+        .iter()
+        .map(|&(path, hash)| json!({"path": path, "sha256": hash}))
+        .collect::<Vec<_>>();
+    assert_eq!(sources.len(), 13);
+    let good = json!({"runtime_source_commit": archive::HARNESS,
+        "original_runtime_pin": archive::RUNTIME,
+        "baseline_diff_sha256": FROZEN_BASELINE_DIFF_SHA256, "compiled_sources": sources});
+    frozen(&good).unwrap();
+    for field in [
+        "runtime_source_commit",
+        "original_runtime_pin",
+        "baseline_diff_sha256",
+    ] {
+        let mut bad = good.clone();
+        bad[field] = json!("unreviewed");
+        assert!(frozen(&bad).is_err(), "accepted {field} substitution");
+    }
+    for i in 0..sources.len() {
+        for field in ["path", "sha256"] {
+            let mut bad = good.clone();
+            bad["compiled_sources"][i][field] = json!("unreviewed");
+            assert!(frozen(&bad).is_err(), "accepted source {i} {field}");
+        }
+    }
+    let mut bad = good.clone();
+    bad["compiled_sources"].as_array_mut().unwrap().pop();
+    assert!(frozen(&bad).is_err());
+    bad = good;
+    bad["compiled_sources"].as_array_mut().unwrap().reverse();
+    assert!(frozen(&bad).is_err());
 }
 
 pub(super) fn source() -> AResult<(PathBuf, Value)> {

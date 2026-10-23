@@ -6,6 +6,7 @@ use crate::metal::{
     DispatchCensusRow, diagnostics_observer_active_counts, dispatch_census_begin,
     dispatch_census_is_active, dispatch_census_take,
 };
+use crate::tokenizer::NativeTokenizer;
 use sha2::{Digest, Sha256};
 use std::{
     fs::File,
@@ -18,7 +19,34 @@ const FROZEN: &[u8] = include_bytes!("../../../../../../scripts/reference/glm53/
 const ROWS: usize = 2048;
 const CENSUS_BYTES: u64 = 128 << 20;
 const REPORT_BYTES: u64 = 8 << 20;
+const TOKENIZER_BYTES: u64 = 128 << 20;
 const ARMS: [(&str, bool); 2] = [("old", false), ("tensor", true)];
+const LONG_TASKS: [&str; 4] = ["T09", "T10", "T11", "T12"];
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Packet {
+    Quality,
+    Plain,
+    Extended,
+}
+
+impl Packet {
+    fn report_env(self) -> &'static str {
+        match self {
+            Self::Quality => "GLM53_TENSOR_QUALITY_REPORT",
+            Self::Plain => "GLM53_TENSOR_TIMING_REPORT",
+            Self::Extended => "GLM53_TENSOR_EXTENDED_REPORT",
+        }
+    }
+
+    fn schema(self) -> &'static str {
+        match self {
+            Self::Quality => "glm53.tensor_quality.v1",
+            Self::Plain => "glm53.tensor_plain_abba.v1",
+            Self::Extended => "glm53.tensor_extended_quality.v1",
+        }
+    }
+}
 
 struct Document {
     path: String,
@@ -27,7 +55,7 @@ struct Document {
     tokens: Vec<u32>,
 }
 
-fn documents() -> [Document; 3] {
+fn documents() -> Vec<Document> {
     let fixture: Value = serde_json::from_slice(FROZEN).unwrap();
     assert_eq!(fixture["name"], "glm53-quality-v1");
     assert_eq!(fixture["continuation"], CONTINUATION);
@@ -60,6 +88,131 @@ fn documents() -> [Document; 3] {
             tokens,
         }
     })
+    .into()
+}
+
+fn all_documents() -> Vec<Document> {
+    let fixture: Value = serde_json::from_slice(FROZEN).unwrap();
+    assert_eq!(fixture["name"], "glm53-quality-v1");
+    assert_eq!(fixture["continuation"], CONTINUATION);
+    let frozen = fixture["documents"].as_array().unwrap();
+    assert_eq!(frozen.len(), 22);
+    let mut strata = BTreeMap::<String, usize>::new();
+    let mut paths = std::collections::BTreeSet::new();
+    let documents = frozen
+        .iter()
+        .map(|d| {
+            let stratum = d["stratum"].as_str().unwrap();
+            let lengths: Vec<usize> = d["prefix_lengths"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|n| usize::try_from(n.as_u64().unwrap()).unwrap())
+                .collect();
+            assert_eq!(
+                lengths,
+                match stratum {
+                    "prose" | "code" => vec![512, 2048],
+                    "long" => vec![4352],
+                    _ => panic!("unexpected frozen stratum {stratum}"),
+                }
+            );
+            let prefix = *lengths.iter().max().unwrap();
+            let path = d["path"].as_str().unwrap().to_owned();
+            assert!(paths.insert(path.clone()), "duplicate frozen document");
+            *strata.entry(stratum.into()).or_default() += 1;
+            let mut tokens = parse_ids(&d["tokens"]);
+            assert!(tokens.len() >= prefix + CONTINUATION);
+            tokens.truncate(prefix + CONTINUATION);
+            Document {
+                path,
+                stratum: stratum.into(),
+                prefix,
+                tokens,
+            }
+        })
+        .collect();
+    assert_eq!(
+        strata,
+        BTreeMap::from([("prose".into(), 8), ("code".into(), 8), ("long".into(), 6)])
+    );
+    documents
+}
+
+struct ToolTask {
+    id: String,
+    context_level: u64,
+    prompt: Vec<u32>,
+    expected: Value,
+    expect: Expect,
+}
+
+impl ToolTask {
+    fn capacity(&self) -> usize {
+        // The 1455-token tasks still need the same 2048-row workspace.
+        ROWS.max(self.prompt.len().checked_add(TOOL_CAP).unwrap())
+    }
+}
+
+fn long_tasks() -> (Vec<ToolTask>, Vec<ToolDefinition>) {
+    let fixture: Value = serde_json::from_slice(FROZEN).unwrap();
+    assert_eq!(fixture["name"], "glm53-quality-v1");
+    assert_eq!(fixture["tool_cap"], TOOL_CAP);
+    assert_eq!(fixture["tool_seeds"][0], 11);
+    let (tools, definitions) = tool_definitions();
+    assert_eq!(fixture["tools"], json!(tools), "frozen tool definitions");
+    let frozen_definitions: Vec<_> = fixture["tools"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|v| ToolDefinition::from_value(v).unwrap())
+        .collect();
+    let tasks: Vec<_> = fixture["tool_tasks"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|t| t["context_level"].as_u64().unwrap() > 0)
+        .map(|t| {
+            let id = t["id"].as_str().unwrap();
+            let (_, _, context, expect) = TOOL_TASKS.iter().find(|t| t.0 == id).unwrap();
+            let context_level = t["context_level"].as_u64().unwrap();
+            assert_eq!(context_level, u64::from(*context));
+            assert_eq!(t["effort"], "low");
+            assert_eq!(t["expected"], expect.describe());
+            let prompt = parse_ids(&t["prompt"]);
+            assert_eq!(prompt.len() as u64, t["prompt_tokens"].as_u64().unwrap());
+            assert!(
+                prompt.len() >= 1024,
+                "tool prefill must exercise eligible tensor context"
+            );
+            let messages = [Message::User(t["user"].as_str().unwrap().into())];
+            assert_eq!(
+                render(&messages, &definitions, Effort::Low),
+                render(&messages, &frozen_definitions, Effort::Low),
+                "frozen rendered tools"
+            );
+            ToolTask {
+                id: id.into(),
+                context_level,
+                prompt,
+                expected: t["expected"].clone(),
+                expect: *expect,
+            }
+        })
+        .collect();
+    assert_eq!(
+        tasks.iter().map(|t| t.id.as_str()).collect::<Vec<_>>(),
+        LONG_TASKS
+    );
+    (tasks, frozen_definitions)
+}
+
+fn token_hash(tokens: &[u32]) -> String {
+    let mut hash = Sha256::new();
+    for token in tokens {
+        hash.update(token.to_le_bytes());
+    }
+    format!("{:x}", hash.finalize())
 }
 
 fn environment() {
@@ -333,7 +486,8 @@ fn quality(
     cpu: u64,
     out: &mut Report,
 ) {
-    warm(ctx, weights, &documents[2].tokens[..ROWS], cpu, out);
+    let long = documents.iter().find(|d| d.stratum == "long").unwrap();
+    warm(ctx, weights, &long.tokens[..ROWS], cpu, out);
     let vocab = weights.config.vocab_size as usize;
     for d in documents {
         let n = d.prefix;
@@ -401,6 +555,110 @@ fn quality(
     }
 }
 
+fn tool_quality(
+    ctx: &MetalContext,
+    weights: &Glm5NextWeights,
+    tokenizer: &NativeTokenizer,
+    tasks: &[ToolTask],
+    definitions: &[ToolDefinition],
+    cpu: u64,
+    out: &mut Report,
+) {
+    let vocab = weights.config.vocab_size as usize;
+    for task in tasks {
+        let n = task.prompt.len();
+        let prompt_hash = token_hash(&task.prompt);
+        for generation in [
+            Generation::Greedy { cap: TOOL_CAP },
+            Generation::Sampled {
+                seed: 11,
+                cap: TOOL_CAP,
+            },
+        ] {
+            for (arm, enabled) in ARMS {
+                out.emit(json!({"event":"task_begin","arm":arm,"id":task.id,
+                    "context_level":task.context_level,"expected":task.expected,
+                    "generation":generation.describe(),"prompt_tokens":n,"prompt_sha256":prompt_hash,
+                    "token_hash_encoding":"u32 little-endian","requested_capacity":n+TOOL_CAP,
+                    "capacity":task.capacity(),"workspace_rows":ROWS}));
+                let mut s = fresh(ctx, weights, task.capacity(), cpu, arm, "tool_quality", out);
+                assert_plain();
+                let (mut logits, commits) = observed_prefill(ctx, &mut s, &task.prompt, enabled);
+                out.emit(json!({"event":"task_prefill","arm":arm,"id":task.id,
+                    "generation":generation.describe(),"prefill_chunks":commits,"position":s.position(),
+                    "actual_prefill_rows":s.ledger().prefill_rows()}));
+                let mut sampler = Sampler::new(generation.sampling()).unwrap();
+                let mut emitted = Vec::with_capacity(TOOL_CAP);
+                let mut sampled = Vec::with_capacity(TOOL_CAP);
+                let mut forward_calls = 0;
+                let stop = loop {
+                    check_session(&s, n + forward_calls);
+                    check_logits(&logits, vocab);
+                    assert_plain();
+                    let token = u32::try_from(sampler.sample(&logits).unwrap().token).unwrap();
+                    assert!((token as usize) < vocab);
+                    let is_stop = chat::CHAT_STOPS.contains(&i32::try_from(token).unwrap());
+                    sampled.push(token);
+                    out.emit(json!({"event":"task_token","arm":arm,"id":task.id,
+                        "generation":generation.describe(),"sample_index":sampled.len()-1,
+                        "position":s.position(),"token":token,"is_stop":is_stop,"logits_finite":true}));
+                    if is_stop {
+                        break Some(token);
+                    }
+                    emitted.push(token);
+                    if emitted.len() == TOOL_CAP {
+                        break None;
+                    }
+                    logits = s.forward(ctx, token).unwrap();
+                    forward_calls += 1;
+                };
+                assert!(!sampled.is_empty() && sampled.len() <= TOOL_CAP);
+                assert_eq!(
+                    forward_calls,
+                    sampled.len() - 1,
+                    "last sampled token is not forwarded"
+                );
+                assert_eq!(emitted.len() + usize::from(stop.is_some()), sampled.len());
+                check_session(&s, n + forward_calls);
+                let final_position = s.position();
+                drop(s);
+                drop(logits);
+                drop(sampler);
+                let text = tokenizer
+                    .try_decode(
+                        &emitted
+                            .iter()
+                            .map(|&t| i32::try_from(t).unwrap())
+                            .collect::<Vec<_>>(),
+                    )
+                    .unwrap();
+                let (reasoning, content, calls, parse_error) = match parse_turn(&text, definitions)
+                {
+                    Ok((reasoning, content, calls)) => {
+                        (Some(reasoning), Some(content), calls, None)
+                    }
+                    Err(error) => (None, None, Vec::new(), Some(error)),
+                };
+                out.emit(json!({"event":"task_generation","arm":arm,"id":task.id,
+                    "context_level":task.context_level,"expected":task.expected,
+                    "generation":generation.describe(),"prompt_tokens":n,"prompt_sha256":prompt_hash,
+                    "token_hash_encoding":"u32 little-endian","emitted_ids":emitted,
+                    "emitted_ids_exclude_stop":true,"emitted_sha256":token_hash(&emitted),
+                    "sampled_ids":sampled,"sampled_ids_include_stop":true,"sampled_sha256":token_hash(&sampled),
+                    "emitted_tokens":emitted.len(),"sampled_tokens":sampled.len(),
+                    "text":text,"text_sha256":sha256_hex(text.as_bytes()),"reasoning":reasoning,"content":content,
+                    "stop":stop,"stop_reason":if stop.is_some() { "chat_stop" } else { "cap" },
+                    "parse_error":parse_error,"calls":calls.iter().map(|c|json!({"id":c.id,"name":c.name,"arguments":c.arguments})).collect::<Vec<_>>(),
+                    "lenient_first_call_match":call_correct(&calls, task.expect),
+                    "strict_scorer":"scripts/reference/glm53/quality_analysis.py::tool_correct on recorded calls/stop/parse_error",
+                    "final_position":final_position,"decode_calls":forward_calls,"capacity":task.capacity(),
+                    "lineage":"Fast","precision":"Half","workspace_rows":ROWS,
+                    "policy":"descriptive tool screen only; parse/task outcomes are recorded, not asserted"}));
+            }
+        }
+    }
+}
+
 fn plain_abba(
     ctx: &MetalContext,
     weights: &Glm5NextWeights,
@@ -442,16 +700,20 @@ fn plain_abba(
     }
 }
 
-fn packet(quality_screen: bool) {
-    let mut out = Report::new(
-        if quality_screen {
-            "GLM53_TENSOR_QUALITY_REPORT"
-        } else {
-            "GLM53_TENSOR_TIMING_REPORT"
-        },
-        quality_screen,
-    );
-    let documents = documents();
+fn packet(kind: Packet) {
+    let quality_screen = kind != Packet::Plain;
+    let extended = kind == Packet::Extended;
+    let mut out = Report::new(kind.report_env(), quality_screen);
+    let documents = if extended {
+        all_documents()
+    } else {
+        documents()
+    };
+    let (tasks, definitions) = if extended {
+        long_tasks()
+    } else {
+        (Vec::new(), Vec::new())
+    };
     // Preserve the shard symlink name: GGUF uses it to find sibling shards.
     let path = PathBuf::from(std::env::var_os("GLM53_GGUF").unwrap());
     let gguf = GgufFile::open(&path).unwrap();
@@ -463,13 +725,43 @@ fn packet(quality_screen: bool) {
     for d in &documents {
         assert!(d.tokens.iter().all(|&t| t < vocab));
     }
+    for task in &tasks {
+        assert!(
+            task.prompt
+                .iter()
+                .all(|&t| t < vocab && i32::try_from(t).is_ok())
+        );
+    }
+    if extended {
+        assert!(
+            chat::CHAT_STOPS
+                .iter()
+                .all(|&t| t >= 0 && (t as u32) < vocab)
+        );
+    }
     let capacity = if quality_screen {
-        4352 + CONTINUATION
+        documents
+            .iter()
+            .map(|d| d.prefix + CONTINUATION)
+            .chain(tasks.iter().map(ToolTask::capacity))
+            .max()
+            .unwrap()
     } else {
         4096
     };
     assert!(capacity <= artifact.config().context_length as usize);
-    let terms = cpu_terms(vocab);
+    let mut terms = Vec::from(cpu_terms(vocab));
+    if extended {
+        terms.extend([
+            (
+                "native_tokenizer_construction_retained_and_decode_peak",
+                TOKENIZER_BYTES,
+            ),
+            ("sampler_topk_off_peak_vectors", u64::from(vocab) * 24),
+            ("sampler_radix_histogram", 65536 * size_of::<usize>() as u64),
+            ("tool_ids_text_parse_and_progress_reports", 8 << 20),
+        ]);
+    }
     let cpu = terms
         .iter()
         .try_fold(0u64, |sum, (_, n)| sum.checked_add(*n))
@@ -490,7 +782,7 @@ fn packet(quality_screen: bool) {
             .entry(format!("{:?} {:?}", t.dtype, t.shape))
             .or_default() += 1;
     }
-    out.emit(json!({"event":"header", "schema":if quality_screen { "glm53.tensor_quality.v1" } else { "glm53.tensor_plain_abba.v1" },
+    let mut header = json!({"event":"header", "schema":kind.schema(),
         "model":path, "artifact_layout":artifact_layout(&gguf), "tensor_shape_counts":shapes,
         "config":format!("{:?}", artifact.config()), "binary":std::env::current_exe().unwrap(),
         "binary_sha256":binary_hash(), "fixture_sha256":sha256_hex(FROZEN),
@@ -508,8 +800,35 @@ fn packet(quality_screen: bool) {
         "cpu_reserve_bytes":cpu, "cpu_terms":terms, "mtl_debug_layer":"1", "metal_lease_wait":"1",
         "q6_k_n64_min_n":1024, "tensor_tier":format!("{:?}",ctx.tensor_ops_status()),
         "token_source":"frozen repository quality-v1 token IDs only; no retokenization or tokenizer compatibility claim",
-        "policy":"descriptive only; finite/state/alignment/dispatch assertions, no NLL/KL threshold, quality/noninferiority pass, promotion or performance verdict; all timings diagnostic with validation on; incomplete without final complete event"}));
-    let weights = {
+        "policy":"descriptive only; finite/state/alignment/dispatch assertions, no NLL/KL threshold, quality/noninferiority pass, promotion or performance verdict; all timings diagnostic with validation on; incomplete without final complete event"});
+    if extended {
+        header["document_selection"] = json!({"method":"all frozen quality-v1 documents in fixture order; maximum frozen prefix per document",
+            "documents":22,"strata":{"prose":8,"code":8,"long":6},
+            "overlap":"includes the original three bounded cases; not independent replication",
+            "bounded_cases":self::documents().iter().map(|d|json!({"path":d.path,"prefix":d.prefix})).collect::<Vec<_>>()});
+        header["tool_tasks"] = json!(tasks.iter().map(|t|json!({"id":t.id,"context_level":t.context_level,
+            "prompt_tokens":t.prompt.len(),"prompt_sha256":token_hash(&t.prompt),"expected":t.expected,
+            "requested_capacity":t.prompt.len()+TOOL_CAP,"capacity":t.capacity()})).collect::<Vec<_>>());
+        header["tool_generations"] = json!([
+            Generation::Greedy { cap: TOOL_CAP }.describe(),
+            Generation::Sampled {
+                seed: 11,
+                cap: TOOL_CAP
+            }
+            .describe()
+        ]);
+        header["tool_definitions"] = json!(tool_definitions().0);
+        header["tool_definition_check"] = json!(
+            "frozen definitions and their rendered form equal quality.rs presets; no prompt retokenization"
+        );
+        header["tool_token_hash_encoding"] = json!("u32 little-endian");
+        header["decoder"] = json!({"implementation":"NativeTokenizer::from_gguf (source artifact)",
+            "cpu_reserve_bytes":TOKENIZER_BYTES,"construction":"after full CPU/GPU admission, before weight load",
+            "scope":"decodes generated IDs only; frozen input IDs remain authoritative; no tokenizer compatibility claim"});
+        header["plain_prompt_lengths"] = json!([]);
+    }
+    out.emit(header);
+    let (tokenizer, weights) = {
         let _allocation = ctx.begin_allocation_transaction();
         let preflight = preflight_session(&ctx, &gguf, artifact.model(), capacity, ROWS).unwrap();
         assert_eq!(preflight.ledger.prefill_rows(), ROWS as u64);
@@ -534,21 +853,43 @@ fn packet(quality_screen: bool) {
             "mandatory full model + session + CPU admission refused: {:?}",
             admission.reason
         );
-        Glm5NextWeights::load(&ctx, &gguf).unwrap()
+        let tokenizer = extended.then(|| {
+            let tokenizer = NativeTokenizer::from_gguf(&gguf).unwrap();
+            assert_eq!(tokenizer.n_vocab(), vocab);
+            tokenizer
+        });
+        (tokenizer, Glm5NextWeights::load(&ctx, &gguf).unwrap())
     };
     assert_eq!(weights.config.vocab_size, vocab);
     if quality_screen {
         quality(&ctx, &weights, &documents, cpu, &mut out);
+        if extended {
+            tool_quality(
+                &ctx,
+                &weights,
+                tokenizer.as_ref().unwrap(),
+                &tasks,
+                &definitions,
+                cpu,
+                &mut out,
+            );
+        }
     } else {
         plain_abba(&ctx, &weights, &documents[2], cpu, &mut out);
     }
     assert_plain();
     assert_eq!(gguf.revalidate_retained_shard_stamps().unwrap(), stamps);
-    out.emit(json!({"event":"complete", "execution_complete":true,
-        "documents_per_arm":if quality_screen { 3 } else { 0 },
+    let mut complete = json!({"event":"complete", "execution_complete":true,
+        "documents_per_arm":if quality_screen { documents.len() } else { 0 },
         "quality_rows_per_document_arm":if quality_screen { CONTINUATION } else { 0 },
         "plain_samples":if quality_screen { 0 } else { 16 }, "arms":2,
-        "quality_verdict":null, "performance_verdict":null}));
+        "quality_verdict":null, "performance_verdict":null});
+    if extended {
+        complete["tool_tasks_per_arm"] = json!(tasks.len());
+        complete["tool_generations_per_task_arm"] = json!(2);
+        complete["tool_generations"] = json!(tasks.len() * 2 * ARMS.len());
+    }
+    out.emit(complete);
     out.sync();
 }
 
@@ -557,7 +898,7 @@ fn packet(quality_screen: bool) {
 fn tensor_prefill_quality_screen() {
     environment();
     let _lease = production_lease();
-    packet(true);
+    packet(Packet::Quality);
 }
 
 #[test]
@@ -565,5 +906,13 @@ fn tensor_prefill_quality_screen() {
 fn tensor_prefill_plain_abba() {
     environment();
     let _lease = production_lease();
-    packet(false);
+    packet(Packet::Plain);
+}
+
+#[test]
+#[ignore = "release extended full-model tensor quality: all 22 frozen documents and T09-T12 greedy/seed11; MTL_DEBUG_LAYER=1, QWEN_METAL_LEASE_WAIT=1, QWEN_MATMAT_Q6_K_N64_MIN_N=1024, tensor tier, GLM53_GGUF and new GLM53_TENSOR_EXTENDED_REPORT"]
+fn tensor_prefill_extended_quality() {
+    environment();
+    let _lease = production_lease();
+    packet(Packet::Extended);
 }

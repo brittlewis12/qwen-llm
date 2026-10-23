@@ -28,6 +28,13 @@ before building anything adjacent. This replaces relaying between sessions.
 
 ### DeepSeek V4.1-Flash (main after 512-row sink tiles: pp2048 Q2 768 / IQ3 757 tok/s, pp4096 Q2 736 / IQ3 727; decode rechecked tg32 Q2 43.1 / IQ3 40.5, depth tg32@d2048 41.6 from the prior landing)
 
+CED encoder-only bulk prefill and decoder-state construction are the leading
+architectural opportunity: in flight (`perf/v41-ced-recon`). Establish current
+prior art, exact dependency versus trained bounded-replay policies, cache and
+handoff contracts, and a staged implementation/quality plan before changing
+production execution. Attention and activation-staging kernel lanes remain
+independent; no wall-time gain is established for CED yet.
+
 Decode budget at depth 2048, 22.3 ms/token: ~10.2 ms bytes (11.1 GiB at the
 ~1.09 TB/s the GEMV probe reaches), ~8 ms dispatch floor (~1,600 dispatches),
 ~4 ms spread thin. Prefill split per 2048-token chunk, fresh post-tile six-span sample
@@ -187,7 +194,8 @@ attention tiles at 34.7%. Re-sample after the next landing.
   (central 90% [-0.0003,+0.0081]), one fewer hit/1408; eight tool pairs are
   correct and token-identical. Not a model-wide noninferiority claim.
   Packet: `bench/2026-10-22-glm-tensor-prefill/README.md`.
-- M5 routed IQ3_S down-only tensor transfer: open. The existing down-policy
+- M5 routed IQ3_S down-only tensor transfer: in flight
+  (`perf/glm-tensor-down`). The existing down-policy
   seam can replace 39 stock grouped down calls while preserving fused
   gate/up and GLM's post-down weighting; three IQ4_XS layers keep their
   dedicated incumbent. Gain unmeasured against the dense checkpoint.

@@ -187,12 +187,21 @@ fn nondefault_gguf_preflight_prices_only_active_binding_controls_and_refuses_sho
             );
             assert!(run(short).unwrap_err().as_memory_admission().is_some());
             let mut short_host = preflight_signals();
-            short_host
-                .host_budget
-                .as_mut()
-                .unwrap()
-                .conservative_available_bytes =
-                cold.required_metal_bytes + cold.required_cpu_bytes - 1;
+            let host = short_host.host_budget.as_mut().unwrap();
+            let reserve = host.physical_bytes - host.ceiling_bytes().unwrap();
+            let total = cold.required_metal_bytes + cold.required_cpu_bytes;
+            host.conservative_available_bytes = reserve + total - 1;
+            assert_eq!(short_host.host_remaining_bytes(), Some(total - 1));
+            assert!(
+                metal::evaluate_metal_memory_admission_with_cpu_bytes(
+                    cold.required_metal_bytes - cold.binding_metal_bytes,
+                    cold.required_cpu_bytes,
+                    0,
+                    short_host,
+                    true,
+                )
+                .is_admitted()
+            );
             assert!(run(short_host).unwrap_err().as_memory_admission().is_some());
             assert_eq!(Arc::strong_count(&g.shards[0].mmap), refs);
         }
@@ -296,7 +305,14 @@ fn binding_preflight_rejects_invalid_linear_inventory_before_pricing() {
 }
 
 #[test]
+#[ignore = "self-leased bounded metadata preflight; debug validation required; no weight import"]
 fn bounded_gpu_public_preflight_accepts_nondefault_schedule_and_engram_without_import() {
+    assert_eq!(std::env::var("MTL_DEBUG_LAYER").as_deref(), Ok("1"));
+    assert_eq!(std::env::var("QWEN_METAL_LEASE_WAIT").as_deref(), Ok("1"));
+    assert!(!crate::env_flag::read_default_off(
+        "QWEN_METAL_LEASE_SKIP_WIRED_GATE"
+    ));
+    let _lease = metal::acquire_metal_benchmark_lease().expect("bounded metadata preflight lease");
     let ctx = MetalContext::new().unwrap();
     let (kv, tensors) = nondefault_parts(&[0, 2], true);
     let g = write_fixture(kv, tensors);

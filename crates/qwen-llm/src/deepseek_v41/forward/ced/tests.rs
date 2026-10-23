@@ -375,7 +375,15 @@ fn nonuniform_model<'a>(
 }
 
 #[test]
+#[ignore = "self-leased bounded metadata/runtime parity; debug validation required; no full model"]
 fn bounded_metadata_parts_match_loaded_request_full_and_ced_ledgers() {
+    assert_eq!(std::env::var("MTL_DEBUG_LAYER").as_deref(), Ok("1"));
+    assert_eq!(std::env::var("QWEN_METAL_LEASE_WAIT").as_deref(), Ok("1"));
+    assert!(!crate::env_flag::read_default_off(
+        "QWEN_METAL_LEASE_SKIP_WIRED_GATE"
+    ));
+    let _lease =
+        metal::acquire_metal_benchmark_lease().expect("bounded metadata/runtime parity lease");
     let ctx = MetalContext::new().unwrap();
     let weights = toy::Weights::new(&ctx);
     let embedding = embeddings(&ctx);

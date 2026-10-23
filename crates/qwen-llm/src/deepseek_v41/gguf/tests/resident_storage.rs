@@ -93,11 +93,10 @@ fn combined_preflight_refuses_before_injected_import_with_typed_telemetry_errors
     let admitted = run(preflight_signals()).unwrap();
     let total = admitted.required_metal_bytes + admitted.required_cpu_bytes;
     let mut short = preflight_signals();
-    short
-        .host_budget
-        .as_mut()
-        .unwrap()
-        .conservative_available_bytes = total - 1;
+    let host = short.host_budget.as_mut().unwrap();
+    let reserve = host.physical_bytes - host.ceiling_bytes().unwrap();
+    host.conservative_available_bytes = reserve + total - 1;
+    assert_eq!(short.host_remaining_bytes(), Some(total - 1));
     // Each side fits alone, but the preweight combined host exposure does not.
     assert!(
         metal::evaluate_metal_memory_admission_with_cpu_bytes(
@@ -184,21 +183,32 @@ fn cold_preflight_rejects_context_overflow_and_invalid_projection_metadata() {
 }
 
 #[test]
+#[ignore = "self-leased tiny GGUF preflight/binding parity; debug validation required; no full model"]
 fn bounded_gpu_preflight_request_matches_loaded_metadata_estimator() {
     use crate::deepseek_v41::forward::{Forward, PrefillExecution, preflight_cold_prefill};
+    assert_eq!(std::env::var("MTL_DEBUG_LAYER").as_deref(), Ok("1"));
+    assert_eq!(std::env::var("QWEN_METAL_LEASE_WAIT").as_deref(), Ok("1"));
+    assert!(!crate::env_flag::read_default_off(
+        "QWEN_METAL_LEASE_SKIP_WIRED_GATE"
+    ));
+    let _lease =
+        metal::acquire_metal_benchmark_lease().expect("tiny GGUF preflight/binding parity lease");
     let ctx = MetalContext::new().unwrap();
     for engram in [false, true] {
-        let g = fixture(1, GgmlType::F32, 2, engram);
-        let cold =
-            preflight_cold_prefill(&ctx, &g, 8, 16, &[PrefillExecution::FullForward], 0).unwrap();
-        let weights = ResidentWeights::load(&ctx, Arc::clone(&g)).unwrap();
-        let model =
-            Forward::from_resident(&ctx, &weights, weights.token_map.clone(), weights.raw_pad)
+        objc2::rc::autoreleasepool(|_| {
+            let g = fixture(1, GgmlType::F32, 2, engram);
+            let cold = preflight_cold_prefill(&ctx, &g, 8, 16, &[PrefillExecution::FullForward], 0)
                 .unwrap();
-        assert_eq!(
-            cold.request,
-            model.estimate_request_memory_with_gpu_step(16).unwrap()
-        );
+            assert!(cold.resident_storage.metal_view_bytes < 4 << 20);
+            let weights = ResidentWeights::load(&ctx, Arc::clone(&g)).unwrap();
+            let model =
+                Forward::from_resident(&ctx, &weights, weights.token_map.clone(), weights.raw_pad)
+                    .unwrap();
+            assert_eq!(
+                cold.request,
+                model.estimate_request_memory_with_gpu_step(16).unwrap()
+            );
+        });
     }
 }
 

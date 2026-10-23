@@ -96,8 +96,9 @@ attention tiles at 34.7%. Re-sample after the next landing.
 - Attention sink fusion (`score_mma` + `softmax_rows` + `pv_mma` +
   `normalize_rows`): with the tile now at production occupancy, each key
   row is still gathered once for QK^T and again for PV, and the score slab
-  makes a full round trip. Fusing over all heads of a row (or an
-  online-softmax tile) targets those two costs; gain unmeasured: open.
+  makes a full round trip. An online-softmax tile over 16 heads and an
+  8-key block can gather the block once, use it for both QK^T and PV, and
+  fold normalization into the store: in flight (`perf/v41-sink-fuse`).
 - Attention sink tensor ops: independently time `score_mma`/`pv_mma`
   substitution at the 512-row tile before combining with fusion; the
   gather-vs-MMA attribution is still unmeasured and shares the fusion

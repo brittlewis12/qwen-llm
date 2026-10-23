@@ -677,6 +677,159 @@ kernel void kernel_deepseek_v41_attention_pv_mma(
     }
 }
 
+// Fused online-softmax sink tile: one threadgroup per (16-head block, query
+// row). Each eight-key block is gathered once as half, used for QK^T, then
+// immediately for PV (K = V). A running max/sum seeded with the sink replaces
+// the score slab, the shared softmax and the separate normalize pass. The
+// per-row arithmetic stays the scalar sink's: F32 products and sums from half
+// operands, exp probabilities rounded to half for PV, F32 division at store.
+#define V41_FUSED_KEYS 8
+#define V41_FUSED_THREADS 256
+
+// Row owned by `lane` in a simdgroup_float8x8 accumulator fragment.
+inline uint v41_accumulator_row(uint lane) {
+    return ((lane >> 2) & 4) + ((lane >> 1) & 3);
+}
+
+kernel void kernel_deepseek_v41_attention_sink_fused(
+    constant uint4 &a [[buffer(0)]], constant uint4 &b [[buffer(1)]],
+    device const float *q [[buffer(2)]], device const float *raw [[buffer(3)]],
+    device const float *compressed [[buffer(4)]], device const uint *ids [[buffer(5)]],
+    device const float *sink [[buffer(6)]], device float *out [[buffer(8)]],
+    device atomic_uint *status [[buffer(10)]], constant uint4 &m [[buffer(11)]],
+    uint2 group [[threadgroup_position_in_grid]], uint tid [[thread_index_in_threadgroup]],
+    uint sg [[simdgroup_index_in_threadgroup]]) {
+    threadgroup half qblk[V41_MMA_HEADS * V41_MMA_DIM];
+    threadgroup half kblk[V41_FUSED_KEYS * V41_MMA_DIM];
+    threadgroup half pblk[V41_MMA_HEADS * V41_FUSED_KEYS];
+    threadgroup float sblk[V41_MMA_HEADS * V41_FUSED_KEYS];
+    threadgroup float rmax[V41_MMA_HEADS];
+    threadgroup float rsum[V41_MMA_HEADS];
+    threadgroup float ralpha[V41_MMA_HEADS];
+    threadgroup uint bad[V41_FUSED_THREADS / 32];
+
+    const uint r = group.y;
+    const uint4 rr = attention_row_raw(a, b, r);
+    const uint length = attention_row_length(b, r);
+    const uint selected = min(length, a.z);
+    const uint count = rr.y + selected;
+    device const uint *row_ids = ids + r * a.z;
+    device const float *qrow = q + r * m.y * a.x + group.x * V41_MMA_HEADS * a.x;
+    device float *orow = out + r * a.x + (group.x * V41_MMA_HEADS) * m.z * a.x;
+    const float scale = rsqrt(float(a.x));
+    const uint lane = tid & 31;
+    const uint accrow = v41_accumulator_row(lane);
+
+    if (tid < V41_MMA_HEADS) {
+        rmax[tid] = sink[group.x * V41_MMA_HEADS + tid];
+        rsum[tid] = 1.0f;
+        ralpha[tid] = 1.0f;
+    }
+    if (tid < V41_FUSED_THREADS / 32) bad[tid] = 0;
+    for (uint e = tid; e < V41_MMA_HEADS * V41_MMA_DIM / 4; e += V41_FUSED_THREADS) {
+        ((threadgroup half4 *)qblk)[e] = half4(((device const float4 *)qrow)[e]);
+    }
+    bool invalid = false;
+    for (uint i = tid; i < selected; i += V41_FUSED_THREADS) invalid |= row_ids[i] >= length;
+    if (simd_any(invalid) && lane == 0) bad[sg] = 1;
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    bool any_bad = false;
+    for (uint i = 0; i < V41_FUSED_THREADS / 32; ++i) any_bad |= bad[i] != 0;
+    if (any_bad) {
+        if (tid == 0) atomic_fetch_or_explicit(status, 2u, memory_order_relaxed);
+        for (uint e = tid; e < V41_MMA_HEADS * V41_MMA_DIM; e += V41_FUSED_THREADS) {
+            const uint h = e / V41_MMA_DIM, d = e % V41_MMA_DIM;
+            out[(group.x * V41_MMA_HEADS + h) * m.z * a.x + r * a.x + d] = 0.0f;
+        }
+        return;
+    }
+
+    simdgroup_float8x8 acc[16];
+    for (uint i = 0; i < 16; ++i) acc[i] = simdgroup_float8x8(0.0f);
+    const uint dim0 = sg * 64;
+
+    for (uint k0 = 0; k0 < count; k0 += V41_FUSED_KEYS) {
+        for (uint e = tid; e < V41_FUSED_KEYS * V41_MMA_DIM / 4; e += V41_FUSED_THREADS) {
+            const uint key = e / (V41_MMA_DIM / 4), c4 = e % (V41_MMA_DIM / 4);
+            const uint i = k0 + key;
+            float4 v = float4(0.0f);
+            if (i < count) v = ((device const float4 *)attention_row_key(rr, raw, compressed, row_ids, i))[c4];
+            ((threadgroup half4 *)kblk)[e] = half4(v);
+        }
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+        if (sg < 2) {
+            simdgroup_float8x8 s = simdgroup_float8x8(0.0f);
+            threadgroup const half *qa = qblk + sg * 8 * V41_MMA_DIM;
+            for (uint d = 0; d < V41_MMA_DIM; d += 8) {
+                simdgroup_half8x8 A, B;
+                simdgroup_load(A, qa + d, V41_MMA_DIM);
+                simdgroup_load(B, kblk + d, V41_MMA_DIM, ulong2(0, 0), true);
+                simdgroup_multiply_accumulate(s, A, B, s);
+            }
+            s.thread_elements()[0] *= scale;
+            s.thread_elements()[1] *= scale;
+            simdgroup_store(s, sblk + sg * 8 * V41_FUSED_KEYS, V41_FUSED_KEYS);
+        }
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+        if (tid < V41_MMA_HEADS) {
+            const uint h = tid;
+            const float oldmax = rmax[h];
+            float bmax = -INFINITY;
+            for (uint k = 0; k < V41_FUSED_KEYS; ++k) {
+                if (k0 + k < count) bmax = max(bmax, sblk[h * V41_FUSED_KEYS + k]);
+            }
+            const float newmax = max(oldmax, bmax);
+            const float alpha = exp(oldmax - newmax);
+            float sum = rsum[h] * alpha;
+            for (uint k = 0; k < V41_FUSED_KEYS; ++k) {
+                if (k0 + k < count) sum += exp(sblk[h * V41_FUSED_KEYS + k] - newmax);
+            }
+            rmax[h] = newmax;
+            rsum[h] = sum;
+            ralpha[h] = alpha;
+        }
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+        if (tid < V41_MMA_HEADS * V41_FUSED_KEYS) {
+            const uint h = tid / V41_FUSED_KEYS, k = tid % V41_FUSED_KEYS;
+            pblk[tid] = half(k0 + k < count ? exp(sblk[h * V41_FUSED_KEYS + k] - rmax[h]) : 0.0f);
+        }
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+        const float alpha0 = ralpha[accrow];
+        const float alpha1 = ralpha[8 + accrow];
+        for (uint t = 0; t < 8; ++t) {
+            acc[t].thread_elements()[0] *= alpha0;
+            acc[t].thread_elements()[1] *= alpha0;
+            acc[8 + t].thread_elements()[0] *= alpha1;
+            acc[8 + t].thread_elements()[1] *= alpha1;
+        }
+        simdgroup_half8x8 P0, P1;
+        simdgroup_load(P0, pblk, V41_FUSED_KEYS);
+        simdgroup_load(P1, pblk + 8 * V41_FUSED_KEYS, V41_FUSED_KEYS);
+        for (uint t = 0; t < 8; ++t) {
+            simdgroup_half8x8 V;
+            simdgroup_load(V, kblk + dim0 + t * 8, V41_MMA_DIM);
+            simdgroup_multiply_accumulate(acc[t], P0, V, acc[t]);
+            simdgroup_multiply_accumulate(acc[8 + t], P1, V, acc[8 + t]);
+        }
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+    }
+
+    const float inv0 = 1.0f / rsum[accrow];
+    const float inv1 = 1.0f / rsum[8 + accrow];
+    for (uint t = 0; t < 8; ++t) {
+        acc[t].thread_elements()[0] *= inv0;
+        acc[t].thread_elements()[1] *= inv0;
+        acc[8 + t].thread_elements()[0] *= inv1;
+        acc[8 + t].thread_elements()[1] *= inv1;
+        if (!isfinite(acc[t].thread_elements()[0]) || !isfinite(acc[t].thread_elements()[1])
+            || !isfinite(acc[8 + t].thread_elements()[0]) || !isfinite(acc[8 + t].thread_elements()[1])) {
+            atomic_fetch_or_explicit(status, 4u, memory_order_relaxed);
+        }
+        simdgroup_store(acc[t], orow + dim0 + t * 8, m.z * a.x);
+        simdgroup_store(acc[8 + t], orow + 8 * m.z * a.x + dim0 + t * 8, m.z * a.x);
+    }
+}
+
 // out[h][r][j] /= denominator(h, r); zero and flag invalid rows; finite check.
 kernel void kernel_deepseek_v41_attention_normalize_rows(
     constant uint4 &a [[buffer(0)]], device const float *scores [[buffer(7)]],

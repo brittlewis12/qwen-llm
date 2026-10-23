@@ -558,6 +558,14 @@ impl Fixture {
         let pso = pipeline(ctx, enc, "normalize_rows").unwrap();
         dispatch(enc, &pso, self.n * H * M);
     }
+
+    /// The fused online-softmax tile: gather eight keys once, QK^T, update
+    /// the running max/sum, then PV from the same staged block.
+    fn encode_fused(&self, ctx: &MetalContext, enc: &KernelEncoder) {
+        self.bind(enc);
+        pipeline(ctx, enc, "sink_fused").unwrap();
+        grid(enc, H / 16, self.n, 1, 256);
+    }
 }
 
 #[test]
@@ -644,6 +652,71 @@ fn mma_sink_tile_invalid_visibility_and_finite_guards() {
     f.check_guards();
 }
 
+#[test]
+fn fused_sink_tile_matches_scalar_sink() {
+    let Some(ctx) = crate::test_fixtures::metal_context_or_skip() else {
+        return;
+    };
+    for (k, n, ragged, first) in cases() {
+        let f = Fixture::new(&ctx, k, n, ragged, first);
+        f.checked(&ctx, Scalar, Scope::Sink);
+        let scalar = f32_slice(&f.output).unwrap().to_vec();
+        execute(&ctx, |enc| f.encode_fused(&ctx, enc));
+        assert_eq!(ids(&f.status, 1), [0], "k={k} n={n} ragged={ragged}");
+        close_half(f32_slice(&f.output).unwrap(), &scalar);
+        f.check_guards();
+    }
+}
+
+#[test]
+fn fused_sink_tile_invalid_visibility_and_finite_guards() {
+    let Some(ctx) = crate::test_fixtures::metal_context_or_skip() else {
+        return;
+    };
+    let mut f = Fixture::new(&ctx, 512, 8, true, 0);
+    execute(&ctx, |enc| f.encode_fused(&ctx, enc));
+    let valid = f32_slice(&f.output).unwrap().to_vec();
+    let mut selected: Vec<u32> = ids(&f.selected, f.topk * f.n)
+        .into_iter()
+        .map(|id| id as u32)
+        .collect();
+    selected[f.topk] = ((f.start + 2) / f.ratio) as u32; // Populated but not visible to query 1.
+    f.selected = MetalTensor::from_bytes(
+        &ctx,
+        bytemuck::cast_slice(&selected),
+        vec![f.topk as u64, f.n as u64],
+        GgmlType::I32,
+    )
+    .unwrap();
+    execute(&ctx, |enc| f.encode_fused(&ctx, enc));
+    assert_eq!(ids(&f.status, 1), [2]);
+    let got = f32_slice(&f.output).unwrap();
+    for h in 0..H {
+        for q in 0..f.n {
+            let off = (h * f.n + q) * M;
+            if q == 1 {
+                assert!(got[off..off + M].iter().all(|&v| v == 0.0));
+            } else {
+                assert_eq!(got[off..off + M], valid[off..off + M]);
+            }
+        }
+    }
+    let poison = upload(&ctx, &[f32::NAN], vec![1]).unwrap();
+    execute(&ctx, |enc| {
+        copy(
+            &ctx,
+            enc,
+            &poison,
+            &f.history.view_subrange(M as u64, vec![1]),
+            1,
+        )
+        .unwrap()
+    });
+    execute(&ctx, |enc| f.encode_fused(&ctx, enc));
+    assert_eq!(ids(&f.status, 1), [6]);
+    f.check_guards();
+}
+
 /// Opt-in timing of each sink-tile dispatch, old path versus MMA, at the
 /// production tile shape. `QWEN_V41_SINK_TIMING=1`; prints, asserts nothing.
 #[test]
@@ -714,5 +787,6 @@ fn mma_sink_tile_dispatch_timing() {
             f.encode(&ctx, enc, Production, Scope::Sink)
         });
         timed("full mma sink", &f, &|enc| f.encode_mma(&ctx, enc));
+        timed("full fused sink", &f, &|enc| f.encode_fused(&ctx, enc));
     }
 }

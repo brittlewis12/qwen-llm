@@ -344,14 +344,26 @@ impl Reference {
         );
         let shards = artifact["shards"].as_array().context("artifact shards")?;
         ensure!(!shards.is_empty(), "no artifact shards");
+        let mut payload_shards = std::collections::BTreeSet::new();
+        for tensor in artifact["layout"]["tensors"]
+            .as_array()
+            .context("artifact tensor inventory")?
+        {
+            let shard = number(tensor, "shard_idx")?;
+            ensure!(shard < shards.len(), "tensor shard outside inventory");
+            payload_shards.insert(shard);
+        }
         for (i, s) in shards.iter().enumerate() {
-            ensure!(
-                number(s, "shard_idx")? == i && number(s, "size")? > 0,
-                "shard identity"
-            );
+            let size = number(s, "size")?;
+            ensure!(number(s, "shard_idx")? == i && size > 0, "shard identity");
             let alignment = number(s, "alignment")?;
+            let start = number(s, "tensor_data_start")?;
+            // A metadata-only shard can end before hypothetical tensor padding.
+            let metadata_only_eof = start == size && !payload_shards.contains(&i);
             ensure!(
-                alignment.is_power_of_two() && number(s, "tensor_data_start")? % alignment == 0,
+                alignment.is_power_of_two()
+                    && start <= size
+                    && (start.is_multiple_of(alignment) || metadata_only_eof),
                 "shard alignment"
             );
             digest(&s["sha256"])?;

@@ -211,6 +211,43 @@ fn complete_fixture_maps_absolute_rows_without_copying_payloads() {
 }
 
 #[test]
+fn metadata_only_shard_may_end_at_unaligned_eof_but_payload_shards_must_align() {
+    for (size, start, alignment, tensor_shard, accepted) in [
+        (65, 65, 32, None, true),
+        (64, 32, 32, Some(0), true),
+        (65, 65, 32, Some(0), false),
+        (65, 63, 32, None, false),
+        (65, 96, 32, None, false),
+        (65, 65, 0, None, false),
+        (65, 65, 24, None, false),
+        (65, 65, 32, Some(1), false),
+    ] {
+        let f = Fixture::new();
+        let mut artifact = f.read("artifact.json");
+        artifact["shards"][0]["size"] = json!(size);
+        artifact["shards"][0]["tensor_data_start"] = json!(start);
+        artifact["shards"][0]["alignment"] = json!(alignment);
+        artifact["layout"]["tensors"] = json!(
+            tensor_shard
+                .map(|shard| vec![json!({"shard_idx": shard})])
+                .unwrap_or_default()
+        );
+        let layout_sha = json_sha(&artifact["layout"]).unwrap();
+        artifact["layout_sha256"] = json!(layout_sha);
+        let mut header = f.read("header.json");
+        header["artifact_layout_sha256"] = json!(layout_sha);
+        f.json("artifact.json", &artifact);
+        f.json("header.json", &header);
+        f.manifest();
+        assert_eq!(
+            f.load().is_ok(),
+            accepted,
+            "size={size} start={start} alignment={alignment} tensor_shard={tensor_shard:?}"
+        );
+    }
+}
+
+#[test]
 fn missing_and_corrupted_complete_are_rejected() {
     let f = Fixture::new();
     fs::remove_file(f.dir.join("complete.json")).unwrap();

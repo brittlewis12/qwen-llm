@@ -620,6 +620,47 @@ fn memory_ledger_comparison_excludes_runtime_peak_observations() {
     assert_ne!(admission_ledger(&observed), admission_ledger(&estimated));
 }
 
+fn production_command_count(plan: &CedPlan) -> AResult<usize> {
+    let scalar_tail = usize::from(prefill::original_scalar_tail(plan.prompt_rows).is_some());
+    plan.decoder.iter().try_fold(
+        plan.prompt_rows.div_ceil(PREFILL_CHUNK_ROWS),
+        |commands, layer| {
+            let packed_rows = layer
+                .output_rows
+                .len()
+                .checked_sub(scalar_tail)
+                .context("scalar tail outside decoder outputs")?;
+            commands
+                .checked_add(layer.seed_rows.len().div_ceil(PREFILL_CHUNK_ROWS))
+                .and_then(|n| n.checked_add(packed_rows.div_ceil(PREFILL_CHUNK_ROWS)))
+                .and_then(|n| n.checked_add(scalar_tail))
+                .context("qualification command count overflow")
+        },
+    )
+}
+
+#[test]
+fn production_command_count_preserves_genuine_scalar_tail_submissions() {
+    for (n, expected) in [(1, 21), (4096, 45), (4097, 65), (8192, 47), (8193, 67)] {
+        let plan = CedPlan::shrinking(
+            &Config::default(),
+            &v41_gguf::Schedule::default(),
+            &engram::HashConfig::default(),
+            &CedRequest::cold(n, n + STEPS),
+        )
+        .unwrap();
+        assert_eq!(production_command_count(&plan).unwrap(), expected, "N={n}");
+        if n == 4097 {
+            let layer = &plan.decoder[18];
+            assert_eq!(layer.output_rows.len(), 128);
+            assert_eq!(
+                (layer.output_rows.len() - 1).div_ceil(PREFILL_CHUNK_ROWS) + 1,
+                2
+            );
+        }
+    }
+}
+
 fn execution_report(
     model: &Forward<'_>,
     r: &PrefillReport,
@@ -641,14 +682,7 @@ fn execution_report(
     let commands = if arm.scalar() {
         g.n + p.work.decoder_seed_rows + p.work.decoder_output_rows
     } else {
-        g.n.div_ceil(PREFILL_CHUNK_ROWS)
-            + p.decoder
-                .iter()
-                .map(|l| {
-                    l.seed_rows.len().div_ceil(PREFILL_CHUNK_ROWS)
-                        + l.output_rows.len().div_ceil(PREFILL_CHUNK_ROWS)
-                })
-                .sum::<usize>()
+        production_command_count(&p)?
     };
     ensure!(
         counters.encoded_commands == commands && counters.completed_commands == commands,

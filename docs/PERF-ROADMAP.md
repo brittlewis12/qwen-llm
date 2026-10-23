@@ -41,13 +41,16 @@ wall-time gain is established yet; bounded128 remains a separate policy arm.
 Attention and activation-staging kernel lanes remain independent.
 
 Memory safety repair: in flight (`fix/v41-mapping-safety`). Repeated cold 8K
-validation of the full IQ3 artifact on 256 GiB exposed a watchdog failure;
-CED performance qualification is blocked. Its 217.414 GiB resident-window
-plan includes 156.059 GiB of whole-window private EOF mappings for only
-30,496 padding bytes. Do not repeat near-capacity full-model loads until
-shared EOF mapping, combined host admission and bounded import probes are
-validated. A passing Metal-only budget or an earlier successful run is not
-a physical-memory safety argument; see the 2026-10-23 memory-safety entry.
+validation of full IQ3 on 256 GiB exposed a watchdog failure; CED performance
+qualification is blocked. The old 217.414 GiB resident-window plan exposed
+156.059 GiB of private EOF mappings for only 30,496 padding bytes. Shared EOF
+now passes bounded M4/M5 import/use/release proofs; combined host admission
+and its integrated tests are in progress. The full-IQ3 hold includes 2K/4K:
+shorter prompts do not reduce resident weight exposure. The new 80%-physical
+ownership bound rejects that resident plan on 256 GiB before import. Use the
+shared metadata-only loader plan to select a fitting artifact, not a waiver.
+A passing Metal-only budget or an earlier successful run is not a physical
+memory safety argument; see the 2026-10-23 memory-safety entries.
 
 Decode budget at depth 2048, 22.3 ms/token: ~10.2 ms bytes (11.1 GiB at the
 ~1.09 TB/s the GEMV probe reaches), ~8 ms dispatch floor (~1,600 dispatches),

@@ -189,6 +189,13 @@ attention tiles at 34.7%. Re-sample after the next landing.
   +15.5%/+11.3% Q2 pp2048/4096, +15.3%/+10.8% IQ3; vs incumbent
   +19.7%/+15.2%, +19.1%/+14.8%; census 88,133 -> 45,982; serial span
   18.7% -> 5.2%; witness identical across all three arms.
+  Ratio-2 compressor pair pool: negative/mixed (2026-10-23 probe,
+  bench/2026-10-23-v41-pair-pool-negative.md). A 1024-thread pair
+  pool+norm replaces the per-pair copies/pool/norm and is correct, but
+  Q2 gains +1.4% while IQ3 pp2048 regresses 5.0%; the pair kernel's
+  cache/occupancy footprint costs more than the dispatch savings. Use a
+  lower-footprint fusion next (copies only or publish rows), not a
+  1024-thread pair kernel.
 - Selection padded-4096 extension: landed (2026-10-22 entry,
   bench/2026-10-22-v41-select-fuse4k.md). The common path keeps the 16 KiB
   2048-entry selector; a 32 KiB 4096-entry kernel handles late tiles with

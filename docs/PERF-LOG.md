@@ -6,6 +6,16 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the current state and evidence index.
 
+## 2026-10-23 - Ratio-2 Compressor Pair Pool: Negative/Mixed
+
+- Batch prefill pair pooling is correct (state and kernel tests pass) and
+  removes ~9k small serial dispatches, but model-level ABCCBA is mixed:
+  Q2 pp2048/4096 +1.4%/+1.4%, IQ3 pp4096 +1.3%, while IQ3 pp2048
+  regresses 5.5% (control 848.9 -> 802.5; recheck 846.8/850.0 vs 803.0).
+  The 1024-thread-per-pair kernel's cache/occupancy footprint costs more
+  than the dispatches it removes. Not landed.
+- [Probe and interpretation](bench/2026-10-23-v41-pair-pool-negative.md).
+
 ## 2026-10-23 - V4.1 Cold-Load Memory Safety: Performance Qualification Blocked
 
 - Repeated cold 8K full-IQ3 validation on 256 GiB ended in a watchdog

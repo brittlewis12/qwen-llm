@@ -71,6 +71,7 @@ pub fn moe_grouped_tensor_selected(ctx: &MetalContext) -> bool {
 }
 
 const TENSOR_THREADGROUP_BYTES: usize = 8192;
+const TENSOR_THREADGROUP_BYTES_WIDE: usize = 16384;
 
 #[allow(clippy::too_many_arguments)]
 fn dispatch_tensor_mm(
@@ -244,12 +245,23 @@ pub fn mat_mat_tensor_pipeline_name(dtype: GgmlType) -> Option<String> {
     Some(format!("kernel_mat_mat_{}_f32_tensor", l.suffix))
 }
 
+/// 64-slot dense form. Instanced only for Q8_0, the dtype of the V4.1
+/// attention/output/shared-expert projections.
+pub fn mat_mat_tensor_wide_pipeline_name(dtype: GgmlType) -> Option<String> {
+    (dtype == GgmlType::Q8_0).then(|| "kernel_mat_mat_q8_0_f32_tensor_wide".to_string())
+}
+
 /// Dense `y[row] = W x[row]` on the tensor tile with the `mat_mat`
 /// contract: `weight` is `[n_in, n_out]` in any dtype with a generic
 /// layout, `x` is `[n_in, n_query]` F32 and `y` is `[n_out, n_query]` F32
 /// (row-major rows of `n_in` / `n_out`), `n_in` a multiple of 32 and of
 /// the dtype's block. Half operands, F32 sums; output rows past `n_query`
 /// are untouched. Callers gate on [`moe_grouped_tensor_selected`].
+///
+/// The 64-slot Q8_0 form is the default from 128 query rows (below that
+/// the padded slot group loses; measured 64/96 rows are 12-14% slower).
+/// `QWEN_V41_DENSE_NARROW=1` selects the 32-slot form for same-binary
+/// A/B measurement. The arithmetic per output row is unchanged.
 #[allow(clippy::too_many_arguments)]
 pub fn encode_mat_mat_tensor_f32(
     ctx: &MetalContext,
@@ -260,6 +272,54 @@ pub fn encode_mat_mat_tensor_f32(
     n_in: usize,
     n_out: usize,
     n_query: usize,
+) -> Result<(), MetalError> {
+    let wide = n_query >= 128
+        && mat_mat_tensor_wide_pipeline_name(weight.dtype).is_some()
+        && std::env::var_os("QWEN_V41_DENSE_NARROW").is_none();
+    encode_mat_mat_tensor_f32_impl(ctx, enc, weight, x, y, n_in, n_out, n_query, wide)
+}
+
+/// Force the 64-slot dense form; test and probe entry point.
+#[allow(clippy::too_many_arguments)]
+pub fn encode_mat_mat_tensor_f32_wide(
+    ctx: &MetalContext,
+    enc: &KernelEncoder,
+    weight: &MetalTensor,
+    x: &MetalTensor,
+    y: &MetalTensor,
+    n_in: usize,
+    n_out: usize,
+    n_query: usize,
+) -> Result<(), MetalError> {
+    encode_mat_mat_tensor_f32_impl(ctx, enc, weight, x, y, n_in, n_out, n_query, true)
+}
+
+/// Force the 32-slot dense form; test and probe entry point.
+#[allow(clippy::too_many_arguments)]
+pub fn encode_mat_mat_tensor_f32_narrow(
+    ctx: &MetalContext,
+    enc: &KernelEncoder,
+    weight: &MetalTensor,
+    x: &MetalTensor,
+    y: &MetalTensor,
+    n_in: usize,
+    n_out: usize,
+    n_query: usize,
+) -> Result<(), MetalError> {
+    encode_mat_mat_tensor_f32_impl(ctx, enc, weight, x, y, n_in, n_out, n_query, false)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn encode_mat_mat_tensor_f32_impl(
+    ctx: &MetalContext,
+    enc: &KernelEncoder,
+    weight: &MetalTensor,
+    x: &MetalTensor,
+    y: &MetalTensor,
+    n_in: usize,
+    n_out: usize,
+    n_query: usize,
+    wide: bool,
 ) -> Result<(), MetalError> {
     const KERNEL: &str = "mat_mat_tensor";
     let l = moe_grouped_generic_layout(weight.dtype).ok_or_else(|| MetalError::BadShape {
@@ -311,17 +371,28 @@ pub fn encode_mat_mat_tensor_f32(
         b_div: 1,
         slot_limit: n_query as u32,
     };
-    let name = mat_mat_tensor_pipeline_name(weight.dtype).expect("layout found above");
+    let wide = wide && mat_mat_tensor_wide_pipeline_name(weight.dtype).is_some();
+    let name = if wide {
+        mat_mat_tensor_wide_pipeline_name(weight.dtype).expect("layout found above")
+    } else {
+        mat_mat_tensor_pipeline_name(weight.dtype).expect("layout found above")
+    };
+    let slots = if wide { 64 } else { 32 };
+    let threadgroup_bytes = if wide {
+        TENSOR_THREADGROUP_BYTES_WIDE
+    } else {
+        TENSOR_THREADGROUP_BYTES
+    };
     let pso = ctx.tensor_pipeline(&name)?;
     enc.set_pipeline(&pso);
     enc.set_bytes(0, &args);
     enc.set_tensor(1, weight);
     enc.set_tensor(2, x);
     enc.set_tensor(3, y);
-    enc.set_threadgroup_memory(0, TENSOR_THREADGROUP_BYTES);
+    enc.set_threadgroup_memory(0, threadgroup_bytes);
     enc.dispatch(
         MTLSize {
-            width: n_query.div_ceil(32),
+            width: n_query.div_ceil(slots),
             height: n_out.div_ceil(64),
             depth: 1,
         },

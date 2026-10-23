@@ -1149,6 +1149,109 @@ fn run_tensor_dense_case(dtype: GgmlType) {
     }
 }
 
+/// 64-slot dense tile against the CPU reference and the explicit 32-slot
+/// tile at ragged shapes (partial first and second slot groups, output-row
+/// tails).
+fn run_tensor_dense_wide_case(n_out: usize, rows: usize, seed: u64) {
+    let Some(ctx) = metal_test_context() else {
+        return;
+    };
+    if !moe_grouped_tensor_available(&ctx) {
+        eprintln!("tensor tier unavailable: {:?}", ctx.tensor_ops_status());
+        return;
+    }
+    const N_IN: usize = 512;
+    let bank = synthetic_bank(GgmlType::Q8_0, N_IN, n_out, 1, seed);
+    let w_cpu = cpu_expert(GgmlType::Q8_0, &bank, N_IN, n_out, 0);
+    let mut rng = Lcg(seed ^ 0x5a);
+    let x: Vec<f32> = (0..rows * N_IN).map(|_| rng.signed(0.5)).collect();
+    let cpu: Vec<f32> = (0..rows)
+        .flat_map(|r| matvec(&w_cpu, N_IN, &x[r * N_IN..(r + 1) * N_IN]))
+        .collect();
+    let w = MetalTensor::from_bytes(&ctx, &bank, vec![N_IN as u64, n_out as u64], GgmlType::Q8_0)
+        .expect("weight tensor");
+    let x_t = f32_tensor(&ctx, &x);
+    let x_v = x_t.view_bytes(0, vec![N_IN as u64, rows as u64]);
+    let narrow = MetalTensor::zeros_f32(&ctx, vec![n_out as u64, rows as u64]).unwrap();
+    let wide = MetalTensor::zeros_f32(&ctx, vec![n_out as u64, rows as u64]).unwrap();
+    one_shot(&ctx, |enc| {
+        encode_mat_mat_tensor_f32_narrow(&ctx, enc, &w, &x_v, &narrow, N_IN, n_out, rows)
+    })
+    .expect("narrow dense mat-mat");
+    one_shot(&ctx, |enc| {
+        encode_mat_mat_tensor_f32_wide(&ctx, enc, &w, &x_v, &wide, N_IN, n_out, rows)
+    })
+    .expect("wide dense mat-mat");
+    let narrow = read_back_f32(&narrow.buffer, rows * n_out);
+    let wide = read_back_f32(&wide.buffer, rows * n_out);
+    let label = format!("tensor-dense-wide-{n_out}x{rows}");
+    assert_close(&label, &wide, &cpu);
+    let bits = |values: &[f32]| values.iter().map(|v| v.to_bits()).collect::<Vec<_>>();
+    assert_eq!(
+        bits(&wide),
+        bits(&narrow),
+        "wide and narrow dense tiles differ at {n_out}x{rows}"
+    );
+}
+
+#[test]
+fn tensor_dense_wide_q8_0_matches_narrow() {
+    run_tensor_dense_wide_case(320, 130, 0x9d);
+    run_tensor_dense_wide_case(321, 97, 0x9e);
+}
+
+/// Opt-in narrow/wide dense timing at short batch lengths (the selector
+/// turns wide on at 64 rows). `QWEN_V41_TILE_TIMING=1`.
+#[test]
+fn tensor_dense_wide_batch_timing() {
+    if std::env::var_os("QWEN_V41_TILE_TIMING").is_none() {
+        return;
+    }
+    let Some(ctx) = metal_test_context() else {
+        return;
+    };
+    if !moe_grouped_tensor_available(&ctx) {
+        return;
+    }
+    let (n_in, n_out) = (8192usize, 5120usize);
+    let bank = synthetic_bank(GgmlType::Q8_0, n_in, n_out, 1, 0x44);
+    let w = MetalTensor::from_bytes(&ctx, &bank, vec![n_in as u64, n_out as u64], GgmlType::Q8_0)
+        .expect("weight tensor");
+    let mut rng = Lcg(0x51);
+    let bytes = bank.len() as f64;
+    for rows in [64usize, 96, 128, 192, 256] {
+        let x: Vec<f32> = (0..rows * n_in).map(|_| rng.signed(0.5)).collect();
+        let x_t = f32_tensor(&ctx, &x);
+        let x_v = x_t.view_bytes(0, vec![n_in as u64, rows as u64]);
+        let y_n = MetalTensor::zeros_f32(&ctx, vec![n_out as u64, rows as u64]).unwrap();
+        let y_w = MetalTensor::zeros_f32(&ctx, vec![n_out as u64, rows as u64]).unwrap();
+        let narrow = |enc: &KernelEncoder| {
+            encode_mat_mat_tensor_f32_narrow(&ctx, enc, &w, &x_v, &y_n, n_in, n_out, rows).unwrap();
+        };
+        let wide = |enc: &KernelEncoder| {
+            encode_mat_mat_tensor_f32_wide(&ctx, enc, &w, &x_v, &y_w, n_in, n_out, rows).unwrap();
+        };
+        heat(&ctx, 2, &[&narrow, &wide]);
+        let flops = 2.0 * (rows * n_in * n_out) as f64;
+        timed_tile(
+            &ctx,
+            &format!("output_b rows={rows} narrow"),
+            4,
+            flops,
+            bytes,
+            &narrow,
+        );
+        timed_tile(
+            &ctx,
+            &format!("output_b rows={rows} wide"),
+            4,
+            flops,
+            bytes,
+            &wide,
+        );
+    }
+}
+
 macro_rules! tensor_dense_cases {
     ($($name:ident => $dtype:expr;)*) => {
         $(

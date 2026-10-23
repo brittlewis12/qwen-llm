@@ -27,6 +27,10 @@ Raw: `metagross:~/qwen-runs/2026-10-22-select-fuse/`.
 tok/s, arm means. Both fused arms sit far above both split arms at every
 shape and quant.
 
+Rebased confirmation on the final tree (`6fec78d4`): Q2 PP2048 fused 652.4
+vs split 563.4; IQ3 PP2048 fused 647.4 vs split 557.9, same direction and
+magnitude as the three-arm table.
+
 ## Dispatch census
 
 Q2 PP2048, one run:

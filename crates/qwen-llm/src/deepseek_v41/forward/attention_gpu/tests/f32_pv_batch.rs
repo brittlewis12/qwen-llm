@@ -572,6 +572,20 @@ impl Fixture {
         let pso = pipeline(ctx, enc, "normalize_rows").unwrap();
         dispatch(enc, &pso, self.n * H * M);
     }
+
+    /// Wider-N tensor score (32 keys, two 256-wide latent chunks) with the
+    /// existing softmax, tensor PV and normalize.
+    fn encode_tensor32(&self, ctx: &MetalContext, enc: &KernelEncoder) {
+        self.bind(enc);
+        tensor_pipeline(ctx, enc, "score_tensor32").unwrap();
+        grid(enc, H / 16, self.n, 1, 128);
+        pipeline(ctx, enc, "softmax_rows").unwrap();
+        grid(enc, H, self.n, 1, 32);
+        tensor_pipeline(ctx, enc, "pv_tensor").unwrap();
+        grid(enc, H / 16, self.n, 1, 128);
+        let pso = pipeline(ctx, enc, "normalize_rows").unwrap();
+        dispatch(enc, &pso, self.n * H * M);
+    }
 }
 
 #[test]
@@ -648,6 +662,42 @@ fn tensor_sink_tile_matches_mma_sink() {
         let got = f32_slice(&f.output).unwrap();
         close_tile(got, &mma);
         close_half(got, &scalar);
+        f.check_guards();
+    }
+}
+
+#[test]
+fn tensor32_sink_tile_matches_tensor_sink() {
+    let Some(ctx) = crate::test_fixtures::metal_context_or_skip() else {
+        return;
+    };
+    if !metal::moe_grouped_tensor_available(&ctx) {
+        eprintln!("tensor tier unavailable: {:?}", ctx.tensor_ops_status());
+        return;
+    }
+    for (k, n, ragged, first) in cases() {
+        let f = Fixture::new(&ctx, k, n, ragged, first);
+        execute(&ctx, |enc| f.encode_tensor(&ctx, enc));
+        let base_scores = f32_slice(&f.scores).unwrap().to_vec();
+        let base_out = f32_slice(&f.output).unwrap().to_vec();
+        execute(&ctx, |enc| f.encode_tensor32(&ctx, enc));
+        assert_eq!(ids(&f.status, 1), [0], "k={k} n={n} ragged={ragged}");
+        let got_scores = f32_slice(&f.scores).unwrap();
+        for q in 0..n {
+            let count = f.count(q);
+            for h in 0..H {
+                let base = (q * H + h) * SCORE_STRIDE;
+                close_tile(
+                    &got_scores[base..base + count],
+                    &base_scores[base..base + count],
+                );
+                close_tile(
+                    &got_scores[base + SCORE_STRIDE - 1..base + SCORE_STRIDE],
+                    &base_scores[base + SCORE_STRIDE - 1..base + SCORE_STRIDE],
+                );
+            }
+        }
+        close_tile(f32_slice(&f.output).unwrap(), &base_out);
         f.check_guards();
     }
 }
@@ -783,7 +833,20 @@ fn mma_sink_tile_dispatch_timing() {
         });
         timed("full mma sink", &f, &|enc| f.encode_mma(&ctx, enc));
         if metal::moe_grouped_tensor_available(&ctx) {
+            timed("tensor score", &f, &|enc| {
+                f.bind(enc);
+                tensor_pipeline(&ctx, enc, "score_tensor").unwrap();
+                grid(enc, H / 16, f.n, 1, 128);
+            });
+            timed("tensor32 score", &f, &|enc| {
+                f.bind(enc);
+                tensor_pipeline(&ctx, enc, "score_tensor32").unwrap();
+                grid(enc, H / 16, f.n, 1, 128);
+            });
             timed("full tensor sink", &f, &|enc| f.encode_tensor(&ctx, enc));
+            timed("full tensor32 sink", &f, &|enc| {
+                f.encode_tensor32(&ctx, enc)
+            });
         }
     }
 }

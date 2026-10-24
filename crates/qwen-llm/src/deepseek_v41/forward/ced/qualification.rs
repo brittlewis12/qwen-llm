@@ -622,6 +622,18 @@ fn memory_ledger_comparison_excludes_runtime_peak_observations() {
 }
 
 pub(in crate::deepseek_v41::forward) fn production_command_count(plan: &CedPlan) -> AResult<usize> {
+    let layers = gpu_step::ced::batch_layers();
+    if layers != 0 {
+        return plan
+            .prompt_rows
+            .div_ceil(plan.full_chunk_rows)
+            .checked_add(plan.decoder.len().div_ceil(layers))
+            .context("qualification batch command count overflow");
+    }
+    incumbent_command_count(plan)
+}
+
+fn incumbent_command_count(plan: &CedPlan) -> AResult<usize> {
     let scalar_tail = usize::from(plan.scalar_tail().is_some());
     plan.decoder.iter().try_fold(
         plan.prompt_rows.div_ceil(plan.full_chunk_rows),
@@ -669,7 +681,11 @@ fn production_seed_fusion_removes_only_eligible_boundaries_at_native_lengths() {
                 })
                 .sum::<usize>();
         assert_eq!(incumbent, old);
-        assert_eq!(production_command_count(&plan).unwrap(), fused);
+        assert_eq!(incumbent_command_count(&plan).unwrap(), fused);
+        assert_eq!(
+            production_command_count(&plan).unwrap(),
+            n.div_ceil(PREFILL_CHUNK_ROWS) + plan.decoder.len().div_ceil(2)
+        );
         assert_eq!(
             plan.decoder
                 .iter()
@@ -682,15 +698,15 @@ fn production_seed_fusion_removes_only_eligible_boundaries_at_native_lengths() {
 }
 
 #[test]
-fn production_command_count_preserves_genuine_scalar_tail_submissions() {
+fn production_command_count_groups_genuine_scalar_tails_without_changing_units() {
     for (n, expected) in [
-        (1, 21),
-        (128, 21),
-        (2048, 21),
-        (4096, 25),
-        (4097, 46),
-        (8192, 27),
-        (8193, 48),
+        (1, 11),
+        (128, 11),
+        (2048, 11),
+        (4096, 12),
+        (4097, 13),
+        (8192, 14),
+        (8193, 15),
     ] {
         let plan = CedPlan::shrinking(
             &Config::default(),
@@ -700,6 +716,28 @@ fn production_command_count_preserves_genuine_scalar_tail_submissions() {
         )
         .unwrap();
         assert_eq!(production_command_count(&plan).unwrap(), expected, "N={n}");
+        let scalar_units = plan
+            .decoder
+            .chunks(2)
+            .map(|group| {
+                super::super::ced_plan::batches::units(
+                    &plan,
+                    group[0].layer..group.last().unwrap().layer + 1,
+                )
+                .unwrap()
+                .into_iter()
+                .filter(|u| u.kind == super::super::ced_plan::batches::Kind::Scalar)
+                .count()
+            })
+            .sum::<usize>();
+        assert_eq!(
+            scalar_units,
+            if prefill::original_scalar_tail(n).is_some() {
+                plan.decoder.len()
+            } else {
+                0
+            }
+        );
         if n == 4097 {
             let layer = &plan.decoder[18];
             assert_eq!(layer.output_rows.len(), 128);

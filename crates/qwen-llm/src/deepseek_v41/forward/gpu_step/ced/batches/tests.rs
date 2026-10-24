@@ -345,6 +345,12 @@ fn arm(model: &Forward<'_>, n: usize, depth: usize) -> Arm {
         report.observed_incremental_metal_bytes.unwrap()
             <= report.memory.as_ref().unwrap().incremental_metal_bytes
     );
+    if depth != 0 {
+        eprintln!(
+            "batch_memory N={n} depth={depth} {}",
+            serde_json::to_string(report.memory.as_ref().unwrap()).unwrap()
+        );
+    }
     let causal = incumbent::causal_bits(&state)
         .into_iter()
         .map(|v| v.into_iter().map(f32::to_bits).collect())

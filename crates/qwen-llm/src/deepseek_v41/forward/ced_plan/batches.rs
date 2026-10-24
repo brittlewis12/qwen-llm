@@ -193,6 +193,22 @@ mod tests {
                     expected
                 );
             }
+            let memory = crate::deepseek_v41::forward::ced::estimate_from_parts(
+                &Config::default(),
+                40,
+                &[],
+                0,
+                n,
+                &p,
+                true,
+                &|bytes| Ok(if bytes == 0 { 0 } else { bytes + 16384 }),
+            )
+            .unwrap();
+            eprintln!(
+                "production_batch_plan N={n} status_words={} {}",
+                maximum_status_words(&p, 2).unwrap(),
+                serde_json::to_string(&memory).unwrap()
+            );
             assert!(maximum_status_words(&p, 0).is_err());
             assert!(units(&p, 20..25).is_err());
         }

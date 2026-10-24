@@ -2515,6 +2515,7 @@ mod tests {
                             .collect(),
                     };
                     actual.memory = Some(CedMemoryEstimate {
+                        full_chunk_rows: usize::MAX,
                         retained_residual_bytes: u64::MAX,
                         retained_mix_bytes: u64::MAX,
                         retained_selected_bytes: u64::MAX,

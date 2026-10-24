@@ -22,7 +22,15 @@ fn hier_top512_shapes_price_two_allocations_and_capacity_not_prompt() {
         (16384, 4),
         (32768, 4),
     ] {
-        for rows in [1, 3, 511, 512, 513, prefill::DEFAULT_CHUNK_ROWS] {
+        for rows in [
+            1,
+            3,
+            511,
+            512,
+            513,
+            prefill::DEFAULT_CHUNK_ROWS,
+            prefill::MAX_CHUNK_ROWS,
+        ] {
             let shapes = selection_shapes(&c, capacity, rows, 512).unwrap();
             let t = rows.min(512);
             assert_eq!(shapes, [t * capacity.min(16384), t * partitions * K * 2]);
@@ -54,7 +62,7 @@ fn hier_top512_shapes_price_two_allocations_and_capacity_not_prompt() {
     assert_eq!(selection_shapes(&other, 16384, 512, 512).unwrap()[1], 0);
     assert!(selection_shapes(&c, 16384, 0, 512).is_err());
     assert!(selection_shapes(&c, 16384, 1, 0).is_err());
-    assert!(selection_shapes(&c, 16384, prefill::DEFAULT_CHUNK_ROWS + 1, 512).is_err());
+    assert!(selection_shapes(&c, 16384, prefill::MAX_CHUNK_ROWS + 1, 512).is_err());
     other.candidate_topk = usize::MAX;
     assert!(selection_shapes(&other, 8192, 512, 512).is_err());
     other.candidate_block = 1;

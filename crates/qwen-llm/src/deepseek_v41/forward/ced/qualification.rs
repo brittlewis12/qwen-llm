@@ -637,7 +637,7 @@ pub(in crate::deepseek_v41::forward) fn production_command_count(plan: &CedPlan)
                 .and_then(|n| n.checked_add(scalar_tail))
                 .and_then(|n| {
                     n.checked_sub(usize::from(
-                        layer.fuse_seed_with_packed_output(plan.prompt_rows),
+                        layer.fuse_seed_with_packed_output(plan.prompt_rows, plan.full_chunk_rows),
                     ))
                 })
                 .context("qualification command count overflow")
@@ -673,7 +673,7 @@ fn production_seed_fusion_removes_only_eligible_boundaries_at_native_lengths() {
         assert_eq!(
             plan.decoder
                 .iter()
-                .filter(|layer| layer.fuse_seed_with_packed_output(n))
+                .filter(|layer| layer.fuse_seed_with_packed_output(n, plan.full_chunk_rows))
                 .count(),
             seeds
         );
@@ -707,6 +707,36 @@ fn production_command_count_preserves_genuine_scalar_tail_submissions() {
                 (layer.output_rows.len() - 1).div_ceil(PREFILL_CHUNK_ROWS) + 1,
                 2
             );
+        }
+    }
+}
+
+#[test]
+fn production_fusion_counts_follow_selected_full_chunks_without_growing_decoder_tiles() {
+    for (n, narrow, wide) in [
+        (128, 21, 21),
+        (2047, 21, 21),
+        (2048, 21, 21),
+        (2049, 42, 24),
+        (4095, 25, 24),
+        (4096, 25, 24),
+        (4097, 46, 45),
+        (8192, 27, 25),
+    ] {
+        for (width, expected) in [(2048, narrow), (4096, wide)] {
+            let plan = CedPlan::shrinking(
+                &Config::default(),
+                &v41_gguf::Schedule::default(),
+                &engram::HashConfig::default(),
+                &CedRequest::cold(n, n + STEPS).with_full_chunk_rows(width),
+            )
+            .unwrap();
+            assert_eq!(
+                production_command_count(&plan).unwrap(),
+                expected,
+                "N={n}, width={width}"
+            );
+            assert_eq!(plan.scalar_tail(), (n % width == 1).then_some(n - 1));
         }
     }
 }

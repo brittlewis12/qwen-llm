@@ -11,7 +11,7 @@ fn maximum_decoder_rows(plan: &CedPlan, arithmetic: Arithmetic) -> Result<Option
     if arithmetic.scalar() {
         return Ok(None);
     }
-    let tail = prefill::original_scalar_tail(plan.prompt_rows);
+    let tail = plan.scalar_tail();
     let mut maximum: Option<Range<usize>> = None;
     for layer in &plan.decoder {
         let end = tail.unwrap_or(layer.output_rows.end);
@@ -1044,8 +1044,8 @@ impl Workspace {
             backing: None,
         };
         for layer in &plan.decoder {
-            let mut fuse_seed =
-                !arithmetic.scalar() && layer.fuse_seed_with_packed_output(plan.prompt_rows);
+            let mut fuse_seed = !arithmetic.scalar()
+                && layer.fuse_seed_with_packed_output(plan.prompt_rows, plan.full_chunk_rows);
             #[cfg(test)]
             {
                 fuse_seed &= !super::super::ced::tests::unfused();

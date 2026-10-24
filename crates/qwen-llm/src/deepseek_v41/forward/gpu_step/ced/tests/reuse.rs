@@ -108,7 +108,7 @@ fn derives_actual_maximum_excluding_native_and_genuine_scalar_tails() {
             let maximum = maximum_decoder_rows(&plan, Arithmetic::Production).unwrap();
             let mut actual = Vec::new();
             for layer in &plan.decoder {
-                let tail = prefill::original_scalar_tail(n);
+                let tail = plan.scalar_tail();
                 for chunk in chunk_views(layer.output_rows.start..tail.unwrap_or(n), 2048).unwrap()
                 {
                     actual.push(chunk.absolute_rows);
@@ -163,6 +163,30 @@ fn outer_prefix_rejects_zero_oversize_and_overflow_before_views() {
     let mut plan = dependency_plan(&forward::toy::config(), 128);
     plan.decoder[0].output_rows = 129..128;
     assert!(maximum_decoder_rows(&plan, Arithmetic::Production).is_err());
+}
+
+#[test]
+fn selected_full_width_never_expands_the_reusable_decoder_backing() {
+    for width in [2048, 4096] {
+        for n in [2047, 2048, 2049, 4095, 4096, 4097] {
+            let c = Config {
+                window: 2048,
+                ..forward::toy::config()
+            };
+            let mut plan = dependency_plan(&c, n);
+            plan.full_chunk_rows = width;
+            let backing = maximum_decoder_rows(&plan, Arithmetic::Production)
+                .unwrap()
+                .unwrap();
+            assert!(backing.len() <= 2048);
+            assert_eq!(plan.scalar_tail(), (n % width == 1).then_some(n - 1));
+            if n == 2049 && width == 4096 {
+                assert_eq!(plan.scalar_tail(), None);
+                assert_eq!(backing.len(), 2048);
+                assert!(prefill::RowsArithmetic::Packed.packed_operands(1));
+            }
+        }
+    }
 }
 
 type WeakBuffer = Weak<ProtocolObject<dyn MTLBuffer>>;

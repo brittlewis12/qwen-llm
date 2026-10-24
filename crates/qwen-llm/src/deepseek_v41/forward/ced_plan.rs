@@ -72,11 +72,16 @@ pub struct CedLayerPlan {
 }
 
 impl CedLayerPlan {
-    pub(super) fn fuse_seed_with_packed_output(&self, prompt_rows: usize) -> bool {
+    pub(super) fn fuse_seed_with_packed_output(
+        &self,
+        prompt_rows: usize,
+        full_chunk_rows: usize,
+    ) -> bool {
         !self.seed_rows.is_empty()
             && self.seed_rows.len() <= DEFAULT_CHUNK_ROWS
             && self.output_rows.start
-                < super::prefill::original_scalar_tail(prompt_rows).unwrap_or(self.output_rows.end)
+                < super::prefill::original_scalar_tail(prompt_rows, full_chunk_rows)
+                    .unwrap_or(self.output_rows.end)
     }
 }
 

@@ -225,7 +225,7 @@ mod tests {
                     let scalar_tail =
                         prefill::original_scalar_tail(n, super::super::prefill::DEFAULT_CHUNK_ROWS);
                     for layer in &plan.decoder {
-                        let mut fuse = layer.fuse_seed_with_packed_output(n);
+                        let mut fuse = layer.fuse_seed_with_packed_output(n, plan.full_chunk_rows);
                         if !fuse {
                             for view in chunk_views(layer.seed_rows.clone(), chunk).unwrap() {
                                 let r = view.absolute_rows;

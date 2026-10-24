@@ -37,8 +37,8 @@ pub(super) fn selection_shapes(
     tile: usize,
 ) -> Result<[usize; 2]> {
     op::require(
-        (1..=prefill::DEFAULT_CHUNK_ROWS).contains(&rows)
-            && (1..=prefill::DEFAULT_CHUNK_ROWS).contains(&tile),
+        (1..=prefill::MAX_CHUNK_ROWS).contains(&rows)
+            && (1..=prefill::MAX_CHUNK_ROWS).contains(&tile),
         "selection scratch rows",
     )?;
     let unpruned = c
@@ -448,6 +448,17 @@ mod scratch_prefix_geometry_tests {
     use super::*;
 
     #[test]
+    fn selected_4k_full_chunk_keeps_default_selection_tiles_bounded() {
+        let c = Config::default();
+        for capacity in [8192, 16384] {
+            assert_eq!(
+                selection_shapes(&c, capacity, 4096, 512).unwrap(),
+                selection_shapes(&c, capacity, 2048, 512).unwrap()
+            );
+        }
+    }
+
+    #[test]
     fn query_prefix_shapes_recompute_history_span_and_matrix_tile_strides() {
         let c = Config {
             head_dim: 64,
@@ -474,7 +485,7 @@ mod scratch_prefix_geometry_tests {
     fn query_prefix_shapes_reject_invalid_rows_and_history_overflow() {
         let mut c = Config::default();
         assert!(Scratch::shapes(&c, 0).is_err());
-        assert!(Scratch::shapes(&c, prefill::DEFAULT_CHUNK_ROWS + 1).is_err());
+        assert!(Scratch::shapes(&c, prefill::MAX_CHUNK_ROWS + 1).is_err());
         c.window = usize::MAX;
         assert!(Scratch::shapes(&c, 1).is_err());
     }

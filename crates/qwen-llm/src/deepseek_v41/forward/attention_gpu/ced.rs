@@ -537,11 +537,11 @@ impl Cursor {
         let range = checked_range(&self.plan.decoder[j].output_rows, start, rows)?;
         op::require(
             p.encoded
+                && rows <= prefill::DEFAULT_CHUNK_ROWS
                 && p.encoded_seed_prefix.is_none()
-                && self.plan.decoder[j].fuse_seed_with_packed_output(self.plan.prompt_rows)
-                && range.end
-                    <= prefill::original_scalar_tail(self.plan.prompt_rows)
-                        .unwrap_or(self.plan.prompt_rows)
+                && self.plan.decoder[j]
+                    .fuse_seed_with_packed_output(self.plan.prompt_rows, self.plan.full_chunk_rows)
+                && range.end <= self.plan.scalar_tail().unwrap_or(self.plan.prompt_rows)
                 && self.seed_completed[j] == seed.start
                 && start == seed.end
                 && start == self.output_completed[j],

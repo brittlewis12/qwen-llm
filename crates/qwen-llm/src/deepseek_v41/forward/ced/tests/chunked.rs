@@ -329,7 +329,8 @@ fn ced_commands(plan: &CedPlan) -> Vec<Command> {
         })
         .collect::<Vec<_>>();
     for layer in &plan.decoder {
-        let mut fuse = !unfused() && layer.fuse_seed_with_packed_output(plan.prompt_rows);
+        let mut fuse = !unfused()
+            && layer.fuse_seed_with_packed_output(plan.prompt_rows, plan.full_chunk_rows);
         if !fuse {
             for range in chunks(layer.seed_rows.clone()) {
                 commands.push(("ced_local_seed", [layer.layer, range.start, range.len(), 0]));

@@ -5,6 +5,51 @@ use ced_plan::{CedPlan, CedRequest, chunk_views};
 const EDGES: [usize; 6] = [2047, 2048, 2049, 4095, 4096, 4097];
 
 #[test]
+fn released_shape_prices_actual_4k_encoder_and_half_scratch_per_allocation() {
+    let c = Config::default();
+    let s = gguf::Schedule::default();
+    let h = engram::HashConfig::default();
+    let projections = vec![(6144, 5 * c.hidden); h.layers.len()];
+    let price = |bytes: u64| -> Result<u64> {
+        Ok(if bytes == 0 {
+            0
+        } else {
+            bytes.div_ceil(16384) * 16384 + 1024
+        })
+    };
+    let mut costs = Vec::new();
+    for width in [2048, 4096] {
+        let (_, full, ced) = preflight::runtime_from_parts(
+            &c,
+            &s,
+            &h,
+            &projections,
+            8192,
+            8448,
+            &[
+                PrefillExecution::FullForward,
+                PrefillExecution::ShrinkingCed,
+            ],
+            width,
+            true,
+            &price,
+        )
+        .unwrap();
+        let ced = ced.unwrap();
+        let half = prefill::half_scratch_budget_with(&c, width, true, &price).unwrap();
+        assert_eq!(ced.priced_half_chunk_bytes, half);
+        println!(
+            "{}",
+            serde_json::json!({"geometry":"Config::default; no weights loaded","per_allocation_price":"ceil_16KiB_plus_1KiB_nonempty","full_chunk_rows":width,"full_metal_bytes":full.0,"full_cpu_bytes":full.1,"ced":ced})
+        );
+        costs.push((full, half));
+    }
+    assert!(costs[1].0.0 > costs[0].0.0);
+    assert!(costs[1].0.1 > costs[0].0.1);
+    assert!(costs[1].1 > costs[0].1);
+}
+
+#[test]
 fn selected_full_geometry_keeps_encoder_schedule_and_scalar_native_identity() {
     for width in [prefill::DEFAULT_CHUNK_ROWS, prefill::MAX_CHUNK_ROWS] {
         for n in EDGES {

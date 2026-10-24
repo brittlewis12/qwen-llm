@@ -693,7 +693,7 @@ fn assert_report(report: &PrefillReport, n: usize, capacity: usize, scalar: bool
     let counters = report.counters.as_ref().expect("executed CED counters");
     counters.validate(&p).unwrap();
     let mut expected = complete_counters(&p);
-    let scalar_tail = usize::from(prefill::original_scalar_tail(n).is_some());
+    let scalar_tail = usize::from(p.scalar_tail().is_some());
     expected.encoded_commands = if scalar {
         n + p.work.decoder_seed_rows + p.work.decoder_output_rows
     } else {
@@ -704,7 +704,9 @@ fn assert_report(report: &PrefillReport, n: usize, capacity: usize, scalar: bool
                     l.seed_rows.len().div_ceil(prefill::DEFAULT_CHUNK_ROWS)
                         + (l.output_rows.len() - scalar_tail).div_ceil(prefill::DEFAULT_CHUNK_ROWS)
                         + scalar_tail
-                        - usize::from(!unfused() && l.fuse_seed_with_packed_output(n))
+                        - usize::from(
+                            !unfused() && l.fuse_seed_with_packed_output(n, p.full_chunk_rows),
+                        )
                 })
                 .sum::<usize>()
     };

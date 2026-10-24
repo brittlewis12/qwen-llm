@@ -1483,8 +1483,8 @@ mod tests {
             process_limit_remaining_bytes: Some(4000 * MIB),
             host_budget: Some(qwen_llm::metal::HostMemoryBudget {
                 physical_bytes: 5000 * MIB,
-                // Keep the ordinary 20% margin, leaving 600 MiB for new demand.
-                conservative_available_bytes: 1600 * MIB,
+                // Load fits within 600 MiB of actual availability; the whole peak does not.
+                conservative_available_bytes: 600 * MIB,
                 external_gap_bytes: 0,
                 private_shadow_bytes: 0,
             }),
@@ -1569,7 +1569,12 @@ mod tests {
                 "device" => signals.recommended_max_bytes = preweight.plan.required_metal_bytes - 1,
                 "ownership" => {
                     let host = signals.host_budget.as_mut().unwrap();
-                    host.external_gap_bytes = 3100 * MIB;
+                    // Isolate physical capacity from the independent device bound.
+                    signals.recommended_max_bytes = host.physical_bytes;
+                    host.external_gap_bytes = host.physical_bytes
+                        - preweight.plan.required_metal_bytes
+                        - preweight.plan.required_cpu_bytes
+                        + 1;
                 }
                 "process" => {
                     signals.process_limit_remaining_bytes = Some(
@@ -1591,8 +1596,7 @@ mod tests {
                         .as_mut()
                         .unwrap()
                         .conservative_available_bytes =
-                        1000 * MIB + preweight.plan.load_metal_bytes + preweight.plan.load_cpu_bytes
-                            - 1
+                        preweight.plan.load_metal_bytes + preweight.plan.load_cpu_bytes - 1
                 }
                 "overflow" => preweight.plan.required_metal_bytes = u64::MAX,
                 _ => unreachable!(),
@@ -1710,8 +1714,7 @@ mod tests {
                             let host = signals.host_budget.as_mut().unwrap();
                             host.private_shadow_bytes =
                                 preweight.plan.resident_storage.private_shadow_bytes;
-                            host.conservative_available_bytes = 1000 * MIB
-                                + host.private_shadow_bytes
+                            host.conservative_available_bytes = host.private_shadow_bytes
                                 + if index == stop {
                                     preweight.plan.runtime_metal_bytes
                                         + preweight.plan.runtime_gate_cpu_bytes

@@ -2025,7 +2025,8 @@ mod admission_refusal_tests {
             process_limit_remaining_bytes: Some(0),
             host_budget: Some(HostMemoryBudget {
                 physical_bytes: 1000,
-                conservative_available_bytes: 900,
+                // Future capacity can fit even when today's availability cannot.
+                conservative_available_bytes: 700,
                 external_gap_bytes: 0,
                 private_shadow_bytes: 0,
             }),
@@ -2065,7 +2066,8 @@ mod admission_refusal_tests {
             .unwrap()
             .conservative_available_bytes = 1001;
         let mut over_ceiling = capacity_signals();
-        over_ceiling.current_allocated_bytes = 801;
+        over_ceiling.current_allocated_bytes = 1001;
+        over_ceiling.recommended_max_bytes = 1001;
         over_ceiling
             .host_budget
             .as_mut()
@@ -2098,7 +2100,7 @@ mod admission_refusal_tests {
         let mut signals = capacity_signals();
         let capacity = evaluate_metal_memory_capacity_with_cpu_bytes(750, 50, signals).unwrap();
         assert_eq!(capacity.required_bytes, 800);
-        assert_eq!(capacity.ceiling_remaining_bytes, 800);
+        assert_eq!(capacity.ceiling_remaining_bytes, 1000);
         assert_eq!(capacity.signals, signals);
         assert_eq!(
             evaluate_metal_memory_admission_with_cpu_bytes(750, 50, 0, signals, true).reason,
@@ -2133,7 +2135,7 @@ mod admission_refusal_tests {
         );
         signals = capacity_signals();
         assert_eq!(
-            evaluate_metal_memory_capacity_with_cpu_bytes(750, 51, signals)
+            evaluate_metal_memory_capacity_with_cpu_bytes(750, 251, signals)
                 .unwrap_err()
                 .reason(),
             R::HostInsufficient
@@ -2168,17 +2170,12 @@ mod admission_refusal_tests {
             .unwrap()
             .external_gap_bytes = u64::MAX;
         let mut shadow_overflow = base;
+        shadow_overflow.current_allocated_bytes = 1;
         shadow_overflow
             .host_budget
             .as_mut()
             .unwrap()
             .private_shadow_bytes = u64::MAX;
-        let mut ceiling_overflow = base;
-        ceiling_overflow
-            .host_budget
-            .as_mut()
-            .unwrap()
-            .physical_bytes = u64::MAX;
         for (signals, expected) in [
             (missing, R::HostSignalUnavailable),
             (no_process, R::ProcessSignalUnavailable),
@@ -2188,7 +2185,6 @@ mod admission_refusal_tests {
             (device_overshoot, R::InvalidWorkingSetSignal),
             (gap_overflow, R::InvalidHostSignal),
             (shadow_overflow, R::InvalidHostSignal),
-            (ceiling_overflow, R::InvalidHostSignal),
         ] {
             let error = evaluate_metal_memory_capacity_with_cpu_bytes(10, 20, signals).unwrap_err();
             let ordinary = evaluate_metal_memory_admission_with_cpu_bytes(10, 20, 0, signals, true);
@@ -2204,14 +2200,22 @@ mod admission_refusal_tests {
             evaluate_metal_memory_capacity_with_cpu_bytes(u64::MAX, 1, missing).unwrap_err();
         assert_eq!(error.reason(), R::RequiredBytesOverflow);
         assert_eq!(error.required_bytes, None);
+        // Full-width physical capacity is valid now that no percentage is computed.
+        let mut full_width = base;
+        full_width.host_budget.as_mut().unwrap().physical_bytes = u64::MAX;
+        assert!(evaluate_metal_memory_capacity_with_cpu_bytes(10, 20, full_width).is_ok());
+        assert!(
+            evaluate_metal_memory_admission_with_cpu_bytes(10, 20, 0, full_width, true)
+                .is_admitted()
+        );
     }
 
     #[test]
     fn capacity_and_ordinary_admission_match_independent_boundary_inequalities() {
-        for allocated in [0, 100, 800, 801] {
+        for allocated in [0, 100, 1000, 1001] {
             for gap in [0, 25] {
                 for shadow in [0, 10] {
-                    for available in [0, 199, 200, 900, 1000] {
+                    for available in [0, 9, 10, 900, 1000] {
                         for recommended in [0, 800, 1000] {
                             for process in [None, Some(0), Some(100), Some(800)] {
                                 let signals = MetalMemorySignals {
@@ -2229,16 +2233,16 @@ mod admission_refusal_tests {
                                     for cpu in [0, 100] {
                                         let effective = allocated + gap;
                                         let required = metal + cpu;
-                                        let capacity_fits = effective + shadow + required <= 800
+                                        let capacity_fits = effective + shadow + required <= 1000
                                             && recommended > effective
                                             && effective + metal <= recommended
                                             && process.is_some_and(|remaining| {
                                                 remaining == 0 || required <= remaining
                                             });
                                         let ordinary_fits = capacity_fits
-                                            && available > 200 + shadow
-                                            && required <= available - 200 - shadow
-                                            && effective + shadow < 800;
+                                            && available > shadow
+                                            && required <= available - shadow
+                                            && effective + shadow < 1000;
                                         assert_eq!(
                                             evaluate_metal_memory_capacity_with_cpu_bytes(
                                                 metal, cpu, signals

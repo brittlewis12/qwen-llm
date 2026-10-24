@@ -78,8 +78,8 @@ fn cold_preflight_uses_validated_small_metadata_without_import_or_new_maps() {
         );
         let mut staged = preflight_signals();
         let host = staged.host_budget.as_mut().unwrap();
-        let reserve = host.physical_bytes - host.ceiling_bytes().unwrap();
-        host.conservative_available_bytes = reserve + cold.load_metal_bytes + cold.load_cpu_bytes;
+        // Fresh availability covers the load exactly, but not the future runtime peak.
+        host.conservative_available_bytes = cold.load_metal_bytes + cold.load_cpu_bytes;
         let assessment = cold.plan.assess_load(staged).unwrap();
         assert!(assessment.load_admission.is_admitted());
         assert!(!assessment.whole_peak_now.is_admitted());
@@ -114,8 +114,7 @@ fn combined_preflight_refuses_before_injected_import_with_typed_telemetry_errors
     let total = admitted.required_metal_bytes + admitted.required_cpu_bytes;
     let mut short = preflight_signals();
     let host = short.host_budget.as_mut().unwrap();
-    let reserve = host.physical_bytes - host.ceiling_bytes().unwrap();
-    host.conservative_available_bytes = reserve + total - 1;
+    host.conservative_available_bytes = total - 1;
     assert_eq!(short.host_remaining_bytes(), Some(total - 1));
     // Each side fits alone, but the preweight combined host exposure does not.
     assert!(

@@ -6,6 +6,50 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the current state and evidence index.
 
+## 2026-10-23 - CED Phase Admission And Allocation Attribution
+
+- The experimental paired path separates full-future capacity feasibility from
+  phase-local availability:
+  retain device/ownership/positive-process limits before import, admit the
+  complete load/binding/caller phase, and refresh the combined runtime budget
+  after binding before each fresh state. No active-cache credit, reserve change
+  or inner-admission exception is introduced; strict cold qualification remains.
+- The combined M4 checkpoint passes 156 ordinary forward, 17 FFN, 11 bounded CED,
+  four hierarchical GPU and 1,525 CLI tests, plus affected release all-target
+  checks. Pure boundary tests preserve raw-zero CPU accounting, exact refusal
+  causes, private/import debt and refusal before state/command callbacks.
+- One supervised validation-on 2K diagnostic enters through those gates, then
+  rejects a 2.509x within-CED spread before the sixth case. GPU intervals remain
+  near 2.00 s Full / 1.75 s CED while completion-wall intervals vary by seconds;
+  warmed process I/O and recorded pipeline misses do not explain that gap.
+- CED block-row allocation/initialization aggregates about 1.18 s. Prototype
+  request-local maximum-row scratch reuse (`perf/v41-ced-scratch`): source census
+  removes 874 of 920 decoder buffer constructions at 2K, not GPU work or command
+  boundaries. Checked logical views must preserve overwrite/status semantics
+  and borrowed control origins without retaining multiple row-count pools.
+- These are attribution and capacity results, not production throughput. Keep
+  whole-model explicit residency/pinning closed; diagnose the waiting regime
+  separately and retain all stop rules.
+
+## 2026-10-23 - Exact Long-Prefix Selector: Bounded And 8K Causal Proofs Pass
+
+- Candidate `7089b312` passes six pure tests and four bounded self-leased GPU
+  fixtures on M4/M5, including 513-row P2/P4 slab reuse and nonzero-offset CED
+  controls. The largest explicit pre-allocation priced bound is 97.844 MiB;
+  context/driver overhead is separate. <=4K, pruning and rollback remain.
+- One supervised fitting Maya-S 8K run matches all 257 complete vocabulary
+  vectors and 56 causal regions between candidate Full/CED. Offline comparison
+  with frozen `01983b7b` also matches every state observation and all four
+  arms' head hashes, with matching input and retained artifact identities.
+- Minimum sampled host availability is 69.39 GiB; no unhealthy sample or bypass
+  occurs. Ordered elapsed times remain unqualified and do not lift the native
+  timing hold. The independent diagnostic build retains the incumbent selector.
+- A new census assertion incorrectly expects mask publication by consumers;
+  test-only `208124cd` fixes the source/consumer distinction. The corrected
+  combined M4 checkpoint subsequently passes 156 forward, 17 FFN, 11 bounded
+  CED, four selector GPU and 1,525 CLI tests plus release all-target checks.
+- [Algorithm, bounds, causal evidence and performance limits](bench/2026-10-23-v41-select-hier.md).
+
 ## 2026-10-23 - V4.1 Native Full/CED Pair: pp128 Loss, 2K Rejected
 
 - Clean source `6896f87d` runs one resident Maya-S model with fresh KV, both

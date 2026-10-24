@@ -47,6 +47,13 @@ healthy evidence. See `bench/2026-10-23-v41-ced-native-pair.md`. Bounded128
 remains a separate policy arm.
 Attention and activation-staging kernel lanes remain independent.
 
+CED decoder scratch reuse: in flight (`perf/v41-ced-scratch`). Instrumented
+2K attribution measures about 1.18 s in block-row allocation/initialization;
+source census identifies 874 removable buffer constructions with one checked
+maximum-row decoder backing. Preserve all 38 submissions, original arithmetic
+lineage, status initialization and the existing admitted peak. This is a reuse
+bet, not a native speedup claim; completion-wall variability remains separate.
+
 Mapping/admission repair: landed (2026-10-23 memory-safety entry and
 `bench/2026-10-23-v41-memory-safety.md`). Shared EOF removes the old 156.059 GiB
 private exposure; combined host admission and bounded import/lifetime proofs
@@ -219,7 +226,11 @@ attention tiles at 34.7%. Re-sample after the next landing.
   8192 expand into 83,880 legacy sort/chronological dispatches. Partition-local
   top-512 plus exact merge is a bounded experiment, not measured wall-time
   attribution. Preserve comparator/NaN/causal semantics, price tile scratch,
-  retain <=4K and pruning fallbacks, and prove exact IDs before model timing.
+  retain <=4K and pruning fallbacks. Bounded exact IDs/status/canaries and
+  513-row/borrowed-control reuse pass on M4/M5. Candidate 8K Full/CED and frozen
+  incumbent Full/CED match all 257 vocabulary vectors and 56 causal regions
+  at every position. Corrected broad regression passes; production-regime
+  wall-time evidence remains open. See `bench/2026-10-23-v41-select-hier.md`.
 - Scalar score kernel tuning: superseded on the released geometry by the
   MMA tile; the 8-lane scalar kernel remains the fallback for other
   geometry. The 4-key/8-lane variants measured +3.0%/+1.2-1.4% on the old

@@ -105,6 +105,56 @@ Exact hierarchical top512 selection above 4K remains an independent bounded
 experiment (`perf/v41-select-hier`). Partition-local top512 plus exact merge
 targets the source-derived 83,880 legacy sort/chronological dispatches in 8K CED.
 It preserves signed-zero/tie/NaN behavior, causal visibility and absolute IDs,
-with capacity-priced tile scratch and an incumbent rollback. Review does not
-establish GPU correctness or wall-time improvement; production-tile reuse and
-borrowed CED control views need bounded execution proof before model trials.
+with capacity-priced tile scratch and an incumbent rollback. At the initial
+checkpoint, review alone does not establish GPU correctness or wall-time
+improvement. Subsequent bounded and end-to-end proofs are linked in the follow-up.
+
+## Follow-Up: Phase Planning And Attribution
+
+The experimental planner separates full-future capacity feasibility from
+availability at the actual phase boundary. It preserves the 80% ownership
+ceiling, 20% host margin, positive process/device constraints and private/import
+debt. Before import it admits resident views, binding and caller storage; after
+binding and before each fresh state it reassesses the complete runtime envelope
+with fresh signals. No active-cache credit or telemetry exception is introduced.
+The original strict cold-peak wrapper remains available for qualification.
+
+This avoids requiring every future allocation to fit a pre-import availability
+snapshot, without assuming shared-cache reuse will occur. If runtime availability
+does not suffice afterward, no new case state/prefill starts. Later production
+CED fallback remains guarded Full execution and still invalidates a paired case.
+
+Source `c1fdca25` passes a fitting supervised 2K diagnostic through those phase
+checks, then rejects a 2.509x CED spread after its fifth chronological case.
+Recorded GPU durations remain approximately 2.00 s Full / 1.75 s CED; CED's
+completion-wall sum changes from 6.57 to 18.70 s while its GPU sum stays near
+1.75 s. Warmed process reads/page-ins and recorded pipeline misses are zero.
+These counters do not rule out all I/O or driver work, and the wait interval
+does not identify scheduling, validation, residency or completion delivery.
+
+The new aggregate block-row allocation/initialization span measures about
+1.18 s across CED encoder/decoder constructors. It overlaps the encoder's host
+preparation span; it is host wall, not additive CPU work. Request-local storage
+reuse is a separate measured-code-path bet. Replacing allocation observations'
+full host/task queries with the same raw device getter does not establish a
+native speedup: a separate pp128 pair remains approximately 306 ms Full /
+474 ms CED. Do not attribute the observed short-prompt loss to those queries.
+
+The combined M4 checkpoint passes 156 forward, 17 FFN, 11 bounded CED, four
+selector GPU and 1,525 CLI tests plus release all-target checks. Independent
+reviews find no remaining staged-admission or lifecycle correctness issue.
+All-current/frozen 8K head/state evidence is recorded in the
+[exact-selector packet](2026-10-23-v41-select-hier.md).
+
+Measurement regimes need explicit separation: recent V4.1 production-throughput
+packets leave API/shader validation unset, whereas this initial pair contract
+requires API validation. Historical rows prove that API validation was requested;
+they do not record every shader-validation override or prove effective API-only
+instrumentation. A separately identified production-timing regime is in flight;
+correctness tests keep validation enabled and all memory/lease/stop checks stay.
+No evidence yet shows that validation caused the completion-wall variability.
+
+Whole-model explicit residency remains closed under the standing
+[failure decision](../PERF-LOG.md#2026-08-13-whole-model-residency-optimization-lane-closed).
+Do not reinterpret the wait gap as permission to pin, pre-wire, use `mlock`,
+force cache cleanup or relax admission.

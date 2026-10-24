@@ -84,6 +84,11 @@ pub fn moe_grouped_tensor_pipeline_name(
     ))
 }
 
+/// 64-slot gate/up probe pipeline for a generic dtype.
+pub fn wide_probe_pipeline_name(dtype: GgmlType) -> Option<String> {
+    moe_grouped_generic_layout(dtype).map(|l| format!("kernel_moe_wide_probe_{}_f16act", l.suffix))
+}
+
 /// True when the tensor tile can run on this context.
 pub fn moe_grouped_tensor_available(ctx: &MetalContext) -> bool {
     ctx.tensor_ops_status().is_available()
@@ -218,6 +223,20 @@ pub fn encode_moe_swiglu_f32_grouped_slots_tensor(
             kernel: KERNEL,
             detail: format!("clamp must be finite and positive, got {clamp}"),
         });
+    }
+    // At a 4096-row chunk the routed experts average ~64 slots, so the wide
+    // panel is full. Down keeps the narrow tile; gate/up uses the wide panel.
+    if n_tokens >= 4096
+        && let Some(limit) = clamp
+        && moe_grouped_tensor_selected(ctx)
+        && std::env::var_os("QWEN_V41_EXPERT_WIDE").is_none_or(|v| v != "0")
+        && wide_probe_pipeline_name(w_gate.dtype).is_some()
+        && wide_probe_pipeline_name(w_up.dtype).is_some()
+    {
+        return encode_moe_swiglu_wide_probe(
+            ctx, enc, w_gate, w_up, x_pack, counts, ids, inner, n_hidden, n_ffn, n_expert, topk,
+            n_tokens, limit,
+        );
     }
     crate::metal::checks::require_serial(KERNEL, enc)?;
     let gate_args = generic_mm_args(
@@ -447,5 +466,173 @@ fn encode_mat_mat_tensor_f32_impl(
             depth: 1,
         },
     );
+    Ok(())
+}
+
+/// Probe-only 64-slot IQ3_XXS down dispatch. Same data and arithmetic as the
+/// narrow tile; the fixture compares panel cost at 4096 routed tokens.
+#[allow(clippy::too_many_arguments)]
+pub fn encode_moe_down_wide_probe(
+    ctx: &MetalContext,
+    enc: &KernelEncoder,
+    weight: &MetalTensor,
+    inner: &MetalTensor,
+    counts: &MetalTensor,
+    ids: &MetalTensor,
+    out: &MetalTensor,
+    n_in: usize,
+    n_out: usize,
+    n_expert: usize,
+    n_tokens: usize,
+) -> Result<(), MetalError> {
+    const KERNEL: &str = "moe_down_wide_probe";
+    let args = generic_mm_args(
+        KERNEL,
+        weight,
+        inner,
+        counts,
+        ids,
+        out,
+        n_in,
+        n_out,
+        n_expert,
+        n_tokens,
+        1,
+        0,
+        i32::MAX as u32,
+    )?;
+    let name = wide_probe_pipeline_name(weight.dtype).ok_or(MetalError::BadShape {
+        kernel: KERNEL,
+        detail: format!("no wide probe pipeline for {:?}", weight.dtype),
+    })?;
+    let pso = ctx.tensor_pipeline(&name)?;
+    enc.set_pipeline(&pso);
+    enc.set_bytes(0, &args);
+    enc.set_tensor(1, weight);
+    enc.set_tensor(2, inner);
+    enc.set_tensor(3, counts);
+    enc.set_tensor(4, ids);
+    enc.set_tensor(5, out);
+    enc.set_bytes(6, &0.0f32);
+    enc.set_bytes(7, &0i32);
+    enc.set_threadgroup_memory(0, TENSOR_THREADGROUP_BYTES_WIDE);
+    enc.dispatch(
+        MTLSize {
+            width: n_tokens.div_ceil(64),
+            height: n_out.div_ceil(64),
+            depth: n_expert,
+        },
+        MTLSize {
+            width: 128,
+            height: 1,
+            depth: 1,
+        },
+    );
+    Ok(())
+}
+
+/// 64-slot gate/up dispatch: gate into `inner` (EPI 0), then the clamped up
+/// pass in place (EPI 2). Selected from `encode_moe_swiglu_f32_grouped_slots_tensor`
+/// at >=4096 rows; `QWEN_V41_EXPERT_WIDE=0` restores the narrow tile.
+#[allow(clippy::too_many_arguments)]
+pub fn encode_moe_swiglu_wide_probe(
+    ctx: &MetalContext,
+    enc: &KernelEncoder,
+    w_gate: &MetalTensor,
+    w_up: &MetalTensor,
+    x_pack: &MetalTensor,
+    counts: &MetalTensor,
+    ids: &MetalTensor,
+    inner: &MetalTensor,
+    n_hidden: usize,
+    n_ffn: usize,
+    n_expert: usize,
+    topk: usize,
+    n_tokens: usize,
+    clamp_limit: f32,
+) -> Result<(), MetalError> {
+    const KERNEL: &str = "moe_swiglu_wide_probe";
+    crate::metal::checks::require_serial(KERNEL, enc)?;
+    if !clamp_limit.is_finite() || clamp_limit <= 0.0 {
+        return Err(MetalError::BadShape {
+            kernel: KERNEL,
+            detail: format!("clamp must be finite and positive, got {clamp_limit}"),
+        });
+    }
+    let gate_name = wide_probe_pipeline_name(w_gate.dtype).ok_or(MetalError::BadShape {
+        kernel: KERNEL,
+        detail: format!("no wide gate pipeline for {:?}", w_gate.dtype),
+    })?;
+    let up_name = wide_probe_pipeline_name(w_up.dtype).ok_or(MetalError::BadShape {
+        kernel: KERNEL,
+        detail: format!("no wide up pipeline for {:?}", w_up.dtype),
+    })?;
+    // Resolve both before the first dispatch so a missing instantiation cannot
+    // leave the gate pass half applied.
+    ctx.tensor_pipeline(&gate_name)?;
+    ctx.tensor_pipeline(&up_name)?;
+    let gate_args = generic_mm_args(
+        KERNEL,
+        w_gate,
+        x_pack,
+        counts,
+        ids,
+        inner,
+        n_hidden,
+        n_ffn,
+        n_expert,
+        n_tokens,
+        topk,
+        0,
+        i32::MAX as u32,
+    )?;
+    let up_args = generic_mm_args(
+        KERNEL,
+        w_up,
+        x_pack,
+        counts,
+        ids,
+        inner,
+        n_hidden,
+        n_ffn,
+        n_expert,
+        n_tokens,
+        topk,
+        0,
+        i32::MAX as u32,
+    )?;
+    let dispatch = |name: &str,
+                    args: &GenericMmArgs,
+                    weight: &MetalTensor,
+                    epi: i32,
+                    limit: f32|
+     -> Result<(), MetalError> {
+        let pso = ctx.tensor_pipeline(name)?;
+        enc.set_pipeline(&pso);
+        enc.set_bytes(0, args);
+        enc.set_tensor(1, weight);
+        enc.set_tensor(2, x_pack);
+        enc.set_tensor(3, counts);
+        enc.set_tensor(4, ids);
+        enc.set_tensor(5, inner);
+        enc.set_bytes(6, &limit);
+        enc.set_bytes(7, &epi);
+        enc.set_threadgroup_memory(0, TENSOR_THREADGROUP_BYTES_WIDE);
+        enc.dispatch(
+            MTLSize {
+                width: n_tokens.div_ceil(64),
+                height: n_ffn.div_ceil(64),
+                depth: n_expert,
+            },
+            MTLSize {
+                width: 128,
+                height: 1,
+                depth: 1,
+            },
+        );
+        Ok(())
+    };
+    dispatch(&gate_name, &gate_args, w_gate, 0, 0.0)?;
+    dispatch(&up_name, &up_args, w_up, 2, clamp_limit)?;
     Ok(())
 }

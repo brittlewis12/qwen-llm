@@ -2119,6 +2119,288 @@ fn tensor_tile_production_shape_timing() {
     }
 }
 
+/// Nonzero equivalence for the 64-slot down probe at a small production-like
+/// shape: same IQ3_XXS bank and F16 activations, narrow 32-slot panels versus
+/// wide 64-slot panels.
+#[test]
+fn expert_wide_panel_matches_narrow() {
+    let Some(ctx) = crate::test_fixtures::metal_context_or_skip() else {
+        return;
+    };
+    if !moe_grouped_tensor_available(&ctx) {
+        eprintln!("tensor tier unavailable: {:?}", ctx.tensor_ops_status());
+        return;
+    }
+    const TOKENS: usize = 4096;
+    const EXPERTS: usize = 384;
+    const TOPK: usize = 6;
+    const N_IN: usize = 512;
+    const N_OUT: usize = 256;
+    let slots = TOKENS * TOPK;
+    let bank = synthetic_bank(GgmlType::IQ3_XXS, N_IN, N_OUT, EXPERTS, 0x5eed);
+    let weight = bank_tensor(&ctx, GgmlType::IQ3_XXS, &bank, N_IN, N_OUT, EXPERTS);
+    let mut counts = vec![0i32; EXPERTS];
+    let mut ids = vec![-1i32; EXPERTS * TOKENS];
+    for token in 0..TOKENS {
+        for k in 0..TOPK {
+            let expert = (token * 7 + k * 53) % EXPERTS;
+            ids[expert * TOKENS + counts[expert] as usize] = (token * TOPK + k) as i32;
+            counts[expert] += 1;
+        }
+    }
+    let counts_t = i32_typed_tensor(&ctx, &counts);
+    let ids_t = i32_typed_tensor(&ctx, &ids);
+    let mut rng = Lcg(0x51ee);
+    let x: Vec<f32> = (0..slots * N_IN).map(|_| rng.signed(0.5)).collect();
+    let x_h = f16_tensor(&ctx, &x);
+    let narrow_out = MetalTensor::zeros_f32(&ctx, vec![(slots * N_OUT) as u64]).unwrap();
+    let wide_out = MetalTensor::zeros_f32(&ctx, vec![(slots * N_OUT) as u64]).unwrap();
+    let narrow = |enc: &KernelEncoder| {
+        encode_moe_down_f32_grouped_slots_tensor(
+            &ctx,
+            enc,
+            &weight,
+            &x_h,
+            &counts_t,
+            &ids_t,
+            &narrow_out,
+            N_IN,
+            N_OUT,
+            EXPERTS,
+            TOKENS,
+        )
+        .unwrap();
+    };
+    let wide = |enc: &KernelEncoder| {
+        encode_moe_down_wide_probe(
+            &ctx, enc, &weight, &x_h, &counts_t, &ids_t, &wide_out, N_IN, N_OUT, EXPERTS, TOKENS,
+        )
+        .unwrap();
+    };
+    for encode in [&narrow as &dyn Fn(&KernelEncoder), &wide] {
+        let command = ctx.queue.commandBuffer().unwrap();
+        let enc = KernelEncoder::begin(&command);
+        encode(&enc);
+        enc.end();
+        commit_and_wait(&command).unwrap();
+    }
+    assert_close(
+        "wide64 down",
+        &tensor_f32_at_offset(&wide_out),
+        &tensor_f32_at_offset(&narrow_out),
+    );
+
+    let mut rng_gate = Lcg(0x6eed);
+    let xg: Vec<f32> = (0..TOKENS * N_IN).map(|_| rng_gate.signed(0.5)).collect();
+    let xg_h = f16_tensor(&ctx, &xg);
+    let inner_narrow = MetalTensor::zeros_f32(&ctx, vec![(slots * N_OUT) as u64]).unwrap();
+    let inner_wide = MetalTensor::zeros_f32(&ctx, vec![(slots * N_OUT) as u64]).unwrap();
+    let narrow_swiglu = |enc: &KernelEncoder| {
+        encode_moe_swiglu_f32_grouped_slots_tensor(
+            &ctx,
+            enc,
+            &weight,
+            &weight,
+            &xg_h,
+            &counts_t,
+            &ids_t,
+            &inner_narrow,
+            N_IN,
+            N_OUT,
+            EXPERTS,
+            TOPK,
+            TOKENS,
+            Some(10.0),
+        )
+        .unwrap();
+    };
+    let wide_swiglu = |enc: &KernelEncoder| {
+        encode_moe_swiglu_wide_probe(
+            &ctx,
+            enc,
+            &weight,
+            &weight,
+            &xg_h,
+            &counts_t,
+            &ids_t,
+            &inner_wide,
+            N_IN,
+            N_OUT,
+            EXPERTS,
+            TOPK,
+            TOKENS,
+            10.0,
+        )
+        .unwrap();
+    };
+    // This test compares the explicit narrow and wide dispatches; keep the
+    // production 4096 selector out of the narrow arm.
+    unsafe {
+        std::env::set_var("QWEN_V41_EXPERT_WIDE", "0");
+    }
+    for encode in [&narrow_swiglu as &dyn Fn(&KernelEncoder), &wide_swiglu] {
+        let command = ctx.queue.commandBuffer().unwrap();
+        let enc = KernelEncoder::begin(&command);
+        encode(&enc);
+        enc.end();
+        commit_and_wait(&command).unwrap();
+    }
+    unsafe {
+        std::env::remove_var("QWEN_V41_EXPERT_WIDE");
+    }
+    assert_close(
+        "wide64 gate/up",
+        &tensor_f32_at_offset(&inner_wide),
+        &tensor_f32_at_offset(&inner_narrow),
+    );
+}
+
+/// Opt-in 4096-token expert down timing: narrow 32-slot panels versus one
+/// 64-slot probe panel. Synthetic IQ3_XXS bank, same useful slots; the 4096
+/// count distribution makes the wide panel mostly full. `QWEN_V41_TILE_TIMING=1`.
+#[test]
+fn expert_wide_panel_timing() {
+    if std::env::var_os("QWEN_V41_TILE_TIMING").is_none() {
+        return;
+    }
+    let ctx = MetalContext::new().expect("Metal");
+    if !moe_grouped_tensor_available(&ctx) {
+        eprintln!("tensor tier unavailable: {:?}", ctx.tensor_ops_status());
+        return;
+    }
+    let shape = ProductionShape::new(&ctx);
+    let b = shape.banks(&ctx, GgmlType::IQ3_XXS);
+    const TOKENS: usize = 4096;
+    const EXPERTS: usize = ProductionShape::EXPERTS;
+    const TOPK: usize = ProductionShape::TOPK;
+    let slots = TOKENS * TOPK;
+    let mut counts = vec![0i32; EXPERTS];
+    let mut ids = vec![-1i32; EXPERTS * TOKENS];
+    for token in 0..TOKENS {
+        for k in 0..TOPK {
+            let expert = (token * 7 + k * 53) % EXPERTS;
+            ids[expert * TOKENS + counts[expert] as usize] = (token * TOPK + k) as i32;
+            counts[expert] += 1;
+        }
+    }
+    let counts_t = i32_typed_tensor(&ctx, &counts);
+    let ids_t = i32_typed_tensor(&ctx, &ids);
+    let inner_h =
+        MetalTensor::zeros_f16(&ctx, vec![(slots * ProductionShape::FFN) as u64]).unwrap();
+    let out_t =
+        MetalTensor::zeros_f32(&ctx, vec![(slots * ProductionShape::HIDDEN) as u64]).unwrap();
+    let narrow = |enc: &KernelEncoder| {
+        encode_moe_down_f32_grouped_slots_tensor(
+            &ctx,
+            enc,
+            &b.down_t,
+            &inner_h,
+            &counts_t,
+            &ids_t,
+            &out_t,
+            ProductionShape::FFN,
+            ProductionShape::HIDDEN,
+            EXPERTS,
+            TOKENS,
+        )
+        .unwrap();
+    };
+    let wide = |enc: &KernelEncoder| {
+        encode_moe_down_wide_probe(
+            &ctx,
+            enc,
+            &b.down_t,
+            &inner_h,
+            &counts_t,
+            &ids_t,
+            &out_t,
+            ProductionShape::FFN,
+            ProductionShape::HIDDEN,
+            EXPERTS,
+            TOKENS,
+        )
+        .unwrap();
+    };
+    let x_h =
+        MetalTensor::zeros_f16(&ctx, vec![(TOKENS * ProductionShape::HIDDEN) as u64]).unwrap();
+    let inner_t =
+        MetalTensor::zeros_f32(&ctx, vec![(slots * ProductionShape::FFN) as u64]).unwrap();
+    let narrow_gate_up = |enc: &KernelEncoder| {
+        encode_moe_swiglu_f32_grouped_slots_tensor(
+            &ctx,
+            enc,
+            &b.gate_t,
+            &b.up_t,
+            &x_h,
+            &counts_t,
+            &ids_t,
+            &inner_t,
+            ProductionShape::HIDDEN,
+            ProductionShape::FFN,
+            EXPERTS,
+            TOPK,
+            TOKENS,
+            Some(10.0),
+        )
+        .unwrap();
+    };
+    let wide_gate_up = |enc: &KernelEncoder| {
+        encode_moe_swiglu_wide_probe(
+            &ctx,
+            enc,
+            &b.gate_t,
+            &b.up_t,
+            &x_h,
+            &counts_t,
+            &ids_t,
+            &inner_t,
+            ProductionShape::HIDDEN,
+            ProductionShape::FFN,
+            EXPERTS,
+            TOPK,
+            TOKENS,
+            10.0,
+        )
+        .unwrap();
+    };
+    // The narrow arm must bypass the production 4096 selector; the wide arm
+    // calls the explicit probe pipeline directly.
+    unsafe {
+        std::env::set_var("QWEN_V41_EXPERT_WIDE", "0");
+    }
+    heat(&ctx, 3, &[&narrow, &wide, &narrow_gate_up, &wide_gate_up]);
+    let down_flops = 2.0 * (slots * ProductionShape::HIDDEN * ProductionShape::FFN) as f64;
+    let gate_up_flops = 2.0 * down_flops;
+    timed_tile(
+        &ctx,
+        "down 4096 narrow32",
+        8,
+        down_flops,
+        b.down_bytes,
+        &narrow,
+    );
+    timed_tile(&ctx, "down 4096 wide64", 8, down_flops, b.down_bytes, &wide);
+    timed_tile(
+        &ctx,
+        "gate+up 4096 narrow32",
+        8,
+        gate_up_flops,
+        b.gate_bytes,
+        &narrow_gate_up,
+    );
+    timed_tile(
+        &ctx,
+        "gate+up 4096 wide64",
+        8,
+        gate_up_flops,
+        b.gate_bytes,
+        &wide_gate_up,
+    );
+    unsafe {
+        std::env::remove_var("QWEN_V41_EXPERT_WIDE");
+    }
+}
+
 /// Raw Metal 4 matmul2d ceiling with threadgroup-resident half operands at
 /// the tile shapes the tensor expert tile could use (research kernel, no
 /// device traffic in the loop). `QWEN_V41_TILE_TIMING=1`; prints TFLOPS.

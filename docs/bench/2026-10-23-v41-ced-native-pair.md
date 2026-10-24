@@ -1,5 +1,66 @@
 # Native V4.1 Full/CED: Correctness Qualified, Performance Still Open
 
+## 2026-10-24 Seed-Fusion Qualification And Native Observations
+
+Clean source `e50dba57` fuses an eligible seed with its first packed decoder
+submission, preserving the same operators and original Full arithmetic lineage.
+The encoded seed remains pending until joint checked GPU completion; seed and
+output frontiers publish only after both attention and FFN status checks pass.
+Scalar tails and multichunk seeds retain the unfused path. This reduces command
+counts from 22/38/47 to 21/21/27 at 128/2048/8192 tokens without changing work,
+seed or publication rows, or enlarging the existing scratch-plus-seed envelope.
+
+Bounded M4/M5 parity, status/fault, cancellation, unwind and resource-lifetime
+fixtures pass, including the M5 staged/tensor singleton path. Full-model Maya-S
+qualification also passes at all three lengths: 257 complete 129,280-logit vectors
+match bitwise and all 56 causal regions match at every position. An independent
+offline check matches all six Full/CED head hashes across fused `e50dba57`, frozen
+`01983b7b` and unfused `eba1f591`, plus every recorded state/control/history field.
+The verifier independently enumerates positions, region shapes and all 40 layers'
+work counts. All commands complete, no fallback occurs, and observed incremental
+Metal allocation remains below its accepted bound. This is report-level evidence,
+not a fresh rehash of raw numerical payloads or full model-shard contents.
+
+Three native v2 cohorts complete with the operator-selected 240 GiB MWSS. Each
+uses one resident import, excluded warm A/B and pilot ABBA, then retained BAAB;
+all ten endpoints are finite and match bitwise within each cohort. The two 2K
+cohorts also match the archived synthetic endpoint hash. The code-variant cohorts
+are sequential, not an interleaved fused/unfused comparison.
+
+| Source / prompt | Full retained seconds | CED retained seconds | Pilot-plus-main max/min, Full / CED |
+| --- | --- | --- | --- |
+| Unfused `7e19c7d8`, 2048 | 13.7463; 2.2818 | 3.2231; 3.2173 | 6.024 / 1.019 |
+| Fused `e50dba57`, 2048 | 5.6493; 2.2790 | 3.0562; 3.2128 | 2.479 / 2.490 |
+| Fused `e50dba57`, 8192 | 18.9659; 10.1778 | 7.7128; 7.4976 | 2.080 / 2.665 |
+
+There is no convincing 2K native gain. The 8K retained CED calls are faster than
+both retained Full calls, a useful long-prompt signal, but the excluded CED pilot
+also includes 19.8395 s. Keep that sample and the excluded Full warmup of 69.3768 s;
+do not present the retained mean alone as stable performance or a fusion gain.
+The 8K CED cases complete 27 commands with 3,054,010,368 bytes sampled incremental
+Metal allocation against a 3,076,259,840-byte bound. Both 2K variants observe
+2,981,986,304 bytes against 3,004,235,776 bytes. Sparse controller samples remain
+normal, with conservative CPU availability at least 44.76 GiB and wired plus
+compressor at most 177.41 GiB across these three cohorts. These are not continuous
+peak bounds, proof of no swap, or effective-instrumentation attestation.
+
+A matched 2K diagnostic after the CPU/Metal-domain repair completes without a
+purge or model change. Its warmed GPU intervals are about 2.00 s Full / 1.68 s CED,
+but host preparation and completion waits erase that advantage. Decoder scratch
+reuse reduces the block-allocation aggregate to two constructions and roughly
+0.18-0.20 s, versus 21 and about 1.18 s in the earlier diagnostic. The source/count
+reduction is established; the timings are instrumented and not a controlled
+cross-configuration causal comparison. Its cold Full case records about 167.60
+GiB of process reads; subsequent cases record zero process reads/page-ins. Those
+counters do not rule out all driver or GPU I/O and do not identify the wait cause.
+
+These qualification and timing results precede the incoming default 32-key
+tensor score. Rebase onto repaired main must retain logical Full-tile arity for
+compacted singletons, adapt kernel-name censuses and requalify the changed
+arithmetic before extending this correctness claim. Frozen trees/binaries and
+raw reports remain immutable. No CED default promotion or reopening of explicit
+whole-model residency follows from these results.
+
 ## 2026-10-24 Full-Model Qualification
 
 Clean candidate `eba1f591` passes strict current-Full/shrinking-CED qualification

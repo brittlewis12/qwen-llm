@@ -35,12 +35,15 @@ dependency-preserving reconstruction: at most 2541 boundary rows, but only
 24150 complete decoder layer-output rows for long prompts, plus KV-only seeds.
 Trained bounded-128 replay is a separate policy using the same primitives.
 Cold shrinking native implementation: correctness-qualified on Maya-S
-(`perf/v41-ced-scratch`, `eba1f591`, 2026-10-24). Current Full/CED at 128/2048/8192
+(`perf/v41-ced-scratch`, fused `e50dba57`, 2026-10-24). Current Full/CED at 128/2048/8192
 matches all 257 complete 129,280-logit vectors and all 56 causal regions at every
 position. All four arms also match frozen source `01983b7b`, with exact input,
 artifact, publication/completion and state metadata; no fallback. This includes
-request-local scratch reuse and hierarchical selection. Long-prompt native A/B
-remains unqualified. The historical validation-on pp128 pair is a CED loss:
+request-local scratch reuse, hierarchical selection and seed/first-decoder fusion.
+This qualification predates the incoming 32-key tensor score; active-branch
+rebase needs fresh bounded and full-model qualification of that arithmetic.
+Stable long-prompt native performance remains unqualified. The historical
+validation-on pp128 pair is a CED loss:
 305.17 -> 464.15 ms (+52.1% latency); its 2K sequence rejects a 7.272x
 within-Full spread. Explicit production timing (`5e6683a9`, clean source
 `a92e67d2`) keeps correctness validation and all safety/stability rules intact.
@@ -58,8 +61,9 @@ Attention and activation-staging kernel lanes remain independent.
 CED decoder scratch reuse: in flight (`perf/v41-ced-scratch`). Instrumented
 2K attribution measures about 1.18 s in block-row allocation/initialization;
 source census identifies 874 removable buffer constructions with one checked
-maximum-row decoder backing. Preserve all 38 submissions, original arithmetic
-lineage, status initialization and the existing admitted peak. This is a reuse
+maximum-row decoder backing. The initial reuse candidate preserves all 38
+submissions, original arithmetic lineage, status initialization and the existing
+admitted peak. This is a reuse
 bet, not a native speedup claim; completion-wall variability remains separate.
 Candidate `eec23a0f` passes bounded fresh/reused bitwise, allocation, arithmetic
 lineage and cleanup fixtures on M4/M5, plus broader forward/FFN/CED regressions.
@@ -69,10 +73,15 @@ causal state identical to frozen Full/CED. Native gains remain unestablished.
 Native v2 measurement (`999a2383`) now completes the full 2K cohort rather than
 vetoing timing dispersion: retained Full 2.586 / 2.305 s, CED 2.672 / 12.479 s,
 with pilot-plus-main variation above 5x for both. No usable win is established.
-Seed/first-decoder fusion is in flight on the same branch, targeting 38 -> 21
-submissions at 2K and 47 -> 27 at 8K without changing arithmetic or scratch
-capacity. It still needs bounded and full-model requalification. New runs use
-the operator-selected 240 GiB MWSS; compare code variants within that setting.
+Seed/first-decoder fusion on the same branch passes bounded M4/M5 and full-model
+128/2K/8K qualification at `e50dba57`, completing 21/21/27 commands without
+changing work rows or scratch capacity. New native cohorts at the operator's
+240 GiB MWSS retain Full 5.649 / 2.279 s versus CED 3.056 / 3.213 s at 2K,
+and Full 18.966 / 10.178 s versus CED 7.713 / 7.498 s at 8K. The 8K pilot also
+includes CED 19.840 s: a promising long-prompt signal, not stable performance or
+a fusion gain. Preserve all samples and compare within the same configuration.
+Next: preserve logical-arity routing through the repaired-main rebase, then
+requalify the 32-key-score default before further native comparisons.
 
 Mapping/admission repair: landed (2026-10-23 memory-safety entry and
 `bench/2026-10-23-v41-memory-safety.md`). Shared EOF removes the old 156.059 GiB

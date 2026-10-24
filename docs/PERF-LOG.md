@@ -6,6 +6,33 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the current state and evidence index.
 
+## 2026-10-24 - CED Seed Fusion Qualified; First Native 8K Cohort Completed
+
+- Clean `e50dba57` fuses eligible seed/first-decoder submissions, reducing
+  128/2K/8K command counts from 22/38/47 to 21/21/27 with unchanged work rows and
+  scratch envelope. Bounded M4/M5 parity, sticky-status, failure and cleanup
+  fixtures pass. Full-model Maya-S qualification passes all three sizes: 257
+  complete 129,280-logit vectors and 56 causal regions at every position.
+- Independent offline verification matches all six Full/CED head hashes across
+  fused, frozen `01983b7b` and unfused `eba1f591`, with exact recorded state,
+  control, input and artifact metadata. Commands complete without fallback and
+  sampled allocations stay below estimates. This is not raw-payload rehashing,
+  fresh full-shard identity verification or formal quality qualification.
+- At 240 GiB MWSS, retained native 2K samples are Full 5.649 / 2.279 s and CED
+  3.056 / 3.213 s; sequential unfused CED is 3.223 / 3.217 s. No convincing 2K
+  gain follows. The first native 8K cohort retains Full 18.966 / 10.178 s and
+  CED 7.713 / 7.498 s, but its excluded CED pilot includes 19.840 s. All ten
+  endpoints match; retain the complete chronology, not a stable speedup claim.
+- Across these three native cohorts, sparse pressure samples remain normal,
+  conservative CPU availability is at least 44.76 GiB and wired plus compressor
+  at most 177.41 GiB. No purge, smaller-model workaround or admission waiver is
+  used. This does not bound continuous peaks or establish absence of swap.
+- These results predate main's 32-key tensor-score arithmetic. Active branches
+  are being rebased onto repaired main; preserve Full logical-arity routing and
+  rerun bounded/full-model qualification before extending the claim. Frozen
+  references remain untouched; CED stays opt-in and explicit residency closed.
+- [Full protocol, diagnostic attribution and timing limits](bench/2026-10-23-v41-ced-native-pair.md).
+
 ## 2026-10-24 - Native 2K CED Cohort Completed; Submission Fusion In Flight
 
 - Source `999a2383` completes ten production-timing Full/CED calls in one

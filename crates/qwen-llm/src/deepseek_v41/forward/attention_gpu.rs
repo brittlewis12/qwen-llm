@@ -174,6 +174,7 @@ pub(super) struct Rows {
     index_weights: MetalTensor,
     /// One index-score row per selection tile row (capacity elements each).
     select_scores: MetalTensor,
+    select_pairs: Option<MetalTensor>,
     /// Half copies of projection inputs for the tensor tile; `None` when
     /// the tier is not selected.
     half: Option<prefill::HalfScratch>,
@@ -222,12 +223,15 @@ impl Rows {
         capacity.min(c.candidate_topk.saturating_mul(c.candidate_block))
     }
 
-    /// Admission width for the tiled selection score scratch. The actual
-    /// allocation is `select_width * min(rows, tile_rows)`; this per-row width
-    /// prices at least that many bytes when multiplied by `rows`.
-    pub(super) fn select_widths(c: &Config, capacity: usize, rows: usize) -> Vec<usize> {
-        let tile = rows.min(query_batch::tile_rows());
-        vec![(Self::select_width(c, capacity).saturating_mul(tile)).div_ceil(rows.max(1))]
+    /// Two separately priced allocations: F32 scores and packed (score bits, ID)
+    /// pairs. Round each up independently for short chunks and tile tails.
+    pub(super) fn select_widths(c: &Config, capacity: usize, rows: usize) -> Result<Vec<usize>> {
+        Ok(
+            query_batch::selection_shapes(c, capacity, rows, query_batch::tile_rows())?
+                .into_iter()
+                .map(|elements| elements.div_ceil(rows))
+                .collect(),
+        )
     }
 
     pub(super) fn new(
@@ -257,6 +261,7 @@ impl Rows {
         controls: Option<QueryControlView>,
     ) -> Result<Self> {
         let half_elements = prefill::attention_half_scratch_elements(c, rows)?;
+        let selection = query_batch::selection_shapes(c, capacity, rows, query_batch::tile_rows())?;
         let widths = Self::widths(c, capacity);
         for &width in &widths {
             checked_product(&[width, rows])?;
@@ -281,12 +286,12 @@ impl Rows {
             compressor_gate: prefill::allocate(ctx, widths[9], rows, GgmlType::F32)?,
             index_query: prefill::allocate(ctx, widths[10], rows, GgmlType::F32)?,
             index_weights: prefill::allocate(ctx, widths[11], rows, GgmlType::F32)?,
-            select_scores: prefill::allocate(
-                ctx,
-                Self::select_width(c, capacity),
-                rows.min(query_batch::tile_rows()),
-                GgmlType::F32,
-            )?,
+            select_scores: prefill::allocate(ctx, selection[0], 1, GgmlType::F32)?,
+            select_pairs: if selection[1] == 0 {
+                None
+            } else {
+                Some(prefill::allocate(ctx, selection[1], 1, GgmlType::I32)?)
+            },
             half: prefill::HalfScratch::new(ctx, half_elements)?,
             rows,
             arithmetic: if controls.is_some() {

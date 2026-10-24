@@ -320,6 +320,90 @@ kernel void kernel_deepseek_v41_attention_select_fused_rows_4k(
     }
 }
 
+// A total order after NaN normalization: numerical descending, equal-value bits
+// ascending (+0 before -0), then original absolute key ID ascending.
+inline bool attention_select_better(float l, uint li, float r, uint ri) {
+    return l > r || (l == r && (as_type<uint>(l) == as_type<uint>(r)
+        ? li < ri : as_type<uint>(l) < as_type<uint>(r)));
+}
+
+inline void attention_select_best_first(threadgroup float *values,
+    threadgroup uint *order, uint count, uint tid) {
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    for (uint width = 2; width <= count; width <<= 1) {
+        for (uint stride = width >> 1; stride > 0; stride >>= 1) {
+            for (uint j = tid; j < count; j += 256) {
+                uint other = j ^ stride;
+                if (other <= j) continue;
+                float l = values[j], r = values[other];
+                uint li = order[j], ri = order[other];
+                // Each independent network ends best-first. In particular do
+                // not use the legacy global-base alternating tile orientation.
+                if (attention_select_better(l, li, r, ri) != ((j & width) == 0)) {
+                    values[j] = r; values[other] = l;
+                    order[j] = ri; order[other] = li;
+                }
+            }
+            threadgroup_barrier(mem_flags::mem_threadgroup);
+        }
+    }
+}
+
+// a: absolute chunk start, ratio, score stride, partitions (2 or 4).
+// b: first output row, tile rows, 0, 0. Pairs: [tile row, partition, 512].
+kernel void kernel_deepseek_v41_attention_select_hier_local(
+    constant uint4 &a [[buffer(0)]], constant uint4 &b [[buffer(1)]],
+    device const float *scores [[buffer(2)]], device uint2 *pairs [[buffer(3)]],
+    device atomic_uint *status [[buffer(4)]],
+    uint3 group [[threadgroup_position_in_grid]],
+    uint tid [[thread_index_in_threadgroup]]) {
+    uint local = group.y, partition = group.x;
+    if (local >= b.y || partition >= a.w) return;
+    uint length = (a.x + b.x + local + 1) / a.y;
+    if (length <= 512) return; // prepare owns all-selected rows
+    threadgroup float values[4096];
+    threadgroup uint order[4096];
+    for (uint j = tid; j < 4096; j += 256) {
+        uint id = partition * 4096 + j;
+        // Never even read future published scores, including poison NaNs.
+        float v = id < length ? scores[(ulong)local * a.z + id] : -INFINITY;
+        if (isnan(v)) {
+            atomic_fetch_or_explicit(status, 1u, memory_order_relaxed);
+            v = -INFINITY;
+        }
+        values[j] = v;
+        // Padding IDs exceed every visible ID, so even real -Inf beats padding.
+        order[j] = id;
+    }
+    attention_select_best_first(values, order, 4096, tid);
+    for (uint j = tid; j < 512; j += 256)
+        pairs[((ulong)local * a.w + partition) * 512 + j] =
+            uint2(as_type<uint>(values[j]), order[j]);
+}
+
+kernel void kernel_deepseek_v41_attention_select_hier_merge(
+    constant uint4 &a [[buffer(0)]], constant uint4 &b [[buffer(1)]],
+    device const uint2 *pairs [[buffer(2)]], device uint *selected [[buffer(3)]],
+    threadgroup float *values [[threadgroup(0)]],
+    threadgroup uint *order [[threadgroup(1)]],
+    uint3 group [[threadgroup_position_in_grid]],
+    uint tid [[thread_index_in_threadgroup]]) {
+    uint local = group.y, row = b.x + local;
+    if (local >= b.y || (a.x + row + 1) / a.y <= 512) return;
+    uint count = a.w * 512;
+    for (uint j = tid; j < count; j += 256) {
+        uint2 pair = pairs[(ulong)local * count + j];
+        values[j] = as_type<float>(pair.x);
+        order[j] = pair.y;
+    }
+    attention_select_best_first(values, order, count, tid);
+    for (uint j = tid; j < 512; j += 256) {
+        uint id = order[j], rank = 0;
+        for (uint k = 0; k < 512; ++k) rank += order[k] < id;
+        selected[(ulong)row * 512 + rank] = id;
+    }
+}
+
 kernel void kernel_deepseek_v41_attention_keep(
     constant uint2 &a [[buffer(0)]], device const uint *ids [[buffer(1)]],
     device uint *mask [[buffer(2)]], uint t [[thread_position_in_grid]]) {

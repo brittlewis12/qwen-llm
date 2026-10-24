@@ -93,7 +93,11 @@ pub(super) fn chunk_widths_from_geometry(
     widths.extend(prefill::HcRows::widths(c));
     widths.extend(ffn_gpu::Rows::widths(c, layers));
     widths.extend(attention_gpu::Rows::widths(c, capacity));
-    widths.extend(attention_gpu::Rows::select_widths(c, capacity, rows));
+    widths.extend(
+        attention_gpu::Rows::select_widths(c, capacity, rows)?
+            .into_iter()
+            .filter(|&width| width != 0),
+    );
     widths.extend(attention_gpu::Rows::tile_widths(c, rows)?);
     for &(input, output) in engram_projections {
         widths.extend([input, output]);

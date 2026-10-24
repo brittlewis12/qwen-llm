@@ -1,6 +1,9 @@
 use super::super::query_batch::{Scratch, TILE, rope_rows};
 use super::*;
 
+#[path = "query_batch/selection_hier.rs"]
+mod selection_hier;
+
 fn config() -> Config {
     Config {
         hidden: 32,
@@ -187,6 +190,47 @@ fn compare_case(ctx: &MetalContext, c: &Config, schedule: &Schedule, start: usiz
                 && c.candidate_topk == 2048
                 && schedule.produces_index(id)
                 && ratio > 0
+                && [
+                    "QWEN_V41_SELECT_PER_ROW",
+                    "QWEN_V41_SELECT_SPLIT_SORT",
+                    "QWEN_V41_SELECT_FUSE_2048",
+                    "QWEN_V41_SELECT_NO_HIER",
+                ]
+                .iter()
+                .all(|name| std::env::var_os(name).is_none())
+            {
+                let last = (start + n) / ratio;
+                let expected = if last.div_ceil(c.candidate_block) <= c.candidate_topk {
+                    (0..n)
+                        .step_by(super::super::query_batch::tile_rows())
+                        .filter(|&first| {
+                            let end =
+                                first + (n - first).min(super::super::query_batch::tile_rows());
+                            matches!(
+                                super::super::query_batch::selection_route(
+                                    c,
+                                    (start + end) / ratio,
+                                    super::super::query_batch::SelectionOverrides::default(),
+                                ),
+                                super::super::query_batch::SelectionRoute::Hier(_)
+                            )
+                        })
+                        .count()
+                } else {
+                    0
+                };
+                assert_eq!(count("select_hier_local"), expected);
+                assert_eq!(count("select_hier_merge"), expected);
+                if last == 16385 {
+                    assert_eq!(count("index_heads_rows"), 0, "pruning stays per-row");
+                    assert!(count("blocks") > 0);
+                    assert!(count("keep") > 0);
+                }
+            }
+            if c.index_topk == 512
+                && c.candidate_topk == 2048
+                && schedule.produces_index(id)
+                && ratio > 0
                 && (start + n) / ratio > c.index_topk
                 && (start + n) / ratio <= 4096
             {
@@ -230,6 +274,20 @@ fn compare_case(ctx: &MetalContext, c: &Config, schedule: &Schedule, start: usiz
                     "mask layer={id} row={row}"
                 );
             }
+        }
+        if schedule.candidate_source_layer == Some(id)
+            && c.candidate_block == 8
+            && c.candidate_topk == 2048
+            && start + n == 16385
+        {
+            assert_eq!(
+                f32_slice(&batched.block_scores).unwrap()[2048],
+                f32::INFINITY
+            );
+            assert_eq!(
+                ids(&prefill::row(&rows.candidates, blocks, n - 1), 2049)[2048],
+                1
+            );
         }
     }
     batched.validate_snapshot_position(start + n).unwrap();

@@ -528,7 +528,12 @@ fn preweight_memory(
     widths.extend(prefill::HcRows::widths(c));
     widths.extend(ffn_gpu::Rows::widths(c, g.layers));
     widths.extend(attention_gpu::Rows::widths(c, capacity));
-    widths.extend(attention_gpu::Rows::select_widths(c, capacity, rows));
+    widths.extend(
+        attention_gpu::Rows::select_widths(c, capacity, rows)
+            .map_err(anyhow::Error::msg)?
+            .into_iter()
+            .filter(|&width| width != 0),
+    );
     widths.extend(attention_gpu::Rows::tile_widths(c, rows).map_err(anyhow::Error::msg)?);
     for _ in &p.engram_hash.layers {
         widths.extend([6144, 5 * c.hidden]);

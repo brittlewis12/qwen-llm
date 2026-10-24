@@ -14,6 +14,226 @@ mod lineage_tests;
 
 pub(super) const TILE: usize = 512;
 
+const HIER_K: usize = 512;
+const HIER_PARTITION: usize = 4096;
+const HIER_LIMIT: usize = 16384;
+
+fn hier_partitions(length: usize) -> usize {
+    if length <= HIER_PARTITION {
+        0
+    } else if length <= 8192 {
+        2
+    } else {
+        4
+    }
+}
+
+/// Elements in two 4-byte allocations, independent of runtime rollback flags.
+/// Capacity, not the current prefill length, determines the reusable pair slab.
+pub(super) fn selection_shapes(
+    c: &Config,
+    capacity: usize,
+    rows: usize,
+    tile: usize,
+) -> Result<[usize; 2]> {
+    op::require(
+        (1..=prefill::DEFAULT_CHUNK_ROWS).contains(&rows)
+            && (1..=prefill::DEFAULT_CHUNK_ROWS).contains(&tile),
+        "selection scratch rows",
+    )?;
+    let unpruned = c
+        .candidate_topk
+        .checked_mul(c.candidate_block)
+        .ok_or("selection unpruned extent overflow")?;
+    let width = capacity.min(unpruned);
+    let partitions = if c.index_topk == HIER_K {
+        hier_partitions(width.min(HIER_LIMIT))
+    } else {
+        0
+    };
+    let t = rows.min(tile);
+    Ok([
+        checked_product(&[t, width])?,
+        checked_product(&[t, partitions, HIER_K, 2])?,
+    ])
+}
+
+#[derive(Clone, Copy, Debug, Default)]
+pub(super) struct SelectionOverrides {
+    pub(super) per_row: bool,
+    pub(super) split_sort: bool,
+    pub(super) fuse_2048: bool,
+    pub(super) no_hier: bool,
+}
+
+impl SelectionOverrides {
+    fn env() -> Self {
+        Self {
+            per_row: std::env::var_os("QWEN_V41_SELECT_PER_ROW").is_some(),
+            split_sort: std::env::var_os("QWEN_V41_SELECT_SPLIT_SORT").is_some(),
+            fuse_2048: std::env::var_os("QWEN_V41_SELECT_FUSE_2048").is_some(),
+            // Presence (including an empty value or "0") restores incumbent routing.
+            no_hier: std::env::var_os("QWEN_V41_SELECT_NO_HIER").is_some(),
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum SelectionRoute {
+    All,
+    Legacy,
+    Fused2k,
+    Fused4k,
+    Hier(usize),
+}
+
+pub(super) fn selection_route(
+    c: &Config,
+    length: usize,
+    flags: SelectionOverrides,
+) -> SelectionRoute {
+    if length <= c.index_topk {
+        return SelectionRoute::All;
+    }
+    if flags.per_row
+        || flags.split_sort
+        || c.candidate_block == 0
+        || length.div_ceil(c.candidate_block) > c.candidate_topk
+    {
+        return SelectionRoute::Legacy;
+    }
+    if c.index_topk <= 2048 {
+        if length <= 2048 {
+            return SelectionRoute::Fused2k;
+        }
+        if length <= 4096 && !flags.fuse_2048 {
+            return SelectionRoute::Fused4k;
+        }
+    }
+    if c.index_topk == HIER_K
+        && (4097..=HIER_LIMIT).contains(&length)
+        && !flags.no_hier
+        && !flags.fuse_2048
+    {
+        return SelectionRoute::Hier(hier_partitions(length));
+    }
+    SelectionRoute::Legacy
+}
+
+/// Two serial dispatches, no submissions or retries. All addresses are tile-local
+/// except selected output rows; the pair layout is compact for this dispatch's P.
+pub(super) fn select_hier_rows(
+    ctx: &MetalContext,
+    enc: &KernelEncoder,
+    scores: &MetalTensor,
+    pairs: &MetalTensor,
+    selected: &MetalTensor,
+    status: &MetalTensor,
+    start: usize,
+    ratio: usize,
+    first: usize,
+    n: usize,
+    score_width: usize,
+    partitions: usize,
+) -> Result<()> {
+    op::require(
+        !enc.is_concurrent(),
+        "hierarchical selection requires serial encoder",
+    )?;
+    op::require(
+        ratio > 0
+            && ratio <= u32::MAX as usize
+            && n > 0
+            && n <= tile_rows()
+            && score_width <= u32::MAX as usize
+            && matches!(partitions, 2 | 4),
+        "hierarchical selection geometry",
+    )?;
+    let last = start
+        .checked_add(first)
+        .and_then(|v| v.checked_add(n))
+        .ok_or("hierarchical selection position overflow")?;
+    op::require(
+        last <= u32::MAX as usize
+            && last / ratio <= partitions * HIER_PARTITION
+            && last / ratio <= score_width,
+        "hierarchical selection visible extent",
+    )?;
+    selection_view(scores, checked_product(&[n, score_width])?, GgmlType::F32)?;
+    selection_view(
+        pairs,
+        checked_product(&[n, partitions, HIER_K, 2])?,
+        GgmlType::I32,
+    )?;
+    op::require(pairs.offset.is_multiple_of(8), "selection pair alignment")?;
+    selection_view(
+        selected,
+        checked_product(&[
+            first.checked_add(n).ok_or("selection row overflow")?,
+            HIER_K,
+        ])?,
+        GgmlType::I32,
+    )?;
+    selection_view(status, 1, GgmlType::I32)?;
+    pipeline(ctx, enc, "select_hier_local")?;
+    enc.set_bytes(
+        0,
+        &[
+            start as u32,
+            ratio as u32,
+            score_width as u32,
+            partitions as u32,
+        ],
+    );
+    enc.set_bytes(1, &[first as u32, n as u32, 0, 0]);
+    enc.set_tensor(2, scores);
+    enc.set_tensor(3, pairs);
+    enc.set_tensor(4, status);
+    enc.dispatch(
+        MTLSize {
+            width: partitions,
+            height: n,
+            depth: 1,
+        },
+        MTLSize {
+            width: 256,
+            height: 1,
+            depth: 1,
+        },
+    );
+    pipeline(ctx, enc, "select_hier_merge")?;
+    enc.set_tensor(2, pairs);
+    enc.set_tensor(3, selected);
+    enc.set_threadgroup_memory(0, partitions * HIER_K * 4);
+    enc.set_threadgroup_memory(1, partitions * HIER_K * 4);
+    enc.dispatch(
+        MTLSize {
+            width: 1,
+            height: n,
+            depth: 1,
+        },
+        MTLSize {
+            width: 256,
+            height: 1,
+            depth: 1,
+        },
+    );
+    Ok(())
+}
+
+fn selection_view(t: &MetalTensor, count: usize, dtype: GgmlType) -> Result<()> {
+    let end = (count as u64)
+        .checked_mul(4)
+        .and_then(|n| n.checked_add(t.offset));
+    op::require(
+        t.dtype == dtype
+            && t.n_elements() >= count as u64
+            && t.offset.is_multiple_of(4)
+            && end.is_some_and(|end| end <= t.buffer.length() as u64),
+        "selection buffer bounds/dtype",
+    )
+}
+
 /// Rows per query batch tile. The default is the production width; the
 /// environment override exists for same-binary A/B measurement of the width
 /// itself and is read once per process.
@@ -385,7 +605,7 @@ impl Workspace {
     }
 
     /// Batched unpruned selection: prepare ids/masks, compute index scores,
-    /// then run the incumbent per-row sort and chronological pass. Pruning
+    /// then fused <=4K, bounded hierarchical top512, or incumbent sorting. Pruning
     /// (block scores/keep) is not reached before 16,385 visible keys and
     /// stays on the per-row path.
     fn select_rows_unpruned(
@@ -492,17 +712,29 @@ impl Workspace {
                     depth: 1,
                 },
             );
-            let allow_4k = last_length > 2048
-                && last_length <= 4096
-                && std::env::var_os("QWEN_V41_SELECT_FUSE_2048").is_none();
-            let fused = (last_length <= 2048 || allow_4k)
-                && c.index_topk <= 2048
-                && std::env::var_os("QWEN_V41_SELECT_SPLIT_SORT").is_none();
-            if fused {
+            let route = selection_route(c, last_length, SelectionOverrides::env());
+            if let SelectionRoute::Hier(partitions) = route {
+                select_hier_rows(
+                    ctx,
+                    enc,
+                    &rows.select_scores,
+                    rows.select_pairs
+                        .as_ref()
+                        .ok_or("missing hierarchical selection scratch")?,
+                    &rows.selected,
+                    &self.status,
+                    start,
+                    ratio,
+                    first,
+                    n,
+                    select_width,
+                    partitions,
+                )?;
+            } else if matches!(route, SelectionRoute::Fused2k | SelectionRoute::Fused4k) {
                 pipeline(
                     ctx,
                     enc,
-                    if allow_4k {
+                    if route == SelectionRoute::Fused4k {
                         "select_fused_rows_4k"
                     } else {
                         "select_fused_rows"

@@ -38,8 +38,13 @@ Cold shrinking native implementation: in flight (`perf/v41-ced`). Current
 Full/CED equivalence passes on fitting Maya-S at 128/2048/8192: all 257 full
 vocabulary vectors are bitwise equal and all 56 causal regions match at every
 position, with exact publication/completion counters. Warmed native A/B remains
-in flight (`perf/v41-ced-bench`); ordered diagnostic timings are not a speedup
-claim. Bounded128 remains a separate policy arm.
+in flight (`perf/v41-ced-bench`). The first stable warmed pp128 pair is a CED
+loss: 305.17 -> 464.15 ms (+52.1% latency). The 2K sequence rejects a 7.272x
+within-Full timing spread despite healthy sampled host memory; no 8K timing
+escalation or speedup claim follows. Localize that phase shift with explicit
+diagnostics, then repeat the unchanged native protocol only on explained,
+healthy evidence. See `bench/2026-10-23-v41-ced-native-pair.md`. Bounded128
+remains a separate policy arm.
 Attention and activation-staging kernel lanes remain independent.
 
 Mapping/admission repair: landed (2026-10-23 memory-safety entry and

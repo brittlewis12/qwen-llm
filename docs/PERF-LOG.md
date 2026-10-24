@@ -6,6 +6,24 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the current state and evidence index.
 
+## 2026-10-23 - V4.1 Native Full/CED Pair: pp128 Loss, 2K Rejected
+
+- Clean source `6896f87d` runs one resident Maya-S model with fresh KV, both
+  policies warmed, an excluded ABBA pilot and retained BAAB samples. pp128
+  Full is 305.17 ms versus CED 464.15 ms: +52.1% latency, not a CED win.
+- The 2K sequence stops after Full shifts from approximately 17 s to 2.35 s;
+  its pilot-plus-main spread is 7.272x. Endpoint heads still match, all executed
+  CED commands complete, and sampled host memory stays healthy. No partial
+  timing result, automatic retry or 8K escalation is accepted.
+- Metadata-only cold admission now includes independently priced binding
+  controls using actual tensor types and descriptors shared with runtime.
+  M4 passes 71 selected core CPU tests, 1,513 CLI tests and release all-target
+  checks; bounded metadata/lifetime/half fixtures pass on M4/M5.
+- Diagnose process I/O, pipeline misses and preparation versus command time
+  explicitly, without treating instrumented timing as native performance.
+  Exact >4K hierarchical selection remains an independent bounded-proof bet.
+- [Protocol, short-prompt loss, rejected sequence and limits](bench/2026-10-23-v41-ced-native-pair.md).
+
 ## 2026-10-23 - V4.1 Full Lifetime Repair And Fitting CED Equivalence
 
 - Intrinsic pools drain completed Full chunks, scalar tails and scalar steps;

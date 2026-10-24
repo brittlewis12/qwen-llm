@@ -252,8 +252,12 @@ mod tests {
     fn large_windows_choose_bounded_incumbent_before_allocating_or_pricing_groups() {
         for n in [32768, 1_048_576] {
             for window in [1, 128, n] {
+                // Keep the gathered PV scratch inside its existing uint byte
+                // domain at 1M rows; no geometry/extent check is relaxed.
                 let c = Config {
                     window,
+                    heads: 1,
+                    groups: 1,
                     ..crate::deepseek_v41::forward::toy::config()
                 };
                 let p = CedPlan::shrinking(
@@ -262,7 +266,7 @@ mod tests {
                     &HashConfig::default(),
                     &CedRequest::cold(n, n),
                 )
-                .unwrap();
+                .unwrap_or_else(|e| panic!("large-window request N={n} W={window}: {e}"));
                 for depth in [1, 2, 4] {
                     let selection = select(&p, depth).unwrap();
                     if window == n {
@@ -299,7 +303,7 @@ mod tests {
                     false,
                     &|n| Ok(n),
                 )
-                .unwrap();
+                .unwrap_or_else(|e| panic!("large-window memory N={n} W={window}: {e}"));
                 assert!(memory.batch_encoding_reserve_bytes <= 16 * 1024 * 1024);
                 if window == n {
                     assert_eq!(memory.decoder_batch_layers, 0);

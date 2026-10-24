@@ -188,13 +188,15 @@ fn nondefault_gguf_preflight_prices_only_active_binding_controls_and_refuses_sho
             assert!(run(short).unwrap_err().as_memory_admission().is_some());
             let mut short_host = preflight_signals();
             let host = short_host.host_budget.as_mut().unwrap();
-            let total = cold.required_metal_bytes + cold.required_cpu_bytes;
-            host.conservative_available_bytes = total - 1;
-            assert_eq!(short_host.host_remaining_bytes(), Some(total - 1));
+            host.conservative_available_bytes = cold.required_cpu_bytes - 1;
+            assert_eq!(
+                short_host.host_remaining_bytes(),
+                Some(cold.required_cpu_bytes - 1)
+            );
             assert!(
                 metal::evaluate_metal_memory_admission_with_cpu_bytes(
-                    cold.required_metal_bytes - cold.binding_metal_bytes,
-                    cold.required_cpu_bytes,
+                    cold.required_metal_bytes,
+                    cold.required_cpu_bytes - cold.binding_cpu_bytes,
                     0,
                     short_host,
                     true,

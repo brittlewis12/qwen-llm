@@ -79,7 +79,7 @@ fn cold_preflight_uses_validated_small_metadata_without_import_or_new_maps() {
         let mut staged = preflight_signals();
         let host = staged.host_budget.as_mut().unwrap();
         // Fresh availability covers the load exactly, but not the future runtime peak.
-        host.conservative_available_bytes = cold.load_metal_bytes + cold.load_cpu_bytes;
+        host.conservative_available_bytes = cold.load_cpu_bytes;
         let assessment = cold.plan.assess_load(staged).unwrap();
         assert!(assessment.load_admission.is_admitted());
         assert!(!assessment.whole_peak_now.is_admitted());
@@ -114,6 +114,7 @@ fn combined_preflight_refuses_before_injected_import_with_typed_telemetry_errors
     let total = admitted.required_metal_bytes + admitted.required_cpu_bytes;
     let mut short = preflight_signals();
     let host = short.host_budget.as_mut().unwrap();
+    host.physical_bytes = total - 1;
     host.conservative_available_bytes = total - 1;
     assert_eq!(short.host_remaining_bytes(), Some(total - 1));
     // Each side fits alone, but the preweight combined host exposure does not.
@@ -137,6 +138,12 @@ fn combined_preflight_refuses_before_injected_import_with_typed_telemetry_errors
         )
         .is_admitted()
     );
+    let mut short_cpu = preflight_signals();
+    short_cpu
+        .host_budget
+        .as_mut()
+        .unwrap()
+        .conservative_available_bytes = admitted.required_cpu_bytes - 1;
     let mut missing = preflight_signals();
     missing.host_budget = None;
     let mut invalid = preflight_signals();
@@ -145,7 +152,14 @@ fn combined_preflight_refuses_before_injected_import_with_typed_telemetry_errors
     invalid_host.host_budget.as_mut().unwrap().physical_bytes = 0;
     let mut missing_process = preflight_signals();
     missing_process.process_limit_remaining_bytes = None;
-    for signals in [short, missing, invalid, invalid_host, missing_process] {
+    for signals in [
+        short,
+        short_cpu,
+        missing,
+        invalid,
+        invalid_host,
+        missing_process,
+    ] {
         let called = std::cell::Cell::new(false);
         let outcome = run(signals).map(|_| {
             called.set(true);

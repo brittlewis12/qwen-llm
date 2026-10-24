@@ -545,8 +545,8 @@ fn staged_signals() -> metal::MetalMemorySignals {
         process_limit_remaining_bytes: Some(0),
         host_budget: Some(metal::HostMemoryBudget {
             physical_bytes: 1000,
-            // The 650-byte load fits; the 800-byte whole peak does not.
-            conservative_available_bytes: 700,
+            // Shared load fits; the whole peak's 50-byte CPU payload does not.
+            conservative_available_bytes: 25,
             external_gap_bytes: 0,
             private_shadow_bytes: 0,
         }),
@@ -617,18 +617,18 @@ fn staged_runtime_uses_explicit_postload_signals_and_refuses_before_state_creati
         .host_budget
         .as_mut()
         .unwrap()
-        .conservative_available_bytes = 150;
+        .conservative_available_bytes = 50;
     let runtime = plan.assess_runtime(after).unwrap();
     assert_eq!(runtime.required_bytes, Some(150));
     assert_eq!(runtime.signals, after);
-    assert_eq!(runtime.signals.host_remaining_bytes(), Some(150));
+    assert_eq!(runtime.signals.host_remaining_bytes(), Some(50));
     assert_ne!(runtime.signals, load.load_admission.signals);
 
     after
         .host_budget
         .as_mut()
         .unwrap()
-        .conservative_available_bytes = 149;
+        .conservative_available_bytes = 49;
     let states = std::cell::Cell::new(0);
     let commands = std::cell::Cell::new(0);
     let denied = plan
@@ -698,7 +698,7 @@ fn staged_capacity_checks_constraints_hidden_by_whole_peak_availability() {
         .host_budget
         .as_mut()
         .unwrap()
-        .conservative_available_bytes = 649;
+        .private_shadow_bytes = 26;
     assert_eq!(
         plan.assess_load(short_load)
             .unwrap_err()
@@ -734,7 +734,13 @@ fn staged_runtime_recharges_binding_and_caller_cpu_but_not_loaded_metal() {
     assert_eq!(plan.runtime_cpu_bytes, 0);
     assert_eq!(plan.runtime_gate_cpu_bytes, 50);
     assert_eq!(plan.required_cpu_bytes, 50);
-    assert!(plan.assess_load(staged_signals()).is_ok());
+    let mut observed = staged_signals();
+    observed
+        .host_budget
+        .as_mut()
+        .unwrap()
+        .conservative_available_bytes = 50;
+    assert!(plan.assess_load(observed).is_ok());
 
     let mut after = staged_signals();
     after.current_allocated_bytes = 600;
@@ -742,7 +748,7 @@ fn staged_runtime_recharges_binding_and_caller_cpu_but_not_loaded_metal() {
         .host_budget
         .as_mut()
         .unwrap()
-        .conservative_available_bytes = 150;
+        .conservative_available_bytes = 50;
     assert_eq!(
         plan.assess_runtime(after).unwrap().required_bytes,
         Some(150)
@@ -761,7 +767,7 @@ fn staged_runtime_recharges_binding_and_caller_cpu_but_not_loaded_metal() {
         .host_budget
         .as_mut()
         .unwrap()
-        .conservative_available_bytes = 149;
+        .conservative_available_bytes = 49;
     assert!(plan.assess_runtime(after).is_err());
 }
 
@@ -892,7 +898,7 @@ fn staged_assessments_refuse_invalid_telemetry_and_runtime_combined_overflow() {
 }
 
 #[test]
-fn staged_iq3_views_fit_available_ram_but_still_require_device_capacity() {
+fn staged_iq3_views_exceed_cpu_availability_but_still_require_device_capacity() {
     let mut original = staged_plan();
     let gib = 1u64 << 30;
     original.resident_storage.metal_view_bytes = 217_414 * gib / 1000;
@@ -912,7 +918,7 @@ fn staged_iq3_views_fit_available_ram_but_still_require_device_capacity() {
         process_limit_remaining_bytes: Some(0),
         host_budget: Some(metal::HostMemoryBudget {
             physical_bytes: 256 * gib,
-            conservative_available_bytes: 256 * gib,
+            conservative_available_bytes: 156 * gib,
             external_gap_bytes: 0,
             private_shadow_bytes: 0,
         }),

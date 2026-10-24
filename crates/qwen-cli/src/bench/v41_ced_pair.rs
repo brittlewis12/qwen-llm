@@ -328,7 +328,9 @@ fn admission_report(admission: &MetalMemoryAdmission) -> serde_json::Value {
         "admitted": admission.is_admitted(),
         "reason": format!("{:?}", admission.reason),
         "required_bytes": admission.required_bytes,
+        "cpu_required_bytes": admission.cpu_required_bytes,
         "working_set_headroom_bytes": admission.working_set_headroom_bytes,
+        "host_remaining_scope": "additional_cpu_headroom_not_shared_metal_capacity",
     })
 }
 
@@ -1474,8 +1476,8 @@ mod tests {
             process_limit_remaining_bytes: Some(4000 * MIB),
             host_budget: Some(qwen_llm::metal::HostMemoryBudget {
                 physical_bytes: 5000 * MIB,
-                // Load fits within 600 MiB of actual availability; the whole peak does not.
-                conservative_available_bytes: 600 * MIB,
+                // Load CPU fits; the whole peak's CPU payload does not.
+                conservative_available_bytes: 60 * MIB + caller_cpu_bytes(true),
                 external_gap_bytes: 0,
                 private_shadow_bytes: 0,
             }),
@@ -1586,8 +1588,7 @@ mod tests {
                         .host_budget
                         .as_mut()
                         .unwrap()
-                        .conservative_available_bytes =
-                        preweight.plan.load_metal_bytes + preweight.plan.load_cpu_bytes - 1
+                        .conservative_available_bytes = preweight.plan.load_cpu_bytes - 1
                 }
                 "overflow" => preweight.plan.required_metal_bytes = u64::MAX,
                 _ => unreachable!(),
@@ -1707,9 +1708,7 @@ mod tests {
                                 preweight.plan.resident_storage.private_shadow_bytes;
                             host.conservative_available_bytes = host.private_shadow_bytes
                                 + if index == stop {
-                                    preweight.plan.runtime_metal_bytes
-                                        + preweight.plan.runtime_gate_cpu_bytes
-                                        - 1
+                                    preweight.plan.runtime_gate_cpu_bytes - 1
                                 } else {
                                     600 * MIB
                                 };

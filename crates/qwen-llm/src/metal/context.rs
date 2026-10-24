@@ -480,7 +480,8 @@ impl MetalMemorySignals {
             .effective_device_usage(self.current_allocated_bytes)
     }
 
-    /// Additional CPU headroom, not a shared-Metal working-set ceiling.
+    /// Additional CPU headroom, bounded by physical capacity and conservative
+    /// CPU availability after private shadows. Not a shared-Metal demand ceiling.
     pub fn host_remaining_bytes(self) -> Option<u64> {
         self.host_budget?
             .remaining_bytes(self.current_allocated_bytes)
@@ -553,7 +554,8 @@ pub struct MemoryAdmissionDenied {
     reason: MetalMemoryAdmissionReason,
     /// `None` when the required size overflows.
     pub required_bytes: Option<u64>,
-    /// Additional CPU demand including caller reserve, excluding live private shadows.
+    /// Additional CPU demand including caller reserve, excluding live private
+    /// shadows in `signals`. `None` when unknown or overflowing.
     pub cpu_required_bytes: Option<u64>,
     pub signals: MetalMemorySignals,
     pub working_set_headroom_bytes: Option<u64>,
@@ -632,7 +634,8 @@ pub struct MetalMemoryAdmission {
     pub scratch_upper_bytes: u64,
     pub reserve_bytes: u64,
     pub required_bytes: Option<u64>,
-    /// Additional CPU demand including caller reserve, excluding live private shadows.
+    /// Additional CPU demand including caller reserve, excluding live private
+    /// shadows in `signals`. `None` when unknown or overflowing.
     pub cpu_required_bytes: Option<u64>,
     pub signals: MetalMemorySignals,
     pub working_set_headroom_bytes: Option<u64>,
@@ -738,8 +741,11 @@ pub fn evaluate_metal_memory_capacity_with_cpu_bytes(
             .unwrap_or(signals.current_allocated_bytes),
     );
     let denied = |reason| {
-        MemoryAdmissionDenied::new(reason, required_bytes, signals, working_set_headroom_bytes)
-            .expect("capacity failure is a refusing reason")
+        let mut denied =
+            MemoryAdmissionDenied::new(reason, required_bytes, signals, working_set_headroom_bytes)
+                .expect("capacity failure is a refusing reason");
+        denied.cpu_required_bytes = Some(cpu_upper_bytes);
+        denied
     };
     let (required, metal_required, headroom) = validated_memory_demand(
         required_bytes,
@@ -831,7 +837,8 @@ fn evaluate_memory_admission(
                     <= host
                         .ceiling_remaining_bytes(signals.current_allocated_bytes)
                         .expect("validated host signal");
-            // Shared Metal demand follows MWSS; only CPU growth uses CPU availability.
+            // Shared Metal demand is bounded above by physical capacity and MWSS,
+            // not by the cache-blind CPU-availability lower bound.
             let cpu_required = cpu_upper_bytes + reserve_bytes;
             let host_availability_fits =
                 host.within_availability() == Some(true) && cpu_required <= host_remaining;
@@ -2025,12 +2032,39 @@ mod admission_refusal_tests {
             process_limit_remaining_bytes: Some(0),
             host_budget: Some(HostMemoryBudget {
                 physical_bytes: 1000,
-                // Future capacity can fit even when today's availability cannot.
-                conservative_available_bytes: 700,
+                // Future capacity fits, but today's CPU payload does not.
+                conservative_available_bytes: 49,
                 external_gap_bytes: 0,
                 private_shadow_bytes: 0,
             }),
         }
+    }
+
+    #[test]
+    fn cpu_demand_metadata_survives_refusal_without_guessing_legacy_or_overflow() {
+        use MetalMemoryAdmissionReason as R;
+        let admission =
+            evaluate_metal_memory_admission_with_cpu_bytes(10, 20, 3, signals(Some(30)), true);
+        assert_eq!(admission.reason, R::ProcessInsufficient);
+        assert_eq!(admission.cpu_required_bytes, Some(23));
+        assert_eq!(admission.refusal().unwrap().cpu_required_bytes, Some(23));
+        let capacity =
+            evaluate_metal_memory_capacity_with_cpu_bytes(10, 20, signals(Some(29))).unwrap_err();
+        assert_eq!(capacity.cpu_required_bytes, Some(20));
+        let legacy = MemoryAdmissionDenied::new(
+            R::ProcessInsufficient,
+            Some(33),
+            signals(Some(30)),
+            Some(60),
+        )
+        .unwrap();
+        assert_eq!(legacy.cpu_required_bytes, None);
+        let overflow =
+            evaluate_metal_memory_admission_with_cpu_bytes(1, u64::MAX, 1, signals(Some(30)), true);
+        assert_eq!(overflow.reason, R::RequiredBytesOverflow);
+        assert_eq!(overflow.required_bytes, None);
+        assert_eq!(overflow.cpu_required_bytes, None);
+        assert_eq!(overflow.refusal().unwrap().cpu_required_bytes, None);
     }
 
     #[test]
@@ -2239,10 +2273,8 @@ mod admission_refusal_tests {
                                             && process.is_some_and(|remaining| {
                                                 remaining == 0 || required <= remaining
                                             });
-                                        let ordinary_fits = capacity_fits
-                                            && available > shadow
-                                            && required <= available - shadow
-                                            && effective + shadow < 1000;
+                                        let ordinary_fits =
+                                            capacity_fits && shadow + cpu <= available;
                                         assert_eq!(
                                             evaluate_metal_memory_capacity_with_cpu_bytes(
                                                 metal, cpu, signals

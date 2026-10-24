@@ -7,7 +7,7 @@ use std::rc::Rc;
 pub(in super::super) mod chunked;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum Action {
+pub(in super::super) enum Action {
     Error,
     Panic,
     Cancel,
@@ -24,14 +24,14 @@ thread_local! {
     static INJECTION: RefCell<Option<Injection>> = const { RefCell::new(None) };
 }
 
-struct Scope {
+pub(in super::super) struct Scope {
     previous: Option<Injection>,
     hits: Rc<Cell<usize>>,
     _thread: PhantomData<Rc<()>>,
 }
 
 impl Scope {
-    fn new(role: &'static str, action: Action) -> Self {
+    pub(in super::super) fn new(role: &'static str, action: Action) -> Self {
         let hits = Rc::new(Cell::new(0));
         let previous = INJECTION.with(|slot| {
             slot.replace(Some(Injection {
@@ -47,7 +47,7 @@ impl Scope {
         }
     }
 
-    fn hits(&self) -> usize {
+    pub(in super::super) fn hits(&self) -> usize {
         self.hits.get()
     }
 }
@@ -333,7 +333,7 @@ fn vary(linear: &mut Linear<'_>, seed: usize) {
     .unwrap();
 }
 
-fn embeddings(ctx: &MetalContext) -> MetalTensor {
+pub(in super::super) fn embeddings(ctx: &MetalContext) -> MetalTensor {
     upload(
         ctx,
         &(0..256)
@@ -347,7 +347,7 @@ fn embeddings(ctx: &MetalContext) -> MetalTensor {
 // Same real operators and nonuniform recipe as prefill's dynamic-schedule witness.
 // No rowwise/grouped/F32-linear override is installed: ScalarNative uses the
 // scalar attention, scalar native expert operands, and complete scalar mHC path.
-fn nonuniform_model<'a>(
+pub(in super::super) fn nonuniform_model<'a>(
     weights: &'a toy::Weights,
     ctx: &'a MetalContext,
     embeddings: &'a MetalTensor,
@@ -493,7 +493,7 @@ fn vary_model<'a>(model: &mut Forward<'a>, embeddings: &'a MetalTensor) {
     }
 }
 
-fn tokens(n: usize) -> Vec<u32> {
+pub(in super::super) fn tokens(n: usize) -> Vec<u32> {
     (0..n).map(|i| ((i * 3 + i / 5 + 1) % 8) as u32).collect()
 }
 
@@ -508,7 +508,7 @@ fn assert_bits(a: &[f32], b: &[f32], label: &str) {
     }
 }
 
-fn causal_bits(state: &State) -> Vec<Vec<f32>> {
+pub(in super::super) fn causal_bits(state: &State) -> Vec<Vec<f32>> {
     let attention = state.gpu_step.as_ref().unwrap().attention();
     attention
         .validate_snapshot_position(state.position())
@@ -765,7 +765,7 @@ fn production_rows_preserve_encoder_and_owner_globals_report_decoder_differences
     }
 }
 
-fn assert_poisoned_rejects(
+pub(in super::super) fn assert_poisoned_rejects(
     model: &Forward<'_>,
     state: &mut State,
     addresses: engram::AddressState,

@@ -3,6 +3,58 @@ use super::super::ced_plan::{CedPlan, chunk_views, row_view};
 use super::*;
 use std::ops::Range;
 
+#[cfg(test)]
+#[path = "ced/tests/reuse.rs"]
+mod reuse;
+
+fn maximum_decoder_rows(plan: &CedPlan, arithmetic: Arithmetic) -> Result<Option<Range<usize>>> {
+    if arithmetic.scalar() {
+        return Ok(None);
+    }
+    let tail = prefill::original_scalar_tail(plan.prompt_rows);
+    let mut maximum: Option<Range<usize>> = None;
+    for layer in &plan.decoder {
+        let end = tail.unwrap_or(layer.output_rows.end);
+        for chunk in chunk_views(layer.output_rows.start..end, prefill::DEFAULT_CHUNK_ROWS)
+            .map_err(|e| e.to_string())?
+        {
+            let range = chunk.absolute_rows;
+            if maximum.as_ref().is_none_or(|old| range.len() > old.len()) {
+                maximum = Some(range);
+            }
+        }
+    }
+    Ok(maximum)
+}
+
+fn checked_outer_elements(hidden: usize, rows: usize) -> Result<(u64, u64)> {
+    op::require(
+        hidden > 0 && (1..=prefill::DEFAULT_CHUNK_ROWS).contains(&rows),
+        "CED scratch prefix geometry",
+    )?;
+    let output = hidden
+        .checked_mul(rows)
+        .and_then(|n| u64::try_from(n).ok())
+        .ok_or("CED scratch prefix overflow")?;
+    let half = output.checked_mul(4).ok_or("CED scratch prefix overflow")?;
+    half.checked_mul(4)
+        .ok_or("CED scratch prefix byte overflow")?;
+    Ok((half, output))
+}
+
+fn check_outer_prefix(t: &MetalTensor, elements: u64) -> Result<()> {
+    op::require(
+        t.dtype == GgmlType::F32
+            && elements <= t.n_elements()
+            && t.offset.is_multiple_of(4)
+            && elements
+                .checked_mul(4)
+                .and_then(|bytes| t.offset.checked_add(bytes))
+                .is_some_and(|end| end <= t.buffer.length() as u64),
+        "CED scratch prefix backing extent",
+    )
+}
+
 pub(in super::super) fn decoder_chunk_widths(
     model: &Forward<'_>,
     capacity: usize,
@@ -154,6 +206,42 @@ struct BlockRows {
 }
 
 impl BlockRows {
+    fn checked_prefix(
+        &self,
+        c: &Config,
+        capacity: usize,
+        layers: usize,
+        controls: &attention_gpu::QueryControlView,
+    ) -> Result<Self> {
+        let n = controls.rows();
+        let (half, output) = checked_outer_elements(c.hidden, n)?;
+        op::require(
+            self.arithmetic == prefill::RowsArithmetic::Packed && n <= self.hc.rows,
+            "CED scratch prefix requires packed maximum backing",
+        )?;
+        check_outer_prefix(&self.half, half)?;
+        check_outer_prefix(&self.output, output)?;
+        let hc = self.hc.checked_prefix(c, n)?;
+        let attention = self
+            .attention
+            .checked_prefix_with_controls(c, capacity, controls)?;
+        // FFN clears the compact active status slab only after all other views
+        // have checked successfully and the previous unit has completed.
+        let ffn = self.ffn.checked_prefix(c, n, layers)?;
+        Ok(Self {
+            arithmetic: self.arithmetic,
+            half: self
+                .half
+                .view_subrange(0, vec![c.hidden as u64, 4, n as u64]),
+            output: self
+                .output
+                .view_subrange(0, vec![c.hidden as u64, n as u64]),
+            hc,
+            ffn,
+            attention,
+        })
+    }
+
     fn new(
         model: &Forward<'_>,
         capacity: usize,
@@ -187,6 +275,57 @@ impl BlockRows {
                 None => attention_gpu::Rows::new(model.ctx, c, capacity, rows)?,
             },
         })
+    }
+}
+
+struct DecoderRowsPool {
+    maximum: Option<Range<usize>>,
+    backing: Option<BlockRows>,
+}
+
+impl DecoderRowsPool {
+    fn checked_rows(
+        &mut self,
+        model: &Forward<'_>,
+        capacity: usize,
+        storage: &Storage,
+        controls: &attention_gpu::QueryControlView,
+    ) -> Result<BlockRows> {
+        #[cfg(test)]
+        if reuse::fresh_decoder_rows() {
+            return BlockRows::new(model, capacity, controls.rows(), Some(controls));
+        }
+        let maximum = self
+            .maximum
+            .as_ref()
+            .ok_or("CED packed decoder without maximum")?;
+        op::require(
+            controls.rows() > 0 && controls.rows() <= maximum.len(),
+            "CED decoder exceeds planned maximum",
+        )?;
+        if self.backing.is_none() {
+            let controls = storage
+                .controls
+                .checked_tile_view(maximum.start, maximum.len())?;
+            #[cfg(test)]
+            super::super::ced::tests::checkpoint("ced_pool_allocate", None)?;
+            self.backing = Some(BlockRows::new(
+                model,
+                capacity,
+                maximum.len(),
+                Some(&controls),
+            )?);
+            #[cfg(test)]
+            reuse::pool_born(model.ctx, self.backing.as_ref().unwrap());
+        }
+        #[cfg(test)]
+        super::super::ced::tests::checkpoint("ced_pool_view", None)?;
+        self.backing.as_ref().unwrap().checked_prefix(
+            &model.config,
+            capacity,
+            model.layers.len(),
+            controls,
+        )
     }
 }
 
@@ -399,6 +538,8 @@ impl Workspace {
             ));
         }
         drop(engram_prepare);
+        #[cfg(test)]
+        reuse::encoder_allocated(&x, &incoming, &scratch);
         storage.observe(ctx);
         cancelled(cancel)?;
         self.attention.begin_ced_encoder(start, n)?;
@@ -652,12 +793,13 @@ impl Workspace {
         cancel: Option<&AtomicBool>,
         storage: &mut Storage,
         counters: &mut CedCounters,
+        pool: &mut DecoderRowsPool,
     ) -> Result<()> {
         let ctx = model.ctx;
         let n = range.len();
         let (x, incoming) = storage.input(range.clone())?;
         let controls = storage.controls.checked_tile_view(range.start, n)?;
-        let scratch = BlockRows::new(model, self.attention.capacity(), n, Some(&controls))?;
+        let scratch = pool.checked_rows(model, self.attention.capacity(), storage, &controls)?;
         storage.observe(ctx);
         cancelled(cancel)?;
         self.attention
@@ -684,6 +826,8 @@ impl Workspace {
         counters.decoder(layer, n, model.schedule.produces_index(layer))?;
         #[cfg(test)]
         super::super::ced::tests::checkpoint("ced_decoder_complete", cancel)?;
+        #[cfg(test)]
+        reuse::decoder_completed(ctx, &scratch, &controls, layer, &x, &incoming);
         cancelled(cancel)
     }
 
@@ -753,6 +897,7 @@ impl Workspace {
     ) -> Result<Output> {
         self.commands = 0;
         self.trace_copies = 0;
+        let maximum = maximum_decoder_rows(plan, arithmetic)?;
         self.attention.begin_ced(plan)?;
         let chunk_rows = if arithmetic.scalar() {
             1
@@ -805,6 +950,10 @@ impl Workspace {
         }
         #[cfg(test)]
         super::super::ced::qualification::publication(&self.attention, plan.prompt_rows)?;
+        let mut pool = DecoderRowsPool {
+            maximum,
+            backing: None,
+        };
         for layer in &plan.decoder {
             for chunk in
                 chunk_views(layer.seed_rows.clone(), chunk_rows).map_err(|e| e.to_string())?
@@ -853,6 +1002,7 @@ impl Workspace {
                             cancel,
                             &mut storage,
                             &mut counters,
+                            &mut pool,
                         )
                     }
                 })?;
@@ -877,6 +1027,7 @@ impl Workspace {
                 plan.prompt_rows,
             )?;
         }
+        drop(pool);
         cancelled(cancel)?;
         counters.validate(plan)?;
         let logits = f32_slice(&self.logits)?;

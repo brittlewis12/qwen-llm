@@ -488,6 +488,10 @@ pub(crate) struct SuiteArgs {
     /// evidence; every endpoint head must match warm Full bitwise.
     #[arg(long)]
     pub(crate) v41_ced_pair: bool,
+    /// Instrument every paired case and stream observations to stderr, including
+    /// excluded warmup/pilot cases. Not performance evidence; all gates remain.
+    #[arg(long, requires = "v41_ced_pair")]
+    pub(crate) v41_ced_pair_diagnostic: bool,
     /// Prompt-only prefill shapes. Accepts repeated flags or comma lists.
     #[arg(long = "pp", value_delimiter = ',')]
     pub(crate) pp: Vec<usize>,

@@ -3,6 +3,10 @@
 use serde::Serialize;
 use std::{cell::RefCell, marker::PhantomData, rc::Rc, time::Instant};
 
+/// Unsampled pair diagnostics: <=8192 rows, <=256 layers, one profile at a time.
+/// The producer inventory is bounded by chunks and decoder layers, not runs.
+pub const PAIRED_OPERATION_CAPACITY: usize = 4096;
+
 thread_local! {
     static ACTIVE: RefCell<Option<Vec<Operation>>> = const { RefCell::new(None) };
     static STAGES: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
@@ -162,4 +166,164 @@ pub(super) fn submitted(
             }
         }
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn paired_production_command_inventory_fits_profile_capacity_without_metal() {
+        use super::super::{
+            Config,
+            ced_plan::{CedPlan, CedRequest, chunk_views},
+            prefill,
+        };
+        use crate::deepseek_v41::{engram::HashConfig, gguf::Schedule};
+        let chunk = prefill::DEFAULT_CHUNK_ROWS;
+        for layers in [40, 256] {
+            let mut schedule = Schedule::default();
+            schedule.layers = layers;
+            schedule.compression_ratios.resize(layers, 1);
+            for window in [1, Config::default().window, 8192] {
+                let config = Config {
+                    window,
+                    ..Config::default()
+                };
+                for n in [2, 128, 2048, 2049, 8191, 8192] {
+                    let plan = CedPlan::shrinking(
+                        &config,
+                        &schedule,
+                        &HashConfig::default(),
+                        &CedRequest::cold(n, n),
+                    )
+                    .unwrap();
+                    let scope = Scope::begin().unwrap();
+                    let mut commands = 0;
+                    let mut emit = |role, dimensions| {
+                        submitted(role, dimensions, 1.0, 2.0, true, 1.0, 1.001);
+                        commands += 1;
+                    };
+                    // Match the production encoder, seed and decoder submissions,
+                    // including the genuine Full scalar tail during compaction.
+                    for view in chunk_views(0..n, chunk).unwrap() {
+                        let r = view.absolute_rows;
+                        if r.len() > 1 {
+                            drop(Wall("ced_encoder_host_prepare", [0; 4], start()));
+                            drop(Wall("ced_encoder_engram_prepare", [0; 4], start()));
+                        }
+                        emit(
+                            if r.len() == 1 {
+                                "ced_encoder_scalar"
+                            } else {
+                                "ced_encoder_rows"
+                            },
+                            [r.start, r.len(), plan.publication_layer, 0],
+                        );
+                    }
+                    let scalar_tail = prefill::original_scalar_tail(n);
+                    for layer in &plan.decoder {
+                        for view in chunk_views(layer.seed_rows.clone(), chunk).unwrap() {
+                            let r = view.absolute_rows;
+                            emit("ced_local_seed", [layer.layer, r.start, r.len(), 0]);
+                        }
+                        for view in chunk_views(
+                            layer.output_rows.start..scalar_tail.unwrap_or(layer.output_rows.end),
+                            chunk,
+                        )
+                        .unwrap()
+                        {
+                            let r = view.absolute_rows;
+                            emit("ced_decoder_rows", [layer.layer, r.start, r.len(), 0]);
+                        }
+                        if let Some(position) = scalar_tail {
+                            emit("ced_decoder_scalar", [layer.layer, position, 1, 0]);
+                        }
+                    }
+                    drop(emit);
+                    let report = scope.finish();
+                    assert_eq!(
+                        commands,
+                        super::super::ced::qualification::production_command_count(&plan).unwrap()
+                    );
+                    assert_eq!(
+                        report
+                            .operations
+                            .iter()
+                            .map(|op| op.completed_submits)
+                            .sum::<usize>(),
+                        commands
+                    );
+                    assert_eq!(
+                        report.operations.len(),
+                        commands + if n > 1 { 2 } else { 0 }
+                    );
+                    let producer_bound =
+                        n.div_ceil(chunk) + layers * (2 * n.div_ceil(chunk) + 1) + 4;
+                    assert!(report.operations.len() <= producer_bound);
+                    assert!(producer_bound <= PAIRED_OPERATION_CAPACITY);
+                    assert!(report.operations.capacity() <= PAIRED_OPERATION_CAPACITY);
+
+                    let scope = Scope::begin().unwrap();
+                    for view in chunk_views(0..n, chunk).unwrap() {
+                        let r = view.absolute_rows;
+                        if r.len() == 1 {
+                            submitted(
+                                "gpu_step",
+                                [r.start, 0, layers, 0],
+                                1.0,
+                                2.0,
+                                true,
+                                1.0,
+                                1.001,
+                            );
+                            drop(Wall("gpu_step", [r.start, 0, layers, 0], start()));
+                        } else {
+                            drop(Wall("prefill_host_prepare", [0; 4], start()));
+                            drop(Wall("prefill_engram_prepare", [0; 4], start()));
+                            submitted(
+                                "prefill_chunk_rows",
+                                [r.start, layers, r.len(), 0],
+                                1.0,
+                                2.0,
+                                true,
+                                1.0,
+                                1.001,
+                            );
+                        }
+                    }
+                    let report = scope.finish();
+                    assert_eq!(
+                        report
+                            .operations
+                            .iter()
+                            .map(|op| op.completed_submits)
+                            .sum::<usize>(),
+                        n.div_ceil(chunk)
+                    );
+                    assert_eq!(report.operations.len(), n.div_ceil(chunk) + 2);
+                    assert!(report.operations.capacity() <= PAIRED_OPERATION_CAPACITY);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn unsampled_scope_is_cleared_on_error_and_unwind() {
+        let run = || -> Result<(), String> {
+            let _scope = Scope::begin()?;
+            assert!(!stages());
+            assert!(Scope::begin().is_err());
+            Err("profile error fixture".into())
+        };
+        assert!(run().is_err());
+        let result = std::panic::catch_unwind(|| {
+            let _scope = Scope::begin().unwrap();
+            panic!("profile unwind fixture");
+        });
+        assert!(result.is_err());
+        let scope = Scope::begin().unwrap();
+        assert!(!stages());
+        assert!(scope.finish().operations.is_empty());
+    }
 }

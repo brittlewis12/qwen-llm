@@ -621,7 +621,7 @@ fn memory_ledger_comparison_excludes_runtime_peak_observations() {
     assert_ne!(admission_ledger(&observed), admission_ledger(&estimated));
 }
 
-fn production_command_count(plan: &CedPlan) -> AResult<usize> {
+pub(in crate::deepseek_v41::forward) fn production_command_count(plan: &CedPlan) -> AResult<usize> {
     let scalar_tail = usize::from(prefill::original_scalar_tail(plan.prompt_rows).is_some());
     plan.decoder.iter().try_fold(
         plan.prompt_rows.div_ceil(PREFILL_CHUNK_ROWS),

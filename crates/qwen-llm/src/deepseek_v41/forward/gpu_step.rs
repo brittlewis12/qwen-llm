@@ -177,6 +177,7 @@ impl Workspace {
         let ctx = model.ctx;
         let c = &model.config;
         let n = tokens.len();
+        let prepare = profile::Wall("prefill_host_prepare", [0; 4], profile::start());
         let mut embeddings = Vec::with_capacity(n * 4 * c.hidden);
         for &token in tokens {
             embeddings.extend(decode_rows(model.embedding, token as usize, 1)?.repeat(4));
@@ -190,6 +191,7 @@ impl Workspace {
         let ffn = ffn_gpu::Rows::new(ctx, c, n, model.layers.len())?;
         let attention = attention_gpu::Rows::new(ctx, c, self.attention.capacity(), n)?;
         let mut engrams = Vec::new();
+        let engram_prepare = profile::Wall("prefill_engram_prepare", [0; 4], profile::start());
         for slot in &self.engrams {
             let p = &model.layers[slot.layer].engram.as_ref().unwrap().projection;
             let mut values = Vec::with_capacity(n * p.input);
@@ -205,6 +207,7 @@ impl Workspace {
                 prefill::allocate(ctx, p.output, n, GgmlType::F32)?,
             ));
         }
+        drop(engram_prepare);
         let snapshots = match capture.as_ref() {
             Some(sink) => capture::batch_snapshots(model, start, n, &**sink)?,
             None => Vec::new(),
@@ -213,6 +216,7 @@ impl Workspace {
         self.commands = 0;
         self.trace_copies = 0;
         cancelled(cancel)?;
+        drop(prepare);
         let started = profile::start();
         let samples = if profile::stages() {
             Some(

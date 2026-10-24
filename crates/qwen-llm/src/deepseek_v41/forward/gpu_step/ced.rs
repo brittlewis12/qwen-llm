@@ -363,6 +363,7 @@ impl Workspace {
         let ctx = model.ctx;
         let c = &model.config;
         let n = tokens.len();
+        let prepare = profile::Wall("ced_encoder_host_prepare", [0; 4], profile::start());
         let mut embeddings = Vec::with_capacity(n * 4 * c.hidden);
         for &token in tokens {
             embeddings.extend(decode_rows(model.embedding, token as usize, 1)?.repeat(4));
@@ -372,6 +373,7 @@ impl Workspace {
         let scratch = BlockRows::new(model, self.attention.capacity(), n, None)?;
         let publication = attention_gpu::PublicationRows::new(ctx, c, n)?;
         let mut engrams = Vec::new();
+        let engram_prepare = profile::Wall("ced_encoder_engram_prepare", [0; 4], profile::start());
         for slot in &self.engrams {
             op::require(
                 plan.encoder_layers.contains(&slot.layer),
@@ -391,9 +393,11 @@ impl Workspace {
                 prefill::allocate(ctx, p.output, n, GgmlType::F32)?,
             ));
         }
+        drop(engram_prepare);
         storage.observe(ctx);
         cancelled(cancel)?;
         self.attention.begin_ced_encoder(start, n)?;
+        drop(prepare);
         self.ced_command(
             model,
             "ced_encoder_rows",

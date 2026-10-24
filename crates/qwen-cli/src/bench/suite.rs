@@ -345,6 +345,7 @@ pub(crate) fn run_suite(args: SuiteArgs) -> Result<()> {
     let SuiteArgs {
         model,
         v41_ced_pair,
+        v41_ced_pair_diagnostic,
         pp,
         tg,
         depth: depths,
@@ -354,6 +355,10 @@ pub(crate) fn run_suite(args: SuiteArgs) -> Result<()> {
         seed,
         output,
     } = args;
+    ensure!(
+        !v41_ced_pair_diagnostic || v41_ced_pair,
+        "--v41-ced-pair-diagnostic requires --v41-ced-pair"
+    );
     if runs == 0 {
         return Err(anyhow!("--runs must be >= 1"));
     }
@@ -481,6 +486,11 @@ pub(crate) fn run_suite(args: SuiteArgs) -> Result<()> {
             family.record_label()
         );
         let ctx = MetalContext::new().context("init Metal")?;
+        if v41_ced_pair_diagnostic {
+            // This fresh context/cache stays private to this suite invocation.
+            // Enable once; context drop handles return, errors and unwind.
+            ctx.set_pipeline_cache_metrics_enabled(true);
+        }
         crate::text_log!(json_mode, "[suite] device: {}", ctx.describe());
         let row_ctx = SuiteRowContext {
             build_commit: commit,
@@ -504,7 +514,12 @@ pub(crate) fn run_suite(args: SuiteArgs) -> Result<()> {
             FamilyBenchExtent::for_shapes(&pp, &tg, &depths, (warmup_pp, WARMUP_TG))?
         };
         let paired_preweight = if v41_ced_pair {
-            Some(crate::v41_ced_pair::preweight_plan(&ctx, &probe, extent)?)
+            Some(crate::v41_ced_pair::preweight_plan(
+                &ctx,
+                &probe,
+                extent,
+                v41_ced_pair_diagnostic,
+            )?)
         } else {
             None
         };
@@ -516,15 +531,32 @@ pub(crate) fn run_suite(args: SuiteArgs) -> Result<()> {
             v41_prefill_execution,
             &mut |bench| {
                 if let Some(preweight) = &paired_preweight {
-                    let rows =
-                        crate::v41_ced_pair::run(bench, &row_ctx, pp[0], runs, seed, preweight)?;
+                    let rows = crate::v41_ced_pair::run(
+                        bench,
+                        &row_ctx,
+                        pp[0],
+                        runs,
+                        seed,
+                        preweight,
+                        v41_ced_pair_diagnostic.then_some(&ctx),
+                    )?;
                     for row in &rows {
-                        crate::text_log!(
-                            json_mode,
-                            "[suite] paired prefill_mode={}",
-                            row.prefill_mode.unwrap_or("unreported"),
-                        );
-                        log_row(json_mode, row);
+                        if v41_ced_pair_diagnostic {
+                            crate::text_log!(
+                                json_mode,
+                                "[suite] INSTRUMENTED performance_evidence=false paired prefill_mode={} {}: {:.2} t/s",
+                                row.prefill_mode.unwrap_or("unreported"),
+                                row.test,
+                                row.avg_ts,
+                            );
+                        } else {
+                            crate::text_log!(
+                                json_mode,
+                                "[suite] paired prefill_mode={}",
+                                row.prefill_mode.unwrap_or("unreported"),
+                            );
+                            log_row(json_mode, row);
+                        }
                     }
                     return Ok(rows);
                 }

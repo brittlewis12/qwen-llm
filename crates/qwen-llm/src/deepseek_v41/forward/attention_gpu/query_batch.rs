@@ -334,9 +334,16 @@ pub(super) struct Scratch {
     pub(super) scores: MetalTensor,
     pub(super) attended: MetalTensor,
     pub(super) matrix: Option<ValueMatrix>,
+    rows: usize,
+    geometry: [usize; 5],
+    prefix_view: bool,
 }
 
 impl Scratch {
+    fn geometry(c: &Config) -> [usize; 5] {
+        [c.window, c.head_dim, c.heads, c.index_topk, tile_rows()]
+    }
+
     pub(super) fn shapes(c: &Config, rows: usize) -> Result<Vec<usize>> {
         op::require(
             (1..=prefill::MAX_CHUNK_ROWS).contains(&rows),
@@ -370,6 +377,9 @@ impl Scratch {
         let sizes = Self::shapes(c, rows)?;
         let f = |i| tensor(ctx, sizes[i], GgmlType::F32);
         Ok(Self {
+            rows,
+            geometry: Self::geometry(c),
+            prefix_view: false,
             history: f(0)?,
             scores: f(1)?,
             attended: f(2)?,
@@ -383,6 +393,41 @@ impl Scratch {
             },
         })
     }
+
+    pub(super) fn checked_prefix(&self, c: &Config, rows: usize) -> Result<Self> {
+        prefill::checked_scratch_rows(self.rows, rows)?;
+        op::require(
+            !self.prefix_view && self.geometry == Self::geometry(c),
+            "query scratch requires compatible original backing",
+        )?;
+        let backing = Self::shapes(c, self.rows)?;
+        let active = Self::shapes(c, rows)?;
+        op::require(
+            self.matrix.is_some() == (active.len() == 5),
+            "query scratch matrix backing missing/incompatible",
+        )?;
+        let f = |tensor, i| {
+            prefill::checked_scratch_view(tensor, &[backing[i]], &[active[i]], GgmlType::F32)
+        };
+        Ok(Self {
+            history: f(&self.history, 0)?,
+            scores: f(&self.scores, 1)?,
+            attended: f(&self.attended, 2)?,
+            matrix: self
+                .matrix
+                .as_ref()
+                .map(|matrix| -> Result<ValueMatrix> {
+                    Ok(ValueMatrix {
+                        values: f(&matrix.values, 3)?,
+                        probabilities: f(&matrix.probabilities, 4)?,
+                    })
+                })
+                .transpose()?,
+            rows,
+            geometry: self.geometry,
+            prefix_view: true,
+        })
+    }
 }
 
 impl Rows {
@@ -393,6 +438,58 @@ impl Rows {
             .into_iter()
             .map(|n| n.div_ceil(rows))
             .collect())
+    }
+}
+
+#[cfg(test)]
+mod scratch_prefix_geometry_tests {
+    use super::*;
+
+    #[test]
+    fn query_prefix_shapes_recompute_history_span_and_matrix_tile_strides() {
+        let c = Config {
+            head_dim: 64,
+            heads: 8,
+            ..Config::default()
+        };
+        let backing = Scratch::shapes(&c, prefill::DEFAULT_CHUNK_ROWS).unwrap();
+        let matrix = ValueMatrix::shapes(&c).unwrap();
+        assert_eq!(matrix.len(), 2);
+        for rows in [1, 3, 127, 512, prefill::DEFAULT_CHUNK_ROWS] {
+            let active = Scratch::shapes(&c, rows).unwrap();
+            let tile = rows.min(tile_rows());
+            assert_eq!(active.len(), 5);
+            assert_eq!(active[0], (c.window + rows) * c.head_dim);
+            assert_eq!(active[1], tile * c.heads * (c.window + c.index_topk + 1));
+            assert_eq!(active[2], tile * c.heads * c.head_dim);
+            assert_eq!(active[3], tile * matrix[0]);
+            assert_eq!(active[4], tile * matrix[1]);
+            assert!(active.iter().zip(&backing).all(|(n, max)| n <= max));
+        }
+    }
+
+    #[test]
+    fn query_prefix_shapes_reject_invalid_rows_and_history_overflow() {
+        let mut c = Config::default();
+        assert!(Scratch::shapes(&c, 0).is_err());
+        assert!(Scratch::shapes(&c, prefill::DEFAULT_CHUNK_ROWS + 1).is_err());
+        c.window = usize::MAX;
+        assert!(Scratch::shapes(&c, 1).is_err());
+    }
+
+    #[test]
+    fn selection_prefix_p4_backing_contains_compact_p2_and_p4_tiles() {
+        let c = Config::default();
+        let backing = selection_shapes(&c, 16384, prefill::DEFAULT_CHUNK_ROWS, 512).unwrap();
+        for rows in [1, 3, 127, 512, prefill::DEFAULT_CHUNK_ROWS] {
+            let tile = rows.min(512);
+            for (capacity, partitions) in [(8192, 2), (16384, 4)] {
+                let active = selection_shapes(&c, capacity, rows, 512).unwrap();
+                assert_eq!(active[0], tile * capacity);
+                assert_eq!(active[1], tile * partitions * HIER_K * 2);
+                assert!(active.iter().zip(&backing).all(|(n, max)| n <= max));
+            }
+        }
     }
 }
 

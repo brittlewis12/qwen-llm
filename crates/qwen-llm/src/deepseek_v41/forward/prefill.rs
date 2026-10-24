@@ -114,6 +114,126 @@ fn with_rowwise_linears<T>(f: impl FnOnce() -> T) -> T {
 /// the F32-input form; this only removes the per-tile re-read and cast.
 pub(super) struct HalfScratch {
     tensor: MetalTensor,
+    prefix_view: bool,
+}
+
+pub(super) fn checked_scratch_rows(backing_rows: usize, rows: usize) -> Result<()> {
+    op::require(
+        (1..=DEFAULT_CHUNK_ROWS).contains(&backing_rows) && (1..=backing_rows).contains(&rows),
+        "scratch prefix rows outside original backing",
+    )
+}
+
+fn scratch_elements(shape: &[u64]) -> Result<u64> {
+    op::require(!shape.is_empty(), "empty scratch shape")?;
+    shape.iter().try_fold(1u64, |n, &d| {
+        op::require(d > 0, "zero scratch dimension")?;
+        n.checked_mul(d)
+            .ok_or_else(|| "scratch shape overflow".into())
+    })
+}
+
+fn scratch_byte_extent(offset: u64, elements: u64, bytes: u64, limit: u64) -> Result<()> {
+    op::require(offset.is_multiple_of(bytes), "scratch offset alignment")?;
+    let end = elements
+        .checked_mul(bytes)
+        .and_then(|n| offset.checked_add(n))
+        .ok_or("scratch byte extent overflow")?;
+    op::require(
+        end <= limit && end <= isize::MAX as u64,
+        "scratch byte extent outside buffer",
+    )
+}
+
+fn scratch_prefix_extent(
+    backing_shape: &[u64],
+    shape: &[u64],
+    offset: u64,
+    bytes: u64,
+    limit: u64,
+) -> Result<()> {
+    let parent = scratch_elements(backing_shape)?;
+    let elements = scratch_elements(shape)?;
+    op::require(elements <= parent, "scratch prefix logical extent")?;
+    scratch_byte_extent(offset, parent, bytes, limit)?;
+    scratch_byte_extent(offset, elements, bytes, limit)
+}
+
+/// Check both the original logical extent and the physical allocation before
+/// entering MetalTensor's asserting view API. Offsets remain dtype-sized.
+pub(super) fn checked_scratch_view(
+    tensor: &MetalTensor,
+    backing_shape: &[usize],
+    shape: &[usize],
+    dtype: GgmlType,
+) -> Result<MetalTensor> {
+    op::require(
+        tensor.dtype == dtype
+            && tensor.is_writable()
+            && tensor.shape.len() == backing_shape.len()
+            && tensor
+                .shape
+                .iter()
+                .zip(backing_shape)
+                .all(|(&actual, &expected)| actual == expected as u64),
+        "scratch backing shape/dtype/provenance",
+    )?;
+    let bytes = match dtype {
+        GgmlType::F16 => 2,
+        GgmlType::F32 | GgmlType::I32 => 4,
+        _ => return Err("unsupported scratch dtype".into()),
+    };
+    let shape = shape.iter().map(|&n| n as u64).collect::<Vec<_>>();
+    scratch_prefix_extent(
+        &tensor.shape,
+        &shape,
+        tensor.offset,
+        bytes,
+        tensor.buffer.length() as u64,
+    )?;
+    Ok(tensor.view_subrange(0, shape))
+}
+
+#[cfg(test)]
+mod scratch_prefix_geometry_tests {
+    use super::*;
+
+    #[test]
+    fn prefix_rows_require_bounded_original_backing() {
+        for backing in [1, 3, 128, DEFAULT_CHUNK_ROWS] {
+            for rows in [1, backing] {
+                assert!(checked_scratch_rows(backing, rows).is_ok());
+            }
+            assert!(checked_scratch_rows(backing, 0).is_err());
+            assert!(checked_scratch_rows(backing, backing + 1).is_err());
+        }
+        assert!(checked_scratch_rows(0, 1).is_err());
+        assert!(checked_scratch_rows(DEFAULT_CHUNK_ROWS + 1, 1).is_err());
+        assert!(checked_scratch_rows(usize::MAX, 1).is_err());
+    }
+
+    #[test]
+    fn prefix_extents_check_logical_and_physical_limits_before_views() {
+        assert!(scratch_prefix_extent(&[24, 8], &[24, 3], 16, 4, 784).is_ok());
+        assert!(scratch_prefix_extent(&[4, 4, 8], &[4, 4, 1], 0, 4, 512).is_ok());
+        assert!(scratch_prefix_extent(&[8], &[9], 0, 4, 4096).is_err());
+        assert!(scratch_prefix_extent(&[8], &[1], 0, 4, 31).is_err());
+        assert!(scratch_prefix_extent(&[8], &[1], 2, 4, 64).is_err());
+        assert!(scratch_prefix_extent(&[8], &[0], 0, 4, 64).is_err());
+        assert!(scratch_prefix_extent(&[0], &[1], 0, 4, 64).is_err());
+        assert!(scratch_prefix_extent(&[], &[1], 0, 4, 64).is_err());
+        assert!(scratch_prefix_extent(&[u64::MAX, 2], &[1], 0, 4, u64::MAX).is_err());
+        assert!(scratch_prefix_extent(&[u64::MAX], &[1], 0, 4, u64::MAX).is_err());
+        assert!(scratch_prefix_extent(&[8], &[1], u64::MAX - 3, 4, u64::MAX).is_err());
+    }
+
+    #[test]
+    fn half_prefix_extents_use_two_byte_offset_units() {
+        assert!(scratch_prefix_extent(&[8, 1], &[3], 2, 2, 18).is_ok());
+        assert!(scratch_prefix_extent(&[8, 1], &[3], 1, 2, 18).is_err());
+        assert!(scratch_prefix_extent(&[8, 1], &[3], 2, 2, 17).is_err());
+        assert!(HalfScratch::logical_bytes(usize::MAX).is_err());
+    }
 }
 
 fn half_scratch_extent(factors: &[usize]) -> Result<usize> {
@@ -246,7 +366,26 @@ impl HalfScratch {
         Self::logical_bytes(elements)?;
         Ok(Some(Self {
             tensor: allocate(ctx, elements, 1, GgmlType::F16)?,
+            prefix_view: false,
         }))
+    }
+
+    /// Call on the original allocation, never on a previously narrowed view.
+    pub(super) fn checked_prefix(&self, elements: usize) -> Result<Self> {
+        op::require(!self.prefix_view, "half prefix requires original backing")?;
+        Self::logical_bytes(elements)?;
+        let backing_elements = self.tensor.shape.first().copied().unwrap_or(0);
+        let backing_elements =
+            usize::try_from(backing_elements).map_err(|_| "half scratch host extent overflow")?;
+        Ok(Self {
+            tensor: checked_scratch_view(
+                &self.tensor,
+                &[backing_elements, 1],
+                &[elements],
+                GgmlType::F16,
+            )?,
+            prefix_view: true,
+        })
     }
 
     /// Convert the first `elements` of `x` (F32) into the scratch and
@@ -620,6 +759,7 @@ pub(super) fn row(t: &MetalTensor, width: usize, row: usize) -> MetalTensor {
 
 pub(super) struct HcRows {
     pub(super) rows: usize,
+    prefix_view: bool,
     raw: MetalTensor,
     pub(super) pre: MetalTensor,
     pub(super) post: MetalTensor,
@@ -636,12 +776,36 @@ impl HcRows {
         let f = |w| allocate(ctx, w, rows, GgmlType::F32);
         Ok(Self {
             rows,
+            prefix_view: false,
             raw: f(24)?,
             pre: f(4)?,
             post: f(4)?,
             comb: f(16)?.view_bytes(0, vec![4, 4, rows as u64]),
             collapsed: f(c.hidden)?,
             normalized: f(c.hidden)?,
+        })
+    }
+
+    pub(super) fn checked_prefix(&self, c: &Config, rows: usize) -> Result<Self> {
+        op::require(!self.prefix_view, "HC prefix requires original backing")?;
+        checked_scratch_rows(self.rows, rows)?;
+        let f = |tensor, width| {
+            checked_scratch_view(tensor, &[width, self.rows], &[width, rows], GgmlType::F32)
+        };
+        Ok(Self {
+            rows,
+            prefix_view: true,
+            raw: f(&self.raw, 24)?,
+            pre: f(&self.pre, 4)?,
+            post: f(&self.post, 4)?,
+            comb: checked_scratch_view(
+                &self.comb,
+                &[4, 4, self.rows],
+                &[4, 4, rows],
+                GgmlType::F32,
+            )?,
+            collapsed: f(&self.collapsed, c.hidden)?,
+            normalized: f(&self.normalized, c.hidden)?,
         })
     }
     pub(super) fn encode(

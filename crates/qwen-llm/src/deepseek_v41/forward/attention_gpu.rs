@@ -179,12 +179,61 @@ pub(super) struct Rows {
     /// the tier is not selected.
     half: Option<prefill::HalfScratch>,
     rows: usize,
+    geometry: [usize; 14],
     arithmetic: RowsArithmetic,
     controls: Option<QueryControlView>,
     history: std::cell::Cell<Option<ced::HistoryRange>>,
 }
 
 impl Rows {
+    fn geometry(c: &Config, capacity: usize) -> [usize; 14] {
+        [
+            c.hidden,
+            c.heads,
+            c.head_dim,
+            c.query_rank,
+            c.output_rank,
+            c.groups,
+            c.index_heads,
+            c.index_dim,
+            c.index_topk,
+            c.window,
+            c.candidate_block,
+            c.candidate_topk,
+            c.rope_dim,
+            capacity,
+        ]
+    }
+
+    fn prefix_widths(c: &Config, capacity: usize) -> Result<Vec<usize>> {
+        op::require(
+            capacity > 0
+                && capacity <= u32::MAX as usize / 8
+                && Self::geometry(c, capacity)[..12]
+                    .iter()
+                    .all(|&n| n > 0 && n <= u32::MAX as usize / 4)
+                && c.heads.is_multiple_of(c.groups),
+            "attention prefix geometry/capacity",
+        )?;
+        let query = checked_product(&[c.heads, c.head_dim])?;
+        let low = checked_product(&[c.groups, c.output_rank])?;
+        let index = checked_product(&[c.index_heads, c.index_dim])?;
+        Ok(vec![
+            c.query_rank,
+            query,
+            c.head_dim,
+            c.index_topk,
+            capacity.div_ceil(c.candidate_block),
+            low,
+            query,
+            low,
+            c.head_dim,
+            c.head_dim,
+            index,
+            c.index_heads,
+        ])
+    }
+
     /// CED borrows the two retained I32 controls instead of allocating them.
     pub(super) fn widths_with_controls(c: &Config, capacity: usize) -> Vec<usize> {
         Self::widths(c, capacity)
@@ -294,12 +343,100 @@ impl Rows {
             },
             half: prefill::HalfScratch::new(ctx, half_elements)?,
             rows,
+            geometry: Self::geometry(c, capacity),
             arithmetic: if controls.is_some() {
                 RowsArithmetic::Packed
             } else {
                 RowsArithmetic::Ordinary
             },
             controls,
+            history: std::cell::Cell::new(None),
+        })
+    }
+
+    pub(super) fn checked_prefix_with_controls(
+        &self,
+        c: &Config,
+        capacity: usize,
+        controls: &QueryControlView,
+    ) -> Result<Self> {
+        let rows = controls.rows();
+        prefill::checked_scratch_rows(self.rows, rows)?;
+        op::require(
+            self.geometry == Self::geometry(c, capacity),
+            "attention prefix incompatible backing geometry",
+        )?;
+        let widths = Self::prefix_widths(c, capacity)?;
+        let selection = query_batch::selection_shapes(c, capacity, rows, query_batch::tile_rows())?;
+        let backing_selection =
+            query_batch::selection_shapes(c, capacity, self.rows, query_batch::tile_rows())?;
+        let f = |tensor, i| {
+            checked_product(&[widths[i], rows])?;
+            prefill::checked_scratch_view(
+                tensor,
+                &[widths[i], self.rows],
+                &[widths[i], rows],
+                GgmlType::F32,
+            )
+        };
+        let selected = prefill::checked_scratch_view(
+            &controls.selected,
+            &[widths[3], rows],
+            &[widths[3], rows],
+            GgmlType::I32,
+        )?;
+        let candidates = prefill::checked_scratch_view(
+            &controls.candidates,
+            &[widths[4], rows],
+            &[widths[4], rows],
+            GgmlType::I32,
+        )?;
+        controls.validate_geometry(c, capacity)?;
+        let select_pairs = if selection[1] == 0 {
+            None
+        } else {
+            let pairs = self
+                .select_pairs
+                .as_ref()
+                .ok_or("attention selection pair backing missing")?;
+            op::require(pairs.offset.is_multiple_of(8), "selection pair alignment")?;
+            Some(prefill::checked_scratch_view(
+                pairs,
+                &[backing_selection[1], 1],
+                &[selection[1], 1],
+                GgmlType::I32,
+            )?)
+        };
+        Ok(Self {
+            tile: self.tile.checked_prefix(c, rows)?,
+            rank: f(&self.rank, 0)?,
+            query: f(&self.query, 1)?,
+            latent: f(&self.latent, 2)?,
+            low: f(&self.low, 5)?,
+            selected,
+            candidates,
+            grouped_input: f(&self.grouped_input, 6)?,
+            grouped_low: f(&self.grouped_low, 7)?,
+            compressor_value: f(&self.compressor_value, 8)?,
+            compressor_gate: f(&self.compressor_gate, 9)?,
+            index_query: f(&self.index_query, 10)?,
+            index_weights: f(&self.index_weights, 11)?,
+            select_scores: prefill::checked_scratch_view(
+                &self.select_scores,
+                &[backing_selection[0], 1],
+                &[selection[0], 1],
+                GgmlType::F32,
+            )?,
+            select_pairs,
+            half: self
+                .half
+                .as_ref()
+                .map(|half| half.checked_prefix(prefill::attention_half_scratch_elements(c, rows)?))
+                .transpose()?,
+            rows,
+            geometry: self.geometry,
+            arithmetic: RowsArithmetic::Packed,
+            controls: Some(controls.clone()),
             history: std::cell::Cell::new(None),
         })
     }
@@ -332,6 +469,52 @@ impl Rows {
                 detail: "attention half input extent overflow".into(),
             })?;
         half.convert(ctx, enc, x, elements).map(Some)
+    }
+}
+
+#[cfg(test)]
+mod scratch_prefix_geometry_tests {
+    use super::*;
+
+    #[test]
+    fn attention_prefix_widths_preserve_fresh_shapes_and_current_group_strides() {
+        let c = Config::default();
+        let widths = Rows::prefix_widths(&c, 16384).unwrap();
+        assert_eq!(widths, Rows::widths(&c, 16384));
+        let group_width = c.heads * c.head_dim / c.groups;
+        for rows in [1, 3, 127, 512, prefill::DEFAULT_CHUNK_ROWS] {
+            let grouped = checked_product(&[widths[6], rows]).unwrap();
+            let low = checked_product(&[widths[7], rows]).unwrap();
+            assert_eq!(
+                (c.groups - 1) * group_width * rows + group_width * rows,
+                grouped
+            );
+            assert_eq!(
+                (c.groups - 1) * c.output_rank * rows + c.output_rank * rows,
+                low
+            );
+            let half = prefill::attention_half_scratch_elements(&c, rows).unwrap();
+            assert!(half >= grouped && half >= low);
+            assert!(RowsArithmetic::Packed.packed_operands(rows));
+        }
+    }
+
+    #[test]
+    fn attention_prefix_geometry_rejects_invalid_capacity_and_products() {
+        let mut c = Config::default();
+        assert!(Rows::prefix_widths(&c, 0).is_err());
+        assert!(Rows::prefix_widths(&c, usize::MAX).is_err());
+        c.candidate_block = 0;
+        assert!(Rows::prefix_widths(&c, 16384).is_err());
+        c = Config::default();
+        c.groups = 0;
+        assert!(Rows::prefix_widths(&c, 16384).is_err());
+        c = Config::default();
+        c.heads = usize::MAX;
+        assert!(Rows::prefix_widths(&c, 16384).is_err());
+        c = Config::default();
+        c.head_dim = u32::MAX as usize / 4;
+        assert!(Rows::prefix_widths(&c, 16384).is_err());
     }
 }
 

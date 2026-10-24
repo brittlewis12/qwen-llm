@@ -925,6 +925,27 @@ pub(super) struct Rows {
     half_inner: Option<prefill::HalfScratch>,
 }
 impl Rows {
+    fn prefix_widths(
+        c: &Config,
+        backing_rows: usize,
+        rows: usize,
+        layers: usize,
+    ) -> Result<Vec<usize>> {
+        prefill::checked_scratch_rows(backing_rows, rows)?;
+        composition_extents(c, backing_rows).map_err(|e| e.to_string())?;
+        composition_extents(c, rows).map_err(|e| e.to_string())?;
+        op::require(layers > 0, "FFN prefix requires layers")?;
+        let widths = Self::widths(c, layers);
+        for &width in &widths {
+            width
+                .checked_mul(backing_rows)
+                .and_then(|n| n.checked_mul(4))
+                .filter(|&bytes| bytes <= isize::MAX as usize)
+                .ok_or("FFN prefix backing extent overflow")?;
+        }
+        Ok(widths)
+    }
+
     pub(super) fn widths(c: &Config, layers: usize) -> Vec<usize> {
         let mut widths = prefill::HcRows::widths(c);
         widths.extend([
@@ -1002,6 +1023,71 @@ impl Rows {
             half_inner,
         })
     }
+
+    /// The driver must retire all users of the backing before this call: the
+    /// compact [layer][current row] status slab is reset on the host.
+    pub(super) fn checked_prefix(&self, c: &Config, rows: usize, layers: usize) -> Result<Self> {
+        let widths = Self::prefix_widths(c, self.hc.rows, rows, layers)?;
+        op::require(
+            self.buffers.len() == widths.len() - 6,
+            "FFN scratch buffers",
+        )?;
+        let hc = self.hc.checked_prefix(c, rows)?;
+        let buffers = self
+            .buffers
+            .iter()
+            .zip(&widths[6..])
+            .enumerate()
+            .map(|(i, (tensor, &width))| {
+                prefill::checked_scratch_view(
+                    tensor,
+                    &[width, self.hc.rows],
+                    &[width, rows],
+                    if matches!(i, 6 | 8 | 10 | 11) {
+                        GgmlType::I32
+                    } else {
+                        GgmlType::F32
+                    },
+                )
+            })
+            .collect::<Result<Vec<_>>>()?;
+        let [input_elements, inner_elements] = prefill::ffn_half_scratch_elements(c, rows)?;
+        let half_input = self
+            .half_input
+            .as_ref()
+            .map(|half| half.checked_prefix(input_elements))
+            .transpose()?;
+        let half_inner = self
+            .half_inner
+            .as_ref()
+            .map(|half| half.checked_prefix(inner_elements))
+            .transpose()?;
+
+        // Every view has passed validation. Reset only active statuses, not the
+        // large overwrite-before-read activations or unused maximum-row tail.
+        let status = &buffers[6];
+        unsafe {
+            std::ptr::write_bytes(
+                status
+                    .buffer
+                    .contents()
+                    .as_ptr()
+                    .cast::<u8>()
+                    .add(status.offset as usize)
+                    .cast::<i32>(),
+                0,
+                status.n_elements() as usize,
+            );
+        }
+        Ok(Self {
+            hc,
+            arithmetic: RowsArithmetic::Packed,
+            buffers,
+            half_input,
+            half_inner,
+        })
+    }
+
     pub(super) fn validate_status(&self) -> Result<()> {
         self.validate_status_layers(0..self.buffers[6].n_elements() as usize / self.hc.rows)
     }
@@ -1037,5 +1123,43 @@ impl Rows {
             }
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod scratch_prefix_geometry_tests {
+    use super::*;
+
+    #[test]
+    fn ffn_prefix_geometry_compacts_statuses_and_slot_strides() {
+        let c = Config::default();
+        let layers = 20;
+        for rows in [1, 3, 127, 512, prefill::DEFAULT_CHUNK_ROWS] {
+            let widths =
+                Rows::prefix_widths(&c, prefill::DEFAULT_CHUNK_ROWS, rows, layers).unwrap();
+            let active = widths[6..].iter().map(|w| w * rows).collect::<Vec<_>>();
+            let extents = composition_extents(&c, rows).unwrap();
+            assert_eq!(active[6], layers * rows);
+            assert_eq!((layers - 1) * rows + rows, active[6]);
+            assert_eq!(active[8], extents.slots as usize);
+            assert_eq!(active[9], extents.slots as usize);
+            assert_eq!(active[10], c.experts * rows);
+            assert_eq!(active[11], c.experts * rows);
+            assert_eq!(active[12], extents.weighted as usize);
+            assert_eq!(active[13], extents.weighted as usize);
+            assert_eq!(active[14], c.hidden * c.topk * rows);
+            assert!(RowsArithmetic::Packed.packed_operands(rows));
+        }
+    }
+
+    #[test]
+    fn ffn_prefix_geometry_rejects_empty_oversize_and_overflow() {
+        let mut c = Config::default();
+        for (backing, rows, layers) in [(8, 0, 2), (8, 9, 2), (2049, 1, 2), (8, 1, 0)] {
+            assert!(Rows::prefix_widths(&c, backing, rows, layers).is_err());
+        }
+        assert!(Rows::prefix_widths(&c, 8, 1, usize::MAX).is_err());
+        c.intermediate = usize::MAX;
+        assert!(Rows::prefix_widths(&c, 8, 1, 2).is_err());
     }
 }

@@ -26,7 +26,7 @@ expected effect, status. Status is one of `open`, `in flight (branch)`,
 `in flight` with your branch; a second lane finding it claimed reads the branch
 before building anything adjacent. This replaces relaying between sessions.
 
-### DeepSeek V4.1-Flash (main after the wider 32-key attention score: pp2048 Q2 876.5 / IQ3 852 (not re-measured), pp4096 Q2 843.0 / IQ3 815; decode rechecked tg32 Q2 43.2 / IQ3 41.0, depth tg32@d2048 41.6 from the prior landing)
+### DeepSeek V4.1-Flash (main after the wider 32-key attention score: pp2048 Q2 877.3 / IQ3 852 (not re-measured), pp4096 Q2 840.0 / IQ3 815; decode rechecked tg32 Q2 43.2 / IQ3 41.0, depth tg32@d2048 41.6 from the prior landing)
 
 CED encoder-only bulk prefill is the leading architectural opportunity.
 Design/dependency recon: landed (2026-10-23 CED entry;
@@ -211,9 +211,10 @@ attention tiles at 34.7%. Re-sample after the next landing.
   bench/2026-10-24-v41-score32.md). The 32-key score tile splits the
   latent into two 256-wide chunks, keeps Q resident in the same 32 KiB,
   and leaves softmax/PV/normalize unchanged. Fixture: score -18 to -20%,
-  full sink -12 to -13% at 128/256/512 rows. Same-binary Q2 ABCCBA:
-  pp2048 852.284 -> 876.514 (+2.84%), pp4096 819.739 -> 842.959
-  (+2.83%). IQ3 held-text witness identical (NLL 2.1542914542, top-1
+  full sink -12 to -13% at 128/256/512 rows. Same-binary Q2 ABBA on the
+  landing build: pp2048 855.219 -> 877.289 (+2.58%), pp4096 817.600 ->
+  839.959 (+2.74%); the pre-landing ABCCBA measured +2.84/+2.83%. IQ3
+  held-text witness identical (NLL 2.1542914542, top-1
   0.5677083333). Default from 128 rows on the tensor tier;
   `QWEN_V41_SINK_TENSOR32=0` restores the 16-key form. Score is still
   ~11.9 TFLOPS vs PV ~20.4; register-cooperative or materialized

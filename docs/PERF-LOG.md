@@ -42,8 +42,9 @@ See also: `docs/PERF-ROADMAP.md` for the current state and evidence index.
 - Fixture at 512 rows / 640 keys: score 2,215.6 -> 1,808.0 us (-18.4%),
   full sink 3,298.5 -> 2,876.8 us (-12.8%); 128/256 rows are -20.1/-18.1%
   score and -13.0/-12.3% sink. Correctness covers all fixture cases.
-- Same-binary Q2 ABCCBA (`d0ea399a` cached-load fix, build identity match):
-  pp2048 852.284 -> 876.514 (+2.84%), pp4096 819.739 -> 842.959 (+2.83%).
+- Same-binary Q2 ABBA on the landing build (`9a53b531`, build identity
+  match): pp2048 855.219 -> 877.289 (+2.58%), pp4096 817.600 -> 839.959
+  (+2.74%). The pre-landing ABCCBA measured +2.84/+2.83%.
 - IQ3 held-text witness is identical: mean NLL 2.1542914542, top-1
   0.5677083333, per-document NLL/rank/top-1 unchanged. The score is still
   ~11.9 TFLOPS vs PV ~20.4; register-cooperative/materialized attention
@@ -52,7 +53,7 @@ See also: `docs/PERF-ROADMAP.md` for the current state and evidence index.
   -5.4% of the combined expert tile (~1.3% model arithmetic) on the
   31/32/33 route fixture, not landed; a prebuilt half-KV score source adds
   ~2% full sink on top of score32, not landed.
-- [Fixture, ABCCBA, witness and limits](bench/2026-10-24-v41-score32.md).
+- [Fixture, ABBA, witness and limits](bench/2026-10-24-v41-score32.md).
 
 ## 2026-10-24 - CED Full-Model Correctness Qualified At 128/2K/8K
 

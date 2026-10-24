@@ -2400,11 +2400,13 @@ fn wide_narrow_compacted_maya_gate_up_bitwise() {
     };
     let submit = |encode: &dyn Fn(&KernelEncoder), wide: bool| {
         crate::metal::dispatch_census_begin();
-        let command = ctx.queue.commandBuffer().unwrap();
-        let enc = KernelEncoder::begin(&command);
-        encode(&enc);
-        enc.end();
-        commit_and_wait(&command).unwrap();
+        objc2::rc::autoreleasepool(|_| {
+            let command = ctx.queue.commandBuffer().unwrap();
+            let enc = KernelEncoder::begin(&command);
+            encode(&enc);
+            enc.end();
+            commit_and_wait(&command).unwrap();
+        });
         let census = crate::metal::dispatch_census_take();
         assert_eq!(census.len(), 2);
         assert_eq!(

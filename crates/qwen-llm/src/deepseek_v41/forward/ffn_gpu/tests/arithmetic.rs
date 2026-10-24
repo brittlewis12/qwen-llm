@@ -275,6 +275,9 @@ fn packed_singleton_ffn_preserves_operands_and_all_f32_controls_win() {
     });
 }
 
+// The toy owner retains all 40 layers even though this fixture binds only one.
+const WIDE_FFN_RESIDENT_BOUND: u64 = 32 * 1024 * 1024;
+
 fn wide_ffn_rows_bound(c: &Config, n: usize) -> u64 {
     let price = |bytes: usize| (bytes as u64).div_ceil(16384) * 16384 + 1024;
     let scratch: u64 = Rows::widths(c, 1)
@@ -294,7 +297,8 @@ fn wide_ffn_fixture_has_bounded_full_and_decoder_backing() {
     let mut c = toy::config();
     c.hidden = 256;
     c.intermediate = 256;
-    let bound = wide_ffn_rows_bound(&c, 4096) + wide_ffn_rows_bound(&c, 2048) + 12 * 1024 * 1024;
+    let bound =
+        wide_ffn_rows_bound(&c, 4096) + wide_ffn_rows_bound(&c, 2048) + WIDE_FFN_RESIDENT_BOUND;
     assert!(bound < 256 * 1024 * 1024, "{bound}");
     assert_eq!(c.topk, 6);
     for n in [1, 33, 2048] {
@@ -339,7 +343,7 @@ fn wide_full_vs_compacted_ffn_maya_bitwise_and_status() {
         let workspace = Workspace::new(&model).unwrap();
         let resident = ctx.memory_signals().current_allocated_bytes;
         assert!(
-            resident <= 12 * 1024 * 1024,
+            resident <= WIDE_FFN_RESIDENT_BOUND,
             "fixture resident buffers {resident}"
         );
         for n in [4096, 2048] {
@@ -378,8 +382,10 @@ fn wide_full_vs_compacted_ffn_maya_bitwise_and_status() {
         let encode =
             |input: &MetalTensor, incoming: &MetalTensor, out: &MetalTensor, scratch: &Rows| {
                 metal::dispatch_census_begin();
-                let result = submit(&ctx, "wide_ffn_compat", [scratch.hc.rows, 0, 0, 0], |enc| {
-                    workspace.encode_rows(&ctx, enc, c, layer, 0, input, incoming, out, scratch)
+                let result = objc2::rc::autoreleasepool(|_| {
+                    submit(&ctx, "wide_ffn_compat", [scratch.hc.rows, 0, 0, 0], |enc| {
+                        workspace.encode_rows(&ctx, enc, c, layer, 0, input, incoming, out, scratch)
+                    })
                 });
                 let census = metal::dispatch_census_take();
                 result.unwrap();

@@ -223,8 +223,21 @@ fn compare_case(ctx: &MetalContext, c: &Config, schedule: &Schedule, start: usiz
                 assert_eq!(count("select_hier_merge"), expected);
                 if last == 16385 {
                     assert_eq!(count("index_heads_rows"), 0, "pruning stays per-row");
-                    assert!(count("blocks") > 0);
-                    assert!(count("keep") > 0);
+                    if schedule.candidate_source_layer == Some(id) {
+                        assert!(count("blocks") > 0);
+                        assert!(count("keep") > 0);
+                    } else {
+                        assert_eq!(
+                            count("blocks"),
+                            0,
+                            "only the candidate source scores blocks"
+                        );
+                        assert_eq!(
+                            count("keep"),
+                            0,
+                            "only the candidate source publishes masks"
+                        );
+                    }
                 }
             }
             if c.index_topk == 512

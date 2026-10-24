@@ -89,10 +89,12 @@ Fresh outside leverage map: landed reconnaissance (2026-10-24;
 `bench/2026-10-24-v41-outside-leverage-map.md`), not new performance evidence.
 Two independent outside reviews plus primary-source/source audits prioritize:
 
-- CED transactional cross-layer completion batches: open. Start with two layers,
+- CED transactional cross-layer completion batches: in flight
+  (`perf/v41-ced-batches`). Start with two layers,
   preserve pending/completed separation and disjoint sticky status evidence;
   target 21 -> 11 commands at 2K, not an assumed proportional latency gain.
-- Same-format cooperative/register-fed quantized matmul: open. Apple and pinned
+- Same-format cooperative/register-fed quantized matmul: in flight
+  (`perf/v41-register-operands`). Apple and pinned
   MLX implement the operand mechanism; bypass threadgroup staging rather than
   retrying native FP4, larger K panels or a decoder-ALU rewrite. Separately gate
   newer input APIs: the current tensor library targets macOS 26.0.
@@ -110,7 +112,10 @@ Two independent outside reviews plus primary-source/source audits prioritize:
 The immediate two proof-of-leverage experiments pair native driver/host
 attribution and bounded CED retirement with a matched streaming cooperative-input
 kernel control. Do not stop at another peak-FLOPS comparison or profiler census.
-No optimization has been implemented by this reconnaissance checkpoint.
+The implementation phase also integrates the concurrent Full chunk-4096 change
+on `perf/v41-ced-scratch`, including actual Full/CED arithmetic lineage and cold
+memory pricing. The frozen qualified source remains the comparison; existing
+proofs are not extended to the new geometry or batching before fresh checks.
 
 Mapping/admission repair: landed (2026-10-23 memory-safety entry and
 `bench/2026-10-23-v41-memory-safety.md`). Shared EOF removes the old 156.059 GiB

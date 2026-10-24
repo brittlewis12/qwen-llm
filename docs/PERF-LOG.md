@@ -27,9 +27,16 @@ See also: `docs/PERF-ROADMAP.md` for the current state and evidence index.
 - Other substantial lanes: occupancy-aware expert layouts; shared attention
   operands; batched Engram reads; qualified CED-origin reuse; candidate-only
   reindexing beyond 16K. Their contexts and overlapping Amdahl budgets differ.
-  Keep existing chunk-4096 work independent. No smaller artifact, hidden bounded
-  replay policy, cache gate, percentage reserve or explicit residency is proposed.
+  Keep the separate chunk-4096 landing independent. No smaller artifact, hidden
+  bounded replay policy, cache gate, percentage reserve or explicit residency is
+  proposed.
 - [Ranked map, decisive experiments, quantitative budgets and primary sources](bench/2026-10-24-v41-outside-leverage-map.md).
+
+Concurrent baseline note: `28d23ac9` landed Full's fitting-artifact 4096-row
+selector during map finalization. Its Q2 pp4096 packet reports +3.46%, with
+long-chunk quality still owed. The outside reviews and existing CED qualification
+remain pinned to their prior source; the attempted documentation-only branch
+refresh stops rather than silently importing and certifying this runtime change.
 
 ## 2026-10-24 - Rebased CED Preserves Score32 Lineage And Full-Model Equivalence
 

@@ -99,8 +99,10 @@ Two independent outside reviews plus primary-source/source audits prioritize:
 - Expert-major/count-adaptive execution and head/query/layer-shared attention
   operands: open structural follow-ons. Measure useful versus padded work and
   actual data movement; do not recast the existing 5.4% return-grid or ~2% half-KV
-  probes as unmeasured multipliers. Chunk-4096 work is already on
-  `perf/v41-chunk4096`, not a duplicate assignment here.
+  probes as unmeasured multipliers. Full chunk-4096 work landed separately in
+  `28d23ac9` (+3.46% Q2 pp4096); its resident-size heuristic is not a universal
+  fit boundary, and its packet still owes long-chunk quality coverage. CED
+  runtime integration is separate, not a documentation-only rebase.
 - Batched Engram preparation, CED-origin prefix reuse and candidate-only
   long-context reindexing: open, with distinct cold/warm/context economics.
   Full prefix caching already exists; CED-origin reuse needs qualification.

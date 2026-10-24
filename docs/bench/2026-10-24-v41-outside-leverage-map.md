@@ -8,6 +8,21 @@ were read-only; no new GPU experiment, model run or implementation is claimed.
 Private review responses, retrieved sources and a source-bound arithmetic witness
 are retained outside Git.
 
+### Late Concurrent Full-Chunk Landing
+
+While this map was finalized, `28d23ac9` landed separately on main: fitting
+artifacts select a 4096-row Full chunk. Its packet reports Q2 pp4096 +3.46%;
+the IQ3 comparison does not establish a benefit. The 200-GiB resident-size selector
+is an explicit heuristic, not a universal physical-fit boundary, and the packet
+still owes a 4096-token quality comparison. See
+[the separate chunk packet](2026-10-24-v41-chunk4096.md).
+
+The outside reviews and CED numbers here retain their pinned 2048-chunk baseline.
+An 8K request's expert populations must not be inferred from its request length,
+nor from a newly selected Full chunk in a different build. Runtime integration
+of this landing into the qualified CED branches needs its own compatibility
+checks; a documentation-only refresh must not silently carry it as proven.
+
 ## Decision
 
 Pursue two structural bets first:
@@ -79,9 +94,10 @@ The following uniform-Poisson illustration is **not measured routing**:
 | 4096 | 64 | 1.233x |
 | 8192 | 128 | 1.119x |
 
-The 4096/8192 populations are hypothetical single batches. Current default
-prefill chunks at 2048, so an 8K request does not obtain the 8192-row padding
-ratio; CED additionally executes shrinking decoder batches.
+The 4096/8192 populations are hypothetical single batches. Reviewed CED encoder
+chunks are bounded at 2048, so an 8K request does not obtain the 8192-row padding
+ratio; CED additionally executes shrinking decoder batches. The separate late
+Full landing can select 4096 for fitting artifacts, not a single 8192-row batch.
 
 This can make a useful-FLOP rate look terrible while hardware computes padding.
 It does not imply a 13.83x latency win: the selected experts' weights still have
@@ -232,9 +248,10 @@ scatter/sum order; moving weighting changes the rounded operands.
 
 The adjacent return-only grid probe already saved about 5.4% of the expert
 operator, not a model multiplier. A new design must remove padding/repeated
-operand gathers, not rename that probe. Larger chunks are already being explored
-on `perf/v41-chunk4096`; do not duplicate that lane. Cross-chunk weight reuse
-requires actual panel reuse or demonstrated cache locality, not just a loop swap.
+operand gathers, not rename that probe. Larger Full chunks landed separately in
+`28d23ac9`; do not duplicate that lane or assume CED integration. Cross-chunk
+weight reuse requires actual panel reuse or demonstrated cache locality, not just
+a loop swap.
 
 ### Attention Reuse And A Different Work Partition
 

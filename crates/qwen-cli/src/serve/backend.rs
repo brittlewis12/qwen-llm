@@ -693,18 +693,26 @@ fn allocate_single_chunk_request_state(
 /// shortfall. Device working-set and host-ceiling shortfalls are excluded.
 fn process_deficit(admission: &qwen_llm::metal::MetalMemoryAdmission) -> Option<u64> {
     use qwen_llm::metal::MetalMemoryAdmissionReason as Reason;
-    let available = match admission.reason {
-        Reason::ProcessInsufficient => admission.signals.process_limit_remaining_bytes?,
+    let required = admission.required_bytes?;
+    let deficit = match admission.reason {
+        Reason::ProcessInsufficient => {
+            required.checked_sub(admission.signals.process_limit_remaining_bytes?)?
+        }
         Reason::HostAvailabilityInsufficient => {
-            let host = admission.signals.host_remaining_bytes()?;
-            match admission.signals.process_limit_remaining_bytes? {
-                0 => host,
-                process => host.min(process),
-            }
+            admission.signals.host_remaining_bytes()?;
+            let host = admission.signals.host_budget?;
+            let cpu_exposure = admission
+                .cpu_required_bytes?
+                .checked_add(host.private_shadow_bytes)?;
+            let cpu_deficit = cpu_exposure.saturating_sub(host.conservative_available_bytes);
+            let process_deficit = match admission.signals.process_limit_remaining_bytes? {
+                0 => 0,
+                process => required.saturating_sub(process),
+            };
+            cpu_deficit.max(process_deficit)
         }
         _ => return None,
     };
-    let deficit = admission.required_bytes?.checked_sub(available)?;
     (deficit > 0).then_some(deficit)
 }
 
@@ -2884,6 +2892,105 @@ mod tests {
             restored_extension_offsets,
             [None, Some(0), Some(1), Some(2)]
         );
+    }
+
+    #[test]
+    fn host_availability_relief_uses_cpu_exposure_and_masked_combined_process_shortfall() {
+        use qwen_llm::metal::{
+            HostMemoryBudget, MetalMemoryAdmissionReason as Reason, MetalMemorySignals,
+            evaluate_metal_memory_admission_with_cpu_bytes,
+        };
+        for (process, expected) in [(0, 50), (2_000_000, 50), (1_000_075, 50), (1_000_025, 75)] {
+            let admission = evaluate_metal_memory_admission_with_cpu_bytes(
+                1_000_000,
+                90,
+                10,
+                MetalMemorySignals {
+                    recommended_max_bytes: 2_000_000,
+                    current_allocated_bytes: 1000,
+                    process_limit_remaining_bytes: Some(process),
+                    host_budget: Some(HostMemoryBudget {
+                        physical_bytes: 10_000_000,
+                        conservative_available_bytes: 70,
+                        external_gap_bytes: 0,
+                        private_shadow_bytes: 20,
+                    }),
+                },
+                true,
+            );
+            assert_eq!(admission.reason, Reason::HostAvailabilityInsufficient);
+            assert_eq!(admission.required_bytes, Some(1_000_100));
+            assert_eq!(admission.cpu_required_bytes, Some(100));
+            assert_eq!(process_deficit(&admission), Some(expected));
+        }
+    }
+
+    #[test]
+    fn host_availability_relief_preserves_private_overshoot_unknown_and_overflow() {
+        use qwen_llm::metal::{
+            HostMemoryBudget, MetalMemoryAdmission, MetalMemoryAdmissionReason as Reason,
+            MetalMemorySignals, evaluate_metal_memory_admission_with_cpu_bytes,
+        };
+        let admission = evaluate_metal_memory_admission_with_cpu_bytes(
+            1_000_000,
+            0,
+            0,
+            MetalMemorySignals {
+                recommended_max_bytes: 2_000_000,
+                current_allocated_bytes: 0,
+                process_limit_remaining_bytes: Some(0),
+                host_budget: Some(HostMemoryBudget {
+                    physical_bytes: 10_000_000,
+                    conservative_available_bytes: 20,
+                    external_gap_bytes: 0,
+                    private_shadow_bytes: 70,
+                }),
+            },
+            true,
+        );
+        assert_eq!(admission.reason, Reason::HostAvailabilityInsufficient);
+        assert_eq!(admission.signals.host_remaining_bytes(), Some(0));
+        assert_eq!(process_deficit(&admission), Some(50));
+
+        let legacy = MetalMemoryAdmission::new(
+            admission.reason,
+            admission.scratch_upper_bytes,
+            admission.reserve_bytes,
+            admission.required_bytes,
+            admission.signals,
+            admission.working_set_headroom_bytes,
+        );
+        assert_eq!(legacy.cpu_required_bytes, None);
+        assert_eq!(process_deficit(&legacy), None);
+        for fault in [
+            "cpu",
+            "combined",
+            "process",
+            "host",
+            "telemetry",
+            "overflow",
+            "no_deficit",
+        ] {
+            let mut unknown = admission;
+            match fault {
+                "cpu" => unknown.cpu_required_bytes = None,
+                "combined" => unknown.required_bytes = None,
+                "process" => unknown.signals.process_limit_remaining_bytes = None,
+                "host" => unknown.signals.host_budget = None,
+                "telemetry" => unknown.signals.host_budget.as_mut().unwrap().physical_bytes = 0,
+                "overflow" => unknown.cpu_required_bytes = Some(u64::MAX),
+                "no_deficit" => {
+                    unknown
+                        .signals
+                        .host_budget
+                        .as_mut()
+                        .unwrap()
+                        .private_shadow_bytes = 20
+                }
+                _ => unreachable!(),
+            }
+            assert_eq!(process_deficit(&unknown), None, "{fault}");
+        }
     }
 
     #[test]

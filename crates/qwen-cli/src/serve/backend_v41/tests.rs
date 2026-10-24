@@ -912,8 +912,8 @@ fn v41_request_memory_splits_metal_cpu_and_preserves_typed_refusals() {
     admit_request_memory(estimate, extra_cpu, omitted).unwrap();
     let mut host_short = omitted;
     let host = host_short.host_budget.as_mut().unwrap();
-    // Metal and caller bytes fit; the request's CPU demand still must be charged.
-    host.conservative_available_bytes = estimate.metal_bytes + extra_cpu;
+    // Caller bytes fit; the request's CPU demand still must be charged.
+    host.conservative_available_bytes = estimate.cpu_bytes + extra_cpu - 1;
     let denied = admit_request_memory(estimate, extra_cpu, host_short).unwrap_err();
     assert_eq!(
         denied.reason(),

@@ -7,6 +7,7 @@ use std::sync::atomic::AtomicU64;
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct HostMemoryBudget {
     pub physical_bytes: u64,
+    /// Conservative CPU availability, not a shared-Metal working-set ceiling.
     pub conservative_available_bytes: u64,
     /// Live import lengths not covered by the observed Metal allocation API.
     pub external_gap_bytes: u64,
@@ -24,6 +25,8 @@ impl HostMemoryBudget {
         current_allocated_bytes.checked_add(self.external_gap_bytes)
     }
 
+    /// Additional CPU bytes that fit both physical capacity and conservative
+    /// CPU availability, retaining the full outstanding private-shadow charge.
     pub fn remaining_bytes(self, current_allocated_bytes: u64) -> Option<u64> {
         if self.conservative_available_bytes > self.physical_bytes {
             return None;
@@ -461,7 +464,7 @@ mod tests {
             .conservative_available_bytes = 650;
         assert_eq!(observed.host_remaining_bytes(), Some(650));
         assert_eq!(
-            evaluate_metal_memory_admission_with_cpu_bytes(1, 650, 0, observed, true).reason,
+            evaluate_metal_memory_admission_with_cpu_bytes(1, 651, 0, observed, true).reason,
             MetalMemoryAdmissionReason::HostAvailabilityInsufficient
         );
         observed.host_budget = None;
@@ -496,24 +499,24 @@ mod tests {
             .unwrap()
             .conservative_available_bytes = 300;
         assert_eq!(
-            evaluate_metal_memory_admission(301, 0, observed, true).reason,
+            evaluate_metal_memory_admission_with_cpu_bytes(301, 301, 0, observed, true).reason,
             MetalMemoryAdmissionReason::HostAvailabilityInsufficient
         );
         observed.recommended_max_bytes = 200;
         assert_eq!(
-            evaluate_metal_memory_admission(301, 0, observed, true).reason,
+            evaluate_metal_memory_admission_with_cpu_bytes(301, 301, 0, observed, true).reason,
             MetalMemoryAdmissionReason::WorkingSetInsufficient
         );
         observed.recommended_max_bytes = 1_000;
         observed.current_allocated_bytes = 700;
         assert_eq!(
-            evaluate_metal_memory_admission(301, 0, observed, true).reason,
+            evaluate_metal_memory_admission_with_cpu_bytes(301, 301, 0, observed, true).reason,
             MetalMemoryAdmissionReason::HostInsufficient
         );
     }
 
     #[test]
-    fn effective_zero_and_overflow_refuse_without_reclaimability_guesses() {
+    fn zero_cpu_availability_allows_only_zero_cpu_demand_and_valid_telemetry() {
         let mut observed = signals();
         observed
             .host_budget
@@ -522,11 +525,21 @@ mod tests {
             .conservative_available_bytes = 0;
         assert_eq!(observed.host_remaining_bytes(), Some(0));
         for bytes in [0, 1] {
+            assert!(evaluate_metal_memory_admission(bytes, 0, observed, true).is_admitted());
             assert_eq!(
-                evaluate_metal_memory_admission(bytes, 0, observed, true).reason,
+                evaluate_metal_memory_admission_with_cpu_bytes(bytes, 1, 0, observed, true).reason,
                 MetalMemoryAdmissionReason::HostAvailabilityInsufficient
             );
         }
+        assert_eq!(
+            evaluate_metal_memory_admission(1, 1, observed, true).reason,
+            MetalMemoryAdmissionReason::HostAvailabilityInsufficient
+        );
+        observed.host_budget.as_mut().unwrap().private_shadow_bytes = 1;
+        assert_eq!(
+            evaluate_metal_memory_admission(1, 0, observed, true).reason,
+            MetalMemoryAdmissionReason::HostAvailabilityInsufficient
+        );
         observed
             .host_budget
             .as_mut()
@@ -587,13 +600,50 @@ mod tests {
             .conservative_available_bytes = 500;
         assert_eq!(observed.host_remaining_bytes(), Some(490));
         assert!(
-            evaluate_metal_memory_admission_with_cpu_bytes(200, 290, 0, observed, true)
+            evaluate_metal_memory_admission_with_cpu_bytes(200, 490, 0, observed, true)
                 .is_admitted()
         );
         assert_eq!(
-            evaluate_metal_memory_admission_with_cpu_bytes(200, 291, 0, observed, true).reason,
+            evaluate_metal_memory_admission_with_cpu_bytes(200, 491, 0, observed, true).reason,
             MetalMemoryAdmissionReason::HostAvailabilityInsufficient
         );
+    }
+
+    #[test]
+    fn shared_metal_demand_does_not_consume_cpu_availability() {
+        use MetalMemoryAdmissionReason as R;
+        let mut observed = signals();
+        observed.process_limit_remaining_bytes = Some(740);
+        let host = observed.host_budget.as_mut().unwrap();
+        host.conservative_available_bytes = 150;
+        host.external_gap_bytes = 20;
+        host.private_shadow_bytes = 10;
+        assert_eq!(observed.host_remaining_bytes(), Some(140));
+        let exact = evaluate_metal_memory_admission_with_cpu_bytes(600, 100, 40, observed, true);
+        assert_eq!(exact.reason, R::AdmittedWithProcessBudget);
+        assert_eq!(exact.required_bytes, Some(740));
+        assert_eq!(exact.working_set_headroom_bytes, Some(880));
+        assert!(admit_external_import(140, 140, observed).is_ok());
+        assert_eq!(
+            evaluate_metal_memory_admission_with_cpu_bytes(600, 101, 40, observed, true).reason,
+            R::HostAvailabilityInsufficient
+        );
+        assert!(admit_external_import(141, 141, observed).is_err());
+
+        for (physical, recommended, process, reason) in [
+            (869, 1000, 740, R::HostInsufficient),
+            (1000, 759, 740, R::WorkingSetInsufficient),
+            (1000, 1000, 739, R::ProcessInsufficient),
+        ] {
+            let mut short = observed;
+            short.host_budget.as_mut().unwrap().physical_bytes = physical;
+            short.recommended_max_bytes = recommended;
+            short.process_limit_remaining_bytes = Some(process);
+            assert_eq!(
+                evaluate_metal_memory_admission_with_cpu_bytes(600, 100, 40, short, true).reason,
+                reason
+            );
+        }
     }
 
     #[test]
@@ -604,7 +654,7 @@ mod tests {
         observed.current_allocated_bytes = 0;
         observed.host_budget = Some(HostMemoryBudget {
             physical_bytes: 256 * gib,
-            conservative_available_bytes: 256 * gib,
+            conservative_available_bytes: 156 * gib,
             external_gap_bytes: 0,
             private_shadow_bytes: 0,
         });
@@ -696,14 +746,14 @@ mod tests {
         observed.host_budget.as_mut().unwrap().private_shadow_bytes =
             ledger.shadow.load(Ordering::Acquire);
         assert_eq!(observed.host_remaining_bytes(), Some(300));
-        assert!(admit_external_import(301, 0, observed).is_err());
-        assert!(admit_external_import(300, 0, observed).is_ok());
+        assert!(admit_external_import(501, 0, observed).is_err());
+        assert!(admit_external_import(500, 0, observed).is_ok());
         drop(first);
         observed.host_budget.as_mut().unwrap().external_gap_bytes =
             ledger.gap.load(Ordering::Acquire);
         observed.host_budget.as_mut().unwrap().private_shadow_bytes =
             ledger.shadow.load(Ordering::Acquire);
-        assert!(admit_external_import(301, 0, observed).is_ok());
+        assert!(admit_external_import(501, 0, observed).is_ok());
     }
 
     #[test]

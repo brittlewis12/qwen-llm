@@ -38,17 +38,23 @@ simply be added: their physical pages can overlap.
 
 ## One Combined Budget
 
-CPU demand, Metal demand and reserve must fit a validated host budget. A raw
+CPU demand, Metal demand and reserve retain their actual resource domains. A raw
 zero Mach process limit can omit only the process constraint, never the host
 constraint. Missing or invalid telemetry refuses admission.
 
 The added 80%-physical ownership ceiling and 20%-physical availability reserve
 were uncalibrated application policy, not Metal requirements. They are removed
 in `d47e264c` (2026-10-24): Metal's working-set recommendation already supplies
-device headroom. Combined demand still must fit actual physical capacity and
-fresh observed availability, with uncovered imports and private-shadow exposure
-accounted. Availability credits free pages and a lower bound on inactive
-non-anonymous pages; it does not add overlapping VM counters.
+device headroom. Metal demand is checked against that working-set limit; only
+additional CPU demand and outstanding private-copy exposure use the conservative
+CPU-availability estimate. Combined ownership still fits actual physical RAM,
+with uncovered imports and private shadows accounted. Comparing an entire shared
+Metal mapping against the cache-blind CPU estimate was a separate accounting
+error, not evidence that cached RAM was unusable. File-backed cache may remain
+after unmapping and be reclaimed by macOS; it is neither extra allocation debt
+nor a reason to purge, reboot or choose a smaller model. Availability credits
+free pages and a lower bound on inactive non-anonymous pages; those counters
+overlap file-backed page counts and must not be added again.
 
 Raw Metal counters remain raw. The ledger adds uncovered external import lengths
 and full private shadows. It credits `allocatedSize` only when the observed

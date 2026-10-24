@@ -71,8 +71,10 @@ Mapping/admission repair: landed (2026-10-23 memory-safety entry and
 private exposure; combined host admission and bounded import/lifetime proofs
 pass on M4/M5. The extra 80%-physical ceiling and 20% availability reserve were
 unmeasured application policy, not Metal limits; removed in `d47e264c`. Keep
-Metal's working-set limit, actual host capacity/availability and CPU/private
-ownership accounting. The former 204.8 GiB IQ3 cutoff is no longer a valid fit
+Metal's working-set limit for Metal demand, CPU availability for additional CPU/
+private-copy demand, and actual combined physical capacity. Shared GPU mappings
+must not be refused against a cache-blind CPU-availability estimate. The former
+204.8 GiB IQ3 cutoff is no longer a valid fit
 argument; IQ3 has not been rerun here. Shorter prompts do not shrink weights.
 Metadata-only plans report Maya-S 165.950 GiB and Q2 185.907 GiB, both with
 zero private shadow. Completed-chunk/scalar lifetimes now return to a fixed

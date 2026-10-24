@@ -229,7 +229,10 @@ fn host_limited_capacity_advice_fits_combined_admission_budget() {
             private_shadow_bytes: 0,
         }),
     };
-    let denied = evaluate_metal_memory_admission(required, 0, signals, true);
+    assert!(evaluate_metal_memory_admission(required, 0, signals, true).is_admitted());
+    // Exercise CPU availability without treating it as a second Metal ceiling.
+    let denied =
+        crate::metal::evaluate_metal_memory_admission_with_cpu_bytes(0, required, 0, signals, true);
     assert_eq!(
         denied.reason,
         MetalMemoryAdmissionReason::HostAvailabilityInsufficient
@@ -245,9 +248,25 @@ fn host_limited_capacity_advice_fits_combined_admission_budget() {
     .unwrap()
     .unwrap();
     assert!((1024..requested).contains(&fitting));
-    assert!(evaluate_metal_memory_admission(peak(fitting), 0, signals, true).is_admitted());
+    assert!(
+        crate::metal::evaluate_metal_memory_admission_with_cpu_bytes(
+            0,
+            peak(fitting),
+            0,
+            signals,
+            true,
+        )
+        .is_admitted()
+    );
     assert_eq!(
-        evaluate_metal_memory_admission(peak(fitting + 1), 0, signals, true).reason,
+        crate::metal::evaluate_metal_memory_admission_with_cpu_bytes(
+            0,
+            peak(fitting + 1),
+            0,
+            signals,
+            true,
+        )
+        .reason,
         MetalMemoryAdmissionReason::HostAvailabilityInsufficient
     );
     assert_eq!(

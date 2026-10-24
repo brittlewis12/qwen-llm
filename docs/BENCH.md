@@ -89,10 +89,12 @@ even `--runs 2..=16` retained samples per policy. Warmup is mandatory.
 
 - A is Full forward; B is shrinking CED. Captured AB warmup calls are excluded
   from statistics; an excluded ABBA pilot collects two samples per policy, then
-  retained BAAB/ABBA blocks alternate. The CLI checks each policy's finite,
-  positive max/min <=1.5,
-  including its pilot baseline, before scheduling further cases. It never
-  treats the intended difference between policies as instability.
+  retained BAAB/ABBA blocks alternate. Pilot/main samples must be finite and
+  positive; spread alone never stops scheduling. Each policy's `native_dispersion`
+  reports `min_ns`, `max_ns` and `max_over_min` separately for `pilot_plus_main`
+  and `retained_main`, never pooling policies. Schedule/pilot status `completed`
+  describes collection only, not stability or accepted performance. All four v2
+  protocols replace the v1 spread gate; historical v1 records keep their meaning.
 - Pre-import planning uses the public `plan_cold_prefill` ledger: exact resident
   windows and private shadows, binding allocations, one request state, the maximum
   complete sequential Full/CED workspace envelope and caller CPU storage. Suite
@@ -137,18 +139,19 @@ even `--runs 2..=16` retained samples per policy. Warmup is mandatory.
   per policy. Warmup/pilot are excluded from statistics but retained in both
   rows' chronological diagnostics, along with reports, fingerprints and budgets.
 - By default use `MTL_DEBUG_LAYER=1`: this retains the validation-on protocol
-  `native_full_ced_abba_baab_v1`, not canonical production throughput. The explicit
+  `native_full_ced_abba_baab_v2`, not canonical production throughput. The explicit
   production-timing regime below is separate. Both require the production lease
   and stock runtime/arithmetic environment. Profiling overrides and an active
   dispatch observer are refused.
   Run under external continuous host supervision, such as `pilot.Session`;
-  the CLI's timing gate does not monitor global VM health. A nonzero exit or
-  unhealthy/missing telemetry invalidates the run; do not automatically retry.
+  the CLI does not monitor global VM health. A nonzero exit or unhealthy/missing
+  telemetry invalidates the run; do not automatically retry.
 
 This measures synthetic cold-KV prefill, not artifact quality, sampled
 continuation or the separate bounded-128 policy. A matching endpoint fingerprint
 is not a replacement for the strict full-vocabulary and causal-state CED
-qualification. Ordered cold Full-then-CED diagnostics are not speedup evidence.
+qualification. Native samples are observational, not automatic performance-gain
+acceptance. Ordered cold Full-then-CED diagnostics are not speedup evidence.
 
 ### Explicit Production Timing
 
@@ -195,11 +198,11 @@ and numerical/causal-state qualification continue to require `MTL_DEBUG_LAYER=1`
   production requests. It is a regime label, not proof of effective validation
   state, host validity, qualification or a gain.
 - Native production timing uses
-  `native_full_ced_abba_baab_production_timing_v1`; the default protocol identifier
-  stays unchanged. Neither native regime enables a profiling scope, sampled
-  stages or pipeline-cache counters. Lease, device/process/host accounting,
-  all staged/inner admissions, endpoint fingerprints, stability gates, fallback
-  rejection and the 64/80 MiB caller budgets remain unchanged. This adds no
+  `native_full_ced_abba_baab_production_timing_v2`. Neither native regime enables
+  a profiling scope, sampled stages or pipeline-cache counters. Lease,
+  device/process/host accounting, all staged/inner admissions, endpoint fingerprints,
+  finite-positive samples, fallback rejection and the 64/80 MiB caller budgets
+  remain unchanged. This adds no
   pinning, residency, retry or admission-bypass mode.
 - Before reporting a production gain, the offline controller must match the
   artifact, prompt/capacity and seed and compare complete 129,280-logit endpoint
@@ -225,26 +228,26 @@ within the same requested regime, not validation-on against production timing.
 Add `--v41-ced-pair-diagnostic` only for a separately authorized diagnostic
 series; it requires `--v41-ced-pair`. It does not retry a rejected benchmark,
 add warmups, change arithmetic, enable sampled stages, or relax any shape,
-selected validation regime, lease, admission, fingerprint, stability or host-validity
-requirement. Start with a bounded 2K series (`--pp 2048 --runs 2`: at most ten
-calls including warmup/pilot), not an automatic escalation to 8K.
+selected validation regime, lease, admission, fingerprint, sample-validity or
+host-validity requirement. Start with a bounded 2K series (`--pp 2048 --runs 2`:
+at most ten calls including warmup/pilot), not an automatic escalation to 8K.
 
 - Every diagnostic result row, chronological case and diagnostic stderr event
   carries `instrumented: true` and `performance_evidence: false`. The row's
-  paired protocol is `instrumented_full_ced_abba_baab_diagnostic_v1` by default.
+  paired protocol is `instrumented_full_ced_abba_baab_diagnostic_v2` by default.
   Combining with `--v41-ced-pair-production-timing` is supported for matched
-  attribution under `instrumented_full_ced_abba_baab_production_timing_diagnostic_v1`.
+  attribution under `instrumented_full_ced_abba_baab_production_timing_diagnostic_v2`.
   Both are distinct from native timing; diagnostic stderr events also name the
   protocol/regime without repeating the environment. Instrumented throughput
-  columns must not be used as performance evidence, even if all stability checks
-  pass; `canonical_production_timing_requested` remains false.
+  columns must not be used as performance evidence, even if the schedule completes;
+  `canonical_production_timing_requested` remains false.
 - Case-tagged JSON observations stream and flush to stderr before the next
-  stability decision, so completed observations survive a later rejection.
+  cross-case validation, so completed observations survive a later rejection.
   Each profile is streamed once and dropped, never copied into both rows'
-  chronology. Finish events explicitly mark cross-case fingerprint/stability
-  checks pending; they are observations, not acceptance. Missing required process
-  counters, profiling setup failures and observation-write errors stop scheduling
-  rather than silently disabling data.
+  chronology. Finish events explicitly mark cross-case fingerprint and sample
+  validation pending; they are observations, not acceptance. Missing required
+  process counters, profiling setup failures and observation-write errors stop
+  scheduling rather than silently disabling data.
 - The existing native prefill timer still excludes state allocation and includes
   endpoint logits copying, but is now instrumented. A separate unsampled
   `forward::profile::Scope::begin()` encloses the outer case: state allocation,

@@ -478,15 +478,16 @@ pub(crate) struct SuiteArgs {
     pub(crate) model: PathBuf,
     /// Native V4.1 Full/CED pair: exactly one --pp (2..=8192), no --tg,
     /// depth 0, warmup enabled, no chunk override, even --runs 2..=16 per
-    /// policy. Warms both policies, gates an ABBA pilot (2 samples/policy),
+    /// policy. Warms both policies, completes an ABBA pilot (2 samples/policy),
     /// then alternates retained BAAB/ABBA blocks. Warmup/pilot are excluded
-    /// from statistics; per-policy max/min must stay <=1.5, including pilot
-    /// evidence, after every main case. Defaults to MTL_DEBUG_LAYER=1; the
+    /// from statistics; reports per-policy pilot+main and retained-main dispersion
+    /// without a spread gate (v2 protocols). Defaults to MTL_DEBUG_LAYER=1; the
     /// explicit production-timing regime instead requires validation unset.
     /// Requires a stock arithmetic/profiling environment and external continuous
     /// host-validity monitoring. Supports vocab <=1048576 and <=256 layers. Timings are
     /// host-wall native prefill plus endpoint logits, not GPU-only or quality
-    /// evidence; every endpoint head must match warm Full bitwise.
+    /// evidence or automatic gain acceptance; every endpoint head must match warm
+    /// Full bitwise. Pilot/main samples must be finite and positive.
     #[arg(long)]
     pub(crate) v41_ced_pair: bool,
     /// Instrument every paired case and stream observations to stderr, including

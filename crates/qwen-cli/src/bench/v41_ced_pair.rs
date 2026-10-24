@@ -133,10 +133,10 @@ impl Measurement {
 
     pub(crate) fn protocol(&self) -> &'static str {
         match (self.production_timing, self.diagnostic) {
-            (false, false) => "native_full_ced_abba_baab_v1",
-            (false, true) => "instrumented_full_ced_abba_baab_diagnostic_v1",
-            (true, false) => "native_full_ced_abba_baab_production_timing_v1",
-            (true, true) => "instrumented_full_ced_abba_baab_production_timing_diagnostic_v1",
+            (false, false) => "native_full_ced_abba_baab_v2",
+            (false, true) => "instrumented_full_ced_abba_baab_diagnostic_v2",
+            (true, false) => "native_full_ced_abba_baab_production_timing_v2",
+            (true, true) => "instrumented_full_ced_abba_baab_production_timing_diagnostic_v2",
         }
     }
 
@@ -373,12 +373,6 @@ impl Policy {
             Self::B => PrefillExecution::ShrinkingCed,
         }
     }
-    fn index(self) -> usize {
-        match self {
-            Self::A => 0,
-            Self::B => 1,
-        }
-    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize)]
@@ -433,11 +427,17 @@ fn schedule(runs: usize) -> Result<Vec<Case>> {
     Ok(cases)
 }
 
-/// Deliberately evaluates each policy independently, never a pooled ratio.
-fn stable(samples: &[f64]) -> Result<()> {
+#[derive(Debug, serde::Serialize)]
+struct NativeDispersion {
+    min_ns: f64,
+    max_ns: f64,
+    max_over_min: f64,
+}
+
+fn dispersion(samples: &[f64]) -> Result<NativeDispersion> {
     ensure!(
         samples.len() >= 2,
-        "pilot requires two native samples per policy"
+        "dispersion requires at least two native samples per policy"
     );
     ensure!(
         samples.iter().all(|n| n.is_finite() && *n > 0.0),
@@ -445,12 +445,11 @@ fn stable(samples: &[f64]) -> Result<()> {
     );
     let min = samples.iter().copied().fold(f64::INFINITY, f64::min);
     let max = samples.iter().copied().fold(0.0, f64::max);
-    ensure!(
-        max / min <= 1.5,
-        "within-policy native instability: max/min={} > 1.5, samples={samples:?}",
-        max / min
-    );
-    Ok(())
+    Ok(NativeDispersion {
+        min_ns: min,
+        max_ns: max,
+        max_over_min: max / min,
+    })
 }
 
 fn drive<T>(
@@ -459,7 +458,6 @@ fn drive<T>(
     mut execute: impl FnMut(Case) -> Result<(f64, T)>,
 ) -> Result<Vec<(Case, T)>> {
     let cases = schedule(runs)?;
-    let mut native = [Vec::new(), Vec::new()];
     let mut evidence = Vec::with_capacity(cases.len());
     for case in cases {
         // The previous callback has dropped state and drained its autorelease pool.
@@ -476,27 +474,8 @@ fn drive<T>(
                 "paired case {} has invalid native time {sample}",
                 case.case_index
             );
-            native[case.policy.index()].push(sample);
-            if native[case.policy.index()].len() >= 2 {
-                stable(&native[case.policy.index()]).with_context(|| {
-                    format!(
-                        "paired {:?} stability gate after case {} (pilot baseline included)",
-                        case.policy, case.case_index
-                    )
-                })?;
-            }
         }
         evidence.push((case, payload));
-        if (case.phase == Phase::Pilot && case.order_in_block == 3) || case.phase == Phase::Main {
-            for policy in [Policy::A, Policy::B] {
-                stable(&native[policy.index()]).with_context(|| {
-                    format!(
-                        "paired {:?} stability gate after case {} (pilot baseline included)",
-                        policy, case.case_index
-                    )
-                })?;
-            }
-        }
     }
     checkpoint()?;
     Ok(evidence)
@@ -829,7 +808,7 @@ fn diagnostic_case_with<P: DiagnosticProbe>(
     emit(DiagnosticEvent::Finish(DiagnosticObservation {
         native_case_succeeded: result.is_ok(),
         collection_succeeded: after.is_ok() && validation.is_ok(),
-        cross_case_gate_status: "fingerprint_and_stability_checks_pending",
+        cross_case_gate_status: "fingerprint_and_sample_validation_pending",
         native_prefill_wall_ns: result.as_ref().ok().map(|sample| sample.sample_ns),
         native_timing_scope: "prefill_plus_endpoint_copy_state_allocation_excluded_instrumented",
         profile_and_pipeline_scope: "outer_native_case_including_state_allocation_validation_fingerprint_reporting_teardown_and_pool_drain",
@@ -978,7 +957,7 @@ fn aggregate(
                 "pilot_status": match case.phase {
                     Phase::Warmup => "pending",
                     Phase::Pilot if case.order_in_block < 3 => "collecting",
-                    _ => "accepted",
+                    _ => "completed",
                 },
                 "prefill_mode": sample.semantics.prefill_mode,
                 "prefill_chunk": sample.semantics.prefill_chunk,
@@ -997,6 +976,11 @@ fn aggregate(
     let ids = synthetic_prompt_ids(n, u32::try_from(vocab)?, seed);
     let mut rows = Vec::with_capacity(2);
     for policy in [Policy::A, Policy::B] {
+        let pilot_plus_main_ns: Vec<_> = evidence
+            .iter()
+            .filter(|(case, _)| case.phase != Phase::Warmup && case.policy == policy)
+            .map(|(_, sample)| sample.sample_ns as f64)
+            .collect();
         let retained: Vec<_> = evidence
             .iter()
             .filter(|(case, _)| case.retained && case.policy == policy)
@@ -1018,6 +1002,9 @@ fn aggregate(
             .iter()
             .map(|(_, sample)| sample.sample_ns)
             .collect();
+        let retained_main_ns: Vec<_> = row.samples_ns.iter().map(|&ns| ns as f64).collect();
+        let pilot_plus_main_dispersion = dispersion(&pilot_plus_main_ns)?;
+        let retained_main_dispersion = dispersion(&retained_main_ns)?;
         attach_v41_diagnostics(
             &mut row,
             retained
@@ -1035,10 +1022,14 @@ fn aggregate(
             "prompt_ids_sha256_i32le": token_ids_sha256_i32le(&ids),
             "capacity": n,
             "retained_runs_per_policy": runs,
-            "pilot_status": "accepted",
+            "schedule_status": "completed",
+            "pilot_status": "completed",
             "pilot_samples_per_policy": 2,
-            "max_within_policy_spread": 1.5,
-            "stability_baseline": "pilot_plus_main_rechecked_after_each_main_case",
+            "native_dispersion": {
+                "pilot_plus_main": pilot_plus_main_dispersion,
+                "retained_main": retained_main_dispersion,
+            },
+            "timing_interpretation": "observational_not_automatic_performance_gain",
             "preweight_plan": preweight,
             "native_chronological_cases": chronology,
             "timing_scope": "native_prefill_host_wall_including_endpoint_logits_copy_state_allocation_excluded",
@@ -2111,7 +2102,7 @@ mod tests {
     }
 
     #[test]
-    fn recorded_2k_instability_streams_case_8_then_never_schedules_case_9() {
+    fn recorded_2k_spread_completes_with_finite_continuation_and_full_chronology() {
         let seconds = [
             26.2563, 19.2572, 17.0546, 11.3095, 16.9522, 16.9579, 13.0913, 14.9084, 2.3451,
         ];
@@ -2121,14 +2112,13 @@ mod tests {
         );
         let mut streamed = Vec::new();
         let mut calls = Vec::new();
-        let error = collect(
+        let evidence = collect(
             2,
             || Ok(()),
             |case| {
                 calls.push(case.case_index);
-                let seconds = seconds
-                    .get(case.case_index)
-                    .expect("must not schedule case 9");
+                // Case 9 was never recorded by v1; use a finite synthetic continuation.
+                let seconds = seconds.get(case.case_index).copied().unwrap_or(12.0);
                 let mut sample = native_case(&mut bench, &row_context(), 3, 1, case)?;
                 sample.sample_ns = (seconds * 1e9) as u64;
                 sample.instrumented = true;
@@ -2142,21 +2132,56 @@ mod tests {
                 Ok(sample)
             },
         )
-        .unwrap_err();
-        assert_eq!(calls, (0..9).collect::<Vec<_>>());
-        assert!(format!("{error:#}").contains("stability gate after case 8"));
+        .unwrap();
+        assert_eq!(calls, (0..10).collect::<Vec<_>>());
         let events: Vec<serde_json::Value> = std::str::from_utf8(&streamed)
             .unwrap()
             .lines()
             .map(|line| serde_json::from_str(line).unwrap())
             .collect();
-        assert_eq!(events.len(), 9);
-        assert_eq!(events[8]["case"]["case_index"], 8);
+        assert_eq!(events.len(), 10);
+        for (index, event) in events.iter().enumerate() {
+            assert_eq!(event["case"]["case_index"], index);
+        }
         assert!(
             events
                 .iter()
                 .all(|e| e["instrumented"] == true && e["performance_evidence"] == false)
         );
+        let rows = aggregate(
+            &row_context(),
+            3,
+            2,
+            1,
+            257,
+            &serde_json::json!({}),
+            &measurement_fixture(false, true),
+            &evidence,
+        )
+        .unwrap();
+        for row in &rows {
+            let paired = &row.diagnostics.as_ref().unwrap()["deepseek_v41"]["paired_benchmark"];
+            assert_eq!(paired["schedule_status"], "completed");
+            assert_eq!(paired["pilot_status"], "completed");
+            let chronology = paired["native_chronological_cases"].as_array().unwrap();
+            assert_eq!(chronology.len(), 10);
+            for (index, case) in chronology.iter().enumerate() {
+                assert_eq!(case["case"]["case_index"], index);
+                assert_eq!(case["sample_ns"], evidence[index].1.sample_ns);
+            }
+        }
+        let full = &rows[0].diagnostics.as_ref().unwrap()["deepseek_v41"]["paired_benchmark"];
+        let spread = &full["native_dispersion"];
+        let min = evidence[8].1.sample_ns as f64;
+        for (scope, max) in [
+            ("pilot_plus_main", evidence[2].1.sample_ns as f64),
+            ("retained_main", evidence[7].1.sample_ns as f64),
+        ] {
+            assert_eq!(spread[scope]["min_ns"], min);
+            assert_eq!(spread[scope]["max_ns"], max);
+            assert_eq!(spread[scope]["max_over_min"], max / min);
+            assert!(spread[scope]["max_over_min"].as_f64().unwrap() > 1.5);
+        }
     }
 
     #[test]
@@ -2198,14 +2223,22 @@ mod tests {
                 assert_eq!(
                     measurement.protocol(),
                     match (production, instrumented) {
-                        (false, false) => "native_full_ced_abba_baab_v1",
-                        (false, true) => "instrumented_full_ced_abba_baab_diagnostic_v1",
-                        (true, false) => "native_full_ced_abba_baab_production_timing_v1",
+                        (false, false) => "native_full_ced_abba_baab_v2",
+                        (false, true) => "instrumented_full_ced_abba_baab_diagnostic_v2",
+                        (true, false) => "native_full_ced_abba_baab_production_timing_v2",
                         (true, true) =>
-                            "instrumented_full_ced_abba_baab_production_timing_diagnostic_v1",
+                            "instrumented_full_ced_abba_baab_production_timing_diagnostic_v2",
                     }
                 );
                 assert_eq!(paired["measurement"], measurement.description());
+                assert_eq!(paired["schedule_status"], "completed");
+                assert_eq!(paired["pilot_status"], "completed");
+                assert_eq!(
+                    paired["timing_interpretation"],
+                    "observational_not_automatic_performance_gain"
+                );
+                assert!(paired.get("max_within_policy_spread").is_none());
+                assert!(paired.get("stability_baseline").is_none());
                 assert_eq!(
                     paired["metal_debug_layer"],
                     serde_json::to_value(
@@ -2654,18 +2687,23 @@ mod tests {
     }
 
     #[test]
-    fn gate_is_finite_positive_with_inclusive_ratio_and_no_policy_pooling() {
-        assert!(stable(&[2., 3.]).is_ok());
+    fn dispersion_is_finite_positive_without_a_spread_gate() {
+        for samples in [[2., 3.], [1., 1.50001], [1., 100.]] {
+            let spread = dispersion(&samples).unwrap();
+            assert_eq!(spread.min_ns, samples[0]);
+            assert_eq!(spread.max_ns, samples[1]);
+            assert_eq!(spread.max_over_min, samples[1] / samples[0]);
+        }
         for values in [
             vec![],
             vec![1.],
-            vec![1., 1.50001],
             vec![0., 1.],
             vec![-1., 1.],
             vec![1., f64::NAN],
             vec![1., f64::INFINITY],
+            vec![1., f64::NEG_INFINITY],
         ] {
-            assert!(stable(&values).is_err(), "{values:?}");
+            assert!(dispersion(&values).is_err(), "{values:?}");
         }
         let evidence = drive(
             2,
@@ -2676,13 +2714,13 @@ mod tests {
         assert_eq!(
             evidence.len(),
             10,
-            "10x cross-policy difference is not instability"
+            "cross-policy differences do not gate scheduling"
         );
     }
 
     #[test]
-    fn pilot_and_every_main_case_gate_before_any_remaining_case() {
-        for bad_index in 2..14 {
+    fn pilot_and_main_spread_complete_but_invalid_samples_stop_immediately() {
+        for varied_index in 2..14 {
             let calls = Cell::new(0);
             let result = drive(
                 4,
@@ -2690,7 +2728,7 @@ mod tests {
                 |case| {
                     calls.set(calls.get() + 1);
                     Ok((
-                        if case.case_index == bad_index {
+                        if case.case_index == varied_index {
                             200.
                         } else {
                             100.
@@ -2699,30 +2737,32 @@ mod tests {
                     ))
                 },
             );
-            assert!(result.is_err());
-            assert_eq!(
-                calls.get(),
-                match bad_index {
-                    2 | 5 => 6,
-                    3 | 4 => 5,
-                    _ => bad_index + 1,
-                }
-            );
+            assert_eq!(result.unwrap().len(), 14);
+            assert_eq!(calls.get(), 14);
         }
-        for invalid in [0., -1., f64::NAN, f64::INFINITY] {
-            let calls = Cell::new(0);
-            assert!(
-                drive(
-                    2,
-                    || Ok(()),
-                    |case| {
-                        calls.set(calls.get() + 1);
-                        Ok((if case.case_index == 2 { invalid } else { 1. }, ()))
-                    }
-                )
-                .is_err()
-            );
-            assert_eq!(calls.get(), 3);
+        for invalid in [0., -1., f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+            for bad_index in 2..14 {
+                let calls = Cell::new(0);
+                assert!(
+                    drive(
+                        4,
+                        || Ok(()),
+                        |case| {
+                            calls.set(calls.get() + 1);
+                            Ok((
+                                if case.case_index == bad_index {
+                                    invalid
+                                } else {
+                                    1.
+                                },
+                                (),
+                            ))
+                        }
+                    )
+                    .is_err()
+                );
+                assert_eq!(calls.get(), bad_index + 1);
+            }
         }
     }
 
@@ -2892,7 +2932,18 @@ mod tests {
             let paired = &diagnostics["paired_benchmark"];
             assert_eq!(paired["preweight_plan"], preweight);
             assert_eq!(paired["quality_qualification"], false);
-            assert_eq!(paired["pilot_status"], "accepted");
+            assert_eq!(paired["schedule_status"], "completed");
+            assert_eq!(paired["pilot_status"], "completed");
+            let spread = &paired["native_dispersion"];
+            assert_eq!(
+                spread["pilot_plus_main"]["min_ns"],
+                (expected_ns / 11 * 10) as f64
+            );
+            assert_eq!(spread["pilot_plus_main"]["max_ns"], expected_ns as f64);
+            assert_eq!(spread["pilot_plus_main"]["max_over_min"], 1.1);
+            assert_eq!(spread["retained_main"]["min_ns"], expected_ns as f64);
+            assert_eq!(spread["retained_main"]["max_ns"], expected_ns as f64);
+            assert_eq!(spread["retained_main"]["max_over_min"], 1.0);
             let cases = paired["native_chronological_cases"].as_array().unwrap();
             assert_eq!(cases.len(), 10);
             assert_eq!(
@@ -2904,7 +2955,10 @@ mod tests {
             );
             assert_eq!(cases[0]["case"]["phase"], "warmup");
             assert_eq!(cases[2]["case"]["phase"], "pilot");
-            assert_eq!(cases[5]["pilot_status"], "accepted");
+            assert_eq!(cases[0]["pilot_status"], "pending");
+            assert_eq!(cases[2]["pilot_status"], "collecting");
+            assert_eq!(cases[5]["pilot_status"], "completed");
+            assert_eq!(cases[9]["pilot_status"], "completed");
             assert_eq!(
                 cases[1]["prefill_report"]["calls"][0]["memory"]["incremental_metal_bytes"],
                 123

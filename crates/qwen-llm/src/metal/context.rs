@@ -676,6 +676,107 @@ impl MetalMemoryAdmission {
     }
 }
 
+/// Capacity feasibility for a future phase, not permission to allocate. Current
+/// host availability is validated but must be admitted separately at execution.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[non_exhaustive]
+pub struct MetalMemoryCapacity {
+    pub metal_upper_bytes: u64,
+    pub cpu_upper_bytes: u64,
+    pub required_bytes: u64,
+    pub working_set_headroom_bytes: u64,
+    pub ceiling_remaining_bytes: u64,
+    pub signals: MetalMemorySignals,
+}
+
+fn validated_memory_demand(
+    required_bytes: Option<u64>,
+    metal_required_bytes: Option<u64>,
+    working_set_headroom_bytes: Option<u64>,
+    signals: MetalMemorySignals,
+) -> Result<(u64, u64, u64), MetalMemoryAdmissionReason> {
+    use MetalMemoryAdmissionReason as R;
+    match (
+        required_bytes,
+        metal_required_bytes,
+        working_set_headroom_bytes,
+    ) {
+        (None, _, _) | (_, None, _) => Err(R::RequiredBytesOverflow),
+        _ if signals.host_budget.is_none() => Err(R::HostSignalUnavailable),
+        _ if signals.host_remaining_bytes().is_none() => Err(R::InvalidHostSignal),
+        _ if signals.host_budget.is_some_and(|host| {
+            host.within_ceiling(signals.current_allocated_bytes)
+                .is_none()
+                || host.within_availability().is_none()
+        }) =>
+        {
+            Err(R::InvalidHostSignal)
+        }
+        (Some(_), Some(_), _) if signals.recommended_max_bytes == 0 => {
+            Err(R::InvalidWorkingSetSignal)
+        }
+        (Some(_), Some(_), None) => Err(R::InvalidWorkingSetSignal),
+        (Some(required), Some(metal_required), Some(headroom)) => {
+            Ok((required, metal_required, headroom))
+        }
+    }
+}
+
+/// Check the full future CPU/Metal demand against ownership, device and positive
+/// process limits without treating current host availability as a reservation.
+/// A raw zero process limit retains the validated host-capacity constraint.
+pub fn evaluate_metal_memory_capacity_with_cpu_bytes(
+    metal_upper_bytes: u64,
+    cpu_upper_bytes: u64,
+    signals: MetalMemorySignals,
+) -> Result<MetalMemoryCapacity, MemoryAdmissionDenied> {
+    use MetalMemoryAdmissionReason as R;
+    let required_bytes = metal_upper_bytes.checked_add(cpu_upper_bytes);
+    let working_set_headroom_bytes = signals.recommended_max_bytes.checked_sub(
+        signals
+            .effective_device_usage()
+            .unwrap_or(signals.current_allocated_bytes),
+    );
+    let denied = |reason| {
+        MemoryAdmissionDenied::new(reason, required_bytes, signals, working_set_headroom_bytes)
+            .expect("capacity failure is a refusing reason")
+    };
+    let (required, metal_required, headroom) = validated_memory_demand(
+        required_bytes,
+        Some(metal_upper_bytes),
+        working_set_headroom_bytes,
+        signals,
+    )
+    .map_err(denied)?;
+    let host = signals.host_budget.expect("validated host signal");
+    let ceiling = host
+        .ceiling_remaining_bytes(signals.current_allocated_bytes)
+        .expect("validated host signal");
+    let working_set_fits = headroom > 0 && metal_required <= headroom;
+    let process_fits = match signals.process_limit_remaining_bytes {
+        None => return Err(denied(R::ProcessSignalUnavailable)),
+        Some(0) => true,
+        Some(remaining) => required <= remaining,
+    };
+    if host.within_ceiling(signals.current_allocated_bytes) != Some(true) || required > ceiling {
+        return Err(denied(R::HostInsufficient));
+    }
+    match (working_set_fits, process_fits) {
+        (false, false) => return Err(denied(R::BothInsufficient)),
+        (false, true) => return Err(denied(R::WorkingSetInsufficient)),
+        (true, false) => return Err(denied(R::ProcessInsufficient)),
+        (true, true) => {}
+    }
+    Ok(MetalMemoryCapacity {
+        metal_upper_bytes,
+        cpu_upper_bytes,
+        required_bytes: required,
+        working_set_headroom_bytes: headroom,
+        ceiling_remaining_bytes: ceiling,
+        signals,
+    })
+}
+
 pub fn evaluate_metal_memory_admission_with_cpu_bytes(
     metal_upper_bytes: u64,
     cpu_upper_bytes: u64,
@@ -710,29 +811,14 @@ fn evaluate_memory_admission(
             .effective_device_usage()
             .unwrap_or(signals.current_allocated_bytes),
     );
-    let reason = match (
+    let reason = match validated_memory_demand(
         required_bytes,
         metal_required_bytes,
         working_set_headroom_bytes,
+        signals,
     ) {
-        (None, _, _) | (_, None, _) => MetalMemoryAdmissionReason::RequiredBytesOverflow,
-        _ if signals.host_budget.is_none() => MetalMemoryAdmissionReason::HostSignalUnavailable,
-        _ if signals.host_remaining_bytes().is_none() => {
-            MetalMemoryAdmissionReason::InvalidHostSignal
-        }
-        _ if signals.host_budget.is_some_and(|host| {
-            host.within_ceiling(signals.current_allocated_bytes)
-                .is_none()
-                || host.within_availability().is_none()
-        }) =>
-        {
-            MetalMemoryAdmissionReason::InvalidHostSignal
-        }
-        (Some(_), Some(_), _) if signals.recommended_max_bytes == 0 => {
-            MetalMemoryAdmissionReason::InvalidWorkingSetSignal
-        }
-        (Some(_), Some(_), None) => MetalMemoryAdmissionReason::InvalidWorkingSetSignal,
-        (Some(required), Some(metal_required), Some(working_set_headroom)) => {
+        Err(reason) => reason,
+        Ok((required, metal_required, working_set_headroom)) => {
             let working_set_fits = (allocation_complete || working_set_headroom > 0)
                 && metal_required <= working_set_headroom;
             let host_remaining = signals
@@ -1929,6 +2015,253 @@ mod admission_refusal_tests {
             recommended_max_bytes: 100,
             current_allocated_bytes: 40,
             process_limit_remaining_bytes: process,
+        }
+    }
+
+    fn capacity_signals() -> MetalMemorySignals {
+        MetalMemorySignals {
+            recommended_max_bytes: 1000,
+            current_allocated_bytes: 0,
+            process_limit_remaining_bytes: Some(0),
+            host_budget: Some(HostMemoryBudget {
+                physical_bytes: 1000,
+                conservative_available_bytes: 900,
+                external_gap_bytes: 0,
+                private_shadow_bytes: 0,
+            }),
+        }
+    }
+
+    #[test]
+    fn zero_demand_capacity_and_admission_preserve_refusal_precedence() {
+        use MetalMemoryAdmissionReason as R;
+        let zero = MetalMemorySignals {
+            recommended_max_bytes: 0,
+            current_allocated_bytes: 0,
+            process_limit_remaining_bytes: None,
+            host_budget: None,
+        };
+        let mut zero_host = zero;
+        zero_host.host_budget = Some(HostMemoryBudget {
+            physical_bytes: 0,
+            conservative_available_bytes: 0,
+            external_gap_bytes: 0,
+            private_shadow_bytes: 0,
+        });
+        let mut no_working_set = capacity_signals();
+        no_working_set.recommended_max_bytes = 0;
+        no_working_set.process_limit_remaining_bytes = None;
+        let mut missing_process = capacity_signals();
+        missing_process.process_limit_remaining_bytes = None;
+        missing_process
+            .host_budget
+            .as_mut()
+            .unwrap()
+            .conservative_available_bytes = 0;
+        let mut invalid_host = no_working_set;
+        invalid_host
+            .host_budget
+            .as_mut()
+            .unwrap()
+            .conservative_available_bytes = 1001;
+        let mut over_ceiling = capacity_signals();
+        over_ceiling.current_allocated_bytes = 801;
+        over_ceiling
+            .host_budget
+            .as_mut()
+            .unwrap()
+            .conservative_available_bytes = 0;
+        for (signals, reason) in [
+            (zero, R::HostSignalUnavailable),
+            (zero_host, R::InvalidHostSignal),
+            (no_working_set, R::InvalidWorkingSetSignal),
+            (missing_process, R::ProcessSignalUnavailable),
+            (invalid_host, R::InvalidHostSignal),
+            (over_ceiling, R::HostInsufficient),
+        ] {
+            assert_eq!(
+                evaluate_metal_memory_capacity_with_cpu_bytes(0, 0, signals)
+                    .unwrap_err()
+                    .reason(),
+                reason
+            );
+            assert_eq!(
+                evaluate_metal_memory_admission_with_cpu_bytes(0, 0, 0, signals, true).reason,
+                reason
+            );
+        }
+    }
+
+    #[test]
+    fn capacity_is_not_allocation_admission_and_checks_masked_process_shortage() {
+        use MetalMemoryAdmissionReason as R;
+        let mut signals = capacity_signals();
+        let capacity = evaluate_metal_memory_capacity_with_cpu_bytes(750, 50, signals).unwrap();
+        assert_eq!(capacity.required_bytes, 800);
+        assert_eq!(capacity.ceiling_remaining_bytes, 800);
+        assert_eq!(capacity.signals, signals);
+        assert_eq!(
+            evaluate_metal_memory_admission_with_cpu_bytes(750, 50, 0, signals, true).reason,
+            R::HostAvailabilityInsufficient
+        );
+        signals.process_limit_remaining_bytes = Some(799);
+        assert_eq!(
+            evaluate_metal_memory_admission_with_cpu_bytes(750, 50, 0, signals, true).reason,
+            R::HostAvailabilityInsufficient
+        );
+        assert_eq!(
+            evaluate_metal_memory_capacity_with_cpu_bytes(750, 50, signals)
+                .unwrap_err()
+                .reason(),
+            R::ProcessInsufficient
+        );
+        signals.process_limit_remaining_bytes = Some(800);
+        assert!(evaluate_metal_memory_capacity_with_cpu_bytes(750, 50, signals).is_ok());
+        signals.recommended_max_bytes = 749;
+        assert_eq!(
+            evaluate_metal_memory_capacity_with_cpu_bytes(750, 50, signals)
+                .unwrap_err()
+                .reason(),
+            R::WorkingSetInsufficient
+        );
+        signals.process_limit_remaining_bytes = Some(799);
+        assert_eq!(
+            evaluate_metal_memory_capacity_with_cpu_bytes(750, 50, signals)
+                .unwrap_err()
+                .reason(),
+            R::BothInsufficient
+        );
+        signals = capacity_signals();
+        assert_eq!(
+            evaluate_metal_memory_capacity_with_cpu_bytes(750, 51, signals)
+                .unwrap_err()
+                .reason(),
+            R::HostInsufficient
+        );
+    }
+
+    #[test]
+    fn capacity_and_admission_share_validation_without_telemetry_forgery() {
+        use MetalMemoryAdmissionReason as R;
+        let base = capacity_signals();
+        let mut missing = base;
+        missing.host_budget = None;
+        let mut no_process = base;
+        no_process.process_limit_remaining_bytes = None;
+        let mut zero_physical = base;
+        zero_physical.host_budget.as_mut().unwrap().physical_bytes = 0;
+        let mut excess_available = base;
+        excess_available
+            .host_budget
+            .as_mut()
+            .unwrap()
+            .conservative_available_bytes = 1001;
+        let mut invalid_device = base;
+        invalid_device.recommended_max_bytes = 0;
+        let mut device_overshoot = base;
+        device_overshoot.current_allocated_bytes = 1001;
+        let mut gap_overflow = base;
+        gap_overflow.current_allocated_bytes = 1;
+        gap_overflow
+            .host_budget
+            .as_mut()
+            .unwrap()
+            .external_gap_bytes = u64::MAX;
+        let mut shadow_overflow = base;
+        shadow_overflow
+            .host_budget
+            .as_mut()
+            .unwrap()
+            .private_shadow_bytes = u64::MAX;
+        let mut ceiling_overflow = base;
+        ceiling_overflow
+            .host_budget
+            .as_mut()
+            .unwrap()
+            .physical_bytes = u64::MAX;
+        for (signals, expected) in [
+            (missing, R::HostSignalUnavailable),
+            (no_process, R::ProcessSignalUnavailable),
+            (zero_physical, R::InvalidHostSignal),
+            (excess_available, R::InvalidHostSignal),
+            (invalid_device, R::InvalidWorkingSetSignal),
+            (device_overshoot, R::InvalidWorkingSetSignal),
+            (gap_overflow, R::InvalidHostSignal),
+            (shadow_overflow, R::InvalidHostSignal),
+            (ceiling_overflow, R::InvalidHostSignal),
+        ] {
+            let error = evaluate_metal_memory_capacity_with_cpu_bytes(10, 20, signals).unwrap_err();
+            let ordinary = evaluate_metal_memory_admission_with_cpu_bytes(10, 20, 0, signals, true);
+            assert_eq!(error.reason(), expected);
+            assert_eq!(ordinary.reason, expected);
+            assert_eq!(error.signals, signals);
+            assert_eq!(
+                error.working_set_headroom_bytes,
+                ordinary.working_set_headroom_bytes
+            );
+        }
+        let error =
+            evaluate_metal_memory_capacity_with_cpu_bytes(u64::MAX, 1, missing).unwrap_err();
+        assert_eq!(error.reason(), R::RequiredBytesOverflow);
+        assert_eq!(error.required_bytes, None);
+    }
+
+    #[test]
+    fn capacity_and_ordinary_admission_match_independent_boundary_inequalities() {
+        for allocated in [0, 100, 800, 801] {
+            for gap in [0, 25] {
+                for shadow in [0, 10] {
+                    for available in [0, 199, 200, 900, 1000] {
+                        for recommended in [0, 800, 1000] {
+                            for process in [None, Some(0), Some(100), Some(800)] {
+                                let signals = MetalMemorySignals {
+                                    recommended_max_bytes: recommended,
+                                    current_allocated_bytes: allocated,
+                                    process_limit_remaining_bytes: process,
+                                    host_budget: Some(HostMemoryBudget {
+                                        physical_bytes: 1000,
+                                        conservative_available_bytes: available,
+                                        external_gap_bytes: gap,
+                                        private_shadow_bytes: shadow,
+                                    }),
+                                };
+                                for metal in [0, 100, 750] {
+                                    for cpu in [0, 100] {
+                                        let effective = allocated + gap;
+                                        let required = metal + cpu;
+                                        let capacity_fits = effective + shadow + required <= 800
+                                            && recommended > effective
+                                            && effective + metal <= recommended
+                                            && process.is_some_and(|remaining| {
+                                                remaining == 0 || required <= remaining
+                                            });
+                                        let ordinary_fits = capacity_fits
+                                            && available > 200 + shadow
+                                            && required <= available - 200 - shadow
+                                            && effective + shadow < 800;
+                                        assert_eq!(
+                                            evaluate_metal_memory_capacity_with_cpu_bytes(
+                                                metal, cpu, signals
+                                            )
+                                            .is_ok(),
+                                            capacity_fits,
+                                            "capacity {metal}+{cpu}, {signals:?}"
+                                        );
+                                        assert_eq!(
+                                            evaluate_metal_memory_admission_with_cpu_bytes(
+                                                metal, cpu, 0, signals, true
+                                            )
+                                            .is_admitted(),
+                                            ordinary_fits,
+                                            "admission {metal}+{cpu}, {signals:?}"
+                                        );
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
         }
     }
 

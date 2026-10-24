@@ -93,16 +93,45 @@ even `--runs 2..=16` retained samples per policy. Warmup is mandatory.
   positive max/min <=1.5,
   including its pilot baseline, before scheduling further cases. It never
   treats the intended difference between policies as instability.
-- Pre-import planning uses the public `preflight_cold_prefill` ledger: exact
-  resident windows and private shadows, binding allocations, one request state,
-  the sequential Full/CED workspace envelope and caller CPU storage. The pair
-  supports at most 256 layers and 1,048,576 logits. This is not a reservation;
-  normal loader, state and prefill admission remain active.
+- Pre-import planning uses the public `plan_cold_prefill` ledger: exact resident
+  windows and private shadows, binding allocations, one request state, the maximum
+  complete sequential Full/CED workspace envelope and caller CPU storage. Suite
+  owns the typed plan across its sole resident import and binding. The pair
+  supports at most 256 layers and 1,048,576 logits; normal caller storage is
+  bounded by 64 MiB. Planning is not a reservation.
+- Immediately before the resident factory, `assess_load` requires the **full cold
+  peak** to fit device capacity, the 80% host-ownership ceiling and any positive
+  process limit, with valid telemetry and checked arithmetic. Ordinary fresh
+  availability admission applies to the **load phase** (resident windows, private
+  shadows, binding and caller CPU), not to all future workspace simultaneously.
+  The unchanged 20% host margin still applies; active file cache receives no
+  credit. A whole-peak availability refusal alone can therefore coexist with an
+  admitted load, but a peak-capacity or load refusal stops before the factory.
+- After binding and before **every** fresh case state, `assess_runtime` uses
+  actual current memory signals to admit one request plus the maximum complete
+  Full/CED envelope. It recharges the full binding and caller CPU envelopes;
+  resident Metal and private shadows are already in live signals, not added
+  again. The prior state's logits/commands/state and case autorelease pool have
+  drained first. All ordinary device, ownership, process, telemetry and fresh
+  availability constraints remain active, as do the inner loader, `new_state`,
+  Full and CED gates. A runtime refusal creates no new state or prefill callback,
+  produces no execution report or valid result row, and releases the resident
+  factory normally. There is no retry or bypass.
+- JSON `preweight_plan` records the static request, workspace, binding, caller,
+  full-cold-peak, load and runtime-gate CPU budgets. `peak_capacity_passed` and
+  `peak_capacity` describe capacity only; `load_admission` admits only the load.
+  `whole_peak_now` is explicitly diagnostic, may deny availability, and is **not**
+  runtime admission. Fresh runtime signal reports are not retained per case.
+  The strict `preflight_cold_prefill` wrapper still requires ordinary admission
+  of the whole cold peak for its separate qualification callers.
 - Every completed native report must name the requested policy without
   fallback. CED must finish all encoded commands and report observed incremental
   Metal allocation no larger than its accepted estimate. Every finite endpoint
   head must match warm Full bitwise; state and autoreleases drain between cases,
   including on validation errors and cancellation.
+  Production CED admission may still fall back to Full. The pair rejects that
+  report after guarded execution; a later CED denial does not promise zero GPU
+  work. Neither the production fallback nor any inner admission is changed.
 - Timings cover host-wall production prefill and the endpoint logits copy, not
   state allocation, GPU-only time or model loading. Schema-v4 output has one row
   per policy. Warmup/pilot are excluded from statistics but retained in both
@@ -144,7 +173,9 @@ calls including warmup/pilot), not an automatic escalation to 8K.
   `forward::profile::Scope::begin()` encloses the outer case: state allocation,
   prefill, report handling, endpoint fingerprinting, state destruction and case
   autorelease-pool drain. Its historical `token_wall_ms` field is **outer-case
-  wall time**, not exact native prefill time. Model import/binding are outside it.
+  wall time**, not exact native prefill time. Model import/binding and the fresh
+  pre-case runtime assessment are outside it. Runtime admission also precedes
+  the diagnostic start snapshot/event, so a denied case starts no profile scope.
 - Resources are captured before the case and after state drop/pool drain:
   process page-ins, physical disk-read bytes, current RSS/physical footprint and
   current Metal allocation, with signed memory deltas. These are process-wide
@@ -162,7 +193,7 @@ calls including warmup/pilot), not an automatic escalation to 8K.
   command timers. Aggregate Full/CED-encoder host-preparation spans expose
   allocation/upload work and nested Engram read/decode/upload work; these spans
   overlap and are not additive. No per-row tracing or new lookup cache is added.
-- Diagnostic preflight charges an additional fixed 16 MiB CPU reserve on top of
+- Diagnostic planning charges an additional fixed 16 MiB CPU reserve on top of
   the normal 64 MiB caller envelope (80 MiB total). At the existing bounds of
   8192 tokens, 256 layers and 16 runs/policy, one unsampled profile has at most
   4096 operation records, including fixed aggregate host spans. Preweight checks
@@ -172,7 +203,9 @@ calls including warmup/pilot), not an automatic escalation to 8K.
   including chunk boundaries, scalar tails and window extremes. A CPU-only
   maximum-payload streaming fixture charges live operation storage, serialized
   bytes and 1 MiB fixed slack against that reserve. No 38-profile retention or
-  host-budget bypass is permitted.
+  host-budget bypass is permitted. The existing maximum-caller-payload regression
+  includes the staged budget/assessment metadata without increasing the normal
+  64 MiB caller envelope or diagnostic 80 MiB total.
 
 This mode localizes unexplained wall time; it does not by itself establish
 file-cache misses, a thermal cause, interference, a lifetime defect or a speedup.

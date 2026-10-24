@@ -523,68 +523,77 @@ pub(crate) fn run_suite(args: SuiteArgs) -> Result<()> {
         } else {
             None
         };
-        rows = with_family_bench(
-            family,
-            &ctx,
-            &probe,
-            extent,
-            v41_prefill_execution,
-            &mut |bench| {
-                if let Some(preweight) = &paired_preweight {
-                    let rows = crate::v41_ced_pair::run(
-                        bench,
-                        &row_ctx,
-                        pp[0],
-                        runs,
-                        seed,
-                        preweight,
-                        v41_ced_pair_diagnostic.then_some(&ctx),
-                    )?;
-                    for row in &rows {
-                        if v41_ced_pair_diagnostic {
-                            crate::text_log!(
-                                json_mode,
-                                "[suite] INSTRUMENTED performance_evidence=false paired prefill_mode={} {}: {:.2} t/s",
-                                row.prefill_mode.unwrap_or("unreported"),
-                                row.test,
-                                row.avg_ts,
-                            );
-                        } else {
-                            crate::text_log!(
-                                json_mode,
-                                "[suite] paired prefill_mode={}",
-                                row.prefill_mode.unwrap_or("unreported"),
-                            );
-                            log_row(json_mode, row);
+        rows = crate::v41_ced_pair::with_load(
+            paired_preweight.as_ref(),
+            || ctx.memory_signals(),
+            |preweight_report| {
+                with_family_bench(
+                    family,
+                    &ctx,
+                    &probe,
+                    extent,
+                    v41_prefill_execution,
+                    &mut |bench| {
+                        if let Some(preweight) = &paired_preweight {
+                            let rows = crate::v41_ced_pair::run(
+                                bench,
+                                &row_ctx,
+                                pp[0],
+                                runs,
+                                seed,
+                                &preweight.plan,
+                                preweight_report
+                                    .context("paired load assessment report missing")?,
+                                &ctx,
+                                v41_ced_pair_diagnostic,
+                            )?;
+                            for row in &rows {
+                                if v41_ced_pair_diagnostic {
+                                    crate::text_log!(
+                                        json_mode,
+                                        "[suite] INSTRUMENTED performance_evidence=false paired prefill_mode={} {}: {:.2} t/s",
+                                        row.prefill_mode.unwrap_or("unreported"),
+                                        row.test,
+                                        row.avg_ts,
+                                    );
+                                } else {
+                                    crate::text_log!(
+                                        json_mode,
+                                        "[suite] paired prefill_mode={}",
+                                        row.prefill_mode.unwrap_or("unreported"),
+                                    );
+                                    log_row(json_mode, row);
+                                }
+                            }
+                            return Ok(rows);
                         }
-                    }
-                    return Ok(rows);
-                }
-                let mut rows = Vec::with_capacity((pp.len() + tg.len()) * depths.len());
-                if !no_warmup {
-                    crate::text_log!(json_mode, "[suite] model warm-up (untimed)");
-                    run_family_pp_row(bench, &row_ctx, warmup_pp, 0, 1, true, seed)
-                        .context("suite model warm-up pp")?;
-                    run_family_tg_row(bench, &row_ctx, WARMUP_TG, 0, 1, true, seed)
-                        .context("suite model warm-up tg")?;
-                }
-                for &depth in &depths {
-                    for &n_prompt in &pp {
-                        let row = run_family_pp_row(
-                            bench, &row_ctx, n_prompt, depth, runs, no_warmup, seed,
-                        )?;
-                        log_row(json_mode, &row);
-                        rows.push(row);
-                    }
-                    for &n_gen in &tg {
-                        let row = run_family_tg_row(
-                            bench, &row_ctx, n_gen, depth, runs, no_warmup, seed,
-                        )?;
-                        log_row(json_mode, &row);
-                        rows.push(row);
-                    }
-                }
-                Ok(rows)
+                        let mut rows = Vec::with_capacity((pp.len() + tg.len()) * depths.len());
+                        if !no_warmup {
+                            crate::text_log!(json_mode, "[suite] model warm-up (untimed)");
+                            run_family_pp_row(bench, &row_ctx, warmup_pp, 0, 1, true, seed)
+                                .context("suite model warm-up pp")?;
+                            run_family_tg_row(bench, &row_ctx, WARMUP_TG, 0, 1, true, seed)
+                                .context("suite model warm-up tg")?;
+                        }
+                        for &depth in &depths {
+                            for &n_prompt in &pp {
+                                let row = run_family_pp_row(
+                                    bench, &row_ctx, n_prompt, depth, runs, no_warmup, seed,
+                                )?;
+                                log_row(json_mode, &row);
+                                rows.push(row);
+                            }
+                            for &n_gen in &tg {
+                                let row = run_family_tg_row(
+                                    bench, &row_ctx, n_gen, depth, runs, no_warmup, seed,
+                                )?;
+                                log_row(json_mode, &row);
+                                rows.push(row);
+                            }
+                        }
+                        Ok(rows)
+                    },
+                )
             },
         )?;
     }

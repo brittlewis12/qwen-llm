@@ -21,7 +21,10 @@ mod gpu_step;
 mod hc_gpu;
 mod memory;
 pub(super) mod preflight;
-pub use preflight::{ColdPrefillPreflight, preflight_cold_prefill};
+pub use preflight::{
+    ColdLoadAssessment, ColdPrefillPlan, ColdPrefillPreflight, plan_cold_prefill,
+    preflight_cold_prefill,
+};
 pub mod profile;
 mod token_map;
 pub use memory::RequestMemoryEstimate;

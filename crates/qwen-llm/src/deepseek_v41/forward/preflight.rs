@@ -5,7 +5,7 @@ use crate::deepseek_v41::gguf::{self, LoadError, ResidentStoragePlan};
 use crate::gguf::GgufFile;
 
 #[derive(Clone, Debug)]
-pub struct ColdPrefillPreflight {
+pub struct ColdPrefillPlan {
     pub resident_storage: ResidentStoragePlan,
     pub request: RequestMemoryEstimate,
     pub full_incremental_metal_bytes: u64,
@@ -19,12 +19,120 @@ pub struct ColdPrefillPreflight {
     /// Excludes shared resident weight views and per-request runtime buffers.
     pub binding_metal_bytes: u64,
     pub caller_cpu_bytes: u64,
+    /// Full cold peak, including the resident/binding and runtime phases.
     pub required_metal_bytes: u64,
     pub required_cpu_bytes: u64,
+    /// Resident views plus retained binding Metal resources.
+    pub load_metal_bytes: u64,
+    /// New full private shadows, binding CPU and caller CPU envelopes.
+    pub load_cpu_bytes: u64,
+    /// Runtime CPU peak plus the full binding and caller envelopes, even when
+    /// some of those bytes already affect the observed host availability.
+    pub runtime_gate_cpu_bytes: u64,
+}
+
+#[derive(Clone, Debug)]
+pub struct ColdLoadAssessment {
+    pub peak_capacity: metal::MetalMemoryCapacity,
+    pub load_admission: metal::MetalMemoryAdmission,
+    /// Diagnostic only: a future peak can fail today's availability snapshot.
+    pub whole_peak_now: metal::MetalMemoryAdmission,
+}
+
+#[derive(Clone, Debug)]
+pub struct ColdPrefillPreflight {
+    pub plan: ColdPrefillPlan,
     pub admission: metal::MetalMemoryAdmission,
 }
 
-/// Admit one cold sequence before weight import, using the actual GGUF geometry.
+impl std::ops::Deref for ColdPrefillPreflight {
+    type Target = ColdPrefillPlan;
+
+    fn deref(&self) -> &Self::Target {
+        &self.plan
+    }
+}
+
+impl ColdPrefillPlan {
+    /// Allow only the load/binding phase, after checking the complete future
+    /// peak's capacity. Neither result reserves memory for a later phase.
+    pub fn assess_load(
+        &self,
+        signals: metal::MetalMemorySignals,
+    ) -> std::result::Result<ColdLoadAssessment, LoadError> {
+        let peak_capacity = metal::evaluate_metal_memory_capacity_with_cpu_bytes(
+            self.required_metal_bytes,
+            self.required_cpu_bytes,
+            signals,
+        )?;
+        let load_admission = metal::evaluate_metal_memory_admission_with_cpu_bytes(
+            self.load_metal_bytes,
+            self.load_cpu_bytes,
+            0,
+            signals,
+            true,
+        );
+        if let Some(denied) = load_admission.refusal() {
+            return Err(denied.into());
+        }
+        Ok(ColdLoadAssessment {
+            peak_capacity,
+            load_admission,
+            whole_peak_now: self.whole_peak_admission(signals),
+        })
+    }
+
+    /// Refresh after binding and before each fresh state, once the previous
+    /// state's resources and autoreleases have drained. Resident imports,
+    /// binding buffers and private shadows must already be in the live signals.
+    /// Normal state/prefill checks and production fallback remain required.
+    pub fn assess_runtime(
+        &self,
+        signals: metal::MetalMemorySignals,
+    ) -> std::result::Result<metal::MetalMemoryAdmission, LoadError> {
+        let admission = metal::evaluate_metal_memory_admission_with_cpu_bytes(
+            self.runtime_metal_bytes,
+            self.runtime_gate_cpu_bytes,
+            0,
+            signals,
+            true,
+        );
+        if let Some(denied) = admission.refusal() {
+            return Err(denied.into());
+        }
+        Ok(admission)
+    }
+
+    fn whole_peak_admission(
+        &self,
+        signals: metal::MetalMemorySignals,
+    ) -> metal::MetalMemoryAdmission {
+        metal::evaluate_metal_memory_admission_with_cpu_bytes(
+            self.required_metal_bytes,
+            self.required_cpu_bytes,
+            0,
+            signals,
+            true,
+        )
+    }
+
+    fn into_strict(
+        self,
+        signals: metal::MetalMemorySignals,
+    ) -> std::result::Result<ColdPrefillPreflight, LoadError> {
+        let admission = self.whole_peak_admission(signals);
+        if let Some(denied) = admission.refusal() {
+            return Err(denied.into());
+        }
+        Ok(ColdPrefillPreflight {
+            plan: self,
+            admission,
+        })
+    }
+}
+
+/// Strictly admit the entire cold peak against current availability before
+/// weight import. This deliberately retains the stronger, non-staged contract.
 /// Policies (including repetitions) run sequentially, never as concurrent states.
 /// `ced` is absent when not requested or when runtime would fall back to Full.
 /// No payload is imported, no RSS execution observation is made, and no memory
@@ -37,12 +145,33 @@ pub fn preflight_cold_prefill(
     executions: &[PrefillExecution],
     caller_cpu_bytes: u64,
 ) -> std::result::Result<ColdPrefillPreflight, LoadError> {
+    plan_cold_prefill(
+        ctx,
+        gguf,
+        prompt_rows,
+        capacity,
+        executions,
+        caller_cpu_bytes,
+    )?
+    .into_strict(ctx.memory_signals())
+}
+
+/// Compute budgets without admitting any allocation or importing payloads.
+/// Staged callers must assess load and then reassess runtime with fresh signals.
+pub fn plan_cold_prefill(
+    ctx: &MetalContext,
+    gguf: &GgufFile,
+    prompt_rows: usize,
+    capacity: usize,
+    executions: &[PrefillExecution],
+    caller_cpu_bytes: u64,
+) -> std::result::Result<ColdPrefillPlan, LoadError> {
     let resident_storage = gguf::resident_storage_plan(
         gguf,
         metal::host_page_size_bytes()?,
         ctx.max_buffer_length(),
     )?;
-    preflight_with_pricing(
+    plan_with_pricing(
         gguf,
         resident_storage,
         prompt_rows,
@@ -58,8 +187,40 @@ pub fn preflight_cold_prefill(
                 .map(|p| p.priced_upper_bytes)
                 .map_err(|e| e.to_string())
         },
-        ctx.memory_signals(),
     )
+    .map_err(|error| error.with_signals(ctx.memory_signals()))
+}
+
+#[derive(Debug)]
+enum PlanError {
+    Load(LoadError),
+    Overflow,
+}
+
+impl From<LoadError> for PlanError {
+    fn from(error: LoadError) -> Self {
+        Self::Load(error)
+    }
+}
+
+impl PlanError {
+    fn with_signals(self, signals: metal::MetalMemorySignals) -> LoadError {
+        match self {
+            Self::Load(error) => error,
+            Self::Overflow => metal::MemoryAdmissionDenied::new(
+                metal::MetalMemoryAdmissionReason::RequiredBytesOverflow,
+                None,
+                signals,
+                signals.recommended_max_bytes.checked_sub(
+                    signals
+                        .effective_device_usage()
+                        .unwrap_or(signals.current_allocated_bytes),
+                ),
+            )
+            .expect("overflow is a refusing reason")
+            .into(),
+        }
+    }
 }
 
 fn sum(values: &[u64]) -> Result<u64> {
@@ -150,6 +311,7 @@ pub(super) fn runtime_from_parts(
     Ok((request, full, ced))
 }
 
+#[cfg(test)]
 pub(in crate::deepseek_v41) fn preflight_with_pricing(
     gguf: &GgufFile,
     resident_storage: ResidentStoragePlan,
@@ -161,6 +323,30 @@ pub(in crate::deepseek_v41) fn preflight_with_pricing(
     price: &impl Fn(u64) -> Result<u64>,
     signals: metal::MetalMemorySignals,
 ) -> std::result::Result<ColdPrefillPreflight, LoadError> {
+    plan_with_pricing(
+        gguf,
+        resident_storage,
+        prompt_rows,
+        capacity,
+        executions,
+        caller_cpu_bytes,
+        half_selected,
+        price,
+    )
+    .map_err(|error| error.with_signals(signals))?
+    .into_strict(signals)
+}
+
+fn plan_with_pricing(
+    gguf: &GgufFile,
+    resident_storage: ResidentStoragePlan,
+    prompt_rows: usize,
+    capacity: usize,
+    executions: &[PrefillExecution],
+    caller_cpu_bytes: u64,
+    half_selected: bool,
+    price: &impl Fn(u64) -> Result<u64>,
+) -> std::result::Result<ColdPrefillPlan, PlanError> {
     let p = gguf::plan(gguf)?;
     let calculate = || -> Result<_> {
         let output = p
@@ -197,7 +383,7 @@ pub(in crate::deepseek_v41) fn preflight_with_pricing(
     };
     let (request, full, ced, binding_cpu_bytes, binding_metal_bytes) =
         calculate().map_err(LoadError::Invalid)?;
-    let result = combine(
+    combine_plan(
         resident_storage,
         request,
         full,
@@ -205,12 +391,7 @@ pub(in crate::deepseek_v41) fn preflight_with_pricing(
         binding_cpu_bytes,
         binding_metal_bytes,
         caller_cpu_bytes,
-        signals,
-    )?;
-    if let Some(reason) = result.admission.refusal() {
-        return Err(reason.into());
-    }
-    Ok(result)
+    )
 }
 
 fn binding_metal_bytes(
@@ -246,7 +427,7 @@ fn binding_vectors_bytes(c: &Config, layers: usize) -> Result<u64> {
     product(layers as u64, product(width as u64, 64 * 4)?)
 }
 
-fn combine(
+fn combine_plan(
     resident_storage: ResidentStoragePlan,
     request: RequestMemoryEstimate,
     full: (u64, u64),
@@ -254,23 +435,8 @@ fn combine(
     binding_cpu_bytes: u64,
     binding_metal_bytes: u64,
     caller_cpu_bytes: u64,
-    signals: metal::MetalMemorySignals,
-) -> std::result::Result<ColdPrefillPreflight, LoadError> {
-    let sum = |values: &[u64]| {
-        sum(values).map_err(|_| {
-            LoadError::MemoryAdmissionDenied(
-                metal::MemoryAdmissionDenied::new(
-                    metal::MetalMemoryAdmissionReason::RequiredBytesOverflow,
-                    None,
-                    signals,
-                    signals
-                        .recommended_max_bytes
-                        .checked_sub(signals.current_allocated_bytes),
-                )
-                .expect("overflow is a refusing reason"),
-            )
-        })
-    };
+) -> std::result::Result<ColdPrefillPlan, PlanError> {
+    let sum = |values: &[u64]| sum(values).map_err(|_| PlanError::Overflow);
     let runtime_metal_bytes = sum(&[
         request.metal_bytes,
         full.0
@@ -292,14 +458,18 @@ fn combine(
         runtime_cpu_bytes,
         caller_cpu_bytes,
     ])?;
-    let admission = metal::evaluate_metal_memory_admission_with_cpu_bytes(
-        required_metal_bytes,
-        required_cpu_bytes,
-        0,
-        signals,
-        true,
-    );
-    Ok(ColdPrefillPreflight {
+    let load_metal_bytes = sum(&[resident_storage.metal_view_bytes, binding_metal_bytes])?;
+    let load_cpu_bytes = sum(&[
+        resident_storage.private_shadow_bytes,
+        binding_cpu_bytes,
+        caller_cpu_bytes,
+    ])?;
+    let runtime_gate_cpu_bytes = sum(&[runtime_cpu_bytes, binding_cpu_bytes, caller_cpu_bytes])?;
+    // Check the combined runtime gate too: the individual CPU/Metal totals may
+    // be representable while their sum is not.
+    sum(&[runtime_metal_bytes, runtime_gate_cpu_bytes])?;
+    sum(&[required_metal_bytes, required_cpu_bytes])?;
+    Ok(ColdPrefillPlan {
         resident_storage,
         request,
         full_incremental_metal_bytes: full.0,
@@ -312,7 +482,9 @@ fn combine(
         caller_cpu_bytes,
         required_metal_bytes,
         required_cpu_bytes,
-        admission,
+        load_metal_bytes,
+        load_cpu_bytes,
+        runtime_gate_cpu_bytes,
     })
 }
 

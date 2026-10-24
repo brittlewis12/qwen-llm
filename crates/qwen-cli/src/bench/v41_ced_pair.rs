@@ -7,8 +7,8 @@ use crate::family_bench::{
 };
 use anyhow::ensure;
 use qwen_llm::deepseek_v41::forward::profile;
-use qwen_llm::deepseek_v41::forward::{PrefillExecution, preflight_cold_prefill};
-use qwen_llm::metal::MetalPipelineCacheMetrics;
+use qwen_llm::deepseek_v41::forward::{ColdPrefillPlan, PrefillExecution, plan_cold_prefill};
+use qwen_llm::metal::{MetalMemoryAdmission, MetalMemorySignals, MetalPipelineCacheMetrics};
 use qwen_llm::model_family::ModelFamily;
 use qwen_llm::pid_metrics::PidSnapshot;
 use std::io::Write;
@@ -105,13 +105,18 @@ pub(crate) fn check_environment() -> Result<()> {
     validate_environment(|name| std::env::var_os(name), &names)
 }
 
+pub(crate) struct PairedPreweight {
+    pub(crate) plan: ColdPrefillPlan,
+    report: serde_json::Value,
+}
+
 /// Called before with_family_bench can import any resident weights.
 pub(crate) fn preweight_plan(
     ctx: &MetalContext,
     gguf: &GgufFile,
     extent: FamilyBenchExtent,
     diagnostic: bool,
-) -> Result<serde_json::Value> {
+) -> Result<PairedPreweight> {
     let plan = qwen_llm::deepseek_v41::gguf::plan(gguf)?;
     ensure!(
         plan.config.vocab <= 1_048_576 && plan.layers <= MAX_LAYERS,
@@ -128,7 +133,7 @@ pub(crate) fn preweight_plan(
             "diagnostic producer inventory exceeds its CPU reserve"
         );
     }
-    let accepted = preflight_cold_prefill(
+    let plan = plan_cold_prefill(
         ctx,
         gguf,
         extent.prefill_endpoint,
@@ -139,38 +144,81 @@ pub(crate) fn preweight_plan(
         ],
         caller_cpu_bytes(diagnostic),
     )
-    .context("paired preweight Full/CED admission")?;
-    ensure!(
-        accepted.admission.is_admitted(),
-        "paired preweight plan was not admitted"
-    );
-    let ced = accepted
+    .context("paired preweight Full/CED planning")?;
+    let report = preweight_report(&plan, extent)?;
+    Ok(PairedPreweight { plan, report })
+}
+
+fn preweight_report(
+    plan: &ColdPrefillPlan,
+    extent: FamilyBenchExtent,
+) -> Result<serde_json::Value> {
+    let ced = plan
         .ced
         .as_ref()
         .context("paired preweight plan cannot execute CED without fallback")?;
     Ok(serde_json::json!({
-        "accepted": accepted.admission.is_admitted(),
         "prompt_rows": extent.prefill_endpoint,
         "capacity": extent.forwards,
         "executions": [PrefillExecution::FullForward, PrefillExecution::ShrinkingCed],
-        "resident_metal_view_bytes": accepted.resident_storage.metal_view_bytes,
-        "resident_private_shadow_bytes": accepted.resident_storage.private_shadow_bytes,
+        "resident_metal_view_bytes": plan.resident_storage.metal_view_bytes,
+        "resident_private_shadow_bytes": plan.resident_storage.private_shadow_bytes,
+        "request_metal_bytes": plan.request.metal_bytes,
+        "request_cpu_bytes": plan.request.cpu_bytes,
         "ced_incremental_metal_bytes": ced.incremental_metal_bytes,
         "ced_incremental_cpu_bytes": ced.incremental_cpu_bytes,
-        "full_incremental_metal_bytes": accepted.full_incremental_metal_bytes,
-        "full_incremental_cpu_bytes": accepted.full_incremental_cpu_bytes,
-        "runtime_metal_bytes": accepted.runtime_metal_bytes,
-        "runtime_cpu_bytes": accepted.runtime_cpu_bytes,
-        "binding_metal_bytes": accepted.binding_metal_bytes,
-        "binding_cpu_bytes": accepted.binding_cpu_bytes,
-        "caller_cpu_bytes": accepted.caller_cpu_bytes,
-        "required_metal_bytes": accepted.required_metal_bytes,
-        "required_cpu_bytes": accepted.required_cpu_bytes,
-        "admission_reason": format!("{:?}", accepted.admission.reason),
-        "admission_required_bytes": accepted.admission.required_bytes,
-        "working_set_headroom_bytes": accepted.admission.working_set_headroom_bytes,
-        "scope": "preweight_budget_not_reservation_later_state_and_prefill_gates_retained",
+        "full_incremental_metal_bytes": plan.full_incremental_metal_bytes,
+        "full_incremental_cpu_bytes": plan.full_incremental_cpu_bytes,
+        "runtime_metal_bytes": plan.runtime_metal_bytes,
+        "runtime_cpu_bytes": plan.runtime_cpu_bytes,
+        "binding_metal_bytes": plan.binding_metal_bytes,
+        "binding_cpu_bytes": plan.binding_cpu_bytes,
+        "caller_cpu_bytes": plan.caller_cpu_bytes,
+        "required_metal_bytes": plan.required_metal_bytes,
+        "required_cpu_bytes": plan.required_cpu_bytes,
+        "load_metal_bytes": plan.load_metal_bytes,
+        "load_cpu_bytes": plan.load_cpu_bytes,
+        "runtime_gate_cpu_bytes": plan.runtime_gate_cpu_bytes,
+        "required_bytes_scope": "full_cold_peak_capacity_not_fresh_load_availability",
+        "scope": "staged_budget_not_reservation_fresh_runtime_assessment_before_every_state_inner_gates_retained",
     }))
+}
+
+fn admission_report(admission: &MetalMemoryAdmission) -> serde_json::Value {
+    serde_json::json!({
+        "admitted": admission.is_admitted(),
+        "reason": format!("{:?}", admission.reason),
+        "required_bytes": admission.required_bytes,
+        "working_set_headroom_bytes": admission.working_set_headroom_bytes,
+    })
+}
+
+/// The only resident factory invocation must remain inside this gate.
+pub(crate) fn with_load<R>(
+    preweight: Option<&PairedPreweight>,
+    signals: impl FnOnce() -> MetalMemorySignals,
+    factory: impl FnOnce(Option<&serde_json::Value>) -> Result<R>,
+) -> Result<R> {
+    let report = if let Some(preweight) = preweight {
+        let assessment = preweight
+            .plan
+            .assess_load(signals())
+            .context("paired full cold peak capacity and fresh load admission")?;
+        ensure!(
+            assessment.load_admission.is_admitted(),
+            "paired load denied"
+        );
+        let mut report = preweight.report.clone();
+        report["peak_capacity_passed"] = true.into();
+        report["peak_capacity"] = format!("{:?}", assessment.peak_capacity).into();
+        report["load_admission"] = admission_report(&assessment.load_admission);
+        report["whole_peak_now"] = admission_report(&assessment.whole_peak_now);
+        report["whole_peak_now_scope"] = "diagnostic_only_not_runtime_admission".into();
+        Some(report)
+    } else {
+        None
+    };
+    factory(report.as_ref())
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize)]
@@ -652,30 +700,42 @@ fn diagnostic_case_with<P: DiagnosticProbe>(
     Ok(sample)
 }
 
-/// Suite is the sole caller and owns a fresh, private context for the entire
-/// diagnostic run. Counters are enabled once there; only snapshots happen here.
+/// Suite owns the plan and a fresh context through import, binding and all cases.
 pub(crate) fn run(
     bench: &mut dyn FamilyBench,
     row_ctx: &SuiteRowContext,
     n: usize,
     runs: usize,
     seed: u64,
+    plan: &ColdPrefillPlan,
     preweight: &serde_json::Value,
-    diagnostic_ctx: Option<&MetalContext>,
+    ctx: &MetalContext,
+    diagnostic: bool,
 ) -> Result<Vec<BenchRow>> {
-    let evidence = if let Some(ctx) = diagnostic_ctx {
+    if diagnostic {
         ensure!(
-            preweight["caller_cpu_bytes"].as_u64() == Some(caller_cpu_bytes(true)),
+            plan.caller_cpu_bytes == caller_cpu_bytes(true),
             "paired diagnostic requires its additional preweight CPU reserve"
         );
-        collect(runs, shutdown::checkpoint, |case| {
-            diagnostic_case(ctx, bench, row_ctx, n, seed, case)
-        })?
-    } else {
-        collect(runs, shutdown::checkpoint, |case| {
-            native_case(bench, row_ctx, n, seed, case)
-        })?
-    };
+    }
+    let evidence = collect_assessed(
+        runs,
+        shutdown::checkpoint,
+        || {
+            let admission = plan
+                .assess_runtime(ctx.memory_signals())
+                .context("paired fresh postbinding runtime admission")?;
+            ensure!(admission.is_admitted(), "paired runtime denied");
+            Ok(())
+        },
+        |case| {
+            if diagnostic {
+                diagnostic_case(ctx, bench, row_ctx, n, seed, case)
+            } else {
+                native_case(bench, row_ctx, n, seed, case)
+            }
+        },
+    )?;
     aggregate(
         row_ctx,
         n,
@@ -685,6 +745,20 @@ pub(crate) fn run(
         preweight,
         &evidence,
     )
+}
+
+fn collect_assessed(
+    runs: usize,
+    checkpoint: impl FnMut() -> Result<()>,
+    mut assess_runtime: impl FnMut() -> Result<()>,
+    mut execute: impl FnMut(Case) -> Result<NativeCase>,
+) -> Result<Vec<(Case, NativeCase)>> {
+    collect(runs, checkpoint, |case| {
+        // The prior native case has released state/logits/commands and its pool.
+        // Do not put this in checkpoint: drive also checkpoints after all cases.
+        assess_runtime()?;
+        execute(case)
+    })
 }
 
 fn collect(
@@ -885,6 +959,378 @@ mod tests {
             encode_ms: 5.0,
             commit_wait_ms: 20.0,
             wall_ms: 0.0,
+        }
+    }
+
+    const MIB: u64 = 1 << 20;
+
+    fn staged_preweight(diagnostic: bool) -> PairedPreweight {
+        use qwen_llm::deepseek_v41::forward::RequestMemoryEstimate;
+        use qwen_llm::deepseek_v41::gguf::{ByteCounters, ResidentStoragePlan};
+        let caller = caller_cpu_bytes(diagnostic);
+        let plan = ColdPrefillPlan {
+            resident_storage: ResidentStoragePlan {
+                page_size: 16384,
+                max_buffer_length: 1 << 30,
+                bytes: ByteCounters::default(),
+                windows: vec![],
+                metal_view_bytes: 400 * MIB,
+                private_shadow_bytes: 20 * MIB,
+                shared_eof_window_count: 0,
+                private_window_count: 0,
+            },
+            request: RequestMemoryEstimate {
+                cpu_persistent_bytes: 10 * MIB,
+                cpu_transient_bytes: 10 * MIB,
+                cpu_bytes: 20 * MIB,
+                metal_bytes: 100 * MIB,
+                total_bytes: 120 * MIB,
+            },
+            full_incremental_metal_bytes: 200 * MIB,
+            full_incremental_cpu_bytes: 10 * MIB,
+            ced: Some(CedMemoryEstimate {
+                incremental_metal_bytes: 300 * MIB,
+                incremental_cpu_bytes: 20 * MIB,
+                ..Default::default()
+            }),
+            runtime_metal_bytes: 400 * MIB,
+            runtime_cpu_bytes: 40 * MIB,
+            binding_metal_bytes: 10 * MIB,
+            binding_cpu_bytes: 30 * MIB,
+            caller_cpu_bytes: caller,
+            required_metal_bytes: 810 * MIB,
+            required_cpu_bytes: 90 * MIB + caller,
+            load_metal_bytes: 410 * MIB,
+            load_cpu_bytes: 50 * MIB + caller,
+            runtime_gate_cpu_bytes: 70 * MIB + caller,
+        };
+        let report = preweight_report(
+            &plan,
+            FamilyBenchExtent {
+                forwards: 3,
+                prefill_endpoint: 3,
+            },
+        )
+        .unwrap();
+        PairedPreweight { plan, report }
+    }
+
+    fn staged_signals() -> MetalMemorySignals {
+        MetalMemorySignals {
+            recommended_max_bytes: 4000 * MIB,
+            current_allocated_bytes: 0,
+            process_limit_remaining_bytes: Some(4000 * MIB),
+            host_budget: Some(qwen_llm::metal::HostMemoryBudget {
+                physical_bytes: 5000 * MIB,
+                // Keep the ordinary 20% margin, leaving 600 MiB for new demand.
+                conservative_available_bytes: 1600 * MIB,
+                external_gap_bytes: 0,
+                private_shadow_bytes: 0,
+            }),
+        }
+    }
+
+    #[test]
+    fn staged_load_allows_only_future_availability_denial_and_reports_static_budgets() {
+        for diagnostic in [false, true] {
+            let preweight = staged_preweight(diagnostic);
+            let calls = Cell::new(0);
+            with_load(Some(&preweight), staged_signals, |report| {
+                calls.set(calls.get() + 1);
+                let report = report.unwrap();
+                assert_eq!(report["peak_capacity_passed"], true);
+                assert_eq!(report["load_admission"]["admitted"], true);
+                assert_eq!(report["whole_peak_now"]["admitted"], false);
+                assert_eq!(
+                    report["whole_peak_now"]["reason"],
+                    "HostAvailabilityInsufficient"
+                );
+                assert_eq!(
+                    report["whole_peak_now_scope"],
+                    "diagnostic_only_not_runtime_admission"
+                );
+                assert!(report.get("accepted").is_none());
+                assert!(report.get("runtime_admission").is_none());
+                assert_eq!(
+                    report["request_metal_bytes"],
+                    preweight.plan.request.metal_bytes
+                );
+                assert_eq!(
+                    report["request_cpu_bytes"],
+                    preweight.plan.request.cpu_bytes
+                );
+                for (field, bytes) in [
+                    ("required_metal_bytes", preweight.plan.required_metal_bytes),
+                    ("required_cpu_bytes", preweight.plan.required_cpu_bytes),
+                    ("load_metal_bytes", preweight.plan.load_metal_bytes),
+                    ("load_cpu_bytes", preweight.plan.load_cpu_bytes),
+                    ("runtime_metal_bytes", preweight.plan.runtime_metal_bytes),
+                    ("runtime_cpu_bytes", preweight.plan.runtime_cpu_bytes),
+                    (
+                        "runtime_gate_cpu_bytes",
+                        preweight.plan.runtime_gate_cpu_bytes,
+                    ),
+                    ("caller_cpu_bytes", caller_cpu_bytes(diagnostic)),
+                ] {
+                    assert_eq!(report[field].as_u64(), Some(bytes), "{field}");
+                }
+                Ok(())
+            })
+            .unwrap();
+            assert_eq!(calls.get(), 1);
+        }
+        with_load(
+            None,
+            || panic!("ordinary suite must not probe a pair gate"),
+            |report| {
+                assert!(report.is_none());
+                Ok(())
+            },
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn capacity_and_load_denials_stop_before_the_resident_factory() {
+        for fault in [
+            "device",
+            "ownership",
+            "process",
+            "host_missing",
+            "process_missing",
+            "invalid_host",
+            "load_availability",
+            "overflow",
+        ] {
+            let mut preweight = staged_preweight(false);
+            let mut signals = staged_signals();
+            match fault {
+                "device" => signals.recommended_max_bytes = preweight.plan.required_metal_bytes - 1,
+                "ownership" => {
+                    let host = signals.host_budget.as_mut().unwrap();
+                    host.external_gap_bytes = 3100 * MIB;
+                }
+                "process" => {
+                    signals.process_limit_remaining_bytes = Some(
+                        preweight.plan.required_metal_bytes + preweight.plan.required_cpu_bytes - 1,
+                    )
+                }
+                "host_missing" => signals.host_budget = None,
+                "process_missing" => signals.process_limit_remaining_bytes = None,
+                "invalid_host" => {
+                    signals
+                        .host_budget
+                        .as_mut()
+                        .unwrap()
+                        .conservative_available_bytes = 5001 * MIB
+                }
+                "load_availability" => {
+                    signals
+                        .host_budget
+                        .as_mut()
+                        .unwrap()
+                        .conservative_available_bytes =
+                        1000 * MIB + preweight.plan.load_metal_bytes + preweight.plan.load_cpu_bytes
+                            - 1
+                }
+                "overflow" => preweight.plan.required_metal_bytes = u64::MAX,
+                _ => unreachable!(),
+            }
+            let result: Result<()> = with_load(
+                Some(&preweight),
+                || signals,
+                |_| panic!("resident factory entered after {fault} denial"),
+            );
+            assert!(result.is_err(), "{fault}");
+        }
+    }
+
+    #[test]
+    fn fresh_runtime_gate_follows_every_state_drop_and_pool_drain_and_releases_resident() {
+        struct Resident(Rc<Cell<bool>>);
+        impl Drop for Resident {
+            fn drop(&mut self) {
+                self.0.set(false);
+            }
+        }
+        struct State(Rc<RefCell<Vec<&'static str>>>);
+        impl Drop for State {
+            fn drop(&mut self) {
+                self.0.borrow_mut().push("state_drop");
+            }
+        }
+        struct Drain(Rc<RefCell<Vec<&'static str>>>);
+        impl Drop for Drain {
+            fn drop(&mut self) {
+                self.0.borrow_mut().push("drain");
+            }
+        }
+        struct Probe {
+            trace: Rc<RefCell<Vec<&'static str>>>,
+            after: bool,
+        }
+        impl DiagnosticProbe for Probe {
+            type Scope = profile::Scope;
+            fn resources(&mut self) -> Result<DiagnosticResources> {
+                self.trace.borrow_mut().push(if self.after {
+                    "snapshot_after"
+                } else {
+                    "snapshot"
+                });
+                self.after = !self.after;
+                Ok(DiagnosticResources {
+                    process_pageins: 0,
+                    process_disk_read_bytes: 0,
+                    process_resident_size_bytes: 0,
+                    process_phys_footprint_bytes: 0,
+                    device_current_allocated_bytes: 0,
+                })
+            }
+            fn pipelines(&self) -> MetalPipelineCacheMetrics {
+                Default::default()
+            }
+            fn begin(&mut self) -> Result<Self::Scope> {
+                self.trace.borrow_mut().push("scope");
+                profile::Scope::begin().map_err(anyhow::Error::msg)
+            }
+            fn finish(&mut self, scope: Self::Scope) -> profile::Report {
+                self.trace.borrow_mut().push("finish");
+                scope.finish();
+                profile_report(vec![])
+            }
+        }
+        for diagnostic in [false, true] {
+            for stop in 0..=10 {
+                let preweight = staged_preweight(diagnostic);
+                let resident_live = Rc::new(Cell::new(false));
+                let trace = Rc::new(RefCell::new(Vec::new()));
+                let assessments = Cell::new(0);
+                let states = Cell::new(0);
+                let prefills = Cell::new(0);
+                let checkpoints = Cell::new(0);
+                let result = with_load(Some(&preweight), staged_signals, |_| {
+                    resident_live.set(true);
+                    let _resident = Resident(resident_live.clone());
+                    let mut bench = v41_pair_test_bench(
+                        || {
+                            states.set(states.get() + 1);
+                            trace.borrow_mut().push("state");
+                            Ok(State(trace.clone()))
+                        },
+                        |_, _, execution| {
+                            prefills.set(prefills.get() + 1);
+                            trace.borrow_mut().push("prefill");
+                            Ok((vec![0.; 257], report(execution)))
+                        },
+                    );
+                    let mut probe = Probe {
+                        trace: trace.clone(),
+                        after: false,
+                    };
+                    collect_assessed(
+                        2,
+                        || {
+                            checkpoints.set(checkpoints.get() + 1);
+                            Ok(())
+                        },
+                        || {
+                            assert!(resident_live.get());
+                            let index = assessments.get();
+                            if index > 0 {
+                                assert_eq!(
+                                    trace.borrow().last(),
+                                    Some(&if diagnostic { "finish_event" } else { "drain" })
+                                );
+                            }
+                            assessments.set(index + 1);
+                            trace.borrow_mut().push("runtime");
+                            let mut signals = staged_signals();
+                            signals.current_allocated_bytes = preweight.plan.load_metal_bytes;
+                            let host = signals.host_budget.as_mut().unwrap();
+                            host.private_shadow_bytes =
+                                preweight.plan.resident_storage.private_shadow_bytes;
+                            host.conservative_available_bytes = 1000 * MIB
+                                + host.private_shadow_bytes
+                                + if index == stop {
+                                    preweight.plan.runtime_metal_bytes
+                                        + preweight.plan.runtime_gate_cpu_bytes
+                                        - 1
+                                } else {
+                                    600 * MIB
+                                };
+                            let admission = preweight.plan.assess_runtime(signals)?;
+                            assert!(admission.is_admitted());
+                            assert_eq!(
+                                admission.required_bytes,
+                                Some(
+                                    preweight.plan.runtime_metal_bytes
+                                        + preweight.plan.runtime_gate_cpu_bytes
+                                )
+                            );
+                            Ok(())
+                        },
+                        |case| {
+                            let mut execute = || {
+                                native_case_with(
+                                    &mut bench,
+                                    &row_context(),
+                                    3,
+                                    1,
+                                    case,
+                                    |body| {
+                                        let _drain = Drain(trace.clone());
+                                        body()
+                                    },
+                                    fingerprint_logits,
+                                )
+                            };
+                            let mut sample = if diagnostic {
+                                diagnostic_case_with(&mut probe, case, execute, |event| {
+                                    trace.borrow_mut().push(match event {
+                                        DiagnosticEvent::Start(_) => "start_event",
+                                        DiagnosticEvent::Finish(_) => "finish_event",
+                                    });
+                                    Ok(())
+                                })?
+                            } else {
+                                execute()?
+                            };
+                            sample.sample_ns = 100;
+                            Ok(sample)
+                        },
+                    )
+                });
+                assert_eq!(result.is_ok(), stop == 10);
+                assert!(!resident_live.get());
+                assert_eq!(states.get(), stop);
+                assert_eq!(prefills.get(), stop);
+                assert_eq!(assessments.get(), if stop == 10 { 10 } else { stop + 1 });
+                assert_eq!(checkpoints.get(), if stop == 10 { 11 } else { stop + 1 });
+                let mut expected = Vec::new();
+                for _ in 0..stop {
+                    expected.push("runtime");
+                    if diagnostic {
+                        expected.extend(["snapshot", "start_event", "scope"]);
+                    }
+                    expected.extend(["state", "prefill", "state_drop", "drain"]);
+                    if diagnostic {
+                        expected.extend(["finish", "snapshot_after", "finish_event"]);
+                    }
+                }
+                if stop < 10 {
+                    expected.push("runtime");
+                }
+                assert_eq!(*trace.borrow(), expected);
+                if let Ok(evidence) = result {
+                    assert_eq!(evidence.len(), 10);
+                    assert!(
+                        evidence
+                            .iter()
+                            .all(|(_, sample)| sample.instrumented == diagnostic)
+                    );
+                }
+                drop(profile::Scope::begin().expect("runtime denial leaves no diagnostic scope"));
+            }
         }
     }
 
@@ -1562,29 +2008,25 @@ mod tests {
         )
         .unwrap();
         assert_eq!(evidence.len(), 38);
-        let preweight = serde_json::json!({
-            "accepted": true,
-            "prompt_rows": MAX_PP,
-            "capacity": MAX_PP,
-            "executions": [PrefillExecution::FullForward, PrefillExecution::ShrinkingCed],
-            "resident_metal_view_bytes": u64::MAX,
-            "resident_private_shadow_bytes": u64::MAX,
-            "ced_incremental_metal_bytes": u64::MAX,
-            "ced_incremental_cpu_bytes": u64::MAX,
-            "full_incremental_metal_bytes": u64::MAX,
-            "full_incremental_cpu_bytes": u64::MAX,
-            "runtime_metal_bytes": u64::MAX,
-            "runtime_cpu_bytes": u64::MAX,
-            "binding_metal_bytes": u64::MAX,
-            "binding_cpu_bytes": u64::MAX,
-            "caller_cpu_bytes": CALLER_CPU_BYTES,
-            "required_metal_bytes": u64::MAX,
-            "required_cpu_bytes": u64::MAX,
-            "admission_reason": "AdmittedWithHostBudget",
-            "admission_required_bytes": u64::MAX,
-            "working_set_headroom_bytes": u64::MAX,
-            "scope": "preweight_budget_not_reservation_later_state_and_prefill_gates_retained",
-        });
+        let preweight_plan = staged_preweight(false);
+        let mut preweight = with_load(Some(&preweight_plan), staged_signals, |report| {
+            Ok(report.unwrap().clone())
+        })
+        .unwrap();
+        fn saturate_numbers(value: &mut serde_json::Value) {
+            match value {
+                serde_json::Value::Number(_) => *value = u64::MAX.into(),
+                serde_json::Value::Object(fields) => {
+                    fields.values_mut().for_each(saturate_numbers);
+                }
+                serde_json::Value::Array(values) => values.iter_mut().for_each(saturate_numbers),
+                _ => {}
+            }
+        }
+        saturate_numbers(&mut preweight);
+        preweight["prompt_rows"] = MAX_PP.into();
+        preweight["capacity"] = MAX_PP.into();
+        preweight["caller_cpu_bytes"] = CALLER_CPU_BYTES.into();
         let rows = aggregate(
             &row_context(),
             MAX_PP,

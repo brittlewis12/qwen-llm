@@ -64,6 +64,26 @@ fn cold_preflight_uses_validated_small_metadata_without_import_or_new_maps() {
                 + cold.runtime_cpu_bytes
                 + 334_226_432
         );
+        assert_eq!(
+            cold.load_metal_bytes,
+            storage.metal_view_bytes + cold.binding_metal_bytes
+        );
+        assert_eq!(
+            cold.load_cpu_bytes,
+            storage.private_shadow_bytes + cold.binding_cpu_bytes + cold.caller_cpu_bytes
+        );
+        assert_eq!(
+            cold.runtime_gate_cpu_bytes,
+            cold.runtime_cpu_bytes + cold.binding_cpu_bytes + cold.caller_cpu_bytes
+        );
+        let mut staged = preflight_signals();
+        let host = staged.host_budget.as_mut().unwrap();
+        let reserve = host.physical_bytes - host.ceiling_bytes().unwrap();
+        host.conservative_available_bytes = reserve + cold.load_metal_bytes + cold.load_cpu_bytes;
+        let assessment = cold.plan.assess_load(staged).unwrap();
+        assert!(assessment.load_admission.is_admitted());
+        assert!(!assessment.whole_peak_now.is_admitted());
+        assert_eq!(Arc::strong_count(&g.shards[0].mmap), refs);
         let p = plan(&g).unwrap();
         assert_ne!(
             cold.request,

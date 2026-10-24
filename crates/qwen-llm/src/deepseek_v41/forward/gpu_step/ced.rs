@@ -43,7 +43,7 @@ impl Storage {
         capacity: usize,
         plan: &CedPlan,
     ) -> std::result::Result<Self, StateError> {
-        let allocation_base = model.ctx.memory_signals().current_allocated_bytes;
+        let allocation_base = model.ctx.current_allocated_size();
         op::require(
             attention_gpu::QueryControls::logical_bytes(
                 &model.config,
@@ -81,10 +81,10 @@ impl Storage {
     }
 
     fn observe(&self, ctx: &MetalContext) {
+        // This samples allocation, not admission; do not resample host/task budgets.
         self.peak.set(
             self.peak.get().max(
-                ctx.memory_signals()
-                    .current_allocated_bytes
+                ctx.current_allocated_size()
                     .saturating_sub(self.allocation_base),
             ),
         );

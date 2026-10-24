@@ -1457,7 +1457,7 @@ mod transport_relief_tests {
             observations += 1;
             super::super::transport_memory::admit_resident_transport_with_headroom(
                 100,
-                headroom(1_000, 701),
+                headroom(1_000, 901),
             )
         })
         .unwrap_err();
@@ -1480,9 +1480,9 @@ mod transport_relief_tests {
                 let result = with_transport_snapshot_release(&mut cache, None, || {
                     observations += 1;
                     let available = if recover && weak.upgrade().is_none() {
-                        300
+                        100
                     } else {
-                        299
+                        99
                     };
                     super::super::transport_memory::admit_resident_transport_with_headroom(
                         100,

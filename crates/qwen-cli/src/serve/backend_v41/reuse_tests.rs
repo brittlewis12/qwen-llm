@@ -648,7 +648,7 @@ fn output_host_ceiling_refusal_keeps_snapshots_without_retry() {
                 external_gap_bytes: 0,
                 private_shadow_bytes: 0,
             },
-            701,
+            901,
             0,
         )
     })

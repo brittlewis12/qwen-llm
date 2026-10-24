@@ -224,7 +224,7 @@ fn host_limited_capacity_advice_fits_combined_admission_budget() {
         process_limit_remaining_bytes: Some(required * 2),
         host_budget: Some(HostMemoryBudget {
             physical_bytes: physical,
-            conservative_available_bytes: physical / 5 + host_remaining,
+            conservative_available_bytes: host_remaining,
             external_gap_bytes: 0,
             private_shadow_bytes: 0,
         }),

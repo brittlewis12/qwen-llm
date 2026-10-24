@@ -1599,7 +1599,7 @@ mod tests {
                 private_shadow_bytes: 0,
             }),
         };
-        let exact = 6 * GIB - SNAPSHOT_CAPTURE_HEADROOM_BYTES;
+        let exact = 8 * GIB - SNAPSHOT_CAPTURE_HEADROOM_BYTES;
         assert!(snapshot_capture_admission(exact, signals).is_ok());
         assert_eq!(
             snapshot_capture_admission(exact + 1, signals),
@@ -1680,7 +1680,7 @@ mod tests {
             process_limit_remaining_bytes: Some(required - 60),
             host_budget: Some(qwen_llm::metal::HostMemoryBudget {
                 physical_bytes: 10 * GIB,
-                conservative_available_bytes: 2 * GIB + required - 40,
+                conservative_available_bytes: required - 40,
                 external_gap_bytes: 0,
                 private_shadow_bytes: 0,
             }),
@@ -1710,7 +1710,7 @@ mod tests {
         assert_eq!(reads.get(), 2);
 
         let mut signals = observed.get();
-        signals.current_allocated_bytes = 8 * GIB - required + 1;
+        signals.current_allocated_bytes = 10 * GIB - required + 1;
         let result = admit_snapshot_capture_for(
             "host-ceiling",
             100,

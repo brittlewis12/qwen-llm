@@ -1928,8 +1928,9 @@ mod admission_refusal_tests {
             current_allocated_bytes: 100,
             process_limit_remaining_bytes: Some(0),
             host_budget: Some(HostMemoryBudget {
-                physical_bytes: 1_000,
-                conservative_available_bytes: 900,
+                // Align actual physical and device capacity to test exact exhaustion.
+                physical_bytes: 800,
+                conservative_available_bytes: 800,
                 external_gap_bytes: 0,
                 private_shadow_bytes: 0,
             }),
@@ -1940,7 +1941,7 @@ mod admission_refusal_tests {
             .host_budget
             .as_mut()
             .unwrap()
-            .conservative_available_bytes = 200;
+            .conservative_available_bytes = 0;
         assert_eq!(before.host_remaining_bytes(), Some(0));
         assert!(completed_external_import_admission(before).is_admitted());
         assert!(!evaluate_metal_memory_admission(0, 0, before, true).is_admitted());
@@ -1954,11 +1955,9 @@ mod admission_refusal_tests {
             R::HostInsufficient
         );
         after = before;
-        after
-            .host_budget
-            .as_mut()
-            .unwrap()
-            .conservative_available_bytes = 199;
+        // Capacity fits exactly, but fresh availability cannot cover the private shadow.
+        after.current_allocated_bytes = 799;
+        after.host_budget.as_mut().unwrap().private_shadow_bytes = 1;
         assert_eq!(after.host_remaining_bytes(), Some(0));
         assert_eq!(
             completed_external_import_admission(after).reason,

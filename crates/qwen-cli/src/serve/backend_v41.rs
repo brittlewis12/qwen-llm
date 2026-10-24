@@ -189,7 +189,7 @@ fn finite_headroom(remaining: u64) -> Option<HostMemoryHeadroom> {
     HostMemoryHeadroom::from_budget(
         qwen_llm::metal::HostMemoryBudget {
             physical_bytes: 5 << 40,
-            conservative_available_bytes: (1 << 40) + remaining,
+            conservative_available_bytes: remaining,
             external_gap_bytes: 0,
             private_shadow_bytes: 0,
         },

@@ -131,8 +131,8 @@ mod tests {
         assert_eq!(missing.reason, R::HostSignalUnavailable);
         assert_eq!(missing.error.status, 500);
         for (available, current, process, reason) in [
-            (1_000, 701, 0, R::HostInsufficient),
-            (299, 100, 0, R::HostAvailabilityInsufficient),
+            (1_000, 901, 0, R::HostInsufficient),
+            (99, 100, 0, R::HostAvailabilityInsufficient),
             (1_000, 100, 99, R::ProcessInsufficient),
         ] {
             let headroom = HostMemoryHeadroom::from_budget(

@@ -6,6 +6,32 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the current state and evidence index.
 
+## 2026-10-24 - Native 2K CED Cohort Completed; Submission Fusion In Flight
+
+- Source `999a2383` completes ten production-timing Full/CED calls in one
+  resident Maya-S model. Retained Full times are 2.586 / 2.305 s; CED times are
+  2.672 / 12.479 s. Pilot-plus-main max/min is 5.29 Full and 5.07 CED. All
+  endpoint heads match the prior reference. These variable samples do not
+  establish a performance win; the v2 protocol reports dispersion instead of
+  stopping collection at an arbitrary 1.5x ratio.
+- A following diagnostic reveals another accounting error: shared GPU views
+  were charged against a cache-blind CPU-availability estimate as well as MWSS.
+  Maintained fix `1bb0af0a` separates those domains, preserves actual combined
+  physical/process/private ownership bounds, and records explicit CPU demand.
+  Snapshot-based Q2 regression `d0ea399a` admits shared views under MWSS without
+  purging cache or selecting a smaller model; it is not a Q2 execution result.
+- Benchmark supervision no longer imposes default wired-percentage or hidden
+  physical/64 availability limits. VM usage is observed; an available OS-critical
+  pressure signal stops work. Missing optional pressure is explicitly unknown.
+  All 30 controller tests pass; actual critical pressure was not induced.
+- A fresh device query confirms the operator-selected MWSS of 240 GiB
+  (257,698,037,760 bytes). This starts a new measurement configuration; do not
+  attribute cross-configuration differences to CED alone.
+- Seed/first-packed-decoder fusion is in flight (`perf/v41-ced-scratch`): source
+  inventory predicts 38 -> 21 submissions at 2K and 47 -> 27 at 8K with unchanged
+  work rows and scratch envelope. Runtime/fault and full-model requalification
+  remain pending; no residency or pinning experiment is reopened.
+
 ## 2026-10-24 - CED Full-Model Correctness Qualified At 128/2K/8K
 
 - Clean source `eba1f591` passes Maya-S Full/CED at 128, 2048 and 8192 tokens,

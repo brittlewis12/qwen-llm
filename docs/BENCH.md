@@ -71,6 +71,9 @@ For priorities: `docs/PERF-ROADMAP.md`.
 - `scripts/bench/pilot.py` supplies a reusable pilot runner. It requires stable
   native timing samples and healthy host telemetry before further launches,
   monitors health every two seconds, and supports a deadline and stop file.
+  Its default memory supervision observes VM counts without a percentage or
+  free-page floor; an observed OS-critical pressure event stops the owned job.
+  Missing optional pressure data is recorded as unknown, not assumed normal.
   Cancellation signals only the owned child, with bounded graceful waits; it
   does not retry, signal process groups, or force-kill an unresponsive child.
 - The runner is secondary protection, not permission to exceed loader admission

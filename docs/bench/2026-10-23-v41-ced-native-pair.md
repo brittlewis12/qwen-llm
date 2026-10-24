@@ -34,6 +34,23 @@ separate; the following timing history does not establish a scratch-reuse gain.
 
 ## Scope
 
+Follow-up native source `999a2383` uses a v2 collection protocol: it keeps the
+balanced chronology and reports per-policy dispersion without a 1.5x scheduling
+veto. A completed production-timing 2K cohort retains Full samples of
+2,585,895,458 / 2,304,673,542 ns and CED samples of
+2,671,738,209 / 12,479,097,250 ns. Pilot-plus-main max/min is 5.294 / 5.069.
+All ten endpoint hashes match the prior 2K reference; minimum sampled
+conservative CPU availability is 44.14 GiB, maximum wired plus compressor
+176.96 GiB. This is
+complete observational data, not an accepted speedup.
+
+A matched diagnostic then refuses before import because the old accounting
+compares the shared GPU load with CPU cache availability. `1bb0af0a` corrects
+that dimensional error; it does not purge or add cache credits. Subsequent
+runs use the operator-selected 240 GiB MWSS, confirmed by a fresh device query,
+so comparisons must retain that configuration. The historical protocol and
+measurements below keep their original v1 meaning.
+
 Initial experimental source `6896f87d` compares production Full forward and shrinking
 CED inside one resident Maya-S model, with fresh KV state for every call. The
 compiled/runtime identity matches and both are clean. This is synthetic cold-KV

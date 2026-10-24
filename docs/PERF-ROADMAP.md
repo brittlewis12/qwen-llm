@@ -64,7 +64,15 @@ bet, not a native speedup claim; completion-wall variability remains separate.
 Candidate `eec23a0f` passes bounded fresh/reused bitwise, allocation, arithmetic
 lineage and cleanup fixtures on M4/M5, plus broader forward/FFN/CED regressions.
 Full-model qualification now passes at 128/2K/8K (`eba1f591`) with all heads and
-causal state identical to frozen Full/CED. Native gains remain unmeasured.
+causal state identical to frozen Full/CED. Native gains remain unestablished.
+
+Native v2 measurement (`999a2383`) now completes the full 2K cohort rather than
+vetoing timing dispersion: retained Full 2.586 / 2.305 s, CED 2.672 / 12.479 s,
+with pilot-plus-main variation above 5x for both. No usable win is established.
+Seed/first-decoder fusion is in flight on the same branch, targeting 38 -> 21
+submissions at 2K and 47 -> 27 at 8K without changing arithmetic or scratch
+capacity. It still needs bounded and full-model requalification. New runs use
+the operator-selected 240 GiB MWSS; compare code variants within that setting.
 
 Mapping/admission repair: landed (2026-10-23 memory-safety entry and
 `bench/2026-10-23-v41-memory-safety.md`). Shared EOF removes the old 156.059 GiB

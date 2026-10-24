@@ -584,7 +584,7 @@ fn assert_causal(a: &State, b: &State, label: &str) {
 }
 
 #[test]
-#[ignore = "self-leased <=128 MiB small-geometry 2K/4K chunk edges; MTL debug required; no real model"]
+#[ignore = "self-leased <=256 MiB complete buffers including 4K Engram uploads; MTL debug required; no real model"]
 fn selected_2k_and_4k_chunk_edges_match_current_full_bits_state_and_counts() {
     assert_eq!(std::env::var("MTL_DEBUG_LAYER").as_deref(), Ok("1"));
     assert_eq!(std::env::var("QWEN_METAL_LEASE_WAIT").as_deref(), Ok("1"));
@@ -605,6 +605,9 @@ fn selected_2k_and_4k_chunk_edges_match_current_full_bits_state_and_counts() {
                 )
                 .unwrap();
                 let price = |bytes| -> Result<u64> {
+                    if bytes == 0 {
+                        return Ok(0);
+                    }
                     Ok(ctx
                         .price_shared_buffer_upper(bytes)
                         .unwrap()
@@ -627,22 +630,27 @@ fn selected_2k_and_4k_chunk_edges_match_current_full_bits_state_and_counts() {
                 )
                 .unwrap();
                 let ced_budget = ced_budget.unwrap();
-                let explicit_bound = ctx.current_allocated_size()
-                    + 2 * request.metal_bytes
-                    + full_budget.0
-                    + ced_budget.incremental_metal_bytes;
+                let metal =
+                    2 * request.metal_bytes + full_budget.0.max(ced_budget.incremental_metal_bytes);
+                let cpu = 2 * request.cpu_bytes
+                    + full_budget.1.max(ced_budget.incremental_cpu_bytes)
+                    + 32 * 1024 * 1024;
+                let explicit_bound = ctx.current_allocated_size() + metal;
                 assert!(
-                    explicit_bound <= 128 * 1024 * 1024,
+                    explicit_bound <= 256 * 1024 * 1024,
                     "complete fixture upper bound {explicit_bound}"
                 );
                 let admission = metal::evaluate_metal_memory_admission_with_cpu_bytes(
-                    2 * request.metal_bytes + full_budget.0 + ced_budget.incremental_metal_bytes,
-                    32 * 1024 * 1024,
+                    metal,
+                    cpu,
                     0,
                     ctx.memory_signals(),
                     true,
                 );
                 assert!(admission.is_admitted(), "{admission:?}");
+                eprintln!(
+                    "chunk-edge fixture width={width} N={n} complete_metal_bound={explicit_bound} additional_cpu_bound={cpu}"
+                );
                 let mut full = model.new_state(n + 1).unwrap();
                 let mut shrinking = model.new_state(n + 1).unwrap();
                 let input = tokens(n);

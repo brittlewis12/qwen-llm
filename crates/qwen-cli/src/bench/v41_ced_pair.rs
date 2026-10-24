@@ -3352,4 +3352,72 @@ mod tests {
             .is_err()
         );
     }
+
+    #[test]
+    fn adaptive_transition_cli_args_keep_selected_geometry_and_caller_bounds() {
+        use clap::Parser;
+        assert_eq!(MAX_DIAGNOSTIC_OPERATIONS, 4096);
+        for n in [2047, 2048, 2049, 4095, 4096, 4097, 8192] {
+            for diagnostic in [false, true] {
+                for production in [false, true] {
+                    let n_text = n.to_string();
+                    let mut argv = vec![
+                        "qwen-bench",
+                        "suite",
+                        "-m",
+                        "fixture.gguf",
+                        "--pp",
+                        &n_text,
+                        "--runs",
+                        "2",
+                        "--v41-ced-pair",
+                    ];
+                    if diagnostic {
+                        argv.push("--v41-ced-pair-diagnostic");
+                    }
+                    if production {
+                        argv.push("--v41-ced-pair-production-timing");
+                    }
+                    let Cmd::Suite(args) = Args::try_parse_from(argv).unwrap().cmd else {
+                        panic!("suite")
+                    };
+                    validate_args(
+                        ModelFamily::DeepSeekV41,
+                        &args.pp,
+                        &args.tg,
+                        &args.depth,
+                        args.runs,
+                        args.no_warmup,
+                        args.prefill_chunk,
+                    )
+                    .unwrap();
+                    assert_eq!(args.pp, [n]);
+                    assert_eq!(args.v41_ced_pair_diagnostic, diagnostic);
+                    assert_eq!(args.v41_ced_pair_production_timing, production);
+                    let extent =
+                        FamilyBenchExtent::for_shapes(&args.pp, &args.tg, &args.depth, (0, 0))
+                            .unwrap();
+                    assert_eq!(extent.prefill_endpoint, n);
+                    assert_eq!(extent.forwards, n);
+                    assert!(diagnostic_operation_bound(n, MAX_LAYERS) <= MAX_DIAGNOSTIC_OPERATIONS);
+                    assert_eq!(
+                        caller_cpu_bytes(diagnostic),
+                        CALLER_CPU_BYTES + if diagnostic { DIAGNOSTIC_CPU_BYTES } else { 0 }
+                    );
+                    for width in [2048, 4096] {
+                        // This synthetic ledger tests report plumbing; core geometry
+                        // tests independently compare actual per-allocation prices.
+                        let mut staged = staged_preweight(diagnostic);
+                        staged.plan.full_chunk_rows = width;
+                        staged.plan.ced.as_mut().unwrap().full_chunk_rows = width;
+                        let report = preweight_report(&staged.plan, extent).unwrap();
+                        assert_eq!(report["prompt_rows"], n);
+                        assert_eq!(report["capacity"], n);
+                        assert_eq!(report["full_chunk_rows"], width);
+                        assert_eq!(report["caller_cpu_bytes"], caller_cpu_bytes(diagnostic));
+                    }
+                }
+            }
+        }
+    }
 }

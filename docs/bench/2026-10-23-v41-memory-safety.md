@@ -42,11 +42,13 @@ CPU demand, Metal demand and reserve must fit a validated host budget. A raw
 zero Mach process limit can omit only the process constraint, never the host
 constraint. Missing or invalid telemetry refuses admission.
 
-The current process's device/import ownership plus private-shadow exposure is
-capped at 80% of physical RAM. A second bound uses fresh conservative available
-memory, retaining the other 20% for the host. Availability credits free pages
-and a lower bound on inactive non-anonymous pages; it does not guess that active
-file cache, speculative and purgeable counters are independent reclaimable pools.
+The added 80%-physical ownership ceiling and 20%-physical availability reserve
+were uncalibrated application policy, not Metal requirements. They are removed
+in `d47e264c` (2026-10-24): Metal's working-set recommendation already supplies
+device headroom. Combined demand still must fit actual physical capacity and
+fresh observed availability, with uncovered imports and private-shadow exposure
+accounted. Availability credits free pages and a lower bound on inactive
+non-anonymous pages; it does not add overlapping VM counters.
 
 Raw Metal counters remain raw. The ledger adds uncovered external import lengths
 and full private shadows. It credits `allocatedSize` only when the observed
@@ -110,11 +112,11 @@ The shared loader planner, with the recorded 16 KiB page geometry, reports:
 | UD-Q2_K_XL | 185.907 GiB | 0 | 45 | 5 |
 | UD-IQ3_XXS | 217.414 GiB | 0 | 45 | 5 |
 
-These audits do not import weights. The 256 GiB ownership ceiling is 204.8 GiB
-before runtime demand, so full IQ3 is refused even after its private EOF exposure
-is removed. Shortening a prompt to 2K does not shrink resident weights. Maya-S
-offers more room for a fitting CED pilot, not a runtime-fit or quality-substitute
-claim; runtime CPU/Metal bounds and fresh host availability must still admit it.
+These audits do not import weights. The former 204.8 GiB cutoff on a 256 GiB
+host was the removed percentage policy, not proof that full IQ3 cannot fit.
+Actual Metal, host and runtime demand must determine fit; IQ3 has not been rerun
+here. Shortening a prompt to 2K does not shrink resident weights. Maya-S offers
+more room, not a quality-substitute claim.
 
 Execution-policy comparisons should reuse one resident model with fresh KV
 states, not repeatedly cold-import the entire model. Start with a fitting pilot;

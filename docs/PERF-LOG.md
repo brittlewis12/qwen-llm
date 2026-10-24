@@ -6,6 +6,27 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the current state and evidence index.
 
+## 2026-10-24 - CED Full-Model Correctness Qualified At 128/2K/8K
+
+- Clean source `eba1f591` passes Maya-S Full/CED at 128, 2048 and 8192 tokens,
+  with request-local scratch reuse and hierarchical selection. Each case checks
+  257 complete 129,280-logit vectors bitwise and 56 causal regions at all positions,
+  including 256 teacher-forced continuation steps, exact state metadata and
+  completion/publication counters. No fallback occurs.
+- Offline comparison against frozen `01983b7b` matches all four arms' head
+  hashes and every causal-state observation at every length, with identical
+  retained artifact metadata/layout and input. The 8K CED case completes all
+  47 commands, 163,840 encoder output rows and 24,150 decoder output rows.
+- Remove the uncalibrated 80%-physical ceiling and 20% availability reserve
+  (`d47e264c` on maintained main). Prior refusals were caused by that extra
+  application padding, not Metal's working-set limit. Preserve actual capacity,
+  availability, CPU/private exposure, resource ownership and Metal/process limits.
+- Across the three runs, sampled conservative availability stays at least
+  60.83 GiB and wired plus compressor usage at most 177.37 GiB, with no unhealthy
+  sample. These are not continuous peaks. Ordered timings are not speedup evidence;
+  native performance and default-policy promotion remain separate.
+- [Qualification and timing history](bench/2026-10-23-v41-ced-native-pair.md).
+
 ## 2026-10-23 - Request-Local CED Scratch Passes Bounded M4/M5 Proofs
 
 - Candidate `eec23a0f` lazily reuses one maximum decoder backing through checked

@@ -34,10 +34,12 @@ Design/dependency recon: landed (2026-10-23 CED entry;
 dependency-preserving reconstruction: at most 2541 boundary rows, but only
 24150 complete decoder layer-output rows for long prompts, plus KV-only seeds.
 Trained bounded-128 replay is a separate policy using the same primitives.
-Cold shrinking native implementation: in flight (`perf/v41-ced`). Current
-Full/CED equivalence passes on fitting Maya-S at 128/2048/8192: all 257 full
-vocabulary vectors are bitwise equal and all 56 causal regions match at every
-position, with exact publication/completion counters. Long-prompt native A/B
+Cold shrinking native implementation: correctness-qualified on Maya-S
+(`perf/v41-ced-scratch`, `eba1f591`, 2026-10-24). Current Full/CED at 128/2048/8192
+matches all 257 complete 129,280-logit vectors and all 56 causal regions at every
+position. All four arms also match frozen source `01983b7b`, with exact input,
+artifact, publication/completion and state metadata; no fallback. This includes
+request-local scratch reuse and hierarchical selection. Long-prompt native A/B
 remains unqualified. The historical validation-on pp128 pair is a CED loss:
 305.17 -> 464.15 ms (+52.1% latency); its 2K sequence rejects a 7.272x
 within-Full spread. Explicit production timing (`5e6683a9`, clean source
@@ -46,8 +48,9 @@ One supervised pp128 series accepts all ten cases: Full 297.559 ms versus CED
 450.183 ms (+51.3% latency), with endpoint heads and recorded artifact/input
 metadata matching the validation-on reference. This is not validation-causality
 or cross-regime speedup evidence. The next pp2048 launch refuses before import
-on fresh host availability; no retries, reserve changes, active-cache credit or
-8K timing follows. See `bench/2026-10-23-v41-ced-native-pair.md` for protocol,
+on the subsequently removed percentage-padded host check. These are historical
+results, not a current admission blocker. See
+`bench/2026-10-23-v41-ced-native-pair.md` for protocol,
 verification and measurement limits. Bounded128 remains a separate policy arm;
 whole-model explicit residency remains closed.
 Attention and activation-staging kernel lanes remain independent.
@@ -60,16 +63,17 @@ lineage, status initialization and the existing admitted peak. This is a reuse
 bet, not a native speedup claim; completion-wall variability remains separate.
 Candidate `eec23a0f` passes bounded fresh/reused bitwise, allocation, arithmetic
 lineage and cleanup fixtures on M4/M5, plus broader forward/FFN/CED regressions.
-The first candidate native pp128 launch refuses before import on fresh host
-availability. Full-model scratch qualification and native gains remain open;
-no retry or admission waiver follows.
+Full-model qualification now passes at 128/2K/8K (`eba1f591`) with all heads and
+causal state identical to frozen Full/CED. Native gains remain unmeasured.
 
 Mapping/admission repair: landed (2026-10-23 memory-safety entry and
 `bench/2026-10-23-v41-memory-safety.md`). Shared EOF removes the old 156.059 GiB
 private exposure; combined host admission and bounded import/lifetime proofs
-pass on M4/M5. Full IQ3 still does not fit the 80%-physical ownership ceiling
-on 256 GiB: 217.414 GiB resident views versus 204.8 GiB before runtime demand.
-The hold includes 2K/4K; shorter prompts do not shrink resident weights.
+pass on M4/M5. The extra 80%-physical ceiling and 20% availability reserve were
+unmeasured application policy, not Metal limits; removed in `d47e264c`. Keep
+Metal's working-set limit, actual host capacity/availability and CPU/private
+ownership accounting. The former 204.8 GiB IQ3 cutoff is no longer a valid fit
+argument; IQ3 has not been rerun here. Shorter prompts do not shrink weights.
 Metadata-only plans report Maya-S 165.950 GiB and Q2 185.907 GiB, both with
 zero private shadow. Completed-chunk/scalar lifetimes now return to a fixed
 device baseline on M4/M5; Full also prices 202 MiB of logical half staging at

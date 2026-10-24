@@ -1,4 +1,36 @@
-# Native V4.1 Full/CED Pair: Short-Prompt Loss, Long-Prompt Unqualified
+# Native V4.1 Full/CED: Correctness Qualified, Performance Still Open
+
+## 2026-10-24 Full-Model Qualification
+
+Clean candidate `eba1f591` passes strict current-Full/shrinking-CED qualification
+on Maya-S at 128, 2048 and 8192 prompt tokens, including request-local decoder
+scratch reuse and hierarchical selection. Each case imports one resident model
+and runs one live KV state at a time, with debug validation and the GPU lease.
+
+At each length, all 257 complete 129,280-logit vectors match bitwise and all 56
+causal-state regions match at every position, including 256 teacher-forced
+continuation steps. Address/history, readiness, origin and exact publication/
+completion checks pass without fallback. Offline comparison against frozen
+`01983b7b` matches both Full and CED head hashes and every state observation at
+all three lengths, with identical retained artifact metadata/layout and input.
+
+The 8K CED run completes 163,840 encoder output rows, 24,150 decoder output rows,
+2,540 seed rows, 8,192 publication rows and all 47 encoded commands. Across the
+three runs, minimum sampled conservative availability is 60.83 GiB and maximum
+wired plus compressor usage is 177.37 GiB; no unhealthy sample is recorded.
+Samples are not continuous peak bounds or OS reservations.
+
+The prior load refusals came from an added 80%-physical ceiling and 20%-physical
+reserve, not Metal's working-set limit. `d47e264c` removes that uncalibrated
+padding from maintained admission; candidate `eba1f591` uses the same correction.
+Actual physical capacity/availability, Metal/process limits, combined CPU demand
+and private/import ownership accounting remain. The 8K cold plan admits roughly
+169.90 GiB of combined demand against 203.74 GiB observed availability.
+
+This closes full-model correctness qualification for this candidate/artifact.
+Ordered qualification timings are not comparative throughput evidence. Native
+performance, a default-policy change and evaluation of another artifact remain
+separate; the following timing history does not establish a scratch-reuse gain.
 
 ## Scope
 

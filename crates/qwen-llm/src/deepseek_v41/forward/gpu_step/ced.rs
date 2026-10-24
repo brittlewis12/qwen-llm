@@ -156,6 +156,7 @@ impl BlockRows {
         rows: usize,
         controls: Option<&attention_gpu::QueryControlView>,
     ) -> Result<Self> {
+        let _allocation = profile::Wall("ced_block_rows_allocate", [0; 4], profile::start());
         let c = &model.config;
         let arithmetic = if controls.is_some() {
             prefill::RowsArithmetic::Packed

@@ -211,6 +211,7 @@ mod tests {
                         if r.len() > 1 {
                             drop(Wall("ced_encoder_host_prepare", [0; 4], start()));
                             drop(Wall("ced_encoder_engram_prepare", [0; 4], start()));
+                            drop(Wall("ced_block_rows_allocate", [0; 4], start()));
                         }
                         emit(
                             if r.len() == 1 {
@@ -234,6 +235,7 @@ mod tests {
                         .unwrap()
                         {
                             let r = view.absolute_rows;
+                            drop(Wall("ced_block_rows_allocate", [0; 4], start()));
                             emit("ced_decoder_rows", [layer.layer, r.start, r.len(), 0]);
                         }
                         if let Some(position) = scalar_tail {
@@ -256,7 +258,7 @@ mod tests {
                     );
                     assert_eq!(
                         report.operations.len(),
-                        commands + if n > 1 { 2 } else { 0 }
+                        commands + if n > 1 { 3 } else { 0 }
                     );
                     let producer_bound =
                         n.div_ceil(chunk) + layers * (2 * n.div_ceil(chunk) + 1) + 4;

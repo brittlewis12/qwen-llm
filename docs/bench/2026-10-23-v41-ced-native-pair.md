@@ -1,5 +1,45 @@
 # Native V4.1 Full/CED: Correctness Qualified, Performance Still Open
 
+## Repaired-Main Rebase And Score32 Requalification
+
+Active benchmark and scratch branches are rebased onto repaired main `1c7c3ef8`.
+Before compatibility fixes, both resulting trees exactly match independently
+computed merges of their old tips plus that main. Meaningful merge resolutions
+and feature dependencies survive; frozen oracle trees and binaries do not move.
+The scratch rebase retains hierarchy, scratch reuse, v2 collection and fusion.
+Both branches preserve the corrected CPU/Metal admission domains and explicit
+CPU-demand metadata in the capacity evaluator.
+
+Qualified scratch source `efea4908` includes main's default 32-key tensor score.
+Its routing still uses original Full logical arity, not the physical compacted
+row count. Two test censuses now expect the selected tensor score name; exact
+bitwise, sticky-status, dispatch-shape and command assertions are unchanged.
+
+Fresh M5 validation passes default and score16-rollback sink-lineage fixtures,
+the wide fusion/reuse rollback fixture, two prefix and nine driver fixtures,
+176 ordinary forward tests and the MMA-routing rollback. The ordinary suite
+includes the incoming tensor32 numerical fixture; actual tensor coverage runs,
+not a hardware skip. Overlapping groups are not additive independent totals.
+Both active branches also pass release core/CLI all-target checks, formatting,
+selected CPU admission/lineage/paired-benchmark tests and 30 controller tests.
+
+Fresh Maya-S full-model qualification passes at 128/2048/8192 with the new default:
+all 257 complete 129,280-logit vectors and all 56 causal regions match between
+Full and CED at every position. Every head hash and recorded state field also
+matches the pre-score32 fused reports, which already match frozen `01983b7b`.
+The tensor metallib hash changes as expected; equality is measured, not assumed
+from a rebase or similar aggregate quality. Command counts remain 21/21/27, with
+no fallback and sampled allocation below the same accepted estimates.
+
+Across these qualification runs, all 197 whole-host pressure snapshots are
+normal; conservative CPU availability reaches 19.34 GiB and wired plus compressor
+reaches 200.07 GiB. These are sampled system totals, not process attribution or
+continuous peak bounds. No cache purge, reserve waiver or model substitution is
+used. Ordered qualification timings are still not performance evidence. The
+native cohorts below remain pinned to the pre-score32 build; native attribution
+on the rebased default is the next performance step, not a reason to repeat
+already-closed correctness or memory-policy investigations.
+
 ## 2026-10-24 Seed-Fusion Qualification And Native Observations
 
 Clean source `e50dba57` fuses an eligible seed with its first packed decoder

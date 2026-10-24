@@ -35,13 +35,13 @@ dependency-preserving reconstruction: at most 2541 boundary rows, but only
 24150 complete decoder layer-output rows for long prompts, plus KV-only seeds.
 Trained bounded-128 replay is a separate policy using the same primitives.
 Cold shrinking native implementation: correctness-qualified on Maya-S
-(`perf/v41-ced-scratch`, fused `e50dba57`, 2026-10-24). Current Full/CED at 128/2048/8192
+(`perf/v41-ced-scratch`, rebased `efea4908`, 2026-10-24). Current Full/CED at 128/2048/8192
 matches all 257 complete 129,280-logit vectors and all 56 causal regions at every
-position. All four arms also match frozen source `01983b7b`, with exact input,
+position. Current and prior arms also match frozen source `01983b7b`, with exact input,
 artifact, publication/completion and state metadata; no fallback. This includes
 request-local scratch reuse, hierarchical selection and seed/first-decoder fusion.
-This qualification predates the incoming 32-key tensor score; active-branch
-rebase needs fresh bounded and full-model qualification of that arithmetic.
+Fresh bounded and full-model qualification includes repaired main's 32-key tensor
+score, with default/rollback lineage checks and exact pre-rebase heads/state.
 Stable long-prompt native performance remains unqualified. The historical
 validation-on pp128 pair is a CED loss:
 305.17 -> 464.15 ms (+52.1% latency); its 2K sequence rejects a 7.272x
@@ -75,13 +75,15 @@ vetoing timing dispersion: retained Full 2.586 / 2.305 s, CED 2.672 / 12.479 s,
 with pilot-plus-main variation above 5x for both. No usable win is established.
 Seed/first-decoder fusion on the same branch passes bounded M4/M5 and full-model
 128/2K/8K qualification at `e50dba57`, completing 21/21/27 commands without
-changing work rows or scratch capacity. New native cohorts at the operator's
+changing work rows or scratch capacity. Pre-score32 native cohorts at the operator's
 240 GiB MWSS retain Full 5.649 / 2.279 s versus CED 3.056 / 3.213 s at 2K,
 and Full 18.966 / 10.178 s versus CED 7.713 / 7.498 s at 8K. The 8K pilot also
 includes CED 19.840 s: a promising long-prompt signal, not stable performance or
 a fusion gain. Preserve all samples and compare within the same configuration.
-Next: preserve logical-arity routing through the repaired-main rebase, then
-requalify the 32-key-score default before further native comparisons.
+Rebase and score32 requalification now pass at `efea4908`, preserving the inherited
+Full logical arity and all recorded pre-rebase heads/state. Next: native attribution
+on that default; separate GPU work from host/completion cost without reopening
+the explicit-residency lane or inventing cache-based admission restrictions.
 
 Mapping/admission repair: landed (2026-10-23 memory-safety entry and
 `bench/2026-10-23-v41-memory-safety.md`). Shared EOF removes the old 156.059 GiB

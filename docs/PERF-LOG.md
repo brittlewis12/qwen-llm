@@ -6,6 +6,33 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the current state and evidence index.
 
+## 2026-10-24 - Rebased CED Preserves Score32 Lineage And Full-Model Equivalence
+
+- Active bench/scratch branches rebase onto repaired main `1c7c3ef8`; their
+  pre-fix trees match independent old-tip/main merge oracles exactly. Preserve
+  substantive merge resolutions, CPU-domain accounting and scratch's hierarchy,
+  reuse, v2 protocol and fusion. Frozen reference trees/binaries remain unchanged.
+- Scratch `efea4908` preserves original Full logical-arity routing through the
+  score32 default, including compacted tensor singletons. Default and score16
+  rollback lineage/fusion fixtures pass on M5, along with 176 ordinary forward
+  tests, two prefix and nine driver fixtures, and MMA rollback. Groups overlap.
+  Both branches pass release all-target checks, selected CPU tests and all 30
+  controller tests; no bitwise/status/count assertion is weakened.
+- Fresh Maya-S 128/2K/8K qualification passes all 257 complete 129,280-logit
+  vectors and 56 causal regions per position. Every head hash and recorded state
+  field also matches pre-score32 fused evidence, extending the frozen-reference
+  bridge by measured equality. No fallback; command counts remain 21/21/27 and
+  sampled allocations stay below their unchanged accepted bounds.
+- All 197 sampled whole-host pressure observations are normal, with conservative
+  CPU availability down to 19.34 GiB and wired plus compressor up to 200.07 GiB.
+  These are not process peaks or continuous bounds. No purge, reserve waiver or
+  smaller-model workaround is used. Ordered qualification timings are not
+  performance evidence; existing native cohorts precede score32.
+- Next performance step: native attribution on the rebased default, retaining
+  complete dispersion and separating real GPU savings from host/completion cost.
+  CED remains opt-in; whole-model explicit residency stays closed.
+- [Rebase, compatibility and qualification evidence](bench/2026-10-23-v41-ced-native-pair.md#repaired-main-rebase-and-score32-requalification).
+
 ## 2026-10-24 - CED Seed Fusion Qualified; First Native 8K Cohort Completed
 
 - Clean `e50dba57` fuses eligible seed/first-decoder submissions, reducing

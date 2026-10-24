@@ -157,6 +157,8 @@ pub struct CedMemoryEstimate {
     pub batch_cpu_bytes: u64,
     pub priced_batch_diagnostic_bytes: u64,
     pub batch_encoding_reserve_bytes: u64,
+    pub decoder_batch_layers: usize,
+    pub decoder_schedule_reason: Option<&'static str>,
     pub command_reserve_bytes: u64,
     pub incremental_metal_bytes: u64,
     pub incremental_cpu_bytes: u64,
@@ -296,7 +298,8 @@ pub(super) fn estimate_from_parts(
     for width in [c.hidden, c.hidden, c.head_dim] {
         seed = checked_add(seed, price(row_bytes(width, seed_rows)?)?)?;
     }
-    let batch_layers = gpu_step::ced::batch_layers();
+    let selection = gpu_step::ced::batch_selection(plan)?;
+    let batch_layers = selection.layers;
     let batch_encoding_reserve = if batch_layers == 0 {
         0
     } else {
@@ -344,7 +347,7 @@ pub(super) fn estimate_from_parts(
             }
             maximum = maximum.max(total);
         }
-        checked_add(maximum, price(4)?)?
+        checked_add(maximum, checked_add(price(4)?, price(4)?)?)?
     };
     let metal = [
         retained,
@@ -386,6 +389,8 @@ pub(super) fn estimate_from_parts(
         batch_cpu_bytes: batch_cpu,
         priced_batch_diagnostic_bytes: diagnostic,
         batch_encoding_reserve_bytes: batch_encoding_reserve,
+        decoder_batch_layers: batch_layers,
+        decoder_schedule_reason: selection.reason,
         command_reserve_bytes: reserve,
         incremental_metal_bytes: metal,
         incremental_cpu_bytes: cpu,
@@ -423,6 +428,9 @@ impl Drop for Provisional<'_> {
     fn drop(&mut self) {
         if !self.committed {
             self.state.phase = StatePhase::Poisoned;
+            if let Some(workspace) = self.state.gpu_step.as_mut() {
+                workspace.abort_ced();
+            }
         }
     }
 }

@@ -15,6 +15,8 @@ pub(super) fn batch_layers() -> usize {
 pub(super) struct StatusUnit {
     ffn: Option<MetalTensor>,
     attention: MetalTensor,
+    #[cfg(test)]
+    canaries: Vec<MetalTensor>,
 }
 
 fn status_views(backing: &MetalTensor, units: &[Unit]) -> Result<Vec<StatusUnit>> {
@@ -36,21 +38,53 @@ fn status_views(backing: &MetalTensor, units: &[Unit]) -> Result<Vec<StatusUnit>
         "CED status ledger backing",
     )?;
     let mut offset = 0;
-    Ok(units
+    let views: Vec<StatusUnit> = units
         .iter()
         .map(|unit| {
+            #[cfg(test)]
+            let mut canaries = Vec::with_capacity(5);
+            let mut region = |words: usize| {
+                let guards = plan_batch::status_guard_words();
+                #[cfg(test)]
+                canaries.push(backing.view_subrange(offset as u64, vec![guards as u64]));
+                offset += guards;
+                let view = backing.view_subrange(offset as u64, vec![words as u64]);
+                offset += words;
+                #[cfg(test)]
+                canaries.push(backing.view_subrange(offset as u64, vec![guards as u64]));
+                offset += guards;
+                view
+            };
             let ffn = if unit.kind == Kind::Rows {
-                let view = backing.view_subrange(offset as u64, vec![unit.rows.len() as u64]);
-                offset += unit.rows.len();
-                Some(view)
+                Some(region(unit.rows.len()))
             } else {
                 None
             };
-            let attention = backing.view_subrange(offset as u64, vec![1]);
-            offset += 1;
-            StatusUnit { ffn, attention }
+            let attention = region(1);
+            StatusUnit {
+                ffn,
+                attention,
+                #[cfg(test)]
+                canaries,
+            }
         })
-        .collect())
+        .collect();
+    #[cfg(test)]
+    let views = {
+        let mut views = views;
+        if (offset as u64) < backing.n_elements() {
+            views
+                .last_mut()
+                .ok_or("CED empty status group")?
+                .canaries
+                .push(
+                    backing
+                        .view_subrange(offset as u64, vec![backing.n_elements() - offset as u64]),
+                );
+        }
+        views
+    };
+    Ok(views)
 }
 
 fn attention_status(t: &MetalTensor) -> Result<()> {
@@ -75,8 +109,15 @@ impl Workspace {
         pool: &mut DecoderRowsPool,
     ) -> Result<()> {
         let ctx = model.ctx;
-        let layers = batch_layers();
+        let layers = batch_selection(plan)?.layers;
+        op::require(
+            layers > 0,
+            "CED group execution requires structurally bounded selection",
+        )?;
         let words = plan_batch::maximum_status_words(plan, layers).map_err(|e| e.to_string())?;
+        #[cfg(test)]
+        tests::allocation_checkpoint(tests::AllocationSite::Ledger, words * 4)
+            .map_err(|e| e.to_string())?;
         let ledger = prefill::allocate(ctx, words, 1, GgmlType::I32)?;
         let seed_range = plan
             .decoder
@@ -106,6 +147,8 @@ impl Workspace {
                     storage,
                     counters,
                     |this, enc| {
+                        #[cfg(test)]
+                        tests::initialize_status_canaries(ctx, enc, &ledger)?;
                         for (unit, status) in units.iter().zip(&statuses) {
                             cancelled(cancel)?;
                             let layer = unit.layer;
@@ -211,9 +254,9 @@ impl Workspace {
                                 }
                             }
                             #[cfg(test)]
-                            diagnostics.fault(&this.attention, ctx, enc, unit)?;
-                            #[cfg(test)]
                             tests::before_copies();
+                            #[cfg(test)]
+                            diagnostics.fault(&this.attention, ctx, enc, unit, status)?;
                             this.attention
                                 .encode_ced_status_copy(ctx, enc, &status.attention)?;
                             #[cfg(test)]
@@ -237,7 +280,9 @@ impl Workspace {
                     },
                 )?;
                 #[cfg(test)]
-                tests::completed_statuses(&units, &statuses);
+                tests::check_status_canaries(&statuses)?;
+                #[cfg(test)]
+                tests::completed_statuses(&self.attention, &units, &statuses);
                 #[cfg(test)]
                 super::super::super::ced::tests::checkpoint("ced_batch_completed", cancel)?;
                 cancelled(cancel)?;
@@ -274,6 +319,10 @@ impl Workspace {
                 }
                 #[cfg(test)]
                 diagnostics.complete(&self.attention, plan.prompt_rows, &units, cancel)?;
+                #[cfg(test)]
+                tests::group_retired(&self.attention);
+                #[cfg(test)]
+                super::super::super::ced::tests::checkpoint("ced_batch_retired", cancel)?;
                 Ok(())
             })?;
         }

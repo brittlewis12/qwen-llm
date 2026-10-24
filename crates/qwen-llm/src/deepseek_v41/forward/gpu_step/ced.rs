@@ -14,6 +14,12 @@ pub(in super::super) fn batch_layers() -> usize {
     batches::batch_layers()
 }
 
+pub(in super::super) fn batch_selection(
+    plan: &CedPlan,
+) -> Result<super::super::ced_plan::batches::Selection> {
+    super::super::ced_plan::batches::select(plan, batch_layers()).map_err(|e| e.to_string())
+}
+
 pub(in super::super) fn batch_cpu_bytes(plan: &CedPlan, layers: usize) -> Result<u64> {
     let mut maximum = 0;
     for group in plan.decoder.chunks(layers) {
@@ -27,8 +33,10 @@ pub(in super::super) fn batch_cpu_bytes(plan: &CedPlan, layers: usize) -> Result
     let descriptors = (maximum.max(4)
         * 2
         * (std::mem::size_of::<super::super::ced_plan::batches::Unit>() + 2 * 1024)
-        + maximum * (std::mem::size_of::<batches::StatusUnit>() + 2 * 1024))
-        as u64;
+        + maximum
+            * (std::mem::size_of::<batches::StatusUnit>()
+                + 2 * 1024
+                + if cfg!(test) { 5 * 1024 } else { 0 })) as u64;
     attention_gpu::ced_group_cpu_bytes(plan.encoder_layers.len() + plan.decoder.len(), maximum)?
         .checked_add(descriptors)
         .ok_or_else(|| "CED batch CPU ledger overflow".into())
@@ -301,10 +309,19 @@ impl BlockRows {
         } else {
             prefill::RowsArithmetic::Ordinary
         };
+        let half = prefill::allocate(model.ctx, 4 * c.hidden, rows, GgmlType::F32)?
+            .view_bytes(0, vec![c.hidden as u64, 4, rows as u64]);
+        #[cfg(test)]
+        if controls.is_some() {
+            batches::tests::allocation_checkpoint(
+                batches::tests::AllocationSite::DecoderPool,
+                c.hidden * rows * 4,
+            )
+            .map_err(|e| e.to_string())?;
+        }
         Ok(Self {
             arithmetic,
-            half: prefill::allocate(model.ctx, 4 * c.hidden, rows, GgmlType::F32)?
-                .view_bytes(0, vec![c.hidden as u64, 4, rows as u64]),
+            half,
             output: prefill::allocate(model.ctx, c.hidden, rows, GgmlType::F32)?,
             hc: prefill::HcRows::new(model.ctx, c, rows)?,
             ffn: ffn_gpu::Rows::with_arithmetic(
@@ -370,10 +387,17 @@ impl LocalSeed {
         let c = &model.config;
         let n = range.len();
         let (x, incoming) = storage.input(range)?;
+        let collapsed = prefill::allocate(model.ctx, c.hidden, n, GgmlType::F32)?;
+        #[cfg(test)]
+        batches::tests::allocation_checkpoint(
+            batches::tests::AllocationSite::SeedNormalized,
+            c.hidden * n * 4,
+        )
+        .map_err(|e| e.to_string())?;
         let seed = Self {
             x,
             incoming,
-            collapsed: prefill::allocate(model.ctx, c.hidden, n, GgmlType::F32)?,
+            collapsed,
             normalized: prefill::allocate(model.ctx, c.hidden, n, GgmlType::F32)?,
             attention: attention_gpu::SeedRows::new(model.ctx, c, n)?,
         };
@@ -442,6 +466,10 @@ impl DecoderRowsPool {
 }
 
 impl Workspace {
+    pub(in super::super) fn abort_ced(&mut self) {
+        self.attention.abort_ced();
+    }
+
     fn ced_command(
         &mut self,
         model: &Forward<'_>,
@@ -1134,7 +1162,7 @@ impl Workspace {
             maximum,
             backing: None,
         };
-        if !arithmetic.scalar() && batches::batch_layers() != 0 {
+        if !arithmetic.scalar() && batch_selection(plan)?.layers != 0 {
             self.ced_decoder_groups(model, plan, cancel, &mut storage, &mut counters, &mut pool)?;
         } else {
             for layer in &plan.decoder {

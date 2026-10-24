@@ -10,8 +10,115 @@ thread_local! {
     static ARITHMETIC: RefCell<Option<Vec<metal::DispatchCensusRow>>> = const { RefCell::new(None) };
     static COPIES: RefCell<Vec<metal::DispatchCensusRow>> = const { RefCell::new(Vec::new()) };
     static BAD_ATTENTION: Cell<bool> = const { Cell::new(false) };
+    static FFN_FAULT: Cell<Option<FfnFault>> = const { Cell::new(None) };
+    static FFN_HITS: Cell<usize> = const { Cell::new(0) };
+    static BAD_CANARY: Cell<bool> = const { Cell::new(false) };
+    static ALLOCATION: RefCell<Option<(AllocationSite, Rc<Cell<usize>>)>> = const { RefCell::new(None) };
+    static CANARY_WORDS_CHECKED: Cell<usize> = const { Cell::new(0) };
+    static PUBLIC_PROGRESS: RefCell<Vec<usize>> = const { RefCell::new(Vec::new()) };
+    static RETIRED_PROGRESS: RefCell<Vec<usize>> = const { RefCell::new(Vec::new()) };
     static STATUSES: RefCell<Vec<(Unit, Vec<u32>, u32)>> = const { RefCell::new(Vec::new()) };
     static CONTROLS: RefCell<Vec<(usize, Range<usize>, Vec<u32>, Vec<u32>)>> = const { RefCell::new(Vec::new()) };
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(in super::super::super) enum AllocationSite {
+    Ledger,
+    SeedNormalized,
+    DecoderPool,
+}
+
+pub(in super::super::super) fn allocation_checkpoint(
+    site: AllocationSite,
+    bytes: usize,
+) -> std::result::Result<(), metal::MetalError> {
+    let fail = ALLOCATION.with(|slot| {
+        let mut slot = slot.borrow_mut();
+        if slot.as_ref().is_some_and(|(expected, _)| *expected == site) {
+            let (_, hits) = slot.take().unwrap();
+            hits.set(hits.get() + 1);
+            true
+        } else {
+            false
+        }
+    });
+    if fail {
+        Err(metal::MetalError::NoBuffer(bytes))
+    } else {
+        Ok(())
+    }
+}
+
+struct AllocationFault {
+    previous: Option<(AllocationSite, Rc<Cell<usize>>)>,
+    hits: Rc<Cell<usize>>,
+}
+impl AllocationFault {
+    fn new(site: AllocationSite) -> Self {
+        let hits = Rc::new(Cell::new(0));
+        let previous = ALLOCATION.with(|slot| slot.replace(Some((site, hits.clone()))));
+        Self { previous, hits }
+    }
+}
+impl Drop for AllocationFault {
+    fn drop(&mut self) {
+        ALLOCATION.with(|slot| slot.replace(self.previous.take()));
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
+struct FfnFault {
+    layer: usize,
+    start: usize,
+    row: usize,
+    word: i32,
+}
+
+struct FfnFaultScope(Option<FfnFault>, usize, PhantomData<Rc<()>>);
+impl FfnFaultScope {
+    fn new(fault: FfnFault) -> Self {
+        Self(
+            FFN_FAULT.with(|v| v.replace(Some(fault))),
+            FFN_HITS.with(|v| v.replace(0)),
+            PhantomData,
+        )
+    }
+}
+impl Drop for FfnFaultScope {
+    fn drop(&mut self) {
+        FFN_FAULT.with(|v| v.set(self.0));
+        FFN_HITS.with(|v| v.set(self.1));
+    }
+}
+
+const CANARY_BITS: u32 = 0x4b1af03d;
+
+pub(super) fn initialize_status_canaries(
+    ctx: &MetalContext,
+    enc: &KernelEncoder,
+    ledger: &MetalTensor,
+) -> Result<()> {
+    before_copies();
+    let mut floats = ledger.clone();
+    floats.dtype = GgmlType::F32;
+    metal::encode_fill_f32(ctx, enc, &floats, f32::from_bits(CANARY_BITS))
+        .map_err(|e| e.to_string())?;
+    after_copies();
+    Ok(())
+}
+
+pub(super) fn check_status_canaries(statuses: &[StatusUnit]) -> Result<()> {
+    for status in statuses {
+        for guard in &status.canaries {
+            let words = bits(guard);
+            op::require(
+                words.iter().all(|&word| word == CANARY_BITS),
+                "CED GPU status ledger canary overwritten",
+            )?;
+            CANARY_WORDS_CHECKED.with(|v| v.set(v.get() + words.len()));
+        }
+    }
+    Ok(())
 }
 
 pub(super) fn override_layers() -> Option<usize> {
@@ -34,6 +141,7 @@ impl Drop for Scope {
 pub(super) struct Diagnostics(
     Vec<(Unit, attention_gpu::QueryControlView)>,
     Option<MetalTensor>,
+    Option<MetalTensor>,
 );
 impl Diagnostics {
     pub(super) fn new(model: &Forward<'_>, storage: &Storage, units: &[Unit]) -> Result<Self> {
@@ -54,6 +162,14 @@ impl Diagnostics {
             } else {
                 None
             },
+            FFN_FAULT
+                .with(|v| v.get().map(|fault| fault.word))
+                .or_else(|| BAD_CANARY.with(|v| v.get().then_some(0)))
+                .map(|word| {
+                    MetalTensor::from_bytes(model.ctx, &word.to_le_bytes(), vec![1], GgmlType::I32)
+                        .map_err(|e| e.to_string())
+                })
+                .transpose()?,
         ))
     }
     pub(super) fn fault(
@@ -61,10 +177,53 @@ impl Diagnostics {
         attention: &attention_gpu::Workspace,
         ctx: &MetalContext,
         enc: &KernelEncoder,
-        _unit: &Unit,
+        unit: &Unit,
+        status: &StatusUnit,
     ) -> Result<()> {
         if BAD_ATTENTION.with(|v| v.replace(false)) {
             attention.encode_ced_test_nonfinite(ctx, enc, self.1.as_ref().unwrap())?;
+        }
+        if let Some(fault) = FFN_FAULT.with(Cell::get)
+            && fault.layer == unit.layer
+            && fault.start == unit.rows.start
+            && unit.kind == Kind::Rows
+        {
+            let ffn = status
+                .ffn
+                .as_ref()
+                .ok_or("CED injected FFN status missing")?;
+            op::require(
+                fault.row < unit.rows.len(),
+                "CED injected FFN row outside unit",
+            )?;
+            let target = ffn.view_subrange(fault.row as u64, vec![1]);
+            metal::encode_copy_offset_i32(
+                ctx,
+                enc,
+                self.2.as_ref().ok_or("CED injected FFN source missing")?,
+                0,
+                &target,
+                1,
+            )
+            .map_err(|e| e.to_string())?;
+            FFN_FAULT.with(|v| v.set(None));
+            FFN_HITS.with(|v| v.set(v.get() + 1));
+        }
+        if BAD_CANARY.with(|v| v.replace(false)) {
+            let target = status
+                .canaries
+                .last()
+                .ok_or("CED guard fault missing boundary")?
+                .view_subrange(0, vec![1]);
+            metal::encode_copy_offset_i32(
+                ctx,
+                enc,
+                self.2.as_ref().ok_or("CED guard fault source missing")?,
+                0,
+                &target,
+                1,
+            )
+            .map_err(|e| e.to_string())?;
         }
         Ok(())
     }
@@ -131,8 +290,16 @@ pub(super) fn after_copies() {
     }
 }
 
-pub(super) fn completed_statuses(units: &[Unit], statuses: &[StatusUnit]) {
+pub(super) fn completed_statuses(
+    attention: &attention_gpu::Workspace,
+    units: &[Unit],
+    statuses: &[StatusUnit],
+) {
     if RECORD.with(Cell::get) {
+        PUBLIC_PROGRESS.with(|v| {
+            v.borrow_mut()
+                .push(attention.ced_public_decoder_progress().unwrap().0)
+        });
         STATUSES.with(|v| {
             v.borrow_mut()
                 .extend(units.iter().zip(statuses).map(|(unit, status)| {
@@ -146,6 +313,15 @@ pub(super) fn completed_statuses(units: &[Unit], statuses: &[StatusUnit]) {
     }
 }
 
+pub(super) fn group_retired(attention: &attention_gpu::Workspace) {
+    if RECORD.with(Cell::get) {
+        RETIRED_PROGRESS.with(|v| {
+            v.borrow_mut()
+                .push(attention.ced_public_decoder_progress().unwrap().0)
+        });
+    }
+}
+
 struct Capture;
 impl Capture {
     fn begin() -> Self {
@@ -154,6 +330,9 @@ impl Capture {
         CONTROLS.with(|v| v.borrow_mut().clear());
         COPIES.with(|v| v.borrow_mut().clear());
         STATUSES.with(|v| v.borrow_mut().clear());
+        CANARY_WORDS_CHECKED.with(|v| v.set(0));
+        PUBLIC_PROGRESS.with(|v| v.borrow_mut().clear());
+        RETIRED_PROGRESS.with(|v| v.borrow_mut().clear());
         metal::dispatch_census_begin();
         Self
     }
@@ -171,6 +350,7 @@ impl Drop for Capture {
         RECORD.with(|v| v.set(false));
         ARITHMETIC.with(|v| v.take());
         BAD_ATTENTION.with(|v| v.set(false));
+        BAD_CANARY.with(|v| v.set(false));
     }
 }
 
@@ -222,6 +402,26 @@ fn batch_override_is_nested_thread_local_and_unwind_safe() {
     );
     drop(outer);
     assert_eq!(batch_layers(), 2);
+}
+
+#[test]
+fn typed_allocation_failure_sites_are_one_shot_and_do_not_request_real_oom() {
+    for site in [
+        AllocationSite::Ledger,
+        AllocationSite::SeedNormalized,
+        AllocationSite::DecoderPool,
+    ] {
+        let fault = AllocationFault::new(site);
+        std::thread::spawn(|| assert!(allocation_checkpoint(AllocationSite::Ledger, 19).is_ok()))
+            .join()
+            .unwrap();
+        assert!(matches!(
+            allocation_checkpoint(site, 37),
+            Err(metal::MetalError::NoBuffer(37))
+        ));
+        assert_eq!(fault.hits.get(), 1);
+        assert!(allocation_checkpoint(site, 37).is_ok());
+    }
 }
 
 fn configure_four(model: &mut Forward<'_>, window: usize) {
@@ -332,6 +532,7 @@ struct Arm {
     counters: CedCounters,
     arithmetic: Vec<Dispatch>,
     copies: Vec<Dispatch>,
+    groups: usize,
 }
 
 fn arm(model: &Forward<'_>, n: usize, depth: usize) -> Arm {
@@ -375,6 +576,11 @@ fn arm(model: &Forward<'_>, n: usize, depth: usize) -> Arm {
                     .div_ceil(depth)
         );
     }
+    let groups = if depth == 0 {
+        0
+    } else {
+        counters.completed_commands - n.div_ceil(prefill::DEFAULT_CHUNK_ROWS)
+    };
     Arm {
         head: head.into_iter().map(f32::to_bits).collect(),
         causal,
@@ -382,6 +588,7 @@ fn arm(model: &Forward<'_>, n: usize, depth: usize) -> Arm {
         counters,
         arithmetic: dispatches(arithmetic),
         copies: dispatches(copies),
+        groups,
     }
 }
 
@@ -414,14 +621,25 @@ fn assert_pair(actual: &Arm, reference: &Arm, model: &Forward<'_>, n: usize) {
     let outputs = units.iter().filter(|u| u.kind != Kind::Seed).count();
     assert_eq!(
         actual.copies.len(),
-        units.len() + 2 * outputs,
-        "one sticky snapshot/unit and two test-only control snapshots/output"
+        units.len() + 2 * outputs + actual.groups,
+        "one sticky snapshot/unit, two test-only control snapshots/output, one GPU canary initialization/group"
     );
     assert!(
         actual
             .copies
             .iter()
-            .all(|r| r.0 == "kernel_deepseek_v41_attention_copy" && !r.2)
+            .all(
+                |r| (r.0 == "kernel_deepseek_v41_attention_copy" || r.0 == "kernel_fill_f32")
+                    && !r.2
+            )
+    );
+    assert_eq!(
+        actual
+            .copies
+            .iter()
+            .filter(|r| r.0 == "kernel_fill_f32")
+            .count(),
+        actual.groups
     );
     eprintln!(
         "N={n} reference_commands={} batch_commands={} work_rows={}",
@@ -525,7 +743,7 @@ fn all_new_fixture_ledgers_include_four_layer_status_and_diagnostic_storage_belo
 
 #[test]
 #[ignore = "self-leased <=128 MiB complete buffers; MTL debug; no real model"]
-fn early_ffn_and_attention_errors_survive_later_valid_units_with_incumbent_precedence() {
+fn attention_error_survives_all_later_healthy_units_and_releases_owners_while_poisoned() {
     let _lease = reuse::require_debug_lease();
     let ctx = MetalContext::new().unwrap();
     objc2::rc::autoreleasepool(|_| {
@@ -538,80 +756,284 @@ fn early_ffn_and_attention_errors_survive_later_valid_units_with_incumbent_prece
             objc2::rc::autoreleasepool(|_| {
                 let _ = arm(&model, 640, 4);
             });
+            let _depth = Scope::new(4);
+            let mut state = objc2::rc::autoreleasepool(|_| model.new_state(640).unwrap());
             let baseline = ctx.current_allocated_size();
-            for (bad_attention, bad_ffn) in [(false, true), (true, false), (true, true)] {
-                let _depth = Scope::new(4);
-                model.layers[2].bias[0] = if bad_ffn { f32::NAN } else { 0.0 };
-                // A second failure cannot outrank the first logical unit.
-                model.layers[4].bias[0] = if bad_ffn { f32::NAN } else { 0.0 };
+            objc2::rc::autoreleasepool(|_| {
+                let _capture = Capture::begin();
+                BAD_ATTENTION.with(|v| v.set(true));
+                let addresses = state.addresses;
+                let error = crate::deepseek_v41::forward::ced::run(
+                    &model,
+                    &mut state,
+                    &incumbent::tokens(640),
+                    None,
+                    Arithmetic::Production,
+                )
+                .unwrap_err();
+                assert!(
+                    error.to_string().contains("CED attention status 4"),
+                    "{error}"
+                );
+                let statuses = STATUSES.with(|v| v.take());
+                assert_eq!(
+                    statuses.len(),
+                    plan_batch::units(&plan(&model, 640), 2..6).unwrap().len()
+                );
+                for (unit, ffn, attention) in &statuses {
+                    assert_eq!(
+                        ffn.len(),
+                        if unit.kind == Kind::Rows {
+                            unit.rows.len()
+                        } else {
+                            0
+                        }
+                    );
+                    assert!(
+                        ffn.iter().all(|&word| word == 1),
+                        "every nonfaulted FFN word is READY: {unit:?}"
+                    );
+                    assert_eq!(
+                        *attention, 4,
+                        "one-shot attention error remains sticky: {unit:?}"
+                    );
+                }
+                assert!(CANARY_WORDS_CHECKED.with(Cell::get) > 0);
+                assert_eq!(PUBLIC_PROGRESS.with(|v| v.take()), [0]);
+                assert!(
+                    state
+                        .gpu_step
+                        .as_ref()
+                        .unwrap()
+                        .attention
+                        .ced_public_decoder_progress()
+                        .is_none()
+                );
+                incumbent::assert_poisoned_rejects(&model, &mut state, addresses);
+            });
+            assert!(
+                ctx.current_allocated_size() <= baseline,
+                "transient owners released while poisoned State remains alive"
+            );
+            assert!(state.is_poisoned());
+        });
+    });
+}
+
+fn two_decoder_multichunk(model: &mut Forward<'_>) {
+    configure_four(model, 2050);
+    model.layers.truncate(4);
+    model.schedule.layers = 4;
+    model.schedule.compression_ratios.truncate(4);
+    model.schedule.index_source_layers.retain(|&id| id < 4);
+}
+
+fn assert_one_ffn_fault(statuses: &[(Unit, Vec<u32>, u32)], fault: FfnFault, attention: u32) {
+    let mut failures = Vec::new();
+    for (unit, words, status) in statuses {
+        assert_eq!(
+            words.len(),
+            if unit.kind == Kind::Rows {
+                unit.rows.len()
+            } else {
+                0
+            }
+        );
+        assert_eq!(*status, attention, "{unit:?}");
+        for (row, &word) in words.iter().enumerate() {
+            if unit.layer == fault.layer && unit.rows.start == fault.start && row == fault.row {
+                assert_eq!(word, fault.word as u32);
+                failures.push((unit.layer, unit.rows.start, row));
+            } else {
+                assert_eq!(
+                    word,
+                    metal::ROUTE_STATUS_READY as u32,
+                    "{unit:?} row {row}: all other ledger words must remain READY"
+                );
+            }
+        }
+    }
+    assert_eq!(failures, [(fault.layer, fault.start, fault.row)]);
+    assert!(
+        statuses
+            .iter()
+            .any(|(u, words, _)| u.layer == 2 && u.rows == (2048..2050) && words.len() == 2)
+    );
+    assert!(
+        statuses
+            .iter()
+            .any(|(u, words, _)| u.layer == 3 && u.kind == Kind::Rows && words.len() == 1)
+    );
+    assert!(CANARY_WORDS_CHECKED.with(Cell::get) > 0);
+}
+
+#[test]
+#[ignore = "self-leased <=128 MiB complete buffers; one GPU status fault after healthy math; MTL debug"]
+fn single_ffn_word_survives_healthy_same_layer_second_chunk_and_every_later_word() {
+    let _lease = reuse::require_debug_lease();
+    let ctx = MetalContext::new().unwrap();
+    objc2::rc::autoreleasepool(|_| {
+        let weights = crate::deepseek_v41::forward::toy::Weights::new(&ctx);
+        let embedding = incumbent::embeddings(&ctx);
+        let mut model = incumbent::nonuniform_model(&weights, &ctx, &embedding);
+        two_decoder_multichunk(&mut model);
+        admit(&model, 2050);
+        prefill::with_batched_f32(|| {
+            objc2::rc::autoreleasepool(|_| {
+                let _ = arm(&model, 2050, 2);
+            });
+            ctx.pipeline("kernel_copy_offset_i32").unwrap();
+            let _depth = Scope::new(2);
+            let mut state = objc2::rc::autoreleasepool(|_| model.new_state(2050).unwrap());
+            let baseline = ctx.current_allocated_size();
+            objc2::rc::autoreleasepool(|_| {
+                let _capture = Capture::begin();
+                let spec = FfnFault {
+                    layer: 2,
+                    start: 0,
+                    row: 2047,
+                    word: -7,
+                };
+                let _fault = FfnFaultScope::new(spec);
+                let addresses = state.addresses;
+                let error = crate::deepseek_v41::forward::ced::run(
+                    &model,
+                    &mut state,
+                    &incumbent::tokens(2050),
+                    None,
+                    Arithmetic::Production,
+                )
+                .unwrap_err();
+                assert!(
+                    error
+                        .to_string()
+                        .ends_with("prefill FFN layer 2 row 2047 route status -7"),
+                    "{error}"
+                );
+                assert_eq!(FFN_HITS.with(Cell::get), 1);
+                let statuses = STATUSES.with(|v| v.take());
+                assert_eq!(
+                    statuses
+                        .iter()
+                        .map(|(u, _, _)| u.clone())
+                        .collect::<Vec<_>>(),
+                    plan_batch::units(&plan(&model, 2050), 2..4).unwrap()
+                );
+                assert_one_ffn_fault(&statuses, spec, 0);
+                assert_eq!(PUBLIC_PROGRESS.with(|v| v.take()), [0]);
+                assert!(
+                    state
+                        .gpu_step
+                        .as_ref()
+                        .unwrap()
+                        .attention
+                        .ced_public_decoder_progress()
+                        .is_none()
+                );
+                incumbent::assert_poisoned_rejects(&model, &mut state, addresses);
+            });
+            assert!(
+                ctx.current_allocated_size() <= baseline,
+                "all transient status/seed/control/decoder owners drop with poisoned State still alive"
+            );
+        });
+    });
+}
+
+#[test]
+#[ignore = "self-leased <=128 MiB complete buffers; competing one-shot errors; MTL debug"]
+fn competing_attention_and_single_ffn_word_obey_logical_unit_precedence() {
+    let _lease = reuse::require_debug_lease();
+    let ctx = MetalContext::new().unwrap();
+    objc2::rc::autoreleasepool(|_| {
+        let weights = crate::deepseek_v41::forward::toy::Weights::new(&ctx);
+        let embedding = incumbent::embeddings(&ctx);
+        let mut model = incumbent::nonuniform_model(&weights, &ctx, &embedding);
+        two_decoder_multichunk(&mut model);
+        admit(&model, 2050);
+        prefill::with_batched_f32(|| {
+            for start in [0, 2048] {
+                let _depth = Scope::new(2);
                 objc2::rc::autoreleasepool(|_| {
-                    let capture = Capture::begin();
-                    BAD_ATTENTION.with(|v| v.set(bad_attention));
-                    let mut state = model.new_state(640).unwrap();
+                    let _capture = Capture::begin();
+                    BAD_ATTENTION.with(|v| v.set(true));
+                    let spec = FfnFault {
+                        layer: 2,
+                        start,
+                        row: 1,
+                        word: -7,
+                    };
+                    let _fault = FfnFaultScope::new(spec);
+                    let mut state = model.new_state(2050).unwrap();
                     let addresses = state.addresses;
-                    let p = plan(&model, 640);
                     let error = crate::deepseek_v41::forward::ced::run(
                         &model,
                         &mut state,
-                        &incumbent::tokens(640),
+                        &incumbent::tokens(2050),
                         None,
                         Arithmetic::Production,
                     )
                     .unwrap_err();
-                    let statuses = STATUSES.with(|v| v.take());
-                    assert!(
-                        statuses.iter().any(|(u, ffn, _)| u.layer == 3
-                            && u.kind == Kind::Rows
-                            && ffn.iter().all(|&s| s == 1)),
-                        "later valid route writes executed"
-                    );
-                    assert!(
-                        statuses.iter().any(|(u, _, _)| u.layer == 5),
-                        "entire submitted batch drained"
-                    );
-                    if bad_ffn {
+                    assert_eq!(FFN_HITS.with(Cell::get), 1);
+                    if start == 0 {
                         assert!(
-                            error.to_string().contains("layer 2 row 0 route status"),
+                            error
+                                .to_string()
+                                .ends_with("prefill FFN layer 2 row 1 route status -7"),
                             "{error}"
-                        );
-                        assert!(
-                            statuses
-                                .iter()
-                                .any(|(u, ffn, _)| u.layer == 2 && ffn.iter().any(|&s| s != 1))
                         );
                     } else {
                         assert!(
-                            error.to_string().contains("CED attention status"),
+                            error.to_string().ends_with("CED attention status 4"),
                             "{error}"
                         );
                     }
-                    if bad_attention {
-                        assert!(
-                            statuses.iter().all(|(_, _, s)| s & 4 != 0),
-                            "global finite error stays sticky through seed/rows/layers"
-                        );
-                    }
-                    assert_eq!(
-                        state
-                            .gpu_step
-                            .as_ref()
-                            .unwrap()
-                            .attention
-                            .ced_public_decoder_progress(),
-                        (
-                            0,
-                            p.decoder.iter().map(|l| l.seed_rows.start).collect(),
-                            p.decoder.iter().map(|l| l.output_rows.start).collect()
-                        )
-                    );
+                    assert_one_ffn_fault(&STATUSES.with(|v| v.take()), spec, 4);
                     incumbent::assert_poisoned_rejects(&model, &mut state, addresses);
-                    drop(capture);
                 });
-                assert!(
-                    ctx.current_allocated_size() <= baseline,
-                    "all request resources return to the warmed baseline"
-                );
             }
+        });
+    });
+}
+
+#[test]
+#[ignore = "self-leased <=128 MiB complete buffers; GPU ledger boundary clobber detection; MTL debug"]
+fn gpu_written_status_boundary_canary_detects_a_gpu_clobber_after_completion() {
+    let _lease = reuse::require_debug_lease();
+    let ctx = MetalContext::new().unwrap();
+    objc2::rc::autoreleasepool(|_| {
+        let weights = crate::deepseek_v41::forward::toy::Weights::new(&ctx);
+        let embedding = incumbent::embeddings(&ctx);
+        let mut model = incumbent::nonuniform_model(&weights, &ctx, &embedding);
+        configure_four(&mut model, 65);
+        admit(&model, 640);
+        prefill::with_batched_f32(|| {
+            let _depth = Scope::new(2);
+            let _capture = Capture::begin();
+            BAD_CANARY.with(|v| v.set(true));
+            let mut state = model.new_state(640).unwrap();
+            let addresses = state.addresses;
+            let error = crate::deepseek_v41::forward::ced::run(
+                &model,
+                &mut state,
+                &incumbent::tokens(640),
+                None,
+                Arithmetic::Production,
+            )
+            .unwrap_err();
+            assert!(
+                error
+                    .to_string()
+                    .ends_with("CED GPU status ledger canary overwritten"),
+                "{error}"
+            );
+            assert_eq!(
+                state.gpu_step.as_ref().unwrap().commands,
+                2,
+                "GPU completion precedes boundary inspection"
+            );
+            assert!(!BAD_CANARY.with(Cell::get));
+            incumbent::assert_poisoned_rejects(&model, &mut state, addresses);
         });
     });
 }
@@ -631,20 +1053,26 @@ fn batch_encode_completion_cancel_and_unwind_poison_without_publication_or_resou
         prefill::with_batched_f32(|| {
             objc2::rc::autoreleasepool(|_| {
                 let _ = arm(&model, 640, 2);
+                let _ = arm(&model, 640, 0);
             });
-            let baseline = ctx.current_allocated_size();
-            for (role, action) in [
-                ("ced_batch_unit_encoded", Action::Error),
-                ("ced_batch_unit_encoded", Action::Cancel),
-                ("ced_batch_unit_encoded", Action::Panic),
-                ("ced_decoder_batch", Action::Completion),
-                ("ced_batch_completed", Action::Error),
-                ("ced_batch_completed", Action::Cancel),
-                ("ced_batch_completed", Action::Panic),
+            for (depth, role, action) in [
+                (2, "ced_batch_unit_encoded", Action::Error),
+                (2, "ced_batch_unit_encoded", Action::Cancel),
+                (2, "ced_batch_unit_encoded", Action::Panic),
+                (2, "ced_decoder_batch", Action::Completion),
+                (2, "ced_batch_completed", Action::Error),
+                (2, "ced_batch_completed", Action::Cancel),
+                (2, "ced_batch_completed", Action::Panic),
+                (2, "ced_batch_retired", Action::Error),
+                (2, "ced_batch_retired", Action::Cancel),
+                (2, "ced_batch_retired", Action::Panic),
+                (0, "ced_seed_decoder_rows", Action::Completion),
             ] {
-                let _depth = Scope::new(2);
+                let _depth = Scope::new(depth);
+                let mut state = objc2::rc::autoreleasepool(|_| model.new_state(640).unwrap());
+                let baseline = ctx.current_allocated_size();
                 objc2::rc::autoreleasepool(|_| {
-                    let mut state = model.new_state(640).unwrap();
+                    let _capture = Capture::begin();
                     let addresses = state.addresses;
                     let cancel = AtomicBool::new(false);
                     let fault = incumbent::Scope::new(role, action);
@@ -672,21 +1100,77 @@ fn batch_encode_completion_cancel_and_unwind_poison_without_publication_or_resou
                         },
                         "no future decoder group is submitted after {role}"
                     );
-                    assert_eq!(
+                    assert!(
                         state
                             .gpu_step
                             .as_ref()
                             .unwrap()
                             .attention
                             .ced_public_decoder_progress()
-                            .0,
-                        0
+                            .is_none()
+                    );
+                    if role == "ced_batch_retired" {
+                        assert_eq!(
+                            RETIRED_PROGRESS.with(|v| v.take()),
+                            [2],
+                            "one complete group retired before injected failure"
+                        );
+                    } else {
+                        assert!(RETIRED_PROGRESS.with(|v| v.borrow().is_empty()));
+                    }
+                    incumbent::assert_poisoned_rejects(&model, &mut state, addresses);
+                });
+                assert!(
+                    ctx.current_allocated_size() <= baseline,
+                    "{role}: resources return to pre-existing causal-state baseline while poisoned State remains alive"
+                );
+                assert!(state.is_poisoned());
+            }
+            for (depth, site) in [
+                (2, AllocationSite::Ledger),
+                (2, AllocationSite::SeedNormalized),
+                (2, AllocationSite::DecoderPool),
+                (0, AllocationSite::SeedNormalized),
+                (0, AllocationSite::DecoderPool),
+            ] {
+                let _depth = Scope::new(depth);
+                let mut state = objc2::rc::autoreleasepool(|_| model.new_state(640).unwrap());
+                let baseline = ctx.current_allocated_size();
+                objc2::rc::autoreleasepool(|_| {
+                    let fault = AllocationFault::new(site);
+                    let addresses = state.addresses;
+                    let error = crate::deepseek_v41::forward::ced::run(
+                        &model,
+                        &mut state,
+                        &incumbent::tokens(640),
+                        None,
+                        Arithmetic::Production,
+                    )
+                    .unwrap_err();
+                    assert_eq!(fault.hits.get(), 1, "typed allocation site {site:?}");
+                    assert!(
+                        error.to_string().contains("could not create buffer of"),
+                        "{site:?}: {error}"
+                    );
+                    assert_eq!(
+                        state.gpu_step.as_ref().unwrap().commands,
+                        1,
+                        "allocation failure never submits a decoder command"
+                    );
+                    assert!(
+                        state
+                            .gpu_step
+                            .as_ref()
+                            .unwrap()
+                            .attention
+                            .ced_public_decoder_progress()
+                            .is_none()
                     );
                     incumbent::assert_poisoned_rejects(&model, &mut state, addresses);
                 });
                 assert!(
                     ctx.current_allocated_size() <= baseline,
-                    "{role}: resources return to baseline after draining"
+                    "{site:?}: partial allocations released with poisoned State alive"
                 );
             }
         });

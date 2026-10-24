@@ -622,7 +622,9 @@ fn memory_ledger_comparison_excludes_runtime_peak_observations() {
 }
 
 pub(in crate::deepseek_v41::forward) fn production_command_count(plan: &CedPlan) -> AResult<usize> {
-    let layers = gpu_step::ced::batch_layers();
+    let layers = gpu_step::ced::batch_selection(plan)
+        .map_err(anyhow::Error::msg)?
+        .layers;
     if layers != 0 {
         return plan
             .prompt_rows

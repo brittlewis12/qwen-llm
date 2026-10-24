@@ -821,13 +821,22 @@ impl Cursor {
 
 impl Workspace {
     #[cfg(test)]
-    pub(in super::super) fn ced_public_decoder_progress(&self) -> (usize, Vec<usize>, Vec<usize>) {
-        let c = self.ced.as_ref().unwrap();
-        (
+    pub(in super::super) fn ced_public_decoder_progress(
+        &self,
+    ) -> Option<(usize, Vec<usize>, Vec<usize>)> {
+        let c = self.ced.as_ref()?;
+        Some((
             c.decoder_next,
             c.seed_completed.clone(),
             c.output_completed.clone(),
-        )
+        ))
+    }
+
+    pub(in super::super) fn abort_ced(&mut self) {
+        // The synchronous CED owner drains submitted work before returning or
+        // unwinding to the provisional guard. Drop transient coverage/view owners
+        // without resetting any mutated causal data or making it reusable.
+        self.ced = None;
     }
     #[cfg(test)]
     pub(in super::super) fn encode_ced_test_nonfinite(

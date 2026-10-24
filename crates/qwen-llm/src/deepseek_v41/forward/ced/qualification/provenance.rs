@@ -273,6 +273,8 @@ pub(super) fn batching_compiled_sources() -> &'static [(&'static str, &'static [
         "crates/qwen-llm/src/deepseek_v41/forward/gpu_step/ced/batches/tests.rs",
         "crates/qwen-llm/src/deepseek_v41/forward/ced/tests.rs",
         "crates/qwen-llm/src/deepseek_v41/forward/gpu_step/ced/tests/reuse.rs",
+        "crates/qwen-llm/src/metal/elementwise.rs",
+        "kernels/elementwise.metal",
     ]
 }
 
@@ -283,6 +285,13 @@ pub(super) fn checked_compiled_source(root: &Path, path: &str, bytes: &[u8]) -> 
         "binary/source mismatch: {path}; rebuild after wiring or editing"
     );
     Ok(json!({"path": path, "sha256": hash}))
+}
+
+pub(super) fn checked_batching_sources(root: &Path) -> AResult<Vec<Value>> {
+    batching_compiled_sources()
+        .iter()
+        .map(|&(path, bytes)| checked_compiled_source(root, path, bytes))
+        .collect()
 }
 
 fn compiled_sources() -> &'static [(&'static str, &'static [u8])] {
@@ -349,9 +358,10 @@ fn compiled_sources() -> &'static [(&'static str, &'static [u8])] {
 
 fn checked_compiled_sources(root: &Path) -> AResult<Vec<Value>> {
     let mut compiled = Vec::new();
-    for &(path, bytes) in compiled_sources().iter().chain(batching_compiled_sources()) {
+    for &(path, bytes) in compiled_sources() {
         compiled.push(checked_compiled_source(&root, path, bytes)?);
     }
+    compiled.extend(checked_batching_sources(root)?);
     Ok(compiled)
 }
 
@@ -376,14 +386,14 @@ fn compiled_geometry_inventory_rejects_helper_only_edits_before_import() {
         std::process::id()
     ));
     std::fs::create_dir(&root).unwrap();
-    for &(path, bytes) in sources {
+    for &(path, bytes) in sources.iter().chain(batching_compiled_sources()) {
         let destination = root.join(path);
         std::fs::create_dir_all(destination.parent().unwrap()).unwrap();
         std::fs::write(destination, bytes).unwrap();
     }
     assert_eq!(
         checked_compiled_sources(&root).unwrap().len(),
-        sources.len()
+        sources.len() + batching_compiled_sources().len()
     );
     let mut changed = embedded.to_vec();
     changed.extend_from_slice(b"\n// helper-only freshness probe\n");
@@ -441,14 +451,17 @@ fn every_batching_source_rejects_a_stale_body_in_both_qualification_inventories(
         let file = root.join(path);
         std::fs::create_dir_all(file.parent().unwrap()).unwrap();
         std::fs::write(&file, compiled).unwrap();
-        assert!(checked_compiled_source(&root, path, compiled).is_ok());
-        assert!(super::current_pair::checked_compiled_source(&root, path, compiled).is_ok());
+    }
+    for &(path, compiled) in batching_compiled_sources() {
+        let file = root.join(path);
+        assert!(checked_batching_sources(&root).is_ok());
+        assert!(super::current_pair::checked_batching_sources(&root).is_ok());
         let mut changed = compiled.to_vec();
         changed.extend_from_slice(b"\n// freshness regression edit\n");
         std::fs::write(&file, changed).unwrap();
         for error in [
-            checked_compiled_source(&root, path, compiled).unwrap_err(),
-            super::current_pair::checked_compiled_source(&root, path, compiled).unwrap_err(),
+            checked_batching_sources(&root).unwrap_err(),
+            super::current_pair::checked_batching_sources(&root).unwrap_err(),
         ] {
             assert!(
                 error

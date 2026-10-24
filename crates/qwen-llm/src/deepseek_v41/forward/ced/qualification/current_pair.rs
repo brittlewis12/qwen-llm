@@ -221,6 +221,13 @@ pub(super) fn checked_compiled_source(root: &Path, path: &str, compiled: &[u8]) 
     Ok(json!({"path": path, "sha256": hash}))
 }
 
+pub(super) fn checked_batching_sources(root: &Path) -> AResult<Vec<Value>> {
+    provenance::batching_compiled_sources()
+        .iter()
+        .map(|&(path, bytes)| checked_compiled_source(root, path, bytes))
+        .collect()
+}
+
 fn source_identity() -> AResult<(PathBuf, Value)> {
     let (root, mut source) = provenance::source()?;
     let sources: &[(&str, &[u8])] = &[
@@ -280,13 +287,12 @@ fn source_identity() -> AResult<(PathBuf, Value)> {
             )),
         ),
     ];
-    source["current_pair_compiled_sources"] = json!(
-        sources
-            .iter()
-            .chain(provenance::batching_compiled_sources())
-            .map(|&(path, bytes)| { checked_compiled_source(&root, path, bytes) })
-            .collect::<AResult<Vec<_>>>()?
-    );
+    let mut compiled = sources
+        .iter()
+        .map(|&(path, bytes)| checked_compiled_source(&root, path, bytes))
+        .collect::<AResult<Vec<_>>>()?;
+    compiled.extend(checked_batching_sources(&root)?);
+    source["current_pair_compiled_sources"] = json!(compiled);
     Ok((root, source))
 }
 

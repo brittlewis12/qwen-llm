@@ -2623,6 +2623,8 @@ mod tests {
                         batch_cpu_bytes: u64::MAX,
                         priced_batch_diagnostic_bytes: u64::MAX,
                         batch_encoding_reserve_bytes: u64::MAX,
+                        decoder_batch_layers: usize::MAX,
+                        decoder_schedule_reason: Some("invalid test ledger"),
                         command_reserve_bytes: u64::MAX,
                         incremental_metal_bytes: u64::MAX,
                         incremental_cpu_bytes: u64::MAX,

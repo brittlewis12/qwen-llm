@@ -296,19 +296,32 @@ pub(super) fn estimate_from_parts(
     for width in [c.hidden, c.hidden, c.head_dim] {
         seed = checked_add(seed, price(row_bytes(width, seed_rows)?)?)?;
     }
-    let batch_layers = gpu_step::ced::batch_layers().max(1);
-    let batch_encoding_reserve =
+    let batch_layers = gpu_step::ced::batch_layers();
+    let batch_encoding_reserve = if batch_layers == 0 {
+        0
+    } else {
         super::ced_plan::batches::encoding_reserve_bytes(plan, batch_layers)
-            .map_err(|e| e.to_string())?;
+            .map_err(|e| e.to_string())?
+    };
     let reserve = checked_add(16 * 1024 * 1024, batch_encoding_reserve)?;
-    let batch_words = super::ced_plan::batches::maximum_status_words(plan, batch_layers)
-        .map_err(|e| e.to_string())?;
+    let batch_words = if batch_layers == 0 {
+        0
+    } else {
+        super::ced_plan::batches::maximum_status_words(plan, batch_layers)
+            .map_err(|e| e.to_string())?
+    };
     let batch_status = price(row_bytes(1, batch_words)?)?;
-    let batch_cpu = gpu_step::ced::batch_cpu_bytes(plan, batch_layers)?;
+    let batch_cpu = if batch_layers == 0 {
+        0
+    } else {
+        gpu_step::ced::batch_cpu_bytes(plan, batch_layers)?
+    };
     #[cfg(not(test))]
     let diagnostic = 0;
     #[cfg(test)]
-    let diagnostic = {
+    let diagnostic = if batch_layers == 0 {
+        0
+    } else {
         let mut maximum = 0;
         for group in plan.decoder.chunks(batch_layers) {
             let mut total = 0;

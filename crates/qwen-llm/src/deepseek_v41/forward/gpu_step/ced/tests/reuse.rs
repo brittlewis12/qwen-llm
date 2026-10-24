@@ -472,6 +472,7 @@ fn explicit_bound(c: &Config, n: usize, capacity: usize, price: &impl Fn(u64) ->
 
 #[test]
 fn complete_fixture_ledgers_stay_below_128_mib() {
+    let _incumbent = incumbent_scope();
     let price = |n| if n == 0 { 0 } else { n + 16384 };
     for (window, n, capacity) in [
         (915, 1900, 1900),
@@ -1042,6 +1043,7 @@ fn assert_fusion_pair(fused: &DriverArm, reference: &DriverArm, saved: usize) {
 #[test]
 #[ignore = "self-leased <=128 MiB complete buffers; MTL debug validation; no real model"]
 fn seed_fusion_matches_unfused_empty_partial_full_wrap_packed_one_second_chunk_and_scalar() {
+    let _incumbent = incumbent_scope();
     let _lease = require_debug_lease();
     let ctx = MetalContext::new().unwrap();
     for (window, n, arithmetic, saved) in [

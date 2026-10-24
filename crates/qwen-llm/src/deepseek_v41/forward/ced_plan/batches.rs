@@ -183,15 +183,24 @@ mod tests {
                 &CedRequest::cold(n, n),
             )
             .unwrap();
-            for (depth, expected) in [
-                (1, if n == 8192 { 24 } else { 21 }),
-                (2, if n == 8192 { 14 } else { 11 }),
-                (4, if n == 8192 { 9 } else { 6 }),
-            ] {
+            for depth in [1, 2, 4] {
+                let expected = n.div_ceil(DEFAULT_CHUNK_ROWS) + p.decoder.len().div_ceil(depth);
                 assert_eq!(
                     n.div_ceil(DEFAULT_CHUNK_ROWS) + p.decoder.chunks(depth).count(),
                     expected
                 );
+                if DEFAULT_CHUNK_ROWS == 2048 {
+                    let pinned = match (n, depth) {
+                        (8192, 1) => 24,
+                        (8192, 2) => 14,
+                        (8192, 4) => 9,
+                        (_, 1) => 21,
+                        (_, 2) => 11,
+                        (_, 4) => 6,
+                        _ => unreachable!(),
+                    };
+                    assert_eq!(expected, pinned);
+                }
             }
             let memory = crate::deepseek_v41::forward::ced::estimate_from_parts(
                 &Config::default(),

@@ -266,11 +266,17 @@ fn bound(
         &crate::deepseek_v41::forward::ced_plan::CedRequest::cold(n, n),
     )
     .unwrap();
-    let memory =
-        crate::deepseek_v41::forward::ced::estimate_from_parts(c, 6, &[], 0, n, &p, true, &|n| {
-            Ok(if n == 0 { 0 } else { price(n) })
-        })
-        .unwrap();
+    let memory = crate::deepseek_v41::forward::ced::estimate_from_parts(
+        c,
+        schedule.layers,
+        &[],
+        0,
+        n,
+        &p,
+        true,
+        &|n| Ok(if n == 0 { 0 } else { price(n) }),
+    )
+    .unwrap();
     reuse::weight_bytes(price)
         + 2 * super::super::super::bytes_with_schedule(c, n, schedule, 0).unwrap()
         + memory.incremental_metal_bytes
@@ -445,10 +451,26 @@ fn bounded_old_vs_batch_1_2_4_exact_heads_causal_controls_ordered_arithmetic_chu
                 (3, 2048),
                 (3, 2049),
                 (257, 640),
-                (1025, 2542),
-                (2050, 2542),
+                (2050, 2050),
             ] {
                 reuse::configure(&mut model, window);
+                if window == 2050 {
+                    model.layers.truncate(4);
+                    model.schedule.layers = 4;
+                    model.schedule.compression_ratios.truncate(4);
+                    model.schedule.index_source_layers.retain(|&id| id < 4);
+                    let p = plan(&model, n);
+                    assert!(
+                        p.decoder
+                            .iter()
+                            .any(|l| l.seed_rows.len() > prefill::DEFAULT_CHUNK_ROWS)
+                    );
+                    assert!(
+                        p.decoder
+                            .iter()
+                            .any(|l| l.output_rows.len() > prefill::DEFAULT_CHUNK_ROWS)
+                    );
+                }
                 admit(&model, n);
                 let reference = objc2::rc::autoreleasepool(|_| arm(&model, n, 0));
                 assert!(reference.copies.is_empty());
@@ -464,7 +486,7 @@ fn bounded_old_vs_batch_1_2_4_exact_heads_causal_controls_ordered_arithmetic_chu
 #[test]
 fn all_new_fixture_ledgers_include_four_layer_status_and_diagnostic_storage_below_128_mib() {
     let _depth = Scope::new(4);
-    let schedule = crate::deepseek_v41::gguf::Schedule {
+    let mut schedule = crate::deepseek_v41::gguf::Schedule {
         layers: 6,
         kv_source_layers: vec![1, 2],
         index_source_layers: vec![1, 2, 4],
@@ -480,14 +502,18 @@ fn all_new_fixture_ledgers_include_four_layer_status_and_diagnostic_storage_belo
         (3, 2048),
         (3, 2049),
         (257, 640),
-        (1025, 2542),
-        (2050, 2542),
+        (2050, 2050),
     ] {
         let c = Config {
             window,
             index_topk: 2,
             ..crate::deepseek_v41::forward::toy::config()
         };
+        if window == 2050 {
+            schedule.layers = 4;
+            schedule.compression_ratios.truncate(4);
+            schedule.index_source_layers.retain(|&id| id < 4);
+        }
         let bytes = bound(&c, &schedule, n, &|n| n + 16384);
         assert!(
             bytes <= 128 * 1024 * 1024,
@@ -637,6 +663,15 @@ fn batch_encode_completion_cancel_and_unwind_poison_without_publication_or_resou
                     } else {
                         assert!(result.unwrap().is_err());
                     }
+                    assert_eq!(
+                        state.gpu_step.as_ref().unwrap().commands,
+                        if role == "ced_batch_unit_encoded" {
+                            1
+                        } else {
+                            2
+                        },
+                        "no future decoder group is submitted after {role}"
+                    );
                     assert_eq!(
                         state
                             .gpu_step

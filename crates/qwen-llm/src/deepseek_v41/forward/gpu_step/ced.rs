@@ -237,6 +237,7 @@ struct BlockRows {
 }
 
 impl BlockRows {
+    #[cfg(test)]
     fn checked_prefix(
         &self,
         c: &Config,

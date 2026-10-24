@@ -21,8 +21,8 @@ FAST = pilot.Policy(interrupt_grace_s=0.15, terminate_grace_s=0.15, poll_s=0.01)
 
 
 class AssessmentTests(unittest.TestCase):
-    def assess(self, samples, before=HEALTHY, after=HEALTHY):
-        return pilot.assess_pilot(samples, before, after)
+    def assess(self, samples, before=HEALTHY, after=HEALTHY, *, policy=pilot.Policy()):
+        return pilot.assess_pilot(samples, before, after, policy=policy)
 
     def test_cdf_catastrophic_spread_rejected_and_persistable(self):
         assessment = self.assess([18.52e9, 34.16e9])
@@ -53,20 +53,67 @@ class AssessmentTests(unittest.TestCase):
     def test_missing_or_unhealthy_telemetry_fails_closed(self):
         low_free = replace(HEALTHY, free_bytes=1, available_bytes=1)
         high_wired = pilot.Snapshot(GIB // 2, GIB // 2, 14 * GIB, GIB, 16 * GIB)
+        policy = pilot.Policy(
+            min_available_bytes=512 * 1024**2, max_nonreclaimable_fraction=0.90
+        )
         for snapshot in (None, low_free, high_wired):
-            self.assertFalse(self.assess([10, 10], before=snapshot).passed)
-            self.assertFalse(self.assess([10, 10], after=snapshot).passed)
+            self.assertFalse(
+                self.assess([10, 10], before=snapshot, policy=policy).passed
+            )
+            self.assertFalse(
+                self.assess([10, 10], after=snapshot, policy=policy).passed
+            )
         self.assertFalse(pilot.assess_pilot([10, 10]).passed)
 
-    def test_available_floor_scales_with_physical_ram(self):
+    def test_explicit_available_floor_does_not_scale_with_physical_ram(self):
+        policy = pilot.Policy(min_available_bytes=512 * 1024**2)
         large = replace(HEALTHY, physical_bytes=256 * GIB)
-        self.assertTrue(self.assess([10, 10], large, large).passed)
+        self.assertTrue(self.assess([10, 10], large, large, policy=policy).passed)
         low = replace(large, free_bytes=2 * GIB, available_bytes=2 * GIB)
-        assessment = self.assess([10, 10], large, low)
+        self.assertTrue(self.assess([10, 10], large, low, policy=policy).passed)
+        boundary = replace(low, free_bytes=GIB // 2, available_bytes=GIB // 2)
+        self.assertTrue(self.assess([10, 10], boundary, boundary, policy=policy).passed)
+        below = replace(boundary, free_bytes=0, available_bytes=GIB // 2 - 1)
+        assessment = self.assess([10, 10], large, below, policy=policy)
         self.assertFalse(assessment.passed)
-        self.assertIn(str(4 * GIB), assessment.reasons[0])
-        small = replace(HEALTHY, free_bytes=GIB // 2, available_bytes=GIB // 2)
-        self.assertTrue(self.assess([10, 10], small, small).passed)
+        self.assertIn(str(GIB // 2), assessment.reasons[0])
+
+    def test_default_observes_low_availability_and_240_gib_without_ram_veto(self):
+        policy = pilot.Policy()
+        self.assertIsNone(policy.min_available_bytes)
+        self.assertIsNone(policy.max_nonreclaimable_fraction)
+        for snapshot in (
+            replace(HEALTHY, free_bytes=0, available_bytes=0),
+            pilot.Snapshot(0, 0, 240 * GIB, 0, 256 * GIB),
+        ):
+            with self.subTest(snapshot=snapshot):
+                assessment = self.assess([10, 10], snapshot, snapshot)
+                self.assertTrue(assessment.passed)
+                self.assertEqual(assessment.before, snapshot)
+                self.assertEqual(assessment.after, snapshot)
+                self.assertEqual(snapshot.memory_pressure, "unknown")
+
+    def test_only_observed_critical_pressure_vetoes_by_default(self):
+        for state in ("normal", "warning", "unknown"):
+            snapshot = replace(HEALTHY, memory_pressure=state)
+            with self.subTest(state=state):
+                self.assertTrue(self.assess([10, 10], snapshot, snapshot).passed)
+        critical = replace(HEALTHY, memory_pressure="critical")
+        for before, after in ((critical, HEALTHY), (HEALTHY, critical)):
+            assessment = self.assess([10, 10], before, after)
+            self.assertFalse(assessment.passed)
+            self.assertIn("OS memory pressure critical", assessment.reasons[0])
+
+    def test_optional_memory_policy_validation(self):
+        for value in (0, -1, True, 1.5):
+            with self.subTest(min_available_bytes=value), self.assertRaises(ValueError):
+                pilot.Policy(min_available_bytes=value)
+        for value in (0, -1, 1, float("inf"), float("nan")):
+            with (
+                self.subTest(max_nonreclaimable_fraction=value),
+                self.assertRaises(ValueError),
+            ):
+                pilot.Policy(max_nonreclaimable_fraction=value)
 
     def test_health_interval_is_positive_and_finite(self):
         self.assertEqual(pilot.Policy().health_interval_s, 2)
@@ -83,6 +130,8 @@ class AssessmentTests(unittest.TestCase):
             pilot.Policy(max_spread=2)
         with self.assertRaises(ValueError):
             replace(HEALTHY, available_bytes=16 * GIB)
+        with self.assertRaises(ValueError):
+            replace(HEALTHY, memory_pressure="assumed normal")
         self.assertEqual(HEALTHY.nonreclaimable_bytes, 3 * GIB)
 
     def test_macos_sampler_does_not_add_overlapping_or_logical_counters(self):
@@ -101,14 +150,48 @@ Pages occupied by compressor: 150.
         with (
             patch.object(pilot.sys, "platform", "darwin"),
             patch.object(
-                pilot, "_host_output", side_effect=[str(16 * GIB), vm_stat]
+                pilot, "_host_output", side_effect=[str(16 * GIB), vm_stat, "1\n"]
             ) as read,
         ):
             snapshot = pilot.sample_host_health()
         self.assertEqual(snapshot.free_bytes, 100 * 16384)
         self.assertEqual(snapshot.available_bytes, 300 * 16384)
         self.assertEqual(snapshot.nonreclaimable_bytes, 350 * 16384)
-        self.assertEqual(read.call_count, 2)
+        self.assertEqual(snapshot.memory_pressure, "normal")
+        self.assertEqual(read.call_count, 3)
+        self.assertEqual(
+            read.call_args.args[0],
+            ["/usr/sbin/sysctl", "-n", "kern.memorystatus_vm_pressure_level"],
+        )
+
+    def test_macos_pressure_is_observed_or_explicitly_unknown(self):
+        for output, expected in (
+            ("1\n", "normal"),
+            ("2\n", "warning"),
+            ("4\n", "critical"),
+            ("0\n", "unknown"),
+            ("3\n", "unknown"),
+            ("", "unknown"),
+            ("invalid", "unknown"),
+            (OSError("sysctl unavailable"), "unknown"),
+            (subprocess.TimeoutExpired("sysctl", 2), "unknown"),
+        ):
+            with (
+                self.subTest(output=output),
+                patch.object(pilot.sys, "platform", "darwin"),
+                patch.object(pilot, "snapshot_from_vm_stat", return_value=HEALTHY),
+                patch.object(
+                    pilot,
+                    "_host_output",
+                    side_effect=[str(16 * GIB), "vm_stat", output],
+                ),
+            ):
+                snapshot = pilot.sample_host_health()
+                self.assertEqual(snapshot.memory_pressure, expected)
+                self.assertEqual(snapshot.available_bytes, HEALTHY.available_bytes)
+                assessment = self.assess([10, 10], snapshot, snapshot)
+                self.assertEqual(assessment.passed, expected != "critical")
+                self.assertEqual(asdict(snapshot)["memory_pressure"], expected)
 
     def test_idle_file_cache_is_not_a_free_page_exhaustion(self):
         pages_per_gib = GIB // 16384
@@ -138,7 +221,28 @@ Pages occupied by compressor: 150.
 """,
         )
         self.assertEqual(snapshot.available_bytes, snapshot.free_bytes)
-        self.assertFalse(self.assess([10, 10], snapshot, snapshot).passed)
+        self.assertTrue(self.assess([10, 10], snapshot, snapshot).passed)
+        policy = pilot.Policy(min_available_bytes=512 * 1024**2)
+        self.assertFalse(
+            self.assess([10, 10], snapshot, snapshot, policy=policy).passed
+        )
+
+    def test_active_file_cache_does_not_veto_by_default(self):
+        pages_per_gib = GIB // 16384
+        snapshot = pilot.snapshot_from_vm_stat(
+            256 * GIB,
+            f"""Mach Virtual Memory Statistics: (page size of 16384 bytes)
+Pages free: 1.
+Pages active: {240 * pages_per_gib}.
+Pages inactive: 0.
+File-backed pages: {240 * pages_per_gib}.
+Anonymous pages: 0.
+Pages wired down: {8 * pages_per_gib}.
+Pages occupied by compressor: {pages_per_gib}.
+""",
+        )
+        self.assertEqual(snapshot.available_bytes, 16384)
+        self.assertTrue(self.assess([10, 10], snapshot, snapshot).passed)
 
     def test_sampler_refuses_missing_or_invalid_availability_categories(self):
         text = """Mach Virtual Memory Statistics: (page size of 16384 bytes)
@@ -228,13 +332,14 @@ class SessionTests(unittest.TestCase):
                 self.session.authorize_repetitions([10, 10])
             spawn.assert_not_called()
 
-    def test_preexisting_stop_file_and_missing_telemetry_do_not_spawn(self):
+    def test_stop_file_missing_telemetry_or_critical_pressure_do_not_spawn(self):
         stop = self.root / "stop"
         stop.touch()
         for sampler, stop_file in (
             (lambda: HEALTHY, stop),
             (lambda: None, None),
             (Mock(side_effect=OSError("unavailable")), None),
+            (lambda: replace(HEALTHY, memory_pressure="critical"), None),
         ):
             self.session = pilot.Session(FAST, sampler=sampler)
             with patch.object(pilot.subprocess, "Popen") as spawn:
@@ -243,10 +348,16 @@ class SessionTests(unittest.TestCase):
                 spawn.assert_not_called()
             self.assertEqual(self.timeline()[-1]["event"], "blocked")
 
-    def test_nonzero_exit_and_postflight_telemetry_loss_latch_closed(self):
+    def test_nonzero_exit_postflight_telemetry_loss_or_critical_latch_closed(self):
         for code, sampler in (
             ("raise SystemExit(7)", lambda: HEALTHY),
             ("pass", Mock(side_effect=[HEALTHY, None])),
+            (
+                "pass",
+                Mock(
+                    side_effect=[HEALTHY, replace(HEALTHY, memory_pressure="critical")]
+                ),
+            ),
         ):
             self.session = pilot.Session(FAST, sampler=sampler)
             self.assertNotEqual(self.run_child(code).reason, "completed")
@@ -301,10 +412,13 @@ class SessionTests(unittest.TestCase):
     @unittest.skipUnless(sys.platform != "win32", "POSIX signals")
     def test_midflight_unhealthy_or_missing_telemetry_stops_owned_child(self):
         low = replace(HEALTHY, free_bytes=1, available_bytes=1)
-        for failure in (low, None, OSError("telemetry disappeared")):
+        critical = replace(HEALTHY, memory_pressure="critical")
+        for failure in (low, critical, None, OSError("telemetry disappeared")):
             with self.subTest(failure=failure):
                 sampler = Mock(side_effect=[HEALTHY, HEALTHY, failure, HEALTHY])
                 policy = replace(FAST, health_interval_s=0.05)
+                if failure == low:
+                    policy = replace(policy, min_available_bytes=512 * 1024**2)
                 self.session = pilot.Session(policy, sampler=sampler)
                 started = time.monotonic()
                 result = self.run_child("import time; time.sleep(5)", timeout_s=3)
@@ -363,6 +477,24 @@ class SessionTests(unittest.TestCase):
             call for call in emit.call_args_list if call.args[0] == "health"
         ]
         self.assertTrue(all(call.kwargs["durable"] is False for call in health_calls))
+
+    def test_default_ram_observations_allow_pilot_and_repetitions(self):
+        snapshot = pilot.Snapshot(0, 0, 240 * GIB, 0, 256 * GIB)
+        self.session = pilot.Session(
+            replace(FAST, health_interval_s=0.05), sampler=lambda: snapshot
+        )
+        self.assertEqual(
+            self.run_child("import time; time.sleep(0.12)").reason, "completed"
+        )
+        rows = self.timeline()
+        observed = [row for row in rows if "snapshot" in row]
+        self.assertTrue(any(row["event"] == "health" for row in observed))
+        for row in observed:
+            self.assertEqual(row["snapshot"], asdict(snapshot))
+            self.assertEqual(row["snapshot"]["memory_pressure"], "unknown")
+            self.assertFalse(row.get("health_reasons"))
+        self.assertTrue(self.session.authorize_repetitions([10, 10]).passed)
+        self.assertEqual(self.run_child().reason, "completed")
 
     def test_unresponsive_handle_returns_bounded_and_never_sigkills(self):
         child = Mock(pid=123, returncode=None)

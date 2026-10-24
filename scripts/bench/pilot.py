@@ -14,7 +14,7 @@ and retain the Session until its owned child exits; never reap it elsewhere.
 from __future__ import annotations
 
 from contextlib import ExitStack
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, replace
 import json
 import math
 import os
@@ -30,8 +30,8 @@ from typing import Sequence
 @dataclass(frozen=True)
 class Policy:
     max_spread: float = 1.5
-    min_available_bytes: int = 512 * 1024**2
-    max_nonreclaimable_fraction: float = 0.90
+    min_available_bytes: int | None = None
+    max_nonreclaimable_fraction: float | None = None
     interrupt_grace_s: float = 3.0
     terminate_grace_s: float = 2.0
     poll_s: float = 0.05
@@ -40,12 +40,14 @@ class Policy:
     def __post_init__(self):
         if not (1 <= self.max_spread <= 1.5):
             raise ValueError("max_spread must be between 1 and 1.5")
-        if (
-            type(self.min_available_bytes) is not int
-            or self.min_available_bytes <= 0
-            or not (0 < self.max_nonreclaimable_fraction < 1)
+        if self.min_available_bytes is not None and (
+            type(self.min_available_bytes) is not int or self.min_available_bytes <= 0
         ):
-            raise ValueError("positive memory headroom and fraction below 1 required")
+            raise ValueError("positive min_available_bytes required when set")
+        if self.max_nonreclaimable_fraction is not None and not (
+            0 < self.max_nonreclaimable_fraction < 1
+        ):
+            raise ValueError("max_nonreclaimable_fraction must be between 0 and 1")
         bounds = (self.interrupt_grace_s, self.terminate_grace_s, self.poll_s)
         if not all(math.isfinite(v) and v >= 0 for v in bounds) or self.poll_s == 0:
             raise ValueError("finite cancellation bounds and positive poll_s required")
@@ -60,10 +62,20 @@ class Snapshot:
     wired_bytes: int
     compressed_bytes: int
     physical_bytes: int
+    memory_pressure: str = "unknown"
 
     def __post_init__(self):
-        if any(type(v) is not int or v < 0 for v in asdict(self).values()):
+        counts = (
+            self.free_bytes,
+            self.available_bytes,
+            self.wired_bytes,
+            self.compressed_bytes,
+            self.physical_bytes,
+        )
+        if any(type(v) is not int or v < 0 for v in counts):
             raise ValueError("snapshot values must be nonnegative byte counts")
+        if self.memory_pressure not in ("unknown", "normal", "warning", "critical"):
+            raise ValueError("invalid memory pressure state")
         accounted = self.available_bytes + self.nonreclaimable_bytes
         valid = 0 < self.physical_bytes >= accounted
         if not valid or self.free_bytes > self.available_bytes:
@@ -144,7 +156,19 @@ def sample_host_health() -> Snapshot:
     if sys.platform != "darwin":
         raise OSError("macOS telemetry unavailable; inject a host sampler")
     physical = int(_host_output(["/usr/sbin/sysctl", "-n", "hw.memsize"]))
-    return snapshot_from_vm_stat(physical, _host_output(["/usr/bin/vm_stat"]))
+    snapshot = snapshot_from_vm_stat(physical, _host_output(["/usr/bin/vm_stat"]))
+    pressure = "unknown"
+    try:
+        level = int(
+            _host_output(
+                ["/usr/sbin/sysctl", "-n", "kern.memorystatus_vm_pressure_level"]
+            )
+        )
+        # macOS SDK dispatch/source.h: NORMAL=0x01, WARN=0x02, CRITICAL=0x04.
+        pressure = {1: "normal", 2: "warning", 4: "critical"}.get(level, "unknown")
+    except (OSError, ValueError, subprocess.TimeoutExpired):
+        pass
+    return replace(snapshot, memory_pressure=pressure)
 
 
 @dataclass(frozen=True)
@@ -161,11 +185,18 @@ def _health_reasons(snapshot, label, policy):
     if not isinstance(snapshot, Snapshot):
         return [f"{label}: required host telemetry unavailable"]
     reasons = []
-    floor = max(policy.min_available_bytes, (snapshot.physical_bytes + 63) // 64)
-    if snapshot.available_bytes < floor:
-        reasons.append(f"{label}: available bytes below {floor}")
+    if snapshot.memory_pressure == "critical":
+        reasons.append(f"{label}: OS memory pressure critical")
+    if (
+        policy.min_available_bytes is not None
+        and snapshot.available_bytes < policy.min_available_bytes
+    ):
+        reasons.append(f"{label}: available bytes below {policy.min_available_bytes}")
     fraction = snapshot.nonreclaimable_bytes / snapshot.physical_bytes
-    if fraction > policy.max_nonreclaimable_fraction:
+    if (
+        policy.max_nonreclaimable_fraction is not None
+        and fraction > policy.max_nonreclaimable_fraction
+    ):
         reasons.append(f"{label}: wired + compressed fraction {fraction:.4g} too high")
     return reasons
 

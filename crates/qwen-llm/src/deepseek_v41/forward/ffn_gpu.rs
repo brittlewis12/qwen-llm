@@ -923,6 +923,8 @@ pub(super) struct Rows {
     /// shared, then the routed slots); `None` when the tier is not selected.
     half_input: Option<prefill::HalfScratch>,
     half_inner: Option<prefill::HalfScratch>,
+    // Constructor provenance; checked views must not silently lose half staging.
+    half_required: [bool; 2],
 }
 impl Rows {
     fn prefix_widths(
@@ -1019,6 +1021,7 @@ impl Rows {
             hc,
             arithmetic,
             buffers,
+            half_required: [half_input.is_some(), half_inner.is_some()],
             half_input,
             half_inner,
         })
@@ -1028,6 +1031,10 @@ impl Rows {
     /// compact [layer][current row] status slab is reset on the host.
     pub(super) fn checked_prefix(&self, c: &Config, rows: usize, layers: usize) -> Result<Self> {
         let widths = Self::prefix_widths(c, self.hc.rows, rows, layers)?;
+        op::require(
+            [self.half_input.is_some(), self.half_inner.is_some()] == self.half_required,
+            "FFN prefix half backing presence differs from constructor",
+        )?;
         op::require(
             self.buffers.len() == widths.len() - 6,
             "FFN scratch buffers",
@@ -1085,6 +1092,7 @@ impl Rows {
             buffers,
             half_input,
             half_inner,
+            half_required: self.half_required,
         })
     }
 
@@ -1129,6 +1137,151 @@ impl Rows {
 #[cfg(test)]
 mod scratch_prefix_geometry_tests {
     use super::*;
+
+    #[test]
+    #[ignore = "self-leased actual scratch buffers; MTL debug layer; no model or dispatch"]
+    fn ffn_actual_prefix_resets_only_active_statuses_after_all_checks() {
+        assert_eq!(std::env::var("MTL_DEBUG_LAYER").as_deref(), Ok("1"));
+        assert_eq!(std::env::var("QWEN_METAL_LEASE_WAIT").as_deref(), Ok("1"));
+        assert!(!crate::env_flag::read_default_off(
+            "QWEN_METAL_LEASE_SKIP_WIRED_GATE"
+        ));
+        let _lease = metal::acquire_metal_benchmark_lease().unwrap();
+        let ctx = MetalContext::new().unwrap();
+        let c = super::super::toy::config();
+        let (maximum, layers) = (8, 3);
+        let widths = Rows::widths(&c, layers);
+        let half = prefill::ffn_half_scratch_elements(&c, maximum).unwrap();
+        let bytes = widths
+            .iter()
+            .map(|&w| (w * maximum * 4) as u64)
+            .chain(half.map(|n| (n * 2) as u64))
+            .map(|n| ctx.price_shared_buffer_upper(n).unwrap().priced_upper_bytes)
+            .sum::<u64>();
+        assert!(bytes < 16 * 1024 * 1024);
+        let admission = metal::evaluate_metal_memory_admission_with_cpu_bytes(
+            bytes,
+            1024 * 1024,
+            0,
+            ctx.memory_signals(),
+            true,
+        );
+        assert!(admission.refusal().is_none());
+
+        fn words(t: &MetalTensor) -> &[u32] {
+            unsafe {
+                std::slice::from_raw_parts(
+                    t.buffer
+                        .contents()
+                        .as_ptr()
+                        .cast::<u8>()
+                        .add(t.offset as usize)
+                        .cast::<u32>(),
+                    t.n_elements() as usize,
+                )
+            }
+        }
+        fn poison(t: &MetalTensor) {
+            unsafe {
+                std::slice::from_raw_parts_mut(
+                    t.buffer
+                        .contents()
+                        .as_ptr()
+                        .cast::<u8>()
+                        .add(t.offset as usize)
+                        .cast::<u32>(),
+                    t.n_elements() as usize,
+                )
+            }
+            .iter_mut()
+            .enumerate()
+            .for_each(|(i, word)| *word = 0xdead0000 + i as u32);
+        }
+        fn activations(rows: &Rows) -> Vec<Vec<u32>> {
+            rows.buffers
+                .iter()
+                .enumerate()
+                .filter(|(i, _)| *i != 6)
+                .map(|(_, t)| t)
+                .chain([
+                    &rows.hc.pre,
+                    &rows.hc.post,
+                    &rows.hc.comb,
+                    &rows.hc.normalized,
+                ])
+                .map(|t| words(t).to_vec())
+                .collect()
+        }
+
+        objc2::rc::autoreleasepool(|_| {
+            let mut backing =
+                Rows::with_arithmetic(&ctx, &c, maximum, layers, RowsArithmetic::Packed).unwrap();
+            for t in backing.buffers.iter().chain([
+                &backing.hc.pre,
+                &backing.hc.post,
+                &backing.hc.comb,
+                &backing.hc.normalized,
+            ]) {
+                poison(t);
+            }
+            let before = activations(&backing);
+            for n in [8, 1, 5] {
+                poison(&backing.buffers[6]);
+                let status_before = words(&backing.buffers[6]).to_vec();
+                let view = backing.checked_prefix(&c, n, layers).unwrap();
+                assert_eq!(view.hc.rows, n);
+                assert_eq!(backing.hc.rows, maximum);
+                assert_eq!(view.half_required, backing.half_required);
+                for (index, (view, original)) in
+                    view.buffers.iter().zip(&backing.buffers).enumerate()
+                {
+                    assert!(std::ptr::eq(&*view.buffer, &*original.buffer));
+                    assert_eq!(view.offset, original.offset);
+                    assert_eq!(view.n_elements(), (widths[index + 6] * n) as u64);
+                }
+                assert!(
+                    words(&backing.buffers[6])[..layers * n]
+                        .iter()
+                        .all(|&word| word == 0)
+                );
+                assert_eq!(
+                    &words(&backing.buffers[6])[layers * n..],
+                    &status_before[layers * n..]
+                );
+                assert_eq!(activations(&backing), before);
+            }
+
+            poison(&backing.buffers[6]);
+            let status_before = words(&backing.buffers[6]).to_vec();
+            let last = backing.buffers.pop().unwrap();
+            backing
+                .buffers
+                .push(last.view_subrange(0, vec![last.shape[0], 7]));
+            assert!(backing.checked_prefix(&c, 1, layers).is_err());
+            assert_eq!(words(&backing.buffers[6]), status_before);
+            *backing.buffers.last_mut().unwrap() = last;
+            assert_eq!(activations(&backing), before);
+
+            if let Some(original) = backing.half_input.take() {
+                assert!(backing.half_required[0]);
+                assert!(backing.checked_prefix(&c, 1, layers).is_err());
+                assert_eq!(words(&backing.buffers[6]), status_before);
+                assert_eq!(activations(&backing), before);
+                backing.half_input = Some(original);
+            }
+            if let Some(original) = backing.half_inner.take() {
+                assert!(backing.half_required[1]);
+                assert!(backing.checked_prefix(&c, 1, layers).is_err());
+                assert_eq!(words(&backing.buffers[6]), status_before);
+                assert_eq!(activations(&backing), before);
+                backing.half_inner = Some(original.checked_prefix(1).unwrap());
+                assert!(backing.checked_prefix(&c, 1, layers).is_err());
+                assert_eq!(words(&backing.buffers[6]), status_before);
+                assert_eq!(activations(&backing), before);
+                backing.half_inner = Some(original);
+            }
+        });
+    }
 
     #[test]
     fn ffn_prefix_geometry_compacts_statuses_and_slot_strides() {

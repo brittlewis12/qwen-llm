@@ -178,6 +178,8 @@ pub(super) struct Rows {
     /// Half copies of projection inputs for the tensor tile; `None` when
     /// the tier is not selected.
     half: Option<prefill::HalfScratch>,
+    // Constructor provenance; checked views must not silently lose half staging.
+    half_required: bool,
     rows: usize,
     geometry: [usize; 14],
     arithmetic: RowsArithmetic,
@@ -315,7 +317,7 @@ impl Rows {
         for &width in &widths {
             checked_product(&[width, rows])?;
         }
-        Ok(Self {
+        let mut scratch = Self {
             tile: query_batch::Scratch::new(ctx, c, rows)?,
             rank: prefill::allocate(ctx, widths[0], rows, GgmlType::F32)?,
             query: prefill::allocate(ctx, widths[1], rows, GgmlType::F32)?,
@@ -342,6 +344,7 @@ impl Rows {
                 Some(prefill::allocate(ctx, selection[1], 1, GgmlType::I32)?)
             },
             half: prefill::HalfScratch::new(ctx, half_elements)?,
+            half_required: false,
             rows,
             geometry: Self::geometry(c, capacity),
             arithmetic: if controls.is_some() {
@@ -351,7 +354,9 @@ impl Rows {
             },
             controls,
             history: std::cell::Cell::new(None),
-        })
+        };
+        scratch.half_required = scratch.half.is_some();
+        Ok(scratch)
     }
 
     pub(super) fn checked_prefix_with_controls(
@@ -362,6 +367,10 @@ impl Rows {
     ) -> Result<Self> {
         let rows = controls.rows();
         prefill::checked_scratch_rows(self.rows, rows)?;
+        op::require(
+            self.half.is_some() == self.half_required,
+            "attention prefix half backing presence differs from constructor",
+        )?;
         op::require(
             self.geometry == Self::geometry(c, capacity),
             "attention prefix incompatible backing geometry",
@@ -433,6 +442,7 @@ impl Rows {
                 .as_ref()
                 .map(|half| half.checked_prefix(prefill::attention_half_scratch_elements(c, rows)?))
                 .transpose()?,
+            half_required: self.half_required,
             rows,
             geometry: self.geometry,
             arithmetic: RowsArithmetic::Packed,
@@ -475,6 +485,173 @@ impl Rows {
 #[cfg(test)]
 mod scratch_prefix_geometry_tests {
     use super::*;
+
+    #[test]
+    #[ignore = "self-leased actual scratch buffers; MTL debug layer; no model or dispatch"]
+    fn attention_actual_prefix_rebinds_controls_and_rejects_invalid_parents() {
+        assert_eq!(std::env::var("MTL_DEBUG_LAYER").as_deref(), Ok("1"));
+        assert_eq!(std::env::var("QWEN_METAL_LEASE_WAIT").as_deref(), Ok("1"));
+        assert!(!crate::env_flag::read_default_off(
+            "QWEN_METAL_LEASE_SKIP_WIRED_GATE"
+        ));
+        let _lease = metal::acquire_metal_benchmark_lease().unwrap();
+        let ctx = MetalContext::new().unwrap();
+        let c = Config {
+            heads: 8,
+            head_dim: 32,
+            index_topk: 2,
+            ..super::super::toy::config()
+        };
+        let (maximum, capacity) = (8, 32);
+        let retained = 10..22;
+        let bytes = Rows::widths_with_controls(&c, capacity)
+            .into_iter()
+            .map(|w| w * maximum)
+            .chain(query_batch::Scratch::shapes(&c, maximum).unwrap())
+            .chain(
+                query_batch::selection_shapes(&c, capacity, maximum, query_batch::tile_rows())
+                    .unwrap(),
+            )
+            .chain(QueryControls::shapes(&c, capacity, retained.clone()).unwrap())
+            .filter(|&n| n != 0)
+            .map(|n| (n * 4) as u64)
+            .chain([
+                (prefill::attention_half_scratch_elements(&c, maximum).unwrap() * 2) as u64,
+                18 * 2,
+            ])
+            .map(|n| ctx.price_shared_buffer_upper(n).unwrap().priced_upper_bytes)
+            .sum::<u64>();
+        assert!(bytes < 16 * 1024 * 1024);
+        let admission = metal::evaluate_metal_memory_admission_with_cpu_bytes(
+            bytes,
+            1024 * 1024,
+            0,
+            ctx.memory_signals(),
+            true,
+        );
+        assert!(admission.refusal().is_none());
+
+        fn scratch(rows: &Rows) -> Vec<&MetalTensor> {
+            let mut tensors = vec![
+                &rows.rank,
+                &rows.query,
+                &rows.latent,
+                &rows.low,
+                &rows.grouped_input,
+                &rows.grouped_low,
+                &rows.compressor_value,
+                &rows.compressor_gate,
+                &rows.index_query,
+                &rows.index_weights,
+                &rows.select_scores,
+                &rows.tile.history,
+                &rows.tile.scores,
+                &rows.tile.attended,
+            ];
+            tensors.extend(rows.select_pairs.as_ref());
+            if let Some(matrix) = &rows.tile.matrix {
+                tensors.extend([&matrix.values, &matrix.probabilities]);
+            }
+            tensors
+        }
+
+        objc2::rc::autoreleasepool(|_| {
+            let controls = QueryControls::new(&ctx, &c, capacity, retained.clone()).unwrap();
+            let initial = controls.checked_tile_view(11, maximum).unwrap();
+            let mut backing = Rows::with_controls(&ctx, &c, capacity, &initial).unwrap();
+            let history = ced::HistoryRange {
+                layer: 4,
+                start: 11,
+                floor: 9,
+                extent: 10,
+            };
+            backing.history.set(Some(history));
+            for (start, n) in [(11, 8), (17, 1), (13, 5)] {
+                let controls = controls.checked_tile_view(start, n).unwrap();
+                let view = backing
+                    .checked_prefix_with_controls(&c, capacity, &controls)
+                    .unwrap();
+                assert_eq!(view.rows, n);
+                assert_eq!(view.arithmetic, RowsArithmetic::Packed);
+                assert_eq!(view.half_required, backing.half_required);
+                assert_eq!(view.history.get(), None);
+                assert_eq!(backing.history.get(), Some(history));
+                assert_eq!(
+                    view.controls.as_ref().unwrap().absolute_rows(),
+                    start..start + n
+                );
+                for (view, original) in scratch(&view).into_iter().zip(scratch(&backing)) {
+                    assert!(std::ptr::eq(&*view.buffer, &*original.buffer));
+                    assert_eq!(view.offset, original.offset);
+                    assert!(view.n_elements() <= original.n_elements());
+                }
+                for (actual, expected, width) in [
+                    (&view.selected, controls.selected(), c.index_topk),
+                    (
+                        &view.candidates,
+                        controls.candidates(),
+                        capacity.div_ceil(c.candidate_block),
+                    ),
+                ] {
+                    assert!(std::ptr::eq(&*actual.buffer, &*expected.buffer));
+                    assert_eq!(actual.offset, ((start - retained.start) * width * 4) as u64);
+                    assert_eq!(actual.offset, expected.offset);
+                    assert_eq!(actual.n_elements(), (width * n) as u64);
+                }
+                assert!(
+                    view.checked_prefix_with_controls(&c, capacity, &controls)
+                        .is_err()
+                );
+                assert!(view.tile.checked_prefix(&c, 1).is_err());
+            }
+            let current = controls.checked_tile_view(13, 5).unwrap();
+            let matrix = backing.tile.matrix.take();
+            assert!(
+                matrix.is_some(),
+                "fixture must exercise the gathered matrix path"
+            );
+            assert!(
+                backing
+                    .checked_prefix_with_controls(&c, capacity, &current)
+                    .is_err()
+            );
+            backing.tile.matrix = matrix;
+            assert!(
+                backing
+                    .checked_prefix_with_controls(&c, capacity, &current)
+                    .is_ok()
+            );
+            if let Some(half) = backing.half.take() {
+                assert!(backing.half_required);
+                assert!(
+                    backing
+                        .checked_prefix_with_controls(&c, capacity, &current)
+                        .is_err()
+                );
+                assert_eq!(backing.history.get(), Some(history));
+                backing.half = Some(half);
+                assert!(
+                    backing
+                        .checked_prefix_with_controls(&c, capacity, &current)
+                        .is_ok()
+                );
+            }
+
+            let half = prefill::allocate(&ctx, 18, 1, GgmlType::F16).unwrap();
+            let shifted = half.view_subrange(1, vec![16, 1]);
+            let view =
+                prefill::checked_scratch_view(&shifted, &[16, 1], &[5], GgmlType::F16).unwrap();
+            assert!(std::ptr::eq(&*view.buffer, &*half.buffer));
+            assert_eq!(view.offset, 2);
+            assert_eq!(view.n_elements(), 5);
+            assert!(prefill::checked_scratch_view(&view, &[16, 1], &[1], GgmlType::F16).is_err());
+            let mut misaligned = shifted.clone();
+            misaligned.offset = 1;
+            assert!(
+                prefill::checked_scratch_view(&misaligned, &[16, 1], &[5], GgmlType::F16).is_err()
+            );
+        });
+    }
 
     #[test]
     fn attention_prefix_widths_preserve_fresh_shapes_and_current_group_strides() {

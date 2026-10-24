@@ -194,7 +194,15 @@ fn dispatch_rows(
     assert_eq!(census.len(), 5 * spans.len(), "{census:?}");
     for (launches, &(n, tensor)) in census.chunks_exact(5).zip(spans) {
         for (launch, suffix) in launches.iter().zip([
-            if tensor { "score_tensor" } else { "score_mma" },
+            if tensor {
+                if std::env::var_os("QWEN_V41_SINK_TENSOR32").is_none_or(|v| v != "0") {
+                    "score_tensor32"
+                } else {
+                    "score_tensor"
+                }
+            } else {
+                "score_mma"
+            },
             "softmax_rows",
             if tensor { "pv_tensor" } else { "pv_mma" },
             "normalize_rows",

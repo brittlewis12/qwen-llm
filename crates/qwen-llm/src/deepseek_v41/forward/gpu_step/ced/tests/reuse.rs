@@ -1674,7 +1674,12 @@ fn wide_full_tile_lineage_and_staged_groups_match_fresh_through_packed_singleton
             driver_arm(&model, 129, false, Arithmetic::Production)
         });
         assert_fusion_pair(&reuse, &unfused, 2);
-        for suffix in ["score_tensor", "pv_tensor"] {
+        let score = if std::env::var_os("QWEN_V41_SINK_TENSOR32").is_none_or(|v| v != "0") {
+            "score_tensor32"
+        } else {
+            "score_tensor"
+        };
+        for suffix in [score, "pv_tensor"] {
             let name = format!("kernel_deepseek_v41_attention_{suffix}");
             assert!(
                 reuse

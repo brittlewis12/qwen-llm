@@ -576,8 +576,18 @@ impl Workspace {
             && n >= 128
             && metal::moe_grouped_tensor_selected(ctx)
             && std::env::var_os("QWEN_V41_SINK_TENSOR").is_none_or(|v| v != "0");
+        let score32 =
+            tensor && std::env::var_os("QWEN_V41_SINK_TENSOR32").is_some_and(|v| v != "0");
         if tensor {
-            tensor_pipeline(ctx, enc, "score_tensor")?;
+            tensor_pipeline(
+                ctx,
+                enc,
+                if score32 {
+                    "score_tensor32"
+                } else {
+                    "score_tensor"
+                },
+            )?;
             enc.dispatch(
                 MTLSize {
                     width: c.heads / MMA_HEADS,

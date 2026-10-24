@@ -252,12 +252,13 @@ mod tests {
     fn large_windows_choose_bounded_incumbent_before_allocating_or_pricing_groups() {
         for n in [32768, 1_048_576] {
             for window in [1, 128, n] {
-                // Keep the gathered PV scratch inside its existing uint byte
-                // domain at 1M rows; no geometry/extent check is relaxed.
+                // Keep gathered PV and retained controls inside their existing
+                // uint byte domains at 1M rows; no extent check is relaxed.
                 let c = Config {
                     window,
                     heads: 1,
                     groups: 1,
+                    candidate_block: 4096,
                     ..crate::deepseek_v41::forward::toy::config()
                 };
                 let p = CedPlan::shrinking(
@@ -267,6 +268,16 @@ mod tests {
                     &CedRequest::cold(n, n),
                 )
                 .unwrap_or_else(|e| panic!("large-window request N={n} W={window}: {e}"));
+                assert_eq!(
+                    crate::deepseek_v41::forward::attention_gpu::QueryControls::logical_bytes(
+                        &c,
+                        n,
+                        p.candidate_rows.clone()
+                    )
+                    .unwrap(),
+                    p.memory.candidate_bytes + p.memory.selected_bytes,
+                    "the extreme request also has representable retained-control backing"
+                );
                 for depth in [1, 2, 4] {
                     let selection = select(&p, depth).unwrap();
                     if window == n {

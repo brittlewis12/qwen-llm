@@ -545,7 +545,8 @@ fn staged_signals() -> metal::MetalMemorySignals {
         process_limit_remaining_bytes: Some(0),
         host_budget: Some(metal::HostMemoryBudget {
             physical_bytes: 1000,
-            conservative_available_bytes: 900,
+            // The 650-byte load fits; the 800-byte whole peak does not.
+            conservative_available_bytes: 700,
             external_gap_bytes: 0,
             private_shadow_bytes: 0,
         }),
@@ -616,7 +617,7 @@ fn staged_runtime_uses_explicit_postload_signals_and_refuses_before_state_creati
         .host_budget
         .as_mut()
         .unwrap()
-        .conservative_available_bytes = 350;
+        .conservative_available_bytes = 150;
     let runtime = plan.assess_runtime(after).unwrap();
     assert_eq!(runtime.required_bytes, Some(150));
     assert_eq!(runtime.signals, after);
@@ -627,7 +628,7 @@ fn staged_runtime_uses_explicit_postload_signals_and_refuses_before_state_creati
         .host_budget
         .as_mut()
         .unwrap()
-        .conservative_available_bytes = 349;
+        .conservative_available_bytes = 149;
     let states = std::cell::Cell::new(0);
     let commands = std::cell::Cell::new(0);
     let denied = plan
@@ -657,8 +658,13 @@ fn staged_capacity_checks_constraints_hidden_by_whole_peak_availability() {
     let mut device = staged_signals();
     device.recommended_max_bytes = 749;
     let mut ownership = staged_signals();
+    // At exact physical capacity, one byte of existing gap or shadow blocks the peak.
+    ownership.host_budget.as_mut().unwrap().physical_bytes =
+        plan.required_metal_bytes + plan.required_cpu_bytes;
     ownership.host_budget.as_mut().unwrap().external_gap_bytes = 1;
     let mut shadow = staged_signals();
+    shadow.host_budget.as_mut().unwrap().physical_bytes =
+        plan.required_metal_bytes + plan.required_cpu_bytes;
     shadow.host_budget.as_mut().unwrap().private_shadow_bytes = 1;
     for (signals, reason) in [
         (process, R::ProcessInsufficient),
@@ -692,7 +698,7 @@ fn staged_capacity_checks_constraints_hidden_by_whole_peak_availability() {
         .host_budget
         .as_mut()
         .unwrap()
-        .conservative_available_bytes = 849;
+        .conservative_available_bytes = 649;
     assert_eq!(
         plan.assess_load(short_load)
             .unwrap_err()
@@ -736,7 +742,7 @@ fn staged_runtime_recharges_binding_and_caller_cpu_but_not_loaded_metal() {
         .host_budget
         .as_mut()
         .unwrap()
-        .conservative_available_bytes = 350;
+        .conservative_available_bytes = 150;
     assert_eq!(
         plan.assess_runtime(after).unwrap().required_bytes,
         Some(150)
@@ -755,7 +761,7 @@ fn staged_runtime_recharges_binding_and_caller_cpu_but_not_loaded_metal() {
         .host_budget
         .as_mut()
         .unwrap()
-        .conservative_available_bytes = 349;
+        .conservative_available_bytes = 149;
     assert!(plan.assess_runtime(after).is_err());
 }
 
@@ -775,7 +781,9 @@ fn staged_private_shadows_and_uncovered_imports_remain_charged_exactly_once() {
     let host = after.host_budget.as_mut().unwrap();
     host.external_gap_bytes = 100;
     host.private_shadow_bytes = 10;
-    host.conservative_available_bytes = 360;
+    // Live device usage, shadow and runtime demand exactly fill physical capacity.
+    host.physical_bytes = plan.required_metal_bytes + plan.required_cpu_bytes;
+    host.conservative_available_bytes = 160;
     assert_eq!(after.effective_device_usage(), Some(640));
     assert_eq!(after.host_remaining_bytes(), Some(150));
     assert_eq!(
@@ -809,7 +817,18 @@ fn staged_private_shadows_and_uncovered_imports_remain_charged_exactly_once() {
         private.required_metal_bytes + private.required_cpu_bytes,
         801
     );
-    assert!(private.assess_load(staged_signals()).is_err());
+    let mut exact_capacity = staged_signals();
+    exact_capacity.host_budget.as_mut().unwrap().physical_bytes = 800;
+    assert!(staged_plan().assess_load(exact_capacity).is_ok());
+    assert_eq!(
+        private
+            .assess_load(exact_capacity)
+            .unwrap_err()
+            .as_memory_admission()
+            .unwrap()
+            .reason(),
+        metal::MetalMemoryAdmissionReason::HostInsufficient
+    );
 }
 
 #[test]
@@ -873,7 +892,7 @@ fn staged_assessments_refuse_invalid_telemetry_and_runtime_combined_overflow() {
 }
 
 #[test]
-fn staged_iq3_views_refuse_capacity_before_import_even_with_all_ram_available() {
+fn staged_iq3_views_fit_available_ram_but_still_require_device_capacity() {
     let mut original = staged_plan();
     let gib = 1u64 << 30;
     original.resident_storage.metal_view_bytes = 217_414 * gib / 1000;
@@ -899,13 +918,33 @@ fn staged_iq3_views_refuse_capacity_before_import_even_with_all_ram_available() 
         }),
     };
     let imports = std::cell::Cell::new(0);
-    let error = plan
+    let load = plan
         .assess_load(signals)
-        .map(|_| imports.set(1))
+        .map(|load| {
+            imports.set(imports.get() + 1);
+            load
+        })
+        .unwrap();
+    assert!(load.load_admission.is_admitted());
+    assert!(load.whole_peak_now.is_admitted());
+    assert!(
+        plan.clone()
+            .into_strict(signals)
+            .unwrap()
+            .admission
+            .is_admitted()
+    );
+    assert_eq!(imports.get(), 1);
+
+    let mut short_device = signals;
+    short_device.recommended_max_bytes = plan.required_metal_bytes - 1;
+    let error = plan
+        .assess_load(short_device)
+        .map(|_| imports.set(imports.get() + 1))
         .unwrap_err();
     assert_eq!(
         error.as_memory_admission().unwrap().reason(),
-        metal::MetalMemoryAdmissionReason::HostInsufficient
+        metal::MetalMemoryAdmissionReason::WorkingSetInsufficient
     );
-    assert_eq!(imports.get(), 0);
+    assert_eq!(imports.get(), 1);
 }

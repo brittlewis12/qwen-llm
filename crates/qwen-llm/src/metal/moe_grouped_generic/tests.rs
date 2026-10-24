@@ -2257,6 +2257,318 @@ fn expert_wide_panel_matches_narrow() {
     );
 }
 
+fn wide_compat_routing(original_rows: &[usize]) -> (Vec<i32>, Vec<i32>) {
+    let n = original_rows.len();
+    let mut counts = vec![0i32; 10];
+    let mut ids = vec![-1; 10 * n];
+    for (row, &original) in original_rows.iter().enumerate() {
+        assert!(original < 4096);
+        let mut end = 3807;
+        let mut second = 1;
+        for (i, tail) in [1, 31, 32, 33, 63, 64, 65].into_iter().enumerate() {
+            if (end..end + tail).contains(&original) {
+                second = i + 2;
+            }
+            end += tail;
+        }
+        assert_eq!(end, 4096);
+        for (k, expert) in [0, second].into_iter().enumerate() {
+            ids[expert * n + counts[expert] as usize] = (row * 2 + k) as i32;
+            counts[expert] += 1;
+        }
+    }
+    (counts, ids)
+}
+
+fn wide_compat_metal_bound() -> usize {
+    // Three full outputs (including the F32 control) dominate the two full
+    // plus two compact outputs. All weights are conservatively priced as F32.
+    3 * (4096 * 2 * 288 + 128) * 4
+        + (4096 + 2048) * 512 * 4
+        + 2 * 10 * 512 * 288 * 4
+        + 2 * (10 + 10 * 4096) * 4
+        + 64 * 65536
+}
+
+#[test]
+fn wide_compat_fixture_covers_slot_tails_and_bounded_compaction() {
+    assert!(wide_compat_metal_bound() < 64 * 1024 * 1024);
+    let (counts, ids) = wide_compat_routing(&(0..4096).collect::<Vec<_>>());
+    assert_eq!(counts, [4096, 3807, 1, 31, 32, 33, 63, 64, 65, 0]);
+    let mut seen = vec![false; 8192];
+    for (expert, &count) in counts.iter().enumerate() {
+        for &id in &ids[expert * 4096..expert * 4096 + count as usize] {
+            assert!(!std::mem::replace(&mut seen[id as usize], true));
+        }
+        assert!(
+            ids[expert * 4096 + count as usize..(expert + 1) * 4096]
+                .iter()
+                .all(|&id| id == -1)
+        );
+    }
+    assert!(seen.into_iter().all(|v| v));
+    for n in [1, 17, 31, 32, 33, 63, 64, 65, 127, 128, 129, 2048] {
+        let rows: Vec<_> = (0..n).map(|i| (4050 + i * 4051) % 4096).collect();
+        let (counts, _) = wide_compat_routing(&rows);
+        assert_eq!(counts.iter().sum::<i32>(), (n * 2) as i32);
+        assert_eq!(counts[0], n as i32);
+        assert_eq!(counts[9], 0);
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn wide_compat_narrow(
+    ctx: &MetalContext,
+    enc: &KernelEncoder,
+    gate: &MetalTensor,
+    up: &MetalTensor,
+    x: &MetalTensor,
+    counts: &MetalTensor,
+    ids: &MetalTensor,
+    out: &MetalTensor,
+    n: usize,
+) {
+    for (weight, role, clamp) in [
+        (gate, MoeGroupedTensorRole::Down, None),
+        (up, MoeGroupedTensorRole::UpClamped, Some(10.0)),
+    ] {
+        let args = generic_mm_args(
+            "wide_compat",
+            weight,
+            x,
+            counts,
+            ids,
+            out,
+            512,
+            288,
+            10,
+            n,
+            2,
+            0,
+            i32::MAX as u32,
+        )
+        .unwrap();
+        let activation = if x.dtype == GgmlType::F16 {
+            TensorActivation::F16
+        } else {
+            TensorActivation::F32
+        };
+        let name = moe_grouped_tensor_pipeline_name(role, weight.dtype, activation).unwrap();
+        tensor::dispatch_tensor_mm(
+            ctx, enc, &name, &args, weight, x, counts, ids, out, 288, 10, n, clamp,
+        )
+        .unwrap();
+    }
+}
+
+#[test]
+#[ignore = "M5 tensor tier required; self-leased, strict bits, <=64 MiB planned Metal buffers"]
+fn wide_narrow_compacted_maya_gate_up_bitwise() {
+    assert_eq!(std::env::var("MTL_DEBUG_LAYER").as_deref(), Ok("1"));
+    assert_eq!(std::env::var("QWEN_METAL_LEASE_WAIT").as_deref(), Ok("1"));
+    let _lease = crate::metal::acquire_metal_benchmark_lease().expect("wide compatibility lease");
+    assert!(wide_compat_metal_bound() < 64 * 1024 * 1024);
+    let ctx = MetalContext::new().unwrap();
+    assert!(
+        moe_grouped_tensor_selected(&ctx),
+        "M5 tensor tier must be active, no fallback proof"
+    );
+    assert!(std::env::var_os("QWEN_V41_EXPERT_WIDE").is_none_or(|v| v != "0"));
+    let types = [
+        GgmlType::IQ2_XXS,
+        GgmlType::IQ2_S,
+        GgmlType::IQ3_XXS,
+        GgmlType::IQ3_S,
+    ];
+    let guarded = |n: usize| {
+        let root = f32_tensor(&ctx, &vec![4096.25; n * 2 * 288 + 128]);
+        let view = root.view_bytes(64 * 4, vec![(n * 2 * 288) as u64]);
+        (root, view)
+    };
+    let checked = |root: &MetalTensor| {
+        let values = tensor_f32_at_offset(root);
+        assert!(
+            values[..64]
+                .iter()
+                .chain(&values[values.len() - 64..])
+                .all(|&v| v == 4096.25)
+        );
+        let values = values[64..values.len() - 64].to_vec();
+        assert!(values.iter().all(|v| v.is_finite() && *v != 4096.25));
+        assert!(values.iter().any(|&v| v != 0.0));
+        values
+    };
+    let submit = |encode: &dyn Fn(&KernelEncoder), wide: bool| {
+        crate::metal::dispatch_census_begin();
+        let command = ctx.queue.commandBuffer().unwrap();
+        let enc = KernelEncoder::begin(&command);
+        encode(&enc);
+        enc.end();
+        commit_and_wait(&command).unwrap();
+        let census = crate::metal::dispatch_census_take();
+        assert_eq!(census.len(), 2);
+        assert_eq!(
+            census
+                .iter()
+                .filter(|d| d.kernel.starts_with("kernel_moe_wide_probe_"))
+                .count(),
+            if wide { 2 } else { 0 }
+        );
+    };
+    for (case, gate_type) in types.into_iter().enumerate() {
+        for up_type in [gate_type, types[(case + 1) % types.len()]] {
+            let gate = bank_tensor(
+                &ctx,
+                gate_type,
+                &synthetic_bank(gate_type, 512, 288, 10, 0x1234),
+                512,
+                288,
+                10,
+            );
+            let up = bank_tensor(
+                &ctx,
+                up_type,
+                &synthetic_bank(up_type, 512, 288, 10, 0x9876),
+                512,
+                288,
+                10,
+            );
+            let mut rng = Lcg(0x57ee);
+            let x: Vec<_> = (0..4096 * 512).map(|_| rng.signed(0.5)).collect();
+            let half = f16_tensor(&ctx, &x);
+            let (counts, ids) = wide_compat_routing(&(0..4096).collect::<Vec<_>>());
+            let counts = i32_typed_tensor(&ctx, &counts);
+            let ids = i32_typed_tensor(&ctx, &ids);
+            let (narrow_root, narrow) = guarded(4096);
+            let (wide_root, wide) = guarded(4096);
+            submit(
+                &|enc| {
+                    wide_compat_narrow(&ctx, enc, &gate, &up, &half, &counts, &ids, &narrow, 4096)
+                },
+                false,
+            );
+            submit(
+                &|enc| {
+                    encode_moe_swiglu_f32_grouped_slots_tensor(
+                        &ctx,
+                        enc,
+                        &gate,
+                        &up,
+                        &half,
+                        &counts,
+                        &ids,
+                        &wide,
+                        512,
+                        288,
+                        10,
+                        2,
+                        4096,
+                        Some(10.0),
+                    )
+                    .unwrap()
+                },
+                true,
+            );
+            let reference = checked(&wide_root);
+            assert_eq!(
+                reference.iter().map(|v| v.to_bits()).collect::<Vec<_>>(),
+                checked(&narrow_root)
+                    .iter()
+                    .map(|v| v.to_bits())
+                    .collect::<Vec<_>>(),
+                "{gate_type:?}/{up_type:?} full panels"
+            );
+            for n in [1, 17, 31, 32, 33, 63, 64, 65, 127, 128, 129, 2048] {
+                let rows: Vec<_> = (0..n).map(|i| (4050 + i * 4051) % 4096).collect();
+                let compact: Vec<_> = rows
+                    .iter()
+                    .flat_map(|&r| x[r * 512..(r + 1) * 512].iter().copied())
+                    .collect();
+                let compact = f16_tensor(&ctx, &compact);
+                let (cc, ci) = wide_compat_routing(&rows);
+                let cc = i32_typed_tensor(&ctx, &cc);
+                let ci = i32_typed_tensor(&ctx, &ci);
+                for force_wide in [false, true] {
+                    let (root, out) = guarded(n);
+                    submit(
+                        &|enc| {
+                            if force_wide {
+                                encode_moe_swiglu_wide_probe(
+                                    &ctx, enc, &gate, &up, &compact, &cc, &ci, &out, 512, 288, 10,
+                                    2, n, 10.0,
+                                )
+                                .unwrap();
+                            } else {
+                                encode_moe_swiglu_f32_grouped_slots_tensor(
+                                    &ctx,
+                                    enc,
+                                    &gate,
+                                    &up,
+                                    &compact,
+                                    &cc,
+                                    &ci,
+                                    &out,
+                                    512,
+                                    288,
+                                    10,
+                                    2,
+                                    n,
+                                    Some(10.0),
+                                )
+                                .unwrap();
+                            }
+                        },
+                        force_wide,
+                    );
+                    let actual = checked(&root);
+                    for (i, &original) in rows.iter().enumerate() {
+                        for j in 0..2 * 288 {
+                            assert_eq!(
+                                actual[i * 2 * 288 + j].to_bits(),
+                                reference[original * 2 * 288 + j].to_bits(),
+                                "{gate_type:?}/{up_type:?} compact n={n} row={original} j={j} wide={force_wide}"
+                            );
+                        }
+                    }
+                }
+            }
+            let f32_input = f32_tensor(&ctx, &x);
+            let (f32_root, f32_out) = guarded(4096);
+            submit(
+                &|enc| {
+                    encode_moe_swiglu_f32_grouped_slots_tensor(
+                        &ctx,
+                        enc,
+                        &gate,
+                        &up,
+                        &f32_input,
+                        &counts,
+                        &ids,
+                        &f32_out,
+                        512,
+                        288,
+                        10,
+                        2,
+                        4096,
+                        Some(10.0),
+                    )
+                    .unwrap()
+                },
+                false,
+            );
+            assert_eq!(
+                checked(&f32_root)
+                    .iter()
+                    .map(|v| v.to_bits())
+                    .collect::<Vec<_>>(),
+                reference.iter().map(|v| v.to_bits()).collect::<Vec<_>>(),
+                "F32 narrow control"
+            );
+            eprintln!("strict wide/compact case {gate_type:?}/{up_type:?} passed");
+        }
+    }
+}
+
 /// Opt-in 4096-token expert down timing: narrow 32-slot panels versus one
 /// 64-slot probe panel. Synthetic IQ3_XXS bank, same useful slots; the 4096
 /// count distribution makes the wide panel mostly full. `QWEN_V41_TILE_TIMING=1`.

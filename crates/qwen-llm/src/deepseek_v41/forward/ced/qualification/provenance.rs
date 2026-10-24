@@ -263,19 +263,19 @@ fn frozen_reference_requires_complete_reviewed_harness_identity() {
     assert!(frozen(&bad).is_err());
 }
 
-pub(super) fn source() -> AResult<(PathBuf, Value)> {
-    let root = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../..")
-        .canonicalize()?;
+fn compiled_sources() -> &'static [(&'static str, &'static [u8])] {
     macro_rules! embedded {
         ($($path:literal),+ $(,)?) => { &[$(($path, include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/../../", $path)).as_slice())),+] };
     }
-    let sources: &[(&str, &[u8])] = embedded![
+    const SOURCES: &[(&str, &[u8])] = embedded![
         "Cargo.lock",
         "Cargo.toml",
         "crates/qwen-llm/Cargo.toml",
         "crates/qwen-llm/build.rs",
         "crates/qwen-llm/src/deepseek_v41/forward.rs",
+        "crates/qwen-llm/src/deepseek_v41/forward/chunk_geometry.rs",
+        "crates/qwen-llm/src/deepseek_v41/forward/preflight.rs",
+        "crates/qwen-llm/src/deepseek_v41/forward/binding.rs",
         "crates/qwen-llm/src/deepseek_v41/forward/ced.rs",
         "crates/qwen-llm/src/deepseek_v41/forward/ced_plan.rs",
         "crates/qwen-llm/src/deepseek_v41/forward/gpu_step.rs",
@@ -284,6 +284,7 @@ pub(super) fn source() -> AResult<(PathBuf, Value)> {
         "crates/qwen-llm/src/deepseek_v41/forward/attention_gpu/ced.rs",
         "crates/qwen-llm/src/deepseek_v41/forward/attention_gpu/query_batch.rs",
         "crates/qwen-llm/src/deepseek_v41/forward/ffn_gpu.rs",
+        "crates/qwen-llm/src/deepseek_v41/forward/ffn_gpu/tests/arithmetic.rs",
         "crates/qwen-llm/src/deepseek_v41/forward/prefill.rs",
         "crates/qwen-llm/src/deepseek_v41/forward/bind.rs",
         "crates/qwen-llm/src/deepseek_v41/forward/attention.rs",
@@ -303,17 +304,30 @@ pub(super) fn source() -> AResult<(PathBuf, Value)> {
         "crates/qwen-llm/src/deepseek_v41/gguf/storage.rs",
         "crates/qwen-llm/src/gguf.rs",
         "crates/qwen-llm/src/checkpoint_identity.rs",
+        "crates/qwen-llm/src/metal/moe_grouped_generic.rs",
+        "crates/qwen-llm/src/metal/moe_grouped_generic/tensor.rs",
+        "crates/qwen-llm/src/metal/moe_grouped_generic/tests.rs",
+        "crates/qwen-llm/src/metal/context.rs",
+        "crates/qwen-llm/src/metal/census.rs",
+        "crates/qwen-llm/src/metal/host_budget.rs",
         "crates/qwen-llm/src/deepseek_v41/forward/ced/qualification.rs",
         "crates/qwen-llm/src/deepseek_v41/forward/ced/qualification/archive.rs",
         "crates/qwen-llm/src/deepseek_v41/forward/ced/qualification/archive/tests.rs",
         "crates/qwen-llm/src/deepseek_v41/forward/ced/qualification/metrics.rs",
         "crates/qwen-llm/src/deepseek_v41/forward/ced/qualification/provenance.rs",
+        "crates/qwen-llm/src/deepseek_v41/forward/ced/qualification/current_pair.rs",
         "kernels/deepseek_v41_attention.metal",
         "kernels/deepseek_v41_ffn.metal",
         "kernels/deepseek_v41_engram.metal",
+        "kernels/tensor/moe_grouped_slots_tensor.metal",
+        "kernels/quant_tiles.h",
     ];
+    SOURCES
+}
+
+fn checked_compiled_sources(root: &Path) -> AResult<Vec<Value>> {
     let mut compiled = Vec::new();
-    for &(path, bytes) in sources {
+    for &(path, bytes) in compiled_sources() {
         let hash = archive::sha(bytes);
         ensure!(
             archive::file_sha(&mut archive::open(&root.join(path))?)? == hash,
@@ -321,6 +335,55 @@ pub(super) fn source() -> AResult<(PathBuf, Value)> {
         );
         compiled.push(json!({"path": path, "sha256": hash}));
     }
+    Ok(compiled)
+}
+
+#[test]
+fn active_compiled_inventory_matches_checkout() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    checked_compiled_sources(&root).unwrap();
+}
+
+#[test]
+fn compiled_geometry_inventory_rejects_helper_only_edits_before_import() {
+    let helper = "crates/qwen-llm/src/deepseek_v41/forward/chunk_geometry.rs";
+    let sources = compiled_sources();
+    let embedded = sources.iter().find(|(p, _)| *p == helper).unwrap().1;
+    assert_eq!(embedded, include_bytes!("../../chunk_geometry.rs"));
+    let nonce = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    let root = std::env::temp_dir().join(format!(
+        "qwen-geometry-inventory-{}-{nonce}",
+        std::process::id()
+    ));
+    std::fs::create_dir(&root).unwrap();
+    for &(path, bytes) in sources {
+        let destination = root.join(path);
+        std::fs::create_dir_all(destination.parent().unwrap()).unwrap();
+        std::fs::write(destination, bytes).unwrap();
+    }
+    assert_eq!(
+        checked_compiled_sources(&root).unwrap().len(),
+        sources.len()
+    );
+    let mut changed = embedded.to_vec();
+    changed.extend_from_slice(b"\n// helper-only freshness probe\n");
+    std::fs::write(root.join(helper), changed).unwrap();
+    let refusal = checked_compiled_sources(&root).unwrap_err().to_string();
+    assert!(
+        refusal.contains(&format!("binary/source mismatch: {helper}")),
+        "{refusal}"
+    );
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+pub(super) fn source() -> AResult<(PathBuf, Value)> {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../..")
+        .canonicalize()?;
+    let compiled = checked_compiled_sources(&root)?;
     let git = |args: &[&str]| -> AResult<String> {
         let o = Command::new("git").current_dir(&root).args(args).output()?;
         ensure!(

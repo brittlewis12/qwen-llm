@@ -274,3 +274,188 @@ fn packed_singleton_ffn_preserves_operands_and_all_f32_controls_win() {
         );
     });
 }
+
+fn wide_ffn_rows_bound(c: &Config, n: usize) -> u64 {
+    let price = |bytes: usize| (bytes as u64).div_ceil(16384) * 16384 + 1024;
+    let scratch: u64 = Rows::widths(c, 1)
+        .into_iter()
+        .map(|w| price(w * n * 4))
+        .sum();
+    let half: u64 = prefill::ffn_half_scratch_elements(c, n)
+        .unwrap()
+        .into_iter()
+        .map(|e| price(e * 2))
+        .sum();
+    scratch + half + 2 * price(4 * c.hidden * n * 4) + price(4 * n * 4)
+}
+
+#[test]
+fn wide_ffn_fixture_has_bounded_full_and_decoder_backing() {
+    let mut c = toy::config();
+    c.hidden = 256;
+    c.intermediate = 256;
+    let bound = wide_ffn_rows_bound(&c, 4096) + wide_ffn_rows_bound(&c, 2048) + 12 * 1024 * 1024;
+    assert!(bound < 256 * 1024 * 1024, "{bound}");
+    assert_eq!(c.topk, 6);
+    for n in [1, 33, 2048] {
+        assert!(wide_ffn_rows_bound(&c, n) <= wide_ffn_rows_bound(&c, 2048));
+    }
+}
+
+#[test]
+#[ignore = "M5 tensor tier required; self-leased, exact Full-wide vs bounded decoder FFN/status"]
+fn wide_full_vs_compacted_ffn_maya_bitwise_and_status() {
+    assert_eq!(std::env::var("MTL_DEBUG_LAYER").as_deref(), Ok("1"));
+    assert_eq!(std::env::var("QWEN_METAL_LEASE_WAIT").as_deref(), Ok("1"));
+    let _lease = metal::acquire_metal_benchmark_lease().expect("wide FFN compatibility lease");
+    let ctx = MetalContext::new().unwrap();
+    assert!(
+        metal::moe_grouped_tensor_selected(&ctx),
+        "M5 tensor tier required, no fallback proof"
+    );
+    assert!(std::env::var_os("QWEN_V41_EXPERT_WIDE").is_none_or(|v| v != "0"));
+    for dtype in [
+        GgmlType::IQ2_XXS,
+        GgmlType::IQ2_S,
+        GgmlType::IQ3_XXS,
+        GgmlType::IQ3_S,
+    ] {
+        let banks = [3, 7, 11].map(|seed| bank(&ctx, dtype, seed));
+        let weights = toy::Weights::new(&ctx);
+        let mut model = weights.model(&ctx);
+        model.layers.truncate(1);
+        model.config.hidden = 256;
+        model.config.intermediate = 256;
+        let layer = &mut model.layers[0];
+        layer.banks = [&banks[0], &banks[1], &banks[2]];
+        layer.ffn_hc.norm = vec![1.0; 256];
+        dense(&mut layer.ffn_hc.projection, 1024, 24, GgmlType::BF16);
+        dense(&mut layer.router, 256, 8, GgmlType::F32);
+        for linear in &mut layer.shared {
+            dense(linear, 256, 256, GgmlType::BF16);
+        }
+        let c = &model.config;
+        let layer = &model.layers[0];
+        let workspace = Workspace::new(&model).unwrap();
+        let resident = ctx.memory_signals().current_allocated_bytes;
+        assert!(
+            resident <= 12 * 1024 * 1024,
+            "fixture resident buffers {resident}"
+        );
+        for n in [4096, 2048] {
+            let row_bytes = Rows::widths(c, 1)
+                .into_iter()
+                .chain([4 * c.hidden, 4 * c.hidden, 4])
+                .map(|w| (w * n * 4) as u64);
+            let half_bytes = prefill::ffn_half_scratch_elements(c, n)
+                .unwrap()
+                .into_iter()
+                .map(|e| (e * 2) as u64);
+            for logical in row_bytes.chain(half_bytes) {
+                assert!(
+                    ctx.price_shared_buffer_upper(logical)
+                        .unwrap()
+                        .priced_upper_bytes
+                        <= logical.div_ceil(16384) * 16384 + 1024
+                );
+            }
+        }
+        let bound = resident + wide_ffn_rows_bound(c, 4096) + wide_ffn_rows_bound(c, 2048);
+        assert!(
+            bound < 256 * 1024 * 1024,
+            "fixture planned Metal buffers {bound}"
+        );
+        let x: Vec<_> = (0..1024 * 4096)
+            .map(|i| ((i * 19 % 1009) as f32 - 504.0) / 171.0)
+            .collect();
+        let p = [0.7, 0.1, 0.3, 0.9];
+        let input = upload(&ctx, &x, vec![256, 4, 4096]).unwrap();
+        let incoming = upload(&ctx, &p.repeat(4096), vec![4, 4096]).unwrap();
+        let full_out = prefill::allocate(&ctx, 1024, 4096, GgmlType::F32)
+            .unwrap()
+            .view_bytes(0, vec![256, 4, 4096]);
+        let full = Rows::new(&ctx, c, 4096, 1).unwrap();
+        let encode =
+            |input: &MetalTensor, incoming: &MetalTensor, out: &MetalTensor, scratch: &Rows| {
+                metal::dispatch_census_begin();
+                let result = submit(&ctx, "wide_ffn_compat", [scratch.hc.rows, 0, 0, 0], |enc| {
+                    workspace.encode_rows(&ctx, enc, c, layer, 0, input, incoming, out, scratch)
+                });
+                let census = metal::dispatch_census_take();
+                result.unwrap();
+                scratch.validate_status().unwrap();
+                assert!(f32_slice(out).unwrap().iter().all(|v| v.is_finite()));
+                assert!(f32_slice(out).unwrap().iter().any(|&v| v != 0.0));
+                assert_eq!(
+                    census
+                        .iter()
+                        .filter(|d| d.kernel.starts_with("kernel_moe_wide_probe_"))
+                        .count(),
+                    if scratch.hc.rows >= 4096 { 2 } else { 0 }
+                );
+                assert_eq!(
+                    census
+                        .iter()
+                        .filter(|d| d.kernel.starts_with("kernel_moe_down_")
+                            && d.kernel.ends_with("_f16act_grouped_slots_tensor"))
+                        .count(),
+                    usize::from(scratch.arithmetic.packed_operands(scratch.hc.rows))
+                );
+            };
+        encode(&input, &incoming, &full_out, &full);
+        for n in [1, 33, 2048] {
+            let rows: Vec<_> = (0..n).map(|i| (4050 + i * 4051) % 4096).collect();
+            let compact_x: Vec<_> = rows
+                .iter()
+                .flat_map(|&r| x[r * 1024..(r + 1) * 1024].iter().copied())
+                .collect();
+            let compact_x = upload(&ctx, &compact_x, vec![256, 4, n as u64]).unwrap();
+            let compact_p = upload(&ctx, &p.repeat(n), vec![4, n as u64]).unwrap();
+            let out = prefill::allocate(&ctx, 1024, n, GgmlType::F32)
+                .unwrap()
+                .view_bytes(0, vec![256, 4, n as u64]);
+            let scratch = Rows::with_arithmetic(&ctx, c, n, 1, RowsArithmetic::Packed).unwrap();
+            encode(&compact_x, &compact_p, &out, &scratch);
+            for (reference, actual, width) in [
+                (&full_out, &out, 1024),
+                (&full.hc.pre, &scratch.hc.pre, 4),
+                (&full.hc.normalized, &scratch.hc.normalized, 256),
+                (&full.buffers[8], &scratch.buffers[8], c.topk),
+                (&full.buffers[9], &scratch.buffers[9], c.topk),
+                (
+                    &full.buffers[12],
+                    &scratch.buffers[12],
+                    c.intermediate * c.topk,
+                ),
+            ] {
+                // Route IDs are I32; compare their raw words too, not floats.
+                let mut reference_view = reference.clone();
+                let mut actual_view = actual.clone();
+                assert!(matches!(
+                    reference_view.dtype,
+                    GgmlType::F32 | GgmlType::I32
+                ));
+                assert_eq!(reference_view.dtype, actual_view.dtype);
+                reference_view.dtype = GgmlType::F32;
+                actual_view.dtype = GgmlType::F32;
+                let reference = f32_slice(&reference_view).unwrap();
+                let actual = f32_slice(&actual_view).unwrap();
+                for (i, &row) in rows.iter().enumerate() {
+                    for j in 0..width {
+                        assert_eq!(
+                            actual[i * width + j].to_bits(),
+                            reference[row * width + j].to_bits(),
+                            "{dtype:?} n={n} original={row} width={width} j={j}"
+                        );
+                    }
+                }
+            }
+            if n == 1 {
+                let scalar = Rows::new(&ctx, c, 1, 1).unwrap();
+                assert!(!scalar.arithmetic.packed_operands(1));
+                encode(&compact_x, &compact_p, &out, &scalar);
+            }
+        }
+        eprintln!("strict wide Full/compacted FFN {dtype:?} passed");
+    }
+}

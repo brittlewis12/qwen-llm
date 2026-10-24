@@ -334,12 +334,15 @@ mod tests {
                     window,
                     ..Config::default()
                 };
-                for n in [2, 128, 2048, 2049, 8191, 8192] {
+                for (n, full_chunk_rows) in [2, 128, 2047, 2048, 2049, 4095, 4096, 4097, 8191, 8192]
+                    .into_iter()
+                    .flat_map(|n| [(n, 2048), (n, 4096)])
+                {
                     let plan = CedPlan::shrinking(
                         &config,
                         &schedule,
                         &HashConfig::default(),
-                        &CedRequest::cold(n, n),
+                        &CedRequest::cold(n, n).with_full_chunk_rows(full_chunk_rows),
                     )
                     .unwrap();
                     let scope = Scope::begin().unwrap();
@@ -350,7 +353,7 @@ mod tests {
                     };
                     // Match the production encoder, seed and decoder submissions,
                     // including the genuine Full scalar tail during compaction.
-                    for view in chunk_views(0..n, chunk).unwrap() {
+                    for view in chunk_views(0..n, full_chunk_rows).unwrap() {
                         let r = view.absolute_rows;
                         if r.len() > 1 {
                             drop(Wall("ced_encoder_host_prepare", [0; 4], start()));
@@ -366,8 +369,7 @@ mod tests {
                             [r.start, r.len(), plan.publication_layer, 0],
                         );
                     }
-                    let scalar_tail =
-                        prefill::original_scalar_tail(n, super::super::prefill::DEFAULT_CHUNK_ROWS);
+                    let scalar_tail = plan.scalar_tail();
                     for layer in &plan.decoder {
                         let mut fuse = layer.fuse_seed_with_packed_output(n, plan.full_chunk_rows);
                         if !fuse {
@@ -428,7 +430,7 @@ mod tests {
                     assert!(report.operations.capacity() <= PAIRED_OPERATION_CAPACITY);
 
                     let scope = Scope::begin().unwrap();
-                    for view in chunk_views(0..n, chunk).unwrap() {
+                    for view in chunk_views(0..n, full_chunk_rows).unwrap() {
                         let r = view.absolute_rows;
                         if r.len() == 1 {
                             submitted(
@@ -462,9 +464,9 @@ mod tests {
                             .iter()
                             .map(|op| op.completed_submits)
                             .sum::<usize>(),
-                        n.div_ceil(chunk)
+                        n.div_ceil(full_chunk_rows)
                     );
-                    assert_eq!(report.operations.len(), n.div_ceil(chunk) + 2);
+                    assert_eq!(report.operations.len(), n.div_ceil(full_chunk_rows) + 2);
                     assert!(report.operations.capacity() <= PAIRED_OPERATION_CAPACITY);
                 }
             }

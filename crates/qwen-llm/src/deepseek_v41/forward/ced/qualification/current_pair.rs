@@ -18,8 +18,10 @@ fn prompt_n(text: &str) -> AResult<usize> {
     match text {
         "128" => Ok(128),
         "2048" => Ok(2048),
+        "2049" => Ok(2049),
+        "4097" => Ok(4097),
         "8192" => Ok(8192),
-        _ => anyhow::bail!("V41_CED_PAIR_N must be explicitly 128, 2048, or 8192"),
+        _ => anyhow::bail!("V41_CED_PAIR_N must be explicitly 128, 2048, 2049, 4097, or 8192"),
     }
 }
 
@@ -726,7 +728,7 @@ fn prefix_selection_uses_true_next_256_ids_and_rejects_bad_inputs() {
         prompt: (0..8192).collect(),
         continuation: (8192..8448).collect(),
     };
-    for n in [128, 2048, 8192] {
+    for n in [128, 2048, 2049, 4097, 8192] {
         let selected = select_prefix(&frozen, n, 9000).unwrap();
         assert_eq!(selected.prompt, (0..n as u32).collect::<Vec<_>>());
         assert_eq!(
@@ -750,7 +752,7 @@ fn prefix_selection_uses_true_next_256_ids_and_rejects_bad_inputs() {
     };
     assert!(select_prefix(&short, 128, 9000).is_err());
     for text in [
-        "", "0", "1", "127", "129", "2049", "8193", "16384", "0128", "128 ", "-128",
+        "", "0", "1", "127", "129", "2047", "4095", "4096", "8193", "16384", "0128", "128 ", "-128",
     ] {
         assert!(prompt_n(text).is_err(), "accepted N={text:?}");
     }
@@ -763,6 +765,41 @@ fn capture_and_combined_budget_charge_all_257_full_vocab_vectors() {
     assert_eq!(capture.total_bytes, 132_899_840 + 192 * 1024 * 1024);
     assert!(capture_cpu_plan(0).is_err());
     assert!(capture_cpu_plan(usize::MAX).is_err());
+}
+
+#[test]
+fn transition_prefixes_keep_existing_capture_and_causal_coverage_bounds() {
+    let config = Config::default();
+    let schedule = v41_gguf::Schedule::default();
+    let maximum = capture_cpu_plan(config.vocab).unwrap();
+    for n in [2049, 4097, 8192] {
+        let g = Geometry {
+            n,
+            layers: schedule.layers,
+            cut: schedule.candidate_source_layer.unwrap(),
+            window: config.window,
+            hidden: config.hidden,
+            head_dim: config.head_dim,
+            index_dim: config.index_dim,
+            vocab: config.vocab,
+            topk: config.index_topk,
+            block: config.candidate_block,
+            owners: schedule
+                .kv_source_layers
+                .iter()
+                .map(|&l| (l, schedule.ratio(l)))
+                .collect(),
+            producers: schedule.index_source_layers.clone(),
+        };
+        assert_eq!(g.state_keys().len(), 56);
+        assert_eq!(STEPS + 1, 257);
+        assert_eq!(
+            capture_cpu_plan(g.vocab).unwrap().total_bytes,
+            maximum.total_bytes
+        );
+        assert!(n + STEPS <= 8448);
+        assert!(n >= g.window);
+    }
 }
 
 #[test]

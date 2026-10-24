@@ -306,6 +306,7 @@ fn preweight_report(
         "request_cpu_bytes": plan.request.cpu_bytes,
         "ced_incremental_metal_bytes": ced.incremental_metal_bytes,
         "ced_incremental_cpu_bytes": ced.incremental_cpu_bytes,
+        "full_chunk_rows": plan.full_chunk_rows,
         "full_incremental_metal_bytes": plan.full_incremental_metal_bytes,
         "full_incremental_cpu_bytes": plan.full_incremental_cpu_bytes,
         "runtime_metal_bytes": plan.runtime_metal_bytes,
@@ -1419,6 +1420,7 @@ mod tests {
         use qwen_llm::deepseek_v41::gguf::{ByteCounters, ResidentStoragePlan};
         let caller = caller_cpu_bytes(diagnostic);
         let plan = ColdPrefillPlan {
+            full_chunk_rows: qwen_llm::deepseek_v41::forward::PREFILL_CHUNK_ROWS,
             resident_storage: ResidentStoragePlan {
                 page_size: 16384,
                 max_buffer_length: 1 << 30,

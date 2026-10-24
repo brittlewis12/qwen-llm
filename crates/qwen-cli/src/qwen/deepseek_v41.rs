@@ -667,8 +667,8 @@ pub(crate) fn run(
     if prefill_report.execution == qwen_llm::deepseek_v41::forward::PrefillExecution::FullForward {
         tracing::info!(target: "qwen_diag", family="deepseek_v41", prefill_ms,
             prefill_mode,
-            prefill_rows=ids.len().min(crate::family_options::V41_PREFILL_ROWS),
-            prefill_chunks=ids.len().div_ceil(crate::family_options::V41_PREFILL_ROWS),
+            prefill_rows=ids.len().min(forward.prefill_chunk_rows()),
+            prefill_chunks=ids.len().div_ceil(forward.prefill_chunk_rows()),
             "run prefill");
     } else {
         tracing::info!(target: "qwen_diag", family="deepseek_v41", prefill_ms,

@@ -5,19 +5,37 @@ use super::*;
 fn original_scalar_tail_matches_the_actual_full_chunk_schedule() {
     for n in 0..=3 * DEFAULT_CHUNK_ROWS + 2 {
         let last = n % DEFAULT_CHUNK_ROWS;
-        assert_eq!(original_scalar_tail(n), (last == 1).then(|| n - 1));
-        if let Some(position) = original_scalar_tail(n) {
+        assert_eq!(
+            original_scalar_tail(n, prefill::DEFAULT_CHUNK_ROWS),
+            (last == 1).then(|| n - 1)
+        );
+        if let Some(position) = original_scalar_tail(n, prefill::DEFAULT_CHUNK_ROWS) {
             assert_eq!(position + 1, n);
             assert!(position.is_multiple_of(DEFAULT_CHUNK_ROWS));
         }
     }
-    assert_eq!(original_scalar_tail(0), None);
-    assert_eq!(original_scalar_tail(1), Some(0));
-    assert_eq!(original_scalar_tail(2048), None);
-    assert_eq!(original_scalar_tail(2049), Some(2048));
-    assert_eq!(original_scalar_tail(4097), Some(4096));
+    assert_eq!(original_scalar_tail(0, prefill::DEFAULT_CHUNK_ROWS), None);
+    assert_eq!(
+        original_scalar_tail(1, prefill::DEFAULT_CHUNK_ROWS),
+        Some(0)
+    );
+    assert_eq!(
+        original_scalar_tail(2048, prefill::DEFAULT_CHUNK_ROWS),
+        None
+    );
+    assert_eq!(
+        original_scalar_tail(2049, prefill::DEFAULT_CHUNK_ROWS),
+        Some(2048)
+    );
+    assert_eq!(
+        original_scalar_tail(4097, prefill::DEFAULT_CHUNK_ROWS),
+        Some(4096)
+    );
     let n = usize::MAX - usize::MAX % DEFAULT_CHUNK_ROWS + 1;
-    assert_eq!(original_scalar_tail(n), Some(n - 1));
+    assert_eq!(
+        original_scalar_tail(n, prefill::DEFAULT_CHUNK_ROWS),
+        Some(n - 1)
+    );
 }
 
 #[test]

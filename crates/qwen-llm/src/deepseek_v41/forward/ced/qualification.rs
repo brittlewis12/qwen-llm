@@ -140,7 +140,7 @@ impl Comparator {
         let g = self.reference.geometry.clone();
         let end = start.checked_add(rows).context("boundary overflow")?;
         ensure!(
-            rows > 0 && rows <= PREFILL_CHUNK_ROWS && end <= g.n,
+            rows > 0 && rows <= MAX_PREFILL_CHUNK_ROWS && end <= g.n,
             "boundary chunk range"
         );
         let e = f32_slice(residual).map_err(anyhow::Error::msg)?;
@@ -482,14 +482,21 @@ fn add(values: &[u64]) -> AResult<u64> {
         a.checked_add(b).context("qualification memory overflow")
     })
 }
-fn price(ctx: &MetalContext, counts: impl IntoIterator<Item = usize>) -> AResult<u64> {
-    counts.into_iter().try_fold(0u64, |a, n| {
-        add(&[
-            a,
-            ctx.price_shared_buffer_upper((n as u64).checked_mul(4).context("price overflow")?)?
-                .priced_upper_bytes,
-        ])
-    })
+
+fn require_reference_chunk_rows(selected: usize, reference: usize) -> AResult<()> {
+    ensure!(
+        selected == reference,
+        "frozen production Full chunk geometry differs from selected runtime; use a fresh current Full/CED pair"
+    );
+    Ok(())
+}
+
+#[test]
+fn production_reference_rejects_a_different_full_chunk_schedule() {
+    assert!(require_reference_chunk_rows(2048, 2048).is_ok());
+    assert!(require_reference_chunk_rows(4096, 4096).is_ok());
+    assert!(require_reference_chunk_rows(4096, 2048).is_err());
+    assert!(require_reference_chunk_rows(2048, 4096).is_err());
 }
 fn admit(ctx: &MetalContext, metal_bytes: u64, cpu_bytes: u64) -> AResult<Value> {
     let s = ctx.memory_signals();
@@ -516,58 +523,45 @@ fn preweight_memory(
 ) -> AResult<Value> {
     let c = &p.config;
     let capacity = g.n + STEPS;
-    let request = c
-        .estimate_request_memory_with_gpu_step(capacity)
-        .map_err(anyhow::Error::msg)?;
-    let rows = if arm.scalar() {
-        1
+    let full_chunk_rows = prefill_rows_for_resident(p.bytes.resident_bytes());
+    let rows = g.n.min(full_chunk_rows);
+    let projections = vec![(6144, 5 * c.hidden); p.engram_hash.layers.len()];
+    let policies = if arm.shrinking() {
+        vec![
+            PrefillExecution::FullForward,
+            PrefillExecution::ShrinkingCed,
+        ]
     } else {
-        g.n.min(PREFILL_CHUNK_ROWS)
+        vec![PrefillExecution::FullForward]
     };
-    let mut widths = vec![4 * c.hidden, 4 * c.hidden, c.hidden, 4];
-    widths.extend(prefill::HcRows::widths(c));
-    widths.extend(ffn_gpu::Rows::widths(c, g.layers));
-    widths.extend(attention_gpu::Rows::widths(c, capacity));
-    widths.extend(
-        attention_gpu::Rows::select_widths(c, capacity, rows)
-            .map_err(anyhow::Error::msg)?
-            .into_iter()
-            .filter(|&width| width != 0),
-    );
-    widths.extend(attention_gpu::Rows::tile_widths(c, rows).map_err(anyhow::Error::msg)?);
-    for _ in &p.engram_hash.layers {
-        widths.extend([6144, 5 * c.hidden]);
-    }
+    let (request, full, ced) = preflight::runtime_from_parts(
+        c,
+        &p.schedule,
+        &p.engram_hash,
+        &projections,
+        g.n,
+        capacity,
+        &policies,
+        full_chunk_rows,
+        metal::moe_grouped_tensor_selected(ctx),
+        &|bytes| {
+            if bytes == 0 {
+                return Ok(0);
+            }
+            ctx.price_shared_buffer_upper(bytes)
+                .map(|p| p.priced_upper_bytes)
+                .map_err(|e| e.to_string())
+        },
+    )
+    .map_err(anyhow::Error::msg)?;
     let half_scratch = prefill::half_scratch_budget(ctx, c, rows).map_err(anyhow::Error::msg)?;
-    let scratch = add(&[
-        price(ctx, widths.into_iter().map(|w| w * rows))?,
-        half_scratch,
-    ])?;
-    let mut extra = 16 * 1024 * 1024;
-    if arm.shrinking() {
-        let plan = CedPlan::shrinking(
-            c,
-            &p.schedule,
-            &p.engram_hash,
-            &CedRequest::cold(g.n, capacity),
-        )?;
-        extra = add(&[
-            extra,
-            price(
-                ctx,
-                [
-                    plan.boundary_rows.len() * 4 * c.hidden,
-                    plan.boundary_rows.len() * 4,
-                    plan.candidate_rows.len() * c.index_topk,
-                    plan.candidate_rows.len() * capacity.div_ceil(c.candidate_block),
-                    rows * c.hidden,
-                    rows * c.hidden,
-                    rows * c.head_dim,
-                    rows * c.head_dim,
-                ],
-            )?,
-        ])?;
-    }
+    let scratch = full
+        .0
+        .max(ced.as_ref().map_or(0, |c| c.incremental_metal_bytes));
+    let runtime_cpu = full
+        .1
+        .max(ced.as_ref().map_or(0, |c| c.incremental_cpu_bytes));
+    let extra = 16 * 1024 * 1024;
     let state_floats = g.layers * c.window * c.head_dim
         + g.owners
             .iter()
@@ -583,7 +577,7 @@ fn preweight_memory(
             .checked_mul(8)
             .context("compare reserve overflow")?,
         c.vocab as u64 * 32,
-        rows as u64 * (6144 + 4 * c.hidden) as u64 * 8,
+        runtime_cpu,
         64 * 1024 * 1024,
     ])?;
     let gpu = add(&[
@@ -598,6 +592,7 @@ fn preweight_memory(
     let admission = admit(ctx, gpu, cpu)?;
     Ok(
         json!({"preweight_admission": admission, "archive_cpu_reserve_bytes": archive_cpu,
+        "full_prefill_chunk_rows": full_chunk_rows,
         "cpu_total_reserve_bytes": cpu, "chunk_scratch_priced_bytes": scratch,
         "half_chunk_scratch_priced_bytes": half_scratch, "ced_extra_priced_bytes": extra,
         "strategy": "normal CPU+Metal admission before resident weight loading; entire reference mmap bytes charged plus 24x JSON/index bytes, full causal CPU compare reserve, 8 logit buffers and parse/hash/upload slack; direct read-only region slices, no full-state clones"}),
@@ -627,9 +622,9 @@ fn memory_ledger_comparison_excludes_runtime_peak_observations() {
 }
 
 pub(in crate::deepseek_v41::forward) fn production_command_count(plan: &CedPlan) -> AResult<usize> {
-    let scalar_tail = usize::from(prefill::original_scalar_tail(plan.prompt_rows).is_some());
+    let scalar_tail = usize::from(plan.scalar_tail().is_some());
     plan.decoder.iter().try_fold(
-        plan.prompt_rows.div_ceil(PREFILL_CHUNK_ROWS),
+        plan.prompt_rows.div_ceil(plan.full_chunk_rows),
         |commands, layer| {
             let packed_rows = layer
                 .output_rows
@@ -726,7 +721,7 @@ fn execution_report(
         &model.config,
         &model.schedule,
         &model.engram_hash,
-        &CedRequest::cold(g.n, g.n + STEPS),
+        &CedRequest::cold(g.n, g.n + STEPS).with_full_chunk_rows(model.prefill_rows),
     )?;
     ensure!(
         r.execution == PrefillExecution::ShrinkingCed && r.fallback.is_none(),
@@ -947,6 +942,12 @@ fn run(arm: Arm) -> AResult<()> {
         &input_bytes,
         arm.reference_arm(),
     )?);
+    if !arm.scalar() {
+        require_reference_chunk_rows(
+            prefill_rows_for_resident(planned.bytes.resident_bytes()),
+            archive::number(&reference.header, "prefill_chunk_rows")?,
+        )?;
+    }
     provenance::frozen(&reference.provenance)?;
     let stamps_before = provenance::artifact(&gguf, &planned, &reference.artifact)?;
     let metadata = serde_json::to_vec(gguf.model.metadata())?.len() as u64;
@@ -1070,6 +1071,7 @@ fn run(arm: Arm) -> AResult<()> {
         "source/binary provenance changed during qualification"
     );
     let report = json!({"schema": "v41-ced-qualification-v1", "complete": true, "arm": arm.name(),
+        "full_prefill_chunk_rows": model.prefill_rows,
         "N": g.n, "capacity": g.n + STEPS, "continuation_steps": STEPS,
         "reference": {"directory": reference_path, "header": reference.header, "complete": reference.complete,
             "provenance": reference.provenance, "validation": "all manifest and region lengths, SHA256, 4-byte alignment, shape, identity, producer, complete row/state coverage; exact raw input SHA and canonical IDs SHA; retained reference file stamps before/after"},

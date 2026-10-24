@@ -222,7 +222,8 @@ mod tests {
                             [r.start, r.len(), plan.publication_layer, 0],
                         );
                     }
-                    let scalar_tail = prefill::original_scalar_tail(n);
+                    let scalar_tail =
+                        prefill::original_scalar_tail(n, super::super::prefill::DEFAULT_CHUNK_ROWS);
                     for layer in &plan.decoder {
                         let mut fuse = layer.fuse_seed_with_packed_output(n);
                         if !fuse {

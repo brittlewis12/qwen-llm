@@ -99,7 +99,7 @@ fn ced_sink_lineage_fixture_budget_and_plan() {
     for (n, decoder, range) in [(128, 1, 127..128), (145, 1, 144..145), (145, 0, 126..145)] {
         let p = plan(&c, &s, n);
         assert_eq!(p.decoder[decoder].output_rows, range);
-        assert!(prefill::original_scalar_tail(n).is_none());
+        assert!(prefill::original_scalar_tail(n, prefill::DEFAULT_CHUNK_ROWS).is_none());
         let bytes = buffer_budget(&c, &s, n, range.len());
         assert!(bytes < LIMIT, "explicit buffer upper bound: {bytes}");
     }
@@ -316,7 +316,7 @@ fn run_case(ctx: &MetalContext, n: usize, decoder: usize, range: Range<usize>, t
     assert_eq!(
         w.ced_decoder_prompt_rows(id, range.start, range.len())
             .unwrap(),
-        Some(n)
+        Some((n, prefill::DEFAULT_CHUNK_ROWS))
     );
     let spans = match range.len() {
         1 => vec![(1, tensor && n == WIDTH)],

@@ -470,9 +470,8 @@ struct Layer<'a> {
     engram: Option<Engram<'a>>,
 }
 
-/// Packed+dense resident bytes above this stay on the 2048-row chunk. Q2
-/// (~186 GiB) and Maya-S (~166 GiB) fit the 4096-row envelope; IQ3 (~217 GiB)
-/// does not have the stability margin measured for the larger chunk.
+/// Measured performance crossover, not a capacity or admission theorem.
+/// Packed+dense resident bytes above this retain the 2048-row schedule.
 const FULL_CHUNK_RESIDENT_LIMIT: u64 = 200 * (1u64 << 30);
 
 pub(super) fn prefill_rows_for_resident(resident_bytes: u64) -> usize {
@@ -542,6 +541,10 @@ impl State {
 }
 
 impl<'a> Forward<'a> {
+    pub fn prefill_chunk_rows(&self) -> usize {
+        self.prefill_rows
+    }
+
     pub fn new_state(&self, max_context: usize) -> std::result::Result<State, StateError> {
         self.new_state_with_gpu_step(max_context)
     }
@@ -613,14 +616,7 @@ impl<'a> Forward<'a> {
         tokens: &[u32],
         cancel: Option<&AtomicBool>,
     ) -> std::result::Result<Vec<f32>, StateError> {
-        prefill::run(
-            self,
-            state,
-            tokens,
-            cancel,
-            self.prefill_rows,
-            true,
-        )
+        prefill::run(self, state, tokens, cancel, self.prefill_rows, true)
     }
 
     /// Capture actual batched attention inputs and checkpoint outputs after GPU
@@ -650,15 +646,7 @@ impl<'a> Forward<'a> {
         tokens: &[u32],
         cancel: Option<&AtomicBool>,
     ) -> std::result::Result<(), StateError> {
-        prefill::run(
-            self,
-            state,
-            tokens,
-            cancel,
-            self.prefill_rows,
-            false,
-        )
-        .map(|_| ())
+        prefill::run(self, state, tokens, cancel, self.prefill_rows, false).map(|_| ())
     }
 
     /// Synchronously borrow each completed block's CPU F32 outputs. None adds
@@ -982,6 +970,8 @@ fn inject_engram(x: &mut [f32], kv: &[f32], q: &[f32], k: &[f32], eps: f32) -> R
     Ok(())
 }
 
+#[cfg(test)]
+mod chunk_geometry;
 #[cfg(test)]
 mod tests;
 #[cfg(test)]

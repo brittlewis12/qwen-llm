@@ -47,7 +47,7 @@ fn f32_attention_planning_prices_the_released_geometry_gathered_matrices() {
     }
     prefill::with_batched_f32(|| {
         assert!(Scratch::shapes(&c, 0).is_err());
-        assert!(Scratch::shapes(&c, prefill::DEFAULT_CHUNK_ROWS + 1).is_err());
+        assert!(Scratch::shapes(&c, prefill::MAX_CHUNK_ROWS + 1).is_err());
     });
 }
 

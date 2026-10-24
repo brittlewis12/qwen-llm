@@ -6,6 +6,65 @@ const PROMPTS: [usize; 13] = [
 ];
 const WIDTHS: [usize; 7] = [32, 128, 129, 300, 512, 1024, 2048];
 
+#[test]
+fn selected_full_chunks_preserve_every_compacted_query_tile_and_singleton_route() {
+    for chunk in [2048, 4096] {
+        for n in [2047, 2048, 2049, 4095, 4096, 4097] {
+            for tile in [128, 129, 300, 512, 2048, 4096] {
+                let mut oracle = Vec::new();
+                for first in (0..n).step_by(chunk) {
+                    let end = (first + chunk).min(n);
+                    for start in (first..end).step_by(tile) {
+                        let range = start..(start + tile).min(end);
+                        oracle.extend(vec![range.clone(); range.len()]);
+                    }
+                }
+                for (position, expected) in oracle.iter().enumerate() {
+                    assert_eq!(
+                        super::original_query_tile(n, chunk, position, tile).unwrap(),
+                        *expected
+                    );
+                    for physical in [1, (n - position).min(2048)] {
+                        let (rows, arity) =
+                            super::query_tile_span(Some((n, chunk)), position, physical, tile)
+                                .unwrap();
+                        assert_eq!(rows, physical.min(expected.end - position));
+                        assert_eq!(arity, expected.len());
+                        assert_eq!(tensor_arithmetic(true, arity), expected.len() >= 128);
+                    }
+                }
+            }
+        }
+    }
+    assert_eq!(
+        super::query_tile_span(Some((2049, 4096)), 2048, 1, 4096).unwrap(),
+        (1, 2049)
+    );
+    assert_eq!(
+        super::query_tile_span(Some((2049, 2048)), 2048, 1, 4096).unwrap(),
+        (1, 1)
+    );
+}
+
+// Retain the original 2K witnesses independently of the new selected-width cases.
+fn original_query_tile(prompt: usize, position: usize, width: usize) -> Result<Range<usize>> {
+    super::original_query_tile(prompt, prefill::DEFAULT_CHUNK_ROWS, position, width)
+}
+
+fn query_tile_span(
+    prompt: Option<usize>,
+    position: usize,
+    remaining: usize,
+    width: usize,
+) -> Result<(usize, usize)> {
+    super::query_tile_span(
+        prompt.map(|n| (n, prefill::DEFAULT_CHUNK_ROWS)),
+        position,
+        remaining,
+        width,
+    )
+}
+
 // Independent oracle: enumerate Full's chunk-relative tiles from cold zero,
 // rather than deriving a tile from an absolute position as production does.
 fn full_tiles(prompt_rows: usize, width: usize) -> Vec<Range<usize>> {
@@ -192,7 +251,7 @@ fn nondivisor_width_restarts_at_original_chunks_not_physical_starts() {
 #[test]
 fn genuine_whole_chunk_scalar_tails_remain_outside_rows() {
     for prompt_rows in PROMPTS {
-        let scalar = prefill::original_scalar_tail(prompt_rows);
+        let scalar = prefill::original_scalar_tail(prompt_rows, prefill::DEFAULT_CHUNK_ROWS);
         assert_eq!(
             scalar,
             (prompt_rows % prefill::DEFAULT_CHUNK_ROWS == 1).then_some(prompt_rows - 1)
@@ -216,9 +275,18 @@ fn genuine_whole_chunk_scalar_tails_remain_outside_rows() {
             }
         }
     }
-    assert_eq!(prefill::original_scalar_tail(513), None);
-    assert_eq!(prefill::original_scalar_tail(2065), None);
-    assert_eq!(prefill::original_scalar_tail(2575), None);
+    assert_eq!(
+        prefill::original_scalar_tail(513, prefill::DEFAULT_CHUNK_ROWS),
+        None
+    );
+    assert_eq!(
+        prefill::original_scalar_tail(2065, prefill::DEFAULT_CHUNK_ROWS),
+        None
+    );
+    assert_eq!(
+        prefill::original_scalar_tail(2575, prefill::DEFAULT_CHUNK_ROWS),
+        None
+    );
 }
 
 #[test]
@@ -253,7 +321,7 @@ fn checked_bounds_reject_invalid_views_without_overflowing_valid_extremes() {
         (17, 18, 512),
         (usize::MAX, usize::MAX, 512),
         (8192, 0, 0),
-        (8192, 0, 2049),
+        (8192, 0, 4097),
         (8192, 0, usize::MAX),
     ] {
         assert!(original_query_tile(prompt_rows, position, width).is_err());
@@ -261,10 +329,10 @@ fn checked_bounds_reject_invalid_views_without_overflowing_valid_extremes() {
     for prompt_rows in [None, Some(usize::MAX)] {
         for (position, remaining, width) in [
             (0, 0, 512),
-            (0, 2049, 512),
+            (0, 4097, 512),
             (0, usize::MAX, 512),
             (0, 1, 0),
-            (0, 1, 2049),
+            (0, 1, 4097),
             (usize::MAX, 1, 512),
             (usize::MAX - 1, 2, 512),
         ] {

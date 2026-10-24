@@ -6,6 +6,7 @@ use crate::gguf::GgufFile;
 
 #[derive(Clone, Debug)]
 pub struct ColdPrefillPlan {
+    pub full_chunk_rows: usize,
     pub resident_storage: ResidentStoragePlan,
     pub request: RequestMemoryEstimate,
     pub full_incremental_metal_bytes: u64,
@@ -243,6 +244,7 @@ pub(super) fn runtime_from_parts(
     prompt_rows: usize,
     capacity: usize,
     executions: &[PrefillExecution],
+    full_chunk_rows: usize,
     half_selected: bool,
     price: &impl Fn(u64) -> Result<u64>,
 ) -> Result<(RequestMemoryEstimate, (u64, u64), Option<CedMemoryEstimate>)> {
@@ -270,7 +272,11 @@ pub(super) fn runtime_from_parts(
         "Engram projection/hash count mismatch",
     )?;
     let request = memory::estimate_gpu_step(c, capacity, schedule, hash.layers.len())?;
-    let rows = prompt_rows.min(prefill::DEFAULT_CHUNK_ROWS);
+    op::require(
+        (1..=prefill::MAX_CHUNK_ROWS).contains(&full_chunk_rows),
+        "cold Full chunk geometry",
+    )?;
+    let rows = prompt_rows.min(full_chunk_rows);
     let full = prefill::full_scratch_budget_with(
         c,
         schedule.layers,
@@ -285,7 +291,10 @@ pub(super) fn runtime_from_parts(
             c,
             schedule,
             hash,
-            &ced_plan::CedRequest::cold(prompt_rows, capacity),
+            &ced_plan::CedRequest {
+                full_chunk_rows,
+                ..ced_plan::CedRequest::cold(prompt_rows, capacity)
+            },
         ) {
             Ok(plan) => Some(ced::estimate_from_parts(
                 c,
@@ -348,6 +357,7 @@ fn plan_with_pricing(
     price: &impl Fn(u64) -> Result<u64>,
 ) -> std::result::Result<ColdPrefillPlan, PlanError> {
     let p = gguf::plan(gguf)?;
+    let full_chunk_rows = super::prefill_rows_for_resident(p.bytes.resident_bytes());
     let calculate = || -> Result<_> {
         let output = p
             .config
@@ -364,6 +374,7 @@ fn plan_with_pricing(
             prompt_rows,
             capacity,
             executions,
+            full_chunk_rows,
             half_selected,
             price,
         )?;
@@ -383,7 +394,7 @@ fn plan_with_pricing(
     };
     let (request, full, ced, binding_cpu_bytes, binding_metal_bytes) =
         calculate().map_err(LoadError::Invalid)?;
-    combine_plan(
+    let mut combined = combine_plan(
         resident_storage,
         request,
         full,
@@ -391,7 +402,9 @@ fn plan_with_pricing(
         binding_cpu_bytes,
         binding_metal_bytes,
         caller_cpu_bytes,
-    )
+    )?;
+    combined.full_chunk_rows = full_chunk_rows;
+    Ok(combined)
 }
 
 fn binding_metal_bytes(
@@ -470,6 +483,7 @@ fn combine_plan(
     sum(&[runtime_metal_bytes, runtime_gate_cpu_bytes])?;
     sum(&[required_metal_bytes, required_cpu_bytes])?;
     Ok(ColdPrefillPlan {
+        full_chunk_rows: prefill::DEFAULT_CHUNK_ROWS,
         resident_storage,
         request,
         full_incremental_metal_bytes: full.0,

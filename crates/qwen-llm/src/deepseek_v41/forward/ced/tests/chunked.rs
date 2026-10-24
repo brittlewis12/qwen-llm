@@ -5,6 +5,7 @@ use std::ops::Range;
 const CHUNK: usize = prefill::DEFAULT_CHUNK_ROWS;
 
 fn set_window(model: &mut Forward<'_>, window: usize) {
+    model.prefill_rows = CHUNK;
     model.config.window = window;
     for layer in &mut model.layers {
         layer.attention.window = window;

@@ -60,7 +60,7 @@ impl SeedRows {
 
 fn valid_chunk(rows: usize) -> Result<()> {
     op::require(
-        (1..=prefill::DEFAULT_CHUNK_ROWS).contains(&rows),
+        (1..=prefill::MAX_CHUNK_ROWS).contains(&rows),
         "CED chunk rows",
     )
 }
@@ -378,6 +378,7 @@ impl Cursor {
         let n = plan.prompt_rows;
         op::require(
             c.window > 0
+                && (1..=prefill::MAX_CHUNK_ROWS).contains(&plan.full_chunk_rows)
                 && n > 0
                 && n <= capacity
                 && plan.encoder_layers == (0..cut)
@@ -434,6 +435,10 @@ impl Cursor {
 
     fn begin_encoder(&mut self, start: usize, rows: usize) -> Result<()> {
         self.idle()?;
+        op::require(
+            rows <= self.plan.full_chunk_rows,
+            "CED encoder chunk geometry",
+        )?;
         let range = checked_range(&(0..self.plan.prompt_rows), start, rows)?;
         op::require(
             start == self.encoder_completed && start == self.publication_completed,
@@ -470,6 +475,10 @@ impl Cursor {
 
     fn begin_seed(&mut self, layer: usize, start: usize, rows: usize) -> Result<()> {
         self.idle()?;
+        op::require(
+            rows <= prefill::DEFAULT_CHUNK_ROWS,
+            "CED seed chunk geometry",
+        )?;
         let j = self.decoder_index(layer)?;
         let range = checked_range(&self.plan.decoder[j].seed_rows, start, rows)?;
         op::require(
@@ -492,6 +501,10 @@ impl Cursor {
 
     fn begin_decoder(&mut self, layer: usize, start: usize, rows: usize) -> Result<()> {
         self.idle()?;
+        op::require(
+            rows <= prefill::DEFAULT_CHUNK_ROWS,
+            "CED decoder chunk geometry",
+        )?;
         let j = self.decoder_index(layer)?;
         let range = checked_range(&self.plan.decoder[j].output_rows, start, rows)?;
         op::require(
@@ -723,14 +736,14 @@ impl Workspace {
         id: usize,
         start: usize,
         rows: usize,
-    ) -> Result<Option<usize>> {
+    ) -> Result<Option<(usize, usize)>> {
         let Some(ced) = &self.ced else {
             return Ok(None);
         };
         let p = ced.pending.as_ref().ok_or("CED has no attention intent")?;
         if matches!(p.phase, Phase::Decoder(_)) {
             ced.matches(Phase::Decoder(id), start, rows)?;
-            return Ok(Some(ced.plan.prompt_rows));
+            return Ok(Some((ced.plan.prompt_rows, ced.plan.full_chunk_rows)));
         }
         Ok(None)
     }

@@ -98,6 +98,7 @@ fn custom_schedule_engram_variants_and_shared_ledgers() {
                     PrefillExecution::FullForward,
                     PrefillExecution::ShrinkingCed,
                 ],
+                prefill::DEFAULT_CHUNK_ROWS,
                 half,
                 &price,
             )
@@ -159,6 +160,7 @@ fn policy_repetitions_are_peaks_not_sums() {
             8192,
             8448,
             policies,
+            prefill::DEFAULT_CHUNK_ROWS,
             true,
             &price,
         )
@@ -277,7 +279,18 @@ fn checked_geometry_context_and_pricing_fail_closed() {
                n,
                capacity,
                policies: &[PrefillExecution]| {
-        runtime_from_parts(c, s, h, &[], n, capacity, policies, true, &price)
+        runtime_from_parts(
+            c,
+            s,
+            h,
+            &[],
+            n,
+            capacity,
+            policies,
+            prefill::DEFAULT_CHUNK_ROWS,
+            true,
+            &price,
+        )
     };
     assert!(run(&c, &schedule(), &hash, 0, 24, &full).is_err());
     assert!(run(&c, &schedule(), &hash, 25, 24, &full).is_err());
@@ -308,9 +321,18 @@ fn checked_geometry_context_and_pricing_fail_closed() {
         assert!(gpu_step::ced::decoder_chunk_widths_from_geometry(&c, 4, 24, 16).is_err());
     }
     assert!(
-        runtime_from_parts(&c, &schedule(), &hash, &[], 16, 24, &full, true, &|_| Err(
-            "pricing refused".into()
-        ))
+        runtime_from_parts(
+            &c,
+            &schedule(),
+            &hash,
+            &[],
+            16,
+            24,
+            &full,
+            prefill::DEFAULT_CHUNK_ROWS,
+            true,
+            &|_| Err("pricing refused".into())
+        )
         .is_err()
     );
     let scalar = run(&c, &schedule(), &hash, 1, 24, &full).unwrap();
@@ -345,6 +367,7 @@ fn unsupported_ced_geometry_uses_the_runtime_full_fallback() {
         16,
         24,
         &[PrefillExecution::ShrinkingCed],
+        prefill::DEFAULT_CHUNK_ROWS,
         false,
         &price,
     )

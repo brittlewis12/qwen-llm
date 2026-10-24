@@ -5,6 +5,7 @@ use std::{fmt, ops::Range};
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct CedRequest {
     pub prompt_rows: Option<usize>,
+    pub full_chunk_rows: usize,
     pub capacity: usize,
     pub start_position: usize,
     pub prefix_reuse: bool,
@@ -16,9 +17,15 @@ pub struct CedRequest {
 }
 
 impl CedRequest {
+    pub fn with_full_chunk_rows(mut self, rows: usize) -> Self {
+        self.full_chunk_rows = rows;
+        self
+    }
+
     pub fn cold(prompt_rows: usize, capacity: usize) -> Self {
         Self {
             prompt_rows: Some(prompt_rows),
+            full_chunk_rows: DEFAULT_CHUNK_ROWS,
             capacity,
             start_position: 0,
             prefix_reuse: false,
@@ -102,6 +109,9 @@ pub struct CedMemoryLedger {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct CedPlan {
     pub prompt_rows: usize,
+    /// Full's selected chunk width; encoder execution follows it. Decoder
+    /// replay and its reusable backing remain bounded by DEFAULT_CHUNK_ROWS.
+    pub full_chunk_rows: usize,
     pub encoder_layers: Range<usize>,
     pub publication_layer: usize,
     pub boundary_bound_rows: usize,
@@ -114,6 +124,10 @@ pub struct CedPlan {
 }
 
 impl CedPlan {
+    pub(super) fn scalar_tail(&self) -> Option<usize> {
+        super::prefill::original_scalar_tail(self.prompt_rows, self.full_chunk_rows)
+    }
+
     pub fn shrinking(
         config: &Config,
         schedule: &Schedule,
@@ -123,6 +137,10 @@ impl CedPlan {
         let n = request.prompt_rows.ok_or(CedPlanError::UnsupportedRequest(
             "known whole-prompt length required",
         ))?;
+        if ![DEFAULT_CHUNK_ROWS, super::prefill::MAX_CHUNK_ROWS].contains(&request.full_chunk_rows)
+        {
+            return Err(CedPlanError::InvalidChunkRows(request.full_chunk_rows));
+        }
         if n == 0 {
             return Err(CedPlanError::UnsupportedRequest("empty prompt"));
         }
@@ -243,6 +261,7 @@ impl CedPlan {
             .ok_or(CedPlanError::Overflow("retained bytes"))?;
         Ok(Self {
             prompt_rows: n,
+            full_chunk_rows: request.full_chunk_rows,
             encoder_layers: 0..split,
             publication_layer: split,
             boundary_bound_rows,
@@ -304,7 +323,7 @@ pub fn row_view(retained: &Range<usize>, rows: Range<usize>) -> Result<CedChunkV
     {
         return Err(CedPlanError::InvalidRowView);
     }
-    if rows.len() > DEFAULT_CHUNK_ROWS {
+    if rows.len() > super::prefill::MAX_CHUNK_ROWS {
         return Err(CedPlanError::InvalidChunkRows(rows.len()));
     }
     Ok(CedChunkView {
@@ -321,7 +340,7 @@ pub struct CedChunks {
 }
 
 pub fn chunk_views(rows: Range<usize>, chunk_rows: usize) -> Result<CedChunks> {
-    if !(1..=DEFAULT_CHUNK_ROWS).contains(&chunk_rows) {
+    if !(1..=super::prefill::MAX_CHUNK_ROWS).contains(&chunk_rows) {
         return Err(CedPlanError::InvalidChunkRows(chunk_rows));
     }
     if rows.start > rows.end {
@@ -863,12 +882,15 @@ mod tests {
         )
         .unwrap();
         assert_eq!(boundary.row_offset, 127);
-        assert!(matches!(
-            row_view(&p.boundary_rows, p.candidate_rows.clone()),
-            Err(CedPlanError::InvalidChunkRows(2414))
-        ));
+        assert_eq!(
+            row_view(&p.boundary_rows, p.candidate_rows.clone())
+                .unwrap()
+                .absolute_rows,
+            p.candidate_rows
+        );
+        assert!(row_view(&(0..8192), 0..4097).is_err());
         assert!(chunk_views(0..1, 0).is_err());
-        assert!(chunk_views(0..1, 2049).is_err());
+        assert!(chunk_views(0..1, 4097).is_err());
         assert!(chunk_views(Range { start: 2, end: 1 }, 1).is_err());
         assert!(chunk_views(1..1, 1).unwrap().next().is_none());
         assert!(row_view(&(10..20), 9..11).is_err());

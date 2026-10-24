@@ -975,6 +975,10 @@ impl Workspace {
         arithmetic: Arithmetic,
         mut storage: Storage,
     ) -> Result<Output> {
+        op::require(
+            plan.full_chunk_rows == model.prefill_rows,
+            "CED Full chunk geometry differs from bound model",
+        )?;
         self.commands = 0;
         self.trace_copies = 0;
         let maximum = maximum_decoder_rows(plan, arithmetic)?;
@@ -985,7 +989,12 @@ impl Workspace {
             prefill::DEFAULT_CHUNK_ROWS
         };
         let mut counters = CedCounters::default();
-        for chunk in chunk_views(0..tokens.len(), chunk_rows).map_err(|e| e.to_string())? {
+        let encoder_rows = if arithmetic.scalar() {
+            1
+        } else {
+            plan.full_chunk_rows
+        };
+        for chunk in chunk_views(0..tokens.len(), encoder_rows).map_err(|e| e.to_string())? {
             cancelled(cancel)?;
             let range = chunk.absolute_rows;
             let input = &tokens[range.clone()];
@@ -1062,7 +1071,7 @@ impl Workspace {
             let scalar_tail = if arithmetic.scalar() {
                 None
             } else {
-                prefill::original_scalar_tail(plan.prompt_rows)
+                plan.scalar_tail()
             };
             let row_end = scalar_tail.unwrap_or(layer.output_rows.end);
             for chunk in chunk_views(layer.output_rows.start..row_end, chunk_rows)

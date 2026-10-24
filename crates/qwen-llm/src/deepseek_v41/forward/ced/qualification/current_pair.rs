@@ -597,7 +597,8 @@ fn run_pair() -> AResult<()> {
             &planned.config,
             &planned.schedule,
             &planned.engram_hash,
-            &CedRequest::cold(n, n + STEPS),
+            &CedRequest::cold(n, n + STEPS)
+                .with_full_chunk_rows(prefill_rows_for_resident(planned.bytes.resident_bytes())),
         )?;
         let capture = capture_cpu_plan(g.vocab)?;
         let cold = preflight_cold_prefill(
@@ -620,6 +621,8 @@ fn run_pair() -> AResult<()> {
             "current pair requires supported CED geometry"
         );
         let (runtime, resident) = preload_report(&cold)?;
+        report["full_prefill_chunk_rows"] = json!(cold.full_chunk_rows);
+        report["ced_decoder_chunk_rows_max"] = json!(PREFILL_CHUNK_ROWS);
         report["input"] = json!({"path": input_path, "source_raw_json_sha256": archive::sha(&bytes),
             "source_prompt_ids": frozen.prompt.len(), "source_continuation_ids": frozen.continuation.len(),
             "selected_ids_sha256": archive::json_sha(&serde_json::to_value(&input)?)?,
@@ -656,6 +659,10 @@ fn run_pair() -> AResult<()> {
         let model =
             Forward::from_resident(&ctx, &weights, weights.token_map.clone(), weights.raw_pad)
                 .map_err(anyhow::Error::msg)?;
+        ensure!(
+            model.prefill_rows == cold.full_chunk_rows,
+            "metadata/runtime Full chunk selection mismatch"
+        );
         report["stage"] = json!("current_full");
         write_report(&mut report_file, &report)?;
         let (reference, full_execution, full_seconds) =

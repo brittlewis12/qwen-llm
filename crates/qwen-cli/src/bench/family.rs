@@ -136,6 +136,7 @@ pub(crate) fn with_family_bench<R>(
             .map_err(anyhow::Error::msg)?;
             let mut bench = DeepSeekV41Bench {
                 vocab: weights.config.vocab,
+                full_chunk_rows: forward.prefill_chunk_rows(),
                 state: None,
                 requested_execution: v41_prefill_execution,
                 position: 0,
@@ -349,6 +350,7 @@ fn validate_v41_extent(extent: FamilyBenchExtent, max_position: u64) -> Result<(
 
 struct DeepSeekV41Bench<S, Create, Step, Prefill> {
     vocab: usize,
+    full_chunk_rows: usize,
     state: Option<S>,
     create: Create,
     step: Step,
@@ -506,7 +508,7 @@ where
             prefill_mode: crate::family_options::v41_prefill_mode(self.last_execution),
             decode_mode: "gpu_step+logits_copy",
             prefill_chunk: (self.last_execution == PrefillExecution::FullForward)
-                .then_some(crate::family_options::V41_PREFILL_ROWS),
+                .then_some(self.full_chunk_rows),
         }
     }
     fn v41_prefill_diagnostics(&self) -> Option<V41BenchPrefillRep> {
@@ -1068,6 +1070,7 @@ pub(crate) fn v41_pair_test_bench<S>(
 ) -> impl FamilyBench {
     DeepSeekV41Bench {
         vocab: 257,
+        full_chunk_rows: crate::family_options::V41_PREFILL_ROWS,
         state: None,
         create,
         step: |_: &mut S, _| bail!("paired fixture must not decode"),
@@ -1133,6 +1136,7 @@ mod tests {
     ) -> impl FamilyBench {
         DeepSeekV41Bench {
             vocab: 257,
+            full_chunk_rows: crate::family_options::V41_PREFILL_ROWS,
             state: None,
             requested_execution: PrefillExecution::ShrinkingCed,
             position: 0,
@@ -1382,6 +1386,7 @@ mod tests {
         let repetitions = RefCell::new(Vec::<Vec<u32>>::new());
         let mut bench = DeepSeekV41Bench {
             vocab: 257,
+            full_chunk_rows: crate::family_options::V41_PREFILL_ROWS,
             state: None,
             requested_execution: PrefillExecution::FullForward,
             position: 0,

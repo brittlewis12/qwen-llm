@@ -393,6 +393,7 @@ pub(in super::super) fn nonuniform_model<'a>(
     embeddings: &'a MetalTensor,
 ) -> Forward<'a> {
     let mut model = weights.model(ctx);
+    model.prefill_rows = prefill::DEFAULT_CHUNK_ROWS;
     let engram = model.layers[1].engram.take();
     model.layers = model
         .layers
@@ -449,6 +450,7 @@ fn bounded_metadata_parts_match_loaded_request_full_and_ced_ledgers() {
                 PrefillExecution::FullForward,
                 PrefillExecution::ShrinkingCed,
             ],
+            prefill::DEFAULT_CHUNK_ROWS,
             metal::moe_grouped_tensor_selected(&ctx),
             &price,
         )
@@ -578,6 +580,105 @@ fn assert_causal(a: &State, b: &State, label: &str) {
     assert_eq!(a.len(), b.len(), "{label}: region coverage");
     for (region, (a, b)) in a.iter().zip(&b).enumerate() {
         assert_bits(a, b, &format!("{label}, causal region {region}"));
+    }
+}
+
+#[test]
+#[ignore = "self-leased <=128 MiB small-geometry 2K/4K chunk edges; MTL debug required; no real model"]
+fn selected_2k_and_4k_chunk_edges_match_current_full_bits_state_and_counts() {
+    assert_eq!(std::env::var("MTL_DEBUG_LAYER").as_deref(), Ok("1"));
+    assert_eq!(std::env::var("QWEN_METAL_LEASE_WAIT").as_deref(), Ok("1"));
+    let _lease = metal::acquire_metal_benchmark_lease().unwrap();
+    let ctx = MetalContext::new().unwrap();
+    let weights = toy::Weights::new(&ctx);
+    let embedding = embeddings(&ctx);
+    let mut model = nonuniform_model(&weights, &ctx, &embedding);
+    for width in [2048, 4096] {
+        model.prefill_rows = width;
+        for n in [2047, 2048, 2049, 4095, 4096, 4097] {
+            objc2::rc::autoreleasepool(|_| {
+                let p = CedPlan::shrinking(
+                    &model.config,
+                    &model.schedule,
+                    &model.engram_hash,
+                    &CedRequest::cold(n, n + 1).with_full_chunk_rows(width),
+                )
+                .unwrap();
+                let price = |bytes| -> Result<u64> {
+                    Ok(ctx
+                        .price_shared_buffer_upper(bytes)
+                        .unwrap()
+                        .priced_upper_bytes)
+                };
+                let (request, full_budget, ced_budget) = preflight::runtime_from_parts(
+                    &model.config,
+                    &model.schedule,
+                    &model.engram_hash,
+                    &gpu_step::engram_projections(&model),
+                    n,
+                    n + 1,
+                    &[
+                        PrefillExecution::FullForward,
+                        PrefillExecution::ShrinkingCed,
+                    ],
+                    width,
+                    metal::moe_grouped_tensor_selected(&ctx),
+                    &price,
+                )
+                .unwrap();
+                let ced_budget = ced_budget.unwrap();
+                let explicit_bound = ctx.current_allocated_size()
+                    + 2 * request.metal_bytes
+                    + full_budget.0
+                    + ced_budget.incremental_metal_bytes;
+                assert!(
+                    explicit_bound <= 128 * 1024 * 1024,
+                    "complete fixture upper bound {explicit_bound}"
+                );
+                let admission = metal::evaluate_metal_memory_admission_with_cpu_bytes(
+                    2 * request.metal_bytes + full_budget.0 + ced_budget.incremental_metal_bytes,
+                    32 * 1024 * 1024,
+                    0,
+                    ctx.memory_signals(),
+                    true,
+                );
+                assert!(admission.is_admitted(), "{admission:?}");
+                let mut full = model.new_state(n + 1).unwrap();
+                let mut shrinking = model.new_state(n + 1).unwrap();
+                let input = tokens(n);
+                let expected = model.prefill(&mut full, &input, None).unwrap();
+                let (actual, report) = model
+                    .prefill_with_execution(
+                        &mut shrinking,
+                        &input,
+                        None,
+                        PrefillExecution::ShrinkingCed,
+                    )
+                    .unwrap();
+                let label = format!("selected width {width}, N={n}");
+                assert_eq!(report.execution, PrefillExecution::ShrinkingCed);
+                assert!(report.fallback.is_none());
+                report.counters.as_ref().unwrap().validate(&p).unwrap();
+                assert_eq!(
+                    report.counters.as_ref().unwrap().completed_commands,
+                    qualification::production_command_count(&p).unwrap()
+                );
+                assert_eq!(
+                    report.memory.as_ref().unwrap().incremental_metal_bytes,
+                    ced_budget.incremental_metal_bytes
+                );
+                assert!(
+                    report.observed_incremental_metal_bytes.unwrap()
+                        <= ced_budget.incremental_metal_bytes
+                );
+                assert_bits(&actual, &expected, &label);
+                assert_causal(&full, &shrinking, &label);
+                let expected = model.step(&mut full, 2, None).unwrap();
+                let actual = model.step(&mut shrinking, 2, None).unwrap();
+                assert_bits(&actual, &expected, &label);
+                assert_causal(&full, &shrinking, &label);
+            });
+        }
     }
 }
 

@@ -143,6 +143,7 @@ impl CedCounters {
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, serde::Serialize)]
 pub struct CedMemoryEstimate {
+    pub full_chunk_rows: usize,
     pub retained_residual_bytes: u64,
     pub retained_mix_bytes: u64,
     pub retained_selected_bytes: u64,
@@ -250,7 +251,7 @@ pub(super) fn estimate_from_parts(
     half_selected: bool,
     price: &impl Fn(u64) -> Result<u64>,
 ) -> Result<CedMemoryEstimate> {
-    let rows = plan.prompt_rows.min(prefill::DEFAULT_CHUNK_ROWS);
+    let rows = plan.prompt_rows.min(plan.full_chunk_rows);
     let mut retained = 0;
     for bytes in [
         plan.memory.boundary_residual_bytes,
@@ -308,6 +309,7 @@ pub(super) fn estimate_from_parts(
     .into_iter()
     .try_fold(0, checked_add)?;
     Ok(CedMemoryEstimate {
+        full_chunk_rows: plan.full_chunk_rows,
         retained_residual_bytes: plan.memory.boundary_residual_bytes,
         retained_mix_bytes: plan.memory.boundary_mix_bytes,
         retained_selected_bytes: plan.memory.selected_bytes,
@@ -402,6 +404,7 @@ pub(super) fn run(
     )?;
     cancelled(cancel)?;
     let mut request = CedRequest::cold(tokens.len(), state.capacity());
+    request.full_chunk_rows = model.prefill_rows;
     request.start_position = state.position();
     let plan =
         match CedPlan::shrinking(&model.config, &model.schedule, &model.engram_hash, &request) {

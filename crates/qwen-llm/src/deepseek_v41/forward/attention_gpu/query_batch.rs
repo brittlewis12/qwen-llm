@@ -243,7 +243,7 @@ pub(super) fn tile_rows() -> usize {
         std::env::var("QWEN_V41_SINK_TILE")
             .ok()
             .and_then(|value| value.parse().ok())
-            .filter(|&rows| (1..=prefill::DEFAULT_CHUNK_ROWS).contains(&rows))
+            .filter(|&rows| (1..=prefill::MAX_CHUNK_ROWS).contains(&rows))
             .unwrap_or(TILE)
     })
 }
@@ -252,17 +252,19 @@ pub(super) fn tile_rows() -> usize {
 /// restart at each original chunk, even when the width does not divide it.
 fn original_query_tile(
     prompt_rows: usize,
+    chunk_rows: usize,
     position: usize,
     tile_rows: usize,
 ) -> Result<std::ops::Range<usize>> {
     op::require(
-        (1..=prefill::DEFAULT_CHUNK_ROWS).contains(&tile_rows),
+        (1..=prefill::MAX_CHUNK_ROWS).contains(&tile_rows)
+            && (1..=prefill::MAX_CHUNK_ROWS).contains(&chunk_rows),
         "original query tile width",
     )?;
     op::require(position < prompt_rows, "original query position")?;
-    let chunk_start = position - position % prefill::DEFAULT_CHUNK_ROWS;
+    let chunk_start = position - position % chunk_rows;
     let chunk_end = chunk_start
-        .checked_add((prompt_rows - chunk_start).min(prefill::DEFAULT_CHUNK_ROWS))
+        .checked_add((prompt_rows - chunk_start).min(chunk_rows))
         .ok_or("original query chunk overflow")?;
     let tile_start = chunk_start
         .checked_add((position - chunk_start) / tile_rows * tile_rows)
@@ -276,22 +278,22 @@ fn original_query_tile(
 /// Physical span length and its Full arithmetic arity. Only CED decoder Rows
 /// supply prompt_rows; ordinary Full and the uncompacted encoder stay physical.
 fn query_tile_span(
-    prompt_rows: Option<usize>,
+    prompt_rows: Option<(usize, usize)>,
     position: usize,
     remaining: usize,
     tile_rows: usize,
 ) -> Result<(usize, usize)> {
     op::require(
-        (1..=prefill::DEFAULT_CHUNK_ROWS).contains(&remaining)
-            && (1..=prefill::DEFAULT_CHUNK_ROWS).contains(&tile_rows),
+        (1..=prefill::MAX_CHUNK_ROWS).contains(&remaining)
+            && (1..=prefill::MAX_CHUNK_ROWS).contains(&tile_rows),
         "query span geometry",
     )?;
     let end = position
         .checked_add(remaining)
         .ok_or("query span overflow")?;
-    if let Some(prompt_rows) = prompt_rows {
+    if let Some((prompt_rows, chunk_rows)) = prompt_rows {
         op::require(end <= prompt_rows, "query span outside original prompt")?;
-        let original = original_query_tile(prompt_rows, position, tile_rows)?;
+        let original = original_query_tile(prompt_rows, chunk_rows, position, tile_rows)?;
         Ok((remaining.min(original.end - position), original.len()))
     } else {
         let n = remaining.min(tile_rows);

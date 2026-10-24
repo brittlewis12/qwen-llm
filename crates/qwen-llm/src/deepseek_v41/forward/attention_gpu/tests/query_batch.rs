@@ -159,9 +159,9 @@ fn compare_case(ctx: &MetalContext, c: &Config, schedule: &Schedule, start: usiz
                     .count()
             };
             if mma {
-                // One sink per query tile; the tensor and MMA forms are
-                // selected per tile width/tier, so count both.
-                let score = count("score_mma") + count("score_tensor");
+                // One sink per query tile; the MMA, 16-key tensor and
+                // 32-key tensor forms are selected per tile width/tier.
+                let score = count("score_mma") + count("score_tensor") + count("score_tensor32");
                 let pv = count("pv_mma") + count("pv_tensor");
                 assert_eq!(score, n.div_ceil(TILE), "score");
                 assert_eq!(pv, n.div_ceil(TILE), "pv");
@@ -847,7 +847,7 @@ fn sink_case(
                     .count()
             };
             if mma {
-                let score = count("score_mma") + count("score_tensor");
+                let score = count("score_mma") + count("score_tensor") + count("score_tensor32");
                 let pv = count("pv_mma") + count("pv_tensor");
                 assert_eq!(score, spans.len(), "score");
                 assert_eq!(pv, spans.len(), "pv");
@@ -863,7 +863,7 @@ fn sink_case(
                 ] {
                     assert_eq!(count(suffix), 0, "{suffix}");
                 }
-                let heights = |suffixes: [&str; 2]| {
+                let heights = |suffixes: &[&str]| {
                     census
                         .iter()
                         .filter(|d| {
@@ -874,8 +874,8 @@ fn sink_case(
                         .map(|d| d.grid_height)
                         .collect::<Vec<_>>()
                 };
-                depths.0 = heights(["score_mma", "score_tensor"]);
-                depths.1 = heights(["pv_mma", "pv_tensor"]);
+                depths.0 = heights(&["score_mma", "score_tensor", "score_tensor32"]);
+                depths.1 = heights(&["pv_mma", "pv_tensor"]);
                 let tiles = spans.iter().map(|&(_, n, _)| n as u64).collect::<Vec<_>>();
                 assert_eq!(depths.0, tiles);
                 assert_eq!(depths.1, tiles);

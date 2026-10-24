@@ -64,6 +64,15 @@ pub struct CedLayerPlan {
     pub output_rows: Range<usize>,
 }
 
+impl CedLayerPlan {
+    pub(super) fn fuse_seed_with_packed_output(&self, prompt_rows: usize) -> bool {
+        !self.seed_rows.is_empty()
+            && self.seed_rows.len() <= DEFAULT_CHUNK_ROWS
+            && self.output_rows.start
+                < super::prefill::original_scalar_tail(prompt_rows).unwrap_or(self.output_rows.end)
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct CedWorkCounters {
     pub encoder_output_rows: usize,

@@ -157,6 +157,105 @@ fn checked_absolute_ranges_history_and_control_prices() {
 }
 
 #[test]
+fn compound_seed_encoding_never_publishes_completion_and_retires_both_ranges() {
+    let (c, schedule, plan) = fixture(9);
+    let mut cursor = Cursor::new(&plan, &c, &schedule, 10).unwrap();
+    cursor.begin_encoder(0, 9).unwrap();
+    encoded(&mut cursor, true);
+    cursor.complete(Phase::Encoder, 0, 9).unwrap();
+    cursor.begin_seed(2, 4, 2).unwrap();
+    assert!(cursor.chain_seed_to_decoder(2, 6, 2).is_err());
+    encoded(&mut cursor, false);
+    for (layer, start, rows) in [(3, 6, 2), (2, 7, 2), (2, 6, 0), (2, 6, 4)] {
+        assert!(cursor.chain_seed_to_decoder(layer, start, rows).is_err());
+    }
+    cursor.chain_seed_to_decoder(2, 6, 2).unwrap();
+    assert_eq!(cursor.seed_completed, [4, 6]);
+    assert_eq!(cursor.output_completed, [6, 8]);
+    assert_eq!(cursor.decoder_next, 0);
+    let p = cursor.pending.as_ref().unwrap();
+    assert_eq!(p.encoded_seed_prefix, Some(4..6));
+    assert!(!p.encoded && !p.finished.get() && p.controls.is_none());
+    assert!(cursor.chain_seed_to_decoder(2, 6, 2).is_err());
+    assert!(cursor.complete(Phase::Seed(2), 4, 2).is_err());
+    assert!(cursor.complete(Phase::Decoder(2), 6, 2).is_err());
+    assert!(cursor.begin_decoder(2, 8, 1).is_err());
+    assert!(cursor.begin_seed(3, 6, 2).is_err());
+    encoded(&mut cursor, false);
+    cursor.pending.as_ref().unwrap().finished.set(false);
+    assert!(cursor.complete(Phase::Decoder(2), 6, 2).is_err());
+    cursor.pending.as_ref().unwrap().finished.set(true);
+    cursor.pending.as_mut().unwrap().encoded_seed_prefix = Some(3..6);
+    assert!(cursor.complete(Phase::Decoder(2), 6, 2).is_err());
+    assert_eq!(cursor.seed_completed[0], 4);
+    assert_eq!(cursor.output_completed[0], 6);
+    cursor.pending.as_mut().unwrap().encoded_seed_prefix = Some(4..6);
+    cursor.complete(Phase::Decoder(2), 6, 2).unwrap();
+    assert_eq!(cursor.seed_completed[0], 6);
+    assert_eq!(cursor.output_completed[0], 8);
+    assert_eq!(cursor.decoder_next, 0);
+    cursor.begin_decoder(2, 8, 1).unwrap();
+    encoded(&mut cursor, false);
+    cursor.complete(Phase::Decoder(2), 8, 1).unwrap();
+    assert_eq!(cursor.decoder_next, 1);
+    cursor.begin_seed(3, 6, 2).unwrap();
+    encoded(&mut cursor, false);
+    cursor.chain_seed_to_decoder(3, 8, 1).unwrap();
+    encoded(&mut cursor, false);
+    assert!(!cursor.ready(9));
+    cursor.complete(Phase::Decoder(3), 8, 1).unwrap();
+    assert!(cursor.ready(9));
+}
+
+#[test]
+fn compound_rejects_partial_multichunk_seed_and_genuine_scalar_tail() {
+    let (mut c, schedule, _) = fixture(9);
+    c.window = 2050;
+    let engram = engram::HashConfig {
+        layers: Vec::new(),
+        ..engram::HashConfig::default()
+    };
+    let plan = CedPlan::shrinking(&c, &schedule, &engram, &CedRequest::cold(8192, 8192)).unwrap();
+    let mut cursor = Cursor::new(&plan, &c, &schedule, 8192).unwrap();
+    cursor.encoder_completed = 8192;
+    cursor.publication_completed = 8192;
+    let seed = plan.decoder[0].seed_rows.clone();
+    assert_eq!(seed.len(), 2049);
+    cursor.begin_seed(2, seed.start, 2048).unwrap();
+    encoded(&mut cursor, false);
+    assert!(cursor.chain_seed_to_decoder(2, seed.end, 2048).is_err());
+    cursor.complete(Phase::Seed(2), seed.start, 2048).unwrap();
+    cursor.begin_seed(2, seed.end - 1, 1).unwrap();
+    encoded(&mut cursor, false);
+    assert!(cursor.chain_seed_to_decoder(2, seed.end, 2048).is_err());
+    cursor.complete(Phase::Seed(2), seed.end - 1, 1).unwrap();
+    cursor.begin_decoder(2, seed.end, 2048).unwrap();
+
+    let (c, schedule, plan) = fixture(2049);
+    let mut cursor = Cursor::new(&plan, &c, &schedule, 2050).unwrap();
+    cursor.encoder_completed = 2049;
+    cursor.publication_completed = 2049;
+    let seed = plan.decoder[0].seed_rows.clone();
+    cursor.begin_seed(2, seed.start, seed.len()).unwrap();
+    encoded(&mut cursor, false);
+    assert!(cursor.chain_seed_to_decoder(2, seed.end, 3).is_err());
+    cursor.chain_seed_to_decoder(2, seed.end, 2).unwrap();
+    encoded(&mut cursor, false);
+    cursor.complete(Phase::Decoder(2), seed.end, 2).unwrap();
+    cursor.begin_decoder(2, 2048, 1).unwrap();
+    encoded(&mut cursor, false);
+    cursor.complete(Phase::Decoder(2), 2048, 1).unwrap();
+    let seed = plan.decoder[1].seed_rows.clone();
+    cursor.begin_seed(3, seed.start, seed.len()).unwrap();
+    encoded(&mut cursor, false);
+    assert!(cursor.chain_seed_to_decoder(3, 2048, 1).is_err());
+    cursor
+        .complete(Phase::Seed(3), seed.start, seed.len())
+        .unwrap();
+    cursor.begin_decoder(3, 2048, 1).unwrap();
+}
+
+#[test]
 fn control_producers_keep_owner_masks_and_reindex_only_the_narrowed_subset() {
     let schedule = Schedule::default();
     let mut coverage = Coverage {

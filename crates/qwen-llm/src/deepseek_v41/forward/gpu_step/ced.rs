@@ -283,6 +283,32 @@ struct DecoderRowsPool {
     backing: Option<BlockRows>,
 }
 
+struct LocalSeed {
+    x: MetalTensor,
+    incoming: MetalTensor,
+    collapsed: MetalTensor,
+    normalized: MetalTensor,
+    attention: attention_gpu::SeedRows,
+}
+
+impl LocalSeed {
+    fn new(model: &Forward<'_>, storage: &Storage, range: Range<usize>) -> Result<Self> {
+        let c = &model.config;
+        let n = range.len();
+        let (x, incoming) = storage.input(range)?;
+        let seed = Self {
+            x,
+            incoming,
+            collapsed: prefill::allocate(model.ctx, c.hidden, n, GgmlType::F32)?,
+            normalized: prefill::allocate(model.ctx, c.hidden, n, GgmlType::F32)?,
+            attention: attention_gpu::SeedRows::new(model.ctx, c, n)?,
+        };
+        #[cfg(test)]
+        reuse::seed_allocated(&seed);
+        Ok(seed)
+    }
+}
+
 impl DecoderRowsPool {
     fn checked_rows(
         &mut self,
@@ -715,12 +741,8 @@ impl Workspace {
         counters: &mut CedCounters,
     ) -> Result<()> {
         let ctx = model.ctx;
-        let c = &model.config;
         let n = range.len();
-        let (x, incoming) = storage.input(range.clone())?;
-        let collapsed = prefill::allocate(ctx, c.hidden, n, GgmlType::F32)?;
-        let normalized = prefill::allocate(ctx, c.hidden, n, GgmlType::F32)?;
-        let scratch = attention_gpu::SeedRows::new(ctx, c, n)?;
+        let seed = LocalSeed::new(model, storage, range.clone())?;
         storage.observe(ctx);
         cancelled(cancel)?;
         self.attention.begin_ced_seed(layer, range.start, n)?;
@@ -731,49 +753,7 @@ impl Workspace {
             storage,
             counters,
             |this, enc| {
-                if arithmetic.scalar() {
-                    op::require(n == 1, "scalar CED seed width")?;
-                    this.normalize_scalar_input(
-                        model,
-                        enc,
-                        layer,
-                        &x.view_bytes(0, vec![c.hidden as u64, 4]),
-                        &incoming.view_bytes(0, vec![4]),
-                    )?;
-                    this.attention.seed_ced_scalar(
-                        ctx,
-                        enc,
-                        layer,
-                        range.start,
-                        &model.layers[layer].attention,
-                        &this.normalized,
-                    )?;
-                } else {
-                    metal::encode_mhc4_collapse_rows(
-                        ctx, enc, c.hidden, n, &x, &incoming, &collapsed,
-                    )
-                    .map_err(|e| e.to_string())?;
-                    metal::encode_rms_norm_mul_rows_f32(
-                        ctx,
-                        enc,
-                        &collapsed,
-                        &this.constants[layer][2],
-                        &normalized,
-                        n,
-                        c.hidden,
-                        c.norm_eps,
-                    )
-                    .map_err(|e| e.to_string())?;
-                    this.attention.seed_ced_rows(
-                        ctx,
-                        enc,
-                        layer,
-                        range.start,
-                        &model.layers[layer].attention,
-                        &normalized,
-                        &scratch,
-                    )?;
-                }
+                this.ced_encode_seed(model, enc, layer, &range, arithmetic, &seed)?;
                 cancelled(cancel)
             },
         )?;
@@ -784,11 +764,75 @@ impl Workspace {
         cancelled(cancel)
     }
 
+    fn ced_encode_seed(
+        &mut self,
+        model: &Forward<'_>,
+        enc: &KernelEncoder,
+        layer: usize,
+        range: &Range<usize>,
+        arithmetic: Arithmetic,
+        seed: &LocalSeed,
+    ) -> Result<()> {
+        let ctx = model.ctx;
+        let c = &model.config;
+        let n = range.len();
+        if arithmetic.scalar() {
+            op::require(n == 1, "scalar CED seed width")?;
+            self.normalize_scalar_input(
+                model,
+                enc,
+                layer,
+                &seed.x.view_bytes(0, vec![c.hidden as u64, 4]),
+                &seed.incoming.view_bytes(0, vec![4]),
+            )?;
+            self.attention.seed_ced_scalar(
+                ctx,
+                enc,
+                layer,
+                range.start,
+                &model.layers[layer].attention,
+                &self.normalized,
+            )
+        } else {
+            metal::encode_mhc4_collapse_rows(
+                ctx,
+                enc,
+                c.hidden,
+                n,
+                &seed.x,
+                &seed.incoming,
+                &seed.collapsed,
+            )
+            .map_err(|e| e.to_string())?;
+            metal::encode_rms_norm_mul_rows_f32(
+                ctx,
+                enc,
+                &seed.collapsed,
+                &self.constants[layer][2],
+                &seed.normalized,
+                n,
+                c.hidden,
+                c.norm_eps,
+            )
+            .map_err(|e| e.to_string())?;
+            self.attention.seed_ced_rows(
+                ctx,
+                enc,
+                layer,
+                range.start,
+                &model.layers[layer].attention,
+                &seed.normalized,
+                &seed.attention,
+            )
+        }
+    }
+
     fn ced_decoder_rows(
         &mut self,
         model: &Forward<'_>,
         layer: usize,
         range: Range<usize>,
+        seed_range: Option<Range<usize>>,
         final_logits: bool,
         cancel: Option<&AtomicBool>,
         storage: &mut Storage,
@@ -797,20 +841,47 @@ impl Workspace {
     ) -> Result<()> {
         let ctx = model.ctx;
         let n = range.len();
+        let seed = seed_range
+            .as_ref()
+            .map(|range| LocalSeed::new(model, storage, range.clone()))
+            .transpose()?;
         let (x, incoming) = storage.input(range.clone())?;
         let controls = storage.controls.checked_tile_view(range.start, n)?;
         let scratch = pool.checked_rows(model, self.attention.capacity(), storage, &controls)?;
         storage.observe(ctx);
         cancelled(cancel)?;
-        self.attention
-            .begin_ced_decoder_chunk(layer, range.start, n)?;
+        if let Some(seed) = &seed_range {
+            self.attention
+                .begin_ced_seed(layer, seed.start, seed.len())?;
+        } else {
+            self.attention
+                .begin_ced_decoder_chunk(layer, range.start, n)?;
+        }
         self.ced_command(
             model,
-            "ced_decoder_rows",
-            [layer, range.start, n, 0],
+            if seed.is_some() {
+                "ced_seed_decoder_rows"
+            } else {
+                "ced_decoder_rows"
+            },
+            [
+                layer,
+                range.start,
+                n,
+                seed_range.as_ref().map_or(0, Range::len),
+            ],
             storage,
             counters,
             |this, enc| {
+                if let (Some(range0), Some(seed)) = (&seed_range, &seed) {
+                    this.ced_encode_seed(model, enc, layer, range0, Arithmetic::Production, seed)?;
+                    // Encode-only seam: neither range has completed or been submitted.
+                    #[cfg(test)]
+                    super::super::ced::tests::checkpoint("ced_seed_encoded", cancel)?;
+                    cancelled(cancel)?;
+                    this.attention
+                        .chain_ced_seed_to_decoder(layer, range.start, n)?;
+                }
                 this.ced_block(model, enc, layer, range.start, &x, &incoming, &scratch)?;
                 if final_logits {
                     this.ced_head(model, enc, &x, &incoming, n)?;
@@ -818,9 +889,18 @@ impl Workspace {
                 cancelled(cancel)
             },
         )?;
+        #[cfg(test)]
+        if seed.is_some() {
+            reuse::compound_completed(&self.attention, &scratch, layer);
+        }
         scratch.ffn.validate_status_layers(layer..layer + 1)?;
         self.attention
             .complete_ced_decoder_chunk(layer, range.start, n)?;
+        if let Some(range) = &seed_range {
+            counters.seed(layer, range.len())?;
+            #[cfg(test)]
+            super::super::ced::tests::checkpoint("ced_seed_complete", cancel)?;
+        }
         #[cfg(test)]
         super::super::ced::qualification::controls(layer, range.start, n, &controls)?;
         counters.decoder(layer, n, model.schedule.produces_index(layer))?;
@@ -955,9 +1035,18 @@ impl Workspace {
             backing: None,
         };
         for layer in &plan.decoder {
-            for chunk in
-                chunk_views(layer.seed_rows.clone(), chunk_rows).map_err(|e| e.to_string())?
+            let mut fuse_seed =
+                !arithmetic.scalar() && layer.fuse_seed_with_packed_output(plan.prompt_rows);
+            #[cfg(test)]
             {
+                fuse_seed &= !super::super::ced::tests::unfused();
+            }
+            let seeds = if fuse_seed {
+                0..0
+            } else {
+                layer.seed_rows.clone()
+            };
+            for chunk in chunk_views(seeds, chunk_rows).map_err(|e| e.to_string())? {
                 objc2::rc::autoreleasepool(|_| {
                     self.ced_seed(
                         model,
@@ -998,6 +1087,11 @@ impl Workspace {
                             model,
                             layer.layer,
                             range,
+                            if fuse_seed {
+                                Some(layer.seed_rows.clone())
+                            } else {
+                                None
+                            },
                             final_logits,
                             cancel,
                             &mut storage,
@@ -1006,6 +1100,7 @@ impl Workspace {
                         )
                     }
                 })?;
+                fuse_seed = false;
             }
             if let Some(position) = scalar_tail {
                 objc2::rc::autoreleasepool(|_| {

@@ -22,6 +22,46 @@ struct Injection {
 
 thread_local! {
     static INJECTION: RefCell<Option<Injection>> = const { RefCell::new(None) };
+    static UNFUSED: Cell<bool> = const { Cell::new(false) };
+}
+
+pub(in super::super) fn unfused() -> bool {
+    UNFUSED.with(Cell::get)
+}
+
+pub(in super::super) struct Unfused(bool, PhantomData<Rc<()>>);
+
+impl Unfused {
+    pub(in super::super) fn begin() -> Self {
+        Self(UNFUSED.with(|slot| slot.replace(true)), PhantomData)
+    }
+}
+
+impl Drop for Unfused {
+    fn drop(&mut self) {
+        UNFUSED.with(|slot| slot.set(self.0));
+    }
+}
+
+#[test]
+fn unfused_reference_is_nested_thread_local_and_unwind_safe() {
+    assert!(!unfused());
+    let outer = Unfused::begin();
+    {
+        let _inner = Unfused::begin();
+    }
+    assert!(unfused());
+    std::thread::spawn(|| assert!(!unfused())).join().unwrap();
+    assert!(
+        catch_unwind(|| {
+            let _inner = Unfused::begin();
+            panic!("restore unfused reference");
+        })
+        .is_err()
+    );
+    assert!(unfused());
+    drop(outer);
+    assert!(!unfused());
 }
 
 pub(in super::super) struct Scope {
@@ -552,6 +592,7 @@ fn assert_report(report: &PrefillReport, n: usize, capacity: usize, scalar: bool
     let counters = report.counters.as_ref().expect("executed CED counters");
     counters.validate(&p).unwrap();
     let mut expected = complete_counters(&p);
+    let scalar_tail = usize::from(prefill::original_scalar_tail(n).is_some());
     expected.encoded_commands = if scalar {
         n + p.work.decoder_seed_rows + p.work.decoder_output_rows
     } else {
@@ -560,7 +601,9 @@ fn assert_report(report: &PrefillReport, n: usize, capacity: usize, scalar: bool
                 .iter()
                 .map(|l| {
                     l.seed_rows.len().div_ceil(prefill::DEFAULT_CHUNK_ROWS)
-                        + l.output_rows.len().div_ceil(prefill::DEFAULT_CHUNK_ROWS)
+                        + (l.output_rows.len() - scalar_tail).div_ceil(prefill::DEFAULT_CHUNK_ROWS)
+                        + scalar_tail
+                        - usize::from(!unfused() && l.fuse_seed_with_packed_output(n))
                 })
                 .sum::<usize>()
     };
@@ -864,12 +907,14 @@ fn discarded_completion_poisoning_is_scoped_to_each_command_role() {
     for (role, arithmetic) in [
         ("ced_encoder_rows", Arithmetic::Production),
         ("ced_encoder_scalar", Arithmetic::ScalarNative),
-        ("ced_local_seed", Arithmetic::Production),
+        ("ced_local_seed", Arithmetic::ScalarNative),
+        ("ced_seed_decoder_rows", Arithmetic::Production),
         ("ced_decoder_rows", Arithmetic::Production),
         ("ced_decoder_scalar", Arithmetic::ScalarNative),
     ] {
         let mut state = model.new_state(input.len()).unwrap();
         let addresses = state.addresses;
+        let _unfused = (role == "ced_decoder_rows").then(Unfused::begin);
         let scope = Scope::new(role, Action::Completion);
         let error = run(&model, &mut state, &input, None, arithmetic).unwrap_err();
         assert_eq!(scope.hits(), 1, "missing completion hook {role}");

@@ -224,9 +224,12 @@ mod tests {
                     }
                     let scalar_tail = prefill::original_scalar_tail(n);
                     for layer in &plan.decoder {
-                        for view in chunk_views(layer.seed_rows.clone(), chunk).unwrap() {
-                            let r = view.absolute_rows;
-                            emit("ced_local_seed", [layer.layer, r.start, r.len(), 0]);
+                        let mut fuse = layer.fuse_seed_with_packed_output(n);
+                        if !fuse {
+                            for view in chunk_views(layer.seed_rows.clone(), chunk).unwrap() {
+                                let r = view.absolute_rows;
+                                emit("ced_local_seed", [layer.layer, r.start, r.len(), 0]);
+                            }
                         }
                         for view in chunk_views(
                             layer.output_rows.start..scalar_tail.unwrap_or(layer.output_rows.end),
@@ -236,7 +239,20 @@ mod tests {
                         {
                             let r = view.absolute_rows;
                             drop(Wall("ced_block_rows_allocate", [0; 4], start()));
-                            emit("ced_decoder_rows", [layer.layer, r.start, r.len(), 0]);
+                            emit(
+                                if fuse {
+                                    "ced_seed_decoder_rows"
+                                } else {
+                                    "ced_decoder_rows"
+                                },
+                                [
+                                    layer.layer,
+                                    r.start,
+                                    r.len(),
+                                    if fuse { layer.seed_rows.len() } else { 0 },
+                                ],
+                            );
+                            fuse = false;
                         }
                         if let Some(position) = scalar_tail {
                             emit("ced_decoder_scalar", [layer.layer, position, 1, 0]);

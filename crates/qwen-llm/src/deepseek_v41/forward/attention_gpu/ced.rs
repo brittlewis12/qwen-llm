@@ -40,6 +40,11 @@ pub(in super::super) struct SeedRows {
 }
 
 impl SeedRows {
+    #[cfg(test)]
+    pub(in super::super) fn value(&self) -> &MetalTensor {
+        &self.value
+    }
+
     pub(in super::super) fn shapes(c: &Config, rows: usize) -> Result<Vec<usize>> {
         PublicationRows::shapes(c, rows)
     }
@@ -348,6 +353,8 @@ enum Phase {
 struct Pending {
     phase: Phase,
     range: Range<usize>,
+    // Encoded earlier in this serial command, never completed coverage.
+    encoded_seed_prefix: Option<Range<usize>>,
     batch: Option<BatchCursor>,
     end_layer: usize,
     encoded: bool,
@@ -435,6 +442,7 @@ impl Cursor {
         self.pending = Some(Pending {
             phase: Phase::Encoder,
             range,
+            encoded_seed_prefix: None,
             batch: Some(BatchCursor {
                 start,
                 rows,
@@ -472,6 +480,7 @@ impl Cursor {
         self.pending = Some(Pending {
             phase: Phase::Seed(layer),
             range,
+            encoded_seed_prefix: None,
             batch: None,
             end_layer: layer,
             encoded: false,
@@ -493,6 +502,42 @@ impl Cursor {
         self.pending = Some(Pending {
             phase: Phase::Decoder(layer),
             range,
+            encoded_seed_prefix: None,
+            batch: Some(BatchCursor {
+                start,
+                rows,
+                layer,
+                row: 0,
+            }),
+            end_layer: layer + 1,
+            encoded: false,
+            finished: std::cell::Cell::new(false),
+            controls: None,
+        });
+        Ok(())
+    }
+
+    fn chain_seed_to_decoder(&mut self, layer: usize, start: usize, rows: usize) -> Result<()> {
+        let j = self.decoder_index(layer)?;
+        let seed = &self.plan.decoder[j].seed_rows;
+        let p = self.matches(Phase::Seed(layer), seed.start, seed.len())?;
+        let range = checked_range(&self.plan.decoder[j].output_rows, start, rows)?;
+        op::require(
+            p.encoded
+                && p.encoded_seed_prefix.is_none()
+                && self.plan.decoder[j].fuse_seed_with_packed_output(self.plan.prompt_rows)
+                && range.end
+                    <= prefill::original_scalar_tail(self.plan.prompt_rows)
+                        .unwrap_or(self.plan.prompt_rows)
+                && self.seed_completed[j] == seed.start
+                && start == seed.end
+                && start == self.output_completed[j],
+            "CED compound requires fully encoded whole seed and first decoder chunk",
+        )?;
+        self.pending = Some(Pending {
+            phase: Phase::Decoder(layer),
+            range,
+            encoded_seed_prefix: Some(seed.clone()),
             batch: Some(BatchCursor {
                 start,
                 rows,
@@ -522,7 +567,12 @@ impl Cursor {
             .is_some_and(|b| b.layer == p.end_layer && b.row == 0)
     }
 
-    fn complete(&mut self, phase: Phase, start: usize, rows: usize) -> Result<()> {
+    fn completion_range(
+        &self,
+        phase: Phase,
+        start: usize,
+        rows: usize,
+    ) -> Result<(usize, Option<usize>)> {
         let p = self.matches(phase, start, rows)?;
         op::require(
             p.encoded
@@ -531,6 +581,25 @@ impl Cursor {
             "CED range not fully encoded",
         )?;
         let end = p.range.end;
+        let seed_end = if let Some(seed) = &p.encoded_seed_prefix {
+            let j = self.decoder_next;
+            op::require(
+                phase == Phase::Decoder(self.plan.decoder[j].layer)
+                    && *seed == self.plan.decoder[j].seed_rows
+                    && self.seed_completed[j] == seed.start
+                    && p.range.start == seed.end
+                    && self.output_completed[j] == p.range.start,
+                "CED compound completion frontier",
+            )?;
+            Some(seed.end)
+        } else {
+            None
+        };
+        Ok((end, seed_end))
+    }
+
+    fn complete(&mut self, phase: Phase, start: usize, rows: usize) -> Result<()> {
+        let (end, seed_end) = self.completion_range(phase, start, rows)?;
         match phase {
             Phase::Encoder => {
                 self.encoder_completed = end;
@@ -540,6 +609,9 @@ impl Cursor {
                 self.seed_completed[self.decoder_next] = end;
             }
             Phase::Decoder(_) => {
+                if let Some(end) = seed_end {
+                    self.seed_completed[self.decoder_next] = end;
+                }
                 self.output_completed[self.decoder_next] = end;
                 if end == self.plan.prompt_rows {
                     self.decoder_next += 1;
@@ -601,6 +673,18 @@ impl Workspace {
             .as_mut()
             .ok_or("CED not active")?
             .begin_decoder(layer, start, rows)
+    }
+
+    pub(in super::super) fn chain_ced_seed_to_decoder(
+        &mut self,
+        layer: usize,
+        start: usize,
+        rows: usize,
+    ) -> Result<()> {
+        self.ced
+            .as_mut()
+            .ok_or("CED not active")?
+            .chain_seed_to_decoder(layer, start, rows)
     }
 
     /// One-row intents let the existing gpu_step::layer use scalar operators.
@@ -767,9 +851,17 @@ impl Workspace {
             if id >= ced.plan.publication_layer {
                 let j = ced.decoder_index(id)?;
                 let floor = start.saturating_sub(self.config.window - 1);
+                let encoded_seed = ced.pending.as_ref().is_some_and(|p| {
+                    p.phase == Phase::Decoder(id)
+                        && p.range == (start..start + rows)
+                        && p.encoded_seed_prefix.as_ref() == Some(&ced.plan.decoder[j].seed_rows)
+                        && ced.seed_completed[j] == ced.plan.decoder[j].seed_rows.start
+                        && start == ced.plan.decoder[j].seed_rows.end
+                });
                 op::require(
                     floor >= ced.plan.decoder[j].seed_rows.start
-                        && ced.seed_completed[j] == ced.plan.decoder[j].seed_rows.end
+                        && (ced.seed_completed[j] == ced.plan.decoder[j].seed_rows.end
+                            || encoded_seed)
                         && start == ced.output_completed[j],
                     "CED local history completed coverage",
                 )?;
@@ -1115,6 +1207,7 @@ impl Workspace {
     ) -> Result<()> {
         self.checked_ced_status()?;
         let ced = self.ced.as_mut().ok_or("CED not active")?;
+        ced.completion_range(Phase::Decoder(layer), start, rows)?;
         let p = ced.matches(Phase::Decoder(layer), start, rows)?;
         op::require(
             p.encoded && p.finished.get() && Cursor::attention_done(p),

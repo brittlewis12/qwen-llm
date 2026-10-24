@@ -640,14 +640,63 @@ pub(in crate::deepseek_v41::forward) fn production_command_count(plan: &CedPlan)
                 .checked_add(layer.seed_rows.len().div_ceil(PREFILL_CHUNK_ROWS))
                 .and_then(|n| n.checked_add(packed_rows.div_ceil(PREFILL_CHUNK_ROWS)))
                 .and_then(|n| n.checked_add(scalar_tail))
+                .and_then(|n| {
+                    n.checked_sub(usize::from(
+                        layer.fuse_seed_with_packed_output(plan.prompt_rows),
+                    ))
+                })
                 .context("qualification command count overflow")
         },
     )
 }
 
 #[test]
+fn production_seed_fusion_removes_only_eligible_boundaries_at_native_lengths() {
+    for (n, old, fused, seeds, seed_rows) in [
+        (128, 22, 21, 1, 127),
+        (2048, 38, 21, 17, 2047),
+        (8192, 47, 27, 20, 2540),
+    ] {
+        let plan = CedPlan::shrinking(
+            &Config::default(),
+            &v41_gguf::Schedule::default(),
+            &engram::HashConfig::default(),
+            &CedRequest::cold(n, n + STEPS),
+        )
+        .unwrap();
+        let incumbent = n.div_ceil(PREFILL_CHUNK_ROWS)
+            + plan
+                .decoder
+                .iter()
+                .map(|layer| {
+                    layer.seed_rows.len().div_ceil(PREFILL_CHUNK_ROWS)
+                        + layer.output_rows.len().div_ceil(PREFILL_CHUNK_ROWS)
+                })
+                .sum::<usize>();
+        assert_eq!(incumbent, old);
+        assert_eq!(production_command_count(&plan).unwrap(), fused);
+        assert_eq!(
+            plan.decoder
+                .iter()
+                .filter(|layer| layer.fuse_seed_with_packed_output(n))
+                .count(),
+            seeds
+        );
+        assert_eq!(plan.work.decoder_seed_rows, seed_rows);
+    }
+}
+
+#[test]
 fn production_command_count_preserves_genuine_scalar_tail_submissions() {
-    for (n, expected) in [(1, 21), (4096, 45), (4097, 65), (8192, 47), (8193, 67)] {
+    for (n, expected) in [
+        (1, 21),
+        (128, 21),
+        (2048, 21),
+        (4096, 25),
+        (4097, 46),
+        (8192, 27),
+        (8193, 48),
+    ] {
         let plan = CedPlan::shrinking(
             &Config::default(),
             &v41_gguf::Schedule::default(),

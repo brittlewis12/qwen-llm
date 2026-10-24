@@ -328,18 +328,29 @@ fn ced_commands(plan: &CedPlan) -> Vec<Command> {
         })
         .collect::<Vec<_>>();
     for layer in &plan.decoder {
-        for range in chunks(layer.seed_rows.clone()) {
-            commands.push(("ced_local_seed", [layer.layer, range.start, range.len(), 0]));
+        let mut fuse = !unfused() && layer.fuse_seed_with_packed_output(plan.prompt_rows);
+        if !fuse {
+            for range in chunks(layer.seed_rows.clone()) {
+                commands.push(("ced_local_seed", [layer.layer, range.start, range.len(), 0]));
+            }
         }
         for (range, scalar) in decoder_chunks(plan, layer.output_rows.clone()) {
             commands.push((
                 if scalar {
                     "ced_decoder_scalar"
+                } else if fuse {
+                    "ced_seed_decoder_rows"
                 } else {
                     "ced_decoder_rows"
                 },
-                [layer.layer, range.start, range.len(), 0],
+                [
+                    layer.layer,
+                    range.start,
+                    range.len(),
+                    if fuse { layer.seed_rows.len() } else { 0 },
+                ],
             ));
+            fuse = false;
         }
     }
     commands

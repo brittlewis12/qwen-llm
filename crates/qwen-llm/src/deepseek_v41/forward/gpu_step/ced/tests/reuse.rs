@@ -178,9 +178,48 @@ struct Unit {
 struct Observation {
     encoder: Vec<WeakBuffer>,
     backing: Vec<WeakBuffer>,
+    seeds: Vec<WeakBuffer>,
+    poison_seed: bool,
+    compounds: Vec<(u32, bool)>,
     births: usize,
     units: Vec<Unit>,
     plateau: Vec<u64>,
+}
+
+pub(super) fn seed_allocated(seed: &LocalSeed) {
+    OBSERVE.with(|slot| {
+        if let Some(o) = slot.borrow().as_ref() {
+            let mut o = o.borrow_mut();
+            assert!(
+                o.seeds.iter().all(|w| w.load().is_none()),
+                "only one co-live seed scratch"
+            );
+            o.seeds.extend(
+                [&seed.collapsed, &seed.normalized, seed.attention.value()]
+                    .into_iter()
+                    .map(weak),
+            );
+            if o.poison_seed {
+                fill(&seed.x, POISON);
+                o.poison_seed = false;
+            }
+        }
+    });
+}
+
+pub(super) fn compound_completed(
+    attention: &attention_gpu::Workspace,
+    scratch: &BlockRows,
+    layer: usize,
+) {
+    OBSERVE.with(|slot| {
+        if let Some(o) = slot.borrow().as_ref() {
+            o.borrow_mut().compounds.push((
+                bits(attention.status())[0],
+                scratch.ffn.validate_status_layers(layer..layer + 1).is_ok(),
+            ));
+        }
+    });
 }
 
 struct Observe {
@@ -415,6 +454,9 @@ fn complete_fixture_ledgers_stay_below_128_mib() {
         (257, 640, 640),
         (257, 2049, 2049),
         (3, 33, 33),
+        (1, 128, 128),
+        (1025, 2542, 2542),
+        (2050, 2542, 2542),
     ] {
         let bound = explicit_bound(&fixture_config(window), n, capacity, &price);
         assert!(bound <= LIMIT, "W={window}, N={n}: {bound} > {LIMIT}");
@@ -631,6 +673,7 @@ fn dirty_arm(
                     model,
                     layer.layer,
                     start..end,
+                    None,
                     index + 1 == plan.decoder.len() && end == n,
                     None,
                     &mut storage,
@@ -862,18 +905,16 @@ fn one_maximum_backing_and_zero_metal_allocations_for_every_checked_view() {
     });
 }
 
-fn driver_arm(
-    model: &Forward<'_>,
-    n: usize,
-    fresh: bool,
-    arithmetic: Arithmetic,
-) -> (
+type DriverArm = (
     Vec<u32>,
     Vec<Vec<u32>>,
     CedCounters,
     Vec<metal::DispatchCensusRow>,
     profile::Report,
-) {
+    Vec<Unit>,
+);
+
+fn driver_arm(model: &Forward<'_>, n: usize, fresh: bool, arithmetic: Arithmetic) -> DriverArm {
     let _fresh = Fresh::new(fresh);
     let observe = Observe::begin();
     let mut state = model.new_state(n).unwrap();
@@ -890,11 +931,17 @@ fn driver_arm(
         forward::PrefillExecution::ShrinkingCed
     );
     assert!(report.fallback.is_none());
+    report
+        .counters
+        .as_ref()
+        .unwrap()
+        .validate(&dependency_plan(&model.config, n))
+        .unwrap();
     assert!(
         report.observed_incremental_metal_bytes.unwrap()
             <= report.memory.as_ref().unwrap().incremental_metal_bytes
     );
-    let observation = observe.current.borrow();
+    let mut observation = observe.current.borrow_mut();
     let needs_pool = !fresh
         && maximum_decoder_rows(&dependency_plan(&model.config, n), arithmetic)
             .unwrap()
@@ -905,6 +952,7 @@ fn driver_arm(
             .backing
             .iter()
             .chain(&observation.encoder)
+            .chain(&observation.seeds)
             .all(|w| w.load().is_none()),
         "request scratch must drop before return"
     );
@@ -918,7 +966,169 @@ fn driver_arm(
         report.counters.unwrap(),
         census,
         profile,
+        std::mem::take(&mut observation.units),
     )
+}
+
+fn assert_fusion_pair(fused: &DriverArm, reference: &DriverArm, saved: usize) {
+    assert_eq!(fused.0, reference.0, "complete head bits");
+    assert_eq!(fused.1, reference.1, "all causal state bits");
+    assert_eq!(
+        fused.5, reference.5,
+        "every packed output, current-n scratch and retained control word"
+    );
+    assert_eq!(
+        dispatches(&fused.3),
+        dispatches(&reference.3),
+        "ordered arithmetic pipelines/grids"
+    );
+    let mut expected = reference.2.clone();
+    expected.encoded_commands -= saved;
+    expected.completed_commands -= saved;
+    assert_eq!(fused.2, expected, "only submission count changes");
+    let mut expanded = Vec::new();
+    let mut compounds = 0;
+    for (role, dims, submits) in commands(&fused.4) {
+        if role == "ced_seed_decoder_rows" {
+            let [layer, start, rows, seeds] = dims;
+            assert!(seeds > 0);
+            expanded.push(("ced_local_seed", [layer, start - seeds, seeds, 0], submits));
+            expanded.push(("ced_decoder_rows", [layer, start, rows, 0], submits));
+            compounds += submits;
+        } else {
+            expanded.push((role, dims, submits));
+        }
+    }
+    expanded.sort_unstable();
+    assert_eq!(
+        expanded,
+        commands(&reference.4),
+        "exact roles and absolute ranges after splitting compounds"
+    );
+    assert_eq!(compounds, saved);
+    for arm in [fused, reference] {
+        assert_eq!(
+            commands(&arm.4).iter().map(|r| r.2).sum::<usize>(),
+            arm.2.completed_commands
+        );
+    }
+}
+
+#[test]
+#[ignore = "self-leased <=128 MiB complete buffers; MTL debug validation; no real model"]
+fn seed_fusion_matches_unfused_empty_partial_full_wrap_packed_one_second_chunk_and_scalar() {
+    let _lease = require_debug_lease();
+    let ctx = MetalContext::new().unwrap();
+    for (window, n, arithmetic, saved) in [
+        (257, 128, Arithmetic::Production, 1),
+        (257, 640, Arithmetic::Production, 3),
+        (1025, 2542, Arithmetic::Production, 3),
+        (2050, 2542, Arithmetic::Production, 1),
+        (257, 2049, Arithmetic::Production, 2),
+        (1, 128, Arithmetic::Production, 0),
+        (3, 33, Arithmetic::ScalarNative, 0),
+    ] {
+        admit(&ctx, &fixture_config(window), n, n);
+        objc2::rc::autoreleasepool(|_| {
+            let weights = forward::toy::Weights::new(&ctx);
+            let embedding = incumbent::embeddings(&ctx);
+            let mut model = incumbent::nonuniform_model(&weights, &ctx, &embedding);
+            configure(&mut model, window);
+            let compare = || {
+                let reference = objc2::rc::autoreleasepool(|_| {
+                    let _unfused = incumbent::Unfused::begin();
+                    driver_arm(&model, n, false, arithmetic)
+                });
+                let fused =
+                    objc2::rc::autoreleasepool(|_| driver_arm(&model, n, false, arithmetic));
+                assert_fusion_pair(&fused, &reference, saved);
+            };
+            if arithmetic.scalar() {
+                compare();
+            } else {
+                prefill::with_batched_f32(compare);
+            }
+        });
+    }
+}
+
+#[test]
+#[ignore = "self-leased <=128 MiB complete buffers; MTL debug validation; no real model"]
+fn compound_seed_nonfinite_is_sticky_after_decoder_and_route_failure_poison_and_drain() {
+    let _lease = require_debug_lease();
+    let ctx = MetalContext::new().unwrap();
+    admit(&ctx, &fixture_config(257), 640, 640);
+    objc2::rc::autoreleasepool(|_| {
+        let weights = forward::toy::Weights::new(&ctx);
+        let embedding = incumbent::embeddings(&ctx);
+        let mut model = incumbent::nonuniform_model(&weights, &ctx, &embedding);
+        configure(&mut model, 257);
+        prefill::with_batched_f32(|| {
+            objc2::rc::autoreleasepool(|_| {
+                let _ = driver_arm(&model, 640, false, Arithmetic::Production);
+            });
+            let baseline = ctx.current_allocated_size();
+            for bad_seed in [true, false] {
+                model.layers[3].bias[0] = if bad_seed { 0.0 } else { f32::NAN };
+                let observe = Observe::begin();
+                observe.current.borrow_mut().poison_seed = bad_seed;
+                objc2::rc::autoreleasepool(|_| {
+                    let mut state = model.new_state(640).unwrap();
+                    let addresses = state.addresses;
+                    let profile = profile::Scope::begin().unwrap();
+                    let error = forward::ced::run(
+                        &model,
+                        &mut state,
+                        &incumbent::tokens(640),
+                        None,
+                        Arithmetic::Production,
+                    )
+                    .unwrap_err();
+                    let profile = profile.finish();
+                    assert_eq!(
+                        commands(&profile)
+                            .iter()
+                            .filter(|r| r.0 == "ced_seed_decoder_rows")
+                            .map(|r| r.2)
+                            .sum::<usize>(),
+                        1
+                    );
+                    let o = observe.current.borrow();
+                    assert_eq!(
+                        o.compounds.len(),
+                        1,
+                        "checked GPU completion reached after full decoder encoding"
+                    );
+                    if bad_seed {
+                        assert!(!o.poison_seed, "seed-only corruption hook was exercised");
+                        assert_ne!(
+                            o.compounds[0].0 & 4,
+                            0,
+                            "seed finite-status bit survives decoder dispatches"
+                        );
+                    } else {
+                        assert_eq!(o.compounds[0], (0, false));
+                        assert!(
+                            error.to_string().contains("layer 3 row 0 route status"),
+                            "{error}"
+                        );
+                    }
+                    drop(o);
+                    incumbent::assert_poisoned_rejects(&model, &mut state, addresses);
+                });
+                let o = observe.current.borrow();
+                assert!(
+                    o.encoder
+                        .iter()
+                        .chain(&o.backing)
+                        .chain(&o.seeds)
+                        .all(|w| w.load().is_none())
+                );
+                assert_eq!(o.births, 1);
+                assert!(ctx.current_allocated_size() <= baseline + 2 * 1024 * 1024);
+            }
+        });
+    });
 }
 
 #[test]
@@ -984,12 +1194,21 @@ fn reuse_allocation_view_completion_error_cancel_and_unwind_drop_and_poison() {
                 ("ced_pool_view", Action::Error),
                 ("ced_pool_view", Action::Panic),
                 ("ced_decoder_rows", Action::Completion),
+                ("ced_seed_decoder_rows", Action::Completion),
+                ("ced_seed_encoded", Action::Error),
+                ("ced_seed_encoded", Action::Cancel),
+                ("ced_seed_encoded", Action::Panic),
+                ("ced_seed_complete", Action::Error),
+                ("ced_seed_complete", Action::Cancel),
+                ("ced_seed_complete", Action::Panic),
                 ("ced_decoder_complete", Action::Error),
                 ("ced_decoder_complete", Action::Cancel),
                 ("ced_decoder_complete", Action::Panic),
                 ("ced_commit", Action::Error),
             ] {
+                let _unfused = (role == "ced_decoder_rows").then(incumbent::Unfused::begin);
                 let observe = Observe::begin();
+                let profile = profile::Scope::begin().unwrap();
                 objc2::rc::autoreleasepool(|_| {
                     let mut state = model.new_state(640).unwrap();
                     let addresses = state.addresses;
@@ -1013,12 +1232,31 @@ fn reuse_allocation_view_completion_error_cancel_and_unwind_drop_and_poison() {
                     drop(fault);
                     incumbent::assert_poisoned_rejects(&model, &mut state, addresses);
                 });
+                let profile = profile.finish();
                 let observation = observe.current.borrow();
+                if role == "ced_seed_encoded" {
+                    assert!(
+                        observation.compounds.is_empty(),
+                        "encode-only fault must discard the unsubmitted compound"
+                    );
+                    assert!(
+                        !commands(&profile)
+                            .iter()
+                            .any(|r| r.0 == "ced_seed_decoder_rows")
+                    );
+                } else if role == "ced_seed_complete" {
+                    assert_eq!(
+                        observation.compounds,
+                        [(0, true)],
+                        "seed-complete hook runs only after checked joint completion and FFN status"
+                    );
+                }
                 assert!(
                     observation
                         .backing
                         .iter()
                         .chain(&observation.encoder)
+                        .chain(&observation.seeds)
                         .all(|w| w.load().is_none()),
                     "{role}: resources survived request drain"
                 );
@@ -1431,6 +1669,11 @@ fn wide_full_tile_lineage_and_staged_groups_match_fresh_through_packed_singleton
         assert_eq!(reuse.2, fresh.2);
         assert_eq!(dispatches(&reuse.3), dispatches(&fresh.3));
         assert_eq!(commands(&reuse.4), commands(&fresh.4));
+        let unfused = objc2::rc::autoreleasepool(|_| {
+            let _unfused = incumbent::Unfused::begin();
+            driver_arm(&model, 129, false, Arithmetic::Production)
+        });
+        assert_fusion_pair(&reuse, &unfused, 2);
         for suffix in ["score_tensor", "pv_tensor"] {
             let name = format!("kernel_deepseek_v41_attention_{suffix}");
             assert!(

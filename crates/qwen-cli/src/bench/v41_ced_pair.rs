@@ -11,6 +11,7 @@ use qwen_llm::deepseek_v41::forward::{ColdPrefillPlan, PrefillExecution, plan_co
 use qwen_llm::metal::{MetalMemoryAdmission, MetalMemorySignals, MetalPipelineCacheMetrics};
 use qwen_llm::model_family::ModelFamily;
 use qwen_llm::pid_metrics::PidSnapshot;
+use std::collections::BTreeMap;
 use std::io::Write;
 
 // At most 38 cases, 256 layer counters per report, two JSON rows and a 1M-logit head.
@@ -63,50 +64,183 @@ pub(crate) fn validate_args(
     Ok(())
 }
 
-fn validate_environment(
-    get: impl Fn(&str) -> Option<std::ffi::OsString>,
-    names: &[String],
-) -> Result<()> {
-    ensure!(
-        get("MTL_DEBUG_LAYER").as_deref() == Some(std::ffi::OsStr::new("1")),
-        "--v41-ced-pair requires MTL_DEBUG_LAYER=1"
-    );
-    for name in names {
-        let override_name = name.starts_with("QWEN_V41_")
-            || name.starts_with("QWEN_MATMAT_")
-            || name.starts_with("QWEN_MATVEC_")
-            || name.starts_with("QWEN_PREFILL_")
-            || name.starts_with("QWEN_DECODE_")
-            || name.starts_with("QWEN_DSV4_")
-            || name.starts_with("QWEN_PROMPT_MATMAT_")
-            || name == "QWEN_EXPERT_TENSOR_TILE";
-        ensure!(
-            !override_name,
-            "remove runtime/arithmetic/profiling override {name} for --v41-ced-pair"
-        );
-    }
-    if let Some(value) = get("QWEN_METAL_LEASE_SKIP_WIRED_GATE") {
-        ensure!(
-            qwen_llm::env_flag::env_value_falsy(&value.to_string_lossy()),
-            "--v41-ced-pair refuses the wired admission bypass"
-        );
-    }
-    ensure!(
-        !qwen_llm::metal::dispatch_census_is_active(),
-        "--v41-ced-pair refuses an active dispatch observer"
-    );
-    Ok(())
+fn runtime_override(name: &str) -> bool {
+    name.starts_with("QWEN_V41_")
+        || name.starts_with("QWEN_MATMAT_")
+        || name.starts_with("QWEN_MATVEC_")
+        || name.starts_with("QWEN_PREFILL_")
+        || name.starts_with("QWEN_DECODE_")
+        || name.starts_with("QWEN_DSV4_")
+        || name.starts_with("QWEN_PROMPT_MATMAT_")
+        || name == "QWEN_EXPERT_TENSOR_TILE"
 }
 
-pub(crate) fn check_environment() -> Result<()> {
-    let names: Vec<_> = std::env::vars_os()
-        .map(|(name, _)| name.to_string_lossy().into_owned())
-        .collect();
-    validate_environment(|name| std::env::var_os(name), &names)
+const VALIDATION_ENV_KEYS: &[&str] = &[
+    "MTL_DEBUG_LAYER",
+    "MTL_SHADER_VALIDATION",
+    "METAL_DEVICE_WRAPPER_TYPE",
+    "DYLD_INSERT_LIBRARIES",
+    "DYLD_IMAGE_SUFFIX",
+    "MTL_CAPTURE_ENABLED",
+];
+
+fn validation_or_injection_setting(name: &str) -> bool {
+    name.starts_with("MTL_DEBUG_LAYER")
+        || name.starts_with("MTL_SHADER_VALIDATION")
+        || VALIDATION_ENV_KEYS.contains(&name)
+}
+
+pub(crate) struct Measurement {
+    production_timing: bool,
+    diagnostic: bool,
+    environment: BTreeMap<String, Option<String>>,
+}
+
+impl Measurement {
+    pub(crate) fn capture(production_timing: bool, diagnostic: bool) -> Self {
+        Self::from_environment(production_timing, diagnostic, std::env::vars_os())
+    }
+
+    pub(crate) fn from_environment(
+        production_timing: bool,
+        diagnostic: bool,
+        vars: impl IntoIterator<Item = (std::ffi::OsString, std::ffi::OsString)>,
+    ) -> Self {
+        let mut environment: BTreeMap<_, _> = VALIDATION_ENV_KEYS
+            .iter()
+            .map(|name| ((*name).to_owned(), None))
+            .collect();
+        for (name, value) in vars {
+            let name = name.to_string_lossy();
+            if validation_or_injection_setting(&name)
+                || runtime_override(&name)
+                || name == "QWEN_METAL_LEASE_SKIP_WIRED_GATE"
+            {
+                let captured = if runtime_override(&name) {
+                    "<set; disallowed runtime value not recorded>".to_owned()
+                } else {
+                    value.to_string_lossy().into_owned()
+                };
+                environment.insert(name.into_owned(), Some(captured));
+            }
+        }
+        Self {
+            production_timing,
+            diagnostic,
+            environment,
+        }
+    }
+
+    pub(crate) fn protocol(&self) -> &'static str {
+        match (self.production_timing, self.diagnostic) {
+            (false, false) => "native_full_ced_abba_baab_v1",
+            (false, true) => "instrumented_full_ced_abba_baab_diagnostic_v1",
+            (true, false) => "native_full_ced_abba_baab_production_timing_v1",
+            (true, true) => "instrumented_full_ced_abba_baab_production_timing_diagnostic_v1",
+        }
+    }
+
+    fn regime(&self) -> &'static str {
+        if self.production_timing {
+            "production_timing_requested"
+        } else {
+            "validation_on_requested"
+        }
+    }
+
+    fn description(&self) -> serde_json::Value {
+        serde_json::json!({
+            "protocol": self.protocol(),
+            "regime": self.regime(),
+            "production_timing_requested": self.production_timing,
+            "canonical_production_timing_requested": self.production_timing && !self.diagnostic,
+            "instrumented": self.diagnostic,
+            "effective_validation": "not_verified_external_injection_possible",
+            "environment_capture": "before_metal_context_creation_no_in_process_mutation",
+            "environment_value_encoding": "os_values_lossy_utf8",
+            "disallowed_runtime_values": "presence_only_not_recorded",
+            "environment": self.environment,
+        })
+    }
+
+    pub(crate) fn validate_environment(&self) -> Result<()> {
+        if !self.production_timing {
+            ensure!(
+                self.environment
+                    .get("MTL_DEBUG_LAYER")
+                    .and_then(|v| v.as_deref())
+                    == Some("1"),
+                "--v41-ced-pair requires MTL_DEBUG_LAYER=1 unless --v41-ced-pair-production-timing is explicit"
+            );
+        }
+        for (name, value) in &self.environment {
+            if value.is_none() {
+                continue;
+            }
+            ensure!(
+                !self.production_timing || !validation_or_injection_setting(name),
+                "production timing requires {name} unset at process launch (even 0/empty is refused)"
+            );
+            let error_override = validation_or_injection_setting(name)
+                && (name.ends_with("_ERROR_MODE")
+                    || name.ends_with("_WARNING_MODE")
+                    || name.ends_with("_ENABLE_ERROR_REPORTING")
+                    || name.ends_with("_REPORT_TO_STDERR"));
+            ensure!(
+                !error_override,
+                "remove validation error/warning override {name} for --v41-ced-pair"
+            );
+            ensure!(
+                !runtime_override(name),
+                "remove runtime/arithmetic/profiling override {name} for --v41-ced-pair"
+            );
+        }
+        if let Some(Some(value)) = self.environment.get("QWEN_METAL_LEASE_SKIP_WIRED_GATE") {
+            ensure!(
+                qwen_llm::env_flag::env_value_falsy(value),
+                "--v41-ced-pair refuses the wired admission bypass"
+            );
+        }
+        ensure!(
+            !qwen_llm::metal::dispatch_census_is_active(),
+            "--v41-ced-pair refuses an active dispatch observer"
+        );
+        Ok(())
+    }
+
+    pub(crate) fn emit_requested(&self, writer: &mut impl Write) -> Result<()> {
+        serde_json::to_writer(
+            &mut *writer,
+            &serde_json::json!({
+                "event": "v41_pair_launch_requested",
+                "measurement": self.description(),
+                "instrumented": self.diagnostic,
+                "performance_evidence": false,
+                "status": "environment_check_pending_no_device_created",
+            }),
+        )?;
+        writer.write_all(b"\n")?;
+        writer.flush()?;
+        Ok(())
+    }
+
+    #[cfg(test)]
+    fn start(self, writer: &mut impl Write) -> Result<Self> {
+        self.emit_requested(writer)?;
+        self.validate_environment().with_context(|| {
+            format!(
+                "paired launch protocol={} regime={}",
+                self.protocol(),
+                self.regime()
+            )
+        })?;
+        Ok(self)
+    }
 }
 
 pub(crate) struct PairedPreweight {
     pub(crate) plan: ColdPrefillPlan,
+    pub(crate) measurement: Measurement,
     report: serde_json::Value,
 }
 
@@ -115,8 +249,9 @@ pub(crate) fn preweight_plan(
     ctx: &MetalContext,
     gguf: &GgufFile,
     extent: FamilyBenchExtent,
-    diagnostic: bool,
+    measurement: Measurement,
 ) -> Result<PairedPreweight> {
+    let diagnostic = measurement.diagnostic;
     let plan = qwen_llm::deepseek_v41::gguf::plan(gguf)?;
     ensure!(
         plan.config.vocab <= 1_048_576 && plan.layers <= MAX_LAYERS,
@@ -146,7 +281,11 @@ pub(crate) fn preweight_plan(
     )
     .context("paired preweight Full/CED planning")?;
     let report = preweight_report(&plan, extent)?;
-    Ok(PairedPreweight { plan, report })
+    Ok(PairedPreweight {
+        plan,
+        measurement,
+        report,
+    })
 }
 
 fn preweight_report(
@@ -541,6 +680,7 @@ fn validate_diagnostic_report(report: &profile::Report) -> Result<()> {
 
 fn stream_diagnostic(
     writer: &mut impl Write,
+    measurement: &Measurement,
     case: Case,
     event: &'static str,
     observations: &impl serde::Serialize,
@@ -548,6 +688,8 @@ fn stream_diagnostic(
     #[derive(serde::Serialize)]
     struct Event<'a, T> {
         event: &'static str,
+        protocol: &'static str,
+        measurement_regime: &'static str,
         case: Case,
         instrumented: bool,
         performance_evidence: bool,
@@ -557,6 +699,8 @@ fn stream_diagnostic(
         &mut *writer,
         &Event {
             event,
+            protocol: measurement.protocol(),
+            measurement_regime: measurement.regime(),
             case,
             instrumented: true,
             performance_evidence: false,
@@ -572,6 +716,7 @@ fn stream_diagnostic(
 
 fn diagnostic_case(
     ctx: &MetalContext,
+    measurement: &Measurement,
     bench: &mut dyn FamilyBench,
     row_ctx: &SuiteRowContext,
     n: usize,
@@ -583,7 +728,7 @@ fn diagnostic_case(
         &mut NativeDiagnosticProbe(ctx),
         case,
         || native_case(bench, row_ctx, n, seed, case),
-        |event| stream_diagnostic_event(&mut stderr.lock(), case, event),
+        |event| stream_diagnostic_event(&mut stderr.lock(), measurement, case, event),
     )
 }
 
@@ -643,16 +788,25 @@ enum DiagnosticEvent<'a> {
 
 fn stream_diagnostic_event(
     writer: &mut impl Write,
+    measurement: &Measurement,
     case: Case,
     event: DiagnosticEvent<'_>,
 ) -> Result<()> {
     match event {
-        DiagnosticEvent::Start(before) => {
-            stream_diagnostic(writer, case, "v41_pair_diagnostic_start", before)
-        }
-        DiagnosticEvent::Finish(observation) => {
-            stream_diagnostic(writer, case, "v41_pair_diagnostic_finish", &observation)
-        }
+        DiagnosticEvent::Start(before) => stream_diagnostic(
+            writer,
+            measurement,
+            case,
+            "v41_pair_diagnostic_start",
+            before,
+        ),
+        DiagnosticEvent::Finish(observation) => stream_diagnostic(
+            writer,
+            measurement,
+            case,
+            "v41_pair_diagnostic_finish",
+            &observation,
+        ),
     }
 }
 
@@ -710,8 +864,9 @@ pub(crate) fn run(
     plan: &ColdPrefillPlan,
     preweight: &serde_json::Value,
     ctx: &MetalContext,
-    diagnostic: bool,
+    measurement: &Measurement,
 ) -> Result<Vec<BenchRow>> {
+    let diagnostic = measurement.diagnostic;
     if diagnostic {
         ensure!(
             plan.caller_cpu_bytes == caller_cpu_bytes(true),
@@ -730,7 +885,7 @@ pub(crate) fn run(
         },
         |case| {
             if diagnostic {
-                diagnostic_case(ctx, bench, row_ctx, n, seed, case)
+                diagnostic_case(ctx, measurement, bench, row_ctx, n, seed, case)
             } else {
                 native_case(bench, row_ctx, n, seed, case)
             }
@@ -743,6 +898,7 @@ pub(crate) fn run(
         seed,
         bench.vocab_size(),
         preweight,
+        measurement,
         &evidence,
     )
 }
@@ -796,6 +952,7 @@ fn aggregate(
     seed: u64,
     vocab: usize,
     preweight: &serde_json::Value,
+    measurement: &Measurement,
     evidence: &[(Case, NativeCase)],
 ) -> Result<Vec<BenchRow>> {
     let instrumented = evidence
@@ -806,6 +963,10 @@ fn aggregate(
             .iter()
             .all(|(_, sample)| sample.instrumented == instrumented),
         "paired evidence mixes diagnostic and uninstrumented cases"
+    );
+    ensure!(
+        measurement.diagnostic == instrumented,
+        "paired measurement identity differs from instrumentation"
     );
     let chronology: Vec<_> = evidence
         .iter()
@@ -866,7 +1027,8 @@ fn aggregate(
         );
         let diagnostics = row.diagnostics.get_or_insert_with(|| serde_json::json!({}));
         diagnostics["deepseek_v41"]["paired_benchmark"] = serde_json::json!({
-            "protocol": "native_full_ced_abba_baab_v1",
+            "protocol": measurement.protocol(),
+            "measurement": measurement.description(),
             "policy": policy,
             "requested_execution": policy.execution(),
             "seed": seed,
@@ -882,13 +1044,12 @@ fn aggregate(
             "timing_scope": "native_prefill_host_wall_including_endpoint_logits_copy_state_allocation_excluded",
             "quality_qualification": false,
             "host_validity": "external_continuous_monitor_required",
-            "metal_debug_layer": std::env::var("MTL_DEBUG_LAYER").ok(),
+            "metal_debug_layer": measurement.environment.get("MTL_DEBUG_LAYER").and_then(|v| v.as_deref()),
         });
         if instrumented {
             diagnostics["instrumented"] = true.into();
             diagnostics["performance_evidence"] = false.into();
             let paired = &mut diagnostics["deepseek_v41"]["paired_benchmark"];
-            paired["protocol"] = "instrumented_full_ced_abba_baab_diagnostic_v1".into();
             paired["instrumented"] = true.into();
             paired["performance_evidence"] = false.into();
             paired["diagnostic_observations"] = "streamed_to_stderr_not_retained".into();
@@ -906,6 +1067,302 @@ mod tests {
     use qwen_llm::deepseek_v41::forward::{CedCounters, CedMemoryEstimate, PrefillReport};
     use std::cell::{Cell, RefCell};
     use std::rc::Rc;
+
+    fn measurement_vars(production: bool, diagnostic: bool, vars: &[(&str, &str)]) -> Measurement {
+        Measurement::from_environment(
+            production,
+            diagnostic,
+            vars.iter()
+                .map(|(name, value)| ((*name).into(), (*value).into())),
+        )
+    }
+
+    fn measurement_fixture(production: bool, diagnostic: bool) -> Measurement {
+        measurement_vars(
+            production,
+            diagnostic,
+            if production {
+                &[]
+            } else {
+                &[("MTL_DEBUG_LAYER", "1")]
+            },
+        )
+    }
+
+    const PROVENANCE_ENV_BUDGET_BYTES: usize = 240 << 10;
+
+    fn escaped_many_key_measurement() -> (Measurement, usize, usize) {
+        let mut vars: Vec<(std::ffi::OsString, std::ffi::OsString)> =
+            vec![("MTL_DEBUG_LAYER".into(), "1".into())];
+        let entry_bytes =
+            |name: &str, value: &str| name.len() + value.len() + 2 + std::mem::size_of::<usize>();
+        let mut raw_bytes = entry_bytes("MTL_DEBUG_LAYER", "1");
+        loop {
+            let name = format!("MTL_SHADER_VALIDATION_FIXTURE_{:04}", vars.len());
+            let value = "\u{0001}".repeat(192);
+            let bytes = entry_bytes(&name, &value);
+            if raw_bytes + bytes > PROVENANCE_ENV_BUDGET_BYTES {
+                break;
+            }
+            raw_bytes += bytes;
+            vars.push((name.into(), value.into()));
+        }
+        let keys = vars.len();
+        (
+            Measurement::from_environment(false, false, vars),
+            raw_bytes,
+            keys,
+        )
+    }
+
+    #[test]
+    fn escaped_many_key_provenance_uses_a_bounded_arg_max_like_fixture() {
+        let (measurement, raw_bytes, keys) = escaped_many_key_measurement();
+        assert!(raw_bytes <= PROVENANCE_ENV_BUDGET_BYTES);
+        assert!(raw_bytes > PROVENANCE_ENV_BUDGET_BYTES - 512);
+        assert!(keys >= 1000);
+        measurement.validate_environment().unwrap();
+        let serialized = serde_json::to_string(&measurement.description()).unwrap();
+        assert!(serialized.len() > raw_bytes * 4);
+        assert!(serialized.contains("\\u0001"));
+        assert!(!serialized.contains('\u{0001}'));
+        assert!(
+            measurement
+                .environment
+                .values()
+                .flatten()
+                .all(|v| !v.contains('\0'))
+        );
+    }
+
+    #[test]
+    fn production_timing_cli_requires_pair_and_remains_explicit() {
+        use clap::Parser;
+        assert!(
+            Args::try_parse_from([
+                "qwen-bench",
+                "suite",
+                "-m",
+                "fixture.gguf",
+                "--pp",
+                "128",
+                "--v41-ced-pair-production-timing",
+            ])
+            .is_err()
+        );
+        for diagnostic in [false, true] {
+            let mut argv = vec![
+                "qwen-bench",
+                "suite",
+                "-m",
+                "fixture.gguf",
+                "--pp",
+                "128",
+                "--runs",
+                "2",
+                "--v41-ced-pair",
+                "--v41-ced-pair-production-timing",
+            ];
+            if diagnostic {
+                argv.push("--v41-ced-pair-diagnostic");
+            }
+            let Cmd::Suite(args) = Args::try_parse_from(argv).unwrap().cmd else {
+                panic!("suite")
+            };
+            assert!(args.v41_ced_pair && args.v41_ced_pair_production_timing);
+            assert_eq!(args.v41_ced_pair_diagnostic, diagnostic);
+        }
+        let Cmd::Suite(args) = Args::try_parse_from([
+            "qwen-bench",
+            "suite",
+            "-m",
+            "fixture.gguf",
+            "--pp",
+            "128",
+            "--v41-ced-pair",
+        ])
+        .unwrap()
+        .cmd
+        else {
+            panic!("suite")
+        };
+        assert!(!args.v41_ced_pair_production_timing);
+        assert!(!args.v41_ced_pair_diagnostic);
+    }
+
+    #[test]
+    fn production_timing_requires_validation_wrapper_and_injection_settings_strictly_unset() {
+        for diagnostic in [false, true] {
+            assert!(
+                measurement_fixture(true, diagnostic)
+                    .validate_environment()
+                    .is_ok()
+            );
+            for name in [
+                "MTL_DEBUG_LAYER",
+                "MTL_DEBUG_LAYER_ERROR_MODE",
+                "MTL_DEBUG_LAYER_WARNING_MODE",
+                "MTL_DEBUG_LAYER_VALIDATE_UNRETAINED_RESOURCES",
+                "MTL_SHADER_VALIDATION",
+                "MTL_SHADER_VALIDATION_DEFAULT_STATE",
+                "MTL_SHADER_VALIDATION_ENABLE_ERROR_REPORTING",
+                "MTL_SHADER_VALIDATION_REPORT_TO_STDERR",
+                "METAL_DEVICE_WRAPPER_TYPE",
+                "DYLD_INSERT_LIBRARIES",
+                "DYLD_IMAGE_SUFFIX",
+                "MTL_CAPTURE_ENABLED",
+            ] {
+                for value in ["", "0", "1", "false"] {
+                    assert!(
+                        measurement_vars(true, diagnostic, &[(name, value)])
+                            .validate_environment()
+                            .is_err(),
+                        "{name}={value:?}"
+                    );
+                }
+            }
+        }
+        for name in [
+            "MTL_DEBUG_LAYER_ERROR_MODE",
+            "MTL_DEBUG_LAYER_WARNING_MODE",
+            "MTL_SHADER_VALIDATION_ENABLE_ERROR_REPORTING",
+            "MTL_SHADER_VALIDATION_REPORT_TO_STDERR",
+        ] {
+            assert!(
+                measurement_vars(false, false, &[("MTL_DEBUG_LAYER", "1"), (name, "0")])
+                    .validate_environment()
+                    .is_err(),
+                "{name}"
+            );
+        }
+    }
+
+    #[test]
+    fn validation_provenance_preserves_unset_zero_one_and_records_failed_launch_identity() {
+        for value in [None, Some(""), Some("0"), Some("1")] {
+            let vars: Vec<_> = value
+                .map(|value| ("MTL_DEBUG_LAYER", value))
+                .into_iter()
+                .collect();
+            let measurement = measurement_vars(false, false, &vars);
+            assert_eq!(
+                measurement.description()["environment"]["MTL_DEBUG_LAYER"],
+                serde_json::to_value(value).unwrap()
+            );
+            assert_eq!(
+                measurement.validate_environment().is_ok(),
+                value == Some("1")
+            );
+        }
+        for shader in ["0", "1"] {
+            let measurement = measurement_vars(
+                false,
+                false,
+                &[("MTL_DEBUG_LAYER", "1"), ("MTL_SHADER_VALIDATION", shader)],
+            );
+            assert!(measurement.validate_environment().is_ok());
+            assert_eq!(
+                measurement.description()["environment"]["MTL_SHADER_VALIDATION"],
+                shader
+            );
+            assert_eq!(
+                measurement.description()["effective_validation"],
+                "not_verified_external_injection_possible"
+            );
+        }
+        for production in [false, true] {
+            for diagnostic in [false, true] {
+                let vars = if production {
+                    vec![
+                        ("MTL_SHADER_VALIDATION", "0"),
+                        ("DYLD_INSERT_LIBRARIES", "fixture-injection"),
+                    ]
+                } else {
+                    vec![]
+                };
+                let measurement = measurement_vars(production, diagnostic, &vars);
+                let expected = measurement.description();
+                let protocol = measurement.protocol();
+                let mut bytes = Vec::new();
+                let error = measurement
+                    .start(&mut bytes)
+                    .err()
+                    .expect("invalid launch refused");
+                assert!(format!("{error:#}").contains(protocol));
+                let launch: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+                assert_eq!(launch["event"], "v41_pair_launch_requested");
+                assert_eq!(launch["measurement"], expected);
+                assert_eq!(
+                    launch["status"],
+                    "environment_check_pending_no_device_created"
+                );
+                assert_eq!(launch["performance_evidence"], false);
+            }
+        }
+    }
+
+    #[test]
+    fn rejected_runtime_override_values_are_not_logged() {
+        let secret = "fixture-value-that-must-not-be-logged";
+        let measurement = measurement_vars(
+            false,
+            false,
+            &[
+                ("MTL_DEBUG_LAYER", "1"),
+                ("QWEN_V41_UNKNOWN_OVERRIDE", secret),
+            ],
+        );
+        let mut bytes = Vec::new();
+        assert!(measurement.start(&mut bytes).is_err());
+        let launch = String::from_utf8(bytes).unwrap();
+        assert!(launch.contains("QWEN_V41_UNKNOWN_OVERRIDE"));
+        assert!(!launch.contains(secret));
+    }
+
+    #[test]
+    fn both_native_regimes_leave_profile_scope_inert() {
+        for production in [false, true] {
+            let measurement = measurement_fixture(production, false);
+            measurement.validate_environment().unwrap();
+            let mut bench = v41_pair_test_bench(
+                || {
+                    drop(profile::Scope::begin().expect("no scope around native state creation"));
+                    Ok(())
+                },
+                |_, _, execution| {
+                    drop(profile::Scope::begin().expect("no scope around native prefill"));
+                    Ok((vec![0.; 257], report(execution)))
+                },
+            );
+            let sample =
+                native_case(&mut bench, &row_context(), 3, 1, schedule(2).unwrap()[0]).unwrap();
+            assert!(!sample.instrumented);
+            drop(profile::Scope::begin().expect("native case leaves no profiling scope"));
+        }
+    }
+
+    #[test]
+    fn diagnostic_events_have_distinct_regime_identity_without_repeating_environment() {
+        for production in [false, true] {
+            let measurement = measurement_fixture(production, true);
+            let mut bytes = Vec::new();
+            stream_diagnostic(
+                &mut bytes,
+                &measurement,
+                schedule(2).unwrap()[0],
+                "fixture",
+                &(),
+            )
+            .unwrap();
+            let event: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+            assert_eq!(event["protocol"], measurement.protocol());
+            assert_eq!(event["measurement_regime"], measurement.regime());
+            assert_eq!(event["instrumented"], true);
+            assert_eq!(event["performance_evidence"], false);
+            assert!(event.get("environment").is_none());
+            assert!(event.get("measurement").is_none());
+        }
+    }
 
     fn row_context() -> SuiteRowContext {
         SuiteRowContext {
@@ -1012,7 +1469,11 @@ mod tests {
             },
         )
         .unwrap();
-        PairedPreweight { plan, report }
+        PairedPreweight {
+            plan,
+            measurement: measurement_fixture(false, diagnostic),
+            report,
+        }
     }
 
     fn staged_signals() -> MetalMemorySignals {
@@ -1514,9 +1975,19 @@ mod tests {
                             .push(if start { "start_write" } else { "finish_write" });
                         if (start && fault == "write_start") || (!start && fault == "write_finish")
                         {
-                            stream_diagnostic_event(&mut BrokenWriter, case, event)
+                            stream_diagnostic_event(
+                                &mut BrokenWriter,
+                                &measurement_fixture(false, true),
+                                case,
+                                event,
+                            )
                         } else {
-                            stream_diagnostic_event(&mut bytes, case, event)
+                            stream_diagnostic_event(
+                                &mut bytes,
+                                &measurement_fixture(false, true),
+                                case,
+                                event,
+                            )
                         }
                     },
                 )
@@ -1658,7 +2129,13 @@ mod tests {
                 let mut sample = native_case(&mut bench, &row_context(), 3, 1, case)?;
                 sample.sample_ns = (seconds * 1e9) as u64;
                 sample.instrumented = true;
-                stream_diagnostic(&mut streamed, case, "fixture_finish", &sample.sample_ns)?;
+                stream_diagnostic(
+                    &mut streamed,
+                    &measurement_fixture(false, true),
+                    case,
+                    "fixture_finish",
+                    &sample.sample_ns,
+                )?;
                 Ok(sample)
             },
         )
@@ -1681,7 +2158,10 @@ mod tests {
 
     #[test]
     fn diagnostic_rows_and_every_case_are_marked_without_retaining_profiles() {
-        for instrumented in [false, true] {
+        for (production, instrumented) in
+            [(false, false), (false, true), (true, false), (true, true)]
+        {
+            let measurement = measurement_fixture(production, instrumented);
             let mut bench = v41_pair_test_bench(
                 || Ok(()),
                 |_, _, execution| Ok((vec![0.; 257], report(execution))),
@@ -1704,25 +2184,47 @@ mod tests {
                 1,
                 257,
                 &serde_json::json!({"caller_cpu_bytes": caller_cpu_bytes(instrumented)}),
+                &measurement,
                 &evidence,
             )
             .unwrap();
             for row in rows {
                 let diagnostics = row.diagnostics.unwrap();
                 let paired = &diagnostics["deepseek_v41"]["paired_benchmark"];
+                assert_eq!(paired["protocol"], measurement.protocol());
+                assert_eq!(
+                    measurement.protocol(),
+                    match (production, instrumented) {
+                        (false, false) => "native_full_ced_abba_baab_v1",
+                        (false, true) => "instrumented_full_ced_abba_baab_diagnostic_v1",
+                        (true, false) => "native_full_ced_abba_baab_production_timing_v1",
+                        (true, true) =>
+                            "instrumented_full_ced_abba_baab_production_timing_diagnostic_v1",
+                    }
+                );
+                assert_eq!(paired["measurement"], measurement.description());
+                assert_eq!(
+                    paired["metal_debug_layer"],
+                    serde_json::to_value(
+                        measurement
+                            .environment
+                            .get("MTL_DEBUG_LAYER")
+                            .and_then(|v| v.as_deref())
+                    )
+                    .unwrap()
+                );
+                assert_eq!(
+                    paired["measurement"]["canonical_production_timing_requested"],
+                    production && !instrumented
+                );
                 if instrumented {
                     assert_eq!(diagnostics["instrumented"], true);
                     assert_eq!(diagnostics["performance_evidence"], false);
                     assert_eq!(paired["instrumented"], true);
                     assert_eq!(paired["performance_evidence"], false);
-                    assert_eq!(
-                        paired["protocol"],
-                        "instrumented_full_ced_abba_baab_diagnostic_v1"
-                    );
                 } else {
                     assert!(diagnostics.get("instrumented").is_none());
                     assert!(paired.get("instrumented").is_none());
-                    assert_eq!(paired["protocol"], "native_full_ced_abba_baab_v1");
                 }
                 for case in paired["native_chronological_cases"].as_array().unwrap() {
                     if instrumented {
@@ -1733,6 +2235,7 @@ mod tests {
                     }
                     assert!(case.get("profile").is_none());
                     assert!(case.get("command_totals").is_none());
+                    assert!(case.get("measurement").is_none());
                 }
             }
         }
@@ -1794,7 +2297,13 @@ mod tests {
                 || Ok(()),
                 |case| {
                     calls.set(calls.get() + 1);
-                    stream_diagnostic(&mut BrokenWriter, case, "fixture", &())?;
+                    stream_diagnostic(
+                        &mut BrokenWriter,
+                        &measurement_fixture(false, true),
+                        case,
+                        "fixture",
+                        &(),
+                    )?;
                     Ok((100.0, ()))
                 }
             )
@@ -1838,7 +2347,14 @@ mod tests {
             report.operations.capacity() * std::mem::size_of::<profile::Operation>();
         for case in schedule(16).unwrap() {
             let mut writer = CountBytes(0);
-            stream_diagnostic(&mut writer, case, "fixture_maximum", &report).unwrap();
+            stream_diagnostic(
+                &mut writer,
+                &measurement_fixture(false, true),
+                case,
+                "fixture_maximum",
+                &report,
+            )
+            .unwrap();
             // Also charge serialized bytes conservatively although the real
             // writer streams without keeping a JSON string or parsed DOM.
             assert!((live_operations + writer.0 + (1 << 20)) as u64 <= DIAGNOSTIC_CPU_BYTES);
@@ -2027,6 +2543,8 @@ mod tests {
         preweight["prompt_rows"] = MAX_PP.into();
         preweight["capacity"] = MAX_PP.into();
         preweight["caller_cpu_bytes"] = CALLER_CPU_BYTES.into();
+        // Stress JSON escaping and map overhead, not only a long unescaped value.
+        let (measurement, provenance_env_bytes, provenance_keys) = escaped_many_key_measurement();
         let rows = aggregate(
             &row_context(),
             MAX_PP,
@@ -2034,6 +2552,7 @@ mod tests {
             u64::MAX,
             VOCAB,
             &preweight,
+            &measurement,
             &evidence,
         )
         .unwrap();
@@ -2063,14 +2582,19 @@ mod tests {
         // additional parsed DOM that production does not retain.
         let json = serde_json::to_string(&rows).unwrap();
         assert_eq!(json.matches("\"native_chronological_cases\"").count(), 2);
+        assert_eq!(
+            json.matches("\"canonical_production_timing_requested\"")
+                .count(),
+            2
+        );
         assert_eq!(json.matches("\"layers\":[").count(), 2 * 19 + RUNS);
-        std::hint::black_box((&head, &bits, &rows, &evidence, &json));
+        std::hint::black_box((&head, &bits, &rows, &evidence, &json, &measurement));
         let result_peak_delta = caller_envelope_peak_rss_bytes()
             .checked_sub(before)
             .unwrap();
         let charged_bytes = head_and_bits_bytes.checked_add(result_peak_delta).unwrap();
         println!(
-            "paired-caller-envelope-rss head_and_bits_bytes={head_and_bits_bytes} result_peak_delta_bytes={result_peak_delta} remaining_bytes={remaining_bytes} charged_bytes={charged_bytes} limit_bytes={CALLER_CPU_BYTES} json_bytes={} measurement=observational_not_heap_proof",
+            "paired-caller-envelope-rss head_and_bits_bytes={head_and_bits_bytes} result_peak_delta_bytes={result_peak_delta} remaining_bytes={remaining_bytes} charged_bytes={charged_bytes} limit_bytes={CALLER_CPU_BYTES} json_bytes={} provenance_env_bytes={provenance_env_bytes} provenance_keys={provenance_keys} measurement=observational_not_heap_proof",
             json.len()
         );
         assert!(
@@ -2335,7 +2859,17 @@ mod tests {
                 .collect::<Vec<_>>()
         );
         let preweight = serde_json::json!({"accepted": true, "caller_cpu_bytes": CALLER_CPU_BYTES});
-        let rows = aggregate(&ctx, 3, 2, 42, 257, &preweight, &evidence).unwrap();
+        let rows = aggregate(
+            &ctx,
+            3,
+            2,
+            42,
+            257,
+            &preweight,
+            &measurement_fixture(false, false),
+            &evidence,
+        )
+        .unwrap();
         let json = serde_json::to_value(rows).unwrap();
         for (index, expected_ns) in [110_000_000u64, 11_000_000].into_iter().enumerate() {
             let row = &json[index];
@@ -2626,10 +3160,18 @@ mod tests {
         };
         assert!(!args.v41_ced_pair);
         assert!(!args.v41_ced_pair_diagnostic);
+        assert!(!args.v41_ced_pair_production_timing);
         assert_eq!(args.runs, 1, "ordinary defaults unchanged");
-        let get = |name: &str| (name == "MTL_DEBUG_LAYER").then(|| "1".into());
-        assert!(validate_environment(get, &[]).is_ok());
-        assert!(validate_environment(|_| None, &[]).is_err());
+        assert!(
+            measurement_fixture(false, false)
+                .validate_environment()
+                .is_ok()
+        );
+        assert!(
+            measurement_vars(false, false, &[])
+                .validate_environment()
+                .is_err()
+        );
         for name in [
             "QWEN_V41_PREFILL_EXECUTION",
             "QWEN_V41_SINK_TENSOR",
@@ -2638,17 +3180,22 @@ mod tests {
             "QWEN_MATMAT_F16_HALF_ACT",
             "QWEN_MATVEC_IQ3_XXS_FAST",
         ] {
-            assert!(validate_environment(get, &[name.into()]).is_err());
+            assert!(
+                measurement_vars(false, false, &[("MTL_DEBUG_LAYER", "1"), (name, "0")])
+                    .validate_environment()
+                    .is_err()
+            );
         }
         assert!(
-            validate_environment(
-                |name| match name {
-                    "MTL_DEBUG_LAYER" => Some("1".into()),
-                    "QWEN_METAL_LEASE_SKIP_WIRED_GATE" => Some("1".into()),
-                    _ => None,
-                },
-                &[]
+            measurement_vars(
+                false,
+                false,
+                &[
+                    ("MTL_DEBUG_LAYER", "1"),
+                    ("QWEN_METAL_LEASE_SKIP_WIRED_GATE", "1")
+                ]
             )
+            .validate_environment()
             .is_err()
         );
     }

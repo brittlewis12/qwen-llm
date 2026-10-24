@@ -481,9 +481,10 @@ pub(crate) struct SuiteArgs {
     /// policy. Warms both policies, gates an ABBA pilot (2 samples/policy),
     /// then alternates retained BAAB/ABBA blocks. Warmup/pilot are excluded
     /// from statistics; per-policy max/min must stay <=1.5, including pilot
-    /// evidence, after every main case. Requires MTL_DEBUG_LAYER=1, a stock
-    /// arithmetic/profiling environment and external continuous host-validity
-    /// monitoring. Supports vocab <=1048576 and <=256 layers. Timings are
+    /// evidence, after every main case. Defaults to MTL_DEBUG_LAYER=1; the
+    /// explicit production-timing regime instead requires validation unset.
+    /// Requires a stock arithmetic/profiling environment and external continuous
+    /// host-validity monitoring. Supports vocab <=1048576 and <=256 layers. Timings are
     /// host-wall native prefill plus endpoint logits, not GPU-only or quality
     /// evidence; every endpoint head must match warm Full bitwise.
     #[arg(long)]
@@ -492,6 +493,12 @@ pub(crate) struct SuiteArgs {
     /// excluded warmup/pilot cases. Not performance evidence; all gates remain.
     #[arg(long, requires = "v41_ced_pair")]
     pub(crate) v41_ced_pair_diagnostic: bool,
+    /// Explicit production timing: API/shader validation and known injection/
+    /// wrapper settings must be unset before launch, not set to 0. Does not
+    /// change correctness qualification or any runtime gate. May combine with
+    /// --v41-ced-pair-diagnostic for attribution, never performance evidence.
+    #[arg(long, requires = "v41_ced_pair")]
+    pub(crate) v41_ced_pair_production_timing: bool,
     /// Prompt-only prefill shapes. Accepts repeated flags or comma lists.
     #[arg(long = "pp", value_delimiter = ',')]
     pub(crate) pp: Vec<usize>,

@@ -470,6 +470,7 @@ pub(crate) fn run_pp(args: PpArgs) -> Result<()> {
         return crate::suite::run_suite(SuiteArgs {
             v41_ced_pair: false,
             v41_ced_pair_diagnostic: false,
+            v41_ced_pair_production_timing: false,
             model: args.model,
             pp: vec![args.n_prompt],
             tg: Vec::new(),

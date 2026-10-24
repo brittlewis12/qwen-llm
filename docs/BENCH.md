@@ -136,8 +136,11 @@ even `--runs 2..=16` retained samples per policy. Warmup is mandatory.
   state allocation, GPU-only time or model loading. Schema-v4 output has one row
   per policy. Warmup/pilot are excluded from statistics but retained in both
   rows' chronological diagnostics, along with reports, fingerprints and budgets.
-- Use `MTL_DEBUG_LAYER=1`, the production lease and the stock runtime/arithmetic
-  environment. Profiling overrides and an active dispatch observer are refused.
+- By default use `MTL_DEBUG_LAYER=1`: this retains the validation-on protocol
+  `native_full_ced_abba_baab_v1`, not canonical production throughput. The explicit
+  production-timing regime below is separate. Both require the production lease
+  and stock runtime/arithmetic environment. Profiling overrides and an active
+  dispatch observer are refused.
   Run under external continuous host supervision, such as `pilot.Session`;
   the CLI's timing gate does not monitor global VM health. A nonzero exit or
   unhealthy/missing telemetry invalidates the run; do not automatically retry.
@@ -147,20 +150,94 @@ continuation or the separate bounded-128 policy. A matching endpoint fingerprint
 is not a replacement for the strict full-vocabulary and causal-state CED
 qualification. Ordered cold Full-then-CED diagnostics are not speedup evidence.
 
+### Explicit Production Timing
+
+Add `--v41-ced-pair-production-timing` to request the production-timing regime;
+it requires `--v41-ced-pair` and defaults to false. Launch the process with
+`MTL_DEBUG_LAYER` and `MTL_SHADER_VALIDATION` **unset**, not `0`, `false` or empty.
+The CLI never changes environment variables in process. GPU correctness tests
+and numerical/causal-state qualification continue to require `MTL_DEBUG_LAYER=1`.
+
+- Production timing refuses every present `MTL_DEBUG_LAYER*` or
+  `MTL_SHADER_VALIDATION*` setting, plus `METAL_DEVICE_WRAPPER_TYPE`,
+  `DYLD_INSERT_LIBRARIES`, `DYLD_IMAGE_SUFFIX` and `MTL_CAPTURE_ENABLED`, regardless
+  of value. These are a small set of known validation/wrapper/instrumentation
+  controls, not a claim to detect all external tooling. Validation-on mode still
+  requires exactly `MTL_DEBUG_LAYER=1`; error/warning-mode and shader error-report
+  overrides (`*_ERROR_MODE`, `*_WARNING_MODE`, `*_ENABLE_ERROR_REPORTING`,
+  `*_REPORT_TO_STDERR`) are refused in both regimes. Other shader validation
+  settings are recorded in validation-on mode, not described as API-only.
+- Once parsed arguments identify a pair, the entry point captures one relevant
+  environment `BTreeMap` and writes and flushes JSON `v41_pair_launch_requested`
+  to stderr before build-identity checks, model opening or Metal context creation.
+  The captured object is passed into Suite without recapture. The existing
+  process-wide perf-ablation guard still runs before ordinary argument parsing:
+  on refusal only, it attempts non-exiting argument parsing to identify a pair
+  and emit its request before returning the original refusal. Help, invalid
+  arguments and non-pair commands do not imply paired intent. No guard is waived,
+  and launch-write or flush failure stops before model/device work.
+  The event includes the requested protocol, regime and known Metal validation
+  values even when ablation, build-identity or environment checks reject launch.
+  Known primary keys are present as `null` when unset; `"0"`, `"1"` and `""`
+  remain distinct strings. Present prefixed controls and stock-runtime override
+  controls use the same map, but disallowed QWEN runtime override values are
+  redacted to presence markers (`disallowed_runtime_values` is
+  `"presence_only_not_recorded"`); rejection is unchanged. Recorded OS-string
+  values use explicitly labeled lossy UTF-8 conversion. Unrelated environment
+  variables are not captured. The launch event is not acceptance or performance
+  evidence.
+- Results retain this captured provenance under `paired_benchmark.measurement`,
+  once per result row rather than per chronological case. No summary-time
+  environment reread occurs; legacy `metal_debug_layer` comes from the same map.
+  Regimes are labeled `validation_on_requested` or `production_timing_requested`,
+  with `effective_validation: "not_verified_external_injection_possible"`.
+  `canonical_production_timing_requested` is true only for uninstrumented
+  production requests. It is a regime label, not proof of effective validation
+  state, host validity, qualification or a gain.
+- Native production timing uses
+  `native_full_ced_abba_baab_production_timing_v1`; the default protocol identifier
+  stays unchanged. Neither native regime enables a profiling scope, sampled
+  stages or pipeline-cache counters. Lease, 80% ownership/20% availability policy,
+  all staged/inner admissions, endpoint fingerprints, stability gates, fallback
+  rejection and the 64/80 MiB caller budgets remain unchanged. This adds no
+  pinning, residency, retry or admission-bypass mode.
+- Before reporting a production gain, the offline controller must match the
+  artifact, prompt/capacity and seed and compare complete 129,280-logit endpoint
+  head hashes against the validation-on qualified reference. The CLI does not
+  enforce an external-reference flag or implement that controller check. When
+  arithmetic sources are unchanged, reuse the existing all-257-head/56-state
+  proofs at 128/2K/8K; this timing-only protocol does not require repeating those
+  large qualifications. Within-run equality to warm Full is not the external
+  validation/production bridge.
+
+This separation follows the established validation-on correctness versus
+validation-unset throughput practice in
+[query batching](bench/2026-10-19-v41-query-batching.md),
+[grouped tradeoffs](bench/2026-10-20-v41-grouped-tradeoffs.md) and
+[IQ2 grouped prefill](bench/2026-10-21-v41-prefill-iq2-grouped.md). The
+[toolchain baseline](bench/2026-10-17-m5-toolchain-baseline/README.md) likewise
+distinguishes API-validation timings from production throughput. None of this
+establishes validation as the cause of unexplained wait jitter. Compare gains
+within the same requested regime, not validation-on against production timing.
+
 ### Instrumented Pair Diagnostic
 
 Add `--v41-ced-pair-diagnostic` only for a separately authorized diagnostic
 series; it requires `--v41-ced-pair`. It does not retry a rejected benchmark,
 add warmups, change arithmetic, enable sampled stages, or relax any shape,
-debug-validation, lease, admission, fingerprint, stability or host-validity
+selected validation regime, lease, admission, fingerprint, stability or host-validity
 requirement. Start with a bounded 2K series (`--pp 2048 --runs 2`: at most ten
 calls including warmup/pilot), not an automatic escalation to 8K.
 
 - Every diagnostic result row, chronological case and diagnostic stderr event
   carries `instrumented: true` and `performance_evidence: false`. The row's
-  paired protocol is `instrumented_full_ced_abba_baab_diagnostic_v1`, distinct
-  from the uninstrumented native protocol. Instrumented throughput columns must
-  not be used as performance evidence, even if all stability checks pass.
+  paired protocol is `instrumented_full_ced_abba_baab_diagnostic_v1` by default.
+  Combining with `--v41-ced-pair-production-timing` is supported for matched
+  attribution under `instrumented_full_ced_abba_baab_production_timing_diagnostic_v1`.
+  Both are distinct from native timing; diagnostic stderr events also name the
+  protocol/regime without repeating the environment. Instrumented throughput
+  columns must not be used as performance evidence, even if all stability checks
+  pass; `canonical_production_timing_requested` remains false.
 - Case-tagged JSON observations stream and flush to stderr before the next
   stability decision, so completed observations survive a later rejection.
   Each profile is streamed once and dropped, never copied into both rows'
@@ -204,8 +281,13 @@ calls including warmup/pilot), not an automatic escalation to 8K.
   maximum-payload streaming fixture charges live operation storage, serialized
   bytes and 1 MiB fixed slack against that reserve. No 38-profile retention or
   host-budget bypass is permitted. The existing maximum-caller-payload regression
-  includes the staged budget/assessment metadata without increasing the normal
-  64 MiB caller envelope or diagnostic 80 MiB total.
+  includes the staged budget/assessment and measurement provenance metadata
+  without increasing the normal 64 MiB caller envelope or diagnostic 80 MiB total.
+  Its provenance fixture uses more than 1,000 relevant keys and non-NUL control
+  values requiring JSON escaping within a 240 KiB ARG_MAX-like input budget,
+  including entry/pointer costs. This is bounded stress coverage, not a proof
+  over every possible launch environment; the isolated RSS regression remains
+  observational, not a formal heap bound.
 
 This mode localizes unexplained wall time; it does not by itself establish
 file-cache misses, a thermal cause, interference, a lifetime defect or a speedup.

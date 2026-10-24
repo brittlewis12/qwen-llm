@@ -18,6 +18,7 @@ pub(crate) fn run_tg(args: TgArgs) -> Result<()> {
         return crate::suite::run_suite(SuiteArgs {
             v41_ced_pair: false,
             v41_ced_pair_diagnostic: false,
+            v41_ced_pair_production_timing: false,
             model: args.model,
             pp: Vec::new(),
             tg: vec![args.n_gen],

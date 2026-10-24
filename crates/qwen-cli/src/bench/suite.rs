@@ -342,10 +342,28 @@ fn log_row(json_mode: bool, row: &BenchRow) {
 }
 
 pub(crate) fn run_suite(args: SuiteArgs) -> Result<()> {
+    let paired_measurement = if args.v41_ced_pair {
+        let measurement = crate::v41_ced_pair::Measurement::capture(
+            args.v41_ced_pair_production_timing,
+            args.v41_ced_pair_diagnostic,
+        );
+        measurement.emit_requested(&mut std::io::stderr().lock())?;
+        Some(measurement)
+    } else {
+        None
+    };
+    run_suite_with_measurement(args, paired_measurement)
+}
+
+pub(crate) fn run_suite_with_measurement(
+    args: SuiteArgs,
+    paired_measurement: Option<crate::v41_ced_pair::Measurement>,
+) -> Result<()> {
     let SuiteArgs {
         model,
         v41_ced_pair,
         v41_ced_pair_diagnostic,
+        v41_ced_pair_production_timing,
         pp,
         tg,
         depth: depths,
@@ -359,6 +377,19 @@ pub(crate) fn run_suite(args: SuiteArgs) -> Result<()> {
         !v41_ced_pair_diagnostic || v41_ced_pair,
         "--v41-ced-pair-diagnostic requires --v41-ced-pair"
     );
+    ensure!(
+        !v41_ced_pair_production_timing || v41_ced_pair,
+        "--v41-ced-pair-production-timing requires --v41-ced-pair"
+    );
+    ensure!(
+        v41_ced_pair == paired_measurement.is_some(),
+        "paired launch measurement missing or unexpected"
+    );
+    if let Some(measurement) = &paired_measurement {
+        measurement
+            .validate_environment()
+            .with_context(|| format!("paired launch protocol={}", measurement.protocol()))?;
+    }
     if runs == 0 {
         return Err(anyhow!("--runs must be >= 1"));
     }
@@ -388,7 +419,6 @@ pub(crate) fn run_suite(args: SuiteArgs) -> Result<()> {
             no_warmup,
             prefill_chunk,
         )?;
-        crate::v41_ced_pair::check_environment()?;
     }
     let v41_prefill_execution = if family == ModelFamily::DeepSeekV41 && !v41_ced_pair {
         crate::family_options::v41_prefill_execution_from_env()?
@@ -513,12 +543,12 @@ pub(crate) fn run_suite(args: SuiteArgs) -> Result<()> {
         } else {
             FamilyBenchExtent::for_shapes(&pp, &tg, &depths, (warmup_pp, WARMUP_TG))?
         };
-        let paired_preweight = if v41_ced_pair {
+        let paired_preweight = if let Some(measurement) = paired_measurement {
             Some(crate::v41_ced_pair::preweight_plan(
                 &ctx,
                 &probe,
                 extent,
-                v41_ced_pair_diagnostic,
+                measurement,
             )?)
         } else {
             None
@@ -545,13 +575,14 @@ pub(crate) fn run_suite(args: SuiteArgs) -> Result<()> {
                                 preweight_report
                                     .context("paired load assessment report missing")?,
                                 &ctx,
-                                v41_ced_pair_diagnostic,
+                                &preweight.measurement,
                             )?;
                             for row in &rows {
                                 if v41_ced_pair_diagnostic {
                                     crate::text_log!(
                                         json_mode,
-                                        "[suite] INSTRUMENTED performance_evidence=false paired prefill_mode={} {}: {:.2} t/s",
+                                        "[suite] protocol={} INSTRUMENTED performance_evidence=false paired prefill_mode={} {}: {:.2} t/s",
+                                        preweight.measurement.protocol(),
                                         row.prefill_mode.unwrap_or("unreported"),
                                         row.test,
                                         row.avg_ts,
@@ -559,7 +590,8 @@ pub(crate) fn run_suite(args: SuiteArgs) -> Result<()> {
                                 } else {
                                     crate::text_log!(
                                         json_mode,
-                                        "[suite] paired prefill_mode={}",
+                                        "[suite] protocol={} paired prefill_mode={}",
+                                        preweight.measurement.protocol(),
                                         row.prefill_mode.unwrap_or("unreported"),
                                     );
                                     log_row(json_mode, row);

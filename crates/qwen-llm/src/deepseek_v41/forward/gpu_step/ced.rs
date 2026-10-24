@@ -388,7 +388,7 @@ impl Workspace {
         storage.observe(model.ctx);
         self.commands += 1;
         if let Some(encode_ms) = encode_ms {
-            profile::submitted(
+            profile::submitted_with_driver_scheduling(
                 role,
                 dimensions,
                 encode_ms,
@@ -396,6 +396,7 @@ impl Workspace {
                 result.is_ok(),
                 command.GPUStartTime(),
                 command.GPUEndTime(),
+                || (command.kernelStartTime(), command.kernelEndTime()),
             );
         }
         result?;

@@ -312,7 +312,7 @@ fn submit(
     let wait = started.map(|_| std::time::Instant::now());
     let result = metal::commit_and_wait(&command).map_err(|e| e.to_string());
     if let Some(wait) = wait {
-        profile::submitted(
+        profile::submitted_with_driver_scheduling(
             role,
             dimensions,
             encoded.unwrap(),
@@ -320,6 +320,7 @@ fn submit(
             result.is_ok(),
             command.GPUStartTime(),
             command.GPUEndTime(),
+            || (command.kernelStartTime(), command.kernelEndTime()),
         );
     }
     result

@@ -1076,19 +1076,25 @@ impl MetalContext {
         let Some(library) = self.tensor_library.as_ref() else {
             return Err(MetalError::NoFunction(name.to_string()));
         };
-        if let Some(p) = self.pso_cache.lock().pipelines.get(name) {
-            return Ok(p.clone());
-        }
+        let mut metrics = {
+            let mut cache = self.pso_cache.lock();
+            if let Some(p) = cache.pipelines.get(name) {
+                return Ok(p.clone());
+            }
+            MetricsScope::begin(&self.pso_cache, &mut cache)
+        };
         let function_name = NSString::from_str(name);
         let function = library
             .newFunctionWithName(&function_name)
             .ok_or_else(|| MetalError::NoFunction(name.to_string()))?;
-        let pso = self
+        metrics.compiler_started();
+        let pso_result = self
             .device
-            .newComputePipelineStateWithFunction_error(&function)
-            .map_err(|error| {
-                MetalError::Pipeline(name.to_string(), error.localizedDescription().to_string())
-            })?;
+            .newComputePipelineStateWithFunction_error(&function);
+        drop(metrics);
+        let pso = pso_result.map_err(|error| {
+            MetalError::Pipeline(name.to_string(), error.localizedDescription().to_string())
+        })?;
         let pso = Pipeline {
             raw: pso,
             name: Arc::from(name),
@@ -1123,40 +1129,28 @@ impl MetalContext {
     /// come from the embedded product metallib; bench/research probes fall
     /// back to the research metallib.
     pub fn pipeline(&self, name: &str) -> Result<Pipeline, MetalError> {
-        let metrics_enabled = {
+        let mut metrics = {
             let mut cache = self.pso_cache.lock();
             if let Some(p) = cache.pipelines.get(name) {
                 return Ok(p.clone());
             }
-            if cache.metrics_enabled {
-                cache.metrics.misses = cache.metrics.misses.saturating_add(1);
-            }
-            cache.metrics_enabled
+            MetricsScope::begin(&self.pso_cache, &mut cache)
         };
-        let miss_t0 = metrics_enabled.then(std::time::Instant::now);
         let func_name = NSString::from_str(name);
         let function = match self.library.newFunctionWithName(&func_name) {
             Some(function) => function,
             None => match self.research_function(&func_name)? {
                 Some(function) => function,
                 None => {
-                    if let Some(start) = miss_t0 {
-                        self.record_pipeline_miss_wall(start.elapsed(), None);
-                    }
                     return Err(MetalError::NoFunction(name.to_string()));
                 }
             },
         };
-        let compiler_t0 = metrics_enabled.then(std::time::Instant::now);
+        metrics.compiler_started();
         let pso_result = self
             .device
             .newComputePipelineStateWithFunction_error(&function);
-        if let Some(start) = miss_t0 {
-            self.record_pipeline_miss_wall(
-                start.elapsed(),
-                compiler_t0.map(|compiler_start| compiler_start.elapsed()),
-            );
-        }
+        drop(metrics);
         let pso = pso_result.map_err(|e: Retained<NSError>| {
             MetalError::Pipeline(name.to_string(), e.localizedDescription().to_string())
         })?;
@@ -1181,27 +1175,6 @@ impl MetalContext {
 
     pub fn pipeline_cache_metrics(&self) -> MetalPipelineCacheMetrics {
         self.pso_cache.lock().metrics
-    }
-
-    fn record_pipeline_miss_wall(
-        &self,
-        miss_wall: std::time::Duration,
-        compiler_wall: Option<std::time::Duration>,
-    ) {
-        let mut cache = self.pso_cache.lock();
-        if !cache.metrics_enabled {
-            return;
-        }
-        cache.metrics.miss_wall_ns = cache
-            .metrics
-            .miss_wall_ns
-            .saturating_add(duration_ns_saturating(miss_wall));
-        if let Some(compiler_wall) = compiler_wall {
-            cache.metrics.compiler_wall_ns = cache
-                .metrics
-                .compiler_wall_ns
-                .saturating_add(duration_ns_saturating(compiler_wall));
-        }
     }
 
     pub fn pipeline_info(&self, name: &str) -> Result<MetalPipelineInfo, MetalError> {
@@ -1752,6 +1725,57 @@ pub fn price_shared_buffer_upper(
 mod tests {
     use super::*;
     use crate::metal::test_support::*;
+
+    #[test]
+    #[ignore = "self-leased tiny PSO test; requires supported Metal 4 tensor hardware, not an M4 skip/pass"]
+    fn ordinary_and_tensor_pipeline_metrics_cover_cold_hits_and_missing_functions() {
+        assert_eq!(std::env::var("MTL_DEBUG_LAYER").as_deref(), Ok("1"));
+        let _lease = acquire_metal_benchmark_lease().expect("attribution PSO production lease");
+        let ctx = MetalContext::new().expect("Metal context and process lease");
+        assert!(
+            ctx.tensor_library.is_some(),
+            "tensor coverage unavailable: {:?}",
+            ctx.tensor_ops_status()
+        );
+        ctx.set_pipeline_cache_metrics_enabled(true);
+        for (tensor, name) in [
+            (false, "kernel_add_f32"),
+            (true, "kernel_tensor_matmul2d_f16_f32"),
+        ] {
+            let lookup = |name| {
+                if tensor {
+                    ctx.tensor_pipeline(name)
+                } else {
+                    ctx.pipeline(name)
+                }
+            };
+            let before = ctx.pipeline_cache_metrics();
+            let pso = lookup(name).expect("cold PSO creation");
+            let cold = ctx.pipeline_cache_metrics();
+            assert_eq!(cold.misses, before.misses + 1);
+            assert!(cold.miss_wall_ns > before.miss_wall_ns);
+            assert!(cold.compiler_wall_ns > before.compiler_wall_ns);
+            let hit = lookup(name).unwrap();
+            assert!(Arc::ptr_eq(&pso.name, &hit.name));
+            assert_eq!(ctx.pipeline_cache_metrics(), cold);
+            assert!(matches!(
+                lookup("attribution_v26_missing"),
+                Err(MetalError::NoFunction(_))
+            ));
+            let missing = ctx.pipeline_cache_metrics();
+            assert_eq!(missing.misses, cold.misses + 1);
+            assert!(missing.miss_wall_ns > cold.miss_wall_ns);
+            assert_eq!(missing.compiler_wall_ns, cold.compiler_wall_ns);
+        }
+        ctx.set_pipeline_cache_metrics_enabled(false);
+        let before = ctx.pipeline_cache_metrics();
+        assert!(ctx.pipeline("attribution_v26_disabled_missing").is_err());
+        assert!(
+            ctx.tensor_pipeline("attribution_v26_disabled_missing")
+                .is_err()
+        );
+        assert_eq!(ctx.pipeline_cache_metrics(), before);
+    }
 
     fn priced(size: u64, alignment: u64) -> MetalBufferSizeAndAlign {
         MetalBufferSizeAndAlign { size, alignment }

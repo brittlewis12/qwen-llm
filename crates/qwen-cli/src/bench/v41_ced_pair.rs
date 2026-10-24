@@ -620,6 +620,8 @@ struct CommandTotals {
     completed_submits: usize,
     invalid_gpu_timestamps: usize,
     gpu_ms_valid_completed_only: Option<f64>,
+    driver_scheduling_ms_valid_completed_only: Option<f64>,
+    invalid_driver_scheduling_timestamps: usize,
     encode_ms: f64,
     commit_wait_ms_including_gpu: f64,
     outer_wall_minus_command_encode_and_wait_ms: f64,
@@ -630,6 +632,8 @@ fn command_totals(report: &profile::Report) -> CommandTotals {
         completed_submits: 0,
         invalid_gpu_timestamps: 0,
         gpu_ms_valid_completed_only: None,
+        driver_scheduling_ms_valid_completed_only: None,
+        invalid_driver_scheduling_timestamps: 0,
         encode_ms: 0.0,
         commit_wait_ms_including_gpu: 0.0,
         outer_wall_minus_command_encode_and_wait_ms: 0.0,
@@ -640,9 +644,17 @@ fn command_totals(report: &profile::Report) -> CommandTotals {
         if let Some(ms) = op.gpu_ms {
             *totals.gpu_ms_valid_completed_only.get_or_insert(0.0) += ms;
         }
+        if let Some(ms) = op.driver_scheduling_ms {
+            *totals
+                .driver_scheduling_ms_valid_completed_only
+                .get_or_insert(0.0) += ms;
+        }
+        totals.invalid_driver_scheduling_timestamps += op.invalid_driver_scheduling_timestamps;
         totals.encode_ms += op.encode_ms;
         totals.commit_wait_ms_including_gpu += op.commit_wait_ms;
     }
+    // The outer case includes work outside native prefill. Neither Metal GPU
+    // envelopes nor CPU-driver scheduling are additive to inclusive wait time.
     totals.outer_wall_minus_command_encode_and_wait_ms =
         report.token_wall_ms - totals.encode_ms - totals.commit_wait_ms_including_gpu;
     totals
@@ -754,11 +766,13 @@ struct DiagnosticObservation<'a> {
     profile_and_pipeline_scope: &'static str,
     resource_scope: &'static str,
     gap_interpretation: &'static str,
+    driver_scheduling_interpretation: &'static str,
     resources_before: &'a DiagnosticResources,
     resources_after_pool_drain: Option<&'a DiagnosticResources>,
     resource_delta: Option<DiagnosticResourceDelta>,
     pipeline_cache_delta: [u64; 3],
     pipeline_cache_delta_fields: [&'static str; 3],
+    pipeline_cache_coverage: &'static str,
     command_totals: CommandTotals,
     profile: &'a profile::Report,
 }
@@ -817,6 +831,7 @@ fn diagnostic_case_with<P: DiagnosticProbe>(
         profile_and_pipeline_scope: "outer_native_case_including_state_allocation_validation_fingerprint_reporting_teardown_and_pool_drain",
         resource_scope: "before_case_to_after_state_drop_and_case_pool_drain_current_values_not_peaks",
         gap_interpretation: "outer_wall_minus_encode_and_wait_is_unattributed_wall_not_cpu_time_gpu_is_already_inside_wait",
+        driver_scheduling_interpretation: "metal_kernel_end_minus_start_cpu_driver_scheduling_not_shader_active_no_instant_alignment_not_additive_to_gpu_or_wait_null_without_valid_completed_pairs_invalid_count_completed_only",
         resources_before: &before,
         resources_after_pool_drain: after.as_ref().ok(),
         resource_delta: after.as_ref().ok().map(|a| a.delta_since(&before)),
@@ -826,6 +841,7 @@ fn diagnostic_case_with<P: DiagnosticProbe>(
             pipeline.compiler_wall_ns,
         ],
         pipeline_cache_delta_fields: ["misses", "miss_wall_ns", "compiler_wall_ns"],
+        pipeline_cache_coverage: "ordinary_product_research_and_available_tensor_cold_lookups_including_failures_compiler_nested_in_miss_wall_absent_tensor_tier_not_a_lookup",
         command_totals: command_totals(&report),
         profile: &report,
     }))?;
@@ -1407,6 +1423,8 @@ mod tests {
             completed_submits: 1,
             invalid_gpu_timestamps: 0,
             gpu_ms: Some(12.0),
+            driver_scheduling_ms: Some(3.0),
+            invalid_driver_scheduling_timestamps: 0,
             encode_ms: 5.0,
             commit_wait_ms: 20.0,
             wall_ms: 0.0,
@@ -2283,15 +2301,33 @@ mod tests {
         let mut host = profile_operation();
         host.completed_submits = 0;
         host.gpu_ms = None;
+        host.driver_scheduling_ms = None;
         host.encode_ms = 0.0;
         host.commit_wait_ms = 0.0;
         host.wall_ms = 40.0;
         let report = profile_report(vec![profile_operation(), host]);
         let totals = command_totals(&report);
         assert_eq!(totals.gpu_ms_valid_completed_only, Some(12.0));
+        assert_eq!(totals.driver_scheduling_ms_valid_completed_only, Some(3.0));
         assert_eq!(totals.outer_wall_minus_command_encode_and_wait_ms, 75.0);
         assert_eq!(totals.completed_submits, 1);
         validate_diagnostic_report(&report).unwrap();
+    }
+
+    #[test]
+    fn diagnostic_scheduling_totals_serialize_unknown_as_null_not_zero() {
+        let mut op = profile_operation();
+        op.driver_scheduling_ms = None;
+        op.invalid_driver_scheduling_timestamps = 1;
+        op.encode_ms = 0.0;
+        let report = profile_report(vec![op]);
+        let totals = command_totals(&report);
+        let json = serde_json::to_value(totals).unwrap();
+        assert!(json["driver_scheduling_ms_valid_completed_only"].is_null());
+        assert_eq!(json["invalid_driver_scheduling_timestamps"], 1);
+        assert_eq!(json["encode_ms"], 0.0);
+        assert_eq!(json["gpu_ms_valid_completed_only"], 12.0);
+        assert_eq!(json["outer_wall_minus_command_encode_and_wait_ms"], 80.0);
     }
 
     #[test]
@@ -2363,39 +2399,97 @@ mod tests {
                 Ok(())
             }
         }
-        let report = profile_report(
-            (0..MAX_DIAGNOSTIC_OPERATIONS)
-                .map(|_| {
-                    let mut op = profile_operation();
-                    op.dimensions = [usize::MAX; 4];
-                    op.count = usize::MAX;
-                    op.completed_submits = usize::MAX;
-                    op.invalid_gpu_timestamps = usize::MAX;
-                    op.gpu_ms = Some(f64::MAX);
-                    op.encode_ms = f64::MAX;
-                    op.commit_wait_ms = f64::MAX;
-                    op.wall_ms = f64::MAX;
-                    op
-                })
-                .collect(),
-        );
+        let maximum_report = || {
+            profile_report(
+                (0..MAX_DIAGNOSTIC_OPERATIONS)
+                    .map(|_| {
+                        let mut op = profile_operation();
+                        op.operation = "ced_encoder_engram_prepare";
+                        op.dimensions = [usize::MAX; 4];
+                        op.count = usize::MAX;
+                        // Keep production totals finite/nonoverflowing while
+                        // stressing long numeric encodings in every operation.
+                        op.completed_submits = usize::MAX / MAX_DIAGNOSTIC_OPERATIONS;
+                        op.invalid_gpu_timestamps = usize::MAX / MAX_DIAGNOSTIC_OPERATIONS;
+                        op.gpu_ms = Some(f64::MAX / (2 * MAX_DIAGNOSTIC_OPERATIONS) as f64);
+                        op.driver_scheduling_ms = op.gpu_ms;
+                        op.invalid_driver_scheduling_timestamps = op.invalid_gpu_timestamps;
+                        op.encode_ms = op.gpu_ms.unwrap();
+                        op.commit_wait_ms = op.gpu_ms.unwrap();
+                        op.wall_ms = f64::MAX;
+                        op
+                    })
+                    .collect(),
+            )
+        };
+        let report = maximum_report();
         validate_diagnostic_report(&report).unwrap();
+        let operation_capacity = report.operations.capacity();
         let live_operations =
             report.operations.capacity() * std::mem::size_of::<profile::Operation>();
-        for case in schedule(16).unwrap() {
+        drop(report);
+        let cases = schedule(16).unwrap();
+        assert_eq!(cases.len(), 38);
+        struct MaximumDiagnosticProbe(Option<profile::Report>);
+        impl DiagnosticProbe for MaximumDiagnosticProbe {
+            type Scope = ();
+            fn resources(&mut self) -> Result<DiagnosticResources> {
+                Ok(DiagnosticResources {
+                    process_pageins: u64::MAX,
+                    process_disk_read_bytes: u64::MAX,
+                    process_resident_size_bytes: u64::MAX,
+                    process_phys_footprint_bytes: u64::MAX,
+                    device_current_allocated_bytes: u64::MAX,
+                })
+            }
+            fn pipelines(&self) -> MetalPipelineCacheMetrics {
+                MetalPipelineCacheMetrics::default()
+            }
+            fn begin(&mut self) -> Result<()> {
+                Ok(())
+            }
+            fn finish(&mut self, (): ()) -> profile::Report {
+                self.0.take().unwrap()
+            }
+        }
+        // Use the production finish-event serializer, including labels/totals,
+        // without retaining JSON or profiles across cases (or in either row).
+        let mut largest_event = 0;
+        let mut largest_charged = 0;
+        for case in &cases {
             let mut writer = CountBytes(0);
-            stream_diagnostic(
-                &mut writer,
-                &measurement_fixture(false, true),
-                case,
-                "fixture_maximum",
-                &report,
+            let mut probe = MaximumDiagnosticProbe(Some(maximum_report()));
+            diagnostic_case_with(
+                &mut probe,
+                *case,
+                || Err(anyhow::anyhow!("CPU fixture")),
+                |event| {
+                    stream_diagnostic_event(
+                        &mut writer,
+                        &measurement_fixture(false, true),
+                        *case,
+                        event,
+                    )
+                },
             )
-            .unwrap();
+            .unwrap_err();
+            largest_event = largest_event.max(writer.0);
             // Also charge serialized bytes conservatively although the real
             // writer streams without keeping a JSON string or parsed DOM.
-            assert!((live_operations + writer.0 + (1 << 20)) as u64 <= DIAGNOSTIC_CPU_BYTES);
+            let fixed = std::mem::size_of::<DiagnosticObservation<'_>>()
+                + std::mem::size_of::<profile::Report>()
+                + 2 * std::mem::size_of::<DiagnosticResources>()
+                + cases.capacity() * std::mem::size_of::<Case>();
+            let charged = live_operations + writer.0 + fixed;
+            largest_charged = largest_charged.max(charged);
+            assert!(charged as u64 <= DIAGNOSTIC_CPU_BYTES);
         }
+        println!(
+            "attribution-v26-diagnostic-bound operation_bytes={} capacity={} live_operations_bytes={live_operations} largest_start_plus_finish_bytes={largest_event} charged_bytes={largest_charged} cases={} diagnostic_reserve_bytes={DIAGNOSTIC_CPU_BYTES} native_reserve_bytes={CALLER_CPU_BYTES}",
+            std::mem::size_of::<profile::Operation>(),
+            operation_capacity,
+            cases.len()
+        );
     }
 
     #[test]

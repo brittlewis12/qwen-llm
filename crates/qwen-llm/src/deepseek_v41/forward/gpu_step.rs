@@ -416,7 +416,7 @@ impl Workspace {
         let result = metal::commit_and_wait(&command).map_err(|e| e.to_string());
         self.commands += 1;
         if let Some(encode_ms) = encode_ms {
-            profile::submitted(
+            profile::submitted_with_driver_scheduling(
                 "prefill_chunk_rows",
                 [start, model.layers.len(), n, 0],
                 encode_ms,
@@ -424,6 +424,7 @@ impl Workspace {
                 result.is_ok(),
                 command.GPUStartTime(),
                 command.GPUEndTime(),
+                || (command.kernelStartTime(), command.kernelEndTime()),
             );
         }
         result?;
@@ -893,7 +894,7 @@ impl Workspace {
             let result = metal::commit_and_wait(&command).map_err(|e| e.to_string());
             self.commands += 1;
             if let Some(encode_ms) = encode_ms {
-                profile::submitted(
+                profile::submitted_with_driver_scheduling(
                     "gpu_step",
                     [position, start, end, 0],
                     encode_ms,
@@ -901,6 +902,7 @@ impl Workspace {
                     result.is_ok(),
                     command.GPUStartTime(),
                     command.GPUEndTime(),
+                    || (command.kernelStartTime(), command.kernelEndTime()),
                 );
             }
             result?;

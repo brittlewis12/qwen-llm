@@ -267,7 +267,7 @@ pub(super) fn batching_compiled_sources() -> &'static [(&'static str, &'static [
     macro_rules! embedded {
         ($($path:literal),+ $(,)?) => { &[$(($path, include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/../../", $path)).as_slice())),+] };
     }
-    embedded![
+    const SOURCES: &[(&str, &[u8])] = embedded![
         "crates/qwen-llm/src/deepseek_v41/forward/ced_plan/batches.rs",
         "crates/qwen-llm/src/deepseek_v41/forward/gpu_step/ced/batches.rs",
         "crates/qwen-llm/src/deepseek_v41/forward/gpu_step/ced/batches/tests.rs",
@@ -275,7 +275,8 @@ pub(super) fn batching_compiled_sources() -> &'static [(&'static str, &'static [
         "crates/qwen-llm/src/deepseek_v41/forward/gpu_step/ced/tests/reuse.rs",
         "crates/qwen-llm/src/metal/elementwise.rs",
         "kernels/elementwise.metal",
-    ]
+    ];
+    SOURCES
 }
 
 pub(super) fn checked_compiled_source(root: &Path, path: &str, bytes: &[u8]) -> AResult<Value> {

@@ -85,6 +85,31 @@ Full logical arity and all recorded pre-rebase heads/state. Next: native attribu
 on that default; separate GPU work from host/completion cost without reopening
 the explicit-residency lane or inventing cache-based admission restrictions.
 
+Fresh outside leverage map: landed reconnaissance (2026-10-24;
+`bench/2026-10-24-v41-outside-leverage-map.md`), not new performance evidence.
+Two independent outside reviews plus primary-source/source audits prioritize:
+
+- CED transactional cross-layer completion batches: open. Start with two layers,
+  preserve pending/completed separation and disjoint sticky status evidence;
+  target 21 -> 11 commands at 2K, not an assumed proportional latency gain.
+- Same-format cooperative/register-fed quantized matmul: open. Apple and pinned
+  MLX implement the operand mechanism; bypass threadgroup staging rather than
+  retrying native FP4, larger K panels or a decoder-ALU rewrite. Separately gate
+  newer input APIs: the current tensor library targets macOS 26.0.
+- Expert-major/count-adaptive execution and head/query/layer-shared attention
+  operands: open structural follow-ons. Measure useful versus padded work and
+  actual data movement; do not recast the existing 5.4% return-grid or ~2% half-KV
+  probes as unmeasured multipliers. Chunk-4096 work is already on
+  `perf/v41-chunk4096`, not a duplicate assignment here.
+- Batched Engram preparation, CED-origin prefix reuse and candidate-only
+  long-context reindexing: open, with distinct cold/warm/context economics.
+  Full prefix caching already exists; CED-origin reuse needs qualification.
+
+The immediate two proof-of-leverage experiments pair native driver/host
+attribution and bounded CED retirement with a matched streaming cooperative-input
+kernel control. Do not stop at another peak-FLOPS comparison or profiler census.
+No optimization has been implemented by this reconnaissance checkpoint.
+
 Mapping/admission repair: landed (2026-10-23 memory-safety entry and
 `bench/2026-10-23-v41-memory-safety.md`). Shared EOF removes the old 156.059 GiB
 private exposure; combined host admission and bounded import/lifetime proofs
@@ -157,9 +182,10 @@ attention tiles at 34.7%. Re-sample after the next landing.
   same 32-slot shape with f16act operands, simplest-decoder Q8_0 is the
   slowest tile (39.1/39.7 TFLOPS at 649/659 GB/s) while IQ3_XXS reaches
   54.1/49.5 at 324/296 and IQ2_XS 56.9/52.4 at 257/237; the tile is
-  weight-byte/staging-bound, not decoder-ALU bound. Remaining routed
-  lever: fewer staged weight bytes (native MXFP4 or a lower-bit
-  artifact), not a faster decoder.
+  weight-byte/staging-bound, not evidence for a pure decoder-ALU rewrite.
+  The control changes byte volume too; it does not isolate DRAM from on-chip
+  staging. Same-format cooperative/register operand delivery is a distinct open
+  dataflow bet in the fresh outside map, without a new quant artifact.
 - Native MXFP4 blockwise right operands: negative (2026-10-23 probe,
   bench/2026-10-23-v41-mxfp4-blockwise-negative.md; branch
   `perf/v41-mxfp4-probe`). The Metal 4.1 `metal_fp4_e2m1_format` +

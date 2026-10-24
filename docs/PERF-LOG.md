@@ -6,6 +6,31 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the current state and evidence index.
 
+## 2026-10-24 - Fresh Outside Map Prioritizes Execution And Operand Dataflow
+
+- Two fresh independent outside model reviews and three focused source/primary
+  research passes identify structural leverage, not another incremental tile
+  queue. This is read-only reconnaissance; no new GPU run or speedup is claimed.
+- First exact-execution bet: transactional CED decoder-layer batches, removing
+  per-layer CPU retirement while retaining checked final publication. Two-layer
+  batches target 21 -> 11 commands at 2K; status-slab CPU resets and encoded/
+  completed frontiers must be redesigned locally, not bypassed.
+- First kernel bet: custom dequantization directly into cooperative/register
+  matmul inputs. Apple documents it and pinned MLX code implements the mechanism.
+  This changes the operand path at the same dtype, not the failed native FP4 or
+  decoder-ALU premise. Verify deployment gating beyond the current 26.0 library.
+- Source-bound work math puts 8K CED's main projections/shared+routed FFN at
+  about 140.74 TFLOP, or 1.083 s at the resident-operand 130-TFLOPS reference,
+  before other work. Current wide dense fixtures reach 67-90 TFLOPS. Useful versus
+  padded MoE work, requested versus DRAM/staging bytes and native versus GPU
+  timing are separate denominators; a peak ratio is not a promised 10x speedup.
+- Other substantial lanes: occupancy-aware expert layouts; shared attention
+  operands; batched Engram reads; qualified CED-origin reuse; candidate-only
+  reindexing beyond 16K. Their contexts and overlapping Amdahl budgets differ.
+  Keep existing chunk-4096 work independent. No smaller artifact, hidden bounded
+  replay policy, cache gate, percentage reserve or explicit residency is proposed.
+- [Ranked map, decisive experiments, quantitative budgets and primary sources](bench/2026-10-24-v41-outside-leverage-map.md).
+
 ## 2026-10-24 - Rebased CED Preserves Score32 Lineage And Full-Model Equivalence
 
 - Active bench/scratch branches rebase onto repaired main `1c7c3ef8`; their

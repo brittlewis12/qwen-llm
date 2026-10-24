@@ -56,9 +56,10 @@ For priorities: `docs/PERF-ROADMAP.md`.
   then one fitting pilot, then repetitions. File size and virtual mapped bytes
   are not physical-memory bounds; private/COW exposure must be priced explicitly.
 - Combined host admission remains mandatory when the raw process-limit signal
-  is zero. Device/import ownership and full private shadows must fit the
-  80%-physical ceiling, while fresh conservative availability preserves host
-  headroom. Unknown telemetry is not a zero-cost allowance.
+  is zero. Combined demand and private/import exposure must fit actual host
+  capacity and observed availability, alongside Metal's working-set limit.
+  Do not add a physical-memory percentage cap or reserve on top of those limits.
+  Unknown telemetry is not a zero-cost allowance.
 - V4.1's `deepseek_v41_storage_plan` example reports the loader's exact windows
   and private exposure using supplied page/device geometry, without importing
   weights or reading tensor payloads. It is a storage audit, not runtime fit;

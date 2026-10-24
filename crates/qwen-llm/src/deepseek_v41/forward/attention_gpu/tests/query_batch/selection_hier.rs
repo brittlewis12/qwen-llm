@@ -8,6 +8,9 @@ use super::*;
 const K: usize = 512;
 const LIMIT: u64 = 128 * 1024 * 1024;
 
+#[path = "selection_hier/tile_reuse.rs"]
+mod tile_reuse;
+
 #[test]
 fn hier_top512_shapes_price_two_allocations_and_capacity_not_prompt() {
     let c = Config::default();
@@ -348,7 +351,18 @@ fn ledger(
         .map(price)
         .sum();
     // scheduled_weights F32, one layer, one output group, optional pair gate.
-    let weights = [
+    let weights = fixture_weight_shapes(c).into_iter().map(price).sum::<u64>();
+    let extra: u64 = extras.iter().copied().filter(|&n| n != 0).map(price).sum();
+    let total = workspace * copies as u64 + weights + extra;
+    eprintln!(
+        "hier explicit ledger: workspaces={} weights={weights} extras={extra} total={total} limit={LIMIT}; context/driver separate",
+        workspace * copies as u64
+    );
+    assert!(total <= LIMIT);
+}
+
+fn fixture_weight_shapes(c: &Config) -> [usize; 10] {
+    [
         c.hidden * c.query_rank,
         c.query_rank * c.heads * c.head_dim,
         c.hidden * c.head_dim,
@@ -360,16 +374,6 @@ fn ledger(
         c.hidden * c.index_heads,
         c.head_dim * c.index_dim,
     ]
-    .into_iter()
-    .map(price)
-    .sum::<u64>();
-    let extra: u64 = extras.iter().copied().filter(|&n| n != 0).map(price).sum();
-    let total = workspace * copies as u64 + weights + extra;
-    eprintln!(
-        "hier explicit ledger: workspaces={} weights={weights} extras={extra} total={total} limit={LIMIT}; context/driver separate",
-        workspace * copies as u64
-    );
-    assert!(total <= LIMIT);
 }
 
 fn guarded_ids(ctx: &MetalContext, words: usize) -> (MetalTensor, MetalTensor) {

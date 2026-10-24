@@ -576,8 +576,9 @@ impl Workspace {
             && n >= 128
             && metal::moe_grouped_tensor_selected(ctx)
             && std::env::var_os("QWEN_V41_SINK_TENSOR").is_none_or(|v| v != "0");
-        let score32 =
-            tensor && std::env::var_os("QWEN_V41_SINK_TENSOR32").is_some_and(|v| v != "0");
+        // The wider-N score tile is the default tensor-tier form from 128
+        // rows; `QWEN_V41_SINK_TENSOR32=0` restores the 16-key form.
+        let score32 = tensor && std::env::var_os("QWEN_V41_SINK_TENSOR32").is_none_or(|v| v != "0");
         if tensor {
             tensor_pipeline(
                 ctx,

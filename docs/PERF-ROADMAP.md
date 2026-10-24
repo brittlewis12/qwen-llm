@@ -26,7 +26,7 @@ expected effect, status. Status is one of `open`, `in flight (branch)`,
 `in flight` with your branch; a second lane finding it claimed reads the branch
 before building anything adjacent. This replaces relaying between sessions.
 
-### DeepSeek V4.1-Flash (main after the tensor-ops attention sink: pp2048 Q2 853 / IQ3 852 tok/s, pp4096 Q2 816 / IQ3 815; decode rechecked tg32 Q2 43.2 / IQ3 41.0, depth tg32@d2048 41.6 from the prior landing)
+### DeepSeek V4.1-Flash (main after the wider 32-key attention score: pp2048 Q2 876.5 / IQ3 852 (not re-measured), pp4096 Q2 843.0 / IQ3 815; decode rechecked tg32 Q2 43.2 / IQ3 41.0, depth tg32@d2048 41.6 from the prior landing)
 
 CED encoder-only bulk prefill is the leading architectural opportunity.
 Design/dependency recon: landed (2026-10-23 CED entry;
@@ -207,6 +207,22 @@ attention tiles at 34.7%. Re-sample after the next landing.
   rows +18% slower, so selected only at >=128 rows on the tensor tier.
   Held-text mean NLL +0.0079 (+0.37%), top-1 unchanged;
   `QWEN_V41_SINK_TENSOR=0` restores the MMA kernels.
+- Wider-N attention score: landed (2026-10-24 score32 entry,
+  bench/2026-10-24-v41-score32.md). The 32-key score tile splits the
+  latent into two 256-wide chunks, keeps Q resident in the same 32 KiB,
+  and leaves softmax/PV/normalize unchanged. Fixture: score -18 to -20%,
+  full sink -12 to -13% at 128/256/512 rows. Same-binary Q2 ABCCBA:
+  pp2048 852.284 -> 876.514 (+2.84%), pp4096 819.739 -> 842.959
+  (+2.83%). IQ3 held-text witness identical (NLL 2.1542914542, top-1
+  0.5677083333). Default from 128 rows on the tensor tier;
+  `QWEN_V41_SINK_TENSOR32=0` restores the 16-key form. Score is still
+  ~11.9 TFLOPS vs PV ~20.4; register-cooperative or materialized
+  attention remains open.
+- Bounded attention/expert probes, not landed:
+  return-only expert grid width 64 -> 2 is -5.4% of the combined expert
+  tile (~1.3% model arithmetic) on the 31/32/33 route fixture; a prebuilt
+  half-KV score source adds ~2% full sink on top of score32 and needs
+  persistent-view lifecycle work. Evidence branch `perf/v41-expert-sched`.
 - Maya-S artifact (`peasantsmith/DeepSeek-V4.1-Flash-1017-Maya-GGUF`,
   six shards, 339.5 GB): evaluated (2026-10-22 Maya entry,
   bench/2026-10-22-maya-s-eval.md). All 40 routed layers on the

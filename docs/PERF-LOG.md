@@ -32,6 +32,28 @@ See also: `docs/PERF-ROADMAP.md` for the current state and evidence index.
   work rows and scratch envelope. Runtime/fault and full-model requalification
   remain pending; no residency or pinning experiment is reopened.
 
+## 2026-10-24 - V4.1 Attention: Wider 32-Key Tensor Score, +2.8%
+
+- The tensor score tile processes 32 keys with the latent split into two
+  256-wide chunks. Q stays resident in 16 KiB and K uses the other 16 KiB,
+  so the 32 KiB budget is unchanged; softmax, tensor PV and normalize are
+  untouched. Default on the tensor tier from 128 rows;
+  `QWEN_V41_SINK_TENSOR32=0` restores the 16-key form.
+- Fixture at 512 rows / 640 keys: score 2,215.6 -> 1,808.0 us (-18.4%),
+  full sink 3,298.5 -> 2,876.8 us (-12.8%); 128/256 rows are -20.1/-18.1%
+  score and -13.0/-12.3% sink. Correctness covers all fixture cases.
+- Same-binary Q2 ABCCBA (`d0ea399a` cached-load fix, build identity match):
+  pp2048 852.284 -> 876.514 (+2.84%), pp4096 819.739 -> 842.959 (+2.83%).
+- IQ3 held-text witness is identical: mean NLL 2.1542914542, top-1
+  0.5677083333, per-document NLL/rank/top-1 unchanged. The score is still
+  ~11.9 TFLOPS vs PV ~20.4; register-cooperative/materialized attention
+  remains open.
+- Bounded adjacent probes: return-only expert grid width 64 -> 2 is
+  -5.4% of the combined expert tile (~1.3% model arithmetic) on the
+  31/32/33 route fixture, not landed; a prebuilt half-KV score source adds
+  ~2% full sink on top of score32, not landed.
+- [Fixture, ABCCBA, witness and limits](bench/2026-10-24-v41-score32.md).
+
 ## 2026-10-24 - CED Full-Model Correctness Qualified At 128/2K/8K
 
 - Clean source `eba1f591` passes Maya-S Full/CED at 128, 2048 and 8192 tokens,

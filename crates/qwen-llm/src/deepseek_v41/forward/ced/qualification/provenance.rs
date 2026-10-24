@@ -263,6 +263,28 @@ fn frozen_reference_requires_complete_reviewed_harness_identity() {
     assert!(frozen(&bad).is_err());
 }
 
+pub(super) fn batching_compiled_sources() -> &'static [(&'static str, &'static [u8])] {
+    macro_rules! embedded {
+        ($($path:literal),+ $(,)?) => { &[$(($path, include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/../../", $path)).as_slice())),+] };
+    }
+    embedded![
+        "crates/qwen-llm/src/deepseek_v41/forward/ced_plan/batches.rs",
+        "crates/qwen-llm/src/deepseek_v41/forward/gpu_step/ced/batches.rs",
+        "crates/qwen-llm/src/deepseek_v41/forward/gpu_step/ced/batches/tests.rs",
+        "crates/qwen-llm/src/deepseek_v41/forward/ced/tests.rs",
+        "crates/qwen-llm/src/deepseek_v41/forward/gpu_step/ced/tests/reuse.rs",
+    ]
+}
+
+pub(super) fn checked_compiled_source(root: &Path, path: &str, bytes: &[u8]) -> AResult<Value> {
+    let hash = archive::sha(bytes);
+    ensure!(
+        archive::file_sha(&mut archive::open(&root.join(path))?)? == hash,
+        "binary/source mismatch: {path}; rebuild after wiring or editing"
+    );
+    Ok(json!({"path": path, "sha256": hash}))
+}
+
 fn compiled_sources() -> &'static [(&'static str, &'static [u8])] {
     macro_rules! embedded {
         ($($path:literal),+ $(,)?) => { &[$(($path, include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/../../", $path)).as_slice())),+] };
@@ -327,13 +349,8 @@ fn compiled_sources() -> &'static [(&'static str, &'static [u8])] {
 
 fn checked_compiled_sources(root: &Path) -> AResult<Vec<Value>> {
     let mut compiled = Vec::new();
-    for &(path, bytes) in compiled_sources() {
-        let hash = archive::sha(bytes);
-        ensure!(
-            archive::file_sha(&mut archive::open(&root.join(path))?)? == hash,
-            "binary/source mismatch: {path}; rebuild after wiring or editing"
-        );
-        compiled.push(json!({"path": path, "sha256": hash}));
+    for &(path, bytes) in compiled_sources().iter().chain(batching_compiled_sources()) {
+        compiled.push(checked_compiled_source(&root, path, bytes)?);
     }
     Ok(compiled)
 }
@@ -407,4 +424,40 @@ pub(super) fn source() -> AResult<(PathBuf, Value)> {
             "product_sha256": archive::sha(crate::KERNELS_METALLIB), "tensor_sha256": archive::sha(crate::KERNELS_TENSOR_METALLIB),
             "diagnostic_features": crate::enabled_diagnostic_features()}});
     Ok((root, value))
+}
+
+#[test]
+fn every_batching_source_rejects_a_stale_body_in_both_qualification_inventories() {
+    let nonce = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    let root = std::env::temp_dir().join(format!(
+        "qwen-batch-freshness-{}-{nonce}",
+        std::process::id()
+    ));
+    std::fs::create_dir(&root).unwrap();
+    for &(path, compiled) in batching_compiled_sources() {
+        let file = root.join(path);
+        std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+        std::fs::write(&file, compiled).unwrap();
+        assert!(checked_compiled_source(&root, path, compiled).is_ok());
+        assert!(super::current_pair::checked_compiled_source(&root, path, compiled).is_ok());
+        let mut changed = compiled.to_vec();
+        changed.extend_from_slice(b"\n// freshness regression edit\n");
+        std::fs::write(&file, changed).unwrap();
+        for error in [
+            checked_compiled_source(&root, path, compiled).unwrap_err(),
+            super::current_pair::checked_compiled_source(&root, path, compiled).unwrap_err(),
+        ] {
+            assert!(
+                error
+                    .to_string()
+                    .contains(&format!("binary/source mismatch: {path}")),
+                "{error}"
+            );
+        }
+        std::fs::write(&file, compiled).unwrap();
+    }
+    std::fs::remove_dir_all(root).unwrap();
 }

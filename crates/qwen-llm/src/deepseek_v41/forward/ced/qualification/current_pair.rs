@@ -212,7 +212,7 @@ fn geometry(gguf: &crate::gguf::GgufFile, p: &v41_gguf::Plan, n: usize) -> AResu
     })
 }
 
-fn checked_compiled_source(root: &Path, path: &str, compiled: &[u8]) -> AResult<Value> {
+pub(super) fn checked_compiled_source(root: &Path, path: &str, compiled: &[u8]) -> AResult<Value> {
     let hash = archive::sha(compiled);
     ensure!(
         archive::file_sha(&mut archive::open(&root.join(path))?)? == hash,
@@ -283,6 +283,7 @@ fn source_identity() -> AResult<(PathBuf, Value)> {
     source["current_pair_compiled_sources"] = json!(
         sources
             .iter()
+            .chain(provenance::batching_compiled_sources())
             .map(|&(path, bytes)| { checked_compiled_source(&root, path, bytes) })
             .collect::<AResult<Vec<_>>>()?
     );

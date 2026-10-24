@@ -26,7 +26,7 @@ expected effect, status. Status is one of `open`, `in flight (branch)`,
 `in flight` with your branch; a second lane finding it claimed reads the branch
 before building anything adjacent. This replaces relaying between sessions.
 
-### DeepSeek V4.1-Flash (main after the wider 32-key attention score: pp2048 Q2 877.3 / IQ3 852 (not re-measured), pp4096 Q2 840.0 / IQ3 815; decode rechecked tg32 Q2 43.2 / IQ3 41.0, depth tg32@d2048 41.6 from the prior landing)
+### DeepSeek V4.1-Flash (main after the 4096-row chunk and 64-slot gate/up: pp2048 Q2 877.3 / IQ3 852 (not re-measured), pp4096 Q2 890.2 / IQ3 840.7; decode rechecked tg32 Q2 43.2 / IQ3 41.0, depth tg32@d2048 41.6 from the prior landing)
 
 CED encoder-only bulk prefill is the leading architectural opportunity.
 Design/dependency recon: landed (2026-10-23 CED entry;
@@ -263,11 +263,29 @@ attention tiles at 34.7%. Re-sample after the next landing.
   `QWEN_V41_SINK_TENSOR32=0` restores the 16-key form. Score is still
   ~11.9 TFLOPS vs PV ~20.4; register-cooperative or materialized
   attention remains open.
+- Full 4096-row chunk selector: landed (2026-10-24 chunk4096 entry,
+  bench/2026-10-24-v41-chunk4096.md). Fitting residents (Q2 ~186 GiB,
+  Maya-S ~166 GiB) use one 4096-row chunk; IQ3-class (~217 GiB) keeps
+  2048. Q2 pp4096 build-vs-build ABBA: 842.588 -> 871.755 (+3.46%);
+  pp2048 unchanged. IQ3 at 4096 was unstable (874.732/827.866 vs
+  838.487/836.996), so it stays on 2048. The 576-token witness does not
+  exercise the 4096 path; per-row arithmetic is unchanged in construction.
+- 64-slot gate/up panel at 4096: landed (2026-10-24 wide64 entry,
+  bench/2026-10-24-v41-expert-wide64.md). Down stays on the 32-slot tile
+  (wide down is +43% slower); gate/up wide is -22.7% in the fixture and
+  +1.67% at pp4096 in the same-binary Q2 ABBA (875.506 -> 890.172).
+  IQ3_XXS nonzero correctness is bitwise identical; the wide tile is
+  selected only at >=4096 rows with the clamped epilogue, and
+  `QWEN_V41_EXPERT_WIDE=0` restores narrow.
 - Bounded attention/expert probes, not landed:
   return-only expert grid width 64 -> 2 is -5.4% of the combined expert
   tile (~1.3% model arithmetic) on the 31/32/33 route fixture; a prebuilt
   half-KV score source adds ~2% full sink on top of score32 and needs
-  persistent-view lifecycle work. Evidence branch `perf/v41-expert-sched`.
+  persistent-view lifecycle work. The 33rd routed slot costs +58.2% down
+  time for +3.1% useful work, so a 64-slot panel at 2K is only a ~0.5-1%
+  model tail opportunity; it is worth it at 4096 where the panel is full.
+  Evidence branches `perf/v41-expert-sched`, `perf/v41-expert-tail`,
+  `bench/2026-10-24-v41-expert-panel-tail.md`.
 - Maya-S artifact (`peasantsmith/DeepSeek-V4.1-Flash-1017-Maya-GGUF`,
   six shards, 339.5 GB): evaluated (2026-10-22 Maya entry,
   bench/2026-10-22-maya-s-eval.md). All 40 routed layers on the

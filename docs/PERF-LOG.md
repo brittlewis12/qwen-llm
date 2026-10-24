@@ -6,6 +6,20 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the current state and evidence index.
 
+## 2026-10-24 - V4.1: 4096-Row Chunk And 64-Slot Gate/Up
+
+- The Full path now chooses a 4096-row chunk for fitting residents and keeps
+  2048 for IQ3-class residents. Q2 pp4096 build-vs-build ABBA: 842.588 ->
+  871.755 tok/s (+3.46%); pp2048 unchanged. IQ3 at 4096 was unstable
+  (874.732/827.866 vs 838.487/836.996), so the selector keeps IQ3 at 2048.
+- The routed gate/up tile now uses a 64-slot panel at 4096 rows; down keeps
+  the 32-slot tile. Fixture: gate/up 30,277.9 -> 23,407.5 us (-22.7%),
+  down wide is +43% slower. Q2 pp4096 same-binary ABBA: 875.506 -> 890.172
+  tok/s (+1.67%). IQ3_XXS nonzero correctness is bitwise identical.
+  `QWEN_V41_EXPERT_WIDE=0` restores the narrow gate/up tile.
+- [4096 chunk packet](bench/2026-10-24-v41-chunk4096.md),
+  [wide gate/up packet](bench/2026-10-24-v41-expert-wide64.md).
+
 ## 2026-10-24 - Fresh Outside Map Prioritizes Execution And Operand Dataflow
 
 - Two fresh independent outside model reviews and three focused source/primary

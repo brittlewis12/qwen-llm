@@ -650,16 +650,27 @@ mod tests {
     fn large_residency_fits_but_excess_capacity_and_private_exposure_refuse_before_import() {
         let gib = 1u64 << 30;
         let mut observed = signals();
-        observed.recommended_max_bytes = 256 * gib;
+        observed.recommended_max_bytes = 239_143_321_600;
         observed.current_allocated_bytes = 0;
         observed.host_budget = Some(HostMemoryBudget {
             physical_bytes: 256 * gib,
-            conservative_available_bytes: 156 * gib,
+            conservative_available_bytes: 156_097_380_352,
             external_gap_bytes: 0,
             private_shadow_bytes: 0,
         });
         // No additional physical-RAM margin above the device's working-set bound.
         assert!(admit_external_import(217_414 * gib / 1_000, 0, observed).is_ok());
+        assert!(
+            evaluate_metal_memory_admission_with_cpu_bytes(
+                199_616_397_312,
+                gib,
+                0,
+                observed,
+                true,
+            )
+            .is_admitted()
+        );
+        assert!(admit_external_import(observed.recommended_max_bytes + 1, 0, observed).is_err());
         let called = Cell::new(false);
         let denied = admit_external_import(256 * gib + 1, 0, observed).map(|()| called.set(true));
         assert!(matches!(denied, Err(MetalError::MemoryAdmission(_))));
@@ -746,14 +757,14 @@ mod tests {
         observed.host_budget.as_mut().unwrap().private_shadow_bytes =
             ledger.shadow.load(Ordering::Acquire);
         assert_eq!(observed.host_remaining_bytes(), Some(300));
-        assert!(admit_external_import(501, 0, observed).is_err());
-        assert!(admit_external_import(500, 0, observed).is_ok());
+        assert!(admit_external_import(301, 0, observed).is_err());
+        assert!(admit_external_import(300, 0, observed).is_ok());
         drop(first);
         observed.host_budget.as_mut().unwrap().external_gap_bytes =
             ledger.gap.load(Ordering::Acquire);
         observed.host_budget.as_mut().unwrap().private_shadow_bytes =
             ledger.shadow.load(Ordering::Acquire);
-        assert!(admit_external_import(501, 0, observed).is_ok());
+        assert!(admit_external_import(301, 0, observed).is_ok());
     }
 
     #[test]

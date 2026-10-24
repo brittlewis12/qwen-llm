@@ -6,6 +6,49 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the current state and evidence index.
 
+## 2026-10-23 - Explicit Production-Timing CED Pair: pp128 Loss, 2K Admission Refusal
+
+- Benchmark commit `5e6683a9`, clean merged source `a92e67d2`, adds explicit
+  `--v41-ced-pair-production-timing`; validation-on remains the default.
+  The controller unsets known `MTL_DEBUG_LAYER*`, `MTL_SHADER_VALIDATION*` and
+  wrapper/injection/capture controls in the child's launch environment; the CLI
+  refuses present controls without in-process environment mutation. The raw
+  requested regime is recorded before build identity checks, model opening or
+  Metal initialization, with runtime `QWEN` override values redacted. Launch
+  write/flush failure stops execution. Effective instrumentation is not verified.
+- Arithmetic, leases, 80% ownership, the 20% conservative availability margin,
+  staged gates, inner checks, head requirements and stability rules remain
+  unchanged. Independent source review finds no actionable P1/P2 issue. Frozen
+  M4 verification passes 1,535 CLI unit tests (127 bench, 969 qwen, 302 lens,
+  119 library, eight census, nine grammar, one tokenizer) plus 40 integration
+  tests, 1,575 total, and affected release CLI all-target checks. M5 passes all
+  127 bench CPU tests. The new maximum-caller RSS fixture passes. Actual
+  environment and ablation process refusals each emit exactly one request and
+  stop before nonexistent model opening; build refusal has composed injected
+  test coverage only.
+- One supervised Maya-S pp128 production-timing series accepts all ten cases.
+  Retained Full samples are 296,901,792 / 298,216,582 ns, mean 297,559,187 ns;
+  CED samples are 449,668,500 / 450,697,791 ns, mean 450,183,145.5 ns:
+  approximately 51.3% higher CED latency. All ten uniquely recorded endpoint
+  heads match validation-on reference `6896f87d`, SHA-256
+  `6fc6e7b246b17af8bb0ad47d499b576e791cc243fb9340fe29a3e4cb91a0103e`.
+  Recorded artifact identity/location, size, parameter count and family, plus
+  prompt hash, capacity and seed, match. This is not a full-weight content-hash
+  bridge, validation-causality evidence or a cross-regime speedup claim.
+- The subsequent single pp2048 series refuses before resident import: load
+  demand 178,488,408,584 bytes exceeds fresh host remaining capacity of
+  168,515,023,667 bytes (conservative availability 223,490,605,056 bytes).
+  No timing, retry, reserve change, active-cache credit or cleanup follows.
+  Recorded host-health samples are healthy: pp128 conservative availability
+  stays at least 68.56 GiB, wired plus compressor at most 174.36 GiB; the refused
+  2K launch stays below 7.78 GiB wired plus compressor. Sparse sampled health
+  neither overrides admission nor establishes continuous peaks.
+- Long-prompt native performance remains unqualified; there is no 8K timing.
+  Candidate scratch reuse continues through bounded proofs independently of
+  timing ambiguity, not as runtime-verified reuse. Whole-model explicit
+  residency remains closed.
+- [Protocol, regime provenance, measurements and limits](bench/2026-10-23-v41-ced-native-pair.md).
+
 ## 2026-10-23 - CED Phase Admission And Allocation Attribution
 
 - The experimental paired path separates full-future capacity feasibility from

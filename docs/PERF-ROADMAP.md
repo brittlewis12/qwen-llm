@@ -37,14 +37,19 @@ Trained bounded-128 replay is a separate policy using the same primitives.
 Cold shrinking native implementation: in flight (`perf/v41-ced`). Current
 Full/CED equivalence passes on fitting Maya-S at 128/2048/8192: all 257 full
 vocabulary vectors are bitwise equal and all 56 causal regions match at every
-position, with exact publication/completion counters. Warmed native A/B remains
-in flight (`perf/v41-ced-bench`). The first stable warmed pp128 pair is a CED
-loss: 305.17 -> 464.15 ms (+52.1% latency). The 2K sequence rejects a 7.272x
-within-Full timing spread despite healthy sampled host memory; no 8K timing
-escalation or speedup claim follows. Localize that phase shift with explicit
-diagnostics, then repeat the unchanged native protocol only on explained,
-healthy evidence. See `bench/2026-10-23-v41-ced-native-pair.md`. Bounded128
-remains a separate policy arm.
+position, with exact publication/completion counters. Long-prompt native A/B
+remains unqualified. The historical validation-on pp128 pair is a CED loss:
+305.17 -> 464.15 ms (+52.1% latency); its 2K sequence rejects a 7.272x
+within-Full spread. Explicit production timing (`5e6683a9`, clean source
+`a92e67d2`) keeps correctness validation and all safety/stability rules intact.
+One supervised pp128 series accepts all ten cases: Full 297.559 ms versus CED
+450.183 ms (+51.3% latency), with endpoint heads and recorded artifact/input
+metadata matching the validation-on reference. This is not validation-causality
+or cross-regime speedup evidence. The next pp2048 launch refuses before import
+on fresh host availability; no retries, reserve changes, active-cache credit or
+8K timing follows. See `bench/2026-10-23-v41-ced-native-pair.md` for protocol,
+verification and measurement limits. Bounded128 remains a separate policy arm;
+whole-model explicit residency remains closed.
 Attention and activation-staging kernel lanes remain independent.
 
 CED decoder scratch reuse: in flight (`perf/v41-ced-scratch`). Instrumented
@@ -53,6 +58,8 @@ source census identifies 874 removable buffer constructions with one checked
 maximum-row decoder backing. Preserve all 38 submissions, original arithmetic
 lineage, status initialization and the existing admitted peak. This is a reuse
 bet, not a native speedup claim; completion-wall variability remains separate.
+Bounded proofs continue without waiting for that ambiguity to resolve; candidate
+scratch reuse is not yet runtime-verified.
 
 Mapping/admission repair: landed (2026-10-23 memory-safety entry and
 `bench/2026-10-23-v41-memory-safety.md`). Shared EOF removes the old 156.059 GiB

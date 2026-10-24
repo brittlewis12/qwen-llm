@@ -1,13 +1,15 @@
-# Native V4.1 Full/CED Pair: Short-Prompt Loss, 2K Timing Rejected
+# Native V4.1 Full/CED Pair: Short-Prompt Loss, Long-Prompt Unqualified
 
 ## Scope
 
-Experimental source `6896f87d` compares production Full forward and shrinking
+Initial experimental source `6896f87d` compares production Full forward and shrinking
 CED inside one resident Maya-S model, with fresh KV state for every call. The
 compiled/runtime identity matches and both are clean. This is synthetic cold-KV
 prefill, not model loading, sampled generation, artifact quality or bounded128.
-The implementation and further diagnostics remain in `perf/v41-ced-bench`;
-there is no default-policy promotion.
+The explicit production-timing option is added by `5e6683a9`, with clean merged
+source `a92e67d2`. Validation-on remains the default; there is no default-policy
+promotion. Historical validation-on and subsequent requested production-timing
+results are separated below.
 
 Native timing includes prefill planning/admission, temporary allocation, CPU
 Engram work, GPU encoding/completion and endpoint logits copy. State creation,
@@ -24,7 +26,9 @@ timer. It is not GPU-only time or total request-lifecycle time.
 - Require the requested execution without fallback, completed CED commands,
   observed incremental Metal allocation no larger than its accepted estimate,
   and finite complete endpoint heads matching warm Full bitwise.
-- Keep debug validation, the production lease and ordinary memory admission.
+- Keep validation enabled by default; the explicit production-timing regime
+  below changes only instrumentation controls, not arithmetic or admission.
+  Keep the production lease and ordinary memory admission.
   Continuous secondary host supervision remains required; it does not replace
   core admission. Failure stops the sequence without automatic retries.
 
@@ -36,12 +40,12 @@ use actual validated tensor types and shared projection descriptors. The
 at 16 KiB resource pricing, 64 MiB plus one page, not one aggregate allocation.
 
 The caller envelope supports at most 16 retained samples per policy, 256 layers
-and 1,048,576 logits. Its isolated maximum-size CPU regression charges 33.89 MiB
-against the 64 MiB allowance, including live head/bit-vector capacities, both
-aggregates, duplicated chronology and final JSON serialization. This RSS
-observation is a regression witness, not a formal heap proof.
+and 1,048,576 logits. The maximum-size caller RSS fixture passes against the
+64 MiB allowance, including live head/bit-vector capacities, both aggregates,
+duplicated chronology and final JSON serialization. This is a regression
+witness, not a formal heap proof.
 
-## Measurements
+## Historical Validation-On Measurements
 
 M5 Ultra, 256 GiB; Maya-S plans 165.950 GiB resident views and zero private
 shadow. Results concern this artifact, not the larger IQ3 artifact or its quality.
@@ -146,13 +150,62 @@ reviews find no remaining staged-admission or lifecycle correctness issue.
 All-current/frozen 8K head/state evidence is recorded in the
 [exact-selector packet](2026-10-23-v41-select-hier.md).
 
-Measurement regimes need explicit separation: recent V4.1 production-throughput
-packets leave API/shader validation unset, whereas this initial pair contract
-requires API validation. Historical rows prove that API validation was requested;
-they do not record every shader-validation override or prove effective API-only
-instrumentation. A separately identified production-timing regime is in flight;
-correctness tests keep validation enabled and all memory/lease/stop checks stay.
-No evidence yet shows that validation caused the completion-wall variability.
+## Explicit Production-Timing Regime And Verification
+
+`--v41-ced-pair-production-timing` explicitly selects a production-timing child;
+the default remains validation-on and correctness tests retain validation.
+The controller unsets known `MTL_DEBUG_LAYER*`, `MTL_SHADER_VALIDATION*`, and
+wrapper/injection/capture controls only in the child's launch environment.
+The CLI refuses present controls rather than mutating its environment.
+A raw requested-regime record is captured
+before build identity checks, model opening or Metal initialization. Runtime
+`QWEN` override values are redacted; launch-record write or flush failures stop
+execution. This records requested controls, not verified effective instrumentation.
+Historical rows establish requested API validation, not effective API-only
+instrumentation or a complete shader-override record.
+
+Arithmetic, leases, the 80% ownership ceiling, 20% conservative availability
+margin, staged admission gates, inner checks, endpoint-head requirements and
+per-policy stability rules are unchanged. Independent source review finds no
+actionable P1/P2 issue. Frozen M4 verification passes all 1,535 CLI unit tests
+(127 bench, 969 qwen, 302 lens, 119 library, eight census, nine grammar and one
+tokenizer) plus 40 integration tests: 1,575 total. Affected release CLI
+all-target checks pass; M5 passes all 127 bench CPU tests. Two actual process
+refusal cases, environment and ablation, each emit exactly one request record
+and refuse before opening a nonexistent model. Build refusal is covered only
+by composed injected tests. The new maximum-caller RSS fixture also passes.
+
+## Production-Timing Observations
+
+One supervised Maya-S pp128 series accepts all ten chronological cases under
+the unchanged warmup, excluded pilot and retained balanced protocol:
+
+| Policy | Retained native samples (ns) | Mean (ns) |
+| --- | --- | --- |
+| Full | 296,901,792; 298,216,582 | 297,559,187 |
+| CED | 449,668,500; 450,697,791 | 450,183,145.5 |
+
+CED latency is approximately 51.3% higher. All ten uniquely recorded endpoint
+heads have SHA-256
+`6fc6e7b246b17af8bb0ad47d499b576e791cc243fb9340fe29a3e4cb91a0103e`,
+matching validation-on reference `6896f87d`. Recorded artifact identity/location,
+size, parameter count and family, plus prompt hash, capacity and seed, also
+match. This is an endpoint and metadata bridge, not a full-weight content-hash
+bridge. Neither this comparison nor the historical timings establishes validation
+causality or a cross-regime speedup.
+
+The subsequent single pp2048 series refuses before resident import: planned
+load demand is 178,488,408,584 bytes versus fresh host remaining capacity of
+168,515,023,667 bytes, from conservative availability of 223,490,605,056 bytes.
+There is no timing result, retry, reserve change, active-cache credit or cleanup.
+Recorded host-health samples remain healthy: pp128 minimum conservative
+availability is 68.56 GiB and maximum wired plus compressor usage is 174.36 GiB;
+the refused 2K launch stays below 7.78 GiB wired plus compressor. These sparse
+samples do not override admission or establish continuous peaks. No 8K timing
+follows. Long-prompt native performance remains unqualified.
+
+Candidate scratch reuse continues through bounded proofs; it is not yet
+runtime-verified and does not wait on resolving the timing ambiguity.
 
 Whole-model explicit residency remains closed under the standing
 [failure decision](../PERF-LOG.md#2026-08-13-whole-model-residency-optimization-lane-closed).

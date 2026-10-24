@@ -100,11 +100,11 @@ even `--runs 2..=16` retained samples per policy. Warmup is mandatory.
   supports at most 256 layers and 1,048,576 logits; normal caller storage is
   bounded by 64 MiB. Planning is not a reservation.
 - Immediately before the resident factory, `assess_load` requires the **full cold
-  peak** to fit device capacity, the 80% host-ownership ceiling and any positive
+  peak** to fit device capacity, actual host capacity and any positive
   process limit, with valid telemetry and checked arithmetic. Ordinary fresh
   availability admission applies to the **load phase** (resident windows, private
   shadows, binding and caller CPU), not to all future workspace simultaneously.
-  The unchanged 20% host margin still applies; active file cache receives no
+  No additional percentage headroom is applied; active file cache receives no
   credit. A whole-peak availability refusal alone can therefore coexist with an
   admitted load, but a peak-capacity or load refusal stops before the factory.
 - After binding and before **every** fresh case state, `assess_runtime` uses
@@ -197,7 +197,7 @@ and numerical/causal-state qualification continue to require `MTL_DEBUG_LAYER=1`
 - Native production timing uses
   `native_full_ced_abba_baab_production_timing_v1`; the default protocol identifier
   stays unchanged. Neither native regime enables a profiling scope, sampled
-  stages or pipeline-cache counters. Lease, 80% ownership/20% availability policy,
+  stages or pipeline-cache counters. Lease, device/process/host accounting,
   all staged/inner admissions, endpoint fingerprints, stability gates, fallback
   rejection and the 64/80 MiB caller budgets remain unchanged. This adds no
   pinning, residency, retry or admission-bypass mode.

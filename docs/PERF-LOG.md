@@ -6,6 +6,26 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the current state and evidence index.
 
+## 2026-10-23 - Request-Local CED Scratch Passes Bounded M4/M5 Proofs
+
+- Candidate `eec23a0f` lazily reuses one maximum decoder backing through checked
+  current-row views. Preserve Full arithmetic lineage, completed command/status
+  boundaries, constructor half-staging provenance and the existing admitted
+  scratch-plus-seed envelope; validate all views before active status reset.
+- Fifteen focused CPU tests and seven new bounded resource/GPU fixtures pass on
+  M4; M5 passes the same CPU tests and nine fixtures including staged subgroups
+  and compact-singleton Tensor attention. Explicit fixture buffers stay within
+  128 MiB. Fresh/reused outputs and causal state match bitwise; checked prefixes
+  allocate no new Metal storage; poisoned status tails and failure cleanup pass.
+- Both machines pass broader 169 forward, 19 FFN, 11 existing bounded CED, four
+  selector GPU and metadata/lifetime/half-budget coverage. Groups overlap; they
+  are not additive independent totals. M4 affected release all-target checks pass.
+- The candidate's first native pp128 launch refuses before resident import:
+  178,488,408,584-byte load versus 168,202,941,235 bytes fresh host remaining.
+  No retry, admission waiver, full-model scratch equivalence or native gain is
+  claimed. The allocation census validates reuse, not real-model speedup.
+- [Implementation contract, bounded evidence and remaining qualification](bench/2026-10-23-v41-ced-native-pair.md#bounded-decoder-scratch-reuse).
+
 ## 2026-10-23 - Explicit Production-Timing CED Pair: pp128 Loss, 2K Admission Refusal
 
 - Benchmark commit `5e6683a9`, clean merged source `a92e67d2`, adds explicit

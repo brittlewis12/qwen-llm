@@ -204,8 +204,41 @@ the refused 2K launch stays below 7.78 GiB wired plus compressor. These sparse
 samples do not override admission or establish continuous peaks. No 8K timing
 follows. Long-prompt native performance remains unqualified.
 
-Candidate scratch reuse continues through bounded proofs; it is not yet
-runtime-verified and does not wait on resolving the timing ambiguity.
+## Bounded Decoder-Scratch Reuse
+
+Candidate `eec23a0f` keeps one lazy, request-local maximum decoder backing after
+encoder pools drain. Each completed unit rebinds a checked current-row prefix
+and absolute control view. It preserves original Full tile arithmetic lineage,
+submission/status/checkpoint boundaries and the existing scratch-plus-seed
+budget. Constructor-selected half staging cannot silently disappear. All views
+validate before the compact active FFN status slab is cleared.
+
+Fifteen focused CPU tests pass on M4/M5. Seven new bounded resource/GPU fixtures
+pass on M4 and nine on M5, with explicit buffer ledgers at most 128 MiB and
+validation enabled. They establish:
+
+- Fresh/reused active outputs and causal state match bitwise through dirty
+  `513 -> 1 -> 512 -> 33 -> 127 -> 129 -> 513` rows and genuine scalar tails.
+- Allocation census sees exactly one maximum backing and no new Metal storage
+  per checked view, including P4 score/pair slabs and changed control offsets.
+- Poisoned `8 -> 1 -> 5` status prefixes reset only active words, leave tails
+  and activations unchanged, and remain untouched on late validation failure.
+- M5 staged subgroup projections and compact-singleton Tensor attention preserve
+  fresh dispatches/results; error, cancellation and unwind release the pool and
+  retain poisoned-state rejection.
+
+Both machines also pass 169 forward, 19 FFN, 11 existing bounded CED and four
+selector GPU tests plus metadata, lifetime and half-budget fixtures. These
+groups overlap the focused CPU coverage; do not add them as independent totals.
+M4 affected release core/CLI all-target checks pass. Independent scoped review
+finds no remaining concrete P1/P2 source issue.
+
+The candidate's first supervised native pp128 launch refuses before resident
+import: the same 178,488,408,584-byte load requires more than fresh host remaining
+capacity of 168,202,941,235 bytes. No candidate timing or full-model scratch
+equivalence result follows, and there is no retry or admission change. Bounded
+proofs and the source-derived removable allocation count are not native speedup
+evidence; the new backing still needs the full-model causal bridge and timing.
 
 Whole-model explicit residency remains closed under the standing
 [failure decision](../PERF-LOG.md#2026-08-13-whole-model-residency-optimization-lane-closed).

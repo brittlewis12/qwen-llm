@@ -58,8 +58,11 @@ source census identifies 874 removable buffer constructions with one checked
 maximum-row decoder backing. Preserve all 38 submissions, original arithmetic
 lineage, status initialization and the existing admitted peak. This is a reuse
 bet, not a native speedup claim; completion-wall variability remains separate.
-Bounded proofs continue without waiting for that ambiguity to resolve; candidate
-scratch reuse is not yet runtime-verified.
+Candidate `eec23a0f` passes bounded fresh/reused bitwise, allocation, arithmetic
+lineage and cleanup fixtures on M4/M5, plus broader forward/FFN/CED regressions.
+The first candidate native pp128 launch refuses before import on fresh host
+availability. Full-model scratch qualification and native gains remain open;
+no retry or admission waiver follows.
 
 Mapping/admission repair: landed (2026-10-23 memory-safety entry and
 `bench/2026-10-23-v41-memory-safety.md`). Shared EOF removes the old 156.059 GiB

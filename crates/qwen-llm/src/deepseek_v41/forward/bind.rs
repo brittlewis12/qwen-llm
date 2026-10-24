@@ -345,6 +345,7 @@ impl<'a> Forward<'a> {
             embedding,
             norm,
             head,
+            prefill_rows: super::prefill_rows_for_resident(resident.bytes.resident_bytes()),
             identity: Arc::new(()),
         })
     }

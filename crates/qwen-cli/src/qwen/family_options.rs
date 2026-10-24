@@ -10,8 +10,9 @@ use qwen_llm::deepseek_v4_metal::{
 use qwen_llm::muse_glimmer_runtime::MuseGlimmerRuntimeOptions;
 use qwen_llm::qwen4exp_runtime::Qwen4ExpDecodeOptions;
 
-/// Forward::prefill's bounded layer-major NativeF32 schedule.
-pub(crate) const V41_PREFILL_ROWS: usize = qwen_llm::deepseek_v41::forward::PREFILL_CHUNK_ROWS;
+/// Maximum rows the V4.1 forward may submit in one chunk. The actual chunk is
+/// selected per resident size (4096 for fitting artifacts, 2048 for IQ3-class).
+pub(crate) const V41_PREFILL_ROWS: usize = qwen_llm::deepseek_v41::forward::MAX_PREFILL_CHUNK_ROWS;
 pub(crate) const V41_PREFILL_MODE: &str = "layer_major_batched+final_logits_copy";
 
 /// Enables HC up-mix for eligible Flash-Next singleton Q8 up projections.

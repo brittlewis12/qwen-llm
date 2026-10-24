@@ -36,7 +36,7 @@ pub(super) struct Scratch {
 impl Scratch {
     pub(super) fn shapes(c: &Config, rows: usize) -> Result<Vec<usize>> {
         op::require(
-            (1..=prefill::DEFAULT_CHUNK_ROWS).contains(&rows),
+            (1..=prefill::MAX_CHUNK_ROWS).contains(&rows),
             "query batch scratch rows",
         )?;
         let tile = rows.min(tile_rows());

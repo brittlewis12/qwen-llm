@@ -6,6 +6,10 @@ use super::*;
 mod tests;
 
 pub const DEFAULT_CHUNK_ROWS: usize = 2048;
+/// Upper bound for a fitting artifact's Full-forward chunk. The selector in
+/// `Forward` uses this only when resident weights leave enough headroom;
+/// IQ3-class residents stay at `DEFAULT_CHUNK_ROWS`.
+pub const MAX_CHUNK_ROWS: usize = 4096;
 
 #[cfg(test)]
 thread_local! {
@@ -298,7 +302,7 @@ fn run_hybrid(
 ) -> Result<Vec<f32>> {
     op::require(!tokens.is_empty(), "empty prefill suffix")?;
     op::require(
-        (1..=DEFAULT_CHUNK_ROWS).contains(&chunk_rows),
+        (1..=MAX_CHUNK_ROWS).contains(&chunk_rows),
         "invalid prefill chunk rows",
     )?;
     op::require(
@@ -579,7 +583,7 @@ pub(super) fn run_captured(
 ) -> std::result::Result<Vec<f32>, StateError> {
     op::require(!tokens.is_empty(), "empty prefill suffix")?;
     op::require(
-        (1..=DEFAULT_CHUNK_ROWS).contains(&chunk_rows),
+        (1..=MAX_CHUNK_ROWS).contains(&chunk_rows),
         "invalid prefill chunk rows",
     )?;
     op::require(

@@ -482,7 +482,7 @@ fn invalid_prefill_request_preserves_state() {
     for (tokens, chunk) in [
         (vec![], 1),
         (vec![0], 0),
-        (vec![0], DEFAULT_CHUNK_ROWS + 1),
+        (vec![0], MAX_CHUNK_ROWS + 1),
         (vec![0, u32::MAX], 2),
         (vec![0; 4], 2),
     ] {

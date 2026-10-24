@@ -6,6 +6,7 @@ mod bind;
 mod engram_gpu;
 mod prefill;
 pub use prefill::DEFAULT_CHUNK_ROWS as PREFILL_CHUNK_ROWS;
+pub use prefill::MAX_CHUNK_ROWS as MAX_PREFILL_CHUNK_ROWS;
 mod snapshot;
 pub use snapshot::Snapshot;
 pub mod error;
@@ -472,6 +473,19 @@ struct Layer<'a> {
     engram: Option<Engram<'a>>,
 }
 
+/// Packed+dense resident bytes above this stay on the 2048-row chunk. Q2
+/// (~186 GiB) and Maya-S (~166 GiB) fit the 4096-row envelope; IQ3 (~217 GiB)
+/// does not have the stability margin measured for the larger chunk.
+const FULL_CHUNK_RESIDENT_LIMIT: u64 = 200 * (1u64 << 30);
+
+pub(super) fn prefill_rows_for_resident(resident_bytes: u64) -> usize {
+    if resident_bytes <= FULL_CHUNK_RESIDENT_LIMIT {
+        prefill::MAX_CHUNK_ROWS
+    } else {
+        prefill::DEFAULT_CHUNK_ROWS
+    }
+}
+
 /// Bound once, without copying dense matrices or packed expert banks. Do not
 /// mutate ResidentWeights buffers while this model is alive.
 pub struct Forward<'a> {
@@ -486,6 +500,7 @@ pub struct Forward<'a> {
     embedding: &'a MetalTensor,
     norm: Vec<f32>,
     head: Linear<'a>,
+    prefill_rows: usize,
     identity: Arc<()>,
 }
 
@@ -589,7 +604,7 @@ impl<'a> Forward<'a> {
             state,
             tokens,
             cancel,
-            prefill::DEFAULT_CHUNK_ROWS,
+            self.prefill_rows,
             true,
         )
     }
@@ -608,7 +623,7 @@ impl<'a> Forward<'a> {
             state,
             tokens,
             cancel,
-            prefill::DEFAULT_CHUNK_ROWS,
+            self.prefill_rows,
             true,
             Some(capture),
         )
@@ -626,7 +641,7 @@ impl<'a> Forward<'a> {
             state,
             tokens,
             cancel,
-            prefill::DEFAULT_CHUNK_ROWS,
+            self.prefill_rows,
             false,
         )
         .map(|_| ())

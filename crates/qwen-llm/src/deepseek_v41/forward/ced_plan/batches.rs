@@ -268,9 +268,19 @@ mod tests {
                     if window == n {
                         assert_eq!(selection.layers, 0);
                         assert!(selection.reason.unwrap().contains("physical_unit_budget"));
-                        assert!(
-                            units(&p, p.publication_layer..p.publication_layer + depth).is_err()
-                        );
+                        let oversized = p
+                            .decoder
+                            .chunks(depth)
+                            .filter_map(|g| {
+                                let layers = g[0].layer..g.last().unwrap().layer + 1;
+                                (unit_count(&p, layers.clone()).unwrap() > MAX_GROUP_UNITS)
+                                    .then_some(layers)
+                            })
+                            .collect::<Vec<_>>();
+                        assert!(!oversized.is_empty());
+                        for layers in oversized {
+                            assert!(units(&p, layers).is_err());
+                        }
                     } else {
                         assert_eq!(selection.layers, depth);
                         assert!(

@@ -34,6 +34,130 @@ fn encoded(cursor: &mut Cursor, publication: bool) {
 }
 
 #[test]
+fn decoder_group_keeps_public_frontiers_atomic_and_rejects_bad_tickets_before_mutation() {
+    let (c, schedule, plan) = fixture(9);
+    let mut cursor = Cursor::new(&plan, &c, &schedule, 10).unwrap();
+    assert!(cursor.begin_group(2..4).is_err());
+    cursor.begin_encoder(0, 9).unwrap();
+    encoded(&mut cursor, true);
+    cursor.complete(Phase::Encoder, 0, 9).unwrap();
+    for layers in [1..3, 2..5, 3..4, 2..2] {
+        assert!(cursor.begin_group(layers).is_err());
+    }
+    let initial = (
+        cursor.seed_completed.clone(),
+        cursor.output_completed.clone(),
+        cursor.decoder_next,
+    );
+    let ticket = cursor.begin_group(2..4).unwrap();
+    assert!(cursor.begin_group(2..4).is_err());
+    assert!(cursor.begin_encoder(0, 1).is_err());
+    for layer in &plan.decoder {
+        cursor
+            .begin_seed(layer.layer, layer.seed_rows.start, layer.seed_rows.len())
+            .unwrap();
+        assert!(
+            cursor
+                .stage_group_unit(
+                    ticket,
+                    layer.layer,
+                    layer.seed_rows.start,
+                    layer.seed_rows.len(),
+                    true
+                )
+                .is_err()
+        );
+        encoded(&mut cursor, false);
+        for (generation, id, start, rows) in [
+            (
+                ticket + 1,
+                layer.layer,
+                layer.seed_rows.start,
+                layer.seed_rows.len(),
+            ),
+            (
+                ticket,
+                layer.layer + 1,
+                layer.seed_rows.start,
+                layer.seed_rows.len(),
+            ),
+            (
+                ticket,
+                layer.layer,
+                layer.seed_rows.start + 1,
+                layer.seed_rows.len(),
+            ),
+        ] {
+            assert!(
+                cursor
+                    .stage_group_unit(generation, id, start, rows, true)
+                    .is_err()
+            );
+            assert!(cursor.pending.is_some());
+        }
+        assert!(
+            cursor
+                .complete(
+                    Phase::Seed(layer.layer),
+                    layer.seed_rows.start,
+                    layer.seed_rows.len()
+                )
+                .is_err()
+        );
+        cursor
+            .stage_group_unit(
+                ticket,
+                layer.layer,
+                layer.seed_rows.start,
+                layer.seed_rows.len(),
+                true,
+            )
+            .unwrap();
+        cursor
+            .begin_decoder(
+                layer.layer,
+                layer.output_rows.start,
+                layer.output_rows.len(),
+            )
+            .unwrap();
+        encoded(&mut cursor, false);
+        cursor
+            .stage_group_unit(
+                ticket,
+                layer.layer,
+                layer.output_rows.start,
+                layer.output_rows.len(),
+                false,
+            )
+            .unwrap();
+        assert_eq!(
+            (
+                cursor.seed_completed.clone(),
+                cursor.output_completed.clone(),
+                cursor.decoder_next
+            ),
+            initial
+        );
+        assert!(!cursor.ready(9));
+    }
+    for (generation, layers) in [(ticket + 1, 2..4), (ticket, 2..3), (ticket, 3..4)] {
+        assert!(cursor.validate_group(generation, &layers).is_err());
+        assert_eq!(
+            (
+                cursor.seed_completed.clone(),
+                cursor.output_completed.clone(),
+                cursor.decoder_next
+            ),
+            initial
+        );
+    }
+    cursor.validate_group(ticket, &(2..4)).unwrap();
+    cursor.publish_group();
+    assert!(cursor.ready(9));
+    assert!(cursor.validate_group(ticket, &(2..4)).is_err());
+}
+
+#[test]
 fn frontiers_advance_only_at_completion_and_commit_requires_every_layer() {
     let (c, schedule, plan) = fixture(9);
     let mut cursor = Cursor::new(&plan, &c, &schedule, 10).unwrap();

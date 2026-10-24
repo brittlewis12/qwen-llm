@@ -587,6 +587,7 @@ impl Workspace {
         {
             self.encode_routed_rows(ctx, enc, c, layer, id, scratch, input_half.as_ref())?;
         } else {
+            let status = scratch.status_view(id)?;
             for row in 0..n {
                 self.encode_routed(
                     ctx,
@@ -598,7 +599,7 @@ impl Workspace {
                     &prefill::row(&b[0], c.experts, row),
                     &prefill::row(&b[4], c.hidden, row),
                     &prefill::row(&b[5], c.hidden, row),
-                    &prefill::row(&b[6], 1, id * n + row),
+                    &prefill::row(&status, 1, row),
                 )?;
             }
         }
@@ -628,7 +629,7 @@ impl Workspace {
         let n = scratch.hc.rows;
         let extents = composition_extents(c, n)?;
         let b = &scratch.buffers;
-        let status = b[6].view_subrange((id * n) as u64, vec![n as u64]);
+        let status = scratch.status_view(id)?;
         let counts = b[10].view_subrange(0, vec![c.experts as u64]);
         encode_route_rows(
             ctx,
@@ -925,8 +926,26 @@ pub(super) struct Rows {
     half_inner: Option<prefill::HalfScratch>,
     // Constructor provenance; checked views must not silently lose half staging.
     half_required: [bool; 2],
+    ced_status: Option<(usize, MetalTensor)>,
 }
 impl Rows {
+    fn status_view(&self, id: usize) -> std::result::Result<MetalTensor, metal::MetalError> {
+        if let Some((layer, status)) = &self.ced_status {
+            if *layer != id {
+                return Err(metal::MetalError::BadShape {
+                    kernel: "v41_ffn_ced_status",
+                    detail: "status producer mismatch".into(),
+                });
+            }
+            Ok(status.clone())
+        } else {
+            Ok(
+                self.buffers[6]
+                    .view_subrange((id * self.hc.rows) as u64, vec![self.hc.rows as u64]),
+            )
+        }
+    }
+
     fn prefix_widths(
         c: &Config,
         backing_rows: usize,
@@ -1024,12 +1043,36 @@ impl Rows {
             half_required: [half_input.is_some(), half_inner.is_some()],
             half_input,
             half_inner,
+            ced_status: None,
         })
     }
 
     /// The driver must retire all users of the backing before this call: the
     /// compact [layer][current row] status slab is reset on the host.
     pub(super) fn checked_prefix(&self, c: &Config, rows: usize, layers: usize) -> Result<Self> {
+        self.prefix(c, rows, layers, None)
+    }
+
+    pub(super) fn checked_ced_prefix(
+        &self,
+        c: &Config,
+        rows: usize,
+        layers: usize,
+        layer: usize,
+        status: &MetalTensor,
+    ) -> Result<Self> {
+        op::require(layer < layers, "CED FFN status layer")?;
+        prefill::checked_scratch_view(status, &[rows], &[rows], GgmlType::I32)?;
+        self.prefix(c, rows, layers, Some((layer, status.clone())))
+    }
+
+    fn prefix(
+        &self,
+        c: &Config,
+        rows: usize,
+        layers: usize,
+        ced_status: Option<(usize, MetalTensor)>,
+    ) -> Result<Self> {
         let widths = Self::prefix_widths(c, self.hc.rows, rows, layers)?;
         op::require(
             [self.half_input.is_some(), self.half_inner.is_some()] == self.half_required,
@@ -1073,18 +1116,20 @@ impl Rows {
         // Every view has passed validation. Reset only active statuses, not the
         // large overwrite-before-read activations or unused maximum-row tail.
         let status = &buffers[6];
-        unsafe {
-            std::ptr::write_bytes(
-                status
-                    .buffer
-                    .contents()
-                    .as_ptr()
-                    .cast::<u8>()
-                    .add(status.offset as usize)
-                    .cast::<i32>(),
-                0,
-                status.n_elements() as usize,
-            );
+        if ced_status.is_none() {
+            unsafe {
+                std::ptr::write_bytes(
+                    status
+                        .buffer
+                        .contents()
+                        .as_ptr()
+                        .cast::<u8>()
+                        .add(status.offset as usize)
+                        .cast::<i32>(),
+                    0,
+                    status.n_elements() as usize,
+                );
+            }
         }
         Ok(Self {
             hc,
@@ -1093,6 +1138,7 @@ impl Rows {
             half_input,
             half_inner,
             half_required: self.half_required,
+            ced_status,
         })
     }
 
@@ -1101,6 +1147,10 @@ impl Rows {
     }
 
     pub(super) fn validate_status_layers(&self, layers: std::ops::Range<usize>) -> Result<()> {
+        if let Some((layer, status)) = &self.ced_status {
+            op::require(layers == (*layer..*layer + 1), "CED FFN status scope")?;
+            return validate_ced_status(status, *layer);
+        }
         let t = &self.buffers[6];
         let values = unsafe {
             std::slice::from_raw_parts(
@@ -1134,6 +1184,36 @@ impl Rows {
     }
 }
 
+pub(super) fn validate_ced_status(t: &MetalTensor, layer: usize) -> Result<()> {
+    op::require(
+        t.dtype == GgmlType::I32
+            && t.offset.is_multiple_of(4)
+            && t.n_elements() > 0
+            && t.n_elements()
+                .checked_mul(4)
+                .and_then(|n| t.offset.checked_add(n))
+                .is_some_and(|end| end <= t.buffer.length() as u64),
+        "CED FFN status view",
+    )?;
+    let values = unsafe {
+        std::slice::from_raw_parts(
+            t.buffer
+                .contents()
+                .as_ptr()
+                .cast::<i32>()
+                .add((t.offset / 4) as usize),
+            t.n_elements() as usize,
+        )
+    };
+    for (row, &status) in values.iter().enumerate() {
+        op::require(
+            status == metal::ROUTE_STATUS_READY,
+            &format!("prefill FFN layer {layer} row {row} route status {status}"),
+        )?;
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod scratch_prefix_geometry_tests {
     use super::*;
@@ -1156,6 +1236,7 @@ mod scratch_prefix_geometry_tests {
             .iter()
             .map(|&w| (w * maximum * 4) as u64)
             .chain(half.map(|n| (n * 2) as u64))
+            .chain([64 * 4])
             .map(|n| ctx.price_shared_buffer_upper(n).unwrap().priced_upper_bytes)
             .sum::<u64>();
         assert!(bytes < 16 * 1024 * 1024);
@@ -1253,6 +1334,49 @@ mod scratch_prefix_geometry_tests {
 
             poison(&backing.buffers[6]);
             let status_before = words(&backing.buffers[6]).to_vec();
+            let ledger = prefill::allocate(&ctx, 64, 1, GgmlType::I32).unwrap();
+            poison(&ledger);
+            let ledger_before = words(&ledger).to_vec();
+            for n in [8, 1, 5] {
+                let scoped = ledger.view_subrange(16, vec![n as u64]);
+                let view = backing
+                    .checked_ced_prefix(&c, n, layers, 2, &scoped)
+                    .unwrap();
+                assert_eq!(view.status_view(2).unwrap().offset, scoped.offset);
+                assert!(view.status_view(1).is_err());
+                assert!(view.validate_status_layers(1..2).is_err());
+                assert_eq!(
+                    words(&backing.buffers[6]),
+                    status_before,
+                    "CED never CPU-clears the compact slab"
+                );
+                assert_eq!(
+                    words(&ledger),
+                    ledger_before,
+                    "checked scoped views never mutate status or canaries"
+                );
+            }
+            let scoped = ledger.view_subrange(16, vec![1]);
+            let mut misaligned = scoped.clone();
+            misaligned.offset += 1;
+            let mut wrong_dtype = scoped.clone();
+            wrong_dtype.dtype = GgmlType::F32;
+            for (rows, layer, status) in [
+                (0, 2, &scoped),
+                (9, 2, &scoped),
+                (1, 3, &scoped),
+                (2, 2, &scoped),
+                (1, 2, &misaligned),
+                (1, 2, &wrong_dtype),
+            ] {
+                assert!(
+                    backing
+                        .checked_ced_prefix(&c, rows, layers, layer, status)
+                        .is_err()
+                );
+                assert_eq!(words(&backing.buffers[6]), status_before);
+                assert_eq!(words(&ledger), ledger_before);
+            }
             let last = backing.buffers.pop().unwrap();
             backing
                 .buffers

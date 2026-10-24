@@ -704,6 +704,9 @@ fn assert_report(report: &PrefillReport, n: usize, capacity: usize, scalar: bool
     let scalar_tail = usize::from(p.scalar_tail().is_some());
     expected.encoded_commands = if scalar {
         n + p.work.decoder_seed_rows + p.work.decoder_output_rows
+    } else if gpu_step::ced::batch_layers() != 0 {
+        n.div_ceil(prefill::DEFAULT_CHUNK_ROWS)
+            + p.decoder.len().div_ceil(gpu_step::ced::batch_layers())
     } else {
         n.div_ceil(prefill::DEFAULT_CHUNK_ROWS)
             + p.decoder
@@ -1007,6 +1010,7 @@ fn checkpoints_error_cancel_and_unwind_poison_every_ced_phase() {
 #[test]
 #[ignore = "requires explicit Metal benchmark lease and debug layer"]
 fn discarded_completion_poisoning_is_scoped_to_each_command_role() {
+    let _incumbent = gpu_step::ced::incumbent_scope();
     assert_eq!(std::env::var("MTL_DEBUG_LAYER").as_deref(), Ok("1"));
     assert_eq!(std::env::var("QWEN_METAL_LEASE_WAIT").as_deref(), Ok("1"));
     let _lease = metal::acquire_metal_benchmark_lease().expect("CED GPU lease");

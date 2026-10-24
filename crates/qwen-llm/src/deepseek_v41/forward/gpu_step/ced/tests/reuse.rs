@@ -388,7 +388,7 @@ pub(super) fn decoder_completed(
 // Covers all 40-layer toy allocations (including both Engram matrices), then
 // every replacement made by nonuniform_model. Charge originals too: an outer
 // autorelease pool may retain them until the entire fixture has drained.
-fn weight_bytes(price: &impl Fn(u64) -> u64) -> u64 {
+pub(super) fn weight_bytes(price: &impl Fn(u64) -> u64) -> u64 {
     let mut bytes = Vec::new();
     for layer in 0..40 {
         bytes.extend([32 * 6, 6 * 8, 32 * 4, 4 * 6, 6 * 32, 6, 4, 2].map(|n| n * 4));
@@ -498,7 +498,7 @@ fn complete_fixture_ledgers_stay_below_128_mib() {
     );
 }
 
-fn admit(ctx: &MetalContext, c: &Config, n: usize, capacity: usize) -> u64 {
+pub(super) fn admit(ctx: &MetalContext, c: &Config, n: usize, capacity: usize) -> u64 {
     let price = |n| ctx.price_shared_buffer_upper(n).unwrap().priced_upper_bytes;
     let bytes = explicit_bound(c, n, capacity, &price);
     assert!(
@@ -520,7 +520,7 @@ fn admit(ctx: &MetalContext, c: &Config, n: usize, capacity: usize) -> u64 {
     bytes
 }
 
-fn require_debug_lease() -> metal::MetalProcessLease {
+pub(super) fn require_debug_lease() -> metal::MetalProcessLease {
     assert_eq!(std::env::var("MTL_DEBUG_LAYER").as_deref(), Ok("1"));
     assert_eq!(std::env::var("QWEN_METAL_LEASE_WAIT").as_deref(), Ok("1"));
     assert!(!crate::env_flag::read_default_off(
@@ -529,7 +529,7 @@ fn require_debug_lease() -> metal::MetalProcessLease {
     metal::acquire_metal_benchmark_lease().expect("bounded CED reuse production lease")
 }
 
-fn configure(model: &mut Forward<'_>, window: usize) {
+pub(super) fn configure(model: &mut Forward<'_>, window: usize) {
     model.config.window = window;
     model.engram_hash.layers.clear();
     for layer in &mut model.layers {
@@ -939,6 +939,7 @@ type DriverArm = (
 );
 
 fn driver_arm(model: &Forward<'_>, n: usize, fresh: bool, arithmetic: Arithmetic) -> DriverArm {
+    let _incumbent = incumbent_scope();
     let _fresh = Fresh::new(fresh);
     let observe = Observe::begin();
     let mut state = model.new_state(n).unwrap();
@@ -1079,6 +1080,7 @@ fn seed_fusion_matches_unfused_empty_partial_full_wrap_packed_one_second_chunk_a
 #[test]
 #[ignore = "self-leased <=128 MiB complete buffers; MTL debug validation; no real model"]
 fn compound_seed_nonfinite_is_sticky_after_decoder_and_route_failure_poison_and_drain() {
+    let _incumbent = incumbent_scope();
     let _lease = require_debug_lease();
     let ctx = MetalContext::new().unwrap();
     admit(&ctx, &fixture_config(257), 640, 640);
@@ -1198,6 +1200,7 @@ fn request_driver_matches_fresh_short_maximum_packed_singleton_and_scalar_tail()
 #[test]
 #[ignore = "self-leased <=128 MiB complete buffers; MTL debug validation; no real model"]
 fn reuse_allocation_view_completion_error_cancel_and_unwind_drop_and_poison() {
+    let _incumbent = incumbent_scope();
     let _lease = require_debug_lease();
     let ctx = MetalContext::new().unwrap();
     admit(&ctx, &fixture_config(257), 640, 640);
@@ -1555,7 +1558,7 @@ fn half_prefix_staged_subgroups_use_current_n_strides_and_match_fresh_bits() {
     });
 }
 
-fn wide_config() -> Config {
+pub(super) fn wide_config() -> Config {
     Config {
         heads: 16,
         head_dim: 512,
@@ -1581,7 +1584,7 @@ fn wide_projection_shapes(c: &Config) -> Vec<(usize, usize)> {
     shapes
 }
 
-fn wide_bound(price: &impl Fn(u64) -> u64) -> u64 {
+pub(super) fn wide_bound(price: &impl Fn(u64) -> u64) -> u64 {
     let c = wide_config();
     explicit_bound(&c, 129, 129, price)
         + 6 * wide_projection_shapes(&c)
@@ -1625,7 +1628,7 @@ fn bf16_projection<'a>(
     }
 }
 
-fn configure_wide(model: &mut Forward<'_>) {
+pub(super) fn configure_wide(model: &mut Forward<'_>) {
     let c = wide_config();
     configure(model, c.window);
     for (id, layer) in model.layers.iter_mut().enumerate() {

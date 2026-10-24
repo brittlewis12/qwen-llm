@@ -7,7 +7,9 @@ use objc2_metal::{MTLComputePipelineState, MTLSize};
 
 mod ced;
 mod query_batch;
-pub(super) use ced::{GlobalKvMode, PublicationRows, QueryControlView, QueryControls, SeedRows};
+pub(super) use ced::{
+    GlobalKvMode, PublicationRows, QueryControlView, QueryControls, SeedRows, ced_group_cpu_bytes,
+};
 #[cfg(test)]
 pub(super) use query_batch::with_f32_attention;
 #[cfg(test)]

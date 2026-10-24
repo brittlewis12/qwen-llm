@@ -1,0 +1,282 @@
+use super::super::super::ced_plan::batches::{self as plan_batch, Kind, Unit};
+use super::*;
+
+#[cfg(test)]
+pub(super) mod tests;
+
+pub(super) fn batch_layers() -> usize {
+    #[cfg(test)]
+    if let Some(layers) = tests::override_layers() {
+        return layers;
+    }
+    plan_batch::DECODER_BATCH_LAYERS
+}
+
+pub(super) struct StatusUnit {
+    ffn: Option<MetalTensor>,
+    attention: MetalTensor,
+}
+
+fn status_views(backing: &MetalTensor, units: &[Unit]) -> Result<Vec<StatusUnit>> {
+    let words = plan_batch::status_words(units).map_err(|e| e.to_string())?;
+    op::require(
+        backing.dtype == GgmlType::I32
+            && backing.is_writable()
+            && backing.offset.is_multiple_of(4)
+            && words as u64 <= backing.n_elements()
+            && backing
+                .offset
+                .checked_add(
+                    backing
+                        .n_elements()
+                        .checked_mul(4)
+                        .ok_or("CED status ledger overflow")?,
+                )
+                .is_some_and(|end| end <= backing.buffer.length() as u64),
+        "CED status ledger backing",
+    )?;
+    let mut offset = 0;
+    Ok(units
+        .iter()
+        .map(|unit| {
+            let ffn = if unit.kind == Kind::Rows {
+                let view = backing.view_subrange(offset as u64, vec![unit.rows.len() as u64]);
+                offset += unit.rows.len();
+                Some(view)
+            } else {
+                None
+            };
+            let attention = backing.view_subrange(offset as u64, vec![1]);
+            offset += 1;
+            StatusUnit { ffn, attention }
+        })
+        .collect())
+}
+
+fn attention_status(t: &MetalTensor) -> Result<()> {
+    let status = unsafe {
+        *t.buffer
+            .contents()
+            .as_ptr()
+            .cast::<i32>()
+            .add((t.offset / 4) as usize)
+    };
+    op::require(status == 0, &format!("CED attention status {status}"))
+}
+
+impl Workspace {
+    pub(super) fn ced_decoder_groups(
+        &mut self,
+        model: &Forward<'_>,
+        plan: &CedPlan,
+        cancel: Option<&AtomicBool>,
+        storage: &mut Storage,
+        counters: &mut CedCounters,
+        pool: &mut DecoderRowsPool,
+    ) -> Result<()> {
+        let ctx = model.ctx;
+        let layers = batch_layers();
+        let words = plan_batch::maximum_status_words(plan, layers).map_err(|e| e.to_string())?;
+        let ledger = prefill::allocate(ctx, words, 1, GgmlType::I32)?;
+        let seed_range = plan
+            .decoder
+            .iter()
+            .flat_map(|l| chunk_views(l.seed_rows.clone(), prefill::DEFAULT_CHUNK_ROWS).unwrap())
+            .map(|c| c.absolute_rows)
+            .max_by_key(Range::len);
+        let seed = seed_range
+            .map(|range| LocalSeed::new(model, storage, range))
+            .transpose()?;
+        for group in plan.decoder.chunks(layers) {
+            objc2::rc::autoreleasepool(|_| -> Result<()> {
+                cancelled(cancel)?;
+                let layer_range = group[0].layer..group.last().unwrap().layer + 1;
+                let units =
+                    plan_batch::units(plan, layer_range.clone()).map_err(|e| e.to_string())?;
+                let statuses = status_views(&ledger, &units)?;
+                #[cfg(test)]
+                let mut diagnostics = tests::Diagnostics::new(model, storage, &units)?;
+                let generation = self
+                    .attention
+                    .begin_ced_group(layer_range.clone(), &storage.controls)?;
+                self.ced_command(
+                    model,
+                    "ced_decoder_batch",
+                    [layer_range.start, layer_range.len(), units.len(), 0],
+                    storage,
+                    counters,
+                    |this, enc| {
+                        for (unit, status) in units.iter().zip(&statuses) {
+                            cancelled(cancel)?;
+                            let layer = unit.layer;
+                            let range = unit.rows.clone();
+                            let n = range.len();
+                            match unit.kind {
+                                Kind::Seed => {
+                                    let seed = seed
+                                        .as_ref()
+                                        .ok_or("CED seed backing missing")?
+                                        .checked_view(model, storage, range.clone())?;
+                                    this.attention.begin_ced_seed(layer, range.start, n)?;
+                                    this.ced_encode_seed(
+                                        model,
+                                        enc,
+                                        layer,
+                                        &range,
+                                        Arithmetic::Production,
+                                        &seed,
+                                    )?;
+                                }
+                                Kind::Rows => {
+                                    let controls =
+                                        storage.controls.checked_tile_view(range.start, n)?;
+                                    let scratch = pool.checked_rows_status(
+                                        model,
+                                        this.attention.capacity(),
+                                        storage,
+                                        &controls,
+                                        Some((layer, status.ffn.as_ref().unwrap())),
+                                    )?;
+                                    let (x, incoming) = storage.input(range.clone())?;
+                                    this.attention.begin_ced_decoder_chunk(
+                                        layer,
+                                        range.start,
+                                        n,
+                                    )?;
+                                    this.ced_block(
+                                        model,
+                                        enc,
+                                        layer,
+                                        range.start,
+                                        &x,
+                                        &incoming,
+                                        &scratch,
+                                    )?;
+                                    if layer + 1 == model.layers.len()
+                                        && range.end == plan.prompt_rows
+                                    {
+                                        this.ced_head(model, enc, &x, &incoming, n)?;
+                                    }
+                                }
+                                Kind::Scalar => {
+                                    let c = &model.config;
+                                    let (x, incoming) = storage.input(range.clone())?;
+                                    let controls =
+                                        storage.controls.checked_tile_view(range.start, 1)?;
+                                    this.attention.begin_ced_decoder_scalar(
+                                        layer,
+                                        range.start,
+                                        &controls,
+                                    )?;
+                                    metal::encode_copy_offset_f32(
+                                        ctx,
+                                        enc,
+                                        &x,
+                                        0,
+                                        &this.x,
+                                        4 * c.hidden,
+                                    )
+                                    .map_err(|e| e.to_string())?;
+                                    metal::encode_copy_offset_f32(
+                                        ctx,
+                                        enc,
+                                        &incoming,
+                                        0,
+                                        this.ffn.next_pre(),
+                                        4,
+                                    )
+                                    .map_err(|e| e.to_string())?;
+                                    this.layer(model, enc, layer, range.start, None, true)?;
+                                    metal::encode_copy_offset_f32(
+                                        ctx,
+                                        enc,
+                                        &this.x,
+                                        0,
+                                        &x,
+                                        4 * c.hidden,
+                                    )
+                                    .map_err(|e| e.to_string())?;
+                                    metal::encode_copy_offset_f32(
+                                        ctx,
+                                        enc,
+                                        this.ffn.next_pre(),
+                                        0,
+                                        &incoming,
+                                        4,
+                                    )
+                                    .map_err(|e| e.to_string())?;
+                                    if layer + 1 == model.layers.len() {
+                                        this.ced_head(model, enc, &this.x, this.ffn.next_pre(), 1)?;
+                                    }
+                                }
+                            }
+                            #[cfg(test)]
+                            diagnostics.fault(&this.attention, ctx, enc, unit)?;
+                            #[cfg(test)]
+                            tests::before_copies();
+                            this.attention
+                                .encode_ced_status_copy(ctx, enc, &status.attention)?;
+                            #[cfg(test)]
+                            diagnostics.encode(ctx, enc, storage, unit)?;
+                            #[cfg(test)]
+                            tests::after_copies();
+                            this.attention.stage_ced_group_unit(
+                                generation,
+                                layer,
+                                range.start,
+                                n,
+                                unit.kind == Kind::Seed,
+                            )?;
+                            #[cfg(test)]
+                            super::super::super::ced::tests::checkpoint(
+                                "ced_batch_unit_encoded",
+                                cancel,
+                            )?;
+                        }
+                        cancelled(cancel)
+                    },
+                )?;
+                #[cfg(test)]
+                tests::completed_statuses(&units, &statuses);
+                #[cfg(test)]
+                super::super::super::ced::tests::checkpoint("ced_batch_completed", cancel)?;
+                cancelled(cancel)?;
+                // The incumbent compound checks its first output FFN before
+                // the sticky seed/attention word. Multichunk seeds retire alone.
+                for (unit, status) in units.iter().zip(&statuses) {
+                    if let Some(ffn) = &status.ffn {
+                        ffn_gpu::validate_ced_status(ffn, unit.layer)?;
+                    }
+                    if unit.kind == Kind::Scalar {
+                        op::require(
+                            self.ffn.status(unit.layer) == metal::ROUTE_STATUS_READY,
+                            "CED scalar decoder FFN status",
+                        )?;
+                    }
+                    let compound_seed = unit.kind == Kind::Seed
+                        && plan.decoder[unit.layer - plan.publication_layer]
+                            .fuse_seed_with_packed_output(plan.prompt_rows);
+                    if !compound_seed {
+                        attention_status(&status.attention)?;
+                    }
+                }
+                self.attention.retire_ced_group(generation, layer_range)?;
+                for unit in &units {
+                    if unit.kind == Kind::Seed {
+                        counters.seed(unit.layer, unit.rows.len())?;
+                    } else {
+                        counters.decoder(
+                            unit.layer,
+                            unit.rows.len(),
+                            model.schedule.produces_index(unit.layer),
+                        )?;
+                    }
+                }
+                #[cfg(test)]
+                diagnostics.complete(&self.attention, plan.prompt_rows, &units, cancel)?;
+                Ok(())
+            })?;
+        }
+        Ok(())
+    }
+}

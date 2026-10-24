@@ -40,6 +40,17 @@ pub(in super::super) struct SeedRows {
 }
 
 impl SeedRows {
+    pub(in super::super) fn checked_prefix(&self, c: &Config, rows: usize) -> Result<Self> {
+        Ok(Self {
+            value: prefill::checked_scratch_view(
+                &self.value,
+                &[c.head_dim * self.rows],
+                &[c.head_dim * rows],
+                GgmlType::F32,
+            )?,
+            rows,
+        })
+    }
     #[cfg(test)]
     pub(in super::super) fn value(&self) -> &MetalTensor {
         &self.value
@@ -245,6 +256,36 @@ impl QueryControls {
 }
 
 impl QueryControlView {
+    #[cfg(test)]
+    pub(in super::super) fn diagnostic_copy(&self, ctx: &MetalContext) -> Result<Self> {
+        let mut view = self.clone();
+        view.selected = tensor(ctx, self.selected.n_elements() as usize, GgmlType::I32)?;
+        view.candidates = tensor(ctx, self.candidates.n_elements() as usize, GgmlType::I32)?;
+        Ok(view)
+    }
+
+    #[cfg(test)]
+    pub(in super::super) fn encode_diagnostic_copy(
+        &self,
+        ctx: &MetalContext,
+        enc: &KernelEncoder,
+        source: &Self,
+    ) -> Result<()> {
+        copy(
+            ctx,
+            enc,
+            &source.selected,
+            &self.selected,
+            self.selected.n_elements() as usize,
+        )?;
+        copy(
+            ctx,
+            enc,
+            &source.candidates,
+            &self.candidates,
+            self.candidates.n_elements() as usize,
+        )
+    }
     pub(in super::super) fn rows(&self) -> usize {
         self.range.len()
     }
@@ -370,6 +411,33 @@ pub(super) struct Cursor {
     seed_completed: Vec<usize>,
     output_completed: Vec<usize>,
     pending: Option<Pending>,
+    group: Option<EncodedGroup>,
+    generation: u64,
+}
+
+struct EncodedGroup {
+    generation: u64,
+    layers: Range<usize>,
+    next: usize,
+    seeds: Vec<usize>,
+    outputs: Vec<usize>,
+    units: Vec<Pending>,
+    coverage: Option<Arc<Mutex<Coverage>>>,
+}
+
+pub(in super::super) fn ced_group_cpu_bytes(layers: usize, units: usize) -> Result<u64> {
+    // Two frontier vectors and one exact-capacity Pending vector. Each retained
+    // control tensor uses the same 1 KiB descriptor allowance as other plans.
+    layers
+        .checked_mul(2 * std::mem::size_of::<usize>())
+        .and_then(|n| {
+            units
+                .checked_mul(std::mem::size_of::<Pending>() + 2 * 1024)
+                .and_then(|u| n.checked_add(u))
+        })
+        .and_then(|n| n.checked_add(std::mem::size_of::<EncodedGroup>()))
+        .and_then(|n| u64::try_from(n).ok())
+        .ok_or_else(|| "CED batch CPU ledger overflow".into())
 }
 
 impl Cursor {
@@ -423,6 +491,8 @@ impl Cursor {
             seed_completed: plan.decoder.iter().map(|l| l.seed_rows.start).collect(),
             output_completed: plan.decoder.iter().map(|l| l.output_rows.start).collect(),
             pending: None,
+            group: None,
+            generation: 0,
         })
     }
 
@@ -439,6 +509,7 @@ impl Cursor {
             rows <= self.plan.full_chunk_rows,
             "CED encoder chunk geometry",
         )?;
+        op::require(self.group.is_none(), "CED encoder during decoder batch")?;
         let range = checked_range(&(0..self.plan.prompt_rows), start, rows)?;
         op::require(
             start == self.encoder_completed && start == self.publication_completed,
@@ -463,14 +534,31 @@ impl Cursor {
     }
 
     fn decoder_index(&self, layer: usize) -> Result<usize> {
+        let next = self.group.as_ref().map_or(self.decoder_next, |g| g.next);
         op::require(
             self.encoder_completed == self.plan.prompt_rows
                 && self.publication_completed == self.plan.prompt_rows
-                && self.decoder_next < self.plan.decoder.len()
-                && self.plan.decoder[self.decoder_next].layer == layer,
+                && next < self.plan.decoder.len()
+                && self.plan.decoder[next].layer == layer
+                && self
+                    .group
+                    .as_ref()
+                    .is_none_or(|g| g.layers.contains(&layer)),
             "CED decoder layer/completed publication frontier",
         )?;
-        Ok(self.decoder_next)
+        Ok(next)
+    }
+
+    fn seed_frontier(&self, j: usize) -> usize {
+        self.group
+            .as_ref()
+            .map_or(self.seed_completed[j], |g| g.seeds[j])
+    }
+
+    fn output_frontier(&self, j: usize) -> usize {
+        self.group
+            .as_ref()
+            .map_or(self.output_completed[j], |g| g.outputs[j])
     }
 
     fn begin_seed(&mut self, layer: usize, start: usize, rows: usize) -> Result<()> {
@@ -482,8 +570,8 @@ impl Cursor {
         let j = self.decoder_index(layer)?;
         let range = checked_range(&self.plan.decoder[j].seed_rows, start, rows)?;
         op::require(
-            start == self.seed_completed[j]
-                && self.output_completed[j] == self.plan.decoder[j].output_rows.start,
+            start == self.seed_frontier(j)
+                && self.output_frontier(j) == self.plan.decoder[j].output_rows.start,
             "CED seed completed frontier",
         )?;
         self.pending = Some(Pending {
@@ -508,8 +596,8 @@ impl Cursor {
         let j = self.decoder_index(layer)?;
         let range = checked_range(&self.plan.decoder[j].output_rows, start, rows)?;
         op::require(
-            self.seed_completed[j] == self.plan.decoder[j].seed_rows.end
-                && start == self.output_completed[j],
+            self.seed_frontier(j) == self.plan.decoder[j].seed_rows.end
+                && start == self.output_frontier(j),
             "CED output completed frontier/seed coverage",
         )?;
         self.pending = Some(Pending {
@@ -542,9 +630,9 @@ impl Cursor {
                 && self.plan.decoder[j]
                     .fuse_seed_with_packed_output(self.plan.prompt_rows, self.plan.full_chunk_rows)
                 && range.end <= self.plan.scalar_tail().unwrap_or(self.plan.prompt_rows)
-                && self.seed_completed[j] == seed.start
+                && self.seed_frontier(j) == seed.start
                 && start == seed.end
-                && start == self.output_completed[j],
+                && start == self.output_frontier(j),
             "CED compound requires fully encoded whole seed and first decoder chunk",
         )?;
         self.pending = Some(Pending {
@@ -595,13 +683,16 @@ impl Cursor {
         )?;
         let end = p.range.end;
         let seed_end = if let Some(seed) = &p.encoded_seed_prefix {
-            let j = self.decoder_next;
+            let j = self.decoder_index(match phase {
+                Phase::Decoder(id) => id,
+                _ => return Err("CED compound phase".into()),
+            })?;
             op::require(
                 phase == Phase::Decoder(self.plan.decoder[j].layer)
                     && *seed == self.plan.decoder[j].seed_rows
-                    && self.seed_completed[j] == seed.start
+                    && self.seed_frontier(j) == seed.start
                     && p.range.start == seed.end
-                    && self.output_completed[j] == p.range.start,
+                    && self.output_frontier(j) == p.range.start,
                 "CED compound completion frontier",
             )?;
             Some(seed.end)
@@ -612,6 +703,7 @@ impl Cursor {
     }
 
     fn complete(&mut self, phase: Phase, start: usize, rows: usize) -> Result<()> {
+        op::require(self.group.is_none(), "CED batch requires atomic retirement")?;
         let (end, seed_end) = self.completion_range(phase, start, rows)?;
         match phase {
             Phase::Encoder => {
@@ -638,14 +730,253 @@ impl Cursor {
     fn ready(&self, n: usize) -> bool {
         n == self.plan.prompt_rows
             && self.pending.is_none()
+            && self.group.is_none()
             && self.encoder_completed == n
             && self.publication_completed == n
             && self.decoder_next == self.plan.decoder.len()
             && self.output_completed.iter().all(|&end| end == n)
     }
+
+    fn begin_group(&mut self, layers: Range<usize>) -> Result<u64> {
+        self.idle()?;
+        op::require(
+            self.group.is_none() && (1..=4).contains(&layers.len()),
+            "CED batch bounds",
+        )?;
+        self.decoder_index(layers.start)?;
+        op::require(
+            layers.end <= self.plan.publication_layer + self.plan.decoder.len(),
+            "CED batch end",
+        )?;
+        let generation = self
+            .generation
+            .checked_add(1)
+            .ok_or("CED batch generation overflow")?;
+        let units = super::super::ced_plan::batches::units(&self.plan, layers.clone())
+            .map_err(|e| e.to_string())?;
+        self.group = Some(EncodedGroup {
+            generation,
+            layers,
+            next: self.decoder_next,
+            seeds: self.seed_completed.clone(),
+            outputs: self.output_completed.clone(),
+            units: Vec::with_capacity(units.len()),
+            coverage: None,
+        });
+        self.generation = generation;
+        Ok(generation)
+    }
+
+    fn stage_group_unit(
+        &mut self,
+        generation: u64,
+        layer: usize,
+        start: usize,
+        rows: usize,
+        seed: bool,
+    ) -> Result<()> {
+        let phase = if seed {
+            Phase::Seed(layer)
+        } else {
+            Phase::Decoder(layer)
+        };
+        let (end, seed_end) = self.completion_range(phase, start, rows)?;
+        let j = self.decoder_index(layer)?;
+        let g = self.group.as_mut().ok_or("CED batch missing")?;
+        op::require(g.generation == generation, "CED batch generation")?;
+        if seed {
+            g.seeds[j] = end;
+        } else {
+            if let Some(end) = seed_end {
+                g.seeds[j] = end;
+            }
+            g.outputs[j] = end;
+            if end == self.plan.prompt_rows {
+                g.next += 1;
+            }
+        }
+        g.units.push(self.pending.take().unwrap());
+        Ok(())
+    }
+
+    fn validate_group(&self, generation: u64, layers: &Range<usize>) -> Result<()> {
+        self.idle()?;
+        let g = self.group.as_ref().ok_or("CED batch missing")?;
+        op::require(
+            g.generation == generation
+                && &g.layers == layers
+                && g.next + self.plan.publication_layer == layers.end
+                && !g.units.is_empty(),
+            "CED batch retirement range/generation/coverage",
+        )
+    }
+
+    fn publish_group(&mut self) {
+        let g = self.group.take().unwrap();
+        self.decoder_next = g.next;
+        self.seed_completed = g.seeds;
+        self.output_completed = g.outputs;
+    }
 }
 
 impl Workspace {
+    #[cfg(test)]
+    pub(in super::super) fn ced_public_decoder_progress(&self) -> (usize, Vec<usize>, Vec<usize>) {
+        let c = self.ced.as_ref().unwrap();
+        (
+            c.decoder_next,
+            c.seed_completed.clone(),
+            c.output_completed.clone(),
+        )
+    }
+    #[cfg(test)]
+    pub(in super::super) fn encode_ced_test_nonfinite(
+        &self,
+        ctx: &MetalContext,
+        enc: &KernelEncoder,
+        value: &MetalTensor,
+    ) -> Result<()> {
+        finite(ctx, enc, value, 1, &self.status)
+    }
+    fn validate_ced_controls(&self, view: &QueryControlView, layer: usize) -> Result<()> {
+        let Some(g) = self.ced.as_ref().and_then(|c| c.group.as_ref()) else {
+            return view.validate_layer(&self.schedule, layer);
+        };
+        let coverage = g
+            .coverage
+            .as_ref()
+            .ok_or("CED batch control storage missing")?;
+        op::require(
+            Arc::ptr_eq(coverage, &view.coverage),
+            "CED batch control generation/storage",
+        )?;
+        let coverage = coverage
+            .lock()
+            .map_err(|_| "CED control coverage poisoned")?;
+        let candidate = self
+            .schedule
+            .candidate_source_layer
+            .ok_or("CED candidate owner")?;
+        let selected = self
+            .schedule
+            .index_source_layers
+            .iter()
+            .copied()
+            .rev()
+            .find(|&id| id <= layer);
+        op::require(
+            view.range.start >= coverage.origin
+                && view.range.end - coverage.origin <= coverage.selected.len(),
+            "CED batch control origin",
+        )?;
+        for position in view.range.clone() {
+            let row = position - coverage.origin;
+            let mut got_selected = coverage.selected[row];
+            let mut got_candidate = coverage.candidates[row];
+            for p in &g.units {
+                if let Phase::Decoder(id) = p.phase
+                    && p.range.contains(&position)
+                {
+                    if self.schedule.produces_index(id) {
+                        got_selected = Some(id);
+                    }
+                    if id == candidate {
+                        got_candidate = Some(id);
+                    }
+                }
+            }
+            op::require(
+                layer <= candidate || got_candidate == Some(candidate),
+                "CED missing encoded owner candidate controls",
+            )?;
+            op::require(
+                self.schedule.produces_index(layer) || got_selected == selected,
+                "CED missing encoded selected-ID producer",
+            )?;
+        }
+        Ok(())
+    }
+
+    pub(in super::super) fn begin_ced_group(
+        &mut self,
+        layers: Range<usize>,
+        controls: &QueryControls,
+    ) -> Result<u64> {
+        let ced = self.ced.as_mut().ok_or("CED not active")?;
+        op::require(
+            controls.range == ced.plan.candidate_rows,
+            "CED batch retained control origin",
+        )?;
+        let generation = ced.begin_group(layers)?;
+        ced.group.as_mut().unwrap().coverage = Some(controls.coverage.clone());
+        Ok(generation)
+    }
+
+    pub(in super::super) fn stage_ced_group_unit(
+        &mut self,
+        generation: u64,
+        layer: usize,
+        start: usize,
+        rows: usize,
+        seed: bool,
+    ) -> Result<()> {
+        self.ced
+            .as_mut()
+            .ok_or("CED not active")?
+            .stage_group_unit(generation, layer, start, rows, seed)
+    }
+
+    pub(in super::super) fn retire_ced_group(
+        &mut self,
+        generation: u64,
+        layers: Range<usize>,
+    ) -> Result<()> {
+        self.checked_ced_status()?;
+        let ced = self.ced.as_mut().ok_or("CED not active")?;
+        ced.validate_group(generation, &layers)?;
+        let g = ced.group.as_ref().unwrap();
+        let coverage = g
+            .coverage
+            .as_ref()
+            .ok_or("CED batch controls missing")?
+            .clone();
+        let mut coverage = coverage
+            .lock()
+            .map_err(|_| "CED control coverage poisoned")?;
+        for p in &g.units {
+            if let Phase::Decoder(_) = p.phase {
+                let v = p.controls.as_ref().ok_or("CED staged controls missing")?;
+                op::require(
+                    v.range == p.range && Arc::ptr_eq(&v.coverage, g.coverage.as_ref().unwrap()),
+                    "CED staged controls range/storage",
+                )?;
+            }
+        }
+        for p in &g.units {
+            if let Phase::Decoder(id) = p.phase {
+                coverage.complete(p.range.clone(), &self.schedule, id);
+            }
+        }
+        ced.publish_group();
+        Ok(())
+    }
+
+    pub(in super::super) fn encode_ced_status_copy(
+        &self,
+        ctx: &MetalContext,
+        enc: &KernelEncoder,
+        out: &MetalTensor,
+    ) -> Result<()> {
+        // Integer words pass through the existing bit-preserving copy operator.
+        copy(
+            ctx,
+            enc,
+            &self.status.view_bytes(0, vec![1]),
+            &out.view_bytes(0, vec![1]),
+            1,
+        )
+    }
+
     pub(in super::super) fn begin_ced(&mut self, plan: &CedPlan) -> Result<()> {
         self.validate_snapshot_position(0)?;
         self.ced = Some(Cursor::new(
@@ -712,7 +1043,7 @@ impl Workspace {
             controls.range == (position..position + 1),
             "CED scalar control origin",
         )?;
-        controls.validate_layer(&self.schedule, layer)?;
+        self.validate_ced_controls(controls, layer)?;
         self.begin_ced_decoder_chunk(layer, position, 1)?;
         self.ced
             .as_mut()
@@ -836,7 +1167,7 @@ impl Workspace {
                 controls.range == (start..start + rows.rows),
                 "CED row controls absolute origin",
             )?;
-            controls.validate_layer(&self.schedule, id)?;
+            self.validate_ced_controls(controls, id)?;
             let p = self.ced.as_mut().unwrap().pending.as_mut().unwrap();
             op::require(p.controls.is_none(), "CED decoder rows already prepared")?;
             p.controls = Some(controls.clone());
@@ -868,14 +1199,14 @@ impl Workspace {
                     p.phase == Phase::Decoder(id)
                         && p.range == (start..start + rows)
                         && p.encoded_seed_prefix.as_ref() == Some(&ced.plan.decoder[j].seed_rows)
-                        && ced.seed_completed[j] == ced.plan.decoder[j].seed_rows.start
+                        && ced.seed_frontier(j) == ced.plan.decoder[j].seed_rows.start
                         && start == ced.plan.decoder[j].seed_rows.end
                 });
                 op::require(
                     floor >= ced.plan.decoder[j].seed_rows.start
-                        && (ced.seed_completed[j] == ced.plan.decoder[j].seed_rows.end
+                        && (ced.seed_frontier(j) == ced.plan.decoder[j].seed_rows.end
                             || encoded_seed)
-                        && start == ced.output_completed[j],
+                        && start == ced.output_frontier(j),
                     "CED local history completed coverage",
                 )?;
                 start - floor
@@ -923,7 +1254,7 @@ impl Workspace {
             let controls = controls
                 .as_ref()
                 .ok_or("CED scalar decoder controls missing")?;
-            controls.validate_layer(&self.schedule, id)?;
+            self.validate_ced_controls(controls, id)?;
             self.row_history(id, position, 1)?;
             let selected = std::mem::replace(
                 &mut self.selected,
@@ -1220,6 +1551,7 @@ impl Workspace {
     ) -> Result<()> {
         self.checked_ced_status()?;
         let ced = self.ced.as_mut().ok_or("CED not active")?;
+        op::require(ced.group.is_none(), "CED batch requires atomic retirement")?;
         ced.completion_range(Phase::Decoder(layer), start, rows)?;
         let p = ced.matches(Phase::Decoder(layer), start, rows)?;
         op::require(
@@ -1256,7 +1588,10 @@ impl Workspace {
             .as_ref()
             .ok_or("CED diagnostic transaction missing")?;
         op::require(
-            ced.encoder_completed == n && ced.publication_completed == n && ced.pending.is_none(),
+            ced.encoder_completed == n
+                && ced.publication_completed == n
+                && ced.pending.is_none()
+                && ced.group.is_none(),
             "CED diagnostic requires completed publication and no pending command",
         )?;
         self.checked_ced_status()?;

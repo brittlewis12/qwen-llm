@@ -153,6 +153,10 @@ pub struct CedMemoryEstimate {
     pub priced_half_chunk_bytes: u64,
     pub priced_publication_bytes: u64,
     pub priced_seed_bytes: u64,
+    pub priced_batch_status_bytes: u64,
+    pub batch_cpu_bytes: u64,
+    pub priced_batch_diagnostic_bytes: u64,
+    pub batch_encoding_reserve_bytes: u64,
     pub command_reserve_bytes: u64,
     pub incremental_metal_bytes: u64,
     pub incremental_cpu_bytes: u64,
@@ -292,10 +296,54 @@ pub(super) fn estimate_from_parts(
     for width in [c.hidden, c.hidden, c.head_dim] {
         seed = checked_add(seed, price(row_bytes(width, seed_rows)?)?)?;
     }
-    let reserve = 16 * 1024 * 1024;
-    let metal = [retained, chunk, publication, seed, reserve]
-        .into_iter()
-        .try_fold(0, checked_add)?;
+    let batch_layers = gpu_step::ced::batch_layers().max(1);
+    let batch_encoding_reserve =
+        super::ced_plan::batches::encoding_reserve_bytes(plan, batch_layers)
+            .map_err(|e| e.to_string())?;
+    let reserve = checked_add(16 * 1024 * 1024, batch_encoding_reserve)?;
+    let batch_words = super::ced_plan::batches::maximum_status_words(plan, batch_layers)
+        .map_err(|e| e.to_string())?;
+    let batch_status = price(row_bytes(1, batch_words)?)?;
+    let batch_cpu = gpu_step::ced::batch_cpu_bytes(plan, batch_layers)?;
+    #[cfg(not(test))]
+    let diagnostic = 0;
+    #[cfg(test)]
+    let diagnostic = {
+        let mut maximum = 0;
+        for group in plan.decoder.chunks(batch_layers) {
+            let mut total = 0;
+            for unit in super::ced_plan::batches::units(
+                plan,
+                group[0].layer..group.last().unwrap().layer + 1,
+            )
+            .map_err(|e| e.to_string())?
+            {
+                if unit.kind != super::ced_plan::batches::Kind::Seed {
+                    total = checked_add(total, price(row_bytes(c.index_topk, unit.rows.len())?)?)?;
+                    total = checked_add(
+                        total,
+                        price(row_bytes(
+                            capacity.div_ceil(c.candidate_block),
+                            unit.rows.len(),
+                        )?)?,
+                    )?;
+                }
+            }
+            maximum = maximum.max(total);
+        }
+        checked_add(maximum, price(4)?)?
+    };
+    let metal = [
+        retained,
+        chunk,
+        publication,
+        seed,
+        reserve,
+        batch_status,
+        diagnostic,
+    ]
+    .into_iter()
+    .try_fold(0, checked_add)?;
     let controls_cpu = attention_gpu::QueryControls::cpu_bytes(plan.candidate_rows.clone())?;
     let hash_cpu = prefill::chunk_hash_cpu_bytes(hash_count, rows)?;
     let cpu = [
@@ -304,6 +352,8 @@ pub(super) fn estimate_from_parts(
         row_bytes(c.vocab, 2)?,
         hash_cpu,
         controls_cpu,
+        batch_cpu,
+        batch_encoding_reserve,
         16 * 1024 * 1024,
     ]
     .into_iter()
@@ -319,6 +369,10 @@ pub(super) fn estimate_from_parts(
         priced_half_chunk_bytes: half_chunk,
         priced_publication_bytes: publication,
         priced_seed_bytes: seed,
+        priced_batch_status_bytes: batch_status,
+        batch_cpu_bytes: batch_cpu,
+        priced_batch_diagnostic_bytes: diagnostic,
+        batch_encoding_reserve_bytes: batch_encoding_reserve,
         command_reserve_bytes: reserve,
         incremental_metal_bytes: metal,
         incremental_cpu_bytes: cpu,

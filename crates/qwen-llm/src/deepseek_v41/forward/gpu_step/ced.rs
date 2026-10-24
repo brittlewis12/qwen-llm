@@ -3,6 +3,37 @@ use super::super::ced_plan::{CedPlan, chunk_views, row_view};
 use super::*;
 use std::ops::Range;
 
+mod batches;
+
+#[cfg(test)]
+pub(in super::super) fn incumbent_scope() -> impl Drop {
+    batches::tests::Scope::new(0)
+}
+
+pub(in super::super) fn batch_layers() -> usize {
+    batches::batch_layers()
+}
+
+pub(in super::super) fn batch_cpu_bytes(plan: &CedPlan, layers: usize) -> Result<u64> {
+    let mut maximum = 0;
+    for group in plan.decoder.chunks(layers) {
+        let units = super::super::ced_plan::batches::units(
+            plan,
+            group[0].layer..group.last().unwrap().layer + 1,
+        )
+        .map_err(|e| e.to_string())?;
+        maximum = maximum.max(units.len());
+    }
+    let descriptors = (maximum.max(4)
+        * 2
+        * (std::mem::size_of::<super::super::ced_plan::batches::Unit>() + 2 * 1024)
+        + maximum * (std::mem::size_of::<batches::StatusUnit>() + 2 * 1024))
+        as u64;
+    attention_gpu::ced_group_cpu_bytes(plan.encoder_layers.len() + plan.decoder.len(), maximum)?
+        .checked_add(descriptors)
+        .ok_or_else(|| "CED batch CPU ledger overflow".into())
+}
+
 #[cfg(test)]
 #[path = "ced/tests/reuse.rs"]
 mod reuse;
@@ -213,6 +244,17 @@ impl BlockRows {
         layers: usize,
         controls: &attention_gpu::QueryControlView,
     ) -> Result<Self> {
+        self.checked_prefix_status(c, capacity, layers, controls, None)
+    }
+
+    fn checked_prefix_status(
+        &self,
+        c: &Config,
+        capacity: usize,
+        layers: usize,
+        controls: &attention_gpu::QueryControlView,
+        status: Option<(usize, &MetalTensor)>,
+    ) -> Result<Self> {
         let n = controls.rows();
         let (half, output) = checked_outer_elements(c.hidden, n)?;
         op::require(
@@ -225,9 +267,12 @@ impl BlockRows {
         let attention = self
             .attention
             .checked_prefix_with_controls(c, capacity, controls)?;
-        // FFN clears the compact active status slab only after all other views
-        // have checked successfully and the previous unit has completed.
-        let ffn = self.ffn.checked_prefix(c, n, layers)?;
+        // Incumbent views clear only after retirement; batch views bind a
+        // disjoint ledger and never CPU-clear the shared compact status slab.
+        let ffn = match status {
+            Some((layer, status)) => self.ffn.checked_ced_prefix(c, n, layers, layer, status)?,
+            None => self.ffn.checked_prefix(c, n, layers)?,
+        };
         Ok(Self {
             arithmetic: self.arithmetic,
             half: self
@@ -292,6 +337,34 @@ struct LocalSeed {
 }
 
 impl LocalSeed {
+    fn checked_view(
+        &self,
+        model: &Forward<'_>,
+        storage: &Storage,
+        range: Range<usize>,
+    ) -> Result<Self> {
+        let n = range.len();
+        let c = &model.config;
+        let backing = self.normalized.n_elements() as usize / c.hidden;
+        let (x, incoming) = storage.input(range)?;
+        Ok(Self {
+            x,
+            incoming,
+            collapsed: prefill::checked_scratch_view(
+                &self.collapsed,
+                &[c.hidden, backing],
+                &[c.hidden, n],
+                GgmlType::F32,
+            )?,
+            normalized: prefill::checked_scratch_view(
+                &self.normalized,
+                &[c.hidden, backing],
+                &[c.hidden, n],
+                GgmlType::F32,
+            )?,
+            attention: self.attention.checked_prefix(c, n)?,
+        })
+    }
     fn new(model: &Forward<'_>, storage: &Storage, range: Range<usize>) -> Result<Self> {
         let c = &model.config;
         let n = range.len();
@@ -317,8 +390,19 @@ impl DecoderRowsPool {
         storage: &Storage,
         controls: &attention_gpu::QueryControlView,
     ) -> Result<BlockRows> {
+        self.checked_rows_status(model, capacity, storage, controls, None)
+    }
+
+    fn checked_rows_status(
+        &mut self,
+        model: &Forward<'_>,
+        capacity: usize,
+        storage: &Storage,
+        controls: &attention_gpu::QueryControlView,
+        status: Option<(usize, &MetalTensor)>,
+    ) -> Result<BlockRows> {
         #[cfg(test)]
-        if reuse::fresh_decoder_rows() {
+        if status.is_none() && reuse::fresh_decoder_rows() {
             return BlockRows::new(model, capacity, controls.rows(), Some(controls));
         }
         let maximum = self
@@ -346,11 +430,12 @@ impl DecoderRowsPool {
         }
         #[cfg(test)]
         super::super::ced::tests::checkpoint("ced_pool_view", None)?;
-        self.backing.as_ref().unwrap().checked_prefix(
+        self.backing.as_ref().unwrap().checked_prefix_status(
             &model.config,
             capacity,
             model.layers.len(),
             controls,
+            status,
         )
     }
 }
@@ -904,6 +989,8 @@ impl Workspace {
         }
         #[cfg(test)]
         super::super::ced::qualification::controls(layer, range.start, n, &controls)?;
+        #[cfg(test)]
+        batches::tests::record(layer, range.clone(), &controls);
         counters.decoder(layer, n, model.schedule.produces_index(layer))?;
         #[cfg(test)]
         super::super::ced::tests::checkpoint("ced_decoder_complete", cancel)?;
@@ -959,6 +1046,8 @@ impl Workspace {
             .complete_ced_decoder_chunk(layer, position, 1)?;
         #[cfg(test)]
         super::super::ced::qualification::controls(layer, position, 1, &controls)?;
+        #[cfg(test)]
+        batches::tests::record(layer, position..position + 1, &controls);
         counters.decoder(layer, 1, model.schedule.produces_index(layer))?;
         #[cfg(test)]
         super::super::ced::tests::checkpoint("ced_decoder_complete", cancel)?;
@@ -1044,93 +1133,97 @@ impl Workspace {
             maximum,
             backing: None,
         };
-        for layer in &plan.decoder {
-            let mut fuse_seed = !arithmetic.scalar()
-                && layer.fuse_seed_with_packed_output(plan.prompt_rows, plan.full_chunk_rows);
-            #[cfg(test)]
-            {
-                fuse_seed &= !super::super::ced::tests::unfused();
-            }
-            let seeds = if fuse_seed {
-                0..0
-            } else {
-                layer.seed_rows.clone()
-            };
-            for chunk in chunk_views(seeds, chunk_rows).map_err(|e| e.to_string())? {
-                objc2::rc::autoreleasepool(|_| {
-                    self.ced_seed(
-                        model,
-                        layer.layer,
-                        chunk.absolute_rows,
-                        arithmetic,
-                        cancel,
-                        &mut storage,
-                        &mut counters,
-                    )
-                })?;
-            }
-            let scalar_tail = if arithmetic.scalar() {
-                None
-            } else {
-                plan.scalar_tail()
-            };
-            let row_end = scalar_tail.unwrap_or(layer.output_rows.end);
-            for chunk in chunk_views(layer.output_rows.start..row_end, chunk_rows)
-                .map_err(|e| e.to_string())?
-            {
-                let range = chunk.absolute_rows;
-                let final_logits =
-                    layer.layer + 1 == model.layers.len() && range.end == plan.prompt_rows;
-                objc2::rc::autoreleasepool(|_| {
-                    if arithmetic.scalar() {
+        if !arithmetic.scalar() && batches::batch_layers() != 0 {
+            self.ced_decoder_groups(model, plan, cancel, &mut storage, &mut counters, &mut pool)?;
+        } else {
+            for layer in &plan.decoder {
+                let mut fuse_seed = !arithmetic.scalar()
+                    && layer.fuse_seed_with_packed_output(plan.prompt_rows, plan.full_chunk_rows);
+                #[cfg(test)]
+                {
+                    fuse_seed &= !super::super::ced::tests::unfused();
+                }
+                let seeds = if fuse_seed {
+                    0..0
+                } else {
+                    layer.seed_rows.clone()
+                };
+                for chunk in chunk_views(seeds, chunk_rows).map_err(|e| e.to_string())? {
+                    objc2::rc::autoreleasepool(|_| {
+                        self.ced_seed(
+                            model,
+                            layer.layer,
+                            chunk.absolute_rows,
+                            arithmetic,
+                            cancel,
+                            &mut storage,
+                            &mut counters,
+                        )
+                    })?;
+                }
+                let scalar_tail = if arithmetic.scalar() {
+                    None
+                } else {
+                    plan.scalar_tail()
+                };
+                let row_end = scalar_tail.unwrap_or(layer.output_rows.end);
+                for chunk in chunk_views(layer.output_rows.start..row_end, chunk_rows)
+                    .map_err(|e| e.to_string())?
+                {
+                    let range = chunk.absolute_rows;
+                    let final_logits =
+                        layer.layer + 1 == model.layers.len() && range.end == plan.prompt_rows;
+                    objc2::rc::autoreleasepool(|_| {
+                        if arithmetic.scalar() {
+                            self.ced_decoder_scalar(
+                                model,
+                                layer.layer,
+                                range.start,
+                                final_logits,
+                                cancel,
+                                &mut storage,
+                                &mut counters,
+                            )
+                        } else {
+                            self.ced_decoder_rows(
+                                model,
+                                layer.layer,
+                                range,
+                                if fuse_seed {
+                                    Some(layer.seed_rows.clone())
+                                } else {
+                                    None
+                                },
+                                final_logits,
+                                cancel,
+                                &mut storage,
+                                &mut counters,
+                                &mut pool,
+                            )
+                        }
+                    })?;
+                    fuse_seed = false;
+                }
+                if let Some(position) = scalar_tail {
+                    objc2::rc::autoreleasepool(|_| {
                         self.ced_decoder_scalar(
                             model,
                             layer.layer,
-                            range.start,
-                            final_logits,
+                            position,
+                            layer.layer + 1 == model.layers.len(),
                             cancel,
                             &mut storage,
                             &mut counters,
                         )
-                    } else {
-                        self.ced_decoder_rows(
-                            model,
-                            layer.layer,
-                            range,
-                            if fuse_seed {
-                                Some(layer.seed_rows.clone())
-                            } else {
-                                None
-                            },
-                            final_logits,
-                            cancel,
-                            &mut storage,
-                            &mut counters,
-                            &mut pool,
-                        )
-                    }
-                })?;
-                fuse_seed = false;
+                    })?;
+                }
+                #[cfg(test)]
+                super::super::ced::qualification::decoder_layer(
+                    &self.attention,
+                    layer.layer,
+                    plan.prompt_rows,
+                )?;
             }
-            if let Some(position) = scalar_tail {
-                objc2::rc::autoreleasepool(|_| {
-                    self.ced_decoder_scalar(
-                        model,
-                        layer.layer,
-                        position,
-                        layer.layer + 1 == model.layers.len(),
-                        cancel,
-                        &mut storage,
-                        &mut counters,
-                    )
-                })?;
-            }
-            #[cfg(test)]
-            super::super::ced::qualification::decoder_layer(
-                &self.attention,
-                layer.layer,
-                plan.prompt_rows,
-            )?;
         }
         drop(pool);
         cancelled(cancel)?;

@@ -2,6 +2,8 @@ use super::super::{engram::HashConfig, gguf::Schedule};
 use super::{Config, prefill::DEFAULT_CHUNK_ROWS};
 use std::{fmt, ops::Range};
 
+pub(super) mod batches;
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct CedRequest {
     pub prompt_rows: Option<usize>,

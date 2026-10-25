@@ -1,10 +1,12 @@
 use super::*;
 use metal::evaluate_metal_memory_admission_with_cpu_bytes;
+use objc2::rc::{Weak, autoreleasepool};
+use objc2::runtime::ProtocolObject;
 use objc2_metal::MTLDevice;
 use serde_json::json;
 use sha2::{Digest, Sha256};
 
-const DOMAINS: [usize; 8] = [0, 1, 255, 256, 257, 2048, 16384, 131072];
+const DOMAINS: [usize; 9] = [0, 1, 255, 256, 257, 2048, 2049, 16384, 131072];
 const COUNTS: [usize; 4] = [0, 1, 256, 2048];
 const PATTERNS: [&str; 4] = ["mixed", "boundary", "duplicates", "invalid"];
 const GUARD: u32 = 0x91ab_cdef;
@@ -14,6 +16,7 @@ const THREADS: usize = 256;
 const BATCH: usize = 4;
 const ROUNDS: usize = 3;
 const CPU_RESERVE: u64 = 1 << 20;
+const LIFETIME_BOOKKEEPING_BYTES: u64 = 4096;
 const LIMIT: u64 = 64 << 20;
 const PROTOCOL: &str = "v41-candidate-publish-v1";
 
@@ -73,7 +76,9 @@ fn buffer_words(domain: usize, count: usize) -> [usize; 3] {
 fn cpu_price(domain: usize, count: usize) -> u64 {
     // Eight full inventory copies cover upload staging, ID permutations,
     // sorted oracle/set, expected mask, incumbent snapshot, and guard reads.
-    8 * buffer_words(domain, count).iter().sum::<usize>() as u64 * 4 + CPU_RESERVE
+    8 * buffer_words(domain, count).iter().sum::<usize>() as u64 * 4
+        + CPU_RESERVE
+        + LIFETIME_BOOKKEEPING_BYTES
 }
 
 #[test]
@@ -88,6 +93,12 @@ fn candidate_publish_cpu_reference_contract() {
     assert_eq!(domain, 131072);
     assert_eq!(domain * config.candidate_topk, 268435456);
     assert_eq!(config.candidate_block * config.candidate_topk, 16384);
+    let first_pruned_keys = config.candidate_block * config.candidate_topk + 1;
+    assert_eq!(first_pruned_keys, 16385);
+    let first_pruned_domain = first_pruned_keys.div_ceil(config.candidate_block);
+    assert_eq!(first_pruned_domain, 2049);
+    assert!(DOMAINS.contains(&first_pruned_domain));
+    assert_eq!(first_pruned_domain * config.candidate_topk, 4196352);
 }
 
 #[test]
@@ -123,7 +134,7 @@ fn candidate_publish_cpu_grid_and_controls() {
             }
         }
     }
-    assert_eq!(cases, 128);
+    assert_eq!(cases, 144);
     // A semantically wrong ID permutation must not be confused with merely
     // reordering the ID list (which is explicitly legal).
     assert_ne!(reference(257, &[0, 255]), reference(257, &[1, 256]));
@@ -141,7 +152,110 @@ fn candidate_publish_cpu_budget_contract() {
     }
     assert_eq!(buffer_words(0, 0), [50, 34, 66]);
     assert_eq!(buffer_words(131072, 2048), [2097, 131105, 131137]);
-    assert_eq!(cpu_price(131072, 2048), 9507424);
+    assert_eq!(cpu_price(131072, 2048), 9511520);
+    assert!(std::mem::size_of::<BufferProbes>() as u64 <= LIFETIME_BOOKKEEPING_BYTES);
+}
+
+type BufferProbes = [Weak<ProtocolObject<dyn MTLBuffer>>; 3];
+
+fn drained_case_pool<G, P>(
+    transaction: G,
+    work: impl FnOnce(&G) -> P,
+    verify_release: impl FnOnce(P),
+) {
+    let probes = autoreleasepool(|_| work(&transaction));
+    verify_release(probes);
+    // Admission stays serialized through Rust destruction AND pool drain.
+    drop(transaction);
+}
+
+#[test]
+fn candidate_publish_cpu_case_pool_lifetime_controls() {
+    use objc2::rc::Retained;
+    use objc2::runtime::NSObject;
+    use std::cell::Cell;
+
+    struct Guard<'a>(&'a Cell<bool>);
+    impl Drop for Guard<'_> {
+        fn drop(&mut self) {
+            self.0.set(false);
+        }
+    }
+
+    let held = Cell::new(true);
+    drained_case_pool(
+        Guard(&held),
+        |_| {
+            assert!(held.get());
+            let object = NSObject::new();
+            let weak = Weak::from_retained(&object);
+            let _ = Retained::autorelease_ptr(object);
+            assert!(weak.load().is_some(), "no-drain control must still be live");
+            weak
+        },
+        |weak| {
+            assert!(held.get(), "guard must outlive the drain/release check");
+            assert!(weak.load().is_none(), "case autoreleases must be drained");
+        },
+    );
+    assert!(!held.get());
+
+    drained_case_pool(
+        (),
+        |_| {
+            let object = NSObject::new();
+            let weak = Weak::from_retained(&object);
+            let _ = Retained::autorelease_ptr(object.clone());
+            (weak, object)
+        },
+        |(weak, retained)| {
+            assert!(
+                weak.load().is_some(),
+                "escaped-retain control must be detected"
+            );
+            drop(retained);
+            assert!(weak.load().is_none());
+        },
+    );
+}
+
+#[test]
+fn candidate_publish_cpu_nested_sample_pool_contract() {
+    use objc2::rc::Retained;
+    use objc2::runtime::NSObject;
+
+    for _ in 0..2 {
+        drained_case_pool(
+            (),
+            |_| {
+                let fixture = NSObject::new();
+                let fixture_weak = Weak::from_retained(&fixture);
+                let _ = Retained::autorelease_ptr(fixture.clone());
+                for _ in 0..ROUNDS * 8 {
+                    let sample_weak = autoreleasepool(|_| {
+                        let command = NSObject::new();
+                        let weak = Weak::from_retained(&command);
+                        let _ = Retained::autorelease_ptr(command);
+                        assert!(weak.load().is_some());
+                        assert!(fixture_weak.load().is_some());
+                        weak
+                    });
+                    assert!(sample_weak.load().is_none(), "no sample accumulation");
+                    assert!(
+                        fixture_weak.load().is_some(),
+                        "one fixture spans all samples"
+                    );
+                }
+                drop(fixture);
+                assert!(
+                    fixture_weak.load().is_some(),
+                    "case pool has not drained yet"
+                );
+                fixture_weak
+            },
+            |weak| assert!(weak.load().is_none(), "no case accumulation"),
+        );
+    }
 }
 
 fn forbidden_native_variable(name: &str) -> bool {
@@ -304,7 +418,13 @@ struct Fixture {
 }
 
 impl Fixture {
-    fn new(ctx: &MetalContext, domain: usize, count: usize, pattern: &str) -> Self {
+    fn new(
+        ctx: &MetalContext,
+        domain: usize,
+        count: usize,
+        pattern: &str,
+        _transaction: &metal::MetalAllocationTransactionGuard,
+    ) -> Self {
         assert!(DOMAINS.contains(&domain) && COUNTS.contains(&count));
         let sizes = buffer_words(domain, count).map(|n| n as u64 * 4);
         let priced: u64 = sizes
@@ -313,7 +433,6 @@ impl Fixture {
             .sum();
         let cpu = cpu_price(domain, count);
         assert!(priced + cpu < LIMIT);
-        let _transaction = ctx.begin_allocation_transaction();
         let admission = evaluate_metal_memory_admission_with_cpu_bytes(
             priced,
             cpu,
@@ -456,6 +575,47 @@ impl Fixture {
     }
 }
 
+fn with_fixture(
+    ctx: &MetalContext,
+    domain: usize,
+    count: usize,
+    pattern: &str,
+    phase: &str,
+    work: impl FnOnce(&Fixture),
+) {
+    drained_case_pool(
+        ctx.begin_allocation_transaction(),
+        |transaction| {
+            let f = Fixture::new(ctx, domain, count, pattern, transaction);
+            let probes: BufferProbes = [
+                Weak::from_retained(&f.selected.backing.buffer),
+                Weak::from_retained(&f.mask.backing.buffer),
+                Weak::from_retained(&f.observed.backing.buffer),
+            ];
+            assert!(probes.iter().all(|weak| weak.load().is_some()));
+            work(&f);
+            drop(f);
+            probes
+        },
+        |probes| {
+            for (name, weak) in ["ids", "mask", "observer"].into_iter().zip(probes) {
+                assert!(
+                    weak.load().is_none(),
+                    "{phase} {name} buffer survived case drain"
+                );
+            }
+            eprintln!(
+                "{}",
+                json!({
+                    "protocol": PROTOCOL, "event": "case_release", "phase": phase,
+                    "domain_words": domain, "kept_id_count": count, "pattern": pattern,
+                    "buffers": ["ids", "mask", "observer"], "all_released": true,
+                })
+            );
+        },
+    );
+}
+
 fn context() -> MetalContext {
     let ctx = MetalContext::new().expect("explicit fixture requires Metal, never skip");
     assert!(
@@ -483,8 +643,9 @@ fn correctness_grid(ctx: &MetalContext, p: &Pipelines) {
     for domain in DOMAINS {
         for count in COUNTS {
             for pattern in PATTERNS {
-                let f = Fixture::new(ctx, domain, count, pattern);
-                f.correctness(ctx, p);
+                with_fixture(ctx, domain, count, pattern, "correctness", |f| {
+                    f.correctness(ctx, p);
+                });
                 cases += 1;
                 eprintln!(
                     "{}",
@@ -498,7 +659,7 @@ fn correctness_grid(ctx: &MetalContext, p: &Pipelines) {
             }
         }
     }
-    assert_eq!(cases, 128);
+    assert_eq!(cases, 144);
     eprintln!(
         "{}",
         json!({"protocol": PROTOCOL, "event": "correctness_complete", "cases": cases})
@@ -540,63 +701,69 @@ fn candidate_publish_m5_native_timing() {
             "excludes": "allocation, compilation, CPU oracle/readback, observer, model, selection",
             "warmup_samples": 0, "retries": 0, "spread_or_gain_gate": false,
             "known_validation_flags_absent": true,
+            "sample_pool_setup_and_drain_in_cpu_wall": false,
         })
     );
     use Arm::{ClearScatter as B, Incumbent as A};
     let mut sample = 0;
     for domain in DOMAINS {
         for count in COUNTS {
-            let f = Fixture::new(&ctx, domain, count, "mixed");
-            let expected = reference(domain, &f.input);
-            for round in 0..ROUNDS {
-                for (order, arms) in [("ABBA", [A, B, B, A]), ("BAAB", [B, A, A, B])] {
-                    for (slot, arm) in arms.into_iter().enumerate() {
-                        f.reset();
-                        let wall = std::time::Instant::now();
-                        let command = ctx.queue.commandBuffer().unwrap();
-                        let enc = KernelEncoder::begin(&command);
-                        for _ in 0..BATCH {
-                            f.encode(&enc, &p, arm, false);
+            with_fixture(&ctx, domain, count, "mixed", "timing", |f| {
+                let expected = reference(domain, &f.input);
+                for round in 0..ROUNDS {
+                    for (order, arms) in [("ABBA", [A, B, B, A]), ("BAAB", [B, A, A, B])] {
+                        for (slot, arm) in arms.into_iter().enumerate() {
+                            autoreleasepool(|_| {
+                                f.reset();
+                                let wall = std::time::Instant::now();
+                                let command = ctx.queue.commandBuffer().unwrap();
+                                let enc = KernelEncoder::begin(&command);
+                                for _ in 0..BATCH {
+                                    f.encode(&enc, &p, arm, false);
+                                }
+                                enc.end();
+                                metal::commit_and_wait(&command).unwrap();
+                                let wall_ns = wall.elapsed().as_nanos() as u64;
+                                let start = command.GPUStartTime();
+                                let end = command.GPUEndTime();
+                                let valid = start.is_finite()
+                                    && end.is_finite()
+                                    && start > 0.0
+                                    && end > start;
+                                // Emit even an invalid measurement before refusing; no retry/filter.
+                                eprintln!(
+                                    "{}",
+                                    json!({
+                                        "protocol": PROTOCOL, "event": "sample", "sample": sample,
+                                        "domain_words": domain, "kept_id_count": count, "pattern": "mixed",
+                                        "logical_incumbent_comparisons_per_publication": domain * count,
+                                        "round": round, "order": order, "slot": slot, "arm": arm.name(),
+                                        "publications": BATCH, "dispatches": BATCH * arm.dispatches(),
+                                        "cpu_wall_ns": wall_ns, "gpu_start_s": start, "gpu_end_s": end,
+                                        "gpu_timestamps_valid": valid,
+                                        "gpu_batch_ns": if valid { Some((end - start) * 1e9) } else { None },
+                                        "gpu_ns_per_publication": if valid { Some((end - start) * 1e9 / BATCH as f64) } else { None },
+                                        "cpu_ns_per_publication": wall_ns as f64 / BATCH as f64,
+                                    })
+                                );
+                                assert!(
+                                    valid,
+                                    "GPU timestamps unavailable; sample retained, no retry"
+                                );
+                                assert_eq!(f.mask.read(), expected);
+                                assert_eq!(f.selected.read(), f.input);
+                                f.selected.check_guards();
+                                f.mask.check_guards();
+                                f.observed.check_guards();
+                                sample += 1;
+                            });
                         }
-                        enc.end();
-                        metal::commit_and_wait(&command).unwrap();
-                        let wall_ns = wall.elapsed().as_nanos() as u64;
-                        let start = command.GPUStartTime();
-                        let end = command.GPUEndTime();
-                        let valid =
-                            start.is_finite() && end.is_finite() && start > 0.0 && end > start;
-                        // Emit even an invalid measurement before refusing; no retry/filter.
-                        eprintln!(
-                            "{}",
-                            json!({
-                                "protocol": PROTOCOL, "event": "sample", "sample": sample,
-                                "domain_words": domain, "kept_id_count": count, "pattern": "mixed",
-                                "logical_incumbent_comparisons_per_publication": domain * count,
-                                "round": round, "order": order, "slot": slot, "arm": arm.name(),
-                                "publications": BATCH, "dispatches": BATCH * arm.dispatches(),
-                                "cpu_wall_ns": wall_ns, "gpu_start_s": start, "gpu_end_s": end,
-                                "gpu_timestamps_valid": valid,
-                                "gpu_batch_ns": if valid { Some((end - start) * 1e9) } else { None },
-                                "gpu_ns_per_publication": if valid { Some((end - start) * 1e9 / BATCH as f64) } else { None },
-                                "cpu_ns_per_publication": wall_ns as f64 / BATCH as f64,
-                            })
-                        );
-                        assert!(
-                            valid,
-                            "GPU timestamps unavailable; sample retained, no retry"
-                        );
-                        assert_eq!(f.mask.read(), expected);
-                        assert_eq!(f.selected.read(), f.input);
-                        f.selected.check_guards();
-                        f.mask.check_guards();
-                        f.observed.check_guards();
-                        sample += 1;
                     }
                 }
-            }
+            });
         }
     }
-    assert_eq!(sample, 768);
+    assert_eq!(sample, 864);
     eprintln!(
         "{}",
         json!({"protocol": PROTOCOL, "event": "timing_complete", "samples": sample})

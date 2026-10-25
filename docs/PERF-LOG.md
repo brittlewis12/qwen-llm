@@ -6,6 +6,30 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the current state and evidence index.
 
+## 2026-10-25 - Retained-Window P4 Repeats A Native 8K CED Win
+
+- Unchanged frozen sources `b7038406`/`7398cb76` pass actual 8K Full/CED:
+  all 257 complete heads and 56 causal regions per position, P0 old-reference
+  and P4/P0 bridges, unchanged work, one import/KV state, no fallback and 12
+  commands. Both resource inventories match 2K; local rechecking reproduces
+  the complete bridges and natural completion.
+- The uninstrumented P0-P4-P4-P0 matrix completes all 56 checked endpoints.
+  P4 combined retained Full/CED medians are 11.093566/7.645048 s: CED latency
+  is 31.1% lower. All 12 P4 CED pilot/main calls (7.606-8.681 s) beat all 12
+  Full calls (9.566-11.903 s), across both repeated processes.
+- Mapping does not improve every call: P0's first CED retained median is
+  7.347178 s, faster than P4, but its second is 13.667603 s; P0 pilot/main CED
+  spans 7.164-34.121 s. This is observed tail reduction and repeated native
+  8K CED/Full separation, not universal speedup or isolated length causality.
+- All 383 sparse host observations are normal; native sampled incremental
+  Metal allocation is 5712609280 bytes, within admission. These are not peak/
+  no-swap bounds. Production timing is requested; external effective regime is
+  unattested. No 8K diagnostic decomposition is claimed.
+- Keep P4 as a frozen experimental control. No main CED/mapping default,
+  admission, device setting, pinning or residency change is installed. Other
+  artifacts/contexts, quality and main integration remain separate work.
+- [Complete samples, frozen hashes and qualification boundaries](bench/2026-10-25-v41-retained-windows.md).
+
 ## 2026-10-25 - Retained Windows Preserve Exact State And Reduce 2K Tails
 
 - Final disabled/4-GiB sources `b7038406`/`7398cb76` differ by one constant on

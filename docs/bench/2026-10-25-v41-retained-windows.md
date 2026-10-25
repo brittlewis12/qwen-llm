@@ -200,6 +200,67 @@ Frozen sources and binaries remain unchanged for the subsequent 8K
 correctness/native followup. No main mapping or CED default is promoted from
 these 2K results.
 
+## 8K Correctness And Native Confirmation
+
+The same frozen executables now pass Full/CED at 8192 prompt rows plus 256
+teacher-forced steps. Both pairs again match every complete head and causal
+state record; P0 bridges to the old qualified batch-two reference and P4 to
+P0. Work counters remain unchanged, with one import, one KV state, no fallback
+and 12 completed CED commands. Sampled incremental Metal allocation is
+5718163456 bytes within the accepted 5776277504-byte bound. Resource
+inventories match the qualified 2K layouts exactly. Local offline rechecking
+reproduces both full-state bridges and natural completion.
+
+Full-model report SHA256s:
+
+```text
+P0 2df88c81b8dfb5dacbc2443e7c9c823c9acd5b846112e13ed71e524e8b9afd0b
+P4 148aa4531e0c09d1706cc759738ae21a21f1c82f65818008fa3a28ffc51e59a1
+```
+
+Only after those gates pass, run another uninstrumented P0-P4-P4-P0 matrix
+with the same protocol, four retained samples per policy/process and all 56
+chronological endpoints checked. Every source/build, expected head, no-fallback,
+12-command, sampled-bound, resource-inventory and natural-completion check
+passes. Local reduction independently reproduces all four native summaries.
+
+Retained seconds, chronological within each policy:
+
+| Process Order | Full | CED | Median Full / CED |
+| --- | --- | --- | --- |
+| P0 first | 20.574736, 9.518978, 16.011909, 36.487126 | 7.336950, 7.357406, 7.194841, 16.055441 | 18.293323 / 7.347178 |
+| P4 first | 11.091014, 9.566335, 11.096121, 11.040451 | 7.631693, 7.621777, 7.661854, 8.681068 | 11.065732 / 7.646773 |
+| P4 second | 11.096119, 9.605344, 11.099823, 11.613667 | 7.658403, 7.606312, 7.615299, 8.513090 | 11.097971 / 7.636851 |
+| P0 second | 19.485146, 9.518402, 17.949658, 14.625001 | 10.286979, 16.186770, 11.148436, 34.121185 | 16.287329 / 13.667603 |
+
+Combined retained Full/CED medians are 16.980784/10.717707 s for P0 and
+11.093566/7.645048 s for P4. Within P4, CED's retained median latency is
+31.1% lower than Full. Every one of the 12 P4 CED pilot/main calls
+(7.606-8.681 s) is faster than every one of the 12 P4 Full calls
+(9.566-11.903 s), including both repeated processes. This is a repeated native
+8K win in this configuration, not a universal context/workload claim.
+
+The mapping comparison is more nuanced: P0's first CED retained median is
+7.347178 s, faster than P4, while its second is 13.667603 s. P0 CED pilot/main
+spans 7.164-34.121 s versus P4 7.606-8.681 s. The P4 cohorts show smaller
+observed tails and CED/Full separation in both processes, not faster execution
+of every invocation or shader. P0's best calls remain faster.
+No 8K diagnostic profiler was enabled, so do not extend the measured 2K driver
+intervals into an unmeasured 8K timing decomposition.
+
+All 383 sparse host health samples are normal. Conservative CPU availability
+reaches 40.390 GiB and system wired plus compressor reaches 179.951 GiB; these
+are observations, not peak/absence-of-swap or transient-driver bounds. Native
+sampled incremental Metal allocation is 5712609280 bytes, within admission.
+
+The 8K native matrix receipt SHA256 is
+`8cc596bb57f8ad341a8875280fc2ffa52e87c09dec4d4a0780cbf2fd3f4d55b4`;
+the independent reduction SHA256 is
+`30990c19e9a5c723d6291f22679ee349f9bde038e99b7faf0d691baad2a53d0b`.
+The P4 checkpoint is a useful frozen control for subsequent CED work. Main
+integration, other artifacts/lengths, quality/full-context coverage and any
+default policy change remain separate work, not implied by this experiment.
+
 ## Interpretation Boundaries
 
 - Driver scheduling intervals include waiting/scheduling, not measured CPU busy
@@ -210,7 +271,7 @@ these 2K results.
   not peaks; sparse host health cannot bound transient driver costs or swap.
 - Zero CPU process reads/page-ins does not prove absence of GPU faults or DRAM
   traffic. Native synthetic routes are not a real-text workload distribution.
-- This qualifies the final sources at 2K only. It does not extend the new
+- This qualifies the final sources at 2K and 8K only. It does not extend the
   mapping strategy to other lengths, artifacts, full context or quality tests.
 - Main does not ship the experimental CED executor or these mapping changes.
   The frozen source and private evidence remain available without a push.

@@ -162,20 +162,24 @@ Two independent outside reviews plus primary-source/source audits prioritize:
   all 336 samples retained. The 22.94% arithmetic model does not establish a
   latency gain. Default dispatch stays unchanged; broader structural occupancy
   remains open. See [the measured leaf and limits](bench/2026-10-25-v41-adaptive-tail-negative.md).
-- Shared retained-window partitioning: in flight
+- Shared retained-window partitioning: landed qualification/native evidence
   (`perf/v41-window-p0-v30`, `perf/v41-window-p4-v30`). Disabled/4-GiB sources
   `b7038406`/`7398cb76` pass 74 CPU checks each, four actual M5 mapping/lifetime
-  witnesses and 2K Full/CED with all 257 complete heads/state matching the
+  witnesses and 2K/8K Full/CED with all 257 complete heads/state matching the
   qualified batch-two reference. Actual retained objects change 44 -> 85,
   largest 44.594 -> 3.945 GiB, exposed span +656 KiB, private shadow zero.
   Instrumented and uninstrumented P0-P4-P4-P0 cohorts reproduce a 2K tail
   improvement: native retained P4 CED 3.469-4.564 s versus P0 5.528-30.209 s.
   A P0 pilot is still faster than P4; CED does not yet beat Full at 2K.
-  Same frozen-source 8K qualification/confirmation is in flight, not implied by
-  2K. Preserve oversized eligibility, EOF/lifetimes and actual admission; this
-  is a soft coalescing target, not a fit cap. It also changes mmap provenance,
-  so a win cannot isolate buffer length as the cause. No pinning/residency/
-  purge or default promotion is added. See
+  Same-source 8K native confirmation repeats CED/Full separation in both P4
+  processes: combined retained medians 7.645/11.094 s, CED latency 31.1% lower;
+  all 12 CED pilot/main calls beat all 12 Full calls. P0 still has faster best
+  calls but CED tails to 34.121 s versus P4 8.681 s. This is experimental
+  evidence, not a main/default landing or universal win. Preserve oversized
+  eligibility, EOF/lifetimes and actual admission; this is a soft coalescing
+  target, not a fit cap. It also changes mmap provenance, so the comparison
+  cannot isolate buffer length as the cause. No pinning/residency/purge is
+  added. Main integration and other-artifact/context coverage remain open. See
   [the frozen sources, full cohorts and limits](bench/2026-10-25-v41-retained-windows.md).
 - Batched Engram preparation, CED-origin prefix reuse and candidate-only
   long-context reindexing: open, with distinct cold/warm/context economics.

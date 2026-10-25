@@ -31,21 +31,27 @@ before building anything adjacent. This replaces relaying between sessions.
 Current implementation campaign (2026-10-25): close the trust-boundary defects
 before promoting the experimental CED composition. Independent owned lanes:
 
-- Tensor staging ownership: in flight (`fix/v41-staging-ownership-v33`). Separate
-  clamped source reads from unique physical staging destinations in narrow and
-  wide weight tails; prove coverage/unique ownership and run actual M5 witnesses.
-- Executable family contracts: in flight (`fix/v41-execution-contract-v33`).
-  Distinguish descriptive planning from backend eligibility, validate activation
-  aliases, and preserve general output-group fallback instead of a shape allowlist.
+- Tensor staging ownership: landed (`e97bd5c0`, qualified source `7d80ac08`).
+  Unique physical staging and zero-filled invalid rows pass eight focused CPU
+  and fourteen actual M5 GPU tests, including all 11,951 strict buffer-release
+  assertions. Independent structural ownership checks reject the historical map.
+- Executable family contracts: landed (`de082865`, qualified source `0d6bafaa`).
+  Shared backend eligibility and activation-alias checks preserve descriptive
+  plans and distinguish memory fit. General output-group fallback passes an
+  independent stored-precision M5 oracle at 1/8/16/17/32 groups.
 - Request planning/lifecycle: in flight (`fix/v41-request-planning-v33`). Release
   obsolete live state before avoidable admission refusal, report actual selected
   geometry, and choose admitted chunk candidates before mutation. Keep Metal/CPU
   accounting domains and pending debt intact; do not shrink context or retry a
   poisoned state. Resolve live/snapshot preference explicitly rather than assuming
   longest prefix always minimizes request latency.
-- Current acceptance: in flight (`fix/v41-acceptance-current-v33`). Repair the
-  stale suffix dispatch witness, generated environment reference, intentional
-  test identities/ignore accounting, and expose genuine execution boundaries.
+- Current acceptance machinery: landed (`16c70885`, `45a3ce68`, `0a4c676f`).
+  Exact CPU/exclusion inventory, current suffix census, generated environment
+  reference, identity probes and checked comparison reporters replace stale
+  expectations. Actual main `de082865` ring capture passes dispatch and
+  restore/growth self-parity but fails independent attention output tolerances
+  in all 120 rows; all selection/owner and applicable candidate IDs agree.
+  Numerical localization is in flight; do not weaken the acceptance gate.
 
 The parent integration lane will compose reviewed changes onto current main,
 then qualify retained-window mapping and explicit cold exact CED without losing
@@ -54,10 +60,14 @@ Full/CED equality is not a race-freedom or independent model-numerics proof.
 Serving/CED-origin reuse has a separate acceptance boundary from cold run/bench.
 Long-context selector work removal and complete short-packet expert dataflow
 remain independent structural bets, not another adaptive-tail width sweep.
-The first exact selector leaf is in flight (`perf/v41-mask-publication-v33`):
-compare incumbent membership scans with ordered clear plus atomic scatter.
-Preserve duplicate/out-of-range ID behavior and include the extra dispatch;
-this leaf does not remove the dense mask allocation or qualify model speedup.
+The first exact selector leaf is in flight (`perf/v41-mask-valid-ids-v35`).
+Source `3ab20576` passes 144 actual M5 correctness cases and retains all 864 native
+samples, including the extra clear/scatter dispatch. Large-domain isolated times
+are promising, but mixed timed IDs contain invalid/duplicate entries. Confirm
+valid unique ascending/ranked IDs before inclusive producer/consumer and model
+gates; this leaf neither removes dense mask allocation nor qualifies model speedup.
+Current proof identities, failure metrics and limits are in
+[runtime-contract qualification](bench/2026-10-25-v41-runtime-contracts.md).
 Before automatic policy selection, measure homogeneous request streams as well
 as mixed transitions: the retained P4 8K same-policy Full calls are 9.566/9.605 s
 and same-policy CED calls 8.681/8.513 s. Two observations per transition do not

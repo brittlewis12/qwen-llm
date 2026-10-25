@@ -6,6 +6,29 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the current state and evidence index.
 
+## 2026-10-25 - Trust Repairs Land; Independent Attention Gate Exposes Numerical Drift
+
+- Main `e97bd5c0`/`de082865` integrate reviewed staging ownership and executable
+  contracts/general output-A fallback. Actual corrected M5 fixtures pass fourteen
+  staging GPU tests and the independent fifteen-case native/fallback witness;
+  all strict buffer-release checks pass. No new performance default is selected.
+- Maintained acceptance machinery is current, but the actual main ring/suffix
+  qualification is not green: dispatch census and snapshot/restore/growth parity
+  pass; all 120 selection/owner and 75 candidate checks agree, while all 120
+  independently replayed attention outputs fail the existing absolute tolerance.
+  Worst max-absolute error is 0.004125595 and relative L2 is 0.000721274. Retain the
+  failure and localize operand lineage; do not loosen tolerances or substitute
+  Full/CED agreement for independent numerical acceptance.
+- Exact mask-publication source `3ab20576` passes 144 M5 correctness cases and
+  retains all 864 native samples. Large-domain publication-only results favor
+  clear/scatter even with its added dispatch, but timed mixed IDs include invalid
+  and repeated entries. Claim valid-unique ascending/ranked confirmation on
+  `perf/v41-mask-valid-ids-v35`; no production dispatch or dense allocation change.
+- Composed CED review catches admitted-width, optional-admission fallback and
+  mixed-repetition telemetry defects before promotion. Repairs and current-source
+  qualification remain in flight, independently of the numerical-oracle gap.
+- [Proofs, frozen identities, complete qualification scope and limits](bench/2026-10-25-v41-runtime-contracts.md).
+
 ## 2026-10-25 - Execution Capability And Trust-Boundary Campaign Starts
 
 - Split independent source repairs across staging ownership, executable family

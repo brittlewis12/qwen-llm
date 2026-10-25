@@ -515,7 +515,7 @@ fn plan_with_pricing(
     let mut plans = planning::candidates(preferred, None).map(|rows| build(rows, executions));
     let mut first = plans.next().expect("at least one geometry")?;
     first.alternatives = plans.collect::<std::result::Result<_, _>>()?;
-    if executions == [PrefillExecution::ShrinkingCed] {
+    if intent == PrefillIntent::OptionalCed {
         for rows in planning::candidates(preferred, None) {
             first
                 .alternatives

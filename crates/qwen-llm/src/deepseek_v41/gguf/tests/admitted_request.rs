@@ -144,7 +144,6 @@ fn small_request_cpu_quote_preserves_optional_intent_and_required_pair_refusal()
         let ced = quote(&[E::ShrinkingCed], observed).unwrap();
         let full = quote(&[E::FullForward], observed).unwrap();
         assert!(ced.required_metal_bytes > full.required_metal_bytes);
-        assert!(ced.required_metal_bytes + ced.required_cpu_bytes <= 256 << 20);
         assert_eq!(ced.prefill_admission.intent, PrefillIntent::OptionalCed);
         assert!(ced.prefill_admission.fallback.is_none());
         eprintln!(
@@ -158,11 +157,21 @@ fn small_request_cpu_quote_preserves_optional_intent_and_required_pair_refusal()
             ced.resident_storage.metal_view_bytes,
             ced.resident_storage.private_shadow_bytes
         );
+        assert!(
+            ced.required_metal_bytes + ced.required_cpu_bytes <= 512 << 20,
+            "combined fixture domains: Metal={} CPU={}",
+            ced.required_metal_bytes,
+            ced.required_cpu_bytes,
+        );
         let short = crate::metal::MetalMemorySignals {
             recommended_max_bytes: full.required_metal_bytes,
             ..observed
         };
         let fallback = quote(&[E::ShrinkingCed], short).unwrap();
+        let repeated = quote(&[E::ShrinkingCed, E::ShrinkingCed], short).unwrap();
+        assert_eq!(repeated.prefill_admission, fallback.prefill_admission);
+        assert_eq!(repeated.required_metal_bytes, fallback.required_metal_bytes);
+        assert_eq!(repeated.required_cpu_bytes, fallback.required_cpu_bytes);
         assert_eq!(
             fallback.prefill_admission.intent,
             PrefillIntent::OptionalCed

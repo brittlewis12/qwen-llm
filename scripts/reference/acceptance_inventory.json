@@ -2006,7 +2006,7 @@
     "name": "deepseek_v41::forward::planning::tests::metal::admitted_2k_request_on_4k_model_executes_ced_public_api_and_matches_same_width_full",
     "class": "gpu",
     "ignored": true,
-    "reason": "Bounded self-leased actual Metal public request-plan/Full/CED regression, <=256 MiB explicit CPU+Metal ledger and strict owner release; parent M5 execution required."
+    "reason": "Bounded self-leased actual Metal public request-plan/Full/CED regression, <=512 MiB explicit CPU+Metal ledger and strict owner release; parent M5 execution required."
   },
   {
     "target": "lib",

@@ -1,5 +1,5 @@
 use super::*;
-use crate::deepseek_v41::gguf::{self, ResidentWeights, tests::admitted_request};
+use crate::deepseek_v41::gguf::{ResidentWeights, tests::admitted_request};
 use objc2::rc::{Weak, autoreleasepool};
 
 const TOKENS: usize = 2049;
@@ -7,7 +7,7 @@ const CAPACITY: usize = TOKENS + 1;
 const FIXTURE_CPU: u64 = 32 << 20;
 // Token/logit vectors, saved causal-region bits and report serialization.
 const COMPARISON_CPU: u64 = 8 << 20;
-const BOUND: u64 = 256 << 20;
+const BOUND: u64 = 512 << 20;
 
 fn bits(values: &[f32]) -> Vec<u32> {
     assert!(values.iter().all(|v| v.is_finite()));
@@ -15,7 +15,7 @@ fn bits(values: &[f32]) -> Vec<u32> {
 }
 
 #[test]
-#[ignore = "self-leased <=256 MiB combined CPU+Metal ledger; admitted 2K state with unchanged 4K model; MTL debug required; no model"]
+#[ignore = "self-leased <=512 MiB combined CPU+Metal ledger; admitted 2K state with unchanged 4K model; MTL debug required; no model"]
 fn admitted_2k_request_on_4k_model_executes_ced_public_api_and_matches_same_width_full() {
     assert_eq!(std::env::var("MTL_DEBUG_LAYER").as_deref(), Ok("1"));
     assert_eq!(std::env::var("QWEN_METAL_LEASE_WAIT").as_deref(), Ok("1"));

@@ -54,10 +54,6 @@ Full/CED equality is not a race-freedom or independent model-numerics proof.
 Serving/CED-origin reuse has a separate acceptance boundary from cold run/bench.
 Long-context selector work removal and complete short-packet expert dataflow
 remain independent structural bets, not another adaptive-tail width sweep.
-The first exact selector leaf is in flight (`perf/v41-mask-publication-v33`):
-compare incumbent membership scans with ordered clear plus atomic scatter.
-Preserve duplicate/out-of-range ID behavior and include the extra dispatch;
-this leaf does not remove the dense mask allocation or qualify model speedup.
 Before automatic policy selection, measure homogeneous request streams as well
 as mixed transitions: the retained P4 8K same-policy Full calls are 9.566/9.605 s
 and same-policy CED calls 8.681/8.513 s. Two observations per transition do not

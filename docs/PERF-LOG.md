@@ -22,6 +22,10 @@ See also: `docs/PERF-ROADMAP.md` for the current state and evidence index.
 - Exact selector-domain removal and complete short-packet dataflow remain
   separate measured lanes. Keep independent numerical acceptance, cold runtime
   integration and warm-serving reuse as distinct deliverables.
+- Claim the first exact selector leaf on `perf/v41-mask-publication-v33`:
+  ordered clear plus atomic scatter versus the incumbent membership scan.
+  This preserves the dense representation and must include added launch cost,
+  duplicate/out-of-range IDs and guarded output checks before any promotion.
 
 ## 2026-10-25 - Retained-Window P4 Repeats A Native 8K CED Win
 

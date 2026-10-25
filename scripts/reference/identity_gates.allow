@@ -40,6 +40,7 @@ crates/qwen-llm/src/k2_horizon_chat.rs	2c9659a84c4eea6f9f60462221fe762c8c84d75c	
 crates/qwen-llm/src/k2_horizon_chat.rs	2da7d47641f4509da4ae47711e31d8b5f0f3f801ee08d87e7e9f07f814bdc4a3	provenance	upstream generation config digest recorded, never compared
 crates/qwen-llm/src/k2_horizon_chat.rs	a892cd0b0195599f283a8c706787520d9a6747640efb2f4dec4144b0abb62590	provenance	upstream template digest recorded in the chat profile, never compared
 crates/qwen-llm/src/k2_horizon_chat.rs	f6e3cd6dbf0f95016fff531f41f921dee541025733c14580a881cf5a5f9fa750	renderer_format	the embedded chat template must match the format the native renderer reproduces; a mismatch refuses chat and raw input still works (kept by review, 2026-10-19)
+crates/qwen-llm/src/metal/moe/hc4_strict.rs	1_013_904_223	frozen_experiment	Test-only strict HC probe LCG increment for deterministic operands; not an artifact byte count or identity gate.
 crates/qwen-llm/src/metal/qualification.rs	1ba1ce14804b9ada2330f374d792bf7b9396072ba0961785e6973801639eb2c2	provenance	measurement report digests are serialized as evidence and not read by holds_for
 crates/qwen-llm/src/metal/qualification.rs	Apple M1 Pro	frozen_experiment	device labels are stored in characterization records and are not read by holds_for
 crates/qwen-llm/src/metal/qualification.rs	Apple M4 Max	frozen_experiment	device labels are stored in characterization records and are not read by holds_for
@@ -57,4 +58,5 @@ crates/qwen-llm/src/qwen4exp_moe_down_index_probe.rs	*	frozen_experiment	pinned 
 crates/qwen-llm/src/qwen4exp_moe_m128_index_probe.rs	*	frozen_experiment	pinned census evidence and frozen research records
 crates/qwen-llm/src/qwen4exp_moe_observe.rs	*	frozen_experiment	pinned census evidence and frozen research records
 crates/qwen-llm/src/qwen4exp_moe_remaining_index_probe.rs	*	frozen_experiment	pinned census evidence and frozen research records
+crates/qwen-llm/src/qwen4exp_runtime/strict_inject_probe.rs	874537119c68f6c566c4288ba17c1099694416edb001c4003249570894438e97	frozen_experiment	Ignored strict HC probe verifies the retained natural-ssh token fixture; not a production model gate.
 crates/qwen-llm/src/runtime.rs	1_000_000_000	durable_binding	timestamp unit conversion contributes shard metadata to snapshot weight identity; it is not a gate threshold

@@ -1,86 +1,203 @@
 //! Conditional attention qualification and separate native continuation self-parity.
 use anyhow::{Context, Result, ensure};
+use objc2_metal::MTLComputePipelineState;
 use qwen_llm::deepseek_v41::forward::{Forward, State};
 use serde_json::{Value, json};
 
-pub(super) const RING_POSITIONS: [usize; 9] = [126, 127, 128, 254, 255, 256, 381, 382, 383];
+pub(super) const RING_CALLS: [usize; 2] = [127, 513];
+pub(super) const RING_END: usize = 640;
+pub(super) const RING_POSITIONS: [usize; 15] = [
+    126, 127, 128, 254, 255, 256, 381, 382, 383, 510, 511, 512, 637, 638, 639,
+];
+const PREFIX: &str = "kernel_deepseek_v41_attention_";
 
-pub(super) fn ring_census(calls: &[Vec<qwen_llm::metal::DispatchCensusRow>]) -> Result<Value> {
-    ensure!(calls.len() == 2, "ring census needs both capture calls");
-    let names = ["score_rows", "softmax_rows", "score", "softmax"]
-        .map(|s| format!("kernel_deepseek_v41_attention_{s}"));
-    let mut totals = [0usize; 4];
-    let mut reports = Vec::new();
-    for (call, rows) in calls.iter().enumerate() {
-        let counts = std::array::from_fn(|i| rows.iter().filter(|r| r.kernel == names[i]).count());
-        let last_batch = rows
-            .iter()
-            .filter(|r| names[..2].contains(&r.kernel))
-            .map(|r| r.encoder_ordinal)
-            .max()
-            .context("missing batched attention census")?;
-        let decode_separate = rows
-            .iter()
-            .filter(|r| names[2..].contains(&r.kernel))
-            .all(|r| r.encoder_ordinal > last_batch);
-        check_ring_dispatches(call, counts, decode_separate)?;
-        for (total, count) in totals.iter_mut().zip(counts) {
-            *total += count;
-        }
-        let mut shapes = std::collections::BTreeMap::new();
-        for r in rows {
-            let grid = [r.grid_width, r.grid_height, r.grid_depth];
-            let tg = [r.threads_width, r.threads_height, r.threads_depth];
-            *shapes
-                .entry((r.kernel.clone(), grid, tg, r.grid_tgs, r.tg_threads))
-                .or_insert(0usize) += 1;
-        }
-        let shapes: Vec<_> = shapes
-            .into_iter()
-            .map(|((kernel, grid, tg, grid_tgs, tg_threads), count)| {
-                json!({
-                    "kernel":kernel, "grid":grid, "threadgroup":tg, "dispatches":count,
-                    "total_grid_tgs":count as u64 * grid_tgs, "tg_threads":tg_threads
-                })
-            })
-            .collect();
-        reports.push(json!({"start":([0,127][call]), "prefill_rows":([127,257][call]),
-            "attention_dispatches":counts, "decode_encoders_after_batch":decode_separate, "kernel_shapes":shapes}));
+#[derive(Clone, Copy, Debug)]
+pub(super) struct RingPlan {
+    tensor: bool,
+    score32: bool,
+}
+
+impl RingPlan {
+    pub(super) fn selected(
+        ctx: &qwen_llm::metal::MetalContext,
+        weights: &qwen_llm::deepseek_v41::gguf::ResidentWeights,
+    ) -> Result<Self> {
+        let c = &weights.config;
+        ensure!(
+            c.heads == 64
+                && c.head_dim == 512
+                && c.window == 128
+                && c.index_topk == 512
+                && weights.schedule.layers == 40,
+            "ring census requires released 40-layer/64-head/512-latent geometry"
+        );
+        ensure!(
+            std::env::var_os("QWEN_V41_SINK_TILE").is_none(),
+            "ring boundary witness requires the ordinary 512-query tile; unset QWEN_V41_SINK_TILE"
+        );
+        ensure!(
+            ctx.pipeline("kernel_deepseek_v41_attention_normalize_rows")?
+                .maxTotalThreadsPerThreadgroup()
+                >= 128,
+            "ring census requires the released 128-thread normalization geometry"
+        );
+        let enabled = |name| std::env::var_os(name).is_none_or(|v| v != "0");
+        Ok(Self {
+            tensor: qwen_llm::metal::moe_grouped_tensor_selected(ctx)
+                && enabled("QWEN_V41_SINK_TENSOR"),
+            score32: enabled("QWEN_V41_SINK_TENSOR32"),
+        })
     }
+
+    fn kernels(self, queries: usize) -> [&'static str; 4] {
+        if self.tensor && queries >= 128 {
+            [
+                if self.score32 {
+                    "score_tensor32"
+                } else {
+                    "score_tensor"
+                },
+                "softmax_rows",
+                "pv_tensor",
+                "normalize_rows",
+            ]
+        } else {
+            ["score_mma", "softmax_rows", "pv_mma", "normalize_rows"]
+        }
+    }
+
+    pub(super) fn identity(self) -> Value {
+        json!({"layers":40, "heads":64, "head_dim":512, "window":128,
+            "index_topk":512, "query_tile_rows":512,
+            "tensor_selected":self.tensor, "tensor_score32_enabled":self.score32,
+            "source":"loaded_geometry_and_context_selection_not_inferred_from_census",
+            "limits":"census has no buffer bindings, query offsets, dispatch API kind or layer IDs"})
+    }
+}
+
+fn sink_kernel(kernel: &str) -> bool {
+    kernel.strip_prefix(PREFIX).is_some_and(|s| {
+        [
+            "score",
+            "softmax",
+            "pv",
+            "normalize",
+            "matrix_values",
+            "attend",
+        ]
+        .iter()
+        .any(|prefix| s.starts_with(prefix))
+    })
+}
+
+fn check_ring_call(
+    rows: &[qwen_llm::metal::DispatchCensusRow],
+    queries: usize,
+    plan: RingPlan,
+) -> Result<Value> {
+    ensure!(queries > 1, "ring call must be batched");
+    let sink: Vec<_> = rows.iter().filter(|r| sink_kernel(&r.kernel)).collect();
+    let tiles: Vec<_> = (0..queries)
+        .step_by(512)
+        .map(|q| (queries - q).min(512))
+        .collect();
+    ensure!(
+        sink.len() == 40 * tiles.len() * 4,
+        "wrong sink dispatch count: {} for {queries} queries",
+        sink.len()
+    );
+    let mut previous_encoder = None;
+    let mut cursor = 0;
+    for layer in 0..40 {
+        let encoder = sink[cursor].encoder_ordinal;
+        ensure!(
+            previous_encoder.is_none_or(|old| encoder >= old),
+            "layer {layer}: sink encoders not ordered"
+        );
+        previous_encoder = Some(encoder);
+        for &n in &tiles {
+            for (stage, suffix) in plan.kernels(n).iter().enumerate() {
+                let row = sink[cursor];
+                cursor += 1;
+                ensure!(
+                    row.kernel == format!("{PREFIX}{suffix}"),
+                    "layer {layer} queries {n} stage {stage}: wrong kernel {}",
+                    row.kernel
+                );
+                ensure!(
+                    !row.encoder_concurrent && row.encoder_ordinal == encoder,
+                    "layer {layer}: wrong encoder type/order"
+                );
+                let grid = [row.grid_width, row.grid_height, row.grid_depth];
+                let tg = [row.threads_width, row.threads_height, row.threads_depth];
+                if stage == 3 {
+                    ensure!(
+                        grid == [n as u64 * 256, 1, 1] && tg == [128, 1, 1],
+                        "wrong normalize geometry"
+                    );
+                } else {
+                    let expected_grid = if stage == 1 {
+                        [64, n as u64, 1]
+                    } else {
+                        [4, n as u64, 1]
+                    };
+                    let threads = if stage == 1 {
+                        32
+                    } else if stage == 2 && *suffix == "pv_mma" {
+                        256
+                    } else {
+                        128
+                    };
+                    ensure!(
+                        grid == expected_grid && tg == [threads, 1, 1],
+                        "layer {layer} stage {stage}: wrong grid/threadgroup {grid:?}/{tg:?}"
+                    );
+                }
+                ensure!(
+                    row.grid_tgs == grid.iter().product::<u64>()
+                        && row.tg_threads == tg.iter().product::<u64>(),
+                    "inconsistent census totals"
+                );
+            }
+        }
+    }
+    let mut shapes = std::collections::BTreeMap::new();
+    for row in &sink {
+        *shapes
+            .entry((
+                row.kernel.clone(),
+                [row.grid_width, row.grid_height, row.grid_depth],
+                [row.threads_width, row.threads_height, row.threads_depth],
+            ))
+            .or_insert(0usize) += 1;
+    }
+    let shapes: Vec<_> = shapes.into_iter().map(|((kernel, grid, threadgroup), dispatches)|
+        json!({"kernel":kernel, "grid":grid, "threadgroup":threadgroup, "dispatches":dispatches})
+    ).collect();
+    Ok(json!({"prefill_rows":queries, "query_tiles":tiles,
+        "sink_dispatches":sink.len(), "layer_sink_groups":40,
+        "decode_dispatches":0, "serial_stage_order_exact":true, "kernel_shapes":shapes}))
+}
+
+pub(super) fn ring_census(
+    calls: &[Vec<qwen_llm::metal::DispatchCensusRow>],
+    plan: RingPlan,
+) -> Result<Value> {
+    ensure!(
+        calls.len() == RING_CALLS.len(),
+        "ring census needs both capture calls"
+    );
+    let reports = calls
+        .iter()
+        .zip(RING_CALLS)
+        .map(|(rows, n)| check_ring_call(rows, n, plan))
+        .collect::<Result<Vec<_>>>()?;
     Ok(
         json!({"kind":"dispatch_census", "scope":"ring_capture_prefill_only_not_timing",
-        "attention_kernels":names, "attention_dispatch_totals":totals, "calls":reports}),
+        "selected_geometry":plan.identity(), "prefill_call_rows":RING_CALLS,
+        "calls":reports, "boundary_positions":[638,639],
+        "note":"Exact released-geometry sink sequence, not independent full-model numerical acceptance"}),
     )
-}
-
-fn check_ring_dispatches(call: usize, counts: [usize; 4], decode_separate: bool) -> Result<()> {
-    // run_captured uses [127] then [256, 1]; 32-query tiles do not straddle PV thresholds here.
-    let expected = [[160, 160, 0, 0], [320, 320, 40, 40]];
-    ensure!(
-        expected.get(call) == Some(&counts),
-        "ring call {call}: attention dispatches {counts:?}"
-    );
-    ensure!(
-        decode_separate,
-        "old row score/softmax appeared inside batched encoders"
-    );
-    Ok(())
-}
-
-#[test]
-fn ring_dispatch_census_negative_controls() {
-    for (call, valid) in [(0, [160, 160, 0, 0]), (1, [320, 320, 40, 40])] {
-        check_ring_dispatches(call, valid, true).unwrap();
-        assert!(check_ring_dispatches(call, valid, false).is_err());
-        assert!(check_ring_dispatches(call, [0; 4], true).is_err());
-        for i in 0..4 {
-            let mut bad = valid;
-            bad[i] += 1;
-            assert!(check_ring_dispatches(call, bad, true).is_err());
-        }
-    }
-    assert!(ring_census(&[]).is_err());
-    assert!(ring_census(&[vec![], vec![]]).is_err());
 }
 
 pub(super) fn check_schedule(positions: &[usize], calls: &[usize]) -> Result<()> {
@@ -133,7 +250,7 @@ pub(super) fn wrapped_continuation(
 ) -> Result<Value> {
     let start = uninterrupted.position();
     ensure!(
-        start == 384 && tokens.len() == 3,
+        start == RING_END && tokens.len() == 3,
         "wrong wrapped continuation extent"
     );
     let end = start + tokens.len();
@@ -316,6 +433,164 @@ fn check_report(report: &Value, positions: &[usize]) -> Result<()> {
 mod tests {
     use super::*;
 
+    // These literal launch shapes are an independent witness fixture, not
+    // generated by RingPlan::kernels or the validator's tile calculation.
+    fn census_fixture(tiles: &[(u64, &str, &str, u64)]) -> Vec<qwen_llm::metal::DispatchCensusRow> {
+        let mut rows = Vec::new();
+        for layer in 0..40 {
+            for &(n, score, pv, pv_threads) in tiles {
+                for (name, grid, threads) in [
+                    (score, [4, n, 1], 128),
+                    ("softmax_rows", [64, n, 1], 32),
+                    (pv, [4, n, 1], pv_threads),
+                    ("normalize_rows", [n * 256, 1, 1], 128),
+                ] {
+                    rows.push(qwen_llm::metal::DispatchCensusRow {
+                        family: "",
+                        tag: None,
+                        encoder_ordinal: layer,
+                        encoder_concurrent: false,
+                        kernel: format!("{PREFIX}{name}"),
+                        grid_width: grid[0],
+                        grid_height: grid[1],
+                        grid_depth: grid[2],
+                        threads_width: threads,
+                        threads_height: 1,
+                        threads_depth: 1,
+                        grid_tgs: grid.iter().product(),
+                        tg_threads: threads,
+                    });
+                }
+            }
+        }
+        rows
+    }
+
+    #[test]
+    fn ring_census_positive_selected_tiers_and_real_query_boundary() -> Result<()> {
+        let short = census_fixture(&[(127, "score_mma", "pv_mma", 256)]);
+        for (tensor, score32, score, pv, threads) in [
+            (false, false, "score_mma", "pv_mma", 256),
+            (true, false, "score_tensor", "pv_tensor", 128),
+            (true, true, "score_tensor32", "pv_tensor", 128),
+        ] {
+            let plan = RingPlan { tensor, score32 };
+            let packed = census_fixture(&[(257, score, pv, threads)]);
+            check_ring_call(&packed, 257, plan)?;
+            let split =
+                census_fixture(&[(512, score, pv, threads), (1, "score_mma", "pv_mma", 256)]);
+            let report = ring_census(&[short.clone(), split], plan)?;
+            assert_eq!(report["calls"][0]["sink_dispatches"], 160);
+            assert_eq!(report["calls"][1]["sink_dispatches"], 320);
+            assert_eq!(report["calls"][1]["query_tiles"], json!([512, 1]));
+            // Ordinary unsampled execution can keep all layers in one serial encoder.
+            let mut single = packed;
+            for row in &mut single {
+                row.encoder_ordinal = 0;
+            }
+            check_ring_call(&single, 257, plan)?;
+        }
+        check_schedule(&RING_POSITIONS, &RING_CALLS)?;
+        assert!(RING_POSITIONS.contains(&638) && RING_POSITIONS.contains(&639));
+        assert_eq!(RING_POSITIONS.last().copied(), Some(RING_END - 1));
+        Ok(())
+    }
+
+    #[test]
+    fn ring_census_rejects_missing_wrong_kernel_type_count_order_and_geometry() {
+        let plan = RingPlan {
+            tensor: true,
+            score32: true,
+        };
+        let valid = census_fixture(&[
+            (512, "score_tensor32", "pv_tensor", 128),
+            (1, "score_mma", "pv_mma", 256),
+        ]);
+        check_ring_call(&valid, 513, plan).unwrap();
+        for index in [0, 1, 2, 3, 4, 7, valid.len() - 1] {
+            let mut bad = valid.clone();
+            bad.remove(index);
+            assert!(check_ring_call(&bad, 513, plan).is_err());
+            let mut bad = valid.clone();
+            bad.push(valid[index].clone());
+            assert!(check_ring_call(&bad, 513, plan).is_err());
+            for kernel in [
+                "score_rows",
+                "score_mma",
+                "score_tensor",
+                "pv_tensor",
+                "softmax",
+                "unknown",
+            ] {
+                let mut bad = valid.clone();
+                bad[index].kernel = format!("{PREFIX}{kernel}");
+                if bad[index].kernel != valid[index].kernel {
+                    assert!(check_ring_call(&bad, 513, plan).is_err());
+                }
+            }
+            let mut bad = valid.clone();
+            bad[index].encoder_concurrent = true;
+            assert!(check_ring_call(&bad, 513, plan).is_err());
+            let mut bad = valid.clone();
+            bad[index].grid_height += 1;
+            assert!(check_ring_call(&bad, 513, plan).is_err());
+            let mut bad = valid.clone();
+            bad[index].threads_width *= 2;
+            assert!(check_ring_call(&bad, 513, plan).is_err());
+            let mut bad = valid.clone();
+            bad[index].grid_tgs += 1;
+            assert!(check_ring_call(&bad, 513, plan).is_err());
+            let mut bad = valid.clone();
+            bad[index].tg_threads += 1;
+            assert!(check_ring_call(&bad, 513, plan).is_err());
+        }
+        for (a, b) in [(0, 1), (2, 3), (0, 4), (3, 4)] {
+            let mut bad = valid.clone();
+            bad.swap(a, b);
+            assert!(check_ring_call(&bad, 513, plan).is_err());
+        }
+        let mut bad = valid.clone();
+        bad[8].encoder_ordinal = 0;
+        bad[16].encoder_ordinal = 0; // precedes layer 1's encoder
+        bad[8].encoder_ordinal = 2;
+        assert!(check_ring_call(&bad, 513, plan).is_err());
+        let mut bad = valid.clone();
+        bad[3].grid_width *= 2;
+        bad[3].grid_tgs *= 2;
+        bad[3].threads_width /= 2;
+        bad[3].tg_threads /= 2;
+        assert!(check_ring_call(&bad, 513, plan).is_err());
+        assert!(ring_census(&[], plan).is_err());
+        assert!(ring_census(&[vec![], vec![]], plan).is_err());
+    }
+
+    #[test]
+    fn ring_census_stale_suffix_red_control() {
+        let plan = RingPlan {
+            tensor: false,
+            score32: false,
+        };
+        // The historical [256, 1] dispatch hypothesis for a 257-row call is
+        // rejected even if every individual kernel is otherwise legitimate.
+        let stale_split = census_fixture(&[
+            (256, "score_mma", "pv_mma", 256),
+            (1, "score_mma", "pv_mma", 256),
+        ]);
+        assert!(check_ring_call(&stale_split, 257, plan).is_err());
+        let stale_tile = census_fixture(&[
+            (32, "score_mma", "pv_mma", 256),
+            (95, "score_mma", "pv_mma", 256),
+        ]);
+        assert!(check_ring_call(&stale_tile, 127, plan).is_err());
+        let stale_kernel = census_fixture(&[(127, "score_rows", "pv_mma", 256)]);
+        assert!(check_ring_call(&stale_kernel, 127, plan).is_err());
+        let packed = census_fixture(&[(257, "score_mma", "pv_mma", 256)]);
+        check_ring_call(&packed, 257, plan).unwrap();
+        // A packed 513-row launch does not prove the actual query boundary.
+        let unsplit = census_fixture(&[(513, "score_mma", "pv_mma", 256)]);
+        assert!(check_ring_call(&unsplit, 513, plan).is_err());
+    }
+
     #[test]
     fn wrapped_continuation_self_parity_rejects_vacuous_and_nonbitwise_results() -> Result<()> {
         let valid = vec![0.; 129280];
@@ -360,7 +635,7 @@ mod tests {
     fn suffix_schedule_and_report_inventory_are_nonvacuous() -> Result<()> {
         for (positions, calls) in [
             (&super::super::BATCH_POSITIONS[..], &[16383, 3][..]),
-            (&RING_POSITIONS[..], &[127, 257][..]),
+            (&RING_POSITIONS[..], &RING_CALLS[..]),
         ] {
             check_schedule(positions, calls)?;
             let valid = report(positions);

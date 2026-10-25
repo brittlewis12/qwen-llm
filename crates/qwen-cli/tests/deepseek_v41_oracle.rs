@@ -349,7 +349,7 @@ fn independent_gguf_batched_attention_odd_pruning_suffix_qualification() -> Resu
 #[test]
 #[ignore = "model witness: deepseek-v4.1-reap-272e-mxfp4-q8engram"]
 fn independent_gguf_batched_attention_ring_suffix_qualification() -> Result<()> {
-    suffix::qualify(&suffix::RING_POSITIONS, &[127, 257], true)
+    suffix::qualify(&suffix::RING_POSITIONS, &suffix::RING_CALLS, true)
 }
 
 fn batched_attention_replay(
@@ -360,7 +360,7 @@ fn batched_attention_replay(
     suffix::check_schedule(positions, call_rows)?;
     ensure!(
         !check_wrapped_continuation
-            || (positions == suffix::RING_POSITIONS && call_rows == [127, 257]),
+            || (positions == suffix::RING_POSITIONS && call_rows == suffix::RING_CALLS),
         "wrapped continuation is restricted to the bounded ring witness"
     );
     qwen_cli::shutdown::install()?;
@@ -385,6 +385,9 @@ fn batched_attention_replay(
     {
         let ctx = MetalContext::new()?;
         let weights = load_characterization_model(&ctx, model)?;
+        let ring_plan = check_wrapped_continuation
+            .then(|| suffix::RingPlan::selected(&ctx, &weights))
+            .transpose()?;
         let forward =
             Forward::from_resident(&ctx, &weights, weights.token_map.clone(), weights.raw_pad)
                 .map_err(anyhow::Error::msg)?;
@@ -392,7 +395,7 @@ fn batched_attention_replay(
         let mut capture = capture::Writer::create(
             &capture_path,
             positions,
-            json!({"gguf":model,"execution":"layer_major_batched_capture", "chunk_rows":qwen_llm::deepseek_v41::forward::PREFILL_CHUNK_ROWS, "prefill_call_rows":call_rows, "tokens":"cycled retained 10K fixture", "provenance_verified":false}),
+            json!({"gguf":model,"execution":"layer_major_batched_capture", "default_chunk_rows":qwen_llm::deepseek_v41::forward::PREFILL_CHUNK_ROWS, "ring_selected_geometry":ring_plan.map(|p| p.identity()), "prefill_call_rows":call_rows, "tokens":"cycled retained 10K fixture", "provenance_verified":false}),
         )?;
         let mut start = 0;
         let mut censuses = Vec::new();
@@ -429,7 +432,8 @@ fn batched_attention_replay(
         );
         capture.finish()?;
         if check_wrapped_continuation {
-            let census = serde_json::to_string_pretty(&suffix::ring_census(&censuses)?)?;
+            let census =
+                serde_json::to_string_pretty(&suffix::ring_census(&censuses, ring_plan.unwrap())?)?;
             std::fs::write(
                 output.join("ring-dispatch-census.json"),
                 format!("{census}\n"),
@@ -932,6 +936,14 @@ fn named_gguf_fixture_is_resolved_without_runtime_source_directory() -> Result<(
             child.status.success(),
             "GGUF fixture lookup failed: {}",
             String::from_utf8_lossy(&child.stderr)
+        );
+        ensure!(
+            String::from_utf8_lossy(&child.stdout)
+                .lines()
+                .filter(|line| line.starts_with("test result: ok. 1 passed; 0 failed; 0 ignored;"))
+                .count()
+                == 1,
+            "fixture lookup child did not execute exactly once without skips"
         );
         Ok(())
     })();

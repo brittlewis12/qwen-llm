@@ -25,6 +25,7 @@ pub use resident_storage::{
     ResidentMappingKind, ResidentStorageAudit, ResidentStoragePlan, ResidentStorageWindow,
     ResidentTensorAudit, ResidentTensorExtent, resident_storage_audit, resident_storage_plan,
 };
+pub(crate) use retained_resources::{RetainedSummaryBookkeeping, retained_summary_bookkeeping};
 pub use retained_resources::{RetainedWeightResource, RetainedWeightResourceSummary};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -385,6 +386,8 @@ impl ResidentWeights {
         }
         let page = metal::host_page_size_bytes()?;
         let (p, storage) = prepared_load_plan(&g, page, ctx.max_buffer_length(), soft_target)?;
+        let bookkeeping: RetainedSummaryBookkeeping =
+            retained_summary_bookkeeping(&g, &p, &storage)?;
         let windows = &storage.windows;
         let requests: Vec<_> = g
             .tensors
@@ -394,13 +397,7 @@ impl ResidentWeights {
         let _allocation_transaction = ctx.begin_allocation_transaction();
         if let Some(e) = metal::evaluate_metal_memory_admission_with_cpu_bytes(
             storage.metal_view_bytes,
-            add(
-                storage.private_shadow_bytes,
-                add(
-                    p.controls.retained_cpu_bytes,
-                    p.controls.source_bookkeeping_bytes,
-                )?,
-            )?,
+            bookkeeping.load_cpu_bytes(&p.controls, storage.private_shadow_bytes)?,
             0,
             ctx.memory_signals(),
             true,
@@ -483,7 +480,7 @@ impl ResidentWeights {
             }
         }
         p.engram_context.revalidate(&g)?;
-        let retained_resources = retained_resources::summarize(&banks, &dense)?;
+        let retained_resources = retained_resources::summarize(&banks, &dense, bookkeeping)?;
         Ok(Self {
             config: p.config,
             schedule: p.schedule,

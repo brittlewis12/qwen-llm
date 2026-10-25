@@ -270,9 +270,8 @@ fn cpu_sampled_anchor_only_uses_one_target_draw_and_no_proposal_draws() {
 fn load(ctx: &MetalContext) -> (Glm5NextWeights, MetalDFlashHead) {
     let target_path = std::env::var("QWEN_GLM_DFLASH_TARGET")
         .expect("set QWEN_GLM_DFLASH_TARGET to the archived GLM UD-IQ3_XXS GGUF");
-    let drafter_path = std::env::var("QWEN_GLM_DFLASH_DRAFTER").unwrap_or_else(|_| {
-        "/Users/tito/models/incoai-dflash2/GLM-5.3-Flash-DFlash2-Q8_0.gguf".into()
-    });
+    let drafter_path = std::env::var("QWEN_GLM_DFLASH_DRAFTER")
+        .expect("set QWEN_GLM_DFLASH_DRAFTER to the GLM DFlash2 Q8_0 GGUF");
     let target_gguf = GgufFile::open(target_path).unwrap();
     let weights = Glm5NextWeights::load(ctx, &target_gguf).unwrap();
     let drafter_gguf = GgufFile::open(drafter_path).unwrap();

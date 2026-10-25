@@ -1,4 +1,5 @@
 use super::*;
+use crate::compare::{report_max_abs_diff_f32, report_max_abs_diff_f64};
 
 fn half_operand(v: f32) -> f32 {
     half::f16::from_f32(v).to_f32()
@@ -34,6 +35,10 @@ fn gamma(steps: usize, unit: f64) -> f64 {
 struct Bounded {
     value: f64,
     error: f64,
+}
+
+fn bounded_max_abs(actual: &[f32], expected: &[Bounded]) -> f64 {
+    report_max_abs_diff_f64(actual, expected.iter().map(|e| e.value))
 }
 
 impl Bounded {
@@ -164,6 +169,90 @@ fn swiglu_bound(g: Bounded, u: Bounded, clamp: f32) -> Bounded {
     Bounded {
         value: s * uc,
         error: propagated + max_output * (epilogue_relative + 32.0 * f64::EPSILON) + tail,
+    }
+}
+
+#[test]
+fn acceptance_source_cpu_half_reporters_keep_precision_and_finite_results() {
+    assert_eq!(
+        report_max_abs_diff_f32([1.0f32, -2.0], [0.5f32, 3.0]),
+        5.0f32
+    );
+    let expected = [Bounded {
+        value: 16_777_217.0,
+        error: 1.0,
+    }];
+    assert_eq!(bounded_max_abs(&[16_777_216.0f32], &expected), 1.0f64);
+    assert_eq!(expected[0].check("unchanged bound", 0, 16_777_216.0), 1.0);
+    assert_eq!(
+        bounded_max_abs(
+            &[-2.0],
+            &[Bounded {
+                value: 3.0,
+                error: 5.0
+            }]
+        ),
+        5.0
+    );
+    assert_eq!(bounded_max_abs(&[0.0], &[Bounded::default()]), 0.0);
+}
+
+#[test]
+fn acceptance_source_cpu_half_reporters_poison_shape_nonfinite_and_overflow() {
+    for (actual, expected) in [
+        (&[][..], &[][..]),
+        (&[0.0f32][..], &[][..]),
+        (&[][..], &[0.0f32][..]),
+    ] {
+        assert!(report_max_abs_diff_f32(actual, expected).is_nan());
+        let bounds: Vec<_> = expected
+            .iter()
+            .map(|&value| Bounded {
+                value: f64::from(value),
+                error: 0.0,
+            })
+            .collect();
+        assert!(bounded_max_abs(actual, &bounds).is_nan());
+    }
+    for invalid in [f32::NAN, f32::INFINITY, f32::NEG_INFINITY] {
+        assert!(report_max_abs_diff_f32([invalid], [0.0f32]).is_nan());
+        assert!(report_max_abs_diff_f32([0.0f32], [invalid]).is_nan());
+        assert!(bounded_max_abs(&[invalid], &[Bounded::default()]).is_nan());
+    }
+    for invalid in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+        assert!(
+            bounded_max_abs(
+                &[0.0],
+                &[Bounded {
+                    value: invalid,
+                    error: 0.0
+                }]
+            )
+            .is_nan()
+        );
+    }
+    assert!(report_max_abs_diff_f32([f32::MAX], [-f32::MAX]).is_nan());
+}
+
+#[test]
+fn acceptance_source_cpu_half_per_element_bounds_still_reject_corruption() {
+    for (actual, value, error) in [
+        (f32::NAN, 0.0, 1.0),
+        (f32::INFINITY, 0.0, 1.0),
+        (f32::NEG_INFINITY, 0.0, 1.0),
+        (0.0, f64::NAN, 1.0),
+        (0.0, f64::INFINITY, 1.0),
+        (0.0, f64::NEG_INFINITY, 1.0),
+        (0.0, 0.0, f64::NAN),
+        (0.0, 0.0, f64::INFINITY),
+        (0.0, 0.0, -1.0),
+        (2.0, 0.0, 1.0),
+        (f32::from_bits(1), 0.0, 0.0),
+    ] {
+        assert!(
+            std::panic::catch_unwind(|| Bounded { value, error }.check("corrupt", 0, actual))
+                .is_err()
+        );
     }
 }
 
@@ -705,11 +794,7 @@ fn native_half_rows_metal_grouped_reduction_deltas() {
             let a = tensor_f32_at_offset(&native);
             let b = tensor_f32_at_offset(&grouped);
             let label = format!("native/grouped {g:?}/{u:?} down={down} rows={rows}");
-            let max_abs = a
-                .iter()
-                .zip(&b)
-                .map(|(a, b)| (a - b).abs())
-                .fold(0.0f32, f32::max);
+            let max_abs = report_max_abs_diff_f32(&a, &b);
             let unequal_bits = a
                 .iter()
                 .zip(&b)
@@ -928,11 +1013,7 @@ fn half_case(
         // Rejected routes have the default zero bound: exact zero, no floor.
         max_ratio = max_ratio.max(e.check(&label, index, a));
     }
-    let max_abs = actual
-        .iter()
-        .zip(&expected)
-        .map(|(a, e)| (f64::from(*a) - e.value).abs())
-        .fold(0.0f64, f64::max);
+    let max_abs = bounded_max_abs(&actual, &expected);
     eprintln!("{label} F64_max_abs={max_abs:e} max_error_over_bound={max_ratio:e}");
     assert_offset_guards(&output, 20, 28);
     for (t, bytes) in inputs.iter().zip(before) {

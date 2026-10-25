@@ -451,17 +451,14 @@ fn metal_capture_same_width_oracles_1_2_8() {
 
 // Numerical characterization is intentionally separate from capture invariance.
 // These metrics are not an equivalence gate or an artifact qualification list.
-fn report_numeric(label: &str, packed: &[f32], serial: &[f32], row_width: usize) {
+fn numeric_metrics(packed: &[f32], serial: &[f32], row_width: usize) -> (f64, f64, usize) {
     assert_eq!(packed.len(), serial.len());
     assert!(packed.iter().chain(serial).all(|x| x.is_finite()));
-    let (max_abs, sum_squared) =
-        packed
-            .iter()
-            .zip(serial)
-            .fold((0.0f64, 0.0f64), |(max, sum), (&a, &b)| {
-                let d = a as f64 - b as f64;
-                (max.max(d.abs()), sum + d * d)
-            });
+    let max_abs = crate::compare::report_max_abs_diff_f64(packed, serial);
+    let sum_squared = packed.iter().zip(serial).fold(0.0f64, |sum, (&a, &b)| {
+        let d = a as f64 - b as f64;
+        sum + d * d
+    });
     let argmax = |row: &[f32]| {
         row.iter()
             .enumerate()
@@ -474,10 +471,46 @@ fn report_numeric(label: &str, packed: &[f32], serial: &[f32], row_width: usize)
         .zip(serial.chunks_exact(row_width))
         .filter(|(a, b)| argmax(a) != argmax(b))
         .count();
-    eprintln!(
-        "{label}: max_abs={max_abs:.8e} rms={:.8e} row_top1_changes={top1_changes}",
-        (sum_squared / packed.len() as f64).sqrt()
-    );
+    (
+        max_abs,
+        (sum_squared / packed.len() as f64).sqrt(),
+        top1_changes,
+    )
+}
+
+fn report_numeric(label: &str, packed: &[f32], serial: &[f32], row_width: usize) {
+    let (max_abs, rms, top1_changes) = numeric_metrics(packed, serial, row_width);
+    eprintln!("{label}: max_abs={max_abs:.8e} rms={rms:.8e} row_top1_changes={top1_changes}");
+}
+
+#[test]
+fn acceptance_source_cpu_glm_numeric_report_preserves_rms_top1_and_scope() {
+    let packed = [1.0, 0.0, 0.0, 3.0];
+    let serial = [0.0, 2.0, 0.0, 1.0];
+    assert_eq!(numeric_metrics(&packed, &serial, 2), (2.0, 1.5, 1));
+    assert_eq!(numeric_metrics(&packed, &packed, 2), (0.0, 0.0, 0));
+    let (max_abs, rms, changed) = numeric_metrics(&[f32::MAX], &[-f32::MAX], 1);
+    assert_eq!(max_abs, 2.0 * f64::from(f32::MAX));
+    assert_eq!(rms, max_abs);
+    assert_eq!(changed, 0);
+    report_numeric("finite drift remains characterization", &packed, &serial, 2);
+}
+
+#[test]
+fn acceptance_source_cpu_glm_numeric_report_keeps_shape_and_finite_rejection() {
+    for (packed, serial) in [(&[0.0f32][..], &[][..]), (&[][..], &[0.0f32][..])] {
+        assert!(std::panic::catch_unwind(|| report_numeric("shape", packed, serial, 1)).is_err());
+    }
+    for invalid in [f32::NAN, f32::INFINITY, f32::NEG_INFINITY] {
+        assert!(
+            std::panic::catch_unwind(|| report_numeric("actual", &[0.0, invalid], &[0.0; 2], 1))
+                .is_err()
+        );
+        assert!(
+            std::panic::catch_unwind(|| report_numeric("expected", &[0.0; 2], &[0.0, invalid], 1))
+                .is_err()
+        );
+    }
 }
 
 #[test]

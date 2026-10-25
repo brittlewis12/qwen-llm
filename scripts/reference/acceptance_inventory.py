@@ -25,6 +25,28 @@ INVENTORY = Path(__file__).with_suffix(".json")
 TARGETS = {
     "lib": ["-p", "qwen-llm", "--lib"],
     "oracle": ["-p", "qwen-cli", "--test", "deepseek_v41_oracle"],
+    "bench": ["-p", "qwen-cli", "--bin", "qwen-bench"],
+    "qwen": ["-p", "qwen-cli", "--bin", "qwen"],
+}
+SCOPES = {
+    "lib": [
+        "deepseek_v41::",
+        "metal::moe_grouped_generic::tests::staging_ownership::",
+        "metal::moe_grouped_generic::tests::wide_activation_type::",
+    ],
+    "oracle": [],
+    "bench": [
+        "v41_ced_pair::",
+        "family_bench::tests::v41_",
+        "family_options::tests::v41_",
+        "paired_startup_tests::",
+    ],
+    "qwen": [
+        "deepseek_v41::tests::",
+        "serve::backend_v41::",
+        "family_options::tests::v41_",
+        "telemetry::family_diagnostics_tests::v41_",
+    ],
 }
 CLASSES = {"cpu", "gpu", "model", "fixture", "timing"}
 
@@ -48,8 +70,10 @@ def validate_entries(entries: list[dict]) -> None:
             raise ValueError(
                 f"ignored correctness test cannot enter CPU acceptance: {entry}"
             )
-        if entry["target"] == "lib" and not entry["name"].startswith("deepseek_v41::"):
-            raise ValueError(f"outside the maintained V41 lib scope: {entry}")
+        if SCOPES[entry["target"]] and not any(
+            entry["name"].startswith(scope) for scope in SCOPES[entry["target"]]
+        ):
+            raise ValueError(f"outside the maintained target scope: {entry}")
     for target in TARGETS:
         if not any(e["target"] == target and e["class"] == "cpu" for e in entries):
             raise ValueError(f"empty CPU inventory: {target}")
@@ -80,7 +104,9 @@ def check_discovery(
 
 
 def check_execution(output: str, names: set[str], filtered: int) -> None:
-    results = re.findall(r"^test (\S+) \.\.\. (\S+).*$", output, re.M)
+    results = re.findall(
+        r"^test (\S+)(?: - should panic)? \.\.\. (\S+).*$", output, re.M
+    )
     expected = sorted((name, "ok") for name in names)
     if sorted(results) != expected:
         raise ValueError(f"unexpected tests, failures or skips: {results}")
@@ -102,7 +128,12 @@ def self_test() -> None:
             "ignored": False,
             "reason": "test",
         }
-        for target, name in [("lib", "deepseek_v41::positive"), ("oracle", "positive")]
+        for target, name in [
+            ("lib", "deepseek_v41::positive"),
+            ("oracle", "positive"),
+            ("bench", "v41_ced_pair::positive"),
+            ("qwen", "deepseek_v41::tests::positive"),
+        ]
     ]
     validate_entries(entries)
     check_discovery(entries, "lib", {"deepseek_v41::positive"}, set())
@@ -119,6 +150,9 @@ def self_test() -> None:
             raise AssertionError("accepted changed inventory/ignore state")
     valid = "test positive ... ok\ntest result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 7 filtered out; finished in 0.0s\n"
     check_execution(valid, {"positive"}, 7)
+    check_execution(
+        valid.replace("positive ...", "positive - should panic ..."), {"positive"}, 7
+    )
     for bad in [
         valid.replace("... ok", "... ignored"),
         valid.replace("1 passed", "0 passed"),
@@ -218,7 +252,7 @@ def main() -> None:
             subprocess.check_output([str(path), "--list"], text=True, cwd=ROOT)
         )
         artifacts[target] = (path, len(total))
-        scope = ["deepseek_v41::"] if target == "lib" else []
+        scope = SCOPES[target]
         discover = lambda extra: listed(
             subprocess.check_output(
                 [str(path), *scope, "--list", *extra],

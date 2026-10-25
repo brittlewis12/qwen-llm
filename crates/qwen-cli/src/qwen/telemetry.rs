@@ -1489,7 +1489,11 @@ mod family_diagnostics_tests {
             output_fingerprint: GeneratedTokenSha256Digest::of(&[7, 8]),
         };
         let full = PrefillReport {
-            geometry: qwen_llm::deepseek_v41::forward::PrefillGeometry { start: 0, tokens: 3, selected_rows: 4096 },
+            geometry: qwen_llm::deepseek_v41::forward::PrefillGeometry {
+                start: 0,
+                tokens: 3,
+                selected_rows: 4096,
+            },
             execution: PrefillExecution::FullForward,
             fallback: None,
             counters: None,

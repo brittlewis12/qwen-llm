@@ -42,6 +42,7 @@ pub struct RequestPlan {
     report: PrefillGeometry,
     memory: RequestMemoryEstimate,
     cpu_reserve: u64,
+    binding_cpu_reserve: u64,
     identity: Arc<()>,
 }
 
@@ -62,7 +63,10 @@ impl RequestPlan {
         self.memory
     }
     pub fn caller_cpu_reserve(&self) -> u64 {
-        self.cpu_reserve
+        self.cpu_reserve - self.binding_cpu_reserve
+    }
+    pub fn binding_cpu_reserve(&self) -> u64 {
+        self.binding_cpu_reserve
     }
 }
 
@@ -297,6 +301,7 @@ impl Forward<'_> {
             },
             memory,
             cpu_reserve: caller_cpu_reserve,
+            binding_cpu_reserve: 0,
             identity: self.identity.clone(),
         })
     }
@@ -313,7 +318,7 @@ impl Forward<'_> {
             .binding_cpu_bytes
             .checked_add(cold.caller_cpu_bytes)
             .ok_or("cold caller reserve overflow")?;
-        let plan = self.request_plan_at_rows(
+        let mut plan = self.request_plan_at_rows(
             cold.capacity,
             cold.geometry.tokens,
             reserve,
@@ -325,6 +330,7 @@ impl Forward<'_> {
                 && plan.memory.cpu_bytes == cold.runtime_cpu_bytes,
             "cold metadata/runtime pricing mismatch",
         )?;
+        plan.binding_cpu_reserve = cold.binding_cpu_bytes;
         Ok(plan)
     }
 

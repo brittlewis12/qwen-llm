@@ -364,6 +364,17 @@ pub(super) fn loader_compiled_sources() -> &'static [(&'static str, &'static [u8
         "crates/qwen-cli/src/serve/backend_v41/reuse/operations.rs",
         "crates/qwen-cli/src/serve/backend_v41/reuse/tests.rs",
         "crates/qwen-cli/src/serve/backend_v41/io.rs",
+        "crates/qwen-llm/src/deepseek_v41.rs",
+        "crates/qwen-llm/src/deepseek_v41/forward/ffn_gpu/tests.rs",
+        "crates/qwen-llm/src/deepseek_v41/forward/snapshot/tests.rs",
+        "crates/qwen-cli/src/deepseek_v41_fixture.rs",
+        "crates/qwen-cli/src/bench/pp.rs",
+        "crates/qwen-cli/src/bench/tg.rs",
+        "crates/qwen-cli/src/serve/backend_v41/tests.rs",
+        "crates/qwen-cli/src/serve/backend_v41/reuse_tests.rs",
+        "crates/qwen-cli/tests/deepseek_v41_oracle.rs",
+        "crates/qwen-cli/tests/support/v41_suffix.rs",
+        "crates/qwen-cli/tests/support/v41_capture/tests.rs",
     ];
     SOURCES
 }

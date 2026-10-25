@@ -449,6 +449,15 @@ verified_checkpoint_content_identity(source);
             "874537119c68f6c566c4288ba17c1099694416edb001c4003249570894438e97",
         ),
         ("crates/qwen-llm/src/metal/moe/hc4_strict.rs", "1_013_904_223"),
+        (
+            "crates/qwen-llm/src/deepseek_v41/forward/ced/qualification/provenance.rs",
+            "1b2bf6b0384435d7cb551f4df7444beb52da51ed62bd52f3e2626bf0f1c675c5",
+        ),
+        (
+            "crates/qwen-llm/src/deepseek_v41/forward/ced/qualification/archive.rs",
+            "84c465db06384a4c87da7a7304a98e9b479c150b",
+        ),
+        ("crates/qwen-llm/src/deepseek_v41/gguf/resident_storage.rs", "4_294_967_296"),
     ]:
         entries = parse_allowlist(registry)
         assert (path, token) in entries and (path, "*") not in entries

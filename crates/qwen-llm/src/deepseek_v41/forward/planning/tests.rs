@@ -369,6 +369,7 @@ fn request_identity_is_arc_bound_not_config_or_capacity_equality() {
             total_bytes: 0,
         },
         cpu_reserve: 99,
+        binding_cpu_reserve: 0,
         identity: identity.clone(),
     };
     plan.validate_identity(&identity).unwrap();

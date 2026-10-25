@@ -136,6 +136,7 @@ impl Forward<'_> {
         )?;
         let attention = state.gpu_step.as_mut().unwrap().attention_mut();
         attention.validate_causal_restore(snapshot.position(), snapshot.payload.len())?;
+        state.last_prefill = None;
         state.phase = StatePhase::Poisoned;
         attention.restore_causal(snapshot.position(), &snapshot.payload)?;
         state.addresses = snapshot.addresses;

@@ -514,18 +514,41 @@ fn admit(ctx: &MetalContext, metal_bytes: u64, cpu_bytes: u64) -> AResult<Value>
 
 fn preweight_memory(
     ctx: &MetalContext,
-    p: &v41_gguf::Plan,
+    gguf: &crate::gguf::GgufFile,
     g: &Geometry,
     arm: Arm,
     archive_cpu: u64,
-    metadata: u64,
-    tensor_count: usize,
-) -> AResult<Value> {
-    let c = &p.config;
-    let capacity = g.n + STEPS;
-    let full_chunk_rows = prefill_rows_for_resident(p.bytes.resident_bytes());
-    let rows = g.n.min(full_chunk_rows);
-    let projections = vec![(6144, 5 * c.hidden); p.engram_hash.layers.len()];
+) -> AResult<(ColdPrefillPreflight, Value)> {
+    let capacity =
+        g.n.checked_add(STEPS)
+            .context("qualification capacity overflow")?;
+    let product = |factors: &[usize]| -> AResult<u64> {
+        factors.iter().try_fold(1u64, |a, &b| {
+            a.checked_mul(b as u64)
+                .context("qualification compare reserve overflow")
+        })
+    };
+    let mut state_floats = product(&[g.layers, g.window, g.head_dim])?;
+    for &(_, ratio) in &g.owners {
+        state_floats = add(&[
+            state_floats,
+            product(&[
+                capacity / ratio,
+                g.head_dim
+                    .checked_add(g.index_dim)
+                    .context("state width overflow")?,
+            ])?,
+            product(&[2, g.head_dim])?,
+        ])?;
+    }
+    let caller = add(&[
+        archive_cpu,
+        state_floats
+            .checked_mul(8)
+            .context("compare reserve overflow")?,
+        product(&[g.vocab, 32])?,
+        64 * 1024 * 1024,
+    ])?;
     let policies = if arm.shrinking() {
         vec![
             PrefillExecution::FullForward,
@@ -534,69 +557,19 @@ fn preweight_memory(
     } else {
         vec![PrefillExecution::FullForward]
     };
-    let (request, full, ced) = preflight::runtime_from_parts(
-        c,
-        &p.schedule,
-        &p.engram_hash,
-        &projections,
-        g.n,
-        capacity,
-        &policies,
-        full_chunk_rows,
-        metal::moe_grouped_tensor_selected(ctx),
-        &|bytes| {
-            if bytes == 0 {
-                return Ok(0);
-            }
-            ctx.price_shared_buffer_upper(bytes)
-                .map(|p| p.priced_upper_bytes)
-                .map_err(|e| e.to_string())
-        },
-    )
-    .map_err(anyhow::Error::msg)?;
-    let half_scratch = prefill::half_scratch_budget(ctx, c, rows).map_err(anyhow::Error::msg)?;
-    let scratch = full
-        .0
-        .max(ced.as_ref().map_or(0, |c| c.incremental_metal_bytes));
-    let runtime_cpu = full
-        .1
-        .max(ced.as_ref().map_or(0, |c| c.incremental_cpu_bytes));
-    let extra = 16 * 1024 * 1024;
-    let state_floats = g.layers * c.window * c.head_dim
-        + g.owners
-            .iter()
-            .map(|&(_, ratio)| capacity / ratio * (c.head_dim + c.index_dim) + 2 * c.head_dim)
-            .sum::<usize>();
-    let cpu = add(&[
-        request.cpu_bytes,
-        archive_cpu,
-        metadata
-            .checked_mul(8)
-            .context("metadata reserve overflow")?,
-        (state_floats as u64)
-            .checked_mul(8)
-            .context("compare reserve overflow")?,
-        c.vocab as u64 * 32,
-        runtime_cpu,
-        64 * 1024 * 1024,
-    ])?;
-    let gpu = add(&[
-        p.bytes.resident_bytes(),
-        (tensor_count as u64)
-            .checked_mul(32768)
-            .context("tensor overhead overflow")?,
-        request.metal_bytes,
-        scratch,
-        extra,
-    ])?;
-    let admission = admit(ctx, gpu, cpu)?;
-    Ok(
-        json!({"preweight_admission": admission, "archive_cpu_reserve_bytes": archive_cpu,
-        "full_prefill_chunk_rows": full_chunk_rows,
-        "cpu_total_reserve_bytes": cpu, "chunk_scratch_priced_bytes": scratch,
-        "half_chunk_scratch_priced_bytes": half_scratch, "ced_extra_priced_bytes": extra,
-        "strategy": "normal CPU+Metal admission before resident weight loading; entire reference mmap bytes charged plus 24x JSON/index bytes, full causal CPU compare reserve, 8 logit buffers and parse/hash/upload slack; direct read-only region slices, no full-state clones"}),
-    )
+    let cold = preflight_cold_prefill(ctx, gguf, g.n, capacity, &policies, caller)?;
+    let report = json!({"schema_version": 2,
+        "preweight_admission": current_pair::admission_report(&cold.admission, cold.required_metal_bytes, cold.required_cpu_bytes),
+        "archive_cpu_reserve_bytes": archive_cpu, "caller_cpu_reserve_bytes": caller,
+        "full_prefill_chunk_rows": cold.full_chunk_rows,
+        "required_metal_bytes": cold.required_metal_bytes, "required_cpu_bytes": cold.required_cpu_bytes,
+        "runtime_metal_bytes": cold.runtime_metal_bytes, "runtime_cpu_bytes": cold.runtime_cpu_bytes,
+        "binding_metal_bytes": cold.binding_metal_bytes, "binding_cpu_bytes": cold.binding_cpu_bytes,
+        "loader_control_cpu_bytes": cold.loader_control_cpu_bytes,
+        "descriptor_window_cpu_bytes": cold.descriptor_window_cpu_bytes,
+        "retained_summary_cpu_bytes": cold.retained_summary_cpu_bytes,
+        "strategy": "common cold/request plan; whole reference mmap/index and causal CPU comparison reserve; exact resident windows, binding and sequential runtime envelope; not a reservation"});
+    Ok((cold, report))
 }
 
 fn admission_ledger(memory: &CedMemoryEstimate) -> CedMemoryEstimate {
@@ -790,7 +763,7 @@ fn execution_report(
         &model.config,
         &model.schedule,
         &model.engram_hash,
-        &CedRequest::cold(g.n, g.n + STEPS).with_full_chunk_rows(model.prefill_rows),
+        &CedRequest::cold(g.n, g.n + STEPS).with_full_chunk_rows(r.geometry.selected_rows),
     )?;
     ensure!(
         r.execution == PrefillExecution::ShrinkingCed && r.fallback.is_none(),
@@ -1011,34 +984,42 @@ fn run(arm: Arm) -> AResult<()> {
         &input_bytes,
         arm.reference_arm(),
     )?);
+    provenance::frozen(&reference.provenance)?;
+    let stamps_before = provenance::artifact(&gguf, &planned, &reference.artifact)?;
+    let (cold, memory) = preweight_memory(&ctx, &gguf, &g, arm, archive_cpu)?;
     if !arm.scalar() {
         require_reference_chunk_rows(
-            prefill_rows_for_resident(planned.bytes.resident_bytes()),
+            cold.full_chunk_rows,
             archive::number(&reference.header, "prefill_chunk_rows")?,
         )?;
     }
-    provenance::frozen(&reference.provenance)?;
-    let stamps_before = provenance::artifact(&gguf, &planned, &reference.artifact)?;
-    let metadata = serde_json::to_vec(gguf.model.metadata())?.len() as u64;
-    let memory = preweight_memory(
-        &ctx,
-        &planned,
-        &g,
-        arm,
-        archive_cpu,
-        metadata,
-        gguf.tensors.len(),
-    )?;
     drop(input_bytes);
     let weights = ResidentWeights::load(&ctx, Arc::clone(&gguf))?;
+    current_pair::validate_loaded_sources(&gguf, &planned, &weights.engram)?;
+    ensure!(
+        weights.token_map == planned.token_map
+            && weights.engram_hash == planned.engram_hash
+            && weights.raw_pad == planned.raw_pad,
+        "loaded normalized controls differ from plan"
+    );
     let model = Forward::from_resident(&ctx, &weights, weights.token_map.clone(), weights.raw_pad)
         .map_err(anyhow::Error::msg)?;
-    let mut state = model.new_state(g.n + STEPS)?;
+    let request = model.plan_request_from_cold(&cold)?;
+    let mut state = model.new_state_from_plan(&request)?;
     let comparator = Rc::new(RefCell::new(Comparator::new(Rc::clone(&reference), arm)));
     let started = std::time::Instant::now();
     let mut execution = Value::Null;
     let mut logits = match arm {
-        Arm::FullProduction => model.prefill(&mut state, &input.prompt, None)?,
+        Arm::FullProduction => {
+            let (logits, report) = model.prefill_with_execution(
+                &mut state,
+                &input.prompt,
+                None,
+                PrefillExecution::FullForward,
+            )?;
+            execution = serde_json::to_value(report)?;
+            logits
+        }
         Arm::FullScalar => {
             for &t in &input.prompt[..g.n - 1] {
                 model
@@ -1128,6 +1109,7 @@ fn run(arm: Arm) -> AResult<()> {
         }
     }
     let total_seconds = started.elapsed().as_secs_f64();
+    current_pair::validate_loaded_sources(&gguf, &planned, &weights.engram)?;
     let stamps_after = provenance::artifact(&gguf, &planned, &reference.artifact)?;
     ensure!(
         stamps_before == stamps_after,
@@ -1139,8 +1121,9 @@ fn run(arm: Arm) -> AResult<()> {
         source == source_after,
         "source/binary provenance changed during qualification"
     );
-    let report = json!({"schema": "v41-ced-qualification-v1", "complete": true, "arm": arm.name(),
-        "full_prefill_chunk_rows": model.prefill_rows,
+    let report = json!({"schema": "v41-ced-qualification-v2", "complete": true, "arm": arm.name(),
+        "full_prefill_chunk_rows": (!arm.scalar()).then_some(request.prefill().selected_rows),
+        "admitted_input_geometry": request.prefill(), "loaded_source_groups_match_planned": true,
         "N": g.n, "capacity": g.n + STEPS, "continuation_steps": STEPS,
         "reference": {"directory": reference_path, "header": reference.header, "complete": reference.complete,
             "provenance": reference.provenance, "validation": "all manifest and region lengths, SHA256, 4-byte alignment, shape, identity, producer, complete row/state coverage; exact raw input SHA and canonical IDs SHA; retained reference file stamps before/after"},

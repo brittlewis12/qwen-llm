@@ -1,5 +1,341 @@
 [
   {
+    "target": "bench",
+    "name": "family_bench::tests::v41_bench_extent_uses_validated_alias_without_expert_count_gate",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Reviewed host-only planning, metadata, NSObject lifetime, pure arithmetic, fake-state lifecycle or loopback fixture; no Metal context or real model import."
+  },
+  {
+    "target": "bench",
+    "name": "family_bench::tests::v41_ced_cold_pp_and_tg_depth_keep_actual_reports",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Reviewed host-only planning, metadata, NSObject lifetime, pure arithmetic, fake-state lifecycle or loopback fixture; no Metal context or real model import."
+  },
+  {
+    "target": "bench",
+    "name": "family_bench::tests::v41_ced_library_fallback_and_mixed_reps_are_not_mislabeled",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Reviewed host-only planning, metadata, NSObject lifetime, pure arithmetic, fake-state lifecycle or loopback fixture; no Metal context or real model import."
+  },
+  {
+    "target": "bench",
+    "name": "family_bench::tests::v41_ced_pp_at_depth_is_explicit_full_forward",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Reviewed host-only planning, metadata, NSObject lifetime, pure arithmetic, fake-state lifecycle or loopback fixture; no Metal context or real model import."
+  },
+  {
+    "target": "bench",
+    "name": "family_bench::tests::v41_standard_harness_keeps_fresh_state_depth_and_common_columns",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Reviewed host-only planning, metadata, NSObject lifetime, pure arithmetic, fake-state lifecycle or loopback fixture; no Metal context or real model import."
+  },
+  {
+    "target": "bench",
+    "name": "family_options::tests::v41_ced_geometry_never_labels_logical_encoder_chunks_as_full_decoder_work",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Reviewed host-only planning, metadata, NSObject lifetime, pure arithmetic, fake-state lifecycle or loopback fixture; no Metal context or real model import."
+  },
+  {
+    "target": "bench",
+    "name": "family_options::tests::v41_cold_prefill_parser_defaults_and_valid_values",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Reviewed host-only planning, metadata, NSObject lifetime, pure arithmetic, fake-state lifecycle or loopback fixture; no Metal context or real model import."
+  },
+  {
+    "target": "bench",
+    "name": "family_options::tests::v41_cold_prefill_parser_rejects_invalid_and_non_utf8_values",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Reviewed host-only planning, metadata, NSObject lifetime, pure arithmetic, fake-state lifecycle or loopback fixture; no Metal context or real model import."
+  },
+  {
+    "target": "bench",
+    "name": "family_options::tests::v41_geometry_separates_engine_ceiling_selected_width_and_actual_ranges",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Reviewed host-only planning, metadata, NSObject lifetime, pure arithmetic, fake-state lifecycle or loopback fixture; no Metal context or real model import."
+  },
+  {
+    "target": "bench",
+    "name": "family_options::tests::v41_prefill_diagnostics_preserve_actual_report_and_default_omission",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Reviewed host-only planning, metadata, NSObject lifetime, pure arithmetic, fake-state lifecycle or loopback fixture; no Metal context or real model import."
+  },
+  {
+    "target": "bench",
+    "name": "paired_startup_tests::launch_write_or_flush_failure_stops_entry_before_build_model_or_metal",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Reviewed host-only planning, metadata, NSObject lifetime, pure arithmetic, fake-state lifecycle or loopback fixture; no Metal context or real model import."
+  },
+  {
+    "target": "bench",
+    "name": "paired_startup_tests::paired_entry_emits_once_before_ablation_or_build_refusal_without_model_or_metal",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Reviewed host-only planning, metadata, NSObject lifetime, pure arithmetic, fake-state lifecycle or loopback fixture; no Metal context or real model import."
+  },
+  {
+    "target": "bench",
+    "name": "paired_startup_tests::preparse_guard_keeps_refusal_for_help_parse_failure_and_nonpair_commands",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Reviewed host-only planning, metadata, NSObject lifetime, pure arithmetic, fake-state lifecycle or loopback fixture; no Metal context or real model import."
+  },
+  {
+    "target": "bench",
+    "name": "v41_ced_pair::tests::adaptive_transition_cli_args_keep_selected_geometry_and_caller_bounds",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Reviewed host-only planning, metadata, NSObject lifetime, pure arithmetic, fake-state lifecycle or loopback fixture; no Metal context or real model import."
+  },
+  {
+    "target": "bench",
+    "name": "v41_ced_pair::tests::blocked_invalid_calls_stop_without_retry_or_later_policy_execution",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Reviewed host-only planning, metadata, NSObject lifetime, pure arithmetic, fake-state lifecycle or loopback fixture; no Metal context or real model import."
+  },
+  {
+    "target": "bench",
+    "name": "v41_ced_pair::tests::blocked_launch_identity_and_invalid_arguments_precede_model_open",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Reviewed host-only planning, metadata, NSObject lifetime, pure arithmetic, fake-state lifecycle or loopback fixture; no Metal context or real model import."
+  },
+  {
+    "target": "bench",
+    "name": "v41_ced_pair::tests::blocked_native_calls_keep_cold_input_raw_chronology_and_retained_statistics",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Reviewed host-only planning, metadata, NSObject lifetime, pure arithmetic, fake-state lifecycle or loopback fixture; no Metal context or real model import."
+  },
+  {
+    "target": "bench",
+    "name": "v41_ced_pair::tests::blocked_schedules_bound_all_counts_phases_and_policy_transitions",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Reviewed host-only planning, metadata, NSObject lifetime, pure arithmetic, fake-state lifecycle or loopback fixture; no Metal context or real model import."
+  },
+  {
+    "target": "bench",
+    "name": "v41_ced_pair::tests::both_native_regimes_leave_profile_scope_inert",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Reviewed host-only planning, metadata, NSObject lifetime, pure arithmetic, fake-state lifecycle or loopback fixture; no Metal context or real model import."
+  },
+  {
+    "target": "bench",
+    "name": "v41_ced_pair::tests::bounded_schedule_is_two_policies_with_both_warm_before_pilot",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Reviewed host-only planning, metadata, NSObject lifetime, pure arithmetic, fake-state lifecycle or loopback fixture; no Metal context or real model import."
+  },
+  {
+    "target": "bench",
+    "name": "v41_ced_pair::tests::caller_cpu_envelope_worst_case_isolated_rss_regression",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Reviewed host-only planning, metadata, NSObject lifetime, pure arithmetic, fake-state lifecycle or loopback fixture; no Metal context or real model import."
+  },
+  {
+    "target": "bench",
+    "name": "v41_ced_pair::tests::caller_cpu_envelope_worst_case_rss_child",
+    "class": "fixture",
+    "ignored": true,
+    "reason": "CPU-only isolated RSS child, launched exactly by its CPU parent; never a standalone ignored acceptance filter."
+  },
+  {
+    "target": "bench",
+    "name": "v41_ced_pair::tests::cancellation_and_execution_error_never_schedule_later_cases",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Reviewed host-only planning, metadata, NSObject lifetime, pure arithmetic, fake-state lifecycle or loopback fixture; no Metal context or real model import."
+  },
+  {
+    "target": "bench",
+    "name": "v41_ced_pair::tests::capacity_and_load_denials_stop_before_the_resident_factory",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Reviewed host-only planning, metadata, NSObject lifetime, pure arithmetic, fake-state lifecycle or loopback fixture; no Metal context or real model import."
+  },
+  {
+    "target": "bench",
+    "name": "v41_ced_pair::tests::composed_diagnostic_lifecycle_orders_and_cleans_every_boundary",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Reviewed host-only planning, metadata, NSObject lifetime, pure arithmetic, fake-state lifecycle or loopback fixture; no Metal context or real model import."
+  },
+  {
+    "target": "bench",
+    "name": "v41_ced_pair::tests::diagnostic_cli_requires_pair_and_is_not_an_ordinary_default",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Reviewed host-only planning, metadata, NSObject lifetime, pure arithmetic, fake-state lifecycle or loopback fixture; no Metal context or real model import."
+  },
+  {
+    "target": "bench",
+    "name": "v41_ced_pair::tests::diagnostic_collection_and_stream_errors_stop_the_driver",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Reviewed host-only planning, metadata, NSObject lifetime, pure arithmetic, fake-state lifecycle or loopback fixture; no Metal context or real model import."
+  },
+  {
+    "target": "bench",
+    "name": "v41_ced_pair::tests::diagnostic_events_have_distinct_regime_identity_without_repeating_environment",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Reviewed host-only planning, metadata, NSObject lifetime, pure arithmetic, fake-state lifecycle or loopback fixture; no Metal context or real model import."
+  },
+  {
+    "target": "bench",
+    "name": "v41_ced_pair::tests::diagnostic_gap_does_not_subtract_gpu_twice_or_sum_nested_host_spans",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Reviewed host-only planning, metadata, NSObject lifetime, pure arithmetic, fake-state lifecycle or loopback fixture; no Metal context or real model import."
+  },
+  {
+    "target": "bench",
+    "name": "v41_ced_pair::tests::diagnostic_maximum_profile_is_streamed_one_at_a_time_within_reserve",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Reviewed host-only planning, metadata, NSObject lifetime, pure arithmetic, fake-state lifecycle or loopback fixture; no Metal context or real model import."
+  },
+  {
+    "target": "bench",
+    "name": "v41_ced_pair::tests::diagnostic_resource_deltas_keep_released_memory_negative",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Reviewed host-only planning, metadata, NSObject lifetime, pure arithmetic, fake-state lifecycle or loopback fixture; no Metal context or real model import."
+  },
+  {
+    "target": "bench",
+    "name": "v41_ced_pair::tests::diagnostic_rows_and_every_case_are_marked_without_retaining_profiles",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Reviewed host-only planning, metadata, NSObject lifetime, pure arithmetic, fake-state lifecycle or loopback fixture; no Metal context or real model import."
+  },
+  {
+    "target": "bench",
+    "name": "v41_ced_pair::tests::diagnostic_scheduling_totals_serialize_unknown_as_null_not_zero",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Reviewed host-only planning, metadata, NSObject lifetime, pure arithmetic, fake-state lifecycle or loopback fixture; no Metal context or real model import."
+  },
+  {
+    "target": "bench",
+    "name": "v41_ced_pair::tests::dispersion_is_finite_positive_without_a_spread_gate",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Reviewed host-only planning, metadata, NSObject lifetime, pure arithmetic, fake-state lifecycle or loopback fixture; no Metal context or real model import."
+  },
+  {
+    "target": "bench",
+    "name": "v41_ced_pair::tests::escaped_many_key_provenance_uses_a_bounded_arg_max_like_fixture",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Reviewed host-only planning, metadata, NSObject lifetime, pure arithmetic, fake-state lifecycle or loopback fixture; no Metal context or real model import."
+  },
+  {
+    "target": "bench",
+    "name": "v41_ced_pair::tests::fallback_errors_and_bad_heads_release_state_and_halt_the_protocol",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Reviewed host-only planning, metadata, NSObject lifetime, pure arithmetic, fake-state lifecycle or loopback fixture; no Metal context or real model import."
+  },
+  {
+    "target": "bench",
+    "name": "v41_ced_pair::tests::fresh_runtime_gate_follows_every_state_drop_and_pool_drain_and_releases_resident",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Reviewed host-only planning, metadata, NSObject lifetime, pure arithmetic, fake-state lifecycle or loopback fixture; no Metal context or real model import."
+  },
+  {
+    "target": "bench",
+    "name": "v41_ced_pair::tests::malformed_ced_work_or_memory_stops_before_later_cases",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Reviewed host-only planning, metadata, NSObject lifetime, pure arithmetic, fake-state lifecycle or loopback fixture; no Metal context or real model import."
+  },
+  {
+    "target": "bench",
+    "name": "v41_ced_pair::tests::native_case_unwind_releases_state_before_returning_to_caller",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Reviewed host-only planning, metadata, NSObject lifetime, pure arithmetic, fake-state lifecycle or loopback fixture; no Metal context or real model import."
+  },
+  {
+    "target": "bench",
+    "name": "v41_ced_pair::tests::native_fake_adapter_preserves_ids_cold_state_full_reports_and_json_statistics",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Reviewed host-only planning, metadata, NSObject lifetime, pure arithmetic, fake-state lifecycle or loopback fixture; no Metal context or real model import."
+  },
+  {
+    "target": "bench",
+    "name": "v41_ced_pair::tests::paired_cli_is_opt_in_and_validation_does_not_mutate_environment",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Reviewed host-only planning, metadata, NSObject lifetime, pure arithmetic, fake-state lifecycle or loopback fixture; no Metal context or real model import."
+  },
+  {
+    "target": "bench",
+    "name": "v41_ced_pair::tests::pilot_and_main_spread_complete_but_invalid_samples_stop_immediately",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Reviewed host-only planning, metadata, NSObject lifetime, pure arithmetic, fake-state lifecycle or loopback fixture; no Metal context or real model import."
+  },
+  {
+    "target": "bench",
+    "name": "v41_ced_pair::tests::production_timing_cli_requires_pair_and_remains_explicit",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Reviewed host-only planning, metadata, NSObject lifetime, pure arithmetic, fake-state lifecycle or loopback fixture; no Metal context or real model import."
+  },
+  {
+    "target": "bench",
+    "name": "v41_ced_pair::tests::production_timing_requires_validation_wrapper_and_injection_settings_strictly_unset",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Reviewed host-only planning, metadata, NSObject lifetime, pure arithmetic, fake-state lifecycle or loopback fixture; no Metal context or real model import."
+  },
+  {
+    "target": "bench",
+    "name": "v41_ced_pair::tests::recorded_2k_spread_completes_with_finite_continuation_and_full_chronology",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Reviewed host-only planning, metadata, NSObject lifetime, pure arithmetic, fake-state lifecycle or loopback fixture; no Metal context or real model import."
+  },
+  {
+    "target": "bench",
+    "name": "v41_ced_pair::tests::rejected_runtime_override_values_are_not_logged",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Reviewed host-only planning, metadata, NSObject lifetime, pure arithmetic, fake-state lifecycle or loopback fixture; no Metal context or real model import."
+  },
+  {
+    "target": "bench",
+    "name": "v41_ced_pair::tests::staged_load_allows_only_future_availability_denial_and_reports_static_budgets",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Reviewed host-only planning, metadata, NSObject lifetime, pure arithmetic, fake-state lifecycle or loopback fixture; no Metal context or real model import."
+  },
+  {
+    "target": "bench",
+    "name": "v41_ced_pair::tests::validation_provenance_preserves_unset_zero_one_and_records_failed_launch_identity",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Reviewed host-only planning, metadata, NSObject lifetime, pure arithmetic, fake-state lifecycle or loopback fixture; no Metal context or real model import."
+  },
+  {
     "target": "lib",
     "name": "deepseek_v41::engram::tests::checked_boundaries_and_discarded_staging",
     "class": "cpu",
@@ -36,6 +372,244 @@
   },
   {
     "target": "lib",
+    "name": "deepseek_v41::execution::tests::malformed_config_dimensions_and_controls_are_rejected_without_panics",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Reviewed host-only CED, request-planning, execution contract or synthetic storage control; no Metal context or dispatch."
+  },
+  {
+    "target": "lib",
+    "name": "deepseek_v41::execution::tests::released_math_and_nonfastpath_shapes_are_executable_without_fit_gate",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Reviewed host-only CED, request-planning, execution contract or synthetic storage control; no Metal context or dispatch."
+  },
+  {
+    "target": "lib",
+    "name": "deepseek_v41::execution::tests::routing_backend_limit_is_explicit",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Reviewed host-only CED, request-planning, execution contract or synthetic storage control; no Metal context or dispatch."
+  },
+  {
+    "target": "lib",
+    "name": "deepseek_v41::execution::tests::sinkhorn_backend_limit_is_explicit",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Reviewed host-only CED, request-planning, execution contract or synthetic storage control; no Metal context or dispatch."
+  },
+  {
+    "target": "lib",
+    "name": "deepseek_v41::forward::attention_gpu::ced::tests::checked_absolute_ranges_history_and_control_prices",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Reviewed host-only CED, request-planning, execution contract or synthetic storage control; no Metal context or dispatch."
+  },
+  {
+    "target": "lib",
+    "name": "deepseek_v41::forward::attention_gpu::ced::tests::compound_rejects_partial_multichunk_seed_and_genuine_scalar_tail",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Reviewed host-only CED, request-planning, execution contract or synthetic storage control; no Metal context or dispatch."
+  },
+  {
+    "target": "lib",
+    "name": "deepseek_v41::forward::attention_gpu::ced::tests::compound_seed_encoding_never_publishes_completion_and_retires_both_ranges",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Reviewed host-only CED, request-planning, execution contract or synthetic storage control; no Metal context or dispatch."
+  },
+  {
+    "target": "lib",
+    "name": "deepseek_v41::forward::attention_gpu::ced::tests::control_producers_keep_owner_masks_and_reindex_only_the_narrowed_subset",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Reviewed host-only CED, request-planning, execution contract or synthetic storage control; no Metal context or dispatch."
+  },
+  {
+    "target": "lib",
+    "name": "deepseek_v41::forward::attention_gpu::ced::tests::decoder_group_keeps_public_frontiers_atomic_and_rejects_bad_tickets_before_mutation",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Reviewed host-only CED, request-planning, execution contract or synthetic storage control; no Metal context or dispatch."
+  },
+  {
+    "target": "lib",
+    "name": "deepseek_v41::forward::attention_gpu::ced::tests::frontiers_advance_only_at_completion_and_commit_requires_every_layer",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Reviewed host-only CED, request-planning, execution contract or synthetic storage control; no Metal context or dispatch."
+  },
+  {
+    "target": "lib",
+    "name": "deepseek_v41::forward::attention_gpu::ced::tests::retained_controls_prune_at_16385_and_reindex_uses_owner_query_masks",
+    "class": "gpu",
+    "ignored": true,
+    "reason": "Metal allocation/dispatch or self-leased device witness; excluded from CPU acceptance."
+  },
+  {
+    "target": "lib",
+    "name": "deepseek_v41::forward::attention_gpu::ced::tests::short_and_window_one_plans_need_no_fabricated_seed",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Reviewed host-only CED, request-planning, execution contract or synthetic storage control; no Metal context or dispatch."
+  },
+  {
+    "target": "lib",
+    "name": "deepseek_v41::forward::attention_gpu::ced::tests::sink_lineage::ced_sink_lineage_fixture_budget_and_plan",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Reviewed host-only CED, request-planning, execution contract or synthetic storage control; no Metal context or dispatch."
+  },
+  {
+    "target": "lib",
+    "name": "deepseek_v41::forward::attention_gpu::ced::tests::sink_lineage::ced_sink_lineage_gpu_singletons_and_boundary_bitwise",
+    "class": "gpu",
+    "ignored": true,
+    "reason": "Metal allocation/dispatch or self-leased device witness; excluded from CPU acceptance."
+  },
+  {
+    "target": "lib",
+    "name": "deepseek_v41::forward::attention_gpu::query_batch::arithmetic_tests::controlled_f32_attention_census_proves_both_pv_routes_and_matching_allocations",
+    "class": "gpu",
+    "ignored": true,
+    "reason": "Metal allocation/dispatch or self-leased device witness; excluded from CPU acceptance."
+  },
+  {
+    "target": "lib",
+    "name": "deepseek_v41::forward::attention_gpu::query_batch::arithmetic_tests::f32_attention_planning_prices_the_released_geometry_gathered_matrices",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Reviewed host-only CED, request-planning, execution contract or synthetic storage control; no Metal context or dispatch."
+  },
+  {
+    "target": "lib",
+    "name": "deepseek_v41::forward::attention_gpu::query_batch::arithmetic_tests::f32_attention_scope_nests_is_thread_local_and_restores_on_unwind",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Reviewed host-only CED, request-planning, execution contract or synthetic storage control; no Metal context or dispatch."
+  },
+  {
+    "target": "lib",
+    "name": "deepseek_v41::forward::attention_gpu::query_batch::arithmetic_tests::packed_attention_propagates_to_all_seven_query_and_output_projections",
+    "class": "gpu",
+    "ignored": true,
+    "reason": "Metal allocation/dispatch or self-leased device witness; excluded from CPU acceptance."
+  },
+  {
+    "target": "lib",
+    "name": "deepseek_v41::forward::attention_gpu::query_batch::lineage_tests::checked_bounds_reject_invalid_views_without_overflowing_valid_extremes",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Reviewed host-only CED, request-planning, execution contract or synthetic storage control; no Metal context or dispatch."
+  },
+  {
+    "target": "lib",
+    "name": "deepseek_v41::forward::attention_gpu::query_batch::lineage_tests::compacted_subranges_keep_full_per_row_arithmetic_and_exact_coverage",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Reviewed host-only CED, request-planning, execution contract or synthetic storage control; no Metal context or dispatch."
+  },
+  {
+    "target": "lib",
+    "name": "deepseek_v41::forward::attention_gpu::query_batch::lineage_tests::genuine_whole_chunk_scalar_tails_remain_outside_rows",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Reviewed host-only CED, request-planning, execution contract or synthetic storage control; no Metal context or dispatch."
+  },
+  {
+    "target": "lib",
+    "name": "deepseek_v41::forward::attention_gpu::query_batch::lineage_tests::lineage_does_not_bypass_f32_or_unsupported_mma_geometry",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Reviewed host-only CED, request-planning, execution contract or synthetic storage control; no Metal context or dispatch."
+  },
+  {
+    "target": "lib",
+    "name": "deepseek_v41::forward::attention_gpu::query_batch::lineage_tests::nondivisor_width_restarts_at_original_chunks_not_physical_starts",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Reviewed host-only CED, request-planning, execution contract or synthetic storage control; no Metal context or dispatch."
+  },
+  {
+    "target": "lib",
+    "name": "deepseek_v41::forward::attention_gpu::query_batch::lineage_tests::ordinary_rows_remain_physical_and_chunk_relative",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Reviewed host-only CED, request-planning, execution contract or synthetic storage control; no Metal context or dispatch."
+  },
+  {
+    "target": "lib",
+    "name": "deepseek_v41::forward::attention_gpu::query_batch::lineage_tests::original_tiles_match_cold_full_at_every_row",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Reviewed host-only CED, request-planning, execution contract or synthetic storage control; no Metal context or dispatch."
+  },
+  {
+    "target": "lib",
+    "name": "deepseek_v41::forward::attention_gpu::query_batch::lineage_tests::packed_singletons_and_short_original_tails_are_not_blanket_tensor",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Reviewed host-only CED, request-planning, execution contract or synthetic storage control; no Metal context or dispatch."
+  },
+  {
+    "target": "lib",
+    "name": "deepseek_v41::forward::attention_gpu::query_batch::lineage_tests::selected_full_chunks_preserve_every_compacted_query_tile_and_singleton_route",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Reviewed host-only CED, request-planning, execution contract or synthetic storage control; no Metal context or dispatch."
+  },
+  {
+    "target": "lib",
+    "name": "deepseek_v41::forward::attention_gpu::query_batch::scratch_prefix_geometry_tests::query_prefix_shapes_recompute_history_span_and_matrix_tile_strides",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Reviewed host-only CED, request-planning, execution contract or synthetic storage control; no Metal context or dispatch."
+  },
+  {
+    "target": "lib",
+    "name": "deepseek_v41::forward::attention_gpu::query_batch::scratch_prefix_geometry_tests::query_prefix_shapes_reject_invalid_rows_and_history_overflow",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Reviewed host-only CED, request-planning, execution contract or synthetic storage control; no Metal context or dispatch."
+  },
+  {
+    "target": "lib",
+    "name": "deepseek_v41::forward::attention_gpu::query_batch::scratch_prefix_geometry_tests::selected_4k_full_chunk_keeps_default_selection_tiles_bounded",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Reviewed host-only CED, request-planning, execution contract or synthetic storage control; no Metal context or dispatch."
+  },
+  {
+    "target": "lib",
+    "name": "deepseek_v41::forward::attention_gpu::query_batch::scratch_prefix_geometry_tests::selection_prefix_p4_backing_contains_compact_p2_and_p4_tiles",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Reviewed host-only CED, request-planning, execution contract or synthetic storage control; no Metal context or dispatch."
+  },
+  {
+    "target": "lib",
+    "name": "deepseek_v41::forward::attention_gpu::scratch_prefix_geometry_tests::attention_actual_prefix_rebinds_controls_and_rejects_invalid_parents",
+    "class": "gpu",
+    "ignored": true,
+    "reason": "Metal allocation/dispatch or self-leased device witness; excluded from CPU acceptance."
+  },
+  {
+    "target": "lib",
+    "name": "deepseek_v41::forward::attention_gpu::scratch_prefix_geometry_tests::attention_prefix_geometry_rejects_invalid_capacity_and_products",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Reviewed host-only CED, request-planning, execution contract or synthetic storage control; no Metal context or dispatch."
+  },
+  {
+    "target": "lib",
+    "name": "deepseek_v41::forward::attention_gpu::scratch_prefix_geometry_tests::attention_prefix_widths_preserve_fresh_shapes_and_current_group_strides",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Reviewed host-only CED, request-planning, execution contract or synthetic storage control; no Metal context or dispatch."
+  },
+  {
+    "target": "lib",
     "name": "deepseek_v41::forward::attention_gpu::tests::admission_and_order_bounds",
     "class": "gpu",
     "ignored": false,
@@ -47,6 +621,27 @@
     "class": "cpu",
     "ignored": false,
     "reason": "Host-only metadata, arithmetic, source contract or synthetic disk fixture; no Metal context."
+  },
+  {
+    "target": "lib",
+    "name": "deepseek_v41::forward::attention_gpu::tests::ced::ced_rows_publication_only_poisoned_history_and_borrowed_controls",
+    "class": "gpu",
+    "ignored": true,
+    "reason": "Metal allocation/dispatch or self-leased device witness; excluded from CPU acceptance."
+  },
+  {
+    "target": "lib",
+    "name": "deepseek_v41::forward::attention_gpu::tests::ced::ced_scalar_error_restores_control_bindings_and_finite_publication_blocks_completion",
+    "class": "gpu",
+    "ignored": true,
+    "reason": "Metal allocation/dispatch or self-leased device witness; excluded from CPU acceptance."
+  },
+  {
+    "target": "lib",
+    "name": "deepseek_v41::forward::attention_gpu::tests::ced::ced_scalar_native_publication_seed_controls_reuse_and_continuation",
+    "class": "gpu",
+    "ignored": true,
+    "reason": "Metal allocation/dispatch or self-leased device witness; excluded from CPU acceptance."
   },
   {
     "target": "lib",
@@ -155,6 +750,90 @@
   },
   {
     "target": "lib",
+    "name": "deepseek_v41::forward::attention_gpu::tests::output_a_strategy::fixture_contracts::bank_and_low_guard_controls_detect_mutation",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Reviewed host-only CED, request-planning, execution contract or synthetic storage control; no Metal context or dispatch."
+  },
+  {
+    "target": "lib",
+    "name": "deepseek_v41::forward::attention_gpu::tests::output_a_strategy::fixture_contracts::exact_dispatch_contract_rejects_missing_extra_or_malformed_fallback_launches",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Reviewed host-only CED, request-planning, execution contract or synthetic storage control; no Metal context or dispatch."
+  },
+  {
+    "target": "lib",
+    "name": "deepseek_v41::forward::attention_gpu::tests::output_a_strategy::fixture_contracts::fixture_prices_bound_every_case_before_gpu_allocation",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Reviewed host-only CED, request-planning, execution contract or synthetic storage control; no Metal context or dispatch."
+  },
+  {
+    "target": "lib",
+    "name": "deepseek_v41::forward::attention_gpu::tests::output_a_strategy::fixture_contracts::independent_oracle_rejects_noop_zero_bank_permutations_and_nonfinite_values",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Reviewed host-only CED, request-planning, execution contract or synthetic storage control; no Metal context or dispatch."
+  },
+  {
+    "target": "lib",
+    "name": "deepseek_v41::forward::attention_gpu::tests::output_a_strategy::fixture_contracts::independent_stored_precision_decoder_has_known_q8_and_bfloat_values",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Reviewed host-only CED, request-planning, execution contract or synthetic storage control; no Metal context or dispatch."
+  },
+  {
+    "target": "lib",
+    "name": "deepseek_v41::forward::attention_gpu::tests::output_a_strategy::fixture_contracts::nested_autorelease_pools_release_position_objects_before_case_objects",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Reviewed host-only planning, metadata, NSObject lifetime, pure arithmetic, fake-state lifecycle or loopback fixture; no Metal context or real model import."
+  },
+  {
+    "target": "lib",
+    "name": "deepseek_v41::forward::attention_gpu::tests::output_a_strategy::fixture_contracts::stored_group_matrices_cover_offsets_strides_tails_and_distinct_ids",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Reviewed host-only CED, request-planning, execution contract or synthetic storage control; no Metal context or dispatch."
+  },
+  {
+    "target": "lib",
+    "name": "deepseek_v41::forward::attention_gpu::tests::output_a_strategy::fixture_contracts::weak_release_control_detects_strong_owner_escaping_pool_drain",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Reviewed host-only planning, metadata, NSObject lifetime, pure arithmetic, fake-state lifecycle or loopback fixture; no Metal context or real model import."
+  },
+  {
+    "target": "lib",
+    "name": "deepseek_v41::forward::attention_gpu::tests::output_a_strategy::grouped_decode_output_a_native_and_general_fallback_match",
+    "class": "gpu",
+    "ignored": true,
+    "reason": "Metal allocation/dispatch or self-leased device witness; excluded from CPU acceptance."
+  },
+  {
+    "target": "lib",
+    "name": "deepseek_v41::forward::attention_gpu::tests::output_a_strategy::native_group_count_limit_preserves_general_fallback",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Reviewed host-only CED, request-planning, execution contract or synthetic storage control; no Metal context or dispatch."
+  },
+  {
+    "target": "lib",
+    "name": "deepseek_v41::forward::attention_gpu::tests::output_a_strategy::native_layout_checks_dtype_alignment_and_quantized_rows",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Reviewed host-only CED, request-planning, execution contract or synthetic storage control; no Metal context or dispatch."
+  },
+  {
+    "target": "lib",
+    "name": "deepseek_v41::forward::attention_gpu::tests::output_a_strategy::native_layout_rejects_malformed_and_overflowing_limits_without_panics",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Reviewed host-only CED, request-planning, execution contract or synthetic storage control; no Metal context or dispatch."
+  },
+  {
+    "target": "lib",
     "name": "deepseek_v41::forward::attention_gpu::tests::pinned_seven_positions_forty_layers_outputs_caches_and_ids",
     "class": "gpu",
     "ignored": false,
@@ -253,6 +932,76 @@
   },
   {
     "target": "lib",
+    "name": "deepseek_v41::forward::attention_gpu::tests::query_batch::selection_hier::hier_top512_bounded_gpu_exact_legacy_cpu_canaries_and_reuse",
+    "class": "gpu",
+    "ignored": true,
+    "reason": "Metal allocation/dispatch or self-leased device witness; excluded from CPU acceptance."
+  },
+  {
+    "target": "lib",
+    "name": "deepseek_v41::forward::attention_gpu::tests::query_batch::selection_hier::hier_top512_bounded_gpu_query_route_and_pruning_boundary",
+    "class": "gpu",
+    "ignored": true,
+    "reason": "Metal allocation/dispatch or self-leased device witness; excluded from CPU acceptance."
+  },
+  {
+    "target": "lib",
+    "name": "deepseek_v41::forward::attention_gpu::tests::query_batch::selection_hier::hier_top512_full_and_ced_budget_consume_separately_rounded_shapes",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Reviewed host-only CED, request-planning, execution contract or synthetic storage control; no Metal context or dispatch."
+  },
+  {
+    "target": "lib",
+    "name": "deepseek_v41::forward::attention_gpu::tests::query_batch::selection_hier::hier_top512_independent_partition_network_and_cpu_total_order_proof",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Reviewed host-only CED, request-planning, execution contract or synthetic storage control; no Metal context or dispatch."
+  },
+  {
+    "target": "lib",
+    "name": "deepseek_v41::forward::attention_gpu::tests::query_batch::selection_hier::hier_top512_n8192_full_source_dispatch_census_not_duration",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Reviewed host-only CED, request-planning, execution contract or synthetic storage control; no Metal context or dispatch."
+  },
+  {
+    "target": "lib",
+    "name": "deepseek_v41::forward::attention_gpu::tests::query_batch::selection_hier::hier_top512_route_preserves_boundaries_overrides_and_pruning",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Reviewed host-only CED, request-planning, execution contract or synthetic storage control; no Metal context or dispatch."
+  },
+  {
+    "target": "lib",
+    "name": "deepseek_v41::forward::attention_gpu::tests::query_batch::selection_hier::hier_top512_shapes_price_two_allocations_and_capacity_not_prompt",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Reviewed host-only CED, request-planning, execution contract or synthetic storage control; no Metal context or dispatch."
+  },
+  {
+    "target": "lib",
+    "name": "deepseek_v41::forward::attention_gpu::tests::query_batch::selection_hier::tile_reuse::hier_top512_513_rows_fixture_explicit_buffers_below_128_mib",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Reviewed host-only CED, request-planning, execution contract or synthetic storage control; no Metal context or dispatch."
+  },
+  {
+    "target": "lib",
+    "name": "deepseek_v41::forward::attention_gpu::tests::query_batch::selection_hier::tile_reuse::hier_top512_bounded_gpu_513_rows_ced_offset_controls",
+    "class": "gpu",
+    "ignored": true,
+    "reason": "Metal allocation/dispatch or self-leased device witness; excluded from CPU acceptance."
+  },
+  {
+    "target": "lib",
+    "name": "deepseek_v41::forward::attention_gpu::tests::query_batch::selection_hier::tile_reuse::hier_top512_bounded_gpu_513_rows_tile_scratch_reuse",
+    "class": "gpu",
+    "ignored": true,
+    "reason": "Metal allocation/dispatch or self-leased device witness; excluded from CPU acceptance."
+  },
+  {
+    "target": "lib",
     "name": "deepseek_v41::forward::attention_gpu::tests::scheduled_bf16_q8_attention_and_capture_match_f32",
     "class": "gpu",
     "ignored": false,
@@ -295,6 +1044,447 @@
   },
   {
     "target": "lib",
+    "name": "deepseek_v41::forward::ced::qualification::archive::tests::complete_fixture_maps_absolute_rows_without_copying_payloads",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Reviewed host-only CED, request-planning, execution contract or synthetic storage control; no Metal context or dispatch."
+  },
+  {
+    "target": "lib",
+    "name": "deepseek_v41::forward::ced::qualification::archive::tests::metadata_only_shard_may_end_at_unaligned_eof_but_payload_shards_must_align",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Reviewed host-only CED, request-planning, execution contract or synthetic storage control; no Metal context or dispatch."
+  },
+  {
+    "target": "lib",
+    "name": "deepseek_v41::forward::ced::qualification::archive::tests::missing_and_corrupted_complete_are_rejected",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Reviewed host-only CED, request-planning, execution contract or synthetic storage control; no Metal context or dispatch."
+  },
+  {
+    "target": "lib",
+    "name": "deepseek_v41::forward::ced::qualification::archive::tests::raw_input_sha_ids_shape_and_arm_cannot_be_substituted",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Reviewed host-only CED, request-planning, execution contract or synthetic storage control; no Metal context or dispatch."
+  },
+  {
+    "target": "lib",
+    "name": "deepseek_v41::forward::ced::qualification::archive::tests::truncated_wronghash_missing_and_misaligned_records_are_rejected",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Reviewed host-only CED, request-planning, execution contract or synthetic storage control; no Metal context or dispatch."
+  },
+  {
+    "target": "lib",
+    "name": "deepseek_v41::forward::ced::qualification::current_full_production_matches_frozen_reference",
+    "class": "model",
+    "ignored": true,
+    "reason": "Explicit full-artifact/frozen-reference qualification; parent model lane only."
+  },
+  {
+    "target": "lib",
+    "name": "deepseek_v41::forward::ced::qualification::current_full_scalar_matches_frozen_reference",
+    "class": "model",
+    "ignored": true,
+    "reason": "Explicit full-artifact/frozen-reference qualification; parent model lane only."
+  },
+  {
+    "target": "lib",
+    "name": "deepseek_v41::forward::ced::qualification::current_pair::capture_and_combined_budget_charge_all_257_full_vocab_vectors",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Reviewed host-only CED, request-planning, execution contract or synthetic storage control; no Metal context or dispatch."
+  },
+  {
+    "target": "lib",
+    "name": "deepseek_v41::forward::ced::qualification::current_pair::compiled_safety_source_refuses_a_stale_body_before_import",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Reviewed host-only CED, request-planning, execution contract or synthetic storage control; no Metal context or dispatch."
+  },
+  {
+    "target": "lib",
+    "name": "deepseek_v41::forward::ced::qualification::current_pair::current_full_vs_ced_paired_full_model",
+    "class": "model",
+    "ignored": true,
+    "reason": "Explicit full-artifact/frozen-reference qualification; parent model lane only."
+  },
+  {
+    "target": "lib",
+    "name": "deepseek_v41::forward::ced::qualification::current_pair::every_loader_source_rejects_a_stale_body_in_both_active_inventories",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Reviewed host-only CED, request-planning, execution contract or synthetic storage control; no Metal context or dispatch."
+  },
+  {
+    "target": "lib",
+    "name": "deepseek_v41::forward::ced::qualification::current_pair::prefix_selection_uses_true_next_256_ids_and_rejects_bad_inputs",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Reviewed host-only CED, request-planning, execution contract or synthetic storage control; no Metal context or dispatch."
+  },
+  {
+    "target": "lib",
+    "name": "deepseek_v41::forward::ced::qualification::current_pair::repeated_companion_path_replacement_refuses_new_loaded_fds_even_if_planned_fd_is_unchanged",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Reviewed host-only CED, request-planning, execution contract or synthetic storage control; no Metal context or dispatch."
+  },
+  {
+    "target": "lib",
+    "name": "deepseek_v41::forward::ced::qualification::current_pair::transition_prefixes_keep_existing_capture_and_causal_coverage_bounds",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Reviewed host-only CED, request-planning, execution contract or synthetic storage control; no Metal context or dispatch."
+  },
+  {
+    "target": "lib",
+    "name": "deepseek_v41::forward::ced::qualification::memory_ledger_comparison_excludes_runtime_peak_observations",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Reviewed host-only CED, request-planning, execution contract or synthetic storage control; no Metal context or dispatch."
+  },
+  {
+    "target": "lib",
+    "name": "deepseek_v41::forward::ced::qualification::metrics::tests::stable_large_logits_and_extra_row_not_a_prediction",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Reviewed host-only CED, request-planning, execution contract or synthetic storage control; no Metal context or dispatch."
+  },
+  {
+    "target": "lib",
+    "name": "deepseek_v41::forward::ced::qualification::metrics::tests::strict_bits_never_relax_even_signed_zero",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Reviewed host-only CED, request-planning, execution contract or synthetic storage control; no Metal context or dispatch."
+  },
+  {
+    "target": "lib",
+    "name": "deepseek_v41::forward::ced::qualification::production_command_count_groups_genuine_scalar_tails_without_changing_units",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Reviewed host-only CED, request-planning, execution contract or synthetic storage control; no Metal context or dispatch."
+  },
+  {
+    "target": "lib",
+    "name": "deepseek_v41::forward::ced::qualification::production_fusion_counts_follow_selected_full_chunks_without_growing_decoder_tiles",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Reviewed host-only CED, request-planning, execution contract or synthetic storage control; no Metal context or dispatch."
+  },
+  {
+    "target": "lib",
+    "name": "deepseek_v41::forward::ced::qualification::production_reference_rejects_a_different_full_chunk_schedule",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Reviewed host-only CED, request-planning, execution contract or synthetic storage control; no Metal context or dispatch."
+  },
+  {
+    "target": "lib",
+    "name": "deepseek_v41::forward::ced::qualification::production_seed_fusion_removes_only_eligible_boundaries_at_native_lengths",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Reviewed host-only CED, request-planning, execution contract or synthetic storage control; no Metal context or dispatch."
+  },
+  {
+    "target": "lib",
+    "name": "deepseek_v41::forward::ced::qualification::provenance::active_compiled_inventory_matches_checkout",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Reviewed host-only CED, request-planning, execution contract or synthetic storage control; no Metal context or dispatch."
+  },
+  {
+    "target": "lib",
+    "name": "deepseek_v41::forward::ced::qualification::provenance::compiled_geometry_and_activation_inventory_rejects_single_file_edits_before_import",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Reviewed host-only CED, request-planning, execution contract or synthetic storage control; no Metal context or dispatch."
+  },
+  {
+    "target": "lib",
+    "name": "deepseek_v41::forward::ced::qualification::provenance::every_batching_source_rejects_a_stale_body_in_both_qualification_inventories",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Reviewed host-only CED, request-planning, execution contract or synthetic storage control; no Metal context or dispatch."
+  },
+  {
+    "target": "lib",
+    "name": "deepseek_v41::forward::ced::qualification::provenance::every_soft_window_source_rejects_a_stale_body_in_both_qualification_inventories",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Reviewed host-only CED, request-planning, execution contract or synthetic storage control; no Metal context or dispatch."
+  },
+  {
+    "target": "lib",
+    "name": "deepseek_v41::forward::ced::qualification::provenance::frozen_reference_requires_complete_reviewed_harness_identity",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Reviewed host-only CED, request-planning, execution contract or synthetic storage control; no Metal context or dispatch."
+  },
+  {
+    "target": "lib",
+    "name": "deepseek_v41::forward::ced::qualification::shrinking_production_against_frozen_reference",
+    "class": "model",
+    "ignored": true,
+    "reason": "Explicit full-artifact/frozen-reference qualification; parent model lane only."
+  },
+  {
+    "target": "lib",
+    "name": "deepseek_v41::forward::ced::qualification::shrinking_scalar_matches_frozen_reference",
+    "class": "model",
+    "ignored": true,
+    "reason": "Explicit full-artifact/frozen-reference qualification; parent model lane only."
+  },
+  {
+    "target": "lib",
+    "name": "deepseek_v41::forward::ced::tests::bounded_metadata_parts_match_loaded_request_full_and_ced_ledgers",
+    "class": "gpu",
+    "ignored": true,
+    "reason": "Metal allocation/dispatch or self-leased device witness; excluded from CPU acceptance."
+  },
+  {
+    "target": "lib",
+    "name": "deepseek_v41::forward::ced::tests::checkpoints_error_cancel_and_unwind_poison_every_ced_phase",
+    "class": "gpu",
+    "ignored": true,
+    "reason": "Metal allocation/dispatch or self-leased device witness; excluded from CPU acceptance."
+  },
+  {
+    "target": "lib",
+    "name": "deepseek_v41::forward::ced::tests::chunked::batched_f32_chunk_edges_and_genuine_scalar_tails_bitwise",
+    "class": "gpu",
+    "ignored": true,
+    "reason": "Metal allocation/dispatch or self-leased device witness; excluded from CPU acceptance."
+  },
+  {
+    "target": "lib",
+    "name": "deepseek_v41::forward::ced::tests::chunked::batched_f32_default_d20_w128_2542_bitwise_all_layers",
+    "class": "gpu",
+    "ignored": true,
+    "reason": "Metal allocation/dispatch or self-leased device witness; excluded from CPU acceptance."
+  },
+  {
+    "target": "lib",
+    "name": "deepseek_v41::forward::ced::tests::chunked::batched_f32_multichunk_4096_bitwise_restore_growth_and_256_scalar_steps",
+    "class": "gpu",
+    "ignored": true,
+    "reason": "Metal allocation/dispatch or self-leased device witness; excluded from CPU acceptance."
+  },
+  {
+    "target": "lib",
+    "name": "deepseek_v41::forward::ced::tests::chunked::batched_f32_window_one_packed_singletons_bitwise",
+    "class": "gpu",
+    "ignored": true,
+    "reason": "Metal allocation/dispatch or self-leased device witness; excluded from CPU acceptance."
+  },
+  {
+    "target": "lib",
+    "name": "deepseek_v41::forward::ced::tests::chunked::multichunk_graph_geometry_really_crosses_encoder_and_decoder_boundaries",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Reviewed host-only CED, request-planning, execution contract or synthetic storage control; no Metal context or dispatch."
+  },
+  {
+    "target": "lib",
+    "name": "deepseek_v41::forward::ced::tests::counters_reject_duplicate_and_extraneous_layer_records",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Reviewed host-only CED, request-planning, execution contract or synthetic storage control; no Metal context or dispatch."
+  },
+  {
+    "target": "lib",
+    "name": "deepseek_v41::forward::ced::tests::counters_require_completed_commands_and_exact_layer_coverage",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Reviewed host-only CED, request-planning, execution contract or synthetic storage control; no Metal context or dispatch."
+  },
+  {
+    "target": "lib",
+    "name": "deepseek_v41::forward::ced::tests::discarded_completion_poisoning_is_scoped_to_each_command_role",
+    "class": "gpu",
+    "ignored": true,
+    "reason": "Metal allocation/dispatch or self-leased device witness; excluded from CPU acceptance."
+  },
+  {
+    "target": "lib",
+    "name": "deepseek_v41::forward::ced::tests::encoder_route_status_failure_cannot_commit_ced",
+    "class": "gpu",
+    "ignored": true,
+    "reason": "Metal allocation/dispatch or self-leased device witness; excluded from CPU acceptance."
+  },
+  {
+    "target": "lib",
+    "name": "deepseek_v41::forward::ced::tests::preflight_rejections_keep_ready_and_nonzero_start_reports_full_fallback",
+    "class": "gpu",
+    "ignored": true,
+    "reason": "Metal allocation/dispatch or self-leased device witness; excluded from CPU acceptance."
+  },
+  {
+    "target": "lib",
+    "name": "deepseek_v41::forward::ced::tests::production_rows_preserve_encoder_and_owner_globals_report_decoder_differences",
+    "class": "gpu",
+    "ignored": true,
+    "reason": "Metal allocation/dispatch or self-leased device witness; excluded from CPU acceptance."
+  },
+  {
+    "target": "lib",
+    "name": "deepseek_v41::forward::ced::tests::provisional_guard_commits_addresses_and_origin_only_on_success",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Reviewed host-only CED, request-planning, execution contract or synthetic storage control; no Metal context or dispatch."
+  },
+  {
+    "target": "lib",
+    "name": "deepseek_v41::forward::ced::tests::provisional_guard_error_and_unwind_poison_without_committing_addresses",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Reviewed host-only CED, request-planning, execution contract or synthetic storage control; no Metal context or dispatch."
+  },
+  {
+    "target": "lib",
+    "name": "deepseek_v41::forward::ced::tests::scalar_native_full_vs_ced_bitwise_state_logits_restore_growth_and_256_steps",
+    "class": "gpu",
+    "ignored": true,
+    "reason": "Metal allocation/dispatch or self-leased device witness; excluded from CPU acceptance."
+  },
+  {
+    "target": "lib",
+    "name": "deepseek_v41::forward::ced::tests::scoped_hooks_are_one_shot_nested_thread_local_and_unwind_safe",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Reviewed host-only CED, request-planning, execution contract or synthetic storage control; no Metal context or dispatch."
+  },
+  {
+    "target": "lib",
+    "name": "deepseek_v41::forward::ced::tests::selected_2k_and_4k_chunk_edges_match_current_full_bits_state_and_counts",
+    "class": "gpu",
+    "ignored": true,
+    "reason": "Metal allocation/dispatch or self-leased device witness; excluded from CPU acceptance."
+  },
+  {
+    "target": "lib",
+    "name": "deepseek_v41::forward::ced::tests::unfused_reference_is_nested_thread_local_and_unwind_safe",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Reviewed host-only CED, request-planning, execution contract or synthetic storage control; no Metal context or dispatch."
+  },
+  {
+    "target": "lib",
+    "name": "deepseek_v41::forward::ced_plan::batches::tests::bounded_groups_preserve_every_absolute_unit_and_work_at_chunk_edges",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Reviewed host-only CED, request-planning, execution contract or synthetic storage control; no Metal context or dispatch."
+  },
+  {
+    "target": "lib",
+    "name": "deepseek_v41::forward::ced_plan::batches::tests::large_windows_choose_bounded_incumbent_before_allocating_or_pricing_groups",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Reviewed host-only CED, request-planning, execution contract or synthetic storage control; no Metal context or dispatch."
+  },
+  {
+    "target": "lib",
+    "name": "deepseek_v41::forward::ced_plan::batches::tests::physical_unit_budget_accepts_16_rejects_17_and_override_is_scoped",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Reviewed host-only CED, request-planning, execution contract or synthetic storage control; no Metal context or dispatch."
+  },
+  {
+    "target": "lib",
+    "name": "deepseek_v41::forward::ced_plan::batches::tests::production_command_plan_is_derived_not_fixed_to_twenty_decoder_layers",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Reviewed host-only CED, request-planning, execution contract or synthetic storage control; no Metal context or dispatch."
+  },
+  {
+    "target": "lib",
+    "name": "deepseek_v41::forward::ced_plan::tests::asymmetric_cut_still_rejects_later_owners_and_decoder_engram",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Reviewed host-only CED, request-planning, execution contract or synthetic storage control; no Metal context or dispatch."
+  },
+  {
+    "target": "lib",
+    "name": "deepseek_v41::forward::ced_plan::tests::bounded_views_preserve_absolute_and_retained_origins",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Reviewed host-only CED, request-planning, execution contract or synthetic storage control; no Metal context or dispatch."
+  },
+  {
+    "target": "lib",
+    "name": "deepseek_v41::forward::ced_plan::tests::checks_window_geometry_and_arithmetic_overflow",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Reviewed host-only CED, request-planning, execution contract or synthetic storage control; no Metal context or dispatch."
+  },
+  {
+    "target": "lib",
+    "name": "deepseek_v41::forward::ced_plan::tests::excludes_non_cold_or_extra_reader_requests",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Reviewed host-only CED, request-planning, execution contract or synthetic storage control; no Metal context or dispatch."
+  },
+  {
+    "target": "lib",
+    "name": "deepseek_v41::forward::ced_plan::tests::prompt_edges_and_exact_long_prompt_work",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Reviewed host-only CED, request-planning, execution contract or synthetic storage control; no Metal context or dispatch."
+  },
+  {
+    "target": "lib",
+    "name": "deepseek_v41::forward::ced_plan::tests::rejects_incompatible_or_malformed_schedules",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Reviewed host-only CED, request-planning, execution contract or synthetic storage control; no Metal context or dispatch."
+  },
+  {
+    "target": "lib",
+    "name": "deepseek_v41::forward::ced_plan::tests::rejects_later_owner_and_decoder_engram_but_allows_reindex",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Reviewed host-only CED, request-planning, execution contract or synthetic storage control; no Metal context or dispatch."
+  },
+  {
+    "target": "lib",
+    "name": "deepseek_v41::forward::ced_plan::tests::separate_f32_boundary_and_i32_candidate_and_selected_pricing",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Reviewed host-only CED, request-planning, execution contract or synthetic storage control; no Metal context or dispatch."
+  },
+  {
+    "target": "lib",
+    "name": "deepseek_v41::forward::ced_plan::tests::short_asymmetric_profiles_and_window_one_remain_general",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Reviewed host-only CED, request-planning, execution contract or synthetic storage control; no Metal context or dispatch."
+  },
+  {
+    "target": "lib",
+    "name": "deepseek_v41::forward::chunk_geometry::full_and_ced_metadata_price_the_selected_runtime_width_not_a_fixed_2k_cap",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Reviewed host-only CED, request-planning, execution contract or synthetic storage control; no Metal context or dispatch."
+  },
+  {
+    "target": "lib",
+    "name": "deepseek_v41::forward::chunk_geometry::released_shape_prices_actual_4k_encoder_and_half_scratch_per_allocation",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Reviewed host-only CED, request-planning, execution contract or synthetic storage control; no Metal context or dispatch."
+  },
+  {
+    "target": "lib",
+    "name": "deepseek_v41::forward::chunk_geometry::selected_full_geometry_keeps_encoder_schedule_and_scalar_native_identity",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Reviewed host-only CED, request-planning, execution contract or synthetic storage control; no Metal context or dispatch."
+  },
+  {
+    "target": "lib",
     "name": "deepseek_v41::forward::engram_gpu::tests::random_both_layouts_tiny_and_real_hidden_batched",
     "class": "gpu",
     "ignored": false,
@@ -323,10 +1513,59 @@
   },
   {
     "target": "lib",
+    "name": "deepseek_v41::forward::ffn_gpu::arithmetic_tests::packed_singleton_ffn_preserves_operands_and_all_f32_controls_win",
+    "class": "gpu",
+    "ignored": true,
+    "reason": "Metal allocation/dispatch or self-leased device witness; excluded from CPU acceptance."
+  },
+  {
+    "target": "lib",
+    "name": "deepseek_v41::forward::ffn_gpu::arithmetic_tests::wide_ffn_fixture_has_bounded_full_and_decoder_backing",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Reviewed host-only CED, request-planning, execution contract or synthetic storage control; no Metal context or dispatch."
+  },
+  {
+    "target": "lib",
+    "name": "deepseek_v41::forward::ffn_gpu::arithmetic_tests::wide_full_vs_compacted_ffn_maya_bitwise_and_status",
+    "class": "gpu",
+    "ignored": true,
+    "reason": "Metal allocation/dispatch or self-leased device witness; excluded from CPU acceptance."
+  },
+  {
+    "target": "lib",
+    "name": "deepseek_v41::forward::ffn_gpu::scratch_prefix_geometry_tests::ffn_actual_prefix_resets_only_active_statuses_after_all_checks",
+    "class": "gpu",
+    "ignored": true,
+    "reason": "Metal allocation/dispatch or self-leased device witness; excluded from CPU acceptance."
+  },
+  {
+    "target": "lib",
+    "name": "deepseek_v41::forward::ffn_gpu::scratch_prefix_geometry_tests::ffn_prefix_geometry_compacts_statuses_and_slot_strides",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Reviewed host-only CED, request-planning, execution contract or synthetic storage control; no Metal context or dispatch."
+  },
+  {
+    "target": "lib",
+    "name": "deepseek_v41::forward::ffn_gpu::scratch_prefix_geometry_tests::ffn_prefix_geometry_rejects_empty_oversize_and_overflow",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Reviewed host-only CED, request-planning, execution contract or synthetic storage control; no Metal context or dispatch."
+  },
+  {
+    "target": "lib",
     "name": "deepseek_v41::forward::ffn_gpu::tests::asymmetric_clamps_preserve_negative_gate_tail",
     "class": "gpu",
     "ignored": false,
     "reason": "Metal context, allocation or dispatch witness; parent GPU lane only."
+  },
+  {
+    "target": "lib",
+    "name": "deepseek_v41::forward::ffn_gpu::tests::execution_contract_rejections_match_ffn_workspace_and_composition_guards",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Reviewed host-only CED, request-planning, execution contract or synthetic storage control; no Metal context or dispatch."
   },
   {
     "target": "lib",
@@ -449,6 +1688,195 @@
   },
   {
     "target": "lib",
+    "name": "deepseek_v41::forward::gpu_step::ced::batches::tests::all_new_fixture_ledgers_include_four_layer_status_and_diagnostic_storage_below_128_mib",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Reviewed host-only CED, request-planning, execution contract or synthetic storage control; no Metal context or dispatch."
+  },
+  {
+    "target": "lib",
+    "name": "deepseek_v41::forward::gpu_step::ced::batches::tests::attention_error_survives_all_later_healthy_units_and_releases_owners_while_poisoned",
+    "class": "gpu",
+    "ignored": true,
+    "reason": "Metal allocation/dispatch or self-leased device witness; excluded from CPU acceptance."
+  },
+  {
+    "target": "lib",
+    "name": "deepseek_v41::forward::gpu_step::ced::batches::tests::automatic_unit_budget_fallback_matches_incumbent_counts_prices_and_all_bits",
+    "class": "gpu",
+    "ignored": true,
+    "reason": "Metal allocation/dispatch or self-leased device witness; excluded from CPU acceptance."
+  },
+  {
+    "target": "lib",
+    "name": "deepseek_v41::forward::gpu_step::ced::batches::tests::batch_encode_completion_cancel_and_unwind_poison_without_publication_or_resource_leaks",
+    "class": "gpu",
+    "ignored": true,
+    "reason": "Metal allocation/dispatch or self-leased device witness; excluded from CPU acceptance."
+  },
+  {
+    "target": "lib",
+    "name": "deepseek_v41::forward::gpu_step::ced::batches::tests::batch_override_is_nested_thread_local_and_unwind_safe",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Reviewed host-only CED, request-planning, execution contract or synthetic storage control; no Metal context or dispatch."
+  },
+  {
+    "target": "lib",
+    "name": "deepseek_v41::forward::gpu_step::ced::batches::tests::bounded_old_vs_batch_1_2_4_exact_heads_causal_controls_ordered_arithmetic_chunks_and_tails",
+    "class": "gpu",
+    "ignored": true,
+    "reason": "Metal allocation/dispatch or self-leased device witness; excluded from CPU acceptance."
+  },
+  {
+    "target": "lib",
+    "name": "deepseek_v41::forward::gpu_step::ced::batches::tests::competing_attention_and_single_ffn_word_obey_logical_unit_precedence",
+    "class": "gpu",
+    "ignored": true,
+    "reason": "Metal allocation/dispatch or self-leased device witness; excluded from CPU acceptance."
+  },
+  {
+    "target": "lib",
+    "name": "deepseek_v41::forward::gpu_step::ced::batches::tests::gpu_written_status_boundary_canary_detects_a_gpu_clobber_after_completion",
+    "class": "gpu",
+    "ignored": true,
+    "reason": "Metal allocation/dispatch or self-leased device witness; excluded from CPU acceptance."
+  },
+  {
+    "target": "lib",
+    "name": "deepseek_v41::forward::gpu_step::ced::batches::tests::m5_small_and_wide_batch_lineage_preserves_full_tile_packed_singletons",
+    "class": "gpu",
+    "ignored": true,
+    "reason": "Metal allocation/dispatch or self-leased device witness; excluded from CPU acceptance."
+  },
+  {
+    "target": "lib",
+    "name": "deepseek_v41::forward::gpu_step::ced::batches::tests::selected_full_geometry_edges_preserve_batch_1_2_4_bits_and_driver_attribution",
+    "class": "gpu",
+    "ignored": true,
+    "reason": "Metal allocation/dispatch or self-leased device witness; excluded from CPU acceptance."
+  },
+  {
+    "target": "lib",
+    "name": "deepseek_v41::forward::gpu_step::ced::batches::tests::single_ffn_word_survives_healthy_same_layer_second_chunk_and_every_later_word",
+    "class": "gpu",
+    "ignored": true,
+    "reason": "Metal allocation/dispatch or self-leased device witness; excluded from CPU acceptance."
+  },
+  {
+    "target": "lib",
+    "name": "deepseek_v41::forward::gpu_step::ced::batches::tests::typed_allocation_failure_sites_are_one_shot_and_do_not_request_real_oom",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Reviewed host-only CED, request-planning, execution contract or synthetic storage control; no Metal context or dispatch."
+  },
+  {
+    "target": "lib",
+    "name": "deepseek_v41::forward::gpu_step::ced::reuse::complete_fixture_ledgers_stay_below_128_mib",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Reviewed host-only CED, request-planning, execution contract or synthetic storage control; no Metal context or dispatch."
+  },
+  {
+    "target": "lib",
+    "name": "deepseek_v41::forward::gpu_step::ced::reuse::compound_seed_nonfinite_is_sticky_after_decoder_and_route_failure_poison_and_drain",
+    "class": "gpu",
+    "ignored": true,
+    "reason": "Metal allocation/dispatch or self-leased device witness; excluded from CPU acceptance."
+  },
+  {
+    "target": "lib",
+    "name": "deepseek_v41::forward::gpu_step::ced::reuse::derives_actual_maximum_excluding_native_and_genuine_scalar_tails",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Reviewed host-only CED, request-planning, execution contract or synthetic storage control; no Metal context or dispatch."
+  },
+  {
+    "target": "lib",
+    "name": "deepseek_v41::forward::gpu_step::ced::reuse::dirty_combined_rows_match_fresh_bitwise_and_preserve_dispatch_commands",
+    "class": "gpu",
+    "ignored": true,
+    "reason": "Metal allocation/dispatch or self-leased device witness; excluded from CPU acceptance."
+  },
+  {
+    "target": "lib",
+    "name": "deepseek_v41::forward::gpu_step::ced::reuse::fresh_incumbent_override_is_nested_thread_local_and_unwind_safe",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Reviewed host-only CED, request-planning, execution contract or synthetic storage control; no Metal context or dispatch."
+  },
+  {
+    "target": "lib",
+    "name": "deepseek_v41::forward::gpu_step::ced::reuse::half_prefix_staged_subgroups_use_current_n_strides_and_match_fresh_bits",
+    "class": "gpu",
+    "ignored": true,
+    "reason": "Metal allocation/dispatch or self-leased device witness; excluded from CPU acceptance."
+  },
+  {
+    "target": "lib",
+    "name": "deepseek_v41::forward::gpu_step::ced::reuse::one_maximum_backing_and_zero_metal_allocations_for_every_checked_view",
+    "class": "gpu",
+    "ignored": true,
+    "reason": "Metal allocation/dispatch or self-leased device witness; excluded from CPU acceptance."
+  },
+  {
+    "target": "lib",
+    "name": "deepseek_v41::forward::gpu_step::ced::reuse::outer_prefix_rejects_zero_oversize_and_overflow_before_views",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Reviewed host-only CED, request-planning, execution contract or synthetic storage control; no Metal context or dispatch."
+  },
+  {
+    "target": "lib",
+    "name": "deepseek_v41::forward::gpu_step::ced::reuse::p4_selection_slabs_rebind_without_another_score_or_pair_allocation",
+    "class": "gpu",
+    "ignored": true,
+    "reason": "Metal allocation/dispatch or self-leased device witness; excluded from CPU acceptance."
+  },
+  {
+    "target": "lib",
+    "name": "deepseek_v41::forward::gpu_step::ced::reuse::request_driver_matches_fresh_short_maximum_packed_singleton_and_scalar_tail",
+    "class": "gpu",
+    "ignored": true,
+    "reason": "Metal allocation/dispatch or self-leased device witness; excluded from CPU acceptance."
+  },
+  {
+    "target": "lib",
+    "name": "deepseek_v41::forward::gpu_step::ced::reuse::reuse_allocation_view_completion_error_cancel_and_unwind_drop_and_poison",
+    "class": "gpu",
+    "ignored": true,
+    "reason": "Metal allocation/dispatch or self-leased device witness; excluded from CPU acceptance."
+  },
+  {
+    "target": "lib",
+    "name": "deepseek_v41::forward::gpu_step::ced::reuse::seed_fusion_matches_unfused_empty_partial_full_wrap_packed_one_second_chunk_and_scalar",
+    "class": "gpu",
+    "ignored": true,
+    "reason": "Metal allocation/dispatch or self-leased device witness; excluded from CPU acceptance."
+  },
+  {
+    "target": "lib",
+    "name": "deepseek_v41::forward::gpu_step::ced::reuse::selected_full_width_never_expands_the_reusable_decoder_backing",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Reviewed host-only CED, request-planning, execution contract or synthetic storage control; no Metal context or dispatch."
+  },
+  {
+    "target": "lib",
+    "name": "deepseek_v41::forward::gpu_step::ced::reuse::wide_full_tile_lineage_and_staged_groups_match_fresh_through_packed_singleton",
+    "class": "gpu",
+    "ignored": true,
+    "reason": "Metal allocation/dispatch or self-leased device witness; excluded from CPU acceptance."
+  },
+  {
+    "target": "lib",
+    "name": "deepseek_v41::forward::gpu_step::ced::reuse::wide_lineage_fixture_is_separate_from_p4_and_below_128_mib",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Reviewed host-only CED, request-planning, execution contract or synthetic storage control; no Metal context or dispatch."
+  },
+  {
+    "target": "lib",
     "name": "deepseek_v41::forward::gpu_step::tests::cancellation_callback_errors_and_encode_failure_poison",
     "class": "gpu",
     "ignored": false,
@@ -516,6 +1944,160 @@
     "class": "cpu",
     "ignored": false,
     "reason": "Host-only metadata, arithmetic, source contract or synthetic disk fixture; no Metal context."
+  },
+  {
+    "target": "lib",
+    "name": "deepseek_v41::forward::planning::tests::candidate_selection_is_pure_and_smaller_geometry_precedes_any_allocation",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Reviewed host-only CED, request-planning, execution contract or synthetic storage control; no Metal context or dispatch."
+  },
+  {
+    "target": "lib",
+    "name": "deepseek_v41::forward::planning::tests::ced_lineage_uses_admitted_geometry_and_distinguishes_genuine_scalar_tails",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Reviewed host-only CED, request-planning, execution contract or synthetic storage control; no Metal context or dispatch."
+  },
+  {
+    "target": "lib",
+    "name": "deepseek_v41::forward::planning::tests::cold_peak_reserve_and_live_capacity_cost_are_not_erased_by_smaller_selection",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Reviewed host-only CED, request-planning, execution contract or synthetic storage control; no Metal context or dispatch."
+  },
+  {
+    "target": "lib",
+    "name": "deepseek_v41::forward::planning::tests::current_device_and_process_debt_still_bind_candidate_admission",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Reviewed host-only CED, request-planning, execution contract or synthetic storage control; no Metal context or dispatch."
+  },
+  {
+    "target": "lib",
+    "name": "deepseek_v41::forward::planning::tests::frozen_geometry_refuses_without_retry_or_mutation_and_invalid_signals_fail_closed",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Reviewed host-only CED, request-planning, execution contract or synthetic storage control; no Metal context or dispatch."
+  },
+  {
+    "target": "lib",
+    "name": "deepseek_v41::forward::planning::tests::intrinsic_execution_refusal_precedes_candidate_scratch_pricing",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Reviewed host-only CED, request-planning, execution contract or synthetic storage control; no Metal context or dispatch."
+  },
+  {
+    "target": "lib",
+    "name": "deepseek_v41::forward::planning::tests::new_live_request_can_narrow_before_mutation_but_keeps_an_admissible_retained_width",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Reviewed host-only CED, request-planning, execution contract or synthetic storage control; no Metal context or dispatch."
+  },
+  {
+    "target": "lib",
+    "name": "deepseek_v41::forward::planning::tests::reports_actual_internal_ranges_for_logical_4096_partial_suffix_and_nonzero_start",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Reviewed host-only CED, request-planning, execution contract or synthetic storage control; no Metal context or dispatch."
+  },
+  {
+    "target": "lib",
+    "name": "deepseek_v41::forward::planning::tests::request_identity_is_arc_bound_not_config_or_capacity_equality",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Reviewed host-only CED, request-planning, execution contract or synthetic storage control; no Metal context or dispatch."
+  },
+  {
+    "target": "lib",
+    "name": "deepseek_v41::forward::planning::tests::runtime_price_uses_sequential_full_ced_maxima_and_keeps_cpu_domains_separate",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Reviewed host-only CED, request-planning, execution contract or synthetic storage control; no Metal context or dispatch."
+  },
+  {
+    "target": "lib",
+    "name": "deepseek_v41::forward::planning::tests::shared_gpu_growth_uses_mwss_and_physical_ceiling_not_cpu_availability",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Reviewed host-only CED, request-planning, execution contract or synthetic storage control; no Metal context or dispatch."
+  },
+  {
+    "target": "lib",
+    "name": "deepseek_v41::forward::prefill::arithmetic_tests::batched_f32_scope_nests_is_thread_local_and_restores_on_unwind",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Reviewed host-only CED, request-planning, execution contract or synthetic storage control; no Metal context or dispatch."
+  },
+  {
+    "target": "lib",
+    "name": "deepseek_v41::forward::prefill::arithmetic_tests::original_scalar_tail_matches_the_actual_full_chunk_schedule",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Reviewed host-only CED, request-planning, execution contract or synthetic storage control; no Metal context or dispatch."
+  },
+  {
+    "target": "lib",
+    "name": "deepseek_v41::forward::prefill::arithmetic_tests::packed_lineage_changes_only_nonempty_singleton_dense_eligibility",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Reviewed host-only CED, request-planning, execution contract or synthetic storage control; no Metal context or dispatch."
+  },
+  {
+    "target": "lib",
+    "name": "deepseek_v41::forward::prefill::arithmetic_tests::singleton_dense_lineage_uses_real_views_and_ordinary_wrapper_is_unchanged",
+    "class": "gpu",
+    "ignored": true,
+    "reason": "Metal allocation/dispatch or self-leased device witness; excluded from CPU acceptance."
+  },
+  {
+    "target": "lib",
+    "name": "deepseek_v41::forward::prefill::half_staging_tests::half_staging_allocation_ledger_counts_unused_override_buffers",
+    "class": "gpu",
+    "ignored": true,
+    "reason": "Metal allocation/dispatch or self-leased device witness; excluded from CPU acceptance."
+  },
+  {
+    "target": "lib",
+    "name": "deepseek_v41::forward::prefill::half_staging_tests::half_staging_conversion_and_dense_operand_bits_match",
+    "class": "gpu",
+    "ignored": true,
+    "reason": "Metal allocation/dispatch or self-leased device witness; excluded from CPU acceptance."
+  },
+  {
+    "target": "lib",
+    "name": "deepseek_v41::forward::prefill::half_staging_tests::half_staging_default_geometry_is_202_mib",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Reviewed host-only CED, request-planning, execution contract or synthetic storage control; no Metal context or dispatch."
+  },
+  {
+    "target": "lib",
+    "name": "deepseek_v41::forward::prefill::half_staging_tests::half_staging_geometry_checks_products_and_bytes",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Reviewed host-only CED, request-planning, execution contract or synthetic storage control; no Metal context or dispatch."
+  },
+  {
+    "target": "lib",
+    "name": "deepseek_v41::forward::prefill::scratch_prefix_geometry_tests::half_prefix_extents_use_two_byte_offset_units",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Reviewed host-only CED, request-planning, execution contract or synthetic storage control; no Metal context or dispatch."
+  },
+  {
+    "target": "lib",
+    "name": "deepseek_v41::forward::prefill::scratch_prefix_geometry_tests::prefix_extents_check_logical_and_physical_limits_before_views",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Reviewed host-only CED, request-planning, execution contract or synthetic storage control; no Metal context or dispatch."
+  },
+  {
+    "target": "lib",
+    "name": "deepseek_v41::forward::prefill::scratch_prefix_geometry_tests::prefix_rows_require_bounded_original_backing",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Reviewed host-only CED, request-planning, execution contract or synthetic storage control; no Metal context or dispatch."
   },
   {
     "target": "lib",
@@ -659,6 +2241,167 @@
   },
   {
     "target": "lib",
+    "name": "deepseek_v41::forward::preflight::tests::binding_controls_price_each_quantized_resource_and_skip_direct_types",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Reviewed host-only CED, request-planning, execution contract or synthetic storage control; no Metal context or dispatch."
+  },
+  {
+    "target": "lib",
+    "name": "deepseek_v41::forward::preflight::tests::binding_inventory_has_exact_schedule_roles_and_one_grouped_output_control",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Reviewed host-only CED, request-planning, execution contract or synthetic storage control; no Metal context or dispatch."
+  },
+  {
+    "target": "lib",
+    "name": "deepseek_v41::forward::preflight::tests::checked_geometry_context_and_pricing_fail_closed",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Reviewed host-only CED, request-planning, execution contract or synthetic storage control; no Metal context or dispatch."
+  },
+  {
+    "target": "lib",
+    "name": "deepseek_v41::forward::preflight::tests::cold_candidates_select_before_import_and_freeze_geometry_without_repricing_cpu_as_weights",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Reviewed host-only CED, request-planning, execution contract or synthetic storage control; no Metal context or dispatch."
+  },
+  {
+    "target": "lib",
+    "name": "deepseek_v41::forward::preflight::tests::combined_budget_keeps_the_original_pair_sum_and_overflow_regression",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Reviewed host-only CED, request-planning, execution contract or synthetic storage control; no Metal context or dispatch."
+  },
+  {
+    "target": "lib",
+    "name": "deepseek_v41::forward::preflight::tests::custom_schedule_engram_variants_and_shared_ledgers",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Reviewed host-only CED, request-planning, execution contract or synthetic storage control; no Metal context or dispatch."
+  },
+  {
+    "target": "lib",
+    "name": "deepseek_v41::forward::preflight::tests::default_half_scratch_is_202_mib_without_gpu_family_guesses",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Reviewed host-only CED, request-planning, execution contract or synthetic storage control; no Metal context or dispatch."
+  },
+  {
+    "target": "lib",
+    "name": "deepseek_v41::forward::preflight::tests::loader_control_cpu_budget_is_explicit_checked_and_never_charges_shared_weights",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Reviewed host-only CED, request-planning, execution contract or synthetic storage control; no Metal context or dispatch."
+  },
+  {
+    "target": "lib",
+    "name": "deepseek_v41::forward::preflight::tests::policy_repetitions_are_peaks_not_sums",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Reviewed host-only CED, request-planning, execution contract or synthetic storage control; no Metal context or dispatch."
+  },
+  {
+    "target": "lib",
+    "name": "deepseek_v41::forward::preflight::tests::ratio_two_256_layer_binding_controls_cost_64_mib_plus_one_page",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Reviewed host-only CED, request-planning, execution contract or synthetic storage control; no Metal context or dispatch."
+  },
+  {
+    "target": "lib",
+    "name": "deepseek_v41::forward::preflight::tests::staged_assessments_refuse_invalid_telemetry_and_runtime_combined_overflow",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Reviewed host-only CED, request-planning, execution contract or synthetic storage control; no Metal context or dispatch."
+  },
+  {
+    "target": "lib",
+    "name": "deepseek_v41::forward::preflight::tests::staged_capacity_checks_constraints_hidden_by_whole_peak_availability",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Reviewed host-only CED, request-planning, execution contract or synthetic storage control; no Metal context or dispatch."
+  },
+  {
+    "target": "lib",
+    "name": "deepseek_v41::forward::preflight::tests::staged_iq3_views_exceed_cpu_availability_but_still_require_device_capacity",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Reviewed host-only CED, request-planning, execution contract or synthetic storage control; no Metal context or dispatch."
+  },
+  {
+    "target": "lib",
+    "name": "deepseek_v41::forward::preflight::tests::staged_load_fits_while_strict_peak_remains_refused",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Reviewed host-only CED, request-planning, execution contract or synthetic storage control; no Metal context or dispatch."
+  },
+  {
+    "target": "lib",
+    "name": "deepseek_v41::forward::preflight::tests::staged_private_shadows_and_uncovered_imports_remain_charged_exactly_once",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Reviewed host-only CED, request-planning, execution contract or synthetic storage control; no Metal context or dispatch."
+  },
+  {
+    "target": "lib",
+    "name": "deepseek_v41::forward::preflight::tests::staged_runtime_recharges_binding_and_caller_cpu_but_not_loaded_metal",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Reviewed host-only CED, request-planning, execution contract or synthetic storage control; no Metal context or dispatch."
+  },
+  {
+    "target": "lib",
+    "name": "deepseek_v41::forward::preflight::tests::staged_runtime_uses_explicit_postload_signals_and_refuses_before_state_creation",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Reviewed host-only CED, request-planning, execution contract or synthetic storage control; no Metal context or dispatch."
+  },
+  {
+    "target": "lib",
+    "name": "deepseek_v41::forward::preflight::tests::unsupported_ced_geometry_uses_the_runtime_full_fallback",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Reviewed host-only CED, request-planning, execution contract or synthetic storage control; no Metal context or dispatch."
+  },
+  {
+    "target": "lib",
+    "name": "deepseek_v41::forward::profile::tests::driver_scheduling_aggregates_by_existing_key_without_changing_gpu_or_wait",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Reviewed host-only CED, request-planning, execution contract or synthetic storage control; no Metal context or dispatch."
+  },
+  {
+    "target": "lib",
+    "name": "deepseek_v41::forward::profile::tests::paired_production_command_inventory_fits_profile_capacity_without_metal",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Reviewed host-only CED, request-planning, execution contract or synthetic storage control; no Metal context or dispatch."
+  },
+  {
+    "target": "lib",
+    "name": "deepseek_v41::forward::profile::tests::scheduling_getters_are_scope_inert_and_failed_only_duration_is_unknown",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Reviewed host-only CED, request-planning, execution contract or synthetic storage control; no Metal context or dispatch."
+  },
+  {
+    "target": "lib",
+    "name": "deepseek_v41::forward::profile::tests::timestamp_duration_requires_positive_finite_ordered_pairs",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Reviewed host-only CED, request-planning, execution contract or synthetic storage control; no Metal context or dispatch."
+  },
+  {
+    "target": "lib",
+    "name": "deepseek_v41::forward::profile::tests::unsampled_scope_is_cleared_on_error_and_unwind",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Reviewed host-only CED, request-planning, execution contract or synthetic storage control; no Metal context or dispatch."
+  },
+  {
+    "target": "lib",
     "name": "deepseek_v41::forward::snapshot::tests::capacity_fallback_retries_only_admission_denial",
     "class": "cpu",
     "ignored": false,
@@ -799,10 +2542,80 @@
   },
   {
     "target": "lib",
+    "name": "deepseek_v41::gguf::retained_resources::tests::summary_bank_name_workspace_covers_max_layer_and_every_projection",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Reviewed host-only planning, metadata, NSObject lifetime, pure arithmetic, fake-state lifecycle or loopback fixture; no Metal context or real model import."
+  },
+  {
+    "target": "lib",
+    "name": "deepseek_v41::gguf::retained_resources::tests::summary_bound_covers_retained_and_temporary_capacity_without_growth",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Reviewed host-only planning, metadata, NSObject lifetime, pure arithmetic, fake-state lifecycle or loopback fixture; no Metal context or real model import."
+  },
+  {
+    "target": "lib",
+    "name": "deepseek_v41::gguf::retained_resources::tests::summary_bound_rejects_checked_count_byte_and_allocation_overflow",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Reviewed host-only planning, metadata, NSObject lifetime, pure arithmetic, fake-state lifecycle or loopback fixture; no Metal context or real model import."
+  },
+  {
+    "target": "lib",
+    "name": "deepseek_v41::gguf::retained_resources::tests::summary_local_cpu_admission_keeps_mwss_physical_and_pending_charges",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Reviewed host-only planning, metadata, NSObject lifetime, pure arithmetic, fake-state lifecycle or loopback fixture; no Metal context or real model import."
+  },
+  {
+    "target": "lib",
+    "name": "deepseek_v41::gguf::retained_resources::tests::summary_shared_envelope_is_max_not_an_additional_caller_charge",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Reviewed host-only planning, metadata, NSObject lifetime, pure arithmetic, fake-state lifecycle or loopback fixture; no Metal context or real model import."
+  },
+  {
+    "target": "lib",
+    "name": "deepseek_v41::gguf::retained_resources::tests::summary_zero_case_and_descriptor_mismatch_are_priced_and_checked",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Reviewed host-only planning, metadata, NSObject lifetime, pure arithmetic, fake-state lifecycle or loopback fixture; no Metal context or real model import."
+  },
+  {
+    "target": "lib",
     "name": "deepseek_v41::gguf::tests::active_engram_metadata_is_required_without_static_hash_fallbacks",
     "class": "cpu",
     "ignored": false,
     "reason": "Host-only metadata, arithmetic, source contract or synthetic disk fixture; no Metal context."
+  },
+  {
+    "target": "lib",
+    "name": "deepseek_v41::gguf::tests::binding_preflight::binding_preflight_rejects_invalid_linear_inventory_before_pricing",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Reviewed host-only CED, request-planning, execution contract or synthetic storage control; no Metal context or dispatch."
+  },
+  {
+    "target": "lib",
+    "name": "deepseek_v41::gguf::tests::binding_preflight::bounded_gpu_public_preflight_accepts_nondefault_schedule_and_engram_without_import",
+    "class": "gpu",
+    "ignored": true,
+    "reason": "Metal allocation/dispatch or self-leased device witness; excluded from CPU acceptance."
+  },
+  {
+    "target": "lib",
+    "name": "deepseek_v41::gguf::tests::binding_preflight::mixed_gguf_binding_inventory_keeps_actual_dtypes_and_direct_projection_exclusions",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Reviewed host-only CED, request-planning, execution contract or synthetic storage control; no Metal context or dispatch."
+  },
+  {
+    "target": "lib",
+    "name": "deepseek_v41::gguf::tests::binding_preflight::nondefault_gguf_preflight_prices_only_active_binding_controls_and_refuses_short_budget",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Reviewed host-only CED, request-planning, execution contract or synthetic storage control; no Metal context or dispatch."
   },
   {
     "target": "lib",
@@ -883,10 +2696,73 @@
   },
   {
     "target": "lib",
+    "name": "deepseek_v41::gguf::tests::execution_contract::activation_aliases_conflict_in_either_order",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Reviewed host-only CED, request-planning, execution contract or synthetic storage control; no Metal context or dispatch."
+  },
+  {
+    "target": "lib",
+    "name": "deepseek_v41::gguf::tests::execution_contract::activation_aliases_each_and_equal_pair_preserve_silu_default",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Reviewed host-only CED, request-planning, execution contract or synthetic storage control; no Metal context or dispatch."
+  },
+  {
+    "target": "lib",
+    "name": "deepseek_v41::gguf::tests::execution_contract::activation_aliases_reject_unsupported_single_and_equal_pair",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Reviewed host-only CED, request-planning, execution contract or synthetic storage control; no Metal context or dispatch."
+  },
+  {
+    "target": "lib",
+    "name": "deepseek_v41::gguf::tests::execution_contract::activation_aliases_wrong_types_never_fall_back_to_missing_default",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Reviewed host-only CED, request-planning, execution contract or synthetic storage control; no Metal context or dispatch."
+  },
+  {
+    "target": "lib",
+    "name": "deepseek_v41::gguf::tests::execution_contract::descriptive_storage_plan_is_broader_but_import_preparation_rejects_math_before_mapping",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Reviewed host-only CED, request-planning, execution contract or synthetic storage control; no Metal context or dispatch."
+  },
+  {
+    "target": "lib",
+    "name": "deepseek_v41::gguf::tests::execution_contract::positive_sinkhorn_counts_are_valid_plans_but_only_twenty_is_executable",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Reviewed host-only CED, request-planning, execution contract or synthetic storage control; no Metal context or dispatch."
+  },
+  {
+    "target": "lib",
+    "name": "deepseek_v41::gguf::tests::execution_contract::routing_topk_above_native_limit_is_not_malformed_metadata",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Reviewed host-only CED, request-planning, execution contract or synthetic storage control; no Metal context or dispatch."
+  },
+  {
+    "target": "lib",
+    "name": "deepseek_v41::gguf::tests::execution_contract::zero_sinkhorn_and_topk_outside_expert_count_remain_invalid_plans",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Reviewed host-only CED, request-planning, execution contract or synthetic storage control; no Metal context or dispatch."
+  },
+  {
+    "target": "lib",
     "name": "deepseek_v41::gguf::tests::expert_count_is_mandatory_and_positive",
     "class": "cpu",
     "ignored": false,
     "reason": "Host-only metadata, arithmetic, source contract or synthetic disk fixture; no Metal context."
+  },
+  {
+    "target": "lib",
+    "name": "deepseek_v41::gguf::tests::gsq_loader::companion_control_preflight_charges_cpu_and_refuses_a_one_byte_short_host_budget",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Reviewed host-only CED, request-planning, execution contract or synthetic storage control; no Metal context or dispatch."
   },
   {
     "target": "lib",
@@ -1170,6 +3046,34 @@
   },
   {
     "target": "lib",
+    "name": "deepseek_v41::gguf::tests::resident_storage::bounded_gpu_preflight_request_matches_loaded_metadata_estimator",
+    "class": "gpu",
+    "ignored": true,
+    "reason": "Metal allocation/dispatch or self-leased device witness; excluded from CPU acceptance."
+  },
+  {
+    "target": "lib",
+    "name": "deepseek_v41::gguf::tests::resident_storage::cold_preflight_rejects_context_overflow_and_invalid_projection_metadata",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Reviewed host-only CED, request-planning, execution contract or synthetic storage control; no Metal context or dispatch."
+  },
+  {
+    "target": "lib",
+    "name": "deepseek_v41::gguf::tests::resident_storage::cold_preflight_uses_validated_small_metadata_without_import_or_new_maps",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Reviewed host-only CED, request-planning, execution contract or synthetic storage control; no Metal context or dispatch."
+  },
+  {
+    "target": "lib",
+    "name": "deepseek_v41::gguf::tests::resident_storage::combined_preflight_refuses_before_injected_import_with_typed_telemetry_errors",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Reviewed host-only CED, request-planning, execution contract or synthetic storage control; no Metal context or dispatch."
+  },
+  {
+    "target": "lib",
     "name": "deepseek_v41::gguf::tests::resident_storage::metadata_storage_plan_charges_entire_private_engram_boundary_windows",
     "class": "cpu",
     "ignored": false,
@@ -1223,6 +3127,83 @@
     "class": "gpu",
     "ignored": false,
     "reason": "Metal context, allocation or dispatch witness; parent GPU lane only."
+  },
+  {
+    "target": "lib",
+    "name": "deepseek_v41::gguf::tests::soft_windows::soft_window_audit_is_bounded_excludes_disk_and_unused_and_does_not_map",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Reviewed host-only CED, request-planning, execution contract or synthetic storage control; no Metal context or dispatch."
+  },
+  {
+    "target": "lib",
+    "name": "deepseek_v41::gguf::tests::soft_windows::soft_window_live_resources_follow_first_containing_and_survive_owner_drop",
+    "class": "gpu",
+    "ignored": true,
+    "reason": "Metal allocation/dispatch or self-leased device witness; excluded from CPU acceptance."
+  },
+  {
+    "target": "lib",
+    "name": "deepseek_v41::gguf::tests::soft_windows::soft_window_none_preserves_incumbent_geometry_and_selected_metadata_loader_parity",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Reviewed host-only CED, request-planning, execution contract or synthetic storage control; no Metal context or dispatch."
+  },
+  {
+    "target": "lib",
+    "name": "deepseek_v41::gguf::tests::soft_windows::soft_window_overlap_padding_requires_first_containing_not_segment_index",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Reviewed host-only CED, request-planning, execution contract or synthetic storage control; no Metal context or dispatch."
+  },
+  {
+    "target": "lib",
+    "name": "deepseek_v41::gguf::tests::soft_windows::soft_window_owner_subview_fixture_contract_is_nonzero_and_bounded",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Reviewed host-only CED, request-planning, execution contract or synthetic storage control; no Metal context or dispatch."
+  },
+  {
+    "target": "lib",
+    "name": "deepseek_v41::gguf::tests::soft_windows::soft_window_owner_subview_fixture_contract_rejects_old_eight_float_request",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Reviewed host-only CED, request-planning, execution contract or synthetic storage control; no Metal context or dispatch."
+  },
+  {
+    "target": "lib",
+    "name": "deepseek_v41::gguf::tests::soft_windows::soft_window_prepared_loader_plan_rejects_changed_retained_source",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Reviewed host-only CED, request-planning, execution contract or synthetic storage control; no Metal context or dispatch."
+  },
+  {
+    "target": "lib",
+    "name": "deepseek_v41::gguf::tests::soft_windows::soft_window_prepared_loader_plan_validates_chosen_geometry_and_preserves_controls",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Reviewed host-only CED, request-planning, execution contract or synthetic storage control; no Metal context or dispatch."
+  },
+  {
+    "target": "lib",
+    "name": "deepseek_v41::gguf::tests::soft_windows::soft_window_private_boundaries_and_oversized_singletons_keep_hardware_eligibility",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Reviewed host-only CED, request-planning, execution contract or synthetic storage control; no Metal context or dispatch."
+  },
+  {
+    "target": "lib",
+    "name": "deepseek_v41::gguf::tests::soft_windows::soft_window_summary_bookkeeping_counts_sources_not_oversized_payload_bytes",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Reviewed host-only planning, metadata, NSObject lifetime, pure arithmetic, fake-state lifecycle or loopback fixture; no Metal context or real model import."
+  },
+  {
+    "target": "lib",
+    "name": "deepseek_v41::gguf::tests::soft_windows::soft_window_tensor_controls_keep_source_groups_and_cpu_accounting",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Reviewed host-only CED, request-planning, execution contract or synthetic storage control; no Metal context or dispatch."
   },
   {
     "target": "lib",
@@ -1433,6 +3414,181 @@
     "class": "cpu",
     "ignored": false,
     "reason": "Host-only metadata, arithmetic, source contract or synthetic disk fixture; no Metal context."
+  },
+  {
+    "target": "lib",
+    "name": "metal::moe_grouped_generic::tests::staging_ownership::staging_active_only_comparison_red_control",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Reviewed host-only planning, metadata, NSObject lifetime, pure arithmetic, fake-state lifecycle or loopback fixture; no Metal context or real model import."
+  },
+  {
+    "target": "lib",
+    "name": "metal::moe_grouped_generic::tests::staging_ownership::staging_counts_and_output_tails_exhaustive_tile_coverage",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Reviewed host-only planning, metadata, NSObject lifetime, pure arithmetic, fake-state lifecycle or loopback fixture; no Metal context or real model import."
+  },
+  {
+    "target": "lib",
+    "name": "metal::moe_grouped_generic::tests::staging_ownership::staging_cpu_budget_covers_every_scheduled_fixture",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Reviewed host-only planning, metadata, NSObject lifetime, pure arithmetic, fake-state lifecycle or loopback fixture; no Metal context or real model import."
+  },
+  {
+    "target": "lib",
+    "name": "metal::moe_grouped_generic::tests::staging_ownership::staging_cpu_budget_red_control_rejects_old_iq1_dense_underprice",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Reviewed host-only planning, metadata, NSObject lifetime, pure arithmetic, fake-state lifecycle or loopback fixture; no Metal context or real model import."
+  },
+  {
+    "target": "lib",
+    "name": "metal::moe_grouped_generic::tests::staging_ownership::staging_m5_dense_f32",
+    "class": "gpu",
+    "ignored": true,
+    "reason": "Metal allocation/dispatch or self-leased device witness; excluded from CPU acceptance."
+  },
+  {
+    "target": "lib",
+    "name": "metal::moe_grouped_generic::tests::staging_ownership::staging_m5_dense_iq1_m",
+    "class": "gpu",
+    "ignored": true,
+    "reason": "Metal allocation/dispatch or self-leased device witness; excluded from CPU acceptance."
+  },
+  {
+    "target": "lib",
+    "name": "metal::moe_grouped_generic::tests::staging_ownership::staging_m5_dense_iq1_s",
+    "class": "gpu",
+    "ignored": true,
+    "reason": "Metal allocation/dispatch or self-leased device witness; excluded from CPU acceptance."
+  },
+  {
+    "target": "lib",
+    "name": "metal::moe_grouped_generic::tests::staging_ownership::staging_m5_dense_iq3_s",
+    "class": "gpu",
+    "ignored": true,
+    "reason": "Metal allocation/dispatch or self-leased device witness; excluded from CPU acceptance."
+  },
+  {
+    "target": "lib",
+    "name": "metal::moe_grouped_generic::tests::staging_ownership::staging_m5_dense_iq3_xxs",
+    "class": "gpu",
+    "ignored": true,
+    "reason": "Metal allocation/dispatch or self-leased device witness; excluded from CPU acceptance."
+  },
+  {
+    "target": "lib",
+    "name": "metal::moe_grouped_generic::tests::staging_ownership::staging_m5_dense_q4_k",
+    "class": "gpu",
+    "ignored": true,
+    "reason": "Metal allocation/dispatch or self-leased device witness; excluded from CPU acceptance."
+  },
+  {
+    "target": "lib",
+    "name": "metal::moe_grouped_generic::tests::staging_ownership::staging_m5_dense_q8_0",
+    "class": "gpu",
+    "ignored": true,
+    "reason": "Metal allocation/dispatch or self-leased device witness; excluded from CPU acceptance."
+  },
+  {
+    "target": "lib",
+    "name": "metal::moe_grouped_generic::tests::staging_ownership::staging_m5_grouped_f32",
+    "class": "gpu",
+    "ignored": true,
+    "reason": "Metal allocation/dispatch or self-leased device witness; excluded from CPU acceptance."
+  },
+  {
+    "target": "lib",
+    "name": "metal::moe_grouped_generic::tests::staging_ownership::staging_m5_grouped_iq1_m",
+    "class": "gpu",
+    "ignored": true,
+    "reason": "Metal allocation/dispatch or self-leased device witness; excluded from CPU acceptance."
+  },
+  {
+    "target": "lib",
+    "name": "metal::moe_grouped_generic::tests::staging_ownership::staging_m5_grouped_iq1_s",
+    "class": "gpu",
+    "ignored": true,
+    "reason": "Metal allocation/dispatch or self-leased device witness; excluded from CPU acceptance."
+  },
+  {
+    "target": "lib",
+    "name": "metal::moe_grouped_generic::tests::staging_ownership::staging_m5_grouped_iq3_s",
+    "class": "gpu",
+    "ignored": true,
+    "reason": "Metal allocation/dispatch or self-leased device witness; excluded from CPU acceptance."
+  },
+  {
+    "target": "lib",
+    "name": "metal::moe_grouped_generic::tests::staging_ownership::staging_m5_grouped_iq3_xxs",
+    "class": "gpu",
+    "ignored": true,
+    "reason": "Metal allocation/dispatch or self-leased device witness; excluded from CPU acceptance."
+  },
+  {
+    "target": "lib",
+    "name": "metal::moe_grouped_generic::tests::staging_ownership::staging_m5_grouped_q4_k",
+    "class": "gpu",
+    "ignored": true,
+    "reason": "Metal allocation/dispatch or self-leased device witness; excluded from CPU acceptance."
+  },
+  {
+    "target": "lib",
+    "name": "metal::moe_grouped_generic::tests::staging_ownership::staging_m5_grouped_q8_0",
+    "class": "gpu",
+    "ignored": true,
+    "reason": "Metal allocation/dispatch or self-leased device witness; excluded from CPU acceptance."
+  },
+  {
+    "target": "lib",
+    "name": "metal::moe_grouped_generic::tests::staging_ownership::staging_old_mapping_red_control_detects_collisions_and_holes",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Reviewed host-only planning, metadata, NSObject lifetime, pure arithmetic, fake-state lifecycle or loopback fixture; no Metal context or real model import."
+  },
+  {
+    "target": "lib",
+    "name": "metal::moe_grouped_generic::tests::staging_ownership::staging_physical_fragments_exhaustive_ownership_and_zero_coverage",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Reviewed host-only planning, metadata, NSObject lifetime, pure arithmetic, fake-state lifecycle or loopback fixture; no Metal context or real model import."
+  },
+  {
+    "target": "lib",
+    "name": "metal::moe_grouped_generic::tests::staging_ownership::staging_source_contract_matches_physical_model_and_retains_k_order",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Reviewed host-only planning, metadata, NSObject lifetime, pure arithmetic, fake-state lifecycle or loopback fixture; no Metal context or real model import."
+  },
+  {
+    "target": "lib",
+    "name": "metal::moe_grouped_generic::tests::staging_ownership::staging_witness_plan_and_cpu_half_fixtures_are_bounded_nontrivial",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Reviewed host-only planning, metadata, NSObject lifetime, pure arithmetic, fake-state lifecycle or loopback fixture; no Metal context or real model import."
+  },
+  {
+    "target": "lib",
+    "name": "metal::moe_grouped_generic::tests::wide_activation_type::wide_activation_type_f16_4096_keeps_wide_numeric_contract",
+    "class": "gpu",
+    "ignored": true,
+    "reason": "Metal allocation/dispatch or self-leased device witness; excluded from CPU acceptance."
+  },
+  {
+    "target": "lib",
+    "name": "metal::moe_grouped_generic::tests::wide_activation_type::wide_activation_type_f32_4096_preserves_narrow_numeric_contract",
+    "class": "gpu",
+    "ignored": true,
+    "reason": "Metal allocation/dispatch or self-leased device witness; excluded from CPU acceptance."
+  },
+  {
+    "target": "lib",
+    "name": "metal::moe_grouped_generic::tests::wide_activation_type::wide_activation_type_invalid_and_direct_probes_refuse_without_dispatch",
+    "class": "gpu",
+    "ignored": true,
+    "reason": "Metal allocation/dispatch or self-leased device witness; excluded from CPU acceptance."
   },
   {
     "target": "oracle",
@@ -1720,5 +3876,544 @@
     "class": "cpu",
     "ignored": false,
     "reason": "Synthetic report, capture, command-construction or fixture-lookup control; no model/Metal execution."
+  },
+  {
+    "target": "qwen",
+    "name": "deepseek_v41::tests::v41_info_iq1_support_does_not_admit_unsupported_types_or_partial_rows",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Reviewed host-only planning, metadata, NSObject lifetime, pure arithmetic, fake-state lifecycle or loopback fixture; no Metal context or real model import."
+  },
+  {
+    "target": "qwen",
+    "name": "deepseek_v41::tests::v41_info_native_iq1_banks_and_independent_down_remain_metadata_only",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Reviewed host-only planning, metadata, NSObject lifetime, pure arithmetic, fake-state lifecycle or loopback fixture; no Metal context or real model import."
+  },
+  {
+    "target": "qwen",
+    "name": "deepseek_v41::tests::v41_info_preserves_supported_routing_boundaries_and_rejects_invalid_plans",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Reviewed host-only planning, metadata, NSObject lifetime, pure arithmetic, fake-state lifecycle or loopback fixture; no Metal context or real model import."
+  },
+  {
+    "target": "qwen",
+    "name": "deepseek_v41::tests::v41_info_reports_bad_metadata_separately_from_machine_fit",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Reviewed host-only planning, metadata, NSObject lifetime, pure arithmetic, fake-state lifecycle or loopback fixture; no Metal context or real model import."
+  },
+  {
+    "target": "qwen",
+    "name": "deepseek_v41::tests::v41_info_separates_valid_plan_from_unsupported_backend_math",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Reviewed host-only planning, metadata, NSObject lifetime, pure arithmetic, fake-state lifecycle or loopback fixture; no Metal context or real model import."
+  },
+  {
+    "target": "qwen",
+    "name": "deepseek_v41::tests::v41_messages_accept_arrays_and_both_document_aliases",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Reviewed host-only planning, metadata, NSObject lifetime, pure arithmetic, fake-state lifecycle or loopback fixture; no Metal context or real model import."
+  },
+  {
+    "target": "qwen",
+    "name": "deepseek_v41::tests::v41_messages_aliases_and_reasoning_sources_are_mutually_exclusive",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Reviewed host-only planning, metadata, NSObject lifetime, pure arithmetic, fake-state lifecycle or loopback fixture; no Metal context or real model import."
+  },
+  {
+    "target": "qwen",
+    "name": "deepseek_v41::tests::v41_messages_model_metadata_never_replaces_cli_artifact",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Reviewed host-only planning, metadata, NSObject lifetime, pure arithmetic, fake-state lifecycle or loopback fixture; no Metal context or real model import."
+  },
+  {
+    "target": "qwen",
+    "name": "deepseek_v41::tests::v41_messages_null_aliases_and_optional_fields_are_absent",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Reviewed host-only planning, metadata, NSObject lifetime, pure arithmetic, fake-state lifecycle or loopback fixture; no Metal context or real model import."
+  },
+  {
+    "target": "qwen",
+    "name": "deepseek_v41::tests::v41_messages_preserve_responses_history_tools_and_reasoning",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Reviewed host-only planning, metadata, NSObject lifetime, pure arithmetic, fake-state lifecycle or loopback fixture; no Metal context or real model import."
+  },
+  {
+    "target": "qwen",
+    "name": "deepseek_v41::tests::v41_messages_refuse_nested_controls_without_restricting_schema_data",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Reviewed host-only planning, metadata, NSObject lifetime, pure arithmetic, fake-state lifecycle or loopback fixture; no Metal context or real model import."
+  },
+  {
+    "target": "qwen",
+    "name": "deepseek_v41::tests::v41_messages_refuse_nonnull_lost_controls_but_accept_null_fields",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Reviewed host-only planning, metadata, NSObject lifetime, pure arithmetic, fake-state lifecycle or loopback fixture; no Metal context or real model import."
+  },
+  {
+    "target": "qwen",
+    "name": "deepseek_v41::tests::v41_profile_is_ram_prefix_reuse_without_speculation",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Reviewed host-only planning, metadata, NSObject lifetime, pure arithmetic, fake-state lifecycle or loopback fixture; no Metal context or real model import."
+  },
+  {
+    "target": "qwen",
+    "name": "deepseek_v41::tests::v41_run_and_info_use_validated_context_alias_without_fit_gate",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Reviewed host-only planning, metadata, NSObject lifetime, pure arithmetic, fake-state lifecycle or loopback fixture; no Metal context or real model import."
+  },
+  {
+    "target": "qwen",
+    "name": "deepseek_v41::tests::v41_run_refuses_non_text_output_and_no_thinking_before_reading_messages",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Reviewed host-only planning, metadata, NSObject lifetime, pure arithmetic, fake-state lifecycle or loopback fixture; no Metal context or real model import."
+  },
+  {
+    "target": "qwen",
+    "name": "deepseek_v41::tests::v41_run_uses_recipe_without_artifact_identity",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Reviewed host-only planning, metadata, NSObject lifetime, pure arithmetic, fake-state lifecycle or loopback fixture; no Metal context or real model import."
+  },
+  {
+    "target": "qwen",
+    "name": "deepseek_v41::tests::v41_uses_normal_run_and_serve_commands_only",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Reviewed host-only planning, metadata, NSObject lifetime, pure arithmetic, fake-state lifecycle or loopback fixture; no Metal context or real model import."
+  },
+  {
+    "target": "qwen",
+    "name": "family_options::tests::v41_ced_geometry_never_labels_logical_encoder_chunks_as_full_decoder_work",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Reviewed host-only planning, metadata, NSObject lifetime, pure arithmetic, fake-state lifecycle or loopback fixture; no Metal context or real model import."
+  },
+  {
+    "target": "qwen",
+    "name": "family_options::tests::v41_cold_prefill_parser_defaults_and_valid_values",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Reviewed host-only planning, metadata, NSObject lifetime, pure arithmetic, fake-state lifecycle or loopback fixture; no Metal context or real model import."
+  },
+  {
+    "target": "qwen",
+    "name": "family_options::tests::v41_cold_prefill_parser_rejects_invalid_and_non_utf8_values",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Reviewed host-only planning, metadata, NSObject lifetime, pure arithmetic, fake-state lifecycle or loopback fixture; no Metal context or real model import."
+  },
+  {
+    "target": "qwen",
+    "name": "family_options::tests::v41_geometry_separates_engine_ceiling_selected_width_and_actual_ranges",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Reviewed host-only planning, metadata, NSObject lifetime, pure arithmetic, fake-state lifecycle or loopback fixture; no Metal context or real model import."
+  },
+  {
+    "target": "qwen",
+    "name": "family_options::tests::v41_prefill_diagnostics_preserve_actual_report_and_default_omission",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Reviewed host-only planning, metadata, NSObject lifetime, pure arithmetic, fake-state lifecycle or loopback fixture; no Metal context or real model import."
+  },
+  {
+    "target": "qwen",
+    "name": "serve::backend_v41::reuse::tests::capture_admission_checks_full_entry_plus_reserve_and_overflow",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Reviewed host-only planning, metadata, NSObject lifetime, pure arithmetic, fake-state lifecycle or loopback fixture; no Metal context or real model import."
+  },
+  {
+    "target": "qwen",
+    "name": "serve::backend_v41::reuse::tests::capture_metal_telemetry_and_overflow_declines_do_not_evict_or_capture",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Reviewed host-only planning, metadata, NSObject lifetime, pure arithmetic, fake-state lifecycle or loopback fixture; no Metal context or real model import."
+  },
+  {
+    "target": "qwen",
+    "name": "serve::backend_v41::reuse::tests::capture_process_pressure_evicts_unpinned_payload_then_rechecks_once",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Reviewed host-only planning, metadata, NSObject lifetime, pure arithmetic, fake-state lifecycle or loopback fixture; no Metal context or real model import."
+  },
+  {
+    "target": "qwen",
+    "name": "serve::backend_v41::reuse::tests::full_snapshot_payload_key_and_logits_must_fit_before_capture",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Reviewed host-only planning, metadata, NSObject lifetime, pure arithmetic, fake-state lifecycle or loopback fixture; no Metal context or real model import."
+  },
+  {
+    "target": "qwen",
+    "name": "serve::backend_v41::reuse::tests::growth_pressure_drops_old_state_before_normal_cold_allocation_but_invalid_is_fatal",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Reviewed host-only planning, metadata, NSObject lifetime, pure arithmetic, fake-state lifecycle or loopback fixture; no Metal context or real model import."
+  },
+  {
+    "target": "qwen",
+    "name": "serve::backend_v41::reuse::tests::incompatible_idle_owner_drops_before_output_admission_compatible_owner_survives",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Reviewed host-only planning, metadata, NSObject lifetime, pure arithmetic, fake-state lifecycle or loopback fixture; no Metal context or real model import."
+  },
+  {
+    "target": "qwen",
+    "name": "serve::backend_v41::reuse::tests::initial_reuse_requires_ready_full_forward_origin",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Reviewed host-only planning, metadata, NSObject lifetime, pure arithmetic, fake-state lifecycle or loopback fixture; no Metal context or real model import."
+  },
+  {
+    "target": "qwen",
+    "name": "serve::backend_v41::reuse::tests::live_selection_is_pure_causal_and_live_first_then_snapshot_on_growth_refusal",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Reviewed host-only planning, metadata, NSObject lifetime, pure arithmetic, fake-state lifecycle or loopback fixture; no Metal context or real model import."
+  },
+  {
+    "target": "qwen",
+    "name": "serve::backend_v41::reuse::tests::optional_capture_decline_preserves_request_schedule_and_live_state",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Reviewed host-only planning, metadata, NSObject lifetime, pure arithmetic, fake-state lifecycle or loopback fixture; no Metal context or real model import."
+  },
+  {
+    "target": "qwen",
+    "name": "serve::backend_v41::reuse::tests::restore_pressure_discards_candidate_before_cold_but_nonmemory_restore_errors_propagate",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Reviewed host-only planning, metadata, NSObject lifetime, pure arithmetic, fake-state lifecycle or loopback fixture; no Metal context or real model import."
+  },
+  {
+    "target": "qwen",
+    "name": "serve::backend_v41::reuse::tests::snapshot_allocation_pressure_only_allows_cold_retry_after_actual_process_relief",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Reviewed host-only planning, metadata, NSObject lifetime, pure arithmetic, fake-state lifecycle or loopback fixture; no Metal context or real model import."
+  },
+  {
+    "target": "qwen",
+    "name": "serve::backend_v41::reuse::tests::snapshot_selection_uses_longest_causal_prefix_or_equal_with_logits_without_mutating_payload",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Reviewed host-only planning, metadata, NSObject lifetime, pure arithmetic, fake-state lifecycle or loopback fixture; no Metal context or real model import."
+  },
+  {
+    "target": "qwen",
+    "name": "serve::backend_v41::reuse::tests::snapshot_zero_budget_and_expiry_do_not_retire_compatible_live",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Reviewed host-only planning, metadata, NSObject lifetime, pure arithmetic, fake-state lifecycle or loopback fixture; no Metal context or real model import."
+  },
+  {
+    "target": "qwen",
+    "name": "serve::backend_v41::reuse::tests::successful_growth_retains_live_tokens_and_logits",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Reviewed host-only planning, metadata, NSObject lifetime, pure arithmetic, fake-state lifecycle or loopback fixture; no Metal context or real model import."
+  },
+  {
+    "target": "qwen",
+    "name": "serve::backend_v41::reuse::tests::successful_snapshot_restore_keeps_candidate_and_prefix",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Reviewed host-only planning, metadata, NSObject lifetime, pure arithmetic, fake-state lifecycle or loopback fixture; no Metal context or real model import."
+  },
+  {
+    "target": "qwen",
+    "name": "serve::backend_v41::reuse_tests::batched_prefill_splits_verified_checkpoint_and_resumes_live_snapshot_and_equal",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Reviewed host-only planning, metadata, NSObject lifetime, pure arithmetic, fake-state lifecycle or loopback fixture; no Metal context or real model import."
+  },
+  {
+    "target": "qwen",
+    "name": "serve::backend_v41::reuse_tests::cancelled_partial_decode_discards_live_state_but_keeps_prompt_checkpoint",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Reviewed host-only planning, metadata, NSObject lifetime, pure arithmetic, fake-state lifecycle or loopback fixture; no Metal context or real model import."
+  },
+  {
+    "target": "qwen",
+    "name": "serve::backend_v41::reuse_tests::decode_output_admission_retries_same_piece_and_preserves_guards",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Reviewed host-only planning, metadata, NSObject lifetime, pure arithmetic, fake-state lifecycle or loopback fixture; no Metal context or real model import."
+  },
+  {
+    "target": "qwen",
+    "name": "serve::backend_v41::reuse_tests::different_user_restores_official_shared_prelude_with_cache_independent_cuts",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Reviewed host-only planning, metadata, NSObject lifetime, pure arithmetic, fake-state lifecycle or loopback fixture; no Metal context or real model import."
+  },
+  {
+    "target": "qwen",
+    "name": "serve::backend_v41::reuse_tests::execution_retains_only_consumed_tokens_and_final_logits",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Reviewed host-only planning, metadata, NSObject lifetime, pure arithmetic, fake-state lifecycle or loopback fixture; no Metal context or real model import."
+  },
+  {
+    "target": "qwen",
+    "name": "serve::backend_v41::reuse_tests::execution_sorts_dedups_and_verifies_both_byte_boundaries",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Reviewed host-only planning, metadata, NSObject lifetime, pure arithmetic, fake-state lifecycle or loopback fixture; no Metal context or real model import."
+  },
+  {
+    "target": "qwen",
+    "name": "serve::backend_v41::reuse_tests::failed_or_cancelled_chunks_never_publish_partial_state_or_overwrite_checkpoint",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Reviewed host-only planning, metadata, NSObject lifetime, pure arithmetic, fake-state lifecycle or loopback fixture; no Metal context or real model import."
+  },
+  {
+    "target": "qwen",
+    "name": "serve::backend_v41::reuse_tests::headless_and_final_prefill_memory_refusals_stay_typed",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Reviewed host-only planning, metadata, NSObject lifetime, pure arithmetic, fake-state lifecycle or loopback fixture; no Metal context or real model import."
+  },
+  {
+    "target": "qwen",
+    "name": "serve::backend_v41::reuse_tests::native_byte_pieces_use_shared_decode_without_lossy_utf8_conversion",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Reviewed host-only planning, metadata, NSObject lifetime, pure arithmetic, fake-state lifecycle or loopback fixture; no Metal context or real model import."
+  },
+  {
+    "target": "qwen",
+    "name": "serve::backend_v41::reuse_tests::official_text_reasoning_and_tool_rerenders_choose_exact_prefixes",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Reviewed host-only planning, metadata, NSObject lifetime, pure arithmetic, fake-state lifecycle or loopback fixture; no Metal context or real model import."
+  },
+  {
+    "target": "qwen",
+    "name": "serve::backend_v41::reuse_tests::output_admission_releases_snapshots_before_rechecking_cpu_headroom",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Reviewed host-only planning, metadata, NSObject lifetime, pure arithmetic, fake-state lifecycle or loopback fixture; no Metal context or real model import."
+  },
+  {
+    "target": "qwen",
+    "name": "serve::backend_v41::reuse_tests::output_host_ceiling_refusal_keeps_snapshots_without_retry",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Reviewed host-only planning, metadata, NSObject lifetime, pure arithmetic, fake-state lifecycle or loopback fixture; no Metal context or real model import."
+  },
+  {
+    "target": "qwen",
+    "name": "serve::backend_v41::reuse_tests::output_unknown_headroom_keeps_snapshots_without_retry",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Reviewed host-only planning, metadata, NSObject lifetime, pure arithmetic, fake-state lifecycle or loopback fixture; no Metal context or real model import."
+  },
+  {
+    "target": "qwen",
+    "name": "serve::backend_v41::reuse_tests::renderer_boundary_ignores_marker_lookalikes_in_user_text",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Reviewed host-only planning, metadata, NSObject lifetime, pure arithmetic, fake-state lifecycle or loopback fixture; no Metal context or real model import."
+  },
+  {
+    "target": "qwen",
+    "name": "serve::backend_v41::reuse_tests::request_admission_retries_only_after_process_cache_relief",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Reviewed host-only planning, metadata, NSObject lifetime, pure arithmetic, fake-state lifecycle or loopback fixture; no Metal context or real model import."
+  },
+  {
+    "target": "qwen",
+    "name": "serve::backend_v41::reuse_tests::smaller_runtime_geometry_counts_internal_chunks_not_logical_4096_calls",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Reviewed host-only planning, metadata, NSObject lifetime, pure arithmetic, fake-state lifecycle or loopback fixture; no Metal context or real model import."
+  },
+  {
+    "target": "qwen",
+    "name": "serve::backend_v41::tests::prefill_io_counts_rows_but_reports_logical_call_observation_maxima",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Reviewed host-only planning, metadata, NSObject lifetime, pure arithmetic, fake-state lifecycle or loopback fixture; no Metal context or real model import."
+  },
+  {
+    "target": "qwen",
+    "name": "serve::backend_v41::tests::token_io_aggregates_consumed_steps",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Reviewed host-only planning, metadata, NSObject lifetime, pure arithmetic, fake-state lifecycle or loopback fixture; no Metal context or real model import."
+  },
+  {
+    "target": "qwen",
+    "name": "serve::backend_v41::tests::token_io_missing_and_regressed_counters_are_not_zero",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Reviewed host-only planning, metadata, NSObject lifetime, pure arithmetic, fake-state lifecycle or loopback fixture; no Metal context or real model import."
+  },
+  {
+    "target": "qwen",
+    "name": "serve::backend_v41::tests::token_io_nonstats_never_snapshots_and_preserves_errors",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Reviewed host-only planning, metadata, NSObject lifetime, pure arithmetic, fake-state lifecycle or loopback fixture; no Metal context or real model import."
+  },
+  {
+    "target": "qwen",
+    "name": "serve::backend_v41::tests::v41_allocated_state_is_not_readmitted_during_prefill_or_decode",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Reviewed host-only planning, metadata, NSObject lifetime, pure arithmetic, fake-state lifecycle or loopback fixture; no Metal context or real model import."
+  },
+  {
+    "target": "qwen",
+    "name": "serve::backend_v41::tests::v41_backend_defaults_prompt_budget_and_loopback_only",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Reviewed host-only planning, metadata, NSObject lifetime, pure arithmetic, fake-state lifecycle or loopback fixture; no Metal context or real model import."
+  },
+  {
+    "target": "qwen",
+    "name": "serve::backend_v41::tests::v41_backend_flushes_incomplete_utf8_at_eos",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Reviewed host-only planning, metadata, NSObject lifetime, pure arithmetic, fake-state lifecycle or loopback fixture; no Metal context or real model import."
+  },
+  {
+    "target": "qwen",
+    "name": "serve::backend_v41::tests::v41_backend_http_disconnect_cancels_inside_layer_and_next_request_recovers",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Reviewed host-only planning, metadata, NSObject lifetime, pure arithmetic, fake-state lifecycle or loopback fixture; no Metal context or real model import."
+  },
+  {
+    "target": "qwen",
+    "name": "serve::backend_v41::tests::v41_backend_http_fresh_state_reasoning_eos_and_token_limit",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Reviewed host-only planning, metadata, NSObject lifetime, pure arithmetic, fake-state lifecycle or loopback fixture; no Metal context or real model import."
+  },
+  {
+    "target": "qwen",
+    "name": "serve::backend_v41::tests::v41_backend_tools_multiturn_non_generation_and_preflight_rejections",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Reviewed host-only planning, metadata, NSObject lifetime, pure arithmetic, fake-state lifecycle or loopback fixture; no Metal context or real model import."
+  },
+  {
+    "target": "qwen",
+    "name": "serve::backend_v41::tests::v41_cancellation_during_state_construction_remains_aborted",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Reviewed host-only planning, metadata, NSObject lifetime, pure arithmetic, fake-state lifecycle or loopback fixture; no Metal context or real model import."
+  },
+  {
+    "target": "qwen",
+    "name": "serve::backend_v41::tests::v41_http_complete_tool_at_budget_is_retained_in_incomplete_response",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Reviewed host-only planning, metadata, NSObject lifetime, pure arithmetic, fake-state lifecycle or loopback fixture; no Metal context or real model import."
+  },
+  {
+    "target": "qwen",
+    "name": "serve::backend_v41::tests::v41_http_partial_tool_is_incomplete_at_budget_but_failed_at_eos",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Reviewed host-only planning, metadata, NSObject lifetime, pure arithmetic, fake-state lifecycle or loopback fixture; no Metal context or real model import."
+  },
+  {
+    "target": "qwen",
+    "name": "serve::backend_v41::tests::v41_http_sampling_seeds_are_per_request_and_explicit_seeds_are_echoed",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Reviewed host-only planning, metadata, NSObject lifetime, pure arithmetic, fake-state lifecycle or loopback fixture; no Metal context or real model import."
+  },
+  {
+    "target": "qwen",
+    "name": "serve::backend_v41::tests::v41_native_phase_clock_excludes_preparation_and_counts_eos_and_max_one",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Reviewed host-only planning, metadata, NSObject lifetime, pure arithmetic, fake-state lifecycle or loopback fixture; no Metal context or real model import."
+  },
+  {
+    "target": "qwen",
+    "name": "serve::backend_v41::tests::v41_native_phase_stats_are_opt_in_on_existing_http_echo",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Reviewed host-only planning, metadata, NSObject lifetime, pure arithmetic, fake-state lifecycle or loopback fixture; no Metal context or real model import."
+  },
+  {
+    "target": "qwen",
+    "name": "serve::backend_v41::tests::v41_request_memory_admits_creation_once_and_checks_output_growth",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Reviewed host-only planning, metadata, NSObject lifetime, pure arithmetic, fake-state lifecycle or loopback fixture; no Metal context or real model import."
+  },
+  {
+    "target": "qwen",
+    "name": "serve::backend_v41::tests::v41_request_memory_prices_actual_use_not_million_token_capacity",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Reviewed host-only planning, metadata, NSObject lifetime, pure arithmetic, fake-state lifecycle or loopback fixture; no Metal context or real model import."
+  },
+  {
+    "target": "qwen",
+    "name": "serve::backend_v41::tests::v41_request_memory_splits_metal_cpu_and_preserves_typed_refusals",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Reviewed host-only planning, metadata, NSObject lifetime, pure arithmetic, fake-state lifecycle or loopback fixture; no Metal context or real model import."
+  },
+  {
+    "target": "qwen",
+    "name": "serve::backend_v41::tests::v41_serve_preparation_uses_validated_context_alias",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Reviewed host-only planning, metadata, NSObject lifetime, pure arithmetic, fake-state lifecycle or loopback fixture; no Metal context or real model import."
+  },
+  {
+    "target": "qwen",
+    "name": "serve::backend_v41::tests::v41_state_refusal_is_http_503_and_next_request_starts_fresh",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Reviewed host-only planning, metadata, NSObject lifetime, pure arithmetic, fake-state lifecycle or loopback fixture; no Metal context or real model import."
+  },
+  {
+    "target": "qwen",
+    "name": "serve::backend_v41::tests::v41_typed_state_pressure_is_503_and_never_steps",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Reviewed host-only planning, metadata, NSObject lifetime, pure arithmetic, fake-state lifecycle or loopback fixture; no Metal context or real model import."
+  },
+  {
+    "target": "qwen",
+    "name": "serve::backend_v41::tokenizer_fixture::fixture_uses_native_joyai_encoding_and_exact_piece_bytes",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Reviewed host-only planning, metadata, NSObject lifetime, pure arithmetic, fake-state lifecycle or loopback fixture; no Metal context or real model import."
+  },
+  {
+    "target": "qwen",
+    "name": "telemetry::family_diagnostics_tests::v41_request_stats_default_json_is_unchanged_and_fallback_is_actual",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Reviewed host-only planning, metadata, NSObject lifetime, pure arithmetic, fake-state lifecycle or loopback fixture; no Metal context or real model import."
   }
 ]

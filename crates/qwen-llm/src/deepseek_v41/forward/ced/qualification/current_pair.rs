@@ -163,7 +163,11 @@ fn admission(ctx: &MetalContext, metal_bytes: u64, cpu_bytes: u64) -> AResult<Va
     Ok(admission_report(&a, metal_bytes, cpu_bytes))
 }
 
-fn admission_report(a: &metal::MetalMemoryAdmission, metal_bytes: u64, cpu_bytes: u64) -> Value {
+pub(super) fn admission_report(
+    a: &metal::MetalMemoryAdmission,
+    metal_bytes: u64,
+    cpu_bytes: u64,
+) -> Value {
     let s = a.signals;
     json!({"metal_bytes": metal_bytes, "cpu_bytes": cpu_bytes, "reason": a.reason.as_str(),
         "recommended_max_bytes": s.recommended_max_bytes, "current_allocated_bytes": s.current_allocated_bytes,
@@ -322,7 +326,7 @@ fn artifact_identity(gguf: &crate::gguf::GgufFile, p: &v41_gguf::Plan) -> AResul
     Ok(identity)
 }
 
-fn validate_loaded_sources(
+pub(super) fn validate_loaded_sources(
     gguf: &crate::gguf::GgufFile,
     planned: &v41_gguf::Plan,
     loaded: &v41_gguf::DiskEngram,

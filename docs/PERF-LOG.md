@@ -6,6 +6,28 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the current state and evidence index.
 
+## 2026-10-24 - Standard GSQ Controls And Disk Engram Companion Bridge
+
+- Loader bridge `0079569a` reuses existing quant codecs, hash normalization,
+  resident ownership/admission and IQ4_NL disk row decoding. It adds exact
+  signed-LE integer controls, missing metadata aliases, grouped output-A shape
+  normalization, and a separately retained declared Engram companion.
+- Four backbone shards/1008 tensors remain separate from the two-table auxiliary
+  container; no fake split member, runnable auxiliary architecture or full-table
+  host/GPU materialization. Both groups retain FDs and stamp checks. Declared
+  source matching is not cryptographic artifact authentication.
+- All 109 focused optimized CPU checks pass, including authentic pinned
+  IQ2_XS/IQ2_XXS sparse header/control replay. Only saved headers and 517952
+  control bytes are present in replay; absent weights/tables are not qualified.
+  Independent read-only review finds no concrete P1/P2.
+- Actual IQ2_XS CPU planning accepts all 120 expert banks using existing types.
+  IQ2_XXS still correctly rejects missing IQ1 expert execution; that adapter is
+  a separate in-flight reuse of the existing canonical IQ1 decoder.
+- Full pinned LFS verification and M5 load/prefill/decode qualification remain
+  outstanding. A separate CED qualification composition preserves both source
+  groups and explicit control CPU accounting; frozen Maya controls are unchanged.
+- [Serialization, accounting, fixtures and qualification boundaries](DEEPSEEK-V41-GSQ-LOADER.md).
+
 ## 2026-10-24 - Four-Layer CED Qualified; Real Text Exposes Tail Padding
 
 - Four-layer source `4672dc81` passes 33 focused CPU and 18 validation-on M5

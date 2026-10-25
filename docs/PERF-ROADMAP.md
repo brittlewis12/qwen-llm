@@ -28,8 +28,9 @@ before building anything adjacent. This replaces relaying between sessions.
 
 ### DeepSeek V4.1-Flash (main after the 4096-row chunk and 64-slot gate/up: pp2048 Q2 877.3 / IQ3 852 (not re-measured), pp4096 Q2 890.2 / IQ3 840.7; decode rechecked tg32 Q2 43.2 / IQ3 41.0, depth tg32@d2048 41.6 from the prior landing)
 
-GSQ-RCO release bring-up: in flight (`feat/v41-gsq-loader`,
-`feat/v41-iq1-experts`), pinned HF revision `cb02422c900df489cea5833e8a92171224059b3c`.
+GSQ-RCO release bring-up: loader bridge landed (`0079569a`); IQ1 expert wiring
+remains in flight (`feat/v41-iq1-experts`), pinned HF revision
+`cb02422c900df489cea5833e8a92171224059b3c`.
 Reuse established Flash-Next standard-GGUF/GSQ-RCO machinery and IQ1 codecs;
 this is DeepSeek-specific source/control and expert-bank wiring, not a new
 quantization stack. The recommended 2.00-bpw build has 60 IQ1_M expert banks;
@@ -38,6 +39,11 @@ IQ4_NL Engram companion and four integer control tensors. Preserve separate
 source groups/stamps, disk-backed tables and current admission. Qualify the new
 artifact independently; do not substitute it into frozen Maya/P0/P4 controls or
 treat the author's benchmark scores as local quality/performance evidence.
+The bridge passes 109 focused CPU checks and authentic sparse header/control
+replay; independent review finds no concrete P1/P2. Full weights are not yet
+execution-qualified. Separate Full/CED artifact/source-group qualification is
+in flight (`test/v41-gsq-ced-qualification`); see
+[the serialization and ownership contract](DEEPSEEK-V41-GSQ-LOADER.md).
 
 CED encoder-only bulk prefill is the leading architectural opportunity.
 Design/dependency recon: landed (2026-10-23 CED entry;

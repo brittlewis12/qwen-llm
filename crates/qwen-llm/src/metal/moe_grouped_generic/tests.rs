@@ -2,6 +2,7 @@ use super::*;
 use crate::metal::test_support::*;
 
 mod iq1;
+mod staging_ownership;
 mod wide_activation_type;
 
 const MOE_METAL: &str = include_str!(concat!(

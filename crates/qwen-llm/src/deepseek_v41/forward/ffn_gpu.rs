@@ -49,29 +49,7 @@ fn shapes(c: &Config) -> Vec<Vec<u64>> {
 }
 
 fn validate(c: &Config) -> Result<()> {
-    op::require(
-        c.hidden > 0
-            && c.intermediate > 0
-            && c.experts > 0
-            && c.topk > 0
-            && c.topk <= c.experts
-            && c.topk <= 16
-            && c.hc_iterations == 20
-            && c.norm_eps.is_finite()
-            && c.norm_eps > 0.0
-            && c.hc_eps.is_finite()
-            && c.hc_eps > 0.0
-            && c.gate_temperature.is_finite()
-            && c.gate_temperature > 0.0
-            && c.route_scale.is_finite()
-            && c.clamp.is_finite()
-            && c.clamp > 0.0,
-        "GPU FFN geometry/controls",
-    )?;
-    for n in [c.hidden, c.intermediate, c.experts] {
-        op::require(n <= u32::MAX as usize / 64, "GPU FFN extent overflow")?;
-    }
-    Ok(())
+    super::super::execution::validate_ffn(c).map_err(|e| e.to_string())
 }
 
 #[derive(Debug)]

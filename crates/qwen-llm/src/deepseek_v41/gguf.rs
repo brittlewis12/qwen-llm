@@ -139,6 +139,8 @@ pub enum LoadError {
     #[error("invalid V4.1 GGUF: {0}")]
     Invalid(String),
     #[error(transparent)]
+    UnsupportedExecution(#[from] super::execution::UnsupportedExecution),
+    #[error(transparent)]
     Gguf(#[from] crate::gguf::GgufError),
     #[error(transparent)]
     Metal(#[from] metal::MetalError),
@@ -214,6 +216,10 @@ pub struct Plan {
 }
 
 impl Plan {
+    pub fn validate_execution(&self) -> Result<(), super::execution::UnsupportedExecution> {
+        super::execution::validate(&self.config)
+    }
+
     pub fn source_groups(&self) -> &SourceGroups {
         &self.engram_context.stamps
     }
@@ -358,6 +364,7 @@ impl ResidentWeights {
             return Err(e.into());
         }
         let p = plan(&g)?;
+        p.validate_execution()?;
         p.engram_context.revalidate(&g)?;
         let page = metal::host_page_size_bytes()?;
         let storage = resident_storage::for_plan(&g, &p, page, ctx.max_buffer_length())?;

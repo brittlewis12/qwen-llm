@@ -1,7 +1,7 @@
 use super::*;
 
 // Local experiment selection; metadata and loading enter through for_plan.
-const SOFT_COALESCING_TARGET: Option<usize> = None;
+const SOFT_COALESCING_TARGET: Option<usize> = Some(4_294_967_296);
 
 /// Mapping ownership selected by the same geometry used during load.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

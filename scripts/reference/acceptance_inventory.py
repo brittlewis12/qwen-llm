@@ -18,6 +18,7 @@ import os
 from pathlib import Path
 import re
 import subprocess
+import sys
 
 ROOT = Path(__file__).resolve().parents[2]
 INVENTORY = Path(__file__).with_suffix(".json")
@@ -160,7 +161,7 @@ def self_test() -> None:
 
 
 def binary(target: str) -> Path:
-    output = subprocess.check_output(
+    result = subprocess.run(
         [
             "cargo",
             "test",
@@ -171,11 +172,19 @@ def binary(target: str) -> Path:
         ],
         cwd=ROOT,
         text=True,
+        stdout=subprocess.PIPE,
     )
+    messages = [json.loads(line) for line in result.stdout.splitlines()]
+    for message in messages:
+        if message.get("reason") == "compiler-message":
+            rendered = message.get("message", {}).get("rendered")
+            if rendered:
+                print(rendered, end="", file=sys.stderr)
+    result.check_returncode()
     executables = {
         message["executable"]
-        for line in output.splitlines()
-        if (message := json.loads(line)).get("reason") == "compiler-artifact"
+        for message in messages
+        if message.get("reason") == "compiler-artifact"
         and message.get("executable")
         and message.get("profile", {}).get("test")
     }

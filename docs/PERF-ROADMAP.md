@@ -40,8 +40,11 @@ source groups/stamps, disk-backed tables and current admission. Qualify the new
 artifact independently; do not substitute it into frozen Maya/P0/P4 controls or
 treat the author's benchmark scores as local quality/performance evidence.
 The bridge passes 109 focused CPU checks and authentic sparse header/control
-replay; independent review finds no concrete P1/P2. Full weights are not yet
-execution-qualified. Separate Full/CED artifact/source-group qualification is
+replay; independent review finds no concrete P1/P2. The five requested IQ2_XS
+and auxiliary files now pass pinned full LFS hashes (265821115072 bytes total).
+Actual M5 validation-on loader fixtures pass 71 tests, including eight GPU
+fixtures. Full weights are not yet execution-qualified. Separate Full/CED
+artifact/source-group qualification is
 in flight (`test/v41-gsq-ced-qualification`); see
 [the serialization and ownership contract](DEEPSEEK-V41-GSQ-LOADER.md).
 

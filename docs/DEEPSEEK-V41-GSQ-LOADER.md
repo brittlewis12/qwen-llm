@@ -99,6 +99,17 @@ other axis permutations are not treated as equivalent.
 
 ## Verification and integration
 
+Parent checkpoint, 2026-10-24: all five requested IQ2_XS/auxiliary files match
+their pinned LFS lengths and full SHA256s, totaling 265821115072 bytes. The
+private verification receipt SHA256 is
+`4261f9175dec537eafcfce0c6b7e6e37ff63ba0447cb179130eaa8c9fa20af0f`.
+Separately, frozen source `b2486f97` passes all 71 GGUF fixtures on M5 under
+Metal API validation, including eight GPU loader fixtures. Frozen binary SHA256:
+`4a54e659ad16cc0065b37ee24c0857e04b3bf5a4753090d071d9f906970375af`.
+The sparse CPU replay is ignored in that run and qualified separately. These
+synthetic fixtures do not load the verified full artifact or establish its
+quality, performance, context capacity or Full/CED equivalence.
+
 CPU fixtures cover inline/tensor equivalence, large exact integers, malformed
 controls, offsets and aliases, four backbone shards plus a separate companion,
 source/architecture/path/geometry failures, ambiguity/duplicates, retained FDs,

@@ -6,6 +6,23 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the current state and evidence index.
 
+## 2026-10-24 - GSQ Artifact Verified And M5 Loader Fixtures Pass
+
+- All four requested IQ2_XS backbone shards and the shared IQ4_NL Engram file
+  match pinned LFS lengths and full SHA256s at HF revision
+  `cb02422c900df489cea5833e8a92171224059b3c`: 265821115072 bytes total.
+  The supervised transfer/hash pass completes normally; no memory or device
+  setting is changed. This is artifact verification, not execution evidence.
+- Frozen M5 source `b2486f97` passes all 71 GGUF fixture tests under validation,
+  including the eight GPU loader fixtures; the private sparse CPU replay remains
+  explicitly ignored in this run and is covered separately. Frozen test-binary
+  SHA256 is `4a54e659ad16cc0065b37ee24c0857e04b3bf5a4753090d071d9f906970375af`.
+- CPU-only fixtures and small synthetic GPU fixtures do not establish full-weight
+  prefill/decode, quality, performance or capacity. The separate Full/CED source
+  composition and IQ1 expert proof repairs remain in flight; no new artifact is
+  substituted into frozen Maya/mapping controls.
+- [Source, accounting and checkpoint boundaries](DEEPSEEK-V41-GSQ-LOADER.md).
+
 ## 2026-10-24 - Standard GSQ Controls And Disk Engram Companion Bridge
 
 - Loader bridge `0079569a` reuses existing quant codecs, hash normalization,

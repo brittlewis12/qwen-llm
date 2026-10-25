@@ -217,7 +217,16 @@ fn fixture_prices_bound_every_case_before_gpu_allocation() {
                 price.metal_upper,
                 price.logical + price.requests.len() as u64 * 16384
             );
-            assert_eq!(price.cpu_upper, 4 * price.logical + (1 << 20));
+            assert_eq!(
+                price.cpu_upper,
+                4 * price.logical + (1 << 20) + LIFETIME_CPU_BYTES
+            );
+            assert!(
+                LIFETIME_CPU_BYTES
+                    >= 2 * 16384
+                        + std::mem::size_of::<BufferReleaseProbes>() as u64
+                        + 2 * std::mem::size_of::<usize>() as u64
+            );
             let total = price.metal_upper + price.cpu_upper + RESERVE;
             assert!(total <= BUDGET);
             eprintln!(
@@ -229,4 +238,64 @@ fn fixture_prices_bound_every_case_before_gpu_allocation() {
             );
         }
     }
+}
+
+#[test]
+fn nested_autorelease_pools_release_position_objects_before_case_objects() {
+    use objc2::rc::{Retained, Weak, autoreleasepool};
+    use objc2::runtime::NSObject;
+
+    let case_weak = autoreleasepool(|_| {
+        let object = NSObject::new();
+        let case_weak = Weak::from_retained(&object);
+        let _ = Retained::autorelease_ptr(object);
+        for _ in 0..2 {
+            let position_weak = autoreleasepool(|_| {
+                let object = NSObject::new();
+                let weak = Weak::from_retained(&object);
+                let _ = Retained::autorelease_ptr(object);
+                assert!(
+                    weak.load().is_some(),
+                    "explicit autorelease must survive until drain"
+                );
+                weak
+            });
+            assert!(
+                position_weak.load().is_none(),
+                "position pool must drain independently"
+            );
+            assert!(
+                case_weak.load().is_some(),
+                "position drain must not release case objects"
+            );
+        }
+        case_weak
+    });
+    assert!(
+        case_weak.load().is_none(),
+        "case pool must release its autoreleased objects"
+    );
+}
+
+#[test]
+fn weak_release_control_detects_strong_owner_escaping_pool_drain() {
+    use objc2::rc::{Retained, Weak, autoreleasepool};
+    use objc2::runtime::NSObject;
+
+    let (weak, escaped) = autoreleasepool(|_| {
+        let object = NSObject::new();
+        let weak = Weak::from_retained(&object);
+        let escaped = object.clone();
+        let _ = Retained::autorelease_ptr(object);
+        (weak, escaped)
+    });
+    assert!(
+        weak.load().is_some(),
+        "weak proof must detect an escaped strong owner"
+    );
+    drop(escaped);
+    assert!(
+        weak.load().is_none(),
+        "weak observation must not keep the object alive"
+    );
 }

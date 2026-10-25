@@ -392,21 +392,29 @@ fn wide_full_vs_compacted_ffn_maya_bitwise_and_status() {
                 scratch.validate_status().unwrap();
                 assert!(f32_slice(out).unwrap().iter().all(|v| v.is_finite()));
                 assert!(f32_slice(out).unwrap().iter().any(|&v| v != 0.0));
-                assert_eq!(
-                    census
-                        .iter()
-                        .filter(|d| d.kernel.starts_with("kernel_moe_wide_probe_"))
-                        .count(),
-                    if scratch.hc.rows >= 4096 { 2 } else { 0 }
-                );
-                assert_eq!(
-                    census
-                        .iter()
-                        .filter(|d| d.kernel.starts_with("kernel_moe_down_")
-                            && d.kernel.ends_with("_f16act_grouped_slots_tensor"))
-                        .count(),
-                    usize::from(scratch.arithmetic.packed_operands(scratch.hc.rows))
-                );
+                let suffix = metal::moe_grouped_generic_layout(dtype).unwrap().suffix;
+                let down = format!("kernel_moe_down_{suffix}_f16act_grouped_slots_tensor");
+                let expected = if !scratch.arithmetic.packed_operands(scratch.hc.rows) {
+                    Vec::new()
+                } else if scratch.hc.rows >= 4096 {
+                    let wide = format!("kernel_moe_wide_probe_{suffix}_f16act");
+                    vec![wide.clone(), wide, down]
+                } else {
+                    vec![
+                        down.clone(),
+                        format!("kernel_moe_up_clamped_{suffix}_f16act_grouped_slots_tensor"),
+                        down,
+                    ]
+                };
+                let actual: Vec<_> = census
+                    .iter()
+                    .filter(|d| {
+                        d.kernel.starts_with("kernel_moe_")
+                            && (d.kernel.contains("_f16act_") || d.kernel.ends_with("_f16act"))
+                    })
+                    .map(|d| d.kernel.as_str())
+                    .collect();
+                assert_eq!(actual, expected, "{dtype:?} rows={}", scratch.hc.rows);
             };
         encode(&input, &incoming, &full_out, &full);
         for n in [1, 33, 2048] {

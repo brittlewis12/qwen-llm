@@ -43,9 +43,13 @@ The bridge passes 109 focused CPU checks and authentic sparse header/control
 replay; independent review finds no concrete P1/P2. The five requested IQ2_XS
 and auxiliary files now pass pinned full LFS hashes (265821115072 bytes total).
 Actual M5 validation-on loader fixtures pass 71 tests, including eight GPU
-fixtures. Full weights are not yet execution-qualified. Separate Full/CED
-artifact/source-group qualification is
-in flight (`test/v41-gsq-ced-qualification`); see
+fixtures. Separate Full/CED artifact/source-group qualification now passes
+128/2048/8192 at `05edb66f` (`test/v41-gsq-ced-qualification`): all 257 complete
+heads and 56 causal regions per position match within the new artifact, with
+one import, one KV state and no fallback. Resident shared views are 144.560 GiB,
+private shadow zero, with the companion disk-only. These ordered validation-on
+pairs are not quality or performance evidence and do not ship the CED executor;
+see
 [the serialization and ownership contract](DEEPSEEK-V41-GSQ-LOADER.md).
 
 CED encoder-only bulk prefill is the leading architectural opportunity.
@@ -151,6 +155,8 @@ Two independent outside reviews plus primary-source/source audits prioritize:
   remainder panel without repeated weight decode or added submissions. This
   models 22.94% less CED routed arithmetic; default dispatch stays unchanged.
 - Shared retained-window partitioning: in flight (`perf/v41-soft-windows`).
+  Paused at preserved uncommitted source pending ownership recovery. Do not
+  start a second writer or infer a qualified P0/P4 result from the partial code.
   Fresh batch-two 2K diagnostics keep warmed Full GPU envelopes at 1.943-1.946 s
   while driver intervals range 0.027-11.439 s, with zero process reads/page-ins
   and ordinary/tensor PSO misses. Test disabled versus a 4 GiB soft coalescing

@@ -110,6 +110,25 @@ The sparse CPU replay is ignored in that run and qualified separately. These
 synthetic fixtures do not load the verified full artifact or establish its
 quality, performance, context capacity or Full/CED equivalence.
 
+Full-weight checkpoint, 2026-10-25: separate unbatched CED composition
+`05edb66ff4bf5baf25e022faef8eac57c526dad6` now passes actual IQ2_XS pairs at
+128/2048/8192 prompt rows. Each compares all 257 complete 129280-logit vectors
+and all 56 causal regions per position, with unchanged frozen input, one import,
+one live KV state, no fallback and 21/21/25 completed CED commands. V2 reports
+retain both source groups, planned/loaded FD equality and unchanged endpoint
+identities; six corrupt source/control report variants are rejected. This is
+within-GSQ equivalence, not a comparison with Maya logits.
+
+The actual resident shared views total 155220049920 bytes (144.560 GiB), with
+zero private weight shadow and 110595290400 table payload bytes disk-only.
+Observed/accepted incremental Metal bytes are 214777856/237092864 at 128,
+2983034880/3005284352 at 2048 and 5718163456/5740412928 at 8192. These are sampled
+increments and admitted bounds, not continuous process/driver peaks. Frozen core
+SHA256 is `d26af009441a86f4bbc152ffb89db38d67215f232d56755a6a382fc753acff6e`.
+Ordered validation-on timings are diagnostic only. No quality, native-speed,
+full-1M-context or CED-default claim follows, and the CED executor remains on its
+separate branch rather than being shipped by the main loader bridge.
+
 CPU fixtures cover inline/tensor equivalence, large exact integers, malformed
 controls, offsets and aliases, four backbone shards plus a separate companion,
 source/architecture/path/geometry failures, ambiguity/duplicates, retained FDs,

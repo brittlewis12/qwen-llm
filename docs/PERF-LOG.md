@@ -6,6 +6,31 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the current state and evidence index.
 
+## 2026-10-25 - Verified GSQ Full Weights Preserve Exact CED State
+
+- Separate source composition `05edb66f` passes actual IQ2_XS Full/CED pairs at
+  128/2048/8192, each with all 257 complete 129280-logit vectors and all 56
+  causal regions per position bitwise equal. The frozen real prompt/continuation
+  is unchanged; there is no Maya cross-artifact head comparison.
+- Each pair uses one resident import and one live KV state, no fallback, and
+  21/21/25 completed CED commands. Both backbone and auxiliary source groups
+  match planned/loaded FDs and remain unchanged. Six corrupted v2 source/control
+  evidence cases are rejected by the independent report checks.
+- Actual shared views are 155220049920 bytes (144.560 GiB), private weight
+  shadow zero, and IQ4_NL table payloads 110595290400 bytes disk-only. Sampled
+  incremental Metal allocations stay within their accepted bounds at all sizes.
+- Frozen core SHA256:
+  `d26af009441a86f4bbc152ffb89db38d67215f232d56755a6a382fc753acff6e`.
+  Private evidence labels are `gsq-iq2xs-n{128,2048,8192}-v27-r1.*` and
+  `gsq-iq2xs-v27-local-summary.json`. All three reports are independently checked
+  after copying, including their complete teacher-forced position coverage.
+- These are ordered validation-on correctness runs, not native throughput,
+  effort-50 quality, full-context or CED-default promotion evidence. The main
+  loader bridge and the branch-only CED executor remain separate deliveries.
+- The shared-window lane remains paused pending ownership recovery. Partial
+  source is preserved; no second writer or unqualified P0/P4 comparison starts.
+- [Artifact/source and execution boundaries](DEEPSEEK-V41-GSQ-LOADER.md).
+
 ## 2026-10-24 - GSQ Artifact Verified And M5 Loader Fixtures Pass
 
 - All four requested IQ2_XS backbone shards and the shared IQ4_NL Engram file

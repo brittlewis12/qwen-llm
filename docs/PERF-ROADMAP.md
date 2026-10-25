@@ -162,9 +162,11 @@ Two independent outside reviews plus primary-source/source audits prioritize:
   all 336 samples retained. The 22.94% arithmetic model does not establish a
   latency gain. Default dispatch stays unchanged; broader structural occupancy
   remains open. See [the measured leaf and limits](bench/2026-10-25-v41-adaptive-tail-negative.md).
-- Shared retained-window partitioning: in flight (`perf/v41-soft-windows`).
-  Paused at preserved uncommitted source pending ownership recovery. Do not
-  start a second writer or infer a qualified P0/P4 result from the partial code.
+- Shared retained-window partitioning: in flight
+  (`perf/v41-soft-windows-recovered`). Continue the preserved partial source in
+  a fresh owned checkout from qualified batch-two `9874c68b`; the original
+  partial checkout and frozen controls remain unchanged. Source/context are
+  retained; no recovered implementation is qualified before fresh checks.
   Fresh batch-two 2K diagnostics keep warmed Full GPU envelopes at 1.943-1.946 s
   while driver intervals range 0.027-11.439 s, with zero process reads/page-ins
   and ordinary/tensor PSO misses. Test disabled versus a 4 GiB soft coalescing

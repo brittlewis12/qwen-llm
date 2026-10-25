@@ -6,6 +6,19 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the current state and evidence index.
 
+## 2026-10-25 - Retained-Window Experiment Continues From Preserved Source
+
+- Resume the bounded P0/P4 comparison on
+  `perf/v41-soft-windows-recovered`, based on qualified batch-two `9874c68b`.
+  The preserved tracked patch and new resource-summary helper are copied and
+  hash-checked into a fresh owned checkout; the original partial checkout,
+  frozen references and active main implementation remain unchanged.
+- There is no missing source or experiment context. Complete the helper,
+  source inventories and bounded proofs before actual mapping audit, M5
+  correctness and controlled disabled/4-GiB cohorts. No second writer edits
+  the original checkout, and no performance or default-promotion claim follows
+  from recovering the partial implementation.
+
 ## 2026-10-25 - Existing IQ1 Codecs Reach Indexed Expert Execution
 
 - Main `d1ad718c` adds IQ1_S/M native scalar/rows, generic half, and M5 tensor/

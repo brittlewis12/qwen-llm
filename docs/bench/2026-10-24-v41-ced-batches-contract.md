@@ -1,21 +1,25 @@
 # Bounded CED Decoder Retirement
 
-Candidate branch: `perf/v41-ced-batches`, based on `cada5864`. Executable proof
-source: clean `24c0f41188cfb6e3b31c7a836d4618a43ee2ff39` on Apple M4 Max.
-CED remains opt-in. This candidate does not incorporate or qualify the parallel
-4K Full/encoder geometry integration. No full-model, native latency or M5 result
-is claimed.
+Candidate branch: `perf/v41-ced-batches`, based on integrated scratch
+`41f4eb543177619ecb480a5b59f6754be5e42b59`, including main
+`12d098ebdd699dfb01be3e64000cc8b34547e638`. Only owned commits after original
+`cada586431e3d909f0240535080b91b5b19e17c8` were rebased onto that base.
+Executable proof source: clean `c661d593c346287773d94b5caf608101ba075695`
+on Apple M4 Max. Bounded selected 2K/4K Full geometry proofs pass; CED remains
+opt-in. No full-model, native latency or M5 result is claimed.
 
 ## Execution Contract
 
 The encoder retains its existing chunk completion boundaries. Production CED
 groups two consecutive decoder layers into one command buffer with one serial
 compute encoder only when every requested group has at most 16 physical units.
-Each seed/output unit is bounded by the actual decoder chunk geometry (2048 rows
-here); scalar tails have one row. Every actual seed chunk, packed output chunk
-and native scalar tail is encoded in original layer-major order. Scoped tests select the old
-per-unit incumbent or one/two/four-layer groups; there is no production knob or
-generic queue scheduler.
+Each seed/output unit is bounded by the decoder chunk geometry (2048 rows);
+scalar tails have one row. The encoder follows selected Full geometry (4096 rows
+for fitting Maya plans). Scalar identity follows `plan.scalar_tail()` and that
+selected Full width, not the decoder chunk width. Every actual seed chunk,
+packed output chunk and native scalar tail is encoded in original layer-major
+order. Scoped tests select the old per-unit incumbent or one/two/four-layer
+groups; there is no production knob or generic queue scheduler.
 
 If any requested group exceeds that unit budget, selection uses the existing
 bounded per-unit CED decoder schedule for the entire decoder. It does not use
@@ -69,17 +73,22 @@ poisoned State, including failures in the incumbent decoder path.
 
 ## Count And Memory Plans
 
-Counts derive from actual encoder geometry and decoder groups. On this pinned
-2048-row geometry, the 40-layer default schedule plans:
+Counts derive from actual encoder geometry and the selected decoder schedule.
+On selected 4096-row Full/encoder geometry, the 40-layer default schedule plans:
 
 | Prompt Rows | Incumbent | Group 1 | Group 2 | Group 4 |
 | --- | ---: | ---: | ---: | ---: |
 | 2048 | 21 | 21 | 11 | 6 |
-| 8192 | 27 | 24 | 14 | 9 |
+| 8192 | 25 | 22 | 12 | 7 |
 
 Group 1 also co-encodes a layer's multiple chunks. Useful output/seed work and
-ordered arithmetic dispatches do not change. These are command-count plans, not
-latency multipliers or current-main 4K compatibility evidence.
+ordered arithmetic dispatches do not change. On selected 2048-row encoder
+geometry the corresponding 8192-row counts remain 27/24/14/9. Encoder commands
+are derived as `prompt_rows.div_ceil(plan.full_chunk_rows)`; eligible grouped
+decoder commands are `decoder.len().div_ceil(group_layers)`. These are
+command-count plans, not latency multipliers. Completed group submissions retain
+the integrated driver-scheduling attribution helper; tests check positive driver
+durations or explicit invalid-timestamp accounting, never silent GPU-only timing.
 
 The single shared status allocation is the maximum over actual groups of four
 bytes times packed output rows plus one attention word per unit. Scalar FFN
@@ -112,9 +121,11 @@ diagnostic-copy interval and asserts every excluded dispatch.
 
 ## Source Freshness
 
-Frozen-reference and current-pair qualification use the same additional compiled
-source inventory: the batch planner, runtime, test diagnostics, existing scoped
-runtime hooks, and Rust/Metal elementwise primitives used by the new proofs.
+Frozen-reference and current-pair qualification preserve the integrated compiled
+source inventory, including selected chunk geometry and wide guards, and share
+the additional batching inventory: planner, runtime, test diagnostics, existing
+scoped runtime hooks, query arithmetic/lineage diagnostics, wide activation-type
+tests, and Rust/Metal elementwise primitives used by the new proofs.
 Both actual freshness gates have per-file negative checks: changing only any
 one registered body rejects the binary before import. No maintained source is
 edited by those tests. These gates specifically cover the three new batching
@@ -124,8 +135,9 @@ modules omitted by candidate1's inventory.
 
 Release workspace all-target checking, formatting and optimized test `--no-run`
 pass. Executables are frozen under the same build lease before releasing the
-shared target. Focused pure planner/cursor/coverage/preflight/status tests and
-eight production-self-leased GPU tests pass with `MTL_DEBUG_LAYER=1`:
+shared target. Sixteen focused pure invocations pass 74 tests, covering planner,
+cursor, coverage, preflight, profiling, geometry and both freshness gates. Eleven
+production-self-leased GPU tests pass with `MTL_DEBUG_LAYER=1`:
 
 - Old versus group 1/2/4: exact complete heads, all causal state, all absolute
   query controls, ordered arithmetic PSOs/grids, counters and observed admission.
@@ -133,6 +145,15 @@ eight production-self-leased GPU tests pass with `MTL_DEBUG_LAYER=1`:
   The latter has two decoder layers and crosses both output and seed boundaries;
   other fixtures retain four decoder layers. All executed GPU fixture ledgers are at
   most 128 MiB, including reserves; no capacity exception is used.
+- Both selected Full widths additionally check N=2049/4095/4096/4097 against
+  incumbent and groups 1/2/4, including strict driver attribution. A historical
+  seed-fusion oracle explicitly retains its original 2048-row geometry.
+- Automatic structural fallback is executed on GPU for both Full widths using
+  a thread-local test-only unit limit of one. The requested schedule remains two
+  layers; actual selection, counts, pricing, complete outputs and ordered dispatches
+  equal incumbent, with no batch commands or charges. A ledger-allocation fault
+  remains untriggered. Separate CPU tests check the production 16/17-unit boundary;
+  production always uses 16. No giant GPU payload or actual OOM is induced.
 - One FFN word is GPU-overwritten after healthy unit math: layer 2, row 2047,
   status -7. That exact coordinate fails, while every other ledger word is READY,
   including the same layer's second two-row chunk and a later one-row unit.
@@ -147,20 +168,25 @@ eight production-self-leased GPU tests pass with `MTL_DEBUG_LAYER=1`:
 - GPU-written status canaries survive every successful completion; a deliberate
   GPU boundary clobber is detected after completion. Invalid CPU status prefixes
   preserve trailing canaries. Loaded runtime and metadata cold ledgers match.
+- The original real-NaN sticky seed/route-failure witness also passes; it remains
+  distinct from the isolated post-math FFN-word injection.
 
-The private artifact root ends in
-`v41-leverage-2026-10-24.dc1jxYdL/ced-batches-candidate2`. The final build manifest
-is `controls-extents-proof5/frozen.json`, results are `24c0f411-tests4/results.json`,
-and the aggregate packet is `candidate2-proof-summary.json`. Frozen core-test
-SHA-256: `6398b49a18bf3aa8767a6fd74621e56bf7a2740d0810a698479ae54d906c57de`.
-Candidate1 artifacts remain immutable; rejected candidate2 build/fixture attempts
-remain in the new packet's chronology. Test process durations include lease
-waiting and are not native latency measurements.
+The private candidate3 packet contains `attributed-proof2/frozen.json`,
+`c661d593-tests2/results.json` and `candidate3-proof-summary.json`. Frozen
+core-test SHA-256:
+`66c86ede830132ebffeae9efe353d9583cb786e422bad32dd9a961cebc882390`.
+Candidate1/2 refs and frozen archives remain immutable. The candidate3 packet
+also preserves the pre-rebase continuation bundle, range-diff and rejected first
+integrated proof attempt. That attempt exposed a pure profile simulator still
+emitting incumbent commands; the final test models actual schedule selection
+without weakening capacity/count assertions. Test process durations include
+lease waiting and are not native latency measurements.
 
 M5 small/wide tensor-lineage fixtures compile but are not run on M4. Parent
-review, rebase of only these new commits onto integrated scratch, joined 4K
-boundary tests, M5 tensor qualification, full-model/native qualification and
-uninstrumented latency measurement remain separate required work.
+review, M5 tensor qualification, full-model/native qualification and
+uninstrumented latency measurement remain separate required work. The exact
+self-leased M5 filters and expected results are in
+`2026-10-24-v41-ced-batches-m5-handoff.md`.
 Inclusive normal-production CPU/device transient peaks without test control
 copies remain for parent diagnostics; allocation samples and release-to-baseline
 checks do not establish those peaks or formally qualify the encoding allowance.

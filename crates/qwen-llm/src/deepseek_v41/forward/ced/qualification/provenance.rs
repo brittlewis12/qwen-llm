@@ -298,6 +298,38 @@ pub(super) fn checked_batching_sources(root: &Path) -> AResult<Vec<Value>> {
         .collect()
 }
 
+pub(super) fn soft_window_compiled_sources() -> &'static [(&'static str, &'static [u8])] {
+    macro_rules! embedded {
+        ($($path:literal),+ $(,)?) => { &[$(($path, include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/../../", $path)).as_slice())),+] };
+    }
+    const SOURCES: &[(&str, &[u8])] = embedded![
+        "crates/qwen-llm/src/metal/tensor.rs",
+        "crates/qwen-llm/src/metal/mat_mat.rs",
+        "crates/qwen-llm/src/deepseek_v41/gguf.rs",
+        "crates/qwen-llm/src/deepseek_v41/gguf/resident_storage.rs",
+        "crates/qwen-llm/src/deepseek_v41/gguf/retained_resources.rs",
+        "crates/qwen-llm/src/deepseek_v41/gguf/storage.rs",
+        "crates/qwen-llm/src/deepseek_v41/gguf/tests.rs",
+        "crates/qwen-llm/src/deepseek_v41/gguf/tests/soft_windows.rs",
+        "crates/qwen-llm/src/deepseek_v41/gguf/tests/resident_storage.rs",
+        "crates/qwen-llm/src/deepseek_v41/gguf/tests/storage_mapping.rs",
+        "crates/qwen-llm/src/deepseek_v41/forward/preflight.rs",
+        "crates/qwen-llm/src/deepseek_v41/forward/preflight/tests.rs",
+        "crates/qwen-llm/src/deepseek_v41/forward/ced/qualification/provenance.rs",
+        "crates/qwen-llm/src/deepseek_v41/forward/ced/qualification/current_pair.rs",
+        "crates/qwen-llm/examples/deepseek_v41_storage_plan.rs",
+        "crates/qwen-cli/src/bench/v41_ced_pair.rs",
+    ];
+    SOURCES
+}
+
+pub(super) fn checked_soft_window_sources(root: &Path) -> AResult<Vec<Value>> {
+    soft_window_compiled_sources()
+        .iter()
+        .map(|&(path, bytes)| checked_compiled_source(root, path, bytes))
+        .collect()
+}
+
 fn compiled_sources() -> &'static [(&'static str, &'static [u8])] {
     macro_rules! embedded {
         ($($path:literal),+ $(,)?) => { &[$(($path, include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/../../", $path)).as_slice())),+] };
@@ -309,7 +341,6 @@ fn compiled_sources() -> &'static [(&'static str, &'static [u8])] {
         "crates/qwen-llm/build.rs",
         "crates/qwen-llm/src/deepseek_v41/forward.rs",
         "crates/qwen-llm/src/deepseek_v41/forward/chunk_geometry.rs",
-        "crates/qwen-llm/src/deepseek_v41/forward/preflight.rs",
         "crates/qwen-llm/src/deepseek_v41/forward/binding.rs",
         "crates/qwen-llm/src/deepseek_v41/forward/ced.rs",
         "crates/qwen-llm/src/deepseek_v41/forward/ced_plan.rs",
@@ -332,11 +363,9 @@ fn compiled_sources() -> &'static [(&'static str, &'static [u8])] {
         "crates/qwen-llm/src/deepseek_v41/forward/error.rs",
         "crates/qwen-llm/src/deepseek_v41/forward/profile.rs",
         "crates/qwen-llm/src/deepseek_v41/engram.rs",
-        "crates/qwen-llm/src/deepseek_v41/gguf.rs",
         "crates/qwen-llm/src/deepseek_v41/gguf/metadata.rs",
         "crates/qwen-llm/src/deepseek_v41/gguf/names.rs",
         "crates/qwen-llm/src/deepseek_v41/gguf/engram.rs",
-        "crates/qwen-llm/src/deepseek_v41/gguf/storage.rs",
         "crates/qwen-llm/src/gguf.rs",
         "crates/qwen-llm/src/checkpoint_identity.rs",
         "crates/qwen-llm/src/metal/moe_grouped_generic.rs",
@@ -350,8 +379,6 @@ fn compiled_sources() -> &'static [(&'static str, &'static [u8])] {
         "crates/qwen-llm/src/deepseek_v41/forward/ced/qualification/archive.rs",
         "crates/qwen-llm/src/deepseek_v41/forward/ced/qualification/archive/tests.rs",
         "crates/qwen-llm/src/deepseek_v41/forward/ced/qualification/metrics.rs",
-        "crates/qwen-llm/src/deepseek_v41/forward/ced/qualification/provenance.rs",
-        "crates/qwen-llm/src/deepseek_v41/forward/ced/qualification/current_pair.rs",
         "kernels/deepseek_v41_attention.metal",
         "kernels/deepseek_v41_ffn.metal",
         "kernels/deepseek_v41_engram.metal",
@@ -367,6 +394,7 @@ fn checked_compiled_sources(root: &Path) -> AResult<Vec<Value>> {
         compiled.push(checked_compiled_source(&root, path, bytes)?);
     }
     compiled.extend(checked_batching_sources(root)?);
+    compiled.extend(checked_soft_window_sources(root)?);
     Ok(compiled)
 }
 
@@ -391,14 +419,18 @@ fn compiled_geometry_and_activation_inventory_rejects_single_file_edits_before_i
         std::process::id()
     ));
     std::fs::create_dir(&root).unwrap();
-    for &(path, bytes) in sources.iter().chain(batching_compiled_sources()) {
+    for &(path, bytes) in sources
+        .iter()
+        .chain(batching_compiled_sources())
+        .chain(soft_window_compiled_sources())
+    {
         let destination = root.join(path);
         std::fs::create_dir_all(destination.parent().unwrap()).unwrap();
         std::fs::write(destination, bytes).unwrap();
     }
     assert_eq!(
         checked_compiled_sources(&root).unwrap().len(),
-        sources.len() + batching_compiled_sources().len()
+        sources.len() + batching_compiled_sources().len() + soft_window_compiled_sources().len()
     );
     for path in [
         helper,
@@ -484,6 +516,45 @@ fn every_batching_source_rejects_a_stale_body_in_both_qualification_inventories(
             );
         }
         std::fs::write(&file, compiled).unwrap();
+    }
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn every_soft_window_source_rejects_a_stale_body_in_both_qualification_inventories() {
+    let nonce = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    let root = std::env::temp_dir().join(format!(
+        "qwen-soft-window-freshness-{}-{nonce}",
+        std::process::id()
+    ));
+    std::fs::create_dir(&root).unwrap();
+    for &(path, compiled) in soft_window_compiled_sources() {
+        let file = root.join(path);
+        std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+        std::fs::write(&file, compiled).unwrap();
+    }
+    for &(path, compiled) in soft_window_compiled_sources() {
+        let file = root.join(path);
+        assert!(checked_soft_window_sources(&root).is_ok());
+        assert!(super::current_pair::checked_soft_window_sources(&root).is_ok());
+        let mut changed = compiled.to_vec();
+        changed.extend_from_slice(b"\n// single-file soft-window freshness probe\n");
+        std::fs::write(&file, changed).unwrap();
+        for error in [
+            checked_soft_window_sources(&root).unwrap_err(),
+            super::current_pair::checked_soft_window_sources(&root).unwrap_err(),
+        ] {
+            assert!(
+                error
+                    .to_string()
+                    .contains(&format!("binary/source mismatch: {path}")),
+                "{error}"
+            );
+        }
+        std::fs::write(file, compiled).unwrap();
     }
     std::fs::remove_dir_all(root).unwrap();
 }

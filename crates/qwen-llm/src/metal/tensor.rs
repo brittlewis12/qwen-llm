@@ -100,6 +100,25 @@ pub fn plan_retained_storage(
     max_buffer_length: usize,
     required_alignment: usize,
 ) -> Result<RetainedStoragePlan, MetalError> {
+    plan_retained_storage_with_soft_target(
+        shard_mapped_lengths,
+        requests,
+        page_size,
+        max_buffer_length,
+        required_alignment,
+        None,
+    )
+}
+
+/// A coalescing target, never a tensor eligibility or import limit.
+pub(crate) fn plan_retained_storage_with_soft_target(
+    shard_mapped_lengths: &[usize],
+    requests: &[&TensorDesc],
+    page_size: usize,
+    max_buffer_length: usize,
+    required_alignment: usize,
+    soft_target: Option<usize>,
+) -> Result<RetainedStoragePlan, MetalError> {
     if !page_size.is_power_of_two() {
         return Err(MetalError::GgufNoCopy(format!(
             "host page size {page_size} is not a power of two"
@@ -121,6 +140,11 @@ pub fn plan_retained_storage(
             "Metal maxBufferLength {max_buffer_length} exposes no complete {page_size}-byte page"
         )));
     }
+    let coalescing_length = soft_target.map_or(usable_window_length, |target| {
+        checked_page_floor(target, page_size)
+            .max(page_size)
+            .min(usable_window_length)
+    });
 
     let mut canonical = Vec::<CanonicalRetainedRequest<'_>>::new();
     let mut by_source = HashMap::<(usize, u64, u64), usize>::new();
@@ -253,7 +277,8 @@ pub fn plan_retained_storage(
             })?;
             let required_length = rounded_end.checked_sub(window_start);
             if start >= window_start
-                && required_length.is_some_and(|bytes| bytes <= usable_window_length)
+                && required_length
+                    .is_some_and(|bytes| bytes <= window.length || bytes <= coalescing_length)
             {
                 selected_window = Some(window_index);
             }
@@ -263,7 +288,8 @@ pub fn plan_retained_storage(
                 usize::try_from(windows[window_index].mmap_offset).map_err(|_| {
                     MetalError::GgufNoCopy("planned window offset does not fit usize".to_string())
                 })?;
-            windows[window_index].length = rounded_end - window_start;
+            windows[window_index].length =
+                windows[window_index].length.max(rounded_end - window_start);
             window_index
         } else {
             let window_index = windows.len();
@@ -1379,6 +1405,171 @@ mod tests {
         assert!(GgufBackingGeometry::new_window(0, 256, 32, 64, 64, 32).is_err());
         assert!(GgufBackingGeometry::new_window(0, 256, 64, 96, 64, 32).is_err());
         assert!(GgufBackingGeometry::new_window(0, 256, 192, 128, 64, 32).is_err());
+    }
+
+    #[test]
+    fn retained_storage_four_gib_soft_target_is_not_a_hardware_limit() {
+        let page = 16_384;
+        let soft = 4_294_967_296;
+        let hardware = 179_357_827_072;
+        let large = f32_desc("large", 0, 16, (soft as u64 + 16) / 4);
+        let padding = f32_desc("padding", 0, soft as u64 + 32, 4);
+        let lengths = [soft + page];
+        let result = plan_retained_storage_with_soft_target(
+            &lengths,
+            &[&large, &padding],
+            page,
+            hardware,
+            16,
+            Some(soft),
+        )
+        .unwrap();
+        assert_eq!(
+            result.windows,
+            vec![RetainedStorageWindow {
+                shard_idx: 0,
+                mmap_offset: 0,
+                length: soft + page,
+            }]
+        );
+        assert_eq!(result.unique_fallback_bytes, 0);
+        assert_eq!(result.unique_view_bytes, large.n_bytes + padding.n_bytes);
+        assert_retained_plan_invariants(&result, &[&large, &padding], &lengths);
+        let refused =
+            plan_retained_storage_with_soft_target(&lengths, &[&large], page, soft, 16, Some(soft))
+                .unwrap();
+        assert_eq!(refused.unique_fallback_bytes, large.n_bytes);
+        assert_eq!(
+            refused.entries[0].disposition,
+            RetainedStorageDisposition::CopyFallback {
+                reason: RetainedStorageFallback::TensorExceedsWindow,
+            }
+        );
+    }
+
+    #[test]
+    fn retained_storage_soft_target_only_limits_growth_not_singleton_eligibility() {
+        let a = f32_desc("a", 0, 16, 36); // 144 bytes, singleton [0, 192).
+        let padding = f32_desc("padding", 0, 160, 4);
+        let growth = f32_desc("growth", 0, 176, 8);
+        let tail = f32_desc("tail", 0, 208, 4);
+        let requests = [&a, &padding, &growth, &tail, &a];
+        let control = plan_retained_storage(&[320], &requests, 64, 319, 16).unwrap();
+        let none =
+            plan_retained_storage_with_soft_target(&[320], &requests, 64, 319, 16, None).unwrap();
+        assert_eq!(none, control);
+        assert_eq!(control.windows.len(), 1);
+        for target in [0, 1, 64, 127] {
+            let soft = plan_retained_storage_with_soft_target(
+                &[320],
+                &requests,
+                64,
+                319,
+                16,
+                Some(target),
+            )
+            .unwrap();
+            assert_retained_plan_invariants(&soft, &requests, &[320]);
+            assert_eq!(soft.max_buffer_length, 319);
+            assert_eq!(soft.usable_window_length, 256);
+            assert_eq!(soft.unique_fallback_bytes, 0);
+            assert_eq!(soft.unique_view_bytes, control.unique_view_bytes);
+            assert_eq!(soft.alias_bytes, a.n_bytes);
+            assert_eq!(
+                soft.windows,
+                vec![
+                    RetainedStorageWindow {
+                        shard_idx: 0,
+                        mmap_offset: 0,
+                        length: 192
+                    },
+                    RetainedStorageWindow {
+                        shard_idx: 0,
+                        mmap_offset: 128,
+                        length: 128
+                    },
+                ]
+            );
+            assert_eq!(
+                soft.entries[1].disposition,
+                RetainedStorageDisposition::View {
+                    window_index: 0,
+                    buffer_offset: 160,
+                }
+            );
+            assert_eq!(
+                soft.entries[2].disposition,
+                RetainedStorageDisposition::View {
+                    window_index: 1,
+                    buffer_offset: 48,
+                }
+            );
+            assert_eq!(
+                soft.entries[3].disposition,
+                RetainedStorageDisposition::View {
+                    window_index: 1,
+                    buffer_offset: 80,
+                }
+            );
+            let permutation = [&tail, &growth, &a, &padding, &a];
+            let permuted = plan_retained_storage_with_soft_target(
+                &[320],
+                &permutation,
+                64,
+                319,
+                16,
+                Some(target),
+            )
+            .unwrap();
+            assert_eq!(soft.windows, permuted.windows);
+            assert_eq!(soft.unique_view_bytes, permuted.unique_view_bytes);
+        }
+        for target in [256, 320, usize::MAX] {
+            assert_eq!(
+                control,
+                plan_retained_storage_with_soft_target(
+                    &[320],
+                    &requests,
+                    64,
+                    319,
+                    16,
+                    Some(target),
+                )
+                .unwrap()
+            );
+        }
+        let refused =
+            plan_retained_storage_with_soft_target(&[320], &[&a], 64, 191, 16, Some(64)).unwrap();
+        assert_eq!(
+            refused.entries[0].disposition,
+            RetainedStorageDisposition::CopyFallback {
+                reason: RetainedStorageFallback::TensorExceedsWindow,
+            }
+        );
+    }
+
+    #[test]
+    fn retained_storage_soft_target_splits_small_tensors_and_preserves_fallbacks() {
+        let a = f32_desc("a", 0, 80, 12);
+        let b = f32_desc("b", 0, 128, 16);
+        let c = f32_desc("c", 0, 192, 4);
+        let requests = [&a, &b, &c];
+        let control = plan_retained_storage(&[256], &requests, 64, 256, 16).unwrap();
+        let soft =
+            plan_retained_storage_with_soft_target(&[256], &requests, 64, 256, 16, Some(127))
+                .unwrap();
+        assert_eq!(control.windows.len(), 1);
+        assert_eq!(soft.windows.len(), 3);
+        assert_eq!(soft.windows[0].mmap_offset, 64);
+        assert!(soft.windows.iter().all(|w| w.length == 64));
+        assert_retained_plan_invariants(&soft, &requests, &[256]);
+        let wrong = f32_desc("wrong", 0, 84, 4);
+        let tail = f32_desc("tail", 0, 224, 8);
+        let requests = [&wrong, &tail];
+        let control = plan_retained_storage(&[255], &requests, 64, 256, 16).unwrap();
+        let soft = plan_retained_storage_with_soft_target(&[255], &requests, 64, 256, 16, Some(64))
+            .unwrap();
+        assert_eq!(soft, control);
     }
 
     #[test]

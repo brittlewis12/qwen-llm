@@ -41,6 +41,7 @@ fn storage() -> ResidentStoragePlan {
     ResidentStoragePlan {
         page_size: 16384,
         max_buffer_length: 1 << 40,
+        soft_coalescing_target: None,
         bytes: gguf::ByteCounters::default(),
         windows: vec![],
         metal_view_bytes: 100,

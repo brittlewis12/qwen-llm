@@ -386,6 +386,8 @@ fn plan_with_pricing(
             product(p.config.vocab as u64, 32)?,
             binding_vectors_bytes(&p.config, p.schedule.layers)?,
             128 * 1024 * 1024,
+            // Also bounds the once-after-load live identity/length inventory;
+            // descriptors below cover bindings/digest serialization, not mmap bytes.
             product(resident_storage.windows.len() as u64, 4096)?,
             product(gguf.tensors.len() as u64, 1024)?,
         ])?;

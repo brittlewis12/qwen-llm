@@ -12,12 +12,15 @@ mod engram;
 mod metadata;
 mod names;
 mod resident_storage;
+mod retained_resources;
 mod storage;
 pub use super::engram::HashConfig;
 pub use engram::DiskEngram;
 pub use resident_storage::{
-    ResidentMappingKind, ResidentStoragePlan, ResidentStorageWindow, resident_storage_plan,
+    ResidentMappingKind, ResidentStorageAudit, ResidentStoragePlan, ResidentStorageWindow,
+    ResidentTensorAudit, ResidentTensorExtent, resident_storage_audit, resident_storage_plan,
 };
+pub use retained_resources::{RetainedWeightResource, RetainedWeightResourceSummary};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Schedule {
@@ -185,6 +188,8 @@ pub struct ResidentWeights {
     pub token_map: Vec<u32>,
     pub raw_pad: u32,
     pub bytes: ByteCounters,
+    /// Captured once from owning views after load; no physical residency claim.
+    pub retained_resources: RetainedWeightResourceSummary,
 }
 #[derive(Debug)]
 pub struct Plan {
@@ -333,6 +338,16 @@ impl ResidentWeights {
         g.revalidate_retained_shard_stamps()?;
         let page = metal::host_page_size_bytes()?;
         let storage = resident_storage::for_plan(&g, &p, page, ctx.max_buffer_length())?;
+        Self::load_planned(ctx, g, p, storage)
+    }
+
+    fn load_planned(
+        ctx: &MetalContext,
+        g: Arc<GgufFile>,
+        p: Plan,
+        storage: ResidentStoragePlan,
+    ) -> Result<Self, LoadError> {
+        let page = storage.page_size;
         let windows = &storage.windows;
         let requests: Vec<_> = g
             .tensors
@@ -425,6 +440,11 @@ impl ResidentWeights {
             }
         }
         g.revalidate_retained_shard_stamps()?;
+        let retained_resources = retained_resources::summarize(&banks, &dense)?;
+        eprintln!(
+            "[v41-retained-weight-resources] {}",
+            serde_json::to_string(&retained_resources).map_err(|e| invalid(e.to_string()))?
+        );
         Ok(Self {
             config: p.config,
             schedule: p.schedule,
@@ -435,6 +455,7 @@ impl ResidentWeights {
             token_map: p.token_map,
             raw_pad: p.raw_pad,
             bytes: p.bytes,
+            retained_resources,
         })
     }
 }

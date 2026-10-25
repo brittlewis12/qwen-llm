@@ -4,8 +4,6 @@ use super::*;
 use std::io::{Seek, SeekFrom};
 
 const SCHEMA: &str = "v41-ced-current-pair-v1";
-const SOURCE_PATH: &str =
-    "crates/qwen-llm/src/deepseek_v41/forward/ced/qualification/current_pair.rs";
 const INPUT_LIMIT: u64 = 16 * 1024 * 1024;
 
 #[test]
@@ -145,6 +143,7 @@ fn preload_report(cold: &ColdPrefillPreflight) -> AResult<(RuntimeUpper, Residen
         binding_control_metal_bytes: cold.binding_metal_bytes,
         bookkeeping_cpu_bytes: cold.binding_cpu_bytes,
         planner_evidence: json!({"page_size": storage.page_size,
+            "soft_coalescing_target": storage.soft_coalescing_target,
             "max_buffer_length": storage.max_buffer_length, "windows": windows,
             "shared_eof_window_count": storage.shared_eof_window_count,
             "private_window_count": storage.private_window_count,
@@ -228,17 +227,19 @@ pub(super) fn checked_batching_sources(root: &Path) -> AResult<Vec<Value>> {
         .collect()
 }
 
+pub(super) fn checked_soft_window_sources(root: &Path) -> AResult<Vec<Value>> {
+    provenance::soft_window_compiled_sources()
+        .iter()
+        .map(|&(path, bytes)| checked_compiled_source(root, path, bytes))
+        .collect()
+}
+
 fn source_identity() -> AResult<(PathBuf, Value)> {
     let (root, mut source) = provenance::source()?;
     let sources: &[(&str, &[u8])] = &[
-        (SOURCE_PATH, include_bytes!("current_pair.rs")),
         (
             "crates/qwen-llm/src/deepseek_v41/forward.rs",
             include_bytes!("../../../forward.rs"),
-        ),
-        (
-            "crates/qwen-llm/src/deepseek_v41/forward/preflight.rs",
-            include_bytes!("../../preflight.rs"),
         ),
         (
             "crates/qwen-llm/src/deepseek_v41/forward/binding.rs",
@@ -275,23 +276,13 @@ fn source_identity() -> AResult<(PathBuf, Value)> {
             "crates/qwen-llm/src/metal/context.rs",
             include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/src/metal/context.rs")),
         ),
-        (
-            "crates/qwen-llm/src/metal/tensor.rs",
-            include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/src/metal/tensor.rs")),
-        ),
-        (
-            "crates/qwen-llm/src/deepseek_v41/gguf/resident_storage.rs",
-            include_bytes!(concat!(
-                env!("CARGO_MANIFEST_DIR"),
-                "/src/deepseek_v41/gguf/resident_storage.rs"
-            )),
-        ),
     ];
     let mut compiled = sources
         .iter()
         .map(|&(path, bytes)| checked_compiled_source(&root, path, bytes))
         .collect::<AResult<Vec<_>>>()?;
     compiled.extend(checked_batching_sources(&root)?);
+    compiled.extend(checked_soft_window_sources(&root)?);
     source["current_pair_compiled_sources"] = json!(compiled);
     Ok((root, source))
 }
@@ -665,6 +656,8 @@ fn run_pair() -> AResult<()> {
         drop(frozen);
         // This is the only weight import. Keep it downstream of every combined gate.
         let weights = ResidentWeights::load(&ctx, Arc::clone(&gguf))?;
+        report["realized_retained_weight_resources"] =
+            serde_json::to_value(&weights.retained_resources)?;
         let model =
             Forward::from_resident(&ctx, &weights, weights.token_map.clone(), weights.raw_pad)
                 .map_err(anyhow::Error::msg)?;

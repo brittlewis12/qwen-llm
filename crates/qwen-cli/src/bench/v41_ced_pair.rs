@@ -1442,6 +1442,7 @@ mod tests {
             resident_storage: ResidentStoragePlan {
                 page_size: 16384,
                 max_buffer_length: 1 << 30,
+                soft_coalescing_target: None,
                 bytes: ByteCounters::default(),
                 windows: vec![],
                 metal_view_bytes: 400 * MIB,

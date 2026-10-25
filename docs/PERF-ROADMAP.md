@@ -93,11 +93,14 @@ Two independent outside reviews plus primary-source/source audits prioritize:
   (`perf/v41-ced-batches`). Start with two layers,
   preserve pending/completed separation and disjoint sticky status evidence;
   target 21 -> 11 commands at 2K, not an assumed proportional latency gain.
-- Same-format cooperative/register-fed quantized matmul: in flight
-  (`perf/v41-register-operands`). Apple and pinned
-  MLX implement the operand mechanism; bypass threadgroup staging rather than
-  retrying native FP4, larger K panels or a decoder-ALU rewrite. Separately gate
-  newer input APIs: the current tensor library targets macOS 26.0.
+- Same-format cooperative/register-fed quantized matmul: negative
+  (`perf/v41-register-operands`; final
+  `bench/2026-10-24-v41-register-operands-32x32-f16.md`). Correct bounded
+  coordinate/fragment/producer and one-SIMD alternatives all lose. The final
+  matched-F16ACT 32x32 one-accumulator path takes 10.676 ms versus 5.235 ms
+  incumbent on the full streaming IQ3_XXS count32 bank. Do not promote or expand
+  this losing leaf. Reproducible standalone probes preserve the newer API gate;
+  the product tensor library still targets macOS 26.0.
 - Expert-major/count-adaptive execution and head/query/layer-shared attention
   operands: open structural follow-ons. Measure useful versus padded work and
   actual data movement; do not recast the existing 5.4% return-grid or ~2% half-KV
@@ -109,9 +112,18 @@ Two independent outside reviews plus primary-source/source audits prioritize:
   long-context reindexing: open, with distinct cold/warm/context economics.
   Full prefix caching already exists; CED-origin reuse needs qualification.
 
-The immediate two proof-of-leverage experiments pair native driver/host
-attribution and bounded CED retirement with a matched streaming cooperative-input
-kernel control. Do not stop at another peak-FLOPS comparison or profiler census.
+Fresh native controls on frozen score32 source retain an 8K CED cohort median of
+7.924 s versus Full 11.016 s, with every pilot/main CED call faster than every
+Full call in that cohort. The 2K cohort establishes no win. Instrumented 2K
+attribution localizes 0.812-1.571 s to summed driver scheduling intervals in warm
+CED, with zero warm process reads/page-ins and ordinary/tensor PSO misses. This
+is not shader-active time or a residency-causality claim. These controls precede
+the 4K/wide integration and do not measure batching gains; see
+`bench/2026-10-24-v41-execution-leverage.md`.
+
+The immediate execution experiment pairs native driver/host attribution and
+bounded CED retirement. The matched streaming cooperative-input control is now
+closed negative. Do not stop at another peak-FLOPS comparison or profiler census.
 The implementation phase also integrates the concurrent Full chunk-4096 change
 on `perf/v41-ced-scratch`, including actual Full/CED arithmetic lineage and cold
 memory pricing. The frozen qualified source remains the comparison; existing

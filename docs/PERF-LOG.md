@@ -6,6 +6,31 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the current state and evidence index.
 
+## 2026-10-24 - Execution Attribution And A Closed Register-Operand Leaf
+
+- Frozen score32 CED source completes fresh four-retained-run native controls at
+  240 GiB MWSS. At 8K, Full median 11.016 s versus CED 7.924 s; all six CED
+  pilot/main calls are faster than all six Full calls. At 2K, Full 3.189 s
+  versus CED 3.580 s does not establish a win. All 14 endpoint heads per length
+  match the archived reference. These controls precede 4K/wide integration.
+- Separate instrumented 2K diagnostics measure 0.812-1.571 s of summed driver
+  scheduling intervals in warm CED versus 1.616-1.684 s of GPU envelopes. Warm
+  process reads/page-ins and ordinary/tensor PSO misses are zero. The interval
+  includes driver scheduling/waiting, not measured CPU busy time or shader-active
+  time. Cross-layer batching remains an unqualified implementation candidate.
+- The register/cooperative-input family closes negative after coordinate,
+  explicit-fragment, producer transpose and one-SIMD alternatives. Final matched
+  F16ACT 32x32 direct output: 10.675500 ms versus 5.235042 ms incumbent, 2.039x
+  slower. All 26 output comparisons and 655,360 half-input checks pass with zero
+  observed bit mismatches. Preserve all 36 timing samples; no product promotion.
+- Wide-dispatch dtype correction `12d098eb` lands separately. Genuine M5
+  red/green fixtures reproduce F32 corruption and invalid-type dispatch, then
+  pass all three tests under validation. Production F16 wide arithmetic and the
+  rollback selector are unchanged; maintained tool build identity matches.
+- [Execution controls, diagnostic definitions and limits](bench/2026-10-24-v41-execution-leverage.md),
+  [final F16 register packet](bench/2026-10-24-v41-register-operands-32x32-f16.md),
+  [standalone evidence inventory](bench/2026-10-24-v41-register-operands-inventory.md).
+
 ## 2026-10-24 - V4.1: 4096-Row Chunk And 64-Slot Gate/Up
 
 - The Full path now chooses a 4096-row chunk for fitting residents and keeps

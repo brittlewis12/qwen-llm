@@ -1,0 +1,106 @@
+// One SIMD, one 32x32 accumulator, pre-rounded F16 activations, M/32 grid.
+template <int BYTES, void (*DEQ)(device const uchar *, short, thread half4x4 &),
+          bool RETAIN_OUTPUT, bool AUDIT, short EPI>
+kernel void tile32_f16_probe(
+        constant moe_group_generic_mm_args & args [[buffer(0)]],
+        device const uchar * weights [[buffer(1)]], device const half * x [[buffer(2)]],
+        device const int * counts [[buffer(3)]], device const int * ids [[buffer(4)]],
+        device float * dst [[buffer(5)]], constant float & limit [[buffer(6)]],
+        device half * audit [[buffer(7)]], threadgroup uchar * shmem [[threadgroup(0)]],
+        uint3 grid [[threadgroup_position_in_grid]], uint tid [[thread_index_in_threadgroup]],
+        uint simd_width [[threads_per_simdgroup]]) {
+    const int count = counts[grid.z], r0 = int(grid.y) * 32, s0 = int(grid.x) * 32;
+    if (count < int(args.min_count) || count > int(args.max_count) || s0 >= count) return;
+    const int nr0 = min(32, int(args.M) - r0), nr1 = min(32, count - s0);
+    constexpr auto desc = tensor_ops::matmul2d_descriptor(32, 32, 32, false, true, false,
+        tensor_ops::matmul2d_descriptor::mode::multiply_accumulate);
+    tensor_ops::matmul2d<desc, execution_simdgroup> op;
+    auto left = op.template get_left_input_cooperative_tensor<half, half, float>();
+    auto right = op.template get_right_input_cooperative_tensor<half, half, float>();
+    auto acc = op.template get_destination_cooperative_tensor<
+        remove_addrspace_t<decltype(left)>, remove_addrspace_t<decltype(right)>, float>();
+    if (AUDIT && grid.x == 0 && grid.y == 0 && grid.z == 0 && tid == 0) {
+        device uint * traits = (device uint *)audit;
+        traits[0] = left.get_capacity(); traits[1] = right.get_capacity();
+        traits[2] = acc.get_capacity(); traits[3] = simd_width;
+    }
+#pragma clang loop unroll(full)
+    for (ushort i = 0; i < acc.get_capacity(); ++i) acc[i] = 0;
+    for (uint k = 0; k < args.K; k += 32) {
+#pragma clang loop unroll(full)
+        for (ushort side = 0; side < 2; ++side) {
+            const ushort capacity = side == 0 ? left.get_capacity() : right.get_capacity();
+#pragma clang loop unroll(full)
+            for (ushort i = 0; i < capacity; i += 4) {
+                const auto c = side == 0 ? left.get_multidimensional_index(i) : right.get_multidimensional_index(i);
+                half4x4 decoded;
+                int b_row = 0;
+                if (side == 1) {
+                    DEQ(weights + (ulong(grid.z) * args.M + r0 + min(c[1], nr0 - 1)) * args.nb01
+                        + ulong((k + c[0]) / 256) * BYTES, short(((k + c[0]) % 256) / 16), decoded);
+                } else {
+                    const int slot = ids[ulong(grid.z) * args.N + s0 + min(c[1], nr1 - 1)];
+                    b_row = (slot >= 0 && slot < int(args.slot_limit) ? slot : 0) / int(args.b_div);
+                }
+#pragma clang loop unroll(full)
+                for (ushort j = 0; j < 4; ++j) {
+                    const auto ij = side == 0 ? left.get_multidimensional_index(i + j) : right.get_multidimensional_index(i + j);
+                    const uint q = uint(ij[0]) % 16;
+                    const half value = side == 1 ? decoded[q / 4][q % 4]
+                        : x[ulong(b_row) * args.stride_b + k + ij[0]];
+                    if (side == 0) left[i + j] = value; else right[i + j] = value;
+                }
+            }
+            if (AUDIT && grid.x == 0 && grid.y == 0 && grid.z == 0) {
+                device volatile half * observed = audit + 8;
+#pragma clang loop unroll(full)
+                for (ushort i = 0; i < capacity; ++i) {
+                    const auto c = side == 0 ? left.get_multidimensional_index(i) : right.get_multidimensional_index(i);
+                    observed[ulong(k / 32) * 2048 + (side == 1 ? 0 : 1024) + c[1] * 32 + c[0]]
+                        = side == 0 ? left[i] : right[i];
+                }
+            }
+        }
+        op.run(left, right, acc);
+    }
+    threadgroup float * output = (threadgroup float *)shmem;
+#pragma clang loop unroll(full)
+    for (ushort i = 0; i < acc.get_capacity(); ++i) {
+        const auto c = acc.get_multidimensional_index(i);
+        const int row = c[0], j = c[1];
+        if (RETAIN_OUTPUT) output[j * 32 + row] = acc[i];
+        else if (row < nr0 && j < nr1) {
+            const int slot = ids[ulong(grid.z) * args.N + s0 + j];
+            if (slot >= 0 && slot < int(args.slot_limit)) {
+                device float & D = dst[ulong(slot) * args.M + r0 + row];
+                if (EPI == 0) D = acc[i];
+                else if (EPI == 2) D = tt_silu(min(D, limit)) * clamp(acc[i], -limit, limit);
+                else D = tt_silu(D) * acc[i];
+            }
+        }
+    }
+    if (RETAIN_OUTPUT) {
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+        const int j = int(tid);
+        if (j < nr1) {
+            const int slot = ids[ulong(grid.z) * args.N + s0 + j];
+            if (slot >= 0 && slot < int(args.slot_limit)) for (int row = 0; row < nr0; ++row) {
+                device float & D = dst[ulong(slot) * args.M + r0 + row];
+                const float C = output[j * 32 + row];
+                if (EPI == 0) D = C;
+                else if (EPI == 2) D = tt_silu(min(D, limit)) * clamp(C, -limit, limit);
+                else D = tt_silu(D) * C;
+            }
+        }
+    }
+}
+typedef decltype(tile32_f16_probe<98, qt_dequantize_iq3_xxs, false, false, 0>) tile32_f16_probe_t;
+#define TILE32_ENTRY(NAME, TG, AUDIT, EPI) \
+template [[host_name(NAME "_iq3_xxs")]] kernel tile32_f16_probe_t tile32_f16_probe<98, qt_dequantize_iq3_xxs, TG, AUDIT, EPI>;
+#define TILE32_ARM(NAME, TG) \
+TILE32_ENTRY(NAME, TG, false, 0) \
+TILE32_ENTRY(NAME "_audit", TG, true, 0) \
+TILE32_ENTRY(NAME "_silu", TG, false, 1) \
+TILE32_ENTRY(NAME "_clamp", TG, false, 2)
+TILE32_ARM("sg1t32", false)
+TILE32_ARM("sg1t32tg", true)

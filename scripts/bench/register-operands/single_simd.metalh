@@ -1,0 +1,188 @@
+// SDK 27 restricts both-cooperative M/N to 16 or 32. One SIMD owns the full
+// unchanged macro through four 512-point accumulators, reusing input registers.
+template <bool WEIGHT, bool AUDIT, typename Coop>
+inline void single_audit(thread const Coop & input, constant moe_group_generic_mm_args & args,
+        device half * audit, uint3 grid, int base, uint k) {
+    if (AUDIT && grid.x == 0 && grid.y == 0 && grid.z == 0) {
+        device volatile half * observed = audit;
+#pragma clang loop unroll(full)
+        for (ushort i = 0; i < input.get_capacity(); ++i) {
+            const auto c = input.get_multidimensional_index(i);
+            observed[ulong(k / 32) * 3072 + (WEIGHT ? 0 : 2048) + (base + c[1]) * 32 + k % 32 + c[0]] = input[i];
+        }
+    }
+}
+
+template <bool WEIGHT, bool AUDIT, typename Coop>
+inline void single_fill(thread Coop & input, constant moe_group_generic_mm_args & args,
+        device const uchar * weights, device const float * x, device const int * ids,
+        device half * audit, uint3 grid, int r0, int s0, int nr0, int nr1, int base, uint k) {
+#pragma clang loop unroll(full)
+    for (ushort i = 0; i < input.get_capacity(); i += 4) {
+        const auto c = input.get_multidimensional_index(i);
+        half4x4 decoded;
+        int b_row = 0;
+        if (WEIGHT) {
+            qt_dequantize_iq3_xxs(weights + (ulong(grid.z) * args.M + r0 + min(base + c[1], nr0 - 1)) * args.nb01
+                + ulong((k + c[0]) / 256) * QT_IQ3_XXS_BYTES, short(((k + c[0]) % 256) / 16), decoded);
+        } else {
+            const int slot = ids[ulong(grid.z) * args.N + s0 + min(base + c[1], nr1 - 1)];
+            b_row = (slot >= 0 && slot < int(args.slot_limit) ? slot : 0) / int(args.b_div);
+        }
+#pragma clang loop unroll(full)
+        for (ushort j = 0; j < 4; ++j) {
+            const auto ij = input.get_multidimensional_index(i + j);
+            const uint q = uint(ij[0]) % 16;
+            const half value = WEIGHT ? decoded[q / 4][q % 4]
+                : half(x[ulong(b_row) * args.stride_b + k + ij[0]]);
+            input[i + j] = value;
+        }
+    }
+    single_audit<WEIGHT, AUDIT>(input, args, audit, grid, base, k);
+}
+
+inline half4x4 transpose_quarters(half4x4 v, ushort lane) {
+    uint2 a = as_type<uint2>(v[0]), b = as_type<uint2>(v[1]);
+    uint2 c = as_type<uint2>(v[2]), d = as_type<uint2>(v[3]);
+    const bool low = (lane & 1) != 0, high = (lane & 8) != 0;
+    uint2 exchange = simd_shuffle_xor(low ? a : b, ushort(1));
+    if (low) a = exchange; else b = exchange;
+    exchange = simd_shuffle_xor(low ? c : d, ushort(1));
+    if (low) c = exchange; else d = exchange;
+    exchange = simd_shuffle_xor(high ? a : c, ushort(8));
+    if (high) a = exchange; else c = exchange;
+    exchange = simd_shuffle_xor(high ? b : d, ushort(8));
+    if (high) b = exchange; else d = exchange;
+    return half4x4(as_type<half4>(a), as_type<half4>(b), as_type<half4>(c), as_type<half4>(d));
+}
+
+template <bool AUDIT, typename Coop>
+inline void single_fill_butterfly(thread Coop & input, constant moe_group_generic_mm_args & args,
+        device const uchar * weights, device half * audit, uint3 grid, int r0, int nr0, int base,
+        uint k, ushort lane) {
+    const int fm = ((lane >> 2) & 4) | ((lane >> 1) & 3);
+    const int quarter = ((lane >> 2) & 2) | (lane & 1);
+    const int row = min(base + fm + 8 * quarter, nr0 - 1);
+    half4x4 producer;
+    qt_dequantize_iq3_xxs(weights + (ulong(grid.z) * args.M + r0 + row) * args.nb01
+        + ulong(k / 256) * QT_IQ3_XXS_BYTES, short((k % 256) / 16), producer);
+    const half4x4 transposed = transpose_quarters(producer, lane);
+#pragma clang loop unroll(full)
+    for (ushort i = 0; i < 16; ++i) input[i] = transposed[i / 4][i % 4];
+    single_audit<true, AUDIT>(input, args, audit, grid, base, k);
+}
+
+template <bool WEIGHT_LEFT, bool RETAIN_OUTPUT, short EPI, typename Coop>
+inline void single_finish(thread const Coop & acc, constant moe_group_generic_mm_args & args,
+        device const int * ids, device float * dst, threadgroup float * output,
+        uint3 grid, int r0, int s0, int nr0, int nr1, int row_base, int slot_base, float limit) {
+#pragma clang loop unroll(full)
+    for (ushort i = 0; i < acc.get_capacity(); ++i) {
+        const auto c = acc.get_multidimensional_index(i);
+        const int row = row_base + (WEIGHT_LEFT ? c[1] : c[0]);
+        const int j = slot_base + (WEIGHT_LEFT ? c[0] : c[1]);
+        if (RETAIN_OUTPUT) output[j * 64 + row] = acc[i];
+        else if (row < nr0 && j < nr1) {
+            const int slot = ids[ulong(grid.z) * args.N + s0 + j];
+            if (slot >= 0 && slot < int(args.slot_limit)) {
+                device float & D = dst[ulong(slot) * args.M + r0 + row];
+                if (EPI == 0) D = acc[i];
+                else if (EPI == 2) D = tt_silu(min(D, limit)) * clamp(acc[i], -limit, limit);
+                else D = tt_silu(D) * acc[i];
+            }
+        }
+    }
+}
+
+template <bool WEIGHT_LEFT, bool RETAIN_OUTPUT, bool AUDIT, short EPI, bool BUTTERFLY = false>
+kernel void single_simd_probe(
+        constant moe_group_generic_mm_args & args [[buffer(0)]],
+        device const uchar * weights [[buffer(1)]], device const float * x [[buffer(2)]],
+        device const int * counts [[buffer(3)]], device const int * ids [[buffer(4)]],
+        device float * dst [[buffer(5)]], constant float & limit [[buffer(6)]],
+        device half * audit [[buffer(7)]], threadgroup uchar * shmem [[threadgroup(0)]],
+        uint3 grid [[threadgroup_position_in_grid]], uint tid [[thread_index_in_threadgroup]]) {
+    const int count = counts[grid.z], r0 = int(grid.y) * 64, s0 = int(grid.x) * 32;
+    if (count < int(args.min_count) || count > int(args.max_count) || s0 >= count) return;
+    const int nr0 = min(64, int(args.M) - r0), nr1 = min(32, count - s0);
+    static_assert(!BUTTERFLY || !WEIGHT_LEFT, "butterfly arm uses the verified K16 right-weight mapping");
+    constexpr int step = BUTTERFLY ? 16 : 32;
+    constexpr auto desc = tensor_ops::matmul2d_descriptor(16, 32, step, false, true, false,
+        tensor_ops::matmul2d_descriptor::mode::multiply_accumulate);
+    tensor_ops::matmul2d<desc, execution_simdgroup> op;
+    auto left = op.template get_left_input_cooperative_tensor<half, half, float>();
+    auto right = op.template get_right_input_cooperative_tensor<half, half, float>();
+    auto left1 = op.template get_left_input_cooperative_tensor<half, half, float>();
+    auto right1 = op.template get_right_input_cooperative_tensor<half, half, float>();
+    using L = remove_addrspace_t<decltype(left)>;
+    using R = remove_addrspace_t<decltype(right)>;
+    auto c0 = op.template get_destination_cooperative_tensor<L, R, float>();
+    auto c1 = op.template get_destination_cooperative_tensor<L, R, float>();
+    auto c2 = op.template get_destination_cooperative_tensor<L, R, float>();
+    auto c3 = op.template get_destination_cooperative_tensor<L, R, float>();
+#pragma clang loop unroll(full)
+    for (ushort i = 0; i < c0.get_capacity(); ++i) { c0[i] = 0; c1[i] = 0; c2[i] = 0; c3[i] = 0; }
+    for (uint k = 0; k < args.K; k += step) {
+        if (WEIGHT_LEFT) {
+            single_fill<false, AUDIT>(right, args, weights, x, ids, audit, grid, r0, s0, nr0, nr1, 0, k);
+            single_fill<true, AUDIT>(left, args, weights, x, ids, audit, grid, r0, s0, nr0, nr1, 0, k);
+            op.run(left, right, c0);
+            single_fill<true, AUDIT>(left, args, weights, x, ids, audit, grid, r0, s0, nr0, nr1, 16, k);
+            op.run(left, right, c1);
+            single_fill<true, AUDIT>(left, args, weights, x, ids, audit, grid, r0, s0, nr0, nr1, 32, k);
+            op.run(left, right, c2);
+            single_fill<true, AUDIT>(left, args, weights, x, ids, audit, grid, r0, s0, nr0, nr1, 48, k);
+            op.run(left, right, c3);
+        } else {
+            single_fill<false, AUDIT>(left, args, weights, x, ids, audit, grid, r0, s0, nr0, nr1, 0, k);
+            single_fill<false, AUDIT>(left1, args, weights, x, ids, audit, grid, r0, s0, nr0, nr1, 16, k);
+            if (BUTTERFLY) {
+                single_fill_butterfly<AUDIT>(right, args, weights, audit, grid, r0, nr0, 0, k, ushort(tid));
+                single_fill_butterfly<AUDIT>(right1, args, weights, audit, grid, r0, nr0, 32, k, ushort(tid));
+            } else {
+                single_fill<true, AUDIT>(right, args, weights, x, ids, audit, grid, r0, s0, nr0, nr1, 0, k);
+                single_fill<true, AUDIT>(right1, args, weights, x, ids, audit, grid, r0, s0, nr0, nr1, 32, k);
+            }
+            op.run(left, right, c0); op.run(left, right1, c1);
+            op.run(left1, right, c2); op.run(left1, right1, c3);
+        }
+    }
+    threadgroup float * output = (threadgroup float *)shmem;
+    single_finish<WEIGHT_LEFT, RETAIN_OUTPUT, EPI>(c0, args, ids, dst, output, grid, r0, s0, nr0, nr1, 0, 0, limit);
+    single_finish<WEIGHT_LEFT, RETAIN_OUTPUT, EPI>(c1, args, ids, dst, output, grid, r0, s0, nr0, nr1, WEIGHT_LEFT ? 16 : 32, 0, limit);
+    single_finish<WEIGHT_LEFT, RETAIN_OUTPUT, EPI>(c2, args, ids, dst, output, grid, r0, s0, nr0, nr1, WEIGHT_LEFT ? 32 : 0, WEIGHT_LEFT ? 0 : 16, limit);
+    single_finish<WEIGHT_LEFT, RETAIN_OUTPUT, EPI>(c3, args, ids, dst, output, grid, r0, s0, nr0, nr1, WEIGHT_LEFT ? 48 : 32, WEIGHT_LEFT ? 0 : 16, limit);
+    if (RETAIN_OUTPUT) {
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+        const int j = int(tid);
+        if (j < nr1) {
+            const int slot = ids[ulong(grid.z) * args.N + s0 + j];
+            if (slot >= 0 && slot < int(args.slot_limit)) for (int row = 0; row < nr0; ++row) {
+                device float & D = dst[ulong(slot) * args.M + r0 + row];
+                const float C = output[j * 64 + row];
+                if (EPI == 0) D = C;
+                else if (EPI == 2) D = tt_silu(min(D, limit)) * clamp(C, -limit, limit);
+                else D = tt_silu(D) * C;
+            }
+        }
+    }
+}
+typedef decltype(single_simd_probe<true, false, false, 0>) single_simd_probe_t;
+#define SINGLE_ENTRY(NAME, WL, TG, AUDIT, EPI) \
+template [[host_name(NAME "_iq3_xxs")]] kernel single_simd_probe_t single_simd_probe<WL, TG, AUDIT, EPI>;
+#define SINGLE_ARM(NAME, WL, TG) \
+SINGLE_ENTRY(NAME, WL, TG, false, 0) \
+SINGLE_ENTRY(NAME "_audit", WL, TG, true, 0) \
+SINGLE_ENTRY(NAME "_silu", WL, TG, false, 1) \
+SINGLE_ENTRY(NAME "_clamp", WL, TG, false, 2)
+SINGLE_ARM("sg1wx512", true, false)
+SINGLE_ARM("sg1wx512tg", true, true)
+SINGLE_ARM("sg1ax512", false, false)
+SINGLE_ARM("sg1ax512tg", false, true)
+#define BUTTERFLY_ARM(NAME, TG) \
+template [[host_name(NAME "_iq3_xxs")]] kernel single_simd_probe_t single_simd_probe<false, TG, false, 0, true>; \
+template [[host_name(NAME "_audit_iq3_xxs")]] kernel single_simd_probe_t single_simd_probe<false, TG, true, 0, true>; \
+template [[host_name(NAME "_silu_iq3_xxs")]] kernel single_simd_probe_t single_simd_probe<false, TG, false, 1, true>; \
+template [[host_name(NAME "_clamp_iq3_xxs")]] kernel single_simd_probe_t single_simd_probe<false, TG, false, 2, true>;
+BUTTERFLY_ARM("sg1axbt16", false)
+BUTTERFLY_ARM("sg1axbt16tg", true)

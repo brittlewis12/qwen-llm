@@ -1,5 +1,6 @@
 //! Conditional attention qualification and separate native continuation self-parity.
 use anyhow::{Context, Result, ensure};
+use objc2_metal::MTLComputePipelineState;
 use qwen_llm::deepseek_v41::forward::{Forward, State};
 use serde_json::{Value, json};
 
@@ -33,6 +34,12 @@ impl RingPlan {
         ensure!(
             std::env::var_os("QWEN_V41_SINK_TILE").is_none(),
             "ring boundary witness requires the ordinary 512-query tile; unset QWEN_V41_SINK_TILE"
+        );
+        ensure!(
+            ctx.pipeline("kernel_deepseek_v41_attention_normalize_rows")?
+                .maxTotalThreadsPerThreadgroup()
+                >= 128,
+            "ring census requires the released 128-thread normalization geometry"
         );
         let enabled = |name| std::env::var_os(name).is_none_or(|v| v != "0");
         Ok(Self {
@@ -124,13 +131,8 @@ fn check_ring_call(
                 let grid = [row.grid_width, row.grid_height, row.grid_depth];
                 let tg = [row.threads_width, row.threads_height, row.threads_depth];
                 if stage == 3 {
-                    // normalize_rows uses an exact one-dimensional grid, not a collective.
                     ensure!(
-                        grid[1..] == [1, 1]
-                            && tg[1..] == [1, 1]
-                            && tg[0].is_power_of_two()
-                            && tg[0] <= 128
-                            && grid[0].checked_mul(tg[0]) == Some(n as u64 * 64 * 512),
+                        grid == [n as u64 * 256, 1, 1] && tg == [128, 1, 1],
                         "wrong normalize geometry"
                     );
                 } else {
@@ -551,6 +553,12 @@ mod tests {
         bad[8].encoder_ordinal = 0;
         bad[16].encoder_ordinal = 0; // precedes layer 1's encoder
         bad[8].encoder_ordinal = 2;
+        assert!(check_ring_call(&bad, 513, plan).is_err());
+        let mut bad = valid.clone();
+        bad[3].grid_width *= 2;
+        bad[3].grid_tgs *= 2;
+        bad[3].threads_width /= 2;
+        bad[3].tg_threads /= 2;
         assert!(check_ring_call(&bad, 513, plan).is_err());
         assert!(ring_census(&[], plan).is_err());
         assert!(ring_census(&[vec![], vec![]], plan).is_err());

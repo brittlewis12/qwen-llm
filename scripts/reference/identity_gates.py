@@ -95,7 +95,10 @@ def blank_non_code(text: str, *, keep_strings: bool) -> str:
                 and "\n" not in interior
                 and (
                     (len(interior) == 1 and interior != "\\")
-                    or re.fullmatch(r"\\(?:['\"\\nrt0]|x[0-9a-fA-F]{2}|u\{[0-9a-fA-F_]+\})", interior)
+                    or re.fullmatch(
+                        r"\\(?:['\"\\nrt0]|x[0-9a-fA-F]{2}|u\{[0-9a-fA-F_]+\})",
+                        interior,
+                    )
                 )
             )
             if not is_char:
@@ -125,12 +128,14 @@ def blank_non_code(text: str, *, keep_strings: bool) -> str:
 
 def strip_inline_test_modules(text: str) -> str:
     code = blank_non_code(text, keep_strings=False)
-    pattern = re.compile(r"#\s*\[\s*cfg\s*\(\s*test\s*\)\s*\]\s*mod\s+[A-Za-z_][A-Za-z_0-9]*\s*\{")
+    pattern = re.compile(
+        r"#\s*\[\s*cfg\s*\(\s*test\s*\)\s*\]\s*mod\s+[A-Za-z_][A-Za-z_0-9]*\s*\{"
+    )
     ranges: list[tuple[int, int]] = []
     for match in pattern.finditer(code):
         brace = code.find("{", match.start(), match.end())
         line_start = code.rfind("\n", 0, match.start()) + 1
-        indent = re.match(r"[ \t]*", code[line_start:match.start()]).group(0)
+        indent = re.match(r"[ \t]*", code[line_start : match.start()]).group(0)
         # Rustfmt keeps a module's final brace at its declaration indentation.
         # This handles brace characters in Rust macro strings without needing
         # a full lexer; retain counting for compact synthetic modules.
@@ -175,7 +180,11 @@ def rust_files() -> list[pathlib.Path]:
         for parent in all_rs:
             source = blank_non_code(parent.read_text(), keep_strings=True)
             for match in declaration.finditer(source):
-                child = (parent.parent / match.group(1)) if match.group(1) else (parent.parent / f"{match.group(2)}.rs")
+                child = (
+                    (parent.parent / match.group(1))
+                    if match.group(1)
+                    else (parent.parent / f"{match.group(2)}.rs")
+                )
                 if child.is_file():
                     test_only_external.add(child.resolve())
                 elif not match.group(1):
@@ -185,7 +194,10 @@ def rust_files() -> list[pathlib.Path]:
         for path in all_rs:
             if path.name in {"tests.rs"} or path.name.endswith("_tests.rs"):
                 continue
-            if any(part == "tests" or part.endswith("_tests") for part in path.relative_to(base).parts):
+            if any(
+                part == "tests" or part.endswith("_tests")
+                for part in path.relative_to(base).parts
+            ):
                 continue
             if path.resolve() in test_only_external:
                 continue
@@ -197,10 +209,19 @@ def file_level_review_module(path: str) -> bool:
     """Research/evidence/lens files whose whole content may be reviewed once."""
     candidate = pathlib.PurePosixPath(path)
     name = candidate.name
-    if name in {"dflash_k0s.rs", "dsv4_mhc_delete.rs", "gguf_arena_floor.rs",
-                "grammar_lm_head_row_floor.rs", "grammar_oracle.rs",
-                "grammar_row_runtime.rs", "integrated_grammar_row.rs",
-                "prefix_cache_vt_ab.rs", "qwen4exp.rs", "qwen4exp_moe_observe.rs", "deepseek_v4_census.rs"}:
+    if name in {
+        "dflash_k0s.rs",
+        "dsv4_mhc_delete.rs",
+        "gguf_arena_floor.rs",
+        "grammar_lm_head_row_floor.rs",
+        "grammar_oracle.rs",
+        "grammar_row_runtime.rs",
+        "integrated_grammar_row.rs",
+        "prefix_cache_vt_ab.rs",
+        "qwen4exp.rs",
+        "qwen4exp_moe_observe.rs",
+        "deepseek_v4_census.rs",
+    }:
         return True
     if name.endswith("_probe.rs") or name.endswith("_packet.rs"):
         return True
@@ -217,6 +238,7 @@ def scan_text(path: str, text: str) -> list[Finding]:
     code_only = blank_non_code(text, keep_strings=False)
     findings: list[Finding] = []
     line_starts = [0] + [match.end() for match in re.finditer("\n", text)]
+
     def line_at(offset: int) -> int:
         return bisect.bisect_right(line_starts, offset)
 
@@ -233,7 +255,9 @@ def scan_text(path: str, text: str) -> list[Finding]:
         line = line_at(match.start())
         # Find long hexadecimal literals; 16-character IDs are flagged only
         # when the containing source line compares them.
-        for hex_match in re.finditer(r"(?i)(?<![0-9a-f])[0-9a-f]{16,}(?![0-9a-f])", content):
+        for hex_match in re.finditer(
+            r"(?i)(?<![0-9a-f])[0-9a-f]{16,}(?![0-9a-f])", content
+        ):
             token = hex_match.group(0)
             if len(token) < 32:
                 prefix = visible[max(0, match.start() - 48) : match.start()].rstrip()
@@ -256,7 +280,9 @@ def scan_text(path: str, text: str) -> list[Finding]:
             findings.append(Finding(path, line, token, "device", f'"{content}"'))
 
     lines = code_only.splitlines()
-    for match in re.finditer(r"(?<![\w.])(?:0x[0-9a-fA-F]+|[0-9][0-9_]*)(?![\w.])", code_only):
+    for match in re.finditer(
+        r"(?<![\w.])(?:0x[0-9a-fA-F]+|[0-9][0-9_]*)(?![\w.])", code_only
+    ):
         raw = match.group(0)
         if raw.lower().startswith("0x"):
             continue
@@ -271,11 +297,17 @@ def scan_text(path: str, text: str) -> list[Finding]:
         previous_const = code_only.rfind("const ", 0, match.start())
         if previous_const >= 0:
             declaration = code_only[previous_const : match.start()]
-            if re.match(r"const\s+(?:[A-Za-z_][A-Za-z_0-9]*_)?MULTIPLIERS?\b", declaration):
+            if re.match(
+                r"const\s+(?:[A-Za-z_][A-Za-z_0-9]*_)?MULTIPLIERS?\b", declaration
+            ):
                 continue
         # Skip a literal used by a MAX-style constant and literals in shifts.
         before = code_only[max(0, match.start() - 180) : match.start()]
-        if re.search(r"\b(?:const|static)\s+[A-Za-z_][A-Za-z_0-9]*MAX[A-Za-z_0-9]*\s*:[^;=]*=", before, re.I):
+        if re.search(
+            r"\b(?:const|static)\s+[A-Za-z_][A-Za-z_0-9]*MAX[A-Za-z_0-9]*\s*:[^;=]*=",
+            before,
+            re.I,
+        ):
             continue
         after = code_only[match.end() : match.end() + 30]
         if re.match(r"\s*<<", after) or re.search(r"<<\s*$", before[-30:]):
@@ -316,19 +348,27 @@ def parse_allowlist(text: str) -> dict[tuple[str, str], tuple[str, str]]:
             continue
         fields = stripped.split("\t", 3)
         if len(fields) != 4:
-            raise ValueError(f"allowlist line {number}: expected path<TAB>token<TAB>category<TAB>reason")
+            raise ValueError(
+                f"allowlist line {number}: expected path<TAB>token<TAB>category<TAB>reason"
+            )
         path, token, category, reason = fields
         if category not in CATEGORIES:
             raise ValueError(f"allowlist line {number}: invalid category {category!r}")
         if not reason.strip():
             raise ValueError(f"allowlist line {number}: reason is required")
         if category == "temporary" and not reason.lower().startswith("trigger:"):
-            raise ValueError(f"allowlist line {number}: temporary entry must name a removal trigger")
+            raise ValueError(
+                f"allowlist line {number}: temporary entry must name a removal trigger"
+            )
         if token == "*" and category not in {"lens_binding", "frozen_experiment"}:
-            raise ValueError(f"allowlist line {number}: file-level entries require lens_binding or frozen_experiment")
+            raise ValueError(
+                f"allowlist line {number}: file-level entries require lens_binding or frozen_experiment"
+            )
         key = (path, token)
         if key in entries:
-            raise ValueError(f"allowlist line {number}: duplicate entry for {path} {token}")
+            raise ValueError(
+                f"allowlist line {number}: duplicate entry for {path} {token}"
+            )
         entries[key] = (category, reason)
     return entries
 
@@ -363,7 +403,7 @@ def check(findings: list[Finding], allow_text: str) -> tuple[list[str], list[str
 
 
 def self_test() -> None:
-    synthetic = '''
+    synthetic = """
 const DIGEST: &str = "0123456789abcdef0123456789abcdef";
 if tokenizer == "51ebd8140ea2abd9" { }
 const HUGE: u64 = 1_000_000_000;
@@ -371,7 +411,7 @@ const MULTIPLIERS: [u64; 1] = [9_223_372_036_854_775_807];
 let product = "Apple M4 Max";
 verified_checkpoint_content_identity(source);
 #[cfg(test)] mod tests { const TEST: &str = "ffffffffffffffffffffffffffffffff"; }
-'''
+"""
     findings = scan_text("crates/example/src/lib.rs", synthetic)
     kinds = {f.kind for f in findings}
     assert kinds == {"digest", "byte_total", "device", "identity_call"}, findings
@@ -383,22 +423,41 @@ verified_checkpoint_content_identity(source);
     assert not errors and not stale
     errors, _ = check([f for f in findings if f != sample], entry)
     assert errors
-    _, stale = check([sample], entry + "crates/example/src/old.rs\tdeadbeef\tprovenance\tstale test\n")
+    _, stale = check(
+        [sample],
+        entry + "crates/example/src/old.rs\tdeadbeef\tprovenance\tstale test\n",
+    )
     assert stale
     wildcard_hit = Finding(
         "crates/qwen-cli/src/full_lens.rs", 1, "abc", "digest", '"abc"'
     )
-    wildcard_entry = (
-        "crates/qwen-cli/src/full_lens.rs\t*\tlens_binding\twhole lens module reviewed\n"
-    )
+    wildcard_entry = "crates/qwen-cli/src/full_lens.rs\t*\tlens_binding\twhole lens module reviewed\n"
     assert check([wildcard_hit], wildcard_entry) == ([], [])
     assert check(
         [Finding("crates/qwen-cli/src/main.rs", 1, "abc", "digest", '"abc"')],
         "crates/qwen-cli/src/main.rs\t*\tfrozen_experiment\tbad wildcard\n",
     )[0]
-    test_only_fixture = ROOT / "crates/qwen-llm/src/deepseek_v4_metal/prefill/k160_n128_floor.rs"
+    test_only_fixture = (
+        ROOT / "crates/qwen-llm/src/deepseek_v4_metal/prefill/k160_n128_floor.rs"
+    )
     if test_only_fixture.exists():
         assert test_only_fixture not in rust_files()
+    registry = ALLOWLIST.read_text()
+    for path, token in [
+        (
+            "crates/qwen-llm/src/qwen4exp_runtime/strict_inject_probe.rs",
+            "874537119c68f6c566c4288ba17c1099694416edb001c4003249570894438e97",
+        ),
+        ("crates/qwen-llm/src/metal/moe/hc4_strict.rs", "1_013_904_223"),
+    ]:
+        entries = parse_allowlist(registry)
+        assert (path, token) in entries and (path, "*") not in entries
+        findings = scan_text(path, (ROOT / path).read_text())
+        assert any(f.token == token for f in findings)
+        assert not check(findings, registry)[0]
+        assert check(
+            findings + [Finding(path, 1, "unreviewed", "digest", "test")], registry
+        )[0]
     print("identity_gates self-tests: passed")
 
 
@@ -421,7 +480,9 @@ def main(argv: list[str]) -> int:
         for error in errors + stale:
             print(f"identity_gates: {error}", file=sys.stderr)
         return 1
-    print(f"identity_gates: {len(findings)} reviewed findings across {len({f.path for f in findings})} files")
+    print(
+        f"identity_gates: {len(findings)} reviewed findings across {len({f.path for f in findings})} files"
+    )
     return 0
 
 

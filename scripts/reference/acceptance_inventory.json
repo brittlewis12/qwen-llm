@@ -1,0 +1,1724 @@
+[
+  {
+    "target": "lib",
+    "name": "deepseek_v41::engram::tests::checked_boundaries_and_discarded_staging",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Host-only metadata, arithmetic, source contract or synthetic disk fixture; no Metal context."
+  },
+  {
+    "target": "lib",
+    "name": "deepseek_v41::engram::tests::dead_blocks_current_and_every_older_phase",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Host-only metadata, arithmetic, source contract or synthetic disk fixture; no Metal context."
+  },
+  {
+    "target": "lib",
+    "name": "deepseek_v41::engram::tests::every_source_row_chunking_and_restoration",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Host-only metadata, arithmetic, source contract or synthetic disk fixture; no Metal context."
+  },
+  {
+    "target": "lib",
+    "name": "deepseek_v41::engram::tests::metadata_layers_buckets_and_multipliers_change_addresses",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Host-only metadata, arithmetic, source contract or synthetic disk fixture; no Metal context."
+  },
+  {
+    "target": "lib",
+    "name": "deepseek_v41::engram::tests::pinned_parameters_and_product_bounds",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Host-only metadata, arithmetic, source contract or synthetic disk fixture; no Metal context."
+  },
+  {
+    "target": "lib",
+    "name": "deepseek_v41::forward::attention_gpu::tests::admission_and_order_bounds",
+    "class": "gpu",
+    "ignored": false,
+    "reason": "Metal context, allocation or dispatch witness; parent GPU lane only."
+  },
+  {
+    "target": "lib",
+    "name": "deepseek_v41::forward::attention_gpu::tests::candidate_mask_rejects_incompatible_compressed_coordinates",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Host-only metadata, arithmetic, source contract or synthetic disk fixture; no Metal context."
+  },
+  {
+    "target": "lib",
+    "name": "deepseek_v41::forward::attention_gpu::tests::exact_dispatch_copy_pack_canaries",
+    "class": "gpu",
+    "ignored": false,
+    "reason": "Metal context, allocation or dispatch witness; parent GPU lane only."
+  },
+  {
+    "target": "lib",
+    "name": "deepseek_v41::forward::attention_gpu::tests::exact_dispatch_geometry_census",
+    "class": "gpu",
+    "ignored": false,
+    "reason": "Metal context, allocation or dispatch witness; parent GPU lane only."
+  },
+  {
+    "target": "lib",
+    "name": "deepseek_v41::forward::attention_gpu::tests::exact_dispatch_rope_pool_match_scalar_with_canaries",
+    "class": "gpu",
+    "ignored": false,
+    "reason": "Metal context, allocation or dispatch witness; parent GPU lane only."
+  },
+  {
+    "target": "lib",
+    "name": "deepseek_v41::forward::attention_gpu::tests::exact_dispatch_sticky_status_and_sort_init_canaries",
+    "class": "gpu",
+    "ignored": false,
+    "reason": "Metal context, allocation or dispatch witness; parent GPU lane only."
+  },
+  {
+    "target": "lib",
+    "name": "deepseek_v41::forward::attention_gpu::tests::f32_pv_batch::f32_pv_batch_correctness",
+    "class": "gpu",
+    "ignored": false,
+    "reason": "Metal context, allocation or dispatch witness; parent GPU lane only."
+  },
+  {
+    "target": "lib",
+    "name": "deepseek_v41::forward::attention_gpu::tests::f32_pv_batch::f32_pv_batch_invalid_visibility_and_finite_guards",
+    "class": "gpu",
+    "ignored": false,
+    "reason": "Metal context, allocation or dispatch witness; parent GPU lane only."
+  },
+  {
+    "target": "lib",
+    "name": "deepseek_v41::forward::attention_gpu::tests::f32_pv_batch::f32_pv_batch_performance",
+    "class": "timing",
+    "ignored": true,
+    "reason": "Opt-in resident GPU timing incompatible with correctness validation; never CPU acceptance."
+  },
+  {
+    "target": "lib",
+    "name": "deepseek_v41::forward::attention_gpu::tests::f32_pv_batch::mma_sink_tile_dispatch_timing",
+    "class": "gpu",
+    "ignored": false,
+    "reason": "Metal context, allocation or dispatch witness; parent GPU lane only."
+  },
+  {
+    "target": "lib",
+    "name": "deepseek_v41::forward::attention_gpu::tests::f32_pv_batch::mma_sink_tile_invalid_visibility_and_finite_guards",
+    "class": "gpu",
+    "ignored": false,
+    "reason": "Metal context, allocation or dispatch witness; parent GPU lane only."
+  },
+  {
+    "target": "lib",
+    "name": "deepseek_v41::forward::attention_gpu::tests::f32_pv_batch::mma_sink_tile_matches_scalar_sink",
+    "class": "gpu",
+    "ignored": false,
+    "reason": "Metal context, allocation or dispatch witness; parent GPU lane only."
+  },
+  {
+    "target": "lib",
+    "name": "deepseek_v41::forward::attention_gpu::tests::f32_pv_batch::tensor32_sink_tile_matches_tensor_sink",
+    "class": "gpu",
+    "ignored": false,
+    "reason": "Metal context, allocation or dispatch witness; parent GPU lane only."
+  },
+  {
+    "target": "lib",
+    "name": "deepseek_v41::forward::attention_gpu::tests::f32_pv_batch::tensor_sink_tile_matches_mma_sink",
+    "class": "gpu",
+    "ignored": false,
+    "reason": "Metal context, allocation or dispatch witness; parent GPU lane only."
+  },
+  {
+    "target": "lib",
+    "name": "deepseek_v41::forward::attention_gpu::tests::forty_layer_seven_token_chain_one_command",
+    "class": "gpu",
+    "ignored": false,
+    "reason": "Metal context, allocation or dispatch witness; parent GPU lane only."
+  },
+  {
+    "target": "lib",
+    "name": "deepseek_v41::forward::attention_gpu::tests::native_512_dim_64_heads_sink_rope_and_invalid_ids",
+    "class": "gpu",
+    "ignored": false,
+    "reason": "Metal context, allocation or dispatch witness; parent GPU lane only."
+  },
+  {
+    "target": "lib",
+    "name": "deepseek_v41::forward::attention_gpu::tests::native_index_32_heads_128_dim_signed_weights",
+    "class": "gpu",
+    "ignored": false,
+    "reason": "Metal context, allocation or dispatch witness; parent GPU lane only."
+  },
+  {
+    "target": "lib",
+    "name": "deepseek_v41::forward::attention_gpu::tests::pinned_seven_positions_forty_layers_outputs_caches_and_ids",
+    "class": "gpu",
+    "ignored": false,
+    "reason": "Metal context, allocation or dispatch witness; parent GPU lane only."
+  },
+  {
+    "target": "lib",
+    "name": "deepseek_v41::forward::attention_gpu::tests::projection_checks_quantized_row_bounds_without_f32_upcasting",
+    "class": "gpu",
+    "ignored": false,
+    "reason": "Metal context, allocation or dispatch witness; parent GPU lane only."
+  },
+  {
+    "target": "lib",
+    "name": "deepseek_v41::forward::attention_gpu::tests::query_batch::query_batch_batched_selection_matches_incumbent_across_tiles",
+    "class": "gpu",
+    "ignored": false,
+    "reason": "Metal context, allocation or dispatch witness; parent GPU lane only."
+  },
+  {
+    "target": "lib",
+    "name": "deepseek_v41::forward::attention_gpu::tests::query_batch::query_batch_error_restores_all_six_temporary_binding_identities",
+    "class": "gpu",
+    "ignored": false,
+    "reason": "Metal context, allocation or dispatch witness; parent GPU lane only."
+  },
+  {
+    "target": "lib",
+    "name": "deepseek_v41::forward::attention_gpu::tests::query_batch::query_batch_f32_mma_ring_pair_followers_and_decode_continuation",
+    "class": "gpu",
+    "ignored": false,
+    "reason": "Metal context, allocation or dispatch witness; parent GPU lane only."
+  },
+  {
+    "target": "lib",
+    "name": "deepseek_v41::forward::attention_gpu::tests::query_batch::query_batch_group_specific_pv_padding_canaries_and_sticky_errors",
+    "class": "gpu",
+    "ignored": false,
+    "reason": "Metal context, allocation or dispatch witness; parent GPU lane only."
+  },
+  {
+    "target": "lib",
+    "name": "deepseek_v41::forward::attention_gpu::tests::query_batch::query_batch_hc_projected_rms_same_reduction_and_one_launch",
+    "class": "gpu",
+    "ignored": false,
+    "reason": "Metal context, allocation or dispatch witness; parent GPU lane only."
+  },
+  {
+    "target": "lib",
+    "name": "deepseek_v41::forward::attention_gpu::tests::query_batch::query_batch_memory_pricing_and_rope_canaries",
+    "class": "gpu",
+    "ignored": false,
+    "reason": "Metal context, allocation or dispatch witness; parent GPU lane only."
+  },
+  {
+    "target": "lib",
+    "name": "deepseek_v41::forward::attention_gpu::tests::query_batch::query_batch_mma_geometry_tiles_without_pv_branch_split",
+    "class": "gpu",
+    "ignored": false,
+    "reason": "Metal context, allocation or dispatch witness; parent GPU lane only."
+  },
+  {
+    "target": "lib",
+    "name": "deepseek_v41::forward::attention_gpu::tests::query_batch::query_batch_normalized_inputs_awkward_rows_wrap_pair_phase_and_followers",
+    "class": "gpu",
+    "ignored": false,
+    "reason": "Metal context, allocation or dispatch witness; parent GPU lane only."
+  },
+  {
+    "target": "lib",
+    "name": "deepseek_v41::forward::attention_gpu::tests::query_batch::query_batch_per_query_publication_and_pruning_at_16385",
+    "class": "gpu",
+    "ignored": false,
+    "reason": "Metal context, allocation or dispatch witness; parent GPU lane only."
+  },
+  {
+    "target": "lib",
+    "name": "deepseek_v41::forward::attention_gpu::tests::query_batch::query_batch_pruned_follower_excludes_otherwise_winning_block",
+    "class": "gpu",
+    "ignored": false,
+    "reason": "Metal context, allocation or dispatch witness; parent GPU lane only."
+  },
+  {
+    "target": "lib",
+    "name": "deepseek_v41::forward::attention_gpu::tests::query_batch::query_batch_rejects_populated_but_not_yet_visible_ids",
+    "class": "gpu",
+    "ignored": false,
+    "reason": "Metal context, allocation or dispatch witness; parent GPU lane only."
+  },
+  {
+    "target": "lib",
+    "name": "deepseek_v41::forward::attention_gpu::tests::query_batch::query_batch_threshold_split_source_census_expectation",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Host-only metadata, arithmetic, source contract or synthetic disk fixture; no Metal context."
+  },
+  {
+    "target": "lib",
+    "name": "deepseek_v41::forward::attention_gpu::tests::scheduled_bf16_q8_attention_and_capture_match_f32",
+    "class": "gpu",
+    "ignored": false,
+    "reason": "Metal context, allocation or dispatch witness; parent GPU lane only."
+  },
+  {
+    "target": "lib",
+    "name": "deepseek_v41::forward::attention_gpu::tests::split_sink_real_geometry_same_run_witness",
+    "class": "gpu",
+    "ignored": false,
+    "reason": "Metal context, allocation or dispatch witness; parent GPU lane only."
+  },
+  {
+    "target": "lib",
+    "name": "deepseek_v41::forward::attention_gpu::tests::stable_gpu_selection_long_prefix_and_candidate_boundary",
+    "class": "gpu",
+    "ignored": false,
+    "reason": "Metal context, allocation or dispatch witness; parent GPU lane only."
+  },
+  {
+    "target": "lib",
+    "name": "deepseek_v41::forward::capture::tests::batched_capture_replays_cpu_without_changing_logits",
+    "class": "gpu",
+    "ignored": false,
+    "reason": "Metal context, allocation or dispatch witness; parent GPU lane only."
+  },
+  {
+    "target": "lib",
+    "name": "deepseek_v41::forward::capture::tests::capture_full_gpu_step_replays_cpu_phases_ids_and_pruning",
+    "class": "gpu",
+    "ignored": false,
+    "reason": "Metal context, allocation or dispatch witness; parent GPU lane only."
+  },
+  {
+    "target": "lib",
+    "name": "deepseek_v41::forward::capture::tests::capture_requires_gpu_and_callback_errors_poison_state",
+    "class": "gpu",
+    "ignored": false,
+    "reason": "Metal context, allocation or dispatch witness; parent GPU lane only."
+  },
+  {
+    "target": "lib",
+    "name": "deepseek_v41::forward::engram_gpu::tests::random_both_layouts_tiny_and_real_hidden_batched",
+    "class": "gpu",
+    "ignored": false,
+    "reason": "Metal context, allocation or dispatch witness; parent GPU lane only."
+  },
+  {
+    "target": "lib",
+    "name": "deepseek_v41::forward::engram_gpu::tests::rejects_invalid_constants_and_activation_shapes",
+    "class": "gpu",
+    "ignored": false,
+    "reason": "Metal context, allocation or dispatch witness; parent GPU lane only."
+  },
+  {
+    "target": "lib",
+    "name": "deepseek_v41::forward::engram_gpu::tests::zeros_signed_zero_floor_and_both_rms_factors",
+    "class": "gpu",
+    "ignored": false,
+    "reason": "Metal context, allocation or dispatch witness; parent GPU lane only."
+  },
+  {
+    "target": "lib",
+    "name": "deepseek_v41::forward::error::tests::refusal_keeps_typed_reason_and_signals",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Host-only metadata, arithmetic, source contract or synthetic disk fixture; no Metal context."
+  },
+  {
+    "target": "lib",
+    "name": "deepseek_v41::forward::ffn_gpu::tests::asymmetric_clamps_preserve_negative_gate_tail",
+    "class": "gpu",
+    "ignored": false,
+    "reason": "Metal context, allocation or dispatch witness; parent GPU lane only."
+  },
+  {
+    "target": "lib",
+    "name": "deepseek_v41::forward::ffn_gpu::tests::grouped_mxfp4_rows_match_scalar_weight_before_down",
+    "class": "gpu",
+    "ignored": false,
+    "reason": "Metal context, allocation or dispatch witness; parent GPU lane only."
+  },
+  {
+    "target": "lib",
+    "name": "deepseek_v41::forward::ffn_gpu::tests::native_f32::new_dtype_triples_384_top6_frozen_routes_and_partition",
+    "class": "gpu",
+    "ignored": false,
+    "reason": "Metal context, allocation or dispatch witness; parent GPU lane only."
+  },
+  {
+    "target": "lib",
+    "name": "deepseek_v41::forward::ffn_gpu::tests::native_f32::new_dtype_triples_v41_widths_frozen_composition_and_dispatch",
+    "class": "gpu",
+    "ignored": false,
+    "reason": "Metal context, allocation or dispatch witness; parent GPU lane only."
+  },
+  {
+    "target": "lib",
+    "name": "deepseek_v41::forward::ffn_gpu::tests::native_rows::native_rows_v41_composition_accepts_actual_geometry_and_u32_boundaries",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Host-only metadata, arithmetic, source contract or synthetic disk fixture; no Metal context."
+  },
+  {
+    "target": "lib",
+    "name": "deepseek_v41::forward::ffn_gpu::tests::native_rows::native_rows_v41_composition_rejects_oversized_metadata_without_gpu",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Host-only metadata, arithmetic, source contract or synthetic disk fixture; no Metal context."
+  },
+  {
+    "target": "lib",
+    "name": "deepseek_v41::forward::ffn_gpu::tests::native_rows::native_rows_v41_eligibility_keeps_grouped_and_deferred_paths",
+    "class": "gpu",
+    "ignored": false,
+    "reason": "Metal context, allocation or dispatch witness; parent GPU lane only."
+  },
+  {
+    "target": "lib",
+    "name": "deepseek_v41::forward::ffn_gpu::tests::native_rows::native_rows_v41_iq2_actual_cohorts_and_mixed_gate_up_are_bitwise",
+    "class": "gpu",
+    "ignored": false,
+    "reason": "Metal context, allocation or dispatch witness; parent GPU lane only."
+  },
+  {
+    "target": "lib",
+    "name": "deepseek_v41::forward::ffn_gpu::tests::native_rows::native_rows_v41_live_route_stages_dispatch_and_partition_are_bitwise",
+    "class": "gpu",
+    "ignored": false,
+    "reason": "Metal context, allocation or dispatch witness; parent GPU lane only."
+  },
+  {
+    "target": "lib",
+    "name": "deepseek_v41::forward::ffn_gpu::tests::native_rows::native_rows_v41_mixed_types_keep_live_fallback_bitwise",
+    "class": "gpu",
+    "ignored": false,
+    "reason": "Metal context, allocation or dispatch witness; parent GPU lane only."
+  },
+  {
+    "target": "lib",
+    "name": "deepseek_v41::forward::ffn_gpu::tests::native_rows_selector_is_scoped_nested_and_unwind_safe",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Host-only metadata, arithmetic, source contract or synthetic disk fixture; no Metal context."
+  },
+  {
+    "target": "lib",
+    "name": "deepseek_v41::forward::ffn_gpu::tests::ordered_slots_then_shared_sum",
+    "class": "gpu",
+    "ignored": false,
+    "reason": "Metal context, allocation or dispatch witness; parent GPU lane only."
+  },
+  {
+    "target": "lib",
+    "name": "deepseek_v41::forward::ffn_gpu::tests::parallel_router_is_bitwise_equal_to_the_serial_reference",
+    "class": "gpu",
+    "ignored": false,
+    "reason": "Metal context, allocation or dispatch witness; parent GPU lane only."
+  },
+  {
+    "target": "lib",
+    "name": "deepseek_v41::forward::ffn_gpu::tests::routing_ties_bias_absorption_temperature_extremes_and_top1",
+    "class": "gpu",
+    "ignored": false,
+    "reason": "Metal context, allocation or dispatch witness; parent GPU lane only."
+  },
+  {
+    "target": "lib",
+    "name": "deepseek_v41::forward::ffn_gpu::tests::stages_lagged_pre_weight_before_down_and_nonalias",
+    "class": "gpu",
+    "ignored": false,
+    "reason": "Metal context, allocation or dispatch witness; parent GPU lane only."
+  },
+  {
+    "target": "lib",
+    "name": "deepseek_v41::forward::ffn_gpu::tests::strategy::grouped_override_is_scoped_nested_thread_local_and_unwind_safe",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Host-only metadata, arithmetic, source contract or synthetic disk fixture; no Metal context."
+  },
+  {
+    "target": "lib",
+    "name": "deepseek_v41::forward::ffn_gpu::tests::strategy::iq1_selected_strategy_native_singleton_half_grouped_prefill_release_cohorts",
+    "class": "gpu",
+    "ignored": false,
+    "reason": "Metal context, allocation or dispatch witness; parent GPU lane only."
+  },
+  {
+    "target": "lib",
+    "name": "deepseek_v41::forward::ffn_gpu::tests::strategy::selected_strategy_threshold_legacy_fallback_and_entrypoints",
+    "class": "gpu",
+    "ignored": false,
+    "reason": "Metal context, allocation or dispatch witness; parent GPU lane only."
+  },
+  {
+    "target": "lib",
+    "name": "deepseek_v41::forward::gpu_step::tests::cancellation_callback_errors_and_encode_failure_poison",
+    "class": "gpu",
+    "ignored": false,
+    "reason": "Metal context, allocation or dispatch witness; parent GPU lane only."
+  },
+  {
+    "target": "lib",
+    "name": "deepseek_v41::forward::gpu_step::tests::capacity_memory_and_modes_are_explicit",
+    "class": "gpu",
+    "ignored": false,
+    "reason": "Metal context, allocation or dispatch witness; parent GPU lane only."
+  },
+  {
+    "target": "lib",
+    "name": "deepseek_v41::forward::gpu_step::tests::earlier_route_failure_is_not_overwritten_by_later_layers",
+    "class": "gpu",
+    "ignored": false,
+    "reason": "Metal context, allocation or dispatch witness; parent GPU lane only."
+  },
+  {
+    "target": "lib",
+    "name": "deepseek_v41::forward::gpu_step::tests::forty_layers_python_legacy_trace_and_one_command",
+    "class": "gpu",
+    "ignored": false,
+    "reason": "Metal context, allocation or dispatch witness; parent GPU lane only."
+  },
+  {
+    "target": "lib",
+    "name": "deepseek_v41::forward::gpu_step::tests::metadata_schedule_drives_full_gpu_graph_and_engram_at_zero",
+    "class": "gpu",
+    "ignored": false,
+    "reason": "Metal context, allocation or dispatch witness; parent GPU lane only."
+  },
+  {
+    "target": "lib",
+    "name": "deepseek_v41::forward::gpu_step::tests::sticky_attention_status_is_checked_after_completion",
+    "class": "gpu",
+    "ignored": false,
+    "reason": "Metal context, allocation or dispatch witness; parent GPU lane only."
+  },
+  {
+    "target": "lib",
+    "name": "deepseek_v41::forward::memory::tests::gpu_estimate_tracks_actual_layers_owners_ratios_and_engrams",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Host-only metadata, arithmetic, source contract or synthetic disk fixture; no Metal context."
+  },
+  {
+    "target": "lib",
+    "name": "deepseek_v41::forward::memory::tests::grouped_buffers_bound_when_they_dominate_toy_scratch",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Host-only metadata, arithmetic, source contract or synthetic disk fixture; no Metal context."
+  },
+  {
+    "target": "lib",
+    "name": "deepseek_v41::forward::memory::tests::old_model_request_estimates_are_monotone_and_split_without_double_counting",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Host-only metadata, arithmetic, source contract or synthetic disk fixture; no Metal context."
+  },
+  {
+    "target": "lib",
+    "name": "deepseek_v41::forward::memory::tests::request_estimate_checks_bounds_and_all_arithmetic",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Host-only metadata, arithmetic, source contract or synthetic disk fixture; no Metal context."
+  },
+  {
+    "target": "lib",
+    "name": "deepseek_v41::forward::prefill::tests::batch_failure_poisoning_and_all_row_route_statuses",
+    "class": "gpu",
+    "ignored": false,
+    "reason": "Metal context, allocation or dispatch witness; parent GPU lane only."
+  },
+  {
+    "target": "lib",
+    "name": "deepseek_v41::forward::prefill::tests::caller_split_headless_chunks_match_final_prefill",
+    "class": "gpu",
+    "ignored": false,
+    "reason": "Metal context, allocation or dispatch witness; parent GPU lane only."
+  },
+  {
+    "target": "lib",
+    "name": "deepseek_v41::forward::prefill::tests::chunk_dispatch_and_submission_census",
+    "class": "gpu",
+    "ignored": false,
+    "reason": "Metal context, allocation or dispatch witness; parent GPU lane only."
+  },
+  {
+    "target": "lib",
+    "name": "deepseek_v41::forward::prefill::tests::early_layer_route_failure_survives_later_healthy_layer",
+    "class": "gpu",
+    "ignored": false,
+    "reason": "Metal context, allocation or dispatch witness; parent GPU lane only."
+  },
+  {
+    "target": "lib",
+    "name": "deepseek_v41::forward::prefill::tests::half_budget::half_staging_allocation_ledger_counts_unused_override_buffers",
+    "class": "gpu",
+    "ignored": true,
+    "reason": "Ignored self-leased tiny Metal witness; parent runs separately without outer lease."
+  },
+  {
+    "target": "lib",
+    "name": "deepseek_v41::forward::prefill::tests::half_budget::half_staging_default_geometry_is_202_mib",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Host-only metadata, arithmetic, source contract or synthetic disk fixture; no Metal context."
+  },
+  {
+    "target": "lib",
+    "name": "deepseek_v41::forward::prefill::tests::half_budget::half_staging_geometry_checks_products_and_bytes",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Host-only metadata, arithmetic, source contract or synthetic disk fixture; no Metal context."
+  },
+  {
+    "target": "lib",
+    "name": "deepseek_v41::forward::prefill::tests::headless_prefill_skips_head_including_single_row_and_tail",
+    "class": "gpu",
+    "ignored": false,
+    "reason": "Metal context, allocation or dispatch witness; parent GPU lane only."
+  },
+  {
+    "target": "lib",
+    "name": "deepseek_v41::forward::prefill::tests::hybrid_reference_matches_layer_major",
+    "class": "gpu",
+    "ignored": false,
+    "reason": "Metal context, allocation or dispatch witness; parent GPU lane only."
+  },
+  {
+    "target": "lib",
+    "name": "deepseek_v41::forward::prefill::tests::invalid_prefill_request_preserves_state",
+    "class": "gpu",
+    "ignored": false,
+    "reason": "Metal context, allocation or dispatch witness; parent GPU lane only."
+  },
+  {
+    "target": "lib",
+    "name": "deepseek_v41::forward::prefill::tests::layer_major_chunks_match_serial_and_snapshot_continuation",
+    "class": "gpu",
+    "ignored": false,
+    "reason": "Metal context, allocation or dispatch witness; parent GPU lane only."
+  },
+  {
+    "target": "lib",
+    "name": "deepseek_v41::forward::prefill::tests::lifetime::full_chunks_and_scalar_steps_release_inside_one_outer_pool",
+    "class": "gpu",
+    "ignored": true,
+    "reason": "Ignored self-leased tiny Metal witness; parent runs separately without outer lease."
+  },
+  {
+    "target": "lib",
+    "name": "deepseek_v41::forward::prefill::tests::lifetime::full_lifetime_fixture_explicit_buffers_below_32_mib",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Host-only metadata, arithmetic, source contract or synthetic disk fixture; no Metal context."
+  },
+  {
+    "target": "lib",
+    "name": "deepseek_v41::forward::prefill::tests::linear_rows_mma_q8_and_bf16_with_offsets",
+    "class": "gpu",
+    "ignored": false,
+    "reason": "Metal context, allocation or dispatch witness; parent GPU lane only."
+  },
+  {
+    "target": "lib",
+    "name": "deepseek_v41::forward::prefill::tests::linear_rows_native_f32_q8_and_bf16_with_offsets",
+    "class": "gpu",
+    "ignored": false,
+    "reason": "Metal context, allocation or dispatch witness; parent GPU lane only."
+  },
+  {
+    "target": "lib",
+    "name": "deepseek_v41::forward::prefill::tests::nonuniform_dynamic_schedule_preserves_all_causal_regions",
+    "class": "gpu",
+    "ignored": false,
+    "reason": "Metal context, allocation or dispatch witness; parent GPU lane only."
+  },
+  {
+    "target": "lib",
+    "name": "deepseek_v41::forward::prefill::tests::public_single_row_prefill_uses_one_scalar_command",
+    "class": "gpu",
+    "ignored": false,
+    "reason": "Metal context, allocation or dispatch witness; parent GPU lane only."
+  },
+  {
+    "target": "lib",
+    "name": "deepseek_v41::forward::prefill::tests::real::gguf_scalar_rowwise_grouped_prefill_diagnostic",
+    "class": "model",
+    "ignored": true,
+    "reason": "Real GGUF scalar/rowwise/grouped diagnostic; parent model lane only."
+  },
+  {
+    "target": "lib",
+    "name": "deepseek_v41::forward::prefill::tests::rowwise_linear_override_is_scoped_and_changes_dispatch",
+    "class": "gpu",
+    "ignored": false,
+    "reason": "Metal context, allocation or dispatch witness; parent GPU lane only."
+  },
+  {
+    "target": "lib",
+    "name": "deepseek_v41::forward::prefill::tests::unaligned_f32_geometry_uses_native_row_fallback",
+    "class": "gpu",
+    "ignored": false,
+    "reason": "Metal context, allocation or dispatch witness; parent GPU lane only."
+  },
+  {
+    "target": "lib",
+    "name": "deepseek_v41::forward::snapshot::tests::capacity_fallback_retries_only_admission_denial",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Host-only metadata, arithmetic, source contract or synthetic disk fixture; no Metal context."
+  },
+  {
+    "target": "lib",
+    "name": "deepseek_v41::forward::snapshot::tests::rejection_does_not_mutate_healthy_destination",
+    "class": "gpu",
+    "ignored": false,
+    "reason": "Metal context, allocation or dispatch witness; parent GPU lane only."
+  },
+  {
+    "target": "lib",
+    "name": "deepseek_v41::forward::snapshot::tests::wrapped_odd_even_restore_and_growth_are_bitwise",
+    "class": "gpu",
+    "ignored": false,
+    "reason": "Metal context, allocation or dispatch witness; parent GPU lane only."
+  },
+  {
+    "target": "lib",
+    "name": "deepseek_v41::forward::tests::compression_interns_in_id_order_and_falls_back_on_partial_utf8",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Host-only metadata, arithmetic, source contract or synthetic disk fixture; no Metal context."
+  },
+  {
+    "target": "lib",
+    "name": "deepseek_v41::forward::tests::engram_injection_normalizes_each_stream_and_preserves_gate_sign",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Host-only metadata, arithmetic, source contract or synthetic disk fixture; no Metal context."
+  },
+  {
+    "target": "lib",
+    "name": "deepseek_v41::forward::tests::folded_engram_storage_is_explicit",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Host-only metadata, arithmetic, source contract or synthetic disk fixture; no Metal context."
+  },
+  {
+    "target": "lib",
+    "name": "deepseek_v41::forward::tests::full_chunk_selector_keeps_large_residents_at_2048",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Host-only metadata, arithmetic, source contract or synthetic disk fixture; no Metal context."
+  },
+  {
+    "target": "lib",
+    "name": "deepseek_v41::forward::tests::gguf_dense_bf16_q8_bounded_rows_and_group_offsets",
+    "class": "gpu",
+    "ignored": false,
+    "reason": "Metal context, allocation or dispatch witness; parent GPU lane only."
+  },
+  {
+    "target": "lib",
+    "name": "deepseek_v41::forward::tests::gguf_dense_extra_iq_formats_preserve_f32_operands",
+    "class": "gpu",
+    "ignored": false,
+    "reason": "Metal context, allocation or dispatch witness; parent GPU lane only."
+  },
+  {
+    "target": "lib",
+    "name": "deepseek_v41::forward::tests::gguf_quant_bank_real_expert_counts_high_ids",
+    "class": "gpu",
+    "ignored": false,
+    "reason": "Metal context, allocation or dispatch witness; parent GPU lane only."
+  },
+  {
+    "target": "lib",
+    "name": "deepseek_v41::forward::tests::grouped_linear_bitwise_serial_gpu_witness",
+    "class": "gpu",
+    "ignored": false,
+    "reason": "Metal context, allocation or dispatch witness; parent GPU lane only."
+  },
+  {
+    "target": "lib",
+    "name": "deepseek_v41::forward::tests::grouped_projection_default_validates_and_preserves_order",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Host-only metadata, arithmetic, source contract or synthetic disk fixture; no Metal context."
+  },
+  {
+    "target": "lib",
+    "name": "deepseek_v41::forward::tests::profile_linear_completed_and_scope_cleanup",
+    "class": "gpu",
+    "ignored": false,
+    "reason": "Metal context, allocation or dispatch witness; parent GPU lane only."
+  },
+  {
+    "target": "lib",
+    "name": "deepseek_v41::forward::tests::resident_metal_projections_match_old_source_all_40_layers",
+    "class": "gpu",
+    "ignored": false,
+    "reason": "Metal context, allocation or dispatch witness; parent GPU lane only."
+  },
+  {
+    "target": "lib",
+    "name": "deepseek_v41::forward::tests::router_bias_selects_but_does_not_weight",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Host-only metadata, arithmetic, source contract or synthetic disk fixture; no Metal context."
+  },
+  {
+    "target": "lib",
+    "name": "deepseek_v41::forward::tests::router_exact_bias_absorption_ties_choose_lower_expert_ids",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Host-only metadata, arithmetic, source contract or synthetic disk fixture; no Metal context."
+  },
+  {
+    "target": "lib",
+    "name": "deepseek_v41::forward::tests::six_native_experts_plus_shared_match_cpu_f32",
+    "class": "gpu",
+    "ignored": false,
+    "reason": "Metal context, allocation or dispatch witness; parent GPU lane only."
+  },
+  {
+    "target": "lib",
+    "name": "deepseek_v41::forward::toy::full_graph_python_parity_and_trace_is_observational",
+    "class": "gpu",
+    "ignored": false,
+    "reason": "Metal context, allocation or dispatch witness; parent GPU lane only."
+  },
+  {
+    "target": "lib",
+    "name": "deepseek_v41::forward::toy::trace_errors_and_mid_token_cancellation_poison_but_preflight_does_not",
+    "class": "gpu",
+    "ignored": false,
+    "reason": "Metal context, allocation or dispatch witness; parent GPU lane only."
+  },
+  {
+    "target": "lib",
+    "name": "deepseek_v41::gguf::engram::tests::q8_signed_codes_and_half_scales",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Host-only metadata, arithmetic, source contract or synthetic disk fixture; no Metal context."
+  },
+  {
+    "target": "lib",
+    "name": "deepseek_v41::gguf::tests::active_engram_metadata_is_required_without_static_hash_fallbacks",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Host-only metadata, arithmetic, source contract or synthetic disk fixture; no Metal context."
+  },
+  {
+    "target": "lib",
+    "name": "deepseek_v41::gguf::tests::candidate_mask_aliases_preserve_values_and_reject_conflicts",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Host-only metadata, arithmetic, source contract or synthetic disk fixture; no Metal context."
+  },
+  {
+    "target": "lib",
+    "name": "deepseek_v41::gguf::tests::conflicting_published_aliases_are_rejected",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Host-only metadata, arithmetic, source contract or synthetic disk fixture; no Metal context."
+  },
+  {
+    "target": "lib",
+    "name": "deepseek_v41::gguf::tests::custom_engram_dtype_and_encoding_are_explicitly_unsupported",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Host-only metadata, arithmetic, source contract or synthetic disk fixture; no Metal context."
+  },
+  {
+    "target": "lib",
+    "name": "deepseek_v41::gguf::tests::declared_math_must_match_implemented_operations",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Host-only metadata, arithmetic, source contract or synthetic disk fixture; no Metal context."
+  },
+  {
+    "target": "lib",
+    "name": "deepseek_v41::gguf::tests::dense_capabilities_match_linear_not_all_ggml_types",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Host-only metadata, arithmetic, source contract or synthetic disk fixture; no Metal context."
+  },
+  {
+    "target": "lib",
+    "name": "deepseek_v41::gguf::tests::direct_views_retain_mapping_and_preserve_offsets",
+    "class": "gpu",
+    "ignored": false,
+    "reason": "Metal context, allocation or dispatch witness; parent GPU lane only."
+  },
+  {
+    "target": "lib",
+    "name": "deepseek_v41::gguf::tests::disk_engram_retains_handle_and_bounds_reads",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Host-only metadata, arithmetic, source contract or synthetic disk fixture; no Metal context."
+  },
+  {
+    "target": "lib",
+    "name": "deepseek_v41::gguf::tests::empty_engram_layers_need_no_hash_arrays_or_geometry",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Host-only metadata, arithmetic, source contract or synthetic disk fixture; no Metal context."
+  },
+  {
+    "target": "lib",
+    "name": "deepseek_v41::gguf::tests::engram_header_validation_checks_codecs_without_table_payloads",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Host-only metadata, arithmetic, source contract or synthetic disk fixture; no Metal context."
+  },
+  {
+    "target": "lib",
+    "name": "deepseek_v41::gguf::tests::engram_rejects_nonfinite_rows_and_mismatched_encoding",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Host-only metadata, arithmetic, source contract or synthetic disk fixture; no Metal context."
+  },
+  {
+    "target": "lib",
+    "name": "deepseek_v41::gguf::tests::engram_standard_codecs_gather_selected_rows_with_exact_strides",
+    "class": "gpu",
+    "ignored": false,
+    "reason": "Metal context, allocation or dispatch witness; parent GPU lane only."
+  },
+  {
+    "target": "lib",
+    "name": "deepseek_v41::gguf::tests::expert_count_is_mandatory_and_positive",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Host-only metadata, arithmetic, source contract or synthetic disk fixture; no Metal context."
+  },
+  {
+    "target": "lib",
+    "name": "deepseek_v41::gguf::tests::gsq_loader::companion_rejects_missing_source_arch_geometry_duplicates_and_ambiguity",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Host-only metadata, arithmetic, source contract or synthetic disk fixture; no Metal context."
+  },
+  {
+    "target": "lib",
+    "name": "deepseek_v41::gguf::tests::gsq_loader::cpu_only_sparse_header_control_replay",
+    "class": "fixture",
+    "ignored": true,
+    "reason": "Requires external V41_GSQ_AUDIT_DIR sparse header/control fixture; excluded from model-free gate."
+  },
+  {
+    "target": "lib",
+    "name": "deepseek_v41::gguf::tests::gsq_loader::exact_i32_and_i64_domains_and_malformed_controls",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Host-only metadata, arithmetic, source contract or synthetic disk fixture; no Metal context."
+  },
+  {
+    "target": "lib",
+    "name": "deepseek_v41::gguf::tests::gsq_loader::grouped_output_a_accepts_only_the_exact_serialized_axes",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Host-only metadata, arithmetic, source contract or synthetic disk fixture; no Metal context."
+  },
+  {
+    "target": "lib",
+    "name": "deepseek_v41::gguf::tests::gsq_loader::gsq_geometry_aliases_and_conflicts",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Host-only metadata, arithmetic, source contract or synthetic disk fixture; no Metal context."
+  },
+  {
+    "target": "lib",
+    "name": "deepseek_v41::gguf::tests::gsq_loader::logical_snapshot_symlinks_and_retained_descriptor_stamps",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Host-only metadata, arithmetic, source contract or synthetic disk fixture; no Metal context."
+  },
+  {
+    "target": "lib",
+    "name": "deepseek_v41::gguf::tests::gsq_loader::metadata_tensor_conflicts_are_rejected_for_every_control",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Host-only metadata, arithmetic, source contract or synthetic disk fixture; no Metal context."
+  },
+  {
+    "target": "lib",
+    "name": "deepseek_v41::gguf::tests::gsq_loader::retained_auxiliary_fd_does_not_follow_replaced_path",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Host-only metadata, arithmetic, source contract or synthetic disk fixture; no Metal context."
+  },
+  {
+    "target": "lib",
+    "name": "deepseek_v41::gguf::tests::gsq_loader::separate_four_shard_companion_groups_iq4_rows_and_disk_only_storage",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Host-only metadata, arithmetic, source contract or synthetic disk fixture; no Metal context."
+  },
+  {
+    "target": "lib",
+    "name": "deepseek_v41::gguf::tests::gsq_loader::tensor_controls_equal_inline_and_ple_without_float_rounding",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Host-only metadata, arithmetic, source contract or synthetic disk fixture; no Metal context."
+  },
+  {
+    "target": "lib",
+    "name": "deepseek_v41::gguf::tests::inconsistent_geometry_fails",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Host-only metadata, arithmetic, source contract or synthetic disk fixture; no Metal context."
+  },
+  {
+    "target": "lib",
+    "name": "deepseek_v41::gguf::tests::iq1_expert_bank_capability_does_not_relax_type_geometry_or_storage",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Host-only metadata, arithmetic, source contract or synthetic disk fixture; no Metal context."
+  },
+  {
+    "target": "lib",
+    "name": "deepseek_v41::gguf::tests::mandatory_numeric_metadata_cannot_be_inferred_or_defaulted",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Host-only metadata, arithmetic, source contract or synthetic disk fixture; no Metal context."
+  },
+  {
+    "target": "lib",
+    "name": "deepseek_v41::gguf::tests::metadata_expert_counts_and_native_dtypes",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Host-only metadata, arithmetic, source contract or synthetic disk fixture; no Metal context."
+  },
+  {
+    "target": "lib",
+    "name": "deepseek_v41::gguf::tests::metadata_hash_survives_planning_and_loading",
+    "class": "gpu",
+    "ignored": false,
+    "reason": "Metal context, allocation or dispatch witness; parent GPU lane only."
+  },
+  {
+    "target": "lib",
+    "name": "deepseek_v41::gguf::tests::metadata_schedules_and_auxiliary_compression_entries_are_retained",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Host-only metadata, arithmetic, source contract or synthetic disk fixture; no Metal context."
+  },
+  {
+    "target": "lib",
+    "name": "deepseek_v41::gguf::tests::missing_dense_inventory_fails_before_loading",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Host-only metadata, arithmetic, source contract or synthetic disk fixture; no Metal context."
+  },
+  {
+    "target": "lib",
+    "name": "deepseek_v41::gguf::tests::named_ownership_fallback_requires_known_layer_operations",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Host-only metadata, arithmetic, source contract or synthetic disk fixture; no Metal context."
+  },
+  {
+    "target": "lib",
+    "name": "deepseek_v41::gguf::tests::nonzero_bf16_load_forward_multiple_steps",
+    "class": "gpu",
+    "ignored": false,
+    "reason": "Metal context, allocation or dispatch witness; parent GPU lane only."
+  },
+  {
+    "target": "lib",
+    "name": "deepseek_v41::gguf::tests::oversized_plan_is_metadata_only",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Host-only metadata, arithmetic, source contract or synthetic disk fixture; no Metal context."
+  },
+  {
+    "target": "lib",
+    "name": "deepseek_v41::gguf::tests::ownership_metadata::each_conflicting_alias_is_rejected_in_either_value_order",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Host-only metadata, arithmetic, source contract or synthetic disk fixture; no Metal context."
+  },
+  {
+    "target": "lib",
+    "name": "deepseek_v41::gguf::tests::ownership_metadata::explicit_invalid_layout_never_silently_uses_fallback",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Host-only metadata, arithmetic, source contract or synthetic disk fixture; no Metal context."
+  },
+  {
+    "target": "lib",
+    "name": "deepseek_v41::gguf::tests::ownership_metadata::explicit_layout_must_bind_its_own_tensors_not_fallback_inventory",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Host-only metadata, arithmetic, source contract or synthetic disk fixture; no Metal context."
+  },
+  {
+    "target": "lib",
+    "name": "deepseek_v41::gguf::tests::ownership_metadata::explicit_nonstandard_schedule_keeps_existing_structural_support",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Host-only metadata, arithmetic, source contract or synthetic disk fixture; no Metal context."
+  },
+  {
+    "target": "lib",
+    "name": "deepseek_v41::gguf::tests::ownership_metadata::gsq_attention_candidate_declarations_override_defaults_and_check_conflicts",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Host-only metadata, arithmetic, source contract or synthetic disk fixture; no Metal context."
+  },
+  {
+    "target": "lib",
+    "name": "deepseek_v41::gguf::tests::ownership_metadata::long_short_and_consistent_aliases_override_fallback",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Host-only metadata, arithmetic, source contract or synthetic disk fixture; no Metal context."
+  },
+  {
+    "target": "lib",
+    "name": "deepseek_v41::gguf::tests::ownership_metadata::malformed_long_alias_cannot_be_treated_as_missing",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Host-only metadata, arithmetic, source contract or synthetic disk fixture; no Metal context."
+  },
+  {
+    "target": "lib",
+    "name": "deepseek_v41::gguf::tests::ownership_metadata::missing_ownership_falls_back_only_for_matching_standard_operations",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Host-only metadata, arithmetic, source contract or synthetic disk fixture; no Metal context."
+  },
+  {
+    "target": "lib",
+    "name": "deepseek_v41::gguf::tests::ple_engram::combined_main_table_does_not_bind_or_validate_auxiliary_table_payloads",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Host-only metadata, arithmetic, source contract or synthetic disk fixture; no Metal context."
+  },
+  {
+    "target": "lib",
+    "name": "deepseek_v41::gguf::tests::ple_engram::combined_table_encoding_is_inferred_but_explicit_conflicts_fail",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Host-only metadata, arithmetic, source contract or synthetic disk fixture; no Metal context."
+  },
+  {
+    "target": "lib",
+    "name": "deepseek_v41::gguf::tests::ple_engram::combined_table_geometry_and_ambiguous_bindings_are_rejected",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Host-only metadata, arithmetic, source contract or synthetic disk fixture; no Metal context."
+  },
+  {
+    "target": "lib",
+    "name": "deepseek_v41::gguf::tests::ple_engram::combined_table_stays_out_of_metal_residency",
+    "class": "gpu",
+    "ignored": false,
+    "reason": "Metal context, allocation or dispatch witness; parent GPU lane only."
+  },
+  {
+    "target": "lib",
+    "name": "deepseek_v41::gguf::tests::ple_engram::disabled_engram_accepts_zero_geometry_without_binding_auxiliary_tables",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Host-only metadata, arithmetic, source contract or synthetic disk fixture; no Metal context."
+  },
+  {
+    "target": "lib",
+    "name": "deepseek_v41::gguf::tests::ple_engram::dual_schema_offsets_compare_after_coordinate_normalization",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Host-only metadata, arithmetic, source contract or synthetic disk fixture; no Metal context."
+  },
+  {
+    "target": "lib",
+    "name": "deepseek_v41::gguf::tests::ple_engram::ple_and_legacy_normalize_to_the_same_layer_local_hashes",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Host-only metadata, arithmetic, source contract or synthetic disk fixture; no Metal context."
+  },
+  {
+    "target": "lib",
+    "name": "deepseek_v41::gguf::tests::ple_engram::ple_missing_malformed_and_inconsistent_fields_are_rejected",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Host-only metadata, arithmetic, source contract or synthetic disk fixture; no Metal context."
+  },
+  {
+    "target": "lib",
+    "name": "deepseek_v41::gguf::tests::ple_engram::q5_and_q6_combined_rows_translate_once_and_retain_handles",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Host-only metadata, arithmetic, source contract or synthetic disk fixture; no Metal context."
+  },
+  {
+    "target": "lib",
+    "name": "deepseek_v41::gguf::tests::ple_split::mixed_quant_table_shard_uses_its_own_descriptor_without_weakening_split_checks",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Host-only metadata, arithmetic, source contract or synthetic disk fixture; no Metal context."
+  },
+  {
+    "target": "lib",
+    "name": "deepseek_v41::gguf::tests::pr28696_numeric_parameters_and_uniform_clamps_are_consumed",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Host-only metadata, arithmetic, source contract or synthetic disk fixture; no Metal context."
+  },
+  {
+    "target": "lib",
+    "name": "deepseek_v41::gguf::tests::published_scalar_and_engram_aliases_are_consumed",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Host-only metadata, arithmetic, source contract or synthetic disk fixture; no Metal context."
+  },
+  {
+    "target": "lib",
+    "name": "deepseek_v41::gguf::tests::resident_storage::metadata_storage_plan_charges_entire_private_engram_boundary_windows",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Host-only metadata, arithmetic, source contract or synthetic disk fixture; no Metal context."
+  },
+  {
+    "target": "lib",
+    "name": "deepseek_v41::gguf::tests::resident_storage::metadata_storage_plan_rejects_invalid_geometry_without_import",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Host-only metadata, arithmetic, source contract or synthetic disk fixture; no Metal context."
+  },
+  {
+    "target": "lib",
+    "name": "deepseek_v41::gguf::tests::resident_storage::metadata_storage_plan_separates_aligned_engram_and_unused_segments",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Host-only metadata, arithmetic, source contract or synthetic disk fixture; no Metal context."
+  },
+  {
+    "target": "lib",
+    "name": "deepseek_v41::gguf::tests::resident_storage::metadata_storage_plan_shared_and_eof_counts_match_loader_helper",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Host-only metadata, arithmetic, source contract or synthetic disk fixture; no Metal context."
+  },
+  {
+    "target": "lib",
+    "name": "deepseek_v41::gguf::tests::resident_storage::metadata_storage_plan_uses_supplied_maximum_and_is_order_independent",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Host-only metadata, arithmetic, source contract or synthetic disk fixture; no Metal context."
+  },
+  {
+    "target": "lib",
+    "name": "deepseek_v41::gguf::tests::routed_expert_count_is_an_independent_alias",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Host-only metadata, arithmetic, source contract or synthetic disk fixture; no Metal context."
+  },
+  {
+    "target": "lib",
+    "name": "deepseek_v41::gguf::tests::schedule_accepts_structural_variation_not_identity",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Host-only metadata, arithmetic, source contract or synthetic disk fixture; no Metal context."
+  },
+  {
+    "target": "lib",
+    "name": "deepseek_v41::gguf::tests::singleton_expert_axes_are_restored_on_direct_views",
+    "class": "gpu",
+    "ignored": false,
+    "reason": "Metal context, allocation or dispatch witness; parent GPU lane only."
+  },
+  {
+    "target": "lib",
+    "name": "deepseek_v41::gguf::tests::standard_q8_engram_wkv_alias_and_positional_rows",
+    "class": "gpu",
+    "ignored": false,
+    "reason": "Metal context, allocation or dispatch witness; parent GPU lane only."
+  },
+  {
+    "target": "lib",
+    "name": "deepseek_v41::gguf::tests::storage_mapping::engram_boundary_clear_is_private_bounded_and_preserves_source",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Host-only metadata, arithmetic, source contract or synthetic disk fixture; no Metal context."
+  },
+  {
+    "target": "lib",
+    "name": "deepseek_v41::gguf::tests::storage_mapping::invalid_geometry_is_rejected_before_any_mapping",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Host-only metadata, arithmetic, source contract or synthetic disk fixture; no Metal context."
+  },
+  {
+    "target": "lib",
+    "name": "deepseek_v41::gguf::tests::storage_mapping::large_eof_plan_is_metadata_only_and_fake_extent_is_rejected",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Host-only metadata, arithmetic, source contract or synthetic disk fixture; no Metal context."
+  },
+  {
+    "target": "lib",
+    "name": "deepseek_v41::gguf::tests::storage_mapping::missing_tensor_payload_still_fails_raw_eof_validation",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Host-only metadata, arithmetic, source contract or synthetic disk fixture; no Metal context."
+  },
+  {
+    "target": "lib",
+    "name": "deepseek_v41::gguf::tests::storage_mapping::original_shared_reuses_arc_and_absolute_offsets",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Host-only metadata, arithmetic, source contract or synthetic disk fixture; no Metal context."
+  },
+  {
+    "target": "lib",
+    "name": "deepseek_v41::gguf::tests::storage_mapping::page_aligned_eof_never_allows_an_extra_page",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Host-only metadata, arithmetic, source contract or synthetic disk fixture; no Metal context."
+  },
+  {
+    "target": "lib",
+    "name": "deepseek_v41::gguf::tests::storage_mapping::partial_eof_is_shared_read_only_with_nonzero_payload_and_zero_tail",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Host-only metadata, arithmetic, source contract or synthetic disk fixture; no Metal context."
+  },
+  {
+    "target": "lib",
+    "name": "deepseek_v41::gguf::tests::tensor_overflow_is_rejected",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Host-only metadata, arithmetic, source contract or synthetic disk fixture; no Metal context."
+  },
+  {
+    "target": "lib",
+    "name": "deepseek_v41::gguf::tests::unpadded_and_engram_shared_pages_use_private_boundary_pages",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Host-only metadata, arithmetic, source contract or synthetic disk fixture; no Metal context."
+  },
+  {
+    "target": "lib",
+    "name": "deepseek_v41::gguf::tests::unused_tensors_keep_inventory_without_binding_or_dtype_requirements",
+    "class": "gpu",
+    "ignored": false,
+    "reason": "Metal context, allocation or dispatch witness; parent GPU lane only."
+  },
+  {
+    "target": "lib",
+    "name": "deepseek_v41::mxfp4::tests::errors_are_atomic_with_canaries",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Host-only metadata, arithmetic, source contract or synthetic disk fixture; no Metal context."
+  },
+  {
+    "target": "lib",
+    "name": "deepseek_v41::mxfp4::tests::every_position_routes_uniquely_across_rows_and_blocks",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Host-only metadata, arithmetic, source contract or synthetic disk fixture; no Metal context."
+  },
+  {
+    "target": "lib",
+    "name": "deepseek_v41::mxfp4::tests::exhaustive_codes_and_scales",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Host-only metadata, arithmetic, source contract or synthetic disk fixture; no Metal context."
+  },
+  {
+    "target": "lib",
+    "name": "deepseek_v41::mxfp4::tests::exhaustive_packed_validation_matches_decoder_with_canaries",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Host-only metadata, arithmetic, source contract or synthetic disk fixture; no Metal context."
+  },
+  {
+    "target": "lib",
+    "name": "deepseek_v41::mxfp4::tests::linked_ggml_independent_decode",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Host-only metadata, arithmetic, source contract or synthetic disk fixture; no Metal context."
+  },
+  {
+    "target": "lib",
+    "name": "deepseek_v41::mxfp4::tests::linked_ggml_mixed_rows",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Host-only metadata, arithmetic, source contract or synthetic disk fixture; no Metal context."
+  },
+  {
+    "target": "lib",
+    "name": "deepseek_v41::mxfp4::tests::tiny_native_f32_dot",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Host-only metadata, arithmetic, source contract or synthetic disk fixture; no Metal context."
+  },
+  {
+    "target": "lib",
+    "name": "deepseek_v41::mxfp4::tests::validation_preserves_first_error_and_atomicity",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Host-only metadata, arithmetic, source contract or synthetic disk fixture; no Metal context."
+  },
+  {
+    "target": "lib",
+    "name": "deepseek_v41::operators::oracle_tests::old_source_attention_outputs_and_every_cache_transition",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Host-only metadata, arithmetic, source contract or synthetic disk fixture; no Metal context."
+  },
+  {
+    "target": "lib",
+    "name": "deepseek_v41::operators::oracle_tests::old_source_lagged_block_assembly_numerical_parity",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Host-only metadata, arithmetic, source contract or synthetic disk fixture; no Metal context."
+  },
+  {
+    "target": "lib",
+    "name": "deepseek_v41::operators::oracle_tests::rollback_after_owner_append_preserves_completed_and_pending_rows",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Host-only metadata, arithmetic, source contract or synthetic disk fixture; no Metal context."
+  },
+  {
+    "target": "lib",
+    "name": "deepseek_v41::operators::tests::all_layers_all_pair_phases_chunking_and_sessions",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Host-only metadata, arithmetic, source contract or synthetic disk fixture; no Metal context."
+  },
+  {
+    "target": "lib",
+    "name": "deepseek_v41::operators::tests::assembled_attention_ffn_and_final_collapse",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Host-only metadata, arithmetic, source contract or synthetic disk fixture; no Metal context."
+  },
+  {
+    "target": "lib",
+    "name": "deepseek_v41::operators::tests::candidates_pin_recent_and_topk_is_position_sorted",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Host-only metadata, arithmetic, source contract or synthetic disk fixture; no Metal context."
+  },
+  {
+    "target": "lib",
+    "name": "deepseek_v41::operators::tests::compression_pairs_and_continuation",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Host-only metadata, arithmetic, source contract or synthetic disk fixture; no Metal context."
+  },
+  {
+    "target": "lib",
+    "name": "deepseek_v41::operators::tests::incomplete_pair_republishes_own_keys_and_stale_owner_rejected",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Host-only metadata, arithmetic, source contract or synthetic disk fixture; no Metal context."
+  },
+  {
+    "target": "lib",
+    "name": "deepseek_v41::operators::tests::lagged_mhc_timing_and_source_major_merge",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Host-only metadata, arithmetic, source contract or synthetic disk fixture; no Metal context."
+  },
+  {
+    "target": "lib",
+    "name": "deepseek_v41::operators::tests::sparse_exponent_reuse_preserves_per_coordinate_arithmetic",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Host-only metadata, arithmetic, source contract or synthetic disk fixture; no Metal context."
+  },
+  {
+    "target": "lib",
+    "name": "deepseek_v41::operators::tests::sparse_sink_rotary_and_group_projection",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Host-only metadata, arithmetic, source contract or synthetic disk fixture; no Metal context."
+  },
+  {
+    "target": "oracle",
+    "name": "capture::tests::capture_library_records_explicit_checkpoints",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Synthetic report, capture, command-construction or fixture-lookup control; no model/Metal execution."
+  },
+  {
+    "target": "oracle",
+    "name": "capture::tests::capture_npy_histories_sparse_checkpoints_and_collision",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Synthetic report, capture, command-construction or fixture-lookup control; no model/Metal execution."
+  },
+  {
+    "target": "oracle",
+    "name": "capture::tests::capture_partial_failure_and_cancellation_remain_incomplete",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Synthetic report, capture, command-construction or fixture-lookup control; no model/Metal execution."
+  },
+  {
+    "target": "oracle",
+    "name": "capture::tests::capture_suffix_calls_preserve_all_history_and_checkpoint_inventory",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Synthetic report, capture, command-construction or fixture-lookup control; no model/Metal execution."
+  },
+  {
+    "target": "oracle",
+    "name": "characterization::tests::batched_attention_inventory_requires_pruning_checkpoints",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Synthetic report, capture, command-construction or fixture-lookup control; no model/Metal execution."
+  },
+  {
+    "target": "oracle",
+    "name": "characterization::tests::characterization_rejects_incomplete_nonfinite_and_inconsistent_reports",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Synthetic report, capture, command-construction or fixture-lookup control; no model/Metal execution."
+  },
+  {
+    "target": "oracle",
+    "name": "characterization::tests::finite_conversion_error_and_argmax_changes_are_not_acceptance_failures",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Synthetic report, capture, command-construction or fixture-lookup control; no model/Metal execution."
+  },
+  {
+    "target": "oracle",
+    "name": "characterization::tests::long_characterization_reports_differences_without_relaxing_legacy_bounds",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Synthetic report, capture, command-construction or fixture-lookup control; no model/Metal execution."
+  },
+  {
+    "target": "oracle",
+    "name": "execution::independent_gguf_reference_negative_controls",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Synthetic report, capture, command-construction or fixture-lookup control; no model/Metal execution."
+  },
+  {
+    "target": "oracle",
+    "name": "gguf_native_f32_prefill_65_token_serial_snapshot_parity",
+    "class": "model",
+    "ignored": true,
+    "reason": "Conditional real-model Metal capture/replay witness; parent model lane only."
+  },
+  {
+    "target": "oracle",
+    "name": "hf_conversion_seven_token_characterization",
+    "class": "model",
+    "ignored": true,
+    "reason": "Conditional real-model Metal capture/replay witness; parent model lane only."
+  },
+  {
+    "target": "oracle",
+    "name": "hf_conversion_ten_thousand_token_attention_characterization",
+    "class": "model",
+    "ignored": true,
+    "reason": "Conditional real-model Metal capture/replay witness; parent model lane only."
+  },
+  {
+    "target": "oracle",
+    "name": "independent_gguf_batched_attention_boundary_characterization",
+    "class": "model",
+    "ignored": true,
+    "reason": "Conditional real-model Metal capture/replay witness; parent model lane only."
+  },
+  {
+    "target": "oracle",
+    "name": "independent_gguf_batched_attention_odd_pruning_suffix_qualification",
+    "class": "model",
+    "ignored": true,
+    "reason": "Conditional real-model Metal capture/replay witness; parent model lane only."
+  },
+  {
+    "target": "oracle",
+    "name": "independent_gguf_batched_attention_ring_suffix_qualification",
+    "class": "model",
+    "ignored": true,
+    "reason": "Conditional real-model Metal capture/replay witness; parent model lane only."
+  },
+  {
+    "target": "oracle",
+    "name": "independent_gguf_seven_token_execution_acceptance",
+    "class": "model",
+    "ignored": true,
+    "reason": "Conditional real-model Metal capture/replay witness; parent model lane only."
+  },
+  {
+    "target": "oracle",
+    "name": "long_context_comparison_remains_independent_cpu",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Synthetic report, capture, command-construction or fixture-lookup control; no model/Metal execution."
+  },
+  {
+    "target": "oracle",
+    "name": "long_context_manifest_validation",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Synthetic report, capture, command-construction or fixture-lookup control; no model/Metal execution."
+  },
+  {
+    "target": "oracle",
+    "name": "long_context_report_negative_controls",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Synthetic report, capture, command-construction or fixture-lookup control; no model/Metal execution."
+  },
+  {
+    "target": "oracle",
+    "name": "named_gguf_fixture_is_resolved_without_runtime_source_directory",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Synthetic report, capture, command-construction or fixture-lookup control; no model/Metal execution."
+  },
+  {
+    "target": "oracle",
+    "name": "named_gguf_fixture_lookup_child",
+    "class": "fixture",
+    "ignored": true,
+    "reason": "Synthetic fixture-lookup subprocess invoked only by the named CPU parent test; not a standalone acceptance run."
+  },
+  {
+    "target": "oracle",
+    "name": "prefill::comparison_characterizes_shift_and_accumulates_failures",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Synthetic report, capture, command-construction or fixture-lookup control; no model/Metal execution."
+  },
+  {
+    "target": "oracle",
+    "name": "prefill::comparison_detects_distribution_drift",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Synthetic report, capture, command-construction or fixture-lookup control; no model/Metal execution."
+  },
+  {
+    "target": "oracle",
+    "name": "prefill::comparison_shape_and_nonfinite_are_fatal",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Synthetic report, capture, command-construction or fixture-lookup control; no model/Metal execution."
+  },
+  {
+    "target": "oracle",
+    "name": "prefill::distribution_contract_negative_controls",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Synthetic report, capture, command-construction or fixture-lookup control; no model/Metal execution."
+  },
+  {
+    "target": "oracle",
+    "name": "seven_token_comparison_has_no_numerical_threshold_arguments",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Synthetic report, capture, command-construction or fixture-lookup control; no model/Metal execution."
+  },
+  {
+    "target": "oracle",
+    "name": "suffix::tests::ring_census_positive_selected_tiers_and_real_query_boundary",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Synthetic report, capture, command-construction or fixture-lookup control; no model/Metal execution."
+  },
+  {
+    "target": "oracle",
+    "name": "suffix::tests::ring_census_rejects_missing_wrong_kernel_type_count_order_and_geometry",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Synthetic report, capture, command-construction or fixture-lookup control; no model/Metal execution."
+  },
+  {
+    "target": "oracle",
+    "name": "suffix::tests::ring_census_stale_suffix_red_control",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Synthetic report, capture, command-construction or fixture-lookup control; no model/Metal execution."
+  },
+  {
+    "target": "oracle",
+    "name": "suffix::tests::suffix_qualification_rejects_disagreement_and_overbound_even_with_pass_flag",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Synthetic report, capture, command-construction or fixture-lookup control; no model/Metal execution."
+  },
+  {
+    "target": "oracle",
+    "name": "suffix::tests::suffix_schedule_and_report_inventory_are_nonvacuous",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Synthetic report, capture, command-construction or fixture-lookup control; no model/Metal execution."
+  },
+  {
+    "target": "oracle",
+    "name": "suffix::tests::wrapped_continuation_self_parity_rejects_vacuous_and_nonbitwise_results",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Synthetic report, capture, command-construction or fixture-lookup control; no model/Metal execution."
+  },
+  {
+    "target": "oracle",
+    "name": "tight_execution_report_bounds_remain_unchanged",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Synthetic report, capture, command-construction or fixture-lookup control; no model/Metal execution."
+  },
+  {
+    "target": "oracle",
+    "name": "trace::tests::converted_capture_has_one_production_mode_and_characterization_scope",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Synthetic report, capture, command-construction or fixture-lookup control; no model/Metal execution."
+  },
+  {
+    "target": "oracle",
+    "name": "trace::tests::execution_capture_is_distinct_from_hf_characterization",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Synthetic report, capture, command-construction or fixture-lookup control; no model/Metal execution."
+  },
+  {
+    "target": "oracle",
+    "name": "trace::tests::v41_trace_checks_chunked_byte_counts_and_does_not_overwrite",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Synthetic report, capture, command-construction or fixture-lookup control; no model/Metal execution."
+  },
+  {
+    "target": "oracle",
+    "name": "trace::tests::v41_trace_portable_bytes_all_layers_positions_and_success_manifest",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Synthetic report, capture, command-construction or fixture-lookup control; no model/Metal execution."
+  },
+  {
+    "target": "oracle",
+    "name": "trace::tests::v41_trace_rejects_nonempty_files_symlinks_and_missing_parents",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Synthetic report, capture, command-construction or fixture-lookup control; no model/Metal execution."
+  },
+  {
+    "target": "oracle",
+    "name": "trace::tests::v41_trace_rejects_wrong_shapes_missing_layers_and_file_collisions",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Synthetic report, capture, command-construction or fixture-lookup control; no model/Metal execution."
+  },
+  {
+    "target": "oracle",
+    "name": "trace::tests::v41_trace_wrong_logits_and_failed_manifest_leave_incomplete_status",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Synthetic report, capture, command-construction or fixture-lookup control; no model/Metal execution."
+  },
+  {
+    "target": "oracle",
+    "name": "upstream_tie_negative_control_is_not_an_agreement_fixture",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Synthetic report, capture, command-construction or fixture-lookup control; no model/Metal execution."
+  }
+]

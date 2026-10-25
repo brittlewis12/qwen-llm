@@ -330,6 +330,28 @@ pub(super) fn checked_soft_window_sources(root: &Path) -> AResult<Vec<Value>> {
         .collect()
 }
 
+pub(super) fn loader_compiled_sources() -> &'static [(&'static str, &'static [u8])] {
+    macro_rules! embedded {
+        ($($path:literal),+ $(,)?) => { &[$(($path, include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/../../", $path)).as_slice())),+] };
+    }
+    embedded![
+        "crates/qwen-llm/src/deepseek_v41/gguf/companion.rs",
+        "crates/qwen-llm/src/deepseek_v41/gguf/controls.rs",
+        "crates/qwen-llm/src/deepseek_v41/gguf/metadata.rs",
+        "crates/qwen-llm/src/deepseek_v41/gguf/names.rs",
+        "crates/qwen-llm/src/deepseek_v41/gguf/engram.rs",
+        "crates/qwen-llm/src/deepseek_v41/gguf/tests/gsq_loader.rs",
+        "crates/qwen-llm/src/deepseek_v41/gguf/tests/binding_preflight.rs",
+    ]
+}
+
+pub(super) fn checked_loader_sources(root: &Path) -> AResult<Vec<Value>> {
+    loader_compiled_sources()
+        .iter()
+        .map(|&(path, bytes)| checked_compiled_source(root, path, bytes))
+        .collect()
+}
+
 fn compiled_sources() -> &'static [(&'static str, &'static [u8])] {
     macro_rules! embedded {
         ($($path:literal),+ $(,)?) => { &[$(($path, include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/../../", $path)).as_slice())),+] };
@@ -395,6 +417,7 @@ fn checked_compiled_sources(root: &Path) -> AResult<Vec<Value>> {
     }
     compiled.extend(checked_batching_sources(root)?);
     compiled.extend(checked_soft_window_sources(root)?);
+    compiled.extend(checked_loader_sources(root)?);
     Ok(compiled)
 }
 
@@ -423,6 +446,7 @@ fn compiled_geometry_and_activation_inventory_rejects_single_file_edits_before_i
         .iter()
         .chain(batching_compiled_sources())
         .chain(soft_window_compiled_sources())
+        .chain(loader_compiled_sources())
     {
         let destination = root.join(path);
         std::fs::create_dir_all(destination.parent().unwrap()).unwrap();
@@ -430,7 +454,10 @@ fn compiled_geometry_and_activation_inventory_rejects_single_file_edits_before_i
     }
     assert_eq!(
         checked_compiled_sources(&root).unwrap().len(),
-        sources.len() + batching_compiled_sources().len() + soft_window_compiled_sources().len()
+        sources.len()
+            + batching_compiled_sources().len()
+            + soft_window_compiled_sources().len()
+            + loader_compiled_sources().len()
     );
     for path in [
         helper,

@@ -485,6 +485,13 @@ fn package(case: &str) -> Package {
     package
 }
 
+pub(in crate::deepseek_v41) fn with_companion_fixture(
+    test: impl FnOnce(Arc<GgufFile>, &std::path::Path),
+) {
+    let package = package("valid");
+    test(package.backbone(), &package.0);
+}
+
 #[test]
 fn separate_four_shard_companion_groups_iq4_rows_and_disk_only_storage() {
     let package = package("valid");
@@ -537,6 +544,59 @@ fn separate_four_shard_companion_groups_iq4_rows_and_disk_only_storage() {
     }
     assert!(disk.read_rows(2, &[0]).is_err());
     assert!(disk.read_rows(0, &vec![0; 32769]).is_err());
+}
+
+#[test]
+fn companion_control_preflight_charges_cpu_and_refuses_a_one_byte_short_host_budget() {
+    use super::resident_storage::{M5_MAX_BUFFER_LENGTH, PAGE, preflight_signals};
+    use crate::deepseek_v41::forward::{PrefillExecution, preflight};
+    with_companion_fixture(|g, _| {
+        let p = plan(&g).unwrap();
+        let storage = resident_storage_plan(&g, PAGE, M5_MAX_BUFFER_LENGTH).unwrap();
+        let run = |signals| {
+            preflight::preflight_with_pricing(
+                &g,
+                storage.clone(),
+                8,
+                16,
+                &[PrefillExecution::FullForward],
+                1234,
+                false,
+                &Ok,
+                signals,
+            )
+        };
+        let cold = run(preflight_signals()).unwrap();
+        assert_eq!(cold.loader_controls, p.controls);
+        assert_eq!(
+            cold.loader_control_cpu_bytes,
+            6 * p.controls.payload_bytes_read
+                + p.controls.retained_cpu_bytes
+                + p.controls.source_bookkeeping_bytes
+        );
+        assert_eq!(
+            cold.required_metal_bytes,
+            storage.metal_view_bytes + cold.binding_metal_bytes + cold.runtime_metal_bytes
+        );
+        let mut short = preflight_signals();
+        short
+            .host_budget
+            .as_mut()
+            .unwrap()
+            .conservative_available_bytes = cold.required_cpu_bytes - 1;
+        assert!(
+            metal::evaluate_metal_memory_admission_with_cpu_bytes(
+                cold.required_metal_bytes,
+                cold.required_cpu_bytes - cold.loader_control_cpu_bytes,
+                0,
+                short,
+                true
+            )
+            .is_admitted()
+        );
+        assert!(run(short).unwrap_err().as_memory_admission().is_some());
+        p.revalidate_sources(&g).unwrap();
+    });
 }
 
 #[test]
@@ -739,6 +799,41 @@ fn cpu_only_sparse_header_control_replay() {
             if quant == "IQ2_XXS" { 60 } else { 0 }
         );
         assert_eq!(validated.bytes.disk_engram, 110595290400);
+        use super::resident_storage::{M5_MAX_BUFFER_LENGTH, PAGE, preflight_signals};
+        use crate::deepseek_v41::forward::{PrefillExecution, preflight};
+        let storage = resident_storage_plan(&g, PAGE, M5_MAX_BUFFER_LENGTH).unwrap();
+        for n in [128, 2048, 8192] {
+            let cold = preflight::preflight_with_pricing(
+                &g,
+                storage.clone(),
+                n,
+                n + 256,
+                &[
+                    PrefillExecution::FullForward,
+                    PrefillExecution::ShrinkingCed,
+                ],
+                334_226_432,
+                false,
+                &|bytes| Ok(bytes.next_multiple_of(PAGE as u64)),
+                preflight_signals(),
+            )
+            .unwrap();
+            assert!(cold.ced.is_some());
+            assert_eq!(cold.loader_controls, validated.controls);
+            let delta = 6 * validated.controls.payload_bytes_read
+                + validated.controls.retained_cpu_bytes
+                + validated.controls.source_bookkeeping_bytes;
+            assert_eq!(cold.loader_control_cpu_bytes, delta);
+            eprintln!(
+                "CPU SPARSE BUDGET ONLY n={n}: loader_delta={delta} old_binding={} new_binding={} load_cpu={} required_cpu={} runtime_gate_cpu={}; synthetic pricing/signals, NOT a device fit or import qualification",
+                cold.binding_cpu_bytes - delta,
+                cold.binding_cpu_bytes,
+                cold.load_cpu_bytes,
+                cold.required_cpu_bytes,
+                cold.runtime_gate_cpu_bytes
+            );
+        }
+        validated.revalidate_sources(&g).unwrap();
         eprintln!(
             "CPU SPARSE CONTRACT ONLY {quant}: controls={:?} groups=4+1 banks=120 bytes={:?}; no weight/table payload qualification",
             validated.controls, validated.bytes

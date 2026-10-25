@@ -1,4 +1,5 @@
-//! Metadata-only cold request admission. This is a budget, not an OS reservation;
+//! Cold request admission with bounded CPU control reads, not weight import.
+//! This is a budget, not an OS reservation;
 //! loader, state allocation and prefill admission remain independently required.
 use super::*;
 use crate::deepseek_v41::gguf::{self, LoadError, ResidentStoragePlan};
@@ -16,6 +17,10 @@ pub struct ColdPrefillPlan {
     pub runtime_cpu_bytes: u64,
     /// Conservative binding vectors, metadata copies and descriptor bookkeeping.
     pub binding_cpu_bytes: u64,
+    /// Explicit loader control/source subset already included in binding CPU.
+    /// Cold normalization is retained in all gates as a conservative overbound.
+    pub loader_control_cpu_bytes: u64,
+    pub loader_controls: gguf::ControlAccounting,
     /// Retained per-linear native controls, priced as separate Metal resources.
     /// Excludes shared resident weight views and per-request runtime buffers.
     pub binding_metal_bytes: u64,
@@ -136,8 +141,9 @@ impl ColdPrefillPlan {
 /// weight import. This deliberately retains the stronger, non-staged contract.
 /// Policies (including repetitions) run sequentially, never as concurrent states.
 /// `ced` is absent when not requested or when runtime would fall back to Full.
-/// No payload is imported, no RSS execution observation is made, and no memory
-/// is reserved. The opened GGUF already retains its original shared mappings.
+/// No weight/table payload is imported, no RSS execution observation is made,
+/// and no memory is reserved. Planning can open a declared companion and read
+/// bounded CPU control payloads. The opened GGUF retains shared file mappings.
 pub fn preflight_cold_prefill(
     ctx: &MetalContext,
     gguf: &GgufFile,
@@ -157,7 +163,8 @@ pub fn preflight_cold_prefill(
     .into_strict(ctx.memory_signals())
 }
 
-/// Compute budgets without admitting any allocation or importing payloads.
+/// Compute budgets without admitting execution allocations or importing weights.
+/// Serialized Engram controls require bounded CPU reads and normalization.
 /// Staged callers must assess load and then reassess runtime with fresh signals.
 pub fn plan_cold_prefill(
     ctx: &MetalContext,
@@ -390,6 +397,7 @@ fn plan_with_pricing(
             // descriptors below cover bindings/digest serialization, not mmap bytes.
             product(resident_storage.windows.len() as u64, 4096)?,
             product(gguf.tensors.len() as u64, 1024)?,
+            loader_control_cpu_bytes(p.controls)?,
         ])?;
         let binding_metal_bytes = binding_metal_bytes(p.binding_linears.values().copied(), price)?;
         Ok((request, full, ced, binding_cpu_bytes, binding_metal_bytes))
@@ -406,7 +414,23 @@ fn plan_with_pricing(
         caller_cpu_bytes,
     )?;
     combined.full_chunk_rows = full_chunk_rows;
+    combined.loader_controls = p.controls;
+    combined.loader_control_cpu_bytes =
+        loader_control_cpu_bytes(p.controls).map_err(LoadError::Invalid)?;
     Ok(combined)
+}
+
+fn loader_control_cpu_bytes(controls: gguf::ControlAccounting) -> Result<u64> {
+    // Retain both the loader's pre-normalization bound and normalized peak,
+    // without crediting overlap with metadata/vocab or shared weight mappings.
+    let cold = controls
+        .cold_cpu_bytes
+        .max(product(controls.payload_bytes_read, 6)?);
+    sum(&[
+        cold,
+        controls.retained_cpu_bytes,
+        controls.source_bookkeeping_bytes,
+    ])
 }
 
 fn binding_metal_bytes(
@@ -494,6 +518,8 @@ fn combine_plan(
         runtime_metal_bytes,
         runtime_cpu_bytes,
         binding_cpu_bytes,
+        loader_control_cpu_bytes: 0,
+        loader_controls: gguf::ControlAccounting::default(),
         binding_metal_bytes,
         caller_cpu_bytes,
         required_metal_bytes,

@@ -160,6 +160,38 @@ fn nondefault_gguf_preflight_prices_only_active_binding_controls_and_refuses_sho
                 )
             };
             let cold = run(preflight_signals()).unwrap();
+            assert_eq!(cold.loader_controls, p.controls);
+            let loader_delta = p
+                .controls
+                .cold_cpu_bytes
+                .max(6 * p.controls.payload_bytes_read)
+                + p.controls.retained_cpu_bytes
+                + p.controls.source_bookkeeping_bytes;
+            assert_eq!(cold.loader_control_cpu_bytes, loader_delta);
+            let width = [
+                p.config.hidden,
+                p.config.query_rank,
+                p.config.head_dim,
+                p.config.index_dim,
+                p.config.experts,
+                p.config.heads,
+                p.config.groups,
+                p.config.rope_dim,
+            ]
+            .into_iter()
+            .max()
+            .unwrap() as u64;
+            let old_binding_cpu = serde_json::to_vec(g.model.metadata()).unwrap().len() as u64 * 8
+                + p.config.vocab as u64 * 32
+                + p.layers as u64 * width * 64 * 4
+                + 128 * 1024 * 1024
+                + storage.windows.len() as u64 * 4096
+                + g.tensors.len() as u64 * 1024;
+            assert_eq!(cold.binding_cpu_bytes, old_binding_cpu + loader_delta);
+            eprintln!(
+                "INLINE CPU CONTRACT ONLY layers={engram_layers:?} folded={folded}: old_binding={old_binding_cpu} loader_delta={loader_delta} new_binding={}",
+                cold.binding_cpu_bytes
+            );
             assert!(cold.ced.is_some());
             assert_eq!(cold.binding_metal_bytes, controls * 16_384);
             assert_eq!(

@@ -1,5 +1,39 @@
 use super::*;
 
+#[test]
+fn loader_control_cpu_budget_is_explicit_checked_and_never_charges_shared_weights() {
+    let controls = gguf::ControlAccounting {
+        payload_bytes_read: 517_952,
+        cold_cpu_bytes: 3_105_632,
+        retained_cpu_bytes: 519_648,
+        source_bookkeeping_bytes: 4578,
+    };
+    assert_eq!(loader_control_cpu_bytes(controls).unwrap(), 3_631_938);
+    let mut normalization = controls;
+    normalization.cold_cpu_bytes = 4_000_000;
+    assert_eq!(loader_control_cpu_bytes(normalization).unwrap(), 4_524_226);
+    for bad in [
+        gguf::ControlAccounting {
+            payload_bytes_read: u64::MAX,
+            ..controls
+        },
+        gguf::ControlAccounting {
+            retained_cpu_bytes: u64::MAX,
+            ..controls
+        },
+        gguf::ControlAccounting {
+            source_bookkeeping_bytes: u64::MAX,
+            ..controls
+        },
+    ] {
+        assert!(loader_control_cpu_bytes(bad).is_err());
+    }
+    assert_eq!(
+        loader_control_cpu_bytes(gguf::ControlAccounting::default()).unwrap(),
+        0
+    );
+}
+
 fn combine(
     resident_storage: ResidentStoragePlan,
     request: RequestMemoryEstimate,

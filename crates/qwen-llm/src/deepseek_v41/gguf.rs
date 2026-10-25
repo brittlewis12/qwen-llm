@@ -224,6 +224,9 @@ impl Plan {
     pub fn source_groups(&self) -> &SourceGroups {
         &self.engram_context.stamps
     }
+    pub fn revalidate_sources(&self, backbone: &GgufFile) -> Result<(), LoadError> {
+        self.engram_context.revalidate(backbone)
+    }
 }
 
 pub fn plan(g: &GgufFile) -> Result<Plan, LoadError> {
@@ -504,4 +507,4 @@ impl ResidentWeights {
 }
 
 #[cfg(test)]
-mod tests;
+pub(in crate::deepseek_v41) mod tests;

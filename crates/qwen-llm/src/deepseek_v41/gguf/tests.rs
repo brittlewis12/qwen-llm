@@ -2,7 +2,7 @@ use super::*;
 use std::io::Write;
 
 mod binding_preflight;
-mod gsq_loader;
+pub(in crate::deepseek_v41) mod gsq_loader;
 mod ownership_metadata;
 mod ple_engram;
 mod ple_split;

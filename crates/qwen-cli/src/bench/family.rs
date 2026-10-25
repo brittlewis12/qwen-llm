@@ -127,6 +127,10 @@ pub(crate) fn with_family_bench<R>(
             validate_v41_extent(extent, plan.engram_hash.max_position)?;
             let weights = v41_weights::ResidentWeights::load(ctx, gguf.clone())
                 .context("load DeepSeek V4.1 weights")?;
+            eprintln!(
+                "[v41-retained-weight-resources] {}",
+                serde_json::to_string(&weights.retained_resources)?
+            );
             let forward = V41Forward::from_resident(
                 ctx,
                 &weights,

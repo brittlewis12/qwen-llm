@@ -3,11 +3,11 @@
 use super::*;
 use std::io::{Seek, SeekFrom};
 
-const SCHEMA: &str = "v41-ced-current-pair-v1";
+const SCHEMA: &str = "v41-ced-current-pair-v2";
 const INPUT_LIMIT: u64 = 16 * 1024 * 1024;
 
 #[test]
-#[ignore = "PRIVATE: central preload/host-budget repair and bounded pilot controller required before any full-model run"]
+#[ignore = "PRIVATE: release, externally verified full artifact, debug1, production self-lease and bounded M5 controller required"]
 fn current_full_vs_ced_paired_full_model() {
     run_pair().unwrap();
 }
@@ -234,6 +234,13 @@ pub(super) fn checked_soft_window_sources(root: &Path) -> AResult<Vec<Value>> {
         .collect()
 }
 
+pub(super) fn checked_loader_sources(root: &Path) -> AResult<Vec<Value>> {
+    provenance::loader_compiled_sources()
+        .iter()
+        .map(|&(path, bytes)| checked_compiled_source(root, path, bytes))
+        .collect()
+}
+
 fn source_identity() -> AResult<(PathBuf, Value)> {
     let (root, mut source) = provenance::source()?;
     let sources: &[(&str, &[u8])] = &[
@@ -283,30 +290,50 @@ fn source_identity() -> AResult<(PathBuf, Value)> {
         .collect::<AResult<Vec<_>>>()?;
     compiled.extend(checked_batching_sources(&root)?);
     compiled.extend(checked_soft_window_sources(&root)?);
+    compiled.extend(checked_loader_sources(&root)?);
     source["current_pair_compiled_sources"] = json!(compiled);
     Ok((root, source))
 }
 
 fn artifact_identity(gguf: &crate::gguf::GgufFile, p: &v41_gguf::Plan) -> AResult<Value> {
-    let stamps = gguf.revalidate_retained_shard_stamps()?;
-    let shards = stamps
-        .iter()
-        .map(|s| {
-            json!({"shard_idx": s.shard_idx, "supplied_path": s.path,
+    p.revalidate_sources(gguf)?;
+    let stamps = |group: &[crate::gguf::GgufShardStamp]| {
+        group
+            .iter()
+            .map(|s| {
+                json!({"shard_idx": s.shard_idx, "supplied_path": s.path,
         "device": s.device, "inode": s.inode, "size": s.size, "mtime_sec": s.mtime_sec,
         "mtime_nsec": s.mtime_nsec, "ctime_sec": s.ctime_sec, "ctime_nsec": s.ctime_nsec})
-        })
-        .collect::<Vec<_>>();
+            })
+            .collect::<Vec<_>>()
+    };
+    let groups = p.source_groups();
     let layout = gguf.tensors.iter().map(|t| json!({"name": t.name, "dtype": format!("{:?}", t.dtype),
         "shape": t.shape, "shard_idx": t.shard_idx, "data_offset": t.data_offset, "n_bytes": t.n_bytes})).collect::<Vec<_>>();
-    Ok(
-        json!({"shards": shards, "tensor_layout_sha256": archive::json_sha(&json!(layout))?,
-        "metadata_sha256": archive::json_sha(&serde_json::to_value(gguf.model.metadata())?)?,
+    let identity = json!({"source_groups": {"backbone": stamps(&groups.backbone), "auxiliary": stamps(&groups.auxiliary)},
+        "backbone_tensor_layout_sha256": archive::json_sha(&json!(layout))?,
+        "backbone_metadata_sha256": archive::json_sha(&serde_json::to_value(gguf.model.metadata())?)?,
         "config_debug": format!("{:?}", p.config), "schedule_debug": format!("{:?}", p.schedule),
         "hash_profile_debug": format!("{:?}", p.engram_hash), "dtype_inventory_bytes": p.dtype_inventory,
         "token_map_sha256_u32_le": archive::sha(bytemuck::cast_slice(&p.token_map)), "raw_pad": p.raw_pad,
-        "identity_method": "same loaded ResidentWeights; retained file stamps and metadata/layout hashes, NOT fresh shard-content hashes"}),
-    )
+        "declared_engram_source": gguf.get_str("deepseek41.engram.source"),
+        "identity_method": "same loaded ResidentWeights; separate backbone/auxiliary retained FD stamps, backbone metadata/layout and normalized controls; no fresh content hashes or cryptographic authenticity"});
+    p.revalidate_sources(gguf)?;
+    Ok(identity)
+}
+
+fn validate_loaded_sources(
+    gguf: &crate::gguf::GgufFile,
+    planned: &v41_gguf::Plan,
+    loaded: &v41_gguf::DiskEngram,
+) -> AResult<()> {
+    ensure!(
+        loaded.source_groups() == planned.source_groups(),
+        "loaded source groups differ from planned backbone/auxiliary FDs"
+    );
+    planned.revalidate_sources(gguf)?;
+    loaded.revalidate_sources()?;
+    Ok(())
 }
 
 fn observe_state(
@@ -577,9 +604,10 @@ fn run_pair() -> AResult<()> {
         "stage": "preload_not_authorized"});
     write_report(&mut report_file, &report)?;
     File::open(report_path.parent().context("report parent")?)?.sync_all()?;
+    let mut lease = None;
     let outcome = (|| -> AResult<()> {
         // Test contexts skip automatic production-lease acquisition.
-        let _lease = metal::acquire_metal_benchmark_lease()?;
+        lease = Some(metal::acquire_metal_benchmark_lease()?);
         report["environment"]["production_lease_acquired"] = json!(true);
         let ctx = MetalContext::new()?;
         admission(&ctx, 0, 128 * 1024 * 1024)?;
@@ -634,6 +662,12 @@ fn run_pair() -> AResult<()> {
                 "full_incremental_cpu_bytes": cold.full_incremental_cpu_bytes, "ced": cold.ced,
                 "runtime_metal_bytes": cold.runtime_metal_bytes, "runtime_cpu_bytes": cold.runtime_cpu_bytes,
                 "binding_cpu_bytes": cold.binding_cpu_bytes, "caller_cpu_bytes": cold.caller_cpu_bytes,
+                "loader_control_cpu_bytes": cold.loader_control_cpu_bytes,
+                "loader_controls": {"payload_bytes_read_per_plan": cold.loader_controls.payload_bytes_read,
+                    "cold_normalization_cpu_bytes": cold.loader_controls.cold_cpu_bytes,
+                    "retained_cpu_bytes": cold.loader_controls.retained_cpu_bytes,
+                    "source_bookkeeping_bytes": cold.loader_controls.source_bookkeeping_bytes,
+                    "aggregation": "max(normalization, 6x serialized controls) + retained + source; subset of binding CPU, not shared weights"},
                 "aggregation": "request plus max(Full, CED), one state at a time; not a sum over policies or repetitions",
                 "legacy_report_fields": "resident bookkeeping includes all binding CPU; runtime binding_upload_hash_cpu is incremental runtime CPU only",
                 "reservation": "none; all later loader, state and prefill gates remain required"},
@@ -656,6 +690,18 @@ fn run_pair() -> AResult<()> {
         drop(frozen);
         // This is the only weight import. Keep it downstream of every combined gate.
         let weights = ResidentWeights::load(&ctx, Arc::clone(&gguf))?;
+        validate_loaded_sources(&gguf, &planned, &weights.engram)?;
+        ensure!(
+            weights.token_map == planned.token_map
+                && weights.raw_pad == planned.raw_pad
+                && weights.engram_hash == planned.engram_hash,
+            "loaded normalized controls differ from retained plan"
+        );
+        report["loaded_source_groups_match_planned"] = json!(true);
+        eprintln!(
+            "[v41-retained-weight-resources] {}",
+            serde_json::to_string(&weights.retained_resources)?
+        );
         report["realized_retained_weight_resources"] =
             serde_json::to_value(&weights.retained_resources)?;
         let model =
@@ -674,6 +720,7 @@ fn run_pair() -> AResult<()> {
         let (observations, ced_execution, ced_seconds) =
             objc2::rc::autoreleasepool(|_| compare_ced(&model, &input, &g, &plan, reference))?;
         ensure!(observations.len() == STEPS + 1, "paired position coverage");
+        validate_loaded_sources(&gguf, &planned, &weights.engram)?;
         let artifact_after = artifact_identity(&gguf, &planned)?;
         ensure!(
             report["artifact_before"] == artifact_after,
@@ -707,9 +754,9 @@ fn run_pair() -> AResult<()> {
         report["limitations"] = json!([
             "not the frozen original runtime and not an original-golden pass",
             "no boundary activation or per-query control archive comparison; production completion/publication checks and exact counters remain active",
-            "no fresh model shard-content hash; same resident object and retained stamps/layout identify this pair",
+            "no fresh model content hash or cryptographic authenticity; same resident object and separate retained backbone/auxiliary FD groups identify this pair",
             "no sampled continuation, snapshot/restore/growth, failure/cancellation or throughput qualification",
-            "requires parent bounded pilot controller and central combined host/import budget repair before actual execution"
+            "requires external full artifact verification and parent bounded M5 supervision; CPU sparse replay does not qualify absent weights"
         ]);
         report["stage"] = json!("complete");
         report["complete"] = json!(true);
@@ -719,6 +766,9 @@ fn run_pair() -> AResult<()> {
         report["failure"] = json!(format!("{error:#}"));
     }
     write_report(&mut report_file, &report)?;
+    report_file.set_permissions(std::fs::Permissions::from_mode(0o400))?;
+    report_file.sync_all()?;
+    drop(lease);
     outcome
 }
 
@@ -824,4 +874,96 @@ fn compiled_safety_source_refuses_a_stale_body_before_import() {
     );
     std::fs::remove_file(&path).unwrap();
     std::fs::remove_dir(&root).unwrap();
+}
+
+#[test]
+fn every_loader_source_rejects_a_stale_body_in_both_active_inventories() {
+    let nonce = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    let root = std::env::temp_dir().join(format!(
+        "qwen-loader-freshness-{}-{nonce}",
+        std::process::id()
+    ));
+    let sources = provenance::loader_compiled_sources();
+    let unique: std::collections::BTreeSet<_> = sources.iter().map(|(path, _)| *path).collect();
+    assert_eq!(unique.len(), sources.len());
+    for &(path, bytes) in sources {
+        let destination = root.join(path);
+        std::fs::create_dir_all(destination.parent().unwrap()).unwrap();
+        std::fs::write(destination, bytes).unwrap();
+    }
+    for &(path, bytes) in sources {
+        assert!(checked_loader_sources(&root).is_ok());
+        assert!(provenance::checked_loader_sources(&root).is_ok());
+        std::fs::write(root.join(path), b"stale loader helper body").unwrap();
+        for error in [
+            checked_loader_sources(&root).unwrap_err(),
+            provenance::checked_loader_sources(&root).unwrap_err(),
+        ] {
+            assert!(
+                error
+                    .to_string()
+                    .contains(&format!("binary/source mismatch: {path}")),
+                "{error}"
+            );
+        }
+        std::fs::write(root.join(path), bytes).unwrap();
+    }
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn repeated_companion_path_replacement_refuses_new_loaded_fds_even_if_planned_fd_is_unchanged() {
+    v41_gguf::tests::gsq_loader::with_companion_fixture(|g, root| {
+        let path = root.join("aux.gguf");
+        let original = root.join("original-aux.gguf");
+        std::fs::rename(&path, &original).unwrap();
+        std::os::unix::fs::symlink(&original, &path).unwrap();
+        let planned = v41_gguf::plan(&g).unwrap();
+        let loaded = v41_gguf::DiskEngram::new(Arc::clone(&g)).unwrap();
+        validate_loaded_sources(&g, &planned, &loaded).unwrap();
+        let before = artifact_identity(&g, &planned).unwrap();
+        assert_eq!(
+            before["source_groups"]["backbone"]
+                .as_array()
+                .unwrap()
+                .len(),
+            4
+        );
+        assert_eq!(
+            before["source_groups"]["auxiliary"]
+                .as_array()
+                .unwrap()
+                .len(),
+            1
+        );
+        for i in 0..3 {
+            let replacement = root.join(format!("replacement-{i}.gguf"));
+            std::fs::copy(&original, &replacement).unwrap();
+            let link = root.join("next-aux-link");
+            std::os::unix::fs::symlink(&replacement, &link).unwrap();
+            std::fs::rename(&link, &path).unwrap();
+            planned.revalidate_sources(&g).unwrap();
+            loaded.revalidate_sources().unwrap();
+            assert_eq!(before, artifact_identity(&g, &planned).unwrap());
+            let new_loaded = v41_gguf::DiskEngram::new(Arc::clone(&g)).unwrap();
+            let error = validate_loaded_sources(&g, &planned, &new_loaded)
+                .unwrap_err()
+                .to_string();
+            assert!(error.contains("loaded source groups differ"), "{error}");
+        }
+        use std::os::unix::fs::FileExt;
+        let mutator = std::fs::OpenOptions::new()
+            .write(true)
+            .open(&original)
+            .unwrap();
+        mutator
+            .write_all_at(&[1], mutator.metadata().unwrap().len() - 1)
+            .unwrap();
+        assert!(planned.revalidate_sources(&g).is_err());
+        assert!(loaded.revalidate_sources().is_err());
+        assert!(artifact_identity(&g, &planned).is_err());
+    });
 }

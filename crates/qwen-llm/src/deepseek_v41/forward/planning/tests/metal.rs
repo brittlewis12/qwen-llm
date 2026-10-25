@@ -1,8 +1,8 @@
 use super::*;
-use crate::deepseek_v41::gguf::{ResidentWeights, tests::admitted_request};
+use crate::deepseek_v41::gguf::{self, ResidentWeights, tests::admitted_request};
 use objc2::rc::{Weak, autoreleasepool};
 
-const TOKENS: usize = 2049;
+const TOKENS: usize = admitted_request::REQUEST_TOKENS;
 const CAPACITY: usize = TOKENS + 1;
 const FIXTURE_CPU: u64 = 32 << 20;
 // Token/logit vectors, saved causal-region bits and report serialization.
@@ -49,13 +49,10 @@ fn admitted_2k_request_on_4k_model_executes_ced_public_api_and_matches_same_widt
             .required_metal_bytes
             .checked_add(cold.required_cpu_bytes)
             .unwrap();
-        assert!(
-            priced_total <= BOUND,
-            "actual-pricer CPU+Metal fixture ledger {priced_total} exceeds {BOUND}"
-        );
         eprintln!(
             "admitted_request_fixture_prices {}",
             serde_json::json!({
+                "tokens": TOKENS, "capacity": CAPACITY,
                 "bound_bytes": BOUND, "resident_metal_bytes": cold.load_metal_bytes,
                 "private_shadow_bytes": cold.resident_storage.private_shadow_bytes,
                 "binding_cpu_bytes": cold.binding_cpu_bytes,
@@ -66,6 +63,46 @@ fn admitted_2k_request_on_4k_model_executes_ced_public_api_and_matches_same_widt
                 "required_cpu_bytes": cold.required_cpu_bytes,
                 "total_bytes": priced_total,
             })
+        );
+        let p = gguf::plan(&g).unwrap();
+        let half = crate::metal::moe_grouped_tensor_selected(&ctx);
+        let quote = |rows| {
+            quotes::runtime_quote(
+                &p.config,
+                &p.schedule,
+                &p.engram_hash,
+                &[],
+                TOKENS,
+                CAPACITY,
+                rows,
+                half,
+                &|bytes| {
+                    ctx.price_shared_buffer_upper(bytes)
+                        .map(|p| p.priced_upper_bytes)
+                        .map_err(|e| e.to_string())
+                },
+            )
+            .unwrap()
+        };
+        let (quoted_wide, wide_details) = quote(4096);
+        let (quoted_narrow, narrow_details) = quote(2048);
+        eprintln!(
+            "admitted_request_runtime_quotes {}",
+            serde_json::json!({
+                "schema": "v36_actual_device_width_quotes_v1",
+                "wide": wide_details, "narrow": narrow_details,
+                "binding_cpu_bytes": cold.binding_cpu_bytes,
+                "caller_cpu_bytes": cold.caller_cpu_bytes,
+                "private_shadow_bytes": cold.resident_storage.private_shadow_bytes,
+            })
+        );
+        assert!(
+            priced_total <= BOUND,
+            "actual-pricer CPU+Metal fixture ledger {priced_total} exceeds {BOUND}"
+        );
+        assert!(
+            quoted_wide.metal_bytes > quoted_narrow.metal_bytes,
+            "fixture must admit genuine MWSS-induced narrowing before import"
         );
         // The complete real-signal peak is admitted before importing any weight.
         Cost {
@@ -98,6 +135,8 @@ fn admitted_2k_request_on_4k_model_executes_ced_public_api_and_matches_same_widt
         assert_eq!(model.prefill_chunk_rows(), 4096);
         let (wide_price, _) = model.price_request(CAPACITY, TOKENS, 4096, true).unwrap();
         let (narrow_price, _) = model.price_request(CAPACITY, TOKENS, 2048, true).unwrap();
+        assert_eq!(wide_price, quoted_wide);
+        assert_eq!(narrow_price, quoted_narrow);
         assert!(wide_price.metal_bytes > narrow_price.metal_bytes);
         let mut controlled = ctx.memory_signals();
         controlled.recommended_max_bytes = controlled
@@ -105,6 +144,16 @@ fn admitted_2k_request_on_4k_model_executes_ced_public_api_and_matches_same_widt
             .unwrap()
             .checked_add(narrow_price.metal_bytes)
             .unwrap();
+        eprintln!(
+            "admitted_request_selection_signals {}",
+            serde_json::json!({
+                "model_preference_rows": model.prefill_chunk_rows(),
+                "effective_device_usage_bytes": controlled.effective_device_usage().unwrap(),
+                "controlled_mwss_bytes": controlled.recommended_max_bytes,
+                "wide_minus_narrow_metal_bytes": wide_price.metal_bytes - narrow_price.metal_bytes,
+                "binding_and_caller_cpu_reserve_bytes": cold.binding_cpu_bytes + cold.caller_cpu_bytes,
+            })
+        );
         // Evaluation-only snapshots, never an in-process environment or hardware limit change.
         let mut plan = with_request_signals(vec![controlled, controlled], || {
             model.plan_request_for_executions(
@@ -157,7 +206,7 @@ fn admitted_2k_request_on_4k_model_executes_ced_public_api_and_matches_same_widt
                 assert_eq!(report.geometry, plan.prefill());
                 assert_eq!(
                     report.geometry.chunk_ranges().collect::<Vec<_>>(),
-                    [0..2048, 2048..2049]
+                    [0..2048, 2048..TOKENS]
                 );
                 assert!(state.is_ready() && !state.is_poisoned());
                 assert_eq!(state.position(), TOKENS);

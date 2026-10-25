@@ -2031,6 +2031,13 @@
   },
   {
     "target": "lib",
+    "name": "deepseek_v41::forward::planning::tests::quotes::admitted_fixture_width_quotes_separate_strict_pair_metal_costs_for_both_half_modes",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Host-only shared-runtime 16 KiB price separation and strict MWSS admission, including the historical scalar-tail counterexample and all cold CPU reserves; no Metal context or model execution."
+  },
+  {
+    "target": "lib",
     "name": "deepseek_v41::forward::planning::tests::reports_actual_internal_ranges_for_logical_4096_partial_suffix_and_nonzero_start",
     "class": "cpu",
     "ignored": false,

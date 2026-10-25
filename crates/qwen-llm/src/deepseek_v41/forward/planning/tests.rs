@@ -2,6 +2,7 @@ use super::*;
 use crate::metal::HostMemoryBudget;
 
 mod metal;
+mod quotes;
 
 fn signals() -> MetalMemorySignals {
     MetalMemorySignals {

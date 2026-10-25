@@ -1,6 +1,8 @@
 use super::*;
 
 pub(in crate::deepseek_v41) const RECIPE_CPU_BYTES: u64 = 1 << 20;
+// Unlike 2049, this does not add a scalar decoder unit only at the 2K width.
+pub(in crate::deepseek_v41) const REQUEST_TOKENS: usize = 2050;
 
 pub(in crate::deepseek_v41) fn fixture() -> (Arc<GgufFile>, u64) {
     let (mut kv, _) = fixture_parts(4, GgmlType::F32, 32, false);
@@ -132,8 +134,8 @@ fn small_request_cpu_quote_preserves_optional_intent_and_required_pair_refusal()
             preflight::preflight_with_pricing(
                 &g,
                 storage.clone(),
-                2049,
-                2050,
+                REQUEST_TOKENS,
+                REQUEST_TOKENS + 1,
                 executions,
                 40 << 20,
                 half,
@@ -147,7 +149,8 @@ fn small_request_cpu_quote_preserves_optional_intent_and_required_pair_refusal()
         assert_eq!(ced.prefill_admission.intent, PrefillIntent::OptionalCed);
         assert!(ced.prefill_admission.fallback.is_none());
         eprintln!(
-            "CPU_ONLY_16K_PAGE_QUOTE half={half} metal={} cpu={} binding_cpu={} runtime_metal={} runtime_cpu={} caller={} resident={} private={}",
+            "CPU_ONLY_16K_PAGE_QUOTE tokens={REQUEST_TOKENS} capacity={} half={half} metal={} cpu={} binding_cpu={} runtime_metal={} runtime_cpu={} caller={} resident={} private={}",
+            REQUEST_TOKENS + 1,
             ced.required_metal_bytes,
             ced.required_cpu_bytes,
             ced.binding_cpu_bytes,

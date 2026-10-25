@@ -6,6 +6,25 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the current state and evidence index.
 
+## 2026-10-25 - Single-Panel Adaptive Tail Leaf Does Not Earn Promotion
+
+- Probe `e65eb300` retains full panels and selects a single 16/32/64-slot
+  remainder descriptor, modeling 22.94% less routed arithmetic without repeated
+  weight decode or extra submissions. It does not change production selection.
+- Actual M5 six CPU and four GPU gates pass. All 40 active-output comparisons
+  are bitwise incumbent-equal; CPU references, count-range endpoints, offsets,
+  guards and F32 refusal pass. The original non-clamping fixture failure and
+  subsequent CPU-only fixture corrections remain archived, not suppressed.
+- Requested-validation-off timing retains 336 samples over 28 five-expert
+  synthetic fixture cases. GPU medians are slower in 20 cases and wall medians
+  in 19; geometric mean case ratios are 1.038824 and 1.022967 respectively.
+  Effective validation is unattested, drift is substantial, and these are not
+  population/model-weighted estimates or evidence of a stable intrinsic loss.
+- Close this uniform-branch leaf without promotion or a width/launch sweep.
+  The broader structural-occupancy opportunity remains open. Independent review
+  recomputes all samples, medians, ratios and bitwise checks without discrepancy.
+- [Scope, complete distributions, repairs and frozen identities](bench/2026-10-25-v41-adaptive-tail-negative.md).
+
 ## 2026-10-25 - Verified GSQ Full Weights Preserve Exact CED State
 
 - Separate source composition `05edb66f` passes actual IQ2_XS Full/CED pairs at

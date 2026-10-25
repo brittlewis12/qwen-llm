@@ -150,10 +150,12 @@ Two independent outside reviews plus primary-source/source audits prioritize:
   Tail-only 16-slot replacement models 24.29% less routed arithmetic, not latency
   or an implemented/numerically qualified kernel. This is one real prompt, not a
   workload distribution; retain packed-singleton lineage and separate gate/up
-  wide64 from decoder/down narrow32. Adaptive tails: in flight bounded probe
-  (`perf/v41-adaptive-tails`), retaining full panels and using one 16/32/64-slot
-  remainder panel without repeated weight decode or added submissions. This
-  models 22.94% less CED routed arithmetic; default dispatch stays unchanged.
+  wide64 from decoder/down narrow32. The bounded uniform-branch adaptive-tail
+  leaf is negative (`perf/v41-adaptive-tails`, `e65eb300`): 40 M5 comparisons are
+  bitwise exact, but 20/28 GPU and 19/28 wall fixture medians are slower, with
+  all 336 samples retained. The 22.94% arithmetic model does not establish a
+  latency gain. Default dispatch stays unchanged; broader structural occupancy
+  remains open. See [the measured leaf and limits](bench/2026-10-25-v41-adaptive-tail-negative.md).
 - Shared retained-window partitioning: in flight (`perf/v41-soft-windows`).
   Paused at preserved uncommitted source pending ownership recovery. Do not
   start a second writer or infer a qualified P0/P4 result from the partial code.

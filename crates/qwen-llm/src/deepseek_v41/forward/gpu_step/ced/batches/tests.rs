@@ -444,7 +444,8 @@ fn plan(model: &Forward<'_>, n: usize) -> CedPlan {
         &model.config,
         &model.schedule,
         &model.engram_hash,
-        &crate::deepseek_v41::forward::ced_plan::CedRequest::cold(n, n),
+        &crate::deepseek_v41::forward::ced_plan::CedRequest::cold(n, n)
+            .with_full_chunk_rows(model.prefill_rows),
     )
     .unwrap()
 }
@@ -453,6 +454,7 @@ fn bound(
     c: &Config,
     schedule: &crate::deepseek_v41::gguf::Schedule,
     n: usize,
+    width: usize,
     price: &impl Fn(u64) -> u64,
 ) -> u64 {
     let hash = engram::HashConfig {
@@ -463,7 +465,7 @@ fn bound(
         c,
         schedule,
         &hash,
-        &crate::deepseek_v41::forward::ced_plan::CedRequest::cold(n, n),
+        &crate::deepseek_v41::forward::ced_plan::CedRequest::cold(n, n).with_full_chunk_rows(width),
     )
     .unwrap();
     let memory = crate::deepseek_v41::forward::ced::estimate_from_parts(
@@ -484,13 +486,19 @@ fn bound(
 
 fn admit(model: &Forward<'_>, n: usize) {
     let _depth = Scope::new(4);
-    let bytes = bound(&model.config, &model.schedule, n, &|n| {
-        model
-            .ctx
-            .price_shared_buffer_upper(n)
-            .unwrap()
-            .priced_upper_bytes
-    });
+    let bytes = bound(
+        &model.config,
+        &model.schedule,
+        n,
+        model.prefill_rows,
+        &|n| {
+            model
+                .ctx
+                .price_shared_buffer_upper(n)
+                .unwrap()
+                .priced_upper_bytes
+        },
+    );
     assert!(
         bytes <= 128 * 1024 * 1024,
         "complete batch fixture ledger {bytes}"
@@ -533,12 +541,15 @@ struct Arm {
     arithmetic: Vec<Dispatch>,
     copies: Vec<Dispatch>,
     groups: usize,
+    memory: crate::deepseek_v41::forward::ced::CedMemoryEstimate,
+    profile: profile::Report,
 }
 
 fn arm(model: &Forward<'_>, n: usize, depth: usize) -> Arm {
     let _depth = Scope::new(depth);
     let capture = Capture::begin();
     let mut state = model.new_state(n).unwrap();
+    let profiling = profile::Scope::begin().unwrap();
     let (head, report) = crate::deepseek_v41::forward::ced::run(
         model,
         &mut state,
@@ -548,6 +559,10 @@ fn arm(model: &Forward<'_>, n: usize, depth: usize) -> Arm {
     )
     .unwrap();
     assert!(state.is_ready() && state.position() == n && report.fallback.is_none());
+    assert_eq!(
+        state.prefill_origin(),
+        crate::deepseek_v41::forward::PrefillExecution::ShrinkingCed
+    );
     assert!(
         report.observed_incremental_metal_bytes.unwrap()
             <= report.memory.as_ref().unwrap().incremental_metal_bytes
@@ -564,23 +579,50 @@ fn arm(model: &Forward<'_>, n: usize, depth: usize) -> Arm {
         .collect();
     let (arithmetic, copies) = capture.finish();
     let counters = report.counters.unwrap();
-    counters.validate(&plan(model, n)).unwrap();
-    if depth != 0 {
+    let p = plan(model, n);
+    counters.validate(&p).unwrap();
+    let selected = report.memory.as_ref().unwrap().decoder_batch_layers;
+    if selected != 0 {
         assert_eq!(
             counters.completed_commands,
-            n.div_ceil(prefill::DEFAULT_CHUNK_ROWS)
+            n.div_ceil(p.full_chunk_rows)
                 + model
                     .schedule
                     .layers
                     .saturating_sub(model.schedule.candidate_source_layer.unwrap())
-                    .div_ceil(depth)
+                    .div_ceil(selected)
         );
     }
-    let groups = if depth == 0 {
+    let groups = if selected == 0 {
         0
     } else {
-        counters.completed_commands - n.div_ceil(prefill::DEFAULT_CHUNK_ROWS)
+        counters.completed_commands - n.div_ceil(p.full_chunk_rows)
     };
+    let profile = profiling.finish();
+    assert_eq!(
+        profile
+            .operations
+            .iter()
+            .map(|op| op.completed_submits)
+            .sum::<usize>(),
+        counters.completed_commands
+    );
+    for op in profile
+        .operations
+        .iter()
+        .filter(|op| op.completed_submits != 0)
+    {
+        assert!(op.invalid_driver_scheduling_timestamps <= op.completed_submits);
+        if let Some(ms) = op.driver_scheduling_ms {
+            assert!(ms.is_finite() && ms > 0.0);
+            assert!(op.invalid_driver_scheduling_timestamps < op.completed_submits);
+        } else {
+            assert_eq!(
+                op.invalid_driver_scheduling_timestamps, op.completed_submits,
+                "every command must sample or explicitly report unavailable driver timestamps"
+            );
+        }
+    }
     Arm {
         head: head.into_iter().map(f32::to_bits).collect(),
         causal,
@@ -589,6 +631,8 @@ fn arm(model: &Forward<'_>, n: usize, depth: usize) -> Arm {
         arithmetic: dispatches(arithmetic),
         copies: dispatches(copies),
         groups,
+        memory: report.memory.unwrap(),
+        profile,
     }
 }
 
@@ -647,6 +691,147 @@ fn assert_pair(actual: &Arm, reference: &Arm, model: &Forward<'_>, n: usize) {
         actual.counters.completed_commands,
         p.work.total_output_rows
     );
+}
+
+fn command_plan(report: &profile::Report) -> Vec<(&'static str, [usize; 4], usize)> {
+    let mut commands = report
+        .operations
+        .iter()
+        .filter(|op| op.completed_submits != 0)
+        .map(|op| (op.operation, op.dimensions, op.completed_submits))
+        .collect::<Vec<_>>();
+    commands.sort_unstable();
+    commands
+}
+
+#[test]
+#[ignore = "self-leased <=128 MiB complete buffers; automatic structural fallback; MTL debug"]
+fn automatic_unit_budget_fallback_matches_incumbent_counts_prices_and_all_bits() {
+    let _lease = reuse::require_debug_lease();
+    let ctx = MetalContext::new().unwrap();
+    objc2::rc::autoreleasepool(|_| {
+        let weights = crate::deepseek_v41::forward::toy::Weights::new(&ctx);
+        let embedding = incumbent::embeddings(&ctx);
+        let mut model = incumbent::nonuniform_model(&weights, &ctx, &embedding);
+        configure_four(&mut model, 65);
+        prefill::with_batched_f32(|| {
+            for width in [2048, 4096] {
+                model.prefill_rows = width;
+                let n = 2049;
+                admit(&model, n);
+                let p = plan(&model, n);
+                let reference = objc2::rc::autoreleasepool(|_| arm(&model, n, 0));
+                let _limit = plan_batch::UnitLimitScope::new(1);
+                assert_eq!(
+                    batch_layers(),
+                    2,
+                    "the fallback does not force the incumbent override"
+                );
+                assert!(p.decoder.chunks(2).any(|g| {
+                    plan_batch::unit_count(&p, g[0].layer..g.last().unwrap().layer + 1).unwrap() > 1
+                }));
+                let ledger = AllocationFault::new(AllocationSite::Ledger);
+                let actual = objc2::rc::autoreleasepool(|_| arm(&model, n, 2));
+                assert_eq!(
+                    ledger.hits.get(),
+                    0,
+                    "an automatically unsubmitted ledger is never allocated"
+                );
+                assert_eq!(actual.memory.decoder_batch_layers, 0);
+                assert!(
+                    actual
+                        .memory
+                        .decoder_schedule_reason
+                        .unwrap()
+                        .contains("physical_unit_budget")
+                );
+                assert_eq!(actual.memory.full_chunk_rows, width);
+                assert_eq!(actual.memory.priced_batch_status_bytes, 0);
+                assert_eq!(actual.memory.batch_cpu_bytes, 0);
+                assert_eq!(actual.memory.priced_batch_diagnostic_bytes, 0);
+                assert_eq!(actual.memory.batch_encoding_reserve_bytes, 0);
+                assert_eq!(actual.memory.command_reserve_bytes, 16 * 1024 * 1024);
+                assert_eq!(actual.groups, 0);
+                assert!(actual.copies.is_empty());
+                assert_eq!(actual.head, reference.head);
+                assert_eq!(actual.causal, reference.causal);
+                assert_eq!(actual.controls, reference.controls);
+                assert_eq!(actual.arithmetic, reference.arithmetic);
+                assert_eq!(actual.counters, reference.counters);
+                assert_eq!(
+                    command_plan(&actual.profile),
+                    command_plan(&reference.profile)
+                );
+                assert!(
+                    !actual
+                        .profile
+                        .operations
+                        .iter()
+                        .any(|op| op.operation == "ced_decoder_batch")
+                );
+                let tail = usize::from(p.scalar_tail().is_some());
+                let expected = n.div_ceil(width)
+                    + p.decoder
+                        .iter()
+                        .map(|l| {
+                            l.seed_rows.len().div_ceil(prefill::DEFAULT_CHUNK_ROWS)
+                                + (l.output_rows.len() - tail).div_ceil(prefill::DEFAULT_CHUNK_ROWS)
+                                + tail
+                                - usize::from(l.fuse_seed_with_packed_output(n, width))
+                        })
+                        .sum::<usize>();
+                assert_eq!(actual.counters.completed_commands, expected);
+                assert_eq!(
+                    qualification::production_command_count(&p).unwrap(),
+                    expected
+                );
+                let mut actual_memory = actual.memory.clone();
+                let mut reference_memory = reference.memory.clone();
+                actual_memory.process_ru_maxrss_before_bytes = None;
+                actual_memory.process_ru_maxrss_after_bytes = None;
+                reference_memory.process_ru_maxrss_before_bytes = None;
+                reference_memory.process_ru_maxrss_after_bytes = None;
+                actual_memory.decoder_schedule_reason = reference_memory.decoder_schedule_reason;
+                assert_eq!(
+                    actual_memory, reference_memory,
+                    "only truthful schedule reason differs"
+                );
+            }
+        });
+    });
+}
+
+#[test]
+#[ignore = "self-leased <=128 MiB complete buffers; selected Full 2K/4K and decoder 2K; MTL debug"]
+fn selected_full_geometry_edges_preserve_batch_1_2_4_bits_and_driver_attribution() {
+    let _lease = reuse::require_debug_lease();
+    let ctx = MetalContext::new().unwrap();
+    objc2::rc::autoreleasepool(|_| {
+        let weights = crate::deepseek_v41::forward::toy::Weights::new(&ctx);
+        let embedding = incumbent::embeddings(&ctx);
+        let mut model = incumbent::nonuniform_model(&weights, &ctx, &embedding);
+        configure_four(&mut model, 3);
+        model.config.candidate_block = 8;
+        for layer in &mut model.layers {
+            layer.attention.candidate_block_size = 8;
+        }
+        prefill::with_batched_f32(|| {
+            for width in [2048, 4096] {
+                model.prefill_rows = width;
+                for n in [2049, 4095, 4096, 4097] {
+                    admit(&model, n);
+                    let p = plan(&model, n);
+                    assert_eq!(p.scalar_tail(), (n % width == 1).then_some(n - 1));
+                    let reference = objc2::rc::autoreleasepool(|_| arm(&model, n, 0));
+                    for depth in [1, 2, 4] {
+                        let actual = objc2::rc::autoreleasepool(|_| arm(&model, n, depth));
+                        assert_pair(&actual, &reference, &model, n);
+                        assert_eq!(actual.memory.full_chunk_rows, width);
+                    }
+                }
+            }
+        });
+    });
 }
 
 #[test]
@@ -732,13 +917,35 @@ fn all_new_fixture_ledgers_include_four_layer_status_and_diagnostic_storage_belo
             schedule.compression_ratios.truncate(4);
             schedule.index_source_layers.retain(|&id| id < 4);
         }
-        let bytes = bound(&c, &schedule, n, &|n| n + 16384);
+        let bytes = bound(&c, &schedule, n, prefill::DEFAULT_CHUNK_ROWS, &|n| {
+            n + 16384
+        });
         assert!(
             bytes <= 128 * 1024 * 1024,
             "W={window} N={n} full fixture ledger {bytes}"
         );
     }
     assert!(reuse::wide_bound(&|n| n + 16384) <= 128 * 1024 * 1024);
+    let schedule = crate::deepseek_v41::gguf::Schedule {
+        layers: 6,
+        kv_source_layers: vec![1, 2],
+        index_source_layers: vec![1, 2, 4],
+        compression_ratios: vec![0, 2, 1, 1, 1, 1],
+        candidate_source_layer: Some(2),
+    };
+    for width in [2048, 4096] {
+        for n in [2049, 4095, 4096, 4097] {
+            let c = Config {
+                candidate_block: 8,
+                index_topk: 2,
+                ..crate::deepseek_v41::forward::toy::config()
+            };
+            assert!(
+                bound(&c, &schedule, n, width, &|n| n + 16384) <= 128 * 1024 * 1024,
+                "selected Full fixture width={width} N={n}"
+            );
+        }
+    }
 }
 
 #[test]

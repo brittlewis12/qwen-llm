@@ -705,12 +705,12 @@ fn assert_report(report: &PrefillReport, n: usize, capacity: usize, scalar: bool
     expected.encoded_commands = if scalar {
         n + p.work.decoder_seed_rows + p.work.decoder_output_rows
     } else if gpu_step::ced::batch_selection(&p).unwrap().layers != 0 {
-        n.div_ceil(prefill::DEFAULT_CHUNK_ROWS)
+        n.div_ceil(p.full_chunk_rows)
             + p.decoder
                 .len()
                 .div_ceil(gpu_step::ced::batch_selection(&p).unwrap().layers)
     } else {
-        n.div_ceil(prefill::DEFAULT_CHUNK_ROWS)
+        n.div_ceil(p.full_chunk_rows)
             + p.decoder
                 .iter()
                 .map(|l| {

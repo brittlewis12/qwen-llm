@@ -943,6 +943,8 @@ fn driver_arm(model: &Forward<'_>, n: usize, fresh: bool, arithmetic: Arithmetic
     let _incumbent = incumbent_scope();
     let _fresh = Fresh::new(fresh);
     let observe = Observe::begin();
+    let mut plan = dependency_plan(&model.config, n);
+    plan.full_chunk_rows = model.prefill_rows;
     let mut state = model.new_state(n).unwrap();
     let profile = profile::Scope::begin().unwrap();
     let census = Census::begin();
@@ -957,21 +959,13 @@ fn driver_arm(model: &Forward<'_>, n: usize, fresh: bool, arithmetic: Arithmetic
         forward::PrefillExecution::ShrinkingCed
     );
     assert!(report.fallback.is_none());
-    report
-        .counters
-        .as_ref()
-        .unwrap()
-        .validate(&dependency_plan(&model.config, n))
-        .unwrap();
+    report.counters.as_ref().unwrap().validate(&plan).unwrap();
     assert!(
         report.observed_incremental_metal_bytes.unwrap()
             <= report.memory.as_ref().unwrap().incremental_metal_bytes
     );
     let mut observation = observe.current.borrow_mut();
-    let needs_pool = !fresh
-        && maximum_decoder_rows(&dependency_plan(&model.config, n), arithmetic)
-            .unwrap()
-            .is_some();
+    let needs_pool = !fresh && maximum_decoder_rows(&plan, arithmetic).unwrap().is_some();
     assert_eq!(observation.births, usize::from(needs_pool));
     assert!(
         observation
@@ -1060,6 +1054,7 @@ fn seed_fusion_matches_unfused_empty_partial_full_wrap_packed_one_second_chunk_a
             let weights = forward::toy::Weights::new(&ctx);
             let embedding = incumbent::embeddings(&ctx);
             let mut model = incumbent::nonuniform_model(&weights, &ctx, &embedding);
+            model.prefill_rows = prefill::DEFAULT_CHUNK_ROWS;
             configure(&mut model, window);
             let compare = || {
                 let reference = objc2::rc::autoreleasepool(|_| {

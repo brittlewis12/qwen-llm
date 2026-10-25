@@ -300,7 +300,7 @@ impl Workspace {
                     }
                     let compound_seed = unit.kind == Kind::Seed
                         && plan.decoder[unit.layer - plan.publication_layer]
-                            .fuse_seed_with_packed_output(plan.prompt_rows);
+                            .fuse_seed_with_packed_output(plan.prompt_rows, plan.full_chunk_rows);
                     if !compound_seed {
                         attention_status(&status.attention)?;
                     }

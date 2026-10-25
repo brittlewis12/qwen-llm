@@ -673,7 +673,7 @@ fn production_seed_fusion_removes_only_eligible_boundaries_at_native_lengths() {
             &CedRequest::cold(n, n + STEPS),
         )
         .unwrap();
-        let incumbent = n.div_ceil(PREFILL_CHUNK_ROWS)
+        let incumbent = n.div_ceil(plan.full_chunk_rows)
             + plan
                 .decoder
                 .iter()
@@ -688,7 +688,7 @@ fn production_seed_fusion_removes_only_eligible_boundaries_at_native_lengths() {
         }
         assert_eq!(
             production_command_count(&plan).unwrap(),
-            n.div_ceil(PREFILL_CHUNK_ROWS) + plan.decoder.len().div_ceil(2)
+            n.div_ceil(plan.full_chunk_rows) + plan.decoder.len().div_ceil(2)
         );
         assert_eq!(
             plan.decoder
@@ -711,7 +711,7 @@ fn production_command_count_groups_genuine_scalar_tails_without_changing_units()
             &CedRequest::cold(n, n + STEPS),
         )
         .unwrap();
-        let expected = n.div_ceil(PREFILL_CHUNK_ROWS) + plan.decoder.len().div_ceil(2);
+        let expected = n.div_ceil(plan.full_chunk_rows) + plan.decoder.len().div_ceil(2);
         assert_eq!(production_command_count(&plan).unwrap(), expected, "N={n}");
         let scalar_units = plan
             .decoder
@@ -729,7 +729,7 @@ fn production_command_count_groups_genuine_scalar_tails_without_changing_units()
             .sum::<usize>();
         assert_eq!(
             scalar_units,
-            if prefill::original_scalar_tail(n).is_some() {
+            if plan.scalar_tail().is_some() {
                 plan.decoder.len()
             } else {
                 0
@@ -767,9 +767,13 @@ fn production_fusion_counts_follow_selected_full_chunks_without_growing_decoder_
             )
             .unwrap();
             assert_eq!(
-                production_command_count(&plan).unwrap(),
+                incumbent_command_count(&plan).unwrap(),
                 expected,
                 "N={n}, width={width}"
+            );
+            assert_eq!(
+                production_command_count(&plan).unwrap(),
+                n.div_ceil(width) + plan.decoder.len().div_ceil(2)
             );
             assert_eq!(plan.scalar_tail(), (n % width == 1).then_some(n - 1));
         }

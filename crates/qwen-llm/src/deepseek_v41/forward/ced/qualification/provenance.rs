@@ -273,6 +273,9 @@ pub(super) fn batching_compiled_sources() -> &'static [(&'static str, &'static [
         "crates/qwen-llm/src/deepseek_v41/forward/gpu_step/ced/batches/tests.rs",
         "crates/qwen-llm/src/deepseek_v41/forward/ced/tests.rs",
         "crates/qwen-llm/src/deepseek_v41/forward/gpu_step/ced/tests/reuse.rs",
+        "crates/qwen-llm/src/deepseek_v41/forward/attention_gpu/query_batch/arithmetic.rs",
+        "crates/qwen-llm/src/deepseek_v41/forward/attention_gpu/query_batch/lineage.rs",
+        "crates/qwen-llm/src/metal/moe_grouped_generic/tests/wide_activation_type.rs",
         "crates/qwen-llm/src/metal/elementwise.rs",
         "kernels/elementwise.metal",
     ];

@@ -161,6 +161,11 @@ fn nondefault_gguf_preflight_prices_only_active_binding_controls_and_refuses_sho
             };
             let cold = run(preflight_signals()).unwrap();
             assert_eq!(cold.loader_controls, p.controls);
+            assert!(cold.descriptor_window_cpu_bytes >= cold.retained_summary_cpu_bytes);
+            assert!(
+                cold.binding_cpu_bytes
+                    >= cold.descriptor_window_cpu_bytes + cold.loader_control_cpu_bytes
+            );
             let loader_delta = p
                 .controls
                 .cold_cpu_bytes

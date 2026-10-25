@@ -214,6 +214,56 @@ fn soft_window_prepared_loader_plan_validates_chosen_geometry_and_preserves_cont
 }
 
 #[test]
+fn soft_window_summary_bookkeeping_counts_sources_not_oversized_payload_bytes() {
+    for (mut g, width) in owner_fixtures().into_iter().zip([2, 128]) {
+        let mut expected = Vec::new();
+        for target in [None, Some(4_294_967_296), Some(PAGE)] {
+            let (p, storage) = prepared_load_plan(&g, PAGE, M5_MAX_BUFFER_LENGTH, target).unwrap();
+            let b = retained_summary_bookkeeping(&g, &p, &storage).unwrap();
+            let banks = g
+                .tensors
+                .iter()
+                .filter(|t| resident_tensor(t, p.layers) && names::bank(&t.name).is_some())
+                .count() as u64;
+            let dense = g
+                .tensors
+                .iter()
+                .filter(|t| {
+                    resident_tensor(t, p.layers) && names::dense(&t.name, p.layers).is_some()
+                })
+                .count() as u64;
+            assert_eq!(b.bank_descriptors, banks);
+            assert_eq!(b.dense_descriptors, dense);
+            assert_eq!(banks, 3);
+            assert_eq!(dense, 24);
+            assert_eq!(b.window_count, storage.windows.len() as u64);
+            assert_eq!(b.cpu_bytes, (banks + dense) * 1024 + b.window_count * 4096);
+            assert!(b.cpu_bytes >= b.retained_cpu_bytes + b.temporary_cpu_bytes);
+            if width == 128 {
+                assert!(
+                    g.tensors
+                        .iter()
+                        .any(|t| names::bank(&t.name).is_some() && t.n_bytes > PAGE as u64)
+                );
+            }
+            eprintln!(
+                "summary_bookkeeping width={width} target={target:?} bound={b:?} load_cpu_bytes={}",
+                b.load_cpu_bytes(&p.controls, storage.private_shadow_bytes)
+                    .unwrap()
+            );
+            expected.push((target, b, p.controls, p.source_groups().clone()));
+        }
+        Arc::get_mut(&mut g).unwrap().tensors.reverse();
+        for (target, b, controls, sources) in expected {
+            let (p, storage) = prepared_load_plan(&g, PAGE, M5_MAX_BUFFER_LENGTH, target).unwrap();
+            assert_eq!(retained_summary_bookkeeping(&g, &p, &storage).unwrap(), b);
+            assert_eq!(p.controls, controls);
+            assert_eq!(p.source_groups(), &sources);
+        }
+    }
+}
+
+#[test]
 fn soft_window_tensor_controls_keep_source_groups_and_cpu_accounting() {
     let (mut kv, mut tensors) = fixture_parts(1, GgmlType::F32, 2, true);
     let mut payloads = BTreeMap::new();
@@ -255,7 +305,7 @@ fn soft_window_tensor_controls_keep_source_groups_and_cpu_accounting() {
         tensors.push((name.into(), vec![count as u64], dtype));
         payloads.insert(name.to_string(), bytes);
     }
-    let g = write_fixture_payload(kv, tensors, false, |name, _, _| payloads.get(name).cloned());
+    let mut g = write_fixture_payload(kv, tensors, false, |name, _, _| payloads.get(name).cloned());
     let reference = plan(&g).unwrap();
     let stamps = reference.source_groups().clone();
     assert_eq!(reference.controls.payload_bytes_read, 428);
@@ -269,6 +319,7 @@ fn soft_window_tensor_controls_keep_source_groups_and_cpu_accounting() {
         resident_storage_plan(&g, PAGE, M5_MAX_BUFFER_LENGTH).unwrap(),
         targeted(&g, audit.selected_soft_coalescing_target)
     );
+    let mut admitted = Vec::new();
     for target in [None, Some(4_294_967_296), Some(PAGE)] {
         let (p, storage) = prepared_load_plan(&g, PAGE, M5_MAX_BUFFER_LENGTH, target).unwrap();
         assert_eq!(p.controls, reference.controls);
@@ -279,6 +330,29 @@ fn soft_window_tensor_controls_keep_source_groups_and_cpu_accounting() {
         assert_eq!(storage.bytes, reference.bytes);
         assert_eq!(storage, targeted(&g, target));
         assert_eq!(audit.tensors.payload_bytes, p.bytes.resident_bytes());
+        let b = retained_summary_bookkeeping(&g, &p, &storage).unwrap();
+        let cpu = b
+            .load_cpu_bytes(&p.controls, storage.private_shadow_bytes)
+            .unwrap();
+        assert_eq!(
+            cpu,
+            storage.private_shadow_bytes + 1276 + 1092 + b.cpu_bytes
+        );
+        admitted.push((target, b, cpu));
+    }
+    Arc::get_mut(&mut g).unwrap().tensors.reverse();
+    for (target, b, cpu) in admitted {
+        let (p, storage) = prepared_load_plan(&g, PAGE, M5_MAX_BUFFER_LENGTH, target).unwrap();
+        assert_eq!(p.controls, reference.controls);
+        assert_eq!(p.source_groups(), &stamps);
+        let permuted = retained_summary_bookkeeping(&g, &p, &storage).unwrap();
+        assert_eq!(permuted, b);
+        assert_eq!(
+            permuted
+                .load_cpu_bytes(&p.controls, storage.private_shadow_bytes)
+                .unwrap(),
+            cpu
+        );
     }
     eprintln!(
         "soft_window_tensor_controls controls={:?} source_groups=1+0",
@@ -508,7 +582,12 @@ fn soft_window_live_resources_follow_first_containing_and_survive_owner_drop() {
         );
         assert_eq!(
             *summary,
-            super::super::retained_resources::summarize(&weights.banks, &weights.dense).unwrap()
+            super::super::retained_resources::summarize(
+                &weights.banks,
+                &weights.dense,
+                retained_summary_bookkeeping(&g, &plan(&g).unwrap(), &soft).unwrap(),
+            )
+            .unwrap()
         );
         assert!(serde_json::to_string(summary).unwrap().find("0x").is_none());
         let bank = &weights.banks[0];

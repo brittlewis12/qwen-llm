@@ -375,6 +375,9 @@ fn preweight_report(
         "binding_metal_bytes": plan.binding_metal_bytes,
         "binding_cpu_bytes": plan.binding_cpu_bytes,
         "loader_control_cpu_bytes": plan.loader_control_cpu_bytes,
+        "descriptor_window_cpu_bytes": plan.descriptor_window_cpu_bytes,
+        "retained_summary_cpu_bytes": plan.retained_summary_cpu_bytes,
+        "retained_summary_accounting": "max(loader_summary, caller_descriptor_window); included_once_in_binding_cpu",
         "loader_controls": {"payload_bytes_read_per_plan": plan.loader_controls.payload_bytes_read,
             "cold_normalization_cpu_bytes": plan.loader_controls.cold_cpu_bytes,
             "retained_cpu_bytes": plan.loader_controls.retained_cpu_bytes,
@@ -1581,8 +1584,17 @@ mod tests {
         use qwen_llm::deepseek_v41::gguf::{ByteCounters, ResidentStoragePlan};
         let caller = caller_cpu_bytes(diagnostic);
         let plan = ColdPrefillPlan {
-            geometry: qwen_llm::deepseek_v41::forward::PrefillGeometry { start: 0, tokens: 0, selected_rows: 4096 },
-            capacity: 0, executions: vec![PrefillExecution::FullForward, PrefillExecution::ShrinkingCed], alternatives: Vec::new(),
+            geometry: qwen_llm::deepseek_v41::forward::PrefillGeometry {
+                start: 0,
+                tokens: 0,
+                selected_rows: 4096,
+            },
+            capacity: 0,
+            executions: vec![
+                PrefillExecution::FullForward,
+                PrefillExecution::ShrinkingCed,
+            ],
+            alternatives: Vec::new(),
             full_chunk_rows: qwen_llm::deepseek_v41::forward::PREFILL_CHUNK_ROWS,
             resident_storage: ResidentStoragePlan {
                 page_size: 16384,
@@ -1615,6 +1627,8 @@ mod tests {
             binding_cpu_bytes: 30 * MIB,
             loader_control_cpu_bytes: 0,
             loader_controls: Default::default(),
+            descriptor_window_cpu_bytes: 0,
+            retained_summary_cpu_bytes: 0,
             caller_cpu_bytes: caller,
             required_metal_bytes: 810 * MIB,
             required_cpu_bytes: 90 * MIB + caller,

@@ -26,6 +26,10 @@ pub struct ColdPrefillPlan {
     /// Cold normalization is retained in all gates as a conservative overbound.
     pub loader_control_cpu_bytes: u64,
     pub loader_controls: gguf::ControlAccounting,
+    /// Shared descriptor/window category, included once in binding CPU.
+    pub descriptor_window_cpu_bytes: u64,
+    /// Loader-local summary bound: a subset, not an additional charge.
+    pub retained_summary_cpu_bytes: u64,
     /// Retained per-linear native controls, priced as separate Metal resources.
     /// Excludes shared resident weight views and per-request runtime buffers.
     pub binding_metal_bytes: u64,
@@ -418,6 +422,13 @@ fn plan_with_pricing(
     }
     let p = gguf::plan(gguf)?;
     p.validate_execution().map_err(LoadError::from)?;
+    let summary = gguf::retained_summary_bookkeeping(gguf, &p, &resident_storage)?;
+    let descriptor_window = sum(&[
+        product(resident_storage.windows.len() as u64, 4096).map_err(LoadError::Invalid)?,
+        product(gguf.tensors.len() as u64, 1024).map_err(LoadError::Invalid)?,
+    ])
+    .map_err(LoadError::Invalid)?;
+    let descriptor_window = summary.shared_cpu_envelope(descriptor_window);
     let preferred = super::prefill_rows_for_resident(p.bytes.resident_bytes());
     let calculate = |full_chunk_rows, executions: &[PrefillExecution]| -> Result<_> {
         let output = p
@@ -447,10 +458,7 @@ fn plan_with_pricing(
             product(p.config.vocab as u64, 32)?,
             binding_vectors_bytes(&p.config, p.schedule.layers)?,
             128 * 1024 * 1024,
-            // Also bounds the once-after-load live identity/length inventory;
-            // descriptors below cover bindings/digest serialization, not mmap bytes.
-            product(resident_storage.windows.len() as u64, 4096)?,
-            product(gguf.tensors.len() as u64, 1024)?,
+            descriptor_window,
             loader_control_cpu_bytes(p.controls)?,
         ])?;
         let binding_metal_bytes = binding_metal_bytes(p.binding_linears.values().copied(), price)?;
@@ -479,6 +487,8 @@ fn plan_with_pricing(
         combined.capacity = capacity;
         combined.executions = executions.to_vec();
         combined.loader_controls = p.controls;
+        combined.descriptor_window_cpu_bytes = descriptor_window;
+        combined.retained_summary_cpu_bytes = summary.cpu_bytes;
         combined.loader_control_cpu_bytes =
             loader_control_cpu_bytes(p.controls).map_err(LoadError::Invalid)?;
         Ok(combined)
@@ -598,6 +608,8 @@ fn combine_plan(
         binding_cpu_bytes,
         loader_control_cpu_bytes: 0,
         loader_controls: gguf::ControlAccounting::default(),
+        descriptor_window_cpu_bytes: 0,
+        retained_summary_cpu_bytes: 0,
         binding_metal_bytes,
         caller_cpu_bytes,
         required_metal_bytes,

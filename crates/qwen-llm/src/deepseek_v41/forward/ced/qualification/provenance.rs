@@ -342,6 +342,7 @@ pub(super) fn loader_compiled_sources() -> &'static [(&'static str, &'static [u8
         "crates/qwen-llm/src/deepseek_v41/gguf/engram.rs",
         "crates/qwen-llm/src/deepseek_v41/gguf/tests/gsq_loader.rs",
         "crates/qwen-llm/src/deepseek_v41/gguf/tests/binding_preflight.rs",
+        "crates/qwen-llm/src/deepseek_v41/gguf/retained_resources/tests.rs",
         "crates/qwen-llm/src/deepseek_v41/execution.rs",
         "crates/qwen-llm/src/deepseek_v41/forward/planning.rs",
         "crates/qwen-llm/src/deepseek_v41/forward/planning/tests.rs",

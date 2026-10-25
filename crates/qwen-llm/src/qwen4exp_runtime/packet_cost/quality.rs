@@ -1,5 +1,6 @@
 //! Teacher-forced characterization, not a task-quality or serial-identity gate.
 use super::*;
+use crate::compare::report_max_abs_diff_f64;
 use crate::qwen4exp_moe::router_capture::{self, Bank, EXPERTS, LAYERS, TOP_K};
 use repeatability::{Audit, Observation, State, completed_values, restore, state};
 
@@ -144,11 +145,7 @@ fn route_row(scores: &[f32], ids: &[i32], weights: &[f32]) -> serde_json::Value 
         .map(|&id| (f64::from(scores[id]) - max).exp())
         .collect();
     let sum: f64 = mass.iter().sum();
-    let weight_error = weights
-        .iter()
-        .zip(mass)
-        .map(|(&w, m)| (f64::from(w) - m / sum).abs())
-        .fold(0.0, f64::max);
+    let weight_error = report_max_abs_diff_f64(weights, mass.into_iter().map(|m| m / sum));
     json!({"ids":ids,"weights":weights,"weight_sum":weights.iter().map(|&w|f64::from(w)).sum::<f64>(),
         "softmax_f64_max_abs":weight_error,"cut_selected":order[TOP_K-1],"cut_excluded":order[TOP_K],
         "cut_margin":f64::from(scores[order[TOP_K-1]])-f64::from(scores[order[TOP_K]]),
@@ -252,7 +249,7 @@ pub(super) fn router_witness(
                 "packet_router_margin {}",
                 json!({"depth":base.length(),"width":tokens.len(),"hc_mode":mode.name(),"layer":layer,"row":row,
                 "baseline":route_row(sa,ia,&a.2[r*TOP_K..(r+1)*TOP_K]),"candidate":route_row(sb,ib,&b.2[r*TOP_K..(r+1)*TOP_K]),
-                "max_score_delta":sa.iter().zip(sb).map(|(&a,&b)|(f64::from(a)-f64::from(b)).abs()).fold(0.0,f64::max),
+                "max_score_delta":report_max_abs_diff_f64(sa,sb),
                 "ordered_ids_equal":ia==ib,"switched":switched,"timing_eligible":false,
                 "scope":"same model weights, raw packed router logits, selected-softmax weights; no near-tie threshold"})
             );
@@ -354,6 +351,62 @@ pub(super) fn rolling(
             "route_rows_changed_vs_baseline":route_switched_rows,"timing_eligible":false,"quality_threshold":null,
             "scope":"64 common corpus inputs, one prefix restore per arm, native scalar reference not author truth; no sampled rollout claim"})
         );
+    }
+}
+
+#[test]
+fn acceptance_source_cpu_router_reporters_preserve_f64_and_report_only_scope() {
+    let scores = vec![0.0; EXPERTS];
+    let ids: Vec<_> = (0..TOP_K as i32).collect();
+    let weights = vec![0.1f32; TOP_K];
+    let route = route_row(&scores, &ids, &weights);
+    assert_eq!(
+        route["softmax_f64_max_abs"],
+        (f64::from(0.1f32) - 1.0 / TOP_K as f64).abs()
+    );
+    assert_eq!(route["ids"], json!(ids));
+    assert_eq!(route["weights"], json!(weights));
+    assert_eq!(route["cut_margin"], 0.0);
+    assert_eq!(route["cut_selected"], TOP_K - 1);
+    assert_eq!(route["cut_excluded"], TOP_K);
+    assert_eq!(route["top11"].as_array().unwrap().len(), TOP_K + 1);
+    assert_eq!(report_max_abs_diff_f64([1.0f32, -2.0], [0.5f32, 3.0]), 5.0);
+    assert_eq!(
+        report_max_abs_diff_f64([f32::MAX], [-f32::MAX]),
+        2.0 * f64::from(f32::MAX)
+    );
+    let drift = route_row(&scores, &ids, &vec![100.0; TOP_K]);
+    assert_eq!(drift["softmax_f64_max_abs"], 100.0 - 1.0 / TOP_K as f64);
+}
+
+#[test]
+fn acceptance_source_cpu_router_reporters_poison_invalid_metrics_and_keep_input_checks() {
+    for (actual, expected) in [
+        (&[][..], &[][..]),
+        (&[0.0f32][..], &[][..]),
+        (&[][..], &[0.0f32][..]),
+    ] {
+        assert!(report_max_abs_diff_f64(actual, expected).is_nan());
+    }
+    let scores = vec![0.0; EXPERTS];
+    let ids: Vec<_> = (0..TOP_K as i32).collect();
+    let weights = vec![0.1; TOP_K];
+    for (s, i, w) in [
+        (&scores[..EXPERTS - 1], &ids[..], &weights[..]),
+        (&scores[..], &ids[..TOP_K - 1], &weights[..]),
+        (&scores[..], &ids[..], &weights[..TOP_K - 1]),
+    ] {
+        assert!(std::panic::catch_unwind(|| route_row(s, i, w)).is_err());
+    }
+    for invalid in [f32::NAN, f32::INFINITY, f32::NEG_INFINITY] {
+        assert!(report_max_abs_diff_f64([invalid], [0.0f32]).is_nan());
+        assert!(report_max_abs_diff_f64([0.0f32], [invalid]).is_nan());
+        let mut bad = scores.clone();
+        bad[EXPERTS - 1] = invalid;
+        assert!(std::panic::catch_unwind(|| route_row(&bad, &ids, &weights)).is_err());
+        let mut bad = weights.clone();
+        bad[TOP_K - 1] = invalid;
+        assert!(std::panic::catch_unwind(|| route_row(&scores, &ids, &bad)).is_err());
     }
 }
 

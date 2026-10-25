@@ -369,40 +369,56 @@ mod tests {
                             [r.start, r.len(), plan.publication_layer, 0],
                         );
                     }
-                    let scalar_tail = plan.scalar_tail();
-                    for layer in &plan.decoder {
-                        let mut fuse = layer.fuse_seed_with_packed_output(n, plan.full_chunk_rows);
-                        if !fuse {
-                            for view in chunk_views(layer.seed_rows.clone(), chunk).unwrap() {
-                                let r = view.absolute_rows;
-                                emit("ced_local_seed", [layer.layer, r.start, r.len(), 0]);
-                            }
-                        }
-                        for view in chunk_views(
-                            layer.output_rows.start..scalar_tail.unwrap_or(layer.output_rows.end),
-                            chunk,
-                        )
-                        .unwrap()
-                        {
-                            let r = view.absolute_rows;
-                            drop(Wall("ced_block_rows_allocate", [0; 4], start()));
+                    let selected = super::super::gpu_step::ced::batch_selection(&plan).unwrap();
+                    if selected.layers != 0 {
+                        for group in plan.decoder.chunks(selected.layers) {
+                            let range = group[0].layer..group.last().unwrap().layer + 1;
+                            let units =
+                                super::super::ced_plan::batches::units(&plan, range.clone())
+                                    .unwrap();
                             emit(
-                                if fuse {
-                                    "ced_seed_decoder_rows"
-                                } else {
-                                    "ced_decoder_rows"
-                                },
-                                [
-                                    layer.layer,
-                                    r.start,
-                                    r.len(),
-                                    if fuse { layer.seed_rows.len() } else { 0 },
-                                ],
+                                "ced_decoder_batch",
+                                [range.start, range.len(), units.len(), 0],
                             );
-                            fuse = false;
                         }
-                        if let Some(position) = scalar_tail {
-                            emit("ced_decoder_scalar", [layer.layer, position, 1, 0]);
+                    } else {
+                        let scalar_tail = plan.scalar_tail();
+                        for layer in &plan.decoder {
+                            let mut fuse =
+                                layer.fuse_seed_with_packed_output(n, plan.full_chunk_rows);
+                            if !fuse {
+                                for view in chunk_views(layer.seed_rows.clone(), chunk).unwrap() {
+                                    let r = view.absolute_rows;
+                                    emit("ced_local_seed", [layer.layer, r.start, r.len(), 0]);
+                                }
+                            }
+                            for view in chunk_views(
+                                layer.output_rows.start
+                                    ..scalar_tail.unwrap_or(layer.output_rows.end),
+                                chunk,
+                            )
+                            .unwrap()
+                            {
+                                let r = view.absolute_rows;
+                                drop(Wall("ced_block_rows_allocate", [0; 4], start()));
+                                emit(
+                                    if fuse {
+                                        "ced_seed_decoder_rows"
+                                    } else {
+                                        "ced_decoder_rows"
+                                    },
+                                    [
+                                        layer.layer,
+                                        r.start,
+                                        r.len(),
+                                        if fuse { layer.seed_rows.len() } else { 0 },
+                                    ],
+                                );
+                                fuse = false;
+                            }
+                            if let Some(position) = scalar_tail {
+                                emit("ced_decoder_scalar", [layer.layer, position, 1, 0]);
+                            }
                         }
                     }
                     drop(emit);

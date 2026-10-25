@@ -30,6 +30,7 @@ EXCLUDED_VARIABLES = {
 }
 EXCLUDED_PREFIXES = ("MTL_", "CARGO_")
 FAMILIES = (
+    "deepseek_v41",
     "deepseek_v4",
     "qwen4exp",
     "glm",
@@ -42,6 +43,18 @@ FAMILIES = (
     "metal",
     "cli",
 )
+REQUIRED_V41_SWITCHES = {
+    "QWEN_V41_CENSUS",
+    "QWEN_V41_DENSE_NARROW",
+    "QWEN_V41_EXPERT_WIDE",
+    "QWEN_V41_PREFILL_STAGES",
+    "QWEN_V41_SELECT_FUSE_2048",
+    "QWEN_V41_SELECT_PER_ROW",
+    "QWEN_V41_SELECT_SPLIT_SORT",
+    "QWEN_V41_SINK_TENSOR",
+    "QWEN_V41_SINK_TENSOR32",
+    "QWEN_V41_SINK_TILE",
+}
 
 
 @dataclass
@@ -326,7 +339,8 @@ def parse_env_flag(
         index = attr_end + 1
     if (
         index + 1 >= len(declaration)
-        or declaration[index].value not in ("default_on", "default_off", "perf_ablation")
+        or declaration[index].value
+        not in ("default_on", "default_off", "perf_ablation")
         or declaration[index + 1].kind != "ident"
         or len(declaration) != index + 2
         or len(variable) != 1
@@ -400,23 +414,25 @@ def self_test() -> None:
     assert const_docs(
         '#[doc = "Attribute purpose."]\nconst NAME: &str = "QWEN_SELF_TEST";'
     ) == ["Attribute purpose."]
-    assert const_docs(
-        '//// Not documentation.\nconst NAME: &str = "QWEN_SELF_TEST";'
-    ) == []
-    assert const_docs(
-        '/*\n/// Inside a block comment.\n*/\nconst NAME: &str = "QWEN_SELF_TEST";'
-    ) == []
-    assert const_docs(
-        '/*\n/// bogus\n*/ const NAME: &str = "QWEN_EDGE";'
-    ) == []
+    assert (
+        const_docs('//// Not documentation.\nconst NAME: &str = "QWEN_SELF_TEST";')
+        == []
+    )
+    assert (
+        const_docs(
+            '/*\n/// Inside a block comment.\n*/\nconst NAME: &str = "QWEN_SELF_TEST";'
+        )
+        == []
+    )
+    assert const_docs('/*\n/// bogus\n*/ const NAME: &str = "QWEN_EDGE";') == []
     assert const_docs(
         'const PREFIX: &str = "/*";\n'
-        '/// Legitimate purpose after a string opener.\n'
+        "/// Legitimate purpose after a string opener.\n"
         'const NAME: &str = "QWEN_SELF_TEST";'
     ) == ["Legitimate purpose after a string opener."]
     assert const_docs(
-        '// opener /*\n'
-        '/// Legitimate purpose after a line-comment opener.\n'
+        "// opener /*\n"
+        "/// Legitimate purpose after a line-comment opener.\n"
         'const NAME: &str = "QWEN_SELF_TEST";'
     ) == ["Legitimate purpose after a line-comment opener."]
     assert const_docs(
@@ -439,6 +455,20 @@ def self_test() -> None:
         "two.rs",
     )
     assert declared["QWEN_DUP"][2] == "first purpose"
+    knobs = {
+        name: Knob(name, "value", "example.rs", 1, "test")
+        for name in REQUIRED_V41_SWITCHES
+    }
+    reference = render(knobs, "12345678")
+    assert reference_matches(reference, render(knobs, "abcdef00"))
+    for name in knobs:
+        missing = (
+            "\n".join(
+                line for line in reference.splitlines() if f"`{name}`" not in line
+            )
+            + "\n"
+        )
+        assert not reference_matches(missing, reference), name
     print("env_knobs scanner self-tests: passed")
 
 
@@ -1028,8 +1058,8 @@ def collect() -> tuple[dict[str, Knob], list[tuple[str, str, str, int, str]]]:
 
     declared_flags: dict[str, tuple[str, int, str]] = {}
     for rel, text, _, lines, tokens, test_ranges in sources:
-        scope_at = (
-            lambda offset: "test-only"
+        scope_at = lambda offset: (
+            "test-only"
             if path_is_test(rel, test_files) or in_ranges(offset, test_ranges)
             else "runtime"
         )
@@ -1282,6 +1312,15 @@ def render(knobs: dict[str, Knob], revision: str) -> str:
     return "\n".join(rows) + "\n"
 
 
+def reference_matches(existing: str, rendered: str) -> bool:
+    def normalized(value: str) -> str:
+        return re.sub(
+            r"at source revision `[0-9a-f]+`", "at source revision `<revision>`", value
+        )
+
+    return normalized(existing) == normalized(rendered)
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument(
@@ -1298,6 +1337,13 @@ def main() -> int:
         self_test()
         return 0
     knobs, conflicts = collect()
+    missing = REQUIRED_V41_SWITCHES - knobs.keys()
+    if missing:
+        print(
+            f"env_knobs: scanner missed maintained V41 switches: {sorted(missing)}",
+            file=sys.stderr,
+        )
+        return 1
     revision = subprocess.check_output(
         ["git", "rev-parse", "--short", "HEAD"], cwd=ROOT, text=True
     ).strip()
@@ -1305,10 +1351,7 @@ def main() -> int:
     target = args.output or ROOT / "docs/ENV.md"
     if args.check:
         existing = target.read_text(encoding="utf-8") if target.exists() else ""
-        normalize_revision = lambda value: re.sub(
-            r"at source revision `[0-9a-f]+`", "at source revision `<revision>`", value
-        )
-        if normalize_revision(existing) != normalize_revision(rendered):
+        if not reference_matches(existing, rendered):
             print("docs/ENV.md is stale; run the generator", file=sys.stderr)
             return 1
     else:

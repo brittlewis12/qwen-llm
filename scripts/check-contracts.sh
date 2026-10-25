@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# Structural contracts that need no GPU or model, checked on the committed
+# Structural and exact-inventory CPU contracts, with no GPU or model execution,
+# checked on the committed
 # tree: no machine-specific paths in code, scripts or maintained docs,
 # formatting, the generated knob reference, the model-witness and path
 # normalizer self-tests, and the numeric comparison tripwire. `--full` also
@@ -96,6 +97,7 @@ check_tree_has_no_match "home-directory checkout path expression found outside d
 check_tree_has_no_match "relative model-directory literal found in Rust or scripts" "$relative_model_pattern"
 
 cargo fmt --all --check
+uv run scripts/reference/env_knobs.py --self-test
 uv run scripts/reference/env_knobs.py --check
 uv run scripts/reference/identity_gates.py --self-test
 uv run scripts/reference/identity_gates.py --check
@@ -103,12 +105,20 @@ uv run scripts/model-witnesses.py --self-test
 uv run scripts/qualification-witnesses.py --self-test
 uv run scripts/reference/normalize_paths.py --self-test
 uv run scripts/reference/normalize_paths.py --check
+uv run scripts/reference/acceptance_inventory.py --self-test
 uv run --no-project python scripts/reference/deepseek_v41/check.py
+cpu_leased() {
+  QWEN_METAL_LEASE_WAIT=1 uv run scripts/bench/with-metal-lease -- "$@"
+}
+# Discovery checks every full name and ignore state before executing only CPU
+# entries. GPU, model, timing and external-fixture witnesses remain explicit
+# exclusions, including self-leased tests which must not inherit this lease.
+cpu_leased uv run scripts/reference/acceptance_inventory.py
 if [ "$full" -eq 1 ]; then
-  cargo test --release --workspace --no-run
+  cpu_leased cargo test --release --workspace --no-run
   release_qwen=$(
-    cargo build --release -p qwen-cli --bin qwen --message-format=json |
-      python3 -c '
+    cpu_leased cargo build --release -p qwen-cli --bin qwen --message-format=json |
+      uv run --no-project python -c '
 import json
 import sys
 
@@ -160,22 +170,11 @@ print(executables[0])
   fi
 fi
 
-cargo test --release -p qwen-llm --test comparison_tripwire
-status=0
-# Keep validation-incompatible opt-in timing probes outside correctness coverage.
-output=$(cargo test --release -p qwen-llm --lib deepseek_v41:: -- \
-  --skip gguf_scalar_rowwise_grouped_prefill_diagnostic \
-  --skip deepseek_v41::forward::attention_gpu::tests::f32_pv_batch::f32_pv_batch_performance 2>&1) || status=$?
-printf '%s\n' "$output"
-[ "$status" -eq 0 ] || exit "$status"
-if ! grep -Eq '^test result: ok\. [1-9][0-9]* passed; 0 failed; 0 ignored' <<<"$output"; then
-  echo "check-contracts: V4.1 model-free tests did not execute without skips" >&2
-  exit 1
-fi
+cpu_leased cargo test --release -p qwen-llm --test comparison_tripwire
 if [ "$full" -eq 1 ]; then
   readme_test=family_profile::tests::readme_family_table_matches_profiles
   status=0
-  output=$(cargo test --release -p qwen-cli --bin qwen -- --exact "$readme_test" 2>&1) ||
+  output=$(cpu_leased cargo test --release -p qwen-cli --bin qwen -- --exact "$readme_test" 2>&1) ||
     status=$?
   printf '%s\n' "$output"
   [ "$status" -eq 0 ] || exit "$status"

@@ -177,7 +177,10 @@ fn capture_library_records_explicit_checkpoints() {
 fn capture_suffix_calls_preserve_all_history_and_checkpoint_inventory() {
     for (positions, calls) in [
         (&super::super::BATCH_POSITIONS[..], &[16383, 3][..]),
-        (&super::super::suffix::RING_POSITIONS[..], &[127, 257][..]),
+        (
+            &super::super::suffix::RING_POSITIONS[..],
+            &super::super::suffix::RING_CALLS[..],
+        ),
     ] {
         let temp = Temp::new();
         let root = temp.0.join("suffix");

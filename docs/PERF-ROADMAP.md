@@ -28,8 +28,8 @@ before building anything adjacent. This replaces relaying between sessions.
 
 ### DeepSeek V4.1-Flash (main after the 4096-row chunk and 64-slot gate/up: pp2048 Q2 877.3 / IQ3 852 (not re-measured), pp4096 Q2 890.2 / IQ3 896.8; decode rechecked tg32 Q2 43.2 / IQ3 41.0, depth tg32@d2048 41.6 from the prior landing)
 
-GSQ-RCO release bring-up: loader bridge landed (`0079569a`); IQ1 expert wiring
-remains in flight (`feat/v41-iq1-experts`), pinned HF revision
+GSQ-RCO release bring-up: loader bridge and IQ1 expert wiring landed
+(`0079569a`, `d1ad718c`), pinned HF revision
 `cb02422c900df489cea5833e8a92171224059b3c`.
 Reuse established Flash-Next standard-GGUF/GSQ-RCO machinery and IQ1 codecs;
 this is DeepSeek-specific source/control and expert-bank wiring, not a new
@@ -51,6 +51,12 @@ private shadow zero, with the companion disk-only. These ordered validation-on
 pairs are not quality or performance evidence and do not ship the CED executor;
 see
 [the serialization and ownership contract](DEEPSEEK-V41-GSQ-LOADER.md).
+IQ1_S/M adapters reuse the canonical decoder and pass M4/M5 witnesses, including
+65 distinct M5 checks across overlapping filters. Joint CPU plans accept both
+XS/XXS variants; smaller full IQ1 artifacts are not execution-qualified. The
+smallest build's audited weight views are about 112.425 GiB, leaving only
+5.575 GiB below a 118 GiB MWSS before runtime/CPU costs. This is capacity
+reconnaissance, not a fit guarantee or permission to change admission.
 
 CED encoder-only bulk prefill is the leading architectural opportunity.
 Design/dependency recon: landed (2026-10-23 CED entry;

@@ -161,3 +161,25 @@ The other six preserve the existing all-format grouped/dense comparison
 fixtures. The existing `wide_activation_type` M5 filters remain applicable
 and unchanged. These local results remain distinct from the later parent
 M5 execution recorded in `docs/V41-IQ1-CAPABILITY-CENSUS.md`.
+
+## Parent M5 Checkpoint
+
+On 2026-10-25, the corrected standalone source
+`791251c46dd42fa0e08bc9d429a773f5db7cf469` completes a fresh native M5 run under
+Metal API validation. Filters pass 33 focused checks, nine ignored witnesses,
+26 native-module checks and three wide activation-type checks. The nine include
+the eight required tensor witnesses plus the existing embedding role witness.
+There are 65 distinct passing tests after accounting for overlapping filters.
+The stale CPU capability expectation and the earlier runner's eight-versus-nine
+census error remain preserved rather than being called GPU failures or hidden.
+
+Frozen executable SHA256:
+`7596e7fb9aa154467cf62f55527c8e602d0fbb3ea3556b8862d35785e202e3cb`.
+Private evidence labels are `iq1-m5-{default,tensor,native-regressions,wide-types}-v28.*`,
+`iq1-experts-v28-core.identity.json` and `iq1-m5-v28-local-summary.json`.
+
+Main `d1ad718c` integrates the reviewed source-equal joint loader composition.
+Joint M4/CPU checks and the measured source bridge do not become a fresh joint
+M5 full-model result. No full IQ1 artifact, held-text quality, speed or smaller
+device fit is certified by these witnesses. A future CDFwd join must still add
+the new IQ1 sources to both active compiled-source inventories before execution.

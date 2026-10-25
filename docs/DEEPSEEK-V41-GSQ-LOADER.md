@@ -131,6 +131,36 @@ Ordered validation-on timings are diagnostic only. No quality, native-speed,
 full-1M-context or CED-default claim follows, and the CED executor remains on its
 separate branch rather than being shipped by the main loader bridge.
 
+Main `d1ad718c` also provides the missing indexed IQ1_S/M expert adapters through
+the existing canonical decoder. Both saved XS/XXS sparse contracts now accept
+all 120 banks, with 60 IQ1_M banks in XXS. M4 and standalone M5 primitive
+witnesses pass; this is eligibility, not full-weight XXS or IQ1_M-budget model
+qualification. Their logits do not inherit the separate IQ2_XS Full/CED proof.
+
+### Smallest-Build Capacity Audit
+
+Four bounded 16 MiB IQ1_M-budget prefixes at the pinned revision expose all
+1008 descriptors and complete controls, but no complete expert bank or full
+weight hash. Controls and non-expert geometry match XS/XXS. Expert banks are
+83 IQ1_S, 15 IQ1_M, 20 IQ2_XXS and two IQ2_S.
+
+Retained backbone payload is 120715284928 bytes (112.424870 GiB). A transcription
+of the current page planner at page size 16384 and a 72 GiB hardware buffer
+limit gives four shared EOF windows totaling 120715345920 bytes, with no
+hypothetical private shadow. This transcription reproduces the measured XS
+window total; it is not executed Rust/device planning or actual import evidence.
+At 118 GiB MWSS the weight-only remainder is 5986189312 bytes (5.575073 GiB).
+An independent separate-tensor page-view upper bound leaves 5969805312 bytes.
+
+M4 generic-path KV/Full/CED scratch, CPU staging/metadata, driver costs and live
+host ownership remain unmeasured. M5 tensor-half scratch is not substituted as
+an M4 bound. No actual device-fit, execution or full-context claim follows, and
+no reserve, context reduction, pinning or admission change is assumed. Complete
+backbone plus shared auxiliary files require 231316411072 disk bytes; Engram
+remains disk-only, not an additional resident model weight allocation.
+
+### Loader Regression Coverage
+
 CPU fixtures cover inline/tensor equivalence, large exact integers, malformed
 controls, offsets and aliases, four backbone shards plus a separate companion,
 source/architecture/path/geometry failures, ambiguity/duplicates, retained FDs,

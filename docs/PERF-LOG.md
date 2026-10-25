@@ -6,6 +6,31 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the current state and evidence index.
 
+## 2026-10-25 - Existing IQ1 Codecs Reach Indexed Expert Execution
+
+- Main `d1ad718c` adds IQ1_S/M native scalar/rows, generic half, and M5 tensor/
+  wide expert adapters using the byte-identical extracted canonical decoder.
+  Dense entrypoint math remains unchanged. No CPU route readback, full-bank
+  materialization, weight shadow, new quant format or memory policy is added.
+- Seven shared grouped bodies now reject negative/out-of-capacity counts before
+  ID reads. Genuine M4 red/green evidence exposes then removes an erroneous
+  malformed-expert write. Assigned-only comparison and independent capability
+  expectations are corrected without relaxing numerical tolerances.
+- Fresh M5 source `791251c4` passes 33 focused tests, nine ignored witnesses
+  (eight tensor plus one legacy embedding), 26 native regressions and three
+  activation-type checks: 65 distinct tests after overlap adjustment. Frozen
+  binary SHA256 is `7596e7fb9aa154467cf62f55527c8e602d0fbb3ea3556b8862d35785e202e3cb`.
+- Reviewed joint composition preserves all 21 IQ1 task-source hashes, loader
+  and concurrent selector sources. It passes 63 GGUF CPU checks, both-variant
+  sparse replay, 15 CLI tests, exhaustive capability matrix, all-target compile
+  and two joint M4 GPU fixtures. Eligibility is not full IQ1-model qualification.
+- Bounded smallest-build headers establish 112.425 GiB weight views under the
+  source-derived page plan, not executed Rust/device planning. Only 5.575 GiB
+  remains below 118 GiB MWSS before unmeasured runtime/CPU/driver costs; no fit
+  waiver, hidden context reduction or whole-Engram import is proposed.
+- [Adapter and M5 evidence boundaries](V41-IQ1-EXPERT-ADAPTERS.md),
+  [joint loader integration](V41-GSQ-IQ1-INTEGRATION.md).
+
 ## 2026-10-25 - Single-Panel Adaptive Tail Leaf Does Not Earn Promotion
 
 - Probe `e65eb300` retains full panels and selects a single 16/32/64-slot

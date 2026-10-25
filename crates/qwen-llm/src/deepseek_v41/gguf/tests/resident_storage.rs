@@ -1,7 +1,249 @@
 use super::*;
 
-const PAGE: usize = 16_384;
-const M5_MAX_BUFFER_LENGTH: usize = 179_357_827_072;
+pub(super) const PAGE: usize = 16_384;
+pub(super) const M5_MAX_BUFFER_LENGTH: usize = 179_357_827_072;
+
+pub(super) fn preflight_signals() -> metal::MetalMemorySignals {
+    metal::MetalMemorySignals {
+        recommended_max_bytes: 1 << 40,
+        current_allocated_bytes: 0,
+        process_limit_remaining_bytes: Some(0),
+        host_budget: Some(metal::HostMemoryBudget {
+            physical_bytes: 1 << 40,
+            conservative_available_bytes: 1 << 40,
+            external_gap_bytes: 0,
+            private_shadow_bytes: 0,
+        }),
+    }
+}
+
+#[test]
+fn cold_preflight_uses_validated_small_metadata_without_import_or_new_maps() {
+    use crate::deepseek_v41::forward::{PrefillExecution, preflight};
+    for engram in [false, true] {
+        let g = fixture(1, GgmlType::F32, 2, engram);
+        assert!(g.shards[0].mmap_len() < 4 * 1024 * 1024);
+        let refs = Arc::strong_count(&g.shards[0].mmap);
+        let storage = resident_storage_plan(&g, PAGE, M5_MAX_BUFFER_LENGTH).unwrap();
+        let cold = preflight::preflight_with_pricing(
+            &g,
+            storage.clone(),
+            8,
+            16,
+            &[
+                PrefillExecution::FullForward,
+                PrefillExecution::ShrinkingCed,
+            ],
+            334_226_432,
+            true,
+            &Ok,
+            preflight_signals(),
+        )
+        .unwrap();
+        assert_eq!(cold.resident_storage, storage);
+        assert_eq!(cold.caller_cpu_bytes, 334_226_432);
+        assert_eq!(cold.binding_metal_bytes, 0);
+        assert_eq!(Arc::strong_count(&g.shards[0].mmap), refs);
+        assert!(cold.ced.is_none()); // One-layer metadata has no decoder split.
+        assert_eq!(
+            cold.runtime_metal_bytes,
+            cold.request.metal_bytes + cold.full_incremental_metal_bytes
+        );
+        assert_eq!(
+            cold.runtime_cpu_bytes,
+            cold.request.cpu_bytes + cold.full_incremental_cpu_bytes
+        );
+        assert_eq!(
+            cold.required_metal_bytes,
+            storage.metal_view_bytes + cold.binding_metal_bytes + cold.runtime_metal_bytes
+        );
+        assert_eq!(
+            cold.required_cpu_bytes,
+            storage.private_shadow_bytes
+                + cold.binding_cpu_bytes
+                + cold.runtime_cpu_bytes
+                + 334_226_432
+        );
+        assert_eq!(
+            cold.load_metal_bytes,
+            storage.metal_view_bytes + cold.binding_metal_bytes
+        );
+        assert_eq!(
+            cold.load_cpu_bytes,
+            storage.private_shadow_bytes + cold.binding_cpu_bytes + cold.caller_cpu_bytes
+        );
+        assert_eq!(
+            cold.runtime_gate_cpu_bytes,
+            cold.runtime_cpu_bytes + cold.binding_cpu_bytes + cold.caller_cpu_bytes
+        );
+        let mut staged = preflight_signals();
+        let host = staged.host_budget.as_mut().unwrap();
+        // Fresh availability covers the load exactly, but not the future runtime peak.
+        host.conservative_available_bytes = cold.load_cpu_bytes;
+        let assessment = cold.plan.assess_load(staged).unwrap();
+        assert!(assessment.load_admission.is_admitted());
+        assert!(!assessment.whole_peak_now.is_admitted());
+        assert_eq!(Arc::strong_count(&g.shards[0].mmap), refs);
+        let p = plan(&g).unwrap();
+        assert_ne!(
+            cold.request,
+            p.config.estimate_request_memory_with_gpu_step(16).unwrap()
+        );
+    }
+}
+
+#[test]
+fn combined_preflight_refuses_before_injected_import_with_typed_telemetry_errors() {
+    use crate::deepseek_v41::forward::{PrefillExecution, preflight};
+    let g = fixture(1, GgmlType::F32, 2, false);
+    let storage = resident_storage_plan(&g, PAGE, M5_MAX_BUFFER_LENGTH).unwrap();
+    let run = |signals| {
+        preflight::preflight_with_pricing(
+            &g,
+            storage.clone(),
+            8,
+            16,
+            &[PrefillExecution::FullForward],
+            334_226_432,
+            false,
+            &Ok,
+            signals,
+        )
+    };
+    let admitted = run(preflight_signals()).unwrap();
+    let total = admitted.required_metal_bytes + admitted.required_cpu_bytes;
+    let mut short = preflight_signals();
+    let host = short.host_budget.as_mut().unwrap();
+    host.physical_bytes = total - 1;
+    host.conservative_available_bytes = total - 1;
+    assert_eq!(short.host_remaining_bytes(), Some(total - 1));
+    // Each side fits alone, but the preweight combined host exposure does not.
+    assert!(
+        metal::evaluate_metal_memory_admission_with_cpu_bytes(
+            admitted.required_metal_bytes,
+            0,
+            0,
+            short,
+            true
+        )
+        .is_admitted()
+    );
+    assert!(
+        metal::evaluate_metal_memory_admission_with_cpu_bytes(
+            0,
+            admitted.required_cpu_bytes,
+            0,
+            short,
+            true
+        )
+        .is_admitted()
+    );
+    let mut short_cpu = preflight_signals();
+    short_cpu
+        .host_budget
+        .as_mut()
+        .unwrap()
+        .conservative_available_bytes = admitted.required_cpu_bytes - 1;
+    let mut missing = preflight_signals();
+    missing.host_budget = None;
+    let mut invalid = preflight_signals();
+    invalid.recommended_max_bytes = 0;
+    let mut invalid_host = preflight_signals();
+    invalid_host.host_budget.as_mut().unwrap().physical_bytes = 0;
+    let mut missing_process = preflight_signals();
+    missing_process.process_limit_remaining_bytes = None;
+    for signals in [
+        short,
+        short_cpu,
+        missing,
+        invalid,
+        invalid_host,
+        missing_process,
+    ] {
+        let called = std::cell::Cell::new(false);
+        let outcome = run(signals).map(|_| {
+            called.set(true);
+        });
+        let error = outcome.unwrap_err();
+        assert!(error.as_memory_admission().is_some(), "{error}");
+        assert!(!called.get(), "weight import callback ran after refusal");
+    }
+}
+
+#[test]
+fn cold_preflight_rejects_context_overflow_and_invalid_projection_metadata() {
+    use crate::deepseek_v41::forward::{PrefillExecution, preflight};
+    let mut g = fixture(1, GgmlType::F32, 2, true);
+    let storage = resident_storage_plan(&g, PAGE, M5_MAX_BUFFER_LENGTH).unwrap();
+    for (prompt, capacity, caller) in [(0, 16, 0), (17, 16, 0), (8, 1048577, 0), (8, 16, u64::MAX)]
+    {
+        assert!(
+            preflight::preflight_with_pricing(
+                &g,
+                storage.clone(),
+                prompt,
+                capacity,
+                &[PrefillExecution::FullForward],
+                caller,
+                false,
+                &Ok,
+                preflight_signals(),
+            )
+            .is_err()
+        );
+    }
+    let tensor = Arc::get_mut(&mut g)
+        .unwrap()
+        .tensors
+        .iter_mut()
+        .find(|t| t.name == "blk.0.engram_kv.weight")
+        .unwrap();
+    tensor.shape[0] = 32;
+    assert!(
+        preflight::preflight_with_pricing(
+            &g,
+            storage,
+            8,
+            16,
+            &[PrefillExecution::FullForward],
+            0,
+            false,
+            &Ok,
+            preflight_signals(),
+        )
+        .is_err()
+    );
+}
+
+#[test]
+#[ignore = "self-leased tiny GGUF preflight/binding parity; debug validation required; no full model"]
+fn bounded_gpu_preflight_request_matches_loaded_metadata_estimator() {
+    use crate::deepseek_v41::forward::{Forward, PrefillExecution, preflight_cold_prefill};
+    assert_eq!(std::env::var("MTL_DEBUG_LAYER").as_deref(), Ok("1"));
+    assert_eq!(std::env::var("QWEN_METAL_LEASE_WAIT").as_deref(), Ok("1"));
+    assert!(!crate::env_flag::read_default_off(
+        "QWEN_METAL_LEASE_SKIP_WIRED_GATE"
+    ));
+    let _lease =
+        metal::acquire_metal_benchmark_lease().expect("tiny GGUF preflight/binding parity lease");
+    let ctx = MetalContext::new().unwrap();
+    for engram in [false, true] {
+        objc2::rc::autoreleasepool(|_| {
+            let g = fixture(1, GgmlType::F32, 2, engram);
+            let cold = preflight_cold_prefill(&ctx, &g, 8, 16, &[PrefillExecution::FullForward], 0)
+                .unwrap();
+            assert!(cold.resident_storage.metal_view_bytes < 4 << 20);
+            let weights = ResidentWeights::load(&ctx, Arc::clone(&g)).unwrap();
+            let model =
+                Forward::from_resident(&ctx, &weights, weights.token_map.clone(), weights.raw_pad)
+                    .unwrap();
+            assert_eq!(
+                cold.request,
+                model.estimate_request_memory_with_gpu_step(16).unwrap()
+            );
+        });
+    }
+}
 
 fn check_counts(g: &GgufFile, max_buffer_length: usize) -> ResidentStoragePlan {
     let p = plan(g).unwrap();

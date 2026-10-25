@@ -1,10 +1,17 @@
 //! Encode-only F32 attention. Workspace metadata is provisional: a failed encode
 //! or command completion requires the caller to poison/discard the workspace.
 use super::super::gguf::Schedule;
+use super::prefill::RowsArithmetic;
 use super::*;
 use objc2_metal::{MTLComputePipelineState, MTLSize};
 
+mod ced;
 mod query_batch;
+pub(super) use ced::{
+    GlobalKvMode, PublicationRows, QueryControlView, QueryControls, SeedRows, ced_group_cpu_bytes,
+};
+#[cfg(test)]
+pub(super) use query_batch::with_f32_attention;
 #[cfg(test)]
 mod tests;
 
@@ -33,6 +40,7 @@ pub(super) struct Workspace {
     next_layer: usize,
     next_position: usize,
     batch: Option<BatchCursor>,
+    ced: Option<ced::Cursor>,
     constants: Vec<Constants>,
     raw: MetalTensor,
     owners: Vec<OwnerCache>,
@@ -168,13 +176,83 @@ pub(super) struct Rows {
     index_weights: MetalTensor,
     /// One index-score row per selection tile row (capacity elements each).
     select_scores: MetalTensor,
+    select_pairs: Option<MetalTensor>,
     /// Half copies of projection inputs for the tensor tile; `None` when
     /// the tier is not selected.
     half: Option<prefill::HalfScratch>,
+    // Constructor provenance; checked views must not silently lose half staging.
+    half_required: bool,
     rows: usize,
+    geometry: [usize; 14],
+    arithmetic: RowsArithmetic,
+    controls: Option<QueryControlView>,
+    history: std::cell::Cell<Option<ced::HistoryRange>>,
 }
 
 impl Rows {
+    fn geometry(c: &Config, capacity: usize) -> [usize; 14] {
+        [
+            c.hidden,
+            c.heads,
+            c.head_dim,
+            c.query_rank,
+            c.output_rank,
+            c.groups,
+            c.index_heads,
+            c.index_dim,
+            c.index_topk,
+            c.window,
+            c.candidate_block,
+            c.candidate_topk,
+            c.rope_dim,
+            capacity,
+        ]
+    }
+
+    fn prefix_widths(c: &Config, capacity: usize) -> Result<Vec<usize>> {
+        op::require(
+            capacity > 0
+                && capacity <= u32::MAX as usize / 8
+                && Self::geometry(c, capacity)[..12]
+                    .iter()
+                    .all(|&n| n > 0 && n <= u32::MAX as usize / 4)
+                && c.heads.is_multiple_of(c.groups),
+            "attention prefix geometry/capacity",
+        )?;
+        let query = checked_product(&[c.heads, c.head_dim])?;
+        let low = checked_product(&[c.groups, c.output_rank])?;
+        let index = checked_product(&[c.index_heads, c.index_dim])?;
+        Ok(vec![
+            c.query_rank,
+            query,
+            c.head_dim,
+            c.index_topk,
+            capacity.div_ceil(c.candidate_block),
+            low,
+            query,
+            low,
+            c.head_dim,
+            c.head_dim,
+            index,
+            c.index_heads,
+        ])
+    }
+
+    /// CED borrows the two retained I32 controls instead of allocating them.
+    pub(super) fn widths_with_controls(c: &Config, capacity: usize) -> Vec<usize> {
+        Self::widths(c, capacity)
+            .into_iter()
+            .enumerate()
+            .filter_map(|(i, width)| (!matches!(i, 3 | 4)).then_some(width))
+            .collect()
+    }
+
+    /// Grouped buffers are rewritten in full by finish_rows. A changed tile
+    /// starts with no valid history or derived layout from its previous origin.
+    pub(super) fn reset_grouped_layouts(&self) {
+        self.history.set(None);
+    }
+
     pub(super) fn widths(c: &Config, capacity: usize) -> Vec<usize> {
         vec![
             c.query_rank,
@@ -198,12 +276,15 @@ impl Rows {
         capacity.min(c.candidate_topk.saturating_mul(c.candidate_block))
     }
 
-    /// Admission width for the tiled selection score scratch. The actual
-    /// allocation is `select_width * min(rows, tile_rows)`; this per-row width
-    /// prices at least that many bytes when multiplied by `rows`.
-    pub(super) fn select_widths(c: &Config, capacity: usize, rows: usize) -> Vec<usize> {
-        let tile = rows.min(query_batch::tile_rows());
-        vec![(Self::select_width(c, capacity).saturating_mul(tile)).div_ceil(rows.max(1))]
+    /// Two separately priced allocations: F32 scores and packed (score bits, ID)
+    /// pairs. Round each up independently for short chunks and tile tails.
+    pub(super) fn select_widths(c: &Config, capacity: usize, rows: usize) -> Result<Vec<usize>> {
+        Ok(
+            query_batch::selection_shapes(c, capacity, rows, query_batch::tile_rows())?
+                .into_iter()
+                .map(|elements| elements.div_ceil(rows))
+                .collect(),
+        )
     }
 
     pub(super) fn new(
@@ -212,18 +293,45 @@ impl Rows {
         capacity: usize,
         rows: usize,
     ) -> Result<Self> {
+        Self::allocate(ctx, c, capacity, rows, None)
+    }
+
+    pub(super) fn with_controls(
+        ctx: &MetalContext,
+        c: &Config,
+        capacity: usize,
+        controls: &QueryControlView,
+    ) -> Result<Self> {
+        controls.validate_geometry(c, capacity)?;
+        Self::allocate(ctx, c, capacity, controls.rows(), Some(controls.clone()))
+    }
+
+    fn allocate(
+        ctx: &MetalContext,
+        c: &Config,
+        capacity: usize,
+        rows: usize,
+        controls: Option<QueryControlView>,
+    ) -> Result<Self> {
         let half_elements = prefill::attention_half_scratch_elements(c, rows)?;
+        let selection = query_batch::selection_shapes(c, capacity, rows, query_batch::tile_rows())?;
         let widths = Self::widths(c, capacity);
         for &width in &widths {
             checked_product(&[width, rows])?;
         }
-        Ok(Self {
+        let mut scratch = Self {
             tile: query_batch::Scratch::new(ctx, c, rows)?,
             rank: prefill::allocate(ctx, widths[0], rows, GgmlType::F32)?,
             query: prefill::allocate(ctx, widths[1], rows, GgmlType::F32)?,
             latent: prefill::allocate(ctx, widths[2], rows, GgmlType::F32)?,
-            selected: prefill::allocate(ctx, widths[3], rows, GgmlType::I32)?,
-            candidates: prefill::allocate(ctx, widths[4], rows, GgmlType::I32)?,
+            selected: match &controls {
+                Some(view) => view.selected.clone(),
+                None => prefill::allocate(ctx, widths[3], rows, GgmlType::I32)?,
+            },
+            candidates: match &controls {
+                Some(view) => view.candidates.clone(),
+                None => prefill::allocate(ctx, widths[4], rows, GgmlType::I32)?,
+            },
             low: prefill::allocate(ctx, widths[5], rows, GgmlType::F32)?,
             grouped_input: prefill::allocate(ctx, widths[6], rows, GgmlType::F32)?,
             grouped_low: prefill::allocate(ctx, widths[7], rows, GgmlType::F32)?,
@@ -231,14 +339,117 @@ impl Rows {
             compressor_gate: prefill::allocate(ctx, widths[9], rows, GgmlType::F32)?,
             index_query: prefill::allocate(ctx, widths[10], rows, GgmlType::F32)?,
             index_weights: prefill::allocate(ctx, widths[11], rows, GgmlType::F32)?,
-            select_scores: prefill::allocate(
-                ctx,
-                Self::select_width(c, capacity),
-                rows.min(query_batch::tile_rows()),
+            select_scores: prefill::allocate(ctx, selection[0], 1, GgmlType::F32)?,
+            select_pairs: if selection[1] == 0 {
+                None
+            } else {
+                Some(prefill::allocate(ctx, selection[1], 1, GgmlType::I32)?)
+            },
+            half: prefill::HalfScratch::new(ctx, half_elements)?,
+            half_required: false,
+            rows,
+            geometry: Self::geometry(c, capacity),
+            arithmetic: if controls.is_some() {
+                RowsArithmetic::Packed
+            } else {
+                RowsArithmetic::Ordinary
+            },
+            controls,
+            history: std::cell::Cell::new(None),
+        };
+        scratch.half_required = scratch.half.is_some();
+        Ok(scratch)
+    }
+
+    pub(super) fn checked_prefix_with_controls(
+        &self,
+        c: &Config,
+        capacity: usize,
+        controls: &QueryControlView,
+    ) -> Result<Self> {
+        let rows = controls.rows();
+        prefill::checked_scratch_rows(self.rows, rows)?;
+        op::require(
+            self.half.is_some() == self.half_required,
+            "attention prefix half backing presence differs from constructor",
+        )?;
+        op::require(
+            self.geometry == Self::geometry(c, capacity),
+            "attention prefix incompatible backing geometry",
+        )?;
+        let widths = Self::prefix_widths(c, capacity)?;
+        let selection = query_batch::selection_shapes(c, capacity, rows, query_batch::tile_rows())?;
+        let backing_selection =
+            query_batch::selection_shapes(c, capacity, self.rows, query_batch::tile_rows())?;
+        let f = |tensor, i| {
+            checked_product(&[widths[i], rows])?;
+            prefill::checked_scratch_view(
+                tensor,
+                &[widths[i], self.rows],
+                &[widths[i], rows],
+                GgmlType::F32,
+            )
+        };
+        let selected = prefill::checked_scratch_view(
+            &controls.selected,
+            &[widths[3], rows],
+            &[widths[3], rows],
+            GgmlType::I32,
+        )?;
+        let candidates = prefill::checked_scratch_view(
+            &controls.candidates,
+            &[widths[4], rows],
+            &[widths[4], rows],
+            GgmlType::I32,
+        )?;
+        controls.validate_geometry(c, capacity)?;
+        let select_pairs = if selection[1] == 0 {
+            None
+        } else {
+            let pairs = self
+                .select_pairs
+                .as_ref()
+                .ok_or("attention selection pair backing missing")?;
+            op::require(pairs.offset.is_multiple_of(8), "selection pair alignment")?;
+            Some(prefill::checked_scratch_view(
+                pairs,
+                &[backing_selection[1], 1],
+                &[selection[1], 1],
+                GgmlType::I32,
+            )?)
+        };
+        Ok(Self {
+            tile: self.tile.checked_prefix(c, rows)?,
+            rank: f(&self.rank, 0)?,
+            query: f(&self.query, 1)?,
+            latent: f(&self.latent, 2)?,
+            low: f(&self.low, 5)?,
+            selected,
+            candidates,
+            grouped_input: f(&self.grouped_input, 6)?,
+            grouped_low: f(&self.grouped_low, 7)?,
+            compressor_value: f(&self.compressor_value, 8)?,
+            compressor_gate: f(&self.compressor_gate, 9)?,
+            index_query: f(&self.index_query, 10)?,
+            index_weights: f(&self.index_weights, 11)?,
+            select_scores: prefill::checked_scratch_view(
+                &self.select_scores,
+                &[backing_selection[0], 1],
+                &[selection[0], 1],
                 GgmlType::F32,
             )?,
-            half: prefill::HalfScratch::new(ctx, half_elements)?,
+            select_pairs,
+            half: self
+                .half
+                .as_ref()
+                .map(|half| half.checked_prefix(prefill::attention_half_scratch_elements(c, rows)?))
+                .transpose()?,
+            half_required: self.half_required,
             rows,
+            geometry: self.geometry,
+            arithmetic: RowsArithmetic::Packed,
+            controls: Some(controls.clone()),
+            history: std::cell::Cell::new(None),
         })
     }
 
@@ -257,10 +468,232 @@ impl Rows {
         let Some(half) = self.half.as_ref() else {
             return Ok(None);
         };
-        if !consumers.iter().any(|w| w.tensor_rows_selected(self.rows)) {
+        if !consumers
+            .iter()
+            .any(|w| w.tensor_rows_selected_with_arithmetic(self.rows, self.arithmetic))
+        {
             return Ok(None);
         }
-        half.convert(ctx, enc, x, width * self.rows).map(Some)
+        let elements = width
+            .checked_mul(self.rows)
+            .ok_or_else(|| metal::MetalError::BadShape {
+                kernel: "v41_half_scratch",
+                detail: "attention half input extent overflow".into(),
+            })?;
+        half.convert(ctx, enc, x, elements).map(Some)
+    }
+}
+
+#[cfg(test)]
+mod scratch_prefix_geometry_tests {
+    use super::*;
+
+    #[test]
+    #[ignore = "self-leased actual scratch buffers; MTL debug layer; no model or dispatch"]
+    fn attention_actual_prefix_rebinds_controls_and_rejects_invalid_parents() {
+        assert_eq!(std::env::var("MTL_DEBUG_LAYER").as_deref(), Ok("1"));
+        assert_eq!(std::env::var("QWEN_METAL_LEASE_WAIT").as_deref(), Ok("1"));
+        assert!(!crate::env_flag::read_default_off(
+            "QWEN_METAL_LEASE_SKIP_WIRED_GATE"
+        ));
+        let _lease = metal::acquire_metal_benchmark_lease().unwrap();
+        let ctx = MetalContext::new().unwrap();
+        let c = Config {
+            heads: 8,
+            head_dim: 32,
+            index_topk: 2,
+            ..super::super::toy::config()
+        };
+        let (maximum, capacity) = (8, 32);
+        let retained = 10..22;
+        let bytes = Rows::widths_with_controls(&c, capacity)
+            .into_iter()
+            .map(|w| w * maximum)
+            .chain(query_batch::Scratch::shapes(&c, maximum).unwrap())
+            .chain(
+                query_batch::selection_shapes(&c, capacity, maximum, query_batch::tile_rows())
+                    .unwrap(),
+            )
+            .chain(QueryControls::shapes(&c, capacity, retained.clone()).unwrap())
+            .filter(|&n| n != 0)
+            .map(|n| (n * 4) as u64)
+            .chain([
+                (prefill::attention_half_scratch_elements(&c, maximum).unwrap() * 2) as u64,
+                18 * 2,
+            ])
+            .map(|n| ctx.price_shared_buffer_upper(n).unwrap().priced_upper_bytes)
+            .sum::<u64>();
+        assert!(bytes < 16 * 1024 * 1024);
+        let admission = metal::evaluate_metal_memory_admission_with_cpu_bytes(
+            bytes,
+            1024 * 1024,
+            0,
+            ctx.memory_signals(),
+            true,
+        );
+        assert!(admission.refusal().is_none());
+
+        fn scratch(rows: &Rows) -> Vec<&MetalTensor> {
+            let mut tensors = vec![
+                &rows.rank,
+                &rows.query,
+                &rows.latent,
+                &rows.low,
+                &rows.grouped_input,
+                &rows.grouped_low,
+                &rows.compressor_value,
+                &rows.compressor_gate,
+                &rows.index_query,
+                &rows.index_weights,
+                &rows.select_scores,
+                &rows.tile.history,
+                &rows.tile.scores,
+                &rows.tile.attended,
+            ];
+            tensors.extend(rows.select_pairs.as_ref());
+            if let Some(matrix) = &rows.tile.matrix {
+                tensors.extend([&matrix.values, &matrix.probabilities]);
+            }
+            tensors
+        }
+
+        objc2::rc::autoreleasepool(|_| {
+            let controls = QueryControls::new(&ctx, &c, capacity, retained.clone()).unwrap();
+            let initial = controls.checked_tile_view(11, maximum).unwrap();
+            let mut backing = Rows::with_controls(&ctx, &c, capacity, &initial).unwrap();
+            let history = ced::HistoryRange {
+                layer: 4,
+                start: 11,
+                floor: 9,
+                extent: 10,
+            };
+            backing.history.set(Some(history));
+            for (start, n) in [(11, 8), (17, 1), (13, 5)] {
+                let controls = controls.checked_tile_view(start, n).unwrap();
+                let view = backing
+                    .checked_prefix_with_controls(&c, capacity, &controls)
+                    .unwrap();
+                assert_eq!(view.rows, n);
+                assert_eq!(view.arithmetic, RowsArithmetic::Packed);
+                assert_eq!(view.half_required, backing.half_required);
+                assert_eq!(view.history.get(), None);
+                assert_eq!(backing.history.get(), Some(history));
+                assert_eq!(
+                    view.controls.as_ref().unwrap().absolute_rows(),
+                    start..start + n
+                );
+                for (view, original) in scratch(&view).into_iter().zip(scratch(&backing)) {
+                    assert!(std::ptr::eq(&*view.buffer, &*original.buffer));
+                    assert_eq!(view.offset, original.offset);
+                    assert!(view.n_elements() <= original.n_elements());
+                }
+                for (actual, expected, width) in [
+                    (&view.selected, controls.selected(), c.index_topk),
+                    (
+                        &view.candidates,
+                        controls.candidates(),
+                        capacity.div_ceil(c.candidate_block),
+                    ),
+                ] {
+                    assert!(std::ptr::eq(&*actual.buffer, &*expected.buffer));
+                    assert_eq!(actual.offset, ((start - retained.start) * width * 4) as u64);
+                    assert_eq!(actual.offset, expected.offset);
+                    assert_eq!(actual.n_elements(), (width * n) as u64);
+                }
+                assert!(
+                    view.checked_prefix_with_controls(&c, capacity, &controls)
+                        .is_err()
+                );
+                assert!(view.tile.checked_prefix(&c, 1).is_err());
+            }
+            let current = controls.checked_tile_view(13, 5).unwrap();
+            let matrix = backing.tile.matrix.take();
+            assert!(
+                matrix.is_some(),
+                "fixture must exercise the gathered matrix path"
+            );
+            assert!(
+                backing
+                    .checked_prefix_with_controls(&c, capacity, &current)
+                    .is_err()
+            );
+            backing.tile.matrix = matrix;
+            assert!(
+                backing
+                    .checked_prefix_with_controls(&c, capacity, &current)
+                    .is_ok()
+            );
+            if let Some(half) = backing.half.take() {
+                assert!(backing.half_required);
+                assert!(
+                    backing
+                        .checked_prefix_with_controls(&c, capacity, &current)
+                        .is_err()
+                );
+                assert_eq!(backing.history.get(), Some(history));
+                backing.half = Some(half);
+                assert!(
+                    backing
+                        .checked_prefix_with_controls(&c, capacity, &current)
+                        .is_ok()
+                );
+            }
+
+            let half = prefill::allocate(&ctx, 18, 1, GgmlType::F16).unwrap();
+            let shifted = half.view_subrange(1, vec![16, 1]);
+            let view =
+                prefill::checked_scratch_view(&shifted, &[16, 1], &[5], GgmlType::F16).unwrap();
+            assert!(std::ptr::eq(&*view.buffer, &*half.buffer));
+            assert_eq!(view.offset, 2);
+            assert_eq!(view.n_elements(), 5);
+            assert!(prefill::checked_scratch_view(&view, &[16, 1], &[1], GgmlType::F16).is_err());
+            let mut misaligned = shifted.clone();
+            misaligned.offset = 1;
+            assert!(
+                prefill::checked_scratch_view(&misaligned, &[16, 1], &[5], GgmlType::F16).is_err()
+            );
+        });
+    }
+
+    #[test]
+    fn attention_prefix_widths_preserve_fresh_shapes_and_current_group_strides() {
+        let c = Config::default();
+        let widths = Rows::prefix_widths(&c, 16384).unwrap();
+        assert_eq!(widths, Rows::widths(&c, 16384));
+        let group_width = c.heads * c.head_dim / c.groups;
+        for rows in [1, 3, 127, 512, prefill::DEFAULT_CHUNK_ROWS] {
+            let grouped = checked_product(&[widths[6], rows]).unwrap();
+            let low = checked_product(&[widths[7], rows]).unwrap();
+            assert_eq!(
+                (c.groups - 1) * group_width * rows + group_width * rows,
+                grouped
+            );
+            assert_eq!(
+                (c.groups - 1) * c.output_rank * rows + c.output_rank * rows,
+                low
+            );
+            let half = prefill::attention_half_scratch_elements(&c, rows).unwrap();
+            assert!(half >= grouped && half >= low);
+            assert!(RowsArithmetic::Packed.packed_operands(rows));
+        }
+    }
+
+    #[test]
+    fn attention_prefix_geometry_rejects_invalid_capacity_and_products() {
+        let mut c = Config::default();
+        assert!(Rows::prefix_widths(&c, 0).is_err());
+        assert!(Rows::prefix_widths(&c, usize::MAX).is_err());
+        c.candidate_block = 0;
+        assert!(Rows::prefix_widths(&c, 16384).is_err());
+        c = Config::default();
+        c.groups = 0;
+        assert!(Rows::prefix_widths(&c, 16384).is_err());
+        c = Config::default();
+        c.heads = usize::MAX;
+        assert!(Rows::prefix_widths(&c, 16384).is_err());
+        c = Config::default();
+        c.head_dim = u32::MAX as usize / 4;
+        assert!(Rows::prefix_widths(&c, 16384).is_err());
     }
 }
 
@@ -270,6 +703,11 @@ impl Workspace {
     }
     /// Physical rings, completed owner rows, and pending pooling operands only.
     pub(super) fn causal_regions(&self, position: usize) -> Result<Vec<(&MetalTensor, usize)>> {
+        op::require(self.ced.is_none(), "snapshot during active CED")?;
+        self.causal_region_views(position)
+    }
+
+    fn causal_region_views(&self, position: usize) -> Result<Vec<(&MetalTensor, usize)>> {
         op::require(
             position <= self.capacity,
             "snapshot exceeds attention capacity",
@@ -305,7 +743,10 @@ impl Workspace {
 
     pub(super) fn validate_snapshot_position(&self, position: usize) -> Result<()> {
         op::require(
-            self.batch.is_none() && self.next_layer == 0 && self.next_position == position,
+            self.ced.is_none()
+                && self.batch.is_none()
+                && self.next_layer == 0
+                && self.next_position == position,
             "snapshot requires committed attention state",
         )
     }
@@ -315,6 +756,7 @@ impl Workspace {
         position: usize,
         payload_len: usize,
     ) -> Result<()> {
+        op::require(self.ced.is_none(), "restore during active CED")?;
         let regions = self.causal_regions(position)?;
         let size = regions
             .iter()
@@ -902,6 +1344,7 @@ impl Workspace {
             next_layer: 0,
             next_position: 0,
             batch: None,
+            ced: None,
             constants,
             raw: f(schedule.layers * c.window * c.head_dim)?,
             owners,
@@ -1088,7 +1531,20 @@ impl Workspace {
         input: &MetalTensor,
     ) -> Result<&MetalTensor> {
         op::require(self.batch.is_none(), "decode during attention batch")?;
-        self.encode_inner(ctx, enc, id, position, w, input, None, true)
+        if self.ced.is_some() {
+            return self.encode_ced_scalar(ctx, enc, id, position, w, input);
+        }
+        self.encode_inner(
+            ctx,
+            enc,
+            id,
+            position,
+            w,
+            input,
+            None,
+            true,
+            GlobalKvMode::Ordinary,
+        )
     }
 
     pub(super) fn begin_batch(&mut self, start: usize, rows: usize) -> Result<()> {
@@ -1106,7 +1562,7 @@ impl Workspace {
         Ok(())
     }
 
-    pub(super) fn prepare_rows(
+    fn prepare_rows_mode(
         &self,
         ctx: &MetalContext,
         enc: &KernelEncoder,
@@ -1114,10 +1570,11 @@ impl Workspace {
         w: &Weights<'_>,
         input: &MetalTensor,
         rows: &Rows,
+        mode: GlobalKvMode,
     ) -> std::result::Result<(), metal::MetalError> {
         let c = &self.config;
         let index = if self.schedule.produces_index(id) {
-            let needs_index = self.batch.as_ref().is_none_or(|batch| {
+            let needs_index = self.active_batch().is_none_or(|batch| {
                 let length = (batch.start + batch.rows) / self.schedule.ratio(id);
                 length > c.index_topk || length.div_ceil(c.candidate_block) > c.candidate_topk
             });
@@ -1125,39 +1582,65 @@ impl Workspace {
         } else {
             None
         };
+        let compressor = w
+            .compressor
+            .as_ref()
+            .filter(|_| mode == GlobalKvMode::Ordinary);
         // Every projection of the layer input first (one half copy serves
         // them all), then the rank-fed ones after the query norm. The
         // order is free: the rank consumers depend only on query_a.
         let mut input_consumers = vec![&w.query_a, &w.kv];
-        if let Some(compressor) = &w.compressor {
+        if let Some(compressor) = compressor {
             input_consumers.push(&compressor.kv);
             input_consumers.extend(compressor.gate.as_ref());
         }
         input_consumers.extend(index.map(|index| &index.weights));
         let input_half = rows.half_input(ctx, enc, input, c.hidden, &input_consumers)?;
         let input_half = input_half.as_ref();
-        w.query_a
-            .encode_rows_with(enc, input, input_half, &rows.rank, rows.rows)?;
-        w.kv.encode_rows_with(enc, input, input_half, &rows.latent, rows.rows)?;
-        if let Some(compressor) = &w.compressor {
-            compressor.kv.encode_rows_with(
+        w.query_a.encode_rows_with_arithmetic_and_half(
+            enc,
+            input,
+            input_half,
+            &rows.rank,
+            rows.rows,
+            rows.arithmetic,
+        )?;
+        w.kv.encode_rows_with_arithmetic_and_half(
+            enc,
+            input,
+            input_half,
+            &rows.latent,
+            rows.rows,
+            rows.arithmetic,
+        )?;
+        if let Some(compressor) = compressor {
+            compressor.kv.encode_rows_with_arithmetic_and_half(
                 enc,
                 input,
                 input_half,
                 &rows.compressor_value,
                 rows.rows,
+                rows.arithmetic,
             )?;
             if let Some(gate) = &compressor.gate {
-                gate.encode_rows_with(enc, input, input_half, &rows.compressor_gate, rows.rows)?;
+                gate.encode_rows_with_arithmetic_and_half(
+                    enc,
+                    input,
+                    input_half,
+                    &rows.compressor_gate,
+                    rows.rows,
+                    rows.arithmetic,
+                )?;
             }
         }
         if let Some(index) = index {
-            index.weights.encode_rows_with(
+            index.weights.encode_rows_with_arithmetic_and_half(
                 enc,
                 input,
                 input_half,
                 &rows.index_weights,
                 rows.rows,
+                rows.arithmetic,
             )?;
         }
         metal::encode_rms_norm_mul_rows_f32(
@@ -1184,20 +1667,28 @@ impl Workspace {
         rank_consumers.extend(index.map(|index| &index.query));
         let rank_half = rows.half_input(ctx, enc, &rows.rank, c.query_rank, &rank_consumers)?;
         let rank_half = rank_half.as_ref();
-        w.query_b
-            .encode_rows_with(enc, &rows.rank, rank_half, &rows.query, rows.rows)?;
+        w.query_b.encode_rows_with_arithmetic_and_half(
+            enc,
+            &rows.rank,
+            rank_half,
+            &rows.query,
+            rows.rows,
+            rows.arithmetic,
+        )?;
         if let Some(index) = index {
-            index.query.encode_rows_with(
+            index.query.encode_rows_with_arithmetic_and_half(
                 enc,
                 &rows.rank,
                 rank_half,
                 &rows.index_query,
                 rows.rows,
+                rows.arithmetic,
             )?;
         }
         Ok(())
     }
 
+    #[cfg(test)]
     pub(super) fn encode_batch_row(
         &mut self,
         ctx: &MetalContext,
@@ -1210,8 +1701,25 @@ impl Workspace {
         row: usize,
         select: bool,
     ) -> Result<()> {
+        let mode = self.global_mode(id, position, rows.rows)?;
+        self.encode_batch_row_mode(ctx, enc, id, position, w, input, rows, row, select, mode)
+    }
+
+    fn encode_batch_row_mode(
+        &mut self,
+        ctx: &MetalContext,
+        enc: &KernelEncoder,
+        id: usize,
+        position: usize,
+        w: &Weights<'_>,
+        input: &MetalTensor,
+        rows: &Rows,
+        row: usize,
+        select: bool,
+        mode: GlobalKvMode,
+    ) -> Result<()> {
         op::require(
-            self.batch.as_ref().is_some_and(|b| {
+            self.active_batch().is_some_and(|b| {
                 b.rows == rows.rows && b.row == row && b.layer == id && b.start + row == position
             }),
             "attention batch row order",
@@ -1251,7 +1759,17 @@ impl Workspace {
             prefill::row(&rows.index_weights, self.config.index_heads, row),
         );
         let result = self
-            .encode_inner(ctx, enc, id, position, w, input, Some((rows, row)), select)
+            .encode_inner(
+                ctx,
+                enc,
+                id,
+                position,
+                w,
+                input,
+                Some((rows, row)),
+                select,
+                mode,
+            )
             .map(|_| ());
         self.selected = selected;
         self.candidates = candidates;
@@ -1300,7 +1818,7 @@ impl Workspace {
                 .as_ref()
                 .map(|h| h.view_subrange(offset, shape.clone()));
             projection
-                .encode_rows_with(
+                .encode_rows_with_arithmetic_and_half(
                     enc,
                     &rows.grouped_input.view_subrange(offset, shape),
                     group_half.as_ref(),
@@ -1309,6 +1827,7 @@ impl Workspace {
                         vec![c.output_rank as u64, rows.rows as u64],
                     ),
                     rows.rows,
+                    rows.arithmetic,
                 )
                 .map_err(|e| e.to_string())?;
         }
@@ -1331,13 +1850,21 @@ impl Workspace {
             )
             .map_err(|e| e.to_string())?;
         w.output_b
-            .encode_rows_with(enc, &rows.low, low_half.as_ref(), output, rows.rows)
+            .encode_rows_with_arithmetic_and_half(
+                enc,
+                &rows.low,
+                low_half.as_ref(),
+                output,
+                rows.rows,
+                rows.arithmetic,
+            )
             .map_err(|e| e.to_string())?;
         let pso = pipeline(ctx, enc, "finite")?;
         enc.set_bytes(0, &((self.config.hidden * rows.rows) as u32));
         enc.set_tensor(1, output);
         enc.set_tensor(2, &self.status);
         dispatch(enc, &pso, self.config.hidden * rows.rows);
+        self.finish_ced_rows(rows)?;
         Ok(())
     }
 
@@ -1351,6 +1878,7 @@ impl Workspace {
         input: &MetalTensor,
         prepared: Option<(&Rows, usize)>,
         select: bool,
+        mode: GlobalKvMode,
     ) -> Result<&MetalTensor> {
         op::require(
             !enc.is_concurrent(),
@@ -1358,12 +1886,13 @@ impl Workspace {
         )?;
         let c = &self.config;
         op::require(
-            self.batch.as_ref().map_or(
+            self.active_batch().map_or(
                 id == self.next_layer && position == self.next_position,
                 |b| id == b.layer && position == b.start + b.row,
             ) && position < self.capacity,
             "GPU attention order/capacity",
         )?;
+        self.validate_global_mode(id, position, mode)?;
         validate_weights(c, id, w, &self.schedule)?;
         valid_view(input, c.hidden)?;
         let constants = &self.constants[id];
@@ -1425,105 +1954,18 @@ impl Workspace {
             let cache = &self.owners[owner];
             let ratio = self.schedule.ratio(id);
             let length = (position + 1) / ratio;
-            if self.schedule.owns_kv(id) {
-                let compressor = w.compressor.as_ref().ok_or("missing compressor")?;
-                if prepared.is_none() {
-                    linear(ctx, enc, &compressor.kv, input, &self.latent)?;
-                }
-                if ratio == 2 {
-                    if prepared.is_none() {
-                        linear(
-                            ctx,
-                            enc,
-                            compressor.gate.as_ref().ok_or("missing gate")?,
-                            input,
-                            &self.gate,
-                        )?;
-                    }
-                    if position.is_multiple_of(2) {
-                        copy(ctx, enc, &self.latent, &cache.pending_value, c.head_dim)?;
-                        copy(ctx, enc, &self.gate, &cache.pending_gate, c.head_dim)?;
-                    } else {
-                        let pso = pipeline(ctx, enc, "pool")?;
-                        enc.set_bytes(0, &(c.head_dim as u32));
-                        enc.set_tensor(1, &cache.pending_value);
-                        enc.set_tensor(2, &cache.pending_gate);
-                        enc.set_tensor(3, &self.latent);
-                        enc.set_tensor(4, &self.gate);
-                        dispatch(enc, &pso, c.head_dim);
-                    }
-                }
-                if (position + 1).is_multiple_of(ratio) {
-                    norm(
-                        ctx,
-                        enc,
-                        &self.latent,
-                        constants.compressor_norm.as_ref().ok_or("missing norm")?,
-                        c.head_dim,
-                        w.eps,
-                    )?;
-                    let index = w.index.as_ref().ok_or("missing index")?;
-                    linear(
-                        ctx,
-                        enc,
-                        index.key.as_ref().ok_or("missing key")?,
-                        &self.latent,
-                        &self.key,
-                    )?;
-                    let key_norm = constants.key_norm.as_ref().ok_or("missing key norm")?;
-                    let group_position = position + 1 - ratio;
-                    let pairs = c.rope_dim / 2;
-                    let cache_key = cache.keys.view_subrange(
-                        ((length - 1) * c.index_dim) as u64,
-                        vec![c.index_dim as u64],
-                    );
-                    let cache_latent = cache
-                        .compressed
-                        .view_subrange(((length - 1) * c.head_dim) as u64, vec![c.head_dim as u64]);
-                    if c.index_dim <= 128 && pairs <= 128 && pairs * 2 <= c.index_dim {
-                        compress_publish(
-                            ctx,
-                            enc,
-                            &self.key,
-                            key_norm,
-                            &self.latent,
-                            &constants.frequencies,
-                            &cache_key,
-                            &cache_latent,
-                            c.index_dim,
-                            c.head_dim,
-                            pairs,
-                            group_position,
-                            w.eps,
-                        )?;
-                    } else {
-                        norm(ctx, enc, &self.key, key_norm, c.index_dim, w.eps)?;
-                        rope(
-                            ctx,
-                            enc,
-                            &self.key,
-                            &constants.frequencies,
-                            c.index_dim,
-                            1,
-                            pairs,
-                            group_position,
-                            false,
-                        )?;
-                        rope(
-                            ctx,
-                            enc,
-                            &self.latent,
-                            &constants.frequencies,
-                            c.head_dim,
-                            1,
-                            pairs,
-                            group_position,
-                            false,
-                        )?;
-                        copy(ctx, enc, &self.key, &cache_key, c.index_dim)?;
-                        copy(ctx, enc, &self.latent, &cache_latent, c.head_dim)?;
-                    }
-                }
+            if self.schedule.owns_kv(id) && mode == GlobalKvMode::Ordinary {
+                self.publish_owner_transition(
+                    ctx,
+                    enc,
+                    id,
+                    position,
+                    w,
+                    input,
+                    &self.latent,
+                    &self.gate,
+                    prepared.is_some(),
+                )?;
             }
             selected_count = length.min(c.index_topk);
             if select && self.schedule.produces_index(id) && length > 0 {
@@ -1592,6 +2034,18 @@ impl Workspace {
                     dispatch(enc, &pso, selected_count);
                 }
             }
+        }
+        #[cfg(test)]
+        if prepared.is_none() {
+            super::ced::tests::chunked::encode_control_probes(
+                ctx,
+                enc,
+                id,
+                position,
+                1,
+                &self.selected,
+                &self.candidates,
+            )?;
         }
         if prepared.is_none() {
             let raw = self.raw.view_subrange(
@@ -1696,28 +2150,33 @@ impl Workspace {
             enc.set_tensor(2, &self.status);
             dispatch(enc, &pso, c.hidden);
         }
-        if let Some(batch) = self.batch.as_mut() {
-            batch.row += 1;
-            if batch.row == batch.rows {
-                batch.row = 0;
-                batch.layer += 1;
-            }
-            if batch.layer == self.schedule.layers {
-                self.next_position = batch.start + batch.rows;
-                self.next_layer = 0;
-                self.batch = None;
-            }
+        if self.ced.is_some() {
+            self.advance_ced_row()?;
         } else {
-            self.next_layer = (id + 1) % self.schedule.layers;
-            if self.next_layer == 0 {
-                self.next_position += 1;
+            if let Some(batch) = self.batch.as_mut() {
+                batch.row += 1;
+                if batch.row == batch.rows {
+                    batch.row = 0;
+                    batch.layer += 1;
+                }
+                if batch.layer == self.schedule.layers {
+                    self.next_position = batch.start + batch.rows;
+                    self.next_layer = 0;
+                    self.batch = None;
+                }
+            } else {
+                self.next_layer = (id + 1) % self.schedule.layers;
+                if self.next_layer == 0 {
+                    self.next_position += 1;
+                }
             }
         }
         Ok(&self.output)
     }
 
     /// Sticky device error bits: 1 NaN selection score, 2 invalid selected ID,
-    /// 4 nonfinite attention. Inspect only after the caller's command completes.
+    /// 4 nonfinite attention/published or seeded KV. Inspect only after the
+    /// caller's command completes.
     pub(super) fn status(&self) -> &MetalTensor {
         &self.status
     }

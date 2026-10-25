@@ -1,11 +1,13 @@
 use super::*;
 use std::io::Write;
 
+mod binding_preflight;
 mod gsq_loader;
 mod ownership_metadata;
 mod ple_engram;
 mod ple_split;
 mod resident_storage;
+mod soft_windows;
 mod storage_mapping;
 
 #[derive(Clone)]

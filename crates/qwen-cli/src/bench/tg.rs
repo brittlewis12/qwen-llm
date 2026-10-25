@@ -16,6 +16,9 @@ pub(crate) fn run_tg(args: TgArgs) -> Result<()> {
     }
     if !experimental {
         return crate::suite::run_suite(SuiteArgs {
+            v41_ced_pair: false,
+            v41_ced_pair_diagnostic: false,
+            v41_ced_pair_production_timing: false,
             model: args.model,
             pp: Vec::new(),
             tg: vec![args.n_gen],
@@ -337,6 +340,7 @@ pub(crate) fn run_tg(args: TgArgs) -> Result<()> {
             prefill_mode: None,
             power,
             qwen_env: capture_qwen_env(),
+            diagnostics: None,
         };
         let arr = vec![row];
         let json = serde_json::to_string_pretty(&arr).context("serialize tg bench row")?;
@@ -722,6 +726,7 @@ pub(crate) fn run_decode(args: DecodeArgs) -> Result<()> {
             }),
             power: power.clone(),
             qwen_env: qwen_env.clone(),
+            diagnostics: None,
         });
         // tg row: post-first-token steady-state mean per rep, averaged
         // across reps. Matches lcpp's `tg<N>` printer (its `avg_ts` is the
@@ -782,6 +787,7 @@ pub(crate) fn run_decode(args: DecodeArgs) -> Result<()> {
                 prefill_mode: None,
                 power,
                 qwen_env,
+                diagnostics: None,
             });
         }
         let json = serde_json::to_string_pretty(&rows).context("serialize decode bench rows")?;

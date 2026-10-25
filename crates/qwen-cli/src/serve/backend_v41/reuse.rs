@@ -1,6 +1,6 @@
 use super::super::{decode_loop, snapshot_cache::SnapshotCache};
 use super::*;
-use qwen_llm::deepseek_v41::forward::{Snapshot, State};
+use qwen_llm::deepseek_v41::forward::{PrefillExecution, Snapshot, State};
 
 mod operations;
 #[cfg(test)]
@@ -56,6 +56,10 @@ pub(super) struct Session<'a, 'b> {
     pub ctx: &'a MetalContext,
 }
 
+fn reuse_eligible(ready: bool, origin: PrefillExecution) -> bool {
+    ready && origin == PrefillExecution::FullForward
+}
+
 impl Reuse<State> for Session<'_, '_> {
     fn evict_for(&mut self, bytes: u64) -> qwen_llm::snapshot_policy::Evicted {
         self.store.cache.evict_for(bytes)
@@ -68,15 +72,10 @@ impl Reuse<State> for Session<'_, '_> {
     ) -> Result<Option<Restored<State>>, ServeError> {
         self.store.cache.sweep();
         if let Some(live) = self.store.live.take() {
-            let matched = decode_loop::extending_prefix(
-                &live.tokens,
-                ids,
-                live.state.position(),
-                !live.state.is_poisoned(),
-            );
-            let equal = !live.state.is_poisoned()
-                && live.tokens == ids
-                && live.state.position() == ids.len();
+            let eligible = reuse_eligible(live.state.is_ready(), live.state.prefill_origin());
+            let matched =
+                decode_loop::extending_prefix(&live.tokens, ids, live.state.position(), eligible);
+            let equal = eligible && live.tokens == ids && live.state.position() == ids.len();
             if matched > 0 || equal {
                 return operations::grow_live(live, |state| {
                     self.forward.ensure_capacity(state, required)
@@ -93,8 +92,16 @@ impl Reuse<State> for Session<'_, '_> {
             .store
             .cache
             .peek_exact_in(&(), ids)
-            .filter(|hit| !hit.value.logits.is_empty())
-            .or_else(|| self.store.cache.peek_best_prefix_in(&(), ids));
+            .filter(|hit| {
+                !hit.value.logits.is_empty()
+                    && reuse_eligible(true, hit.value.snapshot.prefill_origin())
+            })
+            .or_else(|| {
+                self.store
+                    .cache
+                    .peek_best_prefix_in(&(), ids)
+                    .filter(|hit| reuse_eligible(true, hit.value.snapshot.prefill_origin()))
+            });
         let Some(hit) = hit else { return Ok(None) };
         let Some((state, hit)) = operations::restore_candidate(
             &mut self.store.cache,
@@ -105,6 +112,9 @@ impl Reuse<State> for Session<'_, '_> {
         else {
             return Ok(None);
         };
+        if !reuse_eligible(state.is_ready(), state.prefill_origin()) {
+            return Ok(None);
+        }
         Ok(Some(Restored {
             live: Live {
                 state,
@@ -116,6 +126,9 @@ impl Reuse<State> for Session<'_, '_> {
     }
 
     fn checkpoint(&mut self, state: &State, ids: &[u32], logits: &[f32], reserve: u64) {
+        if !reuse_eligible(state.is_ready(), state.prefill_origin()) {
+            return;
+        }
         let Some(logits_bytes) = (logits.len() as u64).checked_mul(size_of::<f32>() as u64) else {
             return;
         };
@@ -128,7 +141,10 @@ impl Reuse<State> for Session<'_, '_> {
             || self.forward.snapshot_payload_bytes(state),
             |expected_bytes| {
                 let snapshot = self.forward.capture_snapshot(state)?;
-                if snapshot.position() != ids.len() || snapshot.payload_bytes() != expected_bytes {
+                if snapshot.position() != ids.len()
+                    || snapshot.payload_bytes() != expected_bytes
+                    || !reuse_eligible(true, snapshot.prefill_origin())
+                {
                     return Err(qwen_llm::deepseek_v41::forward::StateError::Invalid(
                         "snapshot extent changed during capture".into(),
                     ));
@@ -142,7 +158,8 @@ impl Reuse<State> for Session<'_, '_> {
     }
 
     fn commit(&mut self, live: Live<State>) {
-        self.store.live = Some(live);
+        self.store.live =
+            reuse_eligible(live.state.is_ready(), live.state.prefill_origin()).then_some(live);
     }
     fn capacity(&self, state: &State, _: usize) -> usize {
         state.capacity()

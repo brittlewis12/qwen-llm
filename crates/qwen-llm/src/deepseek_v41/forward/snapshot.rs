@@ -4,12 +4,17 @@ use super::*;
 pub struct Snapshot {
     identity: Arc<()>,
     addresses: engram::AddressState,
+    prefill_origin: PrefillExecution,
     payload: Vec<f32>,
 }
 
 impl Snapshot {
     pub fn position(&self) -> usize {
         self.addresses.position() as usize
+    }
+
+    pub fn prefill_origin(&self) -> PrefillExecution {
+        self.prefill_origin
     }
 
     /// Causal tensor bytes; fixed-size address and identity bookkeeping excluded.
@@ -31,7 +36,7 @@ fn allocate_with_capacity_fallback<T>(
 
 impl Forward<'_> {
     fn validate_snapshot_state(&self, state: &State) -> Result<()> {
-        op::require(!state.poisoned, "snapshot requires healthy state")?;
+        op::require(state.is_ready(), "snapshot requires ready state")?;
         op::require(
             Arc::ptr_eq(&self.identity, &state.identity),
             "state belongs to another model",
@@ -99,6 +104,7 @@ impl Forward<'_> {
         Ok(Snapshot {
             identity: Arc::clone(&self.identity),
             addresses: state.addresses,
+            prefill_origin: state.prefill_origin,
             payload,
         })
     }
@@ -119,10 +125,11 @@ impl Forward<'_> {
         )?;
         let attention = state.gpu_step.as_mut().unwrap().attention_mut();
         attention.validate_causal_restore(snapshot.position(), snapshot.payload.len())?;
-        state.poisoned = true;
+        state.phase = StatePhase::Poisoned;
         attention.restore_causal(snapshot.position(), &snapshot.payload)?;
         state.addresses = snapshot.addresses;
-        state.poisoned = false;
+        state.prefill_origin = snapshot.prefill_origin;
+        state.phase = StatePhase::Ready;
         Ok(())
     }
 

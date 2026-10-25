@@ -468,6 +468,9 @@ pub(crate) fn run_pp(args: PpArgs) -> Result<()> {
         // The suite always times the endpoint head and logits, so
         // `--with-tail` is satisfied rather than ignored.
         return crate::suite::run_suite(SuiteArgs {
+            v41_ced_pair: false,
+            v41_ced_pair_diagnostic: false,
+            v41_ced_pair_production_timing: false,
             model: args.model,
             pp: vec![args.n_prompt],
             tg: Vec::new(),
@@ -746,6 +749,7 @@ pub(crate) fn run_pp(args: PpArgs) -> Result<()> {
             prefill_mode: Some("packed"),
             power,
             qwen_env: capture_qwen_env(),
+            diagnostics: None,
         };
         // Wrap in an array to match `llama-bench -o json`.
         let arr = vec![row];
@@ -1039,6 +1043,7 @@ pub(crate) fn run_pp_wait(args: PpWaitArgs) -> Result<()> {
             prefill_mode: Some("packed"),
             power,
             qwen_env: capture_qwen_env(),
+            diagnostics: None,
         };
         println!(
             "{}",

@@ -4,7 +4,235 @@
 //! KV/keys remain append-only, with each follower bounded by its query's length.
 use super::*;
 
+#[cfg(test)]
+#[path = "query_batch/arithmetic.rs"]
+mod arithmetic_tests;
+
+#[cfg(test)]
+#[path = "query_batch/lineage.rs"]
+mod lineage_tests;
+
 pub(super) const TILE: usize = 512;
+
+const HIER_K: usize = 512;
+const HIER_PARTITION: usize = 4096;
+const HIER_LIMIT: usize = 16384;
+
+fn hier_partitions(length: usize) -> usize {
+    if length <= HIER_PARTITION {
+        0
+    } else if length <= 8192 {
+        2
+    } else {
+        4
+    }
+}
+
+/// Elements in two 4-byte allocations, independent of runtime rollback flags.
+/// Capacity, not the current prefill length, determines the reusable pair slab.
+pub(super) fn selection_shapes(
+    c: &Config,
+    capacity: usize,
+    rows: usize,
+    tile: usize,
+) -> Result<[usize; 2]> {
+    op::require(
+        (1..=prefill::MAX_CHUNK_ROWS).contains(&rows)
+            && (1..=prefill::MAX_CHUNK_ROWS).contains(&tile),
+        "selection scratch rows",
+    )?;
+    let unpruned = c
+        .candidate_topk
+        .checked_mul(c.candidate_block)
+        .ok_or("selection unpruned extent overflow")?;
+    let width = capacity.min(unpruned);
+    let partitions = if c.index_topk == HIER_K {
+        hier_partitions(width.min(HIER_LIMIT))
+    } else {
+        0
+    };
+    let t = rows.min(tile);
+    Ok([
+        checked_product(&[t, width])?,
+        checked_product(&[t, partitions, HIER_K, 2])?,
+    ])
+}
+
+#[derive(Clone, Copy, Debug, Default)]
+pub(super) struct SelectionOverrides {
+    pub(super) per_row: bool,
+    pub(super) split_sort: bool,
+    pub(super) fuse_2048: bool,
+    pub(super) no_hier: bool,
+}
+
+impl SelectionOverrides {
+    fn env() -> Self {
+        Self {
+            per_row: std::env::var_os("QWEN_V41_SELECT_PER_ROW").is_some(),
+            split_sort: std::env::var_os("QWEN_V41_SELECT_SPLIT_SORT").is_some(),
+            fuse_2048: std::env::var_os("QWEN_V41_SELECT_FUSE_2048").is_some(),
+            // Presence (including an empty value or "0") restores incumbent routing.
+            no_hier: std::env::var_os("QWEN_V41_SELECT_NO_HIER").is_some(),
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum SelectionRoute {
+    All,
+    Legacy,
+    Fused2k,
+    Fused4k,
+    Hier(usize),
+}
+
+pub(super) fn selection_route(
+    c: &Config,
+    length: usize,
+    flags: SelectionOverrides,
+) -> SelectionRoute {
+    if length <= c.index_topk {
+        return SelectionRoute::All;
+    }
+    if flags.per_row
+        || flags.split_sort
+        || c.candidate_block == 0
+        || length.div_ceil(c.candidate_block) > c.candidate_topk
+    {
+        return SelectionRoute::Legacy;
+    }
+    if c.index_topk <= 2048 {
+        if length <= 2048 {
+            return SelectionRoute::Fused2k;
+        }
+        if length <= 4096 && !flags.fuse_2048 {
+            return SelectionRoute::Fused4k;
+        }
+    }
+    if c.index_topk == HIER_K
+        && (4097..=HIER_LIMIT).contains(&length)
+        && !flags.no_hier
+        && !flags.fuse_2048
+    {
+        return SelectionRoute::Hier(hier_partitions(length));
+    }
+    SelectionRoute::Legacy
+}
+
+/// Two serial dispatches, no submissions or retries. All addresses are tile-local
+/// except selected output rows; the pair layout is compact for this dispatch's P.
+pub(super) fn select_hier_rows(
+    ctx: &MetalContext,
+    enc: &KernelEncoder,
+    scores: &MetalTensor,
+    pairs: &MetalTensor,
+    selected: &MetalTensor,
+    status: &MetalTensor,
+    start: usize,
+    ratio: usize,
+    first: usize,
+    n: usize,
+    score_width: usize,
+    partitions: usize,
+) -> Result<()> {
+    op::require(
+        !enc.is_concurrent(),
+        "hierarchical selection requires serial encoder",
+    )?;
+    op::require(
+        ratio > 0
+            && ratio <= u32::MAX as usize
+            && n > 0
+            && n <= tile_rows()
+            && score_width <= u32::MAX as usize
+            && matches!(partitions, 2 | 4),
+        "hierarchical selection geometry",
+    )?;
+    let last = start
+        .checked_add(first)
+        .and_then(|v| v.checked_add(n))
+        .ok_or("hierarchical selection position overflow")?;
+    op::require(
+        last <= u32::MAX as usize
+            && last / ratio <= partitions * HIER_PARTITION
+            && last / ratio <= score_width,
+        "hierarchical selection visible extent",
+    )?;
+    selection_view(scores, checked_product(&[n, score_width])?, GgmlType::F32)?;
+    selection_view(
+        pairs,
+        checked_product(&[n, partitions, HIER_K, 2])?,
+        GgmlType::I32,
+    )?;
+    op::require(pairs.offset.is_multiple_of(8), "selection pair alignment")?;
+    selection_view(
+        selected,
+        checked_product(&[
+            first.checked_add(n).ok_or("selection row overflow")?,
+            HIER_K,
+        ])?,
+        GgmlType::I32,
+    )?;
+    selection_view(status, 1, GgmlType::I32)?;
+    pipeline(ctx, enc, "select_hier_local")?;
+    enc.set_bytes(
+        0,
+        &[
+            start as u32,
+            ratio as u32,
+            score_width as u32,
+            partitions as u32,
+        ],
+    );
+    enc.set_bytes(1, &[first as u32, n as u32, 0, 0]);
+    enc.set_tensor(2, scores);
+    enc.set_tensor(3, pairs);
+    enc.set_tensor(4, status);
+    enc.dispatch(
+        MTLSize {
+            width: partitions,
+            height: n,
+            depth: 1,
+        },
+        MTLSize {
+            width: 256,
+            height: 1,
+            depth: 1,
+        },
+    );
+    pipeline(ctx, enc, "select_hier_merge")?;
+    enc.set_tensor(2, pairs);
+    enc.set_tensor(3, selected);
+    enc.set_threadgroup_memory(0, partitions * HIER_K * 4);
+    enc.set_threadgroup_memory(1, partitions * HIER_K * 4);
+    enc.dispatch(
+        MTLSize {
+            width: 1,
+            height: n,
+            depth: 1,
+        },
+        MTLSize {
+            width: 256,
+            height: 1,
+            depth: 1,
+        },
+    );
+    Ok(())
+}
+
+fn selection_view(t: &MetalTensor, count: usize, dtype: GgmlType) -> Result<()> {
+    let end = (count as u64)
+        .checked_mul(4)
+        .and_then(|n| n.checked_add(t.offset));
+    op::require(
+        t.dtype == dtype
+            && t.n_elements() >= count as u64
+            && t.offset.is_multiple_of(4)
+            && end.is_some_and(|end| end <= t.buffer.length() as u64),
+        "selection buffer bounds/dtype",
+    )
+}
 
 /// Rows per query batch tile. The default is the production width; the
 /// environment override exists for same-binary A/B measurement of the width
@@ -15,15 +243,92 @@ pub(super) fn tile_rows() -> usize {
         std::env::var("QWEN_V41_SINK_TILE")
             .ok()
             .and_then(|value| value.parse().ok())
-            .filter(|&rows| (1..=prefill::DEFAULT_CHUNK_ROWS).contains(&rows))
+            .filter(|&rows| (1..=prefill::MAX_CHUNK_ROWS).contains(&rows))
             .unwrap_or(TILE)
     })
 }
 
-/// The released geometry runs the simdgroup-MMA sink tile, whose per-query
-/// PV branch (and its gathered value matrix) is unreachable.
+/// The cold Full prefill tile containing an absolute query position. Tiles
+/// restart at each original chunk, even when the width does not divide it.
+fn original_query_tile(
+    prompt_rows: usize,
+    chunk_rows: usize,
+    position: usize,
+    tile_rows: usize,
+) -> Result<std::ops::Range<usize>> {
+    op::require(
+        (1..=prefill::MAX_CHUNK_ROWS).contains(&tile_rows)
+            && (1..=prefill::MAX_CHUNK_ROWS).contains(&chunk_rows),
+        "original query tile width",
+    )?;
+    op::require(position < prompt_rows, "original query position")?;
+    let chunk_start = position - position % chunk_rows;
+    let chunk_end = chunk_start
+        .checked_add((prompt_rows - chunk_start).min(chunk_rows))
+        .ok_or("original query chunk overflow")?;
+    let tile_start = chunk_start
+        .checked_add((position - chunk_start) / tile_rows * tile_rows)
+        .ok_or("original query tile overflow")?;
+    let tile_end = tile_start
+        .checked_add((chunk_end - tile_start).min(tile_rows))
+        .ok_or("original query tile end overflow")?;
+    Ok(tile_start..tile_end)
+}
+
+/// Physical span length and its Full arithmetic arity. Only CED decoder Rows
+/// supply prompt_rows; ordinary Full and the uncompacted encoder stay physical.
+fn query_tile_span(
+    prompt_rows: Option<(usize, usize)>,
+    position: usize,
+    remaining: usize,
+    tile_rows: usize,
+) -> Result<(usize, usize)> {
+    op::require(
+        (1..=prefill::MAX_CHUNK_ROWS).contains(&remaining)
+            && (1..=prefill::MAX_CHUNK_ROWS).contains(&tile_rows),
+        "query span geometry",
+    )?;
+    let end = position
+        .checked_add(remaining)
+        .ok_or("query span overflow")?;
+    if let Some((prompt_rows, chunk_rows)) = prompt_rows {
+        op::require(end <= prompt_rows, "query span outside original prompt")?;
+        let original = original_query_tile(prompt_rows, chunk_rows, position, tile_rows)?;
+        Ok((remaining.min(original.end - position), original.len()))
+    } else {
+        let n = remaining.min(tile_rows);
+        Ok((n, n))
+    }
+}
+
+#[cfg(test)]
+thread_local! {
+    static F32_ATTENTION_ROWS: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+#[cfg(test)]
+pub(in super::super) fn with_f32_attention<T>(f: impl FnOnce() -> T) -> T {
+    struct Restore(bool);
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            F32_ATTENTION_ROWS.with(|flag| flag.set(self.0));
+        }
+    }
+    let _restore = Restore(F32_ATTENTION_ROWS.with(|flag| flag.replace(true)));
+    f()
+}
+
+/// Scratch planning and execution must agree on whether gathered F32 PV is reachable.
 fn mma_geometry(c: &Config) -> bool {
+    #[cfg(test)]
+    if F32_ATTENTION_ROWS.with(|flag| flag.get()) {
+        return false;
+    }
     c.head_dim == MMA_DIM && c.heads.is_multiple_of(MMA_HEADS)
+}
+
+fn tensor_arithmetic(mma: bool, logical_arity: usize) -> bool {
+    mma && logical_arity >= 128
 }
 
 pub(super) struct Scratch {
@@ -31,9 +336,16 @@ pub(super) struct Scratch {
     pub(super) scores: MetalTensor,
     pub(super) attended: MetalTensor,
     pub(super) matrix: Option<ValueMatrix>,
+    rows: usize,
+    geometry: [usize; 5],
+    prefix_view: bool,
 }
 
 impl Scratch {
+    fn geometry(c: &Config) -> [usize; 5] {
+        [c.window, c.head_dim, c.heads, c.index_topk, tile_rows()]
+    }
+
     pub(super) fn shapes(c: &Config, rows: usize) -> Result<Vec<usize>> {
         op::require(
             (1..=prefill::MAX_CHUNK_ROWS).contains(&rows),
@@ -67,6 +379,9 @@ impl Scratch {
         let sizes = Self::shapes(c, rows)?;
         let f = |i| tensor(ctx, sizes[i], GgmlType::F32);
         Ok(Self {
+            rows,
+            geometry: Self::geometry(c),
+            prefix_view: false,
             history: f(0)?,
             scores: f(1)?,
             attended: f(2)?,
@@ -80,6 +395,41 @@ impl Scratch {
             },
         })
     }
+
+    pub(super) fn checked_prefix(&self, c: &Config, rows: usize) -> Result<Self> {
+        prefill::checked_scratch_rows(self.rows, rows)?;
+        op::require(
+            !self.prefix_view && self.geometry == Self::geometry(c),
+            "query scratch requires compatible original backing",
+        )?;
+        let backing = Self::shapes(c, self.rows)?;
+        let active = Self::shapes(c, rows)?;
+        op::require(
+            self.matrix.is_some() == (active.len() == 5),
+            "query scratch matrix backing missing/incompatible",
+        )?;
+        let f = |tensor, i| {
+            prefill::checked_scratch_view(tensor, &[backing[i]], &[active[i]], GgmlType::F32)
+        };
+        Ok(Self {
+            history: f(&self.history, 0)?,
+            scores: f(&self.scores, 1)?,
+            attended: f(&self.attended, 2)?,
+            matrix: self
+                .matrix
+                .as_ref()
+                .map(|matrix| -> Result<ValueMatrix> {
+                    Ok(ValueMatrix {
+                        values: f(&matrix.values, 3)?,
+                        probabilities: f(&matrix.probabilities, 4)?,
+                    })
+                })
+                .transpose()?,
+            rows,
+            geometry: self.geometry,
+            prefix_view: true,
+        })
+    }
 }
 
 impl Rows {
@@ -90,6 +440,69 @@ impl Rows {
             .into_iter()
             .map(|n| n.div_ceil(rows))
             .collect())
+    }
+}
+
+#[cfg(test)]
+mod scratch_prefix_geometry_tests {
+    use super::*;
+
+    #[test]
+    fn selected_4k_full_chunk_keeps_default_selection_tiles_bounded() {
+        let c = Config::default();
+        for capacity in [8192, 16384] {
+            assert_eq!(
+                selection_shapes(&c, capacity, 4096, 512).unwrap(),
+                selection_shapes(&c, capacity, 2048, 512).unwrap()
+            );
+        }
+    }
+
+    #[test]
+    fn query_prefix_shapes_recompute_history_span_and_matrix_tile_strides() {
+        let c = Config {
+            head_dim: 64,
+            heads: 8,
+            ..Config::default()
+        };
+        let backing = Scratch::shapes(&c, prefill::DEFAULT_CHUNK_ROWS).unwrap();
+        let matrix = ValueMatrix::shapes(&c).unwrap();
+        assert_eq!(matrix.len(), 2);
+        for rows in [1, 3, 127, 512, prefill::DEFAULT_CHUNK_ROWS] {
+            let active = Scratch::shapes(&c, rows).unwrap();
+            let tile = rows.min(tile_rows());
+            assert_eq!(active.len(), 5);
+            assert_eq!(active[0], (c.window + rows) * c.head_dim);
+            assert_eq!(active[1], tile * c.heads * (c.window + c.index_topk + 1));
+            assert_eq!(active[2], tile * c.heads * c.head_dim);
+            assert_eq!(active[3], tile * matrix[0]);
+            assert_eq!(active[4], tile * matrix[1]);
+            assert!(active.iter().zip(&backing).all(|(n, max)| n <= max));
+        }
+    }
+
+    #[test]
+    fn query_prefix_shapes_reject_invalid_rows_and_history_overflow() {
+        let mut c = Config::default();
+        assert!(Scratch::shapes(&c, 0).is_err());
+        assert!(Scratch::shapes(&c, prefill::MAX_CHUNK_ROWS + 1).is_err());
+        c.window = usize::MAX;
+        assert!(Scratch::shapes(&c, 1).is_err());
+    }
+
+    #[test]
+    fn selection_prefix_p4_backing_contains_compact_p2_and_p4_tiles() {
+        let c = Config::default();
+        let backing = selection_shapes(&c, 16384, prefill::DEFAULT_CHUNK_ROWS, 512).unwrap();
+        for rows in [1, 3, 127, 512, prefill::DEFAULT_CHUNK_ROWS] {
+            let tile = rows.min(512);
+            for (capacity, partitions) in [(8192, 2), (16384, 4)] {
+                let active = selection_shapes(&c, capacity, rows, 512).unwrap();
+                assert_eq!(active[0], tile * capacity);
+                assert_eq!(active[1], tile * partitions * HIER_K * 2);
+                assert!(active.iter().zip(&backing).all(|(n, max)| n <= max));
+            }
+        }
     }
 }
 
@@ -154,14 +567,17 @@ impl Workspace {
     ) -> Result<()> {
         op::require(!enc.is_concurrent(), "query batch requires serial encoder")?;
         op::require(
-            self.batch.as_ref().is_some_and(|b| {
+            self.active_batch().is_some_and(|b| {
                 b.start == start && b.rows == rows.rows && b.layer == id && b.row == 0
             }),
             "query batch layer order",
         )?;
         validate_weights(&self.config, id, w, &self.schedule)?;
         valid_view(input, checked_product(&[self.config.hidden, rows.rows])?)?;
-        self.prepare_rows(ctx, enc, id, w, input, rows)
+        let mode = self.global_mode(id, start, rows.rows)?;
+        self.bind_ced_rows(id, start, rows)?;
+        let history = self.row_history(id, start, rows.rows)?;
+        self.prepare_rows_mode(ctx, enc, id, w, input, rows, mode)
             .map_err(|e| e.to_string())?;
         let c = &self.config;
         let constants = &self.constants[id];
@@ -207,7 +623,7 @@ impl Workspace {
             (id * c.window * c.head_dim) as u64,
             vec![(c.window * c.head_dim) as u64],
         );
-        let old = start.min(c.window);
+        let old = start - history.floor;
         let pso = pipeline(ctx, enc, "history")?;
         enc.set_bytes(
             0,
@@ -221,11 +637,13 @@ impl Workspace {
         enc.set_tensor(1, &raw);
         enc.set_tensor(2, &rows.latent);
         enc.set_tensor(3, &rows.tile.history);
+        enc.set_bytes(4, &[old as u32, history.floor as u32]);
         dispatch(enc, &pso, (old + rows.rows) * c.head_dim);
         // Separate dispatch: no thread may overwrite the ring while another
         // still gathers its old prefix. Each physical slot has one writer.
         let pso = pipeline(ctx, enc, "publish_raw")?;
         dispatch(enc, &pso, rows.rows.min(c.window) * c.head_dim);
+        rows.history.set(Some(history));
         Ok(())
     }
 
@@ -243,6 +661,8 @@ impl Workspace {
         input: &MetalTensor,
         rows: &Rows,
     ) -> Result<()> {
+        let mode = self.global_mode(id, start, rows.rows)?;
+        self.validate_global_mode(id, start + rows.rows - 1, mode)?;
         let c = &self.config;
         let hidden = c.hidden;
         let owner = self.schedule.owner_slot(id);
@@ -254,7 +674,7 @@ impl Workspace {
             && last_length.div_ceil(c.candidate_block) <= c.candidate_topk
             && std::env::var_os("QWEN_V41_SELECT_PER_ROW").is_none();
         for row in 0..rows.rows {
-            self.encode_batch_row(
+            self.encode_batch_row_mode(
                 ctx,
                 enc,
                 id,
@@ -264,6 +684,7 @@ impl Workspace {
                 rows,
                 row,
                 !batched,
+                mode,
             )?;
         }
         if batched {
@@ -280,11 +701,21 @@ impl Workspace {
                 )?;
             }
         }
+        #[cfg(test)]
+        super::super::ced::tests::chunked::encode_control_probes(
+            ctx,
+            enc,
+            id,
+            start,
+            rows.rows,
+            &rows.selected,
+            &rows.candidates,
+        )?;
         Ok(())
     }
 
     /// Batched unpruned selection: prepare ids/masks, compute index scores,
-    /// then run the incumbent per-row sort and chronological pass. Pruning
+    /// then fused <=4K, bounded hierarchical top512, or incumbent sorting. Pruning
     /// (block scores/keep) is not reached before 16,385 visible keys and
     /// stays on the per-row path.
     fn select_rows_unpruned(
@@ -391,17 +822,29 @@ impl Workspace {
                     depth: 1,
                 },
             );
-            let allow_4k = last_length > 2048
-                && last_length <= 4096
-                && std::env::var_os("QWEN_V41_SELECT_FUSE_2048").is_none();
-            let fused = (last_length <= 2048 || allow_4k)
-                && c.index_topk <= 2048
-                && std::env::var_os("QWEN_V41_SELECT_SPLIT_SORT").is_none();
-            if fused {
+            let route = selection_route(c, last_length, SelectionOverrides::env());
+            if let SelectionRoute::Hier(partitions) = route {
+                select_hier_rows(
+                    ctx,
+                    enc,
+                    &rows.select_scores,
+                    rows.select_pairs
+                        .as_ref()
+                        .ok_or("missing hierarchical selection scratch")?,
+                    &rows.selected,
+                    &self.status,
+                    start,
+                    ratio,
+                    first,
+                    n,
+                    select_width,
+                    partitions,
+                )?;
+            } else if matches!(route, SelectionRoute::Fused2k | SelectionRoute::Fused4k) {
                 pipeline(
                     ctx,
                     enc,
-                    if allow_4k {
+                    if route == SelectionRoute::Fused4k {
                         "select_fused_rows_4k"
                     } else {
                         "select_fused_rows"
@@ -479,16 +922,13 @@ impl Workspace {
         rows: &Rows,
     ) -> Result<()> {
         let tile = tile_rows();
-        for first in (0..rows.rows).step_by(tile) {
-            self.sink_tile(
-                ctx,
-                enc,
-                id,
-                start,
-                rows,
-                first,
-                (rows.rows - first).min(tile),
-            )?;
+        let prompt_rows = self.ced_decoder_prompt_rows(id, start, rows.rows)?;
+        let mut first = 0;
+        while first < rows.rows {
+            let position = start.checked_add(first).ok_or("query position overflow")?;
+            let (n, _) = query_tile_span(prompt_rows, position, rows.rows - first, tile)?;
+            self.sink_tile(ctx, enc, id, start, rows, first, n)?;
+            first += n;
         }
         Ok(())
     }
@@ -505,15 +945,36 @@ impl Workspace {
     ) -> Result<()> {
         let c = &self.config;
         op::require(
-            n > 0 && n <= tile_rows() && first + n <= rows.rows,
+            n > 0 && n <= tile_rows() && first.checked_add(n).is_some_and(|end| end <= rows.rows),
             "query tile extent",
         )?;
-        let position = start + first;
+        let position = start.checked_add(first).ok_or("query position overflow")?;
+        let prompt_rows = self.ced_decoder_prompt_rows(id, start, rows.rows)?;
+        let (span, logical_arity) = query_tile_span(prompt_rows, position, n, tile_rows())?;
+        op::require(span == n, "query tile crosses original Full tile")?;
+        let history = match rows.history.get() {
+            Some(history) => history,
+            None if self.ced.is_none() => ced::HistoryRange {
+                layer: id,
+                start,
+                floor: start - start.min(c.window),
+                extent: start.min(c.window) + rows.rows,
+            },
+            None => return Err("CED history was not prepared".into()),
+        };
+        history.validate(id, start, rows.rows, c.window)?;
         let count = |p: usize| (p + 1).min(c.window) + self.selected_count(id, p);
         // Simdgroup-MMA QK^T and PV for the released geometry (512-wide
         // latent, head count a multiple of 16); other geometries keep the
         // scalar/gathered-GEMM path below.
-        let mma = c.head_dim == MMA_DIM && c.heads.is_multiple_of(MMA_HEADS);
+        let mma = mma_geometry(c);
+        #[cfg(test)]
+        if !mma && !ValueMatrix::shapes(c)?.is_empty() {
+            op::require(
+                rows.tile.matrix.is_some(),
+                "F32 attention scratch must be planned and allocated inside its arithmetic scope",
+            )?;
+        }
         // Preserve the incumbent per-query PV branch. Counts are monotone, so
         // at most one fixed tile per layer/chunk needs this extra boundary split.
         if !mma
@@ -553,8 +1014,8 @@ impl Workspace {
             1,
             &[
                 position as u32,
-                (start - start.min(c.window)) as u32,
-                (start.min(c.window) + rows.rows) as u32,
+                history.floor as u32,
+                history.extent as u32,
                 self.schedule.ratio(id) as u32,
             ],
         );
@@ -572,8 +1033,9 @@ impl Workspace {
         enc.set_tensor(7, &rows.tile.scores);
         enc.set_tensor(8, &attended);
         enc.set_tensor(10, &self.status);
-        let tensor = mma
-            && n >= 128
+        // Compaction must not change Full's QK/PV reduction tree. A physical
+        // singleton can descend from a Tensor tile or from a short MMA tail.
+        let tensor = tensor_arithmetic(mma, logical_arity)
             && metal::moe_grouped_tensor_selected(ctx)
             && std::env::var_os("QWEN_V41_SINK_TENSOR").is_none_or(|v| v != "0");
         // The wider-N score tile is the default tensor-tier form from 128

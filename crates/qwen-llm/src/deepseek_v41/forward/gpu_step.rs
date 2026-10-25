@@ -2,6 +2,8 @@
 use super::*;
 use objc2_metal::MTLSize;
 
+pub(super) mod ced;
+
 #[cfg(test)]
 mod tests;
 
@@ -37,17 +39,68 @@ pub(super) fn chunk_widths(
     capacity: usize,
     rows: usize,
 ) -> Result<Vec<usize>> {
-    let c = &model.config;
+    chunk_widths_from_geometry(
+        &model.config,
+        model.layers.len(),
+        &engram_projections(model),
+        capacity,
+        rows,
+    )
+}
+
+pub(super) fn engram_projections(model: &Forward<'_>) -> Vec<(usize, usize)> {
+    model
+        .layers
+        .iter()
+        .filter_map(|layer| {
+            layer
+                .engram
+                .as_ref()
+                .map(|e| (e.projection.input, e.projection.output))
+        })
+        .collect()
+}
+
+pub(super) fn validate_chunk_geometry(c: &Config, capacity: usize, rows: usize) -> Result<()> {
+    op::require(
+        capacity > 0 && rows > 0 && rows <= capacity,
+        "invalid chunk geometry",
+    )?;
+    op::require(c.candidate_block > 0, "zero candidate block")?;
+    for (a, b) in [
+        (4, c.hidden),
+        (c.heads, c.head_dim),
+        (c.groups, c.output_rank),
+        (c.index_heads, c.index_dim),
+        (c.intermediate, c.topk),
+        (c.hidden, c.topk),
+        (c.candidate_topk, c.candidate_block),
+    ] {
+        a.checked_mul(b).ok_or("chunk width overflow")?;
+    }
+    Ok(())
+}
+
+pub(super) fn chunk_widths_from_geometry(
+    c: &Config,
+    layers: usize,
+    engram_projections: &[(usize, usize)],
+    capacity: usize,
+    rows: usize,
+) -> Result<Vec<usize>> {
+    validate_chunk_geometry(c, capacity, rows)?;
     let mut widths = vec![4 * c.hidden, 4 * c.hidden, c.hidden, 4];
     widths.extend(prefill::HcRows::widths(c));
-    widths.extend(ffn_gpu::Rows::widths(c, model.layers.len()));
+    widths.extend(ffn_gpu::Rows::widths(c, layers));
     widths.extend(attention_gpu::Rows::widths(c, capacity));
-    widths.extend(attention_gpu::Rows::select_widths(c, capacity, rows));
+    widths.extend(
+        attention_gpu::Rows::select_widths(c, capacity, rows)?
+            .into_iter()
+            .filter(|&width| width != 0),
+    );
     widths.extend(attention_gpu::Rows::tile_widths(c, rows)?);
-    for layer in &model.layers {
-        if let Some(e) = &layer.engram {
-            widths.extend([e.projection.input, e.projection.output]);
-        }
+    for &(input, output) in engram_projections {
+        widths.extend([input, output]);
     }
     Ok(widths)
 }
@@ -128,6 +181,7 @@ impl Workspace {
         let ctx = model.ctx;
         let c = &model.config;
         let n = tokens.len();
+        let prepare = profile::Wall("prefill_host_prepare", [0; 4], profile::start());
         let mut embeddings = Vec::with_capacity(n * 4 * c.hidden);
         for &token in tokens {
             embeddings.extend(decode_rows(model.embedding, token as usize, 1)?.repeat(4));
@@ -141,6 +195,7 @@ impl Workspace {
         let ffn = ffn_gpu::Rows::new(ctx, c, n, model.layers.len())?;
         let attention = attention_gpu::Rows::new(ctx, c, self.attention.capacity(), n)?;
         let mut engrams = Vec::new();
+        let engram_prepare = profile::Wall("prefill_engram_prepare", [0; 4], profile::start());
         for slot in &self.engrams {
             let p = &model.layers[slot.layer].engram.as_ref().unwrap().projection;
             let mut values = Vec::with_capacity(n * p.input);
@@ -156,6 +211,7 @@ impl Workspace {
                 prefill::allocate(ctx, p.output, n, GgmlType::F32)?,
             ));
         }
+        drop(engram_prepare);
         let snapshots = match capture.as_ref() {
             Some(sink) => capture::batch_snapshots(model, start, n, &**sink)?,
             None => Vec::new(),
@@ -164,6 +220,7 @@ impl Workspace {
         self.commands = 0;
         self.trace_copies = 0;
         cancelled(cancel)?;
+        drop(prepare);
         let started = profile::start();
         let samples = if profile::stages() {
             Some(
@@ -359,7 +416,7 @@ impl Workspace {
         let result = metal::commit_and_wait(&command).map_err(|e| e.to_string());
         self.commands += 1;
         if let Some(encode_ms) = encode_ms {
-            profile::submitted(
+            profile::submitted_with_driver_scheduling(
                 "prefill_chunk_rows",
                 [start, model.layers.len(), n, 0],
                 encode_ms,
@@ -367,6 +424,7 @@ impl Workspace {
                 result.is_ok(),
                 command.GPUStartTime(),
                 command.GPUEndTime(),
+                || (command.kernelStartTime(), command.kernelEndTime()),
             );
         }
         result?;
@@ -521,22 +579,17 @@ impl Workspace {
         })
     }
 
-    fn layer(
-        &mut self,
+    fn normalize_scalar_input(
+        &self,
         model: &Forward<'_>,
         enc: &KernelEncoder,
         id: usize,
-        position: usize,
-        snapshot: Option<&capture::Snapshot>,
+        x: &MetalTensor,
+        incoming: &MetalTensor,
     ) -> Result<()> {
         let ctx = model.ctx;
         let c = &model.config;
         let l = &model.layers[id];
-        let incoming = if id == 0 {
-            &self.initial_pre
-        } else {
-            self.ffn.next_pre()
-        };
         let encode = || -> std::result::Result<(), metal::MetalError> {
             if hc_gpu::fused_supported(&l.attn_hc) {
                 return hc_gpu::encode_pre(
@@ -545,7 +598,7 @@ impl Workspace {
                     c,
                     &l.attn_hc,
                     &self.constants[id],
-                    &self.x,
+                    x,
                     hc_gpu::HcPreSite {
                         mix: &self.raw,
                         pre: &self.pre,
@@ -557,11 +610,11 @@ impl Workspace {
                     },
                 );
             }
-            l.attn_hc.projection.encode(enc, &self.x, &self.raw)?;
+            l.attn_hc.projection.encode(enc, x, &self.raw)?;
             enc.set_pipeline(&ctx.pipeline("kernel_deepseek_v41_projected_rms")?);
             enc.set_bytes(0, &((4 * c.hidden) as u32));
             enc.set_bytes(1, &c.norm_eps);
-            enc.set_tensor(2, &self.x);
+            enc.set_tensor(2, x);
             enc.set_tensor(3, &self.raw);
             enc.dispatch(
                 MTLSize {
@@ -586,7 +639,7 @@ impl Workspace {
                 &self.post,
                 &self.comb,
             )?;
-            metal::encode_mhc4_collapse(ctx, enc, c.hidden, &self.x, incoming, &self.collapsed)?;
+            metal::encode_mhc4_collapse(ctx, enc, c.hidden, x, incoming, &self.collapsed)?;
             metal::encode_rms_norm_mul_rows_f32(
                 ctx,
                 enc,
@@ -598,10 +651,40 @@ impl Workspace {
                 c.norm_eps,
             )
         };
-        encode().map_err(|e| e.to_string())?;
-        let output =
+        encode().map_err(|e| e.to_string())
+    }
+
+    fn layer(
+        &mut self,
+        model: &Forward<'_>,
+        enc: &KernelEncoder,
+        id: usize,
+        position: usize,
+        snapshot: Option<&capture::Snapshot>,
+        ced: bool,
+    ) -> Result<()> {
+        let ctx = model.ctx;
+        let c = &model.config;
+        let l = &model.layers[id];
+        let incoming = if id == 0 {
+            &self.initial_pre
+        } else {
+            self.ffn.next_pre()
+        };
+        self.normalize_scalar_input(model, enc, id, &self.x, incoming)?;
+        let output = if ced {
+            self.attention.encode_ced_scalar(
+                ctx,
+                enc,
+                id,
+                position,
+                &l.attention,
+                &self.normalized,
+            )?
+        } else {
             self.attention
-                .encode(ctx, enc, id, position, &l.attention, &self.normalized)?;
+                .encode(ctx, enc, id, position, &l.attention, &self.normalized)?
+        };
         metal::encode_mhc4_post(
             ctx, enc, c.hidden, output, &self.x, &self.post, &self.comb, &self.half,
         )
@@ -752,6 +835,7 @@ impl Workspace {
                             .iter()
                             .find(|(layer, _)| *layer == id)
                             .map(|(_, s)| s),
+                        false,
                     )?;
                     if !captures.is_empty() {
                         metal::encode_copy_offset_f32(
@@ -810,7 +894,7 @@ impl Workspace {
             let result = metal::commit_and_wait(&command).map_err(|e| e.to_string());
             self.commands += 1;
             if let Some(encode_ms) = encode_ms {
-                profile::submitted(
+                profile::submitted_with_driver_scheduling(
                     "gpu_step",
                     [position, start, end, 0],
                     encode_ms,
@@ -818,6 +902,7 @@ impl Workspace {
                     result.is_ok(),
                     command.GPUStartTime(),
                     command.GPUEndTime(),
+                    || (command.kernelStartTime(), command.kernelEndTime()),
                 );
             }
             result?;

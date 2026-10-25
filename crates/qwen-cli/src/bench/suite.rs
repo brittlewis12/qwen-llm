@@ -175,6 +175,7 @@ pub(crate) fn run_suite_pp_row(
         prefill_mode: Some("production_prefill+endpoint_logits"),
         power: row_ctx.power.clone(),
         qwen_env: row_ctx.qwen_env.clone(),
+        diagnostics: None,
     })
 }
 
@@ -323,6 +324,7 @@ pub(crate) fn run_suite_tg_row(
         prefill_mode: None,
         power: row_ctx.power.clone(),
         qwen_env: row_ctx.qwen_env.clone(),
+        diagnostics: None,
     })
 }
 
@@ -340,8 +342,28 @@ fn log_row(json_mode: bool, row: &BenchRow) {
 }
 
 pub(crate) fn run_suite(args: SuiteArgs) -> Result<()> {
+    let paired_measurement = if args.v41_ced_pair {
+        let measurement = crate::v41_ced_pair::Measurement::capture(
+            args.v41_ced_pair_production_timing,
+            args.v41_ced_pair_diagnostic,
+        );
+        measurement.emit_requested(&mut std::io::stderr().lock())?;
+        Some(measurement)
+    } else {
+        None
+    };
+    run_suite_with_measurement(args, paired_measurement)
+}
+
+pub(crate) fn run_suite_with_measurement(
+    args: SuiteArgs,
+    paired_measurement: Option<crate::v41_ced_pair::Measurement>,
+) -> Result<()> {
     let SuiteArgs {
         model,
+        v41_ced_pair,
+        v41_ced_pair_diagnostic,
+        v41_ced_pair_production_timing,
         pp,
         tg,
         depth: depths,
@@ -351,6 +373,23 @@ pub(crate) fn run_suite(args: SuiteArgs) -> Result<()> {
         seed,
         output,
     } = args;
+    ensure!(
+        !v41_ced_pair_diagnostic || v41_ced_pair,
+        "--v41-ced-pair-diagnostic requires --v41-ced-pair"
+    );
+    ensure!(
+        !v41_ced_pair_production_timing || v41_ced_pair,
+        "--v41-ced-pair-production-timing requires --v41-ced-pair"
+    );
+    ensure!(
+        v41_ced_pair == paired_measurement.is_some(),
+        "paired launch measurement missing or unexpected"
+    );
+    if let Some(measurement) = &paired_measurement {
+        measurement
+            .validate_environment()
+            .with_context(|| format!("paired launch protocol={}", measurement.protocol()))?;
+    }
     if runs == 0 {
         return Err(anyhow!("--runs must be >= 1"));
     }
@@ -370,6 +409,22 @@ pub(crate) fn run_suite(args: SuiteArgs) -> Result<()> {
             probe.get_str("general.architecture")
         )
     })?;
+    if v41_ced_pair {
+        crate::v41_ced_pair::validate_args(
+            family,
+            &pp,
+            &tg,
+            &depths,
+            runs,
+            no_warmup,
+            prefill_chunk,
+        )?;
+    }
+    let v41_prefill_execution = if family == ModelFamily::DeepSeekV41 && !v41_ced_pair {
+        crate::family_options::v41_prefill_execution_from_env()?
+    } else {
+        Default::default()
+    };
     let (commit, dirty) = qwen_build_identity();
     let power = capture_power_snapshot();
     crate::text_log!(
@@ -461,6 +516,11 @@ pub(crate) fn run_suite(args: SuiteArgs) -> Result<()> {
             family.record_label()
         );
         let ctx = MetalContext::new().context("init Metal")?;
+        if v41_ced_pair_diagnostic {
+            // This fresh context/cache stays private to this suite invocation.
+            // Enable once; context drop handles return, errors and unwind.
+            ctx.set_pipeline_cache_metrics_enabled(true);
+        }
         crate::text_log!(json_mode, "[suite] device: {}", ctx.describe());
         let row_ctx = SuiteRowContext {
             build_commit: commit,
@@ -475,32 +535,99 @@ pub(crate) fn run_suite(args: SuiteArgs) -> Result<()> {
             power,
             qwen_env: capture_qwen_env(),
         };
-        let extent = FamilyBenchExtent::for_shapes(&pp, &tg, &depths, (warmup_pp, WARMUP_TG))?;
-        rows = with_family_bench(family, &ctx, &probe, extent, &mut |bench| {
-            let mut rows = Vec::with_capacity((pp.len() + tg.len()) * depths.len());
-            if !no_warmup {
-                crate::text_log!(json_mode, "[suite] model warm-up (untimed)");
-                run_family_pp_row(bench, &row_ctx, warmup_pp, 0, 1, true, seed)
-                    .context("suite model warm-up pp")?;
-                run_family_tg_row(bench, &row_ctx, WARMUP_TG, 0, 1, true, seed)
-                    .context("suite model warm-up tg")?;
+        let extent = if v41_ced_pair {
+            FamilyBenchExtent {
+                forwards: pp[0],
+                prefill_endpoint: pp[0],
             }
-            for &depth in &depths {
-                for &n_prompt in &pp {
-                    let row =
-                        run_family_pp_row(bench, &row_ctx, n_prompt, depth, runs, no_warmup, seed)?;
-                    log_row(json_mode, &row);
-                    rows.push(row);
-                }
-                for &n_gen in &tg {
-                    let row =
-                        run_family_tg_row(bench, &row_ctx, n_gen, depth, runs, no_warmup, seed)?;
-                    log_row(json_mode, &row);
-                    rows.push(row);
-                }
-            }
-            Ok(rows)
-        })?;
+        } else {
+            FamilyBenchExtent::for_shapes(&pp, &tg, &depths, (warmup_pp, WARMUP_TG))?
+        };
+        let paired_preweight = if let Some(measurement) = paired_measurement {
+            Some(crate::v41_ced_pair::preweight_plan(
+                &ctx,
+                &probe,
+                extent,
+                measurement,
+            )?)
+        } else {
+            None
+        };
+        rows = crate::v41_ced_pair::with_load(
+            paired_preweight.as_ref(),
+            || ctx.memory_signals(),
+            |preweight_report| {
+                with_family_bench(
+                    family,
+                    &ctx,
+                    &probe,
+                    extent,
+                    v41_prefill_execution,
+                    &mut |bench| {
+                        if let Some(preweight) = &paired_preweight {
+                            let rows = crate::v41_ced_pair::run(
+                                bench,
+                                &row_ctx,
+                                pp[0],
+                                runs,
+                                seed,
+                                &preweight.plan,
+                                preweight_report
+                                    .context("paired load assessment report missing")?,
+                                &ctx,
+                                &preweight.measurement,
+                            )?;
+                            for row in &rows {
+                                if v41_ced_pair_diagnostic {
+                                    crate::text_log!(
+                                        json_mode,
+                                        "[suite] protocol={} INSTRUMENTED performance_evidence=false paired prefill_mode={} {}: {:.2} t/s",
+                                        preweight.measurement.protocol(),
+                                        row.prefill_mode.unwrap_or("unreported"),
+                                        row.test,
+                                        row.avg_ts,
+                                    );
+                                } else {
+                                    crate::text_log!(
+                                        json_mode,
+                                        "[suite] protocol={} paired prefill_mode={}",
+                                        preweight.measurement.protocol(),
+                                        row.prefill_mode.unwrap_or("unreported"),
+                                    );
+                                    log_row(json_mode, row);
+                                }
+                            }
+                            return Ok(rows);
+                        }
+                        let mut rows = Vec::with_capacity((pp.len() + tg.len()) * depths.len());
+                        if !no_warmup {
+                            crate::text_log!(json_mode, "[suite] model warm-up (untimed)");
+                            run_family_pp_row(bench, &row_ctx, warmup_pp, 0, 1, true, seed)
+                                .context("suite model warm-up pp")?;
+                            run_family_tg_row(bench, &row_ctx, WARMUP_TG, 0, 1, true, seed)
+                                .context("suite model warm-up tg")?;
+                        }
+                        for &depth in &depths {
+                            for &n_prompt in &pp {
+                                let row = run_family_pp_row(
+                                    bench, &row_ctx, n_prompt, depth, runs, no_warmup, seed,
+                                )?;
+                                log_row(json_mode, &row);
+                                rows.push(row);
+                            }
+                            for &n_gen in &tg {
+                                let row = run_family_tg_row(
+                                    bench, &row_ctx, n_gen, depth, runs, no_warmup, seed,
+                                )?;
+                                log_row(json_mode, &row);
+                                rows.push(row);
+                            }
+                        }
+                        Ok(rows)
+                    },
+                )
+            },
+        )?;
     }
 
     if json_mode {

@@ -80,7 +80,12 @@ fn chunk_widths(c: &Config) -> Vec<usize> {
     widths.extend(HcRows::widths(c));
     widths.extend(ffn_gpu::Rows::widths(c, 1));
     widths.extend(attention_gpu::Rows::widths(c, CAPACITY));
-    widths.extend(attention_gpu::Rows::select_widths(c, CAPACITY, CHUNK));
+    widths.extend(
+        attention_gpu::Rows::select_widths(c, CAPACITY, CHUNK)
+            .unwrap()
+            .into_iter()
+            .filter(|&width| width != 0),
+    );
     widths.extend(attention_gpu::Rows::tile_widths(c, CHUNK).unwrap());
     widths.extend([6144, 5 * c.hidden]);
     widths

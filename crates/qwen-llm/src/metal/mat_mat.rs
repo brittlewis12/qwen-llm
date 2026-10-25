@@ -4095,13 +4095,15 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "self-leased tiny soft-window lifetime/blit proof; debug validation required"]
     fn overlapping_mmap_windows_retain_storage_independently() {
         use std::io::Write;
         use std::sync::atomic::AtomicUsize;
 
-        let Some(ctx) = crate::test_fixtures::metal_context_or_skip() else {
-            return;
-        };
+        assert_eq!(std::env::var("MTL_DEBUG_LAYER").as_deref(), Ok("1"));
+        assert_eq!(std::env::var("QWEN_METAL_LEASE_WAIT").as_deref(), Ok("1"));
+        let _lease = acquire_metal_benchmark_lease().expect("soft-window lifetime lease");
+        let ctx = MetalContext::new().expect("Metal context");
         let page_size = host_page_size().expect("host page size");
 
         for reverse_drop_order in [false, true] {
@@ -4134,9 +4136,15 @@ mod tests {
                 let first = f32_desc("first", 0, 0, (page_size as u64 + 32) / 4);
                 let second = f32_desc("second", 0, page_size as u64 + 64, page_size as u64 / 4);
                 let requests = [&first, &second, &first];
-                let plan =
-                    plan_retained_storage(&[bytes.len()], &requests, page_size, page_size * 2, 32)
-                        .expect("overlapping-window plan");
+                let plan = plan_retained_storage_with_soft_target(
+                    &[bytes.len()],
+                    &requests,
+                    page_size,
+                    page_size * 4,
+                    32,
+                    Some(page_size),
+                )
+                .expect("soft overlapping-window plan");
                 assert_retained_plan_invariants(&plan, &requests, &[bytes.len()]);
                 assert_eq!(plan.windows.len(), 2);
                 assert_eq!(plan.windows[0].mmap_offset, 0);

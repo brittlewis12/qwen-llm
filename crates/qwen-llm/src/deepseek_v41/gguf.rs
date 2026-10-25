@@ -15,14 +15,17 @@ mod engram;
 mod metadata;
 mod names;
 mod resident_storage;
+mod retained_resources;
 mod storage;
 pub use super::engram::HashConfig;
 pub use companion::SourceGroups;
 pub use controls::ControlAccounting;
 pub use engram::DiskEngram;
 pub use resident_storage::{
-    ResidentMappingKind, ResidentStoragePlan, ResidentStorageWindow, resident_storage_plan,
+    ResidentMappingKind, ResidentStorageAudit, ResidentStoragePlan, ResidentStorageWindow,
+    ResidentTensorAudit, ResidentTensorExtent, resident_storage_audit, resident_storage_plan,
 };
+pub use retained_resources::{RetainedWeightResource, RetainedWeightResourceSummary};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Schedule {
@@ -190,6 +193,8 @@ pub struct ResidentWeights {
     pub token_map: Vec<u32>,
     pub raw_pad: u32,
     pub bytes: ByteCounters,
+    /// Captured once from owning views after load; no physical residency claim.
+    pub retained_resources: RetainedWeightResourceSummary,
 }
 #[derive(Debug)]
 pub struct Plan {
@@ -198,6 +203,8 @@ pub struct Plan {
     pub engram_hash: HashConfig,
     /// Serialized bytes by GGML dtype, including auxiliary and disk tensors.
     pub dtype_inventory: BTreeMap<String, u64>,
+    /// Exact retained Binder::linear calls, keyed by internal binding name.
+    pub(in crate::deepseek_v41) binding_linears: BTreeMap<String, GgmlType>,
     pub bytes: ByteCounters,
     pub token_map: Vec<u32>,
     pub raw_pad: u32,
@@ -265,7 +272,7 @@ pub fn plan(g: &GgufFile) -> Result<Plan, LoadError> {
                 )));
             }
             validate_storage(t)?;
-            if dense.insert(key, ()).is_some() {
+            if dense.insert(key, t).is_some() {
                 return Err(invalid("duplicate internal dense key"));
             }
             names::validate_shape(t, &p.config)?;
@@ -281,6 +288,17 @@ pub fn plan(g: &GgufFile) -> Result<Plan, LoadError> {
     }
     add(p.bytes.packed_experts, p.bytes.dense_bytes)?;
     names::validate_inventory(&p, &dense)?;
+    for spec in super::forward::binding::linear_inventory(&p.config, &p.schedule, &p.engram_hash) {
+        let t = dense
+            .get(&spec.name)
+            .ok_or_else(|| invalid(format!("missing binding linear {}", spec.name)))?;
+        if names::expected_shape(&t.name, &p.config).as_deref()
+            != Some(&[spec.input as u64, spec.output as u64][..])
+        {
+            return Err(invalid(format!("invalid binding linear shape: {}", t.name)));
+        }
+        p.binding_linears.insert(spec.name, t.dtype);
+    }
     if let Some(aux) = &p.engram_context.auxiliary {
         for table in &aux.tensors {
             p.bytes.disk_engram = add(p.bytes.disk_engram, table.n_bytes)?;
@@ -361,6 +379,16 @@ impl ResidentWeights {
         p.engram_context.revalidate(&g)?;
         let page = metal::host_page_size_bytes()?;
         let storage = resident_storage::for_plan(&g, &p, page, ctx.max_buffer_length())?;
+        Self::load_planned(ctx, g, p, storage)
+    }
+
+    fn load_planned(
+        ctx: &MetalContext,
+        g: Arc<GgufFile>,
+        p: Plan,
+        storage: ResidentStoragePlan,
+    ) -> Result<Self, LoadError> {
+        let page = storage.page_size;
         let windows = &storage.windows;
         let requests: Vec<_> = g
             .tensors
@@ -459,6 +487,7 @@ impl ResidentWeights {
             }
         }
         p.engram_context.revalidate(&g)?;
+        let retained_resources = retained_resources::summarize(&banks, &dense)?;
         Ok(Self {
             config: p.config,
             schedule: p.schedule,
@@ -469,6 +498,7 @@ impl ResidentWeights {
             token_map: p.token_map,
             raw_pad: p.raw_pad,
             bytes: p.bytes,
+            retained_resources,
         })
     }
 }

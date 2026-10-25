@@ -2,6 +2,7 @@ use super::*;
 use std::io::Write;
 
 mod binding_preflight;
+mod execution_contract;
 pub(in crate::deepseek_v41) mod gsq_loader;
 mod ownership_metadata;
 mod ple_engram;
@@ -16,6 +17,7 @@ enum Value<'a> {
     Bool(bool),
     F32s(Vec<f32>),
     U32(u32),
+    I32(i32),
     U32s(Vec<u32>),
     Str(&'a str),
     Ints(Vec<i32>),
@@ -224,6 +226,10 @@ fn fixture_file(
             }
             Value::U32(v) => {
                 out.extend(4u32.to_le_bytes());
+                out.extend(v.to_le_bytes());
+            }
+            Value::I32(v) => {
+                out.extend(5u32.to_le_bytes());
                 out.extend(v.to_le_bytes());
             }
             Value::U32s(v) => {
@@ -461,6 +467,7 @@ fn oversized_plan_is_metadata_only() {
     }
     let p = plan(g).unwrap();
     assert!(p.bytes.resident_bytes() > 1u64 << 50);
+    p.validate_execution().unwrap();
 }
 #[test]
 fn inconsistent_geometry_fails() {

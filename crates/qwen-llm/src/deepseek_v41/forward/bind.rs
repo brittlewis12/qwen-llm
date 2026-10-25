@@ -227,11 +227,11 @@ impl<'a> Forward<'a> {
         op::require(
             c.heads % c.groups == 0
                 && c.topk <= c.experts
-                && c.topk <= 16
                 && c.rope_dim <= c.head_dim
                 && c.rope_dim <= c.index_dim,
             "invalid attention/expert geometry",
         )?;
+        super::super::execution::validate(c).map_err(|e| e.to_string())?;
         for width in [
             c.heads.checked_mul(c.head_dim),
             c.groups.checked_mul(c.output_rank),

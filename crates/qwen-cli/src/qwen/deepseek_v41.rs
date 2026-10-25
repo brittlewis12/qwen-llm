@@ -27,20 +27,30 @@ pub(crate) fn capabilities(gguf: &GgufFile) -> Result<serde_json::Value> {
         Err(error) => {
             return Ok(serde_json::json!({
                 "input": prompt_template::InputCapability::none("invalid_v41_gguf", error.to_string()),
+                "plan":{"status":"invalid","code":"invalid_v41_gguf"},
                 "execution":{"status":"rejected","code":"invalid_v41_gguf","message":error.to_string()},
                 "template":{"status":"unknown"},
                 "local_fit":{"status":"not_evaluated","stage":"runtime_memory_admission"},
             }));
         }
     };
+    let validation = plan.validate_execution();
+    let execution = match &validation {
+        Ok(()) => {
+            serde_json::json!({"status":"supported","capacity_policy":"runtime_memory_admission",
+            "prefill_mode":crate::family_options::V41_PREFILL_MODE,
+            "prefill_rows_max":crate::family_options::V41_PREFILL_ROWS})
+        }
+        Err(error) => serde_json::json!({"status":"rejected","code":error.code(),
+            "message":error.to_string()}),
+    };
     Ok(serde_json::json!({
+        "plan":{"status":"valid"},
         "input": prompt_template::InputCapability::all_supported(),
         "reasoning": {"levels":["none","low","high","xhigh","max"],"fallback":"none",
             "no_thinking":{"status":"unsupported"},"thinking":{"status":"unsupported"}},
         "template": {"status":"identified","rendered_as":"deepseek_recipe_dsv41"},
-        "execution":{"status":"supported","capacity_policy":"runtime_memory_admission",
-            "prefill_mode":crate::family_options::V41_PREFILL_MODE,
-            "prefill_rows_max":crate::family_options::V41_PREFILL_ROWS},
+        "execution":execution,
         "geometry":{"experts":plan.config.experts,"context_tokens":plan.engram_hash.max_position},
         "sources":{"backbone_shards":plan.source_groups().backbone.len(),
             "auxiliary_shards":plan.source_groups().auxiliary.len(),
@@ -50,7 +60,11 @@ pub(crate) fn capabilities(gguf: &GgufFile) -> Result<serde_json::Value> {
             "retained_cpu_bytes":plan.controls.retained_cpu_bytes,
             "source_bookkeeping_bytes":plan.controls.source_bookkeeping_bytes},
         "local_fit":{"status":"not_evaluated","stage":"runtime_memory_admission"},
-        "bench":{"status":"supported","harness":"family_pp_tg"},
+        "bench":if validation.is_ok() {
+            serde_json::json!({"status":"supported","harness":"family_pp_tg"})
+        } else {
+            serde_json::json!({"status":"unsupported","reason":"execution_rejected"})
+        },
         "cache":{"policy":"exact_prefix_ram","prefix_reuse":true,"snapshots":true},
         "lens":{"status":"unsupported"},"speculation":{"status":"unsupported"}
     }))
@@ -188,6 +202,7 @@ fn prepare_request_input(
 }
 
 fn request_forwards(plan: &weights::Plan, args: &Args, prompt_tokens: usize) -> Result<usize> {
+    plan.validate_execution()?;
     let context = usize::try_from(plan.engram_hash.max_position)?;
     let capacity = args.max_context_tokens.unwrap_or(context);
     ensure!(
@@ -248,6 +263,51 @@ mod tests {
             "invalid_v41_gguf"
         );
         assert_eq!(info["capabilities"]["local_fit"]["status"], "not_evaluated");
+        assert_eq!(info["capabilities"]["plan"]["status"], "invalid");
+    }
+
+    #[test]
+    fn v41_info_separates_valid_plan_from_unsupported_backend_math() {
+        for (iterations, topk, code) in [
+            (3, 6, "unsupported_v41_sinkhorn_iterations"),
+            (20, 17, "unsupported_v41_routing_topk"),
+        ] {
+            let gguf = crate::deepseek_v41_fixture::gguf_with_execution(32, iterations, topk);
+            let plan = weights::plan(&gguf).unwrap();
+            let expected = plan.validate_execution().unwrap_err();
+            let info = crate::project_info(std::path::Path::new("synthetic.gguf"), &gguf).unwrap();
+            assert_eq!(info["capabilities"]["plan"]["status"], "valid");
+            assert_eq!(info["capabilities"]["execution"]["status"], "rejected");
+            assert_eq!(info["capabilities"]["execution"]["code"], code);
+            assert_eq!(info["capabilities"]["bench"]["status"], "unsupported");
+            assert_eq!(
+                info["capabilities"]["execution"]["message"],
+                expected.to_string()
+            );
+            assert_eq!(info["capabilities"]["local_fit"]["status"], "not_evaluated");
+            let (args, _) =
+                invocation(&["qwen", "run", "-m", "synthetic.gguf", "--raw-prompt", "hi"]);
+            assert_eq!(
+                request_forwards(&plan, &args, 1).unwrap_err().to_string(),
+                expected.to_string()
+            );
+        }
+    }
+
+    #[test]
+    fn v41_info_preserves_supported_routing_boundaries_and_rejects_invalid_plans() {
+        for topk in [1, 6, 16] {
+            let gguf = crate::deepseek_v41_fixture::gguf_with_execution(32, 20, topk);
+            let info = capabilities(&gguf).unwrap();
+            assert_eq!(info["plan"]["status"], "valid");
+            assert_eq!(info["execution"]["status"], "supported");
+        }
+        for (iterations, topk) in [(0, 6), (20, 0), (20, 33)] {
+            let gguf = crate::deepseek_v41_fixture::gguf_with_execution(32, iterations, topk);
+            let info = capabilities(&gguf).unwrap();
+            assert_eq!(info["plan"]["status"], "invalid");
+            assert_eq!(info["execution"]["code"], "invalid_v41_gguf");
+        }
     }
 
     #[test]

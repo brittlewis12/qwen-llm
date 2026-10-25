@@ -10,6 +10,41 @@ mod native_rows;
 #[path = "tests/strategy.rs"]
 mod strategy;
 
+#[test]
+fn execution_contract_rejections_match_ffn_workspace_and_composition_guards() {
+    for c in [
+        Config {
+            hc_iterations: 3,
+            ..Config::default()
+        },
+        Config {
+            topk: 17,
+            ..Config::default()
+        },
+    ] {
+        let expected = crate::deepseek_v41::execution::validate(&c)
+            .unwrap_err()
+            .to_string();
+        assert_eq!(validate(&c).unwrap_err(), expected);
+        assert_eq!(bytes_for_layers(&c, 1).unwrap_err(), expected);
+        assert!(
+            composition_extents(&c, 1)
+                .unwrap_err()
+                .to_string()
+                .contains(&expected)
+        );
+    }
+    for topk in [1, 6, 16] {
+        let c = Config {
+            topk,
+            ..Config::default()
+        };
+        validate(&c).unwrap();
+        bytes_for_layers(&c, 1).unwrap();
+        composition_extents(&c, 1).unwrap();
+    }
+}
+
 thread_local! {
     pub(super) static NATIVE_ROWS_ONLY: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
     pub(super) static FORCE_GROUPED_ROWS: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };

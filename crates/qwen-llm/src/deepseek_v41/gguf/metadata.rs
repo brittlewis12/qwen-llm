@@ -23,6 +23,29 @@ fn optional_uint_aliases(g: &GgufFile, keys: &[&str]) -> Result<Option<u64>, Loa
     Ok(found)
 }
 
+fn supported_string_aliases(g: &GgufFile, keys: &[&str], expected: &str) -> Result<(), LoadError> {
+    let mut found = None;
+    for short in keys {
+        let key = format!("deepseek41.{short}");
+        if g.model.metadata().get(&key).is_some() {
+            let value = g
+                .get_str(&key)
+                .ok_or_else(|| invalid(format!("{key} must be string")))?;
+            if found.is_some_and(|old| old != value) {
+                return Err(invalid(format!("conflicting aliases for {key}")));
+            }
+            found = Some(value);
+        }
+    }
+    if let Some(value) = found.filter(|value| *value != expected) {
+        return Err(invalid(format!(
+            "unsupported deepseek41.{}: {value:?}; implemented value is {expected}",
+            keys[0]
+        )));
+    }
+    Ok(())
+}
+
 fn uint(g: &GgufFile, keys: &[&str], default: Option<usize>) -> Result<usize, LoadError> {
     let mut found = None;
     for key in keys {
@@ -131,20 +154,13 @@ pub(super) fn parse(g: &GgufFile) -> Result<Plan, LoadError> {
         return Err(invalid("general.architecture must be deepseek41"));
     }
     let d = Config::default();
-    for (short, expected) in [
-        ("scoring_func", "sqrtsoftplus"),
-        ("expert_scoring_func", "sqrtsoftplus"),
-        ("topk_method", "noaux_tc"),
-        ("hidden_act", "silu"),
-        ("rope.scaling.type", "yarn"),
+    for (keys, expected) in [
+        (&["scoring_func", "expert_scoring_func"][..], "sqrtsoftplus"),
+        (&["topk_method"][..], "noaux_tc"),
+        (&["hidden_act", "hidden_activation"][..], "silu"),
+        (&["rope.scaling.type"][..], "yarn"),
     ] {
-        let key = format!("deepseek41.{short}");
-        if g.model.metadata().get(&key).is_some() && g.get_str(&key) != Some(expected) {
-            return Err(invalid(format!(
-                "unsupported {key}: {:?}; implemented value is {expected}",
-                g.get_str(&key)
-            )));
-        }
+        supported_string_aliases(g, keys, expected)?;
     }
     for key in [
         "deepseek41.norm_topk_prob",

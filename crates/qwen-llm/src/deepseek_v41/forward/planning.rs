@@ -245,10 +245,11 @@ impl Forward<'_> {
         state: &State,
         tokens: usize,
         caller_cpu_reserve: u64,
+        fixed_rows: Option<usize>,
     ) -> std::result::Result<PrefillReport, StateError> {
         let (selected_rows, _) = select(
-            self.prefill_rows,
-            state.prefill_rows,
+            state.prefill_rows.unwrap_or(self.prefill_rows),
+            fixed_rows,
             tokens,
             Cost {
                 metal: 0,

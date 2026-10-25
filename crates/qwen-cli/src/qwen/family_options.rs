@@ -10,10 +10,22 @@ use qwen_llm::deepseek_v4_metal::{
 use qwen_llm::muse_glimmer_runtime::MuseGlimmerRuntimeOptions;
 use qwen_llm::qwen4exp_runtime::Qwen4ExpDecodeOptions;
 
-/// Maximum rows the V4.1 forward may submit in one chunk. The actual chunk is
-/// selected per resident size (4096 for fitting artifacts, 2048 for IQ3-class).
+/// Global engine ceiling, separate from admission-selected runtime geometry.
 pub(crate) const V41_PREFILL_ROWS: usize = qwen_llm::deepseek_v41::forward::MAX_PREFILL_CHUNK_ROWS;
 pub(crate) const V41_PREFILL_MODE: &str = "layer_major_batched+final_logits_copy";
+
+pub(crate) fn v41_prefill_geometry(
+    report: qwen_llm::deepseek_v41::forward::PrefillReport,
+) -> serde_json::Value {
+    serde_json::json!({
+        "engine_rows_max": V41_PREFILL_ROWS,
+        "selected_rows": report.selected_rows,
+        "actual_chunks": report.chunk_count(),
+        "chunk_ranges": report.chunk_ranges().map(|range| [range.start, range.end]).collect::<Vec<_>>(),
+        "start": report.start, "logical_tokens": report.tokens,
+        "max_chunk_rows": report.max_chunk_rows(),
+    })
+}
 
 /// Enables HC up-mix for eligible Flash-Next singleton Q8 up projections.
 /// Defaults on; accepts `0` (off) or `1` (on); any other value, including
@@ -164,6 +176,23 @@ pub(crate) fn deepseek_v4_prefill_chunk_ranges(
 mod tests {
     use super::*;
     use std::ffi::OsStr;
+
+    #[test]
+    fn v41_geometry_separates_engine_ceiling_selected_width_and_actual_ranges() {
+        let value = v41_prefill_geometry(qwen_llm::deepseek_v41::forward::PrefillReport {
+            start: 73,
+            tokens: 4097,
+            selected_rows: 2048,
+        });
+        assert_eq!(value["engine_rows_max"], 4096);
+        assert_eq!(value["selected_rows"], 2048);
+        assert_eq!(value["logical_tokens"], 4097);
+        assert_eq!(value["actual_chunks"], 3);
+        assert_eq!(
+            value["chunk_ranges"],
+            serde_json::json!([[73, 2121], [2121, 4169], [4169, 4170]])
+        );
+    }
 
     #[test]
     fn qwen4exp_decode_flags_follow_the_documented_contract() {

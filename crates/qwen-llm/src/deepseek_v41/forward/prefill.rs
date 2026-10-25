@@ -633,7 +633,7 @@ pub(super) fn run_captured(
         state
             .prefill_rows
             .is_none_or(|selected| selected == chunk_rows),
-        "prefill geometry is fixed for this state",
+        "prefill geometry is fixed for this request",
     )?;
     state.prefill_rows = Some(chunk_rows);
     state.last_prefill = None;

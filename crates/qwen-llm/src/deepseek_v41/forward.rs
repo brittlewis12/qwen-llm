@@ -613,7 +613,12 @@ impl<'a> Forward<'a> {
         cancel: Option<&AtomicBool>,
     ) -> std::result::Result<Vec<f32>, StateError> {
         let rows = self
-            .select_prefill(state, tokens.len(), state.caller_cpu_reserve)?
+            .select_prefill(
+                state,
+                tokens.len(),
+                state.caller_cpu_reserve,
+                state.prefill_rows,
+            )?
             .selected_rows;
         prefill::run(self, state, tokens, cancel, rows, true)
     }
@@ -628,7 +633,12 @@ impl<'a> Forward<'a> {
         capture: &mut dyn capture::Capture,
     ) -> std::result::Result<Vec<f32>, StateError> {
         let rows = self
-            .select_prefill(state, tokens.len(), state.caller_cpu_reserve)?
+            .select_prefill(
+                state,
+                tokens.len(),
+                state.caller_cpu_reserve,
+                state.prefill_rows,
+            )?
             .selected_rows;
         prefill::run_captured(self, state, tokens, cancel, rows, true, Some(capture))
     }
@@ -641,7 +651,12 @@ impl<'a> Forward<'a> {
         cancel: Option<&AtomicBool>,
     ) -> std::result::Result<(), StateError> {
         let rows = self
-            .select_prefill(state, tokens.len(), state.caller_cpu_reserve)?
+            .select_prefill(
+                state,
+                tokens.len(),
+                state.caller_cpu_reserve,
+                state.prefill_rows,
+            )?
             .selected_rows;
         prefill::run(self, state, tokens, cancel, rows, false).map(|_| ())
     }

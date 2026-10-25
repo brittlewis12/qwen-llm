@@ -1425,6 +1425,7 @@ pub(crate) struct RequestStatsBuild {
 #[serde(rename_all = "snake_case")]
 pub(crate) enum FamilyDiagnostics {
     DeepseekV4(RequestStatsDeepSeekV4Diagnostics),
+    DeepseekV41(serde_json::Value),
     K2Horizon(RequestStatsK2Diagnostics),
     Glm5Next(RequestStatsGlm5NextDiagnostics),
 }
@@ -1467,6 +1468,29 @@ pub(crate) struct RequestStatsDeepSeekV4Diagnostics {
 #[cfg(test)]
 mod family_diagnostics_tests {
     use super::*;
+
+    #[test]
+    fn deepseek_v41_diagnostics_report_actual_geometry_not_engine_ceiling_as_chunk_count() {
+        let geometry = crate::family_options::v41_prefill_geometry(
+            qwen_llm::deepseek_v41::forward::PrefillReport {
+                start: 73,
+                tokens: 4096,
+                selected_rows: 2048,
+            },
+        );
+        let value = serde_json::to_value(FamilyDiagnostics::DeepseekV41(serde_json::json!({
+            "prefill_geometry":geometry,
+        })))
+        .unwrap();
+        let geometry = &value["deepseek_v41"]["prefill_geometry"];
+        assert_eq!(geometry["engine_rows_max"], 4096);
+        assert_eq!(geometry["selected_rows"], 2048);
+        assert_eq!(geometry["actual_chunks"], 2);
+        assert_eq!(
+            geometry["chunk_ranges"],
+            serde_json::json!([[73, 2121], [2121, 4169]])
+        );
+    }
 
     #[test]
     fn deepseek_v4_family_diagnostics_match_previous_serialized_bytes() {

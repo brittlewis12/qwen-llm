@@ -8,7 +8,7 @@ impl Settings {
         prompt: &str,
         boundaries: Option<super::super::http::PromptBoundaries>,
         sink: &mut dyn GenerationSink,
-        admit: impl FnMut(usize, u64) -> std::result::Result<(), StateError>,
+        admit: impl FnMut(usize, usize, u64) -> std::result::Result<(), StateError>,
         new_state: impl FnOnce(usize) -> std::result::Result<S, ServeError>,
         reuse: &mut impl reuse::Reuse<S>,
         prefill: impl FnMut(
@@ -42,7 +42,7 @@ impl Settings {
         prompt: &str,
         boundaries: Option<super::super::http::PromptBoundaries>,
         sink: &mut dyn GenerationSink,
-        mut admit: impl FnMut(usize, u64) -> std::result::Result<(), StateError>,
+        mut admit: impl FnMut(usize, usize, u64) -> std::result::Result<(), StateError>,
         new_state: impl FnOnce(usize) -> std::result::Result<S, ServeError>,
         reuse: &mut impl reuse::Reuse<S>,
         mut prefill: impl FnMut(
@@ -128,9 +128,10 @@ impl Settings {
             }
         };
         check(sink)?;
+        reuse.prepare(&ids);
         admit_output(reuse, reserve, self.headroom)?;
         let restore_start = now();
-        let restored = reuse.take(&ids, required)?;
+        let restored = reuse.take(&ids, required, reserve)?;
         let restore_ms = (now() - restore_start).as_secs_f64() * 1e3;
         let (mut state, mut logits, matched, reuse_source) = if let Some(restored) = restored {
             (
@@ -142,7 +143,7 @@ impl Settings {
         } else {
             super::super::memory_relief::retry(
                 "deepseek_v41",
-                admit(required, reserve),
+                admit(required, ids.len(), reserve),
                 |result| {
                     result
                         .as_ref()
@@ -151,7 +152,7 @@ impl Settings {
                         .map(|denied| (denied.reason(), u64::MAX))
                 },
                 |bytes| reuse.evict_for(bytes),
-                || admit(required, reserve),
+                || admit(required, ids.len(), reserve),
             )
             .map_err(|error| match error.memory_admission() {
                 Some(denied) => {
@@ -178,6 +179,9 @@ impl Settings {
         let mut position = matched;
         let mut prefill_rows = 0;
         let mut prefill_chunks = 0;
+        let mut prefill_calls = 0;
+        let mut prefill_ranges = Vec::new();
+        let mut selected_rows = None;
         while position < ids.len() {
             check(sink)?;
             admit_output(reuse, reserve, self.headroom)?;
@@ -197,8 +201,15 @@ impl Settings {
             if with_logits && (logits.len() != vocab || !logits.iter().all(|v| v.is_finite())) {
                 return Err(ServeError::server_error("V4.1 returned malformed logits").into());
             }
-            prefill_rows = prefill_rows.max(endpoint - position);
-            prefill_chunks += 1;
+            let report = reuse.prefill_report(&state, position, endpoint - position);
+            if report.start != position || report.tokens != endpoint - position {
+                return Err(ServeError::server_error("V4.1 prefill report extent mismatch").into());
+            }
+            selected_rows = Some(report.selected_rows);
+            prefill_rows = prefill_rows.max(report.max_chunk_rows());
+            prefill_chunks += report.chunk_count();
+            prefill_calls += 1;
+            prefill_ranges.extend(report.chunk_ranges().map(|range| [range.start, range.end]));
             position = endpoint;
             if checkpoint_cuts.contains(&position) {
                 reuse.checkpoint(&state, &ids[..position], &[], reserve);
@@ -259,16 +270,19 @@ impl Settings {
             crate::family_options::V41_PREFILL_MODE
         };
         tracing::info!(target: "qwen_diag",
-            "serve phases: family=deepseek_v41 prefill_ms={prefill_ms:.3} reused_tokens={matched} reuse_source={reuse_source} restore_ms={restore_ms:.3} prefill_tokens={} prefill_mode={prefill_mode} prefill_rows={prefill_rows} prefill_chunks={prefill_chunks} decode_ms={:.3} required_forwards={required} capacity={} transitions={transitions} transition_ms={transition_ms:.3} ced=false",
-            ids.len() - matched, generation.wall_ms, capacity);
+            "serve phases: family=deepseek_v41 prefill_ms={prefill_ms:.3} reused_tokens={matched} reuse_source={reuse_source} restore_ms={restore_ms:.3} prefill_tokens={} prefill_mode={prefill_mode} prefill_rows={prefill_rows} prefill_chunks={prefill_chunks} prefill_calls={prefill_calls} prefill_selected_rows={selected_rows:?} prefill_rows_max={} decode_ms={:.3} required_forwards={required} capacity={} transitions={transitions} transition_ms={transition_ms:.3} ced=false",
+            ids.len() - matched, crate::family_options::V41_PREFILL_ROWS, generation.wall_ms, capacity);
         let phases = serde_json::json!({
             "family":"deepseek_v41", "prefill_ms":prefill_ms, "prefill_tokens":ids.len() - matched,
             "prefill_mode":prefill_mode, "prefill_rows":prefill_rows, "prefill_chunks":prefill_chunks,
             "prefill_rows_max":crate::family_options::V41_PREFILL_ROWS,
+            "prefill_selected_rows":selected_rows, "prefill_calls":prefill_calls,
+            "prefill_chunk_ranges":prefill_ranges,
             "decode_ms":generation.wall_ms, "generated_tokens":generation.tokens.len(),
             "transitions":transitions, "transition_ms":transition_ms,
             "required_forwards":required, "capacity":capacity, "reused_tokens":matched, "reuse_source":reuse_source, "restore_ms":restore_ms, "ced":false,
             "cache_policy":"exact_prefix_ram",
+            "reuse_selection_policy":"compatible_live_then_longest_snapshot_then_cold",
         });
         let mut outcome =
             super::super::outcome::finish_generation(ids.len(), &generation, matched, restore_ms);

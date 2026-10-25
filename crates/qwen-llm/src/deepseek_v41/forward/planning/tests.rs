@@ -134,6 +134,38 @@ fn frozen_geometry_refuses_without_retry_or_mutation_and_invalid_signals_fail_cl
 }
 
 #[test]
+fn new_live_request_can_narrow_before_mutation_but_keeps_an_admissible_retained_width() {
+    let price = |rows: usize| {
+        Ok(Cost {
+            metal: rows as u64 * 2,
+            cpu: 0,
+        })
+    };
+    let base = Cost {
+        metal: 1000,
+        cpu: 0,
+    };
+    assert!(select(4096, Some(4096), 4096, base, signals(), price).is_err());
+    let (rows, _) = select(4096, None, 4096, base, signals(), price).unwrap();
+    assert_eq!(
+        rows, 2048,
+        "a new request need not discard compatible KV to narrow"
+    );
+    let mut attempts = vec![];
+    let (rows, _) = select(2048, None, 4096, Cost::default(), signals(), |rows| {
+        attempts.push(rows);
+        price(rows)
+    })
+    .unwrap();
+    assert_eq!(rows, 2048);
+    assert_eq!(
+        attempts,
+        [2048],
+        "retain cheap live geometry rather than widening it"
+    );
+}
+
+#[test]
 fn shared_gpu_growth_uses_mwss_and_physical_ceiling_not_cpu_availability() {
     let mut observed = signals();
     observed

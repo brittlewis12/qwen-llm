@@ -703,6 +703,7 @@ pub(crate) fn run_pp(args: PpArgs) -> Result<()> {
     if json_mode {
         let (commit, dirty) = qwen_build_identity();
         let row = BenchRow {
+            prefill_geometry: None,
             schema_version: BENCH_SCHEMA_VERSION,
             engine: "qwen-llm",
             build_commit: commit,
@@ -1000,6 +1001,7 @@ pub(crate) fn run_pp_wait(args: PpWaitArgs) -> Result<()> {
     if json_mode {
         let (commit, dirty) = qwen_build_identity();
         let row = BenchRow {
+            prefill_geometry: None,
             schema_version: BENCH_SCHEMA_VERSION,
             engine: "qwen-llm",
             build_commit: commit,

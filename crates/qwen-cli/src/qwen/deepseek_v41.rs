@@ -746,7 +746,8 @@ pub(crate) fn run(
         Forward::from_resident(&ctx, &weights, weights.token_map.clone(), weights.raw_pad)
             .map_err(anyhow::Error::msg)?;
     let load_ms = loading.elapsed().as_secs_f64() * 1e3;
-    let mut state = forward.new_state_with_gpu_step(required)?;
+    let request_plan = forward.plan_request(required, ids.len(), 0)?;
+    let mut state = forward.new_state_from_plan(&request_plan)?;
     let execution = Instant::now();
     let prefill = Instant::now();
     let logits = forward
@@ -757,10 +758,15 @@ pub(crate) fn run(
         )
         .context("V4.1 prefill")?;
     let prefill_ms = prefill.elapsed().as_secs_f64() * 1e3;
+    let report = state
+        .last_prefill_report()
+        .context("V4.1 missing prefill report")?;
+    let geometry = crate::family_options::v41_prefill_geometry(report);
     tracing::info!(target: "qwen_diag", family="deepseek_v41", prefill_ms,
         prefill_mode=crate::family_options::V41_PREFILL_MODE,
-        prefill_rows=ids.len().min(crate::family_options::V41_PREFILL_ROWS),
-        prefill_chunks=ids.len().div_ceil(crate::family_options::V41_PREFILL_ROWS),
+        prefill_rows=report.max_chunk_rows(), prefill_chunks=report.chunk_count(),
+        prefill_selected_rows=report.selected_rows, prefill_rows_max=crate::family_options::V41_PREFILL_ROWS,
+        prefill_geometry=%geometry,
         "run prefill");
     let mut stdout = std::io::stdout().lock();
     let generation = decode::generate_serial(
@@ -813,7 +819,12 @@ pub(crate) fn run(
                 (source == PromptSource::Messages).then_some("deepseek_recipe_dsv41"),
             ),
             &measured,
-            None,
+            Some(crate::telemetry::FamilyDiagnostics::DeepseekV41(
+                serde_json::json!({
+                    "schema_version":1, "prefill_mode":crate::family_options::V41_PREFILL_MODE,
+                    "capacity":required, "prefill_geometry":geometry,
+                }),
+            )),
         )?;
     }
     Ok(())

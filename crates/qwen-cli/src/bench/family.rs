@@ -44,6 +44,9 @@ pub(crate) trait FamilyBench {
     fn decode(&mut self, id: u32) -> Result<()>;
     /// Labels for the most recent prefill and decode calls.
     fn semantics(&self) -> FamilySemantics;
+    fn prefill_report(&self) -> Option<qwen_llm::deepseek_v41::forward::PrefillReport> {
+        None
+    }
 }
 
 /// Extent the loaded model and its session must hold for these shapes.
@@ -116,10 +119,16 @@ pub(crate) fn with_family_bench<R>(
                 weights.raw_pad,
             )
             .map_err(anyhow::Error::msg)?;
+            let request_plan = forward.plan_request(
+                extent.forwards,
+                extent.prefill_endpoint.min(extent.forwards),
+                0,
+            )?;
             let mut bench = DeepSeekV41Bench {
                 vocab: weights.config.vocab,
                 state: None,
-                create: || Ok(forward.new_state_with_gpu_step(extent.forwards)?),
+                last_prefill: None,
+                create: || Ok(forward.new_state_from_plan(&request_plan)?),
                 prefill: |state: &mut qwen_llm::deepseek_v41::forward::State, ids: &[u32]| {
                     shutdown::checkpoint()?;
                     // Measurement hook (not a product flag): per-layer sampled
@@ -150,7 +159,12 @@ pub(crate) fn with_family_bench<R>(
                             );
                         }
                     }
-                    Ok(logits)
+                    Ok((
+                        logits,
+                        state
+                            .last_prefill_report()
+                            .context("V4.1 missing prefill report")?,
+                    ))
                 },
                 step: |state: &mut qwen_llm::deepseek_v41::forward::State, token| {
                     shutdown::checkpoint()?;
@@ -321,19 +335,22 @@ struct DeepSeekV41Bench<S, Create, Step, Prefill> {
     create: Create,
     step: Step,
     prefill: Prefill,
+    last_prefill: Option<qwen_llm::deepseek_v41::forward::PrefillReport>,
 }
 
 impl<S, Create, Step, Prefill> FamilyBench for DeepSeekV41Bench<S, Create, Step, Prefill>
 where
     Create: FnMut() -> Result<S>,
     Step: FnMut(&mut S, u32) -> Result<Vec<f32>>,
-    Prefill: FnMut(&mut S, &[u32]) -> Result<Vec<f32>>,
+    Prefill:
+        FnMut(&mut S, &[u32]) -> Result<(Vec<f32>, qwen_llm::deepseek_v41::forward::PrefillReport)>,
 {
     fn vocab_size(&self) -> usize {
         self.vocab
     }
     fn begin_rep(&mut self) -> Result<()> {
         self.state = None;
+        self.last_prefill = None;
         self.state = Some((self.create)()?);
         Ok(())
     }
@@ -342,7 +359,9 @@ where
             .state
             .as_mut()
             .context("DeepSeek V4.1 bench used before begin_rep")?;
-        std::hint::black_box((self.prefill)(state, ids)?);
+        let (logits, report) = (self.prefill)(state, ids)?;
+        std::hint::black_box(logits);
+        self.last_prefill = Some(report);
         Ok(())
     }
     fn decode(&mut self, id: u32) -> Result<()> {
@@ -357,8 +376,11 @@ where
         FamilySemantics {
             prefill_mode: crate::family_options::V41_PREFILL_MODE,
             decode_mode: "gpu_step+logits_copy",
-            prefill_chunk: Some(crate::family_options::V41_PREFILL_ROWS),
+            prefill_chunk: self.last_prefill.map(|report| report.selected_rows),
         }
+    }
+    fn prefill_report(&self) -> Option<qwen_llm::deepseek_v41::forward::PrefillReport> {
+        self.last_prefill
     }
 }
 
@@ -738,7 +760,7 @@ pub(crate) fn run_family_pp_row(
     for _ in 0..runs {
         wall.push(rep(bench).context("family pp rep")?);
     }
-    Ok(family_row(
+    let mut row = family_row(
         row_ctx,
         bench.semantics(),
         shape_label("pp", n_prompt, depth),
@@ -746,7 +768,11 @@ pub(crate) fn run_family_pp_row(
         depth,
         &wall,
         true,
-    ))
+    );
+    row.prefill_geometry = bench
+        .prefill_report()
+        .map(crate::family_options::v41_prefill_geometry);
+    Ok(row)
 }
 
 /// One llama-bench `tg<n>` row at `depth`: per rep a fresh state, an untimed
@@ -840,6 +866,7 @@ fn family_row(
         kernel_trace_concurrent_encoders_per_token: None,
         kernel_trace_dispatches_per_token: None,
         decode_gb_per_s: None,
+        prefill_geometry: None,
         prefill_chunk: if prefill {
             semantics.prefill_chunk
         } else {
@@ -969,6 +996,7 @@ mod tests {
         let mut bench = DeepSeekV41Bench {
             vocab: 257,
             state: None,
+            last_prefill: None,
             create: || {
                 repetitions.borrow_mut().push(vec![]);
                 Ok(0usize)
@@ -978,8 +1006,13 @@ mod tests {
                 let ids = reps.last_mut().unwrap();
                 assert_eq!(*position, ids.len());
                 ids.extend_from_slice(tokens);
+                let report = qwen_llm::deepseek_v41::forward::PrefillReport {
+                    start: *position,
+                    tokens: tokens.len(),
+                    selected_rows: 2048,
+                };
                 *position += tokens.len();
-                Ok(vec![0.; 257])
+                Ok((vec![0.; 257], report))
             },
             step: |position: &mut usize, token| {
                 let mut reps = repetitions.borrow_mut();
@@ -1014,15 +1047,25 @@ mod tests {
         );
         assert_eq!(pp.test, "pp3@d2");
         assert_eq!(tg.test, "tg4@d2");
-        assert_eq!(
-            pp.prefill_chunk,
-            Some(crate::family_options::V41_PREFILL_ROWS)
-        );
+        assert_eq!(pp.prefill_chunk, Some(2048));
+        let geometry = pp.prefill_geometry.as_ref().unwrap();
+        assert_eq!(geometry["engine_rows_max"], 4096);
+        assert_eq!(geometry["selected_rows"], 2048);
+        assert_eq!(geometry["actual_chunks"], 1);
+        assert_eq!(geometry["chunk_ranges"], serde_json::json!([[2, 5]]));
         assert_eq!(
             pp.prefill_mode,
             Some(crate::family_options::V41_PREFILL_MODE)
         );
         assert_eq!(tg.decode_mode, Some("gpu_step+logits_copy"));
+        let wide = run_family_pp_row(&mut bench, &row_ctx, 4096, 73, 1, true, 42).unwrap();
+        let geometry = wide.prefill_geometry.as_ref().unwrap();
+        assert_eq!(wide.prefill_chunk, Some(2048));
+        assert_eq!(geometry["actual_chunks"], 2);
+        assert_eq!(
+            geometry["chunk_ranges"],
+            serde_json::json!([[73, 2121], [2121, 4169]])
+        );
         for row in [pp, tg] {
             let json = serde_json::to_value(row).unwrap();
             assert_eq!(json["schema_version"], BENCH_SCHEMA_VERSION);

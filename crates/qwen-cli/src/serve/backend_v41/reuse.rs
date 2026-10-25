@@ -1,4 +1,7 @@
-use super::super::{decode_loop, snapshot_cache::SnapshotCache};
+//! Prefer compatible live state (no restore copy), then the longest usable RAM
+//! snapshot, then cold. This is deliberately not longest-prefix across both
+//! sources. Snapshot retention/expiry never governs the live session.
+use super::super::snapshot_cache::SnapshotCache;
 use super::*;
 use qwen_llm::deepseek_v41::forward::{Snapshot, State};
 
@@ -18,10 +21,32 @@ pub(super) struct Restored<S> {
 }
 
 pub(super) trait Reuse<S> {
+    /// Non-allocating request preparation. Retire incompatible idle ownership
+    /// before output admission; do not grow, restore, or consume compatible live.
+    fn prepare(&mut self, _: &[u32]) {}
     fn evict_for(&mut self, _: u64) -> qwen_llm::snapshot_policy::Evicted {
         Default::default()
     }
-    fn take(&mut self, ids: &[u32], required: usize) -> Result<Option<Restored<S>>, ServeError>;
+    /// Allocating phase, after `prepare` and output admission. Each source must
+    /// admit its own additional state/scratch peak while retaining `reserve`.
+    fn take(
+        &mut self,
+        ids: &[u32],
+        required: usize,
+        reserve: u64,
+    ) -> Result<Option<Restored<S>>, ServeError>;
+    fn prefill_report(
+        &self,
+        _: &S,
+        start: usize,
+        tokens: usize,
+    ) -> qwen_llm::deepseek_v41::forward::PrefillReport {
+        qwen_llm::deepseek_v41::forward::PrefillReport {
+            start,
+            tokens,
+            selected_rows: crate::family_options::V41_PREFILL_ROWS,
+        }
+    }
     fn checkpoint(&mut self, state: &S, ids: &[u32], logits: &[f32], reserve: u64);
     fn commit(&mut self, live: Live<S>);
     fn capacity(&self, state: &S, required: usize) -> usize;
@@ -57,6 +82,12 @@ pub(super) struct Session<'a, 'b> {
 }
 
 impl Reuse<State> for Session<'_, '_> {
+    fn prepare(&mut self, ids: &[u32]) {
+        operations::discard_incompatible(&mut self.store.live, ids, |state| {
+            (state.position(), !state.is_poisoned())
+        });
+    }
+
     fn evict_for(&mut self, bytes: u64) -> qwen_llm::snapshot_policy::Evicted {
         self.store.cache.evict_for(bytes)
     }
@@ -65,41 +96,60 @@ impl Reuse<State> for Session<'_, '_> {
         &mut self,
         ids: &[u32],
         required: usize,
+        reserve: u64,
     ) -> Result<Option<Restored<State>>, ServeError> {
         self.store.cache.sweep();
-        if let Some(live) = self.store.live.take() {
-            let matched = decode_loop::extending_prefix(
-                &live.tokens,
-                ids,
-                live.state.position(),
-                !live.state.is_poisoned(),
-            );
-            let equal = !live.state.is_poisoned()
-                && live.tokens == ids
-                && live.state.position() == ids.len();
-            if matched > 0 || equal {
-                return operations::grow_live(live, |state| {
-                    self.forward.ensure_capacity(state, required)
-                })
-                .map(|live| {
-                    live.map(|live| Restored {
-                        live,
-                        source: "live_session",
-                    })
-                });
-            }
-        }
-        let hit = self
-            .store
-            .cache
-            .peek_exact_in(&(), ids)
-            .filter(|hit| !hit.value.logits.is_empty())
-            .or_else(|| self.store.cache.peek_best_prefix_in(&(), ids));
+        let forward = self.forward;
+        let suffix = ids.len() - self.store.live.as_ref().map_or(0, |live| live.tokens.len());
+        operations::live_then_snapshot(
+            self.store.live.take(),
+            |state| forward.ensure_capacity_for_request(state, required, suffix, reserve),
+            || self.take_snapshot(ids, required, reserve),
+        )
+    }
+
+    fn prefill_report(
+        &self,
+        state: &State,
+        _: usize,
+        _: usize,
+    ) -> qwen_llm::deepseek_v41::forward::PrefillReport {
+        state
+            .last_prefill_report()
+            .expect("successful native prefill reports geometry")
+    }
+
+    fn checkpoint(&mut self, state: &State, ids: &[u32], logits: &[f32], reserve: u64) {
+        self.capture_checkpoint(state, ids, logits, reserve);
+    }
+
+    fn commit(&mut self, live: Live<State>) {
+        self.store.live = Some(live);
+    }
+    fn capacity(&self, state: &State, _: usize) -> usize {
+        state.capacity()
+    }
+}
+
+impl Session<'_, '_> {
+    fn take_snapshot(
+        &mut self,
+        ids: &[u32],
+        required: usize,
+        reserve: u64,
+    ) -> Result<Option<Restored<State>>, ServeError> {
+        let hit = operations::snapshot_candidate(&mut self.store.cache, ids, |checkpoint| {
+            !checkpoint.logits.is_empty()
+        });
         let Some(hit) = hit else { return Ok(None) };
+        let suffix = ids.len() - hit.prefix_len;
         let Some((state, hit)) = operations::restore_candidate(
             &mut self.store.cache,
             hit,
-            || self.forward.new_state_with_gpu_step(required),
+            || {
+                let plan = self.forward.plan_request(required, suffix, reserve)?;
+                self.forward.new_state_from_plan(&plan)
+            },
             |state, checkpoint| self.forward.restore_snapshot(state, &checkpoint.snapshot),
         )?
         else {
@@ -115,7 +165,7 @@ impl Reuse<State> for Session<'_, '_> {
         }))
     }
 
-    fn checkpoint(&mut self, state: &State, ids: &[u32], logits: &[f32], reserve: u64) {
+    fn capture_checkpoint(&mut self, state: &State, ids: &[u32], logits: &[f32], reserve: u64) {
         let Some(logits_bytes) = (logits.len() as u64).checked_mul(size_of::<f32>() as u64) else {
             return;
         };
@@ -140,20 +190,13 @@ impl Reuse<State> for Session<'_, '_> {
             },
         );
     }
-
-    fn commit(&mut self, live: Live<State>) {
-        self.store.live = Some(live);
-    }
-    fn capacity(&self, state: &State, _: usize) -> usize {
-        state.capacity()
-    }
 }
 
 #[cfg(test)]
 pub(super) struct NoReuse;
 #[cfg(test)]
 impl<S> Reuse<S> for NoReuse {
-    fn take(&mut self, _: &[u32], _: usize) -> Result<Option<Restored<S>>, ServeError> {
+    fn take(&mut self, _: &[u32], _: usize, _: u64) -> Result<Option<Restored<S>>, ServeError> {
         Ok(None)
     }
     fn checkpoint(&mut self, _: &S, _: &[u32], _: &[f32], _: u64) {}

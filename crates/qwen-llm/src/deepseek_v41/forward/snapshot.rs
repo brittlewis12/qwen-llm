@@ -147,6 +147,8 @@ impl Forward<'_> {
 
     /// Prepare live reuse without mutating causal KV. Growth and snapshot-copy
     /// peaks retain the caller's CPU reserve; refusal permits another source.
+    /// Call only at a new request boundary, before any of its prefill mutations:
+    /// retained geometry is preferred but may narrow without dropping live KV.
     pub fn ensure_capacity_for_request(
         &self,
         state: &mut State,
@@ -175,7 +177,7 @@ impl Forward<'_> {
         }
         if required <= state.max_context {
             if let Some((tokens, reserve)) = request {
-                let report = self.select_prefill(state, tokens, reserve)?;
+                let report = self.select_prefill(state, tokens, reserve, None)?;
                 state.prefill_rows = Some(report.selected_rows);
                 state.caller_cpu_reserve = reserve;
             }

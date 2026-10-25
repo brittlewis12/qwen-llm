@@ -55,11 +55,258 @@ struct GrowthFixture {
     live: Option<Live<Tracked>>,
     pressure: bool,
 }
+
+#[test]
+fn live_selection_is_pure_causal_and_live_first_then_snapshot_on_growth_refusal() {
+    let drops = Rc::new(Cell::new(0));
+    let make = || Live {
+        state: Tracked {
+            tokens: vec![1, 2],
+            drops: drops.clone(),
+        },
+        tokens: vec![1, 2],
+        logits: vec![7.],
+    };
+    let live = make();
+    for (ids, position, healthy, expected) in [
+        (vec![1, 2, 3, 4], 2, true, Some(2)),
+        (vec![1, 2], 2, true, Some(2)),
+        (vec![1, 9, 3], 2, true, None),
+        (vec![1], 2, true, None),
+        (vec![1, 2, 3], 1, true, None),
+        (vec![1, 2, 3], 2, false, None),
+    ] {
+        assert_eq!(
+            operations::live_prefix_len(&live, &ids, position, healthy),
+            expected
+        );
+        assert_eq!(live.tokens, [1, 2]);
+        assert_eq!(live.state.tokens, [1, 2]);
+        assert_eq!(drops.get(), 0);
+    }
+    drop(live);
+    for (pressure, snapshot_available) in [(false, true), (true, true), (true, false)] {
+        let before = drops.get();
+        let restored = operations::live_then_snapshot(
+            Some(make()),
+            |_| {
+                if pressure {
+                    Err(denied(Reason::ProcessInsufficient))
+                } else {
+                    Ok(())
+                }
+            },
+            || {
+                assert!(pressure, "cheap live wins even over a longer snapshot");
+                assert_eq!(drops.get(), before + 1, "old owner released before restore");
+                Ok(snapshot_available.then(|| Restored {
+                    live: Live {
+                        tokens: vec![1, 2, 3],
+                        ..make()
+                    },
+                    source: "snapshot_ram",
+                }))
+            },
+        )
+        .unwrap();
+        if let Some(restored) = restored {
+            assert_eq!(
+                restored.source,
+                if pressure {
+                    "snapshot_ram"
+                } else {
+                    "live_session"
+                }
+            );
+            assert_eq!(restored.live.tokens.len(), if pressure { 3 } else { 2 });
+        } else {
+            assert!(
+                pressure && !snapshot_available,
+                "cold only after both sources"
+            );
+        }
+    }
+}
+
+#[test]
+fn snapshot_selection_uses_longest_causal_prefix_or_equal_with_logits_without_mutating_payload() {
+    for exact_logits in [false, true] {
+        let mut cache = SnapshotCache::new(1024, Default::default());
+        assert!(cache.insert_strict(vec![1], (vec![1], false), 20));
+        assert!(cache.insert_strict(vec![1, 2, 3], (vec![1, 2, 3], false), 40));
+        assert!(cache.insert_strict(vec![1, 2, 3, 4], (vec![1, 2, 3, 4], exact_logits), 50));
+        let bytes = cache.indexed_bytes();
+        let hit =
+            operations::snapshot_candidate(&mut cache, &[1, 2, 3, 4], |value| value.1).unwrap();
+        assert_eq!(hit.prefix_len, if exact_logits { 4 } else { 3 });
+        assert_eq!(hit.value.0, [1, 2, 3, 4][..hit.prefix_len]);
+        assert_eq!(cache.len(), 3);
+        assert_eq!(cache.indexed_bytes(), bytes);
+    }
+}
+
+#[test]
+fn snapshot_zero_budget_and_expiry_do_not_retire_compatible_live() {
+    use qwen_llm::snapshot_policy::{FakeClock, SnapshotPolicyConfig};
+    for budget in [0, 1024] {
+        let clock = FakeClock::default();
+        let mut cache = SnapshotCache::with_clock(
+            budget,
+            SnapshotPolicyConfig {
+                idle_ttl: Duration::from_secs(1),
+                ..Default::default()
+            },
+            Arc::new(clock.clone()),
+        );
+        cache.insert_strict(vec![1], 7u8, 20);
+        let drops = Rc::new(Cell::new(0));
+        let mut live = Some(Live {
+            state: Tracked {
+                tokens: vec![1],
+                drops: drops.clone(),
+            },
+            tokens: vec![1],
+            logits: vec![],
+        });
+        clock.advance(Duration::from_secs(2));
+        cache.sweep();
+        operations::discard_incompatible(&mut live, &[1, 2], |state| (state.tokens.len(), true));
+        assert_eq!(cache.len(), 0);
+        assert_eq!(drops.get(), 0);
+        assert!(live.is_some());
+        drop(live);
+        assert_eq!(drops.get(), 1);
+    }
+}
+
+thread_local! {
+    static IDLE_BYTES: Cell<u64> = const { Cell::new(0) };
+}
+
+struct IdleAllocation(u64);
+impl Drop for IdleAllocation {
+    fn drop(&mut self) {
+        IDLE_BYTES.with(|bytes| bytes.set(bytes.get() - self.0));
+    }
+}
+
+fn idle_headroom() -> Option<HostMemoryHeadroom> {
+    IDLE_BYTES.with(|bytes| finite_headroom((1 << 30) - bytes.get()))
+}
+
+struct IdleFixture(Option<Live<IdleAllocation>>);
+impl Reuse<IdleAllocation> for IdleFixture {
+    fn prepare(&mut self, ids: &[u32]) {
+        operations::discard_incompatible(&mut self.0, ids, |_| (1, true));
+    }
+    fn take(
+        &mut self,
+        _: &[u32],
+        _: usize,
+        _: u64,
+    ) -> Result<Option<Restored<IdleAllocation>>, ServeError> {
+        Ok(self.0.take().map(|live| Restored {
+            live,
+            source: "live_session",
+        }))
+    }
+    fn checkpoint(&mut self, _: &IdleAllocation, _: &[u32], _: &[f32], _: u64) {}
+    fn commit(&mut self, live: Live<IdleAllocation>) {
+        self.0 = Some(live);
+    }
+    fn capacity(&self, _: &IdleAllocation, required: usize) -> usize {
+        required
+    }
+}
+
+#[test]
+fn incompatible_idle_owner_drops_before_output_admission_compatible_owner_survives() {
+    struct Sink;
+    impl GenerationSink for Sink {
+        fn tick(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+        fn piece(&mut self, _: &[u8]) -> io::Result<()> {
+            Ok(())
+        }
+    }
+    let mut settings = Settings::new(
+        super::super::tokenizer_fixture::tokenizer(None),
+        128,
+        1,
+        SamplingConfig::default(),
+        256,
+        "test".into(),
+    )
+    .unwrap();
+    settings.headroom = idle_headroom;
+    let request = settings
+        .profile()
+        .parse(&serde_json::json!({"model":"test", "input":"ab", "max_output_tokens":1}))
+        .unwrap();
+    for compatible in [false, true] {
+        let bytes = if compatible { 1024 } else { (1 << 30) - 1 };
+        IDLE_BYTES.with(|live| live.set(bytes));
+        let mut fixture = IdleFixture(Some(Live {
+            state: IdleAllocation(bytes),
+            tokens: vec![if compatible { 97 } else { 99 }],
+            logits: vec![],
+        }));
+        if !compatible {
+            assert!(
+                super::super::execution::admit_output(&mut fixture, 1 << 20, idle_headroom)
+                    .is_err(),
+                "obsolete resident would falsely refuse"
+            );
+            assert!(fixture.0.is_some(), "snapshot relief is not live policy");
+        }
+        let result = settings
+            .execute(
+                &request,
+                "ab",
+                None,
+                &mut Sink,
+                |_, _, _| {
+                    assert_eq!(IDLE_BYTES.with(Cell::get), 0);
+                    Ok(())
+                },
+                |_| {
+                    assert!(!compatible);
+                    Ok(IdleAllocation(0))
+                },
+                &mut fixture,
+                |_, tokens, _, _| {
+                    assert_eq!(tokens, if compatible { &[98][..] } else { &[97, 98][..] });
+                    assert_eq!(
+                        IDLE_BYTES.with(Cell::get),
+                        if compatible { bytes } else { 0 }
+                    );
+                    let mut logits = vec![0.; 257];
+                    logits[256] = 100.;
+                    Ok(logits)
+                },
+                |_, _, _| panic!("EOS is not consumed"),
+                || Duration::ZERO,
+            )
+            .unwrap();
+        assert_eq!(
+            result.stats.unwrap().matched_tokens,
+            usize::from(compatible)
+        );
+        drop(fixture);
+        assert_eq!(
+            IDLE_BYTES.with(Cell::get),
+            0,
+            "only actual owner Drop releases fake allocation"
+        );
+    }
+}
 impl Reuse<Tracked> for GrowthFixture {
     fn take(
         &mut self,
         ids: &[u32],
         required: usize,
+        _: u64,
     ) -> Result<Option<Restored<Tracked>>, ServeError> {
         let live = self.live.take().unwrap();
         assert!(ids.starts_with(&live.tokens));
@@ -132,7 +379,7 @@ fn growth_pressure_drops_old_state_before_normal_cold_allocation_but_invalid_is_
             "ab",
             None,
             &mut Sink,
-            |_, _| {
+            |_, _, _| {
                 assert_eq!(drops.get(), 1);
                 admissions.set(admissions.get() + 1);
                 Ok(())
@@ -522,7 +769,12 @@ fn optional_capture_decline_preserves_request_schedule_and_live_state() {
         process_pressure: bool,
     }
     impl Reuse<usize> for Fixture<'_> {
-        fn take(&mut self, _: &[u32], _: usize) -> Result<Option<Restored<usize>>, ServeError> {
+        fn take(
+            &mut self,
+            _: &[u32],
+            _: usize,
+            _: u64,
+        ) -> Result<Option<Restored<usize>>, ServeError> {
             Ok(None)
         }
         fn checkpoint(&mut self, state: &usize, ids: &[u32], logits: &[f32], reserve: u64) {
@@ -620,7 +872,7 @@ fn optional_capture_decline_preserves_request_schedule_and_live_state() {
                 "abc",
                 boundaries,
                 &mut Sink,
-                |_, bytes| {
+                |_, _, bytes| {
                     reserve.set(bytes);
                     Ok(())
                 },

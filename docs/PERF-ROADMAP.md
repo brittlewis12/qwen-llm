@@ -28,6 +28,17 @@ before building anything adjacent. This replaces relaying between sessions.
 
 ### DeepSeek V4.1-Flash (main after the 4096-row chunk and 64-slot gate/up: pp2048 Q2 877.3 / IQ3 852 (not re-measured), pp4096 Q2 890.2 / IQ3 840.7; decode rechecked tg32 Q2 43.2 / IQ3 41.0, depth tg32@d2048 41.6 from the prior landing)
 
+GSQ-RCO release bring-up: in flight (`feat/v41-gsq-loader`,
+`feat/v41-iq1-experts`), pinned HF revision `cb02422c900df489cea5833e8a92171224059b3c`.
+Reuse established Flash-Next standard-GGUF/GSQ-RCO machinery and IQ1 codecs;
+this is DeepSeek-specific source/control and expert-bank wiring, not a new
+quantization stack. The recommended 2.00-bpw build has 60 IQ1_M expert banks;
+2.25 bpw uses already-supported expert types. Actual prefixes declare a separate
+IQ4_NL Engram companion and four integer control tensors. Preserve separate
+source groups/stamps, disk-backed tables and current admission. Qualify the new
+artifact independently; do not substitute it into frozen Maya/P0/P4 controls or
+treat the author's benchmark scores as local quality/performance evidence.
+
 CED encoder-only bulk prefill is the leading architectural opportunity.
 Design/dependency recon: landed (2026-10-23 CED entry;
 `DEEPSEEK-V41-CED-DESIGN.md`). The first recommended executor is cold shrinking

@@ -467,11 +467,12 @@ struct ReferenceRow {
 }
 
 fn full_reference(
+    request: &RequestPlan,
     model: &Forward<'_>,
     input: &Input,
     g: &Geometry,
 ) -> AResult<(Vec<ReferenceRow>, Value, f64)> {
-    let mut state = model.new_state(g.n + STEPS)?;
+    let mut state = model.new_state_from_plan(request)?;
     let started = std::time::Instant::now();
     let (mut logits, execution) = model.prefill_with_execution(
         &mut state,
@@ -509,6 +510,7 @@ fn full_reference(
 }
 
 fn compare_ced(
+    request: &RequestPlan,
     model: &Forward<'_>,
     input: &Input,
     g: &Geometry,
@@ -516,7 +518,7 @@ fn compare_ced(
     reference: Vec<ReferenceRow>,
 ) -> AResult<(Vec<Value>, Value, f64)> {
     ensure!(reference.len() == STEPS + 1, "reference position coverage");
-    let mut state = model.new_state(g.n + STEPS)?;
+    let mut state = model.new_state_from_plan(request)?;
     let started = std::time::Instant::now();
     let (mut logits, execution) = model.prefill_with_execution(
         &mut state,
@@ -621,13 +623,6 @@ fn run_pair() -> AResult<()> {
         let planned = v41_gguf::plan(&gguf)?;
         let g = geometry(&gguf, &planned, n)?;
         let input = select_prefix(&frozen, n, g.vocab)?;
-        let plan = CedPlan::shrinking(
-            &planned.config,
-            &planned.schedule,
-            &planned.engram_hash,
-            &CedRequest::cold(n, n + STEPS)
-                .with_full_chunk_rows(prefill_rows_for_resident(planned.bytes.resident_bytes())),
-        )?;
         let capture = capture_cpu_plan(g.vocab)?;
         let cold = preflight_cold_prefill(
             &ctx,
@@ -639,6 +634,12 @@ fn run_pair() -> AResult<()> {
                 PrefillExecution::ShrinkingCed,
             ],
             capture.total_bytes,
+        )?;
+        let plan = CedPlan::shrinking(
+            &planned.config,
+            &planned.schedule,
+            &planned.engram_hash,
+            &CedRequest::cold(n, n + STEPS).with_full_chunk_rows(cold.full_chunk_rows),
         )?;
         ensure!(
             cold.resident_storage.bytes == planned.bytes,
@@ -707,18 +708,16 @@ fn run_pair() -> AResult<()> {
         let model =
             Forward::from_resident(&ctx, &weights, weights.token_map.clone(), weights.raw_pad)
                 .map_err(anyhow::Error::msg)?;
-        ensure!(
-            model.prefill_rows == cold.full_chunk_rows,
-            "metadata/runtime Full chunk selection mismatch"
-        );
+        let request = model.plan_request_from_cold(&cold)?;
         report["stage"] = json!("current_full");
         write_report(&mut report_file, &report)?;
         let (reference, full_execution, full_seconds) =
-            objc2::rc::autoreleasepool(|_| full_reference(&model, &input, &g))?;
+            objc2::rc::autoreleasepool(|_| full_reference(&request, &model, &input, &g))?;
         report["stage"] = json!("shrinking_ced");
         write_report(&mut report_file, &report)?;
-        let (observations, ced_execution, ced_seconds) =
-            objc2::rc::autoreleasepool(|_| compare_ced(&model, &input, &g, &plan, reference))?;
+        let (observations, ced_execution, ced_seconds) = objc2::rc::autoreleasepool(|_| {
+            compare_ced(&request, &model, &input, &g, &plan, reference)
+        })?;
         ensure!(observations.len() == STEPS + 1, "paired position coverage");
         validate_loaded_sources(&gguf, &planned, &weights.engram)?;
         let artifact_after = artifact_identity(&gguf, &planned)?;

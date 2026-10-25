@@ -571,16 +571,17 @@ pub(crate) fn run_suite_with_measurement(
         } else {
             None
         };
-        rows = crate::v41_ced_pair::with_load(
+        rows = crate::v41_ced_pair::with_load_plan(
             paired_preweight.as_ref(),
             || ctx.memory_signals(),
-            |preweight_report| {
-                with_family_bench(
+            |preweight_report, selected_plan| {
+                crate::family_bench::with_family_bench_planned(
                     family,
                     &ctx,
                     &probe,
                     extent,
                     v41_prefill_execution,
+                    selected_plan,
                     &mut |bench| {
                         if let Some(preweight) = &paired_preweight {
                             let rows = crate::v41_ced_pair::run(
@@ -589,7 +590,7 @@ pub(crate) fn run_suite_with_measurement(
                                 pp[0],
                                 runs,
                                 seed,
-                                &preweight.plan,
+                                selected_plan.context("paired admitted plan missing")?,
                                 preweight_report
                                     .context("paired load assessment report missing")?,
                                 &ctx,

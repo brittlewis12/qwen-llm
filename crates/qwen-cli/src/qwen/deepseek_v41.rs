@@ -798,6 +798,16 @@ pub(crate) fn run(
     shutdown::checkpoint()?;
     let loading = Instant::now();
     let ctx = MetalContext::new()?;
+    let cold = qwen_llm::deepseek_v41::forward::plan_cold_prefill(
+        &ctx,
+        &gguf,
+        ids.len(),
+        required,
+        &[prefill_execution],
+        0,
+    )?
+    .select_load(ctx.memory_signals())?
+    .0;
     let weights = load(&ctx, Arc::new(gguf))?;
     ensure!(
         weights.config.vocab == tokenizer.n_vocab() as usize,
@@ -807,7 +817,7 @@ pub(crate) fn run(
         Forward::from_resident(&ctx, &weights, weights.token_map.clone(), weights.raw_pad)
             .map_err(anyhow::Error::msg)?;
     let load_ms = loading.elapsed().as_secs_f64() * 1e3;
-    let request_plan = forward.plan_request(required, ids.len(), 0)?;
+    let request_plan = forward.plan_request_from_cold(&cold)?;
     let mut state = forward.new_state_from_plan(&request_plan)?;
     let execution = Instant::now();
     let prefill = Instant::now();
@@ -837,6 +847,7 @@ pub(crate) fn run(
     let prefill_diagnostics = Some(crate::family_options::V41PrefillDiagnostics {
         requested_execution: prefill_execution,
         report: prefill_report,
+        capacity: Some(required),
     });
     if let Some(diagnostics) = &prefill_diagnostics {
         tracing::info!(target: "qwen_diag", family="deepseek_v41",

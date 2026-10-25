@@ -403,31 +403,55 @@ fn admission_report(admission: &MetalMemoryAdmission) -> serde_json::Value {
 }
 
 /// The only resident factory invocation must remain inside this gate.
+#[cfg(test)]
 pub(crate) fn with_load<R>(
     preweight: Option<&PairedPreweight>,
     signals: impl FnOnce() -> MetalMemorySignals,
     factory: impl FnOnce(Option<&serde_json::Value>) -> Result<R>,
 ) -> Result<R> {
+    with_load_plan(preweight, signals, |report, _| factory(report))
+}
+
+pub(crate) fn with_load_plan<R>(
+    preweight: Option<&PairedPreweight>,
+    signals: impl FnOnce() -> MetalMemorySignals,
+    factory: impl FnOnce(Option<&serde_json::Value>, Option<&ColdPrefillPlan>) -> Result<R>,
+) -> Result<R> {
+    let mut selected = None;
     let report = if let Some(preweight) = preweight {
-        let assessment = preweight
+        let (plan, assessment) = preweight
             .plan
-            .assess_load(signals())
+            .select_load(signals())
             .context("paired full cold peak capacity and fresh load admission")?;
         ensure!(
             assessment.load_admission.is_admitted(),
             "paired load denied"
         );
         let mut report = preweight.report.clone();
+        if plan.capacity != 0 {
+            let current = preweight_report(
+                &plan,
+                FamilyBenchExtent {
+                    forwards: plan.capacity,
+                    prefill_endpoint: plan.geometry.tokens,
+                },
+            )?;
+            report
+                .as_object_mut()
+                .context("paired report object")?
+                .extend(current.as_object().unwrap().clone());
+        }
         report["peak_capacity_passed"] = true.into();
         report["peak_capacity"] = format!("{:?}", assessment.peak_capacity).into();
         report["load_admission"] = admission_report(&assessment.load_admission);
         report["whole_peak_now"] = admission_report(&assessment.whole_peak_now);
         report["whole_peak_now_scope"] = "diagnostic_only_not_runtime_admission".into();
+        selected = Some(plan);
         Some(report)
     } else {
         None
     };
-    factory(report.as_ref())
+    factory(report.as_ref(), selected.as_ref())
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize)]
@@ -1505,7 +1529,11 @@ mod tests {
     fn report(execution: PrefillExecution) -> PrefillReport {
         let ced = execution == PrefillExecution::ShrinkingCed;
         PrefillReport {
-            geometry: qwen_llm::deepseek_v41::forward::PrefillGeometry { start: 0, tokens: 3, selected_rows: 4096 },
+            geometry: qwen_llm::deepseek_v41::forward::PrefillGeometry {
+                start: 0,
+                tokens: 3,
+                selected_rows: 4096,
+            },
             execution,
             fallback: None,
             counters: ced.then(|| CedCounters {
@@ -1553,6 +1581,8 @@ mod tests {
         use qwen_llm::deepseek_v41::gguf::{ByteCounters, ResidentStoragePlan};
         let caller = caller_cpu_bytes(diagnostic);
         let plan = ColdPrefillPlan {
+            geometry: qwen_llm::deepseek_v41::forward::PrefillGeometry { start: 0, tokens: 0, selected_rows: 4096 },
+            capacity: 0, executions: vec![PrefillExecution::FullForward, PrefillExecution::ShrinkingCed], alternatives: Vec::new(),
             full_chunk_rows: qwen_llm::deepseek_v41::forward::PREFILL_CHUNK_ROWS,
             resident_storage: ResidentStoragePlan {
                 page_size: 16384,

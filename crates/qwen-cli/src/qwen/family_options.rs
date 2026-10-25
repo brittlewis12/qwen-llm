@@ -67,11 +67,39 @@ pub(crate) fn parse_v41_prefill_execution(
     }
 }
 
-#[derive(Clone, Debug, serde::Serialize)]
+#[derive(Clone, Debug)]
 pub(crate) struct V41PrefillDiagnostics {
     pub(crate) requested_execution: qwen_llm::deepseek_v41::forward::PrefillExecution,
-    #[serde(flatten)]
     pub(crate) report: qwen_llm::deepseek_v41::forward::PrefillReport,
+    pub(crate) capacity: Option<usize>,
+}
+
+impl serde::Serialize for V41PrefillDiagnostics {
+    fn serialize<S: serde::Serializer>(
+        &self,
+        serializer: S,
+    ) -> std::result::Result<S::Ok, S::Error> {
+        #[derive(serde::Serialize)]
+        struct Fields<'a> {
+            schema_version: u32,
+            requested_execution: qwen_llm::deepseek_v41::forward::PrefillExecution,
+            prefill_mode: &'static str,
+            #[serde(skip_serializing_if = "Option::is_none")]
+            capacity: Option<usize>,
+            #[serde(flatten)]
+            report: &'a qwen_llm::deepseek_v41::forward::PrefillReport,
+            prefill_geometry: serde_json::Value,
+        }
+        Fields {
+            schema_version: 2,
+            requested_execution: self.requested_execution,
+            prefill_mode: v41_prefill_mode(self.report.execution),
+            capacity: self.capacity,
+            report: &self.report,
+            prefill_geometry: v41_execution_geometry(&self.report),
+        }
+        .serialize(serializer)
+    }
 }
 
 impl V41PrefillDiagnostics {
@@ -83,6 +111,7 @@ impl V41PrefillDiagnostics {
         (requested_execution == ShrinkingCed || report.execution == ShrinkingCed).then_some(Self {
             requested_execution,
             report,
+            capacity: None,
         })
     }
 }
@@ -249,6 +278,53 @@ mod tests {
     use std::ffi::OsStr;
 
     #[test]
+    fn v41_geometry_separates_engine_ceiling_selected_width_and_actual_ranges() {
+        let value = v41_prefill_geometry(qwen_llm::deepseek_v41::forward::PrefillGeometry {
+            start: 73,
+            tokens: 4097,
+            selected_rows: 2048,
+        });
+        assert_eq!(value["engine_rows_max"], 4096);
+        assert_eq!(value["selected_rows"], 2048);
+        assert_eq!(value["actual_chunks"], 3);
+        assert_eq!(
+            value["chunk_ranges"],
+            serde_json::json!([[73, 2121], [2121, 4169], [4169, 4170]])
+        );
+    }
+
+    #[test]
+    fn v41_ced_geometry_never_labels_logical_encoder_chunks_as_full_decoder_work() {
+        use qwen_llm::deepseek_v41::forward::{PrefillExecution, PrefillGeometry, PrefillReport};
+        let report = PrefillReport {
+            geometry: PrefillGeometry {
+                start: 0,
+                tokens: 4097,
+                selected_rows: 2048,
+            },
+            execution: PrefillExecution::ShrinkingCed,
+            fallback: None,
+            counters: None,
+            memory: None,
+            observed_incremental_metal_bytes: None,
+        };
+        let value = serde_json::to_value(V41PrefillDiagnostics {
+            requested_execution: PrefillExecution::ShrinkingCed,
+            report,
+            capacity: Some(4353),
+        })
+        .unwrap();
+        assert_eq!(value["capacity"], 4353);
+        assert_eq!(value["prefill_geometry"]["input_encoder_chunks"], 3);
+        assert_eq!(
+            value["prefill_geometry"]["scope"],
+            "logical_input_encoder_not_decoder_work"
+        );
+        assert!(value["prefill_geometry"].get("actual_chunks").is_none());
+        assert!(value["prefill_geometry"].get("chunk_ranges").is_none());
+    }
+
+    #[test]
     fn v41_cold_prefill_parser_defaults_and_valid_values() {
         use qwen_llm::deepseek_v41::forward::PrefillExecution;
         for (value, expected) in [
@@ -296,7 +372,11 @@ mod tests {
             CedCounters, CedMemoryEstimate, PrefillExecution, PrefillReport,
         };
         let full = PrefillReport {
-            geometry: qwen_llm::deepseek_v41::forward::PrefillGeometry { start: 0, tokens: 3, selected_rows: 4096 },
+            geometry: qwen_llm::deepseek_v41::forward::PrefillGeometry {
+                start: 0,
+                tokens: 3,
+                selected_rows: 4096,
+            },
             execution: PrefillExecution::FullForward,
             fallback: None,
             counters: None,
@@ -317,7 +397,11 @@ mod tests {
         assert_eq!(json["fallback"], "unsupported structure");
         assert!(json["counters"].is_null());
         let ced = PrefillReport {
-            geometry: qwen_llm::deepseek_v41::forward::PrefillGeometry { start: 0, tokens: 3, selected_rows: 4096 },
+            geometry: qwen_llm::deepseek_v41::forward::PrefillGeometry {
+                start: 0,
+                tokens: 3,
+                selected_rows: 4096,
+            },
             execution: PrefillExecution::ShrinkingCed,
             fallback: None,
             counters: Some(CedCounters {

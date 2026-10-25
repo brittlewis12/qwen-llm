@@ -115,6 +115,48 @@ fn price(bytes: u64) -> Result<u64> {
 }
 
 #[test]
+fn cold_candidates_select_before_import_and_freeze_geometry_without_repricing_cpu_as_weights() {
+    let request = RequestMemoryEstimate {
+        cpu_persistent_bytes: 10,
+        cpu_transient_bytes: 20,
+        cpu_bytes: 30,
+        metal_bytes: 40,
+        total_bytes: 70,
+    };
+    let make = |rows, scratch| {
+        let mut plan = combine_plan(storage(), request, (scratch, 16), None, 17, 50, 9).unwrap();
+        plan.full_chunk_rows = rows;
+        plan.geometry = PrefillGeometry {
+            start: 0,
+            tokens: 4097,
+            selected_rows: rows,
+        };
+        plan.capacity = 8192;
+        plan
+    };
+    let mut preferred = make(4096, 9000);
+    preferred.alternatives.push(make(2048, 4000));
+    let mut observed = signals();
+    observed.recommended_max_bytes = 8000;
+    observed
+        .host_budget
+        .as_mut()
+        .unwrap()
+        .conservative_available_bytes = 1000;
+    let (selected, admission) = preferred.select_load(observed).unwrap();
+    assert!(admission.load_admission.is_admitted());
+    assert_eq!(selected.full_chunk_rows, 2048);
+    assert_eq!(selected.capacity, 8192);
+    assert!(selected.alternatives.is_empty());
+    assert_eq!(selected.required_cpu_bytes, 200 + 17 + 30 + 16 + 9);
+    assert!(selected.required_metal_bytes > 1000);
+    observed.current_allocated_bytes = selected.load_metal_bytes;
+    selected.assess_runtime(observed).unwrap();
+    observed.recommended_max_bytes = 0;
+    assert!(preferred.select_load(observed).is_err());
+}
+
+#[test]
 fn custom_schedule_engram_variants_and_shared_ledgers() {
     let c = super::super::toy::config();
     let schedule = schedule();

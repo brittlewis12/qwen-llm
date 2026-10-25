@@ -250,3 +250,129 @@ fn reports_actual_internal_ranges_for_logical_4096_partial_suffix_and_nonzero_st
         assert_eq!(report.max_chunk_rows(), tokens.min(2048));
     }
 }
+
+#[test]
+fn ced_lineage_uses_admitted_geometry_and_distinguishes_genuine_scalar_tails() {
+    let c = Config::default();
+    let schedule = super::super::super::gguf::Schedule::default();
+    let hash = engram::HashConfig::default();
+    for tokens in [2049, 4097] {
+        for selected_rows in [2048, 4096] {
+            let geometry = PrefillGeometry {
+                start: 0,
+                tokens,
+                selected_rows,
+            };
+            let plan =
+                ced::plan_for_geometry(&c, &schedule, &hash, geometry, tokens + 256).unwrap();
+            assert_eq!(plan.full_chunk_rows, selected_rows);
+            assert_eq!(
+                plan.scalar_tail(),
+                (tokens % selected_rows == 1).then_some(tokens - 1)
+            );
+            let json = serde_json::to_value(PrefillReport {
+                geometry,
+                execution: PrefillExecution::ShrinkingCed,
+                fallback: None,
+                counters: None,
+                memory: None,
+                observed_incremental_metal_bytes: None,
+            })
+            .unwrap();
+            assert_eq!(json["input_geometry"]["selected_rows"], selected_rows);
+            assert_eq!(geometry.chunk_count(), tokens.div_ceil(selected_rows));
+            assert!(
+                plan.decoder
+                    .iter()
+                    .all(|layer| layer.output_rows.end <= tokens)
+            );
+        }
+    }
+    assert!(
+        ced::plan_for_geometry(
+            &c,
+            &schedule,
+            &hash,
+            PrefillGeometry {
+                start: 73,
+                tokens: 4096,
+                selected_rows: 2048
+            },
+            8192
+        )
+        .is_err()
+    );
+}
+
+#[test]
+fn runtime_price_uses_sequential_full_ced_maxima_and_keeps_cpu_domains_separate() {
+    let base = RequestMemoryEstimate {
+        cpu_persistent_bytes: 10,
+        cpu_transient_bytes: 20,
+        cpu_bytes: 30,
+        metal_bytes: 40,
+        total_bytes: 70,
+    };
+    let ced = CedMemoryEstimate {
+        incremental_metal_bytes: 250,
+        incremental_cpu_bytes: 7,
+        ..Default::default()
+    };
+    let runtime = runtime_memory(base, (100, 10), Some(&ced)).unwrap();
+    assert_eq!(runtime.metal_bytes, 290);
+    assert_eq!(runtime.cpu_bytes, 40);
+    assert_eq!(runtime.cpu_transient_bytes, 30);
+    assert_eq!(runtime.total_bytes, 330);
+    assert!(runtime_memory(base, (u64::MAX, 1), None).is_err());
+    assert!(runtime_memory(base, (1, u64::MAX), None).is_err());
+}
+
+#[test]
+fn intrinsic_execution_refusal_precedes_candidate_scratch_pricing() {
+    let mut c = Config::default();
+    c.hc_iterations = 3;
+    let prices = std::cell::Cell::new(0);
+    let result = preflight::runtime_from_parts(
+        &c,
+        &super::super::super::gguf::Schedule::default(),
+        &engram::HashConfig::default(),
+        &[(6144, 5 * c.hidden); 2],
+        4097,
+        8192,
+        &[PrefillExecution::ShrinkingCed],
+        2048,
+        false,
+        &|bytes| {
+            prices.set(prices.get() + 1);
+            Ok(bytes)
+        },
+    );
+    assert!(result.unwrap_err().contains("Sinkhorn"));
+    assert_eq!(prices.get(), 0);
+}
+
+#[test]
+fn request_identity_is_arc_bound_not_config_or_capacity_equality() {
+    let identity = Arc::new(());
+    let plan = RequestPlan {
+        capacity: 8192,
+        report: PrefillGeometry {
+            start: 0,
+            tokens: 4097,
+            selected_rows: 2048,
+        },
+        memory: RequestMemoryEstimate {
+            cpu_persistent_bytes: 0,
+            cpu_transient_bytes: 0,
+            cpu_bytes: 0,
+            metal_bytes: 0,
+            total_bytes: 0,
+        },
+        cpu_reserve: 99,
+        identity: identity.clone(),
+    };
+    plan.validate_identity(&identity).unwrap();
+    assert!(plan.validate_identity(&Arc::new(())).is_err());
+    assert_eq!(plan.prefill().selected_rows, 2048);
+    assert_eq!(plan.caller_cpu_reserve(), 99);
+}

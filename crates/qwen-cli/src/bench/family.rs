@@ -124,10 +124,38 @@ pub(crate) fn with_family_bench<R>(
     v41_prefill_execution: PrefillExecution,
     body: &mut dyn FnMut(&mut dyn FamilyBench) -> Result<R>,
 ) -> Result<R> {
+    with_family_bench_planned(family, ctx, gguf, extent, v41_prefill_execution, None, body)
+}
+
+pub(crate) fn with_family_bench_planned<R>(
+    family: ModelFamily,
+    ctx: &MetalContext,
+    gguf: &std::sync::Arc<GgufFile>,
+    extent: FamilyBenchExtent,
+    v41_prefill_execution: PrefillExecution,
+    cold: Option<&qwen_llm::deepseek_v41::forward::ColdPrefillPlan>,
+    body: &mut dyn FnMut(&mut dyn FamilyBench) -> Result<R>,
+) -> Result<R> {
     match family {
         ModelFamily::DeepSeekV41 => {
             let plan = v41_weights::plan(gguf)?;
             validate_v41_extent(extent, plan.engram_hash.max_position)?;
+            plan.validate_execution()?;
+            let planned = match cold {
+                Some(cold) => cold.clone(),
+                None => {
+                    qwen_llm::deepseek_v41::forward::plan_cold_prefill(
+                        ctx,
+                        gguf,
+                        extent.prefill_endpoint.min(extent.forwards),
+                        extent.forwards,
+                        &[v41_prefill_execution],
+                        0,
+                    )?
+                    .select_load(ctx.memory_signals())?
+                    .0
+                }
+            };
             let weights = v41_weights::ResidentWeights::load(ctx, gguf.clone())
                 .context("load DeepSeek V4.1 weights")?;
             eprintln!(
@@ -141,11 +169,7 @@ pub(crate) fn with_family_bench<R>(
                 weights.raw_pad,
             )
             .map_err(anyhow::Error::msg)?;
-            let request_plan = forward.plan_request(
-                extent.forwards,
-                extent.prefill_endpoint.min(extent.forwards),
-                0,
-            )?;
+            let request_plan = forward.plan_request_from_cold(&planned)?;
             let mut bench = DeepSeekV41Bench {
                 vocab: weights.config.vocab,
                 full_chunk_rows: request_plan.prefill().selected_rows,
@@ -496,6 +520,7 @@ where
             Some(crate::family_options::V41PrefillDiagnostics {
                 requested_execution: self.requested_execution,
                 report,
+                capacity: None,
             })
         } else {
             crate::family_options::V41PrefillDiagnostics::new(self.requested_execution, report)
@@ -1012,6 +1037,19 @@ pub(crate) fn attach_v41_diagnostics(row: &mut BenchRow, repetitions: Vec<V41Ben
     if repetitions.is_empty() {
         return;
     }
+    let reports: Vec<_> = repetitions
+        .iter()
+        .filter_map(|r| r.calls.last())
+        .map(|c| &c.diagnostics.report)
+        .collect();
+    row.prefill_geometry = reports
+        .first()
+        .filter(|first| {
+            reports
+                .iter()
+                .all(|r| r.geometry == first.geometry && r.execution == first.execution)
+        })
+        .map(|r| crate::family_options::v41_execution_geometry(r));
     if row.prefill_mode.is_some() {
         let mut actual = repetitions.iter().filter_map(|rep| {
             rep.calls

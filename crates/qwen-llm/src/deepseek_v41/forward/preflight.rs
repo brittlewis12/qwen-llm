@@ -7,6 +7,11 @@ use crate::gguf::GgufFile;
 
 #[derive(Clone, Debug)]
 pub struct ColdPrefillPlan {
+    pub geometry: PrefillGeometry,
+    pub capacity: usize,
+    pub executions: Vec<PrefillExecution>,
+    /// Pre-mutation candidates only; selecting a plan clears alternatives.
+    pub alternatives: Vec<ColdPrefillPlan>,
     pub full_chunk_rows: usize,
     pub resident_storage: ResidentStoragePlan,
     pub request: RequestMemoryEstimate,
@@ -62,7 +67,7 @@ impl std::ops::Deref for ColdPrefillPreflight {
 impl ColdPrefillPlan {
     /// Allow only the load/binding phase, after checking the complete future
     /// peak's capacity. Neither result reserves memory for a later phase.
-    pub fn assess_load(
+    fn assess_load_fixed(
         &self,
         signals: metal::MetalMemorySignals,
     ) -> std::result::Result<ColdLoadAssessment, LoadError> {
@@ -86,6 +91,38 @@ impl ColdPrefillPlan {
             load_admission,
             whole_peak_now: self.whole_peak_admission(signals),
         })
+    }
+
+    pub fn select_load(
+        &self,
+        signals: metal::MetalMemorySignals,
+    ) -> std::result::Result<(Self, ColdLoadAssessment), LoadError> {
+        let mut last = None;
+        for candidate in std::iter::once(self).chain(&self.alternatives) {
+            match candidate.assess_load_fixed(signals) {
+                Ok(assessment) => {
+                    let mut selected = candidate.clone();
+                    selected.alternatives.clear();
+                    return Ok((selected, assessment));
+                }
+                Err(error)
+                    if error
+                        .as_memory_admission()
+                        .is_some_and(|e| planning::pressure_reason(e.reason())) =>
+                {
+                    last = Some(error)
+                }
+                Err(error) => return Err(error),
+            }
+        }
+        Err(last.expect("at least one cold candidate"))
+    }
+
+    pub fn assess_load(
+        &self,
+        signals: metal::MetalMemorySignals,
+    ) -> std::result::Result<ColdLoadAssessment, LoadError> {
+        self.assess_load_fixed(signals)
     }
 
     /// Refresh after binding and before each fresh state, once the previous
@@ -126,14 +163,20 @@ impl ColdPrefillPlan {
         self,
         signals: metal::MetalMemorySignals,
     ) -> std::result::Result<ColdPrefillPreflight, LoadError> {
-        let admission = self.whole_peak_admission(signals);
-        if let Some(denied) = admission.refusal() {
-            return Err(denied.into());
+        let mut last = None;
+        for candidate in std::iter::once(&self).chain(&self.alternatives) {
+            let admission = candidate.whole_peak_admission(signals);
+            match admission.refusal() {
+                None => {
+                    let mut plan = candidate.clone();
+                    plan.alternatives.clear();
+                    return Ok(ColdPrefillPreflight { plan, admission });
+                }
+                Some(denied) if planning::pressure_reason(denied.reason()) => last = Some(denied),
+                Some(denied) => return Err(denied.into()),
+            }
         }
-        Ok(ColdPrefillPreflight {
-            plan: self,
-            admission,
-        })
+        Err(last.expect("at least one cold candidate").into())
     }
 }
 
@@ -256,6 +299,7 @@ pub(super) fn runtime_from_parts(
     price: &impl Fn(u64) -> Result<u64>,
 ) -> Result<(RequestMemoryEstimate, (u64, u64), Option<CedMemoryEstimate>)> {
     schedule.validate().map_err(|e| e.to_string())?;
+    super::super::execution::validate(c).map_err(|e| e.to_string())?;
     hash.validate()
         .map_err(|e| format!("invalid Engram hash: {e:?}"))?;
     op::require(
@@ -284,16 +328,20 @@ pub(super) fn runtime_from_parts(
         "cold Full chunk geometry",
     )?;
     let rows = prompt_rows.min(full_chunk_rows);
-    let full = prefill::full_scratch_budget_with(
-        c,
-        schedule.layers,
-        projections,
-        capacity,
-        rows,
-        half_selected,
-        price,
-    )?;
-    let ced = if executions.contains(&PrefillExecution::ShrinkingCed) {
+    let full = if rows == 0 {
+        (0, 0)
+    } else {
+        prefill::full_scratch_budget_with(
+            c,
+            schedule.layers,
+            projections,
+            capacity,
+            rows,
+            half_selected,
+            price,
+        )?
+    };
+    let ced = if prompt_rows > 0 && executions.contains(&PrefillExecution::ShrinkingCed) {
         match ced_plan::CedPlan::shrinking(
             c,
             schedule,
@@ -315,7 +363,9 @@ pub(super) fn runtime_from_parts(
             )?),
             // These valid cold requests take Full in the runtime too.
             Err(
-                ced_plan::CedPlanError::UnsupportedSchedule(_)
+                ced_plan::CedPlanError::UnsupportedRequest(_)
+                | ced_plan::CedPlanError::UnsupportedWindow(_)
+                | ced_plan::CedPlanError::UnsupportedSchedule(_)
                 | ced_plan::CedPlanError::DecoderOwner(_)
                 | ced_plan::CedPlanError::DecoderEngram(_),
             ) => None,
@@ -363,9 +413,13 @@ fn plan_with_pricing(
     half_selected: bool,
     price: &impl Fn(u64) -> Result<u64>,
 ) -> std::result::Result<ColdPrefillPlan, PlanError> {
+    if prompt_rows == 0 {
+        return Err(LoadError::Invalid("empty cold prompt".into()).into());
+    }
     let p = gguf::plan(gguf)?;
-    let full_chunk_rows = super::prefill_rows_for_resident(p.bytes.resident_bytes());
-    let calculate = || -> Result<_> {
+    p.validate_execution().map_err(LoadError::from)?;
+    let preferred = super::prefill_rows_for_resident(p.bytes.resident_bytes());
+    let calculate = |full_chunk_rows, executions: &[PrefillExecution]| -> Result<_> {
         let output = p
             .config
             .hidden
@@ -402,22 +456,44 @@ fn plan_with_pricing(
         let binding_metal_bytes = binding_metal_bytes(p.binding_linears.values().copied(), price)?;
         Ok((request, full, ced, binding_cpu_bytes, binding_metal_bytes))
     };
-    let (request, full, ced, binding_cpu_bytes, binding_metal_bytes) =
-        calculate().map_err(LoadError::Invalid)?;
-    let mut combined = combine_plan(
-        resident_storage,
-        request,
-        full,
-        ced,
-        binding_cpu_bytes,
-        binding_metal_bytes,
-        caller_cpu_bytes,
-    )?;
-    combined.full_chunk_rows = full_chunk_rows;
-    combined.loader_controls = p.controls;
-    combined.loader_control_cpu_bytes =
-        loader_control_cpu_bytes(p.controls).map_err(LoadError::Invalid)?;
-    Ok(combined)
+    let build = |full_chunk_rows,
+                 executions: &[PrefillExecution]|
+     -> std::result::Result<ColdPrefillPlan, PlanError> {
+        let (request, full, ced, binding_cpu_bytes, binding_metal_bytes) =
+            calculate(full_chunk_rows, executions).map_err(LoadError::Invalid)?;
+        let mut combined = combine_plan(
+            resident_storage.clone(),
+            request,
+            full,
+            ced,
+            binding_cpu_bytes,
+            binding_metal_bytes,
+            caller_cpu_bytes,
+        )?;
+        combined.full_chunk_rows = full_chunk_rows;
+        combined.geometry = PrefillGeometry {
+            start: 0,
+            tokens: prompt_rows,
+            selected_rows: full_chunk_rows,
+        };
+        combined.capacity = capacity;
+        combined.executions = executions.to_vec();
+        combined.loader_controls = p.controls;
+        combined.loader_control_cpu_bytes =
+            loader_control_cpu_bytes(p.controls).map_err(LoadError::Invalid)?;
+        Ok(combined)
+    };
+    let mut plans = planning::candidates(preferred, None).map(|rows| build(rows, executions));
+    let mut first = plans.next().expect("at least one geometry")?;
+    first.alternatives = plans.collect::<std::result::Result<_, _>>()?;
+    if executions == [PrefillExecution::ShrinkingCed] {
+        for rows in planning::candidates(preferred, None) {
+            first
+                .alternatives
+                .push(build(rows, &[PrefillExecution::FullForward])?);
+        }
+    }
+    Ok(first)
 }
 
 fn loader_control_cpu_bytes(controls: gguf::ControlAccounting) -> Result<u64> {
@@ -476,16 +552,10 @@ fn combine_plan(
     caller_cpu_bytes: u64,
 ) -> std::result::Result<ColdPrefillPlan, PlanError> {
     let sum = |values: &[u64]| sum(values).map_err(|_| PlanError::Overflow);
-    let runtime_metal_bytes = sum(&[
-        request.metal_bytes,
-        full.0
-            .max(ced.as_ref().map_or(0, |c| c.incremental_metal_bytes)),
-    ])?;
-    let runtime_cpu_bytes = sum(&[
-        request.cpu_bytes,
-        full.1
-            .max(ced.as_ref().map_or(0, |c| c.incremental_cpu_bytes)),
-    ])?;
+    let runtime =
+        planning::runtime_memory(request, full, ced.as_ref()).map_err(|_| PlanError::Overflow)?;
+    let runtime_metal_bytes = runtime.metal_bytes;
+    let runtime_cpu_bytes = runtime.cpu_bytes;
     let required_metal_bytes = sum(&[
         resident_storage.metal_view_bytes,
         binding_metal_bytes,
@@ -509,6 +579,14 @@ fn combine_plan(
     sum(&[runtime_metal_bytes, runtime_gate_cpu_bytes])?;
     sum(&[required_metal_bytes, required_cpu_bytes])?;
     Ok(ColdPrefillPlan {
+        geometry: PrefillGeometry {
+            start: 0,
+            tokens: 0,
+            selected_rows: prefill::DEFAULT_CHUNK_ROWS,
+        },
+        capacity: 0,
+        executions: vec![PrefillExecution::FullForward],
+        alternatives: Vec::new(),
         full_chunk_rows: prefill::DEFAULT_CHUNK_ROWS,
         resident_storage,
         request,

@@ -401,7 +401,7 @@ pub(super) fn estimate_from_parts(
         chunk_hash_cpu_bytes: hash_cpu,
         process_ru_maxrss_before_bytes: None,
         process_ru_maxrss_after_bytes: None,
-        observation_method: "metadata-only preload plan; no execution or process RSS observations",
+        observation_method: "bounded CPU-control preload plan; no execution or process RSS observations",
     })
 }
 
@@ -482,7 +482,6 @@ pub(super) fn run(
         "token outside vocabulary",
     )?;
     cancelled(cancel)?;
-    let mut request = CedRequest::cold(tokens.len(), state.capacity());
     let geometry = model.select_prefill(
         state,
         tokens.len(),
@@ -490,13 +489,16 @@ pub(super) fn run(
         state.prefill_rows,
     )?;
     state.prefill_rows = Some(geometry.selected_rows);
-    request.full_chunk_rows = geometry.selected_rows;
-    request.start_position = state.position();
-    let plan =
-        match CedPlan::shrinking(&model.config, &model.schedule, &model.engram_hash, &request) {
-            Ok(plan) => plan,
-            Err(reason) => return full(model, state, tokens, cancel, Some(reason.to_string())),
-        };
+    let plan = match plan_for_geometry(
+        &model.config,
+        &model.schedule,
+        &model.engram_hash,
+        geometry,
+        state.capacity(),
+    ) {
+        Ok(plan) => plan,
+        Err(reason) => return full(model, state, tokens, cancel, Some(reason.to_string())),
+    };
     state
         .gpu_step
         .as_ref()
@@ -565,6 +567,19 @@ pub(super) fn run(
             observed_incremental_metal_bytes: Some(result.observed_incremental_metal_bytes),
         },
     ))
+}
+
+pub(super) fn plan_for_geometry(
+    config: &Config,
+    schedule: &super::super::gguf::Schedule,
+    hash: &engram::HashConfig,
+    geometry: PrefillGeometry,
+    capacity: usize,
+) -> std::result::Result<CedPlan, super::ced_plan::CedPlanError> {
+    let mut request =
+        CedRequest::cold(geometry.tokens, capacity).with_full_chunk_rows(geometry.selected_rows);
+    request.start_position = geometry.start;
+    CedPlan::shrinking(config, schedule, hash, &request)
 }
 
 impl Forward<'_> {

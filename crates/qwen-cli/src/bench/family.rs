@@ -50,6 +50,9 @@ pub(crate) trait FamilyBench {
     fn decode(&mut self, id: u32) -> Result<()>;
     /// Labels for the most recent prefill and decode calls.
     fn semantics(&self) -> FamilySemantics;
+    fn prefill_report(&self) -> Option<qwen_llm::deepseek_v41::forward::PrefillReport> {
+        None
+    }
     fn v41_prefill_diagnostics(&self) -> Option<V41BenchPrefillRep> {
         None
     }
@@ -138,9 +141,14 @@ pub(crate) fn with_family_bench<R>(
                 weights.raw_pad,
             )
             .map_err(anyhow::Error::msg)?;
+            let request_plan = forward.plan_request(
+                extent.forwards,
+                extent.prefill_endpoint.min(extent.forwards),
+                0,
+            )?;
             let mut bench = DeepSeekV41Bench {
                 vocab: weights.config.vocab,
-                full_chunk_rows: forward.prefill_chunk_rows(),
+                full_chunk_rows: request_plan.prefill().selected_rows,
                 state: None,
                 requested_execution: v41_prefill_execution,
                 position: 0,
@@ -149,7 +157,8 @@ pub(crate) fn with_family_bench<R>(
                 reports: Vec::new(),
                 paired: false,
                 last_logits: None,
-                create: || Ok(forward.new_state_with_gpu_step(extent.forwards)?),
+                last_prefill: None,
+                create: || Ok(forward.new_state_from_plan(&request_plan)?),
                 prefill: |state: &mut qwen_llm::deepseek_v41::forward::State,
                           ids: &[u32],
                           execution| {
@@ -366,6 +375,7 @@ struct DeepSeekV41Bench<S, Create, Step, Prefill> {
     reports: Vec<V41BenchPrefillCall>,
     paired: bool,
     last_logits: Option<Vec<f32>>,
+    last_prefill: Option<PrefillReport>,
 }
 
 #[derive(Clone, Debug, serde::Serialize)]
@@ -444,6 +454,7 @@ where
     }
     fn begin_rep(&mut self) -> Result<()> {
         self.state = None;
+        self.last_prefill = None;
         self.state = Some((self.create)()?);
         self.position = 0;
         self.ced_allowed = true;
@@ -468,6 +479,7 @@ where
             PrefillExecution::FullForward
         };
         let (logits, mut report) = (self.prefill)(state, ids, execution)?;
+        self.last_prefill = Some(report.clone());
         if self.paired {
             self.last_logits = Some(logits);
         } else {
@@ -511,9 +523,15 @@ where
         FamilySemantics {
             prefill_mode: crate::family_options::v41_prefill_mode(self.last_execution),
             decode_mode: "gpu_step+logits_copy",
-            prefill_chunk: (self.last_execution == PrefillExecution::FullForward)
-                .then_some(self.full_chunk_rows),
+            prefill_chunk: (self.last_execution == PrefillExecution::FullForward).then(|| {
+                self.last_prefill
+                    .as_ref()
+                    .map_or(self.full_chunk_rows, |r| r.geometry.selected_rows)
+            }),
         }
+    }
+    fn prefill_report(&self) -> Option<PrefillReport> {
+        self.last_prefill.clone()
     }
     fn v41_prefill_diagnostics(&self) -> Option<V41BenchPrefillRep> {
         (self.requested_execution == PrefillExecution::ShrinkingCed || !self.reports.is_empty())
@@ -930,6 +948,10 @@ pub(crate) fn run_family_pp_row(
         true,
     );
     attach_v41_diagnostics(&mut row, diagnostics);
+    row.prefill_geometry = bench
+        .prefill_report()
+        .as_ref()
+        .map(crate::family_options::v41_execution_geometry);
     Ok(row)
 }
 
@@ -1054,6 +1076,7 @@ pub(crate) fn family_row(
         kernel_trace_concurrent_encoders_per_token: None,
         kernel_trace_dispatches_per_token: None,
         decode_gb_per_s: None,
+        prefill_geometry: None,
         prefill_chunk: if prefill {
             semantics.prefill_chunk
         } else {
@@ -1086,6 +1109,7 @@ pub(crate) fn v41_pair_test_bench<S>(
         reports: Vec::new(),
         paired: false,
         last_logits: None,
+        last_prefill: None,
     }
 }
 
@@ -1095,6 +1119,11 @@ mod tests {
 
     fn full_report(fallback: Option<&str>) -> PrefillReport {
         PrefillReport {
+            geometry: qwen_llm::deepseek_v41::forward::PrefillGeometry {
+                start: 0,
+                tokens: 3,
+                selected_rows: 4096,
+            },
             execution: PrefillExecution::FullForward,
             fallback: fallback.map(str::to_owned),
             counters: None,
@@ -1106,6 +1135,11 @@ mod tests {
     fn ced_report() -> PrefillReport {
         use qwen_llm::deepseek_v41::forward::{CedCounters, CedMemoryEstimate};
         PrefillReport {
+            geometry: qwen_llm::deepseek_v41::forward::PrefillGeometry {
+                start: 0,
+                tokens: 3,
+                selected_rows: 4096,
+            },
             execution: PrefillExecution::ShrinkingCed,
             fallback: None,
             counters: Some(CedCounters {
@@ -1149,6 +1183,7 @@ mod tests {
             reports: Vec::new(),
             paired: false,
             last_logits: None,
+            last_prefill: None,
             create: || Ok(0usize),
             prefill,
             step: |position: &mut usize, _| {
@@ -1399,6 +1434,7 @@ mod tests {
             reports: Vec::new(),
             paired: false,
             last_logits: None,
+            last_prefill: None,
             create: || {
                 repetitions.borrow_mut().push(vec![]);
                 Ok(0usize)
@@ -1409,8 +1445,19 @@ mod tests {
                 let ids = reps.last_mut().unwrap();
                 assert_eq!(*position, ids.len());
                 ids.extend_from_slice(tokens);
+                let geometry = qwen_llm::deepseek_v41::forward::PrefillGeometry {
+                    start: *position,
+                    tokens: tokens.len(),
+                    selected_rows: 2048,
+                };
                 *position += tokens.len();
-                Ok((vec![0.; 257], full_report(None)))
+                Ok((
+                    vec![0.; 257],
+                    PrefillReport {
+                        geometry,
+                        ..full_report(None)
+                    },
+                ))
             },
             step: |position: &mut usize, token| {
                 let mut reps = repetitions.borrow_mut();
@@ -1445,15 +1492,25 @@ mod tests {
         );
         assert_eq!(pp.test, "pp3@d2");
         assert_eq!(tg.test, "tg4@d2");
-        assert_eq!(
-            pp.prefill_chunk,
-            Some(crate::family_options::V41_PREFILL_ROWS)
-        );
+        assert_eq!(pp.prefill_chunk, Some(2048));
+        let geometry = pp.prefill_geometry.as_ref().unwrap();
+        assert_eq!(geometry["engine_rows_max"], 4096);
+        assert_eq!(geometry["selected_rows"], 2048);
+        assert_eq!(geometry["actual_chunks"], 1);
+        assert_eq!(geometry["chunk_ranges"], serde_json::json!([[2, 5]]));
         assert_eq!(
             pp.prefill_mode,
             Some(crate::family_options::V41_PREFILL_MODE)
         );
         assert_eq!(tg.decode_mode, Some("gpu_step+logits_copy"));
+        let wide = run_family_pp_row(&mut bench, &row_ctx, 4096, 73, 1, true, 42).unwrap();
+        let geometry = wide.prefill_geometry.as_ref().unwrap();
+        assert_eq!(wide.prefill_chunk, Some(2048));
+        assert_eq!(geometry["actual_chunks"], 2);
+        assert_eq!(
+            geometry["chunk_ranges"],
+            serde_json::json!([[73, 2121], [2121, 4169]])
+        );
         for row in [pp, tg] {
             let json = serde_json::to_value(row).unwrap();
             assert!(json.get("diagnostics").is_none());

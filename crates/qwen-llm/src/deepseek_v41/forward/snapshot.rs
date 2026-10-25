@@ -82,11 +82,22 @@ impl Forward<'_> {
     }
 
     pub fn capture_snapshot(&self, state: &State) -> std::result::Result<Snapshot, StateError> {
+        self.capture_snapshot_with_reserve(state, 0)
+    }
+
+    fn capture_snapshot_with_reserve(
+        &self,
+        state: &State,
+        reserve: u64,
+    ) -> std::result::Result<Snapshot, StateError> {
         let (regions, bytes) = self.snapshot_regions(state)?;
         let count = bytes / std::mem::size_of::<f32>();
         let admission = metal::evaluate_metal_memory_admission_with_cpu_bytes(
             0,
-            bytes as u64 + 4096,
+            (bytes as u64)
+                .checked_add(4096)
+                .and_then(|n| n.checked_add(reserve))
+                .ok_or("snapshot reserve overflow")?,
             0,
             self.ctx.memory_signals(),
             true,
@@ -138,17 +149,62 @@ impl Forward<'_> {
         state: &mut State,
         required: usize,
     ) -> std::result::Result<(), StateError> {
+        self.ensure_capacity_inner(state, required, None)
+    }
+
+    /// Prepare live reuse without mutating causal KV. Growth and snapshot-copy
+    /// peaks retain the caller's CPU reserve; refusal permits another source.
+    /// Call only at a new request boundary, before any of its prefill mutations:
+    /// retained geometry is preferred but may narrow without dropping live KV.
+    pub fn ensure_capacity_for_request(
+        &self,
+        state: &mut State,
+        required: usize,
+        prefill_tokens: usize,
+        caller_cpu_reserve: u64,
+    ) -> std::result::Result<(), StateError> {
+        self.ensure_capacity_inner(state, required, Some((prefill_tokens, caller_cpu_reserve)))
+    }
+
+    fn ensure_capacity_inner(
+        &self,
+        state: &mut State,
+        required: usize,
+        request: Option<(usize, u64)>,
+    ) -> std::result::Result<(), StateError> {
         self.validate_snapshot_state(state)?;
         let limit = usize::try_from(self.engram_hash.max_position)
             .map_err(|e| format!("context limit: {e}"))?;
         op::require(required <= limit, "required capacity exceeds context limit")?;
+        if let Some((tokens, _)) = request {
+            op::require(
+                required >= state.position() && tokens <= required - state.position(),
+                "request suffix exceeds required capacity",
+            )?;
+        }
         if required <= state.max_context {
+            if let Some((tokens, reserve)) = request {
+                let report = self.select_prefill(state, tokens, reserve, None)?;
+                state.prefill_rows = Some(report.selected_rows);
+                state.caller_cpu_reserve = reserve;
+            }
             return Ok(());
         }
         let capacity = required.max(state.max_context.saturating_mul(2)).min(limit);
-        let snapshot = self.capture_snapshot(state)?;
-        let mut replacement =
-            allocate_with_capacity_fallback(capacity, required, |n| self.new_state(n))?;
+        let reserve = request.map_or(state.caller_cpu_reserve, |(_, reserve)| reserve);
+        let snapshot = self.capture_snapshot_with_reserve(state, reserve)?;
+        let mut replacement = allocate_with_capacity_fallback(capacity, required, |n| {
+            if let Some((tokens, reserve)) = request {
+                let plan = self.plan_request(n, tokens, reserve)?;
+                self.new_state_from_plan(&plan)
+            } else {
+                let plan = self.plan_request(n, 0, reserve)?;
+                let mut replacement = self.new_state_from_plan(&plan)?;
+                replacement.prefill_rows = state.prefill_rows;
+                replacement.caller_cpu_reserve = reserve;
+                Ok(replacement)
+            }
+        })?;
         self.restore_snapshot(&mut replacement, &snapshot)?;
         *state = replacement;
         Ok(())

@@ -301,6 +301,7 @@ pub(crate) fn run_tg(args: TgArgs) -> Result<()> {
             None
         };
         let row = BenchRow {
+            prefill_geometry: None,
             schema_version: BENCH_SCHEMA_VERSION,
             engine: "qwen-llm",
             build_commit: commit,
@@ -685,6 +686,7 @@ pub(crate) fn run_decode(args: DecodeArgs) -> Result<()> {
         let mut rows: Vec<BenchRow> = Vec::new();
         // pp seed row: mean across reps.
         rows.push(BenchRow {
+            prefill_geometry: None,
             schema_version: BENCH_SCHEMA_VERSION,
             engine: "qwen-llm",
             build_commit: commit,
@@ -743,6 +745,7 @@ pub(crate) fn run_decode(args: DecodeArgs) -> Result<()> {
                 None
             };
             rows.push(BenchRow {
+                prefill_geometry: None,
                 schema_version: BENCH_SCHEMA_VERSION,
                 engine: "qwen-llm",
                 build_commit: commit,

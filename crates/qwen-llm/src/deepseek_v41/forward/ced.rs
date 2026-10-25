@@ -171,6 +171,9 @@ pub struct CedMemoryEstimate {
 
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize)]
 pub struct PrefillReport {
+    /// Logical input chunks: Full work or CED encoder work, never decoder coverage.
+    #[serde(rename = "input_geometry")]
+    pub geometry: PrefillGeometry,
     pub execution: PrefillExecution,
     pub fallback: Option<String>,
     pub counters: Option<CedCounters>,
@@ -446,6 +449,7 @@ fn full(
     Ok((
         logits,
         PrefillReport {
+            geometry: state.last_prefill_report().ok_or("missing Full geometry")?,
             execution: PrefillExecution::FullForward,
             fallback,
             counters: None,
@@ -479,7 +483,14 @@ pub(super) fn run(
     )?;
     cancelled(cancel)?;
     let mut request = CedRequest::cold(tokens.len(), state.capacity());
-    request.full_chunk_rows = model.prefill_rows;
+    let geometry = model.select_prefill(
+        state,
+        tokens.len(),
+        state.caller_cpu_reserve,
+        state.prefill_rows,
+    )?;
+    state.prefill_rows = Some(geometry.selected_rows);
+    request.full_chunk_rows = geometry.selected_rows;
     request.start_position = state.position();
     let plan =
         match CedPlan::shrinking(&model.config, &model.schedule, &model.engram_hash, &request) {
@@ -495,7 +506,10 @@ pub(super) fn run(
     let mut memory = estimate(model, state.capacity(), &plan)?;
     let admission = metal::evaluate_metal_memory_admission_with_cpu_bytes(
         memory.incremental_metal_bytes,
-        memory.incremental_cpu_bytes,
+        memory
+            .incremental_cpu_bytes
+            .checked_add(state.caller_cpu_reserve)
+            .ok_or("CED caller reserve overflow")?,
         0,
         model.ctx.memory_signals(),
         true,
@@ -539,9 +553,11 @@ pub(super) fn run(
     memory.process_ru_maxrss_after_bytes = process_peak_rss_bytes();
     cancelled(cancel)?;
     guard.commit(addresses);
+    state.last_prefill = Some(geometry);
     Ok((
         result.logits,
         PrefillReport {
+            geometry,
             execution: PrefillExecution::ShrinkingCed,
             fallback: None,
             counters: Some(result.counters),

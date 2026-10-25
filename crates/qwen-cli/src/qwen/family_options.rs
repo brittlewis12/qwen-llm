@@ -10,10 +10,40 @@ use qwen_llm::deepseek_v4_metal::{
 use qwen_llm::muse_glimmer_runtime::MuseGlimmerRuntimeOptions;
 use qwen_llm::qwen4exp_runtime::Qwen4ExpDecodeOptions;
 
-/// Maximum rows the V4.1 forward may submit in one chunk. The actual chunk is
-/// selected per resident size (4096 for fitting artifacts, 2048 for IQ3-class).
+/// Global engine ceiling, separate from admission-selected runtime geometry.
 pub(crate) const V41_PREFILL_ROWS: usize = qwen_llm::deepseek_v41::forward::MAX_PREFILL_CHUNK_ROWS;
 pub(crate) const V41_PREFILL_MODE: &str = "layer_major_batched+final_logits_copy";
+
+pub(crate) fn v41_prefill_geometry(
+    report: qwen_llm::deepseek_v41::forward::PrefillGeometry,
+) -> serde_json::Value {
+    serde_json::json!({
+        "engine_rows_max": V41_PREFILL_ROWS, "selected_rows": report.selected_rows,
+        "actual_chunks": report.chunk_count(),
+        "chunk_ranges": report.chunk_ranges().map(|r| [r.start, r.end]).collect::<Vec<_>>(),
+        "start": report.start, "logical_tokens": report.tokens,
+        "max_chunk_rows": report.max_chunk_rows(),
+    })
+}
+
+pub(crate) fn v41_execution_geometry(
+    report: &qwen_llm::deepseek_v41::forward::PrefillReport,
+) -> serde_json::Value {
+    let mut value = v41_prefill_geometry(report.geometry);
+    if report.execution == qwen_llm::deepseek_v41::forward::PrefillExecution::ShrinkingCed {
+        let fields = value.as_object_mut().unwrap();
+        let count = fields.remove("actual_chunks").unwrap();
+        let ranges = fields.remove("chunk_ranges").unwrap();
+        fields.insert("input_encoder_chunks".into(), count);
+        fields.insert("input_encoder_chunk_ranges".into(), ranges);
+        fields.insert(
+            "scope".into(),
+            "logical_input_encoder_not_decoder_work".into(),
+        );
+        fields.insert("schema_version".into(), 2.into());
+    }
+    value
+}
 
 pub(crate) const V41_PREFILL_EXECUTION_ENV: &str = "QWEN_V41_PREFILL_EXECUTION";
 
@@ -266,6 +296,7 @@ mod tests {
             CedCounters, CedMemoryEstimate, PrefillExecution, PrefillReport,
         };
         let full = PrefillReport {
+            geometry: qwen_llm::deepseek_v41::forward::PrefillGeometry { start: 0, tokens: 3, selected_rows: 4096 },
             execution: PrefillExecution::FullForward,
             fallback: None,
             counters: None,
@@ -286,6 +317,7 @@ mod tests {
         assert_eq!(json["fallback"], "unsupported structure");
         assert!(json["counters"].is_null());
         let ced = PrefillReport {
+            geometry: qwen_llm::deepseek_v41::forward::PrefillGeometry { start: 0, tokens: 3, selected_rows: 4096 },
             execution: PrefillExecution::ShrinkingCed,
             fallback: None,
             counters: Some(CedCounters {

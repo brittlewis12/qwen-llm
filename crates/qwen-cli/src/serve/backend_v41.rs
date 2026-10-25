@@ -276,23 +276,30 @@ impl Backend<'_> {
         let mut prefill_observations = request
             .echo_stats
             .then(memory_io::ChunkObservations::default);
+        let cold_plan = std::cell::RefCell::new(None);
         let mut outcome = self.settings.execute_with_ceiling(
             ceiling,
             request,
             prompt,
             boundaries,
             sink,
-            |positions, reserve| {
-                let estimate = self
+            |positions, prefill_tokens, reserve| {
+                let plan = self
                     .forward
-                    .estimate_request_memory_with_gpu_step(positions)
-                    .map_err(|e| StateError::Invalid(format!("V4.1 request estimate: {e}")))?;
-                admit_request_memory(estimate, reserve, self.ctx.memory_signals())
-                    .map_err(StateError::MemoryAdmissionDenied)
+                    .plan_request(positions, prefill_tokens, reserve)?;
+                admit_request_memory(plan.memory(), reserve, self.ctx.memory_signals())
+                    .map_err(StateError::MemoryAdmissionDenied)?;
+                *cold_plan.borrow_mut() = Some(plan);
+                Ok(())
             },
-            |capacity| {
+            |_| {
                 self.forward
-                    .new_state_with_gpu_step(capacity)
+                    .new_state_from_plan(
+                        &cold_plan
+                            .borrow_mut()
+                            .take()
+                            .expect("cold allocation follows admission"),
+                    )
                     .map_err(state_error)
             },
             &mut reuse::Session {

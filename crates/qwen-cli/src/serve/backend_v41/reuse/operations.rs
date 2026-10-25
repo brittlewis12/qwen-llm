@@ -2,6 +2,62 @@ use super::super::super::{admit_snapshot_capture_for, memory_relief, snapshot_ca
 use super::*;
 use qwen_llm::deepseek_v41::forward::StateError;
 
+/// Pure causal compatibility check; neither a common prefix of a divergent
+/// history nor an equal prompt without endpoint logits is reusable live state.
+pub(super) fn live_prefix_len<S>(
+    live: &Live<S>,
+    ids: &[u32],
+    position: usize,
+    healthy: bool,
+) -> Option<usize> {
+    (healthy
+        && position == live.tokens.len()
+        && !live.tokens.is_empty()
+        && ids.starts_with(&live.tokens)
+        && (ids.len() > position || !live.logits.is_empty()))
+    .then_some(position)
+}
+
+pub(super) fn discard_incompatible<S>(
+    live: &mut Option<Live<S>>,
+    ids: &[u32],
+    describe: impl FnOnce(&S) -> (usize, bool),
+) {
+    if live.as_ref().is_some_and(|live| {
+        let (position, healthy) = describe(&live.state);
+        live_prefix_len(live, ids, position, healthy).is_none()
+    }) {
+        drop(live.take());
+    }
+}
+
+pub(super) fn live_then_snapshot<S>(
+    live: Option<Live<S>>,
+    grow: impl FnOnce(&mut S) -> Result<(), StateError>,
+    snapshot: impl FnOnce() -> Result<Option<Restored<S>>, ServeError>,
+) -> Result<Option<Restored<S>>, ServeError> {
+    if let Some(live) = live
+        && let Some(live) = grow_live(live, grow)?
+    {
+        return Ok(Some(Restored {
+            live,
+            source: "live_session",
+        }));
+    }
+    snapshot()
+}
+
+pub(super) fn snapshot_candidate<V>(
+    cache: &mut SnapshotCache<V>,
+    ids: &[u32],
+    has_logits: impl FnOnce(&V) -> bool,
+) -> Option<PrefixHit<V>> {
+    cache
+        .peek_exact_in(&(), ids)
+        .filter(|hit| has_logits(&hit.value))
+        .or_else(|| cache.peek_best_prefix_in(&(), ids))
+}
+
 pub(super) fn grow_live<S>(
     mut live: Live<S>,
     grow: impl FnOnce(&mut S) -> Result<(), StateError>,
@@ -11,7 +67,7 @@ pub(super) fn grow_live<S>(
         Err(error) if error.memory_admission().is_some() => {
             // Cold allocation need not coexist with the old KV and growth copy.
             drop(live);
-            tracing::debug!("V4.1 live growth refused; cold prefilling: {error}");
+            tracing::debug!("V4.1 live growth refused; trying snapshot then cold: {error}");
             Ok(None)
         }
         Err(error) => Err(state_error(error)),

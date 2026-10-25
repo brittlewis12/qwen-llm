@@ -141,6 +141,7 @@ pub(crate) fn run_suite_pp_row(
             .collect::<Vec<_>>(),
     );
     Ok(BenchRow {
+        prefill_geometry: None,
         schema_version: BENCH_SCHEMA_VERSION,
         engine: "qwen-llm",
         build_commit: row_ctx.build_commit,
@@ -290,6 +291,7 @@ pub(crate) fn run_suite_tg_row(
     };
 
     Ok(BenchRow {
+        prefill_geometry: None,
         schema_version: BENCH_SCHEMA_VERSION,
         engine: "qwen-llm",
         build_commit: row_ctx.build_commit,

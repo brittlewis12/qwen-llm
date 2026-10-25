@@ -536,6 +536,8 @@ struct BenchRow {
     /// and the naive `model_size × t/s` overstates by ~10x for MoE.
     decode_gb_per_s: Option<f64>,
     prefill_chunk: Option<usize>,
+    /// Family-specific actual logical chunk ranges and runtime width, when known.
+    prefill_geometry: Option<serde_json::Value>,
     decode_mode: Option<&'static str>,
     prefill_mode: Option<&'static str>,
     power: Option<PowerSnapshot>,

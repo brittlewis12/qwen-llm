@@ -14,8 +14,7 @@ mod arithmetic_tests;
 mod half_staging_tests;
 
 pub const DEFAULT_CHUNK_ROWS: usize = 2048;
-/// Maximum supported Full chunk. Selection is a performance heuristic;
-/// allocation still requires admission of the actual selected geometry.
+/// Global engine ceiling, not the width selected by request admission.
 pub const MAX_CHUNK_ROWS: usize = 4096;
 
 /// Operand lineage of logical rows, independent of a CED replay tile's size.
@@ -964,34 +963,24 @@ pub(super) fn run_captured(
                 census[3]
             );
         });
-        // State and resident weights already exist and are reflected in device signals.
-        // Charge only the incremental chunk buffers and bounded upload temporaries.
-        let (extra, cpu) = full_scratch_budget_with(
-            &model.config,
-            model.layers.len(),
-            &gpu_step::engram_projections(model),
-            state.capacity(),
-            rows,
-            HalfScratch::selected(model.ctx),
-            &|bytes| {
-                model
-                    .ctx
-                    .price_shared_buffer_upper(bytes)
-                    .map(|p| p.priced_upper_bytes)
-                    .map_err(|e| e.to_string())
-            },
-        )?;
-        let admission = metal::evaluate_metal_memory_admission_with_cpu_bytes(
-            extra,
-            cpu,
-            0,
-            model.ctx.memory_signals(),
-            true,
-        );
-        if let Some(reason) = admission.refusal() {
-            return Err(StateError::MemoryAdmissionDenied(reason));
-        }
     }
+    let cost = model.prefill_cost(state.capacity(), rows)?;
+    planning::Cost {
+        metal: cost.metal,
+        cpu: cost
+            .cpu
+            .checked_add(state.caller_cpu_reserve)
+            .ok_or("prefill reserve overflow")?,
+    }
+    .admit(model.ctx.memory_signals())?;
+    op::require(
+        state
+            .prefill_rows
+            .is_none_or(|selected| selected == chunk_rows),
+        "prefill geometry is fixed for this request",
+    )?;
+    state.prefill_rows = Some(chunk_rows);
+    state.last_prefill = None;
     let end = state.position() + tokens.len();
     let mut logits = Vec::new();
     for chunk in tokens.chunks(chunk_rows) {
@@ -1044,5 +1033,10 @@ pub(super) fn run_captured(
         #[cfg(test)]
         tests::lifetime::completed_chunk(model.ctx, state, chunk.len());
     }
+    state.last_prefill = Some(PrefillGeometry {
+        start: end - tokens.len(),
+        tokens: tokens.len(),
+        selected_rows: chunk_rows,
+    });
     Ok(logits)
 }

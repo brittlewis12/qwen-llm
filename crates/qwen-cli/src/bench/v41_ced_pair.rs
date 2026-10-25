@@ -1505,6 +1505,7 @@ mod tests {
     fn report(execution: PrefillExecution) -> PrefillReport {
         let ced = execution == PrefillExecution::ShrinkingCed;
         PrefillReport {
+            geometry: qwen_llm::deepseek_v41::forward::PrefillGeometry { start: 0, tokens: 3, selected_rows: 4096 },
             execution,
             fallback: None,
             counters: ced.then(|| CedCounters {

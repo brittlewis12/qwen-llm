@@ -196,6 +196,9 @@ fn cpu_state() -> State {
         phase: StatePhase::Ready,
         prefill_origin: PrefillExecution::FullForward,
         identity: Arc::new(()),
+        prefill_rows: None,
+        caller_cpu_reserve: 0,
+        last_prefill: None,
     }
 }
 

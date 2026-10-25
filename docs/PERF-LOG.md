@@ -6,6 +6,31 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the current state and evidence index.
 
+## 2026-10-25 - Retained Windows Preserve Exact State And Reduce 2K Tails
+
+- Final disabled/4-GiB sources `b7038406`/`7398cb76` differ by one constant on
+  qualified batch-two CED. Each passes 74 CPU checks; all four M5 mapping/
+  post-drop GPU lifetime witnesses pass. A fixture-only out-of-bounds repair is
+  explicit; frozen v29 sources/failure remain unchanged and no guard is relaxed.
+- Actual metadata and live-object inventories agree: 1002 tensor views, 44 -> 85
+  objects, largest 44.594 -> 3.945 GiB, total exposed span +656 KiB, private
+  shadow zero. Disk-backed Engram is excluded; physical residency is unmeasured.
+- Both actual 2K Full/CED pairs preserve all 257 complete heads and 56 causal
+  regions per position, old-reference bridges and unchanged work, with one
+  import, one KV state, no fallback and 11 completed commands. Independent local
+  rechecking reproduces both bridges and both layout digests.
+- Instrumented and native P0-P4-P4-P0 cohorts retain every sample. Native P4
+  CED retained calls are 3.469-4.564 s versus P0 5.528-30.209 s; P4 CED still
+  does not beat Full at 2K, and a P0 pilot is faster than P4. This is repeated
+  cohort tail improvement, not universal speedup or buffer-length causality.
+- Review repairs exact stderr/sample joins and natural-controller-completion
+  acceptance offline. All four diagnostic cohorts recheck; healthy plus six
+  corrupt-copy controls pass/refuse as expected. GPU/driver/wait intervals
+  overlap; zero process I/O is not a GPU-fault/DRAM-traffic proof.
+- Extend the same frozen sources to 8K correctness and native confirmation;
+  no main mapping, CED default, memory policy or device setting changes.
+- [Frozen identities, complete distributions, repairs and limits](bench/2026-10-25-v41-retained-windows.md).
+
 ## 2026-10-25 - Retained-Window Experiment Continues From Preserved Source
 
 - Resume the bounded P0/P4 comparison on

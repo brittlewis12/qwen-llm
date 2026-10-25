@@ -224,9 +224,11 @@ pub fn encode_moe_swiglu_f32_grouped_slots_tensor(
             detail: format!("clamp must be finite and positive, got {clamp}"),
         });
     }
-    // At a 4096-row chunk the routed experts average ~64 slots, so the wide
-    // panel is full. Down keeps the narrow tile; gate/up uses the wide panel.
+    let activation = TensorActivation::of(x_pack, KERNEL)?;
+    // The wide panel reads half storage only. F32 retains its typed narrow
+    // path; at 4096 rows F16 gate/up uses the wide panel as before.
     if n_tokens >= 4096
+        && activation == TensorActivation::F16
         && let Some(limit) = clamp
         && moe_grouped_tensor_selected(ctx)
         && std::env::var_os("QWEN_V41_EXPERT_WIDE").is_none_or(|v| v != "0")
@@ -269,7 +271,6 @@ pub fn encode_moe_swiglu_f32_grouped_slots_tensor(
         0,
         i32::MAX as u32,
     )?;
-    let activation = TensorActivation::of(x_pack, KERNEL)?;
     let gate =
         moe_grouped_tensor_pipeline_name(MoeGroupedTensorRole::Down, w_gate.dtype, activation)
             .expect("layout lookup succeeded in generic_mm_args");
@@ -469,8 +470,8 @@ fn encode_mat_mat_tensor_f32_impl(
     Ok(())
 }
 
-/// Probe-only 64-slot IQ3_XXS down dispatch. Same data and arithmetic as the
-/// narrow tile; the fixture compares panel cost at 4096 routed tokens.
+/// Probe-only 64-slot down dispatch with F16 activation storage. Same data and
+/// arithmetic as the narrow tile; compares panel cost at 4096 routed tokens.
 #[allow(clippy::too_many_arguments)]
 pub fn encode_moe_down_wide_probe(
     ctx: &MetalContext,
@@ -486,6 +487,12 @@ pub fn encode_moe_down_wide_probe(
     n_tokens: usize,
 ) -> Result<(), MetalError> {
     const KERNEL: &str = "moe_down_wide_probe";
+    if inner.dtype != GgmlType::F16 {
+        return Err(MetalError::BadShape {
+            kernel: KERNEL,
+            detail: format!("wide probe activations must be F16, got {:?}", inner.dtype),
+        });
+    }
     let args = generic_mm_args(
         KERNEL,
         weight,
@@ -531,7 +538,7 @@ pub fn encode_moe_down_wide_probe(
     Ok(())
 }
 
-/// 64-slot gate/up dispatch: gate into `inner` (EPI 0), then the clamped up
+/// F16-activation-only 64-slot gate/up: gate into `inner` (EPI 0), then clamped up
 /// pass in place (EPI 2). Selected from `encode_moe_swiglu_f32_grouped_slots_tensor`
 /// at >=4096 rows; `QWEN_V41_EXPERT_WIDE=0` restores the narrow tile.
 #[allow(clippy::too_many_arguments)]
@@ -552,6 +559,12 @@ pub fn encode_moe_swiglu_wide_probe(
     clamp_limit: f32,
 ) -> Result<(), MetalError> {
     const KERNEL: &str = "moe_swiglu_wide_probe";
+    if x_pack.dtype != GgmlType::F16 {
+        return Err(MetalError::BadShape {
+            kernel: KERNEL,
+            detail: format!("wide probe activations must be F16, got {:?}", x_pack.dtype),
+        });
+    }
     crate::metal::checks::require_serial(KERNEL, enc)?;
     if !clamp_limit.is_finite() || clamp_limit <= 0.0 {
         return Err(MetalError::BadShape {

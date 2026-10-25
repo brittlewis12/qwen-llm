@@ -1,6 +1,8 @@
 use super::*;
 use crate::metal::test_support::*;
 
+mod wide_activation_type;
+
 const MOE_METAL: &str = include_str!(concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/../../kernels/moe.metal"

@@ -15,14 +15,17 @@ mod engram;
 mod metadata;
 mod names;
 mod resident_storage;
+mod retained_resources;
 mod storage;
 pub use super::engram::HashConfig;
 pub use companion::SourceGroups;
 pub use controls::ControlAccounting;
 pub use engram::DiskEngram;
 pub use resident_storage::{
-    ResidentMappingKind, ResidentStoragePlan, ResidentStorageWindow, resident_storage_plan,
+    ResidentMappingKind, ResidentStorageAudit, ResidentStoragePlan, ResidentStorageWindow,
+    ResidentTensorAudit, ResidentTensorExtent, resident_storage_audit, resident_storage_plan,
 };
+pub use retained_resources::{RetainedWeightResource, RetainedWeightResourceSummary};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Schedule {
@@ -190,6 +193,8 @@ pub struct ResidentWeights {
     pub token_map: Vec<u32>,
     pub raw_pad: u32,
     pub bytes: ByteCounters,
+    /// Captured once from owning views after load; no physical residency claim.
+    pub retained_resources: RetainedWeightResourceSummary,
 }
 #[derive(Debug)]
 pub struct Plan {
@@ -333,6 +338,19 @@ fn validate_storage(t: &TensorDesc) -> Result<(), LoadError> {
     add(t.data_offset, bytes)?;
     Ok(())
 }
+fn prepared_load_plan(
+    g: &GgufFile,
+    page: usize,
+    max_buffer_length: usize,
+    soft_target: Option<usize>,
+) -> Result<(Plan, ResidentStoragePlan), LoadError> {
+    let p = plan(g)?;
+    p.engram_context.revalidate(g)?;
+    let storage =
+        resident_storage::for_plan_with_target(g, &p, page, max_buffer_length, soft_target)?;
+    Ok((p, storage))
+}
+
 impl ResidentWeights {
     pub fn bank(&self, layer: usize, part: &str) -> Option<&MetalTensor> {
         self.banks
@@ -344,6 +362,14 @@ impl ResidentWeights {
         plan(g)
     }
     pub fn load(ctx: &MetalContext, g: Arc<GgufFile>) -> Result<Self, LoadError> {
+        Self::load_planned(ctx, g, resident_storage::SOFT_COALESCING_TARGET)
+    }
+
+    fn load_planned(
+        ctx: &MetalContext,
+        g: Arc<GgufFile>,
+        soft_target: Option<usize>,
+    ) -> Result<Self, LoadError> {
         let cold_cpu = controls::cold_bound(&g)?;
         if cold_cpu > 0
             && let Some(e) = metal::evaluate_metal_memory_admission_with_cpu_bytes(
@@ -357,10 +383,8 @@ impl ResidentWeights {
         {
             return Err(e.into());
         }
-        let p = plan(&g)?;
-        p.engram_context.revalidate(&g)?;
         let page = metal::host_page_size_bytes()?;
-        let storage = resident_storage::for_plan(&g, &p, page, ctx.max_buffer_length())?;
+        let (p, storage) = prepared_load_plan(&g, page, ctx.max_buffer_length(), soft_target)?;
         let windows = &storage.windows;
         let requests: Vec<_> = g
             .tensors
@@ -459,6 +483,7 @@ impl ResidentWeights {
             }
         }
         p.engram_context.revalidate(&g)?;
+        let retained_resources = retained_resources::summarize(&banks, &dense)?;
         Ok(Self {
             config: p.config,
             schedule: p.schedule,
@@ -469,6 +494,7 @@ impl ResidentWeights {
             token_map: p.token_map,
             raw_pad: p.raw_pad,
             bytes: p.bytes,
+            retained_resources,
         })
     }
 }

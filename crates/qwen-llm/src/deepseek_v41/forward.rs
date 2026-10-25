@@ -16,6 +16,8 @@ mod ffn_gpu;
 mod gpu_step;
 mod hc_gpu;
 mod memory;
+mod planning;
+pub use planning::{PrefillReport, RequestPlan};
 pub mod profile;
 mod token_map;
 pub use memory::RequestMemoryEstimate;
@@ -473,10 +475,8 @@ struct Layer<'a> {
     engram: Option<Engram<'a>>,
 }
 
-/// Packed+dense resident bytes above this stay on the 2048-row chunk. Q2
-/// (~186 GiB), Maya-S (~166 GiB) and IQ3 (~217 GiB) fit the 4096-row envelope
-/// at the 240 GiB MWSS; IQ3's earlier slow sample was a transient (four later
-/// samples: 879.41/879.87/878.80/874.77 tok/s, sigma 2.33).
+/// Initial preference only. Request admission prices actual state capacity,
+/// selected-tier scratch and current headroom before choosing a runtime width.
 const FULL_CHUNK_RESIDENT_LIMIT: u64 = 240 * (1u64 << 30);
 
 pub(super) fn prefill_rows_for_resident(resident_bytes: u64) -> usize {
@@ -515,6 +515,9 @@ pub struct State {
     max_context: usize,
     poisoned: bool,
     identity: Arc<()>,
+    prefill_rows: Option<usize>,
+    caller_cpu_reserve: u64,
+    last_prefill: Option<PrefillReport>,
 }
 impl State {
     pub fn capacity(&self) -> usize {
@@ -526,6 +529,12 @@ impl State {
     }
     pub fn is_poisoned(&self) -> bool {
         self.poisoned
+    }
+    pub fn selected_prefill_rows(&self) -> Option<usize> {
+        self.prefill_rows
+    }
+    pub fn last_prefill_report(&self) -> Option<PrefillReport> {
+        self.last_prefill
     }
 }
 
@@ -557,6 +566,9 @@ impl<'a> Forward<'a> {
             max_context,
             poisoned: false,
             identity: Arc::clone(&self.identity),
+            prefill_rows: None,
+            caller_cpu_reserve: 0,
+            last_prefill: None,
         })
     }
 
@@ -600,7 +612,10 @@ impl<'a> Forward<'a> {
         tokens: &[u32],
         cancel: Option<&AtomicBool>,
     ) -> std::result::Result<Vec<f32>, StateError> {
-        prefill::run(self, state, tokens, cancel, self.prefill_rows, true)
+        let rows = self
+            .select_prefill(state, tokens.len(), state.caller_cpu_reserve)?
+            .selected_rows;
+        prefill::run(self, state, tokens, cancel, rows, true)
     }
 
     /// Capture actual batched attention inputs and checkpoint outputs after GPU
@@ -612,15 +627,10 @@ impl<'a> Forward<'a> {
         cancel: Option<&AtomicBool>,
         capture: &mut dyn capture::Capture,
     ) -> std::result::Result<Vec<f32>, StateError> {
-        prefill::run_captured(
-            self,
-            state,
-            tokens,
-            cancel,
-            self.prefill_rows,
-            true,
-            Some(capture),
-        )
+        let rows = self
+            .select_prefill(state, tokens.len(), state.caller_cpu_reserve)?
+            .selected_rows;
+        prefill::run_captured(self, state, tokens, cancel, rows, true, Some(capture))
     }
 
     /// Consume a nonempty suffix without computing vocabulary logits.
@@ -630,7 +640,10 @@ impl<'a> Forward<'a> {
         tokens: &[u32],
         cancel: Option<&AtomicBool>,
     ) -> std::result::Result<(), StateError> {
-        prefill::run(self, state, tokens, cancel, self.prefill_rows, false).map(|_| ())
+        let rows = self
+            .select_prefill(state, tokens.len(), state.caller_cpu_reserve)?
+            .selected_rows;
+        prefill::run(self, state, tokens, cancel, rows, false).map(|_| ())
     }
 
     /// Synchronously borrow each completed block's CPU F32 outputs. None adds

@@ -6,9 +6,7 @@ use super::*;
 mod tests;
 
 pub const DEFAULT_CHUNK_ROWS: usize = 2048;
-/// Upper bound for a fitting artifact's Full-forward chunk. The selector in
-/// `Forward` uses this only when resident weights leave enough headroom;
-/// IQ3-class residents stay at `DEFAULT_CHUNK_ROWS`.
+/// Global engine ceiling, not the width selected by request admission.
 pub const MAX_CHUNK_ROWS: usize = 4096;
 
 #[cfg(test)]
@@ -621,46 +619,24 @@ pub(super) fn run_captured(
                 census[3]
             );
         });
-        let mut extra = half_scratch_budget(model.ctx, &model.config, rows)?;
-        for width in gpu_step::chunk_widths(model, state.capacity(), rows)? {
-            let bytes = width
-                .checked_mul(rows)
-                .and_then(|n| n.checked_mul(4))
-                .ok_or("prefill scratch overflow")? as u64;
-            let priced = model
-                .ctx
-                .price_shared_buffer_upper(bytes)
-                .map_err(|e| e.to_string())?;
-            extra = extra
-                .checked_add(priced.priced_upper_bytes)
-                .ok_or("prefill scratch overflow")?;
-        }
-        // State and resident weights already exist and are reflected in device signals.
-        // Charge only the incremental chunk buffers and bounded upload temporaries.
-        let upload_width = model
-            .layers
-            .iter()
-            .filter_map(|l| l.engram.as_ref())
-            .map(|e| e.projection.input)
-            .max()
-            .unwrap_or(0)
-            .checked_add(4 * model.config.hidden)
-            .ok_or("prefill upload overflow")?;
-        let cpu = (rows as u64)
-            .checked_mul(upload_width as u64)
-            .and_then(|n| n.checked_mul(8))
-            .ok_or("prefill upload overflow")?;
-        let admission = metal::evaluate_metal_memory_admission_with_cpu_bytes(
-            extra,
-            cpu,
-            0,
-            model.ctx.memory_signals(),
-            true,
-        );
-        if let Some(reason) = admission.refusal() {
-            return Err(StateError::MemoryAdmissionDenied(reason));
-        }
     }
+    let cost = model.prefill_cost(state.capacity(), rows)?;
+    planning::Cost {
+        metal: cost.metal,
+        cpu: cost
+            .cpu
+            .checked_add(state.caller_cpu_reserve)
+            .ok_or("prefill reserve overflow")?,
+    }
+    .admit(model.ctx.memory_signals())?;
+    op::require(
+        state
+            .prefill_rows
+            .is_none_or(|selected| selected == chunk_rows),
+        "prefill geometry is fixed for this state",
+    )?;
+    state.prefill_rows = Some(chunk_rows);
+    state.last_prefill = None;
     let end = state.position() + tokens.len();
     let mut logits = Vec::new();
     for chunk in tokens.chunks(chunk_rows) {
@@ -713,5 +689,10 @@ pub(super) fn run_captured(
         #[cfg(test)]
         tests::lifetime::completed_chunk(model.ctx, state, chunk.len());
     }
+    state.last_prefill = Some(PrefillReport {
+        start: end - tokens.len(),
+        tokens: tokens.len(),
+        selected_rows: chunk_rows,
+    });
     Ok(logits)
 }

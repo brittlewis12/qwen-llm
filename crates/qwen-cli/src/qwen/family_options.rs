@@ -302,6 +302,7 @@ mod tests {
                 tokens: 4097,
                 selected_rows: 2048,
             },
+            admission: None,
             execution: PrefillExecution::ShrinkingCed,
             fallback: None,
             counters: None,
@@ -377,6 +378,7 @@ mod tests {
                 tokens: 3,
                 selected_rows: 4096,
             },
+            admission: None,
             execution: PrefillExecution::FullForward,
             fallback: None,
             counters: None,
@@ -402,6 +404,7 @@ mod tests {
                 tokens: 3,
                 selected_rows: 4096,
             },
+            admission: None,
             execution: PrefillExecution::ShrinkingCed,
             fallback: None,
             counters: Some(CedCounters {

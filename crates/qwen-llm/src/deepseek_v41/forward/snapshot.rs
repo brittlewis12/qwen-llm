@@ -188,6 +188,10 @@ impl Forward<'_> {
                 let report = self.select_prefill(state, tokens, reserve, None)?;
                 state.prefill_rows = Some(report.selected_rows);
                 state.caller_cpu_reserve = reserve;
+                state.prefill_admission = Some(PrefillAdmission {
+                    intent: PrefillIntent::Full,
+                    fallback: None,
+                });
             }
             return Ok(());
         }
@@ -203,6 +207,7 @@ impl Forward<'_> {
                 let mut replacement = self.new_state_from_plan(&plan)?;
                 replacement.prefill_rows = state.prefill_rows;
                 replacement.caller_cpu_reserve = reserve;
+                replacement.prefill_admission = state.prefill_admission.clone();
                 Ok(replacement)
             }
         })?;

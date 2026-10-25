@@ -19,7 +19,7 @@ pub(super) fn preflight_signals() -> metal::MetalMemorySignals {
 
 #[test]
 fn cold_preflight_uses_validated_small_metadata_without_import_or_new_maps() {
-    use crate::deepseek_v41::forward::{PrefillExecution, preflight};
+    use crate::deepseek_v41::forward::{PrefillExecution, PrefillIntent, preflight};
     for engram in [false, true] {
         let g = fixture(1, GgmlType::F32, 2, engram);
         assert!(g.shards[0].mmap_len() < 4 * 1024 * 1024);
@@ -30,10 +30,7 @@ fn cold_preflight_uses_validated_small_metadata_without_import_or_new_maps() {
             storage.clone(),
             8,
             16,
-            &[
-                PrefillExecution::FullForward,
-                PrefillExecution::ShrinkingCed,
-            ],
+            &[PrefillExecution::ShrinkingCed],
             334_226_432,
             true,
             &Ok,
@@ -45,6 +42,27 @@ fn cold_preflight_uses_validated_small_metadata_without_import_or_new_maps() {
         assert_eq!(cold.binding_metal_bytes, 0);
         assert_eq!(Arc::strong_count(&g.shards[0].mmap), refs);
         assert!(cold.ced.is_none()); // One-layer metadata has no decoder split.
+        assert_eq!(cold.prefill_admission.intent, PrefillIntent::OptionalCed);
+        assert!(cold.prefill_admission.fallback.is_some());
+        assert!(
+            preflight::preflight_with_pricing(
+                &g,
+                storage.clone(),
+                8,
+                16,
+                &[
+                    PrefillExecution::FullForward,
+                    PrefillExecution::ShrinkingCed
+                ],
+                334_226_432,
+                true,
+                &Ok,
+                preflight_signals(),
+            )
+            .unwrap_err()
+            .to_string()
+            .contains("required CED")
+        );
         assert_eq!(
             cold.runtime_metal_bytes,
             cold.request.metal_bytes + cold.full_incremental_metal_bytes

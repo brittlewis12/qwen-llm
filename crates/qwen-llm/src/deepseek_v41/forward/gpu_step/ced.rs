@@ -1087,17 +1087,14 @@ impl Workspace {
     pub(in super::super) fn run_ced(
         &mut self,
         model: &Forward<'_>,
-        plan: &CedPlan,
+        admitted: super::super::ced::AdmittedPlan<'_>,
         tokens: &[u32],
         addresses: &mut engram::AddressState,
         cancel: Option<&AtomicBool>,
         arithmetic: Arithmetic,
         mut storage: Storage,
     ) -> Result<Output> {
-        op::require(
-            plan.full_chunk_rows == model.prefill_rows,
-            "CED Full chunk geometry differs from bound model",
-        )?;
+        let plan = admitted.plan();
         self.commands = 0;
         self.trace_copies = 0;
         let maximum = maximum_decoder_rows(plan, arithmetic)?;

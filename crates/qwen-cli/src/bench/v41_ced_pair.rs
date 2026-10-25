@@ -1537,6 +1537,7 @@ mod tests {
                 tokens: 3,
                 selected_rows: 4096,
             },
+            admission: None,
             execution,
             fallback: None,
             counters: ced.then(|| CedCounters {
@@ -1584,6 +1585,10 @@ mod tests {
         use qwen_llm::deepseek_v41::gguf::{ByteCounters, ResidentStoragePlan};
         let caller = caller_cpu_bytes(diagnostic);
         let plan = ColdPrefillPlan {
+            prefill_admission: qwen_llm::deepseek_v41::forward::PrefillAdmission {
+                intent: qwen_llm::deepseek_v41::forward::PrefillIntent::RequiredFullCed,
+                fallback: None,
+            },
             geometry: qwen_llm::deepseek_v41::forward::PrefillGeometry {
                 start: 0,
                 tokens: 0,

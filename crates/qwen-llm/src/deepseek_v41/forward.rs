@@ -26,7 +26,7 @@ pub use preflight::{
     preflight_cold_prefill,
 };
 mod planning;
-pub use planning::{PrefillGeometry, RequestPlan};
+pub use planning::{PrefillAdmission, PrefillGeometry, PrefillIntent, RequestPlan};
 pub mod profile;
 mod token_map;
 pub use memory::RequestMemoryEstimate;
@@ -517,6 +517,7 @@ pub struct State {
     prefill_rows: Option<usize>,
     caller_cpu_reserve: u64,
     last_prefill: Option<PrefillGeometry>,
+    prefill_admission: Option<PrefillAdmission>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -526,6 +527,15 @@ enum StatePhase {
     Poisoned,
 }
 impl State {
+    fn requires_ced(&self) -> bool {
+        self.prefill_admission
+            .as_ref()
+            .is_some_and(|a| a.intent == PrefillIntent::RequiredFullCed)
+    }
+
+    pub fn prefill_admission(&self) -> Option<&PrefillAdmission> {
+        self.prefill_admission.as_ref()
+    }
     pub fn capacity(&self) -> usize {
         self.max_context
     }
@@ -588,6 +598,7 @@ impl<'a> Forward<'a> {
             prefill_rows: None,
             caller_cpu_reserve: 0,
             last_prefill: None,
+            prefill_admission: None,
         })
     }
 

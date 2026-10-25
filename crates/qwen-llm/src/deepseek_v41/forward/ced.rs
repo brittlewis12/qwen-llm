@@ -174,12 +174,41 @@ pub struct PrefillReport {
     /// Logical input chunks: Full work or CED encoder work, never decoder coverage.
     #[serde(rename = "input_geometry")]
     pub geometry: PrefillGeometry,
+    /// Request/allocation admission, when created through a request plan.
+    pub admission: Option<PrefillAdmission>,
     pub execution: PrefillExecution,
     pub fallback: Option<String>,
     pub counters: Option<CedCounters>,
     pub memory: Option<CedMemoryEstimate>,
     /// Maximum of phase samples, not a continuous command/driver high-water.
     pub observed_incremental_metal_bytes: Option<u64>,
+}
+
+pub(super) struct AdmittedPlan<'a>(&'a CedPlan);
+
+impl<'a> AdmittedPlan<'a> {
+    pub(super) fn validate(
+        plan: &'a CedPlan,
+        geometry: PrefillGeometry,
+        state_rows: Option<usize>,
+        input_tokens: usize,
+        capacity: usize,
+    ) -> Result<Self> {
+        op::require(
+            state_rows == Some(geometry.selected_rows)
+                && plan.full_chunk_rows == geometry.selected_rows
+                && geometry.start == 0
+                && geometry.tokens == input_tokens
+                && plan.prompt_rows == input_tokens
+                && input_tokens <= capacity,
+            "CED plan differs from admitted request/state geometry",
+        )?;
+        Ok(Self(plan))
+    }
+
+    pub(super) fn plan(&self) -> &'a CedPlan {
+        self.0
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -450,6 +479,7 @@ fn full(
         logits,
         PrefillReport {
             geometry: state.last_prefill_report().ok_or("missing Full geometry")?,
+            admission: state.prefill_admission.clone(),
             execution: PrefillExecution::FullForward,
             fallback,
             counters: None,
@@ -489,6 +519,11 @@ pub(super) fn run(
         state.prefill_rows,
     )?;
     state.prefill_rows = Some(geometry.selected_rows);
+    if let Some(admission) = &state.prefill_admission
+        && admission.fallback.is_some()
+    {
+        return full(model, state, tokens, cancel, admission.fallback.clone());
+    }
     let plan = match plan_for_geometry(
         &model.config,
         &model.schedule,
@@ -497,8 +532,20 @@ pub(super) fn run(
         state.capacity(),
     ) {
         Ok(plan) => plan,
-        Err(reason) => return full(model, state, tokens, cancel, Some(reason.to_string())),
+        Err(reason) => {
+            if state.requires_ced() {
+                return Err(format!("required CED is unsupported: {reason}").into());
+            }
+            return full(model, state, tokens, cancel, Some(reason.to_string()));
+        }
     };
+    let admitted = AdmittedPlan::validate(
+        &plan,
+        geometry,
+        state.prefill_rows,
+        tokens.len(),
+        state.capacity(),
+    )?;
     state
         .gpu_step
         .as_ref()
@@ -517,6 +564,9 @@ pub(super) fn run(
         true,
     );
     if let Some(reason) = admission.refusal() {
+        if state.requires_ced() || !planning::pressure_reason(reason.reason()) {
+            return Err(StateError::MemoryAdmissionDenied(reason));
+        }
         return full(
             model,
             state,
@@ -533,7 +583,7 @@ pub(super) fn run(
     let mut addresses = guard.state.addresses;
     let result = guard.state.gpu_step.as_mut().unwrap().run_ced(
         model,
-        &plan,
+        admitted,
         tokens,
         &mut addresses,
         cancel,
@@ -560,6 +610,7 @@ pub(super) fn run(
         result.logits,
         PrefillReport {
             geometry,
+            admission: state.prefill_admission.clone(),
             execution: PrefillExecution::ShrinkingCed,
             fallback: None,
             counters: Some(result.counters),

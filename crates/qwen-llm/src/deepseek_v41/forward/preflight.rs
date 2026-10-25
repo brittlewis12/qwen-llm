@@ -10,6 +10,8 @@ pub struct ColdPrefillPlan {
     pub geometry: PrefillGeometry,
     pub capacity: usize,
     pub executions: Vec<PrefillExecution>,
+    /// Original caller intent survives selection of a Full-only alternative.
+    pub prefill_admission: PrefillAdmission,
     /// Pre-mutation candidates only; selecting a plan clears alternatives.
     pub alternatives: Vec<ColdPrefillPlan>,
     pub full_chunk_rows: usize,
@@ -187,7 +189,8 @@ impl ColdPrefillPlan {
 /// Strictly admit the entire cold peak against current availability before
 /// weight import. This deliberately retains the stronger, non-staged contract.
 /// Policies (including repetitions) run sequentially, never as concurrent states.
-/// `ced` is absent when not requested or when runtime would fall back to Full.
+/// `ced` is absent when not requested or when optional CED would take Full.
+/// A two-arm Full/CED request is required: unsupported CED is a refusal.
 /// No weight/table payload is imported, no RSS execution observation is made,
 /// and no memory is reserved. Planning can open a declared companion and read
 /// bounded CPU control payloads. The opened GGUF retains shared file mappings.
@@ -421,6 +424,7 @@ fn plan_with_pricing(
         return Err(LoadError::Invalid("empty cold prompt".into()).into());
     }
     let p = gguf::plan(gguf)?;
+    let intent = PrefillIntent::from_executions(executions).map_err(LoadError::Invalid)?;
     p.validate_execution().map_err(LoadError::from)?;
     let summary = gguf::retained_summary_bookkeeping(gguf, &p, &resident_storage)?;
     let descriptor_window = sum(&[
@@ -469,6 +473,20 @@ fn plan_with_pricing(
      -> std::result::Result<ColdPrefillPlan, PlanError> {
         let (request, full, ced, binding_cpu_bytes, binding_metal_bytes) =
             calculate(full_chunk_rows, executions).map_err(LoadError::Invalid)?;
+        if intent == PrefillIntent::RequiredFullCed && ced.is_none() {
+            return Err(LoadError::Invalid("required CED is unsupported".into()).into());
+        }
+        let fallback = if intent == PrefillIntent::OptionalCed {
+            if !executions.contains(&PrefillExecution::ShrinkingCed) {
+                Some("cold capacity: CED memory admission fallback".into())
+            } else if ced.is_none() {
+                Some("cold planning: CED unsupported".into())
+            } else {
+                None
+            }
+        } else {
+            None
+        };
         let mut combined = combine_plan(
             resident_storage.clone(),
             request,
@@ -486,6 +504,7 @@ fn plan_with_pricing(
         };
         combined.capacity = capacity;
         combined.executions = executions.to_vec();
+        combined.prefill_admission = PrefillAdmission { intent, fallback };
         combined.loader_controls = p.controls;
         combined.descriptor_window_cpu_bytes = descriptor_window;
         combined.retained_summary_cpu_bytes = summary.cpu_bytes;
@@ -596,6 +615,10 @@ fn combine_plan(
         },
         capacity: 0,
         executions: vec![PrefillExecution::FullForward],
+        prefill_admission: PrefillAdmission {
+            intent: PrefillIntent::Full,
+            fallback: None,
+        },
         alternatives: Vec::new(),
         full_chunk_rows: prefill::DEFAULT_CHUNK_ROWS,
         resident_storage,

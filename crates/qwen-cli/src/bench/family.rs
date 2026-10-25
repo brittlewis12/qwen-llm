@@ -972,11 +972,13 @@ pub(crate) fn run_family_pp_row(
         &wall,
         true,
     );
+    if diagnostics.is_empty() {
+        row.prefill_geometry = bench
+            .prefill_report()
+            .as_ref()
+            .map(crate::family_options::v41_execution_geometry);
+    }
     attach_v41_diagnostics(&mut row, diagnostics);
-    row.prefill_geometry = bench
-        .prefill_report()
-        .as_ref()
-        .map(crate::family_options::v41_execution_geometry);
     Ok(row)
 }
 
@@ -1045,11 +1047,20 @@ pub(crate) fn attach_v41_diagnostics(row: &mut BenchRow, repetitions: Vec<V41Ben
     row.prefill_geometry = reports
         .first()
         .filter(|first| {
-            reports
-                .iter()
-                .all(|r| r.geometry == first.geometry && r.execution == first.execution)
+            reports.len() == row.n_repetitions
+                && reports
+                    .iter()
+                    .all(|r| r.geometry == first.geometry && r.execution == first.execution)
         })
         .map(|r| crate::family_options::v41_execution_geometry(r));
+    if !reports.first().is_some_and(|first| {
+        reports.len() == row.n_repetitions
+            && reports
+                .iter()
+                .all(|r| r.geometry.selected_rows == first.geometry.selected_rows)
+    }) {
+        row.prefill_chunk = None;
+    }
     if row.prefill_mode.is_some() {
         let mut actual = repetitions.iter().filter_map(|rep| {
             rep.calls
@@ -1162,6 +1173,7 @@ mod tests {
                 tokens: 3,
                 selected_rows: 4096,
             },
+            admission: None,
             execution: PrefillExecution::FullForward,
             fallback: fallback.map(str::to_owned),
             counters: None,
@@ -1178,6 +1190,7 @@ mod tests {
                 tokens: 3,
                 selected_rows: 4096,
             },
+            admission: None,
             execution: PrefillExecution::ShrinkingCed,
             fallback: None,
             counters: Some(CedCounters {
@@ -1338,7 +1351,12 @@ mod tests {
                     None
                 }
             );
+            assert_eq!(row.prefill_geometry.is_some(), runs == 1);
+            assert_eq!(row.n_repetitions, runs);
+            assert_eq!(row.samples_ns.len(), runs);
+            assert_eq!(row.samples_ts.len(), runs);
             let reports = &row.diagnostics.unwrap()["deepseek_v41"]["prefill_repetitions"];
+            assert_eq!(reports.as_array().unwrap().len(), runs);
             assert_eq!(reports[0]["calls"][0]["execution"], "full_forward");
             assert_eq!(
                 reports[0]["calls"][0]["fallback"],
@@ -1348,6 +1366,41 @@ mod tests {
             if runs == 2 {
                 assert_eq!(reports[1]["calls"][0]["execution"], "shrinking_ced");
             }
+        }
+    }
+
+    #[test]
+    fn v41_full_reps_with_different_widths_keep_raw_geometry_not_last_aggregate() {
+        let mut call = 0;
+        let mut bench = v41_test_bench(|position, ids, _| {
+            *position += ids.len();
+            call += 1;
+            let mut report = full_report(Some("optional CED admission refusal"));
+            report.geometry.selected_rows = if call == 1 { 4096 } else { 2048 };
+            Ok((vec![0.; 257], report))
+        });
+        let row = run_family_pp_row(&mut bench, &v41_row_context(), 3, 0, 2, true, 42).unwrap();
+        assert!(row.prefill_geometry.is_none());
+        assert!(row.prefill_chunk.is_none());
+        assert_eq!(
+            row.prefill_mode,
+            Some(crate::family_options::V41_PREFILL_MODE)
+        );
+        assert_eq!(row.n_repetitions, 2);
+        assert_eq!(row.samples_ns.len(), 2);
+        assert_eq!(row.samples_ts.len(), 2);
+        let reps = &row.diagnostics.unwrap()["deepseek_v41"]["prefill_repetitions"];
+        assert_eq!(reps.as_array().unwrap().len(), 2);
+        for (index, width) in [4096, 2048].into_iter().enumerate() {
+            assert_eq!(
+                reps[index]["calls"][0]["input_geometry"]["selected_rows"],
+                width
+            );
+            assert_eq!(reps[index]["calls"][0]["execution"], "full_forward");
+            assert_eq!(
+                reps[index]["calls"][0]["fallback"],
+                "optional CED admission refusal"
+            );
         }
     }
 

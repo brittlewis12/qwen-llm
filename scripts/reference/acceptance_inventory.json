@@ -29,6 +29,13 @@
   },
   {
     "target": "bench",
+    "name": "family_bench::tests::v41_full_reps_with_different_widths_keep_raw_geometry_not_last_aggregate",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Reviewed v35 host-only admission, metadata/price quote or fake benchmark aggregation; no Metal context, device allocation or model."
+  },
+  {
+    "target": "bench",
     "name": "family_bench::tests::v41_standard_harness_keeps_fresh_state_depth_and_common_columns",
     "class": "cpu",
     "ignored": false,
@@ -1954,6 +1961,13 @@
   },
   {
     "target": "lib",
+    "name": "deepseek_v41::forward::planning::tests::ced_executor_contract_uses_admitted_state_width_not_resident_preference",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Reviewed v35 host-only admission, metadata/price quote or fake benchmark aggregation; no Metal context, device allocation or model."
+  },
+  {
+    "target": "lib",
     "name": "deepseek_v41::forward::planning::tests::ced_lineage_uses_admitted_geometry_and_distinguishes_genuine_scalar_tails",
     "class": "cpu",
     "ignored": false,
@@ -1989,10 +2003,31 @@
   },
   {
     "target": "lib",
+    "name": "deepseek_v41::forward::planning::tests::metal::admitted_2k_request_on_4k_model_executes_ced_public_api_and_matches_same_width_full",
+    "class": "gpu",
+    "ignored": true,
+    "reason": "Bounded self-leased actual Metal public request-plan/Full/CED regression, <=256 MiB explicit CPU+Metal ledger and strict owner release; parent M5 execution required."
+  },
+  {
+    "target": "lib",
     "name": "deepseek_v41::forward::planning::tests::new_live_request_can_narrow_before_mutation_but_keeps_an_admissible_retained_width",
     "class": "cpu",
     "ignored": false,
     "reason": "Reviewed host-only CED, request-planning, execution contract or synthetic storage control; no Metal context or dispatch."
+  },
+  {
+    "target": "lib",
+    "name": "deepseek_v41::forward::planning::tests::optional_ced_invalid_signals_and_overflow_are_not_pressure_or_fallback",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Reviewed v35 host-only admission, metadata/price quote or fake benchmark aggregation; no Metal context, device allocation or model."
+  },
+  {
+    "target": "lib",
+    "name": "deepseek_v41::forward::planning::tests::optional_ced_reprices_full_at_both_boundaries_with_fresh_signals_and_all_reserves",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Reviewed v35 host-only admission, metadata/price quote or fake benchmark aggregation; no Metal context, device allocation or model."
   },
   {
     "target": "lib",
@@ -2010,6 +2045,13 @@
   },
   {
     "target": "lib",
+    "name": "deepseek_v41::forward::planning::tests::required_pair_refuses_pressure_at_both_boundaries_without_full_retry",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Reviewed v35 host-only admission, metadata/price quote or fake benchmark aggregation; no Metal context, device allocation or model."
+  },
+  {
+    "target": "lib",
     "name": "deepseek_v41::forward::planning::tests::runtime_price_uses_sequential_full_ced_maxima_and_keeps_cpu_domains_separate",
     "class": "cpu",
     "ignored": false,
@@ -2021,6 +2063,13 @@
     "class": "cpu",
     "ignored": false,
     "reason": "Reviewed host-only CED, request-planning, execution contract or synthetic storage control; no Metal context or dispatch."
+  },
+  {
+    "target": "lib",
+    "name": "deepseek_v41::forward::planning::tests::unsupported_ced_is_optional_only_and_intent_survives_serialization",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Reviewed v35 host-only admission, metadata/price quote or fake benchmark aggregation; no Metal context, device allocation or model."
   },
   {
     "target": "lib",
@@ -2588,6 +2637,27 @@
     "class": "cpu",
     "ignored": false,
     "reason": "Host-only metadata, arithmetic, source contract or synthetic disk fixture; no Metal context."
+  },
+  {
+    "target": "lib",
+    "name": "deepseek_v41::gguf::tests::admitted_request::small_ced_request_fixture_is_executable_metadata_not_a_mock_step",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Reviewed v35 host-only admission, metadata/price quote or fake benchmark aggregation; no Metal context, device allocation or model."
+  },
+  {
+    "target": "lib",
+    "name": "deepseek_v41::gguf::tests::admitted_request::small_request_cpu_quote_preserves_optional_intent_and_required_pair_refusal",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Reviewed v35 host-only admission, metadata/price quote or fake benchmark aggregation; no Metal context, device allocation or model."
+  },
+  {
+    "target": "lib",
+    "name": "deepseek_v41::gguf::tests::admitted_request::unsupported_metadata_schedule_is_optional_full_not_a_required_ced_arm",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Reviewed v35 host-only admission, metadata/price quote or fake benchmark aggregation; no Metal context, device allocation or model."
   },
   {
     "target": "lib",

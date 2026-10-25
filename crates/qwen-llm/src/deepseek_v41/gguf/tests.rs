@@ -1,6 +1,7 @@
 use super::*;
 use std::io::Write;
 
+pub(in crate::deepseek_v41) mod admitted_request;
 mod binding_preflight;
 mod execution_contract;
 pub(in crate::deepseek_v41) mod gsq_loader;

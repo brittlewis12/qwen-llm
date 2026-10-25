@@ -1494,6 +1494,7 @@ mod family_diagnostics_tests {
                 tokens: 3,
                 selected_rows: 4096,
             },
+            admission: None,
             execution: PrefillExecution::FullForward,
             fallback: None,
             counters: None,

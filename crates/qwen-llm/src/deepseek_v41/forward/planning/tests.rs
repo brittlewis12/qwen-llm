@@ -1,6 +1,8 @@
 use super::*;
 use crate::metal::HostMemoryBudget;
 
+mod metal;
+
 fn signals() -> MetalMemorySignals {
     MetalMemorySignals {
         host_budget: Some(HostMemoryBudget {
@@ -272,6 +274,7 @@ fn ced_lineage_uses_admitted_geometry_and_distinguishes_genuine_scalar_tails() {
             );
             let json = serde_json::to_value(PrefillReport {
                 geometry,
+                admission: None,
                 execution: PrefillExecution::ShrinkingCed,
                 fallback: None,
                 counters: None,
@@ -370,10 +373,298 @@ fn request_identity_is_arc_bound_not_config_or_capacity_equality() {
         },
         cpu_reserve: 99,
         binding_cpu_reserve: 0,
+        admission: PrefillAdmission {
+            intent: PrefillIntent::Full,
+            fallback: None,
+        },
         identity: identity.clone(),
     };
     plan.validate_identity(&identity).unwrap();
     assert!(plan.validate_identity(&Arc::new(())).is_err());
     assert_eq!(plan.prefill().selected_rows, 2048);
     assert_eq!(plan.caller_cpu_reserve(), 99);
+}
+
+fn runtime_fixture(with_ced: bool) -> RequestMemoryEstimate {
+    runtime_memory(
+        RequestMemoryEstimate {
+            cpu_persistent_bytes: 10,
+            cpu_transient_bytes: 20,
+            cpu_bytes: 30,
+            metal_bytes: 40,
+            total_bytes: 70,
+        },
+        (100, 10),
+        with_ced.then_some(&CedMemoryEstimate {
+            incremental_metal_bytes: 250,
+            incremental_cpu_bytes: 70,
+            ..Default::default()
+        }),
+    )
+    .unwrap()
+}
+
+#[test]
+fn optional_ced_reprices_full_at_both_boundaries_with_fresh_signals_and_all_reserves() {
+    // These are the disjoint caller/binding/source/private CPU envelopes.
+    let reserve = 13 + 17 + 19 + 23;
+    for stage in ["post_binding", "allocation"] {
+        let prices = std::cell::RefCell::new(vec![]);
+        let samples = std::cell::Cell::new(0);
+        let (memory, admission) = admit_runtime(
+            PrefillAdmission {
+                intent: PrefillIntent::OptionalCed,
+                fallback: None,
+            },
+            reserve,
+            stage,
+            |ced| {
+                prices.borrow_mut().push((ced, 8192, 2048));
+                Ok((runtime_fixture(ced), ced))
+            },
+            || {
+                samples.set(samples.get() + 1);
+                let mut s = signals();
+                s.host_budget.as_mut().unwrap().conservative_available_bytes =
+                    if samples.get() == 1 { 150 } else { 113 };
+                s
+            },
+        )
+        .unwrap();
+        assert_eq!(*prices.borrow(), [(true, 8192, 2048), (false, 8192, 2048)]);
+        assert_eq!(samples.get(), 2);
+        assert_eq!(memory, runtime_fixture(false));
+        assert_eq!(admission.intent, PrefillIntent::OptionalCed);
+        assert!(admission.fallback.as_ref().unwrap().starts_with(stage));
+        assert!(
+            admission
+                .fallback
+                .as_ref()
+                .unwrap()
+                .contains("host_availability_insufficient")
+        );
+
+        let mut attempted = vec![];
+        admit_runtime(
+            admission.clone(),
+            reserve,
+            "allocation",
+            |ced| {
+                attempted.push(ced);
+                Ok((runtime_fixture(ced), ced))
+            },
+            signals,
+        )
+        .unwrap();
+        assert_eq!(
+            attempted,
+            [false],
+            "allocation cannot re-enable declined CED"
+        );
+
+        let mut s = signals();
+        s.host_budget.as_mut().unwrap().conservative_available_bytes = 111;
+        assert!(
+            admit_runtime(
+                admission,
+                reserve,
+                stage,
+                |ced| Ok((runtime_fixture(ced), ced)),
+                || s
+            )
+            .is_err(),
+            "Full must still admit every reserve; 40 + 72 exceeds 111"
+        );
+    }
+}
+
+#[test]
+fn required_pair_refuses_pressure_at_both_boundaries_without_full_retry() {
+    for stage in ["post_binding", "allocation"] {
+        let mut attempted = vec![];
+        let mut s = signals();
+        s.host_budget.as_mut().unwrap().conservative_available_bytes = 150;
+        let error = admit_runtime(
+            PrefillAdmission {
+                intent: PrefillIntent::RequiredFullCed,
+                fallback: None,
+            },
+            72,
+            stage,
+            |ced| {
+                attempted.push(ced);
+                Ok((runtime_fixture(ced), ced))
+            },
+            || s,
+        )
+        .unwrap_err();
+        assert_eq!(attempted, [true]);
+        assert_eq!(
+            error.memory_admission().unwrap().reason(),
+            Reason::HostAvailabilityInsufficient
+        );
+    }
+}
+
+#[test]
+fn optional_ced_invalid_signals_and_overflow_are_not_pressure_or_fallback() {
+    let invalid = [
+        MetalMemorySignals {
+            recommended_max_bytes: 0,
+            ..signals()
+        },
+        MetalMemorySignals {
+            host_budget: None,
+            ..signals()
+        },
+        MetalMemorySignals {
+            host_budget: Some(HostMemoryBudget {
+                physical_bytes: 0,
+                conservative_available_bytes: 0,
+                external_gap_bytes: 0,
+                private_shadow_bytes: 0,
+            }),
+            ..signals()
+        },
+    ];
+    for stage in ["post_binding", "allocation"] {
+        for (observed, reserve) in invalid
+            .into_iter()
+            .map(|s| (s, 0))
+            .chain([(signals(), u64::MAX)])
+        {
+            let mut attempted = vec![];
+            let error = admit_runtime(
+                PrefillAdmission {
+                    intent: PrefillIntent::OptionalCed,
+                    fallback: None,
+                },
+                reserve,
+                stage,
+                |ced| {
+                    attempted.push(ced);
+                    Ok((runtime_fixture(ced), ced))
+                },
+                || observed,
+            )
+            .unwrap_err();
+            assert_eq!(attempted, [true]);
+            assert!(
+                !error
+                    .memory_admission()
+                    .is_some_and(|e| pressure_reason(e.reason()))
+            );
+        }
+        let mut attempted = vec![];
+        assert!(
+            admit_runtime(
+                PrefillAdmission {
+                    intent: PrefillIntent::OptionalCed,
+                    fallback: None
+                },
+                0,
+                stage,
+                |ced| {
+                    attempted.push(ced);
+                    Err("arithmetic overflow".into())
+                },
+                signals,
+            )
+            .is_err()
+        );
+        assert_eq!(attempted, [true]);
+    }
+}
+
+#[test]
+fn unsupported_ced_is_optional_only_and_intent_survives_serialization() {
+    for intent in [PrefillIntent::OptionalCed, PrefillIntent::RequiredFullCed] {
+        let mut attempted = vec![];
+        let result = admit_runtime(
+            PrefillAdmission {
+                intent,
+                fallback: None,
+            },
+            72,
+            "post_binding",
+            |ced| {
+                attempted.push(ced);
+                Ok((runtime_fixture(false), false))
+            },
+            signals,
+        );
+        if intent == PrefillIntent::RequiredFullCed {
+            assert!(result.is_err());
+            assert_eq!(attempted, [true]);
+        } else {
+            let (_, admission) = result.unwrap();
+            assert_eq!(attempted, [true, false]);
+            let json = serde_json::to_value(admission).unwrap();
+            assert_eq!(json["intent"], "optional_ced");
+            assert_eq!(json["fallback"], "post_binding: CED unsupported");
+        }
+    }
+    assert_eq!(
+        PrefillIntent::from_executions(&[PrefillExecution::ShrinkingCed]).unwrap(),
+        PrefillIntent::OptionalCed
+    );
+    assert_eq!(
+        PrefillIntent::from_executions(&[
+            PrefillExecution::FullForward,
+            PrefillExecution::ShrinkingCed
+        ])
+        .unwrap(),
+        PrefillIntent::RequiredFullCed
+    );
+    assert!(PrefillIntent::from_executions(&[]).is_err());
+}
+
+#[test]
+fn ced_executor_contract_uses_admitted_state_width_not_resident_preference() {
+    let geometry = PrefillGeometry {
+        start: 0,
+        tokens: 2049,
+        selected_rows: 2048,
+    };
+    let plan = ced::plan_for_geometry(
+        &Config::default(),
+        &super::super::super::gguf::Schedule::default(),
+        &engram::HashConfig::default(),
+        geometry,
+        4096,
+    )
+    .unwrap();
+    let resident_preference = 4096;
+    assert_ne!(
+        plan.full_chunk_rows, resident_preference,
+        "old executor comparison rejects a valid request"
+    );
+    let ticket = ced::AdmittedPlan::validate(&plan, geometry, Some(2048), 2049, 4096).unwrap();
+    assert_eq!(ticket.plan().full_chunk_rows, 2048);
+    for (report, state_rows, tokens, capacity) in [
+        (geometry, Some(4096), 2049, 4096),
+        (geometry, None, 2049, 4096),
+        (
+            PrefillGeometry {
+                selected_rows: 4096,
+                ..geometry
+            },
+            Some(4096),
+            2049,
+            4096,
+        ),
+        (
+            PrefillGeometry {
+                start: 1,
+                ..geometry
+            },
+            Some(2048),
+            2049,
+            4096,
+        ),
+        (geometry, Some(2048), 2048, 4096),
+        (geometry, Some(2048), 2049, 2048),
+    ] {
+        assert!(ced::AdmittedPlan::validate(&plan, report, state_rows, tokens, capacity).is_err());
+    }
 }

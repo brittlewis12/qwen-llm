@@ -199,6 +199,7 @@ fn cpu_state() -> State {
         prefill_rows: None,
         caller_cpu_reserve: 0,
         last_prefill: None,
+        prefill_admission: None,
     }
 }
 

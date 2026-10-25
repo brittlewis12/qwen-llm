@@ -610,7 +610,8 @@ fn emit_pair_request(
         let measurement = capture(
             suite.v41_ced_pair_production_timing,
             suite.v41_ced_pair_diagnostic,
-        );
+        )
+        .with_schedule(suite.v41_ced_pair_schedule.unwrap_or_default());
         measurement.emit_requested(writer)?;
         Ok(Some(measurement))
     } else {

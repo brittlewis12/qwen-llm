@@ -85,9 +85,10 @@ For priorities: `docs/PERF-ROADMAP.md`.
 `qwen-bench suite --v41-ced-pair` is an experimental, pp-only comparison using
 one resident import and a fresh request state for each native call. It accepts
 exactly one `--pp` in 2..=8192, `--depth 0`, no `--tg`, no chunk override and
-even `--runs 2..=16` retained samples per policy. Warmup is mandatory.
+even `--runs 2..=16` retained samples per policy for the default interleaved
+schedule. Warmup is mandatory.
 
-- A is Full forward; B is shrinking CED. Captured AB warmup calls are excluded
+- A is Full forward; B is shrinking CED. By default, captured AB warmup calls are excluded
   from statistics; an excluded ABBA pilot collects two samples per policy, then
   retained BAAB/ABBA blocks alternate. Pilot/main samples must be finite and
   positive; spread alone never stops scheduling. Each policy's `native_dispersion`
@@ -152,6 +153,26 @@ continuation or the separate bounded-128 policy. A matching endpoint fingerprint
 is not a replacement for the strict full-vocabulary and causal-state CED
 qualification. Native samples are observational, not automatic performance-gain
 acceptance. Ordered cold Full-then-CED diagnostics are not speedup evidence.
+
+### Explicit Blocked Schedules
+
+`--v41-ced-pair-schedule interleaved` preserves the default v2 chronology and
+protocol meaning. The native-only alternatives `full-blocks-first` and
+`ced-blocks-first` each run one policy's warmup, two excluded pilots and all
+retained main calls, then the other policy's corresponding stream. They require
+even `--runs 4..=16`, refuse `--v41-ced-pair-diagnostic`, and retain the same
+input, endpoint, bounds, admission, no-fallback and cleanup checks. They do not
+retry or reject variance. CED-first heads must also match warm Full when its
+stream starts; no successful aggregate is emitted on a mismatch.
+
+Blocked launch/paired diagnostics carry `v41-ced-pair-blocked-v1`, the explicit
+schedule, distinct native protocols and every chronological case, including
+excluded phases. The outer bench row schema stays unchanged; only main calls
+contribute per-policy summary statistics. See
+[`2026-10-25-v41-current-runtime-composition.md`](bench/2026-10-25-v41-current-runtime-composition.md)
+for exact protocol names, counts and pending qualification. Launch environment
+capture remains before Metal, without in-process mutation. Production timing
+still requires the explicit regime below.
 
 ### Explicit Production Timing
 

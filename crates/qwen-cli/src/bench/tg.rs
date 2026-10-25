@@ -19,6 +19,7 @@ pub(crate) fn run_tg(args: TgArgs) -> Result<()> {
             v41_ced_pair: false,
             v41_ced_pair_diagnostic: false,
             v41_ced_pair_production_timing: false,
+            v41_ced_pair_schedule: None,
             model: args.model,
             pp: Vec::new(),
             tg: vec![args.n_gen],

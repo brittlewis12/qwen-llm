@@ -23,6 +23,35 @@ const MAX_DIAGNOSTIC_OPERATIONS: usize = profile::PAIRED_OPERATION_CAPACITY;
 const MAX_PP: usize = 8192;
 const MAX_LAYERS: usize = 256;
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, clap::ValueEnum, serde::Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub(crate) enum PairSchedule {
+    #[default]
+    Interleaved,
+    FullBlocksFirst,
+    CedBlocksFirst,
+}
+
+impl PairSchedule {
+    pub(crate) fn validate(self, runs: usize, diagnostic: bool) -> Result<()> {
+        ensure!(
+            (2..=16).contains(&runs) && runs % 2 == 0,
+            "paired runs must be even, 2..=16 per policy"
+        );
+        if self != Self::Interleaved {
+            ensure!(
+                runs >= 4,
+                "blocked pair schedules require --runs >= 4 per policy"
+            );
+            ensure!(
+                !diagnostic,
+                "blocked pair schedules are native-only; remove --v41-ced-pair-diagnostic"
+            );
+        }
+        Ok(())
+    }
+}
+
 fn diagnostic_operation_bound(rows: usize, layers: usize) -> usize {
     let chunks = rows.div_ceil(qwen_llm::deepseek_v41::forward::PREFILL_CHUNK_ROWS);
     chunks + layers * (2 * chunks + 1) + 4
@@ -93,6 +122,7 @@ fn validation_or_injection_setting(name: &str) -> bool {
 pub(crate) struct Measurement {
     production_timing: bool,
     diagnostic: bool,
+    schedule: PairSchedule,
     environment: BTreeMap<String, Option<String>>,
 }
 
@@ -127,17 +157,42 @@ impl Measurement {
         Self {
             production_timing,
             diagnostic,
+            schedule: PairSchedule::Interleaved,
             environment,
         }
     }
 
     pub(crate) fn protocol(&self) -> &'static str {
+        match (self.schedule, self.production_timing) {
+            (PairSchedule::FullBlocksFirst, false) => return "native_full_ced_full_blocks_first_v1",
+            (PairSchedule::FullBlocksFirst, true) => {
+                return "native_full_ced_full_blocks_first_production_timing_v1";
+            }
+            (PairSchedule::CedBlocksFirst, false) => return "native_full_ced_ced_blocks_first_v1",
+            (PairSchedule::CedBlocksFirst, true) => {
+                return "native_full_ced_ced_blocks_first_production_timing_v1";
+            }
+            _ => (),
+        }
         match (self.production_timing, self.diagnostic) {
             (false, false) => "native_full_ced_abba_baab_v2",
             (false, true) => "instrumented_full_ced_abba_baab_diagnostic_v2",
             (true, false) => "native_full_ced_abba_baab_production_timing_v2",
             (true, true) => "instrumented_full_ced_abba_baab_production_timing_diagnostic_v2",
         }
+    }
+
+    pub(crate) fn with_schedule(mut self, schedule: PairSchedule) -> Self {
+        self.schedule = schedule;
+        self
+    }
+
+    pub(crate) fn validate_schedule(&self, schedule: PairSchedule, runs: usize) -> Result<()> {
+        ensure!(
+            self.schedule == schedule,
+            "paired launch schedule differs from request"
+        );
+        self.schedule.validate(runs, self.diagnostic)
     }
 
     fn regime(&self) -> &'static str {
@@ -149,7 +204,7 @@ impl Measurement {
     }
 
     fn description(&self) -> serde_json::Value {
-        serde_json::json!({
+        let mut description = serde_json::json!({
             "protocol": self.protocol(),
             "regime": self.regime(),
             "production_timing_requested": self.production_timing,
@@ -160,7 +215,13 @@ impl Measurement {
             "environment_value_encoding": "os_values_lossy_utf8",
             "disallowed_runtime_values": "presence_only_not_recorded",
             "environment": self.environment,
-        })
+        });
+        if self.schedule != PairSchedule::Interleaved {
+            description["schema"] = "v41-ced-pair-blocked-v1".into();
+            description["schedule"] = serde_json::json!(self.schedule);
+            description["schedule_contract"] = "one policy warmup + two excluded pilots + all retained main calls, then the other policy; fresh cold state per call".into();
+        }
+        description
     }
 
     pub(crate) fn validate_environment(&self) -> Result<()> {
@@ -392,7 +453,7 @@ enum Phase {
     Main,
 }
 
-#[derive(Clone, Copy, Debug, serde::Serialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize)]
 struct Case {
     /// Zero-based native chronological index, including excluded calls.
     case_index: usize,
@@ -404,11 +465,8 @@ struct Case {
     retained: bool,
 }
 
-fn schedule(runs: usize) -> Result<Vec<Case>> {
-    ensure!(
-        (2..=16).contains(&runs) && runs % 2 == 0,
-        "paired runs must be even, 2..=16 per policy"
-    );
+fn schedule(mode: PairSchedule, runs: usize) -> Result<Vec<Case>> {
+    mode.validate(runs, false)?;
     let mut cases = Vec::with_capacity(6 + 2 * runs);
     let mut block = |phase, block, order: &'static str, policies: &[Policy]| {
         for (slot, &policy) in policies.iter().enumerate() {
@@ -424,6 +482,30 @@ fn schedule(runs: usize) -> Result<Vec<Case>> {
         }
     };
     use Policy::{A, B};
+    if mode != PairSchedule::Interleaved {
+        let order = if mode == PairSchedule::FullBlocksFirst {
+            [A, B]
+        } else {
+            [B, A]
+        };
+        for (index, policy) in order.into_iter().enumerate() {
+            let label = if policy == A { "A" } else { "B" };
+            block(Phase::Warmup, index, label, &[policy]);
+            block(
+                Phase::Pilot,
+                index,
+                if policy == A { "AA" } else { "BB" },
+                &[policy; 2],
+            );
+            let main_order = if policy == A {
+                "AAAAAAAAAAAAAAAA"
+            } else {
+                "BBBBBBBBBBBBBBBB"
+            };
+            block(Phase::Main, index, &main_order[..runs], &vec![policy; runs]);
+        }
+        return Ok(cases);
+    }
     block(Phase::Warmup, 0, "AB", &[A, B]);
     block(Phase::Pilot, 0, "ABBA", &[A, B, B, A]);
     for index in 0..runs / 2 {
@@ -462,11 +544,12 @@ fn dispersion(samples: &[f64]) -> Result<NativeDispersion> {
 }
 
 fn drive<T>(
+    mode: PairSchedule,
     runs: usize,
     mut checkpoint: impl FnMut() -> Result<()>,
     mut execute: impl FnMut(Case) -> Result<(f64, T)>,
 ) -> Result<Vec<(Case, T)>> {
-    let cases = schedule(runs)?;
+    let cases = schedule(mode, runs)?;
     let mut evidence = Vec::with_capacity(cases.len());
     for case in cases {
         // The previous callback has dropped state and drained its autorelease pool.
@@ -871,6 +954,7 @@ pub(crate) fn run(
     measurement: &Measurement,
 ) -> Result<Vec<BenchRow>> {
     let diagnostic = measurement.diagnostic;
+    measurement.schedule.validate(runs, diagnostic)?;
     if diagnostic {
         ensure!(
             plan.caller_cpu_bytes == caller_cpu_bytes(true),
@@ -878,6 +962,7 @@ pub(crate) fn run(
         );
     }
     let evidence = collect_assessed(
+        measurement.schedule,
         runs,
         shutdown::checkpoint,
         || {
@@ -908,12 +993,13 @@ pub(crate) fn run(
 }
 
 fn collect_assessed(
+    mode: PairSchedule,
     runs: usize,
     checkpoint: impl FnMut() -> Result<()>,
     mut assess_runtime: impl FnMut() -> Result<()>,
     mut execute: impl FnMut(Case) -> Result<NativeCase>,
 ) -> Result<Vec<(Case, NativeCase)>> {
-    collect(runs, checkpoint, |case| {
+    collect(mode, runs, checkpoint, |case| {
         // The prior native case has released state/logits/commands and its pool.
         // Do not put this in checkpoint: drive also checkpoints after all cases.
         assess_runtime()?;
@@ -922,19 +1008,20 @@ fn collect_assessed(
 }
 
 fn collect(
+    mode: PairSchedule,
     runs: usize,
     checkpoint: impl FnMut() -> Result<()>,
     mut execute: impl FnMut(Case) -> Result<NativeCase>,
 ) -> Result<Vec<(Case, NativeCase)>> {
-    let mut warm_full = None;
-    drive(runs, checkpoint, |case| {
+    let mut first_warmup = None;
+    drive(mode, runs, checkpoint, |case| {
         let sample = execute(case)?;
         if case.case_index == 0 {
-            warm_full = Some(sample.logits_sha256_f32le.clone());
+            first_warmup = Some(sample.logits_sha256_f32le.clone());
         }
         ensure!(
-            warm_full.as_ref() == Some(&sample.logits_sha256_f32le),
-            "paired case {} endpoint head differs bitwise from warm Full; not quality qualification",
+            first_warmup.as_ref() == Some(&sample.logits_sha256_f32le),
+            "paired case {} endpoint head differs bitwise from first warmup (all must match warm Full); not quality qualification",
             case.case_index
         );
         if sample.instrumented {
@@ -959,6 +1046,15 @@ fn aggregate(
     measurement: &Measurement,
     evidence: &[(Case, NativeCase)],
 ) -> Result<Vec<BenchRow>> {
+    let expected = schedule(measurement.schedule, runs)?;
+    ensure!(
+        evidence.len() == expected.len()
+            && evidence
+                .iter()
+                .zip(&expected)
+                .all(|((case, _), expected)| case == expected),
+        "paired evidence has incomplete or incorrect schedule chronology"
+    );
     let instrumented = evidence
         .first()
         .is_some_and(|(_, sample)| sample.instrumented);
@@ -974,14 +1070,15 @@ fn aggregate(
     );
     let chronology: Vec<_> = evidence
         .iter()
-        .map(|(case, sample)| {
+        .enumerate()
+        .map(|(index, (case, sample))| {
             let mut entry = serde_json::json!({
                 "case": case,
                 "requested_execution": case.policy.execution(),
                 "sample_ns": sample.sample_ns,
                 "pilot_status": match case.phase {
                     Phase::Warmup => "pending",
-                    Phase::Pilot if case.order_in_block < 3 => "collecting",
+                    Phase::Pilot if evidence.get(index + 1).is_some_and(|(next, _)| next.phase == Phase::Pilot && next.block == case.block) => "collecting",
                     _ => "completed",
                 },
                 "prefill_mode": sample.semantics.prefill_mode,
@@ -1062,6 +1159,11 @@ fn aggregate(
             "host_validity": "external_continuous_monitor_required",
             "metal_debug_layer": measurement.environment.get("MTL_DEBUG_LAYER").and_then(|v| v.as_deref()),
         });
+        if measurement.schedule != PairSchedule::Interleaved {
+            let paired = &mut diagnostics["deepseek_v41"]["paired_benchmark"];
+            paired["schema"] = "v41-ced-pair-blocked-v1".into();
+            paired["schedule"] = serde_json::json!(measurement.schedule);
+        }
         if instrumented {
             diagnostics["instrumented"] = true.into();
             diagnostics["performance_evidence"] = false.into();
@@ -1350,8 +1452,14 @@ mod tests {
                     Ok((vec![0.; 257], report(execution)))
                 },
             );
-            let sample =
-                native_case(&mut bench, &row_context(), 3, 1, schedule(2).unwrap()[0]).unwrap();
+            let sample = native_case(
+                &mut bench,
+                &row_context(),
+                3,
+                1,
+                schedule(PairSchedule::Interleaved, 2).unwrap()[0],
+            )
+            .unwrap();
             assert!(!sample.instrumented);
             drop(profile::Scope::begin().expect("native case leaves no profiling scope"));
         }
@@ -1365,7 +1473,7 @@ mod tests {
             stream_diagnostic(
                 &mut bytes,
                 &measurement,
-                schedule(2).unwrap()[0],
+                schedule(PairSchedule::Interleaved, 2).unwrap()[0],
                 "fixture",
                 &(),
             )
@@ -1714,6 +1822,7 @@ mod tests {
                         after: false,
                     };
                     collect_assessed(
+                        PairSchedule::Interleaved,
                         2,
                         || {
                             checkpoints.set(checkpoints.get() + 1);
@@ -1964,7 +2073,7 @@ mod tests {
                     Ok((vec![0.; 257], report(execution)))
                 },
             );
-            let case = schedule(2).unwrap()[0];
+            let case = schedule(PairSchedule::Interleaved, 2).unwrap()[0];
             let mut bytes = Vec::new();
             let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                 diagnostic_case_with(
@@ -2141,6 +2250,7 @@ mod tests {
         let mut streamed = Vec::new();
         let mut calls = Vec::new();
         let evidence = collect(
+            PairSchedule::Interleaved,
             2,
             || Ok(()),
             |case| {
@@ -2223,6 +2333,7 @@ mod tests {
                 |_, _, execution| Ok((vec![0.; 257], report(execution))),
             );
             let evidence = collect(
+                PairSchedule::Interleaved,
                 2,
                 || Ok(()),
                 |case| {
@@ -2346,6 +2457,7 @@ mod tests {
         let calls = Cell::new(0);
         assert!(
             drive(
+                PairSchedule::Interleaved,
                 2,
                 || Ok(()),
                 |case| {
@@ -2375,6 +2487,7 @@ mod tests {
         calls.set(0);
         assert!(
             drive(
+                PairSchedule::Interleaved,
                 2,
                 || Ok(()),
                 |case| {
@@ -2437,7 +2550,7 @@ mod tests {
         let live_operations =
             report.operations.capacity() * std::mem::size_of::<profile::Operation>();
         drop(report);
-        let cases = schedule(16).unwrap();
+        let cases = schedule(PairSchedule::Interleaved, 16).unwrap();
         assert_eq!(cases.len(), 38);
         struct MaximumDiagnosticProbe(Option<profile::Report>);
         impl DiagnosticProbe for MaximumDiagnosticProbe {
@@ -2649,6 +2762,7 @@ mod tests {
             },
         );
         let evidence = collect(
+            PairSchedule::Interleaved,
             RUNS,
             || Ok(()),
             |case| {
@@ -2752,10 +2866,321 @@ mod tests {
     }
 
     #[test]
+    fn blocked_schedules_bound_all_counts_phases_and_policy_transitions() {
+        for mode in [PairSchedule::FullBlocksFirst, PairSchedule::CedBlocksFirst] {
+            let policies = if mode == PairSchedule::FullBlocksFirst {
+                [Policy::A, Policy::B]
+            } else {
+                [Policy::B, Policy::A]
+            };
+            for runs in (4..=16).step_by(2) {
+                let cases = schedule(mode, runs).unwrap();
+                assert_eq!(cases.len(), 6 + 2 * runs);
+                assert!(cases.len() <= 38);
+                for (index, case) in cases.iter().enumerate() {
+                    assert_eq!(case.case_index, index);
+                    assert_eq!(case.retained, case.phase == Phase::Main);
+                }
+                for (block, &policy) in policies.iter().enumerate() {
+                    let stream = &cases[block * (runs + 3)..(block + 1) * (runs + 3)];
+                    assert!(
+                        stream
+                            .iter()
+                            .all(|c| c.policy == policy && c.block == block)
+                    );
+                    assert_eq!(stream[0].phase, Phase::Warmup);
+                    assert!(stream[1..3].iter().all(|c| c.phase == Phase::Pilot));
+                    assert!(stream[3..].iter().all(|c| c.phase == Phase::Main));
+                    assert_eq!(stream[1].order_in_block, 0);
+                    assert_eq!(stream[2].order_in_block, 1);
+                    assert_eq!(
+                        stream[3..]
+                            .iter()
+                            .map(|c| c.order_in_block)
+                            .collect::<Vec<_>>(),
+                        (0..runs).collect::<Vec<_>>()
+                    );
+                }
+                assert_eq!(
+                    cases
+                        .windows(2)
+                        .filter(|w| w[0].policy != w[1].policy)
+                        .count(),
+                    1
+                );
+            }
+            for runs in [0, 1, 2, 3, 5, 17, 18, usize::MAX] {
+                assert!(schedule(mode, runs).is_err());
+            }
+            assert!(mode.validate(4, true).is_err());
+        }
+    }
+
+    #[test]
+    fn blocked_native_calls_keep_cold_input_raw_chronology_and_retained_statistics() {
+        for mode in [PairSchedule::FullBlocksFirst, PairSchedule::CedBlocksFirst] {
+            for runs in [4, 16] {
+                let live = Rc::new(Cell::new(0));
+                let calls = RefCell::new(Vec::new());
+                let mut bench = v41_pair_test_bench(
+                    || {
+                        assert_eq!(live.replace(1), 0);
+                        Ok(ColdState {
+                            live: live.clone(),
+                            rows: 0,
+                        })
+                    },
+                    |state, ids, execution| {
+                        assert_eq!(state.rows, 0);
+                        state.rows += ids.len();
+                        calls.borrow_mut().push((ids.to_vec(), execution));
+                        Ok((vec![0.; 257], report(execution)))
+                    },
+                );
+                let checkpoints = Cell::new(0);
+                let assessments = Cell::new(0);
+                let evidence = collect_assessed(
+                    mode,
+                    runs,
+                    || {
+                        assert_eq!(live.get(), 0);
+                        checkpoints.set(checkpoints.get() + 1);
+                        Ok(())
+                    },
+                    || {
+                        assert_eq!(live.get(), 0);
+                        assessments.set(assessments.get() + 1);
+                        Ok(())
+                    },
+                    |case| {
+                        let mut sample = native_case_with(
+                            &mut bench,
+                            &row_context(),
+                            3,
+                            42,
+                            case,
+                            |body| body(),
+                            fingerprint_logits,
+                        )?;
+                        assert_eq!(live.get(), 0);
+                        drop(
+                            profile::Scope::begin()
+                                .expect("blocked native case leaves no profiling scope"),
+                        );
+                        sample.sample_ns = (case.case_index as u64 + 1) * 1000;
+                        Ok(sample)
+                    },
+                )
+                .unwrap();
+                assert_eq!(checkpoints.get(), evidence.len() + 1);
+                assert_eq!(assessments.get(), evidence.len());
+                let calls = calls.borrow();
+                assert_eq!(calls.len(), evidence.len());
+                assert!(calls.iter().all(|(ids, _)| ids == &calls[0].0));
+                let measurement = measurement_fixture(true, false).with_schedule(mode);
+                let rows = aggregate(
+                    &row_context(),
+                    3,
+                    runs,
+                    42,
+                    257,
+                    &serde_json::json!({}),
+                    &measurement,
+                    &evidence,
+                )
+                .unwrap();
+                for (row, policy) in rows.iter().zip([Policy::A, Policy::B]) {
+                    let expected = evidence
+                        .iter()
+                        .filter(|(c, _)| c.retained && c.policy == policy)
+                        .map(|(_, s)| s.sample_ns)
+                        .collect::<Vec<_>>();
+                    assert_eq!(row.samples_ns, expected);
+                    assert_eq!(row.n_repetitions, runs);
+                    let paired =
+                        &row.diagnostics.as_ref().unwrap()["deepseek_v41"]["paired_benchmark"];
+                    assert_eq!(paired["schema"], "v41-ced-pair-blocked-v1");
+                    assert_eq!(paired["schedule"], serde_json::json!(mode));
+                    let raw = paired["native_chronological_cases"].as_array().unwrap();
+                    assert_eq!(raw.len(), evidence.len());
+                    for (entry, (case, sample)) in raw.iter().zip(&evidence) {
+                        assert_eq!(entry["case"], serde_json::to_value(case).unwrap());
+                        assert_eq!(entry["sample_ns"], sample.sample_ns);
+                        assert_eq!(entry["endpoint_bitwise_matches_warm_full"], true);
+                        if case.phase == Phase::Pilot && case.order_in_block == 1 {
+                            assert_eq!(entry["pilot_status"], "completed");
+                        }
+                    }
+                }
+                assert!(
+                    aggregate(
+                        &row_context(),
+                        3,
+                        runs,
+                        42,
+                        257,
+                        &serde_json::json!({}),
+                        &measurement,
+                        &evidence[..evidence.len() - 1]
+                    )
+                    .is_err()
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn blocked_invalid_calls_stop_without_retry_or_later_policy_execution() {
+        for mode in [PairSchedule::FullBlocksFirst, PairSchedule::CedBlocksFirst] {
+            for stop in 0..14 {
+                let calls = Cell::new(0);
+                let result = drive(
+                    mode,
+                    4,
+                    || Ok(()),
+                    |case| {
+                        calls.set(calls.get() + 1);
+                        ensure!(case.case_index != stop, "injected execution failure");
+                        Ok((1., ()))
+                    },
+                );
+                assert!(result.is_err());
+                assert_eq!(calls.get(), stop + 1);
+            }
+            for invalid in [0., -1., f64::NAN, f64::INFINITY] {
+                for bad in [1, 2, 3, 6, 8, 9, 10, 13] {
+                    let calls = Cell::new(0);
+                    assert!(
+                        drive(
+                            mode,
+                            4,
+                            || Ok(()),
+                            |case| {
+                                calls.set(calls.get() + 1);
+                                Ok((if case.case_index == bad { invalid } else { 1. }, ()))
+                            }
+                        )
+                        .is_err()
+                    );
+                    assert_eq!(calls.get(), bad + 1);
+                }
+            }
+            let calls = Cell::new(0);
+            assert!(
+                drive(
+                    mode,
+                    2,
+                    || Ok(()),
+                    |_| {
+                        calls.set(1);
+                        Ok((1., ()))
+                    }
+                )
+                .is_err()
+            );
+            assert_eq!(calls.get(), 0);
+        }
+    }
+
+    #[test]
+    fn blocked_launch_identity_and_invalid_arguments_precede_model_open() {
+        use clap::Parser;
+        for (text, mode) in [
+            ("full-blocks-first", PairSchedule::FullBlocksFirst),
+            ("ced-blocks-first", PairSchedule::CedBlocksFirst),
+        ] {
+            let argv = [
+                "qwen-bench",
+                "suite",
+                "-m",
+                "/nonexistent/blocked-fixture.gguf",
+                "--pp",
+                "128",
+                "--runs",
+                "4",
+                "--v41-ced-pair",
+                "--v41-ced-pair-schedule",
+                text,
+            ];
+            let args = Args::try_parse_from(argv).unwrap();
+            let mut startup = Vec::new();
+            let measurement = crate::emit_pair_request(
+                &args,
+                |_, _| measurement_fixture(false, false),
+                &mut startup,
+            )
+            .unwrap()
+            .unwrap();
+            let event: serde_json::Value = serde_json::from_slice(&startup).unwrap();
+            assert_eq!(
+                event["status"],
+                "environment_check_pending_no_device_created"
+            );
+            assert_eq!(event["measurement"]["schedule"], text);
+            assert_eq!(event["measurement"]["schema"], "v41-ced-pair-blocked-v1");
+            assert!(
+                measurement
+                    .protocol()
+                    .contains(text.replace('-', "_").as_str())
+            );
+            measurement.validate_schedule(mode, 4).unwrap();
+            for (runs, diagnostic, pp, chunk, depth) in [
+                (2, false, vec![128], None, vec![0]),
+                (4, true, vec![128], None, vec![0]),
+                (4, false, vec![8193], None, vec![0]),
+                (4, false, vec![128], Some(128), vec![0]),
+                (4, false, vec![128], None, vec![1]),
+            ] {
+                let Cmd::Suite(mut suite) = Args::try_parse_from(argv).unwrap().cmd else {
+                    unreachable!()
+                };
+                suite.runs = runs;
+                suite.v41_ced_pair_diagnostic = diagnostic;
+                suite.pp = pp;
+                suite.prefill_chunk = chunk;
+                suite.depth = depth;
+                let launch = measurement_fixture(false, diagnostic).with_schedule(mode);
+                let error =
+                    crate::suite::run_suite_with_measurement(suite, Some(launch)).unwrap_err();
+                assert!(
+                    !format!("{error:#}").contains("open /nonexistent"),
+                    "{error:#}"
+                );
+            }
+            let no_pair = [
+                "qwen-bench",
+                "suite",
+                "-m",
+                "fixture.gguf",
+                "--v41-ced-pair-schedule",
+                text,
+            ];
+            assert!(Args::try_parse_from(no_pair).is_err());
+        }
+        for value in ["", "full", "auto", "FullBlocksFirst", "ced-blocks-first "] {
+            assert!(
+                Args::try_parse_from([
+                    "qwen-bench",
+                    "suite",
+                    "-m",
+                    "fixture.gguf",
+                    "--v41-ced-pair",
+                    "--v41-ced-pair-schedule",
+                    value
+                ])
+                .is_err()
+            );
+        }
+        let default = measurement_fixture(false, false);
+        assert_eq!(default.protocol(), "native_full_ced_abba_baab_v2");
+        assert!(default.description().get("schedule").is_none());
+    }
+
+    #[test]
     fn bounded_schedule_is_two_policies_with_both_warm_before_pilot() {
         use Policy::{A, B};
         for runs in (2..=16).step_by(2) {
-            let cases = schedule(runs).unwrap();
+            let cases = schedule(PairSchedule::Interleaved, runs).unwrap();
             assert_eq!(cases.len(), 6 + 2 * runs);
             assert_eq!(
                 cases.iter().take(6).map(|c| c.policy).collect::<Vec<_>>(),
@@ -2793,7 +3218,7 @@ mod tests {
             assert!(cases.iter().enumerate().all(|(i, c)| c.case_index == i));
         }
         for runs in [0, 1, 3, 17, usize::MAX] {
-            assert!(schedule(runs).is_err());
+            assert!(schedule(PairSchedule::Interleaved, runs).is_err());
         }
     }
 
@@ -2817,6 +3242,7 @@ mod tests {
             assert!(dispersion(&values).is_err(), "{values:?}");
         }
         let evidence = drive(
+            PairSchedule::Interleaved,
             2,
             || Ok(()),
             |case| Ok((if case.policy == Policy::A { 100. } else { 10. }, ())),
@@ -2834,6 +3260,7 @@ mod tests {
         for varied_index in 2..14 {
             let calls = Cell::new(0);
             let result = drive(
+                PairSchedule::Interleaved,
                 4,
                 || Ok(()),
                 |case| {
@@ -2856,6 +3283,7 @@ mod tests {
                 let calls = Cell::new(0);
                 assert!(
                     drive(
+                        PairSchedule::Interleaved,
                         4,
                         || Ok(()),
                         |case| {
@@ -2883,6 +3311,7 @@ mod tests {
             let checkpoints = Cell::new(0);
             let calls = Cell::new(0);
             let result = drive(
+                PairSchedule::Interleaved,
                 2,
                 || {
                     let index = checkpoints.get();
@@ -2902,6 +3331,7 @@ mod tests {
             let calls = Cell::new(0);
             assert!(
                 drive(
+                    PairSchedule::Interleaved,
                     2,
                     || Ok(()),
                     |case| {
@@ -2941,7 +3371,13 @@ mod tests {
             |_, _, _| panic!("native case unwind fixture"),
         );
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            native_case(&mut bench, &row_context(), 3, 1, schedule(2).unwrap()[0])
+            native_case(
+                &mut bench,
+                &row_context(),
+                3,
+                1,
+                schedule(PairSchedule::Interleaved, 2).unwrap()[0],
+            )
         }));
         assert!(result.is_err());
         assert_eq!(live.get(), 0);
@@ -2977,6 +3413,7 @@ mod tests {
         );
         let ctx = row_context();
         let evidence = collect(
+            PairSchedule::Interleaved,
             2,
             || {
                 assert_eq!(live.get(), 0);
@@ -3006,7 +3443,7 @@ mod tests {
         assert!(calls.iter().all(|(ids, _)| *ids == calls[0].0));
         assert_eq!(
             calls.iter().map(|(_, e)| *e).collect::<Vec<_>>(),
-            schedule(2)
+            schedule(PairSchedule::Interleaved, 2)
                 .unwrap()
                 .iter()
                 .map(|c| c.policy.execution())
@@ -3092,8 +3529,103 @@ mod tests {
 
     #[test]
     fn fallback_errors_and_bad_heads_release_state_and_halt_the_protocol() {
-        for stop in 0..10 {
-            for fault in ["fallback", "wrong_policy", "error", "nonfinite", "bits"] {
+        for mode in [
+            PairSchedule::Interleaved,
+            PairSchedule::FullBlocksFirst,
+            PairSchedule::CedBlocksFirst,
+        ] {
+            let runs = if mode == PairSchedule::Interleaved {
+                2
+            } else {
+                4
+            };
+            for stop in 0..schedule(mode, runs).unwrap().len() {
+                for fault in ["fallback", "wrong_policy", "error", "nonfinite", "bits"] {
+                    let live = Rc::new(Cell::new(0));
+                    let calls = Cell::new(0);
+                    let mut bench = v41_pair_test_bench(
+                        || {
+                            assert_eq!(live.get(), 0);
+                            live.set(1);
+                            Ok(ColdState {
+                                live: live.clone(),
+                                rows: 0,
+                            })
+                        },
+                        |_, _, execution| {
+                            let current = calls.get();
+                            calls.set(current + 1);
+                            let mut actual = report(execution);
+                            let mut logits = vec![0.; 257];
+                            if current == stop {
+                                match fault {
+                                    "fallback" => {
+                                        actual.fallback = Some("fixture CED refusal".into())
+                                    }
+                                    "wrong_policy" => {
+                                        actual.execution =
+                                            if execution == PrefillExecution::FullForward {
+                                                PrefillExecution::ShrinkingCed
+                                            } else {
+                                                PrefillExecution::FullForward
+                                            }
+                                    }
+                                    "error" => anyhow::bail!("fixture native failure"),
+                                    "nonfinite" => logits[256] = f32::NAN,
+                                    "bits" => logits[256] = -0.,
+                                    _ => unreachable!(),
+                                }
+                            }
+                            Ok((logits, actual))
+                        },
+                    );
+                    let ctx = row_context();
+                    let result = collect(
+                        mode,
+                        runs,
+                        || {
+                            assert_eq!(live.get(), 0);
+                            Ok(())
+                        },
+                        |case| {
+                            let mut sample = native_case(&mut bench, &ctx, 3, 42, case)?;
+                            sample.sample_ns = 100;
+                            Ok(sample)
+                        },
+                    );
+                    assert!(result.is_err(), "stop={stop}, fault={fault}");
+                    // A bad first warmup establishes the baseline; the next call rejects it.
+                    let expected = if stop == 0 && fault == "bits" {
+                        2
+                    } else {
+                        stop + 1
+                    };
+                    assert_eq!(calls.get(), expected, "stop={stop}, fault={fault}");
+                    assert_eq!(live.get(), 0);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn malformed_ced_work_or_memory_stops_before_later_cases() {
+        for mode in [
+            PairSchedule::Interleaved,
+            PairSchedule::FullBlocksFirst,
+            PairSchedule::CedBlocksFirst,
+        ] {
+            let runs = if mode == PairSchedule::Interleaved {
+                2
+            } else {
+                4
+            };
+            for fault in [
+                "counters",
+                "incomplete",
+                "memory",
+                "observation",
+                "over_bound",
+            ] {
                 let live = Rc::new(Cell::new(0));
                 let calls = Cell::new(0);
                 let mut bench = v41_pair_test_bench(
@@ -3106,110 +3638,50 @@ mod tests {
                         })
                     },
                     |_, _, execution| {
-                        let current = calls.get();
-                        calls.set(current + 1);
+                        calls.set(calls.get() + 1);
                         let mut actual = report(execution);
-                        let mut logits = vec![0.; 257];
-                        if current == stop {
+                        if execution == PrefillExecution::ShrinkingCed {
                             match fault {
-                                "fallback" => actual.fallback = Some("fixture CED refusal".into()),
-                                "wrong_policy" => {
-                                    actual.execution = if execution == PrefillExecution::FullForward
-                                    {
-                                        PrefillExecution::ShrinkingCed
-                                    } else {
-                                        PrefillExecution::FullForward
-                                    }
+                                "counters" => actual.counters = None,
+                                "incomplete" => {
+                                    actual.counters.as_mut().unwrap().completed_commands = 1
                                 }
-                                "error" => anyhow::bail!("fixture native failure"),
-                                "nonfinite" => logits[256] = f32::NAN,
-                                "bits" => logits[256] = -0.,
+                                "memory" => actual.memory = None,
+                                "observation" => actual.observed_incremental_metal_bytes = None,
+                                "over_bound" => actual.observed_incremental_metal_bytes = Some(124),
                                 _ => unreachable!(),
                             }
                         }
-                        Ok((logits, actual))
+                        Ok((vec![0.; 257], actual))
                     },
                 );
                 let ctx = row_context();
-                let result = collect(
-                    2,
-                    || {
-                        assert_eq!(live.get(), 0);
-                        Ok(())
-                    },
-                    |case| {
-                        let mut sample = native_case(&mut bench, &ctx, 3, 42, case)?;
-                        sample.sample_ns = 100;
-                        Ok(sample)
-                    },
+                assert!(
+                    collect(
+                        mode,
+                        runs,
+                        || Ok(()),
+                        |case| {
+                            let mut sample = native_case(&mut bench, &ctx, 3, 42, case)?;
+                            sample.sample_ns = 100;
+                            Ok(sample)
+                        }
+                    )
+                    .is_err(),
+                    "fault={fault}"
                 );
-                assert!(result.is_err(), "stop={stop}, fault={fault}");
-                // A bad first warm Full establishes the bitwise baseline; warm CED rejects it.
-                let expected = if stop == 0 && fault == "bits" {
-                    2
-                } else {
-                    stop + 1
-                };
-                assert_eq!(calls.get(), expected, "stop={stop}, fault={fault}");
+                assert_eq!(
+                    calls.get(),
+                    schedule(mode, runs)
+                        .unwrap()
+                        .iter()
+                        .position(|c| c.policy == Policy::B)
+                        .unwrap()
+                        + 1,
+                    "fault={fault}"
+                );
                 assert_eq!(live.get(), 0);
             }
-        }
-    }
-
-    #[test]
-    fn malformed_ced_work_or_memory_stops_before_later_cases() {
-        for fault in [
-            "counters",
-            "incomplete",
-            "memory",
-            "observation",
-            "over_bound",
-        ] {
-            let live = Rc::new(Cell::new(0));
-            let calls = Cell::new(0);
-            let mut bench = v41_pair_test_bench(
-                || {
-                    assert_eq!(live.get(), 0);
-                    live.set(1);
-                    Ok(ColdState {
-                        live: live.clone(),
-                        rows: 0,
-                    })
-                },
-                |_, _, execution| {
-                    calls.set(calls.get() + 1);
-                    let mut actual = report(execution);
-                    if execution == PrefillExecution::ShrinkingCed {
-                        match fault {
-                            "counters" => actual.counters = None,
-                            "incomplete" => {
-                                actual.counters.as_mut().unwrap().completed_commands = 1
-                            }
-                            "memory" => actual.memory = None,
-                            "observation" => actual.observed_incremental_metal_bytes = None,
-                            "over_bound" => actual.observed_incremental_metal_bytes = Some(124),
-                            _ => unreachable!(),
-                        }
-                    }
-                    Ok((vec![0.; 257], actual))
-                },
-            );
-            let ctx = row_context();
-            assert!(
-                collect(
-                    2,
-                    || Ok(()),
-                    |case| {
-                        let mut sample = native_case(&mut bench, &ctx, 3, 42, case)?;
-                        sample.sample_ns = 100;
-                        Ok(sample)
-                    }
-                )
-                .is_err(),
-                "fault={fault}"
-            );
-            assert_eq!(calls.get(), 2, "fault={fault}");
-            assert_eq!(live.get(), 0);
         }
     }
 

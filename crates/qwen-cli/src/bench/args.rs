@@ -500,6 +500,12 @@ pub(crate) struct SuiteArgs {
     /// --v41-ced-pair-diagnostic for attribution, never performance evidence.
     #[arg(long, requires = "v41_ced_pair")]
     pub(crate) v41_ced_pair_production_timing: bool,
+    /// Explicit paired chronology. Interleaved preserves the v2 ABBA/BAAB
+    /// protocol. Blocked modes run one policy's warmup, two excluded pilots,
+    /// then all retained calls before the other policy (distinct v1 protocol).
+    /// Blocked modes require even --runs 4..=16 and refuse diagnostic profiling.
+    #[arg(long, value_enum, requires = "v41_ced_pair")]
+    pub(crate) v41_ced_pair_schedule: Option<crate::v41_ced_pair::PairSchedule>,
     /// Prompt-only prefill shapes. Accepts repeated flags or comma lists.
     #[arg(long = "pp", value_delimiter = ',')]
     pub(crate) pp: Vec<usize>,

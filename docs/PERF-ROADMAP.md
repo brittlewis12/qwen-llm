@@ -28,6 +28,37 @@ before building anything adjacent. This replaces relaying between sessions.
 
 ### DeepSeek V4.1-Flash (main after the 4096-row chunk and 64-slot gate/up: pp2048 Q2 877.3 / IQ3 852 (not re-measured), pp4096 Q2 890.2 / IQ3 896.8; decode rechecked tg32 Q2 43.2 / IQ3 41.0, depth tg32@d2048 41.6 from the prior landing)
 
+Current implementation campaign (2026-10-25): close the trust-boundary defects
+before promoting the experimental CED composition. Independent owned lanes:
+
+- Tensor staging ownership: in flight (`fix/v41-staging-ownership-v33`). Separate
+  clamped source reads from unique physical staging destinations in narrow and
+  wide weight tails; prove coverage/unique ownership and run actual M5 witnesses.
+- Executable family contracts: in flight (`fix/v41-execution-contract-v33`).
+  Distinguish descriptive planning from backend eligibility, validate activation
+  aliases, and preserve general output-group fallback instead of a shape allowlist.
+- Request planning/lifecycle: in flight (`fix/v41-request-planning-v33`). Release
+  obsolete live state before avoidable admission refusal, report actual selected
+  geometry, and choose admitted chunk candidates before mutation. Keep Metal/CPU
+  accounting domains and pending debt intact; do not shrink context or retry a
+  poisoned state. Resolve live/snapshot preference explicitly rather than assuming
+  longest prefix always minimizes request latency.
+- Current acceptance: in flight (`fix/v41-acceptance-current-v33`). Repair the
+  stale suffix dispatch witness, generated environment reference, intentional
+  test identities/ignore accounting, and expose genuine execution boundaries.
+
+The parent integration lane will compose reviewed changes onto current main,
+then qualify retained-window mapping and explicit cold exact CED without losing
+GSQ/IQ1 or newer chunk support. P4 remains frozen historical evidence; its old
+Full/CED equality is not a race-freedom or independent model-numerics proof.
+Serving/CED-origin reuse has a separate acceptance boundary from cold run/bench.
+Long-context selector work removal and complete short-packet expert dataflow
+remain independent structural bets, not another adaptive-tail width sweep.
+Before automatic policy selection, measure homogeneous request streams as well
+as mixed transitions: the retained P4 8K same-policy Full calls are 9.566/9.605 s
+and same-policy CED calls 8.681/8.513 s. Two observations per transition do not
+establish a replacement speedup estimate, but make predecessor effects material.
+
 GSQ-RCO release bring-up: loader bridge and IQ1 expert wiring landed
 (`0079569a`, `d1ad718c`), pinned HF revision
 `cb02422c900df489cea5833e8a92171224059b3c`.

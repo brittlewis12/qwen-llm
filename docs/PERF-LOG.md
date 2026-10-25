@@ -6,6 +6,23 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the current state and evidence index.
 
+## 2026-10-25 - Execution Capability And Trust-Boundary Campaign Starts
+
+- Split independent source repairs across staging ownership, executable family
+  contracts, request lifecycle/geometry and current acceptance. Owned branch
+  assignments live in the roadmap; frozen P0/P4 sources and unrelated work stay
+  unchanged. These are implementation claims, not completed qualification.
+- Integrate reviewed repairs before a new current-main CED composition. Preserve
+  GSQ/IQ1, metadata-derived shapes, memory domains and transactional completion;
+  no automatic CED policy or inherited P4 performance claim is installed.
+- Offline predecessor classification finds retained same-policy P4 8K Full
+  9.566/9.605 s and CED 8.681/8.513 s. Those two observations per transition
+  are not a new steady-state estimate. Add homogeneous streams and mixed
+  transitions before deriving an automatic crossover from pooled ABBA medians.
+- Exact selector-domain removal and complete short-packet dataflow remain
+  separate measured lanes. Keep independent numerical acceptance, cold runtime
+  integration and warm-serving reuse as distinct deliverables.
+
 ## 2026-10-25 - Retained-Window P4 Repeats A Native 8K CED Win
 
 - Unchanged frozen sources `b7038406`/`7398cb76` pass actual 8K Full/CED:

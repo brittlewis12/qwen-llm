@@ -1,7 +1,7 @@
 use super::*;
 
-// Local experiment selection; metadata and loading enter through for_plan.
-const SOFT_COALESCING_TARGET: Option<usize> = None;
+// Shared selection for metadata and loading; the generic Metal wrapper stays None.
+pub(super) const SOFT_COALESCING_TARGET: Option<usize> = None;
 
 /// Mapping ownership selected by the same geometry used during load.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -185,7 +185,9 @@ pub struct ResidentStorageAudit {
 }
 
 /// Fixed None/4 GiB comparison, not a runtime selection or admission API.
-/// Like resident_storage_plan, this reads no payloads and creates no mappings.
+/// Like resident_storage_plan, this may read bounded CPU control payloads and
+/// open a declared companion's headers, but never reads weight/table payloads
+/// or imports Metal mappings.
 pub fn resident_storage_audit(
     g: &GgufFile,
     page_size: usize,

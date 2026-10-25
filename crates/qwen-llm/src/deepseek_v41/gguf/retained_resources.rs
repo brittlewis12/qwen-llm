@@ -25,8 +25,8 @@ pub(super) fn summarize(
     banks: &[PackedBank],
     dense: &BTreeMap<String, MetalTensor>,
 ) -> Result<RetainedWeightResourceSummary, LoadError> {
-    // Temporary O(bindings + windows) CPU inventory fits the existing 1024-byte
-    // per-descriptor / 4096-byte per-window preflight reserve. No buffer clones.
+    // CPU bookkeeping only: O(bindings + windows), covered by the caller's
+    // descriptor/window reserve rather than source-group accounting. No buffer clones.
     let mut identities = BTreeMap::new();
     let mut resources = Vec::<RetainedWeightResource>::new();
     let mut digest = Sha256::new();

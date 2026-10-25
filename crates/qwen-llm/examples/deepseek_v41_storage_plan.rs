@@ -1,6 +1,6 @@
 //! CPU pre-import audit. Opening GGUF retains shared shard mappings; planning
-//! reads bounded tensor-serialized controls, but no weight or table payloads.
-//! It creates no Metal context or GPU mapping.
+//! reads bounded tensor-serialized controls and may open companion headers,
+//! but reads no weight/table payloads and creates no Metal context or GPU mapping.
 use anyhow::{Context, bail};
 use qwen_llm::{
     deepseek_v41::gguf::{ResidentMappingKind, ResidentStoragePlan, resident_storage_audit},

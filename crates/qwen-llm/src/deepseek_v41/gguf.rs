@@ -360,6 +360,20 @@ fn validate_storage(t: &TensorDesc) -> Result<(), LoadError> {
     add(t.data_offset, bytes)?;
     Ok(())
 }
+fn prepared_load_plan(
+    g: &GgufFile,
+    page: usize,
+    max_buffer_length: usize,
+    soft_target: Option<usize>,
+) -> Result<(Plan, ResidentStoragePlan), LoadError> {
+    let p = plan(g)?;
+    p.validate_execution()?;
+    p.engram_context.revalidate(g)?;
+    let storage =
+        resident_storage::for_plan_with_target(g, &p, page, max_buffer_length, soft_target)?;
+    Ok((p, storage))
+}
+
 impl ResidentWeights {
     pub fn bank(&self, layer: usize, part: &str) -> Option<&MetalTensor> {
         self.banks
@@ -371,6 +385,14 @@ impl ResidentWeights {
         plan(g)
     }
     pub fn load(ctx: &MetalContext, g: Arc<GgufFile>) -> Result<Self, LoadError> {
+        Self::load_planned(ctx, g, resident_storage::SOFT_COALESCING_TARGET)
+    }
+
+    fn load_planned(
+        ctx: &MetalContext,
+        g: Arc<GgufFile>,
+        soft_target: Option<usize>,
+    ) -> Result<Self, LoadError> {
         let cold_cpu = controls::cold_bound(&g)?;
         if cold_cpu > 0
             && let Some(e) = metal::evaluate_metal_memory_admission_with_cpu_bytes(
@@ -384,21 +406,8 @@ impl ResidentWeights {
         {
             return Err(e.into());
         }
-        let p = plan(&g)?;
-        p.validate_execution()?;
-        p.engram_context.revalidate(&g)?;
         let page = metal::host_page_size_bytes()?;
-        let storage = resident_storage::for_plan(&g, &p, page, ctx.max_buffer_length())?;
-        Self::load_planned(ctx, g, p, storage)
-    }
-
-    fn load_planned(
-        ctx: &MetalContext,
-        g: Arc<GgufFile>,
-        p: Plan,
-        storage: ResidentStoragePlan,
-    ) -> Result<Self, LoadError> {
-        let page = storage.page_size;
+        let (p, storage) = prepared_load_plan(&g, page, ctx.max_buffer_length(), soft_target)?;
         let windows = &storage.windows;
         let requests: Vec<_> = g
             .tensors

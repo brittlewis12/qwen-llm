@@ -1,5 +1,7 @@
 use super::*;
-use resident_storage::{M5_MAX_BUFFER_LENGTH, PAGE};
+
+const PAGE: usize = 16_384;
+const M5_MAX_BUFFER_LENGTH: usize = 179_357_827_072;
 
 fn targeted(g: &GgufFile, target: Option<usize>) -> ResidentStoragePlan {
     super::super::resident_storage::for_plan_with_target(
@@ -101,7 +103,26 @@ fn soft_window_owner_subview_fixture_contract_is_nonzero_and_bounded() {
         assert_eq!(owner_view_expected(&g, bank), [2.5, 3.75, 5.0]);
         assert!(OWNER_VIEW_EXPECTED.iter().all(|&value| value != 0.0));
         assert!(g.shards[0].mmap_len() < 16 << 20);
-        assert!(targeted(&g, Some(PAGE)).metal_view_bytes < 16 << 20);
+        let storage = targeted(&g, Some(PAGE));
+        assert!(storage.metal_view_bytes < 16 << 20);
+        let bound: std::collections::BTreeSet<_> = g
+            .tensors
+            .iter()
+            .filter(|t| resident_tensor(t, 1))
+            .map(|t| first_containing(&storage, t))
+            .collect();
+        let lengths: Vec<_> = bound
+            .iter()
+            .map(|&i| storage.windows[i].window.length as u64)
+            .collect();
+        eprintln!(
+            "soft_window_fixture_prices width={width} raw_file_bytes={} planned_windows={} planned_metal_view_bytes={} private_shadow_bytes={} first_containing_resource_lengths={lengths:?} first_containing_unique_bytes={} guarded_output_bytes=28",
+            g.shards[0].mmap_len(),
+            storage.windows.len(),
+            storage.metal_view_bytes,
+            storage.private_shadow_bytes,
+            lengths.iter().sum::<u64>(),
+        );
         assert_eq!(g.revalidate_retained_shard_stamps().unwrap(), stamps);
     }
 }
@@ -167,6 +188,115 @@ fn soft_window_none_preserves_incumbent_geometry_and_selected_metadata_loader_pa
         assert_eq!(soft.shared_eof_window_count, usize::from(!pad_end));
         assert_eq!(soft.metal_view_bytes, none.metal_view_bytes);
     }
+}
+
+#[test]
+fn soft_window_prepared_loader_plan_validates_chosen_geometry_and_preserves_controls() {
+    for g in owner_fixtures() {
+        let reference = plan(&g).unwrap();
+        for target in [None, Some(4_294_967_296), Some(PAGE)] {
+            let (p, storage) = prepared_load_plan(&g, PAGE, M5_MAX_BUFFER_LENGTH, target).unwrap();
+            assert_eq!(storage, targeted(&g, target));
+            assert_eq!(p.bytes, reference.bytes);
+            assert_eq!(p.controls, reference.controls);
+            assert_eq!(p.source_groups(), reference.source_groups());
+            assert_eq!(p.token_map, reference.token_map);
+            assert_eq!(p.engram_hash, reference.engram_hash);
+            assert_eq!(p.config.hidden, reference.config.hidden);
+            assert_eq!(p.config.intermediate, reference.config.intermediate);
+            assert_eq!(p.config.experts, reference.config.experts);
+            assert_eq!(p.config.vocab, reference.config.vocab);
+            assert_eq!(p.schedule, reference.schedule);
+        }
+        assert!(prepared_load_plan(&g, 0, M5_MAX_BUFFER_LENGTH, Some(PAGE)).is_err());
+        assert!(prepared_load_plan(&g, PAGE, PAGE - 1, Some(PAGE)).is_err());
+    }
+}
+
+#[test]
+fn soft_window_tensor_controls_keep_source_groups_and_cpu_accounting() {
+    let (mut kv, mut tensors) = fixture_parts(1, GgmlType::F32, 2, true);
+    let mut payloads = BTreeMap::new();
+    for (key, name, dtype) in [
+        (
+            "deepseek41.engram.token_map",
+            "engram_token_map.weight",
+            GgmlType::I32,
+        ),
+        (
+            "deepseek41.engram.primes",
+            "engram_primes.weight",
+            GgmlType::I64,
+        ),
+        (
+            "deepseek41.engram.offsets",
+            "engram_offsets.weight",
+            GgmlType::I64,
+        ),
+        (
+            "deepseek41.engram.multipliers",
+            "engram_multipliers.weight",
+            GgmlType::I64,
+        ),
+    ] {
+        let index = kv.iter().position(|(k, _)| *k == key).unwrap();
+        let (_, value) = kv.remove(index);
+        let (count, bytes): (usize, Vec<u8>) = match value {
+            Value::Ints(values) => (
+                values.len(),
+                values.into_iter().flat_map(i32::to_le_bytes).collect(),
+            ),
+            Value::U64s(values) => (
+                values.len(),
+                values.into_iter().flat_map(u64::to_le_bytes).collect(),
+            ),
+            _ => unreachable!(),
+        };
+        tensors.push((name.into(), vec![count as u64], dtype));
+        payloads.insert(name.to_string(), bytes);
+    }
+    let g = write_fixture_payload(kv, tensors, false, |name, _, _| payloads.get(name).cloned());
+    let reference = plan(&g).unwrap();
+    let stamps = reference.source_groups().clone();
+    assert_eq!(reference.controls.payload_bytes_read, 428);
+    assert_eq!(reference.controls.cold_cpu_bytes, 1528);
+    assert_eq!(controls::cold_bound(&g).unwrap(), 2568);
+    assert_eq!(reference.source_groups().backbone.len(), 1);
+    assert!(reference.source_groups().auxiliary.is_empty());
+    let audit = resident_storage_audit(&g, PAGE, M5_MAX_BUFFER_LENGTH).unwrap();
+    assert_eq!(audit.control, targeted(&g, None));
+    assert_eq!(
+        resident_storage_plan(&g, PAGE, M5_MAX_BUFFER_LENGTH).unwrap(),
+        targeted(&g, audit.selected_soft_coalescing_target)
+    );
+    for target in [None, Some(4_294_967_296), Some(PAGE)] {
+        let (p, storage) = prepared_load_plan(&g, PAGE, M5_MAX_BUFFER_LENGTH, target).unwrap();
+        assert_eq!(p.controls, reference.controls);
+        assert_eq!(p.source_groups(), &stamps);
+        assert_eq!(p.token_map, reference.token_map);
+        assert_eq!(p.engram_hash, reference.engram_hash);
+        assert_eq!(p.bytes, reference.bytes);
+        assert_eq!(storage.bytes, reference.bytes);
+        assert_eq!(storage, targeted(&g, target));
+        assert_eq!(audit.tensors.payload_bytes, p.bytes.resident_bytes());
+    }
+    eprintln!(
+        "soft_window_tensor_controls controls={:?} source_groups=1+0",
+        reference.controls
+    );
+}
+
+#[test]
+fn soft_window_prepared_loader_plan_rejects_changed_retained_source() {
+    let g = overlapping_segments();
+    prepared_load_plan(&g, PAGE, M5_MAX_BUFFER_LENGTH, Some(PAGE)).unwrap();
+    let shard = &g.shards[0];
+    shard.file.set_len(shard.mmap_len() as u64 + 1).unwrap();
+    assert!(g.revalidate_retained_shard_stamps().is_err());
+    for target in [None, Some(PAGE)] {
+        assert!(prepared_load_plan(&g, PAGE, M5_MAX_BUFFER_LENGTH, target).is_err());
+    }
+    assert!(resident_storage_audit(&g, PAGE, M5_MAX_BUFFER_LENGTH).is_err());
 }
 
 #[test]
@@ -328,10 +458,9 @@ fn soft_window_live_resources_follow_first_containing_and_survive_owner_drop() {
     let page = metal::host_page_size_bytes().unwrap();
     assert_eq!(page, PAGE);
     for g in owner_fixtures() {
-        let p = plan(&g).unwrap();
         let soft = targeted(&g, Some(PAGE));
         assert!(soft.metal_view_bytes < 16 << 20);
-        let weights = ResidentWeights::load_planned(&ctx, Arc::clone(&g), p, soft.clone()).unwrap();
+        let weights = ResidentWeights::load_planned(&ctx, Arc::clone(&g), Some(PAGE)).unwrap();
         let mut identities = BTreeMap::new();
         let mut actual = Vec::new();
         for t in g

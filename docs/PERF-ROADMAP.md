@@ -35,10 +35,13 @@ dependency-preserving reconstruction: at most 2541 boundary rows, but only
 24150 complete decoder layer-output rows for long prompts, plus KV-only seeds.
 Trained bounded-128 replay is a separate policy using the same primitives.
 Cold shrinking native implementation: correctness-qualified on Maya-S
-(`perf/v41-ced-scratch`, rebased `efea4908`, 2026-10-24). Current Full/CED at 128/2048/8192
-matches all 257 complete 129,280-logit vectors and all 56 causal regions at every
-position. Current and prior arms also match frozen source `01983b7b`, with exact input,
-artifact, publication/completion and state metadata; no fallback. This includes
+(`perf/v41-ced-scratch`, current 4K/wide control `be874b3f`, 2026-10-24).
+Current Full/CED at 128/2048/2049/4097/8192 matches all 257 complete
+129,280-logit vectors and all 56 causal regions at every position. The 128/2K/8K
+heads/state also preserve the measured bridge through `efea4908` to frozen
+`01983b7b`; the two new transition sizes qualify current Full, not an unmeasured
+pre-4K oracle. Exact input, artifact, publication/completion and state metadata;
+no fallback. This includes
 request-local scratch reuse, hierarchical selection and seed/first-decoder fusion.
 Fresh bounded and full-model qualification includes repaired main's 32-key tensor
 score, with default/rollback lineage checks and exact pre-rebase heads/state.
@@ -90,9 +93,14 @@ Fresh outside leverage map: landed reconnaissance (2026-10-24;
 Two independent outside reviews plus primary-source/source audits prioritize:
 
 - CED transactional cross-layer completion batches: in flight
-  (`perf/v41-ced-batches`). Start with two layers,
-  preserve pending/completed separation and disjoint sticky status evidence;
-  target 21 -> 11 commands at 2K, not an assumed proportional latency gain.
+  (`perf/v41-ced-batches`, `perf/v41-ced-batch4`). Two-layer source `9874c68b`
+  passes 18 M5 GPU fixtures and the same five full-model sizes with exact
+  control heads/state and unchanged work rows: 21 -> 11 commands at 2K,
+  25 -> 12 at 8K. Its native cohort establishes no win: retained Full/CED
+  medians 2.913/5.970 s at 2K and 11.924/16.145 s at 8K, with large dispersion.
+  Preserve pending/completed separation, sticky evidence and bounded incumbent
+  selection. Four-layer source `4672dc81` changes only the grouping default;
+  6/7 commands at 2K/8K are plans, not M5/full-model/native results yet.
 - Same-format cooperative/register-fed quantized matmul: negative
   (`perf/v41-register-operands`; final
   `bench/2026-10-24-v41-register-operands-32x32-f16.md`). Correct bounded
@@ -126,6 +134,13 @@ CED, with zero warm process reads/page-ins and ordinary/tensor PSO misses. This
 is not shader-active time or a residency-causality claim. These controls precede
 the 4K/wide integration and do not measure batching gains; see
 `bench/2026-10-24-v41-execution-leverage.md`.
+
+The subsequent current 4K/wide control cohort (`be874b3f`) does not reproduce
+that clean 8K separation: Full/CED medians are 2.854/4.184 s at 2K and
+14.723/14.489 s at 8K, with 2.8-6.6x pilot/main spreads. All endpoints still
+match and all sampled host pressure is normal. Neither the new control nor
+two-layer batching establishes a stable native gain; retain the stalls and
+diagnose them rather than inferring speedup from command counts.
 
 The immediate execution experiment pairs native driver/host attribution and
 bounded CED retirement. The matched streaming cooperative-input control is now

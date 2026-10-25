@@ -117,6 +117,81 @@ Maintained tools rebuild at `12d098eb` with clean matching build/runtime identit
 all three command help checks pass. This does not certify future integration
 heads or replace full-model qualification of the concurrent geometry changes.
 
+## Current 4K Control And Two-Layer Candidate
+
+Current integrated control `be874b3f39ad44c8cf7cfb9c11ddad988e4fca2e`
+includes main's selected 4096-row Full/encoder path, wide64 F16 gate/up,
+the dtype correction and attribution. Decoder rows/seeds remain bounded at
+2048. A separate M5 fixture initially stops on an incorrect census expectation:
+the narrow gate intentionally uses a Down-role pipeline name. The test-only
+repair asserts the complete ordered typed gate/up/down sequence, not a weaker
+nonzero count. All six fresh M5 tensor/dtype/geometry tests then pass.
+
+Two-layer source `9874c68b1602f8ff6058179a982c54775c22b638` adds bounded
+transactional decoder groups. It passes 33 focused CPU checks and 18 self-leased
+M5 GPU fixtures under validation, including automatic oversized-group incumbent
+selection, strict arithmetic/control/state parity, sticky status, GPU canaries,
+fault precedence, cancellation/unwind and release while State remains poisoned.
+Independent read-only source review finds no concrete P1/P2; that review does
+not replace execution or measure driver heaps.
+
+Both sources pass fresh full-model current Full/CED pairs at all five lengths.
+Each length compares all 257 complete vocabulary vectors and all 56 causal
+regions at every position, with one resident import and at most one KV state:
+
+| Prompt Rows | Control Commands | Two-Layer Commands |
+| ---: | ---: | ---: |
+| 128 | 21 | 11 |
+| 2048 | 21 | 11 |
+| 2049 | 24 | 11 |
+| 4097 | 45 | 12 |
+| 8192 | 25 | 12 |
+
+Every candidate head hash and complete state record matches its control; all
+per-layer work counters are unchanged, completion is checked, fallback is null
+and sampled allocations stay within accepted bounds. Control 128/2K/8K also
+preserves the measured old-reference bridge. The 2049/4097 checks extend current
+Full/CED transition coverage, not an unmeasured pre-4K reference. In particular,
+2049 is packed under selected 4K geometry; 4097 has a genuine scalar tail.
+
+The two-layer command allowance remains explicitly unmeasured: 1 MiB per actual
+physical unit per CPU/Metal domain, capped at 16 MiB/domain beyond the incumbent
+allowance. This is not a formal driver/CPU transient bound. Larger-window
+over-budget requests retain bounded incumbent CED commands before batch pricing
+or encoding, rather than rejecting context or restarting Full after mutation.
+
+Fresh production-timing-requested native cohorts retain four calls per policy.
+Seconds below are rounded to six decimals; raw nanoseconds and all chronological
+samples remain in the private reports:
+
+| Source / Prompt | Full | CED | Median Full / CED |
+| --- | --- | --- | --- |
+| Control / 2048 | 12.431765, 2.237038, 3.006496, 2.700650 | 3.042474, 4.909086, 3.459496, 8.904997 | 2.853573 / 4.184291 |
+| Control / 8192 | 18.883852, 9.500112, 29.603241, 10.561673 | 20.833771, 18.744491, 7.456756, 10.233436 | 14.722762 / 14.488964 |
+| Two Layers / 2048 | 3.132919, 2.251518, 19.672501, 2.692496 | 3.372027, 19.311431, 2.743518, 8.568895 | 2.912708 / 5.970461 |
+| Two Layers / 8192 | 23.951903, 9.526876, 11.380274, 12.466781 | 18.749036, 13.450416, 13.541780, 33.457407 | 11.923527 / 16.145408 |
+
+Neither new cohort establishes a stable native win. The earlier frozen-source
+clean 8K separation is not reproduced. The two-layer 2K Full pilot/main spread
+exceeds 10x and CED exceeds 7x; the 8K spreads are about 2.5x. A noisy cross-build
+median change is not causal evidence that geometry or batching causes the
+regression, but command-count reduction alone clearly cannot justify promotion.
+
+All 14 endpoint heads per cohort match the archived synthetic-input reference;
+actual CED command counts and sampled allocation bounds pass independent checks.
+Across these four native cohorts, 387 sampled health observations are normal,
+CPU availability reaches 35.23 GiB and system wired plus compressor reaches
+180.84 GiB. These remain sparse host observations, not a swap or peak-footprint
+proof. Native synthetic routes are not a measured text-route distribution.
+
+Four-layer source `4672dc8172aa9e7047bf204f44302d846b262415` changes only
+the production grouping default; all other production logic and the 16-unit
+budget remain. It passes 49 CPU and four bounded M4 GPU fixtures. Default 4K
+encoder plans complete 6/6/6/7/7 commands at the five lengths, with at most
+15 MiB/domain additional allowance. M5/full-model/native qualification is still
+pending. Keep all frozen sources unchanged while comparing it and localizing
+remaining stalls.
+
 ## Evidence And Next Decision
 
 Private execution archive labels, with no machine-specific path required:
@@ -129,6 +204,12 @@ maya-attribution-n2048-v26-r1.{json,stderr,events.jsonl,controller.json}
 attribution-n2048-v26-role-summary-v2.json
 attribution-m5-pso-v26.*
 wide-type-fix/m5-{red,green}/
+control-{types,wide,ffn,edges}-v27.*
+maya-control-n{128,2048,2049,4097,8192}-v27-r1.*
+maya-control-native-n{2048,8192}-v27-r1.*
+batch2-{freshness,plan,preflight,groups,types,wide,ffn,prefix,ledgers,nonfinite,edges}-v27.*
+maya-batch2-n{128,2048,2049,4097,8192}-v27-r1.*
+maya-batch2-native-n{2048,8192}-v27-r1.*
 ```
 
 The v2 role summary supersedes only the erroneous last-writer `role_totals` in
@@ -136,10 +217,11 @@ the first private diagnostic summary; original case totals and raw evidence
 remain unchanged. Full-model input SHA256 remains
 `aaf5840de38220f6ed4579ffcf83dc828a28e7d71f8e1f2517077ee77020eca2`.
 
-Next: qualify current 4K/wide integration, then the joined transactional batch
-candidate with exact heads, causal regions, fault/lifetime/status/freshness
-checks and native controls on the same source/configuration. Do not promote a
-batching speedup from old controls or instrumented timing. The independent
+Next: qualify the four-layer candidate and use driver/host attribution to locate
+the remaining stalls. Actual text-route population capture is a separate
+diagnostic follow-on; synthetic count bands cannot establish its headroom.
+Do not promote batching from command counts, old controls or instrumented timing.
+The independent
 [matched-F16 register family closes negative](2026-10-24-v41-register-operands-32x32-f16.md),
 with reproducible standalone source and preserved raw evidence, not a product
 kernel landing.

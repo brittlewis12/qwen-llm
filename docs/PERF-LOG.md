@@ -6,6 +6,33 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the current state and evidence index.
 
+## 2026-10-24 - Current 4K CED And Two-Layer Batches Preserve Exact State
+
+- Current 4K/wide control `be874b3f` and two-layer candidate `9874c68b` pass
+  Maya-S at 128/2048/2049/4097/8192: all 257 complete 129,280-logit vectors and
+  all 56 causal regions per position. Offline bridges match all recorded heads
+  and state records; work rows stay unchanged. The two new transition sizes
+  qualify current Full, not an unmeasured pre-4K oracle.
+- Candidate passes 33 focused CPU checks and 18 self-leased M5 GPU fixtures,
+  including selected 2K/4K geometry, tensor lineage, automatic structural
+  fallback, isolated and real numerical faults, error precedence, GPU canaries,
+  cancellation/unwind and release while poisoned State remains alive. Independent
+  read-only review finds no concrete P1/P2; normal driver peaks remain unbounded
+  by the explicitly unmeasured finite command allowance.
+- Actual completed commands fall 21/21/24/45/25 -> 11/11/11/12/12 across the
+  five sizes. Native timing does not turn that into a win: two-layer Full/CED
+  medians are 2.913/5.970 s at 2K and 11.924/16.145 s at 8K, with large spreads.
+  All 14 endpoints per length match and sampled allocation stays within bounds.
+- The current unbatched control is also variable: Full/CED 2.854/4.184 s at
+  2K and 14.723/14.489 s at 8K. The earlier frozen-source clean 8K cohort is
+  not reproduced. Preserve every sample; no causal regression or stable gain
+  follows from a noisy cross-build median comparison.
+- Four-layer candidate `4672dc81` changes only the grouping default, retains
+  the 16-unit budget and incumbent fallback, and passes 49 CPU plus four M4
+  fixtures. Planned 2K/8K counts are 6/7; M5/full-model/native verification is
+  pending. Driver/host attribution continues; no default CED promotion.
+- [Complete controls, proofs and interpretation](bench/2026-10-24-v41-execution-leverage.md).
+
 ## 2026-10-24 - Execution Attribution And A Closed Register-Operand Leaf
 
 - Frozen score32 CED source completes fresh four-retained-run native controls at

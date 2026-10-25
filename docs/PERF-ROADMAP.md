@@ -122,6 +122,14 @@ Two independent outside reviews plus primary-source/source audits prioritize:
   gate/up from narrow32 decoder/down. Measure active panels and padded/useful
   work on real routes before choosing an adaptive-tail kernel. Synthetic
   count32 or 31/32/33 fixtures do not establish that distribution.
+- Shared retained-window partitioning: in flight (`perf/v41-soft-windows`).
+  Fresh batch-two 2K diagnostics keep warmed Full GPU envelopes at 1.943-1.946 s
+  while driver intervals range 0.027-11.439 s, with zero process reads/page-ins
+  and ordinary/tensor PSO misses. Test disabled versus a 4 GiB soft coalescing
+  target on the same two-layer source, not a new hardware/fit cap. Preserve
+  oversized tensor eligibility, EOF/lifetime safety and actual admission. This
+  also changes mmap provenance; a win would qualify a mapping strategy, not
+  prove buffer length alone causes stalls. No pinning/residency/purge is added.
 - Batched Engram preparation, CED-origin prefix reuse and candidate-only
   long-context reindexing: open, with distinct cold/warm/context economics.
   Full prefix caching already exists; CED-origin reuse needs qualification.

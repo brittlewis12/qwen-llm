@@ -20,7 +20,8 @@ pub(crate) fn load(ctx: &MetalContext, gguf: Arc<GgufFile>) -> Result<weights::R
 }
 
 pub(crate) fn capabilities(gguf: &GgufFile) -> Result<serde_json::Value> {
-    // Header validation deliberately has no Metal context or host-fit gate.
+    // Contract validation has no Metal context or host-fit gate. Tensor controls
+    // require bounded CPU reads; companion lookup payloads remain untouched.
     let plan = match weights::plan(gguf) {
         Ok(plan) => plan,
         Err(error) => {
@@ -41,6 +42,13 @@ pub(crate) fn capabilities(gguf: &GgufFile) -> Result<serde_json::Value> {
             "prefill_mode":crate::family_options::V41_PREFILL_MODE,
             "prefill_rows_max":crate::family_options::V41_PREFILL_ROWS},
         "geometry":{"experts":plan.config.experts,"context_tokens":plan.engram_hash.max_position},
+        "sources":{"backbone_shards":plan.source_groups().backbone.len(),
+            "auxiliary_shards":plan.source_groups().auxiliary.len(),
+            "auxiliary_role":"cpu_disk_lookup_only"},
+        "cpu_controls":{"payload_bytes_read":plan.controls.payload_bytes_read,
+            "cold_cpu_bytes":plan.controls.cold_cpu_bytes,
+            "retained_cpu_bytes":plan.controls.retained_cpu_bytes,
+            "source_bookkeeping_bytes":plan.controls.source_bookkeeping_bytes},
         "local_fit":{"status":"not_evaluated","stage":"runtime_memory_admission"},
         "bench":{"status":"supported","harness":"family_pp_tg"},
         "cache":{"policy":"exact_prefix_ram","prefix_reuse":true,"snapshots":true},

@@ -120,6 +120,47 @@ fn long_short_and_consistent_aliases_override_fallback() {
 }
 
 #[test]
+fn gsq_attention_candidate_declarations_override_defaults_and_check_conflicts() {
+    let schedule = explicit_layout();
+    let (mut kv, tensors) = fixture_for(&schedule);
+    declare(&mut kv, &schedule, 0);
+    kv.retain(|(key, _)| *key != "deepseek41.candidate_source_layer_id");
+    kv.extend([
+        (
+            "deepseek41.attention.candidate_source_layer_id",
+            Value::U32(24),
+        ),
+        ("deepseek41.attention.candidate_block_size", Value::U32(16)),
+        ("deepseek41.attention.candidate_topk_blocks", Value::U32(17)),
+        ("deepseek41.expert_scoring_func", Value::Str("sqrtsoftplus")),
+    ]);
+    let p = plan(&write_fixture(kv.clone(), tensors.clone())).unwrap();
+    assert_eq!(p.schedule, schedule);
+    assert_eq!(p.config.candidate_block, 16);
+    assert_eq!(p.config.candidate_topk, 17);
+    for (key, value) in [
+        ("deepseek41.candidate_source_layer_id", Value::U32(20)),
+        ("deepseek41.candidate_block_size", Value::U32(8)),
+        ("deepseek41.candidate_topk_blocks", Value::U32(2048)),
+        ("deepseek41.scoring_func", Value::Str("softmax")),
+    ] {
+        let mut bad = kv.clone();
+        bad.push((key, value));
+        assert!(plan(&write_fixture(bad, tensors.clone())).is_err(), "{key}");
+    }
+    for key in [
+        "deepseek41.attention.candidate_block_size",
+        "deepseek41.attention.candidate_topk_blocks",
+        "deepseek41.attention.candidate_source_layer_id",
+        "deepseek41.expert_scoring_func",
+    ] {
+        let mut bad = kv.clone();
+        bad.iter_mut().find(|(k, _)| *k == key).unwrap().1 = Value::F32(f32::NAN);
+        assert!(plan(&write_fixture(bad, tensors.clone())).is_err(), "{key}");
+    }
+}
+
+#[test]
 fn explicit_nonstandard_schedule_keeps_existing_structural_support() {
     let schedule = Schedule {
         layers: 6,

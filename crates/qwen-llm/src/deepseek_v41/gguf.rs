@@ -1,4 +1,5 @@
-//! Metadata-driven V4.1 GGUF loading. Planning never probes hardware or payloads.
+//! Metadata-driven V4.1 GGUF loading. Planning never probes hardware or weights.
+//! Tensor-serialized Engram controls require bounded CPU payload reads.
 //! Non-upstream GGML type 67 (MXFP8) is not supported; no fork layout is inferred.
 use super::forward::Config;
 use crate::{
@@ -8,12 +9,16 @@ use crate::{
 };
 use std::{collections::BTreeMap, sync::Arc};
 
+mod companion;
+mod controls;
 mod engram;
 mod metadata;
 mod names;
 mod resident_storage;
 mod storage;
 pub use super::engram::HashConfig;
+pub use companion::SourceGroups;
+pub use controls::ControlAccounting;
 pub use engram::DiskEngram;
 pub use resident_storage::{
     ResidentMappingKind, ResidentStoragePlan, ResidentStorageWindow, resident_storage_plan,
@@ -204,10 +209,18 @@ pub struct Plan {
     pub kv_source_layers: Vec<u64>,
     pub index_source_layers: Vec<u64>,
     pub compression_ratios: Vec<u64>,
-    engram_tables: Vec<engram::TableView>,
+    pub controls: ControlAccounting,
+    engram_context: companion::TableContext,
+}
+
+impl Plan {
+    pub fn source_groups(&self) -> &SourceGroups {
+        &self.engram_context.stamps
+    }
 }
 
 pub fn plan(g: &GgufFile) -> Result<Plan, LoadError> {
+    g.revalidate_retained_shard_stamps()?;
     let mut p = metadata::parse(g)?;
     let mut banks = BTreeMap::new();
     let mut dense = BTreeMap::new();
@@ -217,9 +230,11 @@ pub fn plan(g: &GgufFile) -> Result<Plan, LoadError> {
             .entry(format!("{:?}", t.dtype))
             .or_default();
         *count = add(*count, t.n_bytes)?;
-        if p.engram_tables
-            .iter()
-            .any(|table| table.tensor.name == t.name)
+        if p.engram_context.auxiliary.is_none()
+            && p.engram_context
+                .tables
+                .iter()
+                .any(|table| table.tensor.name == t.name)
         {
             p.bytes.disk_engram = add(p.bytes.disk_engram, t.n_bytes)?;
         } else if let Some((layer, part)) = names::bank(&t.name) {
@@ -266,6 +281,17 @@ pub fn plan(g: &GgufFile) -> Result<Plan, LoadError> {
     }
     add(p.bytes.packed_experts, p.bytes.dense_bytes)?;
     names::validate_inventory(&p, &dense)?;
+    if let Some(aux) = &p.engram_context.auxiliary {
+        for table in &aux.tensors {
+            p.bytes.disk_engram = add(p.bytes.disk_engram, table.n_bytes)?;
+            let count = p
+                .dtype_inventory
+                .entry(format!("{:?}", table.dtype))
+                .or_default();
+            *count = add(*count, table.n_bytes)?;
+        }
+    }
+    p.engram_context.revalidate(g)?;
     Ok(p)
 }
 fn dense_supported(t: GgmlType) -> bool {
@@ -318,8 +344,21 @@ impl ResidentWeights {
         plan(g)
     }
     pub fn load(ctx: &MetalContext, g: Arc<GgufFile>) -> Result<Self, LoadError> {
+        let cold_cpu = controls::cold_bound(&g)?;
+        if cold_cpu > 0
+            && let Some(e) = metal::evaluate_metal_memory_admission_with_cpu_bytes(
+                0,
+                cold_cpu,
+                0,
+                ctx.memory_signals(),
+                true,
+            )
+            .refusal()
+        {
+            return Err(e.into());
+        }
         let p = plan(&g)?;
-        g.revalidate_retained_shard_stamps()?;
+        p.engram_context.revalidate(&g)?;
         let page = metal::host_page_size_bytes()?;
         let storage = resident_storage::for_plan(&g, &p, page, ctx.max_buffer_length())?;
         let windows = &storage.windows;
@@ -331,7 +370,13 @@ impl ResidentWeights {
         let _allocation_transaction = ctx.begin_allocation_transaction();
         if let Some(e) = metal::evaluate_metal_memory_admission_with_cpu_bytes(
             storage.metal_view_bytes,
-            storage.private_shadow_bytes,
+            add(
+                storage.private_shadow_bytes,
+                add(
+                    p.controls.retained_cpu_bytes,
+                    p.controls.source_bookkeeping_bytes,
+                )?,
+            )?,
             0,
             ctx.memory_signals(),
             true,
@@ -413,14 +458,14 @@ impl ResidentWeights {
                 dense.insert(key, tensor);
             }
         }
-        g.revalidate_retained_shard_stamps()?;
+        p.engram_context.revalidate(&g)?;
         Ok(Self {
             config: p.config,
             schedule: p.schedule,
             engram_hash: p.engram_hash,
             banks,
             dense,
-            engram: DiskEngram::for_tables(g, p.engram_tables),
+            engram: DiskEngram::for_tables(g, p.engram_context),
             token_map: p.token_map,
             raw_pad: p.raw_pad,
             bytes: p.bytes,

@@ -66,7 +66,14 @@ pub(super) fn validate_shape(t: &TensorDesc, c: &Config) -> Result<(), LoadError
     let Some(expected) = expected_shape(&t.name, c) else {
         return Ok(());
     };
-    if !shape_matches(&t.shape, &expected) {
+    // STANDARD GSQ preserves the outer group axis. Rows remain contiguous in
+    // [group][rank][group_input] order, matching the existing flattened view.
+    let grouped_output = block(&t.name).is_some_and(|(_, tail)| tail == "attn_output_a.weight")
+        && shape_matches(
+            &t.shape,
+            &[expected[0], c.output_rank as u64, c.groups as u64],
+        );
+    if !shape_matches(&t.shape, &expected) && !grouped_output {
         return Err(invalid(format!(
             "{} shape {:?}, expected {expected:?}",
             t.name, t.shape

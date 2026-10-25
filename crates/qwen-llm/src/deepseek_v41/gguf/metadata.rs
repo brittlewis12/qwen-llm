@@ -133,6 +133,7 @@ pub(super) fn parse(g: &GgufFile) -> Result<Plan, LoadError> {
     let d = Config::default();
     for (short, expected) in [
         ("scoring_func", "sqrtsoftplus"),
+        ("expert_scoring_func", "sqrtsoftplus"),
         ("topk_method", "noaux_tc"),
         ("hidden_act", "silu"),
         ("rope.scaling.type", "yarn"),
@@ -206,6 +207,7 @@ pub(super) fn parse(g: &GgufFile) -> Result<Plan, LoadError> {
             g,
             &[
                 "attention.indexer.candidate_block_size",
+                "attention.candidate_block_size",
                 "candidate_block_size",
             ],
             Some(d.candidate_block),
@@ -214,6 +216,7 @@ pub(super) fn parse(g: &GgufFile) -> Result<Plan, LoadError> {
             g,
             &[
                 "attention.indexer.candidate_top_k_blocks",
+                "attention.candidate_topk_blocks",
                 "candidate_topk_blocks",
             ],
             Some(d.candidate_topk),
@@ -342,6 +345,7 @@ pub(super) fn parse(g: &GgufFile) -> Result<Plan, LoadError> {
         g,
         &[
             "candidate_source_layer_id",
+            "attention.candidate_source_layer_id",
             "attention.indexer.candidate_source_layer",
         ],
     )?
@@ -373,13 +377,26 @@ pub(super) fn parse(g: &GgufFile) -> Result<Plan, LoadError> {
     let engram_layers = sources_alias(g, layers)?;
     for (keys, expected) in [
         (
-            &["engram.head_count", "engram.n_heads", "ple.heads_per_ngram"][..],
+            &[
+                "engram.head_count",
+                "engram.n_heads",
+                "engram_n_heads",
+                "ple.heads_per_ngram",
+            ][..],
             8,
         ),
-        (&["engram.max_ngram_size", "ple.ngram_size"][..], 4),
+        (
+            &[
+                "engram.max_ngram_size",
+                "engram_max_ngram_size",
+                "ple.ngram_size",
+            ][..],
+            4,
+        ),
         (
             &[
                 "engram.head_dim",
+                "engram_head_dim",
                 "engram.key_length",
                 "embedding_length_per_layer_input",
             ][..],
@@ -398,22 +415,61 @@ pub(super) fn parse(g: &GgufFile) -> Result<Plan, LoadError> {
             }
         }
     }
-    let token_map = g
+    let mut controls = controls::ControlAccounting::default();
+    let inline_map = g
         .get_i64_array("deepseek41.engram.token_map")?
-        .ok_or_else(|| invalid("missing Engram token_map"))?
-        .into_iter()
-        .map(|n| u32::try_from(n).map_err(|_| invalid("token_map value outside u32")))
-        .collect::<Result<Vec<_>, _>>()?;
+        .map(|values| {
+            values
+                .into_iter()
+                .map(|n| u32::try_from(n).map_err(|_| invalid("token_map value outside u32")))
+                .collect::<Result<Vec<_>, _>>()
+        })
+        .transpose()?;
+    let token_map = if g.find("engram_token_map.weight").is_some() {
+        let token_values = controls::merge(
+            g,
+            "engram_token_map.weight",
+            GgmlType::I32,
+            &[vocab as u64],
+            None,
+            &mut controls,
+        )?
+        .ok_or_else(|| invalid("missing Engram token_map"))?;
+        let mut token_map = Vec::new();
+        token_map
+            .try_reserve_exact(token_values.len())
+            .map_err(|e| invalid(format!("token_map allocation: {e}")))?;
+        for &n in &token_values {
+            token_map.push(u32::try_from(n).map_err(|_| invalid("token_map value outside u32"))?);
+        }
+        if inline_map.as_ref().is_some_and(|old| old != &token_map) {
+            return Err(invalid(
+                "conflicting metadata/tensor control engram_token_map.weight",
+            ));
+        }
+        token_map
+    } else {
+        inline_map.ok_or_else(|| invalid("missing Engram token_map"))?
+    };
     if token_map.len() != vocab {
         return Err(invalid("token_map length differs from vocabulary"));
     }
-    if let Some(n) = optional_uint(g, "engram.compressed_vocab_size")? {
+    let declared_vocab = optional_uint_aliases(
+        g,
+        &[
+            "engram.compressed_vocab_size",
+            "engram_compressed_vocab_size",
+        ],
+    )?;
+    if let Some(n) = declared_vocab {
         if n == 0 || token_map.iter().any(|&v| u64::from(v) >= n) {
             return Err(invalid("token_map outside compressed vocabulary"));
         }
     }
     // Legacy pad_id is already compressed; recover any raw ID with that image.
-    let raw_pad = if let Some(n) = optional_uint(g, "engram.pad_token_id")? {
+    let raw_pad = if let Some(n) =
+        optional_uint_aliases(g, &["engram.pad_token_id", "engram_pad_token_id"])?
+    {
         u32::try_from(n).map_err(|_| invalid("pad ID overflow"))?
     } else if let Some(n) = optional_uint(g, "engram.pad_id")? {
         token_map
@@ -452,10 +508,24 @@ pub(super) fn parse(g: &GgufFile) -> Result<Plan, LoadError> {
         }
     };
     let primes = required_hash(
-        hash_array(&["engram.primes", "ple.head_vocab_sizes"], 24)?,
+        controls::merge(
+            g,
+            "engram_primes.weight",
+            GgmlType::I64,
+            &[24, engram_layers.len() as u64],
+            hash_array(&["engram.primes", "ple.head_vocab_sizes"], 24)?,
+            &mut controls,
+        )?,
         "engram.primes or ple.head_vocab_sizes",
     )?;
-    let legacy_offsets = hash_array(&["engram.offsets"], 24)?;
+    let legacy_offsets = controls::merge(
+        g,
+        "engram_offsets.weight",
+        GgmlType::I64,
+        &[24, engram_layers.len() as u64],
+        hash_array(&["engram.offsets"], 24)?,
+        &mut controls,
+    )?;
     let ple_offsets = hash_array(&["ple.head_offsets"], 24)?
         .map(|offsets| local_ple_offsets(offsets, &primes))
         .transpose()?;
@@ -469,11 +539,18 @@ pub(super) fn parse(g: &GgufFile) -> Result<Plan, LoadError> {
         "engram.offsets or ple.head_offsets",
     )?;
     let multipliers = required_hash(
-        hash_array(&["engram.multipliers", "ple.layer_multipliers"], 4)?,
+        controls::merge(
+            g,
+            "engram_multipliers.weight",
+            GgmlType::I64,
+            &[4, engram_layers.len() as u64],
+            hash_array(&["engram.multipliers", "ple.layer_multipliers"], 4)?,
+            &mut controls,
+        )?,
         "engram.multipliers or ple.layer_multipliers",
     )?;
-    let compressed_vocab_size = optional_uint(g, "engram.compressed_vocab_size")?
-        .unwrap_or(u64::from(token_map.iter().copied().max().unwrap_or(0)) + 1);
+    let compressed_vocab_size =
+        declared_vocab.unwrap_or(u64::from(token_map.iter().copied().max().unwrap_or(0)) + 1);
     let mut engram_hash = HashConfig {
         layers: Vec::new(),
         compressed_vocab_size: u32::try_from(compressed_vocab_size)
@@ -509,7 +586,19 @@ pub(super) fn parse(g: &GgufFile) -> Result<Plan, LoadError> {
     engram_hash
         .validate()
         .map_err(|e| invalid(format!("Engram hash configuration: {e:?}")))?;
-    let engram_tables = engram::resolve_tables(g, &engram_hash, layers)?;
+    let engram_context = companion::resolve(g, &engram_hash, layers)?;
+    controls.source_bookkeeping_bytes = engram_context.bookkeeping_bytes()?;
+    controls.retained_cpu_bytes = add(
+        (token_map.len() as u64)
+            .checked_mul(4)
+            .ok_or_else(|| invalid("token map CPU bytes overflow"))?,
+        (engram_layers.len() as u64)
+            .checked_mul(
+                2 * (24 + 24 + 4) * 8
+                    + std::mem::size_of::<super::super::engram::LayerHash>() as u64,
+            )
+            .ok_or_else(|| invalid("hash CPU bytes overflow"))?,
+    )?;
     let engram_primes = engram_hash.layers.iter().flat_map(|l| l.primes).collect();
     let engram_offsets = engram_hash.layers.iter().flat_map(|l| l.offsets).collect();
     let engram_multipliers = engram_hash
@@ -521,7 +610,8 @@ pub(super) fn parse(g: &GgufFile) -> Result<Plan, LoadError> {
         config,
         schedule,
         engram_hash,
-        engram_tables,
+        engram_context,
+        controls,
         dtype_inventory: BTreeMap::new(),
         bytes: ByteCounters::default(),
         token_map,

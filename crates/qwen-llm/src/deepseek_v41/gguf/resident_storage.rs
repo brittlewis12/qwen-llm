@@ -57,8 +57,10 @@ pub struct ResidentStoragePlan {
 
 /// Plan resident storage without importing weights or probing hardware.
 ///
-/// Uses only the already-opened GGUF's metadata/descriptors and mapped lengths.
-/// No tensor payload reads, new mappings, prefetch, or Metal context are needed.
+/// Uses metadata/descriptors and mapped lengths, plus bounded CPU Engram control
+/// payload reads when serialized as tensors. A declared companion is opened and
+/// retained by the plan, but no lookup-table payload is read or imported.
+/// No prefetch or Metal context is needed.
 /// The supplied geometry must match the eventual loader's host/device geometry.
 /// Opening `GgufFile` itself retains shared shard mappings and reads headers.
 /// Files must remain immutable; load still revalidates retained shard stamps.

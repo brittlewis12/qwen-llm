@@ -134,7 +134,7 @@ pub(super) fn validate(g: &GgufFile, t: &TensorDesc) -> Result<(), LoadError> {
     })?;
     Ok(())
 }
-fn row_stride(t: &TensorDesc) -> Result<usize, LoadError> {
+pub(super) fn row_stride(t: &TensorDesc) -> Result<usize, LoadError> {
     let (block_elements, block_bytes) = t
         .dtype
         .storage_layout()
@@ -176,26 +176,38 @@ pub(super) fn validate_encoding(g: &GgufFile) -> Result<(), LoadError> {
 /// table into Metal or materializes a full table in host memory.
 pub struct DiskEngram {
     gguf: Arc<GgufFile>,
+    context: companion::TableContext,
     tables: BTreeMap<usize, TableView>,
 }
 impl DiskEngram {
     pub fn new(gguf: Arc<GgufFile>) -> Result<Self, LoadError> {
+        gguf.revalidate_retained_shard_stamps()?;
         let p = metadata::parse(&gguf)?;
-        Ok(Self::for_tables(gguf, p.engram_tables))
+        p.engram_context.revalidate(&gguf)?;
+        Ok(Self::for_tables(gguf, p.engram_context))
     }
-    pub(super) fn for_tables(gguf: Arc<GgufFile>, tables: Vec<TableView>) -> Self {
+    pub(super) fn for_tables(gguf: Arc<GgufFile>, mut context: companion::TableContext) -> Self {
+        let tables = std::mem::take(&mut context.tables);
         Self {
             gguf,
+            context,
             tables: tables
                 .into_iter()
                 .map(|table| (table.layer, table))
                 .collect(),
         }
     }
+    pub fn source_groups(&self) -> &SourceGroups {
+        &self.context.stamps
+    }
+    pub fn revalidate_sources(&self) -> Result<(), LoadError> {
+        self.context.revalidate(&self.gguf)
+    }
     pub fn decode_rows(&self, layer: usize, ids: &[u64]) -> Result<Vec<f32>, String> {
         self.read_rows(layer, ids).map_err(|e| e.to_string())
     }
     pub fn read_rows(&self, layer: usize, ids: &[u64]) -> Result<Vec<f32>, LoadError> {
+        self.revalidate_sources()?;
         if ids.len() > MAX_OUTPUT_BYTES / (ROW_WIDTH * std::mem::size_of::<f32>()) {
             return Err(invalid("Engram request exceeds bounded output"));
         }
@@ -208,7 +220,10 @@ impl DiskEngram {
         }
         let t = &table.tensor;
         let stride = row_stride(t)?;
-        let mut raw = vec![0u8; stride];
+        let mut raw = Vec::new();
+        raw.try_reserve_exact(stride)
+            .map_err(|e| invalid(format!("Engram row allocation: {e}")))?;
+        raw.resize(stride, 0);
         let row = TensorDesc {
             name: t.name.clone(),
             shape: vec![ROW_WIDTH as u64, 1],
@@ -228,7 +243,10 @@ impl DiskEngram {
                 .and_then(|n| n.checked_mul(stride as u64))
                 .and_then(|n| t.data_offset.checked_add(n))
                 .ok_or_else(|| invalid("Engram row offset overflow"))?;
-            self.gguf
+            self.context
+                .auxiliary
+                .as_ref()
+                .unwrap_or(&self.gguf)
                 .read_shard_exact_at(t.shard_idx, offset, &mut raw)?;
             crate::codec::dequant_to_f32_in_place(&row, &raw, destination)
                 .map_err(|e| invalid(format!("Engram row decode {} {:?}: {e}", t.name, t.dtype)))?;
@@ -239,6 +257,7 @@ impl DiskEngram {
                 )));
             }
         }
+        self.revalidate_sources()?;
         Ok(output)
     }
 }

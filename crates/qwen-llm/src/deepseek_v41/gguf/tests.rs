@@ -1,6 +1,7 @@
 use super::*;
 use std::io::Write;
 
+mod gsq_loader;
 mod ownership_metadata;
 mod ple_engram;
 mod ple_split;

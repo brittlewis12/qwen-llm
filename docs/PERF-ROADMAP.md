@@ -60,6 +60,11 @@ Full/CED equality is not a race-freedom or independent model-numerics proof.
 Serving/CED-origin reuse has a separate acceptance boundary from cold run/bench.
 Long-context selector work removal and complete short-packet expert dataflow
 remain independent structural bets, not another adaptive-tail width sweep.
+The complete short-packet comparator is in flight
+(`perf/v41-short-packet-half-v35`): preserve the whole FFN and declared Half
+operands while comparing grouped bucketing against GPU-indexed native projections.
+Keep different reductions explicit and leave production capability/selection
+unchanged until stage-local numerical and inclusive operator qualification pass.
 The first exact selector leaf is in flight (`perf/v41-mask-valid-ids-v35`).
 Source `3ab20576` passes 144 actual M5 correctness cases and retains all 864 native
 samples, including the extra clear/scatter dispatch. Large-domain isolated times

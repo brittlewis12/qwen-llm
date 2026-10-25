@@ -57,7 +57,7 @@ dtype, shape, group, stride, alignment and buffer contract holds. More than sixt
 output groups use the existing general per-group fallback, rather than rejecting
 an otherwise executable shape or imposing an eight-group allowlist.
 
-Actual M5 validation-on qualification at `0d6bafaab` passes eleven fixture CPU
+Actual M5 validation-on qualification at `0d6bafaa` passes eleven fixture CPU
 tests and the ignored native/fallback GPU witness. Its fifteen cases cover
 1/8/16/17/32 distinct groups across F32, BF16 and Q8_0 stored weights, rank seven,
 nonzero binding offsets and two positions. Independent stored-precision decoding
@@ -103,7 +103,9 @@ within-artifact Full/CED agreement cannot exclude an error common to both arms.
 Frozen M5 oracle executable SHA256:
 `3077af67b7907dadf937751fc82fee78913315ba208c8ef9fa475e09e31d1ded`.
 Raw receipts are named `trust-v34-oracle-ring.*`; the retained comparison has
-120 complete rows, not only the first reported failure.
+120 complete rows, not only the first reported failure. The explicit `.failure.json`
+receipt confirms natural nonzero exit, no host-health abort and post-exit unchanged
+source, binary, token-fixture and model-file identities; it is not a passing receipt.
 
 ## Exact Mask-Publication Experiment
 

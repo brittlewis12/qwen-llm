@@ -24,6 +24,10 @@ See also: `docs/PERF-ROADMAP.md` for the current state and evidence index.
   clear/scatter even with its added dispatch, but timed mixed IDs include invalid
   and repeated entries. Claim valid-unique ascending/ranked confirmation on
   `perf/v41-mask-valid-ids-v35`; no production dispatch or dense allocation change.
+- Claim the complete short-packet comparator on `perf/v41-short-packet-half-v35`:
+  compare grouped versus indexed native Half routed projections inside the whole
+  FFN, preserving router/shared work and weight-before-down composition. Start
+  with independent operand/reduction proofs; production selectors stay unchanged.
 - Composed CED review catches admitted-width, optional-admission fallback and
   mixed-repetition telemetry defects before promotion. Repairs and current-source
   qualification remain in flight, independently of the numerical-oracle gap.

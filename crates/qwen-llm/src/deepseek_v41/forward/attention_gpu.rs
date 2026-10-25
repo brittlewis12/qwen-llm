@@ -10,6 +10,54 @@ mod tests;
 
 type Weights<'a> = op::AttentionWeights<Linear<'a>>;
 
+#[derive(Debug)]
+struct OutputANativeLayout {
+    group_input: usize,
+    group_bytes: u64,
+    bank_bytes: u64,
+}
+
+fn output_a_native_layout(c: &Config, dtype: GgmlType, offset: u64) -> Option<OutputANativeLayout> {
+    if !(1..=metal::ROUTE_MAX_TOP_K).contains(&c.groups)
+        || c.heads == 0
+        || !c.heads.is_multiple_of(c.groups)
+        || c.head_dim == 0
+        || c.output_rank == 0
+        || c.output_rank > u32::MAX as usize
+        || !offset.is_multiple_of(16)
+        || !metal::all_slots_down_native_supported(dtype)
+    {
+        return None;
+    }
+    let group_input = (c.heads / c.groups).checked_mul(c.head_dim)?;
+    if group_input > u32::MAX as usize {
+        return None;
+    }
+    let (block, bytes) = dtype.storage_layout()?;
+    if !(group_input as u64).is_multiple_of(block) {
+        return None;
+    }
+    let group_bytes = (group_input as u64 / block)
+        .checked_mul(bytes)?
+        .checked_mul(c.output_rank as u64)?;
+    let bank_bytes = group_bytes.checked_mul(c.groups as u64)?;
+    offset.checked_add(bank_bytes)?;
+    (group_input as u64)
+        .checked_mul(c.output_rank as u64)?
+        .checked_mul(c.groups as u64)?;
+    (group_input as u64)
+        .checked_mul(c.groups as u64)?
+        .checked_mul(4)?;
+    (c.output_rank as u64)
+        .checked_mul(c.groups as u64)?
+        .checked_mul(4)?;
+    Some(OutputANativeLayout {
+        group_input,
+        group_bytes,
+        bank_bytes,
+    })
+}
+
 struct Constants {
     query_norm: MetalTensor,
     kv_norm: MetalTensor,
@@ -55,7 +103,7 @@ pub(super) struct Workspace {
     low: MetalTensor,
     output: MetalTensor,
     status: MetalTensor,
-    /// Constant slot ids 0..groups and a READY status, so the eight
+    /// Constant slot ids 0..groups and a READY status, so eligible
     /// output_a group GEMVs dispatch once through the native expert kernel.
     group_ids: MetalTensor,
     ready: MetalTensor,
@@ -942,30 +990,35 @@ impl Workspace {
         })
     }
 
-    /// The eight output_a group matrices as one contiguous [group_input,
+    /// Eligible output_a group matrices as one contiguous [group_input,
     /// output_rank, groups] bank, when their views are adjacent slices of one
     /// resident tensor (how `bind` creates them).
     fn output_a_bank(w: &Weights<'_>, c: &Config) -> Option<MetalTensor> {
         let first = &w.output_a.first()?.tensor;
-        let group_input = c.heads / c.groups * c.head_dim;
-        let (block, block_bytes) = first.dtype.storage_layout()?;
-        if !(group_input as u64).is_multiple_of(block) || w.output_a.len() != c.groups {
+        let OutputANativeLayout {
+            group_input,
+            group_bytes,
+            bank_bytes,
+        } = output_a_native_layout(c, first.dtype, first.offset)?;
+        if w.output_a.len() != c.groups {
             return None;
         }
-        let row_bytes = group_input as u64 / block * block_bytes;
-        let group_bytes = row_bytes * c.output_rank as u64;
         for (g, linear) in w.output_a.iter().enumerate() {
             let t = &linear.tensor;
             if !std::ptr::eq(&*t.buffer, &*first.buffer)
-                || t.offset != first.offset + g as u64 * group_bytes
+                || t.offset
+                    != first
+                        .offset
+                        .checked_add((g as u64).checked_mul(group_bytes)?)?
                 || t.dtype != first.dtype
+                || t.shape != [group_input as u64, c.output_rank as u64]
                 || linear.input != group_input
                 || linear.output != c.output_rank
             {
                 return None;
             }
         }
-        if first.offset + group_bytes * c.groups as u64 > first.buffer.length() as u64 {
+        if first.offset.checked_add(bank_bytes)? > first.buffer.length() as u64 {
             return None;
         }
         Some(MetalTensor {
@@ -1647,9 +1700,7 @@ impl Workspace {
                 true,
             )?;
             let group_width = c.heads / c.groups * c.head_dim;
-            match Self::output_a_bank(w, c)
-                .filter(|bank| metal::all_slots_down_native_supported(bank.dtype))
-            {
+            match Self::output_a_bank(w, c) {
                 // One dispatch over all groups: slot g reads attended group g
                 // and writes low group g through the same native F32 GEMV the
                 // per-group path uses (experts = groups, ids = 0..groups).

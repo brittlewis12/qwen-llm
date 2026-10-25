@@ -26,6 +26,28 @@ pub(crate) fn gguf_with_banks(
     width: u32,
     banks: [GgmlType; 3],
 ) -> GgufFile {
+    gguf_with_contract(experts, context_key, width, banks, 20, 1)
+}
+
+pub(crate) fn gguf_with_execution(experts: u32, iterations: u32, topk: u32) -> GgufFile {
+    gguf_with_contract(
+        experts,
+        "deepseek41.context_length",
+        2,
+        [GgmlType::F32; 3],
+        iterations,
+        topk,
+    )
+}
+
+fn gguf_with_contract(
+    experts: u32,
+    context_key: &str,
+    width: u32,
+    banks: [GgmlType; 3],
+    iterations: u32,
+    topk: u32,
+) -> GgufFile {
     use Value::*;
     let h = u64::from(width);
     let mut tokens = Vec::new();
@@ -43,7 +65,7 @@ pub(crate) fn gguf_with_banks(
     let kv = vec![
         ("general.architecture", Text("deepseek41".into())),
         ("deepseek41.expert_count", Number(experts)),
-        ("deepseek41.expert_used_count", Number(1)),
+        ("deepseek41.expert_used_count", Number(topk)),
         ("deepseek41.block_count", Number(1)),
         ("deepseek41.vocab_size", Number(257)),
         ("deepseek41.embedding_length", Number(width)),
@@ -51,7 +73,7 @@ pub(crate) fn gguf_with_banks(
         ("deepseek41.attention.head_count_kv", Number(1)),
         ("deepseek41.expert_shared_count", Number(1)),
         ("deepseek41.hc_mult", Number(4)),
-        ("deepseek41.hc_sinkhorn_iters", Number(20)),
+        ("deepseek41.hc_sinkhorn_iters", Number(iterations)),
         ("deepseek41.index_topk", Number(512)),
         ("deepseek41.sliding_window", Number(128)),
         ("deepseek41.rms_norm_eps", Float(1e-20)),

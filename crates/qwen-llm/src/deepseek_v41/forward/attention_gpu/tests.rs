@@ -2,6 +2,7 @@ use super::*;
 use std::collections::BTreeMap;
 
 mod f32_pv_batch;
+mod output_a_strategy;
 mod query_batch;
 
 fn scheduled_weights<'a>(

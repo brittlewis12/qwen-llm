@@ -2,6 +2,7 @@
 //! Geometry comes from GGUF metadata; local memory fit is a runtime decision.
 
 pub mod engram;
+pub mod execution;
 pub mod forward;
 pub mod gguf;
 pub mod operators;

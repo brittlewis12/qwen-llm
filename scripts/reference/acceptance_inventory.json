@@ -36,6 +36,34 @@
   },
   {
     "target": "lib",
+    "name": "deepseek_v41::execution::tests::malformed_config_dimensions_and_controls_are_rejected_without_panics",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Reviewed host-only CED, request-planning, execution contract or synthetic storage control; no Metal context or dispatch."
+  },
+  {
+    "target": "lib",
+    "name": "deepseek_v41::execution::tests::released_math_and_nonfastpath_shapes_are_executable_without_fit_gate",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Reviewed host-only CED, request-planning, execution contract or synthetic storage control; no Metal context or dispatch."
+  },
+  {
+    "target": "lib",
+    "name": "deepseek_v41::execution::tests::routing_backend_limit_is_explicit",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Reviewed host-only CED, request-planning, execution contract or synthetic storage control; no Metal context or dispatch."
+  },
+  {
+    "target": "lib",
+    "name": "deepseek_v41::execution::tests::sinkhorn_backend_limit_is_explicit",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Reviewed host-only CED, request-planning, execution contract or synthetic storage control; no Metal context or dispatch."
+  },
+  {
+    "target": "lib",
     "name": "deepseek_v41::forward::attention_gpu::tests::admission_and_order_bounds",
     "class": "gpu",
     "ignored": false,
@@ -152,6 +180,90 @@
     "class": "gpu",
     "ignored": false,
     "reason": "Metal context, allocation or dispatch witness; parent GPU lane only."
+  },
+  {
+    "target": "lib",
+    "name": "deepseek_v41::forward::attention_gpu::tests::output_a_strategy::fixture_contracts::bank_and_low_guard_controls_detect_mutation",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Reviewed host-only CED, request-planning, execution contract or synthetic storage control; no Metal context or dispatch."
+  },
+  {
+    "target": "lib",
+    "name": "deepseek_v41::forward::attention_gpu::tests::output_a_strategy::fixture_contracts::exact_dispatch_contract_rejects_missing_extra_or_malformed_fallback_launches",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Reviewed host-only CED, request-planning, execution contract or synthetic storage control; no Metal context or dispatch."
+  },
+  {
+    "target": "lib",
+    "name": "deepseek_v41::forward::attention_gpu::tests::output_a_strategy::fixture_contracts::fixture_prices_bound_every_case_before_gpu_allocation",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Reviewed host-only CED, request-planning, execution contract or synthetic storage control; no Metal context or dispatch."
+  },
+  {
+    "target": "lib",
+    "name": "deepseek_v41::forward::attention_gpu::tests::output_a_strategy::fixture_contracts::independent_oracle_rejects_noop_zero_bank_permutations_and_nonfinite_values",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Reviewed host-only CED, request-planning, execution contract or synthetic storage control; no Metal context or dispatch."
+  },
+  {
+    "target": "lib",
+    "name": "deepseek_v41::forward::attention_gpu::tests::output_a_strategy::fixture_contracts::independent_stored_precision_decoder_has_known_q8_and_bfloat_values",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Reviewed host-only CED, request-planning, execution contract or synthetic storage control; no Metal context or dispatch."
+  },
+  {
+    "target": "lib",
+    "name": "deepseek_v41::forward::attention_gpu::tests::output_a_strategy::fixture_contracts::nested_autorelease_pools_release_position_objects_before_case_objects",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Reviewed host-only planning, metadata, NSObject lifetime, pure arithmetic, fake-state lifecycle or loopback fixture; no Metal context or real model import."
+  },
+  {
+    "target": "lib",
+    "name": "deepseek_v41::forward::attention_gpu::tests::output_a_strategy::fixture_contracts::stored_group_matrices_cover_offsets_strides_tails_and_distinct_ids",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Reviewed host-only CED, request-planning, execution contract or synthetic storage control; no Metal context or dispatch."
+  },
+  {
+    "target": "lib",
+    "name": "deepseek_v41::forward::attention_gpu::tests::output_a_strategy::fixture_contracts::weak_release_control_detects_strong_owner_escaping_pool_drain",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Reviewed host-only planning, metadata, NSObject lifetime, pure arithmetic, fake-state lifecycle or loopback fixture; no Metal context or real model import."
+  },
+  {
+    "target": "lib",
+    "name": "deepseek_v41::forward::attention_gpu::tests::output_a_strategy::grouped_decode_output_a_native_and_general_fallback_match",
+    "class": "gpu",
+    "ignored": true,
+    "reason": "Metal allocation/dispatch or self-leased device witness; excluded from CPU acceptance."
+  },
+  {
+    "target": "lib",
+    "name": "deepseek_v41::forward::attention_gpu::tests::output_a_strategy::native_group_count_limit_preserves_general_fallback",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Reviewed host-only CED, request-planning, execution contract or synthetic storage control; no Metal context or dispatch."
+  },
+  {
+    "target": "lib",
+    "name": "deepseek_v41::forward::attention_gpu::tests::output_a_strategy::native_layout_checks_dtype_alignment_and_quantized_rows",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Reviewed host-only CED, request-planning, execution contract or synthetic storage control; no Metal context or dispatch."
+  },
+  {
+    "target": "lib",
+    "name": "deepseek_v41::forward::attention_gpu::tests::output_a_strategy::native_layout_rejects_malformed_and_overflowing_limits_without_panics",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Reviewed host-only CED, request-planning, execution contract or synthetic storage control; no Metal context or dispatch."
   },
   {
     "target": "lib",
@@ -327,6 +439,13 @@
     "class": "gpu",
     "ignored": false,
     "reason": "Metal context, allocation or dispatch witness; parent GPU lane only."
+  },
+  {
+    "target": "lib",
+    "name": "deepseek_v41::forward::ffn_gpu::tests::execution_contract_rejections_match_ffn_workspace_and_composition_guards",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Reviewed host-only CED, request-planning, execution contract or synthetic storage control; no Metal context or dispatch."
   },
   {
     "target": "lib",
@@ -880,6 +999,55 @@
     "class": "gpu",
     "ignored": false,
     "reason": "Metal context, allocation or dispatch witness; parent GPU lane only."
+  },
+  {
+    "target": "lib",
+    "name": "deepseek_v41::gguf::tests::execution_contract::activation_aliases_conflict_in_either_order",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Reviewed host-only CED, request-planning, execution contract or synthetic storage control; no Metal context or dispatch."
+  },
+  {
+    "target": "lib",
+    "name": "deepseek_v41::gguf::tests::execution_contract::activation_aliases_each_and_equal_pair_preserve_silu_default",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Reviewed host-only CED, request-planning, execution contract or synthetic storage control; no Metal context or dispatch."
+  },
+  {
+    "target": "lib",
+    "name": "deepseek_v41::gguf::tests::execution_contract::activation_aliases_reject_unsupported_single_and_equal_pair",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Reviewed host-only CED, request-planning, execution contract or synthetic storage control; no Metal context or dispatch."
+  },
+  {
+    "target": "lib",
+    "name": "deepseek_v41::gguf::tests::execution_contract::activation_aliases_wrong_types_never_fall_back_to_missing_default",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Reviewed host-only CED, request-planning, execution contract or synthetic storage control; no Metal context or dispatch."
+  },
+  {
+    "target": "lib",
+    "name": "deepseek_v41::gguf::tests::execution_contract::positive_sinkhorn_counts_are_valid_plans_but_only_twenty_is_executable",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Reviewed host-only CED, request-planning, execution contract or synthetic storage control; no Metal context or dispatch."
+  },
+  {
+    "target": "lib",
+    "name": "deepseek_v41::gguf::tests::execution_contract::routing_topk_above_native_limit_is_not_malformed_metadata",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Reviewed host-only CED, request-planning, execution contract or synthetic storage control; no Metal context or dispatch."
+  },
+  {
+    "target": "lib",
+    "name": "deepseek_v41::gguf::tests::execution_contract::zero_sinkhorn_and_topk_outside_expert_count_remain_invalid_plans",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Reviewed host-only CED, request-planning, execution contract or synthetic storage control; no Metal context or dispatch."
   },
   {
     "target": "lib",

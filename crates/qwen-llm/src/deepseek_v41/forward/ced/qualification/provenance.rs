@@ -334,7 +334,7 @@ pub(super) fn loader_compiled_sources() -> &'static [(&'static str, &'static [u8
     macro_rules! embedded {
         ($($path:literal),+ $(,)?) => { &[$(($path, include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/../../", $path)).as_slice())),+] };
     }
-    embedded![
+    const SOURCES: &[(&str, &[u8])] = embedded![
         "crates/qwen-llm/src/deepseek_v41/gguf/companion.rs",
         "crates/qwen-llm/src/deepseek_v41/gguf/controls.rs",
         "crates/qwen-llm/src/deepseek_v41/gguf/metadata.rs",
@@ -342,7 +342,8 @@ pub(super) fn loader_compiled_sources() -> &'static [(&'static str, &'static [u8
         "crates/qwen-llm/src/deepseek_v41/gguf/engram.rs",
         "crates/qwen-llm/src/deepseek_v41/gguf/tests/gsq_loader.rs",
         "crates/qwen-llm/src/deepseek_v41/gguf/tests/binding_preflight.rs",
-    ]
+    ];
+    SOURCES
 }
 
 pub(super) fn checked_loader_sources(root: &Path) -> AResult<Vec<Value>> {

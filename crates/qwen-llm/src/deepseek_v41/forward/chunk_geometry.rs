@@ -201,6 +201,6 @@ fn full_and_ced_metadata_price_the_selected_runtime_width_not_a_fixed_2k_cap() {
             }
         }
     }
-    assert_eq!(prefill_rows_for_resident(200 << 30), 4096);
-    assert_eq!(prefill_rows_for_resident((200 << 30) + 1), 2048);
+    assert_eq!(prefill_rows_for_resident(240 << 30), 4096);
+    assert_eq!(prefill_rows_for_resident((240 << 30) + 1), 2048);
 }

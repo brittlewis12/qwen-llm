@@ -89,15 +89,16 @@ inline void moe_grouped_slots_mm_tensor_body(
     const short nr0 = ((int)args.M - r0 < TT_NR0) ? (short)((int)args.M - r0) : TT_NR0;
     const short nr1 = (count - r1 < TT_NR1) ? (short)(count - r1) : TT_NR1;
 
-    // Weight staging: thread -> (row lr0, 16-element half il0 of the 32-k slab).
-    // Rows past the tile edge clamp to the last valid row (duplicate writes of
-    // identical values; those output rows are discarded).
-    const short lr0 = ((short)tiitg / TT_NL0) < nr0 ? ((short)tiitg / TT_NL0) : nr0 - 1;
+    // Clamp source rows only; every physical fragment has one writer, including
+    // zero-filled tails consumed by the full tensor operation.
+    const short pr0 = (short)tiitg / TT_NL0;
+    const short lr0 = pr0 < nr0 ? pr0 : nr0 - 1;
     const short il0 = (tiitg % TT_NL0);
     short il = il0;
 
-    // Activation staging: thread -> (slot lr1, 8-element chunk iy).
-    const short lr1 = ((short)tiitg / TT_NL1) < nr1 ? ((short)tiitg / TT_NL1) : nr1 - 1;
+    // Activation staging: thread -> (physical slot pr1, 8-element chunk iy).
+    const short pr1 = (short)tiitg / TT_NL1;
+    const short lr1 = pr1 < nr1 ? pr1 : nr1 - 1;
     const short iy = 8 * (tiitg % TT_NL1);
 
     const short offset1 = il0 / NL;
@@ -106,14 +107,14 @@ inline void moe_grouped_slots_mm_tensor_body(
                                        + (ulong)offset1 * BYTES;
     const int slot_limit = int(args.slot_limit);
     const int slot_id = DENSE ? r1 + lr1 : ids[(ulong)im * args.N + (r1 + lr1)];
-    const bool slot_valid = slot_id >= 0 && slot_id < slot_limit;
+    const bool slot_valid = pr1 < nr1 && slot_id >= 0 && slot_id < slot_limit;
     const int b_row = (slot_valid ? slot_id : 0) / int(args.b_div);
     const ulong y_off = (ulong)args.stride_b * b_row + (ulong)iy;
     device const float * y_ptr = (device const float *)srcB_bytes + y_off;
     device const half * yh_ptr = (device const half *)srcB_bytes + y_off;
 
-    threadgroup half * stage_a = sa + lr0 * TT_NK + 16 * il0;
-    threadgroup half * stage_b = sb + lr1 * TT_NK + iy;
+    threadgroup half * stage_a = sa + pr0 * TT_NK + 16 * il0;
+    threadgroup half * stage_b = sb + pr1 * TT_NK + iy;
 
     // left = activations [32 slots x 32 k], right = weights [64 rows x 32 k]
     // read transposed; destination [32 slots x 64 rows] in registers.
@@ -132,10 +133,12 @@ inline void moe_grouped_slots_mm_tensor_body(
     }
 
     for (uint loop_k = 0; loop_k < args.K; loop_k += TT_NK) {
-        half4x4 temp_a;
-        DEQ(x_ptr, il, temp_a);
-        const half2x4 yv = HALF_ACT ? *((device const half2x4 *)yh_ptr)
-                                    : (half2x4)(*((device const float2x4 *)y_ptr));
+        half4x4 temp_a(0.0h);
+        if (pr0 < nr0) DEQ(x_ptr, il, temp_a);
+        const half2x4 yv = slot_valid
+            ? (HALF_ACT ? *((device const half2x4 *)yh_ptr)
+                        : (half2x4)(*((device const float2x4 *)y_ptr)))
+            : half2x4(0.0h);
 
         // The previous step's matmul must be done reading the slabs.
         threadgroup_barrier(mem_flags::mem_threadgroup);
@@ -212,7 +215,8 @@ kernel void kernel_moe_wide_probe_f16act(
 
     const short nr0 = min(int(args.M) - r0, TT_NR0);
     const short nr1 = min(count - r1, TT_NR1_WIDE);
-    const short lr0 = min(int(tiitg / TT_NL0), int(nr0) - 1);
+    const short pr0 = tiitg / TT_NL0;
+    const short lr0 = min(int(pr0), int(nr0) - 1);
     const short il0 = tiitg % TT_NL0;
     short il = il0;
     const short lr1 = tiitg / TT_NL1; // 0..31
@@ -236,7 +240,7 @@ kernel void kernel_moe_wide_probe_f16act(
     device const uchar * x_ptr = srcA + expert_stride * (ulong)im
         + (ulong)args.nb01 * (r0 + lr0)
         + (ulong)(il0 / NL) * BYTES;
-    threadgroup half * stage_a = sa + lr0 * TT_NK + 16 * il0;
+    threadgroup half * stage_a = sa + pr0 * TT_NK + 16 * il0;
     threadgroup half * stage_b0 = sb + lr1 * TT_NK + iy;
     threadgroup half * stage_b1 = sb + (lr1 + 32) * TT_NK + iy;
 
@@ -253,8 +257,8 @@ kernel void kernel_moe_wide_probe_f16act(
     for (ushort i = 0; i < acc.get_capacity(); ++i) acc[i] = 0.0f;
 
     for (uint loop_k = 0; loop_k < args.K; loop_k += TT_NK) {
-        half4x4 temp_a;
-        DEQ(x_ptr, il, temp_a);
+        half4x4 temp_a(0.0h);
+        if (pr0 < nr0) DEQ(x_ptr, il, temp_a);
         const half2x4 yv0 = ok0 ? *((device const half2x4 *)y0) : half2x4(0.0h);
         const half2x4 yv1 = ok1 ? *((device const half2x4 *)y1) : half2x4(0.0h);
 
@@ -435,7 +439,8 @@ inline void moe_mat_mat_tensor_wide_body(
     const short nr0 = ((int)args.M - r0 < TT_NR0) ? (short)((int)args.M - r0) : TT_NR0;
     const short nr1 = (count - r1 < TT_NR1_WIDE) ? (short)(count - r1) : TT_NR1_WIDE;
 
-    const short lr0 = ((short)tiitg / TT_NL0) < nr0 ? ((short)tiitg / TT_NL0) : nr0 - 1;
+    const short pr0 = (short)tiitg / TT_NL0;
+    const short lr0 = pr0 < nr0 ? pr0 : nr0 - 1;
     const short il0 = (tiitg % TT_NL0);
     short il = il0;
 
@@ -458,7 +463,7 @@ inline void moe_mat_mat_tensor_wide_body(
     device const half * yh_ptr0 = (device const half *)srcB_bytes + y_off0;
     device const half * yh_ptr1 = (device const half *)srcB_bytes + y_off1;
 
-    threadgroup half * stage_a = sa + lr0 * TT_NK + 16 * il0;
+    threadgroup half * stage_a = sa + pr0 * TT_NK + 16 * il0;
     threadgroup half * stage_b0 = sb + phys0 * TT_NK + iy;
     threadgroup half * stage_b1 = sb + phys1 * TT_NK + iy;
 
@@ -477,8 +482,8 @@ inline void moe_mat_mat_tensor_wide_body(
     }
 
     for (uint loop_k = 0; loop_k < args.K; loop_k += TT_NK) {
-        half4x4 temp_a;
-        DEQ(x_ptr, il, temp_a);
+        half4x4 temp_a(0.0h);
+        if (pr0 < nr0) DEQ(x_ptr, il, temp_a);
         const half2x4 yv0 = HALF_ACT ? *((device const half2x4 *)yh_ptr0)
                                      : (half2x4)(*((device const float2x4 *)y_ptr0));
         const half2x4 yv1 = HALF_ACT ? *((device const half2x4 *)yh_ptr1)
@@ -634,4 +639,3 @@ TT_INSTANTIATE_WIDE(iq2_xs,  QT_IQ2_XS_BYTES,  QT_IQ2_XS_NL,  qt_dequantize_iq2_
 TT_INSTANTIATE_WIDE(iq2_xxs, QT_IQ2_XXS_BYTES, QT_IQ2_XXS_NL, qt_dequantize_iq2_xxs)
 TT_INSTANTIATE_WIDE(iq1_s,   QT_IQ1_S_BYTES,   QT_IQ1_S_NL,   qt_dequantize_iq1_s)
 TT_INSTANTIATE_WIDE(iq1_m,   QT_IQ1_M_BYTES,   QT_IQ1_M_NL,   qt_dequantize_iq1_m)
-

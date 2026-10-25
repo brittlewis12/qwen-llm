@@ -46,6 +46,8 @@ fn native_pipeline_name(dtype: GgmlType) -> Option<String> {
         GgmlType::IQ2_XS => "iq2_xs",
         GgmlType::IQ2_XXS => "iq2_xxs",
         GgmlType::MXFP4 => "mxfp4",
+        GgmlType::IQ1_S => "iq1_s",
+        GgmlType::IQ1_M => "iq1_m",
         _ => return None,
     };
     Some(format!("kernel_expert_native_{suffix}_f32"))
@@ -66,7 +68,12 @@ pub fn all_slots_gate_up_native_rows_supported(gate: GgmlType, up: GgmlType) -> 
     [gate, up].into_iter().all(|t| {
         matches!(
             t,
-            GgmlType::IQ3_XXS | GgmlType::Q3_K | GgmlType::IQ2_XS | GgmlType::IQ2_XXS
+            GgmlType::IQ3_XXS
+                | GgmlType::Q3_K
+                | GgmlType::IQ2_XS
+                | GgmlType::IQ2_XXS
+                | GgmlType::IQ1_S
+                | GgmlType::IQ1_M
         )
     })
 }
@@ -74,7 +81,13 @@ pub fn all_slots_gate_up_native_rows_supported(gate: GgmlType, up: GgmlType) -> 
 pub fn all_slots_down_native_rows_supported(dtype: GgmlType) -> bool {
     matches!(
         dtype,
-        GgmlType::IQ3_XXS | GgmlType::IQ3_S | GgmlType::Q3_K | GgmlType::MXFP4 | GgmlType::IQ2_XXS
+        GgmlType::IQ3_XXS
+            | GgmlType::IQ3_S
+            | GgmlType::Q3_K
+            | GgmlType::MXFP4
+            | GgmlType::IQ2_XXS
+            | GgmlType::IQ1_S
+            | GgmlType::IQ1_M
     )
 }
 

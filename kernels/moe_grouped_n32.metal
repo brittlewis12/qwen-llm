@@ -62,7 +62,8 @@ kernel void kernel_moe_swiglu_clamped_grouped_slots_n32(
     const int r1 = tgpig.x * N32_NR1;
 
     const int count = counts[im];
-    if (count < int(args.min_count) || count > int(args.max_count) || r1 >= count) return;
+    if (count < 0 || uint(count) > args.n_tokens
+        || count < int(args.min_count) || count > int(args.max_count) || r1 >= count) return;
 
     const short nr0 = ((int)args.ffn - r0 < N32_NR0) ? (short)((int)args.ffn - r0) : N32_NR0;
     const short nr1 = (count - r1 < N32_NR1) ? (short)(count - r1) : N32_NR1;

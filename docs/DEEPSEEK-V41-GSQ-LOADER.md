@@ -3,9 +3,11 @@
 This is serialization/source compatibility, not a new GSQ implementation or an
 artifact promotion. It reuses the existing native expert capability gate,
 resident weight ownership/admission, GGUF split validation, HashConfig
-normalization, DiskEngram gather, and standard quantization codecs. No IQ1
-adapter, tokenizer identity map, hash parameter fallback, or new GPU path is
-introduced.
+normalization, DiskEngram gather, and standard quantization codecs. The joint
+integration additionally composes the reviewed existing-IQ1 expert adapters
+described in `docs/V41-IQ1-CAPABILITY-CENSUS.md`; this is not a new GSQ/RCO
+format or codec. The serialization bridge introduces no tokenizer identity
+map or hash parameter fallback.
 
 The CPU contract was checked against the saved headers and bounded controls for
 `ISTA-DASLab/DeepSeek-V4.1-Flash-1017-GSQ-RCO-GGUF` at revision
@@ -148,9 +150,11 @@ The ignored `cpu_only_sparse_header_control_replay` test accepts
 headers and only the exact saved control payloads, checks the control digest,
 and exercises CPU contracts for both variants. Sparse holes are NOT weights;
 the replay never calls resident loading, table gathers, or GPU APIs. IQ2_XS
-binds all 120 main-layer expert banks at this CPU contract level. IQ2_XXS
-metadata/control normalization succeeds while its IQ1 expert banks still fail
-the unchanged native bank gate.
+and IQ2_XXS both validate all 120 main-layer expert banks at this CPU contract
+level in the joint integration. IQ2_XXS includes 60 IQ1_M banks, admitted by
+the real native adapters rather than a relaxed loader gate. The replay checks
+unchanged typed controls, 4+1 source groups, and byte accounting for both
+variants; it remains a sparse-header/control proof, not a weight-payload run.
 
 Parent integration must include `gguf/companion.rs` and `gguf/controls.rs` in any
 frozen CDFwd/source inventory when joining this branch, plus
@@ -164,5 +168,9 @@ intended M5 with its native compiler/device tier and normal lease/admission;
 check actual resident windows, ownership, zero CPU weight shadow, and disk row
 source identity; run bounded nonzero load/prefill/decode checks and numerical
 comparisons against a qualified reference before any performance/quality or
-context-capacity claim. The 2.00 package still requires a separate IQ1 expert
-adapter before execution; the requested 2.25 package does not need IQ1 support.
+context-capacity claim. With the joint IQ1 adapters, the 2.00 IQ2_XXS package
+is now eligible at the serialization/native-capability level. That artifact
+has not been downloaded or full-model qualified here; this does not establish
+fit, quality, or speed for it or any smaller package. The requested 2.25
+package does not need IQ1 support. Its parent full-weight results remain
+separate and the CDFwd executor stack is not imported into this joint tree.

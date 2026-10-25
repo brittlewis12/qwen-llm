@@ -1,6 +1,7 @@
 use super::*;
 use crate::metal::test_support::*;
 
+mod iq1;
 mod wide_activation_type;
 
 const MOE_METAL: &str = include_str!(concat!(
@@ -345,6 +346,7 @@ fn f16_scale_offsets(dtype: GgmlType) -> &'static [usize] {
         | GgmlType::IQ3_S
         | GgmlType::IQ4_XS => &[0],
         GgmlType::MXFP4 => &[],
+        GgmlType::IQ1_S | GgmlType::IQ1_M => &[],
         other => panic!("no synthetic block recipe for {other:?}"),
     }
 }
@@ -386,6 +388,10 @@ fn synthetic_bank(
                     // E8M0 shared exponent: 2^(e-127) over a weight-like
                     // range (2^-10 .. 2^-4); codes stay random.
                     block[0] = 117 + (rng.next_u32() % 7) as u8;
+                    continue;
+                }
+                if matches!(dtype, GgmlType::IQ1_S | GgmlType::IQ1_M) {
+                    iq1_test_scale(block, dtype, rng.signed(1.0) / 256.0);
                     continue;
                 }
                 for (i, &off) in offsets.iter().enumerate() {
@@ -638,9 +644,11 @@ fn cpu_swiglu_with_clamp(
 }
 
 fn run_generic_down_case(dtype: GgmlType) {
+    let _lease = crate::metal::acquire_metal_benchmark_lease().expect("production GPU lease");
     let Some(ctx) = metal_test_context() else {
         return;
     };
+    admit_iq1_expert_fixture(&ctx);
     let r = routing();
     let n_slots = r.n_tokens * r.topk;
     let bank = synthetic_bank(
@@ -689,9 +697,11 @@ fn run_generic_down_case(dtype: GgmlType) {
 }
 
 fn run_generic_gate_up_case(gate_dtype: GgmlType, up_dtype: GgmlType) {
+    let _lease = crate::metal::acquire_metal_benchmark_lease().expect("production GPU lease");
     let Some(ctx) = metal_test_context() else {
         return;
     };
+    admit_iq1_expert_fixture(&ctx);
     let r = routing();
     let n_slots = r.n_tokens * r.topk;
     let gate_bank = synthetic_bank(
@@ -849,6 +859,8 @@ generic_grouped_moe_cases! {
     generic_grouped_moe_down_f32_matches_cpu, generic_grouped_moe_gate_up_f32_matches_cpu => GgmlType::F32;
     generic_grouped_moe_down_f16_matches_cpu, generic_grouped_moe_gate_up_f16_matches_cpu => GgmlType::F16;
     generic_grouped_moe_down_bf16_matches_cpu, generic_grouped_moe_gate_up_bf16_matches_cpu => GgmlType::BF16;
+    generic_grouped_moe_down_iq1_s_matches_cpu, generic_grouped_moe_gate_up_iq1_s_matches_cpu => GgmlType::IQ1_S;
+    generic_grouped_moe_down_iq1_m_matches_cpu, generic_grouped_moe_gate_up_iq1_m_matches_cpu => GgmlType::IQ1_M;
 }
 
 // ---------------------------------------------------------------------------
@@ -860,12 +872,12 @@ generic_grouped_moe_cases! {
 /// only the reduction order differs.
 fn assert_tile_agreement(label: &str, tensor: &[f32], generic: &[f32]) {
     assert_eq!(tensor.len(), generic.len());
+    assert!(
+        tensor.iter().chain(generic).all(|v| v.is_finite()),
+        "{label}: nonfinite operand"
+    );
     let ref_max = generic.iter().map(|v| v.abs()).fold(0f32, f32::max);
-    let max_abs = tensor
-        .iter()
-        .zip(generic)
-        .map(|(a, b)| (a - b).abs())
-        .fold(0f32, f32::max);
+    let max_abs = max_abs_diff_finite(label, tensor, generic);
     eprintln!("[{label}] tensor-vs-generic max|delta|={max_abs:.3e} ref_max={ref_max:.3e}");
     assert!(
         max_abs <= 2e-3 * ref_max + 1e-5,
@@ -874,9 +886,18 @@ fn assert_tile_agreement(label: &str, tensor: &[f32], generic: &[f32]) {
 }
 
 fn run_tensor_down_case(dtype: GgmlType) {
+    let _lease = crate::metal::acquire_metal_benchmark_lease().expect("production GPU lease");
     let Some(ctx) = metal_test_context() else {
         return;
     };
+    if matches!(dtype, GgmlType::IQ1_S | GgmlType::IQ1_M) {
+        admit_iq1_expert_fixture(&ctx);
+        assert!(
+            moe_grouped_tensor_available(&ctx),
+            "IQ1 test requires actual M5 execution: {:?}",
+            ctx.tensor_ops_status()
+        );
+    }
     if !moe_grouped_tensor_available(&ctx) {
         eprintln!("tensor tier unavailable: {:?}", ctx.tensor_ops_status());
         return;
@@ -936,9 +957,18 @@ fn run_tensor_down_case(dtype: GgmlType) {
 }
 
 fn run_tensor_gate_up_case(dtype: GgmlType) {
+    let _lease = crate::metal::acquire_metal_benchmark_lease().expect("production GPU lease");
     let Some(ctx) = metal_test_context() else {
         return;
     };
+    if matches!(dtype, GgmlType::IQ1_S | GgmlType::IQ1_M) {
+        admit_iq1_expert_fixture(&ctx);
+        assert!(
+            moe_grouped_tensor_available(&ctx),
+            "IQ1 test requires actual M5 execution: {:?}",
+            ctx.tensor_ops_status()
+        );
+    }
     if !moe_grouped_tensor_available(&ctx) {
         eprintln!("tensor tier unavailable: {:?}", ctx.tensor_ops_status());
         return;
@@ -1067,13 +1097,15 @@ fn run_tensor_gate_up_case(dtype: GgmlType) {
 }
 
 macro_rules! tensor_grouped_moe_cases {
-    ($($down:ident, $gate_up:ident => $dtype:expr;)*) => {
+    ($($(#[$attr:meta])* $down:ident, $gate_up:ident => $dtype:expr;)*) => {
         $(
+            $(#[$attr])*
             #[test]
             fn $down() {
                 run_tensor_down_case($dtype);
             }
 
+            $(#[$attr])*
             #[test]
             fn $gate_up() {
                 run_tensor_gate_up_case($dtype);
@@ -1111,15 +1143,28 @@ tensor_grouped_moe_cases! {
     tensor_grouped_moe_down_f32_matches, tensor_grouped_moe_gate_up_f32_matches => GgmlType::F32;
     tensor_grouped_moe_down_f16_matches, tensor_grouped_moe_gate_up_f16_matches => GgmlType::F16;
     tensor_grouped_moe_down_bf16_matches, tensor_grouped_moe_gate_up_bf16_matches => GgmlType::BF16;
+    #[ignore = "requires M5; run explicitly with --ignored"]
+    tensor_grouped_moe_down_iq1_s_matches, tensor_grouped_moe_gate_up_iq1_s_matches => GgmlType::IQ1_S;
+    #[ignore = "requires M5; run explicitly with --ignored"]
+    tensor_grouped_moe_down_iq1_m_matches, tensor_grouped_moe_gate_up_iq1_m_matches => GgmlType::IQ1_M;
 }
 
 /// Dense tensor mat-mat against the CPU reference and the simdgroup
 /// `mat_mat` dispatch at a ragged shape (rows not a multiple of 32, M not
 /// a multiple of 64).
 fn run_tensor_dense_case(dtype: GgmlType) {
+    let _lease = crate::metal::acquire_metal_benchmark_lease().expect("production GPU lease");
     let Some(ctx) = metal_test_context() else {
         return;
     };
+    if matches!(dtype, GgmlType::IQ1_S | GgmlType::IQ1_M) {
+        admit_iq1_expert_fixture(&ctx);
+        assert!(
+            moe_grouped_tensor_available(&ctx),
+            "IQ1 test requires actual M5 execution: {:?}",
+            ctx.tensor_ops_status()
+        );
+    }
     if !moe_grouped_tensor_available(&ctx) {
         eprintln!("tensor tier unavailable: {:?}", ctx.tensor_ops_status());
         return;
@@ -1181,6 +1226,7 @@ fn run_tensor_dense_case(dtype: GgmlType) {
 /// tile at ragged shapes (partial first and second slot groups, output-row
 /// tails).
 fn run_tensor_dense_wide_case(n_out: usize, rows: usize, seed: u64) {
+    let _lease = crate::metal::acquire_metal_benchmark_lease().expect("production GPU lease");
     let Some(ctx) = metal_test_context() else {
         return;
     };
@@ -1235,6 +1281,7 @@ fn tensor_dense_wide_batch_timing() {
     if std::env::var_os("QWEN_V41_TILE_TIMING").is_none() {
         return;
     }
+    let _lease = crate::metal::acquire_metal_benchmark_lease().expect("production GPU lease");
     let Some(ctx) = metal_test_context() else {
         return;
     };
@@ -1281,8 +1328,9 @@ fn tensor_dense_wide_batch_timing() {
 }
 
 macro_rules! tensor_dense_cases {
-    ($($name:ident => $dtype:expr;)*) => {
+    ($($(#[$attr:meta])* $name:ident => $dtype:expr;)*) => {
         $(
+            $(#[$attr])*
             #[test]
             fn $name() {
                 run_tensor_dense_case($dtype);
@@ -1320,6 +1368,10 @@ tensor_dense_cases! {
     tensor_dense_f32_matches => GgmlType::F32;
     tensor_dense_f16_matches => GgmlType::F16;
     tensor_dense_bf16_matches => GgmlType::BF16;
+    #[ignore = "requires M5; run explicitly with --ignored"]
+    tensor_dense_iq1_s_matches => GgmlType::IQ1_S;
+    #[ignore = "requires M5; run explicitly with --ignored"]
+    tensor_dense_iq1_m_matches => GgmlType::IQ1_M;
 }
 
 /// Opt-in A/B of the dense tensor tile against the simdgroup `mat_mat`
@@ -1412,9 +1464,11 @@ fn generic_grouped_moe_gate_up_mixed_iq4_xs_q8_0_matches_cpu() {
 
 #[test]
 fn generic_grouped_moe_gate_up_mixed_rejects_concurrent_encoder() {
+    let _lease = crate::metal::acquire_metal_benchmark_lease().expect("production GPU lease");
     let Some(ctx) = metal_test_context() else {
         return;
     };
+    admit_iq1_expert_fixture(&ctx);
     let r = routing();
     let g_bank = synthetic_bank(GgmlType::Q4_K, GU_N_HIDDEN, GU_N_FFN, r.n_expert, 1);
     let u_bank = synthetic_bank(GgmlType::Q8_0, GU_N_HIDDEN, GU_N_FFN, r.n_expert, 2);
@@ -1466,6 +1520,7 @@ fn generic_grouped_moe_gate_up_mixed_rejects_concurrent_encoder() {
 /// Generic Q5_K down vs the hand-tuned Q5_K grouped down (same tile math).
 #[test]
 fn generic_grouped_moe_down_q5_k_matches_specialized() {
+    let _lease = crate::metal::acquire_metal_benchmark_lease().expect("production GPU lease");
     let Some(ctx) = metal_test_context() else {
         return;
     };
@@ -1519,9 +1574,11 @@ fn generic_grouped_moe_down_q5_k_matches_specialized() {
 /// Generic Q4_K / Q5_K SwiGLU vs the hand-tuned grouped n16 kernels.
 #[test]
 fn generic_grouped_moe_gate_up_q4_k_q5_k_match_specialized() {
+    let _lease = crate::metal::acquire_metal_benchmark_lease().expect("production GPU lease");
     let Some(ctx) = metal_test_context() else {
         return;
     };
+    admit_iq1_expert_fixture(&ctx);
     let r = routing();
     let n_slots = r.n_tokens * r.topk;
     let mut rng = Lcg(0x77);
@@ -1632,9 +1689,11 @@ fn generic_grouped_moe_gate_up_q4_k_q5_k_match_specialized() {
 
 #[test]
 fn generic_grouped_moe_rejects_bad_contracts() {
+    let _lease = crate::metal::acquire_metal_benchmark_lease().expect("production GPU lease");
     let Some(ctx) = metal_test_context() else {
         return;
     };
+    admit_iq1_expert_fixture(&ctx);
     let r = routing();
     let n_slots = r.n_tokens * r.topk;
     let bank = synthetic_bank(GgmlType::Q4_K, DOWN_N_IN, DOWN_N_OUT, r.n_expert, 3);
@@ -1652,7 +1711,7 @@ fn generic_grouped_moe_rejects_bad_contracts() {
     let out_t = MetalTensor::zeros_f32(&ctx, vec![(n_slots * DOWN_N_OUT) as u64]).unwrap();
     let unsupported = MetalTensor::zeros_f32(&ctx, vec![4]).unwrap();
     let unsupported = MetalTensor {
-        dtype: GgmlType::IQ1_S,
+        dtype: GgmlType::I32,
         ..unsupported
     };
     let cmd = ctx.queue.commandBuffer().expect("command buffer");

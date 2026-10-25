@@ -79,6 +79,10 @@
 #define QT_IQ2_XS_NL      16
 #define QT_IQ2_XXS_BYTES  66
 #define QT_IQ2_XXS_NL     16
+#define QT_IQ1_S_BYTES    50
+#define QT_IQ1_S_NL       16
+#define QT_IQ1_M_BYTES    56
+#define QT_IQ1_M_NL       16
 
 #define QT_QK_K 256
 
@@ -924,6 +928,28 @@ inline void qt_dequantize_iq2_xxs(device const uchar * blk,
                                   thread half4x4 & reg) {
     float4x4 w;
     iq2_xxs_dequant16(blk, uint(il), w);
+    QT_FOR_UNROLL (uint i = 0; i < 16; ++i) {
+        reg[i / 4][i % 4] = half(w[i / 4][i % 4]);
+    }
+}
+
+// Keep canonical F32 decoding, then narrow only the final coefficients.
+#include "iq1_decode.metalh"
+inline void qt_dequantize_iq1_s(device const uchar * blk,
+                                short il,
+                                thread half4x4 & reg) {
+    float4x4 w;
+    iq1_dequant16(blk, uint(il), false, w);
+    QT_FOR_UNROLL (uint i = 0; i < 16; ++i) {
+        reg[i / 4][i % 4] = half(w[i / 4][i % 4]);
+    }
+}
+
+inline void qt_dequantize_iq1_m(device const uchar * blk,
+                                short il,
+                                thread half4x4 & reg) {
+    float4x4 w;
+    iq1_dequant16(blk, uint(il), true, w);
     QT_FOR_UNROLL (uint i = 0; i < 16; ++i) {
         reg[i / 4][i % 4] = half(w[i / 4][i % 4]);
     }

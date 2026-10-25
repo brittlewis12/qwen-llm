@@ -18,6 +18,9 @@ pub(super) fn bank(
             .collect();
         if dtype == GgmlType::MXFP4 {
             b[0] = 116 + ((ordinal + seed) % 5) as u8;
+        } else if matches!(dtype, GgmlType::IQ1_S | GgmlType::IQ1_M) {
+            let scale = (1 + (ordinal + seed) % 7) as f32 / 65536.0;
+            metal::iq1_test_scale(&mut b, dtype, scale);
         } else {
             let offset = if dtype == GgmlType::Q3_K { 108 } else { 0 };
             let sign = if (ordinal + seed) % 2 == 0 { 1.0 } else { -1.0 };

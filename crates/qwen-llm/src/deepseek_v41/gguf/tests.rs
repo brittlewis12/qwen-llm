@@ -420,6 +420,8 @@ fn metadata_expert_counts_and_native_dtypes() {
             (GgmlType::Q8_0, 32),
             (GgmlType::IQ4_NL, 32),
             (GgmlType::Q2_K, 256),
+            (GgmlType::IQ1_S, 256),
+            (GgmlType::IQ1_M, 256),
         ] {
             let g = fixture(experts, dtype, width, false);
             let p = plan(&g).unwrap();
@@ -468,6 +470,50 @@ fn inconsistent_geometry_fails() {
         .unwrap()
         .shape[2] = 272;
     assert!(plan(g).is_err());
+}
+
+#[test]
+fn iq1_expert_bank_capability_does_not_relax_type_geometry_or_storage() {
+    for dtype in [GgmlType::IQ1_S, GgmlType::IQ1_M] {
+        assert!(plan(&fixture(3, dtype, 256, false)).is_ok());
+        let g = fixture(3, dtype, 256, false);
+        let mut partial = g.find("blk.0.ffn_gate_exps.weight").unwrap().clone();
+        partial.shape[0] = 128;
+        let error = validate_storage(&partial).unwrap_err().to_string();
+        assert!(error.contains("partial quantization row"), "{error}");
+        for unsupported in [GgmlType::Unknown, GgmlType::I32] {
+            let mut g = fixture(3, dtype, 256, false);
+            Arc::get_mut(&mut g)
+                .unwrap()
+                .tensors
+                .iter_mut()
+                .find(|t| names::bank(&t.name).is_some())
+                .unwrap()
+                .dtype = unsupported;
+            let error = plan(&g).unwrap_err().to_string();
+            assert!(error.contains("unsupported bank geometry/type"), "{error}");
+        }
+        let mut g = fixture(3, dtype, 256, false);
+        Arc::get_mut(&mut g)
+            .unwrap()
+            .tensors
+            .iter_mut()
+            .find(|t| names::bank(&t.name).is_some())
+            .unwrap()
+            .shape[2] = 2;
+        let error = plan(&g).unwrap_err().to_string();
+        assert!(error.contains("unsupported bank geometry/type"), "{error}");
+        let mut g = fixture(3, dtype, 256, false);
+        Arc::get_mut(&mut g)
+            .unwrap()
+            .tensors
+            .iter_mut()
+            .find(|t| names::bank(&t.name).is_some())
+            .unwrap()
+            .n_bytes -= 1;
+        let error = plan(&g).unwrap_err().to_string();
+        assert!(error.contains("storage size mismatch"), "{error}");
+    }
 }
 #[test]
 fn disk_engram_retains_handle_and_bounds_reads() {

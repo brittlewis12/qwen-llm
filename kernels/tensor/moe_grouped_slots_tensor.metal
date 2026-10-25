@@ -83,7 +83,8 @@ inline void moe_grouped_slots_mm_tensor_body(
     const int r1 = tgpig.x * TT_NR1;
 
     const int count = DENSE ? int(args.N) : counts[im];
-    if (count < int(args.min_count) || count > int(args.max_count) || r1 >= count) return;
+    if (count < 0 || uint(count) > args.N
+        || count < int(args.min_count) || count > int(args.max_count) || r1 >= count) return;
 
     const short nr0 = ((int)args.M - r0 < TT_NR0) ? (short)((int)args.M - r0) : TT_NR0;
     const short nr1 = (count - r1 < TT_NR1) ? (short)(count - r1) : TT_NR1;
@@ -206,7 +207,8 @@ kernel void kernel_moe_wide_probe_f16act(
     const int r0 = tgpig.y * TT_NR0;
     const int r1 = tgpig.x * TT_NR1_WIDE;
     const int count = counts[im];
-    if (r1 >= count) return;
+    if (count < 0 || uint(count) > args.N
+        || count < int(args.min_count) || count > int(args.max_count) || r1 >= count) return;
 
     const short nr0 = min(int(args.M) - r0, TT_NR0);
     const short nr1 = min(count - r1, TT_NR1_WIDE);
@@ -595,6 +597,8 @@ TT_INSTANTIATE(bf16,    QT_BF16_BYTES,    QT_BF16_NL,    qt_dequantize_bf16)
 TT_INSTANTIATE(mxfp4,   QT_MXFP4_BYTES,   QT_MXFP4_NL,   qt_dequantize_mxfp4)
 TT_INSTANTIATE(iq2_xs,  QT_IQ2_XS_BYTES,  QT_IQ2_XS_NL,  qt_dequantize_iq2_xs)
 TT_INSTANTIATE(iq2_xxs, QT_IQ2_XXS_BYTES, QT_IQ2_XXS_NL, qt_dequantize_iq2_xxs)
+TT_INSTANTIATE(iq1_s,   QT_IQ1_S_BYTES,   QT_IQ1_S_NL,   qt_dequantize_iq1_s)
+TT_INSTANTIATE(iq1_m,   QT_IQ1_M_BYTES,   QT_IQ1_M_NL,   qt_dequantize_iq1_m)
 
 // The wide dense tile is instantiated for the Q8_0 projections V4.1 uses
 // (q/kv/output and the shared expert); other dtypes keep the 32-slot form.
@@ -628,4 +632,6 @@ TT_INSTANTIATE_WIDE(bf16,    QT_BF16_BYTES,    QT_BF16_NL,    qt_dequantize_bf16
 TT_INSTANTIATE_WIDE(mxfp4,   QT_MXFP4_BYTES,   QT_MXFP4_NL,   qt_dequantize_mxfp4)
 TT_INSTANTIATE_WIDE(iq2_xs,  QT_IQ2_XS_BYTES,  QT_IQ2_XS_NL,  qt_dequantize_iq2_xs)
 TT_INSTANTIATE_WIDE(iq2_xxs, QT_IQ2_XXS_BYTES, QT_IQ2_XXS_NL, qt_dequantize_iq2_xxs)
+TT_INSTANTIATE_WIDE(iq1_s,   QT_IQ1_S_BYTES,   QT_IQ1_S_NL,   qt_dequantize_iq1_s)
+TT_INSTANTIATE_WIDE(iq1_m,   QT_IQ1_M_BYTES,   QT_IQ1_M_NL,   qt_dequantize_iq1_m)
 

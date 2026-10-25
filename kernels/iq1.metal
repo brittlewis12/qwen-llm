@@ -3,9 +3,7 @@
 // Copyright (c) 2023-2026 The ggml authors. MIT license in iq1_grid.metalh.
 #include <metal_stdlib>
 using namespace metal;
-#include "iq1_grid.metalh"
-
-#define IQ1_UNROLL _Pragma("clang loop unroll(full)") for
+#include "iq1_decode.metalh"
 
 struct iq1_args {
     uint K;
@@ -14,45 +12,6 @@ struct iq1_args {
     uint row_bytes;
     uint is_m;
 };
-
-// Only ushort loads: IQ1_S blocks have a 50-byte stride. IQ1_M's half
-// scale is distributed over the high nibbles of four ushort scale words.
-inline constant char * iq1_grid8(device const uchar * block, uint group8,
-        bool is_m, thread float & dl, thread float & delta) {
-    uint code;
-    if (is_m) {
-        device const ushort * sc = (device const ushort *)(block + 48);
-        const ushort bits = ushort((sc[0] >> 12) | ((sc[1] >> 8) & 0x00f0u)
-            | ((sc[2] >> 4) & 0x0f00u) | (sc[3] & 0xf000u));
-        const uint qh = uint(block[32u + group8 / 2u]) >> (4u * (group8 % 2u));
-        code = uint(block[group8]) | ((qh & 7u) << 8);
-        const uint scale = (uint(sc[group8 / 8u]) >> (3u * ((group8 / 2u) % 4u))) & 7u;
-        dl = float(as_type<half>(bits)) * float(2u * scale + 1u);
-        delta = (qh & 8u) ? -0.125f : 0.125f;
-    } else {
-        const uint qh = ((device const ushort *)(block + 34))[group8 / 4u];
-        code = uint(block[2u + group8]) | (((qh >> (3u * (group8 % 4u))) & 7u) << 8);
-        dl = float(((device const half *)block)[0]) * float(2u * ((qh >> 12) & 7u) + 1u);
-        delta = (qh & 0x8000u) ? -0.125f : 0.125f;
-    }
-    return (constant char *)(iq1_grid + code);
-}
-
-inline float iq1_value(device const uchar * block, uint i, bool is_m) {
-    float dl, delta;
-    constant char * grid = iq1_grid8(block, i / 8u, is_m, dl, delta);
-    return dl * (float(grid[i % 8u]) + delta);
-}
-
-inline void iq1_dequant16(device const uchar * block, uint il, bool is_m, thread float4x4 & w) {
-    IQ1_UNROLL (uint l = 0; l < 2; ++l) {
-        float dl, delta;
-        constant char * grid = iq1_grid8(block, 2u * il + l, is_m, dl, delta);
-        IQ1_UNROLL (uint j = 0; j < 8; ++j) {
-            w[2u * l + j / 4u][j % 4u] = dl * (float(grid[j]) + delta);
-        }
-    }
-}
 
 kernel void kernel_mat_vec_iq1_f32(
         constant iq1_args & args [[buffer(0)]],

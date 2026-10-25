@@ -10,6 +10,7 @@ const IDS: [i32; 7] = [2, 0, 2, -1, EXPERTS as i32, i32::MIN, i32::MAX];
 
 mod decode_probe;
 mod half_rows;
+mod iq1;
 mod rows;
 
 fn production_lease() -> impl Sized {
@@ -31,6 +32,7 @@ fn large_banks_case(dtype: GgmlType, widths: &[usize]) {
     let Some(ctx) = metal_test_context() else {
         return;
     };
+    crate::metal::admit_iq1_expert_fixture(&ctx);
     for experts in [272usize, 320, 384] {
         for &k in widths {
             let m = 5;
@@ -125,6 +127,7 @@ fn native_mxfp4_ggml_scale_edges_f32_precision_and_clamp_asymmetry() {
     let Some(ctx) = metal_test_context() else {
         return;
     };
+    crate::metal::admit_iq1_expert_fixture(&ctx);
     let k = 32;
     // Basis probes cover both nibble planes and every code. High exponents
     // use only finite GGML codes; 255 is not the source converter's contract.
@@ -213,7 +216,13 @@ fn formats() -> Vec<GgmlType> {
     GROUPED_PROJECTION_DTYPES
         .iter()
         .copied()
-        .chain([GgmlType::IQ2_XS, GgmlType::IQ2_XXS, GgmlType::MXFP4])
+        .chain([
+            GgmlType::IQ2_XS,
+            GgmlType::IQ2_XXS,
+            GgmlType::MXFP4,
+            GgmlType::IQ1_S,
+            GgmlType::IQ1_M,
+        ])
         .collect()
 }
 
@@ -296,6 +305,12 @@ fn bank_bytes_for_experts(
             .collect();
         if dtype == GgmlType::MXFP4 {
             b[0] = 120 + ((ordinal + seed) % 5) as u8;
+            result.extend(b);
+            continue;
+        }
+        if matches!(dtype, GgmlType::IQ1_S | GgmlType::IQ1_M) {
+            let scale = (1 + (ordinal + seed) % 7) as f32 * 0.0031;
+            crate::metal::iq1_test_scale(&mut b, dtype, scale);
             result.extend(b);
             continue;
         }
@@ -456,6 +471,7 @@ fn native_mixed_gate_up_cpu_oracles_and_route_rejection() {
     let Some(ctx) = metal_test_context() else {
         return;
     };
+    crate::metal::admit_iq1_expert_fixture(&ctx);
     for (g, u) in [
         (GgmlType::Q2_K, GgmlType::Q3_K),
         (GgmlType::IQ2_S, GgmlType::IQ3_S),
@@ -497,6 +513,7 @@ fn native_all_down_formats_cpu_oracle_offsets_and_slot_isolation() {
     let Some(ctx) = metal_test_context() else {
         return;
     };
+    crate::metal::admit_iq1_expert_fixture(&ctx);
     for dtype in formats() {
         let (block, _) = dtype.storage_layout().unwrap();
         let widths = if block == 1 {
@@ -568,25 +585,18 @@ fn native_all_down_formats_cpu_oracle_offsets_and_slot_isolation() {
 
 #[test]
 fn native_validation_rejects_before_any_dispatch() {
+    native_validation_case(GgmlType::Q2_K, GgmlType::Q3_K);
+}
+
+fn native_validation_case(gate_type: GgmlType, up_type: GgmlType) {
     let _lease = production_lease();
     let Some(ctx) = metal_test_context() else {
         return;
     };
+    crate::metal::admit_iq1_expert_fixture(&ctx);
     let (k, m, top_k) = (256, 7, IDS.len());
-    let gate = bank(
-        &ctx,
-        &bank_bytes(GgmlType::Q2_K, k, m, 3),
-        GgmlType::Q2_K,
-        k,
-        m,
-    );
-    let up = bank(
-        &ctx,
-        &bank_bytes(GgmlType::Q3_K, k, m, 7),
-        GgmlType::Q3_K,
-        k,
-        m,
-    );
+    let gate = bank(&ctx, &bank_bytes(gate_type, k, m, 3), gate_type, k, m);
+    let up = bank(&ctx, &bank_bytes(up_type, k, m, 7), up_type, k, m);
     let input = f32_view(&ctx, &values(k, 9), &[k], 0);
     let ids = i32_view(&ctx, &IDS);
     let status = i32_view(&ctx, &[ROUTE_STATUS_READY]);
@@ -728,6 +738,7 @@ fn native_dense_preserves_f32_operands_and_range() {
     let Some(ctx) = metal_test_context() else {
         return;
     };
+    crate::metal::admit_iq1_expert_fixture(&ctx);
     let (k, m) = (17, 5);
     for dtype in [GgmlType::F32, GgmlType::BF16, GgmlType::F16] {
         let mut bytes = Vec::new();

@@ -1,5 +1,6 @@
 //! Tiny header fixtures shared by CLI unit tests; never loaded on Metal.
 use qwen_llm::gguf::GgufFile;
+use qwen_llm::tensor::GgmlType;
 use std::io::Write;
 
 enum Value {
@@ -16,7 +17,17 @@ fn string(out: &mut Vec<u8>, value: &str) {
 }
 
 pub(crate) fn gguf(experts: u32, context_key: &str) -> GgufFile {
+    gguf_with_banks(experts, context_key, 2, [GgmlType::F32; 3])
+}
+
+pub(crate) fn gguf_with_banks(
+    experts: u32,
+    context_key: &str,
+    width: u32,
+    banks: [GgmlType; 3],
+) -> GgufFile {
     use Value::*;
+    let h = u64::from(width);
     let mut tokens = Vec::new();
     let mut extra = 256;
     for byte in 0..=255u32 {
@@ -35,8 +46,8 @@ pub(crate) fn gguf(experts: u32, context_key: &str) -> GgufFile {
         ("deepseek41.expert_used_count", Number(1)),
         ("deepseek41.block_count", Number(1)),
         ("deepseek41.vocab_size", Number(257)),
-        ("deepseek41.embedding_length", Number(2)),
-        ("deepseek41.expert_feed_forward_length", Number(2)),
+        ("deepseek41.embedding_length", Number(width)),
+        ("deepseek41.expert_feed_forward_length", Number(width)),
         ("deepseek41.attention.head_count_kv", Number(1)),
         ("deepseek41.expert_shared_count", Number(1)),
         ("deepseek41.hc_mult", Number(4)),
@@ -82,38 +93,44 @@ pub(crate) fn gguf(experts: u32, context_key: &str) -> GgufFile {
         ("tokenizer.ggml.bos_token_id", Number(256)),
         ("tokenizer.ggml.eos_token_id", Number(256)),
     ];
-    let mut tensors: Vec<(String, Vec<u64>)> = vec![
-        ("token_embd.weight".into(), vec![2, 257]),
-        ("output.weight".into(), vec![2, 257]),
-        ("output_norm.weight".into(), vec![2]),
+    let mut tensors: Vec<(String, Vec<u64>, GgmlType)> = vec![
+        ("token_embd.weight".into(), vec![h, 257], GgmlType::F32),
+        ("output.weight".into(), vec![h, 257], GgmlType::F32),
+        ("output_norm.weight".into(), vec![h], GgmlType::F32),
     ];
     for (name, shape) in [
-        ("attn_norm.weight", vec![2]),
-        ("ffn_norm.weight", vec![2]),
+        ("attn_norm.weight", vec![h]),
+        ("ffn_norm.weight", vec![h]),
         ("attn_sinks.weight", vec![1]),
-        ("attn_q_a.weight", vec![2, 2]),
+        ("attn_q_a.weight", vec![h, 2]),
         ("attn_q_b.weight", vec![2, 2]),
         ("attn_q_a_norm.weight", vec![2]),
-        ("attn_kv.weight", vec![2, 2]),
+        ("attn_kv.weight", vec![h, 2]),
         ("attn_kv_a_norm.weight", vec![2]),
         ("attn_output_a.weight", vec![2, 2]),
-        ("attn_output_b.weight", vec![2, 2]),
-        ("ffn_gate_inp.weight", vec![2, experts as u64]),
+        ("attn_output_b.weight", vec![2, h]),
+        ("ffn_gate_inp.weight", vec![h, experts as u64]),
         ("exp_probs_b.bias", vec![experts as u64]),
-        ("ffn_gate_shexp.weight", vec![2, 2]),
-        ("ffn_up_shexp.weight", vec![2, 2]),
-        ("ffn_down_shexp.weight", vec![2, 2]),
-        ("hc_attn_fn.weight", vec![8, 24]),
+        ("ffn_gate_shexp.weight", vec![h, h]),
+        ("ffn_up_shexp.weight", vec![h, h]),
+        ("ffn_down_shexp.weight", vec![h, h]),
+        ("hc_attn_fn.weight", vec![4 * h, 24]),
         ("hc_attn_scale.weight", vec![3]),
         ("hc_attn_base.weight", vec![24]),
-        ("hc_ffn_fn.weight", vec![8, 24]),
+        ("hc_ffn_fn.weight", vec![4 * h, 24]),
         ("hc_ffn_scale.weight", vec![3]),
         ("hc_ffn_base.weight", vec![24]),
-        ("ffn_gate_exps.weight", vec![2, 2, experts as u64]),
-        ("ffn_up_exps.weight", vec![2, 2, experts as u64]),
-        ("ffn_down_exps.weight", vec![2, 2, experts as u64]),
+        ("ffn_gate_exps.weight", vec![h, h, experts as u64]),
+        ("ffn_up_exps.weight", vec![h, h, experts as u64]),
+        ("ffn_down_exps.weight", vec![h, h, experts as u64]),
     ] {
-        tensors.push((format!("blk.0.{name}"), shape));
+        let dtype = match name {
+            "ffn_gate_exps.weight" => banks[0],
+            "ffn_up_exps.weight" => banks[1],
+            "ffn_down_exps.weight" => banks[2],
+            _ => GgmlType::F32,
+        };
+        tensors.push((format!("blk.0.{name}"), shape, dtype));
     }
     let mut out = b"GGUF".to_vec();
     out.extend(3u32.to_le_bytes());
@@ -153,15 +170,16 @@ pub(crate) fn gguf(experts: u32, context_key: &str) -> GgufFile {
         }
     }
     let mut offset = 0u64;
-    for (name, shape) in tensors {
+    for (name, shape, dtype) in tensors {
         string(&mut out, &name);
         out.extend((shape.len() as u32).to_le_bytes());
         for n in &shape {
             out.extend(n.to_le_bytes());
         }
-        out.extend(0u32.to_le_bytes());
+        out.extend((dtype as u32).to_le_bytes());
         out.extend(offset.to_le_bytes());
-        offset = (offset + shape.iter().product::<u64>() * 4).next_multiple_of(32);
+        let (block, bytes) = dtype.storage_layout().unwrap();
+        offset = (offset + shape.iter().product::<u64>() / block * bytes).next_multiple_of(32);
     }
     out.resize(out.len().next_multiple_of(32), 0);
     let path = std::env::temp_dir().join(format!(

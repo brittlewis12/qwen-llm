@@ -250,6 +250,94 @@ mod tests {
         assert_eq!(info["capabilities"]["local_fit"]["status"], "not_evaluated");
     }
 
+    #[test]
+    fn v41_info_native_iq1_banks_and_independent_down_remain_metadata_only() {
+        use qwen_llm::tensor::GgmlType;
+        for banks in [
+            [GgmlType::IQ1_S; 3],
+            [GgmlType::IQ1_M; 3],
+            [GgmlType::IQ1_M, GgmlType::IQ1_M, GgmlType::IQ2_XXS],
+            [GgmlType::IQ2_XS, GgmlType::IQ2_XS, GgmlType::IQ1_M],
+        ] {
+            let gguf = crate::deepseek_v41_fixture::gguf_with_banks(
+                3,
+                "deepseek41.context_length",
+                256,
+                banks,
+            );
+            let info = crate::project_info(std::path::Path::new("synthetic.gguf"), &gguf).unwrap();
+            assert_eq!(info["capabilities"]["execution"]["status"], "supported");
+            assert_eq!(info["capabilities"]["local_fit"]["status"], "not_evaluated");
+            assert_eq!(info["capabilities"]["sources"]["backbone_shards"], 1);
+            assert_eq!(info["capabilities"]["sources"]["auxiliary_shards"], 0);
+            assert_eq!(
+                info["capabilities"]["cpu_controls"]["payload_bytes_read"],
+                0
+            );
+        }
+    }
+
+    #[test]
+    fn v41_info_iq1_support_does_not_admit_unsupported_types_or_partial_rows() {
+        use qwen_llm::tensor::GgmlType;
+        for width in [128, 256] {
+            let mut gguf = crate::deepseek_v41_fixture::gguf_with_banks(
+                3,
+                "deepseek41.context_length",
+                width,
+                [if width == 128 {
+                    GgmlType::F32
+                } else {
+                    GgmlType::IQ1_M
+                }; 3],
+            );
+            let bank = gguf
+                .tensors
+                .iter_mut()
+                .find(|t| t.name == "blk.0.ffn_gate_exps.weight")
+                .unwrap();
+            if width == 128 {
+                bank.dtype = GgmlType::IQ1_M;
+                bank.n_bytes = bank.shape.iter().product::<u64>() / 256 * 56;
+            } else {
+                bank.dtype = GgmlType::Unknown;
+            }
+            let info = crate::project_info(std::path::Path::new("synthetic.gguf"), &gguf).unwrap();
+            assert_eq!(
+                info["capabilities"]["execution"]["code"],
+                "invalid_v41_gguf"
+            );
+            assert_eq!(info["capabilities"]["local_fit"]["status"], "not_evaluated");
+            assert!(
+                info["capabilities"]["execution"]["message"]
+                    .as_str()
+                    .unwrap()
+                    .contains(if width == 128 {
+                        "partial quantization row"
+                    } else {
+                        "unsupported bank geometry/type"
+                    })
+            );
+        }
+        let gguf = crate::deepseek_v41_fixture::gguf_with_banks(
+            3,
+            "deepseek41.context_length",
+            256,
+            [GgmlType::I32, GgmlType::IQ1_M, GgmlType::IQ1_M],
+        );
+        let info = crate::project_info(std::path::Path::new("synthetic.gguf"), &gguf).unwrap();
+        assert_eq!(
+            info["capabilities"]["execution"]["code"],
+            "invalid_v41_gguf"
+        );
+        assert!(
+            info["capabilities"]["execution"]["message"]
+                .as_str()
+                .unwrap()
+                .contains("unsupported bank geometry/type")
+        );
+    }
+
     fn invocation(argv: &[&str]) -> (Args, cli::Invocation) {
         let (mut args, _) = Args::parse_with_explicit(argv);
         let invocation = cli::normalize(&mut args);

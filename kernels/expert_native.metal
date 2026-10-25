@@ -6,6 +6,17 @@ using namespace metal;
 #include "iq2_xs_grid.metalh"
 #include "iq2_xxs_decode.metalh"
 #include "mxfp4_decode.metalh"
+#include "iq1_decode.metalh"
+
+inline void expert_dequantize_iq1_s(device const uchar * blk, short il,
+                                    thread float4x4 & reg) {
+    iq1_dequant16(blk, uint(il), false, reg);
+}
+
+inline void expert_dequantize_iq1_m(device const uchar * blk, short il,
+                                    thread float4x4 & reg) {
+    iq1_dequant16(blk, uint(il), true, reg);
+}
 
 inline void expert_dequantize_iq2_xxs(device const uchar * blk, short il,
                                      thread float4x4 & reg) {
@@ -180,3 +191,5 @@ template [[host_name("kernel_expert_native_bf16_f32")]] kernel expert_native_t k
 template [[host_name("kernel_expert_native_iq2_xs_f32")]] kernel expert_native_t kernel_expert_native_f32<74, 16, expert_dequantize_iq2_xs>;
 template [[host_name("kernel_expert_native_iq2_xxs_f32")]] kernel expert_native_t kernel_expert_native_f32<66, 16, expert_dequantize_iq2_xxs>;
 template [[host_name("kernel_expert_native_mxfp4_f32")]] kernel expert_native_t kernel_expert_native_f32<17, 2, expert_dequantize_mxfp4, 0, true>;
+template [[host_name("kernel_expert_native_iq1_s_f32")]] kernel expert_native_t kernel_expert_native_f32<50, 16, expert_dequantize_iq1_s>;
+template [[host_name("kernel_expert_native_iq1_m_f32")]] kernel expert_native_t kernel_expert_native_f32<56, 16, expert_dequantize_iq1_m>;

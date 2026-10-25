@@ -693,6 +693,8 @@ fn cpu_only_sparse_header_control_replay() {
         assert_eq!(p.engram_layers, vec![1, 14]);
         assert_eq!(p.controls.payload_bytes_read, 517952);
         assert_eq!(p.controls.payload_bytes_read, control_bytes);
+        assert_eq!(p.controls.cold_cpu_bytes, 3105632);
+        assert_eq!(p.controls.retained_cpu_bytes, 519648);
         assert_eq!(p.config.candidate_block, 8);
         assert_eq!(p.config.candidate_topk, 2048);
         assert_eq!(p.schedule, Schedule::default());
@@ -711,29 +713,35 @@ fn cpu_only_sparse_header_control_replay() {
         } else {
             reference = Some(controls);
         }
-        if quant == "IQ2_XS" {
-            let p = plan(&g).unwrap();
-            assert_eq!(
-                g.tensors
-                    .iter()
-                    .filter(|t| names::bank(&t.name).is_some_and(|(l, _)| l < 40))
-                    .count(),
-                120
-            );
-            assert_eq!(p.bytes.disk_engram, 110595290400);
-            eprintln!(
-                "CPU SPARSE CONTRACT ONLY {quant}: controls={:?} groups=4+1 banks=120 bytes={:?}; no weight/table payload qualification",
-                p.controls, p.bytes
-            );
-        } else {
-            let error = plan(&g).unwrap_err().to_string();
-            assert!(
-                error.contains("unsupported bank geometry/type") && error.contains("IQ1"),
-                "{error}"
-            );
-            eprintln!(
-                "CPU SPARSE CONTRACT ONLY {quant}: metadata/control normalization passes; native IQ1 bank gate retained: {error}"
-            );
-        }
+        let validated = plan(&g).unwrap();
+        assert_eq!(validated.layers, 40);
+        assert_eq!(validated.controls, p.controls);
+        assert_eq!(validated.source_groups(), p.source_groups());
+        assert_eq!(validated.token_map, p.token_map);
+        assert_eq!(validated.engram_hash, p.engram_hash);
+        let banks: Vec<_> = g
+            .tensors
+            .iter()
+            .filter(|t| names::bank(&t.name).is_some_and(|(l, _)| l < validated.layers))
+            .collect();
+        assert_eq!(banks.len(), 120);
+        assert!(
+            banks
+                .iter()
+                .all(|t| metal::all_slots_down_native_supported(t.dtype))
+        );
+        assert_eq!(
+            banks.iter().map(|t| t.n_bytes).sum::<u64>(),
+            validated.bytes.packed_experts
+        );
+        assert_eq!(
+            banks.iter().filter(|t| t.dtype == GgmlType::IQ1_M).count(),
+            if quant == "IQ2_XXS" { 60 } else { 0 }
+        );
+        assert_eq!(validated.bytes.disk_engram, 110595290400);
+        eprintln!(
+            "CPU SPARSE CONTRACT ONLY {quant}: controls={:?} groups=4+1 banks=120 bytes={:?}; no weight/table payload qualification",
+            validated.controls, validated.bytes
+        );
     }
 }

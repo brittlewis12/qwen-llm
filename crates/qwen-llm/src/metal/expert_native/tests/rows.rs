@@ -12,7 +12,7 @@ fn bits(t: &MetalTensor) -> Vec<u32> {
         .collect()
 }
 
-fn fixture(
+pub(super) fn fixture(
     ctx: &MetalContext,
     dtype: GgmlType,
     down: bool,
@@ -319,6 +319,8 @@ fn native_rows_arithmetic_source_and_capability_contract() {
                     | GgmlType::Q3_K
                     | GgmlType::MXFP4
                     | GgmlType::IQ2_XXS
+                    | GgmlType::IQ1_S
+                    | GgmlType::IQ1_M
             )
         );
         for other in (0..=255).map(GgmlType::from_raw) {
@@ -327,6 +329,8 @@ fn native_rows_arithmetic_source_and_capability_contract() {
                 GgmlType::Q3_K,
                 GgmlType::IQ2_XS,
                 GgmlType::IQ2_XXS,
+                GgmlType::IQ1_S,
+                GgmlType::IQ1_M,
             ];
             assert_eq!(
                 all_slots_gate_up_native_rows_supported(dtype, other),
@@ -495,9 +499,10 @@ fn native_rows_iq2_preflight_is_atomic_for_both_passes() {
     preflight_case(GgmlType::IQ2_XXS, GgmlType::IQ2_XS, GgmlType::IQ2_XXS);
 }
 
-fn preflight_case(gate_type: GgmlType, up_type: GgmlType, down_type: GgmlType) {
+pub(super) fn preflight_case(gate_type: GgmlType, up_type: GgmlType, down_type: GgmlType) {
     let _lease = production_lease();
     let ctx = MetalContext::new().unwrap();
+    crate::metal::admit_iq1_expert_fixture(&ctx);
     let (k, m, e, top, n) = (256, 7, 3, 6, 3);
     let bank = |dtype, seed| {
         offset_tensor(

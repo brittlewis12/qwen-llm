@@ -6867,7 +6867,8 @@ inline void moe_grouped_slots_mm_generic_body(
     const int r1 = tgpig.x * NR1_MM;
 
     const int count = counts[im];
-    if (count < int(args.min_count) || count > int(args.max_count) || r1 >= count) return;
+    if (count < 0 || uint(count) > args.N
+        || count < int(args.min_count) || count > int(args.max_count) || r1 >= count) return;
 
     const short nr0 = ((int)args.M - r0 < NR0_MM) ? (short)((int)args.M - r0) : NR0_MM;
     const short nr1 = (count - r1 < NR1_MM) ? (short)(count - r1) : NR1_MM;
@@ -7056,7 +7057,8 @@ inline void moe_swiglu_grouped_slots_n16_body(
     const int r1 = tgpig.x * NR1_GROUP_Q4;
 
     const int count = counts[im];
-    if (count < int(args.min_count) || count > int(args.max_count) || r1 >= count) return;
+    if (count < 0 || uint(count) > args.n_tokens
+        || count < int(args.min_count) || count > int(args.max_count) || r1 >= count) return;
 
     const short nr0 = ((int)args.ffn - r0 < NR0_MM) ? (short)((int)args.ffn - r0) : NR0_MM;
     const short nr1 = (count - r1 < NR1_GROUP_Q4) ? (short)(count - r1) : NR1_GROUP_Q4;
@@ -7332,3 +7334,12 @@ template [[host_name("kernel_moe_up_clamped_bf16_f32_grouped_slots_clamped")]] k
 template [[host_name("kernel_moe_up_clamped_mxfp4_f32_grouped_slots_clamped")]] kernel moe_up_clamped_grouped_slots_generic_t kernel_moe_up_clamped_grouped_slots_generic<QT_MXFP4_BYTES, QT_MXFP4_NL, qt_dequantize_mxfp4, 2>;
 template [[host_name("kernel_moe_up_clamped_iq2_xs_f32_grouped_slots_clamped")]] kernel moe_up_clamped_grouped_slots_generic_t kernel_moe_up_clamped_grouped_slots_generic<QT_IQ2_XS_BYTES, QT_IQ2_XS_NL, qt_dequantize_iq2_xs, 2>;
 template [[host_name("kernel_moe_up_clamped_iq2_xxs_f32_grouped_slots_clamped")]] kernel moe_up_clamped_grouped_slots_generic_t kernel_moe_up_clamped_grouped_slots_generic<QT_IQ2_XXS_BYTES, QT_IQ2_XXS_NL, qt_dequantize_iq2_xxs, 2>;
+
+template [[host_name("kernel_moe_down_iq1_s_f32_grouped_slots_generic")]] kernel moe_grouped_slots_mm_generic_t kernel_moe_grouped_slots_mm_generic<QT_IQ1_S_BYTES, QT_IQ1_S_NL, qt_dequantize_iq1_s, 0>;
+template [[host_name("kernel_moe_up_silu_mul_iq1_s_f32_grouped_slots_generic")]] kernel moe_grouped_slots_mm_generic_t kernel_moe_grouped_slots_mm_generic<QT_IQ1_S_BYTES, QT_IQ1_S_NL, qt_dequantize_iq1_s, 1>;
+template [[host_name("kernel_moe_swiglu_iq1_s_f32_grouped_slots_generic")]] kernel moe_swiglu_grouped_slots_generic_t kernel_moe_swiglu_grouped_slots_n16_generic<QT_IQ1_S_BYTES, QT_IQ1_S_NL, qt_dequantize_iq1_s>;
+template [[host_name("kernel_moe_up_clamped_iq1_s_f32_grouped_slots_clamped")]] kernel moe_up_clamped_grouped_slots_generic_t kernel_moe_up_clamped_grouped_slots_generic<QT_IQ1_S_BYTES, QT_IQ1_S_NL, qt_dequantize_iq1_s, 2>;
+template [[host_name("kernel_moe_down_iq1_m_f32_grouped_slots_generic")]] kernel moe_grouped_slots_mm_generic_t kernel_moe_grouped_slots_mm_generic<QT_IQ1_M_BYTES, QT_IQ1_M_NL, qt_dequantize_iq1_m, 0>;
+template [[host_name("kernel_moe_up_silu_mul_iq1_m_f32_grouped_slots_generic")]] kernel moe_grouped_slots_mm_generic_t kernel_moe_grouped_slots_mm_generic<QT_IQ1_M_BYTES, QT_IQ1_M_NL, qt_dequantize_iq1_m, 1>;
+template [[host_name("kernel_moe_swiglu_iq1_m_f32_grouped_slots_generic")]] kernel moe_swiglu_grouped_slots_generic_t kernel_moe_swiglu_grouped_slots_n16_generic<QT_IQ1_M_BYTES, QT_IQ1_M_NL, qt_dequantize_iq1_m>;
+template [[host_name("kernel_moe_up_clamped_iq1_m_f32_grouped_slots_clamped")]] kernel moe_up_clamped_grouped_slots_generic_t kernel_moe_up_clamped_grouped_slots_generic<QT_IQ1_M_BYTES, QT_IQ1_M_NL, qt_dequantize_iq1_m, 2>;

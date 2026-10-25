@@ -265,9 +265,11 @@ impl Fixture {
 
 #[test]
 fn iq1_all_grid_scale_delta_positions_match_codec_basis() {
+    let _lease = crate::metal::acquire_metal_benchmark_lease().expect("production GPU lease");
     let Some(ctx) = metal_test_context() else {
         return;
     };
+    crate::metal::admit_iq1_expert_fixture(&ctx);
     for dtype in DTYPES {
         let (k, m, n) = (256, 2049, 256);
         let bytes = payload(dtype, k, m);
@@ -356,9 +358,11 @@ fn iq1_all_grid_scale_delta_positions_match_codec_basis() {
 
 #[test]
 fn iq1_f32_paths_match_f64_tails_offsets_and_real_k() {
+    let _lease = crate::metal::acquire_metal_benchmark_lease().expect("production GPU lease");
     let Some(ctx) = metal_test_context() else {
         return;
     };
+    crate::metal::admit_iq1_expert_fixture(&ctx);
     for dtype in DTYPES {
         let mut cases = Vec::new();
         for (i, n) in [1, 2, 7, 8, 9, 15, 16, 17, 31, 32, 33, 127, 128, 129]
@@ -394,9 +398,11 @@ fn iq1_f32_paths_match_f64_tails_offsets_and_real_k() {
 
 #[test]
 fn iq1_f32_scale_extremes_do_not_stage_half() {
+    let _lease = crate::metal::acquire_metal_benchmark_lease().expect("production GPU lease");
     let Some(ctx) = metal_test_context() else {
         return;
     };
+    crate::metal::admit_iq1_expert_fixture(&ctx);
     for dtype in DTYPES {
         let (k, m, n) = (256, 10, 9);
         let mut bytes = payload(dtype, k, m);
@@ -501,9 +507,11 @@ fn iq1_apple7_support_contract_and_scoped_injection() {
 
 #[test]
 fn iq1_unsupported_apple7_falls_back_before_pipeline_lookup() {
+    let _lease = crate::metal::acquire_metal_benchmark_lease().expect("production GPU lease");
     let Some(ctx) = metal_test_context() else {
         return;
     };
+    crate::metal::admit_iq1_expert_fixture(&ctx);
     for dtype in DTYPES {
         let f = Fixture::new(&ctx, dtype, 512, 17, 9, 16, 28);
         with_mma_support(false, || {
@@ -538,9 +546,11 @@ fn iq1_unsupported_apple7_falls_back_before_pipeline_lookup() {
 
 #[test]
 fn iq1_auto_preflights_capability_and_alignment_fallback() {
+    let _lease = crate::metal::acquire_metal_benchmark_lease().expect("production GPU lease");
     let Some(ctx) = metal_test_context() else {
         return;
     };
+    crate::metal::admit_iq1_expert_fixture(&ctx);
     for dtype in DTYPES {
         let f = Fixture::new(&ctx, dtype, 512, 17, 9, 16, 28);
         for fault in [
@@ -620,9 +630,11 @@ fn iq1_capacity_device_ids_and_dimensions() {
 
 #[test]
 fn iq1_concurrent_shared_inputs_distinct_outputs_match_serial() {
+    let _lease = crate::metal::acquire_metal_benchmark_lease().expect("production GPU lease");
     let Some(ctx) = metal_test_context() else {
         return;
     };
+    crate::metal::admit_iq1_expert_fixture(&ctx);
     for dtype in DTYPES {
         let mut cases = vec![
             (1, true, Iq1MatMatVariant::Auto, 16),
@@ -698,9 +710,11 @@ fn iq1_concurrent_shared_inputs_distinct_outputs_match_serial() {
 
 #[test]
 fn iq1_invalid_bindings_do_not_dispatch_on_serial_or_concurrent() {
+    let _lease = crate::metal::acquire_metal_benchmark_lease().expect("production GPU lease");
     let Some(ctx) = metal_test_context() else {
         return;
     };
+    crate::metal::admit_iq1_expert_fixture(&ctx);
     for dtype in DTYPES {
         let f = Fixture::new(&ctx, dtype, 256, 17, 9, 16, 0);
         let out = f.output(&ctx);
@@ -778,9 +792,11 @@ fn iq1_invalid_bindings_do_not_dispatch_on_serial_or_concurrent() {
 
 #[test]
 fn iq1_foreign_device_bindings_and_encoder_are_rejected_when_available() {
+    let _lease = crate::metal::acquire_metal_benchmark_lease().expect("production GPU lease");
     let Some(ctx) = metal_test_context() else {
         return;
     };
+    crate::metal::admit_iq1_expert_fixture(&ctx);
     for dtype in DTYPES {
         let devices = objc2_metal::MTLCopyAllDevices();
         let Some(device) = devices
@@ -820,6 +836,7 @@ fn iq1_foreign_device_bindings_and_encoder_are_rejected_when_available() {
 
 #[test]
 fn iq1_layout_grid_scale_delta_coverage() {
+    let _lease = crate::metal::acquire_metal_benchmark_lease().expect("production CPU lease");
     assert_eq!(std::mem::size_of::<Args>(), 20);
     assert_eq!(GgmlType::IQ1_S.storage_layout(), Some((256, 50)));
     assert_eq!(GgmlType::IQ1_M.storage_layout(), Some((256, 56)));
@@ -906,6 +923,7 @@ fn iq1_layout_grid_scale_delta_coverage() {
 
 #[test]
 fn iq1_m_reconstructed_half_scale_all_finite_encodings_match_codec() {
+    let _lease = crate::metal::acquire_metal_benchmark_lease().expect("production CPU lease");
     // Bounded batches: all four scale nibbles, signed zero, subnormals and
     // maximal finite half values, with no large persistent F32 test bank.
     let mut bytes = vec![0u8; 256 * 56];
@@ -960,9 +978,11 @@ fn gather_run(
 
 #[test]
 fn iq1_m_gather_codec_offsets_vocab_edges_invalid_ids_and_immutability() {
+    let _lease = crate::metal::acquire_metal_benchmark_lease().expect("production GPU lease");
     let Some(ctx) = metal_test_context() else {
         return;
     };
+    crate::metal::admit_iq1_expert_fixture(&ctx);
     for (width, vocab, suffix) in [(256, 1, 0), (512, 17, 28), (5120, 7, 0), (17408, 3, 28)] {
         let bytes = payload(GgmlType::IQ1_M, width, vocab);
         let decoded = decode(GgmlType::IQ1_M, &bytes, width, vocab);
@@ -1036,9 +1056,11 @@ fn iq1_m_gather_codec_offsets_vocab_edges_invalid_ids_and_immutability() {
 
 #[test]
 fn iq1_m_gather_reconstructed_scale_nibbles_and_extremes_match_codec() {
+    let _lease = crate::metal::acquire_metal_benchmark_lease().expect("production GPU lease");
     let Some(ctx) = metal_test_context() else {
         return;
     };
+    crate::metal::admit_iq1_expert_fixture(&ctx);
     let mut scales = vec![
         0u16, 0x8000, 0x0001, 0x8001, 0x03ff, 0x83ff, 0x0400, 0x7bff, 0xfbff,
     ];
@@ -1093,9 +1115,11 @@ fn iq1_m_gather_reconstructed_scale_nibbles_and_extremes_match_codec() {
 
 #[test]
 fn iq1_m_gather_rejects_invalid_bindings_devices_and_capabilities_before_dispatch() {
+    let _lease = crate::metal::acquire_metal_benchmark_lease().expect("production GPU lease");
     let Some(ctx) = metal_test_context() else {
         return;
     };
+    crate::metal::admit_iq1_expert_fixture(&ctx);
     let (width, vocab, tokens) = (256, 64, 2);
     let bytes = payload(GgmlType::IQ1_M, width, vocab);
     let embed = offset_tensor(

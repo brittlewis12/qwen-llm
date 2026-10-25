@@ -234,7 +234,8 @@ kernel void kernel_moe_down_grouped_slots_f32x(
     const int r1 = tgpig.x * F32X_NR1_DOWN;
 
     const int count = counts[im];
-    if (count < int(args.min_count) || count > int(args.max_count) || r1 >= count) return;
+    if (count < 0 || uint(count) > args.N
+        || count < int(args.min_count) || count > int(args.max_count) || r1 >= count) return;
 
     const short nr0 = (short)min((int)F32X_NR0, (int)args.M - r0);
     const short nr1 = (short)min((int)F32X_NR1_DOWN, count - r1);
@@ -392,7 +393,8 @@ kernel void kernel_moe_swiglu_clamped_grouped_slots_f32x(
     const int r1 = tgpig.x * F32X_NR1_SWIGLU;
 
     const int count = counts[im];
-    if (count < int(args.min_count) || count > int(args.max_count) || r1 >= count) return;
+    if (count < 0 || uint(count) > args.n_tokens
+        || count < int(args.min_count) || count > int(args.max_count) || r1 >= count) return;
 
     const short nr0 = (short)min((int)F32X_NR0, (int)args.ffn - r0);
     const short nr1 = (short)min((int)F32X_NR1_SWIGLU, count - r1);

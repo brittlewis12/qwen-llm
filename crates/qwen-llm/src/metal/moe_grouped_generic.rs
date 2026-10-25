@@ -68,6 +68,8 @@ pub const MOE_GROUPED_GENERIC_LAYOUTS: &[MoeGroupedGenericLayout] = &[
     layout(GgmlType::MXFP4, "mxfp4", 32, 17),
     layout(GgmlType::IQ2_XS, "iq2_xs", 256, 74),
     layout(GgmlType::IQ2_XXS, "iq2_xxs", 256, 66),
+    layout(GgmlType::IQ1_S, "iq1_s", 256, 50),
+    layout(GgmlType::IQ1_M, "iq1_m", 256, 56),
 ];
 
 /// Kernel roles instantiated per dtype.
@@ -1514,7 +1516,7 @@ mod clamped_tests {
                 }
             }
         }
-        for unsupported in [GgmlType::IQ1_S, GgmlType::IQ1_M, GgmlType::Unknown] {
+        for unsupported in [GgmlType::I32, GgmlType::Unknown] {
             assert!(moe_grouped_clamped_recipe(unsupported, GgmlType::Q2_K).is_none());
             assert!(moe_grouped_clamped_recipe(GgmlType::Q2_K, unsupported).is_none());
         }

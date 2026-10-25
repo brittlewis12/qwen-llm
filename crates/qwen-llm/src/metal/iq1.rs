@@ -500,3 +500,8 @@ pub fn encode_get_rows_iq1_m_f32(
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod expert_fixture;
+#[cfg(test)]
+pub(crate) use expert_fixture::{admit_iq1_expert_fixture, iq1_test_scale};

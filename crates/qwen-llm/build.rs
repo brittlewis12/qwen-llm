@@ -35,6 +35,7 @@ fn main() -> anyhow::Result<()> {
     // Keep the manifest lookup at runtime: Cargo filters CARGO_MANIFEST_DIR out
     // of env! dep-info, so a reused build-script executable must use its new root.
     println!("cargo:rerun-if-changed={}", watched_kernels_dir.display());
+    println!("cargo:rerun-if-changed=../../kernels/iq1_decode.metalh");
     println!(
         "cargo:rerun-if-changed={}",
         manifest_dir.join("build.rs").display()

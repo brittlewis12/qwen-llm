@@ -139,13 +139,13 @@ Both sources pass fresh full-model current Full/CED pairs at all five lengths.
 Each length compares all 257 complete vocabulary vectors and all 56 causal
 regions at every position, with one resident import and at most one KV state:
 
-| Prompt Rows | Control Commands | Two-Layer Commands |
-| ---: | ---: | ---: |
-| 128 | 21 | 11 |
-| 2048 | 21 | 11 |
-| 2049 | 24 | 11 |
-| 4097 | 45 | 12 |
-| 8192 | 25 | 12 |
+| Prompt Rows | Control Commands | Two-Layer Commands | Four-Layer Commands |
+| ---: | ---: | ---: | ---: |
+| 128 | 21 | 11 | 6 |
+| 2048 | 21 | 11 | 6 |
+| 2049 | 24 | 11 | 6 |
+| 4097 | 45 | 12 | 7 |
+| 8192 | 25 | 12 | 7 |
 
 Every candidate head hash and complete state record matches its control; all
 per-layer work counters are unchanged, completion is checked, fallback is null
@@ -170,6 +170,8 @@ samples remain in the private reports:
 | Control / 8192 | 18.883852, 9.500112, 29.603241, 10.561673 | 20.833771, 18.744491, 7.456756, 10.233436 | 14.722762 / 14.488964 |
 | Two Layers / 2048 | 3.132919, 2.251518, 19.672501, 2.692496 | 3.372027, 19.311431, 2.743518, 8.568895 | 2.912708 / 5.970461 |
 | Two Layers / 8192 | 23.951903, 9.526876, 11.380274, 12.466781 | 18.749036, 13.450416, 13.541780, 33.457407 | 11.923527 / 16.145408 |
+| Four Layers / 2048 | 10.793855, 2.236180, 21.442213, 4.454123 | 14.115723, 11.600458, 23.543100, 10.458541 | 7.623989 / 12.858091 |
+| Four Layers / 8192 | 22.771069, 9.536378, 18.200721, 14.747849 | 11.069608, 11.785050, 9.943834, 24.335780 | 16.474285 / 11.427329 |
 
 Neither new cohort establishes a stable native win. The earlier frozen-source
 clean 8K separation is not reproduced. The two-layer 2K Full pilot/main spread
@@ -186,11 +188,98 @@ proof. Native synthetic routes are not a measured text-route distribution.
 
 Four-layer source `4672dc8172aa9e7047bf204f44302d846b262415` changes only
 the production grouping default; all other production logic and the 16-unit
-budget remain. It passes 49 CPU and four bounded M4 GPU fixtures. Default 4K
-encoder plans complete 6/6/6/7/7 commands at the five lengths, with at most
-15 MiB/domain additional allowance. M5/full-model/native qualification is still
-pending. Keep all frozen sources unchanged while comparing it and localizing
-remaining stalls.
+budget remain. It passes 49 CPU and four bounded M4 GPU fixtures, followed by
+the same 33 focused CPU and 18 validation-on M5 GPU checks as the two-layer
+candidate. All five full-model sizes preserve the control's complete heads,
+causal state and work counters, completing 6/6/6/7/7 commands. Additional
+allowance is at most 15 MiB/domain and remains explicitly unmeasured. The
+frozen core/benchmark SHA256s are respectively
+`0859dda4c465a78e20ff2027e82dcdc6f915460a2247d15bf0a8b7e26b1b8f04` and
+`2adfdaad84894eee61ec4089cf29a2bb0a1ce20a16047c0505b74baba33b90fa`.
+
+The four-layer native cohorts also establish no stable win. At 8K the retained
+CED median is lower, but CED pilot/main ranges from 6.571 to 24.336 s and Full
+from 9.536 to 35.257 s. All 14 heads per length and sampled allocation bounds
+pass independent verification. The 198 sparse host observations are normal;
+they do not bound peaks. Fewer commands are proven, stable lower latency is not.
+
+## Fresh Scheduling Diagnosis
+
+A fresh, separate validation-on two-layer diagnostic at 2K keeps warm Full GPU
+envelopes at 1.943-1.946 s while driver scheduling intervals range from 0.027 to
+11.439 s. Warm CED GPU envelopes are 1.616-1.673 s, with driver intervals
+0.966-8.968 s. Every warm call records zero process reads/page-ins and ordinary
+plus tensor PSO misses. For example, a 13.655 s Full call includes a 1.945 s GPU
+envelope and an 11.439 s driver interval. These remain distinct overlapping
+measurements, not CPU busy time or proof of absent GPU faults/DRAM traffic.
+
+Existing diagnostics already sample process resident size and physical footprint
+before and after pool drain, not continuous peaks. The retained-window audit
+finds 165.950 GiB of shared views, zero private shadow, and disk Engram excluded;
+the first three shared-EOF roots are about 44.594, 44.396 and 43.868 GiB. There is
+no evidence here of an accidental full Engram import or a lost private copy.
+
+The next causal experiment keeps two-layer execution fixed and compares the
+disabled coalescing target against a 4 GiB soft target. Hardware singleton
+eligibility, oversized tensors, EOF/lifetime rules and admission remain intact.
+This also changes mmap provenance: a win qualifies the mapping strategy, not
+buffer length alone. Full's unchanged bindings already have variable driver
+intervals. No explicit residency, pinning, purge or new fit cap is introduced.
+
+## Actual Text-Route Populations
+
+Diagnostic source `89b06639986c14526da977e37baac7c0acf570db` captures the
+unchanged frozen 8192-token prompt's live I32 counts before scratch reuse,
+without per-layer CPU retirement or extra submissions. One bounded copy ledger
+per arm is released after prefill; the 256 teacher-forced scalar steps run
+outside the population scope. Frozen core SHA256:
+`1e8fda38b0dbf1810cf0fdf9e7d9f05c488e62fb2e541c1394f3cdf2a6962fdc`.
+
+Ten focused caller checks, three provenance checks and the actual M5
+cross-command overwrite fixture pass. Full/CED again matches all 257 complete
+heads and 56 causal regions per position, with one import, one KV state and 25
+commands. Instrumented capture timings are not performance evidence. The final
+JSONL has 245412 bytes and SHA256
+`cf772e9d998617f9caa63e89a2da28e8abc5a3916231b8ce69c4993bf9f86936`;
+the matching qualification reference and final completion footer are present.
+
+Independent offline reduction checks all 384 counts per record, nonnegative
+bounded counts summing to six routes per physical row, exact metrics, complete
+planned ranges and Full/encoder count equality. All 80 Full and 63 CED records
+use grouped tensor execution. The final one-row CED view retains packed Full
+lineage; it is not silently treated as native scalar execution. Planned
+per-layer ascending order identifies ranges; GPU chunk identity is not
+independently tagged. Five corrupted metric/count/footer/identity/digest controls
+are rejected.
+
+Gate/up uses 64-slot panels in the encoder and 32 in the decoder; down uses 32.
+The three projections have equal K*M = 5120*2304, so `2*gate + down` weights
+issued row slots by arithmetic rather than treating a fused gate/up as one
+projection:
+
+| Arm / Phase | Layer Rows | Useful Routes | Weighted Useful Slots | Weighted Issued Slots | Padded MMA |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| Full | 327680 | 1966080 | 5898240 | 8687616 | 32.11% |
+| CED encoder | 163840 | 983040 | 2949120 | 4347072 | 32.16% |
+| CED decoder | 24150 | 144900 | 434700 | 789984 | 44.97% |
+| CED total | 187990 | 1127940 | 3383820 | 5137056 | 34.13% |
+
+The CED routed projections represent 79.834 useful versus 121.198 issued TFLOP
+under this panel-work model. Return-only launch panels do not execute MMA and
+are not this padding. Launch compaction alone therefore cannot recover it.
+Keeping complete current panels but replacing each remainder with 16-slot
+panels would remove 24.29% of CED routed arithmetic; 8-slot tails model 29.78%.
+The encoder contributes 84.13% of the modeled 16-slot saving. A single narrower
+panel (16/32/64 slots, rounding to the next available width rather than splitting
+one remainder across several panels) models 22.94% less CED routed arithmetic
+without requiring repeated weight decode for one incumbent tail. This is the
+first bounded probe (`perf/v41-adaptive-tails`); it leaves production selection
+unchanged and must account for complete dispatch/staging time.
+These are hypotheses, not implemented kernels, a latency/DRAM measurement or an
+end-to-end speedup. Narrow tails must preserve the original activation/math
+lineage and outweigh added scheduling/decode overhead before promotion. This
+one real prompt is stronger guidance than synthetic Poisson/count32 routes,
+not a workload distribution or a measurement of the native synthetic inputs.
 
 ## Evidence And Next Decision
 
@@ -210,6 +299,14 @@ maya-control-native-n{2048,8192}-v27-r1.*
 batch2-{freshness,plan,preflight,groups,types,wide,ffn,prefix,ledgers,nonfinite,edges}-v27.*
 maya-batch2-n{128,2048,2049,4097,8192}-v27-r1.*
 maya-batch2-native-n{2048,8192}-v27-r1.*
+batch4-{freshness,plan,preflight,groups,types,wide,ffn,prefix,ledgers,nonfinite,edges}-v27.*
+maya-batch4-n{128,2048,2049,4097,8192}-v27-r1.*
+maya-batch4-native-n{2048,8192}-v27-r1.*
+maya-batch2-diagnostic-n2048-v27-r1.*
+batch2-attribution-n2048-v27-summary.json
+populations-{caller,freshness,overwrite}-v27.*
+maya-populations-n8192-v27-r1.{json,populations.jsonl,verified.json,population-reduction.json}
+verify-populations-v27.py
 ```
 
 The v2 role summary supersedes only the erroneous last-writer `role_totals` in
@@ -217,9 +314,10 @@ the first private diagnostic summary; original case totals and raw evidence
 remain unchanged. Full-model input SHA256 remains
 `aaf5840de38220f6ed4579ffcf83dc828a28e7d71f8e1f2517077ee77020eca2`.
 
-Next: qualify the four-layer candidate and use driver/host attribution to locate
-the remaining stalls. Actual text-route population capture is a separate
-diagnostic follow-on; synthetic count bands cannot establish its headroom.
+Next: qualify disabled versus soft-4-GiB retained windows on the fixed two-layer
+source, using bounded M5 lifetime/mapping and full-model correctness before a
+controlled native cohort. Actual-text counts separately motivate a narrow-tail
+arithmetic experiment, not another synthetic-only occupancy claim.
 Do not promote batching from command counts, old controls or instrumented timing.
 The independent
 [matched-F16 register family closes negative](2026-10-24-v41-register-operands-32x32-f16.md),

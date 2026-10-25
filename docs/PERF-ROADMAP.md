@@ -111,7 +111,9 @@ Two independent outside reviews plus primary-source/source audits prioritize:
   medians 2.913/5.970 s at 2K and 11.924/16.145 s at 8K, with large dispersion.
   Preserve pending/completed separation, sticky evidence and bounded incumbent
   selection. Four-layer source `4672dc81` changes only the grouping default;
-  6/7 commands at 2K/8K are plans, not M5/full-model/native results yet.
+  the same 18 M5 fixtures and five full-model sizes now pass, completing
+  6/6/6/7/7 commands. Native Full/CED medians are 7.624/12.858 s at 2K and
+  16.474/11.427 s at 8K, still with large dispersion and no stable win.
 - Same-format cooperative/register-fed quantized matmul: negative
   (`perf/v41-register-operands`; final
   `bench/2026-10-24-v41-register-operands-32x32-f16.md`). Correct bounded
@@ -127,12 +129,18 @@ Two independent outside reviews plus primary-source/source audits prioritize:
   `28d23ac9` (+3.46% Q2 pp4096); its resident-size heuristic is not a universal
   fit boundary, and its packet still owes long-chunk quality coverage. CED
   runtime integration is separate, not a documentation-only rebase.
-- Actual expert-population attribution: in flight
-  (`perf/v41-expert-populations`). Capture counts before reused scratch is
-  overwritten, without per-layer CPU waits; distinguish current wide64 encoder
-  gate/up from narrow32 decoder/down. Measure active panels and padded/useful
-  work on real routes before choosing an adaptive-tail kernel. Synthetic
-  count32 or 31/32/33 fixtures do not establish that distribution.
+- Actual expert-population attribution: landed diagnostic evidence
+  (`perf/v41-expert-populations`, source `89b06639`; executor remains a branch).
+  Actual frozen-text 8K Full/CED preserves all heads/state and work, with counts
+  copied before scratch reuse and no extra submissions. Independent reduction
+  finds 34.13% CED routed-projection padding (32.16% encoder, 44.97% decoder).
+  Tail-only 16-slot replacement models 24.29% less routed arithmetic, not latency
+  or an implemented/numerically qualified kernel. This is one real prompt, not a
+  workload distribution; retain packed-singleton lineage and separate gate/up
+  wide64 from decoder/down narrow32. Adaptive tails: in flight bounded probe
+  (`perf/v41-adaptive-tails`), retaining full panels and using one 16/32/64-slot
+  remainder panel without repeated weight decode or added submissions. This
+  models 22.94% less CED routed arithmetic; default dispatch stays unchanged.
 - Shared retained-window partitioning: in flight (`perf/v41-soft-windows`).
   Fresh batch-two 2K diagnostics keep warmed Full GPU envelopes at 1.943-1.946 s
   while driver intervals range 0.027-11.439 s, with zero process reads/page-ins

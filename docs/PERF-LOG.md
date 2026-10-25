@@ -6,6 +6,33 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the current state and evidence index.
 
+## 2026-10-24 - Four-Layer CED Qualified; Real Text Exposes Tail Padding
+
+- Four-layer source `4672dc81` passes 33 focused CPU and 18 validation-on M5
+  GPU checks, then Maya-S 128/2048/2049/4097/8192 with all 257 complete heads and
+  56 causal regions per position matching control. Work is unchanged; actual
+  completed commands are 6/6/6/7/7. The finite extra allowance remains unmeasured.
+- Native Full/CED medians are 7.624/12.858 s at 2K and 16.474/11.427 s at 8K.
+  All 14 heads per cohort and sampled bounds pass, but 8K CED pilot/main spans
+  6.571-24.336 s. No stable win or default promotion follows from command counts.
+- Fresh two-layer 2K diagnostics hold warm Full GPU envelopes at 1.943-1.946 s
+  while driver intervals vary 0.027-11.439 s; CED is 1.616-1.673 s GPU and
+  0.966-8.968 s driver. Warm process reads/page-ins and PSO misses are zero.
+  The disabled/soft-4-GiB mapping experiment remains in flight, without pinning,
+  admission changes or an assumption that resource length alone causes stalls.
+- Actual frozen-text capture `89b06639` preserves full-model heads/state and
+  work with no extra submissions. Independent count, metric, coverage, digest
+  and completion checks find 34.13% CED routed arithmetic padding: 32.16% encoder
+  and 44.97% decoder. The final singleton keeps packed Full lineage. Five corrupt
+  evidence controls are rejected; capture timing is not performance evidence.
+- Tail-only 16-slot replacement models 24.29% less routed arithmetic on this
+  prompt, not end-to-end latency or a qualified kernel. Return-only launch
+  panels do not execute MMA and cannot be counted as that padding. Reuse this
+  measured distribution for the next arithmetic experiment, not synthetic-only
+  occupancy or a promised multiplier. A bounded single-panel adaptive-tail probe
+  starts on `perf/v41-adaptive-tails`; production selection remains unchanged.
+- [Complete qualification, raw samples and population definitions](bench/2026-10-24-v41-execution-leverage.md).
+
 ## 2026-10-24 - Current 4K CED And Two-Layer Batches Preserve Exact State
 
 - Current 4K/wide control `be874b3f` and two-layer candidate `9874c68b` pass

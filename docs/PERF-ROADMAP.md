@@ -108,6 +108,12 @@ Two independent outside reviews plus primary-source/source audits prioritize:
   `28d23ac9` (+3.46% Q2 pp4096); its resident-size heuristic is not a universal
   fit boundary, and its packet still owes long-chunk quality coverage. CED
   runtime integration is separate, not a documentation-only rebase.
+- Actual expert-population attribution: in flight
+  (`perf/v41-expert-populations`). Capture counts before reused scratch is
+  overwritten, without per-layer CPU waits; distinguish current wide64 encoder
+  gate/up from narrow32 decoder/down. Measure active panels and padded/useful
+  work on real routes before choosing an adaptive-tail kernel. Synthetic
+  count32 or 31/32/33 fixtures do not establish that distribution.
 - Batched Engram preparation, CED-origin prefix reuse and candidate-only
   long-context reindexing: open, with distinct cold/warm/context economics.
   Full prefix caching already exists; CED-origin reuse needs qualification.

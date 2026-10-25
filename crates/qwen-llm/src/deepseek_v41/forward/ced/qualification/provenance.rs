@@ -342,6 +342,7 @@ fn compiled_sources() -> &'static [(&'static str, &'static [u8])] {
         "crates/qwen-llm/src/metal/moe_grouped_generic.rs",
         "crates/qwen-llm/src/metal/moe_grouped_generic/tensor.rs",
         "crates/qwen-llm/src/metal/moe_grouped_generic/tests.rs",
+        "crates/qwen-llm/src/metal/moe_grouped_generic/tests/wide_activation_type.rs",
         "crates/qwen-llm/src/metal/context.rs",
         "crates/qwen-llm/src/metal/census.rs",
         "crates/qwen-llm/src/metal/host_budget.rs",
@@ -376,7 +377,7 @@ fn active_compiled_inventory_matches_checkout() {
 }
 
 #[test]
-fn compiled_geometry_inventory_rejects_helper_only_edits_before_import() {
+fn compiled_geometry_and_activation_inventory_rejects_single_file_edits_before_import() {
     let helper = "crates/qwen-llm/src/deepseek_v41/forward/chunk_geometry.rs";
     let sources = compiled_sources();
     let embedded = sources.iter().find(|(p, _)| *p == helper).unwrap().1;
@@ -399,14 +400,22 @@ fn compiled_geometry_inventory_rejects_helper_only_edits_before_import() {
         checked_compiled_sources(&root).unwrap().len(),
         sources.len() + batching_compiled_sources().len()
     );
-    let mut changed = embedded.to_vec();
-    changed.extend_from_slice(b"\n// helper-only freshness probe\n");
-    std::fs::write(root.join(helper), changed).unwrap();
-    let refusal = checked_compiled_sources(&root).unwrap_err().to_string();
-    assert!(
-        refusal.contains(&format!("binary/source mismatch: {helper}")),
-        "{refusal}"
-    );
+    for path in [
+        helper,
+        "crates/qwen-llm/src/metal/moe_grouped_generic/tests/wide_activation_type.rs",
+    ] {
+        let embedded = sources.iter().find(|(p, _)| *p == path).unwrap().1;
+        let mut changed = embedded.to_vec();
+        changed.extend_from_slice(b"\n// single-file freshness probe\n");
+        std::fs::write(root.join(path), changed).unwrap();
+        let refusal = checked_compiled_sources(&root).unwrap_err().to_string();
+        assert!(
+            refusal.contains(&format!("binary/source mismatch: {path}")),
+            "{refusal}"
+        );
+        std::fs::write(root.join(path), embedded).unwrap();
+        checked_compiled_sources(&root).unwrap();
+    }
     std::fs::remove_dir_all(root).unwrap();
 }
 

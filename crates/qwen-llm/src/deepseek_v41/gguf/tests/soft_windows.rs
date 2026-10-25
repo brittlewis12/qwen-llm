@@ -31,7 +31,92 @@ fn overlapping_segments() -> Arc<GgufFile> {
         .unwrap()
         .1 = Value::U32(32);
     tensors.insert(1, ("mtp.unused".into(), vec![4], GgmlType::F32));
-    write_fixture_layout(kv, tensors, false)
+    write_fixture_payload(kv, tensors, false, owner_bank_payload)
+}
+
+const OWNER_VIEW_OFFSET: u64 = 4;
+const OWNER_VIEW_ELEMENTS: u64 = 3;
+const OWNER_VIEW_BYTES: u64 = 12;
+const OWNER_VIEW_END: u64 = 16;
+const OWNER_VIEW_EXPECTED: [f32; 3] = [2.5, 3.75, 5.0];
+
+fn owner_bank_payload(name: &str, shape: &[u64], dtype: GgmlType) -> Option<Vec<u8>> {
+    names::bank(name)?;
+    assert_eq!(dtype, GgmlType::F32);
+    Some(
+        (0..shape.iter().product::<u64>())
+            .flat_map(|index| ((index % 16 + 1) as f32 * 1.25).to_le_bytes())
+            .collect(),
+    )
+}
+
+fn owner_fixtures() -> [Arc<GgufFile>; 2] {
+    let (kv, tensors) = fixture_parts(1, GgmlType::F32, 128, false);
+    [
+        overlapping_segments(),
+        write_fixture_payload(kv, tensors, true, owner_bank_payload),
+    ]
+}
+
+fn assert_owner_view_fits(t: &TensorDesc, offset: u64, elements: u64) -> u64 {
+    assert_eq!(t.dtype, GgmlType::F32);
+    let bytes = elements.checked_mul(4).unwrap();
+    assert!(
+        offset
+            .checked_add(bytes)
+            .is_some_and(|end| end <= t.n_bytes),
+        "owner subview exceeds fixture bank"
+    );
+    bytes
+}
+
+fn owner_view_expected(g: &GgufFile, t: &TensorDesc) -> [f32; 3] {
+    assert_eq!(
+        assert_owner_view_fits(t, OWNER_VIEW_OFFSET, OWNER_VIEW_ELEMENTS),
+        OWNER_VIEW_BYTES
+    );
+    assert_eq!(OWNER_VIEW_OFFSET + OWNER_VIEW_BYTES, OWNER_VIEW_END);
+    let mut bytes = [0u8; OWNER_VIEW_BYTES as usize];
+    g.read_shard_exact_at(t.shard_idx, t.data_offset + OWNER_VIEW_OFFSET, &mut bytes)
+        .unwrap();
+    let expected =
+        std::array::from_fn(|i| f32::from_le_bytes(bytes[i * 4..i * 4 + 4].try_into().unwrap()));
+    assert_eq!(expected, OWNER_VIEW_EXPECTED);
+    expected
+}
+
+#[test]
+fn soft_window_owner_subview_fixture_contract_is_nonzero_and_bounded() {
+    for (g, width) in owner_fixtures().into_iter().zip([2, 128]) {
+        let stamps = g.revalidate_retained_shard_stamps().unwrap();
+        let bank = g
+            .tensors
+            .iter()
+            .find(|t| names::bank(&t.name).is_some())
+            .unwrap();
+        assert_eq!(bank.shape, [width, width]);
+        assert_eq!(bank.n_bytes, width * width * 4);
+        assert_eq!(OWNER_VIEW_OFFSET, 4);
+        assert_eq!(OWNER_VIEW_ELEMENTS, 3);
+        assert_eq!(owner_view_expected(&g, bank), [2.5, 3.75, 5.0]);
+        assert!(OWNER_VIEW_EXPECTED.iter().all(|&value| value != 0.0));
+        assert!(g.shards[0].mmap_len() < 16 << 20);
+        assert!(targeted(&g, Some(PAGE)).metal_view_bytes < 16 << 20);
+        assert_eq!(g.revalidate_retained_shard_stamps().unwrap(), stamps);
+    }
+}
+
+#[test]
+#[should_panic(expected = "owner subview exceeds fixture bank")]
+fn soft_window_owner_subview_fixture_contract_rejects_old_eight_float_request() {
+    let g = overlapping_segments();
+    let bank = g
+        .tensors
+        .iter()
+        .find(|t| names::bank(&t.name).is_some())
+        .unwrap();
+    assert_eq!(bank.n_bytes, 16);
+    assert_owner_view_fits(bank, 0, 8);
 }
 
 #[test]
@@ -234,7 +319,7 @@ fn soft_window_overlap_padding_requires_first_containing_not_segment_index() {
 #[ignore = "self-leased tiny realized soft-window association proof; debug validation required"]
 fn soft_window_live_resources_follow_first_containing_and_survive_owner_drop() {
     use objc2::rc::Retained;
-    use objc2_metal::MTLBuffer;
+    use objc2_metal::{MTLBuffer, MTLCommandBuffer, MTLCommandQueue};
 
     assert_eq!(std::env::var("MTL_DEBUG_LAYER").as_deref(), Ok("1"));
     assert_eq!(std::env::var("QWEN_METAL_LEASE_WAIT").as_deref(), Ok("1"));
@@ -242,10 +327,7 @@ fn soft_window_live_resources_follow_first_containing_and_survive_owner_drop() {
     let ctx = MetalContext::new().unwrap();
     let page = metal::host_page_size_bytes().unwrap();
     assert_eq!(page, PAGE);
-    for g in [
-        overlapping_segments(),
-        fixture(1, GgmlType::F32, 128, false),
-    ] {
+    for g in owner_fixtures() {
         let p = plan(&g).unwrap();
         let soft = targeted(&g, Some(PAGE));
         assert!(soft.metal_view_bytes < 16 << 20);
@@ -300,7 +382,19 @@ fn soft_window_live_resources_follow_first_containing_and_survive_owner_drop() {
             super::super::retained_resources::summarize(&weights.banks, &weights.dense).unwrap()
         );
         assert!(serde_json::to_string(summary).unwrap().find("0x").is_none());
-        let retained = weights.banks[0].tensor.view_bytes(0, vec![8]);
+        let bank = &weights.banks[0];
+        let descriptor = g
+            .tensors
+            .iter()
+            .find(|t| names::bank(&t.name) == Some((bank.layer, bank.projection)))
+            .unwrap();
+        let expected = owner_view_expected(&g, descriptor);
+        assert_eq!(bank.tensor.n_bytes(), descriptor.n_bytes);
+        let retained = bank
+            .tensor
+            .view_bytes(OWNER_VIEW_OFFSET, vec![OWNER_VIEW_ELEMENTS]);
+        assert_eq!(retained.offset, bank.tensor.offset + OWNER_VIEW_OFFSET);
+        assert_eq!(retained.n_bytes(), OWNER_VIEW_BYTES);
         drop(weights);
         drop(g);
         assert_eq!(
@@ -308,6 +402,36 @@ fn soft_window_live_resources_follow_first_containing_and_survive_owner_drop() {
             metal::MetalTensorProvenance::RetainedGgufReadOnly
         );
         assert!(!retained.is_writable());
-        assert!(retained.buffer.length() as u64 >= retained.offset + 32);
+        assert!(retained.buffer.length() as u64 >= retained.offset + OWNER_VIEW_BYTES);
+
+        let guards = [-101.0f32, -102.0, -103.0, -104.0, -105.0, -106.0, -107.0];
+        let output =
+            MetalTensor::from_bytes(&ctx, bytemuck::cast_slice(&guards), vec![7], GgmlType::F32)
+                .unwrap();
+        let destination = output.view_bytes(8, vec![OWNER_VIEW_ELEMENTS]);
+        assert_eq!(destination.n_bytes(), OWNER_VIEW_BYTES);
+        let command = ctx.queue.commandBuffer().unwrap();
+        let blit = metal::BlitEncoder::begin(&command);
+        blit.copy_tensor(&retained, &destination);
+        blit.end();
+        command.commit();
+        metal::wait_completed(&command).unwrap();
+        assert!(command.error().is_none());
+        let expected_output = [
+            guards[0],
+            guards[1],
+            expected[0],
+            expected[1],
+            expected[2],
+            guards[5],
+            guards[6],
+        ];
+        let got = unsafe {
+            std::slice::from_raw_parts(
+                output.buffer.contents().as_ptr().cast::<u8>(),
+                guards.len() * 4,
+            )
+        };
+        assert_eq!(got, bytemuck::cast_slice::<f32, u8>(&expected_output));
     }
 }

@@ -1,4 +1,7 @@
 use super::*;
+use objc2::rc::{Weak, autoreleasepool};
+use objc2::runtime::ProtocolObject;
+use objc2_metal::MTLBuffer;
 
 pub(super) const GROUPS: [usize; 5] = [1, 8, 16, 17, 32];
 pub(super) const DTYPES: [GgmlType; 3] = [GgmlType::F32, GgmlType::BF16, GgmlType::Q8_0];
@@ -7,6 +10,9 @@ pub(super) const RANK: usize = 7;
 pub(super) const GUARD: usize = 64;
 pub(super) const BUDGET: u64 = 16 << 20;
 pub(super) const RESERVE: u64 = 256 << 10;
+pub(super) const LIFETIME_CPU_BYTES: u64 = 64 << 10;
+
+pub(super) type BufferReleaseProbes = [Weak<ProtocolObject<dyn MTLBuffer>>; 2];
 
 pub(super) fn case_config(groups: usize) -> Config {
     Config {
@@ -239,7 +245,9 @@ pub(super) fn price(groups: usize, dtype: GgmlType) -> Price {
     let metal_upper = requests.iter().map(|n| n + 16384).sum();
     // Four full logical copies cover staging, decoded coefficients, readbacks,
     // and f64 oracles; 1 MiB covers small vectors, descriptors, and census rows.
-    let cpu_upper = 4 * logical + (1 << 20);
+    // Separate allowance for the two boxed weak handles, runtime weak-table
+    // entries, and nested case/position autorelease-pool bookkeeping.
+    let cpu_upper = 4 * logical + (1 << 20) + LIFETIME_CPU_BYTES;
     assert!(metal_upper + cpu_upper + RESERVE <= BUDGET);
     Price {
         requests,
@@ -429,7 +437,20 @@ pub(super) fn low_guards_intact(values: &[f32], count: usize) -> bool {
 }
 
 pub(super) fn run_case(ctx: &MetalContext, groups: usize, dtype: GgmlType) {
-    let _transaction = ctx.begin_allocation_transaction();
+    let transaction = ctx.begin_allocation_transaction();
+    let probes = autoreleasepool(|_| run_pooled_case(ctx, groups, dtype));
+    for (label, weak) in ["output_a_bank", "guarded_low"].into_iter().zip(&probes) {
+        assert!(
+            weak.load().is_none(),
+            "{label} survived case pool drain: groups={groups} dtype={dtype:?}"
+        );
+    }
+    eprintln!("output_a_fixture RELEASED groups={groups} dtype={dtype:?} bank=true low=true");
+    drop(probes);
+    drop(transaction);
+}
+
+fn run_pooled_case(ctx: &MetalContext, groups: usize, dtype: GgmlType) -> BufferReleaseProbes {
     let price = admit(ctx, groups, dtype);
     metal::allocation_census_begin();
     let stored = StoredBank::new(groups, dtype);
@@ -451,68 +472,79 @@ pub(super) fn run_case(ctx: &MetalContext, groups: usize, dtype: GgmlType) {
     let allocations = metal::allocation_census_take();
     assert!(allocations.len() <= price.requests.len());
     assert!(allocations.iter().map(|r| r.buffer_length).sum::<u64>() <= price.metal_upper);
+    let probes = [
+        Weak::from_retained(&weights.output_a[0].tensor.buffer),
+        Weak::from_retained(&guarded.buffer),
+    ];
+    assert!(
+        probes.iter().all(|weak| weak.load().is_some()),
+        "live Metal buffers must support weak probes"
+    );
     let b_values = f32_slice(&weights.output_b.tensor).unwrap();
     for position in 0..2 {
-        // No command is in flight while the CPU poisons/repopulates shared views.
-        unsafe {
-            let low = actual
-                .low
-                .buffer
-                .contents()
-                .as_ptr()
-                .cast::<u8>()
-                .add(actual.low.offset as usize)
-                .cast::<f32>();
-            for i in 0..groups * RANK {
-                low.add(i).write(f32::NAN);
+        autoreleasepool(|_| {
+            // No command is in flight while the CPU poisons/repopulates shared views.
+            unsafe {
+                let low = actual
+                    .low
+                    .buffer
+                    .contents()
+                    .as_ptr()
+                    .cast::<u8>()
+                    .add(actual.low.offset as usize)
+                    .cast::<f32>();
+                for i in 0..groups * RANK {
+                    low.add(i).write(f32::NAN);
+                }
+                let x = input.buffer.contents().as_ptr().cast::<f32>();
+                for i in 0..c.hidden {
+                    x.add(i).write((1 + i + position) as f32 / 32.0);
+                }
             }
-            let x = input.buffer.contents().as_ptr().cast::<f32>();
-            for i in 0..c.hidden {
-                x.add(i).write((1 + i + position) as f32 / 32.0);
+            metal::dispatch_census_begin();
+            execute(ctx, |enc| {
+                actual
+                    .encode(ctx, enc, 0, position, &weights, &input)
+                    .unwrap();
+            });
+            check_census(&metal::dispatch_census_take(), groups, dtype).unwrap();
+            let attended = f32_slice(&actual.attended).unwrap();
+            let expected = stored.oracle(attended, &(0..groups).collect::<Vec<_>>());
+            check_dots(f32_slice(&actual.low).unwrap(), &expected, RANK).unwrap();
+            assert!(check_dots(&vec![0.0; groups * RANK], &expected, RANK).is_err());
+            if groups > 1 {
+                for ids in [
+                    vec![0; groups],
+                    (0..groups).map(|g| (g + 1) % groups).collect(),
+                ] {
+                    let wrong: Vec<_> = stored
+                        .oracle(attended, &ids)
+                        .iter()
+                        .map(|d| d.value as f32)
+                        .collect();
+                    assert!(
+                        check_dots(&wrong, &expected, RANK).is_err(),
+                        "actual attended vector cannot distinguish wrong bank IDs"
+                    );
+                }
             }
-        }
-        metal::dispatch_census_begin();
-        execute(ctx, |enc| {
-            actual
-                .encode(ctx, enc, 0, position, &weights, &input)
-                .unwrap();
+            let low = f32_slice(&actual.low).unwrap();
+            let output: Vec<_> = b_values
+                .chunks_exact(groups * RANK)
+                .map(|row| dot(row, low))
+                .collect();
+            check_dots(f32_slice(&actual.output).unwrap(), &output, c.hidden).unwrap();
+            assert!(low_guards_intact(
+                f32_slice(&guarded).unwrap(),
+                groups * RANK
+            ));
+            assert!(stored.unchanged(&shared_bytes(
+                &weights.output_a[0].tensor,
+                stored.bytes.len()
+            )));
+            assert_eq!(shared_bytes(&actual.status, 4), [0, 0, 0, 0]);
+            eprintln!("output_a_fixture PASS groups={groups} dtype={dtype:?} position={position}");
         });
-        check_census(&metal::dispatch_census_take(), groups, dtype).unwrap();
-        let attended = f32_slice(&actual.attended).unwrap();
-        let expected = stored.oracle(attended, &(0..groups).collect::<Vec<_>>());
-        check_dots(f32_slice(&actual.low).unwrap(), &expected, RANK).unwrap();
-        assert!(check_dots(&vec![0.0; groups * RANK], &expected, RANK).is_err());
-        if groups > 1 {
-            for ids in [
-                vec![0; groups],
-                (0..groups).map(|g| (g + 1) % groups).collect(),
-            ] {
-                let wrong: Vec<_> = stored
-                    .oracle(attended, &ids)
-                    .iter()
-                    .map(|d| d.value as f32)
-                    .collect();
-                assert!(
-                    check_dots(&wrong, &expected, RANK).is_err(),
-                    "actual attended vector cannot distinguish wrong bank IDs"
-                );
-            }
-        }
-        let low = f32_slice(&actual.low).unwrap();
-        let output: Vec<_> = b_values
-            .chunks_exact(groups * RANK)
-            .map(|row| dot(row, low))
-            .collect();
-        check_dots(f32_slice(&actual.output).unwrap(), &output, c.hidden).unwrap();
-        assert!(low_guards_intact(
-            f32_slice(&guarded).unwrap(),
-            groups * RANK
-        ));
-        assert!(stored.unchanged(&shared_bytes(
-            &weights.output_a[0].tensor,
-            stored.bytes.len()
-        )));
-        assert_eq!(shared_bytes(&actual.status, 4), [0, 0, 0, 0]);
-        eprintln!("output_a_fixture PASS groups={groups} dtype={dtype:?} position={position}");
     }
+    probes
 }

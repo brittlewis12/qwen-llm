@@ -26,7 +26,7 @@ expected effect, status. Status is one of `open`, `in flight (branch)`,
 `in flight` with your branch; a second lane finding it claimed reads the branch
 before building anything adjacent. This replaces relaying between sessions.
 
-### DeepSeek V4.1-Flash (main after the 4096-row chunk and 64-slot gate/up: pp2048 Q2 877.3 / IQ3 852 (not re-measured), pp4096 Q2 890.2 / IQ3 840.7; decode rechecked tg32 Q2 43.2 / IQ3 41.0, depth tg32@d2048 41.6 from the prior landing)
+### DeepSeek V4.1-Flash (main after the 4096-row chunk and 64-slot gate/up: pp2048 Q2 877.3 / IQ3 852 (not re-measured), pp4096 Q2 890.2 / IQ3 896.8; decode rechecked tg32 Q2 43.2 / IQ3 41.0, depth tg32@d2048 41.6 from the prior landing)
 
 GSQ-RCO release bring-up: loader bridge landed (`0079569a`); IQ1 expert wiring
 remains in flight (`feat/v41-iq1-experts`), pinned HF revision
@@ -330,12 +330,16 @@ attention tiles at 34.7%. Re-sample after the next landing.
   ~11.9 TFLOPS vs PV ~20.4; register-cooperative or materialized
   attention remains open.
 - Full 4096-row chunk selector: landed (2026-10-24 chunk4096 entry,
-  bench/2026-10-24-v41-chunk4096.md). Fitting residents (Q2 ~186 GiB,
-  Maya-S ~166 GiB) use one 4096-row chunk; IQ3-class (~217 GiB) keeps
-  2048. Q2 pp4096 build-vs-build ABBA: 842.588 -> 871.755 (+3.46%);
-  pp2048 unchanged. IQ3 at 4096 was unstable (874.732/827.866 vs
-  838.487/836.996), so it stays on 2048. The 576-token witness does not
-  exercise the 4096 path; per-row arithmetic is unchanged in construction.
+  bench/2026-10-24-v41-chunk4096.md). All current residents (Q2 ~186 GiB,
+  Maya-S ~166 GiB, IQ3 ~217 GiB) use one 4096-row chunk at the 240 GiB
+  MWSS; only >240 GiB keeps 2048. Q2 pp4096 build-vs-build ABBA:
+  842.588 -> 871.755 (+3.46%); pp2048 unchanged. IQ3's first 4096 pair
+  had one transient (827.866); four later samples are 879.406/879.871/
+  878.797/874.775 (mean 878.212, sigma 2.33) against 838.487/836.996
+  control. The current 4096 + wide gate/up build measures 897.1/896.5
+  (896.823) against 839.5/838.3 (838.906), +6.9%. IQ3 now uses 4096.
+  The 576-token witness does not exercise the
+  4096 path; per-row arithmetic is unchanged in construction.
 - 64-slot gate/up panel at 4096: landed (2026-10-24 wide64 entry,
   bench/2026-10-24-v41-expert-wide64.md). Down stays on the 32-slot tile
   (wide down is +43% slower); gate/up wide is -22.7% in the fixture and

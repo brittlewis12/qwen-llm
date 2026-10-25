@@ -474,9 +474,10 @@ struct Layer<'a> {
 }
 
 /// Packed+dense resident bytes above this stay on the 2048-row chunk. Q2
-/// (~186 GiB) and Maya-S (~166 GiB) fit the 4096-row envelope; IQ3 (~217 GiB)
-/// does not have the stability margin measured for the larger chunk.
-const FULL_CHUNK_RESIDENT_LIMIT: u64 = 200 * (1u64 << 30);
+/// (~186 GiB), Maya-S (~166 GiB) and IQ3 (~217 GiB) fit the 4096-row envelope
+/// at the 240 GiB MWSS; IQ3's earlier slow sample was a transient (four later
+/// samples: 879.41/879.87/878.80/874.77 tok/s, sigma 2.33).
+const FULL_CHUNK_RESIDENT_LIMIT: u64 = 240 * (1u64 << 30);
 
 pub(super) fn prefill_rows_for_resident(resident_bytes: u64) -> usize {
     if resident_bytes <= FULL_CHUNK_RESIDENT_LIMIT {
@@ -599,14 +600,7 @@ impl<'a> Forward<'a> {
         tokens: &[u32],
         cancel: Option<&AtomicBool>,
     ) -> std::result::Result<Vec<f32>, StateError> {
-        prefill::run(
-            self,
-            state,
-            tokens,
-            cancel,
-            self.prefill_rows,
-            true,
-        )
+        prefill::run(self, state, tokens, cancel, self.prefill_rows, true)
     }
 
     /// Capture actual batched attention inputs and checkpoint outputs after GPU
@@ -636,15 +630,7 @@ impl<'a> Forward<'a> {
         tokens: &[u32],
         cancel: Option<&AtomicBool>,
     ) -> std::result::Result<(), StateError> {
-        prefill::run(
-            self,
-            state,
-            tokens,
-            cancel,
-            self.prefill_rows,
-            false,
-        )
-        .map(|_| ())
+        prefill::run(self, state, tokens, cancel, self.prefill_rows, false).map(|_| ())
     }
 
     /// Synchronously borrow each completed block's CPU F32 outputs. None adds

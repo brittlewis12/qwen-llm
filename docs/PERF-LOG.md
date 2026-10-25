@@ -109,10 +109,15 @@ See also: `docs/PERF-ROADMAP.md` for the current state and evidence index.
 
 ## 2026-10-24 - V4.1: 4096-Row Chunk And 64-Slot Gate/Up
 
-- The Full path now chooses a 4096-row chunk for fitting residents and keeps
-  2048 for IQ3-class residents. Q2 pp4096 build-vs-build ABBA: 842.588 ->
-  871.755 tok/s (+3.46%); pp2048 unchanged. IQ3 at 4096 was unstable
-  (874.732/827.866 vs 838.487/836.996), so the selector keeps IQ3 at 2048.
+- The Full path now chooses a 4096-row chunk for all current residents
+  (Q2 ~186 GiB, Maya-S ~166 GiB, IQ3 ~217 GiB) at the 240 GiB MWSS; only
+  residents above 240 GiB keep 2048. Q2 pp4096 build-vs-build ABBA:
+  842.588 -> 871.755 tok/s (+3.46%); pp2048 unchanged. IQ3's earlier
+  4096 pair had one transient (827.866); four later samples are
+  879.406/879.871/878.797/874.775 (mean 878.212, sigma 2.33), above every
+  2048 control sample. The current 4096 + wide gate/up build measures
+  897.1/896.5 (mean 896.823) against 839.5/838.3 (838.906), +6.9%.
+  IQ3 now uses 4096.
 - The routed gate/up tile now uses a 64-slot panel at 4096 rows; down keeps
   the 32-slot tile. Fixture: gate/up 30,277.9 -> 23,407.5 us (-22.7%),
   down wide is +43% slower. Q2 pp4096 same-binary ABBA: 875.506 -> 890.172

@@ -5,7 +5,9 @@ use std::collections::BTreeMap;
 fn full_chunk_selector_keeps_large_residents_at_2048() {
     let gib = 1u64 << 30;
     assert_eq!(prefill_rows_for_resident(199 * gib), MAX_PREFILL_CHUNK_ROWS);
-    assert_eq!(prefill_rows_for_resident(218 * gib), PREFILL_CHUNK_ROWS);
+    assert_eq!(prefill_rows_for_resident(217 * gib), MAX_PREFILL_CHUNK_ROWS);
+    assert_eq!(prefill_rows_for_resident(240 * gib), MAX_PREFILL_CHUNK_ROWS);
+    assert_eq!(prefill_rows_for_resident(241 * gib), PREFILL_CHUNK_ROWS);
 }
 
 #[test]

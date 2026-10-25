@@ -349,6 +349,16 @@ const SLOT_LIMIT: usize = 2 * CAPACITY * EXPERTS;
 const GUARD: usize = 32;
 const CANARY: f32 = -777.0;
 const CLAMP: f32 = 0.1875;
+const FIXTURE_LIMIT: usize = 64 << 20;
+const WITNESS_DTYPES: [GgmlType; 7] = [
+    GgmlType::F32,
+    GgmlType::Q8_0,
+    GgmlType::Q4_K,
+    GgmlType::IQ1_S,
+    GgmlType::IQ1_M,
+    GgmlType::IQ3_S,
+    GgmlType::IQ3_XXS,
+];
 
 fn half_values(values: &[f32]) -> Vec<f32> {
     values
@@ -358,11 +368,54 @@ fn half_values(values: &[f32]) -> Vec<f32> {
 }
 
 fn boundary_shapes() -> Vec<(usize, usize)> {
-    let mut shapes: Vec<_> = EDGES.iter().map(|&n| (n, 65)).collect();
+    let mut shapes = Vec::with_capacity(25);
+    shapes.extend(EDGES.iter().map(|&n| (n, 65)));
     shapes.extend(EDGES[..10].iter().map(|&m| (65, m)));
     shapes.extend([(1, 1), (2, 2), (17, 17), (33, 33)]);
     assert_eq!(shapes.len(), 25);
     shapes
+}
+
+#[derive(Clone, Copy, Debug)]
+struct GroupedCase {
+    count: i32,
+    m: usize,
+    min: u32,
+    max: u32,
+    bad_ids: bool,
+}
+
+fn grouped_cases() -> Vec<GroupedCase> {
+    let mut cases = Vec::with_capacity(33);
+    cases.extend(boundary_shapes().into_iter().map(|(count, m)| GroupedCase {
+        count: count as i32,
+        m,
+        min: 0,
+        max: i32::MAX as u32,
+        bad_ids: false,
+    }));
+    cases.extend(
+        [
+            (0, 0, i32::MAX as u32, false),
+            (-1, 0, i32::MAX as u32, false),
+            (66, 0, i32::MAX as u32, false),
+            (i32::MIN, 0, i32::MAX as u32, false),
+            (i32::MAX, 0, i32::MAX as u32, false),
+            (17, 18, 65, false),
+            (33, 0, 32, false),
+            (65, 0, i32::MAX as u32, true),
+        ]
+        .into_iter()
+        .map(|(count, min, max, bad_ids)| GroupedCase {
+            count,
+            m: 17,
+            min,
+            max,
+            bad_ids,
+        }),
+    );
+    assert_eq!(cases.len(), 33);
+    cases
 }
 
 fn require_tensor_context() -> MetalContext {
@@ -380,62 +433,217 @@ fn require_tensor_context() -> MetalContext {
     ctx
 }
 
-// Admission precedes even host fixture construction. One fixture is live at a
-// time; the inventory includes both activation types and one guarded output.
-fn fixture_inventory(dtype: GgmlType, m: usize, rows: usize, experts: usize) -> [usize; 6] {
-    let (block, bytes) = dtype.storage_layout().unwrap();
-    [
-        experts * m * K / block as usize * bytes as usize + 2 * GUARD,
-        rows * K * 4 + 2 * GUARD,
-        rows * K * 2 + 2 * GUARD,
-        experts * 4 + 2 * GUARD,
-        experts * CAPACITY * 4 + 2 * GUARD,
-        rows * m * 4 + 2 * GUARD,
-    ]
-}
-
-fn admit(
-    ctx: &MetalContext,
+#[derive(Clone, Copy, Debug)]
+struct FixturePlan {
     dtype: GgmlType,
     m: usize,
     rows: usize,
-    experts: usize,
-) -> crate::metal::census::MetalAllocationTransactionGuard {
-    let inventory = fixture_inventory(dtype, m, rows, experts);
-    let priced: u64 = inventory
-        .iter()
-        .map(|&n| {
-            ctx.price_shared_buffer_upper(n as u64)
-                .unwrap()
-                .priced_upper_bytes
-        })
-        .sum();
-    // Decoded/half banks, reference sums, staging/reallocation, immutable-input
-    // snapshots and readbacks are bounded by sixteen copies of this inventory.
-    let cpu = 16 * inventory.iter().sum::<usize>() as u64;
-    assert!(priced + cpu <= 64 << 20);
+    b_div: usize,
+    grouped: bool,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct CpuBudget {
+    source_bank: usize,
+    decoded_pair: usize,
+    activations: usize,
+    references: usize,
+    matvec_row: usize,
+    guarded_staging: usize,
+    snapshots: usize,
+    readbacks: usize,
+    bookkeeping: usize,
+}
+
+impl CpuBudget {
+    fn total(self) -> usize {
+        self.source_bank
+            + self.decoded_pair
+            + self.activations
+            + self.references
+            + self.matvec_row
+            + self.guarded_staging
+            + self.snapshots
+            + self.readbacks
+            + self.bookkeeping
+    }
+}
+
+impl FixturePlan {
+    fn grouped(dtype: GgmlType, m: usize, b_div: usize) -> Self {
+        Self {
+            dtype,
+            m,
+            rows: SLOT_LIMIT,
+            b_div,
+            grouped: true,
+        }
+    }
+
+    fn dense(dtype: GgmlType, m: usize, rows: usize) -> Self {
+        Self {
+            dtype,
+            m,
+            rows,
+            b_div: 1,
+            grouped: false,
+        }
+    }
+
+    // Weight / F32 input / F16 input / counts / IDs / one output. Both dense
+    // activation buffers are explicit; absent routing buffers cost zero.
+    fn inventory(self) -> [usize; 6] {
+        let (block, bytes) = self.dtype.storage_layout().unwrap();
+        let experts = if self.grouped { EXPERTS } else { 1 };
+        let x = self.rows / self.b_div * K;
+        [
+            experts * self.m * K / block as usize * bytes as usize + 2 * GUARD,
+            x * 4 + 2 * GUARD,
+            x * 2 + 2 * GUARD,
+            if self.grouped {
+                experts * 4 + 2 * GUARD
+            } else {
+                0
+            },
+            if self.grouped {
+                experts * CAPACITY * 4 + 2 * GUARD
+            } else {
+                0
+            },
+            self.rows * self.m * 4 + 2 * GUARD,
+        ]
+    }
+
+    fn cpu_budget(self, upper: [usize; 6]) -> CpuBudget {
+        let logical = self.inventory();
+        let bank = logical[0] - 2 * GUARD;
+        let x = self.rows / self.b_div * K;
+        let out = self.rows * self.m;
+        let routing = if self.grouped {
+            EXPERTS * CAPACITY * 4
+        } else {
+            0
+        };
+        let input_upper = upper[1].max(upper[2]);
+        let input_snapshot = upper[0] + input_upper + upper[3] + upper[4];
+        // Sum named category peaks, even when their phases cannot overlap.
+        // synthetic_bank's F32 flat_map can grow: old <= bank, new <= 2*bank.
+        // The quantized branch allocates exactly bank bytes. Codec and Half
+        // rounding deliberately retain two full F32 row-major banks together.
+        CpuBudget {
+            source_bank: bank * if self.dtype == GgmlType::F32 { 3 } else { 1 },
+            decoded_pair: 2 * self.m * K * 4,
+            activations: x * (4 + 4 + 2) + routing,
+            references: if self.grouped {
+                out * (4 + 4 + 1 + 4 + 4)
+            } else {
+                out * (4 + 4)
+            },
+            matvec_row: self.m * 4,
+            guarded_staging: *logical.iter().max().unwrap(),
+            snapshots: input_snapshot,
+            // An F32 output readback can coexist with guard/backing comparison.
+            readbacks: out * 4 + *upper.iter().max().unwrap(),
+            // Census reserves 512 rows. Bound the encoder's two binding hazard
+            // vectors, fixture/scheduler shapes, names and weak/snapshot slots.
+            bookkeeping: 512 * std::mem::size_of::<DispatchCensusRow>()
+                + 2 * 8 * std::mem::size_of::<(usize, u64, u64)>()
+                + 33 * std::mem::size_of::<GroupedCase>()
+                + 25 * std::mem::size_of::<(usize, usize)>()
+                + 8 * (128 + 3 * std::mem::size_of::<u64>())
+                + 6 * (std::mem::size_of::<Vec<u8>>() + std::mem::size_of::<BufferWeak>()),
+        }
+    }
+}
+
+struct Admission {
+    upper: [usize; 6],
+    _transaction: crate::metal::census::MetalAllocationTransactionGuard,
+}
+
+fn admit(ctx: &MetalContext, plan: FixturePlan) -> Admission {
     let transaction = ctx.begin_allocation_transaction();
-    let decision =
-        evaluate_metal_memory_admission_with_cpu_bytes(priced, cpu, 0, ctx.memory_signals(), true);
+    let upper = plan.inventory().map(|n| {
+        if n == 0 {
+            0
+        } else {
+            usize::try_from(
+                ctx.price_shared_buffer_upper(n as u64)
+                    .unwrap()
+                    .priced_upper_bytes,
+            )
+            .unwrap()
+        }
+    });
+    let priced = upper.iter().sum::<usize>();
+    let components = plan.cpu_budget(upper);
+    let cpu = components.total();
+    assert!(priced + cpu <= FIXTURE_LIMIT);
+    let decision = evaluate_metal_memory_admission_with_cpu_bytes(
+        priced as u64,
+        cpu as u64,
+        0,
+        ctx.memory_signals(),
+        true,
+    );
     assert!(
         decision.is_admitted(),
         "staging fixture admission: {decision:?}"
     );
     eprintln!(
-        "staging fixture dtype={dtype:?} K={K} M={m} rows={rows} experts={experts} priced_metal_bytes={priced} cpu_bytes={cpu} limit_bytes={}",
-        64 << 20
+        "staging fixture plan={plan:?} K={K} priced_metal_bytes={priced} cpu_bytes={cpu} components={components:?} limit_bytes={FIXTURE_LIMIT}"
     );
-    transaction
+    Admission {
+        upper,
+        _transaction: transaction,
+    }
+}
+
+fn guarded_bytes(bytes: &[u8]) -> Vec<u8> {
+    let mut guarded = vec![0xA5; bytes.len() + 2 * GUARD];
+    guarded[GUARD..GUARD + bytes.len()].copy_from_slice(bytes);
+    guarded[GUARD + bytes.len()..].fill(0x5A);
+    guarded
 }
 
 fn view(ctx: &MetalContext, bytes: &[u8], dtype: GgmlType, shape: Vec<u64>) -> MetalTensor {
-    offset_tensor(ctx, GUARD, bytes, GUARD, shape, dtype)
+    // One exact staging allocation, rather than offset_tensor's growable Vec.
+    let guarded = guarded_bytes(bytes);
+    MetalTensor {
+        buffer: ctx.buffer_from(&guarded).expect("guarded staging tensor"),
+        offset: GUARD as u64,
+        shape,
+        dtype,
+        provenance: MetalTensorProvenance::OwnedWritable,
+    }
+}
+
+type BufferWeak = objc2::rc::Weak<objc2::runtime::ProtocolObject<dyn objc2_metal::MTLBuffer>>;
+
+fn buffer_probe(tensor: &MetalTensor, upper: usize) -> BufferWeak {
+    assert!(
+        tensor.buffer.length() <= upper,
+        "buffer exceeds admitted readback bound"
+    );
+    let weak = BufferWeak::from_retained(&tensor.buffer);
+    assert!(weak.load().is_some(), "weak resource probe must start live");
+    weak
+}
+
+fn assert_buffer_released(weak: &BufferWeak) {
+    objc2::rc::autoreleasepool(|_| {
+        assert!(
+            weak.load().is_none(),
+            "MTLBuffer survives completed work, Rust teardown and autorelease drain; stop before admitting more buffers"
+        );
+    });
 }
 
 fn check_result(actual: &[f32], expected: &[f32], label: &str) -> usize {
     assert_eq!(actual.len(), expected.len());
-    let mut active = Vec::new();
-    let mut reference = Vec::new();
+    let mut active = 0;
+    let mut max_ref = 0.0f32;
+    let mut error = 0.0f32;
     for (&a, &e) in actual.iter().zip(expected) {
         assert!(a.is_finite() && e.is_finite(), "{label}: nonfinite result");
         if e == CANARY {
@@ -445,19 +653,20 @@ fn check_result(actual: &[f32], expected: &[f32], label: &str) -> usize {
                 "{label}: inactive output changed"
             );
         } else {
-            active.push(a);
-            reference.push(e);
+            active += 1;
+            max_ref = max_ref.max(e.abs());
+            let delta = (a - e).abs();
+            assert!(delta.is_finite(), "{label}: nonfinite difference");
+            error = error.max(delta);
         }
     }
-    if !active.is_empty() {
-        let max_ref = reference.iter().map(|v| v.abs()).fold(0.0f32, f32::max);
-        let error = max_abs_diff_finite(label, &active, &reference);
+    if active != 0 {
         assert!(
             error <= 2e-3 * max_ref + 2e-5,
             "{label}: active-only error={error} range={max_ref}"
         );
     }
-    active.len()
+    active
 }
 
 #[test]
@@ -492,19 +701,11 @@ fn staging_witness_plan_and_cpu_half_fixtures_are_bounded_nontrivial() {
         assert!(shapes.iter().any(|&(count, _)| count == edge));
         assert!(shapes.iter().any(|&(_, m)| m == edge));
     }
-    for dtype in [
-        GgmlType::F32,
-        GgmlType::Q8_0,
-        GgmlType::Q4_K,
-        GgmlType::IQ1_S,
-        GgmlType::IQ1_M,
-        GgmlType::IQ3_S,
-        GgmlType::IQ3_XXS,
-    ] {
-        let payload: usize = fixture_inventory(dtype, 65, SLOT_LIMIT, EXPERTS)
-            .iter()
-            .sum();
-        assert!(17 * payload < 64 << 20);
+    for dtype in WITNESS_DTYPES {
+        let plan = FixturePlan::grouped(dtype, 65, 1);
+        let payload: usize = plan.inventory().iter().sum();
+        let cpu = plan.cpu_budget(plan.inventory()).total();
+        assert!(payload + cpu < FIXTURE_LIMIT);
         let bank = synthetic_bank(dtype, K, 65, EXPERTS, 0x1234 ^ dtype as u64);
         for e in 0..EXPERTS {
             let w = half_values(&cpu_expert(dtype, &bank, K, 65, e));
@@ -517,10 +718,200 @@ fn staging_witness_plan_and_cpu_half_fixtures_are_bounded_nontrivial() {
             assert!(result.iter().any(|v| v.abs() > 1e-5));
         }
         eprintln!(
-            "staging CPU fixture dtype={dtype:?}: max_buffer_payload_bytes={payload} cpu_envelope_bytes={} (device pricing/admission deferred to M5)",
-            16 * payload
+            "staging CPU fixture dtype={dtype:?}: max_buffer_payload_bytes={payload} cpu_bytes={cpu} (device pricing/admission deferred to M5)"
         );
     }
+}
+
+fn modeled_upper(plan: FixturePlan, page: usize) -> [usize; 6] {
+    plan.inventory().map(|bytes| {
+        if bytes == 0 {
+            0
+        } else {
+            price_shared_buffer_upper(
+                bytes as u64,
+                MetalBufferSizeAndAlign {
+                    size: bytes as u64,
+                    alignment: page as u64,
+                },
+                page as u64,
+                u64::MAX,
+            )
+            .unwrap()
+            .priced_upper_bytes as usize
+        }
+    })
+}
+
+fn check_budget_components(plan: FixturePlan, upper: [usize; 6]) {
+    let budget = plan.cpu_budget(upper);
+    let input_elements = plan.rows / plan.b_div * K;
+    let output_elements = plan.rows * plan.m;
+    // Independent necessary live allocations, expressed in logical elements,
+    // not compressed bytes or the budget's category formulas.
+    assert!(budget.decoded_pair >= 2 * plan.m * K * std::mem::size_of::<f32>());
+    assert!(
+        budget.activations
+            >= input_elements * (2 * std::mem::size_of::<f32>() + std::mem::size_of::<half::f16>())
+    );
+    assert!(
+        budget.references
+            >= output_elements * std::mem::size_of::<f32>() * if plan.grouped { 4 } else { 2 }
+    );
+    assert!(budget.guarded_staging >= *plan.inventory().iter().max().unwrap());
+    assert!(budget.snapshots >= upper[0] + upper[1].max(upper[2]) + upper[3] + upper[4]);
+    assert!(budget.readbacks >= output_elements * 4 + *upper.iter().max().unwrap());
+    assert!(
+        budget.total() + upper.iter().sum::<usize>() <= FIXTURE_LIMIT,
+        "{plan:?}: {budget:?}"
+    );
+}
+
+fn check_observed_host_capacities(plan: FixturePlan, upper: [usize; 6]) {
+    let experts = if plan.grouped { EXPERTS } else { 1 };
+    let bank = synthetic_bank(plan.dtype, K, plan.m, experts, 0x1234 ^ plan.dtype as u64);
+    let decoded = cpu_expert(plan.dtype, &bank, K, plan.m, 0);
+    let rounded = half_values(&decoded);
+    let x: Vec<_> = (0..plan.rows / plan.b_div * K)
+        .map(|i| (i % 127) as f32 / 139.0)
+        .collect();
+    let hx = half_values(&x);
+    let half_x: Vec<_> = x.iter().map(|&v| half::f16::from_f32(v)).collect();
+    let ids = vec![0i32; if plan.grouped { EXPERTS * CAPACITY } else { 0 }];
+    let references: Vec<Vec<f32>> = (0..if plan.grouped { 4 } else { 2 })
+        .map(|_| vec![CANARY; plan.rows * plan.m])
+        .collect();
+    let active = vec![false; if plan.grouped { plan.rows * plan.m } else { 0 }];
+    let row = matvec(&rounded, K, &hx[..K]);
+    let payload = if bank.len() >= x.len() * 4 {
+        &bank[..]
+    } else {
+        bytemuck::cast_slice(&x)
+    };
+    let staging = guarded_bytes(payload);
+    assert_eq!(staging.len(), *plan.inventory().iter().max().unwrap());
+    let snapshots =
+        [upper[0], upper[1].max(upper[2]), upper[3], upper[4]].map(|bytes| vec![0u8; bytes]);
+    let output_readback = vec![0f32; plan.rows * plan.m];
+    let backing_readback = vec![0u8; *upper.iter().max().unwrap()];
+    let observed = [
+        bank.capacity()
+            + if plan.dtype == GgmlType::F32 {
+                bank.len()
+            } else {
+                0
+            },
+        (decoded.capacity() + rounded.capacity()) * 4,
+        (x.capacity() + hx.capacity()) * 4 + half_x.capacity() * 2 + ids.capacity() * 4,
+        references.iter().map(|v| v.capacity() * 4).sum::<usize>() + active.capacity(),
+        row.capacity() * 4,
+        staging.capacity(),
+        snapshots.iter().map(Vec::capacity).sum::<usize>(),
+        output_readback.capacity() * 4 + backing_readback.capacity(),
+    ];
+    let budget = plan.cpu_budget(upper);
+    let allowed = [
+        budget.source_bank,
+        budget.decoded_pair,
+        budget.activations,
+        budget.references,
+        budget.matvec_row,
+        budget.guarded_staging,
+        budget.snapshots,
+        budget.readbacks,
+    ];
+    for (component, (&actual, &limit)) in observed.iter().zip(&allowed).enumerate() {
+        assert!(
+            actual <= limit,
+            "{plan:?} component={component} observed={actual} allowed={limit}"
+        );
+    }
+    assert!(
+        observed.iter().sum::<usize>() + budget.bookkeeping + upper.iter().sum::<usize>()
+            <= FIXTURE_LIMIT
+    );
+}
+
+#[test]
+fn staging_cpu_budget_covers_every_scheduled_fixture() {
+    let mut grouped = 0;
+    let mut dense = 0;
+    for dtype in WITNESS_DTYPES {
+        for case in grouped_cases() {
+            for b_div in [1, 2] {
+                let plan = FixturePlan::grouped(dtype, case.m, b_div);
+                for page in [1, 4096, 16384, 65536] {
+                    let upper = modeled_upper(plan, page);
+                    check_budget_components(plan, upper);
+                    if page == 16384 {
+                        check_observed_host_capacities(plan, upper);
+                        eprintln!(
+                            "staging budget case={case:?} plan={plan:?} upper={upper:?} cpu={:?} cpu_bytes={} metal_bytes={} complete_bytes={}",
+                            plan.cpu_budget(upper),
+                            plan.cpu_budget(upper).total(),
+                            upper.iter().sum::<usize>(),
+                            plan.cpu_budget(upper).total() + upper.iter().sum::<usize>()
+                        );
+                    }
+                }
+                grouped += 1;
+            }
+        }
+        for (rows, m) in boundary_shapes() {
+            let plan = FixturePlan::dense(dtype, m, rows);
+            for page in [1, 4096, 16384, 65536] {
+                let upper = modeled_upper(plan, page);
+                check_budget_components(plan, upper);
+                if page == 16384 {
+                    check_observed_host_capacities(plan, upper);
+                    eprintln!(
+                        "staging budget plan={plan:?} upper={upper:?} cpu={:?} cpu_bytes={} metal_bytes={} complete_bytes={}",
+                        plan.cpu_budget(upper),
+                        plan.cpu_budget(upper).total(),
+                        upper.iter().sum::<usize>(),
+                        plan.cpu_budget(upper).total() + upper.iter().sum::<usize>()
+                    );
+                }
+            }
+            dense += 1;
+        }
+    }
+    assert_eq!((grouped, dense), (462, 175));
+    eprintln!(
+        "staging CPU budget: 637 scheduled fixtures, 2548 complete price/component checks; no availability reserve"
+    );
+}
+
+#[test]
+fn staging_cpu_budget_red_control_rejects_old_iq1_dense_underprice() {
+    let dtype = GgmlType::IQ1_S;
+    let bank = synthetic_bank(dtype, K, 65, 1, 0xd00d ^ dtype as u64);
+    let decoded = cpu_expert(dtype, &bank, K, 65, 0);
+    let rounded = half_values(&decoded);
+    let live_bytes = bank.capacity() + (decoded.capacity() + rounded.capacity()) * 4;
+    let old_inventory = [
+        6500 + 64,
+        512 * 4 + 64,
+        512 * 2 + 64,
+        4 + 64,
+        65 * 4 + 64,
+        65 * 4 + 64,
+    ];
+    let old_cpu = 16 * old_inventory.iter().sum::<usize>();
+    assert_eq!(old_cpu, 167_680);
+    assert!(live_bytes >= 272_740);
+    assert!(
+        old_cpu < live_bytes,
+        "old compressed-multiple budget must be rejected"
+    );
+    let plan = FixturePlan::dense(dtype, 65, 1);
+    let corrected = plan.cpu_budget(modeled_upper(plan, 16384));
+    assert_eq!(corrected.decoded_pair, 266_240);
+    assert!(corrected.total() >= live_bytes);
+    eprintln!(
+        "staging CPU budget red: old_cpu={old_cpu}, observed_live_bytes={live_bytes}, corrected_cpu={} components={corrected:?}",
+        corrected.total()
+    );
 }
 
 struct GroupedFixture {
@@ -536,7 +927,6 @@ struct GroupedFixture {
     b_div: usize,
     min: u32,
     max: u32,
-    _transaction: crate::metal::census::MetalAllocationTransactionGuard,
 }
 
 impl GroupedFixture {
@@ -550,7 +940,6 @@ impl GroupedFixture {
         max: u32,
         bad_ids: bool,
     ) -> Self {
-        let transaction = admit(ctx, dtype, m, SLOT_LIMIT, EXPERTS);
         let bank = synthetic_bank(dtype, K, m, EXPERTS, 0x1234 ^ dtype as u64);
         let x: Vec<f32> = (0..SLOT_LIMIT / b_div * K)
             .map(|i| (((i * 17 + i / K * 13) % 131) as f32 - 65.0) / 137.0)
@@ -631,7 +1020,6 @@ impl GroupedFixture {
             projection,
             initial,
             active,
-            _transaction: transaction,
             weight: view(ctx, &bank, dtype, vec![K as u64, m as u64, EXPERTS as u64]),
             x32: view(
                 ctx,
@@ -660,7 +1048,14 @@ impl GroupedFixture {
         }
     }
 
-    fn run(&self, ctx: &MetalContext, wide: bool, activation: TensorActivation, epi: usize) {
+    fn run(
+        &self,
+        ctx: &MetalContext,
+        admission: &Admission,
+        wide: bool,
+        activation: TensorActivation,
+        epi: usize,
+    ) -> usize {
         let x = if activation == TensorActivation::F16 {
             &self.x16
         } else {
@@ -674,6 +1069,7 @@ impl GroupedFixture {
             moe_grouped_tensor_pipeline_name(role, self.weight.dtype, activation)
         }
         .unwrap();
+        assert!(name.len() <= 128);
         let layout = moe_grouped_generic_layout(self.weight.dtype).unwrap();
         let args = GenericMmArgs {
             m: self.m as u32,
@@ -714,47 +1110,53 @@ impl GroupedFixture {
         // Repeat from the same initialized output, not recursively through the
         // epilogue. Numerical repetition is a witness, not an ownership proof.
         for _ in 0..2 {
-            let out = view(
-                ctx,
-                bytemuck::cast_slice(&initial),
-                GgmlType::F32,
-                vec![initial.len() as u64],
-            );
-            dispatch_census_begin();
-            one_shot(ctx, |enc| {
-                enc.set_pipeline(&ctx.tensor_pipeline(&name)?);
-                enc.set_bytes(0, &args);
-                enc.set_tensor(1, &self.weight);
-                enc.set_tensor(2, x);
-                enc.set_tensor(3, &self.counts);
-                enc.set_tensor(4, &self.ids);
-                enc.set_tensor(5, &out);
-                enc.set_bytes(6, &CLAMP);
-                if wide {
-                    enc.set_bytes(7, &(epi as i32));
-                }
-                enc.set_threadgroup_memory(0, if wide { 16384 } else { 8192 });
-                enc.dispatch(
-                    MTLSize {
-                        width: CAPACITY.div_ceil(if wide { 64 } else { 32 }),
-                        height: self.m.div_ceil(64),
-                        depth: EXPERTS,
-                    },
-                    MTLSize {
-                        width: 128,
-                        height: 1,
-                        depth: 1,
-                    },
+            let weak = objc2::rc::autoreleasepool(|_| {
+                let out = view(
+                    ctx,
+                    bytemuck::cast_slice(&initial),
+                    GgmlType::F32,
+                    vec![initial.len() as u64],
                 );
-                Ok(())
-            })
-            .expect("staging grouped tensor execution");
-            let census = dispatch_census_take();
-            assert_eq!(census.len(), 1);
-            assert_eq!(census[0].kernel, name);
-            assert_eq!(census[0].tg_threads, 128);
-            check_result(&tensor_f32_at_offset(&out), &expected, &name);
-            assert_offset_guards(&out, GUARD, GUARD);
+                let weak = buffer_probe(&out, admission.upper[5]);
+                dispatch_census_begin();
+                one_shot(ctx, |enc| {
+                    enc.set_pipeline(&ctx.tensor_pipeline(&name)?);
+                    enc.set_bytes(0, &args);
+                    enc.set_tensor(1, &self.weight);
+                    enc.set_tensor(2, x);
+                    enc.set_tensor(3, &self.counts);
+                    enc.set_tensor(4, &self.ids);
+                    enc.set_tensor(5, &out);
+                    enc.set_bytes(6, &CLAMP);
+                    if wide {
+                        enc.set_bytes(7, &(epi as i32));
+                    }
+                    enc.set_threadgroup_memory(0, if wide { 16384 } else { 8192 });
+                    enc.dispatch(
+                        MTLSize {
+                            width: CAPACITY.div_ceil(if wide { 64 } else { 32 }),
+                            height: self.m.div_ceil(64),
+                            depth: EXPERTS,
+                        },
+                        MTLSize {
+                            width: 128,
+                            height: 1,
+                            depth: 1,
+                        },
+                    );
+                    Ok(())
+                })
+                .expect("staging grouped tensor execution");
+                let census = dispatch_census_take();
+                assert_eq!(census.len(), 1);
+                assert_eq!(census[0].kernel, name);
+                assert_eq!(census[0].tg_threads, 128);
+                check_result(&tensor_f32_at_offset(&out), &expected, &name);
+                assert_offset_guards(&out, GUARD, GUARD);
+                drop(out);
+                weak
+            });
+            assert_buffer_released(&weak);
         }
         for (input, bytes) in inputs.iter().zip(before) {
             assert_eq!(
@@ -763,6 +1165,7 @@ impl GroupedFixture {
                 "{name}: immutable input changed"
             );
         }
+        2
     }
 }
 
@@ -770,33 +1173,47 @@ fn run_grouped(dtype: GgmlType) {
     let _lease = acquire_metal_benchmark_lease().expect("staging witness production lease");
     let ctx = require_tensor_context();
     let mut fixtures = 0;
-    for (count, m, min, max, bad_ids) in boundary_shapes()
-        .into_iter()
-        .map(|(c, m)| (c as i32, m, 0, i32::MAX as u32, false))
-        .chain([
-            (0, 17, 0, i32::MAX as u32, false),
-            (-1, 17, 0, i32::MAX as u32, false),
-            (66, 17, 0, i32::MAX as u32, false),
-            (i32::MIN, 17, 0, i32::MAX as u32, false),
-            (i32::MAX, 17, 0, i32::MAX as u32, false),
-            (17, 17, 18, 65, false),
-            (33, 17, 0, 32, false),
-            (65, 17, 0, i32::MAX as u32, true),
-        ])
-    {
+    let mut output_releases = 0;
+    for case in grouped_cases() {
         for b_div in [1, 2] {
-            let f = GroupedFixture::new(&ctx, dtype, m, count, b_div, min, max, bad_ids);
-            for epi in 0..3 {
-                f.run(&ctx, false, TensorActivation::F32, epi);
-                f.run(&ctx, false, TensorActivation::F16, epi);
-                f.run(&ctx, true, TensorActivation::F16, epi);
+            let admission = admit(&ctx, FixturePlan::grouped(dtype, case.m, b_div));
+            let probes = objc2::rc::autoreleasepool(|_| {
+                let f = GroupedFixture::new(
+                    &ctx,
+                    dtype,
+                    case.m,
+                    case.count,
+                    b_div,
+                    case.min,
+                    case.max,
+                    case.bad_ids,
+                );
+                let probes = [
+                    buffer_probe(&f.weight, admission.upper[0]),
+                    buffer_probe(&f.x32, admission.upper[1]),
+                    buffer_probe(&f.x16, admission.upper[2]),
+                    buffer_probe(&f.counts, admission.upper[3]),
+                    buffer_probe(&f.ids, admission.upper[4]),
+                ];
+                for epi in 0..3 {
+                    output_releases += f.run(&ctx, &admission, false, TensorActivation::F32, epi);
+                    output_releases += f.run(&ctx, &admission, false, TensorActivation::F16, epi);
+                    output_releases += f.run(&ctx, &admission, true, TensorActivation::F16, epi);
+                }
+                drop(f);
+                probes
+            });
+            for weak in &probes {
+                assert_buffer_released(weak);
             }
+            drop(admission);
             fixtures += 1;
         }
     }
     assert_eq!(fixtures, 66);
+    assert_eq!(output_releases, 1188);
     eprintln!(
-        "staging grouped dtype={dtype:?}: {fixtures} fixtures, 1188 single-kernel command buffers (2 repeats), K={K}, <=64 MiB admitted/fixture"
+        "staging grouped dtype={dtype:?}: {fixtures} fixtures, {output_releases} completed single-kernel command buffers/output weak releases, 330 fixture input weak releases, K={K}, <=64 MiB admitted/fixture"
     );
 }
 
@@ -805,86 +1222,107 @@ fn run_dense(dtype: GgmlType) {
     let ctx = require_tensor_context();
     let mut dispatches = 0;
     for (rows, m) in boundary_shapes() {
-        let _transaction = admit(&ctx, dtype, m, rows, 1);
-        let bank = synthetic_bank(dtype, K, m, 1, 0xd00d ^ dtype as u64);
-        let w = half_values(&cpu_expert(dtype, &bank, K, m, 0));
-        let x: Vec<f32> = (0..rows * K)
-            .map(|i| (((i * 19 + i / K * 11) % 127) as f32 - 63.0) / 139.0)
-            .collect();
-        let hx = half_values(&x);
-        let expected: Vec<_> = hx
-            .chunks_exact(K)
-            .flat_map(|row| matvec(&w, K, row))
-            .collect();
-        let weight = view(&ctx, &bank, dtype, vec![K as u64, m as u64]);
-        for activation in [TensorActivation::F32, TensorActivation::F16] {
-            let x_bytes: Vec<u8> = if activation == TensorActivation::F32 {
-                bytemuck::cast_slice(&x).to_vec()
-            } else {
-                x.iter()
-                    .flat_map(|&v| half::f16::from_f32(v).to_le_bytes())
-                    .collect()
-            };
-            let input = view(
+        let admission = admit(&ctx, FixturePlan::dense(dtype, m, rows));
+        let probes = objc2::rc::autoreleasepool(|_| {
+            let bank = synthetic_bank(dtype, K, m, 1, 0xd00d ^ dtype as u64);
+            let w = half_values(&cpu_expert(dtype, &bank, K, m, 0));
+            let x: Vec<f32> = (0..rows * K)
+                .map(|i| (((i * 19 + i / K * 11) % 127) as f32 - 63.0) / 139.0)
+                .collect();
+            let hx = half_values(&x);
+            let mut expected = Vec::with_capacity(rows * m);
+            for row in hx.chunks_exact(K) {
+                expected.extend_from_slice(&matvec(&w, K, row));
+            }
+            let weight = view(&ctx, &bank, dtype, vec![K as u64, m as u64]);
+            let half_x: Vec<half::f16> = x.iter().map(|&v| half::f16::from_f32(v)).collect();
+            let x32 = view(
                 &ctx,
-                &x_bytes,
-                if activation == TensorActivation::F32 {
-                    GgmlType::F32
-                } else {
-                    GgmlType::F16
-                },
+                bytemuck::cast_slice(&x),
+                GgmlType::F32,
                 vec![K as u64, rows as u64],
             );
-            for wide in [false, true] {
-                if wide && dtype != GgmlType::Q8_0 {
-                    continue;
-                }
-                let name = if wide {
-                    mat_mat_tensor_wide_pipeline_name(dtype, activation)
+            let x16 = view(
+                &ctx,
+                bytemuck::cast_slice(&half_x),
+                GgmlType::F16,
+                vec![K as u64, rows as u64],
+            );
+            let probes = [
+                buffer_probe(&weight, admission.upper[0]),
+                buffer_probe(&x32, admission.upper[1]),
+                buffer_probe(&x16, admission.upper[2]),
+            ];
+            for activation in [TensorActivation::F32, TensorActivation::F16] {
+                let input = if activation == TensorActivation::F32 {
+                    &x32
                 } else {
-                    mat_mat_tensor_pipeline_name(dtype, activation)
+                    &x16
+                };
+                for wide in [false, true] {
+                    if wide && dtype != GgmlType::Q8_0 {
+                        continue;
+                    }
+                    let name = if wide {
+                        mat_mat_tensor_wide_pipeline_name(dtype, activation)
+                    } else {
+                        mat_mat_tensor_pipeline_name(dtype, activation)
+                    }
+                    .unwrap();
+                    assert!(name.len() <= 128);
+                    let before = [tensor_backing_bytes(&weight), tensor_backing_bytes(input)];
+                    for _ in 0..2 {
+                        let weak = objc2::rc::autoreleasepool(|_| {
+                            let out = view(
+                                &ctx,
+                                bytemuck::cast_slice(&vec![CANARY; rows * m]),
+                                GgmlType::F32,
+                                vec![m as u64, rows as u64],
+                            );
+                            let weak = buffer_probe(&out, admission.upper[5]);
+                            dispatch_census_begin();
+                            one_shot(&ctx, |enc| {
+                                if wide {
+                                    encode_mat_mat_tensor_f32_wide(
+                                        &ctx, enc, &weight, input, &out, K, m, rows,
+                                    )
+                                } else {
+                                    encode_mat_mat_tensor_f32_narrow(
+                                        &ctx, enc, &weight, input, &out, K, m, rows,
+                                    )
+                                }
+                            })
+                            .expect("staging dense tensor execution");
+                            let census = dispatch_census_take();
+                            assert_eq!(census.len(), 1);
+                            assert_eq!(census[0].kernel, name);
+                            assert_eq!(census[0].tg_threads, 128);
+                            assert_eq!(
+                                check_result(&tensor_f32_at_offset(&out), &expected, &name),
+                                rows * m
+                            );
+                            assert_offset_guards(&out, GUARD, GUARD);
+                            drop(out);
+                            weak
+                        });
+                        assert_buffer_released(&weak);
+                        dispatches += 1;
+                    }
+                    assert_eq!(tensor_backing_bytes(&weight), before[0]);
+                    assert_eq!(tensor_backing_bytes(input), before[1]);
                 }
-                .unwrap();
-                let before = [tensor_backing_bytes(&weight), tensor_backing_bytes(&input)];
-                for _ in 0..2 {
-                    let out = view(
-                        &ctx,
-                        bytemuck::cast_slice(&vec![CANARY; rows * m]),
-                        GgmlType::F32,
-                        vec![m as u64, rows as u64],
-                    );
-                    dispatch_census_begin();
-                    one_shot(&ctx, |enc| {
-                        if wide {
-                            encode_mat_mat_tensor_f32_wide(
-                                &ctx, enc, &weight, &input, &out, K, m, rows,
-                            )
-                        } else {
-                            encode_mat_mat_tensor_f32_narrow(
-                                &ctx, enc, &weight, &input, &out, K, m, rows,
-                            )
-                        }
-                    })
-                    .expect("staging dense tensor execution");
-                    let census = dispatch_census_take();
-                    assert_eq!(census.len(), 1);
-                    assert_eq!(census[0].kernel, name);
-                    assert_eq!(census[0].tg_threads, 128);
-                    assert_eq!(
-                        check_result(&tensor_f32_at_offset(&out), &expected, &name),
-                        rows * m
-                    );
-                    assert_offset_guards(&out, GUARD, GUARD);
-                    dispatches += 1;
-                }
-                assert_eq!(tensor_backing_bytes(&weight), before[0]);
-                assert_eq!(tensor_backing_bytes(&input), before[1]);
             }
+            drop((weight, x32, x16));
+            probes
+        });
+        for weak in &probes {
+            assert_buffer_released(weak);
         }
+        drop(admission);
     }
     assert_eq!(dispatches, if dtype == GgmlType::Q8_0 { 200 } else { 100 });
     eprintln!(
-        "staging dense dtype={dtype:?}: 25 shapes, {dispatches} single-kernel command buffers (2 repeats), K={K}, <=64 MiB admitted/fixture"
+        "staging dense dtype={dtype:?}: 25 shapes, {dispatches} completed single-kernel command buffers/output weak releases, 75 fixture input weak releases, K={K}, <=64 MiB admitted/fixture"
     );
 }
 

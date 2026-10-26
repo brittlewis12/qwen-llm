@@ -1009,6 +1009,9 @@ pub(crate) fn run_family_tg_row(
         bench.begin_rep()?;
         if depth > 0 {
             bench.prefill(&depth_ids)?;
+            if let Some(report) = bench.prefill_report() {
+                eprintln!("[bench-depth-prefill] {}", serde_json::to_string(&report)?);
+            }
         }
         let t0 = Instant::now();
         for &id in &ids {

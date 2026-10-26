@@ -80,6 +80,19 @@ For priorities: `docs/PERF-ROADMAP.md`.
   or rely on cancellation after the kernel stalls. Native binaries already take
   the production Metal lease; do not wrap them in another lease holder.
 
+## Cold V4.1 Product Profile
+
+For cold `qwen run` or ordinary `qwen-bench`, explicitly set
+`QWEN_V41_PREFILL_EXECUTION=shrinking_ced` to use the measured CED/P4 profile:
+optional shrinking CED plus a 4 GiB (`4294967296` byte) soft resident mapping
+coalescing target. The selected cold plan carries that mapping into loading.
+Unset or `full_forward` keeps ordinary Full/None (P0) unchanged. Other values,
+including non-UTF-8, error. No context or chunk width is forced; larger singleton
+tensors retain their existing eligibility. Normal admission and optional CED to
+Full fallback remain active; fallback retains P4 and diagnostics report actual
+execution and fallback. Serving ignores this cold control and stays Full/None.
+This is an explicit profile, not automatic crossover selection.
+
 ## Native V4.1 Full/CED Pair
 
 `qwen-bench suite --v41-ced-pair` is an experimental, pp-only comparison using
@@ -158,7 +171,8 @@ acceptance. Ordered cold Full-then-CED diagnostics are not speedup evidence.
 
 Add `--v41-ced-pair-p4` to select a 4 GiB (`4294967296` byte) soft resident
 mapping coalescing target for both Full and CED, including 8K pairs. It requires
-`--v41-ced-pair`; ordinary production and unselected pairs retain None/P0.
+`--v41-ced-pair`; unselected pairs retain None/P0 independently of the cold
+execution policy.
 The selected cold plan carries the target into weight loading, which revalidates
 the storage geometry before import. Larger singletons remain eligible up to the
 device limit; this is not a 4 GiB tensor cap or an artifact/shape allowlist.

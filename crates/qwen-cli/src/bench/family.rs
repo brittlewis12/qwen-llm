@@ -144,13 +144,14 @@ pub(crate) fn with_family_bench_planned<R>(
             let planned = match cold {
                 Some(cold) => cold.clone(),
                 None => {
-                    qwen_llm::deepseek_v41::forward::plan_cold_prefill(
+                    qwen_llm::deepseek_v41::forward::plan_cold_prefill_with_target(
                         ctx,
                         gguf,
                         extent.prefill_endpoint.min(extent.forwards),
                         extent.forwards,
                         &[v41_prefill_execution],
                         0,
+                        crate::family_options::v41_cold_execution_target(v41_prefill_execution),
                     )?
                     .select_load(ctx.memory_signals())?
                     .0

@@ -45,7 +45,20 @@ pub(crate) fn v41_execution_geometry(
     value
 }
 
+/// Cold run/ordinary bench: unset/full_forward = Full/None; shrinking_ced = optional CED with measured 4 GiB soft resident target (P4), retained on Full fallback. Serving ignores it; paired mapping is independent.
 pub(crate) const V41_PREFILL_EXECUTION_ENV: &str = "QWEN_V41_PREFILL_EXECUTION";
+
+/// The explicit cold CED profile includes the measured P4 resident mapping.
+/// Serving and paired controls do not use this cold-only policy.
+pub(crate) fn v41_cold_execution_target(
+    execution: qwen_llm::deepseek_v41::forward::PrefillExecution,
+) -> Option<usize> {
+    use qwen_llm::deepseek_v41::forward::PrefillExecution;
+    match execution {
+        PrefillExecution::FullForward => None,
+        PrefillExecution::ShrinkingCed => Some(4_294_967_296),
+    }
+}
 
 /// Cold run/bench only. Serving deliberately does not read this control.
 pub(crate) fn v41_prefill_execution_from_env()

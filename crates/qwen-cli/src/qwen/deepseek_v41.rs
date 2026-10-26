@@ -798,17 +798,23 @@ pub(crate) fn run(
     shutdown::checkpoint()?;
     let loading = Instant::now();
     let ctx = MetalContext::new()?;
-    let cold = qwen_llm::deepseek_v41::forward::plan_cold_prefill(
+    let cold = qwen_llm::deepseek_v41::forward::plan_cold_prefill_with_target(
         &ctx,
         &gguf,
         ids.len(),
         required,
         &[prefill_execution],
         0,
+        crate::family_options::v41_cold_execution_target(prefill_execution),
     )?
     .select_load(ctx.memory_signals())?
     .0;
-    let weights = load(&ctx, Arc::new(gguf))?;
+    shutdown::checkpoint()?;
+    let weights = weights::ResidentWeights::load_with_storage_plan(
+        &ctx,
+        Arc::new(gguf),
+        &cold.resident_storage,
+    )?;
     ensure!(
         weights.config.vocab == tokenizer.n_vocab() as usize,
         "V4.1 tokenizer/model vocabulary mismatch"

@@ -1,7 +1,7 @@
 # V4.1 Prefill Chunk Scratch Reuse
 
-2026-10-26. Source: local main `72e59e33` plus the two scratch commits
-(`87e87b73` reuse, `a546b232` alternate-policy toggle). Artifact: GSQ-RCO
+2026-10-26. Source: local main `72e59e33` plus the scratch commits (`87e87b73` reuse,
+`a546b232` alternate-policy toggle, `87ce11b6` tail drop-first fix). Artifact: GSQ-RCO
 IQ2_XS (~144.6 GiB resident). Raw:
 `metagross:~/qwen-runs/2026-10-26-v41-scratch-reuse/` (`campaign2-*`,
 `warmup2.*`, `campaign2.log`; the first campaign without a warm-up and the
@@ -40,24 +40,36 @@ arm. Both arms build-identity match. Raw samples, in order:
 | current (C) | 247.75, 806.71 | 784.4 (806.7 warm) |
 
 Warm comparison (excluding the two cold samples 247.75 and 597.51, retained):
-current 784.44, reuse 831.44, **+5.99%**. The stable reuse arm is 856.2. The
-discarded warm-up pair was 763.54/774.11. The box's warm level was below the
-earlier ~850 (768-856), so compare within the campaign, not to the old number.
+current 784.44, reuse 831.44, **+5.99%**. This is an exploratory warm estimate,
+not a robust causal result: low throughput alone does not establish coldness,
+the stable reuse arm is two adjacent observations, and the exclusion needs a
+predefined cache/I/O criterion. The discarded warm-up pair was 763.54/774.11.
+The box's warm level was below the earlier ~850 (768-856), so compare within
+the campaign, not to the old number. A second independently warmed,
+reversed-order campaign is required before a broad claim.
 
 ## Correctness
 
 - 61 prefill tests pass; the census test now includes the
   `prefill_scratch_prepare` span.
-- The self-leased M5 lifetime witness passes for 2/4/8 chunks with identical
-  logits/captures and constant post-chunk device size (5,373,952 bytes);
-  scratch high-water 510,528 bytes.
-- The tail path allocates its own scratch after dropping the max set; the
-  scalar-tail path is unchanged.
+- The self-leased M5 lifetime witness passes for 2/4/8 chunks with tails 1 and
+  7, identical logits/captures/causal state, and a constant full-chunk device
+  size of 5,373,952 bytes; the multi-row tail's post-chunk device is 5,029,888
+  bytes, so the peak stays one set. Scratch high-water 510,528 bytes.
+- The tail path now drops the max scratch before allocating the tail set; the
+  earlier version constructed the replacement while the max set was still
+  alive. The scalar continuation is exercised on the scalar tail; the
+  multi-row tail's per-chunk reference leaves a different report/batch state,
+  so that continuation is not part of this witness.
 
 ## Limits
 
 One artifact and host session; the warm level was thermally variable; two cold
 samples are retained but excluded from the warm comparison; no full-model
-endpoint bitwise comparison (the toy lifetime witness validates the reuse and
-the `incoming` reset, not full-model logits). The campaign lease serialized
-the GPU; the page cache was shared with the other lanes on GSQ.
+endpoint bitwise, causal-state or continuation comparison (the toy lifetime
+witness validates the reuse, the `incoming` reset and the tail lifetime, not
+full-model logits). A second reversed campaign, Maya-S and then near-capacity
+IQ3 generality, and the CED-origin guard are separate follow-ups. The CED quick
+1.9% is not comparable to the 8-10% matched-P4 cohort. The 8192 chunk remains a
+model until the production route counts are merged. The campaign lease
+serialized the GPU; the page cache was shared with the other lanes on GSQ.

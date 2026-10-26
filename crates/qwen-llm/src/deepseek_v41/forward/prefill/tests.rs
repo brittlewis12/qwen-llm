@@ -103,7 +103,8 @@ fn chunk_dispatch_and_submission_census() {
                 [
                     "prefill_chunk_rows",
                     "prefill_engram_prepare",
-                    "prefill_host_prepare"
+                    "prefill_host_prepare",
+                    "prefill_scratch_prepare"
                 ]
             );
             for name in ["prefill_host_prepare", "prefill_engram_prepare"] {
@@ -121,6 +122,19 @@ fn chunk_dispatch_and_submission_census() {
                 assert_eq!(span.commit_wait_ms, 0.0);
                 assert!(span.wall_ms.is_finite() && span.wall_ms >= 0.0);
             }
+            let scratch = report
+                .operations
+                .iter()
+                .find(|o| o.operation == "prefill_scratch_prepare")
+                .unwrap();
+            assert_eq!(scratch.count, 1);
+            assert_eq!(scratch.dimensions, [0; 4]);
+            assert_eq!(scratch.completed_submits, 0);
+            assert_eq!(scratch.invalid_gpu_timestamps, 0);
+            assert!(scratch.gpu_ms.is_none());
+            assert_eq!(scratch.encode_ms, 0.0);
+            assert_eq!(scratch.commit_wait_ms, 0.0);
+            assert!(scratch.wall_ms.is_finite() && scratch.wall_ms >= 0.0);
             assert_eq!(
                 report
                     .operations

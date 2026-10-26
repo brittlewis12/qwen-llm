@@ -980,6 +980,18 @@ pub(super) fn run_captured(
     state.prefill_rows = Some(chunk_rows);
     state.last_prefill = None;
     let end = state.position() + tokens.len();
+    let mut scratch = if rows > 1 {
+        let span = profile::Wall("prefill_scratch_prepare", [0; 4], profile::start());
+        let scratch = state
+            .gpu_step
+            .as_ref()
+            .unwrap()
+            .new_chunk_scratch(model, rows)?;
+        drop(span);
+        Some(scratch)
+    } else {
+        None
+    };
     let mut logits = Vec::new();
     for chunk in tokens.chunks(chunk_rows) {
         // Admission prices one chunk, not the whole suffix. Drop its completed
@@ -999,6 +1011,17 @@ pub(super) fn run_captured(
                         .map(|sink| &mut **sink as &mut dyn capture::Capture),
                     last,
                 )?);
+            }
+            if scratch.as_ref().is_none_or(|s| s.rows != chunk.len()) {
+                let span = profile::Wall("prefill_scratch_prepare", [0; 4], profile::start());
+                scratch = Some(
+                    state
+                        .gpu_step
+                        .as_ref()
+                        .unwrap()
+                        .new_chunk_scratch(model, chunk.len())?,
+                );
+                drop(span);
             }
             let mut next = state.addresses;
             let mut hashes = Vec::with_capacity(chunk.len());
@@ -1023,6 +1046,7 @@ pub(super) fn run_captured(
                 capture
                     .as_mut()
                     .map(|sink| &mut **sink as &mut dyn capture::Capture),
+                scratch.as_ref().unwrap(),
             )?;
             state.addresses = next;
             state.phase = StatePhase::Ready;

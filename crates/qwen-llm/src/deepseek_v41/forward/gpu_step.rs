@@ -299,7 +299,68 @@ fn write(t: &MetalTensor, values: &[f32]) -> Result<()> {
     Ok(())
 }
 
+pub(super) struct ChunkScratch {
+    pub(super) rows: usize,
+    pub(super) x: MetalTensor,
+    pub(super) half: MetalTensor,
+    pub(super) outputs: MetalTensor,
+    pub(super) incoming: MetalTensor,
+    pub(super) hc: prefill::HcRows,
+    pub(super) ffn: ffn_gpu::Rows,
+    pub(super) attention: attention_gpu::Rows,
+    pub(super) engrams: Vec<(usize, MetalTensor, MetalTensor)>,
+}
+
 impl Workspace {
+    pub(super) fn new_chunk_scratch(
+        &self,
+        model: &Forward<'_>,
+        rows: usize,
+    ) -> Result<ChunkScratch> {
+        let c = &model.config;
+        let ctx = model.ctx;
+        let x = prefill::allocate(ctx, 4 * c.hidden, rows, GgmlType::F32)?
+            .view_bytes(0, vec![c.hidden as u64, 4, rows as u64]);
+        let half = prefill::allocate(ctx, 4 * c.hidden, rows, GgmlType::F32)?
+            .view_bytes(0, vec![c.hidden as u64, 4, rows as u64]);
+        let outputs = prefill::allocate(ctx, c.hidden, rows, GgmlType::F32)?;
+        let incoming = upload(
+            ctx,
+            &[1.0, 0.0, 0.0, 0.0].repeat(rows),
+            vec![4, rows as u64],
+        )?;
+        let hc = prefill::HcRows::new(ctx, c, rows)?;
+        let ffn = ffn_gpu::Rows::new(ctx, c, rows, model.layers.len())?;
+        let attention = attention_gpu::Rows::new(ctx, c, self.attention.capacity(), rows)?;
+        let engrams = self
+            .engrams
+            .iter()
+            .map(|slot| {
+                let p = &model.layers[slot.layer]
+                    .engram
+                    .as_ref()
+                    .ok_or("missing Engram")?
+                    .projection;
+                Ok((
+                    slot.layer,
+                    prefill::allocate(ctx, p.input, rows, GgmlType::F32)?,
+                    prefill::allocate(ctx, p.output, rows, GgmlType::F32)?,
+                ))
+            })
+            .collect::<Result<Vec<_>>>()?;
+        Ok(ChunkScratch {
+            rows,
+            x,
+            half,
+            outputs,
+            incoming,
+            hc,
+            ffn,
+            attention,
+            engrams,
+        })
+    }
+
     pub(super) fn run_chunk(
         &mut self,
         model: &Forward<'_>,
@@ -309,33 +370,37 @@ impl Workspace {
         cancel: Option<&AtomicBool>,
         with_logits: bool,
         mut capture: Option<&mut dyn capture::Capture>,
+        scratch: &ChunkScratch,
     ) -> Result<Vec<f32>> {
         let ctx = model.ctx;
         let c = &model.config;
         let n = tokens.len();
+        op::require(scratch.rows == n, "prefill chunk scratch rows")?;
         let prepare = profile::Wall("prefill_host_prepare", [0; 4], profile::start());
         let mut embeddings = Vec::with_capacity(n * 4 * c.hidden);
         for &token in tokens {
             embeddings.extend(decode_rows(model.embedding, token as usize, 1)?.repeat(4));
         }
-        let x = upload(ctx, &embeddings, vec![c.hidden as u64, 4, n as u64])?;
-        let half = prefill::allocate(ctx, 4 * c.hidden, n, GgmlType::F32)?
-            .view_bytes(0, vec![c.hidden as u64, 4, n as u64]);
-        let outputs = prefill::allocate(ctx, c.hidden, n, GgmlType::F32)?;
-        let incoming = upload(ctx, &[1.0, 0.0, 0.0, 0.0].repeat(n), vec![4, n as u64])?;
-        let hc = prefill::HcRows::new(ctx, c, n)?;
-        let ffn = ffn_gpu::Rows::new(ctx, c, n, model.layers.len())?;
-        let attention = attention_gpu::Rows::new(ctx, c, self.attention.capacity(), n)?;
-        let mut engrams = Vec::new();
+        write(&scratch.x, &embeddings)?;
+        write(&scratch.incoming, &[1.0, 0.0, 0.0, 0.0].repeat(n))?;
+        let x = &scratch.x;
+        let half = &scratch.half;
+        let outputs = &scratch.outputs;
+        let incoming = &scratch.incoming;
+        let hc = &scratch.hc;
+        let ffn = &scratch.ffn;
+        let attention = &scratch.attention;
+        let mut engrams = Vec::with_capacity(scratch.engrams.len());
         let engram_prepare = profile::Wall("prefill_engram_prepare", [0; 4], profile::start());
         for slot in &self.engrams {
-            let p = &model.layers[slot.layer].engram.as_ref().unwrap().projection;
             let values = model.engram_rows.decode_tokens(slot.layer, hashes)?;
-            engrams.push((
-                slot.layer,
-                upload(ctx, &values, vec![p.input as u64, n as u64])?,
-                prefill::allocate(ctx, p.output, n, GgmlType::F32)?,
-            ));
+            let (_, input, projected) = scratch
+                .engrams
+                .iter()
+                .find(|(layer, _, _)| *layer == slot.layer)
+                .ok_or("missing chunk Engram scratch")?;
+            write(input, &values)?;
+            engrams.push((slot.layer, input.clone(), projected.clone()));
         }
         drop(engram_prepare);
         let snapshots = match capture.as_ref() {

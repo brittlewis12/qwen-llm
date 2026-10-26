@@ -234,6 +234,7 @@ impl TinyWeights {
 #[derive(Default)]
 struct Observation {
     pending: Vec<Weak<ProtocolObject<dyn MTLBuffer>>>,
+    retained: Vec<Weak<ProtocolObject<dyn MTLBuffer>>>,
     chunk_bytes: u64,
     resource_high_water: u64,
     device_high_water: u64,
@@ -252,7 +253,17 @@ impl Observe {
     }
 
     fn finish(self) -> Observation {
-        OBSERVATION.with(|slot| slot.take().unwrap())
+        OBSERVATION.with(|slot| {
+            let observation = slot.take().unwrap();
+            assert!(
+                observation
+                    .retained
+                    .iter()
+                    .all(|weak| weak.load().is_none()),
+                "prefill scratch survives its request"
+            );
+            observation
+        })
     }
 }
 impl Drop for Observe {
@@ -283,15 +294,17 @@ pub(in super::super) fn completed_chunk(ctx: &MetalContext, state: &State, rows:
     OBSERVATION.with(|slot| {
         if let Some(o) = slot.borrow_mut().as_mut() {
             assert!(!state.is_poisoned());
+            if !o.pending.is_empty() {
+                assert!(
+                    o.retained.is_empty(),
+                    "prefill scratch reallocated across chunks"
+                );
+                o.retained = std::mem::take(&mut o.pending);
+            }
             assert!(
-                o.pending.iter().all(|weak| weak.load().is_none()),
-                "completed chunk scratch retained at position {}",
+                o.retained.iter().all(|weak| weak.load().is_some()),
+                "retained prefill scratch died at position {}",
                 state.position()
-            );
-            assert_eq!(
-                o.pending.is_empty(),
-                rows == 1,
-                "must observe actual multi-row scratch"
             );
             o.resource_high_water = o.resource_high_water.max(o.chunk_bytes);
             o.pending.clear();

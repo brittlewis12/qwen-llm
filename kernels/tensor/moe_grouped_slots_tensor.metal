@@ -115,6 +115,17 @@ inline void moe_grouped_slots_mm_tensor_body(
 
     threadgroup half * stage_a = sa + pr0 * TT_NK + 16 * il0;
     threadgroup half * stage_b = sb + pr1 * TT_NK + iy;
+    // Padded tails and invalid slots keep their pre-zeroed fragments; full
+    // fragments are rewritten every K iteration.
+    if (pr0 >= nr0) {
+        *(threadgroup half4 *)(stage_a + 0)  = half4(0.0h, 0.0h, 0.0h, 0.0h);
+        *(threadgroup half4 *)(stage_a + 4)  = half4(0.0h, 0.0h, 0.0h, 0.0h);
+        *(threadgroup half4 *)(stage_a + 8)  = half4(0.0h, 0.0h, 0.0h, 0.0h);
+        *(threadgroup half4 *)(stage_a + 12) = half4(0.0h, 0.0h, 0.0h, 0.0h);
+    }
+    if (!slot_valid) {
+        *(threadgroup half2x4 *)(stage_b) = half2x4(0.0h);
+    }
 
     // left = activations [32 slots x 32 k], right = weights [64 rows x 32 k]
     // read transposed; destination [32 slots x 64 rows] in registers.
@@ -133,20 +144,22 @@ inline void moe_grouped_slots_mm_tensor_body(
     }
 
     for (uint loop_k = 0; loop_k < args.K; loop_k += TT_NK) {
-        half4x4 temp_a(0.0h);
-        if (pr0 < nr0) DEQ(x_ptr, il, temp_a);
-        const half2x4 yv = slot_valid
-            ? (HALF_ACT ? *((device const half2x4 *)yh_ptr)
-                        : (half2x4)(*((device const float2x4 *)y_ptr)))
-            : half2x4(0.0h);
+        half4x4 temp_a;
+        DEQ(x_ptr, il, temp_a);
+        const half2x4 yv = HALF_ACT ? *((device const half2x4 *)yh_ptr)
+                                    : (half2x4)(*((device const float2x4 *)y_ptr));
 
         // The previous step's matmul must be done reading the slabs.
         threadgroup_barrier(mem_flags::mem_threadgroup);
-        *(threadgroup half4 *)(stage_a + 0)  = temp_a[0];
-        *(threadgroup half4 *)(stage_a + 4)  = temp_a[1];
-        *(threadgroup half4 *)(stage_a + 8)  = temp_a[2];
-        *(threadgroup half4 *)(stage_a + 12) = temp_a[3];
-        *(threadgroup half2x4 *)(stage_b) = yv;
+        if (pr0 < nr0) {
+            *(threadgroup half4 *)(stage_a + 0)  = temp_a[0];
+            *(threadgroup half4 *)(stage_a + 4)  = temp_a[1];
+            *(threadgroup half4 *)(stage_a + 8)  = temp_a[2];
+            *(threadgroup half4 *)(stage_a + 12) = temp_a[3];
+        }
+        if (slot_valid) {
+            *(threadgroup half2x4 *)(stage_b) = yv;
+        }
 
         il = (il + 2 < NL) ? il + 2 : il % 2;
         x_ptr = (il < 2) ? x_ptr + BYTES * ((2 + NL - 1) / NL) : x_ptr;
@@ -243,6 +256,12 @@ kernel void kernel_moe_wide_probe_f16act(
     threadgroup half * stage_a = sa + pr0 * TT_NK + 16 * il0;
     threadgroup half * stage_b0 = sb + lr1 * TT_NK + iy;
     threadgroup half * stage_b1 = sb + (lr1 + 32) * TT_NK + iy;
+    if (pr0 >= nr0) {
+        *(threadgroup half4 *)(stage_a + 0)  = half4(0.0h, 0.0h, 0.0h, 0.0h);
+        *(threadgroup half4 *)(stage_a + 4)  = half4(0.0h, 0.0h, 0.0h, 0.0h);
+        *(threadgroup half4 *)(stage_a + 8)  = half4(0.0h, 0.0h, 0.0h, 0.0h);
+        *(threadgroup half4 *)(stage_a + 12) = half4(0.0h, 0.0h, 0.0h, 0.0h);
+    }
 
     constexpr auto desc = tensor_ops::matmul2d_descriptor(
         TT_NR1_WIDE, TT_NR0, TT_NK, false, true, false,
@@ -257,16 +276,18 @@ kernel void kernel_moe_wide_probe_f16act(
     for (ushort i = 0; i < acc.get_capacity(); ++i) acc[i] = 0.0f;
 
     for (uint loop_k = 0; loop_k < args.K; loop_k += TT_NK) {
-        half4x4 temp_a(0.0h);
-        if (pr0 < nr0) DEQ(x_ptr, il, temp_a);
+        half4x4 temp_a;
+        DEQ(x_ptr, il, temp_a);
         const half2x4 yv0 = ok0 ? *((device const half2x4 *)y0) : half2x4(0.0h);
         const half2x4 yv1 = ok1 ? *((device const half2x4 *)y1) : half2x4(0.0h);
 
         threadgroup_barrier(mem_flags::mem_threadgroup);
-        *(threadgroup half4 *)(stage_a + 0)  = temp_a[0];
-        *(threadgroup half4 *)(stage_a + 4)  = temp_a[1];
-        *(threadgroup half4 *)(stage_a + 8)  = temp_a[2];
-        *(threadgroup half4 *)(stage_a + 12) = temp_a[3];
+        if (pr0 < nr0) {
+            *(threadgroup half4 *)(stage_a + 0)  = temp_a[0];
+            *(threadgroup half4 *)(stage_a + 4)  = temp_a[1];
+            *(threadgroup half4 *)(stage_a + 8)  = temp_a[2];
+            *(threadgroup half4 *)(stage_a + 12) = temp_a[3];
+        }
         if (valid0) *(threadgroup half2x4 *)(stage_b0) = yv0;
         else *(threadgroup half2x4 *)(stage_b0) = half2x4(0.0h);
         if (valid1) *(threadgroup half2x4 *)(stage_b1) = yv1;
@@ -466,6 +487,12 @@ inline void moe_mat_mat_tensor_wide_body(
     threadgroup half * stage_a = sa + pr0 * TT_NK + 16 * il0;
     threadgroup half * stage_b0 = sb + phys0 * TT_NK + iy;
     threadgroup half * stage_b1 = sb + phys1 * TT_NK + iy;
+    if (pr0 >= nr0) {
+        *(threadgroup half4 *)(stage_a + 0)  = half4(0.0h, 0.0h, 0.0h, 0.0h);
+        *(threadgroup half4 *)(stage_a + 4)  = half4(0.0h, 0.0h, 0.0h, 0.0h);
+        *(threadgroup half4 *)(stage_a + 8)  = half4(0.0h, 0.0h, 0.0h, 0.0h);
+        *(threadgroup half4 *)(stage_a + 12) = half4(0.0h, 0.0h, 0.0h, 0.0h);
+    }
 
     constexpr auto desc = tensor_ops::matmul2d_descriptor(
         TT_NR1_WIDE, TT_NR0, TT_NK, false, true, false,
@@ -482,18 +509,20 @@ inline void moe_mat_mat_tensor_wide_body(
     }
 
     for (uint loop_k = 0; loop_k < args.K; loop_k += TT_NK) {
-        half4x4 temp_a(0.0h);
-        if (pr0 < nr0) DEQ(x_ptr, il, temp_a);
+        half4x4 temp_a;
+        DEQ(x_ptr, il, temp_a);
         const half2x4 yv0 = HALF_ACT ? *((device const half2x4 *)yh_ptr0)
                                      : (half2x4)(*((device const float2x4 *)y_ptr0));
         const half2x4 yv1 = HALF_ACT ? *((device const half2x4 *)yh_ptr1)
                                      : (half2x4)(*((device const float2x4 *)y_ptr1));
 
         threadgroup_barrier(mem_flags::mem_threadgroup);
-        *(threadgroup half4 *)(stage_a + 0)  = temp_a[0];
-        *(threadgroup half4 *)(stage_a + 4)  = temp_a[1];
-        *(threadgroup half4 *)(stage_a + 8)  = temp_a[2];
-        *(threadgroup half4 *)(stage_a + 12) = temp_a[3];
+        if (pr0 < nr0) {
+            *(threadgroup half4 *)(stage_a + 0)  = temp_a[0];
+            *(threadgroup half4 *)(stage_a + 4)  = temp_a[1];
+            *(threadgroup half4 *)(stage_a + 8)  = temp_a[2];
+            *(threadgroup half4 *)(stage_a + 12) = temp_a[3];
+        }
         if (valid0) *(threadgroup half2x4 *)(stage_b0) = yv0;
         else *(threadgroup half2x4 *)(stage_b0) = half2x4(0.0h);
         if (valid1) *(threadgroup half2x4 *)(stage_b1) = yv1;

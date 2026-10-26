@@ -175,8 +175,9 @@ fn staging_source_contract_matches_physical_model_and_retains_k_order() {
         let source = body.source();
         for needle in [
             "threadgroup half * stage_a = sa + pr0 * TT_NK + 16 * il0;",
-            "half4x4 temp_a(0.0h);",
-            "if (pr0 < nr0) DEQ(x_ptr, il, temp_a);",
+            "half4x4 temp_a;",
+            "DEQ(x_ptr, il, temp_a);",
+            "if (pr0 >= nr0) {",
             "il = (il + 2 < NL) ? il + 2 : il % 2;",
             "BYTES * ((2 + NL - 1) / NL)",
         ] {
@@ -193,8 +194,10 @@ fn staging_source_contract_matches_physical_model_and_retains_k_order() {
         );
         for (offset, column) in [(0, 0), (4, 1), (8, 2), (12, 3)] {
             let store = format!("*(threadgroup half4 *)(stage_a + {offset})");
-            let line = source.lines().find(|line| line.contains(&store)).unwrap();
-            assert!(line.contains(&format!("= temp_a[{column}];")));
+            let line = source
+                .lines()
+                .find(|line| line.contains(&store) && line.contains(&format!("= temp_a[{column}];")))
+                .unwrap();
         }
         match body {
             Body::Narrow => {
@@ -203,14 +206,18 @@ fn staging_source_contract_matches_physical_model_and_retains_k_order() {
                 assert!(source.contains("il0 = (tiitg % TT_NL0);"));
                 assert!(source.contains("iy = 8 * (tiitg % TT_NL1);"));
                 assert!(source.contains("stage_b = sb + pr1 * TT_NK + iy;"));
+                assert!(source.contains("if (!slot_valid) {"));
+                assert!(
+                    source.contains("*(threadgroup half2x4 *)(stage_b) = half2x4(0.0h);")
+                );
+                assert!(source.contains("if (slot_valid) {"));
                 assert!(source.contains("*(threadgroup half2x4 *)(stage_b) = yv;"));
                 assert!(
                     source.contains(
                         "slot_valid = pr1 < nr1 && slot_id >= 0 && slot_id < slot_limit;"
                     )
                 );
-                assert!(source.contains("yv = slot_valid"));
-                assert!(source.contains(": half2x4(0.0h);"));
+                assert!(source.contains("half2x4 yv = HALF_ACT"));
             }
             Body::ExpertWide | Body::DenseWide => {
                 for needle in [
@@ -235,9 +242,16 @@ fn staging_source_contract_matches_physical_model_and_retains_k_order() {
                 }
             }
         }
-        let first_store = source.find("*(threadgroup half4 *)(stage_a").unwrap();
+        let loop_start = source.find("for (uint loop_k").unwrap();
+        let first_store = loop_start
+            + source[loop_start..]
+                .find("*(threadgroup half4 *)(stage_a")
+                .unwrap();
         let run = source.find("op.run(left, right, acc);").unwrap();
-        assert!(source[..first_store].contains("threadgroup_barrier(mem_flags::mem_threadgroup);"));
+        assert!(
+            source[loop_start..first_store]
+                .contains("threadgroup_barrier(mem_flags::mem_threadgroup);")
+        );
         assert!(
             source[first_store..run].contains("threadgroup_barrier(mem_flags::mem_threadgroup);")
         );

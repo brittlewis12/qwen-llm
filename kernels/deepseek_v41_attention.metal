@@ -413,6 +413,29 @@ kernel void kernel_deepseek_v41_attention_keep(
     mask[t] = keep;
 }
 
+// One group constructs a temporary on-chip set; the published mask stays dense.
+kernel void kernel_deepseek_v41_attention_keep_fused(
+    constant uint2 &a [[buffer(0)]], device const uint *ids [[buffer(1)]],
+    device uint *mask [[buffer(2)]], uint tid [[thread_index_in_threadgroup]],
+    uint3 threads [[threads_per_threadgroup]]) {
+    threadgroup atomic_uint bits[4096];
+    // Uniform guard bounds the rounding addition and every local access.
+    if (a.x <= 131072u) {
+        uint words = (a.x + 31u) >> 5;
+        for (uint j = tid; j < words; j += threads.x)
+            atomic_store_explicit(bits + j, 0u, memory_order_relaxed);
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+        for (ulong j = tid; j < a.y; j += threads.x) {
+            uint id = ids[j];
+            if (id < a.x)
+                atomic_fetch_or_explicit(bits + (id >> 5), 1u << (id & 31u), memory_order_relaxed);
+        }
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+        for (uint j = tid; j < a.x; j += threads.x)
+            mask[j] = (atomic_load_explicit(bits + (j >> 5), memory_order_relaxed) >> (j & 31u)) & 1u;
+    }
+}
+
 // Experimental only: clear, scatter, then consumers must be ordered dispatches
 // on a serial encoder. This preserves the dense mask and has no status output.
 kernel void kernel_deepseek_v41_attention_keep_clear(

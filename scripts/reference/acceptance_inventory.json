@@ -722,6 +722,48 @@
   },
   {
     "target": "lib",
+    "name": "deepseek_v41::forward::attention_gpu::tests::candidate_publish::fused::candidate_publish_fused_current_device_correctness",
+    "class": "gpu",
+    "ignored": true,
+    "reason": "Explicit self-leased current-device 144-case incumbent/clear-scatter/fused dense-mask, next-dispatch and weak-release witness; validation-on parent GPU lane only."
+  },
+  {
+    "target": "lib",
+    "name": "deepseek_v41::forward::attention_gpu::tests::candidate_publish::fused::mask_fused_cpu_policy_boundaries_and_forced_precedence",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Pure bounded serial/pruned/clamped-count/capacity selector and explicit test-arm precedence contracts; no Metal context."
+  },
+  {
+    "target": "lib",
+    "name": "deepseek_v41::forward::attention_gpu::tests::candidate_publish::fused::mask_fused_cpu_single_dispatch_dense_source_contract",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Pure source contract for one-group on-chip bitset, barriers, dense output and unchanged publication bindings; no Metal context."
+  },
+  {
+    "target": "lib",
+    "name": "deepseek_v41::forward::attention_gpu::tests::candidate_publish::fused::mask_fused_cpu_strided_bitset_membership_grid",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Pure cooperative-bitset model across 144 cases, five actual widths, duplicates, invalid IDs and last-word/tail guards; no Metal context."
+  },
+  {
+    "target": "lib",
+    "name": "deepseek_v41::forward::attention_gpu::tests::candidate_publish::fused::mask_fused_cpu_word_rounding_width_capacity_and_budget",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Pure overflow-safe domain/word boundaries, pipeline width/TG-capacity and unchanged global-buffer/CPU budget arithmetic; no Metal context."
+  },
+  {
+    "target": "lib",
+    "name": "deepseek_v41::forward::attention_gpu::tests::candidate_publish::real_pipeline::mask_fused_real_pipeline_current_device_correctness",
+    "class": "gpu",
+    "ignored": true,
+    "reason": "Explicit self-leased current-device fused real producer/follower witness with incumbent dispatch count, raw IDs/mask, status/guards/output and weak-release checks; validation-on parent GPU lane only."
+  },
+  {
+    "target": "lib",
     "name": "deepseek_v41::forward::attention_gpu::tests::candidate_publish::real_pipeline::mask_real_pipeline_cpu_bounds",
     "class": "cpu",
     "ignored": false,

@@ -224,8 +224,17 @@ fn compare_case(ctx: &MetalContext, c: &Config, schedule: &Schedule, start: usiz
                 if last == 16385 {
                     assert_eq!(count("index_heads_rows"), 0, "pruning stays per-row");
                     if schedule.candidate_source_layer == Some(id) {
-                        assert!(count("blocks") > 0);
-                        assert!(count("keep") > 0);
+                        let publications = (0..n)
+                            .filter(|&row| {
+                                ((start + row + 1) / ratio).div_ceil(c.candidate_block)
+                                    > c.candidate_topk
+                            })
+                            .count();
+                        assert_eq!(count("blocks"), publications);
+                        assert_eq!(count("keep"), 0);
+                        assert_eq!(count("keep_fused"), publications);
+                        assert_eq!(count("keep_clear"), 0);
+                        assert_eq!(count("keep_scatter"), 0);
                     } else {
                         assert_eq!(
                             count("blocks"),
@@ -237,6 +246,9 @@ fn compare_case(ctx: &MetalContext, c: &Config, schedule: &Schedule, start: usiz
                             0,
                             "only the candidate source publishes masks"
                         );
+                        assert_eq!(count("keep_fused"), 0);
+                        assert_eq!(count("keep_clear"), 0);
+                        assert_eq!(count("keep_scatter"), 0);
                     }
                 }
             }

@@ -3,7 +3,7 @@
 use super::super::gguf::Schedule;
 use super::prefill::RowsArithmetic;
 use super::*;
-use objc2_metal::{MTLComputePipelineState, MTLSize};
+use objc2_metal::{MTLComputePipelineState, MTLDevice, MTLSize};
 
 mod ced;
 mod query_batch;
@@ -121,8 +121,54 @@ pub(super) struct Workspace {
 
 #[cfg(test)]
 struct MaskPublicationExperiment {
-    clear_scatter: bool,
+    arm: MaskPublicationArm,
     retained_ids: Option<MetalTensor>,
+}
+
+const MASK_FUSED_MAX_DOMAIN: usize = 131072;
+const MASK_FUSED_TG_BYTES: usize = 4096 * 4;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum MaskPublicationArm {
+    Incumbent,
+    Fused,
+    #[cfg(test)]
+    ClearScatter,
+}
+
+fn candidate_publication_arm(
+    domain: usize,
+    candidate_topk: usize,
+    concurrent: bool,
+    tg_capacity: usize,
+    forced: Option<MaskPublicationArm>,
+) -> MaskPublicationArm {
+    if let Some(arm) = forced {
+        return arm;
+    }
+    let count = domain.min(candidate_topk);
+    if !concurrent
+        && count >= 2048
+        && domain > count
+        && domain <= MASK_FUSED_MAX_DOMAIN
+        && tg_capacity >= MASK_FUSED_TG_BYTES
+    {
+        MaskPublicationArm::Fused
+    } else {
+        MaskPublicationArm::Incumbent
+    }
+}
+
+fn candidate_fused_words(domain: usize) -> Option<usize> {
+    (domain <= MASK_FUSED_MAX_DOMAIN).then(|| (domain + 31) / 32)
+}
+
+fn candidate_fused_width(max_threads: usize, static_bytes: usize, tg_capacity: usize) -> usize {
+    if tg_capacity < MASK_FUSED_TG_BYTES.max(static_bytes) {
+        0
+    } else {
+        max_threads.min(256)
+    }
 }
 
 struct BatchCursor {
@@ -1520,32 +1566,84 @@ impl Workspace {
         blocks: usize,
     ) -> Result<()> {
         let count = blocks.min(self.config.candidate_topk);
+        let forced = None;
         #[cfg(test)]
-        if let Some(experiment) = &self.mask_publication_experiment {
+        let forced = if let Some(experiment) = &self.mask_publication_experiment {
             if let Some(retained) = &experiment.retained_ids {
                 metal::encode_copy_offset_i32(ctx, enc, &self.sort_ids, 0, retained, count)
                     .map_err(|error| error.to_string())?;
             }
-            if experiment.clear_scatter {
+            Some(experiment.arm)
+        } else {
+            forced
+        };
+        let capacity = ctx.device.maxThreadgroupMemoryLength();
+        let arm = candidate_publication_arm(blocks, count, enc.is_concurrent(), capacity, forced);
+        let mut width = 0;
+        let suffix = match arm {
+            MaskPublicationArm::Incumbent => "keep",
+            MaskPublicationArm::Fused => {
+                op::require(
+                    !enc.is_concurrent()
+                        && candidate_fused_words(blocks).is_some()
+                        && capacity >= MASK_FUSED_TG_BYTES,
+                    "fused mask requires serial encoder, bounded domain and on-chip capacity",
+                )?;
+                "keep_fused"
+            }
+            #[cfg(test)]
+            MaskPublicationArm::ClearScatter => {
                 op::require(
                     !enc.is_concurrent(),
                     "mask experiment requires serial encoder",
                 )?;
-                let clear = pipeline(ctx, enc, "keep_clear")?;
-                enc.set_bytes(0, &[blocks as u32, count as u32]);
-                enc.set_tensor(2, &self.candidates);
-                dispatch(enc, &clear, blocks);
-                let scatter = pipeline(ctx, enc, "keep_scatter")?;
-                enc.set_tensor(1, &self.sort_ids);
-                dispatch(enc, &scatter, count);
-                return Ok(());
+                "keep_clear"
+            }
+        };
+        let mut pso = ctx
+            .pipeline(&format!("kernel_deepseek_v41_attention_{suffix}"))
+            .map_err(|e| e.to_string())?;
+        if arm == MaskPublicationArm::Fused {
+            width = candidate_fused_width(
+                pso.maxTotalThreadsPerThreadgroup(),
+                pso.staticThreadgroupMemoryLength(),
+                capacity,
+            );
+            if width == 0 {
+                op::require(
+                    forced.is_none(),
+                    "forced fused mask pipeline exceeds TG limits",
+                )?;
+                pso = ctx
+                    .pipeline("kernel_deepseek_v41_attention_keep")
+                    .map_err(|e| e.to_string())?;
             }
         }
-        let pso = pipeline(ctx, enc, "keep")?;
+        enc.set_pipeline(&pso);
         enc.set_bytes(0, &[blocks as u32, count as u32]);
         enc.set_tensor(1, &self.sort_ids);
         enc.set_tensor(2, &self.candidates);
-        dispatch(enc, &pso, blocks);
+        if width > 0 {
+            enc.dispatch(
+                MTLSize {
+                    width: 1,
+                    height: 1,
+                    depth: 1,
+                },
+                MTLSize {
+                    width,
+                    height: 1,
+                    depth: 1,
+                },
+            );
+        } else {
+            dispatch(enc, &pso, blocks);
+        }
+        #[cfg(test)]
+        if arm == MaskPublicationArm::ClearScatter {
+            let scatter = pipeline(ctx, enc, "keep_scatter")?;
+            dispatch(enc, &scatter, count);
+        }
         Ok(())
     }
 

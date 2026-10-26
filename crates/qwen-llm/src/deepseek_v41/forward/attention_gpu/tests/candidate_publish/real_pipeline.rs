@@ -3,6 +3,7 @@ use super::*;
 use crate::deepseek_v41::forward::attention_gpu::query_batch::{Scratch, selection_shapes};
 
 const REAL_PROTOCOL: &str = "v41-mask-real-pipeline-v1";
+const FUSED_REAL_PROTOCOL: &str = "v41-mask-fused-real-pipeline-v1";
 const START: usize = 16383;
 const ROWS: usize = 2;
 const CAPACITY: usize = START + ROWS;
@@ -340,7 +341,7 @@ impl<'a> RealFixture<'a> {
         rows.selected = selected.view.clone();
         rows.candidates = mask.view.clone();
         workspace.mask_publication_experiment = Some(MaskPublicationExperiment {
-            clear_scatter: matches!(arm, Arm::ClearScatter),
+            arm,
             retained_ids: capture.then(|| retained.view.clone()),
         });
         workspace.begin_batch(START, ROWS).unwrap();
@@ -454,6 +455,7 @@ impl<'a> RealFixture<'a> {
 
 fn with_real_fixture<T>(
     ctx: &MetalContext,
+    protocol: &str,
     arm: Arm,
     capture: bool,
     work: impl FnOnce(&mut RealFixture<'_>) -> T,
@@ -488,7 +490,7 @@ fn with_real_fixture<T>(
             );
             eprintln!(
                 "{}",
-                json!({"protocol": REAL_PROTOCOL, "event": "admission", "arm": arm.name(), "capture": capture, "allocation_upper_count": sizes.len(), "priced_metal_bytes": priced, "cpu_inventory": cpu, "cpu_upper_bytes": cpu.total(), "limit_bytes": REAL_LIMIT})
+                json!({"protocol": protocol, "event": "admission", "arm": arm.name(), "capture": capture, "allocation_upper_count": sizes.len(), "priced_metal_bytes": priced, "cpu_inventory": cpu, "cpu_upper_bytes": cpu.total(), "limit_bytes": REAL_LIMIT})
             );
             metal::allocation_census_begin();
             let mut f = RealFixture::new(ctx, arm, capture);
@@ -523,7 +525,7 @@ fn with_real_fixture<T>(
             );
             eprintln!(
                 "{}",
-                json!({"protocol": REAL_PROTOCOL, "event": "case_release", "arm": arm.name(), "capture": capture, "buffers": probes.len(), "realized_metal_bytes": realized, "all_released": true})
+                json!({"protocol": protocol, "event": "case_release", "arm": arm.name(), "capture": capture, "buffers": probes.len(), "realized_metal_bytes": realized, "all_released": true})
             );
         },
     );
@@ -552,6 +554,12 @@ fn census_check(census: &[metal::DispatchCensusRow], arm: Arm, id: usize) {
         count("keep_scatter"),
         source * usize::from(matches!(arm, Arm::ClearScatter))
     );
+    assert_eq!(count("keep_fused"), source * usize::from(arm == Arm::Fused));
+    for d in census.iter().filter(|d| d.kernel.ends_with("_keep_fused")) {
+        assert_eq!((d.grid_width, d.grid_height, d.grid_depth), (1, 1, 1));
+        assert!((1..=256).contains(&d.threads_width));
+        assert_eq!((d.threads_height, d.threads_depth), (1, 1));
+    }
     assert_eq!(count("index_heads"), if id == 1 { 0 } else { ROWS });
     assert_eq!(
         count("index_heads_rows"),
@@ -573,12 +581,12 @@ fn census_check(census: &[metal::DispatchCensusRow], arm: Arm, id: usize) {
     assert!(count("softmax_rows") > 0);
 }
 
-fn correctness(ctx: &MetalContext) -> (Vec<Vec<f32>>, [usize; 2]) {
+fn correctness(ctx: &MetalContext, candidate: Arm, protocol: &str) -> (Vec<Vec<f32>>, [usize; 2]) {
     let mut baseline: Option<Vec<Vec<f32>>> = None;
     let mut producer = None;
     let mut counts = [0; 2];
-    for (index, arm) in [Arm::Incumbent, Arm::ClearScatter].into_iter().enumerate() {
-        let output = with_real_fixture(ctx, arm, true, |f| {
+    for (index, arm) in [Arm::Incumbent, candidate].into_iter().enumerate() {
+        let output = with_real_fixture(ctx, protocol, arm, true, |f| {
             let mut outputs = Vec::new();
             for id in 0..4 {
                 execute(ctx, |enc| {
@@ -591,7 +599,7 @@ fn correctness(ctx: &MetalContext) -> (Vec<Vec<f32>>, [usize; 2]) {
                     let rows: Vec<_> = census.iter().map(|d| json!({"kernel": d.kernel, "grid": [d.grid_width, d.grid_height, d.grid_depth], "threads": [d.threads_width, d.threads_height, d.threads_depth], "serial": !d.encoder_concurrent})).collect();
                     eprintln!(
                         "{}",
-                        json!({"protocol": REAL_PROTOCOL, "event": "dispatch_census", "arm": arm.name(), "layer": id, "rows": rows})
+                        json!({"protocol": protocol, "event": "dispatch_census", "arm": arm.name(), "layer": id, "rows": rows})
                     );
                 });
                 outputs.push(f.check(id, true));
@@ -600,7 +608,7 @@ fn correctness(ctx: &MetalContext) -> (Vec<Vec<f32>>, [usize; 2]) {
             let retained = f.retained.read();
             eprintln!(
                 "{}",
-                json!({"protocol": REAL_PROTOCOL, "event": "actual_producer_ids", "arm": arm.name(), "ids": retained, "sha256_le": valid_ids::id_digest(&retained)})
+                json!({"protocol": protocol, "event": "actual_producer_ids", "arm": arm.name(), "ids": retained, "sha256_le": valid_ids::id_digest(&retained)})
             );
             if let Some(expected) = &producer {
                 assert_eq!(
@@ -623,17 +631,17 @@ fn correctness(ctx: &MetalContext) -> (Vec<Vec<f32>>, [usize; 2]) {
     }
     assert_eq!(
         counts[1],
-        counts[0] + 1,
-        "extra scatter dispatch is counted"
+        counts[0] + candidate.dispatches() - 1,
+        "publication dispatch delta is counted"
     );
     eprintln!(
         "{}",
-        json!({"protocol": REAL_PROTOCOL, "event": "correctness_complete", "arms": 2, "layers_per_arm": 4, "native_span_dispatches": counts, "actual_retained_ids_per_arm": KEPT, "every_mask_word": true, "unmasked_wrong_control": true, "output_bound": "attention_gpu::tests::close: 2e-5 + 4e-6*abs(reference)"})
+        json!({"protocol": protocol, "event": "correctness_complete", "arms": 2, "arm_names": [Arm::Incumbent.name(), candidate.name()], "layers_per_arm": 4, "native_span_dispatches": counts, "actual_retained_ids_per_arm": KEPT, "every_mask_word": true, "unmasked_wrong_control": true, "output_bound": "attention_gpu::tests::close: 2e-5 + 4e-6*abs(reference)"})
     );
     (baseline.unwrap(), counts)
 }
 
-fn real_context(kind: &str) -> MetalContext {
+fn real_context(kind: &str, protocol: &str, current_device: bool) -> MetalContext {
     use std::io::Read;
 
     for (name, _) in std::env::vars_os() {
@@ -645,7 +653,7 @@ fn real_context(kind: &str) -> MetalContext {
     }
     let ctx = MetalContext::new().expect("explicit real pipeline requires Metal");
     assert!(
-        ctx.device.name().to_string().contains("M5"),
+        current_device || ctx.device.name().to_string().contains("M5"),
         "parent-only M5 experiment"
     );
     assert!(!metal::dispatch_census_is_active());
@@ -662,7 +670,7 @@ fn real_context(kind: &str) -> MetalContext {
     eprintln!(
         "{}",
         json!({
-            "protocol": REAL_PROTOCOL, "event": "context", "run_kind": kind, "device": ctx.describe(),
+            "protocol": protocol, "event": "context", "run_kind": kind, "device": ctx.describe(),
             "executable_sha256": format!("{:x}", hash.finalize()),
             "fixture_sha256": format!("{:x}", Sha256::digest(include_bytes!("real_pipeline.rs"))),
             "host_sha256": format!("{:x}", Sha256::digest(include_bytes!("../../../attention_gpu.rs"))),
@@ -671,7 +679,7 @@ fn real_context(kind: &str) -> MetalContext {
             "start": START, "rows": ROWS, "capacity": CAPACITY, "visible_lengths": [16384, 16385],
             "candidate_block": 8, "candidate_topk": KEPT, "index_topk": 512,
             "kv_owners": [0, 2], "index_sources": [0, 2, 3], "candidate_source": 0, "ratios": [1, 1, 1, 1],
-            "production_dispatch_changed": false, "scope": "reduced scheduled host path; NOT model/prompt-threshold evidence",
+            "production_dispatch_changed": true, "production_candidate_default": "bounded fused_onchip", "scope": "reduced scheduled host path; NOT model/prompt-threshold evidence",
             "reset": "fresh independently seeded workspace/weights/rows and metadata for every arm/sample; serial complete-case pools",
         })
     );
@@ -683,8 +691,17 @@ fn real_context(kind: &str) -> MetalContext {
 fn mask_real_pipeline_m5_correctness() {
     assert_eq!(std::env::var("MTL_DEBUG_LAYER").as_deref(), Ok("1"));
     let _lease = metal::acquire_metal_benchmark_lease().expect("production lease and wired guard");
-    let ctx = real_context("correctness");
-    correctness(&ctx);
+    let ctx = real_context("correctness", REAL_PROTOCOL, false);
+    correctness(&ctx, Arm::ClearScatter, REAL_PROTOCOL);
+}
+
+#[test]
+#[ignore = "parent-only self-leased current-device fused real producer/follower correctness; MTL_DEBUG_LAYER=1; <=128 MiB"]
+fn mask_fused_real_pipeline_current_device_correctness() {
+    assert_eq!(std::env::var("MTL_DEBUG_LAYER").as_deref(), Ok("1"));
+    let _lease = metal::acquire_metal_benchmark_lease().expect("production lease and wired guard");
+    let ctx = real_context("correctness", FUSED_REAL_PROTOCOL, true);
+    correctness(&ctx, Arm::Fused, FUSED_REAL_PROTOCOL);
 }
 
 #[test]
@@ -697,8 +714,8 @@ fn mask_real_pipeline_m5_native_timing() {
         );
     }
     let _lease = metal::acquire_metal_benchmark_lease().expect("production lease and wired guard");
-    let ctx = real_context("native_timing");
-    let (baseline, dispatches) = correctness(&ctx);
+    let ctx = real_context("native_timing", REAL_PROTOCOL, false);
+    let (baseline, dispatches) = correctness(&ctx, Arm::ClearScatter, REAL_PROTOCOL);
     eprintln!(
         "{}",
         json!({"protocol": REAL_PROTOCOL, "event": "timing_begin", "rounds": ROUNDS, "orders": ["ABBA", "BAAB"], "total_samples": 24, "warmup_samples": 0, "retries": 0, "spread_or_win_gate": false, "spans_per_sample": 1, "includes": "command creation + serial encode_rows/finish_rows all four layers + real blocks/sort/publication/follower selection/attention + commit/wait", "excludes": "allocation/seed/admission/compilation/census/probe copies/readback/oracles/release", "subspans_summed": false})
@@ -708,7 +725,7 @@ fn mask_real_pipeline_m5_native_timing() {
     for round in 0..ROUNDS {
         for (order, arms) in [("ABBA", [A, B, B, A]), ("BAAB", [B, A, A, B])] {
             for (slot, arm) in arms.into_iter().enumerate() {
-                with_real_fixture(&ctx, arm, false, |f| {
+                with_real_fixture(&ctx, REAL_PROTOCOL, arm, false, |f| {
                     let wall = std::time::Instant::now();
                     let command = ctx.queue.commandBuffer().unwrap();
                     let enc = KernelEncoder::begin(&command);
@@ -792,6 +809,9 @@ fn mask_real_pipeline_cpu_bounds() {
 #[test]
 fn mask_real_pipeline_cpu_protocol() {
     assert_ne!(REAL_PROTOCOL, super::PROTOCOL);
+    assert_ne!(FUSED_REAL_PROTOCOL, REAL_PROTOCOL);
+    assert_eq!(Arm::Fused.dispatches(), Arm::Incumbent.dispatches());
+    assert_ne!(Arm::Fused.name(), Arm::ClearScatter.name());
     assert_eq!(ROUNDS, 3);
     let mut counts = [0; 2];
     for _ in 0..ROUNDS {

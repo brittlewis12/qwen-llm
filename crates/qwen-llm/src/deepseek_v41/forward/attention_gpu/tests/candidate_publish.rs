@@ -6,6 +6,7 @@ use objc2_metal::MTLDevice;
 use serde_json::json;
 use sha2::{Digest, Sha256};
 
+mod fused;
 mod real_pipeline;
 mod valid_ids;
 
@@ -294,23 +295,20 @@ fn candidate_publish_cpu_native_launch_policy() {
     assert!(!forbidden_native_variable("PATH"));
 }
 
-#[derive(Clone, Copy, Debug)]
-enum Arm {
-    Incumbent,
-    ClearScatter,
-}
+use super::super::MaskPublicationArm as Arm;
 
 impl Arm {
     fn name(self) -> &'static str {
         match self {
             Self::Incumbent => "incumbent",
             Self::ClearScatter => "clear_scatter",
+            Self::Fused => "fused_onchip",
         }
     }
 
     fn dispatches(self) -> usize {
         match self {
-            Self::Incumbent => 1,
+            Self::Incumbent | Self::Fused => 1,
             Self::ClearScatter => 2,
         }
     }
@@ -320,6 +318,7 @@ struct Pipelines {
     keep: metal::Pipeline,
     clear: metal::Pipeline,
     scatter: metal::Pipeline,
+    fused: metal::Pipeline,
     observe: metal::Pipeline,
 }
 
@@ -332,10 +331,21 @@ impl Pipelines {
             assert!(p.maxTotalThreadsPerThreadgroup() >= THREADS);
             p
         };
+        let fused = ctx
+            .pipeline("kernel_deepseek_v41_attention_keep_fused")
+            .unwrap();
+        assert!(
+            candidate_fused_width(
+                fused.maxTotalThreadsPerThreadgroup(),
+                fused.staticThreadgroupMemoryLength(),
+                ctx.device.maxThreadgroupMemoryLength(),
+            ) > 0
+        );
         Self {
             keep: get("keep"),
             clear: get("keep_clear"),
             scatter: get("keep_scatter"),
+            fused,
             observe: get("keep_observe"),
         }
     }
@@ -503,6 +513,22 @@ impl Fixture {
                 Self::launch(enc, &p.clear, self.domain);
                 Self::launch(enc, &p.scatter, self.count);
             }
+            Arm::Fused => {
+                assert!(candidate_fused_words(self.domain).is_some());
+                enc.set_pipeline(&p.fused);
+                enc.dispatch(
+                    MTLSize {
+                        width: 1,
+                        height: 1,
+                        depth: 1,
+                    },
+                    MTLSize {
+                        width: p.fused.maxTotalThreadsPerThreadgroup().min(256),
+                        height: 1,
+                        depth: 1,
+                    },
+                );
+            }
         }
         if observe {
             self.encode_observer(enc, p);
@@ -559,22 +585,24 @@ impl Fixture {
         self.reset();
         execute(ctx, |enc| self.encode(enc, p, Arm::Incumbent, true));
         let incumbent = self.check(&expected);
-        self.reset();
-        execute(ctx, |enc| self.encode(enc, p, Arm::ClearScatter, true));
-        assert_eq!(self.check(&expected), incumbent);
         let mut permuted = self.input.clone();
         permuted.reverse();
         permuted.rotate_left(self.count / 3);
-        self.selected.write(&permuted);
-        self.reset();
-        execute(ctx, |enc| self.encode(enc, p, Arm::ClearScatter, true));
-        assert_eq!(self.mask.read(), expected);
-        assert_eq!(self.observed.read(), expected);
-        assert_eq!(self.selected.read(), permuted);
-        self.selected.check_guards();
-        self.mask.check_guards();
-        self.observed.check_guards();
-        self.selected.write(&self.input);
+        for arm in [Arm::ClearScatter, Arm::Fused] {
+            self.reset();
+            execute(ctx, |enc| self.encode(enc, p, arm, true));
+            assert_eq!(self.check(&expected), incumbent);
+            self.selected.write(&permuted);
+            self.reset();
+            execute(ctx, |enc| self.encode(enc, p, arm, true));
+            assert_eq!(self.mask.read(), expected);
+            assert_eq!(self.observed.read(), expected);
+            assert_eq!(self.selected.read(), permuted);
+            self.selected.check_guards();
+            self.mask.check_guards();
+            self.observed.check_guards();
+            self.selected.write(&self.input);
+        }
     }
 }
 
@@ -635,7 +663,8 @@ fn context() -> MetalContext {
             "candidate_block": Config::default().candidate_block,
             "candidate_topk": Config::default().candidate_topk,
             "domains": DOMAINS, "counts": COUNTS, "patterns": PATTERNS,
-            "dense_mask_retained": true, "production_dispatch_changed": false,
+            "dense_mask_retained": true, "production_dispatch_changed": true,
+            "production_candidate_default": "bounded fused_onchip",
         })
     );
     ctx
@@ -656,6 +685,7 @@ fn correctness_grid(ctx: &MetalContext, p: &Pipelines) {
                         "protocol": PROTOCOL, "event": "correctness_case", "domain_words": domain,
                         "kept_id_count": count, "pattern": pattern, "permuted_candidate": true,
                         "independent_cpu": true, "incumbent": true, "next_dispatch_consumer": true,
+                        "clear_scatter": true, "fused_onchip": true,
                         "negative_controls": if domain > 0 { "no-op and wrong-word through GPU observer" } else { "empty range guards only" },
                     })
                 );

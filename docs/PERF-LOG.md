@@ -6,6 +6,22 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the current state and evidence index.
 
+## 2026-10-25 - Measured Cold CED/P4 Reaches Product Run And Ordinary Bench
+
+- Explicit `QWEN_V41_PREFILL_EXECUTION=shrinking_ced` now selects the measured
+  P4 mapping through one cold plan for run/ordinary bench. Full/None defaults
+  and serving are unchanged; no new knob or automatic crossover is introduced.
+- M5 delivery `abda018e` passes the strict 8K Full/CED bridge: all 257 full heads
+  match bitwise and 56 causal-region hashes agree per checkpoint, including 256
+  teacher-forced steps per arm. Complete observations also match frozen P4. The
+  corrected N=2050 public admitted-2K witness passes without forcing geometry.
+- Both actual product frontends pass 8K validation-on smoke checks without
+  fallback; run includes generated-token scalar continuation. Maintained gate
+  `f011b6cd` passes 474 CPU tests, ten tripwires and fourteen Python checks.
+- Native economic evidence remains the separate 8-10% homogeneous / 28% mixed
+  observation, not a new timing or independent quality claim from these checks.
+  [Samples, delivery scope and proof identities](bench/2026-10-25-v41-current-ced-8k.md).
+
 ## 2026-10-25 - V4.1 GSQ-RCO IQ2_XS Matches IQ3 At 2/3 The Memory; Warm Decode Is ~51-55 tok/s
 
 - Main `de082865` on M5 Ultra, all three artifacts admitted: GSQ IQ2_XS

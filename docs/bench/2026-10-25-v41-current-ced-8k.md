@@ -1,8 +1,9 @@
 # Current-Source 8K CED: Homogeneous And Mixed Streams
 
-Experimental source `2de8ce2f` composes current main `c8a3daaa` with the reviewed
-runtime `dde9f8cc`, then adds explicit pair-only P4 mapping selection. This is
-not a main/default promotion, an independent quality receipt, or a new kernel.
+Timing source `2de8ce2f` composes main `c8a3daaa` with the reviewed runtime
+`dde9f8cc`, then adds explicit pair-only P4 mapping selection. Its timings are
+not an independent quality receipt or evidence for changing defaults. The
+subsequent cold-profile delivery checks are recorded separately here.
 
 ## Native Results
 
@@ -57,17 +58,56 @@ claimed by this run.
   tests, zero failed/ignored. Formatting, whitespace and inventory discovery
   checks pass. This is not a fresh full maintained/GPU qualification claim.
 
-Endpoint agreement is not independent numerical acceptance or a full causal-state
-and teacher-forced continuation comparison. Frozen full-state proofs do not
-automatically extend to this composition. The existing independent F32 attention
-discrepancy, narrowed-device fixture and CED-origin serving reuse remain separate
-qualification questions; this experiment does not settle or weaken them.
+Endpoint agreement alone is not independent numerical acceptance or a full
+causal-state and teacher-forced continuation comparison. The subsequent bridge
+closes the latter bounded question; the independent F32 attention discrepancy
+and CED-origin serving reuse remain separate and unwaived.
 
 Production mapping remains None and Full remains the default. The measured
 experiment uses `suite --pp 8192 --depth 0 --runs 4 --seed 1 --v41-ced-pair
 --v41-ced-pair-p4 --v41-ced-pair-production-timing`, with schedules
 `full-blocks-first`, `ced-blocks-first`, then `interleaved`. Launch environment
 requirements and timing scope are documented in `docs/BENCH.md`.
+
+## Cold-Profile Delivery
+
+Delivery source `abda018e` passes the existing strict comparison through an
+explicit P4 selector on M5, with unchanged comparators: all 257 complete
+129,280-logit vectors match bitwise and all 56 causal-region hashes agree at
+every checkpoint, including 256 true teacher-forced steps per arm. One
+resident import and one live KV state are retained; twelve CED commands complete
+without fallback. The entire 257-observation sequence also matches frozen P4
+`7398cb76`. Stable shard stamps, metadata/layout hashes and normalized controls
+match that retained reference after accounting for the report's separate-source
+schema. No fresh whole-artifact content hash is claimed.
+
+The corrected public-API witness also passes on this source: N=2050/capacity2051
+selects a 2048-row admitted request on an unchanged 4096-row-preference model,
+then checks Full/CED equality and release. This does not retrospectively qualify
+the older N=2049 negative fixture.
+
+Actual `qwen run` and ordinary `qwen-bench suite` pass validation-on 8K smoke
+checks using `QWEN_V41_PREFILL_EXECUTION=shrinking_ced`: the selected cold storage
+plan carries P4 into loading, actual execution is CED with width 4096 and no
+fallback. Run uses the exact frozen 8192 prompt IDs after a checked text round
+trip and generates two tokens, including scalar continuation. These are frontend
+checks, not new speed measurements. Default/explicit Full and serving stay
+Full/None; optional pre-mutation Full fallback retains the opted-in P4 mapping.
+
+Independent source review finds no P1/P2 blockers. The maintained default gate
+passes at `f011b6cd`: 474 exact CPU tests (307 library, 33 oracle, 53 bench,
+81 qwen), ten comparison tripwires and fourteen source/Engram Python checks.
+All selected Rust tests report zero ignored/skipped. The first gate stopped on
+two unclassified soft-target constants; exact-token audit explanations fix that
+without changing the scanner or runtime. There are no Rust/Metal changes from
+`abda018e` to that gate source, only identity-audit metadata.
+
+This qualifies the explicit cold profile in the stated scope, not automatic
+policy selection, short-prompt speed, independent task quality or serving reuse.
+Receipts are `delivery-p4-state-n8192.*`, `delivery-admitted-2k.*`,
+`delivery-product-smoke.verified.json`, and `delivery-f011b6cd-contracts.log`
+in the same private evidence archive. Frozen core witness SHA256:
+`9050159731351f39876bde064473c1a7d32bbc0f214e8a6772702a5703718d19`.
 
 ## Evidence Identity
 

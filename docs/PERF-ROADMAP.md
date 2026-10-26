@@ -17,19 +17,24 @@ questions the evidence has closed. Dated measurements remain in
 - DeepSeek V4.1 current requirements and operation live in
   [DEEPSEEK-V41-STRATEGY](DEEPSEEK-V41-STRATEGY.md) and
   [DEEPSEEK-V41-BRINGUP](DEEPSEEK-V41-BRINGUP.md).
+- Cold V4.1 run/ordinary bench support the explicit CED/P4 profile through
+  `QWEN_V41_PREFILL_EXECUTION=shrinking_ced`; default Full/None and serving are
+  unchanged. Current-source 8K economics, state/continuation and frontend checks
+  are in [the measured delivery packet](bench/2026-10-25-v41-current-ced-8k.md).
 
-## Open leverage map (living; read before starting a bet, update when you start or finish one)
+## Open Leverage Map
 
-Numbers are M5 Ultra unless noted. A bet is one line: what, measured or
-expected effect, status. Status is one of `open`, `in flight (branch)`,
-`landed (entry)`, or `negative (packet)`. Claim a bet by setting it to
-`in flight` with your branch; a second lane finding it claimed reads the branch
-before building anything adjacent. This replaces relaying between sessions.
+This is a high-level direction and evidence index, not the live work queue.
+Current objectives, ownership, priorities, parked findings and triage live in
+the `qwen-llm` Aven workspace; dated measurements belong in PERF-LOG and their
+benchmark packets. Do not add claiming/closing commits here. Small ordinary
+changes do not require a task. Historical branch/status notes are evidence, not
+current assignments or authority to reactivate an old experiment.
 
 ### DeepSeek V4.1-Flash (main after the 4096-row chunk and 64-slot gate/up: pp2048 Q2 877.3 / IQ3 852 (not re-measured), pp4096 Q2 890.2 / IQ3 896.8; decode rechecked tg32 Q2 43.2 / IQ3 41.0, depth tg32@d2048 41.6 from the prior landing)
 
-Current implementation campaign (2026-10-25): close the trust-boundary defects
-before promoting the experimental CED composition. Independent owned lanes:
+Earlier integration record (2026-10-25), superseded by the cold-profile status
+and delivery packet above:
 
 - Tensor staging ownership: landed (`e97bd5c0`, qualified source `7d80ac08`).
   Unique physical staging and zero-filled invalid rows pass eight focused CPU

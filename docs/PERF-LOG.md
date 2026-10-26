@@ -6,6 +6,21 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the current state and evidence index.
 
+## 2026-10-25 - V4.1 GSQ-RCO IQ2_XS Matches IQ3 At 2/3 The Memory; Warm Decode Is ~51-55 tok/s
+
+- Main `de082865` on M5 Ultra, all three artifacts admitted: GSQ IQ2_XS
+  (~144.6 GiB resident) pp2048/pp4096 859.6/873.8, Unsloth Q2_K_XL
+  (~185.9 GiB) 843.8/858.6, IQ3_XXS (~217.4 GiB) 849.0/879.5 tok/s.
+- Decode measured right after a model's load includes first-touch page
+  faults: tg32 42.2/41.7/39.3 cold vs 55.1/54.2/50.9 on an immediately
+  repeated arm (GSQ/Q2/IQ3), prefill unchanged. Earlier decode baselines
+  (IQ3 41.0, Q2 43.2) are cold numbers; decode comparisons need warm repeats.
+- Six-document witness, identical 384 targets: mean NLL GSQ 2.1421, Q2
+  2.1539, IQ3 2.1543; top-1 212/213/218. The 22-task screen differs by one
+  code case (GSQ 9/10, others 8/10). Indistinguishable on these instruments;
+  choosing a default needs a stronger quality measure.
+- [Baseline packet](bench/2026-10-25-v41-gsq-baseline.md).
+
 ## 2026-10-25 - Trust Repairs Land; Independent Attention Gate Exposes Numerical Drift
 
 - Main `e97bd5c0`/`de082865` integrate reviewed staging ownership and executable

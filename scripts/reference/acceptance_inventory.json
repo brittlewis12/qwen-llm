@@ -1128,6 +1128,13 @@
   },
   {
     "target": "lib",
+    "name": "deepseek_v41::forward::ced::qualification::current_pair::current_full_vs_ced_paired_full_model_p4",
+    "class": "model",
+    "ignored": true,
+    "reason": "Explicit P4 full-artifact current Full/CED paired qualification; parent bounded M5 model lane only."
+  },
+  {
+    "target": "lib",
     "name": "deepseek_v41::forward::ced::qualification::current_pair::every_loader_source_rejects_a_stale_body_in_both_active_inventories",
     "class": "cpu",
     "ignored": false,
@@ -1146,6 +1153,13 @@
     "class": "cpu",
     "ignored": false,
     "reason": "Reviewed host-only CED, request-planning, execution contract or synthetic storage control; no Metal context or dispatch."
+  },
+  {
+    "target": "lib",
+    "name": "deepseek_v41::forward::ced::qualification::current_pair::storage_selector_preserves_default_and_p4_metadata_and_rejects_drift",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Host-only synthetic GSQ storage planning verifies default/P4 selector provenance and rejects target drift; no Metal context or import."
   },
   {
     "target": "lib",

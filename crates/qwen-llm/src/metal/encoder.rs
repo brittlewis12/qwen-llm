@@ -12,7 +12,8 @@ use super::*;
 /// to client code. The forward-pass driver owns the command buffer; every
 /// kernel just appends dispatches.
 pub struct KernelEncoder {
-    pub(crate) raw: Retained<ProtocolObject<dyn MTLComputeCommandEncoder>>,
+    // Swapped only by the opt-in per-dispatch profiler (`dispatch_profile`).
+    pub(crate) raw: std::cell::RefCell<Retained<ProtocolObject<dyn MTLComputeCommandEncoder>>>,
     pub(crate) parent: Retained<ProtocolObject<dyn MTLCommandBuffer>>,
     pub(crate) ended: bool,
     pub(crate) census_identity: Cell<(usize, u64)>,
@@ -26,6 +27,9 @@ pub struct KernelEncoder {
     /// the debug-only `note_read`/`note_write` hazard tracker below turns a
     /// future violation into a loud panic instead of a silent GPU race.
     pub(crate) concurrent: bool,
+    /// Bindings for per-dispatch replay; Some only for plain encoders begun
+    /// while a dispatch profile is active on this thread.
+    pub(crate) replay: std::cell::RefCell<Option<Box<dispatch_profile::Replay>>>,
     #[cfg(debug_assertions)]
     pub(crate) hazard_writes: std::cell::RefCell<Vec<(usize, u64, u64)>>,
     #[cfg(debug_assertions)]
@@ -44,12 +48,13 @@ impl KernelEncoder {
         concurrent: bool,
     ) -> Self {
         Self {
-            raw,
+            raw: std::cell::RefCell::new(raw),
             parent: parent.clone(),
             ended: false,
             census_identity: Cell::new(census_encoder_identity()),
             bound_pipeline_name: std::cell::RefCell::new(None),
             concurrent,
+            replay: std::cell::RefCell::new(None),
             #[cfg(debug_assertions)]
             hazard_writes: std::cell::RefCell::new(Vec::new()),
             #[cfg(debug_assertions)]
@@ -60,7 +65,7 @@ impl KernelEncoder {
     pub fn begin(cmd: &Retained<ProtocolObject<dyn MTLCommandBuffer>>) -> Self {
         let raw = cmd.computeCommandEncoder().expect("compute encoder");
         kernel_trace_record_encoder(false);
-        Self::new(raw, cmd, false)
+        Self::new(raw, cmd, false).with_profile_replay()
     }
 
     pub fn begin_concurrent(cmd: &Retained<ProtocolObject<dyn MTLCommandBuffer>>) -> Self {
@@ -68,7 +73,14 @@ impl KernelEncoder {
             .computeCommandEncoderWithDispatchType(MTLDispatchType::Concurrent)
             .expect("concurrent compute encoder");
         kernel_trace_record_encoder(true);
-        Self::new(raw, cmd, true)
+        Self::new(raw, cmd, true).with_profile_replay()
+    }
+
+    fn with_profile_replay(self) -> Self {
+        if dispatch_profile::dispatch_profile_records() {
+            *self.replay.borrow_mut() = Some(Box::default());
+        }
+        self
     }
 
     pub(crate) fn is_concurrent(&self) -> bool {
@@ -97,6 +109,18 @@ impl KernelEncoder {
         end_sample: usize,
         concurrent: bool,
     ) -> Result<Self, MetalError> {
+        let raw = Self::sampled_raw(cmd, samples, start_sample, end_sample, concurrent)?;
+        kernel_trace_record_encoder(concurrent);
+        Ok(Self::new(raw, cmd, concurrent))
+    }
+
+    pub(crate) fn sampled_raw(
+        cmd: &Retained<ProtocolObject<dyn MTLCommandBuffer>>,
+        samples: &MetalTimestampSampleBuffer,
+        start_sample: usize,
+        end_sample: usize,
+        concurrent: bool,
+    ) -> Result<Retained<ProtocolObject<dyn MTLComputeCommandEncoder>>, MetalError> {
         let pass = MTLComputePassDescriptor::computePassDescriptor();
         pass.setDispatchType(if concurrent {
             MTLDispatchType::Concurrent
@@ -110,13 +134,8 @@ impl KernelEncoder {
             attachment.setStartOfEncoderSampleIndex(start_sample);
             attachment.setEndOfEncoderSampleIndex(end_sample);
         }
-        let raw = cmd
-            .computeCommandEncoderWithDescriptor(&pass)
-            .ok_or_else(|| {
-                MetalError::Counter("could not create sampled compute encoder".into())
-            })?;
-        kernel_trace_record_encoder(concurrent);
-        Ok(Self::new(raw, cmd, concurrent))
+        cmd.computeCommandEncoderWithDescriptor(&pass)
+            .ok_or_else(|| MetalError::Counter("could not create sampled compute encoder".into()))
     }
 
     /// Debug-only hazard note: declare that a dispatch in this encoder
@@ -191,11 +210,13 @@ impl KernelEncoder {
     }
 
     pub fn set_label(&self, label: &str) {
-        self.raw.setLabel(Some(&NSString::from_str(label)));
+        self.raw.borrow().setLabel(Some(&NSString::from_str(label)));
     }
 
     pub fn insert_debug_signpost(&self, label: &str) {
-        self.raw.insertDebugSignpost(&NSString::from_str(label));
+        self.raw
+            .borrow()
+            .insertDebugSignpost(&NSString::from_str(label));
     }
 
     pub fn sample_counters(
@@ -205,18 +226,20 @@ impl KernelEncoder {
         barrier: bool,
     ) {
         unsafe {
-            self.raw.sampleCountersInBuffer_atSampleIndex_withBarrier(
-                &samples.raw,
-                sample_index,
-                barrier,
-            );
+            self.raw
+                .borrow()
+                .sampleCountersInBuffer_atSampleIndex_withBarrier(
+                    &samples.raw,
+                    sample_index,
+                    barrier,
+                );
         }
     }
 
     pub(crate) fn finish(&mut self) {
         if !self.ended {
             self.ended = true;
-            self.raw.endEncoding();
+            self.raw.borrow().endEncoding();
         }
     }
 
@@ -227,16 +250,24 @@ impl KernelEncoder {
     /// Mark `buf` used for reading by this pass without binding it, so the
     /// command keeps it resident (`MTLComputeCommandEncoder.useResource`).
     pub fn use_resource_read(&self, buf: &Buffer) {
+        if let Some(replay) = self.replay.borrow_mut().as_mut() {
+            replay.resource(buf);
+        }
         let resource: &objc2::runtime::ProtocolObject<dyn objc2_metal::MTLResource> =
             objc2::runtime::ProtocolObject::from_ref(&**buf);
         self.raw
+            .borrow()
             .useResource_usage(resource, objc2_metal::MTLResourceUsage::Read);
     }
 
     /// Bind a buffer at slot `index`.
     pub fn set_buffer(&self, index: usize, buf: &Buffer, offset: u64) {
+        if let Some(replay) = self.replay.borrow_mut().as_mut() {
+            replay.buffer(index, buf, offset);
+        }
         unsafe {
             self.raw
+                .borrow()
                 .setBuffer_offset_atIndex(Some(buf.as_ref()), offset as usize, index);
         }
     }
@@ -252,10 +283,15 @@ impl KernelEncoder {
     /// for tiny per-dispatch scalars.
     pub fn set_bytes<T: bytemuck::Pod>(&self, index: usize, value: &T) {
         let bytes = bytemuck::bytes_of(value);
+        if let Some(replay) = self.replay.borrow_mut().as_mut() {
+            replay.bytes(index, bytes);
+        }
         let ptr = std::ptr::NonNull::new(bytes.as_ptr() as *mut std::ffi::c_void)
             .expect("non-null bytemuck pointer");
         unsafe {
-            self.raw.setBytes_length_atIndex(ptr, bytes.len(), index);
+            self.raw
+                .borrow()
+                .setBytes_length_atIndex(ptr, bytes.len(), index);
         }
     }
 
@@ -267,10 +303,15 @@ impl KernelEncoder {
             bytes.len() <= 4_096,
             "inline Metal slice exceeds the 4 KiB API limit"
         );
+        if let Some(replay) = self.replay.borrow_mut().as_mut() {
+            replay.bytes(index, bytes);
+        }
         let ptr = std::ptr::NonNull::new(bytes.as_ptr() as *mut std::ffi::c_void)
             .expect("non-null bytemuck pointer");
         unsafe {
-            self.raw.setBytes_length_atIndex(ptr, bytes.len(), index);
+            self.raw
+                .borrow()
+                .setBytes_length_atIndex(ptr, bytes.len(), index);
         }
     }
 
@@ -279,29 +320,44 @@ impl KernelEncoder {
         let n_bytes = n_bytes
             .checked_next_multiple_of(16)
             .expect("threadgroup memory size overflow");
+        if let Some(replay) = self.replay.borrow_mut().as_mut() {
+            replay.threadgroup(index, n_bytes);
+        }
         unsafe {
-            self.raw.setThreadgroupMemoryLength_atIndex(n_bytes, index);
+            self.raw
+                .borrow()
+                .setThreadgroupMemoryLength_atIndex(n_bytes, index);
         }
     }
 
     pub fn set_pipeline(&self, pso: &Pipeline) {
-        self.raw.setComputePipelineState(&pso.raw);
+        if let Some(replay) = self.replay.borrow_mut().as_mut() {
+            replay.pipeline(pso);
+        }
+        self.raw.borrow().setComputePipelineState(&pso.raw);
         *self.bound_pipeline_name.borrow_mut() = Some(Arc::clone(&pso.name));
     }
 
     pub fn dispatch(&self, grid: MTLSize, threads: MTLSize) {
         kernel_trace_record_dispatch();
         census_record_dispatch(self, grid, threads);
+        if self.replay.borrow().is_some() {
+            dispatch_profile::split_for_dispatch(self, grid, threads);
+        }
         self.raw
+            .borrow()
             .dispatchThreadgroups_threadsPerThreadgroup(grid, threads);
     }
 
+    /// Fences are not replayed: an encoder that uses one stops splitting.
     pub fn update_fence(&self, fence: &Fence) {
-        self.raw.updateFence(fence);
+        *self.replay.borrow_mut() = None;
+        self.raw.borrow().updateFence(fence);
     }
 
     pub fn wait_for_fence(&self, fence: &Fence) {
-        self.raw.waitForFence(fence);
+        *self.replay.borrow_mut() = None;
+        self.raw.borrow().waitForFence(fence);
     }
 }
 

@@ -1100,7 +1100,7 @@ fn m5_down_invalid_bindings_and_preflight_failures_do_not_mutate() {
     enc.end();
     let command = ctx.queue.commandBuffer().unwrap();
     let mut enc = KernelEncoder::begin(&command);
-    enc.raw.endEncoding();
+    enc.raw.borrow().endEncoding();
     enc.ended = true;
     assert!(c.encode(&ctx, &enc, true).is_err());
     assert!(c.f.prepare(&ctx, &enc).is_err());

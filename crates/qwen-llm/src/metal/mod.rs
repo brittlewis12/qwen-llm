@@ -292,6 +292,7 @@ mod completion;
 mod context;
 mod device_facts;
 mod dflash;
+mod dispatch_profile;
 mod elementwise;
 mod encoder;
 mod expert;
@@ -335,6 +336,10 @@ pub use completion::*;
 pub use context::*;
 pub use device_facts::{DEVICE_FACTS_VERSION, DeviceFacts, GpuFamilySupport, os_build_version};
 pub use dflash::*;
+pub use dispatch_profile::{
+    DispatchProfileGuard, DispatchProfileReport, DispatchProfileRow, dispatch_profile_begin,
+    dispatch_profile_finish, dispatch_profile_label,
+};
 pub use elementwise::*;
 pub use encoder::*;
 pub use expert::*;

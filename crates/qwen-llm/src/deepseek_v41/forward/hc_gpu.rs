@@ -116,8 +116,19 @@ pub(super) fn encode_pre(
         },
     );
 
-    // 2. Projected RMS, controls, collapse, RMS norm in one threadgroup.
-    let pso = ctx.pipeline("kernel_deepseek_v41_hc_pre")?;
+    // 2. Projected RMS, controls, collapse, RMS norm in one threadgroup. The
+    // vector kernel needs float4 rows (V41_HC_PRE_MAX_D4 per thread) and
+    // 16-byte aligned residual/collapsed/normalized/norm-weight views.
+    let vector = hidden.is_multiple_of(4)
+        && hidden / 4 <= (4 * PRE_THREADS) as u64
+        && [x, site.collapsed, site.normalized, &constants[2]]
+            .iter()
+            .all(|t| t.offset.is_multiple_of(16));
+    let pso = ctx.pipeline(if vector {
+        "kernel_deepseek_v41_hc_pre"
+    } else {
+        "kernel_deepseek_v41_hc_pre_scalar"
+    })?;
     enc.set_pipeline(&pso);
     enc.set_bytes(
         0,

@@ -49,7 +49,16 @@ kernel void kernel_deepseek_v41_hc_projection(
     device const float4 *x4 = (device const float4 *)x;
     const uint n4 = n_in / 4;
     float sum = 0.0f;
-    for (uint i = tid; i < n4; i += V41_HC_PROJECTION_THREADS) {
+    // Two weight/activation pairs in flight per thread (the loop is short
+    // and latency-bound: 4*hidden/4 float4s over 1024 threads).
+    uint i = tid;
+    for (; i + V41_HC_PROJECTION_THREADS < n4; i += 2 * V41_HC_PROJECTION_THREADS) {
+        const float4 a0 = w4[i], b0 = x4[i];
+        const float4 a1 = w4[i + V41_HC_PROJECTION_THREADS], b1 = x4[i + V41_HC_PROJECTION_THREADS];
+        sum += a0.x * b0.x + a0.y * b0.y + a0.z * b0.z + a0.w * b0.w;
+        sum += a1.x * b1.x + a1.y * b1.y + a1.z * b1.z + a1.w * b1.w;
+    }
+    for (; i < n4; i += V41_HC_PROJECTION_THREADS) {
         const float4 a = w4[i];
         const float4 b = x4[i];
         sum += a.x * b.x + a.y * b.y + a.z * b.z + a.w * b.w;
@@ -85,7 +94,7 @@ inline float v41_hc_tg_sum(float v, threadgroup float *partial, uint lane, uint 
     threadgroup_barrier(mem_flags::mem_threadgroup);
     return total;
 }
-kernel void kernel_deepseek_v41_hc_pre(
+kernel void kernel_deepseek_v41_hc_pre_scalar(
     constant HcPreArgs &a [[buffer(0)]],
     device const float *x [[buffer(1)]],            // residual [4*hidden]
     device float *mix [[buffer(2)]],                // [24] raw in, scaled out
@@ -174,6 +183,113 @@ kernel void kernel_deepseek_v41_hc_pre(
     const float inv2 = rsqrt(v41_hc_tg_sum(ss2, partial, lane, sg) / float(a.hidden) + a.norm_eps);
     for (uint d = tid; d < a.hidden; d += V41_HC_PRE_THREADS) {
         normalized[d] = (collapsed[d] * inv2) * norm_weight[d];
+    }
+}
+
+// Vector form (the host's default when hidden % 4 == 0 and the residual,
+// collapsed, normalized and norm-weight views are 16-byte aligned). One
+// threadgroup runs on one GPU core, so the scalar loops above were bound by
+// memory-level parallelism (one 4-byte load in flight per thread, ~20 us per
+// call). Here every thread issues its float4 loads together, the controls run
+// on simdgroup 0 with shuffle reductions (same per-entry arithmetic and
+// operand order as the one-thread loop), and the collapsed values stay in
+// registers for the norm. Reduction order differs from the scalar form.
+#define V41_HC_PRE_MAX_D4 4
+kernel void kernel_deepseek_v41_hc_pre(
+    constant HcPreArgs &a [[buffer(0)]],
+    device const float4 *x [[buffer(1)]],           // residual [4*hidden]
+    device float *mix [[buffer(2)]],                // [24] raw in, scaled out
+    device const float *scale [[buffer(3)]],        // [3]
+    device const float *base [[buffer(4)]],         // [24]
+    device float *pre [[buffer(5)]],                // [4]
+    device float *post [[buffer(6)]],               // [4]
+    device float *combination [[buffer(7)]],        // [16]
+    device const float *incoming_pre [[buffer(8)]], // [4] lagged
+    device float4 *collapsed [[buffer(9)]],         // [hidden]
+    device const float4 *norm_weight [[buffer(10)]],// [hidden]
+    device float4 *normalized [[buffer(11)]],       // [hidden]
+    uint tid [[thread_index_in_threadgroup]], uint lane [[thread_index_in_simdgroup]],
+    uint sg [[simdgroup_index_in_threadgroup]]) {
+    threadgroup float partial[V41_HC_PRE_THREADS / 32];
+    const uint h4 = a.hidden / 4;
+    const uint n4 = V41_HC_CONNECTIONS * h4;
+    // A. projected RMS over the whole residual: four loads in flight.
+    float4 acc = 0.0f;
+    uint i = tid;
+    for (; i + 3 * V41_HC_PRE_THREADS < n4; i += 4 * V41_HC_PRE_THREADS) {
+        const float4 v0 = x[i];
+        const float4 v1 = x[i + V41_HC_PRE_THREADS];
+        const float4 v2 = x[i + 2 * V41_HC_PRE_THREADS];
+        const float4 v3 = x[i + 3 * V41_HC_PRE_THREADS];
+        acc += v0 * v0 + v1 * v1 + v2 * v2 + v3 * v3;
+    }
+    for (; i < n4; i += V41_HC_PRE_THREADS) {
+        const float4 v = x[i];
+        acc += v * v;
+    }
+    // C (loads). The collapse uses the lagged pre and is independent of the
+    // controls; issue its loads before the first barrier.
+    const float p0 = incoming_pre[0], p1 = incoming_pre[1], p2 = incoming_pre[2], p3 = incoming_pre[3];
+    float4 col[V41_HC_PRE_MAX_D4];
+    float4 ss2v = 0.0f;
+    for (uint j = 0; j < V41_HC_PRE_MAX_D4; ++j) {
+        const uint d4 = tid + j * V41_HC_PRE_THREADS;
+        if (d4 < h4) {
+            float4 v = 0.0f;
+            v += x[d4] * p0;
+            v += x[h4 + d4] * p1;
+            v += x[2 * h4 + d4] * p2;
+            v += x[3 * h4 + d4] * p3;
+            col[j] = v;
+            ss2v += v * v;
+        }
+    }
+    const float inv = rsqrt(v41_hc_tg_sum((acc.x + acc.y) + (acc.z + acc.w), partial, lane, sg)
+        / float(4 * n4) + a.norm_eps);
+    if (tid < 24) mix[tid] *= inv;
+    threadgroup_barrier(mem_flags::mem_device);
+    // B. controls on simdgroup 0: lane e = source*4 + destination owns one
+    // combination entry (lanes 16-31 mirror 0-15); row/column sums gather the
+    // four operands by shuffle and add them in the one-thread loop's order.
+    if (sg == 0) {
+        const float eps = a.hc_eps;
+        if (lane < V41_HC_CONNECTIONS) {
+            pre[lane] = 1.0f / (1.0f + exp(-(mix[lane] * scale[0] + base[lane]))) + eps;
+            post[lane] = 2.0f / (1.0f + exp(-(mix[4 + lane] * scale[1] + base[4 + lane])));
+        }
+        const uint e = lane & 15u;
+        const uint row0 = lane & ~3u;
+        const uint col0 = (lane & 16u) | (e & 3u);
+        const float value = mix[8 + e] * scale[2] + base[8 + e];
+        float row_max = -INFINITY;
+        for (uint k = 0; k < V41_HC_CONNECTIONS; ++k) row_max = max(row_max, simd_shuffle(value, row0 + k));
+        float comb = exp(value - row_max);
+        float sum = 0.0f;
+        for (uint k = 0; k < V41_HC_CONNECTIONS; ++k) sum += simd_shuffle(comb, row0 + k);
+        const float inverse = 1.0f / sum;
+        comb = comb * inverse + eps;
+        sum = 0.0f;
+        for (uint k = 0; k < V41_HC_CONNECTIONS; ++k) sum += simd_shuffle(comb, col0 + 4u * k);
+        comb *= 1.0f / (sum + eps);
+        for (uint iteration = 1; iteration < V41_HC_SINKHORN_ITERATIONS; ++iteration) {
+            sum = 0.0f;
+            for (uint k = 0; k < V41_HC_CONNECTIONS; ++k) sum += simd_shuffle(comb, row0 + k);
+            comb *= 1.0f / (sum + eps);
+            sum = 0.0f;
+            for (uint k = 0; k < V41_HC_CONNECTIONS; ++k) sum += simd_shuffle(comb, col0 + 4u * k);
+            comb *= 1.0f / (sum + eps);
+        }
+        if (lane < 16) combination[lane] = comb;
+    }
+    // C (stores) and D. weighted RMS norm of the collapsed row.
+    const float inv2 = rsqrt(v41_hc_tg_sum((ss2v.x + ss2v.y) + (ss2v.z + ss2v.w), partial, lane, sg)
+        / float(a.hidden) + a.norm_eps);
+    for (uint j = 0; j < V41_HC_PRE_MAX_D4; ++j) {
+        const uint d4 = tid + j * V41_HC_PRE_THREADS;
+        if (d4 < h4) {
+            collapsed[d4] = col[j];
+            normalized[d4] = (col[j] * inv2) * norm_weight[d4];
+        }
     }
 }
 

@@ -233,10 +233,23 @@ fn native_capabilities_match_actual_dispatch_and_abi() {
     assert_eq!(std::mem::offset_of!(NativeArgs, mode), 24);
     assert_eq!(std::mem::offset_of!(NativeArgs, clamp), 28);
     assert_eq!(ROUTE_STATUS_READY, 1);
+    // One-row instantiations plus the fused gate/up macro's one line.
     assert_eq!(
         SOURCE.matches("template [[host_name(").count(),
-        formats().len()
+        formats().len() + 1
     );
+    for dtype in formats() {
+        if let Some(name) = fused_gate_up_name(dtype) {
+            let suffix = name
+                .strip_prefix("kernel_expert_native_gate_up_")
+                .and_then(|s| s.strip_suffix("_f32"))
+                .unwrap();
+            assert!(
+                SOURCE.contains(&format!("EXPERT_NATIVE_GATE_UP(\"{suffix}\"")),
+                "{dtype:?}"
+            );
+        }
+    }
     for raw in 0..=255 {
         let dtype = GgmlType::from_raw(raw);
         assert_eq!(
@@ -801,5 +814,96 @@ fn native_dense_preserves_f32_operands_and_range() {
             }
         }
         assert_offset_guards(&output, 20, 0);
+    }
+}
+
+/// The fused gate/up dispatch equals the two dispatches bitwise for every
+/// fused storage type: batched and single-token, ready and rejected routes,
+/// invalid IDs, and an odd channel count (half-filled last threadgroup).
+#[test]
+fn native_fused_gate_up_equals_two_passes_bitwise() {
+    let _lease = production_lease();
+    let Some(ctx) = metal_test_context() else {
+        return;
+    };
+    for dtype in formats() {
+        let Some(fused_name) = fused_gate_up_name(dtype) else {
+            continue;
+        };
+        let (block, _) = dtype.storage_layout().unwrap();
+        let k = (block as usize).max(256) * 3;
+        for m in [7usize, 16] {
+            let gate = bank(&ctx, &bank_bytes(dtype, k, m, 3), dtype, k, m);
+            let up = bank(&ctx, &bank_bytes(dtype, k, m, 4), dtype, k, m);
+            for rows in [None, Some(3usize)] {
+                let n = rows.unwrap_or(1);
+                let input = if rows.is_some() {
+                    f32_view(&ctx, &values(k * n, 7), &[k, n], 0)
+                } else {
+                    f32_view(&ctx, &values(k, 7), &[k], 0)
+                };
+                let id_values: Vec<i32> = (0..n).flat_map(|_| IDS).collect();
+                let ids = if rows.is_some() {
+                    offset_tensor(
+                        &ctx,
+                        12,
+                        bytemuck::cast_slice(&id_values),
+                        0,
+                        vec![IDS.len() as u64, n as u64],
+                        GgmlType::I32,
+                    )
+                } else {
+                    i32_view(&ctx, &IDS)
+                };
+                let statuses: Vec<i32> =
+                    [ROUTE_STATUS_READY, ROUTE_STATUS_PENDING, ROUTE_STATUS_READY][..n].to_vec();
+                let status = i32_view(&ctx, &statuses);
+                let slots = IDS.len() * n;
+                let mut outputs = Vec::new();
+                for two_pass in [true, false] {
+                    let out = f32_view(&ctx, &vec![f32::NAN; m * slots], &[m, slots], 0);
+                    dispatch_census_begin();
+                    one_shot(&ctx, |enc| {
+                        encode_gate_up(
+                            &ctx,
+                            enc,
+                            &gate,
+                            &up,
+                            &input,
+                            &ids,
+                            &status,
+                            &out,
+                            k,
+                            m,
+                            EXPERTS,
+                            IDS.len(),
+                            0.37,
+                            rows,
+                            NativeOperands::F32,
+                            !two_pass,
+                        )
+                    })
+                    .unwrap();
+                    let census = dispatch_census_take();
+                    let kernels: Vec<_> = census.iter().map(|r| r.kernel.as_str()).collect();
+                    if two_pass {
+                        assert_eq!(kernels.len(), 2, "{dtype:?}");
+                    } else {
+                        assert_eq!(kernels, [fused_name], "{dtype:?}");
+                    }
+                    outputs.push(
+                        tensor_f32_at_offset(&out)
+                            .iter()
+                            .map(|v| v.to_bits())
+                            .collect::<Vec<_>>(),
+                    );
+                }
+                assert!(
+                    outputs[0].iter().any(|&b| f32::from_bits(b) != 0.0),
+                    "{dtype:?}"
+                );
+                assert_eq!(outputs[0], outputs[1], "{dtype:?} m={m} rows={rows:?}");
+            }
+        }
     }
 }

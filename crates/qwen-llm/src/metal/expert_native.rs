@@ -358,6 +358,49 @@ pub fn encode_all_slots_gate_up_swiglu_native(
         clamp,
         None,
         NativeOperands::F32,
+        false,
+    )
+}
+
+/// `encode_all_slots_gate_up_swiglu_native` as one dispatch when gate and up
+/// share a storage type with a fused kernel (`kernel_expert_native_gate_up_*`):
+/// simdgroups 0-1 of each threadgroup compute two gate channels, 2-3 the same
+/// up channels, and the epilogue reads the values the two-pass form stores
+/// and reloads, so outputs are bitwise equal. Other storage pairs, or
+/// `QWEN_EXPERT_NATIVE_FUSED_GATE_UP=0` (A/B), use the two dispatches.
+#[allow(clippy::too_many_arguments)]
+pub fn encode_all_slots_gate_up_swiglu_native_fused(
+    ctx: &MetalContext,
+    enc: &KernelEncoder,
+    gate_bank: &MetalTensor,
+    up_bank: &MetalTensor,
+    input: &MetalTensor,
+    ids: &MetalTensor,
+    status: &MetalTensor,
+    output: &MetalTensor,
+    n_in: usize,
+    n_out: usize,
+    experts: usize,
+    top_k: usize,
+    clamp: f32,
+) -> Result<(), MetalError> {
+    encode_gate_up(
+        ctx,
+        enc,
+        gate_bank,
+        up_bank,
+        input,
+        ids,
+        status,
+        output,
+        n_in,
+        n_out,
+        experts,
+        top_k,
+        clamp,
+        None,
+        NativeOperands::F32,
+        true,
     )
 }
 
@@ -403,6 +446,7 @@ pub fn encode_all_slots_gate_up_swiglu_native_rows(
         clamp,
         Some(rows),
         NativeOperands::F32,
+        false,
     )
 }
 
@@ -450,7 +494,47 @@ pub fn encode_all_slots_gate_up_swiglu_native_half_rows(
         clamp,
         Some(rows),
         NativeOperands::Half,
+        false,
     )
+}
+
+/// The fused pipeline for same-typed F32-operand banks, unless disabled by
+/// `QWEN_EXPERT_NATIVE_FUSED_GATE_UP=0`.
+fn fused_gate_up_pipeline(
+    ctx: &MetalContext,
+    gate: GgmlType,
+    up: GgmlType,
+    operands: NativeOperands,
+) -> Result<Option<Pipeline>, MetalError> {
+    static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    let enabled = *ENABLED
+        .get_or_init(|| std::env::var("QWEN_EXPERT_NATIVE_FUSED_GATE_UP").as_deref() != Ok("0"));
+    if !enabled || gate != up || !matches!(operands, NativeOperands::F32) {
+        return Ok(None);
+    }
+    let Some(name) = fused_gate_up_name(gate) else {
+        return Ok(None);
+    };
+    ctx.pipeline(name).map(Some)
+}
+
+fn fused_gate_up_name(dtype: GgmlType) -> Option<&'static str> {
+    Some(match dtype {
+        GgmlType::Q2_K => "kernel_expert_native_gate_up_q2_K_f32",
+        GgmlType::Q3_K => "kernel_expert_native_gate_up_q3_K_f32",
+        GgmlType::Q4_K => "kernel_expert_native_gate_up_q4_K_f32",
+        GgmlType::Q5_K => "kernel_expert_native_gate_up_q5_K_f32",
+        GgmlType::Q6_K => "kernel_expert_native_gate_up_q6_K_f32",
+        GgmlType::Q8_0 => "kernel_expert_native_gate_up_q8_0_f32",
+        GgmlType::IQ4_NL => "kernel_expert_native_gate_up_iq4_nl_f32",
+        GgmlType::IQ4_XS => "kernel_expert_native_gate_up_iq4_xs_f32",
+        GgmlType::IQ2_S => "kernel_expert_native_gate_up_iq2_s_f32",
+        GgmlType::IQ3_XXS => "kernel_expert_native_gate_up_iq3_xxs_f32",
+        GgmlType::IQ3_S => "kernel_expert_native_gate_up_iq3_s_f32",
+        GgmlType::IQ2_XS => "kernel_expert_native_gate_up_iq2_xs_f32",
+        GgmlType::IQ2_XXS => "kernel_expert_native_gate_up_iq2_xxs_f32",
+        _ => return None,
+    })
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -470,6 +554,7 @@ fn encode_gate_up(
     clamp: f32,
     rows: Option<usize>,
     operands: NativeOperands,
+    fuse: bool,
 ) -> Result<(), MetalError> {
     const K: &str = "all_slots_gate_up_swiglu_native";
     require_serial(K, enc)?;
@@ -488,6 +573,37 @@ fn encode_gate_up(
     let (up, up_bytes) = bank_pipeline(ctx, K, up_bank, &args, "up bank")?;
     check_disjoint(K, output, &[(gate_bank, "gate bank"), (up_bank, "up bank")])?;
     args.clamp = clamp;
+    let fused = if fuse {
+        fused_gate_up_pipeline(ctx, gate_bank.dtype, up_bank.dtype, operands)?
+    } else {
+        None
+    };
+    if let Some(fused) = fused {
+        // One dispatch: gate and up channels side by side, then SwiGLU.
+        args.mode = operands.mode(1);
+        args.row_bytes = gate_bytes;
+        enc.set_pipeline(&fused);
+        enc.set_bytes(0, &args);
+        enc.set_tensor(1, gate_bank);
+        enc.set_tensor(2, input);
+        enc.set_tensor(3, ids);
+        enc.set_tensor(4, status);
+        enc.set_tensor(5, output);
+        enc.set_tensor(6, up_bank);
+        enc.dispatch(
+            MTLSize {
+                width: n_out.div_ceil(2),
+                height: top_k,
+                depth: rows.unwrap_or(1),
+            },
+            MTLSize {
+                width: 128,
+                height: 1,
+                depth: 1,
+            },
+        );
+        return Ok(());
+    }
     args.mode = operands.mode(0);
     args.row_bytes = gate_bytes;
     dispatch(

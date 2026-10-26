@@ -67,7 +67,8 @@ fn random_both_layouts_tiny_and_real_hidden_batched() {
         let k = random(hidden * 4, &mut seed);
         let folded = EngramGate::Folded(q.iter().zip(&k).map(|(q, k)| q * k).collect());
         let separate = EngramGate::Separate { q, k };
-        for rows in [1, 3] {
+        // 1 and 3 rows take the wide kernel, 17 the per-simdgroup batch one.
+        for rows in [1, 3, 17] {
             let x = random(rows * hidden * 4, &mut seed);
             let kv = random(rows * hidden * 5, &mut seed);
             for gate in [&separate, &folded] {

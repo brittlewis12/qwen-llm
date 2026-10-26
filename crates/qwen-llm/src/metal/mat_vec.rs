@@ -223,7 +223,17 @@ pub(crate) fn encode_mat_vec_16bit_weight_f32(
             detail: format!("y.n_elements={} != n_out={n_out}", y.n_elements()),
         });
     }
-    let pso = ctx.pipeline(kernel_name)?;
+    // Split-K BF16 rows: 16-byte loads need 8-element rows and aligned bases.
+    let split_k = expected == GgmlType::BF16
+        && bf16_split_k_enabled()
+        && n_in.is_multiple_of(8)
+        && weight.offset.is_multiple_of(16)
+        && x.offset.is_multiple_of(16);
+    let pso = ctx.pipeline(if split_k {
+        "kernel_mat_vec_bf16_f32_tg"
+    } else {
+        kernel_name
+    })?;
     enc.set_pipeline(&pso);
 
     #[repr(C)]
@@ -244,19 +254,32 @@ pub(crate) fn encode_mat_vec_16bit_weight_f32(
     enc.set_tensor(3, y);
 
     const ROWS_PER_TG: usize = 4;
+    let (groups, threads) = if split_k {
+        // MAT_VEC_BF16_TG in kernels/mat_vec.metal: one threadgroup per row.
+        (n_out, 128)
+    } else {
+        (n_out.div_ceil(ROWS_PER_TG), ROWS_PER_TG * 32)
+    };
     enc.dispatch(
         MTLSize {
-            width: n_out.div_ceil(ROWS_PER_TG),
+            width: groups,
             height: 1,
             depth: 1,
         },
         MTLSize {
-            width: ROWS_PER_TG * 32,
+            width: threads,
             height: 1,
             depth: 1,
         },
     );
     Ok(())
+}
+
+/// `QWEN_MAT_VEC_BF16_TG=0` restores the one-simdgroup-per-row BF16 GEMV
+/// (A/B control for the split-K kernel).
+fn bf16_split_k_enabled() -> bool {
+    static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ENABLED.get_or_init(|| std::env::var("QWEN_MAT_VEC_BF16_TG").as_deref() != Ok("0"))
 }
 
 pub fn encode_mat_vec_f16_f32(
@@ -2854,6 +2877,77 @@ pub fn encode_mat_vec_q6_k_batch_f32(
 mod tests {
     use super::*;
     use crate::metal::test_support::*;
+
+    /// Split-K BF16 rows (aligned, n_in % 8 == 0) and the legacy fallback
+    /// (n_in % 8 != 0, or a misaligned weight view) both match an f64
+    /// reference, including odd output counts and tails shorter than a pass.
+    #[test]
+    fn bf16_mat_vec_split_k_and_fallback_match_reference() {
+        let Some(ctx) = metal_test_context() else {
+            return;
+        };
+        for (n_in, n_out, weight_prefix) in [
+            (4096usize, 384usize, 0usize),
+            (4096, 7, 16),
+            (1032, 129, 32),
+            (8, 3, 0),
+            (4100, 5, 0),
+            (4096, 6, 8),
+        ] {
+            let w: Vec<u16> = (0..n_in * n_out)
+                .map(|i| {
+                    let v = ((i * 37 + 11) % 113) as f32 * 0.003 - 0.17;
+                    (v.to_bits() >> 16) as u16
+                })
+                .collect();
+            let x: Vec<f32> = (0..n_in)
+                .map(|i| ((i * 29 + 3) % 97) as f32 * 0.04 - 2.0)
+                .collect();
+            let w_t = offset_tensor(
+                &ctx,
+                weight_prefix,
+                bytemuck::cast_slice(&w),
+                16,
+                vec![n_in as u64, n_out as u64],
+                GgmlType::BF16,
+            );
+            let x_t = offset_tensor(
+                &ctx,
+                16,
+                bytemuck::cast_slice(&x),
+                16,
+                vec![n_in as u64],
+                GgmlType::F32,
+            );
+            let y_t = offset_tensor(
+                &ctx,
+                16,
+                bytemuck::cast_slice(&vec![7.0f32; n_out]),
+                16,
+                vec![n_out as u64],
+                GgmlType::F32,
+            );
+            let command = ctx.queue.commandBuffer().expect("command buffer");
+            let enc = KernelEncoder::begin(&command);
+            encode_mat_vec_bf16_f32(&ctx, &enc, &w_t, &x_t, &y_t, n_in, n_out).unwrap();
+            enc.end();
+            command.commit();
+            wait_completed(&command).expect("bf16 mat-vec command");
+            let y = tensor_f32_at_offset(&y_t);
+            for (row, &got) in y.iter().enumerate() {
+                let (mut want, mut scale) = (0.0f64, 0.0f64);
+                for k in 0..n_in {
+                    let a = f32::from_bits((w[row * n_in + k] as u32) << 16) as f64;
+                    want += a * x[k] as f64;
+                    scale += (a * x[k] as f64).abs();
+                }
+                assert!(
+                    (got as f64 - want).abs() <= 1e-5 * scale + 1e-6,
+                    "{n_in}x{n_out}+{weight_prefix} row {row}: {got} vs {want}"
+                );
+            }
+        }
+    }
 
     /// Random Q6_K [n_in -> n_out] bytes from varied valid blocks.
     fn random_q6_k(n_in: usize, n_out: usize, seed: usize) -> Vec<u8> {

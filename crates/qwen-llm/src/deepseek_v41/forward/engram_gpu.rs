@@ -5,6 +5,9 @@ use objc2_metal::MTLSize;
 #[cfg(test)]
 mod tests;
 
+/// Row counts up to this use the wide (1024-thread) gate kernel.
+const WIDE_MAX_ROWS: usize = 16;
+
 pub(super) struct BoundGate {
     q: MetalTensor,
     k: MetalTensor,
@@ -61,9 +64,16 @@ impl BoundGate {
         if rows == 0 {
             return Ok(());
         }
+        // Few rows (decode): one wide threadgroup per stream; batches keep
+        // one simdgroup per stream, already parallel across rows.
+        let wide = rows <= WIDE_MAX_ROWS;
         enc.set_pipeline(
-            &ctx.pipeline("kernel_deepseek_v41_engram")
-                .map_err(|e| e.to_string())?,
+            &ctx.pipeline(if wide {
+                "kernel_deepseek_v41_engram_wide"
+            } else {
+                "kernel_deepseek_v41_engram"
+            })
+            .map_err(|e| e.to_string())?,
         );
         enc.set_bytes(0, &(self.hidden as u32));
         enc.set_bytes(1, &self.eps);
@@ -77,7 +87,8 @@ impl BoundGate {
                 depth: 1,
             },
             MTLSize {
-                width: 32,
+                // V41_ENGRAM_WIDE_THREADS in kernels/deepseek_v41_engram.metal.
+                width: if wide { 1024 } else { 32 },
                 height: 1,
                 depth: 1,
             },

@@ -887,6 +887,54 @@ kernel void kernel_mat_vec_bf16_f32(
     }
 }
 
+// Latency-tolerant BF16 GEMV for short outputs (routers, compressors): one
+// 128-thread threadgroup per row splits K, 16-byte weight loads, two loads in
+// flight per thread. The one-simdgroup-per-row kernel above issues one 8-byte
+// load per iteration and is latency-bound (a 4096x384 router took ~44 us).
+// Requires n_in % 8 == 0 and 16-byte aligned rows (host checks).
+#define MAT_VEC_BF16_TG 128
+
+static inline float mv_bf16_dot8(uint4 u, float4 x0, float4 x1) {
+    const float4 lo = float4(as_type<float>(u.x << 16), as_type<float>(u.x & 0xffff0000u),
+                             as_type<float>(u.y << 16), as_type<float>(u.y & 0xffff0000u));
+    const float4 hi = float4(as_type<float>(u.z << 16), as_type<float>(u.z & 0xffff0000u),
+                             as_type<float>(u.w << 16), as_type<float>(u.w & 0xffff0000u));
+    return dot(lo, x0) + dot(hi, x1);
+}
+
+kernel void kernel_mat_vec_bf16_f32_tg(
+        constant mat_vec_args & args   [[buffer(0)]],
+        device const uint4    * weight [[buffer(1)]],
+        device const float4   * x      [[buffer(2)]],
+        device       float    * y      [[buffer(3)]],
+        uint   row   [[threadgroup_position_in_grid]],
+        ushort tid   [[thread_index_in_threadgroup]],
+        ushort sgitg [[simdgroup_index_in_threadgroup]],
+        ushort tiisg [[thread_index_in_simdgroup]]) {
+    threadgroup float partial[MAT_VEC_BF16_TG / 32];
+    const uint chunks = args.n_in / 8;
+    device const uint4 * w = weight + (ulong)row * chunks;
+    float s0 = 0.0f;
+    float s1 = 0.0f;
+    uint c = tid;
+    for (; c + MAT_VEC_BF16_TG < chunks; c += 2 * MAT_VEC_BF16_TG) {
+        const uint d = c + MAT_VEC_BF16_TG;
+        const uint4 a = w[c];
+        const uint4 b = w[d];
+        s0 += mv_bf16_dot8(a, x[2 * c], x[2 * c + 1]);
+        s1 += mv_bf16_dot8(b, x[2 * d], x[2 * d + 1]);
+    }
+    if (c < chunks) {
+        s0 += mv_bf16_dot8(w[c], x[2 * c], x[2 * c + 1]);
+    }
+    const float sum = simd_sum(s0 + s1);
+    if (tiisg == 0) partial[sgitg] = sum;
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    if (tid == 0) {
+        y[row] = (partial[0] + partial[1]) + (partial[2] + partial[3]);
+    }
+}
+
 #define FROZEN_LINEAR_VJP_NSG 8
 
 kernel void kernel_frozen_linear_f32_vjp_f32(

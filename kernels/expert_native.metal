@@ -42,6 +42,44 @@ inline void expert_dequantize_iq2_xs(device const uchar * blk, short il,
     }
 }
 
+// Q5_K with 16-byte quant/high-bit loads (two vector loads instead of 32
+// byte loads per 16 weights). Same arithmetic as latent_dequantize_q5_K, so
+// decoded values are bitwise equal. Needs 16-byte aligned blocks: the 176-byte
+// Q5_K block keeps every fragment aligned in a 16-byte aligned bank (checked
+// by check_expert_bank).
+inline void expert_dequantize_q5_K(device const uchar * blk_bytes, short il,
+                                   thread float4x4 & reg) {
+    const half d_h    = ((device const half *)blk_bytes)[0];
+    const half dmin_h = ((device const half *)blk_bytes)[1];
+    device const uchar * scales = blk_bytes + 4;
+    const short is  = (il / 4) * 2;
+    const short k01 = (il / 2) & 1;
+    uchar sc_u, m_u;
+    if (is < 4) {
+        sc_u = scales[is + k01] & 63;
+        m_u  = scales[is + k01 + 4] & 63;
+    } else {
+        sc_u = (scales[is + k01 + 4] & 0x0F) | ((scales[is + k01 - 4] >> 6) << 4);
+        m_u  = (scales[is + k01 + 4] >>   4) | ((scales[is + k01    ] >> 6) << 4);
+    }
+    const uint4 qs4 = *((device const uint4 *)(blk_bytes + 48 + 32 * (il / 4) + 16 * (il & 1)));
+    const uint4 qh4 = *((device const uint4 *)(blk_bytes + 16 + 16 * (il & 1)));
+    const uint ul = 1u << (il / 2);
+    const short il_inner = il & 3;
+    const float d   = il_inner < 2 ? (float)d_h : (float)d_h / 16.0f;
+    const float dmin = (float)dmin_h;
+    const float dl  = d   * (float)sc_u;
+    const float ml  = dmin * (float)m_u;
+    const uint mask = il_inner < 2 ? 0x0Fu : 0xF0u;
+    const float qh_val = il_inner < 2 ? 16.0f : 256.0f;
+    QT_FOR_UNROLL (int i = 0; i < 16; ++i) {
+        const uint shift = 8u * uint(i % 4);
+        const float q_low  = (float)((qs4[i / 4] >> shift) & mask);
+        const float q_high = ((qh4[i / 4] >> shift) & ul) ? qh_val : 0.0f;
+        reg[i / 4][i % 4] = (float)(dl * (q_low + q_high) - ml);
+    }
+}
+
 struct expert_native_args {
     ulong row_bytes;
     uint n_in;
@@ -175,7 +213,7 @@ template [[host_name("kernel_expert_native_q2_0_f32")]] kernel expert_native_t k
 template [[host_name("kernel_expert_native_q2_K_f32")]] kernel expert_native_t kernel_expert_native_f32<QT_Q2_K_BYTES, QT_Q2_K_NL, latent_dequantize_q2_K>;
 template [[host_name("kernel_expert_native_q3_K_f32")]] kernel expert_native_t kernel_expert_native_f32<QT_Q3_K_BYTES, QT_Q3_K_NL, latent_dequantize_q3_K>;
 template [[host_name("kernel_expert_native_q4_K_f32")]] kernel expert_native_t kernel_expert_native_f32<QT_Q4_K_BYTES, QT_Q4_K_NL, latent_dequantize_q4_K>;
-template [[host_name("kernel_expert_native_q5_K_f32")]] kernel expert_native_t kernel_expert_native_f32<QT_Q5_K_BYTES, QT_Q5_K_NL, latent_dequantize_q5_K>;
+template [[host_name("kernel_expert_native_q5_K_f32")]] kernel expert_native_t kernel_expert_native_f32<QT_Q5_K_BYTES, QT_Q5_K_NL, expert_dequantize_q5_K>;
 template [[host_name("kernel_expert_native_q6_K_f32")]] kernel expert_native_t kernel_expert_native_f32<QT_Q6_K_BYTES, QT_Q6_K_NL, latent_dequantize_q6_K>;
 template [[host_name("kernel_expert_native_q8_0_f32")]] kernel expert_native_t kernel_expert_native_f32<QT_Q8_0_BYTES, QT_Q8_0_NL, latent_dequantize_q8_0>;
 template [[host_name("kernel_expert_native_q4_0_f32")]] kernel expert_native_t kernel_expert_native_f32<QT_Q4_0_BYTES, QT_Q4_0_NL, latent_dequantize_q4_0>;
@@ -193,3 +231,82 @@ template [[host_name("kernel_expert_native_iq2_xxs_f32")]] kernel expert_native_
 template [[host_name("kernel_expert_native_mxfp4_f32")]] kernel expert_native_t kernel_expert_native_f32<17, 2, expert_dequantize_mxfp4, 0, true>;
 template [[host_name("kernel_expert_native_iq1_s_f32")]] kernel expert_native_t kernel_expert_native_f32<50, 16, expert_dequantize_iq1_s>;
 template [[host_name("kernel_expert_native_iq1_m_f32")]] kernel expert_native_t kernel_expert_native_f32<56, 16, expert_dequantize_iq1_m>;
+
+// Fused gate/up + SwiGLU for one storage type. A 4-simdgroup threadgroup owns
+// two adjacent channels: simdgroups 0-1 compute gate, 2-3 compute up, then
+// 0-1 apply the epilogue. Every dot product is the one-row kernel's (same
+// fragment order, FMA chain and SIMD reduction) and the epilogue consumes the
+// same F32 values the two-pass form stores and reloads, so outputs are bitwise
+// identical; the projection runs as one dispatch with twice the simdgroups
+// (the per-projection dispatches are latency-bound, ~300 GB/s for top-6).
+template <ushort BYTES, ushort NL,
+          void (*DEQ)(device const uchar *, short, thread float4x4 &)>
+[[max_total_threads_per_threadgroup(128)]]
+kernel void kernel_expert_native_gate_up_f32(
+        constant expert_native_args & args [[buffer(0)]],
+        device const uchar * gate_bank [[buffer(1)]],
+        device const float * input [[buffer(2)]],
+        device const int * ids [[buffer(3)]],
+        device const int * status [[buffer(4)]],
+        device float * output [[buffer(5)]],
+        device const uchar * up_bank [[buffer(6)]],
+        uint3 group [[threadgroup_position_in_grid]],
+        ushort lane [[thread_index_in_simdgroup]],
+        ushort simd [[simdgroup_index_in_threadgroup]]) {
+    threadgroup float up_values[2];
+    const uint channel = group.x * 2u + uint(simd & 1u);
+    const bool up = simd >= 2;
+    const uint slot = group.y;
+    const uint token = group.z;
+    const bool active = channel < args.n_out && slot < args.top_k;
+    const ulong selected = ulong(token) * args.top_k + slot;
+    const ulong out_index = selected * args.n_out + channel;
+    // Route rejection precedes all bank/activation reads, as in the one-row
+    // kernel; every thread still reaches the barrier.
+    bool ready = active && status[token] == 1;
+    const int expert = ready ? ids[selected] : -1;
+    ready = ready && expert >= 0 && uint(expert) < args.experts;
+    float value = 0.0f;
+    if (ready) {
+        device const uchar * row = (up ? up_bank : gate_bank)
+            + (ulong(expert) * args.n_out + channel) * args.row_bytes;
+        device const float * x = input + ulong(token) * args.n_in;
+        float sum = 0.0f;
+        for (ulong k = ulong(lane) * 16u; k < args.n_in; k += 512u) {
+            float4x4 decoded;
+            DEQ(row + (k / (16u * NL)) * BYTES, short((k / 16u) % NL), decoded);
+            QT_FOR_UNROLL (uint i = 0; i < 16; ++i) {
+                sum = fma(decoded[i / 4][i % 4], x[k + i], sum);
+            }
+        }
+        value = simd_sum(sum);
+    }
+    if (up && lane == 0) up_values[simd - 2] = value;
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    if (!up && lane == 0 && active) {
+        if (!ready) {
+            output[out_index] = 0.0f;
+        } else {
+            const float g = min(value, args.clamp);
+            const float u = clamp(up_values[simd], -args.clamp, args.clamp);
+            output[out_index] = (g / (1.0f + exp(-g))) * u;
+        }
+    }
+}
+
+typedef decltype(kernel_expert_native_gate_up_f32<QT_Q6_K_BYTES, QT_Q6_K_NL, latent_dequantize_q6_K>) expert_native_gate_up_t;
+#define EXPERT_NATIVE_GATE_UP(NAME, BYTES, NL, DEQ) \
+    template [[host_name("kernel_expert_native_gate_up_" NAME "_f32")]] kernel expert_native_gate_up_t kernel_expert_native_gate_up_f32<BYTES, NL, DEQ>;
+EXPERT_NATIVE_GATE_UP("q2_K", QT_Q2_K_BYTES, QT_Q2_K_NL, latent_dequantize_q2_K)
+EXPERT_NATIVE_GATE_UP("q3_K", QT_Q3_K_BYTES, QT_Q3_K_NL, latent_dequantize_q3_K)
+EXPERT_NATIVE_GATE_UP("q4_K", QT_Q4_K_BYTES, QT_Q4_K_NL, latent_dequantize_q4_K)
+EXPERT_NATIVE_GATE_UP("q5_K", QT_Q5_K_BYTES, QT_Q5_K_NL, expert_dequantize_q5_K)
+EXPERT_NATIVE_GATE_UP("q6_K", QT_Q6_K_BYTES, QT_Q6_K_NL, latent_dequantize_q6_K)
+EXPERT_NATIVE_GATE_UP("q8_0", QT_Q8_0_BYTES, QT_Q8_0_NL, latent_dequantize_q8_0)
+EXPERT_NATIVE_GATE_UP("iq4_nl", QT_IQ4_NL_BYTES, QT_IQ4_NL_NL, latent_dequantize_iq4_nl)
+EXPERT_NATIVE_GATE_UP("iq4_xs", QT_IQ4_XS_BYTES, QT_IQ4_XS_NL, latent_dequantize_iq4_xs)
+EXPERT_NATIVE_GATE_UP("iq2_s", QT_IQ2_S_BYTES, QT_IQ2_S_NL, latent_dequantize_iq2_s)
+EXPERT_NATIVE_GATE_UP("iq3_xxs", QT_IQ3_XXS_BYTES, QT_IQ3_XXS_NL, latent_dequantize_iq3_xxs)
+EXPERT_NATIVE_GATE_UP("iq3_s", QT_IQ3_S_BYTES, QT_IQ3_S_NL, latent_dequantize_iq3_s)
+EXPERT_NATIVE_GATE_UP("iq2_xs", 74, 16, expert_dequantize_iq2_xs)
+EXPERT_NATIVE_GATE_UP("iq2_xxs", 66, 16, expert_dequantize_iq2_xxs)

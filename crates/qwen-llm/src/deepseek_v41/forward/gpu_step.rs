@@ -1,4 +1,5 @@
-//! One serial command per token, including device-side Engram injection.
+//! One decode step per token (one serial command, or up to three in commit
+//! order with split submission), including device-side Engram injection.
 use super::*;
 use objc2_metal::MTLSize;
 
@@ -165,6 +166,41 @@ fn ffn_split_encoders() -> bool {
     static SPLIT: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *SPLIT.get_or_init(|| std::env::var("QWEN_V41_FFN_ENCODERS").as_deref() != Ok("one"))
 }
+
+/// `one` submits each decode step as one command buffer instead of starting
+/// the GPU on the layers before the first Engram layer while the host reads
+/// Engram rows and encodes the rest (A/B lever).
+const DECODE_SUBMIT_ENV: &str = "QWEN_V41_DECODE_SUBMIT";
+
+#[cfg(test)]
+thread_local! {
+    pub(super) static SPLIT_SUBMIT_OVERRIDE: std::cell::Cell<Option<bool>> =
+        const { std::cell::Cell::new(None) };
+}
+
+/// Production decode steps submit up to three command buffers: the layers
+/// before the first Engram layer start on the GPU while the host reads that
+/// token's Engram rows and encodes the rest (GSQ: ~0.3 ms rows + ~0.5 ms
+/// encoding per token were serial before the GPU started). Same dispatches in
+/// the same order; Metal runs command buffers of one queue in commit order.
+/// `QWEN_V41_DECODE_SUBMIT=one` keeps one command buffer (A/B). Unit tests
+/// default to one unless they opt in.
+fn split_submission() -> bool {
+    #[cfg(test)]
+    {
+        let _ = DECODE_SUBMIT_ENV;
+        SPLIT_SUBMIT_OVERRIDE.with(|o| o.get()).unwrap_or(false)
+    }
+    #[cfg(not(test))]
+    {
+        static SPLIT: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+        *SPLIT.get_or_init(|| std::env::var(DECODE_SUBMIT_ENV).as_deref() != Ok("one"))
+    }
+}
+
+/// Layers in the second command buffer of a split step: enough GPU work to
+/// cover encoding the remaining layers on the host.
+const SPLIT_SUBMIT_MIDDLE_LAYERS: usize = 3;
 
 pub(super) fn chunk_widths(
     model: &Forward<'_>,
@@ -982,6 +1018,158 @@ impl Workspace {
         )
     }
 
+    /// One production decode step as up to three command buffers (see
+    /// `split_submission`): [layers before the first Engram layer], then the
+    /// Engram projections and `SPLIT_SUBMIT_MIDDLE_LAYERS` layers, then the
+    /// rest and the head. The first is committed before the host reads the
+    /// Engram rows. Cancellation is honored only before the first commit;
+    /// every committed command is waited for, even after an encode error,
+    /// before returning.
+    fn submit_split(
+        &mut self,
+        model: &Forward<'_>,
+        position: usize,
+        rows: &engram::LayerRows,
+        cancel: Option<&AtomicBool>,
+        with_logits: bool,
+    ) -> Result<()> {
+        let ctx = model.ctx;
+        let c = &model.config;
+        let end = model.layers.len();
+        let lead = self
+            .engrams
+            .iter()
+            .map(|slot| slot.layer)
+            .min()
+            .unwrap_or(0)
+            .min(end);
+        let middle = (lead + SPLIT_SUBMIT_MIDDLE_LAYERS).min(end);
+        cancelled(cancel)?;
+        let started = profile::start();
+        let _wall = profile::Wall("gpu_step", [position, 0, end, 0], started);
+        let mut committed: Vec<
+            objc2::rc::Retained<objc2::runtime::ProtocolObject<dyn objc2_metal::MTLCommandBuffer>>,
+        > = Vec::new();
+        let encoded = (|| -> Result<()> {
+            let segments = [
+                (0..lead, false, false),
+                (lead..middle, true, false),
+                (middle..end, false, true),
+            ];
+            for (index, (range, engram_projection, head)) in segments.into_iter().enumerate() {
+                if index == 1 {
+                    // The lead layers are running; read this token's rows.
+                    let layers: Vec<usize> = self.engrams.iter().map(|slot| slot.layer).collect();
+                    let values = model.engram_rows.decode_layers(&layers, rows)?;
+                    for (slot, values) in self.engrams.iter().zip(values) {
+                        write(&slot.input, &values)?;
+                    }
+                }
+                if range.is_empty() && !engram_projection && !head {
+                    continue;
+                }
+                let command = ctx
+                    .queue
+                    .commandBuffer()
+                    .ok_or("Metal command buffer allocation")?;
+                let mut stages = StageEncoder::begin(&command, None);
+                let segment = (|| -> Result<()> {
+                    if engram_projection {
+                        for slot in &self.engrams {
+                            let p = &model.layers[slot.layer].engram.as_ref().unwrap().projection;
+                            p.encode(stages.enc(), &slot.input, &slot.projected)
+                                .map_err(|e| e.to_string())?;
+                        }
+                    }
+                    for id in range.clone() {
+                        if let Some(slot) = self.engrams.iter().find(|slot| slot.layer == id) {
+                            slot.gate
+                                .encode(ctx, stages.enc(), &self.x, &slot.projected, 1)?;
+                        }
+                        self.layer_staged(model, &mut stages, id, position, None, false)?;
+                    }
+                    if head && with_logits {
+                        metal::encode_mhc4_collapse(
+                            ctx,
+                            stages.enc(),
+                            c.hidden,
+                            &self.x,
+                            self.ffn.next_pre(),
+                            &self.collapsed,
+                        )
+                        .map_err(|e| e.to_string())?;
+                        metal::encode_rms_norm_mul_rows_f32(
+                            ctx,
+                            stages.enc(),
+                            &self.collapsed,
+                            &self.norm,
+                            &self.normalized,
+                            1,
+                            c.hidden,
+                            c.norm_eps,
+                        )
+                        .map_err(|e| e.to_string())?;
+                        model
+                            .head
+                            .encode(stages.enc(), &self.normalized, &self.logits)
+                            .map_err(|e| e.to_string())?;
+                    }
+                    Ok(())
+                })();
+                stages.end();
+                segment?;
+                command.commit();
+                committed.push(command);
+            }
+            Ok(())
+        })();
+        let encode_ms = started.map(|s| s.elapsed().as_secs_f64() * 1000.0);
+        let wait = std::time::Instant::now();
+        let mut waited: Result<()> = Ok(());
+        for command in &committed {
+            if let Err(error) = metal::wait_completed(command)
+                && waited.is_ok()
+            {
+                waited = Err(error.to_string());
+            }
+        }
+        self.commands += committed.len();
+        if let (Some(encode_ms), Some(first), Some(last)) =
+            (encode_ms, committed.first(), committed.last())
+        {
+            profile::submitted_with_driver_scheduling(
+                "gpu_step",
+                [position, 0, end, 0],
+                encode_ms,
+                wait.elapsed().as_secs_f64() * 1000.0,
+                encoded.is_ok() && waited.is_ok(),
+                first.GPUStartTime(),
+                last.GPUEndTime(),
+                || (first.kernelStartTime(), last.kernelEndTime()),
+            );
+        }
+        encoded?;
+        waited?;
+        let status = unsafe {
+            *self
+                .attention
+                .status()
+                .buffer
+                .contents()
+                .as_ptr()
+                .cast::<i32>()
+        };
+        op::require(status == 0, &format!("GPU attention status {status}"))?;
+        for id in 0..end {
+            let status = self.ffn.status(id);
+            op::require(
+                status == metal::ROUTE_STATUS_READY,
+                &format!("GPU FFN layer {id} route status {status}"),
+            )?;
+        }
+        Ok(())
+    }
+
     pub(super) fn run_prepared(
         &mut self,
         model: &Forward<'_>,
@@ -1024,6 +1212,21 @@ impl Workspace {
         self.trace_copies = 0;
         let embedding = decode_rows(model.embedding, token, 1)?;
         write(&self.x, &embedding.repeat(4))?;
+        if split_submission()
+            && prepared.is_none()
+            && trace.is_none()
+            && snapshots.is_empty()
+            && !profile::stages()
+            && !profile::dispatches()
+        {
+            self.submit_split(model, position, rows, cancel, with_logits)?;
+            if !with_logits {
+                return Ok(Vec::new());
+            }
+            let logits = f32_slice(&self.logits)?;
+            op::require(logits.iter().all(|v| v.is_finite()), "non-finite logits")?;
+            return Ok(logits.to_vec());
+        }
         let engram_rows = profile::Wall(
             "decode_engram_rows",
             [0, self.engrams.len(), 0, 0],

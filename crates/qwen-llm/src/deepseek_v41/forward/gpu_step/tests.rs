@@ -290,6 +290,27 @@ fn fused_rank_norms_match_split_qkv_chain_bitwise() {
 }
 
 #[test]
+fn split_submission_matches_one_command_bitwise() {
+    // Lead (layers before the first Engram layer), middle (Engram
+    // projections + the next layers), rest + head: three commands.
+    let ctx = MetalContext::new().unwrap();
+    let weights = toy::Weights::new(&ctx);
+    let model = weights.model(&ctx);
+    let mut one = model.new_state_with_gpu_step(4).unwrap();
+    let mut split = model.new_state_with_gpu_step(4).unwrap();
+    for token in [0, 3, 1, 2] {
+        SPLIT_SUBMIT_OVERRIDE.with(|o| o.set(Some(false)));
+        let expected = model.step(&mut one, token, None);
+        SPLIT_SUBMIT_OVERRIDE.with(|o| o.set(Some(true)));
+        let logits = model.step(&mut split, token, None);
+        SPLIT_SUBMIT_OVERRIDE.with(|o| o.set(None));
+        assert_eq!(logits.unwrap(), expected.unwrap(), "token {token}");
+        assert_eq!(one.gpu_step.as_ref().unwrap().commands, 1);
+        assert_eq!(split.gpu_step.as_ref().unwrap().commands, 3);
+    }
+}
+
+#[test]
 fn split_ffn_encoders_match_one_encoder_bitwise() {
     let ctx = MetalContext::new().unwrap();
     let weights = toy::Weights::new(&ctx);

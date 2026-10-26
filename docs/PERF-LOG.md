@@ -6,6 +6,20 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the current state and evidence index.
 
+## 2026-10-26 - V4.1 Decode +4.3-4.7%: GPU Starts Before Engram Rows And Encoding Finish
+
+- Each decode step read the token's Engram rows (~0.28 ms), encoded all 40
+  layers (~0.54 ms), then committed one command buffer: ~0.8 ms per token with
+  the GPU idle. Production steps now submit up to three command buffers:
+  layers before the first Engram layer (committed first), the Engram
+  projections plus three layers, then the rest and the head. Same dispatches
+  in the same order; Metal runs one queue's command buffers in commit order.
+  Every committed buffer is waited for before an error returns.
+- In-binary M/O x2 (seed 909): tg64@d0 70.24 -> 73.51, @d2048 61.72 ->
+  64.37. Witness logits byte-identical to the previous head (6/6 documents).
+  `QWEN_V41_DECODE_SUBMIT=one` restores one command buffer.
+- Runs: metagross `~/qwen-runs/2026-10-26-decode-twk3` r40.
+
 ## 2026-10-26 - V4.1 Decode +1.3-1.5%: Query-Rank And KV Projections In One Dispatch
 
 - The decode query-rank (1280 rows) and KV-latent (512 rows) Q8_0

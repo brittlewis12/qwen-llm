@@ -6,6 +6,21 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the current state and evidence index.
 
+## 2026-10-25 - Current-Source 8K CED Gains Survive Homogeneous Streams
+
+- Experimental `2de8ce2f` composes current main with the reviewed CED runtime
+  and adds explicit pair-only P4 mapping, shared by cold planning and loading.
+  Production defaults remain None/Full; no kernel or automatic policy changes.
+- Native M5 Maya-S 8K medians: Full-first homogeneous Full/CED 9.777/8.980 s
+  (8.16% lower latency); reverse order 9.808/8.871 s (9.54%); interleaved
+  11.415/8.197 s (28.19%). Four retained calls per policy per process; all raw
+  warmup/pilot/main samples retained. Do not substitute the mixed ratio for a
+  universal or steady-state gain.
+- All forty-two endpoints match bitwise with selected width 4,096, no fallback,
+  completed CED commands and healthy natural exits. This is not independent
+  quality, full causal-state/continuation, serving-reuse or default qualification.
+- [Protocol, samples, identities and limits](bench/2026-10-25-v41-current-ced-8k.md).
+
 ## 2026-10-25 - Trust Repairs Land; Independent Attention Gate Exposes Numerical Drift
 
 - Main `e97bd5c0`/`de082865` integrate reviewed staging ownership and executable

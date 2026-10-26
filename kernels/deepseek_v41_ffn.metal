@@ -293,6 +293,204 @@ kernel void kernel_deepseek_v41_hc_pre(
     }
 }
 
+// Decode mHC pre-block as ONE dispatch (25 threadgroups of 1024 threads).
+// Threadgroups 0..23 each own one mixing logit; each already streams the whole
+// residual for its dot product, so it also sums the squares and applies the
+// projected RMS itself (projection before scaling, as before). Threadgroup 24
+// collapses the four streams with the lagged incoming pre and applies the
+// weighted RMS norm, in parallel with the projection. The sigmoid/Sinkhorn
+// controls are first read after the block, so they move into
+// kernel_deepseek_v41_hc_post_controls. Reduction order differs from
+// projection + kernel_deepseek_v41_hc_pre; nothing else.
+kernel void kernel_deepseek_v41_hc_pre_wide(
+    constant HcPreArgs &a [[buffer(0)]],
+    device const float4 *x [[buffer(1)]],           // residual [4*hidden]
+    device const float4 *weight [[buffer(2)]],      // [24, 4*hidden]
+    device float *mix [[buffer(3)]],                // [24] scaled out
+    device const float *incoming_pre [[buffer(4)]], // [4] lagged
+    device float4 *collapsed [[buffer(5)]],         // [hidden]
+    device const float4 *norm_weight [[buffer(6)]], // [hidden]
+    device float4 *normalized [[buffer(7)]],        // [hidden]
+    uint row [[threadgroup_position_in_grid]], uint tid [[thread_index_in_threadgroup]],
+    uint lane [[thread_index_in_simdgroup]], uint sg [[simdgroup_index_in_threadgroup]]) {
+    threadgroup float partial[V41_HC_PRE_THREADS / 32];
+    threadgroup float2 partial2[V41_HC_PRE_THREADS / 32];
+    const uint h4 = a.hidden / 4;
+    const uint n4 = V41_HC_CONNECTIONS * h4;
+    if (row < 24) {
+        device const float4 *w = weight + ulong(row) * n4;
+        float4 dot = 0.0f, ss = 0.0f;
+        uint i = tid;
+        for (; i + 3 * V41_HC_PRE_THREADS < n4; i += 4 * V41_HC_PRE_THREADS) {
+            const float4 v0 = x[i], v1 = x[i + V41_HC_PRE_THREADS];
+            const float4 v2 = x[i + 2 * V41_HC_PRE_THREADS], v3 = x[i + 3 * V41_HC_PRE_THREADS];
+            const float4 w0 = w[i], w1 = w[i + V41_HC_PRE_THREADS];
+            const float4 w2 = w[i + 2 * V41_HC_PRE_THREADS], w3 = w[i + 3 * V41_HC_PRE_THREADS];
+            dot += w0 * v0 + w1 * v1 + w2 * v2 + w3 * v3;
+            ss += v0 * v0 + v1 * v1 + v2 * v2 + v3 * v3;
+        }
+        for (; i < n4; i += V41_HC_PRE_THREADS) {
+            const float4 v = x[i];
+            dot += w[i] * v;
+            ss += v * v;
+        }
+        const float d = simd_sum((dot.x + dot.y) + (dot.z + dot.w));
+        const float s = simd_sum((ss.x + ss.y) + (ss.z + ss.w));
+        if (lane == 0) partial2[sg] = float2(d, s);
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+        if (tid == 0) {
+            float2 total = 0.0f;
+            for (uint k = 0; k < V41_HC_PRE_THREADS / 32; ++k) total += partial2[k];
+            mix[row] = total.x * rsqrt(total.y / float(4 * n4) + a.norm_eps);
+        }
+        return;
+    }
+    // Collapse with the lagged incoming pre, then the weighted RMS norm.
+    const float p0 = incoming_pre[0], p1 = incoming_pre[1], p2 = incoming_pre[2], p3 = incoming_pre[3];
+    float4 col[V41_HC_PRE_MAX_D4];
+    float4 ss2v = 0.0f;
+    for (uint j = 0; j < V41_HC_PRE_MAX_D4; ++j) {
+        const uint d4 = tid + j * V41_HC_PRE_THREADS;
+        if (d4 < h4) {
+            float4 v = 0.0f;
+            v += x[d4] * p0;
+            v += x[h4 + d4] * p1;
+            v += x[2 * h4 + d4] * p2;
+            v += x[3 * h4 + d4] * p3;
+            col[j] = v;
+            ss2v += v * v;
+        }
+    }
+    const float inv2 = rsqrt(v41_hc_tg_sum((ss2v.x + ss2v.y) + (ss2v.z + ss2v.w), partial, lane, sg)
+        / float(a.hidden) + a.norm_eps);
+    for (uint j = 0; j < V41_HC_PRE_MAX_D4; ++j) {
+        const uint d4 = tid + j * V41_HC_PRE_THREADS;
+        if (d4 < h4) {
+            collapsed[d4] = col[j];
+            normalized[d4] = (col[j] * inv2) * norm_weight[d4];
+        }
+    }
+}
+
+// Controls for a site whose pre-block ran kernel_deepseek_v41_hc_pre_wide,
+// computed in the prologue of its post. Simdgroup 0 of every threadgroup
+// derives pre/post/combination from the 24 scaled mixes with phase B of
+// kernel_deepseek_v41_hc_pre (same per-entry arithmetic and operand order);
+// threadgroup 0 also stores them for the next site's lagged pre and for any
+// reader after the layer. Call from every thread; ends with a barrier.
+struct HcPostControlsArgs { uint hidden; float hc_eps; };
+inline void v41_hc_post_controls(
+    float eps, device const float *mix, device const float *scale, device const float *base,
+    device float *pre, device float *post, device float *combination,
+    threadgroup float *tg_post, threadgroup float *tg_comb, uint group, uint lane, uint sg) {
+    if (sg == 0) {
+        if (lane < V41_HC_CONNECTIONS) {
+            const float pre_v = 1.0f / (1.0f + exp(-(mix[lane] * scale[0] + base[lane]))) + eps;
+            const float post_v = 2.0f / (1.0f + exp(-(mix[4 + lane] * scale[1] + base[4 + lane])));
+            tg_post[lane] = post_v;
+            if (group == 0) {
+                pre[lane] = pre_v;
+                post[lane] = post_v;
+            }
+        }
+        const uint e = lane & 15u;
+        const uint row0 = lane & ~3u;
+        const uint col0 = (lane & 16u) | (e & 3u);
+        const float value = mix[8 + e] * scale[2] + base[8 + e];
+        float row_max = -INFINITY;
+        for (uint k = 0; k < V41_HC_CONNECTIONS; ++k) row_max = max(row_max, simd_shuffle(value, row0 + k));
+        float comb = exp(value - row_max);
+        float sum = 0.0f;
+        for (uint k = 0; k < V41_HC_CONNECTIONS; ++k) sum += simd_shuffle(comb, row0 + k);
+        const float inverse = 1.0f / sum;
+        comb = comb * inverse + eps;
+        sum = 0.0f;
+        for (uint k = 0; k < V41_HC_CONNECTIONS; ++k) sum += simd_shuffle(comb, col0 + 4u * k);
+        comb *= 1.0f / (sum + eps);
+        for (uint iteration = 1; iteration < V41_HC_SINKHORN_ITERATIONS; ++iteration) {
+            sum = 0.0f;
+            for (uint k = 0; k < V41_HC_CONNECTIONS; ++k) sum += simd_shuffle(comb, row0 + k);
+            comb *= 1.0f / (sum + eps);
+            sum = 0.0f;
+            for (uint k = 0; k < V41_HC_CONNECTIONS; ++k) sum += simd_shuffle(comb, col0 + 4u * k);
+            comb *= 1.0f / (sum + eps);
+        }
+        if (lane < 16) {
+            tg_comb[lane] = comb;
+            if (group == 0) combination[lane] = comb;
+        }
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+}
+
+// mHC post (kernel_deepseek_v4_hc_post body) with the site's controls.
+kernel void kernel_deepseek_v41_hc_post_controls(
+    constant HcPostControlsArgs &a [[buffer(0)]],
+    device const float *block [[buffer(1)]],        // [hidden]
+    device const float *residual [[buffer(2)]],     // [4*hidden]
+    device const float *mix [[buffer(3)]],          // [24] scaled
+    device const float *scale [[buffer(4)]],        // [3]
+    device const float *base [[buffer(5)]],         // [24]
+    device float *pre [[buffer(6)]],                // [4]
+    device float *post [[buffer(7)]],               // [4]
+    device float *combination [[buffer(8)]],        // [16]
+    device float *output [[buffer(9)]],             // [4*hidden]
+    uint index [[thread_position_in_grid]], uint group [[threadgroup_position_in_grid]],
+    uint lane [[thread_index_in_simdgroup]], uint sg [[simdgroup_index_in_threadgroup]]) {
+    threadgroup float tg_post[V41_HC_CONNECTIONS];
+    threadgroup float tg_comb[V41_HC_CONNECTIONS * V41_HC_CONNECTIONS];
+    v41_hc_post_controls(a.hc_eps, mix, scale, base, pre, post, combination, tg_post, tg_comb, group, lane, sg);
+    if (index >= V41_HC_CONNECTIONS * a.hidden) return;
+    const uint destination = index / a.hidden;
+    const uint dimension = index % a.hidden;
+    float value = block[dimension] * tg_post[destination];
+    for (uint source = 0; source < V41_HC_CONNECTIONS; ++source) {
+        value += tg_comb[source * V41_HC_CONNECTIONS + destination]
+            * residual[source * a.hidden + dimension];
+    }
+    output[index] = value;
+}
+
+// Decode FFN combine as one dispatch: the routing weights apply to the down
+// outputs here (down(w*h) becomes w*down(h), so kernel_deepseek_v41_weight
+// drops out), the routed sum and shared expert add (kernel_deepseek_v41_sum)
+// happen per dimension, then the mHC post with the site's controls. One row.
+struct FfnPostControlsArgs { uint hidden; float hc_eps; uint topk; };
+kernel void kernel_deepseek_v41_ffn_post_controls(
+    constant FfnPostControlsArgs &a [[buffer(0)]],
+    device const float *slots [[buffer(1)]],        // [topk, hidden] down outputs
+    device const float *weights [[buffer(2)]],      // [topk]
+    device const float *shared [[buffer(3)]],       // [hidden]
+    device const int *status [[buffer(4)]],         // [1]
+    device const float *residual [[buffer(5)]],     // [4*hidden]
+    device const float *mix [[buffer(6)]],          // [24] scaled
+    device const float *scale [[buffer(7)]],        // [3]
+    device const float *base [[buffer(8)]],         // [24]
+    device float *pre [[buffer(9)]],                // [4]
+    device float *post [[buffer(10)]],              // [4]
+    device float *combination [[buffer(11)]],       // [16]
+    device float *output [[buffer(12)]],            // [4*hidden]
+    uint index [[thread_position_in_grid]], uint group [[threadgroup_position_in_grid]],
+    uint lane [[thread_index_in_simdgroup]], uint sg [[simdgroup_index_in_threadgroup]]) {
+    threadgroup float tg_post[V41_HC_CONNECTIONS];
+    threadgroup float tg_comb[V41_HC_CONNECTIONS * V41_HC_CONNECTIONS];
+    v41_hc_post_controls(a.hc_eps, mix, scale, base, pre, post, combination, tg_post, tg_comb, group, lane, sg);
+    if (index >= V41_HC_CONNECTIONS * a.hidden) return;
+    const uint destination = index / a.hidden;
+    const uint dimension = index % a.hidden;
+    float sum = 0.0f;
+    if (status[0] == 1) {
+        for (uint k = 0; k < a.topk; ++k) sum += weights[k] * slots[k * a.hidden + dimension];
+    }
+    const float block = sum + shared[dimension];
+    float value = block * tg_post[destination];
+    for (uint source = 0; source < V41_HC_CONNECTIONS; ++source) {
+        value += tg_comb[source * V41_HC_CONNECTIONS + destination]
+            * residual[source * a.hidden + dimension];
+    }
+    output[index] = value;
+}
+
 struct RouteArgs { uint experts; uint topk; float temperature; float scale; };
 inline bool finite_bits(float v) { return (as_type<uint>(v) & 0x7f800000u) != 0x7f800000u; }
 // MSL has no log1p. Preserve tiny softplus tails instead of rounding 1+x to 1.

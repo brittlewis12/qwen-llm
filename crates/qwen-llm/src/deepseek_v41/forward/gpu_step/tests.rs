@@ -217,6 +217,57 @@ fn dispatch_profile_times_every_decode_dispatch_without_changing_logits() {
 }
 
 #[test]
+fn wide_hc_pre_matches_two_dispatch_pre_within_reduction_order() {
+    use super::super::hc_gpu::HC_WIDE_OVERRIDE;
+    let ctx = MetalContext::new().unwrap();
+    let weights = toy::Weights::new(&ctx);
+    let model = weights.model(&ctx);
+    let layer = &model.layers[0];
+    let ws = model.new_state_with_gpu_step(1).unwrap();
+    let gpu = ws.gpu_step.as_ref().unwrap();
+    HC_WIDE_OVERRIDE.with(|o| o.set(Some(true)));
+    let eligible = super::super::hc_gpu::wide(
+        &layer.attn_hc,
+        model.config.hidden,
+        &gpu.x,
+        &gpu.collapsed,
+        &gpu.normalized,
+        &gpu.constants[0][2],
+    );
+    HC_WIDE_OVERRIDE.with(|o| o.set(None));
+    assert!(eligible, "the toy model must exercise the wide pre-block");
+    use super::super::ffn_gpu::FOLDED_COMBINE_OVERRIDE;
+    let set = |wide: Option<bool>, folded: Option<bool>| {
+        HC_WIDE_OVERRIDE.with(|o| o.set(wide));
+        FOLDED_COMBINE_OVERRIDE.with(|o| o.set(folded));
+    };
+    let mut two = model.new_state_with_gpu_step(4).unwrap();
+    let mut wide = model.new_state_with_gpu_step(4).unwrap();
+    let mut folded = model.new_state_with_gpu_step(4).unwrap();
+    for token in [0, 3, 1, 2] {
+        set(Some(false), Some(false));
+        let expected = model.step(&mut two, token, None);
+        set(Some(true), Some(false));
+        let wide_logits = model.step(&mut wide, token, None);
+        set(Some(true), Some(true));
+        let folded_logits = model.step(&mut folded, token, None);
+        set(None, None);
+        let expected = expected.unwrap();
+        let scale = expected.iter().fold(1.0f32, |m, v| m.max(v.abs()));
+        for (name, logits) in [("wide", wide_logits), ("wide+folded", folded_logits)] {
+            let logits = logits.unwrap();
+            assert_eq!(logits.len(), expected.len());
+            for (index, (got, want)) in logits.iter().zip(&expected).enumerate() {
+                assert!(
+                    (got - want).abs() <= 1e-4 * scale,
+                    "token {token} logit {index}: {name} {got} vs two-dispatch {want}"
+                );
+            }
+        }
+    }
+}
+
+#[test]
 fn split_ffn_encoders_match_one_encoder_bitwise() {
     let ctx = MetalContext::new().unwrap();
     let weights = toy::Weights::new(&ctx);

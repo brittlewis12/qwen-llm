@@ -6,6 +6,25 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the current state and evidence index.
 
+## 2026-10-26 - V4.1 Decode +4%: One-Dispatch mHC Pre-Block, Folded FFN Combine
+
+- Each decode HC site ran a 24-threadgroup projection, then one 1024-thread
+  threadgroup that streamed the 4*hidden residual through a single core
+  (projected RMS, Sinkhorn controls, collapse, norm). Now one dispatch: the 24
+  projection threadgroups also sum the residual's squares and scale their own
+  mix; a 25th threadgroup collapses and norms in parallel. The controls are
+  first read after the block, so they move into the site's post prologue.
+- The FFN combine applies the routing weights to the down outputs and sums
+  routed + shared inside that post, dropping the weight and sum dispatches.
+- In-binary, one campaign, F/S/T x2 (seed 909): both off 64.25 / 56.73 tok/s
+  (tg64 @d0 / @d2048, matching main), wide pre 66.62 / 58.68 (+3.7% / +3.4%),
+  plus folded combine 66.98 / 59.02 (+4.2% / +4.0% total). pp unchanged.
+  Witness 2.1421 / top-1 212 and the 22-task screen unchanged.
+  `QWEN_V41_HC_PRE=two`, `QWEN_V41_FFN_COMBINE=split` restore the old paths.
+- Reading: tiny dispatches cost ~1 us each (the weight+sum fold is worth only
+  ~0.5%); the cost was single-threadgroup work on the serial chain.
+- Runs: metagross `~/qwen-runs/2026-10-26-decode-twk3` r28-r30.
+
 ## 2026-10-26 - V4.1 Decode +4%: llama.cpp Work Split For Q5_K And IQ2_XXS Rows
 
 - Native decode projections for Q5_K (attention q_b/output_b, shared expert)

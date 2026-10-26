@@ -202,6 +202,26 @@ fn encode_route_rows(
     Ok(())
 }
 
+/// `split` keeps the decode FFN combine as routing-weight, sum and post
+/// dispatches; otherwise wide sites apply the routing weights to the down
+/// outputs inside one combine dispatch (A/B lever).
+const FFN_COMBINE_ENV: &str = "QWEN_V41_FFN_COMBINE";
+
+#[cfg(test)]
+thread_local! {
+    pub(super) static FOLDED_COMBINE_OVERRIDE: std::cell::Cell<Option<bool>> =
+        const { std::cell::Cell::new(None) };
+}
+
+fn folded_combine_enabled() -> bool {
+    #[cfg(test)]
+    if let Some(folded) = FOLDED_COMBINE_OVERRIDE.with(|o| o.get()) {
+        return folded;
+    }
+    static FOLDED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *FOLDED.get_or_init(|| std::env::var(FFN_COMBINE_ENV).as_deref() != Ok("split"))
+}
+
 impl Workspace {
     pub(super) fn new(model: &Forward<'_>) -> std::result::Result<Self, StateError> {
         let c = &model.config;
@@ -344,8 +364,24 @@ impl Workspace {
     ) -> std::result::Result<(), metal::MetalError> {
         self.encode_hc_pre(ctx, enc, c, layer, id, x, pre)?;
         self.encode_shared(ctx, enc, c, layer, id)?;
-        self.encode_routed_experts(ctx, enc, c, layer, id)?;
-        self.encode_combine(ctx, enc, c, id, x, output)
+        self.encode_routed_experts(ctx, enc, c, layer, id, x)?;
+        self.encode_combine(ctx, enc, c, layer, id, x, output)
+    }
+
+    /// Whether this layer's FFN site runs the wide pre-block and the one-dispatch
+    /// combine (routing weights and routed sum folded into the controls post).
+    /// `x` is the site's residual input; the routed and combine parts must agree.
+    fn folded_combine(&self, c: &Config, layer: &Layer<'_>, id: usize, x: &MetalTensor) -> bool {
+        let b = &self.buffers;
+        folded_combine_enabled()
+            && hc_gpu::wide(
+                &layer.ffn_hc,
+                c.hidden,
+                x,
+                &b[6],
+                &b[7],
+                &self.constants[id][2],
+            )
     }
 
     /// `encode` in four parts. The shared expert and the router plus routed
@@ -442,7 +478,9 @@ impl Workspace {
         c: &Config,
         layer: &Layer<'_>,
         id: usize,
+        x: &MetalTensor,
     ) -> std::result::Result<(), metal::MetalError> {
+        let folded = self.folded_combine(c, layer, id, x);
         let extents = composition_extents(c, 1)?;
         let b = &self.buffers;
         let constants = &self.constants[id];
@@ -478,19 +516,23 @@ impl Workspace {
             c.topk,
             c.clamp,
         )?;
-        enc.set_pipeline(&ctx.pipeline("kernel_deepseek_v41_weight")?);
-        enc.set_bytes(0, &extents.weighted);
-        enc.set_bytes(1, &(c.intermediate as u32));
-        for (slot, tensor) in [&b[13], &b[11], &b[14], status].iter().enumerate() {
-            enc.set_tensor(slot + 2, tensor);
+        // Folded: the combine weights the down outputs, so down reads the
+        // unweighted SwiGLU rows and the weight dispatch drops out.
+        if !folded {
+            enc.set_pipeline(&ctx.pipeline("kernel_deepseek_v41_weight")?);
+            enc.set_bytes(0, &extents.weighted);
+            enc.set_bytes(1, &(c.intermediate as u32));
+            for (slot, tensor) in [&b[13], &b[11], &b[14], status].iter().enumerate() {
+                enc.set_tensor(slot + 2, tensor);
+            }
+            enc.set_bytes(6, &(c.topk as u32));
+            dispatch(enc, extents.weighted as usize, 256);
         }
-        enc.set_bytes(6, &(c.topk as u32));
-        dispatch(enc, extents.weighted as usize, 256);
         metal::encode_all_slots_down_native(
             ctx,
             enc,
             layer.banks[2],
-            &b[14],
+            if folded { &b[13] } else { &b[14] },
             &b[10],
             status,
             &b[15],
@@ -502,11 +544,13 @@ impl Workspace {
         Ok(())
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub(super) fn encode_combine(
         &self,
         ctx: &MetalContext,
         enc: &KernelEncoder,
         c: &Config,
+        layer: &Layer<'_>,
         id: usize,
         x: &MetalTensor,
         output: &MetalTensor,
@@ -514,6 +558,28 @@ impl Workspace {
         let extents = composition_extents(c, 1)?;
         let b = &self.buffers;
         let status = &self.statuses[id];
+        let constants = &self.constants[id];
+        if self.folded_combine(c, layer, id, x) {
+            metal::dispatch_profile_label("ffn_post", Some(id));
+            return hc_gpu::encode_ffn_post(
+                ctx,
+                enc,
+                c,
+                constants,
+                hc_gpu::FfnPostSite {
+                    slots: &b[15],
+                    weights: &b[11],
+                    shared: &b[19],
+                    status,
+                    residual: x,
+                    mix: &b[2],
+                    pre: &b[3],
+                    post: &b[4],
+                    combination: &b[5],
+                    output,
+                },
+            );
+        }
         enc.set_pipeline(&ctx.pipeline("kernel_deepseek_v41_sum")?);
         enc.set_bytes(0, &(c.hidden as u32));
         enc.set_bytes(1, &(c.topk as u32));
@@ -523,7 +589,23 @@ impl Workspace {
         enc.set_bytes(6, &1u32);
         dispatch(enc, extents.output as usize, 256);
         metal::dispatch_profile_label("ffn_post", Some(id));
-        metal::encode_mhc4_post(ctx, enc, c.hidden, &b[20], x, &b[4], &b[5], output)
+        let wide = hc_gpu::wide(&layer.ffn_hc, c.hidden, x, &b[6], &b[7], &constants[2]);
+        hc_gpu::encode_post(
+            ctx,
+            enc,
+            c,
+            wide,
+            constants,
+            hc_gpu::HcPostSite {
+                block: &b[20],
+                residual: x,
+                mix: &b[2],
+                pre: &b[3],
+                post: &b[4],
+                combination: &b[5],
+                output,
+            },
+        )
     }
 
     fn encode_routed(

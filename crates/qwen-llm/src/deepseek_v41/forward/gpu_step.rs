@@ -903,8 +903,29 @@ impl Workspace {
         stages.boundary();
         let enc = stages.enc();
         metal::dispatch_profile_label("hc_post", Some(id));
-        metal::encode_mhc4_post(
-            ctx, enc, c.hidden, output, &self.x, &self.post, &self.comb, &self.half,
+        let wide = hc_gpu::wide(
+            &l.attn_hc,
+            c.hidden,
+            &self.x,
+            &self.collapsed,
+            &self.normalized,
+            &self.constants[id][2],
+        );
+        hc_gpu::encode_post(
+            ctx,
+            enc,
+            c,
+            wide,
+            &self.constants[id],
+            hc_gpu::HcPostSite {
+                block: output,
+                residual: &self.x,
+                mix: &self.raw,
+                pre: &self.pre,
+                post: &self.post,
+                combination: &self.comb,
+                output: &self.half,
+            },
         )
         .map_err(|e| e.to_string())?;
         if let Some(snapshot) = snapshot {
@@ -929,11 +950,11 @@ impl Workspace {
             .map_err(err)?;
         stages.split();
         self.ffn
-            .encode_routed_experts(ctx, stages.enc(), c, l, id)
+            .encode_routed_experts(ctx, stages.enc(), c, l, id, &self.half)
             .map_err(err)?;
         stages.split();
         self.ffn
-            .encode_combine(ctx, stages.enc(), c, id, &self.half, &self.x)
+            .encode_combine(ctx, stages.enc(), c, l, id, &self.half, &self.x)
             .map_err(err)
     }
 

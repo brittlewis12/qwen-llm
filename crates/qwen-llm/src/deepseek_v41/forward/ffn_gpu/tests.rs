@@ -116,58 +116,66 @@ fn stages_lagged_pre_weight_before_down_and_nonalias() {
     model.layers[0].ffn_hc.base = (0..24).map(|i| (i as f32 - 9.0) / 17.0).collect();
     let c = &model.config;
     let layer = &model.layers[0];
-    let mut workspace = Workspace::new(&model).unwrap();
-    let x: Vec<_> = (0..128)
-        .map(|i| ((i * 17 % 43) as f32 - 21.0) / 7.0)
-        .collect();
-    let pre = [0.7, 0.1, 0.3, 0.9];
-    let (mixes, input) = layer.ffn_hc.prepare(&x, &pre, c).unwrap();
-    let output = Forward::moe(&ctx, c, layer, &input).unwrap();
-    let (actual, next) = workspace.run(&ctx, c, layer, 0, &x, &pre).unwrap();
-    close(&actual, &op::merge(&output, &x, &mixes).unwrap());
-    close(&next, &mixes.pre);
-    let b = &workspace.buffers;
-    close(f32_slice(&b[0]).unwrap(), &x);
-    close(f32_slice(&b[1]).unwrap(), &pre);
-    let inv = (op::dot(&x, &x) / x.len() as f32 + c.norm_eps)
-        .sqrt()
-        .recip();
-    let projected: Vec<_> = layer
-        .ffn_hc
-        .projection
-        .forward(&x)
-        .unwrap()
-        .iter()
-        .map(|v| v * inv)
-        .collect();
-    close(f32_slice(&b[2]).unwrap(), &projected);
-    close(f32_slice(&b[4]).unwrap(), &mixes.post);
-    close(f32_slice(&b[5]).unwrap(), &mixes.comb);
-    close(f32_slice(&b[6]).unwrap(), &op::collapse(&x, &pre).unwrap());
-    close(f32_slice(&b[7]).unwrap(), &input);
-    let (ids, weights) = route(
-        &layer.router.forward(&input).unwrap(),
-        &layer.bias,
-        c.topk,
-        c.gate_temperature,
-        c.route_scale,
-    )
-    .unwrap();
-    let actual_ids = unsafe {
-        std::slice::from_raw_parts(b[10].buffer.contents().as_ptr().cast::<i32>(), c.topk)
-    };
-    assert_eq!(actual_ids, ids);
-    close(f32_slice(&b[11]).unwrap(), &weights);
-    let expected: Vec<_> = f32_slice(&b[13])
-        .unwrap()
-        .iter()
-        .enumerate()
-        .map(|(i, v)| v * weights[i / c.intermediate])
-        .collect();
-    close(f32_slice(&b[14]).unwrap(), &expected);
-    close(f32_slice(&b[20]).unwrap(), &output);
-    assert!(f32_slice(&b[13]).unwrap().iter().any(|v| *v != 0.0));
-    assert!(f32_slice(&b[15]).unwrap().iter().any(|v| *v != 0.0));
+    // Split: weight before down, routed sum, then post (b[14], b[20] staged).
+    // Folded: routing weights applied in the one-dispatch combine instead.
+    for folded in [false, true] {
+        super::FOLDED_COMBINE_OVERRIDE.with(|o| o.set(Some(folded)));
+        let mut workspace = Workspace::new(&model).unwrap();
+        let x: Vec<_> = (0..128)
+            .map(|i| ((i * 17 % 43) as f32 - 21.0) / 7.0)
+            .collect();
+        let pre = [0.7, 0.1, 0.3, 0.9];
+        let (mixes, input) = layer.ffn_hc.prepare(&x, &pre, c).unwrap();
+        let output = Forward::moe(&ctx, c, layer, &input).unwrap();
+        let (actual, next) = workspace.run(&ctx, c, layer, 0, &x, &pre).unwrap();
+        close(&actual, &op::merge(&output, &x, &mixes).unwrap());
+        close(&next, &mixes.pre);
+        let b = &workspace.buffers;
+        close(f32_slice(&b[0]).unwrap(), &x);
+        close(f32_slice(&b[1]).unwrap(), &pre);
+        let inv = (op::dot(&x, &x) / x.len() as f32 + c.norm_eps)
+            .sqrt()
+            .recip();
+        let projected: Vec<_> = layer
+            .ffn_hc
+            .projection
+            .forward(&x)
+            .unwrap()
+            .iter()
+            .map(|v| v * inv)
+            .collect();
+        close(f32_slice(&b[2]).unwrap(), &projected);
+        close(f32_slice(&b[4]).unwrap(), &mixes.post);
+        close(f32_slice(&b[5]).unwrap(), &mixes.comb);
+        close(f32_slice(&b[6]).unwrap(), &op::collapse(&x, &pre).unwrap());
+        close(f32_slice(&b[7]).unwrap(), &input);
+        let (ids, weights) = route(
+            &layer.router.forward(&input).unwrap(),
+            &layer.bias,
+            c.topk,
+            c.gate_temperature,
+            c.route_scale,
+        )
+        .unwrap();
+        let actual_ids = unsafe {
+            std::slice::from_raw_parts(b[10].buffer.contents().as_ptr().cast::<i32>(), c.topk)
+        };
+        assert_eq!(actual_ids, ids);
+        close(f32_slice(&b[11]).unwrap(), &weights);
+        if !folded {
+            let expected: Vec<_> = f32_slice(&b[13])
+                .unwrap()
+                .iter()
+                .enumerate()
+                .map(|(i, v)| v * weights[i / c.intermediate])
+                .collect();
+            close(f32_slice(&b[14]).unwrap(), &expected);
+            close(f32_slice(&b[20]).unwrap(), &output);
+        }
+        assert!(f32_slice(&b[13]).unwrap().iter().any(|v| *v != 0.0));
+        assert!(f32_slice(&b[15]).unwrap().iter().any(|v| *v != 0.0));
+        super::FOLDED_COMBINE_OVERRIDE.with(|o| o.set(None));
+    }
 }
 
 #[test]

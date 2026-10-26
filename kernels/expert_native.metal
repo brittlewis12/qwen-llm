@@ -582,3 +582,41 @@ kernel void kernel_expert_native_gate_up_iq2_xxs_f32_split(
         }
     }
 }
+
+// Two dense Q8_0 projections of one F32 activation in one dispatch (the V4.1
+// decode query-rank and KV-latent projections both read the layer input).
+// One threadgroup per output row with K split across its four simdgroups
+// (each takes every fourth 512-weight pass; partials meet in threadgroup
+// memory), so narrow outputs still fill the GPU. Same 16-weight fragment
+// dequantization and fma as kernel_expert_native_f32; the reduction order
+// differs. Grid: n_a + n_b threadgroups of 128 threads.
+struct dense_pair_args { ulong row_bytes; uint n_in; uint n_a; uint n_b; };
+[[max_total_threads_per_threadgroup(128)]]
+kernel void kernel_dense_pair_q8_0_f32_splitk(
+        constant dense_pair_args & args [[buffer(0)]],
+        device const uchar * bank_a [[buffer(1)]],
+        device const uchar * bank_b [[buffer(2)]],
+        device const float * x [[buffer(3)]],
+        device float * y_a [[buffer(4)]],
+        device float * y_b [[buffer(5)]],
+        uint group [[threadgroup_position_in_grid]],
+        ushort lane [[thread_index_in_simdgroup]],
+        ushort simd [[simdgroup_index_in_threadgroup]],
+        ushort tid [[thread_index_in_threadgroup]]) {
+    threadgroup float partial[4];
+    if (group >= args.n_a + args.n_b) return;
+    const bool second = group >= args.n_a;
+    const uint row_index = second ? group - args.n_a : group;
+    device const uchar * row = (second ? bank_b : bank_a) + ulong(row_index) * args.row_bytes;
+    float sum = 0.0f;
+    for (uint k = (uint(simd) * 32u + uint(lane)) * 16u; k < args.n_in; k += 2048u) {
+        float4x4 decoded;
+        latent_dequantize_q8_0(row + (k / (16u * QT_Q8_0_NL)) * QT_Q8_0_BYTES,
+                               short((k / 16u) % QT_Q8_0_NL), decoded);
+        QT_FOR_UNROLL (uint i = 0; i < 16; ++i) sum = fma(decoded[i / 4][i % 4], x[k + i], sum);
+    }
+    sum = simd_sum(sum);
+    if (lane == 0) partial[simd] = sum;
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    if (tid == 0) (second ? y_b : y_a)[row_index] = (partial[0] + partial[1]) + (partial[2] + partial[3]);
+}

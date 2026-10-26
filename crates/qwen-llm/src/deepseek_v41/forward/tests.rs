@@ -658,3 +658,64 @@ fn six_native_experts_plus_shared_match_cpu_f32() {
     let legacy = Forward::moe(&ctx, &c, &layer, &x).unwrap();
     close(&legacy, &expected);
 }
+
+#[test]
+fn q8_0_rank_pair_matches_separate_native_projections() {
+    let ctx = MetalContext::new().unwrap();
+    // Decode-like geometry: one shared input, two narrow Q8_0 outputs of
+    // different widths, K spanning several 2048-weight split-K passes.
+    let input = 5120usize;
+    let (n_a, n_b) = (40usize, 24usize);
+    let x: Vec<f32> = (0..input)
+        .map(|i| ((i * 37 % 211) as f32 - 105.0) / 97.0)
+        .collect();
+    let bank = |rows: usize, seed: usize| {
+        let mut bytes = Vec::new();
+        for row in 0..rows {
+            for block in 0..input / 32 {
+                let scale = 0.002 + ((row * 7 + block * seed) % 13) as f32 * 0.0007;
+                bytes.extend_from_slice(&half::f16::from_f32(scale).to_bits().to_le_bytes());
+                bytes.extend((0..32).map(|j| ((row * 31 + block * 17 + j * seed) % 255) as u8));
+            }
+        }
+        MetalTensor::from_bytes(
+            &ctx,
+            &bytes,
+            vec![input as u64, rows as u64],
+            GgmlType::Q8_0,
+        )
+        .unwrap()
+    };
+    let linear = |tensor: MetalTensor, output| Linear {
+        native_control: native_control(&ctx, GgmlType::Q8_0).unwrap(),
+        ctx: &ctx,
+        tensor,
+        input,
+        output,
+    };
+    let a = linear(bank(n_a, 3), n_a);
+    let b = linear(bank(n_b, 5), n_b);
+    let xs = upload(&ctx, &x, vec![input as u64]).unwrap();
+    let out = |n: usize| upload(&ctx, &vec![f32::NAN; n], vec![n as u64]).unwrap();
+    let (sep_a, sep_b, pair_a, pair_b) = (out(n_a), out(n_b), out(n_a), out(n_b));
+    let run = |pair: bool, ya: &MetalTensor, yb: &MetalTensor| {
+        RANK_PAIR_OVERRIDE.with(|o| o.set(Some(pair)));
+        let command = ctx.queue.commandBuffer().unwrap();
+        let enc = KernelEncoder::begin(&command);
+        encode_linear_pair(&enc, (&a, ya), (&b, yb), &xs).unwrap();
+        enc.end();
+        metal::commit_and_wait(&command).unwrap();
+        RANK_PAIR_OVERRIDE.with(|o| o.set(None));
+    };
+    run(false, &sep_a, &sep_b);
+    run(true, &pair_a, &pair_b);
+    for (pair, separate) in [(&pair_a, &sep_a), (&pair_b, &sep_b)] {
+        let (pair, separate) = (f32_slice(pair).unwrap(), f32_slice(separate).unwrap());
+        for (i, (p, s)) in pair.iter().zip(separate).enumerate() {
+            assert!(
+                (p - s).abs() <= 1e-4 + 1e-5 * s.abs(),
+                "row {i}: pair {p} vs separate {s}"
+            );
+        }
+    }
+}

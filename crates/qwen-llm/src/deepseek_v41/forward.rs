@@ -200,6 +200,92 @@ pub(crate) fn dense_linear_supported(dtype: GgmlType) -> bool {
         || matches!(dtype, GgmlType::IQ2_XXS | GgmlType::IQ1_S | GgmlType::IQ1_M)
 }
 
+#[repr(C)]
+#[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+struct DensePairArgs {
+    row_bytes: u64,
+    n_in: u32,
+    n_a: u32,
+    n_b: u32,
+    _pad: u32,
+}
+
+/// `split` keeps the decode query-rank and KV-latent projections as two
+/// native dispatches; otherwise two Q8_0 projections of the same input run
+/// as one split-K dispatch (A/B lever).
+const RANK_PAIR_ENV: &str = "QWEN_V41_RANK_PAIR";
+
+#[cfg(test)]
+thread_local! {
+    pub(super) static RANK_PAIR_OVERRIDE: std::cell::Cell<Option<bool>> =
+        const { std::cell::Cell::new(None) };
+}
+
+fn rank_pair_enabled() -> bool {
+    #[cfg(test)]
+    if let Some(pair) = RANK_PAIR_OVERRIDE.with(|o| o.get()) {
+        return pair;
+    }
+    static PAIR: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *PAIR.get_or_init(|| std::env::var(RANK_PAIR_ENV).as_deref() != Ok("split"))
+}
+
+/// Encode `a(x) -> y_a` and `b(x) -> y_b`, as one dispatch when both are
+/// Q8_0 over the same input (`kernel_dense_pair_q8_0_f32_splitk`), else as
+/// each projection's own encoding.
+fn encode_linear_pair(
+    enc: &KernelEncoder,
+    (a, y_a): (&Linear<'_>, &MetalTensor),
+    (b, y_b): (&Linear<'_>, &MetalTensor),
+    x: &MetalTensor,
+) -> std::result::Result<(), metal::MetalError> {
+    let paired = rank_pair_enabled()
+        && a.tensor.dtype == GgmlType::Q8_0
+        && b.tensor.dtype == GgmlType::Q8_0
+        && a.input == b.input
+        && a.input.is_multiple_of(32)
+        && x.dtype == GgmlType::F32
+        && x.n_elements() == a.input as u64
+        && [y_a, y_b].iter().all(|y| y.dtype == GgmlType::F32)
+        && y_a.n_elements() == a.output as u64
+        && y_b.n_elements() == b.output as u64
+        && x.offset.is_multiple_of(4);
+    if !paired {
+        a.encode(enc, x, y_a)?;
+        return b.encode(enc, x, y_b);
+    }
+    let pso = a.ctx.pipeline("kernel_dense_pair_q8_0_f32_splitk")?;
+    enc.set_pipeline(&pso);
+    enc.set_bytes(
+        0,
+        &DensePairArgs {
+            row_bytes: (a.input / 32 * 34) as u64,
+            n_in: a.input as u32,
+            n_a: a.output as u32,
+            n_b: b.output as u32,
+            _pad: 0,
+        },
+    );
+    enc.set_tensor(1, &a.tensor);
+    enc.set_tensor(2, &b.tensor);
+    enc.set_tensor(3, x);
+    enc.set_tensor(4, y_a);
+    enc.set_tensor(5, y_b);
+    enc.dispatch(
+        objc2_metal::MTLSize {
+            width: a.output + b.output,
+            height: 1,
+            depth: 1,
+        },
+        objc2_metal::MTLSize {
+            width: 128,
+            height: 1,
+            depth: 1,
+        },
+    );
+    Ok(())
+}
+
 impl Linear<'_> {
     fn encode(
         &self,

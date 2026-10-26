@@ -2745,6 +2745,13 @@
   },
   {
     "target": "lib",
+    "name": "deepseek_v41::forward::tests::q8_0_rank_pair_matches_separate_native_projections",
+    "class": "gpu",
+    "ignored": false,
+    "reason": "Metal context, allocation or dispatch witness; parent GPU lane only."
+  },
+  {
+    "target": "lib",
     "name": "deepseek_v41::forward::tests::gguf_dense_extra_iq_formats_preserve_f32_operands",
     "class": "gpu",
     "ignored": false,

@@ -6,6 +6,18 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the current state and evidence index.
 
+## 2026-10-26 - V4.1 Decode +1.3-1.5%: Query-Rank And KV Projections In One Dispatch
+
+- The decode query-rank (1280 rows) and KV-latent (512 rows) Q8_0
+  projections read the same layer input but ran as two native dispatches of
+  one simdgroup per row. `kernel_dense_pair_q8_0_f32_splitk` runs both in one
+  dispatch, one threadgroup per row with K split across its four simdgroups
+  (the split-K form probed at q_a 10.7 -> 9.4 us on 2026-10-26).
+- In-binary P/S x2 (seed 909): tg64@d0 68.60 -> 69.50, @d2048 60.24 ->
+  61.15. Witness 2.1421 / top-1 212 and the 22-task screen unchanged.
+  `QWEN_V41_RANK_PAIR=split` restores the two dispatches.
+- Runs: metagross `~/qwen-runs/2026-10-26-decode-twk3` r37-r38.
+
 ## 2026-10-26 - V4.1 Decode +1.5-1.8%: One Dispatch For Rank Norms And KV Epilogue
 
 - The decode query/KV chain ran the query-rank RMS norm and the KV-latent RMS

@@ -2191,8 +2191,13 @@ impl Workspace {
             if fused_rank_norms() {
                 // Both rank projections, then one dispatch for both norms, the
                 // KV RoPE and the ring store, then the query up-projection.
-                linear(ctx, enc, &w.query_a, input, &self.query_rank)?;
-                linear(ctx, enc, &w.kv, input, &self.latent)?;
+                super::encode_linear_pair(
+                    enc,
+                    (&w.query_a, &self.query_rank),
+                    (&w.kv, &self.latent),
+                    input,
+                )
+                .map_err(|e| e.to_string())?;
                 rank_norms(
                     ctx,
                     enc,

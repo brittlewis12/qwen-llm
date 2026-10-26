@@ -12,9 +12,11 @@ outsider acceptance are retained too).
 Promote the reuse. A prefill allocates one `ChunkScratch` (x/half/outputs/
 incoming, `HcRows`, `ffn::Rows`, `attention::Rows`, and the Engram input/
 projected tensors) for the largest chunk and reuses it for every full chunk; a
-smaller tail drops the max scratch and allocates its own, so the peak stays
-one set. `QWEN_V41_CHUNK_SCRATCH_REUSE=0`/`off` restores the old per-chunk
-allocation; `alternate` toggles per call for in-process A/Bs. Default is reuse.
+smaller tail drops the max scratch before allocating its own, so the peak
+stays one set. The in-binary reversed campaign gives **+3.54%** warm 8K
+(reuse 863.7 vs per-chunk 834.2); the cross-build +5.99% is exploratory.
+`QWEN_V41_CHUNK_SCRATCH_REUSE=0`/`off` restores the old per-chunk allocation;
+`alternate` toggles per call for in-process A/Bs. Default is reuse.
 
 ## Why
 
@@ -40,13 +42,27 @@ arm. Both arms build-identity match. Raw samples, in order:
 | current (C) | 247.75, 806.71 | 784.4 (806.7 warm) |
 
 Warm comparison (excluding the two cold samples 247.75 and 597.51, retained):
-current 784.44, reuse 831.44, **+5.99%**. This is an exploratory warm estimate,
-not a robust causal result: low throughput alone does not establish coldness,
-the stable reuse arm is two adjacent observations, and the exclusion needs a
-predefined cache/I/O criterion. The discarded warm-up pair was 763.54/774.11.
-The box's warm level was below the earlier ~850 (768-856), so compare within
-the campaign, not to the old number. A second independently warmed,
-reversed-order campaign is required before a broad claim.
+current 784.44, reuse 831.44, **+5.99%**. This cross-build result is retained as
+exploratory: low throughput alone does not establish coldness, the stable reuse
+arm is two adjacent observations, and the exclusion needs a predefined
+cache/I/O criterion. The discarded warm-up pair was 763.54/774.11. The box's
+warm level was below the earlier ~850 (768-856), so compare within the
+campaign, not to the old number.
+
+The second campaign (campaign3) used the same binary `0a27eb05` and the
+in-binary `QWEN_V41_CHUNK_SCRATCH_REUSE=0` toggle, reversed N C C N, under the
+same campaign lease and a discarded warm-up. Raw samples, in order:
+
+| arm | samples (tok/s) |
+| --- | --- |
+| reuse (N) | 863.66, 863.43 |
+| per-chunk (C) | 834.46, 835.99 |
+| per-chunk (C) | 832.98, 833.21 |
+| reuse (N) | 864.69, 863.12 |
+
+The warm-up pair was 862.58/860.16. No sample was cold; every sample is stable
+and the order is reversed. Reuse 863.725 vs per-chunk 834.165, **+3.54%**; the
+same binary and the in-binary toggle make this the robust warm estimate.
 
 ## Correctness
 
@@ -64,12 +80,12 @@ reversed-order campaign is required before a broad claim.
 
 ## Limits
 
-One artifact and host session; the warm level was thermally variable; two cold
-samples are retained but excluded from the warm comparison; no full-model
-endpoint bitwise, causal-state or continuation comparison (the toy lifetime
-witness validates the reuse, the `incoming` reset and the tail lifetime, not
-full-model logits). A second reversed campaign, Maya-S and then near-capacity
-IQ3 generality, and the CED-origin guard are separate follow-ups. The CED quick
-1.9% is not comparable to the 8-10% matched-P4 cohort. The 8192 chunk remains a
-model until the production route counts are merged. The campaign lease
-serialized the GPU; the page cache was shared with the other lanes on GSQ.
+One artifact and host session; the cross-build +5.99% is exploratory while the
+in-binary reversed +3.54% is the robust warm estimate. No full-model endpoint
+bitwise, causal-state or continuation comparison yet (the toy lifetime witness
+validates the reuse, the `incoming` reset and the tail lifetime, not full-model
+logits). Maya-S and then near-capacity IQ3 generality, the CED-origin guard and
+the CED quick 1.9% (not comparable to the 8-10% matched-P4 cohort) are separate
+follow-ups. The 8192 chunk remains a model until the production route counts
+are merged. The campaign lease serialized the GPU; the page cache was shared
+with the other lanes on GSQ.

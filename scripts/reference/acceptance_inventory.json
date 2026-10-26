@@ -2465,7 +2465,7 @@
   },
   {
     "target": "lib",
-    "name": "deepseek_v41::forward::prefill::tests::lifetime::full_chunks_and_scalar_steps_release_inside_one_outer_pool",
+    "name": "deepseek_v41::forward::prefill::tests::lifetime::full_chunks_and_tail_steps_release_inside_one_outer_pool",
     "class": "gpu",
     "ignored": true,
     "reason": "Ignored self-leased tiny Metal witness; parent runs separately without outer lease."

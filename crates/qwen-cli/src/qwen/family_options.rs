@@ -45,7 +45,41 @@ pub(crate) fn v41_execution_geometry(
     value
 }
 
+/// Cold run/ordinary bench: unset/full_forward = Full/None; shrinking_ced = optional CED with measured 4 GiB soft resident target (P4), retained on Full fallback. Serving ignores it; paired mapping is independent.
 pub(crate) const V41_PREFILL_EXECUTION_ENV: &str = "QWEN_V41_PREFILL_EXECUTION";
+
+/// The explicit cold CED profile includes the measured P4 resident mapping.
+/// Serving and paired controls do not use this cold-only policy.
+pub(crate) fn v41_cold_execution_target(
+    execution: qwen_llm::deepseek_v41::forward::PrefillExecution,
+) -> Option<usize> {
+    use qwen_llm::deepseek_v41::forward::PrefillExecution;
+    match execution {
+        PrefillExecution::FullForward => None,
+        PrefillExecution::ShrinkingCed => Some(4_294_967_296),
+    }
+}
+
+/// Keep the selected cold plan and its resident import together. A supplied
+/// paired plan is already selected and must not inherit ordinary cold policy.
+pub(crate) fn v41_load_cold<T>(
+    execution: qwen_llm::deepseek_v41::forward::PrefillExecution,
+    supplied: Option<&qwen_llm::deepseek_v41::forward::ColdPrefillPlan>,
+    plan: impl FnOnce(Option<usize>) -> Result<qwen_llm::deepseek_v41::forward::ColdPrefillPlan>,
+    signals: impl FnOnce() -> qwen_llm::metal::MetalMemorySignals,
+    load: impl FnOnce(&qwen_llm::deepseek_v41::gguf::ResidentStoragePlan) -> Result<T>,
+) -> Result<(qwen_llm::deepseek_v41::forward::ColdPrefillPlan, T)> {
+    let selected = match supplied {
+        Some(cold) => cold.clone(),
+        None => {
+            plan(v41_cold_execution_target(execution))?
+                .select_load(signals())?
+                .0
+        }
+    };
+    let loaded = load(&selected.resident_storage)?;
+    Ok((selected, loaded))
+}
 
 /// Cold run/bench only. Serving deliberately does not read this control.
 pub(crate) fn v41_prefill_execution_from_env()
@@ -328,15 +362,214 @@ mod tests {
     #[test]
     fn v41_cold_prefill_parser_defaults_and_valid_values() {
         use qwen_llm::deepseek_v41::forward::PrefillExecution;
-        for (value, expected) in [
-            (None, PrefillExecution::FullForward),
-            (Some("full_forward"), PrefillExecution::FullForward),
-            (Some("shrinking_ced"), PrefillExecution::ShrinkingCed),
+        for (value, expected, target) in [
+            (None, PrefillExecution::FullForward, None),
+            (Some("full_forward"), PrefillExecution::FullForward, None),
+            (
+                Some("shrinking_ced"),
+                PrefillExecution::ShrinkingCed,
+                Some(4_294_967_296),
+            ),
         ] {
-            assert_eq!(
-                parse_v41_prefill_execution(value.map(OsStr::new)).unwrap(),
-                expected
+            let execution = parse_v41_prefill_execution(value.map(OsStr::new)).unwrap();
+            assert_eq!(execution, expected);
+            assert_eq!(v41_cold_execution_target(execution), target);
+        }
+    }
+
+    fn cold_signals() -> qwen_llm::metal::MetalMemorySignals {
+        qwen_llm::metal::MetalMemorySignals {
+            recommended_max_bytes: 1 << 40,
+            current_allocated_bytes: 0,
+            process_limit_remaining_bytes: Some(0),
+            host_budget: Some(qwen_llm::metal::HostMemoryBudget {
+                physical_bytes: 1 << 40,
+                conservative_available_bytes: 1 << 40,
+                external_gap_bytes: 0,
+                private_shadow_bytes: 0,
+            }),
+        }
+    }
+
+    fn cold_fixture(
+        execution: qwen_llm::deepseek_v41::forward::PrefillExecution,
+        target: Option<usize>,
+    ) -> qwen_llm::deepseek_v41::forward::ColdPrefillPlan {
+        use qwen_llm::deepseek_v41::forward::{
+            ColdPrefillPlan, PrefillAdmission, PrefillExecution, PrefillGeometry, PrefillIntent,
+            RequestMemoryEstimate,
+        };
+        let gguf = crate::deepseek_v41_fixture::gguf(3, "deepseek41.context_length");
+        let storage = qwen_llm::deepseek_v41::gguf::resident_storage_plan_with_target(
+            &gguf,
+            16384,
+            1 << 36,
+            target,
+        )
+        .unwrap();
+        ColdPrefillPlan {
+            geometry: PrefillGeometry {
+                start: 0,
+                tokens: 17,
+                selected_rows: 4096,
+            },
+            capacity: 23,
+            executions: vec![execution],
+            prefill_admission: PrefillAdmission {
+                intent: match execution {
+                    PrefillExecution::FullForward => PrefillIntent::Full,
+                    PrefillExecution::ShrinkingCed => PrefillIntent::OptionalCed,
+                },
+                fallback: None,
+            },
+            alternatives: vec![],
+            full_chunk_rows: 4096,
+            resident_storage: storage,
+            request: RequestMemoryEstimate {
+                cpu_persistent_bytes: 0,
+                cpu_transient_bytes: 0,
+                cpu_bytes: 0,
+                metal_bytes: 1024,
+                total_bytes: 1024,
+            },
+            full_incremental_metal_bytes: 1024,
+            full_incremental_cpu_bytes: 0,
+            ced: None,
+            runtime_metal_bytes: 2048,
+            runtime_cpu_bytes: 0,
+            binding_cpu_bytes: 0,
+            loader_control_cpu_bytes: 0,
+            loader_controls: Default::default(),
+            descriptor_window_cpu_bytes: 0,
+            retained_summary_cpu_bytes: 0,
+            binding_metal_bytes: 0,
+            caller_cpu_bytes: 0,
+            required_metal_bytes: 1 << 20,
+            required_cpu_bytes: 0,
+            load_metal_bytes: 1 << 19,
+            load_cpu_bytes: 0,
+            runtime_gate_cpu_bytes: 0,
+        }
+    }
+
+    #[test]
+    fn v41_cold_run_and_ordinary_bench_load_selected_profile_plan() {
+        use qwen_llm::deepseek_v41::forward::PrefillExecution::{FullForward, ShrinkingCed};
+        for (value, execution, target) in [
+            (None, FullForward, None),
+            (Some("full_forward"), FullForward, None),
+            (Some("shrinking_ced"), ShrinkingCed, Some(4_294_967_296)),
+        ] {
+            let requested = parse_v41_prefill_execution(value.map(OsStr::new)).unwrap();
+            // Run prompt/required forwards and ordinary bench endpoint/extent.
+            for (tokens, capacity) in [(17, 23), (41, 53)] {
+                let (selected, loaded_storage) = v41_load_cold(
+                    requested,
+                    None,
+                    |chosen_target| {
+                        assert_eq!(chosen_target, target);
+                        let mut plan = cold_fixture(execution, chosen_target);
+                        plan.geometry.tokens = tokens;
+                        plan.capacity = capacity;
+                        Ok(plan)
+                    },
+                    cold_signals,
+                    |storage| Ok(storage.clone()),
+                )
+                .unwrap();
+                assert_eq!(loaded_storage, selected.resident_storage);
+                assert_eq!(loaded_storage.soft_coalescing_target, target);
+                assert_eq!(selected.executions, [execution]);
+                assert_eq!(selected.geometry.tokens, tokens);
+                assert_eq!(selected.capacity, capacity);
+                assert_eq!(selected.geometry.selected_rows, 4096);
+                assert_eq!(selected.full_chunk_rows, 4096);
+            }
+        }
+    }
+
+    #[test]
+    fn v41_cold_selected_full_fallback_retains_p4_and_geometry() {
+        use qwen_llm::deepseek_v41::forward::PrefillExecution::{FullForward, ShrinkingCed};
+        let (selected, loaded_storage) = v41_load_cold(
+            ShrinkingCed,
+            None,
+            |target| {
+                let mut plan = cold_fixture(ShrinkingCed, target);
+                let mut full = plan.clone();
+                full.executions = vec![FullForward];
+                full.geometry.selected_rows = 2048;
+                full.full_chunk_rows = 2048;
+                full.prefill_admission.fallback = Some("fixture cold CED pressure".into());
+                plan.required_metal_bytes = 1 << 50;
+                plan.alternatives.push(full);
+                Ok(plan)
+            },
+            cold_signals,
+            |storage| Ok(storage.clone()),
+        )
+        .unwrap();
+        assert_eq!(loaded_storage, selected.resident_storage);
+        assert_eq!(loaded_storage.soft_coalescing_target, Some(4_294_967_296));
+        assert_eq!(selected.executions, [FullForward]);
+        assert_eq!(selected.geometry.tokens, 17);
+        assert_eq!(selected.capacity, 23);
+        assert_eq!(selected.geometry.selected_rows, 2048);
+        assert_eq!(selected.full_chunk_rows, 2048);
+        assert_eq!(
+            selected.prefill_admission.fallback.as_deref(),
+            Some("fixture cold CED pressure")
+        );
+        assert!(selected.alternatives.is_empty());
+    }
+
+    #[test]
+    fn v41_cold_load_preserves_independent_supplied_pair_mapping() {
+        use qwen_llm::deepseek_v41::forward::PrefillExecution::{FullForward, ShrinkingCed};
+        for execution in [FullForward, ShrinkingCed] {
+            for target in [None, Some(4_294_967_296)] {
+                let mut pair = cold_fixture(FullForward, target);
+                pair.executions.push(ShrinkingCed);
+                let (selected, loaded_storage) = v41_load_cold(
+                    execution,
+                    Some(&pair),
+                    |_| panic!("paired plan must not read ordinary cold policy"),
+                    || panic!("paired plan has its own load admission"),
+                    |storage| Ok(storage.clone()),
+                )
+                .unwrap();
+                assert_eq!(selected.executions, [FullForward, ShrinkingCed]);
+                assert_eq!(loaded_storage, pair.resident_storage);
+                assert_eq!(selected.resident_storage, pair.resident_storage);
+            }
+        }
+    }
+
+    #[test]
+    fn v41_cold_load_stops_on_planning_admission_or_loader_error_without_retry() {
+        use qwen_llm::deepseek_v41::forward::PrefillExecution::ShrinkingCed;
+        use std::cell::Cell;
+        for fault in ["planning", "admission", "loading"] {
+            let loads = Cell::new(0);
+            let result = v41_load_cold(
+                ShrinkingCed,
+                None,
+                |target| {
+                    ensure!(fault != "planning", "fixture planning error");
+                    let mut plan = cold_fixture(ShrinkingCed, target);
+                    if fault == "admission" {
+                        plan.required_metal_bytes = 1 << 50;
+                    }
+                    Ok(plan)
+                },
+                cold_signals,
+                |_| -> Result<()> {
+                    loads.set(loads.get() + 1);
+                    bail!("fixture loading error")
+                },
             );
+            assert!(result.is_err());
+            assert_eq!(loads.get(), usize::from(fault == "loading"));
         }
     }
 

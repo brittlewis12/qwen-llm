@@ -141,27 +141,28 @@ pub(crate) fn with_family_bench_planned<R>(
             let plan = v41_weights::plan(gguf)?;
             validate_v41_extent(extent, plan.engram_hash.max_position)?;
             plan.validate_execution()?;
-            let planned = match cold {
-                Some(cold) => cold.clone(),
-                None => {
-                    qwen_llm::deepseek_v41::forward::plan_cold_prefill(
-                        ctx,
-                        gguf,
-                        extent.prefill_endpoint.min(extent.forwards),
-                        extent.forwards,
-                        &[v41_prefill_execution],
-                        0,
-                    )?
-                    .select_load(ctx.memory_signals())?
-                    .0
-                }
-            };
-            let weights = v41_weights::ResidentWeights::load_with_storage_plan(
-                ctx,
-                gguf.clone(),
-                &planned.resident_storage,
-            )
-            .context("load DeepSeek V4.1 weights")?;
+            let (planned, weights) = crate::family_options::v41_load_cold(
+                v41_prefill_execution,
+                cold,
+                |target| {
+                    Ok(
+                        qwen_llm::deepseek_v41::forward::plan_cold_prefill_with_target(
+                            ctx,
+                            gguf,
+                            extent.prefill_endpoint.min(extent.forwards),
+                            extent.forwards,
+                            &[v41_prefill_execution],
+                            0,
+                            target,
+                        )?,
+                    )
+                },
+                || ctx.memory_signals(),
+                |storage| {
+                    v41_weights::ResidentWeights::load_with_storage_plan(ctx, gguf.clone(), storage)
+                        .context("load DeepSeek V4.1 weights")
+                },
+            )?;
             eprintln!(
                 "[v41-retained-weight-resources] {}",
                 serde_json::to_string(&weights.retained_resources)?

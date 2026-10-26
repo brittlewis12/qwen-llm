@@ -81,10 +81,11 @@ same binary and the in-binary toggle make this the robust warm estimate.
 ## Limits
 
 One artifact and host session; the cross-build +5.99% is exploratory while the
-in-binary reversed +3.54% is the robust warm estimate. No full-model endpoint
-bitwise, causal-state or continuation comparison yet (the toy lifetime witness
-validates the reuse, the `incoming` reset and the tail lifetime, not full-model
-logits). Maya-S and then near-capacity IQ3 generality, the CED-origin guard and
+in-binary reversed +3.54% is the robust warm estimate. The full-model endpoint
+check passes: `qwen run --user` with a fixed prompt, 12 greedy tokens, and the
+`0`/default toggle produced identical 75-byte output. The causal-state and
+continuation comparison is still separate. Maya-S and then near-capacity IQ3
+generality, the CED-origin guard and
 the CED quick 1.9% (not comparable to the 8-10% matched-P4 cohort) are separate
 follow-ups. The 8192 chunk remains a model until the production route counts
 are merged. The campaign lease serialized the GPU; the page cache was shared

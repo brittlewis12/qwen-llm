@@ -102,6 +102,23 @@ def resolve_model(row: dict) -> tuple[Path, int]:
     return path, path.stat().st_size
 
 
+def campaign_lease_fds() -> tuple[int, ...]:
+    """The with-metal-lease campaign descriptor, which subprocess would close.
+
+    Under `with-metal-lease -- family.py ...` the whole sweep is one campaign;
+    passing the descriptor lets qwen-bench arms and nested llama-bench wrappers
+    run inside it instead of queueing behind it.
+    """
+    value = os.environ.get("QWEN_METAL_LEASE_FD", "")
+    if not value.isdigit():
+        return ()
+    try:
+        os.fstat(int(value))
+    except OSError:
+        return ()  # the child refuses with the reason
+    return (int(value),)
+
+
 def run_json_value(
     cmd: list[str | Path], *, stderr_filter: re.Pattern | None = None
 ) -> object:
@@ -112,6 +129,7 @@ def run_json_value(
         [str(c) for c in cmd],
         check=False,
         capture_output=True,
+        pass_fds=campaign_lease_fds(),
         text=True,
     )
     if proc.returncode != 0:

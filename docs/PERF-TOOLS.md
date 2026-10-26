@@ -920,12 +920,42 @@ Timed GPU work is globally exclusive across the repository, including parallel
 agents. Every qwen-llm process that initializes Metal takes an exclusive `flock`
 on `/tmp/qwen-llm-$UID/metal.lock` and records `pid=... executable=...
 opencode_session=...` in it (`crates/qwen-llm/src/metal/context.rs`). A busy
-lease fails immediately; `QWEN_METAL_LEASE_WAIT=1` queues instead.
+lease fails immediately; `QWEN_METAL_LEASE_WAIT=1` queues instead. Waiters
+see the holder's record and how long it has held the lease.
+
+**Campaigns.** A per-process lease is released between processes, so another
+lane's run can land between the arms of an ABBA. Wrap the whole campaign
+instead of each arm:
+
+```sh
+QWEN_METAL_LEASE_WAIT=1 scripts/bench/with-metal-lease \
+  --task V41-XXXX --for 40m --session "$OPENCODE_CALLER_SESSION_ID" -- ./run-abba.sh
+```
+
+The wrapper holds the lease until the script and every descendant that keeps
+the descriptor exit, and exports its number as `QWEN_METAL_LEASE_FD`. qwen
+processes adopt that descriptor (validated against the canonical lock inode,
+re-locked in the same mode, marked close-on-exec, never unlocked) instead of
+opening the lock again, so other lanes wait for the whole sequence. Rules:
+
+- Arms must be built with adoption support; an older binary blocks on its own
+  campaign. Rebuild a historical control on top of this change if needed.
+- Python drivers must pass the descriptor on, since `subprocess` closes
+  inherited descriptors: `pass_fds=(int(os.environ["QWEN_METAL_LEASE_FD"]),)`.
+  `family.py` does. A dropped descriptor makes qwen refuse, not wait.
+- Close it for long-lived helpers the campaign starts
+  (`sh -c "exec $QWEN_METAL_LEASE_FD>&-; exec daemon"`); a daemon that keeps it
+  holds the lease until it exits. `lsof /tmp/qwen-llm-$UID/metal.lock` lists
+  every process with the lock open, holders and waiters alike.
+- Arms run concurrently inside one campaign are not serialized by the lease.
+  Test threads in one process still take turns.
+- ssh does not forward `OPENCODE_CALLER_SESSION_ID`; pass `--session`.
 
 Other engines, such as llama.cpp, do not take this lease. Run them through
 `scripts/bench/with-metal-lease [--] COMMAND ...`, which takes the same lease
 with the same checks and execs COMMAND while holding it; `family.py` does this
-for `llama-bench`. For example:
+for `llama-bench`. Inside a campaign a nested wrapper joins the campaign
+instead of queueing behind it. For example:
 `QWEN_METAL_LEASE_WAIT=1 scripts/bench/with-metal-lease llama-server -m MODEL ...`.
 
 The lease serializes the GPU, not the machine: a build or other CPU-heavy work

@@ -1,8 +1,15 @@
 //! MetalContext: device, queue, pipeline cache, memory admission, process lease.
 
 use super::*;
+use std::os::fd::{FromRawFd, RawFd};
 
 pub(crate) const METAL_PROCESS_LEASE_WAIT_ENV: &str = "QWEN_METAL_LEASE_WAIT";
+
+/// Descriptor number of a campaign lease inherited from
+/// `scripts/bench/with-metal-lease`; see `adopt_inherited_metal_process_lease`.
+/// The descriptor holds `LOCK_EX`. A future shared-mode launcher needs its own
+/// variable: adoption re-requests `LOCK_EX`, which would convert a shared lock.
+pub(crate) const METAL_PROCESS_LEASE_FD_ENV: &str = "QWEN_METAL_LEASE_FD";
 
 pub(crate) const METAL_PROCESS_LEASE_SKIP_WIRED_GATE_ENV: &str = "QWEN_METAL_LEASE_SKIP_WIRED_GATE";
 
@@ -17,6 +24,43 @@ pub(crate) struct MetalProcessLease {
     pub(crate) _file: File,
     pub(crate) _path: PathBuf,
     pub(crate) owner_pid: u32,
+    /// Present only for a lease adopted from a campaign descriptor.
+    pub(crate) _turn: Option<AdoptedLeaseTurn>,
+}
+
+/// One adopted lease per campaign lock inside a process.
+///
+/// Leases this process opens itself are separate open file descriptions, so
+/// `flock` serializes them even between threads (concurrent GPU tests, for
+/// instance). Adopted leases all duplicate the campaign's one description,
+/// which `flock` cannot tell apart; this turn keeps the one-holder rule.
+pub(crate) struct AdoptedLeaseTurn {
+    lock: (u64, u64),
+}
+
+static ADOPTED_LEASE_TURNS: Mutex<Vec<(u64, u64)>> = Mutex::new(Vec::new());
+
+static ADOPTED_LEASE_TURN_FREED: parking_lot::Condvar = parking_lot::Condvar::new();
+
+impl AdoptedLeaseTurn {
+    fn take(lock: (u64, u64), wait: bool) -> Option<Self> {
+        let mut held = ADOPTED_LEASE_TURNS.lock();
+        while held.contains(&lock) {
+            if !wait {
+                return None;
+            }
+            ADOPTED_LEASE_TURN_FREED.wait(&mut held);
+        }
+        held.push(lock);
+        Some(Self { lock })
+    }
+}
+
+impl Drop for AdoptedLeaseTurn {
+    fn drop(&mut self) {
+        ADOPTED_LEASE_TURNS.lock().retain(|lock| *lock != self.lock);
+        ADOPTED_LEASE_TURN_FREED.notify_all();
+    }
 }
 
 pub(crate) static METAL_PROCESS_LEASE: OnceLock<Arc<MetalProcessLease>> = OnceLock::new();
@@ -142,14 +186,32 @@ pub(crate) fn metal_process_lease_owner() -> String {
 }
 
 pub(crate) fn read_metal_process_lease_owner(file: &mut File) -> String {
+    // Every acquisition rewrites the record and adopted campaign arms never
+    // do, so its mtime is when the current holder (or campaign) took the lease.
+    let held = file
+        .metadata()
+        .and_then(|metadata| metadata.modified())
+        .ok()
+        .and_then(|written| written.elapsed().ok())
+        .map(|held| format!("; held {}", format_lease_hold(held)))
+        .unwrap_or_default();
     if file.seek(SeekFrom::Start(0)).is_err() {
-        return "owner metadata unavailable".to_string();
+        return format!("owner metadata unavailable{held}");
     }
     let mut owner = String::new();
     if file.take(4096).read_to_string(&mut owner).is_err() || owner.trim().is_empty() {
-        "owner metadata unavailable".to_string()
+        format!("owner metadata unavailable{held}")
     } else {
-        lease_owner_display(owner.trim())
+        format!("{}{held}", lease_owner_display(owner.trim()))
+    }
+}
+
+pub(crate) fn format_lease_hold(held: std::time::Duration) -> String {
+    let seconds = held.as_secs();
+    match seconds {
+        0..60 => format!("{seconds}s"),
+        60..3_600 => format!("{}m{:02}s", seconds / 60, seconds % 60),
+        _ => format!("{}h{:02}m", seconds / 3_600, seconds % 3_600 / 60),
     }
 }
 
@@ -206,7 +268,7 @@ pub(crate) fn open_metal_process_lease(
             let owner = read_metal_process_lease_owner(&mut file);
             if !wait {
                 return Err(MetalError::ProcessLease(format!(
-                    "another qwen process owns {} ({owner}); queue the work or set {METAL_PROCESS_LEASE_WAIT_ENV}=1 to wait",
+                    "another qwen process owns {} ({owner}); queue the work or set {METAL_PROCESS_LEASE_WAIT_ENV}=1 to wait; run multi-process campaigns under scripts/bench/with-metal-lease so other lanes cannot take the lease between arms",
                     path.display(),
                 )));
             }
@@ -255,7 +317,128 @@ pub(crate) fn open_metal_process_lease(
         _file: file,
         _path: path.to_owned(),
         owner_pid: std::process::id(),
+        _turn: None,
     })
+}
+
+/// Parse `QWEN_METAL_LEASE_FD`; unset or empty means no campaign lease.
+pub(crate) fn parse_inherited_metal_process_lease_fd(
+    value: Option<&str>,
+) -> Result<Option<RawFd>, MetalError> {
+    let Some(value) = value.map(str::trim).filter(|value| !value.is_empty()) else {
+        return Ok(None);
+    };
+    match value.parse::<RawFd>() {
+        Ok(fd) if fd >= 0 => Ok(Some(fd)),
+        _ => Err(MetalError::ProcessLease(format!(
+            "{METAL_PROCESS_LEASE_FD_ENV}={} is not a descriptor number",
+            lease_owner_display(value)
+        ))),
+    }
+}
+
+fn inherited_metal_process_lease_fd() -> Result<Option<RawFd>, MetalError> {
+    match std::env::var(METAL_PROCESS_LEASE_FD_ENV) {
+        Ok(value) => parse_inherited_metal_process_lease_fd(Some(&value)),
+        Err(std::env::VarError::NotPresent) => Ok(None),
+        Err(std::env::VarError::NotUnicode(_)) => Err(MetalError::ProcessLease(format!(
+            "{METAL_PROCESS_LEASE_FD_ENV} is not a descriptor number"
+        ))),
+    }
+}
+
+/// Adopt the campaign lease that `scripts/bench/with-metal-lease` passes down.
+///
+/// The wrapper holds `LOCK_EX` on the canonical lease for a whole campaign and
+/// exports the descriptor number. That open file description is the
+/// capability: opening the path again would create a second description that
+/// conflicts with the campaign's own lock, so this never opens the path. It
+/// duplicates the inherited descriptor close-on-exec, checks that the
+/// duplicate is the canonical lease inode (a sanity check, not the authority),
+/// and requests the mode the campaign holds. qwen only uses `LOCK_EX`; on the
+/// holding description the same-mode request is a no-op, which proves
+/// possession, while a different mode would convert the campaign's lock, so
+/// none is ever requested. A descriptor that does not hold the lease refuses
+/// rather than waits: inside a campaign that is a wiring error.
+///
+/// The inherited number is marked close-on-exec so this process's children
+/// do not hold the campaign; the campaign script keeps its own copy for the
+/// next arm. Nothing calls `LOCK_UN`, which through any inherited descriptor
+/// would release the campaign for everyone; drop only closes the duplicate.
+/// The record is left as the campaign wrote it, so waiters see the campaign.
+pub(crate) fn adopt_inherited_metal_process_lease(
+    fd: RawFd,
+    path: &Path,
+    wait: bool,
+) -> Result<MetalProcessLease, MetalError> {
+    let refuse = |detail: String| {
+        MetalError::ProcessLease(format!("{METAL_PROCESS_LEASE_FD_ENV}={fd}: {detail}"))
+    };
+    // SAFETY: F_GETFD only reads descriptor flags; a closed number is EBADF.
+    let flags = unsafe { libc::fcntl(fd, libc::F_GETFD) };
+    if flags < 0 {
+        return Err(refuse(format!(
+            "not an open descriptor here ({}); only processes the campaign wrapper starts inherit its lease, and a launcher closed it (Python subprocess needs pass_fds)",
+            std::io::Error::last_os_error()
+        )));
+    }
+    // SAFETY: fd is open; F_SETFD changes only this process's descriptor flags.
+    if unsafe { libc::fcntl(fd, libc::F_SETFD, flags | libc::FD_CLOEXEC) } < 0 {
+        return Err(refuse(format!(
+            "mark close-on-exec: {}",
+            std::io::Error::last_os_error()
+        )));
+    }
+    // SAFETY: fd is open; the duplicate is a new descriptor only `file` owns.
+    let duplicate = unsafe { libc::fcntl(fd, libc::F_DUPFD_CLOEXEC, 0) };
+    if duplicate < 0 {
+        return Err(refuse(format!(
+            "duplicate: {}",
+            std::io::Error::last_os_error()
+        )));
+    }
+    // SAFETY: `duplicate` is open and owned by nothing else.
+    let mut file = unsafe { File::from_raw_fd(duplicate) };
+    validate_metal_process_lease_file(&file, path).map_err(|error| match error {
+        MetalError::ProcessLease(detail) => refuse(detail),
+        other => other,
+    })?;
+    match flock_file(&file, libc::LOCK_EX | libc::LOCK_NB) {
+        Ok(()) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+            let owner = read_metal_process_lease_owner(&mut file);
+            return Err(refuse(format!(
+                "descriptor does not hold the lease on {} ({owner})",
+                path.display()
+            )));
+        }
+        Err(error) => return Err(refuse(format!("lock {}: {error}", path.display()))),
+    }
+    let metadata = file
+        .metadata()
+        .map_err(|error| refuse(format!("inspect {}: {error}", path.display())))?;
+    let turn = AdoptedLeaseTurn::take((metadata.dev(), metadata.ino()), wait).ok_or_else(|| {
+        refuse(format!(
+            "another lease in this process already uses the campaign descriptor; set {METAL_PROCESS_LEASE_WAIT_ENV}=1 to wait"
+        ))
+    })?;
+    Ok(MetalProcessLease {
+        _file: file,
+        _path: path.to_owned(),
+        owner_pid: std::process::id(),
+        _turn: Some(turn),
+    })
+}
+
+fn acquire_canonical_or_inherited_lease(
+    path: &Path,
+    inherited: Option<RawFd>,
+    wait: bool,
+) -> Result<MetalProcessLease, MetalError> {
+    match inherited {
+        Some(fd) => adopt_inherited_metal_process_lease(fd, path, wait),
+        None => open_metal_process_lease(path, wait),
+    }
 }
 
 pub(crate) fn host_wired_memory_is_unsafe(wired_bytes: u64, physical_bytes: u64) -> bool {
@@ -302,7 +485,8 @@ fn check_host_wired_memory() -> Result<(), MetalError> {
 /// Unit-test contexts have isolated locks. Model/performance tests must also
 /// retain this production lease until their contexts and GPU resources drop.
 /// Like production, it waits for a busy lease only when
-/// `QWEN_METAL_LEASE_WAIT=1`; otherwise it refuses at once.
+/// `QWEN_METAL_LEASE_WAIT=1`; otherwise it refuses at once. Under a campaign
+/// (`QWEN_METAL_LEASE_FD`) it adopts the campaign's lease, one test at a time.
 #[cfg(test)]
 pub(crate) fn acquire_metal_benchmark_lease() -> Result<MetalProcessLease, MetalError> {
     let uid = unsafe { libc::geteuid() };
@@ -311,7 +495,8 @@ pub(crate) fn acquire_metal_benchmark_lease() -> Result<MetalProcessLease, Metal
         uid,
     )?;
     let wait = crate::env_flag::read_default_off(METAL_PROCESS_LEASE_WAIT_ENV);
-    let lease = open_metal_process_lease(&path, wait)?;
+    let lease =
+        acquire_canonical_or_inherited_lease(&path, inherited_metal_process_lease_fd()?, wait)?;
     check_host_wired_memory()?;
     Ok(lease)
 }
@@ -336,8 +521,17 @@ pub(crate) fn acquire_metal_process_lease() -> Result<Arc<MetalProcessLease>, Me
         return Ok(lease.clone());
     }
     let wait = crate::env_flag::read_default_off(METAL_PROCESS_LEASE_WAIT_ENV);
-    let lease = Arc::new(open_metal_process_lease(
+    // Unit-test builds give production contexts an isolated per-process lock
+    // (`metal_process_lease_path`); only the canonical lease can belong to a
+    // campaign, so they leave the inherited descriptor to the benchmark lease.
+    let inherited = if cfg!(test) {
+        None
+    } else {
+        inherited_metal_process_lease_fd()?
+    };
+    let lease = Arc::new(acquire_canonical_or_inherited_lease(
         &metal_process_lease_path()?,
+        inherited,
         wait,
     )?);
     ensure_host_wired_memory_is_safe()?;
@@ -1875,6 +2069,180 @@ mod tests {
         assert_eq!(cleaned, "pid=1_forged=owner___31m");
         assert!(!cleaned.contains('\n'));
         assert!(!cleaned.contains('\t'));
+    }
+
+    fn descriptor_flags(fd: RawFd) -> libc::c_int {
+        // SAFETY: F_GETFD only reads descriptor flags.
+        unsafe { libc::fcntl(fd, libc::F_GETFD) }
+    }
+
+    /// Model the wrapper: a held lease whose descriptor children inherit.
+    fn campaign_lease(path: &Path) -> (MetalProcessLease, RawFd) {
+        let campaign = open_metal_process_lease(path, false).expect("campaign lease");
+        let fd = campaign._file.as_raw_fd();
+        // SAFETY: fd is open; clearing FD_CLOEXEC mirrors os.set_inheritable.
+        assert_eq!(unsafe { libc::fcntl(fd, libc::F_SETFD, 0) }, 0);
+        (campaign, fd)
+    }
+
+    fn lease_detail(error: MetalError) -> String {
+        let MetalError::ProcessLease(detail) = error else {
+            panic!("unexpected lease error: {error}");
+        };
+        detail
+    }
+
+    #[test]
+    fn inherited_lease_reuses_the_campaign_description_across_arms() {
+        let fixture = LeaseFixture::new();
+        let (campaign, fd) = campaign_lease(&fixture.0);
+        let record = std::fs::read_to_string(&fixture.0).expect("campaign record");
+
+        let arm = adopt_inherited_metal_process_lease(fd, &fixture.0, false).expect("adopt arm A");
+        let duplicate = arm._file.as_raw_fd();
+        assert_ne!(
+            duplicate, fd,
+            "an arm owns a duplicate, not the campaign's number"
+        );
+        assert_ne!(
+            descriptor_flags(fd) & libc::FD_CLOEXEC,
+            0,
+            "arm children must not inherit"
+        );
+        assert_ne!(descriptor_flags(duplicate) & libc::FD_CLOEXEC, 0);
+        let outsider = open_metal_process_lease(&fixture.0, false)
+            .err()
+            .expect("outsider");
+        assert!(lease_detail(outsider).contains("another qwen process owns"));
+
+        // Between arms the campaign still holds the lease; an arm's drop only
+        // closes its duplicate and never unlocks.
+        drop(arm);
+        assert!(open_metal_process_lease(&fixture.0, false).is_err());
+        let arm = adopt_inherited_metal_process_lease(fd, &fixture.0, false).expect("adopt arm B");
+        drop(arm);
+        assert_eq!(
+            std::fs::read_to_string(&fixture.0).expect("record"),
+            record,
+            "arms leave the campaign's record for waiters"
+        );
+
+        drop(campaign);
+        drop(open_metal_process_lease(&fixture.0, false).expect("free after the campaign"));
+    }
+
+    #[test]
+    fn inherited_lease_refuses_a_descriptor_that_does_not_hold_it() {
+        let fixture = LeaseFixture::new();
+        let (_campaign, _) = campaign_lease(&fixture.0);
+        let stranger = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(&fixture.0)
+            .expect("unlocked description of the same lease");
+        let detail = lease_detail(
+            adopt_inherited_metal_process_lease(stranger.as_raw_fd(), &fixture.0, true)
+                .err()
+                .expect("a description without the lock must refuse, even when waiting"),
+        );
+        assert!(detail.contains("does not hold the lease"), "{detail}");
+        assert!(
+            detail.contains(&format!("pid={}", std::process::id())),
+            "{detail}"
+        );
+    }
+
+    #[test]
+    fn inherited_lease_refuses_another_inode_and_unopened_numbers() {
+        let canonical = LeaseFixture::new();
+        drop(open_metal_process_lease(&canonical.0, false).expect("create canonical lease"));
+        let elsewhere = LeaseFixture::new();
+        let (_other, fd) = campaign_lease(&elsewhere.0);
+        let detail = lease_detail(
+            adopt_inherited_metal_process_lease(fd, &canonical.0, false)
+                .err()
+                .expect("a lease on another inode is not this campaign"),
+        );
+        assert!(
+            detail.contains("not one user-owned regular inode"),
+            "{detail}"
+        );
+
+        let detail = lease_detail(
+            adopt_inherited_metal_process_lease(RawFd::MAX, &canonical.0, false)
+                .err()
+                .expect("an unopened number must refuse"),
+        );
+        assert!(detail.contains("not an open descriptor"), "{detail}");
+    }
+
+    #[test]
+    fn adopted_leases_take_turns_within_one_process() {
+        let fixture = LeaseFixture::new();
+        let (_campaign, fd) = campaign_lease(&fixture.0);
+        let first = adopt_inherited_metal_process_lease(fd, &fixture.0, false).expect("first");
+        let detail = lease_detail(
+            adopt_inherited_metal_process_lease(fd, &fixture.0, false)
+                .err()
+                .expect("a second concurrent adopter must not share the turn"),
+        );
+        assert!(
+            detail.contains("already uses the campaign descriptor"),
+            "{detail}"
+        );
+
+        let (sender, receiver) = std::sync::mpsc::channel();
+        let path = fixture.0.clone();
+        let waiter = std::thread::spawn(move || {
+            let lease = adopt_inherited_metal_process_lease(fd, &path, true).expect("waiter");
+            sender.send(()).expect("report");
+            drop(lease);
+        });
+        assert!(
+            receiver
+                .recv_timeout(std::time::Duration::from_millis(100))
+                .is_err(),
+            "the waiter must not run while the first adopter holds the turn"
+        );
+        drop(first);
+        receiver
+            .recv_timeout(std::time::Duration::from_secs(10))
+            .expect("the waiter runs once the turn is free");
+        waiter.join().expect("waiter thread");
+    }
+
+    #[test]
+    fn inherited_lease_descriptor_parsing_is_strict() {
+        assert_eq!(parse_inherited_metal_process_lease_fd(None).unwrap(), None);
+        assert_eq!(
+            parse_inherited_metal_process_lease_fd(Some(" ")).unwrap(),
+            None
+        );
+        assert_eq!(
+            parse_inherited_metal_process_lease_fd(Some("3")).unwrap(),
+            Some(3)
+        );
+        for bad in ["-1", "three", "3.0", "3\n4"] {
+            let detail = lease_detail(
+                parse_inherited_metal_process_lease_fd(Some(bad))
+                    .expect_err("malformed descriptor"),
+            );
+            assert!(!detail.contains('\n'), "{detail}");
+        }
+    }
+
+    #[test]
+    fn lease_hold_durations_read_at_a_glance() {
+        use std::time::Duration;
+        assert_eq!(format_lease_hold(Duration::from_secs(42)), "42s");
+        assert_eq!(
+            format_lease_hold(Duration::from_secs(12 * 60 + 5)),
+            "12m05s"
+        );
+        assert_eq!(
+            format_lease_hold(Duration::from_secs(2 * 3_600 + 3 * 60 + 59)),
+            "2h03m"
+        );
     }
 
     #[test]

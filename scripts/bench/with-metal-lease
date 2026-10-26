@@ -3,20 +3,58 @@
 # requires-python = ">=3.11"
 # dependencies = []
 # ///
-"""Run a command while holding qwen-llm's Metal process lease.
+"""Run a command, or a whole campaign, while holding qwen-llm's Metal lease.
 
-Usage: with-metal-lease [--lease-dir DIR] [--] COMMAND [ARGS...]
+Usage: with-metal-lease [--task ID] [--for DURATION] [--session ID]
+                        [--lease-dir DIR] [--] COMMAND [ARGS...]
 
-qwen-llm serializes timed GPU work with an exclusive flock on
-/tmp/qwen-llm-$UID/metal.lock (crates/qwen-llm/src/metal/context.rs). Other
-engines such as llama.cpp do not take it, so their runs and qwen runs can
-overlap. This wrapper takes the same lease with the same checks, writes the
-same owner record, then execs COMMAND with the locked descriptor inherited:
-COMMAND keeps its PID and holds the lease until it exits.
+qwen-llm serializes GPU work with an exclusive flock on
+/tmp/qwen-llm-$UID/metal.lock (crates/qwen-llm/src/metal/context.rs). This
+wrapper takes the same lease with the same checks, writes the owner record,
+then execs COMMAND with the locked descriptor inherited and its number in
+QWEN_METAL_LEASE_FD. COMMAND keeps its PID and the lease is held until COMMAND
+and every descendant that still has the descriptor have exited.
+
+Campaigns: wrap the whole script, not each arm.
+
+    QWEN_METAL_LEASE_WAIT=1 with-metal-lease --task V41-XXXX --for 40m -- ./run-abba.sh
+
+Every qwen process the script starts adopts the inherited descriptor instead
+of opening the lock again, so other lanes wait for the whole sequence rather
+than landing between arms. Adoption needs a qwen build that includes it
+(QWEN_METAL_LEASE_FD support); an older binary under the wrapper blocks on its
+own campaign. Arms that run concurrently inside one campaign are not
+serialized by the lease; that ordering is the script's job. Engines such as
+llama.cpp do not take the lease at all; under the wrapper they simply run
+inside the campaign, and a wrapper nested inside a campaign joins it instead
+of queueing behind it.
+
+Python's subprocess closes inherited descriptors by default, so a Python
+driver that launches arms must pass the descriptor on:
+
+    fd = os.environ.get("QWEN_METAL_LEASE_FD", "")
+    subprocess.run(cmd, pass_fds=(int(fd),) if fd.isdigit() else ())
+
+Without it, qwen arms refuse with "not an open descriptor here".
+
+Keep the lease out of long-lived helpers the campaign starts (compile-cache
+servers, daemons) by closing the descriptor for them, for example:
+
+    sh -c "exec $QWEN_METAL_LEASE_FD>&-; exec some-daemon"
+
+A daemon that keeps it holds the lease until it exits; `lsof <lock path>`
+lists every process with the lock open, holders and waiters alike.
+
+Record: pid, executable, opencode_session, started (UTC), and when given,
+task and expected (from --for). The session comes from --session or
+OPENCODE_CALLER_SESSION_ID; ssh does not forward that variable, so pass
+--session explicitly on remote hosts. Waiters see the record and how long the
+lease has been held.
 
 A busy lease fails immediately (exit 75) unless QWEN_METAL_LEASE_WAIT is
-1/true/yes, matching qwen. --lease-dir replaces the lease directory, for
-tests only.
+1/true/yes, matching qwen. --lease-dir replaces the lease directory for the
+wrapper's own tests only: qwen adopts a descriptor only when it is the
+canonical lease, so qwen arms refuse under a substitute directory.
 
 Under `uv run`, the PID a caller sees is uv's; uv forwards SIGINT and SIGTERM
 to COMMAND and returns its exit status. The lease file records COMMAND's PID.
@@ -26,9 +64,13 @@ import fcntl
 import os
 import stat
 import sys
+import time
+from datetime import datetime, timezone
 
 EX_TEMPFAIL = 75
 WAIT_ENV = "QWEN_METAL_LEASE_WAIT"
+FD_ENV = "QWEN_METAL_LEASE_FD"
+OPTIONS = ("--lease-dir", "--task", "--for", "--session")
 
 
 def die(message: str, code: int = 1) -> None:
@@ -50,6 +92,16 @@ def owner_display(value: str) -> str:
     return "".join(
         c if (c.isascii() and c.isalnum()) or c in keep else "_" for c in value
     )[:512]
+
+
+def hold(seconds: float) -> str:
+    # Same format as format_lease_hold.
+    seconds = int(max(seconds, 0))
+    if seconds < 60:
+        return f"{seconds}s"
+    if seconds < 3600:
+        return f"{seconds // 60}m{seconds % 60:02d}s"
+    return f"{seconds // 3600}h{seconds % 3600 // 60:02d}m"
 
 
 def secure_directory(directory: str, uid: int) -> None:
@@ -82,29 +134,86 @@ def validate_lease(fd: int, path: str, uid: int) -> None:
 
 def read_owner(fd: int) -> str:
     try:
+        held = f"; held {hold(time.time() - os.fstat(fd).st_mtime)}"
+    except OSError:
+        held = ""
+    try:
         os.lseek(fd, 0, os.SEEK_SET)
         text = os.read(fd, 4096).decode("utf-8", "replace").strip()
     except OSError:
         text = ""
-    return owner_display(text) if text else "owner metadata unavailable"
+    return (owner_display(text) if text else "owner metadata unavailable") + held
 
 
-def main(argv: list[str]) -> None:
-    uid = os.geteuid()
-    directory = f"/tmp/qwen-llm-{uid}"
+def parse(argv: list[str]) -> tuple[dict[str, str], list[str]]:
+    options: dict[str, str] = {}
     args = argv[1:]
-    if args[:1] == ["--lease-dir"]:
+    while args[:1] and args[0] in OPTIONS:
         if len(args) < 2:
-            die("--lease-dir needs a directory", 2)
-        directory, args = args[1], args[2:]
+            die(f"{args[0]} needs a value", 2)
+        options[args[0]], args = args[1], args[2:]
     if args[:1] == ["--"]:
         args = args[1:]
     if not args or args[0] in ("-h", "--help"):
         print(__doc__.strip(), file=sys.stderr)
         sys.exit(0 if args else 2)
+    return options, args
+
+
+def record(command: str, options: dict[str, str]) -> str:
+    session = options.get("--session") or os.environ.get("OPENCODE_CALLER_SESSION_ID")
+    started = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    fields = [
+        f"pid={os.getpid()}",
+        f"executable={owner_field(os.path.basename(command))}",
+        f"opencode_session={owner_field(session) if session else 'none'}",
+        f"started={started}",
+    ]
+    if "--task" in options:
+        fields.append(f"task={owner_field(options['--task'])}")
+    if "--for" in options:
+        fields.append(f"expected={owner_field(options['--for'])}")
+    return " ".join(fields) + "\n"
+
+
+def join_campaign(value: str, path: str, uid: int) -> int:
+    """Validate an inherited campaign descriptor, as qwen's adoption does."""
+    if not value.isdigit():
+        die(f"{FD_ENV}={owner_display(value)} is not a descriptor number")
+    fd = int(value)
+    try:
+        os.fstat(fd)
+    except OSError as error:
+        die(
+            f"{FD_ENV}={fd} is not open here ({error.strerror}); a launcher closed the "
+            "campaign descriptor (Python subprocess needs pass_fds)"
+        )
+    validate_lease(fd, path, uid)
+    try:
+        # Same mode as the campaign holds: a no-op on the holding description.
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError:
+        die(f"{FD_ENV}={fd} does not hold the lease on {path} ({read_owner(fd)})")
+    return fd
+
+
+def main(argv: list[str]) -> None:
+    uid = os.geteuid()
+    options, args = parse(argv)
+    directory = options.get("--lease-dir", f"/tmp/qwen-llm-{uid}")
 
     secure_directory(directory, uid)
     path = os.path.join(directory, "metal.lock")
+    inherited = os.environ.get(FD_ENV, "").strip()
+    if inherited:
+        # Nested inside a campaign (a driver wrapping each llama-bench run, say):
+        # run inside it rather than queue behind it, and keep its record.
+        fd = join_campaign(inherited, path, uid)
+        os.set_inheritable(fd, True)
+        try:
+            os.execvp(args[0], args)
+        except OSError as error:
+            die(f"exec {args[0]}: {error}", 127)
     fd = os.open(path, os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW | os.O_CLOEXEC, 0o600)
     os.fchmod(fd, 0o600)
     validate_lease(fd, path, uid)
@@ -122,16 +231,11 @@ def main(argv: list[str]) -> None:
     validate_lease(fd, path, uid)
     os.ftruncate(fd, 0)
     os.lseek(fd, 0, os.SEEK_SET)
-    session = (
-        owner_field(os.environ["OPENCODE_CALLER_SESSION_ID"])
-        if "OPENCODE_CALLER_SESSION_ID" in os.environ
-        else "none"
-    )
-    os.write(
-        fd,
-        f"pid={os.getpid()} executable={owner_field(os.path.basename(args[0]))} opencode_session={session}\n".encode(),
-    )
+    os.write(fd, record(args[0], options).encode())
+    # Never LOCK_UN: an unlock through any inherited copy releases the campaign
+    # for everyone. The lease ends when the last holder of this description exits.
     os.set_inheritable(fd, True)
+    os.environ[FD_ENV] = str(fd)
     try:
         os.execvp(args[0], args)
     except OSError as error:

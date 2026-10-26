@@ -1053,16 +1053,18 @@ pub(super) fn run_captured(
                 Some(scratch) => scratch,
                 None => {
                     if scratch.as_ref().is_none_or(|s| s.rows != chunk.len()) {
+                        // Drop the max-row set before allocating the tail set so
+                        // the peak stays one scratch.
+                        scratch = None;
                         let span =
                             profile::Wall("prefill_scratch_prepare", [0; 4], profile::start());
-                        scratch = Some(
-                            state
-                                .gpu_step
-                                .as_ref()
-                                .unwrap()
-                                .new_chunk_scratch(model, chunk.len())?,
-                        );
+                        let tail = state
+                            .gpu_step
+                            .as_ref()
+                            .unwrap()
+                            .new_chunk_scratch(model, chunk.len())?;
                         drop(span);
+                        scratch = Some(tail);
                     }
                     scratch.as_ref().unwrap()
                 }

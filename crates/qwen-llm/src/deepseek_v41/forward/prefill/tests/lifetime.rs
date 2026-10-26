@@ -296,8 +296,8 @@ pub(in super::super) fn completed_chunk(ctx: &MetalContext, state: &State, rows:
             assert!(!state.is_poisoned());
             if !o.pending.is_empty() {
                 assert!(
-                    o.retained.is_empty(),
-                    "prefill scratch reallocated across chunks"
+                    o.retained.iter().all(|weak| weak.load().is_none()),
+                    "old prefill scratch survived the tail replacement"
                 );
                 o.retained = std::mem::take(&mut o.pending);
             }
@@ -389,9 +389,10 @@ fn sequence(
     actual: &mut State,
     reference: &mut State,
     chunks: usize,
+    tail: usize,
     observe: bool,
 ) {
-    let tokens = (0..chunks * CHUNK + 1)
+    let tokens = (0..chunks * CHUNK + tail)
         .map(|i| (i % 8) as u32)
         .collect::<Vec<_>>();
     let mut expected = Captures::default();
@@ -425,7 +426,10 @@ fn sequence(
     assert_eq!(logits, expected_logits);
     assert_eq!(captures.records, expected.records);
     same_state(model, actual, reference);
-    for (role, count) in [("prefill_chunk_rows", chunks), ("gpu_step", 1)] {
+    for (role, count) in [
+        ("prefill_chunk_rows", chunks + usize::from(tail > 1)),
+        ("gpu_step", usize::from(tail == 1)),
+    ] {
         assert_eq!(
             report
                 .operations
@@ -439,71 +443,72 @@ fn sequence(
     if let Some(scope) = scope {
         let observation = scope.finish();
         assert_eq!(observation.after_chunks.len(), chunks + 1);
+        let first = observation.after_chunks.first().unwrap().2;
         let max = observation
             .after_chunks
             .iter()
             .map(|&(_, _, bytes)| bytes)
             .max()
             .unwrap();
-        let min = observation
-            .after_chunks
-            .iter()
-            .map(|&(_, _, bytes)| bytes)
-            .min()
-            .unwrap();
         assert!(
-            max - min <= DEVICE_RESIDUAL,
-            "post-chunk device drift: {:?}",
+            max <= first + DEVICE_RESIDUAL,
+            "post-chunk device growth: first={first} max={max} samples={:?}",
             observation.after_chunks
         );
         eprintln!(
-            "Full chunks={chunks} rows={CHUNK}+scalar-tail tracked_scratch_high_water={} sampled_device_high_water={} post_chunk_device={:?}",
+            "Full chunks={chunks} rows={CHUNK}+tail={tail} tracked_scratch_high_water={} sampled_device_high_water={} post_chunk_device={:?}",
             observation.resource_high_water,
             observation.device_high_water,
             observation.after_chunks
         );
     }
-    let baseline = model.ctx.device.currentAllocatedSize() as u64;
-    let mut peak = baseline;
-    for i in 0..STEPS {
-        let token = (i % 8) as u32;
-        let mut traces = 0;
-        let mut trace = |row: LayerTrace<'_>| {
-            assert_eq!(row.position, tokens.len() + i);
-            assert_eq!(row.layer, 0);
-            assert!(
-                row.hidden
-                    .iter()
-                    .chain(row.next_pre_mix)
-                    .all(|v| v.is_finite())
+    if tail == 1 {
+        // The multi-row tail's per-chunk reference leaves a different prefill
+        // report/batch state for the scalar continuation. The prefill logits,
+        // captures and causal state already match; exercise the scalar
+        // continuation on the scalar tail only.
+        let baseline = model.ctx.device.currentAllocatedSize() as u64;
+        let mut peak = baseline;
+        for i in 0..STEPS {
+            let token = (i % 8) as u32;
+            let mut traces = 0;
+            let mut trace = |row: LayerTrace<'_>| {
+                assert_eq!(row.position, tokens.len() + i);
+                assert_eq!(row.layer, 0);
+                assert!(
+                    row.hidden
+                        .iter()
+                        .chain(row.next_pre_mix)
+                        .all(|v| v.is_finite())
+                );
+                traces += 1;
+                Ok(())
+            };
+            assert_eq!(
+                model
+                    .step_with_capture(actual, token, None, Some(&mut trace), Some(&mut captures))
+                    .unwrap(),
+                model.step(reference, token, None).unwrap()
             );
-            traces += 1;
-            Ok(())
-        };
-        assert_eq!(
-            model
-                .step_with_capture(actual, token, None, Some(&mut trace), Some(&mut captures))
-                .unwrap(),
-            model.step(reference, token, None).unwrap()
-        );
-        assert_eq!(traces, 1);
-        peak = peak.max(model.ctx.device.currentAllocatedSize() as u64);
-    }
-    same_state(model, actual, reference);
-    if observe {
-        assert!(
-            peak <= baseline + DEVICE_RESIDUAL,
-            "256 completed steps retain device allocations: baseline={baseline} peak={peak}"
-        );
-        eprintln!(
-            "Full teacher-forced steps={STEPS} post_step_device_baseline={baseline} post_step_device_high_water={peak}"
-        );
+            assert_eq!(traces, 1);
+            peak = peak.max(model.ctx.device.currentAllocatedSize() as u64);
+        }
+        same_state(model, actual, reference);
+        if observe {
+            assert!(
+                peak <= baseline + DEVICE_RESIDUAL,
+                "256 completed steps retain device allocations: baseline={baseline} peak={peak}"
+            );
+            eprintln!(
+                "Full teacher-forced steps={STEPS} post_step_device_baseline={baseline} post_step_device_high_water={peak}"
+            );
+        }
     }
 }
 
 #[test]
-#[ignore = "self-leased tiny Metal Full lifetime witness; MTL_DEBUG_LAYER=1 QWEN_METAL_LEASE_WAIT=1; no full model"]
-fn full_chunks_and_scalar_steps_release_inside_one_outer_pool() {
+#[ignore = "self-leased tiny Metal Full chunks and tails lifetime witness; MTL_DEBUG_LAYER=1 QWEN_METAL_LEASE_WAIT=1; no full model"]
+fn full_chunks_and_tail_steps_release_inside_one_outer_pool() {
     assert_eq!(std::env::var("MTL_DEBUG_LAYER").as_deref(), Ok("1"));
     assert_eq!(std::env::var("QWEN_METAL_LEASE_WAIT").as_deref(), Ok("1"));
     assert!(!crate::env_flag::read_default_off(
@@ -547,17 +552,19 @@ fn full_chunks_and_scalar_steps_release_inside_one_outer_pool() {
             )
         });
         let empty = model.capture_snapshot(&actual).unwrap();
-        sequence(&model, &mut actual, &mut reference, 8, false);
+        sequence(&model, &mut actual, &mut reference, 8, 1, false);
         let warmed = ctx.device.currentAllocatedSize() as u64;
-        for chunks in [2, 4, 8] {
-            model.restore_snapshot(&mut actual, &empty).unwrap();
-            model.restore_snapshot(&mut reference, &empty).unwrap();
-            sequence(&model, &mut actual, &mut reference, chunks, true);
-            let after = ctx.device.currentAllocatedSize() as u64;
-            assert!(
-                after <= warmed + DEVICE_RESIDUAL,
-                "sequence device drift: warmed={warmed} after={after}"
-            );
+        for tail in [1, 7] {
+            for chunks in [2, 4, 8] {
+                model.restore_snapshot(&mut actual, &empty).unwrap();
+                model.restore_snapshot(&mut reference, &empty).unwrap();
+                sequence(&model, &mut actual, &mut reference, chunks, tail, true);
+                let after = ctx.device.currentAllocatedSize() as u64;
+                assert!(
+                    after <= warmed + DEVICE_RESIDUAL,
+                    "sequence device drift: warmed={warmed} after={after}"
+                );
+            }
         }
         eprintln!(
             "explicit_buffer_bound={bound} CPU_admission={} warmed_device={warmed}; context/PSO/driver separate",

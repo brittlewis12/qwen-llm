@@ -5,11 +5,39 @@ use super::*;
 #[cfg(test)]
 mod tests;
 
+#[cfg(test)]
+#[path = "ced/arithmetic.rs"]
+mod arithmetic_tests;
+
+#[cfg(test)]
+#[path = "prefill/half_staging.rs"]
+mod half_staging_tests;
+
 pub const DEFAULT_CHUNK_ROWS: usize = 2048;
-/// Upper bound for a fitting artifact's Full-forward chunk. The selector in
-/// `Forward` uses this only when resident weights leave enough headroom;
-/// IQ3-class residents stay at `DEFAULT_CHUNK_ROWS`.
+/// Global engine ceiling, not the width selected by request admission.
 pub const MAX_CHUNK_ROWS: usize = 4096;
+
+/// Operand lineage of logical rows, independent of a CED replay tile's size.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(super) enum RowsArithmetic {
+    #[default]
+    Ordinary,
+    Packed,
+}
+
+impl RowsArithmetic {
+    pub(super) fn packed_operands(self, rows: usize) -> bool {
+        match self {
+            Self::Ordinary => rows > 1,
+            Self::Packed => rows > 0,
+        }
+    }
+}
+
+/// Absolute position of the genuine scalar final chunk in cold Full prefill.
+pub(super) fn original_scalar_tail(prompt_rows: usize, chunk_rows: usize) -> Option<usize> {
+    (prompt_rows % chunk_rows == 1).then(|| prompt_rows - 1)
+}
 
 #[cfg(test)]
 thread_local! {
@@ -31,14 +59,38 @@ pub(super) fn with_f32_linears<T>(f: impl FnOnce() -> T) -> T {
     f()
 }
 
+/// Controlled batched F32 operands, not a claim of identical reduction trees.
+/// Keep this scope active during both scratch admission/allocation and encoding.
+/// Prefer F32 grouped experts; an explicit native-rows override still wins.
+#[cfg(test)]
+pub(super) fn with_batched_f32<T>(f: impl FnOnce() -> T) -> T {
+    with_f32_linears(|| {
+        ffn_gpu::tests::with_grouped_rows(|| {
+            attention_gpu::with_f32_attention(|| {
+                metal::with_grouped_projection_scalar_baseline_override(true, f)
+            })
+        })
+    })
+}
+
 /// Multi-row dense projections take the shared half-staged simdgroup-MMA
 /// tiles for packed and BF16 weights. F32 weights (router, mHC projections)
 /// keep the F32-operand grouped kernel: they are small and route-sensitive.
-fn mma_linear_rows_selected(dtype: GgmlType, input: usize, rows: usize) -> bool {
-    rows > 1
+fn mma_linear_rows_selected(
+    dtype: GgmlType,
+    input: usize,
+    rows: usize,
+    arithmetic: RowsArithmetic,
+) -> bool {
+    let selected = arithmetic.packed_operands(rows)
         && dtype != GgmlType::F32
         && crate::metal_forward::mat_mat_dispatch_supported(dtype)
-        && input.is_multiple_of(32)
+        && input.is_multiple_of(32);
+    #[cfg(test)]
+    let selected = selected
+        && !ROWWISE_LINEAR_ROWS.with(|flag| flag.get())
+        && !F32_LINEAR_ROWS.with(|flag| flag.get());
+    selected
 }
 
 #[cfg(test)]
@@ -60,6 +112,126 @@ fn with_rowwise_linears<T>(f: impl FnOnce() -> T) -> T {
 /// the F32-input form; this only removes the per-tile re-read and cast.
 pub(super) struct HalfScratch {
     tensor: MetalTensor,
+    prefix_view: bool,
+}
+
+pub(super) fn checked_scratch_rows(backing_rows: usize, rows: usize) -> Result<()> {
+    op::require(
+        (1..=DEFAULT_CHUNK_ROWS).contains(&backing_rows) && (1..=backing_rows).contains(&rows),
+        "scratch prefix rows outside original backing",
+    )
+}
+
+fn scratch_elements(shape: &[u64]) -> Result<u64> {
+    op::require(!shape.is_empty(), "empty scratch shape")?;
+    shape.iter().try_fold(1u64, |n, &d| {
+        op::require(d > 0, "zero scratch dimension")?;
+        n.checked_mul(d)
+            .ok_or_else(|| "scratch shape overflow".into())
+    })
+}
+
+fn scratch_byte_extent(offset: u64, elements: u64, bytes: u64, limit: u64) -> Result<()> {
+    op::require(offset.is_multiple_of(bytes), "scratch offset alignment")?;
+    let end = elements
+        .checked_mul(bytes)
+        .and_then(|n| offset.checked_add(n))
+        .ok_or("scratch byte extent overflow")?;
+    op::require(
+        end <= limit && end <= isize::MAX as u64,
+        "scratch byte extent outside buffer",
+    )
+}
+
+fn scratch_prefix_extent(
+    backing_shape: &[u64],
+    shape: &[u64],
+    offset: u64,
+    bytes: u64,
+    limit: u64,
+) -> Result<()> {
+    let parent = scratch_elements(backing_shape)?;
+    let elements = scratch_elements(shape)?;
+    op::require(elements <= parent, "scratch prefix logical extent")?;
+    scratch_byte_extent(offset, parent, bytes, limit)?;
+    scratch_byte_extent(offset, elements, bytes, limit)
+}
+
+/// Check both the original logical extent and the physical allocation before
+/// entering MetalTensor's asserting view API. Offsets remain dtype-sized.
+pub(super) fn checked_scratch_view(
+    tensor: &MetalTensor,
+    backing_shape: &[usize],
+    shape: &[usize],
+    dtype: GgmlType,
+) -> Result<MetalTensor> {
+    op::require(
+        tensor.dtype == dtype
+            && tensor.is_writable()
+            && tensor.shape.len() == backing_shape.len()
+            && tensor
+                .shape
+                .iter()
+                .zip(backing_shape)
+                .all(|(&actual, &expected)| actual == expected as u64),
+        "scratch backing shape/dtype/provenance",
+    )?;
+    let bytes = match dtype {
+        GgmlType::F16 => 2,
+        GgmlType::F32 | GgmlType::I32 => 4,
+        _ => return Err("unsupported scratch dtype".into()),
+    };
+    let shape = shape.iter().map(|&n| n as u64).collect::<Vec<_>>();
+    scratch_prefix_extent(
+        &tensor.shape,
+        &shape,
+        tensor.offset,
+        bytes,
+        tensor.buffer.length() as u64,
+    )?;
+    Ok(tensor.view_subrange(0, shape))
+}
+
+#[cfg(test)]
+mod scratch_prefix_geometry_tests {
+    use super::*;
+
+    #[test]
+    fn prefix_rows_require_bounded_original_backing() {
+        for backing in [1, 3, 128, DEFAULT_CHUNK_ROWS] {
+            for rows in [1, backing] {
+                assert!(checked_scratch_rows(backing, rows).is_ok());
+            }
+            assert!(checked_scratch_rows(backing, 0).is_err());
+            assert!(checked_scratch_rows(backing, backing + 1).is_err());
+        }
+        assert!(checked_scratch_rows(0, 1).is_err());
+        assert!(checked_scratch_rows(DEFAULT_CHUNK_ROWS + 1, 1).is_err());
+        assert!(checked_scratch_rows(usize::MAX, 1).is_err());
+    }
+
+    #[test]
+    fn prefix_extents_check_logical_and_physical_limits_before_views() {
+        assert!(scratch_prefix_extent(&[24, 8], &[24, 3], 16, 4, 784).is_ok());
+        assert!(scratch_prefix_extent(&[4, 4, 8], &[4, 4, 1], 0, 4, 512).is_ok());
+        assert!(scratch_prefix_extent(&[8], &[9], 0, 4, 4096).is_err());
+        assert!(scratch_prefix_extent(&[8], &[1], 0, 4, 31).is_err());
+        assert!(scratch_prefix_extent(&[8], &[1], 2, 4, 64).is_err());
+        assert!(scratch_prefix_extent(&[8], &[0], 0, 4, 64).is_err());
+        assert!(scratch_prefix_extent(&[0], &[1], 0, 4, 64).is_err());
+        assert!(scratch_prefix_extent(&[], &[1], 0, 4, 64).is_err());
+        assert!(scratch_prefix_extent(&[u64::MAX, 2], &[1], 0, 4, u64::MAX).is_err());
+        assert!(scratch_prefix_extent(&[u64::MAX], &[1], 0, 4, u64::MAX).is_err());
+        assert!(scratch_prefix_extent(&[8], &[1], u64::MAX - 3, 4, u64::MAX).is_err());
+    }
+
+    #[test]
+    fn half_prefix_extents_use_two_byte_offset_units() {
+        assert!(scratch_prefix_extent(&[8, 1], &[3], 2, 2, 18).is_ok());
+        assert!(scratch_prefix_extent(&[8, 1], &[3], 1, 2, 18).is_err());
+        assert!(scratch_prefix_extent(&[8, 1], &[3], 2, 2, 17).is_err());
+        assert!(HalfScratch::logical_bytes(usize::MAX).is_err());
+    }
 }
 
 fn half_scratch_extent(factors: &[usize]) -> Result<usize> {
@@ -86,7 +258,20 @@ pub(super) fn ffn_half_scratch_elements(c: &Config, rows: usize) -> Result<[usiz
 /// Incremental half buffers owned by one attention/FFN row set. Price each
 /// allocation separately, including buffers unused by arithmetic overrides.
 pub(super) fn half_scratch_budget(ctx: &MetalContext, c: &Config, rows: usize) -> Result<u64> {
-    if !HalfScratch::selected(ctx) || rows == 0 {
+    half_scratch_budget_with(c, rows, HalfScratch::selected(ctx), &|bytes| {
+        ctx.price_shared_buffer_upper(bytes)
+            .map(|p| p.priced_upper_bytes)
+            .map_err(|e| e.to_string())
+    })
+}
+
+pub(super) fn half_scratch_budget_with(
+    c: &Config,
+    rows: usize,
+    selected: bool,
+    price: &impl Fn(u64) -> Result<u64>,
+) -> Result<u64> {
+    if !selected || rows == 0 {
         return Ok(0);
     }
     let attention = attention_half_scratch_elements(c, rows)?;
@@ -95,13 +280,67 @@ pub(super) fn half_scratch_budget(ctx: &MetalContext, c: &Config, rows: usize) -
         .into_iter()
         .filter(|&elements| elements != 0)
         .try_fold(0u64, |total, elements| {
-            let priced = ctx
-                .price_shared_buffer_upper(HalfScratch::logical_bytes(elements)?)
-                .map_err(|e| e.to_string())?;
+            let priced = price(HalfScratch::logical_bytes(elements)?)?;
             total
-                .checked_add(priced.priced_upper_bytes)
+                .checked_add(priced)
                 .ok_or_else(|| "half scratch budget overflow".into())
         })
+}
+
+pub(super) fn full_scratch_budget_with(
+    c: &Config,
+    layers: usize,
+    projections: &[(usize, usize)],
+    capacity: usize,
+    rows: usize,
+    half_selected: bool,
+    price: &impl Fn(u64) -> Result<u64>,
+) -> Result<(u64, u64)> {
+    gpu_step::validate_chunk_geometry(c, capacity, rows)?;
+    // A scalar chunk executes the already-budgeted token workspace.
+    if rows == 1 {
+        return Ok((0, 0));
+    }
+    let mut metal = half_scratch_budget_with(c, rows, half_selected, price)?;
+    for width in gpu_step::chunk_widths_from_geometry(c, layers, projections, capacity, rows)? {
+        let bytes = width
+            .checked_mul(rows)
+            .and_then(|n| n.checked_mul(4))
+            .ok_or("prefill scratch overflow")?;
+        metal = metal
+            .checked_add(price(bytes as u64)?)
+            .ok_or("prefill scratch overflow")?;
+    }
+    let cpu = upload_cpu_bytes(c, projections, rows)?
+        .checked_add(chunk_hash_cpu_bytes(projections.len(), rows)?)
+        .ok_or("prefill upload overflow")?;
+    Ok((metal, cpu))
+}
+
+pub(super) fn upload_cpu_bytes(
+    c: &Config,
+    projections: &[(usize, usize)],
+    rows: usize,
+) -> Result<u64> {
+    let upload_width = projections
+        .iter()
+        .map(|&(input, _)| input)
+        .max()
+        .unwrap_or(0)
+        .checked_add(c.hidden.checked_mul(4).ok_or("prefill upload overflow")?)
+        .ok_or("prefill upload overflow")?;
+    (rows as u64)
+        .checked_mul(upload_width as u64)
+        .and_then(|n| n.checked_mul(8))
+        .ok_or_else(|| "prefill upload overflow".into())
+}
+
+pub(super) fn chunk_hash_cpu_bytes(hash_count: usize, rows: usize) -> Result<u64> {
+    (hash_count as u64)
+        .checked_mul(1024)
+        .and_then(|n| n.checked_add(4096))
+        .and_then(|n| n.checked_mul(rows as u64))
+        .ok_or_else(|| "chunk hash upload overflow".into())
 }
 
 impl HalfScratch {
@@ -125,7 +364,26 @@ impl HalfScratch {
         Self::logical_bytes(elements)?;
         Ok(Some(Self {
             tensor: allocate(ctx, elements, 1, GgmlType::F16)?,
+            prefix_view: false,
         }))
+    }
+
+    /// Call on the original allocation, never on a previously narrowed view.
+    pub(super) fn checked_prefix(&self, elements: usize) -> Result<Self> {
+        op::require(!self.prefix_view, "half prefix requires original backing")?;
+        Self::logical_bytes(elements)?;
+        let backing_elements = self.tensor.shape.first().copied().unwrap_or(0);
+        let backing_elements =
+            usize::try_from(backing_elements).map_err(|_| "half scratch host extent overflow")?;
+        Ok(Self {
+            tensor: checked_scratch_view(
+                &self.tensor,
+                &[backing_elements, 1],
+                &[elements],
+                GgmlType::F16,
+            )?,
+            prefix_view: true,
+        })
     }
 
     /// Convert the first `elements` of `x` (F32) into the scratch and
@@ -138,11 +396,16 @@ impl HalfScratch {
         x: &MetalTensor,
         elements: usize,
     ) -> std::result::Result<MetalTensor, metal::MetalError> {
-        if elements == 0 || (elements as u64) > self.tensor.n_elements() {
+        if enc.is_concurrent()
+            || x.dtype != GgmlType::F32
+            || elements == 0
+            || (elements as u64) > x.n_elements()
+            || (elements as u64) > self.tensor.n_elements()
+        {
             return Err(metal::MetalError::BadShape {
                 kernel: "v41_half_scratch",
                 detail: format!(
-                    "{elements} activations exceed the {} element half scratch",
+                    "serial F32 input with {elements} elements within the {} element half scratch required",
                     self.tensor.n_elements()
                 ),
             });
@@ -155,13 +418,13 @@ impl HalfScratch {
 }
 
 impl Linear<'_> {
-    /// True when `encode_rows` would take the dense tensor tile for `rows`.
-    pub(super) fn tensor_rows_selected(&self, rows: usize) -> bool {
-        let mma = mma_linear_rows_selected(self.tensor.dtype, self.input, rows);
-        #[cfg(test)]
-        let mma = mma
-            && !ROWWISE_LINEAR_ROWS.with(|flag| flag.get())
-            && !F32_LINEAR_ROWS.with(|flag| flag.get());
+    /// Eligibility uses logical operand lineage, not just the replay tile size.
+    pub(super) fn tensor_rows_selected_with_arithmetic(
+        &self,
+        rows: usize,
+        arithmetic: RowsArithmetic,
+    ) -> bool {
+        let mma = mma_linear_rows_selected(self.tensor.dtype, self.input, rows, arithmetic);
         mma && metal::moe_grouped_tensor_selected(self.ctx)
             && metal::moe_grouped_generic_layout(self.tensor.dtype)
                 .is_some_and(|l| self.input.is_multiple_of(l.block_elems))
@@ -177,6 +440,17 @@ impl Linear<'_> {
         self.encode_rows_with(enc, x, None, y, rows)
     }
 
+    pub(super) fn encode_rows_with_arithmetic(
+        &self,
+        enc: &KernelEncoder,
+        x: &MetalTensor,
+        y: &MetalTensor,
+        rows: usize,
+        arithmetic: RowsArithmetic,
+    ) -> std::result::Result<(), metal::MetalError> {
+        self.encode_rows_with_arithmetic_and_half(enc, x, None, y, rows, arithmetic)
+    }
+
     /// `encode_rows` with an optional half copy of `x` (`x_half`, the first
     /// `input * rows` elements already converted) that the dense tensor
     /// tile reads instead of re-casting `x`; ignored on every other route.
@@ -187,6 +461,18 @@ impl Linear<'_> {
         x_half: Option<&MetalTensor>,
         y: &MetalTensor,
         rows: usize,
+    ) -> std::result::Result<(), metal::MetalError> {
+        self.encode_rows_with_arithmetic_and_half(enc, x, x_half, y, rows, RowsArithmetic::Ordinary)
+    }
+
+    pub(super) fn encode_rows_with_arithmetic_and_half(
+        &self,
+        enc: &KernelEncoder,
+        x: &MetalTensor,
+        x_half: Option<&MetalTensor>,
+        y: &MetalTensor,
+        rows: usize,
+        arithmetic: RowsArithmetic,
     ) -> std::result::Result<(), metal::MetalError> {
         if rows == 0
             || x.dtype != GgmlType::F32
@@ -199,17 +485,13 @@ impl Linear<'_> {
                 detail: "nonempty matching F32 row extents required".into(),
             });
         }
-        let mma = mma_linear_rows_selected(self.tensor.dtype, self.input, rows);
-        #[cfg(test)]
-        let mma = mma
-            && !ROWWISE_LINEAR_ROWS.with(|flag| flag.get())
-            && !F32_LINEAR_ROWS.with(|flag| flag.get());
+        let mma = mma_linear_rows_selected(self.tensor.dtype, self.input, rows, arithmetic);
         if mma {
             let x = x.view_bytes(0, vec![self.input as u64, rows as u64]);
             let y = y.view_bytes(0, vec![self.output as u64, rows as u64]);
             // The dense form of the Metal 4 tensor tile where the tier
             // exists: same half operands and F32 sums as the MMA tile.
-            if self.tensor_rows_selected(rows) {
+            if self.tensor_rows_selected_with_arithmetic(rows, arithmetic) {
                 let elements = (self.input * rows) as u64;
                 let x_half = x_half.map(|h| {
                     if h.dtype == GgmlType::F16 && h.n_elements() >= elements {
@@ -306,8 +588,8 @@ fn run_hybrid(
         "invalid prefill chunk rows",
     )?;
     op::require(
-        !state.poisoned,
-        "sequence poisoned by a failed partial token",
+        state.is_ready(),
+        "sequence is provisional or poisoned by partial execution",
     )?;
     op::require(
         Arc::ptr_eq(&state.identity, &model.identity),
@@ -437,7 +719,7 @@ fn run_hybrid(
                     )
                 })
                 .collect::<Vec<_>>();
-            state.poisoned = true;
+            state.phase = StatePhase::Poisoned;
             logits = state.gpu_step.as_mut().unwrap().run_prepared(
                 model,
                 position,
@@ -450,7 +732,7 @@ fn run_hybrid(
                 Some(&prepared),
             )?;
             state.addresses = next_addresses[row];
-            state.poisoned = false;
+            state.phase = StatePhase::Ready;
         }
     }
     Ok(logits)
@@ -475,6 +757,7 @@ pub(super) fn row(t: &MetalTensor, width: usize, row: usize) -> MetalTensor {
 
 pub(super) struct HcRows {
     pub(super) rows: usize,
+    prefix_view: bool,
     raw: MetalTensor,
     pub(super) pre: MetalTensor,
     pub(super) post: MetalTensor,
@@ -491,12 +774,36 @@ impl HcRows {
         let f = |w| allocate(ctx, w, rows, GgmlType::F32);
         Ok(Self {
             rows,
+            prefix_view: false,
             raw: f(24)?,
             pre: f(4)?,
             post: f(4)?,
             comb: f(16)?.view_bytes(0, vec![4, 4, rows as u64]),
             collapsed: f(c.hidden)?,
             normalized: f(c.hidden)?,
+        })
+    }
+
+    pub(super) fn checked_prefix(&self, c: &Config, rows: usize) -> Result<Self> {
+        op::require(!self.prefix_view, "HC prefix requires original backing")?;
+        checked_scratch_rows(self.rows, rows)?;
+        let f = |tensor, width| {
+            checked_scratch_view(tensor, &[width, self.rows], &[width, rows], GgmlType::F32)
+        };
+        Ok(Self {
+            rows,
+            prefix_view: true,
+            raw: f(&self.raw, 24)?,
+            pre: f(&self.pre, 4)?,
+            post: f(&self.post, 4)?,
+            comb: checked_scratch_view(
+                &self.comb,
+                &[4, 4, self.rows],
+                &[4, 4, rows],
+                GgmlType::F32,
+            )?,
+            collapsed: f(&self.collapsed, c.hidden)?,
+            normalized: f(&self.normalized, c.hidden)?,
         })
     }
     pub(super) fn encode(
@@ -509,7 +816,30 @@ impl HcRows {
         x: &MetalTensor,
         incoming: &MetalTensor,
     ) -> std::result::Result<(), metal::MetalError> {
-        projection.encode_rows(enc, x, &self.raw, self.rows)?;
+        self.encode_with_arithmetic(
+            ctx,
+            enc,
+            c,
+            projection,
+            constants,
+            x,
+            incoming,
+            RowsArithmetic::Ordinary,
+        )
+    }
+
+    pub(super) fn encode_with_arithmetic(
+        &self,
+        ctx: &MetalContext,
+        enc: &KernelEncoder,
+        c: &Config,
+        projection: &Linear<'_>,
+        constants: &[MetalTensor],
+        x: &MetalTensor,
+        incoming: &MetalTensor,
+        arithmetic: RowsArithmetic,
+    ) -> std::result::Result<(), metal::MetalError> {
+        projection.encode_rows_with_arithmetic(enc, x, &self.raw, self.rows, arithmetic)?;
         enc.set_pipeline(&ctx.pipeline("kernel_deepseek_v41_projected_rms")?);
         enc.set_bytes(0, &((4 * c.hidden) as u32));
         enc.set_bytes(1, &c.norm_eps);
@@ -539,6 +869,18 @@ impl HcRows {
             &self.post,
             &self.comb,
         )?;
+        self.normalize_input(ctx, enc, c, &constants[2], x, incoming)
+    }
+
+    pub(super) fn normalize_input(
+        &self,
+        ctx: &MetalContext,
+        enc: &KernelEncoder,
+        c: &Config,
+        norm: &MetalTensor,
+        x: &MetalTensor,
+        incoming: &MetalTensor,
+    ) -> std::result::Result<(), metal::MetalError> {
         metal::encode_mhc4_collapse_rows(
             ctx,
             enc,
@@ -552,7 +894,7 @@ impl HcRows {
             ctx,
             enc,
             &self.collapsed,
-            &constants[2],
+            norm,
             &self.normalized,
             self.rows,
             c.hidden,
@@ -587,8 +929,8 @@ pub(super) fn run_captured(
         "invalid prefill chunk rows",
     )?;
     op::require(
-        !state.poisoned,
-        "sequence poisoned by a failed partial token",
+        state.is_ready(),
+        "sequence is provisional or poisoned by partial execution",
     )?;
     op::require(
         Arc::ptr_eq(&state.identity, &model.identity),
@@ -621,46 +963,24 @@ pub(super) fn run_captured(
                 census[3]
             );
         });
-        let mut extra = half_scratch_budget(model.ctx, &model.config, rows)?;
-        for width in gpu_step::chunk_widths(model, state.capacity(), rows)? {
-            let bytes = width
-                .checked_mul(rows)
-                .and_then(|n| n.checked_mul(4))
-                .ok_or("prefill scratch overflow")? as u64;
-            let priced = model
-                .ctx
-                .price_shared_buffer_upper(bytes)
-                .map_err(|e| e.to_string())?;
-            extra = extra
-                .checked_add(priced.priced_upper_bytes)
-                .ok_or("prefill scratch overflow")?;
-        }
-        // State and resident weights already exist and are reflected in device signals.
-        // Charge only the incremental chunk buffers and bounded upload temporaries.
-        let upload_width = model
-            .layers
-            .iter()
-            .filter_map(|l| l.engram.as_ref())
-            .map(|e| e.projection.input)
-            .max()
-            .unwrap_or(0)
-            .checked_add(4 * model.config.hidden)
-            .ok_or("prefill upload overflow")?;
-        let cpu = (rows as u64)
-            .checked_mul(upload_width as u64)
-            .and_then(|n| n.checked_mul(8))
-            .ok_or("prefill upload overflow")?;
-        let admission = metal::evaluate_metal_memory_admission_with_cpu_bytes(
-            extra,
-            cpu,
-            0,
-            model.ctx.memory_signals(),
-            true,
-        );
-        if let Some(reason) = admission.refusal() {
-            return Err(StateError::MemoryAdmissionDenied(reason));
-        }
     }
+    let cost = model.prefill_cost(state.capacity(), rows)?;
+    planning::Cost {
+        metal: cost.metal,
+        cpu: cost
+            .cpu
+            .checked_add(state.caller_cpu_reserve)
+            .ok_or("prefill reserve overflow")?,
+    }
+    .admit(model.ctx.memory_signals())?;
+    op::require(
+        state
+            .prefill_rows
+            .is_none_or(|selected| selected == chunk_rows),
+        "prefill geometry is fixed for this request",
+    )?;
+    state.prefill_rows = Some(chunk_rows);
+    state.last_prefill = None;
     let end = state.position() + tokens.len();
     let mut logits = Vec::new();
     for chunk in tokens.chunks(chunk_rows) {
@@ -694,7 +1014,7 @@ pub(super) fn run_captured(
                 hashes.push(rows);
                 next = addresses;
             }
-            state.poisoned = true;
+            state.phase = StatePhase::Poisoned;
             let logits = state.gpu_step.as_mut().unwrap().run_chunk(
                 model,
                 start,
@@ -707,11 +1027,16 @@ pub(super) fn run_captured(
                     .map(|sink| &mut **sink as &mut dyn capture::Capture),
             )?;
             state.addresses = next;
-            state.poisoned = false;
+            state.phase = StatePhase::Ready;
             Ok(logits)
         })?;
         #[cfg(test)]
         tests::lifetime::completed_chunk(model.ctx, state, chunk.len());
     }
+    state.last_prefill = Some(PrefillGeometry {
+        start: end - tokens.len(),
+        tokens: tokens.len(),
+        selected_rows: chunk_rows,
+    });
     Ok(logits)
 }

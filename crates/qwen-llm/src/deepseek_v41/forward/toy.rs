@@ -219,7 +219,10 @@ impl Weights {
 fn snapshot(state: &State) -> String {
     format!(
         "{:?}|{:?}|{}|{}",
-        state.attention, state.addresses, state.max_context, state.poisoned
+        state.attention,
+        state.addresses,
+        state.max_context,
+        state.is_poisoned()
     )
 }
 

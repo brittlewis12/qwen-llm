@@ -1424,6 +1424,7 @@ pub(crate) struct RequestStatsBuild {
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub(crate) enum FamilyDiagnostics {
+    DeepseekV41(crate::family_options::V41PrefillDiagnostics),
     DeepseekV4(RequestStatsDeepSeekV4Diagnostics),
     K2Horizon(RequestStatsK2Diagnostics),
     Glm5Next(RequestStatsGlm5NextDiagnostics),
@@ -1467,6 +1468,76 @@ pub(crate) struct RequestStatsDeepSeekV4Diagnostics {
 #[cfg(test)]
 mod family_diagnostics_tests {
     use super::*;
+
+    #[test]
+    fn v41_request_stats_default_json_is_unchanged_and_fallback_is_actual() {
+        use crate::family_options::V41PrefillDiagnostics;
+        use qwen_llm::deepseek_v41::forward::{PrefillExecution, PrefillReport};
+        let measured = RequestStatsMeasured {
+            input_tokens: 3,
+            output_tokens: 2,
+            transitions: 1,
+            stop_reason: StopReason::TokenLimit,
+            tokenizer_ms: 1.0,
+            load_ms: 2.0,
+            prefill_ms: 3.0,
+            prefill_tps: 1000.0,
+            decode_ms: 4.0,
+            decode_tps: 500.0,
+            transition_tps: 250.0,
+            total_ms: 8.0,
+            output_fingerprint: GeneratedTokenSha256Digest::of(&[7, 8]),
+        };
+        let full = PrefillReport {
+            geometry: qwen_llm::deepseek_v41::forward::PrefillGeometry {
+                start: 0,
+                tokens: 3,
+                selected_rows: 4096,
+            },
+            admission: None,
+            execution: PrefillExecution::FullForward,
+            fallback: None,
+            counters: None,
+            memory: None,
+            observed_incremental_metal_bytes: None,
+        };
+        let record = |diagnostics| {
+            build_single_turn_stats_record(
+                "fixture",
+                0,
+                "deepseek_v41",
+                RequestStatsInput {
+                    kind: "raw",
+                    template: None,
+                },
+                &measured,
+                diagnostics,
+            )
+        };
+        let baseline = serde_json::to_string(&record(None)).unwrap();
+        let default = V41PrefillDiagnostics::new(PrefillExecution::FullForward, full.clone())
+            .map(FamilyDiagnostics::DeepseekV41);
+        assert_eq!(serde_json::to_string(&record(default)).unwrap(), baseline);
+        let json: serde_json::Value = serde_json::from_str(&baseline).unwrap();
+        assert!(json.get("diagnostics").is_none());
+        assert_eq!(json["model"]["family"], "deepseek_v41");
+        assert_eq!(json["schema_version"], 2);
+
+        let diagnostics = V41PrefillDiagnostics::new(
+            PrefillExecution::ShrinkingCed,
+            PrefillReport {
+                fallback: Some("unsupported structure".into()),
+                ..full
+            },
+        )
+        .map(FamilyDiagnostics::DeepseekV41);
+        let json = serde_json::to_value(record(diagnostics)).unwrap();
+        let diagnostics = &json["diagnostics"]["deepseek_v41"];
+        assert_eq!(diagnostics["requested_execution"], "shrinking_ced");
+        assert_eq!(diagnostics["execution"], "full_forward");
+        assert_eq!(diagnostics["fallback"], "unsupported structure");
+        assert!(diagnostics["counters"].is_null());
+    }
 
     #[test]
     fn deepseek_v4_family_diagnostics_match_previous_serialized_bytes() {

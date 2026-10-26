@@ -151,6 +151,7 @@ struct Recorded {
     checkpoint_positions: Vec<usize>,
     cache: SnapshotCache<Vec<u32>>,
     restore_checkpoint: bool,
+    selected_rows: usize,
 }
 
 impl Default for Recorded {
@@ -162,6 +163,7 @@ impl Default for Recorded {
             checkpoint_positions: vec![],
             cache: SnapshotCache::new(1 << 20, Default::default()),
             restore_checkpoint: false,
+            selected_rows: 4096,
         }
     }
 }
@@ -175,6 +177,7 @@ impl reuse::Reuse<Vec<u32>> for Recorded {
         &mut self,
         ids: &[u32],
         _: usize,
+        _: u64,
     ) -> Result<Option<reuse::Restored<Vec<u32>>>, ServeError> {
         let live = self
             .live
@@ -198,6 +201,18 @@ impl reuse::Reuse<Vec<u32>> for Recorded {
                 source: "snapshot_ram",
             })
         }))
+    }
+    fn prefill_report(
+        &self,
+        _: &Vec<u32>,
+        start: usize,
+        tokens: usize,
+    ) -> qwen_llm::deepseek_v41::forward::PrefillGeometry {
+        qwen_llm::deepseek_v41::forward::PrefillGeometry {
+            start,
+            tokens,
+            selected_rows: self.selected_rows,
+        }
     }
     fn checkpoint(&mut self, state: &Vec<u32>, ids: &[u32], logits: &[f32], reserve: u64) {
         assert!(reserve > 0);
@@ -259,7 +274,7 @@ fn execution_retains_only_consumed_tokens_and_final_logits() {
             "prompt",
             None,
             &mut Sink,
-            |_, _| Ok(()),
+            |_, _, _| Ok(()),
             |_| Ok(vec![]),
             &mut recorded,
             |state, tokens, _, with_logits| {
@@ -301,7 +316,7 @@ fn execution_retains_only_consumed_tokens_and_final_logits() {
                         "prompt",
                         None,
                         &mut Sink,
-                        |_, _| Ok(()),
+                        |_, _, _| Ok(()),
                         |_| panic!("equal prompt must retain state"),
                         &mut recorded,
                         |_, _, _, _| panic!("equal prompt must not prefill"),
@@ -351,7 +366,7 @@ fn native_byte_pieces_use_shared_decode_without_lossy_utf8_conversion() {
             "p",
             None,
             &mut sink,
-            |_, _| Ok(()),
+            |_, _, _| Ok(()),
             |_| Ok(vec![]),
             &mut reuse,
             |state, tokens, _, with_logits| {
@@ -411,7 +426,7 @@ fn cancelled_partial_decode_discards_live_state_but_keeps_prompt_checkpoint() {
         "p",
         None,
         &mut Sink(cancel.clone()),
-        |_, _| Ok(()),
+        |_, _, _| Ok(()),
         |_| Ok(vec![]),
         &mut reuse,
         |state, tokens, _, with_logits| {
@@ -516,7 +531,7 @@ fn request_admission_retries_only_after_process_cache_relief() {
                         ticks: &ticks,
                         cancel: Default::default(),
                     },
-                    |_, _| {
+                    |_, _, _| {
                         attempts.set(attempts.get() + 1);
                         if attempts.get() == 2 {
                             assert!(
@@ -773,7 +788,7 @@ fn decode_output_admission_retries_same_piece_and_preserves_guards() {
             "p",
             None,
             &mut sink,
-            |_, _| {
+            |_, _, _| {
                 admissions.set(admissions.get() + 1);
                 Ok(())
             },
@@ -867,7 +882,7 @@ fn execute_checkpoint_fixture(
                 ticks: &ticks,
                 cancel: Default::default(),
             },
-            |_, _| Ok(()),
+            |_, _, _| Ok(()),
             |_| Ok(vec![]),
             recorded,
             |state, tokens, _, with_logits| {
@@ -888,6 +903,50 @@ fn execute_checkpoint_fixture(
     assert_eq!(live.logits, eos_logits());
     assert_eq!(outcome.usage.output_tokens, 1);
     (outcome, calls)
+}
+
+#[test]
+fn smaller_runtime_geometry_counts_internal_chunks_not_logical_4096_calls() {
+    let mut settings = batch_settings();
+    settings.context = 8192;
+    let request = settings
+        .profile()
+        .parse(&json!({"model":"fixture", "input":"x", "max_output_tokens":1}))
+        .unwrap();
+    for matched in [0, 73] {
+        let prompt = "a".repeat(matched + 4096 + 17);
+        let mut recorded = Recorded {
+            selected_rows: 2048,
+            ..Default::default()
+        };
+        if matched > 0 {
+            recorded.live = Some(reuse::Live {
+                state: vec![97; matched],
+                tokens: vec![97; matched],
+                logits: vec![],
+            });
+        }
+        let (outcome, calls) =
+            execute_checkpoint_fixture(&settings, &request, &prompt, None, &mut recorded);
+        assert_eq!(
+            calls,
+            [(matched, matched + 4096), (matched + 4096, matched + 4113)]
+        );
+        let phases = outcome.stats.unwrap().phases.unwrap();
+        assert_eq!(phases["prefill_calls"], 2);
+        assert_eq!(phases["prefill_chunks"], 3);
+        assert_eq!(phases["prefill_rows"], 2048);
+        assert_eq!(phases["prefill_selected_rows"], 2048);
+        assert_eq!(phases["prefill_rows_max"], 4096);
+        assert_eq!(
+            phases["prefill_chunk_ranges"],
+            json!([
+                [matched, matched + 2048],
+                [matched + 2048, matched + 4096],
+                [matched + 4096, matched + 4113],
+            ])
+        );
+    }
 }
 
 #[test]
@@ -1093,7 +1152,7 @@ fn batched_prefill_splits_verified_checkpoint_and_resumes_live_snapshot_and_equa
                     shared_prefix_end: None,
                 }),
                 &mut sink,
-                |_, _| Ok(()),
+                |_, _, _| Ok(()),
                 |_| Ok(vec![]),
                 &mut recorded,
                 |state, tokens, _, with_logits| {
@@ -1162,7 +1221,7 @@ fn failed_or_cancelled_chunks_never_publish_partial_state_or_overwrite_checkpoin
                 shared_prefix_end: None,
             }),
             &mut sink,
-            |_, _| Ok(()),
+            |_, _, _| Ok(()),
             |_| Ok(vec![]),
             &mut recorded,
             |state, tokens, _, with_logits| {
@@ -1219,7 +1278,7 @@ fn headless_and_final_prefill_memory_refusals_stay_typed() {
                 shared_prefix_end: None,
             }),
             &mut sink,
-            |_, _| {
+            |_, _, _| {
                 admissions += 1;
                 Ok(())
             },

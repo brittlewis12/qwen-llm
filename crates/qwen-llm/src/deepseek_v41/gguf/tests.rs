@@ -1,12 +1,15 @@
 use super::*;
 use std::io::Write;
 
+pub(in crate::deepseek_v41) mod admitted_request;
+mod binding_preflight;
 mod execution_contract;
-mod gsq_loader;
+pub(in crate::deepseek_v41) mod gsq_loader;
 mod ownership_metadata;
 mod ple_engram;
 mod ple_split;
 mod resident_storage;
+mod soft_windows;
 mod storage_mapping;
 
 #[derive(Clone)]

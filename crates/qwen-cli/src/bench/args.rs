@@ -476,6 +476,36 @@ pub(crate) struct TgArgs {
 pub(crate) struct SuiteArgs {
     #[arg(short = 'm', long)]
     pub(crate) model: PathBuf,
+    /// Native V4.1 Full/CED pair: exactly one --pp (2..=8192), no --tg,
+    /// depth 0, warmup enabled, no chunk override, even --runs 2..=16 per
+    /// policy. Warms both policies, completes an ABBA pilot (2 samples/policy),
+    /// then alternates retained BAAB/ABBA blocks. Warmup/pilot are excluded
+    /// from statistics; reports per-policy pilot+main and retained-main dispersion
+    /// without a spread gate (v2 protocols). Defaults to MTL_DEBUG_LAYER=1; the
+    /// explicit production-timing regime instead requires validation unset.
+    /// Requires a stock arithmetic/profiling environment and external continuous
+    /// host-validity monitoring. Supports vocab <=1048576 and <=256 layers. Timings are
+    /// host-wall native prefill plus endpoint logits, not GPU-only or quality
+    /// evidence or automatic gain acceptance; every endpoint head must match warm
+    /// Full bitwise. Pilot/main samples must be finite and positive.
+    #[arg(long)]
+    pub(crate) v41_ced_pair: bool,
+    /// Instrument every paired case and stream observations to stderr, including
+    /// excluded warmup/pilot cases. Not performance evidence; all gates remain.
+    #[arg(long, requires = "v41_ced_pair")]
+    pub(crate) v41_ced_pair_diagnostic: bool,
+    /// Explicit production timing: API/shader validation and known injection/
+    /// wrapper settings must be unset before launch, not set to 0. Does not
+    /// change correctness qualification or any runtime gate. May combine with
+    /// --v41-ced-pair-diagnostic for attribution, never performance evidence.
+    #[arg(long, requires = "v41_ced_pair")]
+    pub(crate) v41_ced_pair_production_timing: bool,
+    /// Explicit paired chronology. Interleaved preserves the v2 ABBA/BAAB
+    /// protocol. Blocked modes run one policy's warmup, two excluded pilots,
+    /// then all retained calls before the other policy (distinct v1 protocol).
+    /// Blocked modes require even --runs 4..=16 and refuse diagnostic profiling.
+    #[arg(long, value_enum, requires = "v41_ced_pair")]
+    pub(crate) v41_ced_pair_schedule: Option<crate::v41_ced_pair::PairSchedule>,
     /// Prompt-only prefill shapes. Accepts repeated flags or comma lists.
     #[arg(long = "pp", value_delimiter = ',')]
     pub(crate) pp: Vec<usize>,

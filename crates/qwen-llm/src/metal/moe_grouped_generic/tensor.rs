@@ -110,7 +110,7 @@ const TENSOR_THREADGROUP_BYTES: usize = 8192;
 const TENSOR_THREADGROUP_BYTES_WIDE: usize = 16384;
 
 #[allow(clippy::too_many_arguments)]
-fn dispatch_tensor_mm(
+pub(super) fn dispatch_tensor_mm(
     ctx: &MetalContext,
     enc: &KernelEncoder,
     name: &str,
@@ -227,8 +227,7 @@ pub fn encode_moe_swiglu_f32_grouped_slots_tensor(
     let activation = TensorActivation::of(x_pack, KERNEL)?;
     // The wide panel reads half storage only. F32 retains its typed narrow
     // path; at 4096 rows F16 gate/up uses the wide panel as before.
-    if n_tokens >= 4096
-        && activation == TensorActivation::F16
+    if wide_swiglu_shape(n_tokens, x_pack.dtype, clamp)
         && let Some(limit) = clamp
         && moe_grouped_tensor_selected(ctx)
         && std::env::var_os("QWEN_V41_EXPERT_WIDE").is_none_or(|v| v != "0")
@@ -487,12 +486,7 @@ pub fn encode_moe_down_wide_probe(
     n_tokens: usize,
 ) -> Result<(), MetalError> {
     const KERNEL: &str = "moe_down_wide_probe";
-    if inner.dtype != GgmlType::F16 {
-        return Err(MetalError::BadShape {
-            kernel: KERNEL,
-            detail: format!("wide probe activations must be F16, got {:?}", inner.dtype),
-        });
-    }
+    require_wide_half(KERNEL, inner.dtype)?;
     let args = generic_mm_args(
         KERNEL,
         weight,
@@ -559,12 +553,7 @@ pub fn encode_moe_swiglu_wide_probe(
     clamp_limit: f32,
 ) -> Result<(), MetalError> {
     const KERNEL: &str = "moe_swiglu_wide_probe";
-    if x_pack.dtype != GgmlType::F16 {
-        return Err(MetalError::BadShape {
-            kernel: KERNEL,
-            detail: format!("wide probe activations must be F16, got {:?}", x_pack.dtype),
-        });
-    }
+    require_wide_half(KERNEL, x_pack.dtype)?;
     crate::metal::checks::require_serial(KERNEL, enc)?;
     if !clamp_limit.is_finite() || clamp_limit <= 0.0 {
         return Err(MetalError::BadShape {
@@ -648,4 +637,36 @@ pub fn encode_moe_swiglu_wide_probe(
     dispatch(&gate_name, &gate_args, w_gate, 0, 0.0)?;
     dispatch(&up_name, &up_args, w_up, 2, clamp_limit)?;
     Ok(())
+}
+
+fn wide_swiglu_shape(n_tokens: usize, activation: GgmlType, clamp: Option<f32>) -> bool {
+    n_tokens >= 4096 && activation == GgmlType::F16 && clamp.is_some()
+}
+
+fn require_wide_half(kernel: &'static str, activation: GgmlType) -> Result<(), MetalError> {
+    if activation != GgmlType::F16 {
+        return Err(MetalError::BadShape {
+            kernel,
+            detail: format!("wide panel reads F16 activations, got {activation:?}"),
+        });
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod wide_policy_tests {
+    use super::*;
+
+    #[test]
+    fn wide_policy_requires_physical_4k_half_clamped_rows() {
+        for n in [1, 2047, 2048, 2049, 4095, 4096, 4097, 8192] {
+            assert_eq!(wide_swiglu_shape(n, GgmlType::F16, Some(10.0)), n >= 4096);
+            assert!(!wide_swiglu_shape(n, GgmlType::F32, Some(10.0)));
+            assert!(!wide_swiglu_shape(n, GgmlType::F16, None));
+        }
+        require_wide_half("test", GgmlType::F16).unwrap();
+        for dtype in [GgmlType::F32, GgmlType::BF16, GgmlType::I32] {
+            assert!(require_wide_half("test", dtype).is_err());
+        }
+    }
 }

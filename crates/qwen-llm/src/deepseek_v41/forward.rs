@@ -3,6 +3,10 @@
 mod attention;
 mod attention_gpu;
 mod bind;
+pub(super) mod binding;
+mod ced;
+mod ced_plan;
+pub use ced::{CedCounters, CedLayerCounters, CedMemoryEstimate, PrefillExecution, PrefillReport};
 mod engram_gpu;
 mod prefill;
 pub use prefill::DEFAULT_CHUNK_ROWS as PREFILL_CHUNK_ROWS;
@@ -16,6 +20,13 @@ mod ffn_gpu;
 mod gpu_step;
 mod hc_gpu;
 mod memory;
+pub(super) mod preflight;
+pub use preflight::{
+    ColdLoadAssessment, ColdPrefillPlan, ColdPrefillPreflight, plan_cold_prefill,
+    preflight_cold_prefill,
+};
+mod planning;
+pub use planning::{PrefillAdmission, PrefillGeometry, PrefillIntent, RequestPlan};
 pub mod profile;
 mod token_map;
 pub use memory::RequestMemoryEstimate;
@@ -135,25 +146,13 @@ struct Linear<'a> {
     output: usize,
 }
 fn native_control(ctx: &MetalContext, dtype: GgmlType) -> Result<Option<MetalTensor>> {
-    op::require(
-        dense_linear_supported(dtype),
-        &format!("unsupported NativeF32 linear storage: {dtype:?}"),
-    )?;
-    if matches!(
-        dtype,
-        GgmlType::F32
-            | GgmlType::F16
-            | GgmlType::BF16
-            | GgmlType::IQ2_XXS
-            | GgmlType::IQ1_S
-            | GgmlType::IQ1_M
-    ) {
+    if binding::native_control_bytes(dtype)? == 0 {
         return Ok(None);
     }
     MetalTensor::from_bytes(
         ctx,
-        bytemuck::cast_slice(&[0i32, metal::ROUTE_STATUS_READY]),
-        vec![2],
+        bytemuck::cast_slice(&binding::NATIVE_CONTROL_INITIAL),
+        vec![binding::NATIVE_CONTROL_INITIAL.len() as u64],
         GgmlType::I32,
     )
     .map(Some)
@@ -315,7 +314,7 @@ fn submit(
     let wait = started.map(|_| std::time::Instant::now());
     let result = metal::commit_and_wait(&command).map_err(|e| e.to_string());
     if let Some(wait) = wait {
-        profile::submitted(
+        profile::submitted_with_driver_scheduling(
             role,
             dimensions,
             encoded.unwrap(),
@@ -323,6 +322,7 @@ fn submit(
             result.is_ok(),
             command.GPUStartTime(),
             command.GPUEndTime(),
+            || (command.kernelStartTime(), command.kernelEndTime()),
         );
     }
     result
@@ -473,10 +473,8 @@ struct Layer<'a> {
     engram: Option<Engram<'a>>,
 }
 
-/// Packed+dense resident bytes above this stay on the 2048-row chunk. Q2
-/// (~186 GiB), Maya-S (~166 GiB) and IQ3 (~217 GiB) fit the 4096-row envelope
-/// at the 240 GiB MWSS; IQ3's earlier slow sample was a transient (four later
-/// samples: 879.41/879.87/878.80/874.77 tok/s, sigma 2.33).
+/// Initial preference only. Request admission prices actual state capacity,
+/// selected-tier scratch and current headroom before choosing a runtime width.
 const FULL_CHUNK_RESIDENT_LIMIT: u64 = 240 * (1u64 << 30);
 
 pub(super) fn prefill_rows_for_resident(resident_bytes: u64) -> usize {
@@ -513,10 +511,31 @@ pub struct State {
     attention: attention::Session,
     addresses: engram::AddressState,
     max_context: usize,
-    poisoned: bool,
+    phase: StatePhase,
+    prefill_origin: PrefillExecution,
     identity: Arc<()>,
+    prefill_rows: Option<usize>,
+    caller_cpu_reserve: u64,
+    last_prefill: Option<PrefillGeometry>,
+    prefill_admission: Option<PrefillAdmission>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum StatePhase {
+    Ready,
+    Provisional,
+    Poisoned,
 }
 impl State {
+    fn requires_ced(&self) -> bool {
+        self.prefill_admission
+            .as_ref()
+            .is_some_and(|a| a.intent == PrefillIntent::RequiredFullCed)
+    }
+
+    pub fn prefill_admission(&self) -> Option<&PrefillAdmission> {
+        self.prefill_admission.as_ref()
+    }
     pub fn capacity(&self) -> usize {
         self.max_context
     }
@@ -525,11 +544,29 @@ impl State {
         self.addresses.position() as usize
     }
     pub fn is_poisoned(&self) -> bool {
-        self.poisoned
+        self.phase == StatePhase::Poisoned
+    }
+
+    pub fn is_ready(&self) -> bool {
+        self.phase == StatePhase::Ready
+    }
+
+    pub fn prefill_origin(&self) -> PrefillExecution {
+        self.prefill_origin
+    }
+    pub fn selected_prefill_rows(&self) -> Option<usize> {
+        self.prefill_rows
+    }
+    pub fn last_prefill_report(&self) -> Option<PrefillGeometry> {
+        self.last_prefill
     }
 }
 
 impl<'a> Forward<'a> {
+    pub fn prefill_chunk_rows(&self) -> usize {
+        self.prefill_rows
+    }
+
     pub fn new_state(&self, max_context: usize) -> std::result::Result<State, StateError> {
         self.new_state_with_gpu_step(max_context)
     }
@@ -555,8 +592,13 @@ impl<'a> Forward<'a> {
             addresses: engram::AddressState::new_with_config(self.pad, &self.engram_hash)
                 .map_err(|e| format!("{e:?}"))?,
             max_context,
-            poisoned: false,
+            phase: StatePhase::Ready,
+            prefill_origin: PrefillExecution::FullForward,
             identity: Arc::clone(&self.identity),
+            prefill_rows: None,
+            caller_cpu_reserve: 0,
+            last_prefill: None,
+            prefill_admission: None,
         })
     }
 
@@ -600,7 +642,15 @@ impl<'a> Forward<'a> {
         tokens: &[u32],
         cancel: Option<&AtomicBool>,
     ) -> std::result::Result<Vec<f32>, StateError> {
-        prefill::run(self, state, tokens, cancel, self.prefill_rows, true)
+        let rows = self
+            .select_prefill(
+                state,
+                tokens.len(),
+                state.caller_cpu_reserve,
+                state.prefill_rows,
+            )?
+            .selected_rows;
+        prefill::run(self, state, tokens, cancel, rows, true)
     }
 
     /// Capture actual batched attention inputs and checkpoint outputs after GPU
@@ -612,15 +662,15 @@ impl<'a> Forward<'a> {
         cancel: Option<&AtomicBool>,
         capture: &mut dyn capture::Capture,
     ) -> std::result::Result<Vec<f32>, StateError> {
-        prefill::run_captured(
-            self,
-            state,
-            tokens,
-            cancel,
-            self.prefill_rows,
-            true,
-            Some(capture),
-        )
+        let rows = self
+            .select_prefill(
+                state,
+                tokens.len(),
+                state.caller_cpu_reserve,
+                state.prefill_rows,
+            )?
+            .selected_rows;
+        prefill::run_captured(self, state, tokens, cancel, rows, true, Some(capture))
     }
 
     /// Consume a nonempty suffix without computing vocabulary logits.
@@ -630,7 +680,15 @@ impl<'a> Forward<'a> {
         tokens: &[u32],
         cancel: Option<&AtomicBool>,
     ) -> std::result::Result<(), StateError> {
-        prefill::run(self, state, tokens, cancel, self.prefill_rows, false).map(|_| ())
+        let rows = self
+            .select_prefill(
+                state,
+                tokens.len(),
+                state.caller_cpu_reserve,
+                state.prefill_rows,
+            )?
+            .selected_rows;
+        prefill::run(self, state, tokens, cancel, rows, false).map(|_| ())
     }
 
     /// Synchronously borrow each completed block's CPU F32 outputs. None adds
@@ -676,8 +734,8 @@ impl<'a> Forward<'a> {
             "attention capture requires GPU step",
         )?;
         op::require(
-            !state.poisoned,
-            "sequence poisoned by a failed partial token",
+            state.is_ready(),
+            "sequence is provisional or poisoned by partial execution",
         )?;
         op::require(
             Arc::ptr_eq(&state.identity, &self.identity),
@@ -696,7 +754,7 @@ impl<'a> Forward<'a> {
             .addresses
             .step_with_config(engram::Token::Compressed(compressed), &self.engram_hash)
             .map_err(|e| format!("{e:?}"))?;
-        state.poisoned = true;
+        state.phase = StatePhase::Poisoned;
         // The synchronous step returns CPU values; persistent device state owns
         // Retained buffers. Completed commands must not outlive the priced step.
         let result = objc2::rc::autoreleasepool(|_| {
@@ -711,7 +769,7 @@ impl<'a> Forward<'a> {
             )
         })?;
         state.addresses = next;
-        state.poisoned = false;
+        state.phase = StatePhase::Ready;
         Ok(result)
     }
 
@@ -954,6 +1012,8 @@ fn inject_engram(x: &mut [f32], kv: &[f32], q: &[f32], k: &[f32], eps: f32) -> R
     Ok(())
 }
 
+#[cfg(test)]
+mod chunk_geometry;
 #[cfg(test)]
 mod tests;
 #[cfg(test)]

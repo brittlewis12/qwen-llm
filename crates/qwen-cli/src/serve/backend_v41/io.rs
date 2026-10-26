@@ -48,15 +48,15 @@ pub(super) struct ChunkObservations {
 impl ChunkObservations {
     pub(super) fn json(&self) -> Value {
         let mut value = self.calls.json();
-        value["scope"] = json!("whole_process_native_prefill_chunk");
-        value["attempted_chunks"] = json!(self.calls.attempted_tokens);
-        value["successful_chunks"] = json!(self.calls.successful_tokens);
+        value["scope"] = json!("whole_process_native_prefill_call");
+        value["attempted_calls"] = json!(self.calls.attempted_tokens);
+        value["successful_calls"] = json!(self.calls.successful_tokens);
         value["attempted_tokens"] = json!(self.attempted_tokens);
         value["successful_tokens"] = json!(self.successful_tokens);
         for key in ["process_pageins", "process_disk_read_bytes"] {
             let metric = value[key].as_object_mut().unwrap();
             let max = metric.remove("max").unwrap();
-            metric.insert("max_chunk".into(), max);
+            metric.insert("max_call".into(), max);
             metric.insert(
                 "per_token_mean".into(),
                 json!(
@@ -85,7 +85,7 @@ pub(super) fn observe_chunk<T, E>(
         Some(&mut observations.calls),
         position,
         rows,
-        "whole_process_native_prefill_chunk",
+        "whole_process_native_prefill_call",
         snapshot,
         prefill,
     );

@@ -229,7 +229,9 @@ pub(super) fn try_encode(
     if !prepare(ctx, weight.dtype)? {
         return Ok(false);
     }
-    metal::encode_mat_mat_tensor_f32(ctx, enc, weight, x, y, k, m, n)?;
+    // Preparation and GLM qualification cover the 32-slot pipeline, not the
+    // newer shared Q8_0 wide default.
+    metal::encode_mat_mat_tensor_f32_narrow(ctx, enc, weight, x, y, k, m, n)?;
     Ok(true)
 }
 

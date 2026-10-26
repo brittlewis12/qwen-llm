@@ -1,5 +1,6 @@
 use super::*;
 use attention::{AttentionWeights, CompressorWeights, IndexWeights};
+use binding::{LayerLinears, LinearSpec};
 
 pub(super) struct Binder<'a> {
     pub(super) ctx: &'a MetalContext,
@@ -49,10 +50,23 @@ impl<'a> Binder<'a> {
             output,
         })
     }
+    fn linear_spec(&self, spec: &LinearSpec) -> Result<Linear<'a>> {
+        self.linear(&spec.name, spec.input, spec.output)
+    }
+    #[cfg(test)]
     pub(super) fn hc(&self, layer: usize, kind: &str, c: &Config) -> Result<Hc<'a>> {
+        self.hc_with_linear(layer, kind, c, &LinearSpec::hc(layer, kind, c))
+    }
+    fn hc_with_linear(
+        &self,
+        layer: usize,
+        kind: &str,
+        c: &Config,
+        projection: &LinearSpec,
+    ) -> Result<Hc<'a>> {
         let p = format!("layers.{layer}.hc_{kind}");
         Ok(Hc {
-            projection: self.linear(&format!("{p}_fn"), 4 * c.hidden, 24)?,
+            projection: self.linear_spec(projection)?,
             scale: self.vector(&format!("{p}_scale"), 3)?.try_into().unwrap(),
             base: self.vector(&format!("{p}_base"), 24)?,
             norm: self.vector(&format!("layers.{layer}.{kind}_norm.weight"), c.hidden)?,
@@ -62,21 +76,34 @@ impl<'a> Binder<'a> {
     pub(super) fn attention(&self, layer: usize, c: &Config) -> Result<AttentionWeights<'a>> {
         self.attention_with_schedule(layer, c, &super::super::gguf::Schedule::default())
     }
+    #[cfg(test)]
     pub(super) fn attention_with_schedule(
         &self,
         layer: usize,
         c: &Config,
         schedule: &super::super::gguf::Schedule,
     ) -> Result<AttentionWeights<'a>> {
+        self.attention_with_linears(
+            layer,
+            c,
+            schedule,
+            &LayerLinears::new(c, schedule, layer, false),
+        )
+    }
+    fn attention_with_linears(
+        &self,
+        layer: usize,
+        c: &Config,
+        schedule: &super::super::gguf::Schedule,
+        linears: &LayerLinears,
+    ) -> Result<AttentionWeights<'a>> {
         let p = format!("layers.{layer}.attn");
-        let lin =
-            |name: &str, input, output| self.linear(&format!("{p}.{name}.weight"), input, output);
+        let lin = |spec: &LinearSpec| self.linear_spec(spec);
+        let optional = |spec: &Option<LinearSpec>| spec.as_ref().map(lin).transpose();
         let vec = |name: &str, n| self.vector(&format!("{p}.{name}"), n);
-        let owner = schedule.owns_kv(layer);
-        let index = schedule.produces_index(layer);
         let ratio = schedule.ratio(layer);
         let group_input = c.heads * c.head_dim / c.groups;
-        let output_a = lin("wo_a", group_input, c.groups * c.output_rank)?;
+        let output_a = lin(&linears.output_a)?;
         let stride = row_bytes(&output_a.tensor)?;
         let output_a = (0..c.groups)
             .map(|g| Linear {
@@ -91,38 +118,33 @@ impl<'a> Binder<'a> {
             })
             .collect();
         Ok(AttentionWeights {
-            query_a: lin("wq_a", c.hidden, c.query_rank)?,
+            query_a: lin(&linears.query_a)?,
             query_norm: vec("q_norm.weight", c.query_rank)?,
-            query_b: lin("wq_b", c.query_rank, c.heads * c.head_dim)?,
-            kv: lin("wkv", c.hidden, c.head_dim)?,
+            query_b: lin(&linears.query_b)?,
+            kv: lin(&linears.kv)?,
             kv_norm: vec("kv_norm.weight", c.head_dim)?,
             sink: vec("attn_sink", c.heads)?,
             output_a,
-            output_b: lin("wo_b", c.groups * c.output_rank, c.hidden)?,
-            compressor: if owner {
+            output_b: lin(&linears.output_b)?,
+            compressor: if let Some(kv) = &linears.compressor_kv {
                 Some(CompressorWeights {
                     ratio,
-                    kv: lin("compressor.wkv", c.hidden, c.head_dim)?,
-                    gate: if ratio > 1 {
-                        Some(lin("compressor.wgate", c.hidden, c.head_dim)?)
-                    } else {
-                        None
-                    },
+                    kv: lin(kv)?,
+                    gate: optional(&linears.compressor_gate)?,
                     norm: vec("compressor.norm.weight", c.head_dim)?,
                 })
             } else {
                 None
             },
-            index: if index {
+            index: if let Some(query) = &linears.index_query {
                 Some(IndexWeights {
-                    query: lin("indexer.wq_b", c.query_rank, c.index_heads * c.index_dim)?,
-                    weights: lin("indexer.weights_proj", c.hidden, c.index_heads)?,
-                    key: if owner {
-                        Some(lin("indexer.wk", c.head_dim, c.index_dim)?)
-                    } else {
-                        None
-                    },
-                    key_norm: if owner {
+                    query: lin(query)?,
+                    weights: lin(linears
+                        .index_weights
+                        .as_ref()
+                        .expect("index query has weights"))?,
+                    key: optional(&linears.index_key)?,
+                    key_norm: if linears.index_key.is_some() {
                         vec("indexer.k_norm.weight", c.index_dim)?
                     } else {
                         Vec::new()
@@ -250,7 +272,12 @@ impl<'a> Forward<'a> {
         };
         let mut layers = Vec::with_capacity(resident.schedule.layers);
         for id in 0..resident.schedule.layers {
-            let p = format!("layers.{id}.ffn");
+            let linears = LayerLinears::new(
+                c,
+                &resident.schedule,
+                id,
+                resident.engram_hash.layers.iter().any(|h| h.layer == id),
+            );
             let mut banks = Vec::new();
             for (part, input, output) in [
                 ("w1", c.hidden, c.intermediate),
@@ -275,10 +302,10 @@ impl<'a> Forward<'a> {
                 )?;
                 banks.push(t);
             }
-            let engram = if resident.engram_hash.layers.iter().any(|p| p.layer == id) {
+            let engram = if let Some(projection) = &linears.engram {
                 let p = format!("layers.{id}.engram");
                 Some(Engram {
-                    projection: b.linear(&format!("{p}.wkv.weight"), 6144, 5 * c.hidden)?,
+                    projection: b.linear_spec(projection)?,
                     gate: if let Some(t) = b.weights.get(&format!("{p}.gate.weight")) {
                         op::require(
                             t.shape == vec![c.hidden as u64, 4],
@@ -304,27 +331,15 @@ impl<'a> Forward<'a> {
                 None
             };
             layers.push(Layer {
-                attention: b.attention_with_schedule(id, c, &resident.schedule)?,
-                attn_hc: b.hc(id, "attn", c)?,
-                ffn_hc: b.hc(id, "ffn", c)?,
-                router: b.linear(&format!("{p}.gate.weight"), c.hidden, c.experts)?,
-                bias: b.vector(&format!("{p}.gate.bias"), c.experts)?,
+                attention: b.attention_with_linears(id, c, &resident.schedule, &linears)?,
+                attn_hc: b.hc_with_linear(id, "attn", c, &linears.attn_hc)?,
+                ffn_hc: b.hc_with_linear(id, "ffn", c, &linears.ffn_hc)?,
+                router: b.linear_spec(&linears.router)?,
+                bias: b.vector(&format!("layers.{id}.ffn.gate.bias"), c.experts)?,
                 shared: [
-                    b.linear(
-                        &format!("{p}.shared_experts.w1.weight"),
-                        c.hidden,
-                        c.intermediate,
-                    )?,
-                    b.linear(
-                        &format!("{p}.shared_experts.w3.weight"),
-                        c.hidden,
-                        c.intermediate,
-                    )?,
-                    b.linear(
-                        &format!("{p}.shared_experts.w2.weight"),
-                        c.intermediate,
-                        c.hidden,
-                    )?,
+                    b.linear_spec(&linears.shared[0])?,
+                    b.linear_spec(&linears.shared[1])?,
+                    b.linear_spec(&linears.shared[2])?,
                 ],
                 banks: [banks[0], banks[1], banks[2]],
                 engram,
@@ -332,7 +347,7 @@ impl<'a> Forward<'a> {
         }
         let embedding = b.tensor("embed.weight", &[c.vocab, c.hidden])?;
         let norm = b.vector("norm.weight", c.hidden)?;
-        let head = b.linear("head.weight", c.hidden, c.vocab)?;
+        let head = b.linear_spec(&LinearSpec::head(c))?;
         Ok(Self {
             ctx,
             engram_rows: EngramRows::Disk(&resident.engram),

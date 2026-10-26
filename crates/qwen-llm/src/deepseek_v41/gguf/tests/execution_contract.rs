@@ -146,3 +146,17 @@ fn zero_sinkhorn_and_topk_outside_expert_count_remain_invalid_plans() {
         ));
     }
 }
+
+#[test]
+fn descriptive_storage_plan_is_broader_but_import_preparation_rejects_math_before_mapping() {
+    for iterations in [1, 3, 21] {
+        let (mut kv, tensors) = fixture_parts(32, GgmlType::F32, 2, false);
+        kv.retain(|(key, _)| *key != "deepseek41.hc_sinkhorn_iters");
+        kv.push(("deepseek41.hc_sinkhorn_iters", Value::U32(iterations)));
+        let g = write_fixture(kv, tensors);
+        assert!(plan(&g).is_ok());
+        assert!(resident_storage_plan(&g, 16384, 1 << 30).is_ok());
+        let error = prepared_load_plan(&g, 0, 0, None).unwrap_err();
+        assert!(matches!(error, LoadError::UnsupportedExecution(_)));
+    }
+}

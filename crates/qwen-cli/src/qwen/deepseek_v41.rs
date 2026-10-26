@@ -775,6 +775,7 @@ pub(crate) fn run(
         ],
     }
     .admit(&admission::supplied(args, explicit))?;
+    let prefill_execution = crate::family_options::v41_prefill_execution_from_env()?;
     let plan = weights::plan(&gguf)?;
     let tokenizer = NativeTokenizer::from_gguf(&gguf)?;
     ensure!(
@@ -797,6 +798,16 @@ pub(crate) fn run(
     shutdown::checkpoint()?;
     let loading = Instant::now();
     let ctx = MetalContext::new()?;
+    let cold = qwen_llm::deepseek_v41::forward::plan_cold_prefill(
+        &ctx,
+        &gguf,
+        ids.len(),
+        required,
+        &[prefill_execution],
+        0,
+    )?
+    .select_load(ctx.memory_signals())?
+    .0;
     let weights = load(&ctx, Arc::new(gguf))?;
     ensure!(
         weights.config.vocab == tokenizer.n_vocab() as usize,
@@ -806,22 +817,42 @@ pub(crate) fn run(
         Forward::from_resident(&ctx, &weights, weights.token_map.clone(), weights.raw_pad)
             .map_err(anyhow::Error::msg)?;
     let load_ms = loading.elapsed().as_secs_f64() * 1e3;
-    let mut state = forward.new_state_with_gpu_step(required)?;
+    let request_plan = forward.plan_request_from_cold(&cold)?;
+    let mut state = forward.new_state_from_plan(&request_plan)?;
     let execution = Instant::now();
     let prefill = Instant::now();
-    let logits = forward
-        .prefill(
+    let (logits, prefill_report) = forward
+        .prefill_with_execution(
             &mut state,
             &ids.iter().map(|&id| id as u32).collect::<Vec<_>>(),
             Some(shutdown::cancellation_flag()),
+            prefill_execution,
         )
         .context("V4.1 prefill")?;
     let prefill_ms = prefill.elapsed().as_secs_f64() * 1e3;
-    tracing::info!(target: "qwen_diag", family="deepseek_v41", prefill_ms,
-        prefill_mode=crate::family_options::V41_PREFILL_MODE,
-        prefill_rows=ids.len().min(crate::family_options::V41_PREFILL_ROWS),
-        prefill_chunks=ids.len().div_ceil(crate::family_options::V41_PREFILL_ROWS),
-        "run prefill");
+    let prefill_mode = crate::family_options::v41_prefill_mode(prefill_report.execution);
+    let geometry = crate::family_options::v41_execution_geometry(&prefill_report);
+    if prefill_report.execution == qwen_llm::deepseek_v41::forward::PrefillExecution::FullForward {
+        tracing::info!(target: "qwen_diag", family="deepseek_v41", prefill_ms,
+            prefill_mode,
+            prefill_rows=prefill_report.geometry.max_chunk_rows(),
+            prefill_chunks=prefill_report.geometry.chunk_count(),
+            prefill_selected_rows=prefill_report.geometry.selected_rows,
+            prefill_geometry=%geometry,
+            "run prefill");
+    } else {
+        tracing::info!(target: "qwen_diag", family="deepseek_v41", prefill_ms,
+            prefill_mode, prompt_tokens=ids.len(), "run prefill");
+    }
+    let prefill_diagnostics = Some(crate::family_options::V41PrefillDiagnostics {
+        requested_execution: prefill_execution,
+        report: prefill_report,
+        capacity: Some(required),
+    });
+    if let Some(diagnostics) = &prefill_diagnostics {
+        tracing::info!(target: "qwen_diag", family="deepseek_v41",
+            prefill_report=%serde_json::to_string(diagnostics)?, "cold prefill execution");
+    }
     let mut stdout = std::io::stdout().lock();
     let generation = decode::generate_serial(
         logits,
@@ -873,7 +904,7 @@ pub(crate) fn run(
                 (source == PromptSource::Messages).then_some("deepseek_recipe_dsv41"),
             ),
             &measured,
-            None,
+            prefill_diagnostics.map(FamilyDiagnostics::DeepseekV41),
         )?;
     }
     Ok(())

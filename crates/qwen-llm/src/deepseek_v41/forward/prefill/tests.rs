@@ -92,11 +92,43 @@ fn chunk_dispatch_and_submission_census() {
                     .sum::<usize>(),
                 chunks
             );
-            assert!(
+            let mut inventory = report
+                .operations
+                .iter()
+                .map(|o| o.operation)
+                .collect::<Vec<_>>();
+            inventory.sort_unstable();
+            assert_eq!(
+                inventory,
+                [
+                    "prefill_chunk_rows",
+                    "prefill_engram_prepare",
+                    "prefill_host_prepare"
+                ]
+            );
+            for name in ["prefill_host_prepare", "prefill_engram_prepare"] {
+                let span = report
+                    .operations
+                    .iter()
+                    .find(|o| o.operation == name)
+                    .unwrap();
+                assert_eq!(span.count, chunks);
+                assert_eq!(span.dimensions, [0; 4]);
+                assert_eq!(span.completed_submits, 0);
+                assert_eq!(span.invalid_gpu_timestamps, 0);
+                assert!(span.gpu_ms.is_none());
+                assert_eq!(span.encode_ms, 0.0);
+                assert_eq!(span.commit_wait_ms, 0.0);
+                assert!(span.wall_ms.is_finite() && span.wall_ms >= 0.0);
+            }
+            assert_eq!(
                 report
                     .operations
                     .iter()
-                    .all(|o| matches!(o.operation, "prefill_chunk_rows" | "gpu_step"))
+                    .find(|o| o.operation == "prefill_chunk_rows")
+                    .unwrap()
+                    .completed_submits,
+                chunks
             );
             let encoders = dispatches
                 .iter()

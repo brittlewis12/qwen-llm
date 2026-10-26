@@ -1,8 +1,42 @@
 # V4.1 CED Prefill Design
 
-Date: 2026-10-23. Status: researched design and executable CPU dependency
-witness, **not an implemented native CED executor or a performance result**.
-The ordinary full-forward path remains the reference and default.
+Date: 2026-10-23. Status: experimental native cold shrinking executor implemented;
+full-model qualification and performance acceptance remain open. The ordinary
+full-forward path remains the reference and default. Bounded-128 replay and
+encoder replay are not implemented by this executor.
+
+## Native Interface And Qualification
+
+`Forward::prefill_with_execution` accepts `FullForward` or `ShrinkingCed` and
+returns final logits plus the actual execution report. Cold text `qwen run`
+and `qwen-bench` expose the opt-in through
+`QWEN_V41_PREFILL_EXECUTION=shrinking_ced`; unset or `full_forward` preserves
+ordinary execution. Serving does not read this control. Unsupported schedules,
+nonzero starting positions, and declined CED admission fall back before state
+mutation, reporting the reason and actual full-forward execution. Execution
+failures after mutation poison the provisional state instead of restarting it.
+
+The native implementation retains E/P and query controls with checked absolute
+origins, separately completes publication and KV-only seed frontiers, and
+commits a Ready state only after every decoder layer completes. Completed CED
+states support scalar continuation and snapshot restore/growth, but their
+origin excludes them from serving prefix reuse. Counters report completed
+encoder, publication, seed, and decoder work rather than inferred savings.
+
+Controlled nonuniform real-Metal fixtures establish scalar-native bitwise
+cache/logit parity, including restore/growth and 256 teacher-forced scalar
+steps. Separate arithmetic tests distinguish genuinely scalar original chunk
+tails from singleton tiles created by shrinking. Multi-chunk controlled and
+stock full-model comparisons are acceptance gates, not implied by those small
+fixtures. Frozen original 8K production and token-major scalar references
+retain boundary E/P, routing controls, every causal cache, and 256 continuation
+tokens; diagnostic capture time is not a prefill performance measurement.
+
+Memory reports distinguish the priced incremental admission ledger from Metal
+allocation samples and cumulative process `ru_maxrss`. Phase samples are not a
+continuous driver high-water, and process peak RSS is not an isolated CED peak.
+Neither these observations nor dependency-work counts establish a wall-time
+speedup or model-wide quality equivalence.
 
 ## Recommendation
 

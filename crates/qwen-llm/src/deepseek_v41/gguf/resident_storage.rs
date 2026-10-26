@@ -1,5 +1,8 @@
 use super::*;
 
+// Shared selection for metadata and loading; the generic Metal wrapper stays None.
+pub(super) const SOFT_COALESCING_TARGET: Option<usize> = None;
+
 /// Mapping ownership selected by the same geometry used during load.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ResidentMappingKind {
@@ -42,6 +45,7 @@ pub struct ResidentStorageWindow {
 pub struct ResidentStoragePlan {
     pub page_size: usize,
     pub max_buffer_length: usize,
+    pub soft_coalescing_target: Option<usize>,
     /// Serialized resident payload and disk-only Engram bytes, without page padding.
     pub bytes: ByteCounters,
     /// Ordered exactly as the loader imports them; boundary pages may repeat.
@@ -74,11 +78,33 @@ pub fn resident_storage_plan(
     for_plan(g, &p, page_size, max_buffer_length)
 }
 
+/// Explicit per-request coalescing selection; oversized singletons remain
+/// eligible up to the device limit. Ordinary planning keeps the None default.
+pub fn resident_storage_plan_with_target(
+    g: &GgufFile,
+    page_size: usize,
+    max_buffer_length: usize,
+    soft_target: Option<usize>,
+) -> Result<ResidentStoragePlan, LoadError> {
+    let p = plan(g)?;
+    for_plan_with_target(g, &p, page_size, max_buffer_length, soft_target)
+}
+
 pub(super) fn for_plan(
     g: &GgufFile,
     p: &Plan,
     page_size: usize,
     max_buffer_length: usize,
+) -> Result<ResidentStoragePlan, LoadError> {
+    for_plan_with_target(g, p, page_size, max_buffer_length, SOFT_COALESCING_TARGET)
+}
+
+pub(super) fn for_plan_with_target(
+    g: &GgufFile,
+    p: &Plan,
+    page_size: usize,
+    max_buffer_length: usize,
+    soft_target: Option<usize>,
 ) -> Result<ResidentStoragePlan, LoadError> {
     let lengths = storage::padded_lengths(g, page_size)?;
     // Do not coalesce across disk-only or unused tensors (including MTP).
@@ -105,6 +131,7 @@ pub(super) fn for_plan(
     let mut result = ResidentStoragePlan {
         page_size,
         max_buffer_length,
+        soft_coalescing_target: soft_target,
         bytes: p.bytes,
         windows: Vec::new(),
         metal_view_bytes: 0,
@@ -113,8 +140,14 @@ pub(super) fn for_plan(
         private_window_count: 0,
     };
     for segment in segments.values() {
-        let retained =
-            metal::plan_retained_storage(&lengths, segment, page_size, max_buffer_length, 16)?;
+        let retained = metal::plan_retained_storage_with_soft_target(
+            &lengths,
+            segment,
+            page_size,
+            max_buffer_length,
+            16,
+            soft_target,
+        )?;
         if retained.unique_fallback_bytes != 0 {
             return Err(invalid(
                 "tensor cannot be directly bound: device maximum buffer length or binding alignment",
@@ -136,4 +169,101 @@ pub(super) fn for_plan(
         }
     }
     Ok(result)
+}
+
+#[derive(Clone, Debug)]
+pub struct ResidentTensorExtent {
+    pub tensor: TensorDesc,
+    pub page_rounded_singleton_bytes: u64,
+}
+
+/// Bounded descriptor audit using the loader's private resident predicate.
+#[derive(Clone, Debug)]
+pub struct ResidentTensorAudit {
+    pub count: usize,
+    pub payload_bytes: u64,
+    pub largest_payload_bytes: u64,
+    pub largest_page_rounded_singleton_bytes: u64,
+    pub above_soft_target_count: usize,
+    pub above_soft_target_payload_bytes: u64,
+    pub top: Vec<ResidentTensorExtent>,
+}
+
+pub struct ResidentStorageAudit {
+    pub selected_soft_coalescing_target: Option<usize>,
+    pub control: ResidentStoragePlan,
+    pub candidate: ResidentStoragePlan,
+    pub tensors: ResidentTensorAudit,
+}
+
+/// Fixed None/4 GiB comparison, not a runtime selection or admission API.
+/// Like resident_storage_plan, this may read bounded CPU control payloads and
+/// open a declared companion's headers, but never reads weight/table payloads
+/// or imports Metal mappings.
+pub fn resident_storage_audit(
+    g: &GgufFile,
+    page_size: usize,
+    max_buffer_length: usize,
+) -> Result<ResidentStorageAudit, LoadError> {
+    let p = plan(g)?;
+    let target = 4_294_967_296;
+    let control = for_plan_with_target(g, &p, page_size, max_buffer_length, None)?;
+    let candidate = for_plan_with_target(g, &p, page_size, max_buffer_length, Some(target))?;
+    let effective = (target / page_size * page_size)
+        .max(page_size)
+        .min(max_buffer_length / page_size * page_size) as u64;
+    let tensors = audit_tensors(g, &p, page_size, effective)?;
+    Ok(ResidentStorageAudit {
+        selected_soft_coalescing_target: SOFT_COALESCING_TARGET,
+        control,
+        candidate,
+        tensors,
+    })
+}
+
+pub(super) fn audit_tensors(
+    g: &GgufFile,
+    p: &Plan,
+    page_size: usize,
+    effective_soft_target: u64,
+) -> Result<ResidentTensorAudit, LoadError> {
+    let mut tensors = ResidentTensorAudit {
+        count: 0,
+        payload_bytes: 0,
+        largest_payload_bytes: 0,
+        largest_page_rounded_singleton_bytes: 0,
+        above_soft_target_count: 0,
+        above_soft_target_payload_bytes: 0,
+        top: Vec::with_capacity(11),
+    };
+    for t in g.tensors.iter().filter(|t| resident_tensor(t, p.layers)) {
+        let start = t.data_offset / page_size as u64 * page_size as u64;
+        let end = add(t.data_offset, t.n_bytes)?;
+        let rounded_end = add(end, page_size as u64 - 1)? / page_size as u64 * page_size as u64;
+        let singleton = rounded_end - start;
+        tensors.count += 1;
+        tensors.payload_bytes = add(tensors.payload_bytes, t.n_bytes)?;
+        tensors.largest_payload_bytes = tensors.largest_payload_bytes.max(t.n_bytes);
+        tensors.largest_page_rounded_singleton_bytes =
+            tensors.largest_page_rounded_singleton_bytes.max(singleton);
+        if singleton > effective_soft_target {
+            tensors.above_soft_target_count += 1;
+            tensors.above_soft_target_payload_bytes =
+                add(tensors.above_soft_target_payload_bytes, t.n_bytes)?;
+        }
+        tensors.top.push(ResidentTensorExtent {
+            tensor: t.clone(),
+            page_rounded_singleton_bytes: singleton,
+        });
+        tensors.top.sort_by(|a, b| {
+            b.tensor
+                .n_bytes
+                .cmp(&a.tensor.n_bytes)
+                .then_with(|| a.tensor.name.cmp(&b.tensor.name))
+                .then_with(|| a.tensor.shard_idx.cmp(&b.tensor.shard_idx))
+                .then_with(|| a.tensor.data_offset.cmp(&b.tensor.data_offset))
+        });
+        tensors.top.truncate(10);
+    }
+    Ok(tensors)
 }

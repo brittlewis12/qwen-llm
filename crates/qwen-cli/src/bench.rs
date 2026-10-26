@@ -91,6 +91,8 @@ mod timing;
 mod tok;
 #[path = "bench/topology.rs"]
 mod topology;
+#[path = "bench/v41_ced_pair.rs"]
+mod v41_ced_pair;
 use qwen_cli::tracing_init;
 #[path = "bench/vocab_audit.rs"]
 mod vocab_audit;
@@ -534,10 +536,15 @@ struct BenchRow {
     /// and the naive `model_size × t/s` overstates by ~10x for MoE.
     decode_gb_per_s: Option<f64>,
     prefill_chunk: Option<usize>,
+    /// Family-specific actual logical chunk ranges and runtime width, when known.
+    prefill_geometry: Option<serde_json::Value>,
     decode_mode: Option<&'static str>,
     prefill_mode: Option<&'static str>,
     power: Option<PowerSnapshot>,
     qwen_env: std::collections::BTreeMap<String, String>,
+    /// Opt-in execution reports; omitted to preserve ordinary row JSON.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    diagnostics: Option<serde_json::Value>,
 }
 
 #[derive(Debug, Clone, Default, serde::Serialize)]
@@ -594,30 +601,103 @@ fn model_weight_bytes(g: &qwen_llm::gguf::GgufFile) -> u64 {
     g.tensors.iter().map(|t| t.n_bytes).sum()
 }
 
+fn emit_pair_request(
+    args: &Args,
+    capture: impl FnOnce(bool, bool) -> v41_ced_pair::Measurement,
+    writer: &mut impl std::io::Write,
+) -> Result<Option<v41_ced_pair::Measurement>> {
+    if let Cmd::Suite(suite) = &args.cmd
+        && suite.v41_ced_pair
+    {
+        let measurement = capture(
+            suite.v41_ced_pair_production_timing,
+            suite.v41_ced_pair_diagnostic,
+        )
+        .with_schedule(suite.v41_ced_pair_schedule.unwrap_or_default())
+        .with_p4(suite.v41_ced_pair_p4);
+        measurement.emit_requested(writer)?;
+        Ok(Some(measurement))
+    } else {
+        Ok(None)
+    }
+}
+
+fn check_entry_environment(
+    guard: impl FnOnce() -> std::result::Result<(), String>,
+    parse_on_refusal: impl FnOnce() -> std::result::Result<Args, clap::Error>,
+    capture: impl FnOnce(bool, bool) -> v41_ced_pair::Measurement,
+    writer: &mut impl std::io::Write,
+) -> Result<()> {
+    if let Err(error) = guard() {
+        // Keep the pre-parse refusal even for help/invalid arguments. Only a
+        // successfully parsed pair can truthfully identify a requested regime.
+        if let Ok(args) = parse_on_refusal()
+            && let Err(report_error) = emit_pair_request(&args, capture, writer)
+        {
+            return Err(
+                anyhow!(error).context(format!("paired launch reporting failed: {report_error:#}"))
+            );
+        }
+        return Err(anyhow!(error));
+    }
+    Ok(())
+}
+
+fn with_command_start<R>(
+    args: Args,
+    capture: impl FnOnce(bool, bool) -> v41_ced_pair::Measurement,
+    writer: &mut impl std::io::Write,
+    validate_build: impl FnOnce(&Args) -> Result<()>,
+    dispatch: impl FnOnce(Args, Option<v41_ced_pair::Measurement>) -> Result<R>,
+) -> Result<R> {
+    let paired_measurement = emit_pair_request(&args, capture, writer)?;
+    validate_build(&args)?;
+    dispatch(args, paired_measurement)
+}
+
 fn main() -> std::process::ExitCode {
-    if let Err(error) = qwen_llm::env_flag::check_perf_ablation_environment() {
-        eprintln!("{error}");
+    if let Err(error) = check_entry_environment(
+        qwen_llm::env_flag::check_perf_ablation_environment,
+        Args::try_parse,
+        v41_ced_pair::Measurement::capture,
+        &mut std::io::stderr().lock(),
+    ) {
+        eprintln!("{error:#}");
         return std::process::ExitCode::FAILURE;
     }
     shutdown::finish(run())
 }
 
 fn run() -> Result<()> {
-    shutdown::install()?;
-    tracing_init::install_default_subscriber();
-
     let args = Args::parse();
-    let policy = BuildIdentityPolicy {
-        allow_dirty: args.allow_dirty,
-        allow_unverifiable: args.allow_unverifiable_build,
-    };
-    let _ = BUILD_IDENTITY_POLICY.set(policy);
-    if !matches!(
-        &args.cmd,
-        Cmd::BuildInfo(_) | Cmd::DflashE0Lockstep(_) | Cmd::ResidencyKillChild(_)
-    ) {
-        validate_build_identity(qwen_build_identity_packet(), policy)?;
-    }
+    with_command_start(
+        args,
+        v41_ced_pair::Measurement::capture,
+        &mut std::io::stderr(),
+        |args| {
+            shutdown::install()?;
+            tracing_init::install_default_subscriber();
+            let policy = BuildIdentityPolicy {
+                allow_dirty: args.allow_dirty,
+                allow_unverifiable: args.allow_unverifiable_build,
+            };
+            let _ = BUILD_IDENTITY_POLICY.set(policy);
+            if !matches!(
+                &args.cmd,
+                Cmd::BuildInfo(_) | Cmd::DflashE0Lockstep(_) | Cmd::ResidencyKillChild(_)
+            ) {
+                validate_build_identity(qwen_build_identity_packet(), policy)?;
+            }
+            Ok(())
+        },
+        dispatch_command,
+    )
+}
+
+fn dispatch_command(
+    args: Args,
+    paired_measurement: Option<v41_ced_pair::Measurement>,
+) -> Result<()> {
     match args.cmd {
         Cmd::AttnCapture(a) => {
             attn_capture::run(a, serde_json::to_value(qwen_build_identity_packet())?)
@@ -655,7 +735,7 @@ fn run() -> Result<()> {
             capture_qwen_env(),
         ),
         Cmd::Tg(a) => run_tg(a),
-        Cmd::Suite(a) => run_suite(a),
+        Cmd::Suite(a) => suite::run_suite_with_measurement(a, paired_measurement),
         Cmd::CtxSweep(a) => run_ctx_sweep(a),
         Cmd::Phase(a) => run_phase(a),
         Cmd::AttnIntra(a) => run_attn_intra(a),
@@ -719,6 +799,237 @@ fn run() -> Result<()> {
         Cmd::AttnLayerMicro(a) => run_attn_layer_micro(a),
         Cmd::PpFfnAb(a) => run_pp_ffn_ab(a),
         Cmd::PpWait(a) => run_pp_wait(a),
+    }
+}
+
+#[cfg(test)]
+mod paired_startup_tests {
+    use super::*;
+    use std::cell::Cell;
+    use std::io::Write;
+
+    fn pair_args(production: bool, diagnostic: bool) -> Args {
+        let mut argv = vec![
+            "qwen-bench",
+            "suite",
+            "-m",
+            "fixture.gguf",
+            "--pp",
+            "128",
+            "--v41-ced-pair",
+        ];
+        if production {
+            argv.push("--v41-ced-pair-production-timing");
+        }
+        if diagnostic {
+            argv.push("--v41-ced-pair-diagnostic");
+        }
+        Args::try_parse_from(argv).unwrap()
+    }
+
+    fn measurement(
+        production: bool,
+        diagnostic: bool,
+        ablation: bool,
+    ) -> v41_ced_pair::Measurement {
+        let mut vars = Vec::new();
+        if !production {
+            vars.push(("MTL_DEBUG_LAYER".into(), "1".into()));
+        }
+        if ablation {
+            vars.push(("QWEN_PREFILL_NOOP_FFN".into(), "0".into()));
+        }
+        v41_ced_pair::Measurement::from_environment(production, diagnostic, vars)
+    }
+
+    #[test]
+    fn paired_entry_emits_once_before_ablation_or_build_refusal_without_model_or_metal() {
+        for production in [false, true] {
+            for diagnostic in [false, true] {
+                for fault in ["ablation", "build", "ok"] {
+                    let captures = Cell::new(0);
+                    let builds = Cell::new(0);
+                    let models = Cell::new(0);
+                    let devices = Cell::new(0);
+                    let mut bytes = Vec::new();
+                    let refusal =
+                        qwen_llm::env_flag::perf_ablation_refusal_for(["QWEN_PREFILL_NOOP_FFN"])
+                            .unwrap();
+                    let result = (|| {
+                        check_entry_environment(
+                            || {
+                                if fault == "ablation" {
+                                    Err(refusal.clone())
+                                } else {
+                                    Ok(())
+                                }
+                            },
+                            || Ok(pair_args(production, diagnostic)),
+                            |p, d| {
+                                captures.set(captures.get() + 1);
+                                measurement(p, d, true)
+                            },
+                            &mut bytes,
+                        )?;
+                        with_command_start(
+                            pair_args(production, diagnostic),
+                            |p, d| {
+                                captures.set(captures.get() + 1);
+                                measurement(p, d, false)
+                            },
+                            &mut bytes,
+                            |_| {
+                                builds.set(builds.get() + 1);
+                                anyhow::ensure!(fault != "build", "fixture build identity refusal");
+                                Ok(())
+                            },
+                            |args, captured| {
+                                let Cmd::Suite(_) = args.cmd else {
+                                    panic!("suite")
+                                };
+                                captured
+                                    .expect("already captured measurement reaches suite")
+                                    .validate_environment()?;
+                                models.set(models.get() + 1);
+                                devices.set(devices.get() + 1);
+                                Ok(())
+                            },
+                        )
+                    })();
+                    assert_eq!(captures.get(), 1, "{fault}");
+                    assert_eq!(builds.get(), usize::from(fault != "ablation"));
+                    assert_eq!(models.get(), usize::from(fault == "ok"));
+                    assert_eq!(devices.get(), usize::from(fault == "ok"));
+                    assert_eq!(result.is_ok(), fault == "ok");
+                    if fault == "ablation" {
+                        assert_eq!(result.unwrap_err().to_string(), refusal);
+                    }
+                    let text = String::from_utf8(bytes).unwrap();
+                    assert_eq!(text.lines().count(), 1);
+                    let event: serde_json::Value = serde_json::from_str(&text).unwrap();
+                    assert_eq!(event["event"], "v41_pair_launch_requested");
+                    assert_eq!(
+                        event["measurement"]["production_timing_requested"],
+                        production
+                    );
+                    assert_eq!(event["instrumented"], diagnostic);
+                    if fault == "ablation" {
+                        assert_eq!(
+                            event["measurement"]["environment"]["QWEN_PREFILL_NOOP_FFN"],
+                            "<set; disallowed runtime value not recorded>"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn preparse_guard_keeps_refusal_for_help_parse_failure_and_nonpair_commands() {
+        for argv in [
+            vec!["qwen-bench", "--help"],
+            vec!["qwen-bench", "suite", "--v41-ced-pair", "--unknown"],
+            vec!["qwen-bench", "build-info"],
+        ] {
+            let mut bytes = Vec::new();
+            let error = check_entry_environment(
+                || Err("original preparse refusal".into()),
+                || Args::try_parse_from(argv),
+                |_, _| panic!("no recognizable paired intent"),
+                &mut bytes,
+            )
+            .unwrap_err();
+            assert_eq!(error.to_string(), "original preparse refusal");
+            assert!(bytes.is_empty());
+        }
+        check_entry_environment(
+            || Ok(()),
+            || panic!("successful guard must not parse early"),
+            |_, _| panic!("successful guard must not capture early"),
+            &mut Vec::new(),
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn launch_write_or_flush_failure_stops_entry_before_build_model_or_metal() {
+        struct Broken {
+            fail_write: bool,
+            flushes: usize,
+        }
+        impl Write for Broken {
+            fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+                if self.fail_write {
+                    Err(std::io::Error::other("fixture launch write failure"))
+                } else {
+                    Ok(bytes.len())
+                }
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                self.flushes += 1;
+                Err(std::io::Error::other("fixture launch flush failure"))
+            }
+        }
+        for ablation in [false, true] {
+            for fail_write in [false, true] {
+                let mut writer = Broken {
+                    fail_write,
+                    flushes: 0,
+                };
+                let captures = Cell::new(0);
+                let builds = Cell::new(0);
+                let models = Cell::new(0);
+                let devices = Cell::new(0);
+                let result: Result<()> = (|| {
+                    check_entry_environment(
+                        || {
+                            if ablation {
+                                Err("original preparse refusal".into())
+                            } else {
+                                Ok(())
+                            }
+                        },
+                        || Ok(pair_args(true, false)),
+                        |p, d| {
+                            captures.set(captures.get() + 1);
+                            measurement(p, d, ablation)
+                        },
+                        &mut writer,
+                    )?;
+                    with_command_start(
+                        pair_args(true, false),
+                        |p, d| {
+                            captures.set(captures.get() + 1);
+                            measurement(p, d, false)
+                        },
+                        &mut writer,
+                        |_| {
+                            builds.set(builds.get() + 1);
+                            Ok(())
+                        },
+                        |_, _| {
+                            models.set(models.get() + 1);
+                            devices.set(devices.get() + 1);
+                            Ok(())
+                        },
+                    )
+                })();
+                let error = format!("{:#}", result.unwrap_err());
+                assert!(error.contains(if fail_write {
+                    "fixture launch write failure"
+                } else {
+                    "fixture launch flush failure"
+                }));
+                if ablation {
+                    assert!(error.contains("original preparse refusal"));
+                }
+                assert_eq!(captures.get(), 1);
+                assert_eq!(writer.flushes, usize::from(!fail_write));
+                assert_eq!(builds.get(), 0);
+                assert_eq!(models.get(), 0);
+                assert_eq!(devices.get(), 0);
+            }
+        }
     }
 }
 

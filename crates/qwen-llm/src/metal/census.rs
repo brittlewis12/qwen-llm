@@ -383,7 +383,10 @@ pub struct MetalPipelineInfo {
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct MetalPipelineCacheMetrics {
+    /// Combined ordinary (product/research) and Metal 4 tensor cache misses.
+    /// Includes failed function lookup/PSO creation; cache hits are excluded.
     pub misses: u64,
+    /// Inclusive cold-miss wall time; compiler_wall_ns is nested, not additive.
     pub miss_wall_ns: u64,
     pub compiler_wall_ns: u64,
 }
@@ -409,6 +412,54 @@ pub(crate) struct MetalPipelineCache {
     pub(crate) metrics: MetalPipelineCacheMetrics,
 }
 
+/// Cold-lookup accounting shared by ordinary and tensor pipelines, including
+/// error returns. Disabled metrics do not read clocks or lock again on drop.
+pub(crate) struct MetricsScope<'a> {
+    cache: &'a parking_lot::Mutex<MetalPipelineCache>,
+    start: Option<std::time::Instant>,
+    compiler_start: Option<std::time::Instant>,
+}
+
+impl<'a> MetricsScope<'a> {
+    pub(crate) fn begin(
+        cache: &'a parking_lot::Mutex<MetalPipelineCache>,
+        locked: &mut MetalPipelineCache,
+    ) -> Self {
+        if locked.metrics_enabled {
+            locked.metrics.misses = locked.metrics.misses.saturating_add(1);
+        }
+        Self {
+            cache,
+            start: locked.metrics_enabled.then(std::time::Instant::now),
+            compiler_start: None,
+        }
+    }
+
+    pub(crate) fn compiler_started(&mut self) {
+        self.compiler_start = self.start.map(|_| std::time::Instant::now());
+    }
+}
+
+impl Drop for MetricsScope<'_> {
+    fn drop(&mut self) {
+        let Some(start) = self.start else { return };
+        let end = std::time::Instant::now();
+        let wall = duration_ns_saturating(end.duration_since(start));
+        let compiler = self
+            .compiler_start
+            .map(|start| duration_ns_saturating(end.duration_since(start)));
+        let mut cache = self.cache.lock();
+        if !cache.metrics_enabled {
+            return;
+        }
+        cache.metrics.miss_wall_ns = cache.metrics.miss_wall_ns.saturating_add(wall);
+        if let Some(compiler) = compiler {
+            cache.metrics.compiler_wall_ns =
+                cache.metrics.compiler_wall_ns.saturating_add(compiler);
+        }
+    }
+}
+
 pub(crate) fn duration_ns_saturating(duration: std::time::Duration) -> u64 {
     u64::try_from(duration.as_nanos()).unwrap_or(u64::MAX)
 }
@@ -416,6 +467,56 @@ pub(crate) fn duration_ns_saturating(duration: std::time::Duration) -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn pipeline_metrics_scope_accounts_success_failure_and_unwind_without_metal() {
+        let cache = parking_lot::Mutex::new(MetalPipelineCache::default());
+        cache.lock().metrics_enabled = true;
+        for compile in [false, true] {
+            let mut scope = MetricsScope::begin(&cache, &mut cache.lock());
+            // Inject elapsed intervals, avoiding sleeps and any GPU requirement.
+            scope.start = Some(std::time::Instant::now() - std::time::Duration::from_millis(2));
+            if compile {
+                scope.compiler_started();
+                scope.compiler_start =
+                    Some(std::time::Instant::now() - std::time::Duration::from_millis(1));
+            }
+            drop(scope);
+        }
+        let before = cache.lock().metrics;
+        assert_eq!(before.misses, 2);
+        assert!(before.miss_wall_ns >= 4_000_000);
+        assert!(before.compiler_wall_ns >= 1_000_000);
+        assert!(before.compiler_wall_ns < before.miss_wall_ns);
+        let error = || -> Result<(), ()> {
+            let _scope = MetricsScope::begin(&cache, &mut cache.lock());
+            Err(())
+        };
+        assert!(error().is_err());
+        assert!(
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                let _scope = MetricsScope::begin(&cache, &mut cache.lock());
+                panic!("pipeline creation unwind fixture");
+            }))
+            .is_err()
+        );
+        let after = cache.lock().metrics;
+        assert_eq!(after.misses, 4);
+        assert!(after.miss_wall_ns >= before.miss_wall_ns);
+        assert_eq!(after.compiler_wall_ns, before.compiler_wall_ns);
+        assert_eq!(after.saturating_delta_since(before).misses, 2);
+    }
+
+    #[test]
+    fn pipeline_metrics_scope_disabled_is_clock_and_drop_lock_inert() {
+        let cache = parking_lot::Mutex::new(MetalPipelineCache::default());
+        let mut scope = MetricsScope::begin(&cache, &mut cache.lock());
+        scope.compiler_started();
+        assert!(scope.start.is_none() && scope.compiler_start.is_none());
+        let locked = cache.lock();
+        drop(scope); // Must not try to reacquire the held cache lock.
+        assert_eq!(locked.metrics, MetalPipelineCacheMetrics::default());
+    }
 
     #[test]
     fn census_observer_is_inert_when_only_another_thread_is_capturing() {

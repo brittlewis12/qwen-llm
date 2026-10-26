@@ -1,9 +1,14 @@
 //! FFN component of the full GPU graph. No CPU routes or intermediate readbacks.
+use super::prefill::RowsArithmetic;
 use super::*;
 use objc2_metal::MTLSize;
 
 #[cfg(test)]
 pub(super) mod tests;
+
+#[cfg(test)]
+#[path = "ffn_gpu/tests/arithmetic.rs"]
+mod arithmetic_tests;
 
 pub(super) struct Workspace {
     // 0 X, 1 incoming pre, 2 projected mixes, 3 next pre, 4 post, 5 comb,
@@ -488,7 +493,7 @@ impl Workspace {
         let n = scratch.hc.rows;
         composition_extents(c, n)?;
         let b = &scratch.buffers;
-        scratch.hc.encode(
+        scratch.hc.encode_with_arithmetic(
             ctx,
             enc,
             c,
@@ -496,16 +501,23 @@ impl Workspace {
             &self.constants[id],
             x,
             incoming,
+            scratch.arithmetic,
         )?;
-        layer
-            .router
-            .encode_rows(enc, &scratch.hc.normalized, &b[0], n)?;
+        layer.router.encode_rows_with_arithmetic(
+            enc,
+            &scratch.hc.normalized,
+            &b[0],
+            n,
+            scratch.arithmetic,
+        )?;
         // One half copy of the normalized input for the shared gate/up here
         // and the routed gate/up below.
         let input_half = match &scratch.half_input {
             Some(half)
-                if layer.shared[..2].iter().any(|w| w.tensor_rows_selected(n))
-                    || (half_grouped_selected(c, layer, n)
+                if layer.shared[..2]
+                    .iter()
+                    .any(|w| w.tensor_rows_selected_with_arithmetic(n, scratch.arithmetic))
+                    || (half_grouped_selected_with_arithmetic(c, layer, n, scratch.arithmetic)
                         && metal::moe_grouped_tensor_selected(ctx)) =>
             {
                 Some(half.convert(ctx, enc, &scratch.hc.normalized, c.hidden * n)?)
@@ -513,12 +525,13 @@ impl Workspace {
             _ => None,
         };
         for j in 0..2 {
-            layer.shared[j].encode_rows_with(
+            layer.shared[j].encode_rows_with_arithmetic_and_half(
                 enc,
                 &scratch.hc.normalized,
                 input_half.as_ref(),
                 &b[1 + j],
                 n,
+                scratch.arithmetic,
             )?;
         }
         let shape = vec![(c.intermediate * n) as u64];
@@ -531,18 +544,28 @@ impl Workspace {
             c.clamp,
         )?;
         let shared_half = match &scratch.half_inner {
-            Some(half) if layer.shared[2].tensor_rows_selected(n) => {
+            Some(half)
+                if layer.shared[2].tensor_rows_selected_with_arithmetic(n, scratch.arithmetic) =>
+            {
                 Some(half.convert(ctx, enc, &b[3], c.intermediate * n)?)
             }
             _ => None,
         };
-        layer.shared[2].encode_rows_with(enc, &b[3], shared_half.as_ref(), &b[4], n)?;
-        if half_grouped_selected(c, layer, n)
+        layer.shared[2].encode_rows_with_arithmetic_and_half(
+            enc,
+            &b[3],
+            shared_half.as_ref(),
+            &b[4],
+            n,
+            scratch.arithmetic,
+        )?;
+        if half_grouped_selected_with_arithmetic(c, layer, n, scratch.arithmetic)
             || grouped_selected(c, layer, n)
             || native_rows_supported(c, layer)
         {
             self.encode_routed_rows(ctx, enc, c, layer, id, scratch, input_half.as_ref())?;
         } else {
+            let status = scratch.status_view(id)?;
             for row in 0..n {
                 self.encode_routed(
                     ctx,
@@ -554,7 +577,7 @@ impl Workspace {
                     &prefill::row(&b[0], c.experts, row),
                     &prefill::row(&b[4], c.hidden, row),
                     &prefill::row(&b[5], c.hidden, row),
-                    &prefill::row(&b[6], 1, id * n + row),
+                    &prefill::row(&status, 1, row),
                 )?;
             }
         }
@@ -584,7 +607,7 @@ impl Workspace {
         let n = scratch.hc.rows;
         let extents = composition_extents(c, n)?;
         let b = &scratch.buffers;
-        let status = b[6].view_subrange((id * n) as u64, vec![n as u64]);
+        let status = scratch.status_view(id)?;
         let counts = b[10].view_subrange(0, vec![c.experts as u64]);
         encode_route_rows(
             ctx,
@@ -598,7 +621,7 @@ impl Workspace {
             &b[9],
             &status,
         )?;
-        let half = half_grouped_selected(c, layer, n);
+        let half = half_grouped_selected_with_arithmetic(c, layer, n, scratch.arithmetic);
         // The Metal 4 tensor tile is the half route's production form where
         // the tier exists: same operands and contract, matmul2d instead of
         // simdgroup MMA.
@@ -771,14 +794,22 @@ pub(super) fn half_grouped_supported(c: &Config, layer: &Layer<'_>) -> bool {
 }
 
 pub(super) fn half_grouped_selected(c: &Config, layer: &Layer<'_>, rows: usize) -> bool {
+    half_grouped_selected_with_arithmetic(c, layer, rows, RowsArithmetic::Ordinary)
+}
+
+pub(super) fn half_grouped_selected_with_arithmetic(
+    c: &Config,
+    layer: &Layer<'_>,
+    rows: usize,
+    arithmetic: RowsArithmetic,
+) -> bool {
     // Forcing the grouped route in tests means the F32-operand tiles, whose
     // frozen witnesses hold a 1e-5 contract the half tiles do not claim.
     #[cfg(test)]
     if tests::FORCE_GROUPED_ROWS.with(|flag| flag.get()) {
         return false;
     }
-    // One row is a GEMV; the tiles only pay off once an expert sees several.
-    rows > 1 && half_grouped_supported(c, layer)
+    arithmetic.packed_operands(rows) && half_grouped_supported(c, layer)
 }
 
 /// Layers per routed-expert route for a chunk of `rows`: half-staged
@@ -863,6 +894,7 @@ fn native_rows_supported(c: &Config, layer: &Layer<'_>) -> bool {
 
 pub(super) struct Rows {
     pub(super) hc: prefill::HcRows,
+    arithmetic: RowsArithmetic,
     // Activations are reused; buffer 6 retains layer-major [layer][row] statuses.
     buffers: Vec<MetalTensor>,
     /// Half copy of the normalized input (shared and routed gate/up read
@@ -870,8 +902,49 @@ pub(super) struct Rows {
     /// shared, then the routed slots); `None` when the tier is not selected.
     half_input: Option<prefill::HalfScratch>,
     half_inner: Option<prefill::HalfScratch>,
+    // Constructor provenance; checked views must not silently lose half staging.
+    half_required: [bool; 2],
+    ced_status: Option<(usize, MetalTensor)>,
 }
 impl Rows {
+    fn status_view(&self, id: usize) -> std::result::Result<MetalTensor, metal::MetalError> {
+        if let Some((layer, status)) = &self.ced_status {
+            if *layer != id {
+                return Err(metal::MetalError::BadShape {
+                    kernel: "v41_ffn_ced_status",
+                    detail: "status producer mismatch".into(),
+                });
+            }
+            Ok(status.clone())
+        } else {
+            Ok(
+                self.buffers[6]
+                    .view_subrange((id * self.hc.rows) as u64, vec![self.hc.rows as u64]),
+            )
+        }
+    }
+
+    fn prefix_widths(
+        c: &Config,
+        backing_rows: usize,
+        rows: usize,
+        layers: usize,
+    ) -> Result<Vec<usize>> {
+        prefill::checked_scratch_rows(backing_rows, rows)?;
+        composition_extents(c, backing_rows).map_err(|e| e.to_string())?;
+        composition_extents(c, rows).map_err(|e| e.to_string())?;
+        op::require(layers > 0, "FFN prefix requires layers")?;
+        let widths = Self::widths(c, layers);
+        for &width in &widths {
+            width
+                .checked_mul(backing_rows)
+                .and_then(|n| n.checked_mul(4))
+                .filter(|&bytes| bytes <= isize::MAX as usize)
+                .ok_or("FFN prefix backing extent overflow")?;
+        }
+        Ok(widths)
+    }
+
     pub(super) fn widths(c: &Config, layers: usize) -> Vec<usize> {
         let mut widths = prefill::HcRows::widths(c);
         widths.extend([
@@ -894,6 +967,16 @@ impl Rows {
         widths
     }
     pub(super) fn new(ctx: &MetalContext, c: &Config, rows: usize, layers: usize) -> Result<Self> {
+        Self::with_arithmetic(ctx, c, rows, layers, RowsArithmetic::Ordinary)
+    }
+
+    pub(super) fn with_arithmetic(
+        ctx: &MetalContext,
+        c: &Config,
+        rows: usize,
+        layers: usize,
+        arithmetic: RowsArithmetic,
+    ) -> Result<Self> {
         composition_extents(c, rows).map_err(|e| e.to_string())?;
         let [input_elements, inner_elements] = prefill::ffn_half_scratch_elements(c, rows)?;
         let hc = prefill::HcRows::new(ctx, c, rows)?;
@@ -933,12 +1016,119 @@ impl Rows {
         let half_inner = prefill::HalfScratch::new(ctx, inner_elements)?;
         Ok(Self {
             hc,
+            arithmetic,
+            buffers,
+            half_required: [half_input.is_some(), half_inner.is_some()],
+            half_input,
+            half_inner,
+            ced_status: None,
+        })
+    }
+
+    /// The driver must retire all users of the backing before this call: the
+    /// compact [layer][current row] status slab is reset on the host.
+    pub(super) fn checked_prefix(&self, c: &Config, rows: usize, layers: usize) -> Result<Self> {
+        self.prefix(c, rows, layers, None)
+    }
+
+    pub(super) fn checked_ced_prefix(
+        &self,
+        c: &Config,
+        rows: usize,
+        layers: usize,
+        layer: usize,
+        status: &MetalTensor,
+    ) -> Result<Self> {
+        op::require(layer < layers, "CED FFN status layer")?;
+        prefill::checked_scratch_view(status, &[rows], &[rows], GgmlType::I32)?;
+        self.prefix(c, rows, layers, Some((layer, status.clone())))
+    }
+
+    fn prefix(
+        &self,
+        c: &Config,
+        rows: usize,
+        layers: usize,
+        ced_status: Option<(usize, MetalTensor)>,
+    ) -> Result<Self> {
+        let widths = Self::prefix_widths(c, self.hc.rows, rows, layers)?;
+        op::require(
+            [self.half_input.is_some(), self.half_inner.is_some()] == self.half_required,
+            "FFN prefix half backing presence differs from constructor",
+        )?;
+        op::require(
+            self.buffers.len() == widths.len() - 6,
+            "FFN scratch buffers",
+        )?;
+        let hc = self.hc.checked_prefix(c, rows)?;
+        let buffers = self
+            .buffers
+            .iter()
+            .zip(&widths[6..])
+            .enumerate()
+            .map(|(i, (tensor, &width))| {
+                prefill::checked_scratch_view(
+                    tensor,
+                    &[width, self.hc.rows],
+                    &[width, rows],
+                    if matches!(i, 6 | 8 | 10 | 11) {
+                        GgmlType::I32
+                    } else {
+                        GgmlType::F32
+                    },
+                )
+            })
+            .collect::<Result<Vec<_>>>()?;
+        let [input_elements, inner_elements] = prefill::ffn_half_scratch_elements(c, rows)?;
+        let half_input = self
+            .half_input
+            .as_ref()
+            .map(|half| half.checked_prefix(input_elements))
+            .transpose()?;
+        let half_inner = self
+            .half_inner
+            .as_ref()
+            .map(|half| half.checked_prefix(inner_elements))
+            .transpose()?;
+
+        // Every view has passed validation. Reset only active statuses, not the
+        // large overwrite-before-read activations or unused maximum-row tail.
+        let status = &buffers[6];
+        if ced_status.is_none() {
+            unsafe {
+                std::ptr::write_bytes(
+                    status
+                        .buffer
+                        .contents()
+                        .as_ptr()
+                        .cast::<u8>()
+                        .add(status.offset as usize)
+                        .cast::<i32>(),
+                    0,
+                    status.n_elements() as usize,
+                );
+            }
+        }
+        Ok(Self {
+            hc,
+            arithmetic: RowsArithmetic::Packed,
             buffers,
             half_input,
             half_inner,
+            half_required: self.half_required,
+            ced_status,
         })
     }
+
     pub(super) fn validate_status(&self) -> Result<()> {
+        self.validate_status_layers(0..self.buffers[6].n_elements() as usize / self.hc.rows)
+    }
+
+    pub(super) fn validate_status_layers(&self, layers: std::ops::Range<usize>) -> Result<()> {
+        if let Some((layer, status)) = &self.ced_status {
+            op::require(layers == (*layer..*layer + 1), "CED FFN status scope")?;
+            return validate_ced_status(status, *layer);
+        }
         let t = &self.buffers[6];
         let values = unsafe {
             std::slice::from_raw_parts(
@@ -950,7 +1140,16 @@ impl Rows {
                 t.n_elements() as usize,
             )
         };
-        for (index, &status) in values.iter().enumerate() {
+        op::require(
+            layers.start <= layers.end && layers.end <= values.len() / self.hc.rows,
+            "prefill FFN status layer range",
+        )?;
+        for (index, &status) in values
+            .iter()
+            .enumerate()
+            .take(layers.end * self.hc.rows)
+            .skip(layers.start * self.hc.rows)
+        {
             if status != metal::ROUTE_STATUS_READY {
                 return Err(format!(
                     "prefill FFN layer {} row {} route status {status}",
@@ -960,5 +1159,262 @@ impl Rows {
             }
         }
         Ok(())
+    }
+}
+
+pub(super) fn validate_ced_status(t: &MetalTensor, layer: usize) -> Result<()> {
+    op::require(
+        t.dtype == GgmlType::I32
+            && t.offset.is_multiple_of(4)
+            && t.n_elements() > 0
+            && t.n_elements()
+                .checked_mul(4)
+                .and_then(|n| t.offset.checked_add(n))
+                .is_some_and(|end| end <= t.buffer.length() as u64),
+        "CED FFN status view",
+    )?;
+    let values = unsafe {
+        std::slice::from_raw_parts(
+            t.buffer
+                .contents()
+                .as_ptr()
+                .cast::<i32>()
+                .add((t.offset / 4) as usize),
+            t.n_elements() as usize,
+        )
+    };
+    for (row, &status) in values.iter().enumerate() {
+        op::require(
+            status == metal::ROUTE_STATUS_READY,
+            &format!("prefill FFN layer {layer} row {row} route status {status}"),
+        )?;
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod scratch_prefix_geometry_tests {
+    use super::*;
+
+    #[test]
+    #[ignore = "self-leased actual scratch buffers; MTL debug layer; no model or dispatch"]
+    fn ffn_actual_prefix_resets_only_active_statuses_after_all_checks() {
+        assert_eq!(std::env::var("MTL_DEBUG_LAYER").as_deref(), Ok("1"));
+        assert_eq!(std::env::var("QWEN_METAL_LEASE_WAIT").as_deref(), Ok("1"));
+        assert!(!crate::env_flag::read_default_off(
+            "QWEN_METAL_LEASE_SKIP_WIRED_GATE"
+        ));
+        let _lease = metal::acquire_metal_benchmark_lease().unwrap();
+        let ctx = MetalContext::new().unwrap();
+        let c = super::super::toy::config();
+        let (maximum, layers) = (8, 3);
+        let widths = Rows::widths(&c, layers);
+        let half = prefill::ffn_half_scratch_elements(&c, maximum).unwrap();
+        let bytes = widths
+            .iter()
+            .map(|&w| (w * maximum * 4) as u64)
+            .chain(half.map(|n| (n * 2) as u64))
+            .chain([64 * 4])
+            .map(|n| ctx.price_shared_buffer_upper(n).unwrap().priced_upper_bytes)
+            .sum::<u64>();
+        assert!(bytes < 16 * 1024 * 1024);
+        let admission = metal::evaluate_metal_memory_admission_with_cpu_bytes(
+            bytes,
+            1024 * 1024,
+            0,
+            ctx.memory_signals(),
+            true,
+        );
+        assert!(admission.refusal().is_none());
+
+        fn words(t: &MetalTensor) -> &[u32] {
+            unsafe {
+                std::slice::from_raw_parts(
+                    t.buffer
+                        .contents()
+                        .as_ptr()
+                        .cast::<u8>()
+                        .add(t.offset as usize)
+                        .cast::<u32>(),
+                    t.n_elements() as usize,
+                )
+            }
+        }
+        fn poison(t: &MetalTensor) {
+            unsafe {
+                std::slice::from_raw_parts_mut(
+                    t.buffer
+                        .contents()
+                        .as_ptr()
+                        .cast::<u8>()
+                        .add(t.offset as usize)
+                        .cast::<u32>(),
+                    t.n_elements() as usize,
+                )
+            }
+            .iter_mut()
+            .enumerate()
+            .for_each(|(i, word)| *word = 0xdead0000 + i as u32);
+        }
+        fn activations(rows: &Rows) -> Vec<Vec<u32>> {
+            rows.buffers
+                .iter()
+                .enumerate()
+                .filter(|(i, _)| *i != 6)
+                .map(|(_, t)| t)
+                .chain([
+                    &rows.hc.pre,
+                    &rows.hc.post,
+                    &rows.hc.comb,
+                    &rows.hc.normalized,
+                ])
+                .map(|t| words(t).to_vec())
+                .collect()
+        }
+
+        objc2::rc::autoreleasepool(|_| {
+            let mut backing =
+                Rows::with_arithmetic(&ctx, &c, maximum, layers, RowsArithmetic::Packed).unwrap();
+            for t in backing.buffers.iter().chain([
+                &backing.hc.pre,
+                &backing.hc.post,
+                &backing.hc.comb,
+                &backing.hc.normalized,
+            ]) {
+                poison(t);
+            }
+            let before = activations(&backing);
+            for n in [8, 1, 5] {
+                poison(&backing.buffers[6]);
+                let status_before = words(&backing.buffers[6]).to_vec();
+                let view = backing.checked_prefix(&c, n, layers).unwrap();
+                assert_eq!(view.hc.rows, n);
+                assert_eq!(backing.hc.rows, maximum);
+                assert_eq!(view.half_required, backing.half_required);
+                for (index, (view, original)) in
+                    view.buffers.iter().zip(&backing.buffers).enumerate()
+                {
+                    assert!(std::ptr::eq(&*view.buffer, &*original.buffer));
+                    assert_eq!(view.offset, original.offset);
+                    assert_eq!(view.n_elements(), (widths[index + 6] * n) as u64);
+                }
+                assert!(
+                    words(&backing.buffers[6])[..layers * n]
+                        .iter()
+                        .all(|&word| word == 0)
+                );
+                assert_eq!(
+                    &words(&backing.buffers[6])[layers * n..],
+                    &status_before[layers * n..]
+                );
+                assert_eq!(activations(&backing), before);
+            }
+
+            poison(&backing.buffers[6]);
+            let status_before = words(&backing.buffers[6]).to_vec();
+            let ledger = prefill::allocate(&ctx, 64, 1, GgmlType::I32).unwrap();
+            poison(&ledger);
+            let ledger_before = words(&ledger).to_vec();
+            for n in [8, 1, 5] {
+                let scoped = ledger.view_subrange(16, vec![n as u64]);
+                let view = backing
+                    .checked_ced_prefix(&c, n, layers, 2, &scoped)
+                    .unwrap();
+                assert_eq!(view.status_view(2).unwrap().offset, scoped.offset);
+                assert!(view.status_view(1).is_err());
+                assert!(view.validate_status_layers(1..2).is_err());
+                assert_eq!(
+                    words(&backing.buffers[6]),
+                    status_before,
+                    "CED never CPU-clears the compact slab"
+                );
+                assert_eq!(
+                    words(&ledger),
+                    ledger_before,
+                    "checked scoped views never mutate status or canaries"
+                );
+            }
+            let scoped = ledger.view_subrange(16, vec![1]);
+            let mut misaligned = scoped.clone();
+            misaligned.offset += 1;
+            let mut wrong_dtype = scoped.clone();
+            wrong_dtype.dtype = GgmlType::F32;
+            for (rows, layer, status) in [
+                (0, 2, &scoped),
+                (9, 2, &scoped),
+                (1, 3, &scoped),
+                (2, 2, &scoped),
+                (1, 2, &misaligned),
+                (1, 2, &wrong_dtype),
+            ] {
+                assert!(
+                    backing
+                        .checked_ced_prefix(&c, rows, layers, layer, status)
+                        .is_err()
+                );
+                assert_eq!(words(&backing.buffers[6]), status_before);
+                assert_eq!(words(&ledger), ledger_before);
+            }
+            let last = backing.buffers.pop().unwrap();
+            backing
+                .buffers
+                .push(last.view_subrange(0, vec![last.shape[0], 7]));
+            assert!(backing.checked_prefix(&c, 1, layers).is_err());
+            assert_eq!(words(&backing.buffers[6]), status_before);
+            *backing.buffers.last_mut().unwrap() = last;
+            assert_eq!(activations(&backing), before);
+
+            if let Some(original) = backing.half_input.take() {
+                assert!(backing.half_required[0]);
+                assert!(backing.checked_prefix(&c, 1, layers).is_err());
+                assert_eq!(words(&backing.buffers[6]), status_before);
+                assert_eq!(activations(&backing), before);
+                backing.half_input = Some(original);
+            }
+            if let Some(original) = backing.half_inner.take() {
+                assert!(backing.half_required[1]);
+                assert!(backing.checked_prefix(&c, 1, layers).is_err());
+                assert_eq!(words(&backing.buffers[6]), status_before);
+                assert_eq!(activations(&backing), before);
+                backing.half_inner = Some(original.checked_prefix(1).unwrap());
+                assert!(backing.checked_prefix(&c, 1, layers).is_err());
+                assert_eq!(words(&backing.buffers[6]), status_before);
+                assert_eq!(activations(&backing), before);
+                backing.half_inner = Some(original);
+            }
+        });
+    }
+
+    #[test]
+    fn ffn_prefix_geometry_compacts_statuses_and_slot_strides() {
+        let c = Config::default();
+        let layers = 20;
+        for rows in [1, 3, 127, 512, prefill::DEFAULT_CHUNK_ROWS] {
+            let widths =
+                Rows::prefix_widths(&c, prefill::DEFAULT_CHUNK_ROWS, rows, layers).unwrap();
+            let active = widths[6..].iter().map(|w| w * rows).collect::<Vec<_>>();
+            let extents = composition_extents(&c, rows).unwrap();
+            assert_eq!(active[6], layers * rows);
+            assert_eq!((layers - 1) * rows + rows, active[6]);
+            assert_eq!(active[8], extents.slots as usize);
+            assert_eq!(active[9], extents.slots as usize);
+            assert_eq!(active[10], c.experts * rows);
+            assert_eq!(active[11], c.experts * rows);
+            assert_eq!(active[12], extents.weighted as usize);
+            assert_eq!(active[13], extents.weighted as usize);
+            assert_eq!(active[14], c.hidden * c.topk * rows);
+            assert!(RowsArithmetic::Packed.packed_operands(rows));
+        }
+    }
+
+    #[test]
+    fn ffn_prefix_geometry_rejects_empty_oversize_and_overflow() {
+        let mut c = Config::default();
+        for (backing, rows, layers) in [(8, 0, 2), (8, 9, 2), (2049, 1, 2), (8, 1, 0)] {
+            assert!(Rows::prefix_widths(&c, backing, rows, layers).is_err());
+        }
+        assert!(Rows::prefix_widths(&c, 8, 1, usize::MAX).is_err());
+        c.intermediate = usize::MAX;
+        assert!(Rows::prefix_widths(&c, 8, 1, 2).is_err());
     }
 }

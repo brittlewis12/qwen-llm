@@ -92,7 +92,7 @@ fn v41_typed_state_pressure_is_503_and_never_steps() {
         "prompt",
         None,
         &mut Sink,
-        |_, _| Ok(()),
+        |_, _, _| Ok(()),
         |_| {
             Err(state_error(
                 qwen_llm::deepseek_v41::forward::StateError::MemoryAdmissionDenied(denied),
@@ -177,7 +177,7 @@ fn v41_cancellation_during_state_construction_remains_aborted() {
         "prompt",
         None,
         &mut Sink(cancel.clone()),
-        |_, _| Ok(()),
+        |_, _, _| Ok(()),
         |_| {
             cancel.store(true, Ordering::Release);
             Err(ServeError::server_error("cancelled allocation"))
@@ -312,7 +312,7 @@ fn token_io_nonstats_never_snapshots_and_preserves_errors() {
 }
 
 #[test]
-fn prefill_io_counts_rows_but_reports_chunk_observation_maxima() {
+fn prefill_io_counts_rows_but_reports_logical_call_observation_maxima() {
     let mut observations = memory_io::ChunkObservations::default();
     for (position, rows, delta) in [(0, 32, 64), (32, 3, 6)] {
         let mut snapshots = [
@@ -330,13 +330,13 @@ fn prefill_io_counts_rows_but_reports_chunk_observation_maxima() {
         .unwrap();
     }
     let stats = observations.json();
-    assert_eq!(stats["scope"], "whole_process_native_prefill_chunk");
+    assert_eq!(stats["scope"], "whole_process_native_prefill_call");
     assert_eq!(stats["attempted_tokens"], 35);
     assert_eq!(stats["successful_tokens"], 35);
-    assert_eq!(stats["attempted_chunks"], 2);
+    assert_eq!(stats["attempted_calls"], 2);
     assert_eq!(
         stats["process_pageins"],
-        json!({"count":2,"total":70,"max_chunk":64,"per_token_mean":2.0})
+        json!({"count":2,"total":70,"max_call":64,"per_token_mean":2.0})
     );
     let result = memory_io::observe_chunk::<(), _>(
         None,
@@ -456,7 +456,7 @@ impl GenerationBackend for Stub {
             prompt,
             None,
             sink,
-            |positions, reserve| {
+            |positions, _, reserve| {
                 self.admitted_positions.push(positions);
                 let estimate = qwen_llm::deepseek_v41::forward::Config::default()
                     .estimate_request_memory(positions)
@@ -1015,7 +1015,7 @@ fn v41_native_phase_clock_excludes_preparation_and_counts_eos_and_max_one() {
                 "prompt",
                 None,
                 &mut TimedSink(&clock),
-                |_, _| {
+                |_, _, _| {
                     clock.set(clock.get() + 3);
                     Ok(())
                 },

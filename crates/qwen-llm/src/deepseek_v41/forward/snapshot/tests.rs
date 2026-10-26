@@ -117,7 +117,7 @@ fn rejection_does_not_mutate_healthy_destination() {
         bits(&snapshot.payload),
         bits(&model.capture_snapshot(&state).unwrap().payload)
     );
-    state.poisoned = true;
+    state.phase = StatePhase::Poisoned;
     assert!(model.snapshot_payload_bytes(&state).is_err());
     assert!(model.capture_snapshot(&state).is_err());
     assert!(model.restore_snapshot(&mut state, &snapshot).is_err());

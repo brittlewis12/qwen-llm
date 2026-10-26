@@ -5,11 +5,44 @@ use std::io::{Seek, SeekFrom};
 
 const SCHEMA: &str = "v41-ced-current-pair-v2";
 const INPUT_LIMIT: u64 = 16 * 1024 * 1024;
+const P4_SOFT_TARGET: usize = 4_294_967_296;
 
 #[test]
 #[ignore = "PRIVATE: release, externally verified full artifact, debug1, production self-lease and bounded M5 controller required"]
 fn current_full_vs_ced_paired_full_model() {
-    run_pair().unwrap();
+    run_pair(None).unwrap();
+}
+
+#[test]
+#[ignore = "PRIVATE: release, externally verified full artifact, debug1, production self-lease and bounded M5 controller required"]
+fn current_full_vs_ced_paired_full_model_p4() {
+    run_pair(Some(P4_SOFT_TARGET)).unwrap();
+}
+
+fn pair_selector(soft_target: Option<usize>) -> AResult<&'static str> {
+    match soft_target {
+        None => Ok(
+            "deepseek_v41::forward::ced::qualification::current_pair::current_full_vs_ced_paired_full_model",
+        ),
+        Some(P4_SOFT_TARGET) => Ok(
+            "deepseek_v41::forward::ced::qualification::current_pair::current_full_vs_ced_paired_full_model_p4",
+        ),
+        _ => anyhow::bail!("current pair only supports the default None or explicit P4 target"),
+    }
+}
+
+fn storage_selection(
+    soft_target: Option<usize>,
+    storage: &v41_gguf::ResidentStoragePlan,
+) -> AResult<Value> {
+    let selector = pair_selector(soft_target)?;
+    ensure!(
+        storage.soft_coalescing_target == soft_target,
+        "current pair storage target differs from selector request"
+    );
+    Ok(json!({"test_selector": selector,
+        "requested_soft_coalescing_target_bytes": soft_target,
+        "planned_soft_coalescing_target_bytes": storage.soft_coalescing_target}))
 }
 
 fn prompt_n(text: &str) -> AResult<usize> {
@@ -583,7 +616,8 @@ fn write_report(file: &mut File, report: &Value) -> AResult<()> {
     Ok(())
 }
 
-fn run_pair() -> AResult<()> {
+fn run_pair(soft_target: Option<usize>) -> AResult<()> {
+    let selector = pair_selector(soft_target)?;
     provenance::environment()?;
     ensure!(
         ACTIVE.with(|slot| slot.borrow().is_none()),
@@ -601,6 +635,7 @@ fn run_pair() -> AResult<()> {
     );
     let mut report_file = private_report(&report_path, &checkout)?;
     let mut report = json!({"schema": SCHEMA, "complete": false, "current_pair": true,
+        "test_selector": selector, "requested_soft_coalescing_target_bytes": soft_target,
         "arm_order": ["current_full_production", "shrinking_ced_production"], "candidate_provenance": source,
         "N": n, "capacity": n + STEPS, "continuation_steps": STEPS,
         "strict_contract": "bitwise all full-vocabulary logits and SHA256 of every existing causal state region at all 257 positions; exact address/history, readiness, per-arm origin, completion/publication/counters",
@@ -628,7 +663,7 @@ fn run_pair() -> AResult<()> {
         let g = geometry(&gguf, &planned, n)?;
         let input = select_prefix(&frozen, n, g.vocab)?;
         let capture = capture_cpu_plan(g.vocab)?;
-        let cold = preflight_cold_prefill(
+        let cold = plan_cold_prefill_with_target(
             &ctx,
             &gguf,
             n,
@@ -638,7 +673,10 @@ fn run_pair() -> AResult<()> {
                 PrefillExecution::ShrinkingCed,
             ],
             capture.total_bytes,
-        )?;
+            soft_target,
+        )?
+        .into_strict_for_test(ctx.memory_signals())?;
+        let storage_selection = storage_selection(soft_target, &cold.resident_storage)?;
         let plan = CedPlan::shrinking(
             &planned.config,
             &planned.schedule,
@@ -662,6 +700,7 @@ fn run_pair() -> AResult<()> {
             "prompt_source_stream_range": [0, n], "continuation_source_stream_range": [n, n + STEPS],
             "source_stream": "frozen.prompt concatenated with frozen.continuation; no retokenization, sampling or argmax feedback"});
         report["memory"] = json!({"runtime_upper": runtime, "capture_cpu_plan": capture,
+            "storage_selection": storage_selection,
             "resident_storage_plan": null, "combined_preweight_admission": null,
             "core_preflight": {"full_incremental_metal_bytes": cold.full_incremental_metal_bytes,
                 "full_incremental_cpu_bytes": cold.full_incremental_cpu_bytes, "ced": cold.ced,
@@ -697,7 +736,11 @@ fn run_pair() -> AResult<()> {
         drop(bytes);
         drop(frozen);
         // This is the only weight import. Keep it downstream of every combined gate.
-        let weights = ResidentWeights::load(&ctx, Arc::clone(&gguf))?;
+        let weights = ResidentWeights::load_with_storage_plan(
+            &ctx,
+            Arc::clone(&gguf),
+            &cold.resident_storage,
+        )?;
         validate_loaded_sources(&gguf, &planned, &weights.engram)?;
         ensure!(
             weights.token_map == planned.token_map
@@ -776,6 +819,40 @@ fn run_pair() -> AResult<()> {
     report_file.sync_all()?;
     drop(lease);
     outcome
+}
+
+#[test]
+fn storage_selector_preserves_default_and_p4_metadata_and_rejects_drift() {
+    v41_gguf::tests::gsq_loader::with_companion_fixture(|g, _| {
+        let default = v41_gguf::resident_storage_plan(&g, 16384, 1 << 40).unwrap();
+        let p4 =
+            v41_gguf::resident_storage_plan_with_target(&g, 16384, 1 << 40, Some(P4_SOFT_TARGET))
+                .unwrap();
+        for (target, storage, suffix) in [
+            (None, &default, "current_full_vs_ced_paired_full_model"),
+            (
+                Some(P4_SOFT_TARGET),
+                &p4,
+                "current_full_vs_ced_paired_full_model_p4",
+            ),
+        ] {
+            let metadata = storage_selection(target, storage).unwrap();
+            assert_eq!(
+                metadata,
+                json!({
+                    "test_selector": format!("deepseek_v41::forward::ced::qualification::current_pair::{suffix}"),
+                    "requested_soft_coalescing_target_bytes": target,
+                    "planned_soft_coalescing_target_bytes": target,
+                })
+            );
+        }
+        assert!(storage_selection(Some(P4_SOFT_TARGET), &default).is_err());
+        assert!(storage_selection(None, &p4).is_err());
+        for target in [Some(0), Some(1 << 30), Some(usize::MAX)] {
+            assert!(pair_selector(target).is_err());
+            assert!(storage_selection(target, &p4).is_err());
+        }
+    });
 }
 
 #[test]

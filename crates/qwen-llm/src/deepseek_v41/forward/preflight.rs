@@ -184,6 +184,14 @@ impl ColdPrefillPlan {
         }
         Err(last.expect("at least one cold candidate").into())
     }
+
+    #[cfg(test)]
+    pub(super) fn into_strict_for_test(
+        self,
+        signals: metal::MetalMemorySignals,
+    ) -> std::result::Result<ColdPrefillPreflight, LoadError> {
+        self.into_strict(signals)
+    }
 }
 
 /// Strictly admit the entire cold peak against current availability before

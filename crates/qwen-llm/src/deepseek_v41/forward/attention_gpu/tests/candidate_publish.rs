@@ -7,6 +7,7 @@ use serde_json::json;
 use sha2::{Digest, Sha256};
 
 mod valid_ids;
+mod real_pipeline;
 
 const DOMAINS: [usize; 9] = [0, 1, 255, 256, 257, 2048, 2049, 16384, 131072];
 const COUNTS: [usize; 4] = [0, 1, 256, 2048];

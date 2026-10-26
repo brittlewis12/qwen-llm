@@ -722,6 +722,48 @@
   },
   {
     "target": "lib",
+    "name": "deepseek_v41::forward::attention_gpu::tests::candidate_publish::real_pipeline::mask_real_pipeline_cpu_bounds",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Host-only complete reduced producer/follower CPU+Metal upper-bound arithmetic; no Metal context or dispatch."
+  },
+  {
+    "target": "lib",
+    "name": "deepseek_v41::forward::attention_gpu::tests::candidate_publish::real_pipeline::mask_real_pipeline_cpu_geometry_and_normal_fallback",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Host-only four-layer schedule, visible 16384/16385 geometry and unchanged per-row fallback scratch bounds."
+  },
+  {
+    "target": "lib",
+    "name": "deepseek_v41::forward::attention_gpu::tests::candidate_publish::real_pipeline::mask_real_pipeline_cpu_oracle_and_nonvacuous_controls",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Host-only actual-ID membership oracle rejection and designed unmasked wrong-winner controls; no Metal context."
+  },
+  {
+    "target": "lib",
+    "name": "deepseek_v41::forward::attention_gpu::tests::candidate_publish::real_pipeline::mask_real_pipeline_cpu_protocol",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Host-only bounded ABBA/BAAB complete-span count contract; no timing or Metal context."
+  },
+  {
+    "target": "lib",
+    "name": "deepseek_v41::forward::attention_gpu::tests::candidate_publish::real_pipeline::mask_real_pipeline_m5_correctness",
+    "class": "gpu",
+    "ignored": true,
+    "reason": "Explicit self-leased M5 real blocks/sort producer, publication-only injection and follower selection/attention; validation-on parent GPU lane, <=128 MiB CPU+Metal."
+  },
+  {
+    "target": "lib",
+    "name": "deepseek_v41::forward::attention_gpu::tests::candidate_publish::real_pipeline::mask_real_pipeline_m5_native_timing",
+    "class": "timing",
+    "ignored": true,
+    "reason": "Explicit self-leased M5 complete four-layer real producer/publication/follower span; one correctness phase then 24 raw ABBA/BAAB samples; parent native lane only."
+  },
+  {
+    "target": "lib",
     "name": "deepseek_v41::forward::attention_gpu::tests::candidate_publish::valid_ids::candidate_publish_valid_ids_cpu_budget_contract",
     "class": "cpu",
     "ignored": false,

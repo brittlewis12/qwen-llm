@@ -62,7 +62,7 @@ fn valid_unique_newest(domain: usize, input: &[u32]) -> bool {
     sorted.windows(2).all(|w| w[0] < w[1]) && sorted.last() == Some(&((domain - 1) as u32))
 }
 
-fn id_digest(input: &[u32]) -> String {
+pub(super) fn id_digest(input: &[u32]) -> String {
     let mut hash = Sha256::new();
     for id in input {
         hash.update(id.to_le_bytes());

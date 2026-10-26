@@ -4,7 +4,7 @@ use super::*;
 #[path = "query_batch/selection_hier.rs"]
 mod selection_hier;
 
-fn config() -> Config {
+pub(super) fn config() -> Config {
     Config {
         hidden: 32,
         heads: 8,
@@ -24,13 +24,13 @@ fn config() -> Config {
     }
 }
 
-fn values(n: usize, seed: usize) -> Vec<f32> {
+pub(super) fn values(n: usize, seed: usize) -> Vec<f32> {
     (0..n)
         .map(|i| (((i * seed + i / 17 + 13) % 101) as f32 - 50.0) / 103.0)
         .collect()
 }
 
-fn bound<'a>(ctx: &'a MetalContext, c: &Config, s: &Schedule) -> Vec<Weights<'a>> {
+pub(super) fn bound<'a>(ctx: &'a MetalContext, c: &Config, s: &Schedule) -> Vec<Weights<'a>> {
     (0..s.layers)
         .map(|id| {
             let mut w = scheduled_weights(ctx, c, s, id, GgmlType::F32);

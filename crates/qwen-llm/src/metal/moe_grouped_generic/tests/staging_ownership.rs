@@ -196,7 +196,9 @@ fn staging_source_contract_matches_physical_model_and_retains_k_order() {
             let store = format!("*(threadgroup half4 *)(stage_a + {offset})");
             let line = source
                 .lines()
-                .find(|line| line.contains(&store) && line.contains(&format!("= temp_a[{column}];")))
+                .find(|line| {
+                    line.contains(&store) && line.contains(&format!("= temp_a[{column}];"))
+                })
                 .unwrap();
         }
         match body {
@@ -207,9 +209,7 @@ fn staging_source_contract_matches_physical_model_and_retains_k_order() {
                 assert!(source.contains("iy = 8 * (tiitg % TT_NL1);"));
                 assert!(source.contains("stage_b = sb + pr1 * TT_NK + iy;"));
                 assert!(source.contains("if (!slot_valid) {"));
-                assert!(
-                    source.contains("*(threadgroup half2x4 *)(stage_b) = half2x4(0.0h);")
-                );
+                assert!(source.contains("*(threadgroup half2x4 *)(stage_b) = half2x4(0.0h);"));
                 assert!(source.contains("if (slot_valid) {"));
                 assert!(source.contains("*(threadgroup half2x4 *)(stage_b) = yv;"));
                 assert!(

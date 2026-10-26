@@ -6,6 +6,23 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the current state and evidence index.
 
+## 2026-10-26 - Exact Fused Mask Publication Earns A Small Real-Model Win
+
+- Bounded one-workgroup publication uses a temporary 16 KiB on-chip bitset to
+  emit the unchanged dense mask. Serial, pruned, count>=2048 and domain<=131072
+  paths qualify; other shapes/capacities and concurrent encoders keep incumbent.
+  No global allocation saving, precision change or new knob is claimed.
+- GSQ IQ2_XS native Full TG128@depth16640 confirmation, reversed source BAAB:
+  incumbent/fused medians 2.749915854/2.7400405205 s, 0.359% lower latency.
+  All candidate samples beat all controls. Retain the first drifted ABBA in full;
+  its pooled 7.811% ratio is not the gain claim. Every current depth fill attests
+  selected4096/Full/no fallback. This is a modest M5 observation, not a multiplier.
+- Reject two-dispatch clear/scatter: actual-model ABBA medians
+  3.255738958/3.359820834 s, 3.197% slower, despite reduced-path wins. M4/M5 exact
+  membership, actual follower and boundary checks pass; separate gen16640+64
+  agrees. No M4 speed or independent quality conclusion follows.
+- [All samples, frozen identities, correctness scope and retained negatives](bench/2026-10-26-v41-mask-publication.md).
+
 ## 2026-10-25 - Measured Cold CED/P4 Reaches Product Run And Ordinary Bench
 
 - Explicit `QWEN_V41_PREFILL_EXECUTION=shrinking_ced` now selects the measured

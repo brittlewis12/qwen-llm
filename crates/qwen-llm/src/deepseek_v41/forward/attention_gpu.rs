@@ -1523,7 +1523,8 @@ impl Workspace {
         #[cfg(test)]
         if let Some(experiment) = &self.mask_publication_experiment {
             if let Some(retained) = &experiment.retained_ids {
-                copy(ctx, enc, &self.sort_ids, retained, count)?;
+                metal::encode_copy_offset_i32(ctx, enc, &self.sort_ids, 0, retained, count)
+                    .map_err(|error| error.to_string())?;
             }
             if experiment.clear_scatter {
                 op::require(

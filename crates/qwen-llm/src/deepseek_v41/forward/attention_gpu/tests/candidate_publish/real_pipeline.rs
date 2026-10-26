@@ -634,6 +634,8 @@ fn correctness(ctx: &MetalContext) -> (Vec<Vec<f32>>, [usize; 2]) {
 }
 
 fn real_context(kind: &str) -> MetalContext {
+    use std::io::Read;
+
     for (name, _) in std::env::vars_os() {
         let name = name.to_string_lossy();
         assert!(
@@ -647,10 +649,21 @@ fn real_context(kind: &str) -> MetalContext {
         "parent-only M5 experiment"
     );
     assert!(!metal::dispatch_census_is_active());
+    let mut executable = std::fs::File::open(std::env::current_exe().unwrap()).unwrap();
+    let mut hash = Sha256::new();
+    let mut buffer = [0u8; 65536];
+    loop {
+        let count = executable.read(&mut buffer).unwrap();
+        if count == 0 {
+            break;
+        }
+        hash.update(&buffer[..count]);
+    }
     eprintln!(
         "{}",
         json!({
             "protocol": REAL_PROTOCOL, "event": "context", "run_kind": kind, "device": ctx.describe(),
+            "executable_sha256": format!("{:x}", hash.finalize()),
             "fixture_sha256": format!("{:x}", Sha256::digest(include_bytes!("real_pipeline.rs"))),
             "host_sha256": format!("{:x}", Sha256::digest(include_bytes!("../../../attention_gpu.rs"))),
             "query_batch_sha256": format!("{:x}", Sha256::digest(include_bytes!("../../query_batch.rs"))),
@@ -762,6 +775,10 @@ fn mask_real_pipeline_cpu_bounds() {
     let sizes = inventory(&c, &s);
     let cpu = RealCpuInventory::new(&sizes);
     let conservative_metal: u64 = sizes.iter().map(|&n| n as u64 * 4 + 65536).sum();
+    assert_eq!(sizes.len(), 110);
+    assert_eq!(sizes.iter().sum::<usize>() * 4, 9755640);
+    assert_eq!(cpu.total(), 34604544);
+    assert_eq!(conservative_metal + cpu.total(), 51569144);
     assert!(conservative_metal + cpu.total() < REAL_LIMIT);
     assert!(
         cpu.seed_keys_values_and_upload_staging >= 4 * CAPACITY as u64 * c.index_dim as u64 * 4
@@ -807,6 +824,8 @@ fn mask_real_pipeline_cpu_oracle_and_nonvacuous_controls() {
     invalid[1] = invalid[0];
     assert!(producer_oracle(&invalid).is_none());
     assert!(producer_oracle(&retained[..KEPT - 1]).is_none());
+    invalid = (0..KEPT as u32).collect();
+    assert!(producer_oracle(&invalid).is_none(), "missing newest block");
     let unmasked: Vec<_> = (0..512).collect();
     let masked: Vec<_> = (0..CAPACITY)
         .filter(|&id| mask[id / 8] == 1)

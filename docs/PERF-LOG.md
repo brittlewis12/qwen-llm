@@ -6,6 +6,28 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the current state and evidence index.
 
+## 2026-10-26 - V4.1 Decode +14% Warm, +37% On Uncached Engram Rows
+
+- Engram rows were one blocking `pread` per row from a 103 GiB table that
+  cannot stay cached beside the model: ~4 ms per decoded token and most of a
+  cold prefill on novel text. This is the 2026-10-25 "first decode after
+  load" effect (not weight page faults). Rows are now advised
+  (`F_RDADVISE`) before reading in decode, and batched reads queue
+  read-ahead once a probe block reads slowly. Fresh-seed GSQ: tg64 44.3-44.9
+  -> 61.2-61.3 tok/s; first pp512 27-30 -> 485 tok/s. Warm prefill neutral.
+- Per-dispatch decode profiler (`QWEN_V41_DECODE_DISPATCHES=1`) found
+  latency-bound small kernels: split-K BF16 router GEMV (44 -> 12 us per
+  layer), wide decode Engram gate, vector HC pre, vector-load native Q5_K
+  (head 522 -> 420 us), fused same-type gate/up for V4.1 decode.
+- The decode FFN's shared expert and routed chain go on separate encoders,
+  which Metal overlaps: 59.0 -> 61.8 tok/s (GPU 16.67 -> 15.82 ms/token).
+  The attention split lost and was removed.
+- Main vs branch, rows cached: tg64@d0 54.0 -> 61.9, @d2048 48.3 -> 54.6;
+  pp2048 856 -> 861. Witness NLL 2.1421 / top-1 212 and the 22-task screen
+  are unchanged. Negatives: multi-row and unrolled native rows, IQ2 grid
+  loads, attention encoder split, Engram reader pools.
+- [Packet](bench/2026-10-26-v41-decode-kernels-engram-io.md).
+
 ## 2026-10-26 - Exact Fused Mask Publication Earns A Small Real-Model Win
 
 - Bounded one-workgroup publication uses a temporary 16 KiB on-chip bitset to
@@ -22,6 +44,27 @@ See also: `docs/PERF-ROADMAP.md` for the current state and evidence index.
   membership, actual follower and boundary checks pass; separate gen16640+64
   agrees. No M4 speed or independent quality conclusion follows.
 - [All samples, frozen identities, correctness scope and retained negatives](bench/2026-10-26-v41-mask-publication.md).
+
+## 2026-10-25 - V4.1 Decode Attribution: Serial Small GEMVs, Not Bytes
+
+- Warm GSQ IQ2_XS decode is 18.1 ms/token at depth 0 (55.2 tok/s) and 21.3
+  ms at 2048, against a ~7.2 ms bytes floor (7.28 GiB/token). New opt-in
+  hook `QWEN_V41_DECODE_STAGES=1` (sampled stage per encoder) attributes the
+  GPU time: FFN 8.67 ms at 408 GB/s, attention 7.34 ms at 510 GB/s (+2.2 ms
+  at depth 2048), HC pre 1.18 ms for 0.07 GiB, Engram 0.63, head 0.53 at 867
+  GB/s, HC post 0.17. Host time adds ~1.7 ms per token.
+- 1,317 dispatches per token. A dependent dispatch in a serial chain costs
+  ~1.65 us on M5 (also when interleaved with real work); independent
+  dispatches in a concurrent encoder ~0.16 us; a barrier per dispatch is
+  slower than serial. Serial dispatch overhead is therefore ~2.2 ms; most
+  of the remaining gap is small per-layer GEMVs that cannot ramp in a
+  strictly serial chain. Concurrent encoding of independent decode work
+  (shared expert / router / routed; query / KV chains) and host overlap
+  are the levers.
+- Splitting decode into ~160 encoders is cheap with headroom (GSQ within 1%)
+  but costs seconds per token near the memory ceiling (IQ3 at ~217 of 240
+  GiB, no disk I/O): do not stage-profile near-capacity residents.
+- [Attribution packet](bench/2026-10-25-v41-decode-attribution.md).
 
 ## 2026-10-25 - Measured Cold CED/P4 Reaches Product Run And Ordinary Bench
 

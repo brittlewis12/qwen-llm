@@ -282,9 +282,14 @@ equivalence pass. The controller credits only conservative inactive non-anonymou
 cache availability, not raw free pages alone. No waiver or speedup claim follows
 from prior successful runs or a passing Metal-only budget.
 
-Decode budget at depth 2048, 22.3 ms/token: ~10.2 ms bytes (11.1 GiB at the
-~1.09 TB/s the GEMV probe reaches), ~8 ms dispatch floor (~1,600 dispatches),
-~4 ms spread thin. Prefill split per 2048-token chunk, fresh post-tile six-span sample
+Decode budget (2026-10-26, GSQ IQ2_XS, `perf/v41-decode-stages`): tg64 61.9
+tok/s at depth 0 (54.6 at 2048), ~15.8 ms GPU of ~16.2 ms per token against a
+~7.2 ms bytes floor. In-pipeline removal costs at d0: routed experts ~5 ms,
+attention projections/chains 2.7, attention output 2.7, shared expert 1.7
+(now overlapped with the routed chain), HC pre 1.3, attention core 1.2.
+Engram rows are advised before reading; uncached rows no longer dominate
+decode or cold prefill. Decode baselines before 2026-10-26 that "warmed" by
+repeating a seed measured cached Engram rows; compare with fresh seeds too. Prefill split per 2048-token chunk, fresh post-tile six-span sample
 (`QWEN_V41_PREFILL_STAGES=1`, PP2048, shares only; the profiler's per-span
 waits inflate wall): FFN 50.4%, attention tiles 23.2, finish/post 11.0,
 prepare 6.7, owner/producer serial 5.3, HC 3.5. The 32-row sink tile had
@@ -489,10 +494,14 @@ attention tiles at 34.7%. Re-sample after the next landing.
   MMA tile; the 8-lane scalar kernel remains the fallback for other
   geometry. The 4-key/8-lane variants measured +3.0%/+1.2-1.4% on the old
   scalar path; 8 heads/threadgroup and fatter key loops were negative.
-- Decode: fused attention core, routed gate/up fusion, rope/copy fusion are
-  each <= 1 ms/token: open, low priority. Fused decode expert chain: +1%/+0%
-  (negative, packet 2026-10-20). Q8_0 attention projections (5.1 GB/token)
-  requant to Q6_K: ~-1 ms, quality-sensitive, open.
+- Decode: shared expert / routed chain on separate encoders landed
+  (2026-10-26, +4.7%); the query / KV attention split lost. Open: a routed
+  IQ2 decode kernel beyond ~510 GB/s (tuning the native kernel was negative:
+  multi-row, unrolled rounds, grid loads), short-K q_b, multi-threadgroup HC
+  pre; host overlap is worth only ~0.4 ms/token now. Fused decode expert
+  chain: +1%/+0% (negative, packet 2026-10-20). Do not stage-profile or
+  dispatch-profile near-capacity residents (IQ3): encoder splits cost
+  seconds per token there.
 - Prefill dispatch census tool: landed (`c4125c6b`, `QWEN_V41_CENSUS=1`).
 - Six-span prefill profiler (`QWEN_V41_PREFILL_STAGES=1`, per-layer HC /
   prepare / serial / tiles / finish / FFN): landed; use it before claiming

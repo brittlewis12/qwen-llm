@@ -469,6 +469,7 @@ pub(crate) fn run_pp(args: PpArgs) -> Result<()> {
         // `--with-tail` is satisfied rather than ignored.
         return crate::suite::run_suite(SuiteArgs {
             v41_ced_pair: false,
+            v41_ced_pair_p4: false,
             v41_ced_pair_diagnostic: false,
             v41_ced_pair_production_timing: false,
             v41_ced_pair_schedule: None,

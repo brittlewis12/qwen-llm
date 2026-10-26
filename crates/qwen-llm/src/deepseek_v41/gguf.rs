@@ -24,6 +24,7 @@ pub use engram::DiskEngram;
 pub use resident_storage::{
     ResidentMappingKind, ResidentStorageAudit, ResidentStoragePlan, ResidentStorageWindow,
     ResidentTensorAudit, ResidentTensorExtent, resident_storage_audit, resident_storage_plan,
+    resident_storage_plan_with_target,
 };
 pub(crate) use retained_resources::{RetainedSummaryBookkeeping, retained_summary_bookkeeping};
 pub use retained_resources::{RetainedWeightResource, RetainedWeightResourceSummary};
@@ -375,6 +376,22 @@ fn prepared_load_plan(
     Ok((p, storage))
 }
 
+fn prepared_load_plan_for_storage(
+    g: &GgufFile,
+    page: usize,
+    max_buffer_length: usize,
+    expected: &ResidentStoragePlan,
+) -> Result<(Plan, ResidentStoragePlan), LoadError> {
+    let (p, storage) =
+        prepared_load_plan(g, page, max_buffer_length, expected.soft_coalescing_target)?;
+    if &storage != expected {
+        return Err(invalid(
+            "resident load geometry differs from cold storage plan",
+        ));
+    }
+    Ok((p, storage))
+}
+
 impl ResidentWeights {
     pub fn bank(&self, layer: usize, part: &str) -> Option<&MetalTensor> {
         self.banks
@@ -389,10 +406,28 @@ impl ResidentWeights {
         Self::load_planned(ctx, g, resident_storage::SOFT_COALESCING_TARGET)
     }
 
+    /// Load using the cold plan's target, rejecting geometry drift before import.
+    pub fn load_with_storage_plan(
+        ctx: &MetalContext,
+        g: Arc<GgufFile>,
+        storage: &ResidentStoragePlan,
+    ) -> Result<Self, LoadError> {
+        Self::load_with_target(ctx, g, storage.soft_coalescing_target, Some(storage))
+    }
+
     fn load_planned(
         ctx: &MetalContext,
         g: Arc<GgufFile>,
         soft_target: Option<usize>,
+    ) -> Result<Self, LoadError> {
+        Self::load_with_target(ctx, g, soft_target, None)
+    }
+
+    fn load_with_target(
+        ctx: &MetalContext,
+        g: Arc<GgufFile>,
+        soft_target: Option<usize>,
+        expected: Option<&ResidentStoragePlan>,
     ) -> Result<Self, LoadError> {
         let cold_cpu = controls::cold_bound(&g)?;
         if cold_cpu > 0
@@ -408,7 +443,12 @@ impl ResidentWeights {
             return Err(e.into());
         }
         let page = metal::host_page_size_bytes()?;
-        let (p, storage) = prepared_load_plan(&g, page, ctx.max_buffer_length(), soft_target)?;
+        let (p, storage) = match expected {
+            Some(storage) => {
+                prepared_load_plan_for_storage(&g, page, ctx.max_buffer_length(), storage)?
+            }
+            None => prepared_load_plan(&g, page, ctx.max_buffer_length(), soft_target)?,
+        };
         let bookkeeping: RetainedSummaryBookkeeping =
             retained_summary_bookkeeping(&g, &p, &storage)?;
         let windows = &storage.windows;

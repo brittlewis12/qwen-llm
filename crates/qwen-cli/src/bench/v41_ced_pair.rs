@@ -7,7 +7,9 @@ use crate::family_bench::{
 };
 use anyhow::ensure;
 use qwen_llm::deepseek_v41::forward::profile;
-use qwen_llm::deepseek_v41::forward::{ColdPrefillPlan, PrefillExecution, plan_cold_prefill};
+use qwen_llm::deepseek_v41::forward::{
+    ColdPrefillPlan, PrefillExecution, plan_cold_prefill_with_target,
+};
 use qwen_llm::metal::{MetalMemoryAdmission, MetalMemorySignals, MetalPipelineCacheMetrics};
 use qwen_llm::model_family::ModelFamily;
 use qwen_llm::pid_metrics::PidSnapshot;
@@ -22,6 +24,7 @@ const DIAGNOSTIC_CPU_BYTES: u64 = 16 << 20;
 const MAX_DIAGNOSTIC_OPERATIONS: usize = profile::PAIRED_OPERATION_CAPACITY;
 const MAX_PP: usize = 8192;
 const MAX_LAYERS: usize = 256;
+const P4_SOFT_TARGET: usize = 4_294_967_296usize;
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, clap::ValueEnum, serde::Serialize)]
 #[serde(rename_all = "kebab-case")]
@@ -123,6 +126,7 @@ pub(crate) struct Measurement {
     production_timing: bool,
     diagnostic: bool,
     schedule: PairSchedule,
+    soft_coalescing_target: Option<usize>,
     environment: BTreeMap<String, Option<String>>,
 }
 
@@ -158,6 +162,7 @@ impl Measurement {
             production_timing,
             diagnostic,
             schedule: PairSchedule::Interleaved,
+            soft_coalescing_target: None,
             environment,
         }
     }
@@ -187,6 +192,19 @@ impl Measurement {
         self
     }
 
+    pub(crate) fn with_p4(mut self, p4: bool) -> Self {
+        self.soft_coalescing_target = p4.then_some(P4_SOFT_TARGET);
+        self
+    }
+
+    pub(crate) fn validate_p4(&self, p4: bool) -> Result<()> {
+        ensure!(
+            self.soft_coalescing_target == p4.then_some(P4_SOFT_TARGET),
+            "paired launch mapping target differs from request"
+        );
+        Ok(())
+    }
+
     pub(crate) fn validate_schedule(&self, schedule: PairSchedule, runs: usize) -> Result<()> {
         ensure!(
             self.schedule == schedule,
@@ -210,6 +228,7 @@ impl Measurement {
             "production_timing_requested": self.production_timing,
             "canonical_production_timing_requested": self.production_timing && !self.diagnostic,
             "instrumented": self.diagnostic,
+            "resident_soft_coalescing_target_bytes": self.soft_coalescing_target,
             "effective_validation": "not_verified_external_injection_possible",
             "environment_capture": "before_metal_context_creation_no_in_process_mutation",
             "environment_value_encoding": "os_values_lossy_utf8",
@@ -329,7 +348,7 @@ pub(crate) fn preweight_plan(
             "diagnostic producer inventory exceeds its CPU reserve"
         );
     }
-    let plan = plan_cold_prefill(
+    let plan = plan_cold_prefill_with_target(
         ctx,
         gguf,
         extent.prefill_endpoint,
@@ -339,6 +358,7 @@ pub(crate) fn preweight_plan(
             PrefillExecution::ShrinkingCed,
         ],
         caller_cpu_bytes(diagnostic),
+        measurement.soft_coalescing_target,
     )
     .context("paired preweight Full/CED planning")?;
     let report = preweight_report(&plan, extent)?;
@@ -361,6 +381,7 @@ fn preweight_report(
         "prompt_rows": extent.prefill_endpoint,
         "capacity": extent.forwards,
         "executions": [PrefillExecution::FullForward, PrefillExecution::ShrinkingCed],
+        "resident_soft_coalescing_target_bytes": plan.resident_storage.soft_coalescing_target,
         "resident_metal_view_bytes": plan.resident_storage.metal_view_bytes,
         "resident_private_shadow_bytes": plan.resident_storage.private_shadow_bytes,
         "request_metal_bytes": plan.request.metal_bytes,
@@ -426,6 +447,11 @@ pub(crate) fn with_load_plan<R>(
             .plan
             .select_load(signals())
             .context("paired full cold peak capacity and fresh load admission")?;
+        ensure!(
+            plan.resident_storage.soft_coalescing_target
+                == preweight.measurement.soft_coalescing_target,
+            "paired cold mapping target differs from launch"
+        );
         ensure!(
             assessment.load_admission.is_admitted(),
             "paired load denied"
@@ -3731,6 +3757,160 @@ mod tests {
                     "fault={fault}"
                 );
                 assert_eq!(live.get(), 0);
+            }
+        }
+    }
+
+    #[test]
+    fn p4_cli_requires_pair_and_launch_result_identity_preserves_selected_plan() {
+        use clap::Parser;
+
+        let base = [
+            "qwen-bench",
+            "suite",
+            "-m",
+            "/nonexistent/p4-fixture.gguf",
+            "--pp",
+            "8192",
+            "--runs",
+            "4",
+        ];
+        let error =
+            Args::try_parse_from(base.into_iter().chain(["--v41-ced-pair-p4"])).unwrap_err();
+        assert_eq!(
+            error.kind(),
+            clap::error::ErrorKind::MissingRequiredArgument
+        );
+        assert!(error.to_string().contains("--v41-ced-pair"));
+        let Cmd::Suite(mut invalid) = Args::try_parse_from(base).unwrap().cmd else {
+            panic!("suite")
+        };
+        assert!(!invalid.v41_ced_pair_p4);
+        invalid.v41_ced_pair_p4 = true;
+        let error = crate::suite::run_suite_with_measurement(invalid, None).unwrap_err();
+        assert!(error.to_string().contains("--v41-ced-pair-p4 requires"));
+
+        for p4 in [false, true] {
+            for mode in [
+                PairSchedule::Interleaved,
+                PairSchedule::FullBlocksFirst,
+                PairSchedule::CedBlocksFirst,
+            ] {
+                let mut args = Args::try_parse_from(
+                    base.into_iter()
+                        .chain(["--v41-ced-pair"])
+                        .chain(p4.then_some("--v41-ced-pair-p4")),
+                )
+                .unwrap();
+                let Cmd::Suite(suite) = &mut args.cmd else {
+                    panic!("suite")
+                };
+                assert_eq!(suite.v41_ced_pair_p4, p4);
+                suite.v41_ced_pair_schedule = Some(mode);
+                let mut launch = Vec::new();
+                let measurement = crate::emit_pair_request(
+                    &args,
+                    |_, _| measurement_fixture(false, false),
+                    &mut launch,
+                )
+                .unwrap()
+                .unwrap();
+                measurement.validate_p4(p4).unwrap();
+                assert!(measurement.validate_p4(!p4).is_err());
+                let event: serde_json::Value = serde_json::from_slice(&launch).unwrap();
+                let target = serde_json::to_value(p4.then_some(P4_SOFT_TARGET)).unwrap();
+                assert_eq!(
+                    event["measurement"]["resident_soft_coalescing_target_bytes"],
+                    target
+                );
+                let mut preweight = staged_preweight(false);
+                preweight.plan.resident_storage.soft_coalescing_target =
+                    measurement.soft_coalescing_target;
+                preweight.measurement = measurement;
+                preweight.report = preweight_report(
+                    &preweight.plan,
+                    FamilyBenchExtent {
+                        forwards: 8192,
+                        prefill_endpoint: 8192,
+                    },
+                )
+                .unwrap();
+                let evidence = collect(
+                    mode,
+                    4,
+                    || Ok(()),
+                    |case| {
+                        let mut bench = v41_pair_test_bench(
+                            || Ok(()),
+                            |_, _, execution| Ok((vec![0.; 257], report(execution))),
+                        );
+                        let mut sample = native_case(&mut bench, &row_context(), 3, 1, case)?;
+                        sample.sample_ns = 100;
+                        Ok(sample)
+                    },
+                )
+                .unwrap();
+                with_load_plan(Some(&preweight), staged_signals, |report, selected| {
+                    assert_eq!(
+                        selected.unwrap().resident_storage.soft_coalescing_target,
+                        p4.then_some(P4_SOFT_TARGET)
+                    );
+                    assert_eq!(
+                        report.unwrap()["resident_soft_coalescing_target_bytes"],
+                        target
+                    );
+                    let rows = aggregate(
+                        &row_context(),
+                        3,
+                        4,
+                        1,
+                        257,
+                        report.unwrap(),
+                        &preweight.measurement,
+                        &evidence,
+                    )?;
+                    assert_eq!(rows.len(), 2);
+                    for row in rows {
+                        let diagnostics = row.diagnostics.unwrap();
+                        let paired = &diagnostics["deepseek_v41"]["paired_benchmark"];
+                        assert_eq!(paired["measurement"], event["measurement"]);
+                        assert_eq!(
+                            paired["preweight_plan"]["resident_soft_coalescing_target_bytes"],
+                            target
+                        );
+                    }
+                    Ok(())
+                })
+                .unwrap();
+                let Cmd::Suite(suite) = args.cmd else {
+                    panic!("suite")
+                };
+                let error = crate::suite::run_suite_with_measurement(
+                    suite,
+                    Some(
+                        measurement_fixture(false, false)
+                            .with_schedule(mode)
+                            .with_p4(!p4),
+                    ),
+                )
+                .unwrap_err();
+                assert!(
+                    error
+                        .to_string()
+                        .contains("mapping target differs from request")
+                );
+                preweight.plan.resident_storage.soft_coalescing_target =
+                    (!p4).then_some(P4_SOFT_TARGET);
+                let error =
+                    with_load_plan(Some(&preweight), staged_signals, |_, _| -> Result<()> {
+                        panic!("mismatched mapping must not load")
+                    })
+                    .unwrap_err();
+                assert!(
+                    error
+                        .to_string()
+                        .contains("mapping target differs from launch")
+                );
             }
         }
     }

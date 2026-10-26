@@ -288,6 +288,13 @@
   },
   {
     "target": "bench",
+    "name": "v41_ced_pair::tests::p4_cli_requires_pair_and_launch_result_identity_preserves_selected_plan",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Explicit P4 CLI refusal before model open, launch/cold-plan identity and fake Full/CED result metadata; no Metal context or real model import."
+  },
+  {
+    "target": "bench",
     "name": "v41_ced_pair::tests::paired_cli_is_opt_in_and_validation_does_not_mutate_environment",
     "class": "cpu",
     "ignored": false,
@@ -3218,6 +3225,13 @@
     "class": "gpu",
     "ignored": true,
     "reason": "Metal allocation/dispatch or self-leased device witness; excluded from CPU acceptance."
+  },
+  {
+    "target": "lib",
+    "name": "deepseek_v41::gguf::tests::soft_windows::soft_window_explicit_cold_plan_drives_loader_preparation_and_rejects_drift",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Reduced GGUF fixture and CPU-only 8K Full/CED pricing; selected None/P4/tiny storage plans match loader preparation and reject geometry/accounting drift without importing Metal resources."
   },
   {
     "target": "lib",

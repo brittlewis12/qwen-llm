@@ -154,6 +154,19 @@ is not a replacement for the strict full-vocabulary and causal-state CED
 qualification. Native samples are observational, not automatic performance-gain
 acceptance. Ordered cold Full-then-CED diagnostics are not speedup evidence.
 
+### Explicit P4 Mapping
+
+Add `--v41-ced-pair-p4` to select a 4 GiB (`4294967296` byte) soft resident
+mapping coalescing target for both Full and CED, including 8K pairs. It requires
+`--v41-ced-pair`; ordinary production and unselected pairs retain None/P0.
+The selected cold plan carries the target into weight loading, which revalidates
+the storage geometry before import. Larger singletons remain eligible up to the
+device limit; this is not a 4 GiB tensor cap or an artifact/shape allowlist.
+Early launch and paired result measurement metadata record
+`resident_soft_coalescing_target_bytes` (null for P0), as does the preweight
+report. Paired widths, arithmetic, schedules and memory gates are unchanged.
+No environment override is involved.
+
 ### Explicit Blocked Schedules
 
 `--v41-ced-pair-schedule interleaved` preserves the default v2 chronology and

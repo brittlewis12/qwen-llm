@@ -4,14 +4,7 @@ const PAGE: usize = 16_384;
 const M5_MAX_BUFFER_LENGTH: usize = 179_357_827_072;
 
 fn targeted(g: &GgufFile, target: Option<usize>) -> ResidentStoragePlan {
-    super::super::resident_storage::for_plan_with_target(
-        g,
-        &plan(g).unwrap(),
-        PAGE,
-        M5_MAX_BUFFER_LENGTH,
-        target,
-    )
-    .unwrap()
+    resident_storage_plan_with_target(g, PAGE, M5_MAX_BUFFER_LENGTH, target).unwrap()
 }
 
 fn first_containing(storage: &ResidentStoragePlan, t: &TensorDesc) -> usize {
@@ -171,6 +164,8 @@ fn soft_window_none_preserves_incumbent_geometry_and_selected_metadata_loader_pa
             (g.shards[0].mmap_len().next_multiple_of(PAGE) as u64) - requests[0].data_offset
         );
         let selected = resident_storage_plan(&g, PAGE, M5_MAX_BUFFER_LENGTH).unwrap();
+        assert_eq!(selected.soft_coalescing_target, None);
+        assert_eq!(selected, none);
         assert_eq!(
             selected,
             super::super::resident_storage::for_plan(&g, &p, PAGE, M5_MAX_BUFFER_LENGTH).unwrap()
@@ -197,6 +192,9 @@ fn soft_window_prepared_loader_plan_validates_chosen_geometry_and_preserves_cont
         for target in [None, Some(4_294_967_296), Some(PAGE)] {
             let (p, storage) = prepared_load_plan(&g, PAGE, M5_MAX_BUFFER_LENGTH, target).unwrap();
             assert_eq!(storage, targeted(&g, target));
+            let (_, loaded) =
+                prepared_load_plan_for_storage(&g, PAGE, M5_MAX_BUFFER_LENGTH, &storage).unwrap();
+            assert_eq!(loaded, storage);
             assert_eq!(p.bytes, reference.bytes);
             assert_eq!(p.controls, reference.controls);
             assert_eq!(p.source_groups(), reference.source_groups());
@@ -211,6 +209,64 @@ fn soft_window_prepared_loader_plan_validates_chosen_geometry_and_preserves_cont
         assert!(prepared_load_plan(&g, 0, M5_MAX_BUFFER_LENGTH, Some(PAGE)).is_err());
         assert!(prepared_load_plan(&g, PAGE, PAGE - 1, Some(PAGE)).is_err());
     }
+}
+
+#[test]
+fn soft_window_explicit_cold_plan_drives_loader_preparation_and_rejects_drift() {
+    use crate::deepseek_v41::forward::{PrefillExecution as E, preflight};
+
+    let (g, caller_cpu) = super::admitted_request::fixture();
+    let signals = super::resident_storage::preflight_signals();
+    let mut widths = Vec::new();
+    for target in [None, Some(4_294_967_296usize), Some(PAGE)] {
+        let storage = targeted(&g, target);
+        let cold = preflight::preflight_with_pricing(
+            &g,
+            storage.clone(),
+            8192,
+            8192,
+            &[E::FullForward, E::ShrinkingCed],
+            caller_cpu,
+            false,
+            &|bytes| Ok(bytes.next_multiple_of(PAGE as u64)),
+            signals,
+        )
+        .unwrap();
+        let (selected, _) = cold.plan.select_load(signals).unwrap();
+        assert_eq!(selected.resident_storage.soft_coalescing_target, target);
+        assert_eq!(selected.resident_storage, storage);
+        assert!(selected.alternatives.is_empty());
+        assert!(selected.ced.is_some());
+        widths.push(selected.full_chunk_rows);
+        let (p, loaded) = prepared_load_plan_for_storage(
+            &g,
+            PAGE,
+            M5_MAX_BUFFER_LENGTH,
+            &selected.resident_storage,
+        )
+        .unwrap();
+        assert_eq!(loaded, storage);
+        assert_eq!(selected.loader_controls, p.controls);
+        assert_eq!(loaded.bytes.disk_engram, 0);
+        for drift in 0..3 {
+            let mut changed = storage.clone();
+            match drift {
+                0 => changed.windows[0].window.length += PAGE,
+                1 => changed.metal_view_bytes += PAGE as u64,
+                _ => changed.private_shadow_bytes += PAGE as u64,
+            }
+            let error = prepared_load_plan_for_storage(&g, PAGE, M5_MAX_BUFFER_LENGTH, &changed)
+                .unwrap_err();
+            assert!(error.to_string().contains("differs from cold storage plan"));
+        }
+        assert!(
+            prepared_load_plan_for_storage(&g, PAGE / 2, M5_MAX_BUFFER_LENGTH, &storage).is_err()
+        );
+        assert!(
+            prepared_load_plan_for_storage(&g, PAGE, M5_MAX_BUFFER_LENGTH / 2, &storage).is_err()
+        );
+    }
+    assert!(widths.iter().all(|&width| width == widths[0]));
 }
 
 #[test]

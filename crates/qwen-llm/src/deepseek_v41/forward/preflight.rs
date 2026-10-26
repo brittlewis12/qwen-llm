@@ -224,10 +224,33 @@ pub fn plan_cold_prefill(
     executions: &[PrefillExecution],
     caller_cpu_bytes: u64,
 ) -> std::result::Result<ColdPrefillPlan, LoadError> {
-    let resident_storage = gguf::resident_storage_plan(
+    plan_cold_prefill_with_target(
+        ctx,
+        gguf,
+        prompt_rows,
+        capacity,
+        executions,
+        caller_cpu_bytes,
+        None,
+    )
+}
+
+/// Explicit mapping selection retained in the cold plan for weight loading.
+/// This changes coalescing only, not request arithmetic or singleton eligibility.
+pub fn plan_cold_prefill_with_target(
+    ctx: &MetalContext,
+    gguf: &GgufFile,
+    prompt_rows: usize,
+    capacity: usize,
+    executions: &[PrefillExecution],
+    caller_cpu_bytes: u64,
+    soft_target: Option<usize>,
+) -> std::result::Result<ColdPrefillPlan, LoadError> {
+    let resident_storage = gguf::resident_storage_plan_with_target(
         gguf,
         metal::host_page_size_bytes()?,
         ctx.max_buffer_length(),
+        soft_target,
     )?;
     plan_with_pricing(
         gguf,

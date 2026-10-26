@@ -490,6 +490,11 @@ pub(crate) struct SuiteArgs {
     /// Full bitwise. Pilot/main samples must be finite and positive.
     #[arg(long)]
     pub(crate) v41_ced_pair: bool,
+
+    /// Use a 4 GiB soft mapping coalescing target for both paired policies.
+    /// Defaults to None/P0; larger singletons remain device-limited.
+    #[arg(long, requires = "v41_ced_pair")]
+    pub(crate) v41_ced_pair_p4: bool,
     /// Instrument every paired case and stream observations to stderr, including
     /// excluded warmup/pilot cases. Not performance evidence; all gates remain.
     #[arg(long, requires = "v41_ced_pair")]

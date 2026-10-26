@@ -156,8 +156,12 @@ pub(crate) fn with_family_bench_planned<R>(
                     .0
                 }
             };
-            let weights = v41_weights::ResidentWeights::load(ctx, gguf.clone())
-                .context("load DeepSeek V4.1 weights")?;
+            let weights = v41_weights::ResidentWeights::load_with_storage_plan(
+                ctx,
+                gguf.clone(),
+                &planned.resident_storage,
+            )
+            .context("load DeepSeek V4.1 weights")?;
             eprintln!(
                 "[v41-retained-weight-resources] {}",
                 serde_json::to_string(&weights.retained_resources)?

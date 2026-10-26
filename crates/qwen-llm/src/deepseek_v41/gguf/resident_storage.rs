@@ -78,6 +78,18 @@ pub fn resident_storage_plan(
     for_plan(g, &p, page_size, max_buffer_length)
 }
 
+/// Explicit per-request coalescing selection; oversized singletons remain
+/// eligible up to the device limit. Ordinary planning keeps the None default.
+pub fn resident_storage_plan_with_target(
+    g: &GgufFile,
+    page_size: usize,
+    max_buffer_length: usize,
+    soft_target: Option<usize>,
+) -> Result<ResidentStoragePlan, LoadError> {
+    let p = plan(g)?;
+    for_plan_with_target(g, &p, page_size, max_buffer_length, soft_target)
+}
+
 pub(super) fn for_plan(
     g: &GgufFile,
     p: &Plan,

@@ -349,7 +349,8 @@ pub(crate) fn run_suite(args: SuiteArgs) -> Result<()> {
             args.v41_ced_pair_production_timing,
             args.v41_ced_pair_diagnostic,
         )
-        .with_schedule(args.v41_ced_pair_schedule.unwrap_or_default());
+        .with_schedule(args.v41_ced_pair_schedule.unwrap_or_default())
+        .with_p4(args.v41_ced_pair_p4);
         measurement.emit_requested(&mut std::io::stderr().lock())?;
         Some(measurement)
     } else {
@@ -365,6 +366,7 @@ pub(crate) fn run_suite_with_measurement(
     let SuiteArgs {
         model,
         v41_ced_pair,
+        v41_ced_pair_p4,
         v41_ced_pair_diagnostic,
         v41_ced_pair_production_timing,
         v41_ced_pair_schedule,
@@ -377,6 +379,10 @@ pub(crate) fn run_suite_with_measurement(
         seed,
         output,
     } = args;
+    ensure!(
+        !v41_ced_pair_p4 || v41_ced_pair,
+        "--v41-ced-pair-p4 requires --v41-ced-pair"
+    );
     ensure!(
         !v41_ced_pair_diagnostic || v41_ced_pair,
         "--v41-ced-pair-diagnostic requires --v41-ced-pair"
@@ -394,6 +400,7 @@ pub(crate) fn run_suite_with_measurement(
         "paired launch measurement missing or unexpected"
     );
     if let Some(measurement) = &paired_measurement {
+        measurement.validate_p4(v41_ced_pair_p4)?;
         measurement.validate_schedule(v41_ced_pair_schedule.unwrap_or_default(), runs)?;
         crate::v41_ced_pair::validate_args(
             ModelFamily::DeepSeekV41,

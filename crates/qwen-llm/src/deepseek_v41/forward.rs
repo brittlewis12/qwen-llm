@@ -23,7 +23,7 @@ mod memory;
 pub(super) mod preflight;
 pub use preflight::{
     ColdLoadAssessment, ColdPrefillPlan, ColdPrefillPreflight, plan_cold_prefill,
-    preflight_cold_prefill,
+    plan_cold_prefill_with_target, preflight_cold_prefill,
 };
 mod planning;
 pub use planning::{PrefillAdmission, PrefillGeometry, PrefillIntent, RequestPlan};

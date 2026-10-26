@@ -8,7 +8,7 @@ use crate::metal::{
     MetalTensorProvenance, dispatch_census_begin, dispatch_census_take, wait_completed,
 };
 use crate::tensor::TensorDesc;
-use objc2_metal::{MTLCommandQueue, MTLGPUFamily};
+use objc2_metal::{MTLBuffer, MTLCommandQueue, MTLGPUFamily};
 
 const HALF: Arith = Arith {
     lineage: PackedLineage::Fast,

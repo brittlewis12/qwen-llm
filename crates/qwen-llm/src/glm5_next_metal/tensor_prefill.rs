@@ -8,7 +8,7 @@ use crate::metal::checks::{
 };
 use crate::metal::{self, KernelEncoder, MetalContext, MetalError, MetalTensor};
 use crate::tensor::GgmlType;
-use objc2_metal::{MTLBuffer, MTLCommandBuffer, MTLComputePipelineState, MTLDevice, MTLResource};
+use objc2_metal::{MTLCommandBuffer, MTLComputePipelineState, MTLDevice, MTLResource};
 
 const KERNEL: &str = "glm5_dense_tensor_prefill";
 const MIN_ROWS: usize = 1024;

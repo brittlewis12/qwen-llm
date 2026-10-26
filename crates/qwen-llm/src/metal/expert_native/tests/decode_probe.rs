@@ -379,6 +379,8 @@ fn routed_decode_attribution_probe() {
         (GgmlType::Q3_K, GgmlType::MXFP4),
         (GgmlType::IQ2_XS, GgmlType::MXFP4),
         (GgmlType::Q8_0, GgmlType::Q8_0),
+        // GSQ-RCO IQ2_XS artifact: IQ2_XXS routed banks.
+        (GgmlType::IQ2_XXS, GgmlType::IQ2_XXS),
     ] {
         let f = Fixture::new(&ctx, gate_up, down);
         f.warm(&ctx);

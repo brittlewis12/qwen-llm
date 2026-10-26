@@ -858,5 +858,6 @@ fn packed_q2_attention_perf_audit_130k() {
     );
 }
 
+mod dispatch_latency;
 mod f32_narrow_tiles;
 mod q6_k_f32_tile;

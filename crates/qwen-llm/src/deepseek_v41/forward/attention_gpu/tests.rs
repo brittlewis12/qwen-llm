@@ -1,6 +1,7 @@
 use super::*;
 use std::collections::BTreeMap;
 
+mod candidate_publish;
 mod ced;
 mod f32_pv_batch;
 mod output_a_strategy;

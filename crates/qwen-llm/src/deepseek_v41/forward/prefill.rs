@@ -912,6 +912,30 @@ pub(super) fn run(
     run_captured(model, state, tokens, cancel, chunk_rows, with_logits, None)
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ScratchPolicy {
+    Reuse,
+    PerChunk,
+}
+
+fn scratch_policy() -> ScratchPolicy {
+    match std::env::var_os("QWEN_V41_CHUNK_SCRATCH_REUSE")
+        .as_deref()
+        .and_then(|value| value.to_str())
+    {
+        Some("0") | Some("off") => ScratchPolicy::PerChunk,
+        Some("alternate") => {
+            static NEXT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+            if NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed) % 2 == 0 {
+                ScratchPolicy::Reuse
+            } else {
+                ScratchPolicy::PerChunk
+            }
+        }
+        _ => ScratchPolicy::Reuse,
+    }
+}
+
 pub(super) fn run_captured(
     model: &Forward<'_>,
     state: &mut State,
@@ -980,7 +1004,8 @@ pub(super) fn run_captured(
     state.prefill_rows = Some(chunk_rows);
     state.last_prefill = None;
     let end = state.position() + tokens.len();
-    let mut scratch = if rows > 1 {
+    let policy = scratch_policy();
+    let mut scratch = if policy == ScratchPolicy::Reuse && rows > 1 {
         let span = profile::Wall("prefill_scratch_prepare", [0; 4], profile::start());
         let scratch = state
             .gpu_step
@@ -1012,17 +1037,36 @@ pub(super) fn run_captured(
                     last,
                 )?);
             }
-            if scratch.as_ref().is_none_or(|s| s.rows != chunk.len()) {
+            let per_chunk = if policy == ScratchPolicy::PerChunk {
                 let span = profile::Wall("prefill_scratch_prepare", [0; 4], profile::start());
-                scratch = Some(
-                    state
-                        .gpu_step
-                        .as_ref()
-                        .unwrap()
-                        .new_chunk_scratch(model, chunk.len())?,
-                );
+                let scratch = state
+                    .gpu_step
+                    .as_ref()
+                    .unwrap()
+                    .new_chunk_scratch(model, chunk.len())?;
                 drop(span);
-            }
+                Some(scratch)
+            } else {
+                None
+            };
+            let chunk_scratch = match &per_chunk {
+                Some(scratch) => scratch,
+                None => {
+                    if scratch.as_ref().is_none_or(|s| s.rows != chunk.len()) {
+                        let span =
+                            profile::Wall("prefill_scratch_prepare", [0; 4], profile::start());
+                        scratch = Some(
+                            state
+                                .gpu_step
+                                .as_ref()
+                                .unwrap()
+                                .new_chunk_scratch(model, chunk.len())?,
+                        );
+                        drop(span);
+                    }
+                    scratch.as_ref().unwrap()
+                }
+            };
             let mut next = state.addresses;
             let mut hashes = Vec::with_capacity(chunk.len());
             for &token in chunk {
@@ -1046,7 +1090,7 @@ pub(super) fn run_captured(
                 capture
                     .as_mut()
                     .map(|sink| &mut **sink as &mut dyn capture::Capture),
-                scratch.as_ref().unwrap(),
+                chunk_scratch,
             )?;
             state.addresses = next;
             state.phase = StatePhase::Ready;

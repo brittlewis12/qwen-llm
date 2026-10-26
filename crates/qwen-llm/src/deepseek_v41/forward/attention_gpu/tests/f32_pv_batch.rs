@@ -769,6 +769,7 @@ fn mma_sink_tile_dispatch_timing() {
     if std::env::var_os("QWEN_V41_SINK_TIMING").is_none() {
         return;
     }
+    let _lease = crate::metal::acquire_metal_benchmark_lease().expect("production GPU lease");
     let ctx = MetalContext::new().expect("Metal");
     let timed = |label: &str, f: &Fixture, encode: &dyn Fn(&KernelEncoder)| {
         let mut us = Vec::new();

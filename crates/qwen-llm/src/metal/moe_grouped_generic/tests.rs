@@ -1383,6 +1383,7 @@ fn tensor_dense_production_shape_timing() {
     if std::env::var_os("QWEN_V41_TILE_TIMING").is_none() {
         return;
     }
+    let _lease = crate::metal::acquire_metal_benchmark_lease().expect("production GPU lease");
     let ctx = MetalContext::new().expect("Metal");
     if !moe_grouped_tensor_available(&ctx) {
         eprintln!("tensor tier unavailable: {:?}", ctx.tensor_ops_status());
@@ -1921,6 +1922,7 @@ fn generic_tile_production_shape_timing() {
     if std::env::var_os("QWEN_V41_TILE_TIMING").is_none() {
         return;
     }
+    let _lease = crate::metal::acquire_metal_benchmark_lease().expect("production GPU lease");
     let ctx = MetalContext::new().expect("Metal");
     let shape = ProductionShape::new(&ctx);
     let (gate_up_flops, down_flops) = ProductionShape::flops();
@@ -1995,6 +1997,7 @@ fn tensor_tile_production_shape_timing() {
     if std::env::var_os("QWEN_V41_TILE_TIMING").is_none() {
         return;
     }
+    let _lease = crate::metal::acquire_metal_benchmark_lease().expect("production GPU lease");
     let ctx = MetalContext::new().expect("Metal");
     if !moe_grouped_tensor_available(&ctx) {
         eprintln!("tensor tier unavailable: {:?}", ctx.tensor_ops_status());
@@ -2639,6 +2642,7 @@ fn expert_wide_panel_timing() {
     if std::env::var_os("QWEN_V41_TILE_TIMING").is_none() {
         return;
     }
+    let _lease = crate::metal::acquire_metal_benchmark_lease().expect("production GPU lease");
     let ctx = MetalContext::new().expect("Metal");
     if !moe_grouped_tensor_available(&ctx) {
         eprintln!("tensor tier unavailable: {:?}", ctx.tensor_ops_status());
@@ -2785,6 +2789,7 @@ fn matmul2d_peak_timing() {
     if std::env::var_os("QWEN_V41_TILE_TIMING").is_none() {
         return;
     }
+    let _lease = crate::metal::acquire_metal_benchmark_lease().expect("production GPU lease");
     let ctx = MetalContext::new().expect("Metal");
     if !moe_grouped_tensor_available(&ctx) {
         eprintln!("tensor tier unavailable: {:?}", ctx.tensor_ops_status());
@@ -2849,6 +2854,7 @@ fn simdgroup_mma_peak_timing() {
     if std::env::var_os("QWEN_V41_TILE_TIMING").is_none() {
         return;
     }
+    let _lease = crate::metal::acquire_metal_benchmark_lease().expect("production GPU lease");
     let ctx = MetalContext::new().expect("Metal");
     let out = MetalTensor::zeros_f32(&ctx, vec![4096]).unwrap();
     for (name, acc) in [

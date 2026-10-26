@@ -138,7 +138,13 @@ fn forty_layers_python_legacy_trace_and_one_command() {
                 .sum::<usize>(),
             1
         );
-        assert!(report.operations.iter().all(|o| o.operation == "gpu_step"));
+        // Host Engram row reads are a wall span, not a command.
+        assert!(
+            report
+                .operations
+                .iter()
+                .all(|o| ["gpu_step", "decode_engram_rows"].contains(&o.operation))
+        );
         assert_eq!(logits, untraced);
         let ws = plain.gpu_step.as_ref().unwrap();
         assert_eq!((ws.commands, ws.trace_copies), (1, 0));
@@ -158,6 +164,73 @@ fn forty_layers_python_legacy_trace_and_one_command() {
             .contains("maximum context")
     );
     assert!(!plain.is_poisoned());
+}
+
+#[test]
+fn dispatch_profile_times_every_decode_dispatch_without_changing_logits() {
+    let ctx = MetalContext::new().unwrap();
+    let weights = toy::Weights::new(&ctx);
+    let model = weights.model(&ctx);
+    let mut plain = model.new_state_with_gpu_step(4).unwrap();
+    let mut profiled = model.new_state_with_gpu_step(4).unwrap();
+    for token in [0, 3, 1] {
+        let expected = model.step(&mut plain, token, None).unwrap();
+        metal::dispatch_census_begin();
+        let scope = profile::Scope::begin_dispatches().unwrap();
+        let logits = model.step(&mut profiled, token, None).unwrap();
+        let report = scope.finish();
+        let census = metal::dispatch_census_take();
+        // Same kernels in the same order; only encoder boundaries differ.
+        assert_eq!(logits, expected);
+        assert_eq!(report.dispatch_overflow, 0);
+        assert_eq!(
+            report
+                .dispatches
+                .iter()
+                .map(|r| r.kernel.as_str())
+                .collect::<Vec<_>>(),
+            census.iter().map(|r| r.kernel.as_str()).collect::<Vec<_>>()
+        );
+        assert!(report.dispatches.iter().all(|r| r.gpu_ns.is_some()));
+        let labels: std::collections::BTreeSet<_> =
+            report.dispatches.iter().map(|r| r.label).collect();
+        for label in [
+            "hc_pre",
+            "attn_qkv",
+            "attn_core",
+            "attn_output",
+            "hc_post",
+            "ffn_hc_pre",
+            "ffn_router",
+            "ffn_shared",
+            "ffn_routed",
+            "ffn_post",
+            "head",
+        ] {
+            assert!(labels.contains(label), "{label} missing from {labels:?}");
+        }
+    }
+    // The profile is scoped to the step: later steps run unsplit.
+    let scope = profile::Scope::begin().unwrap();
+    model.step(&mut profiled, 2, None).unwrap();
+    assert!(scope.finish().dispatches.is_empty());
+}
+
+#[test]
+fn split_ffn_encoders_match_one_encoder_bitwise() {
+    let ctx = MetalContext::new().unwrap();
+    let weights = toy::Weights::new(&ctx);
+    let model = weights.model(&ctx);
+    let mut one = model.new_state_with_gpu_step(4).unwrap();
+    let mut split = model.new_state_with_gpu_step(4).unwrap();
+    for token in [0, 3, 1, 2] {
+        FFN_SPLIT_OVERRIDE.with(|o| o.set(Some(false)));
+        let expected = model.step(&mut one, token, None).unwrap();
+        FFN_SPLIT_OVERRIDE.with(|o| o.set(Some(true)));
+        let logits = model.step(&mut split, token, None);
+        FFN_SPLIT_OVERRIDE.with(|o| o.set(None));
+        assert_eq!(logits.unwrap(), expected);
+    }
 }
 
 #[test]

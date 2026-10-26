@@ -4758,5 +4758,19 @@
     "class": "cpu",
     "ignored": false,
     "reason": "Reviewed host-only planning, metadata, NSObject lifetime, pure arithmetic, fake-state lifecycle or loopback fixture; no Metal context or real model import."
+  },
+  {
+    "target": "lib",
+    "name": "deepseek_v41::forward::gpu_step::tests::dispatch_profile_times_every_decode_dispatch_without_changing_logits",
+    "class": "gpu",
+    "ignored": false,
+    "reason": "Metal context, allocation or dispatch witness; parent GPU lane only."
+  },
+  {
+    "target": "lib",
+    "name": "deepseek_v41::forward::gpu_step::tests::split_ffn_encoders_match_one_encoder_bitwise",
+    "class": "gpu",
+    "ignored": false,
+    "reason": "Metal context, allocation or dispatch witness; parent GPU lane only."
   }
 ]

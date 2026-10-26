@@ -10,6 +10,13 @@ pub const PAIRED_OPERATION_CAPACITY: usize = 4096;
 thread_local! {
     static ACTIVE: RefCell<Option<Vec<Operation>>> = const { RefCell::new(None) };
     static STAGES: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    static DISPATCHES: RefCell<Option<Dispatches>> = const { RefCell::new(None) };
+}
+
+#[derive(Default)]
+struct Dispatches {
+    rows: Vec<crate::metal::DispatchProfileRow>,
+    overflow: usize,
 }
 
 #[derive(Debug, Serialize)]
@@ -40,6 +47,17 @@ pub struct Report {
     pub process_pageins: Option<u64>,
     pub process_disk_read_bytes: Option<u64>,
     pub operations: Vec<Operation>,
+    /// Per-dispatch isolated kernel times (`Scope::begin_dispatches` only;
+    /// omitted from serialized reports when empty).
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub dispatches: Vec<crate::metal::DispatchProfileRow>,
+    /// Dispatches that exceeded the per-command sample capacity.
+    #[serde(skip_serializing_if = "is_zero")]
+    pub dispatch_overflow: usize,
+}
+
+fn is_zero(n: &usize) -> bool {
+    *n == 0
 }
 
 /// Thread-bound scope; dropping on errors/unwind clears profiling. No nesting.
@@ -52,6 +70,13 @@ impl Scope {
     pub fn begin_stages() -> Result<Self, String> {
         let scope = Self::begin()?;
         STAGES.with(|enabled| enabled.set(true));
+        Ok(scope)
+    }
+    /// Time every decode dispatch in isolation (one sampled encoder each).
+    /// Not combined with stage sampling.
+    pub fn begin_dispatches() -> Result<Self, String> {
+        let scope = Self::begin()?;
+        DISPATCHES.with(|d| *d.borrow_mut() = Some(Dispatches::default()));
         Ok(scope)
     }
     pub fn begin() -> Result<Self, String> {
@@ -72,6 +97,9 @@ impl Scope {
         let token_wall_ms = self.start.elapsed().as_secs_f64() * 1000.0;
         let after = crate::pid_metrics::PidSnapshot::now().ok();
         let delta = self.before.as_ref().zip(after.as_ref());
+        let dispatches = DISPATCHES
+            .with(|d| d.borrow_mut().take())
+            .unwrap_or_default();
         Report {
             token_wall_ms,
             process_pageins: delta
@@ -82,6 +110,8 @@ impl Scope {
                     .saturating_sub(before.diskio_bytesread)
             }),
             operations: ACTIVE.with(|slot| slot.borrow_mut().take().unwrap()),
+            dispatches: dispatches.rows,
+            dispatch_overflow: dispatches.overflow,
         }
     }
 }
@@ -89,11 +119,25 @@ impl Drop for Scope {
     fn drop(&mut self) {
         ACTIVE.with(|slot| *slot.borrow_mut() = None);
         STAGES.with(|enabled| enabled.set(false));
+        DISPATCHES.with(|d| *d.borrow_mut() = None);
     }
 }
 
 pub(super) fn stages() -> bool {
     STAGES.with(|enabled| enabled.get())
+}
+
+pub(super) fn dispatches() -> bool {
+    DISPATCHES.with(|d| d.borrow().is_some())
+}
+
+pub(super) fn record_dispatches(report: crate::metal::DispatchProfileReport) {
+    DISPATCHES.with(|d| {
+        if let Some(d) = d.borrow_mut().as_mut() {
+            d.rows.extend(report.rows);
+            d.overflow += report.overflow;
+        }
+    });
 }
 
 /// Per-layer sampled GPU interval; the layer lands in `dimensions[1]`.

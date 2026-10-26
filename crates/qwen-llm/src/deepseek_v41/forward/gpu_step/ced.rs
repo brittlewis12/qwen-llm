@@ -665,13 +665,7 @@ impl Workspace {
                 "CED decoder Engram",
             )?;
             let p = &model.layers[slot.layer].engram.as_ref().unwrap().projection;
-            let mut values = Vec::with_capacity(n * p.input);
-            for hash in hashes {
-                values.extend(model.engram_rows.decode(
-                    slot.layer,
-                    hash.get(&slot.layer).ok_or("missing Engram hashes")?,
-                )?);
-            }
+            let values = model.engram_rows.decode_tokens(slot.layer, hashes)?;
             engrams.push((
                 slot.layer,
                 upload(ctx, &values, vec![p.input as u64, n as u64])?,

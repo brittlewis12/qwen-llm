@@ -1585,6 +1585,8 @@ mod tests {
             process_pageins: Some(3),
             process_disk_read_bytes: Some(4096),
             operations,
+            dispatches: Vec::new(),
+            dispatch_overflow: 0,
         }
     }
 

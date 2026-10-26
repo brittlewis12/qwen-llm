@@ -206,7 +206,80 @@ impl DiskEngram {
     pub fn decode_rows(&self, layer: usize, ids: &[u64]) -> Result<Vec<f32>, String> {
         self.read_rows(layer, ids).map_err(|e| e.to_string())
     }
+    /// Like [`Self::decode_rows`] for rows already passed to
+    /// [`Self::advise_rows`]: reads without advising again.
+    pub fn decode_advised_rows(&self, layer: usize, ids: &[u64]) -> Result<Vec<f32>, String> {
+        self.read_rows_with(layer, ids, false)
+            .map_err(|e| e.to_string())
+    }
+    /// Start asynchronous page-ins for rows that will be read soon, so a
+    /// caller can overlap several layers' misses. Advisory only: invalid
+    /// layers or IDs are left for the exact read to reject.
+    pub fn advise_rows(&self, layer: usize, ids: &[u64]) {
+        if !concurrent_reads() {
+            return;
+        }
+        let Some(table) = self.tables.get(&layer) else {
+            return;
+        };
+        let Ok(stride) = row_stride(&table.tensor) else {
+            return;
+        };
+        for &id in ids.iter().filter(|&&id| id < table.row_count) {
+            if let Ok(offset) = row_offset(table, stride, id) {
+                self.source()
+                    .advise_shard_read(table.tensor.shard_idx, offset, stride);
+            }
+        }
+    }
+    /// Any number of rows (prefill chunks), read in order in bounded blocks.
+    /// Cached rows take the plain serial path: advising every row, inline or
+    /// from a helper thread, added 2-3% to a warm 512-token prefill. When a
+    /// block reads slower than cached rows can (uncached rows are SSD round
+    /// trips), read-ahead is queued for every remaining row at once.
+    pub fn decode_rows_batched(&self, layer: usize, ids: &[u64]) -> Result<Vec<f32>, String> {
+        let mut output = Vec::new();
+        output
+            .try_reserve_exact(ids.len() * ROW_WIDTH)
+            .map_err(|e| format!("Engram output allocation: {e}"))?;
+        let mut advised = !concurrent_reads();
+        let mut done = 0;
+        while done < ids.len() {
+            // A short first block detects uncached rows early.
+            let block = if done == 0 { PROBE_ROWS } else { BLOCK_ROWS };
+            let block = &ids[done..(done + block).min(ids.len())];
+            let started = std::time::Instant::now();
+            output.extend(
+                self.read_rows_with(layer, block, false)
+                    .map_err(|e| e.to_string())?,
+            );
+            done += block.len();
+            if !advised
+                && started.elapsed() > COLD_ROW * u32::try_from(block.len()).unwrap_or(u32::MAX)
+            {
+                self.advise_rows(layer, &ids[done..]);
+                advised = true;
+            }
+        }
+        Ok(output)
+    }
+    /// Rows are independent small positional reads. An uncached row is an
+    /// SSD round trip (~70 us for one 16 KiB page), and the 103 GiB table
+    /// cannot stay cached next to the resident model, so every row is
+    /// advised first (asynchronous read-ahead) and then read: 48 uncached
+    /// rows cost ~0.24 ms instead of ~3.4 ms, cached rows ~0.5 us more each.
     pub fn read_rows(&self, layer: usize, ids: &[u64]) -> Result<Vec<f32>, LoadError> {
+        self.read_rows_with(layer, ids, true)
+    }
+    fn source(&self) -> &GgufFile {
+        self.context.auxiliary.as_ref().unwrap_or(&self.gguf)
+    }
+    fn read_rows_with(
+        &self,
+        layer: usize,
+        ids: &[u64],
+        advise: bool,
+    ) -> Result<Vec<f32>, LoadError> {
         self.revalidate_sources()?;
         if ids.len() > MAX_OUTPUT_BYTES / (ROW_WIDTH * std::mem::size_of::<f32>()) {
             return Err(invalid("Engram request exceeds bounded output"));
@@ -220,6 +293,16 @@ impl DiskEngram {
         }
         let t = &table.tensor;
         let stride = row_stride(t)?;
+        let source = self.source();
+        let offsets = ids
+            .iter()
+            .map(|&id| row_offset(table, stride, id))
+            .collect::<Result<Vec<_>, _>>()?;
+        if advise && concurrent_reads() {
+            for &offset in &offsets {
+                source.advise_shard_read(t.shard_idx, offset, stride);
+            }
+        }
         let mut raw = Vec::new();
         raw.try_reserve_exact(stride)
             .map_err(|e| invalid(format!("Engram row allocation: {e}")))?;
@@ -237,17 +320,12 @@ impl DiskEngram {
             .try_reserve_exact(ids.len() * ROW_WIDTH)
             .map_err(|e| invalid(format!("Engram output allocation: {e}")))?;
         output.resize(ids.len() * ROW_WIDTH, 0.0);
-        for (&id, destination) in ids.iter().zip(output.chunks_exact_mut(ROW_WIDTH)) {
-            let offset = id
-                .checked_add(table.row_base)
-                .and_then(|n| n.checked_mul(stride as u64))
-                .and_then(|n| t.data_offset.checked_add(n))
-                .ok_or_else(|| invalid("Engram row offset overflow"))?;
-            self.context
-                .auxiliary
-                .as_ref()
-                .unwrap_or(&self.gguf)
-                .read_shard_exact_at(t.shard_idx, offset, &mut raw)?;
+        for ((&id, &offset), destination) in ids
+            .iter()
+            .zip(&offsets)
+            .zip(output.as_chunks_mut::<ROW_WIDTH>().0)
+        {
+            source.read_shard_exact_at(t.shard_idx, offset, &mut raw)?;
             crate::codec::dequant_to_f32_in_place(&row, &raw, destination)
                 .map_err(|e| invalid(format!("Engram row decode {} {:?}: {e}", t.name, t.dtype)))?;
             if destination.iter().any(|v| !v.is_finite()) {
@@ -260,6 +338,27 @@ impl DiskEngram {
         self.revalidate_sources()?;
         Ok(output)
     }
+}
+
+/// Batched reads: first (probe) block, later blocks, and the mean per-row
+/// read time above which rows are treated as uncached. Cached rows read and
+/// decode in under 1 us; an uncached row is ~60-70 us.
+const PROBE_ROWS: usize = 64;
+const BLOCK_ROWS: usize = 4096;
+const COLD_ROW: std::time::Duration = std::time::Duration::from_micros(8);
+
+/// `QWEN_V41_ENGRAM_IO=serial` restores one blocking read per row with no
+/// read-ahead advice (A/B control).
+fn concurrent_reads() -> bool {
+    static CONCURRENT: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *CONCURRENT.get_or_init(|| std::env::var("QWEN_V41_ENGRAM_IO").as_deref() != Ok("serial"))
+}
+
+fn row_offset(table: &TableView, stride: usize, id: u64) -> Result<u64, LoadError> {
+    id.checked_add(table.row_base)
+        .and_then(|n| n.checked_mul(stride as u64))
+        .and_then(|n| table.tensor.data_offset.checked_add(n))
+        .ok_or_else(|| invalid("Engram row offset overflow"))
 }
 
 #[cfg(test)]

@@ -34,6 +34,138 @@ struct EngramWorkspace {
     gate: engram_gpu::BoundGate,
 }
 
+/// Decode stages sampled under `profile::stages()`: the Engram projections,
+/// then per layer HC pre (with any Engram gate), attention, HC post and the
+/// FFN, then the head. Each stage is its own sampled encoder; splitting adds
+/// encoder overhead, so read stage shares rather than absolute sums. Near the
+/// memory ceiling the splits are not cheap: IQ3_XXS (~217 of 240 GiB) took
+/// seconds per token with ~36 ms of sampled stage time and no disk I/O, so
+/// profile artifacts with headroom (GSQ at ~145 GiB stays within 1%).
+const DECODE_LAYER_STAGES: [&str; 4] = [
+    "decode_hc_pre",
+    "decode_attention",
+    "decode_hc_post",
+    "decode_ffn",
+];
+
+fn decode_stage_count(layers: usize) -> usize {
+    DECODE_LAYER_STAGES.len() * layers + 2
+}
+
+/// Per-dispatch profile capacity for one decode command (GSQ uses ~1,317).
+const DECODE_DISPATCH_PROFILE_CAPACITY: usize = 4096;
+
+/// The decode step's encoder. Without samples every boundary is a no-op and
+/// the whole step stays in one serial encoder, exactly as before. A borrowed
+/// encoder (callers that own their encoder, such as the CED scalar path) never
+/// samples.
+pub(super) struct StageEncoder<'a> {
+    command: Option<
+        &'a objc2::rc::Retained<objc2::runtime::ProtocolObject<dyn objc2_metal::MTLCommandBuffer>>,
+    >,
+    samples: Option<&'a metal::MetalTimestampSampleBuffer>,
+    enc: StageInner<'a>,
+    stage: usize,
+}
+
+enum StageInner<'a> {
+    Owned(KernelEncoder),
+    Borrowed(&'a KernelEncoder),
+}
+
+impl<'a> StageEncoder<'a> {
+    fn begin(
+        command: &'a objc2::rc::Retained<
+            objc2::runtime::ProtocolObject<dyn objc2_metal::MTLCommandBuffer>,
+        >,
+        samples: Option<&'a metal::MetalTimestampSampleBuffer>,
+    ) -> Self {
+        let enc = match samples {
+            Some(samples) => KernelEncoder::begin_sampled(command, samples, 0, 1, false),
+            None => KernelEncoder::begin(command),
+        };
+        Self {
+            command: Some(command),
+            samples,
+            enc: StageInner::Owned(enc),
+            stage: 0,
+        }
+    }
+
+    fn borrowed(enc: &'a KernelEncoder) -> Self {
+        Self {
+            command: None,
+            samples: None,
+            enc: StageInner::Borrowed(enc),
+            stage: 0,
+        }
+    }
+
+    pub(super) fn enc(&self) -> &KernelEncoder {
+        match &self.enc {
+            StageInner::Owned(enc) => enc,
+            StageInner::Borrowed(enc) => enc,
+        }
+    }
+
+    /// Close the current stage and open the next one (sampled builds only).
+    fn boundary(&mut self) {
+        let (Some(samples), Some(command)) = (self.samples, self.command) else {
+            return;
+        };
+        if let StageInner::Owned(enc) = &mut self.enc {
+            enc.finish();
+        }
+        self.stage += 1;
+        self.enc = StageInner::Owned(KernelEncoder::begin_sampled(
+            command,
+            samples,
+            2 * self.stage,
+            2 * self.stage + 1,
+            false,
+        ));
+    }
+
+    /// End the current plain encoder and begin another on the same command,
+    /// so Metal's resource tracking may overlap independent work across the
+    /// boundary. No-op for borrowed or sampled encoders.
+    fn split(&mut self) {
+        let (None, Some(command)) = (self.samples, self.command) else {
+            return;
+        };
+        if let StageInner::Owned(enc) = &mut self.enc {
+            enc.finish();
+            self.enc = StageInner::Owned(KernelEncoder::begin(command));
+        }
+    }
+
+    fn end(self) {
+        if let StageInner::Owned(enc) = self.enc {
+            enc.end();
+        }
+    }
+}
+
+#[cfg(test)]
+thread_local! {
+    static FFN_SPLIT_OVERRIDE: std::cell::Cell<Option<bool>> = const { std::cell::Cell::new(None) };
+}
+
+/// The decode FFN encodes its shared expert and its router plus routed
+/// experts on separate encoders, which Metal's resource tracking overlaps:
+/// GSQ tg64 59.0 -> 61.8 tok/s at d0, 52.7 -> 54.9 at d2048 (GPU 16.67 ->
+/// 15.82 ms/token). The same split for attention (query | KV | core) lost
+/// (60.3 / 53.8): its chains are too short to pay for two more encoders.
+/// `QWEN_V41_FFN_ENCODERS=one` keeps one encoder (A/B).
+fn ffn_split_encoders() -> bool {
+    #[cfg(test)]
+    if let Some(split) = FFN_SPLIT_OVERRIDE.with(|o| o.get()) {
+        return split;
+    }
+    static SPLIT: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *SPLIT.get_or_init(|| std::env::var("QWEN_V41_FFN_ENCODERS").as_deref() != Ok("one"))
+}
+
 pub(super) fn chunk_widths(
     model: &Forward<'_>,
     capacity: usize,
@@ -198,13 +330,7 @@ impl Workspace {
         let engram_prepare = profile::Wall("prefill_engram_prepare", [0; 4], profile::start());
         for slot in &self.engrams {
             let p = &model.layers[slot.layer].engram.as_ref().unwrap().projection;
-            let mut values = Vec::with_capacity(n * p.input);
-            for hash in hashes {
-                values.extend(model.engram_rows.decode(
-                    slot.layer,
-                    hash.get(&slot.layer).ok_or("missing Engram hashes")?,
-                )?);
-            }
+            let values = model.engram_rows.decode_tokens(slot.layer, hashes)?;
             engrams.push((
                 slot.layer,
                 upload(ctx, &values, vec![p.input as u64, n as u64])?,
@@ -663,6 +789,27 @@ impl Workspace {
         snapshot: Option<&capture::Snapshot>,
         ced: bool,
     ) -> Result<()> {
+        self.layer_staged(
+            model,
+            &mut StageEncoder::borrowed(enc),
+            id,
+            position,
+            snapshot,
+            ced,
+        )
+    }
+
+    /// `layer` with decode stage boundaries (HC pre | attention | HC post |
+    /// FFN); boundaries only split encoders when stages are sampled.
+    fn layer_staged(
+        &mut self,
+        model: &Forward<'_>,
+        stages: &mut StageEncoder<'_>,
+        id: usize,
+        position: usize,
+        snapshot: Option<&capture::Snapshot>,
+        ced: bool,
+    ) -> Result<()> {
         let ctx = model.ctx;
         let c = &model.config;
         let l = &model.layers[id];
@@ -671,7 +818,10 @@ impl Workspace {
         } else {
             self.ffn.next_pre()
         };
-        self.normalize_scalar_input(model, enc, id, &self.x, incoming)?;
+        metal::dispatch_profile_label("hc_pre", Some(id));
+        self.normalize_scalar_input(model, stages.enc(), id, &self.x, incoming)?;
+        stages.boundary();
+        let enc = stages.enc();
         let output = if ced {
             self.attention.encode_ced_scalar(
                 ctx,
@@ -685,6 +835,9 @@ impl Workspace {
             self.attention
                 .encode(ctx, enc, id, position, &l.attention, &self.normalized)?
         };
+        stages.boundary();
+        let enc = stages.enc();
+        metal::dispatch_profile_label("hc_post", Some(id));
         metal::encode_mhc4_post(
             ctx, enc, c.hidden, output, &self.x, &self.post, &self.comb, &self.half,
         )
@@ -693,9 +846,30 @@ impl Workspace {
             self.attention
                 .capture(ctx, enc, snapshot, &self.normalized, id, position)?;
         }
+        stages.boundary();
+        if !ffn_split_encoders() {
+            let enc = stages.enc();
+            return self
+                .ffn
+                .encode(ctx, enc, c, l, id, &self.half, &self.pre, &self.x)
+                .map_err(|e| e.to_string());
+        }
+        let err = |e: metal::MetalError| e.to_string();
         self.ffn
-            .encode(ctx, enc, c, l, id, &self.half, &self.pre, &self.x)
-            .map_err(|e| e.to_string())
+            .encode_hc_pre(ctx, stages.enc(), c, l, id, &self.half, &self.pre)
+            .map_err(err)?;
+        stages.split();
+        self.ffn
+            .encode_shared(ctx, stages.enc(), c, l, id)
+            .map_err(err)?;
+        stages.split();
+        self.ffn
+            .encode_routed_experts(ctx, stages.enc(), c, l, id)
+            .map_err(err)?;
+        stages.split();
+        self.ffn
+            .encode_combine(ctx, stages.enc(), c, id, &self.half, &self.x)
+            .map_err(err)
     }
 
     pub(super) fn run(
@@ -764,16 +938,21 @@ impl Workspace {
         self.trace_copies = 0;
         let embedding = decode_rows(model.embedding, token, 1)?;
         write(&self.x, &embedding.repeat(4))?;
-        for slot in &self.engrams {
-            if prepared.is_some() {
-                continue;
+        let engram_rows = profile::Wall(
+            "decode_engram_rows",
+            [0, self.engrams.len(), 0, 0],
+            profile::start(),
+        );
+        if prepared.is_none() {
+            // All layers' rows are advised before any read: uncached rows are
+            // SSD round trips that should overlap.
+            let layers: Vec<usize> = self.engrams.iter().map(|slot| slot.layer).collect();
+            let values = model.engram_rows.decode_layers(&layers, rows)?;
+            for (slot, values) in self.engrams.iter().zip(values) {
+                write(&slot.input, &values)?;
             }
-            let id = slot.layer;
-            let values = model
-                .engram_rows
-                .decode(id, rows.get(&id).ok_or("missing Engram hashes")?)?;
-            write(&slot.input, &values)?;
         }
+        drop(engram_rows);
         let captures = if trace.is_some() {
             (0..model.layers.len())
                 .map(|_| {
@@ -801,18 +980,39 @@ impl Workspace {
                 .queue
                 .commandBuffer()
                 .ok_or("Metal command buffer allocation")?;
-            let enc = KernelEncoder::begin(&command);
+            let samples = if profile::stages() {
+                Some(
+                    ctx.timestamp_sample_buffer(2 * decode_stage_count(end - start))
+                        .map_err(|e| e.to_string())?,
+                )
+            } else {
+                None
+            };
+            // Plain encoders begun under this guard split per dispatch, so it
+            // must precede the step encoder; stage sampling excludes it.
+            let dispatch_profile = if profile::dispatches() && samples.is_none() {
+                Some(
+                    metal::dispatch_profile_begin(ctx, DECODE_DISPATCH_PROFILE_CAPACITY)
+                        .map_err(|e| e.to_string())?,
+                )
+            } else {
+                None
+            };
+            metal::dispatch_profile_label("engram_projection", None);
+            let mut stages = StageEncoder::begin(&command, samples.as_ref());
             let encoded = (|| -> Result<()> {
                 for slot in &self.engrams {
                     if prepared.is_some() {
                         continue;
                     }
                     let p = &model.layers[slot.layer].engram.as_ref().unwrap().projection;
-                    p.encode(&enc, &slot.input, &slot.projected)
+                    p.encode(stages.enc(), &slot.input, &slot.projected)
                         .map_err(|e| e.to_string())?;
                 }
                 for id in start..end {
                     cancelled(cancel)?;
+                    stages.boundary();
+                    metal::dispatch_profile_label("hc_pre", Some(id));
                     if let Some(slot) = self.engrams.iter().find(|slot| slot.layer == id) {
                         let projected = match prepared {
                             Some(rows) => {
@@ -824,11 +1024,11 @@ impl Workspace {
                             }
                             None => &slot.projected,
                         };
-                        slot.gate.encode(ctx, &enc, &self.x, projected, 1)?;
+                        slot.gate.encode(ctx, stages.enc(), &self.x, projected, 1)?;
                     }
-                    self.layer(
+                    self.layer_staged(
                         model,
-                        &enc,
+                        &mut stages,
                         id,
                         position,
                         snapshots
@@ -840,7 +1040,7 @@ impl Workspace {
                     if !captures.is_empty() {
                         metal::encode_copy_offset_f32(
                             ctx,
-                            &enc,
+                            stages.enc(),
                             &self.x,
                             0,
                             &captures[id].0,
@@ -849,7 +1049,7 @@ impl Workspace {
                         .map_err(|e| e.to_string())?;
                         metal::encode_copy_offset_f32(
                             ctx,
-                            &enc,
+                            stages.enc(),
                             self.ffn.next_pre(),
                             0,
                             &captures[id].1,
@@ -859,10 +1059,12 @@ impl Workspace {
                         self.trace_copies += 2;
                     }
                 }
+                stages.boundary();
+                metal::dispatch_profile_label("head", None);
                 if with_logits {
                     metal::encode_mhc4_collapse(
                         ctx,
-                        &enc,
+                        stages.enc(),
                         c.hidden,
                         &self.x,
                         self.ffn.next_pre(),
@@ -871,7 +1073,7 @@ impl Workspace {
                     .map_err(|e| e.to_string())?;
                     metal::encode_rms_norm_mul_rows_f32(
                         ctx,
-                        &enc,
+                        stages.enc(),
                         &self.collapsed,
                         &self.norm,
                         &self.normalized,
@@ -882,12 +1084,12 @@ impl Workspace {
                     .map_err(|e| e.to_string())?;
                     model
                         .head
-                        .encode(&enc, &self.normalized, &self.logits)
+                        .encode(stages.enc(), &self.normalized, &self.logits)
                         .map_err(|e| e.to_string())?;
                 }
                 Ok(())
             })();
-            enc.end();
+            stages.end();
             encoded?;
             let encode_ms = started.map(|s| s.elapsed().as_secs_f64() * 1000.0);
             let wait = std::time::Instant::now();
@@ -906,6 +1108,28 @@ impl Workspace {
                 );
             }
             result?;
+            if let Some(guard) = dispatch_profile {
+                profile::record_dispatches(
+                    metal::dispatch_profile_finish(ctx, guard).map_err(|e| e.to_string())?,
+                );
+            }
+            if let Some(samples) = &samples {
+                let layers = end - start;
+                let times = ctx
+                    .resolve_timestamp_samples(samples, 2 * decode_stage_count(layers))
+                    .map_err(|e| e.to_string())?;
+                let interval = |stage: usize| (times[2 * stage], times[2 * stage + 1]);
+                let (s, e) = interval(0);
+                profile::gpu_interval_layer("decode_engram_projection", 1, 0, s, e);
+                for layer in 0..layers {
+                    for (k, name) in DECODE_LAYER_STAGES.iter().enumerate() {
+                        let (s, e) = interval(1 + DECODE_LAYER_STAGES.len() * layer + k);
+                        profile::gpu_interval_layer(name, 1, start + layer, s, e);
+                    }
+                }
+                let (s, e) = interval(decode_stage_count(layers) - 1);
+                profile::gpu_interval_layer("decode_head", 1, 0, s, e);
+            }
             cancelled(cancel)?;
             let status = unsafe {
                 *self

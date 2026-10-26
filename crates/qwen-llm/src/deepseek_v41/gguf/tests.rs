@@ -875,6 +875,22 @@ fn engram_standard_codecs_gather_selected_rows_with_exact_strides() {
         assert!(weights.engram.read_rows(0, &[u64::MAX]).is_err());
         assert!(weights.engram.read_rows(1, &[0]).is_err());
         assert!(weights.engram.read_rows(0, &vec![0; 32769]).is_err());
+        // Batched (prefill) reads cross the probe and block boundaries and
+        // exceed one bounded read; advised reads match plain reads.
+        let many: Vec<u64> = (0..40_000u64).map(|i| (i * 7 + i / 3) % 48).collect();
+        let batched = weights.engram.decode_rows_batched(0, &many).unwrap();
+        assert_eq!(batched.len(), many.len() * 256);
+        for (&id, row) in many.iter().zip(batched.chunks_exact(256)) {
+            let expected = &expected[id as usize * 256..(id as usize + 1) * 256];
+            assert!(
+                row.iter()
+                    .zip(expected)
+                    .all(|(a, b)| a.to_bits() == b.to_bits())
+            );
+        }
+        assert!(weights.engram.decode_rows_batched(0, &[0, 48]).is_err());
+        weights.engram.advise_rows(0, &[0, 47, 48, u64::MAX]);
+        assert_eq!(weights.engram.decode_advised_rows(0, &ids).unwrap(), actual);
     }
 }
 

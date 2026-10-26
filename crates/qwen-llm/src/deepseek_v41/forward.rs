@@ -65,6 +65,42 @@ impl EngramRows<'_> {
             Self::Toy(read) => read(layer, rows),
         }
     }
+
+    /// One token's rows for several layers: every layer's rows are advised
+    /// before any is read, so uncached rows of all layers load together.
+    fn decode_layers(&self, layers: &[usize], rows: &engram::LayerRows) -> Result<Vec<Vec<f32>>> {
+        let ids = |layer: &usize| rows.get(layer).ok_or("missing Engram hashes");
+        match self {
+            Self::Disk(disk) => {
+                for layer in layers {
+                    disk.advise_rows(*layer, ids(layer)?);
+                }
+                layers
+                    .iter()
+                    .map(|layer| disk.decode_advised_rows(*layer, ids(layer)?))
+                    .collect()
+            }
+            #[cfg(test)]
+            Self::Toy(read) => layers
+                .iter()
+                .map(|layer| read(*layer, ids(layer)?))
+                .collect(),
+        }
+    }
+
+    /// One layer's rows for every token, token-major, in one batched read so
+    /// uncached rows are fetched concurrently rather than token by token.
+    fn decode_tokens(&self, layer: usize, hashes: &[engram::LayerRows]) -> Result<Vec<f32>> {
+        let mut ids = Vec::with_capacity(hashes.len() * 24);
+        for hash in hashes {
+            ids.extend_from_slice(hash.get(&layer).ok_or("missing Engram hashes")?);
+        }
+        match self {
+            Self::Disk(disk) => disk.decode_rows_batched(layer, &ids),
+            #[cfg(test)]
+            Self::Toy(read) => read(layer, &ids),
+        }
+    }
 }
 
 /// Runtime geometry comes from GGUF metadata. Default is the base 384-expert

@@ -670,14 +670,7 @@ fn run_hybrid(
                 .as_ref()
                 .ok_or("missing Engram")?
                 .projection;
-            let mut values = Vec::with_capacity(chunk.len() * linear.input);
-            for rows in &hashes {
-                values.extend(
-                    model
-                        .engram_rows
-                        .decode(id, rows.get(&id).ok_or("missing Engram hashes")?)?,
-                );
-            }
+            let values = model.engram_rows.decode_tokens(id, &hashes)?;
             inputs.push(upload(
                 model.ctx,
                 &values,

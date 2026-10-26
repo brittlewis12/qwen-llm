@@ -342,6 +342,41 @@ impl GgufFile {
         Ok(&shard.mmap[start..end])
     }
 
+    /// Advise the kernel that a shard range will be read soon. On macOS this
+    /// is `F_RDADVISE`: an asynchronous read of the missing pages into the
+    /// page cache, so many advised small reads overlap instead of paying one
+    /// SSD round trip each. Purely advisory: out-of-range, missing-shard and
+    /// syscall failures are ignored (the later exact read still validates).
+    pub fn advise_shard_read(&self, shard_idx: usize, offset: u64, length: usize) {
+        let Some(shard) = self.shards.get(shard_idx) else {
+            return;
+        };
+        if offset
+            .checked_add(length as u64)
+            .is_none_or(|end| end > shard.mmap.len() as u64)
+        {
+            return;
+        }
+        #[cfg(target_os = "macos")]
+        {
+            use std::os::fd::AsRawFd;
+            let (Ok(ra_offset), Ok(ra_count)) =
+                (libc::off_t::try_from(offset), libc::c_int::try_from(length))
+            else {
+                return;
+            };
+            let advice = libc::radvisory {
+                ra_offset,
+                ra_count,
+            };
+            // SAFETY: valid descriptor owned by the shard; F_RDADVISE reads
+            // the struct and does not retain it.
+            unsafe {
+                libc::fcntl(shard.file.as_raw_fd(), libc::F_RDADVISE, &advice);
+            }
+        }
+    }
+
     /// Read an exact validated range from the descriptor retained for a shard.
     ///
     /// This deliberately does not reopen `GgufShard::path`: callers keep the

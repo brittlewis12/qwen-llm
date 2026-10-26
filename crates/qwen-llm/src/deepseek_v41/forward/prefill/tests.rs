@@ -272,7 +272,13 @@ fn public_single_row_prefill_uses_one_scalar_command() {
             .sum::<usize>(),
         1
     );
-    assert!(report.operations.iter().all(|o| o.operation == "gpu_step"));
+    // Host Engram row reads are a wall span, not a command.
+    assert!(
+        report
+            .operations
+            .iter()
+            .all(|o| ["gpu_step", "decode_engram_rows"].contains(&o.operation))
+    );
     assert_eq!(
         model.step(&mut batch, 1, None).unwrap(),
         model.step(&mut serial, 1, None).unwrap()

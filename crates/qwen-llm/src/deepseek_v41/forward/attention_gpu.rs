@@ -2093,7 +2093,9 @@ impl Workspace {
         validate_weights(c, id, w, &self.schedule)?;
         valid_view(input, c.hidden)?;
         let constants = &self.constants[id];
+        let label = |name| metal::dispatch_profile_label(name, Some(id));
         if prepared.is_none() {
+            label("attn_qkv");
             linear(ctx, enc, &w.query_a, input, &self.query_rank)?;
             norm(
                 ctx,
@@ -2152,6 +2154,7 @@ impl Workspace {
             let ratio = self.schedule.ratio(id);
             let length = (position + 1) / ratio;
             if self.schedule.owns_kv(id) && mode == GlobalKvMode::Ordinary {
+                label("attn_owner");
                 self.publish_owner_transition(
                     ctx,
                     enc,
@@ -2166,6 +2169,7 @@ impl Workspace {
             }
             selected_count = length.min(c.index_topk);
             if select && self.schedule.produces_index(id) && length > 0 {
+                label("attn_index");
                 let unpruned = length.div_ceil(c.candidate_block) <= c.candidate_topk;
                 if unpruned && length <= c.index_topk {
                     self.select_unpruned(ctx, enc, id, length)?;
@@ -2241,6 +2245,7 @@ impl Workspace {
             )?;
         }
         if prepared.is_none() {
+            label("attn_core");
             let raw = self.raw.view_subrange(
                 (id * c.window * c.head_dim) as u64,
                 vec![(c.window * c.head_dim) as u64],
@@ -2293,6 +2298,7 @@ impl Workspace {
                 position,
                 true,
             )?;
+            label("attn_output");
             let group_width = c.heads / c.groups * c.head_dim;
             match Self::output_a_bank(w, c) {
                 // One dispatch over all groups: slot g reads attended group g

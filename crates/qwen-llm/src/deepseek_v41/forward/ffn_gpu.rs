@@ -342,9 +342,30 @@ impl Workspace {
         pre: &MetalTensor,
         output: &MetalTensor,
     ) -> std::result::Result<(), metal::MetalError> {
+        self.encode_hc_pre(ctx, enc, c, layer, id, x, pre)?;
+        self.encode_shared(ctx, enc, c, layer, id)?;
+        self.encode_routed_experts(ctx, enc, c, layer, id)?;
+        self.encode_combine(ctx, enc, c, id, x, output)
+    }
+
+    /// `encode` in four parts. The shared expert and the router plus routed
+    /// experts only read the HC pre output and write disjoint buffers, so on
+    /// separate encoders Metal's resource tracking may overlap them; the
+    /// combine part reads both. In order on one encoder they are `encode`.
+    pub(super) fn encode_hc_pre(
+        &self,
+        ctx: &MetalContext,
+        enc: &KernelEncoder,
+        c: &Config,
+        layer: &Layer<'_>,
+        id: usize,
+        x: &MetalTensor,
+        pre: &MetalTensor,
+    ) -> std::result::Result<(), metal::MetalError> {
         composition_extents(c, 1)?;
         let b = &self.buffers;
         let constants = &self.constants[id];
+        metal::dispatch_profile_label("ffn_hc_pre", Some(id));
         if hc_gpu::fused_supported(&layer.ffn_hc) {
             hc_gpu::encode_pre(
                 ctx,
@@ -394,24 +415,114 @@ impl Workspace {
                 c.norm_eps,
             )?;
         }
-        layer.router.encode(enc, &b[7], &b[8])?;
+        Ok(())
+    }
+
+    pub(super) fn encode_shared(
+        &self,
+        ctx: &MetalContext,
+        enc: &KernelEncoder,
+        c: &Config,
+        layer: &Layer<'_>,
+        id: usize,
+    ) -> std::result::Result<(), metal::MetalError> {
+        let b = &self.buffers;
+        metal::dispatch_profile_label("ffn_shared", Some(id));
         for j in 0..2 {
             layer.shared[j].encode(enc, &b[7], &b[16 + j])?;
         }
         metal::encode_clamped_swiglu(ctx, enc, &b[16], &b[17], &b[18], c.clamp)?;
-        layer.shared[2].encode(enc, &b[18], &b[19])?;
-        self.encode_routed(
+        layer.shared[2].encode(enc, &b[18], &b[19])
+    }
+
+    pub(super) fn encode_routed_experts(
+        &self,
+        ctx: &MetalContext,
+        enc: &KernelEncoder,
+        c: &Config,
+        layer: &Layer<'_>,
+        id: usize,
+    ) -> std::result::Result<(), metal::MetalError> {
+        let extents = composition_extents(c, 1)?;
+        let b = &self.buffers;
+        let constants = &self.constants[id];
+        let status = &self.statuses[id];
+        let label = |name| metal::dispatch_profile_label(name, Some(id));
+        label("ffn_router");
+        layer.router.encode(enc, &b[7], &b[8])?;
+        label("ffn_routed");
+        encode_route_rows(
             ctx,
             enc,
             c,
-            layer,
-            &constants[3],
-            &b[7],
+            1,
             &b[8],
-            &b[19],
-            &b[20],
-            &self.statuses[id],
+            &constants[3],
+            &b[9],
+            &b[10],
+            &b[11],
+            status,
         )?;
+        metal::encode_all_slots_gate_up_swiglu_native_fused(
+            ctx,
+            enc,
+            layer.banks[0],
+            layer.banks[1],
+            &b[7],
+            &b[10],
+            status,
+            &b[13],
+            c.hidden,
+            c.intermediate,
+            c.experts,
+            c.topk,
+            c.clamp,
+        )?;
+        enc.set_pipeline(&ctx.pipeline("kernel_deepseek_v41_weight")?);
+        enc.set_bytes(0, &extents.weighted);
+        enc.set_bytes(1, &(c.intermediate as u32));
+        for (slot, tensor) in [&b[13], &b[11], &b[14], status].iter().enumerate() {
+            enc.set_tensor(slot + 2, tensor);
+        }
+        enc.set_bytes(6, &(c.topk as u32));
+        dispatch(enc, extents.weighted as usize, 256);
+        metal::encode_all_slots_down_native(
+            ctx,
+            enc,
+            layer.banks[2],
+            &b[14],
+            &b[10],
+            status,
+            &b[15],
+            c.intermediate,
+            c.hidden,
+            c.experts,
+            c.topk,
+        )?;
+        Ok(())
+    }
+
+    pub(super) fn encode_combine(
+        &self,
+        ctx: &MetalContext,
+        enc: &KernelEncoder,
+        c: &Config,
+        id: usize,
+        x: &MetalTensor,
+        output: &MetalTensor,
+    ) -> std::result::Result<(), metal::MetalError> {
+        let extents = composition_extents(c, 1)?;
+        let b = &self.buffers;
+        let status = &self.statuses[id];
+        enc.set_pipeline(&ctx.pipeline("kernel_deepseek_v41_sum")?);
+        enc.set_bytes(0, &(c.hidden as u32));
+        enc.set_bytes(1, &(c.topk as u32));
+        for (slot, tensor) in [&b[15], &b[19], &b[20], status].iter().enumerate() {
+            enc.set_tensor(slot + 2, tensor);
+        }
+        enc.set_bytes(6, &1u32);
+        dispatch(enc, extents.output as usize, 256);
+        metal::dispatch_profile_label("ffn_post", Some(id));
         metal::encode_mhc4_post(ctx, enc, c.hidden, &b[20], x, &b[4], &b[5], output)
     }
 

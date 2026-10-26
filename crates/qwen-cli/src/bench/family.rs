@@ -229,9 +229,111 @@ pub(crate) fn with_family_bench_planned<R>(
                 },
                 step: |state: &mut qwen_llm::deepseek_v41::forward::State, token| {
                     shutdown::checkpoint()?;
-                    forward
+                    // Measurement hooks (not product flags): per-layer sampled
+                    // decode stage envelopes, and the step's dispatch census,
+                    // printed to stderr for every decoded token. Stage sampling
+                    // splits the step into ~160 encoders; on near-capacity
+                    // residents (IQ3 at ~217 GiB) that costs seconds per token.
+                    // QWEN_V41_DECODE_DISPATCHES instead times every dispatch in
+                    // its own encoder and prints one JSON line per token, and
+                    // QWEN_V41_DECODE_TIMING prints the unsplit command's times.
+                    use qwen_llm::deepseek_v41::forward::profile::Scope;
+                    let env = |name| std::env::var_os(name).is_some();
+                    let dispatches = env("QWEN_V41_DECODE_DISPATCHES");
+                    let scope = if dispatches {
+                        Some(Scope::begin_dispatches())
+                    } else if env("QWEN_V41_DECODE_STAGES") {
+                        Some(Scope::begin_stages())
+                    } else if env("QWEN_V41_DECODE_TIMING") {
+                        Some(Scope::begin())
+                    } else {
+                        None
+                    }
+                    .transpose()
+                    .map_err(anyhow::Error::msg)?;
+                    let census = std::env::var_os("QWEN_V41_CENSUS").is_some();
+                    if census {
+                        qwen_llm::metal::dispatch_census_begin();
+                    }
+                    let logits = forward
                         .step(state, token, Some(shutdown::cancellation_flag()))
-                        .map_err(anyhow::Error::msg)
+                        .map_err(anyhow::Error::msg)?;
+                    if census {
+                        let rows = qwen_llm::metal::dispatch_census_take();
+                        let mut counts = std::collections::BTreeMap::new();
+                        for row in &rows {
+                            *counts.entry(row.kernel.clone()).or_insert(0usize) += 1;
+                        }
+                        let mut top: Vec<_> = counts.into_iter().collect();
+                        top.sort_by_key(|(_, n)| std::cmp::Reverse(*n));
+                        top.truncate(40);
+                        eprintln!(
+                            "[v41-decode-census] dispatches={} top={:?}",
+                            rows.len(),
+                            top
+                        );
+                    }
+                    let report = scope.map(Scope::finish);
+                    if let Some(report) = report.as_ref().filter(|_| dispatches) {
+                        let origin = report
+                            .dispatches
+                            .iter()
+                            .filter_map(|r| r.gpu_start)
+                            .min()
+                            .unwrap_or(0);
+                        let rel = |t: Option<u64>| t.map(|t| t.saturating_sub(origin));
+                        let rows: Vec<_> = report
+                            .dispatches
+                            .iter()
+                            .map(|r| {
+                                serde_json::json!([
+                                    r.label,
+                                    r.layer,
+                                    r.kernel,
+                                    r.grid,
+                                    r.threads,
+                                    r.concurrent,
+                                    r.gpu_ns,
+                                    rel(r.gpu_start),
+                                    rel(r.gpu_end)
+                                ])
+                            })
+                            .collect();
+                        let step_ms = report
+                            .operations
+                            .iter()
+                            .find(|op| op.operation == "gpu_step")
+                            .and_then(|op| op.gpu_ms);
+                        eprintln!(
+                            "[v41-decode-dispatches] {}",
+                            serde_json::json!({
+                                "wall_ms": report.token_wall_ms,
+                                "split_command_gpu_ms": step_ms,
+                                "overflow": report.dispatch_overflow,
+                                "rows": rows,
+                            })
+                        );
+                    } else if let Some(report) = report {
+                        eprintln!(
+                            "[v41-decode-stages] wall_ms={:.3} pageins={:?} disk_read_bytes={:?}",
+                            report.token_wall_ms,
+                            report.process_pageins,
+                            report.process_disk_read_bytes
+                        );
+                        for op in &report.operations {
+                            eprintln!(
+                                "[v41-decode-stages] {} dims={:?} count={} gpu_ms={:?} encode_ms={:.3} wait_ms={:.3} wall_ms={:.3}",
+                                op.operation,
+                                op.dimensions,
+                                op.count,
+                                op.gpu_ms,
+                                op.encode_ms,
+                                op.commit_wait_ms,
+                                op.wall_ms
+                            );
+                        }
+                    }
+                    Ok(logits)
                 },
             };
             body(&mut bench)

@@ -50,6 +50,20 @@
   },
   {
     "target": "bench",
+    "name": "family_options::tests::v41_cold_load_preserves_independent_supplied_pair_mapping",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Host-only cold policy/composition with tiny GGUF storage metadata, synthetic memory signals and fake loader; no environment mutation, Metal context or model import."
+  },
+  {
+    "target": "bench",
+    "name": "family_options::tests::v41_cold_load_stops_on_planning_admission_or_loader_error_without_retry",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Host-only cold policy/composition with tiny GGUF storage metadata, synthetic memory signals and fake loader; no environment mutation, Metal context or model import."
+  },
+  {
+    "target": "bench",
     "name": "family_options::tests::v41_cold_prefill_parser_defaults_and_valid_values",
     "class": "cpu",
     "ignored": false,
@@ -61,6 +75,20 @@
     "class": "cpu",
     "ignored": false,
     "reason": "Reviewed host-only planning, metadata, NSObject lifetime, pure arithmetic, fake-state lifecycle or loopback fixture; no Metal context or real model import."
+  },
+  {
+    "target": "bench",
+    "name": "family_options::tests::v41_cold_run_and_ordinary_bench_load_selected_profile_plan",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Host-only cold policy/composition with tiny GGUF storage metadata, synthetic memory signals and fake loader; no environment mutation, Metal context or model import."
+  },
+  {
+    "target": "bench",
+    "name": "family_options::tests::v41_cold_selected_full_fallback_retains_p4_and_geometry",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Host-only cold policy/composition with tiny GGUF storage metadata, synthetic memory signals and fake loader; no environment mutation, Metal context or model import."
   },
   {
     "target": "bench",
@@ -4096,6 +4124,20 @@
   },
   {
     "target": "qwen",
+    "name": "family_options::tests::v41_cold_load_preserves_independent_supplied_pair_mapping",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Host-only cold policy/composition with tiny GGUF storage metadata, synthetic memory signals and fake loader; no environment mutation, Metal context or model import."
+  },
+  {
+    "target": "qwen",
+    "name": "family_options::tests::v41_cold_load_stops_on_planning_admission_or_loader_error_without_retry",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Host-only cold policy/composition with tiny GGUF storage metadata, synthetic memory signals and fake loader; no environment mutation, Metal context or model import."
+  },
+  {
+    "target": "qwen",
     "name": "family_options::tests::v41_cold_prefill_parser_defaults_and_valid_values",
     "class": "cpu",
     "ignored": false,
@@ -4107,6 +4149,20 @@
     "class": "cpu",
     "ignored": false,
     "reason": "Reviewed host-only planning, metadata, NSObject lifetime, pure arithmetic, fake-state lifecycle or loopback fixture; no Metal context or real model import."
+  },
+  {
+    "target": "qwen",
+    "name": "family_options::tests::v41_cold_run_and_ordinary_bench_load_selected_profile_plan",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Host-only cold policy/composition with tiny GGUF storage metadata, synthetic memory signals and fake loader; no environment mutation, Metal context or model import."
+  },
+  {
+    "target": "qwen",
+    "name": "family_options::tests::v41_cold_selected_full_fallback_retains_p4_and_geometry",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Host-only cold policy/composition with tiny GGUF storage metadata, synthetic memory signals and fake loader; no environment mutation, Metal context or model import."
   },
   {
     "target": "qwen",

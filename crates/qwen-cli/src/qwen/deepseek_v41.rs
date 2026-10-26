@@ -798,22 +798,32 @@ pub(crate) fn run(
     shutdown::checkpoint()?;
     let loading = Instant::now();
     let ctx = MetalContext::new()?;
-    let cold = qwen_llm::deepseek_v41::forward::plan_cold_prefill_with_target(
-        &ctx,
-        &gguf,
-        ids.len(),
-        required,
-        &[prefill_execution],
-        0,
-        crate::family_options::v41_cold_execution_target(prefill_execution),
-    )?
-    .select_load(ctx.memory_signals())?
-    .0;
-    shutdown::checkpoint()?;
-    let weights = weights::ResidentWeights::load_with_storage_plan(
-        &ctx,
-        Arc::new(gguf),
-        &cold.resident_storage,
+    let gguf = Arc::new(gguf);
+    let (cold, weights) = crate::family_options::v41_load_cold(
+        prefill_execution,
+        None,
+        |target| {
+            Ok(
+                qwen_llm::deepseek_v41::forward::plan_cold_prefill_with_target(
+                    &ctx,
+                    &gguf,
+                    ids.len(),
+                    required,
+                    &[prefill_execution],
+                    0,
+                    target,
+                )?,
+            )
+        },
+        || ctx.memory_signals(),
+        |storage| {
+            shutdown::checkpoint()?;
+            Ok(weights::ResidentWeights::load_with_storage_plan(
+                &ctx,
+                gguf.clone(),
+                storage,
+            )?)
+        },
     )?;
     ensure!(
         weights.config.vocab == tokenizer.n_vocab() as usize,

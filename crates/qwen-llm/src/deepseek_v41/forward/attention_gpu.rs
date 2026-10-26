@@ -82,6 +82,8 @@ struct OwnerCache {
 }
 
 pub(super) struct Workspace {
+    #[cfg(test)]
+    mask_publication_experiment: Option<MaskPublicationExperiment>,
     config: Config,
     schedule: Schedule,
     capacity: usize,
@@ -115,6 +117,12 @@ pub(super) struct Workspace {
     /// output_a group GEMVs dispatch once through the native expert kernel.
     group_ids: MetalTensor,
     ready: MetalTensor,
+}
+
+#[cfg(test)]
+struct MaskPublicationExperiment {
+    clear_scatter: bool,
+    retained_ids: Option<MetalTensor>,
 }
 
 struct BatchCursor {
@@ -1387,6 +1395,8 @@ impl Workspace {
             .collect::<Result<Vec<_>>>()?;
         Ok(Self {
             config: c.clone(),
+            #[cfg(test)]
+            mask_publication_experiment: None,
             schedule: schedule.clone(),
             capacity,
             next_layer: 0,
@@ -1500,6 +1510,42 @@ impl Workspace {
         enc.set_tensor(1, &self.selected);
         enc.set_tensor(2, &self.candidates);
         dispatch(enc, &pso, all.max(if publish_mask { blocks } else { 0 }));
+        Ok(())
+    }
+
+    fn publish_candidates(
+        &self,
+        ctx: &MetalContext,
+        enc: &KernelEncoder,
+        blocks: usize,
+    ) -> Result<()> {
+        let count = blocks.min(self.config.candidate_topk);
+        #[cfg(test)]
+        if let Some(experiment) = &self.mask_publication_experiment {
+            if let Some(retained) = &experiment.retained_ids {
+                metal::encode_copy_offset_i32(ctx, enc, &self.sort_ids, 0, retained, count)
+                    .map_err(|error| error.to_string())?;
+            }
+            if experiment.clear_scatter {
+                op::require(
+                    !enc.is_concurrent(),
+                    "mask experiment requires serial encoder",
+                )?;
+                let clear = pipeline(ctx, enc, "keep_clear")?;
+                enc.set_bytes(0, &[blocks as u32, count as u32]);
+                enc.set_tensor(2, &self.candidates);
+                dispatch(enc, &clear, blocks);
+                let scatter = pipeline(ctx, enc, "keep_scatter")?;
+                enc.set_tensor(1, &self.sort_ids);
+                dispatch(enc, &scatter, count);
+                return Ok(());
+            }
+        }
+        let pso = pipeline(ctx, enc, "keep")?;
+        enc.set_bytes(0, &[blocks as u32, count as u32]);
+        enc.set_tensor(1, &self.sort_ids);
+        enc.set_tensor(2, &self.candidates);
+        dispatch(enc, &pso, blocks);
         Ok(())
     }
 
@@ -2060,11 +2106,7 @@ impl Workspace {
                         enc.set_tensor(2, &self.block_scores);
                         dispatch(enc, &pso, blocks);
                         self.sort(ctx, enc, &self.block_scores, blocks, false)?;
-                        let pso = pipeline(ctx, enc, "keep")?;
-                        enc.set_bytes(0, &[blocks as u32, blocks.min(c.candidate_topk) as u32]);
-                        enc.set_tensor(1, &self.sort_ids);
-                        enc.set_tensor(2, &self.candidates);
-                        dispatch(enc, &pso, blocks);
+                        self.publish_candidates(ctx, enc, blocks)?;
                     }
                     if unpruned {
                         self.select_unpruned(ctx, enc, id, length)?;

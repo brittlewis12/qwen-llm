@@ -413,6 +413,33 @@ kernel void kernel_deepseek_v41_attention_keep(
     mask[t] = keep;
 }
 
+// Experimental only: clear, scatter, then consumers must be ordered dispatches
+// on a serial encoder. This preserves the dense mask and has no status output.
+kernel void kernel_deepseek_v41_attention_keep_clear(
+    constant uint2 &a [[buffer(0)]], device uint *mask [[buffer(2)]],
+    uint t [[thread_position_in_grid]]) {
+    if (t >= a.x) return;
+    mask[t] = 0;
+}
+
+kernel void kernel_deepseek_v41_attention_keep_scatter(
+    constant uint2 &a [[buffer(0)]], device const uint *ids [[buffer(1)]],
+    device atomic_uint *mask [[buffer(2)]], uint t [[thread_position_in_grid]]) {
+    if (t >= a.y) return;
+    uint id = ids[t];
+    if (id >= a.x) return;
+    // Duplicate IDs are legal in keep; equal non-atomic writes would race.
+    atomic_store_explicit(mask + id, 1u, memory_order_relaxed);
+}
+
+// Fixture-only next-dispatch observation, before any CPU completion/readback.
+kernel void kernel_deepseek_v41_attention_keep_observe(
+    constant uint2 &a [[buffer(0)]], device const uint *mask [[buffer(2)]],
+    device uint *observed [[buffer(3)]], uint t [[thread_position_in_grid]]) {
+    if (t >= a.x) return;
+    observed[t] = mask[t];
+}
+
 kernel void kernel_deepseek_v41_attention_chronological(
     constant uint &k [[buffer(0)]], device const uint *ids [[buffer(1)]],
     device uint *out [[buffer(2)]], uint t [[thread_position_in_grid]]) {

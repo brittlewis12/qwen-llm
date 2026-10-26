@@ -666,6 +666,146 @@
   },
   {
     "target": "lib",
+    "name": "deepseek_v41::forward::attention_gpu::tests::candidate_publish::candidate_publish_cpu_budget_contract",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Host-only publication buffer/CPU budget arithmetic and weak-probe size contract; no Metal context."
+  },
+  {
+    "target": "lib",
+    "name": "deepseek_v41::forward::attention_gpu::tests::candidate_publish::candidate_publish_cpu_case_pool_lifetime_controls",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Host-only NSObject autorelease/weak lifetime and transaction-order controls; no Metal context or dispatch."
+  },
+  {
+    "target": "lib",
+    "name": "deepseek_v41::forward::attention_gpu::tests::candidate_publish::candidate_publish_cpu_grid_and_controls",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Host-only independent membership reference, ID permutation, wrong-word and no-op controls over the fixed publication grid; no Metal context."
+  },
+  {
+    "target": "lib",
+    "name": "deepseek_v41::forward::attention_gpu::tests::candidate_publish::candidate_publish_cpu_native_launch_policy",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Pure validation/injection variable-name policy checks without environment mutation, Metal context or dispatch."
+  },
+  {
+    "target": "lib",
+    "name": "deepseek_v41::forward::attention_gpu::tests::candidate_publish::candidate_publish_cpu_nested_sample_pool_contract",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Host-only nested NSObject sample/case autorelease and weak-release controls; no Metal context or dispatch."
+  },
+  {
+    "target": "lib",
+    "name": "deepseek_v41::forward::attention_gpu::tests::candidate_publish::candidate_publish_cpu_reference_contract",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Host-only independent sorted-set membership and code-derived publication-default/threshold arithmetic; no Metal context."
+  },
+  {
+    "target": "lib",
+    "name": "deepseek_v41::forward::attention_gpu::tests::candidate_publish::candidate_publish_m5_correctness",
+    "class": "gpu",
+    "ignored": true,
+    "reason": "Explicit self-leased M5 exact publication/next-dispatch/weak-buffer-release witness; validation-on parent GPU lane only, never CPU acceptance."
+  },
+  {
+    "target": "lib",
+    "name": "deepseek_v41::forward::attention_gpu::tests::candidate_publish::candidate_publish_m5_native_timing",
+    "class": "timing",
+    "ignored": true,
+    "reason": "Explicit self-leased M5 synthetic publication timing with validation flags absent at launch; parent timing lane only, never CPU acceptance."
+  },
+  {
+    "target": "lib",
+    "name": "deepseek_v41::forward::attention_gpu::tests::candidate_publish::real_pipeline::mask_real_pipeline_cpu_bounds",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Host-only complete reduced producer/follower CPU+Metal upper-bound arithmetic; no Metal context or dispatch."
+  },
+  {
+    "target": "lib",
+    "name": "deepseek_v41::forward::attention_gpu::tests::candidate_publish::real_pipeline::mask_real_pipeline_cpu_geometry_and_normal_fallback",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Host-only four-layer schedule, visible 16384/16385 geometry and unchanged per-row fallback scratch bounds."
+  },
+  {
+    "target": "lib",
+    "name": "deepseek_v41::forward::attention_gpu::tests::candidate_publish::real_pipeline::mask_real_pipeline_cpu_oracle_and_nonvacuous_controls",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Host-only actual-ID membership oracle rejection and designed unmasked wrong-winner controls; no Metal context."
+  },
+  {
+    "target": "lib",
+    "name": "deepseek_v41::forward::attention_gpu::tests::candidate_publish::real_pipeline::mask_real_pipeline_cpu_protocol",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Host-only bounded ABBA/BAAB complete-span count contract; no timing or Metal context."
+  },
+  {
+    "target": "lib",
+    "name": "deepseek_v41::forward::attention_gpu::tests::candidate_publish::real_pipeline::mask_real_pipeline_m5_correctness",
+    "class": "gpu",
+    "ignored": true,
+    "reason": "Explicit self-leased M5 real blocks/sort producer, publication-only injection and follower selection/attention; validation-on parent GPU lane, <=128 MiB CPU+Metal."
+  },
+  {
+    "target": "lib",
+    "name": "deepseek_v41::forward::attention_gpu::tests::candidate_publish::real_pipeline::mask_real_pipeline_m5_native_timing",
+    "class": "timing",
+    "ignored": true,
+    "reason": "Explicit self-leased M5 complete four-layer real producer/publication/follower span; one correctness phase then 24 raw ABBA/BAAB samples; parent native lane only."
+  },
+  {
+    "target": "lib",
+    "name": "deepseek_v41::forward::attention_gpu::tests::candidate_publish::valid_ids::candidate_publish_valid_ids_cpu_budget_contract",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Host-only valid-unique fixture admission arithmetic including both ID orders and host readback/working storage; no Metal context."
+  },
+  {
+    "target": "lib",
+    "name": "deepseek_v41::forward::attention_gpu::tests::candidate_publish::valid_ids::candidate_publish_valid_ids_cpu_orders_contract",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Host-only valid unique/newest ID, deterministic order and independent membership-invariance contracts; no Metal context."
+  },
+  {
+    "target": "lib",
+    "name": "deepseek_v41::forward::attention_gpu::tests::candidate_publish::valid_ids::candidate_publish_valid_ids_cpu_protocol_grid_contract",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Host-only distinct valid-unique protocol, six-case and ABBA/BAAB count arithmetic; no Metal context."
+  },
+  {
+    "target": "lib",
+    "name": "deepseek_v41::forward::attention_gpu::tests::candidate_publish::valid_ids::candidate_publish_valid_ids_cpu_wrong_noop_count_controls",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Host-only NaN-like poison, wrong-word, inclusive count, invalid/duplicate ID and no-op rejection controls; no Metal context."
+  },
+  {
+    "target": "lib",
+    "name": "deepseek_v41::forward::attention_gpu::tests::candidate_publish::valid_ids::candidate_publish_valid_ids_m5_correctness",
+    "class": "gpu",
+    "ignored": true,
+    "reason": "Explicit self-leased M5 valid-unique CPU/incumbent/candidate/observer and real weak-release witness; validation-on parent GPU lane only."
+  },
+  {
+    "target": "lib",
+    "name": "deepseek_v41::forward::attention_gpu::tests::candidate_publish::valid_ids::candidate_publish_valid_ids_m5_native_timing",
+    "class": "timing",
+    "ignored": true,
+    "reason": "Explicit self-leased M5 six-case valid-unique publication timing with 144 raw samples and untimed observer checks; parent native-timing lane only."
+  },
+  {
+    "target": "lib",
     "name": "deepseek_v41::forward::attention_gpu::tests::ced::ced_rows_publication_only_poisoned_history_and_borrowed_controls",
     "class": "gpu",
     "ignored": true,

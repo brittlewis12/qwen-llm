@@ -344,6 +344,11 @@ pub(super) fn chunk_hash_cpu_bytes(hash_count: usize, rows: usize) -> Result<u64
 }
 
 impl HalfScratch {
+    #[cfg(test)]
+    pub(super) fn backing_for_test(&self) -> &MetalTensor {
+        &self.tensor
+    }
+
     fn selected(ctx: &MetalContext) -> bool {
         metal::moe_grouped_tensor_selected(ctx)
     }

@@ -264,13 +264,19 @@ fn native_rows_live_route_witness_with_chunks(
         assert_eq!(routed[5].kernel, "kernel_deepseek_v41_sum");
         for i in [1, 2, 4] {
             assert!(routed[i].kernel.starts_with("kernel_expert_native_"));
+            // The IQ2_XXS split owns two channels per simdgroup.
+            let per = if routed[i].kernel.ends_with("iq2_xxs_f32_split") {
+                8
+            } else {
+                4
+            };
             assert_eq!(
                 (
                     routed[i].grid_width,
                     routed[i].grid_height,
                     routed[i].grid_depth
                 ),
-                (H.div_ceil(4) as u64, c.topk as u64, N as u64)
+                (H.div_ceil(per) as u64, c.topk as u64, N as u64)
             );
             assert_eq!(
                 (

@@ -240,6 +240,13 @@ fn native_capabilities_match_actual_dispatch_and_abi() {
     );
     for dtype in formats() {
         if let Some(name) = fused_gate_up_name(dtype) {
+            if name.ends_with("_split") {
+                assert!(
+                    SOURCE.contains(&format!("kernel void {name}(")),
+                    "{dtype:?}"
+                );
+                continue;
+            }
             let suffix = name
                 .strip_prefix("kernel_expert_native_gate_up_")
                 .and_then(|s| s.strip_suffix("_f32"))
@@ -257,8 +264,10 @@ fn native_capabilities_match_actual_dispatch_and_abi() {
             formats().contains(&dtype)
         );
         if let Some(name) = native_pipeline_name(dtype) {
+            // Template instantiation, or a plain kernel (the Q5_K split).
             assert!(
-                SOURCE.contains(&format!("host_name(\"{name}\")")),
+                SOURCE.contains(&format!("host_name(\"{name}\")"))
+                    || SOURCE.contains(&format!("kernel void {name}(")),
                 "{dtype:?}"
             );
         }

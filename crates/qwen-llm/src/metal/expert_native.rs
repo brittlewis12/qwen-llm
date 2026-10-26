@@ -50,7 +50,45 @@ fn native_pipeline_name(dtype: GgmlType) -> Option<String> {
         GgmlType::IQ1_M => "iq1_m",
         _ => return None,
     };
+    if dtype == GgmlType::Q5_K && q5_k_split() {
+        return Some("kernel_expert_native_q5_K_f32_split".to_string());
+    }
+    if dtype == GgmlType::IQ2_XXS && iq2_xxs_split() {
+        return Some("kernel_expert_native_iq2_xxs_f32_split".to_string());
+    }
     Some(format!("kernel_expert_native_{suffix}_f32"))
+}
+
+/// `one_row` keeps the one-row IQ2_XXS native decode kernels instead of
+/// llama.cpp's mul_mv split (two channels per simdgroup); A/B lever.
+const EXPERT_NATIVE_IQ2XXS_ENV: &str = "QWEN_EXPERT_NATIVE_IQ2XXS";
+
+/// `one_row` keeps the one-row Q5_K native decode kernel instead of
+/// llama.cpp's mul_mv work split; A/B lever.
+const EXPERT_NATIVE_Q5K_ENV: &str = "QWEN_EXPERT_NATIVE_Q5K";
+
+/// IQ2_XXS uses `kernel_expert_native_iq2_xxs_f32_split` (two channels per
+/// simdgroup) unless `QWEN_EXPERT_NATIVE_IQ2XXS=one_row` (A/B).
+fn iq2_xxs_split() -> bool {
+    static SPLIT: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *SPLIT.get_or_init(|| std::env::var(EXPERT_NATIVE_IQ2XXS_ENV).as_deref() != Ok("one_row"))
+}
+
+/// Output channels per 128-thread threadgroup of a single-projection native
+/// dispatch (EXPERT_IQ2_ROWS = 2 channels per simdgroup for the IQ2_XXS split).
+pub(crate) fn native_channels_per_threadgroup(dtype: GgmlType) -> usize {
+    if dtype == GgmlType::IQ2_XXS && iq2_xxs_split() {
+        8
+    } else {
+        4
+    }
+}
+
+/// Q5_K uses `kernel_expert_native_q5_K_f32_split` (llama.cpp's work split)
+/// unless `QWEN_EXPERT_NATIVE_Q5K=one_row` keeps the one-row kernel (A/B).
+fn q5_k_split() -> bool {
+    static SPLIT: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *SPLIT.get_or_init(|| std::env::var(EXPERT_NATIVE_Q5K_ENV).as_deref() != Ok("one_row"))
 }
 
 /// Independently typed native gate/up capability. Shape constraints still apply.
@@ -309,7 +347,7 @@ fn dispatch(
     enc.set_tensor(5, output);
     enc.dispatch(
         MTLSize {
-            width: (args.n_out as usize).div_ceil(4),
+            width: (args.n_out as usize).div_ceil(native_channels_per_threadgroup(bank.dtype)),
             height: args.top_k as usize,
             depth: rows,
         },
@@ -523,7 +561,6 @@ fn fused_gate_up_name(dtype: GgmlType) -> Option<&'static str> {
         GgmlType::Q2_K => "kernel_expert_native_gate_up_q2_K_f32",
         GgmlType::Q3_K => "kernel_expert_native_gate_up_q3_K_f32",
         GgmlType::Q4_K => "kernel_expert_native_gate_up_q4_K_f32",
-        GgmlType::Q5_K => "kernel_expert_native_gate_up_q5_K_f32",
         GgmlType::Q6_K => "kernel_expert_native_gate_up_q6_K_f32",
         GgmlType::Q8_0 => "kernel_expert_native_gate_up_q8_0_f32",
         GgmlType::IQ4_NL => "kernel_expert_native_gate_up_iq4_nl_f32",
@@ -532,6 +569,7 @@ fn fused_gate_up_name(dtype: GgmlType) -> Option<&'static str> {
         GgmlType::IQ3_XXS => "kernel_expert_native_gate_up_iq3_xxs_f32",
         GgmlType::IQ3_S => "kernel_expert_native_gate_up_iq3_s_f32",
         GgmlType::IQ2_XS => "kernel_expert_native_gate_up_iq2_xs_f32",
+        GgmlType::IQ2_XXS if iq2_xxs_split() => "kernel_expert_native_gate_up_iq2_xxs_f32_split",
         GgmlType::IQ2_XXS => "kernel_expert_native_gate_up_iq2_xxs_f32",
         _ => return None,
     })
@@ -592,7 +630,9 @@ fn encode_gate_up(
         enc.set_tensor(6, up_bank);
         enc.dispatch(
             MTLSize {
-                width: n_out.div_ceil(2),
+                // Channels per threadgroup: two simdgroup pairs of one (or,
+                // for the IQ2_XXS split, two) channels each.
+                width: n_out.div_ceil(native_channels_per_threadgroup(gate_bank.dtype) / 2),
                 height: top_k,
                 depth: rows.unwrap_or(1),
             },

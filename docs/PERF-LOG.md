@@ -6,6 +6,25 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the current state and evidence index.
 
+## 2026-10-26 - V4.1 Decode +4%: llama.cpp Work Split For Q5_K And IQ2_XXS Rows
+
+- Native decode projections for Q5_K (attention q_b/output_b, shared expert)
+  and IQ2_XXS (routed gate/up/down, fused gate/up) now use llama.cpp's
+  mul_mv split: in Q5_K each lane takes eight byte positions of four
+  sub-blocks of every fourth block, so one quant byte serves two weights and
+  scales apply once per eight-weight group; IQ2_XXS computes two output
+  channels per simdgroup with the grid tables in threadgroup memory. Probe (M5): q_b 36.9 -> 32.0 us, output_b 41.7 -> 34.8,
+  routed gate 38.2 -> 32.2, routed down 40.0 -> 36.7.
+- In-binary A/Bs (seed 909, two runs each): Q5_K tg64@d0 61.6 -> 62.1-63.0,
+  @d2048 54.8 -> 55.7-55.9; IQ2_XXS tg64@d0 62.0 -> 62.8-62.9, @d2048
+  55.7 -> 55.9-56.4.
+- Main vs branch, one campaign lease, CNNC: tg64@d0 61.0/62.05 -> 64.25/63.96
+  (+4.2%), @d2048 53.6/55.2 -> 56.0/56.9 (+3.7%); pp512 and pp512@d2048
+  unchanged. Witness NLL 2.1421 / top-1 212 (logits differ at ~1e-7 NLL) and
+  the 22-task screen are unchanged. `QWEN_EXPERT_NATIVE_{Q5K,IQ2XXS}=one_row`
+  restore the one-row kernels.
+- Runs: metagross `~/qwen-runs/2026-10-26-decode-twk3` r23-r27.
+
 ## 2026-10-26 - V4.1 Decode +14% Warm, +37% On Uncached Engram Rows
 
 - Engram rows were one blocking `pread` per row from a 103 GiB table that

@@ -300,7 +300,6 @@ typedef decltype(kernel_expert_native_gate_up_f32<QT_Q6_K_BYTES, QT_Q6_K_NL, lat
 EXPERT_NATIVE_GATE_UP("q2_K", QT_Q2_K_BYTES, QT_Q2_K_NL, latent_dequantize_q2_K)
 EXPERT_NATIVE_GATE_UP("q3_K", QT_Q3_K_BYTES, QT_Q3_K_NL, latent_dequantize_q3_K)
 EXPERT_NATIVE_GATE_UP("q4_K", QT_Q4_K_BYTES, QT_Q4_K_NL, latent_dequantize_q4_K)
-EXPERT_NATIVE_GATE_UP("q5_K", QT_Q5_K_BYTES, QT_Q5_K_NL, expert_dequantize_q5_K)
 EXPERT_NATIVE_GATE_UP("q6_K", QT_Q6_K_BYTES, QT_Q6_K_NL, latent_dequantize_q6_K)
 EXPERT_NATIVE_GATE_UP("q8_0", QT_Q8_0_BYTES, QT_Q8_0_NL, latent_dequantize_q8_0)
 EXPERT_NATIVE_GATE_UP("iq4_nl", QT_IQ4_NL_BYTES, QT_IQ4_NL_NL, latent_dequantize_iq4_nl)
@@ -310,3 +309,276 @@ EXPERT_NATIVE_GATE_UP("iq3_xxs", QT_IQ3_XXS_BYTES, QT_IQ3_XXS_NL, latent_dequant
 EXPERT_NATIVE_GATE_UP("iq3_s", QT_IQ3_S_BYTES, QT_IQ3_S_NL, latent_dequantize_iq3_s)
 EXPERT_NATIVE_GATE_UP("iq2_xs", 74, 16, expert_dequantize_iq2_xs)
 EXPERT_NATIVE_GATE_UP("iq2_xxs", 66, 16, expert_dequantize_iq2_xxs)
+
+// Q5_K F32-operand projection with the work split of llama.cpp's
+// kernel_mul_mv_q5_K_f32 (ggml/src/ggml-metal/kernels/mul_mv.metal at
+// 56e603cc64b95f024de8b17ebda489f88c8bf773, MIT License, Copyright (c)
+// 2023-2026 The ggml authors): each lane takes eight byte positions of four
+// sub-blocks of every fourth block, so one quant byte serves two weights and
+// one high-bit byte four, scales apply once per eight-weight group, and the
+// mins use the activation sums. Same bindings, grid (n_out / 4 threadgroups
+// of four simdgroups, one channel each), guards and epilogue as
+// kernel_expert_native_f32; F32 operands only (the host never sends the
+// half-operand flag for Q5_K). Summation order differs from the one-row
+// kernel (decode probe on M5: q_b -13%, attention output_b -17%, shared
+// gate -19%).
+[[max_total_threads_per_threadgroup(128)]]
+kernel void kernel_expert_native_q5_K_f32_split(
+        constant expert_native_args & args [[buffer(0)]],
+        device const uchar * bank [[buffer(1)]],
+        device const float * input [[buffer(2)]],
+        device const int * ids [[buffer(3)]],
+        device const int * status [[buffer(4)]],
+        device float * output [[buffer(5)]],
+        uint3 group [[threadgroup_position_in_grid]],
+        ushort lane [[thread_index_in_simdgroup]],
+        ushort simd [[simdgroup_index_in_threadgroup]]) {
+    const uint channel = group.x * 4u + uint(simd);
+    const uint slot = group.y;
+    const uint token = group.z;
+    if (channel >= args.n_out || slot >= args.top_k) return;
+    const ulong selected = ulong(token) * args.top_k + slot;
+    const ulong out_index = selected * args.n_out + channel;
+    if (status[token] != 1) {
+        if (lane == 0) output[out_index] = 0.0f;
+        return;
+    }
+    const int expert = ids[selected];
+    if (expert < 0 || uint(expert) >= args.experts) {
+        if (lane == 0) output[out_index] = 0.0f;
+        return;
+    }
+    device const uchar * row = bank
+        + (ulong(expert) * args.n_out + channel) * args.row_bytes;
+    const uint projection = args.mode & EXPERT_NATIVE_PROJECTION_MASK;
+    device const float * x = input + (projection == 2 ? selected : ulong(token)) * args.n_in;
+    const uint nb = args.n_in / 256u;
+    constexpr ushort kmask1 = 0x3f3f;
+    constexpr ushort kmask2 = 0x0f0f;
+    constexpr ushort kmask3 = 0xc0c0;
+    const ushort tid = lane / 4;
+    const ushort ix = lane % 4;
+    const ushort iq = tid / 4;
+    const ushort ir = tid % 4;
+    const ushort l0 = 8 * ir;
+    const ushort q_offset = 32 * iq + l0;
+    const ushort y_offset = 64 * iq + l0;
+    const uchar hm1 = 1u << (2 * iq);
+    const uchar hm2 = hm1 << 1;
+    const uchar hm3 = hm1 << 4;
+    const uchar hm4 = hm2 << 4;
+    float yl[16], yh[16];
+    ushort sc16[4];
+    thread const uchar * sc8 = (thread const uchar *)sc16;
+    device const float * y1 = x + uint(ix) * 256u + y_offset;
+    float sum = 0.0f;
+    for (uint i = ix; i < nb; i += 4) {
+        device const uchar * block = row + ulong(i) * QT_Q5_K_BYTES;
+        device const uchar * q1 = block + 48 + q_offset;
+        device const uchar * q2 = q1 + 64;
+        device const uchar * qh = block + 16 + l0;
+        device const half * dh = (device const half *)block;
+        device const ushort * a = (device const ushort *)(block + 4) + iq;
+        device const float * y2 = y1 + 128;
+        float4 sumy = 0.0f;
+        QT_FOR_UNROLL (ushort l = 0; l < 8; ++l) {
+            yl[l + 0] = y1[l + 0]; sumy[0] += yl[l + 0];
+            yl[l + 8] = y1[l + 32]; sumy[1] += yl[l + 8];
+            yh[l + 0] = y2[l + 0]; sumy[2] += yh[l + 0];
+            yh[l + 8] = y2[l + 32]; sumy[3] += yh[l + 8];
+        }
+        sc16[0] = a[0] & kmask1;
+        sc16[1] = a[2] & kmask1;
+        sc16[2] = ((a[4] >> 0) & kmask2) | ((a[0] & kmask3) >> 2);
+        sc16[3] = ((a[4] >> 4) & kmask2) | ((a[2] & kmask3) >> 2);
+        float4 acc1 = 0.0f;
+        float4 acc2 = 0.0f;
+        QT_FOR_UNROLL (ushort l = 0; l < 8; ++l) {
+            const uchar h = qh[l];
+            acc1[0] += yl[l + 0] * float(q1[l] & 0x0F);
+            acc1[1] += yl[l + 8] * float(q1[l] & 0xF0);
+            acc1[2] += yh[l + 0] * float(q2[l] & 0x0F);
+            acc1[3] += yh[l + 8] * float(q2[l] & 0xF0);
+            acc2[0] += h & hm1 ? yl[l + 0] : 0.0f;
+            acc2[1] += h & hm2 ? yl[l + 8] : 0.0f;
+            acc2[2] += h & hm3 ? yh[l + 0] : 0.0f;
+            acc2[3] += h & hm4 ? yh[l + 8] : 0.0f;
+        }
+        sum += float(dh[0]) * (float(sc8[0]) * (acc1[0] + 16.0f * acc2[0]) +
+                               float(sc8[1]) * (acc1[1] / 16.0f + 16.0f * acc2[1]) +
+                               float(sc8[4]) * (acc1[2] + 16.0f * acc2[2]) +
+                               float(sc8[5]) * (acc1[3] / 16.0f + 16.0f * acc2[3])) -
+               float(dh[1]) * (sumy[0] * float(sc8[2]) + sumy[1] * float(sc8[3]) +
+                               sumy[2] * float(sc8[6]) + sumy[3] * float(sc8[7]));
+        y1 += 4 * 256;
+    }
+    const float value = simd_sum(sum);
+    if (lane == 0) {
+        if (args.mode == 1) {
+            const float g = min(output[out_index], args.clamp);
+            const float u = clamp(value, -args.clamp, args.clamp);
+            output[out_index] = (g / (1.0f + exp(-g))) * u;
+        } else {
+            output[out_index] = value;
+        }
+    }
+}
+
+// IQ2_XXS F32-operand projections with the work split of llama.cpp's
+// kernel_mul_mv_iq2_xxs_f32 (same source and license as the Q5_K split
+// above): each lane owns whole 32-weight groups, a simdgroup computes
+// EXPERT_IQ2_ROWS adjacent channels sharing the activation registers, the
+// block scale applies once per group and channel, and the grid/sign tables
+// live in threadgroup memory. Summation order differs from the one-row
+// kernel (decode probe on M5, top-6 routed: gate -16%, down -8%).
+#define EXPERT_IQ2_ROWS 2u
+
+inline void expert_iq2_xxs_tables(threadgroup ulong * grid, threadgroup uchar * signs, ushort tid) {
+    for (uint i = tid; i < 256u; i += 128u) grid[i] = iq2_xxs_grid[i];
+    if (tid < 128u) signs[tid] = iq2_xxs_signs[tid];
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+}
+
+// Accumulates sum[r] += dot(row first_row + r, x) for r < rows.
+inline void expert_iq2_xxs_rows_dot(
+        device const uchar * row0, ulong row_bytes, uint rows,
+        device const float * x, uint n_in, ushort lane,
+        threadgroup const ulong * grid_table, threadgroup const uchar * sign_table,
+        thread float * sum) {
+    const uint nb32 = n_in / 32u;
+    float yl[32];
+    for (uint ib32 = lane; ib32 < nb32; ib32 += 32u) {
+        device const float * y = x + 32u * ib32;
+        for (ushort i = 0; i < 32; ++i) yl[i] = y[i];
+        const ulong offset = ulong(ib32 / 8u) * 66u;
+        const uint ib = ib32 % 8u;
+        for (uint r = 0; r < EXPERT_IQ2_ROWS; ++r) {
+            if (r >= rows) break;
+            device const uchar * block = row0 + ulong(r) * row_bytes + offset;
+            device const ushort * q2 = (device const ushort *)(block + 2) + 4u * ib;
+            const float db = float(*((device const half *)block));
+            device const uchar * aux8 = (device const uchar *)q2;
+            const uint aux32 = uint(q2[2]) | (uint(q2[3]) << 16);
+            const float d = db * (0.5f + float(aux32 >> 28));
+            float s = 0.0f;
+            for (ushort l = 0; l < 4; ++l) {
+                threadgroup const uchar * g = (threadgroup const uchar *)(grid_table + aux8[l]);
+                const uchar signs = sign_table[(aux32 >> (7u * l)) & 127u];
+                for (ushort j = 0; j < 8; ++j) {
+                    s += yl[8 * l + j] * float(g[j]) * ((signs & qt_kmask_iq2xs[j]) ? -1.0f : 1.0f);
+                }
+            }
+            sum[r] += d * s * 0.25f;
+        }
+    }
+}
+
+// One projection (gate 0 / up+SwiGLU 1 / down 2). Grid: (ceil(n_out / (4 *
+// EXPERT_IQ2_ROWS)), top_k, rows), 128 threads.
+[[max_total_threads_per_threadgroup(128)]]
+kernel void kernel_expert_native_iq2_xxs_f32_split(
+        constant expert_native_args & args [[buffer(0)]],
+        device const uchar * bank [[buffer(1)]],
+        device const float * input [[buffer(2)]],
+        device const int * ids [[buffer(3)]],
+        device const int * status [[buffer(4)]],
+        device float * output [[buffer(5)]],
+        uint3 group [[threadgroup_position_in_grid]],
+        ushort lane [[thread_index_in_simdgroup]],
+        ushort simd [[simdgroup_index_in_threadgroup]],
+        ushort tid [[thread_index_in_threadgroup]]) {
+    threadgroup ulong grid_table[256];
+    threadgroup uchar sign_table[128];
+    expert_iq2_xxs_tables(grid_table, sign_table, tid);
+    const uint first = (group.x * 4u + uint(simd)) * EXPERT_IQ2_ROWS;
+    const uint slot = group.y;
+    const uint token = group.z;
+    if (first >= args.n_out || slot >= args.top_k) return;
+    const uint rows = min(EXPERT_IQ2_ROWS, args.n_out - first);
+    const ulong selected = ulong(token) * args.top_k + slot;
+    const ulong out_first = selected * args.n_out + first;
+    const bool ready = status[token] == 1;
+    const int expert = ready ? ids[selected] : -1;
+    if (!(ready && expert >= 0 && uint(expert) < args.experts)) {
+        if (lane < rows) output[out_first + lane] = 0.0f;
+        return;
+    }
+    device const uchar * row0 = bank + (ulong(expert) * args.n_out + first) * args.row_bytes;
+    const uint projection = args.mode & EXPERT_NATIVE_PROJECTION_MASK;
+    device const float * x = input + (projection == 2 ? selected : ulong(token)) * args.n_in;
+    float sum[EXPERT_IQ2_ROWS] = {0.0f};
+    expert_iq2_xxs_rows_dot(row0, args.row_bytes, rows, x, args.n_in, lane, grid_table, sign_table, sum);
+    for (uint r = 0; r < EXPERT_IQ2_ROWS; ++r) {
+        if (r >= rows) break;
+        const float value = simd_sum(sum[r]);
+        if (lane == 0) {
+            const ulong out_index = out_first + r;
+            if (args.mode == 1) {
+                const float g = min(output[out_index], args.clamp);
+                const float u = clamp(value, -args.clamp, args.clamp);
+                output[out_index] = (g / (1.0f + exp(-g))) * u;
+            } else {
+                output[out_index] = value;
+            }
+        }
+    }
+}
+
+// Fused gate/up + SwiGLU with the same split: simdgroups 0-1 compute gate
+// for 2 x EXPERT_IQ2_ROWS channels, 2-3 up for the same channels.
+// Grid: (ceil(n_out / (2 * EXPERT_IQ2_ROWS)), top_k, rows), 128 threads;
+// buffer 6 is the up bank.
+[[max_total_threads_per_threadgroup(128)]]
+kernel void kernel_expert_native_gate_up_iq2_xxs_f32_split(
+        constant expert_native_args & args [[buffer(0)]],
+        device const uchar * gate_bank [[buffer(1)]],
+        device const float * input [[buffer(2)]],
+        device const int * ids [[buffer(3)]],
+        device const int * status [[buffer(4)]],
+        device float * output [[buffer(5)]],
+        device const uchar * up_bank [[buffer(6)]],
+        uint3 group [[threadgroup_position_in_grid]],
+        ushort lane [[thread_index_in_simdgroup]],
+        ushort simd [[simdgroup_index_in_threadgroup]],
+        ushort tid [[thread_index_in_threadgroup]]) {
+    threadgroup ulong grid_table[256];
+    threadgroup uchar sign_table[128];
+    threadgroup float up_values[2 * EXPERT_IQ2_ROWS];
+    expert_iq2_xxs_tables(grid_table, sign_table, tid);
+    const bool up = simd >= 2;
+    const uint base = group.x * 2u * EXPERT_IQ2_ROWS;
+    const uint first = base + uint(simd & 1u) * EXPERT_IQ2_ROWS;
+    const uint slot = group.y;
+    const uint token = group.z;
+    const bool active = first < args.n_out && slot < args.top_k;
+    const uint rows = active ? min(EXPERT_IQ2_ROWS, args.n_out - first) : 0u;
+    const ulong selected = ulong(token) * args.top_k + slot;
+    bool ready = active && status[token] == 1;
+    const int expert = ready ? ids[selected] : -1;
+    ready = ready && expert >= 0 && uint(expert) < args.experts;
+    float sum[EXPERT_IQ2_ROWS] = {0.0f};
+    if (ready) {
+        device const uchar * row0 = (up ? up_bank : gate_bank)
+            + (ulong(expert) * args.n_out + first) * args.row_bytes;
+        device const float * x = input + ulong(token) * args.n_in;
+        expert_iq2_xxs_rows_dot(row0, args.row_bytes, rows, x, args.n_in, lane, grid_table, sign_table, sum);
+    }
+    for (uint r = 0; r < EXPERT_IQ2_ROWS; ++r) {
+        const float value = simd_sum(sum[r]);
+        if (up && lane == 0) up_values[uint(simd & 1u) * EXPERT_IQ2_ROWS + r] = value;
+        sum[r] = value;
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    if (!up && lane == 0 && active) {
+        const ulong out_first = selected * args.n_out + first;
+        for (uint r = 0; r < rows; ++r) {
+            if (!ready) {
+                output[out_first + r] = 0.0f;
+            } else {
+                const float g = min(sum[r], args.clamp);
+                const float u = clamp(up_values[uint(simd & 1u) * EXPERT_IQ2_ROWS + r], -args.clamp, args.clamp);
+                output[out_first + r] = (g / (1.0f + exp(-g))) * u;
+            }
+        }
+    }
+}

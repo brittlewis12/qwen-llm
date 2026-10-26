@@ -172,7 +172,11 @@ fn fixture_types(
             assert_eq!(record.kernel, native_pipeline_name(pass_type).unwrap());
             assert_eq!(
                 (record.grid_width, record.grid_height, record.grid_depth),
-                (m.div_ceil(4) as u64, TOP as u64, *chunk as u64)
+                (
+                    m.div_ceil(native_channels_per_threadgroup(pass_type)) as u64,
+                    TOP as u64,
+                    *chunk as u64
+                )
             );
             assert_eq!(
                 (

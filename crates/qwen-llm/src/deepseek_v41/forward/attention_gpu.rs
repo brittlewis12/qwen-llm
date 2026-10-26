@@ -1203,6 +1203,90 @@ fn rope(
     dispatch(enc, &pso, heads * count);
     Ok(())
 }
+/// `split` keeps the decode query/KV norms, KV RoPE and ring copy as four
+/// dispatches; otherwise `kernel_deepseek_v41_attention_rank_norms` does them
+/// in one (bitwise equal; A/B lever).
+const QKV_CHAIN_ENV: &str = "QWEN_V41_QKV_CHAIN";
+
+#[cfg(test)]
+thread_local! {
+    pub(super) static FUSED_RANK_NORMS_OVERRIDE: std::cell::Cell<Option<bool>> =
+        const { std::cell::Cell::new(None) };
+}
+
+fn fused_rank_norms() -> bool {
+    #[cfg(test)]
+    if let Some(fused) = FUSED_RANK_NORMS_OVERRIDE.with(|o| o.get()) {
+        return fused;
+    }
+    static FUSED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *FUSED.get_or_init(|| std::env::var(QKV_CHAIN_ENV).as_deref() != Ok("split"))
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+struct RankNormsArgs {
+    q_n: u32,
+    kv_n: u32,
+    pairs: u32,
+    position: u32,
+    eps: f32,
+}
+
+#[allow(clippy::too_many_arguments)]
+fn rank_norms(
+    ctx: &MetalContext,
+    enc: &KernelEncoder,
+    c: &Config,
+    constants: &Constants,
+    eps: f32,
+    position: usize,
+    query_rank: &MetalTensor,
+    latent: &MetalTensor,
+    ring_row: &MetalTensor,
+) -> Result<()> {
+    valid_view(query_rank, c.query_rank)?;
+    valid_view(latent, c.head_dim)?;
+    valid_view(ring_row, c.head_dim)?;
+    op::require(
+        2 * (c.rope_dim / 2) <= c.head_dim
+            && constants.query_norm.n_elements() as usize == c.query_rank
+            && constants.kv_norm.n_elements() as usize == c.head_dim
+            && constants.frequencies.n_elements() as usize >= c.rope_dim / 2,
+        "decode rank norms geometry",
+    )?;
+    pipeline(ctx, enc, "rank_norms")?;
+    enc.set_bytes(
+        0,
+        &RankNormsArgs {
+            q_n: c.query_rank as u32,
+            kv_n: c.head_dim as u32,
+            pairs: (c.rope_dim / 2) as u32,
+            position: position as u32,
+            eps,
+        },
+    );
+    enc.set_tensor(1, query_rank);
+    enc.set_tensor(2, &constants.query_norm);
+    enc.set_tensor(3, latent);
+    enc.set_tensor(4, &constants.kv_norm);
+    enc.set_tensor(5, &constants.frequencies);
+    enc.set_tensor(6, ring_row);
+    enc.dispatch(
+        MTLSize {
+            width: 2,
+            height: 1,
+            depth: 1,
+        },
+        MTLSize {
+            width: 1024,
+            height: 1,
+            depth: 1,
+        },
+    );
+    Ok(())
+}
+
 fn copy(
     ctx: &MetalContext,
     enc: &KernelEncoder,
@@ -2096,25 +2180,64 @@ impl Workspace {
         let label = |name| metal::dispatch_profile_label(name, Some(id));
         if prepared.is_none() {
             label("attn_qkv");
-            linear(ctx, enc, &w.query_a, input, &self.query_rank)?;
-            norm(
-                ctx,
-                enc,
-                &self.query_rank,
-                &constants.query_norm,
-                c.query_rank,
-                w.eps,
-            )?;
-            linear(ctx, enc, &w.query_b, &self.query_rank, &self.query)?;
-            linear(ctx, enc, &w.kv, input, &self.latent)?;
-            norm(
-                ctx,
-                enc,
-                &self.latent,
-                &constants.kv_norm,
-                c.head_dim,
-                w.eps,
-            )?;
+            let raw = self.raw.view_subrange(
+                (id * c.window * c.head_dim) as u64,
+                vec![(c.window * c.head_dim) as u64],
+            );
+            let row = raw.view_subrange(
+                (position % c.window * c.head_dim) as u64,
+                vec![c.head_dim as u64],
+            );
+            if fused_rank_norms() {
+                // Both rank projections, then one dispatch for both norms, the
+                // KV RoPE and the ring store, then the query up-projection.
+                linear(ctx, enc, &w.query_a, input, &self.query_rank)?;
+                linear(ctx, enc, &w.kv, input, &self.latent)?;
+                rank_norms(
+                    ctx,
+                    enc,
+                    c,
+                    constants,
+                    w.eps,
+                    position,
+                    &self.query_rank,
+                    &self.latent,
+                    &row,
+                )?;
+                linear(ctx, enc, &w.query_b, &self.query_rank, &self.query)?;
+            } else {
+                linear(ctx, enc, &w.query_a, input, &self.query_rank)?;
+                norm(
+                    ctx,
+                    enc,
+                    &self.query_rank,
+                    &constants.query_norm,
+                    c.query_rank,
+                    w.eps,
+                )?;
+                linear(ctx, enc, &w.query_b, &self.query_rank, &self.query)?;
+                linear(ctx, enc, &w.kv, input, &self.latent)?;
+                norm(
+                    ctx,
+                    enc,
+                    &self.latent,
+                    &constants.kv_norm,
+                    c.head_dim,
+                    w.eps,
+                )?;
+                rope(
+                    ctx,
+                    enc,
+                    &self.latent,
+                    &constants.frequencies,
+                    c.head_dim,
+                    1,
+                    c.rope_dim / 2,
+                    position,
+                    false,
+                )?;
+                copy(ctx, enc, &self.latent, &row, c.head_dim)?;
+            }
             rope(
                 ctx,
                 enc,
@@ -2126,26 +2249,6 @@ impl Workspace {
                 position,
                 false,
             )?;
-            rope(
-                ctx,
-                enc,
-                &self.latent,
-                &constants.frequencies,
-                c.head_dim,
-                1,
-                c.rope_dim / 2,
-                position,
-                false,
-            )?;
-            let raw = self.raw.view_subrange(
-                (id * c.window * c.head_dim) as u64,
-                vec![(c.window * c.head_dim) as u64],
-            );
-            let row = raw.view_subrange(
-                (position % c.window * c.head_dim) as u64,
-                vec![c.head_dim as u64],
-            );
-            copy(ctx, enc, &self.latent, &row, c.head_dim)?;
         }
         let owner = self.schedule.owner_slot(id);
         let mut selected_count = 0;

@@ -4775,6 +4775,13 @@
   },
   {
     "target": "lib",
+    "name": "deepseek_v41::forward::gpu_step::tests::fused_rank_norms_match_split_qkv_chain_bitwise",
+    "class": "gpu",
+    "ignored": false,
+    "reason": "Metal context, allocation or dispatch witness; parent GPU lane only."
+  },
+  {
+    "target": "lib",
     "name": "deepseek_v41::forward::gpu_step::tests::wide_hc_pre_matches_two_dispatch_pre_within_reduction_order",
     "class": "gpu",
     "ignored": false,

@@ -268,6 +268,28 @@ fn wide_hc_pre_matches_two_dispatch_pre_within_reduction_order() {
 }
 
 #[test]
+fn fused_rank_norms_match_split_qkv_chain_bitwise() {
+    use super::super::attention_gpu::FUSED_RANK_NORMS_OVERRIDE;
+    let ctx = MetalContext::new().unwrap();
+    let weights = toy::Weights::new(&ctx);
+    let model = weights.model(&ctx);
+    assert!(
+        model.config.rope_dim > 0,
+        "the toy model must rotate the KV tail"
+    );
+    let mut split = model.new_state_with_gpu_step(4).unwrap();
+    let mut fused = model.new_state_with_gpu_step(4).unwrap();
+    for token in [0, 3, 1, 2] {
+        FUSED_RANK_NORMS_OVERRIDE.with(|o| o.set(Some(false)));
+        let expected = model.step(&mut split, token, None);
+        FUSED_RANK_NORMS_OVERRIDE.with(|o| o.set(Some(true)));
+        let logits = model.step(&mut fused, token, None);
+        FUSED_RANK_NORMS_OVERRIDE.with(|o| o.set(None));
+        assert_eq!(logits.unwrap(), expected.unwrap(), "token {token}");
+    }
+}
+
+#[test]
 fn split_ffn_encoders_match_one_encoder_bitwise() {
     let ctx = MetalContext::new().unwrap();
     let weights = toy::Weights::new(&ctx);

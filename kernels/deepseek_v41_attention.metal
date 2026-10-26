@@ -983,3 +983,65 @@ kernel void kernel_deepseek_v41_attention_output_rows(
         raw, compressed, ids + r * a.z, scores + r * m.y * a.w,
         out + r * a.x, m.z * a.x, status, local);
 }
+
+// Decode rank norms and KV epilogue in one dispatch: two 1024-thread
+// threadgroups. Threadgroup 0 RMS-normalizes the query rank in place;
+// threadgroup 1 RMS-normalizes the KV latent in place, applies RoPE to its
+// rotary tail (one head) and stores the result into this position's raw ring
+// row. The norm repeats kernel_rms_norm_mul_f32 at 1024 threads (same
+// per-thread strided sums, simdgroup and first-simdgroup reductions, and
+// (x * scale) * weight); the rotation repeats kernel_deepseek_v41_attention_rope.
+// Bitwise equal to the four separate dispatches.
+struct RankNormsArgs { uint q_n; uint kv_n; uint pairs; uint position; float eps; };
+inline float v41_rms_scale(device const float *x, uint n, float eps, uint tid,
+    uint sg, uint lane, threadgroup float *shmem) {
+    float sumsq = 0.0f;
+    for (uint i = tid; i < n; i += 1024) {
+        const float v = x[i];
+        sumsq += v * v;
+    }
+    sumsq = simd_sum(sumsq);
+    if (lane == 0) shmem[sg] = sumsq;
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    sumsq = lane < 32 ? shmem[lane] : 0.0f;
+    sumsq = simd_sum(sumsq);
+    return rsqrt(sumsq / float(n) + eps);
+}
+[[max_total_threads_per_threadgroup(1024)]]
+kernel void kernel_deepseek_v41_attention_rank_norms(
+    constant RankNormsArgs &a [[buffer(0)]],
+    device float *q [[buffer(1)]], device const float *q_weight [[buffer(2)]],
+    device float *kv [[buffer(3)]], device const float *kv_weight [[buffer(4)]],
+    device const float *freq [[buffer(5)]], device float *ring_row [[buffer(6)]],
+    uint group [[threadgroup_position_in_grid]], uint tid [[thread_index_in_threadgroup]],
+    uint sg [[simdgroup_index_in_threadgroup]], uint lane [[thread_index_in_simdgroup]]) {
+    threadgroup float shmem[32];
+    if (group == 0) {
+        const float scale = v41_rms_scale(q, a.q_n, a.eps, tid, sg, lane, shmem);
+        for (uint i = tid; i < a.q_n; i += 1024) q[i] = (q[i] * scale) * q_weight[i];
+        return;
+    }
+    const float scale = v41_rms_scale(kv, a.kv_n, a.eps, tid, sg, lane, shmem);
+    // Every value is read before any is written (the reduction's barrier
+    // separates the reads above; the rotation reads its pair below).
+    const uint rotary_start = a.kv_n - 2 * a.pairs;
+    for (uint i = tid; i < a.kv_n; i += 1024) {
+        if (i < rotary_start) {
+            const float v = (kv[i] * scale) * kv_weight[i];
+            kv[i] = v;
+            ring_row[i] = v;
+        } else if ((i - rotary_start) % 2 == 0) {
+            const uint j = (i - rotary_start) / 2;
+            const float u = (kv[i] * scale) * kv_weight[i];
+            const float w = (kv[i + 1] * scale) * kv_weight[i + 1];
+            const float angle = float(a.position) * freq[j];
+            const float c = cos(angle), s = sin(angle);
+            const float r0 = u * c - w * s;
+            const float r1 = u * s + w * c;
+            kv[i] = r0;
+            kv[i + 1] = r1;
+            ring_row[i] = r0;
+            ring_row[i + 1] = r1;
+        }
+    }
+}

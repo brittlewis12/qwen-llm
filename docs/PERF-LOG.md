@@ -6,6 +6,22 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the current state and evidence index.
 
+## 2026-10-26 - V4.1 Decode +1.5-1.8%: One Dispatch For Rank Norms And KV Epilogue
+
+- The decode query/KV chain ran the query-rank RMS norm and the KV-latent RMS
+  norm as single-threadgroup dispatches, the KV RoPE as one 32-thread
+  dispatch, and the ring store as a copy. `kernel_deepseek_v41_attention_rank_norms`
+  does all four in one two-threadgroup dispatch, after both rank projections;
+  the query up-projection follows. Bitwise equal (same 1024-thread reduction
+  lineage and rotation arithmetic; toy-model logits assert_eq).
+- In-binary F/S x2 (seed 909): tg64@d0 66.99 -> 67.97, @d2048 59.02 ->
+  60.11. `QWEN_V41_QKV_CHAIN=split` restores the four dispatches.
+- Negative (not landed): F32 simdgroup-MMA decode attention core. MMA score +
+  PV: tg64@d0 62.5 vs 67.0, @d2048 47.5 vs 59.1; MMA score alone 62.0 vs
+  66.6 / 57.0 vs 59.0. The wide scalar score (count/8 x heads threadgroups)
+  and the matrix PV win; fewer, deeper MMA threadgroups lose (V41-8567).
+- Runs: metagross `~/qwen-runs/2026-10-26-decode-twk3` r34-r36.
+
 ## 2026-10-26 - V4.1 Decode +4%: One-Dispatch mHC Pre-Block, Folded FFN Combine
 
 - Each decode HC site ran a 24-threadgroup projection, then one 1024-thread

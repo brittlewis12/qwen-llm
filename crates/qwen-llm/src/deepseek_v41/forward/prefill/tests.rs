@@ -1,6 +1,7 @@
 use super::*;
 
 mod half_budget;
+mod hc_timing;
 pub(super) mod lifetime;
 mod real;
 
@@ -102,7 +103,10 @@ fn chunk_dispatch_and_submission_census() {
                 inventory,
                 [
                     "prefill_chunk_rows",
+                    "prefill_embedding",
+                    "prefill_engram_hash",
                     "prefill_engram_prepare",
+                    "prefill_host_finish",
                     "prefill_host_prepare",
                     "prefill_scratch_prepare"
                 ]

@@ -846,6 +846,44 @@ kernel void kernel_moe_route_bucket_slots_f32(
     counts[tid] = count;
 }
 
+// kernel_moe_route_bucket_slots_f32 with one 256-thread threadgroup per
+// expert instead of one thread: each thread counts this expert's matches in a
+// contiguous chunk of the rows x topk ids, the counts are exclusive-scanned in
+// threadgroup memory, and each thread writes its matches at its offset. Same
+// ascending slot order and counts as the serial scan (bitwise-identical
+// output); the serial form walked all rows x topk ids per expert on one
+// thread.
+kernel void kernel_moe_route_bucket_slots_parallel_f32(
+        constant moe_route_bucket_args & args [[buffer(0)]],
+        device const int              * top_idx [[buffer(1)]],
+        device       int              * counts  [[buffer(2)]],
+        device       int              * ids     [[buffer(3)]],
+        uint expert [[threadgroup_position_in_grid]],
+        uint tid [[thread_index_in_threadgroup]]) {
+    threadgroup int prefix[256];
+    if (expert >= args.n_expert) return;
+    const uint total = args.n_tokens * args.topk;
+    const uint per = (total + 255u) / 256u;
+    const uint first = min(tid * per, total);
+    const uint last = min(first + per, total);
+    int local = 0;
+    for (uint s = first; s < last; ++s) local += top_idx[s] == int(expert) ? 1 : 0;
+    prefix[tid] = local;
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    for (uint offset = 1; offset < 256u; offset <<= 1) {
+        const int v = tid >= offset ? prefix[tid - offset] : 0;
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+        prefix[tid] += v;
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+    }
+    int pos = prefix[tid] - local;
+    device int * out = ids + (ulong)expert * args.n_tokens;
+    for (uint s = first; s < last; ++s) {
+        if (top_idx[s] == int(expert)) out[pos++] = int(s);
+    }
+    if (tid == 255u) counts[expert] = prefix[255];
+}
+
 kernel void kernel_moe_swiglu_q4_K_f32(
         constant moe_q4k_args & args    [[buffer(0)]],
         device const uchar    * w_gate  [[buffer(1)]],

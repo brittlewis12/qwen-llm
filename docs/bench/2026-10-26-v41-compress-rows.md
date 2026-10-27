@@ -91,3 +91,12 @@ estimate (~+0.9%) are separate claims. Future campaigns need an explicit
 inter-arm cooldown or a fixed thermal soak; a 120 s sleep only before the
 campaign does not reset the device between arms. Maya-S/IQ3 generality, the
 selection optimization, and the attention tile are separate lanes.
+
+## Follow-up 2026-10-27: CED Publication And Replay
+
+The CED publication command now uses the same batched ratio-group publisher,
+and the owner batch is gated on `GlobalKvMode::Ordinary` so a `ReusePublished`
+decoder cannot republish completed rows (`73e684a6`). With that gate, the
+Full/CED 8K pair passes bitwise: Full 1,020.74 tok/s, CED 1,437.15 tok/s
+(+40.8%), all endpoint hashes identical. See
+[the Full/CED pair guard](2026-10-27-v41-ced-pair-guard.md).

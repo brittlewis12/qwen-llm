@@ -916,6 +916,17 @@ pub enum MetalTensorProvenance {
     RetainedGgufReadOnly,
 }
 
+/// `host` makes `zeros_dtype_unstaged` write zeros over every new buffer from
+/// the CPU; otherwise it relies on `newBufferWithLength:options:` returning
+/// zero-filled storage, which keeps large prefill scratch allocations off the
+/// host critical path (same bytes; A/B lever).
+const ZERO_FILL_ENV: &str = "QWEN_METAL_ZERO_FILL";
+
+fn host_zero_fill() -> bool {
+    static HOST: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *HOST.get_or_init(|| std::env::var(ZERO_FILL_ENV).as_deref() == Ok("host"))
+}
+
 /// A typed, shape-aware view into an `MTLBuffer`. The buffer is owned via
 /// `Retained` (cloned into multiple `MetalTensor`s if you want sub-views;
 /// they share the same underlying storage).
@@ -1214,9 +1225,13 @@ impl MetalTensor {
             });
         }
         // Fresh owned storage, not yet published or submitted to any command.
-        // Zero quantized payload bytes exactly as the staged helper does; this
-        // makes no additional claim about a dtype's decoded numerical zero.
-        unsafe { std::ptr::write_bytes(buffer.contents().as_ptr().cast::<u8>(), 0, extent) };
+        // Byte zeros, exactly as the staged helper; this makes no additional
+        // claim about a dtype's decoded numerical zero. Metal documents
+        // `newBufferWithLength:options:` as returning zero-filled storage, so
+        // by default the host does not write the pages a second time.
+        if host_zero_fill() {
+            unsafe { std::ptr::write_bytes(buffer.contents().as_ptr().cast::<u8>(), 0, extent) };
+        }
         Ok(Self {
             buffer,
             offset: 0,
@@ -1310,6 +1325,28 @@ impl MetalTensor {
 mod tests {
     use super::*;
     use crate::metal::test_support::*;
+
+    #[test]
+    fn unstaged_zeros_are_zero_after_dirty_buffers_are_released() {
+        let ctx = MetalContext::new().expect("create Metal context");
+        // Dirty and release same-sized buffers first so a recycling allocator
+        // would hand back nonzero pages if Metal did not zero-fill them.
+        for bytes in [4096usize, 1 << 20, 48 << 20] {
+            for _ in 0..3 {
+                let dirty = ctx.buffer_uninit(bytes).expect("allocate dirty buffer");
+                unsafe {
+                    std::ptr::write_bytes(dirty.contents().as_ptr().cast::<u8>(), 0xA5, bytes)
+                };
+            }
+            let words = (bytes / 4) as u64;
+            let zeros = MetalTensor::zeros_dtype_unstaged(&ctx, vec![words], GgmlType::F32)
+                .expect("allocate unstaged zeros");
+            let contents = unsafe {
+                std::slice::from_raw_parts(zeros.buffer.contents().as_ptr().cast::<u8>(), bytes)
+            };
+            assert!(contents.iter().all(|&b| b == 0), "{bytes} bytes not zero");
+        }
+    }
 
     #[test]
     fn allocation_census_records_realized_storage() {

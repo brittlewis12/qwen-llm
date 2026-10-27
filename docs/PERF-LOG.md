@@ -6,6 +6,86 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the current state and evidence index.
 
+## 2026-10-27 - V4.1 CED 8K 1,663 tok/s: No Host Zero Pass on Fresh Buffers
+
+- Host wall spans in the prefill stage profile showed an 8K CED call spending
+  ~1.3 s of 5.3 s on the host with the GPU idle (GPU 4.01 s): block-rows
+  allocation 409 ms, Engram rows 320 ms, embeddings/uploads ~110 ms, encode
+  ~230 ms, plus commit-to-completion gaps. Full: ~0.73 s of 7.9 s (encode
+  246, host prepare 268, scratch 217).
+- The allocation time was `zeros_dtype_unstaged` writing zeros over every
+  fresh shared buffer from one CPU thread. Metal documents
+  `newBufferWithLength:options:` as zero-filled, so the helper no longer
+  writes the pages again (same bytes). `QWEN_METAL_ZERO_FILL=host` restores
+  the host pass.
+- In-binary D H H D (r58), no cooldown between arms: CED pp8192
+  1,618.7/1,615.1 vs 1,425.6/1,423.6 tok/s (**+13.5%**), pp2048 1,013.0/1,026.2
+  vs 803.0/792.4 (**+27.8%**); Full pp8192 1,097.4/1,095.1 vs 1,073.6/1,072.9
+  (+2.1%), pp2048 1,048.0/1,043.4 vs 1,005.8/1,002.7 (+4.2%). GPU time is
+  unchanged (r57 stage profiles).
+- 8K Full/CED pair on the default build (production timing,
+  full-blocks-first, 4 retained calls): Full 1,095.4, **CED 1,662.9** tok/s,
+  every endpoint bitwise equal to warm Full.
+- Negative: reading batched Engram rows on the rayon pool made Engram prepare
+  2.7x slower (241 -> 673 ms Full, 322 -> 752 ms CED); concurrent `pread`s on
+  one shard descriptor contend. Not landed.
+- Raw: `metagross:~/qwen-runs/2026-10-26-decode-twk3/` r55-r58.
+
+## 2026-10-27 - V4.1 Prefill +4.7-5.3%: Parallel Route Bucket, Fused mHC Rows
+
+- On main 18a5c467 plus these commits the 8K Full/CED pair (production
+  timing, full-blocks-first, 4 retained calls, 120 s cooldown) passes the
+  bitwise endpoint gate: Full 1,076.4 tok/s, **CED 1,502.4** (main's own
+  recorded pair: 1,020.74 / 1,437.15; a cross-session comparison).
+- Prefill FFN stage sampling now splits the FFN envelope into HC pre, router,
+  route + bucket, routed gate/up, mid, routed down, shared expert and sum. At
+  4096 rows routed gate/up + down were 65% of the FFN, shared 13%, route +
+  bucket 9.3% and HC pre 6.9%.
+- Route bucket: one threadgroup per expert counts, scans and scatters its
+  slots instead of one thread per expert scanning every rows x topk id. Route
+  stage 162.5 -> 73.7 ms per 4096-token prefill; output bitwise equal.
+  `QWEN_V41_ROUTE_BUCKET=serial` restores the scalar scan.
+- mHC pre: `kernel_deepseek_v41_hc_projection_rows` computes the F32
+  [4*hidden -> 24] projection and the projected RMS in one pass over the
+  residual instead of the scalar grouped kernel plus a second RMS pass.
+  2,903 -> 1,290 us per site at 4096 rows; max |err| 3.1e-5 vs an f64
+  reference (scalar 3.5e-6). `QWEN_V41_HC_ROWS=split` restores the two passes.
+- M5 Ultra GSQ IQ2_XS on main abe6e6e7, in-binary N C C N N C (C = serial
+  bucket + split HC), no cooldown:
+  pp2048 1,037.7/1,036.4/1,036.1 vs 994.2/990.7/987.0 tok/s (**+4.65%**);
+  pp8192 1,106.6/1,104.9/1,103.0 vs 1,050.3/1,047.9 (**+5.3%**; the third
+  control at 980.3 is an outlier and excluded).
+- CED: Full/CED pair (8K, production timing, full-blocks-first, 4 retained
+  calls per policy) on the last CED-passing base 17af573b with only the bucket
+  and HC commits applied, versus 17af573b, 150 s cooldown before each arm:
+  Full 910.7 vs 871.8 tok/s (+4.5%), CED 1,287.8 vs 1,239.4 (+3.9%). Every
+  call's endpoint head is bitwise equal to warm Full in both binaries. In the
+  same pair without cooldowns the second arm lost ~8% to heat (r52), so
+  thermal order effects are as large as the gain.
+- Quality (pre-rebase base, fused HC only): witness NLL 2.1350 / top-1 211 vs
+  2.1421 / 212; 22-task screen identical (code 9/10, reasoning 1/8, JSON 0/4).
+- Raw: `metagross:~/qwen-runs/2026-10-26-decode-twk3/` r43/r44 (stages), r48
+  (pre-rebase HC A/B), r49 (this A/B), r52/r53/r54 (CED pair).
+
+## 2026-10-27 - V4.1 Full/CED Pair Passes 8K: CED 1,437 tok/s
+
+- Two independent parity failures fixed. Batched owner publication ran during
+  CED's `ReusePublished` layer-20 replay and rewrote completed cache rows; gate
+  the batch on `GlobalKvMode::Ordinary` and batch CED's dedicated publication
+  too (`73e684a6`). The dedicated Q5_K matmat is cosine-gated, not bitwise, and
+  Full/CED take different kernels as replay chunks shrink; make it opt-in again
+  (`3a8d9fe2`), restoring the generic Q5_K dense tile for every row count.
+- 8K pair, P0 production timing, `full-blocks-first`, four retained samples per
+  policy: Full 1,020.74 tok/s (stddev 0.58), CED 1,437.15 tok/s (stddev 4.23),
+  **+40.8%**, all 14 endpoint hashes `04267cbd...` identical, clean build.
+- Sustained `F C C F`, two runs per arm, 180 s apart: Full 1,022.51/1,022.97 and
+  CED 1,367.72/1,370.24 tok/s, **+33.9%**; the pair CED is a 5.0% warm-state
+  upper bound, not the sustained rate.
+- CED is not the default. The Q5_K +2.54% dedicated-tile result stands as a
+  measurement but is not in the default path.
+- [Packet](bench/2026-10-27-v41-ced-pair-guard.md). Raw:
+  `metagross:~/qwen-runs/2026-10-27-v41-ced-guard/`.
+
 ## 2026-10-26 - V4.1 Prefill +2.5%: Dedicated Q5_K Tensor Tile
 
 - V4.1 prefill already used a dense tensor route for Q5_K but only its

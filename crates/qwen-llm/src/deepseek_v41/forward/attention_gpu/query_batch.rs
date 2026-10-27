@@ -68,6 +68,22 @@ fn hier_partitions(length: usize) -> usize {
     }
 }
 
+fn long_selection_tile(
+    c: &Config,
+    width: usize,
+    rows: usize,
+    capacity: usize,
+    publish: bool,
+) -> Option<usize> {
+    let block_width = if publish {
+        width.div_ceil(c.candidate_block)
+    } else {
+        0
+    };
+    let row_width = width.checked_add(block_width)?;
+    (width > 0 && rows > 0 && row_width <= capacity).then(|| (capacity / row_width).min(rows))
+}
+
 /// Elements in two 4-byte allocations, independent of runtime rollback flags.
 /// Capacity, not the current prefill length, determines the reusable pair slab.
 pub(super) fn selection_shapes(
@@ -500,6 +516,71 @@ mod scratch_prefix_geometry_tests {
     use super::*;
 
     #[test]
+    fn long_selection_tile_requires_a_complete_score_and_publication_row() {
+        let c = Config::default();
+        let scratch = selection_shapes(&c, 32771, 2, 512).unwrap()[0];
+        assert_eq!(scratch, 32768);
+        assert_eq!(long_selection_tile(&c, 32770, 2, scratch, false), None);
+        assert_eq!(long_selection_tile(&c, 32770, 2, scratch, true), None);
+        assert_eq!(long_selection_tile(&c, 16385, 2, scratch, false), Some(1));
+        assert_eq!(long_selection_tile(&c, 29127, 2, scratch, true), Some(1));
+        assert_eq!(long_selection_tile(&c, 29128, 2, scratch, true), None);
+        assert_eq!(long_selection_tile(&c, 29128, 2, scratch, false), Some(1));
+        for publish in [false, true] {
+            let width = 32770;
+            let row = width
+                + if publish {
+                    width.div_ceil(c.candidate_block)
+                } else {
+                    0
+                };
+            assert_eq!(long_selection_tile(&c, width, 3, row - 1, publish), None);
+            assert_eq!(long_selection_tile(&c, width, 3, row, publish), Some(1));
+            assert_eq!(long_selection_tile(&c, width, 3, row * 2, publish), Some(2));
+            assert_eq!(long_selection_tile(&c, width, 3, row * 4, publish), Some(3));
+        }
+        assert_eq!(long_selection_tile(&c, 0, 2, scratch, true), None);
+        assert_eq!(long_selection_tile(&c, 32770, 0, usize::MAX, true), None);
+        assert_eq!(
+            long_selection_tile(&c, usize::MAX, 2, usize::MAX, true),
+            None
+        );
+    }
+
+    #[test]
+    fn long_selection_tiles_keep_short_tails_safe_and_large_chunks_batched() {
+        let c = Config::default();
+        for prefix in [32768, 65536, 131072, 524288] {
+            for rows in [2, 3, 5, 8, 32, 128, 512, 1024, 4096] {
+                let end = prefix + rows;
+                let scratch = selection_shapes(&c, end, rows, 512).unwrap()[0];
+                for (ratio, publish) in [(1, true), (1, false), (2, false)] {
+                    let width = end / ratio;
+                    let row = width
+                        + if publish {
+                            width.div_ceil(c.candidate_block)
+                        } else {
+                            0
+                        };
+                    let expected = (row <= scratch).then(|| (scratch / row).min(rows));
+                    let tile = long_selection_tile(&c, width, rows, scratch, publish);
+                    assert_eq!(
+                        tile, expected,
+                        "prefix={prefix} rows={rows} ratio={ratio} publish={publish}"
+                    );
+                    if let Some(tile) = tile {
+                        assert!((1..=rows).contains(&tile));
+                        assert!(tile * row <= scratch);
+                    }
+                    if rows >= 512 {
+                        assert!(tile.is_some(), "large chunks must retain batching");
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
     fn selected_4k_full_chunk_keeps_default_selection_tiles_bounded() {
         let c = Config::default();
         for capacity in [8192, 16384] {
@@ -702,8 +783,8 @@ impl Workspace {
     /// Position-ordered compressor, index and selection transitions. For
     /// unpruned rows complete ratio-groups publish in one dispatch and the
     /// unaligned head/tail rows keep the per-row transition, then selection
-    /// is batched over query tiles. The pruning path (from 16,385 visible
-    /// keys) keeps the incumbent per-row selector.
+    /// is batched over query tiles. Pruned rows batch only when the scratch
+    /// can hold a complete score row and any candidate-publication scores.
     pub(in super::super) fn encode_rows_serial(
         &mut self,
         ctx: &MetalContext,
@@ -738,7 +819,15 @@ impl Workspace {
         let long_batch = selector
             && !unpruned_batch
             && super::select_radix_enabled()
-            && super::index_ilp_supported(c);
+            && super::index_ilp_supported(c)
+            && long_selection_tile(
+                c,
+                last_length,
+                rows.rows,
+                rows.select_scores.n_elements() as usize,
+                self.schedule.candidate_source_layer == Some(id),
+            )
+            .is_some();
         let batched = unpruned_batch || long_batch;
         // ReusePublished replays against a completed authoritative cache; the
         // per-row path already suppresses its publication for that mode, and
@@ -1099,12 +1188,9 @@ impl Workspace {
             0
         };
         let capacity = rows.select_scores.n_elements() as usize;
-        op::require(
-            width > 0 && width + block_width <= capacity,
-            "long selection score width",
-        )?;
         // Score rows, then (source layer) block-score rows, in one scratch.
-        let tile = (capacity / (width + block_width)).min(rows.rows).max(1);
+        let tile = long_selection_tile(c, width, rows.rows, capacity, publish)
+            .ok_or("long selection score width")?;
         let block_scores = publish.then(|| {
             rows.select_scores
                 .view_subrange((tile * width) as u64, vec![(tile * block_width) as u64])

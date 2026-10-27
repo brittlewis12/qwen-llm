@@ -603,6 +603,27 @@
   },
   {
     "target": "lib",
+    "name": "deepseek_v41::forward::attention_gpu::query_batch::scratch_prefix_geometry_tests::long_selection_tile_requires_a_complete_score_and_publication_row",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Pure CPU long-selection scratch eligibility: exact/under capacity, publisher-only block-score extent, empty geometry and checked overflow."
+  },
+  {
+    "target": "lib",
+    "name": "deepseek_v41::forward::attention_gpu::query_batch::scratch_prefix_geometry_tests::long_selection_tiles_keep_short_tails_safe_and_large_chunks_batched",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Pure CPU capacity/ratio matrix from 32K through 512K; insufficient short tails retain per-row selection and fitting long chunks retain bounded tile sizes."
+  },
+  {
+    "target": "lib",
+    "name": "deepseek_v41::forward::attention_gpu::tests::query_batch::selection_tail::long_selection_short_tails_match_prepared_per_row_and_continue",
+    "class": "gpu",
+    "ignored": true,
+    "reason": "Self-leased DEBUG=1 Metal witness with production 32x128 index geometry, short score slabs, publisher/masked follower, per-row reference, exact controls/output/causal state and decode continuation; <=2 GiB admission price, no timing/model claim."
+  },
+  {
+    "target": "lib",
     "name": "deepseek_v41::forward::attention_gpu::query_batch::scratch_prefix_geometry_tests::query_prefix_shapes_recompute_history_span_and_matrix_tile_strides",
     "class": "cpu",
     "ignored": false,

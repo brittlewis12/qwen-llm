@@ -6,6 +6,22 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the current state and evidence index.
 
+## 2026-10-26 - V4.1 Prefill +11.4%: Tensor Index-Score Rows
+
+- `index_heads_rows` gave each simdgroup eight keys and reloaded the row query
+  for every key group. One threadgroup now handles a whole row: q is staged
+  once, each 64-key tile runs one 32x64x128 tensor matmul, and the
+  relu/weighted head sum writes the same F32 score layout. The sort is
+  unchanged. `QWEN_V41_INDEX_TENSOR=0` restores the simdgroup kernel.
+- Stage `prefill_attention_serial` 2,145.9 -> 325.4 ms (two-run sum, -84.8%);
+  the remaining serial is the top-k sort.
+- Same-binary 8K with a 180 s inter-arm cooldown, N C C N x2: new
+  1,022.03/1,021.55 and 1,022.08/1,020.90 tok/s, control 918.66/918.01 and
+  915.78/914.82, **+11.43%**, all samples stable.
+- 2K greedy endpoint byte-identical; raw GPU witness against
+  `index_heads_rows`. [Packet](bench/2026-10-26-v41-index-tensor.md). Raw:
+  `metagross:~/qwen-runs/2026-10-26-v41-index-tensor/`.
+
 ## 2026-10-26 - V4.1 Prefill +2.0%: All-Head Tensor Attention Tile
 
 - The 16-head score/PV tile ran four threadgroups per query row and gathered

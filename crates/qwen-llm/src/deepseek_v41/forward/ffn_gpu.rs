@@ -683,12 +683,31 @@ impl Workspace {
         output: &MetalTensor,
         scratch: &Rows,
     ) -> std::result::Result<(), metal::MetalError> {
+        let mut e = enc;
+        self.encode_rows_with(ctx, &mut e, c, layer, id, x, incoming, output, scratch)
+    }
+
+    /// `encode_rows` with stage marks (`PREFILL_FFN_STAGES`) for a sampled
+    /// prefill profile; a plain encoder ignores them.
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn encode_rows_with(
+        &self,
+        ctx: &MetalContext,
+        e: &mut impl RowsEncoder,
+        c: &Config,
+        layer: &Layer<'_>,
+        id: usize,
+        x: &MetalTensor,
+        incoming: &MetalTensor,
+        output: &MetalTensor,
+        scratch: &Rows,
+    ) -> std::result::Result<(), metal::MetalError> {
         let n = scratch.hc.rows;
         composition_extents(c, n)?;
         let b = &scratch.buffers;
         scratch.hc.encode_with_arithmetic(
             ctx,
-            enc,
+            e.enc(),
             c,
             &layer.ffn_hc.projection,
             &self.constants[id],
@@ -696,8 +715,9 @@ impl Workspace {
             incoming,
             scratch.arithmetic,
         )?;
+        e.mark(1);
         layer.router.encode_rows_with_arithmetic(
-            enc,
+            e.enc(),
             &scratch.hc.normalized,
             &b[0],
             n,
@@ -713,13 +733,14 @@ impl Workspace {
                     || (half_grouped_selected_with_arithmetic(c, layer, n, scratch.arithmetic)
                         && metal::moe_grouped_tensor_selected(ctx)) =>
             {
-                Some(half.convert(ctx, enc, &scratch.hc.normalized, c.hidden * n)?)
+                Some(half.convert(ctx, e.enc(), &scratch.hc.normalized, c.hidden * n)?)
             }
             _ => None,
         };
+        e.mark(2);
         for j in 0..2 {
             layer.shared[j].encode_rows_with_arithmetic_and_half(
-                enc,
+                e.enc(),
                 &scratch.hc.normalized,
                 input_half.as_ref(),
                 &b[1 + j],
@@ -730,7 +751,7 @@ impl Workspace {
         let shape = vec![(c.intermediate * n) as u64];
         metal::encode_clamped_swiglu(
             ctx,
-            enc,
+            e.enc(),
             &b[1].view_bytes(0, shape.clone()),
             &b[2].view_bytes(0, shape.clone()),
             &b[3].view_bytes(0, shape),
@@ -740,12 +761,12 @@ impl Workspace {
             Some(half)
                 if layer.shared[2].tensor_rows_selected_with_arithmetic(n, scratch.arithmetic) =>
             {
-                Some(half.convert(ctx, enc, &b[3], c.intermediate * n)?)
+                Some(half.convert(ctx, e.enc(), &b[3], c.intermediate * n)?)
             }
             _ => None,
         };
         layer.shared[2].encode_rows_with_arithmetic_and_half(
-            enc,
+            e.enc(),
             &b[3],
             shared_half.as_ref(),
             &b[4],
@@ -756,13 +777,16 @@ impl Workspace {
             || grouped_selected(c, layer, n)
             || native_rows_supported(c, layer)
         {
-            self.encode_routed_rows(ctx, enc, c, layer, id, scratch, input_half.as_ref())?;
+            self.encode_routed_rows_with(ctx, e, c, layer, id, scratch, input_half.as_ref())?;
         } else {
+            for stage in 3..=7 {
+                e.mark(stage);
+            }
             let status = scratch.status_view(id)?;
             for row in 0..n {
                 self.encode_routed(
                     ctx,
-                    enc,
+                    e.enc(),
                     c,
                     layer,
                     &self.constants[id][3],
@@ -776,7 +800,7 @@ impl Workspace {
         }
         metal::encode_mhc4_post_rows(
             ctx,
-            enc,
+            e.enc(),
             c.hidden,
             n,
             &b[5],
@@ -787,10 +811,26 @@ impl Workspace {
         )
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn encode_routed_rows(
         &self,
         ctx: &MetalContext,
         enc: &KernelEncoder,
+        c: &Config,
+        layer: &Layer<'_>,
+        id: usize,
+        scratch: &Rows,
+        input_half: Option<&MetalTensor>,
+    ) -> std::result::Result<(), metal::MetalError> {
+        let mut e = enc;
+        self.encode_routed_rows_with(ctx, &mut e, c, layer, id, scratch, input_half)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn encode_routed_rows_with(
+        &self,
+        ctx: &MetalContext,
+        e: &mut impl RowsEncoder,
         c: &Config,
         layer: &Layer<'_>,
         id: usize,
@@ -802,9 +842,10 @@ impl Workspace {
         let b = &scratch.buffers;
         let status = scratch.status_view(id)?;
         let counts = b[10].view_subrange(0, vec![c.experts as u64]);
+        e.mark(3);
         encode_route_rows(
             ctx,
-            enc,
+            e.enc(),
             c,
             n,
             &b[0],
@@ -822,14 +863,22 @@ impl Workspace {
         let grouped = half || grouped_selected(c, layer, n);
         if grouped {
             metal::encode_moe_route_bucket_slots_f32(
-                ctx, enc, &b[8], &counts, &b[11], c.experts, n, c.topk,
+                ctx,
+                e.enc(),
+                &b[8],
+                &counts,
+                &b[11],
+                c.experts,
+                n,
+                c.topk,
             )?;
+            e.mark(4);
             if tensor {
                 // The caller's half copy of the normalized input when it made
                 // one (the shared gate/up read it too); otherwise convert here.
                 let owned_half = match (input_half, &scratch.half_input) {
                     (None, Some(half)) => {
-                        Some(half.convert(ctx, enc, &scratch.hc.normalized, c.hidden * n)?)
+                        Some(half.convert(ctx, e.enc(), &scratch.hc.normalized, c.hidden * n)?)
                     }
                     _ => None,
                 };
@@ -838,7 +887,7 @@ impl Workspace {
                     .unwrap_or(&scratch.hc.normalized);
                 metal::encode_moe_swiglu_f32_grouped_slots_tensor(
                     ctx,
-                    enc,
+                    e.enc(),
                     layer.banks[0],
                     layer.banks[1],
                     x_pack,
@@ -860,7 +909,7 @@ impl Workspace {
                 };
                 gate_up(
                     ctx,
-                    enc,
+                    e.enc(),
                     layer.banks[0],
                     layer.banks[1],
                     &scratch.hc.normalized,
@@ -876,9 +925,10 @@ impl Workspace {
                 )?;
             }
         } else {
+            e.mark(4);
             metal::encode_all_slots_gate_up_swiglu_native_rows(
                 ctx,
-                enc,
+                e.enc(),
                 layer.banks[0],
                 layer.banks[1],
                 &scratch.hc.normalized,
@@ -893,14 +943,16 @@ impl Workspace {
                 c.clamp,
             )?;
         }
-        enc.set_pipeline(&ctx.pipeline("kernel_deepseek_v41_weight")?);
-        enc.set_bytes(0, &extents.weighted);
-        enc.set_bytes(1, &(c.intermediate as u32));
+        e.mark(5);
+        e.enc()
+            .set_pipeline(&ctx.pipeline("kernel_deepseek_v41_weight")?);
+        e.enc().set_bytes(0, &extents.weighted);
+        e.enc().set_bytes(1, &(c.intermediate as u32));
         for (slot, tensor) in [&b[12], &b[9], &b[13], &status].iter().enumerate() {
-            enc.set_tensor(slot + 2, tensor);
+            e.enc().set_tensor(slot + 2, tensor);
         }
-        enc.set_bytes(6, &(c.topk as u32));
-        dispatch(enc, extents.weighted as usize, 256);
+        e.enc().set_bytes(6, &(c.topk as u32));
+        dispatch(e.enc(), extents.weighted as usize, 256);
         if grouped {
             let down = if tensor {
                 metal::encode_moe_down_f32_grouped_slots_tensor
@@ -911,13 +963,14 @@ impl Workspace {
             };
             let inner_half = match &scratch.half_inner {
                 Some(half) if tensor => {
-                    Some(half.convert(ctx, enc, &b[13], c.intermediate * c.topk * n)?)
+                    Some(half.convert(ctx, e.enc(), &b[13], c.intermediate * c.topk * n)?)
                 }
                 _ => None,
             };
+            e.mark(6);
             down(
                 ctx,
-                enc,
+                e.enc(),
                 layer.banks[2],
                 inner_half.as_ref().unwrap_or(&b[13]),
                 &counts,
@@ -929,9 +982,10 @@ impl Workspace {
                 n,
             )?;
         } else {
+            e.mark(6);
             metal::encode_all_slots_down_native_rows(
                 ctx,
-                enc,
+                e.enc(),
                 layer.banks[2],
                 &b[13].view_subrange(0, vec![c.intermediate as u64, extents.slots as u64]),
                 &b[8],
@@ -944,15 +998,66 @@ impl Workspace {
                 n,
             )?;
         }
-        enc.set_pipeline(&ctx.pipeline("kernel_deepseek_v41_sum")?);
-        enc.set_bytes(0, &(c.hidden as u32));
-        enc.set_bytes(1, &(c.topk as u32));
+        e.mark(7);
+        e.enc()
+            .set_pipeline(&ctx.pipeline("kernel_deepseek_v41_sum")?);
+        e.enc().set_bytes(0, &(c.hidden as u32));
+        e.enc().set_bytes(1, &(c.topk as u32));
         for (slot, tensor) in [&b[14], &b[4], &b[5], &status].iter().enumerate() {
-            enc.set_tensor(slot + 2, tensor);
+            e.enc().set_tensor(slot + 2, tensor);
         }
-        enc.set_bytes(6, &(n as u32));
-        dispatch(enc, extents.output as usize, 256);
+        e.enc().set_bytes(6, &(n as u32));
+        dispatch(e.enc(), extents.output as usize, 256);
         Ok(())
+    }
+}
+
+/// Prefill FFN stage names in mark order (`QWEN_V41_PREFILL_STAGES`): HC pre,
+/// router, shared expert, route + bucket, routed gate/up, routing weights +
+/// half copy, routed down, sum + HC post.
+pub(super) const PREFILL_FFN_STAGES: [&str; 8] = [
+    "prefill_ffn_hc",
+    "prefill_ffn_router",
+    "prefill_ffn_shared",
+    "prefill_ffn_route",
+    "prefill_ffn_gate_up",
+    "prefill_ffn_mid",
+    "prefill_ffn_down",
+    "prefill_ffn_sum",
+];
+
+/// The prefill FFN's encoder: plain encoding ignores stage marks; a sampled
+/// profile ends the current encoder at each mark and begins the next.
+pub(super) trait RowsEncoder {
+    fn enc(&self) -> &KernelEncoder;
+    fn mark(&mut self, _stage: usize) {}
+}
+
+impl RowsEncoder for &KernelEncoder {
+    fn enc(&self) -> &KernelEncoder {
+        self
+    }
+}
+
+/// Sampled stage encoder: stage k (1..8) records samples base + 2(k - 1)
+/// and base + 2(k - 1) + 1; stage 0 is the caller's current encoder.
+pub(super) struct SampledRows<'a> {
+    pub enc: &'a mut KernelEncoder,
+    pub command:
+        &'a objc2::rc::Retained<objc2::runtime::ProtocolObject<dyn objc2_metal::MTLCommandBuffer>>,
+    pub samples: &'a metal::MetalTimestampSampleBuffer,
+    pub base: usize,
+}
+
+impl RowsEncoder for SampledRows<'_> {
+    fn enc(&self) -> &KernelEncoder {
+        self.enc
+    }
+    fn mark(&mut self, stage: usize) {
+        self.enc.finish();
+        let first = self.base + 2 * (stage - 1);
+        *self.enc =
+            KernelEncoder::begin_sampled(self.command, self.samples, first, first + 1, false);
     }
 }
 

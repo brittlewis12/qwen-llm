@@ -202,6 +202,10 @@ fn split_submission() -> bool {
 /// cover encoding the remaining layers on the host.
 const SPLIT_SUBMIT_MIDDLE_LAYERS: usize = 3;
 
+/// Timestamp samples per layer of a sampled prefill chunk: six attention/FFN
+/// stage pairs, then the FFN's seven further sub-stage pairs.
+const PREFILL_LAYER_SAMPLES: usize = 12 + 2 * (ffn_gpu::PREFILL_FFN_STAGES.len() - 1);
+
 pub(super) fn chunk_widths(
     model: &Forward<'_>,
     capacity: usize,
@@ -451,7 +455,7 @@ impl Workspace {
         let started = profile::start();
         let samples = if profile::stages() {
             Some(
-                ctx.timestamp_sample_buffer(model.layers.len() * 12)
+                ctx.timestamp_sample_buffer(model.layers.len() * PREFILL_LAYER_SAMPLES)
                     .map_err(|e| e.to_string())?,
             )
         } else {
@@ -500,8 +504,8 @@ impl Workspace {
                     enc = KernelEncoder::begin_sampled(
                         &command,
                         samples,
-                        id * 12 + 2,
-                        id * 12 + 3,
+                        id * PREFILL_LAYER_SAMPLES + 2,
+                        id * PREFILL_LAYER_SAMPLES + 3,
                         false,
                     );
                 }
@@ -519,8 +523,8 @@ impl Workspace {
                     enc = KernelEncoder::begin_sampled(
                         &command,
                         samples,
-                        id * 12 + 4,
-                        id * 12 + 5,
+                        id * PREFILL_LAYER_SAMPLES + 4,
+                        id * PREFILL_LAYER_SAMPLES + 5,
                         false,
                     );
                 }
@@ -538,8 +542,8 @@ impl Workspace {
                     enc = KernelEncoder::begin_sampled(
                         &command,
                         samples,
-                        id * 12 + 6,
-                        id * 12 + 7,
+                        id * PREFILL_LAYER_SAMPLES + 6,
+                        id * PREFILL_LAYER_SAMPLES + 7,
                         false,
                     );
                 }
@@ -550,8 +554,8 @@ impl Workspace {
                     enc = KernelEncoder::begin_sampled(
                         &command,
                         samples,
-                        id * 12 + 8,
-                        id * 12 + 9,
+                        id * PREFILL_LAYER_SAMPLES + 8,
+                        id * PREFILL_LAYER_SAMPLES + 9,
                         false,
                     );
                 }
@@ -581,14 +585,33 @@ impl Workspace {
                     enc = KernelEncoder::begin_sampled(
                         &command,
                         samples,
-                        id * 12 + 10,
-                        id * 12 + 11,
+                        id * PREFILL_LAYER_SAMPLES + 10,
+                        id * PREFILL_LAYER_SAMPLES + 11,
                         false,
                     );
                 }
-                self.ffn
-                    .encode_rows(ctx, &enc, c, layer, id, &half, &hc.pre, &x, &ffn)
-                    .map_err(|e| e.to_string())?;
+                match &samples {
+                    Some(samples) => self.ffn.encode_rows_with(
+                        ctx,
+                        &mut ffn_gpu::SampledRows {
+                            enc: &mut enc,
+                            command: &command,
+                            samples,
+                            base: id * PREFILL_LAYER_SAMPLES + 12,
+                        },
+                        c,
+                        layer,
+                        id,
+                        &half,
+                        &hc.pre,
+                        &x,
+                        &ffn,
+                    ),
+                    None => self
+                        .ffn
+                        .encode_rows(ctx, &enc, c, layer, id, &half, &hc.pre, &x, &ffn),
+                }
+                .map_err(|e| e.to_string())?;
                 // Lagged incoming pre is the previous block's mix for this same token.
                 metal::encode_copy_offset_f32(ctx, &enc, &ffn.hc.pre, 0, &incoming, 4 * n)
                     .map_err(|e| e.to_string())?;
@@ -626,8 +649,8 @@ impl Workspace {
                         enc = KernelEncoder::begin_sampled(
                             &command,
                             samples,
-                            (id + 1) * 12,
-                            (id + 1) * 12 + 1,
+                            (id + 1) * PREFILL_LAYER_SAMPLES,
+                            (id + 1) * PREFILL_LAYER_SAMPLES + 1,
                             false,
                         );
                     }
@@ -657,15 +680,24 @@ impl Workspace {
         result?;
         if let Some(samples) = &samples {
             let times = ctx
-                .resolve_timestamp_samples(samples, model.layers.len() * 12)
+                .resolve_timestamp_samples(samples, model.layers.len() * PREFILL_LAYER_SAMPLES)
                 .map_err(|e| e.to_string())?;
-            for (layer, t) in times.chunks_exact(12).enumerate() {
+            for (layer, t) in times.chunks_exact(PREFILL_LAYER_SAMPLES).enumerate() {
                 profile::gpu_interval_layer("prefill_attention_hc", n, layer, t[0], t[1]);
                 profile::gpu_interval_layer("prefill_attention_prepare", n, layer, t[2], t[3]);
                 profile::gpu_interval_layer("prefill_attention_serial", n, layer, t[4], t[5]);
                 profile::gpu_interval_layer("prefill_attention_tiles", n, layer, t[6], t[7]);
                 profile::gpu_interval_layer("prefill_attention_finish_post", n, layer, t[8], t[9]);
-                profile::gpu_interval_layer("prefill_ffn", n, layer, t[10], t[11]);
+                let last = 12 + 2 * (ffn_gpu::PREFILL_FFN_STAGES.len() - 2);
+                profile::gpu_interval_layer("prefill_ffn", n, layer, t[10], t[last + 1]);
+                for (k, name) in ffn_gpu::PREFILL_FFN_STAGES.iter().enumerate() {
+                    let (s, e) = if k == 0 {
+                        (t[10], t[11])
+                    } else {
+                        (t[12 + 2 * (k - 1)], t[13 + 2 * (k - 1)])
+                    };
+                    profile::gpu_interval_layer(name, n, layer, s, e);
+                }
             }
         }
         ffn.validate_status()?;

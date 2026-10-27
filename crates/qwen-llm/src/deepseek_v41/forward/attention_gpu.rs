@@ -171,11 +171,49 @@ fn candidate_fused_width(max_threads: usize, static_bytes: usize, tg_capacity: u
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct BatchCursor {
     start: usize,
     rows: usize,
     layer: usize,
     row: usize,
+}
+
+impl BatchCursor {
+    fn advanced(&self, layer: usize, position: usize, count: usize) -> Result<Self> {
+        let end = self
+            .start
+            .checked_add(self.rows)
+            .ok_or("attention batch overflow")?;
+        let current = self
+            .start
+            .checked_add(self.row)
+            .ok_or("attention row overflow")?;
+        let row = self
+            .row
+            .checked_add(count)
+            .ok_or("attention range overflow")?;
+        op::require(
+            count > 0
+                && self.row < self.rows
+                && row <= self.rows
+                && self.layer == layer
+                && current == position
+                && current < end,
+            "attention range order/extent",
+        )?;
+        let mut next = *self;
+        if row == self.rows {
+            next.layer = self
+                .layer
+                .checked_add(1)
+                .ok_or("attention layer overflow")?;
+            next.row = 0;
+        } else {
+            next.row = row;
+        }
+        Ok(next)
+    }
 }
 
 struct ValueMatrix {

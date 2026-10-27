@@ -12,7 +12,47 @@ mod arithmetic_tests;
 #[path = "query_batch/lineage.rs"]
 mod lineage_tests;
 
+#[cfg(test)]
+#[path = "query_batch/range.rs"]
+mod range_tests;
+
 pub(super) const TILE: usize = 512;
+
+#[cfg(test)]
+thread_local! {
+    static OLD_HOST_LOOP: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+#[cfg(test)]
+pub(in super::super) fn with_old_host_loop<T>(f: impl FnOnce() -> T) -> T {
+    struct Restore(bool);
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            OLD_HOST_LOOP.with(|flag| flag.set(self.0));
+        }
+    }
+    let _restore = Restore(OLD_HOST_LOOP.with(|flag| flag.replace(true)));
+    f()
+}
+
+fn range_host_enabled() -> bool {
+    #[cfg(test)]
+    if OLD_HOST_LOOP.with(|flag| flag.get()) {
+        return false;
+    }
+    true
+}
+
+/// Mirrors only the two command-producing branches of prepared encode_inner_with.
+fn command_free_prepared(
+    ordinary: bool,
+    owns: bool,
+    publish: bool,
+    index: bool,
+    select: bool,
+) -> bool {
+    !(ordinary && owns && publish || index && select)
+}
 
 const HIER_K: usize = 512;
 const HIER_PARTITION: usize = 4096;
@@ -674,8 +714,14 @@ impl Workspace {
         input: &MetalTensor,
         rows: &Rows,
     ) -> Result<()> {
-        let mode = self.global_mode(id, start, rows.rows)?;
-        self.validate_global_mode(id, start + rows.rows - 1, mode)?;
+        let range_host = range_host_enabled();
+        let mode = if range_host {
+            self.validate_serial_range(enc, id, start, w, input, rows)?
+        } else {
+            let mode = self.global_mode(id, start, rows.rows)?;
+            self.validate_global_mode(id, start + rows.rows - 1, mode)?;
+            mode
+        };
         let c = &self.config;
         let hidden = c.hidden;
         let owner = self.schedule.owner_slot(id);
@@ -705,8 +751,23 @@ impl Workspace {
             (0, 0, 0)
         };
         let body_end = head + body;
-        for row in 0..rows.rows {
+        let mut row = 0;
+        while row < rows.rows {
             let publish = body == 0 || row < head || row >= body_end;
+            if range_host
+                && command_free_prepared(
+                    mode == GlobalKvMode::Ordinary,
+                    self.schedule.owns_kv(id),
+                    publish,
+                    owner.is_some() && self.schedule.produces_index(id),
+                    !batched,
+                )
+            {
+                let end = if !publish { body_end } else { rows.rows };
+                self.advance_prepared_range(id, start + row, end - row)?;
+                row = end;
+                continue;
+            }
             self.encode_batch_row_mode(
                 ctx,
                 enc,
@@ -720,6 +781,7 @@ impl Workspace {
                 !batched,
                 mode,
             )?;
+            row += 1;
         }
         if batched {
             let tile = tile_rows();
@@ -746,6 +808,37 @@ impl Workspace {
             &rows.candidates,
         )?;
         Ok(())
+    }
+
+    fn validate_serial_range(
+        &self,
+        enc: &KernelEncoder,
+        id: usize,
+        start: usize,
+        w: &Weights<'_>,
+        input: &MetalTensor,
+        rows: &Rows,
+    ) -> Result<GlobalKvMode> {
+        op::require(
+            !enc.is_concurrent(),
+            "GPU attention requires serial encoder",
+        )?;
+        let b = self.active_batch().ok_or("attention batch missing")?;
+        op::require(
+            b.start == start && b.rows == rows.rows && b.row == 0,
+            "query batch layer order",
+        )?;
+        b.advanced(id, start, rows.rows)?;
+        let end = start
+            .checked_add(rows.rows)
+            .ok_or("attention serial range overflow")?;
+        op::require(end <= self.capacity, "GPU attention order/capacity")?;
+        validate_weights(&self.config, id, w, &self.schedule)?;
+        valid_view(input, checked_product(&[self.config.hidden, rows.rows])?)?;
+        let mode = self.global_mode(id, start, rows.rows)?;
+        self.validate_global_mode(id, start, mode)?;
+        self.validate_global_mode(id, end - 1, mode)?;
+        Ok(mode)
     }
 
     /// Batched unpruned selection: prepare ids/masks, compute index scores,

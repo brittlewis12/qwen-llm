@@ -462,6 +462,27 @@ fn ced_owner_rows_reuse_preserves_published_cache_with_ordinary_batch_control() 
     assert!(std::env::var_os("QWEN_V41_SELECT_PER_ROW").is_none());
     let _lease = metal::acquire_metal_benchmark_lease().expect("CED GPU lease");
     let ctx = MetalContext::new().unwrap();
+    let old = super::super::query_batch::with_old_host_loop(|| owner_rows_reuse_case(&ctx));
+    let range = owner_rows_reuse_case(&ctx);
+    assert_eq!(
+        old, range,
+        "old host vs range: payloads and ordered full dispatch census"
+    );
+}
+
+fn owner_rows_reuse_case(ctx: &MetalContext) -> (Vec<Vec<u32>>, Vec<String>) {
+    assert!(
+        metal::evaluate_metal_memory_admission_with_cpu_bytes(
+            64 << 20,
+            32 << 20,
+            0,
+            ctx.memory_signals(),
+            true
+        )
+        .is_admitted()
+    );
+    let mut snapshots = Vec::new();
+    let mut launches = Vec::new();
     let c = Config {
         hidden: 32,
         heads: 1,
@@ -539,6 +560,7 @@ fn ced_owner_rows_reuse_preserves_published_cache_with_ordinary_batch_control() 
         });
     }
     let census = metal::dispatch_census_take();
+    launches.push(format!("{census:?}"));
     assert_eq!(
         census
             .iter()
@@ -554,21 +576,26 @@ fn ced_owner_rows_reuse_preserves_published_cache_with_ordinary_batch_control() 
         "Ordinary ratio-one and ratio-two owners must retain batched publication",
     );
     assert_status(&ordinary);
+    snapshots.extend(owner_bits(&ordinary));
+    snapshots.push(bits(&ordinary.raw));
 
     let mut ced = Workspace::new_with_schedule(&ctx, &c, capacity, &refs, &schedule).unwrap();
     let rows = Rows::new(&ctx, &c, capacity, n).unwrap();
     let publication = PublicationRows::new(&ctx, &c, n).unwrap();
     ced.begin_ced(&plan).unwrap();
     ced.begin_ced_encoder(0, n).unwrap();
+    metal::dispatch_census_begin();
     execute(&ctx, |enc| {
         ced.encode_rows(&ctx, enc, 0, 0, &weights[0], &input[0], &rows)
             .unwrap();
         ced.publish_ced_rows(&ctx, enc, 1, 0, &weights[1], &input[1], &publication)
             .unwrap();
     });
+    launches.push(format!("{:?}", metal::dispatch_census_take()));
     ced.complete_ced_encoder(0, n).unwrap();
     assert_status(&ced);
     let published = owner_bits(&ced);
+    snapshots.extend(published.clone());
     assert!(ced.owners.iter().all(|o| {
         [&o.compressed, &o.keys]
             .into_iter()
@@ -580,6 +607,7 @@ fn ced_owner_rows_reuse_preserves_published_cache_with_ordinary_batch_control() 
         let seeds = &layer.seed_rows;
         let scratch = SeedRows::new(&ctx, &c, seeds.len()).unwrap();
         ced.begin_ced_seed(id, seeds.start, seeds.len()).unwrap();
+        metal::dispatch_census_begin();
         execute(&ctx, |enc| {
             ced.seed_ced_rows(
                 &ctx,
@@ -592,6 +620,7 @@ fn ced_owner_rows_reuse_preserves_published_cache_with_ordinary_batch_control() 
             )
             .unwrap();
         });
+        launches.push(format!("{:?}", metal::dispatch_census_take()));
         ced.complete_ced_seed(id, seeds.start, seeds.len()).unwrap();
         let outputs = &layer.output_rows;
         let view = controls
@@ -612,6 +641,7 @@ fn ced_owner_rows_reuse_preserves_published_cache_with_ordinary_batch_control() 
             ced.global_mode(id, outputs.start, outputs.len()).unwrap(),
             GlobalKvMode::ReusePublished
         );
+        let progress = ced.ced_public_decoder_progress();
         metal::dispatch_census_begin();
         execute(&ctx, |enc| {
             ced.encode_rows(
@@ -624,10 +654,29 @@ fn ced_owner_rows_reuse_preserves_published_cache_with_ordinary_batch_control() 
                 &rows,
             )
             .unwrap();
+            assert_eq!(ced.ced_pending_encoding(), Some((true, false)));
+            assert_eq!(ced.ced_public_decoder_progress(), progress);
             ced.finish_rows(&ctx, enc, &weights[id], &rows, &output)
                 .unwrap();
         });
         let census = metal::dispatch_census_take();
+        launches.push(format!("{census:?}"));
+        snapshots.extend([
+            bits(&output),
+            bits(&rows.query),
+            ids(&rows.selected, outputs.len() * c.index_topk)
+                .into_iter()
+                .map(|v| v as u32)
+                .collect(),
+            ids(
+                &rows.candidates,
+                outputs.len() * capacity.div_ceil(c.candidate_block),
+            )
+            .into_iter()
+            .map(|v| v as u32)
+            .collect(),
+            bits(&ced.raw),
+        ]);
         assert_eq!(
             owner_bits(&ced),
             published,
@@ -643,6 +692,7 @@ fn ced_owner_rows_reuse_preserves_published_cache_with_ordinary_batch_control() 
     }
     ced.commit_ced(n).unwrap();
     ced.validate_snapshot_position(n).unwrap();
+    (snapshots, launches)
 }
 
 #[test]

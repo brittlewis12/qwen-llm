@@ -4807,5 +4807,75 @@
     "class": "gpu",
     "ignored": false,
     "reason": "Metal context, allocation or dispatch witness; parent GPU lane only."
+  },
+  {
+    "target": "lib",
+    "name": "deepseek_v41::forward::attention_gpu::ced::tests::pending_ranges_encode_without_finishing_coverage_completion_or_group_readiness",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Host-only checked range/cursor, command eligibility, scoped override, pending CED lifecycle or conservative fixture price; no Metal context or execution."
+  },
+  {
+    "target": "lib",
+    "name": "deepseek_v41::forward::attention_gpu::query_batch::range_tests::cursor_range_matches_repeated_rows_partial_exact_and_final",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Host-only checked range/cursor, command eligibility, scoped override, pending CED lifecycle or conservative fixture price; no Metal context or execution."
+  },
+  {
+    "target": "lib",
+    "name": "deepseek_v41::forward::attention_gpu::query_batch::range_tests::cursor_range_refusals_are_atomic",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Host-only checked range/cursor, command eligibility, scoped override, pending CED lifecycle or conservative fixture price; no Metal context or execution."
+  },
+  {
+    "target": "lib",
+    "name": "deepseek_v41::forward::attention_gpu::query_batch::range_tests::old_host_override_is_nested_panic_safe_and_thread_local",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Host-only checked range/cursor, command eligibility, scoped override, pending CED lifecycle or conservative fixture price; no Metal context or execution."
+  },
+  {
+    "target": "lib",
+    "name": "deepseek_v41::forward::attention_gpu::query_batch::range_tests::prepared_range_eligibility_preserves_publication_and_selection_fallbacks",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Host-only checked range/cursor, command eligibility, scoped override, pending CED lifecycle or conservative fixture price; no Metal context or execution."
+  },
+  {
+    "target": "lib",
+    "name": "deepseek_v41::forward::attention_gpu::query_batch::range_tests::ratio_head_body_tail_cursor_parity",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Host-only checked range/cursor, command eligibility, scoped override, pending CED lifecycle or conservative fixture price; no Metal context or execution."
+  },
+  {
+    "target": "lib",
+    "name": "deepseek_v41::forward::attention_gpu::tests::query_batch::range_execution::host_discovery_geometry_and_conservative_peak_fit_four_gib",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Host-only checked range/cursor, command eligibility, scoped override, pending CED lifecycle or conservative fixture price; no Metal context or execution."
+  },
+  {
+    "target": "lib",
+    "name": "deepseek_v41::forward::attention_gpu::tests::query_batch::range_execution::prepared_serial_host_encoding_discovery",
+    "class": "timing",
+    "ignored": true,
+    "reason": "Self-leased opt3 test-profile HOST discovery on current local Metal device, <=4 GiB CPU+Metal; no submission/commit/GPU execution or model; synthetic prepared zero payload; chronological AB/ABBA/BAAB complete serial API durations, not release/GPU qualification."
+  },
+  {
+    "target": "lib",
+    "name": "deepseek_v41::forward::attention_gpu::tests::query_batch::range_execution::prepared_serial_range_old_host_bitexact_outputs_controls_pending_and_census",
+    "class": "gpu",
+    "ignored": true,
+    "reason": "Self-leased <=256 MiB BF16 head512/index128 old-host vs range bitwise outputs, controls, pending owner state, bindings, cursors and ordered census; debug validation; no model."
+  },
+  {
+    "target": "lib",
+    "name": "deepseek_v41::forward::attention_gpu::ced::tests::pending_checked_ranges_match_rows_and_refuse_after_end_atomically",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Exact Pending/BatchCursor host-only partial/exact range-vs-row encoding, encoder publication gating and atomic refusal after end; no Metal context or execution."
   }
 ]

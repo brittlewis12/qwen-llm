@@ -34,6 +34,170 @@ fn encoded(cursor: &mut Cursor, publication: bool) {
 }
 
 #[test]
+fn pending_checked_ranges_match_rows_and_refuse_after_end_atomically() {
+    let make = || Pending {
+        phase: Phase::Decoder(2),
+        range: 4..7,
+        encoded_seed_prefix: None,
+        batch: Some(BatchCursor {
+            start: 4,
+            rows: 3,
+            layer: 2,
+            row: 0,
+        }),
+        end_layer: 3,
+        encoded: false,
+        finished: std::cell::Cell::new(false),
+        controls: None,
+    };
+    let mut range = make();
+    let mut scalar = make();
+    for (position, count) in [(4, 1), (5, 2)] {
+        range.advance_attention(2, position, count).unwrap();
+        for p in position..position + count {
+            scalar.advance_attention(2, p, 1).unwrap();
+        }
+        assert_eq!(range.batch, scalar.batch);
+        assert_eq!(range.encoded, scalar.encoded);
+        assert!(!range.finished.get() && range.controls.is_none());
+    }
+    assert!(range.encoded);
+    let done = range.batch;
+    for (id, position, count) in [
+        (3, 4, 1),
+        (3, 4, 3),
+        (2, 4, 1),
+        (3, 4, 0),
+        (3, 4, usize::MAX),
+    ] {
+        assert!(range.advance_attention(id, position, count).is_err());
+        assert_eq!(range.batch, done);
+        assert!(range.encoded && !range.finished.get());
+    }
+    let mut encoder = make();
+    encoder.phase = Phase::Encoder;
+    encoder.end_layer = 4;
+    for id in 2..4 {
+        encoder.advance_attention(id, 4, 3).unwrap();
+        assert!(!encoder.encoded && !encoder.finished.get());
+    }
+}
+
+#[test]
+fn pending_ranges_encode_without_finishing_coverage_completion_or_group_readiness() {
+    let (c, schedule, plan) = fixture(9);
+    let mut cursor = Cursor::new(&plan, &c, &schedule, 10).unwrap();
+    cursor.begin_encoder(0, 9).unwrap();
+    for id in 0..plan.publication_layer {
+        cursor
+            .pending
+            .as_mut()
+            .unwrap()
+            .advance_attention(id, 0, 9)
+            .unwrap();
+    }
+    assert!(!cursor.pending.as_ref().unwrap().encoded);
+    assert!(cursor.complete(Phase::Encoder, 0, 9).is_err());
+    assert_eq!(
+        (cursor.encoder_completed, cursor.publication_completed),
+        (0, 0)
+    );
+    encoded(&mut cursor, true);
+    cursor.complete(Phase::Encoder, 0, 9).unwrap();
+    let ticket = cursor.begin_group(2..4).unwrap();
+    let coverage = Arc::new(Mutex::new(Coverage {
+        origin: plan.candidate_rows.start,
+        selected: vec![None; plan.candidate_rows.len()],
+        candidates: vec![None; plan.candidate_rows.len()],
+    }));
+    cursor.group.as_mut().unwrap().coverage = Some(coverage.clone());
+    let d = &plan.decoder[0];
+    cursor
+        .begin_seed(d.layer, d.seed_rows.start, d.seed_rows.len())
+        .unwrap();
+    encoded(&mut cursor, false);
+    cursor
+        .stage_group_unit(ticket, d.layer, d.seed_rows.start, d.seed_rows.len(), true)
+        .unwrap();
+    cursor
+        .begin_decoder(d.layer, d.output_rows.start, d.output_rows.len())
+        .unwrap();
+    let before = (
+        cursor.decoder_next,
+        cursor.output_completed.clone(),
+        cursor.seed_completed.clone(),
+    );
+    let p = cursor.pending.as_mut().unwrap();
+    let original = p.batch;
+    for (id, start, count) in [
+        (d.layer + 1, d.output_rows.start, 1),
+        (d.layer, d.output_rows.start + 1, 1),
+        (d.layer, d.output_rows.start, 0),
+        (d.layer, d.output_rows.start, usize::MAX),
+    ] {
+        assert!(p.advance_attention(id, start, count).is_err());
+        assert_eq!(p.batch, original);
+        assert!(!p.encoded && !p.finished.get());
+    }
+    p.advance_attention(d.layer, d.output_rows.start, 1)
+        .unwrap();
+    assert!(!p.encoded);
+    p.advance_attention(d.layer, d.output_rows.start + 1, d.output_rows.len() - 1)
+        .unwrap();
+    assert!(p.encoded && !p.finished.get() && p.controls.is_none());
+    let end = p.batch;
+    assert!(
+        p.advance_attention(d.layer + 1, d.output_rows.start, 1)
+            .is_err()
+    );
+    assert_eq!(p.batch, end);
+    assert!(p.encoded && !p.finished.get());
+    assert!(
+        cursor
+            .complete(
+                Phase::Decoder(d.layer),
+                d.output_rows.start,
+                d.output_rows.len()
+            )
+            .is_err()
+    );
+    assert!(
+        cursor
+            .stage_group_unit(
+                ticket,
+                d.layer,
+                d.output_rows.start,
+                d.output_rows.len(),
+                false
+            )
+            .is_err()
+    );
+    assert!(cursor.validate_group(ticket, &(2..4)).is_err());
+    assert_eq!(
+        (
+            cursor.decoder_next,
+            cursor.output_completed.clone(),
+            cursor.seed_completed.clone()
+        ),
+        before
+    );
+    assert_eq!(cursor.group.as_ref().unwrap().units.len(), 1);
+    assert!(Arc::ptr_eq(
+        cursor.group.as_ref().unwrap().coverage.as_ref().unwrap(),
+        &coverage
+    ));
+    let coverage = coverage.lock().unwrap();
+    assert!(
+        coverage
+            .selected
+            .iter()
+            .chain(&coverage.candidates)
+            .all(Option::is_none)
+    );
+    assert!(!cursor.ready(9));
+}
+
+#[test]
 fn decoder_group_keeps_public_frontiers_atomic_and_rejects_bad_tickets_before_mutation() {
     let (c, schedule, plan) = fixture(9);
     let mut cursor = Cursor::new(&plan, &c, &schedule, 10).unwrap();

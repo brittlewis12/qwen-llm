@@ -4,6 +4,9 @@ use super::*;
 #[path = "query_batch/selection_hier.rs"]
 mod selection_hier;
 
+#[path = "query_batch/range_execution.rs"]
+mod range_execution;
+
 pub(super) fn config() -> Config {
     Config {
         hidden: 32,

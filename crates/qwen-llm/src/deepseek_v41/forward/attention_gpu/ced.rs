@@ -403,6 +403,23 @@ struct Pending {
     controls: Option<QueryControlView>,
 }
 
+impl Pending {
+    fn advance_attention(&mut self, id: usize, position: usize, count: usize) -> Result<()> {
+        op::require(id < self.end_layer, "CED encoded past layer range")?;
+        let next = self
+            .batch
+            .as_ref()
+            .ok_or("CED intent has no attention")?
+            .advanced(id, position, count)?;
+        op::require(next.layer <= self.end_layer, "CED encoded past layer range")?;
+        self.batch = Some(next);
+        if matches!(self.phase, Phase::Decoder(_)) && next.layer == self.end_layer {
+            self.encoded = true;
+        }
+        Ok(())
+    }
+}
+
 pub(super) struct Cursor {
     plan: CedPlan,
     encoder_completed: usize,
@@ -821,6 +838,12 @@ impl Cursor {
 
 impl Workspace {
     #[cfg(test)]
+    pub(in super::super) fn ced_pending_encoding(&self) -> Option<(bool, bool)> {
+        let p = self.ced.as_ref()?.pending.as_ref()?;
+        Some((p.encoded, p.finished.get()))
+    }
+
+    #[cfg(test)]
     pub(in super::super) fn ced_public_decoder_progress(
         &self,
     ) -> Option<(usize, Vec<usize>, Vec<usize>)> {
@@ -1146,22 +1169,46 @@ impl Workspace {
     }
 
     pub(super) fn advance_ced_row(&mut self) -> Result<()> {
+        let b = self.active_batch().ok_or("CED intent has no attention")?;
+        let position = b.start.checked_add(b.row).ok_or("CED row overflow")?;
+        self.advance_prepared_range(b.layer, position, 1)
+    }
+
+    pub(super) fn advance_prepared_range(
+        &mut self,
+        id: usize,
+        position: usize,
+        count: usize,
+    ) -> Result<()> {
+        if self.ced.is_none() {
+            op::require(id < self.schedule.layers, "attention encoded past layers")?;
+            let next = self
+                .batch
+                .as_ref()
+                .ok_or("attention batch missing")?
+                .advanced(id, position, count)?;
+            op::require(
+                next.layer <= self.schedule.layers,
+                "attention encoded past layers",
+            )?;
+            if next.layer == self.schedule.layers {
+                self.next_position = next
+                    .start
+                    .checked_add(next.rows)
+                    .ok_or("attention batch overflow")?;
+                self.next_layer = 0;
+                self.batch = None;
+            } else {
+                self.batch = Some(next);
+            }
+            return Ok(());
+        }
         let p = self
             .ced
             .as_mut()
             .and_then(|c| c.pending.as_mut())
             .ok_or("CED attention intent missing")?;
-        let b = p.batch.as_mut().ok_or("CED intent has no attention")?;
-        b.row += 1;
-        if b.row == b.rows {
-            b.row = 0;
-            b.layer += 1;
-        }
-        op::require(b.layer <= p.end_layer, "CED encoded past layer range")?;
-        if matches!(p.phase, Phase::Decoder(_)) && b.layer == p.end_layer {
-            p.encoded = true;
-        }
-        Ok(())
+        p.advance_attention(id, position, count)
     }
 
     pub(super) fn bind_ced_rows(&mut self, id: usize, start: usize, rows: &Rows) -> Result<()> {

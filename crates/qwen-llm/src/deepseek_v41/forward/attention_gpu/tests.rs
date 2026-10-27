@@ -1172,6 +1172,90 @@ fn native_index_32_heads_128_dim_signed_weights() {
 }
 
 #[test]
+fn index_scores_tensor_matches_index_heads_rows() {
+    let ctx = MetalContext::new().unwrap();
+    if !metal::moe_grouped_tensor_selected(&ctx) {
+        eprintln!("tensor tier unavailable: {:?}", ctx.tensor_ops_status());
+        return;
+    }
+    let (rows, heads, dim, length, stride) = (4usize, 32usize, 128usize, 260usize, 260usize);
+    let (start, ratio, topk, last_length, first) = (254usize, 1usize, 2usize, 260usize, 0usize);
+    let make = |n: usize, seed: usize| {
+        (0..n)
+            .map(|i| ((i * 17 + seed) % 61) as f32 / 64.0 - 0.46875)
+            .collect::<Vec<_>>()
+    };
+    let q = make(rows * heads * dim, 3);
+    let weights = make(rows * heads, 5);
+    let keys = make(length * dim, 7);
+    let q_t = upload(&ctx, &q, vec![(rows * heads * dim) as u64]).unwrap();
+    let w_t = upload(&ctx, &weights, vec![(rows * heads) as u64]).unwrap();
+    let k_t = upload(&ctx, &keys, vec![(length * dim) as u64]).unwrap();
+    let old = tensor(&ctx, rows * stride, GgmlType::F32).unwrap();
+    let new = tensor(&ctx, rows * stride, GgmlType::F32).unwrap();
+    let bind = |enc: &KernelEncoder, out: &MetalTensor| {
+        enc.set_bytes(
+            0,
+            &[start as u32, ratio as u32, topk as u32, last_length as u32],
+        );
+        enc.set_bytes(
+            1,
+            &[dim as u32, heads as u32, (heads * dim) as u32, heads as u32],
+        );
+        enc.set_bytes(2, &[stride as u32, rows as u32, 0, 0]);
+        enc.set_tensor(3, &q_t);
+        enc.set_tensor(4, &w_t);
+        enc.set_tensor(5, &k_t);
+        enc.set_tensor(6, out);
+        enc.set_bytes(7, &(first as u32));
+    };
+    execute(&ctx, |enc| {
+        pipeline(&ctx, enc, "index_heads_rows").unwrap();
+        bind(enc, &old);
+        enc.dispatch(
+            MTLSize {
+                width: last_length.div_ceil(8),
+                height: rows,
+                depth: 1,
+            },
+            MTLSize {
+                width: 256,
+                height: 1,
+                depth: 1,
+            },
+        );
+    });
+    execute(&ctx, |enc| {
+        tensor_pipeline(&ctx, enc, "index_scores_tensor").unwrap();
+        bind(enc, &new);
+        enc.dispatch(
+            MTLSize {
+                width: 1,
+                height: rows,
+                depth: 1,
+            },
+            MTLSize {
+                width: 128,
+                height: 1,
+                depth: 1,
+            },
+        );
+    });
+    let before = f32_slice(&old).unwrap();
+    let after = f32_slice(&new).unwrap();
+    for row in 0..rows {
+        let n = (start + row + 1) / ratio;
+        for t in 0..n {
+            let (a, b) = (before[row * stride + t], after[row * stride + t]);
+            assert!(
+                (a - b).abs() <= 2e-3 + 2e-3 * a.abs(),
+                "row {row} key {t}: {a} != {b}"
+            );
+        }
+    }
+}
+
+#[test]
 fn split_sink_real_geometry_same_run_witness() {
     let ctx = MetalContext::new().unwrap();
     let (heads, dim, window, k, stride) = (64usize, 512usize, 128usize, 512usize, 641usize);

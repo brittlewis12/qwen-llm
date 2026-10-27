@@ -386,3 +386,78 @@ kernel void kernel_deepseek_v41_attention_pv_tensor64(
         threadgroup_barrier(mem_flags::mem_threadgroup);
     }
 }
+
+// Batched index scores: one row x 64 keys per threadgroup. q [32 heads x 128]
+// and the shared key tile are staged as half, one 32x64x128 tensor matmul
+// produces the per-head dots, and the relu/weight head sum writes the same F32
+// score layout as `index_heads_rows`. The selection sort is unchanged.
+#define V41_IDX_HEADS 32
+#define V41_IDX_DIM 128
+#define V41_IDX_KEYS 64
+
+kernel void kernel_deepseek_v41_attention_index_scores_tensor(
+    constant uint4 &a [[buffer(0)]], constant uint4 &b [[buffer(1)]],
+    constant uint4 &c [[buffer(2)]], device const float *q [[buffer(3)]],
+    device const float *weights [[buffer(4)]], device const float *keys [[buffer(5)]],
+    device float *scores [[buffer(6)]], constant uint &row0 [[buffer(7)]],
+    uint2 group [[threadgroup_position_in_grid]],
+    uint tid [[thread_index_in_threadgroup]]) {
+    threadgroup half qblk[V41_IDX_HEADS * V41_IDX_DIM];
+    threadgroup half kblk[V41_IDX_KEYS * V41_IDX_DIM];
+    threadgroup float sblk[V41_IDX_KEYS * V41_IDX_HEADS];
+    const uint local = group.y;
+    if (local >= c.y) return;
+    const uint row = row0 + local;
+    const uint length = (a.x + row + 1) / a.y;
+    if (length <= a.z) return;
+    device const float *qrow = q + (ulong)row * b.z;
+    device const float *wrow = weights + (ulong)row * b.w;
+    device float *srow = scores + (ulong)local * c.x;
+
+    for (uint e = tid; e < V41_IDX_HEADS * V41_IDX_DIM / 4; e += 128) {
+        const uint h = e / (V41_IDX_DIM / 4), c4 = e % (V41_IDX_DIM / 4);
+        const float4 v = ((device const float4 *)(qrow + h * V41_IDX_DIM))[c4];
+        ((threadgroup half4 *)qblk)[e] = half4(v);
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+
+    constexpr auto desc = tensor_ops::matmul2d_descriptor(
+        V41_IDX_HEADS, V41_IDX_KEYS, V41_IDX_DIM, false, true, false,
+        tensor_ops::matmul2d_descriptor::mode::multiply);
+    tensor_ops::matmul2d<desc, execution_simdgroups<4>> op;
+    using q_t = tensor<threadgroup half, extents<int, V41_IDX_DIM, V41_IDX_HEADS>, tensor_inline>;
+    using k_t = tensor<threadgroup half, extents<int, V41_IDX_DIM, V41_IDX_KEYS>, tensor_inline>;
+    using s_t = tensor<threadgroup float, extents<int, V41_IDX_KEYS, V41_IDX_HEADS>, tensor_inline>;
+    q_t qt(qblk, extents<int, V41_IDX_DIM, V41_IDX_HEADS>(),
+           array<int, 2>{1, int(V41_IDX_DIM)});
+    k_t kt(kblk, extents<int, V41_IDX_DIM, V41_IDX_KEYS>());
+    s_t st(sblk, extents<int, V41_IDX_KEYS, V41_IDX_HEADS>());
+    auto acc = op.get_destination_cooperative_tensor<q_t, k_t, float>();
+    const float scale = rsqrt(float(b.x)) * rsqrt(float(b.y));
+
+    for (uint k0 = 0; k0 < length; k0 += V41_IDX_KEYS) {
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+        for (uint e = tid; e < V41_IDX_KEYS * V41_IDX_DIM / 4; e += 128) {
+            const uint key = e / (V41_IDX_DIM / 4), c4 = e % (V41_IDX_DIM / 4);
+            const uint t = k0 + key;
+            float4 v = float4(0.0f);
+            if (t < length) v = ((device const float4 *)(keys + (ulong)t * b.x))[c4];
+            ((threadgroup half4 *)kblk)[e] = half4(v);
+        }
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+        op.run(qt, kt, acc);
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+        acc.store(st);
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+        for (uint key = tid; key < V41_IDX_KEYS; key += 128) {
+            const uint t = k0 + key;
+            if (t >= length) break;
+            float score = 0.0f;
+            for (uint h = 0; h < V41_IDX_HEADS; ++h) {
+                const float dot = sblk[key + h * V41_IDX_KEYS];
+                score += max(dot, 0.0f) * (wrow[h] * scale);
+            }
+            srow[t] = score;
+        }
+    }
+}

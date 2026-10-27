@@ -254,6 +254,12 @@ crate::env_flag!(
     "QWEN_V41_COMPRESS_ROWS"
 );
 
+crate::env_flag!(
+    /// Routes wide index-score rows through the Metal 4 tensor tile; disabling restores the scalar/simd index kernel for a same-binary A/B.
+    default_on index_tensor_enabled,
+    "QWEN_V41_INDEX_TENSOR"
+);
+
 /// The cold Full prefill tile containing an absolute query position. Tiles
 /// restart at each original chunk, even when the width does not divide it.
 fn original_query_tile(
@@ -810,7 +816,15 @@ impl Workspace {
             );
         }
         if last_length > c.index_topk {
-            pipeline(ctx, enc, "index_heads_rows")?;
+            let tensor_index = c.index_heads == 32
+                && c.index_dim == 128
+                && metal::moe_grouped_tensor_selected(ctx)
+                && index_tensor_enabled();
+            if tensor_index {
+                tensor_pipeline(ctx, enc, "index_scores_tensor")?;
+            } else {
+                pipeline(ctx, enc, "index_heads_rows")?;
+            }
             enc.set_bytes(
                 0,
                 &[
@@ -837,12 +851,16 @@ impl Workspace {
             enc.set_bytes(7, &(first as u32));
             enc.dispatch(
                 MTLSize {
-                    width: last_length.div_ceil(8),
+                    width: if tensor_index {
+                        1
+                    } else {
+                        last_length.div_ceil(8)
+                    },
                     height: n,
                     depth: 1,
                 },
                 MTLSize {
-                    width: 256,
+                    width: if tensor_index { 128 } else { 256 },
                     height: 1,
                     depth: 1,
                 },

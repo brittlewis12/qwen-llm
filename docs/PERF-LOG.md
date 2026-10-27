@@ -6,6 +6,31 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the current state and evidence index.
 
+## 2026-10-27 - V4.1 CED 8K 1,663 tok/s: No Host Zero Pass on Fresh Buffers
+
+- Host wall spans in the prefill stage profile showed an 8K CED call spending
+  ~1.3 s of 5.3 s on the host with the GPU idle (GPU 4.01 s): block-rows
+  allocation 409 ms, Engram rows 320 ms, embeddings/uploads ~110 ms, encode
+  ~230 ms, plus commit-to-completion gaps. Full: ~0.73 s of 7.9 s (encode
+  246, host prepare 268, scratch 217).
+- The allocation time was `zeros_dtype_unstaged` writing zeros over every
+  fresh shared buffer from one CPU thread. Metal documents
+  `newBufferWithLength:options:` as zero-filled, so the helper no longer
+  writes the pages again (same bytes). `QWEN_METAL_ZERO_FILL=host` restores
+  the host pass.
+- In-binary D H H D (r58), no cooldown between arms: CED pp8192
+  1,618.7/1,615.1 vs 1,425.6/1,423.6 tok/s (**+13.5%**), pp2048 1,013.0/1,026.2
+  vs 803.0/792.4 (**+27.8%**); Full pp8192 1,097.4/1,095.1 vs 1,073.6/1,072.9
+  (+2.1%), pp2048 1,048.0/1,043.4 vs 1,005.8/1,002.7 (+4.2%). GPU time is
+  unchanged (r57 stage profiles).
+- 8K Full/CED pair on the default build (production timing,
+  full-blocks-first, 4 retained calls): Full 1,095.4, **CED 1,662.9** tok/s,
+  every endpoint bitwise equal to warm Full.
+- Negative: reading batched Engram rows on the rayon pool made Engram prepare
+  2.7x slower (241 -> 673 ms Full, 322 -> 752 ms CED); concurrent `pread`s on
+  one shard descriptor contend. Not landed.
+- Raw: `metagross:~/qwen-runs/2026-10-26-decode-twk3/` r55-r58.
+
 ## 2026-10-27 - V4.1 Prefill +4.7-5.3%: Parallel Route Bucket, Fused mHC Rows
 
 - On main 18a5c467 plus these commits the 8K Full/CED pair (production

@@ -6,6 +6,22 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the current state and evidence index.
 
+## 2026-10-27 - V4.1 Full/CED Pair Passes 8K: CED 1,437 tok/s
+
+- Two independent parity failures fixed. Batched owner publication ran during
+  CED's `ReusePublished` layer-20 replay and rewrote completed cache rows; gate
+  the batch on `GlobalKvMode::Ordinary` and batch CED's dedicated publication
+  too (`73e684a6`). The dedicated Q5_K matmat is cosine-gated, not bitwise, and
+  Full/CED take different kernels as replay chunks shrink; make it opt-in again
+  (`3a8d9fe2`), restoring the generic Q5_K dense tile for every row count.
+- 8K pair, P0 production timing, `full-blocks-first`, four retained samples per
+  policy: Full 1,020.74 tok/s (stddev 0.58), CED 1,437.15 tok/s (stddev 4.23),
+  **+40.8%**, all 14 endpoint hashes `04267cbd...` identical, clean build.
+- CED is not the default and this is not a sustained campaign. The Q5_K +2.54%
+  dedicated-tile result stands as a measurement but is not in the default path.
+- [Packet](bench/2026-10-27-v41-ced-pair-guard.md). Raw:
+  `metagross:~/qwen-runs/2026-10-27-v41-ced-guard/`.
+
 ## 2026-10-26 - V4.1 Prefill +2.5%: Dedicated Q5_K Tensor Tile
 
 - V4.1 prefill already used a dense tensor route for Q5_K but only its

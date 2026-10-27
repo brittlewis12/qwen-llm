@@ -17,8 +17,11 @@ See also: `docs/PERF-ROADMAP.md` for the current state and evidence index.
 - 8K pair, P0 production timing, `full-blocks-first`, four retained samples per
   policy: Full 1,020.74 tok/s (stddev 0.58), CED 1,437.15 tok/s (stddev 4.23),
   **+40.8%**, all 14 endpoint hashes `04267cbd...` identical, clean build.
-- CED is not the default and this is not a sustained campaign. The Q5_K +2.54%
-  dedicated-tile result stands as a measurement but is not in the default path.
+- Sustained `F C C F`, two runs per arm, 180 s apart: Full 1,022.51/1,022.97 and
+  CED 1,367.72/1,370.24 tok/s, **+33.9%**; the pair CED is a 5.0% warm-state
+  upper bound, not the sustained rate.
+- CED is not the default. The Q5_K +2.54% dedicated-tile result stands as a
+  measurement but is not in the default path.
 - [Packet](bench/2026-10-27-v41-ced-pair-guard.md). Raw:
   `metagross:~/qwen-runs/2026-10-27-v41-ced-guard/`.
 

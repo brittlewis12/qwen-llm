@@ -7,11 +7,12 @@ Raw: `metagross:~/qwen-runs/2026-10-27-v41-ced-guard/`.
 
 ## Decision
 
-The 8K Full/CED pair passes with bitwise-identical endpoints. CED is
-**1,437.15 tok/s** against Full **1,020.74 tok/s** (+40.8%) on the same binary,
-lease, prompt and capacity. This qualifies the pair arithmetic; CED remains
-opt-in, and the dedicated Q5_K matmat remains opt-in. It does not qualify CED
-as the product default or a sustained campaign result.
+The 8K Full/CED pair passes with bitwise-identical endpoints. In the paired
+same-process measurement CED is **1,437.15 tok/s** against Full **1,020.74
+tok/s** (+40.8%). A separate-process campaign with 180 s inter-arm cooldowns
+gives Full **1,022.74** and CED **1,368.98** tok/s (+33.9%), both stable. The
+pair qualifies the arithmetic; the campaign is the sustained estimate. CED
+remains opt-in, and the dedicated Q5_K matmat remains opt-in.
 
 ## Two Independent Mismatches
 
@@ -69,12 +70,25 @@ Build identity is clean (`build_dirty=0`). The 8K pair completes 12 CED
 commands, 163,840 encoder output rows, 8,192 publication rows, 24,150 decoder
 output rows and 2,540 seed rows with no fallback.
 
+Sustained campaign (`F C C F`, two runs per arm, 180 s between arms):
+
+| arm | samples (tok/s) | mean |
+| --- | --- | ---: |
+| Full | 1,022.93, 1,022.09 | 1,022.51 |
+| CED | 1,370.94, 1,364.50 | 1,367.72 |
+| CED | 1,369.03, 1,371.46 | 1,370.24 |
+| Full | 1,023.09, 1,022.85 | 1,022.97 |
+
+The pair's CED arm is 5.0% above the separate-process mean; the campaign is
+the sustained number. Both CED arms and both Full arms agree within 0.3%.
+
 ## Limits
 
 The pair protocol runs Full before CED with fresh state per call. Its order
-puts any thermal bias against CED, but it is not the 180 s-cooldown sustained
-campaign and is not a new sustained-throughput claim. The endpoint gate is one
-prompt and one artifact, not a quality sweep or a teacher-forced continuation.
-CED is still opt-in; Full remains the default. The Q5_K dedicated tile needs a
-raw bitwise witness against the generic Q5_K tensor path before it can be
-defaulted again.
+puts any thermal bias against CED, yet its CED arm is 5.0% above the
+separate-process campaign; the sustained claim uses the campaign. The endpoint
+gate is one prompt and one artifact, not a quality sweep or a teacher-forced
+continuation. CED is still opt-in; Full remains the default. The Q5_K
+dedicated tile needs a raw bitwise witness against the generic Q5_K tensor
+path before it can be defaulted again. The 1,702 tok/s bar is 24.3% above the
+sustained CED rate and 18.4% above the warm-pair rate.

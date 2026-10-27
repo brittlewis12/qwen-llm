@@ -763,6 +763,45 @@ pub(super) fn row(t: &MetalTensor, width: usize, row: usize) -> MetalTensor {
     t.view_subrange((row * width) as u64, vec![width as u64])
 }
 
+/// `split` keeps the prefill mHC pre projection (scalar F32 grouped kernel)
+/// and the projected RMS as two passes over the residual; otherwise the F32
+/// [4*hidden -> 24] projection reads each row once per threadgroup and folds
+/// the projected RMS (`kernel_deepseek_v41_hc_projection_rows`; A/B lever).
+const HC_ROWS_ENV: &str = "QWEN_V41_HC_ROWS";
+
+#[cfg(test)]
+thread_local! {
+    pub(super) static HC_ROWS_FUSED_OVERRIDE: std::cell::Cell<Option<bool>> =
+        const { std::cell::Cell::new(None) };
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+struct HcProjRowsArgs {
+    rows: u32,
+    k: u32,
+    eps: f32,
+}
+
+fn hc_projection_rows_fused(projection: &Linear<'_>, c: &Config, x: &MetalTensor) -> bool {
+    #[cfg(test)]
+    let forced = HC_ROWS_FUSED_OVERRIDE.with(|o| o.get());
+    #[cfg(not(test))]
+    let forced: Option<bool> = None;
+    let enabled = forced.unwrap_or_else(|| {
+        static FUSED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+        *FUSED.get_or_init(|| std::env::var(HC_ROWS_ENV).as_deref() != Ok("split"))
+    });
+    enabled
+        && projection.tensor.dtype == GgmlType::F32
+        && projection.output == 24
+        && projection.input == 4 * c.hidden
+        && projection.input.is_multiple_of(16)
+        && projection.tensor.offset.is_multiple_of(16)
+        && x.dtype == GgmlType::F32
+        && x.offset.is_multiple_of(16)
+}
+
 pub(super) struct HcRows {
     pub(super) rows: usize,
     prefix_view: bool,
@@ -847,24 +886,52 @@ impl HcRows {
         incoming: &MetalTensor,
         arithmetic: RowsArithmetic,
     ) -> std::result::Result<(), metal::MetalError> {
-        projection.encode_rows_with_arithmetic(enc, x, &self.raw, self.rows, arithmetic)?;
-        enc.set_pipeline(&ctx.pipeline("kernel_deepseek_v41_projected_rms")?);
-        enc.set_bytes(0, &((4 * c.hidden) as u32));
-        enc.set_bytes(1, &c.norm_eps);
-        enc.set_tensor(2, x);
-        enc.set_tensor(3, &self.raw);
-        enc.dispatch(
-            objc2_metal::MTLSize {
-                width: self.rows,
-                height: 1,
-                depth: 1,
-            },
-            objc2_metal::MTLSize {
-                width: 256,
-                height: 1,
-                depth: 1,
-            },
-        );
+        if hc_projection_rows_fused(projection, c, x) {
+            // One pass over the residual: projection + projected RMS.
+            enc.set_pipeline(&ctx.pipeline("kernel_deepseek_v41_hc_projection_rows")?);
+            enc.set_bytes(
+                0,
+                &HcProjRowsArgs {
+                    rows: self.rows as u32,
+                    k: (4 * c.hidden) as u32,
+                    eps: c.norm_eps,
+                },
+            );
+            enc.set_tensor(1, &projection.tensor);
+            enc.set_tensor(2, x);
+            enc.set_tensor(3, &self.raw);
+            enc.dispatch(
+                objc2_metal::MTLSize {
+                    width: self.rows.div_ceil(4),
+                    height: 1,
+                    depth: 1,
+                },
+                objc2_metal::MTLSize {
+                    width: 128,
+                    height: 1,
+                    depth: 1,
+                },
+            );
+        } else {
+            projection.encode_rows_with_arithmetic(enc, x, &self.raw, self.rows, arithmetic)?;
+            enc.set_pipeline(&ctx.pipeline("kernel_deepseek_v41_projected_rms")?);
+            enc.set_bytes(0, &((4 * c.hidden) as u32));
+            enc.set_bytes(1, &c.norm_eps);
+            enc.set_tensor(2, x);
+            enc.set_tensor(3, &self.raw);
+            enc.dispatch(
+                objc2_metal::MTLSize {
+                    width: self.rows,
+                    height: 1,
+                    depth: 1,
+                },
+                objc2_metal::MTLSize {
+                    width: 256,
+                    height: 1,
+                    depth: 1,
+                },
+            );
+        }
         metal::encode_mhc4_controls_rows(
             ctx,
             enc,

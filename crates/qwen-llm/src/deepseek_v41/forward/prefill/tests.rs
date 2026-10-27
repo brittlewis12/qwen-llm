@@ -1,6 +1,7 @@
 use super::*;
 
 mod half_budget;
+mod hc_timing;
 pub(super) mod lifetime;
 mod real;
 

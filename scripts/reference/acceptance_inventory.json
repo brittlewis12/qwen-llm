@@ -2745,6 +2745,20 @@
   },
   {
     "target": "lib",
+    "name": "deepseek_v41::forward::prefill::tests::hc_timing::fused_hc_projection_rows_matches_split_passes",
+    "class": "gpu",
+    "ignored": false,
+    "reason": "Metal context, allocation or dispatch witness; parent GPU lane only."
+  },
+  {
+    "target": "lib",
+    "name": "deepseek_v41::forward::prefill::tests::hc_timing::hc_rows_kernel_timing",
+    "class": "gpu",
+    "ignored": false,
+    "reason": "Metal context, allocation or dispatch witness; parent GPU lane only."
+  },
+  {
+    "target": "lib",
     "name": "deepseek_v41::forward::tests::q8_0_rank_pair_matches_separate_native_projections",
     "class": "gpu",
     "ignored": false,

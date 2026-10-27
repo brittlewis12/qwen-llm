@@ -665,3 +665,71 @@ kernel void kernel_deepseek_v41_sum(
     if (status[row] == 1) for (uint k = 0; k < topk; ++k) sum += slots[(row * topk + k) * hidden + channel];
     out[i] = sum + shared[i];
 }
+
+// Prefill mHC pre projection with the projected RMS folded in. One
+// threadgroup per 4 rows, 128 threads: simdgroup s computes mixing logits
+// 6s..6s+5 for all 4 rows, so each row's residual is read once per
+// threadgroup (the grouped scalar kernel re-read it for every group of four
+// logits). Lanes own 16-element fragments (k = lane * 16 + 512j) with F32
+// FMAs and a simd_sum, the scalar kernel's precision; simdgroup 0 also sums
+// each row's squares, and the 24 logits are scaled by rsqrt(ss / n + eps)
+// (projection before scaling, as kernel_deepseek_v41_projected_rms).
+struct HcProjRowsArgs { uint rows; uint k; float eps; };
+kernel void kernel_deepseek_v41_hc_projection_rows(
+    constant HcProjRowsArgs &a [[buffer(0)]],
+    device const float *weight [[buffer(1)]],   // [24, k]
+    device const float *x [[buffer(2)]],        // [rows, k]
+    device float *mix [[buffer(3)]],            // [rows, 24]
+    uint group [[threadgroup_position_in_grid]],
+    uint sg [[simdgroup_index_in_threadgroup]], uint lane [[thread_index_in_simdgroup]]) {
+    threadgroup float scale[4];
+    const uint row0 = group * 4;
+    float sums[4][6];
+    float ss[4];
+    for (uint t = 0; t < 4; ++t) {
+        ss[t] = 0.0f;
+        for (uint o = 0; o < 6; ++o) sums[t][o] = 0.0f;
+    }
+    for (uint k = lane * 16; k < a.k; k += 512) {
+        float4 xv[4][4];
+        for (uint t = 0; t < 4; ++t) {
+            const bool live = row0 + t < a.rows;
+            device const float4 *src = (device const float4 *)(x + ulong(row0 + t) * a.k + k);
+            for (uint q = 0; q < 4; ++q) xv[t][q] = live ? src[q] : float4(0.0f);
+        }
+        for (uint o = 0; o < 6; ++o) {
+            device const float4 *w = (device const float4 *)(weight + ulong(sg * 6 + o) * a.k + k);
+            const float4 w0 = w[0], w1 = w[1], w2 = w[2], w3 = w[3];
+            for (uint t = 0; t < 4; ++t) {
+                float acc = sums[t][o];
+                acc = fma(w0.x, xv[t][0].x, acc); acc = fma(w0.y, xv[t][0].y, acc);
+                acc = fma(w0.z, xv[t][0].z, acc); acc = fma(w0.w, xv[t][0].w, acc);
+                acc = fma(w1.x, xv[t][1].x, acc); acc = fma(w1.y, xv[t][1].y, acc);
+                acc = fma(w1.z, xv[t][1].z, acc); acc = fma(w1.w, xv[t][1].w, acc);
+                acc = fma(w2.x, xv[t][2].x, acc); acc = fma(w2.y, xv[t][2].y, acc);
+                acc = fma(w2.z, xv[t][2].z, acc); acc = fma(w2.w, xv[t][2].w, acc);
+                acc = fma(w3.x, xv[t][3].x, acc); acc = fma(w3.y, xv[t][3].y, acc);
+                acc = fma(w3.z, xv[t][3].z, acc); acc = fma(w3.w, xv[t][3].w, acc);
+                sums[t][o] = acc;
+            }
+        }
+        if (sg == 0) {
+            for (uint t = 0; t < 4; ++t) {
+                for (uint q = 0; q < 4; ++q) ss[t] += dot(xv[t][q], xv[t][q]);
+            }
+        }
+    }
+    if (sg == 0) {
+        for (uint t = 0; t < 4; ++t) {
+            const float total = simd_sum(ss[t]);
+            if (lane == 0) scale[t] = rsqrt(total / float(a.k) + a.eps);
+        }
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    for (uint t = 0; t < 4; ++t) {
+        for (uint o = 0; o < 6; ++o) {
+            const float value = simd_sum(sums[t][o]);
+            if (lane == 0 && row0 + t < a.rows) mix[ulong(row0 + t) * 24 + sg * 6 + o] = value * scale[t];
+        }
+    }
+}

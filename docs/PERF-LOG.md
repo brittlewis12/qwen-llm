@@ -6,6 +6,42 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the current state and evidence index.
 
+## 2026-10-27 - V4.1 Long Context: 128K Append 2.56x, Decode +37% (Radix Top-K)
+
+- Why long context: a census of 111,553 local agent-log calls (2026-10-13..27)
+  has median prompt 144K tokens (55% > 128K), ~1.3K new tokens and ~309
+  output tokens per call. Measured on main (r62): 1K append 308.6 tok/s at
+  32K and 129.1 at 128K; decode 55.1 and 38.2 (73.5 at depth 0).
+- Cause: index selection leaves the batched unpruned selectors once a
+  producer layer sees more than 16K keys, which is 16K tokens of context on
+  the ratio-1 decoder layers and 32K on ratio-2 layers. Every row then ran a
+  latency-bound scalar index kernel (~650 us per producer layer at 128K) and
+  a bitonic sort of all visible keys (~22 dispatches). At 128K that was 6.65
+  of a 1K append's 8.3 s and ~8 ms of each decode step.
+- Change (`QWEN_V41_SELECT_RADIX=0` restores the old path): exact radix
+  top-k (three digit passes plus ID-ordered compaction; the sort network's
+  order, chronological output) and an F32 index kernel with eight keys per
+  simdgroup (the scalar kernel's operations). Decode uses them per step;
+  long prefill chunks batch scores, per-row candidate-block publication
+  (radix over block maxima) and top-k over row sub-tiles.
+- Results, M5 Ultra GSQ IQ2_XS: 128K 1K append 129.1 -> **330.1** tok/s
+  (2.56x), decode 38.2 -> **52.5** (+37%) (r62 vs r68). In-binary N O O N
+  (r70): 32K append 281 -> 560 tok/s (2.0x; attention serial 2,229 -> 365
+  ms, r71), decode +8%; 2K append +19%, decode +22% (thermal drift visible
+  between the two N arms). 8K Full/CED pair gate passes: Full 1,125.4, CED
+  1,692.5 tok/s.
+- Exactness: radix vs sort selected IDs equal (unit tests over ties, +/-0,
+  Inf, NaN, masks; long-context witness logits bitwise equal given the same
+  scores); batched long selection bitwise equal to per-row.
+- Quality: a new 80K-prefix long-context witness (2 docs x 128 teacher-forced
+  targets) diverges from main in every token because tiny F32 score
+  differences flip near-tie selections; NLL +0.011/+0.009 vs main is inside
+  the noise floor of benign perturbations of one build (-0.028..+0.021,
+  |t| <= 2.1). The half-precision tensor tile for these scores was ~10%
+  faster in decode (57.6 tok/s at 128K) with the same noise-level NLL
+  shift; not used here. The 512-token witness never reaches this path.
+- Raw: `metagross:~/qwen-runs/2026-10-26-decode-twk3/` r62-r71, `lw/`.
+
 ## 2026-10-27 - V4.1 Exact CED Host Ranges: Preliminary +3.2% at 2K, +3.8% at 8K
 
 - Prepared attention spans that emit no GPU commands now advance a validated

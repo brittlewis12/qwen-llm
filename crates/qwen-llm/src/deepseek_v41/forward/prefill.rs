@@ -422,6 +422,12 @@ impl HalfScratch {
     }
 }
 
+crate::env_flag!(
+    /// Routes Q5_K dense rows through the dedicated 64x64 mat_mat tensor tile instead of the generic dense tensor path; default keeps the generic path for a same-binary A/B.
+    default_off q5k_matmat_enabled,
+    "QWEN_V41_Q5K_MATMAT"
+);
+
 impl Linear<'_> {
     /// Eligibility uses logical operand lineage, not just the replay tile size.
     pub(super) fn tensor_rows_selected_with_arithmetic(
@@ -433,6 +439,7 @@ impl Linear<'_> {
         mma && metal::moe_grouped_tensor_selected(self.ctx)
             && metal::moe_grouped_generic_layout(self.tensor.dtype)
                 .is_some_and(|l| self.input.is_multiple_of(l.block_elems))
+            && !(self.tensor.dtype == GgmlType::Q5_K && q5k_matmat_enabled())
     }
 
     pub(super) fn encode_rows(

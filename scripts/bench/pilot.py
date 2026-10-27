@@ -292,9 +292,11 @@ class Session:
         stop_file: Path | None = None,
         cwd: Path | None = None,
         env: dict[str, str] | None = None,
+        pass_fds: Sequence[int] = (),
     ) -> CommandResult:
         """Stream to exclusive files. After bounded INT/TERM waits, return even
         if self.child remains alive; keep it for observation, never SIGKILL.
+        Forward only explicit extra descriptors; Popen checks actual openness.
         """
         if self._stopped or (self._started and not self._authorized):
             raise GuardStopped("session stopped or pilot not authorized; no launch")
@@ -302,6 +304,11 @@ class Session:
             raise ValueError("finite positive timeout_s required")
         if isinstance(argv, (str, bytes)) or not argv:
             raise ValueError("argv must be a nonempty argument sequence")
+        pass_fds = tuple(pass_fds)
+        if any(type(fd) is not int or fd < 3 for fd in pass_fds) or len(
+            set(pass_fds)
+        ) != len(pass_fds):
+            raise ValueError("pass_fds must contain unique plain-int descriptors >= 3")
         self._stopped = True
         pilot = not self._started
         self._started = True
@@ -331,6 +338,7 @@ class Session:
                     cwd=cwd,
                     env=env,
                     shell=False,
+                    pass_fds=pass_fds,
                 )
             except OSError as error:
                 self._event("spawn_failed", error=str(error))

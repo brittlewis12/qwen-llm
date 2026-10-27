@@ -39,10 +39,14 @@ lease API remains the authority for actual openness, canonical inode, ownership
 and flock validation. Empty, negative, nonnumeric, overflowing or whitespace
 values are refused. Syntax acceptance of 0, 3 or i32::MAX is not descriptor validity.
 `QWEN_METAL_LEASE_WAIT` must remain absent/0 inside the pilot, including adoption.
-For queued work, the outer wrapper waits with WAIT=1 and retains the SAME canonical
-lease across build, CPU, parity, HOST and model phases; launch the model child
-with WAIT=0 and the inherited descriptor retained (Python launchers need
-`pass_fds`). Never release/reacquire between admission and the model. This is
+Build and freeze the canonical release executable before acquiring the Metal
+lease, using separate build exclusion and a dedicated target. CPU inventory can
+also run outside the Metal lease; CPU/offline Metal compilation does not need GPU
+exclusion. For queued qualification, the outer wrapper waits with WAIT=1 and
+retains the SAME canonical Metal lease across DEBUG parity, HOST context and
+model execution; launch the pilot child with WAIT=0 and the inherited descriptor
+retained (`Session.run_command(..., pass_fds=(fd,))` for the Python runner).
+Never release/reacquire between qualification admission and the model. This is
 ordinary exclusion, not a measurement waiver. Reports retain the FD control in
 `stable_controls` and record successful `lease_mode` as `self_acquired` or
 `inherited_adopted`; no inherited lease is labeled self-acquired. The CPU syntax

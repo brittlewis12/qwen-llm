@@ -2,6 +2,7 @@
 
 from dataclasses import FrozenInstanceError, asdict, replace
 import json
+import os
 from pathlib import Path
 import signal
 import subprocess
@@ -332,6 +333,63 @@ class SessionTests(unittest.TestCase):
                 self.session.authorize_repetitions([10, 10])
             spawn.assert_not_called()
 
+    @unittest.skipUnless(sys.platform != "win32", "POSIX descriptors")
+    def test_explicit_pass_fds_child_can_read_pipe(self):
+        read_fd, write_fd = os.pipe()
+        self.addCleanup(os.close, read_fd)
+        self.addCleanup(os.close, write_fd)
+        inheritable = os.get_inheritable(read_fd)
+        os.write(write_fd, b"forwarded")
+        result = self.run_child(
+            f"import os; print(os.read({read_fd}, 9).decode())",
+            pass_fds=[read_fd],
+        )
+        self.assertEqual((result.returncode, result.reason), (0, "completed"))
+        self.assertEqual((self.root / "1.out").read_text(), "forwarded\n")
+        self.assertEqual(os.get_inheritable(read_fd), inheritable)
+
+    @unittest.skipUnless(sys.platform != "win32", "POSIX descriptors")
+    def test_default_does_not_leak_extra_pipe_descriptor(self):
+        read_fd, write_fd = os.pipe()
+        self.addCleanup(os.close, read_fd)
+        self.addCleanup(os.close, write_fd)
+        os.write(write_fd, b"private")
+        result = self.run_child(
+            "import errno, os\n"
+            "try:\n"
+            f"    os.read({read_fd}, 7)\n"
+            "except OSError as error:\n"
+            "    assert error.errno == errno.EBADF\n"
+            "else:\n"
+            "    raise AssertionError('extra descriptor leaked')\n"
+        )
+        self.assertEqual((result.returncode, result.reason), (0, "completed"))
+        self.assertEqual(os.read(read_fd, 7), b"private")
+
+    def test_invalid_pass_fds_refused_before_launch(self):
+        class IntSubclass(int):
+            pass
+
+        for fds in (
+            [3, 3],
+            [-1],
+            [0],
+            [1],
+            [2],
+            [True],
+            [False],
+            ["3"],
+            [3.0],
+            [None],
+            [[]],
+            [IntSubclass(3)],
+        ):
+            with self.subTest(pass_fds=fds), self.assertRaises(ValueError):
+                self.run_child(pass_fds=fds)
+            self.assertIsNone(self.session.child)
+            self.assertFalse(self.events.exists())
+        self.assertEqual(self.run_child().reason, "completed")
+
     def test_stop_file_missing_telemetry_or_critical_pressure_do_not_spawn(self):
         stop = self.root / "stop"
         stop.touch()
@@ -382,6 +440,9 @@ class SessionTests(unittest.TestCase):
 
     @unittest.skipUnless(sys.platform != "win32", "POSIX signals")
     def test_stop_file_sends_int_then_term_to_only_owned_child(self):
+        read_fd, write_fd = os.pipe()
+        self.addCleanup(os.close, read_fd)
+        self.addCleanup(os.close, write_fd)
         stop = self.root / "stop"
         code = (
             "import signal, time, pathlib\n"
@@ -390,12 +451,14 @@ class SessionTests(unittest.TestCase):
             f"pathlib.Path({str(stop)!r}).touch()\n"
             "time.sleep(2)\n"
         )
-        result = self.run_child(code, stop_file=stop)
+        result = self.run_child(code, stop_file=stop, pass_fds=(read_fd,))
         self.assertEqual(result.reason, "stop_file")
         self.assertEqual(result.returncode, 0)
         signals = [row for row in self.timeline() if row["event"] == "signal"]
         self.assertEqual([row["signal"] for row in signals], ["SIGINT", "SIGTERM"])
         self.assertEqual({row["pid"] for row in signals}, {result.pid})
+        os.write(write_fd, b"still owned")
+        self.assertEqual(os.read(read_fd, 11), b"still owned")
         with self.assertRaises(pilot.GuardStopped):
             self.run_child()
 

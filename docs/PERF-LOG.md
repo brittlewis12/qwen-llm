@@ -6,6 +6,33 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the current state and evidence index.
 
+## 2026-10-27 - V4.1 Exact CED Host Ranges: Preliminary +3.2% at 2K, +3.8% at 8K
+
+- Prepared attention spans that emit no GPU commands now advance a validated
+  range instead of repeating per-token view binding, validation and cursor
+  transitions. Publisher/selection commands and arithmetic are unchanged; no
+  FFN, Engram, precision, artifact or prefill-policy change is introduced.
+- Native M5 Ultra same-binary old-host/range exact CED ABBA, with warm Full
+  reference and two teacher-forced decode steps per arm: 2K means
+  2.056301 -> 1.993218 s (+3.165% throughput); 8K means 5.192800 -> 5.000324 s
+  (+3.849%). All warmups and primary observations remain retained.
+- Every one of 21 full-vocabulary vectors per packet equals Full float bits;
+  all old-host/range CED causal/address/cursor/readiness observations match at
+  N, N+1 and N+2. Both range samples beat both controls at each length, but
+  control drift is 2.8%/3.7% with only two primary samples per arm. These are
+  preliminary discoveries, not sustained or cross-engine scoreboard claims.
+- M5 HOST-only N4096 serial API drops from 2.62-2.85 ms to 0.708-1.125 us,
+  with zero GPU commands and unchanged bindings/cursors. This host-slice ratio
+  is not a model throughput multiplier. Release CPU/DEBUG1 parity checks pass.
+- Corrected build exclusion: private CPU Cargo target + CPU flock + frozen
+  executable, no GPU lease during build or 338 CPU tests. One subsequent
+  canonical Metal lease covers parity/HOST/8K for 49.886 s, including the
+  48.531 s model controller. Admission waiting is separate from GPU ownership.
+- [All samples and scope](bench/2026-10-27-v41-range-native-results.md).
+  Raw: `metagross:~/qwen-runs/2026-10-27-v41-range-execution/`,
+  with the 8K packet in `native-1e01-cpu-lock/`. The inherited CED publisher
+  rollback/pruned eligibility caveat remains outside this default-path proof.
+
 ## 2026-10-27 - V4.1 CED 8K 1,663 tok/s: No Host Zero Pass on Fresh Buffers
 
 - Host wall spans in the prefill stage profile showed an 8K CED call spending

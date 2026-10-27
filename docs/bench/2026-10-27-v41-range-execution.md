@@ -88,12 +88,72 @@ history floor or approximation policy. Exact inventory entries are additive;
 `docs/ENV.md` is generated from the composed source. Production provenance embeds
 `attention_gpu.rs`, `query_batch.rs`, and `ced.rs`; all new modules are test-only.
 
-Verification: six exact-source isolated cursor/override/pending CPU tests pass
+Initial isolated-source verification: six exact-source cursor/override/pending CPU tests pass
 using a temporary rustc harness (Result/require and unused control descriptor
 stubs), not full-crate compilation. Rustfmt, diff whitespace checks, 14 offline
 V4.1 source contracts, environment-knob and identity checks, inventory schema
 and self-tests, witness self-tests and path-normalization checks pass. The
 scalar encoder, row-binding wrapper and both publishers are byte-identical to
-`9a7940c0`. Full-crate type-check/discovery, the other two new Rust CPU tests,
-Metal fixtures, discovery timing and numerical qualification remain unverified.
-No Cargo build, GPU test, model or remote execution was performed.
+`9a7940c0`. Those isolated checks do not establish full-crate compilation,
+Metal correctness, host timing, model behavior or remote qualification. The
+following packet exercises a specific composed source rather than extending
+that evidence transitively.
+
+## Local Host Discovery
+
+The composed source `5c1b9849a68f86d3cb53cb8559d19c27e1db6ef6` passes a
+source-pinned M4 Max packet with SDK 26.2. The binary uses the repository's
+optimized test profile: opt3, Thin LTO, 16 codegen units, assertions and overflow
+checks enabled. This is not canonical release, GPU or model timing.
+
+The host fixture has one ownerless, non-index-producing layer, N=128/4096,
+query rank 1280, 64 heads, latent width 512 and RoPE width 64. Hidden width and
+output rank are 32 with one output group. It uses stable synthetic prepared
+buffers and BF16 weights, not an imported model. Both arms call the complete
+serial API and include their validation; neither submits or dispatches GPU
+work. The changed range implementation is the only experimental host path.
+
+All primary host samples are retained here in microseconds; each cell lists
+both samples from its chronological block. A is the original host row chain;
+B is the range transition.
+
+| Rows | Block | A samples (us) | B samples (us) |
+| --- | --- | --- | --- |
+| 128 | ABBA 1 | 183.167, 193.458 | 1.667, 1.500 |
+| 128 | BAAB 1 | 193.167, 189.916 | 1.709, 1.625 |
+| 128 | ABBA 2 | 189.667, 190.042 | 1.708, 1.666 |
+| 128 | BAAB 2 | 188.584, 188.792 | 1.542, 1.583 |
+| 4096 | ABBA 1 | 6413.000, 6448.334 | 1.916, 1.750 |
+| 4096 | BAAB 1 | 6486.500, 6485.959 | 1.750, 1.750 |
+| 4096 | ABBA 2 | 6481.042, 6471.458 | 1.542, 1.708 |
+| 4096 | BAAB 2 | 6573.750, 6578.292 | 1.709, 1.708 |
+
+Separate warm A/B samples are 188.375/2.166 us at N128 and
+6268.000/2.583 us at N4096. No sample or block is discarded. The observation
+is removal of repeated host work, not an equivalent whole-request multiplier.
+The source-level row chain emits zero GPU commands in this fixture, so a GPU
+timestamp cannot measure the removed work.
+
+The host controller completes in 0.366 s, including setup and teardown.
+Priced Metal storage is 1,962,917,888 bytes plus a 536,870,912-byte CPU reserve,
+below the 4 GiB ceiling. All 36 chronological samples have empty dispatch and
+Metal-allocation censuses, unchanged original bindings and identical cursor
+outcomes. No GPU completion is claimed for the unsubmitted command.
+
+The same frozen composition also passes 341 selected CPU tests, two DEBUG1
+Metal parity witnesses (0.381 s combined), and three bounded-policy
+reference/tail/failure witnesses (3.024 s combined). Parity uses a valid mixed
+ratio-two publisher and ratio-one candidate owner, with all-selected, scored,
+pruned and odd head/body/tail cases. Outputs, controls, pending cache bits,
+status, bindings, cursors and ordered GPU dispatches match the old host path.
+The bounded fixtures retain independent replay, poisoned history,
+snapshot/growth/continuation and cancellation checks.
+
+Private evidence is in `v41-prefill-spikes-2026-10-26`:
+`bounded-range-5c1b-{check,build,cpu,range-gpu,host,bounded-gpu}.*`, frozen
+`bounded-range-5c1b-local.identity.json` and binary, and
+`bounded-range-5c1b-host-blocks.json`. Initial busy refusals, the invalid
+fixture schedule found by review, and the fixture's private-helper compilation
+failure are retained separately; none is counted as a passing runtime sample.
+M5 inclusive timing, real-model behavior and the separate Full/CED publisher
+composition are not qualified by this packet.

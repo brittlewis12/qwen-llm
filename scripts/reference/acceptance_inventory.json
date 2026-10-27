@@ -4925,7 +4925,7 @@
     "name": "deepseek_v41::forward::ced::qualification::current_pair::range_pilot::range_host_full_model_native_abba",
     "class": "model",
     "ignored": true,
-    "reason": "Private release-native actual NAX one-import exact CED old-host/range discriminator; N2048 default (parent first launch only) or explicitly selected N8192, never automatic escalation; warm Full/A/B then primary ABBA, two true TF steps per arm, strict all-vocabulary FLOATBITS vs Full and causal hashes/readiness/status/origin vs old CED; self-lease and parent <=60s/90s process cap, durable private evidence; never performance qualification."
+    "reason": "Private release-native actual NAX one-import exact CED old-host/range discriminator; N2048 default (parent first launch only) or explicitly selected N8192, never automatic escalation; warm Full/A/B then primary ABBA, two true TF steps per arm, strict all-vocabulary FLOATBITS vs Full and causal hashes/readiness/status/origin vs old CED; fail-fast canonical lease (self-acquired or validated inherited/adopted) and parent <=60s/90s process cap, durable private evidence; never performance qualification."
   },
   {
     "target": "lib",
@@ -4947,5 +4947,12 @@
     "class": "cpu",
     "ignored": false,
     "reason": "CPU-only production resident-byte-derived preferred encoder width and actual ceil chunk counts for N2048/N8192 and a nonmultiple; selected width may exceed prompt length, without pinning production geometry or bypassing admission."
+  },
+  {
+    "target": "lib",
+    "name": "deepseek_v41::forward::ced::qualification::current_pair::range_pilot::lease_descriptor_syntax_only",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Pure CPU nonnegative i32 descriptor syntax only: rejects empty, negative, nonnumeric, overflow and whitespace, accepts 0/3/i32::MAX without opening descriptors or mutating environment; actual openness, canonical inode, ownership and flock validation remain the authority of metal::acquire_metal_benchmark_lease before MetalContext/import."
   }
 ]

@@ -18,6 +18,7 @@ New CPU-only selectors (not executed here):
 ```text
 deepseek_v41::forward::ced::qualification::current_pair::range_pilot::frozen_prefix_uses_two_true_next_ids_only
 deepseek_v41::forward::ced::qualification::current_pair::range_pilot::preferred_encoder_geometry_uses_actual_chunk_ceiling
+deepseek_v41::forward::ced::qualification::current_pair::range_pilot::lease_descriptor_syntax_only
 deepseek_v41::forward::attention_gpu::tests::query_batch::range_execution::tensor64_parity_geometry_and_shape_budget
 ```
 
@@ -30,9 +31,24 @@ or report sync. No automatic retry or reuse of a timed-out state is authorized.
 
 The binary requires aarch64 macOS, little endian, assertions disabled, no
 diagnostic features, actual-device NAX/TensorOps availability and the production
-tensor route. It never gates on a device name. It acquires its own production
-lease fail-fast: `QWEN_METAL_LEASE_WAIT` absent/0, no inherited lease FD or other
-runtime QWEN controls. Fixed build metadata, if supplied, must match the binary.
+tensor route. It never gates on a device name. Before MetalContext creation or
+model import, `metal::acquire_metal_benchmark_lease()` either acquires the canonical
+production lease fail-fast (FD absent) or adopts `QWEN_METAL_LEASE_FD` from an outer
+canonical lease. The pilot accepts only nonnegative i32 descriptor syntax; the
+lease API remains the authority for actual openness, canonical inode, ownership
+and flock validation. Empty, negative, nonnumeric, overflowing or whitespace
+values are refused. Syntax acceptance of 0, 3 or i32::MAX is not descriptor validity.
+`QWEN_METAL_LEASE_WAIT` must remain absent/0 inside the pilot, including adoption.
+For queued work, the outer wrapper waits with WAIT=1 and retains the SAME canonical
+lease across build, CPU, parity, HOST and model phases; launch the model child
+with WAIT=0 and the inherited descriptor retained (Python launchers need
+`pass_fds`). Never release/reacquire between admission and the model. This is
+ordinary exclusion, not a measurement waiver. Reports retain the FD control in
+`stable_controls` and record successful `lease_mode` as `self_acquired` or
+`inherited_adopted`; no inherited lease is labeled self-acquired. The CPU syntax
+test does not open descriptors, mutate the environment or exercise lease validation.
+All other runtime QWEN controls remain refused.
+Fixed build metadata, if supplied, must match the binary.
 MTL, DYLD, Metal validation/wrapper, Instruments/DT, LLVM/CPU profiler and malloc
 diagnostic controls are refused; diagnostic observers must be idle. The parent
 must also launch without an attached profiler.

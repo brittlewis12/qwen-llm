@@ -17,7 +17,7 @@ const ORDER: [&str; 7] = [
 ];
 
 #[test]
-#[ignore = "PRIVATE release native aarch64 macOS, actual NAX, fail-fast self-lease; one GSQ import, frozen IDs/private report; parent <=60s N2048/default or <=90s explicitly selected N8192 process cap"]
+#[ignore = "PRIVATE release native aarch64 macOS, actual NAX, fail-fast canonical lease (self-acquired or inherited/adopted); one GSQ import, frozen IDs/private report; parent <=60s N2048/default or <=90s explicitly selected N8192 process cap"]
 fn range_host_full_model_native_abba() {
     run().unwrap();
 }
@@ -42,6 +42,13 @@ fn budget(start: std::time::Instant, n: usize) -> AResult<()> {
         "cooperative process budget exhausted; no next operation authorized (not an interrupt of blocking load/GPU calls)"
     );
     Ok(())
+}
+
+// Syntax only; the lease API validates openness, canonical inode, ownership and flock.
+fn lease_fd_syntax(value: &std::ffi::OsStr) -> bool {
+    value
+        .to_str()
+        .is_some_and(|text| text.parse::<i32>().is_ok_and(|fd| fd >= 0))
 }
 
 fn controls() -> AResult<Value> {
@@ -79,8 +86,10 @@ fn controls() -> AResult<Value> {
         } else if name == "QWEN_METAL_LEASE_WAIT" {
             ensure!(
                 value == "0",
-                "WAIT must be absent or 0 for fail-fast self-lease"
+                "WAIT must be absent or 0 for fail-fast canonical lease"
             );
+        } else if name == "QWEN_METAL_LEASE_FD" {
+            ensure!(lease_fd_syntax(&value), "invalid lease descriptor syntax");
         } else {
             ensure!(
                 ![
@@ -376,7 +385,7 @@ fn run() -> AResult<()> {
         "raw_logits": {"path": raw_path, "encoding": "IEEE F32 little endian, complete vocabulary, declared arm then position order"},
         "parent_process_cap_seconds": limit_seconds(n), "supervision": "parent MUST enforce selected 60s/90s whole-process cap; first launch N2048 only; internal checks cannot interrupt blocking import/GPU/report/hash",
         "limitations": ["same resident actual-model discriminator, not original-golden/quality/authenticity or global model content hash", "no performance verdict or filesystem-cold/warmup-sufficiency claim", "publisher eligibility repair out of scope: inherited unconditional CDF publication rollbacks remain; N8192 is explicit private follow-up only, not a new qualification claim"],
-        "stage": "controls_and_self_lease_pending"});
+        "stage": "controls_and_lease_pending"});
     write_report(&mut file, &report)?;
     File::open(report_path.parent().context("report parent")?)?.sync_all()?;
     let mut lease = None;
@@ -386,7 +395,12 @@ fn run() -> AResult<()> {
         report["stable_controls"] = stable.clone();
         budget(start, n)?;
         lease = Some(metal::acquire_metal_benchmark_lease()?);
-        report["stage"] = json!("self_leased_before_context");
+        report["lease_mode"] = json!(if stable.get("QWEN_METAL_LEASE_FD").is_some() {
+            "inherited_adopted"
+        } else {
+            "self_acquired"
+        });
+        report["stage"] = json!("leased_before_context");
         write_report(&mut file, &report)?;
         raw_file = Some(private_report(&raw_path, &checkout)?);
         let raw = raw_file.as_mut().unwrap();
@@ -587,6 +601,16 @@ fn run() -> AResult<()> {
     file.sync_all()?;
     drop(lease);
     outcome
+}
+
+#[test]
+fn lease_descriptor_syntax_only() {
+    for text in ["", "-1", "fd", "2147483648", " 3", "3 ", " "] {
+        assert!(!lease_fd_syntax(std::ffi::OsStr::new(text)), "{text:?}");
+    }
+    for text in ["0", "3", "2147483647"] {
+        assert!(lease_fd_syntax(std::ffi::OsStr::new(text)), "{text:?}");
+    }
 }
 
 #[test]

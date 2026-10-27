@@ -497,8 +497,13 @@ fn ced_owner_rows_reuse_preserves_published_cache_with_ordinary_batch_control() 
         &CedRequest::cold(n, capacity),
     )
     .unwrap();
+    let frequencies = op::rotary_frequencies(c.rope_dim, 160000.0, 65536, 16.0, 32.0, 1.0).unwrap();
     let weights: Vec<_> = (0..schedule.layers)
-        .map(|id| scheduled_weights(&ctx, &c, &schedule, id, GgmlType::BF16))
+        .map(|id| {
+            let mut weights = scheduled_weights(&ctx, &c, &schedule, id, GgmlType::BF16);
+            weights.frequencies = frequencies.clone();
+            weights
+        })
         .collect();
     let refs = weights.iter().collect::<Vec<_>>();
     let input: Vec<_> = (0..schedule.layers)

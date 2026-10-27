@@ -586,6 +586,19 @@ impl Fixture {
         let pso = pipeline(ctx, enc, "normalize_rows").unwrap();
         dispatch(enc, &pso, self.n * H * M);
     }
+
+    /// All 64 heads in one threadgroup (32 keys, four 128-wide latent chunks).
+    fn encode_tensor64(&self, ctx: &MetalContext, enc: &KernelEncoder) {
+        self.bind(enc);
+        tensor_pipeline(ctx, enc, "score_tensor64").unwrap();
+        grid(enc, 1, self.n, 1, 128);
+        pipeline(ctx, enc, "softmax_rows").unwrap();
+        grid(enc, H, self.n, 1, 32);
+        tensor_pipeline(ctx, enc, "pv_tensor64").unwrap();
+        grid(enc, 1, self.n, 1, 128);
+        let pso = pipeline(ctx, enc, "normalize_rows").unwrap();
+        dispatch(enc, &pso, self.n * H * M);
+    }
 }
 
 #[test]
@@ -681,6 +694,42 @@ fn tensor32_sink_tile_matches_tensor_sink() {
         let base_scores = f32_slice(&f.scores).unwrap().to_vec();
         let base_out = f32_slice(&f.output).unwrap().to_vec();
         execute(&ctx, |enc| f.encode_tensor32(&ctx, enc));
+        assert_eq!(ids(&f.status, 1), [0], "k={k} n={n} ragged={ragged}");
+        let got_scores = f32_slice(&f.scores).unwrap();
+        for q in 0..n {
+            let count = f.count(q);
+            for h in 0..H {
+                let base = (q * H + h) * SCORE_STRIDE;
+                close_tile(
+                    &got_scores[base..base + count],
+                    &base_scores[base..base + count],
+                );
+                close_tile(
+                    &got_scores[base + SCORE_STRIDE - 1..base + SCORE_STRIDE],
+                    &base_scores[base + SCORE_STRIDE - 1..base + SCORE_STRIDE],
+                );
+            }
+        }
+        close_tile(f32_slice(&f.output).unwrap(), &base_out);
+        f.check_guards();
+    }
+}
+
+#[test]
+fn tensor64_sink_tile_matches_tensor32_sink() {
+    let Some(ctx) = crate::test_fixtures::metal_context_or_skip() else {
+        return;
+    };
+    if !metal::moe_grouped_tensor_available(&ctx) {
+        eprintln!("tensor tier unavailable: {:?}", ctx.tensor_ops_status());
+        return;
+    }
+    for (k, n, ragged, first) in cases() {
+        let f = Fixture::new(&ctx, k, n, ragged, first);
+        execute(&ctx, |enc| f.encode_tensor32(&ctx, enc));
+        let base_scores = f32_slice(&f.scores).unwrap().to_vec();
+        let base_out = f32_slice(&f.output).unwrap().to_vec();
+        execute(&ctx, |enc| f.encode_tensor64(&ctx, enc));
         assert_eq!(ids(&f.status, 1), [0], "k={k} n={n} ragged={ragged}");
         let got_scores = f32_slice(&f.scores).unwrap();
         for q in 0..n {

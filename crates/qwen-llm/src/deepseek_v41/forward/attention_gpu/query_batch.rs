@@ -1066,7 +1066,27 @@ impl Workspace {
         // The wider-N score tile is the default tensor-tier form from 128
         // rows; `QWEN_V41_SINK_TENSOR32=0` restores the 16-key form.
         let score32 = tensor && std::env::var_os("QWEN_V41_SINK_TENSOR32").is_none_or(|v| v != "0");
-        if tensor {
+        // All 64 heads in one threadgroup: 4x the tensor M and one key gather
+        // per row. `QWEN_V41_SINK_TENSOR64=0` restores the 16-head blocks.
+        let tensor64 = tensor
+            && c.heads == 64
+            && c.head_dim == 512
+            && std::env::var_os("QWEN_V41_SINK_TENSOR64").is_none_or(|v| v != "0");
+        if tensor64 {
+            tensor_pipeline(ctx, enc, "score_tensor64")?;
+            enc.dispatch(
+                MTLSize {
+                    width: 1,
+                    height: n,
+                    depth: 1,
+                },
+                MTLSize {
+                    width: 128,
+                    height: 1,
+                    depth: 1,
+                },
+            );
+        } else if tensor {
             tensor_pipeline(
                 ctx,
                 enc,
@@ -1132,14 +1152,16 @@ impl Workspace {
             },
         );
         if mma {
-            if tensor {
+            if tensor64 {
+                tensor_pipeline(ctx, enc, "pv_tensor64")?;
+            } else if tensor {
                 tensor_pipeline(ctx, enc, "pv_tensor")?;
             } else {
                 pipeline(ctx, enc, "pv_mma")?;
             }
             enc.dispatch(
                 MTLSize {
-                    width: c.heads / MMA_HEADS,
+                    width: if tensor64 { 1 } else { c.heads / MMA_HEADS },
                     height: n,
                     depth: 1,
                 },

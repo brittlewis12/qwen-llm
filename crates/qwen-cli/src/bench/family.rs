@@ -215,13 +215,14 @@ pub(crate) fn with_family_bench_planned<R>(
                         );
                         for op in &report.operations {
                             eprintln!(
-                                "[v41-prefill-stages] {} dims={:?} count={} gpu_ms={:?} encode_ms={:.3} wait_ms={:.3}",
+                                "[v41-prefill-stages] {} dims={:?} count={} gpu_ms={:?} encode_ms={:.3} wait_ms={:.3} wall_ms={:.3}",
                                 op.operation,
                                 op.dimensions,
                                 op.count,
                                 op.gpu_ms,
                                 op.encode_ms,
-                                op.commit_wait_ms
+                                op.commit_wait_ms,
+                                op.wall_ms
                             );
                         }
                     }

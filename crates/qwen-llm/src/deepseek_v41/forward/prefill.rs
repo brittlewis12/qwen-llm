@@ -1146,6 +1146,7 @@ pub(super) fn run_captured(
                     scratch.as_ref().unwrap()
                 }
             };
+            let hash_span = profile::Wall("prefill_engram_hash", [0; 4], profile::start());
             let mut next = state.addresses;
             let mut hashes = Vec::with_capacity(chunk.len());
             for &token in chunk {
@@ -1158,6 +1159,7 @@ pub(super) fn run_captured(
                 hashes.push(rows);
                 next = addresses;
             }
+            drop(hash_span);
             state.phase = StatePhase::Poisoned;
             let logits = state.gpu_step.as_mut().unwrap().run_chunk(
                 model,

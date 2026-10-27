@@ -417,12 +417,14 @@ impl Workspace {
         let n = tokens.len();
         op::require(scratch.rows == n, "prefill chunk scratch rows")?;
         let prepare = profile::Wall("prefill_host_prepare", [0; 4], profile::start());
+        let embedding_span = profile::Wall("prefill_embedding", [0; 4], profile::start());
         let mut embeddings = Vec::with_capacity(n * 4 * c.hidden);
         for &token in tokens {
             embeddings.extend(decode_rows(model.embedding, token as usize, 1)?.repeat(4));
         }
         write(&scratch.x, &embeddings)?;
         write(&scratch.incoming, &[1.0, 0.0, 0.0, 0.0].repeat(n))?;
+        drop(embedding_span);
         let x = &scratch.x;
         let half = &scratch.half;
         let outputs = &scratch.outputs;
@@ -678,6 +680,7 @@ impl Workspace {
             );
         }
         result?;
+        let _finish = profile::Wall("prefill_host_finish", [0; 4], profile::start());
         if let Some(samples) = &samples {
             let times = ctx
                 .resolve_timestamp_samples(samples, model.layers.len() * PREFILL_LAYER_SAMPLES)

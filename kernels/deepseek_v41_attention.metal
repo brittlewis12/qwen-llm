@@ -168,6 +168,52 @@ kernel void kernel_deepseek_v41_attention_index_heads_rows(
     if (lane == 0) srow[t] = score;
 }
 
+// index_heads_rows for 32 heads x 128 dims with the same F32 arithmetic (each
+// head's dot accumulates the dims in order; heads are summed in order after
+// relu and weighting), restructured for long rows: the row query is staged
+// once per threadgroup, transposed so lanes (heads) read consecutive words,
+// and each simdgroup carries eight independent keys. Same arguments and score
+// layout; 64 keys per threadgroup along group.x.
+#define V41_ILP_KEYS 8u
+kernel void kernel_deepseek_v41_attention_index_heads_rows_ilp(
+    constant uint4 &a [[buffer(0)]], constant uint4 &b [[buffer(1)]],
+    constant uint4 &c [[buffer(2)]], device const float *q [[buffer(3)]],
+    device const float *weights [[buffer(4)]], device const float *keys [[buffer(5)]],
+    device float *scores [[buffer(6)]], constant uint &row0 [[buffer(7)]],
+    uint3 group [[threadgroup_position_in_grid]],
+    uint tid [[thread_index_in_threadgroup]],
+    uint sg [[simdgroup_index_in_threadgroup]], uint lane [[thread_index_in_simdgroup]]) {
+    threadgroup float qt[128 * 32];
+    const uint local = group.y;
+    if (local >= c.y) return;
+    const uint row = row0 + local;
+    const uint length = (a.x + row + 1) / a.y;
+    if (length <= a.z || group.x * 8u * V41_ILP_KEYS >= length) return;
+    device const float *qrow = q + (ulong)row * b.z;
+    for (uint e = tid; e < 128u * 32u; e += 256u) qt[(e % 128u) * 32u + e / 128u] = qrow[e];
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    const uint key0 = (group.x * 8u + sg) * V41_ILP_KEYS;
+    if (key0 >= length) return;
+    const uint n = min(V41_ILP_KEYS, length - key0);
+    device const float *k[V41_ILP_KEYS];
+    for (uint i = 0; i < V41_ILP_KEYS; ++i) k[i] = keys + (ulong)(key0 + min(i, n - 1u)) * 128u;
+    float dot[V41_ILP_KEYS];
+    for (uint i = 0; i < V41_ILP_KEYS; ++i) dot[i] = 0;
+    for (uint j = 0; j < 128u; ++j) {
+        const float qv = qt[j * 32u + lane];
+        for (uint i = 0; i < V41_ILP_KEYS; ++i) dot[i] += qv * k[i][j];
+    }
+    device const float *wrow = weights + (ulong)row * b.w;
+    device float *srow = scores + (ulong)local * c.x;
+    const float scale = rsqrt(float(b.x)) * rsqrt(float(b.y));
+    for (uint i = 0; i < n; ++i) {
+        float score = 0;
+        for (uint head = 0; head < 32u; ++head)
+            score += max(simd_shuffle(dot[i], head), 0.0f) * (wrow[head] * scale);
+        if (lane == 0) srow[key0 + i] = score;
+    }
+}
+
 kernel void kernel_deepseek_v41_attention_blocks(
     constant uint2 &a [[buffer(0)]], device const float *scores [[buffer(1)]],
     device float *blocks [[buffer(2)]], uint t [[thread_position_in_grid]]) {
@@ -402,6 +448,180 @@ kernel void kernel_deepseek_v41_attention_select_hier_merge(
         for (uint k = 0; k < 512; ++k) rank += order[k] < id;
         selected[(ulong)row * 512 + rank] = id;
     }
+}
+
+// Exact top-k by radix selection instead of a bitonic sort network.
+//
+// The order is attention_select_better's: numerically descending, equal values
+// with smaller bits first (+0 before -0), then smaller key ID. Mapping a score
+// to `radix_key` (sign-folded bits) makes that the order of (key descending,
+// ID ascending). Masked keys (outside the row's candidate blocks) and NaNs are
+// -Inf, exactly as sort_init does; NaNs set status bit 1.
+//
+// One 1024-thread threadgroup per row: three digit passes (11/11/10 bits) find
+// the k-th largest key T and how many keys equal to T are needed, then two
+// passes over contiguous ID chunks emit every key > T and the lowest-ID keys ==
+// T in ascending ID order, i.e. the chronological list the sort path writes.
+#define V41_RADIX_THREADS 1024u
+
+inline uint radix_key(float v) {
+    const uint u = as_type<uint>(v);
+    return (u & 0x80000000u) ? ~u : (u | 0x80000000u);
+}
+
+// Keys are re-derived from the scores on every pass (no length-sized on-chip
+// copy); only the first pass reports NaNs.
+inline uint radix_row_key(device const float *srow, device const uint *crow, uint t,
+                          bool masked, uint block, bool report, device atomic_uint *status) {
+    if (masked && crow[t / block] == 0) return radix_key(-INFINITY);
+    float v = srow[t];
+    if (isnan(v)) {
+        if (report) atomic_fetch_or_explicit(status, 1u, memory_order_relaxed);
+        v = -INFINITY;
+    }
+    return radix_key(v);
+}
+
+// Exclusive prefix sum over the 1024 threads in thread order, plus the total.
+inline uint radix_exclusive_sum(uint v, threadgroup uint *partials, uint sg, uint lane,
+                                thread uint &total) {
+    const uint inclusive = simd_prefix_inclusive_sum(v);
+    if (lane == 31) partials[sg] = inclusive;
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    if (sg == 0) {
+        const uint p = partials[lane];
+        const uint p_inclusive = simd_prefix_inclusive_sum(p);
+        partials[lane] = p_inclusive - p;
+        if (lane == 31) partials[32] = p_inclusive;
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    const uint exclusive = partials[sg] + inclusive - v;
+    total = partials[32];
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    return exclusive;
+}
+
+// a: chunk start, ratio, top_k, candidate block. b: score stride, candidate
+// stride, rows, mask (1: restrict pruned rows to their candidate blocks).
+// c: selected stride, row0, candidate top-k (blocks), mode. A row is pruned
+// when its visible length spans more than candidate top-k blocks; unpruned rows
+// are never masked. Mode 0 selects top_k key IDs from the row's index scores;
+// rows whose visible length is at most top_k are prepared elsewhere and skip.
+// Mode 1 publishes the candidate mask of a pruned row: `scores` holds its block
+// scores (`select_block_scores_rows`), the domain is its block count, k is the
+// candidate top-k, and every block's mask entry is written (1 kept, 0 not), the
+// same set the block sort plus `keep` chain keeps.
+[[max_total_threads_per_threadgroup(1024)]]
+kernel void kernel_deepseek_v41_attention_select_radix_rows(
+    constant uint4 &a [[buffer(0)]], constant uint4 &b [[buffer(1)]],
+    constant uint4 &c [[buffer(2)]], device const float *scores [[buffer(3)]],
+    device uint *candidates [[buffer(4)]], device uint *selected [[buffer(5)]],
+    device atomic_uint *status [[buffer(6)]],
+    uint3 group [[threadgroup_position_in_grid]],
+    uint tid [[thread_index_in_threadgroup]],
+    uint sg [[simdgroup_index_in_threadgroup]],
+    uint lane [[thread_index_in_simdgroup]]) {
+    threadgroup atomic_uint hist[2048];
+    threadgroup uint partials[33];
+    threadgroup uint found[2];
+    const uint local = group.y;
+    if (local >= b.z) return;
+    const uint row = c.y + local;
+    const uint visible = (a.x + row + 1) / a.y;
+    const uint visible_blocks = (visible + a.w - 1u) / a.w;
+    const bool publish = c.w != 0;
+    const uint length = publish ? visible_blocks : visible;
+    const uint k = publish ? c.z : a.z;
+    if (length <= k) return;
+    device const float *srow = scores + (ulong)local * b.x;
+    device uint *crow = candidates + (ulong)row * b.y;
+    const bool masked = !publish && b.w != 0 && visible_blocks > c.z;
+
+    uint prefix = 0, prefix_mask = 0, remaining = k;
+    const uint shifts[3] = {21u, 10u, 0u};
+    const uint widths[3] = {11u, 11u, 10u};
+    for (uint pass = 0; pass < 3; ++pass) {
+        const uint shift = shifts[pass], bins = 1u << widths[pass], digit = bins - 1u;
+        for (uint j = tid; j < bins; j += V41_RADIX_THREADS)
+            atomic_store_explicit(hist + j, 0u, memory_order_relaxed);
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+        for (uint t = tid; t < length; t += V41_RADIX_THREADS) {
+            const uint key = radix_row_key(srow, crow, t, masked, a.w, pass == 0, status);
+            if ((key & prefix_mask) == prefix)
+                atomic_fetch_add_explicit(hist + ((key >> shift) & digit), 1u, memory_order_relaxed);
+        }
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+        // Thread i owns bins (descending) [bins-1 - i*per, ..., bins - (i+1)*per].
+        const uint per = bins / V41_RADIX_THREADS;
+        uint mine = 0;
+        for (uint j = 0; j < per; ++j)
+            mine += atomic_load_explicit(hist + (bins - 1u - (tid * per + j)), memory_order_relaxed);
+        uint total;
+        uint above = radix_exclusive_sum(mine, partials, sg, lane, total);
+        if (above < remaining && remaining <= above + mine) {
+            for (uint j = 0; j < per; ++j) {
+                const uint bin = bins - 1u - (tid * per + j);
+                const uint n = atomic_load_explicit(hist + bin, memory_order_relaxed);
+                if (above + n >= remaining) {
+                    found[0] = bin;
+                    found[1] = above;
+                    break;
+                }
+                above += n;
+            }
+        }
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+        prefix |= found[0] << shift;
+        prefix_mask |= digit << shift;
+        remaining -= found[1];
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+    }
+    // prefix is now the k-th largest key T; `remaining` keys equal to T are needed.
+    const uint threshold = prefix, need_equal = remaining;
+    const uint chunk = (length + V41_RADIX_THREADS - 1u) / V41_RADIX_THREADS;
+    const uint lo = min(length, tid * chunk), hi = min(length, lo + chunk);
+    uint greater = 0, equal = 0;
+    for (uint t = lo; t < hi; ++t) {
+        const uint key = radix_row_key(srow, crow, t, masked, a.w, false, status);
+        greater += key > threshold;
+        equal += key == threshold;
+    }
+    uint total;
+    const uint equal_before = radix_exclusive_sum(equal, partials, sg, lane, total);
+    const uint equal_taken = equal_before >= need_equal ? 0u : min(equal, need_equal - equal_before);
+    uint out = radix_exclusive_sum(greater + equal_taken, partials, sg, lane, total);
+    device uint *dst = selected + (ulong)row * c.x;
+    uint equal_seen = equal_before;
+    for (uint t = lo; t < hi; ++t) {
+        const uint key = radix_row_key(srow, crow, t, masked, a.w, false, status);
+        bool take = key > threshold;
+        if (key == threshold) {
+            take = equal_seen < need_equal;
+            ++equal_seen;
+        }
+        if (publish) crow[t] = take ? 1u : 0u;
+        else if (take) dst[out++] = t;
+    }
+}
+
+// Per-block maxima of pruned rows' index scores for candidate publication:
+// the `blocks` kernel per row (NaN ignored, newest block forced to +Inf).
+// a: chunk start, ratio, candidate block, candidate top-k. b: score stride,
+// block-score stride, rows, row0. One thread per block, grid (blocks, rows).
+kernel void kernel_deepseek_v41_attention_select_block_scores_rows(
+    constant uint4 &a [[buffer(0)]], constant uint4 &b [[buffer(1)]],
+    device const float *scores [[buffer(2)]], device float *blocks_out [[buffer(3)]],
+    uint2 t [[thread_position_in_grid]]) {
+    const uint local = t.y;
+    if (local >= b.z) return;
+    const uint row = b.w + local;
+    const uint length = (a.x + row + 1) / a.y;
+    const uint blocks = (length + a.z - 1u) / a.z;
+    if (blocks <= a.w || t.x >= blocks) return;
+    device const float *srow = scores + (ulong)local * b.x;
+    float score = -INFINITY;
+    for (uint j = t.x * a.z; j < min((t.x + 1u) * a.z, length); ++j) score = max(score, srow[j]);
+    blocks_out[(ulong)local * b.y + t.x] = t.x + 1u == blocks ? INFINITY : score;
 }
 
 kernel void kernel_deepseek_v41_attention_keep(

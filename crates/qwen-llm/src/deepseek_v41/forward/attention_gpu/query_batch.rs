@@ -727,16 +727,25 @@ impl Workspace {
         let owner = self.schedule.owner_slot(id);
         let ratio = self.schedule.ratio(id);
         let last_length = (start + rows.rows) / ratio.max(1);
-        let batched = self.schedule.produces_index(id)
+        let selector = self.schedule.produces_index(id)
             && owner.is_some()
             && ratio > 0
-            && last_length.div_ceil(c.candidate_block) <= c.candidate_topk
             && std::env::var_os("QWEN_V41_SELECT_PER_ROW").is_none();
+        let unpruned_batch =
+            selector && last_length.div_ceil(c.candidate_block) <= c.candidate_topk;
+        // Past the unpruned selectors' domain: batched F32 index scores,
+        // candidate publication and radix top-k over row sub-tiles.
+        let long_batch = selector
+            && !unpruned_batch
+            && super::select_radix_enabled()
+            && super::index_ilp_supported(c);
+        let batched = unpruned_batch || long_batch;
         // ReusePublished replays against a completed authoritative cache; the
         // per-row path already suppresses its publication for that mode, and
         // the batch must match it. The split owner itself is an ordinary
-        // producer during the encoder phase only.
-        let owner_batch = batched
+        // producer during the encoder phase only. Long batches keep the
+        // per-row publication chain.
+        let owner_batch = unpruned_batch
             && mode == GlobalKvMode::Ordinary
             && self.schedule.owns_kv(id)
             && compress_rows_enabled();
@@ -787,7 +796,9 @@ impl Workspace {
             )?;
             row += 1;
         }
-        if batched {
+        if long_batch {
+            self.select_rows_long(ctx, enc, id, start, rows)?;
+        } else if batched {
             let tile = tile_rows();
             for first in (0..rows.rows).step_by(tile) {
                 self.select_rows_unpruned(
@@ -1051,6 +1062,217 @@ impl Workspace {
                 }
             }
         }
+        Ok(())
+    }
+
+    /// Batched selection for a chunk whose visible keys exceed the unpruned
+    /// selectors' domain. Rows are processed in sub-tiles sized so their F32
+    /// score rows fit the existing `select_scores` scratch: all-selected rows
+    /// and unpruned source masks are prepared as on the unpruned path, every
+    /// other row gets the one-row path's F32 index scores, the source layer
+    /// publishes pruned rows' candidate blocks, and radix selection writes
+    /// chronological top-k IDs (consumer layers restrict pruned rows to their
+    /// candidate blocks). Same selected sets as the one-row path.
+    fn select_rows_long(
+        &mut self,
+        ctx: &MetalContext,
+        enc: &KernelEncoder,
+        id: usize,
+        start: usize,
+        rows: &Rows,
+    ) -> Result<()> {
+        let c = &self.config;
+        let owner = self
+            .schedule
+            .owner_slot(id)
+            .ok_or("missing selection owner")?;
+        let ratio = self.schedule.ratio(id);
+        let publish = self.schedule.candidate_source_layer == Some(id);
+        let mask = self
+            .schedule
+            .candidate_source_layer
+            .is_some_and(|source| id > source);
+        let width = (start + rows.rows) / ratio;
+        let block_width = if publish {
+            width.div_ceil(c.candidate_block)
+        } else {
+            0
+        };
+        let capacity = rows.select_scores.n_elements() as usize;
+        op::require(
+            width > 0 && width + block_width <= capacity,
+            "long selection score width",
+        )?;
+        // Score rows, then (source layer) block-score rows, in one scratch.
+        let tile = (capacity / (width + block_width)).min(rows.rows).max(1);
+        let block_scores = publish.then(|| {
+            rows.select_scores
+                .view_subrange((tile * width) as u64, vec![(tile * block_width) as u64])
+        });
+        let candidates_stride = self.capacity.div_ceil(c.candidate_block);
+        for first in (0..rows.rows).step_by(tile) {
+            let n = (rows.rows - first).min(tile);
+            let last_length = (start + first + n) / ratio;
+            let grid_w = last_length.min(c.index_topk).max(if publish {
+                last_length.div_ceil(c.candidate_block)
+            } else {
+                0
+            });
+            if grid_w > 0 {
+                pipeline(ctx, enc, "selection_prepare_rows")?;
+                enc.set_bytes(
+                    0,
+                    &[
+                        start as u32,
+                        ratio as u32,
+                        c.index_topk as u32,
+                        c.candidate_block as u32,
+                    ],
+                );
+                enc.set_bytes(
+                    1,
+                    &[
+                        c.index_topk as u32,
+                        candidates_stride as u32,
+                        n as u32,
+                        publish as u32,
+                    ],
+                );
+                enc.set_tensor(2, &rows.selected);
+                enc.set_tensor(3, &rows.candidates);
+                enc.set_bytes(4, &(first as u32));
+                enc.dispatch(
+                    MTLSize {
+                        width: grid_w.div_ceil(256),
+                        height: n,
+                        depth: 1,
+                    },
+                    MTLSize {
+                        width: 256,
+                        height: 1,
+                        depth: 1,
+                    },
+                );
+            }
+            if last_length <= c.index_topk {
+                continue;
+            }
+            super::encode_index_scores_rows_ilp(
+                ctx,
+                enc,
+                c,
+                start,
+                ratio,
+                last_length,
+                first,
+                n,
+                width,
+                &rows.index_query,
+                &rows.index_weights,
+                &self.owners[owner].keys,
+                &rows.select_scores,
+            )?;
+            if let Some(block_scores) = &block_scores {
+                pipeline(ctx, enc, "select_block_scores_rows")?;
+                enc.set_bytes(
+                    0,
+                    &[
+                        start as u32,
+                        ratio as u32,
+                        c.candidate_block as u32,
+                        c.candidate_topk as u32,
+                    ],
+                );
+                enc.set_bytes(
+                    1,
+                    &[width as u32, block_width as u32, n as u32, first as u32],
+                );
+                enc.set_tensor(2, &rows.select_scores);
+                enc.set_tensor(3, block_scores);
+                enc.dispatch(
+                    MTLSize {
+                        width: block_width.div_ceil(256),
+                        height: n,
+                        depth: 1,
+                    },
+                    MTLSize {
+                        width: 256,
+                        height: 1,
+                        depth: 1,
+                    },
+                );
+                self.encode_radix_rows(
+                    ctx,
+                    enc,
+                    start,
+                    ratio,
+                    block_scores,
+                    rows,
+                    [block_width, candidates_stride, n, 0],
+                    [c.index_topk, first, c.candidate_topk, 1],
+                )?;
+            }
+            self.encode_radix_rows(
+                ctx,
+                enc,
+                start,
+                ratio,
+                &rows.select_scores,
+                rows,
+                [width, candidates_stride, n, mask as usize],
+                [c.index_topk, first, c.candidate_topk, 0],
+            )?;
+        }
+        Ok(())
+    }
+
+    /// One `select_radix_rows` dispatch over `n = b[2]` rows (see the kernel
+    /// for the `b`/`c` argument layout).
+    #[allow(clippy::too_many_arguments)]
+    fn encode_radix_rows(
+        &self,
+        ctx: &MetalContext,
+        enc: &KernelEncoder,
+        start: usize,
+        ratio: usize,
+        scores: &MetalTensor,
+        rows: &Rows,
+        b: [usize; 4],
+        c4: [usize; 4],
+    ) -> Result<()> {
+        let c = &self.config;
+        let pso = pipeline(ctx, enc, "select_radix_rows")?;
+        op::require(
+            pso.maxTotalThreadsPerThreadgroup() >= 1024,
+            "radix selection needs 1024-thread threadgroups",
+        )?;
+        enc.set_bytes(
+            0,
+            &[
+                start as u32,
+                ratio as u32,
+                c.index_topk as u32,
+                c.candidate_block as u32,
+            ],
+        );
+        enc.set_bytes(1, &b.map(|v| v as u32));
+        enc.set_bytes(2, &c4.map(|v| v as u32));
+        enc.set_tensor(3, scores);
+        enc.set_tensor(4, &rows.candidates);
+        enc.set_tensor(5, &rows.selected);
+        enc.set_tensor(6, &self.status);
+        enc.dispatch(
+            MTLSize {
+                width: 1,
+                height: b[2],
+                depth: 1,
+            },
+            MTLSize {
+                width: 1024,
+                height: 1,
+                depth: 1,
+            },
+        );
         Ok(())
     }
 

@@ -1140,6 +1140,130 @@ fn index_dispatch(enc: &KernelEncoder, length: usize) {
     );
 }
 
+crate::env_flag!(
+    /// Exact radix top-k for index selection, fed by F32 index scores from `index_heads_rows_ilp` (the scalar kernel's operations, to F32 rounding): decode rows, and prefill chunks past the unpruned selectors' 16K-key domain (batched scores, radix candidate publication and radix top-k over row sub-tiles); disabling restores the per-row scalar index and bitonic sort network for a same-binary A/B. Given the same scores both select the same IDs.
+    default_on select_radix_enabled,
+    "QWEN_V41_SELECT_RADIX"
+);
+
+/// `index_heads_rows_ilp` covers the 32-head x 128-dim index geometry.
+fn index_ilp_supported(c: &Config) -> bool {
+    c.index_heads == 32 && c.index_dim == 128
+}
+
+/// F32 index scores for `n` rows starting at chunk-local row `first` of a
+/// chunk at absolute `start` (`kernel_deepseek_v41_attention_index_heads_rows_
+/// ilp`: `index_heads_rows` operations, 64 keys per threadgroup). Row scores
+/// land at `scores[local * stride ..]`; rows with at most top-k visible keys
+/// skip. Decode is the one-row case (`start` = position, `first` = 0).
+#[allow(clippy::too_many_arguments)]
+fn encode_index_scores_rows_ilp(
+    ctx: &MetalContext,
+    enc: &KernelEncoder,
+    c: &Config,
+    start: usize,
+    ratio: usize,
+    max_length: usize,
+    first: usize,
+    n: usize,
+    stride: usize,
+    query: &MetalTensor,
+    weights: &MetalTensor,
+    keys: &MetalTensor,
+    scores: &MetalTensor,
+) -> Result<()> {
+    op::require(index_ilp_supported(c), "ILP index geometry")?;
+    pipeline(ctx, enc, "index_heads_rows_ilp")?;
+    enc.set_bytes(
+        0,
+        &[
+            start as u32,
+            ratio as u32,
+            c.index_topk as u32,
+            max_length as u32,
+        ],
+    );
+    enc.set_bytes(
+        1,
+        &[
+            c.index_dim as u32,
+            c.index_heads as u32,
+            (c.index_heads * c.index_dim) as u32,
+            c.index_heads as u32,
+        ],
+    );
+    enc.set_bytes(2, &[stride as u32, n as u32, 0, 0]);
+    enc.set_tensor(3, query);
+    enc.set_tensor(4, weights);
+    enc.set_tensor(5, keys);
+    enc.set_tensor(6, scores);
+    enc.set_bytes(7, &(first as u32));
+    enc.dispatch(
+        MTLSize {
+            width: max_length.div_ceil(64),
+            height: n,
+            depth: 1,
+        },
+        MTLSize {
+            width: 256,
+            height: 1,
+            depth: 1,
+        },
+    );
+    Ok(())
+}
+
+/// Exact top-k of one row's index scores (`kernel_deepseek_v41_attention_
+/// select_radix_rows`), written as chronological IDs to `selected`; `mask`
+/// restricts the domain to the row's candidate blocks like the sort path.
+#[allow(clippy::too_many_arguments)]
+fn encode_select_radix_row(
+    ctx: &MetalContext,
+    enc: &KernelEncoder,
+    c: &Config,
+    position: usize,
+    ratio: usize,
+    scores: &MetalTensor,
+    candidates: &MetalTensor,
+    selected: &MetalTensor,
+    status: &MetalTensor,
+    mask: bool,
+) -> Result<()> {
+    let pso = pipeline(ctx, enc, "select_radix_rows")?;
+    op::require(
+        pso.maxTotalThreadsPerThreadgroup() >= 1024,
+        "radix selection needs 1024-thread threadgroups",
+    )?;
+    enc.set_bytes(
+        0,
+        &[
+            position as u32,
+            ratio as u32,
+            c.index_topk as u32,
+            c.candidate_block as u32,
+        ],
+    );
+    enc.set_bytes(1, &[0u32, 0, 1, mask as u32]);
+    enc.set_bytes(2, &[c.index_topk as u32, 0, c.candidate_topk as u32, 0]);
+    enc.set_tensor(3, scores);
+    enc.set_tensor(4, candidates);
+    enc.set_tensor(5, selected);
+    enc.set_tensor(6, status);
+    enc.dispatch(
+        MTLSize {
+            width: 1,
+            height: 1,
+            depth: 1,
+        },
+        MTLSize {
+            width: 1024,
+            height: 1,
+            depth: 1,
+        },
+    );
+    Ok(())
+}
+
 // Bindings 0..10 match the incumbent. Each head's last score slot is scratch.
 fn sink_passes(
     ctx: &MetalContext,
@@ -2429,16 +2553,34 @@ impl Workspace {
                             false,
                         )?;
                     }
-                    pipeline(ctx, enc, "index_heads")?;
-                    enc.set_bytes(
-                        0,
-                        &[length as u32, c.index_dim as u32, c.index_heads as u32, 0],
-                    );
-                    enc.set_tensor(1, &self.index_query);
-                    enc.set_tensor(2, &self.index_weights);
-                    enc.set_tensor(3, &cache.keys);
-                    enc.set_tensor(4, &self.index_scores);
-                    index_dispatch(enc, length);
+                    if select_radix_enabled() && index_ilp_supported(c) {
+                        encode_index_scores_rows_ilp(
+                            ctx,
+                            enc,
+                            c,
+                            position,
+                            ratio,
+                            length,
+                            0,
+                            1,
+                            length,
+                            &self.index_query,
+                            &self.index_weights,
+                            &cache.keys,
+                            &self.index_scores,
+                        )?;
+                    } else {
+                        pipeline(ctx, enc, "index_heads")?;
+                        enc.set_bytes(
+                            0,
+                            &[length as u32, c.index_dim as u32, c.index_heads as u32, 0],
+                        );
+                        enc.set_tensor(1, &self.index_query);
+                        enc.set_tensor(2, &self.index_weights);
+                        enc.set_tensor(3, &cache.keys);
+                        enc.set_tensor(4, &self.index_scores);
+                        index_dispatch(enc, length);
+                    }
                     if !unpruned && self.schedule.candidate_source_layer == Some(id) {
                         let blocks = length.div_ceil(c.candidate_block);
                         let pso = pipeline(ctx, enc, "blocks")?;
@@ -2452,22 +2594,32 @@ impl Workspace {
                     if unpruned {
                         self.select_unpruned(ctx, enc, id, length)?;
                     }
-                    self.sort(
-                        ctx,
-                        enc,
-                        &self.index_scores,
-                        length,
-                        !unpruned
-                            && self
-                                .schedule
-                                .candidate_source_layer
-                                .is_some_and(|source| id > source),
-                    )?;
-                    let pso = pipeline(ctx, enc, "chronological")?;
-                    enc.set_bytes(0, &(selected_count as u32));
-                    enc.set_tensor(1, &self.sort_ids);
-                    enc.set_tensor(2, &self.selected);
-                    dispatch(enc, &pso, selected_count);
+                    let mask = !unpruned
+                        && self
+                            .schedule
+                            .candidate_source_layer
+                            .is_some_and(|source| id > source);
+                    if select_radix_enabled() && selected_count == c.index_topk {
+                        encode_select_radix_row(
+                            ctx,
+                            enc,
+                            c,
+                            position,
+                            ratio,
+                            &self.index_scores,
+                            &self.candidates,
+                            &self.selected,
+                            &self.status,
+                            mask,
+                        )?;
+                    } else {
+                        self.sort(ctx, enc, &self.index_scores, length, mask)?;
+                        let pso = pipeline(ctx, enc, "chronological")?;
+                        enc.set_bytes(0, &(selected_count as u32));
+                        enc.set_tensor(1, &self.sort_ids);
+                        enc.set_tensor(2, &self.selected);
+                        dispatch(enc, &pso, selected_count);
+                    }
                 }
             }
         }

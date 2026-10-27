@@ -299,6 +299,143 @@ fn execute(ctx: &MetalContext, f: impl FnOnce(&KernelEncoder)) {
 }
 
 #[test]
+fn compress_rows_batches_pool_key_rope_and_stores() {
+    let ctx = MetalContext::new().unwrap();
+    let (head_dim, index_dim, pairs) = (512usize, 128usize, 32usize);
+    let groups = 4usize;
+    let group0 = 5usize;
+    let eps = 1e-20f32;
+    let make = |n: usize, seed: usize| {
+        (0..n)
+            .map(|i| ((i * seed % 103) as f32 - 51.0) / 37.0)
+            .collect::<Vec<_>>()
+    };
+    let comp_norm = make(head_dim, 7);
+    let key_norm = make(index_dim, 11);
+    let freq = (0..pairs)
+        .map(|j| 1.0 / 10000f32.powf((2 * j) as f32 / (2 * pairs) as f32))
+        .collect::<Vec<_>>();
+    let key_values = make(index_dim * head_dim, 13);
+    let key_bits = key_values
+        .iter()
+        .map(|v| half::bf16::from_f32(*v).to_bits())
+        .collect::<Vec<u16>>();
+    let key_w = MetalTensor::from_bytes(
+        &ctx,
+        bytemuck::cast_slice(&key_bits),
+        vec![head_dim as u64, index_dim as u64],
+        GgmlType::BF16,
+    )
+    .unwrap();
+    let upload = |values: &[f32]| {
+        MetalTensor::from_bytes(
+            &ctx,
+            bytemuck::cast_slice(values),
+            vec![values.len() as u64],
+            GgmlType::F32,
+        )
+        .unwrap()
+    };
+    for ratio in [1usize, 2] {
+        let rows = groups * ratio;
+        let value = make(rows * head_dim, 17);
+        let gate = make(rows * head_dim, 19);
+        let value_t = upload(&value);
+        let gate_t = upload(&gate);
+        let comp_norm_t = upload(&comp_norm);
+        let key_norm_t = upload(&key_norm);
+        let freq_t = upload(&freq);
+        let out_latent = tensor(&ctx, (group0 + groups) * head_dim, GgmlType::F32).unwrap();
+        let out_key = tensor(&ctx, (group0 + groups) * index_dim, GgmlType::F32).unwrap();
+        execute(&ctx, |enc| {
+            compress_publish_rows(
+                &ctx,
+                enc,
+                &value_t,
+                &gate_t,
+                &comp_norm_t,
+                &key_w,
+                &key_norm_t,
+                &freq_t,
+                &out_key,
+                &out_latent,
+                0,
+                group0,
+                groups,
+                ratio,
+                pairs,
+                eps,
+            )
+            .unwrap();
+        });
+        let actual_latent =
+            &f32_slice(&out_latent).unwrap()[group0 * head_dim..(group0 + groups) * head_dim];
+        let actual_key =
+            &f32_slice(&out_key).unwrap()[group0 * index_dim..(group0 + groups) * index_dim];
+        let mut want_latent = vec![0.0f32; groups * head_dim];
+        let mut want_key = vec![0.0f32; groups * index_dim];
+        for g in 0..groups {
+            let base = g * ratio;
+            let mut latent = vec![0.0f32; head_dim];
+            if ratio == 2 {
+                for d in 0..head_dim {
+                    let s0 = gate[base * head_dim + d];
+                    let s1 = gate[(base + 1) * head_dim + d];
+                    let m = s0.max(s1);
+                    let e0 = (s0 - m).exp();
+                    let e1 = (s1 - m).exp();
+                    let den = e0 + e1;
+                    latent[d] = value[base * head_dim + d] * (e0 / den)
+                        + value[(base + 1) * head_dim + d] * (e1 / den);
+                }
+            } else {
+                latent.copy_from_slice(&value[base * head_dim..(base + 1) * head_dim]);
+            }
+            let sumsq: f32 = latent.iter().map(|x| x * x).sum();
+            let scale = (sumsq / head_dim as f32 + eps).sqrt().recip();
+            for d in 0..head_dim {
+                latent[d] = (latent[d] * scale) * comp_norm[d];
+            }
+            let mut key = vec![0.0f32; index_dim];
+            for out in 0..index_dim {
+                let mut sum = 0.0f32;
+                for d in 0..head_dim {
+                    let w = f32::from_bits((key_bits[out * head_dim + d] as u32) << 16);
+                    sum += w * latent[d];
+                }
+                key[out] = sum;
+            }
+            let sumsq: f32 = key.iter().map(|x| x * x).sum();
+            let scale = (sumsq / index_dim as f32 + eps).sqrt().recip();
+            for d in 0..index_dim {
+                key[d] = (key[d] * scale) * key_norm[d];
+            }
+            let position = (group0 + g) * ratio;
+            let mut rotated_latent = latent.clone();
+            for j in 0..pairs {
+                let off = head_dim - 2 * pairs + 2 * j;
+                let (s, c) = (position as f32 * freq[j]).sin_cos();
+                let (u, v) = (latent[off], latent[off + 1]);
+                rotated_latent[off] = u * c - v * s;
+                rotated_latent[off + 1] = u * s + v * c;
+            }
+            let mut rotated_key = key.clone();
+            for j in 0..pairs {
+                let off = index_dim - 2 * pairs + 2 * j;
+                let (s, c) = (position as f32 * freq[j]).sin_cos();
+                let (u, v) = (key[off], key[off + 1]);
+                rotated_key[off] = u * c - v * s;
+                rotated_key[off + 1] = u * s + v * c;
+            }
+            want_latent[g * head_dim..(g + 1) * head_dim].copy_from_slice(&rotated_latent);
+            want_key[g * index_dim..(g + 1) * index_dim].copy_from_slice(&rotated_key);
+        }
+        close(actual_latent, &want_latent);
+        close(actual_key, &want_key);
+    }
+}
+
+#[test]
 fn exact_dispatch_geometry_census() {
     let ctx = MetalContext::new().unwrap();
     let pso = ctx.pipeline("kernel_deepseek_v41_group_rows").unwrap();

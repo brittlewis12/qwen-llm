@@ -1730,6 +1730,96 @@ impl Workspace {
         Ok(())
     }
 
+    /// The batched publication form needs the 512-wide latent, the 128-wide
+    /// index key, a BF16 key projection, and the row-packed compressor/gate
+    /// inputs the prepare pass already produced.
+    fn compress_rows_supported(&self, id: usize, w: &Weights<'_>) -> bool {
+        let c = &self.config;
+        let ratio = self.schedule.ratio(id);
+        let pairs = c.rope_dim / 2;
+        let Some(compressor) = w.compressor.as_ref() else {
+            return false;
+        };
+        let Some(index) = w.index.as_ref() else {
+            return false;
+        };
+        let Some(key) = index.key.as_ref() else {
+            return false;
+        };
+        c.head_dim == 512
+            && c.index_dim == 128
+            && (ratio == 1 || ratio == 2)
+            && pairs > 0
+            && 2 * pairs <= c.index_dim
+            && compressor.ratio == ratio
+            && key.tensor.dtype == GgmlType::BF16
+            && key.input == c.head_dim
+            && key.output == c.index_dim
+            && self.constants[id].compressor_norm.is_some()
+            && self.constants[id].key_norm.is_some()
+    }
+
+    /// Publish every complete ratio-group whose rows all lie in this batch
+    /// with one dispatch. Returns `(head, body, tail)` row counts; the caller
+    /// keeps the per-row transition for the head/tail so the pending pair
+    /// state and every absolute group boundary stay identical.
+    pub(super) fn publish_owner_rows(
+        &self,
+        ctx: &MetalContext,
+        enc: &KernelEncoder,
+        id: usize,
+        start: usize,
+        rows: usize,
+        w: &Weights<'_>,
+        value: &MetalTensor,
+        gate: &MetalTensor,
+    ) -> Result<(usize, usize, usize)> {
+        let c = &self.config;
+        let ratio = self.schedule.ratio(id);
+        if !self.compress_rows_supported(id, w) {
+            return Ok((0, 0, 0));
+        }
+        let body_start = start + (ratio - start % ratio) % ratio;
+        let body_end = (start + rows) / ratio * ratio;
+        if body_end <= body_start {
+            return Ok((0, 0, 0));
+        }
+        let head = body_start - start;
+        let body = body_end - body_start;
+        let tail = rows - head - body;
+        let constants = &self.constants[id];
+        let comp_norm = constants
+            .compressor_norm
+            .as_ref()
+            .ok_or("missing compressor norm")?;
+        let key_norm = constants.key_norm.as_ref().ok_or("missing key norm")?;
+        let index = w.index.as_ref().ok_or("missing index")?;
+        let key = index.key.as_ref().ok_or("missing key")?;
+        let cache = &self.owners[self
+            .schedule
+            .owner_slot(id)
+            .ok_or("missing publication owner")?];
+        compress_publish_rows(
+            ctx,
+            enc,
+            value,
+            gate,
+            comp_norm,
+            &key.tensor,
+            key_norm,
+            &constants.frequencies,
+            &cache.keys,
+            &cache.compressed,
+            head,
+            body_start / ratio,
+            body / ratio,
+            ratio,
+            c.rope_dim / 2,
+            w.eps,
+        )?;
+        Ok((head, body, tail))
+    }
+
     fn validate_published_rows(
         &self,
         ctx: &MetalContext,

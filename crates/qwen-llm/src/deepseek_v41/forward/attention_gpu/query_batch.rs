@@ -248,6 +248,12 @@ pub(super) fn tile_rows() -> usize {
     })
 }
 
+crate::env_flag!(
+    /// Batches the owner compressor/index publication over complete ratio groups; disabling restores the per-row chain for a same-binary A/B.
+    default_on compress_rows_enabled,
+    "QWEN_V41_COMPRESS_ROWS"
+);
+
 /// The cold Full prefill tile containing an absolute query position. Tiles
 /// restart at each original chunk, even when the width does not divide it.
 fn original_query_tile(
@@ -648,9 +654,10 @@ impl Workspace {
     }
 
     /// Position-ordered compressor, index and selection transitions. For
-    /// unpruned rows the per-row compressor/key publication stays ordered,
-    /// then selection is batched over query tiles. The pruning path (from
-    /// 16,385 visible keys) keeps the incumbent per-row selector.
+    /// unpruned rows complete ratio-groups publish in one dispatch and the
+    /// unaligned head/tail rows keep the per-row transition, then selection
+    /// is batched over query tiles. The pruning path (from 16,385 visible
+    /// keys) keeps the incumbent per-row selector.
     pub(in super::super) fn encode_rows_serial(
         &mut self,
         ctx: &MetalContext,
@@ -673,7 +680,24 @@ impl Workspace {
             && ratio > 0
             && last_length.div_ceil(c.candidate_block) <= c.candidate_topk
             && std::env::var_os("QWEN_V41_SELECT_PER_ROW").is_none();
+        let owner_batch = batched && self.schedule.owns_kv(id) && compress_rows_enabled();
+        let (head, body, _tail) = if owner_batch {
+            self.publish_owner_rows(
+                ctx,
+                enc,
+                id,
+                start,
+                rows.rows,
+                w,
+                &rows.compressor_value,
+                &rows.compressor_gate,
+            )?
+        } else {
+            (0, 0, 0)
+        };
+        let body_end = head + body;
         for row in 0..rows.rows {
+            let publish = body == 0 || row < head || row >= body_end;
             self.encode_batch_row_mode(
                 ctx,
                 enc,
@@ -683,6 +707,7 @@ impl Workspace {
                 &prefill::row(input, hidden, row),
                 rows,
                 row,
+                publish,
                 !batched,
                 mode,
             )?;

@@ -1351,6 +1351,76 @@ fn compress_publish(
     Ok(())
 }
 
+#[repr(C)]
+#[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+struct CompressRowsArgs {
+    ratio: u32,
+    group0: u32,
+    row0: u32,
+    pairs: u32,
+    eps: f32,
+}
+
+/// One threadgroup per completed ratio-group: pool, compressor norm, index
+/// key projection/norm, rope and both cache stores. The caller passes the
+/// full value/gate rows and the owner cache; `row0` is the group's first
+/// chunk row and `group0` its absolute cache row.
+#[allow(clippy::too_many_arguments)]
+fn compress_publish_rows(
+    ctx: &MetalContext,
+    enc: &KernelEncoder,
+    value: &MetalTensor,
+    gate: &MetalTensor,
+    comp_norm: &MetalTensor,
+    key: &MetalTensor,
+    key_norm: &MetalTensor,
+    freq: &MetalTensor,
+    out_key: &MetalTensor,
+    out_latent: &MetalTensor,
+    row0: usize,
+    group0: usize,
+    groups: usize,
+    ratio: usize,
+    pairs: usize,
+    eps: f32,
+) -> Result<()> {
+    if groups == 0 {
+        return Ok(());
+    }
+    pipeline(ctx, enc, "compress_rows")?;
+    enc.set_bytes(
+        0,
+        &CompressRowsArgs {
+            ratio: ratio as u32,
+            group0: group0 as u32,
+            row0: row0 as u32,
+            pairs: pairs as u32,
+            eps,
+        },
+    );
+    enc.set_tensor(1, value);
+    enc.set_tensor(2, gate);
+    enc.set_tensor(3, comp_norm);
+    enc.set_tensor(4, key);
+    enc.set_tensor(5, key_norm);
+    enc.set_tensor(6, freq);
+    enc.set_tensor(7, out_latent);
+    enc.set_tensor(8, out_key);
+    enc.dispatch(
+        MTLSize {
+            width: groups,
+            height: 1,
+            depth: 1,
+        },
+        MTLSize {
+            width: 256,
+            height: 1,
+            depth: 1,
+        },
+    );
+    Ok(())
+}
+
 fn projection(w: &Linear<'_>, input: usize, output: usize) -> Result<()> {
     let t = &w.tensor;
     checked_product(&[input, output])?;
@@ -1983,7 +2053,9 @@ impl Workspace {
         select: bool,
     ) -> Result<()> {
         let mode = self.global_mode(id, position, rows.rows)?;
-        self.encode_batch_row_mode(ctx, enc, id, position, w, input, rows, row, select, mode)
+        self.encode_batch_row_mode(
+            ctx, enc, id, position, w, input, rows, row, true, select, mode,
+        )
     }
 
     fn encode_batch_row_mode(
@@ -1996,6 +2068,7 @@ impl Workspace {
         input: &MetalTensor,
         rows: &Rows,
         row: usize,
+        publish: bool,
         select: bool,
         mode: GlobalKvMode,
     ) -> Result<()> {
@@ -2040,7 +2113,7 @@ impl Workspace {
             prefill::row(&rows.index_weights, self.config.index_heads, row),
         );
         let result = self
-            .encode_inner(
+            .encode_inner_with(
                 ctx,
                 enc,
                 id,
@@ -2048,6 +2121,7 @@ impl Workspace {
                 w,
                 input,
                 Some((rows, row)),
+                publish,
                 select,
                 mode,
             )
@@ -2161,6 +2235,25 @@ impl Workspace {
         select: bool,
         mode: GlobalKvMode,
     ) -> Result<&MetalTensor> {
+        self.encode_inner_with(
+            ctx, enc, id, position, w, input, prepared, true, select, mode,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn encode_inner_with(
+        &mut self,
+        ctx: &MetalContext,
+        enc: &KernelEncoder,
+        id: usize,
+        position: usize,
+        w: &Weights<'_>,
+        input: &MetalTensor,
+        prepared: Option<(&Rows, usize)>,
+        publish: bool,
+        select: bool,
+        mode: GlobalKvMode,
+    ) -> Result<&MetalTensor> {
         op::require(
             !enc.is_concurrent(),
             "GPU attention requires serial encoder",
@@ -2261,7 +2354,7 @@ impl Workspace {
             let cache = &self.owners[owner];
             let ratio = self.schedule.ratio(id);
             let length = (position + 1) / ratio;
-            if self.schedule.owns_kv(id) && mode == GlobalKvMode::Ordinary {
+            if publish && self.schedule.owns_kv(id) && mode == GlobalKvMode::Ordinary {
                 label("attn_owner");
                 self.publish_owner_transition(
                     ctx,

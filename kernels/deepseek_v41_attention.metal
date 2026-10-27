@@ -947,6 +947,126 @@ kernel void kernel_deepseek_v41_attention_compress_publish(
     }
 }
 
+// Batched owner publication: one threadgroup per completed ratio-group.
+// Pools the precomputed compressor value/gate rows, applies the compressor
+// RMS norm, projects and norms the index key, then ropes and stores both
+// cache rows. This replaces the per-row copy/pool/norm/GEMV/publish chain;
+// the arithmetic order matches those kernels where it can, but the
+// reductions are tree-shaped rather than the per-row kernels' own order.
+struct compress_rows_args {
+    uint ratio;
+    uint group0;
+    uint row0;
+    uint pairs;
+    float eps;
+};
+
+static inline float compress_rows_bf16(ushort v) {
+    return as_type<float>((uint)v << 16);
+}
+
+kernel void kernel_deepseek_v41_attention_compress_rows(
+    constant compress_rows_args &a [[buffer(0)]],
+    device const float *value [[buffer(1)]],
+    device const float *gate [[buffer(2)]],
+    device const float *comp_norm [[buffer(3)]],
+    device const ushort *wk [[buffer(4)]],
+    device const float *key_norm [[buffer(5)]],
+    device const float *freq [[buffer(6)]],
+    device float *out_latent [[buffer(7)]],
+    device float *out_key [[buffer(8)]],
+    uint group [[threadgroup_position_in_grid]],
+    uint tid [[thread_index_in_threadgroup]],
+    ushort sg [[simdgroup_index_in_threadgroup]],
+    ushort lane [[thread_index_in_simdgroup]]) {
+    threadgroup float lat[512];
+    threadgroup float key[128];
+    threadgroup float scratch[8];
+    uint base = a.row0 + group * a.ratio;
+    for (uint d = tid; d < 512; d += 256) {
+        float v = value[base * 512 + d];
+        if (a.ratio == 2) {
+            float v1 = value[(base + 1) * 512 + d];
+            float s0 = gate[base * 512 + d];
+            float s1 = gate[(base + 1) * 512 + d];
+            float m = max(s0, s1);
+            float e0 = exp(s0 - m), e1 = exp(s1 - m), den = e0 + e1;
+            v = v * (e0 / den) + v1 * (e1 / den);
+        }
+        lat[d] = v;
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    float ss = 0.0f;
+    for (uint d = tid; d < 512; d += 256) ss += lat[d] * lat[d];
+    ss = simd_sum(ss);
+    if (lane == 0) scratch[sg] = ss;
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    if (tid == 0) {
+        float total = 0.0f;
+        for (uint i = 0; i < 8; ++i) total += scratch[i];
+        scratch[0] = rsqrt(total / 512.0f + a.eps);
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    float latent_scale = scratch[0];
+    for (uint d = tid; d < 512; d += 256) lat[d] = (lat[d] * latent_scale) * comp_norm[d];
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    // One simdgroup per output row; each lane reads its stride-32 float4
+    // slice of the BF16 key projection, matching the mat-vec load shape.
+    for (uint out = sg; out < 128; out += 8) {
+        device const ushort *wrow = wk + (ulong)out * 512;
+        float sum = 0.0f;
+        for (uint v = lane; v < 128; v += 32) {
+            uint d = v * 4;
+            float4 x = float4(
+                compress_rows_bf16(wrow[d]),
+                compress_rows_bf16(wrow[d + 1]),
+                compress_rows_bf16(wrow[d + 2]),
+                compress_rows_bf16(wrow[d + 3]));
+            sum += x.x * lat[d] + x.y * lat[d + 1] + x.z * lat[d + 2] + x.w * lat[d + 3];
+        }
+        sum = simd_sum(sum);
+        if (lane == 0) key[out] = sum;
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    if (tid < 128) {
+        float v = key[tid];
+        float sumsq = simd_sum(v * v);
+        if (lane == 0) scratch[sg] = sumsq;
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    if (tid == 0) {
+        float total = scratch[0] + scratch[1] + scratch[2] + scratch[3];
+        scratch[0] = rsqrt(total / 128.0f + a.eps);
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    if (tid < 128) key[tid] = (key[tid] * scratch[0]) * key_norm[tid];
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    uint position = (a.group0 + group) * a.ratio;
+    device float *olat = out_latent + (ulong)(a.group0 + group) * 512;
+    device float *okey = out_key + (ulong)(a.group0 + group) * 128;
+    for (uint d = tid; d < 512; d += 256) olat[d] = lat[d];
+    if (tid < 128) okey[tid] = key[tid];
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    uint lrope = 512 - 2 * a.pairs;
+    if (tid < a.pairs) {
+        uint off = lrope + 2 * tid;
+        float angle = float(position) * freq[tid];
+        float c = cos(angle), s = sin(angle);
+        float u = lat[off], w = lat[off + 1];
+        olat[off] = u * c - w * s;
+        olat[off + 1] = u * s + w * c;
+    }
+    uint krope = 128 - 2 * a.pairs;
+    if (tid < a.pairs) {
+        uint off = krope + 2 * tid;
+        float angle = float(position) * freq[tid];
+        float c = cos(angle), s = sin(angle);
+        float u = key[off], w = key[off + 1];
+        okey[off] = u * c - w * s;
+        okey[off + 1] = u * s + w * c;
+    }
+}
+
 kernel void kernel_deepseek_v41_attention_softmax_rows(
     constant uint4 &a [[buffer(0)]], constant uint4 &b [[buffer(1)]],
     device const uint *ids [[buffer(5)]], device const float *sink [[buffer(6)]],

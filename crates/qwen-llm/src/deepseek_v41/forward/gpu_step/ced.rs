@@ -658,8 +658,10 @@ impl Workspace {
         let scratch = BlockRows::new(model, self.attention.capacity(), n, None)?;
         let publication = attention_gpu::PublicationRows::new(ctx, c, n)?;
         let mut engrams = Vec::new();
+        let mut late = Vec::new();
         let engram_prepare = profile::Wall("ced_encoder_engram_prepare", [0; 4], profile::start());
-        for slot in &self.engrams {
+        let mut slots = self.engrams.iter();
+        if let Some(slot) = slots.next() {
             op::require(
                 plan.encoder_layers.contains(&slot.layer),
                 "CED decoder Engram",
@@ -672,6 +674,17 @@ impl Workspace {
                 prefill::allocate(ctx, p.output, n, GgmlType::F32)?,
             ));
         }
+        for slot in slots {
+            op::require(
+                plan.encoder_layers.contains(&slot.layer),
+                "CED decoder Engram",
+            )?;
+            let p = &model.layers[slot.layer].engram.as_ref().unwrap().projection;
+            let input = prefill::allocate(ctx, p.input, n, GgmlType::F32)?;
+            let projected = prefill::allocate(ctx, p.output, n, GgmlType::F32)?;
+            engrams.push((slot.layer, input.clone(), projected.clone()));
+            late.push((slot.layer, input));
+        }
         drop(engram_prepare);
         #[cfg(test)]
         reuse::encoder_allocated(&x, &incoming, &scratch);
@@ -679,60 +692,88 @@ impl Workspace {
         cancelled(cancel)?;
         self.attention.begin_ced_encoder(start, n)?;
         drop(prepare);
-        self.ced_command(
-            model,
-            "ced_encoder_rows",
-            [start, n, plan.publication_layer, 0],
-            storage,
-            counters,
-            |this, enc| {
-                for id in plan.encoder_layers.clone() {
-                    cancelled(cancel)?;
-                    if let Some((_, input, projected)) =
-                        engrams.iter().find(|(id0, _, _)| *id0 == id)
-                    {
-                        model.layers[id]
-                            .engram
-                            .as_ref()
-                            .unwrap()
-                            .projection
-                            .encode_rows(enc, input, projected, n)
-                            .map_err(|e| e.to_string())?;
-                        this.engrams
-                            .iter()
-                            .find(|slot| slot.layer == id)
-                            .unwrap()
-                            .gate
-                            .encode(ctx, enc, &x, projected, n)?;
+        let late_layers: Vec<usize> = late.iter().map(|(layer, _)| *layer).collect();
+        let (late_tx, late_rx) = std::sync::mpsc::channel();
+        std::thread::scope(|scope| -> Result<()> {
+            if !late_layers.is_empty() {
+                let engram_rows = &model.engram_rows;
+                scope.spawn(move || {
+                    for layer in late_layers {
+                        let values = engram_rows.decode_tokens(layer, hashes);
+                        if late_tx.send((layer, values)).is_err() {
+                            break;
+                        }
                     }
-                    this.ced_block(model, enc, id, start, &x, &incoming, &scratch)?;
-                }
-                #[cfg(test)]
-                super::super::ced::tests::checkpoint("ced_publication", cancel)?;
-                scratch
-                    .hc
-                    .normalize_input(
+                });
+            }
+            self.ced_command(
+                model,
+                "ced_encoder_rows",
+                [start, n, plan.publication_layer, 0],
+                storage,
+                counters,
+                |this, enc| {
+                    for id in plan.encoder_layers.clone() {
+                        cancelled(cancel)?;
+                        if let Some((_, input)) = late.iter().find(|(layer, _)| *layer == id) {
+                            let (got, values) =
+                                late_rx.recv().map_err(|_| "CED late Engram read failed")?;
+                            op::require(got == id, "CED late Engram order")?;
+                            let join = profile::Wall(
+                                "ced_encoder_engram_late_join",
+                                [0; 4],
+                                profile::start(),
+                            );
+                            write(input, &values?)?;
+                            drop(join);
+                        }
+                        if let Some((_, input, projected)) =
+                            engrams.iter().find(|(id0, _, _)| *id0 == id)
+                        {
+                            model.layers[id]
+                                .engram
+                                .as_ref()
+                                .unwrap()
+                                .projection
+                                .encode_rows(enc, input, projected, n)
+                                .map_err(|e| e.to_string())?;
+                            this.engrams
+                                .iter()
+                                .find(|slot| slot.layer == id)
+                                .unwrap()
+                                .gate
+                                .encode(ctx, enc, &x, projected, n)?;
+                        }
+                        this.ced_block(model, enc, id, start, &x, &incoming, &scratch)?;
+                    }
+                    #[cfg(test)]
+                    super::super::ced::tests::checkpoint("ced_publication", cancel)?;
+                    scratch
+                        .hc
+                        .normalize_input(
+                            ctx,
+                            enc,
+                            c,
+                            &this.constants[plan.publication_layer][2],
+                            &x,
+                            &incoming,
+                        )
+                        .map_err(|e| e.to_string())?;
+                    this.attention.publish_ced_rows(
                         ctx,
                         enc,
-                        c,
-                        &this.constants[plan.publication_layer][2],
-                        &x,
-                        &incoming,
-                    )
-                    .map_err(|e| e.to_string())?;
-                this.attention.publish_ced_rows(
-                    ctx,
-                    enc,
-                    plan.publication_layer,
-                    start,
-                    &model.layers[plan.publication_layer].attention,
-                    &scratch.hc.normalized,
-                    &publication,
-                )?;
-                storage.retain(ctx, enc, start, n, &x, &incoming)?;
-                cancelled(cancel)
-            },
-        )?;
+                        plan.publication_layer,
+                        start,
+                        &model.layers[plan.publication_layer].attention,
+                        &scratch.hc.normalized,
+                        &publication,
+                    )?;
+                    storage.retain(ctx, enc, start, n, &x, &incoming)?;
+                    cancelled(cancel)
+                },
+            )?;
+            Ok(())
+        })?;
         scratch
             .ffn
             .validate_status_layers(plan.encoder_layers.clone())?;

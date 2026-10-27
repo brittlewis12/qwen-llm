@@ -4897,7 +4897,7 @@
     "name": "deepseek_v41::forward::attention_gpu::tests::query_batch::range_execution::prepared_serial_host_encoding_discovery",
     "class": "timing",
     "ignored": true,
-    "reason": "Self-leased opt3 test-profile HOST discovery on current local Metal device, <=4 GiB CPU+Metal; no submission/commit/GPU execution or model; synthetic prepared zero payload; chronological AB/ABBA/BAAB complete serial API durations, not release/GPU qualification."
+    "reason": "Self-leased opt3 test-profile or canonical release HOST discovery, dynamically reported debug assertions/profile; release diagnostic features empty and injection/validation/profilers absent; <=4 GiB CPU+Metal; no submission/commit/GPU execution or model; unchanged synthetic payload and chronological samples, no release performance claim; prior M4 data stays source/profile-specific."
   },
   {
     "target": "lib",
@@ -4911,7 +4911,7 @@
     "name": "deepseek_v41::forward::attention_gpu::tests::query_batch::range_execution::prepared_serial_range_old_host_bitexact_outputs_controls_pending_and_census",
     "class": "gpu",
     "ignored": true,
-    "reason": "Self-leased <=256 MiB BF16 head512/index128 old-host vs range bitwise outputs, controls, pending owner state, bindings, cursors and ordered census; debug validation; no model."
+    "reason": "Self-leased shape-priced <=512 MiB CPU+Metal BF16 H64/head512/index128 old-host vs range parity, not measured fit; existing all-selected/scored/pruned/odd cases plus one N128 tensor64 correctness case with actual route census when capable; bitwise outputs, controls, pending mixed-owner state, bindings and cursors; debug validation, no model or speed assertion."
   },
   {
     "target": "lib",
@@ -4919,5 +4919,26 @@
     "class": "cpu",
     "ignored": false,
     "reason": "Exact Pending/BatchCursor host-only partial/exact range-vs-row encoding, encoder publication gating and atomic refusal after end; no Metal context or execution."
+  },
+  {
+    "target": "lib",
+    "name": "deepseek_v41::forward::ced::qualification::current_pair::range_pilot::range_host_full_model_native_abba",
+    "class": "model",
+    "ignored": true,
+    "reason": "Private release-native actual NAX one-import exact CED old-host/range discriminator; N2048 default (parent first launch only) or explicitly selected N8192, never automatic escalation; warm Full/A/B then primary ABBA, two true TF steps per arm, strict all-vocabulary FLOATBITS vs Full and causal hashes/readiness/status/origin vs old CED; self-lease and parent <=60s/90s process cap, durable private evidence; never performance qualification."
+  },
+  {
+    "target": "lib",
+    "name": "deepseek_v41::forward::ced::qualification::current_pair::range_pilot::frozen_prefix_uses_two_true_next_ids_only",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Host-only private row choice defaults N2048 and accepts explicit N8192 only, with 60s/90s budget; frozen prefix and two real next-ID selection across prompt/continuation boundary; validates needed IDs without retokenization, unused-ID rejection or feedback."
+  },
+  {
+    "target": "lib",
+    "name": "deepseek_v41::forward::attention_gpu::tests::query_batch::range_execution::tensor64_parity_geometry_and_shape_budget",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "CPU-only H64/N128 parity geometry and conservative shapes for paired workspaces/rows/scratch, BF16 synthetic weights/native controls, seed overlap and CPU/staging reserves under a declared 512 MiB bound; not measured memory fit or GPU execution."
   }
 ]

@@ -3,6 +3,9 @@
 use super::*;
 use std::io::{Seek, SeekFrom};
 
+#[cfg(test)]
+mod range_pilot;
+
 const SCHEMA: &str = "v41-ced-current-pair-v2";
 const INPUT_LIMIT: u64 = 16 * 1024 * 1024;
 const P4_SOFT_TARGET: usize = 4_294_967_296;

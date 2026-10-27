@@ -11,7 +11,7 @@ pub(super) use ced::{
     GlobalKvMode, PublicationRows, QueryControlView, QueryControls, SeedRows, ced_group_cpu_bytes,
 };
 #[cfg(test)]
-pub(super) use query_batch::with_f32_attention;
+pub(super) use query_batch::{with_f32_attention, with_old_host_loop};
 #[cfg(test)]
 mod tests;
 

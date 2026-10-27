@@ -45,8 +45,9 @@ Self-leased, ignored local discovery (not GPU execution or model timing):
 QWEN_METAL_LEASE_WAIT=1 cargo test -p qwen-llm --lib deepseek_v41::forward::attention_gpu::tests::query_batch::range_execution::prepared_serial_host_encoding_discovery -- --exact --ignored --nocapture --test-threads=1
 ```
 
-Use the repository opt3 **test** profile, not `--release`; debug assertions
-must be on. Launch without MTL debug/shader validation, capture, injected
+Use the repository opt3 **test** profile or canonical `--release`; the fixture
+reports the selected assertion/profile regime dynamically. Release requires
+no diagnostic features. Launch without MTL debug/shader validation, capture, injected
 profilers, or device wrappers. This fixture needs a local Metal context but
 neither M5 nor a model. Use an external <=15-second execution bound;
 that runtime limit has not been measured or qualified.
@@ -77,6 +78,18 @@ census equality. The second strengthens the existing CED poisoned-compressor
 fixture with old-host/range bitwise and ordered-census comparisons and
 encoded-but-not-finished/public-progress assertions. Neither is a claim of
 Full-vs-dedicated-CED publisher parity.
+
+The native-pilot source adds one `(start=0, n=128)` correctness case to the
+first selector and raises its head count from 16 to 64, retaining every earlier
+case and the valid mixed-owner schedule. On a tensor-capable device it requires
+actual score/PV tensor64 dispatches. It uses a conservative 512 MiB CPU+Metal
+ceiling, shape-pricing paired workspaces/row sets/scratch, synthetic BF16 weights
+and controls, seed overlap, 128 MiB CPU reserve and 64 MiB Metal reserve. This is
+a declared admission bound, not measured memory fit. The CPU selector
+`tests::query_batch::range_execution::tensor64_parity_geometry_and_shape_budget`
+checks the shape bound. Neither the new case nor release HOST discovery has run
+in this source-only lane. The prior M4 packet below remains specific to `5c1b9849`
+and its optimized assertion-enabled test profile.
 
 ## Composition and verification
 

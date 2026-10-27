@@ -6008,6 +6008,8 @@ pub fn encode_topk_logits_softmax_dot_sigmoid_packed_f32(
     Ok(())
 }
 
+/// Buckets route ids by expert with one thread per expert scanning every
+/// rows x topk id (`kernel_moe_route_bucket_slots_f32`).
 pub fn encode_moe_route_bucket_slots_f32(
     ctx: &MetalContext,
     enc: &KernelEncoder,
@@ -6017,6 +6019,41 @@ pub fn encode_moe_route_bucket_slots_f32(
     n_expert: usize,
     n_tokens: usize,
     topk: usize,
+) -> Result<(), MetalError> {
+    encode_route_bucket(
+        ctx, enc, topk_idx, counts, ids, n_expert, n_tokens, topk, false,
+    )
+}
+
+/// Same counts and slot lists as [`encode_moe_route_bucket_slots_f32`]
+/// (bitwise), with one 256-thread threadgroup per expert that counts, scans
+/// and scatters its matches in parallel.
+pub fn encode_moe_route_bucket_slots_parallel_f32(
+    ctx: &MetalContext,
+    enc: &KernelEncoder,
+    topk_idx: &MetalTensor,
+    counts: &MetalTensor,
+    ids: &MetalTensor,
+    n_expert: usize,
+    n_tokens: usize,
+    topk: usize,
+) -> Result<(), MetalError> {
+    encode_route_bucket(
+        ctx, enc, topk_idx, counts, ids, n_expert, n_tokens, topk, true,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn encode_route_bucket(
+    ctx: &MetalContext,
+    enc: &KernelEncoder,
+    topk_idx: &MetalTensor,
+    counts: &MetalTensor,
+    ids: &MetalTensor,
+    n_expert: usize,
+    n_tokens: usize,
+    topk: usize,
+    parallel: bool,
 ) -> Result<(), MetalError> {
     if topk_idx.n_elements() as usize != n_tokens * topk
         || counts.n_elements() as usize != n_expert
@@ -6035,7 +6072,11 @@ pub fn encode_moe_route_bucket_slots_f32(
             ),
         });
     }
-    let pso = ctx.pipeline("kernel_moe_route_bucket_slots_f32")?;
+    let pso = ctx.pipeline(if parallel {
+        "kernel_moe_route_bucket_slots_parallel_f32"
+    } else {
+        "kernel_moe_route_bucket_slots_f32"
+    })?;
     enc.set_pipeline(&pso);
     #[repr(C)]
     #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
@@ -6057,7 +6098,11 @@ pub fn encode_moe_route_bucket_slots_f32(
     enc.set_tensor(3, ids);
     enc.dispatch(
         MTLSize {
-            width: n_expert.div_ceil(256),
+            width: if parallel {
+                n_expert
+            } else {
+                n_expert.div_ceil(256)
+            },
             height: 1,
             depth: 1,
         },
@@ -6074,6 +6119,74 @@ pub fn encode_moe_route_bucket_slots_f32(
 mod tests {
     use super::*;
     use crate::metal::test_support::*;
+
+    #[test]
+    fn parallel_route_bucket_matches_serial_bitwise() {
+        let ctx = MetalContext::new().unwrap();
+        for (n_expert, n_tokens, topk) in [
+            (384usize, 4096usize, 6usize),
+            (384, 3, 6),
+            (8, 37, 2),
+            (160, 2048, 8),
+        ] {
+            // Skewed, repeating expert choices (some experts empty, some hot).
+            let idx: Vec<i32> = (0..n_tokens * topk)
+                .map(|s| ((s * 7919 + s / topk * 31) % (n_expert * 3 / 4 + 1)) as i32)
+                .collect();
+            let top = MetalTensor::from_bytes(
+                &ctx,
+                bytemuck::cast_slice(&idx),
+                vec![(n_tokens * topk) as u64],
+                GgmlType::I32,
+            )
+            .unwrap();
+            let run = |parallel: bool| {
+                let counts = MetalTensor::from_bytes(
+                    &ctx,
+                    bytemuck::cast_slice(&vec![-7i32; n_expert]),
+                    vec![n_expert as u64],
+                    GgmlType::I32,
+                )
+                .unwrap();
+                let ids = MetalTensor::from_bytes(
+                    &ctx,
+                    bytemuck::cast_slice(&vec![-9i32; n_expert * n_tokens]),
+                    vec![(n_expert * n_tokens) as u64],
+                    GgmlType::I32,
+                )
+                .unwrap();
+                let command = ctx.queue.commandBuffer().unwrap();
+                let enc = KernelEncoder::begin(&command);
+                encode_route_bucket(
+                    &ctx, &enc, &top, &counts, &ids, n_expert, n_tokens, topk, parallel,
+                )
+                .unwrap();
+                enc.end();
+                crate::metal::commit_and_wait(&command).unwrap();
+                let read = |t: &MetalTensor, n: usize| unsafe {
+                    std::slice::from_raw_parts(t.buffer.contents().as_ptr().cast::<i32>(), n)
+                        .to_vec()
+                };
+                let counts_v = read(&counts, n_expert);
+                let ids_v = read(&ids, n_expert * n_tokens);
+                // Only each expert's filled prefix is defined output.
+                let filled: Vec<Vec<i32>> = (0..n_expert)
+                    .map(|e| ids_v[e * n_tokens..e * n_tokens + counts_v[e] as usize].to_vec())
+                    .collect();
+                (counts_v, filled)
+            };
+            let serial = run(false);
+            let parallel = run(true);
+            assert_eq!(
+                parallel, serial,
+                "experts={n_expert} tokens={n_tokens} topk={topk}"
+            );
+            assert_eq!(
+                serial.0.iter().map(|&c| c as usize).sum::<usize>(),
+                n_tokens * topk
+            );
+        }
+    }
 
     #[test]
     fn diagnostic_max_abs_marks_uncomparable_inputs_non_finite() {

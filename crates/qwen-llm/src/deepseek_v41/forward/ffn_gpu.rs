@@ -222,6 +222,16 @@ fn folded_combine_enabled() -> bool {
     *FOLDED.get_or_init(|| std::env::var(FFN_COMBINE_ENV).as_deref() != Ok("split"))
 }
 
+/// `serial` buckets the prefill routes with one thread per expert scanning
+/// every rows x topk id; otherwise one threadgroup per expert counts, scans
+/// and scatters in parallel (bitwise-equal output; A/B lever).
+const ROUTE_BUCKET_ENV: &str = "QWEN_V41_ROUTE_BUCKET";
+
+fn route_bucket_parallel() -> bool {
+    static PARALLEL: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *PARALLEL.get_or_init(|| std::env::var(ROUTE_BUCKET_ENV).as_deref() != Ok("serial"))
+}
+
 impl Workspace {
     pub(super) fn new(model: &Forward<'_>) -> std::result::Result<Self, StateError> {
         let c = &model.config;
@@ -862,16 +872,12 @@ impl Workspace {
         let tensor = half && metal::moe_grouped_tensor_selected(ctx);
         let grouped = half || grouped_selected(c, layer, n);
         if grouped {
-            metal::encode_moe_route_bucket_slots_f32(
-                ctx,
-                e.enc(),
-                &b[8],
-                &counts,
-                &b[11],
-                c.experts,
-                n,
-                c.topk,
-            )?;
+            let bucket = if route_bucket_parallel() {
+                metal::encode_moe_route_bucket_slots_parallel_f32
+            } else {
+                metal::encode_moe_route_bucket_slots_f32
+            };
+            bucket(ctx, e.enc(), &b[8], &counts, &b[11], c.experts, n, c.topk)?;
             e.mark(4);
             if tensor {
                 // The caller's half copy of the normalized input when it made

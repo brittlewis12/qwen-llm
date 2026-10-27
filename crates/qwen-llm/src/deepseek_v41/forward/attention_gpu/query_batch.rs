@@ -686,7 +686,14 @@ impl Workspace {
             && ratio > 0
             && last_length.div_ceil(c.candidate_block) <= c.candidate_topk
             && std::env::var_os("QWEN_V41_SELECT_PER_ROW").is_none();
-        let owner_batch = batched && self.schedule.owns_kv(id) && compress_rows_enabled();
+        // ReusePublished replays against a completed authoritative cache; the
+        // per-row path already suppresses its publication for that mode, and
+        // the batch must match it. The split owner itself is an ordinary
+        // producer during the encoder phase only.
+        let owner_batch = batched
+            && mode == GlobalKvMode::Ordinary
+            && self.schedule.owns_kv(id)
+            && compress_rows_enabled();
         let (head, body, _tail) = if owner_batch {
             self.publish_owner_rows(
                 ctx,

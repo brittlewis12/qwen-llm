@@ -1343,7 +1343,20 @@ impl Workspace {
             .kv
             .encode_rows(enc, normalized_u, &scratch.value, scratch.rows)
             .map_err(|e| e.to_string())?;
-        for row in 0..scratch.rows {
+        // Same published arithmetic as the Full path: complete ratio groups
+        // through the batched tile, head/tail rows through the per-row chain.
+        // The CED split owner is ratio 1, so the gate is unused by the batch.
+        let (head, body, _tail) = self.publish_owner_rows(
+            ctx,
+            enc,
+            owner,
+            start,
+            scratch.rows,
+            w,
+            &scratch.value,
+            &self.gate,
+        )?;
+        for row in (0..head).chain(head + body..scratch.rows) {
             self.publish_owner_transition(
                 ctx,
                 enc,

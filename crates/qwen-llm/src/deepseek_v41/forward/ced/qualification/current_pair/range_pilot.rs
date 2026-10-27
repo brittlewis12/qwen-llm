@@ -1,7 +1,6 @@
 //! Same-resident exact CED host-scheduling discriminator, never a speed qualification.
 use super::*;
 
-const CHUNK: usize = 2048;
 const DECODE: usize = 2;
 const RESERVE: u64 = 64 << 20;
 const FULL: PrefillExecution = PrefillExecution::FullForward;
@@ -420,18 +419,29 @@ fn run() -> AResult<()> {
         drop(frozen);
         let references = product(&[2, 3, g.vocab as u64, 4])?;
         let caller = add(&[references, RESERVE])?;
+        let preferred = prefill_rows_for_resident(planned.bytes.resident_bytes());
+        report["encoder_geometry"] = json!({"resident_bytes": planned.bytes.resident_bytes(),
+            "preferred_rows": preferred, "selected_rows": null, "actual_chunk_count": null,
+            "expected_chunk_count": n.div_ceil(preferred),
+            "contract": "normal strict joint admission; refuse pressure-demoted width, never pin or bypass planner"});
+        write_report(&mut file, &report)?;
         budget(start, n)?;
         let cold =
             plan_cold_prefill_with_target(&ctx, &gguf, n, n + DECODE, &[FULL, CED], caller, None)?
                 .into_strict_for_test(ctx.memory_signals())?;
+        report["encoder_geometry"]["selected_rows"] = json!(cold.full_chunk_rows);
+        report["encoder_geometry"]["actual_chunk_count"] = json!(cold.geometry.chunk_count());
+        report["encoder_geometry"]["admitted_input_geometry"] =
+            serde_json::to_value(cold.geometry)?;
+        write_report(&mut file, &report)?;
         ensure!(
             cold.executions == [FULL, CED]
                 && cold.ced.is_some()
-                && cold.full_chunk_rows == CHUNK
-                && cold.geometry.chunk_count() == n / CHUNK
+                && cold.full_chunk_rows == preferred
+                && cold.geometry.chunk_count() == n.div_ceil(preferred)
                 && cold.resident_storage.soft_coalescing_target.is_none()
                 && cold.resident_storage.bytes == planned.bytes,
-            "strict joint Full+CED, common N2048 encoder chunks/default None storage required"
+            "strict joint Full+CED, resident-byte-derived preferred encoder width/default None storage required; pressure-demoted geometry refused"
         );
         let plan = CedPlan::shrinking(
             &planned.config,
@@ -577,6 +587,26 @@ fn run() -> AResult<()> {
     file.sync_all()?;
     drop(lease);
     outcome
+}
+
+#[test]
+fn preferred_encoder_geometry_uses_actual_chunk_ceiling() {
+    for (resident_bytes, width, chunks) in [
+        (217u64 << 30, 4096, [1, 2, 2]),
+        (241u64 << 30, 2048, [1, 4, 3]),
+    ] {
+        let preferred = prefill_rows_for_resident(resident_bytes);
+        assert_eq!(preferred, width);
+        for (n, expected) in [2048usize, 8192, 4097].into_iter().zip(chunks) {
+            let geometry = PrefillGeometry {
+                start: 0,
+                tokens: n,
+                selected_rows: preferred,
+            };
+            assert_eq!(geometry.chunk_count(), expected);
+            assert_eq!(geometry.chunk_count(), n.div_ceil(preferred));
+        }
+    }
 }
 
 #[test]

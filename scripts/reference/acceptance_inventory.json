@@ -4940,5 +4940,12 @@
     "class": "cpu",
     "ignored": false,
     "reason": "CPU-only H64/N128 parity geometry and conservative shapes for paired workspaces/rows/scratch, BF16 synthetic weights/native controls, seed overlap and CPU/staging reserves under a declared 512 MiB bound; not measured memory fit or GPU execution."
+  },
+  {
+    "target": "lib",
+    "name": "deepseek_v41::forward::ced::qualification::current_pair::range_pilot::preferred_encoder_geometry_uses_actual_chunk_ceiling",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "CPU-only production resident-byte-derived preferred encoder width and actual ceil chunk counts for N2048/N8192 and a nonmultiple; selected width may exceed prompt length, without pinning production geometry or bypassing admission."
   }
 ]

@@ -1,8 +1,9 @@
 # Exact CED native range discriminator
 
-Source-only checkpoint based on `0c5b4589eb10feea4fc79cc19f14bea8033eeb70`
-(qualified exact baseline plus range execution). No Cargo, GPU, model import,
-SSH, remote execution, test-profile build or LTO run in this lane.
+Checkpoint based on `0c5b4589eb10feea4fc79cc19f14bea8033eeb70`
+(qualified exact baseline plus range execution). The initial checkpoint used
+source checks only; follow-up verification is recorded separately. No GPU,
+model import, SSH, remote execution, test-profile build or LTO run in this lane.
 
 ## Selectors and launch contract
 
@@ -12,10 +13,11 @@ Ignored actual-model selector:
 deepseek_v41::forward::ced::qualification::current_pair::range_pilot::range_host_full_model_native_abba
 ```
 
-New CPU-only selectors (implemented, not compiled/run here):
+New CPU-only selectors (not executed here):
 
 ```text
 deepseek_v41::forward::ced::qualification::current_pair::range_pilot::frozen_prefix_uses_two_true_next_ids_only
+deepseek_v41::forward::ced::qualification::current_pair::range_pilot::preferred_encoder_geometry_uses_actual_chunk_ceiling
 deepseek_v41::forward::attention_gpu::tests::query_batch::range_execution::tensor64_parity_geometry_and_shape_budget
 ```
 
@@ -59,8 +61,14 @@ IDs from prompt concatenated with continuation are selected once; no
 retokenization, sampling, feedback, filtering or retries.
 
 One resident GGUF import/binding, one live KV state at a time, capacity N+2,
-common default None storage mapping and fixed 2048-row encoder chunks (one
-at N2048, four at N8192).
+common default None storage mapping. Preferred encoder width is derived through
+the production `prefill_rows_for_resident(planned.bytes.resident_bytes())`:
+normally 4096 for GSQ at <=240 GiB resident, matching the qualified baseline.
+N2048 then has one actual encoder chunk despite selected width 4096; N8192
+normally has two 4096-row chunks. Counts use `N.div_ceil(preferred)`.
+Preferred width, selected width and actual chunk count are synced before the
+geometry gate. The private experimental control refuses pressure-demoted widths;
+it does not pin a width, weaken normal admission or change production planning.
 The strict cold plan requests BOTH Full and CED with RequiredFullCed admission,
 not a reused Full-only plan. Runtime admission refreshes before each new state;
 production allocation and execution gates remain active. Only the existing
@@ -106,11 +114,11 @@ a global model authenticity assertion.
 Publisher eligibility repair remains out of scope: the inherited unconditional
 CDF publication rollback caveat still applies; N8192 is an explicit private
 follow-up, not newly qualified by adding the selector. No bounded-window/PV-axis/compact-grid implementation,
-Engram, overlap, decoder batch-width or FFN change is introduced. Compile/type
-checking and all CPU, Metal, native HOST and actual-model execution remain for
-the parent. Earlier M4/5c1b HOST results are not relabeled as release or M5 data.
+Engram, overlap, decoder batch-width or FFN change is introduced. All CPU-test,
+Metal, native HOST and actual-model execution remain for the parent. Earlier
+M4/5c1b HOST results are not relabeled as release or M5 data.
 
-Source checks: rustfmt and whitespace checks; 14 offline model-free V4.1
+Initial source checks: rustfmt and whitespace checks; 14 offline model-free V4.1
 source-contract checks; acceptance inventory schema and 15 corruption-control
 self-tests; identity-gate registry and generated environment inventory checks.
 These do not compile/type-check the new Rust tests or validate hardware behavior.
@@ -121,3 +129,24 @@ overlap). Adding 128 MiB CPU and 64 MiB Metal reserves gives 392,944,656 bytes,
 below the declared 512 MiB ceiling. This is not execution of the Rust helper,
 actual-device allocator pricing or measured memory fit; those checks remain
 mandatory in the parent's CPU/Metal runs.
+
+## Preferred-geometry follow-up
+
+Parent review identified that the initial fixed-2048 assertion did not match
+the normal planner preference for the supplied GSQ resident size. The fixture
+now derives that preference from the actual plan and refuses a pressure-demoted
+selected width only after syncing the preferred/selected/actual geometry. The
+production planner and strict joint admission are unchanged; CedPlan continues
+to use the actual selected width. The new CPU test covers selected width larger
+than N, N8192 counts and ceiling division at a nonmultiple.
+
+One permitted local `cargo check --offline --release -p qwen-llm --tests` passes
+under fail-fast `scripts/bench/with-metal-lease`, using the parent's specified
+`/Users/tito/.cache/qwen-llm/cargo-target`. Controller elapsed time is 26.49s,
+exit 0, no timeout, signals or remaining owned processes. Raw output and
+controller metadata remain private outside the checkout. This type-checks the
+new Rust tests; it does not build/link a test executable, run tests, exercise
+Metal/model execution or establish native performance. Local warnings include
+the unsupported Metal 4.1 compiler probe and existing deprecated/dead/unused
+items; no diagnostic reports a new fixture type error. Final rustfmt, whitespace,
+acceptance schema/self-tests and environment-reference checks also pass.

@@ -423,8 +423,11 @@ impl HalfScratch {
 }
 
 crate::env_flag!(
-    /// Routes Q5_K dense rows through the dedicated 64x64 mat_mat tensor tile; `QWEN_V41_Q5K_MATMAT=0` restores the generic dense tensor path.
-    default_on q5k_matmat_enabled,
+    /// Routes Q5_K dense rows through the dedicated 64x64 mat_mat tensor tile and its
+    /// n16/n64 simdgroup variants; `QWEN_V41_Q5K_MATMAT=1` opts in. The dedicated path
+    /// is cosine-gated (>= 0.999), not bitwise-equal to the generic dense tensor tile,
+    /// so it cannot be the default while the Full/CED pair requires a bitwise endpoint.
+    default_off q5k_matmat_enabled,
     "QWEN_V41_Q5K_MATMAT"
 );
 

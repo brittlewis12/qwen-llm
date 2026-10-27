@@ -1244,7 +1244,6 @@ impl Workspace {
             backing: None,
         };
         if !arithmetic.scalar() && batch_selection(plan)?.layers != 0 {
-            #[cfg(not(test))]
             self.ced_decoder_groups_pipelined(
                 model,
                 plan,
@@ -1253,8 +1252,6 @@ impl Workspace {
                 &mut counters,
                 &mut pool,
             )?;
-            #[cfg(test)]
-            self.ced_decoder_groups(model, plan, cancel, &mut storage, &mut counters, &mut pool)?;
         } else {
             for layer in &plan.decoder {
                 let mut fuse_seed = !arithmetic.scalar()

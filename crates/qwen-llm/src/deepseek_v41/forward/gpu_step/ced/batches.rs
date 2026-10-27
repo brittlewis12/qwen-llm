@@ -330,14 +330,12 @@ impl Workspace {
     }
 }
 
-#[cfg(not(test))]
 struct PendingGroup {
     command: super::PendingCed,
     units: Vec<Unit>,
     statuses: Vec<StatusUnit>,
 }
 
-#[cfg(not(test))]
 impl Workspace {
     /// One-group lookahead: submit group N+1 before waiting N. The command count
     /// and arithmetic are unchanged; the cursor is retired speculatively and the

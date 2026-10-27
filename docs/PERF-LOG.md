@@ -6,6 +6,25 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the current state and evidence index.
 
+## 2026-10-26 - V4.1 Prefill +2.0%: All-Head Tensor Attention Tile
+
+- The 16-head score/PV tile ran four threadgroups per query row and gathered
+  each key row once per head block. One threadgroup now handles all 64 heads:
+  Q 16 KiB + K 8 KiB + the 32x64 score block 8 KiB at the 32 KiB limit, four
+  128-wide latent chunks accumulating into one cooperative tensor. Score and PV
+  gather each key row once per panel. `QWEN_V41_SINK_TENSOR64=0` restores the
+  16-head blocks.
+- Stage `prefill_attention_tiles` 4,051.0 -> 3,700.7 ms (two-run sum, -8.6%).
+- Same-binary 8K with a 180 s inter-arm cooldown, N C C N x2: new
+  918.88/918.43 and 918.03/916.91 tok/s, control 900.63/899.68 and
+  900.58/899.76, **+1.99%**, every sample stable.
+- The first build bound a scalar grid position, so every threadgroup ran row 0;
+  the endpoint caught it and `uint2 group`/`group.y` fixed it. The raw witness
+  now compares the 64-head score/PV with tensor32 across the fixture, and the
+  2K greedy endpoint is byte-identical.
+- [Packet](bench/2026-10-26-v41-attn64.md). Raw:
+  `metagross:~/qwen-runs/2026-10-26-v41-attn64/`.
+
 ## 2026-10-26 - V4.1 Prefill: Batched Owner Compressor Publication
 
 - Each KV-source layer published compressed rows one at a time (even/odd

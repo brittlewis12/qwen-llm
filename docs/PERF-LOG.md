@@ -6,6 +6,24 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the current state and evidence index.
 
+## 2026-10-26 - V4.1 Prefill +2.5%: Dedicated Q5_K Tensor Tile
+
+- V4.1 prefill already used a dense tensor route for Q5_K but only its
+  32-query narrow form. The dedicated 64-query x 64-output x 32-K Q5_K tensor
+  GEMM is now the default: 4 KiB activation + 4 KiB Q5_K weight tiles in
+  threadgroup memory, a 64x64 F32 cooperative accumulator, and one 16-element
+  Q5_K subtile per thread. It covers output_b, q_b, output_a and the shared
+  expert.
+- Stage `finish_post` 2,214.0 -> 2,081.1 ms, `prepare` 1,317.4 -> 1,114.2 ms
+  and `ffn` 6,227.2 -> 6,156.8 ms (two-run sums); tiles/serial/HC unchanged.
+- Same-binary 8K N C C N x2 with 180 s inter-arm cooldowns: dedicated
+  1,046.33/1,045.43 and 1,053.20/1,052.48 tok/s, generic 1,022.70/1,023.20 and
+  1,024.35/1,023.30, **+2.54%**, all samples stable.
+- 2K greedy endpoint byte-identical. `QWEN_V41_Q5K_MATMAT=0` restores the
+  generic dense path; `QWEN_MATMAT_Q5_K_TENSOR=0` selects the simdgroup form.
+- [Packet](bench/2026-10-26-v41-q5k-tensor.md). Raw:
+  `metagross:~/qwen-runs/2026-10-26-v41-q5k-matmat/`.
+
 ## 2026-10-26 - V4.1 Prefill +11.4%: Tensor Index-Score Rows
 
 - `index_heads_rows` gave each simdgroup eight keys and reloaded the row query

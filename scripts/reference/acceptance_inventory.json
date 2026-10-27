@@ -897,6 +897,27 @@
   },
   {
     "target": "lib",
+    "name": "deepseek_v41::forward::attention_gpu::tests::compress_rows_batches_pool_key_rope_and_stores",
+    "class": "gpu",
+    "ignored": false,
+    "reason": "Metal context, allocation or dispatch witness; parent GPU lane only."
+  },
+  {
+    "target": "lib",
+    "name": "deepseek_v41::forward::attention_gpu::tests::index_scores_tensor_matches_index_heads_rows",
+    "class": "gpu",
+    "ignored": false,
+    "reason": "Metal context, allocation or dispatch witness; parent GPU lane only."
+  },
+  {
+    "target": "lib",
+    "name": "deepseek_v41::forward::attention_gpu::tests::f32_pv_batch::tensor64_sink_tile_matches_tensor32_sink",
+    "class": "gpu",
+    "ignored": false,
+    "reason": "Metal context, allocation or dispatch witness; parent GPU lane only."
+  },
+  {
+    "target": "lib",
     "name": "deepseek_v41::forward::attention_gpu::tests::f32_pv_batch::f32_pv_batch_correctness",
     "class": "gpu",
     "ignored": false,

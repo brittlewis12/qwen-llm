@@ -86,6 +86,7 @@ fn host_buffer_elements(c: &Config, n: usize) -> Vec<usize> {
         c.heads * c.head_dim * c.output_rank,
         c.output_rank * c.hidden,
     ]);
+    sizes.retain(|&n| n > 0);
     sizes
 }
 
@@ -98,10 +99,9 @@ fn host_discovery_geometry_and_conservative_peak_fit_four_gib() {
     );
     no_owner().validate().unwrap();
     for n in [128, 4096] {
-        let metal: u64 = host_buffer_elements(&c, n)
-            .into_iter()
-            .map(|n| n as u64 * 4 + 65536)
-            .sum();
+        let sizes = host_buffer_elements(&c, n);
+        assert!(sizes.iter().all(|&elements| elements > 0));
+        let metal: u64 = sizes.into_iter().map(|n| n as u64 * 4 + 65536).sum();
         assert!(metal + (512 << 20) < 4 << 30);
     }
 }
@@ -258,7 +258,7 @@ fn payload(t: &MetalTensor) -> Vec<u32> {
 fn prepared_serial_range_old_host_bitexact_outputs_controls_pending_and_census() {
     assert_eq!(std::env::var("MTL_DEBUG_LAYER").as_deref(), Ok("1"));
     assert!(std::env::var_os("QWEN_V41_SELECT_PER_ROW").is_none());
-    assert!(super::super::super::query_batch::compress_rows_enabled());
+    assert!(crate::env_flag::read_default_on("QWEN_V41_COMPRESS_ROWS"));
     let _lease = metal::acquire_metal_benchmark_lease().unwrap();
     let ctx = MetalContext::new().unwrap();
     let c = Config {

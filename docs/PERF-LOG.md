@@ -6,6 +6,26 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the current state and evidence index.
 
+## 2026-10-26 - V4.1 Prefill: Batched Owner Compressor Publication
+
+- Each KV-source layer published compressed rows one at a time (even/odd
+  copies, pool, compressor norm, index-key GEMV, key/latent rope+store). One
+  threadgroup now handles a complete ratio-group: pool, norm, key projection,
+  key norm, rope and both cache stores. Head/tail rows keep the per-row
+  transition so the pending pair and absolute group boundaries are unchanged.
+- Stage serial span 5,344.6 -> 4,292.1 ms (two 8K calls); per owner layer-chunk
+  144.7 -> 82.6 ms at ratio 2 and 242.6 -> 165.2 at ratio 1. Index-only
+  selection lines are unchanged; the remaining serial is selection.
+- Same-binary 8K: adjacent control -> new 870.0 -> 897.4/897.5 tok/s (+3.2%),
+  third rep 877.9 (+0.9%). The reverse-order campaign is confounded by a
+  monotonic thermal soak (last control 794.3); single-call and sustained
+  estimates stay separate.
+- 2K endpoint (12 greedy tokens) byte-identical; new GPU witness vs CPU
+  reference for ratio 1/2; 93 attention tests pass. Default on;
+  `QWEN_V41_COMPRESS_ROWS=0` rolls back.
+- [Packet](bench/2026-10-26-v41-compress-rows.md). Raw:
+  `metagross:~/qwen-runs/2026-10-26-v41-compress-rows/`.
+
 ## 2026-10-26 - V4.1 Decode +4.3-4.7%: GPU Starts Before Engram Rows And Encoding Finish
 
 - Each decode step read the token's Engram rows (~0.28 ms), encoded all 40

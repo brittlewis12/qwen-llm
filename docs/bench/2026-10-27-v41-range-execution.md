@@ -36,6 +36,7 @@ query_batch::range_tests::old_host_override_is_nested_panic_safe_and_thread_loca
 ced::tests::pending_checked_ranges_match_rows_and_refuse_after_end_atomically
 ced::tests::pending_ranges_encode_without_finishing_coverage_completion_or_group_readiness
 tests::query_batch::range_execution::host_discovery_geometry_and_conservative_peak_fit_four_gib
+tests::query_batch::range_execution::range_parity_schedule_keeps_ratio_two_and_ratio_one_candidate_ownership
 ```
 
 Self-leased, ignored local discovery (not GPU execution or model timing):

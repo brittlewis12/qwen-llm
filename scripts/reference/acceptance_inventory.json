@@ -4866,6 +4866,13 @@
   },
   {
     "target": "lib",
+    "name": "deepseek_v41::forward::attention_gpu::tests::query_batch::range_execution::range_parity_schedule_keeps_ratio_two_and_ratio_one_candidate_ownership",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Validate the actual Metal parity fixture schedule: ratio-two publication plus a distinct ratio-one candidate owner and follower reindexing; no Metal context or execution."
+  },
+  {
+    "target": "lib",
     "name": "deepseek_v41::forward::attention_gpu::tests::query_batch::range_execution::prepared_serial_range_old_host_bitexact_outputs_controls_pending_and_census",
     "class": "gpu",
     "ignored": true,

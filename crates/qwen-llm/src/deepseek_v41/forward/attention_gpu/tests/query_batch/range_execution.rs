@@ -36,6 +36,26 @@ fn no_owner() -> Schedule {
     }
 }
 
+fn parity_schedule() -> Schedule {
+    Schedule {
+        layers: 6,
+        kv_source_layers: vec![1, 3],
+        index_source_layers: vec![1, 3, 5],
+        compression_ratios: vec![0, 2, 2, 1, 1, 1],
+        candidate_source_layer: Some(3),
+    }
+}
+
+#[test]
+fn range_parity_schedule_keeps_ratio_two_and_ratio_one_candidate_ownership() {
+    let schedule = parity_schedule();
+    schedule.validate().unwrap();
+    assert!(schedule.owns_kv(1) && schedule.ratio(1) == 2);
+    assert_eq!(schedule.candidate_source_layer, Some(3));
+    assert!(schedule.owns_kv(3) && schedule.ratio(3) == 1);
+    assert!(schedule.produces_index(5) && !schedule.owns_kv(5));
+}
+
 fn host_geometry() -> Config {
     Config {
         hidden: 32,
@@ -248,13 +268,8 @@ fn prepared_serial_range_old_host_bitexact_outputs_controls_pending_and_census()
         rope_dim: 64,
         ..config()
     };
-    let s = Schedule {
-        layers: 4,
-        kv_source_layers: vec![1],
-        index_source_layers: vec![1, 3],
-        compression_ratios: vec![0, 2, 2, 2],
-        candidate_source_layer: Some(1),
-    };
+    let s = parity_schedule();
+    s.validate().unwrap();
     // All-selected, scored top-k, pruned scalar selection, odd chunk head/body/tail.
     for (start, n) in [(0, 3), (3, 4), (7, 4), (17, 4)] {
         let capacity = start + n;

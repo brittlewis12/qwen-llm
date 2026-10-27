@@ -525,8 +525,8 @@ impl Workspace {
     ) -> Result<()> {
         #[cfg(test)]
         let _completion_fault = super::super::ced::tests::completion_fault(pending.role);
-        let wait = pending.submitted_at.elapsed();
         let result = metal::wait_completed(&pending.command).map_err(|e| e.to_string());
+        let wait = pending.submitted_at.elapsed();
         storage.observe(model.ctx);
         self.commands += 1;
         if let Some(encode_ms) = pending.encode_ms {

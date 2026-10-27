@@ -1,7 +1,11 @@
 use super::super::ced::{Arithmetic, CedCounters};
 use super::super::ced_plan::{CedPlan, chunk_views, row_view};
 use super::*;
+use objc2::rc::Retained;
+use objc2::runtime::ProtocolObject;
+use objc2_metal::MTLCommandBuffer;
 use std::ops::Range;
+use std::time::Instant;
 
 mod batches;
 
@@ -465,12 +469,19 @@ impl DecoderRowsPool {
     }
 }
 
+struct PendingCed {
+    command: Retained<ProtocolObject<dyn MTLCommandBuffer>>,
+    role: &'static str,
+    dimensions: [usize; 4],
+    encode_ms: Option<f64>,
+    submitted_at: Instant,
+}
 impl Workspace {
     pub(in super::super) fn abort_ced(&mut self) {
         self.attention.abort_ced();
     }
 
-    fn ced_command(
+    fn ced_submit(
         &mut self,
         model: &Forward<'_>,
         role: &'static str,
@@ -478,7 +489,7 @@ impl Workspace {
         storage: &Storage,
         counters: &mut CedCounters,
         encode: impl FnOnce(&mut Self, &KernelEncoder) -> Result<()>,
-    ) -> Result<()> {
+    ) -> Result<PendingCed> {
         let started = profile::start();
         let command = model
             .ctx
@@ -490,27 +501,49 @@ impl Workspace {
         enc.end();
         storage.observe(model.ctx);
         encoded?;
-        #[cfg(test)]
-        let _completion_fault = super::super::ced::tests::completion_fault(role);
+        let encode_ms = started.map(|s| s.elapsed().as_secs_f64() * 1000.0);
         counters.encoded_commands = counters
             .encoded_commands
             .checked_add(1)
             .ok_or("CED command overflow")?;
-        let encode_ms = started.map(|s| s.elapsed().as_secs_f64() * 1000.0);
-        let wait = std::time::Instant::now();
-        let result = metal::commit_and_wait(&command).map_err(|e| e.to_string());
+        command.commit();
+        Ok(PendingCed {
+            command,
+            role,
+            dimensions,
+            encode_ms,
+            submitted_at: Instant::now(),
+        })
+    }
+
+    fn ced_wait(
+        &mut self,
+        model: &Forward<'_>,
+        pending: PendingCed,
+        storage: &Storage,
+        counters: &mut CedCounters,
+    ) -> Result<()> {
+        #[cfg(test)]
+        let _completion_fault = super::super::ced::tests::completion_fault(pending.role);
+        let wait = pending.submitted_at.elapsed();
+        let result = metal::wait_completed(&pending.command).map_err(|e| e.to_string());
         storage.observe(model.ctx);
         self.commands += 1;
-        if let Some(encode_ms) = encode_ms {
+        if let Some(encode_ms) = pending.encode_ms {
             profile::submitted_with_driver_scheduling(
-                role,
-                dimensions,
+                pending.role,
+                pending.dimensions,
                 encode_ms,
-                wait.elapsed().as_secs_f64() * 1000.0,
+                wait.as_secs_f64() * 1000.0,
                 result.is_ok(),
-                command.GPUStartTime(),
-                command.GPUEndTime(),
-                || (command.kernelStartTime(), command.kernelEndTime()),
+                pending.command.GPUStartTime(),
+                pending.command.GPUEndTime(),
+                || {
+                    (
+                        pending.command.kernelStartTime(),
+                        pending.command.kernelEndTime(),
+                    )
+                },
             );
         }
         result?;
@@ -519,6 +552,19 @@ impl Workspace {
             .checked_add(1)
             .ok_or("CED command overflow")?;
         Ok(())
+    }
+
+    fn ced_command(
+        &mut self,
+        model: &Forward<'_>,
+        role: &'static str,
+        dimensions: [usize; 4],
+        storage: &Storage,
+        counters: &mut CedCounters,
+        encode: impl FnOnce(&mut Self, &KernelEncoder) -> Result<()>,
+    ) -> Result<()> {
+        let pending = self.ced_submit(model, role, dimensions, storage, counters, encode)?;
+        self.ced_wait(model, pending, storage, counters)
     }
 
     fn ced_block(
@@ -1198,6 +1244,16 @@ impl Workspace {
             backing: None,
         };
         if !arithmetic.scalar() && batch_selection(plan)?.layers != 0 {
+            #[cfg(not(test))]
+            self.ced_decoder_groups_pipelined(
+                model,
+                plan,
+                cancel,
+                &mut storage,
+                &mut counters,
+                &mut pool,
+            )?;
+            #[cfg(test)]
             self.ced_decoder_groups(model, plan, cancel, &mut storage, &mut counters, &mut pool)?;
         } else {
             for layer in &plan.decoder {

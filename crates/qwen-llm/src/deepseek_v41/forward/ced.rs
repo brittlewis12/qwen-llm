@@ -345,7 +345,8 @@ pub(super) fn estimate_from_parts(
         super::ced_plan::batches::maximum_status_words(plan, batch_layers)
             .map_err(|e| e.to_string())?
     };
-    let batch_status = price(row_bytes(1, batch_words)?)?;
+    // One-group lookahead keeps two status slots live.
+    let batch_status = price(row_bytes(1, batch_words.saturating_mul(2))?)?;
     let batch_cpu = if batch_layers == 0 {
         0
     } else {

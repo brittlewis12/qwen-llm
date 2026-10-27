@@ -993,6 +993,40 @@ impl Workspace {
         Ok(())
     }
 
+    pub(in super::super) fn retire_ced_group_speculative(
+        &mut self,
+        generation: u64,
+        layers: Range<usize>,
+    ) -> Result<()> {
+        let ced = self.ced.as_mut().ok_or("CED not active")?;
+        ced.validate_group(generation, &layers)?;
+        let g = ced.group.as_ref().unwrap();
+        let coverage = g
+            .coverage
+            .as_ref()
+            .ok_or("CED batch controls missing")?
+            .clone();
+        let mut coverage = coverage
+            .lock()
+            .map_err(|_| "CED control coverage poisoned")?;
+        for p in &g.units {
+            if let Phase::Decoder(_) = p.phase {
+                let v = p.controls.as_ref().ok_or("CED staged controls missing")?;
+                op::require(
+                    v.range == p.range && Arc::ptr_eq(&v.coverage, g.coverage.as_ref().unwrap()),
+                    "CED staged controls range/storage",
+                )?;
+            }
+        }
+        for p in &g.units {
+            if let Phase::Decoder(id) = p.phase {
+                coverage.complete(p.range.clone(), &self.schedule, id);
+            }
+        }
+        ced.publish_group();
+        Ok(())
+    }
+
     pub(in super::super) fn encode_ced_status_copy(
         &self,
         ctx: &MetalContext,
@@ -1572,7 +1606,7 @@ impl Workspace {
         Ok(())
     }
 
-    fn checked_ced_status(&self) -> Result<()> {
+    pub(in super::super) fn checked_ced_status(&self) -> Result<()> {
         // Caller must first wait for successful command completion and check FFN
         // status. Encoding intent alone never changes a completed frontier.
         let status = unsafe {

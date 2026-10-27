@@ -456,6 +456,192 @@ fn ced_rows_publication_only_poisoned_history_and_borrowed_controls() {
 
 #[test]
 #[ignore = "requires explicit Metal benchmark lease and debug layer"]
+fn ced_owner_rows_reuse_preserves_published_cache_with_ordinary_batch_control() {
+    assert_eq!(std::env::var("MTL_DEBUG_LAYER").as_deref(), Ok("1"));
+    assert_eq!(std::env::var("QWEN_METAL_LEASE_WAIT").as_deref(), Ok("1"));
+    assert!(std::env::var_os("QWEN_V41_SELECT_PER_ROW").is_none());
+    let _lease = metal::acquire_metal_benchmark_lease().expect("CED GPU lease");
+    let ctx = MetalContext::new().unwrap();
+    let c = Config {
+        hidden: 32,
+        heads: 1,
+        head_dim: 512,
+        query_rank: 32,
+        output_rank: 32,
+        groups: 1,
+        index_heads: 1,
+        index_dim: 128,
+        index_topk: 8,
+        window: 2,
+        rope_dim: 64,
+        candidate_block: 2,
+        candidate_topk: 4,
+        norm_eps: 1e-6,
+        ..Config::default()
+    };
+    let schedule = Schedule {
+        layers: 3,
+        kv_source_layers: vec![0, 1],
+        index_source_layers: vec![0, 1, 2],
+        compression_ratios: vec![2, 1, 1],
+        candidate_source_layer: Some(1),
+    };
+    let (n, capacity) = (7, 8);
+    let plan = CedPlan::shrinking(
+        &c,
+        &schedule,
+        &engram::HashConfig {
+            layers: Vec::new(),
+            ..engram::HashConfig::default()
+        },
+        &CedRequest::cold(n, capacity),
+    )
+    .unwrap();
+    let weights: Vec<_> = (0..schedule.layers)
+        .map(|id| scheduled_weights(&ctx, &c, &schedule, id, GgmlType::BF16))
+        .collect();
+    let refs = weights.iter().collect::<Vec<_>>();
+    let input: Vec<_> = (0..schedule.layers)
+        .map(|id| upload(&ctx, &values(&c, n, id), vec![c.hidden as u64, n as u64]).unwrap())
+        .collect();
+    let chunk = |id: usize, range: std::ops::Range<usize>| {
+        input[id].view_subrange(
+            (range.start * c.hidden) as u64,
+            vec![c.hidden as u64, range.len() as u64],
+        )
+    };
+    let kernel = "kernel_deepseek_v41_attention_compress_rows";
+    let mut ordinary = Workspace::new_with_schedule(&ctx, &c, capacity, &refs, &schedule).unwrap();
+    metal::dispatch_census_begin();
+    // The second chunk has both an unaligned ratio-two head and tail.
+    for range in [0..3, 3..n] {
+        let rows = Rows::new(&ctx, &c, capacity, range.len()).unwrap();
+        ordinary.begin_batch(range.start, range.len()).unwrap();
+        execute(&ctx, |enc| {
+            for (id, w) in weights.iter().enumerate() {
+                ordinary
+                    .encode_rows(
+                        &ctx,
+                        enc,
+                        id,
+                        range.start,
+                        w,
+                        &chunk(id, range.clone()),
+                        &rows,
+                    )
+                    .unwrap();
+            }
+        });
+    }
+    let census = metal::dispatch_census_take();
+    assert_eq!(
+        census
+            .iter()
+            .filter(|d| d.kernel == kernel)
+            .map(|d| (d.grid_width, d.grid_height, d.grid_depth, d.tg_threads))
+            .collect::<Vec<_>>(),
+        [
+            (1, 1, 1, 256),
+            (3, 1, 1, 256),
+            (1, 1, 1, 256),
+            (4, 1, 1, 256)
+        ],
+        "Ordinary ratio-one and ratio-two owners must retain batched publication",
+    );
+    assert_status(&ordinary);
+
+    let mut ced = Workspace::new_with_schedule(&ctx, &c, capacity, &refs, &schedule).unwrap();
+    let rows = Rows::new(&ctx, &c, capacity, n).unwrap();
+    let publication = PublicationRows::new(&ctx, &c, n).unwrap();
+    ced.begin_ced(&plan).unwrap();
+    ced.begin_ced_encoder(0, n).unwrap();
+    execute(&ctx, |enc| {
+        ced.encode_rows(&ctx, enc, 0, 0, &weights[0], &input[0], &rows)
+            .unwrap();
+        ced.publish_ced_rows(&ctx, enc, 1, 0, &weights[1], &input[1], &publication)
+            .unwrap();
+    });
+    ced.complete_ced_encoder(0, n).unwrap();
+    assert_status(&ced);
+    let published = owner_bits(&ced);
+    assert!(ced.owners.iter().all(|o| {
+        [&o.compressed, &o.keys]
+            .into_iter()
+            .all(|t| f32_slice(t).unwrap().iter().any(|v| *v != 0.0))
+    }));
+    let controls = QueryControls::new(&ctx, &c, capacity, plan.candidate_rows.clone()).unwrap();
+    for layer in &plan.decoder {
+        let id = layer.layer;
+        let seeds = &layer.seed_rows;
+        let scratch = SeedRows::new(&ctx, &c, seeds.len()).unwrap();
+        ced.begin_ced_seed(id, seeds.start, seeds.len()).unwrap();
+        execute(&ctx, |enc| {
+            ced.seed_ced_rows(
+                &ctx,
+                enc,
+                id,
+                seeds.start,
+                &weights[id],
+                &chunk(id, seeds.clone()),
+                &scratch,
+            )
+            .unwrap();
+        });
+        ced.complete_ced_seed(id, seeds.start, seeds.len()).unwrap();
+        let outputs = &layer.output_rows;
+        let view = controls
+            .checked_tile_view(outputs.start, outputs.len())
+            .unwrap();
+        let rows = Rows::with_controls(&ctx, &c, capacity, &view).unwrap();
+        // ReusePublished must neither prepare nor publish these stale rows.
+        for t in [&rows.compressor_value, &rows.compressor_gate] {
+            let ptr = t.buffer.contents().as_ptr().cast::<f32>();
+            for i in 0..t.n_elements() as usize {
+                unsafe { ptr.add(t.offset as usize / 4 + i).write(f32::NAN) };
+            }
+        }
+        let output = prefill::allocate(&ctx, c.hidden, outputs.len(), GgmlType::F32).unwrap();
+        ced.begin_ced_decoder_chunk(id, outputs.start, outputs.len())
+            .unwrap();
+        assert_eq!(
+            ced.global_mode(id, outputs.start, outputs.len()).unwrap(),
+            GlobalKvMode::ReusePublished
+        );
+        metal::dispatch_census_begin();
+        execute(&ctx, |enc| {
+            ced.encode_rows(
+                &ctx,
+                enc,
+                id,
+                outputs.start,
+                &weights[id],
+                &chunk(id, outputs.clone()),
+                &rows,
+            )
+            .unwrap();
+            ced.finish_rows(&ctx, enc, &weights[id], &rows, &output)
+                .unwrap();
+        });
+        let census = metal::dispatch_census_take();
+        assert_eq!(
+            owner_bits(&ced),
+            published,
+            "replay changed globals layer={id}"
+        );
+        assert!(
+            !census.iter().any(|d| d.kernel == kernel),
+            "ReusePublished must not dispatch batched owner publication layer={id}",
+        );
+        assert_status(&ced);
+        ced.complete_ced_decoder_chunk(id, outputs.start, outputs.len())
+            .unwrap();
+    }
+    ced.commit_ced(n).unwrap();
+    ced.validate_snapshot_position(n).unwrap();
+}
+
+#[test]
+#[ignore = "requires explicit Metal benchmark lease and debug layer"]
 fn ced_scalar_error_restores_control_bindings_and_finite_publication_blocks_completion() {
     use objc2::rc::Retained;
     assert_eq!(std::env::var("MTL_DEBUG_LAYER").as_deref(), Ok("1"));

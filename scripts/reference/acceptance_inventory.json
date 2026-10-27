@@ -848,6 +848,13 @@
   },
   {
     "target": "lib",
+    "name": "deepseek_v41::forward::attention_gpu::tests::ced::ced_owner_rows_reuse_preserves_published_cache_with_ordinary_batch_control",
+    "class": "gpu",
+    "ignored": true,
+    "reason": "Self-leased Metal/debug-layer witness at 512/128 BF16 geometry: exact CED owner-cache immutability with poisoned compressor scratch and Ordinary ratio-one/two batch census; parent GPU lane only."
+  },
+  {
+    "target": "lib",
     "name": "deepseek_v41::forward::attention_gpu::tests::ced::ced_rows_publication_only_poisoned_history_and_borrowed_controls",
     "class": "gpu",
     "ignored": true,

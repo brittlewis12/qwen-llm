@@ -686,7 +686,10 @@ impl Workspace {
             && ratio > 0
             && last_length.div_ceil(c.candidate_block) <= c.candidate_topk
             && std::env::var_os("QWEN_V41_SELECT_PER_ROW").is_none();
-        let owner_batch = batched && self.schedule.owns_kv(id) && compress_rows_enabled();
+        let owner_batch = mode == GlobalKvMode::Ordinary
+            && batched
+            && self.schedule.owns_kv(id)
+            && compress_rows_enabled();
         let (head, body, _tail) = if owner_batch {
             self.publish_owner_rows(
                 ctx,

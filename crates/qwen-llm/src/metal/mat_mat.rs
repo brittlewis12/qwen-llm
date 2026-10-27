@@ -2087,6 +2087,8 @@ crate::env_flag!(default_off mat_mat_n16_v2_enabled, "QWEN_MATMAT_N16_V2");
 
 crate::env_flag!(default_on mat_mat_q5_k_n64_enabled, "QWEN_MATMAT_Q5_K_N64");
 
+crate::env_flag!(default_on mat_mat_q5_k_tensor_enabled, "QWEN_MATMAT_Q5_K_TENSOR");
+
 pub(crate) fn mat_mat_q5_k_n64_min_query() -> usize {
     static MIN_N: OnceLock<usize> = OnceLock::new();
     *MIN_N.get_or_init(|| {
@@ -2645,6 +2647,78 @@ pub fn encode_mat_mat_q6_k_f32(
 /// out of the per-token mat-vec re-read loop. Per-row cosine ≥ 0.999
 /// vs N successive Q5_K mat-vec is the gate (same threshold as
 /// Q4_K / Q6_K mat-mat — half-staging in lifted kernel).
+#[repr(C)]
+#[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+struct Q5KTensorArgs {
+    rows: u32,
+    cols: u32,
+    k: u32,
+    nb01: u32,
+    stride_b: u32,
+}
+
+/// Q5_K dense GEMM on the Metal 4 tensor tile. Requires 64-row and 64-column
+/// tiles; the caller has already validated the Q5_K superblock and extents.
+fn encode_mat_mat_q5_k_tensor(
+    ctx: &MetalContext,
+    enc: &KernelEncoder,
+    weight: &MetalTensor,
+    x: &MetalTensor,
+    y: &MetalTensor,
+    n_in: usize,
+    n_out: usize,
+    n_query: usize,
+) -> Result<(), MetalError> {
+    let rows = u32::try_from(n_query).map_err(|_| MetalError::BadShape {
+        kernel: "mat_mat_q5_k_tensor",
+        detail: "n_query exceeds u32".into(),
+    })?;
+    let cols = u32::try_from(n_out).map_err(|_| MetalError::BadShape {
+        kernel: "mat_mat_q5_k_tensor",
+        detail: "n_out exceeds u32".into(),
+    })?;
+    let k = u32::try_from(n_in).map_err(|_| MetalError::BadShape {
+        kernel: "mat_mat_q5_k_tensor",
+        detail: "n_in exceeds u32".into(),
+    })?;
+    let nb01 = u32::try_from((n_in / 256) * 176).map_err(|_| MetalError::BadShape {
+        kernel: "mat_mat_q5_k_tensor",
+        detail: "Q5_K row bytes exceed u32".into(),
+    })?;
+    let stride_b = u32::try_from(n_in).map_err(|_| MetalError::BadShape {
+        kernel: "mat_mat_q5_k_tensor",
+        detail: "activation stride exceeds u32".into(),
+    })?;
+    let pso = ctx.tensor_pipeline("kernel_mat_mat_q5_k_tensor")?;
+    enc.set_pipeline(&pso);
+    enc.set_bytes(
+        0,
+        &Q5KTensorArgs {
+            rows,
+            cols,
+            k,
+            nb01,
+            stride_b,
+        },
+    );
+    enc.set_tensor(1, weight);
+    enc.set_tensor(2, x);
+    enc.set_tensor(3, y);
+    enc.dispatch(
+        MTLSize {
+            width: n_query / 64,
+            height: n_out / 64,
+            depth: 1,
+        },
+        MTLSize {
+            width: 128,
+            height: 1,
+            depth: 1,
+        },
+    );
+    Ok(())
+}
+
 pub fn encode_mat_mat_q5_k_f32(
     ctx: &MetalContext,
     enc: &KernelEncoder,
@@ -2692,6 +2766,15 @@ pub fn encode_mat_mat_q5_k_f32(
                 n_query * n_out
             ),
         });
+    }
+
+    if ctx.tensor_ops_status().is_available()
+        && mat_mat_q5_k_tensor_enabled()
+        && n_query >= 64
+        && n_query.is_multiple_of(64)
+        && n_out.is_multiple_of(64)
+    {
+        return encode_mat_mat_q5_k_tensor(ctx, enc, weight, x, y, n_in, n_out, n_query);
     }
 
     let use_n64 = mat_mat_q5_k_n64_enabled()

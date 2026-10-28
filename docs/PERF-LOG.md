@@ -6,6 +6,27 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the current state and evidence index.
 
+## 2026-10-28 - V4.1 Batched Decode 1.18-1.79x (Engram, Routed Rows, Encoders)
+
+- `step_batch` now also projects the Engram rows once over all sequences
+  (`QWEN_V41_BATCH_ENGRAM`), runs every sequence's routed experts as one
+  gather, one route dispatch over B rows and one gate/up and one down
+  dispatch with a grid row per sequence (`QWEN_V41_BATCH_ROUTED`; bitwise
+  per sequence), and gives each sequence its own encoder in per-sequence
+  phases (`QWEN_V41_BATCH_ENCODERS=shared` restores one). A BF16 skinny
+  router measured 0.0/0.4 ms per round at B = 4/8 and was dropped.
+- M5 Ultra, GSQ IQ2_XS, 512-token prefixes, serial vs batched in
+  alternating blocks: B = 2/3/4/8 aggregate 82.3/98.1/107.7/125.5 tok/s vs
+  ~70 serial (**1.18/1.40/1.53/1.79x**; previous state 1.16/1.30/1.38/1.53x
+  in the same run). Knob-off deltas at B = 4/8: routed +3.1/+8.2 ms per
+  round, per-sequence encoders +0.5/+2.3, Engram +0.5/+1.1.
+- 8192-token prefixes: B = 2/4 1.17/1.51x (98.5 tok/s at B = 4).
+  Teacher-forced argmax equal in every row; max relative logit diff
+  <= 4.0e-6; B = 1 bitwise.
+- Dispatch census at B = 8: ~75% of GPU time is per-sequence work
+  (routed experts 3.7, attention core/index 3.0, HC/FFN controls 1.8 ms per
+  token) against 2.6 ms per token of shared-weight projections.
+
 ## 2026-10-28 - V4.1 Vector4 Misses The Actual-Route Whole-FFN Gate
 
 M5 Ultra, research source `102fb825`, exact ordinary 1K layer-8 capture:

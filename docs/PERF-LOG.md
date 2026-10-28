@@ -6,6 +6,28 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the current state and evidence index.
 
+## 2026-10-28 - V4.1 Long Context: F32 MMA Index Scores (4x), Grid Radix Top-K
+
+- After the radix landing, a 128K decode census put index selection at
+  ~3.5 ms per token: the F32 ILP index kernel at ~235 us and the
+  single-threadgroup radix select at ~207 us per producer layer.
+- `index_heads_rows_mma`: the same F32 scores on simdgroup_float8x8
+  (F32 operands and accumulation; differs from ILP only by summation order),
+  used by decode and the batched long prefill path. Decode's top-k now uses
+  `select_radix_grid_hist`/`_place`, the radix selector split over ~32
+  threadgroups (same IDs, masks, NaN status). `QWEN_V41_SELECT_GRID=0`
+  restores ILP plus the single-threadgroup selector.
+- M5 Ultra kernel timing: index 32K keys 66.2 -> 16.8 us (3.95x), 131K
+  210.3 -> 45.9 us (4.58x); top-512 of 32K keys 34.7 -> 17.3 us, masked
+  64.0 -> 17.2 us.
+- GSQ IQ2_XS at 40K, in-binary N O O N: 1K append 772/719 vs 625/577 tok/s
+  (**+25%**). Decode 61.3/51.8 vs 59.0/56.3: inside the run's ~15% thermal
+  drift (the expected gain at 40K is ~3%; it grows with depth).
+- Long-context witness (80K prefix): NLL vs the ILP build -0.005/-0.014,
+  vs main +0.006/-0.004, inside the noise floor.
+- Built by a subagent from a kernel spec, reviewed and measured here. Raw:
+  `metagross:~/qwen-runs/2026-10-26-decode-twk3/` r74, `lw/F2`.
+
 ## 2026-10-27 - V4.1 Long Context: 128K Append 2.56x, Decode +37% (Radix Top-K)
 
 - Why long context: a census of 111,553 local agent-log calls (2026-10-13..27)

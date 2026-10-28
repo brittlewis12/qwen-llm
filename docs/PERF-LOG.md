@@ -6,6 +6,25 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the current state and evidence index.
 
+## 2026-10-28 - V4.1 Batched Decode: Shared Expert Once Per Batch, 1.08-1.15x
+
+- `Forward::step_batch` (B sequences, one token each, bitwise equal to
+  separate steps) now runs each layer's FFN shared expert once over all
+  sequences: `kernel_dense_skinny_mma_q5_K_f32` dequantizes each Q5_K weight
+  once for up to 8 columns on the simdgroup matrix units.
+- M5 Ultra, GSQ IQ2_XS, 512-token prefixes, serial steps vs `step_batch` in
+  4 alternating blocks of 16 rounds: B = 2/3/4/8 aggregate 73.2/74.7/75.4/
+  76.4 tok/s vs ~67.8 serial (**1.08/1.10/1.11/1.15x**). Control
+  `QWEN_V41_BATCH_SHARED=0`: 1.01x, bitwise.
+- Precision (batched arm teacher-forced with the serial tokens): argmax equal
+  in all 1,188 rows; max |logit diff| 4.6e-6 of max |logit|. B = 1 is
+  exactly `step`.
+- Skinny kernel vs the one-row split kernel, B = 1 -> 8, flat in B: shared
+  gate/up 1.45 -> 1.54x, down 1.21 -> 1.26x, q_b 1.17 -> 1.22x, output_b
+  1.31 -> 1.38x.
+- `qwen serve` still runs one request at a time; nothing calls `step_batch`
+  in production yet.
+
 ## 2026-10-28 - V4.1 Paired Down Misses The Whole-FFN Continuation Gate
 
 M5 Ultra, GSQ IQ2_XS, research source `fdf6b324`: one actual-routing ordinary

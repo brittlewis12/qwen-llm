@@ -6,6 +6,19 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the current state and evidence index.
 
+## 2026-10-28 - qwen serve: Opt-In V4.1 Continuous Batching, 1.18x On 3 Requests
+
+- `QWEN_SERVE_V41_MAX_ACTIVE=N` (default 1 = the unchanged serial path)
+  keeps up to N V4.1 requests in flight: one decode `step_batch` over every
+  decoding request per owner pass, new prompts prefilled in 512-row calls
+  between steps, non-blocking output delivery, per-request cancellation
+  outside the batch, an idle live-state pool (`QWEN_SERVE_V41_LIVE_STATES`,
+  default 1). Design and failure semantics: `docs/SERVE.md`.
+- M5 Ultra, GSQ IQ2_XS, snapshots off, greedy: three concurrent requests
+  (two 320-token, one 200-token streamed) took 16.27/16.29 s with N = 1 and
+  13.81/13.70 s with N = 3 (**1.18-1.19x**), interleaved arms; every output
+  byte-identical to serial; mean batch width 2.98.
+
 ## 2026-10-28 - V4.1 Batched Decode 1.16-1.55x (output_a, Rank Pair, Head)
 
 - `step_batch` now also runs output_a (grouped skinny Q5_K: 8 groups x up

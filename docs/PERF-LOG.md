@@ -166,6 +166,22 @@ unchanged, and the scalar negative remains closed. Actual-routing 1K whole-FFN
 qualification is separate and underway. Method, limits and evidence:
 `docs/bench/2026-10-28-v41-vector4-weight-half.md`.
 
+## 2026-10-28 - V4.1 CED Encoder Submit-Ahead: +3.3%
+
+- Encoder chunk N+1 is prepared and submitted before chunk N's completion is
+  observed (one older submitted intent in the cursor, FIFO completion, error
+  drain). Command count, arithmetic and endpoint unchanged;
+  `QWEN_V41_CED_ENCODER_PIPELINE=0` restores the serialized wait.
+- 8K pair bitwise: Full 1,123.2, CED 1,799.5, all 14 endpoints identical.
+  Same-binary CED A/B `O S S O`, 2 runs/arm, 180 s apart: off 1,808.8, on
+  **1,869.1**; **+3.33%, 146 ms** (wall 4.5291 -> 4.3830 s).
+- The second in-flight chunk scratch is priced: observed 11.202 GB vs 11.245
+  GB priced; device ceiling 240 GiB.
+- Private `current_pair` N=8192 passes: 257 positions, 257 full-vocab vectors
+  per arm, 56 causal regions, 256 teacher-forced steps, bitwise; 83.83 s.
+- [Packet](bench/2026-10-28-v41-ced-encoder-submit-ahead.md). Raw:
+  `~/qwen-runs/2026-10-28-v41-encoder-pipeline/`.
+
 ## 2026-10-28 - V4.1 Batched Decode Passes The 80K Likelihood Witness
 
 - M5 Ultra, GSQ IQ2_XS, main `8d27d686`: the 80K-prefix long witness (2

@@ -6,6 +6,17 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the current state and evidence index.
 
+## 2026-10-28 - V4.1 8K CED Sink-Tile Sweep: 512 Is Optimal
+
+- Query-tile width sweep at 8K CED, ordinary suite, two runs per arm, reversed
+  order, 180 s apart: 128 = 1,346.93, 256 = 1,397.66, **512 = 1,635.87** tok/s.
+- Narrowing the query tile loses 14.6%/17.7%; the default 512 is optimal. The
+  attention lever is the key/window partition, not the query tile.
+- Next: complete-core span-wide window probe; require >=20% core reduction
+  before integrating.
+- [Packet](bench/2026-10-28-v41-sink-tile-sweep.md). Raw:
+  `~/qwen-runs/2026-10-28-v41-sink-sweep/`.
+
 ## 2026-10-28 - V4.1 Long Context: F32 MMA Index Scores (4x), Grid Radix Top-K
 
 - After the radix landing, a 128K decode census put index selection at

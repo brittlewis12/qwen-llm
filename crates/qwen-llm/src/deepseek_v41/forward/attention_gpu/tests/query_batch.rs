@@ -170,8 +170,11 @@ fn compare_case(ctx: &MetalContext, c: &Config, schedule: &Schedule, start: usiz
             if mma {
                 // One sink per query tile; the MMA, 16-key tensor and
                 // 32-key tensor forms are selected per tile width/tier.
-                let score = count("score_mma") + count("score_tensor") + count("score_tensor32");
-                let pv = count("pv_mma") + count("pv_tensor");
+                let score = count("score_mma")
+                    + count("score_tensor")
+                    + count("score_tensor32")
+                    + count("score_tensor64");
+                let pv = count("pv_mma") + count("pv_tensor") + count("pv_tensor64");
                 assert_eq!(score, n.div_ceil(TILE), "score");
                 assert_eq!(pv, n.div_ceil(TILE), "pv");
                 for suffix in ["softmax_rows", "normalize_rows"] {
@@ -938,8 +941,11 @@ fn sink_case(
                     .count()
             };
             if mma {
-                let score = count("score_mma") + count("score_tensor") + count("score_tensor32");
-                let pv = count("pv_mma") + count("pv_tensor");
+                let score = count("score_mma")
+                    + count("score_tensor")
+                    + count("score_tensor32")
+                    + count("score_tensor64");
+                let pv = count("pv_mma") + count("pv_tensor") + count("pv_tensor64");
                 assert_eq!(score, spans.len(), "score");
                 assert_eq!(pv, spans.len(), "pv");
                 for suffix in ["softmax_rows", "normalize_rows", "rope_rows"] {
@@ -965,8 +971,13 @@ fn sink_case(
                         .map(|d| d.grid_height)
                         .collect::<Vec<_>>()
                 };
-                depths.0 = heights(&["score_mma", "score_tensor", "score_tensor32"]);
-                depths.1 = heights(&["pv_mma", "pv_tensor"]);
+                depths.0 = heights(&[
+                    "score_mma",
+                    "score_tensor",
+                    "score_tensor32",
+                    "score_tensor64",
+                ]);
+                depths.1 = heights(&["pv_mma", "pv_tensor", "pv_tensor64"]);
                 let tiles = spans.iter().map(|&(_, n, _)| n as u64).collect::<Vec<_>>();
                 assert_eq!(depths.0, tiles);
                 assert_eq!(depths.1, tiles);

@@ -6,6 +6,21 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the current state and evidence index.
 
+## 2026-10-28 - V4.1 Vector4 Misses The Actual-Route Whole-FFN Gate
+
+M5 Ultra, research source `102fb825`, exact ordinary 1K layer-8 capture:
+all eleven native replays pass A15/B14 materialization, explicit unused-`b13`
+poison, remaining stage/output bits, guards, status and native postflight.
+Whole-FFN GPU reductions are **-0.1521% / +0.6652%**, below the predeclared
+1% per block; inclusive host latency regresses **2.8691% / 0.5109%**.
+Close this continuation without a GPU rerun; defaults and allocation unchanged.
+
+The native packet completes, but its outer parser fails on binary-float
+summation of an exactly contained CPU diagnostic split. Isolated exact-decimal
+CPU analysis passes 93 controls and validates the negative without changing
+samples/gates or fabricating original outer acceptance. Method and limits:
+`docs/bench/2026-10-28-v41-vector4-ffn-result.md`.
+
 ## 2026-10-28 - qwen serve: Opt-In V4.1 Continuous Batching, 1.18x On 3 Requests
 
 - `QWEN_SERVE_V41_MAX_ACTIVE=N` (default 1 = the unchanged serial path)

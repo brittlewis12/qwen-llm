@@ -620,9 +620,11 @@ same outputs, stats and tests. With N > 1 (`serve/backend_v41/scheduler.rs`):
   no other request decodes and in 512-row calls while others do, so a long
   prompt costs decoding requests at most one 512-row call between their
   steps. Checkpoint cuts are unchanged.
-- **Arithmetic.** `step_batch` runs each layer's FFN shared expert once over
-  all sequences (Q5_K skinny kernel: F32 rounding differs from `step`;
-  `QWEN_V41_BATCH_SHARED=0` restores bitwise per-sequence steps). A prompt
+- **Arithmetic.** `step_batch` runs each layer's dense projections once over
+  all sequences: the FFN shared expert, the q_a/kv rank pair, q_b, output_a
+  and output_b, and the head (skinny Q5_K/Q8_0 kernels: F32 rounding differs
+  from `step`). `QWEN_V41_BATCH_SHARED=0` with `QWEN_V41_BATCH_ATTN=0` and
+  `QWEN_V41_BATCH_HEAD=0` restores bitwise per-sequence steps. A prompt
   prefilled under load is split into different calls than it would be alone,
   which can change its rounding and therefore the generated text at
   temperature 0; its stats report `prefill_loaded_calls > 0`. Determinism is
@@ -665,10 +667,12 @@ same outputs, stats and tests. With N > 1 (`serve/backend_v41/scheduler.rs`):
   Existing fields are unchanged.
 
 Measured (M5 Ultra, GSQ IQ2_XS, snapshots off, greedy, 2026-10-28): three
-concurrent 320-token requests with short prompts took 16.1 s serially, 15.9 s
-with N = 3 and `QWEN_V41_BATCH_SHARED=0`, and 14.9 s with N = 3 by default
-(1.08x; a three-wide step is 39.7 ms against 14.7 ms per serial token, 1.11x
-decode). Mean completion latency rose from 11.0 s (5.9/11.0/16.1) to 14.8 s:
+concurrent requests (two 320-token, one 200-token streamed, short prompts)
+took 16.27/16.29 s serially and 13.81/13.70 s with N = 3 (1.18-1.19x), every
+output byte-identical to the serial arm, mean batch width 2.98. Earlier, with
+only the shared expert batched, the same workload took 16.1 s serially, 15.9 s
+with N = 3 and `QWEN_V41_BATCH_SHARED=0`, and 14.9 s with N = 3 (1.08x; a
+three-wide step was 39.7 ms against 14.7 ms per serial token, 1.11x decode). Mean completion latency rose from 11.0 s (5.9/11.0/16.1) to 14.8 s:
 all three were admitted at once and decoded together (mean width 2.98)
 instead of the later two waiting for their predecessors.
 All outputs were byte-identical to the serial arm, including a 2.2K-token prompt

@@ -664,6 +664,19 @@ same outputs, stats and tests. With N > 1 (`serve/backend_v41/scheduler.rs`):
   `decode_ms` are wall clock and include other requests' interleaved work.
   Existing fields are unchanged.
 
+Measured (M5 Ultra, GSQ IQ2_XS, snapshots off, greedy, 2026-10-28): three
+concurrent 320-token requests with short prompts took 16.1 s serially, 15.9 s
+with N = 3 and `QWEN_V41_BATCH_SHARED=0`, and 14.9 s with N = 3 by default
+(1.08x; a three-wide step is 39.7 ms against 14.7 ms per serial token, 1.11x
+decode). Mean completion latency rose from 11.0 s (5.9/11.0/16.1) to 14.8 s:
+all three were admitted at once and decoded together (mean width 2.98)
+instead of the later two waiting for their predecessors.
+All outputs were byte-identical to the serial arm, including a 2.2K-token prompt
+prefilled in seven 512-row calls under load; that prompt's prefill took 4.9 s
+against 3.9 s in one call, so a mix with long prompts gained little (17.7 s
+against 18.2 s). A client that disconnected mid-stream was dropped alone; the
+other two requests finished.
+
 Limits: one owner thread; no preemption of a running prefill call; a
 waiting request is admitted only when fewer than N are active; no survivor
 recovery after a post-start batch failure.

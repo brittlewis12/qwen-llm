@@ -645,6 +645,8 @@ fn dirty_arm(
             &input,
             &hashes,
             None,
+            None,
+            None,
             &mut storage,
             &mut counters,
         )

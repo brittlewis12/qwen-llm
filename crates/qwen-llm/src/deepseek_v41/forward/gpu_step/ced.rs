@@ -18,6 +18,12 @@ pub(in super::super) fn batch_layers() -> usize {
     batches::batch_layers()
 }
 
+crate::env_flag!(
+    /// One-chunk lookahead for CED encoder Engram rows; `QWEN_V41_ENGRAM_PREFETCH=0` restores the synchronous per-chunk read.
+    default_on engram_prefetch_enabled,
+    "QWEN_V41_ENGRAM_PREFETCH"
+);
+
 pub(in super::super) fn batch_selection(
     plan: &CedPlan,
 ) -> Result<super::super::ced_plan::batches::Selection> {
@@ -687,10 +693,12 @@ impl Workspace {
         start: usize,
         tokens: &[u32],
         hashes: &[engram::LayerRows],
+        prefetched: Option<Vec<(usize, Vec<f32>)>>,
+        next_hashes: Option<&[engram::LayerRows]>,
         cancel: Option<&AtomicBool>,
         storage: &mut Storage,
         counters: &mut CedCounters,
-    ) -> Result<()> {
+    ) -> Result<Option<Vec<(usize, Vec<f32>)>>> {
         let ctx = model.ctx;
         let c = &model.config;
         let n = tokens.len();
@@ -699,10 +707,16 @@ impl Workspace {
         for layer in &engram_layers {
             op::require(plan.encoder_layers.contains(layer), "CED decoder Engram")?;
         }
-        let (x, incoming, scratch) =
-            std::thread::scope(|scope| -> Result<(MetalTensor, MetalTensor, BlockRows)> {
-                let (late_tx, late_rx) = std::sync::mpsc::channel();
-                if !engram_layers.is_empty() {
+        let (x, incoming, scratch, next_values) = std::thread::scope(
+            |scope| -> Result<(
+                MetalTensor,
+                MetalTensor,
+                BlockRows,
+                Option<Vec<(usize, Vec<f32>)>>,
+            )> {
+                let mut late_rx = None;
+                if prefetched.is_none() && !engram_layers.is_empty() {
+                    let (late_tx, rx) = std::sync::mpsc::channel();
                     let engram_rows = &model.engram_rows;
                     let layers = engram_layers.clone();
                     scope.spawn(move || {
@@ -713,7 +727,9 @@ impl Workspace {
                             }
                         }
                     });
+                    late_rx = Some(rx);
                 }
+                let streamed = late_rx.is_some();
                 let mut embeddings = Vec::with_capacity(n * 4 * c.hidden);
                 for &token in tokens {
                     embeddings.extend(decode_rows(model.embedding, token as usize, 1)?.repeat(4));
@@ -733,9 +749,25 @@ impl Workspace {
                 }
                 let engram_prepare =
                     profile::Wall("ced_encoder_engram_prepare", [0; 4], profile::start());
-                let first = engram_layers.first().copied();
-                if let Some(layer) = first {
-                    let (got, values) = late_rx.recv().map_err(|_| "CED Engram read failed")?;
+                let first = if streamed {
+                    engram_layers.first().copied()
+                } else {
+                    None
+                };
+                if let Some(values) = prefetched {
+                    let mut seen = 0;
+                    for (layer, values) in values {
+                        op::require(engram_layers.contains(&layer), "CED Engram prefetch layer")?;
+                        let (_, input, _) = engrams
+                            .iter()
+                            .find(|(id, _, _)| *id == layer)
+                            .ok_or("CED Engram buffer")?;
+                        write(input, &values)?;
+                        seen += 1;
+                    }
+                    op::require(seen == engram_layers.len(), "CED Engram prefetch coverage")?;
+                } else if let (Some(layer), Some(rx)) = (first, late_rx.as_ref()) {
+                    let (got, values) = rx.recv().map_err(|_| "CED Engram read failed")?;
                     op::require(got == layer, "CED Engram order")?;
                     let (_, input, _) = engrams
                         .iter()
@@ -751,7 +783,7 @@ impl Workspace {
                 cancelled(cancel)?;
                 self.attention.begin_ced_encoder(start, n)?;
                 drop(prepare);
-                self.ced_command(
+                let pending = self.ced_submit(
                     model,
                     "ced_encoder_rows",
                     [start, n, plan.publication_layer, 0],
@@ -760,12 +792,16 @@ impl Workspace {
                     |this, enc| {
                         for id in plan.encoder_layers.clone() {
                             cancelled(cancel)?;
-                            if Some(id) != first
+                            if streamed
+                                && Some(id) != first
                                 && let Some((_, input, _)) =
                                     engrams.iter().find(|(id0, _, _)| *id0 == id)
                             {
-                                let (got, values) =
-                                    late_rx.recv().map_err(|_| "CED Engram read failed")?;
+                                let (got, values) = late_rx
+                                    .as_ref()
+                                    .ok_or("CED Engram stream missing")?
+                                    .recv()
+                                    .map_err(|_| "CED Engram read failed")?;
                                 op::require(got == id, "CED Engram order")?;
                                 let join = profile::Wall(
                                     "ced_encoder_engram_late_join",
@@ -821,8 +857,37 @@ impl Workspace {
                         cancelled(cancel)
                     },
                 )?;
-                Ok((x, incoming, scratch))
-            })?;
+                let next = if let Some(next_hashes) = next_hashes {
+                    let engram_rows = &model.engram_rows;
+                    let layers = engram_layers.clone();
+                    Some(scope.spawn(move || {
+                        let mut values = Vec::with_capacity(layers.len());
+                        for layer in layers {
+                            values.push((layer, engram_rows.decode_tokens(layer, next_hashes)));
+                        }
+                        values
+                    }))
+                } else {
+                    None
+                };
+                self.ced_wait(model, pending, storage, counters)?;
+                let next_values = match next {
+                    Some(handle) => {
+                        let values = handle
+                            .join()
+                            .map_err(|_| "CED Engram prefetch thread failed")?;
+                        Some(
+                            values
+                                .into_iter()
+                                .map(|(layer, values)| values.map(|values| (layer, values)))
+                                .collect::<Result<Vec<_>>>()?,
+                        )
+                    }
+                    None => None,
+                };
+                Ok((x, incoming, scratch, next_values))
+            },
+        )?;
         scratch
             .ffn
             .validate_status_layers(plan.encoder_layers.clone())?;
@@ -835,7 +900,8 @@ impl Workspace {
         counters.publication(plan.publication_layer, n)?;
         #[cfg(test)]
         super::super::ced::tests::checkpoint("ced_encoder_complete", cancel)?;
-        cancelled(cancel)
+        cancelled(cancel)?;
+        Ok(next_values)
     }
 
     fn ced_encoder_scalar(
@@ -1194,48 +1260,112 @@ impl Workspace {
         } else {
             plan.full_chunk_rows
         };
-        for chunk in chunk_views(0..tokens.len(), encoder_rows).map_err(|e| e.to_string())? {
-            cancelled(cancel)?;
-            let range = chunk.absolute_rows;
-            let input = &tokens[range.clone()];
-            let mut next = *addresses;
-            let mut hashes = Vec::with_capacity(input.len());
-            for &token in input {
-                let (rows, updated) = next
-                    .step_with_config(
-                        engram::Token::Compressed(model.token_map[token as usize]),
-                        &model.engram_hash,
-                    )
-                    .map_err(|e| format!("{e:?}"))?;
-                hashes.push(rows);
-                next = updated;
-            }
-            objc2::rc::autoreleasepool(|_| {
-                if input.len() == 1 {
-                    self.ced_encoder_scalar(
-                        model,
-                        plan,
-                        range.start,
-                        input[0],
-                        &hashes[0],
-                        cancel,
-                        &mut storage,
-                        &mut counters,
-                    )
-                } else {
-                    self.ced_encoder_rows(
-                        model,
-                        plan,
-                        range.start,
-                        input,
-                        &hashes,
-                        cancel,
-                        &mut storage,
-                        &mut counters,
-                    )
+        if !arithmetic.scalar() && engram_prefetch_enabled() {
+            let mut history = *addresses;
+            let mut chunks = Vec::new();
+            for chunk in chunk_views(0..tokens.len(), encoder_rows).map_err(|e| e.to_string())? {
+                let range = chunk.absolute_rows;
+                let input = &tokens[range.clone()];
+                let mut next = history;
+                let mut hashes = Vec::with_capacity(input.len());
+                for &token in input {
+                    let (rows, updated) = next
+                        .step_with_config(
+                            engram::Token::Compressed(model.token_map[token as usize]),
+                            &model.engram_hash,
+                        )
+                        .map_err(|e| format!("{e:?}"))?;
+                    hashes.push(rows);
+                    next = updated;
                 }
-            })?;
-            *addresses = next;
+                chunks.push((range, hashes));
+                history = next;
+            }
+            let mut prefetched = None;
+            for (i, (range, hashes)) in chunks.iter().enumerate() {
+                cancelled(cancel)?;
+                let input = &tokens[range.clone()];
+                let next_hashes = chunks.get(i + 1).and_then(|(next_range, next_hashes)| {
+                    (next_range.len() > 1).then_some(next_hashes.as_slice())
+                });
+                objc2::rc::autoreleasepool(|_| -> Result<()> {
+                    if input.len() == 1 {
+                        prefetched = None;
+                        self.ced_encoder_scalar(
+                            model,
+                            plan,
+                            range.start,
+                            input[0],
+                            &hashes[0],
+                            cancel,
+                            &mut storage,
+                            &mut counters,
+                        )
+                    } else {
+                        prefetched = self.ced_encoder_rows(
+                            model,
+                            plan,
+                            range.start,
+                            input,
+                            hashes,
+                            prefetched.take(),
+                            next_hashes,
+                            cancel,
+                            &mut storage,
+                            &mut counters,
+                        )?;
+                        Ok(())
+                    }
+                })?;
+            }
+            *addresses = history;
+        } else {
+            for chunk in chunk_views(0..tokens.len(), encoder_rows).map_err(|e| e.to_string())? {
+                cancelled(cancel)?;
+                let range = chunk.absolute_rows;
+                let input = &tokens[range.clone()];
+                let mut next = *addresses;
+                let mut hashes = Vec::with_capacity(input.len());
+                for &token in input {
+                    let (rows, updated) = next
+                        .step_with_config(
+                            engram::Token::Compressed(model.token_map[token as usize]),
+                            &model.engram_hash,
+                        )
+                        .map_err(|e| format!("{e:?}"))?;
+                    hashes.push(rows);
+                    next = updated;
+                }
+                objc2::rc::autoreleasepool(|_| {
+                    if input.len() == 1 {
+                        self.ced_encoder_scalar(
+                            model,
+                            plan,
+                            range.start,
+                            input[0],
+                            &hashes[0],
+                            cancel,
+                            &mut storage,
+                            &mut counters,
+                        )
+                    } else {
+                        self.ced_encoder_rows(
+                            model,
+                            plan,
+                            range.start,
+                            input,
+                            &hashes,
+                            None,
+                            None,
+                            cancel,
+                            &mut storage,
+                            &mut counters,
+                        )
+                        .map(|_| ())
+                    }
+                })?;
+                *addresses = next;
+            }
         }
         #[cfg(test)]
         super::super::ced::qualification::publication(&self.attention, plan.prompt_rows)?;

@@ -622,9 +622,12 @@ same outputs, stats and tests. With N > 1 (`serve/backend_v41/scheduler.rs`):
   steps. Checkpoint cuts are unchanged.
 - **Arithmetic.** `step_batch` runs each layer's dense projections once over
   all sequences: the FFN shared expert, the q_a/kv rank pair, q_b, output_a
-  and output_b, and the head (skinny Q5_K/Q8_0 kernels: F32 rounding differs
-  from `step`). `QWEN_V41_BATCH_SHARED=0` with `QWEN_V41_BATCH_ATTN=0` and
-  `QWEN_V41_BATCH_HEAD=0` restores bitwise per-sequence steps. A prompt
+  and output_b, the Engram projections, the router and the head (skinny
+  Q5_K/Q8_0/BF16 kernels: F32 rounding differs from `step`). The routed
+  experts also run once over all sequences, bitwise per sequence.
+  `QWEN_V41_BATCH_SHARED=0` with `QWEN_V41_BATCH_ATTN=0`,
+  `QWEN_V41_BATCH_HEAD=0`, `QWEN_V41_BATCH_ENGRAM=0` and
+  `QWEN_V41_BATCH_ROUTER=0` restores bitwise per-sequence steps. A prompt
   prefilled under load is split into different calls than it would be alone,
   which can change its rounding and therefore the generated text at
   temperature 0; its stats report `prefill_loaded_calls > 0`. Determinism is

@@ -172,13 +172,14 @@ qualification is separate and underway. Method, limits and evidence:
   observed (one older submitted intent in the cursor, FIFO completion, error
   drain). Command count, arithmetic and endpoint unchanged;
   `QWEN_V41_CED_ENCODER_PIPELINE=0` restores the serialized wait.
-- 8K pair bitwise: Full 1,123.2, CED 1,799.5, all 14 endpoints identical.
-  Same-binary CED A/B `O S S O`, 2 runs/arm, 180 s apart: off 1,808.8, on
-  **1,869.1**; **+3.33%, 146 ms** (wall 4.5291 -> 4.3830 s).
+- 8K pair bitwise: Full 1,120.0, CED 1,770.4, all 14 endpoints identical.
+  Same-binary CED A/B `O S S O`, 2 runs/arm, 180 s apart: off 1,803.8, on
+  **1,872.4**; **+3.81%, 166.6 ms** (wall 4.5417 -> 4.3752 s).
 - The second in-flight chunk scratch is priced: observed 11.202 GB vs 11.245
   GB priced; device ceiling 240 GiB.
-- Private `current_pair` N=8192 passes: 257 positions, 257 full-vocab vectors
-  per arm, 56 causal regions, 256 teacher-forced steps, bitwise; 83.83 s.
+- Private `current_pair` N=8192 passes at `181ad0d1`: 257 positions, 257
+  full-vocab vectors per arm, 56 causal regions, 256 teacher-forced steps,
+  bitwise; 170.62 s. Promotion still gated on the bounded fault matrix.
 - [Packet](bench/2026-10-28-v41-ced-encoder-submit-ahead.md). Raw:
   `~/qwen-runs/2026-10-28-v41-encoder-pipeline/`.
 

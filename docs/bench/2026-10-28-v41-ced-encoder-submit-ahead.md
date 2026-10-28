@@ -1,23 +1,24 @@
 # V4.1 CED Encoder Submit-Ahead: +3.3%, 146 ms
 
-2026-10-28. Feature and timing: `47030790` on
-`perf/v41-engram-prefetch-main`, based on main `0c9e9d94` (Engram producer +
-decoder submit-ahead + cross-chunk Engram prefetch). Hardening: `e789bdec`
-(pair bitwise; the hardened A/B and qualification rerun remain the promotion
-gate). Artifact: GSQ-RCO IQ2_XS, 40 layers, 4,096-row chunks, M5 Ultra.
-Raw: `~/qwen-runs/2026-10-28-v41-encoder-pipeline/`.
+2026-10-28. Source: `181ad0d1` on `perf/v41-engram-prefetch-main`, rebased
+onto main `421f2054` (Engram producer + decoder submit-ahead + cross-chunk
+Engram prefetch + encoder submit-ahead). Main has since moved (serve
+batching), so integration needs a fresh rebase and source-identity
+qualification. Artifact: GSQ-RCO IQ2_XS, 40 layers, 4,096-row chunks, M5
+Ultra. Raw: `~/qwen-runs/2026-10-28-v41-encoder-pipeline/`.
 
 ## Decision
 
 The encoder submit-ahead is exact and keeps the encoder queue fed across the
 chunk boundary. The 8K pair is bitwise (all 14 endpoints share
 `a2db19afd7c377c54160e90bdefc52dc04ab13a69b0f929abb34eab099da6edf`); the
-same-binary CED A/B improves **3.33% / 146 ms** (1,808.8 -> 1,869.1 tok/s;
-wall 4.5291 -> 4.3830 s). The private `current_pair` qualification passes at
+same-binary CED A/B improves **3.81% / 166.6 ms** (1,803.8 -> 1,872.4 tok/s;
+wall 4.5417 -> 4.3752 s). The private `current_pair` qualification passes at
 N=8192: 257 positions, 257 full-vocabulary vectors per arm, 56 causal regions
 per position, 256 teacher-forced steps, bitwise logits and causal-state
-SHA256, 83.83 s. Candidate for promotion; the harness's
-`performance_qualified` remains false by design.
+SHA256, 170.62 s. Candidate for promotion; the harness's
+`performance_qualified` remains false by design, and the bounded fault matrix
+below is still the promotion gate.
 
 ## What Changed
 
@@ -52,9 +53,11 @@ they never perform. Observed incremental Metal is 11.202 GB against a priced
 The checkpoint review found two P1s in the first version; both are fixed at
 `e789bdec`, which re-passes the 8K pair bitwise at the same endpoint hash:
 
-- Every committed encoder command is owned by a drop guard before the older
-  command is retired. The guard waits it on error or unwind, so a newer
-  in-flight command cannot escape cleanup when the older completion fails.
+- Every committed encoder command is owned by a drop guard immediately after
+  commit, before the prefetch worker is spawned, and before the older command
+  is retired. The guard waits it on error or unwind, so neither a failed
+  retirement nor a thread-spawn panic can leave an unwaited command or free
+  the buffers it reads.
 - The shared attention-status read is deferred to the final encoder chunk,
   after every writer has drained. Reading it while the newer command was still
   committing was unsynchronized and could misattribute a failure. Per-chunk
@@ -71,8 +74,8 @@ The checkpoint review found two P1s in the first version; both are fixed at
 
 | policy | samples (tok/s) | mean |
 | --- | --- | ---: |
-| Full | 1,124.25 / 1,123.01 / 1,123.03 / 1,122.55 | 1,123.2 |
-| CED | 1,796.55 / 1,800.00 / 1,802.27 / 1,799.29 | **1,799.5** |
+| Full | 1,121.03 / 1,119.31 / 1,119.70 / 1,119.85 | 1,120.0 |
+| CED | 1,795.09 / 1,725.94 / 1,798.42 / 1,762.19 | **1,770.4** |
 
 All 14 cases share the endpoint hash above.
 
@@ -80,27 +83,28 @@ Same-binary CED A/B, `O S S O`, two runs per arm, 180 s between arms:
 
 | arm | samples (tok/s) | mean | wall |
 | --- | --- | ---: | ---: |
-| off | 1,812.51 / 1,811.78 | 1,808.8 | 4.5291 |
-| on | 1,874.21 / 1,867.19 | **1,869.1** | 4.3830 |
-| on | 1,870.20 / 1,864.58 | **1,867.4** | 4.3869 |
-| off | 1,802.40 / 1,808.40 | 1,805.4 | 4.5375 |
+| off | 1,802.72 / 1,793.13 | 1,797.9 | 4.5564 |
+| on | 1,874.34 / 1,873.67 | **1,874.0** | 4.3714 |
+| on | 1,874.21 / 1,867.36 | **1,870.8** | 4.3789 |
+| off | 1,810.60 / 1,808.54 | 1,809.6 | 4.5270 |
 
-The four off samples average 1,808.8; the four on samples average 1,869.1.
-The machine state is faster than the earlier prefetch packet (off arm was
-1,774.98 then), so only the same-binary delta is claimed.
+The four off samples average 1,803.8 (wall 4.5417); the four on samples
+average 1,872.4 (wall 4.3752). The machine state differs from earlier
+packets (off arm was 1,774.98 in the prefetch packet), so only the
+same-binary delta is claimed.
 
 ## Qualification
 
-`47030790`, private `current_vs_ced_paired_full_model` at N=8192,
+`181ad0d1`, private `current_vs_ced_paired_full_model` at N=8192,
 `MTL_DEBUG_LAYER=1`, production self-lease, one test:
 
-- `test result: ok. 1 passed; 0 failed` in 83.83 s.
+- `test result: ok. 1 passed; 0 failed` in 170.62 s.
 - `complete: true`, `current_pair: true`, `performance_qualified: false`,
   `formal_quality_verdict: null`.
 - Coverage: 257 state positions and 257 full-vocabulary vectors per arm,
   129,280 logits per vector, 56 causal regions per position, 256
   teacher-forced steps.
-- Report: `~/qwen-runs/2026-10-28-v41-encoder-pipeline/qualify-8k-47030790.json`.
+- Report: `~/qwen-runs/2026-10-28-v41-encoder-pipeline/qualify-8k-181ad0d1.json`.
 
 ## Limits
 
@@ -117,9 +121,6 @@ The machine state is faster than the earlier prefetch packet (off arm was
 - Qualification covers the standard private witness only; no chunk-size/
   position boundary sweep, snapshot/growth, cancellation, or throughput
   qualification.
-- The A/B and private qualification were measured at `47030790`; the hardened
-  `e789bdec` re-passes the bitwise pair but its A/B and qualification rerun
-  are still owed before promotion.
 - Admission does not yet retry serialized CED automatically when the priced
   pipeline mode is refused under pressure; near-capacity residents must set
   `QWEN_V41_CED_ENCODER_PIPELINE=0`.

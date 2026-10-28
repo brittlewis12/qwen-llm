@@ -293,6 +293,20 @@ All M5 Ultra, GSQ IQ2_XS, main `fbbf99b6` unless noted.
 - [Packet](bench/2026-10-28-v41-sink-tile-sweep.md). Raw:
   `~/qwen-runs/2026-10-28-v41-sink-sweep/`.
 
+## 2026-10-28 - V4.1 CED Cross-Chunk Engram Prefetch: +2.4%, 106 ms
+
+- One-chunk lookahead hides the second encoder chunk's Engram read; hashes are
+  precomputed from a private history copy and committed only on success. GPU
+  commands, arithmetic, command count and endpoint unchanged;
+  `QWEN_V41_ENGRAM_PREFETCH=0` restores the synchronous read.
+- 8K pair default on: Full 1,126.84, CED 1,768.11, all endpoints identical.
+  Same-binary CED A/B O S S O, 180 s apart: off 1,774.98/1,773.80, on
+  **1,815.68/1,816.71**; +2.36% and **106 ms**. Below the predeclared 150 ms
+  bar; candidate only.
+- On rate is 6.7% above 1,702. Next: packed-RHS IQ2_XXS experts.
+- [Packet](bench/2026-10-28-v41-engram-prefetch.md). Raw:
+  `~/qwen-runs/2026-10-28-v41-engram-prefetch/`.
+
 ## 2026-10-28 - V4.1 Long Context: F32 MMA Index Scores (4x), Grid Radix Top-K
 
 - After the radix landing, a 128K decode census put index selection at

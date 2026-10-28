@@ -16,18 +16,18 @@ use std::time::{Duration, Instant};
 use qwen_llm::tokenizer::NativeTokenizer;
 
 /// Concurrent V4.1 requests `qwen serve` keeps in flight on the model owner
-/// (default 1: one request at a time, exactly the serial path). Above 1, every
-/// decoding request advances one token per `Forward::step_batch` step (plain
-/// `step` when only one decodes), and a new request's prefill interleaves with
-/// their decode in 512-row calls (full chunks when nobody else decodes), which
-/// changes that prompt's prefill partition and so F32 rounding. The acceptor's
-/// `QWEN_SERVE_QUEUE_DEPTH` still bounds active plus waiting connections.
-/// Pair with `QWEN_SERVE_V41_LIVE_STATES` to keep each conversation's live
-/// session. Positive integer; read at startup.
+/// (default `DEFAULT_MAX_ACTIVE`; 1 is one request at a time, exactly the
+/// serial path). Above 1, every decoding request advances one token per
+/// `Forward::step_batch` step (plain `step` when only one decodes), and a new
+/// request's prefill interleaves with their decode in 512-row calls (full
+/// chunks when nobody else decodes), which changes that prompt's prefill
+/// partition and so F32 rounding. The acceptor's `QWEN_SERVE_QUEUE_DEPTH`
+/// still bounds active plus waiting connections. Positive integer; read at
+/// startup.
 const MAX_ACTIVE_ENV: &str = "QWEN_SERVE_V41_MAX_ACTIVE";
 /// Idle V4.1 live sessions `qwen serve` keeps for exact-prefix reuse (default
-/// 1: the single live session). Larger values keep other conversations'
-/// sessions resident; the least recently used is released when the count or
+/// `DEFAULT_LIVE_STATES`; 1 is the single live session). More than one keeps
+/// other conversations' sessions resident; the least recently used is released when the count or
 /// `QWEN_SERVE_V41_LIVE_STATE_MIB` budget is exceeded and, under memory
 /// pressure, before a request is refused. Positive integer; read at startup.
 const LIVE_STATES_ENV: &str = "QWEN_SERVE_V41_LIVE_STATES";
@@ -35,6 +35,13 @@ const LIVE_STATES_ENV: &str = "QWEN_SERVE_V41_LIVE_STATES";
 /// engine's request-memory estimate at its capacity. Unset: count only.
 /// Positive integer; read at startup.
 const LIVE_STATE_MIB_ENV: &str = "QWEN_SERVE_V41_LIVE_STATE_MIB";
+
+/// Agent workloads keep about three conversations busy at once. M5 Ultra, GSQ
+/// IQ2_XS, three agents x three turns (greedy, 128 tokens per turn, fresh
+/// server): 26.9 s with one request in flight and one live session, 21.6 s
+/// with four of each (1.25x); three concurrent single requests 1.18x.
+const DEFAULT_MAX_ACTIVE: usize = 4;
+const DEFAULT_LIVE_STATES: usize = 4;
 
 fn positive_env(name: &str) -> Result<Option<usize>> {
     let value = match std::env::var(name) {
@@ -86,8 +93,8 @@ impl Prepared {
             .map(|bytes| bytes.context("V4.1 live-state budget overflows"))
             .transpose()?;
         Ok(Self {
-            live_states: positive_env(LIVE_STATES_ENV)?.unwrap_or(1),
-            max_active: positive_env(MAX_ACTIVE_ENV)?.unwrap_or(1),
+            live_states: positive_env(LIVE_STATES_ENV)?.unwrap_or(DEFAULT_LIVE_STATES),
+            max_active: positive_env(MAX_ACTIVE_ENV)?.unwrap_or(DEFAULT_MAX_ACTIVE),
             live_state_bytes,
             snapshot_mib: invocation.snapshot_cache_mib,
             snapshot_policy: invocation.snapshot_policy,
@@ -121,6 +128,9 @@ pub(super) fn start(
         ctx.memory_signals(),
     )?;
     tracing::info!("serve: V4.1 snapshot cache: {plan}");
+    if prepared.max_active > 1 {
+        warm_batched_decode(&forward, prepared.max_active, prepared.settings.eos)?;
+    }
     let mut settings = prepared.settings;
     settings.model_id = listening.model_id.clone();
     let mut backend = Backend::new(&ctx, forward, settings);
@@ -143,6 +153,33 @@ pub(super) fn start(
         backend.scheduler = Some(scheduler::Scheduler::new(prepared.max_active));
     }
     listening.serve(started.elapsed().as_secs_f64() * 1e3, &mut backend)
+}
+
+/// Compile the batched decode path's pipelines before serving: on M5 Ultra
+/// the first `step_batch` of a process otherwise spends ~9 s compiling them
+/// while the first concurrent requests wait. One step of `width` (at most 8)
+/// throwaway two-position states, plus one plain step; results are discarded
+/// and the states dropped.
+fn warm_batched_decode(forward: &Forward<'_>, width: usize, token: u32) -> Result<()> {
+    let started = Instant::now();
+    let width = width.clamp(2, 8);
+    let cancel = Some(crate::shutdown::cancellation_flag());
+    let mut states = (0..=width)
+        .map(|_| forward.new_state(2))
+        .collect::<std::result::Result<Vec<_>, StateError>>()?;
+    let (single, batch) = states.split_first_mut().expect("width >= 2");
+    forward
+        .step(single, token, cancel)
+        .map_err(anyhow::Error::msg)?;
+    let mut members: Vec<_> = batch.iter_mut().collect();
+    forward
+        .step_batch(&mut members, &vec![token; width], cancel)
+        .map_err(anyhow::Error::msg)?;
+    tracing::info!(
+        "serve: V4.1 decode warm-up: one step and one {width}-wide batched step in {:.0} ms",
+        started.elapsed().as_secs_f64() * 1e3
+    );
+    Ok(())
 }
 
 mod cursor;

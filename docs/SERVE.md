@@ -600,10 +600,14 @@ concurrent history/native routes and the capability-gated Bun browser client.
 
 ## DeepSeek V4.1 continuous batching
 
-Opt-in, off by default. `QWEN_SERVE_V41_MAX_ACTIVE=N` (positive, read at
-startup; default 1) keeps up to N V4.1 requests in flight on the model owner.
-With 1 there is no scheduler and serving is exactly the serial path above:
-same outputs, stats and tests. With N > 1 (`serve/backend_v41/scheduler.rs`):
+On by default. `QWEN_SERVE_V41_MAX_ACTIVE=N` (positive, read at startup;
+default 4) keeps up to N V4.1 requests in flight on the model owner, and
+`QWEN_SERVE_V41_LIVE_STATES` (default 4) keeps that many idle conversations
+resident. With `QWEN_SERVE_V41_MAX_ACTIVE=1` there is no scheduler and serving
+is exactly the serial path above: same outputs, stats and tests. With N > 1
+(`serve/backend_v41/scheduler.rs`) the server first runs one plain and one
+batched throwaway decode step at startup, so the batched kernels' pipelines
+(about 9 s to compile on M5 Ultra) are ready before the first request:
 
 - **Scheduling.** Each owner pass reaps requests whose client or the server
   stopped, delivers queued output to parked clients, starts at most one waiting
@@ -653,8 +657,8 @@ same outputs, stats and tests. With N > 1 (`serve/backend_v41/scheduler.rs`):
   at most 512 rows. N live states plus idle ones (below) must fit: pair N with
   `--max-context-tokens` and the snapshot budget accordingly; refusal is the
   usual typed 503.
-- **Idle live sessions.** `QWEN_SERVE_V41_LIVE_STATES` (default 1, the single
-  live session) keeps up to that many idle states for exact-prefix reuse,
+- **Idle live sessions.** `QWEN_SERVE_V41_LIVE_STATES` (default 4; 1 is the
+  single live session) keeps up to that many idle states for exact-prefix reuse,
   least recently used released first; `QWEN_SERVE_V41_LIVE_STATE_MIB`
   optionally caps their estimated bytes. A request takes the compatible idle
   state with the longest exact prefix; in-flight states are never pooled;
@@ -683,6 +687,20 @@ prefilled in seven 512-row calls under load; that prompt's prefill took 4.9 s
 against 3.9 s in one call, so a mix with long prompts gained little (17.7 s
 against 18.2 s). A client that disconnected mid-stream was dropped alone; the
 other two requests finished.
+
+Multi-turn agents (same machine, snapshots on, 2026-10-28): three agents ran
+three turns each concurrently (greedy, 128 output tokens per turn, each later
+turn resending the conversation plus a ~1K-token tool-style message), on a
+freshly started server with no client warm-up. With the defaults (four in
+flight, four live sessions) the arms took 21.56/21.57 s; with one of each,
+26.89/26.94 s (1.25x). Later turns reused each agent's live session
+(~1,020 new tokens prefilled in 512-row calls under load) instead of restoring
+the snapshot at the generation-header cut (~1,150 tokens). Repeat arms were
+byte-identical, but the batched transcripts differ from the serial ones: under
+load, batched rounding and the 512-row prefill partition change greedy
+continuations. Before the startup warm-up, the first batched requests of a
+process waited ~9 s for pipeline compilation; the warm-up took 0.8-6.8 s
+before listening.
 
 Limits: one owner thread; no preemption of a running prefill call; a
 waiting request is admitted only when fewer than N are active; no survivor

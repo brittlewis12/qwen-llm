@@ -6,6 +6,19 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the current state and evidence index.
 
+## 2026-10-28 - V4.1 Fused Weight-To-Half: Exact, Scalar 1K Gate Fails
+
+M5 Ultra, research source `38c53b70`: the scalar fused producer passes an
+optimized two-dispatch GPU oracle over 141.6M half words, including the two
+F32/half double-rounding witnesses, status failures, offsets and guards.
+Separate common-output 1K/4K ABBA economics is a valid negative: 1K block GPU
+reductions are **-5.7186% / +31.0136%**, with host regression in the first;
+4K gives **51.7844% / 52.8070%**, but the predeclared filter requires all four
+blocks to pass. Close the scalar variant without choosing only 4K. No model,
+DRAM or allocation claim; defaults unchanged. A vector4 successor is a new
+implementation hypothesis, not a timing rerun. Method and evidence limits:
+`docs/bench/2026-10-28-v41-weight-half-producer.md`.
+
 ## 2026-10-28 - V4.1 Batched Decode: Shared Expert Once Per Batch, 1.08-1.15x
 
 - `Forward::step_batch` (B sequences, one token each, bitwise equal to

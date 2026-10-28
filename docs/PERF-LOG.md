@@ -6,6 +6,21 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the current state and evidence index.
 
+## 2026-10-28 - qwen serve: V4.1 Batching On By Default, 1.25x On Multi-Turn Agents
+
+- `QWEN_SERVE_V41_MAX_ACTIVE` and `QWEN_SERVE_V41_LIVE_STATES` now default
+  to 4 (1 restores the serial path and single live session). Startup runs
+  one plain and one batched throwaway decode step first: without it the
+  first batched requests of a process waited ~9 s for pipeline compilation.
+- M5 Ultra, GSQ IQ2_XS, snapshots on, fresh server per arm, no client
+  warm-up: three agents x three turns concurrently (greedy, 128 tokens per
+  turn, later turns resend the conversation plus a ~1K-token tool-style
+  message): defaults 21.56/21.57 s vs one in flight and one live session
+  26.89/26.94 s (**1.25x**). Later turns reuse each agent's live session
+  instead of the generation-header snapshot. Repeat arms byte-identical;
+  batched transcripts differ from serial ones (batched rounding and the
+  512-row prefill partition under load). Startup warm-up 0.8-6.8 s.
+
 ## 2026-10-28 - V4.1 Routed IQ2 Decode Kernels Specialized On Shape, 1.04x tg64
 
 - Routed IQ2 experts are compute-bound, not DRAM-bound (layout probe:

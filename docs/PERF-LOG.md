@@ -6,6 +6,34 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the current state and evidence index.
 
+## 2026-10-28 - V4.1 Batched Decode 1.14-1.37x (q_b, output_b); Bitwise Sink Scores 2.1x
+
+All M5 Ultra, GSQ IQ2_XS.
+
+- `step_batch` now also runs each layer's q_b (1280 -> 32768) and output_b
+  (8192 -> 5120) once over all sequences (skinny Q5_K kernel; the decode
+  attention encode is split front / q_b / middle / output_b / finish with
+  single-sequence dispatch order unchanged). Gather/scatter take one
+  dispatch for up to 8 sequences (`QWEN_V41_BATCH_COPY=per_column`
+  restores per-sequence copies; `QWEN_V41_BATCH_ATTN=0` per-sequence
+  attention).
+- Serial steps vs `step_batch`, 512-token prefixes, 4 alternating blocks of
+  16 rounds: B = 2/3/4/8 aggregate 77.3/83.0/86.1/91.2 tok/s vs ~67.9
+  serial (**1.14/1.22/1.27/1.37x**; shared expert alone 1.08/1.10/1.11/
+  1.13x). Teacher-forced argmax equal in every row; max |logit diff|
+  2.0e-6 of max |logit|; B = 1 bitwise.
+- 8192-token prefixes: B = 2/4 1.13/1.26x, argmax all equal, but max
+  relative logit diff 1.3e-2/3.2e-2. Per round it is ~5e-7 for 12 rounds,
+  then a ~1e-4 floor with 1e-2 spikes; identical with the shared expert
+  alone and bitwise with both batched paths off: sparse top-k selection
+  amplifies rounding in the decoded history. Relative logit diff is not a
+  usable gate at depth; a batched likelihood witness is next.
+- Sink-attention scores (`kernel_deepseek_v41_attention_score_keys`):
+  8-head x 4-key register tiles per simdgroup with `attention_score`'s
+  per-pair operations, bitwise equal. Kernel time at 64 heads x 512:
+  128+512 keys 21.48 -> 10.10 us (2.13x), 128+256 16.25 -> 9.96 us.
+  `QWEN_V41_SCORE_KEYS=0` restores the old kernel.
+
 ## 2026-10-28 - V4.1 Fused Weight-To-Half: Exact, Scalar 1K Gate Fails
 
 M5 Ultra, research source `38c53b70`: the scalar fused producer passes an

@@ -6,6 +6,20 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the current state and evidence index.
 
+## 2026-10-28 - V4.1 Vector4 Weight-To-Half Passes Its Operator Gate
+
+M5 Ultra, research source `a0e60724`: one four-element producer replaces F32
+weight materialization plus half conversion. Exact GPU-oracle proof passes
+**141,560,517 half words**, including READY/failed tails, rounding witnesses,
+status, offsets and guards. Common-output economics passes all four fixed
+blocks: **28.1442% / 28.7807%** producer GPU latency reduction at 1K,
+**51.4354% / 56.2160%** at 4K, with lower inclusive host means throughout.
+Both phases use the same frozen executable and pass 344 CPU checks each.
+This is only an operator continuation signal; defaults and allocation stay
+unchanged, and the scalar negative remains closed. Actual-routing 1K whole-FFN
+qualification is separate and underway. Method, limits and evidence:
+`docs/bench/2026-10-28-v41-vector4-weight-half.md`.
+
 ## 2026-10-28 - V4.1 Batched Decode Passes The 80K Likelihood Witness
 
 - M5 Ultra, GSQ IQ2_XS, main `8d27d686`: the 80K-prefix long witness (2

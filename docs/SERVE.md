@@ -69,7 +69,10 @@ connection with `QWEN_SERVE_QUEUE_DEPTH=1`, fails fast with
 `503 Service Unavailable`, `Retry-After: 1`, and a `server_busy` envelope
 instead of waiting silently in the listen backlog. Connections still queued at
 shutdown receive the same busy response. The Lens/control acceptor keeps its
-own execution gate.
+own execution gate. DeepSeek V4.1 alone can opt into several requests in
+flight (`QWEN_SERVE_V41_MAX_ACTIVE`; see
+[DeepSeek V4.1 continuous batching](#deepseek-v41-continuous-batching)); the
+queue depth then still bounds active plus waiting connections.
 
 **F4 — DeepSeek V4 tool support: implemented.** DS4 serve renders declared
 tools with the 0731 chat template (`render_ds4.rs`, pinned against the
@@ -94,7 +97,10 @@ construction returns ownership on failure so residency remains recoverable.
 `admit_independent_queue2`, `create_dense_batch8_executor`,
 `create_moe_batch16_executor`, and `concurrent_jsonl.rs` runs width-2
 overlapped decode today. Route serve through them: wiring and
-scheduling, with F3 as the on-ramp.
+scheduling, with F3 as the on-ramp. First family wired: DeepSeek V4.1
+(opt-in, `Forward::step_batch`; see
+[DeepSeek V4.1 continuous batching](#deepseek-v41-continuous-batching)); the
+owner-loop and scheduler contract is family-neutral, Qwen/DS4 remain serial.
 
 **F7 — Long-context performance stability.** Measured overnight
 (2026-08-20, 27B Q8): decode fell 14.5 → 8.4 tok/s from 31 k → 133 k, and
@@ -464,7 +470,9 @@ qwen serve -m MODEL --trace-sse "$trace_dir/serve-$(date +%Y%m%d-%H%M%S).jsonl"
   `usage.input_tokens_details.cached_tokens` reports tokens restored
   from checkpoints.
 - **Serial generation, fail-fast admission.** `std::net`, one request in
-  flight; the acceptor rejects other connections immediately with `503` and
+  flight (DeepSeek V4.1 opt-in exception: `QWEN_SERVE_V41_MAX_ACTIVE`, see
+  [continuous batching](#deepseek-v41-continuous-batching)); the acceptor
+  rejects connections beyond its queue immediately with `503` and
   `Retry-After: 1`. HTTP/1.1 with
   `Connection: close`; hand-rolled request parse (loopback threat model;
   request bodies are `Content-Length` JSON).
@@ -521,7 +529,9 @@ qwen serve -m MODEL --trace-sse "$trace_dir/serve-$(date +%Y%m%d-%H%M%S).jsonl"
 
 ## HTTP Ownership And Admission
 
-Serving still admits one ordinary HTTP connection at a time. A CPU worker owns
+Serving still admits one ordinary HTTP connection at a time, except DeepSeek
+V4.1 with `QWEN_SERVE_V41_MAX_ACTIVE` above 1 (below and
+[continuous batching](#deepseek-v41-continuous-batching)). A CPU worker owns
 request reading, family-profile parsing/rendering, output partitioning and response
 writing. The resident backend remains on its original owner thread, including K2's
 borrowed model/session. There is no additional service, worker-pool option or
@@ -550,6 +560,23 @@ session construction, restoring residency on a returned post-construction refusa
 this does not price or qualify the construction peak. A reported zero process
 budget retains the runtime's omitted-budget convention, not proof of headroom.
 
+A backend that keeps several requests in flight (`GenerationBackend::max_active`
+above 1; today only V4.1 when opted in) gets a separate owner loop on the plain
+acceptor; every other backend keeps the loop above unchanged. It holds up to
+`max_active` connections, polls each without blocking, hands prepared requests
+to the backend's scheduler (`submit`) and advances them in bounded `pump`
+quanta, admitting at most one waiting connection per pass in arrival order.
+Its piece channel is eight chunks deep and is never acknowledged per piece:
+the owner queues output and sends without waiting, and a request whose client
+has not drained earlier output is parked by its scheduler instead of blocking
+the others. The worker's reserve prices the deeper channel plus one queued
+piece. The owner parks for at most the 10 ms transport poll when nothing can
+progress; workers wake it when they submit a request or drain output. On
+shutdown every submitted request completes before workers are stopped
+(started ones abort, unstarted ones get `503 server_busy`), queued
+connections get the busy response, and each admitted connection still
+produces exactly one completion.
+
 Worker exit signals cancellation independently of activity accounting. Owner work
 retains activity until it unwinds, and each handled connection produces exactly
 one completion callback. CPU preparation and response writing inhibit idle
@@ -570,6 +597,76 @@ Live Metal pressure, performance, cache continuity and model-backed signal/durab
 shutdown remain pending. This earlier ordinary-bridge milestone does not establish
 Lens qualification. The subsequent [durable baseline slice](LENS-WEB.md) adds
 concurrent history/native routes and the capability-gated Bun browser client.
+
+## DeepSeek V4.1 continuous batching
+
+Opt-in, off by default. `QWEN_SERVE_V41_MAX_ACTIVE=N` (positive, read at
+startup; default 1) keeps up to N V4.1 requests in flight on the model owner.
+With 1 there is no scheduler and serving is exactly the serial path above:
+same outputs, stats and tests. With N > 1 (`serve/backend_v41/scheduler.rs`):
+
+- **Scheduling.** Each owner pass reaps requests whose client or the server
+  stopped, delivers queued output to parked clients, starts at most one waiting
+  request (arrival order), then runs either one prefill call for the oldest
+  prefilling request or one decode step over every unparked decoding request,
+  alternating while both wait. Every decoding request advances one token per
+  `Forward::step_batch` call (plain `step`, with the request's own
+  cancellation, when only one decodes). Requests run the serial phases
+  unchanged (tokenize, cuts, admission, live/snapshot/cold take, prefill,
+  the `decode_serial` token lifecycle via a per-token cursor, phases, commit
+  only after success). Connections beyond N wait in the
+  `QWEN_SERVE_QUEUE_DEPTH` queue, which still bounds active plus waiting.
+- **Prefill under load.** A prompt prefills in `V41_PREFILL_ROWS` calls when
+  no other request decodes and in 512-row calls while others do, so a long
+  prompt costs decoding requests at most one 512-row call between their
+  steps. Checkpoint cuts are unchanged.
+- **Arithmetic.** `step_batch` runs each layer's FFN shared expert once over
+  all sequences (Q5_K skinny kernel: F32 rounding differs from `step`;
+  `QWEN_V41_BATCH_SHARED=0` restores bitwise per-sequence steps). A prompt
+  prefilled under load is split into different calls than it would be alone,
+  which can change its rounding and therefore the generated text at
+  temperature 0; its stats report `prefill_loaded_calls > 0`. Determinism is
+  therefore conditional on batch composition and prefill partition, as F7
+  already conditions it on restore partitioning.
+- **Failure isolation.** A batched step never receives a request's
+  cancellation flag, only the process-shutdown flag; each request's own
+  disconnect or cancellation is checked between steps and drops that request
+  alone. Members are checked first (ready, below capacity); an unready member
+  steps alone and fails alone. A batch the engine refuses before touching any
+  state (for example its scratch admission) falls back to per-request steps.
+  A batch that fails after it started has poisoned every member, so every
+  member fails with a 500 naming the batched step; no poisoned state is kept.
+- **Slow clients.** Output is queued and delivered without waiting (no
+  per-piece acknowledgement). A request whose client has not drained its
+  earlier output leaves the batch (parked) until it catches up and is aborted
+  after 30 s, the socket write timeout. Others keep decoding.
+- **Memory.** Each request is admitted as in the serial path, against current
+  memory signals that include the other requests' resident states, and its
+  caller reserve is increased by the reserves of requests already in flight.
+  The engine admits each batch's scratch before touching any state. A
+  prefill call's scratch is admitted per call, and under load the call is
+  at most 512 rows. N live states plus idle ones (below) must fit: pair N with
+  `--max-context-tokens` and the snapshot budget accordingly; refusal is the
+  usual typed 503.
+- **Idle live sessions.** `QWEN_SERVE_V41_LIVE_STATES` (default 1, the single
+  live session) keeps up to that many idle states for exact-prefix reuse,
+  least recently used released first; `QWEN_SERVE_V41_LIVE_STATE_MIB`
+  optionally caps their estimated bytes. A request takes the compatible idle
+  state with the longest exact prefix; in-flight states are never pooled;
+  only ready full-forward states of successful requests are kept. Memory
+  relief releases snapshots first, then idle states the admitting request
+  could not take. With one state, relief stays snapshots-only as before.
+- **Stats.** With N > 1, `x_qwen.phases.batch` adds `max_active`, `queue_ms`
+  (owner submission to start), `parked_ms`, `stepped_transitions`,
+  `width_max`, `width_mean`, `batched_transitions` (steps shared with at least
+  one other request), `prefill_loaded_rows` and `prefill_loaded_calls`.
+  `transition_ms` counts each shared step's wall time; `prefill_ms` and
+  `decode_ms` are wall clock and include other requests' interleaved work.
+  Existing fields are unchanged.
+
+Limits: one owner thread; no preemption of a running prefill call; a
+waiting request is admitted only when fewer than N are active; no survivor
+recovery after a post-start batch failure.
 
 ## K2 Horizon Raw Profile
 
@@ -1540,7 +1637,10 @@ chunk heartbeat. Byte-oriented reasoning/tool partitioning can buffer token
 boundaries that do not produce a write, so cancellation is write/chunk bounded,
 not universally token- or time-bounded. The S1 cell measured 24 ms to the
 following admission in its tested mid-decode case, but serve makes no universal
-`<250 ms` claim. A non-stream response has no required write before completion;
+`<250 ms` claim. With V4.1 continuous batching, a request's disconnect is
+observed between batched steps and drops only that request; batched steps
+see only process shutdown, so an in-flight step is not interrupted by one
+client. A non-stream response has no required write before completion;
 graceful disconnect detection before that first write is inherently best-effort.
 
 ## S1 gate definitions (executed; see gate record)

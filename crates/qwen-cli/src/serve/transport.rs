@@ -1,5 +1,7 @@
 //! One admitted HTTP worker communicates with the resident owner. This separates
 //! ownership, not admission policy: no new connection overlaps response cleanup.
+//! A backend that schedules several requests (`max_active() > 1`) instead gets
+//! [`Connection::poll_batched`] and a non-blocking, unacknowledged owner sink.
 
 use super::http::{
     self, BackendFailure, GenerationBackend, GenerationOutcome, GenerationSink, PreparedResponse,

@@ -4572,6 +4572,27 @@
   },
   {
     "target": "qwen",
+    "name": "serve::backend_v41::cursor::tests::cursor_matches_decode_serial_counters",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Reviewed host-only planning, metadata, NSObject lifetime, pure arithmetic, fake-state lifecycle or loopback fixture; no Metal context or real model import."
+  },
+  {
+    "target": "qwen",
+    "name": "serve::backend_v41::cursor::tests::cursor_matches_decode_serial_events_tokens_and_errors",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Reviewed host-only planning, metadata, NSObject lifetime, pure arithmetic, fake-state lifecycle or loopback fixture; no Metal context or real model import."
+  },
+  {
+    "target": "qwen",
+    "name": "serve::backend_v41::cursor::tests::cursor_zero_max_tokens_is_a_client_error_and_checkpoint_failure_is_500",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Reviewed host-only planning, metadata, NSObject lifetime, pure arithmetic, fake-state lifecycle or loopback fixture; no Metal context or real model import."
+  },
+  {
+    "target": "qwen",
     "name": "serve::backend_v41::reuse::tests::capture_admission_checks_full_entry_plus_reserve_and_overflow",
     "class": "cpu",
     "ignored": false,
@@ -4629,6 +4650,34 @@
   {
     "target": "qwen",
     "name": "serve::backend_v41::reuse::tests::optional_capture_decline_preserves_request_schedule_and_live_state",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Reviewed host-only planning, metadata, NSObject lifetime, pure arithmetic, fake-state lifecycle or loopback fixture; no Metal context or real model import."
+  },
+  {
+    "target": "qwen",
+    "name": "serve::backend_v41::reuse::tests::pool_commit_enforces_count_and_byte_budgets_by_lru",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Reviewed host-only planning, metadata, NSObject lifetime, pure arithmetic, fake-state lifecycle or loopback fixture; no Metal context or real model import."
+  },
+  {
+    "target": "qwen",
+    "name": "serve::backend_v41::reuse::tests::pool_of_one_prepares_exactly_like_the_single_live_slot",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Reviewed host-only planning, metadata, NSObject lifetime, pure arithmetic, fake-state lifecycle or loopback fixture; no Metal context or real model import."
+  },
+  {
+    "target": "qwen",
+    "name": "serve::backend_v41::reuse::tests::pool_relief_releases_lru_states_the_admitting_request_cannot_take",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Reviewed host-only planning, metadata, NSObject lifetime, pure arithmetic, fake-state lifecycle or loopback fixture; no Metal context or real model import."
+  },
+  {
+    "target": "qwen",
+    "name": "serve::backend_v41::reuse::tests::pool_takes_longest_compatible_prefix_then_most_recent",
     "class": "cpu",
     "ignored": false,
     "reason": "Reviewed host-only planning, metadata, NSObject lifetime, pure arithmetic, fake-state lifecycle or loopback fixture; no Metal context or real model import."
@@ -4783,6 +4832,76 @@
   {
     "target": "qwen",
     "name": "serve::backend_v41::reuse_tests::smaller_runtime_geometry_counts_internal_chunks_not_logical_4096_calls",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Reviewed host-only planning, metadata, NSObject lifetime, pure arithmetic, fake-state lifecycle or loopback fixture; no Metal context or real model import."
+  },
+  {
+    "target": "qwen",
+    "name": "serve::backend_v41::scheduler_tests::a_batch_that_fails_after_starting_fails_every_member_without_commit",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Reviewed host-only planning, metadata, NSObject lifetime, pure arithmetic, fake-state lifecycle or loopback fixture; no Metal context or real model import."
+  },
+  {
+    "target": "qwen",
+    "name": "serve::backend_v41::scheduler_tests::a_cancelled_request_drops_alone_and_batches_never_see_its_flag",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Reviewed host-only planning, metadata, NSObject lifetime, pure arithmetic, fake-state lifecycle or loopback fixture; no Metal context or real model import."
+  },
+  {
+    "target": "qwen",
+    "name": "serve::backend_v41::scheduler_tests::a_parked_request_leaves_the_batch_resumes_and_times_out",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Reviewed host-only planning, metadata, NSObject lifetime, pure arithmetic, fake-state lifecycle or loopback fixture; no Metal context or real model import."
+  },
+  {
+    "target": "qwen",
+    "name": "serve::backend_v41::scheduler_tests::a_refused_batch_falls_back_to_single_steps_and_only_an_offender_fails",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Reviewed host-only planning, metadata, NSObject lifetime, pure arithmetic, fake-state lifecycle or loopback fixture; no Metal context or real model import."
+  },
+  {
+    "target": "qwen",
+    "name": "serve::backend_v41::scheduler_tests::abort_all_aborts_started_requests_and_rejects_waiting_ones_busy",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Reviewed host-only planning, metadata, NSObject lifetime, pure arithmetic, fake-state lifecycle or loopback fixture; no Metal context or real model import."
+  },
+  {
+    "target": "qwen",
+    "name": "serve::backend_v41::scheduler_tests::batched_requests_match_serial_outputs_and_report_batch_fields",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Reviewed host-only planning, metadata, NSObject lifetime, pure arithmetic, fake-state lifecycle or loopback fixture; no Metal context or real model import."
+  },
+  {
+    "target": "qwen",
+    "name": "serve::backend_v41::scheduler_tests::http_requests_batch_through_the_owner_loop_with_serial_text",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Reviewed host-only planning, metadata, NSObject lifetime, pure arithmetic, fake-state lifecycle or loopback fixture; no Metal context or real model import."
+  },
+  {
+    "target": "qwen",
+    "name": "serve::backend_v41::scheduler_tests::prefill_cap_is_reported_per_request",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Reviewed host-only planning, metadata, NSObject lifetime, pure arithmetic, fake-state lifecycle or loopback fixture; no Metal context or real model import."
+  },
+  {
+    "target": "qwen",
+    "name": "serve::backend_v41::scheduler_tests::prefill_is_bounded_while_others_decode_and_full_when_idle",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Reviewed host-only planning, metadata, NSObject lifetime, pure arithmetic, fake-state lifecycle or loopback fixture; no Metal context or real model import."
+  },
+  {
+    "target": "qwen",
+    "name": "serve::backend_v41::scheduler_tests::waiting_requests_start_in_order_and_admission_adds_in_flight_reserves",
     "class": "cpu",
     "ignored": false,
     "reason": "Reviewed host-only planning, metadata, NSObject lifetime, pure arithmetic, fake-state lifecycle or loopback fixture; no Metal context or real model import."

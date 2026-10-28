@@ -6,6 +6,20 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the current state and evidence index.
 
+## 2026-10-28 - V4.1 Paired Down Misses The Whole-FFN Continuation Gate
+
+M5 Ultra, GSQ IQ2_XS, research source `fdf6b324`: one actual-routing ordinary
+4K layer-8 FFN capture, warm A/B, then two ABBA blocks. All eleven replays pass
+exact defined-stage/output bits, guards, status and immutable-bank checks.
+Whole-FFN GPU latency falls **2.2272% / 2.2514%**, below the required 3% per
+block; inclusive host latency regresses **0.1334% / 0.6140%**. Close the leaf;
+defaults unchanged, no model-gain claim or further paired timing campaign.
+
+The native packet completes, but its original outer parser fails on a stale
+field name. Separate reviewed CPU-only reduction confirms the negative without
+rerunning the GPU or synthesizing original controller acceptance. Full evidence
+and limits: `docs/bench/2026-10-28-v41-paired-ffn-result.md`.
+
 ## 2026-10-28 - V4.1 Agent Depth After Select-v2; Independent Sequences Do Not Overlap
 
 All M5 Ultra, GSQ IQ2_XS, main `fbbf99b6` unless noted.

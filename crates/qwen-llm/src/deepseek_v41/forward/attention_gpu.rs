@@ -106,6 +106,8 @@ pub(super) struct Workspace {
     candidates: MetalTensor,
     sort_scores: MetalTensor,
     sort_ids: MetalTensor,
+    /// One-row scratch of the multi-threadgroup radix selector (decode).
+    radix_grid: RadixGridScratch,
     selected: MetalTensor,
     attention_scores: MetalTensor,
     value_matrix: Option<ValueMatrix>,
@@ -1035,6 +1037,7 @@ fn shapes(c: &Config, capacity: usize, schedule: &Schedule) -> Result<Vec<usize>
         capacity.div_ceil(c.candidate_block),
         capacity.next_power_of_two(),
         capacity.next_power_of_two(),
+        RadixGridScratch::domain_words(capacity),
         c.index_topk,
         c.heads * (c.window + c.index_topk + 1),
         c.heads * c.head_dim,
@@ -1141,7 +1144,7 @@ fn index_dispatch(enc: &KernelEncoder, length: usize) {
 }
 
 crate::env_flag!(
-    /// Exact radix top-k for index selection, fed by F32 index scores from `index_heads_rows_ilp` (the scalar kernel's operations, to F32 rounding): decode rows, and prefill chunks past the unpruned selectors' 16K-key domain (batched scores, radix candidate publication and radix top-k over row sub-tiles); disabling restores the per-row scalar index and bitonic sort network for a same-binary A/B. Given the same scores both select the same IDs.
+    /// Exact radix top-k for index selection, fed by F32 index scores from the long-row index kernels (`index_heads_rows_mma`, or `index_heads_rows_ilp` with `QWEN_V41_SELECT_GRID=0`; the scalar kernel's operations, to F32 rounding): decode rows, and prefill chunks past the unpruned selectors' 16K-key domain (batched scores, radix candidate publication and radix top-k over row sub-tiles); disabling restores the per-row scalar index and bitonic sort network for a same-binary A/B. Given the same scores both select the same IDs.
     default_on select_radix_enabled,
     "QWEN_V41_SELECT_RADIX"
 );
@@ -1156,6 +1159,7 @@ fn index_ilp_supported(c: &Config) -> bool {
 /// ilp`: `index_heads_rows` operations, 64 keys per threadgroup). Row scores
 /// land at `scores[local * stride ..]`; rows with at most top-k visible keys
 /// skip. Decode is the one-row case (`start` = position, `first` = 0).
+#[cfg(test)]
 #[allow(clippy::too_many_arguments)]
 fn encode_index_scores_rows_ilp(
     ctx: &MetalContext,
@@ -1172,8 +1176,114 @@ fn encode_index_scores_rows_ilp(
     keys: &MetalTensor,
     scores: &MetalTensor,
 ) -> Result<()> {
+    encode_index_scores_rows_kernel(
+        ctx,
+        enc,
+        c,
+        IndexRowsKernel::Ilp,
+        [start, ratio, max_length, first, n, stride],
+        query,
+        weights,
+        keys,
+        scores,
+    )
+}
+
+/// `encode_index_scores_rows_ilp` on `index_heads_rows_mma` (F32 simdgroup
+/// MMA, 128 keys per threadgroup): the same scores up to F32 summation order.
+#[cfg(test)]
+#[allow(clippy::too_many_arguments)]
+fn encode_index_scores_rows_mma(
+    ctx: &MetalContext,
+    enc: &KernelEncoder,
+    c: &Config,
+    start: usize,
+    ratio: usize,
+    max_length: usize,
+    first: usize,
+    n: usize,
+    stride: usize,
+    query: &MetalTensor,
+    weights: &MetalTensor,
+    keys: &MetalTensor,
+    scores: &MetalTensor,
+) -> Result<()> {
+    encode_index_scores_rows_kernel(
+        ctx,
+        enc,
+        c,
+        IndexRowsKernel::Mma,
+        [start, ratio, max_length, first, n, stride],
+        query,
+        weights,
+        keys,
+        scores,
+    )
+}
+
+/// The radix path's long-row index scores: MMA unless `QWEN_V41_SELECT_GRID`
+/// is off, then ILP.
+#[allow(clippy::too_many_arguments)]
+fn encode_index_scores_rows_long(
+    ctx: &MetalContext,
+    enc: &KernelEncoder,
+    c: &Config,
+    start: usize,
+    ratio: usize,
+    max_length: usize,
+    first: usize,
+    n: usize,
+    stride: usize,
+    query: &MetalTensor,
+    weights: &MetalTensor,
+    keys: &MetalTensor,
+    scores: &MetalTensor,
+) -> Result<()> {
+    let kernel = if select_grid_enabled() {
+        IndexRowsKernel::Mma
+    } else {
+        IndexRowsKernel::Ilp
+    };
+    encode_index_scores_rows_kernel(
+        ctx,
+        enc,
+        c,
+        kernel,
+        [start, ratio, max_length, first, n, stride],
+        query,
+        weights,
+        keys,
+        scores,
+    )
+}
+
+#[derive(Clone, Copy)]
+enum IndexRowsKernel {
+    Ilp,
+    Mma,
+}
+
+/// Shared binding of the 32x128 long-row index kernels. `g`: chunk start,
+/// ratio, longest visible length, first row, rows, score stride.
+#[allow(clippy::too_many_arguments)]
+fn encode_index_scores_rows_kernel(
+    ctx: &MetalContext,
+    enc: &KernelEncoder,
+    c: &Config,
+    kernel: IndexRowsKernel,
+    g: [usize; 6],
+    query: &MetalTensor,
+    weights: &MetalTensor,
+    keys: &MetalTensor,
+    scores: &MetalTensor,
+) -> Result<()> {
+    let [start, ratio, max_length, first, n, stride] = g;
     op::require(index_ilp_supported(c), "ILP index geometry")?;
-    pipeline(ctx, enc, "index_heads_rows_ilp")?;
+    let (suffix, keys_per_group) = match kernel {
+        IndexRowsKernel::Ilp => ("index_heads_rows_ilp", 64),
+        IndexRowsKernel::Mma => ("index_heads_rows_mma", 128),
+    };
+    pipeline(ctx, enc, suffix)?;
     enc.set_bytes(
         0,
         &[
@@ -1200,7 +1310,7 @@ fn encode_index_scores_rows_ilp(
     enc.set_bytes(7, &(first as u32));
     enc.dispatch(
         MTLSize {
-            width: max_length.div_ceil(64),
+            width: max_length.div_ceil(keys_per_group),
             height: n,
             depth: 1,
         },
@@ -1262,6 +1372,203 @@ fn encode_select_radix_row(
         },
     );
     Ok(())
+}
+
+crate::env_flag!(
+    /// Wide kernels on the radix selection path (`QWEN_V41_SELECT_RADIX`): decode's one-row top-k by the multi-threadgroup radix selector (`select_radix_grid_hist`/`_place`) and long-row index scores, decode and batched prefill, by the F32 simdgroup-MMA kernel (`index_heads_rows_mma`); disabling restores the single-threadgroup radix kernel and the ILP index kernel for a same-binary A/B. Same IDs given the same scores; MMA scores differ from ILP only by F32 summation order.
+    default_on select_grid_enabled,
+    "QWEN_V41_SELECT_GRID"
+);
+
+/// Words before the per-chunk tables in a radix grid scratch row
+/// (`V41_RADIX_GRID_TABLES`: three digit histograms and the selection state).
+const RADIX_GRID_HEADER: usize = 5128;
+/// Words per chunk table (`V41_RADIX_GRID_TABLE`).
+const RADIX_GRID_TABLE: usize = 1028;
+/// Threads per `select_radix_grid_*` threadgroup; a chunk holds at most four
+/// keys per thread.
+const RADIX_GRID_THREADS: usize = 512;
+const RADIX_GRID_MAX_CHUNK: usize = 4 * RADIX_GRID_THREADS;
+/// `radix_grid_chunk` aims for this many chunks per row.
+const RADIX_GRID_TARGET_CHUNKS: usize = 32;
+
+/// Keys per threadgroup for a selection domain: about
+/// `RADIX_GRID_TARGET_CHUNKS` chunks of 512 to 2048 keys (the fastest shapes
+/// measured on M4 Max from 16K to 128K keys).
+fn radix_grid_chunk(domain: usize) -> usize {
+    domain
+        .div_ceil(RADIX_GRID_TARGET_CHUNKS)
+        .next_power_of_two()
+        .clamp(RADIX_GRID_THREADS, RADIX_GRID_MAX_CHUNK)
+}
+
+/// Scratch rows of the multi-threadgroup radix selector: one per
+/// dispatch-local row, each with room for `chunks` chunk tables. Allocated
+/// zeroed; the kernels keep the histograms zeroed between selections (see
+/// `select_radix_grid_hist`).
+struct RadixGridScratch {
+    tensor: MetalTensor,
+    rows: usize,
+    stride: usize,
+}
+
+impl RadixGridScratch {
+    fn new(ctx: &MetalContext, rows: usize, chunks: usize) -> Result<Self> {
+        let stride = RADIX_GRID_HEADER + RADIX_GRID_TABLE * chunks;
+        Ok(Self {
+            tensor: tensor(ctx, rows.max(1) * stride, GgmlType::I32)?,
+            rows,
+            stride,
+        })
+    }
+
+    /// Chunks of every domain up to `domain` at `radix_grid_chunk`'s shapes:
+    /// at most `RADIX_GRID_TARGET_CHUNKS` until the chunk size caps.
+    fn domain_chunks(domain: usize) -> usize {
+        domain
+            .div_ceil(RADIX_GRID_MAX_CHUNK)
+            .max(RADIX_GRID_TARGET_CHUNKS)
+    }
+
+    /// Words of a one-row scratch for domains up to `domain`.
+    fn domain_words(domain: usize) -> usize {
+        RADIX_GRID_HEADER + RADIX_GRID_TABLE * Self::domain_chunks(domain)
+    }
+
+    /// One row with room for every domain up to `domain`.
+    fn for_domain(ctx: &MetalContext, domain: usize) -> Result<Self> {
+        Self::new(ctx, 1, Self::domain_chunks(domain))
+    }
+}
+
+/// `select_radix_rows` over `b[2]` rows split across threadgroups
+/// (`kernel_deepseek_v41_attention_select_radix_grid_hist` for each digit,
+/// then `select_radix_grid_place`): identical arguments, order, masks, modes,
+/// NaN status and outputs. `domain` bounds every row's selection domain
+/// (visible keys, or blocks in mode 1) and `chunk` is the keys per
+/// threadgroup.
+#[allow(clippy::too_many_arguments)]
+fn encode_select_radix_grid(
+    ctx: &MetalContext,
+    enc: &KernelEncoder,
+    a: [u32; 4],
+    b: [u32; 4],
+    c: [u32; 4],
+    domain: usize,
+    chunk: usize,
+    scores: &MetalTensor,
+    candidates: &MetalTensor,
+    selected: &MetalTensor,
+    status: &MetalTensor,
+    scratch: &RadixGridScratch,
+) -> Result<()> {
+    let rows = b[2] as usize;
+    let chunks = domain.div_ceil(chunk.max(1));
+    op::require(
+        (1..=RADIX_GRID_MAX_CHUNK).contains(&chunk)
+            && rows <= scratch.rows
+            && RADIX_GRID_HEADER + RADIX_GRID_TABLE * chunks <= scratch.stride,
+        "radix grid scratch",
+    )?;
+    if rows == 0 || domain == 0 {
+        return Ok(());
+    }
+    for (kernel, pass) in [("hist", 0u32), ("hist", 1), ("hist", 2), ("place", 0)] {
+        let pso = pipeline(ctx, enc, &format!("select_radix_grid_{kernel}"))?;
+        op::require(
+            pso.maxTotalThreadsPerThreadgroup() >= RADIX_GRID_THREADS,
+            "radix grid threadgroup size",
+        )?;
+        enc.set_bytes(0, &a);
+        enc.set_bytes(1, &b);
+        enc.set_bytes(2, &c);
+        enc.set_tensor(3, scores);
+        enc.set_tensor(4, candidates);
+        enc.set_tensor(5, selected);
+        enc.set_tensor(6, status);
+        enc.set_tensor(7, &scratch.tensor);
+        enc.set_bytes(8, &[pass, chunk as u32, scratch.stride as u32, 0]);
+        enc.dispatch(
+            MTLSize {
+                width: chunks,
+                height: rows,
+                depth: 1,
+            },
+            MTLSize {
+                width: RADIX_GRID_THREADS,
+                height: 1,
+                depth: 1,
+            },
+        );
+    }
+    Ok(())
+}
+
+/// `select_radix_rows` on the multi-threadgroup selector at
+/// `radix_grid_chunk(domain)`.
+#[allow(clippy::too_many_arguments)]
+fn encode_select_radix_wide(
+    ctx: &MetalContext,
+    enc: &KernelEncoder,
+    a: [u32; 4],
+    b: [u32; 4],
+    c: [u32; 4],
+    domain: usize,
+    scores: &MetalTensor,
+    candidates: &MetalTensor,
+    selected: &MetalTensor,
+    status: &MetalTensor,
+    scratch: &RadixGridScratch,
+) -> Result<()> {
+    encode_select_radix_grid(
+        ctx,
+        enc,
+        a,
+        b,
+        c,
+        domain,
+        radix_grid_chunk(domain),
+        scores,
+        candidates,
+        selected,
+        status,
+        scratch,
+    )
+}
+
+/// `encode_select_radix_row` on the wide selectors.
+#[allow(clippy::too_many_arguments)]
+fn encode_select_radix_row_wide(
+    ctx: &MetalContext,
+    enc: &KernelEncoder,
+    c: &Config,
+    position: usize,
+    ratio: usize,
+    scores: &MetalTensor,
+    candidates: &MetalTensor,
+    selected: &MetalTensor,
+    status: &MetalTensor,
+    scratch: &RadixGridScratch,
+    mask: bool,
+) -> Result<()> {
+    encode_select_radix_wide(
+        ctx,
+        enc,
+        [
+            position as u32,
+            ratio as u32,
+            c.index_topk as u32,
+            c.candidate_block as u32,
+        ],
+        [0, 0, 1, mask as u32],
+        [c.index_topk as u32, 0, c.candidate_topk as u32, 0],
+        (position + 1) / ratio,
+        scores,
+        candidates,
+        selected,
+        status,
+        scratch,
+    )
 }
 
 // Bindings 0..10 match the incumbent. Each head's last score slot is scratch.
@@ -1780,6 +2087,7 @@ impl Workspace {
             candidates: i(capacity.div_ceil(c.candidate_block))?,
             sort_scores: f(capacity.next_power_of_two())?,
             sort_ids: i(capacity.next_power_of_two())?,
+            radix_grid: RadixGridScratch::for_domain(ctx, capacity)?,
             selected: i(c.index_topk)?,
             attention_scores: f(c.heads * (c.window + c.index_topk + 1))?,
             value_matrix: ValueMatrix::new(ctx, c)?,
@@ -2554,7 +2862,7 @@ impl Workspace {
                         )?;
                     }
                     if select_radix_enabled() && index_ilp_supported(c) {
-                        encode_index_scores_rows_ilp(
+                        encode_index_scores_rows_long(
                             ctx,
                             enc,
                             c,
@@ -2600,18 +2908,34 @@ impl Workspace {
                             .candidate_source_layer
                             .is_some_and(|source| id > source);
                     if select_radix_enabled() && selected_count == c.index_topk {
-                        encode_select_radix_row(
-                            ctx,
-                            enc,
-                            c,
-                            position,
-                            ratio,
-                            &self.index_scores,
-                            &self.candidates,
-                            &self.selected,
-                            &self.status,
-                            mask,
-                        )?;
+                        if select_grid_enabled() {
+                            encode_select_radix_row_wide(
+                                ctx,
+                                enc,
+                                c,
+                                position,
+                                ratio,
+                                &self.index_scores,
+                                &self.candidates,
+                                &self.selected,
+                                &self.status,
+                                &self.radix_grid,
+                                mask,
+                            )?;
+                        } else {
+                            encode_select_radix_row(
+                                ctx,
+                                enc,
+                                c,
+                                position,
+                                ratio,
+                                &self.index_scores,
+                                &self.candidates,
+                                &self.selected,
+                                &self.status,
+                                mask,
+                            )?;
+                        }
                     } else {
                         self.sort(ctx, enc, &self.index_scores, length, mask)?;
                         let pso = pipeline(ctx, enc, "chronological")?;

@@ -237,6 +237,7 @@ fn all_tensors(w: &Workspace, r: &Rows) -> Vec<MetalTensor> {
         &w.candidates,
         &w.sort_scores,
         &w.sort_ids,
+        &w.radix_grid.tensor,
         &w.selected,
         &w.attention_scores,
         &w.attended,
@@ -792,10 +793,10 @@ fn mask_real_pipeline_cpu_bounds() {
     let sizes = inventory(&c, &s);
     let cpu = RealCpuInventory::new(&sizes);
     let conservative_metal: u64 = sizes.iter().map(|&n| n as u64 * 4 + 65536).sum();
-    assert_eq!(sizes.len(), 110);
-    assert_eq!(sizes.iter().sum::<usize>() * 4, 9755640);
+    assert_eq!(sizes.len(), 111);
+    assert_eq!(sizes.iter().sum::<usize>() * 4, 9907736);
     assert_eq!(cpu.total(), 34604544);
-    assert_eq!(conservative_metal + cpu.total(), 51569144);
+    assert_eq!(conservative_metal + cpu.total(), 51786776);
     assert!(conservative_metal + cpu.total() < REAL_LIMIT);
     assert!(
         cpu.seed_keys_values_and_upload_staging >= 4 * CAPACITY as u64 * c.index_dim as u64 * 4

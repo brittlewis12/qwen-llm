@@ -214,6 +214,82 @@ kernel void kernel_deepseek_v41_attention_index_heads_rows_ilp(
     }
 }
 
+// index_heads_rows_ilp's scores (32 heads x 128 dims; F32 operands, F32
+// accumulation) on simdgroup_float8x8 MMA, for long rows. A 256-thread
+// threadgroup covers V41_IDX_MMA_KEYS keys along group.x: simdgroup (key
+// group g = sg / 4, head group h = sg % 4) keeps Q^T of heads 8h..8h+7 in
+// registers and, for its 8-key blocks, computes S^T = K x Q^T from 8x8 key
+// tiles loaded straight from the key rows (dims accumulated in order, eight
+// per step), applies relu, and reduces its eight heads with a second F32 MMA
+// against a tile whose columns are the scaled head weights; the four
+// head-group partials are summed in order through threadgroup memory. Equal
+// to index_heads_rows up to F32 summation order; same arguments and score
+// layout as the ILP kernel. One 8-key block per simdgroup step keeps the
+// accumulators few, so many simdgroups stay resident to cover load latency.
+// Rows are longer than top_k >= 8 keys: a short last block is computed as
+// the row's last 8 keys and only its own keys are written.
+#define V41_IDX_MMA_ROUNDS 8u
+#define V41_IDX_MMA_KEYS (2u * 8u * V41_IDX_MMA_ROUNDS)
+kernel void kernel_deepseek_v41_attention_index_heads_rows_mma(
+    constant uint4 &a [[buffer(0)]], constant uint4 &b [[buffer(1)]],
+    constant uint4 &c [[buffer(2)]], device const float *q [[buffer(3)]],
+    device const float *weights [[buffer(4)]], device const float *keys [[buffer(5)]],
+    device float *scores [[buffer(6)]], constant uint &row0 [[buffer(7)]],
+    uint3 group [[threadgroup_position_in_grid]], uint tid [[thread_index_in_threadgroup]],
+    uint sg [[simdgroup_index_in_threadgroup]], uint lane [[thread_index_in_simdgroup]]) {
+    threadgroup float ws[256];
+    threadgroup float partial[V41_IDX_MMA_KEYS * 4u];
+    threadgroup float scratch[8u * 64u];
+    const uint local = group.y;
+    if (local >= c.y) return;
+    const uint row = row0 + local;
+    const uint length = (a.x + row + 1) / a.y;
+    const uint first = group.x * V41_IDX_MMA_KEYS;
+    if (length <= a.z || length < 8u || first >= length) return;
+    device const float *qrow = q + (ulong)row * b.z;
+    device const float *wrow = weights + (ulong)row * b.w;
+    const float scale = rsqrt(float(b.x)) * rsqrt(float(b.y));
+    // Head group h's weight tile [8 heads x 8]: every column is
+    // w[8h .. 8h + 7] * scale.
+    ws[tid] = wrow[(tid / 64u) * 8u + (tid % 64u) / 8u] * scale;
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    const uint hg = sg % 4u, kg = sg / 4u;
+    simdgroup_float8x8 qt[16];
+    for (uint i = 0; i < 16u; ++i)
+        simdgroup_load(qt[i], qrow + hg * 8u * 128u + i * 8u, 128, ulong2(0, 0), true); // [8 dims x 8 heads]
+    simdgroup_float8x8 wc;
+    simdgroup_load(wc, ws + hg * 64u, 8);
+    threadgroup float *o = scratch + sg * 64u;
+    for (uint round = 0; round < V41_IDX_MMA_ROUNDS; ++round) {
+        const uint key0 = first + (round * 2u + kg) * 8u;
+        if (key0 >= length) break;
+        const uint base = min(key0, length - 8u);
+        device const float *kp = keys + (ulong)base * 128u;
+        simdgroup_float8x8 acc = simdgroup_float8x8(0.0f);
+        for (uint i = 0; i < 16u; ++i) {
+            simdgroup_float8x8 km;
+            simdgroup_load(km, kp + i * 8u, 128); // [8 keys x 8 dims]
+            simdgroup_multiply_accumulate(acc, km, qt[i], acc);
+        }
+        acc.thread_elements()[0] = max(acc.thread_elements()[0], 0.0f);
+        acc.thread_elements()[1] = max(acc.thread_elements()[1], 0.0f);
+        simdgroup_float8x8 r;
+        simdgroup_multiply(r, acc, wc);
+        simdgroup_store(r, o, 8);
+        simdgroup_barrier(mem_flags::mem_threadgroup);
+        const uint key = base + lane;
+        if (lane < 8u && key >= key0 && key < length) partial[(key - first) * 4u + hg] = o[lane * 8u];
+        simdgroup_barrier(mem_flags::mem_threadgroup);
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    device float *srow = scores + (ulong)local * c.x;
+    for (uint j = tid; j < V41_IDX_MMA_KEYS; j += 256u) {
+        const uint key = first + j;
+        if (key < length)
+            srow[key] = partial[j * 4u] + partial[j * 4u + 1u] + partial[j * 4u + 2u] + partial[j * 4u + 3u];
+    }
+}
+
 kernel void kernel_deepseek_v41_attention_blocks(
     constant uint2 &a [[buffer(0)]], device const float *scores [[buffer(1)]],
     device float *blocks [[buffer(2)]], uint t [[thread_position_in_grid]]) {
@@ -603,6 +679,346 @@ kernel void kernel_deepseek_v41_attention_select_radix_rows(
         else if (take) dst[out++] = t;
     }
 }
+
+// select_radix_rows split across threadgroups for long rows (decode has one
+// row, which one threadgroup leaves the GPU mostly idle on). Same arguments
+// a/b/c, order, masks, NaN status, modes and outputs. d: digit pass, keys per
+// threadgroup (`chunk`, at most 4 per thread), scratch row stride (words), 0.
+// Grid (chunks, rows); 512 threads per threadgroup.
+// Each dispatch-local row owns a scratch row: global digit histograms 0..2
+// (2048, 2048, 1024 bins), the selection state, and per chunk a 1025-entry
+// table whose entry j counts the chunk's keys >= (top 22 bits of T) | j
+// (j = 1024: keys above that 22-bit prefix).
+//
+// grid_hist, one dispatch per digit pass p over (chunks, rows): every
+// threadgroup histograms digit p of its chunk's keys that match the prefix
+// so far in threadgroup memory and adds the nonzero bins to global
+// histogram p. Passes 1 and 2 first find the previous digit in the previous
+// histogram (redundantly per threadgroup; threadgroup 0 records the state);
+// pass 2 also writes its chunk's table. grid_place finds the last digit,
+// i.e. the k-th largest key T and how many keys equal to T are needed, takes
+// the keys > T and == T in earlier chunks from their tables, and writes in
+// ascending ID order every key > T and the lowest-ID keys == T (mode 0) or
+// every block's mask entry (mode 1). Keys are loaded once per pass, before
+// any dependent work.
+//
+// Clearing: pass 0 zeroes histograms 1 and 2, and pass 2 zeroes histogram 0
+// for the next selection, so scratch must start zeroed (fresh allocations
+// are) and each pass 0 is followed by pass 2 on the same scratch rows. Pass 1
+// sets status bit 8 when histogram 0 does not count exactly the row's keys.
+#define V41_RADIX_GRID_STATE 5120u
+#define V41_RADIX_GRID_TABLES 5128u
+#define V41_RADIX_GRID_TABLE 1028u
+#define V41_RADIX_GRID_KEYS 4u
+#define V41_RADIX_NEG_INF 0x007fffffu
+
+struct RadixGridRow {
+    uint row, length, k;
+    bool publish, masked;
+};
+
+// The row of dispatch-local row `local`; false when it selects nothing here.
+inline bool radix_grid_row(constant uint4 &a, constant uint4 &b, constant uint4 &c,
+                           uint local, thread RadixGridRow &r) {
+    if (local >= b.z) return false;
+    r.row = c.y + local;
+    const uint visible = (a.x + r.row + 1) / a.y;
+    const uint visible_blocks = (visible + a.w - 1u) / a.w;
+    r.publish = c.w != 0;
+    r.length = r.publish ? visible_blocks : visible;
+    r.k = r.publish ? c.z : a.z;
+    r.masked = !r.publish && b.w != 0 && visible_blocks > c.z;
+    return r.length > r.k;
+}
+
+// Exclusive prefix sum over a THREADS-thread group in thread order, plus the
+// total (radix_exclusive_sum for any multiple of 32 up to 1024).
+template <uint THREADS>
+inline uint radix_grid_exclusive_sum(uint v, threadgroup uint *partials, uint sg, uint lane,
+                                     thread uint &total) {
+    constexpr uint groups = THREADS / 32u;
+    const uint inclusive = simd_prefix_inclusive_sum(v);
+    if (lane == 31) partials[sg] = inclusive;
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    if (sg == 0) {
+        const uint p = lane < groups ? partials[lane] : 0u;
+        const uint p_inclusive = simd_prefix_inclusive_sum(p);
+        if (lane < groups) partials[lane] = p_inclusive - p;
+        if (lane == 31) partials[32] = p_inclusive;
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    const uint exclusive = partials[sg] + inclusive - v;
+    total = partials[32];
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    return exclusive;
+}
+
+// A chunk's keys, at most V41_RADIX_GRID_KEYS per thread (ID lo + i * THREADS
+// + tid), loaded before any dependent work: radix_row_key's mapping with a
+// bit-level NaN test (flagged, reported by the caller). Past `hi`: invalid.
+struct RadixGridKeys {
+    uint key[V41_RADIX_GRID_KEYS];
+    bool valid[V41_RADIX_GRID_KEYS];
+};
+
+template <uint THREADS>
+inline RadixGridKeys radix_grid_load(device const float *srow, device const uint *crow,
+                                     uint lo, uint hi, uint tid, bool masked, uint block,
+                                     thread bool &nan) {
+    RadixGridKeys k;
+    const uint slots = (hi - lo + THREADS - 1u) / THREADS;
+    for (uint i = 0; i < V41_RADIX_GRID_KEYS; ++i) {
+        k.valid[i] = false;
+        k.key[i] = 0;
+        if (i >= slots) continue; // uniform
+        const uint t = lo + i * THREADS + tid;
+        k.valid[i] = t < hi;
+        const uint u = k.valid[i] ? as_type<uint>(srow[t]) : 0u;
+        const bool kept = !masked || !k.valid[i] || crow[t / block] != 0;
+        const bool is_nan = (u & 0x7fffffffu) > 0x7f800000u;
+        nan = nan || (k.valid[i] && kept && is_nan);
+        k.key[i] = !kept || is_nan ? V41_RADIX_NEG_INF
+            : ((u & 0x80000000u) ? ~u : (u | 0x80000000u));
+    }
+    return k;
+}
+
+// The bin (of 2048 or 1024, scanned descending) holding the `remaining`-th
+// largest key and the count above it; `total` is the histogram's sum.
+template <uint THREADS>
+inline uint2 radix_grid_find(device const uint *hist, uint bins, uint remaining,
+                             threadgroup uint *partials, threadgroup uint *found,
+                             uint tid, uint sg, uint lane, thread uint &total) {
+    if (tid == 0) {
+        found[0] = 0;
+        found[1] = 0;
+    }
+    const uint per = bins / THREADS;
+    uint mine = 0;
+    for (uint j = 0; j < per; ++j) mine += hist[bins - 1u - (tid * per + j)];
+    uint above = radix_grid_exclusive_sum<THREADS>(mine, partials, sg, lane, total);
+    if (above < remaining && remaining <= above + mine) {
+        for (uint j = 0; j < per; ++j) {
+            const uint bin = bins - 1u - (tid * per + j);
+            const uint n = hist[bin];
+            if (above + n >= remaining) {
+                found[0] = bin;
+                found[1] = above;
+                break;
+            }
+            above += n;
+        }
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    return uint2(found[0], found[1]);
+}
+
+#define V41_RADIX_GRID_ARGS                                                                        \
+    constant uint4 &a [[buffer(0)]], constant uint4 &b [[buffer(1)]],                             \
+    constant uint4 &c [[buffer(2)]], device const float *scores [[buffer(3)]],                    \
+    device uint *candidates [[buffer(4)]], device uint *selected [[buffer(5)]],                   \
+    device atomic_uint *status [[buffer(6)]], device uint *scratch [[buffer(7)]],                 \
+    constant uint4 &d [[buffer(8)]], uint3 group [[threadgroup_position_in_grid]],               \
+    uint tid [[thread_index_in_threadgroup]], uint sg [[simdgroup_index_in_threadgroup]],         \
+    uint lane [[thread_index_in_simdgroup]]
+#define V41_RADIX_GRID_PARAMS                                                                      \
+    constant uint4 &a, constant uint4 &b, constant uint4 &c, device const float *scores,          \
+    device uint *candidates, device uint *selected, device atomic_uint *status,                   \
+    device uint *scratch, constant uint4 &d, uint3 group, uint tid, uint sg, uint lane
+#define V41_RADIX_GRID_FORWARD                                                                     \
+    a, b, c, scores, candidates, selected, status, scratch, d, group, tid, sg, lane
+
+template <uint THREADS>
+inline void radix_grid_hist(V41_RADIX_GRID_PARAMS, threadgroup atomic_uint *hist,
+                            threadgroup uint *partials, threadgroup uint *found,
+                            threadgroup uint *sums) {
+    RadixGridRow r;
+    if (!radix_grid_row(a, b, c, group.y, r)) return;
+    const uint pass = d.x, chunk = d.y, lo = group.x * chunk;
+    if (lo >= r.length) return;
+    const uint hi = min(r.length, lo + chunk);
+    const uint groups = (r.length + chunk - 1u) / chunk;
+    device const float *srow = scores + (ulong)group.y * b.x;
+    device const uint *crow = candidates + (ulong)r.row * b.y;
+    device uint *sc = scratch + (ulong)group.y * d.z;
+    const bool leader = group.x == 0 && tid == 0;
+    bool nan = false;
+    const RadixGridKeys keys = radix_grid_load<THREADS>(srow, crow, lo, hi, tid, r.masked, a.w, nan);
+    if (pass == 0 && simd_any(nan) && lane == 0)
+        atomic_fetch_or_explicit(status, 1u, memory_order_relaxed);
+    const uint bins = pass == 2 ? 1024u : 2048u;
+    for (uint j = tid; j < bins; j += THREADS) atomic_store_explicit(hist + j, 0u, memory_order_relaxed);
+
+    uint prefix = 0, prefix_mask = 0, shift = 21u;
+    if (pass == 1) {
+        uint total;
+        const uint2 f = radix_grid_find<THREADS>(sc, 2048u, r.k, partials, found, tid, sg, lane, total);
+        prefix = f.x << 21;
+        prefix_mask = 0xffe00000u;
+        shift = 10u;
+        if (leader) {
+            if (total != r.length) atomic_fetch_or_explicit(status, 8u, memory_order_relaxed);
+            sc[V41_RADIX_GRID_STATE] = prefix;
+            sc[V41_RADIX_GRID_STATE + 1u] = r.k - f.y;
+        }
+    } else if (pass == 2) {
+        prefix = sc[V41_RADIX_GRID_STATE];
+        const uint remaining = sc[V41_RADIX_GRID_STATE + 1u];
+        uint total;
+        const uint2 f = radix_grid_find<THREADS>(sc + 2048u, 2048u, remaining, partials, found, tid,
+                                                 sg, lane, total);
+        prefix |= f.x << 10;
+        prefix_mask = 0xfffffc00u;
+        shift = 0u;
+        if (leader) {
+            sc[V41_RADIX_GRID_STATE + 2u] = prefix;
+            sc[V41_RADIX_GRID_STATE + 3u] = remaining - f.y;
+        }
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    const uint digit = bins - 1u;
+    const uint slots = (hi - lo + THREADS - 1u) / THREADS;
+    uint above = 0;
+    for (uint i = 0; i < V41_RADIX_GRID_KEYS; ++i) {
+        if (i >= slots) break; // uniform
+        const uint key = keys.key[i];
+        const bool match = keys.valid[i] && (key & prefix_mask) == prefix;
+        above += keys.valid[i] && (key & prefix_mask) > prefix;
+        // Runs of equal keys (masked blocks, -Inf, ties) would serialize on
+        // one bin: keys equal to lane 0's matching key, and -Inf keys, are
+        // added with one atomic each.
+        const uint lead = simd_broadcast_first(match ? key : 0xffffffffu);
+        const bool same = match && key == lead;
+        const bool low = match && !same && key == V41_RADIX_NEG_INF;
+        const uint n_same = simd_sum(uint(same)), n_low = simd_sum(uint(low));
+        if (match && !same && !low)
+            atomic_fetch_add_explicit(hist + ((key >> shift) & digit), 1u, memory_order_relaxed);
+        if (lane == 0) {
+            if (n_same)
+                atomic_fetch_add_explicit(hist + ((lead >> shift) & digit), n_same, memory_order_relaxed);
+            if (n_low)
+                atomic_fetch_add_explicit(hist + ((V41_RADIX_NEG_INF >> shift) & digit), n_low,
+                                          memory_order_relaxed);
+        }
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    device atomic_uint *global = (device atomic_uint *)(sc + pass * 2048u);
+    for (uint j = tid; j < bins; j += THREADS) {
+        const uint n = atomic_load_explicit(hist + j, memory_order_relaxed);
+        if (n) atomic_fetch_add_explicit(global + j, n, memory_order_relaxed);
+    }
+    if (pass == 2) {
+        // Table entry j: keys above the 22-bit prefix plus matching keys with
+        // digit >= j. Thread i owns bins 1023 - i * per, ... (descending).
+        above = simd_sum(above);
+        if (lane == 0) sums[sg] = above;
+        constexpr uint per = 1024u / THREADS;
+        uint n[per], mine = 0;
+        for (uint j = 0; j < per; ++j) {
+            n[j] = atomic_load_explicit(hist + (1023u - (tid * per + j)), memory_order_relaxed);
+            mine += n[j];
+        }
+        uint total;
+        uint running = radix_grid_exclusive_sum<THREADS>(mine, partials, sg, lane, total);
+        uint greater = 0;
+        for (uint j = 0; j < THREADS / 32u; ++j) greater += sums[j];
+        device uint *table = sc + V41_RADIX_GRID_TABLES + group.x * V41_RADIX_GRID_TABLE;
+        for (uint j = 0; j < per; ++j) {
+            running += n[j];
+            table[1023u - (tid * per + j)] = greater + running;
+        }
+        if (tid == 0) table[1024] = greater;
+    }
+    if (pass != 1) {
+        // Pass 0: histograms 1 and 2 for this selection; pass 2: histogram 0
+        // for the next one (pass 1 was its last reader).
+        const uint first = pass == 0 ? 2048u : 0u, words = pass == 0 ? 3072u : 2048u;
+        for (uint j = group.x * THREADS + tid; j < words; j += groups * THREADS) sc[first + j] = 0;
+    }
+}
+
+template <uint THREADS>
+inline void radix_grid_place(V41_RADIX_GRID_PARAMS, threadgroup uint *partials,
+                             threadgroup uint *found, threadgroup uint *sums) {
+    RadixGridRow r;
+    if (!radix_grid_row(a, b, c, group.y, r)) return;
+    const uint chunk = d.y, lo = group.x * chunk;
+    if (lo >= r.length) return;
+    const uint hi = min(r.length, lo + chunk);
+    device const float *srow = scores + (ulong)group.y * b.x;
+    device uint *crow = candidates + (ulong)r.row * b.y;
+    device const uint *sc = scratch + (ulong)group.y * d.z;
+    bool nan = false;
+    const RadixGridKeys keys = radix_grid_load<THREADS>(srow, crow, lo, hi, tid, r.masked, a.w, nan);
+    const uint prefix = sc[V41_RADIX_GRID_STATE + 2u];
+    const uint remaining = sc[V41_RADIX_GRID_STATE + 3u];
+    uint total;
+    const uint2 f = radix_grid_find<THREADS>(sc + 4096u, 1024u, remaining, partials, found, tid, sg,
+                                             lane, total);
+    // T and how many keys equal to T are taken (lowest IDs first).
+    const uint threshold = prefix | f.x, need_equal = remaining - f.y;
+    // Keys > T and == T in earlier chunks, from their tables.
+    uint greater = 0, equal = 0;
+    for (uint j = tid; j < group.x; j += THREADS) {
+        device const uint *table = sc + V41_RADIX_GRID_TABLES + j * V41_RADIX_GRID_TABLE;
+        const uint at_least = table[f.x], above = table[f.x + 1u];
+        greater += above;
+        equal += at_least - above;
+    }
+    greater = simd_sum(greater);
+    equal = simd_sum(equal);
+    if (lane == 0) {
+        sums[sg] = greater;
+        sums[32u + sg] = equal;
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    uint equal_seen = 0, out = 0;
+    for (uint j = 0; j < THREADS / 32u; ++j) {
+        out += sums[j];
+        equal_seen += sums[32u + j];
+    }
+    out += min(equal_seen, need_equal);
+    device uint *dst = selected + (ulong)r.row * c.x;
+    for (uint i = 0; i < V41_RADIX_GRID_KEYS; ++i) {
+        if (lo + i * THREADS >= hi) break; // uniform
+        const uint t = lo + i * THREADS + tid;
+        const uint key = keys.key[i];
+        const bool gt = keys.valid[i] && key > threshold;
+        const bool eq = keys.valid[i] && key == threshold;
+        uint equal_total, take_total;
+        const uint equal_rank =
+            equal_seen + radix_grid_exclusive_sum<THREADS>(uint(eq), partials, sg, lane, equal_total);
+        const bool take = gt || (eq && equal_rank < need_equal);
+        const uint position =
+            out + radix_grid_exclusive_sum<THREADS>(uint(take), partials, sg, lane, take_total);
+        if (r.publish) {
+            if (keys.valid[i]) crow[t] = take ? 1u : 0u;
+        } else if (take && position < r.k) {
+            dst[position] = t;
+        }
+        equal_seen += equal_total;
+        out += take_total;
+    }
+}
+
+// Instantiated at 512 threads (the fastest of 256, 512 and 1024 on M4 Max).
+#define V41_RADIX_GRID_KERNELS(suffix, THREADS)                                                    \
+[[max_total_threads_per_threadgroup(THREADS)]]                                                    \
+kernel void kernel_deepseek_v41_attention_select_radix_grid_hist##suffix(V41_RADIX_GRID_ARGS) {   \
+    threadgroup atomic_uint hist[2048];                                                            \
+    threadgroup uint partials[33];                                                                 \
+    threadgroup uint found[2];                                                                     \
+    threadgroup uint sums[32];                                                                     \
+    radix_grid_hist<THREADS>(V41_RADIX_GRID_FORWARD, hist, partials, found, sums);                \
+}                                                                                                  \
+[[max_total_threads_per_threadgroup(THREADS)]]                                                    \
+kernel void kernel_deepseek_v41_attention_select_radix_grid_place##suffix(V41_RADIX_GRID_ARGS) {  \
+    threadgroup uint partials[33];                                                                 \
+    threadgroup uint found[2];                                                                     \
+    threadgroup uint sums[64];                                                                     \
+    radix_grid_place<THREADS>(V41_RADIX_GRID_FORWARD, partials, found, sums);                     \
+}
+V41_RADIX_GRID_KERNELS(, 512u)
 
 // Per-block maxima of pruned rows' index scores for candidate publication:
 // the `blocks` kernel per row (NaN ignored, newest block forced to +Inf).

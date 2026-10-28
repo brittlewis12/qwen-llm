@@ -302,9 +302,9 @@ fn long_selection_short_tails_match_prepared_per_row_and_continue() {
                             vec![1; n]
                         };
                         assert_eq!(
-                            heights("index_heads_rows_ilp"),
+                            heights("index_heads_rows_mma"),
                             tiles,
-                            "ILP tile sizes start={start} n={n} layer={id} candidate={is_candidate}"
+                            "MMA tile sizes start={start} n={n} layer={id} candidate={is_candidate}"
                         );
                         assert_eq!(
                             heights("blocks").len(),
@@ -318,17 +318,29 @@ fn long_selection_short_tails_match_prepared_per_row_and_continue() {
                                 vec![]
                             }
                         );
-                        let radix = if source && batched {
+                        // Batched tiles keep select_radix_rows; per-row selection
+                        // is the decode path's multi-threadgroup selector.
+                        let radix = if !batched {
+                            vec![]
+                        } else if source {
                             tiles.iter().flat_map(|&h| [h, h]).collect::<Vec<_>>()
                         } else {
                             tiles.clone()
                         };
                         assert_eq!(heights("select_radix_rows"), radix);
+                        let per_row = if batched { 0 } else { n };
+                        assert_eq!(heights("select_radix_grid_hist"), vec![1; 3 * per_row]);
+                        assert_eq!(heights("select_radix_grid_place"), vec![1; per_row]);
                         assert_eq!(
                             heights("selection_prepare_rows"),
                             if batched { tiles } else { vec![] }
                         );
-                        for suffix in ["index_heads", "index_heads_rows", "index_scores_tensor"] {
+                        for suffix in [
+                            "index_heads",
+                            "index_heads_rows",
+                            "index_heads_rows_ilp",
+                            "index_scores_tensor",
+                        ] {
                             assert!(heights(suffix).is_empty(), "unexpected scorer {suffix}");
                         }
                         workspace

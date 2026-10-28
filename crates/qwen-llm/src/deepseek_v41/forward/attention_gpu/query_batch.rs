@@ -1243,7 +1243,7 @@ impl Workspace {
             if last_length <= c.index_topk {
                 continue;
             }
-            super::encode_index_scores_rows_ilp(
+            super::encode_index_scores_rows_long(
                 ctx,
                 enc,
                 c,

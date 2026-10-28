@@ -392,6 +392,37 @@ fn frontiers_advance_only_at_completion_and_commit_requires_every_layer() {
 }
 
 #[test]
+fn speculative_encoder_keeps_one_inflight_intent_and_completes_in_fifo_order() {
+    let (c, schedule, plan) = fixture(9);
+    let mut cursor = Cursor::new(&plan, &c, &schedule, 10).unwrap();
+    cursor.begin_encoder(0, 4).unwrap();
+    encoded(&mut cursor, true);
+    // The normal path still refuses a second encoder while one is pending.
+    assert!(cursor.begin_encoder(4, 5).is_err());
+    cursor.begin_encoder_speculative(4, 5).unwrap();
+    assert_eq!(cursor.inflight.len(), 1);
+    assert_eq!(cursor.pending.as_ref().unwrap().range, 4..9);
+    // One lookahead only, and decoder work cannot begin before both finish.
+    assert!(cursor.begin_encoder_speculative(9, 0).is_err());
+    assert!(cursor.begin_decoder(2, 6, 3).is_err());
+    assert!(cursor.begin_seed(2, 0, 1).is_err());
+    // Completing the older command advances the frontier but keeps the newest.
+    cursor.complete(Phase::Encoder, 0, 4).unwrap();
+    assert!(cursor.inflight.is_empty());
+    assert!(cursor.pending.is_some());
+    assert_eq!(
+        (cursor.encoder_completed, cursor.publication_completed),
+        (4, 4)
+    );
+    // Out-of-order completion is refused.
+    encoded(&mut cursor, true);
+    assert!(cursor.complete(Phase::Encoder, 0, 4).is_err());
+    cursor.complete(Phase::Encoder, 4, 5).unwrap();
+    assert!(cursor.pending.is_none());
+    assert_eq!(cursor.encoder_completed, 9);
+}
+
+#[test]
 fn checked_absolute_ranges_history_and_control_prices() {
     assert_eq!(checked_range(&(100..120), 107, 3).unwrap(), 107..110);
     for (start, rows) in [(99, 1), (120, 1), (107, 0), (100, 2049), (usize::MAX, 2)] {

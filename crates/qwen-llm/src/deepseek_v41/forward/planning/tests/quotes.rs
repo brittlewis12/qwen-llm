@@ -124,10 +124,20 @@ fn admitted_fixture_width_quotes_separate_strict_pair_metal_costs_for_both_half_
                 w["ced"]["batch_encoding_reserve_bytes"]
             );
             if tokens == admitted_request::REQUEST_TOKENS {
-                assert_eq!(
-                    wide.metal_bytes - narrow.metal_bytes,
-                    if half { 786_432 } else { 737_280 }
-                );
+                // The pipeline keeps the next chunk's scratch and command
+                // reserve live, so its width delta is pinned separately.
+                let (serial, pipelined) = if half {
+                    (786_432, 1_556_480)
+                } else {
+                    (737_280, 1_458_176)
+                };
+                let expected =
+                    if crate::deepseek_v41::forward::gpu_step::ced::encoder_pipeline_priced() {
+                        pipelined
+                    } else {
+                        serial
+                    };
+                assert_eq!(wide.metal_bytes - narrow.metal_bytes, expected);
                 assert!(n["scalar_tail"].is_null() && w["scalar_tail"].is_null());
                 assert_eq!(
                     n["input_ranges"],

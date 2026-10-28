@@ -451,8 +451,18 @@ fn fixture_config(window: usize) -> Config {
 fn explicit_bound(c: &Config, n: usize, capacity: usize, price: &impl Fn(u64) -> u64) -> u64 {
     let plan = dependency_plan_at_capacity(c, n, capacity);
     let priced = |bytes| Ok(if bytes == 0 { 0 } else { price(bytes) });
-    let estimate =
-        forward::ced::estimate_from_parts(c, 6, &[], 0, capacity, &plan, true, &priced).unwrap();
+    let estimate = forward::ced::estimate_from_parts(
+        c,
+        6,
+        &[],
+        0,
+        capacity,
+        &plan,
+        true,
+        crate::deepseek_v41::forward::gpu_step::ced::encoder_pipeline_enabled(),
+        &priced,
+    )
+    .unwrap();
     let schedule = crate::deepseek_v41::gguf::Schedule {
         layers: 6,
         kv_source_layers: vec![1, 3],

@@ -476,6 +476,7 @@ fn bound(
         n,
         &p,
         true,
+        crate::deepseek_v41::forward::gpu_step::ced::encoder_pipeline_enabled(),
         &|n| Ok(if n == 0 { 0 } else { price(n) }),
     )
     .unwrap();

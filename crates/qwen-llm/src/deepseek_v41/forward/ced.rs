@@ -150,6 +150,10 @@ pub struct CedMemoryEstimate {
     pub retained_candidate_bytes: u64,
     pub priced_retained_bytes: u64,
     pub priced_chunk_bytes: u64,
+    /// Second encoder chunk scratch plus its command reserve while the
+    /// submit-ahead keeps two encoder commands in flight; zero when priced
+    /// serially.
+    pub priced_pipeline_chunk_bytes: u64,
     pub priced_half_chunk_bytes: u64,
     pub priced_publication_bytes: u64,
     pub priced_seed_bytes: u64,
@@ -272,6 +276,7 @@ fn estimate(model: &Forward<'_>, capacity: usize, plan: &CedPlan) -> Result<CedM
         capacity,
         plan,
         metal::moe_grouped_tensor_selected(model.ctx),
+        gpu_step::ced::encoder_pipeline_priced(),
         &price,
     )?;
     estimate.process_ru_maxrss_before_bytes = process_peak_rss_bytes();
@@ -287,6 +292,7 @@ pub(super) fn estimate_from_parts(
     capacity: usize,
     plan: &CedPlan,
     half_selected: bool,
+    pipelined: bool,
     price: &impl Fn(u64) -> Result<u64>,
 ) -> Result<CedMemoryEstimate> {
     let rows = plan.prompt_rows.min(plan.full_chunk_rows);
@@ -339,6 +345,11 @@ pub(super) fn estimate_from_parts(
             .map_err(|e| e.to_string())?
     };
     let reserve = checked_add(16 * 1024 * 1024, batch_encoding_reserve)?;
+    let pipeline_chunk = if pipelined {
+        checked_add(chunk, reserve)?
+    } else {
+        0
+    };
     let batch_words = if batch_layers == 0 {
         0
     } else {
@@ -385,6 +396,7 @@ pub(super) fn estimate_from_parts(
     let metal = [
         retained,
         chunk,
+        pipeline_chunk,
         publication,
         seed,
         reserve,
@@ -415,6 +427,7 @@ pub(super) fn estimate_from_parts(
         retained_candidate_bytes: plan.memory.candidate_bytes,
         priced_retained_bytes: retained,
         priced_chunk_bytes: chunk,
+        priced_pipeline_chunk_bytes: pipeline_chunk,
         priced_half_chunk_bytes: half_chunk,
         priced_publication_bytes: publication,
         priced_seed_bytes: seed,

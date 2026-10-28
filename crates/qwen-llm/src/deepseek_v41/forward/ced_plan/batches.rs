@@ -404,6 +404,7 @@ mod tests {
                     n,
                     &p,
                     false,
+                    false,
                     &|n| Ok(n),
                 )
                 .unwrap_or_else(|e| panic!("large-window memory N={n} W={window}: {e}"));
@@ -468,6 +469,7 @@ mod tests {
                     n,
                     &p,
                     true,
+                    false,
                     &|bytes| Ok(if bytes == 0 { 0 } else { bytes + 16384 }),
                 )
                 .unwrap();

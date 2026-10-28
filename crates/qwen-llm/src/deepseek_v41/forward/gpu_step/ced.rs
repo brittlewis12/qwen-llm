@@ -24,6 +24,17 @@ crate::env_flag!(
     "QWEN_V41_ENGRAM_PREFETCH"
 );
 
+crate::env_flag!(
+    /// Submit encoder chunk N+1 before observing chunk N's completion; `QWEN_V41_CED_ENCODER_PIPELINE=0` restores the serialized wait.
+    default_on encoder_pipeline_enabled,
+    "QWEN_V41_CED_ENCODER_PIPELINE"
+);
+
+/// Memory pricing must match the live submission mode.
+pub(in super::super) fn encoder_pipeline_priced() -> bool {
+    encoder_pipeline_enabled()
+}
+
 pub(in super::super) fn batch_selection(
     plan: &CedPlan,
 ) -> Result<super::super::ced_plan::batches::Selection> {
@@ -482,6 +493,28 @@ struct PendingCed {
     encode_ms: Option<f64>,
     submitted_at: Instant,
 }
+/// Host-owned encoder chunk. Preparation is independent of the previous
+/// chunk's completion; only the attention intent and command submission are
+/// ordered.
+struct EncoderChunk {
+    start: usize,
+    rows: usize,
+    x: MetalTensor,
+    incoming: MetalTensor,
+    scratch: BlockRows,
+    publication: attention_gpu::PublicationRows,
+    engrams: Vec<(usize, MetalTensor, MetalTensor)>,
+    late: Option<std::sync::mpsc::Receiver<(usize, Result<Vec<f32>>)>>,
+    first: Option<usize>,
+}
+
+struct PendingEncoder {
+    command: PendingCed,
+    chunk: EncoderChunk,
+}
+
+type EngramValues = Vec<(usize, Result<Vec<f32>>)>;
+
 impl Workspace {
     pub(in super::super) fn abort_ced(&mut self) {
         self.attention.abort_ced();
@@ -686,6 +719,286 @@ impl Workspace {
             .map_err(|e| e.to_string())
     }
 
+    #[allow(clippy::too_many_arguments)]
+    fn encoder_chunk_prepare<'scope, 'env>(
+        &mut self,
+        model: &'scope Forward<'_>,
+        plan: &CedPlan,
+        start: usize,
+        tokens: &'scope [u32],
+        hashes: &'scope [engram::LayerRows],
+        prefetched: Option<Vec<(usize, Vec<f32>)>>,
+        storage: &Storage,
+        scope: &'scope std::thread::Scope<'scope, 'env>,
+    ) -> Result<EncoderChunk> {
+        let ctx = model.ctx;
+        let c = &model.config;
+        let n = tokens.len();
+        let prepare = profile::Wall("ced_encoder_host_prepare", [0; 4], profile::start());
+        let engram_layers: Vec<usize> = self.engrams.iter().map(|slot| slot.layer).collect();
+        for layer in &engram_layers {
+            op::require(plan.encoder_layers.contains(layer), "CED decoder Engram")?;
+        }
+        let mut late_rx = None;
+        if prefetched.is_none() && !engram_layers.is_empty() {
+            let (late_tx, rx) = std::sync::mpsc::channel();
+            let engram_rows = &model.engram_rows;
+            let layers = engram_layers.clone();
+            scope.spawn(move || {
+                for layer in layers {
+                    let values = engram_rows.decode_tokens(layer, hashes);
+                    if late_tx.send((layer, values)).is_err() {
+                        break;
+                    }
+                }
+            });
+            late_rx = Some(rx);
+        }
+        let streamed = late_rx.is_some();
+        let mut embeddings = Vec::with_capacity(n * 4 * c.hidden);
+        for &token in tokens {
+            embeddings.extend(decode_rows(model.embedding, token as usize, 1)?.repeat(4));
+        }
+        let x = upload(ctx, &embeddings, vec![c.hidden as u64, 4, n as u64])?;
+        let incoming = upload(ctx, &[1.0, 0.0, 0.0, 0.0].repeat(n), vec![4, n as u64])?;
+        let scratch = BlockRows::new(model, self.attention.capacity(), n, None)?;
+        let publication = attention_gpu::PublicationRows::new(ctx, c, n)?;
+        let mut engrams = Vec::new();
+        for slot in &self.engrams {
+            let p = &model.layers[slot.layer].engram.as_ref().unwrap().projection;
+            engrams.push((
+                slot.layer,
+                prefill::allocate(ctx, p.input, n, GgmlType::F32)?,
+                prefill::allocate(ctx, p.output, n, GgmlType::F32)?,
+            ));
+        }
+        let engram_prepare = profile::Wall("ced_encoder_engram_prepare", [0; 4], profile::start());
+        let first = if streamed {
+            engram_layers.first().copied()
+        } else {
+            None
+        };
+        if let Some(values) = prefetched {
+            let mut seen = 0;
+            for (layer, values) in values {
+                op::require(engram_layers.contains(&layer), "CED Engram prefetch layer")?;
+                let (_, input, _) = engrams
+                    .iter()
+                    .find(|(id, _, _)| *id == layer)
+                    .ok_or("CED Engram buffer")?;
+                write(input, &values)?;
+                seen += 1;
+            }
+            op::require(seen == engram_layers.len(), "CED Engram prefetch coverage")?;
+        } else if let (Some(layer), Some(rx)) = (first, late_rx.as_ref()) {
+            let (got, values) = rx.recv().map_err(|_| "CED Engram read failed")?;
+            op::require(got == layer, "CED Engram order")?;
+            let (_, input, _) = engrams
+                .iter()
+                .find(|(id, _, _)| *id == layer)
+                .ok_or("CED Engram buffer")?;
+            let values = values?;
+            write(input, &values)?;
+        }
+        drop(engram_prepare);
+        #[cfg(test)]
+        reuse::encoder_allocated(&x, &incoming, &scratch);
+        storage.observe(ctx);
+        drop(prepare);
+        Ok(EncoderChunk {
+            start,
+            rows: n,
+            x,
+            incoming,
+            scratch,
+            publication,
+            engrams,
+            late: late_rx,
+            first,
+        })
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn encoder_chunk_submit<'scope, 'env>(
+        &mut self,
+        model: &'scope Forward<'_>,
+        plan: &CedPlan,
+        mut chunk: EncoderChunk,
+        speculative: bool,
+        next_hashes: Option<&'scope [engram::LayerRows]>,
+        storage: &Storage,
+        counters: &mut CedCounters,
+        cancel: Option<&AtomicBool>,
+        scope: &'scope std::thread::Scope<'scope, 'env>,
+    ) -> Result<(
+        PendingEncoder,
+        Option<std::thread::ScopedJoinHandle<'scope, EngramValues>>,
+    )> {
+        let ctx = model.ctx;
+        let c = &model.config;
+        let start = chunk.start;
+        let n = chunk.rows;
+        let engram_layers: Vec<usize> = self.engrams.iter().map(|slot| slot.layer).collect();
+        if speculative {
+            self.attention.begin_ced_encoder_speculative(start, n)?;
+        } else {
+            self.attention.begin_ced_encoder(start, n)?;
+        }
+        let pending = self.ced_submit(
+            model,
+            "ced_encoder_rows",
+            [start, n, plan.publication_layer, 0],
+            storage,
+            counters,
+            |this, enc| {
+                for id in plan.encoder_layers.clone() {
+                    cancelled(cancel)?;
+                    if chunk.late.is_some()
+                        && Some(id) != chunk.first
+                        && let Some((_, input, _)) =
+                            chunk.engrams.iter().find(|(id0, _, _)| *id0 == id)
+                    {
+                        let (got, values) = chunk
+                            .late
+                            .as_ref()
+                            .ok_or("CED Engram stream missing")?
+                            .recv()
+                            .map_err(|_| "CED Engram read failed")?;
+                        op::require(got == id, "CED Engram order")?;
+                        let join =
+                            profile::Wall("ced_encoder_engram_late_join", [0; 4], profile::start());
+                        let values = values?;
+                        write(input, &values)?;
+                        drop(join);
+                    }
+                    if let Some((_, input, projected)) =
+                        chunk.engrams.iter().find(|(id0, _, _)| *id0 == id)
+                    {
+                        model.layers[id]
+                            .engram
+                            .as_ref()
+                            .unwrap()
+                            .projection
+                            .encode_rows(enc, input, projected, n)
+                            .map_err(|e| e.to_string())?;
+                        this.engrams
+                            .iter()
+                            .find(|slot| slot.layer == id)
+                            .unwrap()
+                            .gate
+                            .encode(ctx, enc, &chunk.x, projected, n)?;
+                    }
+                    this.ced_block(
+                        model,
+                        enc,
+                        id,
+                        start,
+                        &chunk.x,
+                        &chunk.incoming,
+                        &chunk.scratch,
+                    )?;
+                }
+                #[cfg(test)]
+                super::super::ced::tests::checkpoint("ced_publication", cancel)?;
+                chunk
+                    .scratch
+                    .hc
+                    .normalize_input(
+                        ctx,
+                        enc,
+                        c,
+                        &this.constants[plan.publication_layer][2],
+                        &chunk.x,
+                        &chunk.incoming,
+                    )
+                    .map_err(|e| e.to_string())?;
+                this.attention.publish_ced_rows(
+                    ctx,
+                    enc,
+                    plan.publication_layer,
+                    start,
+                    &model.layers[plan.publication_layer].attention,
+                    &chunk.scratch.hc.normalized,
+                    &chunk.publication,
+                )?;
+                storage.retain(ctx, enc, start, n, &chunk.x, &chunk.incoming)?;
+                cancelled(cancel)
+            },
+        )?;
+        let next = next_hashes.map(|next_hashes| {
+            let engram_rows = &model.engram_rows;
+            let layers = engram_layers;
+            scope.spawn(move || {
+                let mut values = Vec::with_capacity(layers.len());
+                for layer in layers {
+                    values.push((layer, engram_rows.decode_tokens(layer, next_hashes)));
+                }
+                values
+            })
+        });
+        Ok((
+            PendingEncoder {
+                command: pending,
+                chunk,
+            },
+            next,
+        ))
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn encoder_chunk_finish(
+        &mut self,
+        model: &Forward<'_>,
+        plan: &CedPlan,
+        pending: PendingEncoder,
+        storage: &Storage,
+        counters: &mut CedCounters,
+        cancel: Option<&AtomicBool>,
+    ) -> Result<()> {
+        #[allow(unused_variables)]
+        let EncoderChunk {
+            start,
+            rows: n,
+            ref x,
+            ref incoming,
+            ref scratch,
+            ..
+        } = pending.chunk;
+        self.ced_wait(model, pending.command, storage, counters)?;
+        scratch
+            .ffn
+            .validate_status_layers(plan.encoder_layers.clone())?;
+        self.attention.complete_ced_encoder(start, n)?;
+        #[cfg(test)]
+        super::super::ced::qualification::boundary(start, n, x, incoming)?;
+        for id in plan.encoder_layers.clone() {
+            counters.encoder(id, n, model.schedule.produces_index(id))?;
+        }
+        counters.publication(plan.publication_layer, n)?;
+        #[cfg(test)]
+        super::super::ced::tests::checkpoint("ced_encoder_complete", cancel)?;
+        cancelled(cancel)?;
+        Ok(())
+    }
+
+    fn join_engram_prefetch<'scope>(
+        handle: Option<std::thread::ScopedJoinHandle<'scope, EngramValues>>,
+    ) -> Result<Option<Vec<(usize, Vec<f32>)>>> {
+        let Some(handle) = handle else {
+            return Ok(None);
+        };
+        let values = handle
+            .join()
+            .map_err(|_| "CED Engram prefetch thread failed")?;
+        Ok(Some(
+            values
+                .into_iter()
+                .map(|(layer, values)| values.map(|values| (layer, values)))
+                .collect::<Result<Vec<_>>>()?,
+        ))
+    }
+
+    #[allow(clippy::too_many_arguments)]
     fn ced_encoder_rows(
         &mut self,
         model: &Forward<'_>,
@@ -699,209 +1012,24 @@ impl Workspace {
         storage: &mut Storage,
         counters: &mut CedCounters,
     ) -> Result<Option<Vec<(usize, Vec<f32>)>>> {
-        let ctx = model.ctx;
-        let c = &model.config;
-        let n = tokens.len();
-        let prepare = profile::Wall("ced_encoder_host_prepare", [0; 4], profile::start());
-        let engram_layers: Vec<usize> = self.engrams.iter().map(|slot| slot.layer).collect();
-        for layer in &engram_layers {
-            op::require(plan.encoder_layers.contains(layer), "CED decoder Engram")?;
-        }
-        let (x, incoming, scratch, next_values) = std::thread::scope(
-            |scope| -> Result<(
-                MetalTensor,
-                MetalTensor,
-                BlockRows,
-                Option<Vec<(usize, Vec<f32>)>>,
-            )> {
-                let mut late_rx = None;
-                if prefetched.is_none() && !engram_layers.is_empty() {
-                    let (late_tx, rx) = std::sync::mpsc::channel();
-                    let engram_rows = &model.engram_rows;
-                    let layers = engram_layers.clone();
-                    scope.spawn(move || {
-                        for layer in layers {
-                            let values = engram_rows.decode_tokens(layer, hashes);
-                            if late_tx.send((layer, values)).is_err() {
-                                break;
-                            }
-                        }
-                    });
-                    late_rx = Some(rx);
-                }
-                let streamed = late_rx.is_some();
-                let mut embeddings = Vec::with_capacity(n * 4 * c.hidden);
-                for &token in tokens {
-                    embeddings.extend(decode_rows(model.embedding, token as usize, 1)?.repeat(4));
-                }
-                let x = upload(ctx, &embeddings, vec![c.hidden as u64, 4, n as u64])?;
-                let incoming = upload(ctx, &[1.0, 0.0, 0.0, 0.0].repeat(n), vec![4, n as u64])?;
-                let scratch = BlockRows::new(model, self.attention.capacity(), n, None)?;
-                let publication = attention_gpu::PublicationRows::new(ctx, c, n)?;
-                let mut engrams = Vec::new();
-                for slot in &self.engrams {
-                    let p = &model.layers[slot.layer].engram.as_ref().unwrap().projection;
-                    engrams.push((
-                        slot.layer,
-                        prefill::allocate(ctx, p.input, n, GgmlType::F32)?,
-                        prefill::allocate(ctx, p.output, n, GgmlType::F32)?,
-                    ));
-                }
-                let engram_prepare =
-                    profile::Wall("ced_encoder_engram_prepare", [0; 4], profile::start());
-                let first = if streamed {
-                    engram_layers.first().copied()
-                } else {
-                    None
-                };
-                if let Some(values) = prefetched {
-                    let mut seen = 0;
-                    for (layer, values) in values {
-                        op::require(engram_layers.contains(&layer), "CED Engram prefetch layer")?;
-                        let (_, input, _) = engrams
-                            .iter()
-                            .find(|(id, _, _)| *id == layer)
-                            .ok_or("CED Engram buffer")?;
-                        write(input, &values)?;
-                        seen += 1;
-                    }
-                    op::require(seen == engram_layers.len(), "CED Engram prefetch coverage")?;
-                } else if let (Some(layer), Some(rx)) = (first, late_rx.as_ref()) {
-                    let (got, values) = rx.recv().map_err(|_| "CED Engram read failed")?;
-                    op::require(got == layer, "CED Engram order")?;
-                    let (_, input, _) = engrams
-                        .iter()
-                        .find(|(id, _, _)| *id == layer)
-                        .ok_or("CED Engram buffer")?;
-                    let values = values?;
-                    write(input, &values)?;
-                }
-                drop(engram_prepare);
-                #[cfg(test)]
-                reuse::encoder_allocated(&x, &incoming, &scratch);
-                storage.observe(ctx);
-                cancelled(cancel)?;
-                self.attention.begin_ced_encoder(start, n)?;
-                drop(prepare);
-                let pending = self.ced_submit(
-                    model,
-                    "ced_encoder_rows",
-                    [start, n, plan.publication_layer, 0],
-                    storage,
-                    counters,
-                    |this, enc| {
-                        for id in plan.encoder_layers.clone() {
-                            cancelled(cancel)?;
-                            if streamed
-                                && Some(id) != first
-                                && let Some((_, input, _)) =
-                                    engrams.iter().find(|(id0, _, _)| *id0 == id)
-                            {
-                                let (got, values) = late_rx
-                                    .as_ref()
-                                    .ok_or("CED Engram stream missing")?
-                                    .recv()
-                                    .map_err(|_| "CED Engram read failed")?;
-                                op::require(got == id, "CED Engram order")?;
-                                let join = profile::Wall(
-                                    "ced_encoder_engram_late_join",
-                                    [0; 4],
-                                    profile::start(),
-                                );
-                                let values = values?;
-                                write(input, &values)?;
-                                drop(join);
-                            }
-                            if let Some((_, input, projected)) =
-                                engrams.iter().find(|(id0, _, _)| *id0 == id)
-                            {
-                                model.layers[id]
-                                    .engram
-                                    .as_ref()
-                                    .unwrap()
-                                    .projection
-                                    .encode_rows(enc, input, projected, n)
-                                    .map_err(|e| e.to_string())?;
-                                this.engrams
-                                    .iter()
-                                    .find(|slot| slot.layer == id)
-                                    .unwrap()
-                                    .gate
-                                    .encode(ctx, enc, &x, projected, n)?;
-                            }
-                            this.ced_block(model, enc, id, start, &x, &incoming, &scratch)?;
-                        }
-                        #[cfg(test)]
-                        super::super::ced::tests::checkpoint("ced_publication", cancel)?;
-                        scratch
-                            .hc
-                            .normalize_input(
-                                ctx,
-                                enc,
-                                c,
-                                &this.constants[plan.publication_layer][2],
-                                &x,
-                                &incoming,
-                            )
-                            .map_err(|e| e.to_string())?;
-                        this.attention.publish_ced_rows(
-                            ctx,
-                            enc,
-                            plan.publication_layer,
-                            start,
-                            &model.layers[plan.publication_layer].attention,
-                            &scratch.hc.normalized,
-                            &publication,
-                        )?;
-                        storage.retain(ctx, enc, start, n, &x, &incoming)?;
-                        cancelled(cancel)
-                    },
-                )?;
-                let next = if let Some(next_hashes) = next_hashes {
-                    let engram_rows = &model.engram_rows;
-                    let layers = engram_layers.clone();
-                    Some(scope.spawn(move || {
-                        let mut values = Vec::with_capacity(layers.len());
-                        for layer in layers {
-                            values.push((layer, engram_rows.decode_tokens(layer, next_hashes)));
-                        }
-                        values
-                    }))
-                } else {
-                    None
-                };
-                self.ced_wait(model, pending, storage, counters)?;
-                let next_values = match next {
-                    Some(handle) => {
-                        let values = handle
-                            .join()
-                            .map_err(|_| "CED Engram prefetch thread failed")?;
-                        Some(
-                            values
-                                .into_iter()
-                                .map(|(layer, values)| values.map(|values| (layer, values)))
-                                .collect::<Result<Vec<_>>>()?,
-                        )
-                    }
-                    None => None,
-                };
-                Ok((x, incoming, scratch, next_values))
-            },
-        )?;
-        scratch
-            .ffn
-            .validate_status_layers(plan.encoder_layers.clone())?;
-        self.attention.complete_ced_encoder(start, n)?;
-        #[cfg(test)]
-        super::super::ced::qualification::boundary(start, n, &x, &incoming)?;
-        for id in plan.encoder_layers.clone() {
-            counters.encoder(id, n, model.schedule.produces_index(id))?;
-        }
-        counters.publication(plan.publication_layer, n)?;
-        #[cfg(test)]
-        super::super::ced::tests::checkpoint("ced_encoder_complete", cancel)?;
-        cancelled(cancel)?;
-        Ok(next_values)
+        std::thread::scope(|scope| -> Result<Option<Vec<(usize, Vec<f32>)>>> {
+            let chunk = self.encoder_chunk_prepare(
+                model, plan, start, tokens, hashes, prefetched, storage, scope,
+            )?;
+            let (pending, next) = self.encoder_chunk_submit(
+                model,
+                plan,
+                chunk,
+                false,
+                next_hashes,
+                storage,
+                counters,
+                cancel,
+                scope,
+            )?;
+            self.encoder_chunk_finish(model, plan, pending, storage, counters, cancel)?;
+            Self::join_engram_prefetch(next)
+        })
     }
 
     fn ced_encoder_scalar(
@@ -1281,42 +1409,138 @@ impl Workspace {
                 chunks.push((range, hashes));
                 history = next;
             }
-            let mut prefetched = None;
-            for (i, (range, hashes)) in chunks.iter().enumerate() {
-                cancelled(cancel)?;
-                let input = &tokens[range.clone()];
-                let next_hashes = chunks.get(i + 1).and_then(|(next_range, next_hashes)| {
-                    (next_range.len() > 1).then_some(next_hashes.as_slice())
-                });
-                objc2::rc::autoreleasepool(|_| -> Result<()> {
-                    if input.len() == 1 {
-                        prefetched = None;
-                        self.ced_encoder_scalar(
-                            model,
-                            plan,
-                            range.start,
-                            input[0],
-                            &hashes[0],
-                            cancel,
-                            &mut storage,
-                            &mut counters,
-                        )
-                    } else {
-                        prefetched = self.ced_encoder_rows(
-                            model,
-                            plan,
-                            range.start,
-                            input,
-                            hashes,
-                            prefetched.take(),
-                            next_hashes,
-                            cancel,
-                            &mut storage,
-                            &mut counters,
-                        )?;
+            if encoder_pipeline_enabled() {
+                std::thread::scope(|scope| -> Result<()> {
+                    let mut pending: Option<PendingEncoder> = None;
+                    let mut next: Option<std::thread::ScopedJoinHandle<'_, EngramValues>> = None;
+                    let result = (|| -> Result<()> {
+                        for (i, (range, hashes)) in chunks.iter().enumerate() {
+                            cancelled(cancel)?;
+                            let input = &tokens[range.clone()];
+                            if input.len() == 1 {
+                                if let Some(older) = pending.take() {
+                                    self.encoder_chunk_finish(
+                                        model,
+                                        plan,
+                                        older,
+                                        &storage,
+                                        &mut counters,
+                                        cancel,
+                                    )?;
+                                }
+                                let _ = Self::join_engram_prefetch(next.take())?;
+                                self.ced_encoder_scalar(
+                                    model,
+                                    plan,
+                                    range.start,
+                                    input[0],
+                                    &hashes[0],
+                                    cancel,
+                                    &mut storage,
+                                    &mut counters,
+                                )?;
+                                continue;
+                            }
+                            let prefetched = Self::join_engram_prefetch(next.take())?;
+                            let chunk = self.encoder_chunk_prepare(
+                                model,
+                                plan,
+                                range.start,
+                                input,
+                                hashes,
+                                prefetched,
+                                &storage,
+                                scope,
+                            )?;
+                            let next_hashes =
+                                chunks.get(i + 1).and_then(|(next_range, next_hashes)| {
+                                    (next_range.len() > 1).then_some(next_hashes.as_slice())
+                                });
+                            let speculative = pending.is_some();
+                            let (submitted, spawned) = self.encoder_chunk_submit(
+                                model,
+                                plan,
+                                chunk,
+                                speculative,
+                                next_hashes,
+                                &storage,
+                                &mut counters,
+                                cancel,
+                                scope,
+                            )?;
+                            next = spawned;
+                            if let Some(older) = pending.take() {
+                                self.encoder_chunk_finish(
+                                    model,
+                                    plan,
+                                    older,
+                                    &storage,
+                                    &mut counters,
+                                    cancel,
+                                )?;
+                            }
+                            pending = Some(submitted);
+                        }
                         Ok(())
+                    })();
+                    if result.is_err() {
+                        if let Some(done) = pending.take() {
+                            let _ = self.ced_wait(model, done.command, &storage, &mut counters);
+                        }
+                        let _ = Self::join_engram_prefetch(next.take());
+                        return result;
                     }
+                    if let Some(last) = pending.take() {
+                        self.encoder_chunk_finish(
+                            model,
+                            plan,
+                            last,
+                            &storage,
+                            &mut counters,
+                            cancel,
+                        )?;
+                    }
+                    let _ = Self::join_engram_prefetch(next.take())?;
+                    Ok(())
                 })?;
+            } else {
+                let mut prefetched = None;
+                for (i, (range, hashes)) in chunks.iter().enumerate() {
+                    cancelled(cancel)?;
+                    let input = &tokens[range.clone()];
+                    let next_hashes = chunks.get(i + 1).and_then(|(next_range, next_hashes)| {
+                        (next_range.len() > 1).then_some(next_hashes.as_slice())
+                    });
+                    objc2::rc::autoreleasepool(|_| -> Result<()> {
+                        if input.len() == 1 {
+                            prefetched = None;
+                            self.ced_encoder_scalar(
+                                model,
+                                plan,
+                                range.start,
+                                input[0],
+                                &hashes[0],
+                                cancel,
+                                &mut storage,
+                                &mut counters,
+                            )
+                        } else {
+                            prefetched = self.ced_encoder_rows(
+                                model,
+                                plan,
+                                range.start,
+                                input,
+                                hashes,
+                                prefetched.take(),
+                                next_hashes,
+                                cancel,
+                                &mut storage,
+                                &mut counters,
+                            )?;
+                            Ok(())
+                        }
+                    })?;
+                }
             }
             *addresses = history;
         } else {

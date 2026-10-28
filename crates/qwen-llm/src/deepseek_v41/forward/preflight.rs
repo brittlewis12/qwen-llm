@@ -397,6 +397,7 @@ pub(super) fn runtime_from_parts(
                 capacity,
                 &plan,
                 half_selected,
+                gpu_step::ced::encoder_pipeline_priced(),
                 price,
             )?),
             // These valid cold requests take Full in the runtime too.

@@ -206,8 +206,18 @@ fn custom_schedule_engram_variants_and_shared_ledgers() {
             let ced = ced.unwrap();
             assert_eq!(
                 ced,
-                ced::estimate_from_parts(&c, 4, &projections, count, 24, &plan, half, &price)
-                    .unwrap()
+                ced::estimate_from_parts(
+                    &c,
+                    4,
+                    &projections,
+                    count,
+                    24,
+                    &plan,
+                    half,
+                    crate::deepseek_v41::forward::gpu_step::ced::encoder_pipeline_priced(),
+                    &price
+                )
+                .unwrap()
             );
             assert_eq!(ced.retained_selected_bytes, plan.memory.selected_bytes);
             assert_eq!(ced.retained_candidate_bytes, plan.memory.candidate_bytes);

@@ -168,6 +168,7 @@ fn full_and_ced_metadata_price_the_selected_runtime_width_not_a_fixed_2k_cap() {
                         n,
                         &plan,
                         half,
+                        gpu_step::ced::encoder_pipeline_priced(),
                         &price
                     )
                     .unwrap()

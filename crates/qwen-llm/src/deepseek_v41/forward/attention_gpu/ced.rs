@@ -1,6 +1,7 @@
 //! Narrow CED attention primitives and completion-gated range state.
 use super::super::ced_plan::CedPlan;
 use super::*;
+use std::collections::VecDeque;
 use std::ops::Range;
 use std::sync::{Arc, Mutex};
 
@@ -428,6 +429,10 @@ pub(super) struct Cursor {
     seed_completed: Vec<usize>,
     output_completed: Vec<usize>,
     pending: Option<Pending>,
+    // Submitted encoder commands whose completion has not been observed yet.
+    // FIFO and bounded by the driver's lookahead; an entry is popped only by
+    // its own completion, never by encoding the next chunk.
+    inflight: VecDeque<Pending>,
     group: Option<EncodedGroup>,
     generation: u64,
 }
@@ -508,6 +513,7 @@ impl Cursor {
             seed_completed: plan.decoder.iter().map(|l| l.seed_rows.start).collect(),
             output_completed: plan.decoder.iter().map(|l| l.output_rows.start).collect(),
             pending: None,
+            inflight: VecDeque::new(),
             group: None,
             generation: 0,
         })
@@ -515,7 +521,7 @@ impl Cursor {
 
     fn idle(&self) -> Result<()> {
         op::require(
-            self.pending.is_none(),
+            self.pending.is_none() && self.inflight.is_empty(),
             "CED command still pending completion",
         )
     }
@@ -523,15 +529,40 @@ impl Cursor {
     fn begin_encoder(&mut self, start: usize, rows: usize) -> Result<()> {
         self.idle()?;
         op::require(
+            start == self.encoder_completed && start == self.publication_completed,
+            "CED encoder completed frontier",
+        )?;
+        self.begin_encoder_at(start, rows)
+    }
+
+    /// Begin the next encoder chunk while the previous submitted encoder is
+    /// still in flight. The GPU queue preserves order, so chunk N+1's command
+    /// may be encoded and committed before chunk N's completion is observed;
+    /// completion still advances the frontier in FIFO order and the previous
+    /// intent stays inspectable until its own completion.
+    fn begin_encoder_speculative(&mut self, start: usize, rows: usize) -> Result<()> {
+        op::require(self.inflight.is_empty(), "CED speculative encoder depth")?;
+        op::require(self.group.is_none(), "CED encoder during decoder batch")?;
+        let previous = self
+            .pending
+            .as_ref()
+            .ok_or("CED speculative encoder requires a pending encoder")?;
+        op::require(
+            previous.phase == Phase::Encoder && previous.range.end == start,
+            "CED speculative encoder frontier",
+        )?;
+        let previous = self.pending.take().unwrap();
+        self.inflight.push_back(previous);
+        self.begin_encoder_at(start, rows)
+    }
+
+    fn begin_encoder_at(&mut self, start: usize, rows: usize) -> Result<()> {
+        op::require(
             rows <= self.plan.full_chunk_rows,
             "CED encoder chunk geometry",
         )?;
         op::require(self.group.is_none(), "CED encoder during decoder batch")?;
         let range = checked_range(&(0..self.plan.prompt_rows), start, rows)?;
-        op::require(
-            start == self.encoder_completed && start == self.publication_completed,
-            "CED encoder completed frontier",
-        )?;
         self.pending = Some(Pending {
             phase: Phase::Encoder,
             range,
@@ -671,12 +702,13 @@ impl Cursor {
     }
 
     fn matches(&self, phase: Phase, start: usize, rows: usize) -> Result<&Pending> {
-        let p = self.pending.as_ref().ok_or("CED has no pending command")?;
-        op::require(
-            p.phase == phase && p.range.start == start && p.range.len() == rows,
-            "CED pending range/phase",
-        )?;
-        Ok(p)
+        let matched = self
+            .pending
+            .iter()
+            .chain(self.inflight.iter().rev())
+            .find(|p| p.phase == phase && p.range.start == start && p.range.len() == rows)
+            .ok_or("CED pending range/phase")?;
+        Ok(matched)
     }
 
     fn attention_done(p: &Pending) -> bool {
@@ -721,6 +753,12 @@ impl Cursor {
 
     fn complete(&mut self, phase: Phase, start: usize, rows: usize) -> Result<()> {
         op::require(self.group.is_none(), "CED batch requires atomic retirement")?;
+        if phase == Phase::Encoder {
+            op::require(
+                start == self.encoder_completed && start == self.publication_completed,
+                "CED encoder completion frontier",
+            )?;
+        }
         let (end, seed_end) = self.completion_range(phase, start, rows)?;
         match phase {
             Phase::Encoder => {
@@ -740,13 +778,22 @@ impl Cursor {
                 }
             }
         }
-        self.pending = None;
+        let front = self
+            .inflight
+            .front()
+            .is_some_and(|p| p.phase == phase && p.range.start == start && p.range.len() == rows);
+        if front {
+            self.inflight.pop_front();
+        } else {
+            self.pending = None;
+        }
         Ok(())
     }
 
     fn ready(&self, n: usize) -> bool {
         n == self.plan.prompt_rows
             && self.pending.is_none()
+            && self.inflight.is_empty()
             && self.group.is_none()
             && self.encoder_completed == n
             && self.publication_completed == n
@@ -1059,6 +1106,20 @@ impl Workspace {
             .as_mut()
             .ok_or("CED not active")?
             .begin_encoder(start, rows)
+    }
+
+    /// Begin encoder chunk N+1 before chunk N's completion is observed. The
+    /// caller must have submitted chunk N and must wait both commands in FIFO
+    /// order; only the frontier bookkeeping is deferred, not the GPU order.
+    pub(in super::super) fn begin_ced_encoder_speculative(
+        &mut self,
+        start: usize,
+        rows: usize,
+    ) -> Result<()> {
+        self.ced
+            .as_mut()
+            .ok_or("CED not active")?
+            .begin_encoder_speculative(start, rows)
     }
 
     pub(in super::super) fn begin_ced_seed(

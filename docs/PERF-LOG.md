@@ -6,6 +6,35 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the current state and evidence index.
 
+## 2026-10-28 - V4.1 Agent Depth After Select-v2; Independent Sequences Do Not Overlap
+
+All M5 Ultra, GSQ IQ2_XS, main `fbbf99b6` unless noted.
+
+- 1K append at 128K: **547.3 tok/s** with stage sampling on (was 330.1 plain
+  after radix top-k; sampling only adds time). Stages: FFN 835 ms, attention
+  851 ms (serial 327, tiles 252, finish/post 153, prepare 91, HC 29), Engram
+  host read 123 ms before the GPU starts. At 40K: 597.8 tok/s, FFN 867 ms,
+  attention 640 ms. The agent append is now half FFN at 1K-row chunks.
+- 128K decode: tg32 52.59 tok/s (52.5 before select-v2). The dispatch census
+  shows select-v2 engaged: index selection 4.04 -> 1.63 ms/token
+  (`index_heads_rows_mma` 0.66 ms, grid radix 0.42 ms), but weight-streaming
+  stages ran 1-8% slower than in the earlier census (Engram projection 26%),
+  so the median command fell only 25.2 -> 23.5 ms. The plain run followed two
+  128K fills. No plain-run gain is claimed.
+- Dispatch censuses are bimodal by GPU clock state: at depth 0, tokens split
+  between ~13.5 and ~20 ms with every weight kernel ~1.5x slower and the
+  bandwidth-bound head unchanged. Check a clock proxy before comparing
+  census tokens across runs or depths.
+- Batched decode scaffold (branch `perf/v41-step-batch`):
+  `Forward::step_batch` runs B sequences' unchanged decode chains, bitwise
+  equal to B separate steps (toy tests; real model B=1-8, 66 greedy rounds
+  per arm). Against serial steps it is 1.00-1.03x, whether the sequences use
+  separate encoders in shared command buffers or separate command queues; GPU
+  time is unchanged (B=2: 28.66 vs 28.84 ms). The per-command timeline shows
+  the second queue's command starting ~11 ms into the first: decode kernels
+  already fill the GPU. Aggregate gains need kernels that dequantize each
+  weight once for all rows.
+
 ## 2026-10-28 - V4.1 8K CED Sink-Tile Sweep: 512 Is Optimal
 
 - Query-tile width sweep at 8K CED, ordinary suite, two runs per arm, reversed

@@ -299,15 +299,7 @@ impl Settings {
         let position = run.position;
         check(sink, cancel)?;
         admit_output(reuse, run.reserve, self.headroom)?;
-        let endpoint = (position + max_rows)
-            .min(
-                run.checkpoint_cuts
-                    .iter()
-                    .copied()
-                    .find(|&cut| cut > position)
-                    .unwrap_or(ids.len()),
-            )
-            .min(ids.len());
+        let endpoint = run.next_endpoint(max_rows);
         let with_logits = endpoint == ids.len();
         run.logits = engine
             .prefill(
@@ -428,6 +420,8 @@ impl Settings {
 /// The model operations one request needs. The serial path adapts its
 /// closures; the batch scheduler implements it over the resident forward.
 pub(super) trait Engine<S> {
+    /// The engine's typed admission error, as the serial closures return it.
+    #[allow(clippy::result_large_err)]
     fn admit(
         &mut self,
         positions: usize,
@@ -533,6 +527,18 @@ pub(super) struct Run<S> {
 }
 
 impl<S> Run<S> {
+    /// Where a prefill call of at most `max_rows` from here would end.
+    pub(super) fn next_endpoint(&self, max_rows: usize) -> usize {
+        (self.position + max_rows)
+            .min(
+                self.checkpoint_cuts
+                    .iter()
+                    .copied()
+                    .find(|&cut| cut > self.position)
+                    .unwrap_or(self.ids.len()),
+            )
+            .min(self.ids.len())
+    }
     pub(super) fn prefilled(&self) -> bool {
         self.position >= self.ids.len()
     }

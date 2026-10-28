@@ -15,6 +15,16 @@ use std::time::{Duration, Instant};
 
 use qwen_llm::tokenizer::NativeTokenizer;
 
+/// Concurrent V4.1 requests `qwen serve` keeps in flight on the model owner
+/// (default 1: one request at a time, exactly the serial path). Above 1, every
+/// decoding request advances one token per `Forward::step_batch` step (plain
+/// `step` when only one decodes), and a new request's prefill interleaves with
+/// their decode in 512-row calls (full chunks when nobody else decodes), which
+/// changes that prompt's prefill partition and so F32 rounding. The acceptor's
+/// `QWEN_SERVE_QUEUE_DEPTH` still bounds active plus waiting connections.
+/// Pair with `QWEN_SERVE_V41_LIVE_STATES` to keep each conversation's live
+/// session. Positive integer; read at startup.
+const MAX_ACTIVE_ENV: &str = "QWEN_SERVE_V41_MAX_ACTIVE";
 /// Idle V4.1 live sessions `qwen serve` keeps for exact-prefix reuse (default
 /// 1: the single live session). Larger values keep other conversations'
 /// sessions resident; the least recently used is released when the count or
@@ -46,6 +56,7 @@ pub(super) struct Prepared {
     snapshot_policy: qwen_llm::snapshot_policy::SnapshotPolicyConfig,
     live_states: usize,
     live_state_bytes: Option<u64>,
+    max_active: usize,
 }
 impl Prepared {
     pub(super) fn new(
@@ -76,6 +87,7 @@ impl Prepared {
             .transpose()?;
         Ok(Self {
             live_states: positive_env(LIVE_STATES_ENV)?.unwrap_or(1),
+            max_active: positive_env(MAX_ACTIVE_ENV)?.unwrap_or(1),
             live_state_bytes,
             snapshot_mib: invocation.snapshot_cache_mib,
             snapshot_policy: invocation.snapshot_policy,
@@ -122,6 +134,14 @@ pub(super) fn start(
     );
     backend.reuse = reuse::Store::new(plan.bytes, plan.policy)
         .with_live_budget(prepared.live_states, prepared.live_state_bytes);
+    if prepared.max_active > 1 {
+        tracing::info!(
+            "serve: V4.1 continuous batching: up to {} requests in flight (prefill {} rows per call while others decode)",
+            prepared.max_active,
+            scheduler::LOADED_PREFILL_ROWS
+        );
+        backend.scheduler = Some(scheduler::Scheduler::new(prepared.max_active));
+    }
     listening.serve(started.elapsed().as_secs_f64() * 1e3, &mut backend)
 }
 
@@ -130,12 +150,14 @@ mod execution;
 #[path = "backend_v41/io.rs"]
 mod memory_io;
 mod reuse;
+mod scheduler;
 
 pub(crate) struct Backend<'a> {
     ctx: &'a MetalContext,
     forward: Forward<'a>,
     settings: Settings,
     reuse: reuse::Store,
+    scheduler: Option<scheduler::Scheduler<qwen_llm::deepseek_v41::forward::State>>,
 }
 
 /// Caller-retained logits and sampler candidates/weights/sort storage, separate
@@ -248,7 +270,93 @@ impl<'a> Backend<'a> {
             forward,
             settings,
             reuse: reuse::Store::new(0, Default::default()),
+            scheduler: None,
         }
+    }
+}
+
+/// The resident forward as the batch scheduler's engine.
+struct ForwardEngine<'a, 'b> {
+    forward: &'a Forward<'b>,
+    ctx: &'a MetalContext,
+    cold_plan: Option<qwen_llm::deepseek_v41::forward::RequestPlan>,
+    epoch: Instant,
+}
+
+impl execution::Engine<qwen_llm::deepseek_v41::forward::State> for ForwardEngine<'_, '_> {
+    fn admit(
+        &mut self,
+        positions: usize,
+        prefill_tokens: usize,
+        reserve: u64,
+    ) -> std::result::Result<(), StateError> {
+        let plan = self
+            .forward
+            .plan_request(positions, prefill_tokens, reserve)?;
+        admit_request_memory(plan.memory(), reserve, self.ctx.memory_signals())
+            .map_err(StateError::MemoryAdmissionDenied)?;
+        self.cold_plan = Some(plan);
+        Ok(())
+    }
+    fn new_state(
+        &mut self,
+        _: usize,
+    ) -> std::result::Result<qwen_llm::deepseek_v41::forward::State, ServeError> {
+        self.forward
+            .new_state_from_plan(
+                &self
+                    .cold_plan
+                    .take()
+                    .expect("cold allocation follows admission"),
+            )
+            .map_err(state_error)
+    }
+    fn prefill(
+        &mut self,
+        state: &mut qwen_llm::deepseek_v41::forward::State,
+        tokens: &[u32],
+        cancel: &AtomicBool,
+        with_logits: bool,
+    ) -> std::result::Result<Vec<f32>, ServeError> {
+        if with_logits {
+            self.forward.prefill(state, tokens, Some(cancel))
+        } else {
+            self.forward
+                .advance_prefill(state, tokens, Some(cancel))
+                .map(|()| Vec::new())
+        }
+        .map_err(state_error)
+    }
+    fn step(
+        &mut self,
+        state: &mut qwen_llm::deepseek_v41::forward::State,
+        token: u32,
+        cancel: &AtomicBool,
+    ) -> std::result::Result<Vec<f32>, String> {
+        self.forward.step(state, token, Some(cancel))
+    }
+    fn now(&mut self) -> Duration {
+        self.epoch.elapsed()
+    }
+}
+
+impl scheduler::BatchEngine<qwen_llm::deepseek_v41::forward::State> for ForwardEngine<'_, '_> {
+    fn step_batch(
+        &mut self,
+        states: &mut [&mut qwen_llm::deepseek_v41::forward::State],
+        tokens: &[u32],
+        cancel: &AtomicBool,
+    ) -> std::result::Result<Vec<Vec<f32>>, String> {
+        self.forward.step_batch(states, tokens, Some(cancel))
+    }
+    fn can_step(&self, state: &qwen_llm::deepseek_v41::forward::State) -> bool {
+        state.is_ready() && state.position() < state.capacity()
+    }
+    fn poisoned(&self, state: &qwen_llm::deepseek_v41::forward::State) -> bool {
+        state.is_poisoned()
+    }
+    fn position(&self, state: &qwen_llm::deepseek_v41::forward::State) -> usize {
+        state.position()
     }
 }
 
@@ -261,6 +369,56 @@ impl GenerationBackend for Backend<'_> {
     }
     fn idle(&mut self) {
         self.reuse.sweep();
+    }
+    fn max_active(&self) -> usize {
+        self.scheduler
+            .as_ref()
+            .map_or(1, scheduler::Scheduler::max_active)
+    }
+    fn submit(&mut self, job: super::batching::Job) {
+        match &mut self.scheduler {
+            Some(scheduler) => scheduler.submit(job),
+            None => job.sink.complete(Err(ServeError::server_error(
+                "V4.1 continuous batching is not enabled",
+            )
+            .into())),
+        }
+    }
+    fn pump(&mut self) -> bool {
+        let Backend {
+            ctx,
+            forward,
+            settings,
+            reuse,
+            scheduler,
+        } = self;
+        let Some(scheduler) = scheduler else {
+            return false;
+        };
+        let (forward, ctx) = (&*forward, *ctx);
+        if scheduler.admitting() {
+            reuse.sweep();
+        }
+        let mut engine = ForwardEngine {
+            forward,
+            ctx,
+            cold_plan: None,
+            epoch: Instant::now(),
+        };
+        let progressed = scheduler.pump(
+            settings,
+            &mut engine,
+            &mut reuse::Session::new(forward, reuse, ctx),
+        );
+        for _ in 0..scheduler.take_server_failures() {
+            self.request_failed_on_server();
+        }
+        progressed
+    }
+    fn abort_all(&mut self) {
+        if let Some(scheduler) = &mut self.scheduler {
+            scheduler.abort_all();
+        }
     }
     fn generate(
         &mut self,
@@ -392,6 +550,8 @@ impl Backend<'_> {
 
 #[cfg(test)]
 mod reuse_tests;
+#[cfg(test)]
+mod scheduler_tests;
 #[cfg(test)]
 mod tests;
 #[cfg(test)]

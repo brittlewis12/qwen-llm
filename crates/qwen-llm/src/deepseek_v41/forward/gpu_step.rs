@@ -3,6 +3,7 @@
 use super::*;
 use objc2_metal::MTLSize;
 
+pub(super) mod batch;
 pub(super) mod ced;
 
 #[cfg(test)]

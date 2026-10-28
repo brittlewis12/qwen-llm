@@ -842,6 +842,79 @@ impl<'a> Forward<'a> {
         self.execute_token(state, token, cancel, trace, capture, true)
     }
 
+    /// Consume one token in each of several independent sequences and return
+    /// each sequence's full next-token logits, in order. Every sequence runs
+    /// the dispatches of `step` on its own workspace (bitwise-identical
+    /// results); the sequences share command buffers and per-sequence
+    /// encoders, so the GPU may overlap their chains. All states are checked
+    /// before any is touched: a refused batch leaves every state unchanged.
+    /// Once execution starts, a failure or cancellation poisons every state
+    /// in the batch. Requires GPU-step states of this model.
+    pub fn step_batch(
+        &self,
+        states: &mut [&mut State],
+        tokens: &[u32],
+        cancel: Option<&AtomicBool>,
+    ) -> Result<Vec<Vec<f32>>> {
+        op::require(
+            !states.is_empty() && states.len() == tokens.len(),
+            "batched decode needs one token per state",
+        )?;
+        let mut steps = Vec::with_capacity(states.len());
+        for (state, &token) in states.iter().zip(tokens) {
+            op::require(
+                state.gpu_step.is_some(),
+                "batched decode requires GPU step states",
+            )?;
+            op::require(
+                state.is_ready(),
+                "sequence is provisional or poisoned by partial execution",
+            )?;
+            op::require(
+                Arc::ptr_eq(&state.identity, &self.identity),
+                "state belongs to another model",
+            )?;
+            op::require(
+                state.position() < state.max_context,
+                "maximum context reached",
+            )?;
+            let compressed = *self
+                .token_map
+                .get(token as usize)
+                .ok_or("token outside vocabulary")?;
+            let (rows, next) = state
+                .addresses
+                .step_with_config(engram::Token::Compressed(compressed), &self.engram_hash)
+                .map_err(|e| format!("{e:?}"))?;
+            steps.push((token as usize, state.position(), rows, next));
+        }
+        cancelled(cancel)?;
+        for state in states.iter_mut() {
+            state.phase = StatePhase::Poisoned;
+        }
+        let inputs: Vec<_> = steps
+            .iter()
+            .map(|(token, position, rows, _)| gpu_step::batch::BatchInput {
+                token: *token,
+                position: *position,
+                rows,
+            })
+            .collect();
+        let mut workspaces: Vec<_> = states
+            .iter_mut()
+            .map(|state| state.gpu_step.as_mut().expect("checked GPU step state"))
+            .collect();
+        // As in `execute_token`: completed commands must not outlive the step.
+        let logits = objc2::rc::autoreleasepool(|_| {
+            gpu_step::batch::run_batch(self, &mut workspaces, &inputs, cancel)
+        })?;
+        for (state, (_, _, _, next)) in states.iter_mut().zip(steps) {
+            state.addresses = next;
+            state.phase = StatePhase::Ready;
+        }
+        Ok(logits)
+    }
+
     fn execute_token(
         &self,
         state: &mut State,

@@ -450,3 +450,108 @@ fn capacity_memory_and_modes_are_explicit() {
     let state = model.new_state(1).unwrap();
     assert!(state.gpu_step.is_some());
 }
+
+#[test]
+fn batched_steps_match_separate_steps_bitwise() {
+    let ctx = MetalContext::new().unwrap();
+    let weights = toy::Weights::new(&ctx);
+    let model = weights.model(&ctx);
+    for split in [false, true] {
+        SPLIT_SUBMIT_OVERRIDE.with(|o| o.set(Some(split)));
+        let new = || {
+            (0..3)
+                .map(|_| model.new_state_with_gpu_step(6).unwrap())
+                .collect::<Vec<_>>()
+        };
+        let (mut alone, mut batched) = (new(), new());
+        // Different depths: the last sequence starts two tokens ahead.
+        for token in [4, 2] {
+            model.step(&mut alone[2], token, None).unwrap();
+            model.step(&mut batched[2], token, None).unwrap();
+        }
+        for tokens in [[0, 3, 1], [3, 3, 2], [1, 0, 4]] {
+            let expected: Vec<_> = alone
+                .iter_mut()
+                .zip(tokens)
+                .map(|(state, token)| model.step(state, token, None).unwrap())
+                .collect();
+            let mut states: Vec<&mut State> = batched.iter_mut().collect();
+            let logits = model.step_batch(&mut states, &tokens, None).unwrap();
+            assert_eq!(logits, expected, "split {split} tokens {tokens:?}");
+            for (alone, batched) in alone.iter().zip(&batched) {
+                assert!(batched.is_ready());
+                assert_eq!(batched.position(), alone.position());
+                assert_eq!(batched.addresses, alone.addresses);
+                let commands = batched.gpu_step.as_ref().unwrap().commands;
+                assert_eq!(commands, if split { 3 } else { 1 });
+            }
+        }
+        SPLIT_SUBMIT_OVERRIDE.with(|o| o.set(None));
+    }
+}
+
+#[test]
+fn refused_batches_keep_states_and_failed_batches_poison_all() {
+    let ctx = MetalContext::new().unwrap();
+    let weights = toy::Weights::new(&ctx);
+    let mut model = weights.model(&ctx);
+    let mut a = model.new_state_with_gpu_step(1).unwrap();
+    let mut b = model.new_state_with_gpu_step(3).unwrap();
+    assert!(model.step_batch(&mut [], &[], None).is_err());
+    let error = model
+        .step_batch(&mut [&mut a, &mut b], &[0], None)
+        .unwrap_err();
+    assert!(error.contains("one token per state"), "{error}");
+    let error = model
+        .step_batch(&mut [&mut a, &mut b], &[0, 8], None)
+        .unwrap_err();
+    assert!(error.contains("vocabulary"), "{error}");
+    let cancel = AtomicBool::new(true);
+    let error = model
+        .step_batch(&mut [&mut a, &mut b], &[0, 1], Some(&cancel))
+        .unwrap_err();
+    assert!(error.contains("cancelled"), "{error}");
+    assert!(a.is_ready() && b.is_ready());
+    assert_eq!((a.position(), b.position()), (0, 0));
+    model
+        .step_batch(&mut [&mut a, &mut b], &[0, 1], None)
+        .unwrap();
+    // `a` is full: the batch is refused before `b` is touched.
+    let error = model
+        .step_batch(&mut [&mut b, &mut a], &[0, 1], None)
+        .unwrap_err();
+    assert!(error.contains("maximum context"), "{error}");
+    assert!(a.is_ready() && b.is_ready());
+    assert_eq!((a.position(), b.position()), (1, 1));
+    // A device failure in one sequence poisons the whole batch.
+    let mut c = model.new_state_with_gpu_step(2).unwrap();
+    let status = b.gpu_step.as_ref().unwrap().attention.status();
+    unsafe {
+        *status.buffer.contents().as_ptr().cast::<i32>() = 4;
+    }
+    let error = model
+        .step_batch(&mut [&mut c, &mut b], &[0, 1], None)
+        .unwrap_err();
+    assert!(
+        error.contains("sequence 1: GPU attention status 4"),
+        "{error}"
+    );
+    assert!(b.is_poisoned() && c.is_poisoned());
+    assert_eq!((b.position(), c.position()), (1, 0));
+    // A poisoned member is refused without touching the others.
+    let mut d = model.new_state_with_gpu_step(2).unwrap();
+    let error = model
+        .step_batch(&mut [&mut d, &mut b], &[0, 0], None)
+        .unwrap_err();
+    assert!(error.contains("poisoned"), "{error}");
+    assert!(d.is_ready());
+    // An encode failure poisons every member and commits nothing.
+    let mut e = model.new_state_with_gpu_step(2).unwrap();
+    model.layers[3].attention.head_dim += 1;
+    let error = model
+        .step_batch(&mut [&mut d, &mut e], &[0, 1], None)
+        .unwrap_err();
+    assert!(error.contains("GPU attention weights"), "{error}");
+    assert!(d.is_poisoned() && e.is_poisoned());
+    assert_eq!(d.gpu_step.as_ref().unwrap().commands, 0);
+}

@@ -1235,6 +1235,60 @@ kernel void kernel_deepseek_v41_attention_score(
     attention_score(a, b, q, raw, compressed, ids, scores, length, group, sg, lane);
 }
 
+// attention_score register-tiled: each simdgroup computes an 8-head x 4-key
+// tile, so each lane loads 8 Q and 4 key values per step for 32 products
+// instead of 1 + 1 per product. Every (head, key) dot product runs
+// attention_score's operations in its order (lane-strided products
+// accumulated in j order, then simd_sum, then the rsqrt(dim) scale) on the
+// same F32 values, so scores are bitwise equal. group.x: block of 32 keys
+// (4 per simdgroup); group.y: block of 8 heads.
+#define V41_SCORE_TILE_HEADS 8
+#define V41_SCORE_TILE_KEYS 4
+#define V41_SCORE_KEY_BLOCK 32
+
+kernel void kernel_deepseek_v41_attention_score_keys(
+    constant uint4 &a [[buffer(0)]], constant uint2 &b [[buffer(1)]],
+    device const float *q [[buffer(2)]], device const float *raw [[buffer(3)]],
+    device const float *compressed [[buffer(4)]], device const uint *ids [[buffer(5)]],
+    device float *scores [[buffer(7)]], constant uint &length [[buffer(9)]],
+    constant uint &heads [[buffer(14)]],
+    uint2 group [[threadgroup_position_in_grid]],
+    uint sg [[simdgroup_index_in_threadgroup]], uint lane [[thread_index_in_simdgroup]]) {
+    const uint dim = a.x, count = a.y + b.x, h0 = group.y * V41_SCORE_TILE_HEADS;
+    const uint hn = h0 < heads ? min(uint(V41_SCORE_TILE_HEADS), heads - h0) : 0u;
+    bool valid[V41_SCORE_TILE_KEYS];
+    device const float *row[V41_SCORE_TILE_KEYS];
+    uint first = group.x * V41_SCORE_KEY_BLOCK + sg * V41_SCORE_TILE_KEYS;
+    bool any = false;
+    for (uint k = 0; k < V41_SCORE_TILE_KEYS; k++) {
+        const uint i = first + k;
+        valid[k] = i < count && (i < a.y || ids[i - a.y] < length);
+        row[k] = !valid[k] ? raw
+            : i < a.y ? raw + ((a.z + i) % a.w) * dim : compressed + ids[i - a.y] * dim;
+        any |= valid[k];
+    }
+    if (!any || hn == 0) return;
+    float acc[V41_SCORE_TILE_HEADS][V41_SCORE_TILE_KEYS];
+    for (uint h = 0; h < V41_SCORE_TILE_HEADS; h++)
+        for (uint k = 0; k < V41_SCORE_TILE_KEYS; k++) acc[h][k] = 0;
+    device const float *qh = q + h0 * dim;
+    for (uint j = lane; j < dim; j += 32) {
+        float kv[V41_SCORE_TILE_KEYS], qv[V41_SCORE_TILE_HEADS];
+        for (uint k = 0; k < V41_SCORE_TILE_KEYS; k++) kv[k] = row[k][j];
+        for (uint h = 0; h < V41_SCORE_TILE_HEADS; h++) qv[h] = h < hn ? qh[h * dim + j] : 0.0f;
+        for (uint h = 0; h < V41_SCORE_TILE_HEADS; h++)
+            for (uint k = 0; k < V41_SCORE_TILE_KEYS; k++) acc[h][k] += qv[h] * kv[k];
+    }
+    const float scale = rsqrt(float(dim));
+    for (uint h = 0; h < V41_SCORE_TILE_HEADS; h++) {
+        if (h >= hn) break;
+        for (uint k = 0; k < V41_SCORE_TILE_KEYS; k++) {
+            const float sum = simd_sum(acc[h][k]);
+            if (valid[k] && lane == 0) scores[(h0 + h) * b.y + first + k] = sum * scale;
+        }
+    }
+}
+
 kernel void kernel_deepseek_v41_attention_softmax(
     constant uint4 &a [[buffer(0)]], constant uint2 &b [[buffer(1)]],
     device const uint *ids [[buffer(5)]], device const float *sink [[buffer(6)]],

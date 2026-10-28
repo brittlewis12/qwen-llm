@@ -1576,6 +1576,32 @@ fn encode_select_radix_row_wide(
     )
 }
 
+crate::env_flag!(
+    /// Sink-attention scores (decode and scalar rows) by `attention_score_keys`, which computes 8-head x 4-key register tiles (each lane loads 12 values per 32 products instead of 2 per product); the per-(head, key) arithmetic is `attention_score`'s, so scores are bitwise equal. Disabling restores the one-key-per-simdgroup `attention_score` kernel (A/B).
+    default_on score_keys_env,
+    "QWEN_V41_SCORE_KEYS"
+);
+
+#[cfg(test)]
+thread_local! {
+    pub(super) static SCORE_KEYS_OVERRIDE: std::cell::Cell<Option<bool>> =
+        const { std::cell::Cell::new(None) };
+}
+
+/// Keys and heads per `attention_score_keys` threadgroup (8 simdgroups of
+/// 8-head x 4-key tiles); the dimension limit of the dispatch choice.
+const SCORE_KEY_BLOCK: usize = 32;
+const SCORE_HEAD_BLOCK: usize = 8;
+const SCORE_KEYS_MAX_DIM: usize = 512;
+
+fn score_keys_enabled(dim: usize) -> bool {
+    #[cfg(test)]
+    if let Some(enabled) = SCORE_KEYS_OVERRIDE.with(|o| o.get()) {
+        return enabled && dim <= SCORE_KEYS_MAX_DIM;
+    }
+    score_keys_env() && dim <= SCORE_KEYS_MAX_DIM
+}
+
 // Bindings 0..10 match the incumbent. Each head's last score slot is scratch.
 fn sink_passes(
     ctx: &MetalContext,
@@ -1585,7 +1611,22 @@ fn sink_passes(
     count: usize,
     matrix: Option<(&ValueMatrix, &MetalTensor, &MetalTensor)>,
 ) -> Result<()> {
-    if count > 0 {
+    if count > 0 && score_keys_enabled(dim) {
+        pipeline(ctx, enc, "score_keys")?;
+        enc.set_bytes(14, &(heads as u32));
+        enc.dispatch(
+            MTLSize {
+                width: count.div_ceil(SCORE_KEY_BLOCK),
+                height: heads.div_ceil(SCORE_HEAD_BLOCK),
+                depth: 1,
+            },
+            MTLSize {
+                width: 256,
+                height: 1,
+                depth: 1,
+            },
+        );
+    } else if count > 0 {
         pipeline(ctx, enc, "score")?;
         enc.dispatch(
             MTLSize {

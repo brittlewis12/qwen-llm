@@ -7,6 +7,7 @@ mod f32_pv_batch;
 mod output_a_strategy;
 mod query_batch;
 mod radix_select;
+mod score_keys;
 
 pub(super) fn scheduled_weights<'a>(
     ctx: &'a MetalContext,
@@ -1349,6 +1350,16 @@ fn split_sink_real_geometry_same_run_witness() {
         let expected_passes = if nr + nk == 0 {
             vec![
                 ("sink", heads),
+                ("softmax", heads * 32),
+                ("output", heads * dim),
+            ]
+        } else if score_keys_enabled(dim) {
+            vec![
+                ("sink", heads),
+                (
+                    "score_keys",
+                    heads.div_ceil(SCORE_HEAD_BLOCK) * (nr + nk).div_ceil(SCORE_KEY_BLOCK) * 256,
+                ),
                 ("softmax", heads * 32),
                 ("output", heads * dim),
             ]

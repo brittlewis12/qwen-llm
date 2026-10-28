@@ -1338,6 +1338,13 @@
   },
   {
     "target": "lib",
+    "name": "deepseek_v41::forward::attention_gpu::tests::score_keys::score_keys_match_score_bitwise",
+    "class": "gpu",
+    "ignored": false,
+    "reason": "Metal context, allocation or dispatch witness; parent GPU lane only."
+  },
+  {
+    "target": "lib",
     "name": "deepseek_v41::forward::attention_gpu::tests::stable_gpu_selection_long_prefix_and_candidate_boundary",
     "class": "gpu",
     "ignored": false,

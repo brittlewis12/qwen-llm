@@ -951,6 +951,13 @@ impl Workspace {
                 cancelled(cancel)
             },
         )?;
+        // Own the committed command before the first fallible operation
+        // after commit. A thread-spawn panic must not drop an unwaited
+        // command or release the buffers it reads.
+        let mut owner = EncoderDrain(Some(PendingEncoder {
+            command: pending,
+            chunk,
+        }));
         let next = next_hashes.map(|next_hashes| {
             let engram_rows = &model.engram_rows;
             let layers = engram_layers;
@@ -962,13 +969,8 @@ impl Workspace {
                 values
             })
         });
-        Ok((
-            PendingEncoder {
-                command: pending,
-                chunk,
-            },
-            next,
-        ))
+        let pending = owner.take().expect("encoder command owner");
+        Ok((pending, next))
     }
 
     #[allow(clippy::too_many_arguments)]

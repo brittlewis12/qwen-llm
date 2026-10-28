@@ -62,9 +62,14 @@ cache: the 27B's 16 attention layers hold 64 KiB per token, so 133K is about
 9 GB (4.5 GB measured at 66K).
 
 **F3 — Honest behaviour when busy: implemented, live rerun pending.** Serve
-remains single-flight, but a separate acceptor now fails concurrent connections
-fast with `503 Service Unavailable`, `Retry-After: 1`, and a `server_busy`
-envelope instead of leaving them silent in the listen backlog.
+executes one request at a time. Without Lens, the acceptor holds up to
+`QWEN_SERVE_QUEUE_DEPTH` connections (default 8: the executing one plus those
+waiting, run in arrival order); a connection beyond that depth, or any
+connection with `QWEN_SERVE_QUEUE_DEPTH=1`, fails fast with
+`503 Service Unavailable`, `Retry-After: 1`, and a `server_busy` envelope
+instead of waiting silently in the listen backlog. Connections still queued at
+shutdown receive the same busy response. The Lens/control acceptor keeps its
+own execution gate.
 
 **F4 — DeepSeek V4 tool support: implemented.** DS4 serve renders declared
 tools with the 0731 chat template (`render_ds4.rs`, pinned against the

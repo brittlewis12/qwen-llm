@@ -305,6 +305,63 @@ fn busy_rejection_does_not_create_an_owner_completion() {
     assert!(observed.try_recv().is_err());
 }
 
+#[test]
+fn queued_connection_waits_for_the_active_request_instead_of_503() {
+    let listener = bind_loopback("127.0.0.1:0").unwrap();
+    let address = listener.local_addr().unwrap();
+    let (events, observed) = channel();
+    let (release, gate) = channel();
+    let mut first = connect(address);
+    first.write_all(post().as_bytes()).unwrap();
+    let server = std::thread::spawn(move || {
+        let mut backend = LifecycleBackend {
+            events,
+            owner: std::thread::current().id(),
+            address,
+            fail_render: false,
+            generation_gate: Some(gate),
+            idle_stop: None,
+        };
+        // Stop once two requests have been handled.
+        let mut handled = 0;
+        assert!(
+            super::accept_loop_with_queue_depth(listener, &mut backend, 2, |checkpoint| {
+                ensure!(
+                    !(handled == 2 && checkpoint == OwnerCheckpoint::BeforeAdmission),
+                    "test stop after two requests"
+                );
+                handled += usize::from(checkpoint == OwnerCheckpoint::BeforeHandling);
+                Ok(())
+            })
+            .is_err()
+        );
+    });
+    assert_eq!(first_non_idle(&observed), Event::Generate);
+    // The second connection is queued while the first generates: no 503.
+    let mut second = connect(address);
+    second.write_all(post().as_bytes()).unwrap();
+    std::thread::sleep(WAIT / 10);
+    assert!(observed.try_recv().is_err());
+    release.send(()).unwrap();
+    let mut response = String::new();
+    first.read_to_string(&mut response).unwrap();
+    assert!(response.starts_with("HTTP/1.1 200"), "{response}");
+    let mut response = String::new();
+    second.read_to_string(&mut response).unwrap();
+    assert!(response.starts_with("HTTP/1.1 200"), "{response}");
+    server.join().unwrap();
+    let events: Vec<_> = observed.try_iter().filter(|e| *e != Event::Idle).collect();
+    assert_eq!(
+        events,
+        [
+            Event::Finished,
+            Event::Generate,
+            Event::Finished,
+            Event::Shutdown
+        ]
+    );
+}
+
 struct PhaseBackend {
     v41: bool,
     owner: ThreadId,

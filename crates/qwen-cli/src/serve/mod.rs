@@ -66,7 +66,7 @@ use qwen_llm::model_family::ModelFamily;
 use qwen_llm::snapshot_policy::{Evicted, SnapshotPolicyConfig};
 use std::net::{TcpListener, ToSocketAddrs};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::mpsc::{RecvTimeoutError, SyncSender, sync_channel};
 use std::thread::JoinHandle;
 use std::time::Duration;
@@ -75,6 +75,63 @@ use std::time::Instant;
 
 const ACCEPT_POLL_INTERVAL: Duration = Duration::from_millis(50);
 const ADMISSION_POLL_INTERVAL: Duration = Duration::from_millis(100);
+
+/// Connections the plain (non-Lens) server holds at once: the one executing
+/// plus those waiting their turn in arrival order. Requests still execute one
+/// at a time; a connection beyond this depth gets the `503 server_busy`
+/// response. `1` restores single-flight fail-fast admission.
+const SERVE_QUEUE_DEPTH_ENV: &str = "QWEN_SERVE_QUEUE_DEPTH";
+const DEFAULT_SERVE_QUEUE_DEPTH: usize = 8;
+
+fn serve_queue_depth() -> usize {
+    // Unit tests pin the single-flight contract unless they opt in explicitly.
+    if cfg!(test) {
+        return 1;
+    }
+    std::env::var(SERVE_QUEUE_DEPTH_ENV)
+        .ok()
+        .and_then(|v| v.parse::<usize>().ok())
+        .filter(|&depth| depth >= 1)
+        .unwrap_or(DEFAULT_SERVE_QUEUE_DEPTH)
+}
+
+/// Connections admitted by the plain acceptor and not yet settled by the
+/// owner (executing plus queued), bounded by `depth`.
+struct AcceptSlots {
+    outstanding: AtomicUsize,
+    depth: usize,
+    closed: AtomicBool,
+}
+
+impl AcceptSlots {
+    fn new(depth: usize) -> Self {
+        Self {
+            outstanding: AtomicUsize::new(0),
+            depth: depth.max(1),
+            closed: AtomicBool::new(false),
+        }
+    }
+
+    fn try_reserve(&self) -> bool {
+        !self.closed.load(Ordering::Acquire)
+            && self
+                .outstanding
+                .try_update(Ordering::AcqRel, Ordering::Acquire, |n| {
+                    (n < self.depth).then_some(n + 1)
+                })
+                .is_ok()
+    }
+
+    fn release(&self) {
+        let _ = self
+            .outstanding
+            .try_update(Ordering::AcqRel, Ordering::Acquire, |n| n.checked_sub(1));
+    }
+
+    fn close(&self) {
+        self.closed.store(true, Ordering::Release);
+    }
+}
 
 struct Workbench {
     store: Option<Arc<jobs::store::JobStore>>,
@@ -736,7 +793,7 @@ fn drain_completions(
 fn spawn_acceptor(
     listener: TcpListener,
     sender: SyncSender<control::Event>,
-    ready: Arc<AtomicBool>,
+    slots: Arc<AcceptSlots>,
     stopping: Arc<AtomicBool>,
 ) -> Result<JoinHandle<Result<()>>> {
     listener
@@ -752,7 +809,7 @@ fn spawn_acceptor(
                             tracing::warn!("serve: configure accepted socket failed: {error}");
                             continue;
                         }
-                        if ready.swap(false, Ordering::AcqRel) {
+                        if slots.try_reserve() {
                             if sender.send(control::Event::Incoming(stream)).is_err() {
                                 break;
                             }
@@ -819,6 +876,18 @@ fn accept_loop_with_checkpoint(
     )
 }
 
+#[cfg(test)]
+fn accept_loop_with_queue_depth(
+    listener: TcpListener,
+    backend: &mut dyn http::GenerationBackend,
+    depth: usize,
+    checkpoint: impl FnMut(OwnerCheckpoint) -> Result<()>,
+) -> Result<()> {
+    accept_loop_inner(
+        listener, "test", 0.0, backend, &mut None, None, depth, checkpoint,
+    )
+}
+
 fn accept_loop_with_workbench(
     listener: TcpListener,
     model_id: &str,
@@ -826,6 +895,29 @@ fn accept_loop_with_workbench(
     backend: &mut dyn http::GenerationBackend,
     trace: &mut Option<http::TraceLog>,
     workbench: Option<Workbench>,
+    checkpoint: impl FnMut(OwnerCheckpoint) -> Result<()>,
+) -> Result<()> {
+    accept_loop_inner(
+        listener,
+        model_id,
+        load_ms,
+        backend,
+        trace,
+        workbench,
+        serve_queue_depth(),
+        checkpoint,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn accept_loop_inner(
+    listener: TcpListener,
+    model_id: &str,
+    load_ms: f64,
+    backend: &mut dyn http::GenerationBackend,
+    trace: &mut Option<http::TraceLog>,
+    workbench: Option<Workbench>,
+    depth: usize,
     mut checkpoint: impl FnMut(OwnerCheckpoint) -> Result<()>,
 ) -> Result<()> {
     let local_addr = listener
@@ -833,18 +925,21 @@ fn accept_loop_with_workbench(
         .map_or_else(|_| "<unknown>".to_owned(), |addr| addr.to_string());
     tracing::info!(
         target: "qwen_diag",
-        "serve: listening on http://{} model={} load_ms={:.1} lens_history={} (serial; POST /v1/responses, GET /v1/models)",
+        "serve: listening on http://{} model={} load_ms={:.1} lens_history={} queue_depth={} (serial; POST /v1/responses, GET /v1/models)",
         local_addr,
         model_id,
         load_ms,
         workbench.as_ref().is_some_and(|w| w.store.is_some()),
+        if workbench.is_some() { 1 } else { depth },
     );
     let control_enabled = workbench.is_some();
-    let (sender, receiver) = sync_channel(usize::from(control_enabled));
-    // Publish initial readiness before the acceptor can observe a connection;
-    // otherwise an idle server has a startup window that returns a false 503.
-    let ready = Arc::new(AtomicBool::new(true));
-    let accept_ready = Arc::clone(&ready);
+    // The plain acceptor reserves a slot before forwarding, so the channel
+    // never holds more than `depth` connections and sends never block.
+    let (sender, receiver) = sync_channel(if control_enabled { 1 } else { depth });
+    // Slots exist before the acceptor can observe a connection; otherwise an
+    // idle server has a startup window that returns a false 503.
+    let slots = Arc::new(AcceptSlots::new(depth));
+    let accept_slots = Arc::clone(&slots);
     let stopping = Arc::new(AtomicBool::new(false));
     let accept_stopping = Arc::clone(&stopping);
     let mut activity = owner_activity::OwnerActivity::default();
@@ -896,7 +991,7 @@ fn accept_loop_with_workbench(
             }
         }
     } else {
-        spawn_acceptor(listener, sender, accept_ready, accept_stopping)?
+        spawn_acceptor(listener, sender, accept_slots, accept_stopping)?
     };
     let mut connection: Option<transport::Connection> = None;
 
@@ -917,14 +1012,14 @@ fn accept_loop_with_workbench(
                     };
                 if settled {
                     connection.take();
+                    if !control_enabled {
+                        slots.release();
+                    }
                     drain_completions(&mut activity, backend);
                 }
                 continue;
             }
             checkpoint(OwnerCheckpoint::BeforeAdmission)?;
-            if !control_enabled {
-                ready.store(true, Ordering::Release);
-            }
             let event = match receiver.recv_timeout(ADMISSION_POLL_INTERVAL) {
                 Ok(event) => event,
                 Err(RecvTimeoutError::Timeout) => {
@@ -949,6 +1044,9 @@ fn accept_loop_with_workbench(
                     match transport::Connection::start(stream, backend, subscriber, guard) {
                         Ok(started) => connection = Some(started),
                         Err(cause) => {
+                            if !control_enabled {
+                                slots.release();
+                            }
                             tracing::warn!("serve: HTTP connection setup failed: {cause:#}");
                             std::thread::sleep(ACCEPT_POLL_INTERVAL);
                         }
@@ -968,8 +1066,17 @@ fn accept_loop_with_workbench(
 
     admission.close();
     gate.close();
-    ready.store(false, Ordering::Release);
+    slots.close();
     stopping.store(true, Ordering::Release);
+    // Connections still waiting their turn get the busy response, not a
+    // silently closed socket.
+    while let Ok(event) = receiver.try_recv() {
+        if let control::Event::Incoming(stream) = event
+            && let Err(error) = http::write_busy_response(&stream)
+        {
+            tracing::info!(target: "qwen_diag", "serve: busy response aborted: {error}");
+        }
+    }
     drop(receiver);
     let worker_result = connection.map_or(Ok(()), transport::Connection::stop_and_join);
     let acceptor_result = acceptor.join();
@@ -1427,10 +1534,11 @@ mod tests {
         let listener = bind_loopback("127.0.0.1:0").unwrap();
         let address = listener.local_addr().unwrap();
         let (sender, receiver) = sync_channel(0);
-        let ready = Arc::new(AtomicBool::new(false));
+        let slots = Arc::new(AcceptSlots::new(1));
+        slots.close();
         let stopping = Arc::new(AtomicBool::new(false));
         let acceptor =
-            spawn_acceptor(listener, sender, Arc::clone(&ready), Arc::clone(&stopping)).unwrap();
+            spawn_acceptor(listener, sender, Arc::clone(&slots), Arc::clone(&stopping)).unwrap();
         stopping.store(true, Ordering::Release);
         drop(receiver);
         assert_thread_finishes(
@@ -1471,10 +1579,10 @@ mod tests {
         let listener = bind_loopback("127.0.0.1:0").unwrap();
         let address = listener.local_addr().unwrap();
         let (sender, receiver) = sync_channel(0);
-        let ready = Arc::new(AtomicBool::new(true));
+        let slots = Arc::new(AcceptSlots::new(1));
         let stopping = Arc::new(AtomicBool::new(false));
         let acceptor =
-            spawn_acceptor(listener, sender, Arc::clone(&ready), Arc::clone(&stopping)).unwrap();
+            spawn_acceptor(listener, sender, Arc::clone(&slots), Arc::clone(&stopping)).unwrap();
         let client = std::net::TcpStream::connect(address).unwrap();
         let admitted = receiver
             .recv_timeout(ACCEPT_POLL_INTERVAL * 4)
@@ -1492,16 +1600,16 @@ mod tests {
         let listener = bind_loopback("127.0.0.1:0").unwrap();
         let address = listener.local_addr().unwrap();
         let (sender, receiver) = sync_channel(0);
-        let ready = Arc::new(AtomicBool::new(true));
+        let slots = Arc::new(AcceptSlots::new(1));
         let stopping = Arc::new(AtomicBool::new(false));
         let acceptor =
-            spawn_acceptor(listener, sender, Arc::clone(&ready), Arc::clone(&stopping)).unwrap();
+            spawn_acceptor(listener, sender, Arc::clone(&slots), Arc::clone(&stopping)).unwrap();
         std::thread::sleep(ACCEPT_POLL_INTERVAL + Duration::from_millis(5));
         let client = std::net::TcpStream::connect(address).unwrap();
         let admitted = receiver
             .recv_timeout(THREAD_EXIT_TIMEOUT)
             .expect("idle listener must wake");
-        assert!(!ready.load(Ordering::Acquire));
+        assert_eq!(slots.outstanding.load(Ordering::Acquire), 1);
         let mut busy = std::net::TcpStream::connect(address).unwrap();
         busy.set_read_timeout(Some(THREAD_EXIT_TIMEOUT)).unwrap();
         let mut response = String::new();
@@ -1513,6 +1621,61 @@ mod tests {
         drop(admitted);
         drop(client);
         assert_thread_finishes(&acceptor, "readiness wait did not stop");
+        acceptor.join().unwrap().unwrap();
+    }
+
+    #[test]
+    fn queued_acceptor_holds_connections_in_order_up_to_its_depth() {
+        use std::io::Read;
+        let listener = bind_loopback("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let (sender, receiver) = sync_channel(3);
+        let slots = Arc::new(AcceptSlots::new(3));
+        let stopping = Arc::new(AtomicBool::new(false));
+        let acceptor =
+            spawn_acceptor(listener, sender, Arc::clone(&slots), Arc::clone(&stopping)).unwrap();
+        let clients: Vec<_> = (0..3)
+            .map(|_| {
+                let c = std::net::TcpStream::connect(address).unwrap();
+                // Serialize arrivals so admission order is the connect order.
+                std::thread::sleep(ACCEPT_POLL_INTERVAL);
+                c
+            })
+            .collect();
+        let deadline = Instant::now() + THREAD_EXIT_TIMEOUT;
+        while slots.outstanding.load(Ordering::Acquire) < 3 && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        assert_eq!(slots.outstanding.load(Ordering::Acquire), 3);
+        // The fourth connection exceeds the depth and is refused.
+        let mut busy = std::net::TcpStream::connect(address).unwrap();
+        busy.set_read_timeout(Some(THREAD_EXIT_TIMEOUT)).unwrap();
+        let mut response = String::new();
+        busy.read_to_string(&mut response).unwrap();
+        assert!(response.starts_with("HTTP/1.1 503"), "{response}");
+        // Queued connections arrive in connect order.
+        let peers: Vec<_> = (0..3)
+            .map(
+                |_| match receiver.recv_timeout(THREAD_EXIT_TIMEOUT).unwrap() {
+                    control::Event::Incoming(stream) => stream.peer_addr().unwrap(),
+                    _ => panic!("plain acceptor forwards incoming streams only"),
+                },
+            )
+            .collect();
+        let locals: Vec<_> = clients.iter().map(|c| c.local_addr().unwrap()).collect();
+        assert_eq!(peers, locals);
+        // A released slot admits the next connection again.
+        slots.release();
+        let next = std::net::TcpStream::connect(address).unwrap();
+        assert!(matches!(
+            receiver.recv_timeout(THREAD_EXIT_TIMEOUT),
+            Ok(control::Event::Incoming(_))
+        ));
+        stopping.store(true, Ordering::Release);
+        drop(receiver);
+        drop(next);
+        drop(clients);
+        assert_thread_finishes(&acceptor, "queued acceptor did not stop");
         acceptor.join().unwrap().unwrap();
     }
 

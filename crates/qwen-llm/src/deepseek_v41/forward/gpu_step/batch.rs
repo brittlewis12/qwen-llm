@@ -138,6 +138,37 @@ const BATCH_ENGRAM_ENV: &str = "QWEN_V41_BATCH_ENGRAM";
 /// lever.
 const BATCH_ROUTED_ENV: &str = "QWEN_V41_BATCH_ROUTED";
 
+/// A batched decode step starts a new encoder for each sequence's own chain
+/// in every per-sequence phase (HC pre and attention front, rank norms,
+/// attention middle, finish and HC post, FFN HC pre, combine), so Metal's
+/// resource tracking may overlap different sequences' small dependent
+/// kernels; `shared` keeps each phase on one encoder (A/B lever). Same
+/// dispatches, so values are unchanged. M5 Ultra, GSQ, 512-token prefixes:
+/// 0.5/2.3 ms less per batched round at B = 4/8.
+const BATCH_ENCODERS_ENV: &str = "QWEN_V41_BATCH_ENCODERS";
+
+#[cfg(test)]
+thread_local! {
+    pub(in super::super) static BATCH_ENCODERS_OVERRIDE: std::cell::Cell<Option<bool>> =
+        const { std::cell::Cell::new(None) };
+}
+
+fn per_sequence_encoders() -> bool {
+    #[cfg(test)]
+    if let Some(enabled) = BATCH_ENCODERS_OVERRIDE.with(|o| o.get()) {
+        return enabled;
+    }
+    static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ENABLED.get_or_init(|| std::env::var(BATCH_ENCODERS_ENV).as_deref() != Ok("shared"))
+}
+
+/// A new encoder for the next sequence's chain when `per_sequence_encoders()`.
+fn sequence_boundary(stages: &mut StageEncoder<'_>) {
+    if per_sequence_encoders() {
+        stages.split();
+    }
+}
+
 #[cfg(test)]
 thread_local! {
     pub(in super::super) static BATCH_ENGRAM_OVERRIDE: std::cell::Cell<Option<bool>> =
@@ -410,6 +441,7 @@ fn encode_attention_columns(
     let cols = workspaces.len();
     let err = |e: metal::MetalError| e.to_string();
     for (ws, input) in workspaces.iter_mut().zip(inputs) {
+        sequence_boundary(stages);
         ws.encode_engram_gate(model, stages, id)?;
         ws.attention_input(model, stages, id)?;
         let ws = &mut **ws;
@@ -442,6 +474,7 @@ fn encode_attention_columns(
             .map_err(err)?;
         }
         for (ws, input) in workspaces.iter_mut().zip(inputs) {
+            sequence_boundary(stages);
             ws.attention
                 .encode_rank_norms(ctx, stages.enc(), id, input.position, w)?;
         }
@@ -465,6 +498,7 @@ fn encode_attention_columns(
         .map_err(err)?;
     }
     for (ws, input) in workspaces.iter_mut().zip(inputs) {
+        sequence_boundary(stages);
         let ws = &mut **ws;
         ws.attention
             .encode_middle(ctx, stages.enc(), id, input.position, w, &ws.normalized)?;
@@ -502,6 +536,7 @@ fn encode_attention_columns(
         columns::encode_scatter(ctx, stages.enc(), &scratch.output, &outputs).map_err(err)?;
     }
     for (ws, input) in workspaces.iter_mut().zip(inputs) {
+        sequence_boundary(stages);
         let output = ws
             .attention
             .encode_finish(ctx, stages.enc(), id, input.position)?
@@ -572,6 +607,7 @@ fn encode_ffn_columns(
         return Ok(());
     }
     for ws in workspaces.iter_mut() {
+        sequence_boundary(stages);
         ws.ffn_hc_pre(model, stages, id)?;
     }
     let split = ffn_split_encoders();
@@ -618,6 +654,7 @@ fn encode_ffn_columns(
         stages.split();
     }
     for ws in workspaces.iter_mut() {
+        sequence_boundary(stages);
         ws.ffn_combine(model, stages, id)?;
     }
     Ok(())

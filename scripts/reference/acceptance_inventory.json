@@ -2262,6 +2262,13 @@
   },
   {
     "target": "lib",
+    "name": "deepseek_v41::forward::gpu_step::tests::batched_dispatch_profile_times_every_dispatch_without_changing_logits",
+    "class": "gpu",
+    "ignored": false,
+    "reason": "Metal context, allocation or dispatch witness; parent GPU lane only."
+  },
+  {
+    "target": "lib",
     "name": "deepseek_v41::forward::gpu_step::tests::batched_steps_match_separate_steps_bitwise",
     "class": "gpu",
     "ignored": false,

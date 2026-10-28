@@ -461,6 +461,7 @@ struct BatchLevers {
     head: bool,
     engram: bool,
     routed: bool,
+    sequence_encoders: bool,
     ffn_split: bool,
     per_column_copy: bool,
     fused_rank_norms: bool,
@@ -472,9 +473,9 @@ impl BatchLevers {
         use super::super::attention_gpu::FUSED_RANK_NORMS_OVERRIDE;
         use super::super::columns::PER_COLUMN_COPY_OVERRIDE;
         use batch::{
-            BATCH_ATTN_OVERRIDE, BATCH_ENGRAM_OVERRIDE, BATCH_HEAD_OVERRIDE,
-            BATCH_OUTPUT_A_OVERRIDE, BATCH_QKV_OVERRIDE, BATCH_ROUTED_OVERRIDE,
-            BATCH_SHARED_OVERRIDE,
+            BATCH_ATTN_OVERRIDE, BATCH_ENCODERS_OVERRIDE, BATCH_ENGRAM_OVERRIDE,
+            BATCH_HEAD_OVERRIDE, BATCH_OUTPUT_A_OVERRIDE, BATCH_QKV_OVERRIDE,
+            BATCH_ROUTED_OVERRIDE, BATCH_SHARED_OVERRIDE,
         };
         let l = levers;
         BATCH_SHARED_OVERRIDE.with(|o| o.set(l.map(|l| l.shared)));
@@ -484,6 +485,7 @@ impl BatchLevers {
         BATCH_HEAD_OVERRIDE.with(|o| o.set(l.map(|l| l.head)));
         BATCH_ENGRAM_OVERRIDE.with(|o| o.set(l.map(|l| l.engram)));
         BATCH_ROUTED_OVERRIDE.with(|o| o.set(l.map(|l| l.routed)));
+        BATCH_ENCODERS_OVERRIDE.with(|o| o.set(l.map(|l| l.sequence_encoders)));
         FFN_SPLIT_OVERRIDE.with(|o| o.set(l.map(|l| l.ffn_split)));
         PER_COLUMN_COPY_OVERRIDE.with(|o| o.set(l.map(|l| l.per_column_copy)));
         FUSED_RANK_NORMS_OVERRIDE.with(|o| o.set(l.map(|l| l.fused_rank_norms)));
@@ -522,6 +524,7 @@ fn batched_steps_match_separate_steps_bitwise() {
         head: true,
         engram: true,
         routed: true,
+        sequence_encoders: false,
         ffn_split: true,
         per_column_copy: false,
         fused_rank_norms: true,
@@ -561,6 +564,10 @@ fn batched_steps_match_separate_steps_bitwise() {
         BatchLevers { head: false, ..on },
         BatchLevers {
             engram: false,
+            ..on
+        },
+        BatchLevers {
+            sequence_encoders: true,
             ..on
         },
         BatchLevers {

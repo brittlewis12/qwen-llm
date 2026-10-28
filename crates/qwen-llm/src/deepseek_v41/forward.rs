@@ -287,6 +287,82 @@ fn encode_linear_pair(
     Ok(())
 }
 
+/// `encode_linear_pair` for `cols` columns: x is F32 `[a.input, cols]`, y_a
+/// `[a.output, cols]` and y_b `[b.output, cols]`, each column contiguous.
+/// Q8_0 pairs `metal::encode_dense_pair_skinny_q8_0` supports take it for
+/// 2..=8 columns per dispatch (each weight read once; F32 rounding differs
+/// from `encode_linear_pair`); every other pair, a single column, or an odd
+/// weight offset encodes each column with `encode_linear_pair` (bitwise).
+fn encode_linear_pair_columns(
+    enc: &KernelEncoder,
+    (a, y_a): (&Linear<'_>, &MetalTensor),
+    (b, y_b): (&Linear<'_>, &MetalTensor),
+    x: &MetalTensor,
+    cols: usize,
+) -> std::result::Result<(), metal::MetalError> {
+    let n_in = a.input;
+    if cols == 0
+        || b.input != n_in
+        || [x, y_a, y_b].iter().any(|t| t.dtype != GgmlType::F32)
+        || n_in.checked_mul(cols).map(|n| n as u64) != Some(x.n_elements())
+        || a.output.checked_mul(cols).map(|n| n as u64) != Some(y_a.n_elements())
+        || b.output.checked_mul(cols).map(|n| n as u64) != Some(y_b.n_elements())
+    {
+        return Err(metal::MetalError::BadShape {
+            kernel: "v41_linear_pair_columns",
+            detail: "nonempty matching F32 column extents required".into(),
+        });
+    }
+    let (n_a, n_b) = (a.output, b.output);
+    let mut first = 0;
+    while first < cols {
+        let n = (cols - first).min(metal::DENSE_SKINNY_MAX_COLS);
+        let view = |t: &MetalTensor, height: usize| {
+            t.view_bytes((first * height * 4) as u64, vec![height as u64, n as u64])
+        };
+        let (xs, yas, ybs) = (view(x, n_in), view(y_a, n_a), view(y_b, n_b));
+        let skinny = n >= 2
+            && metal::dense_pair_skinny_supported(
+                a.tensor.dtype,
+                b.tensor.dtype,
+                n_in,
+                n_a,
+                n_b,
+                n,
+            )
+            && [&a.tensor, &b.tensor]
+                .iter()
+                .all(|t| t.offset.is_multiple_of(2));
+        if skinny {
+            metal::encode_dense_pair_skinny_q8_0(
+                a.ctx,
+                enc,
+                &a.tensor.view_bytes(0, vec![n_in as u64, n_a as u64]),
+                &b.tensor.view_bytes(0, vec![n_in as u64, n_b as u64]),
+                &xs,
+                &yas,
+                &ybs,
+                (n_in, n_a, n_b),
+                n,
+            )?;
+        } else {
+            for c in 0..n {
+                let col = |t: &MetalTensor, height: usize| {
+                    t.view_bytes((c * height * 4) as u64, vec![height as u64])
+                };
+                encode_linear_pair(
+                    enc,
+                    (a, &col(&yas, n_a)),
+                    (b, &col(&ybs, n_b)),
+                    &col(&xs, n_in),
+                )?;
+            }
+        }
+        first += n;
+    }
+    Ok(())
+}
+
 impl Linear<'_> {
     fn encode(
         &self,

@@ -220,5 +220,35 @@ pub(super) fn encode_linear(
     encode_scatter(ctx, enc, y, outputs)
 }
 
+/// `encode_linear_pair` of every sequence b (`inputs[b]` -> `outputs_a[b]`,
+/// `outputs_b[b]`) as one column batch: gather into `x`,
+/// `encode_linear_pair_columns` into `y_a` / `y_b`, scatter both. Bitwise
+/// per-sequence except where the skinny Q8_0 pair kernel runs (F32
+/// rounding).
+pub(super) fn encode_linear_pair(
+    ctx: &MetalContext,
+    enc: &KernelEncoder,
+    (a, outputs_a): (&Linear<'_>, &[&MetalTensor]),
+    (b, outputs_b): (&Linear<'_>, &[&MetalTensor]),
+    inputs: &[&MetalTensor],
+    (x, y_a, y_b): (&MetalTensor, &MetalTensor, &MetalTensor),
+) -> std::result::Result<(), metal::MetalError> {
+    if inputs.len() != outputs_a.len() || inputs.len() != outputs_b.len() {
+        return Err(metal::MetalError::BadShape {
+            kernel: "v41_columns",
+            detail: format!(
+                "{} inputs for {} and {} outputs",
+                inputs.len(),
+                outputs_a.len(),
+                outputs_b.len()
+            ),
+        });
+    }
+    encode_gather(ctx, enc, inputs, x)?;
+    super::encode_linear_pair_columns(enc, (a, y_a), (b, y_b), x, inputs.len())?;
+    encode_scatter(ctx, enc, y_a, outputs_a)?;
+    encode_scatter(ctx, enc, y_b, outputs_b)
+}
+
 #[cfg(test)]
 mod tests;

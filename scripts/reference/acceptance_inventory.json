@@ -1828,6 +1828,13 @@
   },
   {
     "target": "lib",
+    "name": "deepseek_v41::forward::columns::tests::batched_f32_pair_is_bitwise_per_sequence",
+    "class": "gpu",
+    "ignored": false,
+    "reason": "Metal context, allocation or dispatch witness; parent GPU lane only."
+  },
+  {
+    "target": "lib",
     "name": "deepseek_v41::forward::columns::tests::batched_f32_projection_is_bitwise_per_sequence",
     "class": "gpu",
     "ignored": false,
@@ -1836,6 +1843,13 @@
   {
     "target": "lib",
     "name": "deepseek_v41::forward::columns::tests::batched_q5_k_attention_projections_match_per_sequence_to_f32_rounding",
+    "class": "gpu",
+    "ignored": false,
+    "reason": "Metal context, allocation or dispatch witness; parent GPU lane only."
+  },
+  {
+    "target": "lib",
+    "name": "deepseek_v41::forward::columns::tests::batched_q8_0_rank_pair_matches_per_sequence_to_f32_rounding",
     "class": "gpu",
     "ignored": false,
     "reason": "Metal context, allocation or dispatch witness; parent GPU lane only."

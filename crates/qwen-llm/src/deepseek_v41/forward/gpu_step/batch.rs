@@ -2,8 +2,9 @@
 //! buffers, encoded layer-major. Each sequence keeps its own workspace and
 //! runs the dispatches of a single `run`, except where a batched kernel
 //! reads a weight once for every sequence: the FFN shared expert
-//! (`BATCH_SHARED_ENV`) and the attention's q_b and output_b projections
-//! (`BATCH_ATTN_ENV`). Without such kernels batching only saves commits: on
+//! (`BATCH_SHARED_ENV`), the attention's dense projections (q_b and output_b:
+//! `BATCH_ATTN_ENV`; output_a: `BATCH_OUTPUT_A_ENV`; the query-rank/KV-latent
+//! pair: `BATCH_QKV_ENV`) and the head (`BATCH_HEAD_ENV`). Without such kernels batching only saves commits: on
 //! M5 Ultra (GSQ, 512-token prefixes, B=1-8) per-sequence encoders in shared
 //! command buffers and per-sequence command queues both measured
 //! 1.00-1.03x of serial steps with unchanged GPU time, because the decode
@@ -67,24 +68,104 @@ fn batch_attn_enabled() -> bool {
     *ENABLED.get_or_init(|| std::env::var(BATCH_ATTN_ENV).as_deref() != Ok("0"))
 }
 
-/// Column scratch of the batched attention projections: query rank and
-/// query (q_b), output rank and output (output_b), `[n, B]` each. About
-/// 185 KiB per sequence at GSQ geometry.
+/// `0` keeps each sequence's attention output_a (8 groups of heads x
+/// head dim / 8 -> output rank) per sequence inside the staged attention
+/// (`BATCH_ATTN_ENV`); otherwise one grouped dispatch projects every
+/// sequence's groups (a Q5_K bank through the grouped skinny kernel, F32
+/// rounding; other storage column by column, bitwise) straight into
+/// output_b's input columns. M5 Ultra, GSQ, 512-token prefixes: saves
+/// 1.6/5.3 ms per batched round at B = 4/8. A/B lever.
+const BATCH_OUTPUT_A_ENV: &str = "QWEN_V41_BATCH_OUTPUT_A";
+
+/// `0` keeps each sequence's query-rank/KV-latent projection pair per
+/// sequence inside the staged attention (`BATCH_ATTN_ENV`); otherwise the
+/// pair runs once over every sequence's attention input (a Q8_0 pair
+/// through the skinny pair kernel, F32 rounding; other storage column by
+/// column, bitwise) before each sequence's rank norms. M5 Ultra, GSQ,
+/// 512-token prefixes: saves 0.5/2.0 ms per batched round at B = 4/8. A/B
+/// lever.
+const BATCH_QKV_ENV: &str = "QWEN_V41_BATCH_QKV";
+
+/// `0` keeps each sequence's output head (hidden -> vocabulary) per
+/// sequence; otherwise batches of two or more sequences project their final
+/// norms once as columns (Q5_K through the skinny kernel, F32 rounding;
+/// other storage column by column, bitwise). M5 Ultra, GSQ, 512-token
+/// prefixes: saves 0.9/2.5 ms per batched round at B = 4/8. With every
+/// batched lever on, B = 2/3/4/8 rounds run 1.16/1.30/1.38/1.55x faster
+/// than serial steps. A/B lever.
+const BATCH_HEAD_ENV: &str = "QWEN_V41_BATCH_HEAD";
+
+#[cfg(test)]
+thread_local! {
+    pub(in super::super) static BATCH_OUTPUT_A_OVERRIDE: std::cell::Cell<Option<bool>> =
+        const { std::cell::Cell::new(None) };
+    pub(in super::super) static BATCH_QKV_OVERRIDE: std::cell::Cell<Option<bool>> =
+        const { std::cell::Cell::new(None) };
+    pub(in super::super) static BATCH_HEAD_OVERRIDE: std::cell::Cell<Option<bool>> =
+        const { std::cell::Cell::new(None) };
+}
+
+fn batch_output_a_enabled() -> bool {
+    #[cfg(test)]
+    if let Some(enabled) = BATCH_OUTPUT_A_OVERRIDE.with(|o| o.get()) {
+        return enabled;
+    }
+    static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ENABLED.get_or_init(|| std::env::var(BATCH_OUTPUT_A_ENV).as_deref() != Ok("0"))
+}
+
+fn batch_qkv_enabled() -> bool {
+    #[cfg(test)]
+    if let Some(enabled) = BATCH_QKV_OVERRIDE.with(|o| o.get()) {
+        return enabled;
+    }
+    static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ENABLED.get_or_init(|| std::env::var(BATCH_QKV_ENV).as_deref() != Ok("0"))
+}
+
+fn batch_head_enabled() -> bool {
+    #[cfg(test)]
+    if let Some(enabled) = BATCH_HEAD_OVERRIDE.with(|o| o.get()) {
+        return enabled;
+    }
+    static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ENABLED.get_or_init(|| std::env::var(BATCH_HEAD_ENV).as_deref() != Ok("0"))
+}
+
+/// Column scratch of the batched attention projections, `[n, B]` each:
+/// attention input, query rank and KV latent (the rank pair), query (q_b),
+/// attended heads (output_a), output rank (output_a's output, output_b's
+/// input) and output (output_b). About 315 KiB per sequence at GSQ
+/// geometry. `qkv` and `output_a` record whether those projections are
+/// batched too.
 struct AttentionColumns {
+    input: MetalTensor,
     rank: MetalTensor,
+    latent: MetalTensor,
     query: MetalTensor,
+    attended: MetalTensor,
     low: MetalTensor,
     output: MetalTensor,
+    qkv: bool,
+    output_a: bool,
+}
+
+/// Column scratch of the batched head: final norms and logits, `[n, B]`
+/// each (about 525 KiB per sequence at GSQ geometry).
+struct HeadColumns {
+    normalized: MetalTensor,
+    logits: MetalTensor,
 }
 
 /// Per-call scratch of a batched step, allocated (priced and admitted)
 /// before any state is touched, for at least two sequences: the shared
 /// expert's column scratch when `batch_shared_enabled()`, the attention's
-/// when `batch_attn_enabled()`.
+/// when `batch_attn_enabled()`, the head's when `batch_head_enabled()`.
 pub(in super::super) struct BatchScratch {
     sequences: usize,
     shared: Option<ffn_gpu::SharedColumns>,
     attention: Option<AttentionColumns>,
+    head: Option<HeadColumns>,
 }
 
 impl BatchScratch {
@@ -98,7 +179,10 @@ impl BatchScratch {
         };
         let attention = if batched && batch_attn_enabled() {
             let heights = [
+                c.hidden,
                 c.query_rank,
+                c.head_dim,
+                c.heads * c.head_dim,
                 c.heads * c.head_dim,
                 c.groups * c.output_rank,
                 c.hidden,
@@ -106,12 +190,33 @@ impl BatchScratch {
             let mut regions =
                 columns::allocate(model.ctx, &heights, sequences, "attention column scratch")?
                     .into_iter();
-            let mut next = || regions.next().expect("four regions");
+            let mut next = || regions.next().expect("seven regions");
             Some(AttentionColumns {
+                input: next(),
                 rank: next(),
+                latent: next(),
                 query: next(),
+                attended: next(),
                 low: next(),
                 output: next(),
+                qkv: batch_qkv_enabled(),
+                output_a: batch_output_a_enabled(),
+            })
+        } else {
+            None
+        };
+        let head = if batched && batch_head_enabled() {
+            let mut regions = columns::allocate(
+                model.ctx,
+                &[c.hidden, model.head.output],
+                sequences,
+                "head column scratch",
+            )?
+            .into_iter();
+            let mut next = || regions.next().expect("two regions");
+            Some(HeadColumns {
+                normalized: next(),
+                logits: next(),
             })
         } else {
             None
@@ -120,6 +225,7 @@ impl BatchScratch {
             sequences,
             shared,
             attention,
+            head,
         })
     }
 }
@@ -171,6 +277,15 @@ impl Workspace {
     }
 
     fn encode_head(&self, model: &Forward<'_>, stages: &mut StageEncoder<'_>) -> Result<()> {
+        self.encode_head_input(model, stages)?;
+        model
+            .head
+            .encode(stages.enc(), &self.normalized, &self.logits)
+            .map_err(|e| e.to_string())
+    }
+
+    /// The final HC collapse and norm: the head's input (`normalized`).
+    fn encode_head_input(&self, model: &Forward<'_>, stages: &mut StageEncoder<'_>) -> Result<()> {
         let ctx = model.ctx;
         let c = &model.config;
         metal::encode_mhc4_collapse(
@@ -192,21 +307,20 @@ impl Workspace {
             c.hidden,
             c.norm_eps,
         )
-        .map_err(|e| e.to_string())?;
-        model
-            .head
-            .encode(stages.enc(), &self.normalized, &self.logits)
-            .map_err(|e| e.to_string())
+        .map_err(|e| e.to_string())
     }
 }
 
-/// Layer `id` of every sequence's attention, with q_b and output_b projected
+/// Layer `id` of every sequence's attention, with its dense projections run
 /// once for all of them: per sequence the Engram gate, HC pre and the
-/// attention front (through the rank norms); q_b over the gathered query
-/// ranks; per sequence the attention middle (query RoPE through output_a);
-/// output_b over the gathered output ranks; per sequence the attention
-/// finish (finite check, cursor advance) and HC post. With non-skinny
-/// weights each sequence's values are bitwise `layer_until_ffn`'s.
+/// attention checks; the rank pair over the gathered inputs (or, without
+/// `qkv`, each sequence's own front); per sequence the rank norms; q_b over
+/// the gathered query ranks; per sequence the attention middle (query RoPE
+/// through the attended RoPE); output_a over the gathered attended heads
+/// into output_b's input columns (or, without `output_a`, each sequence's
+/// own output_a and a gather); output_b; per sequence the attention finish
+/// (finite check, cursor advance) and HC post. With non-skinny weights each
+/// sequence's values are bitwise `layer_until_ffn`'s.
 fn encode_attention_columns(
     model: &Forward<'_>,
     stages: &mut StageEncoder<'_>,
@@ -217,50 +331,100 @@ fn encode_attention_columns(
 ) -> Result<()> {
     let ctx = model.ctx;
     let w = &model.layers[id].attention;
+    let cols = workspaces.len();
     let err = |e: metal::MetalError| e.to_string();
     for (ws, input) in workspaces.iter_mut().zip(inputs) {
         ws.encode_engram_gate(model, stages, id)?;
         ws.attention_input(model, stages, id)?;
         let ws = &mut **ws;
-        ws.attention
-            .encode_front(ctx, stages.enc(), id, input.position, w, &ws.normalized)?;
+        if scratch.qkv {
+            ws.attention
+                .encode_checks(stages.enc(), id, input.position, w, &ws.normalized)?;
+        } else {
+            ws.attention
+                .encode_front(ctx, stages.enc(), id, input.position, w, &ws.normalized)?;
+        }
     }
-    let io: Vec<[&MetalTensor; 4]> = workspaces
-        .iter()
-        .map(|ws| ws.attention.staged_io())
-        .collect();
-    let slot = |k: usize| io.iter().map(|io| io[k]).collect::<Vec<_>>();
-    metal::dispatch_profile_label("attn_qkv", Some(id));
-    columns::encode_linear(
-        ctx,
-        stages.enc(),
-        &w.query_b,
-        &slot(0),
-        &slot(1),
-        (&scratch.rank, &scratch.query),
-    )
-    .map_err(err)?;
-    drop(io);
+    if scratch.qkv {
+        {
+            let normalized: Vec<_> = workspaces.iter().map(|ws| &ws.normalized).collect();
+            let io: Vec<_> = workspaces
+                .iter()
+                .map(|ws| ws.attention.staged_io())
+                .collect();
+            let ranks: Vec<_> = io.iter().map(|io| io.query_rank).collect();
+            let latents: Vec<_> = io.iter().map(|io| io.latent).collect();
+            metal::dispatch_profile_label("attn_qkv", Some(id));
+            columns::encode_linear_pair(
+                ctx,
+                stages.enc(),
+                (&w.query_a, &ranks),
+                (&w.kv, &latents),
+                &normalized,
+                (&scratch.input, &scratch.rank, &scratch.latent),
+            )
+            .map_err(err)?;
+        }
+        for (ws, input) in workspaces.iter_mut().zip(inputs) {
+            ws.attention
+                .encode_rank_norms(ctx, stages.enc(), id, input.position, w)?;
+        }
+    }
+    {
+        let io: Vec<_> = workspaces
+            .iter()
+            .map(|ws| ws.attention.staged_io())
+            .collect();
+        let ranks: Vec<_> = io.iter().map(|io| io.query_rank).collect();
+        let queries: Vec<_> = io.iter().map(|io| io.query).collect();
+        metal::dispatch_profile_label("attn_qkv", Some(id));
+        columns::encode_linear(
+            ctx,
+            stages.enc(),
+            &w.query_b,
+            &ranks,
+            &queries,
+            (&scratch.rank, &scratch.query),
+        )
+        .map_err(err)?;
+    }
     for (ws, input) in workspaces.iter_mut().zip(inputs) {
         let ws = &mut **ws;
         ws.attention
             .encode_middle(ctx, stages.enc(), id, input.position, w, &ws.normalized)?;
+        if !scratch.output_a {
+            ws.attention
+                .encode_output_a(ctx, stages.enc(), id, input.position, w)?;
+        }
     }
-    let io: Vec<[&MetalTensor; 4]> = workspaces
-        .iter()
-        .map(|ws| ws.attention.staged_io())
-        .collect();
-    let slot = |k: usize| io.iter().map(|io| io[k]).collect::<Vec<_>>();
-    columns::encode_linear(
-        ctx,
-        stages.enc(),
-        &w.output_b,
-        &slot(2),
-        &slot(3),
-        (&scratch.low, &scratch.output),
-    )
-    .map_err(err)?;
-    drop(io);
+    {
+        let io: Vec<_> = workspaces
+            .iter()
+            .map(|ws| ws.attention.staged_io())
+            .collect();
+        metal::dispatch_profile_label("attn_output", Some(id));
+        if scratch.output_a {
+            // output_a writes output_b's input columns directly.
+            let attended: Vec<_> = io.iter().map(|io| io.attended).collect();
+            columns::encode_gather(ctx, stages.enc(), &attended, &scratch.attended).map_err(err)?;
+            workspaces[0].attention.encode_output_a_columns(
+                ctx,
+                stages.enc(),
+                w,
+                &scratch.attended,
+                &scratch.low,
+                cols,
+            )?;
+        } else {
+            let lows: Vec<_> = io.iter().map(|io| io.low).collect();
+            columns::encode_gather(ctx, stages.enc(), &lows, &scratch.low).map_err(err)?;
+        }
+        let outputs: Vec<_> = io.iter().map(|io| io.output).collect();
+        w.output_b
+            .encode_columns(stages.enc(), &scratch.low, &scratch.output, cols)
+            .map_err(err)?;
+        columns::encode_scatter(ctx, stages.enc(), &scratch.output, &outputs).map_err(err)?;
+    }
     for (ws, input) in workspaces.iter_mut().zip(inputs) {
         let output = ws
             .attention
@@ -269,6 +433,33 @@ fn encode_attention_columns(
         ws.attention_output(model, stages, id, input.position, &output, None)?;
     }
     Ok(())
+}
+
+/// Every sequence's head: per sequence the final collapse and norm, then
+/// the head once over the gathered norms, scattered to each sequence's
+/// logits.
+fn encode_head_columns(
+    model: &Forward<'_>,
+    stages: &mut StageEncoder<'_>,
+    workspaces: &[&mut Workspace],
+    scratch: &HeadColumns,
+) -> Result<()> {
+    let err = |e: metal::MetalError| e.to_string();
+    for ws in workspaces {
+        ws.encode_head_input(model, stages)?;
+    }
+    let normalized: Vec<_> = workspaces.iter().map(|ws| &ws.normalized).collect();
+    let logits: Vec<_> = workspaces.iter().map(|ws| &ws.logits).collect();
+    metal::dispatch_profile_label("head", None);
+    columns::encode_linear(
+        model.ctx,
+        stages.enc(),
+        &model.head,
+        &normalized,
+        &logits,
+        (&scratch.normalized, &scratch.logits),
+    )
+    .map_err(err)
 }
 
 /// Segments follow `submit_split` (or one command when split submission is
@@ -289,7 +480,9 @@ pub(in super::super) fn run_batch(
         !workspaces.is_empty()
             && workspaces.len() == inputs.len()
             && (scratch.sequences == workspaces.len()
-                || scratch.shared.is_none() && scratch.attention.is_none()),
+                || scratch.shared.is_none()
+                    && scratch.attention.is_none()
+                    && scratch.head.is_none()),
         "batched decode shape",
     )?;
     // Staged attention needs every sequence on plain fused-chain decode;
@@ -419,8 +612,15 @@ pub(in super::super) fn run_batch(
                     }
                 }
                 if head {
-                    for ws in workspaces.iter() {
-                        ws.encode_head(model, &mut stages)?;
+                    match &scratch.head {
+                        Some(columns) => {
+                            encode_head_columns(model, &mut stages, workspaces, columns)?
+                        }
+                        None => {
+                            for ws in workspaces.iter() {
+                                ws.encode_head(model, &mut stages)?;
+                            }
+                        }
                     }
                 }
                 Ok(())

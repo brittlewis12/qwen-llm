@@ -456,25 +456,61 @@ fn capacity_memory_and_modes_are_explicit() {
 struct BatchLevers {
     shared: bool,
     attention: bool,
+    qkv: bool,
+    output_a: bool,
+    head: bool,
     ffn_split: bool,
     per_column_copy: bool,
     fused_rank_norms: bool,
 }
 
-/// The toy's F32 shared and attention weights take the batched projections'
-/// bitwise column fallback, so batched steps equal separate steps bitwise
-/// with the batched shared expert and the staged attention (q_b, output_b)
-/// on or off, one or split FFN encoders, one-dispatch or per-column column
-/// copies, and the unfused query/KV chain (which keeps per-sequence
-/// attention). The column copies are counted, so the batched paths ran.
+impl BatchLevers {
+    /// Set (or, with `None`, clear) every lever's thread-local override.
+    fn apply(levers: Option<Self>) {
+        use super::super::attention_gpu::FUSED_RANK_NORMS_OVERRIDE;
+        use super::super::columns::PER_COLUMN_COPY_OVERRIDE;
+        use batch::{
+            BATCH_ATTN_OVERRIDE, BATCH_HEAD_OVERRIDE, BATCH_OUTPUT_A_OVERRIDE, BATCH_QKV_OVERRIDE,
+            BATCH_SHARED_OVERRIDE,
+        };
+        let l = levers;
+        BATCH_SHARED_OVERRIDE.with(|o| o.set(l.map(|l| l.shared)));
+        BATCH_ATTN_OVERRIDE.with(|o| o.set(l.map(|l| l.attention)));
+        BATCH_QKV_OVERRIDE.with(|o| o.set(l.map(|l| l.qkv)));
+        BATCH_OUTPUT_A_OVERRIDE.with(|o| o.set(l.map(|l| l.output_a)));
+        BATCH_HEAD_OVERRIDE.with(|o| o.set(l.map(|l| l.head)));
+        FFN_SPLIT_OVERRIDE.with(|o| o.set(l.map(|l| l.ffn_split)));
+        PER_COLUMN_COPY_OVERRIDE.with(|o| o.set(l.map(|l| l.per_column_copy)));
+        FUSED_RANK_NORMS_OVERRIDE.with(|o| o.set(l.map(|l| l.fused_rank_norms)));
+    }
+
+    /// Column gathers and scatters of one step over `layers` layers: per
+    /// layer one each for the shared expert, two each for q_b and output_b
+    /// (or output_a and output_b), three for the rank pair (one gather, two
+    /// scatters); one each for the head.
+    fn transfers(self, layers: usize) -> usize {
+        let staged = self.attention && self.fused_rank_norms;
+        let per_layer =
+            2 * self.shared as usize + 4 * staged as usize + 3 * (staged && self.qkv) as usize;
+        per_layer * layers + 2 * self.head as usize
+    }
+}
+
+/// The toy's F32 weights take every batched projection's bitwise column
+/// fallback, so batched steps equal separate steps bitwise with the batched
+/// shared expert, the staged attention (q_b, output_b), the batched rank
+/// pair, output_a and head each on or off, one or split FFN encoders,
+/// one-dispatch or per-column column copies, and the unfused query/KV chain
+/// (which keeps per-sequence attention). The column copies are counted, so
+/// the batched paths ran.
 #[test]
 fn batched_steps_match_separate_steps_bitwise() {
-    use super::super::attention_gpu::FUSED_RANK_NORMS_OVERRIDE;
-    use super::super::columns::PER_COLUMN_COPY_OVERRIDE;
-    use batch::{BATCH_ATTN_OVERRIDE, BATCH_SHARED_OVERRIDE};
     let on = BatchLevers {
         shared: true,
         attention: true,
+        qkv: true,
+        output_a: true,
+        head: true,
         ffn_split: true,
         per_column_copy: false,
         fused_rank_norms: true,
@@ -506,18 +542,24 @@ fn batched_steps_match_separate_steps_bitwise() {
             fused_rank_norms: false,
             ..on
         },
+        BatchLevers { qkv: false, ..on },
+        BatchLevers {
+            output_a: false,
+            ..on
+        },
+        BatchLevers { head: false, ..on },
+        BatchLevers {
+            shared: false,
+            attention: false,
+            qkv: false,
+            output_a: false,
+            head: false,
+            ..on
+        },
     ] {
-        BATCH_SHARED_OVERRIDE.with(|o| o.set(Some(levers.shared)));
-        BATCH_ATTN_OVERRIDE.with(|o| o.set(Some(levers.attention)));
-        FFN_SPLIT_OVERRIDE.with(|o| o.set(Some(levers.ffn_split)));
-        PER_COLUMN_COPY_OVERRIDE.with(|o| o.set(Some(levers.per_column_copy)));
-        FUSED_RANK_NORMS_OVERRIDE.with(|o| o.set(Some(levers.fused_rank_norms)));
+        BatchLevers::apply(Some(levers));
         batched_steps_case(levers);
-        BATCH_SHARED_OVERRIDE.with(|o| o.set(None));
-        BATCH_ATTN_OVERRIDE.with(|o| o.set(None));
-        FFN_SPLIT_OVERRIDE.with(|o| o.set(None));
-        PER_COLUMN_COPY_OVERRIDE.with(|o| o.set(None));
-        FUSED_RANK_NORMS_OVERRIDE.with(|o| o.set(None));
+        BatchLevers::apply(None);
     }
 }
 
@@ -536,10 +578,6 @@ fn batched_steps_case(levers: BatchLevers) {
         "kernel_deepseek_v41_gather_columns",
         "kernel_deepseek_v41_scatter_columns",
     ];
-    // Gathers and scatters per layer: one each for the shared expert, two
-    // each for the staged attention (q_b and output_b).
-    let transfers =
-        2 * levers.shared as usize + 4 * (levers.attention && levers.fused_rank_norms) as usize;
     for split in [false, true] {
         SPLIT_SUBMIT_OVERRIDE.with(|o| o.set(Some(split)));
         let new = || {
@@ -565,11 +603,11 @@ fn batched_steps_case(levers: BatchLevers) {
             metal::dispatch_census_begin();
             let logits = model.step_batch(&mut states, &tokens, None).unwrap();
             let batch = metal::dispatch_census_take();
-            let layers = model.layers.len();
+            let transfers = levers.transfers(model.layers.len());
             let (copies, column_copies) = if levers.per_column_copy {
-                (3 * transfers * layers, 0)
+                (3 * transfers, 0)
             } else {
-                (0, transfers * layers)
+                (0, transfers)
             };
             assert_eq!(
                 count(&batch, &copy),
@@ -656,8 +694,40 @@ fn staged_attention_decode_refuses_out_of_order_stages() {
         .encode_front(&ctx, &enc, 1, 0, w, &input)
         .unwrap_err();
     assert!(error.contains("staged"), "{error}");
+    // output_a belongs after the middle; the finish still follows.
+    attention.encode_output_a(&ctx, &enc, 0, 0, w).unwrap();
     attention.encode_finish(&ctx, &enc, 0, 0).unwrap();
     assert!(attention.staged_decode_supported());
+    order(attention.encode_output_a(&ctx, &enc, 1, 0, w).unwrap_err());
+    // The checks-only front: rank norms are due before the middle, and only
+    // once; nothing else runs until then.
+    order(
+        attention
+            .encode_rank_norms(&ctx, &enc, 1, 0, w)
+            .unwrap_err(),
+    );
+    attention.encode_checks(&enc, 1, 0, w, &input).unwrap();
+    order(
+        attention
+            .encode_middle(&ctx, &enc, 1, 0, w, &input)
+            .unwrap_err(),
+    );
+    order(attention.encode_output_a(&ctx, &enc, 1, 0, w).unwrap_err());
+    let error = attention.encode_checks(&enc, 1, 0, w, &input).unwrap_err();
+    assert!(error.contains("staged"), "{error}");
+    attention.encode_rank_norms(&ctx, &enc, 1, 0, w).unwrap();
+    order(
+        attention
+            .encode_rank_norms(&ctx, &enc, 1, 0, w)
+            .unwrap_err(),
+    );
+    attention
+        .encode_middle(&ctx, &enc, 1, 0, w, &input)
+        .unwrap();
+    attention.encode_finish(&ctx, &enc, 1, 0).unwrap();
+    // Out of schedule order: the checks refuse layer 1 again.
+    let error = attention.encode_checks(&enc, 1, 0, w, &input).unwrap_err();
+    assert!(error.contains("order/capacity"), "{error}");
     enc.end();
 }
 

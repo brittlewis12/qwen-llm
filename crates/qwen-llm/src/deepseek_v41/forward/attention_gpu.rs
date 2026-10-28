@@ -91,9 +91,10 @@ pub(super) struct Workspace {
     next_position: usize,
     batch: Option<BatchCursor>,
     ced: Option<ced::Cursor>,
-    /// (layer, position, middle encoded) of a decode step encoded in stages
-    /// (`encode_front` .. `encode_finish`) whose finish is still due.
-    staged: Option<(usize, usize, bool)>,
+    /// (layer, position, last stage) of a decode step encoded in stages
+    /// (`encode_checks` or `encode_front` .. `encode_finish`) whose finish
+    /// is still due.
+    staged: Option<(usize, usize, Stage)>,
     constants: Vec<Constants>,
     raw: MetalTensor,
     owners: Vec<OwnerCache>,
@@ -122,6 +123,31 @@ pub(super) struct Workspace {
     /// output_a group GEMVs dispatch once through the native expert kernel.
     group_ids: MetalTensor,
     ready: MetalTensor,
+}
+
+/// Last completed stage of a staged decode step (`Workspace::encode_front`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Stage {
+    /// Checks passed; the caller encodes the rank pair.
+    Checked,
+    /// Rank norms done; the caller encodes q_b.
+    Front,
+    /// Attended heads ready; output_a (own or the caller's), the caller's
+    /// output_b, then the finish.
+    Middle,
+}
+
+/// Bindings of a staged decode step's caller-encoded projections: the rank
+/// pair writes `query_rank` and `latent`, q_b reads `query_rank` and writes
+/// `query`, output_a reads `attended` and writes `low`, output_b reads `low`
+/// and writes `output`.
+pub(super) struct StagedIo<'a> {
+    pub(super) query_rank: &'a MetalTensor,
+    pub(super) latent: &'a MetalTensor,
+    pub(super) query: &'a MetalTensor,
+    pub(super) attended: &'a MetalTensor,
+    pub(super) low: &'a MetalTensor,
+    pub(super) output: &'a MetalTensor,
 }
 
 #[cfg(test)]
@@ -2423,17 +2449,32 @@ impl Workspace {
         self.batch.is_none() && self.ced.is_none() && self.staged.is_none() && fused_rank_norms()
     }
 
-    /// `encode` in three stages, so a caller can project the query
-    /// up-projection (q_b) and output_b of several sequences at once:
-    /// `encode_front` (all checks, rank projections and norms; writes
-    /// `staged_io()[0]`, the query rank), then the caller's q_b into
-    /// `staged_io()[1]` (the query), `encode_middle` (query RoPE through
-    /// output_a; writes `staged_io()[2]`, the output rank), the caller's
-    /// output_b into `staged_io()[3]` (the output), and `encode_finish`
-    /// (finite check and the cursor advance). With `Linear::encode` for both
+    fn require_stage(&self, id: usize, position: usize, stage: Stage) -> Result<()> {
+        op::require(
+            self.staged == Some((id, position, stage)),
+            "staged decode order",
+        )
+    }
+
+    /// `encode` in stages, so a caller can encode the dense projections of
+    /// several sequences at once. Per sequence, in order:
+    /// - `encode_front` (all checks, then the rank pair and the rank norms;
+    ///   writes the query rank), or `encode_checks` (checks only), the
+    ///   caller's rank pair (input -> `StagedIo::query_rank` and `latent`)
+    ///   and `encode_rank_norms`;
+    /// - the caller's q_b (`query_rank` -> `query`);
+    /// - `encode_middle` (query RoPE through the attended RoPE; writes
+    ///   `attended`);
+    /// - `encode_output_a`, or the caller's output_a (`attended` -> `low`);
+    /// - the caller's output_b (`low` -> `output`);
+    /// - `encode_finish` (finite check and the cursor advance).
+    ///
+    /// With `encode_linear_pair` and `Linear::encode` for the caller's
     /// projections it is `encode`, dispatch for dispatch. Validation happens
-    /// in the front; the cursors move only in the finish, so an error at any
-    /// stage leaves them unadvanced (the caller poisons the sequence).
+    /// first; the cursors move only in the finish, so an error at any stage
+    /// leaves them unadvanced (the caller poisons the sequence). The stages
+    /// this workspace encodes refuse to run out of order; the caller's
+    /// projections are the caller's to order.
     pub(super) fn encode_front(
         &mut self,
         ctx: &MetalContext,
@@ -2458,7 +2499,42 @@ impl Workspace {
             GlobalKvMode::Ordinary,
         )?;
         op::require(!projected, "staged decode query projection")?;
-        self.staged = Some((id, position, false));
+        self.staged = Some((id, position, Stage::Front));
+        Ok(())
+    }
+
+    /// The checks of a staged decode step whose rank pair the caller
+    /// encodes (see `encode_front`). Encodes nothing.
+    pub(super) fn encode_checks(
+        &mut self,
+        enc: &KernelEncoder,
+        id: usize,
+        position: usize,
+        w: &Weights<'_>,
+        input: &MetalTensor,
+    ) -> Result<()> {
+        op::require(
+            self.staged_decode_supported(),
+            "staged decode needs plain fused-chain decode",
+        )?;
+        self.check_step(enc, id, position, w, input, GlobalKvMode::Ordinary)?;
+        self.staged = Some((id, position, Stage::Checked));
+        Ok(())
+    }
+
+    /// The rank norms after the caller's rank pair (see `encode_front`).
+    pub(super) fn encode_rank_norms(
+        &mut self,
+        ctx: &MetalContext,
+        enc: &KernelEncoder,
+        id: usize,
+        position: usize,
+        w: &Weights<'_>,
+    ) -> Result<()> {
+        self.require_stage(id, position, Stage::Checked)?;
+        metal::dispatch_profile_label("attn_qkv", Some(id));
+        self.encode_fused_rank_norms(ctx, enc, id, position, w)?;
+        self.staged = Some((id, position, Stage::Front));
         Ok(())
     }
 
@@ -2473,10 +2549,7 @@ impl Workspace {
         w: &Weights<'_>,
         input: &MetalTensor,
     ) -> Result<()> {
-        op::require(
-            self.staged == Some((id, position, false)),
-            "staged decode order",
-        )?;
+        self.require_stage(id, position, Stage::Front)?;
         self.encode_core(
             ctx,
             enc,
@@ -2489,8 +2562,22 @@ impl Workspace {
             true,
             GlobalKvMode::Ordinary,
         )?;
-        self.staged = Some((id, position, true));
+        self.staged = Some((id, position, Stage::Middle));
         Ok(())
+    }
+
+    /// This sequence's own output_a after the middle (see `encode_front`).
+    pub(super) fn encode_output_a(
+        &mut self,
+        ctx: &MetalContext,
+        enc: &KernelEncoder,
+        id: usize,
+        position: usize,
+        w: &Weights<'_>,
+    ) -> Result<()> {
+        self.require_stage(id, position, Stage::Middle)?;
+        metal::dispatch_profile_label("attn_output", Some(id));
+        self.encode_output_a_on(ctx, enc, w, &self.attended, &self.low)
     }
 
     /// The last stage of a staged decode step (see `encode_front`); the
@@ -2502,19 +2589,23 @@ impl Workspace {
         id: usize,
         position: usize,
     ) -> Result<&MetalTensor> {
-        op::require(
-            self.staged == Some((id, position, true)),
-            "staged decode order",
-        )?;
+        self.require_stage(id, position, Stage::Middle)?;
         self.staged = None;
         self.encode_close(ctx, enc, id, true)?;
         Ok(&self.output)
     }
 
     /// Bindings of the projections a staged decode step leaves to the
-    /// caller: [query rank, query, output rank, output].
-    pub(super) fn staged_io(&self) -> [&MetalTensor; 4] {
-        [&self.query_rank, &self.query, &self.low, &self.output]
+    /// caller.
+    pub(super) fn staged_io(&self) -> StagedIo<'_> {
+        StagedIo {
+            query_rank: &self.query_rank,
+            latent: &self.latent,
+            query: &self.query,
+            attended: &self.attended,
+            low: &self.low,
+            output: &self.output,
+        }
     }
 
     pub(super) fn begin_batch(&mut self, start: usize, rows: usize) -> Result<()> {
@@ -2880,10 +2971,77 @@ impl Workspace {
             ctx, enc, id, position, w, input, prepared, publish, select, mode,
         )?;
         if prepared.is_none() {
+            metal::dispatch_profile_label("attn_output", Some(id));
+            self.encode_output_a_on(ctx, enc, w, &self.attended, &self.low)?;
             linear(ctx, enc, &w.output_b, &self.low, &self.output)?;
         }
         self.encode_close(ctx, enc, id, prepared.is_none())?;
         Ok(&self.output)
+    }
+
+    /// Every check of a step, before anything is encoded: serial encoder,
+    /// order/capacity, global mode, weights and input.
+    fn check_step(
+        &self,
+        enc: &KernelEncoder,
+        id: usize,
+        position: usize,
+        w: &Weights<'_>,
+        input: &MetalTensor,
+        mode: GlobalKvMode,
+    ) -> Result<()> {
+        op::require(
+            !enc.is_concurrent(),
+            "GPU attention requires serial encoder",
+        )?;
+        let c = &self.config;
+        op::require(
+            self.active_batch().map_or(
+                id == self.next_layer && position == self.next_position,
+                |b| id == b.layer && position == b.start + b.row,
+            ) && position < self.capacity,
+            "GPU attention order/capacity",
+        )?;
+        self.validate_global_mode(id, position, mode)?;
+        validate_weights(c, id, w, &self.schedule)?;
+        valid_view(input, c.hidden)
+    }
+
+    /// Layer `id`'s raw KV ring row for `position`.
+    fn raw_row(&self, id: usize, position: usize) -> MetalTensor {
+        let c = &self.config;
+        self.raw
+            .view_subrange(
+                (id * c.window * c.head_dim) as u64,
+                vec![(c.window * c.head_dim) as u64],
+            )
+            .view_subrange(
+                (position % c.window * c.head_dim) as u64,
+                vec![c.head_dim as u64],
+            )
+    }
+
+    /// One dispatch for the query/KV rank norms, the KV RoPE and the ring
+    /// store, after both rank projections.
+    fn encode_fused_rank_norms(
+        &self,
+        ctx: &MetalContext,
+        enc: &KernelEncoder,
+        id: usize,
+        position: usize,
+        w: &Weights<'_>,
+    ) -> Result<()> {
+        rank_norms(
+            ctx,
+            enc,
+            &self.config,
+            &self.constants[id],
+            w.eps,
+            position,
+            &self.query_rank,
+            &self.latent,
+            &self.raw_row(id, position),
+        )
     }
 
     /// The step's checks, then (unless prepared) its query/KV projections.
@@ -2903,35 +3061,14 @@ impl Workspace {
         prepared: Option<(&Rows, usize)>,
         mode: GlobalKvMode,
     ) -> Result<bool> {
-        op::require(
-            !enc.is_concurrent(),
-            "GPU attention requires serial encoder",
-        )?;
+        self.check_step(enc, id, position, w, input, mode)?;
         let c = &self.config;
-        op::require(
-            self.active_batch().map_or(
-                id == self.next_layer && position == self.next_position,
-                |b| id == b.layer && position == b.start + b.row,
-            ) && position < self.capacity,
-            "GPU attention order/capacity",
-        )?;
-        self.validate_global_mode(id, position, mode)?;
-        validate_weights(c, id, w, &self.schedule)?;
-        valid_view(input, c.hidden)?;
         let constants = &self.constants[id];
-        let label = |name| metal::dispatch_profile_label(name, Some(id));
         if prepared.is_some() {
             return Ok(true);
         }
-        label("attn_qkv");
-        let raw = self.raw.view_subrange(
-            (id * c.window * c.head_dim) as u64,
-            vec![(c.window * c.head_dim) as u64],
-        );
-        let row = raw.view_subrange(
-            (position % c.window * c.head_dim) as u64,
-            vec![c.head_dim as u64],
-        );
+        metal::dispatch_profile_label("attn_qkv", Some(id));
+        let row = self.raw_row(id, position);
         if fused_rank_norms() {
             // Both rank projections, then one dispatch for both norms, the
             // KV RoPE and the ring store; the caller projects the query.
@@ -2942,17 +3079,7 @@ impl Workspace {
                 input,
             )
             .map_err(|e| e.to_string())?;
-            rank_norms(
-                ctx,
-                enc,
-                c,
-                constants,
-                w.eps,
-                position,
-                &self.query_rank,
-                &self.latent,
-                &row,
-            )?;
+            self.encode_fused_rank_norms(ctx, enc, id, position, w)?;
             return Ok(false);
         }
         linear(ctx, enc, &w.query_a, input, &self.query_rank)?;
@@ -3217,48 +3344,126 @@ impl Workspace {
                 position,
                 true,
             )?;
-            label("attn_output");
-            let group_width = c.heads / c.groups * c.head_dim;
-            match Self::output_a_bank(w, c) {
-                // One dispatch over all groups: slot g reads attended group g
-                // and writes low group g through the same native F32 GEMV the
-                // per-group path uses (experts = groups, ids = 0..groups).
-                Some(bank) => metal::encode_all_slots_down_native(
+        }
+        Ok(())
+    }
+
+    /// output_a of one sequence: its attended heads (`attended`, heads x
+    /// head_dim) into its output rank (`low`, groups x output_rank).
+    fn encode_output_a_on(
+        &self,
+        ctx: &MetalContext,
+        enc: &KernelEncoder,
+        w: &Weights<'_>,
+        attended: &MetalTensor,
+        low: &MetalTensor,
+    ) -> Result<()> {
+        let c = &self.config;
+        let group_width = c.heads / c.groups * c.head_dim;
+        match Self::output_a_bank(w, c) {
+            // One dispatch over all groups: slot g reads attended group g
+            // and writes low group g through the same native F32 GEMV the
+            // per-group path uses (experts = groups, ids = 0..groups).
+            Some(bank) => metal::encode_all_slots_down_native(
+                ctx,
+                enc,
+                &bank,
+                &attended.view_bytes(0, vec![group_width as u64, c.groups as u64]),
+                &self.group_ids,
+                &self.ready,
+                &low.view_bytes(0, vec![c.output_rank as u64, c.groups as u64]),
+                group_width,
+                c.output_rank,
+                c.groups,
+                c.groups,
+            )
+            .map_err(|e| e.to_string())?,
+            None => {
+                for (group, projection) in w.output_a.iter().enumerate() {
+                    linear(
+                        ctx,
+                        enc,
+                        projection,
+                        &attended
+                            .view_subrange((group * group_width) as u64, vec![group_width as u64]),
+                        &low.view_subrange(
+                            (group * c.output_rank) as u64,
+                            vec![c.output_rank as u64],
+                        ),
+                    )?;
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// output_a of `cols` sequences gathered as columns: `x` holds their
+    /// attended heads (`[heads * head_dim, cols]`), `y` receives their output
+    /// ranks (`[groups * output_rank, cols]`). A Q5_K output_a bank takes
+    /// `metal::encode_grouped_skinny_q5_k` (all groups, up to 8 columns per
+    /// dispatch, each weight read once; F32 rounding); otherwise each column
+    /// runs `encode_output_a_on` (bitwise per-sequence).
+    pub(super) fn encode_output_a_columns(
+        &self,
+        ctx: &MetalContext,
+        enc: &KernelEncoder,
+        w: &Weights<'_>,
+        x: &MetalTensor,
+        y: &MetalTensor,
+        cols: usize,
+    ) -> Result<()> {
+        let c = &self.config;
+        let (width_in, width_out) = (c.heads * c.head_dim, c.groups * c.output_rank);
+        op::require(
+            cols > 0
+                && [(x, width_in), (y, width_out)]
+                    .iter()
+                    .all(|(t, n)| t.dtype == GgmlType::F32 && t.n_elements() == (n * cols) as u64),
+            "output_a column extents",
+        )?;
+        let group_width = width_in / c.groups;
+        let bank = Self::output_a_bank(w, c).filter(|bank| {
+            metal::grouped_skinny_supported(bank.dtype, group_width, c.output_rank, c.groups, 2)
+                && bank.offset.is_multiple_of(16)
+                && x.offset.is_multiple_of(16)
+        });
+        let mut first = 0;
+        while first < cols {
+            let n = (cols - first).min(metal::DENSE_SKINNY_MAX_COLS);
+            let xs = x.view_bytes(
+                (first * width_in * 4) as u64,
+                vec![width_in as u64, n as u64],
+            );
+            let ys = y.view_bytes(
+                (first * width_out * 4) as u64,
+                vec![width_out as u64, n as u64],
+            );
+            match bank.as_ref().filter(|_| n >= 2) {
+                Some(bank) => metal::encode_grouped_skinny_q5_k(
                     ctx,
                     enc,
-                    &bank,
-                    &self
-                        .attended
-                        .view_bytes(0, vec![group_width as u64, c.groups as u64]),
-                    &self.group_ids,
-                    &self.ready,
-                    &self
-                        .low
-                        .view_bytes(0, vec![c.output_rank as u64, c.groups as u64]),
+                    bank,
+                    &xs,
+                    &ys,
                     group_width,
                     c.output_rank,
                     c.groups,
-                    c.groups,
+                    n,
                 )
                 .map_err(|e| e.to_string())?,
                 None => {
-                    for (group, projection) in w.output_a.iter().enumerate() {
-                        linear(
+                    for column in 0..n {
+                        self.encode_output_a_on(
                             ctx,
                             enc,
-                            projection,
-                            &self.attended.view_subrange(
-                                (group * group_width) as u64,
-                                vec![group_width as u64],
-                            ),
-                            &self.low.view_subrange(
-                                (group * c.output_rank) as u64,
-                                vec![c.output_rank as u64],
-                            ),
+                            w,
+                            &xs.view_bytes((column * width_in * 4) as u64, vec![width_in as u64]),
+                            &ys.view_bytes((column * width_out * 4) as u64, vec![width_out as u64]),
                         )?;
                     }
                 }
             }
+            first += n;
         }
         Ok(())
     }

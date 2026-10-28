@@ -1828,10 +1828,14 @@ pub(crate) fn load_library(device: &Device, bytes: &[u8]) -> Result<Library, Met
     // Alternative `newLibraryWithData:` wants `dispatch_data_t`, which
     // objc2-metal 0.3 doesn't expose ergonomically yet.
     use std::io::Write;
+    // The clock alone can repeat across threads (microsecond resolution), and
+    // a second loader would then delete the file the first is still loading.
+    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     let mut tmp = std::env::temp_dir();
     tmp.push(format!(
-        "qwen-kernels-{}-{}.metallib",
+        "qwen-kernels-{}-{}-{}.metallib",
         std::process::id(),
+        NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
         std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_nanos())

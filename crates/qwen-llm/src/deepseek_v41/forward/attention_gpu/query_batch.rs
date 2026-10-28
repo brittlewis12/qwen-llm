@@ -527,7 +527,7 @@ mod scratch_prefix_geometry_tests {
         assert_eq!(long_selection_tile(&c, 29128, 2, scratch, true), None);
         assert_eq!(long_selection_tile(&c, 29128, 2, scratch, false), Some(1));
         for publish in [false, true] {
-            let width = 32770;
+            let width = 32770usize;
             let row = width
                 + if publish {
                     width.div_ceil(c.candidate_block)

@@ -13,6 +13,7 @@ mod dense_skinny;
 mod half_rows;
 mod iq1;
 mod rows;
+mod tokens;
 
 fn production_lease() -> impl Sized {
     crate::metal::acquire_metal_benchmark_lease().expect("production GPU lease")

@@ -328,6 +328,181 @@ pub(super) fn encode_shared_columns(
     columns::encode_scatter(ctx, enc, &scratch.output, outputs)
 }
 
+/// Row scratch for the router and routed experts of `cols` sequences in one
+/// batched decode step, each row (sequence) contiguous: normalized inputs
+/// `[hidden, cols]`, router logits and scores `[experts, cols]`, expert IDs
+/// (I32) and routing weights `[topk, cols]`, route statuses (I32) `[cols]`,
+/// SwiGLU and weighted activations `[intermediate, topk * cols]` and down
+/// slots `[hidden, topk * cols]`. About 260 KiB per sequence at GSQ
+/// geometry.
+pub(super) struct RoutedColumns {
+    cols: usize,
+    input: MetalTensor,
+    logits: MetalTensor,
+    scores: MetalTensor,
+    weights: MetalTensor,
+    activation: MetalTensor,
+    weighted: MetalTensor,
+    slots: MetalTensor,
+    ids: MetalTensor,
+    status: MetalTensor,
+}
+
+impl RoutedColumns {
+    /// Prices and admits the scratch before allocating it.
+    pub(super) fn new(ctx: &MetalContext, c: &Config, cols: usize) -> Result<Self> {
+        validate(c)?;
+        let (h, e, k, i) = (c.hidden, c.experts, c.topk, c.intermediate);
+        let mut f = columns::allocate(
+            ctx,
+            &[h, e, e, k, i * k, i * k, h * k],
+            cols,
+            "routed column scratch",
+        )?
+        .into_iter();
+        let mut words =
+            columns::allocate_typed(ctx, &[k, 1], cols, GgmlType::I32, "routed column scratch")?
+                .into_iter();
+        let mut next = || f.next().expect("seven F32 regions");
+        Ok(Self {
+            cols,
+            input: next(),
+            logits: next(),
+            scores: next(),
+            weights: next(),
+            activation: next(),
+            weighted: next(),
+            slots: next(),
+            ids: words.next().expect("ids"),
+            status: words.next().expect("status"),
+        })
+    }
+}
+
+/// The router and routed experts of several sequences as one batch: gathers
+/// each sequence's normalized FFN input (`sequences[b].0`'s
+/// `shared_io().0`) into row b, projects the router (`Linear::encode_columns`;
+/// BF16 runs column by column), routes all rows in one dispatch, runs the
+/// fused gate/up, the routing weights (unless the combine folds them) and
+/// down once with rows = B (grid z = sequence), then scatters each
+/// sequence's routing weights, down slots and route status into its own
+/// workspace for `Workspace::encode_combine`. Every per-row kernel computes
+/// each (row, slot) with the one-row arithmetic, so each sequence's values
+/// are bitwise `Workspace::encode_routed_experts`'s. `sequences[b].1` is
+/// sequence b's FFN residual input (the combine's `x`); all must agree on
+/// whether the combine folds the routing weights.
+pub(super) fn encode_routed_columns(
+    ctx: &MetalContext,
+    enc: &KernelEncoder,
+    c: &Config,
+    layer: &Layer<'_>,
+    id: usize,
+    sequences: &[(&Workspace, &MetalTensor)],
+    scratch: &RoutedColumns,
+) -> std::result::Result<(), metal::MetalError> {
+    let rows = scratch.cols;
+    let bad = |detail: String| metal::MetalError::BadShape {
+        kernel: "v41_routed_columns",
+        detail,
+    };
+    let Some(&(first, first_x)) = sequences.first() else {
+        return Err(bad("no sequences".into()));
+    };
+    if sequences.len() != rows {
+        return Err(bad(format!(
+            "{} sequences for {rows} scratch rows",
+            sequences.len()
+        )));
+    }
+    let folded = first.folded_combine(c, layer, id, first_x);
+    if sequences
+        .iter()
+        .any(|(ws, x)| ws.folded_combine(c, layer, id, x) != folded)
+    {
+        return Err(bad("sequences disagree on the folded combine".into()));
+    }
+    let extents = composition_extents(c, rows)?;
+    let (h, e, k, i) = (c.hidden, c.experts, c.topk, c.intermediate);
+    let shape =
+        |t: &MetalTensor, dims: [usize; 2]| t.view_bytes(0, vec![dims[0] as u64, dims[1] as u64]);
+    let label = |name| metal::dispatch_profile_label(name, Some(id));
+    label("ffn_router");
+    let inputs: Vec<_> = sequences.iter().map(|(ws, _)| &ws.buffers[7]).collect();
+    columns::encode_gather(ctx, enc, &inputs, &scratch.input)?;
+    layer
+        .router
+        .encode_columns(enc, &scratch.input, &scratch.logits, rows)?;
+    label("ffn_routed");
+    encode_route_rows(
+        ctx,
+        enc,
+        c,
+        rows,
+        &scratch.logits,
+        &first.constants[id][3],
+        &scratch.scores,
+        &scratch.ids,
+        &scratch.weights,
+        &scratch.status,
+    )?;
+    let input = shape(&scratch.input, [h, rows]);
+    let ids = shape(&scratch.ids, [k, rows]);
+    let activation = shape(&scratch.activation, [i, k * rows]);
+    metal::encode_all_slots_gate_up_swiglu_native_fused_tokens(
+        ctx,
+        enc,
+        layer.banks[0],
+        layer.banks[1],
+        &input,
+        &ids,
+        &scratch.status,
+        &activation,
+        (h, i, e, k),
+        rows,
+        c.clamp,
+    )?;
+    if !folded {
+        enc.set_pipeline(&ctx.pipeline("kernel_deepseek_v41_weight")?);
+        enc.set_bytes(0, &extents.weighted);
+        enc.set_bytes(1, &(i as u32));
+        for (slot, tensor) in [
+            &scratch.activation,
+            &scratch.weights,
+            &scratch.weighted,
+            &scratch.status,
+        ]
+        .iter()
+        .enumerate()
+        {
+            enc.set_tensor(slot + 2, tensor);
+        }
+        enc.set_bytes(6, &(k as u32));
+        dispatch(enc, extents.weighted as usize, 256);
+    }
+    metal::encode_all_slots_down_native_tokens(
+        ctx,
+        enc,
+        layer.banks[2],
+        &if folded {
+            activation
+        } else {
+            shape(&scratch.weighted, [i, k * rows])
+        },
+        &ids,
+        &scratch.status,
+        &shape(&scratch.slots, [h, k * rows]),
+        (i, h, e, k),
+        rows,
+    )?;
+    let outputs = |index: usize| -> Vec<&MetalTensor> {
+        sequences.iter().map(|(ws, _)| &ws.buffers[index]).collect()
+    };
+    columns::encode_scatter(ctx, enc, &scratch.weights, &outputs(11))?;
+    columns::encode_scatter(ctx, enc, &scratch.slots, &outputs(15))?;
+    let statuses: Vec<_> = sequences.iter().map(|(ws, _)| &ws.statuses[id]).collect();
+    columns::encode_scatter(ctx, enc, &scratch.status, &statuses)
+}
+
 impl Workspace {
     pub(super) fn new(model: &Forward<'_>) -> std::result::Result<Self, StateError> {
         let c = &model.config;

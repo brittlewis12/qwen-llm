@@ -123,6 +123,47 @@ fn batch_qkv_enabled() -> bool {
     *ENABLED.get_or_init(|| std::env::var(BATCH_QKV_ENV).as_deref() != Ok("0"))
 }
 
+/// `0` keeps each sequence's Engram projections per sequence in a batched
+/// decode step; otherwise each Engram layer's projection runs once over all
+/// sequences' Engram rows as columns (Q5_K through the skinny kernel, F32
+/// rounding; other storage column by column, bitwise). A/B lever.
+const BATCH_ENGRAM_ENV: &str = "QWEN_V41_BATCH_ENGRAM";
+
+/// `0` keeps each sequence's router and routed experts per sequence in a
+/// batched decode step; otherwise every layer routes all sequences in one
+/// dispatch and runs the fused gate/up and down once with one grid row per
+/// sequence (the router itself column by column unless its storage has a
+/// skinny kernel). Every per-row kernel computes each (sequence, slot) with
+/// the one-sequence arithmetic, so values are bitwise per-sequence. A/B
+/// lever.
+const BATCH_ROUTED_ENV: &str = "QWEN_V41_BATCH_ROUTED";
+
+#[cfg(test)]
+thread_local! {
+    pub(in super::super) static BATCH_ENGRAM_OVERRIDE: std::cell::Cell<Option<bool>> =
+        const { std::cell::Cell::new(None) };
+    pub(in super::super) static BATCH_ROUTED_OVERRIDE: std::cell::Cell<Option<bool>> =
+        const { std::cell::Cell::new(None) };
+}
+
+fn batch_engram_enabled() -> bool {
+    #[cfg(test)]
+    if let Some(enabled) = BATCH_ENGRAM_OVERRIDE.with(|o| o.get()) {
+        return enabled;
+    }
+    static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ENABLED.get_or_init(|| std::env::var(BATCH_ENGRAM_ENV).as_deref() != Ok("0"))
+}
+
+fn batch_routed_enabled() -> bool {
+    #[cfg(test)]
+    if let Some(enabled) = BATCH_ROUTED_OVERRIDE.with(|o| o.get()) {
+        return enabled;
+    }
+    static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ENABLED.get_or_init(|| std::env::var(BATCH_ROUTED_ENV).as_deref() != Ok("0"))
+}
+
 fn batch_head_enabled() -> bool {
     #[cfg(test)]
     if let Some(enabled) = BATCH_HEAD_OVERRIDE.with(|o| o.get()) {
@@ -160,12 +201,16 @@ struct HeadColumns {
 /// Per-call scratch of a batched step, allocated (priced and admitted)
 /// before any state is touched, for at least two sequences: the shared
 /// expert's column scratch when `batch_shared_enabled()`, the attention's
-/// when `batch_attn_enabled()`, the head's when `batch_head_enabled()`.
+/// when `batch_attn_enabled()`, the head's when `batch_head_enabled()`, the
+/// routed experts' when `batch_routed_enabled()`, and one (rows, projected)
+/// pair per Engram layer when `batch_engram_enabled()`.
 pub(in super::super) struct BatchScratch {
     sequences: usize,
     shared: Option<ffn_gpu::SharedColumns>,
     attention: Option<AttentionColumns>,
     head: Option<HeadColumns>,
+    routed: Option<ffn_gpu::RoutedColumns>,
+    engram: Option<Vec<(MetalTensor, MetalTensor)>>,
 }
 
 impl BatchScratch {
@@ -221,11 +266,42 @@ impl BatchScratch {
         } else {
             None
         };
+        let routed = if batched && batch_routed_enabled() {
+            Some(ffn_gpu::RoutedColumns::new(model.ctx, c, sequences)?)
+        } else {
+            None
+        };
+        let engram = if batched && batch_engram_enabled() {
+            let heights: Vec<usize> = model
+                .layers
+                .iter()
+                .filter_map(|l| l.engram.as_ref())
+                .flat_map(|e| [e.projection.input, e.projection.output])
+                .collect();
+            if heights.is_empty() {
+                None
+            } else {
+                let regions =
+                    columns::allocate(model.ctx, &heights, sequences, "Engram column scratch")?;
+                Some(
+                    regions
+                        .as_chunks::<2>()
+                        .0
+                        .iter()
+                        .map(|[x, y]| (x.clone(), y.clone()))
+                        .collect(),
+                )
+            }
+        } else {
+            None
+        };
         Ok(Self {
             sequences,
             shared,
             attention,
             head,
+            routed,
+            engram,
         })
     }
 }
@@ -435,6 +511,118 @@ fn encode_attention_columns(
     Ok(())
 }
 
+/// Every sequence's Engram projections: per Engram layer, the projection
+/// once over all sequences' Engram rows gathered as columns, scattered to
+/// each sequence's projected rows. `scratch` holds one (rows, projected)
+/// column pair per Engram layer, in layer order.
+fn encode_engram_columns(
+    model: &Forward<'_>,
+    stages: &mut StageEncoder<'_>,
+    workspaces: &[&mut Workspace],
+    scratch: &[(MetalTensor, MetalTensor)],
+) -> Result<()> {
+    let slots = workspaces[0].engrams.len();
+    op::require(
+        scratch.len() == slots && workspaces.iter().all(|ws| ws.engrams.len() == slots),
+        "batched Engram layers",
+    )?;
+    metal::dispatch_profile_label("engram_projection", None);
+    for (k, (x, y)) in scratch.iter().enumerate() {
+        let layer = workspaces[0].engrams[k].layer;
+        let projection = &model.layers[layer]
+            .engram
+            .as_ref()
+            .ok_or("missing Engram")?
+            .projection;
+        let inputs: Vec<_> = workspaces.iter().map(|ws| &ws.engrams[k].input).collect();
+        let outputs: Vec<_> = workspaces
+            .iter()
+            .map(|ws| &ws.engrams[k].projected)
+            .collect();
+        columns::encode_linear(
+            model.ctx,
+            stages.enc(),
+            projection,
+            &inputs,
+            &outputs,
+            (x, y),
+        )
+        .map_err(|e| e.to_string())?;
+    }
+    Ok(())
+}
+
+/// Layer `id`'s FFN for every sequence after its attention: per sequence the
+/// FFN HC pre; the shared expert (batched or per sequence); the router and
+/// routed experts (batched or per sequence); per sequence the combine. With
+/// neither batched, each sequence runs `layer_ffn`.
+fn encode_ffn_columns(
+    model: &Forward<'_>,
+    stages: &mut StageEncoder<'_>,
+    workspaces: &mut [&mut Workspace],
+    id: usize,
+    scratch: &BatchScratch,
+) -> Result<()> {
+    let (ctx, c, l) = (model.ctx, &model.config, &model.layers[id]);
+    let err = |e: metal::MetalError| e.to_string();
+    if scratch.shared.is_none() && scratch.routed.is_none() {
+        for ws in workspaces.iter_mut() {
+            ws.layer_ffn(model, stages, id)?;
+        }
+        return Ok(());
+    }
+    for ws in workspaces.iter_mut() {
+        ws.ffn_hc_pre(model, stages, id)?;
+    }
+    let split = ffn_split_encoders();
+    if split {
+        stages.split();
+    }
+    match &scratch.shared {
+        Some(shared) => {
+            let (shared_in, shared_out): (Vec<_>, Vec<_>) =
+                workspaces.iter().map(|ws| ws.ffn.shared_io()).unzip();
+            ffn_gpu::encode_shared_columns(
+                ctx,
+                stages.enc(),
+                c,
+                &l.shared,
+                id,
+                &shared_in,
+                &shared_out,
+                shared,
+            )
+            .map_err(err)?;
+        }
+        None => {
+            for ws in workspaces.iter() {
+                ws.ffn
+                    .encode_shared(ctx, stages.enc(), c, l, id)
+                    .map_err(err)?;
+            }
+        }
+    }
+    let Some(routed) = &scratch.routed else {
+        for ws in workspaces.iter_mut() {
+            ws.layer_after_shared(model, stages, id)?;
+        }
+        return Ok(());
+    };
+    if split {
+        stages.split();
+    }
+    let sequences: Vec<_> = workspaces.iter().map(|ws| (&ws.ffn, &ws.half)).collect();
+    ffn_gpu::encode_routed_columns(ctx, stages.enc(), c, l, id, &sequences, routed).map_err(err)?;
+    drop(sequences);
+    if split {
+        stages.split();
+    }
+    for ws in workspaces.iter_mut() {
+        ws.ffn_combine(model, stages, id)?;
+    }
+    Ok(())
+}
+
 /// Every sequence's head: per sequence the final collapse and norm, then
 /// the head once over the gathered norms, scattered to each sequence's
 /// logits.
@@ -482,7 +670,9 @@ pub(in super::super) fn run_batch(
             && (scratch.sequences == workspaces.len()
                 || scratch.shared.is_none()
                     && scratch.attention.is_none()
-                    && scratch.head.is_none()),
+                    && scratch.head.is_none()
+                    && scratch.routed.is_none()
+                    && scratch.engram.is_none()),
         "batched decode shape",
     )?;
     // Staged attention needs every sequence on plain fused-chain decode;
@@ -548,12 +738,19 @@ pub(in super::super) fn run_batch(
             let mut stages = StageEncoder::begin(&command, None);
             let segment = (|| -> Result<()> {
                 if engram_projection {
-                    for ws in workspaces.iter() {
-                        ws.encode_engram_projections(model, &mut stages)?;
+                    match &scratch.engram {
+                        Some(columns) => {
+                            encode_engram_columns(model, &mut stages, workspaces, columns)?
+                        }
+                        None => {
+                            for ws in workspaces.iter() {
+                                ws.encode_engram_projections(model, &mut stages)?;
+                            }
+                        }
                     }
                 }
                 for id in range {
-                    if scratch.shared.is_none() && !attention {
+                    if scratch.shared.is_none() && scratch.routed.is_none() && !attention {
                         for (ws, input) in workspaces.iter_mut().zip(inputs) {
                             ws.encode_layer(model, &mut stages, id, input.position)?;
                         }
@@ -582,34 +779,7 @@ pub(in super::super) fn run_batch(
                             }
                         }
                     }
-                    let Some(shared) = &scratch.shared else {
-                        for ws in workspaces.iter_mut() {
-                            ws.layer_ffn(model, &mut stages, id)?;
-                        }
-                        continue;
-                    };
-                    for ws in workspaces.iter_mut() {
-                        ws.ffn_hc_pre(model, &mut stages, id)?;
-                    }
-                    if ffn_split_encoders() {
-                        stages.split();
-                    }
-                    let (shared_in, shared_out): (Vec<_>, Vec<_>) =
-                        workspaces.iter().map(|ws| ws.ffn.shared_io()).unzip();
-                    ffn_gpu::encode_shared_columns(
-                        ctx,
-                        stages.enc(),
-                        &model.config,
-                        &model.layers[id].shared,
-                        id,
-                        &shared_in,
-                        &shared_out,
-                        shared,
-                    )
-                    .map_err(|e| e.to_string())?;
-                    for ws in workspaces.iter_mut() {
-                        ws.layer_after_shared(model, &mut stages, id)?;
-                    }
+                    encode_ffn_columns(model, &mut stages, workspaces, id, scratch)?;
                 }
                 if head {
                     match &scratch.head {

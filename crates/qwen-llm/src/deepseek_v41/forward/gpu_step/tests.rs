@@ -459,6 +459,8 @@ struct BatchLevers {
     qkv: bool,
     output_a: bool,
     head: bool,
+    engram: bool,
+    routed: bool,
     ffn_split: bool,
     per_column_copy: bool,
     fused_rank_norms: bool,
@@ -470,7 +472,8 @@ impl BatchLevers {
         use super::super::attention_gpu::FUSED_RANK_NORMS_OVERRIDE;
         use super::super::columns::PER_COLUMN_COPY_OVERRIDE;
         use batch::{
-            BATCH_ATTN_OVERRIDE, BATCH_HEAD_OVERRIDE, BATCH_OUTPUT_A_OVERRIDE, BATCH_QKV_OVERRIDE,
+            BATCH_ATTN_OVERRIDE, BATCH_ENGRAM_OVERRIDE, BATCH_HEAD_OVERRIDE,
+            BATCH_OUTPUT_A_OVERRIDE, BATCH_QKV_OVERRIDE, BATCH_ROUTED_OVERRIDE,
             BATCH_SHARED_OVERRIDE,
         };
         let l = levers;
@@ -479,20 +482,26 @@ impl BatchLevers {
         BATCH_QKV_OVERRIDE.with(|o| o.set(l.map(|l| l.qkv)));
         BATCH_OUTPUT_A_OVERRIDE.with(|o| o.set(l.map(|l| l.output_a)));
         BATCH_HEAD_OVERRIDE.with(|o| o.set(l.map(|l| l.head)));
+        BATCH_ENGRAM_OVERRIDE.with(|o| o.set(l.map(|l| l.engram)));
+        BATCH_ROUTED_OVERRIDE.with(|o| o.set(l.map(|l| l.routed)));
         FFN_SPLIT_OVERRIDE.with(|o| o.set(l.map(|l| l.ffn_split)));
         PER_COLUMN_COPY_OVERRIDE.with(|o| o.set(l.map(|l| l.per_column_copy)));
         FUSED_RANK_NORMS_OVERRIDE.with(|o| o.set(l.map(|l| l.fused_rank_norms)));
     }
 
-    /// Column gathers and scatters of one step over `layers` layers: per
-    /// layer one each for the shared expert, two each for q_b and output_b
-    /// (or output_a and output_b), three for the rank pair (one gather, two
-    /// scatters); one each for the head.
-    fn transfers(self, layers: usize) -> usize {
+    /// Column gathers and scatters of one step over `layers` layers with
+    /// `engrams` Engram layers: per layer one each for the shared expert, two
+    /// each for q_b and output_b (or output_a and output_b), three for the
+    /// rank pair (one gather, two scatters), four for the routed experts (the
+    /// input gather; routing weights, down slots and route status scatters);
+    /// per step one each for the head and for each Engram projection.
+    fn transfers(self, layers: usize, engrams: usize) -> usize {
         let staged = self.attention && self.fused_rank_norms;
-        let per_layer =
-            2 * self.shared as usize + 4 * staged as usize + 3 * (staged && self.qkv) as usize;
-        per_layer * layers + 2 * self.head as usize
+        let per_layer = 2 * self.shared as usize
+            + 4 * staged as usize
+            + 3 * (staged && self.qkv) as usize
+            + 4 * self.routed as usize;
+        per_layer * layers + 2 * self.head as usize + 2 * engrams * self.engram as usize
     }
 }
 
@@ -511,6 +520,8 @@ fn batched_steps_match_separate_steps_bitwise() {
         qkv: true,
         output_a: true,
         head: true,
+        engram: true,
+        routed: true,
         ffn_split: true,
         per_column_copy: false,
         fused_rank_norms: true,
@@ -549,11 +560,37 @@ fn batched_steps_match_separate_steps_bitwise() {
         },
         BatchLevers { head: false, ..on },
         BatchLevers {
+            engram: false,
+            ..on
+        },
+        BatchLevers {
+            routed: false,
+            ..on
+        },
+        // The routed experts alone, and with per-column copies.
+        BatchLevers {
             shared: false,
             attention: false,
             qkv: false,
             output_a: false,
             head: false,
+            engram: false,
+            ..on
+        },
+        BatchLevers {
+            per_column_copy: true,
+            shared: false,
+            attention: false,
+            ..on
+        },
+        BatchLevers {
+            shared: false,
+            attention: false,
+            qkv: false,
+            output_a: false,
+            head: false,
+            engram: false,
+            routed: false,
             ..on
         },
     ] {
@@ -573,7 +610,8 @@ fn batched_steps_case(levers: BatchLevers) {
             .filter(|r| kernels.contains(&r.kernel.as_str()))
             .count()
     };
-    let copy = ["kernel_copy_offset_f32"];
+    // Per-column copies: F32 activations, I32 route statuses.
+    let copy = ["kernel_copy_offset_f32", "kernel_copy_offset_i32"];
     let columns = [
         "kernel_deepseek_v41_gather_columns",
         "kernel_deepseek_v41_scatter_columns",
@@ -603,7 +641,7 @@ fn batched_steps_case(levers: BatchLevers) {
             metal::dispatch_census_begin();
             let logits = model.step_batch(&mut states, &tokens, None).unwrap();
             let batch = metal::dispatch_census_take();
-            let transfers = levers.transfers(model.layers.len());
+            let transfers = levers.transfers(model.layers.len(), model.engram_hash.layers.len());
             let (copies, column_copies) = if levers.per_column_copy {
                 (3 * transfers, 0)
             } else {

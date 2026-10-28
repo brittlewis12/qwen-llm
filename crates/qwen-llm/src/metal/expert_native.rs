@@ -442,6 +442,79 @@ pub fn encode_all_slots_gate_up_swiglu_native_fused(
     )
 }
 
+/// `encode_all_slots_gate_up_swiglu_native_fused` for `rows` independent
+/// tokens in one dispatch (grid z = token): input `[K, rows]`, IDs `[top_k,
+/// rows]`, status `[rows]`, output `[M, top_k * rows]`. Every storage the
+/// one-token entrypoint takes: each (token, slot) runs the one-token
+/// kernel's arithmetic on its own row, so values are bitwise those of one
+/// dispatch per token.
+#[allow(clippy::too_many_arguments)]
+pub fn encode_all_slots_gate_up_swiglu_native_fused_tokens(
+    ctx: &MetalContext,
+    enc: &KernelEncoder,
+    gate_bank: &MetalTensor,
+    up_bank: &MetalTensor,
+    input: &MetalTensor,
+    ids: &MetalTensor,
+    status: &MetalTensor,
+    output: &MetalTensor,
+    (n_in, n_out, experts, top_k): (usize, usize, usize, usize),
+    rows: usize,
+    clamp: f32,
+) -> Result<(), MetalError> {
+    encode_gate_up(
+        ctx,
+        enc,
+        gate_bank,
+        up_bank,
+        input,
+        ids,
+        status,
+        output,
+        n_in,
+        n_out,
+        experts,
+        top_k,
+        clamp,
+        Some(rows),
+        NativeOperands::F32,
+        true,
+    )
+}
+
+/// `encode_all_slots_down_native` for `rows` independent tokens in one
+/// dispatch (grid z = token): input `[K, top_k * rows]`, IDs `[top_k, rows]`,
+/// status `[rows]`, output `[M, top_k * rows]`. Every storage the one-token
+/// entrypoint takes; values are bitwise those of one dispatch per token.
+#[allow(clippy::too_many_arguments)]
+pub fn encode_all_slots_down_native_tokens(
+    ctx: &MetalContext,
+    enc: &KernelEncoder,
+    bank: &MetalTensor,
+    input: &MetalTensor,
+    ids: &MetalTensor,
+    status: &MetalTensor,
+    output: &MetalTensor,
+    (n_in, n_out, experts, top_k): (usize, usize, usize, usize),
+    rows: usize,
+) -> Result<(), MetalError> {
+    encode_down(
+        ctx,
+        enc,
+        bank,
+        input,
+        ids,
+        status,
+        output,
+        n_in,
+        n_out,
+        experts,
+        top_k,
+        Some(rows),
+        NativeOperands::F32,
+    )
+}
+
 /// Token-batched native GEMV. Input `[K, rows]`, IDs `[top_k, rows]`, status
 /// `[rows]`, output `[M, top_k * rows]`. Both banks/pipelines are preflighted
 /// before either pass. No buckets, MMA, new scratch, or precision substitution.

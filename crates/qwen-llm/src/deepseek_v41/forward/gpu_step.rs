@@ -1023,9 +1023,20 @@ impl Workspace {
         if split {
             stages.split();
         }
+        self.ffn_combine(model, stages, id)
+    }
+
+    /// The FFN's combine (routed sum, shared output and HC post) into `x`.
+    fn ffn_combine(
+        &mut self,
+        model: &Forward<'_>,
+        stages: &mut StageEncoder<'_>,
+        id: usize,
+    ) -> Result<()> {
+        let (ctx, c, l) = (model.ctx, &model.config, &model.layers[id]);
         self.ffn
             .encode_combine(ctx, stages.enc(), c, l, id, &self.half, &self.x)
-            .map_err(err)
+            .map_err(|e| e.to_string())
     }
 
     /// `layer_staged` up to the FFN: HC pre, attention, HC post.

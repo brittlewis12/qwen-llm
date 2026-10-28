@@ -13,6 +13,21 @@ pub(super) fn allocate(
     cols: usize,
     what: &str,
 ) -> Result<Vec<MetalTensor>> {
+    allocate_typed(ctx, heights, cols, GgmlType::F32, what)
+}
+
+/// `allocate` with 4-byte `dtype` (F32 or I32) regions.
+pub(super) fn allocate_typed(
+    ctx: &MetalContext,
+    heights: &[usize],
+    cols: usize,
+    dtype: GgmlType,
+    what: &str,
+) -> Result<Vec<MetalTensor>> {
+    op::require(
+        matches!(dtype, GgmlType::F32 | GgmlType::I32),
+        &format!("{what} dtype"),
+    )?;
     op::require(
         cols >= 1 && !heights.is_empty(),
         &format!("{what} needs columns"),
@@ -49,7 +64,7 @@ pub(super) fn allocate(
     if let Some(reason) = admission.refusal() {
         return Err(format!("{what} refused: {reason:?}"));
     }
-    let backing = MetalTensor::zeros_dtype_unstaged(ctx, vec![total as u64], GgmlType::F32)
+    let backing = MetalTensor::zeros_dtype_unstaged(ctx, vec![total as u64], dtype)
         .map_err(|e| e.to_string())?;
     let mut offset = 0;
     Ok(sizes
@@ -117,8 +132,14 @@ fn encode_columns_copy(
         return Err(bad(format!("{} vectors of {n}", vectors.len())));
     }
     for v in vectors.iter().copied().chain([columns]) {
-        if v.dtype != GgmlType::F32 || !v.offset.is_multiple_of(4) || !v.is_writable() {
-            return Err(bad("writable 4-byte aligned F32 bindings required".into()));
+        if v.dtype != columns.dtype
+            || !matches!(v.dtype, GgmlType::F32 | GgmlType::I32)
+            || !v.offset.is_multiple_of(4)
+            || !v.is_writable()
+        {
+            return Err(bad(
+                "writable 4-byte aligned bindings of one dtype (F32 or I32) required".into(),
+            ));
         }
     }
     if vectors.iter().any(|v| v.n_elements() != n as u64)
@@ -152,7 +173,23 @@ fn encode_columns_copy(
     Ok(())
 }
 
-/// Copy `inputs[b]` (`[n]` F32 each) into column b of `columns` (`[n * B]`).
+/// The per-column copy of `columns`' dtype (F32 or I32).
+fn copy_words(
+    ctx: &MetalContext,
+    enc: &KernelEncoder,
+    src: &MetalTensor,
+    src_off: usize,
+    dst: &MetalTensor,
+    n: usize,
+) -> std::result::Result<(), metal::MetalError> {
+    if src.dtype == GgmlType::I32 {
+        metal::encode_copy_offset_i32(ctx, enc, src, src_off, dst, n)
+    } else {
+        metal::encode_copy_offset_f32(ctx, enc, src, src_off, dst, n)
+    }
+}
+
+/// Copy `inputs[b]` (`[n]` F32 or I32 each) into column b of `columns` (`[n * B]`).
 pub(super) fn encode_gather(
     ctx: &MetalContext,
     enc: &KernelEncoder,
@@ -170,12 +207,13 @@ pub(super) fn encode_gather(
     }
     for (column, input) in inputs.iter().enumerate() {
         let dst = columns.view_subrange((column * n) as u64, vec![n as u64]);
-        metal::encode_copy_offset_f32(ctx, enc, input, 0, &dst, n)?;
+        copy_words(ctx, enc, input, 0, &dst, n)?;
     }
     Ok(())
 }
 
-/// Copy column b of `columns` (`[n * B]`) into `outputs[b]` (`[n]` F32 each).
+/// Copy column b of `columns` (`[n * B]`) into `outputs[b]` (`[n]` F32 or
+/// I32 each).
 pub(super) fn encode_scatter(
     ctx: &MetalContext,
     enc: &KernelEncoder,
@@ -192,7 +230,7 @@ pub(super) fn encode_scatter(
         return Ok(());
     }
     for (column, output) in outputs.iter().enumerate() {
-        metal::encode_copy_offset_f32(ctx, enc, columns, column * n, output, n)?;
+        copy_words(ctx, enc, columns, column * n, output, n)?;
     }
     Ok(())
 }

@@ -232,6 +232,162 @@ fn route_bucket_parallel() -> bool {
     *PARALLEL.get_or_init(|| std::env::var(ROUTE_BUCKET_ENV).as_deref() != Ok("serial"))
 }
 
+/// One sequence's shared expert: gate and up projections of `x`, the clamped
+/// SwiGLU, then the down projection. `scratch` is [gate, up, activation,
+/// output].
+fn encode_shared_vector(
+    ctx: &MetalContext,
+    enc: &KernelEncoder,
+    shared: &[Linear<'_>; 3],
+    clamp: f32,
+    x: &MetalTensor,
+    [gate, up, activation, output]: [&MetalTensor; 4],
+) -> std::result::Result<(), metal::MetalError> {
+    shared[0].encode(enc, x, gate)?;
+    shared[1].encode(enc, x, up)?;
+    metal::encode_clamped_swiglu(ctx, enc, gate, up, activation, clamp)?;
+    shared[2].encode(enc, activation, output)
+}
+
+/// Column scratch for the shared expert of `cols` sequences in one batched
+/// decode step: input and output `[hidden, cols]`, gate/up/activation
+/// `[intermediate, cols]`, each column contiguous, in one allocation whose
+/// regions start on 256-byte boundaries. 4 * cols * (2 * hidden + 3 *
+/// intermediate) bytes plus padding: about 69 KiB per sequence at GSQ
+/// geometry.
+pub(super) struct SharedColumns {
+    cols: usize,
+    x: MetalTensor,
+    gate: MetalTensor,
+    up: MetalTensor,
+    activation: MetalTensor,
+    output: MetalTensor,
+}
+
+impl SharedColumns {
+    /// Region element counts in allocation order (x, gate, up, activation,
+    /// output) and each region's padded element stride.
+    fn regions(c: &Config, cols: usize) -> Result<([usize; 5], [usize; 5])> {
+        let column = |n: usize| {
+            n.checked_mul(cols)
+                .filter(|&n| n > 0 && u32::try_from(n).is_ok())
+                .ok_or_else(|| "shared column scratch extent".to_string())
+        };
+        let (h, i) = (column(c.hidden)?, column(c.intermediate)?);
+        let sizes = [h, i, i, i, h];
+        Ok((sizes, sizes.map(|n| n.next_multiple_of(64))))
+    }
+
+    pub(super) fn bytes(c: &Config, cols: usize) -> Result<u64> {
+        let (_, strides) = Self::regions(c, cols)?;
+        strides
+            .iter()
+            .try_fold(0u64, |sum, &n| sum.checked_add(n as u64 * 4))
+            .ok_or_else(|| "shared column scratch bytes".into())
+    }
+
+    /// Prices and admits the scratch before allocating it.
+    pub(super) fn new(ctx: &MetalContext, c: &Config, cols: usize) -> Result<Self> {
+        validate(c)?;
+        op::require(cols >= 1, "shared column scratch needs a column")?;
+        let (sizes, strides) = Self::regions(c, cols)?;
+        let logical = Self::bytes(c, cols)?;
+        let priced = ctx
+            .price_shared_buffer_upper(logical)
+            .map_err(|e| e.to_string())?;
+        op::require(
+            priced.priced_upper_bytes <= logical + 16384,
+            "shared column scratch exceeds estimated page slack",
+        )?;
+        let admission = metal::evaluate_metal_memory_admission_with_cpu_bytes(
+            priced.priced_upper_bytes,
+            0,
+            0,
+            ctx.memory_signals(),
+            true,
+        );
+        if let Some(reason) = admission.refusal() {
+            return Err(format!("shared column scratch refused: {reason:?}"));
+        }
+        let total = strides.iter().sum::<usize>();
+        let backing = MetalTensor::zeros_dtype_unstaged(ctx, vec![total as u64], GgmlType::F32)
+            .map_err(|e| e.to_string())?;
+        let mut offset = 0;
+        let mut views = sizes.iter().zip(strides).map(|(&n, stride)| {
+            let view = backing.view_subrange(offset as u64, vec![n as u64]);
+            offset += stride;
+            view
+        });
+        let mut next = || views.next().expect("five regions");
+        Ok(Self {
+            cols,
+            x: next(),
+            gate: next(),
+            up: next(),
+            activation: next(),
+            output: next(),
+        })
+    }
+
+    pub(super) fn cols(&self) -> usize {
+        self.cols
+    }
+}
+
+/// The shared expert of several sequences as one column batch: copies
+/// sequence b's normalized input (`inputs[b]`, `[hidden]`) into column b,
+/// projects gate and up with `Linear::encode_columns`, applies the clamped
+/// SwiGLU over every column at once (an elementwise kernel, so each value is
+/// `encode_shared`'s for the same gate/up values), projects down, and copies
+/// column b to `outputs[b]` (`[hidden]`). With F32 (or any non-skinny)
+/// weights every value is bitwise `encode_shared`'s; Q5_K weights go
+/// through the skinny kernel and differ by F32 rounding.
+pub(super) fn encode_shared_columns(
+    ctx: &MetalContext,
+    enc: &KernelEncoder,
+    c: &Config,
+    shared: &[Linear<'_>; 3],
+    id: usize,
+    inputs: &[&MetalTensor],
+    outputs: &[&MetalTensor],
+    scratch: &SharedColumns,
+) -> std::result::Result<(), metal::MetalError> {
+    let cols = scratch.cols;
+    let hidden = c.hidden;
+    if inputs.len() != cols || outputs.len() != cols {
+        return Err(metal::MetalError::BadShape {
+            kernel: "v41_shared_columns",
+            detail: format!(
+                "{} inputs and {} outputs for {cols} scratch columns",
+                inputs.len(),
+                outputs.len()
+            ),
+        });
+    }
+    metal::dispatch_profile_label("ffn_shared", Some(id));
+    for (column, input) in inputs.iter().enumerate() {
+        let dst = scratch
+            .x
+            .view_subrange((column * hidden) as u64, vec![hidden as u64]);
+        metal::encode_copy_offset_f32(ctx, enc, input, 0, &dst, hidden)?;
+    }
+    shared[0].encode_columns(enc, &scratch.x, &scratch.gate, cols)?;
+    shared[1].encode_columns(enc, &scratch.x, &scratch.up, cols)?;
+    metal::encode_clamped_swiglu(
+        ctx,
+        enc,
+        &scratch.gate,
+        &scratch.up,
+        &scratch.activation,
+        c.clamp,
+    )?;
+    shared[2].encode_columns(enc, &scratch.activation, &scratch.output, cols)?;
+    for (column, output) in outputs.iter().enumerate() {
+        metal::encode_copy_offset_f32(ctx, enc, &scratch.output, column * hidden, output, hidden)?;
+    }
+    Ok(())
+}
+
 impl Workspace {
     pub(super) fn new(model: &Forward<'_>) -> std::result::Result<Self, StateError> {
         let c = &model.config;
@@ -474,11 +630,20 @@ impl Workspace {
     ) -> std::result::Result<(), metal::MetalError> {
         let b = &self.buffers;
         metal::dispatch_profile_label("ffn_shared", Some(id));
-        for j in 0..2 {
-            layer.shared[j].encode(enc, &b[7], &b[16 + j])?;
-        }
-        metal::encode_clamped_swiglu(ctx, enc, &b[16], &b[17], &b[18], c.clamp)?;
-        layer.shared[2].encode(enc, &b[18], &b[19])
+        encode_shared_vector(
+            ctx,
+            enc,
+            &layer.shared,
+            c.clamp,
+            &b[7],
+            [&b[16], &b[17], &b[18], &b[19]],
+        )
+    }
+
+    /// The shared expert's input (the normalized FFN input `encode_hc_pre`
+    /// writes) and output (read by `encode_combine`).
+    pub(super) fn shared_io(&self) -> (&MetalTensor, &MetalTensor) {
+        (&self.buffers[7], &self.buffers[19])
     }
 
     pub(super) fn encode_routed_experts(

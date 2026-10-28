@@ -7,6 +7,9 @@ mod native_f32;
 #[path = "tests/native_rows.rs"]
 mod native_rows;
 
+#[path = "tests/shared_columns.rs"]
+mod shared_columns;
+
 #[path = "tests/strategy.rs"]
 mod strategy;
 

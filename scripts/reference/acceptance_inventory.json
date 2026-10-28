@@ -1996,6 +1996,20 @@
   },
   {
     "target": "lib",
+    "name": "deepseek_v41::forward::ffn_gpu::tests::shared_columns::batched_f32_shared_expert_is_bitwise_per_sequence",
+    "class": "gpu",
+    "ignored": false,
+    "reason": "Metal context, allocation or dispatch witness; parent GPU lane only."
+  },
+  {
+    "target": "lib",
+    "name": "deepseek_v41::forward::ffn_gpu::tests::shared_columns::batched_q5_k_shared_expert_matches_per_sequence_to_f32_rounding",
+    "class": "gpu",
+    "ignored": false,
+    "reason": "Metal context, allocation or dispatch witness; parent GPU lane only."
+  },
+  {
+    "target": "lib",
     "name": "deepseek_v41::forward::ffn_gpu::tests::stages_lagged_pre_weight_before_down_and_nonalias",
     "class": "gpu",
     "ignored": false,
@@ -2213,6 +2227,13 @@
   },
   {
     "target": "lib",
+    "name": "deepseek_v41::forward::gpu_step::tests::batched_steps_match_separate_steps_bitwise",
+    "class": "gpu",
+    "ignored": false,
+    "reason": "Metal context, allocation or dispatch witness; parent GPU lane only."
+  },
+  {
+    "target": "lib",
     "name": "deepseek_v41::forward::gpu_step::tests::cancellation_callback_errors_and_encode_failure_poison",
     "class": "gpu",
     "ignored": false,
@@ -2242,6 +2263,20 @@
   {
     "target": "lib",
     "name": "deepseek_v41::forward::gpu_step::tests::metadata_schedule_drives_full_gpu_graph_and_engram_at_zero",
+    "class": "gpu",
+    "ignored": false,
+    "reason": "Metal context, allocation or dispatch witness; parent GPU lane only."
+  },
+  {
+    "target": "lib",
+    "name": "deepseek_v41::forward::gpu_step::tests::refused_batches_keep_states_and_failed_batches_poison_all",
+    "class": "gpu",
+    "ignored": false,
+    "reason": "Metal context, allocation or dispatch witness; parent GPU lane only."
+  },
+  {
+    "target": "lib",
+    "name": "deepseek_v41::forward::gpu_step::tests::single_sequence_batch_is_step_with_batched_shared_on",
     "class": "gpu",
     "ignored": false,
     "reason": "Metal context, allocation or dispatch witness; parent GPU lane only."

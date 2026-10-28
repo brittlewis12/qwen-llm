@@ -9,6 +9,7 @@ const EXPERTS: usize = 3;
 const IDS: [i32; 7] = [2, 0, 2, -1, EXPERTS as i32, i32::MIN, i32::MAX];
 
 mod decode_probe;
+mod dense_skinny;
 mod half_rows;
 mod iq1;
 mod rows;

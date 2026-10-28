@@ -363,6 +363,67 @@ impl Linear<'_> {
         )
     }
 
+    /// `cols` independent projections `y[:, c] = W x[:, c]`: x is F32
+    /// `[input, cols]` and y F32 `[output, cols]`, each column contiguous.
+    /// Q5_K weights whose geometry `metal::encode_dense_skinny_q5_k`
+    /// supports project 2..=8 columns per dispatch with each weight read once
+    /// (F32 rounding differs from `encode`; not bitwise). Every other storage,
+    /// a single column, or a binding the skinny kernel cannot read (offsets
+    /// not 16-byte aligned) encodes each column with `encode`, bitwise equal
+    /// to per-sequence projections.
+    fn encode_columns(
+        &self,
+        enc: &KernelEncoder,
+        x: &MetalTensor,
+        y: &MetalTensor,
+        cols: usize,
+    ) -> std::result::Result<(), metal::MetalError> {
+        if cols == 0
+            || x.dtype != GgmlType::F32
+            || y.dtype != GgmlType::F32
+            || self.input.checked_mul(cols).map(|n| n as u64) != Some(x.n_elements())
+            || self.output.checked_mul(cols).map(|n| n as u64) != Some(y.n_elements())
+        {
+            return Err(metal::MetalError::BadShape {
+                kernel: "v41_linear_columns",
+                detail: "nonempty matching F32 column extents required".into(),
+            });
+        }
+        let (input, output) = (self.input as u64, self.output as u64);
+        let mut first = 0;
+        while first < cols {
+            let n = (cols - first).min(metal::DENSE_SKINNY_MAX_COLS);
+            let xs = x.view_bytes(first as u64 * input * 4, vec![input, n as u64]);
+            let ys = y.view_bytes(first as u64 * output * 4, vec![output, n as u64]);
+            let skinny = n >= 2
+                && metal::dense_skinny_supported(self.tensor.dtype, self.input, self.output, n)
+                && self.tensor.offset.is_multiple_of(16)
+                && xs.offset.is_multiple_of(16);
+            if skinny {
+                metal::encode_dense_skinny_q5_k(
+                    self.ctx,
+                    enc,
+                    &self.tensor.view_bytes(0, vec![input, output]),
+                    &xs,
+                    &ys,
+                    self.input,
+                    self.output,
+                    n,
+                )?;
+            } else {
+                for c in 0..n as u64 {
+                    self.encode(
+                        enc,
+                        &xs.view_bytes(c * input * 4, vec![input]),
+                        &ys.view_bytes(c * output * 4, vec![output]),
+                    )?;
+                }
+            }
+            first += n;
+        }
+        Ok(())
+    }
+
     fn forward(&self, x: &[f32]) -> Result<Vec<f32>> {
         let dims = [self.input, self.output, 0, 1];
         let _wall = profile::Wall("linear", dims, profile::start());
@@ -844,9 +905,12 @@ impl<'a> Forward<'a> {
 
     /// Consume one token in each of several independent sequences and return
     /// each sequence's full next-token logits, in order. Every sequence runs
-    /// the dispatches of `step` on its own workspace (bitwise-identical
-    /// results); the sequences share command buffers and per-sequence
-    /// encoders, so the GPU may overlap their chains. All states are checked
+    /// the dispatches of `step` on its own workspace, except that with two
+    /// or more sequences each layer's FFN shared expert runs once over all
+    /// of them (`QWEN_V41_BATCH_SHARED`): bitwise `step` for non-Q5_K shared
+    /// weights, F32 rounding differences for Q5_K (the skinny kernel). One
+    /// sequence is exactly `step`. The sequences share command buffers and
+    /// encoders. All states are checked (and the batch scratch admitted)
     /// before any is touched: a refused batch leaves every state unchanged.
     /// Once execution starts, a failure or cancellation poisons every state
     /// in the batch. Requires GPU-step states of this model.
@@ -888,6 +952,7 @@ impl<'a> Forward<'a> {
                 .map_err(|e| format!("{e:?}"))?;
             steps.push((token as usize, state.position(), rows, next));
         }
+        let scratch = gpu_step::batch::BatchScratch::new(self, states.len())?;
         cancelled(cancel)?;
         for state in states.iter_mut() {
             state.phase = StatePhase::Poisoned;
@@ -906,7 +971,7 @@ impl<'a> Forward<'a> {
             .collect();
         // As in `execute_token`: completed commands must not outlive the step.
         let logits = objc2::rc::autoreleasepool(|_| {
-            gpu_step::batch::run_batch(self, &mut workspaces, &inputs, cancel)
+            gpu_step::batch::run_batch(self, &mut workspaces, &inputs, &scratch, cancel)
         })?;
         for (state, (_, _, _, next)) in states.iter_mut().zip(steps) {
             state.addresses = next;

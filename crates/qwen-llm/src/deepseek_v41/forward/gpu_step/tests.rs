@@ -451,11 +451,33 @@ fn capacity_memory_and_modes_are_explicit() {
     assert!(state.gpu_step.is_some());
 }
 
+/// The toy's F32 shared weights take the batched shared expert's bitwise
+/// column fallback, so batched steps equal separate steps bitwise whether
+/// the batched shared expert is on (its gather/scatter copies dispatched,
+/// one per sequence each way per layer) or off, with one or split FFN
+/// encoders.
 #[test]
 fn batched_steps_match_separate_steps_bitwise() {
+    use batch::BATCH_SHARED_OVERRIDE;
+    for (shared, ffn_split) in [(true, true), (true, false), (false, true)] {
+        BATCH_SHARED_OVERRIDE.with(|o| o.set(Some(shared)));
+        FFN_SPLIT_OVERRIDE.with(|o| o.set(Some(ffn_split)));
+        batched_steps_case(shared);
+        BATCH_SHARED_OVERRIDE.with(|o| o.set(None));
+        FFN_SPLIT_OVERRIDE.with(|o| o.set(None));
+    }
+}
+
+fn batched_steps_case(shared: bool) {
     let ctx = MetalContext::new().unwrap();
     let weights = toy::Weights::new(&ctx);
     let model = weights.model(&ctx);
+    let copies = |census: &[metal::DispatchCensusRow]| {
+        census
+            .iter()
+            .filter(|r| r.kernel == "kernel_copy_offset_f32")
+            .count()
+    };
     for split in [false, true] {
         SPLIT_SUBMIT_OVERRIDE.with(|o| o.set(Some(split)));
         let new = || {
@@ -470,13 +492,23 @@ fn batched_steps_match_separate_steps_bitwise() {
             model.step(&mut batched[2], token, None).unwrap();
         }
         for tokens in [[0, 3, 1], [3, 3, 2], [1, 0, 4]] {
+            metal::dispatch_census_begin();
             let expected: Vec<_> = alone
                 .iter_mut()
                 .zip(tokens)
                 .map(|(state, token)| model.step(state, token, None).unwrap())
                 .collect();
+            let serial_copies = copies(&metal::dispatch_census_take());
             let mut states: Vec<&mut State> = batched.iter_mut().collect();
+            metal::dispatch_census_begin();
             let logits = model.step_batch(&mut states, &tokens, None).unwrap();
+            let batch_copies = copies(&metal::dispatch_census_take());
+            let gathers = if shared {
+                2 * 3 * model.layers.len()
+            } else {
+                0
+            };
+            assert_eq!(batch_copies, serial_copies + gathers);
             assert_eq!(logits, expected, "split {split} tokens {tokens:?}");
             for (alone, batched) in alone.iter().zip(&batched) {
                 assert!(batched.is_ready());
@@ -554,4 +586,36 @@ fn refused_batches_keep_states_and_failed_batches_poison_all() {
     assert!(error.contains("GPU attention weights"), "{error}");
     assert!(d.is_poisoned() && e.is_poisoned());
     assert_eq!(d.gpu_step.as_ref().unwrap().commands, 0);
+}
+
+/// One sequence never takes the batched shared expert: `step_batch` is
+/// `step`, dispatch for dispatch.
+#[test]
+fn single_sequence_batch_is_step_with_batched_shared_on() {
+    use batch::BATCH_SHARED_OVERRIDE;
+    BATCH_SHARED_OVERRIDE.with(|o| o.set(Some(true)));
+    let ctx = MetalContext::new().unwrap();
+    let weights = toy::Weights::new(&ctx);
+    let model = weights.model(&ctx);
+    let mut alone = model.new_state_with_gpu_step(3).unwrap();
+    let mut batched = model.new_state_with_gpu_step(3).unwrap();
+    for token in [0, 3, 1] {
+        metal::dispatch_census_begin();
+        let expected = model.step(&mut alone, token, None).unwrap();
+        let step: Vec<_> = metal::dispatch_census_take()
+            .into_iter()
+            .map(|r| r.kernel)
+            .collect();
+        metal::dispatch_census_begin();
+        let logits = model
+            .step_batch(&mut [&mut batched], &[token], None)
+            .unwrap();
+        let batch: Vec<_> = metal::dispatch_census_take()
+            .into_iter()
+            .map(|r| r.kernel)
+            .collect();
+        assert_eq!(logits, vec![expected]);
+        assert_eq!(batch, step);
+    }
+    BATCH_SHARED_OVERRIDE.with(|o| o.set(None));
 }

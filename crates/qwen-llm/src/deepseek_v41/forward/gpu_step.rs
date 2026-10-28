@@ -947,6 +947,90 @@ impl Workspace {
         snapshot: Option<&capture::Snapshot>,
         ced: bool,
     ) -> Result<()> {
+        if !ffn_split_encoders() {
+            self.layer_until_ffn(model, stages, id, position, snapshot, ced)?;
+            let (ctx, c, l) = (model.ctx, &model.config, &model.layers[id]);
+            return self
+                .ffn
+                .encode(ctx, stages.enc(), c, l, id, &self.half, &self.pre, &self.x)
+                .map_err(|e| e.to_string());
+        }
+        self.layer_through_ffn_pre(model, stages, id, position, snapshot, ced)?;
+        stages.split();
+        self.ffn
+            .encode_shared(
+                model.ctx,
+                stages.enc(),
+                &model.config,
+                &model.layers[id],
+                id,
+            )
+            .map_err(|e| e.to_string())?;
+        self.layer_after_shared(model, stages, id)
+    }
+
+    /// `layer_staged` up to and including the FFN's HC pre, which writes the
+    /// shared expert's input (`ffn_gpu::Workspace::shared_io`). With
+    /// `layer_after_shared` and a shared expert encoded in between (this
+    /// sequence's own, or a batch's) it is `layer_staged`.
+    fn layer_through_ffn_pre(
+        &mut self,
+        model: &Forward<'_>,
+        stages: &mut StageEncoder<'_>,
+        id: usize,
+        position: usize,
+        snapshot: Option<&capture::Snapshot>,
+        ced: bool,
+    ) -> Result<()> {
+        self.layer_until_ffn(model, stages, id, position, snapshot, ced)?;
+        self.ffn
+            .encode_hc_pre(
+                model.ctx,
+                stages.enc(),
+                &model.config,
+                &model.layers[id],
+                id,
+                &self.half,
+                &self.pre,
+            )
+            .map_err(|e| e.to_string())
+    }
+
+    /// The FFN's routed experts and combine after its shared expert, on
+    /// separate encoders when `ffn_split_encoders()`.
+    fn layer_after_shared(
+        &mut self,
+        model: &Forward<'_>,
+        stages: &mut StageEncoder<'_>,
+        id: usize,
+    ) -> Result<()> {
+        let (ctx, c, l) = (model.ctx, &model.config, &model.layers[id]);
+        let split = ffn_split_encoders();
+        let err = |e: metal::MetalError| e.to_string();
+        if split {
+            stages.split();
+        }
+        self.ffn
+            .encode_routed_experts(ctx, stages.enc(), c, l, id, &self.half)
+            .map_err(err)?;
+        if split {
+            stages.split();
+        }
+        self.ffn
+            .encode_combine(ctx, stages.enc(), c, l, id, &self.half, &self.x)
+            .map_err(err)
+    }
+
+    /// `layer_staged` up to the FFN: HC pre, attention, HC post.
+    fn layer_until_ffn(
+        &mut self,
+        model: &Forward<'_>,
+        stages: &mut StageEncoder<'_>,
+        id: usize,
+        position: usize,
+        snapshot: Option<&capture::Snapshot>,
+        ced: bool,
+    ) -> Result<()> {
         let ctx = model.ctx;
         let c = &model.config;
         let l = &model.layers[id];
@@ -1005,29 +1089,7 @@ impl Workspace {
                 .capture(ctx, enc, snapshot, &self.normalized, id, position)?;
         }
         stages.boundary();
-        if !ffn_split_encoders() {
-            let enc = stages.enc();
-            return self
-                .ffn
-                .encode(ctx, enc, c, l, id, &self.half, &self.pre, &self.x)
-                .map_err(|e| e.to_string());
-        }
-        let err = |e: metal::MetalError| e.to_string();
-        self.ffn
-            .encode_hc_pre(ctx, stages.enc(), c, l, id, &self.half, &self.pre)
-            .map_err(err)?;
-        stages.split();
-        self.ffn
-            .encode_shared(ctx, stages.enc(), c, l, id)
-            .map_err(err)?;
-        stages.split();
-        self.ffn
-            .encode_routed_experts(ctx, stages.enc(), c, l, id, &self.half)
-            .map_err(err)?;
-        stages.split();
-        self.ffn
-            .encode_combine(ctx, stages.enc(), c, l, id, &self.half, &self.x)
-            .map_err(err)
+        Ok(())
     }
 
     pub(super) fn run(

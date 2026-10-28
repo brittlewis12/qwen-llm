@@ -827,5 +827,165 @@ fn encode_down(
     Ok(())
 }
 
+/// Most activation columns one `encode_dense_skinny_q5_k` dispatch projects.
+pub const DENSE_SKINNY_MAX_COLS: usize = 8;
+
+/// Output channels per simdgroup of `kernel_dense_skinny_mma_q5_K_f32`
+/// (`DENSE_SKINNY_T8` tiles of 8).
+const DENSE_SKINNY_CHANNELS: usize = 16;
+
+/// Simdgroups the skinny K split aims for (32 per core on an 80-core GPU;
+/// extra splitting measured neutral on a 40-core one).
+const DENSE_SKINNY_TARGET_SIMDGROUPS: usize = 2560;
+
+#[repr(C)]
+#[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+struct DenseSkinnyArgs {
+    row_bytes: u64,
+    n_in: u32,
+    n_out: u32,
+    cols: u32,
+    _pad: u32,
+}
+
+/// K split of the skinny kernel: the smallest divisor of the block count (at
+/// most 8 simdgroups per threadgroup) that brings the grid to
+/// `DENSE_SKINNY_TARGET_SIMDGROUPS`, else the largest divisor at most 8.
+fn dense_skinny_k_split(n_in: usize, n_out: usize) -> usize {
+    let blocks = n_in / 256;
+    let channel_groups = n_out.div_ceil(DENSE_SKINNY_CHANNELS);
+    let mut split = 1;
+    for d in (1..=8).filter(|&d| blocks.is_multiple_of(d)) {
+        split = d;
+        if channel_groups * d >= DENSE_SKINNY_TARGET_SIMDGROUPS {
+            break;
+        }
+    }
+    split
+}
+
+/// Whether `encode_dense_skinny_q5_k` accepts this storage and geometry
+/// (binding layout is checked separately when encoding).
+pub fn dense_skinny_supported(dtype: GgmlType, n_in: usize, n_out: usize, cols: usize) -> bool {
+    dtype == GgmlType::Q5_K
+        && n_in > 0
+        && n_in.is_multiple_of(256)
+        && n_out > 0
+        && (1..=DENSE_SKINNY_MAX_COLS).contains(&cols)
+        && u32::try_from(n_in).is_ok()
+        && u32::try_from(n_out).is_ok()
+}
+
+/// Dense Q5_K projection of `cols` (1..=8) F32 activation columns,
+/// `output[:, c] = weight * input[:, c]`, in one dispatch that reads and
+/// dequantizes each weight once for every column
+/// (`kernel_dense_skinny_mma_q5_K_f32`, simdgroup MMA with F32 operands).
+/// Weight is `[n_in, n_out]` Q5_K (rows of n_in / 256 blocks, 16-byte
+/// aligned), input `[n_in, cols]` F32 (16-byte aligned), output `[n_out,
+/// cols]` F32, disjoint from both. Values match the one-row native kernels to
+/// F32 rounding (summation order differs), not bitwise. Invalid shapes,
+/// storage or bindings return an error before anything is encoded.
+#[allow(clippy::too_many_arguments)]
+pub fn encode_dense_skinny_q5_k(
+    ctx: &MetalContext,
+    enc: &KernelEncoder,
+    weight: &MetalTensor,
+    input: &MetalTensor,
+    output: &MetalTensor,
+    n_in: usize,
+    n_out: usize,
+    cols: usize,
+) -> Result<(), MetalError> {
+    const K: &str = "dense_skinny_q5_k";
+    require_serial(K, enc)?;
+    if weight.dtype != GgmlType::Q5_K {
+        return Err(bad_shape(
+            K,
+            format!("weight must be Q5_K, got {:?}", weight.dtype),
+        ));
+    }
+    if !dense_skinny_supported(weight.dtype, n_in, n_out, cols) {
+        return Err(bad_shape(
+            K,
+            format!(
+                "n_in {n_in} must be a positive multiple of 256, n_out {n_out} positive, \
+                 cols {cols} in 1..={DENSE_SKINNY_MAX_COLS}"
+            ),
+        ));
+    }
+    let (n_in32, n_out32) = (to_u32(K, n_in, "n_in")?, to_u32(K, n_out, "n_out")?);
+    if weight.shape != [n_in as u64, n_out as u64] {
+        return Err(bad_shape(
+            K,
+            format!(
+                "weight must have shape {:?}, got {:?}",
+                [n_in, n_out],
+                weight.shape
+            ),
+        ));
+    }
+    let bank = weight.view_bytes(0, vec![n_in as u64, n_out as u64, 1]);
+    check_expert_bank(K, &bank, n_in, n_out, 1, "weight")?;
+    let cols64 = cols as u64;
+    check_tensor(
+        K,
+        input,
+        GgmlType::F32,
+        &[n_in as u64, cols64],
+        false,
+        "input",
+    )?;
+    super::checks::check_alignment(K, input, 16, "input")?;
+    check_tensor(
+        K,
+        output,
+        GgmlType::F32,
+        &[n_out as u64, cols64],
+        true,
+        "output",
+    )?;
+    check_disjoint(K, output, &[(input, "input"), (weight, "weight")])?;
+    check_device(ctx, enc, K, &[weight, input, output])?;
+    let split = dense_skinny_k_split(n_in, n_out);
+    let pso = ctx.pipeline("kernel_dense_skinny_mma_q5_K_f32")?;
+    if pso.threadExecutionWidth() != 32 || pso.maxTotalThreadsPerThreadgroup() < 32 * split {
+        return Err(bad_shape(
+            K,
+            format!(
+                "skinny kernel needs SIMD width 32 and {} threads",
+                32 * split
+            ),
+        ));
+    }
+    let (block, bytes) = GgmlType::Q5_K.storage_layout().expect("Q5_K layout");
+    enc.set_pipeline(&pso);
+    enc.set_bytes(
+        0,
+        &DenseSkinnyArgs {
+            row_bytes: n_in as u64 / block * bytes,
+            n_in: n_in32,
+            n_out: n_out32,
+            cols: cols as u32,
+            _pad: 0,
+        },
+    );
+    enc.set_tensor(1, weight);
+    enc.set_tensor(2, input);
+    enc.set_tensor(3, output);
+    enc.dispatch(
+        MTLSize {
+            width: n_out.div_ceil(DENSE_SKINNY_CHANNELS),
+            height: 1,
+            depth: 1,
+        },
+        MTLSize {
+            width: 32,
+            height: 1,
+            depth: split,
+        },
+    );
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests;

@@ -1,14 +1,63 @@
 //! One decode step for several independent sequences in shared command
 //! buffers, encoded layer-major. Each sequence keeps its own workspace and
-//! runs exactly the dispatches of a single `run` (bitwise-identical
-//! results). This is the scaffold for batched kernels that read a weight once
-//! for every sequence; by itself it only saves commits: on M5 Ultra (GSQ,
-//! 512-token prefixes, B=1-8) per-sequence encoders in shared command buffers
-//! and per-sequence command queues both measured 1.00-1.03x of serial steps
-//! with unchanged GPU time, because the decode kernels already occupy the
-//! whole GPU (a second queue's command waits for, rather than fills, the
-//! first's).
+//! runs the dispatches of a single `run`, except where a batched kernel
+//! reads a weight once for every sequence: the FFN shared expert
+//! (`BATCH_SHARED_ENV`). Without such kernels batching only saves commits:
+//! on M5 Ultra (GSQ, 512-token prefixes, B=1-8) per-sequence encoders in
+//! shared command buffers and per-sequence command queues both measured
+//! 1.00-1.03x of serial steps with unchanged GPU time, because the decode
+//! kernels already occupy the whole GPU (a second queue's command waits for,
+//! rather than fills, the first's).
 use super::*;
+
+/// `0` runs each sequence's FFN shared expert on its own in a batched decode
+/// step (`Forward::step_batch`), bitwise equal to separate steps. Otherwise
+/// batches of two or more sequences run each layer's shared expert once over
+/// all sequences as columns: Q5_K weights through the skinny simdgroup-MMA
+/// kernel that reads every weight once for the whole batch (F32 summation
+/// order differs from separate steps), other storage column by column
+/// (bitwise). M5 Ultra, GSQ, 512-token prefixes: B = 2/3/4/8 rounds 1.08/
+/// 1.10/1.11/1.15x faster than serial steps (1.01x with `0`), every
+/// teacher-forced argmax equal, max |logit diff| 4.6e-6 of max |logit|.
+/// A/B lever.
+const BATCH_SHARED_ENV: &str = "QWEN_V41_BATCH_SHARED";
+
+#[cfg(test)]
+thread_local! {
+    pub(in super::super) static BATCH_SHARED_OVERRIDE: std::cell::Cell<Option<bool>> =
+        const { std::cell::Cell::new(None) };
+}
+
+fn batch_shared_enabled() -> bool {
+    #[cfg(test)]
+    if let Some(enabled) = BATCH_SHARED_OVERRIDE.with(|o| o.get()) {
+        return enabled;
+    }
+    static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ENABLED.get_or_init(|| std::env::var(BATCH_SHARED_ENV).as_deref() != Ok("0"))
+}
+
+/// Per-call scratch of a batched step, allocated (priced and admitted)
+/// before any state is touched: the shared expert's column scratch when
+/// `batch_shared_enabled()` and there are at least two sequences.
+pub(in super::super) struct BatchScratch {
+    shared: Option<ffn_gpu::SharedColumns>,
+}
+
+impl BatchScratch {
+    pub(in super::super) fn new(model: &Forward<'_>, sequences: usize) -> Result<Self> {
+        let shared = if sequences >= 2 && batch_shared_enabled() {
+            Some(ffn_gpu::SharedColumns::new(
+                model.ctx,
+                &model.config,
+                sequences,
+            )?)
+        } else {
+            None
+        };
+        Ok(Self { shared })
+    }
+}
 
 /// One sequence of a batched step: its token, its position before the step
 /// and its Engram row hashes for this token.
@@ -44,6 +93,22 @@ impl Workspace {
                 .encode(model.ctx, stages.enc(), &self.x, &slot.projected, 1)?;
         }
         self.layer_staged(model, stages, id, position, None, false)
+    }
+
+    /// `encode_layer` up to and including the FFN's HC pre (the shared
+    /// expert's input); `layer_after_shared` finishes the layer.
+    fn encode_layer_through_ffn_pre(
+        &mut self,
+        model: &Forward<'_>,
+        stages: &mut StageEncoder<'_>,
+        id: usize,
+        position: usize,
+    ) -> Result<()> {
+        if let Some(slot) = self.engrams.iter().find(|slot| slot.layer == id) {
+            slot.gate
+                .encode(model.ctx, stages.enc(), &self.x, &slot.projected, 1)?;
+        }
+        self.layer_through_ffn_pre(model, stages, id, position, None, false)
     }
 
     fn encode_head(&self, model: &Forward<'_>, stages: &mut StageEncoder<'_>) -> Result<()> {
@@ -87,10 +152,16 @@ pub(in super::super) fn run_batch(
     model: &Forward<'_>,
     workspaces: &mut [&mut Workspace],
     inputs: &[BatchInput<'_>],
+    scratch: &BatchScratch,
     cancel: Option<&AtomicBool>,
 ) -> Result<Vec<Vec<f32>>> {
     op::require(
-        !workspaces.is_empty() && workspaces.len() == inputs.len(),
+        !workspaces.is_empty()
+            && workspaces.len() == inputs.len()
+            && scratch
+                .shared
+                .as_ref()
+                .is_none_or(|shared| shared.cols() == workspaces.len()),
         "batched decode shape",
     )?;
     let ctx = model.ctx;
@@ -155,8 +226,33 @@ pub(in super::super) fn run_batch(
                     }
                 }
                 for id in range {
+                    let Some(shared) = &scratch.shared else {
+                        for (ws, input) in workspaces.iter_mut().zip(inputs) {
+                            ws.encode_layer(model, &mut stages, id, input.position)?;
+                        }
+                        continue;
+                    };
                     for (ws, input) in workspaces.iter_mut().zip(inputs) {
-                        ws.encode_layer(model, &mut stages, id, input.position)?;
+                        ws.encode_layer_through_ffn_pre(model, &mut stages, id, input.position)?;
+                    }
+                    if ffn_split_encoders() {
+                        stages.split();
+                    }
+                    let (shared_in, shared_out): (Vec<_>, Vec<_>) =
+                        workspaces.iter().map(|ws| ws.ffn.shared_io()).unzip();
+                    ffn_gpu::encode_shared_columns(
+                        ctx,
+                        stages.enc(),
+                        &model.config,
+                        &model.layers[id].shared,
+                        id,
+                        &shared_in,
+                        &shared_out,
+                        shared,
+                    )
+                    .map_err(|e| e.to_string())?;
+                    for ws in workspaces.iter_mut() {
+                        ws.layer_after_shared(model, &mut stages, id)?;
                     }
                 }
                 if head {

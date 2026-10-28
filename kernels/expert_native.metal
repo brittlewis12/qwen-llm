@@ -620,3 +620,129 @@ kernel void kernel_dense_pair_q8_0_f32_splitk(
     threadgroup_barrier(mem_flags::mem_threadgroup);
     if (tid == 0) (second ? y_b : y_a)[row_index] = (partial[0] + partial[1]) + (partial[2] + partial[3]);
 }
+
+// Dense Q5_K projection of `cols` (1..=8) F32 activation columns as a skinny
+// GEMM on the simdgroup matrix units: every weight is read and dequantized
+// once (in registers) for all columns, so the cost is nearly flat in `cols`.
+// Input is [n_in x cols] and output [n_out x cols], each column contiguous.
+// In the 8x8 fragment layout (thread_elements() of lane l are row
+// fm = (l / 4 & 4) + (l / 2) % 4, columns fn, fn + 1 with
+// fn = (l / 4 & 2) * 2 + (l % 2) * 2) lane l holds A[fm][fn..fn+1] = weights
+// of channel fm and B[fm][fn..fn+1] = activations of columns fn, fn + 1. K is
+// permuted inside each 128-weight half block m so that every lane's A elements
+// come from one 16-byte quant chunk (k-index 2p + e of tile t = nibble e of
+// byte t of chunk 4m + p, p = fn / 2) and its B elements are 16 contiguous
+// floats per column. Each simdgroup owns DENSE_SKINNY_T8 tiles of 8 channels
+// that share the B fragments. The threadgroup is (32, ny, nz): ny simdgroups
+// own disjoint channel sets, nz split the blocks of K (block b goes to slice
+// b % nz); partials meet once in threadgroup memory after the K loop.
+// Grid: ceil(n_out / (ny * 8 * DENSE_SKINNY_T8)) threadgroups; ny * nz <= 8.
+// F32 operands and accumulation; the summation order differs from the
+// one-row kernels (F32 rounding, not bitwise). Columns past `cols` re-read the
+// last column and are never stored. Weight rows and the input are read with
+// 16-byte vector loads: both must be 16-byte aligned, n_in % 256 == 0.
+#define DENSE_SKINNY_T8 2
+struct dense_skinny_args { ulong row_bytes; uint n_in; uint n_out; uint cols; uint pad; };
+[[max_total_threads_per_threadgroup(256)]]
+kernel void kernel_dense_skinny_mma_q5_K_f32(
+        constant dense_skinny_args & args [[buffer(0)]],
+        device const uchar * weight [[buffer(1)]],
+        device const float * input [[buffer(2)]],
+        device float * output [[buffer(3)]],
+        uint3 group [[threadgroup_position_in_grid]],
+        ushort3 tpos [[thread_position_in_threadgroup]],
+        ushort3 tdim [[threads_per_threadgroup]]) {
+    constexpr ushort SG_CH = 8 * DENSE_SKINNY_T8;
+    threadgroup float partial[8 * SG_CH * 8];
+    const uint ncols = min(args.cols, 8u);
+    if (ncols == 0u) return;
+    const ushort lane = tpos.x, sy = tpos.y, sz = tpos.z;
+    const ushort ny = tdim.y, nz = tdim.z;
+    const ushort qid = lane / 4;
+    const ushort fm = (qid & 4) + ((lane / 2) % 4);
+    const ushort fn = (qid & 2) * 2 + (lane % 2) * 2;
+    const uint base = (group.x * ny + sy) * SG_CH;
+    device const uchar * rowp[DENSE_SKINNY_T8];
+    QT_FOR_UNROLL (ushort t8 = 0; t8 < DENSE_SKINNY_T8; ++t8) {
+        // Ragged channel tails re-read the last row; their sums are dropped.
+        const uint channel = min(base + uint(t8) * 8u + fm, args.n_out - 1u);
+        rowp[t8] = weight + ulong(channel) * args.row_bytes;
+    }
+    const uint p = fn / 2;
+    const uint h = p & 1u;
+    const uint sh = 16u * (p >> 1);
+    const uint pb = fm >> 1, eb = fm & 1u;
+    const uint xoff = 64u * (pb >> 1) + 32u * eb + 16u * (pb & 1u);
+    device const float * x0 = input + ulong(min(uint(fn), ncols - 1u)) * args.n_in + xoff;
+    device const float * x1 = input + ulong(min(uint(fn) + 1u, ncols - 1u)) * args.n_in + xoff;
+    simdgroup_float8x8 acc[DENSE_SKINNY_T8];
+    QT_FOR_UNROLL (ushort t8 = 0; t8 < DENSE_SKINNY_T8; ++t8) {
+        acc[t8] = make_filled_simdgroup_matrix<float, 8, 8>(0.0f);
+    }
+    const uint nb = args.n_in / 256u;
+    for (uint b = sz; b < nb; b += nz) {
+        const ulong boff = ulong(b) * QT_Q5_K_BYTES;
+        uint4 hdr[DENSE_SKINNY_T8], qh[DENSE_SKINNY_T8];
+        QT_FOR_UNROLL (ushort t8 = 0; t8 < DENSE_SKINNY_T8; ++t8) {
+            hdr[t8] = *((device const uint4 *)(rowp[t8] + boff));
+            qh[t8] = *((device const uint4 *)(rowp[t8] + boff + 16u + 16u * h));
+        }
+        QT_FOR_UNROLL (ushort m = 0; m < 2; ++m) {
+            const uint hs = 2u * ((p >> 1) + 2u * m);
+            const uint kb = b * 256u + 128u * m;
+            float4 xa[4], xb[4];
+            QT_FOR_UNROLL (ushort i = 0; i < 4; ++i) {
+                xa[i] = *((device const float4 *)(x0 + kb + 4u * i));
+                xb[i] = *((device const float4 *)(x1 + kb + 4u * i));
+            }
+            QT_FOR_UNROLL (ushort t8 = 0; t8 < DENSE_SKINNY_T8; ++t8) {
+                const uint4 qs = *((device const uint4 *)(rowp[t8] + boff + 48u + 16u * (4u * m + p)));
+                const half2 dd = as_type<half2>(hdr[t8].x);
+                uint scw, mnw;
+                if (m == 0) {
+                    scw = hdr[t8].y & 0x3F3F3F3Fu;
+                    mnw = hdr[t8].z & 0x3F3F3F3Fu;
+                } else {
+                    scw = (hdr[t8].w & 0x0F0F0F0Fu) | ((hdr[t8].y >> 2) & 0x30303030u);
+                    mnw = ((hdr[t8].w >> 4) & 0x0F0F0F0Fu) | ((hdr[t8].z >> 2) & 0x30303030u);
+                }
+                scw >>= sh;
+                mnw >>= sh;
+                const float dl0 = float(dd.x) * float(scw & 0xFFu);
+                const float dl1 = float(dd.x) * float((scw >> 8) & 0xFFu);
+                const float ml0 = float(dd.y) * float(mnw & 0xFFu);
+                const float ml1 = float(dd.y) * float((mnw >> 8) & 0xFFu);
+                QT_FOR_UNROLL (ushort w = 0; w < 4; ++w) {
+                    const uint hbits = qh[t8][w] >> hs;
+                    const uint lo = (qs[w] & 0x0F0F0F0Fu) | ((hbits << 4) & 0x10101010u);
+                    const uint hi = ((qs[w] >> 4) & 0x0F0F0F0Fu) | ((hbits << 3) & 0x10101010u);
+                    const float4 wl = fma(float4(as_type<uchar4>(lo)), dl0, -ml0);
+                    const float4 wh = fma(float4(as_type<uchar4>(hi)), dl1, -ml1);
+                    QT_FOR_UNROLL (ushort i = 0; i < 4; ++i) {
+                        simdgroup_float8x8 a, x;
+                        a.thread_elements()[0] = wl[i];
+                        a.thread_elements()[1] = wh[i];
+                        x.thread_elements()[0] = xa[w][i];
+                        x.thread_elements()[1] = xb[w][i];
+                        simdgroup_multiply_accumulate(acc[t8], a, x, acc[t8]);
+                    }
+                }
+            }
+        }
+    }
+    const uint slot = uint(sz) * ny + sy;
+    QT_FOR_UNROLL (ushort t8 = 0; t8 < DENSE_SKINNY_T8; ++t8) {
+        const uint at = (slot * SG_CH + uint(t8) * 8u + fm) * 8u + fn;
+        partial[at] = acc[t8].thread_elements()[0];
+        partial[at + 1u] = acc[t8].thread_elements()[1];
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    if (sz != 0) return;
+    for (uint e = lane; e < uint(SG_CH) * ncols; e += 32u) {
+        const uint ch = e % SG_CH, c = e / SG_CH;
+        float s = 0.0f;
+        for (uint z = 0; z < nz; ++z) s += partial[((z * ny + sy) * SG_CH + ch) * 8u + c];
+        const uint channel = base + ch;
+        if (channel < args.n_out) output[ulong(c) * args.n_out + channel] = s;
+    }
+}

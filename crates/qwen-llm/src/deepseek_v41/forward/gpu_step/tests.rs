@@ -451,33 +451,95 @@ fn capacity_memory_and_modes_are_explicit() {
     assert!(state.gpu_step.is_some());
 }
 
-/// The toy's F32 shared weights take the batched shared expert's bitwise
-/// column fallback, so batched steps equal separate steps bitwise whether
-/// the batched shared expert is on (its gather/scatter copies dispatched,
-/// one per sequence each way per layer) or off, with one or split FFN
-/// encoders.
+/// Batch-level levers of one `batched_steps_case`.
+#[derive(Clone, Copy, Debug)]
+struct BatchLevers {
+    shared: bool,
+    attention: bool,
+    ffn_split: bool,
+    per_column_copy: bool,
+    fused_rank_norms: bool,
+}
+
+/// The toy's F32 shared and attention weights take the batched projections'
+/// bitwise column fallback, so batched steps equal separate steps bitwise
+/// with the batched shared expert and the staged attention (q_b, output_b)
+/// on or off, one or split FFN encoders, one-dispatch or per-column column
+/// copies, and the unfused query/KV chain (which keeps per-sequence
+/// attention). The column copies are counted, so the batched paths ran.
 #[test]
 fn batched_steps_match_separate_steps_bitwise() {
-    use batch::BATCH_SHARED_OVERRIDE;
-    for (shared, ffn_split) in [(true, true), (true, false), (false, true)] {
-        BATCH_SHARED_OVERRIDE.with(|o| o.set(Some(shared)));
-        FFN_SPLIT_OVERRIDE.with(|o| o.set(Some(ffn_split)));
-        batched_steps_case(shared);
+    use super::super::attention_gpu::FUSED_RANK_NORMS_OVERRIDE;
+    use super::super::columns::PER_COLUMN_COPY_OVERRIDE;
+    use batch::{BATCH_ATTN_OVERRIDE, BATCH_SHARED_OVERRIDE};
+    let on = BatchLevers {
+        shared: true,
+        attention: true,
+        ffn_split: true,
+        per_column_copy: false,
+        fused_rank_norms: true,
+    };
+    for levers in [
+        on,
+        BatchLevers {
+            ffn_split: false,
+            ..on
+        },
+        BatchLevers {
+            per_column_copy: true,
+            ..on
+        },
+        BatchLevers {
+            shared: false,
+            ..on
+        },
+        BatchLevers {
+            attention: false,
+            ..on
+        },
+        BatchLevers {
+            shared: false,
+            attention: false,
+            ..on
+        },
+        BatchLevers {
+            fused_rank_norms: false,
+            ..on
+        },
+    ] {
+        BATCH_SHARED_OVERRIDE.with(|o| o.set(Some(levers.shared)));
+        BATCH_ATTN_OVERRIDE.with(|o| o.set(Some(levers.attention)));
+        FFN_SPLIT_OVERRIDE.with(|o| o.set(Some(levers.ffn_split)));
+        PER_COLUMN_COPY_OVERRIDE.with(|o| o.set(Some(levers.per_column_copy)));
+        FUSED_RANK_NORMS_OVERRIDE.with(|o| o.set(Some(levers.fused_rank_norms)));
+        batched_steps_case(levers);
         BATCH_SHARED_OVERRIDE.with(|o| o.set(None));
+        BATCH_ATTN_OVERRIDE.with(|o| o.set(None));
         FFN_SPLIT_OVERRIDE.with(|o| o.set(None));
+        PER_COLUMN_COPY_OVERRIDE.with(|o| o.set(None));
+        FUSED_RANK_NORMS_OVERRIDE.with(|o| o.set(None));
     }
 }
 
-fn batched_steps_case(shared: bool) {
+fn batched_steps_case(levers: BatchLevers) {
     let ctx = MetalContext::new().unwrap();
     let weights = toy::Weights::new(&ctx);
     let model = weights.model(&ctx);
-    let copies = |census: &[metal::DispatchCensusRow]| {
+    let count = |census: &[metal::DispatchCensusRow], kernels: &[&str]| {
         census
             .iter()
-            .filter(|r| r.kernel == "kernel_copy_offset_f32")
+            .filter(|r| kernels.contains(&r.kernel.as_str()))
             .count()
     };
+    let copy = ["kernel_copy_offset_f32"];
+    let columns = [
+        "kernel_deepseek_v41_gather_columns",
+        "kernel_deepseek_v41_scatter_columns",
+    ];
+    // Gathers and scatters per layer: one each for the shared expert, two
+    // each for the staged attention (q_b and output_b).
+    let transfers =
+        2 * levers.shared as usize + 4 * (levers.attention && levers.fused_rank_norms) as usize;
     for split in [false, true] {
         SPLIT_SUBMIT_OVERRIDE.with(|o| o.set(Some(split)));
         let new = || {
@@ -498,18 +560,27 @@ fn batched_steps_case(shared: bool) {
                 .zip(tokens)
                 .map(|(state, token)| model.step(state, token, None).unwrap())
                 .collect();
-            let serial_copies = copies(&metal::dispatch_census_take());
+            let serial = metal::dispatch_census_take();
             let mut states: Vec<&mut State> = batched.iter_mut().collect();
             metal::dispatch_census_begin();
             let logits = model.step_batch(&mut states, &tokens, None).unwrap();
-            let batch_copies = copies(&metal::dispatch_census_take());
-            let gathers = if shared {
-                2 * 3 * model.layers.len()
+            let batch = metal::dispatch_census_take();
+            let layers = model.layers.len();
+            let (copies, column_copies) = if levers.per_column_copy {
+                (3 * transfers * layers, 0)
             } else {
-                0
+                (0, transfers * layers)
             };
-            assert_eq!(batch_copies, serial_copies + gathers);
-            assert_eq!(logits, expected, "split {split} tokens {tokens:?}");
+            assert_eq!(
+                count(&batch, &copy),
+                count(&serial, &copy) + copies,
+                "{levers:?}"
+            );
+            assert_eq!(count(&batch, &columns), column_copies, "{levers:?}");
+            assert_eq!(
+                logits, expected,
+                "{levers:?} split {split} tokens {tokens:?}"
+            );
             for (alone, batched) in alone.iter().zip(&batched) {
                 assert!(batched.is_ready());
                 assert_eq!(batched.position(), alone.position());
@@ -520,6 +591,74 @@ fn batched_steps_case(shared: bool) {
         }
         SPLIT_SUBMIT_OVERRIDE.with(|o| o.set(None));
     }
+}
+
+/// The staged decode API refuses out-of-order stages before encoding, and a
+/// pending staged step blocks `encode`; the cursors stay put until finish.
+#[test]
+fn staged_attention_decode_refuses_out_of_order_stages() {
+    let ctx = MetalContext::new().unwrap();
+    let weights = toy::Weights::new(&ctx);
+    let model = weights.model(&ctx);
+    let mut state = model.new_state_with_gpu_step(2).unwrap();
+    let ws = state.gpu_step.as_mut().unwrap();
+    let w = &model.layers[0].attention;
+    let command = ctx.queue.commandBuffer().unwrap();
+    let enc = KernelEncoder::begin(&command);
+    let input = ws.normalized.clone();
+    let attention = &mut ws.attention;
+    assert!(attention.staged_decode_supported());
+    let order = |e: String| assert!(e.contains("staged decode order"), "{e}");
+    order(
+        attention
+            .encode_middle(&ctx, &enc, 0, 0, w, &input)
+            .unwrap_err(),
+    );
+    order(
+        attention
+            .encode_finish(&ctx, &enc, 0, 0)
+            .map(|_| ())
+            .unwrap_err(),
+    );
+    // Out of schedule order: refused by the front's checks.
+    let error = attention
+        .encode_front(&ctx, &enc, 1, 0, w, &input)
+        .unwrap_err();
+    assert!(error.contains("order/capacity"), "{error}");
+    attention.encode_front(&ctx, &enc, 0, 0, w, &input).unwrap();
+    assert!(!attention.staged_decode_supported());
+    let error = attention
+        .encode(&ctx, &enc, 0, 0, w, &input)
+        .map(|_| ())
+        .unwrap_err();
+    assert!(error.contains("staged"), "{error}");
+    order(
+        attention
+            .encode_finish(&ctx, &enc, 0, 0)
+            .map(|_| ())
+            .unwrap_err(),
+    );
+    order(
+        attention
+            .encode_middle(&ctx, &enc, 0, 1, w, &input)
+            .unwrap_err(),
+    );
+    attention
+        .encode_middle(&ctx, &enc, 0, 0, w, &input)
+        .unwrap();
+    order(
+        attention
+            .encode_middle(&ctx, &enc, 0, 0, w, &input)
+            .unwrap_err(),
+    );
+    // The front for the next layer is refused until this step finishes.
+    let error = attention
+        .encode_front(&ctx, &enc, 1, 0, w, &input)
+        .unwrap_err();
+    assert!(error.contains("staged"), "{error}");
+    attention.encode_finish(&ctx, &enc, 0, 0).unwrap();
+    assert!(attention.staged_decode_supported());
+    enc.end();
 }
 
 #[test]
@@ -588,12 +727,13 @@ fn refused_batches_keep_states_and_failed_batches_poison_all() {
     assert_eq!(d.gpu_step.as_ref().unwrap().commands, 0);
 }
 
-/// One sequence never takes the batched shared expert: `step_batch` is
-/// `step`, dispatch for dispatch.
+/// One sequence never takes the batched shared expert or the staged
+/// attention: `step_batch` is `step`, dispatch for dispatch.
 #[test]
 fn single_sequence_batch_is_step_with_batched_shared_on() {
-    use batch::BATCH_SHARED_OVERRIDE;
+    use batch::{BATCH_ATTN_OVERRIDE, BATCH_SHARED_OVERRIDE};
     BATCH_SHARED_OVERRIDE.with(|o| o.set(Some(true)));
+    BATCH_ATTN_OVERRIDE.with(|o| o.set(Some(true)));
     let ctx = MetalContext::new().unwrap();
     let weights = toy::Weights::new(&ctx);
     let model = weights.model(&ctx);
@@ -618,4 +758,5 @@ fn single_sequence_batch_is_step_with_batched_shared_on() {
         assert_eq!(batch, step);
     }
     BATCH_SHARED_OVERRIDE.with(|o| o.set(None));
+    BATCH_ATTN_OVERRIDE.with(|o| o.set(None));
 }

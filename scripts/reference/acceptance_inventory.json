@@ -1821,6 +1821,20 @@
   },
   {
     "target": "lib",
+    "name": "deepseek_v41::forward::columns::tests::batched_f32_projection_is_bitwise_per_sequence",
+    "class": "gpu",
+    "ignored": false,
+    "reason": "Metal context, allocation or dispatch witness; parent GPU lane only."
+  },
+  {
+    "target": "lib",
+    "name": "deepseek_v41::forward::columns::tests::batched_q5_k_attention_projections_match_per_sequence_to_f32_rounding",
+    "class": "gpu",
+    "ignored": false,
+    "reason": "Metal context, allocation or dispatch witness; parent GPU lane only."
+  },
+  {
+    "target": "lib",
     "name": "deepseek_v41::forward::engram_gpu::tests::random_both_layouts_tiny_and_real_hidden_batched",
     "class": "gpu",
     "ignored": false,
@@ -2277,6 +2291,13 @@
   {
     "target": "lib",
     "name": "deepseek_v41::forward::gpu_step::tests::single_sequence_batch_is_step_with_batched_shared_on",
+    "class": "gpu",
+    "ignored": false,
+    "reason": "Metal context, allocation or dispatch witness; parent GPU lane only."
+  },
+  {
+    "target": "lib",
+    "name": "deepseek_v41::forward::gpu_step::tests::staged_attention_decode_refuses_out_of_order_stages",
     "class": "gpu",
     "ignored": false,
     "reason": "Metal context, allocation or dispatch witness; parent GPU lane only."

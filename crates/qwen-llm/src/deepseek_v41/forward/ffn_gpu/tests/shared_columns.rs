@@ -135,8 +135,17 @@ fn batched_q5_k_shared_expert_matches_per_sequence_to_f32_rounding() {
         let (want, got, kernels) = run_both(&ctx, &c, &shared, cols, cols as u64);
         let count = |name: &str| kernels.iter().filter(|k| *k == name).count();
         assert_eq!(count("kernel_dense_skinny_mma_q5_K_f32"), 3, "{kernels:?}");
-        assert_eq!(count("kernel_copy_offset_f32"), 2 * cols, "{kernels:?}");
-        assert_eq!(kernels.len(), 2 * cols + 4, "{kernels:?}");
+        assert_eq!(
+            count("kernel_deepseek_v41_gather_columns"),
+            1,
+            "{kernels:?}"
+        );
+        assert_eq!(
+            count("kernel_deepseek_v41_scatter_columns"),
+            1,
+            "{kernels:?}"
+        );
+        assert_eq!(kernels.len(), 6, "{kernels:?}");
         for (b, (want, got)) in want.iter().zip(&got).enumerate() {
             let scale = want.iter().fold(0f32, |m, v| m.max(v.abs()));
             assert!(scale > 0.0 && scale.is_finite(), "column {b} scale {scale}");

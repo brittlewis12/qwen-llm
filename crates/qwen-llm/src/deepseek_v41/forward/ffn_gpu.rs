@@ -265,60 +265,13 @@ pub(super) struct SharedColumns {
 }
 
 impl SharedColumns {
-    /// Region element counts in allocation order (x, gate, up, activation,
-    /// output) and each region's padded element stride.
-    fn regions(c: &Config, cols: usize) -> Result<([usize; 5], [usize; 5])> {
-        let column = |n: usize| {
-            n.checked_mul(cols)
-                .filter(|&n| n > 0 && u32::try_from(n).is_ok())
-                .ok_or_else(|| "shared column scratch extent".to_string())
-        };
-        let (h, i) = (column(c.hidden)?, column(c.intermediate)?);
-        let sizes = [h, i, i, i, h];
-        Ok((sizes, sizes.map(|n| n.next_multiple_of(64))))
-    }
-
-    pub(super) fn bytes(c: &Config, cols: usize) -> Result<u64> {
-        let (_, strides) = Self::regions(c, cols)?;
-        strides
-            .iter()
-            .try_fold(0u64, |sum, &n| sum.checked_add(n as u64 * 4))
-            .ok_or_else(|| "shared column scratch bytes".into())
-    }
-
     /// Prices and admits the scratch before allocating it.
     pub(super) fn new(ctx: &MetalContext, c: &Config, cols: usize) -> Result<Self> {
         validate(c)?;
-        op::require(cols >= 1, "shared column scratch needs a column")?;
-        let (sizes, strides) = Self::regions(c, cols)?;
-        let logical = Self::bytes(c, cols)?;
-        let priced = ctx
-            .price_shared_buffer_upper(logical)
-            .map_err(|e| e.to_string())?;
-        op::require(
-            priced.priced_upper_bytes <= logical + 16384,
-            "shared column scratch exceeds estimated page slack",
-        )?;
-        let admission = metal::evaluate_metal_memory_admission_with_cpu_bytes(
-            priced.priced_upper_bytes,
-            0,
-            0,
-            ctx.memory_signals(),
-            true,
-        );
-        if let Some(reason) = admission.refusal() {
-            return Err(format!("shared column scratch refused: {reason:?}"));
-        }
-        let total = strides.iter().sum::<usize>();
-        let backing = MetalTensor::zeros_dtype_unstaged(ctx, vec![total as u64], GgmlType::F32)
-            .map_err(|e| e.to_string())?;
-        let mut offset = 0;
-        let mut views = sizes.iter().zip(strides).map(|(&n, stride)| {
-            let view = backing.view_subrange(offset as u64, vec![n as u64]);
-            offset += stride;
-            view
-        });
-        let mut next = || views.next().expect("five regions");
+        let (h, i) = (c.hidden, c.intermediate);
+        let mut regions =
+            columns::allocate(ctx, &[h, i, i, i, h], cols, "shared column scratch")?.into_iter();
+        let mut next = || regions.next().expect("five regions");
         Ok(Self {
             cols,
             x: next(),
@@ -327,10 +280,6 @@ impl SharedColumns {
             activation: next(),
             output: next(),
         })
-    }
-
-    pub(super) fn cols(&self) -> usize {
-        self.cols
     }
 }
 
@@ -353,7 +302,6 @@ pub(super) fn encode_shared_columns(
     scratch: &SharedColumns,
 ) -> std::result::Result<(), metal::MetalError> {
     let cols = scratch.cols;
-    let hidden = c.hidden;
     if inputs.len() != cols || outputs.len() != cols {
         return Err(metal::MetalError::BadShape {
             kernel: "v41_shared_columns",
@@ -365,12 +313,7 @@ pub(super) fn encode_shared_columns(
         });
     }
     metal::dispatch_profile_label("ffn_shared", Some(id));
-    for (column, input) in inputs.iter().enumerate() {
-        let dst = scratch
-            .x
-            .view_subrange((column * hidden) as u64, vec![hidden as u64]);
-        metal::encode_copy_offset_f32(ctx, enc, input, 0, &dst, hidden)?;
-    }
+    columns::encode_gather(ctx, enc, inputs, &scratch.x)?;
     shared[0].encode_columns(enc, &scratch.x, &scratch.gate, cols)?;
     shared[1].encode_columns(enc, &scratch.x, &scratch.up, cols)?;
     metal::encode_clamped_swiglu(
@@ -382,10 +325,7 @@ pub(super) fn encode_shared_columns(
         c.clamp,
     )?;
     shared[2].encode_columns(enc, &scratch.activation, &scratch.output, cols)?;
-    for (column, output) in outputs.iter().enumerate() {
-        metal::encode_copy_offset_f32(ctx, enc, &scratch.output, column * hidden, output, hidden)?;
-    }
-    Ok(())
+    columns::encode_scatter(ctx, enc, &scratch.output, outputs)
 }
 
 impl Workspace {

@@ -6,6 +6,7 @@ mod bind;
 pub(super) mod binding;
 mod ced;
 mod ced_plan;
+mod columns;
 pub use ced::{CedCounters, CedLayerCounters, CedMemoryEstimate, PrefillExecution, PrefillReport};
 mod engram_gpu;
 mod prefill;

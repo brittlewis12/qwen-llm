@@ -733,3 +733,47 @@ kernel void kernel_deepseek_v41_hc_projection_rows(
         }
     }
 }
+
+// Batched decode column copies: column c of the [n x cols] F32 tensor
+// `columns` (each column contiguous) and the [n] vector bound at buffer
+// 2 + c, for cols <= 8 (unused slots may repeat a bound vector). Gather
+// copies vectors into columns, scatter columns into vectors. Grid
+// (ceil(n / 256), cols) threadgroups of 256.
+struct v41_columns_args { uint n; uint cols; };
+
+inline device float * v41_column_vector(
+    uint c, device float *v0, device float *v1, device float *v2, device float *v3,
+    device float *v4, device float *v5, device float *v6, device float *v7) {
+    switch (c) {
+    case 0: return v0;
+    case 1: return v1;
+    case 2: return v2;
+    case 3: return v3;
+    case 4: return v4;
+    case 5: return v5;
+    case 6: return v6;
+    default: return v7;
+    }
+}
+
+#define V41_COLUMN_VECTORS                                                       \
+    device float *v0 [[buffer(2)]], device float *v1 [[buffer(3)]],            \
+    device float *v2 [[buffer(4)]], device float *v3 [[buffer(5)]],            \
+    device float *v4 [[buffer(6)]], device float *v5 [[buffer(7)]],            \
+    device float *v6 [[buffer(8)]], device float *v7 [[buffer(9)]]
+
+kernel void kernel_deepseek_v41_gather_columns(
+    constant v41_columns_args &a [[buffer(0)]], device float *columns [[buffer(1)]],
+    V41_COLUMN_VECTORS, uint2 gid [[thread_position_in_grid]]) {
+    if (gid.x >= a.n || gid.y >= a.cols || gid.y >= 8u) return;
+    device float *v = v41_column_vector(gid.y, v0, v1, v2, v3, v4, v5, v6, v7);
+    columns[ulong(gid.y) * a.n + gid.x] = v[gid.x];
+}
+
+kernel void kernel_deepseek_v41_scatter_columns(
+    constant v41_columns_args &a [[buffer(0)]], device float *columns [[buffer(1)]],
+    V41_COLUMN_VECTORS, uint2 gid [[thread_position_in_grid]]) {
+    if (gid.x >= a.n || gid.y >= a.cols || gid.y >= 8u) return;
+    device float *v = v41_column_vector(gid.y, v0, v1, v2, v3, v4, v5, v6, v7);
+    v[gid.x] = columns[ulong(gid.y) * a.n + gid.x];
+}

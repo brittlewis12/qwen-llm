@@ -91,6 +91,9 @@ pub(super) struct Workspace {
     next_position: usize,
     batch: Option<BatchCursor>,
     ced: Option<ced::Cursor>,
+    /// (layer, position, middle encoded) of a decode step encoded in stages
+    /// (`encode_front` .. `encode_finish`) whose finish is still due.
+    staged: Option<(usize, usize, bool)>,
     constants: Vec<Constants>,
     raw: MetalTensor,
     owners: Vec<OwnerCache>,
@@ -887,6 +890,7 @@ impl Workspace {
         op::require(
             self.ced.is_none()
                 && self.batch.is_none()
+                && self.staged.is_none()
                 && self.next_layer == 0
                 && self.next_position == position,
             "snapshot requires committed attention state",
@@ -951,6 +955,7 @@ impl Workspace {
         self.next_layer = 0;
         self.next_position = position;
         self.batch = None;
+        self.staged = None;
         Ok(())
     }
 }
@@ -2072,6 +2077,7 @@ impl Workspace {
             next_position: 0,
             batch: None,
             ced: None,
+            staged: None,
             constants,
             raw: f(schedule.layers * c.window * c.head_dim)?,
             owners,
@@ -2352,6 +2358,7 @@ impl Workspace {
         input: &MetalTensor,
     ) -> Result<&MetalTensor> {
         op::require(self.batch.is_none(), "decode during attention batch")?;
+        op::require(self.staged.is_none(), "decode during a staged decode step")?;
         if self.ced.is_some() {
             return self.encode_ced_scalar(ctx, enc, id, position, w, input);
         }
@@ -2366,6 +2373,107 @@ impl Workspace {
             true,
             GlobalKvMode::Ordinary,
         )
+    }
+
+    /// Whether a decode step of this workspace can be encoded in stages:
+    /// plain decode (no prefill batch, CED cursor or pending staged step) on
+    /// the fused rank-norm chain (`QWEN_V41_QKV_CHAIN` not `split`).
+    pub(super) fn staged_decode_supported(&self) -> bool {
+        self.batch.is_none() && self.ced.is_none() && self.staged.is_none() && fused_rank_norms()
+    }
+
+    /// `encode` in three stages, so a caller can project the query
+    /// up-projection (q_b) and output_b of several sequences at once:
+    /// `encode_front` (all checks, rank projections and norms; writes
+    /// `staged_io()[0]`, the query rank), then the caller's q_b into
+    /// `staged_io()[1]` (the query), `encode_middle` (query RoPE through
+    /// output_a; writes `staged_io()[2]`, the output rank), the caller's
+    /// output_b into `staged_io()[3]` (the output), and `encode_finish`
+    /// (finite check and the cursor advance). With `Linear::encode` for both
+    /// projections it is `encode`, dispatch for dispatch. Validation happens
+    /// in the front; the cursors move only in the finish, so an error at any
+    /// stage leaves them unadvanced (the caller poisons the sequence).
+    pub(super) fn encode_front(
+        &mut self,
+        ctx: &MetalContext,
+        enc: &KernelEncoder,
+        id: usize,
+        position: usize,
+        w: &Weights<'_>,
+        input: &MetalTensor,
+    ) -> Result<()> {
+        op::require(
+            self.staged_decode_supported(),
+            "staged decode needs plain fused-chain decode",
+        )?;
+        let projected = self.encode_qkv(
+            ctx,
+            enc,
+            id,
+            position,
+            w,
+            input,
+            None,
+            GlobalKvMode::Ordinary,
+        )?;
+        op::require(!projected, "staged decode query projection")?;
+        self.staged = Some((id, position, false));
+        Ok(())
+    }
+
+    /// The middle stage of a staged decode step (see `encode_front`); the
+    /// query must already be projected.
+    pub(super) fn encode_middle(
+        &mut self,
+        ctx: &MetalContext,
+        enc: &KernelEncoder,
+        id: usize,
+        position: usize,
+        w: &Weights<'_>,
+        input: &MetalTensor,
+    ) -> Result<()> {
+        op::require(
+            self.staged == Some((id, position, false)),
+            "staged decode order",
+        )?;
+        self.encode_core(
+            ctx,
+            enc,
+            id,
+            position,
+            w,
+            input,
+            None,
+            true,
+            true,
+            GlobalKvMode::Ordinary,
+        )?;
+        self.staged = Some((id, position, true));
+        Ok(())
+    }
+
+    /// The last stage of a staged decode step (see `encode_front`); the
+    /// output must already be projected. Returns the output.
+    pub(super) fn encode_finish(
+        &mut self,
+        ctx: &MetalContext,
+        enc: &KernelEncoder,
+        id: usize,
+        position: usize,
+    ) -> Result<&MetalTensor> {
+        op::require(
+            self.staged == Some((id, position, true)),
+            "staged decode order",
+        )?;
+        self.staged = None;
+        self.encode_close(ctx, enc, id, true)?;
+        Ok(&self.output)
+    }
+
+    /// Bindings of the projections a staged decode step leaves to the
+    /// caller: [query rank, query, output rank, output].
+    pub(super) fn staged_io(&self) -> [&MetalTensor; 4] {
+        [&self.query_rank, &self.query, &self.low, &self.output]
     }
 
     pub(super) fn begin_batch(&mut self, start: usize, rows: usize) -> Result<()> {
@@ -2724,6 +2832,36 @@ impl Workspace {
         select: bool,
         mode: GlobalKvMode,
     ) -> Result<&MetalTensor> {
+        if !self.encode_qkv(ctx, enc, id, position, w, input, prepared, mode)? {
+            linear(ctx, enc, &w.query_b, &self.query_rank, &self.query)?;
+        }
+        self.encode_core(
+            ctx, enc, id, position, w, input, prepared, publish, select, mode,
+        )?;
+        if prepared.is_none() {
+            linear(ctx, enc, &w.output_b, &self.low, &self.output)?;
+        }
+        self.encode_close(ctx, enc, id, prepared.is_none())?;
+        Ok(&self.output)
+    }
+
+    /// The step's checks, then (unless prepared) its query/KV projections.
+    /// Order/capacity, global mode, weights and input are validated before
+    /// anything is encoded; nothing advances here. Returns whether the query
+    /// up-projection (q_b: `query_rank` -> `query`) is already encoded: false
+    /// only on the fused rank-norm decode chain, whose next dispatch is q_b.
+    #[allow(clippy::too_many_arguments)]
+    fn encode_qkv(
+        &self,
+        ctx: &MetalContext,
+        enc: &KernelEncoder,
+        id: usize,
+        position: usize,
+        w: &Weights<'_>,
+        input: &MetalTensor,
+        prepared: Option<(&Rows, usize)>,
+        mode: GlobalKvMode,
+    ) -> Result<bool> {
         op::require(
             !enc.is_concurrent(),
             "GPU attention requires serial encoder",
@@ -2741,71 +2879,96 @@ impl Workspace {
         valid_view(input, c.hidden)?;
         let constants = &self.constants[id];
         let label = |name| metal::dispatch_profile_label(name, Some(id));
+        if prepared.is_some() {
+            return Ok(true);
+        }
+        label("attn_qkv");
+        let raw = self.raw.view_subrange(
+            (id * c.window * c.head_dim) as u64,
+            vec![(c.window * c.head_dim) as u64],
+        );
+        let row = raw.view_subrange(
+            (position % c.window * c.head_dim) as u64,
+            vec![c.head_dim as u64],
+        );
+        if fused_rank_norms() {
+            // Both rank projections, then one dispatch for both norms, the
+            // KV RoPE and the ring store; the caller projects the query.
+            super::encode_linear_pair(
+                enc,
+                (&w.query_a, &self.query_rank),
+                (&w.kv, &self.latent),
+                input,
+            )
+            .map_err(|e| e.to_string())?;
+            rank_norms(
+                ctx,
+                enc,
+                c,
+                constants,
+                w.eps,
+                position,
+                &self.query_rank,
+                &self.latent,
+                &row,
+            )?;
+            return Ok(false);
+        }
+        linear(ctx, enc, &w.query_a, input, &self.query_rank)?;
+        norm(
+            ctx,
+            enc,
+            &self.query_rank,
+            &constants.query_norm,
+            c.query_rank,
+            w.eps,
+        )?;
+        linear(ctx, enc, &w.query_b, &self.query_rank, &self.query)?;
+        linear(ctx, enc, &w.kv, input, &self.latent)?;
+        norm(
+            ctx,
+            enc,
+            &self.latent,
+            &constants.kv_norm,
+            c.head_dim,
+            w.eps,
+        )?;
+        rope(
+            ctx,
+            enc,
+            &self.latent,
+            &constants.frequencies,
+            c.head_dim,
+            1,
+            c.rope_dim / 2,
+            position,
+            false,
+        )?;
+        copy(ctx, enc, &self.latent, &row, c.head_dim)?;
+        Ok(true)
+    }
+
+    /// Query RoPE, owner publication, index selection, attention core,
+    /// attended RoPE and output_a (writes `low`) of a step whose query is
+    /// projected (prepared rows only publish and select).
+    #[allow(clippy::too_many_arguments)]
+    fn encode_core(
+        &mut self,
+        ctx: &MetalContext,
+        enc: &KernelEncoder,
+        id: usize,
+        position: usize,
+        w: &Weights<'_>,
+        input: &MetalTensor,
+        prepared: Option<(&Rows, usize)>,
+        publish: bool,
+        select: bool,
+        mode: GlobalKvMode,
+    ) -> Result<()> {
+        let c = &self.config;
+        let constants = &self.constants[id];
+        let label = |name| metal::dispatch_profile_label(name, Some(id));
         if prepared.is_none() {
-            label("attn_qkv");
-            let raw = self.raw.view_subrange(
-                (id * c.window * c.head_dim) as u64,
-                vec![(c.window * c.head_dim) as u64],
-            );
-            let row = raw.view_subrange(
-                (position % c.window * c.head_dim) as u64,
-                vec![c.head_dim as u64],
-            );
-            if fused_rank_norms() {
-                // Both rank projections, then one dispatch for both norms, the
-                // KV RoPE and the ring store, then the query up-projection.
-                super::encode_linear_pair(
-                    enc,
-                    (&w.query_a, &self.query_rank),
-                    (&w.kv, &self.latent),
-                    input,
-                )
-                .map_err(|e| e.to_string())?;
-                rank_norms(
-                    ctx,
-                    enc,
-                    c,
-                    constants,
-                    w.eps,
-                    position,
-                    &self.query_rank,
-                    &self.latent,
-                    &row,
-                )?;
-                linear(ctx, enc, &w.query_b, &self.query_rank, &self.query)?;
-            } else {
-                linear(ctx, enc, &w.query_a, input, &self.query_rank)?;
-                norm(
-                    ctx,
-                    enc,
-                    &self.query_rank,
-                    &constants.query_norm,
-                    c.query_rank,
-                    w.eps,
-                )?;
-                linear(ctx, enc, &w.query_b, &self.query_rank, &self.query)?;
-                linear(ctx, enc, &w.kv, input, &self.latent)?;
-                norm(
-                    ctx,
-                    enc,
-                    &self.latent,
-                    &constants.kv_norm,
-                    c.head_dim,
-                    w.eps,
-                )?;
-                rope(
-                    ctx,
-                    enc,
-                    &self.latent,
-                    &constants.frequencies,
-                    c.head_dim,
-                    1,
-                    c.rope_dim / 2,
-                    position,
-                    false,
-                )?;
-                copy(ctx, enc, &self.latent, &row, c.head_dim)?;
-            }
             rope(
                 ctx,
                 enc,
@@ -3055,7 +3218,22 @@ impl Workspace {
                     }
                 }
             }
-            linear(ctx, enc, &w.output_b, &self.low, &self.output)?;
+        }
+        Ok(())
+    }
+
+    /// The decode output's finite check (`finite`), then the cursor advance
+    /// past layer `id`: the only place a step moves the layer/position
+    /// cursors.
+    fn encode_close(
+        &mut self,
+        ctx: &MetalContext,
+        enc: &KernelEncoder,
+        id: usize,
+        finite: bool,
+    ) -> Result<()> {
+        let c = &self.config;
+        if finite {
             let pso = pipeline(ctx, enc, "finite")?;
             enc.set_bytes(0, &(c.hidden as u32));
             enc.set_tensor(1, &self.output);
@@ -3083,7 +3261,7 @@ impl Workspace {
                 }
             }
         }
-        Ok(&self.output)
+        Ok(())
     }
 
     /// Sticky device error bits: 1 NaN selection score, 2 invalid selected ID,

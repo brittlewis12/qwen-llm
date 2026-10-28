@@ -947,15 +947,26 @@ impl Workspace {
         snapshot: Option<&capture::Snapshot>,
         ced: bool,
     ) -> Result<()> {
+        self.layer_until_ffn(model, stages, id, position, snapshot, ced)?;
+        self.layer_ffn(model, stages, id)
+    }
+
+    /// The layer's FFN: one `ffn_gpu::Workspace::encode`, or its parts on
+    /// separate encoders when `ffn_split_encoders()`.
+    fn layer_ffn(
+        &mut self,
+        model: &Forward<'_>,
+        stages: &mut StageEncoder<'_>,
+        id: usize,
+    ) -> Result<()> {
         if !ffn_split_encoders() {
-            self.layer_until_ffn(model, stages, id, position, snapshot, ced)?;
             let (ctx, c, l) = (model.ctx, &model.config, &model.layers[id]);
             return self
                 .ffn
                 .encode(ctx, stages.enc(), c, l, id, &self.half, &self.pre, &self.x)
                 .map_err(|e| e.to_string());
         }
-        self.layer_through_ffn_pre(model, stages, id, position, snapshot, ced)?;
+        self.ffn_hc_pre(model, stages, id)?;
         stages.split();
         self.ffn
             .encode_shared(
@@ -969,20 +980,16 @@ impl Workspace {
         self.layer_after_shared(model, stages, id)
     }
 
-    /// `layer_staged` up to and including the FFN's HC pre, which writes the
-    /// shared expert's input (`ffn_gpu::Workspace::shared_io`). With
-    /// `layer_after_shared` and a shared expert encoded in between (this
-    /// sequence's own, or a batch's) it is `layer_staged`.
-    fn layer_through_ffn_pre(
+    /// The FFN's HC pre, which writes the shared expert's input
+    /// (`ffn_gpu::Workspace::shared_io`). It, a shared expert (this
+    /// sequence's own, or a batch's) and `layer_after_shared` make
+    /// `layer_ffn`.
+    fn ffn_hc_pre(
         &mut self,
         model: &Forward<'_>,
         stages: &mut StageEncoder<'_>,
         id: usize,
-        position: usize,
-        snapshot: Option<&capture::Snapshot>,
-        ced: bool,
     ) -> Result<()> {
-        self.layer_until_ffn(model, stages, id, position, snapshot, ced)?;
         self.ffn
             .encode_hc_pre(
                 model.ctx,
@@ -1031,9 +1038,26 @@ impl Workspace {
         snapshot: Option<&capture::Snapshot>,
         ced: bool,
     ) -> Result<()> {
-        let ctx = model.ctx;
-        let c = &model.config;
-        let l = &model.layers[id];
+        self.attention_input(model, stages, id)?;
+        let (ctx, enc, l) = (model.ctx, stages.enc(), &model.layers[id].attention);
+        let output = if ced {
+            self.attention
+                .encode_ced_scalar(ctx, enc, id, position, l, &self.normalized)?
+        } else {
+            self.attention
+                .encode(ctx, enc, id, position, l, &self.normalized)?
+        }
+        .clone();
+        self.attention_output(model, stages, id, position, &output, snapshot)
+    }
+
+    /// The attention's HC pre: writes its input (`normalized`).
+    fn attention_input(
+        &mut self,
+        model: &Forward<'_>,
+        stages: &mut StageEncoder<'_>,
+        id: usize,
+    ) -> Result<()> {
         let incoming = if id == 0 {
             &self.initial_pre
         } else {
@@ -1042,20 +1066,22 @@ impl Workspace {
         metal::dispatch_profile_label("hc_pre", Some(id));
         self.normalize_scalar_input(model, stages.enc(), id, &self.x, incoming)?;
         stages.boundary();
-        let enc = stages.enc();
-        let output = if ced {
-            self.attention.encode_ced_scalar(
-                ctx,
-                enc,
-                id,
-                position,
-                &l.attention,
-                &self.normalized,
-            )?
-        } else {
-            self.attention
-                .encode(ctx, enc, id, position, &l.attention, &self.normalized)?
-        };
+        Ok(())
+    }
+
+    /// The attention's HC post of its `output` (and any snapshot capture).
+    fn attention_output(
+        &mut self,
+        model: &Forward<'_>,
+        stages: &mut StageEncoder<'_>,
+        id: usize,
+        position: usize,
+        output: &MetalTensor,
+        snapshot: Option<&capture::Snapshot>,
+    ) -> Result<()> {
+        let ctx = model.ctx;
+        let c = &model.config;
+        let l = &model.layers[id];
         stages.boundary();
         let enc = stages.enc();
         metal::dispatch_profile_label("hc_post", Some(id));

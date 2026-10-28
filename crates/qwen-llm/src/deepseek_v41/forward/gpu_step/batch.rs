@@ -126,16 +126,19 @@ fn batch_qkv_enabled() -> bool {
 /// `0` keeps each sequence's Engram projections per sequence in a batched
 /// decode step; otherwise each Engram layer's projection runs once over all
 /// sequences' Engram rows as columns (Q5_K through the skinny kernel, F32
-/// rounding; other storage column by column, bitwise). A/B lever.
+/// rounding; other storage column by column, bitwise). M5 Ultra, GSQ,
+/// 512-token prefixes: saves 0.5/1.1 ms per batched round at B = 4/8. A/B
+/// lever.
 const BATCH_ENGRAM_ENV: &str = "QWEN_V41_BATCH_ENGRAM";
 
 /// `0` keeps each sequence's router and routed experts per sequence in a
 /// batched decode step; otherwise every layer routes all sequences in one
 /// dispatch and runs the fused gate/up and down once with one grid row per
-/// sequence (the router itself column by column unless its storage has a
-/// skinny kernel). Every per-row kernel computes each (sequence, slot) with
-/// the one-sequence arithmetic, so values are bitwise per-sequence. A/B
-/// lever.
+/// sequence (the router itself column by column: a BF16 skinny router
+/// measured no gain on M5). Every per-row kernel computes each (sequence,
+/// slot) with the one-sequence arithmetic, so values are bitwise
+/// per-sequence. M5 Ultra, GSQ, 512-token prefixes: saves 3.1/8.2 ms per
+/// batched round at B = 4/8. A/B lever.
 const BATCH_ROUTED_ENV: &str = "QWEN_V41_BATCH_ROUTED";
 
 /// A batched decode step starts a new encoder for each sequence's own chain

@@ -15,10 +15,37 @@ use std::time::{Duration, Instant};
 
 use qwen_llm::tokenizer::NativeTokenizer;
 
+/// Idle V4.1 live sessions `qwen serve` keeps for exact-prefix reuse (default
+/// 1: the single live session). Larger values keep other conversations'
+/// sessions resident; the least recently used is released when the count or
+/// `QWEN_SERVE_V41_LIVE_STATE_MIB` budget is exceeded and, under memory
+/// pressure, before a request is refused. Positive integer; read at startup.
+const LIVE_STATES_ENV: &str = "QWEN_SERVE_V41_LIVE_STATES";
+/// Optional MiB budget for idle V4.1 live sessions, each measured by the
+/// engine's request-memory estimate at its capacity. Unset: count only.
+/// Positive integer; read at startup.
+const LIVE_STATE_MIB_ENV: &str = "QWEN_SERVE_V41_LIVE_STATE_MIB";
+
+fn positive_env(name: &str) -> Result<Option<usize>> {
+    let value = match std::env::var(name) {
+        Err(std::env::VarError::NotPresent) => return Ok(None),
+        Err(error) => anyhow::bail!("read {name}: {error}"),
+        Ok(value) => value,
+    };
+    value
+        .parse::<usize>()
+        .ok()
+        .filter(|&n| n >= 1)
+        .map(Some)
+        .with_context(|| format!("{name} must be a positive integer, got {value:?}"))
+}
+
 pub(super) struct Prepared {
     settings: Settings,
     snapshot_mib: Option<u64>,
     snapshot_policy: qwen_llm::snapshot_policy::SnapshotPolicyConfig,
+    live_states: usize,
+    live_state_bytes: Option<u64>,
 }
 impl Prepared {
     pub(super) fn new(
@@ -43,7 +70,13 @@ impl Prepared {
             "V4.1 tokenizer/model vocabulary mismatch"
         );
         let eos = tokenizer.eos().context("V4.1 GGUF has no EOS")? as u32;
+        let live_state_bytes = positive_env(LIVE_STATE_MIB_ENV)?
+            .map(|mib| (mib as u64).checked_mul(1 << 20))
+            .map(|bytes| bytes.context("V4.1 live-state budget overflows"))
+            .transpose()?;
         Ok(Self {
+            live_states: positive_env(LIVE_STATES_ENV)?.unwrap_or(1),
+            live_state_bytes,
             snapshot_mib: invocation.snapshot_cache_mib,
             snapshot_policy: invocation.snapshot_policy,
             settings: Settings::new(
@@ -79,10 +112,20 @@ pub(super) fn start(
     let mut settings = prepared.settings;
     settings.model_id = listening.model_id.clone();
     let mut backend = Backend::new(&ctx, forward, settings);
-    backend.reuse = reuse::Store::new(plan.bytes, plan.policy);
+    tracing::info!(
+        "serve: V4.1 idle live sessions: {} (budget {})",
+        prepared.live_states,
+        prepared.live_state_bytes.map_or_else(
+            || "count only".to_owned(),
+            |bytes| format!("{} MiB", bytes >> 20)
+        )
+    );
+    backend.reuse = reuse::Store::new(plan.bytes, plan.policy)
+        .with_live_budget(prepared.live_states, prepared.live_state_bytes);
     listening.serve(started.elapsed().as_secs_f64() * 1e3, &mut backend)
 }
 
+mod cursor;
 mod execution;
 #[path = "backend_v41/io.rs"]
 mod memory_io;
@@ -302,11 +345,7 @@ impl Backend<'_> {
                     )
                     .map_err(state_error)
             },
-            &mut reuse::Session {
-                forward: &self.forward,
-                store: &mut self.reuse,
-                ctx: self.ctx,
-            },
+            &mut reuse::Session::new(&self.forward, &mut self.reuse, self.ctx),
             |state, tokens, cancel, with_logits| {
                 memory_io::observe_chunk(
                     prefill_observations.as_mut(),

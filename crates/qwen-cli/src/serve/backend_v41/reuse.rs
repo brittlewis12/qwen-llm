@@ -58,16 +58,23 @@ pub(super) struct Checkpoint {
 }
 
 pub(super) struct Store {
-    live: Option<Live<State>>,
+    live: operations::LivePool<State>,
     cache: SnapshotCache<Checkpoint>,
 }
 
 impl Store {
+    /// One idle live state (the single live session) and a snapshot cache.
     pub fn new(bytes: u64, policy: qwen_llm::snapshot_policy::SnapshotPolicyConfig) -> Self {
         Self {
-            live: None,
+            live: operations::LivePool::new(1, None),
             cache: SnapshotCache::new(bytes, policy),
         }
+    }
+
+    /// Keep up to `states` idle live states within an optional byte budget.
+    pub fn with_live_budget(mut self, states: usize, bytes: Option<u64>) -> Self {
+        self.live = operations::LivePool::new(states, bytes);
+        self
     }
 
     pub fn sweep(&mut self) {
@@ -79,24 +86,60 @@ pub(super) struct Session<'a, 'b> {
     pub forward: &'a Forward<'b>,
     pub store: &'a mut Store,
     pub ctx: &'a MetalContext,
+    /// The prompt being admitted, between `prepare` and `take`: memory relief
+    /// never releases an idle state that this request could take.
+    pub protect: Vec<u32>,
+}
+
+impl<'a, 'b> Session<'a, 'b> {
+    pub fn new(forward: &'a Forward<'b>, store: &'a mut Store, ctx: &'a MetalContext) -> Self {
+        Self {
+            forward,
+            store,
+            ctx,
+            protect: Vec::new(),
+        }
+    }
 }
 
 fn reuse_eligible(ready: bool, origin: PrefillExecution) -> bool {
     ready && origin == PrefillExecution::FullForward
 }
 
+fn describe(state: &State) -> (usize, bool) {
+    (
+        state.position(),
+        reuse_eligible(state.is_ready(), state.prefill_origin()),
+    )
+}
+
 impl Reuse<State> for Session<'_, '_> {
     fn prepare(&mut self, ids: &[u32]) {
-        operations::discard_incompatible(&mut self.store.live, ids, |state| {
-            (
-                state.position(),
-                reuse_eligible(state.is_ready(), state.prefill_origin()),
-            )
-        });
+        self.store.live.prepare(ids, describe);
+        self.protect = ids.to_vec();
     }
 
+    /// Snapshots first, then idle live states the admitting request could not
+    /// take. With one idle state that is never one (prepare kept only a
+    /// compatible state), so relief is snapshots-only as before.
     fn evict_for(&mut self, bytes: u64) -> qwen_llm::snapshot_policy::Evicted {
-        self.store.cache.evict_for(bytes)
+        let mut evicted = self.store.cache.evict_for(bytes);
+        let remaining = bytes.saturating_sub(evicted.bytes);
+        if remaining > 0 {
+            let (states, released) =
+                self.store
+                    .live
+                    .release_idle(remaining, &self.protect, describe);
+            if states > 0 {
+                tracing::info!(target: "qwen_diag",
+                    "serve: deepseek_v41 released {states} idle live states ({released} bytes) for memory relief");
+                evicted.bytes = evicted.bytes.saturating_add(released);
+                evicted
+                    .ids
+                    .extend((0..states as u64).map(qwen_llm::snapshot_policy::EntryId::external));
+            }
+        }
+        evicted
     }
 
     fn take(
@@ -106,10 +149,12 @@ impl Reuse<State> for Session<'_, '_> {
         reserve: u64,
     ) -> Result<Option<Restored<State>>, ServeError> {
         self.store.cache.sweep();
+        self.protect.clear();
         let forward = self.forward;
-        let suffix = ids.len() - self.store.live.as_ref().map_or(0, |live| live.tokens.len());
+        let live = self.store.live.take(ids, describe);
+        let suffix = ids.len() - live.as_ref().map_or(0, |live| live.tokens.len());
         operations::live_then_snapshot(
-            self.store.live.take(),
+            live,
             |state| forward.ensure_capacity_for_request(state, required, suffix, reserve),
             || self.take_snapshot(ids, required, reserve),
         )
@@ -130,9 +175,17 @@ impl Reuse<State> for Session<'_, '_> {
         self.capture_checkpoint(state, ids, logits, reserve);
     }
 
+    /// Only ready FullForward states are retained (never CED-origin or
+    /// poisoned ones); the pool's budgets then apply.
     fn commit(&mut self, live: Live<State>) {
-        self.store.live =
-            reuse_eligible(live.state.is_ready(), live.state.prefill_origin()).then_some(live);
+        if !reuse_eligible(live.state.is_ready(), live.state.prefill_origin()) {
+            return;
+        }
+        let bytes = self
+            .forward
+            .estimate_request_memory_with_gpu_step(live.state.capacity())
+            .map_or(u64::MAX, |estimate| estimate.total_bytes);
+        self.store.live.commit(live, bytes);
     }
     fn capacity(&self, state: &State, _: usize) -> usize {
         state.capacity()

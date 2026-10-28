@@ -94,6 +94,14 @@ impl Default for SnapshotPolicyConfig {
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Hash, PartialOrd, Ord)]
 pub struct EntryId(u64);
 
+impl EntryId {
+    /// Names a payload released outside any policy (for example an idle live
+    /// session) in a combined [`Evicted`] report. Never looked up in a policy.
+    pub const fn external(value: u64) -> Self {
+        Self(value)
+    }
+}
+
 /// Entries the policy released; the owning cache must drop their payloads.
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct Evicted {

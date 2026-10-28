@@ -925,3 +925,114 @@ fn optional_capture_decline_preserves_request_schedule_and_live_state() {
         }
     }
 }
+
+fn pooled(tokens: &[u32], healthy: bool) -> Live<(usize, bool)> {
+    Live {
+        state: (tokens.len(), healthy),
+        tokens: tokens.to_vec(),
+        logits: vec![1.0],
+    }
+}
+
+fn describe_pooled(state: &(usize, bool)) -> (usize, bool) {
+    *state
+}
+
+#[test]
+fn pool_of_one_prepares_exactly_like_the_single_live_slot() {
+    let histories: [(&[u32], bool); 4] = [
+        (&[1, 2], true),
+        (&[1, 2], false),
+        (&[1, 3], true),
+        (&[1, 2, 3, 4], true),
+    ];
+    for (tokens, healthy) in histories {
+        for ids in [&[1, 2][..], &[1, 2, 3], &[1, 3, 4], &[9]] {
+            let mut slot = Some(pooled(tokens, healthy));
+            operations::discard_incompatible(&mut slot, ids, describe_pooled);
+            let mut pool = operations::LivePool::new(1, None);
+            pool.commit(pooled(tokens, healthy), 1);
+            pool.prepare(ids, describe_pooled);
+            assert_eq!(
+                pool.len(),
+                usize::from(slot.is_some()),
+                "{tokens:?} {ids:?}"
+            );
+            assert_eq!(
+                pool.take(ids, describe_pooled).map(|live| live.tokens),
+                slot.map(|live| live.tokens)
+            );
+            assert_eq!(pool.len(), 0, "taken states leave the pool");
+        }
+    }
+}
+
+#[test]
+fn pool_takes_longest_compatible_prefix_then_most_recent() {
+    let mut pool = operations::LivePool::new(4, None);
+    pool.commit(pooled(&[1], true), 1);
+    pool.commit(pooled(&[1, 2], true), 1);
+    pool.commit(pooled(&[5, 6], true), 1);
+    pool.commit(pooled(&[1, 2], true), 1);
+    // Larger pools keep healthy states of other conversations.
+    pool.prepare(&[1, 2, 3], describe_pooled);
+    assert_eq!(pool.len(), 4);
+    assert_eq!(
+        pool.take(&[1, 2, 3], describe_pooled).unwrap().tokens,
+        [1, 2]
+    );
+    assert_eq!(pool.tokens(), [vec![1], vec![1, 2], vec![5, 6]]);
+    // An equal prompt is reusable only with endpoint logits; [1, 2] has them.
+    assert_eq!(pool.take(&[1, 2], describe_pooled).unwrap().tokens, [1, 2]);
+    assert!(pool.take(&[7], describe_pooled).is_none());
+    // Unhealthy states never survive preparation.
+    pool.commit(pooled(&[8], false), 1);
+    pool.prepare(&[7], describe_pooled);
+    assert_eq!(pool.tokens(), [vec![1], vec![5, 6]]);
+}
+
+#[test]
+fn pool_commit_enforces_count_and_byte_budgets_by_lru() {
+    let mut pool = operations::LivePool::new(2, None);
+    for tokens in [[1], [2], [3]] {
+        pool.commit(pooled(&tokens, true), 10);
+    }
+    assert_eq!(pool.tokens(), [vec![2], vec![3]]);
+    // Taking and recommitting refreshes recency.
+    let live = pool.take(&[2, 9], describe_pooled).unwrap();
+    pool.commit(live, 10);
+    pool.commit(pooled(&[4], true), 10);
+    assert_eq!(pool.tokens(), [vec![2], vec![4]]);
+
+    let mut pool = operations::LivePool::new(8, Some(25));
+    for tokens in [[1], [2], [3]] {
+        pool.commit(pooled(&tokens, true), 10);
+    }
+    assert_eq!(pool.tokens(), [vec![2], vec![3]]);
+    // A state alone above the byte budget is not retained.
+    pool.commit(pooled(&[4], true), 30);
+    assert_eq!(pool.len(), 0);
+}
+
+#[test]
+fn pool_relief_releases_lru_states_the_admitting_request_cannot_take() {
+    let mut pool = operations::LivePool::new(4, None);
+    pool.commit(pooled(&[1], true), 10);
+    pool.commit(pooled(&[2], true), 20);
+    pool.commit(pooled(&[3], true), 30);
+    // [1] is compatible with the admitting prompt and is protected.
+    assert_eq!(pool.release_idle(5, &[1, 7], describe_pooled), (1, 20));
+    assert_eq!(pool.tokens(), [vec![1], vec![3]]);
+    assert_eq!(
+        pool.release_idle(u64::MAX, &[1, 7], describe_pooled),
+        (1, 30)
+    );
+    assert_eq!(pool.tokens(), [vec![1]]);
+    assert_eq!(
+        pool.release_idle(u64::MAX, &[1, 7], describe_pooled),
+        (0, 0)
+    );
+    // Nothing protected: every idle state may go.
+    assert_eq!(pool.release_idle(u64::MAX, &[], describe_pooled), (1, 10));
+    assert_eq!(pool.len(), 0);
+}

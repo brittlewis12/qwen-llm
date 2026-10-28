@@ -18,6 +18,8 @@ pub(super) fn live_prefix_len<S>(
     .then_some(position)
 }
 
+/// The single-slot rule [`LivePool::prepare`] keeps at a budget of one.
+#[cfg(test)]
 pub(super) fn discard_incompatible<S>(
     live: &mut Option<Live<S>>,
     ids: &[u32],
@@ -163,5 +165,135 @@ pub(super) fn capture_checkpoint<V>(
             cache.insert_strict(ids.to_vec(), checkpoint, entry_bytes);
         }
         Err(error) => tracing::debug!("V4.1 checkpoint skipped: {error}"),
+    }
+}
+
+/// Idle live states kept for exact-prefix reuse, in recency order. In-flight
+/// states are never here: `take` removes the chosen one and only a request's
+/// successful, eligible commit returns it. A budget of one state is the single
+/// live slot: before admission, an idle state incompatible with the next
+/// request is dropped. Larger pools keep other conversations' states and
+/// release them by LRU on commit and, under memory pressure, through
+/// `release_idle` (never the one the admitting request may take).
+pub(super) struct LivePool<S> {
+    entries: Vec<PoolEntry<S>>,
+    max_states: usize,
+    max_bytes: Option<u64>,
+    clock: u64,
+}
+
+struct PoolEntry<S> {
+    live: Live<S>,
+    bytes: u64,
+    used: u64,
+}
+
+impl<S> LivePool<S> {
+    pub(super) fn new(max_states: usize, max_bytes: Option<u64>) -> Self {
+        Self {
+            entries: Vec::new(),
+            max_states: max_states.max(1),
+            max_bytes,
+            clock: 0,
+        }
+    }
+
+    #[cfg(test)]
+    pub(super) fn len(&self) -> usize {
+        self.entries.len()
+    }
+
+    #[cfg(test)]
+    pub(super) fn tokens(&self) -> Vec<Vec<u32>> {
+        self.entries
+            .iter()
+            .map(|entry| entry.live.tokens.clone())
+            .collect()
+    }
+
+    fn compatible(
+        entry: &PoolEntry<S>,
+        ids: &[u32],
+        describe: &impl Fn(&S) -> (usize, bool),
+    ) -> bool {
+        let (position, healthy) = describe(&entry.live.state);
+        live_prefix_len(&entry.live, ids, position, healthy).is_some()
+    }
+
+    /// Non-allocating preparation before output admission.
+    pub(super) fn prepare(&mut self, ids: &[u32], describe: impl Fn(&S) -> (usize, bool)) {
+        if self.max_states == 1 {
+            self.entries
+                .retain(|entry| Self::compatible(entry, ids, &describe));
+        } else {
+            self.entries.retain(|entry| describe(&entry.live.state).1);
+        }
+    }
+
+    /// Remove the compatible idle state with the longest prefix (most
+    /// recently used among equals).
+    pub(super) fn take(
+        &mut self,
+        ids: &[u32],
+        describe: impl Fn(&S) -> (usize, bool),
+    ) -> Option<Live<S>> {
+        let index = self
+            .entries
+            .iter()
+            .enumerate()
+            .filter(|(_, entry)| Self::compatible(entry, ids, &describe))
+            .max_by_key(|(_, entry)| (entry.live.tokens.len(), entry.used))
+            .map(|(index, _)| index)?;
+        Some(self.entries.remove(index).live)
+    }
+
+    /// Retain a committed state, then drop least recently used ones until
+    /// both budgets hold. A state alone above the byte budget is not kept.
+    pub(super) fn commit(&mut self, live: Live<S>, bytes: u64) {
+        self.clock += 1;
+        self.entries.push(PoolEntry {
+            live,
+            bytes,
+            used: self.clock,
+        });
+        while self.entries.len() > self.max_states
+            || self
+                .max_bytes
+                .is_some_and(|max| self.entries.iter().map(|e| e.bytes).sum::<u64>() > max)
+        {
+            self.remove_lru(|_| true);
+        }
+    }
+
+    fn remove_lru(&mut self, eligible: impl Fn(&PoolEntry<S>) -> bool) -> Option<u64> {
+        let index = self
+            .entries
+            .iter()
+            .enumerate()
+            .filter(|(_, entry)| eligible(entry))
+            .min_by_key(|(_, entry)| entry.used)
+            .map(|(index, _)| index)?;
+        Some(self.entries.remove(index).bytes)
+    }
+
+    /// Memory relief: release idle states the admitting request (`protect`)
+    /// could not take, least recently used first, until `bytes` are freed.
+    /// Returns (states, bytes) released.
+    pub(super) fn release_idle(
+        &mut self,
+        bytes: u64,
+        protect: &[u32],
+        describe: impl Fn(&S) -> (usize, bool),
+    ) -> (usize, u64) {
+        let (mut states, mut released) = (0, 0u64);
+        while released < bytes {
+            let Some(freed) = self.remove_lru(|entry| !Self::compatible(entry, protect, &describe))
+            else {
+                break;
+            };
+            states += 1;
+            released = released.saturating_add(freed);
+        }
+        (states, released)
     }
 }

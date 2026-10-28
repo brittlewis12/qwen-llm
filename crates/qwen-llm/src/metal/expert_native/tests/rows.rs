@@ -746,6 +746,7 @@ fn native_rows_gate_and_up_projection_stores_are_bitwise() {
             let mut args = dimensions("raw projection witness", k, m, e, top).unwrap();
             let (pso, row_bytes) =
                 bank_pipeline(&ctx, "raw projection witness", &bank, &args, "bank").unwrap();
+            let pso = (pso, native_channels_per_threadgroup(dtype));
             args.row_bytes = row_bytes;
             let batched = f32_view(&ctx, &vec![f32::NAN; m * top * n], &[m, top * n], 28);
             let scalar = f32_view(&ctx, &vec![f32::NAN; m * top * n], &[m, top * n], 28);

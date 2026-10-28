@@ -84,6 +84,61 @@ pub(crate) fn native_channels_per_threadgroup(dtype: GgmlType) -> usize {
     }
 }
 
+/// `0` keeps the generic (runtime-shape) IQ2_XXS / IQ2_XS / IQ2_S native
+/// decode kernels at K = 5120 and 2304 (the DeepSeek V4.1 routed shapes)
+/// instead of the shape-specialized ones (compile-time K and channels per
+/// simdgroup; outputs are bitwise equal); A/B lever.
+const EXPERT_NATIVE_IQ2_SPEC_ENV: &str = "QWEN_EXPERT_NATIVE_IQ2_SPEC";
+
+fn iq2_spec() -> bool {
+    static SPEC: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *SPEC.get_or_init(|| std::env::var(EXPERT_NATIVE_IQ2_SPEC_ENV).as_deref() != Ok("0"))
+}
+
+/// Output channels per simdgroup of the shape-specialized IQ2_XS / IQ2_S
+/// kernels (`kernel_expert_native_{,gate_up_}iq2_{xs,s}_f32_k*_r*`).
+const IQ2_SPEC_ROWS: usize = 4;
+
+/// Shape-specialized F32-operand pipeline for one projection, or with
+/// `fused` the fused gate/up, and its output channels per threadgroup; None
+/// keeps the generic kernel. Needs K = 5120 or 2304, n_out a multiple of the
+/// channels per simdgroup and a 16-byte aligned activation binding (the
+/// kernels read activations as float4).
+fn native_spec_pipeline(
+    dtype: GgmlType,
+    n_in: usize,
+    n_out: usize,
+    input: &MetalTensor,
+    fused: bool,
+) -> Option<(String, usize)> {
+    if !matches!(n_in, 5120 | 2304) || !input.offset.is_multiple_of(16) {
+        return None;
+    }
+    let gate_up = if fused { "gate_up_" } else { "" };
+    let (name, rows) = match dtype {
+        GgmlType::IQ2_XXS if iq2_xxs_split() => (
+            format!("kernel_expert_native_{gate_up}iq2_xxs_f32_split_k{n_in}"),
+            2,
+        ),
+        GgmlType::IQ2_XS | GgmlType::IQ2_S => {
+            let suffix = if dtype == GgmlType::IQ2_XS {
+                "iq2_xs"
+            } else {
+                "iq2_s"
+            };
+            (
+                format!("kernel_expert_native_{gate_up}{suffix}_f32_k{n_in}_r{IQ2_SPEC_ROWS}"),
+                IQ2_SPEC_ROWS,
+            )
+        }
+        _ => return None,
+    };
+    if !n_out.is_multiple_of(rows) {
+        return None;
+    }
+    Some((name, if fused { 2 * rows } else { 4 * rows }))
+}
+
 /// Q5_K uses `kernel_expert_native_q5_K_f32_split` (llama.cpp's work split)
 /// unless `QWEN_EXPERT_NATIVE_Q5K=one_row` keeps the one-row kernel (A/B).
 fn q5_k_split() -> bool {
@@ -329,7 +384,7 @@ fn check_device(
 #[allow(clippy::too_many_arguments)]
 fn dispatch(
     enc: &KernelEncoder,
-    pso: &Pipeline,
+    (pso, channels): &(Pipeline, usize),
     args: &NativeArgs,
     bank: &MetalTensor,
     input: &MetalTensor,
@@ -347,7 +402,7 @@ fn dispatch(
     enc.set_tensor(5, output);
     enc.dispatch(
         MTLSize {
-            width: (args.n_out as usize).div_ceil(native_channels_per_threadgroup(bank.dtype)),
+            width: (args.n_out as usize).div_ceil(*channels),
             height: args.top_k as usize,
             depth: rows,
         },
@@ -667,6 +722,48 @@ fn encode_gate_up(
     operands: NativeOperands,
     fuse: bool,
 ) -> Result<(), MetalError> {
+    encode_gate_up_with(
+        ctx,
+        enc,
+        gate_bank,
+        up_bank,
+        input,
+        ids,
+        status,
+        output,
+        n_in,
+        n_out,
+        experts,
+        top_k,
+        clamp,
+        rows,
+        operands,
+        fuse,
+        iq2_spec(),
+    )
+}
+
+/// `encode_gate_up` choosing the shape-specialized IQ2 kernels only if `spec`.
+#[allow(clippy::too_many_arguments)]
+fn encode_gate_up_with(
+    ctx: &MetalContext,
+    enc: &KernelEncoder,
+    gate_bank: &MetalTensor,
+    up_bank: &MetalTensor,
+    input: &MetalTensor,
+    ids: &MetalTensor,
+    status: &MetalTensor,
+    output: &MetalTensor,
+    n_in: usize,
+    n_out: usize,
+    experts: usize,
+    top_k: usize,
+    clamp: f32,
+    rows: Option<usize>,
+    operands: NativeOperands,
+    fuse: bool,
+    spec: bool,
+) -> Result<(), MetalError> {
     const K: &str = "all_slots_gate_up_swiglu_native";
     require_serial(K, enc)?;
     if !clamp.is_finite() || clamp <= 0.0 {
@@ -684,12 +781,21 @@ fn encode_gate_up(
     let (up, up_bytes) = bank_pipeline(ctx, K, up_bank, &args, "up bank")?;
     check_disjoint(K, output, &[(gate_bank, "gate bank"), (up_bank, "up bank")])?;
     args.clamp = clamp;
+    let spec = spec && matches!(operands, NativeOperands::F32);
     let fused = if fuse {
         fused_gate_up_pipeline(ctx, gate_bank.dtype, up_bank.dtype, operands)?
     } else {
         None
     };
-    if let Some(fused) = fused {
+    let mut fused = fused.map(|pso| (pso, native_channels_per_threadgroup(gate_bank.dtype) / 2));
+    if fused.is_some() && spec {
+        if let Some((name, channels)) =
+            native_spec_pipeline(gate_bank.dtype, n_in, n_out, input, true)
+        {
+            fused = Some((ctx.pipeline(&name)?, channels));
+        }
+    }
+    if let Some((fused, channels)) = fused {
         // One dispatch: gate and up channels side by side, then SwiGLU.
         args.mode = operands.mode(1);
         args.row_bytes = gate_bytes;
@@ -704,8 +810,8 @@ fn encode_gate_up(
         enc.dispatch(
             MTLSize {
                 // Channels per threadgroup: two simdgroup pairs of one (or,
-                // for the IQ2_XXS split, two) channels each.
-                width: n_out.div_ceil(native_channels_per_threadgroup(gate_bank.dtype) / 2),
+                // for the IQ2 split and specialized kernels, two) channels each.
+                width: n_out.div_ceil(channels),
                 height: top_k,
                 depth: rows.unwrap_or(1),
             },
@@ -717,6 +823,14 @@ fn encode_gate_up(
         );
         return Ok(());
     }
+    let projection = |pso: Pipeline, bank: &MetalTensor| -> Result<(Pipeline, usize), MetalError> {
+        match native_spec_pipeline(bank.dtype, n_in, n_out, input, false).filter(|_| spec) {
+            Some((name, channels)) => Ok((ctx.pipeline(&name)?, channels)),
+            None => Ok((pso, native_channels_per_threadgroup(bank.dtype))),
+        }
+    };
+    let gate = projection(gate, gate_bank)?;
+    let up = projection(up, up_bank)?;
     args.mode = operands.mode(0);
     args.row_bytes = gate_bytes;
     dispatch(
@@ -877,6 +991,42 @@ fn encode_down(
     rows: Option<usize>,
     operands: NativeOperands,
 ) -> Result<(), MetalError> {
+    encode_down_with(
+        ctx,
+        enc,
+        bank,
+        input,
+        ids,
+        status,
+        output,
+        n_in,
+        n_out,
+        experts,
+        top_k,
+        rows,
+        operands,
+        iq2_spec(),
+    )
+}
+
+/// `encode_down` choosing the shape-specialized IQ2 kernels only if `spec`.
+#[allow(clippy::too_many_arguments)]
+fn encode_down_with(
+    ctx: &MetalContext,
+    enc: &KernelEncoder,
+    bank: &MetalTensor,
+    input: &MetalTensor,
+    ids: &MetalTensor,
+    status: &MetalTensor,
+    output: &MetalTensor,
+    n_in: usize,
+    n_out: usize,
+    experts: usize,
+    top_k: usize,
+    rows: Option<usize>,
+    operands: NativeOperands,
+    spec: bool,
+) -> Result<(), MetalError> {
     const K: &str = "all_slots_down_native";
     require_serial(K, enc)?;
     let mut args = dimensions(K, n_in, n_out, experts, top_k)?;
@@ -884,6 +1034,11 @@ fn encode_down(
     check_device(ctx, enc, K, &[bank, input, ids, status, output])?;
     let (pso, row_bytes) = bank_pipeline(ctx, K, bank, &args, "down bank")?;
     check_disjoint(K, output, &[(bank, "down bank")])?;
+    let spec = spec && matches!(operands, NativeOperands::F32);
+    let pso = match native_spec_pipeline(bank.dtype, n_in, n_out, input, false).filter(|_| spec) {
+        Some((name, channels)) => (ctx.pipeline(&name)?, channels),
+        None => (pso, native_channels_per_threadgroup(bank.dtype)),
+    };
     args.mode = operands.mode(2);
     args.row_bytes = row_bytes;
     dispatch(

@@ -1071,6 +1071,7 @@ fn native_half_rows_metal_half_operand_basis() {
         // capability). Public two-pass/one-pass validation is tested elsewhere.
         let mut args = dimensions("half basis", k, m, EXPERTS, 1).unwrap();
         let (pso, row_bytes) = bank_pipeline(&ctx, "half basis", &weights, &args, "bank").unwrap();
+        let pso = (pso, native_channels_per_threadgroup(dtype));
         args.row_bytes = row_bytes;
         args.mode = NativeOperands::Half.mode(0);
         one_shot(&ctx, |enc| {

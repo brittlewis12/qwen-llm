@@ -6,6 +6,21 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the current state and evidence index.
 
+## 2026-10-28 - V4.1 Batched Decode 1.16-1.55x (output_a, Rank Pair, Head)
+
+- `step_batch` now also runs output_a (grouped skinny Q5_K: 8 groups x up
+  to 8 columns in one dispatch), the Q8_0 q_a/kv rank pair (skinny pair
+  kernel, each weight read once) and the head once over all sequences.
+  Knobs `QWEN_V41_BATCH_OUTPUT_A`, `QWEN_V41_BATCH_QKV`,
+  `QWEN_V41_BATCH_HEAD` (`0` = per sequence).
+- M5 Ultra, GSQ IQ2_XS, 512-token prefixes, serial vs batched in
+  alternating blocks: B = 2/3/4/8 aggregate 80.9/91.2/96.4/106.4 tok/s vs
+  ~69 serial (**1.16/1.30/1.38/1.55x**; previous state 1.14/1.23/1.28/
+  1.35x in the same window). Knob-off deltas at B = 4/8: output_a +1.6/
+  +5.3 ms per round, rank pair +0.5/+2.0, head +0.9/+2.5.
+- 8192-token prefixes: B = 2/4 1.17/1.41x. Teacher-forced argmax equal in
+  every row; early-round max relative logit diff 3.7e-6; B = 1 bitwise.
+
 ## 2026-10-28 - V4.1 Vector4 Weight-To-Half Passes Its Operator Gate
 
 M5 Ultra, research source `a0e60724`: one four-element producer replaces F32

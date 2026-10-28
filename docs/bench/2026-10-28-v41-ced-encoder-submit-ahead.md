@@ -1,8 +1,10 @@
 # V4.1 CED Encoder Submit-Ahead: +3.3%, 146 ms
 
-2026-10-28. Source: `47030790` on `perf/v41-engram-prefetch-main`, based on
-main `0c9e9d94` (Engram producer + decoder submit-ahead + cross-chunk Engram
-prefetch). Artifact: GSQ-RCO IQ2_XS, 40 layers, 4,096-row chunks, M5 Ultra.
+2026-10-28. Feature and timing: `47030790` on
+`perf/v41-engram-prefetch-main`, based on main `0c9e9d94` (Engram producer +
+decoder submit-ahead + cross-chunk Engram prefetch). Hardening: `e789bdec`
+(pair bitwise; the hardened A/B and qualification rerun remain the promotion
+gate). Artifact: GSQ-RCO IQ2_XS, 40 layers, 4,096-row chunks, M5 Ultra.
 Raw: `~/qwen-runs/2026-10-28-v41-encoder-pipeline/`.
 
 ## Decision
@@ -36,10 +38,32 @@ outstanding command before unwinding. Command count (12), kernel arguments,
 and arithmetic are unchanged. `QWEN_V41_CED_ENCODER_PIPELINE=0` restores the
 serialized wait.
 
-The pipeline keeps a second chunk scratch and command reserve live, so the
-memory ledger charges `priced_pipeline_chunk_bytes = chunk + reserve` when the
-mode is active. Observed incremental Metal is 11.202 GB against a priced
-11.245 GB; the device ceiling is 240 GiB.
+The pipeline keeps a second chunk scratch, publication buffer and command
+reserve live, so the ledger charges
+`priced_pipeline_chunk_bytes = chunk + publication + reserve` when the mode is
+eligible, plus the second chunk's CPU upload staging
+(`priced_pipeline_cpu_bytes`). The charge is gated on prefetch and a nonscalar
+second chunk, so single-chunk and scalar-tail requests do not pay for overlap
+they never perform. Observed incremental Metal is 11.202 GB against a priced
+11.254 GB; the device ceiling is 240 GiB.
+
+## Hardening
+
+The checkpoint review found two P1s in the first version; both are fixed at
+`e789bdec`, which re-passes the 8K pair bitwise at the same endpoint hash:
+
+- Every committed encoder command is owned by a drop guard before the older
+  command is retired. The guard waits it on error or unwind, so a newer
+  in-flight command cannot escape cleanup when the older completion fails.
+- The shared attention-status read is deferred to the final encoder chunk,
+  after every writer has drained. Reading it while the newer command was still
+  committing was unsynchronized and could misattribute a failure. Per-chunk
+  FFN status remains owned by the chunk scratch, and the sticky status still
+  rejects a failed run at the final checked completion.
+- Speculative begin validates the new geometry and requires the previous
+  intent to be fully encoded before moving it to the in-flight queue.
+- A three-chunk cursor test covers re-entering the speculative state after
+  retiring a front intent.
 
 ## Evidence
 
@@ -93,6 +117,15 @@ The machine state is faster than the earlier prefetch packet (off arm was
 - Qualification covers the standard private witness only; no chunk-size/
   position boundary sweep, snapshot/growth, cancellation, or throughput
   qualification.
+- The A/B and private qualification were measured at `47030790`; the hardened
+  `e789bdec` re-passes the bitwise pair but its A/B and qualification rerun
+  are still owed before promotion.
+- Admission does not yet retry serialized CED automatically when the priced
+  pipeline mode is refused under pressure; near-capacity residents must set
+  `QWEN_V41_CED_ENCODER_PIPELINE=0`.
+- A fault injection after the newer command commits (completion, FFN,
+  attention, cancellation, panic) and a physical three-chunk prompt remain
+  the minimum promotion tests.
 
 ## Next
 

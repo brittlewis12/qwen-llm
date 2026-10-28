@@ -6,6 +6,21 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the current state and evidence index.
 
+## 2026-10-28 - V4.1 Routed IQ2 Decode Kernels Specialized On Shape, 1.04x tg64
+
+- Routed IQ2 experts are compute-bound, not DRAM-bound (layout probe:
+  loads-only floors reach ~1.1 TB/s for in-place and repacked layouts alike;
+  cache-resident weights take nearly the same time). The IQ2_XXS split
+  kernels and the IQ2_XS / IQ2_S one-row kernels now have K = 5120 / 2304
+  variants with compile-time K and channels per simdgroup (IQ2_XS / IQ2_S:
+  4 channels sharing activation loads), bitwise equal to the generic ones.
+  `QWEN_EXPERT_NATIVE_IQ2_SPEC=0` keeps the generic kernels.
+- M5 Ultra isolated (top-6, 128-expert banks): IQ2_XXS gate/up 1.14x, down
+  1.15x; IQ2_XS and IQ2_S gate/up 1.24x, down 1.25x.
+- GSQ IQ2_XS tg64@d0, 6 ABBA blocks in one lease: 72.54 -> 75.48 tok/s
+  median (**1.041x**, 13.79 -> 13.25 ms/token); greedy 512-token chat
+  generation byte-identical.
+
 ## 2026-10-28 - V4.1 Batched Decode 1.18-1.79x (Engram, Routed Rows, Encoders)
 
 - `step_batch` now also projects the Engram rows once over all sequences

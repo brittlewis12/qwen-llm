@@ -60,6 +60,7 @@ fn pipeline() -> (OwnerActivity, HttpProxy, Receiver<Work>) {
             work,
             control: control(),
             activity: Arc::new(guard),
+            batched: false,
         },
         incoming,
     )

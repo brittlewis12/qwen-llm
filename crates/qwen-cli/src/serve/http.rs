@@ -191,6 +191,28 @@ pub(crate) trait GenerationBackend {
     fn output_headroom(&self) -> Headroom {
         qwen_llm::metal::effective_host_memory_remaining_bytes
     }
+    /// Requests this backend keeps in flight on its owner thread. Above one,
+    /// the plain accept loop holds that many connections, hands their
+    /// prepared requests to [`Self::submit`] and drives [`Self::pump`]
+    /// instead of calling [`Self::generate_prepared`]. Default: single-flight.
+    fn max_active(&self) -> usize {
+        1
+    }
+    /// Accept a request for the owner-side scheduler (`max_active() > 1`).
+    fn submit(&mut self, job: super::batching::Job) {
+        job.sink.complete(Err(ServeError::server_error(
+            "this backend does not schedule concurrent requests",
+        )
+        .into()));
+    }
+    /// Advance submitted requests by one bounded quantum without blocking on
+    /// any client. True when any request made progress.
+    fn pump(&mut self) -> bool {
+        false
+    }
+    /// Complete every submitted request now (shutdown): started requests are
+    /// aborted, requests that never started receive `503 server_busy`.
+    fn abort_all(&mut self) {}
 }
 
 struct TraceSseWriter<'a, 'b> {

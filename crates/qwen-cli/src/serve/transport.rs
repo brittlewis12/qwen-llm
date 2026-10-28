@@ -17,9 +17,12 @@ use std::sync::mpsc::{Receiver, RecvTimeoutError, SyncSender, TrySendError, sync
 use std::thread::{JoinHandle, Thread};
 use std::time::Duration;
 
-const POLL: Duration = Duration::from_millis(10);
+pub(super) const POLL: Duration = Duration::from_millis(10);
 const CHUNK_BYTES: usize = 4096;
 const PIECE_CAPACITY: usize = 2;
+/// Batched owners never wait for a piece acknowledgement; this channel depth
+/// is the client's credit before the owner parks its request.
+const BATCH_PIECE_CAPACITY: usize = 8;
 const WORKER_STACK_BYTES: usize = 2 * 1024 * 1024;
 // Two queued chunks, one producer chunk, one consumer chunk. Double their
 // payload size for allocator slack and small channel/control metadata. Request
@@ -27,6 +30,9 @@ const WORKER_STACK_BYTES: usize = 2 * 1024 * 1024;
 // too: pages not yet touched may be absent from the process memory signal.
 pub(super) const BUFFER_RESERVE_BYTES: u64 =
     (WORKER_STACK_BYTES + (PIECE_CAPACITY + 2) * CHUNK_BYTES * 2) as u64;
+// Batched: the deeper channel plus one owner-queued piece of chunks.
+const BATCH_BUFFER_RESERVE_BYTES: u64 =
+    (WORKER_STACK_BYTES + (BATCH_PIECE_CAPACITY + 3) * CHUNK_BYTES * 2) as u64;
 
 struct Control {
     execution: ExecutionControl,
@@ -155,6 +161,62 @@ impl GenerationSink for OwnerSink {
     }
 }
 
+/// Non-blocking owner sink for scheduled requests (no acknowledgement wait).
+struct OwnerBatchSink {
+    pieces: SyncSender<Piece>,
+    queued: std::collections::VecDeque<Piece>,
+    terminal: SyncSender<Result<GenerationOutcome, BackendFailure>>,
+    control: Arc<Control>,
+    _activity: Arc<ActivityGuard>,
+    extra_cpu_reserve: u64,
+}
+
+impl super::batching::BatchSink for OwnerBatchSink {
+    fn cancellation_flag(&self) -> Arc<std::sync::atomic::AtomicBool> {
+        self.control.execution.cancellation_flag()
+    }
+    fn transport_reserve_bytes(&self) -> u64 {
+        BATCH_BUFFER_RESERVE_BYTES + self.extra_cpu_reserve
+    }
+    fn check(&self) -> io::Result<()> {
+        self.control.checkpoint()
+    }
+    fn queue(&mut self, bytes: &[u8]) {
+        let chunks = bytes.chunks(CHUNK_BYTES);
+        let count = chunks.len();
+        for (index, chunk) in chunks.enumerate() {
+            self.queued.push_back(Piece {
+                bytes: chunk.to_vec(),
+                new_piece_bytes: (index == 0).then_some(bytes.len()),
+                last: index + 1 == count,
+            });
+        }
+    }
+    fn flush(&mut self) -> io::Result<bool> {
+        while let Some(piece) = self.queued.pop_front() {
+            match self.pieces.try_send(piece) {
+                Ok(()) => {}
+                Err(TrySendError::Full(piece)) => {
+                    self.queued.push_front(piece);
+                    return Ok(false);
+                }
+                Err(TrySendError::Disconnected(_)) => {
+                    self.control.cancel();
+                    return Err(aborted("HTTP piece receiver stopped"));
+                }
+            }
+        }
+        Ok(true)
+    }
+    fn complete(mut self: Box<Self>, result: Result<GenerationOutcome, BackendFailure>) {
+        let _ = self.flush();
+        let _ = self.terminal.try_send(result);
+        // Closing the piece stream follows publishing the terminal, as in
+        // the serial owner: the subscriber drains pieces before inspecting it.
+        drop(self);
+    }
+}
+
 struct HttpProxy {
     model_id: String,
     profile: RequestProfile,
@@ -164,6 +226,9 @@ struct HttpProxy {
     extra_cpu_reserve: u64,
     /// Headroom the HTTP side's output buffers admit against.
     headroom: super::http::Headroom,
+    /// The owner schedules this request with others: deeper piece channel,
+    /// no per-piece acknowledgement, wake the owner on submission.
+    batched: bool,
 }
 
 impl GenerationBackend for HttpProxy {
@@ -208,7 +273,11 @@ impl GenerationBackend for HttpProxy {
         sink: &mut dyn GenerationSink,
     ) -> Result<GenerationOutcome, BackendFailure> {
         self.control.checkpoint().map_err(BackendFailure::Aborted)?;
-        let (pieces, incoming) = sync_channel(PIECE_CAPACITY);
+        let (pieces, incoming) = sync_channel(if self.batched {
+            BATCH_PIECE_CAPACITY
+        } else {
+            PIECE_CAPACITY
+        });
         let (terminal, outcome) = sync_channel(1);
         let (acknowledge, processed) = sync_channel(1);
         self.work
@@ -222,6 +291,9 @@ impl GenerationBackend for HttpProxy {
                 extra_cpu_reserve: self.extra_cpu_reserve,
             })
             .map_err(|_| ServeError::server_error("HTTP model owner unavailable"))?;
+        if self.batched {
+            self.control.owner.unpark();
+        }
         loop {
             self.control.checkpoint().map_err(BackendFailure::Aborted)?;
             match incoming.recv_timeout(POLL) {
@@ -229,7 +301,7 @@ impl GenerationBackend for HttpProxy {
                     self.control.owner.unpark();
                     sink.piece_fragment(&piece.bytes, piece.new_piece_bytes)
                         .map_err(BackendFailure::Aborted)?;
-                    if piece.last {
+                    if piece.last && !self.batched {
                         acknowledge.try_send(()).map_err(|_| {
                             BackendFailure::Aborted(aborted(
                                 "model owner stopped before piece acknowledgement",
@@ -314,6 +386,13 @@ fn execute(work: Work, backend: &mut dyn GenerationBackend) {
     drop(sink);
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum Polled {
+    Idle,
+    Submitted,
+    Settled,
+}
+
 pub(super) struct Connection {
     incoming: Option<Receiver<Work>>,
     worker: Worker,
@@ -358,6 +437,28 @@ impl Connection {
             None,
             None,
             0,
+            false,
+        )
+    }
+
+    /// A connection whose request the backend schedules with others
+    /// ([`GenerationBackend::max_active`] above one); see [`Self::poll_batched`].
+    pub(super) fn start_batched(
+        stream: TcpStream,
+        backend: &dyn GenerationBackend,
+        trace: Option<TraceSubscriber>,
+        guard: ActivityGuard,
+    ) -> Result<Self> {
+        Self::spawn(
+            stream,
+            backend.model_id().to_owned(),
+            backend.request_profile(),
+            trace,
+            guard,
+            None,
+            None,
+            0,
+            true,
         )
     }
 
@@ -380,9 +481,11 @@ impl Connection {
             Some(request),
             Some(execution),
             extra_cpu_reserve,
+            false,
         )
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn spawn(
         stream: TcpStream,
         model_id: String,
@@ -392,6 +495,7 @@ impl Connection {
         request: Option<http::HttpRequest>,
         execution: Option<super::control::ExecutionPermit>,
         extra_cpu_reserve: u64,
+        batched: bool,
     ) -> Result<Self> {
         #[cfg(test)]
         let fault = START_FAULT.take();
@@ -419,6 +523,7 @@ impl Connection {
             activity: Arc::new(guard),
             extra_cpu_reserve,
             headroom: qwen_llm::metal::effective_host_memory_remaining_bytes,
+            batched,
         };
         #[cfg(test)]
         if let Some(headroom) = PROXY_HEADROOM.take() {
@@ -480,6 +585,38 @@ impl Connection {
                 self.incoming.take();
                 self.worker.join()?;
                 Ok(true)
+            }
+        }
+    }
+
+    /// Batched owner: hand a received request to the backend's scheduler
+    /// without waiting. Settled means the CPU worker is joined.
+    pub(super) fn poll_batched(&mut self, backend: &mut dyn GenerationBackend) -> Result<Polled> {
+        match self
+            .incoming
+            .as_ref()
+            .expect("connection not settled")
+            .try_recv()
+        {
+            Ok(work) => {
+                backend.submit(super::batching::Job {
+                    prepared: work.prepared,
+                    sink: Box::new(OwnerBatchSink {
+                        pieces: work.pieces,
+                        queued: Default::default(),
+                        terminal: work.terminal,
+                        control: work.control,
+                        _activity: work._activity,
+                        extra_cpu_reserve: work.extra_cpu_reserve,
+                    }),
+                });
+                Ok(Polled::Submitted)
+            }
+            Err(std::sync::mpsc::TryRecvError::Empty) => Ok(Polled::Idle),
+            Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                self.incoming.take();
+                self.worker.join()?;
+                Ok(Polled::Settled)
             }
         }
     }

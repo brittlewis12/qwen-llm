@@ -21,6 +21,7 @@ pub(crate) mod backend_k2;
 pub(crate) mod backend_muse;
 pub(crate) mod backend_qwen4exp;
 pub(crate) mod backend_v41;
+pub(crate) mod batching;
 mod control;
 pub(crate) mod decode_loop;
 pub(crate) mod durable;
@@ -994,8 +995,24 @@ fn accept_loop_inner(
         spawn_acceptor(listener, sender, accept_slots, accept_stopping)?
     };
     let mut connection: Option<transport::Connection> = None;
+    // Opt-in owner-side batching (plain acceptor only); single-flight
+    // backends keep the serial loop below unchanged.
+    let batched = !control_enabled && backend.max_active() > 1;
+    let mut connections: Vec<transport::Connection> = Vec::new();
 
     let result = (|| -> Result<()> {
+        if batched {
+            return batched_loop(
+                backend,
+                &receiver,
+                &slots,
+                &mut activity,
+                &admission,
+                trace,
+                &mut connections,
+                &mut checkpoint,
+            );
+        }
         loop {
             if control_enabled {
                 gate.checkpoint()?;
@@ -1064,6 +1081,11 @@ fn accept_loop_inner(
         Ok(())
     })();
 
+    if batched {
+        // Every submitted request completes before its worker is stopped.
+        backend.abort_all();
+    }
+
     admission.close();
     gate.close();
     slots.close();
@@ -1078,7 +1100,13 @@ fn accept_loop_inner(
         }
     }
     drop(receiver);
-    let worker_result = connection.map_or(Ok(()), transport::Connection::stop_and_join);
+    let mut worker_result = connection.map_or(Ok(()), transport::Connection::stop_and_join);
+    for active in connections {
+        let stopped = active.stop_and_join();
+        if worker_result.is_ok() {
+            worker_result = stopped;
+        }
+    }
     let acceptor_result = acceptor.join();
     drain_completions(&mut activity, backend);
     // Stop accepting before the bounded durable flush, so clients see a
@@ -1088,6 +1116,111 @@ fn accept_loop_inner(
     worker_result?;
     settlement?;
     result
+}
+
+/// Owner loop for a backend that keeps several requests in flight
+/// ([`http::GenerationBackend::max_active`] above one): up to that many
+/// connections at once, their prepared requests submitted to the backend and
+/// advanced by `pump` quanta. The owner never blocks on one client; it parks
+/// briefly only when no connection or request can progress. Connections
+/// beyond `max_active` wait in the acceptor queue in arrival order.
+#[allow(clippy::too_many_arguments)]
+fn batched_loop(
+    backend: &mut dyn http::GenerationBackend,
+    receiver: &std::sync::mpsc::Receiver<control::Event>,
+    slots: &AcceptSlots,
+    activity: &mut owner_activity::OwnerActivity,
+    admission: &owner_activity::Admission,
+    trace: &Option<http::TraceLog>,
+    connections: &mut Vec<transport::Connection>,
+    checkpoint: &mut impl FnMut(OwnerCheckpoint) -> Result<()>,
+) -> Result<()> {
+    let max_active = backend.max_active();
+    loop {
+        let mut progressed = false;
+        let mut index = 0;
+        while index < connections.len() {
+            checkpoint(OwnerCheckpoint::DuringHandling)?;
+            let settled = match connections[index].poll_batched(backend) {
+                Ok(polled) => {
+                    progressed |= polled != transport::Polled::Idle;
+                    polled == transport::Polled::Settled
+                }
+                Err(cause) if cause.is::<transport::WorkerPanicked>() => {
+                    tracing::warn!("serve: HTTP worker failed: {cause:#}");
+                    true
+                }
+                Err(cause) => return Err(cause),
+            };
+            if settled {
+                connections.remove(index);
+                slots.release();
+                drain_completions(activity, backend);
+                progressed = true;
+            } else {
+                index += 1;
+            }
+        }
+        if !connections.is_empty() {
+            checkpoint(OwnerCheckpoint::DuringHandling)?;
+            progressed |= backend.pump();
+        }
+        if connections.len() < max_active {
+            checkpoint(OwnerCheckpoint::BeforeAdmission)?;
+            let event = if connections.is_empty() {
+                match receiver.recv_timeout(ADMISSION_POLL_INTERVAL) {
+                    Ok(event) => Some(event),
+                    Err(RecvTimeoutError::Timeout) => {
+                        drain_completions(activity, backend);
+                        activity.idle_if_quiet(|| backend.idle());
+                        None
+                    }
+                    Err(RecvTimeoutError::Disconnected) => return Ok(()),
+                }
+            } else {
+                match receiver.try_recv() {
+                    Ok(event) => Some(event),
+                    Err(std::sync::mpsc::TryRecvError::Empty) => None,
+                    Err(std::sync::mpsc::TryRecvError::Disconnected) => return Ok(()),
+                }
+            };
+            if let Some(event) = event {
+                // As in the serial loop: never start an admitted request
+                // without checking for a signal again.
+                checkpoint(OwnerCheckpoint::BeforeHandling)?;
+                progressed = true;
+                match event {
+                    control::Event::Incoming(stream) => {
+                        let guard = admission
+                            .try_admit()
+                            .context("HTTP owner admission is closed")?;
+                        let subscriber = trace.as_ref().map(http::TraceLog::subscriber);
+                        match transport::Connection::start_batched(
+                            stream, backend, subscriber, guard,
+                        ) {
+                            Ok(started) => connections.push(started),
+                            Err(cause) => {
+                                slots.release();
+                                tracing::warn!("serve: HTTP connection setup failed: {cause:#}");
+                            }
+                        }
+                    }
+                    control::Event::Prepared(prepared) => connections.push(prepared),
+                    control::Event::Native(job) => {
+                        if let Err(cause) = job.run(backend) {
+                            tracing::error!("native job publication failed: {cause:#}");
+                        }
+                    }
+                }
+                drain_completions(activity, backend);
+            }
+        }
+        if !progressed && !connections.is_empty() {
+            // Workers unpark the owner when they submit a request or drain
+            // output; cancellation unparks it too.
+            std::thread::park_timeout(transport::POLL);
+        }
+    }
 }
 
 fn shutdown_owner(
@@ -1101,6 +1234,8 @@ fn shutdown_owner(
     Ok(())
 }
 
+#[cfg(test)]
+mod batch_lifecycle_tests;
 #[cfg(test)]
 mod lifecycle_tests;
 #[cfg(test)]

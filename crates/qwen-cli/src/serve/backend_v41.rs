@@ -403,7 +403,7 @@ impl GenerationBackend for Backend<'_> {
             forward,
             ctx,
             cold_plan: None,
-            epoch: Instant::now(),
+            epoch: scheduler.epoch(),
         };
         let progressed = scheduler.pump(
             settings,

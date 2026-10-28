@@ -51,6 +51,8 @@ struct StubEngine {
     log: Rc<RefCell<Log>>,
     refuse_batches: usize,
     fail_batches: usize,
+    /// Synthetic clock: each prefilled row and each step costs 1 ms.
+    clock: Duration,
 }
 
 impl execution::Engine<Seq> for StubEngine {
@@ -76,6 +78,7 @@ impl execution::Engine<Seq> for StubEngine {
     ) -> std::result::Result<Vec<f32>, ServeError> {
         let mut log = self.log.borrow_mut();
         log.prefill.push((tokens.len(), state.tokens.len()));
+        self.clock += Duration::from_millis(tokens.len() as u64);
         log.events.push(format!("prefill {}", tokens.len()));
         state.tokens.extend_from_slice(tokens);
         if !with_logits {
@@ -92,6 +95,7 @@ impl execution::Engine<Seq> for StubEngine {
     ) -> std::result::Result<Vec<f32>, String> {
         self.log.borrow_mut().steps.push(1);
         self.log.borrow_mut().events.push("step 1".into());
+        self.clock += Duration::from_millis(1);
         if state.unready || state.poisoned {
             return Err("sequence is provisional or poisoned by partial execution".into());
         }
@@ -99,7 +103,7 @@ impl execution::Engine<Seq> for StubEngine {
         Ok(next_logits(state))
     }
     fn now(&mut self) -> Duration {
-        Duration::ZERO
+        self.clock
     }
 }
 
@@ -117,6 +121,7 @@ impl BatchEngine<Seq> for StubEngine {
             log.batch_flags_are_shutdown
                 .push(std::ptr::eq(cancel, crate::shutdown::cancellation_flag()));
         }
+        self.clock += Duration::from_millis(1);
         if states.iter().any(|state| state.unready || state.poisoned) {
             return Err("sequence is provisional or poisoned by partial execution".into());
         }
@@ -476,7 +481,11 @@ fn prefill_cap_is_reported_per_request() {
     let Some(Ok((_, _, phases))) = loaded.terminal() else {
         panic!()
     };
-    assert!(phases["batch"]["prefill_loaded_calls"].as_u64().unwrap() >= 1);
+    let calls = phases["batch"]["prefill_loaded_calls"].as_u64().unwrap();
+    assert!(calls >= 1);
+    // Prefill time spans every slice and the steps interleaved with them.
+    let rows = phases["prefill_tokens"].as_f64().unwrap();
+    assert!(phases["prefill_ms"].as_f64().unwrap() > rows, "{phases}");
     let Some(Ok((_, _, phases))) = short.terminal() else {
         panic!()
     };

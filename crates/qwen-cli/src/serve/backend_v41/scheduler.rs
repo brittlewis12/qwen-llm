@@ -103,6 +103,8 @@ impl<S> Active<S> {
 }
 
 pub(super) struct Scheduler<S> {
+    /// One clock for every request's phase timings across pumps.
+    epoch: Instant,
     max_active: usize,
     park_timeout: Duration,
     pending: VecDeque<Pending>,
@@ -183,6 +185,7 @@ impl<S, E: BatchEngine<S>> Engine<S> for Observed<'_, E> {
 impl<S> Scheduler<S> {
     pub(super) fn new(max_active: usize) -> Self {
         Self {
+            epoch: Instant::now(),
             max_active: max_active.max(1),
             park_timeout: PARK_TIMEOUT,
             pending: VecDeque::new(),
@@ -200,6 +203,12 @@ impl<S> Scheduler<S> {
 
     pub(super) fn max_active(&self) -> usize {
         self.max_active
+    }
+
+    /// The engine clock's origin; phase timings subtract readings taken in
+    /// different pumps, so the engine must not restart it per pump.
+    pub(super) fn epoch(&self) -> Instant {
+        self.epoch
     }
 
     pub(super) fn submit(&mut self, job: Job) {

@@ -62,7 +62,7 @@ impl Budget {
     fn claim(self: &Arc<Self>, bytes: usize, limit: usize) -> Option<Bytes> {
         let previous = self
             .used
-            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |used| {
+            .try_update(Ordering::AcqRel, Ordering::Acquire, |used| {
                 used.checked_add(bytes).filter(|&n| n <= limit)
             })
             .ok()?;

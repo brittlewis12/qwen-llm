@@ -4354,7 +4354,7 @@ fn dflash_k0s_session_binding_sha256(
 fn dflash_k0s_allocate_session_sequence_from(
     next: &std::sync::atomic::AtomicU64,
 ) -> Result<u64, DFlashError> {
-    next.fetch_update(
+    next.try_update(
         std::sync::atomic::Ordering::Relaxed,
         std::sync::atomic::Ordering::Relaxed,
         |value| {
@@ -4574,7 +4574,7 @@ pub fn dflash_k0s_event_envelope_sha256(
 #[cfg(feature = "dflash-k0s-diagnostics")]
 fn dflash_k0s_next_event_sequence() -> Result<u64, DFlashError> {
     static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
-    NEXT.fetch_update(
+    NEXT.try_update(
         std::sync::atomic::Ordering::Relaxed,
         std::sync::atomic::Ordering::Relaxed,
         |value| value.checked_add(1),

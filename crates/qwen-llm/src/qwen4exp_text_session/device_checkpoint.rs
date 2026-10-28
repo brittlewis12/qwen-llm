@@ -24,7 +24,7 @@ impl CheckpointLineage {
     pub(super) fn fresh() -> Result<Self, Qwen4ExpTextSessionError> {
         static NEXT: AtomicU64 = AtomicU64::new(1);
         let session = NEXT
-            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |n| n.checked_add(1))
+            .try_update(Ordering::Relaxed, Ordering::Relaxed, |n| n.checked_add(1))
             .map_err(|_| {
                 Qwen4ExpTextSessionError::Invalid("checkpoint session identity exhausted".into())
             })?;

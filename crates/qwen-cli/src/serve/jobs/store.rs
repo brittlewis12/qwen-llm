@@ -1080,7 +1080,7 @@ impl JobStore {
 
     fn reserve_bytes(&self, bytes: u64) -> Result<()> {
         self.reserved_bytes
-            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |used| {
+            .try_update(Ordering::AcqRel, Ordering::Acquire, |used| {
                 used.checked_add(bytes)
                     .filter(|total| *total <= self.limits.max_store_bytes)
             })

@@ -13,7 +13,7 @@ static SESSION_INSTANCES: AtomicU64 = AtomicU64::new(1);
 
 pub(super) fn next_session_instance() -> Result<u64> {
     SESSION_INSTANCES
-        .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |n| n.checked_add(1))
+        .try_update(Ordering::Relaxed, Ordering::Relaxed, |n| n.checked_add(1))
         .map_err(|_| Glm5NextMetalError::Invalid("session identity exhausted".into()))
 }
 

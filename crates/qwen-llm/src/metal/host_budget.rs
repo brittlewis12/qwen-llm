@@ -165,13 +165,13 @@ fn external_ledger() -> &'static Arc<ExternalMemoryLedger> {
 impl ExternalMemoryLedger {
     fn reserve(self: &Arc<Self>, length: u64, shadow: u64) -> Option<ExternalMemoryCharge> {
         self.gap
-            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |old| {
+            .try_update(Ordering::AcqRel, Ordering::Acquire, |old| {
                 old.checked_add(length)
             })
             .ok()?;
         if self
             .shadow
-            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |old| {
+            .try_update(Ordering::AcqRel, Ordering::Acquire, |old| {
                 old.checked_add(shadow)
             })
             .is_err()
@@ -206,7 +206,7 @@ impl ExternalMemoryCharge {
     pub(crate) fn credit_allocated(&self, allocated: u64) {
         let old = self
             .gap
-            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |gap| {
+            .try_update(Ordering::AcqRel, Ordering::Acquire, |gap| {
                 Some(gap.saturating_sub(allocated))
             })
             .expect("infallible gap update");

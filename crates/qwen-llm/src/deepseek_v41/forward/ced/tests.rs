@@ -23,6 +23,20 @@ struct Injection {
 thread_local! {
     static INJECTION: RefCell<Option<Injection>> = const { RefCell::new(None) };
     static UNFUSED: Cell<bool> = const { Cell::new(false) };
+    static DRAINED: Cell<usize> = const { Cell::new(0) };
+}
+
+/// One outstanding submitted command was waited before returning/unwinding.
+pub(in super::super) fn drain_note() {
+    DRAINED.with(|count| count.set(count.get() + 1));
+}
+
+pub(in super::super) fn drain_notes() -> usize {
+    DRAINED.with(Cell::get)
+}
+
+pub(in super::super) fn reset_drain_notes() {
+    DRAINED.with(|count| count.set(0));
 }
 
 pub(in super::super) fn unfused() -> bool {
@@ -588,7 +602,7 @@ fn assert_causal(a: &State, b: &State, label: &str) {
 }
 
 #[test]
-#[ignore = "self-leased <=256 MiB complete buffers including 4K Engram uploads; MTL debug required; no real model"]
+#[ignore = "self-leased <=264 MiB complete buffers including 4K Engram uploads; MTL debug required; no real model"]
 fn selected_2k_and_4k_chunk_edges_match_current_full_bits_state_and_counts() {
     assert_eq!(std::env::var("MTL_DEBUG_LAYER").as_deref(), Ok("1"));
     assert_eq!(std::env::var("QWEN_METAL_LEASE_WAIT").as_deref(), Ok("1"));
@@ -599,7 +613,7 @@ fn selected_2k_and_4k_chunk_edges_match_current_full_bits_state_and_counts() {
     let mut model = nonuniform_model(&weights, &ctx, &embedding);
     for width in [2048, 4096] {
         model.prefill_rows = width;
-        for n in [2047, 2048, 2049, 4095, 4096, 4097] {
+        for n in [2047, 2048, 2049, 4095, 4096, 4097, 6144] {
             objc2::rc::autoreleasepool(|_| {
                 let p = CedPlan::shrinking(
                     &model.config,
@@ -640,8 +654,10 @@ fn selected_2k_and_4k_chunk_edges_match_current_full_bits_state_and_counts() {
                     + full_budget.1.max(ced_budget.incremental_cpu_bytes)
                     + 32 * 1024 * 1024;
                 let explicit_bound = ctx.current_allocated_size() + metal;
+                // The three-chunk (N=6144) case needs a slightly larger toy
+                // fixture; the cap still keeps every arm self-lease bounded.
                 assert!(
-                    explicit_bound <= 256 * 1024 * 1024,
+                    explicit_bound <= 264 * 1024 * 1024,
                     "complete fixture upper bound {explicit_bound}"
                 );
                 let admission = metal::evaluate_metal_memory_admission_with_cpu_bytes(
@@ -1050,6 +1066,81 @@ fn discarded_completion_poisoning_is_scoped_to_each_command_role() {
         let mut healthy = model.new_state(input.len()).unwrap();
         let (_, report) = run(&model, &mut healthy, &input, None, arithmetic).unwrap();
         assert_report(&report, input.len(), input.len(), arithmetic.scalar());
+    }
+}
+
+#[test]
+#[ignore = "requires explicit Metal benchmark lease and debug layer"]
+fn submit_ahead_completion_fault_drains_the_newer_encoder() {
+    let _incumbent = gpu_step::ced::incumbent_scope();
+    assert_eq!(std::env::var("MTL_DEBUG_LAYER").as_deref(), Ok("1"));
+    assert_eq!(std::env::var("QWEN_METAL_LEASE_WAIT").as_deref(), Ok("1"));
+    let _lease = metal::acquire_metal_benchmark_lease().expect("CED GPU lease");
+    let ctx = MetalContext::new().unwrap();
+    let weights = toy::Weights::new(&ctx);
+    let embedding = embeddings(&ctx);
+    let model = nonuniform_model(&weights, &ctx, &embedding);
+    let input = tokens(2 * prefill::DEFAULT_CHUNK_ROWS);
+    reset_drain_notes();
+    let mut state = model.new_state(input.len()).unwrap();
+    let addresses = state.addresses;
+    let scope = Scope::new("ced_encoder_rows", Action::Completion);
+    let error = run(&model, &mut state, &input, None, Arithmetic::Production).unwrap_err();
+    assert_eq!(scope.hits(), 1, "completion hook");
+    assert!(
+        error
+            .to_string()
+            .contains("injected discarded command buffer"),
+        "{error}"
+    );
+    assert_eq!(drain_notes(), 1, "newer encoder command drained");
+    drop(scope);
+    assert_poisoned_rejects(&model, &mut state, addresses);
+    let mut healthy = model.new_state(input.len()).unwrap();
+    let (_, report) = run(&model, &mut healthy, &input, None, Arithmetic::Production).unwrap();
+    assert_eq!(report.execution, PrefillExecution::ShrinkingCed);
+    assert!(report.fallback.is_none());
+}
+
+#[test]
+#[ignore = "requires explicit Metal benchmark lease and debug layer"]
+fn submit_ahead_completion_hook_error_panic_and_cancel_drain_the_newer_encoder() {
+    let _incumbent = gpu_step::ced::incumbent_scope();
+    assert_eq!(std::env::var("MTL_DEBUG_LAYER").as_deref(), Ok("1"));
+    assert_eq!(std::env::var("QWEN_METAL_LEASE_WAIT").as_deref(), Ok("1"));
+    let _lease = metal::acquire_metal_benchmark_lease().expect("CED GPU lease");
+    let ctx = MetalContext::new().unwrap();
+    let weights = toy::Weights::new(&ctx);
+    let embedding = embeddings(&ctx);
+    let model = nonuniform_model(&weights, &ctx, &embedding);
+    let input = tokens(2 * prefill::DEFAULT_CHUNK_ROWS);
+    for action in [Action::Error, Action::Cancel, Action::Panic] {
+        reset_drain_notes();
+        let mut state = model.new_state(input.len()).unwrap();
+        let addresses = state.addresses;
+        let cancel = AtomicBool::new(false);
+        let scope = Scope::new("ced_encoder_complete", action);
+        let result = catch_unwind(AssertUnwindSafe(|| {
+            run(
+                &model,
+                &mut state,
+                &input,
+                Some(&cancel),
+                Arithmetic::Production,
+            )
+        }));
+        assert_eq!(scope.hits(), 1, "hook {action:?}");
+        match action {
+            Action::Panic => assert!(result.is_err(), "panic expected"),
+            _ => assert!(result.expect("no panic").is_err(), "error expected"),
+        }
+        assert!(drain_notes() >= 1, "newer encoder drained for {action:?}");
+        drop(scope);
+        assert_poisoned_rejects(&model, &mut state, addresses);
+        let mut healthy = model.new_state(input.len()).unwrap();
+        let (_, report) = run(&model, &mut healthy, &input, None, Arithmetic::Production).unwrap();
+        assert_eq!(report.execution, PrefillExecution::ShrinkingCed);
+        assert!(report.fallback.is_none());
     }
 }
 

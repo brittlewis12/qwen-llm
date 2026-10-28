@@ -537,6 +537,8 @@ impl Drop for EncoderDrain {
     fn drop(&mut self) {
         if let Some(pending) = self.0.take() {
             let _ = metal::wait_completed(&pending.command.command);
+            #[cfg(test)]
+            super::super::ced::tests::drain_note();
         }
     }
 }
@@ -1523,6 +1525,8 @@ impl Workspace {
                     if result.is_err() {
                         if let Some(done) = drain.take() {
                             let _ = self.ced_wait(model, &done.command, &storage, &mut counters);
+                            #[cfg(test)]
+                            super::super::ced::tests::drain_note();
                         }
                         let _ = Self::join_engram_prefetch(next.take());
                         return result;

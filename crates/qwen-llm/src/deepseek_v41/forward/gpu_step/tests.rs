@@ -868,3 +868,53 @@ fn single_sequence_batch_is_step_with_batched_shared_on() {
     BATCH_SHARED_OVERRIDE.with(|o| o.set(None));
     BATCH_ATTN_OVERRIDE.with(|o| o.set(None));
 }
+
+/// A batched step under `profile::Scope::begin_dispatches` times every
+/// dispatch (the census of the same step, in order) without changing any
+/// sequence's logits.
+#[test]
+fn batched_dispatch_profile_times_every_dispatch_without_changing_logits() {
+    let ctx = MetalContext::new().unwrap();
+    let weights = toy::Weights::new(&ctx);
+    let model = weights.model(&ctx);
+    let new = || {
+        (0..3)
+            .map(|_| model.new_state_with_gpu_step(3).unwrap())
+            .collect::<Vec<_>>()
+    };
+    let (mut plain, mut profiled) = (new(), new());
+    for tokens in [[0, 3, 1], [2, 2, 4]] {
+        let expected = model
+            .step_batch(&mut plain.iter_mut().collect::<Vec<_>>(), &tokens, None)
+            .unwrap();
+        metal::dispatch_census_begin();
+        let scope = profile::Scope::begin_dispatches().unwrap();
+        let logits = model
+            .step_batch(&mut profiled.iter_mut().collect::<Vec<_>>(), &tokens, None)
+            .unwrap();
+        let report = scope.finish();
+        let census = metal::dispatch_census_take();
+        assert_eq!(logits, expected);
+        assert_eq!(report.dispatch_overflow, 0);
+        assert_eq!(
+            report
+                .dispatches
+                .iter()
+                .map(|r| r.kernel.as_str())
+                .collect::<Vec<_>>(),
+            census.iter().map(|r| r.kernel.as_str()).collect::<Vec<_>>()
+        );
+        assert!(report.dispatches.iter().all(|r| r.gpu_ns.is_some()));
+        let labels: std::collections::BTreeSet<_> =
+            report.dispatches.iter().map(|r| r.label).collect();
+        for label in [
+            "attn_qkv",
+            "attn_output",
+            "ffn_shared",
+            "ffn_routed",
+            "head",
+        ] {
+            assert!(labels.contains(label), "{label} missing from {labels:?}");
+        }
+    }
+}

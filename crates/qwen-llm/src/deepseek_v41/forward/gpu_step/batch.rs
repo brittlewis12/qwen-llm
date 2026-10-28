@@ -710,6 +710,17 @@ pub(in super::super) fn run_batch(
     let mut committed: Vec<
         objc2::rc::Retained<objc2::runtime::ProtocolObject<dyn objc2_metal::MTLCommandBuffer>>,
     > = Vec::new();
+    // Under `profile::Scope::begin_dispatches` every dispatch of the step is
+    // timed in isolation (plain encoders begun under the guard split per
+    // dispatch), as in a single step.
+    let dispatch_profile = if profile::dispatches() {
+        Some(
+            metal::dispatch_profile_begin(ctx, DECODE_DISPATCH_PROFILE_CAPACITY * workspaces.len())
+                .map_err(|e| e.to_string())?,
+        )
+    } else {
+        None
+    };
     let encoded = (|| -> Result<()> {
         for (range, engram_projection, head) in segments {
             if engram_projection {
@@ -831,6 +842,11 @@ pub(in super::super) fn run_batch(
     }
     encoded?;
     waited?;
+    if let Some(guard) = dispatch_profile {
+        profile::record_dispatches(
+            metal::dispatch_profile_finish(ctx, guard).map_err(|e| e.to_string())?,
+        );
+    }
     for (index, ws) in workspaces.iter().enumerate() {
         let status = unsafe {
             *ws.attention

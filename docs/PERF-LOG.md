@@ -6,6 +6,19 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the current state and evidence index.
 
+## 2026-10-28 - V4.1 Batched Decode Passes The 80K Likelihood Witness
+
+- M5 Ultra, GSQ IQ2_XS, main `8d27d686`: the 80K-prefix long witness (2
+  documents x 128 teacher-forced targets) scored twice in one build:
+  serial `step` per document, and both documents together through
+  `step_batch` (B = 2: batched shared expert, q_b and output_b).
+- Mean document NLL 1.1352005 serial vs 1.1352006 batched; per-token
+  |dNLL| max 6.9e-6 / 1.2e-5 (mean 1.1e-6 / 6.7e-7); top-1 and target rank
+  equal on all 256 targets; max target-logit difference 1.2e-4. The
+  witness noise floor from benign perturbations is +-0.028 in mean NLL.
+- The serial arm is bitwise equal to the select-v2 arm of 2026-10-28
+  (serial decode unchanged by the batched work).
+
 ## 2026-10-28 - V4.1 Batched Decode 1.14-1.37x (q_b, output_b); Bitwise Sink Scores 2.1x
 
 All M5 Ultra, GSQ IQ2_XS.

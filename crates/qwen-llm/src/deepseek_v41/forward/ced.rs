@@ -166,6 +166,8 @@ pub struct CedMemoryEstimate {
     pub command_reserve_bytes: u64,
     pub incremental_metal_bytes: u64,
     pub incremental_cpu_bytes: u64,
+    /// Second chunk's CPU upload staging while the pipeline is active.
+    pub priced_pipeline_cpu_bytes: u64,
     pub retained_control_cpu_bytes: u64,
     pub chunk_hash_cpu_bytes: u64,
     pub process_ru_maxrss_before_bytes: Option<u64>,
@@ -296,6 +298,8 @@ pub(super) fn estimate_from_parts(
     price: &impl Fn(u64) -> Result<u64>,
 ) -> Result<CedMemoryEstimate> {
     let rows = plan.prompt_rows.min(plan.full_chunk_rows);
+    // The pipeline only overlaps a nonscalar second encoder chunk.
+    let pipelined = pipelined && plan.prompt_rows > plan.full_chunk_rows + 1;
     let mut retained = 0;
     for bytes in [
         plan.memory.boundary_residual_bytes,
@@ -346,7 +350,7 @@ pub(super) fn estimate_from_parts(
     };
     let reserve = checked_add(16 * 1024 * 1024, batch_encoding_reserve)?;
     let pipeline_chunk = if pipelined {
-        checked_add(chunk, reserve)?
+        checked_add(checked_add(chunk, publication)?, reserve)?
     } else {
         0
     };
@@ -407,8 +411,11 @@ pub(super) fn estimate_from_parts(
     .try_fold(0, checked_add)?;
     let controls_cpu = attention_gpu::QueryControls::cpu_bytes(plan.candidate_rows.clone())?;
     let hash_cpu = prefill::chunk_hash_cpu_bytes(hash_count, rows)?;
+    let upload_cpu = prefill::upload_cpu_bytes(c, projections, rows)?;
+    let pipeline_cpu = if pipelined { upload_cpu } else { 0 };
     let cpu = [
-        prefill::upload_cpu_bytes(c, projections, rows)?,
+        upload_cpu,
+        pipeline_cpu,
         row_bytes(1, plan.prompt_rows)?,
         row_bytes(c.vocab, 2)?,
         hash_cpu,
@@ -440,6 +447,7 @@ pub(super) fn estimate_from_parts(
         command_reserve_bytes: reserve,
         incremental_metal_bytes: metal,
         incremental_cpu_bytes: cpu,
+        priced_pipeline_cpu_bytes: pipeline_cpu,
         retained_control_cpu_bytes: controls_cpu,
         chunk_hash_cpu_bytes: hash_cpu,
         process_ru_maxrss_before_bytes: None,

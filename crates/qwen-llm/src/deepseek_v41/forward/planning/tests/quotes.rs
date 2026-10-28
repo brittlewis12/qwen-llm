@@ -117,27 +117,47 @@ fn admitted_fixture_width_quotes_separate_strict_pair_metal_costs_for_both_half_
                 assert_eq!(w["ced"]["batch_encoding_reserve_bytes"], 4 << 20);
                 continue;
             }
-            assert!(wide.metal_bytes > narrow.metal_bytes);
-            assert!(wide.cpu_bytes > narrow.cpu_bytes);
+            let pipeline = |d: &serde_json::Value| {
+                (
+                    d["ced"]["priced_pipeline_chunk_bytes"].as_u64().unwrap(),
+                    d["ced"]["priced_pipeline_cpu_bytes"].as_u64().unwrap(),
+                )
+            };
+            let (narrow_pipe_metal, narrow_pipe_cpu) = pipeline(&n);
+            let (wide_pipe_metal, wide_pipe_cpu) = pipeline(&w);
+            assert!(
+                wide.metal_bytes - wide_pipe_metal > narrow.metal_bytes - narrow_pipe_metal,
+                "serialized chunk width must cost more in the wider plan"
+            );
+            assert!(
+                wide.cpu_bytes - wide_pipe_cpu > narrow.cpu_bytes - narrow_pipe_cpu,
+                "serialized upload staging must cost more in the wider plan"
+            );
             assert_eq!(
                 n["ced"]["batch_encoding_reserve_bytes"],
                 w["ced"]["batch_encoding_reserve_bytes"]
             );
             if tokens == admitted_request::REQUEST_TOKENS {
-                // The pipeline keeps the next chunk's scratch and command
-                // reserve live, so its width delta is pinned separately.
-                let (serial, pipelined) = if half {
-                    (786_432, 1_556_480)
-                } else {
-                    (737_280, 1_458_176)
-                };
-                let expected =
-                    if crate::deepseek_v41::forward::gpu_step::ced::encoder_pipeline_priced() {
-                        pipelined
-                    } else {
-                        serial
-                    };
-                assert_eq!(wide.metal_bytes - narrow.metal_bytes, expected);
+                // Serialized width cost is pinned; the pipeline term is the
+                // second chunk scratch plus its publication and reserve.
+                let serial = if half { 786_432 } else { 737_280 };
+                let expected = serial as i64 + wide_pipe_metal as i64 - narrow_pipe_metal as i64;
+                assert_eq!(
+                    wide.metal_bytes as i64 - narrow.metal_bytes as i64,
+                    expected
+                );
+                assert_eq!(
+                    n["ced"]["priced_pipeline_chunk_bytes"],
+                    serde_json::json!(
+                        n["ced"]["priced_chunk_bytes"].as_u64().unwrap()
+                            + n["ced"]["priced_publication_bytes"].as_u64().unwrap()
+                            + n["ced"]["command_reserve_bytes"].as_u64().unwrap()
+                    )
+                );
+                assert_eq!(
+                    w["ced"]["priced_pipeline_chunk_bytes"],
+                    serde_json::json!(0)
+                );
                 assert!(n["scalar_tail"].is_null() && w["scalar_tail"].is_null());
                 assert_eq!(
                     n["input_ranges"],
@@ -177,13 +197,20 @@ fn admitted_fixture_width_quotes_separate_strict_pair_metal_costs_for_both_half_
                 .unwrap()
                 .checked_add(cold.resident_storage.private_shadow_bytes)
                 .unwrap();
-            observed.recommended_max_bytes = narrow.metal_bytes;
+            // The pipeline charge can make the two-chunk plan larger than
+            // the one-chunk plan; budget the smaller one and refuse the larger.
+            let (smaller, larger) = if wide.metal_bytes < narrow.metal_bytes {
+                (wide, narrow)
+            } else {
+                (narrow, wide)
+            };
+            observed.recommended_max_bytes = smaller.metal_bytes;
             let cost = |memory: RequestMemoryEstimate| Cost {
                 metal: memory.metal_bytes,
                 cpu: memory.cpu_bytes.checked_add(reserve).unwrap(),
             };
             assert_eq!(
-                cost(wide)
+                cost(larger)
                     .admit(observed)
                     .unwrap_err()
                     .memory_admission()
@@ -191,7 +218,7 @@ fn admitted_fixture_width_quotes_separate_strict_pair_metal_costs_for_both_half_
                     .reason(),
                 Reason::WorkingSetInsufficient
             );
-            cost(narrow).admit(observed).unwrap();
+            cost(smaller).admit(observed).unwrap();
             assert!(narrow.total_bytes + reserve <= 512 << 20);
             assert!(wide.total_bytes + reserve <= 512 << 20);
             assert!(cold.required_metal_bytes + cold.required_cpu_bytes <= 512 << 20);

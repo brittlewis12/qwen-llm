@@ -32,7 +32,7 @@ crate::env_flag!(
 
 /// Memory pricing must match the live submission mode.
 pub(in super::super) fn encoder_pipeline_priced() -> bool {
-    encoder_pipeline_enabled()
+    encoder_pipeline_enabled() && engram_prefetch_enabled()
 }
 
 pub(in super::super) fn batch_selection(
@@ -515,6 +515,32 @@ struct PendingEncoder {
 
 type EngramValues = Vec<(usize, Result<Vec<f32>>)>;
 
+/// Owns a submitted encoder command until it is retired or drained. If the
+/// driver unwinds first, the guard waits the command before releasing the
+/// chunk buffers it reads.
+#[derive(Default)]
+struct EncoderDrain(Option<PendingEncoder>);
+
+impl EncoderDrain {
+    fn take(&mut self) -> Option<PendingEncoder> {
+        self.0.take()
+    }
+    fn replace(&mut self, pending: PendingEncoder) -> Option<PendingEncoder> {
+        self.0.replace(pending)
+    }
+    fn is_some(&self) -> bool {
+        self.0.is_some()
+    }
+}
+
+impl Drop for EncoderDrain {
+    fn drop(&mut self) {
+        if let Some(pending) = self.0.take() {
+            let _ = metal::wait_completed(&pending.command.command);
+        }
+    }
+}
+
 impl Workspace {
     pub(in super::super) fn abort_ced(&mut self) {
         self.attention.abort_ced();
@@ -558,7 +584,7 @@ impl Workspace {
     fn ced_wait(
         &mut self,
         model: &Forward<'_>,
-        pending: PendingCed,
+        pending: &PendingCed,
         storage: &Storage,
         counters: &mut CedCounters,
     ) -> Result<()> {
@@ -603,7 +629,7 @@ impl Workspace {
         encode: impl FnOnce(&mut Self, &KernelEncoder) -> Result<()>,
     ) -> Result<()> {
         let pending = self.ced_submit(model, role, dimensions, storage, counters, encode)?;
-        self.ced_wait(model, pending, storage, counters)
+        self.ced_wait(model, &pending, storage, counters)
     }
 
     fn ced_block(
@@ -954,6 +980,7 @@ impl Workspace {
         storage: &Storage,
         counters: &mut CedCounters,
         cancel: Option<&AtomicBool>,
+        final_check: bool,
     ) -> Result<()> {
         #[allow(unused_variables)]
         let EncoderChunk {
@@ -964,11 +991,15 @@ impl Workspace {
             ref scratch,
             ..
         } = pending.chunk;
-        self.ced_wait(model, pending.command, storage, counters)?;
+        self.ced_wait(model, &pending.command, storage, counters)?;
         scratch
             .ffn
             .validate_status_layers(plan.encoder_layers.clone())?;
-        self.attention.complete_ced_encoder(start, n)?;
+        if final_check {
+            self.attention.complete_ced_encoder(start, n)?;
+        } else {
+            self.attention.complete_ced_encoder_deferred(start, n)?;
+        }
         #[cfg(test)]
         super::super::ced::qualification::boundary(start, n, x, incoming)?;
         for id in plan.encoder_layers.clone() {
@@ -1027,7 +1058,7 @@ impl Workspace {
                 cancel,
                 scope,
             )?;
-            self.encoder_chunk_finish(model, plan, pending, storage, counters, cancel)?;
+            self.encoder_chunk_finish(model, plan, pending, storage, counters, cancel, true)?;
             Self::join_engram_prefetch(next)
         })
     }
@@ -1411,14 +1442,14 @@ impl Workspace {
             }
             if encoder_pipeline_enabled() {
                 std::thread::scope(|scope| -> Result<()> {
-                    let mut pending: Option<PendingEncoder> = None;
+                    let mut drain = EncoderDrain::default();
                     let mut next: Option<std::thread::ScopedJoinHandle<'_, EngramValues>> = None;
                     let result = (|| -> Result<()> {
                         for (i, (range, hashes)) in chunks.iter().enumerate() {
                             cancelled(cancel)?;
                             let input = &tokens[range.clone()];
                             if input.len() == 1 {
-                                if let Some(older) = pending.take() {
+                                if let Some(older) = drain.take() {
                                     self.encoder_chunk_finish(
                                         model,
                                         plan,
@@ -1426,6 +1457,7 @@ impl Workspace {
                                         &storage,
                                         &mut counters,
                                         cancel,
+                                        true,
                                     )?;
                                 }
                                 let _ = Self::join_engram_prefetch(next.take())?;
@@ -1456,7 +1488,7 @@ impl Workspace {
                                 chunks.get(i + 1).and_then(|(next_range, next_hashes)| {
                                     (next_range.len() > 1).then_some(next_hashes.as_slice())
                                 });
-                            let speculative = pending.is_some();
+                            let speculative = drain.is_some();
                             let (submitted, spawned) = self.encoder_chunk_submit(
                                 model,
                                 plan,
@@ -1469,7 +1501,10 @@ impl Workspace {
                                 scope,
                             )?;
                             next = spawned;
-                            if let Some(older) = pending.take() {
+                            // Own the new command before any subsequent
+                            // fallible step so an early return drains it.
+                            let older = drain.replace(submitted);
+                            if let Some(older) = older {
                                 self.encoder_chunk_finish(
                                     model,
                                     plan,
@@ -1477,20 +1512,20 @@ impl Workspace {
                                     &storage,
                                     &mut counters,
                                     cancel,
+                                    false,
                                 )?;
                             }
-                            pending = Some(submitted);
                         }
                         Ok(())
                     })();
                     if result.is_err() {
-                        if let Some(done) = pending.take() {
-                            let _ = self.ced_wait(model, done.command, &storage, &mut counters);
+                        if let Some(done) = drain.take() {
+                            let _ = self.ced_wait(model, &done.command, &storage, &mut counters);
                         }
                         let _ = Self::join_engram_prefetch(next.take());
                         return result;
                     }
-                    if let Some(last) = pending.take() {
+                    if let Some(last) = drain.take() {
                         self.encoder_chunk_finish(
                             model,
                             plan,
@@ -1498,6 +1533,7 @@ impl Workspace {
                             &storage,
                             &mut counters,
                             cancel,
+                            true,
                         )?;
                     }
                     let _ = Self::join_engram_prefetch(next.take())?;

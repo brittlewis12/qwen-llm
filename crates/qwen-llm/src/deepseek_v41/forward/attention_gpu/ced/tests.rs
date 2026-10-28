@@ -423,6 +423,28 @@ fn speculative_encoder_keeps_one_inflight_intent_and_completes_in_fifo_order() {
 }
 
 #[test]
+fn speculative_encoder_retires_three_contiguous_chunks_in_order() {
+    let (c, schedule, plan) = fixture(9);
+    let mut cursor = Cursor::new(&plan, &c, &schedule, 10).unwrap();
+    cursor.begin_encoder(0, 3).unwrap();
+    encoded(&mut cursor, true);
+    cursor.begin_encoder_speculative(3, 3).unwrap();
+    // Retire the front; the newest stays pending.
+    cursor.complete(Phase::Encoder, 0, 3).unwrap();
+    assert_eq!(cursor.encoder_completed, 3);
+    // A speculative begin needs the newest intent fully encoded.
+    assert!(cursor.begin_encoder_speculative(6, 3).is_err());
+    encoded(&mut cursor, true);
+    cursor.begin_encoder_speculative(6, 3).unwrap();
+    cursor.complete(Phase::Encoder, 3, 3).unwrap();
+    assert_eq!(cursor.encoder_completed, 6);
+    encoded(&mut cursor, true);
+    cursor.complete(Phase::Encoder, 6, 3).unwrap();
+    assert_eq!(cursor.encoder_completed, 9);
+    assert!(cursor.inflight.is_empty() && cursor.pending.is_none());
+}
+
+#[test]
 fn checked_absolute_ranges_history_and_control_prices() {
     assert_eq!(checked_range(&(100..120), 107, 3).unwrap(), 107..110);
     for (start, rows) in [(99, 1), (120, 1), (107, 0), (100, 2049), (usize::MAX, 2)] {

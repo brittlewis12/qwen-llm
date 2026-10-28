@@ -527,7 +527,7 @@ impl Workspace {
         })();
         if result.is_err() {
             while let Some(done) = pending.pop_front() {
-                let _ = self.ced_wait(model, done.command, storage, counters);
+                let _ = self.ced_wait(model, &done.command, storage, counters);
             }
         }
         result?;
@@ -546,7 +546,7 @@ impl Workspace {
         storage: &mut Storage,
         counters: &mut CedCounters,
     ) -> Result<()> {
-        self.ced_wait(model, done.command, storage, counters)?;
+        self.ced_wait(model, &done.command, storage, counters)?;
         for (unit, status) in done.units.iter().zip(&done.statuses) {
             if let Some(ffn) = &status.ffn {
                 ffn_gpu::validate_ced_status(ffn, unit.layer)?;

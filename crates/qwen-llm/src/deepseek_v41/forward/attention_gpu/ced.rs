@@ -543,12 +543,20 @@ impl Cursor {
     fn begin_encoder_speculative(&mut self, start: usize, rows: usize) -> Result<()> {
         op::require(self.inflight.is_empty(), "CED speculative encoder depth")?;
         op::require(self.group.is_none(), "CED encoder during decoder batch")?;
+        op::require(
+            rows <= self.plan.full_chunk_rows,
+            "CED encoder chunk geometry",
+        )?;
+        checked_range(&(0..self.plan.prompt_rows), start, rows)?;
         let previous = self
             .pending
             .as_ref()
             .ok_or("CED speculative encoder requires a pending encoder")?;
         op::require(
-            previous.phase == Phase::Encoder && previous.range.end == start,
+            previous.phase == Phase::Encoder
+                && previous.range.end == start
+                && previous.encoded
+                && Self::attention_done(previous),
             "CED speculative encoder frontier",
         )?;
         let previous = self.pending.take().unwrap();
@@ -1688,6 +1696,20 @@ impl Workspace {
         rows: usize,
     ) -> Result<()> {
         self.checked_ced_status()?;
+        self.ced
+            .as_mut()
+            .ok_or("CED not active")?
+            .complete(Phase::Encoder, start, rows)
+    }
+
+    /// Retire an encoder chunk before a newer encoder command has drained.
+    /// The shared attention status is still being written by that command, so
+    /// the host read is deferred to the final chunk's checked completion.
+    pub(in super::super) fn complete_ced_encoder_deferred(
+        &mut self,
+        start: usize,
+        rows: usize,
+    ) -> Result<()> {
         self.ced
             .as_mut()
             .ok_or("CED not active")?

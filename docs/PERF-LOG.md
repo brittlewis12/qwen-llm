@@ -6,6 +6,19 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the current state and evidence index.
 
+## 2026-10-29 - V4.1 Small-Resource GateUp Is Exact But Below The Real-Route Gate
+
+M5 Ultra, research `2258eba6`, fixed ordinary layer8/start0/actual1024 GateUp:
+the same binary passes 406 CPU controls, the metadata header, eight standalone
+GPU cohorts and all 32 native commands with full bits/census/guards/postflight.
+Counts 1..16 use dedicated two-SIMD/64-thread/3072-byte kernels; larger counts keep
+the incumbent. Every timed B call includes all four dispatches. GPU latency falls
+**4.238963% / 1.153149%**, host latency falls **1.198942% / 1.479440%**.
+Neither block meets the unchanged 10% GPU/no-host-regression gate: close without
+promotion or another timing window. Complete outer acceptance is a valid negative,
+not a performance win or whole-FFN/model result. Method, identities and limits:
+`docs/bench/2026-10-29-v41-small-resource-route-result.md`.
+
 ## 2026-10-29 - V4.1 Few-Row Appends: Column Kernels 1.3-2.7x, Kill Test Fails At Depth
 
 - Short appends were slow: M5 Ultra, GSQ IQ2_XS, main `16f9a365`, depth

@@ -36,7 +36,7 @@ fn attention_q_register_cache_probe() {
     ] {
         assert!(std::env::var_os(name).is_none(), "unset {name} for timing");
     }
-    let mut signals = metal::test_cancellation::CancellationGuard::install().unwrap();
+    let signals = super::pv_dim2::CancellationGuard::install();
     let lease = metal::acquire_metal_benchmark_lease().unwrap();
     {
         let ctx = MetalContext::new().expect("Q-register timing requires Metal");
@@ -45,7 +45,7 @@ fn attention_q_register_cache_probe() {
             "tensor tier required"
         );
         for (k, n, ragged, first) in production_cases() {
-            metal::test_cancellation::check().unwrap();
+            signals.check();
             let f = Fixture::new(&ctx, k, n, ragged, first);
             execute(&ctx, |enc| score(&f, &ctx, enc, false));
             let expected = f32_slice(&f.scores).unwrap().to_vec();
@@ -90,7 +90,7 @@ fn attention_q_register_cache_probe() {
                 ("sink", sink),
             ] {
                 let timed = |cached| {
-                    metal::test_cancellation::check().unwrap();
+                    signals.check();
                     let command = ctx.queue.commandBuffer().unwrap();
                     let enc = KernelEncoder::begin(&command);
                     for _ in 0..4 {
@@ -128,6 +128,6 @@ fn attention_q_register_cache_probe() {
             f.check_guards();
         }
     }
-    signals.restore().unwrap();
+    drop(signals);
     drop(lease);
 }

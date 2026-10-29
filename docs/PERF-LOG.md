@@ -6,6 +6,21 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the current state and evidence index.
 
+## 2026-10-29 - V4.1 Q Register Cache: Faster Tiles And Native Prefill
+
+- Keep Q half vectors live across key panels without changing the tensor64
+  multiply/MAC sequence. Resident N512 tiles improve 1.62-1.65x for scores and
+  1.30-1.34x for the complete attention sink, bitwise exact.
+- Same-binary 8K off/on ABBA and BAAB give +4.83% Full / +2.99% CED throughput
+  across all samples. Drift is substantial: block gains range +1.71-8.41% Full
+  and +1.90-4.36% CED; do not quote the best block as a stable universal gain.
+- The real-model Full/CED check passes all 257 positions, 129280 logits/vector
+  and 56 causal regions; all observations also match the prior Q-half report.
+- `QWEN_V41_ATTN_QREGISTER=0` restores Q-half. Keep PV unchanged: two-chunk
+  probability reuse is exact but 9-11% slower in the measured PV kernel.
+- [Results and method](bench/2026-10-29-v41-q-register-cache.md). No chunk-width
+  change or new tensor buffer.
+
 ## 2026-10-29 - V4.1 Prefill Q Half Mirror: +2.1%, Bitwise
 
 - The tensor64 score re-converted the F32 query per 32-key panel; staging the

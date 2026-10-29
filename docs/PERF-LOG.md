@@ -6,6 +6,19 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the current state and evidence index.
 
+## 2026-10-29 - V4.1 Attention Half-KV Reuse: Design and Probe Bar
+
+- Found the tensor64 score and PV kernels convert the same KV rows to half
+  independently: `attention_row_key(...)` + `half4(v)` in both, window rows
+  shared across adjacent queries and owner rows shared across all consumers.
+- Design: per-chunk history half mirror (produced in the existing gather) and
+  per-publication owner half mirror, read by both consumers; arithmetic
+  sequence unchanged. Encoder tile budget ~925 ms; F32 K/V reads ~687 GB;
+  10% tile cut ~92 ms (2.1% wall), 20% ~185 ms.
+- Probe: microbenchmark at production shapes, require >=10% tile-kernel
+  reduction, then a >=1% wall CED A/B plus bitwise pair/qualification and a
+  priced ledger. [Packet](bench/2026-10-29-v41-attention-half-kv-design.md).
+
 ## 2026-10-29 - V4.1 CED Encoder GPU Attribution: Attention 54%, FFN 46%
 
 - Full 8K per-layer stage profile on main `508bf6e3`: 7,453.3 ms GPU,

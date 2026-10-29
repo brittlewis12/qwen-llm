@@ -7,10 +7,12 @@
 ## Decision
 
 Training-free encoder depth reduction is closed. Keeping only selected CED
-encoder blocks and bypassing the rest costs **1.22-1.79 nats** on the paired
+encoder blocks and bypassing the rest costs **0.68-1.79 nats** on the paired
 witness, against a predeclared screen gate of 0.10 nats and 5 top-1 points.
-The encoder's hidden-state transformation is not redundant at this scale; a
-1.6-2.2x cold-prefill budget is not available for free. Any further encoder
+The best schedule (ten blocks including the final block) still costs 0.68
+nats, 6.8x the gate. The encoder's hidden-state transformation is not
+redundant at this scale; a 1.6-2.2x cold-prefill budget is not available for
+free. Any further encoder
 depth bet needs distillation or calibration with a stronger quality
 instrument, and is a new project rather than a cheap continuation of this one.
 
@@ -35,13 +37,15 @@ unchanged; the hook is active only when the keep list is set.
 | --- | ---: | ---: | ---: | ---: | ---: |
 | 20 (baseline CED) | 2.139579 | - | 47.753 | 55.73% | - |
 | 10: `0,2,...,18` | 3.569097 | +1.429519 | 445.073 | 37.24% | -18.49 pts |
+| 10 final: `0,2,...,16,19` | 2.821327 | +0.681748 | 127.906 | 45.57% | -10.16 pts |
 | 6: `0,4,8,12,16,19` | 3.364224 | +1.224645 | 205.333 | 40.10% | -15.63 pts |
 | 3: `0,9,19` | 3.932431 | +1.792852 | 439.094 | 33.59% | -22.14 pts |
 
-The sparse-10 pattern omitted the final encoder block and was worse than the
-6-block pattern that retained it. The witness is too small to rank block
-importance, but the publication-adjacent block is plainly not removable by
-this method.
+The final encoder block carries a large share of the loss: swapping block 18
+for block 19 at the same ten-block budget recovers 0.75 nats, and the
+six-block arm retained it too. The witness is too small to rank the other
+blocks, but the publication-adjacent transformation is plainly not removable
+by this method, and even retaining it leaves the arm far outside the gate.
 
 ## Limits
 

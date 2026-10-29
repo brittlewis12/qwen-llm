@@ -55,6 +55,7 @@ SCOPES = {
         "metal::moe_grouped_generic::tests::staging_ownership::",
         "metal::moe_grouped_generic::tests::wide_activation_type::",
         "metal::moe_grouped_generic::tests::sorted_experts::",
+        "metal::test_cancellation::",
     ],
     "oracle": [],
     "bench": [

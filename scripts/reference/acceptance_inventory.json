@@ -6249,5 +6249,19 @@
     "class": "gpu",
     "ignored": false,
     "reason": "M5 synthetic V4.1 Metal state/fork/trace and partial-commit failure checks under solo causal waves and native rollback; no real model import."
+  },
+  {
+    "target": "lib",
+    "name": "metal::test_cancellation::tests::signals_wait_for_release_cpu",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Fresh exact-PID CPU subprocess simulation of cooperative INT/TERM ownership, checked-release ordering or unwind handler restoration; no Metal context, GPU/model work or GPU-drain qualification."
+  },
+  {
+    "target": "lib",
+    "name": "metal::test_cancellation::tests::unwind_restores_handlers_cpu",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Fresh exact-PID CPU subprocess simulation of cooperative INT/TERM ownership, checked-release ordering or unwind handler restoration; no Metal context, GPU/model work or GPU-drain qualification."
   }
 ]

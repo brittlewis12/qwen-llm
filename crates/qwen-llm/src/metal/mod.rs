@@ -335,6 +335,9 @@ mod tensor;
 mod tensor_ops;
 #[cfg(test)]
 pub(crate) mod test_support;
+
+#[cfg(test)]
+pub(crate) mod test_cancellation;
 mod testing;
 #[cfg(test)]
 mod tests;

@@ -6,6 +6,19 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the current state and evidence index.
 
+## 2026-10-29 - V4.1 Prefill Q Half Mirror: +2.1%, Bitwise
+
+- The tensor64 score re-converted the F32 query per 32-key panel; staging the
+  post-RoPE query once in the existing half scratch and reading
+  `score_tensor64_qhalf` keeps the pair endpoint hash `a2db19af...` and
+  improves the same-binary CED A/B by 2.08% / 89 ms (1,863.2 -> 1,901.9;
+  pair CED 1,827.6). Default on; `QWEN_V41_ATTN_QHALF=0` off. No new
+  allocation.
+- Production 512-query probe: Q 1.113-1.115x, K/V 1.022x, Q+K/V 1.166-1.170x;
+  the earlier half-KV negative used <=32 queries and understated the Q cost.
+- Private `current_pair` at `da5d404e`: PASS 85.43 s. [Packet](bench/2026-10-29-v41-attention-qhalf.md).
+  Raw: `~/qwen-runs/2026-10-29-v41-attn-qhalf/`.
+
 ## 2026-10-29 - V4.1 Exact Fast Sampling
 
 - Bitwise sampler-v1: `sample` orders reusable keys by a stable radix sort

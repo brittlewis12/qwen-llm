@@ -49,6 +49,17 @@ attention core or the mirror construction and memory cost. A different slab
 granularity or a fused score+PV kernel could behave differently, but this
 bar is not met.
 
+## Update: production-shaped replay
+
+The original probe used at most 32 queries per dispatch. At production
+512-query tiles (K=640, window 128, topk 512): K/V half is 1.022x, Q half is
+1.113-1.115x, and Q+K/V is 1.166-1.170x, all bitwise-identical on finite
+lanes. The K/V-only negative stands for that operand pair, but the Q mirror
+is a real win and was integrated (see
+`2026-10-29-v41-attention-qhalf.md`). The broader conclusion that the
+attention operand/dataflow family is closed is withdrawn; query staging and
+SIMD ownership remain open.
+
 ## Next
 
 The exact cold-prefill lane is now exhausted: host/queue, Engram dedup,

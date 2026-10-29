@@ -6,6 +6,22 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the current state and evidence index.
 
+## 2026-10-28 - V4.1 Token-K32 GateUp Is Exact But Misses Pack-Inclusive Economics
+
+M5 Ultra, research `1378c2ce`, fixed actual-route ordinary 1K layer-8 GateUp:
+same-binary raw GPU proof passes seven permutations and six matrix cohorts;
+all 32 native commands, full output bits, controls, guards and postflight pass.
+Fresh-pack-plus-Gate/Up GPU latency regresses **0.6773% / 0.4749%**, and host
+latency regresses **0.7461% / 2.0281%**. Both blocks miss the unchanged 10%
+GPU-reduction/no-host-regression gate; close this implementation, no promotion.
+
+The original short-verification-budget packet stays incomplete and unpooled.
+A budget-only source-fixed followup completes; its outer helper then rejects
+valid libtest success without a captured-output section. Separate CPU analysis
+preserves that failure and validates the native negative without a GPU rerun
+or fabricated outer acceptance. Method, source identities and limits:
+`docs/bench/2026-10-28-v41-token-k32-result.md`.
+
 ## 2026-10-28 - qwen serve: V4.1 Batching On By Default, 1.25x On Multi-Turn Agents
 
 - `QWEN_SERVE_V41_MAX_ACTIVE` and `QWEN_SERVE_V41_LIVE_STATES` now default

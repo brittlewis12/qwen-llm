@@ -6,6 +6,47 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the current state and evidence index.
 
+## 2026-10-29 - V4.1 Depth Matrix: Cold Prefill Rises, Append Falls, Decode Flat To 32K
+
+- CED cold prefill: 2K 1,222.8, 8K 1,895.6, 32K 2,086.1, 128K 2,128.1 tok/s.
+  The 2K point uses a half-full 4,096-row chunk; 8K+ use full chunks.
+- Fixed 1K append at the same depths: 941.95, 872.89, 759.07, 525.44 tok/s.
+  At 128K the append costs 4.1x the cold-prefill per-token time; the cold
+  curve amortizes a late-context selection cost the append pays per token.
+- Decode tg32: d0 75.13, d8K 73.23, d32K 72.46; d128K 66.45 steady (first
+  sample 33.18 after the fill). Flat to 32K, about 12% lower at 128K.
+- Next: split the 128K append serial span before choosing a kernel; decode
+  needs a streaming/cache-resident/loads-only control before another bandwidth
+  claim. [Packet](bench/2026-10-29-v41-depth-roofline.md). Raw:
+  `~/qwen-runs/2026-10-29-v41-encoder-depth/`.
+
+## 2026-10-29 - V4.1 Encoder Depth Ablation: Training-Free Skip Is Negative
+
+- Skipping CED encoder blocks and bypassing the rest costs 0.68-1.79 nats on
+  the paired 384-target witness (baseline 2.1396, bitwise equal to Full):
+  keep 10/20 -> 3.5691, keep 6/20 -> 3.3642, keep 3/20 -> 3.9324; the best
+  ten-block schedule, retaining final block 19, is 2.8213 (+0.68). The
+  predeclared gate was 0.10 nats and 5 top-1 points.
+- Training-free encoder depth reduction is closed; a distilled/calibrated
+  encoder is a new project, not a cheap continuation. No latency promotion.
+  [Packet](bench/2026-10-29-v41-encoder-depth-negative.md). Raw:
+  `~/qwen-runs/2026-10-29-v41-encoder-depth/`.
+
+## 2026-10-29 - V4.1 Q Register Cache: Faster Tiles And Native Prefill
+
+- Keep Q half vectors live across key panels without changing the tensor64
+  multiply/MAC sequence. Resident N512 tiles improve 1.62-1.65x for scores and
+  1.30-1.34x for the complete attention sink, bitwise exact.
+- Same-binary 8K off/on ABBA and BAAB give +4.83% Full / +2.99% CED throughput
+  across all samples. Drift is substantial: block gains range +1.71-8.41% Full
+  and +1.90-4.36% CED; do not quote the best block as a stable universal gain.
+- The real-model Full/CED check passes all 257 positions, 129280 logits/vector
+  and 56 causal regions; all observations also match the prior Q-half report.
+- `QWEN_V41_ATTN_QREGISTER=0` restores Q-half. Keep PV unchanged: two-chunk
+  probability reuse is exact but 9-11% slower in the measured PV kernel.
+- [Results and method](bench/2026-10-29-v41-q-register-cache.md). No chunk-width
+  change or new tensor buffer.
+
 ## 2026-10-29 - V4.1 Prefill Q Half Mirror: +2.1%, Bitwise
 
 - The tensor64 score re-converted the F32 query per 32-key panel; staging the

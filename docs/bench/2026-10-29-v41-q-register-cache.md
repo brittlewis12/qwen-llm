@@ -51,5 +51,56 @@ The experimental branch selects Q-cache for the existing tensor64 Q-half path.
 disabling Q-half still restores the F32-query route. No buffer, arithmetic,
 chunk-width or PV policy change is needed.
 
-Actual Full/CED numerical comparison and end-to-end timing remain to be measured.
-The tile result alone does not promote the candidate into maintained main.
+## Real Model Result
+
+Integrated source `ed46c40f` passes the existing 8K Full/CED comparison on the
+40-layer DeepSeek-V4.1-Flash-1017 GSQ-RCO IQ2_XS artifact with IQ4_NL Engram.
+It compares 257 full-vocabulary vectors per arm, 129280 elements per vector,
+256 teacher-forced steps and 56 causal-state regions at each position. Every
+observation also equals the prior Q-half report at `da5d404e`, with identical
+artifact and selected input identities. This is not just candidate Full versus
+candidate CED: the saved prior-kernel logits and state hashes agree too.
+
+The test binary SHA256 is
+`22225477089c11d1807ef99049281b5f2c0cdc597c159b00a3b8907afbff5793`.
+The strengthened, poisoned score/output check also passes on this source, with
+all active scores and outputs exact and no nonfinite output lanes.
+
+### Native Wall Time
+
+The same `qwen-bench` executable runs ordinary `suite` with `--pp 8192
+--depth 0 --runs 2 --seed 1`. Off sets `QWEN_V41_ATTN_QREGISTER=0`; on uses
+the compiled default. Each policy has an off/on/on/off block and a reverse
+on/off/off/on block, two retained samples per process: eight samples per arm,
+32 retained samples overall. Policy order also reverses between blocks. No
+debug validation is active. These are native prefill-plus-final-logit wall
+times, excluding model load; the timing prompt is deterministic synthetic
+input, distinct from the numerical witness. All samples remain included.
+
+| Policy and block | Q-half mean s | Q-cache mean s | Throughput gain |
+| --- | ---: | ---: | ---: |
+| Full ABBA | 7.4199 | 6.8443 | +8.41% |
+| Full BAAB | 7.9813 | 7.8471 | +1.71% |
+| CED ABBA | 5.3294 | 5.2299 | +1.90% |
+| CED BAAB | 4.3079 | 4.1278 | +4.36% |
+| Full, all samples | 7.7006 | 7.3457 | **+4.83%** |
+| CED, all samples | 4.8187 | 4.6788 | **+2.99%** |
+
+The aggregate corresponds to 4.61% less Full wall time and 2.90% less CED wall
+time. Throughput is 8192 divided by mean wall seconds, not the mean of rounded
+rates. Ordinary Full uses P0 mapping and ordinary CED uses P4; compare off/on
+within each policy, not their absolute times to a P0 paired run. Actual CED
+records report `shrinking_ced+final_logits_copy`, not a Full fallback.
+
+Machine-state drift is substantial, especially in Full: the final BAAB on
+samples are 8.79/8.96 s versus 6.82/6.82 s initially. Do not present the +8.41%
+block as a stable universal gain. Both orders favor Q-cache, and the CED BAAB
+block is comparatively steady at 4.31 s off versus 4.13 s on. There is no
+programmed cooldown within a block; the two campaigns have an approximately
+160-second gap. These are one-machine/workload observations, not confidence
+bounds or a physical roofline measurement.
+
+The benchmark executable SHA256 is
+`d090946bf987db283f713096a8548d82dbb07f9440bd51b82932390a8961a413`.
+Encoder width stays 4096, decoder width 2048, query tiles 512, group depth two,
+and pipeline/prefetch remain on. No additional tensor buffer is needed.

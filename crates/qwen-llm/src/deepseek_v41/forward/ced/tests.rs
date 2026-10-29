@@ -1120,6 +1120,54 @@ fn submit_ahead_completion_fault_drains_the_newer_encoder() {
 }
 
 #[test]
+#[ignore = "CPU-only real-prompt Engram duplication diagnostic; needs V41_CED_GGUF and V41_CED_TOKENS"]
+fn real_prompt_engram_duplication() {
+    use crate::deepseek_v41::gguf as v41_gguf;
+    #[derive(serde::Deserialize)]
+    struct Input {
+        prompt: Vec<u32>,
+    }
+    let gguf_path = std::env::var("V41_CED_GGUF").expect("V41_CED_GGUF");
+    let input_path = std::env::var("V41_CED_TOKENS").expect("V41_CED_TOKENS");
+    let input: Input =
+        serde_json::from_slice(&std::fs::read(&input_path).expect("read tokens")).expect("json");
+    let gguf = std::sync::Arc::new(crate::gguf::GgufFile::open(&gguf_path).expect("gguf"));
+    let planned = v41_gguf::plan(&gguf).expect("plan");
+    let mut history = engram::AddressState::new_with_config(planned.raw_pad, &planned.engram_hash)
+        .expect("engram state");
+    let mut hashes = Vec::with_capacity(input.prompt.len());
+    for &token in &input.prompt {
+        let compressed = planned.token_map[token as usize];
+        let (rows, updated) = history
+            .step_with_config(engram::Token::Compressed(compressed), &planned.engram_hash)
+            .expect("engram step");
+        hashes.push(rows);
+        history = updated;
+    }
+    let chunk_rows = prefill::DEFAULT_CHUNK_ROWS;
+    let layers: Vec<usize> = planned.engram_layers.iter().map(|&l| l as usize).collect();
+    let mut all = std::collections::HashSet::new();
+    for (index, chunk) in hashes.chunks(chunk_rows).enumerate() {
+        for &layer in &layers {
+            let mut unique = std::collections::HashSet::new();
+            for rows in chunk {
+                for &id in rows.get(&layer).expect("engram layer rows") {
+                    unique.insert(id);
+                }
+            }
+            eprintln!(
+                "[real-engram] chunk={index} layer={layer} total={} unique={}",
+                chunk.len() * 24,
+                unique.len()
+            );
+            all.extend(unique);
+        }
+    }
+    let total = hashes.len() * 24 * layers.len();
+    eprintln!("[real-engram] whole total={total} unique={}", all.len());
+}
+
+#[test]
 #[ignore = "requires explicit Metal benchmark lease and debug layer"]
 fn submit_ahead_prespawn_panic_drains_the_committed_encoder() {
     let _incumbent = gpu_step::ced::incumbent_scope();

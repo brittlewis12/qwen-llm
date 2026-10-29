@@ -42,6 +42,17 @@ The separate actual-route clamp10/A2-vs-B4 economics gate remains ahead. Method,
 source identities, resource facts and limits:
 `docs/bench/2026-10-28-v41-small-resource-proof.md`.
 
+## 2026-10-28 - V4.1 CED Engram Parallel Decode: Neutral Negative
+
+- First-chunk Engram layers decoded by four bounded workers instead of one
+  serial stream. 8K pair bitwise; same-binary CED A/B `O S S O`: off
+  1,864.15, on 1,863.48; **-0.04% / -1.6 ms**. Reverted; serial stream kept.
+- The serial batched read already read-aheads, and the chunk-1 prefetch is
+  already running; per-layer concurrency only contends for SSD/page cache and
+  CPU bandwidth.
+- [Packet](bench/2026-10-28-v41-engram-decode-parallel-negative.md). Raw:
+  `~/qwen-runs/2026-10-28-v41-engram-decode/`.
+
 ## 2026-10-28 - V4.1 Token-K32 GateUp Is Exact But Misses Pack-Inclusive Economics
 
 M5 Ultra, research `1378c2ce`, fixed actual-route ordinary 1K layer-8 GateUp:

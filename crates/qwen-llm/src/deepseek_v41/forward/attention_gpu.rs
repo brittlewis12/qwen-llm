@@ -349,6 +349,12 @@ crate::env_flag!(
     "QWEN_V41_ATTN_QREGISTER"
 );
 
+crate::env_flag!(
+    /// Give each tensor64 PV dimension chunk its own group; `QWEN_V41_ATTN_PV_SPLIT=0` restores four chunks per group.
+    default_on prefill_pv_split_enabled,
+    "QWEN_V41_ATTN_PV_SPLIT"
+);
+
 pub(super) struct Rows {
     tile: query_batch::Scratch,
     rank: MetalTensor,

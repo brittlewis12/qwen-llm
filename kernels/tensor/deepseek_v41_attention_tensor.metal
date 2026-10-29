@@ -387,7 +387,7 @@ kernel void kernel_deepseek_v41_attention_pv_tensor64(
     }
 }
 
-// Test-only one-chunk PV: four groups per query, one D128 accumulator each.
+// One-chunk PV: four groups per query, one D128 accumulator each.
 // P/V traffic and increasing-key MAC order match the serial four-chunk PV.
 kernel void kernel_deepseek_v41_attention_pv_tensor64_dim1(
     constant uint4 &a [[buffer(0)]], constant uint4 &b [[buffer(1)]],

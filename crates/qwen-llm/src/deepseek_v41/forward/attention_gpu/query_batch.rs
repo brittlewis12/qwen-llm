@@ -1615,8 +1615,17 @@ impl Workspace {
             },
         );
         if mma {
+            let split_pv = tensor64 && prefill_pv_split_enabled();
             if tensor64 {
-                tensor_pipeline(ctx, enc, "pv_tensor64")?;
+                tensor_pipeline(
+                    ctx,
+                    enc,
+                    if split_pv {
+                        "pv_tensor64_dim1"
+                    } else {
+                        "pv_tensor64"
+                    },
+                )?;
             } else if tensor {
                 tensor_pipeline(ctx, enc, "pv_tensor")?;
             } else {
@@ -1624,7 +1633,13 @@ impl Workspace {
             }
             enc.dispatch(
                 MTLSize {
-                    width: if tensor64 { 1 } else { c.heads / MMA_HEADS },
+                    width: if split_pv {
+                        4
+                    } else if tensor64 {
+                        1
+                    } else {
+                        c.heads / MMA_HEADS
+                    },
                     height: n,
                     depth: 1,
                 },

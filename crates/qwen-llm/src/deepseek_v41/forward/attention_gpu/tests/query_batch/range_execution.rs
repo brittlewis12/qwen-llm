@@ -473,7 +473,12 @@ fn prepared_serial_range_old_host_bitexact_outputs_controls_pending_and_census()
                         } else {
                             "score_tensor64"
                         };
-                        for suffix in [score, "pv_tensor64"] {
+                        let pv = if prefill_pv_split_enabled() {
+                            "pv_tensor64_dim1"
+                        } else {
+                            "pv_tensor64"
+                        };
+                        for suffix in [score, pv] {
                             assert!(
                                 census.iter().any(|r| r.kernel
                                     == format!("kernel_deepseek_v41_attention_{suffix}")),

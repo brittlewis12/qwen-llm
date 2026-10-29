@@ -440,10 +440,13 @@ pub(super) fn weight_bytes(price: &impl Fn(u64) -> u64) -> u64 {
     bytes.into_iter().map(price).sum()
 }
 
-fn fixture_config(window: usize) -> Config {
+pub(super) fn fixture_config(window: usize) -> Config {
     Config {
         window,
         index_topk: 2,
+        // Narrow candidate slabs only for these large-window fixture cohorts;
+        // retain encoder pipeline coverage within the unchanged buffer cap.
+        candidate_block: if matches!(window, 1025 | 2050) { 8 } else { 2 },
         ..forward::toy::config()
     }
 }
@@ -459,7 +462,7 @@ fn explicit_bound(c: &Config, n: usize, capacity: usize, price: &impl Fn(u64) ->
         capacity,
         &plan,
         true,
-        crate::deepseek_v41::forward::gpu_step::ced::encoder_pipeline_enabled(),
+        crate::deepseek_v41::forward::gpu_step::ced::encoder_pipeline_priced(),
         &priced,
     )
     .unwrap();
@@ -493,16 +496,67 @@ fn complete_fixture_ledgers_stay_below_128_mib() {
         (1025, 2542, 2542),
         (2050, 2542, 2542),
     ] {
-        let bound = explicit_bound(&fixture_config(window), n, capacity, &price);
+        let c = fixture_config(window);
+        assert_eq!(
+            c.candidate_block,
+            if matches!(window, 1025 | 2050) { 8 } else { 2 }
+        );
+        if matches!(window, 1025 | 2050) {
+            let plan = dependency_plan_at_capacity(&c, n, capacity);
+            let mut previous = dependency_plan_at_capacity(
+                &Config {
+                    candidate_block: 2,
+                    ..c.clone()
+                },
+                n,
+                capacity,
+            );
+            assert_eq!(plan.work, previous.work);
+            assert_eq!(plan.decoder, previous.decoder);
+            assert_eq!(plan.boundary_rows, previous.boundary_rows);
+            assert_eq!(plan.candidate_rows, previous.candidate_rows);
+            assert_eq!(plan.memory.candidate_i32_per_row, capacity.div_ceil(8));
+            assert!(plan.memory.candidate_bytes < previous.memory.candidate_bytes);
+            let saved = previous.memory.candidate_bytes - plan.memory.candidate_bytes;
+            previous.memory.candidate_i32_per_row = plan.memory.candidate_i32_per_row;
+            previous.memory.candidate_bytes = plan.memory.candidate_bytes;
+            previous.memory.total_retained_bytes -= saved;
+            assert_eq!(
+                plan, previous,
+                "only candidate slab geometry/bytes may change"
+            );
+        }
+        let bound = explicit_bound(&c, n, capacity, &price);
+        println!(
+            "{}",
+            serde_json::json!({
+                "fixture":"reuse", "window":window, "rows":n, "capacity":capacity,
+                "candidate_block":c.candidate_block, "bound_bytes":bound, "cap_bytes":LIMIT,
+                "synthetic_price":"n+16384 per nonempty allocation; not an actual device quote"
+            })
+        );
         assert!(bound <= LIMIT, "W={window}, N={n}: {bound} > {LIMIT}");
     }
+    assert_eq!(fixture_config(65).candidate_block, 2);
     let c = Config {
         index_topk: 512,
         candidate_block: 128,
         candidate_topk: 128,
         ..fixture_config(257)
     };
+    assert_eq!(
+        (c.index_topk, c.candidate_block, c.candidate_topk),
+        (512, 128, 128)
+    );
     let bound = explicit_bound(&c, MAX, 16384, &price);
+    println!(
+        "{}",
+        serde_json::json!({
+            "fixture":"separate P4 slab", "window":c.window, "rows":MAX, "capacity":16384,
+            "candidate_block":c.candidate_block, "bound_bytes":bound, "cap_bytes":LIMIT,
+            "synthetic_price":"n+16384 per nonempty allocation; not an actual device quote"
+        })
+    );
     assert!(
         bound <= LIMIT,
         "separate P4 slab fixture: {bound} > {LIMIT}"
@@ -541,11 +595,14 @@ pub(super) fn require_debug_lease() -> metal::MetalProcessLease {
 }
 
 pub(super) fn configure(model: &mut Forward<'_>, window: usize) {
+    let c = fixture_config(window);
     model.config.window = window;
+    model.config.candidate_block = c.candidate_block;
     model.engram_hash.layers.clear();
     for layer in &mut model.layers {
         layer.engram = None;
         layer.attention.window = window;
+        layer.attention.candidate_block_size = c.candidate_block;
     }
 }
 

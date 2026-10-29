@@ -6,6 +6,15 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the current state and evidence index.
 
+## 2026-10-29 - V4.1 Attention Half-KV Reuse: Probe Negative
+
+- Bitwise-exact half-KV mirrors in the tensor64 score/PV tile, but only
+  1.0-5.4% tile-kernel gain (2.7-3.4% at K=512/640, n=32); the bar was 10%.
+  Projected complete-attention gain <0.6% wall. Closed; production keeps the
+  F32 tile.
+- The K/V rows are shared and mostly cache-resident; the in-kernel half
+  conversion is not the dominant cost. [Packet](bench/2026-10-29-v41-attention-half-kv-negative.md).
+
 ## 2026-10-29 - V4.1 Attention Half-KV Reuse: Design and Probe Bar
 
 - Found the tensor64 score and PV kernels convert the same KV rows to half

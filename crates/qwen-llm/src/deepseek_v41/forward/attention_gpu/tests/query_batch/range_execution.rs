@@ -464,7 +464,16 @@ fn prepared_serial_range_old_host_bitexact_outputs_controls_pending_and_census()
                     });
                     let census = metal::dispatch_census_take();
                     if n == 128 && metal::moe_grouped_tensor_selected(&ctx) {
-                        for suffix in ["score_tensor64", "pv_tensor64"] {
+                        let score = if prefill_qhalf_enabled() {
+                            if prefill_qregister_enabled() {
+                                "score_tensor64_qregister"
+                            } else {
+                                "score_tensor64_qhalf"
+                            }
+                        } else {
+                            "score_tensor64"
+                        };
+                        for suffix in [score, "pv_tensor64"] {
                             assert!(
                                 census.iter().any(|r| r.kernel
                                     == format!("kernel_deepseek_v41_attention_{suffix}")),

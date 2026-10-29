@@ -4,7 +4,8 @@
 # ///
 """Exact CPU acceptance inventory; GPU/model witnesses are listed, never run.
 
-Run under scripts/bench/with-metal-lease with QWEN_METAL_LEASE_WAIT=1.
+Run directly, without scripts/bench/with-metal-lease. Compilation, discovery,
+and CPU tests must not hold the GPU lease.
 After composing source lanes, review and extend acceptance_inventory.json by
 full test name, class, ignore state and reason. Discovery is not classification.
 """
@@ -49,6 +50,14 @@ SCOPES = {
     ],
 }
 CLASSES = {"cpu", "gpu", "model", "fixture", "timing"}
+
+
+def check_cpu_environment(environ: dict[str, str]) -> None:
+    if "QWEN_METAL_LEASE_FD" in environ:
+        raise ValueError(
+            "CPU acceptance must run without an inherited GPU lease; "
+            "run directly, not under scripts/bench/with-metal-lease"
+        )
 
 
 def validate_entries(entries: list[dict]) -> None:
@@ -120,6 +129,33 @@ def check_execution(output: str, names: set[str], filtered: int) -> None:
 
 
 def self_test() -> None:
+    from unittest.mock import Mock, patch
+
+    check_cpu_environment({})
+    check_cpu_environment({"QWEN_METAL_LEASE_WAIT": "1"})
+    for value in ["3", "", "invalid"]:
+        try:
+            check_cpu_environment({"QWEN_METAL_LEASE_FD": value})
+        except ValueError:
+            pass
+        else:
+            raise AssertionError("accepted inherited GPU lease environment")
+    print("acceptance_inventory CPU lease controls: 3 inherited environments rejected")
+    for args in [[], ["--check-only"], ["--self-test"]]:
+        blocked = Mock(side_effect=AssertionError("started CPU work while leased"))
+        with (
+            patch.dict(os.environ, {"QWEN_METAL_LEASE_FD": "3"}, clear=True),
+            patch.object(sys, "argv", [str(Path(__file__)), *args]),
+            patch.dict(globals(), {"binary": blocked, "self_test": blocked}),
+        ):
+            try:
+                main()
+            except ValueError as error:
+                assert "without an inherited GPU lease" in str(error)
+            else:
+                raise AssertionError("accepted leased CPU command")
+        blocked.assert_not_called()
+    print("acceptance_inventory CLI lease controls: 3 modes refused before CPU work")
     entries = [
         {
             "target": target,
@@ -199,6 +235,8 @@ def binary(target: str) -> Path:
         [
             "cargo",
             "test",
+            "--offline",
+            "--locked",
             "--release",
             *TARGETS[target],
             "--no-run",
@@ -236,13 +274,10 @@ def main() -> None:
         help="compile and check discovery, without execution",
     )
     args = parser.parse_args()
+    check_cpu_environment(dict(os.environ))
     if args.self_test:
         self_test()
         return
-    if os.environ.get("QWEN_METAL_LEASE_WAIT") != "1":
-        raise ValueError(
-            "CPU compile/test requires QWEN_METAL_LEASE_WAIT=1 and the production lease wrapper"
-        )
     entries = json.loads(INVENTORY.read_text())
     validate_entries(entries)
     artifacts = {}

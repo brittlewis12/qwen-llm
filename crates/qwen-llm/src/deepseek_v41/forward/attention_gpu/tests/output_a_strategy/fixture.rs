@@ -323,9 +323,18 @@ pub(super) fn check_census(
     groups: usize,
     dtype: GgmlType,
 ) -> std::result::Result<(), String> {
+    // The attended output's last producer: the chain's output kernel or the
+    // fused decode attention's combine (with the inverse RoPE folded in).
     let anchor = census
         .iter()
-        .rposition(|r| r.kernel == "kernel_deepseek_v41_attention_output")
+        .rposition(|r| {
+            matches!(
+                r.kernel.as_str(),
+                "kernel_deepseek_v41_attention_output"
+                    | "kernel_deepseek_v41_attention_flash_combine"
+                    | "kernel_deepseek_v41_attention_flash_combine_rope"
+            )
+        })
         .ok_or("missing attended-output anchor")?;
     let tail = &census[anchor + 1..];
     let b = tail

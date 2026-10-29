@@ -264,6 +264,7 @@ fn all_tensors(w: &Workspace, r: &Rows) -> Vec<MetalTensor> {
         &r.tile.attended,
     ];
     tensors.extend(r.select_pairs.as_ref());
+    tensors.extend(w.flash.as_ref().map(|f| &f.scratch));
     if let Some(half) = &r.half {
         tensors.push(half.backing_for_test());
     }
@@ -793,10 +794,10 @@ fn mask_real_pipeline_cpu_bounds() {
     let sizes = inventory(&c, &s);
     let cpu = RealCpuInventory::new(&sizes);
     let conservative_metal: u64 = sizes.iter().map(|&n| n as u64 * 4 + 65536).sum();
-    assert_eq!(sizes.len(), 111);
-    assert_eq!(sizes.iter().sum::<usize>() * 4, 9907736);
+    assert_eq!(sizes.len(), 112);
+    assert_eq!(sizes.iter().sum::<usize>() * 4, 9929576);
     assert_eq!(cpu.total(), 34604544);
-    assert_eq!(conservative_metal + cpu.total(), 51786776);
+    assert_eq!(conservative_metal + cpu.total(), 51874152);
     assert!(conservative_metal + cpu.total() < REAL_LIMIT);
     assert!(
         cpu.seed_keys_values_and_upload_staging >= 4 * CAPACITY as u64 * c.index_dim as u64 * 4

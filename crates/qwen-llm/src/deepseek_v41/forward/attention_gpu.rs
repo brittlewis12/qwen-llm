@@ -119,6 +119,8 @@ pub(super) struct Workspace {
     selected: MetalTensor,
     attention_scores: MetalTensor,
     value_matrix: Option<ValueMatrix>,
+    /// Split scratch of the fused decode attention (head_dim <= 512).
+    flash: Option<FlashScratch>,
     attended: MetalTensor,
     low: MetalTensor,
     output: MetalTensor,
@@ -1092,6 +1094,11 @@ fn shapes(c: &Config, capacity: usize, schedule: &Schedule) -> Result<Vec<usize>
         ]);
     }
     sizes.extend(ValueMatrix::shapes(c)?);
+    sizes.extend(FlashScratch::shape(
+        c.heads,
+        c.head_dim,
+        c.window + c.index_topk,
+    )?);
     for _ in 0..schedule.layers {
         sizes.extend([
             c.query_rank,
@@ -1632,6 +1639,160 @@ fn score_keys_enabled(dim: usize) -> bool {
     score_keys_env() && dim <= SCORE_KEYS_MAX_DIM
 }
 
+/// Split scratch of the fused decode sink attention
+/// (`attention_flash*` + `attention_flash_combine*`): per split, the
+/// unnormalized partial rows (heads x dim), then per (split, head) the split
+/// maximum and exp sum, then one invalid-ID flag per split.
+struct FlashScratch {
+    scratch: MetalTensor,
+    splits: usize,
+}
+
+impl FlashScratch {
+    /// Scratch for rows of up to `max_keys` keys with `flash_kernel`'s
+    /// choices, or None when the fused path does not apply (head_dim > 512).
+    fn new(ctx: &MetalContext, heads: usize, dim: usize, max_keys: usize) -> Result<Option<Self>> {
+        match flash_splits(dim, max_keys) {
+            Some(splits) => Self::with_splits(ctx, heads, dim, splits).map(Some),
+            None => Ok(None),
+        }
+    }
+
+    fn with_splits(ctx: &MetalContext, heads: usize, dim: usize, splits: usize) -> Result<Self> {
+        op::require(splits <= FLASH_MAX_SPLITS, "flash split count")?;
+        Ok(Self {
+            scratch: tensor(ctx, Self::elements(heads, dim, splits)?, GgmlType::F32)?,
+            splits,
+        })
+    }
+
+    fn elements(heads: usize, dim: usize, splits: usize) -> Result<usize> {
+        checked_product(&[splits, heads, dim])?
+            .checked_add(2 * splits * heads + splits)
+            .ok_or_else(|| "flash scratch extent".into())
+    }
+
+    /// Element counts `new` allocates (for workspace pricing).
+    fn shape(heads: usize, dim: usize, max_keys: usize) -> Result<Vec<usize>> {
+        match flash_splits(dim, max_keys) {
+            Some(splits) => Ok(vec![Self::elements(heads, dim, splits)?]),
+            None => Ok(Vec::new()),
+        }
+    }
+}
+
+/// `V41_FLASH_MAX_SPLITS` and the dimension limit of the fused decode
+/// attention (two output columns per thread of a 256-thread group); rows of
+/// at most `FLASH_SHORT_KEYS` keys use the short-row kernel.
+const FLASH_MAX_SPLITS: usize = 64;
+const FLASH_MAX_DIM: usize = 512;
+const FLASH_SHORT_KEYS: usize = 256;
+
+crate::env_flag!(
+    /// Decode sink attention by one fused flash-decoding pass: `attention_flash*` key splits (scores, per-split softmax, unnormalized PV) then `attention_flash_combine_rope` (sink-aware merge plus the attended inverse RoPE) replace score -> softmax -> output or value matrix -> RoPE. F32; outputs match the chain to F32 rounding (softmax and PV summation order differ). Disabling restores the chain (A/B).
+    default_on flash_decode_env,
+    "QWEN_V41_FLASH_DECODE"
+);
+
+#[cfg(test)]
+thread_local! {
+    pub(super) static FLASH_DECODE_OVERRIDE: std::cell::Cell<Option<bool>> =
+        const { std::cell::Cell::new(None) };
+}
+
+fn flash_decode_enabled() -> bool {
+    #[cfg(test)]
+    if let Some(enabled) = FLASH_DECODE_OVERRIDE.with(|o| o.get()) {
+        return enabled;
+    }
+    flash_decode_env()
+}
+
+/// The fused decode partial kernel (suffix, heads and keys per threadgroup)
+/// for a row of `count` keys, or None (head_dim > 512) to keep the chain:
+/// short rows `flash2_h4_k16` (dim % 4 == 0), otherwise `flash_h8_k32`
+/// (`_d512` at head_dim 512). Decode probe on M5 Ultra, 64 heads x 512:
+/// 128 + 0 keys 11.9 us (chain 55.9), 128 + 512 keys 19.0 us (chain 42.0).
+fn flash_kernel(dim: usize, count: usize) -> Option<(&'static str, usize, usize)> {
+    if dim == 0 || dim > FLASH_MAX_DIM {
+        return None;
+    }
+    Some(if count <= FLASH_SHORT_KEYS && dim.is_multiple_of(4) {
+        ("flash2_h4_k16", 4, 16)
+    } else if dim == 512 {
+        ("flash_h8_k32_d512", 8, 32)
+    } else {
+        ("flash_h8_k32", 8, 32)
+    })
+}
+
+/// Splits the scratch needs for every row of 1..=max_keys keys, or None
+/// when the fused path does not apply to such rows (head_dim > 512, or more
+/// than `FLASH_MAX_SPLITS` splits: windows past ~2000 keys keep the chain).
+fn flash_splits(dim: usize, max_keys: usize) -> Option<usize> {
+    (1..=max_keys)
+        .map(|n| flash_kernel(dim, n).map(|(_, _, kb)| n.div_ceil(kb)))
+        .try_fold(0, |m, s| s.map(|s| m.max(s)))
+        .filter(|&s| s <= FLASH_MAX_SPLITS)
+}
+
+/// The fused decode sink attention for one row (bindings 0..10 as
+/// `sink_passes`; `count` raw + selected keys): `partial` (an
+/// `attention_flash*` suffix with its heads and keys per threadgroup) over
+/// ceil(count / kb) key splits, then `attention_flash_combine`, or with
+/// `rope` = (frequencies, pairs, position) `attention_flash_combine_rope`,
+/// which also applies the attended inverse RoPE (`rope(.., inverse)`).
+#[allow(clippy::too_many_arguments)]
+fn flash_passes(
+    ctx: &MetalContext,
+    enc: &KernelEncoder,
+    heads: usize,
+    dim: usize,
+    count: usize,
+    scratch: &FlashScratch,
+    (partial, hg, kb): (&str, usize, usize),
+    rope: Option<(&MetalTensor, usize, usize)>,
+) -> Result<()> {
+    let splits = count.div_ceil(kb);
+    op::require(
+        count > 0 && splits <= scratch.splits && dim <= FLASH_MAX_DIM,
+        "flash decode geometry",
+    )?;
+    enc.set_bytes(14, &(heads as u32));
+    enc.set_tensor(15, &scratch.scratch);
+    enc.set_bytes(16, &[kb as u32, scratch.splits as u32, 0, 0]);
+    let threads = MTLSize {
+        width: 256,
+        height: 1,
+        depth: 1,
+    };
+    pipeline(ctx, enc, partial)?;
+    enc.dispatch(
+        MTLSize {
+            width: splits,
+            height: heads.div_ceil(hg),
+            depth: 1,
+        },
+        threads,
+    );
+    if let Some((freq, pairs, position)) = rope {
+        enc.set_tensor(17, freq);
+        enc.set_bytes(18, &[pairs as u32, position as u32]);
+        pipeline(ctx, enc, "flash_combine_rope")?;
+    } else {
+        pipeline(ctx, enc, "flash_combine")?;
+    }
+    enc.dispatch(
+        MTLSize {
+            width: dim.div_ceil(256),
+            height: heads,
+            depth: 1,
+        },
+        threads,
+    );
+    Ok(())
+}
+
 // Bindings 0..10 match the incumbent. Each head's last score slot is scratch.
 fn sink_passes(
     ctx: &MetalContext,
@@ -2170,6 +2331,7 @@ impl Workspace {
             selected: i(c.index_topk)?,
             attention_scores: f(c.heads * (c.window + c.index_topk + 1))?,
             value_matrix: ValueMatrix::new(ctx, c)?,
+            flash: FlashScratch::new(ctx, c.heads, c.head_dim, c.window + c.index_topk)?,
             attended: f(c.heads * c.head_dim)?,
             low: f(c.groups * c.output_rank)?,
             output: f(c.hidden)?,
@@ -3354,27 +3516,47 @@ impl Workspace {
             let length = owner.map_or(0, |_| (position + 1) / self.schedule.ratio(id));
             enc.set_bytes(9, &(length as u32));
             enc.set_tensor(10, &self.status);
-            sink_passes(
-                ctx,
-                enc,
-                c.heads,
-                c.head_dim,
-                raw_count + selected_count,
-                self.value_matrix
-                    .as_ref()
-                    .map(|matrix| (matrix, &self.attended, &self.status)),
-            )?;
-            rope(
-                ctx,
-                enc,
-                &self.attended,
-                &constants.frequencies,
-                c.head_dim,
-                c.heads,
-                c.rope_dim / 2,
-                position,
-                true,
-            )?;
+            let count = raw_count + selected_count;
+            let flash = self
+                .flash
+                .as_ref()
+                .filter(|_| flash_decode_enabled())
+                .zip(flash_kernel(c.head_dim, count));
+            if let Some((scratch, kernel)) = flash {
+                let pairs = c.rope_dim / 2;
+                flash_passes(
+                    ctx,
+                    enc,
+                    c.heads,
+                    c.head_dim,
+                    count,
+                    scratch,
+                    kernel,
+                    (pairs > 0).then_some((&constants.frequencies, pairs, position)),
+                )?;
+            } else {
+                sink_passes(
+                    ctx,
+                    enc,
+                    c.heads,
+                    c.head_dim,
+                    count,
+                    self.value_matrix
+                        .as_ref()
+                        .map(|matrix| (matrix, &self.attended, &self.status)),
+                )?;
+                rope(
+                    ctx,
+                    enc,
+                    &self.attended,
+                    &constants.frequencies,
+                    c.head_dim,
+                    c.heads,
+                    c.rope_dim / 2,
+                    position,
+                    true,
+                )?;
+            }
         }
         Ok(())
     }

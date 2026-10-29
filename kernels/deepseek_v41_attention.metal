@@ -1319,6 +1319,354 @@ kernel void kernel_deepseek_v41_attention_output(
     attention_output(a, b, raw, compressed, ids, scores, out, a.x, status, t);
 }
 
+// Fused decode sink attention, flash-decoding style (decode rows only; the
+// prefill sink tile is separate): one partial dispatch plus one combine
+// replace score -> softmax -> output / value matrix and the attended inverse
+// RoPE of a decode row. Bindings 0-10 are the chain's; 14 = heads, 15 =
+// split scratch, 16 = (keys per split, scratch splits, 0, 0), 17 / 18 = RoPE
+// frequencies and (pairs, position) for the _rope combine. Scratch: per split
+// the unnormalized partial rows (heads x dim), then per (split, head) the
+// split maximum and exp sum, then one invalid-ID flag per split.
+//
+// Partial kernels: grid (ceil(count / KB), ceil(heads / HG)), 256 threads.
+// Threadgroup (s, g) owns keys [s KB, s KB + KB) of the row (raw ring prefix,
+// then the selected compressed rows) and heads [g HG, g HG + HG):
+//   1. scores: simdgroup sg computes an HG-head x KB/8-key tile;
+//   2. per head over the split's visible keys (rows past the count and
+//      selected IDs >= length excluded): m = max, e = exp(s - m), l = sum e;
+//   3. unnormalized PV, sum_k e[h][k] V[k][d], in key order.
+// A split holding a selected ID >= length flags itself and sets status bit 2,
+// as the chain's softmax does.
+//   kernel_deepseek_v41_attention_flash_h8_k32[_d512]: lane-strided F32
+//     scores with attention_score_keys' per-(head, key) arithmetic, so scores
+//     are bitwise the chain's; _d512 fixes dim = 512 (constant trip counts).
+//   kernel_deepseek_v41_attention_flash2_h4_k16: for short rows: the group's
+//     query is staged once with float4 loads and every float4 load of a
+//     simdgroup's keys is issued before any product (float4 dot steps per
+//     lane, then simd_sum: a different F32 order); dim % 4 == 0.
+// Combine: grid (ceil(dim / 256), heads), 256 threads. M = max(sink, m_s),
+// L = exp(sink - M) + sum_s l_s exp(m_s - M): out = sum_s partial_s
+// exp(m_s - M) / L, or 0 for every head when any split saw an invalid ID;
+// non-finite (pre-RoPE) values set status bit 4. _rope also applies
+// kernel_deepseek_v41_attention_rope's inverse rotation.
+// F32 throughout; the softmax and PV summation orders differ from the chain.
+// Decode probe on M5 Ultra (64 heads x 512, 128 raw + 512 selected keys):
+// chain 42.0 us, fused 19.0 us; 128 + 0 keys: 55.9 / 11.9 us.
+#define V41_FLASH_THREADS 256u
+#define V41_FLASH_MAX_SPLITS 64u
+
+inline uint v41_flash_scratch_rows(uint splits, uint heads, uint dim) { return splits * heads * dim; }
+
+inline device const float *v41_flash_key(uint4 a, device const float *raw,
+    device const float *compressed, device const uint *ids, uint i) {
+    return i < a.y ? raw + ((a.z + i) % a.w) * a.x : compressed + ids[i - a.y] * a.x;
+}
+
+// Phase 2 for a threadgroup's split: e[h * KB + k] holds scores on entry and
+// exp(s - m) (0 for hidden keys) on exit; writes m, l and the split flag.
+template <ushort HG, ushort KB>
+inline void v41_flash_split_softmax(threadgroup float *e, threadgroup const uchar *visible,
+    threadgroup const uchar *bad_keys, device float *scratch, uint splits, uint heads,
+    uint dim, uint split, uint h0, uint hn, bool first_group, device atomic_uint *status,
+    uint sg, uint lane, uint tid) {
+    device float *partial_m = scratch + v41_flash_scratch_rows(splits, heads, dim);
+    device float *partial_l = partial_m + splits * heads;
+    device float *partial_bad = partial_l + splits * heads;
+    for (uint h = sg; h < HG; h += 8) {
+        float m = -FLT_MAX;
+        for (uint k = lane; k < KB; k += 32)
+            if (visible[k]) m = max(m, e[h * KB + k]);
+        m = simd_max(m);
+        float l = 0;
+        for (uint k = lane; k < KB; k += 32) {
+            const float x = visible[k] ? exp(e[h * KB + k] - m) : 0.0f;
+            e[h * KB + k] = x;
+            l += x;
+        }
+        l = simd_sum(l);
+        if (lane == 0 && h < hn) {
+            partial_m[split * heads + h0 + h] = m;
+            partial_l[split * heads + h0 + h] = l;
+        }
+    }
+    bool any_bad = false;
+    for (ushort s = 0; s < 8; s++) any_bad |= bad_keys[s] != 0;
+    if (tid == 0) {
+        partial_bad[split] = any_bad ? 1.0f : 0.0f;
+        if (any_bad && first_group) atomic_fetch_or_explicit(status, 2u, memory_order_relaxed);
+    }
+}
+
+template <ushort HG, ushort KB, ushort DIM>
+[[max_total_threads_per_threadgroup(256)]]
+kernel void kernel_deepseek_v41_attention_flash(
+    constant uint4 &a [[buffer(0)]], constant uint2 &b [[buffer(1)]],
+    device const float *q [[buffer(2)]], device const float *raw [[buffer(3)]],
+    device const float *compressed [[buffer(4)]], device const uint *ids [[buffer(5)]],
+    constant uint &length [[buffer(9)]], device atomic_uint *status [[buffer(10)]],
+    constant uint &heads [[buffer(14)]], device float *scratch [[buffer(15)]],
+    constant uint4 &f [[buffer(16)]],
+    uint2 group [[threadgroup_position_in_grid]], uint tid [[thread_index_in_threadgroup]],
+    uint sg [[simdgroup_index_in_threadgroup]], uint lane [[thread_index_in_simdgroup]]) {
+    constexpr ushort KPS = KB / 8;
+    threadgroup float e[HG * KB];
+    threadgroup uchar visible[KB];
+    threadgroup uchar bad_keys[8];
+    const uint dim = DIM ? uint(DIM) : a.x, count = a.y + b.x, split = group.x, h0 = group.y * HG;
+    const uint hn = h0 < heads ? min(uint(HG), heads - h0) : 0u;
+    const uint k0 = split * KB + sg * KPS;
+    bool valid[KPS];
+    device const float *row[KPS];
+    bool bad = false;
+    for (ushort k = 0; k < KPS; k++) {
+        const uint i = k0 + k;
+        const bool hidden = i >= a.y && i < count && ids[i - a.y] >= length;
+        bad |= hidden;
+        valid[k] = i < count && !hidden;
+        row[k] = valid[k] ? v41_flash_key(a, raw, compressed, ids, i) : raw;
+    }
+    float acc[HG][KPS];
+    for (ushort h = 0; h < HG; h++)
+        for (ushort k = 0; k < KPS; k++) acc[h][k] = 0;
+    device const float *qh = q + h0 * dim;
+    _Pragma("clang loop unroll_count(4)")
+    for (uint j = lane; j < dim; j += 32) {
+        float kv[KPS], qv[HG];
+        for (ushort k = 0; k < KPS; k++) kv[k] = row[k][j];
+        for (ushort h = 0; h < HG; h++) qv[h] = h < hn ? qh[h * dim + j] : 0.0f;
+        for (ushort h = 0; h < HG; h++)
+            for (ushort k = 0; k < KPS; k++) acc[h][k] += qv[h] * kv[k];
+    }
+    const float scale = rsqrt(float(dim));
+    for (ushort h = 0; h < HG; h++) {
+        for (ushort k = 0; k < KPS; k++) {
+            const float sum = simd_sum(acc[h][k]);
+            if (lane == 0) e[h * KB + sg * KPS + k] = sum * scale;
+        }
+    }
+    if (lane == 0) {
+        for (ushort k = 0; k < KPS; k++) visible[sg * KPS + k] = valid[k];
+        bad_keys[sg] = bad;
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    v41_flash_split_softmax<HG, KB>(e, visible, bad_keys, scratch, f.y, heads, dim, split, h0,
+        hn, group.y == 0, status, sg, lane, tid);
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    // Keys in groups of four, loads first; hidden keys load 0 (their e is 0).
+    float out[HG][2];
+    for (ushort h = 0; h < HG; h++) out[h][0] = out[h][1] = 0;
+    const uint d0 = tid, d1 = tid + V41_FLASH_THREADS;
+    for (uint k4 = 0; k4 < KB; k4 += 4) {
+        float v0[4], v1[4];
+        for (ushort u = 0; u < 4; u++) {
+            const uint k = k4 + u;
+            const bool shown = visible[k] != 0;
+            device const float *v = shown ? v41_flash_key(a, raw, compressed, ids, split * KB + k) : raw;
+            v0[u] = shown && d0 < dim ? v[d0] : 0.0f;
+            v1[u] = shown && d1 < dim ? v[d1] : 0.0f;
+        }
+        for (ushort u = 0; u < 4; u++) {
+            for (ushort h = 0; h < HG; h++) {
+                const float w = e[h * KB + k4 + u];
+                out[h][0] = fma(w, v0[u], out[h][0]);
+                out[h][1] = fma(w, v1[u], out[h][1]);
+            }
+        }
+    }
+    for (ushort h = 0; h < HG; h++) {
+        if (h >= hn) break;
+        device float *o = scratch + (ulong(split) * heads + h0 + h) * dim;
+        if (d0 < dim) o[d0] = out[h][0];
+        if (d1 < dim) o[d1] = out[h][1];
+    }
+}
+
+template <ushort HG, ushort KB>
+[[max_total_threads_per_threadgroup(256)]]
+kernel void kernel_deepseek_v41_attention_flash2(
+    constant uint4 &a [[buffer(0)]], constant uint2 &b [[buffer(1)]],
+    device const float *q [[buffer(2)]], device const float *raw [[buffer(3)]],
+    device const float *compressed [[buffer(4)]], device const uint *ids [[buffer(5)]],
+    constant uint &length [[buffer(9)]], device atomic_uint *status [[buffer(10)]],
+    constant uint &heads [[buffer(14)]], device float *scratch [[buffer(15)]],
+    constant uint4 &f [[buffer(16)]],
+    uint2 group [[threadgroup_position_in_grid]], uint tid [[thread_index_in_threadgroup]],
+    uint sg [[simdgroup_index_in_threadgroup]], uint lane [[thread_index_in_simdgroup]]) {
+    constexpr ushort KPS = KB / 8;
+    threadgroup float4 q_staged[HG * 128];
+    threadgroup float e[HG * KB];
+    threadgroup uchar visible[KB];
+    threadgroup uchar bad_keys[8];
+    const uint dim = a.x, d4 = dim / 4, count = a.y + b.x, split = group.x, h0 = group.y * HG;
+    const uint hn = h0 < heads ? min(uint(HG), heads - h0) : 0u;
+    device const float4 *qh = (device const float4 *)(q + h0 * dim);
+    for (uint t = tid; t < hn * d4; t += V41_FLASH_THREADS) q_staged[(t / d4) * 128 + t % d4] = qh[t];
+    const uint k0 = split * KB + sg * KPS;
+    bool valid[KPS];
+    bool bad = false;
+    float4 kv[KPS][4];
+    for (ushort k = 0; k < KPS; k++) {
+        const uint i = k0 + k;
+        const bool hidden = i >= a.y && i < count && ids[i - a.y] >= length;
+        bad |= hidden;
+        valid[k] = i < count && !hidden;
+        device const float4 *row = (device const float4 *)(valid[k]
+            ? v41_flash_key(a, raw, compressed, ids, i) : raw);
+        for (ushort t = 0; t < 4; t++) {
+            const uint c = lane + 32 * t;
+            kv[k][t] = valid[k] && c < d4 ? row[c] : float4(0.0f);
+        }
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    float acc[HG][KPS];
+    for (ushort h = 0; h < HG; h++)
+        for (ushort k = 0; k < KPS; k++) acc[h][k] = 0;
+    for (ushort t = 0; t < 4; t++) {
+        const uint c = lane + 32 * t;
+        if (c >= d4) break;
+        for (ushort h = 0; h < HG; h++) {
+            const float4 qv = h < hn ? q_staged[h * 128 + c] : float4(0.0f);
+            for (ushort k = 0; k < KPS; k++) acc[h][k] += dot(qv, kv[k][t]);
+        }
+    }
+    const float scale = rsqrt(float(dim));
+    for (ushort h = 0; h < HG; h++) {
+        for (ushort k = 0; k < KPS; k++) {
+            const float sum = simd_sum(acc[h][k]);
+            if (lane == 0) e[h * KB + sg * KPS + k] = sum * scale;
+        }
+    }
+    if (lane == 0) {
+        for (ushort k = 0; k < KPS; k++) visible[sg * KPS + k] = valid[k];
+        bad_keys[sg] = bad;
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    v41_flash_split_softmax<HG, KB>(e, visible, bad_keys, scratch, f.y, heads, dim, split, h0,
+        hn, group.y == 0, status, sg, lane, tid);
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    // PV: float2 column pairs, eight keys of loads in flight.
+    float2 out[HG];
+    for (ushort h = 0; h < HG; h++) out[h] = float2(0.0f);
+    const uint c2 = tid, d2 = dim / 2;
+    for (uint k8 = 0; k8 < KB; k8 += 8) {
+        float2 v[8];
+        for (ushort u = 0; u < 8; u++) {
+            const uint k = k8 + u;
+            const bool shown = visible[k] != 0;
+            device const float2 *row = (device const float2 *)(shown
+                ? v41_flash_key(a, raw, compressed, ids, split * KB + k) : raw);
+            v[u] = shown && c2 < d2 ? row[c2] : float2(0.0f);
+        }
+        for (ushort u = 0; u < 8; u++)
+            for (ushort h = 0; h < HG; h++) out[h] = fma(float2(e[h * KB + k8 + u]), v[u], out[h]);
+    }
+    for (ushort h = 0; h < HG; h++) {
+        if (h >= hn) break;
+        if (c2 < d2) ((device float2 *)(scratch + (ulong(split) * heads + h0 + h) * dim))[c2] = out[h];
+    }
+}
+
+#define V41_FLASH(NAME, HG, KB, DIM) \
+    template [[host_name("kernel_deepseek_v41_attention_" NAME)]] kernel void \
+    kernel_deepseek_v41_attention_flash<HG, KB, DIM>(constant uint4 &, constant uint2 &, \
+        device const float *, device const float *, device const float *, device const uint *, \
+        constant uint &, device atomic_uint *, constant uint &, device float *, constant uint4 &, \
+        uint2, uint, uint, uint);
+V41_FLASH("flash_h8_k32", 8, 32, 0)
+V41_FLASH("flash_h8_k32_d512", 8, 32, 512)
+template [[host_name("kernel_deepseek_v41_attention_flash2_h4_k16")]] kernel void
+kernel_deepseek_v41_attention_flash2<4, 16>(constant uint4 &, constant uint2 &,
+    device const float *, device const float *, device const float *, device const uint *,
+    constant uint &, device atomic_uint *, constant uint &, device float *, constant uint4 &,
+    uint2, uint, uint, uint);
+
+// Partial-row sum of one output column, eight (then four) splits of loads in
+// flight per step; summation in split order.
+inline float v41_flash_combined(device const float *scratch, threadgroup const float *weight,
+    uint used, uint heads, uint dim, uint h, uint column) {
+    float value = 0;
+    device const float *p = scratch + ulong(h) * dim + column;
+    const ulong stride = ulong(heads) * dim;
+    uint i = 0;
+    for (; i + 8 <= used; i += 8) {
+        float x[8];
+        for (ushort u = 0; u < 8; u++) x[u] = p[(i + u) * stride];
+        for (ushort u = 0; u < 8; u++) value = fma(x[u], weight[i + u], value);
+    }
+    for (; i + 4 <= used; i += 4) {
+        float x[4];
+        for (ushort u = 0; u < 4; u++) x[u] = p[(i + u) * stride];
+        for (ushort u = 0; u < 4; u++) value = fma(x[u], weight[i + u], value);
+    }
+    for (; i < used; i++) value = fma(p[i * stride], weight[i], value);
+    return value;
+}
+
+template <bool ROPE>
+[[max_total_threads_per_threadgroup(256)]]
+kernel void kernel_deepseek_v41_attention_flash_combine(
+    constant uint4 &a [[buffer(0)]], constant uint2 &b [[buffer(1)]],
+    device const float *sink [[buffer(6)]], device float *out [[buffer(8)]],
+    device atomic_uint *status [[buffer(10)]], constant uint &heads [[buffer(14)]],
+    device const float *scratch [[buffer(15)]], constant uint4 &f [[buffer(16)]],
+    device const float *freq [[buffer(17)]], constant uint2 &rope [[buffer(18)]],
+    uint2 group [[threadgroup_position_in_grid]], uint tid [[thread_index_in_threadgroup]],
+    uint sg [[simdgroup_index_in_threadgroup]], uint lane [[thread_index_in_simdgroup]]) {
+    threadgroup float weight[V41_FLASH_MAX_SPLITS];
+    threadgroup bool rejected;
+    const uint dim = a.x, h = group.y, splits = f.y;
+    const uint used = (a.y + b.x + f.x - 1) / f.x;
+    device const float *partial_m = scratch + v41_flash_scratch_rows(splits, heads, dim);
+    device const float *partial_l = partial_m + splits * heads;
+    device const float *partial_bad = partial_l + splits * heads;
+    if (sg == 0) {
+        const float s = sink[h];
+        float maximum = s;
+        bool bad = false;
+        for (uint i = lane; i < used; i += 32) {
+            maximum = max(maximum, partial_m[i * heads + h]);
+            bad |= partial_bad[i] != 0.0f;
+        }
+        maximum = simd_max(maximum);
+        bad = simd_any(bad);
+        float denom = 0;
+        for (uint i = lane; i < used; i += 32)
+            denom += partial_l[i * heads + h] * exp(partial_m[i * heads + h] - maximum);
+        denom = simd_sum(denom) + exp(s - maximum);
+        for (uint i = lane; i < used; i += 32)
+            weight[i] = exp(partial_m[i * heads + h] - maximum) / denom;
+        if (lane == 0) rejected = bad;
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    const uint j = group.x * V41_FLASH_THREADS + tid;
+    if (j >= dim) return;
+    const float value = rejected ? 0.0f : v41_flash_combined(scratch, weight, used, heads, dim, h, j);
+    if (!isfinite(value)) atomic_fetch_or_explicit(status, 4u, memory_order_relaxed);
+    if (ROPE) {
+        const uint rotary_start = dim - 2 * rope.x;
+        if (j >= rotary_start) {
+            const bool even = (j - rotary_start) % 2 == 0;
+            const float partner = rejected ? 0.0f
+                : v41_flash_combined(scratch, weight, used, heads, dim, h, even ? j + 1 : j - 1);
+            const float u = even ? value : partner, v = even ? partner : value;
+            const float angle = float(rope.y) * freq[(j - rotary_start) / 2] * -1.0f;
+            const float c = cos(angle), s = sin(angle);
+            out[h * dim + j] = even ? u * c - v * s : u * s + v * c;
+            return;
+        }
+    }
+    out[h * dim + j] = value;
+}
+
+#define V41_FLASH_COMBINE(ROPE, SUFFIX) \
+    template [[host_name("kernel_deepseek_v41_attention_flash_combine" SUFFIX)]] kernel void \
+    kernel_deepseek_v41_attention_flash_combine<ROPE>(constant uint4 &, constant uint2 &, \
+        device const float *, device float *, device atomic_uint *, constant uint &, \
+        device const float *, constant uint4 &, device const float *, constant uint2 &, \
+        uint2, uint, uint, uint);
+V41_FLASH_COMBINE(false, "")
+V41_FLASH_COMBINE(true, "_rope")
+
 kernel void kernel_deepseek_v41_attention_rope_rows(
     constant uint4 &a [[buffer(0)]], device const float *input [[buffer(1)]],
     device const float *freq [[buffer(2)]], constant uint2 &b [[buffer(3)]],

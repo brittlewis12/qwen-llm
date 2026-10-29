@@ -231,11 +231,19 @@ fn assert_native_signal_scope() {
     }
 }
 
-fn fixture(single: bool, body: impl FnOnce(&Forward<'_>)) {
-    // Install BEFORE the lease/context, and destroy every GPU/autorelease
-    // owner BEFORE explicit checked restoration. No GPU child or sent signal.
-    let mut signals = metal::test_cancellation::CancellationGuard::install().unwrap();
+fn with_signals(body: impl FnOnce()) {
     assert_native_signal_scope();
+    let mut signals = metal::test_cancellation::CancellationGuard::install().unwrap();
+    body();
+    signals.restore().unwrap();
+    assert!(
+        !metal::test_cancellation::flag().load(Ordering::Relaxed),
+        "operator stop prevents fixture acceptance"
+    );
+}
+
+fn fixture(single: bool, body: impl FnOnce(&Forward<'_>)) {
+    metal::test_cancellation::check().unwrap();
     {
         let _lease = reuse::require_debug_lease();
         let ctx = MetalContext::new().unwrap();
@@ -276,11 +284,7 @@ fn fixture(single: bool, body: impl FnOnce(&Forward<'_>)) {
             });
         });
     }
-    signals.restore().unwrap();
-    assert!(
-        !metal::test_cancellation::flag().load(Ordering::Relaxed),
-        "operator stop prevents fixture acceptance"
-    );
+    metal::test_cancellation::check().unwrap();
 }
 
 fn case(single: bool, role: Option<&'static str>, action: Action, expected: usize) {
@@ -389,41 +393,45 @@ fn healthy(model: &Forward<'_>, single: bool) {
 #[test]
 #[ignore = "self-leased <=128 MiB native default decoder pipeline; synthetic faults; MTL debug"]
 fn default_pipeline_submitted_command_unwind_ownership_fault_matrix_gpu() {
-    case(false, Some("ced_pipeline_first_encode"), Action::Panic, 0);
-    for action in [Action::Error, Action::Panic] {
-        case(false, Some("ced_pipeline_successor_encode"), action, 1);
-        case(false, Some("ced_pipeline_before_adoption"), action, 2);
-        case(false, Some("ced_pipeline_adopted"), action, 2);
-    }
-    for action in [Action::Error, Action::Panic] {
-        case(false, Some("ced_pipeline_popped"), action, 2);
-    }
-    case(false, Some("ced_pipeline_waited"), Action::Panic, 2);
-    case(true, Some("ced_pipeline_popped"), Action::Panic, 1);
-    for single in [false, true] {
-        case(
-            single,
-            Some("ced_decoder_batch"),
-            Action::Completion,
-            if single { 1 } else { 2 },
-        );
-        case(single, None, Action::Error, if single { 1 } else { 2 });
-    }
+    with_signals(|| {
+        case(false, Some("ced_pipeline_first_encode"), Action::Panic, 0);
+        for action in [Action::Error, Action::Panic] {
+            case(false, Some("ced_pipeline_successor_encode"), action, 1);
+            case(false, Some("ced_pipeline_before_adoption"), action, 2);
+            case(false, Some("ced_pipeline_adopted"), action, 2);
+        }
+        for action in [Action::Error, Action::Panic] {
+            case(false, Some("ced_pipeline_popped"), action, 2);
+        }
+        case(false, Some("ced_pipeline_waited"), Action::Panic, 2);
+        case(true, Some("ced_pipeline_popped"), Action::Panic, 1);
+        for single in [false, true] {
+            case(
+                single,
+                Some("ced_decoder_batch"),
+                Action::Completion,
+                if single { 1 } else { 2 },
+            );
+            case(single, None, Action::Error, if single { 1 } else { 2 });
+        }
+    });
 }
 
 #[test]
 #[ignore = "self-leased <=128 MiB native pipeline; local synthetic cancel; no follow-up GPU work"]
 fn default_pipeline_successor_encode_cancel_ownership_gpu() {
-    case(
-        false,
-        Some("ced_pipeline_successor_encode"),
-        Action::Cancel,
-        1,
-    );
+    with_signals(|| {
+        case(
+            false,
+            Some("ced_pipeline_successor_encode"),
+            Action::Cancel,
+            1,
+        );
+    });
 }
 
 #[test]
 #[ignore = "self-leased <=128 MiB native pipeline; local synthetic cancel; no follow-up GPU work"]
 fn default_pipeline_adopted_cancel_ownership_gpu() {
-    case(false, Some("ced_pipeline_adopted"), Action::Cancel, 2);
+    with_signals(|| case(false, Some("ced_pipeline_adopted"), Action::Cancel, 2));
 }

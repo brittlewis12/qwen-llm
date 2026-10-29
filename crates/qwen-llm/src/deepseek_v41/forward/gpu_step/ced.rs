@@ -621,6 +621,7 @@ impl Workspace {
         // after commit precedes every post-submit operation and ownership move.
         pending.command.commit();
         pending.needs_wait = true;
+        pending.submitted_at = Instant::now();
         #[cfg(test)]
         batches::tests::unwind::submitted(role, dimensions[0]);
         Ok(pending)

@@ -19,10 +19,11 @@ Engram, prefetch, or pipeline selection are changed.
 ## Ownership repair
 
 `PendingCed` owns one terminal blocking-wait obligation. All submission metadata,
-including the timestamp, is constructed before commit. The owner is armed by a
-plain boolean assignment immediately after commit, before any post-commit
-bookkeeping or handoff. Returning, enqueueing and popping move the same owner;
-there is no fallible reconstruction of ownership after submission.
+including an initial timestamp, is constructed before commit. The owner is armed
+by a plain boolean assignment immediately after commit, before any post-commit
+bookkeeping or handoff. Only after arming, the timestamp is refreshed to retain
+the existing post-commit wait-time origin. Returning, enqueueing and popping move
+the same owner; there is no fallible reconstruction of ownership after submission.
 
 Normal `ced_wait` blocks through that owner, discharges the lifetime obligation,
 then performs the existing checked completion, profiling, command accounting and
@@ -118,10 +119,13 @@ specify a same-context healthy follow-up with validated counters. Cancellation
 cases specify no healthy follow-up or later GPU work; that proof is deliberately
 separate. These are source assertions, not executed proof.
 
-Each native fixture installs `metal::test_cancellation::CancellationGuard`
-before its lease/context/resources, queries INT/TERM masks as unblocked, rejects
-the CPU signal-helper child environment, passes `Some(flag)` through GPU calls,
-and tears down resources and autorelease pools before explicit checked restore.
+Each exact native selector installs one
+`metal::test_cancellation::CancellationGuard` before any lease/context/resources.
+The same guard spans every fault case and healthy follow-up in that process;
+it is never reinstalled between cases, so a real stop cannot be reset there.
+The driver queries INT/TERM masks as unblocked, rejects the CPU signal-helper
+child environment, passes `Some(flag)` through GPU calls, and tears down all
+resources and autorelease pools before explicit checked restore.
 No signals are sent and no GPU children are spawned. Cancellation selectors
 must each run alone in a fresh exact test process, not together in a broad
 ignored-test invocation. Their local injection is not proof of actual operator

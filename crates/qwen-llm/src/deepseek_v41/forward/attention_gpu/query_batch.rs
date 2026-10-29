@@ -1520,7 +1520,15 @@ impl Workspace {
         if tensor64 {
             let qhalf = rows.query_half.borrow();
             if let Some(half) = qhalf.as_ref() {
-                tensor_pipeline(ctx, enc, "score_tensor64_qhalf")?;
+                tensor_pipeline(
+                    ctx,
+                    enc,
+                    if prefill_qregister_enabled() {
+                        "score_tensor64_qregister"
+                    } else {
+                        "score_tensor64_qhalf"
+                    },
+                )?;
                 let view = half.view_subrange(
                     (first * c.heads * c.head_dim) as u64,
                     vec![(c.heads * c.head_dim) as u64, n as u64],

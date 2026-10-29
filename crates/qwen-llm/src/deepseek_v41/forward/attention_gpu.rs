@@ -343,6 +343,12 @@ crate::env_flag!(
     "QWEN_V41_ATTN_QHALF"
 );
 
+crate::env_flag!(
+    /// Keep tensor64 Q vectors live across key panels; `QWEN_V41_ATTN_QREGISTER=0` restores the Q-half score kernel.
+    default_on prefill_qregister_enabled,
+    "QWEN_V41_ATTN_QREGISTER"
+);
+
 pub(super) struct Rows {
     tile: query_batch::Scratch,
     rank: MetalTensor,

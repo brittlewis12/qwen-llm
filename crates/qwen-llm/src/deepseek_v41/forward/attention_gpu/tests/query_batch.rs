@@ -173,7 +173,9 @@ fn compare_case(ctx: &MetalContext, c: &Config, schedule: &Schedule, start: usiz
                 let score = count("score_mma")
                     + count("score_tensor")
                     + count("score_tensor32")
-                    + count("score_tensor64");
+                    + count("score_tensor64")
+                    + count("score_tensor64_qhalf")
+                    + count("score_tensor64_qregister");
                 let pv = count("pv_mma") + count("pv_tensor") + count("pv_tensor64");
                 assert_eq!(score, n.div_ceil(TILE), "score");
                 assert_eq!(pv, n.div_ceil(TILE), "pv");
@@ -944,7 +946,9 @@ fn sink_case(
                 let score = count("score_mma")
                     + count("score_tensor")
                     + count("score_tensor32")
-                    + count("score_tensor64");
+                    + count("score_tensor64")
+                    + count("score_tensor64_qhalf")
+                    + count("score_tensor64_qregister");
                 let pv = count("pv_mma") + count("pv_tensor") + count("pv_tensor64");
                 assert_eq!(score, spans.len(), "score");
                 assert_eq!(pv, spans.len(), "pv");
@@ -976,6 +980,8 @@ fn sink_case(
                     "score_tensor",
                     "score_tensor32",
                     "score_tensor64",
+                    "score_tensor64_qhalf",
+                    "score_tensor64_qregister",
                 ]);
                 depths.1 = heights(&["pv_mma", "pv_tensor", "pv_tensor64"]);
                 let tiles = spans.iter().map(|&(_, n, _)| n as u64).collect::<Vec<_>>();

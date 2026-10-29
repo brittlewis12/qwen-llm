@@ -1,5 +1,23 @@
 use super::*;
 
+fn poison(tensor: &MetalTensor) {
+    let elements = f32_slice(tensor).unwrap().len();
+    // Every prior command is terminal; no borrowed slice survives this write.
+    unsafe {
+        std::slice::from_raw_parts_mut(
+            tensor
+                .buffer
+                .contents()
+                .as_ptr()
+                .cast::<u8>()
+                .add(tensor.offset as usize)
+                .cast::<f32>(),
+            elements,
+        )
+        .fill(f32::NAN);
+    }
+}
+
 fn score(f: &Fixture, ctx: &MetalContext, enc: &KernelEncoder, cached: bool) {
     f.bind(enc);
     enc.set_tensor(2, &f.query_half);
@@ -49,6 +67,7 @@ fn attention_q_register_cache_probe() {
             let f = Fixture::new(&ctx, k, n, ragged, first);
             execute(&ctx, |enc| score(&f, &ctx, enc, false));
             let expected = f32_slice(&f.scores).unwrap().to_vec();
+            poison(&f.scores);
             execute(&ctx, |enc| score(&f, &ctx, enc, true));
             let actual = f32_slice(&f.scores).unwrap();
             let mut compared = 0;
@@ -65,6 +84,7 @@ fn attention_q_register_cache_probe() {
             execute(&ctx, |enc| sink(&f, &ctx, enc, false));
             let expected_out = f32_slice(&f.output).unwrap().to_vec();
             let expected_status = ids(&f.status, 1);
+            poison(&f.output);
             execute(&ctx, |enc| sink(&f, &ctx, enc, true));
             let actual_out = f32_slice(&f.output).unwrap();
             let mut base_nonfinite = 0;

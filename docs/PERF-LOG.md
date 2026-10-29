@@ -6,6 +6,18 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the current state and evidence index.
 
+## 2026-10-29 - V4.1 Engram Row Dedup: Closed Negative
+
+- The synthetic 8K suite prompt is uniformly novel (xorshift over the model
+  vocabulary): 98,296 / 98,304 unique Engram ids per layer per chunk. The real
+  frozen 8K prompt is 81.7% unique overall; even removing every duplicate
+  bounds the gain at ~19 ms / 0.43%, below the 50 ms / 1% bar. Page-miss
+  dominance makes it smaller.
+- Added the CPU replay diagnostic `real_prompt_engram_duplication`; removed a
+  runtime stats override that qualification rejects.
+- [Packet](bench/2026-10-29-v41-engram-dedup-negative.md). Raw:
+  `~/qwen-runs/2026-10-29-v41-engram-dedup/`.
+
 ## 2026-10-29 - V4.1 128K Decode 66.7 tok/s (Was 52.5)
 
 - M5 Ultra, GSQ IQ2_XS, main `fe50eee5`, `qwen-bench suite --tg 32 -d

@@ -964,6 +964,8 @@ impl Workspace {
             command: pending,
             chunk,
         }));
+        #[cfg(test)]
+        super::super::ced::tests::checkpoint("ced_encoder_prespawn", cancel)?;
         let next = next_hashes.map(|next_hashes| {
             let engram_rows = &model.engram_rows;
             let layers = engram_layers;

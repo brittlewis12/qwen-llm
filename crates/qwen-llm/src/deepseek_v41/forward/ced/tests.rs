@@ -1121,6 +1121,36 @@ fn submit_ahead_completion_fault_drains_the_newer_encoder() {
 
 #[test]
 #[ignore = "requires explicit Metal benchmark lease and debug layer"]
+fn submit_ahead_prespawn_panic_drains_the_committed_encoder() {
+    let _incumbent = gpu_step::ced::incumbent_scope();
+    assert_eq!(std::env::var("MTL_DEBUG_LAYER").as_deref(), Ok("1"));
+    assert_eq!(std::env::var("QWEN_METAL_LEASE_WAIT").as_deref(), Ok("1"));
+    let _lease = metal::acquire_metal_benchmark_lease().expect("CED GPU lease");
+    let ctx = MetalContext::new().unwrap();
+    let weights = toy::Weights::new(&ctx);
+    let embedding = embeddings(&ctx);
+    let model = nonuniform_model(&weights, &ctx, &embedding);
+    let input = tokens(2 * prefill::DEFAULT_CHUNK_ROWS);
+    reset_drain_notes();
+    let mut state = model.new_state(input.len()).unwrap();
+    let addresses = state.addresses;
+    let scope = Scope::new("ced_encoder_prespawn", Action::Panic);
+    let result = catch_unwind(AssertUnwindSafe(|| {
+        run(&model, &mut state, &input, None, Arithmetic::Production)
+    }));
+    assert_eq!(scope.hits(), 1, "pre-spawn hook");
+    assert!(result.is_err(), "panic expected");
+    assert_eq!(drain_notes(), 1, "committed encoder drained on unwind");
+    drop(scope);
+    assert_poisoned_rejects(&model, &mut state, addresses);
+    let mut healthy = model.new_state(input.len()).unwrap();
+    let (_, report) = run(&model, &mut healthy, &input, None, Arithmetic::Production).unwrap();
+    assert_eq!(report.execution, PrefillExecution::ShrinkingCed);
+    assert!(report.fallback.is_none());
+}
+
+#[test]
+#[ignore = "requires explicit Metal benchmark lease and debug layer"]
 fn submit_ahead_deferred_status_rejects_after_both_encoders_retire() {
     let _incumbent = gpu_step::ced::incumbent_scope();
     assert_eq!(std::env::var("MTL_DEBUG_LAYER").as_deref(), Ok("1"));

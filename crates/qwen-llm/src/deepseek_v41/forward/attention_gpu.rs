@@ -338,8 +338,8 @@ impl ValueMatrix {
 }
 
 crate::env_flag!(
-    /// Read the tensor64 score Q from the shared half scratch; `QWEN_V41_ATTN_QHALF=1` enables.
-    default_off prefill_qhalf_enabled,
+    /// Read the tensor64 score Q from the shared half scratch; `QWEN_V41_ATTN_QHALF=0` restores the F32 query.
+    default_on prefill_qhalf_enabled,
     "QWEN_V41_ATTN_QHALF"
 );
 

@@ -14,7 +14,7 @@ use super::super::decode_loop::DecodeRequest;
 use super::super::http::{BackendFailure, GenerationSink};
 use super::super::items::ServeError;
 use anyhow::Context as _;
-use qwen_llm::sampling::Sampler;
+use qwen_llm::sampling::{SampledToken, Sampler, SamplingError};
 use qwen_llm::tokenizer::Tokenize;
 use std::time::Instant;
 
@@ -75,9 +75,12 @@ impl DecodeCursor {
     }
 
     /// Select the next token from the current logits and publish it.
+    /// `presampled`, when given, is `sampler.sample(logits)` already applied
+    /// (by the batch scheduler's sampling pool) and stands in for that call.
     pub(super) fn advance(
         &mut self,
         sampler: &mut Sampler,
+        presampled: Option<Result<SampledToken, SamplingError>>,
         tokenizer: &dyn Tokenize,
         sink: &mut dyn GenerationSink,
         mut checkpoint: impl FnMut() -> anyhow::Result<()>,
@@ -85,7 +88,8 @@ impl DecodeCursor {
         assert!(!self.awaiting_logits, "decode cursor awaits a transition");
         checkpoint().map_err(|error| self.server(error))?;
         let selection_t0 = Instant::now();
-        let token = match sampler.sample(&self.logits) {
+        let sampled = presampled.unwrap_or_else(|| sampler.sample(&self.logits));
+        let token = match sampled {
             Ok(sampled) => sampled.token,
             Err(error) => return Err(self.server(error.into())),
         };
@@ -338,7 +342,7 @@ mod tests {
             })?;
             let mut calls = 0;
             loop {
-                match cursor.advance(&mut sampler, &Bytes, &mut sink, || Ok(()))? {
+                match cursor.advance(&mut sampler, None, &Bytes, &mut sink, || Ok(()))? {
                     Advance::Done(generation) => return Ok(generation),
                     Advance::Forward(token) => {
                         calls += 1;
@@ -474,7 +478,7 @@ mod tests {
         .unwrap();
         let mut sampler = Sampler::new(SamplingConfig::default()).unwrap();
         let Err(BackendFailure::Serve(error)) =
-            cursor.advance(&mut sampler, &Bytes, &mut Recorder::default(), || {
+            cursor.advance(&mut sampler, None, &Bytes, &mut Recorder::default(), || {
                 anyhow::bail!("termination signal")
             })
         else {

@@ -4887,6 +4887,13 @@
   },
   {
     "target": "qwen",
+    "name": "serve::backend_v41::sample_pool::tests::pooled_jobs_return_in_order_with_owner_results_and_states",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Reviewed host-only planning, metadata, NSObject lifetime, pure arithmetic, fake-state lifecycle or loopback fixture; no Metal context or real model import."
+  },
+  {
+    "target": "qwen",
     "name": "serve::backend_v41::scheduler_tests::a_batch_that_fails_after_starting_fails_every_member_without_commit",
     "class": "cpu",
     "ignored": false,
@@ -4930,6 +4937,20 @@
   {
     "target": "qwen",
     "name": "serve::backend_v41::scheduler_tests::http_requests_batch_through_the_owner_loop_with_serial_text",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Reviewed host-only planning, metadata, NSObject lifetime, pure arithmetic, fake-state lifecycle or loopback fixture; no Metal context or real model import."
+  },
+  {
+    "target": "qwen",
+    "name": "serve::backend_v41::scheduler_tests::pooled_sampling_matches_owner_sampling_and_the_serial_path",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Reviewed host-only planning, metadata, NSObject lifetime, pure arithmetic, fake-state lifecycle or loopback fixture; no Metal context or real model import."
+  },
+  {
+    "target": "qwen",
+    "name": "serve::backend_v41::scheduler_tests::pooled_sampling_preserves_owner_failure_handling",
     "class": "cpu",
     "ignored": false,
     "reason": "Reviewed host-only planning, metadata, NSObject lifetime, pure arithmetic, fake-state lifecycle or loopback fixture; no Metal context or real model import."

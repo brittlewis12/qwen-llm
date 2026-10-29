@@ -26,11 +26,16 @@
 //! - Admission adds the caller reserves of requests already in flight to the
 //!   new request's reserve; the engine admits each state against current
 //!   memory signals, which include the other requests' resident states.
+//! - With a [`SamplePool`], the members of a step that returned logits are
+//!   sampled on its threads before any member is consumed; consumption then
+//!   proceeds in the same order with each member's result where it would
+//!   have sampled (see [`super::sample_pool`]).
 use super::super::batching::{BatchSink, Job, shutting_down};
 use super::cursor::{Advance, DecodeCursor};
 use super::execution::{
     BudgetedSink, Engine, Run, admit_output, cancel_of, cancelled, check, interrupted,
 };
+use super::sample_pool::{SampleJob, SamplePool, Sampled};
 use super::*;
 use std::collections::VecDeque;
 use std::sync::Arc;
@@ -112,6 +117,12 @@ pub(super) struct Scheduler<S> {
     prefer_prefill: bool,
     /// 5xx completions since the last pump, for the owner's failure hook.
     server_failures: usize,
+    /// Samples a multi-member step's members in parallel; None samples each
+    /// on the owner as it is consumed.
+    sample_pool: Option<SamplePool>,
+    /// Members sampled through the pool (tests assert it was exercised).
+    #[cfg(test)]
+    pool_sampled: usize,
 }
 
 /// Adapts the request's owner sink to the serial phases' sink contract:
@@ -192,7 +203,28 @@ impl<S> Scheduler<S> {
             active: Vec::new(),
             prefer_prefill: false,
             server_failures: 0,
+            sample_pool: None,
+            #[cfg(test)]
+            pool_sampled: 0,
         }
+    }
+
+    /// Sample multi-member steps on `workers` persistent threads beside the
+    /// owner (0 keeps sampling serial on the owner).
+    pub(super) fn with_sample_workers(mut self, workers: usize) -> std::io::Result<Self> {
+        self.sample_pool = (workers > 0)
+            .then(|| SamplePool::new(workers))
+            .transpose()?;
+        Ok(self)
+    }
+
+    pub(super) fn sample_workers(&self) -> usize {
+        self.sample_pool.as_ref().map_or(0, SamplePool::workers)
+    }
+
+    #[cfg(test)]
+    pub(super) fn pool_sampled(&self) -> usize {
+        self.pool_sampled
     }
 
     #[cfg(test)]
@@ -535,14 +567,21 @@ impl<S> Scheduler<S> {
         }) {
             Ok(cursor) => {
                 active.cursor = Some(cursor);
-                self.advance(index, settings, reuse);
+                self.advance(index, None, settings, reuse);
             }
             Err(failure) => self.fail(index, failure),
         }
     }
 
-    /// Select and publish the next token, or finish the request.
-    fn advance(&mut self, index: usize, settings: &Settings, reuse: &mut impl reuse::Reuse<S>) {
+    /// Select and publish the next token, or finish the request. `presampled`
+    /// is this request's sampler already applied to the cursor's logits.
+    fn advance(
+        &mut self,
+        index: usize,
+        presampled: Option<Sampled>,
+        settings: &Settings,
+        reuse: &mut impl reuse::Reuse<S>,
+    ) {
         let active = &mut self.active[index];
         let run = active.run.as_mut().expect("decoding request has a run");
         let cursor = active
@@ -561,6 +600,7 @@ impl<S> Scheduler<S> {
         };
         let advanced = cursor.advance(
             &mut run.sampler,
+            presampled,
             &settings.tokenizer,
             &mut budgeted,
             crate::shutdown::checkpoint,
@@ -650,10 +690,63 @@ impl<S> Scheduler<S> {
             }
         }
         results.sort_by_key(|(index, ..)| std::cmp::Reverse(*index));
+        let mut presampled = self.presample(&mut results);
         // Highest index first so retiring a request keeps lower indices valid.
-        for (index, result, elapsed_ms, width) in results {
-            self.consume(index, result, elapsed_ms, width, settings, reuse);
+        for ((index, result, elapsed_ms, width), presampled) in
+            results.into_iter().zip(presampled.drain(..))
+        {
+            self.consume(
+                index, result, elapsed_ms, width, presampled, settings, reuse,
+            );
         }
+    }
+
+    /// Run the sampler of every member that returned logits on the pool, one
+    /// result per entry of `results` (None where the owner samples or nothing
+    /// is sampled). Samplers and logits are moved out and back; nothing else
+    /// changes before consumption.
+    fn presample(&mut self, results: &mut [Stepped]) -> Vec<Option<Sampled>> {
+        let mut presampled: Vec<Option<Sampled>> = results.iter().map(|_| None).collect();
+        let Some(pool) = self.sample_pool.as_mut() else {
+            return presampled;
+        };
+        let members: Vec<usize> = (0..results.len())
+            .filter(|&k| results[k].1.is_ok())
+            .collect();
+        if members.len() < 2 {
+            return presampled;
+        }
+        let jobs = members
+            .iter()
+            .map(|&k| {
+                let run = self.active[results[k].0]
+                    .run
+                    .as_mut()
+                    .expect("decoding run");
+                let placeholder =
+                    qwen_llm::sampling::Sampler::new(qwen_llm::sampling::SamplingConfig::default())
+                        .expect("default sampler");
+                SampleJob {
+                    sampler: std::mem::replace(&mut run.sampler, placeholder),
+                    logits: std::mem::take(results[k].1.as_mut().expect("logits")),
+                    sampled: None,
+                }
+            })
+            .collect();
+        for (&k, job) in members.iter().zip(pool.sample_all(jobs)) {
+            let run = self.active[results[k].0]
+                .run
+                .as_mut()
+                .expect("decoding run");
+            run.sampler = job.sampler;
+            *results[k].1.as_mut().expect("logits") = job.logits;
+            presampled[k] = job.sampled;
+        }
+        #[cfg(test)]
+        {
+            self.pool_sampled += members.len();
+        }
+        presampled
     }
 
     fn step_one(&mut self, index: usize, engine: &mut impl BatchEngine<S>) -> Stepped {
@@ -746,12 +839,14 @@ impl<S> Scheduler<S> {
     }
 
     /// Complete one request's transition with its forward result.
+    #[allow(clippy::too_many_arguments)]
     fn consume(
         &mut self,
         index: usize,
         result: std::result::Result<Vec<f32>, String>,
         elapsed_ms: f64,
         width: usize,
+        presampled: Option<Sampled>,
         settings: &Settings,
         reuse: &mut impl reuse::Reuse<S>,
     ) {
@@ -775,7 +870,7 @@ impl<S> Scheduler<S> {
         };
         let cursor = active.cursor.as_mut().expect("decoding cursor");
         match cursor.on_logits(logits, elapsed_ms, crate::shutdown::checkpoint) {
-            Ok(()) => self.advance(index, settings, reuse),
+            Ok(()) => self.advance(index, presampled, settings, reuse),
             Err(failure) => self.fail(index, failure),
         }
     }

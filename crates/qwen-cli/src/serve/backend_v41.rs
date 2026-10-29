@@ -35,6 +35,13 @@ const LIVE_STATES_ENV: &str = "QWEN_SERVE_V41_LIVE_STATES";
 /// engine's request-memory estimate at its capacity. Unset: count only.
 /// Positive integer; read at startup.
 const LIVE_STATE_MIB_ENV: &str = "QWEN_SERVE_V41_LIVE_STATE_MIB";
+/// Persistent threads, beside the owner thread, that sample the members of a
+/// V4.1 batched decode step in parallel when `QWEN_SERVE_V41_MAX_ACTIVE` > 1
+/// (default: max active - 1, so every member of a full step samples at once).
+/// Each request's sampler moves to one thread and back per step; tokens, RNG
+/// streams, errors and publication order are unchanged. 0 samples every
+/// member serially on the owner. Non-negative integer; read at startup.
+const SAMPLE_WORKERS_ENV: &str = "QWEN_SERVE_V41_SAMPLE_WORKERS";
 
 /// Agent workloads keep about three conversations busy at once. M5 Ultra, GSQ
 /// IQ2_XS, three agents x three turns (greedy, 128 tokens per turn, fresh
@@ -42,6 +49,18 @@ const LIVE_STATE_MIB_ENV: &str = "QWEN_SERVE_V41_LIVE_STATE_MIB";
 /// with four of each (1.25x); three concurrent single requests 1.18x.
 const DEFAULT_MAX_ACTIVE: usize = 4;
 const DEFAULT_LIVE_STATES: usize = 4;
+
+fn non_negative_env(name: &str) -> Result<Option<usize>> {
+    let value = match std::env::var(name) {
+        Err(std::env::VarError::NotPresent) => return Ok(None),
+        Err(error) => anyhow::bail!("read {name}: {error}"),
+        Ok(value) => value,
+    };
+    value
+        .parse::<usize>()
+        .map(Some)
+        .with_context(|| format!("{name} must be a non-negative integer, got {value:?}"))
+}
 
 fn positive_env(name: &str) -> Result<Option<usize>> {
     let value = match std::env::var(name) {
@@ -64,6 +83,7 @@ pub(super) struct Prepared {
     live_states: usize,
     live_state_bytes: Option<u64>,
     max_active: usize,
+    sample_workers: usize,
 }
 impl Prepared {
     pub(super) fn new(
@@ -92,9 +112,11 @@ impl Prepared {
             .map(|mib| (mib as u64).checked_mul(1 << 20))
             .map(|bytes| bytes.context("V4.1 live-state budget overflows"))
             .transpose()?;
+        let max_active = positive_env(MAX_ACTIVE_ENV)?.unwrap_or(DEFAULT_MAX_ACTIVE);
         Ok(Self {
             live_states: positive_env(LIVE_STATES_ENV)?.unwrap_or(DEFAULT_LIVE_STATES),
-            max_active: positive_env(MAX_ACTIVE_ENV)?.unwrap_or(DEFAULT_MAX_ACTIVE),
+            max_active,
+            sample_workers: non_negative_env(SAMPLE_WORKERS_ENV)?.unwrap_or(max_active - 1),
             live_state_bytes,
             snapshot_mib: invocation.snapshot_cache_mib,
             snapshot_policy: invocation.snapshot_policy,
@@ -145,12 +167,16 @@ pub(super) fn start(
     backend.reuse = reuse::Store::new(plan.bytes, plan.policy)
         .with_live_budget(prepared.live_states, prepared.live_state_bytes);
     if prepared.max_active > 1 {
+        let scheduler = scheduler::Scheduler::new(prepared.max_active)
+            .with_sample_workers(prepared.sample_workers)
+            .context("start V4.1 sampling workers")?;
         tracing::info!(
-            "serve: V4.1 continuous batching: up to {} requests in flight (prefill {} rows per call while others decode)",
+            "serve: V4.1 continuous batching: up to {} requests in flight (prefill {} rows per call while others decode; {} sampling workers)",
             prepared.max_active,
-            scheduler::LOADED_PREFILL_ROWS
+            scheduler::LOADED_PREFILL_ROWS,
+            scheduler.sample_workers()
         );
-        backend.scheduler = Some(scheduler::Scheduler::new(prepared.max_active));
+        backend.scheduler = Some(scheduler);
     }
     listening.serve(started.elapsed().as_secs_f64() * 1e3, &mut backend)
 }
@@ -187,6 +213,7 @@ mod execution;
 #[path = "backend_v41/io.rs"]
 mod memory_io;
 mod reuse;
+mod sample_pool;
 mod scheduler;
 
 pub(crate) struct Backend<'a> {

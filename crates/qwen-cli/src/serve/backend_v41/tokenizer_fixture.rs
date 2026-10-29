@@ -64,9 +64,13 @@ pub(super) fn tokenizer(emission: Option<&str>) -> NativeTokenizer {
     out.extend(4u32.to_le_bytes());
     out.extend(EOS.to_le_bytes());
     out.resize(out.len().next_multiple_of(32), 0);
+    // Parallel tests can read the same clock value; the counter keeps
+    // `create_new` from colliding within one process.
+    static FIXTURES: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
     let path = std::env::temp_dir().join(format!(
-        "v41-native-tokenizer-{}-{}.gguf",
+        "v41-native-tokenizer-{}-{}-{}.gguf",
         std::process::id(),
+        FIXTURES.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
         std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()

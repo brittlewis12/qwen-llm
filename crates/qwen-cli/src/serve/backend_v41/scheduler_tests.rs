@@ -21,10 +21,26 @@ struct Seq {
     capacity: usize,
 }
 
-fn next_logits(seq: &Seq) -> Vec<f32> {
+fn next_logits(seq: &Seq, shape: Logits) -> Vec<f32> {
     let generated = seq.tokens.len() - seq.prompt;
     let budget = 3 + seq.prompt % 5;
-    let token = if generated >= budget {
+    if shape == Logits::Spread && generated < budget + 4 {
+        // Comparable weights over 'a'..='z' from a hash of the history, so a
+        // sampled request's stream depends on every draw.
+        let mut hash = seq
+            .tokens
+            .iter()
+            .fold(0xcbf2_9ce4_8422_2325u64, |hash, &token| {
+                (hash ^ u64::from(token)).wrapping_mul(0x0100_0000_01b3)
+            });
+        let mut logits = vec![-30.0; VOCAB];
+        for token in b'a'..=b'z' {
+            hash = (hash ^ u64::from(token)).wrapping_mul(0x0100_0000_01b3);
+            logits[usize::from(token)] = (hash >> 40) as f32 / (1u64 << 24) as f32 * 3.0;
+        }
+        return logits;
+    }
+    let token = if generated >= budget || shape == Logits::Spread {
         tokenizer_fixture::EOS
     } else {
         u32::from(b'a') + seq.tokens.iter().sum::<u32>() % 26
@@ -32,6 +48,15 @@ fn next_logits(seq: &Seq) -> Vec<f32> {
     let mut logits = vec![0.0; VOCAB];
     logits[token as usize] = 100.0;
     logits
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+enum Logits {
+    /// One dominant token: greedy and sampled decoding agree.
+    #[default]
+    Peaked,
+    /// Several plausible tokens for a few more steps, then EOS.
+    Spread,
 }
 
 #[derive(Default)]
@@ -53,6 +78,19 @@ struct StubEngine {
     fail_batches: usize,
     /// Synthetic clock: each prefilled row and each step costs 1 ms.
     clock: Duration,
+    logits: Logits,
+    /// Prompt length whose decode logits carry a NaN after its first step.
+    nan_prompt: Option<usize>,
+}
+
+impl StubEngine {
+    fn logits(&self, seq: &Seq) -> Vec<f32> {
+        let mut logits = next_logits(seq, self.logits);
+        if self.nan_prompt == Some(seq.prompt) && seq.tokens.len() > seq.prompt + 1 {
+            logits[usize::from(b'q')] = f32::NAN;
+        }
+        logits
+    }
 }
 
 impl execution::Engine<Seq> for StubEngine {
@@ -85,7 +123,7 @@ impl execution::Engine<Seq> for StubEngine {
             return Ok(Vec::new());
         }
         state.prompt = state.tokens.len();
-        Ok(next_logits(state))
+        Ok(self.logits(state))
     }
     fn step(
         &mut self,
@@ -100,7 +138,7 @@ impl execution::Engine<Seq> for StubEngine {
             return Err("sequence is provisional or poisoned by partial execution".into());
         }
         state.tokens.push(token);
-        Ok(next_logits(state))
+        Ok(self.logits(state))
     }
     fn now(&mut self) -> Duration {
         self.clock
@@ -141,7 +179,7 @@ impl BatchEngine<Seq> for StubEngine {
             .zip(tokens)
             .map(|(state, &token)| {
                 state.tokens.push(token);
-                next_logits(state)
+                self.logits(state)
             })
             .collect())
     }
@@ -260,10 +298,23 @@ fn settings() -> Settings {
 }
 
 fn prepared(settings: &Settings, input: &str, stats: bool) -> Arc<PreparedResponse> {
+    prepared_json(
+        settings,
+        json!({"model":"test","input":input,"x_qwen":{"stats":stats}}),
+    )
+}
+
+/// A request with a fixed sampler seed (absent seeds are fresh draws).
+fn seeded(settings: &Settings, input: &str, seed: u64) -> Arc<PreparedResponse> {
+    prepared_json(
+        settings,
+        json!({"model":"test","input":input,"x_qwen":{"seed":seed}}),
+    )
+}
+
+fn prepared_json(settings: &Settings, body: Value) -> Arc<PreparedResponse> {
     let profile = settings.profile();
-    let request = profile
-        .parse(&json!({"model":"test","input":input,"x_qwen":{"stats":stats}}))
-        .unwrap();
+    let request = profile.parse(&body).unwrap();
     let validated = profile.validate(request).unwrap();
     let (prompt, boundaries) = profile.render_prepared(validated.request()).unwrap();
     Arc::new(PreparedResponse {
@@ -318,6 +369,14 @@ fn drain(
 
 /// The serial path's output for the same request and engine.
 fn serial(settings: &Settings, prepared: &PreparedResponse) -> (String, GenerationEnd, usize) {
+    serial_with(settings, prepared, StubEngine::default())
+}
+
+fn serial_with(
+    settings: &Settings,
+    prepared: &PreparedResponse,
+    engine: StubEngine,
+) -> (String, GenerationEnd, usize) {
     struct Collect(Vec<u8>);
     impl GenerationSink for Collect {
         fn piece(&mut self, bytes: &[u8]) -> io::Result<()> {
@@ -333,7 +392,7 @@ fn serial(settings: &Settings, prepared: &PreparedResponse) -> (String, Generati
     else {
         unreachable!()
     };
-    let engine = RefCell::new(StubEngine::default());
+    let engine = RefCell::new(engine);
     let mut sink = Collect(Vec::new());
     let outcome = settings
         .execute_with_ceiling(
@@ -846,4 +905,116 @@ fn http_requests_batch_through_the_owner_loop_with_serial_text() {
     // step is 2 or 3 depending on scheduling, never a fixed pattern.
     assert!(steps.iter().any(|&width| width >= 2), "{steps:?}");
     assert_eq!(commits, 3);
+}
+
+/// Text and terminal (without timing phases) of every client.
+type Observed = Vec<(
+    String,
+    std::result::Result<(GenerationEnd, usize), (bool, u16, String)>,
+)>;
+
+/// Run `inputs` concurrently with sampling on `workers` pool threads (0 = on
+/// the owner) against spread logits under `settings`' sampler.
+fn sampled_batch(
+    settings: &Settings,
+    inputs: &[&str],
+    workers: usize,
+    nan_prompt: Option<usize>,
+) -> (Observed, usize, Vec<Vec<u32>>, Vec<usize>) {
+    let mut scheduler = Scheduler::new(inputs.len())
+        .with_sample_workers(workers)
+        .unwrap();
+    assert_eq!(scheduler.sample_workers(), workers);
+    let mut engine = StubEngine {
+        logits: Logits::Spread,
+        nan_prompt,
+        ..StubEngine::default()
+    };
+    let mut reuse = Recording::default();
+    let clients: Vec<_> = inputs
+        .iter()
+        .enumerate()
+        .map(|(seed, input)| submit(&mut scheduler, seeded(settings, input, seed as u64)))
+        .collect();
+    drain(&mut scheduler, settings, &mut engine, &mut reuse);
+    let observed = clients
+        .iter()
+        .map(|client| {
+            let terminal = match client.terminal().expect("terminal") {
+                Ok((end, tokens, _)) => Ok((end, tokens)),
+                Err(failure) => Err(failure),
+            };
+            (client.text(), terminal)
+        })
+        .collect();
+    let steps = engine.log.borrow().steps.clone();
+    (observed, scheduler.pool_sampled(), reuse.commits, steps)
+}
+
+#[test]
+fn pooled_sampling_matches_owner_sampling_and_the_serial_path() {
+    let mut settings = settings();
+    // The V4.1 release shape: full-vocabulary sampling at temperature 1.
+    settings.sampling.temperature = 1.0;
+    let inputs = [
+        "first prompt",
+        "a second, longer prompt",
+        "third",
+        "fourth one",
+    ];
+    let (owner, owner_pooled, owner_commits, owner_steps) =
+        sampled_batch(&settings, &inputs, 0, None);
+    assert_eq!(owner_pooled, 0);
+    assert!(owner_steps.contains(&4), "{owner_steps:?}");
+    for workers in [1, 3, 5] {
+        let (pooled, count, commits, steps) = sampled_batch(&settings, &inputs, workers, None);
+        assert!(count > 8, "workers={workers}: {count} pooled samples");
+        assert_eq!(pooled, owner, "workers={workers}");
+        assert_eq!(commits, owner_commits, "workers={workers}");
+        assert_eq!(steps, owner_steps, "workers={workers}");
+    }
+
+    let greedy = self::settings();
+    assert_eq!(greedy.sampling.temperature, 0.0);
+    let mut differs_from_greedy = false;
+    for (seed, ((text, terminal), input)) in owner.iter().zip(inputs).enumerate() {
+        let seed = seed as u64;
+        let spread = || StubEngine {
+            logits: Logits::Spread,
+            ..StubEngine::default()
+        };
+        let (serial_text, end, tokens) =
+            serial_with(&settings, &seeded(&settings, input, seed), spread());
+        assert_eq!(text, &serial_text, "{input}");
+        assert_eq!(terminal, &Ok((end, tokens)), "{input}");
+        let (greedy_text, ..) = serial_with(&greedy, &seeded(&greedy, input, seed), spread());
+        differs_from_greedy |= greedy_text != serial_text;
+    }
+    assert!(
+        differs_from_greedy,
+        "spread logits must make sampling matter"
+    );
+}
+
+/// A member whose logits turn malformed fails alone, on the owner, with the
+/// same terminal whether or not its sampler already ran on the pool.
+#[test]
+fn pooled_sampling_preserves_owner_failure_handling() {
+    let mut settings = settings();
+    settings.sampling.temperature = 1.0;
+    let inputs = ["first prompt", "a second, longer prompt", "third"];
+    let nan_prompt = Some(seeded(&settings, inputs[1], 1).prompt.len());
+    let (owner, ..) = sampled_batch(&settings, &inputs, 0, nan_prompt);
+    let (pooled, count, ..) = sampled_batch(&settings, &inputs, 2, nan_prompt);
+    assert!(count > 0);
+    assert_eq!(pooled, owner);
+    let failed: Vec<_> = owner
+        .iter()
+        .filter(|(_, terminal)| terminal.is_err())
+        .collect();
+    assert_eq!(failed.len(), 1, "{owner:?}");
+    assert!(
+        matches!(&failed[0].1, Err((false, 500, message)) if message.contains("malformed logits")),
+        "{failed:?}"
+    );
 }

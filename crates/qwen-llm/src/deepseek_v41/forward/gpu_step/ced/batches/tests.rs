@@ -476,7 +476,7 @@ fn bound(
         n,
         &p,
         true,
-        crate::deepseek_v41::forward::gpu_step::ced::encoder_pipeline_enabled(),
+        crate::deepseek_v41::forward::gpu_step::ced::encoder_pipeline_priced(),
         &|n| Ok(if n == 0 { 0 } else { price(n) }),
     )
     .unwrap();
@@ -908,25 +908,75 @@ fn all_new_fixture_ledgers_include_four_layer_status_and_diagnostic_storage_belo
         (257, 640),
         (2050, 2050),
     ] {
-        let c = Config {
-            window,
-            index_topk: 2,
-            ..crate::deepseek_v41::forward::toy::config()
-        };
+        let c = reuse::fixture_config(window);
+        assert_eq!(c.candidate_block, if window == 2050 { 8 } else { 2 });
         if window == 2050 {
             schedule.layers = 4;
             schedule.compression_ratios.truncate(4);
             schedule.index_source_layers.retain(|&id| id < 4);
         }
+        if window == 2050 {
+            let make_plan = |c: &Config| {
+                CedPlan::shrinking(
+                    c,
+                    &schedule,
+                    &engram::HashConfig {
+                        layers: Vec::new(),
+                        ..engram::HashConfig::default()
+                    },
+                    &crate::deepseek_v41::forward::ced_plan::CedRequest::cold(n, n),
+                )
+                .unwrap()
+            };
+            let plan = make_plan(&c);
+            let mut previous = make_plan(&Config {
+                candidate_block: 2,
+                ..c.clone()
+            });
+            assert_eq!(plan.work, previous.work);
+            assert_eq!(plan.decoder, previous.decoder);
+            assert_eq!(plan.boundary_rows, previous.boundary_rows);
+            assert_eq!(plan.candidate_rows, previous.candidate_rows);
+            assert_eq!(plan.memory.candidate_i32_per_row, n.div_ceil(8));
+            assert!(plan.memory.candidate_bytes < previous.memory.candidate_bytes);
+            let saved = previous.memory.candidate_bytes - plan.memory.candidate_bytes;
+            previous.memory.candidate_i32_per_row = plan.memory.candidate_i32_per_row;
+            previous.memory.candidate_bytes = plan.memory.candidate_bytes;
+            previous.memory.total_retained_bytes -= saved;
+            assert_eq!(
+                plan, previous,
+                "only candidate slab geometry/bytes may change"
+            );
+        }
         let bytes = bound(&c, &schedule, n, prefill::DEFAULT_CHUNK_ROWS, &|n| {
             n + 16384
         });
+        println!(
+            "{}",
+            serde_json::json!({
+                "fixture":"four-layer batch status/diagnostics", "window":window, "rows":n,
+                "capacity":n, "candidate_block":c.candidate_block,
+                "bound_bytes":bytes, "cap_bytes":128 * 1024 * 1024,
+                "synthetic_price":"n+16384 per nonempty allocation; not an actual device quote"
+            })
+        );
         assert!(
             bytes <= 128 * 1024 * 1024,
             "W={window} N={n} full fixture ledger {bytes}"
         );
     }
-    assert!(reuse::wide_bound(&|n| n + 16384) <= 128 * 1024 * 1024);
+    let wide = reuse::wide_config();
+    let bytes = reuse::wide_bound(&|n| n + 16384);
+    assert_eq!(wide.candidate_block, 2);
+    println!(
+        "{}",
+        serde_json::json!({
+            "fixture":"wide lineage", "window":wide.window, "rows":129, "capacity":129,
+            "candidate_block":wide.candidate_block, "bound_bytes":bytes, "cap_bytes":128 * 1024 * 1024,
+            "synthetic_price":"n+16384 per nonempty allocation; not an actual device quote"
+        })
+    );
+    assert!(bytes <= 128 * 1024 * 1024);
     let schedule = crate::deepseek_v41::gguf::Schedule {
         layers: 6,
         kv_source_layers: vec![1, 2],
@@ -941,8 +991,18 @@ fn all_new_fixture_ledgers_include_four_layer_status_and_diagnostic_storage_belo
                 index_topk: 2,
                 ..crate::deepseek_v41::forward::toy::config()
             };
+            let bytes = bound(&c, &schedule, n, width, &|n| n + 16384);
+            println!(
+                "{}",
+                serde_json::json!({
+                    "fixture":"selected Full boundary", "window":c.window, "rows":n, "capacity":n,
+                    "full_chunk_rows":width, "candidate_block":c.candidate_block,
+                    "bound_bytes":bytes, "cap_bytes":128 * 1024 * 1024,
+                    "synthetic_price":"n+16384 per nonempty allocation; not an actual device quote"
+                })
+            );
             assert!(
-                bound(&c, &schedule, n, width, &|n| n + 16384) <= 128 * 1024 * 1024,
+                bytes <= 128 * 1024 * 1024,
                 "selected Full fixture width={width} N={n}"
             );
         }

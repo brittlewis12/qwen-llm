@@ -263,6 +263,7 @@ pub(super) fn encode_pre(
 struct HcPostControlsArgs {
     hidden: u32,
     hc_eps: f32,
+    check_finite: u32,
 }
 
 /// Buffers of one mHC post site. `mix`, `pre`, `post` and `combination` are
@@ -280,6 +281,9 @@ pub(super) struct HcPostSite<'t> {
 /// mHC post for a site. After a wide pre-block (`wide` true for the same
 /// views) the controls are computed here, in the post's prologue, and stored
 /// for the next site; otherwise this is `metal::encode_mhc4_post`.
+/// `finite_status` (wide sites only) folds the attention output's finite
+/// check into the post: any non-finite block element ORs bit 4 into it, as
+/// `kernel_deepseek_v41_attention_finite` does.
 pub(super) fn encode_post(
     ctx: &MetalContext,
     enc: &KernelEncoder,
@@ -287,7 +291,19 @@ pub(super) fn encode_post(
     wide: bool,
     constants: &[MetalTensor],
     site: HcPostSite<'_>,
+    finite_status: Option<&MetalTensor>,
 ) -> std::result::Result<(), metal::MetalError> {
+    if let Some(status) = finite_status
+        && (!wide
+            || status.dtype != GgmlType::I32
+            || status.n_elements() < 1
+            || !status.is_writable())
+    {
+        return Err(metal::MetalError::BadShape {
+            kernel: "v41_hc_post_controls",
+            detail: "a folded finite check needs a wide site and a writable I32 status".into(),
+        });
+    }
     if !wide {
         return metal::encode_mhc4_post(
             ctx,
@@ -330,6 +346,7 @@ pub(super) fn encode_post(
         &HcPostControlsArgs {
             hidden: c.hidden as u32,
             hc_eps: c.hc_eps,
+            check_finite: finite_status.is_some() as u32,
         },
     );
     enc.set_tensor(1, site.block);
@@ -341,6 +358,8 @@ pub(super) fn encode_post(
     enc.set_tensor(7, site.post);
     enc.set_tensor(8, site.combination);
     enc.set_tensor(9, site.output);
+    // Unread without check_finite; any valid binding keeps the slot bound.
+    enc.set_tensor(10, finite_status.unwrap_or(site.pre));
     enc.dispatch(
         MTLSize {
             width: (HC_CONNECTIONS * hidden).div_ceil(256) as usize,

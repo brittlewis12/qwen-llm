@@ -925,3 +925,83 @@ fn batched_dispatch_profile_times_every_dispatch_without_changing_logits() {
         }
     }
 }
+
+/// Folding the attention output's finite check into the wide mHC post
+/// (`QWEN_V41_FINITE_FOLD`) changes no value: logits of single steps (one
+/// and split submission) and batched steps are bitwise the separate check's,
+/// one finite dispatch per layer disappears, and a non-finite attention
+/// output still fails the step with the same status.
+#[test]
+fn folded_finite_check_matches_separate_dispatch_bitwise() {
+    let ctx = MetalContext::new().unwrap();
+    let weights = toy::Weights::new(&ctx);
+    let model = weights.model(&ctx);
+    let set = |fold: Option<bool>| FINITE_FOLD_OVERRIDE.with(|o| o.set(fold));
+    let finite = |census: &[metal::DispatchCensusRow]| {
+        census
+            .iter()
+            .filter(|r| r.kernel == "kernel_deepseek_v41_attention_finite")
+            .count()
+    };
+    for split in [false, true] {
+        SPLIT_SUBMIT_OVERRIDE.with(|o| o.set(Some(split)));
+        let mut separate = model.new_state_with_gpu_step(4).unwrap();
+        let mut folded = model.new_state_with_gpu_step(4).unwrap();
+        for token in [0, 3, 1, 2] {
+            set(Some(false));
+            metal::dispatch_census_begin();
+            let expected = model.step(&mut separate, token, None).unwrap();
+            let before = finite(&metal::dispatch_census_take());
+            set(Some(true));
+            metal::dispatch_census_begin();
+            let logits = model.step(&mut folded, token, None).unwrap();
+            let after = finite(&metal::dispatch_census_take());
+            set(None);
+            assert_eq!(logits, expected, "split {split} token {token}");
+            assert_eq!(before, model.layers.len());
+            assert_eq!(after, 0);
+        }
+        SPLIT_SUBMIT_OVERRIDE.with(|o| o.set(None));
+    }
+    let new = || {
+        (0..3)
+            .map(|_| model.new_state_with_gpu_step(3).unwrap())
+            .collect::<Vec<_>>()
+    };
+    let (mut separate, mut folded) = (new(), new());
+    for tokens in [[0, 3, 1], [2, 2, 4]] {
+        set(Some(false));
+        let expected = model
+            .step_batch(&mut separate.iter_mut().collect::<Vec<_>>(), &tokens, None)
+            .unwrap();
+        set(Some(true));
+        let logits = model
+            .step_batch(&mut folded.iter_mut().collect::<Vec<_>>(), &tokens, None)
+            .unwrap();
+        set(None);
+        assert_eq!(logits, expected, "batched tokens {tokens:?}");
+    }
+    // A NaN output_b weight makes layer 3's attention output non-finite.
+    let poisoned = toy::Weights::new(&ctx);
+    let model = poisoned.model(&ctx);
+    let w = &model.layers[3].attention.output_b.tensor;
+    unsafe {
+        *w.buffer
+            .contents()
+            .as_ptr()
+            .cast::<u8>()
+            .add(w.offset as usize)
+            .cast::<f32>() = f32::NAN;
+    }
+    let mut errors = Vec::new();
+    for fold in [false, true] {
+        set(Some(fold));
+        let mut state = model.new_state_with_gpu_step(2).unwrap();
+        let error = model.step(&mut state, 0, None).unwrap_err();
+        set(None);
+        assert!(error.contains("GPU attention status"), "{error}");
+        assert!(state.is_poisoned());
+        errors.push(error);
+    }
+    assert_eq!(errors[0], errors[1]);
+}

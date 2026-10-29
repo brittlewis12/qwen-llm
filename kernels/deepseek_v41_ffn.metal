@@ -378,7 +378,10 @@ kernel void kernel_deepseek_v41_hc_pre_wide(
 // kernel_deepseek_v41_hc_pre (same per-entry arithmetic and operand order);
 // threadgroup 0 also stores them for the next site's lagged pre and for any
 // reader after the layer. Call from every thread; ends with a barrier.
-struct HcPostControlsArgs { uint hidden; float hc_eps; };
+// `check_finite`: also set bit 4 of `status` (atomic or, as
+// kernel_deepseek_v41_attention_finite does) for a non-finite block element;
+// the attention decode output's finite check folded into its post.
+struct HcPostControlsArgs { uint hidden; float hc_eps; uint check_finite; };
 inline void v41_hc_post_controls(
     float eps, device const float *mix, device const float *scale, device const float *base,
     device float *pre, device float *post, device float *combination,
@@ -435,6 +438,7 @@ kernel void kernel_deepseek_v41_hc_post_controls(
     device float *post [[buffer(7)]],               // [4]
     device float *combination [[buffer(8)]],        // [16]
     device float *output [[buffer(9)]],             // [4*hidden]
+    device atomic_uint *status [[buffer(10)]],      // [1], with check_finite
     uint index [[thread_position_in_grid]], uint group [[threadgroup_position_in_grid]],
     uint lane [[thread_index_in_simdgroup]], uint sg [[simdgroup_index_in_threadgroup]]) {
     threadgroup float tg_post[V41_HC_CONNECTIONS];
@@ -443,6 +447,9 @@ kernel void kernel_deepseek_v41_hc_post_controls(
     if (index >= V41_HC_CONNECTIONS * a.hidden) return;
     const uint destination = index / a.hidden;
     const uint dimension = index % a.hidden;
+    if (a.check_finite != 0 && index < a.hidden && !isfinite(block[index])) {
+        atomic_fetch_or_explicit(status, 4u, memory_order_relaxed);
+    }
     float value = block[dimension] * tg_post[destination];
     for (uint source = 0; source < V41_HC_CONNECTIONS; ++source) {
         value += tg_comb[source * V41_HC_CONNECTIONS + destination]

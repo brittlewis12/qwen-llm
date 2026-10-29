@@ -895,6 +895,7 @@ impl Workspace {
                 combination: &b[5],
                 output,
             },
+            None,
         )
     }
 

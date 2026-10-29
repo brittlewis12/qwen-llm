@@ -540,6 +540,10 @@ fn encode_attention_columns(
     }
     for (ws, input) in workspaces.iter_mut().zip(inputs) {
         sequence_boundary(stages);
+        if fold_finite() {
+            // attention_output folds the finite check into the post.
+            ws.attention.defer_finite();
+        }
         let output = ws
             .attention
             .encode_finish(ctx, stages.enc(), id, input.position)?

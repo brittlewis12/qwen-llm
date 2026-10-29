@@ -2297,6 +2297,13 @@
   },
   {
     "target": "lib",
+    "name": "deepseek_v41::forward::gpu_step::tests::folded_finite_check_matches_separate_dispatch_bitwise",
+    "class": "gpu",
+    "ignored": false,
+    "reason": "Metal context, allocation or dispatch witness; parent GPU lane only."
+  },
+  {
+    "target": "lib",
     "name": "deepseek_v41::forward::gpu_step::tests::forty_layers_python_legacy_trace_and_one_command",
     "class": "gpu",
     "ignored": false,

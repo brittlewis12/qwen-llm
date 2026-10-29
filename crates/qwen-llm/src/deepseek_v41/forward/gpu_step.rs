@@ -168,6 +168,27 @@ fn ffn_split_encoders() -> bool {
     *SPLIT.get_or_init(|| std::env::var("QWEN_V41_FFN_ENCODERS").as_deref() != Ok("one"))
 }
 
+/// `separate` keeps the decode attention output's finite check as its own
+/// dispatch; otherwise it is folded into the wide mHC post that reads the
+/// output (same status bit, same values; one dispatch fewer per layer). A/B
+/// lever.
+const FINITE_FOLD_ENV: &str = "QWEN_V41_FINITE_FOLD";
+
+#[cfg(test)]
+thread_local! {
+    pub(super) static FINITE_FOLD_OVERRIDE: std::cell::Cell<Option<bool>> =
+        const { std::cell::Cell::new(None) };
+}
+
+fn fold_finite() -> bool {
+    #[cfg(test)]
+    if let Some(fold) = FINITE_FOLD_OVERRIDE.with(|o| o.get()) {
+        return fold;
+    }
+    static FOLD: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *FOLD.get_or_init(|| std::env::var(FINITE_FOLD_ENV).as_deref() != Ok("separate"))
+}
+
 /// `one` submits each decode step as one command buffer instead of starting
 /// the GPU on the layers before the first Engram layer while the host reads
 /// Engram rows and encodes the rest (A/B lever).
@@ -1055,6 +1076,10 @@ impl Workspace {
             self.attention
                 .encode_ced_scalar(ctx, enc, id, position, l, &self.normalized)?
         } else {
+            if fold_finite() {
+                // The post that reads the output checks it (attention_output).
+                self.attention.defer_finite();
+            }
             self.attention
                 .encode(ctx, enc, id, position, l, &self.normalized)?
         }
@@ -1104,6 +1129,12 @@ impl Workspace {
             &self.normalized,
             &self.constants[id][2],
         );
+        // A deferred finite check of the attention output rides in the wide
+        // post that reads it; otherwise it runs on its own, as before.
+        let finite = self.attention.take_finite_pending();
+        if finite && !wide {
+            self.attention.encode_finite(ctx, enc)?;
+        }
         hc_gpu::encode_post(
             ctx,
             enc,
@@ -1119,6 +1150,7 @@ impl Workspace {
                 combination: &self.comb,
                 output: &self.half,
             },
+            (finite && wide).then(|| self.attention.status()),
         )
         .map_err(|e| e.to_string())?;
         if let Some(snapshot) = snapshot {

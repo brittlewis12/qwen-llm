@@ -95,6 +95,10 @@ pub(super) struct Workspace {
     /// (`encode_checks` or `encode_front` .. `encode_finish`) whose finish
     /// is still due.
     staged: Option<(usize, usize, Stage)>,
+    /// The caller folds the next decode output's finite check into its mHC
+    /// post (`defer_finite`); `finite_pending` marks one owed.
+    defer_finite: bool,
+    finite_pending: bool,
     constants: Vec<Constants>,
     raw: MetalTensor,
     owners: Vec<OwnerCache>,
@@ -2145,6 +2149,8 @@ impl Workspace {
             batch: None,
             ced: None,
             staged: None,
+            defer_finite: false,
+            finite_pending: false,
             constants,
             raw: f(schedule.layers * c.window * c.head_dim)?,
             owners,
@@ -2593,6 +2599,31 @@ impl Workspace {
         self.staged = None;
         self.encode_close(ctx, enc, id, true)?;
         Ok(&self.output)
+    }
+
+    /// Leave the next decode output's finite check (bit 4 of `status()` for
+    /// any non-finite output element) to the caller, which folds it into the
+    /// mHC post that reads the output; `take_finite_pending` then reports it
+    /// owed, and `encode_finite` encodes it when the post cannot fold it.
+    pub(super) fn defer_finite(&mut self) {
+        self.defer_finite = true;
+    }
+
+    /// Whether a deferred finite check is owed (clears the marker and any
+    /// unused deferral).
+    pub(super) fn take_finite_pending(&mut self) -> bool {
+        self.defer_finite = false;
+        std::mem::take(&mut self.finite_pending)
+    }
+
+    /// The standalone decode output finite check.
+    pub(super) fn encode_finite(&self, ctx: &MetalContext, enc: &KernelEncoder) -> Result<()> {
+        let pso = pipeline(ctx, enc, "finite")?;
+        enc.set_bytes(0, &(self.config.hidden as u32));
+        enc.set_tensor(1, &self.output);
+        enc.set_tensor(2, &self.status);
+        dispatch(enc, &pso, self.config.hidden);
+        Ok(())
     }
 
     /// Bindings of the projections a staged decode step leaves to the
@@ -3479,7 +3510,9 @@ impl Workspace {
         finite: bool,
     ) -> Result<()> {
         let c = &self.config;
-        if finite {
+        if finite && std::mem::take(&mut self.defer_finite) {
+            self.finite_pending = true;
+        } else if finite {
             let pso = pipeline(ctx, enc, "finite")?;
             enc.set_bytes(0, &(c.hidden as u32));
             enc.set_tensor(1, &self.output);

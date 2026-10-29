@@ -461,3 +461,146 @@ kernel void kernel_deepseek_v41_attention_index_scores_tensor(
         }
     }
 }
+
+// Probe variants: identical score/pv_tensor64 arithmetic, but K/V rows are
+// read from a pre-converted half mirror of the same latent rows. Used to
+// measure the kernel-time effect of bounded half-KV reuse before any host
+// integration; the production path does not select these yet.
+kernel void kernel_deepseek_v41_attention_score_tensor64_half(
+    constant uint4 &a [[buffer(0)]], constant uint4 &b [[buffer(1)]],
+    device const float *q [[buffer(2)]], device const half *raw [[buffer(3)]],
+    device const half *compressed [[buffer(4)]], device const uint *ids [[buffer(5)]],
+    device float *scores [[buffer(7)]], constant uint4 &m [[buffer(11)]],
+    uint2 group [[threadgroup_position_in_grid]], uint tid [[thread_index_in_threadgroup]]) {
+    threadgroup half qblk[V41_TT64_HEADS * V41_TT64_DIM];
+    threadgroup half kblk[V41_TT64_KEYS * V41_TT64_DIM];
+    threadgroup float sblk[V41_TT64_KEYS * V41_TT64_HEADS];
+    const uint r = group.y;
+    const uint4 rr = attention_row_raw(a, b, r);
+    const uint length = attention_row_length(b, r);
+    const uint selected = min(length, a.z);
+    const uint count = rr.y + selected;
+    device const uint *row_ids = ids + r * a.z;
+    device const float *qrow = q + r * m.y * a.x;
+    device float *srow = scores + r * m.y * a.w;
+    const float scale = rsqrt(float(a.x));
+
+    constexpr auto desc0 = tensor_ops::matmul2d_descriptor(
+        V41_TT64_HEADS, V41_TT64_KEYS, V41_TT64_DIM, false, true, false,
+        tensor_ops::matmul2d_descriptor::mode::multiply);
+    constexpr auto desc1 = tensor_ops::matmul2d_descriptor(
+        V41_TT64_HEADS, V41_TT64_KEYS, V41_TT64_DIM, false, true, false,
+        tensor_ops::matmul2d_descriptor::mode::multiply_accumulate);
+    tensor_ops::matmul2d<desc0, execution_simdgroups<4>> op0;
+    tensor_ops::matmul2d<desc1, execution_simdgroups<4>> op1;
+    using q_t = tensor<threadgroup half, extents<int, V41_TT64_DIM, V41_TT64_HEADS>, tensor_inline>;
+    using k_t = tensor<threadgroup half, extents<int, V41_TT64_DIM, V41_TT64_KEYS>, tensor_inline>;
+    using s_t = tensor<threadgroup float, extents<int, V41_TT64_KEYS, V41_TT64_HEADS>, tensor_inline>;
+    q_t qt(qblk, extents<int, V41_TT64_DIM, V41_TT64_HEADS>(),
+           array<int, 2>{1, int(V41_TT64_DIM)});
+    k_t kt(kblk, extents<int, V41_TT64_DIM, V41_TT64_KEYS>());
+    s_t st(sblk, extents<int, V41_TT64_KEYS, V41_TT64_HEADS>());
+    auto acc = op0.get_destination_cooperative_tensor<q_t, k_t, float>();
+
+    for (uint k0 = 0; k0 < count; k0 += V41_TT64_KEYS) {
+        for (uint dc = 0; dc < 4; ++dc) {
+            threadgroup_barrier(mem_flags::mem_threadgroup);
+            for (uint e = tid; e < V41_TT64_HEADS * V41_TT64_DIM / 4; e += 128) {
+                const uint h = e / (V41_TT64_DIM / 4), c4 = e % (V41_TT64_DIM / 4);
+                const device float4 *src =
+                    (device const float4 *)(qrow + h * a.x + dc * V41_TT64_DIM);
+                ((threadgroup half4 *)qblk)[e] = half4(src[c4]);
+            }
+            for (uint e = tid; e < V41_TT64_KEYS * V41_TT64_DIM / 4; e += 128) {
+                const uint key = e / (V41_TT64_DIM / 4), c4 = e % (V41_TT64_DIM / 4);
+                const uint i = k0 + key;
+                half4 h = half4(0.0h);
+                if (i < count && (i < rr.y || row_ids[i - rr.y] < length)) {
+                    const device half *krow =
+                        attention_row_key_half(rr, raw, compressed, row_ids, i);
+                    h = ((device const half4 *)(krow + dc * V41_TT64_DIM))[c4];
+                }
+                ((threadgroup half4 *)kblk)[e] = h;
+            }
+            threadgroup_barrier(mem_flags::mem_threadgroup);
+            if (dc == 0) {
+                op0.run(qt, kt, acc);
+            } else {
+                op1.run(qt, kt, acc);
+            }
+        }
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+        acc.store(st);
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+        for (uint e = tid; e < V41_TT64_HEADS * V41_TT64_KEYS; e += 128) {
+            const uint h = e / V41_TT64_KEYS, kk = e % V41_TT64_KEYS;
+            if (k0 + kk < count) {
+                srow[h * a.w + k0 + kk] = sblk[kk + h * V41_TT64_KEYS] * scale;
+            }
+        }
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+    }
+}
+
+kernel void kernel_deepseek_v41_attention_pv_tensor64_half(
+    constant uint4 &a [[buffer(0)]], constant uint4 &b [[buffer(1)]],
+    device const half *raw [[buffer(3)]], device const half *compressed [[buffer(4)]],
+    device const uint *ids [[buffer(5)]], device const float *scores [[buffer(7)]],
+    device float *out [[buffer(8)]], constant uint4 &m [[buffer(11)]],
+    uint2 group [[threadgroup_position_in_grid]], uint tid [[thread_index_in_threadgroup]]) {
+    threadgroup half vblk[V41_TT64_KEYS * V41_TT64_DIM];
+    threadgroup half pblk[V41_TT64_HEADS * V41_TT64_KEYS];
+    const uint r = group.y;
+    const uint4 rr = attention_row_raw(a, b, r);
+    const uint length = attention_row_length(b, r);
+    const uint selected = min(length, a.z);
+    const uint count = rr.y + selected;
+    device const uint *row_ids = ids + r * a.z;
+    device const float *srow = scores + r * m.y * a.w;
+    const bool invalid = srow[a.w - 1] == -1.0f;
+
+    constexpr auto desc = tensor_ops::matmul2d_descriptor(
+        V41_TT64_HEADS, V41_TT64_DIM, V41_TT64_KEYS, false, false, false,
+        tensor_ops::matmul2d_descriptor::mode::multiply_accumulate);
+    tensor_ops::matmul2d<desc, execution_simdgroups<4>> op;
+    using p_t = tensor<threadgroup half, extents<int, V41_TT64_KEYS, V41_TT64_HEADS>, tensor_inline>;
+    using v_t = tensor<threadgroup half, extents<int, V41_TT64_DIM, V41_TT64_KEYS>, tensor_inline>;
+    p_t pt(pblk, extents<int, V41_TT64_KEYS, V41_TT64_HEADS>());
+    v_t vt(vblk, extents<int, V41_TT64_DIM, V41_TT64_KEYS>());
+
+    for (uint dc = 0; dc < 4; ++dc) {
+        auto acc = op.get_destination_cooperative_tensor<p_t, v_t, float>();
+#pragma clang loop unroll(full)
+        for (ushort i = 0; i < acc.get_capacity(); ++i) {
+            acc[i] = 0.0f;
+        }
+        if (!invalid) {
+            for (uint k0 = 0; k0 < count; k0 += V41_TT64_KEYS) {
+                threadgroup_barrier(mem_flags::mem_threadgroup);
+                for (uint e = tid; e < V41_TT64_KEYS * V41_TT64_DIM / 4; e += 128) {
+                    const uint key = e / (V41_TT64_DIM / 4), c4 = e % (V41_TT64_DIM / 4);
+                    const uint i = k0 + key;
+                    half4 h = half4(0.0h);
+                    if (i < count) {
+                        const device half *krow =
+                            attention_row_key_half(rr, raw, compressed, row_ids, i);
+                        h = ((device const half4 *)(krow + dc * V41_TT64_DIM))[c4];
+                    }
+                    ((threadgroup half4 *)vblk)[e] = h;
+                }
+                for (uint e = tid; e < V41_TT64_HEADS * V41_TT64_KEYS; e += 128) {
+                    const uint h = e / V41_TT64_KEYS, kk = e % V41_TT64_KEYS;
+                    pblk[e] = half(k0 + kk < count ? srow[h * a.w + k0 + kk] : 0.0f);
+                }
+                threadgroup_barrier(mem_flags::mem_threadgroup);
+                op.run(pt, vt, acc);
+            }
+        }
+        device float *orow = out + r * a.x + dc * V41_TT64_DIM;
+        tensor<device float, extents<int, V41_TT64_DIM, V41_TT64_HEADS>, tensor_inline> ot(
+            orow, extents<int, V41_TT64_DIM, V41_TT64_HEADS>(),
+            array<int, 2>{1, int(m.z * a.x)});
+        acc.store(ot);
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+    }
+}

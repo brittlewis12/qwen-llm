@@ -23,3 +23,10 @@ inline device const float *attention_row_key(uint4 raw, device const float *hist
     return i < raw.y ? history + ((raw.z + i) % raw.w) * raw.x
         : compressed + ids[i - raw.y] * raw.x;
 }
+
+// Same rows and offsets from a pre-converted half mirror of the latent.
+inline device const half *attention_row_key_half(uint4 raw, device const half *history,
+    device const half *compressed, device const uint *ids, uint i) {
+    return i < raw.y ? history + ((raw.z + i) % raw.w) * raw.x
+        : compressed + ids[i - raw.y] * raw.x;
+}

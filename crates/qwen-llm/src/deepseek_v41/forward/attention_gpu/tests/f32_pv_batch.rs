@@ -23,6 +23,9 @@ struct Fixture {
     query: MetalTensor,
     history: MetalTensor,
     compressed: MetalTensor,
+    history_half: MetalTensor,
+    compressed_half: MetalTensor,
+    _half_backings: Vec<MetalTensor>,
     selected: MetalTensor,
     sink: MetalTensor,
     scores: MetalTensor,
@@ -73,11 +76,35 @@ impl Fixture {
             vec![(H * M) as u64, (first + n) as u64],
         )
         .view_subrange((first * H * M) as u64, vec![(H * M) as u64, n as u64]);
+        let history_data = data((WINDOW + first + n) * M, 23);
+        let compressed_data = data(end * M, 37);
         let history = alloc(
-            data((WINDOW + first + n) * M, 23),
+            history_data.clone(),
             vec![((WINDOW + first + n) * M) as u64],
         );
-        let compressed = alloc(data(end * M, 37), vec![(end * M) as u64]);
+        let compressed = alloc(compressed_data.clone(), vec![(end * M) as u64]);
+        let half_alloc = |data: &[f32], shape: Vec<u64>| -> (MetalTensor, MetalTensor) {
+            let mut raw: Vec<u16> = Vec::with_capacity(data.len() + 2 * GUARD);
+            raw.extend(std::iter::repeat_n(
+                half::f16::from_f32(CANARY).to_bits(),
+                GUARD,
+            ));
+            raw.extend(data.iter().map(|&v| half::f16::from_f32(v).to_bits()));
+            raw.extend(std::iter::repeat_n(
+                half::f16::from_f32(CANARY).to_bits(),
+                GUARD,
+            ));
+            let len = raw.len() as u64;
+            let backing =
+                MetalTensor::from_bytes(ctx, bytemuck::cast_slice(&raw), vec![len], GgmlType::F16)
+                    .unwrap();
+            let view = backing.view_subrange(GUARD as u64, shape);
+            (backing, view)
+        };
+        let (history_half_backing, history_half) =
+            half_alloc(&history_data, vec![((WINDOW + first + n) * M) as u64]);
+        let (compressed_half_backing, compressed_half) =
+            half_alloc(&compressed_data, vec![(end * M) as u64]);
         let selections: Vec<u32> = (0..n)
             .flat_map(|q| {
                 let visible = (start + first + q + 1) / ratio;
@@ -121,6 +148,9 @@ impl Fixture {
             query,
             history,
             compressed,
+            history_half,
+            compressed_half,
+            _half_backings: vec![history_half_backing, compressed_half_backing],
             selected,
             sink,
             scores,
@@ -452,6 +482,92 @@ fn f32_pv_batch_invalid_visibility_and_finite_guards() {
 }
 
 #[test]
+#[ignore = "resident GPU timing; unset MTL_DEBUG_LAYER and QWEN_REQUIRE_METAL_TESTS"]
+fn attention_half_kv_tile_probe() {
+    for name in ["MTL_DEBUG_LAYER", "QWEN_REQUIRE_METAL_TESTS"] {
+        assert!(
+            std::env::var_os(name).is_none(),
+            "{name} must be unset for performance"
+        );
+    }
+    let ctx = MetalContext::new().expect("explicit timing requires Metal");
+    const REPEATS: usize = 3;
+    const LAUNCHES: usize = 4;
+    for (k, n, ragged, first) in cases() {
+        let f = Fixture::new(&ctx, k, n, ragged, first);
+        execute(&ctx, |enc| f.encode_tensor64(&ctx, enc));
+        let f32_out = f32_slice(&f.output).unwrap().to_vec();
+        let f32_scores = f32_slice(&f.scores).unwrap().to_vec();
+        execute(&ctx, |enc| f.encode_tensor64_half(&ctx, enc));
+        let half_out = f32_slice(&f.output).unwrap();
+        let half_scores = f32_slice(&f.scores).unwrap();
+        for (i, (a, b)) in f32_out.iter().zip(half_out).enumerate() {
+            assert_eq!(a.to_bits(), b.to_bits(), "output bit {i}");
+        }
+        for q in 0..n {
+            let count = f.count(q);
+            for h in 0..H {
+                let base = (q * H + h) * SCORE_STRIDE;
+                for i in 0..count {
+                    assert_eq!(
+                        f32_scores[base + i].to_bits(),
+                        half_scores[base + i].to_bits(),
+                        "score bit q={q} h={h} i={i}"
+                    );
+                }
+            }
+        }
+        let timed = |half: bool| {
+            let wall = std::time::Instant::now();
+            let command = ctx.queue.commandBuffer().unwrap();
+            let enc = KernelEncoder::begin(&command);
+            for _ in 0..LAUNCHES {
+                if half {
+                    f.encode_tensor64_half(&ctx, &enc);
+                } else {
+                    f.encode_tensor64(&ctx, &enc);
+                }
+            }
+            enc.end();
+            metal::commit_and_wait(&command).unwrap();
+            let wall = wall.elapsed().as_secs_f64() * 1e6 / LAUNCHES as f64;
+            let start = command.GPUStartTime();
+            let end = command.GPUEndTime();
+            assert!(
+                start.is_finite() && end.is_finite() && start > 0.0 && end > start,
+                "GPU timestamps unavailable"
+            );
+            ((end - start) * 1e6 / LAUNCHES as f64, wall)
+        };
+        timed(false);
+        timed(true);
+        let mut samples = [Vec::new(), Vec::new()];
+        for _ in 0..REPEATS {
+            for (arm, half) in [(0, false), (1, true), (1, true), (0, false)] {
+                samples[arm].push(timed(half));
+            }
+        }
+        let median = |arm: usize, wall: bool| {
+            let mut x: Vec<f64> = samples[arm]
+                .iter()
+                .map(|&(g, w)| if wall { w } else { g })
+                .collect();
+            x.sort_by(f64::total_cmp);
+            (x[2] + x[3]) * 0.5
+        };
+        let base = median(0, false);
+        let half = median(1, false);
+        eprintln!(
+            "half_kv_probe K={k} n={n} ragged={ragged} first={first} f32_gpu_us={base:.3} half_gpu_us={half:.3} speedup={:.3} f32_wall_us={:.3} half_wall_us={:.3}",
+            base / half,
+            median(0, true),
+            median(1, true)
+        );
+        f.check_guards();
+    }
+}
+
+#[test]
 #[ignore = "worker-only resident GPU timing; unset MTL_DEBUG_LAYER and QWEN_REQUIRE_METAL_TESTS"]
 fn f32_pv_batch_performance() {
     for name in ["MTL_DEBUG_LAYER", "QWEN_REQUIRE_METAL_TESTS"] {
@@ -595,6 +711,25 @@ impl Fixture {
         pipeline(ctx, enc, "softmax_rows").unwrap();
         grid(enc, H, self.n, 1, 32);
         tensor_pipeline(ctx, enc, "pv_tensor64").unwrap();
+        grid(enc, 1, self.n, 1, 128);
+        let pso = pipeline(ctx, enc, "normalize_rows").unwrap();
+        dispatch(enc, &pso, self.n * H * M);
+    }
+
+    /// Same tile with the K/V latent read from the half mirrors.
+    fn bind_half(&self, enc: &KernelEncoder) {
+        self.bind(enc);
+        enc.set_tensor(3, &self.history_half);
+        enc.set_tensor(4, &self.compressed_half);
+    }
+
+    fn encode_tensor64_half(&self, ctx: &MetalContext, enc: &KernelEncoder) {
+        self.bind_half(enc);
+        tensor_pipeline(ctx, enc, "score_tensor64_half").unwrap();
+        grid(enc, 1, self.n, 1, 128);
+        pipeline(ctx, enc, "softmax_rows").unwrap();
+        grid(enc, H, self.n, 1, 32);
+        tensor_pipeline(ctx, enc, "pv_tensor64_half").unwrap();
         grid(enc, 1, self.n, 1, 128);
         let pso = pipeline(ctx, enc, "normalize_rows").unwrap();
         dispatch(enc, &pso, self.n * H * M);

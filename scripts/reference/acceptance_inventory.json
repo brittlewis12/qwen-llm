@@ -1709,6 +1709,13 @@
   },
   {
     "target": "lib",
+    "name": "deepseek_v41::forward::ced::tests::real_prompt_engram_duplication",
+    "class": "fixture",
+    "ignored": true,
+    "reason": "CPU-only Engram address diagnostic requiring explicit external GGUF and token fixtures; excluded from model-free CPU acceptance. No Metal context or dispatch."
+  },
+  {
+    "target": "lib",
     "name": "deepseek_v41::forward::ced::tests::scalar_native_full_vs_ced_bitwise_state_logits_restore_growth_and_256_steps",
     "class": "gpu",
     "ignored": true,

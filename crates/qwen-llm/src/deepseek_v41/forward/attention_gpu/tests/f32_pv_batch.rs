@@ -3,6 +3,8 @@
 use super::*;
 use metal::GroupedF32TestVariant::{self, Production, Scalar};
 
+mod pv_dim2;
+
 const M: usize = 512;
 const H: usize = 64;
 const WINDOW: usize = 128;

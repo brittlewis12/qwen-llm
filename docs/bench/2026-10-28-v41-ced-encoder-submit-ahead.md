@@ -17,8 +17,9 @@ wall 4.5417 -> 4.3752 s). The private `current_pair` qualification passes at
 N=8192: 257 positions, 257 full-vocabulary vectors per arm, 56 causal regions
 per position, 256 teacher-forced steps, bitwise logits and causal-state
 SHA256, 170.62 s. Candidate for promotion; the harness's
-`performance_qualified` remains false by design, and the bounded fault matrix
-below is still the promotion gate.
+`performance_qualified` remains false by design. The bounded fault matrix
+below passes; an encoder-specific chunk-0 FFN-status injection and admission
+auto-retry remain as follow-ups.
 
 ## What Changed
 
@@ -106,10 +107,30 @@ same-binary delta is claimed.
   teacher-forced steps.
 - Report: `~/qwen-runs/2026-10-28-v41-encoder-pipeline/qualify-8k-181ad0d1.json`.
 
+## Fault Matrix
+
+Toy CED fixture, production arithmetic, width 2048 (two chunks at N=4096),
+`MTL_DEBUG_LAYER=1`, production self-lease. Each arm also checks the poisoned
+state, the committed address history and a healthy follow-up request.
+
+| Arm | Result |
+| --- | --- |
+| Completion fault on the first encoder wait after both commands committed | newer command drained, poisoned, healthy rerun succeeds |
+| `ced_encoder_complete` Error / Cancel / Panic with the newer command registered | drained before return or unwind in all three |
+| Chunk-0 sticky attention-status bit, read only at the final checked completion | rejected after both commands retired; no command left for the drain; decoder never submitted; healthy rerun succeeds |
+| Panic after commit and before the prefetch spawn | drain guard waits the command on unwind; poisoned; healthy rerun succeeds |
+| Healthy boundary sweep, widths 2048/4096, N=2047/2048/2049/4095/4096/4097/6144 | Full-vs-CED bitwise logits, causal bits, counters and ledger; N=6144 at width 2048 is three physical chunks |
+
+Raw logs: `~/qwen-runs/2026-10-28-v41-encoder-faults/`. The per-chunk FFN
+status word itself is covered by the existing
+`single_ffn_word_survives_healthy_same_layer_second_chunk_and_every_later_word`
+and `competing_attention_and_single_ffn_word_obey_logical_unit_precedence`
+tests; an encoder-specific chunk-0 FFN injection is still a follow-up.
+
 ## Limits
 
-- One prompt, one artifact, one session. The pair's CED arm (1,799.5) is below
-  the CED-only A/B arms (1,869.1) because the pair runs Full first; report
+- One prompt, one artifact, one session. The pair's CED arm (1,770.4) is below
+  the CED-only A/B arms (1,872.4) because the pair runs Full first; report
   both and use the A/B for the delta.
 - The stage timeline that motivated the change was collected on a hot machine
   with stage sampling on; its GPU spans are inflated. Only the host/tail
@@ -118,20 +139,19 @@ same-binary delta is claimed.
   prices it, but there is no automatic pressure downgrade yet; a
   near-capacity resident should set `QWEN_V41_CED_ENCODER_PIPELINE=0` until
   admission can choose the serialized path itself.
-- Qualification covers the standard private witness only; no chunk-size/
-  position boundary sweep, snapshot/growth, cancellation, or throughput
-  qualification.
+- The private qualification covers one 8K witness; the chunk-width/position
+  boundary sweep is the toy fixture, not the real artifact. No snapshot/
+  growth, cancellation or throughput qualification.
 - Admission does not yet retry serialized CED automatically when the priced
   pipeline mode is refused under pressure; near-capacity residents must set
   `QWEN_V41_CED_ENCODER_PIPELINE=0`.
-- A fault injection after the newer command commits (completion, FFN,
-  attention, cancellation, panic) and a physical three-chunk prompt remain
-  the minimum promotion tests.
+- The fault matrix covers completion, close-hook, unwind, deferred attention
+  status and the three-chunk healthy boundary. An encoder-specific chunk-0
+  FFN-status injection remains a follow-up.
 
 ## Next
 
-- Adversarial review of the cursor/aliasing/lifetime argument and the memory
-  ledger at this checkpoint.
+- Admission retry of serialized CED before Full on a pressure refusal.
 - Decoder setup overlap (hide the last encoder tail), KVMP PV-axis composition,
   a single 8,192-row encoder chunk (engine cap/admission), and parallelism for
   the chunk-0 Engram dequant. Beyond those, the exact GPU floor is about

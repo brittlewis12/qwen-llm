@@ -24,6 +24,23 @@ thread_local! {
     static INJECTION: RefCell<Option<Injection>> = const { RefCell::new(None) };
     static UNFUSED: Cell<bool> = const { Cell::new(false) };
     static DRAINED: Cell<usize> = const { Cell::new(0) };
+    static STATUS_POISON: Cell<Option<usize>> = const { Cell::new(None) };
+}
+
+/// Arm a one-shot shared attention-status bit for the encoder chunk at `start`.
+pub(in super::super) fn arm_status_poison(start: usize) {
+    STATUS_POISON.with(|slot| slot.set(Some(start)));
+}
+
+pub(in super::super) fn take_status_poison(start: usize) -> bool {
+    STATUS_POISON.with(|slot| {
+        if slot.get() == Some(start) {
+            slot.set(None);
+            true
+        } else {
+            false
+        }
+    })
 }
 
 /// One outstanding submitted command was waited before returning/unwinding.
@@ -602,7 +619,7 @@ fn assert_causal(a: &State, b: &State, label: &str) {
 }
 
 #[test]
-#[ignore = "self-leased <=264 MiB complete buffers including 4K Engram uploads; MTL debug required; no real model"]
+#[ignore = "self-leased <=512 MiB complete buffers including 4K Engram uploads; MTL debug required; no real model"]
 fn selected_2k_and_4k_chunk_edges_match_current_full_bits_state_and_counts() {
     assert_eq!(std::env::var("MTL_DEBUG_LAYER").as_deref(), Ok("1"));
     assert_eq!(std::env::var("QWEN_METAL_LEASE_WAIT").as_deref(), Ok("1"));
@@ -657,7 +674,7 @@ fn selected_2k_and_4k_chunk_edges_match_current_full_bits_state_and_counts() {
                 // The three-chunk (N=6144) case needs a slightly larger toy
                 // fixture; the cap still keeps every arm self-lease bounded.
                 assert!(
-                    explicit_bound <= 264 * 1024 * 1024,
+                    explicit_bound <= 512 * 1024 * 1024,
                     "complete fixture upper bound {explicit_bound}"
                 );
                 let admission = metal::evaluate_metal_memory_admission_with_cpu_bytes(
@@ -1095,6 +1112,41 @@ fn submit_ahead_completion_fault_drains_the_newer_encoder() {
     );
     assert_eq!(drain_notes(), 1, "newer encoder command drained");
     drop(scope);
+    assert_poisoned_rejects(&model, &mut state, addresses);
+    let mut healthy = model.new_state(input.len()).unwrap();
+    let (_, report) = run(&model, &mut healthy, &input, None, Arithmetic::Production).unwrap();
+    assert_eq!(report.execution, PrefillExecution::ShrinkingCed);
+    assert!(report.fallback.is_none());
+}
+
+#[test]
+#[ignore = "requires explicit Metal benchmark lease and debug layer"]
+fn submit_ahead_deferred_status_rejects_after_both_encoders_retire() {
+    let _incumbent = gpu_step::ced::incumbent_scope();
+    assert_eq!(std::env::var("MTL_DEBUG_LAYER").as_deref(), Ok("1"));
+    assert_eq!(std::env::var("QWEN_METAL_LEASE_WAIT").as_deref(), Ok("1"));
+    let _lease = metal::acquire_metal_benchmark_lease().expect("CED GPU lease");
+    let ctx = MetalContext::new().unwrap();
+    let weights = toy::Weights::new(&ctx);
+    let embedding = embeddings(&ctx);
+    let model = nonuniform_model(&weights, &ctx, &embedding);
+    let input = tokens(2 * prefill::DEFAULT_CHUNK_ROWS);
+    reset_drain_notes();
+    arm_status_poison(0);
+    let mut state = model.new_state(input.len()).unwrap();
+    let addresses = state.addresses;
+    let error = run(&model, &mut state, &input, None, Arithmetic::Production).unwrap_err();
+    assert!(
+        error.to_string().contains("CED attention status 4"),
+        "{error}"
+    );
+    // Chunk 0 retired without an eager status read; the sticky bit was caught
+    // by the final checked completion after both commands retired.
+    assert_eq!(
+        drain_notes(),
+        0,
+        "no newer command left for the error drain"
+    );
     assert_poisoned_rejects(&model, &mut state, addresses);
     let mut healthy = model.new_state(input.len()).unwrap();
     let (_, report) = run(&model, &mut healthy, &input, None, Arithmetic::Production).unwrap();

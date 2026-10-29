@@ -1675,6 +1675,21 @@ impl Workspace {
         Ok(())
     }
 
+    /// Test-only: host-write a sticky status bit while the encoder command is
+    /// still being encoded, so the deferred read can be exercised.
+    #[cfg(test)]
+    pub(in super::super) fn poison_ced_status_bit(&self, bit: u32) {
+        unsafe {
+            self.status
+                .buffer
+                .contents()
+                .as_ptr()
+                .cast::<u32>()
+                .add((self.status.offset / 4) as usize)
+                .write_volatile(bit);
+        }
+    }
+
     pub(in super::super) fn checked_ced_status(&self) -> Result<()> {
         // Caller must first wait for successful command completion and check FFN
         // status. Encoding intent alone never changes a completed frontier.

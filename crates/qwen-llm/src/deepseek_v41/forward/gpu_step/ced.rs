@@ -927,6 +927,10 @@ impl Workspace {
                     )?;
                 }
                 #[cfg(test)]
+                if super::super::ced::tests::take_status_poison(start) {
+                    this.attention.poison_ced_status_bit(4);
+                }
+                #[cfg(test)]
                 super::super::ced::tests::checkpoint("ced_publication", cancel)?;
                 chunk
                     .scratch

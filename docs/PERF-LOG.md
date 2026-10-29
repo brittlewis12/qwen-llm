@@ -6,6 +6,28 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the current state and evidence index.
 
+## 2026-10-28 - V4.1 Decode Control Kernels: Finite Fold +0.7%, Fusions Negative
+
+- M5 Ultra, GSQ IQ2_XS, `qwen-bench` tg64 at depth 0 and 8192, A/B/B/A in
+  one lease, 3 reps per arm. B = 1 small per-sequence dispatches (isolated,
+  fast clock, us per layer): route 14.5, FFN post 10.7, router 9.5, HC post
+  8.6, HC pre 7.7, FFN HC pre 7.5, RoPE 3.7 + 3.9, rank norms 4.7, softmax
+  4.4, finite check 3.7. A knock-out of the 40 finite checks per token
+  measured +0.6% (d0) / +0.4% (8K): a small dependent dispatch costs ~2 us
+  in the real stream, not its isolated time.
+- Landed: the attention output's finite check folds into its mHC post (same
+  status bit, same atomic; `QWEN_V41_FINITE_FOLD=separate` restores the
+  dispatch). Bitwise. tg64@d0 75.87/75.44 vs 75.24/75.10 tok/s (+0.65%),
+  tg64@d8192 70.63 vs 70.02/70.13 (+0.8%).
+- Not landed: route kernel with candidates in registers (bitwise, isolated
+  20.3 -> 18.1 us, end to end +0.1%, inside noise); route on one simdgroup
+  (-0.6% / -1.3%); attention mHC post fused with the FFN HC pre (bitwise,
+  -2% float4 / -10% scalar: every pre threadgroup recomputes the 4 x hidden
+  post, lengthening the critical path).
+- Remaining small control dispatches are worth at most ~1 ms/token in
+  total; the large single-stream costs are the routed experts and the Q5_K
+  attention/shared projections.
+
 ## 2026-10-28 - V4.1 Two-SIMD Small-Resource GateUp Passes Target Bit Proof
 
 M5 Ultra, research `8ebb8c63`: counts 1..16 use dedicated 16x32xK32 IQ2_XXS

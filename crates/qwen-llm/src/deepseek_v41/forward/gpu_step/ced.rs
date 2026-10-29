@@ -783,12 +783,15 @@ impl Workspace {
             late_rx = Some(rx);
         }
         let streamed = late_rx.is_some();
+        let embedding_span = profile::Wall("ced_encoder_embedding", [0; 4], profile::start());
         let mut embeddings = Vec::with_capacity(n * 4 * c.hidden);
         for &token in tokens {
             embeddings.extend(decode_rows(model.embedding, token as usize, 1)?.repeat(4));
         }
         let x = upload(ctx, &embeddings, vec![c.hidden as u64, 4, n as u64])?;
         let incoming = upload(ctx, &[1.0, 0.0, 0.0, 0.0].repeat(n), vec![4, n as u64])?;
+        drop(embedding_span);
+        let allocation_span = profile::Wall("ced_encoder_allocations", [0; 4], profile::start());
         let scratch = BlockRows::new(model, self.attention.capacity(), n, None)?;
         let publication = attention_gpu::PublicationRows::new(ctx, c, n)?;
         let mut engrams = Vec::new();
@@ -800,6 +803,7 @@ impl Workspace {
                 prefill::allocate(ctx, p.output, n, GgmlType::F32)?,
             ));
         }
+        drop(allocation_span);
         let engram_prepare = profile::Wall("ced_encoder_engram_prepare", [0; 4], profile::start());
         let first = if streamed {
             engram_layers.first().copied()

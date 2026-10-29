@@ -21,6 +21,8 @@ struct Fixture {
     topk: usize,
     ratio: usize,
     query: MetalTensor,
+    query_half: MetalTensor,
+    _query_half_backing: MetalTensor,
     history: MetalTensor,
     compressed: MetalTensor,
     history_half: MetalTensor,
@@ -105,6 +107,9 @@ impl Fixture {
             half_alloc(&history_data, vec![((WINDOW + first + n) * M) as u64]);
         let (compressed_half_backing, compressed_half) =
             half_alloc(&compressed_data, vec![(end * M) as u64]);
+        let query_data = f32_slice(&query).unwrap();
+        let (query_half_backing, query_half) =
+            half_alloc(&query_data, vec![(H * M) as u64, n as u64]);
         let selections: Vec<u32> = (0..n)
             .flat_map(|q| {
                 let visible = (start + first + q + 1) / ratio;
@@ -146,6 +151,8 @@ impl Fixture {
             topk,
             ratio,
             query,
+            query_half,
+            _query_half_backing: query_half_backing,
             history,
             compressed,
             history_half,
@@ -481,6 +488,12 @@ fn f32_pv_batch_invalid_visibility_and_finite_guards() {
     }
 }
 
+/// Production attention tiles dispatch 512 query rows; the older probe used
+/// at most 32 and therefore ran far below the GPU's threadgroup occupancy.
+fn production_cases() -> impl Iterator<Item = (usize, usize, bool, usize)> {
+    [(640, 512, false, 0), (640, 512, true, 0)].into_iter()
+}
+
 #[test]
 #[ignore = "resident GPU timing; unset MTL_DEBUG_LAYER and QWEN_REQUIRE_METAL_TESTS"]
 fn attention_half_kv_tile_probe() {
@@ -493,39 +506,49 @@ fn attention_half_kv_tile_probe() {
     let ctx = MetalContext::new().expect("explicit timing requires Metal");
     const REPEATS: usize = 3;
     const LAUNCHES: usize = 4;
-    for (k, n, ragged, first) in cases() {
+    for (k, n, ragged, first) in cases().chain(production_cases()) {
         let f = Fixture::new(&ctx, k, n, ragged, first);
         execute(&ctx, |enc| f.encode_tensor64(&ctx, enc));
-        let f32_out = f32_slice(&f.output).unwrap().to_vec();
-        let f32_scores = f32_slice(&f.scores).unwrap().to_vec();
-        execute(&ctx, |enc| f.encode_tensor64_half(&ctx, enc));
-        let half_out = f32_slice(&f.output).unwrap();
-        let half_scores = f32_slice(&f.scores).unwrap();
-        for (i, (a, b)) in f32_out.iter().zip(half_out).enumerate() {
-            assert_eq!(a.to_bits(), b.to_bits(), "output bit {i}");
-        }
-        for q in 0..n {
-            let count = f.count(q);
-            for h in 0..H {
-                let base = (q * H + h) * SCORE_STRIDE;
-                for i in 0..count {
-                    assert_eq!(
-                        f32_scores[base + i].to_bits(),
-                        half_scores[base + i].to_bits(),
-                        "score bit q={q} h={h} i={i}"
-                    );
+        let base_out = f32_slice(&f.output).unwrap().to_vec();
+        let base_scores = f32_slice(&f.scores).unwrap().to_vec();
+        for (label, encode) in [
+            (
+                "kvhalf",
+                Fixture::encode_tensor64_half as fn(&Fixture, &MetalContext, &KernelEncoder),
+            ),
+            ("qhalf", Fixture::encode_tensor64_qhalf),
+            ("qkvhalf", Fixture::encode_tensor64_qkvhalf),
+        ] {
+            execute(&ctx, |enc| encode(&f, &ctx, enc));
+            let out = f32_slice(&f.output).unwrap();
+            let scores = f32_slice(&f.scores).unwrap();
+            for (i, (a, b)) in base_out.iter().zip(out).enumerate() {
+                assert_eq!(a.to_bits(), b.to_bits(), "{label} output bit {i}");
+            }
+            for q in 0..n {
+                let count = f.count(q);
+                for h in 0..H {
+                    let base = (q * H + h) * SCORE_STRIDE;
+                    for i in 0..count {
+                        assert_eq!(
+                            base_scores[base + i].to_bits(),
+                            scores[base + i].to_bits(),
+                            "{label} score bit q={q} h={h} i={i}"
+                        );
+                    }
                 }
             }
         }
-        let timed = |half: bool| {
+        let timed = |arm: usize| {
             let wall = std::time::Instant::now();
             let command = ctx.queue.commandBuffer().unwrap();
             let enc = KernelEncoder::begin(&command);
             for _ in 0..LAUNCHES {
-                if half {
-                    f.encode_tensor64_half(&ctx, &enc);
-                } else {
-                    f.encode_tensor64(&ctx, &enc);
+                match arm {
+                    0 => f.encode_tensor64(&ctx, &enc),
+                    1 => f.encode_tensor64_half(&ctx, &enc),
+                    2 => f.encode_tensor64_qhalf(&ctx, &enc),
+                    _ => f.encode_tensor64_qkvhalf(&ctx, &enc),
                 }
             }
             enc.end();
@@ -539,29 +562,29 @@ fn attention_half_kv_tile_probe() {
             );
             ((end - start) * 1e6 / LAUNCHES as f64, wall)
         };
-        timed(false);
-        timed(true);
-        let mut samples = [Vec::new(), Vec::new()];
+        for arm in 0..4 {
+            timed(arm);
+        }
+        let mut samples = [Vec::new(), Vec::new(), Vec::new(), Vec::new()];
         for _ in 0..REPEATS {
-            for (arm, half) in [(0, false), (1, true), (1, true), (0, false)] {
-                samples[arm].push(timed(half));
+            for arm in [0, 1, 2, 3, 3, 2, 1, 0] {
+                samples[arm].push(timed(arm));
             }
         }
-        let median = |arm: usize, wall: bool| {
-            let mut x: Vec<f64> = samples[arm]
-                .iter()
-                .map(|&(g, w)| if wall { w } else { g })
-                .collect();
+        let median = |arm: usize| {
+            let mut x: Vec<f64> = samples[arm].iter().map(|&(g, _)| g).collect();
             x.sort_by(f64::total_cmp);
             (x[2] + x[3]) * 0.5
         };
-        let base = median(0, false);
-        let half = median(1, false);
+        let base = median(0);
+        let kv = median(1);
+        let q = median(2);
+        let qkv = median(3);
         eprintln!(
-            "half_kv_probe K={k} n={n} ragged={ragged} first={first} f32_gpu_us={base:.3} half_gpu_us={half:.3} speedup={:.3} f32_wall_us={:.3} half_wall_us={:.3}",
-            base / half,
-            median(0, true),
-            median(1, true)
+            "half_kv_probe K={k} n={n} ragged={ragged} first={first} f32_us={base:.3} kvhalf_us={kv:.3} qhalf_us={q:.3} qkvhalf_us={qkv:.3} kv_speedup={:.3} q_speedup={:.3} qkv_speedup={:.3}",
+            base / kv,
+            base / q,
+            base / qkv
         );
         f.check_guards();
     }
@@ -726,6 +749,34 @@ impl Fixture {
     fn encode_tensor64_half(&self, ctx: &MetalContext, enc: &KernelEncoder) {
         self.bind_half(enc);
         tensor_pipeline(ctx, enc, "score_tensor64_half").unwrap();
+        grid(enc, 1, self.n, 1, 128);
+        pipeline(ctx, enc, "softmax_rows").unwrap();
+        grid(enc, H, self.n, 1, 32);
+        tensor_pipeline(ctx, enc, "pv_tensor64_half").unwrap();
+        grid(enc, 1, self.n, 1, 128);
+        let pso = pipeline(ctx, enc, "normalize_rows").unwrap();
+        dispatch(enc, &pso, self.n * H * M);
+    }
+
+    /// Score with the Q half mirror; K/V stay F32.
+    fn encode_tensor64_qhalf(&self, ctx: &MetalContext, enc: &KernelEncoder) {
+        self.bind(enc);
+        enc.set_tensor(2, &self.query_half);
+        tensor_pipeline(ctx, enc, "score_tensor64_qhalf").unwrap();
+        grid(enc, 1, self.n, 1, 128);
+        pipeline(ctx, enc, "softmax_rows").unwrap();
+        grid(enc, H, self.n, 1, 32);
+        tensor_pipeline(ctx, enc, "pv_tensor64").unwrap();
+        grid(enc, 1, self.n, 1, 128);
+        let pso = pipeline(ctx, enc, "normalize_rows").unwrap();
+        dispatch(enc, &pso, self.n * H * M);
+    }
+
+    /// Both Q and K/V half mirrors.
+    fn encode_tensor64_qkvhalf(&self, ctx: &MetalContext, enc: &KernelEncoder) {
+        self.bind_half(enc);
+        enc.set_tensor(2, &self.query_half);
+        tensor_pipeline(ctx, enc, "score_tensor64_qhalf").unwrap();
         grid(enc, 1, self.n, 1, 128);
         pipeline(ctx, enc, "softmax_rows").unwrap();
         grid(enc, H, self.n, 1, 32);

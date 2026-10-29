@@ -752,6 +752,25 @@ impl Workspace {
                 )?;
             }
         }
+        // Stage the post-RoPE query once in the shared half scratch; the
+        // tensor64 score then reads half instead of re-converting F32 for
+        // every 32-key panel. The scratch is reused by finish_rows later.
+        if c.heads == 64
+            && c.head_dim == 512
+            && metal::moe_grouped_tensor_selected(ctx)
+            && prefill_qhalf_enabled()
+        {
+            let half = rows.half.as_ref().ok_or("attention half scratch missing")?;
+            let elements = (c.heads * c.head_dim)
+                .checked_mul(rows.rows)
+                .ok_or("attention query half extent overflow")?;
+            let view = half
+                .convert(ctx, enc, &rows.query, elements)
+                .map_err(|e| e.to_string())?;
+            *rows.query_half.borrow_mut() = Some(view);
+        } else {
+            *rows.query_half.borrow_mut() = None;
+        }
         let raw = self.raw.view_subrange(
             (id * c.window * c.head_dim) as u64,
             vec![(c.window * c.head_dim) as u64],
@@ -1499,7 +1518,17 @@ impl Workspace {
             && c.head_dim == 512
             && std::env::var_os("QWEN_V41_SINK_TENSOR64").is_none_or(|v| v != "0");
         if tensor64 {
-            tensor_pipeline(ctx, enc, "score_tensor64")?;
+            let qhalf = rows.query_half.borrow();
+            if let Some(half) = qhalf.as_ref() {
+                tensor_pipeline(ctx, enc, "score_tensor64_qhalf")?;
+                let view = half.view_subrange(
+                    (first * c.heads * c.head_dim) as u64,
+                    vec![(c.heads * c.head_dim) as u64, n as u64],
+                );
+                enc.set_tensor(2, &view);
+            } else {
+                tensor_pipeline(ctx, enc, "score_tensor64")?;
+            }
             enc.dispatch(
                 MTLSize {
                     width: 1,

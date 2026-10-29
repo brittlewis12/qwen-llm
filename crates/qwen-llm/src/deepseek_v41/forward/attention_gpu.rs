@@ -337,10 +337,19 @@ impl ValueMatrix {
     }
 }
 
+crate::env_flag!(
+    /// Read the tensor64 score Q from the shared half scratch; `QWEN_V41_ATTN_QHALF=1` enables.
+    default_off prefill_qhalf_enabled,
+    "QWEN_V41_ATTN_QHALF"
+);
+
 pub(super) struct Rows {
     tile: query_batch::Scratch,
     rank: MetalTensor,
     query: MetalTensor,
+    /// Half mirror of the post-RoPE query in the shared half scratch; the
+    /// tensor64 score reads it instead of re-converting F32 per key panel.
+    query_half: std::cell::RefCell<Option<MetalTensor>>,
     latent: MetalTensor,
     low: MetalTensor,
     selected: MetalTensor,
@@ -500,6 +509,7 @@ impl Rows {
             tile: query_batch::Scratch::new(ctx, c, rows)?,
             rank: prefill::allocate(ctx, widths[0], rows, GgmlType::F32)?,
             query: prefill::allocate(ctx, widths[1], rows, GgmlType::F32)?,
+            query_half: std::cell::RefCell::new(None),
             latent: prefill::allocate(ctx, widths[2], rows, GgmlType::F32)?,
             selected: match &controls {
                 Some(view) => view.selected.clone(),
@@ -599,6 +609,7 @@ impl Rows {
             tile: self.tile.checked_prefix(c, rows)?,
             rank: f(&self.rank, 0)?,
             query: f(&self.query, 1)?,
+            query_half: std::cell::RefCell::new(None),
             latent: f(&self.latent, 2)?,
             low: f(&self.low, 5)?,
             selected,

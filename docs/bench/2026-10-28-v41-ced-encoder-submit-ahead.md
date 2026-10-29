@@ -149,6 +149,34 @@ tests; an encoder-specific chunk-0 FFN injection is still a follow-up.
   status and the three-chunk healthy boundary. An encoder-specific chunk-0
   FFN-status injection remains a follow-up.
 
+## Remaining Critical Path
+
+Fresh 8K stage profile at the rebased head: wall 4,381.9 ms, GPU 4,005.5 ms
+(encoder 3,337.7, decoder 667.8), exposed 376.4 ms. The host split is now
+explicit: embedding build/upload **56.0 ms for both chunks** (28.0 ms each),
+scratch/publication/Engram allocations **0.86 ms**, Encoder Engram prepare
+66.5-69.5 ms (first receive for chunk 0, prefetched writes for chunk 1), late
+join 5.1 ms. Chunk 0 exposes roughly 28 ms of embedding, 34 ms of first
+Engram receive, 73.5 ms of later-layer receive stalls and ~0.4 ms of
+allocations; the remaining decoder-phase exposure is encoder/decoder
+completion tails and queue delivery.
+
+Two candidates are now closed by measurement:
+
+- **Decoder resource preparation** (review's first suggestion): the first
+  decoder group's host encode, including the lazy decoder scratch allocation,
+  is **0.79 ms**, so overlapping it with the last encoder command has no
+  budget.
+- **Per-layer Engram decode concurrency**: the artifact has two Engram
+  layers; four workers versus one is **-0.04% / -1.6 ms** and the reads are
+  I/O/page-cache bound. Reverted; packet
+  `2026-10-28-v41-engram-decode-parallel-negative.md`.
+
+Remaining exact candidates: hide the last encoder completion tail with a
+speculative decoder begin, a GPU Q5_K embedding gather (28 ms per chunk, needs
+a bitwise proof), and the larger bets - a single 8,192-row encoder chunk or
+attention operand reuse - where the return is GPU-side.
+
 ## Next
 
 - Admission retry of serialized CED before Full on a pressure refusal.

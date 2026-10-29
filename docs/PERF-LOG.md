@@ -6,6 +6,16 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the current state and evidence index.
 
+## 2026-10-29 - V4.1 128K Decode 66.7 tok/s (Was 52.5)
+
+- M5 Ultra, GSQ IQ2_XS, main `fe50eee5`, `qwen-bench suite --tg 32 -d
+  131072 --runs 2` after a 120 s cool-down: 70.51 / 62.97 tok/s (mean
+  66.74; the second run drifted with heat). The 2026-10-27 post-radix
+  measurement was 52.5 tok/s.
+- Since then: F32 MMA index scores with grid radix top-k, register-tiled
+  sink scores, fused flash-decoding sink attention, shape-specialized IQ2
+  expert kernels and the folded finite check. Cumulative, not an A/B.
+
 ## 2026-10-29 - V4.1 Fused Flash-Decoding Sink Attention, tg32@d40960 1.058x
 
 - Decode rows now run sink attention as two dispatches: `attention_flash*`

@@ -144,7 +144,12 @@ impl CedPlan {
         let n = request.prompt_rows.ok_or(CedPlanError::UnsupportedRequest(
             "known whole-prompt length required",
         ))?;
-        if ![DEFAULT_CHUNK_ROWS, super::prefill::MAX_CHUNK_ROWS].contains(&request.full_chunk_rows)
+        if ![
+            DEFAULT_CHUNK_ROWS,
+            super::prefill::MAX_CHUNK_ROWS,
+            super::prefill::full_chunk_ceiling(),
+        ]
+        .contains(&request.full_chunk_rows)
         {
             return Err(CedPlanError::InvalidChunkRows(request.full_chunk_rows));
         }
@@ -330,7 +335,7 @@ pub fn row_view(retained: &Range<usize>, rows: Range<usize>) -> Result<CedChunkV
     {
         return Err(CedPlanError::InvalidRowView);
     }
-    if rows.len() > super::prefill::MAX_CHUNK_ROWS {
+    if rows.len() > super::prefill::full_chunk_ceiling() {
         return Err(CedPlanError::InvalidChunkRows(rows.len()));
     }
     Ok(CedChunkView {
@@ -347,7 +352,7 @@ pub struct CedChunks {
 }
 
 pub fn chunk_views(rows: Range<usize>, chunk_rows: usize) -> Result<CedChunks> {
-    if !(1..=super::prefill::MAX_CHUNK_ROWS).contains(&chunk_rows) {
+    if !(1..=super::prefill::full_chunk_ceiling()).contains(&chunk_rows) {
         return Err(CedPlanError::InvalidChunkRows(chunk_rows));
     }
     if rows.start > rows.end {

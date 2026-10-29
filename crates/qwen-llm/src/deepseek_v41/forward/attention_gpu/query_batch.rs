@@ -93,7 +93,7 @@ pub(super) fn selection_shapes(
     tile: usize,
 ) -> Result<[usize; 2]> {
     op::require(
-        (1..=prefill::MAX_CHUNK_ROWS).contains(&rows)
+        (1..=prefill::full_chunk_ceiling()).contains(&rows)
             && (1..=prefill::MAX_CHUNK_ROWS).contains(&tile),
         "selection scratch rows",
     )?;
@@ -326,7 +326,7 @@ fn original_query_tile(
 ) -> Result<std::ops::Range<usize>> {
     op::require(
         (1..=prefill::MAX_CHUNK_ROWS).contains(&tile_rows)
-            && (1..=prefill::MAX_CHUNK_ROWS).contains(&chunk_rows),
+            && (1..=prefill::full_chunk_ceiling()).contains(&chunk_rows),
         "original query tile width",
     )?;
     op::require(position < prompt_rows, "original query position")?;
@@ -352,7 +352,7 @@ fn query_tile_span(
     tile_rows: usize,
 ) -> Result<(usize, usize)> {
     op::require(
-        (1..=prefill::MAX_CHUNK_ROWS).contains(&remaining)
+        (1..=prefill::full_chunk_ceiling()).contains(&remaining)
             && (1..=prefill::MAX_CHUNK_ROWS).contains(&tile_rows),
         "query span geometry",
     )?;
@@ -416,7 +416,7 @@ impl Scratch {
 
     pub(super) fn shapes(c: &Config, rows: usize) -> Result<Vec<usize>> {
         op::require(
-            (1..=prefill::MAX_CHUNK_ROWS).contains(&rows),
+            (1..=prefill::full_chunk_ceiling()).contains(&rows),
             "query batch scratch rows",
         )?;
         let tile = rows.min(tile_rows());

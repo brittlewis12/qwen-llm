@@ -2,6 +2,8 @@ use super::*;
 use crate::deepseek_v41::gguf;
 use ced_plan::{CedPlan, CedRequest, chunk_views};
 
+mod encoder8k;
+
 const EDGES: [usize; 6] = [2047, 2048, 2049, 4095, 4096, 4097];
 
 #[test]

@@ -5234,5 +5234,61 @@
     "class": "cpu",
     "ignored": false,
     "reason": "Pure CPU nonnegative i32 descriptor syntax only: rejects empty, negative, nonnumeric, overflow and whitespace, accepts 0/3/i32::MAX without opening descriptors or mutating environment; actual openness, canonical inode, ownership and flock validation remain the authority of metal::acquire_metal_benchmark_lease before MetalContext/import."
+  },
+  {
+    "target": "lib",
+    "name": "deepseek_v41::forward::attention_gpu::query_batch::lineage_tests::encoder8k_scope_keeps_original_tiles_and_compacted_singleton_lineage",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Fixed-8192 test-scoped host-only feasibility: synthetic pricing, geometry, lineage, bounds or scope restoration; no Metal context/resources, model import or execution."
+  },
+  {
+    "target": "lib",
+    "name": "deepseek_v41::forward::chunk_geometry::encoder8k::conditional_resident_headroom_and_runtime_gates_use_cpu_plus_metal",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Fixed-8192 test-scoped host-only feasibility: synthetic pricing, geometry, lineage, bounds or scope restoration; no Metal context/resources, model import or execution."
+  },
+  {
+    "target": "lib",
+    "name": "deepseek_v41::forward::chunk_geometry::encoder8k::model_shaped_extents_fit_existing_integer_domains_without_kernel_changes",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Fixed-8192 test-scoped host-only feasibility: synthetic pricing, geometry, lineage, bounds or scope restoration; no Metal context/resources, model import or execution."
+  },
+  {
+    "target": "lib",
+    "name": "deepseek_v41::forward::chunk_geometry::encoder8k::one_8k_plan_preserves_work_retention_and_2k_decoder_replay",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Fixed-8192 test-scoped host-only feasibility: synthetic pricing, geometry, lineage, bounds or scope restoration; no Metal context/resources, model import or execution."
+  },
+  {
+    "target": "lib",
+    "name": "deepseek_v41::forward::chunk_geometry::encoder8k::prices_are_monotone_conservative_and_reject_max_buffer_and_overflow",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Fixed-8192 test-scoped host-only feasibility: synthetic pricing, geometry, lineage, bounds or scope restoration; no Metal context/resources, model import or execution."
+  },
+  {
+    "target": "lib",
+    "name": "deepseek_v41::forward::chunk_geometry::encoder8k::pricing_compares_8k_with_two_4k_pipeline_at_full_request_capacity",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Fixed-8192 test-scoped host-only feasibility: synthetic pricing, geometry, lineage, bounds or scope restoration; no Metal context/resources, model import or execution."
+  },
+  {
+    "target": "lib",
+    "name": "deepseek_v41::forward::chunk_geometry::encoder8k::scope_does_not_admit_invalid_requests_or_change_defaults_and_execution_guards",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Fixed-8192 test-scoped host-only feasibility: synthetic pricing, geometry, lineage, bounds or scope restoration; no Metal context/resources, model import or execution."
+  },
+  {
+    "target": "lib",
+    "name": "deepseek_v41::forward::chunk_geometry::encoder8k::scope_is_validated_nested_panic_safe_thread_local_and_default_off",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Fixed-8192 test-scoped host-only feasibility: synthetic pricing, geometry, lineage, bounds or scope restoration; no Metal context/resources, model import or execution."
   }
 ]

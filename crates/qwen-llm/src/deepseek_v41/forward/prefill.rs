@@ -17,6 +17,36 @@ pub const DEFAULT_CHUNK_ROWS: usize = 2048;
 /// Global engine ceiling, not the width selected by request admission.
 pub const MAX_CHUNK_ROWS: usize = 4096;
 
+/// Planning/geometry ceiling only; execution keeps MAX_CHUNK_ROWS.
+pub(super) fn full_chunk_ceiling() -> usize {
+    #[cfg(test)]
+    if ENCODER8K_FEASIBILITY.with(std::cell::Cell::get) {
+        return 8192;
+    }
+    MAX_CHUNK_ROWS
+}
+
+#[cfg(test)]
+thread_local! {
+    static ENCODER8K_FEASIBILITY: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+#[cfg(test)]
+pub(super) fn with_full_chunk_ceiling_for_test<T>(rows: usize, f: impl FnOnce() -> T) -> Result<T> {
+    op::require(
+        [MAX_CHUNK_ROWS, 8192].contains(&rows),
+        "feasibility ceiling",
+    )?;
+    struct Restore(bool);
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            ENCODER8K_FEASIBILITY.with(|flag| flag.set(self.0));
+        }
+    }
+    let _restore = Restore(ENCODER8K_FEASIBILITY.with(|flag| flag.replace(rows == 8192)));
+    Ok(f())
+}
+
 /// Operand lineage of logical rows, independent of a CED replay tile's size.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(super) enum RowsArithmetic {

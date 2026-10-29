@@ -7,6 +7,104 @@ const PROMPTS: [usize; 13] = [
 const WIDTHS: [usize; 7] = [32, 128, 129, 300, 512, 1024, 2048];
 
 #[test]
+fn encoder8k_scope_keeps_original_tiles_and_compacted_singleton_lineage() {
+    assert!(super::original_query_tile(8192, 8192, 0, 512).is_err());
+    prefill::with_full_chunk_ceiling_for_test(8192, || {
+        for prompt in [8191, 8192, 8193] {
+            for tile in [129, 300, 512, 4096] {
+                let mut oracle = Vec::new();
+                for first in (0..prompt).step_by(8192) {
+                    let end = (first + 8192).min(prompt);
+                    for start in (first..end).step_by(tile) {
+                        let range = start..(start + tile).min(end);
+                        oracle.extend(vec![range.clone(); range.len()]);
+                    }
+                }
+                for (position, expected) in oracle.iter().enumerate() {
+                    assert_eq!(
+                        super::original_query_tile(prompt, 8192, position, tile).unwrap(),
+                        *expected
+                    );
+                    for physical in [1, (prompt - position).min(2048)] {
+                        let (rows, arity) =
+                            super::query_tile_span(Some((prompt, 8192)), position, physical, tile)
+                                .unwrap();
+                        assert_eq!(rows, physical.min(expected.end - position));
+                        assert_eq!(arity, expected.len());
+                        assert_eq!(tensor_arithmetic(true, arity), expected.len() >= 128);
+                        assert!(!tensor_arithmetic(false, arity));
+                    }
+                }
+            }
+        }
+        let c = Config::default();
+        let mut tiles = Vec::new();
+        for position in (0..8192).step_by(512) {
+            let tile = super::original_query_tile(8192, 8192, position, 512).unwrap();
+            assert_eq!(
+                tile,
+                super::original_query_tile(8192, 4096, position, 512).unwrap()
+            );
+            assert_eq!(tile.len(), 512);
+            tiles.push(tile);
+        }
+        assert_eq!(tiles.len(), 16);
+        assert_eq!(
+            checked_product(&[8192, c.heads, c.head_dim]).unwrap(),
+            268435456
+        );
+        assert!(checked_product(&[8192, c.heads, c.head_dim, 4]).is_err());
+        assert_eq!(
+            selection_shapes(&c, 8448, 8192, 512).unwrap(),
+            [512 * 8448, 512 * 4 * 512 * 2]
+        );
+        assert!(Scratch::shapes(&c, 8192).is_ok());
+        assert!(Scratch::shapes(&c, 8193).is_err());
+        assert_eq!(
+            super::query_tile_span(None, 0, 8192, 512).unwrap(),
+            (512, 512)
+        );
+        assert!(super::query_tile_span(None, usize::MAX, 8192, 512).is_err());
+        assert!(super::original_query_tile(8192, 8192, 8192, 512).is_err());
+        assert!(super::original_query_tile(8192, 8192, 0, 8192).is_err());
+        assert!(mma_geometry(&c));
+        with_f32_attention(|| {
+            assert!(!mma_geometry(&c));
+            assert!(!tensor_arithmetic(mma_geometry(&c), 512));
+            assert!(Scratch::shapes(&c, 8192).unwrap().len() > 3);
+        });
+        for c in [
+            Config {
+                head_dim: 256,
+                ..c.clone()
+            },
+            Config { heads: 17, ..c },
+        ] {
+            assert!(!mma_geometry(&c));
+            assert!(!tensor_arithmetic(mma_geometry(&c), 512));
+        }
+        assert!(prefill::RowsArithmetic::Packed.packed_operands(1));
+        assert_eq!(
+            super::query_tile_span(Some((8193, 8192)), 8192, 1, 512).unwrap(),
+            (1, 1)
+        );
+        // A nondivisor query tile exposes the different chunk boundary policy;
+        // preserving lineage is not a promise that 4K and 8K compute equal bits.
+        assert_eq!(
+            super::original_query_tile(8192, 4096, 4096, 300).unwrap(),
+            4096..4396
+        );
+        assert_eq!(
+            super::original_query_tile(8192, 8192, 4096, 300).unwrap(),
+            3900..4200
+        );
+    })
+    .unwrap();
+    assert!(Scratch::shapes(&Config::default(), 8192).is_err());
+    assert!(super::original_query_tile(8192, 8192, 0, 512).is_err());
+}
+
+#[test]
 fn selected_full_chunks_preserve_every_compacted_query_tile_and_singleton_route() {
     for chunk in [2048, 4096] {
         for n in [2047, 2048, 2049, 4095, 4096, 4097] {

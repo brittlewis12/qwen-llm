@@ -362,7 +362,8 @@ pub(super) fn runtime_from_parts(
     )?;
     let request = memory::estimate_gpu_step(c, capacity, schedule, hash.layers.len())?;
     op::require(
-        (1..=prefill::MAX_CHUNK_ROWS).contains(&full_chunk_rows),
+        (1..=prefill::MAX_CHUNK_ROWS).contains(&full_chunk_rows)
+            || full_chunk_rows == prefill::full_chunk_ceiling(),
         "cold Full chunk geometry",
     )?;
     let rows = prompt_rows.min(full_chunk_rows);

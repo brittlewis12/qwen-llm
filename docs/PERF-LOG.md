@@ -6,6 +6,18 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the current state and evidence index.
 
+## 2026-10-29 - V4.1 CED Encoder GPU Attribution: Attention 54%, FFN 46%
+
+- Full 8K per-layer stage profile on main `508bf6e3`: 7,453.3 ms GPU,
+  attention 3,991.7 (53.6%; tiles 1,850.0, finish_post 1,107.0, prepare
+  664.4, hc 208.0, serial 162.3), FFN 3,439.6 (46.1%).
+- Extrapolated CED encoder (3,337.7 ms): attention ~1,788, FFN ~1,540. A
+  10% complete attention-core cut is ~179 ms (4.1% wall); 20% is ~358 ms.
+- Next: bounded half-operand reuse for attention (tiles, prepare,
+  finish_post), keeping the arithmetic sequence; at least 1% wall before
+  integration. [Packet](bench/2026-10-29-v41-ced-gpu-attribution.md). Raw:
+  `~/qwen-runs/2026-10-29-v41-ced-timeline/`.
+
 ## 2026-10-29 - V4.1 Q5_K Dense Decode Specialization: Bitwise, -5% End To End, Not Landed
 
 - Kill test, M5 Ultra, isolated decode probe (weights rotating through

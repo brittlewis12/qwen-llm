@@ -5234,5 +5234,47 @@
     "class": "cpu",
     "ignored": false,
     "reason": "Pure CPU nonnegative i32 descriptor syntax only: rejects empty, negative, nonnumeric, overflow and whitespace, accepts 0/3/i32::MAX without opening descriptors or mutating environment; actual openness, canonical inode, ownership and flock validation remain the authority of metal::acquire_metal_benchmark_lease before MetalContext/import."
+  },
+  {
+    "target": "lib",
+    "name": "deepseek_v41::forward::attention_gpu::ced::tests::speculative_encoder_keeps_one_inflight_intent_and_completes_in_fifo_order",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Host-only CED Cursor fixture exercises one speculative encoder intent, FIFO completion and decoder/publication frontiers; no Metal context, lease, allocation or dispatch."
+  },
+  {
+    "target": "lib",
+    "name": "deepseek_v41::forward::attention_gpu::ced::tests::speculative_encoder_retires_three_contiguous_chunks_in_order",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Host-only CED Cursor fixture exercises three contiguous speculative encoder intents and ordered retirement; no Metal context, lease, allocation or dispatch."
+  },
+  {
+    "target": "lib",
+    "name": "deepseek_v41::forward::ced::tests::submit_ahead_completion_fault_drains_the_newer_encoder",
+    "class": "gpu",
+    "ignored": true,
+    "reason": "Explicitly ignored Metal toy-model completion-fault witness: acquires the GPU lease and context, submits encoder work, checks draining/poisoning and a healthy followup; excluded from CPU acceptance."
+  },
+  {
+    "target": "lib",
+    "name": "deepseek_v41::forward::ced::tests::submit_ahead_completion_hook_error_panic_and_cancel_drain_the_newer_encoder",
+    "class": "gpu",
+    "ignored": true,
+    "reason": "Explicitly ignored Metal toy-model completion-hook Error/Cancel/Panic witness: acquires the GPU lease and context and verifies committed encoder drain, poisoning and healthy followups; excluded from CPU acceptance."
+  },
+  {
+    "target": "lib",
+    "name": "deepseek_v41::forward::ced::tests::submit_ahead_deferred_status_rejects_after_both_encoders_retire",
+    "class": "gpu",
+    "ignored": true,
+    "reason": "Explicitly ignored Metal toy-model deferred-status witness: acquires the GPU lease and context, injects a sticky encoder status and checks rejection after both commands retire; excluded from CPU acceptance."
+  },
+  {
+    "target": "lib",
+    "name": "deepseek_v41::forward::ced::tests::submit_ahead_prespawn_panic_drains_the_committed_encoder",
+    "class": "gpu",
+    "ignored": true,
+    "reason": "Explicitly ignored Metal toy-model pre-spawn panic witness: acquires the GPU lease and context and checks committed-command drain on unwind, poisoned state and a healthy followup; excluded from CPU acceptance."
   }
 ]

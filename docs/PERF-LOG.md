@@ -6,6 +6,33 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the current state and evidence index.
 
+## 2026-10-29 - V4.1 Few-Row Appends: Column Kernels 1.3-2.7x, Kill Test Fails At Depth
+
+- Short appends were slow: M5 Ultra, GSQ IQ2_XS, main `16f9a365`, depth
+  8192: pp4 150 ms and pp16 174 ms against a 14.7 ms decode step (below ~11
+  rows, n decode steps were faster than prefill).
+- Kill test (branch `perf/v41-few-rows`, parked): Full prefill chunks of 2-16
+  rows route every dense projection through the skinny column kernels and
+  the routed experts through the native token-row kernels; attention and HC
+  rows paths unchanged. In-binary A/B/B/A, ms per append:
+
+  | rows | d0 old | d0 new | 8K old | 8K new | n decode steps d0 / 8K |
+  |---|---|---|---|---|---|
+  | 2 | 102.3 | 38.4 | 142.6 | 79.7 | 26 / 29 |
+  | 4 | 111.8 | 45.1 | 150.1 | 84.2 | 52 / 59 |
+  | 8 | 123.5 | 57.4 | 160.3 | 96.8 | 103 / 118 |
+  | 16 | 142.3 | 92.6 | 174.5 | 131.5 | 206 / 235 |
+
+- Predeclared criterion (pp4 <= 60 ms and pp16 <= 100 ms at 8K) fails.
+  Stage sampling: the prefill attention tiles and serial selection grow
+  ~38 ms from d0 to 8K at 4 rows (decode attention grows ~1.6 ms per token),
+  and at 16 rows the routed experts alone take ~47 ms (16 tokens x 6
+  experts read mostly distinct weights). pp1 at 8K takes 39.4 ms against a
+  14.7 ms decode step for the same attention reason.
+- Not landed. A few-row path would need decode-style attention per row; even
+  then 16-row appends stay routed-expert bound, so prompt-lookup
+  verification gains little on this MoE.
+
 ## 2026-10-28 - V4.1 Decode Control Kernels: Finite Fold +0.7%, Fusions Negative
 
 - M5 Ultra, GSQ IQ2_XS, `qwen-bench` tg64 at depth 0 and 8192, A/B/B/A in

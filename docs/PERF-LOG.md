@@ -6,6 +6,26 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the current state and evidence index.
 
+## 2026-10-29 - V4.1 Fused Flash-Decoding Sink Attention, tg32@d40960 1.058x
+
+- Decode rows now run sink attention as two dispatches: `attention_flash*`
+  key splits (scores, per-split softmax, unnormalized PV) and
+  `attention_flash_combine_rope` (sink-aware merge plus the attended inverse
+  RoPE) instead of score_keys -> softmax -> output or value matrix -> RoPE.
+  F32, not bitwise. `QWEN_V41_FLASH_DECODE=0` restores the chain.
+- Kill test, M5 Ultra, 64 heads x 512, per decode row back to back: 128 +
+  512 keys 42.2 -> 19.2 us (2.20x), 128 + 0 55.9 -> 11.9 us. Error vs F64
+  1.15e-6 of max |out| (chain 1.15e-6).
+- In-situ per-dispatch profile at depth 40960 (fastest token, equal
+  non-attention time): attn_core 2.36 -> 1.27 ms/token.
+- GSQ IQ2_XS tg32@d40960, 8 arms ABBA BAAB, each its own lease after a 120 s
+  cool-down: 69.26 -> 73.27 tok/s median (**1.058x**, 14.44 -> 13.65
+  ms/token); every fused sample above every chain sample. Back-to-back arms
+  without cool-down drift down 10-25% over a campaign regardless of arm.
+- 81920-prefix likelihood witness, knob on vs off, same build: per-token NLL
+  delta mean +3e-8 / +7e-8, |t| <= 0.52, max 1.1e-5; top-1 and target rank
+  equal on 256/256 targets; logits within 1.9e-6 of max |logit|.
+
 ## 2026-10-29 - V4.1 Fixed-8K Encoder Passes CPU Feasibility, Execution Still Closed
 
 Research `96325bc9`: all 350 library CPU tests pass, including eight new 8K

@@ -113,7 +113,8 @@ cpu_leased() {
 # Discovery checks every full name and ignore state before executing only CPU
 # entries. GPU, model, timing and external-fixture witnesses remain explicit
 # exclusions, including self-leased tests which must not inherit this lease.
-cpu_leased uv run scripts/reference/acceptance_inventory.py
+# The inventory refuses an inherited GPU lease: it runs CPU-only tests.
+uv run scripts/reference/acceptance_inventory.py
 if [ "$full" -eq 1 ]; then
   cpu_leased cargo test --release --workspace --no-run
   release_qwen=$(

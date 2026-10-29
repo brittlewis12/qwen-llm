@@ -6,6 +6,19 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the current state and evidence index.
 
+## 2026-10-29 - V4.1 Exact Fast Sampling
+
+- Bitwise sampler-v1: `sample` orders reusable keys by a stable radix sort
+  of the logit half and binary-searches one stored set of partial sums.
+  At vocab 129,280: 1.171 -> 0.550 ms per sample (-53%, release default);
+  top-p 0.95 -54%, top-k 40 -29%, min-p -62% (CPU replay, synthetic rows).
+- Batched serve samples members on persistent threads
+  (`QWEN_SERVE_V41_SAMPLE_WORKERS`, default max active - 1).
+- M5 Ultra, GSQ IQ2_XS, t=1, 256 tokens: three concurrent requests went
+  94.4 -> 106.3 tok/s (+12.6%) and a single request decoded 3.8% faster.
+- Seeded outputs are identical across all arms.
+  [Packet](bench/2026-10-29-v41-exact-fast-sampler.md).
+
 ## 2026-10-29 - V4.1 Attention Half-KV Reuse: Probe Negative
 
 - Bitwise-exact half-KV mirrors in the tensor64 score/PV tile, but only

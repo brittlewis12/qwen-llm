@@ -502,10 +502,32 @@ impl DecoderRowsPool {
 
 struct PendingCed {
     command: Retained<ProtocolObject<dyn MTLCommandBuffer>>,
+    needs_wait: bool,
     role: &'static str,
     dimensions: [usize; 4],
     encode_ms: Option<f64>,
     submitted_at: Instant,
+}
+
+impl PendingCed {
+    fn wait_terminal(&mut self) {
+        if self.needs_wait {
+            // Terminal failure discharges buffer-lifetime ownership, NOT output
+            // acceptance. ced_wait still checks status and propagates errors.
+            metal::wait_unchecked(&self.command);
+            self.needs_wait = false;
+            #[cfg(test)]
+            batches::tests::unwind::terminal(self.role, self.dimensions[0]);
+        }
+    }
+}
+
+impl Drop for PendingCed {
+    fn drop(&mut self) {
+        // Cleanup only: no status acceptance, counters, profiling or fallible
+        // error formatting while unwinding. Field owners must put this first.
+        self.wait_terminal();
+    }
 }
 /// Host-owned encoder chunk. Preparation is independent of the previous
 /// chunk's completion; only the attention intent and command submission are
@@ -549,8 +571,8 @@ impl EncoderDrain {
 
 impl Drop for EncoderDrain {
     fn drop(&mut self) {
-        if let Some(pending) = self.0.take() {
-            let _ = metal::wait_completed(&pending.command.command);
+        if let Some(mut pending) = self.0.take() {
+            pending.command.wait_terminal();
             #[cfg(test)]
             super::super::ced::tests::drain_note();
         }
@@ -587,26 +609,34 @@ impl Workspace {
             .encoded_commands
             .checked_add(1)
             .ok_or("CED command overflow")?;
-        command.commit();
-        Ok(PendingCed {
+        let mut pending = PendingCed {
             command,
+            needs_wait: false,
             role,
             dimensions,
             encode_ms,
             submitted_at: Instant::now(),
-        })
+        };
+        // All metadata exists before commit. The non-fallible arm immediately
+        // after commit precedes every post-submit operation and ownership move.
+        pending.command.commit();
+        pending.needs_wait = true;
+        #[cfg(test)]
+        batches::tests::unwind::submitted(role, dimensions[0]);
+        Ok(pending)
     }
 
     fn ced_wait(
         &mut self,
         model: &Forward<'_>,
-        pending: &PendingCed,
+        pending: &mut PendingCed,
         storage: &Storage,
         counters: &mut CedCounters,
     ) -> Result<()> {
         #[cfg(test)]
         let _completion_fault = super::super::ced::tests::completion_fault(pending.role);
-        let result = metal::wait_completed(&pending.command).map_err(|e| e.to_string());
+        pending.wait_terminal();
+        let result = metal::command_buffer_completed(&pending.command).map_err(|e| e.to_string());
         let wait = pending.submitted_at.elapsed();
         storage.observe(model.ctx);
         self.commands += 1;
@@ -644,8 +674,8 @@ impl Workspace {
         counters: &mut CedCounters,
         encode: impl FnOnce(&mut Self, &KernelEncoder) -> Result<()>,
     ) -> Result<()> {
-        let pending = self.ced_submit(model, role, dimensions, storage, counters, encode)?;
-        self.ced_wait(model, &pending, storage, counters)
+        let mut pending = self.ced_submit(model, role, dimensions, storage, counters, encode)?;
+        self.ced_wait(model, &mut pending, storage, counters)
     }
 
     fn ced_block(
@@ -1013,7 +1043,7 @@ impl Workspace {
         &mut self,
         model: &Forward<'_>,
         plan: &CedPlan,
-        pending: PendingEncoder,
+        mut pending: PendingEncoder,
         storage: &Storage,
         counters: &mut CedCounters,
         cancel: Option<&AtomicBool>,
@@ -1028,7 +1058,7 @@ impl Workspace {
             ref scratch,
             ..
         } = pending.chunk;
-        self.ced_wait(model, &pending.command, storage, counters)?;
+        self.ced_wait(model, &mut pending.command, storage, counters)?;
         scratch
             .ffn
             .validate_status_layers(plan.encoder_layers.clone())?;
@@ -1550,8 +1580,9 @@ impl Workspace {
                         Ok(())
                     })();
                     if result.is_err() {
-                        if let Some(done) = drain.take() {
-                            let _ = self.ced_wait(model, &done.command, &storage, &mut counters);
+                        if let Some(mut done) = drain.take() {
+                            let _ =
+                                self.ced_wait(model, &mut done.command, &storage, &mut counters);
                             #[cfg(test)]
                             super::super::ced::tests::drain_note();
                         }

@@ -4,6 +4,8 @@ use std::cell::{Cell, RefCell};
 use std::marker::PhantomData;
 use std::rc::Rc;
 
+pub(in super::super) mod unwind;
+
 thread_local! {
     static LAYERS: Cell<Option<usize>> = const { Cell::new(None) };
     static RECORD: Cell<bool> = const { Cell::new(false) };

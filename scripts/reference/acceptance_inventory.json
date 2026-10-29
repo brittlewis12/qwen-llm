@@ -2248,6 +2248,34 @@
   },
   {
     "target": "lib",
+    "name": "deepseek_v41::forward::gpu_step::ced::batches::tests::unwind::default_pipeline_adopted_cancel_ownership_gpu",
+    "class": "gpu",
+    "ignored": true,
+    "reason": "Ignored bounded native decoder pipeline synthetic local cancellation after successor adoption; real operator flag remains passed through model calls; no follow-up GPU work."
+  },
+  {
+    "target": "lib",
+    "name": "deepseek_v41::forward::gpu_step::ced::batches::tests::unwind::default_pipeline_submitted_command_unwind_ownership_fault_matrix_gpu",
+    "class": "gpu",
+    "ignored": true,
+    "reason": "Ignored bounded native default decoder pipeline ownership fixture; real Metal commands with synthetic checkpoint/completion/status faults; execution still owed."
+  },
+  {
+    "target": "lib",
+    "name": "deepseek_v41::forward::gpu_step::ced::batches::tests::unwind::default_pipeline_successor_encode_cancel_ownership_gpu",
+    "class": "gpu",
+    "ignored": true,
+    "reason": "Ignored bounded native decoder pipeline synthetic local cancellation while encoding successor; real operator flag remains passed through model calls; no follow-up GPU work."
+  },
+  {
+    "target": "lib",
+    "name": "deepseek_v41::forward::gpu_step::ced::batches::tests::unwind::release_trace_rejects_missing_duplicate_and_late_terminal_waits_cpu",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Host-only release-trace validator negative controls; no Metal context, fake context, dispatch or command-owner execution."
+  },
+  {
+    "target": "lib",
     "name": "deepseek_v41::forward::gpu_step::ced::reuse::complete_fixture_ledgers_stay_below_128_mib",
     "class": "cpu",
     "ignored": false,

@@ -330,8 +330,11 @@ impl Workspace {
 }
 
 struct PendingGroup {
+    // Drops before status views even when popped out of the pending queue.
     command: super::PendingCed,
     units: Vec<Unit>,
+    #[cfg(test)]
+    _status_release: tests::unwind::Release,
     statuses: Vec<StatusUnit>,
 }
 
@@ -348,6 +351,8 @@ impl Workspace {
         counters: &mut CedCounters,
         pool: &mut DecoderRowsPool,
     ) -> Result<()> {
+        #[cfg(test)]
+        let _outer_release = tests::unwind::Release::new("pool/storage", None);
         let ctx = model.ctx;
         let layers = batch_selection(plan)?.layers;
         op::require(
@@ -356,6 +361,8 @@ impl Workspace {
         )?;
         let words = plan_batch::maximum_status_words(plan, layers).map_err(|e| e.to_string())?;
         let ledger = prefill::allocate(ctx, words * 2, 1, GgmlType::I32)?;
+        #[cfg(test)]
+        let _ledger_release = tests::unwind::Release::new("ledger", None);
         let seed_range = plan
             .decoder
             .iter()
@@ -365,6 +372,8 @@ impl Workspace {
         let seed = seed_range
             .map(|range| LocalSeed::new(model, storage, range))
             .transpose()?;
+        #[cfg(test)]
+        let _seed_release = tests::unwind::Release::new("seed", None);
         let groups = plan
             .decoder
             .chunks(layers)
@@ -506,15 +515,43 @@ impl Workspace {
                                 n,
                                 unit.kind == Kind::Seed,
                             )?;
+                            #[cfg(test)]
+                            tests::unwind::checkpoint(
+                                if i == 0 {
+                                    "ced_pipeline_first_encode"
+                                } else {
+                                    "ced_pipeline_successor_encode"
+                                },
+                                layer_range.start,
+                                cancel,
+                            )?;
                         }
                         cancelled(cancel)
                     },
                 )?;
-                pending.push_back(PendingGroup {
+                let submitted = PendingGroup {
                     command,
                     units,
+                    #[cfg(test)]
+                    _status_release: tests::unwind::Release::new(
+                        "statuses",
+                        Some(layer_range.start),
+                    ),
                     statuses,
-                });
+                };
+                #[cfg(test)]
+                if i > 0 {
+                    tests::unwind::checkpoint(
+                        "ced_pipeline_before_adoption",
+                        layer_range.start,
+                        cancel,
+                    )?;
+                }
+                pending.push_back(submitted);
+                #[cfg(test)]
+                if i > 0 {
+                    tests::unwind::checkpoint("ced_pipeline_adopted", layer_range.start, cancel)?;
+                }
                 self.attention
                     .retire_ced_group_speculative(generation, layer_range.clone())?;
                 if pending.len() > 1 {
@@ -525,8 +562,8 @@ impl Workspace {
             Ok(())
         })();
         if result.is_err() {
-            while let Some(done) = pending.pop_front() {
-                let _ = self.ced_wait(model, &done.command, storage, counters);
+            while let Some(mut done) = pending.pop_front() {
+                let _ = self.ced_wait(model, &mut done.command, storage, counters);
             }
         }
         result?;
@@ -541,11 +578,17 @@ impl Workspace {
         &mut self,
         model: &Forward<'_>,
         plan: &CedPlan,
-        done: PendingGroup,
+        mut done: PendingGroup,
         storage: &mut Storage,
         counters: &mut CedCounters,
     ) -> Result<()> {
-        self.ced_wait(model, &done.command, storage, counters)?;
+        #[cfg(test)]
+        tests::unwind::checkpoint("ced_pipeline_popped", done.command.dimensions[0], None)?;
+        self.ced_wait(model, &mut done.command, storage, counters)?;
+        #[cfg(test)]
+        tests::unwind::checkpoint("ced_pipeline_waited", done.command.dimensions[0], None)?;
+        #[cfg(test)]
+        tests::unwind::status_fault(&done.statuses)?;
         for (unit, status) in done.units.iter().zip(&done.statuses) {
             if let Some(ffn) = &status.ffn {
                 ffn_gpu::validate_ced_status(ffn, unit.layer)?;

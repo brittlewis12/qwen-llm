@@ -6,6 +6,17 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the current state and evidence index.
 
+## 2026-10-29 - V4.1 Encoder Depth Ablation: Training-Free Skip Is Negative
+
+- Skipping CED encoder blocks and bypassing the rest costs 1.22-1.79 nats on
+  the paired 384-target witness (baseline 2.1396, bitwise equal to Full):
+  keep 10/20 -> 3.5691, keep 6/20 -> 3.3642, keep 3/20 -> 3.9324. The
+  predeclared gate was 0.10 nats and 5 top-1 points.
+- Training-free encoder depth reduction is closed; a distilled/calibrated
+  encoder is a new project, not a cheap continuation. No latency promotion.
+  [Packet](bench/2026-10-29-v41-encoder-depth-negative.md). Raw:
+  `~/qwen-runs/2026-10-29-v41-encoder-depth/`.
+
 ## 2026-10-29 - V4.1 Prefill Q Half Mirror: +2.1%, Bitwise
 
 - The tensor64 score re-converted the F32 query per 32-key panel; staging the

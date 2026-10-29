@@ -4,7 +4,7 @@ use super::q_register_cache::{poison, score};
 use super::*;
 
 const REPEATS: usize = 3;
-const LAUNCHES: usize = 4;
+const LAUNCHES: usize = 32;
 
 fn prepare(f: &Fixture, ctx: &MetalContext, enc: &KernelEncoder) {
     score(f, ctx, enc, true);
@@ -122,6 +122,11 @@ fn pv_tensor64_dim1_probe() {
                 ids(&f.status, 1)
             );
 
+            // Readbacks between short commands let the GPU idle and change clocks.
+            for _ in 0..2 {
+                run(false, false);
+                run(true, false);
+            }
             let mut samples = [Vec::new(), Vec::new()];
             for repeat in 0..REPEATS {
                 for (slot, arm) in [0, 1, 1, 0].into_iter().enumerate() {
@@ -131,7 +136,6 @@ fn pv_tensor64_dim1_probe() {
                         "pv_dim1_sample K={k} n={n} ragged={ragged} scope={scope:?} repeat={repeat} slot={slot} arm={} launches={LAUNCHES} gpu_us={gpu:.6} wall_us={wall:.6}",
                         if arm == 0 { "A" } else { "B" }
                     );
-                    compare_output(&f, &baseline, baseline_status, scope);
                 }
             }
             let a = median(&samples[0], false);
@@ -142,6 +146,10 @@ fn pv_tensor64_dim1_probe() {
                 median(&samples[0], true),
                 median(&samples[1], true)
             );
+            compare_output(&f, &baseline, baseline_status, scope);
+            poison(&f.output);
+            run(true, false);
+            compare_output(&f, &baseline, baseline_status, scope);
         }
     }
     cancellation.check();

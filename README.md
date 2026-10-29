@@ -263,6 +263,8 @@ which are profiling and research probes.
 - [docs/PERF-LOG.md](docs/PERF-LOG.md): measurements over time, including
   approaches that were tried and closed
 - [docs/PERF-ROADMAP.md](docs/PERF-ROADMAP.md): open performance work
+- [tools/work-microscope/](tools/work-microscope/README.md): an offline experiment
+  linking tensor-flow reconstructions to source and dated cost evidence
 
 ## Repository layout
 
@@ -273,6 +275,7 @@ crates/qwen-cli/   qwen, qwen-bench and qwen-lens, plus qwen-tok, qwen-census
 kernels/           Metal shaders, embedded in the binaries at build time
 kernels/research/  benchmark-only shaders, loaded on first use
 web/               the lens workbench (Bun and React)
+tools/             offline tensor-flow and evidence explorer (Bun)
 scripts/           reference implementations and fixture generators used by
                    tests, plus benchmark and serving checks
 docs/              behaviour references, design plans and measurement records

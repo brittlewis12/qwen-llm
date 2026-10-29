@@ -995,6 +995,13 @@
   },
   {
     "target": "lib",
+    "name": "deepseek_v41::forward::attention_gpu::tests::f32_pv_batch::attention_half_kv_tile_probe",
+    "class": "timing",
+    "ignored": true,
+    "reason": "Opt-in resident GPU F32/half-KV tensor64 correctness and timing probe; requires validation controls unset and never runs in CPU acceptance."
+  },
+  {
+    "target": "lib",
     "name": "deepseek_v41::forward::attention_gpu::tests::f32_pv_batch::f32_pv_batch_correctness",
     "class": "gpu",
     "ignored": false,

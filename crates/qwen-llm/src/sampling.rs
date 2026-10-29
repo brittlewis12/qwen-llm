@@ -306,6 +306,8 @@ pub struct Sampler {
     config: SamplingConfig,
     rng: Xoshiro256PlusPlus,
     draws: usize,
+    /// Reused working memory for [`Self::sample`]; never sampler state.
+    buffers: SampleBuffers,
 }
 
 impl Sampler {
@@ -315,6 +317,7 @@ impl Sampler {
             config,
             rng: Xoshiro256PlusPlus::from_seed(config.seed),
             draws: 0,
+            buffers: SampleBuffers::default(),
         })
     }
 
@@ -478,6 +481,11 @@ impl Sampler {
     /// while top-p uses the temperature-adjusted f64 distribution. Version-1
     /// replay is scoped to the supported target/build and guarded by golden
     /// vectors for the RNG, f64 draw conversion, and sampled token stream.
+    ///
+    /// The implementation orders reusable `u64` candidate keys and reads
+    /// logits, weights and the draw from them; the operation sequence of every
+    /// value that reaches a comparison, sum or draw is sampler-v1's (see
+    /// [`Self::sample_ordered`]).
     pub fn sample(&mut self, logits: &[f32]) -> Result<SampledToken, SamplingError> {
         if self.config.temperature == 0.0 {
             return Ok(SampledToken {
@@ -485,8 +493,89 @@ impl Sampler {
                 candidate_index: 0,
             });
         }
+        self.sample_ordered(logits).map(|(sampled, _total)| sampled)
+    }
 
-        let mut candidates = sorted_candidates(logits, self.config.top_k)?;
+    /// The positive-temperature sampler-v1 chain over ordered candidate keys.
+    /// Returns the sampled token and the categorical total it was drawn from.
+    ///
+    /// Equivalence with the candidate-vector formulation, step by step:
+    /// - Order: the keys sort in [`candidate_order`] (stable sort of the logit
+    ///   half over keys built in ascending token order, or a select/sort of
+    ///   distinct whole keys for top-k), and each key decodes to the exact
+    ///   `f64::from(f32)` logit.
+    /// - min-p and the positive-infinity filter keep candidates satisfying a
+    ///   predicate that is monotone along that order, so each keeps a prefix.
+    /// - Weights: after those filters either every candidate is `+inf` or none
+    ///   is (a finite `f32` divided by a positive `f32` temperature stays far
+    ///   below `f64::MAX`), so the weights are all ones or `exp(l / t - max)`
+    ///   with the same division (skipped only for `t == 1`, where it is the
+    ///   identity) and subtraction.
+    /// - Sums: `Iterator::sum` for `f64` is a sequential fold from `-0.0`; the
+    ///   running fold from `-0.0` stores those exact partial sums, which equal
+    ///   the top-p and draw scans' partial sums from `+0.0` because no weight
+    ///   is `-0.0`. Partial sums of non-negative weights never decrease, so
+    ///   "first partial sum `>=` target" and "first partial sum `>` draw" are
+    ///   binary searches with the linear scans' answers.
+    fn sample_ordered(&mut self, logits: &[f32]) -> Result<(SampledToken, f64), SamplingError> {
+        let config = self.config;
+        let buffers = &mut self.buffers;
+        let mut len = order_candidate_keys(logits, config.top_k, buffers)?;
+        let keys = &buffers.keys[..len];
+
+        if config.min_p > 0.0 {
+            let max_logit = key_logit(keys[0]);
+            if max_logit.is_finite() {
+                let threshold = max_logit + f64::from(config.min_p).ln();
+                len = keys.partition_point(|&key| key_logit(key) >= threshold);
+            }
+        }
+        if len == 0 {
+            return Err(SamplingError::NoCandidates);
+        }
+        if key_logit(keys[0]) == f64::INFINITY {
+            len = keys[..len].partition_point(|&key| key_logit(key) == f64::INFINITY);
+        }
+        let keys = &keys[..len];
+        let cumulative = cumulative_weights(keys, config.temperature, &mut buffers.cumulative)?;
+
+        let keep = if config.top_p < 1.0 {
+            top_p_keep(cumulative, f64::from(config.top_p))
+        } else {
+            len
+        };
+        let cumulative = &cumulative[..keep];
+        let total = cumulative[keep - 1];
+        if !(total.is_finite() && total > 0.0) {
+            return Err(SamplingError::NoCandidates);
+        }
+        self.draws += 1;
+        let target = self.rng.next_unit_f64() * total;
+        let candidate_index = categorical_index(cumulative, target);
+        Ok((
+            SampledToken {
+                token: key_token(keys[candidate_index]),
+                candidate_index,
+            },
+            total,
+        ))
+    }
+
+    /// The candidate-vector sampler-v1 implementation `sample` replaced, kept
+    /// as the equivalence reference. Also returns the categorical total.
+    #[cfg(test)]
+    fn reference_sample(&mut self, logits: &[f32]) -> Result<(SampledToken, f64), SamplingError> {
+        if self.config.temperature == 0.0 {
+            return Ok((
+                SampledToken {
+                    token: greedy_token(logits)?,
+                    candidate_index: 0,
+                },
+                1.0,
+            ));
+        }
+
+        let mut candidates = reference_sorted_candidates(logits, self.config.top_k)?;
 
         if self.config.min_p > 0.0 {
             let max_logit = candidates[0].logit;
@@ -535,18 +624,24 @@ impl Sampler {
         for (candidate_index, (candidate, weight)) in candidates.iter().zip(&weights).enumerate() {
             cumulative += *weight;
             if target < cumulative {
-                return Ok(SampledToken {
-                    token: candidate.token,
-                    candidate_index,
-                });
+                return Ok((
+                    SampledToken {
+                        token: candidate.token,
+                        candidate_index,
+                    },
+                    total,
+                ));
             }
         }
 
         let candidate_index = candidates.len() - 1;
-        Ok(SampledToken {
-            token: candidates[candidate_index].token,
-            candidate_index,
-        })
+        Ok((
+            SampledToken {
+                token: candidates[candidate_index].token,
+                candidate_index,
+            },
+            total,
+        ))
     }
 
     /// Couple a deterministic (one-hot) speculative proposal to the target
@@ -776,9 +871,11 @@ impl Sampler {
 
     /// Run the exact sampler-v1 chain with opt-in phase attribution.
     ///
-    /// The implementation intentionally mirrors [`Self::sample`] rather than
-    /// routing the default path through timers. Equivalence tests pin outcomes,
-    /// errors, candidate indices, draw counts, and subsequent RNG state.
+    /// This runs the candidate-vector formulation of the chain (the phases
+    /// below), not [`Self::sample`]'s key-ordered implementation, so its phase
+    /// times attribute that formulation; the default path stays free of
+    /// timers. Equivalence tests pin outcomes, errors, candidate indices, draw
+    /// counts, and subsequent RNG state to `sample`.
     pub fn sample_profiled(
         &mut self,
         logits: &[f32],
@@ -1063,24 +1160,246 @@ fn sorted_candidates(logits: &[f32], top_k: usize) -> Result<Vec<Candidate>, Sam
     Ok(candidates)
 }
 
-/// A `u64` whose ascending order is [`candidate_order`]: descending logit
-/// in `f32` total order (which `f64::from` preserves, signed zeros and
-/// infinities included), then ascending token id.
-fn candidate_key(token: usize, logit: f32) -> u64 {
+/// A `u32` whose ascending order is descending `f32` total order (which
+/// `f64::from` preserves, signed zeros and infinities included).
+fn descending_logit_bits(logit: f32) -> u32 {
     let bits = logit.to_bits();
     let ascending = if bits & 0x8000_0000 != 0 {
         !bits
     } else {
         bits | 0x8000_0000
     };
-    (u64::from(!ascending) << 32) | token as u64
+    !ascending
 }
 
-/// Every candidate in [`candidate_order`], built by an LSD radix sort of
-/// [`candidate_key`]s rather than a comparison sort: the same order, so the
-/// same weights, sums and draws as sampler-v1, at a fraction of the cost for
-/// a full vocabulary (top-k off).
+/// A `u64` whose ascending order is [`candidate_order`]: the
+/// [`descending_logit_bits`] above ascending token id.
+fn candidate_key(token: usize, logit: f32) -> u64 {
+    (u64::from(descending_logit_bits(logit)) << 32) | token as u64
+}
+
+/// The exact `f64::from(f32)` logit a [`candidate_key`] was built from.
+fn key_logit(key: u64) -> f64 {
+    let ascending = !((key >> 32) as u32);
+    let bits = if ascending & 0x8000_0000 != 0 {
+        ascending & 0x7fff_ffff
+    } else {
+        !ascending
+    };
+    f64::from(f32::from_bits(bits))
+}
+
+fn key_token(key: u64) -> i32 {
+    key as u32 as i32
+}
+
+/// Radix digit width for the logit half of a [`candidate_key`]: three passes
+/// of 11/11/10 bits, whose histograms stay in L1 (two 16-bit passes measured
+/// slower on a full vocabulary).
+const ORDER_DIGIT_BITS: u32 = 11;
+const ORDER_DIGITS: usize = 32usize.div_ceil(ORDER_DIGIT_BITS as usize);
+const ORDER_BUCKETS: usize = 1 << ORDER_DIGIT_BITS;
+const ORDER_DIGIT_MASK: u32 = (1 << ORDER_DIGIT_BITS) - 1;
+
+/// Working memory reused across one sampler's calls. It holds no sampler
+/// state: every call overwrites what it reads, and clones start empty.
+#[derive(Default)]
+struct SampleBuffers {
+    keys: Vec<u64>,
+    scratch: Vec<u64>,
+    histograms: Vec<[u32; ORDER_BUCKETS]>,
+    cumulative: Vec<f64>,
+}
+
+impl Clone for SampleBuffers {
+    fn clone(&self) -> Self {
+        Self::default()
+    }
+}
+
+impl std::fmt::Debug for SampleBuffers {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SampleBuffers")
+            .field("keys_capacity", &self.keys.capacity())
+            .finish_non_exhaustive()
+    }
+}
+
+/// Fill `buffers.keys` with every candidate's key and order the first
+/// returned count of them in [`candidate_order`]: the whole row when top-k is
+/// off, else the `top_k` best. Fails like sampler-v1 on an empty or oversized
+/// row and on the lowest-token NaN.
+fn order_candidate_keys(
+    logits: &[f32],
+    top_k: usize,
+    buffers: &mut SampleBuffers,
+) -> Result<usize, SamplingError> {
+    validate_logits_shape(logits)?;
+    if top_k == 0 || top_k >= logits.len() {
+        full_order_keys(logits, buffers)?;
+        return Ok(logits.len());
+    }
+    let keys = &mut buffers.keys;
+    keys.resize(logits.len(), 0);
+    for (token, (&logit, key)) in logits.iter().zip(keys.iter_mut()).enumerate() {
+        if logit.is_nan() {
+            return Err(SamplingError::NanLogit { token });
+        }
+        *key = candidate_key(token, logit);
+    }
+    // Keys are distinct (they carry the token), so the selected set and its
+    // order are the comparator's.
+    keys.select_nth_unstable(top_k);
+    keys[..top_k].sort_unstable();
+    Ok(top_k)
+}
+
+/// Every key in [`candidate_order`]. Keys are built in ascending token order
+/// and a stable LSD radix sort over only the logit half keeps equal logits in
+/// that order, which is the comparator's tie-break; the token half needs no
+/// passes. Digit histograms are taken while building, and a digit every key
+/// shares is skipped.
+fn full_order_keys(logits: &[f32], buffers: &mut SampleBuffers) -> Result<(), SamplingError> {
+    let len = logits.len();
+    let SampleBuffers {
+        keys,
+        scratch,
+        histograms,
+        ..
+    } = buffers;
+    keys.resize(len, 0);
+    histograms.resize(ORDER_DIGITS, [0; ORDER_BUCKETS]);
+    for histogram in histograms.iter_mut() {
+        histogram.fill(0);
+    }
+    for (token, (&logit, key)) in logits.iter().zip(keys.iter_mut()).enumerate() {
+        if logit.is_nan() {
+            return Err(SamplingError::NanLogit { token });
+        }
+        let bits = descending_logit_bits(logit);
+        *key = (u64::from(bits) << 32) | token as u64;
+        for (digit, histogram) in histograms.iter_mut().enumerate() {
+            let bucket = (bits >> (digit as u32 * ORDER_DIGIT_BITS)) & ORDER_DIGIT_MASK;
+            histogram[bucket as usize] += 1;
+        }
+    }
+    if len < 2 {
+        return Ok(());
+    }
+    scratch.resize(len, 0);
+    for (digit, histogram) in histograms.iter_mut().enumerate() {
+        let shift = 32 + digit as u32 * ORDER_DIGIT_BITS;
+        let first = ((keys[0] >> shift) as u32 & ORDER_DIGIT_MASK) as usize;
+        if histogram[first] as usize == len {
+            continue;
+        }
+        let mut offset = 0u32;
+        for count in histogram.iter_mut() {
+            let next = offset + *count;
+            *count = offset;
+            offset = next;
+        }
+        for &key in keys.iter() {
+            let bucket = ((key >> shift) as u32 & ORDER_DIGIT_MASK) as usize;
+            scratch[histogram[bucket] as usize] = key;
+            histogram[bucket] += 1;
+        }
+        std::mem::swap(keys, scratch);
+    }
+    Ok(())
+}
+
+/// Every candidate in [`candidate_order`] (see [`full_order_keys`]).
 fn fully_ordered_candidates(logits: &[f32]) -> Result<Vec<Candidate>, SamplingError> {
+    let mut buffers = SampleBuffers::default();
+    full_order_keys(logits, &mut buffers)?;
+    Ok(buffers
+        .keys
+        .into_iter()
+        .map(|key| Candidate {
+            token: key_token(key),
+            logit: key_logit(key),
+        })
+        .collect())
+}
+
+/// Sampler-v1 partial sums of the categorical weights of ordered `keys`
+/// (already filtered by min-p and positive infinity), in `cumulative`.
+/// Errors exactly where [`probability_weights`] does.
+fn cumulative_weights<'a>(
+    keys: &[u64],
+    temperature: f32,
+    cumulative: &'a mut Vec<f64>,
+) -> Result<&'a [f64], SamplingError> {
+    cumulative.resize(keys.len(), 0.0);
+    let cumulative = &mut cumulative[..keys.len()];
+    let first = key_logit(keys[0]);
+    if first == f64::INFINITY {
+        let mut sum = -0.0;
+        for partial in cumulative.iter_mut() {
+            sum += 1.0;
+            *partial = sum;
+        }
+        return Ok(cumulative);
+    }
+
+    let temperature = f64::from(temperature);
+    let finite = if temperature == 1.0 {
+        exp_partial_sums(keys, cumulative, |logit| logit)?
+    } else {
+        exp_partial_sums(keys, cumulative, |logit| logit / temperature)?
+    };
+    if !finite {
+        return Err(SamplingError::NoCandidates);
+    }
+    Ok(cumulative)
+}
+
+/// Sampler-v1's top-p count: one past the first partial sum `>=` the target
+/// fraction of the total, else every candidate. `cumulative` is non-empty,
+/// finite and non-decreasing, so the scan's answer is a binary search.
+fn top_p_keep(cumulative: &[f64], top_p: f64) -> usize {
+    let target = cumulative[cumulative.len() - 1] * top_p;
+    (cumulative.partition_point(|&sum| sum < target) + 1).min(cumulative.len())
+}
+
+/// Sampler-v1's categorical pick: the first partial sum `>` the target, else
+/// the last candidate. `cumulative` is non-empty, finite and non-decreasing
+/// and the target finite, so the scan's answer is a binary search.
+fn categorical_index(cumulative: &[f64], target: f64) -> usize {
+    cumulative
+        .partition_point(|&sum| sum <= target)
+        .min(cumulative.len() - 1)
+}
+
+/// `cumulative[i] = -0.0 + w[0] + ... + w[i]` with
+/// `w[i] = exp(scale(l[i]) - scale(l[0]))`; returns whether every weight was
+/// finite.
+#[inline(always)]
+fn exp_partial_sums(
+    keys: &[u64],
+    cumulative: &mut [f64],
+    scale: impl Fn(f64) -> f64,
+) -> Result<bool, SamplingError> {
+    let max_logit = scale(key_logit(keys[0]));
+    if max_logit == f64::NEG_INFINITY {
+        return Err(SamplingError::NoCandidates);
+    }
+    let mut sum = -0.0;
+    let mut finite = true;
+    for (partial, &key) in cumulative.iter_mut().zip(keys) {
+        let weight = (scale(key_logit(key)) - max_logit).exp();
+        finite &= weight.is_finite();
+        sum += weight;
+        *partial = sum;
+    }
+    Ok(finite)
+}
+
+/// The `u64` radix-sorted full order `fully_ordered_candidates` used before
+/// the logit-half sort, kept as the equivalence reference.
+#[cfg(test)]
+fn reference_fully_ordered_candidates(logits: &[f32]) -> Result<Vec<Candidate>, SamplingError> {
     let mut keys = Vec::with_capacity(logits.len());
     for (token, &logit) in logits.iter().enumerate() {
         if logit.is_nan() {
@@ -1088,7 +1407,7 @@ fn fully_ordered_candidates(logits: &[f32]) -> Result<Vec<Candidate>, SamplingEr
         }
         keys.push(candidate_key(token, logit));
     }
-    radix_sort_u64(&mut keys);
+    reference_radix_sort_u64(&mut keys);
     Ok(keys
         .into_iter()
         .map(|key| {
@@ -1101,8 +1420,22 @@ fn fully_ordered_candidates(logits: &[f32]) -> Result<Vec<Candidate>, SamplingEr
         .collect())
 }
 
+/// The candidate-vector ordering `sample` used before keys.
+#[cfg(test)]
+fn reference_sorted_candidates(
+    logits: &[f32],
+    top_k: usize,
+) -> Result<Vec<Candidate>, SamplingError> {
+    validate_logits_shape(logits)?;
+    if top_k == 0 || top_k >= logits.len() {
+        return reference_fully_ordered_candidates(logits);
+    }
+    sorted_candidates(logits, top_k)
+}
+
 /// Stable LSD radix sort, 16-bit digits, skipping digits every key shares.
-fn radix_sort_u64(keys: &mut Vec<u64>) {
+#[cfg(test)]
+fn reference_radix_sort_u64(keys: &mut Vec<u64>) {
     const BITS: u32 = 16;
     const BUCKETS: usize = 1 << BITS;
     if keys.len() < 2 {
@@ -1604,10 +1937,14 @@ mod tests {
         for row in &rows {
             let expected = comparator(row);
             let actual = fully_ordered_candidates(row).unwrap();
+            let reference = reference_fully_ordered_candidates(row).unwrap();
             assert_eq!(actual.len(), expected.len());
-            for (a, e) in actual.iter().zip(&expected) {
+            assert_eq!(reference.len(), expected.len());
+            for ((a, r), e) in actual.iter().zip(&reference).zip(&expected) {
                 assert_eq!(a.token, e.token);
                 assert_eq!(a.logit.to_bits(), e.logit.to_bits());
+                assert_eq!(r.token, e.token);
+                assert_eq!(r.logit.to_bits(), e.logit.to_bits());
             }
         }
         assert!(matches!(
@@ -2663,6 +3000,329 @@ mod tests {
             }
             assert_eq!(sampler.draws(), 0);
             assert_eq!(sampler.rng.state, state);
+        }
+    }
+
+    /// Rows for the key-ordered sampler's equivalence corpus: logit-like,
+    /// peaked, quantized (tie-heavy), special-value, random-bit, huge-range,
+    /// infinite, all-negative-infinity, subnormal, signed-zero and NaN rows.
+    fn equivalence_rows(
+        rng: &mut Xoshiro256PlusPlus,
+        len: usize,
+        families: usize,
+    ) -> Vec<Vec<f32>> {
+        fn normal(rng: &mut Xoshiro256PlusPlus) -> f32 {
+            ((0..12).map(|_| rng.next_unit_f64()).sum::<f64>() - 6.0) as f32
+        }
+        fn index(rng: &mut Xoshiro256PlusPlus, len: usize) -> usize {
+            (rng.next_u64() % len as u64) as usize
+        }
+        let specials = [
+            0.0,
+            -0.0,
+            f32::INFINITY,
+            f32::NEG_INFINITY,
+            f32::MIN_POSITIVE,
+            -f32::MIN_POSITIVE,
+            f32::from_bits(1),
+            f32::from_bits(0x8000_0001),
+            f32::MAX,
+            f32::MIN,
+            1.0,
+            -1.0,
+        ];
+        let mut rows: Vec<Vec<f32>> = Vec::new();
+        let mut logit_like: Vec<f32> = (0..len).map(|_| normal(rng) * 2.5).collect();
+        for _ in 0..3 {
+            let token = index(rng, len);
+            logit_like[token] += 8.0 + 12.0 * rng.next_unit_f64() as f32;
+        }
+        rows.push(logit_like);
+        let mut peaked: Vec<f32> = (0..len).map(|_| normal(rng)).collect();
+        let token = index(rng, len);
+        peaked[token] += 40.0;
+        rows.push(peaked);
+        rows.push(
+            (0..len)
+                .map(|_| f32::from_bits((normal(rng) * 3.0).to_bits() & 0xffff_0000))
+                .collect(),
+        );
+        rows.push(
+            (0..len)
+                .map(|_| specials[index(rng, specials.len())])
+                .collect(),
+        );
+        let mut nan: Vec<f32> = (0..len).map(|_| normal(rng)).collect();
+        let token = index(rng, len);
+        nan[token] = f32::NAN;
+        if token > 0 {
+            nan[index(rng, token)] = f32::NAN;
+        }
+        rows.push(nan);
+        let mut infinite: Vec<f32> = (0..len).map(|_| normal(rng)).collect();
+        for _ in 0..2 {
+            let token = index(rng, len);
+            infinite[token] = f32::INFINITY;
+        }
+        rows.push(infinite);
+        rows.push(
+            (0..len)
+                .map(|_| (rng.next_u64() % 4) as f32 - 1.5)
+                .collect(),
+        );
+        rows.push(
+            (0..len)
+                .map(|_| {
+                    let value = f32::from_bits(rng.next_u64() as u32);
+                    if value.is_nan() { f32::MAX } else { value }
+                })
+                .collect(),
+        );
+        rows.push(
+            (0..len)
+                .map(|_| ((rng.next_unit_f64() * 2.0 - 1.0) * 3.0e38) as f32)
+                .collect(),
+        );
+        rows.push(vec![2.5; len]);
+        rows.push(vec![f32::NEG_INFINITY; len]);
+        let mut one_finite = vec![f32::NEG_INFINITY; len];
+        let token = index(rng, len);
+        one_finite[token] = -1.0e30;
+        rows.push(one_finite);
+        rows.push(
+            (0..len)
+                .map(|_| f32::from_bits(rng.next_u64() as u32 & 0x807f_ffff))
+                .collect(),
+        );
+        rows.push(
+            (0..len)
+                .map(|_| [0.0, -0.0, 0.0, -1.0][index(rng, 4)])
+                .collect(),
+        );
+        rows.truncate(families);
+        rows
+    }
+
+    #[derive(Default)]
+    struct EquivalenceCoverage {
+        sampled: usize,
+        past_first: usize,
+        nan: usize,
+        no_candidates: usize,
+        empty: usize,
+    }
+
+    /// One call of the key-ordered sampler against the candidate-vector
+    /// reference: same token, candidate index, total bits, error, draw count
+    /// and RNG state.
+    fn assert_sample_matches_reference(
+        fast: &mut Sampler,
+        reference: &mut Sampler,
+        logits: &[f32],
+        coverage: &mut EquivalenceCoverage,
+        label: &dyn Fn() -> String,
+    ) {
+        let expected = reference.reference_sample(logits);
+        let actual = if fast.config.temperature == 0.0 {
+            fast.sample(logits).map(|sampled| (sampled, 1.0))
+        } else {
+            fast.sample_ordered(logits)
+        };
+        match (&actual, &expected) {
+            (Ok((sampled, total)), Ok((expected_sampled, expected_total))) => {
+                assert_eq!(sampled, expected_sampled, "{}", label());
+                assert_eq!(total.to_bits(), expected_total.to_bits(), "{}", label());
+                coverage.sampled += 1;
+                coverage.past_first += usize::from(sampled.candidate_index > 0);
+            }
+            (Err(error), Err(expected_error)) => {
+                assert_eq!(error, expected_error, "{}", label());
+                match error {
+                    SamplingError::NanLogit { .. } => coverage.nan += 1,
+                    SamplingError::NoCandidates => coverage.no_candidates += 1,
+                    SamplingError::EmptyLogits => coverage.empty += 1,
+                    _ => {}
+                }
+            }
+            _ => panic!("{}: fast={actual:?} reference={expected:?}", label()),
+        }
+        assert_eq!(fast.draws(), reference.draws(), "{}", label());
+        assert_eq!(fast.rng.state, reference.rng.state, "{}", label());
+    }
+
+    fn equivalence_configs(
+        temperatures: &[f32],
+        top_ks: &[usize],
+        top_ps: &[f32],
+        min_ps: &[f32],
+    ) -> Vec<SamplingConfig> {
+        let mut configs = Vec::new();
+        for &temperature in temperatures {
+            for &top_k in top_ks {
+                for &top_p in top_ps {
+                    for &min_p in min_ps {
+                        configs.push(SamplingConfig {
+                            temperature,
+                            top_k,
+                            top_p,
+                            min_p,
+                            seed: 0x9e37_79b9_7f4a_7c15 ^ configs.len() as u64,
+                        });
+                    }
+                }
+            }
+        }
+        configs
+    }
+
+    /// The key-ordered `sample` is bitwise sampler-v1 on short rows around the
+    /// radix digit boundaries, across temperatures (including a subnormal and
+    /// greedy), top-k (off, 1, 2, interior, length - 1, beyond the row), top-p
+    /// and min-p, with each sampler reused across lengths and periodically
+    /// cloned (buffers are not state).
+    #[test]
+    fn key_ordered_sampler_matches_reference_on_short_rows() {
+        let mut rng = Xoshiro256PlusPlus::from_seed(0xc0de_5eed);
+        let mut rows: Vec<Vec<f32>> = vec![Vec::new()];
+        for len in [1, 2, 3, 5, 64, 2047, 2049] {
+            rows.extend(equivalence_rows(&mut rng, len, usize::MAX));
+        }
+        let configs = equivalence_configs(
+            &[1.0, 0.7, 1.5, 1.0e-3, f32::from_bits(1), 1.0e4, 0.0],
+            &[0, 1, 2, 40, 2048, 1 << 20],
+            &[1.0, 0.95, 0.5, 1.0e-7],
+            &[0.0, 0.05, 1.0, 1.0e-30],
+        );
+        let mut coverage = EquivalenceCoverage::default();
+        for (config_index, &config) in configs.iter().enumerate() {
+            let mut fast = sampler(config);
+            let mut reference = sampler(config);
+            for (row_index, row) in rows.iter().enumerate() {
+                if row_index % 17 == 16 {
+                    fast = fast.clone();
+                }
+                assert_sample_matches_reference(
+                    &mut fast,
+                    &mut reference,
+                    row,
+                    &mut coverage,
+                    &|| {
+                        format!(
+                            "config {config_index} {config:?} row {row_index} len {}",
+                            row.len()
+                        )
+                    },
+                );
+            }
+        }
+        assert!(coverage.sampled > 10_000 && coverage.past_first > 1_000);
+        assert!(coverage.nan > 0 && coverage.no_candidates > 0 && coverage.empty > 0);
+    }
+
+    /// The same equivalence at the V4.1 vocabulary (129,280) for the release
+    /// default and the top-p, top-k and min-p shapes callers pass.
+    #[test]
+    fn key_ordered_sampler_matches_reference_at_v41_vocabulary() {
+        let mut rng = Xoshiro256PlusPlus::from_seed(0x0012_9280);
+        let rows = equivalence_rows(&mut rng, 129_280, 9);
+        let configs = equivalence_configs(
+            &[1.0, 0.7, f32::from_bits(1)],
+            &[0, 40, 129_279],
+            &[1.0, 0.95],
+            &[0.0, 0.05],
+        );
+        let mut coverage = EquivalenceCoverage::default();
+        for (config_index, &config) in configs.iter().enumerate() {
+            let mut fast = sampler(config);
+            let mut reference = sampler(config);
+            for _ in 0..2 {
+                for (row_index, row) in rows.iter().enumerate() {
+                    assert_sample_matches_reference(
+                        &mut fast,
+                        &mut reference,
+                        row,
+                        &mut coverage,
+                        &|| format!("config {config_index} {config:?} row {row_index}"),
+                    );
+                }
+            }
+        }
+        assert!(coverage.sampled > 500 && coverage.past_first > 100 && coverage.nan > 0);
+    }
+
+    /// The binary searches give the linear scans' answers at and around every
+    /// partial sum, with zero, tied, tiny and huge weights, and the `-0.0`
+    /// partial sums equal the scans' `+0.0` ones.
+    #[test]
+    fn top_p_and_categorical_searches_match_the_linear_scans() {
+        let mut rng = Xoshiro256PlusPlus::from_seed(0x5ea7c4);
+        let mut weight_rows: Vec<Vec<f64>> = vec![
+            vec![1.0],
+            vec![1.0, 0.0, 0.0],
+            vec![1.0, 1.0, 1.0, 1.0],
+            vec![1.0, 1.0e-300, 0.0, 1.0e-17, 1.0e-17],
+            vec![1.0, 0.5, 0.25, 0.125, 0.0625],
+        ];
+        for len in [2, 7, 100] {
+            weight_rows.push(
+                std::iter::once(1.0)
+                    .chain((1..len).map(|_| (-(rng.next_unit_f64() * 40.0)).exp()))
+                    .collect(),
+            );
+        }
+        for weights in &weight_rows {
+            let mut cumulative = Vec::new();
+            let mut sum = -0.0;
+            for weight in weights {
+                sum += weight;
+                cumulative.push(sum);
+            }
+            let total: f64 = weights.iter().sum();
+            assert_eq!(cumulative[cumulative.len() - 1].to_bits(), total.to_bits());
+
+            let mut fractions = vec![1.0e-7, 0.5, 0.95, 0.999_999];
+            for &partial in &cumulative {
+                let fraction = partial / total;
+                fractions.extend([fraction, fraction.next_up(), fraction.next_down()]);
+            }
+            for top_p in fractions {
+                let target = total * top_p;
+                let mut scan = 0.0;
+                let mut keep = 0usize;
+                for weight in weights {
+                    scan += *weight;
+                    keep += 1;
+                    if scan >= target {
+                        break;
+                    }
+                }
+                assert_eq!(
+                    top_p_keep(&cumulative, top_p),
+                    keep.max(1),
+                    "{weights:?} {top_p}"
+                );
+            }
+
+            let mut targets = vec![0.0, total * 0.5, total.next_down()];
+            for &partial in &cumulative {
+                targets.extend([partial, partial.next_up(), partial.next_down()]);
+            }
+            for target in targets {
+                let mut scan = 0.0;
+                let mut expected = weights.len() - 1;
+                for (index, weight) in weights.iter().enumerate() {
+                    scan += *weight;
+                    if target < scan {
+                        expected = index;
+                        break;
+                    }
+                }
+                assert_eq!(
+                    categorical_index(&cumulative, target),
+                    expected,
+                    "{weights:?} {target}"
+                );
+            }
         }
     }
 }

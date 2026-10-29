@@ -6,6 +6,19 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the current state and evidence index.
 
+## 2026-10-29 - V4.1 Fixed-8K Encoder Passes CPU Feasibility, Execution Still Closed
+
+Research `96325bc9`: all 350 library CPU tests pass, including eight new 8K
+plan/pricing/lineage controls; non-test release library typecheck passes too.
+For the executed model-shaped synthetic fixture at capacity 8448, one 8K chunk
+has 190.93 MiB lower synthetically priced Metal demand and 24 MiB higher CPU
+demand than two pipelined 4K chunks; the largest logical allocation doubles to
+1 GiB. This is not actual device admission or a speedup. Two pre-existing failures
+are repaired without raising the 128 MiB cap or disabling pipelining; all 26 quotes
+fit. Original failures remain preserved. Production encoder ceiling 4096,
+decoder replay 2048 and 8K execution guards are unchanged. Method and limits:
+`docs/bench/2026-10-29-v41-encoder8k-cpu-result.md`.
+
 ## 2026-10-29 - V4.1 Small-Resource GateUp Is Exact But Below The Real-Route Gate
 
 M5 Ultra, research `2258eba6`, fixed ordinary layer8/start0/actual1024 GateUp:

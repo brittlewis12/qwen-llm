@@ -8,6 +8,11 @@
 # table test.
 set -euo pipefail
 
+if [ "${QWEN_METAL_LEASE_FD+x}" = x ]; then
+  echo "check-contracts: CPU-only contracts refuse an inherited GPU lease; run without QWEN_METAL_LEASE_FD" >&2
+  exit 2
+fi
+
 full=0
 case "${1:-}" in
   "") ;;
@@ -106,19 +111,17 @@ uv run scripts/qualification-witnesses.py --self-test
 uv run scripts/reference/normalize_paths.py --self-test
 uv run scripts/reference/normalize_paths.py --check
 uv run scripts/reference/acceptance_inventory.py --self-test
+uv run --no-project python scripts/reference/test_contracts_unleased.py
 uv run --no-project python scripts/reference/deepseek_v41/check.py
-cpu_leased() {
-  QWEN_METAL_LEASE_WAIT=1 uv run scripts/bench/with-metal-lease -- "$@"
-}
 # Discovery checks every full name and ignore state before executing only CPU
 # entries. GPU, model, timing and external-fixture witnesses remain explicit
 # exclusions, including self-leased tests which must not inherit this lease.
 # The inventory refuses an inherited GPU lease: it runs CPU-only tests.
 uv run scripts/reference/acceptance_inventory.py
 if [ "$full" -eq 1 ]; then
-  cpu_leased cargo test --release --workspace --no-run
+  cargo test --offline --locked --release --workspace --no-run
   release_qwen=$(
-    cpu_leased cargo build --release -p qwen-cli --bin qwen --message-format=json |
+    cargo build --offline --locked --release -p qwen-cli --bin qwen --message-format=json |
       uv run --no-project python -c '
 import json
 import sys
@@ -171,11 +174,11 @@ print(executables[0])
   fi
 fi
 
-cpu_leased cargo test --release -p qwen-llm --test comparison_tripwire
+cargo test --offline --locked --release -p qwen-llm --test comparison_tripwire
 if [ "$full" -eq 1 ]; then
   readme_test=family_profile::tests::readme_family_table_matches_profiles
   status=0
-  output=$(cpu_leased cargo test --release -p qwen-cli --bin qwen -- --exact "$readme_test" 2>&1) ||
+  output=$(cargo test --offline --locked --release -p qwen-cli --bin qwen -- --exact "$readme_test" 2>&1) ||
     status=$?
   printf '%s\n' "$output"
   [ "$status" -eq 0 ] || exit "$status"

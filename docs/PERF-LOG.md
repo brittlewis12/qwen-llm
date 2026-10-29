@@ -6,6 +6,73 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the current state and evidence index.
 
+## 2026-10-29 - V4.1 CED Encoder GPU Attribution: Attention 54%, FFN 46%
+
+- Full 8K per-layer stage profile on main `508bf6e3`: 7,453.3 ms GPU,
+  attention 3,991.7 (53.6%; tiles 1,850.0, finish_post 1,107.0, prepare
+  664.4, hc 208.0, serial 162.3), FFN 3,439.6 (46.1%).
+- Extrapolated CED encoder (3,337.7 ms): attention ~1,788, FFN ~1,540. A
+  10% complete attention-core cut is ~179 ms (4.1% wall); 20% is ~358 ms.
+- Next: bounded half-operand reuse for attention (tiles, prepare,
+  finish_post), keeping the arithmetic sequence; at least 1% wall before
+  integration. [Packet](bench/2026-10-29-v41-ced-gpu-attribution.md). Raw:
+  `~/qwen-runs/2026-10-29-v41-ced-timeline/`.
+
+## 2026-10-29 - V4.1 Q5_K Dense Decode Specialization: Bitwise, -5% End To End, Not Landed
+
+- Kill test, M5 Ultra, isolated decode probe (weights rotating through
+  copies so rows stream from DRAM), routed split kernel vs the best bitwise
+  variant, us per dispatch:
+
+  | shape | split | best bitwise | speedup |
+  |---|---|---|---|
+  | q_b 1280 -> 32768 | 36.3 | 34.9 (two rows in sequence) | 1.04x |
+  | attn output_a 8 x 4096 -> 1024 | 24.1 | none | 1.00x |
+  | attn output_b 8192 -> 5120 | 29.9 | 28.9 (2 simdgroups, unrouted) | 1.03x |
+  | shared gate + up + SwiGLU (3 dispatches) | 24.2 | 17.9 (fused) | 1.35x |
+  | shared down 2304 -> 5120 | 12.0 | 11.4 (unrouted) | 1.06x |
+  | head 5120 -> 129280 | 388 (1.17 TB/s) | none | 1.00x |
+  | per-token mix | 5.45 ms | 5.07 ms | **1.074x** |
+
+  Below the 1.10x bar for broad specialization. Compile-time K and 64-thread
+  groups alone are neutral; skipping the routing preamble is 3-10% on the
+  small GEMVs, in isolation.
+- Bitwise needs the production body text: restructuring the split kernel's
+  loop (activation loads shared across channels, a `float sum[ROWS]` array,
+  even at ROWS = 1) changed ~70% of outputs with the same expression order,
+  because fast math contracts the restructured body differently. Only
+  minimal edits stay bitwise (constant K, threadgroup shape, routing
+  removed, rows in an outer loop with unrolling disabled).
+- llama.cpp correction: its faster test-backend-ops numbers come from
+  cache-resident repeats of one weight, not a better kernel. Its Q5_K
+  mul_mv uses our split kernel's lane mapping and arithmetic; with one
+  warm copy ours matches it (output_b 23.7 vs 23.5 us, q_b 34.5 vs 34.7,
+  gate 9.9 vs 9.8, down 11.3 vs 11.5).
+- Integration (branch `perf/v41-q5k-spec` `278027cb`, parked):
+  `QWEN_V41_Q5K_SPEC` routes single-sequence q_b, output_b and shared down
+  through the unrouted kernels and the shared gate/up/SwiGLU through one
+  fused dispatch. Bitwise at the real and ragged shapes, census as
+  designed, 80 fewer dispatches per token.
+- GSQ IQ2_XS, knob on vs off, 8 arms ABBA BAAB, each its own lease after a
+  120 s cool-down, median: tg64@d0 (warm second run) 80.63 -> 75.43 tok/s
+  (12.40 -> 13.26 ms/token, **0.936x**); tg32@d8192 73.70 -> 69.77 tok/s
+  (13.57 -> 14.33 ms/token, **0.947x**). Every on sample is below every off
+  sample at 8192 and among the warm d0 runs.
+- Per-site ablation, tg32@d8192, 2 cooled arms each, ms/token added vs off
+  (13.54): fused gate/up +0.46, output_b +0.17, q_b +0.14, shared down
+  +0.13, all +0.79. No site is a net win.
+- Cause: the isolated probe does not predict the decode stream. Unsplit
+  decode GPU time rises 12.14 -> 12.95 ms/token. Timing each dispatch in its
+  own encoder shows the old stream overlapping independent dispatches: up
+  starts ~15 us before gate ends, and the router (which only reads the FFN
+  input) overlaps the shared chain. The fused gate/up -> down is a strict
+  dependency chain, and the router running beside it stretches 7.9 -> 31 us.
+  In situ the unrouted kernels are not faster either (q_b 39.6 -> 40.7 us,
+  output_b 33.9 -> 35.2, down 16.4 -> 16.9).
+- Next: judge decode kernels in the stream, not in isolation. Any shared
+  expert fusion has to keep the router's overlap, for example by encoding
+  the router before the shared expert.
+
 ## 2026-10-29 - V4.1 Engram Row Dedup: Closed Negative
 
 - The synthetic 8K suite prompt is uniformly novel (xorshift over the model

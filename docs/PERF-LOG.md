@@ -6,6 +6,20 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the current state and evidence index.
 
+## 2026-10-28 - V4.1 Two-SIMD Small-Resource GateUp Passes Target Bit Proof
+
+M5 Ultra, research `8ebb8c63`: counts 1..16 use dedicated 16x32xK32 IQ2_XXS
+PSOs; larger counts retain the incumbent. Actual small PSOs report width32,
+64 max threads, zero static shared bytes and 3072 dynamic bytes (large launch
+128 threads /8192 dynamic). All eight standalone GPU cohorts pass exact raw
+Gate/final Up, live-store coverage, ordered A2/B4 census, poison, guards and
+full input/control/bank integrity; the same frozen binary passes 403 CPU tests.
+
+Correctness only: synthetic clamp7, no model/timing/default or occupancy claim.
+The separate actual-route clamp10/A2-vs-B4 economics gate remains ahead. Method,
+source identities, resource facts and limits:
+`docs/bench/2026-10-28-v41-small-resource-proof.md`.
+
 ## 2026-10-28 - V4.1 Token-K32 GateUp Is Exact But Misses Pack-Inclusive Economics
 
 M5 Ultra, research `1378c2ce`, fixed actual-route ordinary 1K layer-8 GateUp:

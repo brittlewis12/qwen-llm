@@ -790,7 +790,7 @@ impl Fixture {
     fn encode_tensor64_qkvhalf(&self, ctx: &MetalContext, enc: &KernelEncoder) {
         self.bind_half(enc);
         enc.set_tensor(2, &self.query_half);
-        tensor_pipeline(ctx, enc, "score_tensor64_qhalf").unwrap();
+        tensor_pipeline(ctx, enc, "score_tensor64_qkvhalf").unwrap();
         grid(enc, 1, self.n, 1, 128);
         pipeline(ctx, enc, "softmax_rows").unwrap();
         grid(enc, H, self.n, 1, 32);

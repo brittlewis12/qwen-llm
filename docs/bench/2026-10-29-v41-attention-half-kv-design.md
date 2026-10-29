@@ -42,10 +42,13 @@ shown by the existing Full/CED pair and qualification.
 
 - Full 8K attention tiles: 1,850.0 ms of 7,453.3 ms GPU; the CED encoder
   equivalent is about 925 ms.
-- Per encoder query the union of window and selected keys is about 1,024;
-  F32 K/V reads are 1,024 x 512 x 4 B x 2 consumers, about 4 MiB per query.
-  Over 163,840 encoder queries that is about 687 GB of F32 K/V traffic.
-  Half mirrors halve those bytes and remove one of the two conversions.
+- Per encoder query the union of window and selected keys is at most
+  **640** (128 window + 512 selected), not 1,024. F32 K/V reads are
+  640 x 512 x 4 B x 2 consumers, about 2.5 MiB per query; over 163,840
+  encoder queries that is about 430 GB of F32 K/V traffic. Half mirrors
+  halve those bytes and remove one of the two conversions. The probe used
+  the real 640-key fixture, so the measured result is unaffected; the
+  traffic extrapolation was overstated.
 - A 10% tile-kernel reduction is about 92 ms (2.1% of the 4.38 s wall); 20%
   is about 185 ms (4.2%). This is consistent with the attribution's 179 ms
   for a 10% complete attention-core cut.

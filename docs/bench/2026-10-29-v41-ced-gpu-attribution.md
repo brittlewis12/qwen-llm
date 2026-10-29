@@ -39,14 +39,25 @@ Full 8K, two chunks, GPU **7,453.3 ms**:
 | - shared | 606.8 | 8.1% |
 | - route/router/sum/hc/mid | 439.1 | 5.9% |
 
-Extrapolated to the CED encoder (3,337.7 ms GPU): attention **~1,788 ms**
-(tiles ~925, finish_post ~553, prepare ~332, hc ~104, serial ~81), FFN
-**~1,540 ms**, plus publication/retention.
+Re-aggregated for encoder layers 0-19 only (the earlier packet used the
+40-layer average; the halves differ little, but the per-stage split was
+wrong): attention **1,967.3 ms** (hc 157.2, prepare 338.3, serial 39.7,
+tiles 878.5, finish_post 553.6), FFN **1,708.5 ms**. The Full 0-19 total is
+3,675.8 ms; the measured CED encoder is 3,337.7 ms (0.908x), so the CED
+encoder's attention is **~1,786 ms** (tiles ~798, finish_post ~503, prepare
+~307, hc ~143, serial ~36) and FFN **~1,551 ms**, plus publication/retention.
 
-The QK+PV work is roughly 22 TFLOP over the 20 encoder layers, about
-**12.3 TFLOPS** against the 129.6 TFLOPS resident-half ceiling and the
-32.1 TFLOPS band-QK probe. The pure GEMMs are not the limit; gather,
-conversion, finish/projection and the scalar core dominate.
+The key count is **128 window + 512 selected = at most 640 per query**, not
+1,024. Useful encoder QK+PV is about **12 TFLOP** over the 20 layers, so the
+attention runs about **6.7 TFLOPS** against the 129.6 TFLOPS resident-half
+ceiling and the 32.1 TFLOPS band-QK probe. The pure GEMMs are not the limit;
+gather, conversion, finish/projection and the scalar core dominate.
+
+The score kernel also reloads and converts the whole query for every 32-key
+panel: at 640 keys that is twenty traversals of a 128 KiB query, about
+**2.5 MiB of logical query loads per query**. That is twice the K/V logical
+load (about 1.25 MiB), and the half-KV probe did not remove it. A
+query-resident partition is a distinct attention-dataflow premise.
 
 ## Budget
 
@@ -69,4 +80,5 @@ encoder's publication/retention and its 20-layer selection are not in the
 Full profile. Stage intervals are sampled GPU envelopes, not exclusive
 resource costs, and the machine state affects absolute values. The
 extrapolation is an attribution tool, not a measurement of the CED kernel
-mix.
+mix. Cooldown arms measure burst performance; continuous runs and real
+prompts are separate observations.

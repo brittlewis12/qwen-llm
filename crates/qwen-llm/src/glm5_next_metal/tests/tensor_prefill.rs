@@ -14,6 +14,9 @@ use objc2_metal::{MTLBuffer, MTLCommandQueue, MTLGPUFamily};
 #[path = "tensor_q8_wide.rs"]
 mod q8_wide;
 
+#[path = "kda_half_inputs_gpu.rs"]
+mod kda_half_inputs;
+
 const HALF: Arith = Arith {
     lineage: PackedLineage::Fast,
     precision: FastPrecision::Half,

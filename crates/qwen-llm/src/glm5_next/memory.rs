@@ -23,6 +23,71 @@ pub const DYNAMIC_RESERVE_BYTES: u64 = 512 * 1024 * 1024;
 /// Page granule of the device-free Apple silicon pricing profile.
 pub const APPLE_16K_GRANULE: u64 = 16 * 1024;
 
+crate::env_flag!(
+    /// Opt-in once-per-KDA-block half activation staging; never enables TensorOps.
+    default_off kda_half_inputs_flag,
+    "QWEN_GLM53_KDA_HALF_INPUTS"
+);
+
+#[cfg(test)]
+thread_local! {
+    static KDA_HALF_INPUTS: std::cell::Cell<Option<bool>> = const { std::cell::Cell::new(None) };
+}
+
+pub(crate) fn kda_half_inputs_enabled() -> bool {
+    #[cfg(test)]
+    if let Some(enabled) = KDA_HALF_INPUTS.with(std::cell::Cell::get) {
+        return enabled;
+    }
+    kda_half_inputs_flag()
+}
+
+/// Same-thread, nestable and unwind-safe control of only the new staging step.
+#[cfg(test)]
+pub(crate) struct KdaHalfInputsScope {
+    previous: Option<bool>,
+    _thread: std::marker::PhantomData<std::rc::Rc<()>>,
+}
+
+#[cfg(test)]
+impl KdaHalfInputsScope {
+    pub(crate) fn new(enabled: bool) -> Self {
+        Self {
+            previous: KDA_HALF_INPUTS.with(|flag| flag.replace(Some(enabled))),
+            _thread: std::marker::PhantomData,
+        }
+    }
+}
+
+#[cfg(test)]
+impl Drop for KdaHalfInputsScope {
+    fn drop(&mut self) {
+        KDA_HALF_INPUTS.with(|flag| flag.set(self.previous));
+    }
+}
+
+/// Allocation options are resolved before admission, not from mutable precision.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub(crate) struct ScratchOptions {
+    pub generic_hc: bool,
+    pub kda_half_inputs: bool,
+}
+
+impl ScratchOptions {
+    pub(crate) fn for_tensor_tier(generic_hc: bool, tensor_selected: bool) -> Self {
+        Self {
+            generic_hc,
+            kda_half_inputs: kda_half_inputs_enabled() && tensor_selected,
+        }
+    }
+
+    /// Unknown-device planning deliberately assumes an eligible M5. This can
+    /// overprice a non-M5 plan with the opt-in set, but never underprices M5.
+    pub(crate) fn device_free(generic_hc: bool) -> Self {
+        Self::for_tensor_tier(generic_hc, true)
+    }
+}
+
 /// Allocation price of one buffer of `logical_bytes`, or `None` when the
 /// buffer cannot be allocated (or its price is unrepresentable).
 pub type BufferPricer<'a> = &'a dyn Fn(u64) -> Option<u64>;
@@ -200,6 +265,40 @@ pub fn packed_generic_hc_scratch_specs(c: &Glm5NextConfig, rows: u64) -> Vec<Buf
         F32,
         &[u64::from(c.hidden_size) * 4, rows],
     )]
+}
+
+/// Exactly one reusable F16 input, sized by admitted capacity, not packet rows.
+/// The half tensor tile masks ragged rows; no padded half rows are read.
+pub(crate) fn packed_kda_half_input_specs(
+    c: &Glm5NextConfig,
+    rows: u64,
+    selected: bool,
+) -> Vec<BufferSpec> {
+    if !selected || rows < 1024 || c.block_count(MixerKind::Kda) == 0 {
+        return Vec::new();
+    }
+    vec![BufferSpec::zeros(
+        "kda_half_input",
+        F16,
+        &[u64::from(c.hidden_size), rows],
+    )]
+}
+
+pub(crate) fn packed_scratch_specs_with_options(
+    c: &Glm5NextConfig,
+    rows: u64,
+    options: ScratchOptions,
+) -> Vec<BufferSpec> {
+    let mut specs = packed_scratch_specs(c, rows);
+    if options.generic_hc {
+        specs.extend(packed_generic_hc_scratch_specs(c, rows));
+    }
+    specs.extend(packed_kda_half_input_specs(
+        c,
+        rows,
+        options.kda_half_inputs,
+    ));
+    specs
 }
 
 /// Row capacity of packed activation buffers for chunks of up to `rows`
@@ -414,6 +513,7 @@ pub fn packed_sparse_specs(c: &Glm5NextConfig, capacity: u64, rows: u64) -> Vec<
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct Glm5NextMemoryLedger {
+    options: ScratchOptions,
     capacity: u64,
     prefill_rows: u64,
     retained_weight_bytes: u64,
@@ -470,6 +570,25 @@ impl Glm5NextMemoryLedger {
         generic_hc: bool,
         price: BufferPricer<'_>,
     ) -> Result<Self> {
+        Self::new_with_options(
+            config,
+            retained_weight_bytes,
+            capacity,
+            prefill_rows,
+            ScratchOptions::device_free(generic_hc),
+            price,
+        )
+    }
+
+    pub(crate) fn new_with_options(
+        config: &Glm5NextConfig,
+        retained_weight_bytes: u64,
+        capacity: u64,
+        prefill_rows: u64,
+        options: ScratchOptions,
+        price: BufferPricer<'_>,
+    ) -> Result<Self> {
+        let generic_hc = options.generic_hc;
         config.validate_release()?;
         if capacity == 0 || capacity > u64::from(config.context_length) {
             return Err(Glm5NextError::InvalidMetadata {
@@ -516,13 +635,10 @@ impl Glm5NextMemoryLedger {
             (0, 0)
         } else {
             (
-                priced(&packed_scratch_specs(c, prefill_rows), price)?
-                    .checked_add(if generic_hc {
-                        priced(&packed_generic_hc_scratch_specs(c, prefill_rows), price)?
-                    } else {
-                        0
-                    })
-                    .ok_or_else(overflow)?,
+                priced(
+                    &packed_scratch_specs_with_options(c, prefill_rows, options),
+                    price,
+                )?,
                 times(moe, priced(&route_specs(c, Some(prefill_rows)), price)?)?,
             )
         };
@@ -545,6 +661,7 @@ impl Glm5NextMemoryLedger {
             DYNAMIC_RESERVE_BYTES,
         ])?;
         Ok(Self {
+            options,
             capacity,
             prefill_rows,
             retained_weight_bytes,
@@ -567,6 +684,10 @@ impl Glm5NextMemoryLedger {
 
     pub fn capacity(&self) -> u64 {
         self.capacity
+    }
+
+    pub(crate) fn scratch_options(&self) -> ScratchOptions {
+        self.options
     }
 
     pub fn prefill_rows(&self) -> u64 {
@@ -641,13 +762,31 @@ impl Glm5NextMemoryLedger {
         generic_hc: bool,
         price: BufferPricer<'_>,
     ) -> Result<Option<u64>> {
+        Self::max_capacity_with_options(
+            config,
+            retained_weight_bytes,
+            prefill_rows,
+            budget_bytes,
+            ScratchOptions::device_free(generic_hc),
+            price,
+        )
+    }
+
+    pub(crate) fn max_capacity_with_options(
+        config: &Glm5NextConfig,
+        retained_weight_bytes: u64,
+        prefill_rows: u64,
+        budget_bytes: u64,
+        options: ScratchOptions,
+        price: BufferPricer<'_>,
+    ) -> Result<Option<u64>> {
         let fits = |capacity: u64| -> Result<bool> {
-            let ledger = Self::new_with_generic_hc(
+            let ledger = Self::new_with_options(
                 config,
                 retained_weight_bytes,
                 capacity,
                 prefill_rows,
-                generic_hc,
+                options,
                 price,
             )?;
             Ok(ledger.peak_bytes() <= budget_bytes)

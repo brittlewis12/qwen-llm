@@ -1,6 +1,6 @@
-//! Bounded dense Half-operand TensorOps route. No expert/MLA absorption
-//! routing, buffers, or activation staging. Q8 wide defaults on for eligible
-//! M5 Fast/Half prefill; 0 restores the narrow tile.
+//! Bounded dense Half-operand TensorOps route. The KDA owner may supply an
+//! already-converted input; no expert/MLA routing or allocations here. Q8 wide
+//! defaults on for eligible M5 Fast/Half prefill; 0 restores the narrow tile.
 
 use super::packed::{Arith, FastPrecision, PackedLineage, StageMode};
 use crate::metal::checks::{
@@ -76,14 +76,15 @@ impl Tile {
         }
     }
 
+    #[cfg(test)]
     fn pipeline_name(self, dtype: GgmlType) -> Option<String> {
+        self.pipeline_for(dtype, metal::TensorActivation::F32)
+    }
+
+    fn pipeline_for(self, dtype: GgmlType, activation: metal::TensorActivation) -> Option<String> {
         match self {
-            Self::Narrow => {
-                metal::mat_mat_tensor_pipeline_name(dtype, metal::TensorActivation::F32)
-            }
-            Self::Q8Wide => {
-                metal::mat_mat_tensor_wide_pipeline_name(dtype, metal::TensorActivation::F32)
-            }
+            Self::Narrow => metal::mat_mat_tensor_pipeline_name(dtype, activation),
+            Self::Q8Wide => metal::mat_mat_tensor_wide_pipeline_name(dtype, activation),
         }
     }
 
@@ -222,8 +223,17 @@ fn capacity_supported(
 /// Resolve/cache the pipeline without touching the encoder. Pipeline failures
 /// are errors, not permission to hide a broken candidate behind the baseline.
 fn prepare(ctx: &MetalContext, dtype: GgmlType, tile: Tile) -> Result<bool, MetalError> {
+    prepare_activation(ctx, dtype, tile, metal::TensorActivation::F32)
+}
+
+fn prepare_activation(
+    ctx: &MetalContext,
+    dtype: GgmlType,
+    tile: Tile,
+    activation: metal::TensorActivation,
+) -> Result<bool, MetalError> {
     let name = tile
-        .pipeline_name(dtype)
+        .pipeline_for(dtype, activation)
         .ok_or_else(|| bad_shape(KERNEL, "no dense tensor pipeline"))?;
     let p = ctx.tensor_pipeline(&name)?;
     Ok(capacity_supported(
@@ -259,6 +269,20 @@ fn check_bindings(
     m: usize,
     n: usize,
 ) -> Result<(), MetalError> {
+    check_bindings_for(ctx, enc, weight, x, y, k, m, n, GgmlType::F32)
+}
+
+fn check_bindings_for(
+    ctx: &MetalContext,
+    enc: &KernelEncoder,
+    weight: &MetalTensor,
+    x: &MetalTensor,
+    y: &MetalTensor,
+    k: usize,
+    m: usize,
+    n: usize,
+    activation: GgmlType,
+) -> Result<(), MetalError> {
     let g = geometry(weight.dtype, k, m, n)?;
     require_serial(KERNEL, enc)?;
     if enc.ended {
@@ -272,7 +296,11 @@ fn check_bindings(
     // tensor metadata returns an error rather than panicking on overflow.
     for (t, name, expected) in [
         (weight, "weight", g.weight_bytes),
-        (x, "input", g.input_elements * size_of::<f32>()),
+        (
+            x,
+            "input",
+            g.input_elements * if activation == GgmlType::F16 { 2 } else { 4 },
+        ),
         (y, "output", g.output_elements * size_of::<f32>()),
     ] {
         check_binding_extent(&t.shape, t.dtype, expected, name)?;
@@ -292,12 +320,95 @@ fn check_bindings(
         "weight",
     )?;
     // Packed activations may retain multiple leading dimensions (heads).
-    check_tensor(KERNEL, x, GgmlType::F32, &x.shape, false, "input")?;
+    check_tensor(KERNEL, x, activation, &x.shape, false, "input")?;
     check_tensor(KERNEL, y, GgmlType::F32, &y.shape, true, "output")?;
     check_physical(KERNEL, weight, 16, false, "weight")?;
     check_alignment(KERNEL, x, 16, "float2x4 input")?;
     check_disjoint(KERNEL, y, &[(weight, "weight"), (x, "input")])?;
     Ok(())
+}
+
+/// Frozen tile and bindings. Both activation twins are resolved before any
+/// conversion; dispatch never re-selects policy (including Q8 wide rollback).
+pub(super) struct PreparedHalf {
+    tile: Tile,
+    weight: MetalTensor,
+    x: MetalTensor,
+    y: MetalTensor,
+    k: usize,
+    m: usize,
+    n: usize,
+}
+
+impl PreparedHalf {
+    pub(super) fn encode(&self, ctx: &MetalContext, enc: &KernelEncoder) -> Result<(), MetalError> {
+        match self.tile {
+            Tile::Narrow => metal::encode_mat_mat_tensor_f32_narrow(
+                ctx,
+                enc,
+                &self.weight,
+                &self.x,
+                &self.y,
+                self.k,
+                self.m,
+                self.n,
+            ),
+            Tile::Q8Wide => metal::encode_mat_mat_tensor_f32_wide(
+                ctx,
+                enc,
+                &self.weight,
+                &self.x,
+                &self.y,
+                self.k,
+                self.m,
+                self.n,
+            ),
+        }
+    }
+}
+
+pub(super) fn prepare_half(
+    ctx: &MetalContext,
+    enc: &KernelEncoder,
+    arith: Arith,
+    mode: StageMode,
+    weight: &MetalTensor,
+    original: &MetalTensor,
+    half: &MetalTensor,
+    y: &MetalTensor,
+    k: usize,
+    m: usize,
+    n: usize,
+) -> Result<Option<PreparedHalf>, MetalError> {
+    if !eligible(arith, mode, weight.dtype, k, m, n)? || !metal::moe_grouped_tensor_selected(ctx) {
+        return Ok(None);
+    }
+    check_bindings(ctx, enc, weight, original, y, k, m, n)?;
+    check_bindings_for(ctx, enc, weight, half, y, k, m, n, GgmlType::F16)?;
+    check_disjoint(
+        KERNEL,
+        half,
+        &[
+            (weight, "weight"),
+            (original, "original input"),
+            (y, "output"),
+        ],
+    )?;
+    let tile = Tile::selected(weight.dtype);
+    let original_supported = prepare(ctx, weight.dtype, tile)?;
+    let half_supported = prepare_activation(ctx, weight.dtype, tile, metal::TensorActivation::F16)?;
+    if !original_supported || !half_supported {
+        return Ok(None);
+    }
+    Ok(Some(PreparedHalf {
+        tile,
+        weight: weight.clone(),
+        x: half.clone(),
+        y: y.clone(),
+        k,
+        m,
+        n,
+    }))
 }
 
 /// False means a policy/capability decline before mutation. Invalid bindings,

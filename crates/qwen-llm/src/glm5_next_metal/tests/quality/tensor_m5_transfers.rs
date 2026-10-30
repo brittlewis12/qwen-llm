@@ -2,11 +2,21 @@
 use super::*;
 use crate::glm5_next_metal::tensor_q5_down;
 
-const ARMS: [(&str, bool, bool); 3] = [
+type TransferArm = (&'static str, bool, bool);
+
+const ARMS: [TransferArm; 3] = [
     ("CURRENT", false, false),
     ("Q8WIDE", true, false),
     ("Q5DOWN", false, true),
 ];
+const COMBINED_ARMS: [TransferArm; 2] = [("CURRENT", false, false), ("COMBINED", true, true)];
+
+#[derive(Clone, Copy)]
+enum TransferPacket {
+    Screen,
+    Extended,
+    Combined,
+}
 const Q4_PIN: &[u8] =
     include_bytes!("../../../../../../docs/bench/2026-10-16-glm-quality-comparison/stock-q4.json");
 const Q6_DOWN_BLOCKS: [usize; 3] = [11, 12, 44];
@@ -14,6 +24,7 @@ const Q5_DOWN_BANKS: usize = 39;
 const Q5_GATE_UP_BLOCKS: [usize; 1] = [11];
 const Q8_MLA_BLOCKS: [usize; 11] = [3, 7, 11, 15, 19, 23, 27, 31, 35, 39, 43];
 const EXTENDED_REPORT: &str = "GLM53_M5_TRANSFER_EXTENDED_REPORT";
+const COMBINED_REPORT: &str = "GLM53_M5_TRANSFER_COMBINED_REPORT";
 
 fn extended_cpu_terms(vocab: u32) -> Vec<(&'static str, u64)> {
     let mut terms = cpu_terms(vocab, false);
@@ -79,6 +90,55 @@ fn cpu_extended_frozen_protocol_counts_capacity_and_allowances() {
     assert_ne!(EXTENDED_REPORT, "GLM53_M5_TRANSFER_REPORT");
 }
 
+#[test]
+fn cpu_combined_protocol_is_bounded_and_uses_explicit_arm_descriptors() {
+    let docs = documents();
+    let (tasks, _) = long_tasks();
+    assert_eq!(
+        COMBINED_ARMS,
+        [("CURRENT", false, false), ("COMBINED", true, true)]
+    );
+    assert_eq!(COMBINED_ARMS[0], ARMS[0]);
+    assert_ne!(COMBINED_ARMS[1], ARMS[1]);
+    assert_eq!(docs.len(), 3);
+    assert_eq!(extended_capacity(&docs, &[]), 4416);
+    assert_eq!(extended_capacity(&docs, &tasks), 5264);
+    assert_eq!(docs.len() * CONTINUATION, 192);
+    assert_eq!(docs.len() * COMBINED_ARMS.len(), 6);
+    assert_eq!(docs.len() * CONTINUATION * COMBINED_ARMS.len(), 384);
+    assert_eq!(tasks.len() * 2 * COMBINED_ARMS.len(), 16);
+    assert_eq!((docs.len() + tasks.len() * 2) * COMBINED_ARMS.len(), 22);
+    assert_eq!(docs.len() * CONTINUATION * ARMS.len(), 576);
+    assert_ne!(COMBINED_REPORT, EXTENDED_REPORT);
+    assert_ne!(COMBINED_REPORT, "GLM53_M5_TRANSFER_REPORT");
+    let q5_selected = || {
+        use crate::glm5_next_metal::packed::{Arith, StageMode};
+        tensor_q5_down::selected(
+            Arith {
+                lineage: PackedLineage::Fast,
+                precision: FastPrecision::Half,
+            },
+            StageMode::Fast,
+            GgmlType::Q5_K,
+            (2048, 4096, 288, 8),
+            ROWS,
+        )
+    };
+    let _off = tensor_q5_down::Scope::new(false);
+    selected(COMBINED_ARMS[1], || {
+        assert!(
+            q5_selected(),
+            "COMBINED must not resolve as global arm index 1 (Q8WIDE)"
+        );
+        selected(COMBINED_ARMS[0], || assert!(!q5_selected()));
+        assert!(q5_selected());
+    });
+    assert!(
+        !q5_selected(),
+        "prefill scope must restore ordinary continuation policy"
+    );
+}
+
 fn down_dtype(block: usize) -> GgmlType {
     if Q6_DOWN_BLOCKS.contains(&block) {
         GgmlType::Q6_K
@@ -141,11 +201,11 @@ fn cpu_q8_mla_inventory_has_11_executed_pairs_and_one_unused_mtp_pair() {
     assert!(!Q8_MLA_BLOCKS.contains(&45));
 }
 
-fn selected<R>(arm: usize, body: impl FnOnce() -> R) -> R {
+fn selected<R>(arm: TransferArm, body: impl FnOnce() -> R) -> R {
     let _dense = tensor_prefill::Scope::new(true);
     let _down = tensor_down::Scope::new(true);
-    let _wide = tensor_prefill::Q8WideScope::new(ARMS[arm].1);
-    let _q5 = tensor_q5_down::Scope::new(ARMS[arm].2);
+    let _wide = tensor_prefill::Q8WideScope::new(arm.1);
+    let _q5 = tensor_q5_down::Scope::new(arm.2);
     body()
 }
 
@@ -160,7 +220,8 @@ fn difference(reference: &[f32], logits: &[f32]) -> Value {
 }
 
 fn profile(ctx: &MetalContext, w: &Glm5NextWeights, tokens: &[u32], cpu: u64, out: &mut Report) {
-    for (arm, &(label, wide, q5)) in ARMS.iter().enumerate() {
+    for &arm in &ARMS {
+        let (label, wide, q5) = arm;
         let mut reference = None;
         let mut plain = Vec::new();
         for phase in ["warm_census", "plain1", "plain2", "profiled"] {
@@ -244,7 +305,7 @@ fn plain(ctx: &MetalContext, w: &Glm5NextWeights, long: &Document, cpu: u64, out
             {
                 let mut s = fresh(ctx, w, n, cpu, ARMS[arm].0, "plain_abba", out);
                 assert_plain();
-                let (logits, wall_ms) = selected(arm, || {
+                let (logits, wall_ms) = selected(ARMS[arm], || {
                     let start = Instant::now();
                     let logits = s.prefill_packed(ctx, &long.tokens[..n]).unwrap();
                     (logits, start.elapsed().as_secs_f64() * 1e3)
@@ -268,11 +329,18 @@ fn quality(
     docs: &[Document],
     cpu: u64,
     out: &mut Report,
+    arms: &[TransferArm],
 ) -> (usize, usize) {
+    assert_eq!(
+        arms.first(),
+        Some(&ARMS[0]),
+        "immutable CURRENT reference must run first"
+    );
     let (mut document_arms, mut rows) = (0, 0);
     for d in docs {
         let mut baseline = Vec::<Vec<f32>>::with_capacity(CONTINUATION);
-        for (arm, &(label, _, _)) in ARMS.iter().enumerate() {
+        for (index, &arm) in arms.iter().enumerate() {
+            let (label, _, _) = arm;
             let mut s = fresh(ctx, w, d.prefix + CONTINUATION, cpu, label, "quality", out);
             assert_plain();
             let (mut logits, commits) = selected(arm, || {
@@ -281,7 +349,7 @@ fn quality(
             for (i, &target) in d.tokens[d.prefix..].iter().enumerate() {
                 check_session(&s, d.prefix + i);
                 check_logits(&logits, w.config.vocab_size as usize);
-                if arm == 0 {
+                if index == 0 {
                     baseline.push(logits.clone());
                 }
                 let reference = &baseline[i];
@@ -331,6 +399,7 @@ fn transfer_tool_quality(
     definitions: &[ToolDefinition],
     cpu: u64,
     out: &mut Report,
+    arms: &[TransferArm],
 ) -> ToolCounts {
     let mut counts = ToolCounts::default();
     let vocab = weights.config.vocab_size as usize;
@@ -344,7 +413,8 @@ fn transfer_tool_quality(
                 cap: TOOL_CAP,
             },
         ] {
-            for (arm, &(label, _, _)) in ARMS.iter().enumerate() {
+            for &arm in arms {
+                let (label, _, _) = arm;
                 out.emit(json!({"event":"task_begin","arm":label,"id":task.id,
                     "context_level":task.context_level,"expected":task.expected,
                     "generation":generation.describe(),"prompt_tokens":n,"prompt_sha256":prompt_hash,
@@ -449,23 +519,33 @@ fn transfer_tool_quality(
 #[test]
 #[ignore = "release actual six-shard UD-Q4_K_XL M5 transfer screen; GLM53_GGUF, fresh GLM53_M5_TRANSFER_REPORT; MTL_DEBUG_LAYER=1 QWEN_METAL_LEASE_WAIT=1 QWEN_MATMAT_Q6_K_N64_MIN_N=1024"]
 fn tensor_m5_transfer_screen() {
-    transfer_screen(false);
+    transfer_screen(TransferPacket::Screen);
 }
 
 #[test]
 #[ignore = "release actual six-shard UD-Q4_K_XL M5 extended quality ONLY: all 22 frozen documents and T09-T12 greedy/seed11; GLM53_GGUF, fresh private GLM53_M5_TRANSFER_EXTENDED_REPORT; MTL_DEBUG_LAYER=1 QWEN_METAL_LEASE_WAIT=1 QWEN_MATMAT_Q6_K_N64_MIN_N=1024; normal full admission and production lease required"]
 fn tensor_m5_transfer_extended_quality() {
-    transfer_screen(true);
+    transfer_screen(TransferPacket::Extended);
 }
 
-fn transfer_screen(extended: bool) {
+#[test]
+#[ignore = "release actual six-shard UD-Q4_K_XL M5 CURRENT/COMBINED quality ONLY: original 3 frozen documents and T09-T12 greedy/seed11; GLM53_GGUF, fresh private GLM53_M5_TRANSFER_COMBINED_REPORT; MTL_DEBUG_LAYER=1 QWEN_METAL_LEASE_WAIT=1 QWEN_MATMAT_Q6_K_N64_MIN_N=1024; normal full admission and production lease required; combination unqualified until GPU execution"]
+fn tensor_m5_transfer_combined_quality() {
+    transfer_screen(TransferPacket::Combined);
+}
+
+fn transfer_screen(packet: TransferPacket) {
+    let extended = matches!(packet, TransferPacket::Extended);
+    let combined = matches!(packet, TransferPacket::Combined);
+    let with_tools = extended || combined;
+    let arms: &[TransferArm] = if combined { &COMBINED_ARMS } else { &ARMS };
     environment();
     let _lease = production_lease();
     let mut out = Report::new(
-        if extended {
-            EXTENDED_REPORT
-        } else {
-            "GLM53_M5_TRANSFER_REPORT"
+        match packet {
+            TransferPacket::Screen => "GLM53_M5_TRANSFER_REPORT",
+            TransferPacket::Extended => EXTENDED_REPORT,
+            TransferPacket::Combined => COMBINED_REPORT,
         },
         true,
     );
@@ -474,11 +554,15 @@ fn transfer_screen(extended: bool) {
     } else {
         documents()
     };
-    let (tasks, definitions) = if extended {
+    let (tasks, definitions) = if with_tools {
         long_tasks()
     } else {
         (Vec::new(), Vec::new())
     };
+    let targets_per_arm = docs.len() * CONTINUATION;
+    let expected_document_arms = docs.len() * arms.len();
+    let expected_quality_rows = expected_document_arms * CONTINUATION;
+    let expected_tool_generations = tasks.len() * 2 * arms.len();
     let path = PathBuf::from(std::env::var_os("GLM53_GGUF").unwrap());
     let gguf = GgufFile::open(&path).unwrap();
     let pin: Value = serde_json::from_slice(Q4_PIN).unwrap();
@@ -538,7 +622,7 @@ fn transfer_screen(extended: bool) {
                 .all(|&t| t < vocab && i32::try_from(t).is_ok())
         );
     }
-    if extended {
+    if with_tools {
         assert!(
             chat::CHAT_STOPS
                 .iter()
@@ -546,9 +630,9 @@ fn transfer_screen(extended: bool) {
         );
     }
     let capacity = extended_capacity(&docs, &tasks);
-    assert_eq!(capacity, if extended { 5264 } else { 4416 });
+    assert_eq!(capacity, if with_tools { 5264 } else { 4416 });
     assert!(capacity <= config.context_length as usize);
-    let terms = if extended {
+    let terms = if with_tools {
         extended_cpu_terms(vocab)
     } else {
         cpu_terms(vocab, false)
@@ -585,13 +669,13 @@ fn transfer_screen(extended: bool) {
         "dense_source_sha256":sha256_hex(include_bytes!("../../tensor_prefill.rs")),
         "q5_source_sha256":sha256_hex(include_bytes!("../../tensor_q5_down.rs")),
         "packed_source_sha256":sha256_hex(include_bytes!("../../packed.rs"))});
-    let Value::Object(protocol) = json!({"arms":ARMS,"arm_columns":["label","q8_wide","q5_down"],"dense_scope":true,"down_scope":true,
+    let Value::Object(protocol) = json!({"arms":arms,"arm_columns":["label","q8_wide","q5_down"],"dense_scope":true,"down_scope":true,
         "scope":"independent thread-local overrides during whole prefill only; no combined candidate; ordinary forward continuation unchanged",
         "documents":docs.iter().map(|d|json!({"path":d.path,"stratum":d.stratum,"prefix":d.prefix,
             "tokens":d.tokens,"tokens_sha256":token_hash(&d.tokens)})).collect::<Vec<_>>(),
         "token_source":"frozen first-in-stratum quality-v1 IDs, u32 little-endian hashes; no retokenization or stock-artifact equivalence claim",
         "capacity":capacity,"workspace_rows":ROWS,"cpu_reserve_bytes":cpu,"cpu_terms":terms,
-        "retained_baselines":1,"baseline_rows":CONTINUATION,"vocab":vocab,"targets_per_arm":192,
+        "retained_baselines":1,"baseline_rows":CONTINUATION,"vocab":vocab,"targets_per_arm":targets_per_arm,
         "lineage":"Fast","precision":"Half","tensor_tier":format!("{:?}",ctx.tensor_ops_status()),
         "environment": (["MTL_DEBUG_LAYER","QWEN_METAL_LEASE_WAIT","QWEN_MATMAT_Q6_K_N64_MIN_N",
             "QWEN_MATMAT_Q6_K_N64","QWEN_EXPERT_TENSOR_TILE","QWEN_GLM53_DENSE_Q8_WIDE","QWEN_GLM53_TENSOR_Q5_DOWN"]
@@ -606,8 +690,12 @@ fn transfer_screen(extended: bool) {
     header["q8_mla_inventory"] = json!({"main_blocks":Q8_MLA_BLOCKS,"executed_banks":22,
         "serialized_pairs":12,"unused_mtp_block":45,"dtype":"Q8_0",
         "attn_k_b_shape":[256,512,64],"attn_v_b_shape":[512,256,64]});
-    if extended {
-        header["schema"] = json!("glm53.m5_transfers_extended_quality.v1");
+    if with_tools {
+        header["schema"] = json!(if combined {
+            "glm53.m5_transfers_combined_quality.v1"
+        } else {
+            "glm53.m5_transfers_extended_quality.v1"
+        });
         header["model"] = json!(path.file_name().unwrap());
         header["binary"] = json!(std::env::current_exe().unwrap().file_name().unwrap());
         header["shards"] = json!(
@@ -630,22 +718,44 @@ fn transfer_screen(extended: bool) {
         header["down_adapter_source_sha256"] = json!(sha256_hex(include_bytes!(
             "../../../metal/expert_tensor_down.rs"
         )));
-        header["token_source"] = json!(
+        header["token_source"] = json!(if combined {
+            "frozen first-in-stratum quality-v1 IDs at maximum frozen prefix, original three bounded cases; T09-T12 frozen prompt IDs; u32 little-endian hashes; no retokenization or stock-artifact/tokenizer equivalence claim"
+        } else {
             "all frozen quality-v1 documents in fixture order, maximum frozen prefix; T09-T12 frozen prompt IDs; u32 little-endian hashes; no retokenization or stock-artifact/tokenizer equivalence claim"
-        );
-        header["document_selection"] = json!({"documents":22,"strata":{"prose":8,"code":8,"long":6},
+        });
+        let strata: serde_json::Map<String, Value> = ["prose", "code", "long"]
+            .into_iter()
+            .map(|stratum| {
+                (
+                    stratum.into(),
+                    json!(docs.iter().filter(|d| d.stratum == stratum).count()),
+                )
+            })
+            .collect();
+        header["document_selection"] = json!({"documents":docs.len(),"strata":strata,
             "prefixes":{"prose":2048,"code":2048,"long":4352},
             "overlap":"includes existing three-document screen; not independent replication"});
-        header["arm_selection"] = json!({"CURRENT":{"dense":true,"iq3_down":true,"q8_wide":false,"q5_down":false},
-            "Q8WIDE":{"dense":true,"iq3_down":true,"q8_wide":true,"q5_down":false},
-            "Q5DOWN":{"dense":true,"iq3_down":true,"q8_wide":false,"q5_down":true}});
+        header["arm_selection"] = Value::Object(
+            arms.iter()
+                .map(|&(label, wide, q5)| {
+                    (
+                        label.into(),
+                        json!({"dense":true,"iq3_down":true,"q8_wide":wide,"q5_down":q5}),
+                    )
+                })
+                .collect(),
+        );
+        if combined {
+            header["scope"] = json!(
+                "independent thread-local overrides during whole prefill only; CURRENT forces both candidates OFF, COMBINED enables Q8 wide and Q5 down together; ordinary forward continuation unchanged; combination unqualified until GPU execution"
+            );
+        }
         header["arithmetic"] = json!({"reference":"CURRENT, same frozen document and target position",
             "metrics":["changed_bits_components","max_abs","KL(CURRENT || arm)","NLL","NLL-CURRENT_NLL","top1","top1_hit","top1_agrees_current"],
             "full_vocab":vocab,"continuation_targets":CONTINUATION,"teacher_forcing":true,
             "baseline_lifetime":"one document at a time, 64 full-vocabulary f32 rows; candidates do not replace CURRENT",
             "prefill":"Fast/Half, F32 storage with Half tensor operands and F32 accumulation; reduction order may differ",
             "decode":"normal forward outside all prefill override scopes"});
-        header["targets_per_arm"] = json!(1408);
         header["tool_tasks"] = json!(tasks.iter().map(|t|json!({"id":t.id,"context_level":t.context_level,
             "prompt_tokens":t.prompt.len(),"prompt_ids":t.prompt,"prompt_sha256":token_hash(&t.prompt),
             "expected":t.expected,"requested_capacity":t.prompt.len()+TOOL_CAP,"capacity":t.capacity()})).collect::<Vec<_>>());
@@ -673,10 +783,10 @@ fn transfer_screen(extended: bool) {
         header["timing"] = json!(
             "quality and tools only; no plain samples, warm census, profiler, timing or performance verdict"
         );
-        header["completion_checks"] = json!({"document_arms":66,"quality_rows":4224,"targets_per_arm":1408,
-            "tool_tasks_per_arm":4,"tool_generations_per_task_arm":2,"tool_generations":24,
-            "tool_token_rows":"observed, 1..256 per generation; stops+caps=24",
-            "sessions":90,"plain_samples":0,"profiled_calls":0,"census_calls":0,
+        header["completion_checks"] = json!({"document_arms":expected_document_arms,"quality_rows":expected_quality_rows,"targets_per_arm":targets_per_arm,
+            "tool_tasks_per_arm":tasks.len(),"tool_generations_per_task_arm":2,"tool_generations":expected_tool_generations,
+            "tool_token_rows":format!("observed, 1..256 per generation; stops+caps={expected_tool_generations}"),
+            "sessions":expected_document_arms+expected_tool_generations,"plain_samples":0,"profiled_calls":0,"census_calls":0,
             "state":"fresh/ledger/position/logit checks throughout, final observers clear and retained shard stamps equal; complete event required"});
         header["policy"] = json!(
             "descriptive full-vocab quality and tool outcomes only; no posthoc thresholds, equality/noninferiority claim, promotion or verdict; private mode-0600 fresh report contains frozen IDs and generated text, do not publish raw inputs/outputs or private paths"
@@ -706,7 +816,7 @@ fn transfer_screen(extended: bool) {
             "full model + session + CPU refused: {:?}",
             admission.reason
         );
-        let tokenizer = extended.then(|| {
+        let tokenizer = with_tools.then(|| {
             let tokenizer = NativeTokenizer::from_gguf(&gguf).unwrap();
             assert_eq!(tokenizer.n_vocab(), vocab);
             tokenizer
@@ -714,14 +824,14 @@ fn transfer_screen(extended: bool) {
         (tokenizer, Glm5NextWeights::load(&ctx, &gguf).unwrap())
     };
     assert_eq!(weights.config, *config);
-    if !extended {
+    if !with_tools {
         profile(&ctx, &weights, &docs[0].tokens[..ROWS], cpu, &mut out);
         plain(&ctx, &weights, &docs[2], cpu, &mut out);
     }
-    let (document_arms, quality_rows) = quality(&ctx, &weights, &docs, cpu, &mut out);
-    assert_eq!(document_arms, docs.len() * ARMS.len());
-    assert_eq!(quality_rows, document_arms * CONTINUATION);
-    let tools = extended.then(|| {
+    let (document_arms, quality_rows) = quality(&ctx, &weights, &docs, cpu, &mut out, arms);
+    assert_eq!(document_arms, expected_document_arms);
+    assert_eq!(quality_rows, expected_quality_rows);
+    let tools = with_tools.then(|| {
         transfer_tool_quality(
             &ctx,
             &weights,
@@ -730,19 +840,18 @@ fn transfer_screen(extended: bool) {
             &definitions,
             cpu,
             &mut out,
+            arms,
         )
     });
     assert_plain();
     assert_eq!(gguf.revalidate_retained_shard_stamps().unwrap(), stamps);
     if let Some(tools) = tools {
-        assert_eq!(document_arms, 66);
-        assert_eq!(quality_rows, 4224);
-        assert_eq!(tools.generations, 24);
+        assert_eq!(tools.generations, expected_tool_generations);
         assert_eq!(tools.stops + tools.caps, tools.generations);
         assert!((tools.generations..=tools.generations * TOOL_CAP).contains(&tools.tokens));
-        out.emit(json!({"event":"complete","execution_complete":true,"arms":3,"documents_per_arm":22,
+        out.emit(json!({"event":"complete","execution_complete":true,"arms":arms.len(),"documents_per_arm":docs.len(),
             "document_arms":document_arms,"quality_rows_per_document_arm":CONTINUATION,
-            "targets_per_arm":1408,"quality_rows":quality_rows,"tool_tasks_per_arm":4,
+            "targets_per_arm":targets_per_arm,"quality_rows":quality_rows,"tool_tasks_per_arm":tasks.len(),
             "tool_generations_per_task_arm":2,"tool_generations":tools.generations,
             "tool_token_rows":tools.tokens,"tool_chat_stops":tools.stops,"tool_caps":tools.caps,
             "sessions":document_arms+tools.generations,"plain_samples":0,"profiled_calls":0,"census_calls":0,
@@ -750,8 +859,8 @@ fn transfer_screen(extended: bool) {
             "quality_verdict":null,"performance_verdict":null}));
     } else {
         out.emit(
-            json!({"event":"complete","execution_complete":true,"arms":3,"documents_per_arm":3,
-        "targets_per_arm":192,"quality_rows":576,"plain_samples":32,"profiled_calls":3,
+            json!({"event":"complete","execution_complete":true,"arms":arms.len(),"documents_per_arm":docs.len(),
+        "targets_per_arm":targets_per_arm,"quality_rows":quality_rows,"plain_samples":32,"profiled_calls":3,
         "quality_verdict":null,"performance_verdict":null}),
         );
     }

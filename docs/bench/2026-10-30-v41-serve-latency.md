@@ -116,15 +116,35 @@ Focused CPU checks cover parsing, overflow, sparse mapping geometry, activity
 attribution, late completions and cancellation-masked faults. The full CLI run
 has 1028 passes, 50 explicit ignores and one info-baseline failure independently
 reproduced on untouched `adad4461`. Eleven existing CPU soft-window checks pass;
-the extended actual-resource GPU witness remains ignored and unexecuted here.
+the extended actual-resource GPU witness was ignored and unexecuted at this
+checkpoint.
 Independent source re-review has no remaining P1/P2 findings.
 `cargo check --locked --offline --workspace --bins`, formatting and the generated
 environment-reference checks pass. The local build uses the available Metal 4.0
 tier; no Metal 4.1 tier or M5 execution is inferred from CPU checks.
 
-No current-artifact M5 performance comparison or deployment is included in this
-checkpoint. Test each control independently, with the same artifact, matched
-prefix/suffix, capacity, output reservation and sampling. Record ordinary TTFT,
-native wall, GPU/driver intervals, checkpoint/restore, memory pressure and all
-samples. Distinguish immediate and idle requests; do not merely move a request
-stall into an expensive pulse. The original long-tail cause remains open.
+No current-artifact M5 performance comparison or deployment was included in the
+implementation checkpoint. Test each control independently, with the same
+artifact, matched prefix/suffix, capacity, output reservation and sampling.
+Record ordinary TTFT, native wall, GPU/driver intervals, checkpoint/restore,
+memory pressure and all samples. Distinguish immediate and idle requests; do
+not merely move a request stall into an expensive pulse. The original long-tail
+cause remains open.
+
+## Measured Controls And Completed Expiry Follow-Up
+
+The subsequent [serving-controls packet](2026-10-30-v41-serve-controls/README.md)
+records the frozen `5bf7e4e5` M5 release, with separate sanitized cached CSVs.
+The first six-arm cohort has 30 complete, byte-matching 534-token generations
+(24 cached). Five-second TTFT medians are 744.982 ms ordinary, 734.716 ms soft
+4 GiB and 220.555 ms with a ten-second idle window. Mapping remains negative.
+
+The completed A2/E0 ordinary-logging follow-up (`RUST_LOG=info`, no per-quantum
+debug) adds ten complete matching generations, eight cached, not pooled with
+the first cohort. Five-second TTFT is 745.873 -> 220.004 ms, with driver delay
+531.559 -> 5.907 ms and idle GPU envelopes about 145 ms. E0 at 15 seconds
+returns to 738.144 ms TTFT / 524.174 ms driver delay, supporting expiry at this
+narrow gap. No obvious decode regression or recorded request/native/pulse/
+cleanup failure appears. This supports ten-second keep-alive for the measured
+workload, not a global default. Power, pressure and arbitrary conversations
+remain unmeasured; the original 15-40-second tails are not explained or fixed.

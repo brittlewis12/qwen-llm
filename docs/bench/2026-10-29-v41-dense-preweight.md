@@ -99,6 +99,42 @@ needs either the output_a groups removed (one more A/B) or a persistent F16
 cache that removes the dequant; if neither wins, close it and keep the
 kernel probe as evidence.
 
+## Resident F16 cache: the dequant was the loss
+
+The per-chunk route's regression was the dequant, not the denser GEMM. A
+resident F16 copy of every Q5_K dense linear is built once at load with the
+same bitwise dequant kernel; the prefill then uses the dense F16 tile with
+no per-chunk dequant. The eight `output_a` group views share the bank cache;
+the per-group hot spot disappears.
+
+8K CED A/B, `--runs 2`, 180 s ABBA:
+
+| arm | cache | tok/s |
+| --- | ---: | ---: |
+| off1 | 0 | 2,174.85 |
+| on1 | 1 | 2,313.93 |
+| on2 | 1 | 2,319.61 |
+| off2 | 0 | 2,179.04 |
+
+**+6.4%** (mean 2,176.95 -> 2,316.77). The current-main QK is in both arms.
+
+8K Full/CED pair at the default-on cache, production timing, 4 retained
+samples per policy:
+
+| policy | tok/s | samples |
+| --- | ---: | --- |
+| Full | 1,408.81 | 1,408.43 / 1,409.06 / 1,408.77 / 1,409.00 |
+| CED | 2,249.30 | 2,254.53 / 2,248.25 / 2,255.28 / 2,239.16 |
+
+All 14 pair cases carry the same endpoint hash
+`a2db19af...`, so the Full/CED endpoint remains bitwise. The pair build is
+`4f52c973`; the cache is default on, and `QWEN_V41_DENSE_PREWEIGHT_CACHE=0`
+restores the per-chunk/tile route. The resident cache costs about 13 GiB.
+
+The pair CED point is below the A/B's 2,316.77 because the pair uses the
+blocked production schedule and its own thermal history; the same-binary A/B
+is the cleaner cache comparison.
+
 ## Next
 
 1. ~~Add a GPU Q5_K->F16 dequant kernel~~ done, bitwise above.

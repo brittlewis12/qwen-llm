@@ -64,6 +64,20 @@ See also: `docs/PERF-ROADMAP.md` for the current state and evidence index.
   fallbacks remain intact. One machine/artifact at 8K, with order drift
   explicitly retained. [Results](bench/2026-10-29-v41-simdgroup-qk.md).
 
+## 2026-10-30 - V4.1 Q5_K Resident F16 Cache: +6.4%, Bitwise Pair
+
+- Per-chunk dequant was the regression, not the dense GEMM. A resident F16
+  copy of every Q5_K dense linear, built once at load with the bitwise
+  dequant, gives 8K CED off 2,174.85/2,179.04 vs on 2,313.93/2,319.61 tok/s
+  (+6.4%, ABBA, 180 s). The output_a groups share the bank cache.
+- 8K Full/CED pair at default-on cache, production timing, 4 samples each:
+  Full 1,408.81, CED 2,249.30; all 14 cases share endpoint hash `a2db19af...`.
+  Build `4f52c973`. Cache costs ~13 GiB resident; `QWEN_V41_DENSE_PREWEIGHT_CACHE=0`
+  restores the per-chunk/tile route.
+  [Packet](bench/2026-10-29-v41-dense-preweight.md). Raw:
+  `~/qwen-runs/2026-10-29-v41-encoder-depth/dense-cache-ab-*.json` and
+  `pair-8k-dense-cache.json`.
+
 ## 2026-10-30 - V4.1 Q5_K Dense Preweight: 8K CED Regression
 
 - Full-set per-chunk routing is 2.2% slower at 8K CED: off 2,050.96 /

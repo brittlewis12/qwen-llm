@@ -495,9 +495,9 @@ pub(super) fn dense_preweight_bytes(c: &Config) -> Result<u64> {
 
 crate::env_flag!(
     /// Build a resident F16 copy of every Q5_K dense linear at load and use it
-    /// instead of the per-chunk dequant scratch. `QWEN_V41_DENSE_PREWEIGHT_CACHE=1`
-    /// opts in; default off because it adds ~13 GiB of resident model memory.
-    default_off dense_preweight_cache_enabled,
+    /// instead of the per-chunk dequant scratch. Default on; `=0` restores the
+    /// per-chunk/tile route. Adds ~13 GiB of resident model memory.
+    default_on dense_preweight_cache_enabled,
     "QWEN_V41_DENSE_PREWEIGHT_CACHE"
 );
 

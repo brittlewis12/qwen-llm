@@ -73,8 +73,9 @@ fn cpu_down_policy_protects_all_arithmetic_modes_types_and_actual_rows() {
                             expected,
                             "{arith:?}/{mode:?}/{dtype:?}/{rows}"
                         );
-                        let policy =
-                            packed::grouped_down_policy(arith, mode, dtype, 2048, 4096, 288, rows);
+                        let policy = packed::grouped_down_policy(
+                            arith, mode, dtype, 2048, 4096, 288, TOP, rows,
+                        );
                         assert_eq!(policy == GroupedDownPolicy::Iq3STensor, expected);
                         if arith.lineage == PackedLineage::Fast
                             && dtype == GgmlType::IQ3_S
@@ -94,9 +95,9 @@ fn cpu_down_policy_protects_all_arithmetic_modes_types_and_actual_rows() {
         (4096, 8192, 16),
         (256, 65, 16),
     ] {
-        assert!(adapter::geometry(k, m, e, TOP, 1024).is_ok());
+        assert!(adapter::geometry(GgmlType::IQ3_S, k, m, e, TOP, 1024).is_ok());
         assert_eq!(
-            packed::grouped_down_policy(HALF, StageMode::Fast, GgmlType::IQ3_S, k, m, e, 1024),
+            packed::grouped_down_policy(HALF, StageMode::Fast, GgmlType::IQ3_S, k, m, e, TOP, 1024),
             GroupedDownPolicy::Iq3STensor
         );
     }
@@ -160,11 +161,11 @@ fn cpu_down_geometry_rejects_partial_blocks_signed_limits_and_products() {
         ),
     ] {
         assert!(
-            adapter::geometry(k, m, e, top, rows).is_err(),
+            adapter::geometry(GgmlType::IQ3_S, k, m, e, top, rows).is_err(),
             "{k}/{m}/{e}/{top}/{rows}"
         );
     }
-    assert!(adapter::geometry(256, 65, 16, TOP, 1025).is_ok());
+    assert!(adapter::geometry(GgmlType::IQ3_S, 256, 65, 16, TOP, 1025).is_ok());
     assert!(adapter::capacity_supported(32, 128, 0, 8192));
     assert!(adapter::capacity_supported(32, 256, 512, 8704));
     for (width, threads, stat, limit) in [
@@ -270,6 +271,28 @@ fn run(ctx: &MetalContext, body: impl FnOnce(&KernelEncoder)) -> Vec<DispatchCen
     census
 }
 
+fn native_compact(dtype: GgmlType, k: usize) -> Vec<u8> {
+    let (elements, bytes) = dtype.storage_layout().unwrap();
+    let mut compact = vec![0u8; WR * k / elements as usize * bytes as usize];
+    let mut rng = 0xdead_beefu32;
+    for (i, block) in compact.chunks_exact_mut(bytes as usize).enumerate() {
+        let header = if dtype == GgmlType::IQ3_S { 2 } else { 4 };
+        for byte in &mut block[header..] {
+            rng = rng.wrapping_mul(1664525).wrapping_add(1013904223);
+            *byte = (rng >> 24) as u8;
+        }
+        let sign = if i % 3 == 0 { -1.0 } else { 1.0 };
+        block[..2].copy_from_slice(
+            &half::f16::from_f32(sign * (1 + i % 7) as f32 * 0.000113).to_le_bytes(),
+        );
+        if header == 4 {
+            block[2..4]
+                .copy_from_slice(&half::f16::from_f32((1 + i % 5) as f32 * 0.000071).to_le_bytes());
+        }
+    }
+    compact
+}
+
 struct Fixture {
     k: usize,
     m: usize,
@@ -289,11 +312,24 @@ struct Fixture {
 
 impl Fixture {
     fn new(ctx: &MetalContext, k: usize, m: usize, e: usize, rows: usize) -> Self {
+        Self::new_native(ctx, k, m, e, rows, GgmlType::IQ3_S, &[])
+    }
+
+    fn new_native(
+        ctx: &MetalContext,
+        k: usize,
+        m: usize,
+        e: usize,
+        rows: usize,
+        dtype: GgmlType,
+        extra_gate_up: &[GgmlType],
+    ) -> Self {
         let _allocation = ctx.begin_allocation_transaction();
-        adapter::geometry(k, m, e, TOP, rows).unwrap();
+        adapter::geometry(dtype, k, m, e, TOP, rows).unwrap();
         let slots = rows * TOP;
-        let row_bytes = k / 256 * 110;
-        let logical = [
+        let (block, bytes) = dtype.storage_layout().unwrap();
+        let row_bytes = k / block as usize * bytes as usize;
+        let mut logical = vec![
             row_bytes * m * e,
             k * slots * 4,
             e * 4,
@@ -305,6 +341,10 @@ impl Fixture {
             m * rows * 4,
             slots * 4,
         ];
+        for &dtype in extra_gate_up {
+            let (block, bytes) = dtype.storage_layout().unwrap();
+            logical.push(m / block as usize * bytes as usize * k * e);
+        }
         let gpu_upper: u64 = logical
             .iter()
             .map(|&n| {
@@ -313,6 +353,12 @@ impl Fixture {
                     .priced_upper_bytes
             })
             .sum();
+        if !extra_gate_up.is_empty() {
+            assert!(
+                gpu_upper <= 1 << 30,
+                "private Q5 witness GPU budget: {gpu_upper}"
+            );
+        }
         // Includes upload plus guarded upload copies, both readbacks, compact
         // f64 oracles, immutable fingerprints and composition scratch. Charge
         // CPU to working-set headroom even when macOS omits process budget.
@@ -328,22 +374,11 @@ impl Fixture {
         );
         assert!(admission.is_admitted(), "{admission:?}");
 
-        let mut compact = vec![0u8; WR * row_bytes];
-        let mut rng = 0xdead_beefu32;
-        for (i, block) in compact.chunks_exact_mut(110).enumerate() {
-            for byte in &mut block[2..] {
-                rng = rng.wrapping_mul(1664525).wrapping_add(1013904223);
-                *byte = (rng >> 24) as u8;
-            }
-            let sign = if i % 3 == 0 { -1.0 } else { 1.0 };
-            block[..2].copy_from_slice(
-                &half::f16::from_f32(sign * (1 + i % 7) as f32 * 0.000113).to_le_bytes(),
-            );
-        }
+        let compact = native_compact(dtype, k);
         let desc = TensorDesc {
-            name: "glm_down_compact_iq3_s".into(),
+            name: "glm_down_compact_native".into(),
             shape: vec![k as u64, WR as u64],
-            dtype: GgmlType::IQ3_S,
+            dtype,
             shard_idx: 0,
             data_offset: 0,
             n_bytes: compact.len() as u64,
@@ -356,12 +391,7 @@ impl Fixture {
                 payload.extend_from_slice(&compact[r * row_bytes..(r + 1) * row_bytes]);
             }
         }
-        let mut w = guarded(
-            ctx,
-            &payload,
-            vec![k as u64, m as u64, e as u64],
-            GgmlType::IQ3_S,
-        );
+        let mut w = guarded(ctx, &payload, vec![k as u64, m as u64, e as u64], dtype);
         w.provenance = MetalTensorProvenance::OwnedWeightReadOnly;
         drop(payload);
         let compact_x: Vec<f32> = (0..XR * k)
@@ -583,6 +613,44 @@ impl Fixture {
             }
         }
     }
+
+    fn validate_composed_q5_samples(&self, inner: &[f32], actual: &[f32]) {
+        let compact = native_compact(GgmlType::Q5_K, self.k);
+        let desc = TensorDesc {
+            name: "glm_composed_q5_samples".into(),
+            shape: vec![self.k as u64, WR as u64],
+            dtype: GgmlType::Q5_K,
+            shard_idx: 0,
+            data_offset: 0,
+            n_bytes: compact.len() as u64,
+        };
+        let decoded = crate::codec::dequant_to_f32(&desc, &compact).unwrap();
+        let mut samples = Vec::new();
+        for token in [0, 1, 15, 16, 17, 31, 32, 33, self.rows - 1] {
+            for lane in 0..TOP {
+                let slot = token * TOP + lane;
+                for row in [0, 1, 63, 64, self.m - 1] {
+                    let wr = (self.owners[slot] * 3 + row) % WR;
+                    let mut full = 0f64;
+                    let mut half = 0f64;
+                    for i in 0..self.k {
+                        let w = decoded[wr * self.k + i];
+                        let x = inner[slot * self.k + i];
+                        full += f64::from(w) * f64::from(x);
+                        half += half::f16::from_f32(w).to_f64() * half::f16::from_f32(x).to_f64();
+                    }
+                    samples.push((actual[slot * self.m + row], full, half));
+                }
+            }
+        }
+        let scale = samples.iter().map(|(_, f, _)| f.abs()).fold(0f64, f64::max);
+        assert!(scale > 1e-5);
+        for (actual, full, half) in samples {
+            assert!(actual.is_finite());
+            assert!((f64::from(actual) - full).abs() <= 1e-2 * scale + 1e-5);
+            assert!((f64::from(actual) - half).abs() <= 2e-3 * scale + 1e-5);
+        }
+    }
 }
 
 #[test]
@@ -760,6 +828,8 @@ fn m5_down_active_views_preserve_older_larger_backing_capacity() {
 
 struct Composition {
     f: Fixture,
+    gate: MetalTensor,
+    up: MetalTensor,
     input: MetalTensor,
     routes: MetalTensor,
 }
@@ -768,6 +838,12 @@ impl Composition {
     fn new(ctx: &MetalContext) -> Self {
         let _allocation = ctx.begin_allocation_transaction();
         let f = Fixture::new(ctx, 256, 256, 32, 1024);
+        let gate = f.w.clone();
+        let up = f.w.clone();
+        Self::with_banks(ctx, f, gate, up)
+    }
+
+    fn with_banks(ctx: &MetalContext, f: Fixture, gate: MetalTensor, up: MetalTensor) -> Self {
         let input: Vec<f32> = (0..f.m * f.rows)
             .map(|i| (((i * 37 + i / f.m * 19) % 211) as f32 - 105.0) * 0.003713)
             .collect();
@@ -784,13 +860,19 @@ impl Composition {
             vec![TOP as u64, f.rows as u64],
             GgmlType::I32,
         );
-        Self { f, input, routes }
+        Self {
+            f,
+            gate,
+            up,
+            input,
+            routes,
+        }
     }
 
     fn tensors(&self) -> [MetalTensor; 11] {
         [
-            &self.f.w,
-            &self.f.w,
+            &self.gate,
+            &self.up,
             &self.f.w,
             &self.input,
             &self.routes,
@@ -818,6 +900,7 @@ impl Composition {
             self.f.k,
             self.f.m,
             self.f.e,
+            TOP,
             self.f.rows,
         );
         self.encode_bindings(ctx, enc, &self.tensors(), 7.0, policy)
@@ -893,20 +976,35 @@ fn m5_down_composition_preserves_fused_gate_up_then_unweighted_down_then_sum() {
     let ctx = MetalContext::new().unwrap();
     require_m5(&ctx);
     let c = Composition::new(&ctx);
-    let inputs = [&c.f.w, &c.input, &c.routes, &c.f.weights];
+    composition_witness(&ctx, &c, GENERIC, TENSOR, |enc, candidate| {
+        c.encode(&ctx, enc, candidate)
+    });
+}
+
+fn composition_witness(
+    ctx: &MetalContext,
+    c: &Composition,
+    generic: &str,
+    tensor: &str,
+    encode: impl Fn(&KernelEncoder, bool) -> Result<(), MetalError>,
+) {
+    let inputs = [&c.gate, &c.up, &c.f.w, &c.input, &c.routes, &c.f.weights];
     let before: Vec<_> = inputs.iter().map(|t| fingerprint(t)).collect();
-    let baseline = run(&ctx, |enc| c.encode(&ctx, enc, false).unwrap());
+    let baseline = run(ctx, |enc| encode(enc, false).unwrap());
     let inner_a = read(&c.f.x);
     let slots_a = read(&c.f.y);
     let out_a = read(&c.f.output);
+    if c.f.w.dtype == GgmlType::Q5_K {
+        c.f.validate_composed_q5_samples(&inner_a, &slots_a);
+    }
     poison(&c.f.x);
     poison(&c.f.y);
     poison(&c.f.output);
-    let candidate = run(&ctx, |enc| c.encode(&ctx, enc, true).unwrap());
+    let candidate = run(ctx, |enc| encode(enc, true).unwrap());
     assert_eq!(candidate.len(), baseline.len());
     let down = candidate.len() - 2;
-    assert_eq!(baseline[down].kernel, GENERIC);
-    assert_eq!(candidate[down].kernel, TENSOR);
+    assert_eq!(baseline[down].kernel, generic);
+    assert_eq!(candidate[down].kernel, tensor);
     assert!(
         down >= 3,
         "bucketing and sized fused gate/up split must remain"
@@ -934,6 +1032,9 @@ fn m5_down_composition_preserves_fused_gate_up_then_unweighted_down_then_sum() {
             && (a - b).abs() <= 3e-3 * scale + 1e-5));
     }
     let slot_out = read(&c.f.y);
+    if c.f.w.dtype == GgmlType::Q5_K {
+        c.f.validate_composed_q5_samples(&read(&c.f.x), &slot_out);
+    }
     let reduced = read(&c.f.output);
     for (i, &a) in reduced.iter().enumerate() {
         let expected: f64 = (0..TOP)
@@ -950,6 +1051,144 @@ fn m5_down_composition_preserves_fused_gate_up_then_unweighted_down_then_sum() {
     }
     for t in c.tensors() {
         guards(&t);
+    }
+}
+
+fn q4_gate_up_bank(ctx: &MetalContext, f: &Fixture) -> MetalTensor {
+    let compact = native_compact(GgmlType::Q4_K, f.m);
+    let row_bytes = f.m / 256 * 144;
+    let mut payload = Vec::with_capacity(row_bytes * f.k * f.e);
+    for expert in 0..f.e {
+        for row in 0..f.k {
+            let r = (expert * 3 + row) % WR;
+            payload.extend_from_slice(&compact[r * row_bytes..(r + 1) * row_bytes]);
+        }
+    }
+    let mut bank = guarded(
+        ctx,
+        &payload,
+        vec![f.m as u64, f.k as u64, f.e as u64],
+        GgmlType::Q4_K,
+    );
+    bank.provenance = MetalTensorProvenance::OwnedWeightReadOnly;
+    bank
+}
+
+#[test]
+#[ignore = "actual M5, validation ON, production lease; private E32 native ledger <=1GiB GPU, no timing"]
+fn m5_q5_down_q4_gate_up_composed_f64_and_preflight_contract() {
+    let _lease = validation_lease();
+    let ctx = MetalContext::new().unwrap();
+    require_m5(&ctx);
+    let generic = "kernel_moe_down_q5_K_f32_grouped_slots_generic";
+    let tensor = "kernel_moe_down_q5_K_f32_grouped_slots_tensor";
+    for rows in [1024, 2048] {
+        objc2::rc::autoreleasepool(|_| {
+            let _allocation = ctx.begin_allocation_transaction();
+            // Only E is reduced; policy CPU tests reject E32 in production.
+            // The native fixture prices both Q4 banks plus all scratch/CPU
+            // headroom before allocation, with no admission exception.
+            let f = Fixture::new_native(
+                &ctx,
+                2048,
+                4096,
+                32,
+                rows,
+                GgmlType::Q5_K,
+                &[GgmlType::Q4_K, GgmlType::Q4_K],
+            );
+            let inputs = [&f.w, &f.x, &f.counts, &f.ids, &f.weights];
+            let before: Vec<_> = inputs.iter().map(|t| fingerprint(t)).collect();
+            for candidate in [false, true] {
+                poison(&f.y);
+                poison(&f.output);
+                let census = run(&ctx, |enc| f.encode(&ctx, enc, candidate, true));
+                assert_eq!(census.len(), 2);
+                assert_eq!(census[0].kernel, if candidate { tensor } else { generic });
+                assert_eq!(
+                    (
+                        census[0].grid_width,
+                        census[0].grid_height,
+                        census[0].grid_depth
+                    ),
+                    (rows.div_ceil(32) as u64, 64, 32)
+                );
+                assert_eq!(census[0].threads_width, 128);
+                f.validate(&read(&f.y));
+                f.validate_reduction(&read(&f.output));
+            }
+            for (t, before) in inputs.iter().zip(before) {
+                assert_eq!(fingerprint(t), before);
+            }
+            let gate = q4_gate_up_bank(&ctx, &f);
+            let up = q4_gate_up_bank(&ctx, &f);
+            let c = Composition::with_banks(&ctx, f, gate, up);
+            composition_witness(&ctx, &c, generic, tensor, |enc, candidate| {
+                c.encode_bindings(
+                    &ctx,
+                    enc,
+                    &c.tensors(),
+                    7.0,
+                    if candidate {
+                        GroupedDownPolicy::Q5KTensor
+                    } else {
+                        GroupedDownPolicy::Incumbent
+                    },
+                )
+            });
+            let before: Vec<_> = c.tensors().iter().map(fingerprint).collect();
+            {
+                let _missing = adapter::FaultScope::new(adapter::PreflightFault::MissingPipeline);
+                assert_no_mutation(&ctx, |enc| {
+                    assert!(matches!(
+                        c.encode_bindings(
+                            &ctx,
+                            enc,
+                            &c.tensors(),
+                            7.0,
+                            GroupedDownPolicy::Q5KTensor
+                        ),
+                        Err(MetalError::NoFunction(_))
+                    ))
+                });
+            }
+            let mut invalid = c.tensors();
+            invalid[9].provenance = MetalTensorProvenance::OwnedWeightReadOnly;
+            assert_no_mutation(&ctx, |enc| {
+                assert!(
+                    c.encode_bindings(&ctx, enc, &invalid, 7.0, GroupedDownPolicy::Q5KTensor)
+                        .is_err()
+                )
+            });
+            assert_no_mutation(&ctx, |enc| {
+                assert!(
+                    c.encode_bindings(&ctx, enc, &c.tensors(), 7.0, GroupedDownPolicy::Iq3STensor)
+                        .is_err()
+                )
+            });
+            {
+                let _capacity = adapter::FaultScope::new(adapter::PreflightFault::Capacity);
+                assert_no_mutation(&ctx, |enc| {
+                    assert!(c.f.prepare(&ctx, enc).unwrap().is_none())
+                });
+                assert_no_mutation(&ctx, |enc| {
+                    assert!(
+                        c.encode_bindings(&ctx, enc, &invalid, 7.0, GroupedDownPolicy::Q5KTensor)
+                            .is_err()
+                    )
+                });
+            }
+            for (t, before) in c.tensors().iter().zip(before) {
+                assert_eq!(fingerprint(t), before);
+            }
+            let _capacity = adapter::FaultScope::new(adapter::PreflightFault::Capacity);
+            let census = run(&ctx, |enc| {
+                c.encode_bindings(&ctx, enc, &c.tensors(), 7.0, GroupedDownPolicy::Q5KTensor)
+                    .unwrap()
+            });
+            assert_eq!(census[census.len() - 2].kernel, generic);
+            assert!(read(&c.f.output).iter().all(|v| v.is_finite()));
+        });
     }
 }
 

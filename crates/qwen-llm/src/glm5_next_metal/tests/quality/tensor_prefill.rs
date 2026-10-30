@@ -1,4 +1,8 @@
 //! Same-binary Fast/Half2048 screen; all wall times are diagnostic with validation on.
+#[cfg(not(debug_assertions))]
+#[path = "tensor_m5_transfers.rs"]
+mod tensor_m5_transfers;
+
 use super::super::super::{tensor_down, tensor_prefill};
 use super::*;
 use crate::glm5_next::admission::Glm5NextArtifactLayout;

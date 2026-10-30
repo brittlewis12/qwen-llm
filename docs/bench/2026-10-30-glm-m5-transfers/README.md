@@ -2,11 +2,12 @@
 
 ## Status
 
-**Performance only; strict numerical qualification remains pending.** Actual-M5
-native A/B measurements support further qualification of independent wide-Q8
-dense and Q5-down candidates on the current UD-Q4_K_XL artifact. Neither flag
-is promoted, no default changes, and these results alone do not qualify source
-integration. This packet adds documentation only.
+**Numerical screen complete; broader continuation/tool qualification pending.**
+Actual-M5 native A/B measurements and the corrected full-vocabulary screen
+support further qualification of independent wide-Q8 dense and Q5-down
+candidates on the current UD-Q4_K_XL artifact. Both controls remain default-off
+and off main; no flag/default promotion or source integration follows. This
+packet adds documentation only.
 
 At 2K/4K, median native wall falls 3.3526%/3.1844% for wide-only and
 8.3784%/7.5065% for Q5-down-only. N512 does not improve. Late-run drift limits
@@ -26,9 +27,10 @@ full-model quality results.
 - M5 Ultra, 80 GPU cores, 256 GiB, macOS 27.0.1. Metal SDK **26.2**, Apple
   Metal compiler **32023.864**. This is not the V4.1 SDK 27 release cohort.
 - Actual six-shard GLM-5.3-Flash UD-Q4_K_XL; reported `model_size` is
-  **199697800568 bytes**. Payload hashes are **not verified**. Detailed model
-  pin data belongs to the pending numerical screen; no artifact-equivalence
-  claim is made to the older UD-IQ3_XXS landing packets.
+  **199697800568 bytes**. Payload hashes are **not verified**. The corrected
+  numerical screen below admits the actual model pins within its metadata-only
+  identity scope; no artifact-equivalence claim is made to the older
+  UD-IQ3_XXS landing packets.
 
 The current artifact's main routed roles differ from those older packets:
 
@@ -38,8 +40,8 @@ The current artifact's main routed roles differ from those older packets:
 | Gate/up | 82 Q4_K; 2 Q5_K at layer 11 | Q4_K |
 | MLA K/V | All 22 main K/V tensors Q8_0, at layers 3, 7, ..., 43 | Not exercised |
 
-This inventory describes candidate coverage, not a completed numerical or
-payload-integrity gate. Do not substitute the old IQ3 role inventory.
+The corrected screen checks this candidate coverage, not weight-payload
+integrity or general quality. Do not substitute the old IQ3 role inventory.
 
 ## Native Measurement Boundary
 
@@ -125,7 +127,7 @@ overlapped the observer. All samples remain in the primary result. Using
 only A1 as the wide 4K control still gives a **3.2039%** median wall reduction,
 so the observed wide benefit is not dependent on retaining A0.
 
-## Qualification Boundary
+## Completed Numerical Screen
 
 The shared tiny M5 wide/Q5 leaf witnesses passed with Metal debugging enabled.
 They are separate from these debug-off full-model timings and are **not a
@@ -133,18 +135,77 @@ full-model quality witness**. An earlier identity refusal and two actual-Q4
 pin refusals occurred before model load, outside this completed cohort; their
 records remain private. They are not timed failures or passing qualification.
 
-The corrected numerical screen plus existing 22-document/tool extension builds
-successfully from clean `5081fcc0`: 23 focused CPU tests pass from its release
-binary, and independent source review has no remaining P1/P2 findings. Its
-separate test-executable SHA256 is
+The corrected screen and existing 22-document/tool extension build from clean
+`5081fcc0`: the earlier 23 focused CPU tests pass, and independent source
+review has no remaining P1/P2 findings. The separate test-executable SHA256 is
 `801872a93e3e1e6c440555cb2a07b010e43822b00759c56b8c2fd1bfb1e7ead4`.
-GPU execution has not yet occurred because the GPU is occupied by parallel
-work. Do not infer passing full-model quality from the build, CPU checks or
-earlier leaf witnesses. A later numerical qualification update must close the
-gate before flag/default promotion or source integration. This performance
-checkpoint does not close it.
+The actual-M5 screen **passes in 320.87 seconds**, with an execution-complete
+record: **576 teacher-forced rows (192 per arm), 32 validation-on plain
+samples, three profiles and three censuses**. Metal API validation is enabled
+for this screen, separate from the debug-off native cohort. Strict actual metadata,
+expert-role and Q8 MLA pins admit, including all 22 main MLA K/V banks; the
+actual layout is not the older stock fixture. Shard names/sizes, primary
+metadata SHA and tensor-table checks do not verify weight-payload hashes.
 
-Depth/ragged append behavior, saved-request continuation/tool behavior,
-full-model quality, combined candidates and serving/decode conversion remain
-unmeasured here. See the [leverage map](../2026-10-30-glm-m5-leverage.md) for
-historical anchors and distinct remaining candidates.
+Each arm scores 64 targets in each of prose, code and long-document strata,
+comparing all **154880 vocabulary components** per row. All values are finite.
+Q8WIDE is full-vocabulary **bit-exact on all 192 scored rows** across the three
+documents: zero changed components, max absolute error, KL and NLL delta.
+This finite/bit check is bounded to the scored teacher-forced histories, not
+a causal-state proof or arbitrary-conversation equivalence.
+
+Q5DOWN changes all 192 rows: max absolute logit delta **1.8312613**, max KL
+**0.04859741174044692**, mean KL **0.0035254466880138145**, mean NLL delta
+**-0.002238788080381185**, and **five top-1 changes** relative to CURRENT.
+NLL delta means candidate minus CURRENT; a negative mean is not a
+noninferiority or equality verdict. Preserve the opposite-signed code result:
+
+| Q5DOWN stratum | Scored rows | Mean NLL delta | Top-1 changes |
+| --- | ---: | ---: | ---: |
+| Prose | 64 | -0.0063893356979749325 | 2 |
+| Code | 64 | +0.010071017545712975 | 0 |
+| Long | 64 | -0.010398046088881598 | 3 |
+
+[numerical-document-metrics.csv](numerical-document-metrics.csv) retains all
+nine arm/document aggregates, including CURRENT and Q8WIDE zeros, row and
+changed-component counts, finite status, maximum logit/KL errors and mean
+KL/NLL deltas. This is a descriptive screen with no quality acceptance
+threshold; the complete event explicitly supplies no quality verdict.
+
+## Separate Validation-On Diagnostics
+
+Each full 2K census records **1342 dispatches**. CURRENT has no wide/Q5-down
+candidate calls; Q8WIDE has **507 wide calls** and no tensor Q5-down calls;
+Q5DOWN has **39 tensor Q5-down calls** and no wide calls. These confirm
+independent path selection, not a measured combined configuration.
+
+Profile/plain ratios below divide the single profiled call by the mean of
+its two same-arm plain calls. All are validation-on diagnostics, not the
+earlier SDK 26.2 debug-off native performance samples; do not pool them.
+
+| Arm | Plain mean ms | Profiled wall ms | Profile/plain mean | Observer overhead |
+| --- | ---: | ---: | ---: | ---: |
+| CURRENT | 3341.613 | 3419.216 | 1.023223 | +2.3223% |
+| Q8WIDE | 3245.596 | 3334.310 | 1.027334 | +2.7334% |
+| Q5DOWN | 3108.194 | 3409.479 | 1.096933 | +9.6933% |
+
+Routed experts dominate the actual profiles: CURRENT is about **60.8% of
+scaled diagnostic spans**. These spans are not recoverable saved wall.
+Q5DOWN is 6.9852% below CURRENT in the paired plain means but only 0.2848%
+below it in profiled wall: split profiling loses much of the plain benefit.
+Observer overhead varies by arm; do not use a leaf span or this diagnostic
+comparison to replace the ordinary performance result or claim combined gain.
+
+## Remaining Qualification
+
+The existing 22-document/tool extension is now running on `5081fcc0` with the
+same screen binary; **no results are available in this checkpoint**. Its fresh
+report is separate from this completed screen. Broader continuation/tool
+qualification, general full-model quality, combined candidates and
+serving/decode conversion remain open. Neither the negative overall Q5DOWN
+NLL delta nor tiny leaf passes closes those gates. Defaults remain off and
+the experimental controls are not promoted to main.
+
+Depth/ragged append performance is also unmeasured here. See the
+[leverage map](../2026-10-30-glm-m5-leverage.md) for historical anchors and the
+separate tiny M5 Q8 MLA tail witnesses, not actual-model tail performance.

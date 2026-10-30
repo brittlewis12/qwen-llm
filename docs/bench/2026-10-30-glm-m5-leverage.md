@@ -12,14 +12,18 @@ below use stock UD-IQ3_XXS; older first-light measurements use Maya-M IQ2_S.
 Their quantization inventories and selected paths are not interchangeable.
 
 Subsequent [actual-M5 native transfer measurements](2026-10-30-glm-m5-transfers/README.md)
-on six-shard UD-Q4_K_XL are now a **performance-only checkpoint**, not a
-qualification or source-integration verdict. Independent wide-only and
+on six-shard UD-Q4_K_XL now include a **completed numerical screen**, not a
+broader quality or source-integration verdict. Independent wide-only and
 Q5-down-only blocks reduce median 2K/4K native wall by 3.3526%/3.1844% and
 8.3784%/7.5065%; N512 does not improve. The packet retains all 48 samples,
 late-run drift and the A0 CPU-observer caveat. Its SDK 26.2 build is distinct
-from V4.1 SDK 27 serving results. Strict numerical qualification remains
-pending; no flag/default promotion follows. The historical map below is
-unchanged, not a claim that these native timings measure serving TTFT.
+from V4.1 SDK 27 serving results. The corrected `5081fcc0` screen completes
+576 teacher-forced rows: Q8WIDE is full-vocabulary bit-exact on all 192 rows;
+Q5DOWN changes all 192, with five top-1 changes and positive code-stratum
+mean NLL delta despite a negative overall mean. Broader 22-document/tool
+qualification is running, without results here; defaults stay off and neither
+control is promoted to main. The historical map below is unchanged, not a
+claim that these native timings measure serving TTFT.
 
 ## Measured Anchors
 
@@ -65,6 +69,13 @@ retain each dot's arithmetic while consolidating remainder dispatches. The
 Q6 path already handles scalar remainder rows differently, so this is
 dtype-specific. The earlier tail-MMA experiment remains off: its useful M4
 timings do not resolve the recorded code-output differences.
+
+Separate experimental off-main source `d1b897cb` now passes the tiny M5 Q8
+MLA tail bitwise witness for both geometries, offsets and guards (6.27 s),
+bad-binding rejection (0.01 s), and debug-on ABBA diagnostic (1.54 s).
+The comparator body/threadgroup/precision are unchanged, with no expanded
+scratch. These are tiny witnesses, not actual-model tail performance or
+default-promotion evidence; do not add them to the full-model transfer gains.
 
 ## Bounded Next Measurement
 

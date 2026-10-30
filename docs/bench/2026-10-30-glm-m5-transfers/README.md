@@ -2,12 +2,13 @@
 
 ## Status
 
-**Numerical screen complete; broader continuation/tool qualification pending.**
-Actual-M5 native A/B measurements and the corrected full-vocabulary screen
-support further qualification of independent wide-Q8 dense and Q5-down
-candidates on the current UD-Q4_K_XL artifact. Both controls remain default-off
-and off main; no flag/default promotion or source integration follows. This
-packet adds documentation only.
+**Extended continuation/tool run complete; combined qualification pending.**
+Actual-M5 native A/B measurements, the initial three-document screen and the
+completed 22-document/tool extension provide descriptive evidence for the
+independent wide-Q8 dense and Q5-down candidates on UD-Q4_K_XL. They do not
+establish global quality equality or noninferiority. Both production controls
+remain default-off and off main, pending combined qualification and the parent
+integration decision. This packet adds documentation only.
 
 At 2K/4K, median native wall falls 3.3526%/3.1844% for wide-only and
 8.3784%/7.5065% for Q5-down-only. N512 does not improve. Late-run drift limits
@@ -127,7 +128,7 @@ overlapped the observer. All samples remain in the primary result. Using
 only A1 as the wide 4K control still gives a **3.2039%** median wall reduction,
 so the observed wide benefit is not dependent on retaining A0.
 
-## Completed Numerical Screen
+## Initial Three-Document Numerical Screen
 
 The shared tiny M5 wide/Q5 leaf witnesses passed with Metal debugging enabled.
 They are separate from these debug-off full-model timings and are **not a
@@ -196,15 +197,107 @@ below it in profiled wall: split profiling loses much of the plain benefit.
 Observer overhead varies by arm; do not use a leaf span or this diagnostic
 comparison to replace the ordinary performance result or claim combined gain.
 
+## Completed Extended Continuation/Tool Run
+
+The separate extended test **passes in 681.59 seconds** on `5081fcc0`, using
+the same `801872a9...` test binary identified above, SDK 26.2 and Metal API
+validation **on**. Its unique complete event accounts for **4224 quality
+rows, 66 document arms, 24 tool generations and 450 sampled-token records**,
+with **24 expected chat stops and zero caps**. Retained shard stamps are
+reported unchanged and observers clear. There are no plain performance,
+profile or census observations in this extension; do not pool it with native
+debug-off timings or the earlier validation-on diagnostics.
+
+All 13 declared fixture/source-file hashes match `5081fcc0`. The frozen
+`quality-v1.json` SHA256 is
+`7f9ac936b08ee0f4e47fbbb42dbfd46c3055f058b4f36fa5d832fbefcad43057`.
+Selection, u32 little-endian token hashes, unique rows, positions, CURRENT
+reference NLL/top-1 arithmetic and completion counts are independently
+rechecked. Each arm has **1408 finite full-vocabulary rows**: 22 documents,
+eight prose, eight code and six long, with 64 targets per document. Maximum
+frozen prefixes are 2048 tokens for prose/code and 4352 for long documents.
+
+CURRENT and Q8WIDE have mean NLL **1.4462970340516323** and **979/1408**
+top-1 hits. Q8WIDE remains full-vocabulary **bit-exact on all 1408 rows**,
+with zero logit/KL/NLL differences and no top-1 changes. This is still a
+teacher-forced finite/bit check, not a causal-state proof.
+
+Q5DOWN changes all 1408 rows: mean NLL **1.445751627193185**, mean delta
+**-0.0005454068584474908**, **980/1408 hits**, **28 top-1 changes**, and mean
+KL **0.0031548689816829206**. Its worst absolute logit delta is **9.899603**
+(`long-04`, target index 58, position 4410); worst KL is
+**0.2790210105159407** (`prose-07`, index 41, position 2089). Indices and
+positions are zero-based. These outliers are not erased by the near-neutral
+mean or the single additional top-1 hit.
+
+Prose/code/long hit counts are 244/454/282 (CURRENT: 243/454/282), with
+18/2/8 top-1 changes, respectively. All strata remain in the analysis.
+
+[extended-document-metrics.csv](extended-document-metrics.csv) retains all
+66 arm/document aggregates, including NLL means/deltas, hits, changed rows
+and components, finite status, and max/mean errors. Public document labels
+number documents within each stratum in frozen fixture order; no document
+text or token IDs are included. All **576 original three-document quality
+records repeat exactly** in the overlapping subset. This is repeatability,
+not an independent replication, and those rows are not counted twice.
+
+### Descriptive Document Bootstrap
+
+Paired per-document NLL means and top-1 hit-rate differences are resampled
+20,000 times, seed **20261008**, following the existing document-bootstrap
+approach. Overall resampling keeps eight prose, eight code and six long
+documents (weights 8/22, 8/22, 6/22); each stratum resamples its own documents.
+Implementation uses stdlib `random.Random` (MT19937), reset per candidate and
+scope, `randrange` draws in prose/code/long and frozen document order, shared
+draws for both metrics, and linear percentiles at `(n - 1) * p` for p=0.05/0.95.
+This avoids NumPy/environment changes; it is not NumPy-RNG-identical.
+
+Q5DOWN deltas are relative to CURRENT. Accuracy changes/intervals are in
+**percentage points**, not relative percentages. Intervals are descriptive
+central 90%, not post-hoc formal pass bounds. Q8WIDE's observed deltas and
+all corresponding intervals are exactly zero.
+
+| Scope | Mean NLL delta | NLL central 90% | Accuracy delta, pp | Accuracy central 90%, pp |
+| --- | ---: | --- | ---: | --- |
+| Overall | -0.000545407 | [-0.003684075, +0.002519717] | +0.071023 | [-0.355114, +0.426136] |
+| Prose | +0.002665668 | [-0.002326976, +0.007816731] | +0.195312 | [-0.585938, +0.976562] |
+| Code | -0.000337876 | [-0.003412302, +0.002851714] | 0.000000 | [0.000000, 0.000000] |
+| Long | -0.005103548 | [-0.013623127, +0.002380607] | 0.000000 | [-1.041667, +1.041667] |
+
+Zero hit-rate intervals reflect observed document-level counts, not logit
+equality or coverage beyond this cohort. The older prescribed Exact-versus-Fast
+thresholds belong to a different cohort/reference. They are not retroactively
+applied, and no preregistered pass or global quality noninferiority is claimed.
+
+### Strict Tool Recheck
+
+All arms are **8/8 strictly correct**: four frozen long-context tasks
+(T09-T12), each once greedy (seed 0) and once sampled (seed 11). Scoring reuses
+the unchanged `scripts/reference/glm53/quality_analysis.py::tool_correct`,
+AST-extracting only `CURRENCY`, `norm_city` and `tool_correct` with
+`math`/`unicodedata`, not
+importing NumPy. The definitions also match source `5081fcc0`. This enforces
+one expected call, normalized city/strict days or numeric amount/unambiguous
+currency, expected observation stop and no parse error, not the lenient
+first-call flag. All 24 stop correctly without errors or caps.
+
+For **both candidates, all eight complete sampled-token sequences**, including
+the stop, are identical to CURRENT; sampled/emitted hashes, token-event and
+position alignment also check. This covers eight generations, not eight
+independent tasks or arbitrary tools. Two tasks use 1455-row prefixes where
+Q5 down is ineligible; two use 2048/2048/912 chunks with two eligible chunks.
+The extension records no census and makes no new dispatch-count claim.
+
 ## Remaining Qualification
 
-The existing 22-document/tool extension is now running on `5081fcc0` with the
-same screen binary; **no results are available in this checkpoint**. Its fresh
-report is separate from this completed screen. Broader continuation/tool
-qualification, general full-model quality, combined candidates and
-serving/decode conversion remain open. Neither the negative overall Q5DOWN
-NLL delta nor tiny leaf passes closes those gates. Defaults remain off and
-the experimental controls are not promoted to main.
+A separate **combined-arm test-only run** (reported source prefix `e75`) is
+running: ordinary native ABBA plus a separate three-document/16-tool screen.
+No combined results belong to this checkpoint; the combined configuration is
+unqualified. Extended independent-arm qualification is complete only in the
+descriptive bounded sense above. Global quality, combined behavior and final
+integration/default promotion remain for the parent decision. Neither the
+negative mean NLL delta nor tiny leaf passes closes those gates. Production
+flags remain off and off main; serving/decode conversion is not established.
 
 Depth/ragged append performance is also unmeasured here. See the
 [leverage map](../2026-10-30-glm-m5-leverage.md) for historical anchors and the

@@ -12,18 +12,30 @@ below use stock UD-IQ3_XXS; older first-light measurements use Maya-M IQ2_S.
 Their quantization inventories and selected paths are not interchangeable.
 
 Subsequent [actual-M5 native transfer measurements](2026-10-30-glm-m5-transfers/README.md)
-on six-shard UD-Q4_K_XL now include a **completed numerical screen**, not a
-broader quality or source-integration verdict. Independent wide-only and
-Q5-down-only blocks reduce median 2K/4K native wall by 3.3526%/3.1844% and
-8.3784%/7.5065%; N512 does not improve. The packet retains all 48 samples,
-late-run drift and the A0 CPU-observer caveat. Its SDK 26.2 build is distinct
-from V4.1 SDK 27 serving results. The corrected `5081fcc0` screen completes
-576 teacher-forced rows: Q8WIDE is full-vocabulary bit-exact on all 192 rows;
-Q5DOWN changes all 192, with five top-1 changes and positive code-stratum
-mean NLL delta despite a negative overall mean. Broader 22-document/tool
-qualification is running, without results here; defaults stay off and neither
-control is promoted to main. The historical map below is unchanged, not a
-claim that these native timings measure serving TTFT.
+on six-shard UD-Q4_K_XL include completed independent and combined checks.
+The parent **approves both bounded M5 Fast/Half routes for default promotion**,
+with separate flag-0 rollbacks; source integration is in progress, not claimed
+merged. Independent wide-only and Q5-down-only blocks reduce median 2K/4K native wall by
+3.3526%/3.1844% and 8.3784%/7.5065%; N512 does not improve. The packet retains
+all 48 samples, late-run drift and the A0 CPU-observer caveat. Its SDK 26.2 build is distinct
+from V4.1 SDK 27 serving results. The validation-on `5081fcc0` extension has
+4224 quality rows: Q8WIDE is full-vocabulary bit-exact on all 1408 scored rows;
+Q5DOWN has 28 top-1 changes, max absolute delta 9.899603 and max KL
+0.2790210105159407 despite mean NLL delta -0.0005454068584474908. Each arm
+scores 8/8 strict tool generations, and both candidates' eight complete
+sampled sequences equal CURRENT. The original three-document subset repeats,
+not independently replicates. Descriptive document-bootstrap intervals and
+all strata are retained in the packet. Combined native ABBA retains all 24
+samples and late C1/A1 drift, including 14.3329% at unaffected N512; its
+pooled 17.9399% 2K wall reduction is confounded, not a headline estimate.
+The separate `e75cd6ab` combined quality check completes 384 rows and 16
+strict-correct tool generations; its 192 combined metric records match the
+earlier Q5DOWN screen, not a retained-vector equality proof. The measured
+checkpoint leaves production unchanged; the source agent is implementing
+default changes and the parent will record the final source commit/merge.
+Exact/F32, short-row/M4 and global rollback behavior must remain preserved.
+These are bounded descriptive findings, not formal noninferiority, universal
+speedup, serving TTFT, or an additive/pooled combined-gain claim.
 
 ## Measured Anchors
 

@@ -6,6 +6,24 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the current state and evidence index.
 
+## 2026-10-30 - GLM M5 Transfers: Native Performance, Quality Pending
+
+- Actual six-shard GLM-5.3-Flash UD-Q4_K_XL, clean `0473b95c2` qwen-bench,
+  SDK 26.2 / Metal compiler 32023.864, not the V4.1 SDK 27 cohort. All 24
+  report rows have matching identities; 48 raw timing/rate samples match the
+  portable CSV. Model payload hashes remain unverified.
+- Independent wide-only and Q5-down-only blocks at depth zero, Fast/Half,
+  admitted chunk 2048: median 2K/4K native wall falls 3.3526%/3.1844% and
+  8.3784%/7.5065%, respectively. N512 does not improve; no combined arm.
+- Retain late D1/A3 drift, including roughly 4% at N512, and the one-second
+  A0 CPU observer caveat. A1-only wide 4K sensitivity still reduces wall
+  3.2039%. False power-warning fields do not establish constant frequency.
+- Performance-only checkpoint: tiny debug-on leaf witnesses are not full-model
+  quality. Corrected numerical qualification on `5081fcc0` remains pending GPU
+  execution; no flag/default promotion or source integration. Native timing
+  includes encode/wait/final-logit readback, not serving TTFT or model load.
+  [Results, identity, drift and all samples](bench/2026-10-30-glm-m5-transfers/README.md).
+
 ## 2026-10-30 - V4.1 Serve Controls: Measured Idle Benefit And Expiry
 
 - Frozen `5bf7e4e5` M5 release: first six-arm cohort completes 30 generations

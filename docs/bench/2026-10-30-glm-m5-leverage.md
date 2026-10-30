@@ -11,6 +11,16 @@ The recent usage artifact is GLM UD-Q4_K_XL. The dense/down landing packets
 below use stock UD-IQ3_XXS; older first-light measurements use Maya-M IQ2_S.
 Their quantization inventories and selected paths are not interchangeable.
 
+Subsequent [actual-M5 native transfer measurements](2026-10-30-glm-m5-transfers/README.md)
+on six-shard UD-Q4_K_XL are now a **performance-only checkpoint**, not a
+qualification or source-integration verdict. Independent wide-only and
+Q5-down-only blocks reduce median 2K/4K native wall by 3.3526%/3.1844% and
+8.3784%/7.5065%; N512 does not improve. The packet retains all 48 samples,
+late-run drift and the A0 CPU-observer caveat. Its SDK 26.2 build is distinct
+from V4.1 SDK 27 serving results. Strict numerical qualification remains
+pending; no flag/default promotion follows. The historical map below is
+unchanged, not a claim that these native timings measure serving TTFT.
+
 ## Measured Anchors
 
 - [Dense tensor prefill](2026-10-22-glm-tensor-prefill/README.md): M5 Ultra,

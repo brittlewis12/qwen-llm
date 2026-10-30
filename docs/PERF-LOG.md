@@ -6,6 +6,19 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the current state and evidence index.
 
+## 2026-10-29 - V4.1 Depth On Q-Cache: 32K Peak, 128K Fall, Append Gap
+
+- Q-cache build `8f455225` (main `034b0c01`), cooled CED: 2K 1,231.1,
+  8K 1,988.3, 32K 2,301.7, 128K 1,980.8 tok/s. The 128K two-rep second
+  sample fell to 1,689; the cooled singles are the point.
+- Fixed 1K append: d0 856.5, d8K 955.1, d32K 895.8, d128K 586.0 tok/s.
+  At 128K the append costs 3.4x the cold-prefill per-token time.
+- Decode: d0 77.68, d128K 68.79 tok/s (12.87 / 14.54 ms). d8K/d32K from the
+  preceding build are 73.23 / 72.46; the prefill Q-cache does not touch decode.
+- The Q-cache is +4.7% at 8K same-binary. This supersedes the earlier Q-half
+  depth matrix. [Packet](bench/2026-10-29-v41-depth-roofline.md). Raw:
+  `~/qwen-runs/2026-10-29-v41-encoder-depth/`.
+
 ## 2026-10-29 - V4.1 Depth Matrix: Cold Prefill Rises, Append Falls, Decode Flat To 32K
 
 - CED cold prefill: 2K 1,222.8, 8K 1,895.6, 32K 2,086.1, 128K 2,128.1 tok/s.

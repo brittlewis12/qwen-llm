@@ -104,12 +104,20 @@ fn cpu_q5_down_policy_bounds_arithmetic_dtype_geometry_topk_and_committed_rows()
 }
 
 #[test]
-fn cpu_q5_down_default_off_scope_is_nested_thread_local_and_unwind_safe() {
-    assert!(
-        !crate::env_flag::read_default_off("QWEN_GLM53_TENSOR_Q5_DOWN"),
-        "run this default contract in a fresh process without the experiment flag"
+fn cpu_q5_down_default_on_scope_is_nested_thread_local_and_unwind_safe() {
+    let runtime = crate::env_flag::read_default_on("QWEN_GLM53_TENSOR_Q5_DOWN");
+    assert_eq!(requested(), runtime);
+    assert_eq!(enabled(), runtime);
+    assert_eq!(
+        selected(
+            HALF,
+            StageMode::Fast,
+            GgmlType::Q5_K,
+            (2048, 4096, 288, 8),
+            2048
+        ),
+        runtime
     );
-    assert!(!enabled());
     {
         let _on = Scope::new(true);
         assert!(enabled());
@@ -128,13 +136,17 @@ fn cpu_q5_down_default_off_scope_is_nested_thread_local_and_unwind_safe() {
         );
         assert!(enabled());
         std::thread::spawn(|| {
-            assert!(!enabled());
-            let _on = Scope::new(true);
-            assert!(enabled());
+            let runtime = crate::env_flag::read_default_on("QWEN_GLM53_TENSOR_Q5_DOWN");
+            assert_eq!(enabled(), runtime);
+            {
+                let _on = Scope::new(true);
+                assert!(enabled());
+            }
+            assert_eq!(enabled(), runtime);
         })
         .join()
         .unwrap();
         assert!(enabled());
     }
-    assert!(!enabled());
+    assert_eq!(enabled(), runtime);
 }

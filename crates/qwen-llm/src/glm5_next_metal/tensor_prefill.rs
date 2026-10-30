@@ -1,5 +1,6 @@
 //! Bounded dense Half-operand TensorOps route. No expert/MLA absorption
-//! routing, buffers, or activation staging. Q8 wide is an opt-in experiment.
+//! routing, buffers, or activation staging. Q8 wide defaults on for eligible
+//! M5 Fast/Half prefill; 0 restores the narrow tile.
 
 use super::packed::{Arith, FastPrecision, PackedLineage, StageMode};
 use crate::metal::checks::{
@@ -16,8 +17,8 @@ const DEFAULT_ENABLED: bool = true;
 const THREADGROUP_BYTES: usize = 8192;
 
 crate::env_flag!(
-    /// Opt-in GLM dense Q8_0 64-slot TensorOps prefill; 0 restores the qualified narrow tile. Does not bypass Half/Fast, row, tier, binding, or global rollback guards.
-    default_off q8_wide_enabled,
+    /// Default-on GLM dense Q8_0 64-slot TensorOps prefill on eligible M5 Fast/Half; 0 restores the previous narrow tile. Does not bypass Half/Fast, row, tier, binding, or global rollback guards.
+    default_on q8_wide_enabled,
     "QWEN_GLM53_DENSE_Q8_WIDE"
 );
 

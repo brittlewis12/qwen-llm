@@ -213,9 +213,14 @@ fn cpu_q8_wide_pipeline_and_capacity_match_explicit_shared_dispatch() {
 }
 
 #[test]
-fn cpu_q8_wide_scope_is_nested_unwind_safe_thread_local_and_independent() {
-    assert_eq!(wide_enabled(), q8_wide_enabled());
-    let runtime = wide_enabled();
+fn cpu_q8_wide_default_on_scope_is_nested_unwind_safe_thread_local_and_independent() {
+    let runtime = crate::env_flag::read_default_on("QWEN_GLM53_DENSE_Q8_WIDE");
+    assert_eq!(q8_wide_enabled(), runtime);
+    assert_eq!(wide_enabled(), runtime);
+    assert_eq!(
+        Tile::selected(GgmlType::Q8_0),
+        if runtime { Tile::Q8Wide } else { Tile::Narrow }
+    );
     {
         let _wide = Q8WideScope::new(false);
         assert_eq!(Tile::selected(GgmlType::Q8_0), Tile::Narrow);
@@ -233,9 +238,13 @@ fn cpu_q8_wide_scope_is_nested_unwind_safe_thread_local_and_independent() {
         assert!(unwind.is_err());
         assert!(!wide_enabled());
         std::thread::spawn(|| {
-            assert_eq!(wide_enabled(), q8_wide_enabled());
-            let _wide = Q8WideScope::new(true);
-            assert!(wide_enabled());
+            let runtime = crate::env_flag::read_default_on("QWEN_GLM53_DENSE_Q8_WIDE");
+            assert_eq!(wide_enabled(), runtime);
+            {
+                let _wide = Q8WideScope::new(true);
+                assert!(wide_enabled());
+            }
+            assert_eq!(wide_enabled(), runtime);
         })
         .join()
         .unwrap();

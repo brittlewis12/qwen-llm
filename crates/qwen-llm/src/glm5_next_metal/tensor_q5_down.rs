@@ -1,4 +1,4 @@
-//! Default-off GLM Q5_K down experiment. The shared adapter owns M5 tier,
+//! Default-on bounded GLM Q5_K down for M5 Fast/Half. The shared adapter owns M5 tier,
 //! global rollback, binding and capacity checks before bucketing writes.
 //! F32 activation storage, Half operands and F32 sums; only reduction order
 //! changes versus the generic Half tile. Gate/up and post-weighting stay put.
@@ -7,8 +7,8 @@ use super::packed::{Arith, FastPrecision, PackedLineage, StageMode};
 use crate::tensor::GgmlType;
 
 crate::env_flag!(
-    /// Bounded GLM-only Q5_K expert down tensor experiment; ordinary model qualification is required before promotion.
-    default_off requested,
+    /// Default-on bounded M5 Fast/Half GLM Q5_K expert down tensor policy; 0 restores the previous down route. Arithmetic, geometry, committed-row, tier, capacity and global rollback guards remain mandatory.
+    default_on requested,
     "QWEN_GLM53_TENSOR_Q5_DOWN"
 );
 

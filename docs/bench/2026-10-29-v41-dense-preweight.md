@@ -111,29 +111,31 @@ the per-group hot spot disappears.
 
 | arm | cache | tok/s |
 | --- | ---: | ---: |
-| off1 | 0 | 2,174.85 |
-| on1 | 1 | 2,313.93 |
-| on2 | 1 | 2,319.61 |
-| off2 | 0 | 2,179.04 |
+| off1 | 0 | 2,167.58 |
+| on1 | 1 | 2,315.49 |
+| on2 | 1 | 2,315.55 |
+| off2 | 0 | 2,173.31 |
 
-**+6.4%** (mean 2,176.95 -> 2,316.77). The current-main QK is in both arms.
+**+6.7%** (mean 2,170.45 -> 2,315.52) on the final main `bce65f3c`. The
+current-main QK is in both arms.
 
 8K Full/CED pair at the default-on cache, production timing, 4 retained
-samples per policy:
+samples per policy, after a 300 s cool-down:
 
 | policy | tok/s | samples |
 | --- | ---: | --- |
-| Full | 1,408.81 | 1,408.43 / 1,409.06 / 1,408.77 / 1,409.00 |
-| CED | 2,249.30 | 2,254.53 / 2,248.25 / 2,255.28 / 2,239.16 |
+| Full | 1,407.77 | 1,408.01 / 1,408.09 / 1,407.18 / 1,407.80 |
+| CED | 2,247.04 | 2,254.16 / 2,246.30 / 2,240.61 / 2,247.08 |
 
 All 14 pair cases carry the same endpoint hash
 `a2db19af...`, so the Full/CED endpoint remains bitwise. The pair build is
-`4f52c973`; the cache is default on, and `QWEN_V41_DENSE_PREWEIGHT_CACHE=0`
+`bce65f3c`; the cache is default on, and `QWEN_V41_DENSE_PREWEIGHT_CACHE=0`
 restores the per-chunk/tile route. The resident cache costs about 13 GiB.
 
-The pair CED point is below the A/B's 2,316.77 because the pair uses the
-blocked production schedule and its own thermal history; the same-binary A/B
-is the cleaner cache comparison.
+The pair CED point is below the A/B's 2,315.52 because the pair uses the
+blocked production schedule; a hot-host run immediately after an unrelated
+residency campaign measured 1,872 and is not the representative point. The
+cooled pair above is.
 
 ## Next
 

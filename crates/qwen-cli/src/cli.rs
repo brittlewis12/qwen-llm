@@ -123,7 +123,7 @@ pub(crate) struct ServeArgs {
     /// (about 1 s for GLM-5.3-Flash). Suspended under host memory pressure;
     /// 0 disables. Accepted when the model load retains mapped GGUF weight
     /// buffers; copied storage is always wired and refuses a nonzero value. Default:
-    /// QWEN_SERVE_IDLE_RESIDENCY_SECS, else 60.
+    /// QWEN_SERVE_IDLE_RESIDENCY_SECS, else 60 (V4.1: 0, opt-in).
     #[arg(long, value_name = "SECS")]
     idle_residency_secs: Option<u64>,
 

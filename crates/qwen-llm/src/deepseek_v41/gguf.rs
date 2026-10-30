@@ -393,6 +393,17 @@ fn prepared_load_plan_for_storage(
 }
 
 impl ResidentWeights {
+    /// Distinct retained GGUF buffers, borrowed from this owner in first-seen
+    /// bank-then-dense order. Disk Engram tables have no Metal handles.
+    pub fn retained_buffers(&self) -> Vec<&metal::Buffer> {
+        metal::retained_gguf_buffers(
+            self.banks
+                .iter()
+                .map(|bank| &bank.tensor)
+                .chain(self.dense.values()),
+        )
+    }
+
     pub fn bank(&self, layer: usize, part: &str) -> Option<&MetalTensor> {
         self.banks
             .iter()

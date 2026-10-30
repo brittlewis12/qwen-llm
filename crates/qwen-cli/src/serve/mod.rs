@@ -627,7 +627,9 @@ pub(crate) fn run_serve(invocation: crate::cli::ServeInvocation) -> Result<()> {
     );
     let idle_window = idle_residency::configured_window(
         invocation.idle_residency_secs,
-        idle_residency::DEFAULT_WINDOW,
+        profile(family)
+            .idle_residency_default_secs
+            .map_or(idle_residency::DEFAULT_WINDOW, Duration::from_secs),
     );
     let template_style = invocation.template_style;
     ensure!(
@@ -682,7 +684,7 @@ pub(crate) fn run_serve(invocation: crate::cli::ServeInvocation) -> Result<()> {
             let prepared = backend_v41::Prepared::new(&gguf, &invocation)?;
             let workbench = open_workbench(&invocation)?;
             let listening = Listening::open(&invocation, workbench)?;
-            backend_v41::start(prepared, gguf, listening)
+            backend_v41::start(prepared, gguf, listening, idle_window)
         }
         ModelFamily::K2Horizon => {
             let prepared = backend_k2::Prepared::new(&gguf, &invocation)?;

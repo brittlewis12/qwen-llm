@@ -1,6 +1,7 @@
 //! Exact-prefix GGUF HTTP backend. Forward borrows the caller's resident
 //! weights/context; neither they nor the backend move to an HTTP worker.
 use super::http::{BackendFailure, GenerationBackend, GenerationOutcome, GenerationSink};
+use super::idle_residency::IdleResidency;
 use super::items::{ServeError, ServeRequest};
 #[cfg(test)]
 use super::output_partition::GenerationEnd;
@@ -89,6 +90,7 @@ pub(super) struct Prepared {
     live_state_bytes: Option<u64>,
     max_active: usize,
     sample_workers: usize,
+    weight_window_bytes: Option<usize>,
 }
 impl Prepared {
     pub(super) fn new(
@@ -123,6 +125,7 @@ impl Prepared {
             max_active,
             sample_workers: non_negative_env(SAMPLE_WORKERS_ENV)?.unwrap_or(max_active - 1),
             live_state_bytes,
+            weight_window_bytes: mapping::target_from_env()?,
             snapshot_mib: invocation.snapshot_cache_mib,
             snapshot_policy: invocation.snapshot_policy,
             settings: Settings::new(
@@ -141,11 +144,16 @@ pub(super) fn start(
     prepared: Prepared,
     gguf: qwen_llm::gguf::GgufFile,
     listening: super::Listening,
+    idle_window: Duration,
 ) -> Result<()> {
     crate::shutdown::checkpoint()?;
     let ctx = MetalContext::new()?;
     let started = Instant::now();
-    let weights = crate::deepseek_v41::load(&ctx, std::sync::Arc::new(gguf))?;
+    let weights = mapping::load(
+        &ctx,
+        &std::sync::Arc::new(gguf),
+        prepared.weight_window_bytes,
+    )?;
     let forward =
         Forward::from_resident(&ctx, &weights, weights.token_map.clone(), weights.raw_pad)
             .map_err(anyhow::Error::msg)?;
@@ -160,7 +168,10 @@ pub(super) fn start(
     }
     let mut settings = prepared.settings;
     settings.model_id = listening.model_id.clone();
-    let mut backend = Backend::new(&ctx, forward, settings);
+    let mut backend = Backend::new(&ctx, &weights, forward, settings, idle_window);
+    if prepared.max_active > 1 {
+        backend.idle_residency.note_activity();
+    }
     tracing::info!(
         "serve: V4.1 idle live sessions: {} (budget {})",
         prepared.live_states,
@@ -215,6 +226,7 @@ fn warm_batched_decode(forward: &Forward<'_>, width: usize, token: u32) -> Resul
 
 mod cursor;
 mod execution;
+mod mapping;
 #[path = "backend_v41/io.rs"]
 mod memory_io;
 mod reuse;
@@ -223,10 +235,12 @@ mod scheduler;
 
 pub(crate) struct Backend<'a> {
     ctx: &'a MetalContext,
+    weights: &'a qwen_llm::deepseek_v41::gguf::ResidentWeights,
     forward: Forward<'a>,
     settings: Settings,
     reuse: reuse::Store,
     scheduler: Option<scheduler::Scheduler<qwen_llm::deepseek_v41::forward::State>>,
+    idle_residency: IdleResidency,
 }
 
 /// Caller-retained logits and sampler candidates/weights/sort storage, separate
@@ -333,13 +347,21 @@ fn finite_headroom(remaining: u64) -> Option<HostMemoryHeadroom> {
 }
 
 impl<'a> Backend<'a> {
-    pub(crate) fn new(ctx: &'a MetalContext, forward: Forward<'a>, settings: Settings) -> Self {
+    pub(crate) fn new(
+        ctx: &'a MetalContext,
+        weights: &'a qwen_llm::deepseek_v41::gguf::ResidentWeights,
+        forward: Forward<'a>,
+        settings: Settings,
+        idle_window: Duration,
+    ) -> Self {
         Self {
             ctx,
+            weights,
             forward,
             settings,
             reuse: reuse::Store::new(0, Default::default()),
             scheduler: None,
+            idle_residency: IdleResidency::new("deepseek_v41", idle_window),
         }
     }
 }
@@ -350,6 +372,17 @@ struct ForwardEngine<'a, 'b> {
     ctx: &'a MetalContext,
     cold_plan: Option<qwen_llm::deepseek_v41::forward::RequestPlan>,
     epoch: Instant,
+    native_failed: std::cell::Cell<bool>,
+}
+
+fn track_native_failure<T, E>(
+    failed: &std::cell::Cell<bool>,
+    result: std::result::Result<T, E>,
+) -> std::result::Result<T, E> {
+    if result.is_err() {
+        failed.set(true);
+    }
+    result
 }
 
 fn time_native_prefill<T, E>(
@@ -444,7 +477,11 @@ impl execution::Engine<qwen_llm::deepseek_v41::forward::State> for ForwardEngine
         cancel: &AtomicBool,
         with_logits: bool,
     ) -> std::result::Result<Vec<f32>, ServeError> {
-        native_prefill(self.forward, state, tokens, cancel, with_logits).map_err(state_error)
+        track_native_failure(
+            &self.native_failed,
+            native_prefill(self.forward, state, tokens, cancel, with_logits),
+        )
+        .map_err(state_error)
     }
     fn step(
         &mut self,
@@ -452,7 +489,10 @@ impl execution::Engine<qwen_llm::deepseek_v41::forward::State> for ForwardEngine
         token: u32,
         cancel: &AtomicBool,
     ) -> std::result::Result<Vec<f32>, String> {
-        self.forward.step(state, token, Some(cancel))
+        track_native_failure(
+            &self.native_failed,
+            self.forward.step(state, token, Some(cancel)),
+        )
     }
     fn now(&mut self) -> Duration {
         self.epoch.elapsed()
@@ -466,7 +506,10 @@ impl scheduler::BatchEngine<qwen_llm::deepseek_v41::forward::State> for ForwardE
         tokens: &[u32],
         cancel: &AtomicBool,
     ) -> std::result::Result<Vec<Vec<f32>>, String> {
-        self.forward.step_batch(states, tokens, Some(cancel))
+        track_native_failure(
+            &self.native_failed,
+            self.forward.step_batch(states, tokens, Some(cancel)),
+        )
     }
     fn can_step(&self, state: &qwen_llm::deepseek_v41::forward::State) -> bool {
         state.is_ready() && state.position() < state.capacity()
@@ -488,6 +531,17 @@ impl GenerationBackend for Backend<'_> {
     }
     fn idle(&mut self) {
         self.reuse.sweep();
+        self.idle_residency
+            .on_idle(self.ctx, || self.weights.retained_buffers());
+    }
+    fn request_finished(&mut self) {
+        self.idle_residency.request_finished();
+    }
+    fn request_failed_on_server(&mut self) {
+        self.idle_residency.request_failed_on_server();
+    }
+    fn shutdown(&mut self) {
+        self.idle_residency.shutdown();
     }
     fn max_active(&self) -> usize {
         self.scheduler
@@ -510,6 +564,8 @@ impl GenerationBackend for Backend<'_> {
             settings,
             reuse,
             scheduler,
+            idle_residency,
+            ..
         } = self;
         let Some(scheduler) = scheduler else {
             return false;
@@ -523,16 +579,18 @@ impl GenerationBackend for Backend<'_> {
             ctx,
             cold_plan: None,
             epoch: scheduler.epoch(),
+            native_failed: std::cell::Cell::new(false),
         };
-        let progressed = scheduler.pump(
-            settings,
-            &mut engine,
-            &mut reuse::Session::new(forward, reuse, ctx),
-        );
-        for _ in 0..scheduler.take_server_failures() {
-            self.request_failed_on_server();
-        }
-        progressed
+        idle_residency.observe_work(|| {
+            let progressed = scheduler.pump(
+                settings,
+                &mut engine,
+                &mut reuse::Session::new(forward, reuse, ctx),
+            );
+            let failed = scheduler.take_server_failures() > 0;
+            // Cancellation can mask a native fault in the published outcome.
+            (progressed, failed || engine.native_failed.get())
+        })
     }
     fn abort_all(&mut self) {
         if let Some(scheduler) = &mut self.scheduler {
@@ -590,6 +648,7 @@ impl Backend<'_> {
         ceiling: super::output_memory::OutputByteCeiling,
         sink: &mut dyn GenerationSink,
     ) -> std::result::Result<GenerationOutcome, BackendFailure> {
+        self.idle_residency.before_request();
         let epoch = Instant::now();
         self.reuse.sweep();
         let mut observations = request.echo_stats.then(memory_io::Observations::default);
@@ -597,7 +656,8 @@ impl Backend<'_> {
             .echo_stats
             .then(memory_io::ChunkObservations::default);
         let cold_plan = std::cell::RefCell::new(None);
-        let mut outcome = self.settings.execute_with_ceiling(
+        let native_failed = std::cell::Cell::new(false);
+        let outcome = self.settings.execute_with_ceiling(
             ceiling,
             request,
             prompt,
@@ -629,7 +689,12 @@ impl Backend<'_> {
                     state.position(),
                     tokens.len(),
                     || qwen_llm::pid_metrics::PidSnapshot::now().ok(),
-                    || native_prefill(&self.forward, state, tokens, cancel, with_logits),
+                    || {
+                        track_native_failure(
+                            &native_failed,
+                            native_prefill(&self.forward, state, tokens, cancel, with_logits),
+                        )
+                    },
                 )
                 .map_err(state_error)
             },
@@ -639,11 +704,20 @@ impl Backend<'_> {
                     observations.as_mut(),
                     position,
                     || qwen_llm::pid_metrics::PidSnapshot::now().ok(),
-                    || self.forward.step(state, token, Some(cancel)),
+                    || {
+                        track_native_failure(
+                            &native_failed,
+                            self.forward.step(state, token, Some(cancel)),
+                        )
+                    },
                 )
             },
             || epoch.elapsed(),
-        )?;
+        );
+        if native_failed.get() {
+            self.idle_residency.request_failed_on_server();
+        }
+        let mut outcome = outcome?;
         if let Some(observations) = observations {
             let phases = outcome
                 .stats
@@ -715,5 +789,41 @@ mod prefill_timing_tests {
 
         let scope = qwen_llm::deepseek_v41::forward::profile::Scope::begin().unwrap();
         assert!(scope.finish().operations.is_empty());
+    }
+}
+
+#[cfg(test)]
+mod native_failure_tests {
+    use super::*;
+
+    #[test]
+    fn native_fault_tracking_survives_cancellation_remapping() {
+        let failed = std::cell::Cell::new(false);
+        let raw = track_native_failure(&failed, Err::<(), _>("native fault"));
+        let published = raw.map_err(|_| {
+            BackendFailure::Aborted(io::Error::new(
+                io::ErrorKind::Interrupted,
+                "client cancelled",
+            ))
+        });
+        assert!(matches!(published, Err(BackendFailure::Aborted(_))));
+        assert!(failed.get());
+        track_native_failure(&failed, Ok::<_, ()>(())).unwrap();
+        assert!(
+            failed.get(),
+            "later work must not erase this quantum's fault"
+        );
+    }
+
+    #[test]
+    fn tracking_preserves_native_results_and_error_identity() {
+        let failed = std::cell::Cell::new(false);
+        assert_eq!(track_native_failure(&failed, Ok::<_, ()>(7)).unwrap(), 7);
+        assert!(!failed.get());
+        let error = Box::new("original fault");
+        let pointer = &*error as *const &str;
+        let result = track_native_failure(&failed, Err::<(), _>(error)).unwrap_err();
+        assert_eq!(&*result as *const &str, pointer);
+        assert!(failed.get());
     }
 }

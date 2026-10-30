@@ -581,16 +581,35 @@ fn soft_window_live_resources_follow_first_containing_and_survive_owner_drop() {
     use objc2::rc::Retained;
     use objc2_metal::{MTLBuffer, MTLCommandBuffer, MTLCommandQueue};
 
+    fn unique_ids<'a>(tensors: impl Iterator<Item = &'a MetalTensor>) -> Vec<usize> {
+        let mut seen = std::collections::BTreeSet::new();
+        tensors
+            .map(|tensor| Retained::as_ptr(&tensor.buffer) as *const () as usize)
+            .filter(|&identity| seen.insert(identity))
+            .collect()
+    }
+
+    fn retained_ids(weights: &ResidentWeights) -> Vec<usize> {
+        weights
+            .retained_buffers()
+            .into_iter()
+            .map(|buffer| Retained::as_ptr(buffer) as *const () as usize)
+            .collect()
+    }
+
     assert_eq!(std::env::var("MTL_DEBUG_LAYER").as_deref(), Ok("1"));
     assert_eq!(std::env::var("QWEN_METAL_LEASE_WAIT").as_deref(), Ok("1"));
     let _lease = metal::acquire_metal_benchmark_lease().unwrap();
     let ctx = MetalContext::new().unwrap();
     let page = metal::host_page_size_bytes().unwrap();
     assert_eq!(page, PAGE);
-    for g in owner_fixtures() {
+    let (kv, tensors) = fixture_parts(1, GgmlType::F32, 128, true);
+    let with_engram = write_fixture_payload(kv, tensors, true, owner_bank_payload);
+    assert!(plan(&with_engram).unwrap().bytes.disk_engram > 0);
+    for g in owner_fixtures().into_iter().chain([with_engram]) {
         let soft = targeted(&g, Some(PAGE));
         assert!(soft.metal_view_bytes < 16 << 20);
-        let weights = ResidentWeights::load_planned(&ctx, Arc::clone(&g), Some(PAGE)).unwrap();
+        let mut weights = ResidentWeights::load_planned(&ctx, Arc::clone(&g), Some(PAGE)).unwrap();
         let mut identities = BTreeMap::new();
         let mut actual = Vec::new();
         for t in g
@@ -646,6 +665,42 @@ fn soft_window_live_resources_follow_first_containing_and_survive_owner_drop() {
             .unwrap()
         );
         assert!(serde_json::to_string(summary).unwrap().find("0x").is_none());
+
+        let bank_ids = unique_ids(weights.banks.iter().map(|bank| &bank.tensor));
+        let dense_ids = unique_ids(weights.dense.values());
+        let expected_ids = unique_ids(
+            weights
+                .banks
+                .iter()
+                .map(|bank| &bank.tensor)
+                .chain(weights.dense.values()),
+        );
+        assert_eq!(retained_ids(&weights), expected_ids);
+        assert_eq!(expected_ids.len(), identities.len());
+
+        let banks = std::mem::take(&mut weights.banks);
+        assert_eq!(retained_ids(&weights), dense_ids);
+        let dense = std::mem::take(&mut weights.dense);
+        // DiskEngram remains owned even when no Metal weight views remain.
+        assert!(weights.retained_buffers().is_empty());
+        weights.banks = banks;
+        assert_eq!(retained_ids(&weights), bank_ids);
+        weights.dense = dense;
+
+        let duplicate = weights.banks[0]
+            .tensor
+            .view_bytes(OWNER_VIEW_OFFSET, vec![OWNER_VIEW_ELEMENTS]);
+        assert_ne!(duplicate.offset, weights.banks[0].tensor.offset);
+        weights.banks.push(PackedBank {
+            layer: weights.banks[0].layer,
+            projection: weights.banks[0].projection,
+            tensor: duplicate.clone(),
+        });
+        weights
+            .dense
+            .insert("retained_inventory_duplicate".into(), duplicate);
+        assert_eq!(retained_ids(&weights), expected_ids);
+
         let bank = &weights.banks[0];
         let descriptor = g
             .tensors

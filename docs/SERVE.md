@@ -203,7 +203,7 @@ family's no-copy weights wired for that long after each request, using
 ordinary keep-alive commands: 500 ms pulses that mark the weights used. It
 is not a residency set.
 
-- **Window.** It opens at the first activity: the warm-up (GLM) or the
+- **Window.** It opens at the first activity: a successful warm-up or the
   first request that began GPU compute work (other families), so a pulse
   never faults in a cold model. It reopens when such a request finishes,
   even if its client aborted it after submission. A request is judged by
@@ -226,7 +226,14 @@ is not a residency set.
   `scripts/reference/serve_residency_poll_check.py` checks polling, a
   refusal, a completed request and a client abort after submission
   against those lines.
-- **Default and bounds.** Default 60 s; 0 disables.
+  V4.1 continuous batching measures each synchronous scheduler quantum instead
+  of overlapping HTTP requests. Its snapshot is consumed before the next
+  quantum or a connection completion, so late completions cannot renew the
+  window. Raw native failures close it even when client cancellation masks the
+  HTTP error. Pulses still run only when the owner has no active connections.
+- **Default and bounds.** Default 60 s, except V4.1 defaults to 0 (opt-in).
+  An explicit flag wins over the environment, which wins over the family default;
+  0 disables. The V4.1 integration has no new M5 latency-gain claim.
 - **Safety.**
   - Pulsing is suspended while the host reports memory pressure of
     warning or worse. It resumes on the next idle tick after the pressure
@@ -246,11 +253,33 @@ is not a residency set.
   mode maps the GGUF weights. Each backend names its buffers (`retained_buffers()`).
   - Flash-Next's CPU-read PLE table stays in the page cache, outside the
     pulse.
+  - V4.1's disk Engram likewise stays outside the pulse; only unique retained
+    expert-bank and dense-weight buffers are named.
   - DeepSeek V4 turns the keep-alive off when its opt-in
     `QWEN_DSV4_RESIDENCY_SET` already holds the weights.
 - **Refused.** Ordinary Qwen with copied weights still refuses a nonzero
   value because its Metal allocations stay wired anyway. With mapped weights,
   the backend pulses the retained GGUF buffers through the same idle lifecycle.
+
+### V4.1 retained-weight mapping
+
+`QWEN_SERVE_V41_WEIGHT_WINDOW_MIB` is a serve-only soft coalescing target, read
+once before loading weights. Unset or 0 preserves the ordinary loader; 4096
+requests approximately 4 GiB retained windows. Invalid or overflowing values
+are startup errors. Oversized singleton tensors remain eligible up to Metal's
+device buffer limit; this is not a model-fit cap.
+
+The selected plan is revalidated by the existing loader and uses normal memory
+admission. Startup reports requested/effective target, window count, largest
+window, exposed mapping bytes and private-shadow bytes. These describe mapping
+geometry, not physical residency. Disk Engram remains excluded.
+
+This setting is independent of idle keep-alive and does not select CED, change
+prefill chunks, or change numerical kernels. Both controls remain opt-in so
+they can be compared independently. Smaller mappings reduced observed driver
+tails on an earlier artifact; that is motivation for current-artifact testing,
+not proof that the reported cached-prefill regression is fixed. See
+[the investigation](bench/2026-10-30-v41-serve-latency.md).
 
 ### Durable snapshots (cross-restart warmth)
 

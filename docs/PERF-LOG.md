@@ -6,6 +6,25 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the current state and evidence index.
 
+## 2026-10-30 - V4.1 Opt-In Serve Mapping And Idle Controls
+
+- Added serve-only `QWEN_SERVE_V41_WEIGHT_WINDOW_MIB`: unset/0 preserves the
+  ordinary loader; 4096 selects a soft 4 GiB coalescing target. Existing source,
+  geometry and admission checks remain; oversized singletons are still eligible.
+- V4.1 now accepts the shared idle-residency flag/environment control while
+  keeping its family default at zero. Actual unique bank/dense buffers are
+  named; disk Engram is excluded. Batch compute quanta avoid overlapping HTTP
+  attribution, and native faults close the window even when cancellation hides
+  the published error. Warm-up, expiry, pressure and shutdown retain bounded
+  shared behavior. No arithmetic, chunk, CED or quantization change.
+- CPU verification: 1028 CLI passes, 50 ignores and one existing info-snapshot
+  failure reproduced independently on untouched `adad4461`; 11 soft-window CPU
+  checks pass. Source re-review clears the two identified lifecycle findings.
+  All workspace binaries pass `cargo check`; formatting/environment checks pass.
+  The actual-resource GPU witness and current-artifact M5 A/B remain unrun.
+- Both controls are unpromoted opt-ins, not a fix claim for the original long
+  tail. [Implementation and validation boundary](bench/2026-10-30-v41-serve-latency.md).
+
 ## 2026-10-30 - V4.1 Serve Latency: Idle Driver Cost, Long Tail Open
 
 - Local main `e55c813b` adds default-off `QWEN_SERVE_V41_PREFILL_TIMING` for

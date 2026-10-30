@@ -47,11 +47,18 @@ The [CED design](DEEPSEEK-V41-CED-DESIGN.md) specifies the proposed encoder-only
 bulk and decoder reconstruction contracts; its CPU witness is not a native
 executor or model-quality qualification.
 
-The V4.1 family profile keeps `idle_residency_eligible = false`: shared GPU
-idle-keepalive integration and lifecycle/admission qualification are not
-established, not an architectural inability or a measured performance verdict.
-The backend's existing `idle()` hook sweeps the snapshot cache; it does not
-keep GPU weights wired through the shared residency mechanism.
+V4.1 supports the shared bounded idle keep-alive, but defaults to zero seconds
+(off). Explicit `--idle-residency-secs` or `QWEN_SERVE_IDLE_RESIDENCY_SECS` opts in.
+Pulses name the unique retained bank/dense buffers, never disk Engram. Serial
+requests and continuous-batch compute quanta track activity separately from
+HTTP completion; native errors close the window even when cancellation masks
+the published error. This integration is not a measured latency-fix claim.
+
+`QWEN_SERVE_V41_WEIGHT_WINDOW_MIB` independently selects a serve-only soft
+coalescing target: unset/0 keeps ordinary loading; 4096 requests 4 GiB windows.
+Larger singleton tensors remain eligible up to the device limit. Existing
+loader admission and source checks apply. Neither control enables CED or
+changes arithmetic; current-artifact M5 latency validation remains separate.
 
 ## Readiness And Evidence Limits
 

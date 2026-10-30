@@ -4,8 +4,8 @@
 
 The reported 13-26-second cached-prefill stalls are real in the earlier serve
 logs, but the controlled reload sequence did not reproduce them. They are not
-declared fixed. The restored V4.1 service now has opt-in unsplit native-call
-timing so a recurring stall can be attributed without guessing from TTFT alone.
+declared fixed. Opt-in unsplit native-call timing can attribute a recurring
+stall without guessing from TTFT alone.
 
 Diagnostic source: `c6e1d4c4`, based on `4accd031`. M5 Ultra, 256 GiB, SDK 27.0,
 canonical release. The wrapper changes no arithmetic, batching, command graph,
@@ -86,12 +86,45 @@ profile, including scratch/host preparation and unsplit command intervals.
 The default is off. Diagnostic setup failure warns and runs the original call;
 native results and errors are preserved. No stage splitting is introduced.
 
-The current service is V4.1 again, with its original endpoint and limits and
-this diagnostic hook enabled. Saved game files were not changed. The original
-executable and incident log are retained privately. Expected client-disconnect
+At the diagnostic handoff, V4.1 was restored with its original endpoint and
+limits and this diagnostic hook enabled. Saved game files were not changed.
+The original executable and incident log are retained privately. Expected client-disconnect
 messages result from bounded probes, not an observed server failure.
 
 The next actual long stall should be matched to its native-call record and
 outer `serve phases` timer. That will distinguish a native allocation/encode,
-driver/GPU wait, or caller-side checkpoint delay. Persistent idle keep-alive
-and smaller retained windows have not been enabled by this investigation.
+driver/GPU wait, or caller-side checkpoint delay. The diagnostic campaign did
+not enable persistent idle keep-alive or smaller retained windows.
+
+## Opt-In Implementation Checkpoint
+
+Two independent serving controls now exist; both preserve existing defaults:
+
+- `QWEN_SERVE_V41_WEIGHT_WINDOW_MIB=4096` requests a 4 GiB soft coalescing
+  target through the existing storage planner and checked loader. Unset/0 uses
+  the ordinary loader. Oversized singletons remain eligible; this is not a fit
+  cap. The startup report describes mapping exposure, not physical residency.
+- `--idle-residency-secs` or `QWEN_SERVE_IDLE_RESIDENCY_SECS` enables the shared
+  resource-aware pulse. V4.1 defaults to zero, unlike the shared 60-second
+  default. Pulses name deduplicated bank/dense backing buffers, never Engram.
+  Continuous batching observes synchronous compute quanta rather than
+  overlapping connection lifetimes. Native errors close the window even if
+  cancellation masks the HTTP error. Successful startup decode warm-up opens
+  an explicitly enabled window; loading alone does not.
+
+Focused CPU checks cover parsing, overflow, sparse mapping geometry, activity
+attribution, late completions and cancellation-masked faults. The full CLI run
+has 1028 passes, 50 explicit ignores and one info-baseline failure independently
+reproduced on untouched `adad4461`. Eleven existing CPU soft-window checks pass;
+the extended actual-resource GPU witness remains ignored and unexecuted here.
+Independent source re-review has no remaining P1/P2 findings.
+`cargo check --locked --offline --workspace --bins`, formatting and the generated
+environment-reference checks pass. The local build uses the available Metal 4.0
+tier; no Metal 4.1 tier or M5 execution is inferred from CPU checks.
+
+No current-artifact M5 performance comparison or deployment is included in this
+checkpoint. Test each control independently, with the same artifact, matched
+prefix/suffix, capacity, output reservation and sampling. Record ordinary TTFT,
+native wall, GPU/driver intervals, checkpoint/restore, memory pressure and all
+samples. Distinguish immediate and idle requests; do not merely move a request
+stall into an expensive pulse. The original long-tail cause remains open.

@@ -3,8 +3,8 @@
 //! (`metal::ResidencyKeepAlive`), so a request after a pause does not pay to
 //! re-wire them. Family-neutral scheduling; each backend names its eligible
 //! buffers (`retained_buffers()`). Every family whose serve backend names its
-//! no-copy GGUF windows defaults to a 60 s window ([`DEFAULT_WINDOW`]); Qwen's
-//! backend does not yet and refuses the flag.
+//! no-copy GGUF windows normally defaults to a 60 s window ([`DEFAULT_WINDOW`]);
+//! V4.1 remains opt-in. Qwen eligibility follows its selected weight storage.
 //!
 //! Window: closed until the first activity (a warm-up, or the first request
 //! that submitted GPU compute work, so a cold model is never faulted in by a
@@ -39,8 +39,10 @@ use qwen_llm::metal::{
 };
 use std::time::{Duration, Instant};
 
+/// Idle keep-alive window in seconds, overridden by the CLI flag. Default 60
+/// for eligible storage, except V4.1 defaults to 0 (opt-in); 0 disables.
 pub(crate) const IDLE_RESIDENCY_ENV: &str = "QWEN_SERVE_IDLE_RESIDENCY_SECS";
-/// The default for every no-copy family: a 1 GiB kill check of ordinary
+/// The shared default for no-copy families: a 1 GiB kill check of ordinary
 /// command-buffer wiring recovered in every case (PERF-LOG 2026-10-05), and
 /// 60 s covers an interactive turn without holding the host for minutes.
 pub(crate) const DEFAULT_WINDOW: Duration = Duration::from_secs(60);
@@ -124,6 +126,19 @@ impl IdleResidency {
         {
             self.disable(&error.to_string());
         }
+    }
+
+    /// Observe one synchronous owner-side batch quantum, not overlapping HTTP
+    /// connections. Its encoder snapshot is consumed before any later quantum
+    /// or connection completion, so neither can be attributed to this work.
+    pub(crate) fn observe_work<T>(&mut self, work: impl FnOnce() -> (T, bool)) -> T {
+        self.before_request();
+        let (result, failed_on_server) = work();
+        if failed_on_server {
+            self.request_failed_on_server();
+        }
+        self.request_finished();
+        result
     }
 
     /// The current request ended in a server-side failure (5xx, which
@@ -379,6 +394,84 @@ mod tests {
         residency.request_finished();
         residency.request_finished();
         assert!(!residency.is_open(), "a success in the batch reopened it");
+    }
+
+    #[test]
+    fn batch_quanta_count_compute_not_scheduler_progress() {
+        let mut residency = IdleResidency::new("test", DEFAULT_WINDOW);
+        residency.encoders = fake_encoders;
+        assert!(residency.observe_work(|| (true, false)));
+        assert!(!residency.is_open(), "admission alone opened the window");
+        assert!(!residency.observe_work(|| {
+            submit();
+            (false, false)
+        }));
+        assert!(
+            residency.is_open(),
+            "actual compute did not open the window"
+        );
+        let opened = residency.last_activity;
+        residency.observe_work(|| (true, false));
+        assert_eq!(residency.last_activity, opened);
+    }
+
+    #[test]
+    fn batch_connection_completions_cannot_renew_a_settled_quantum() {
+        let mut residency = IdleResidency::new("test", DEFAULT_WINDOW);
+        residency.encoders = fake_encoders;
+        residency.observe_work(|| {
+            submit();
+            ((), false)
+        });
+        let opened = residency.last_activity;
+        submit();
+        residency.request_finished();
+        residency.request_finished();
+        assert_eq!(residency.last_activity, opened);
+        assert!(residency.encoders_at_request.is_none());
+    }
+
+    #[test]
+    fn a_failed_quantum_closes_until_later_successful_compute() {
+        let mut residency = IdleResidency::new("test", DEFAULT_WINDOW);
+        residency.encoders = fake_encoders;
+        residency.note_activity();
+        residency.observe_work(|| {
+            submit();
+            ((), true)
+        });
+        assert!(!residency.is_open());
+        residency.request_finished();
+        residency.observe_work(|| ((), false));
+        assert!(
+            !residency.is_open(),
+            "no-work success reopened after a fault"
+        );
+        residency.observe_work(|| {
+            submit();
+            ((), false)
+        });
+        assert!(residency.is_open());
+    }
+
+    #[test]
+    fn late_batch_transport_failure_closes_without_reusing_compute() {
+        let mut residency = IdleResidency::new("test", DEFAULT_WINDOW);
+        residency.encoders = fake_encoders;
+        residency.observe_work(|| {
+            submit();
+            ((), false)
+        });
+        residency.request_failed_on_server();
+        residency.request_finished();
+        assert!(!residency.is_open());
+        residency.request_finished();
+        assert!(!residency.is_open());
+        residency.observe_work(|| {
+            submit();
+            ((), false)
+        });
+        assert!(residency.is_open());
     }
 
     #[test]

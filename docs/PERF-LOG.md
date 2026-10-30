@@ -6,6 +6,20 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the current state and evidence index.
 
+## 2026-10-29 - V4.1 Q5_K Dense Preweight: Bitwise, 1.27-1.73x In The Tile
+
+- At 2,048 rows, a Q5_K dense bank dequantized once to F16 and run through
+  the dense F16 tensor tile is 1.27-1.73x faster than the current Q5_K tile:
+  q_b 2,252 vs 2,952 us, output_a 1,550 vs 2,335, output_b 2,375 vs 3,010,
+  shexp gate 589 vs 875, shexp down 553 vs 816.
+- Bitwise equality on a 5120->2304 synthetic Q5_K shape (exact=true,
+  max_abs=0, rms=0) with the same F16 activation. Q8_0 dense preweight loses
+  (q_a 322 vs 290 us); keep the Q8_0 wide tensor tile.
+- Probe only; production integration needs a GPU Q5_K->F16 dequant and an
+  ~84 MB F16 weight scratch, then the Full/CED pair gate.
+  [Packet](bench/2026-10-29-v41-dense-preweight.md). Raw:
+  `~/qwen-runs/2026-10-29-v41-encoder-depth/dense-preweight-*.log`.
+
 ## 2026-10-29 - V4.1 Depth On Q-Cache: 32K Peak, 128K Fall, Append Gap
 
 - Q-cache build `8f455225` (main `034b0c01`), cooled CED: 2K 1,231.1,

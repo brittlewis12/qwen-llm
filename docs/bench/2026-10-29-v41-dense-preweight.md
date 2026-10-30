@@ -72,7 +72,32 @@ F16 dense path is the 32-slot form and loses.
 sub-tile, the same `qt_dequantize_q5_K` helper as the quantized tile, and a
 row-major `block*256 + il*16` write. On a synthetic 5120x2304 Q5_K bank it
 matches the CPU `dequant_to_f32` + F16 reference exactly (0 / 11,796,480
-half values). The kernel is additive and not wired to production yet.
+half values).
+
+## End-to-end A/B: 8K CED regression
+
+The full routing (q_b, index.query, output_a groups, output_b, shared
+gate/up/down) was integrated on `test/v41-q5k-dequant` (`e7051796`) and
+measured at 8K CED with `--runs 2`, 180 s between arms, ABBA:
+
+| arm | dense preweight | tok/s |
+| --- | ---: | ---: |
+| off1 | 0 | 2,050.96 |
+| on1 | 1 | 2,001.69 |
+| on2 | 1 | 1,999.36 |
+| off2 | 0 | 2,039.30 |
+
+The on arm is **2.2% slower**. The kernel-level 1.27-1.73x did not survive
+the production stream: the per-chunk dequant and the F16 weight read/write
+cost more than the denser GEMM saves. The likely hot spot is the eight
+per-group `output_a` linears (4096->1024 each), unlike the single
+4096->8192 bank used in the kernel probe; per-group dequant overhead
+dominates its small GEMM.
+
+The integration is **not promoted and not on main**. The per-chunk route
+needs either the output_a groups removed (one more A/B) or a persistent F16
+cache that removes the dequant; if neither wins, close it and keep the
+kernel probe as evidence.
 
 ## Next
 

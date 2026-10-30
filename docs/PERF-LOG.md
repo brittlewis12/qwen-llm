@@ -45,6 +45,18 @@ See also: `docs/PERF-ROADMAP.md` for the current state and evidence index.
   fallbacks remain intact. One machine/artifact at 8K, with order drift
   explicitly retained. [Results](bench/2026-10-29-v41-simdgroup-qk.md).
 
+## 2026-10-30 - V4.1 Q5_K Dense Preweight: 8K CED Regression
+
+- Full-set per-chunk routing is 2.2% slower at 8K CED: off 2,050.96 /
+  2,039.30 tok/s, on 2,001.69 / 1,999.36. Kernel-level 1.27-1.73x did not
+  survive the stream; dequant + F16 traffic dominates.
+- Not promoted; integration stays on `test/v41-q5k-dequant` `e7051796`.
+  Likely hot spot: eight per-group output_a linears (4096->1024) versus the
+  single 4096->8192 bank probe. Next: exclude output_a; otherwise close.
+  [Packet](bench/2026-10-29-v41-dense-preweight.md). Raw:
+  `~/qwen-runs/2026-10-29-v41-encoder-depth/dense-ab-*.json`.
+
+
 ## 2026-10-29 - V4.1 Q5_K F16 Dequant Kernel: Bitwise
 
 - `v41_dequant_q5_k_f16` writes the natural row-major `block*256 + il*16`

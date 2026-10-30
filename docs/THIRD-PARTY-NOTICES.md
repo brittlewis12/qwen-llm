@@ -30,12 +30,22 @@ fragment builder and `ggml_metal_op_mul_mat_mma_tiling` rule
 `a3a1c4747fdc0dcad40b3946108b89375d9a7d0e`), without batch dimensions or the
 fused residual add.
 
+## MLX-Serve
+
+`kernel_deepseek_v41_attention_score_simdgroup_qk` in
+`kernels/tensor/deepseek_v41_attention_simdgroup_qk.metal` adapts the
+per-SIMDgroup tensor organization and ping-pong key prefetch from MLX-Serve's
+`src/plugins/deepseek_v41/kernels/attn_qk.metal`, revision
+`9728a44fed7ae9d35ad18b2cc215bfc289c01162`. The adaptation retains this
+runtime's F16 operands, causal row addressing, and scaled F32 score interface.
+
 The adapted source portions are provided under the following terms:
 
 MIT License
 
 Copyright (c) 2026 The ds4.c authors
 Copyright (c) 2023-2026 The ggml authors
+Copyright (c) 2026 David Dalcu
 
 Permission is hereby granted, free of charge, to any person obtaining a copy
 of this software and associated documentation files (the "Software"), to deal

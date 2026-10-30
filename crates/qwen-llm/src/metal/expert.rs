@@ -587,6 +587,17 @@ pub(crate) enum GroupedDownPolicy {
     Incumbent,
     Iq3SSmallCounts,
     Iq3STensor,
+    Q5KTensor,
+}
+
+impl GroupedDownPolicy {
+    fn tensor_dtype(self) -> Option<GgmlType> {
+        match self {
+            Self::Iq3STensor => Some(GgmlType::IQ3_S),
+            Self::Q5KTensor => Some(GgmlType::Q5_K),
+            Self::Incumbent | Self::Iq3SSmallCounts => None,
+        }
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -603,7 +614,10 @@ pub(crate) fn encode_grouped_routed_experts_with_down_policy(
     down_policy: GroupedDownPolicy,
 ) -> Result<(), MetalError> {
     const K: &str = "grouped_routed_experts";
-    if down_policy == GroupedDownPolicy::Iq3STensor {
+    if let Some(dtype) = down_policy.tensor_dtype() {
+        if b.down_bank.dtype != dtype {
+            return Err(bad_shape(K, "tensor down policy and bank dtype disagree"));
+        }
         super::expert_tensor_down::preflight_grouped(
             ctx, enc, b, hidden, ffn, experts, top_k, rows, clamp,
         )?;
@@ -626,7 +640,7 @@ pub(crate) fn encode_grouped_routed_experts_with_down_policy(
     };
     let down_inner = flat(b.inner);
     let down_out = flat(b.slot_out);
-    let tensor_down = if down_policy == GroupedDownPolicy::Iq3STensor {
+    let tensor_down = if down_policy.tensor_dtype().is_some() {
         super::expert_tensor_down::prepare(
             ctx,
             enc,
@@ -645,7 +659,9 @@ pub(crate) fn encode_grouped_routed_experts_with_down_policy(
         None
     };
     let prepared_down = match down_policy {
-        GroupedDownPolicy::Incumbent | GroupedDownPolicy::Iq3STensor => None,
+        GroupedDownPolicy::Incumbent
+        | GroupedDownPolicy::Iq3STensor
+        | GroupedDownPolicy::Q5KTensor => None,
         GroupedDownPolicy::Iq3SSmallCounts => super::iq3_s_down_retile::prepare_small_counts(
             ctx,
             enc,

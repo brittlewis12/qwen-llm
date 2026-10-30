@@ -1,4 +1,4 @@
-//! Checked, prepared adapter for the existing IQ3_S N32 tensor down tile.
+//! Checked, prepared adapter for the existing IQ3_S/Q5_K N32 tensor down tiles.
 //! Preparation never dispatches or mutates bindings; encode never falls back.
 
 use super::checks::{
@@ -85,12 +85,14 @@ pub(crate) struct Geometry {
 }
 
 pub(crate) fn geometry(
+    dtype: GgmlType,
     k: usize,
     m: usize,
     e: usize,
     top_k: usize,
     rows: usize,
 ) -> Result<Geometry, MetalError> {
+    pipeline_name(dtype)?;
     for (name, value) in [("K", k), ("M", m), ("experts", e), ("rows", rows)] {
         positive_i32(value, name)?;
     }
@@ -100,7 +102,7 @@ pub(crate) fn geometry(
     let slots = product(rows, top_k, "slots")?;
     positive_i32(slots, "slot limit")?;
     Ok(Geometry {
-        weight_bytes: bank_bytes(GgmlType::IQ3_S, k, m, e)?,
+        weight_bytes: bank_bytes(dtype, k, m, e)?,
         inner_bytes: product(product(k, slots, "inner elements")?, 4, "inner bytes")?,
         bucket_bytes: product(product(e, rows, "bucket elements")?, 4, "bucket bytes")?,
         out_bytes: product(product(m, slots, "output elements")?, 4, "output bytes")?,
@@ -154,7 +156,7 @@ pub(crate) fn preflight_grouped(
     rows: usize,
     clamp: f32,
 ) -> Result<(), MetalError> {
-    let g = geometry(ffn, hidden, experts, top_k, rows)?;
+    let g = geometry(b.down_bank.dtype, ffn, hidden, experts, top_k, rows)?;
     check_encoder(ctx, enc)?;
     if !clamp.is_finite() || clamp <= 0.0 {
         return Err(bad_shape(KERNEL, "clamp must be finite and positive"));
@@ -203,6 +205,17 @@ pub(crate) fn capacity_supported(
             .is_some_and(|total| total <= limit)
 }
 
+fn pipeline_name(dtype: GgmlType) -> Result<&'static str, MetalError> {
+    match dtype {
+        GgmlType::IQ3_S => Ok("kernel_moe_down_iq3_s_f32_grouped_slots_tensor"),
+        GgmlType::Q5_K => Ok("kernel_moe_down_q5_K_f32_grouped_slots_tensor"),
+        _ => Err(bad_shape(
+            KERNEL,
+            "only native IQ3_S/Q5_K down are eligible",
+        )),
+    }
+}
+
 pub(crate) struct PreparedDown<'a> {
     ctx: &'a MetalContext,
     enc: &'a KernelEncoder,
@@ -245,10 +258,10 @@ pub(crate) fn prepare<'a>(
     if !moe_grouped_tensor_selected(ctx) {
         return Ok(None);
     }
-    let g = geometry(k, m, e, top_k, rows)?;
+    let g = geometry(weight.dtype, k, m, e, top_k, rows)?;
     check_encoder(ctx, enc)?;
     for (t, bytes, dtype, writable, alignment, name) in [
-        (weight, g.weight_bytes, GgmlType::IQ3_S, false, 16, "weight"),
+        (weight, g.weight_bytes, weight.dtype, false, 16, "weight"),
         (inner, g.inner_bytes, GgmlType::F32, false, 16, "inner"),
         (
             counts,
@@ -276,12 +289,7 @@ pub(crate) fn prepare<'a>(
             (ids, "ids"),
         ],
     )?;
-    let name = moe_grouped_tensor_pipeline_name(
-        MoeGroupedTensorRole::Down,
-        GgmlType::IQ3_S,
-        TensorActivation::F32,
-    )
-    .ok_or_else(|| bad_shape(KERNEL, "no IQ3_S tensor down pipeline"))?;
+    let name = pipeline_name(weight.dtype)?.to_owned();
     #[cfg(test)]
     let name = if matches!(
         FAULT.with(std::cell::Cell::get),
@@ -338,7 +346,7 @@ mod tests {
             (256, 65, 32),
         ] {
             for rows in [1024, 1025, 2048] {
-                let g = geometry(k, m, e, 8, rows).unwrap();
+                let g = geometry(GgmlType::IQ3_S, k, m, e, 8, rows).unwrap();
                 assert_eq!(
                     g,
                     Geometry {
@@ -361,5 +369,44 @@ mod tests {
         assert!(bank_bytes(GgmlType::IQ3_S, 256, 256, usize::MAX).is_err());
         assert!(bank_bytes(GgmlType::IQ3_S, 255, 256, 16).is_err());
         assert!(bank_bytes(GgmlType::Unknown, 256, 256, 16).is_err());
+    }
+
+    #[test]
+    fn cpu_tensor_q5_down_native_bytes_pipeline_and_bounded_dtype_contract() {
+        for rows in [1024, 2048] {
+            let g = geometry(GgmlType::Q5_K, 2048, 4096, 288, 8, rows).unwrap();
+            assert_eq!(g.weight_bytes, 2048 / 256 * 176 * 4096 * 288);
+            assert_eq!(g.inner_bytes, 2048 * rows * 8 * 4);
+            assert_eq!(g.out_bytes, 4096 * rows * 8 * 4);
+            assert_eq!(g.bucket_bytes, 288 * rows * 4);
+            assert_eq!(g.slots, rows * 8);
+        }
+        for dtype in [GgmlType::IQ3_S, GgmlType::Q5_K] {
+            assert_eq!(
+                pipeline_name(dtype).unwrap(),
+                moe_grouped_tensor_pipeline_name(
+                    MoeGroupedTensorRole::Down,
+                    dtype,
+                    TensorActivation::F32
+                )
+                .unwrap()
+            );
+            assert!(geometry(dtype, 2047, 4096, 288, 8, 1024).is_err());
+            assert!(geometry(dtype, 256, usize::MAX, 288, 8, 1024).is_err());
+        }
+        for dtype in [
+            GgmlType::Q4_K,
+            GgmlType::Q8_0,
+            GgmlType::F32,
+            GgmlType::Unknown,
+        ] {
+            assert!(pipeline_name(dtype).is_err());
+            assert!(geometry(dtype, 2048, 4096, 288, 8, 1024).is_err());
+        }
+        assert!(capacity_supported(32, 128, 512, 8192 + 512));
+        assert!(!capacity_supported(32, 128, 512, 8192 + 511));
+        assert!(!capacity_supported(16, 128, 0, 8192));
+        assert!(!capacity_supported(32, 127, 0, 8192));
+        assert!(!capacity_supported(32, 128, usize::MAX, usize::MAX));
     }
 }

@@ -2401,6 +2401,7 @@ mod packed;
 pub mod prefill_plan;
 pub(crate) mod tensor_down;
 mod tensor_prefill;
+pub(crate) mod tensor_q5_down;
 pub use capture::{Glm5NextCapturedRows, Glm5NextRowBank, Glm5NextRowBankPlan};
 pub use checkpoint::{
     Glm5NextAppendCheckpoint, Glm5NextAppendTransaction, Glm5NextCommittedRows,

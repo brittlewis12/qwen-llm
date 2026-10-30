@@ -1481,6 +1481,8 @@ fn half_prefix_staged_subgroups_use_current_n_strides_and_match_fresh_bits() {
                     native_control: None,
                     input,
                     output,
+
+                    half_weight: None,
                 }
             })
             .collect::<Vec<_>>();
@@ -1691,6 +1693,8 @@ fn bf16_projection<'a>(
         native_control: None,
         input,
         output,
+
+        half_weight: None,
     }
 }
 

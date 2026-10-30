@@ -14,6 +14,8 @@ fn rowwise_linear_override_is_scoped_and_changes_dispatch() {
         native_control: None,
         input: 32,
         output: 8,
+
+        half_weight: None,
     };
     let x = upload(&ctx, &[0.125; 96], vec![32, 3]).unwrap();
     let y = allocate(&ctx, 8, 3, GgmlType::F32).unwrap();
@@ -492,6 +494,8 @@ fn linear_rows_with_offsets(check: impl Fn(&[f32], &[f32])) {
             native_control: native_control(&ctx, dtype).unwrap(),
             input,
             output,
+
+            half_weight: None,
         };
         for rows in [1, 2, 3, 7] {
             let values = (0..input * rows)
@@ -714,6 +718,8 @@ fn unaligned_f32_geometry_uses_native_row_fallback() {
         native_control: None,
         input: 8,
         output: 3,
+
+        half_weight: None,
     };
     let values = (0..24).map(|i| i as f32 / 7.001).collect::<Vec<_>>();
     let x = upload(&ctx, &values, vec![8, 3]).unwrap();

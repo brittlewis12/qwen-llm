@@ -55,6 +55,8 @@ fn gguf_dense_bf16_q8_bounded_rows_and_group_offsets() {
                 tensor: tensor.view_bytes(group * 8 * stride, vec![32, 8]),
                 input,
                 output,
+
+                half_weight: None,
             })
             .collect();
         for (group, projection) in projections.iter().enumerate() {
@@ -159,6 +161,8 @@ fn gguf_dense_extra_iq_formats_preserve_f32_operands() {
             input: 256,
             output: 8,
             native_control: native_control(&ctx, dtype).unwrap(),
+
+            half_weight: None,
         };
         assert!(linear.native_control.is_none());
         let x: Vec<_> = (0..256).map(|i| 70000.125 + i as f32 / 31.001).collect();
@@ -231,6 +235,8 @@ fn grouped_linear_bitwise_serial_gpu_witness() {
                     tensor: upload(&ctx, &weights, vec![input as u64, output as u64]).unwrap(),
                     input,
                     output,
+
+                    half_weight: None,
                 }
             })
             .collect();
@@ -285,6 +291,8 @@ fn profile_linear_completed_and_scope_cleanup() {
         tensor: upload(&ctx, &[1.0; 64], vec![8, 8]).unwrap(),
         input: 8,
         output: 8,
+
+        half_weight: None,
     };
     let expected = linear.forward(&[1.0; 8]).unwrap();
     let scope = profile::Scope::begin().unwrap();
@@ -592,6 +600,8 @@ fn six_native_experts_plus_shared_match_cpu_f32() {
             tensor: upload(&ctx, &values, vec![input as u64, output as u64]).unwrap(),
             input,
             output,
+
+            half_weight: None,
         }
     };
     let data = fixture();
@@ -692,6 +702,8 @@ fn q8_0_rank_pair_matches_separate_native_projections() {
         tensor,
         input,
         output,
+
+        half_weight: None,
     };
     let a = linear(bank(n_a, 3), n_a);
     let b = linear(bank(n_b, 5), n_b);

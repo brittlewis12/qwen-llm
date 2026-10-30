@@ -177,6 +177,8 @@ fn projection(ctx: &MetalContext, dtype: GgmlType) -> Linear<'_> {
         native_control: None,
         input,
         output,
+
+        half_weight: None,
     }
 }
 

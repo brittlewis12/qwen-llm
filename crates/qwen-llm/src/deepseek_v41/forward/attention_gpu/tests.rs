@@ -45,6 +45,8 @@ pub(super) fn scheduled_weights<'a>(
             native_control: native_control(ctx, dtype).unwrap(),
             input,
             output,
+
+            half_weight: None,
         }
     };
     let owner = schedule.owns_kv(id);
@@ -773,6 +775,8 @@ fn resident<'a>(ctx: &'a MetalContext, w: &op::AttentionWeights) -> Weights<'a> 
         input: w.input,
         output: w.output,
         tensor: upload(ctx, &w.weight, vec![w.input as u64, w.output as u64]).unwrap(),
+
+        half_weight: None,
     };
     op::AttentionWeights {
         query_a: p(&w.query_a),

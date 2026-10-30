@@ -116,6 +116,8 @@ fn singleton_dense_lineage_uses_real_views_and_ordinary_wrapper_is_unchanged() {
         native_control: None,
         input: 32,
         output: 17,
+
+        half_weight: None,
     };
     for n in [1, 33] {
         let x = upload(

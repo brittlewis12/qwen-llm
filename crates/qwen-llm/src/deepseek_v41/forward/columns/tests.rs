@@ -39,6 +39,8 @@ fn q5_k_linear(ctx: &MetalContext, input: usize, output: usize, seed: u64) -> Li
         native_control: native_control(ctx, GgmlType::Q5_K).unwrap(),
         input,
         output,
+
+        half_weight: None,
     }
 }
 
@@ -53,6 +55,8 @@ fn f32_linear(ctx: &MetalContext, input: usize, output: usize, seed: u64) -> Lin
         native_control: native_control(ctx, GgmlType::F32).unwrap(),
         input,
         output,
+
+        half_weight: None,
     }
 }
 
@@ -179,6 +183,8 @@ fn q8_0_linear(ctx: &MetalContext, input: usize, output: usize, seed: u64) -> Li
         native_control: native_control(ctx, GgmlType::Q8_0).unwrap(),
         input,
         output,
+
+        half_weight: None,
     }
 }
 

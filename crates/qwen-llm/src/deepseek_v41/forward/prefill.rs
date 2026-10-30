@@ -494,6 +494,42 @@ pub(super) fn dense_preweight_bytes(c: &Config) -> Result<u64> {
 }
 
 crate::env_flag!(
+    /// Build a resident F16 copy of every Q5_K dense linear at load and use it
+    /// instead of the per-chunk dequant scratch. `QWEN_V41_DENSE_PREWEIGHT_CACHE=1`
+    /// opts in; default off because it adds ~13 GiB of resident model memory.
+    default_off dense_preweight_cache_enabled,
+    "QWEN_V41_DENSE_PREWEIGHT_CACHE"
+);
+
+/// Build the resident F16 copy for one Q5_K dense linear. One command buffer
+/// per linear at load; the dequant kernel is bitwise against the CPU reference.
+pub(super) fn dense_preweight_cache_selected() -> bool {
+    dense_preweight_cache_enabled()
+}
+
+pub(super) fn build_dense_preweight_cache(
+    ctx: &MetalContext,
+    src: &MetalTensor,
+    input: usize,
+    output: usize,
+) -> Result<MetalTensor> {
+    let elements = input
+        .checked_mul(output)
+        .ok_or("dense preweight cache extent overflow")?;
+    let cache = allocate(ctx, elements, 1, GgmlType::F16)?;
+    let command = ctx
+        .queue
+        .commandBuffer()
+        .ok_or("dense preweight cache command buffer")?;
+    let enc = KernelEncoder::begin(&command);
+    metal::encode_v41_dequant_q5_k_f16(ctx, &enc, src, &cache, input, output)
+        .map_err(|e| e.to_string())?;
+    enc.end();
+    metal::commit_and_wait(&command).map_err(|e| e.to_string())?;
+    Ok(cache)
+}
+
+crate::env_flag!(
     /// Routes Q5_K dense rows through the dedicated 64x64 mat_mat tensor tile and its
     /// n16/n64 simdgroup variants; `QWEN_V41_Q5K_MATMAT=1` opts in. The dedicated path
     /// is cosine-gated (>= 0.999), not bitwise-equal to the generic dense tensor tile,
@@ -677,7 +713,7 @@ impl Linear<'_> {
         {
             return Ok(false);
         }
-        let (Some(x_half), Some(dense_weight)) = (x_half, dense_weight) else {
+        let Some(x_half) = x_half else {
             return Ok(false);
         };
         let elements =
@@ -689,11 +725,34 @@ impl Linear<'_> {
                 })?;
         if x_half.dtype != GgmlType::F16
             || y.dtype != GgmlType::F32
-            || dense_weight.dtype != GgmlType::F16
-            || dense_weight.n_elements() < elements as u64
             || x_half.n_elements() < (self.input * rows) as u64
             || y.n_elements() < (self.output * rows) as u64
         {
+            return Ok(false);
+        }
+        let x = x_half.view_bytes(0, vec![self.input as u64, rows as u64]);
+        let y = y.view_bytes(0, vec![self.output as u64, rows as u64]);
+        if let Some(cache) = &self.half_weight {
+            if cache.n_elements() < elements as u64 {
+                return Ok(false);
+            }
+            let weight = cache.view_subrange(0, vec![self.input as u64, self.output as u64]);
+            metal::encode_mat_mat_tensor_f32(
+                self.ctx,
+                enc,
+                &weight,
+                &x,
+                &y,
+                self.input,
+                self.output,
+                rows,
+            )?;
+            return Ok(true);
+        }
+        let Some(dense_weight) = dense_weight else {
+            return Ok(false);
+        };
+        if dense_weight.dtype != GgmlType::F16 || dense_weight.n_elements() < elements as u64 {
             return Ok(false);
         }
         let weight = dense_weight.view_subrange(0, vec![self.input as u64, self.output as u64]);
@@ -705,8 +764,6 @@ impl Linear<'_> {
             self.input,
             self.output,
         )?;
-        let x = x_half.view_bytes(0, vec![self.input as u64, rows as u64]);
-        let y = y.view_bytes(0, vec![self.output as u64, rows as u64]);
         metal::encode_mat_mat_tensor_f32(
             self.ctx,
             enc,

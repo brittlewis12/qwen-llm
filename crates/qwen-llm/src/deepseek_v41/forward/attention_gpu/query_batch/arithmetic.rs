@@ -98,6 +98,8 @@ fn weights<'a>(ctx: &'a MetalContext, c: &Config) -> Weights<'a> {
             native_control: None,
             input,
             output,
+
+            half_weight: None,
         }
     };
     Weights {

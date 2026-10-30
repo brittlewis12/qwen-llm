@@ -47,6 +47,8 @@ fn hc_rows_kernel_timing() {
         native_control: None,
         input: width,
         output: 24,
+
+        half_weight: None,
     };
     let constants = [
         upload(&ctx, &[0.7, 1.3, 0.4], vec![3]).unwrap(),
@@ -197,6 +199,8 @@ fn fused_hc_projection_rows_matches_split_passes() {
             native_control: None,
             input: width,
             output: 24,
+
+            half_weight: None,
         };
         let constants = [
             upload(&ctx, &[0.7, 1.3, 0.4], vec![3]).unwrap(),

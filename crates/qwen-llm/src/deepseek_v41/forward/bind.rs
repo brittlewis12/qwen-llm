@@ -42,12 +42,21 @@ impl<'a> Binder<'a> {
             dense_linear_supported(tensor.dtype),
             "unsupported linear storage",
         )?;
+        let half_weight =
+            if tensor.dtype == GgmlType::Q5_K && super::prefill::dense_preweight_cache_selected() {
+                Some(super::prefill::build_dense_preweight_cache(
+                    self.ctx, tensor, input, output,
+                )?)
+            } else {
+                None
+            };
         Ok(Linear {
             ctx: self.ctx,
             tensor: tensor.clone(),
             native_control: native_control(self.ctx, tensor.dtype)?,
             input,
             output,
+            half_weight,
         })
     }
     fn linear_spec(&self, spec: &LinearSpec) -> Result<Linear<'a>> {
@@ -115,6 +124,12 @@ impl<'a> Binder<'a> {
                 ),
                 input: group_input,
                 output: c.output_rank,
+                half_weight: output_a.half_weight.as_ref().map(|cache| {
+                    cache.view_bytes(
+                        g as u64 * c.output_rank as u64 * group_input as u64 * 2,
+                        vec![group_input as u64, c.output_rank as u64],
+                    )
+                }),
             })
             .collect();
         Ok(AttentionWeights {

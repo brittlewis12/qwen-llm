@@ -380,6 +380,8 @@ fn dense(ctx: &MetalContext, input: usize, output: usize, role: usize) -> Linear
         native_control: None,
         input,
         output,
+
+        half_weight: None,
     }
 }
 
@@ -416,6 +418,8 @@ fn weights<'a>(ctx: &'a MetalContext, c: &Config, stored: &StoredBank) -> Weight
                 native_control: control.clone(),
                 input: WIDTH,
                 output: RANK,
+
+                half_weight: None,
             })
             .collect(),
         output_b: dense(ctx, c.groups * RANK, c.hidden, 4),

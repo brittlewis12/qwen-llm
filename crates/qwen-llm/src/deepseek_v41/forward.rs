@@ -181,6 +181,9 @@ struct Linear<'a> {
     native_control: Option<MetalTensor>,
     input: usize,
     output: usize,
+    /// Resident F16 copy for the Q5_K dense preweight route; built at load
+    /// only when `QWEN_V41_DENSE_PREWEIGHT_CACHE=1`.
+    half_weight: Option<MetalTensor>,
 }
 fn native_control(ctx: &MetalContext, dtype: GgmlType) -> Result<Option<MetalTensor>> {
     if binding::native_control_bytes(dtype)? == 0 {

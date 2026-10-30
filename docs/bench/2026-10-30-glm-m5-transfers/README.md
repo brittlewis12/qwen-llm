@@ -5,8 +5,8 @@
 **Performance only; strict numerical qualification remains pending.** Actual-M5
 native A/B measurements support further qualification of independent wide-Q8
 dense and Q5-down candidates on the current UD-Q4_K_XL artifact. Neither flag
-is promoted, no default changes, and no source integration is authorized by
-these results. This packet adds documentation only.
+is promoted, no default changes, and these results alone do not qualify source
+integration. This packet adds documentation only.
 
 At 2K/4K, median native wall falls 3.3526%/3.1844% for wide-only and
 8.3784%/7.5065% for Q5-down-only. N512 does not improve. Late-run drift limits
@@ -133,12 +133,16 @@ full-model quality witness**. An earlier identity refusal and two actual-Q4
 pin refusals occurred before model load, outside this completed cohort; their
 records remain private. They are not timed failures or passing qualification.
 
-At this handoff, the corrected numerical screen plus 22 docs/tools tests are
-reported as CPU-building on `5081fcc0`; GPU execution has not yet occurred
-because the GPU is occupied by parallel work. Do not infer a passing result
-from a build in progress or from the earlier leaf witnesses. A later numerical
-qualification update must close the gate before flag/default promotion or
-source integration. This useful performance checkpoint does not close it.
+The corrected numerical screen plus existing 22-document/tool extension builds
+successfully from clean `5081fcc0`: 23 focused CPU tests pass from its release
+binary, and independent source review has no remaining P1/P2 findings. Its
+separate test-executable SHA256 is
+`801872a93e3e1e6c440555cb2a07b010e43822b00759c56b8c2fd1bfb1e7ead4`.
+GPU execution has not yet occurred because the GPU is occupied by parallel
+work. Do not infer passing full-model quality from the build, CPU checks or
+earlier leaf witnesses. A later numerical qualification update must close the
+gate before flag/default promotion or source integration. This performance
+checkpoint does not close it.
 
 Depth/ragged append behavior, saved-request continuation/tool behavior,
 full-model quality, combined candidates and serving/decode conversion remain

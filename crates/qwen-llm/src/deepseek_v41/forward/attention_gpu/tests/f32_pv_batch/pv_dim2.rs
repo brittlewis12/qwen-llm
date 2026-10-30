@@ -92,7 +92,12 @@ fn encode(f: &Fixture, ctx: &MetalContext, enc: &KernelEncoder, dim2: bool, scop
     }
 }
 
-fn compare_output(f: &Fixture, baseline: &[f32], baseline_status: usize, scope: Scope) -> usize {
+pub(super) fn compare_output(
+    f: &Fixture,
+    baseline: &[f32],
+    baseline_status: usize,
+    scope: Scope,
+) -> usize {
     let output = f32_slice(&f.output).unwrap();
     assert_eq!(baseline.len(), output.len());
     let mut nonfinite = 0;
@@ -120,7 +125,7 @@ fn compare_output(f: &Fixture, baseline: &[f32], baseline_status: usize, scope: 
     nonfinite
 }
 
-fn median(samples: &[(f64, f64)], wall: bool) -> f64 {
+pub(super) fn median(samples: &[(f64, f64)], wall: bool) -> f64 {
     let mut values: Vec<_> = samples
         .iter()
         .map(|&(g, w)| if wall { w } else { g })

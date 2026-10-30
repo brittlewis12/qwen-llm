@@ -3,6 +3,7 @@
 use super::*;
 use metal::GroupedF32TestVariant::{self, Production, Scalar};
 
+mod pv_dim1;
 mod pv_dim2;
 mod q_register_cache;
 

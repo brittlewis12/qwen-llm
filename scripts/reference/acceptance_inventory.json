@@ -1051,6 +1051,13 @@
   },
   {
     "target": "lib",
+    "name": "deepseek_v41::forward::attention_gpu::tests::f32_pv_batch::pv_dim1::pv_tensor64_dim1_probe",
+    "class": "timing",
+    "ignored": true,
+    "reason": "Explicit parent-queue resident GPU one-accumulator/four-group PV versus tensor64 ABBA probe, fixed Qregister scores and full sink; never CPU acceptance."
+  },
+  {
+    "target": "lib",
     "name": "deepseek_v41::forward::attention_gpu::tests::f32_pv_batch::pv_dim2::pv_tensor64_dim2_probe",
     "class": "timing",
     "ignored": true,

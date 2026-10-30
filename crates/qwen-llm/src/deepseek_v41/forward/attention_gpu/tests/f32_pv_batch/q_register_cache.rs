@@ -1,6 +1,6 @@
 use super::*;
 
-fn poison(tensor: &MetalTensor) {
+pub(super) fn poison(tensor: &MetalTensor) {
     let elements = f32_slice(tensor).unwrap().len();
     // Every prior command is terminal; no borrowed slice survives this write.
     unsafe {
@@ -18,7 +18,7 @@ fn poison(tensor: &MetalTensor) {
     }
 }
 
-fn score(f: &Fixture, ctx: &MetalContext, enc: &KernelEncoder, cached: bool) {
+pub(super) fn score(f: &Fixture, ctx: &MetalContext, enc: &KernelEncoder, cached: bool) {
     f.bind(enc);
     enc.set_tensor(2, &f.query_half);
     tensor_pipeline(

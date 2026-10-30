@@ -188,6 +188,7 @@ fn packed_attention_propagates_to_all_seven_query_and_output_projections() {
                         &x,
                         &rows,
                         GlobalKvMode::ReusePublished,
+                        None,
                     )?;
                     workspace
                         .finish_rows(&ctx, enc, &w, &rows, &output)

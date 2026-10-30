@@ -332,6 +332,11 @@ pub(super) fn full_scratch_budget_with(
         return Ok((0, 0));
     }
     let mut metal = half_scratch_budget_with(c, rows, half_selected, price)?;
+    if half_selected {
+        metal = metal
+            .checked_add(price(dense_preweight_bytes(c)?)?)
+            .ok_or("prefill dense preweight overflow")?;
+    }
     for width in gpu_step::chunk_widths_from_geometry(c, layers, projections, capacity, rows)? {
         let bytes = width
             .checked_mul(rows)
@@ -450,6 +455,42 @@ impl HalfScratch {
         metal::encode_scatter_offset_f32_to_f16(ctx, enc, &src, &dst, 0, elements)?;
         Ok(dst)
     }
+}
+
+crate::env_flag!(
+    /// Route Q5_K dense prefill linears through a per-chunk F16 dequantized
+    /// weight and the dense F16 tensor tile; `QWEN_V41_DENSE_PREWEIGHT=0`
+    /// restores the Q5_K tensor tile for a same-binary A/B. Q8_0 stays on its
+    /// wide tile.
+    default_on dense_preweight_enabled,
+    "QWEN_V41_DENSE_PREWEIGHT"
+);
+
+/// Below this row count the Q5_K tile wins; production prefill chunks are
+/// 2,048/4,096 rows, while 1K appends stay on the tile.
+pub(super) const DENSE_PREWEIGHT_MIN_ROWS: usize = 2_048;
+
+/// Largest Q5_K dense linear the preweight scratch must hold. The per-group
+/// output_a is smaller than output_b, so the q_b/output_b/shared extents
+/// bound it.
+pub(super) fn dense_preweight_elements(c: &Config) -> Result<usize> {
+    let product = |parts: &[usize]| -> Result<usize> {
+        parts.iter().try_fold(1usize, |acc, &n| {
+            acc.checked_mul(n)
+                .ok_or_else(|| "dense preweight extent overflow".into())
+        })
+    };
+    let q_b = product(&[c.query_rank, c.heads, c.head_dim])?;
+    let output_b = product(&[c.groups, c.output_rank, c.hidden])?;
+    let shared = product(&[c.hidden, c.intermediate])?;
+    Ok(q_b.max(output_b).max(shared))
+}
+
+pub(super) fn dense_preweight_bytes(c: &Config) -> Result<u64> {
+    u64::try_from(dense_preweight_elements(c)?)
+        .ok()
+        .and_then(|n| n.checked_mul(2))
+        .ok_or_else(|| "dense preweight scratch overflow".into())
 }
 
 crate::env_flag!(
@@ -615,6 +656,68 @@ impl Linear<'_> {
             )?;
         }
         Ok(())
+    }
+
+    /// Q5_K dense preweight route: dequantize the weight once into `dense_weight`
+    /// (F16, at least `input * output` elements), then run the dense F16 tensor
+    /// tile. Returns false when the shape/dtype/tier does not qualify so the
+    /// caller can use the ordinary tensor/Q5_K path.
+    pub(super) fn encode_rows_with_arithmetic_and_half_preweight(
+        &self,
+        enc: &KernelEncoder,
+        x_half: Option<&MetalTensor>,
+        y: &MetalTensor,
+        rows: usize,
+        dense_weight: Option<&MetalTensor>,
+    ) -> std::result::Result<bool, metal::MetalError> {
+        if !dense_preweight_enabled()
+            || enc.is_concurrent()
+            || self.tensor.dtype != GgmlType::Q5_K
+            || rows < DENSE_PREWEIGHT_MIN_ROWS
+        {
+            return Ok(false);
+        }
+        let (Some(x_half), Some(dense_weight)) = (x_half, dense_weight) else {
+            return Ok(false);
+        };
+        let elements =
+            self.input
+                .checked_mul(self.output)
+                .ok_or_else(|| metal::MetalError::BadShape {
+                    kernel: "v41_dense_preweight",
+                    detail: "weight extent overflow".into(),
+                })?;
+        if x_half.dtype != GgmlType::F16
+            || y.dtype != GgmlType::F32
+            || dense_weight.dtype != GgmlType::F16
+            || dense_weight.n_elements() < elements as u64
+            || x_half.n_elements() < (self.input * rows) as u64
+            || y.n_elements() < (self.output * rows) as u64
+        {
+            return Ok(false);
+        }
+        let weight = dense_weight.view_subrange(0, vec![self.input as u64, self.output as u64]);
+        metal::encode_v41_dequant_q5_k_f16(
+            self.ctx,
+            enc,
+            &self.tensor,
+            &weight,
+            self.input,
+            self.output,
+        )?;
+        let x = x_half.view_bytes(0, vec![self.input as u64, rows as u64]);
+        let y = y.view_bytes(0, vec![self.output as u64, rows as u64]);
+        metal::encode_mat_mat_tensor_f32(
+            self.ctx,
+            enc,
+            &weight,
+            &x,
+            &y,
+            self.input,
+            self.output,
+            rows,
+        )?;
+        Ok(true)
     }
 }
 

@@ -365,6 +365,9 @@ pub(super) struct ChunkScratch {
     pub(super) rows: usize,
     pub(super) x: MetalTensor,
     pub(super) half: MetalTensor,
+    /// Per-chunk F16 scratch for the Q5_K dense preweight route; one linear
+    /// at a time, shared across layers and the Full prefill chunk.
+    pub(super) dense_weight: Option<MetalTensor>,
     pub(super) outputs: MetalTensor,
     pub(super) incoming: MetalTensor,
     pub(super) hc: prefill::HcRows,
@@ -385,6 +388,16 @@ impl Workspace {
             .view_bytes(0, vec![c.hidden as u64, 4, rows as u64]);
         let half = prefill::allocate(ctx, 4 * c.hidden, rows, GgmlType::F32)?
             .view_bytes(0, vec![c.hidden as u64, 4, rows as u64]);
+        let dense_weight = if metal::moe_grouped_tensor_selected(ctx) {
+            Some(prefill::allocate(
+                ctx,
+                prefill::dense_preweight_elements(c)?,
+                1,
+                GgmlType::F16,
+            )?)
+        } else {
+            None
+        };
         let outputs = prefill::allocate(ctx, c.hidden, rows, GgmlType::F32)?;
         let incoming = upload(
             ctx,
@@ -414,6 +427,7 @@ impl Workspace {
             rows,
             x,
             half,
+            dense_weight,
             outputs,
             incoming,
             hc,
@@ -533,7 +547,7 @@ impl Workspace {
                         false,
                     );
                 }
-                self.attention.encode_rows_prepare(
+                self.attention.encode_rows_prepare_with_dense(
                     ctx,
                     &enc,
                     id,
@@ -541,6 +555,7 @@ impl Workspace {
                     &layer.attention,
                     &hc.normalized,
                     &attention,
+                    scratch.dense_weight.as_ref(),
                 )?;
                 if let Some(samples) = &samples {
                     enc.finish();
@@ -583,8 +598,14 @@ impl Workspace {
                         false,
                     );
                 }
-                self.attention
-                    .finish_rows(ctx, &enc, &layer.attention, &attention, &outputs)?;
+                self.attention.finish_rows_with_dense(
+                    ctx,
+                    &enc,
+                    &layer.attention,
+                    &attention,
+                    &outputs,
+                    scratch.dense_weight.as_ref(),
+                )?;
                 for (position, _, snapshot) in snapshots.iter().filter(|(_, layer, _)| *layer == id)
                 {
                     let row = position - start;
@@ -615,7 +636,7 @@ impl Workspace {
                     );
                 }
                 match &samples {
-                    Some(samples) => self.ffn.encode_rows_with(
+                    Some(samples) => self.ffn.encode_rows_with_dense(
                         ctx,
                         &mut ffn_gpu::SampledRows {
                             enc: &mut enc,
@@ -630,10 +651,20 @@ impl Workspace {
                         &hc.pre,
                         &x,
                         &ffn,
+                        scratch.dense_weight.as_ref(),
                     ),
-                    None => self
-                        .ffn
-                        .encode_rows(ctx, &enc, c, layer, id, &half, &hc.pre, &x, &ffn),
+                    None => self.ffn.encode_rows_dense(
+                        ctx,
+                        &enc,
+                        c,
+                        layer,
+                        id,
+                        &half,
+                        &hc.pre,
+                        &x,
+                        &ffn,
+                        scratch.dense_weight.as_ref(),
+                    ),
                 }
                 .map_err(|e| e.to_string())?;
                 // Lagged incoming pre is the previous block's mix for this same token.

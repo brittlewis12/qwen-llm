@@ -328,6 +328,9 @@ pub(super) fn estimate_from_parts(
     }
     let half_chunk = prefill::half_scratch_budget_with(c, rows, half_selected, price)?;
     chunk = checked_add(chunk.max(decoder), half_chunk)?;
+    if half_selected {
+        chunk = checked_add(chunk, price(prefill::dense_preweight_bytes(c)?)?)?;
+    }
     let publication = price(row_bytes(c.head_dim, rows)?)?;
     let seed_rows = plan
         .decoder

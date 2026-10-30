@@ -2848,6 +2848,7 @@ impl Workspace {
         input: &MetalTensor,
         rows: &Rows,
         mode: GlobalKvMode,
+        dense_weight: Option<&MetalTensor>,
     ) -> std::result::Result<(), metal::MetalError> {
         let c = &self.config;
         let index = if self.schedule.produces_index(id) {
@@ -2944,23 +2945,39 @@ impl Workspace {
         rank_consumers.extend(index.map(|index| &index.query));
         let rank_half = rows.half_input(ctx, enc, &rows.rank, c.query_rank, &rank_consumers)?;
         let rank_half = rank_half.as_ref();
-        w.query_b.encode_rows_with_arithmetic_and_half(
+        if !w.query_b.encode_rows_with_arithmetic_and_half_preweight(
             enc,
-            &rows.rank,
             rank_half,
             &rows.query,
             rows.rows,
-            rows.arithmetic,
-        )?;
-        if let Some(index) = index {
-            index.query.encode_rows_with_arithmetic_and_half(
+            dense_weight,
+        )? {
+            w.query_b.encode_rows_with_arithmetic_and_half(
                 enc,
                 &rows.rank,
                 rank_half,
-                &rows.index_query,
+                &rows.query,
                 rows.rows,
                 rows.arithmetic,
             )?;
+        }
+        if let Some(index) = index {
+            if !index.query.encode_rows_with_arithmetic_and_half_preweight(
+                enc,
+                rank_half,
+                &rows.index_query,
+                rows.rows,
+                dense_weight,
+            )? {
+                index.query.encode_rows_with_arithmetic_and_half(
+                    enc,
+                    &rows.rank,
+                    rank_half,
+                    &rows.index_query,
+                    rows.rows,
+                    rows.arithmetic,
+                )?;
+            }
         }
         Ok(())
     }
@@ -3069,6 +3086,19 @@ impl Workspace {
         rows: &Rows,
         output: &MetalTensor,
     ) -> Result<()> {
+        self.finish_rows_with_dense(ctx, enc, w, rows, output, None)
+    }
+
+    /// `finish_rows` with an optional per-chunk Q5_K dense preweight scratch.
+    pub(super) fn finish_rows_with_dense(
+        &self,
+        ctx: &MetalContext,
+        enc: &KernelEncoder,
+        w: &Weights<'_>,
+        rows: &Rows,
+        output: &MetalTensor,
+        dense_weight: Option<&MetalTensor>,
+    ) -> Result<()> {
         let c = &self.config;
         let group_width = c.heads * c.head_dim / c.groups;
         group_rows(
@@ -3098,19 +3128,31 @@ impl Workspace {
             let group_half = grouped_half
                 .as_ref()
                 .map(|h| h.view_subrange(offset, shape.clone()));
-            projection
-                .encode_rows_with_arithmetic_and_half(
+            let y = rows.grouped_low.view_subrange(
+                (group * c.output_rank * rows.rows) as u64,
+                vec![c.output_rank as u64, rows.rows as u64],
+            );
+            if !projection
+                .encode_rows_with_arithmetic_and_half_preweight(
                     enc,
-                    &rows.grouped_input.view_subrange(offset, shape),
                     group_half.as_ref(),
-                    &rows.grouped_low.view_subrange(
-                        (group * c.output_rank * rows.rows) as u64,
-                        vec![c.output_rank as u64, rows.rows as u64],
-                    ),
+                    &y,
                     rows.rows,
-                    rows.arithmetic,
+                    dense_weight,
                 )
-                .map_err(|e| e.to_string())?;
+                .map_err(|e| e.to_string())?
+            {
+                projection
+                    .encode_rows_with_arithmetic_and_half(
+                        enc,
+                        &rows.grouped_input.view_subrange(offset, shape),
+                        group_half.as_ref(),
+                        &y,
+                        rows.rows,
+                        rows.arithmetic,
+                    )
+                    .map_err(|e| e.to_string())?;
+            }
         }
         group_rows(
             ctx,
@@ -3130,16 +3172,28 @@ impl Workspace {
                 &[&w.output_b],
             )
             .map_err(|e| e.to_string())?;
-        w.output_b
-            .encode_rows_with_arithmetic_and_half(
+        if !w
+            .output_b
+            .encode_rows_with_arithmetic_and_half_preweight(
                 enc,
-                &rows.low,
                 low_half.as_ref(),
                 output,
                 rows.rows,
-                rows.arithmetic,
+                dense_weight,
             )
-            .map_err(|e| e.to_string())?;
+            .map_err(|e| e.to_string())?
+        {
+            w.output_b
+                .encode_rows_with_arithmetic_and_half(
+                    enc,
+                    &rows.low,
+                    low_half.as_ref(),
+                    output,
+                    rows.rows,
+                    rows.arithmetic,
+                )
+                .map_err(|e| e.to_string())?;
+        }
         let pso = pipeline(ctx, enc, "finite")?;
         enc.set_bytes(0, &((self.config.hidden * rows.rows) as u32));
         enc.set_tensor(1, output);

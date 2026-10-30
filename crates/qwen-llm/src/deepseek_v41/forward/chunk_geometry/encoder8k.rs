@@ -183,7 +183,8 @@ fn pricing_compares_8k_with_two_4k_pipeline_at_full_request_capacity() {
                     &c, schedule.layers, &projections, capacity, width, false, &price,
                 ).unwrap();
                 let half = prefill::half_scratch_budget_with(&c, width, true, &price).unwrap();
-                assert_eq!(full.0, without_half.0 + half);
+                let dense = price(prefill::dense_preweight_bytes(&c).unwrap()).unwrap();
+                assert_eq!(full.0, without_half.0 + half + dense);
                 assert_eq!(full.1, without_half.1);
                 assert_eq!(full.1, prefill::upload_cpu_bytes(&c, &projections, width).unwrap()
                     + prefill::chunk_hash_cpu_bytes(hash.layers.len(), width).unwrap());

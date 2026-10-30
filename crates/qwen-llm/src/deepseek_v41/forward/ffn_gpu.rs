@@ -974,8 +974,37 @@ impl Workspace {
         output: &MetalTensor,
         scratch: &Rows,
     ) -> std::result::Result<(), metal::MetalError> {
+        self.encode_rows_dense(ctx, enc, c, layer, id, x, incoming, output, scratch, None)
+    }
+
+    /// `encode_rows` with an optional per-chunk Q5_K dense preweight scratch.
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn encode_rows_dense(
+        &self,
+        ctx: &MetalContext,
+        enc: &KernelEncoder,
+        c: &Config,
+        layer: &Layer<'_>,
+        id: usize,
+        x: &MetalTensor,
+        incoming: &MetalTensor,
+        output: &MetalTensor,
+        scratch: &Rows,
+        dense_weight: Option<&MetalTensor>,
+    ) -> std::result::Result<(), metal::MetalError> {
         let mut e = enc;
-        self.encode_rows_with(ctx, &mut e, c, layer, id, x, incoming, output, scratch)
+        self.encode_rows_with_dense(
+            ctx,
+            &mut e,
+            c,
+            layer,
+            id,
+            x,
+            incoming,
+            output,
+            scratch,
+            dense_weight,
+        )
     }
 
     /// `encode_rows` with stage marks (`PREFILL_FFN_STAGES`) for a sampled
@@ -992,6 +1021,24 @@ impl Workspace {
         incoming: &MetalTensor,
         output: &MetalTensor,
         scratch: &Rows,
+    ) -> std::result::Result<(), metal::MetalError> {
+        self.encode_rows_with_dense(ctx, e, c, layer, id, x, incoming, output, scratch, None)
+    }
+
+    /// `encode_rows_with` with an optional per-chunk Q5_K dense preweight scratch.
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn encode_rows_with_dense(
+        &self,
+        ctx: &MetalContext,
+        e: &mut impl RowsEncoder,
+        c: &Config,
+        layer: &Layer<'_>,
+        id: usize,
+        x: &MetalTensor,
+        incoming: &MetalTensor,
+        output: &MetalTensor,
+        scratch: &Rows,
+        dense_weight: Option<&MetalTensor>,
     ) -> std::result::Result<(), metal::MetalError> {
         let n = scratch.hc.rows;
         composition_extents(c, n)?;
@@ -1030,14 +1077,22 @@ impl Workspace {
         };
         e.mark(2);
         for j in 0..2 {
-            layer.shared[j].encode_rows_with_arithmetic_and_half(
+            if !layer.shared[j].encode_rows_with_arithmetic_and_half_preweight(
                 e.enc(),
-                &scratch.hc.normalized,
                 input_half.as_ref(),
                 &b[1 + j],
                 n,
-                scratch.arithmetic,
-            )?;
+                dense_weight,
+            )? {
+                layer.shared[j].encode_rows_with_arithmetic_and_half(
+                    e.enc(),
+                    &scratch.hc.normalized,
+                    input_half.as_ref(),
+                    &b[1 + j],
+                    n,
+                    scratch.arithmetic,
+                )?;
+            }
         }
         let shape = vec![(c.intermediate * n) as u64];
         metal::encode_clamped_swiglu(
@@ -1056,14 +1111,22 @@ impl Workspace {
             }
             _ => None,
         };
-        layer.shared[2].encode_rows_with_arithmetic_and_half(
+        if !layer.shared[2].encode_rows_with_arithmetic_and_half_preweight(
             e.enc(),
-            &b[3],
             shared_half.as_ref(),
             &b[4],
             n,
-            scratch.arithmetic,
-        )?;
+            dense_weight,
+        )? {
+            layer.shared[2].encode_rows_with_arithmetic_and_half(
+                e.enc(),
+                &b[3],
+                shared_half.as_ref(),
+                &b[4],
+                n,
+                scratch.arithmetic,
+            )?;
+        }
         if half_grouped_selected_with_arithmetic(c, layer, n, scratch.arithmetic)
             || grouped_selected(c, layer, n)
             || native_rows_supported(c, layer)

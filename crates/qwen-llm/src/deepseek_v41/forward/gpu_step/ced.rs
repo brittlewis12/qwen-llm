@@ -259,6 +259,8 @@ pub(in super::super) struct Output {
 struct BlockRows {
     arithmetic: prefill::RowsArithmetic,
     half: MetalTensor,
+    /// Per-chunk F16 scratch for the Q5_K dense preweight route.
+    dense_weight: Option<MetalTensor>,
     output: MetalTensor,
     hc: prefill::HcRows,
     ffn: ffn_gpu::Rows,
@@ -308,6 +310,7 @@ impl BlockRows {
             half: self
                 .half
                 .view_subrange(0, vec![c.hidden as u64, 4, n as u64]),
+            dense_weight: self.dense_weight.clone(),
             output: self
                 .output
                 .view_subrange(0, vec![c.hidden as u64, n as u64]),
@@ -332,6 +335,16 @@ impl BlockRows {
         };
         let half = prefill::allocate(model.ctx, 4 * c.hidden, rows, GgmlType::F32)?
             .view_bytes(0, vec![c.hidden as u64, 4, rows as u64]);
+        let dense_weight = if metal::moe_grouped_tensor_selected(model.ctx) {
+            Some(prefill::allocate(
+                model.ctx,
+                prefill::dense_preweight_elements(c)?,
+                1,
+                GgmlType::F16,
+            )?)
+        } else {
+            None
+        };
         #[cfg(test)]
         if controls.is_some() {
             batches::tests::allocation_checkpoint(
@@ -343,6 +356,7 @@ impl BlockRows {
         Ok(Self {
             arithmetic,
             half,
+            dense_weight,
             output: prefill::allocate(model.ctx, c.hidden, rows, GgmlType::F32)?,
             hc: prefill::HcRows::new(model.ctx, c, rows)?,
             ffn: ffn_gpu::Rows::with_arithmetic(
@@ -660,7 +674,7 @@ impl Workspace {
                 rows.arithmetic,
             )
             .map_err(|e| e.to_string())?;
-        self.attention.encode_rows_prepare(
+        self.attention.encode_rows_prepare_with_dense(
             ctx,
             enc,
             layer,
@@ -668,6 +682,7 @@ impl Workspace {
             &weights.attention,
             &rows.hc.normalized,
             &rows.attention,
+            rows.dense_weight.as_ref(),
         )?;
         self.attention.encode_rows_serial(
             ctx,
@@ -680,8 +695,14 @@ impl Workspace {
         )?;
         self.attention
             .encode_rows_tiles(ctx, enc, layer, start, &rows.attention)?;
-        self.attention
-            .finish_rows(ctx, enc, &weights.attention, &rows.attention, &rows.output)?;
+        self.attention.finish_rows_with_dense(
+            ctx,
+            enc,
+            &weights.attention,
+            &rows.attention,
+            &rows.output,
+            rows.dense_weight.as_ref(),
+        )?;
         metal::encode_mhc4_post_rows(
             ctx,
             enc,
@@ -695,7 +716,7 @@ impl Workspace {
         )
         .map_err(|e| e.to_string())?;
         self.ffn
-            .encode_rows(
+            .encode_rows_dense(
                 ctx,
                 enc,
                 c,
@@ -705,6 +726,7 @@ impl Workspace {
                 &rows.hc.pre,
                 x,
                 &rows.ffn,
+                rows.dense_weight.as_ref(),
             )
             .map_err(|e| e.to_string())?;
         metal::encode_copy_offset_f32(ctx, enc, &rows.ffn.hc.pre, 0, incoming, 4 * rows.hc.rows)

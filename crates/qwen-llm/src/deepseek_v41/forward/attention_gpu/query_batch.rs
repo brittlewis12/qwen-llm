@@ -698,6 +698,22 @@ impl Workspace {
         input: &MetalTensor,
         rows: &Rows,
     ) -> Result<()> {
+        self.encode_rows_prepare_with_dense(ctx, enc, id, start, w, input, rows, None)
+    }
+
+    /// `encode_rows_prepare` with an optional per-chunk Q5_K dense preweight
+    /// scratch; the public/test entry keeps the old signature and passes None.
+    pub(in super::super) fn encode_rows_prepare_with_dense(
+        &mut self,
+        ctx: &MetalContext,
+        enc: &KernelEncoder,
+        id: usize,
+        start: usize,
+        w: &Weights<'_>,
+        input: &MetalTensor,
+        rows: &Rows,
+        dense_weight: Option<&MetalTensor>,
+    ) -> Result<()> {
         op::require(!enc.is_concurrent(), "query batch requires serial encoder")?;
         op::require(
             self.active_batch().is_some_and(|b| {
@@ -710,7 +726,7 @@ impl Workspace {
         let mode = self.global_mode(id, start, rows.rows)?;
         self.bind_ced_rows(id, start, rows)?;
         let history = self.row_history(id, start, rows.rows)?;
-        self.prepare_rows_mode(ctx, enc, id, w, input, rows, mode)
+        self.prepare_rows_mode(ctx, enc, id, w, input, rows, mode, dense_weight)
             .map_err(|e| e.to_string())?;
         let c = &self.config;
         let constants = &self.constants[id];

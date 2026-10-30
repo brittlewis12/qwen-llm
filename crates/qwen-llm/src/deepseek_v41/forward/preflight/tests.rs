@@ -189,7 +189,12 @@ fn custom_schedule_engram_variants_and_shared_ledgers() {
                 .into_iter()
                 .map(|width| price((width * 16 * 4) as u64).unwrap())
                 .sum::<u64>()
-                + prefill::half_scratch_budget_with(&c, 16, half, &price).unwrap();
+                + prefill::half_scratch_budget_with(&c, 16, half, &price).unwrap()
+                + if half {
+                    price(prefill::dense_preweight_bytes(&c).unwrap()).unwrap()
+                } else {
+                    0
+                };
             assert_eq!(full.0, expected);
             assert_eq!(
                 full.1,

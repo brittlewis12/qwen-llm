@@ -469,6 +469,60 @@ fn encode_mat_mat_tensor_f32_impl(
     Ok(())
 }
 
+/// Natural row-major Q5_K -> F16 dequant for the dense preweight route.
+/// Writes the same half values the Q5_K tensor tile would dequantize.
+pub fn encode_v41_dequant_q5_k_f16(
+    ctx: &MetalContext,
+    enc: &KernelEncoder,
+    src: &MetalTensor,
+    dst: &MetalTensor,
+    n_in: usize,
+    n_out: usize,
+) -> Result<(), MetalError> {
+    const KERNEL: &str = "v41_dequant_q5_k_f16";
+    let bad = |detail: String| MetalError::BadShape {
+        kernel: KERNEL,
+        detail,
+    };
+    if src.dtype != GgmlType::Q5_K || dst.dtype != GgmlType::F16 {
+        return Err(bad(format!(
+            "requires Q5_K source and F16 destination, got {:?} -> {:?}",
+            src.dtype, dst.dtype
+        )));
+    }
+    if n_in == 0 || n_out == 0 || !n_in.is_multiple_of(256) {
+        return Err(bad(format!("n_in={n_in} n_out={n_out}")));
+    }
+    let elements = n_in
+        .checked_mul(n_out)
+        .ok_or_else(|| bad("extent overflow".into()))?;
+    if src.n_elements() < elements as u64 || dst.n_elements() < elements as u64 {
+        return Err(bad(format!(
+            "operand extents: src {} dst {} need {elements}",
+            src.n_elements(),
+            dst.n_elements()
+        )));
+    }
+    let pso = ctx.tensor_pipeline(KERNEL)?;
+    enc.set_pipeline(&pso);
+    enc.set_tensor(0, src);
+    enc.set_tensor(1, dst);
+    enc.set_bytes(2, &[n_in as u32, n_out as u32]);
+    enc.dispatch(
+        MTLSize {
+            width: n_in / 16,
+            height: n_out,
+            depth: 1,
+        },
+        MTLSize {
+            width: 128,
+            height: 1,
+            depth: 1,
+        },
+    );
+    Ok(())
+}
+
 /// Probe-only 64-slot down dispatch with F16 activation storage. Same data and
 /// arithmetic as the narrow tile; compares panel cost at 4096 routed tokens.
 #[allow(clippy::too_many_arguments)]

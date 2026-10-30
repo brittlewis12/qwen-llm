@@ -1,4 +1,4 @@
-// Test-only K64 score panel: four independent H16 simdgroups, device F16 Q,
+// K64 score panel: four independent H16 simdgroups, device F16 Q,
 // register-prefetched F32-to-F16 K, and 16 KiB of ping-pong shared storage.
 #include <metal_stdlib>
 #include <metal_tensor>

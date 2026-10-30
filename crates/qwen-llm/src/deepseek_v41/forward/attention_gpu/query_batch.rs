@@ -1519,11 +1519,17 @@ impl Workspace {
             && std::env::var_os("QWEN_V41_SINK_TENSOR64").is_none_or(|v| v != "0");
         if tensor64 {
             let qhalf = rows.query_half.borrow();
+            let simdgroup_qk = qhalf.is_some()
+                && prefill_qhalf_enabled()
+                && prefill_qregister_enabled()
+                && prefill_simdgroup_qk_enabled();
             if let Some(half) = qhalf.as_ref() {
                 tensor_pipeline(
                     ctx,
                     enc,
-                    if prefill_qregister_enabled() {
+                    if simdgroup_qk {
+                        "score_simdgroup_qk"
+                    } else if prefill_qregister_enabled() {
                         "score_tensor64_qregister"
                     } else {
                         "score_tensor64_qhalf"
@@ -1539,7 +1545,11 @@ impl Workspace {
             }
             enc.dispatch(
                 MTLSize {
-                    width: 1,
+                    width: if simdgroup_qk {
+                        count(position + n - 1).div_ceil(64)
+                    } else {
+                        1
+                    },
                     height: n,
                     depth: 1,
                 },

@@ -1,8 +1,11 @@
-# Test-Only Per-SIMDgroup QK
+# Per-SIMDgroup Prefill QK
 
-Prototype against `9a22dd11`; no production dispatch, default, softmax, PV,
-normalization, or incumbent Q-register kernel changes. No GPU execution or
-speed measurement is performed for this source handoff.
+Prototype `3a0d4a11`, based on `9a22dd11`, was initially handed off with only
+source/offline checks and no production dispatch change. The parent then built
+and measured that prototype on M5. The integration now enables it by default
+on this candidate branch for a model trial; model verification and timing are
+pending. Softmax, PV, normalization, and the incumbent Q-register kernel remain
+unchanged. This is not a main-branch promotion or a model-speed claim.
 
 ## Kernel
 
@@ -28,7 +31,32 @@ rounds to F16 while staging. No persistent K cache is introduced.
 DK64 preserves the 16 KiB pipelined premise but can change reduction rounding.
 DK128 would retain four depth calls at the cost of 32 KiB of ping-pong K.
 This prototype does not spend that extra memory or serialize the simdgroups
-merely to force bits. Exactness remains a GPU question, not an offline claim.
+merely to force bits. The measured microprobe is bitwise exact; this does not
+establish equality for every model input or the integrated model chain.
+
+## Measured Microprobe
+
+Parent-reported M5 execution of source `3a0d4a11`, built locally with SDK 26.2,
+Metal 4.0, opt-level 3 and thin LTO using the standard test profile. Frozen test
+executable SHA256:
+`0898fe028d9b211dcd6fbfc531f461b17ad1f6e5dec8e1f5d575bbf61ad32046`.
+
+All 37,715,968 active scores and 33,554,432 outputs compare bitwise, as do
+scratch, denominators, and status. Small/tail cases, bad IDs, and the head-0
+NaN case are exact too. Review found no concrete correctness bug.
+
+GPU microseconds per launch, 32 launches per command, continuous warmup,
+three retained ABBA blocks and six retained samples per arm:
+
+| Visibility | Scope | Qregister us | Per-SIMDgroup us | Speedup |
+| --- | --- | ---: | ---: | ---: |
+| Dense | SCORE | 977.584636 | 301.439453 | 3.243055x |
+| Ragged | SCORE | 797.767580 | 251.672527 | 3.169864x |
+| Dense | FULLSINK | 1932.088542 | 1239.611329 | 1.558624x |
+| Ragged | FULLSINK | 1662.533203 | 1113.132163 | 1.493563x |
+
+These are resident synthetic attention results, not native model prefill
+results. Integrated model correctness and Full/CED performance remain pending.
 
 ## Probe
 
@@ -93,16 +121,37 @@ the staging/store/visibility geometry: 15 small cases, both production cases,
 --edition=2024 --test` harness using the actual error accumulator passes five
 CPU checks (exact/one-ULP values, signed zero/cross-zero values, missing store,
 new nonfinite, and changed nonfinite). These temporary CPU checks do not add
-repository infrastructure or run Metal. The full Rust test target is not built
-here; optimized compilation and GPU numerical/timing results remain with the
-parent.
+repository infrastructure or run Metal. Those were the original source-only
+checks; the subsequent parent-built prototype results are recorded above.
+The integrated host change passes offline MSL compile/link, Rust formatting,
+and the standard environment-reference generator's check and CPU self-tests.
+The integrated Rust build and GPU/model verification remain with the parent.
+
+## Trial Integration
+
+`QWEN_V41_ATTN_SIMDGROUP_QK` is a standard default-on flag on this candidate
+branch. It applies only inside the existing tensor64 route: H64/D512, the
+selected tensor tier and existing logical query arity of at least 128, with an
+available F16 Q mirror and both QHALF and QREGISTER enabled. CED descendants
+retain their existing logical-arithmetic lineage, including physical short
+tiles. Dispatch width is `ceil(maximum active row count / 64)`; height is the
+current physical query span. Bindings, score stride, F32 K source types, scratch
+allocations, and the memory ledger do not change.
+
+- `QWEN_V41_ATTN_SIMDGROUP_QK=0` restores current Qregister for same-binary A/B.
+- `QWEN_V41_ATTN_QREGISTER=0` bypasses the candidate and restores Q-half.
+- `QWEN_V41_ATTN_QHALF=0` bypasses the candidate and restores F32-query tensor64.
+
+Existing tensor-tier/geometry overrides retain their earlier fallback routes.
+The raw kernel comparison remains an ignored probe, independent of the runtime
+selector. Existing dispatch-census assertions now recognize the new score name.
 
 ## Parent Build Handoff
 
 The existing build script discovers the new tensor `.metal` file automatically
 and compiles it as Metal 4.0 for macOS 26.0. The new ignored test is classified
-as timing in the existing acceptance inventory. No feature or environment flag
-selects the candidate in production.
+as timing in the existing acceptance inventory. The runtime selector and its
+fallbacks are documented in the generated environment reference.
 
 Build the optimized library test with the existing private Cargo cache, offline
 and unleased:
@@ -116,4 +165,5 @@ Use the exact selector with `--ignored --exact --nocapture
 `MTL_DEBUG_LAYER`, `MTL_SHADER_VALIDATION`, and `QWEN_REQUIRE_METAL_TESTS` for
 this timing probe. The existing benchmark lease and cancellation guard are
 reused, not replaced. Preserve the full output, including nonzero finite-error
-reports; this candidate remains unpromoted regardless of microprobe speed.
+reports. The parent owns integrated builds and all GPU/model execution; the
+candidate-branch default is for that trial, not a completed model promotion.

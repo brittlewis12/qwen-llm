@@ -326,7 +326,7 @@ fn attention_simdgroup_qk_probe() {
         "tensor tier required"
     );
     eprintln!(
-        "simdgroup_qk: A=current score_tensor64_qregister B=test-only score_simdgroup_qk; F16 Q mirror, native F32 K rounded on staging; H16/K64/DK64 per SG, four independent SGs, 128 threads, 16KiB shared; SCORE or unchanged softmax+pv_tensor64+normalize FULLSINK; all finite errors retained, nonfinite payload/status exact; no promotion or model-speed claim"
+        "simdgroup_qk: A=score_tensor64_qregister B=score_simdgroup_qk; F16 Q mirror, native F32 K rounded on staging; H16/K64/DK64 per SG, four independent SGs, 128 threads, 16KiB shared; SCORE or unchanged softmax+pv_tensor64+normalize FULLSINK; all finite errors retained, nonfinite payload/status exact; no model-speed claim"
     );
     edge_checks(&ctx);
     let mut totals = (0, 0);

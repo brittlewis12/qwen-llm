@@ -6,6 +6,26 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the current state and evidence index.
 
+## 2026-10-30 - GLM M5 Numerical Screen Complete, Broader Quality Pending
+
+- Corrected `5081fcc0` M5 screen passes in 320.87 s: complete 576
+  teacher-forced rows (192/arm), 32 validation-on plain samples, three profiles
+  and three censuses. Actual metadata/expert/MLA pins admit; payload hashes
+  remain unverified. Existing 48-sample debug-off native results are unchanged.
+- Q8WIDE is full-vocabulary bit-exact on all 192 scored rows. Q5DOWN changes
+  all 192: max absolute logit delta 1.8312613, max KL 0.04859741174044692,
+  mean KL 0.0035254466880138145, mean NLL delta -0.002238788080381185 and
+  five top-1 changes. Code mean NLL delta is positive (+0.010071017545712975);
+  the negative overall mean is not equality or quality noninferiority.
+- Census: CURRENT has neither candidate path, Q8WIDE 507 wide calls, Q5DOWN
+  39 tensor down calls; each full 2K chunk has 1342 dispatches. Profile/plain
+  overhead is 2.3223%/2.7334%/9.6933% for CURRENT/Q8WIDE/Q5DOWN. Diagnostic
+  expert spans are not recoverable saved wall or ordinary performance evidence.
+- The same-binary 22-document/tool extension is running, with no results here.
+  Broader qualification remains open; defaults off, no promotion to main.
+  Tiny `d1b897cb` M5 MLA tail witnesses pass separately, not actual-model gains.
+  [Screen, all document strata and diagnostic boundaries](bench/2026-10-30-glm-m5-transfers/README.md).
+
 ## 2026-10-30 - GLM M5 Transfers: Native Performance, Quality Pending
 
 - Actual six-shard GLM-5.3-Flash UD-Q4_K_XL, clean `0473b95c2` qwen-bench,
@@ -18,10 +38,10 @@ See also: `docs/PERF-ROADMAP.md` for the current state and evidence index.
 - Retain late D1/A3 drift, including roughly 4% at N512, and the one-second
   A0 CPU observer caveat. A1-only wide 4K sensitivity still reduces wall
   3.2039%. False power-warning fields do not establish constant frequency.
-- Performance-only checkpoint: tiny debug-on leaf witnesses are not full-model
-  quality. Corrected numerical qualification on `5081fcc0` remains pending GPU
-  execution; no flag/default promotion or source integration. Native timing
-  includes encode/wait/final-logit readback, not serving TTFT or model load.
+- At this performance-only checkpoint, tiny debug-on leaf witnesses were not
+  full-model quality and the corrected numerical screen had not yet run; its
+  subsequent completion is recorded above. No promotion was claimed. Native
+  timing includes encode/wait/final-logit readback, not serving TTFT or model load.
   [Results, identity, drift and all samples](bench/2026-10-30-glm-m5-transfers/README.md).
 
 ## 2026-10-30 - V4.1 Serve Controls: Measured Idle Benefit And Expiry

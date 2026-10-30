@@ -668,3 +668,26 @@ TT_INSTANTIATE_WIDE(iq2_xs,  QT_IQ2_XS_BYTES,  QT_IQ2_XS_NL,  qt_dequantize_iq2_
 TT_INSTANTIATE_WIDE(iq2_xxs, QT_IQ2_XXS_BYTES, QT_IQ2_XXS_NL, qt_dequantize_iq2_xxs)
 TT_INSTANTIATE_WIDE(iq1_s,   QT_IQ1_S_BYTES,   QT_IQ1_S_NL,   qt_dequantize_iq1_s)
 TT_INSTANTIATE_WIDE(iq1_m,   QT_IQ1_M_BYTES,   QT_IQ1_M_NL,   qt_dequantize_iq1_m)
+
+// Natural-row-major Q5_K -> F16 dequant for the dense preweight route.
+// One thread dequantizes one 16-element sub-tile with `qt_dequantize_q5_K`
+// (the same helper the quantized tensor tile uses), and writes it at the
+// weight's natural block*256 + il*16 offset so the dense F16 tensor tile
+// reads the same values the Q5_K tile would.
+kernel void v41_dequant_q5_k_f16(
+        device const uchar * src [[buffer(0)]],
+        device       half  * dst [[buffer(1)]],
+        constant     uint2 & dims [[buffer(2)]],
+        uint2 gid [[thread_position_in_grid]]) {
+    const uint n_in = dims.x;
+    const uint row = gid.y;
+    const uint blocks = n_in / 256;
+    const uint block = gid.x >> 4;
+    const uint il = gid.x & 15;
+    if (block >= blocks) return;
+    const device uchar * blk = src + (row * blocks + block) * QT_Q5_K_BYTES;
+    half4x4 reg;
+    qt_dequantize_q5_K(blk, (short)il, reg);
+    device half * out = dst + row * n_in + block * 256 + il * 16;
+    for (int i = 0; i < 16; ++i) out[i] = reg[i / 4][i % 4];
+}

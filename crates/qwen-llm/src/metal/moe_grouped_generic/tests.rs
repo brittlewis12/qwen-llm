@@ -1454,6 +1454,85 @@ fn tensor_dense_production_shape_timing() {
     }
 }
 
+/// GPU Q5_K -> F16 dequant must write the natural weight order the dense
+/// F16 tensor tile reads. Compare its half bits against the CPU reference.
+#[test]
+fn v41_q5_k_f16_dequant_matches_cpu() {
+    let _lease = crate::metal::acquire_metal_benchmark_lease().expect("production GPU lease");
+    let Some(ctx) = metal_test_context() else {
+        return;
+    };
+    if !moe_grouped_tensor_available(&ctx) {
+        eprintln!("tensor tier unavailable: {:?}", ctx.tensor_ops_status());
+        return;
+    }
+    const N_IN: usize = 5120;
+    const N_OUT: usize = 2304;
+    let dtype = GgmlType::Q5_K;
+    let bank = synthetic_bank(dtype, N_IN, N_OUT, 1, 0x5a);
+    let src = MetalTensor::from_bytes(&ctx, &bank, vec![N_IN as u64, N_OUT as u64], dtype)
+        .expect("source tensor");
+    let dst_bytes = vec![0u8; N_IN * N_OUT * 2];
+    let dst = MetalTensor::from_bytes(
+        &ctx,
+        &dst_bytes,
+        vec![N_IN as u64, N_OUT as u64],
+        GgmlType::F16,
+    )
+    .expect("dest tensor");
+    let command = ctx.queue.commandBuffer().expect("command buffer");
+    let enc = KernelEncoder::begin(&command);
+    let pso = ctx
+        .tensor_pipeline("v41_dequant_q5_k_f16")
+        .expect("dequant pipeline");
+    enc.set_pipeline(&pso);
+    enc.set_tensor(0, &src);
+    enc.set_tensor(1, &dst);
+    enc.set_bytes(2, &[N_IN as u32, N_OUT as u32]);
+    enc.dispatch(
+        MTLSize {
+            width: N_IN / 16,
+            height: N_OUT,
+            depth: 1,
+        },
+        MTLSize {
+            width: 128,
+            height: 1,
+            depth: 1,
+        },
+    );
+    enc.end();
+    commit_and_wait(&command).unwrap();
+    let gpu = read_back_u16(&dst);
+    let desc = crate::tensor::TensorDesc {
+        name: "q5k_gpu_dequant".into(),
+        shape: vec![N_IN as u64, N_OUT as u64],
+        dtype,
+        shard_idx: 0,
+        data_offset: 0,
+        n_bytes: bank.len() as u64,
+    };
+    let cpu = crate::codec::dequant_to_f32(&desc, &bank).expect("cpu dequant");
+    let cpu: Vec<u16> = cpu
+        .iter()
+        .map(|&x| half::f16::from_f32(x).to_bits())
+        .collect();
+    let mismatches = gpu
+        .iter()
+        .zip(&cpu)
+        .enumerate()
+        .filter(|(_, (a, b))| a != b)
+        .count();
+    eprintln!(
+        "q5k_dequant gpu_vs_cpu mismatches={mismatches} of {}",
+        cpu.len()
+    );
+    assert_eq!(
+        mismatches, 0,
+        "Q5_K GPU dequant differs from the CPU reference"
+    );
+}
+
 #[test]
 fn generic_grouped_moe_gate_up_mixed_q4_k_q5_k_matches_cpu() {
     run_generic_gate_up_case(GgmlType::Q4_K, GgmlType::Q5_K);

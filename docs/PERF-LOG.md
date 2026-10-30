@@ -6,6 +6,22 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the current state and evidence index.
 
+## 2026-10-30 - V4.1 Serve Latency: Idle Driver Cost, Long Tail Open
+
+- Local main `e55c813b` adds default-off `QWEN_SERVE_V41_PREFILL_TIMING` for
+  unsplit native prefill timing in continuous and serial serving. It preserves
+  native results/errors and changes no computation, residency or cache policy.
+- The controlled V4.1 reload / GLM / Flash Next / V4.1 sequence does not
+  reproduce the historical 13-26-second tail. Original live turns also replay
+  quickly with the same matched prefixes and 39K -> 78K capacity growth.
+- Identical cached requests: TTFT 1434.556 ms after five seconds idle versus
+  244.537 ms immediately repeated. GPU envelopes remain 144.873/144.638 ms;
+  Metal driver intervals change from 1138.789 to 4.410 ms. These overlapping
+  timing fields are not an additive partition or a deployed-fix claim.
+- V4.1 is restored with diagnostics enabled for the next actual stall; saved
+  games are unchanged. The original long-tail cause remains unresolved.
+  [Controls and limits](bench/2026-10-30-v41-serve-latency.md).
+
 ## 2026-10-29 - V4.1 Per-SIMDgroup QK: Exact, +4.95% CED
 
 - Landed on local main `fcfe6af9`; measured integration `0617a798`. Native 8K

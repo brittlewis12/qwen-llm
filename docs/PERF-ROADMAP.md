@@ -539,6 +539,10 @@ attention tiles at 34.7%. Re-sample after the next landing.
 
 ### GLM-5.3-Flash
 
+- Current-source [M5 leverage review](bench/2026-10-30-glm-m5-leverage.md)
+  separates historical M4 and pre-down stage evidence from the serving artifact.
+  Shared dense operand preparation, residual routed work and Q8 MLA ragged tails
+  are candidate targets, not newly measured wins or an M5 saturation verdict.
 - M5 dense tensor-ops transfer for ordinary Fast/Half prefill: landed
   (2026-10-22 dense tensor entry). Existing Q6_K/Q8_0 tiles at >=1024 active
   rows cut ordinary 2048/4096 prefill wall 15.1%/14.3%; saved 11K gameplay

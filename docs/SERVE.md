@@ -233,7 +233,8 @@ is not a residency set.
   HTTP error. Pulses still run only when the owner has no active connections.
 - **Default and bounds.** Default 60 s, except V4.1 defaults to 0 (opt-in).
   An explicit flag wins over the environment, which wins over the family default;
-  0 disables. The V4.1 integration has no new M5 latency-gain claim.
+  0 disables. V4.1's [measured idle benefit and expiry](bench/2026-10-30-v41-serve-controls/README.md)
+  cover one frozen workload, not a global default-policy qualification.
 - **Safety.**
   - Pulsing is suspended while the host reports memory pressure of
     warning or worse. It resumes on the next idle tick after the pressure
@@ -254,7 +255,10 @@ is not a residency set.
   - Flash-Next's CPU-read PLE table stays in the page cache, outside the
     pulse.
   - V4.1's disk Engram likewise stays outside the pulse; only unique retained
-    expert-bank and dense-weight buffers are named.
+    expert-bank and dense-weight GGUF buffers are named. Forward-owned,
+    Metal-allocated F16 preweight caches are intentionally excluded, like other
+    copied weights. Idle-window expiry stops GGUF pulsing; it does not free
+    those model-owned caches or change their allocation policy.
   - DeepSeek V4 turns the keep-alive off when its opt-in
     `QWEN_DSV4_RESIDENCY_SET` already holds the weights.
 - **Refused.** Ordinary Qwen with copied weights still refuses a nonzero

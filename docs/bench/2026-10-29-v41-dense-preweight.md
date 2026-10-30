@@ -48,10 +48,12 @@ bank at 2,048 rows through both paths with the same F16 activation:
 q5k_preweight exact=true max_abs=0e0 rms=0e0
 ```
 
-The dense arm uses the CPU `dequant_to_f32` reference rounded to F16; a
-production GPU dequant must reproduce those F16 values exactly. The existing
-`dequantize_q5_K_half_grouped` helper is the natural kernel source; verify
-its output against the same reference before integration.
+The dense arm uses the CPU `dequant_to_f32` reference rounded to F16. The
+new GPU kernel `v41_dequant_q5_k_f16` (tensor module) dequantizes a synthetic
+5120x2304 Q5_K bank with the same `qt_dequantize_q5_K` helper and writes the
+natural row-major `block*256 + il*16` order. Its half bits match the CPU
+reference on **0 mismatches of 11,796,480 values**
+(`v41_q5_k_f16_dequant_matches_cpu`).
 
 ## Reading
 
@@ -63,15 +65,25 @@ TFLOPS while the dense F16 weight reaches 72-88 TFLOPS. The Q8_0 tile, by
 contrast, is the 64-slot wide form and already reaches 78-102 TFLOPS; the
 F16 dense path is the 32-slot form and loses.
 
+## GPU dequant
+
+`v41_dequant_q5_k_f16` is a scalar natural-order kernel in
+`kernels/tensor/moe_grouped_slots_tensor.metal`: one thread per 16-element
+sub-tile, the same `qt_dequantize_q5_K` helper as the quantized tile, and a
+row-major `block*256 + il*16` write. On a synthetic 5120x2304 Q5_K bank it
+matches the CPU `dequant_to_f32` + F16 reference exactly (0 / 11,796,480
+half values). The kernel is additive and not wired to production yet.
+
 ## Next
 
-1. Add a GPU Q5_K->F16 dequant kernel; require its F16 output to equal the
-   CPU reference bit-for-bit.
+1. ~~Add a GPU Q5_K->F16 dequant kernel~~ done, bitwise above.
 2. Add a reusable F16 dense-weight scratch for the largest dense linear
    (output_b/q_b: 41,943,040 elements / 83.9 MB) and price it in the
    prefill/CED ledger.
 3. Route Q5_K dense linears through the preweight path at rows >= 2,048
-   (production chunks are 2,048/4,096); keep Q8_0 on the current tile.
+   (production chunks are 2,048/4,096); keep Q8_0 on the current tile. The
+   scratch is per chunk and shared across layers; a two-chunk CED pipeline
+   prices two copies.
 4. Run the 8K Full/CED pair endpoint gate and the 8K/32K CED wall A/B. The
    probe predicts a bitwise pair if the GPU dequant matches.
 5. Only then consider lowering the threshold toward 1,024 rows.

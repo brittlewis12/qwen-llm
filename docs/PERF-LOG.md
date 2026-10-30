@@ -6,6 +6,18 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the current state and evidence index.
 
+## 2026-10-29 - V4.1 Q5_K F16 Dequant Kernel: Bitwise
+
+- `v41_dequant_q5_k_f16` writes the natural row-major `block*256 + il*16`
+  order with the same `qt_dequantize_q5_K` helper as the tensor tile. On a
+  synthetic 5120x2304 Q5_K bank its half bits match the CPU reference on
+  0 / 11,796,480 values.
+- This completes the missing kernel for the per-chunk Q5_K dense preweight
+  route (1.27-1.73x in the tile, bitwise). Scratch, Linear threading and the
+  Full/CED pair gate are next; no production routing yet.
+  [Packet](bench/2026-10-29-v41-dense-preweight.md). Raw:
+  `~/qwen-runs/2026-10-29-v41-encoder-depth/q5k-gpu-dequant.log`.
+
 ## 2026-10-29 - V4.1 Q5_K Dense Preweight: Bitwise, 1.27-1.73x In The Tile
 
 - At 2,048 rows, a Q5_K dense bank dequantized once to F16 and run through

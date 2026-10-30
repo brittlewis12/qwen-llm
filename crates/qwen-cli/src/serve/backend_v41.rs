@@ -9,7 +9,7 @@ use anyhow::{Context, Result, ensure};
 use qwen_llm::deepseek_v41::forward::{Forward, RequestMemoryEstimate, StateError};
 use qwen_llm::metal::{HostMemoryHeadroom, MetalContext, MetalMemorySignals};
 use qwen_llm::sampling::{Sampler, SamplingConfig};
-use std::io;
+use std::io::{self, Write};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
@@ -42,6 +42,11 @@ const LIVE_STATE_MIB_ENV: &str = "QWEN_SERVE_V41_LIVE_STATE_MIB";
 /// streams, errors and publication order are unchanged. 0 samples every
 /// member serially on the owner. Non-negative integer; read at startup.
 const SAMPLE_WORKERS_ENV: &str = "QWEN_SERVE_V41_SAMPLE_WORKERS";
+/// Default off. Log per-call native V4.1 serve prefill wall time and unsplit
+/// forward timings to stderr as JSON; no stage or per-dispatch profiling.
+/// Driver scheduling can overlap GPU and commit/wait; wait minus GPU is not
+/// pure queue time. Read for each native prefill call.
+const PREFILL_TIMING_ENV: &str = "QWEN_SERVE_V41_PREFILL_TIMING";
 
 /// Agent workloads keep about three conversations busy at once. M5 Ultra, GSQ
 /// IQ2_XS, three agents x three turns (greedy, 128 tokens per turn, fresh
@@ -347,6 +352,63 @@ struct ForwardEngine<'a, 'b> {
     epoch: Instant,
 }
 
+fn time_native_prefill<T, E>(
+    enabled: bool,
+    position: usize,
+    rows: usize,
+    with_logits: bool,
+    call: impl FnOnce() -> std::result::Result<T, E>,
+) -> std::result::Result<T, E> {
+    if !enabled {
+        return call();
+    }
+    let scope = match qwen_llm::deepseek_v41::forward::profile::Scope::begin() {
+        Ok(scope) => scope,
+        Err(error) => {
+            tracing::warn!("serve native prefill timing setup failed: {error}");
+            return call();
+        }
+    };
+    let started = Instant::now();
+    let result = call();
+    let wall_ms = started.elapsed().as_secs_f64() * 1000.0;
+    let report = scope.finish();
+    let record = serde_json::json!({
+        "position": position,
+        "rows": rows,
+        "with_logits": with_logits,
+        "success": result.is_ok(),
+        "wall_ms": wall_ms,
+        "profile": report,
+    });
+    let _ = writeln!(io::stderr().lock(), "serve native prefill timing: {record}");
+    result
+}
+
+fn native_prefill(
+    forward: &Forward<'_>,
+    state: &mut qwen_llm::deepseek_v41::forward::State,
+    tokens: &[u32],
+    cancel: &AtomicBool,
+    with_logits: bool,
+) -> std::result::Result<Vec<f32>, StateError> {
+    time_native_prefill(
+        qwen_llm::env_flag::read_default_off(PREFILL_TIMING_ENV),
+        state.position(),
+        tokens.len(),
+        with_logits,
+        || {
+            if with_logits {
+                forward.prefill(state, tokens, Some(cancel))
+            } else {
+                forward
+                    .advance_prefill(state, tokens, Some(cancel))
+                    .map(|()| Vec::new())
+            }
+        },
+    )
+}
+
 impl execution::Engine<qwen_llm::deepseek_v41::forward::State> for ForwardEngine<'_, '_> {
     fn admit(
         &mut self,
@@ -382,14 +444,7 @@ impl execution::Engine<qwen_llm::deepseek_v41::forward::State> for ForwardEngine
         cancel: &AtomicBool,
         with_logits: bool,
     ) -> std::result::Result<Vec<f32>, ServeError> {
-        if with_logits {
-            self.forward.prefill(state, tokens, Some(cancel))
-        } else {
-            self.forward
-                .advance_prefill(state, tokens, Some(cancel))
-                .map(|()| Vec::new())
-        }
-        .map_err(state_error)
+        native_prefill(self.forward, state, tokens, cancel, with_logits).map_err(state_error)
     }
     fn step(
         &mut self,
@@ -574,15 +629,7 @@ impl Backend<'_> {
                     state.position(),
                     tokens.len(),
                     || qwen_llm::pid_metrics::PidSnapshot::now().ok(),
-                    || {
-                        if with_logits {
-                            self.forward.prefill(state, tokens, Some(cancel))
-                        } else {
-                            self.forward
-                                .advance_prefill(state, tokens, Some(cancel))
-                                .map(|()| Vec::new())
-                        }
-                    },
+                    || native_prefill(&self.forward, state, tokens, cancel, with_logits),
                 )
                 .map_err(state_error)
             },
@@ -625,5 +672,29 @@ fn state_error(error: qwen_llm::deepseek_v41::forward::StateError) -> ServeError
     match error.memory_admission() {
         Some(denied) => super::transport_memory::memory_refusal("V4.1 state", denied),
         None => ServeError::server_error(format!("V4.1 state: {error}")),
+    }
+}
+
+#[cfg(test)]
+mod prefill_timing_tests {
+    use super::*;
+
+    #[test]
+    fn disabled_timing_preserves_results_and_does_not_open_a_scope() {
+        let value = Box::new(7);
+        let pointer = &*value as *const i32;
+        let result = time_native_prefill(false, 3, 2, true, || {
+            let scope = qwen_llm::deepseek_v41::forward::profile::Scope::begin().unwrap();
+            assert!(scope.finish().operations.is_empty());
+            Ok::<_, ()>(value)
+        })
+        .unwrap();
+        assert_eq!(&*result as *const i32, pointer);
+        let error = Box::new("original error");
+        let pointer = &*error as *const &str;
+        let result = time_native_prefill(false, 3, 2, false, || Err::<(), _>(error)).unwrap_err();
+        assert_eq!(&*result as *const &str, pointer);
+        let scope = qwen_llm::deepseek_v41::forward::profile::Scope::begin().unwrap();
+        assert!(scope.finish().operations.is_empty());
     }
 }

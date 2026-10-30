@@ -6,6 +6,23 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the current state and evidence index.
 
+## 2026-10-30 - V4.1 Serve Controls: Measured Idle Benefit And Expiry
+
+- Frozen `5bf7e4e5` M5 release: first six-arm cohort completes 30 generations
+  (24 cached), all matching output byte hashes and 534 tokens. Five-second
+  idle TTFT medians: ordinary 744.982 ms, soft 4 GiB 734.716 ms, keep-alive
+  10 s 220.555 ms. Mapping remains negative/opt-in; no default changes.
+- Completed separate `RUST_LOG=info` A2/E0 follow-up, without per-quantum
+  debug: ten matching generations (eight cached). Five-second TTFT is
+  745.873 -> 220.004 ms; driver interval 531.559 -> 5.907 ms, GPU about 145 ms.
+  At 15 seconds E0 returns to 738.144 ms TTFT / 524.174 ms driver delay,
+  supporting narrow expiry. No recorded request/native/pulse/cleanup failures.
+- No obvious decode regression with ordinary logging; do not pool these rows
+  with the debug cohort. Ten-second keep-alive is supported for this workload,
+  not globally promoted. Power, pressure and arbitrary conversations remain
+  unmeasured; original 15-40-second tails are not explained/fixed.
+  [Results, separate cohorts and sanitized CSVs](bench/2026-10-30-v41-serve-controls/README.md).
+
 ## 2026-10-30 - V4.1 Opt-In Serve Mapping And Idle Controls
 
 - Added serve-only `QWEN_SERVE_V41_WEIGHT_WINDOW_MIB`: unset/0 preserves the

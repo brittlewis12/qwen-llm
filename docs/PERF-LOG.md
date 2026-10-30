@@ -6,6 +6,29 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the current state and evidence index.
 
+## 2026-10-29 - V4.1 Per-SIMDgroup QK: Exact, +4.95% CED
+
+- Landed on local main `fcfe6af9`; measured integration `0617a798`. Native 8K
+  prefill keeps all 32 samples across ABBA/BAAB and both execution policies:
+  Full 7.015022 -> 6.627847 s (+5.84% throughput), CED 4.161562 -> 3.965455 s
+  (+4.95%). Both orders improve: Full +6.67/+5.07%, CED +6.20/+3.73%.
+- Four independent H16 SIMDgroups run K64/DK64 QK panels with pipelined key
+  prefetch and 16 KiB shared storage, versus the previous 32 KiB layout and
+  full-Q register cache. Existing F16 Q/F32 K inputs, score scaling, softmax,
+  PV and normalization remain unchanged; no new model buffer is allocated.
+- Canonical SDK 27 release microprobe: score 3.18-3.25x and complete sink
+  1.50-1.56x at K640/N512. All 37,715,968 active scores, 33,554,432 outputs,
+  scratch and status match bitwise, with poisoned stores and edge cases.
+  These component ratios are not model-throughput ratios.
+- Existing real 8K Full/CED comparison passes; all 257 complete observations
+  also equal the prior Q-register `ed46c40f` report on the same input/artifact.
+  Query-batch regressions and the validated N128 range test pass. The merged
+  main library compiles with the concurrent additive Q5_K dequant work.
+- Default on for the existing tensor64 geometry. Set
+  `QWEN_V41_ATTN_SIMDGROUP_QK=0` to restore Qregister; QREGISTER/QHALF diagnostic
+  fallbacks remain intact. One machine/artifact at 8K, with order drift
+  explicitly retained. [Results](bench/2026-10-29-v41-simdgroup-qk.md).
+
 ## 2026-10-29 - V4.1 Q5_K F16 Dequant Kernel: Bitwise
 
 - `v41_dequant_q5_k_f16` writes the natural row-major `block*256 + il*16`

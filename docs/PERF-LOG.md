@@ -6,6 +6,31 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the current state and evidence index.
 
+## 2026-10-30 - GLM Combined Checks Complete, Promotion Approved Not Integrated
+
+- Parent approves both bounded M5 Fast/Half routes for default promotion,
+  retaining separate `QWEN_GLM53_DENSE_Q8_WIDE=0` / `QWEN_GLM53_TENSOR_Q5_DOWN=0`
+  rollbacks. Source agent is implementing macro defaults/test docs on the GLM
+  integration branch; measured `e75cd6ab` production code is unchanged. No final
+  source commit, default change or main merge is claimed by this checkpoint.
+- Combined native `0473b95c2`, SDK 26.2 debug-off: 12 matching report rows,
+  all 24 samples retained, 188.063558583 s. Late C1/A1 drift includes A1
+  N512 +14.3329%; pooled 2K -17.9399% is confounded, not an optimization
+  estimate. Early matched-N512 A0/C0 means fall 12.3059%/11.6820% at 2K/4K,
+  without a frequency trace or universal-gain claim. Independent approximately
+  3.2% wide / 8% Q5-down headlines stay separate, not additive.
+- Combined quality `e75cd6ab`, separate validation-on binary: pass 162.73 s,
+  complete 384 rows / six document arms, 16 strict tool generations / 300
+  sampled-token records, 16 stops / zero caps, stamps unchanged/observers clear.
+  All 192 combined metric records match prior three-document Q5DOWN records;
+  not a full-vector equality claim. Both arms score 8/8 strict-correct tools,
+  with all eight complete combined sampled sequences equal CURRENT.
+- Extended Q5 outliers 9.899603 / 0.279021 KL and descriptive intervals remain;
+  all earlier data are unchanged. Approval is bounded judgment, not formal
+  preregistered noninferiority/equality. Exact/F32, short/M4 and global rollback
+  behavior must stay preserved; final integration status awaits the parent.
+  [All samples, drift, combined quality and decision](bench/2026-10-30-glm-m5-transfers/README.md).
+
 ## 2026-10-30 - GLM Extended Independent-Arm Evidence Complete
 
 - `5081fcc0`, same SDK 26.2 validation-on test binary: extended execution
@@ -24,9 +49,9 @@ See also: `docs/PERF-ROADMAP.md` for the current state and evidence index.
   [-0.355114, +0.426136] percentage points. No retroactive Exact/Fast threshold,
   global equality/noninferiority or combined-gain claim. Native 48-sample and
   earlier nine-row screen CSVs are unchanged; validation-on data stay separate.
-- Combined-arm native ABBA plus three-document/16-tool test is reported running,
-  with no results here. Flags/defaults remain off/off main pending the parent
-  combined qualification/integration decision; tiny tail passes are not model gains.
+- At this extended-evidence checkpoint the combined test was still running;
+  its completion and the subsequent parent approval are recorded above, with
+  integration pending. Tiny tail passes are not model gains.
   [All strata, strict scoring, intervals and limits](bench/2026-10-30-glm-m5-transfers/README.md).
 
 ## 2026-10-30 - GLM M5 Numerical Screen Complete, Broader Quality Pending

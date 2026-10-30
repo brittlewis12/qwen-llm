@@ -12,9 +12,10 @@ below use stock UD-IQ3_XXS; older first-light measurements use Maya-M IQ2_S.
 Their quantization inventories and selected paths are not interchangeable.
 
 Subsequent [actual-M5 native transfer measurements](2026-10-30-glm-m5-transfers/README.md)
-on six-shard UD-Q4_K_XL now include a **completed 22-document/tool extension**,
-not global quality equality or a source-integration verdict. Independent
-wide-only and Q5-down-only blocks reduce median 2K/4K native wall by
+on six-shard UD-Q4_K_XL include completed independent and combined checks.
+The parent **approves both bounded M5 Fast/Half routes for default promotion**,
+with separate flag-0 rollbacks; source integration is in progress, not claimed
+merged. Independent wide-only and Q5-down-only blocks reduce median 2K/4K native wall by
 3.3526%/3.1844% and 8.3784%/7.5065%; N512 does not improve. The packet retains
 all 48 samples, late-run drift and the A0 CPU-observer caveat. Its SDK 26.2 build is distinct
 from V4.1 SDK 27 serving results. The validation-on `5081fcc0` extension has
@@ -24,10 +25,17 @@ Q5DOWN has 28 top-1 changes, max absolute delta 9.899603 and max KL
 scores 8/8 strict tool generations, and both candidates' eight complete
 sampled sequences equal CURRENT. The original three-document subset repeats,
 not independently replicates. Descriptive document-bootstrap intervals and
-all strata are retained in the packet. A separate combined-arm ABBA plus
-three-document/16-tool run is pending; production flags stay off/off main
-until the parent integration decision. These quality/diagnostic observations
-are not pooled with native performance or interpreted as serving TTFT.
+all strata are retained in the packet. Combined native ABBA retains all 24
+samples and late C1/A1 drift, including 14.3329% at unaffected N512; its
+pooled 17.9399% 2K wall reduction is confounded, not a headline estimate.
+The separate `e75cd6ab` combined quality check completes 384 rows and 16
+strict-correct tool generations; its 192 combined metric records match the
+earlier Q5DOWN screen, not a retained-vector equality proof. The measured
+checkpoint leaves production unchanged; the source agent is implementing
+default changes and the parent will record the final source commit/merge.
+Exact/F32, short-row/M4 and global rollback behavior must remain preserved.
+These are bounded descriptive findings, not formal noninferiority, universal
+speedup, serving TTFT, or an additive/pooled combined-gain claim.
 
 ## Measured Anchors
 

@@ -697,4 +697,23 @@ mod prefill_timing_tests {
         let scope = qwen_llm::deepseek_v41::forward::profile::Scope::begin().unwrap();
         assert!(scope.finish().operations.is_empty());
     }
+
+    #[test]
+    fn enabled_timing_preserves_errors_and_an_existing_scope() {
+        let error = Box::new("original error");
+        let pointer = &*error as *const &str;
+        let result = time_native_prefill(true, 3, 2, false, || Err::<(), _>(error)).unwrap_err();
+        assert_eq!(&*result as *const &str, pointer);
+
+        let outer = qwen_llm::deepseek_v41::forward::profile::Scope::begin().unwrap();
+        let value = Box::new(11);
+        let pointer = &*value as *const i32;
+        let result = time_native_prefill(true, 3, 2, true, || Ok::<_, ()>(value)).unwrap();
+        assert_eq!(&*result as *const i32, pointer);
+        assert!(qwen_llm::deepseek_v41::forward::profile::Scope::begin().is_err());
+        assert!(outer.finish().operations.is_empty());
+
+        let scope = qwen_llm::deepseek_v41::forward::profile::Scope::begin().unwrap();
+        assert!(scope.finish().operations.is_empty());
+    }
 }

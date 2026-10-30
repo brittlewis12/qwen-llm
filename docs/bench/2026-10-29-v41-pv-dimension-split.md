@@ -1,4 +1,15 @@
-# Tensor64 PV Dimension Split
+# Tensor64 PV Dimension Split: Replay Win, No Model Win
+
+## Decision
+
+Keep the production PV kernel and grid unchanged. Splitting its four D128
+output chunks into four independent groups is bitwise exact and faster in the
+resident replay, but does not establish an end-to-end 8K model gain. Retain the
+ignored probe and experiment history; do not select it by default or rerun the
+same model campaign in search of a favorable result.
+
+This does not close attention dataflow work. Eliminating intermediate passes
+and traffic is a different experiment from changing PV group granularity.
 
 ## Resident Kernel Result
 
@@ -33,27 +44,54 @@ The complete sink includes Q-register score, softmax, PV and normalization.
 Every output bit matches in both cases and scopes: 16,777,216 output elements
 per case, zero nonfinite outputs and status zero. Guards pass. An adversarial
 code review finds no indexing, output-coverage, barrier or arithmetic-order
-defect; it notes the extra group scheduling pressure as a performance tradeoff.
-
-## Earlier Exploratory Samples
+defect; it notes extra group scheduling pressure as a performance tradeoff.
 
 The preceding `f1e0121d` probe uses four launches per command and compares all
 output elements on CPU after every sample. Its PV-only medians appear about
-1.5x faster but individual samples scatter widely. Those samples are preserved,
-not promoted as the PV result. The followup changes only measurement cadence:
+1.5x faster but individual samples scatter widely. Those samples remain
+preserved, not promoted as the PV result. The followup changes only cadence:
 longer GPU batches, continuous warmup and readbacks outside the timing loop.
-The kernel is unchanged. Its original complete-sink medians are 1.0703x and
-1.0866x; the longer-batch results are the primary kernel evidence here.
+The kernel is unchanged.
+
+## Actual Model Result
+
+Experimental integration `6210b9c4` selects the split kernel on the existing
+H64/D512 tensor64 path. Its `QWEN_V41_ATTN_PV_SPLIT=0` control restores the
+previous kernel and one-group grid. That production switch does not land in
+maintained main; the experiment commit remains in history for reproduction.
+
+The existing 8K Full/CED numerical comparison passes on the 40-layer
+DeepSeek-V4.1-Flash-1017 GSQ-RCO IQ2_XS artifact with IQ4_NL Engram: 257
+full-vocabulary vectors per arm, 129280 elements per vector, 256 teacher-forced
+steps and 56 causal regions at each position. All 257 saved observations also
+equal the prior Q-cache report at `ed46c40f`, with identical artifact and selected
+input identities. The release test executable SHA256 is
+`15158d982ee8b5b47f500abe195b861dbeb47bf5d5bc2064306acafae86e5d06`.
+
+Normal-release `qwen-bench suite` runs use `--pp 8192 --depth 0 --runs 2
+--seed 1`, with Q-cache on in both arms. Each policy has contiguous ABBA and
+BAAB blocks, two retained samples per process, eight samples per arm: 32 retained
+samples overall. CED runs before Full, without a programmed cooldown. Timing
+uses deterministic synthetic tokens, not the numerical witness. Native wall
+time includes prefill and final logits, excluding model loading.
+
+| Policy and block | Existing mean s | Split mean s | Throughput change |
+| --- | ---: | ---: | ---: |
+| CED ABBA | 4.2635 | 4.4434 | -4.05% |
+| CED BAAB | 4.6823 | 4.6171 | +1.41% |
+| CED, all samples | 4.4729 | 4.5303 | -1.27% |
+| Full ABBA | 9.2882 | 9.3886 | -1.07% |
+| Full BAAB | 9.1473 | 9.0821 | +0.72% |
+| Full, all samples | 9.2177 | 9.2354 | -0.19% |
+
+All samples stay included. Mixed block signs and substantial machine-state
+variation prevent a precise universal regression claim, but there is no
+demonstrated model speedup to promote. Ordinary Full uses P0 mapping and
+ordinary CED uses P4; comparisons stay within each policy. Actual CED records
+report `shrinking_ced+final_logits_copy`, not a Full fallback. The release
+benchmark executable SHA256 is
+`7f9082ba6ce75d858e72b8826bd131b750a563cb0eb9ce5836c836bb070732ba`.
 
 The earlier two-accumulator/two-group variant remains a separate measured
-negative; it is not rerun or selected by this change.
-
-## Integration Experiment
-
-The experimental prefill path selects the one-chunk PV on the existing
-H64/D512 tensor64 route. `QWEN_V41_ATTN_PV_SPLIT=0` restores the old kernel
-and one-group grid for same-binary A/B; Q-register scoring stays on in both arms.
-Other attention tiers and all tensor buffers/chunk policies remain unchanged.
-
-Real-model numerical comparison and wall-time measurement follow separately.
-This resident tile result alone is not an end-to-end speedup claim.
+negative. Neither result implies a bandwidth ceiling, closes other dataflow
+mechanisms, or predicts performance of a late-context append.

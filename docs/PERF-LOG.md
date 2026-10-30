@@ -32,6 +32,18 @@ See also: `docs/PERF-ROADMAP.md` for the current state and evidence index.
   [Packet](bench/2026-10-29-v41-encoder-depth-negative.md). Raw:
   `~/qwen-runs/2026-10-29-v41-encoder-depth/`.
 
+## 2026-10-29 - V4.1 PV Group Split: Replay Win, No Model Win
+
+- Four groups/query with one D128 accumulator each improve resident PV
+  1.15-1.25x and the complete Q-cache sink 1.06-1.07x, bitwise exact.
+- Actual 8K Full/CED observations also match the prior Q-cache report at all
+  257 positions, but 32 retained native timing samples show no overall win:
+  -0.19% Full / -1.27% CED throughput, with mixed ABBA/BAAB signs and drift.
+- Keep production PV selection unchanged. Retain the ignored probe and full
+  experiment history; do not promote the isolated replay number as a model gain.
+- [Results and method](bench/2026-10-29-v41-pv-dimension-split.md). Pass fusion
+  and reduced intermediate traffic remain distinct attention-dataflow bets.
+
 ## 2026-10-29 - V4.1 Q Register Cache: Faster Tiles And Native Prefill
 
 - Keep Q half vectors live across key panels without changing the tensor64

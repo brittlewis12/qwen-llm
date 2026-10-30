@@ -176,10 +176,7 @@ fn compare_case(ctx: &MetalContext, c: &Config, schedule: &Schedule, start: usiz
                     + count("score_tensor64")
                     + count("score_tensor64_qhalf")
                     + count("score_tensor64_qregister");
-                let pv = count("pv_mma")
-                    + count("pv_tensor")
-                    + count("pv_tensor64")
-                    + count("pv_tensor64_dim1");
+                let pv = count("pv_mma") + count("pv_tensor") + count("pv_tensor64");
                 assert_eq!(score, n.div_ceil(TILE), "score");
                 assert_eq!(pv, n.div_ceil(TILE), "pv");
                 for suffix in ["softmax_rows", "normalize_rows"] {
@@ -952,10 +949,7 @@ fn sink_case(
                     + count("score_tensor64")
                     + count("score_tensor64_qhalf")
                     + count("score_tensor64_qregister");
-                let pv = count("pv_mma")
-                    + count("pv_tensor")
-                    + count("pv_tensor64")
-                    + count("pv_tensor64_dim1");
+                let pv = count("pv_mma") + count("pv_tensor") + count("pv_tensor64");
                 assert_eq!(score, spans.len(), "score");
                 assert_eq!(pv, spans.len(), "pv");
                 for suffix in ["softmax_rows", "normalize_rows", "rope_rows"] {
@@ -989,7 +983,7 @@ fn sink_case(
                     "score_tensor64_qhalf",
                     "score_tensor64_qregister",
                 ]);
-                depths.1 = heights(&["pv_mma", "pv_tensor", "pv_tensor64", "pv_tensor64_dim1"]);
+                depths.1 = heights(&["pv_mma", "pv_tensor", "pv_tensor64"]);
                 let tiles = spans.iter().map(|&(_, n, _)| n as u64).collect::<Vec<_>>();
                 assert_eq!(depths.0, tiles);
                 assert_eq!(depths.1, tiles);

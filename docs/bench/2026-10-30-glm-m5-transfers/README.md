@@ -390,9 +390,11 @@ No persistent scratch or expanded weight bank is added. See the generated
 Extended Q5DOWN outliers (**9.899603** absolute / **0.279021** KL),
 the positive NLL interval upper bound and all earlier tool evidence remain
 part of the decision, not erased by the combined check. General quality and
-serving/decode conversion are not established; tiny tail passes are not
-actual-model performance evidence.
+serving/decode conversion are not established; tiny tail passes alone do not
+establish actual-model performance.
 
-Depth/ragged append performance is also unmeasured here. See the
-[leverage map](../2026-10-30-glm-m5-leverage.md) for historical anchors and the
-separate tiny M5 Q8 MLA tail witnesses, not actual-model tail performance.
+Depth/ragged append performance is outside these core cohorts. A separate
+[ordinary-model tail screen](../2026-10-30-glm-q8-tail-batch/README.md) retains
+64 samples and unchanged-shape controls: it shows no compelling conversion,
+so that candidate stays off main/default-off. See the
+[leverage map](../2026-10-30-glm-m5-leverage.md) for the remaining opportunities.

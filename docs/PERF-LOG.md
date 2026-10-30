@@ -6,6 +6,19 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the current state and evidence index.
 
+## 2026-10-30 - GLM Q8 Tail Batching Parked After Native Conversion Screen
+
+- `d1b897cb`, SDK 26.2 release: 32 matching report rows / all 64 samples,
+  A/T/T/A with core wide/Q5 policies fixed on, N2/127/128/129 at depth 0/4096.
+  Run completes naturally in 412.197 s; no debug/census/profiler in timing.
+- Fresh N127 raw median improves 1.26%; depth-4096 N127 is 1.03% worse.
+  Unchanged N128/N129 controls also drift, so neither is a robust gain or
+  proven regression. Tiny debug leaf timing does not justify promotion.
+- Keep the experimental code off main/default-off. No further large quality
+  run is justified by this conversion; core default-on routes are separate.
+  All GPU work from this lane has ended, with no service restart/deployment.
+  [All samples, process means and limits](bench/2026-10-30-glm-q8-tail-batch/README.md).
+
 ## 2026-10-30 - GLM M5 Prefill Defaults Landed
 
 - `bcf6fd6c`, integrated by `2ac3d907`, enables the bounded Q8-wide and

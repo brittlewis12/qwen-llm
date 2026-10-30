@@ -241,7 +241,7 @@ fn tensor_m5_transfer_screen() {
             .entry(format!("{:?} {:?}", t.dtype, t.shape))
             .or_default() += 1;
     }
-    out.emit(json!({"event":"header","schema":"glm53.m5_transfers.v1","model":path,
+    let mut header = json!({"event":"header","schema":"glm53.m5_transfers.v1","model":path,
         "artifact_layout":layout,"stock_fixture_artifact_layout":fixture["artifact_layout"],
         "artifact_layout_matches_frozen_fixture":false,"artifact_pin":pin,"metadata_shard_sha256":header_sha,
         "artifact_identity_scope":"pinned shard names/sizes and metadata-only primary SHA; actual tensor-table digest and retained stamps recorded; weight payload hashes not verified",
@@ -254,8 +254,8 @@ fn tensor_m5_transfer_screen() {
         "fixture_sha256":sha256_hex(FROZEN),"probe_sha256":sha256_hex(include_bytes!("tensor_m5_transfers.rs")),
         "dense_source_sha256":sha256_hex(include_bytes!("../../tensor_prefill.rs")),
         "q5_source_sha256":sha256_hex(include_bytes!("../../tensor_q5_down.rs")),
-        "packed_source_sha256":sha256_hex(include_bytes!("../../packed.rs")),
-        "arms":ARMS,"arm_columns":["label","q8_wide","q5_down"],"dense_scope":true,"down_scope":true,
+        "packed_source_sha256":sha256_hex(include_bytes!("../../packed.rs"))});
+    let Value::Object(protocol) = json!({"arms":ARMS,"arm_columns":["label","q8_wide","q5_down"],"dense_scope":true,"down_scope":true,
         "scope":"independent thread-local overrides during whole prefill only; no combined candidate; ordinary forward continuation unchanged",
         "documents":docs.iter().map(|d|json!({"path":d.path,"stratum":d.stratum,"prefix":d.prefix,
             "tokens":d.tokens,"tokens_sha256":token_hash(&d.tokens)})).collect::<Vec<_>>(),
@@ -263,12 +263,17 @@ fn tensor_m5_transfer_screen() {
         "capacity":capacity,"workspace_rows":ROWS,"cpu_reserve_bytes":cpu,"cpu_terms":terms,
         "retained_baselines":1,"baseline_rows":CONTINUATION,"vocab":vocab,"targets_per_arm":192,
         "lineage":"Fast","precision":"Half","tensor_tier":format!("{:?}",ctx.tensor_ops_status()),
-        "environment": ["MTL_DEBUG_LAYER","QWEN_METAL_LEASE_WAIT","QWEN_MATMAT_Q6_K_N64_MIN_N",
+        "environment": (["MTL_DEBUG_LAYER","QWEN_METAL_LEASE_WAIT","QWEN_MATMAT_Q6_K_N64_MIN_N",
             "QWEN_MATMAT_Q6_K_N64","QWEN_EXPERT_TENSOR_TILE","QWEN_GLM53_DENSE_Q8_WIDE","QWEN_GLM53_TENSOR_Q5_DOWN"]
-            .map(|key| (key,std::env::var(key).ok())),
+            .map(|key| (key,std::env::var(key).ok()))),
         "plain_prompts":"first frozen long document, prefixes 2048/4096; ABBA then BAAB CURRENT vs each candidate",
         "timing":"diagnostic only, validation ON; ordinary prefill includes GPU wait and normal logits readback, excludes allocation/checks/JSON; no census/profiler in plain samples; parent qwen-bench same binary without DEBUG supplies canonical performance evidence",
-        "policy":"descriptive full-vocab arithmetic/NLL/KL/top1 screen, no equality/quality threshold or promotion; incomplete without complete event"}));
+        "policy":"descriptive full-vocab arithmetic/NLL/KL/top1 screen, no equality/quality threshold or promotion; incomplete without complete event"})
+    else {
+        unreachable!()
+    };
+    header.as_object_mut().unwrap().extend(protocol);
+    out.emit(header);
     let weights = {
         let _allocation = ctx.begin_allocation_transaction();
         let preflight = preflight_session(&ctx, &gguf, artifact.model(), capacity, ROWS).unwrap();

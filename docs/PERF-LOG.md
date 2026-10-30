@@ -99,6 +99,17 @@ See also: `docs/PERF-ROADMAP.md` for the current state and evidence index.
   fallbacks remain intact. One machine/artifact at 8K, with order drift
   explicitly retained. [Results](bench/2026-10-29-v41-simdgroup-qk.md).
 
+## 2026-10-30 - V4.1 1K Append With 1,024-Row Cache: Negative
+
+- 1K append at d128K, cache threshold 1,024: off1 519.68 (578.14/461.22),
+  on1 482.75 (480.82/484.67) tok/s; on is 7.1% slower and the second on run
+  was cancelled after the 128K fill. The dense F16 tile at 1,024 rows loses
+  to the Q5_K tile; the cache threshold stays 2,048.
+- The 128K fill/append are full forward (CED is cold whole-prompt only); the
+  append remains selection-bound. Threshold experiment kept on
+  `test/v41-cache1024`, not promoted. Raw:
+  `~/qwen-runs/2026-10-29-v41-encoder-depth/append-cache1024-*`.
+
 ## 2026-10-30 - V4.1 Q5_K Resident F16 Cache: +6.4%, Bitwise Pair
 
 - Per-chunk dequant was the regression, not the dense GEMM. A resident F16

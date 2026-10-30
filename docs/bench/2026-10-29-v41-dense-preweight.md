@@ -137,6 +137,23 @@ blocked production schedule; a hot-host run immediately after an unrelated
 residency campaign measured 1,872 and is not the representative point. The
 cooled pair above is.
 
+## 1K append at 1,024 rows: negative
+
+The cache threshold was lowered to 1,024 for the long-context append. At
+d128K the append and fill are full forward (CED is cold whole-prompt only),
+so this measures the cache on the 1K suffix, not CED:
+
+| arm | cache | tok/s |
+| --- | ---: | ---: |
+| off1 | 0 | 519.68 (578.14 / 461.22) |
+| on1 | 1 | 482.75 (480.82 / 484.67) |
+
+The on arm is **7.1% slower**; the second on run was cancelled after the
+128K fill. The dense F16 tile at 1,024 rows loses to the Q5_K tile, so the
+cache threshold stays at 2,048. The 128K append remains selection-bound; the
+cache is not its lever. The threshold experiment is preserved on
+`test/v41-cache1024`, not promoted.
+
 ## Next
 
 1. ~~Add a GPU Q5_K->F16 dequant kernel~~ done, bitwise above.

@@ -6,6 +6,25 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the current state and evidence index.
 
+## 2026-10-30 - GLM M5 Prefill Defaults Landed
+
+- `bcf6fd6c`, integrated by `2ac3d907`, enables the bounded Q8-wide and
+  Q5-down routes within M5 Fast/Half. Independent native 2K/4K wall reductions
+  are about 3.2% and 8%, not additive. The combined cohort supports conversion
+  but its late unchanged-control drift prevents a precise pooled gain claim.
+- Q8 is bit-exact on 1408 scored rows; Q5 has near-neutral extended NLL and
+  28 changed top-1 predictions. All eight strict tool sequences match CURRENT
+  for each candidate and the separately checked combined configuration. Keep
+  the recorded Q5 outliers and descriptive intervals; no global equality or
+  formal noninferiority is claimed.
+- Both flags retain independent zero-value rollbacks. The final default flip
+  preserves the measured routes, M5-tier/global guards and strict/short/M4
+  fallbacks; no persistent buffers are added.
+  Nineteen focused CPU cases pass with unset, 0/0, 1/1, 0/1 and 1/0 flags
+  (95 executions). Composed workspace-bin/release-test checks, formatting and
+  generated ENV self-tests/checks pass. No service restart or deployment.
+  [Frozen evidence, all samples and final integration](bench/2026-10-30-glm-m5-transfers/README.md).
+
 ## 2026-10-30 - GLM Combined Checks Complete, Promotion Approved Not Integrated
 
 - Parent approves both bounded M5 Fast/Half routes for default promotion,

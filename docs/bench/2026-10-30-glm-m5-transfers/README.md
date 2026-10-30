@@ -1,15 +1,13 @@
-# GLM-5.3-Flash M5 Transfers: Native Performance Checkpoint
+# GLM-5.3-Flash M5 Prefill Transfers
 
 ## Status
 
-**Combined evidence complete; bounded promotion approved, integration pending.**
-The parent qualifies both bounded M5 Fast/Half routes for default promotion,
-with separate flag-0 rollbacks, based on the independent and combined evidence
-below. The source agent is implementing the two macro defaults and test/docs
-on the GLM integration branch. The measured `e75cd6ab` checkpoint leaves
-production code unchanged; no implementing source commit or main merge is
-recorded here. The parent will record those when actual. This docs-only packet
-does not establish global quality equality or formal noninferiority.
+**Both bounded routes are default-on for eligible M5 Fast/Half prefill.**
+Implementation `bcf6fd6c` is integrated into main by `2ac3d907`, preserving the
+independent flag-0 rollbacks. The frozen measurements below retain their
+original source/binary identities; they are not retagged as final-main runs.
+This promotion within the existing Fast/Half policy does not establish global
+quality equality, formal noninferiority or a universal speedup.
 
 At 2K/4K, median native wall falls 3.3526%/3.1844% for wide-only and
 8.3784%/7.5065% for Q5-down-only. N512 does not improve. Late-run drift limits
@@ -363,20 +361,33 @@ sampled/emitted hashes, token events and positions align. There are no parse
 errors or caps. These validation-on quality observations are not pooled with
 native timing, and no combined gain is inferred by adding independent gains.
 
-## Parent Decision And Pending Integration
+## Decision And Integration
 
-The parent **approves default promotion of both bounded M5 Fast/Half routes**
-within the existing policy. Each must retain its separate rollback:
+Both bounded M5 Fast/Half routes are **default-on** within the existing policy.
+Each retains its separate, process-cached rollback:
 `QWEN_GLM53_DENSE_Q8_WIDE=0` and `QWEN_GLM53_TENSOR_Q5_DOWN=0`.
-Exact/F32, short-row and M4 behavior, and the existing global rollback must
-remain preserved by the integration; the source agent owns implementation
-and its test/docs changes. This is a bounded engineering judgment, not a
-formal preregistered noninferiority/equality result or a universal speedup.
+Both at zero restore the previous baseline. Exact/F32, short-row and M4
+behavior, and the existing global rollback remain unchanged. This is bounded
+engineering judgment, not formal preregistered noninferiority/equality or a
+universal speedup.
 
-The production code measured at `e75cd6ab` is unchanged. Implementation is
-currently in progress on the GLM integration branch; **no default change or
-main merge is claimed here**, and the final source commit/status awaits the
-parent update. Extended Q5DOWN outliers (**9.899603** absolute / **0.279021** KL),
+After qualification, `bcf6fd6c` changes only the two macro defaults, their
+descriptions and CPU scope contracts; arithmetic, eligibility, buffers, shaders
+and admission remain as measured. The source lands through `2ac3d907`.
+The 19 focused CPU cases pass in five fresh-process flag configurations:
+unset, 0/0, 1/1, 0/1 and 1/0 (95 passing executions). The composed main source
+passes workspace-bin checks, release test typechecking, formatting and the
+generated environment reference's self-test/check. Earlier 24-case release
+protocol/selector checks and independent source reviews remain separately
+recorded; no new GPU run is inferred from CPU checks.
+
+Q8 wide keeps the existing Fast/Half, resolved-Fast, native-Q8, actual-N>=1024,
+M5-tier and capacity guards. Q5 down keeps native Q5, K2048/M4096/E288/top-8,
+and exactly 1024/2048 committed rows; the three Q6 down banks remain unchanged.
+No persistent scratch or expanded weight bank is added. See the generated
+[environment reference](../../ENV.md) for parsing and per-process caching.
+
+Extended Q5DOWN outliers (**9.899603** absolute / **0.279021** KL),
 the positive NLL interval upper bound and all earlier tool evidence remain
 part of the decision, not erased by the combined check. General quality and
 serving/decode conversion are not established; tiny tail passes are not

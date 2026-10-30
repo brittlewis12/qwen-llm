@@ -2,8 +2,8 @@
 
 ## Status
 
-Source/evidence review against `adad4461`, not a new benchmark or a claim of
-M5 saturation. GLM and V4.1 both have substantial default M5 optimization;
+The initial source/evidence review uses `adad4461`, without a claim of M5
+saturation. GLM and V4.1 both have substantial default M5 optimization;
 neither is a completed reference implementation for the other. Compare gains
 against each family's own baseline, not cross-model token rates.
 
@@ -13,9 +13,9 @@ Their quantization inventories and selected paths are not interchangeable.
 
 Subsequent [actual-M5 native transfer measurements](2026-10-30-glm-m5-transfers/README.md)
 on six-shard UD-Q4_K_XL include completed independent and combined checks.
-The parent **approves both bounded M5 Fast/Half routes for default promotion**,
-with separate flag-0 rollbacks; source integration is in progress, not claimed
-merged. Independent wide-only and Q5-down-only blocks reduce median 2K/4K native wall by
+Both bounded M5 Fast/Half routes are **default-on** in `bcf6fd6c`, integrated
+into main by `2ac3d907`, with separate flag-0 rollbacks. Independent wide-only
+and Q5-down-only blocks reduce median 2K/4K native wall by
 3.3526%/3.1844% and 8.3784%/7.5065%; N512 does not improve. The packet retains
 all 48 samples, late-run drift and the A0 CPU-observer caveat. Its SDK 26.2 build is distinct
 from V4.1 SDK 27 serving results. The validation-on `5081fcc0` extension has
@@ -31,9 +31,11 @@ pooled 17.9399% 2K wall reduction is confounded, not a headline estimate.
 The separate `e75cd6ab` combined quality check completes 384 rows and 16
 strict-correct tool generations; its 192 combined metric records match the
 earlier Q5DOWN screen, not a retained-vector equality proof. The measured
-checkpoint leaves production unchanged; the source agent is implementing
-default changes and the parent will record the final source commit/merge.
-Exact/F32, short-row/M4 and global rollback behavior must remain preserved.
+checkpoint leaves production unchanged; the later promotion changes defaults,
+descriptions and CPU contracts only. Its 19 CPU cases pass in five flag
+configurations (95 executions); composed workspace-bin/release-test typing,
+formatting and environment-reference checks pass. Exact/F32, short-row/M4 and
+global rollback behavior remain unchanged.
 These are bounded descriptive findings, not formal noninferiority, universal
 speedup, serving TTFT, or an additive/pooled combined-gain claim.
 

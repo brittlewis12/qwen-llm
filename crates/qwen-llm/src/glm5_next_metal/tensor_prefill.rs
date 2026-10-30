@@ -1,5 +1,5 @@
 //! Bounded dense Half-operand TensorOps route. No expert/MLA absorption
-//! routing, buffers, activation staging, or production environment switch.
+//! routing, buffers, or activation staging. Q8 wide is an opt-in experiment.
 
 use super::packed::{Arith, FastPrecision, PackedLineage, StageMode};
 use crate::metal::checks::{
@@ -15,9 +15,83 @@ const MIN_ROWS: usize = 1024;
 const DEFAULT_ENABLED: bool = true;
 const THREADGROUP_BYTES: usize = 8192;
 
+crate::env_flag!(
+    /// Opt-in GLM dense Q8_0 64-slot TensorOps prefill; 0 restores the qualified narrow tile. Does not bypass Half/Fast, row, tier, binding, or global rollback guards.
+    default_off q8_wide_enabled,
+    "QWEN_GLM53_DENSE_Q8_WIDE"
+);
+
 #[cfg(test)]
 thread_local! {
     static OVERRIDE: std::cell::Cell<Option<bool>> = const { std::cell::Cell::new(None) };
+    static Q8_WIDE_OVERRIDE: std::cell::Cell<Option<bool>> = const { std::cell::Cell::new(None) };
+}
+
+/// Independent wide/narrow control; never enables the enclosing tensor route.
+#[cfg(test)]
+pub(crate) struct Q8WideScope {
+    previous: Option<bool>,
+    _thread: std::marker::PhantomData<std::rc::Rc<()>>,
+}
+
+#[cfg(test)]
+impl Q8WideScope {
+    pub(crate) fn new(enabled: bool) -> Self {
+        Self {
+            previous: Q8_WIDE_OVERRIDE.with(|flag| flag.replace(Some(enabled))),
+            _thread: std::marker::PhantomData,
+        }
+    }
+}
+
+#[cfg(test)]
+impl Drop for Q8WideScope {
+    fn drop(&mut self) {
+        Q8_WIDE_OVERRIDE.with(|flag| flag.set(self.previous));
+    }
+}
+
+fn wide_enabled() -> bool {
+    #[cfg(test)]
+    if let Some(enabled) = Q8_WIDE_OVERRIDE.with(std::cell::Cell::get) {
+        return enabled;
+    }
+    q8_wide_enabled()
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Tile {
+    Narrow,
+    Q8Wide,
+}
+
+impl Tile {
+    // Called only after the existing GLM eligibility checks.
+    fn selected(dtype: GgmlType) -> Self {
+        if dtype == GgmlType::Q8_0 && wide_enabled() {
+            Self::Q8Wide
+        } else {
+            Self::Narrow
+        }
+    }
+
+    fn pipeline_name(self, dtype: GgmlType) -> Option<String> {
+        match self {
+            Self::Narrow => {
+                metal::mat_mat_tensor_pipeline_name(dtype, metal::TensorActivation::F32)
+            }
+            Self::Q8Wide => {
+                metal::mat_mat_tensor_wide_pipeline_name(dtype, metal::TensorActivation::F32)
+            }
+        }
+    }
+
+    fn threadgroup_bytes(self) -> usize {
+        match self {
+            Self::Narrow => THREADGROUP_BYTES,
+            Self::Q8Wide => 16384,
+        }
+    }
 }
 
 /// Same-thread, panic-safe, nestable A/B control. Cannot bypass arithmetic,
@@ -130,26 +204,47 @@ pub(super) fn eligible(
     Ok(true)
 }
 
-fn capacity_supported(width: usize, threads: usize, static_bytes: usize, limit: usize) -> bool {
+fn capacity_supported(
+    tile: Tile,
+    width: usize,
+    threads: usize,
+    static_bytes: usize,
+    limit: usize,
+) -> bool {
     width == 32
         && threads >= 128
         && static_bytes
-            .checked_add(THREADGROUP_BYTES)
+            .checked_add(tile.threadgroup_bytes())
             .is_some_and(|total| total <= limit)
 }
 
 /// Resolve/cache the pipeline without touching the encoder. Pipeline failures
 /// are errors, not permission to hide a broken candidate behind the baseline.
-fn prepare(ctx: &MetalContext, dtype: GgmlType) -> Result<bool, MetalError> {
-    let name = metal::mat_mat_tensor_pipeline_name(dtype, metal::TensorActivation::F32)
+fn prepare(ctx: &MetalContext, dtype: GgmlType, tile: Tile) -> Result<bool, MetalError> {
+    let name = tile
+        .pipeline_name(dtype)
         .ok_or_else(|| bad_shape(KERNEL, "no dense tensor pipeline"))?;
     let p = ctx.tensor_pipeline(&name)?;
     Ok(capacity_supported(
+        tile,
         p.threadExecutionWidth(),
         p.maxTotalThreadsPerThreadgroup(),
         p.staticThreadgroupMemoryLength(),
         ctx.device.maxThreadgroupMemoryLength(),
     ))
+}
+
+fn check_binding_extent(
+    shape: &[u64],
+    dtype: GgmlType,
+    expected: usize,
+    name: &str,
+) -> Result<(), MetalError> {
+    let (_, bytes) = metal::checked_ggml_shape_bytes(shape, dtype)?;
+    if bytes != expected {
+        return Err(bad_shape(KERNEL, format!("{name} byte extent mismatch")));
+    }
+    Ok(())
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -179,10 +274,7 @@ fn check_bindings(
         (x, "input", g.input_elements * size_of::<f32>()),
         (y, "output", g.output_elements * size_of::<f32>()),
     ] {
-        let (_, bytes) = metal::checked_ggml_shape_bytes(&t.shape, t.dtype)?;
-        if bytes != expected {
-            return Err(bad_shape(KERNEL, format!("{name} byte extent mismatch")));
-        }
+        check_binding_extent(&t.shape, t.dtype, expected, name)?;
         if t.buffer.device().registryID() != device {
             return Err(bad_shape(
                 KERNEL,
@@ -226,12 +318,14 @@ pub(super) fn try_encode(
         return Ok(false);
     }
     check_bindings(ctx, enc, weight, x, y, k, m, n)?;
-    if !prepare(ctx, weight.dtype)? {
+    let tile = Tile::selected(weight.dtype);
+    if !prepare(ctx, weight.dtype, tile)? {
         return Ok(false);
     }
-    // Preparation and GLM qualification cover the 32-slot pipeline, not the
-    // newer shared Q8_0 wide default.
-    metal::encode_mat_mat_tensor_f32_narrow(ctx, enc, weight, x, y, k, m, n)?;
+    match tile {
+        Tile::Narrow => metal::encode_mat_mat_tensor_f32_narrow(ctx, enc, weight, x, y, k, m, n)?,
+        Tile::Q8Wide => metal::encode_mat_mat_tensor_f32_wide(ctx, enc, weight, x, y, k, m, n)?,
+    }
     Ok(true)
 }
 

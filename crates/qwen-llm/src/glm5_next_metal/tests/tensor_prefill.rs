@@ -1,6 +1,7 @@
 //! CPU policy/contract tests and opt-in primitive witnesses, not model gates.
 //! GPU tests require MTL_DEBUG_LAYER=1 QWEN_METAL_LEASE_WAIT=1, an explicit
-//! production lease, and a release test binary. No timing here.
+//! production lease, and a release test binary. The wide leaf probe also
+//! accepts MTL_DEBUG_LAYER=0 for timing; validation-layer timings are diagnostic.
 
 use super::*;
 use crate::glm5_next_metal::packed;
@@ -10,6 +11,9 @@ use crate::metal::{
 use crate::tensor::TensorDesc;
 use objc2_metal::{MTLBuffer, MTLCommandQueue, MTLGPUFamily};
 
+#[path = "tensor_q8_wide.rs"]
+mod q8_wide;
+
 const HALF: Arith = Arith {
     lineage: PackedLineage::Fast,
     precision: FastPrecision::Half,
@@ -18,6 +22,7 @@ const HALF: Arith = Arith {
 #[test]
 fn cpu_policy_requires_ordinary_half_fast_resolved_mode_and_native_types() {
     let _scope = Scope::new(true);
+    let _wide = Q8WideScope::new(true);
     for lineage in [PackedLineage::Fast, PackedLineage::Exact] {
         for precision in FastPrecision::ALL {
             for mode in [StageMode::Fast, StageMode::FastF32, StageMode::Exact] {
@@ -32,13 +37,20 @@ fn cpu_policy_requires_ordinary_half_fast_resolved_mode_and_native_types() {
                     GgmlType::Unknown,
                 ] {
                     let arith = Arith { lineage, precision };
+                    let expected = arith == HALF
+                        && mode == StageMode::Fast
+                        && matches!(dtype, GgmlType::Q6_K | GgmlType::Q8_0);
                     assert_eq!(
                         eligible(arith, mode, dtype, 4096, 1536, 1024).unwrap(),
-                        arith == HALF
-                            && mode == StageMode::Fast
-                            && matches!(dtype, GgmlType::Q6_K | GgmlType::Q8_0),
+                        expected,
                         "{arith:?}/{mode:?}/{dtype:?}"
                     );
+                    if expected {
+                        assert_eq!(
+                            Tile::selected(dtype) == Tile::Q8Wide,
+                            dtype == GgmlType::Q8_0
+                        );
+                    }
                 }
             }
         }
@@ -48,6 +60,7 @@ fn cpu_policy_requires_ordinary_half_fast_resolved_mode_and_native_types() {
 #[test]
 fn cpu_policy_row_boundary_matches_production_not_q6_test_n64_threshold() {
     let _scope = Scope::new(true);
+    let _wide = Q8WideScope::new(true);
     for dtype in [GgmlType::Q6_K, GgmlType::Q8_0] {
         for n in [
             0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 32, 64, 512, 1023, 1024, 1025, 2048,
@@ -151,8 +164,8 @@ fn cpu_scope_is_default_on_nested_unwind_safe_and_thread_local() {
 
 #[test]
 fn cpu_pipeline_capacity_includes_static_plus_eight_kib_dynamic_memory() {
-    assert!(capacity_supported(32, 128, 0, 8192));
-    assert!(capacity_supported(32, 256, 512, 8704));
+    assert!(capacity_supported(Tile::Narrow, 32, 128, 0, 8192));
+    assert!(capacity_supported(Tile::Narrow, 32, 256, 512, 8704));
     for (width, threads, static_bytes, limit) in [
         (16, 128, 0, 8192),
         (32, 127, 0, 8192),
@@ -160,7 +173,109 @@ fn cpu_pipeline_capacity_includes_static_plus_eight_kib_dynamic_memory() {
         (32, 128, 1, 8192),
         (32, 128, usize::MAX, usize::MAX),
     ] {
-        assert!(!capacity_supported(width, threads, static_bytes, limit));
+        assert!(!capacity_supported(
+            Tile::Narrow,
+            width,
+            threads,
+            static_bytes,
+            limit
+        ));
+    }
+}
+
+#[test]
+fn cpu_q8_wide_pipeline_and_capacity_match_explicit_shared_dispatch() {
+    assert_eq!(Tile::Narrow.threadgroup_bytes(), 8192);
+    assert_eq!(Tile::Q8Wide.threadgroup_bytes(), 16384);
+    assert_eq!(
+        Tile::Q8Wide.pipeline_name(GgmlType::Q8_0).as_deref(),
+        Some("kernel_mat_mat_q8_0_f32_tensor_wide")
+    );
+    assert!(Tile::Q8Wide.pipeline_name(GgmlType::Q6_K).is_none());
+    assert!(capacity_supported(Tile::Q8Wide, 32, 128, 0, 16384));
+    assert!(capacity_supported(Tile::Q8Wide, 32, 256, 512, 16896));
+    for (width, threads, static_bytes, limit) in [
+        (16, 128, 0, 16384),
+        (32, 127, 0, 16384),
+        (32, 128, 0, 8192),
+        (32, 128, 0, 16383),
+        (32, 128, 1, 16384),
+        (32, 128, usize::MAX, usize::MAX),
+    ] {
+        assert!(!capacity_supported(
+            Tile::Q8Wide,
+            width,
+            threads,
+            static_bytes,
+            limit
+        ));
+    }
+}
+
+#[test]
+fn cpu_q8_wide_scope_is_nested_unwind_safe_thread_local_and_independent() {
+    assert_eq!(wide_enabled(), q8_wide_enabled());
+    let runtime = wide_enabled();
+    {
+        let _wide = Q8WideScope::new(false);
+        assert_eq!(Tile::selected(GgmlType::Q8_0), Tile::Narrow);
+        let unwind = std::panic::catch_unwind(|| {
+            let _wide = Q8WideScope::new(true);
+            assert_eq!(Tile::selected(GgmlType::Q8_0), Tile::Q8Wide);
+            assert_eq!(Tile::selected(GgmlType::Q6_K), Tile::Narrow);
+            with_override(false, || {
+                assert!(
+                    !eligible(HALF, StageMode::Fast, GgmlType::Q8_0, 4096, 1536, 1024).unwrap()
+                );
+            });
+            panic!("wide scope restoration");
+        });
+        assert!(unwind.is_err());
+        assert!(!wide_enabled());
+        std::thread::spawn(|| {
+            assert_eq!(wide_enabled(), q8_wide_enabled());
+            let _wide = Q8WideScope::new(true);
+            assert!(wide_enabled());
+        })
+        .join()
+        .unwrap();
+        assert!(!wide_enabled());
+    }
+    assert_eq!(wide_enabled(), runtime);
+}
+
+#[test]
+fn cpu_binding_extents_reject_short_and_overflow_metadata_before_physical_checks() {
+    for dtype in [GgmlType::Q6_K, GgmlType::Q8_0] {
+        let g = geometry(dtype, 4096, 1536, 1024).unwrap();
+        assert!(check_binding_extent(&[4096, 1536], dtype, g.weight_bytes, "weight").is_ok());
+        assert!(check_binding_extent(&[4096, 1535], dtype, g.weight_bytes, "weight").is_err());
+        assert!(
+            check_binding_extent(&[u64::MAX, u64::MAX], dtype, g.weight_bytes, "weight").is_err()
+        );
+        assert!(
+            check_binding_extent(&[4096, 1024], GgmlType::F32, g.input_elements * 4, "input")
+                .is_ok()
+        );
+        assert!(
+            check_binding_extent(
+                &[1536, 1023],
+                GgmlType::F32,
+                g.output_elements * 4,
+                "output"
+            )
+            .is_err()
+        );
+        // Packed leading dimensions are legal; dtype/physical/alias checks remain separate.
+        assert!(
+            check_binding_extent(
+                &[256, 6, 1024],
+                GgmlType::F32,
+                g.output_elements * 4,
+                "output"
+            )
+            .is_ok()
+        );
     }
 }
 
@@ -424,6 +539,7 @@ fn run(ctx: &MetalContext, body: impl FnOnce(&KernelEncoder)) -> Vec<metal::Disp
 #[test]
 #[ignore = "actual M5 + tensor tier, validation ON, production lease"]
 fn m5_glm_shapes_baseline_vs_tensor_and_f64_oracles() {
+    let _wide = Q8WideScope::new(false);
     let _lease = validation_lease();
     let ctx = MetalContext::new().expect("Metal is required, not skipped");
     require_m5(&ctx);
@@ -442,7 +558,7 @@ fn m5_glm_shapes_baseline_vs_tensor_and_f64_oracles() {
             };
             for &n in counts {
                 let f = Fixture::new(&ctx, dtype, k, m, n);
-                assert!(prepare(&ctx, dtype).unwrap());
+                assert!(prepare(&ctx, dtype, Tile::Narrow).unwrap());
                 let baseline = run(&ctx, |enc| f.encode(&ctx, enc, false));
                 assert_eq!(baseline.len(), 1);
                 let expected = match dtype {
@@ -619,6 +735,7 @@ fn m5_global_rollback_disables_candidate_despite_override() {
 }
 
 fn fallback_witness(ctx: &MetalContext) {
+    let _wide = Q8WideScope::new(true);
     for dtype in [GgmlType::Q6_K, GgmlType::Q8_0] {
         let f = Fixture::new(ctx, dtype, 256, 65, 1024);
         let _scope = Scope::new(true);

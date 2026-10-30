@@ -1,0 +1,97 @@
+# V4.1 Serve Latency: Idle Driver Delay, Long Tail Still Open
+
+## Status
+
+The reported 13-26-second cached-prefill stalls are real in the earlier serve
+logs, but the controlled reload sequence did not reproduce them. They are not
+declared fixed. The restored V4.1 service now has opt-in unsplit native-call
+timing so a recurring stall can be attributed without guessing from TTFT alone.
+
+Diagnostic source: `c6e1d4c4`, based on `4accd031`. M5 Ultra, 256 GiB, SDK 27.0,
+canonical release. The wrapper changes no arithmetic, batching, command graph,
+residency policy, or checkpoint policy. It calls `Scope::begin()`, not stage or
+per-dispatch sampling. The frozen executable SHA256 is
+`3c68224e8ae4e9208e2ff579b7a10637ea32293e84a015f388b36b326582f56d`.
+
+## Measurements
+
+One fixed saved request per model retains its original 32,768-token output
+reservation. The reload experiment stops client consumption after 16 primary
+delta events; duplicate reasoning event aliases are excluded. Consequently
+these are bounded diagnostic requests, not complete-turn throughput tests.
+All V4.1 phases use the same saved request; first deltas include reasoning.
+
+| Phase | Cold TTFT, seconds | Cached TTFT, seconds |
+| --- | ---: | --- |
+| A0: V4.1 reload | 15.446 | 1.538, 1.556, 1.522 |
+| A1: V4.1 reload again | 13.488 | 1.607, 1.650, 1.634 |
+| GLM-5.3-Flash Q4 | 21.891 | 0.822 |
+| Qwen3.8-Flash-Next IQ3_S | 22.283 | 0.419 |
+| B: V4.1 after both other models | 17.208 | 1.428, 1.643, 1.684 |
+
+There is no long-tail reproduction in these samples. The fixed V4.1 cold
+prompt has 15,564 tokens, so its cold TTFT must not be compared with the
+earlier incident's shorter cold opener. Shortened generation also differs
+from the original multi-turn GLM and Flash Next usage; this experiment does
+not prove that switching models cannot trigger the condition.
+
+The original early V4.1 turns were then replayed with their original sampling
+seed, reasoning policy and user messages, preserving the newly generated
+assistant reasoning exactly as the client does. The first three generations
+completed before the next turn; only the fourth was cut short.
+
+| Turn | Prompt tokens | Matched tokens | Reuse | New tokens | Capacity | Prefill seconds | TTFT seconds |
+| --- | ---: | ---: | --- | ---: | ---: | ---: | ---: |
+| 0 | 6250 | 6246 | RAM snapshot | 4 | 39017 | 1.519 | 1.974 |
+| 1 | 6445 | 6413 | Live session | 32 | 78034 | 1.633 | 1.837 |
+| 2 | 7454 | 7427 | Live session | 27 | 78034 | 1.626 | 1.774 |
+
+The generations contain 164, 983 and 582 tokens, matching the earlier trace's
+counts. Turn 1 exercises the same capacity doubling as the earlier 13.367-second
+prefill. Thus neither prefix loss nor that growth alone explains the historical
+stall. The fourth request's TTFT is 1.815 seconds. These results do not erase the
+earlier bad observations or establish that every live session is unaffected.
+
+## Reproducible Idle Cost
+
+An identical cached two-token request was sent after five seconds idle, then
+immediately repeated. This is a workload discriminator, not a deployed fix.
+
+| Observation | After five seconds idle | Immediate repeat |
+| --- | ---: | ---: |
+| Client TTFT, ms | 1434.556 | 244.537 |
+| Native-call wall, ms | 1287.136 | 150.512 |
+| Encode, ms | 1.502 | 0.841 |
+| Commit/wait, ms | 1284.877 | 149.266 |
+| GPU envelope, ms | 144.873 | 144.638 |
+| Metal driver scheduling interval, ms | 1138.789 | 4.410 |
+
+GPU time remains effectively unchanged while the Metal-reported driver
+interval changes sharply. Other cached controls show approximately 1.1-1.26
+seconds in that interval after idle, with roughly 145 ms GPU time. The driver,
+GPU and inclusive wait intervals are not assumed to be an additive partition.
+In particular, wait minus GPU is not pure application queue time.
+
+This makes idle/resource-residency handling a concrete performance target.
+It does not prove that the historical 13-26-second tail has the same cause.
+Earlier retained-window experiments observed much larger driver intervals on
+another artifact; that remains supporting context, not a diagnosis of this run.
+
+## Diagnostic Hook And Handoff
+
+`QWEN_SERVE_V41_PREFILL_TIMING=1` emits one `serve native prefill timing:` JSON
+record per native call in both continuous and serial serving. Records contain
+position, rows, logits mode, success, call wall time and the existing native
+profile, including scratch/host preparation and unsplit command intervals.
+The default is off. Diagnostic setup failure warns and runs the original call;
+native results and errors are preserved. No stage splitting is introduced.
+
+The current service is V4.1 again, with its original endpoint and limits and
+this diagnostic hook enabled. Saved game files were not changed. The original
+executable and incident log are retained privately. Expected client-disconnect
+messages result from bounded probes, not an observed server failure.
+
+The next actual long stall should be matched to its native-call record and
+outer `serve phases` timer. That will distinguish a native allocation/encode,
+driver/GPU wait, or caller-side checkpoint delay. Persistent idle keep-alive
+and smaller retained windows have not been enabled by this investigation.

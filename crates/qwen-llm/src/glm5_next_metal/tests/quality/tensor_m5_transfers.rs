@@ -9,6 +9,28 @@ const ARMS: [(&str, bool, bool); 3] = [
 ];
 const Q4_PIN: &[u8] =
     include_bytes!("../../../../../../docs/bench/2026-10-16-glm-quality-comparison/stock-q4.json");
+const Q6_DOWN_BLOCKS: [usize; 3] = [11, 12, 44];
+const Q5_DOWN_BANKS: usize = 39;
+
+fn down_dtype(block: usize) -> GgmlType {
+    if Q6_DOWN_BLOCKS.contains(&block) {
+        GgmlType::Q6_K
+    } else {
+        GgmlType::Q5_K
+    }
+}
+
+#[test]
+fn cpu_main_down_inventory_keeps_exact_q6_exceptions_and_39_q5_banks() {
+    let blocks = |dtype| {
+        (3..45)
+            .filter(|&block| down_dtype(block) == dtype)
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(blocks(GgmlType::Q6_K), [11, 12, 44]);
+    assert_eq!(blocks(GgmlType::Q5_K).len(), Q5_DOWN_BANKS);
+    assert_eq!(Q5_DOWN_BANKS + Q6_DOWN_BLOCKS.len(), 42);
+}
 
 fn selected<R>(arm: usize, body: impl FnOnce() -> R) -> R {
     let _dense = tensor_prefill::Scope::new(true);
@@ -70,7 +92,7 @@ fn profile(ctx: &MetalContext, w: &Glm5NextWeights, tokens: &[u32], cpu: u64, ou
                 }
                 assert_eq!(
                     count("kernel_moe_down_q5_K_f32_grouped_slots_tensor"),
-                    if q5 { 42 } else { 0 }
+                    if q5 { Q5_DOWN_BANKS } else { 0 }
                 );
                 out.emit(json!({"event":"census","arm":label,"prompt_tokens":ROWS,
                     "expected_chunks":chunks(tokens.len()),"dispatches":census.len(),"kernel_counts":kernels,
@@ -206,7 +228,7 @@ fn tensor_m5_transfer_screen() {
     assert_eq!(config.leading_dense_block_count, 3);
     for block in 3..45 {
         for (suffix, dtype, shape) in [
-            ("down", GgmlType::Q5_K, [2048, 4096, 288]),
+            ("down", down_dtype(block), [2048, 4096, 288]),
             ("gate", GgmlType::Q4_K, [4096, 2048, 288]),
             ("up", GgmlType::Q4_K, [4096, 2048, 288]),
         ] {
@@ -249,7 +271,8 @@ fn tensor_m5_transfer_screen() {
             "device":s.device,"inode":s.inode,"mtime_sec":s.mtime_sec,"mtime_nsec":s.mtime_nsec,
             "ctime_sec":s.ctime_sec,"ctime_nsec":s.ctime_nsec})).collect::<Vec<_>>(),
         "config":format!("{config:?}"),"tensor_shape_counts":shapes,
-        "executed_expert_inventory":{"main_blocks":45,"q5_down":42,"q4_gate_up":84},
+        "executed_expert_inventory":{"main_blocks":45,"routed_blocks":42,"q5_down":Q5_DOWN_BANKS,
+            "q6_down":3,"q6_down_blocks":Q6_DOWN_BLOCKS,"q4_gate_up":84},
         "binary":std::env::current_exe().unwrap(),"binary_sha256":binary_hash(),
         "fixture_sha256":sha256_hex(FROZEN),"probe_sha256":sha256_hex(include_bytes!("tensor_m5_transfers.rs")),
         "dense_source_sha256":sha256_hex(include_bytes!("../../tensor_prefill.rs")),

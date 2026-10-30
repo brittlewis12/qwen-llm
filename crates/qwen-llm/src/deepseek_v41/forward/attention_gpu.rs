@@ -349,6 +349,12 @@ crate::env_flag!(
     "QWEN_V41_ATTN_QREGISTER"
 );
 
+crate::env_flag!(
+    /// Use pipelined per-SIMDgroup QK for tensor64 with QHALF and QREGISTER enabled; `QWEN_V41_ATTN_SIMDGROUP_QK=0` restores Qregister.
+    default_on prefill_simdgroup_qk_enabled,
+    "QWEN_V41_ATTN_SIMDGROUP_QK"
+);
+
 pub(super) struct Rows {
     tile: query_batch::Scratch,
     rank: MetalTensor,

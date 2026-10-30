@@ -466,7 +466,11 @@ fn prepared_serial_range_old_host_bitexact_outputs_controls_pending_and_census()
                     if n == 128 && metal::moe_grouped_tensor_selected(&ctx) {
                         let score = if prefill_qhalf_enabled() {
                             if prefill_qregister_enabled() {
-                                "score_tensor64_qregister"
+                                if prefill_simdgroup_qk_enabled() {
+                                    "score_simdgroup_qk"
+                                } else {
+                                    "score_tensor64_qregister"
+                                }
                             } else {
                                 "score_tensor64_qhalf"
                             }

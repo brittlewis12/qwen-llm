@@ -89,6 +89,16 @@ The comparator body/threadgroup/precision are unchanged, with no expanded
 scratch. These are tiny witnesses, not actual-model tail performance or
 default-promotion evidence; do not add them to the full-model transfer gains.
 
+The [ordinary native conversion packet](2026-10-30-glm-q8-tail-batch/README.md)
+now retains all 64 samples with wide/Q5 fixed on and only tail batching varied.
+Fresh N127 median wall falls 1.2571%, but depth-4096 N127 rises 1.0348%; R2
+has no demonstrated robust gain. Unchanged N128/N129 controls drift too, with
+no frequency attribution. Tiny debug leaf gains do not establish a compelling
+ordinary model win or new full-model numerical/equal-state proof. Park the
+experimental off-main/default-off candidate for replay: no promotion or further
+large quality run. This is limited conversion evidence, not a proven regression
+or a claim that all tail paths are worthless.
+
 ## Bounded Next Measurement
 
 Use the existing harness and profiler; do not create a new benchmark framework.

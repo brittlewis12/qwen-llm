@@ -223,6 +223,7 @@ impl TinyWeights {
             norm: vec![1.0; 32],
             head: b.linear("head.weight", 32, 8).unwrap(),
             prefill_rows: crate::deepseek_v41::forward::MAX_PREFILL_CHUNK_ROWS,
+            cold_binding: None,
             identity: Arc::new(()),
         }
     }

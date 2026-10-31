@@ -764,6 +764,7 @@ pub struct Forward<'a> {
     norm: Vec<f32>,
     head: Linear<'a>,
     prefill_rows: usize,
+    cold_binding: Option<planning::ColdBindingSelection>,
     identity: Arc<()>,
 }
 

@@ -710,6 +710,7 @@ fn staged_plan() -> ColdPrefillPlan {
 
 #[test]
 fn staged_load_fits_while_strict_peak_remains_refused() {
+    cache_binding_selects_optional_full_before_factory();
     let plan = staged_plan();
     let observed = staged_signals();
     assert_eq!((plan.load_metal_bytes, plan.load_cpu_bytes), (650, 0));
@@ -738,6 +739,255 @@ fn staged_load_fits_while_strict_peak_remains_refused() {
         strict.plan.required_metal_bytes
     );
     assert!(strict.admission.is_admitted());
+}
+
+fn cache_binding_selects_optional_full_before_factory() {
+    let binding = BindingMemoryPlan::new(
+        [binding::LinearSpec {
+            name: "head.weight".into(),
+            input: 256,
+            output: 256,
+        }],
+        |_| Ok(GgmlType::Q5_K),
+        true,
+        &Ok,
+    )
+    .unwrap();
+    let mut resident = storage();
+    resident.metal_view_bytes = 6000;
+    resident.private_shadow_bytes = 700;
+    let mut cold = combine_plan(
+        resident,
+        RequestMemoryEstimate {
+            cpu_persistent_bytes: 10,
+            cpu_transient_bytes: 40,
+            cpu_bytes: 50,
+            metal_bytes: 100,
+            total_bytes: 150,
+        },
+        (200, 20),
+        Some(CedMemoryEstimate {
+            incremental_metal_bytes: 500,
+            incremental_cpu_bytes: 120,
+            ..Default::default()
+        }),
+        30,
+        binding.control_metal_bytes(),
+        40,
+    )
+    .unwrap()
+    .with_binding_plan(binding.clone())
+    .unwrap();
+    cold.geometry.tokens = 8;
+    cold.capacity = 16;
+    cold.executions = vec![PrefillExecution::ShrinkingCed];
+    cold.prefill_admission = PrefillAdmission {
+        intent: PrefillIntent::OptionalCed,
+        fallback: None,
+    };
+    let reserve = cold.binding_cpu_bytes + cold.caller_cpu_bytes;
+    let price = |ced| -> Result<_> {
+        Ok((
+            planning::runtime_memory(
+                cold.request,
+                (200, 20),
+                if ced { cold.ced.as_ref() } else { None },
+            )?,
+            ced,
+        ))
+    };
+    let full = price(false).unwrap().0;
+    let both = price(true).unwrap().0;
+    let mut before = signals();
+    before.recommended_max_bytes = cold.required_metal_bytes;
+    let host = before.host_budget.as_mut().unwrap();
+    host.physical_bytes = cold.required_metal_bytes + cold.required_cpu_bytes;
+    host.conservative_available_bytes =
+        cold.resident_storage.private_shadow_bytes + reserve + full.cpu_bytes;
+    let load = cold.assess_load(before).unwrap();
+    assert!(load.load_admission.is_admitted());
+    assert!(!load.whole_peak_now.is_admitted());
+    assert!(cold.clone().into_strict(before).is_err());
+
+    let mut after = before;
+    after.current_allocated_bytes = 5000;
+    after.host_budget.as_mut().unwrap().external_gap_bytes = 1000;
+    after.host_budget.as_mut().unwrap().private_shadow_bytes = 700;
+    let factories = std::cell::Cell::new(0);
+    let samples = std::cell::Cell::new(0);
+    let selected = cold
+        .with_binding_admission(
+            binding.clone(),
+            || {
+                samples.set(samples.get() + 1);
+                after
+            },
+            |frozen, selected| {
+                factories.set(factories.get() + 1);
+                assert_eq!(frozen, binding);
+                assert_eq!(selected.memory, full);
+                Ok(selected)
+            },
+        )
+        .unwrap();
+    assert_eq!(samples.get(), 2);
+    assert_eq!(factories.get(), 1);
+    assert_eq!(selected.admission.intent, PrefillIntent::OptionalCed);
+    assert!(
+        selected
+            .admission
+            .fallback
+            .as_ref()
+            .unwrap()
+            .starts_with("binding: CED memory admission:")
+    );
+    assert_eq!(cold.runtime_metal_bytes, both.metal_bytes);
+    assert_eq!(cold.runtime_cpu_bytes, both.cpu_bytes);
+    assert_eq!(cold.binding_plan.cache_metal_bytes(), 256 * 256 * 2);
+
+    // The actual request-planning handoff reprices the selected Full envelope,
+    // then the shared post-binding/allocation selector cannot re-enable CED.
+    let attempted = std::cell::RefCell::new(vec![]);
+    let inherited = selected
+        .admission_for(&cold, reserve, |ced| {
+            attempted.borrow_mut().push(ced);
+            price(ced)
+        })
+        .unwrap()
+        .unwrap();
+    assert_eq!(*attempted.borrow(), [false]);
+    let mut post = after;
+    post.current_allocated_bytes += binding.cache_metal_bytes() + binding.control_metal_bytes();
+    post.host_budget
+        .as_mut()
+        .unwrap()
+        .conservative_available_bytes = 700 + reserve + both.cpu_bytes;
+    planning::Cost {
+        metal: both.metal_bytes,
+        cpu: reserve + both.cpu_bytes,
+    }
+    .admit(post)
+    .unwrap();
+    for stage in ["post_binding", "allocation"] {
+        attempted.borrow_mut().clear();
+        let (memory, decision) = planning::admit_runtime_with_base(
+            inherited.clone(),
+            planning::Cost {
+                metal: 0,
+                cpu: reserve,
+            },
+            stage,
+            |ced| {
+                attempted.borrow_mut().push(ced);
+                price(ced)
+            },
+            || post,
+        )
+        .unwrap();
+        assert_eq!(*attempted.borrow(), [false]);
+        assert_eq!(memory, full);
+        assert_eq!(decision, inherited);
+    }
+    assert!(
+        selected
+            .admission_for(&cold, reserve, |_| Ok((both, true)))
+            .is_err()
+    );
+    let mut different = cold.clone();
+    different.capacity += 1;
+    assert!(
+        selected
+            .admission_for(&different, reserve, |_| panic!(
+                "unrelated request inherited binding choice"
+            ))
+            .unwrap()
+            .is_none()
+    );
+
+    let mut required = cold.clone();
+    required.executions.insert(0, PrefillExecution::FullForward);
+    required.prefill_admission.intent = PrefillIntent::RequiredFullCed;
+    samples.set(0);
+    let error = required
+        .with_binding_admission(
+            binding.clone(),
+            || {
+                samples.set(samples.get() + 1);
+                after
+            },
+            |_, _| -> Result<()> { panic!("required CED reached cache factory") },
+        )
+        .unwrap_err();
+    assert_eq!(samples.get(), 1);
+    assert_eq!(
+        error.memory_admission().unwrap().reason(),
+        metal::MetalMemoryAdmissionReason::HostAvailabilityInsufficient
+    );
+
+    // Full fallback must still retain caches, controls, source/shadow exposure,
+    // binding/caller CPU and Full's future memory at every exact boundary.
+    for field in 0..4 {
+        let mut short = after;
+        let metal = binding.cache_metal_bytes() + binding.control_metal_bytes() + full.metal_bytes;
+        let cpu = reserve + full.cpu_bytes;
+        match field {
+            0 => short.recommended_max_bytes = 6000 + metal - 1,
+            1 => short.process_limit_remaining_bytes = Some(metal + cpu - 1),
+            2 => short.host_budget.as_mut().unwrap().physical_bytes = 6000 + 700 + metal + cpu - 1,
+            3 => {
+                short
+                    .host_budget
+                    .as_mut()
+                    .unwrap()
+                    .conservative_available_bytes -= 1
+            }
+            _ => unreachable!(),
+        }
+        assert!(
+            cold.with_binding_admission(
+                binding.clone(),
+                || short,
+                |_, _| -> Result<()> { panic!("short Full reached cache factory") }
+            )
+            .is_err()
+        );
+    }
+    samples.set(0);
+    assert!(
+        cold.with_binding_admission(
+            binding.clone(),
+            || {
+                samples.set(samples.get() + 1);
+                let mut fresh = after;
+                if samples.get() == 2 {
+                    fresh
+                        .host_budget
+                        .as_mut()
+                        .unwrap()
+                        .conservative_available_bytes -= 1;
+                }
+                fresh
+            },
+            |_, _| -> Result<()> { panic!("fallback reused stale availability") }
+        )
+        .is_err()
+    );
+    assert_eq!(samples.get(), 2);
+    let mut invalid = after;
+    invalid.host_budget = None;
+    samples.set(0);
+    assert!(
+        cold.with_binding_admission(
+            binding,
+            || {
+                samples.set(samples.get() + 1);
+                invalid
+            },
+            |_, _| -> Result<()> { panic!("invalid telemetry reached cache factory") }
+        )
+        .is_err()
+    );
+    assert_eq!(samples.get(), 1);
 }
 
 #[test]

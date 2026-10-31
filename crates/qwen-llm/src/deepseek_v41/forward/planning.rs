@@ -40,11 +40,32 @@ pub struct PrefillAdmission {
     pub fallback: Option<String>,
 }
 
-/// Both post-binding and allocation gates use fresh pricing and fresh signals.
+/// Post-binding and allocation gates use fresh pricing and fresh signals.
 /// The closure always prices the same exact capacity/width and CPU reserves.
 fn admit_runtime(
-    mut admission: PrefillAdmission,
+    admission: PrefillAdmission,
     reserve: u64,
+    stage: &str,
+    price: impl FnMut(bool) -> Result<(RequestMemoryEstimate, bool)>,
+    signals: impl FnMut() -> MetalMemorySignals,
+) -> std::result::Result<(RequestMemoryEstimate, PrefillAdmission), StateError> {
+    admit_runtime_with_base(
+        admission,
+        Cost {
+            metal: 0,
+            cpu: reserve,
+        },
+        stage,
+        price,
+        signals,
+    )
+}
+
+/// Binding adds all unallocated controls/caches and CPU reserves to every
+/// candidate. Only the permitted future workspace may change on pressure.
+pub(super) fn admit_runtime_with_base(
+    mut admission: PrefillAdmission,
+    base: Cost,
     stage: &str,
     mut price: impl FnMut(bool) -> Result<(RequestMemoryEstimate, bool)>,
     mut signals: impl FnMut() -> MetalMemorySignals,
@@ -58,11 +79,9 @@ fn admit_runtime(
     let admit = |memory: RequestMemoryEstimate, signals| {
         Cost {
             metal: memory.metal_bytes,
-            cpu: memory
-                .cpu_bytes
-                .checked_add(reserve)
-                .ok_or("request reserve overflow")?,
+            cpu: memory.cpu_bytes,
         }
+        .plus(base)?
         .admit(signals)
     };
     if wants_ced && !supported {
@@ -89,6 +108,56 @@ fn admit_runtime(
     let (full, _) = price(false)?;
     admit(full, signals())?;
     Ok((full, admission))
+}
+
+pub(super) struct ColdBindingSelection {
+    geometry: PrefillGeometry,
+    capacity: usize,
+    reserve: u64,
+    requested: PrefillAdmission,
+    pub(super) admission: PrefillAdmission,
+    pub(super) memory: RequestMemoryEstimate,
+}
+
+impl ColdBindingSelection {
+    pub(super) fn new(
+        cold: &ColdPrefillPlan,
+        reserve: u64,
+        admission: PrefillAdmission,
+        memory: RequestMemoryEstimate,
+    ) -> Self {
+        Self {
+            geometry: cold.geometry,
+            capacity: cold.capacity,
+            reserve,
+            requested: cold.prefill_admission.clone(),
+            admission,
+            memory,
+        }
+    }
+
+    pub(super) fn admission_for(
+        &self,
+        cold: &ColdPrefillPlan,
+        reserve: u64,
+        price: impl FnOnce(bool) -> Result<(RequestMemoryEstimate, bool)>,
+    ) -> Result<Option<PrefillAdmission>> {
+        if self.geometry != cold.geometry
+            || self.capacity != cold.capacity
+            || self.reserve != reserve
+            || self.requested != cold.prefill_admission
+        {
+            return Ok(None);
+        }
+        let wants_ced =
+            self.admission.intent != PrefillIntent::Full && self.admission.fallback.is_none();
+        let (actual, _) = price(wants_ced)?;
+        op::require(
+            actual == self.memory,
+            "binding/request runtime pricing mismatch",
+        )?;
+        Ok(Some(self.admission.clone()))
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize)]
@@ -434,11 +503,27 @@ impl Forward<'_> {
                 && priced.cpu_bytes == cold.runtime_cpu_bytes,
             "cold metadata/runtime pricing mismatch",
         )?;
+        let admission = self
+            .cold_binding
+            .as_ref()
+            .map(|selection| {
+                selection.admission_for(cold, reserve, |ced| {
+                    self.price_request(
+                        cold.capacity,
+                        cold.geometry.tokens,
+                        cold.full_chunk_rows,
+                        ced,
+                    )
+                })
+            })
+            .transpose()?
+            .flatten()
+            .unwrap_or_else(|| cold.prefill_admission.clone());
         let mut plan = self.request_plan_at_rows(
             cold.capacity,
             cold.geometry.tokens,
             reserve,
-            cold.prefill_admission.clone(),
+            admission,
             cold.full_chunk_rows,
         )?;
         plan.binding_cpu_reserve = cold.binding_cpu_bytes;

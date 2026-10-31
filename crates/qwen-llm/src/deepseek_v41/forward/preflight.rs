@@ -73,6 +73,54 @@ impl std::ops::Deref for ColdPrefillPreflight {
 }
 
 impl ColdPrefillPlan {
+    pub(super) fn with_binding_admission<T>(
+        &self,
+        binding_plan: BindingMemoryPlan,
+        signals: impl FnMut() -> metal::MetalMemorySignals,
+        factory: impl FnOnce(BindingMemoryPlan, planning::ColdBindingSelection) -> Result<T>,
+    ) -> std::result::Result<T, StateError> {
+        op::require(
+            binding_plan == self.binding_plan,
+            "cold binding inventory/pricing mismatch",
+        )?;
+        let full = (
+            self.full_incremental_metal_bytes,
+            self.full_incremental_cpu_bytes,
+        );
+        let price = |ced| {
+            Ok((
+                planning::runtime_memory(
+                    self.request,
+                    full,
+                    if ced { self.ced.as_ref() } else { None },
+                )?,
+                self.ced.is_some(),
+            ))
+        };
+        let (quoted, _) = price(self.executions.contains(&PrefillExecution::ShrinkingCed))?;
+        op::require(
+            (quoted.metal_bytes, quoted.cpu_bytes)
+                == (self.runtime_metal_bytes, self.runtime_cpu_bytes),
+            "cold binding runtime pricing mismatch",
+        )?;
+        let reserve = sum(&[self.binding_cpu_bytes, self.caller_cpu_bytes])?;
+        let (memory, admission) = planning::admit_runtime_with_base(
+            self.prefill_admission.clone(),
+            planning::Cost {
+                metal: sum(&[
+                    binding_plan.control_metal_bytes(),
+                    binding_plan.cache_metal_bytes(),
+                ])?,
+                cpu: reserve,
+            },
+            "binding",
+            price,
+            signals,
+        )?;
+        let selected = planning::ColdBindingSelection::new(self, reserve, admission, memory);
+        factory(binding_plan, selected).map_err(StateError::from)
+    }
+
     fn with_binding_plan(
         mut self,
         binding_plan: BindingMemoryPlan,

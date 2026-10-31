@@ -365,134 +365,131 @@ impl<'a> Forward<'a> {
                     .map_err(|e| e.to_string())
             },
         )?;
-        let (binding_cpu, future_metal, future_cpu) = if let Some(cold) = cold {
-            op::require(
-                plan == cold.binding_plan,
-                "cold binding inventory/pricing mismatch",
-            )?;
+        if let Some(cold) = cold {
             op::require(
                 resident.binding_cpu_bytes == cold.binding_cpu_bytes,
                 "cold binding CPU pricing mismatch",
             )?;
-            (
-                cold.binding_cpu_bytes,
-                cold.runtime_metal_bytes,
-                cold.runtime_cpu_bytes
-                    .checked_add(cold.caller_cpu_bytes)
-                    .ok_or("binding future CPU overflow")?,
-            )
-        } else {
-            // Serving/direct binding has no known request yet; this admits only
-            // construction, not a zero-sized whole-request promise.
-            (resident.binding_cpu_bytes, 0, 0)
-        };
+        }
         let _transaction = ctx.begin_allocation_transaction();
-        plan.with_admission(
-            binding_cpu,
-            future_metal,
-            future_cpu,
-            ctx.memory_signals(),
-            |plan| {
-                let c = &config;
-                let b = Binder {
-                    ctx,
-                    weights: &resident.dense,
-                    plan,
-                };
-                let mut layers = Vec::with_capacity(resident.schedule.layers);
-                for id in 0..resident.schedule.layers {
-                    let linears = LayerLinears::new(
-                        c,
-                        &resident.schedule,
-                        id,
-                        resident.engram_hash.layers.iter().any(|h| h.layer == id),
-                    );
-                    let mut banks = Vec::new();
-                    for (part, input, output) in [
-                        ("w1", c.hidden, c.intermediate),
-                        ("w3", c.hidden, c.intermediate),
-                        ("w2", c.intermediate, c.hidden),
-                    ] {
-                        let t = resident
-                            .bank(id, part)
-                            .ok_or_else(|| format!("missing expert bank {id}/{part}"))?;
-                        let expected = vec![input as u64, output as u64, c.experts as u64];
-                        let bytes = row_bytes(t)?
-                            .checked_mul(output as u64)
-                            .and_then(|n| n.checked_mul(c.experts as u64))
-                            .and_then(|n| n.checked_add(t.offset))
-                            .ok_or("expert extent overflow")?;
-                        op::require(
-                            metal::all_slots_down_native_supported(t.dtype)
-                                && t.shape == expected
-                                && t.offset % 16 == 0
-                                && bytes <= t.buffer.length() as u64,
-                            &format!("invalid expert bank {id}/{part}"),
-                        )?;
-                        banks.push(t);
-                    }
-                    let engram = if let Some(projection) = &linears.engram {
-                        let p = format!("layers.{id}.engram");
-                        Some(Engram {
-                            projection: b.linear_spec(projection)?,
-                            gate: if let Some(t) = b.weights.get(&format!("{p}.gate.weight")) {
-                                op::require(
-                                    t.shape == vec![c.hidden as u64, 4],
-                                    "folded Engram gate shape",
-                                )?;
-                                EngramGate::Folded(decode_rows(t, 0, 4)?)
-                            } else {
-                                EngramGate::Separate {
-                                    q: decode_rows(
-                                        b.tensor(&format!("{p}.q_weight"), &[4, c.hidden])?,
-                                        0,
-                                        4,
-                                    )?,
-                                    k: decode_rows(
-                                        b.tensor(&format!("{p}.k_weight"), &[4, c.hidden])?,
-                                        0,
-                                        4,
-                                    )?,
-                                }
-                            },
-                        })
-                    } else {
-                        None
-                    };
-                    layers.push(Layer {
-                        attention: b.attention_with_linears(id, c, &resident.schedule, &linears)?,
-                        attn_hc: b.hc_with_linear(id, "attn", c, &linears.attn_hc)?,
-                        ffn_hc: b.hc_with_linear(id, "ffn", c, &linears.ffn_hc)?,
-                        router: b.linear_spec(&linears.router)?,
-                        bias: b.vector(&format!("layers.{id}.ffn.gate.bias"), c.experts)?,
-                        shared: [
-                            b.linear_spec(&linears.shared[0])?,
-                            b.linear_spec(&linears.shared[1])?,
-                            b.linear_spec(&linears.shared[2])?,
-                        ],
-                        banks: [banks[0], banks[1], banks[2]],
-                        engram,
-                    });
+        let construct = |plan, cold_binding| {
+            let c = &config;
+            let b = Binder {
+                ctx,
+                weights: &resident.dense,
+                plan,
+            };
+            let mut layers = Vec::with_capacity(resident.schedule.layers);
+            for id in 0..resident.schedule.layers {
+                let linears = LayerLinears::new(
+                    c,
+                    &resident.schedule,
+                    id,
+                    resident.engram_hash.layers.iter().any(|h| h.layer == id),
+                );
+                let mut banks = Vec::new();
+                for (part, input, output) in [
+                    ("w1", c.hidden, c.intermediate),
+                    ("w3", c.hidden, c.intermediate),
+                    ("w2", c.intermediate, c.hidden),
+                ] {
+                    let t = resident
+                        .bank(id, part)
+                        .ok_or_else(|| format!("missing expert bank {id}/{part}"))?;
+                    let expected = vec![input as u64, output as u64, c.experts as u64];
+                    let bytes = row_bytes(t)?
+                        .checked_mul(output as u64)
+                        .and_then(|n| n.checked_mul(c.experts as u64))
+                        .and_then(|n| n.checked_add(t.offset))
+                        .ok_or("expert extent overflow")?;
+                    op::require(
+                        metal::all_slots_down_native_supported(t.dtype)
+                            && t.shape == expected
+                            && t.offset % 16 == 0
+                            && bytes <= t.buffer.length() as u64,
+                        &format!("invalid expert bank {id}/{part}"),
+                    )?;
+                    banks.push(t);
                 }
-                let embedding = b.tensor("embed.weight", &[c.vocab, c.hidden])?;
-                let norm = b.vector("norm.weight", c.hidden)?;
-                let head = b.linear_spec(&LinearSpec::head(c))?;
-                Ok(Self {
-                    ctx,
-                    engram_rows: EngramRows::Disk(&resident.engram),
-                    engram_hash: resident.engram_hash.clone(),
-                    schedule: resident.schedule.clone(),
-                    config,
-                    token_map,
-                    pad,
-                    layers,
-                    embedding,
-                    norm,
-                    head,
-                    prefill_rows: super::prefill_rows_for_resident(resident.bytes.resident_bytes()),
-                    identity: Arc::new(()),
-                })
-            },
-        )
+                let engram = if let Some(projection) = &linears.engram {
+                    let p = format!("layers.{id}.engram");
+                    Some(Engram {
+                        projection: b.linear_spec(projection)?,
+                        gate: if let Some(t) = b.weights.get(&format!("{p}.gate.weight")) {
+                            op::require(
+                                t.shape == vec![c.hidden as u64, 4],
+                                "folded Engram gate shape",
+                            )?;
+                            EngramGate::Folded(decode_rows(t, 0, 4)?)
+                        } else {
+                            EngramGate::Separate {
+                                q: decode_rows(
+                                    b.tensor(&format!("{p}.q_weight"), &[4, c.hidden])?,
+                                    0,
+                                    4,
+                                )?,
+                                k: decode_rows(
+                                    b.tensor(&format!("{p}.k_weight"), &[4, c.hidden])?,
+                                    0,
+                                    4,
+                                )?,
+                            }
+                        },
+                    })
+                } else {
+                    None
+                };
+                layers.push(Layer {
+                    attention: b.attention_with_linears(id, c, &resident.schedule, &linears)?,
+                    attn_hc: b.hc_with_linear(id, "attn", c, &linears.attn_hc)?,
+                    ffn_hc: b.hc_with_linear(id, "ffn", c, &linears.ffn_hc)?,
+                    router: b.linear_spec(&linears.router)?,
+                    bias: b.vector(&format!("layers.{id}.ffn.gate.bias"), c.experts)?,
+                    shared: [
+                        b.linear_spec(&linears.shared[0])?,
+                        b.linear_spec(&linears.shared[1])?,
+                        b.linear_spec(&linears.shared[2])?,
+                    ],
+                    banks: [banks[0], banks[1], banks[2]],
+                    engram,
+                });
+            }
+            let embedding = b.tensor("embed.weight", &[c.vocab, c.hidden])?;
+            let norm = b.vector("norm.weight", c.hidden)?;
+            let head = b.linear_spec(&LinearSpec::head(c))?;
+            Ok(Self {
+                ctx,
+                engram_rows: EngramRows::Disk(&resident.engram),
+                engram_hash: resident.engram_hash.clone(),
+                schedule: resident.schedule.clone(),
+                config,
+                token_map,
+                pad,
+                layers,
+                embedding,
+                norm,
+                head,
+                prefill_rows: super::prefill_rows_for_resident(resident.bytes.resident_bytes()),
+                cold_binding,
+                identity: Arc::new(()),
+            })
+        };
+        match cold {
+            Some(cold) => cold
+                .with_binding_admission(
+                    plan,
+                    || ctx.memory_signals(),
+                    |plan, selected| construct(plan, Some(selected)),
+                )
+                .map_err(|e| e.to_string()),
+            // Direct/serve binding admits construction, not an unknown request.
+            None => plan.with_admission(
+                resident.binding_cpu_bytes,
+                0,
+                0,
+                ctx.memory_signals(),
+                |plan| construct(plan, None),
+            ),
+        }
     }
 }

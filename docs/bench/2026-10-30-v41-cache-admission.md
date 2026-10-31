@@ -31,15 +31,17 @@ Let R be resident Metal window lengths, S full additional private-COW shadow
 exposure, B binding native controls, C resident F16 caches, U the full binding
 CPU envelope, A caller CPU reserve, and T the request state plus componentwise
 maximum complete sequential Full/CED workspace envelope. T_M and T_U are its
-Metal and CPU components.
+Metal and CPU components. T_s is the permitted future envelope selected at
+binding: T for required Full/CED, or freshly admitted Full for optional CED
+pressure fallback. Fixed cache/control and CPU reserves are never selectable.
 
 | Boundary | Additional Metal | Additional CPU |
 | --- | --- | --- |
 | Full cold quote | R + B + C + T_M | S + U + T_U + A |
 | Load quote | R + B + C | S + U + A |
-| Fresh cold-plan binding, after source import | B + C + T_M | U + T_U + A |
+| Fresh cold-plan binding, after source import | B + C + T_s_M | U + T_s_U + A |
 | Fresh direct/serve binding, no request known | B + C | U |
-| Postbinding runtime gate | T_M | U + T_U + A |
+| Matching request's postbinding/allocation gate | T_s_M | U + T_s_U + A |
 
 At binding, source Metal R and private shadows S are already in live signals;
 they are not charged again. At runtime, live signals also contain B and C.
@@ -53,6 +55,35 @@ binding retains known future/caller demand; direct binding uses the loader's
 retained full CPU quote. No per-cache pressure fallback is introduced. Existing
 strict whole-cold admission and the separately documented staged load API retain
 their respective availability/capacity semantics, now including C.
+
+## Optional CED At Binding
+
+Independent review found that the initial repair unconditionally admitted the
+Full/CED maximum at binding. That refused staged optional-CED requests before
+the ordinary postbinding pressure fallback could choose Full. Binding now uses
+the same selector as request planning, adding B+C and U+A to every candidate.
+Only optional CED pressure/unsupported cases may freshly admit Full; required
+Full/CED, invalid telemetry and arithmetic errors do not acquire a bypass.
+
+The bound Forward retains the selection for the matching cold geometry,
+capacity, CPU reserve and original admission intent. `plan_request_from_cold`
+still validates the original metadata/runtime quote, then reprices the selected
+envelope and inherits its sticky fallback. Later allocation cannot silently
+re-enable CED when availability recovers. Independent request planning is not
+forced to inherit another request's binding decision.
+
+The original cold quote remains conservative and unchanged: its standalone
+`assess_runtime` still assesses that quote. Ordinary cold CLI/bench use the
+matching bound request plan; paired Full/CED remains required and has no binding
+fallback. Load-phase admission remains load-only after full peak capacity
+assessment, not a whole-peak availability reservation.
+
+CPU regressions extend existing classified names without inventory/runner
+changes. They exercise the production binding factory boundary with staged
+load admitted but whole-peak availability refused, optional CED refusing fresh
+availability while Full fits, required CED refusing before the factory, sticky
+postbinding/allocation handoff, repricing mismatch, invalid telemetry, changing
+signals and one-byte-short cache/control/source-shadow/CPU/Full budgets.
 
 Quantized sources remain retained during and after conversion. GPU conversion
 writes directly to each final F16 destination and waits; there is no additional

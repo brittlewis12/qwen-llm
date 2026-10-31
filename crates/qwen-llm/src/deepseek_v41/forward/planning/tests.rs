@@ -409,7 +409,7 @@ fn runtime_fixture(with_ced: bool) -> RequestMemoryEstimate {
 fn optional_ced_reprices_full_at_both_boundaries_with_fresh_signals_and_all_reserves() {
     // These are the disjoint caller/binding/source/private CPU envelopes.
     let reserve = 13 + 17 + 19 + 23;
-    for stage in ["post_binding", "allocation"] {
+    for stage in ["binding", "post_binding", "allocation"] {
         let prices = std::cell::RefCell::new(vec![]);
         let samples = std::cell::Cell::new(0);
         let (memory, admission) = admit_runtime(
@@ -481,7 +481,7 @@ fn optional_ced_reprices_full_at_both_boundaries_with_fresh_signals_and_all_rese
 
 #[test]
 fn required_pair_refuses_pressure_at_both_boundaries_without_full_retry() {
-    for stage in ["post_binding", "allocation"] {
+    for stage in ["binding", "post_binding", "allocation"] {
         let mut attempted = vec![];
         let mut s = signals();
         s.host_budget.as_mut().unwrap().conservative_available_bytes = 150;
@@ -528,7 +528,7 @@ fn optional_ced_invalid_signals_and_overflow_are_not_pressure_or_fallback() {
             ..signals()
         },
     ];
-    for stage in ["post_binding", "allocation"] {
+    for stage in ["binding", "post_binding", "allocation"] {
         for (observed, reserve) in invalid
             .into_iter()
             .map(|s| (s, 0))

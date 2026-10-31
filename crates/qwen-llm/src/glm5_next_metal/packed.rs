@@ -713,6 +713,7 @@ pub(super) struct PackedScratch {
     comb: MetalTensor,
     collapsed: MetalTensor,
     normed: MetalTensor,
+    normalized_half: Option<MetalTensor>,
     block_out: MetalTensor,
     q: MetalTensor,
     k: MetalTensor,
@@ -833,6 +834,7 @@ impl PackedScratch {
 }
 
 impl PackedScratch {
+    #[cfg(test)]
     pub(super) fn new(
         ctx: &MetalContext,
         c: &Glm5NextConfig,
@@ -840,11 +842,19 @@ impl PackedScratch {
         capacity: usize,
         generic_hc: bool,
     ) -> Result<Self> {
+        Self::new_with_options(ctx, c, rows, capacity, scratch_options(ctx, generic_hc))
+    }
+
+    pub(super) fn new_with_options(
+        ctx: &MetalContext,
+        c: &Glm5NextConfig,
+        rows: usize,
+        capacity: usize,
+        options: memory::ScratchOptions,
+    ) -> Result<Self> {
         let r = rows as u64;
-        let mut specs = memory::packed_scratch_specs(c, r);
-        if generic_hc {
-            specs.extend(memory::packed_generic_hc_scratch_specs(c, r));
-        }
+        let specs = memory::packed_scratch_specs_with_options(c, r, options);
+        let has_half = specs.iter().any(|spec| spec.name == "normalized_half");
         let mut b = SpecBuffers::allocate(ctx, "packed_scratch", &specs)?;
         let scratch = Self {
             rows,
@@ -856,7 +866,10 @@ impl PackedScratch {
                 take_rows(&mut b, "residual_a", rows)?,
                 take_rows(&mut b, "residual_b", rows)?,
             ],
-            hc_normalized: generic_hc.then(|| b.take("hc_normalized")).transpose()?,
+            hc_normalized: options
+                .generic_hc
+                .then(|| b.take("hc_normalized"))
+                .transpose()?,
             hc_partial_dots: take_rows(&mut b, "hc_partial_dots", rows)?,
             hc_partial_sumsq: take_rows(&mut b, "hc_partial_sumsq", rows)?,
             mixes: take_rows(&mut b, "mixes", rows)?,
@@ -865,6 +878,7 @@ impl PackedScratch {
             comb: take_rows(&mut b, "comb", rows)?,
             collapsed: take_rows(&mut b, "collapsed", rows)?,
             normed: take_rows(&mut b, "normed", rows)?,
+            normalized_half: has_half.then(|| b.take("normalized_half")).transpose()?,
             block_out: take_rows(&mut b, "block_out", rows)?,
             q: take_rows(&mut b, "q", rows)?,
             k: take_rows(&mut b, "k", rows)?,
@@ -922,7 +936,7 @@ fn flat(t: &MetalTensor, n: usize) -> MetalTensor {
 /// Resolve execution without changing the session's requested lineage.
 /// A missing GEMM, or a missing F32 tile when F32 operands are requested,
 /// uses the existing Exact row loop. Native F32 GEMM already keeps F32.
-fn projection_mode(
+pub(super) fn projection_mode(
     arith: Arith,
     stage: Stage,
     dtype: GgmlType,
@@ -1073,6 +1087,56 @@ fn packet_q8_fewrow_selected(
         && (2..=max_rows).contains(&rows)
         && n_in > 0
         && n_in.is_multiple_of(32)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn encode_experts_with_half(
+    ctx: &MetalContext,
+    enc: &KernelEncoder,
+    arith: Arith,
+    b: &GroupedExperts<'_>,
+    half: Option<&MetalTensor>,
+    status: &MetalTensor,
+    row_inner: &MetalTensor,
+    row_out: &MetalTensor,
+    h: usize,
+    f: usize,
+    e: usize,
+    k: usize,
+    rows: usize,
+    clamp: f32,
+) -> Result<StageMode> {
+    let mode = expert_mode(arith, b.gate_bank.dtype, b.up_bank.dtype, b.down_bank.dtype);
+    if super::tensor_gate_up::selected(
+        arith,
+        mode,
+        b.gate_bank.dtype,
+        b.up_bank.dtype,
+        (h, f, e, k),
+        rows,
+    ) && let Some(half) = half
+        && let Some(prepared) = crate::metal::expert_tensor_gate_up::prepare(
+            ctx,
+            enc,
+            b,
+            half,
+            h,
+            f,
+            e,
+            k,
+            rows,
+            clamp,
+            grouped_down_policy(arith, mode, b.down_bank.dtype, f, h, e, k, rows),
+        )?
+    {
+        #[cfg(test)]
+        record_census(Stage::RoutedExperts, "experts".into(), CensusPath::Half);
+        prepared.encode()?;
+        return Ok(mode);
+    }
+    encode_experts(
+        ctx, enc, arith, b, status, row_inner, row_out, h, f, e, k, rows, clamp,
+    )
 }
 
 /// Shared by the session and synthetic dispatch tests; returns arithmetic mode.
@@ -1372,6 +1436,75 @@ pub(super) fn matmat(
     crate::metal_forward::encode_mat_mat_dispatch_with_policy(
         ctx, enc, weight, x, y, n_in, n_out, rows, true,
     )?;
+    Ok(())
+}
+
+/// Complete eight-op input fanout, preserving both rank expansions and order.
+pub(super) fn encode_kda_fanout(
+    ctx: &MetalContext,
+    enc: &KernelEncoder,
+    arith: Arith,
+    original: &MetalTensor,
+    half: Option<&MetalTensor>,
+    consumers: &super::kda_half_inputs::Consumers<'_>,
+    expansions: [(&MetalTensor, &MetalTensor); 2],
+    hidden: usize,
+    width: usize,
+    rank: usize,
+    rows: usize,
+) -> Result<()> {
+    let prepared =
+        super::kda_half_inputs::prepare(ctx, enc, arith, original, half, consumers, hidden, rows)?;
+    if let Some(prepared) = &prepared {
+        prepared.copy(ctx, enc)?;
+    }
+    for (index, &(weight, output, columns)) in consumers.iter().enumerate() {
+        let staged = match &prepared {
+            Some(prepared) => prepared.encode(index, ctx, enc)?,
+            None => false,
+        };
+        if !staged {
+            matmat(
+                ctx,
+                enc,
+                arith,
+                Stage::KdaProjection,
+                weight,
+                original,
+                output,
+                hidden,
+                columns,
+                rows,
+            )?;
+        } else {
+            #[cfg(test)]
+            record_census(
+                Stage::KdaProjection,
+                format!("{:?}", weight.dtype),
+                CensusPath::Half,
+            );
+        }
+        let expansion = match index {
+            3 => Some(0),
+            5 => Some(1),
+            _ => None,
+        };
+        if let Some(expansion) = expansion {
+            let (weight, destination) = expansions[expansion];
+            expand_rows(
+                ctx,
+                enc,
+                arith,
+                Stage::KdaExpand,
+                weight,
+                output,
+                destination,
+                rank,
+                width,
+                rows,
+            )?;
+        }
+    }
     Ok(())
 }
 
@@ -1887,11 +2020,12 @@ impl Glm5NextSession<'_> {
                             .view_subrange(0, vec![h as u64, (k * rows) as u64]),
                         output: &v(&p.routed),
                     };
-                    let _expert_mode = encode_experts(
+                    let _expert_mode = encode_experts_with_half(
                         ctx,
                         &enc,
                         p.arith(),
                         &grouped,
+                        p.normalized_half.as_ref(),
                         &v(&route.status),
                         &self.s.expert_inner,
                         &self.s.expert_out,
@@ -2108,100 +2242,27 @@ impl Glm5NextSession<'_> {
         );
         self.stage(enc, Glm5NextStage::PackedKdaInputProjections, Some(block))?;
         let x = v(&p.normed);
-        matmat(
+        encode_kda_fanout(
             ctx,
             enc,
             p.arith(),
-            Stage::KdaProjection,
-            &kda.query,
             &x,
-            &v(&p.q),
+            p.normalized_half.as_ref(),
+            &[
+                (&kda.query, &v(&p.q), width),
+                (&kda.key, &v(&p.k), width),
+                (&kda.value, &v(&p.v), width),
+                (&kda.decay_a, &v(&p.rank_a), rank),
+                (&kda.beta, &v(&p.raw_beta), c.head_count as usize),
+                (&kda.gate_a, &v(&p.rank_b), rank),
+            ],
+            [
+                (&kda.decay_b, &v(&p.raw_gate)),
+                (&kda.gate_b, &v(&p.output_gate)),
+            ],
             h,
             width,
-            rows,
-        )?;
-        matmat(
-            ctx,
-            enc,
-            p.arith(),
-            Stage::KdaProjection,
-            &kda.key,
-            &x,
-            &v(&p.k),
-            h,
-            width,
-            rows,
-        )?;
-        matmat(
-            ctx,
-            enc,
-            p.arith(),
-            Stage::KdaProjection,
-            &kda.value,
-            &x,
-            &v(&p.v),
-            h,
-            width,
-            rows,
-        )?;
-        matmat(
-            ctx,
-            enc,
-            p.arith(),
-            Stage::KdaProjection,
-            &kda.decay_a,
-            &x,
-            &v(&p.rank_a),
-            h,
             rank,
-            rows,
-        )?;
-        expand_rows(
-            ctx,
-            enc,
-            p.arith(),
-            Stage::KdaExpand,
-            &kda.decay_b,
-            &v(&p.rank_a),
-            &v(&p.raw_gate),
-            rank,
-            width,
-            rows,
-        )?;
-        matmat(
-            ctx,
-            enc,
-            p.arith(),
-            Stage::KdaProjection,
-            &kda.beta,
-            &x,
-            &v(&p.raw_beta),
-            h,
-            c.head_count as usize,
-            rows,
-        )?;
-        matmat(
-            ctx,
-            enc,
-            p.arith(),
-            Stage::KdaProjection,
-            &kda.gate_a,
-            &x,
-            &v(&p.rank_b),
-            h,
-            rank,
-            rows,
-        )?;
-        expand_rows(
-            ctx,
-            enc,
-            p.arith(),
-            Stage::KdaExpand,
-            &kda.gate_b,
-            &v(&p.rank_b),
-            &v(&p.output_gate),
-            rank,
-            width,
             rows,
         )?;
         let bindings = KdaDecode {

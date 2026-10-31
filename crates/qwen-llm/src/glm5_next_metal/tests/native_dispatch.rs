@@ -4,6 +4,9 @@ use crate::deepseek_v4_oracle::{hyper_connection_pre, rms_norm};
 use crate::glm5_next::{BlockKind, FfnKind};
 use crate::metal::{Mhc4PreInputs, Mhc4PreOutputs, Mhc4PrePartials};
 
+#[path = "kda_half_inputs_ledger.rs"]
+mod kda_half_inputs_ledger;
+
 fn config() -> Glm5NextConfig {
     Glm5NextConfig {
         architecture: crate::glm5_next::ARCHITECTURE_NAME.into(),

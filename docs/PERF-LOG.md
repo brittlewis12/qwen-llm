@@ -6,6 +6,31 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the current state and evidence index.
 
+## 2026-10-30 - GLM Routed Gate/Up Default Promotion Prepared
+
+- Parent approves C default ON within bounded M5 Fast/Half, with qualified
+  Q8-wide/Q5-down ON and A KDA staging OFF. Source/doc promotion is prepared
+  on the isolated routed branch; maintained-main integration and clean release
+  handoff remain parent-owned. This unit runs no GPU or release/native build.
+- Qualified `eea1d369`, shared binary `a514850e...`: 22 documents, 1408 targets
+  per arm, 2816 finite full-vocabulary rows and 60 sessions. NLL delta is
+  +0.0023925409 (about +0.2395% perplexity), mean/max KL .003209616/.070720391,
+  correctness 980 -> 982, agreement 1377/1408. All eight tool sequences per arm
+  are independently strict-correct and byte-identical, with short controls.
+- Descriptive CURRENT-Fast/Half bootstrap, not Exact or formal NI: overall
+  central 90% NLL interval [-.0027069224, +.0071478978]; long-stratum delta
+  +.00814497 with interval [-.0005322327, +.0173199514]. The parent explicitly
+  accepts that uncertainty under the existing precision policy, not equivalence.
+- One-load DEBUG-OFF balanced 32-sample evidence gives stable 1K/2K latency
+  reductions 29.70%/26.05%; 512 is bit-exact and +.0256% in time. At 4K both
+  blocks favor C, but CURRENT/C drift +10.93%/+12.35% limits the pooled 23.36%
+  headline. Earlier noisy native conversion corroborates, not calibrates, it.
+- A standalone stable gain is only about 1.44%; its separate bitwise result
+  does not qualify A+C. Keep A default OFF and require C=0 for A-only replay.
+  D and FFN split remain parked. C retains independent cached rollback 0,
+  all shape/mode/tier/preflight guards, and one 16 MiB shared activation buffer,
+  not expanded weights. [Authoritative evidence, all samples and limits](bench/2026-10-30-glm-routed-tensor-gate-up.md).
+
 ## 2026-10-30 - GLM Q8 Tail Batching Parked After Native Conversion Screen
 
 - `d1b897cb`, SDK 26.2 release: 32 matching report rows / all 64 samples,

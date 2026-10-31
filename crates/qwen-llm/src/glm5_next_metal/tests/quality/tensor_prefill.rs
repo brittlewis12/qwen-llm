@@ -1,7 +1,16 @@
 //! Same-binary Fast/Half2048 screen; all wall times are diagnostic with validation on.
 #[cfg(not(debug_assertions))]
+#[path = "tensor_gate_up.rs"]
+mod tensor_gate_up;
+#[cfg(not(debug_assertions))]
 #[path = "tensor_m5_transfers.rs"]
 mod tensor_m5_transfers;
+
+#[path = "kda_half_inputs.rs"]
+mod kda_half_inputs;
+
+#[path = "routed_qualification.rs"]
+mod routed_qualification;
 
 use super::super::super::{tensor_down, tensor_prefill};
 use super::*;

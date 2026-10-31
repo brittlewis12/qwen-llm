@@ -165,6 +165,13 @@ fn retained_geometry(ctx: &MetalContext) -> Result<(usize, usize)> {
 /// Default packed-prefill chunk (rows per command buffer).
 pub const DEFAULT_PREFILL_ROWS: usize = 512;
 
+fn scratch_options(ctx: &MetalContext, generic_hc: bool) -> memory::ScratchOptions {
+    memory::ScratchOptions::for_tensor_tier(
+        generic_hc,
+        crate::metal::moe_grouped_tensor_selected(ctx),
+    )
+}
+
 /// The device-priced plan of an admitted session (see [`preflight_session`]).
 #[derive(Clone, Copy, Debug)]
 pub struct Glm5NextPreflight {
@@ -188,12 +195,13 @@ pub fn preflight_session(
     let (_, retained) = model.plan_retained(gguf, page, max_buffer)?;
     let price = device_price(ctx);
     let generic_hc = needs_generic_hc(&model.blocks, |t| t.dtype);
-    let ledger = Glm5NextMemoryLedger::new_with_generic_hc(
+    let options = scratch_options(ctx, generic_hc);
+    let ledger = Glm5NextMemoryLedger::new_with_options(
         &model.config,
         retained,
         capacity as u64,
         prefill_rows as u64,
-        generic_hc,
+        options,
         &price,
     )?;
     let admission =
@@ -204,12 +212,12 @@ pub fn preflight_session(
     let budget = admission_budget(&admission);
     // A smaller capacity is advice only when memory, not telemetry, refused.
     let advice = if denied.reason().is_pressure() {
-        match Glm5NextMemoryLedger::max_capacity_with_generic_hc(
+        match Glm5NextMemoryLedger::max_capacity_with_options(
             &model.config,
             retained,
             prefill_rows as u64,
             budget,
-            generic_hc,
+            options,
             &price,
         ) {
             Ok(Some(n)) => CapacityAdvice::Fits(n),
@@ -1084,12 +1092,12 @@ impl<'w> Glm5NextSession<'w> {
         if capacity == 0 {
             return invalid("capacity must be positive");
         }
-        Ok(Glm5NextMemoryLedger::new_with_generic_hc(
+        Ok(Glm5NextMemoryLedger::new_with_options(
             &weights.config,
             weights.retained_bytes,
             capacity as u64,
             prefill_rows as u64,
-            needs_generic_hc(&weights.blocks, |t| t.dtype),
+            scratch_options(ctx, needs_generic_hc(&weights.blocks, |t| t.dtype)),
             &device_price(ctx),
         )?)
     }
@@ -1139,7 +1147,15 @@ impl<'w> Glm5NextSession<'w> {
             .then(|| SparseScratch::new(ctx, c, capacity as u64))
             .transpose()?;
         let packed = (prefill_rows > 0)
-            .then(|| packed::PackedScratch::new(ctx, c, prefill_rows, capacity, generic_hc))
+            .then(|| {
+                packed::PackedScratch::new_with_options(
+                    ctx,
+                    c,
+                    prefill_rows,
+                    capacity,
+                    ledger.scratch_options(),
+                )
+            })
             .transpose()?;
         // Diagnostic only: the device counter also moves with unrelated
         // allocations and frees elsewhere in the process.
@@ -2396,10 +2412,12 @@ mod capture;
 mod checkpoint;
 mod dflash;
 mod interventions;
+mod kda_half_inputs;
 mod lens;
 mod packed;
 pub mod prefill_plan;
 pub(crate) mod tensor_down;
+mod tensor_gate_up;
 mod tensor_prefill;
 pub(crate) mod tensor_q5_down;
 pub use capture::{Glm5NextCapturedRows, Glm5NextRowBank, Glm5NextRowBankPlan};

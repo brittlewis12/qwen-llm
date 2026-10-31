@@ -58,7 +58,10 @@ The span sum's difference from command time is not an idle-time measurement.
 
 The subsequent [mixed-operand MLA gate](2026-10-31-glm-mla-mixed-operand-gate.md)
 validates bounded QK/PV ownership and arithmetic. It does not measure the
-CURRENT attention leaf or establish fused/native MLA savings.
+CURRENT attention leaf or establish fused/native MLA savings. The separate
+[current attention-only budget](2026-10-31-glm-current-attention-budget.md)
+measures that unchanged dispatch at about 21.8 ms for the fixed synthetic 2K
+shape; it funds one fused source gate, not a whole-MLA or application gain.
 
 The actual cold gate requests 199265371264 Metal bytes and 1611860564 CPU bytes,
 including the separate diagnostic policies. Each fresh gate requests 4146692096

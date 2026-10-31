@@ -191,8 +191,76 @@ quote, and no whole-cold admission was performed. The 557-test CPU evidence and
 bounded toy allocation/lifetime result above remain separate evidence classes.
 The parent retains the private proof and verifies the quoted arithmetic.
 
-V4 main integration and the clean release handoff remain pending until a
-reviewed canonical artifact passes the ordinary 8K Full/CED production-timing
-pair under the parent's actual bounded timeout. That next check is for the
-qualified cached stack's admission/construction/execution plumbing, not a
-stages/instrumentation run, optimization campaign or performance claim.
+The metadata quote alone left actual-artifact construction/execution open.
+The subsequent bounded check below supplies that separate evidence; it does not
+turn the one-row quote into 8K admission or a high-water measurement.
+
+## Ordinary 8K Full/CED Artifact Smoke
+
+The frozen canonical `qwen-bench` built from clean `bd9f4407` **passes** the
+ordinary 8K Full/CED production-timing smoke on the actual GSQ artifact. The
+parent-supervised canonical fail-fast invocation completes naturally in about
+51 s under an actual 180 s timeout. This closes the bounded reviewed stack's
+resident import, cache binding, fresh-state admission and Full/CED execution
+check, not a stages/instrumentation or optimization campaign.
+
+The artifact uses the default release fat LTO build. Its compiled/runtime
+identity is MATCH at clean `bd9f4407`, SDK 26.2, Apple Metal 32023.864, diagnostic
+features `[]`, no identity overrides, and source state:
+
+```text
+git-source-sha256-v2:c8cabb87dde77b8324a3d7ccead7ac5930716396eb899da36cb406efe61eff38
+```
+
+The frozen executable and retained suite JSON have SHA-256:
+
+```text
+qwen-bench: d6cf5b9623f33a92d73c2ddc79d3605bc83405b0c279fde3d068d6e0b073a3b5
+suite:      db463fda9df47bc9f6b71ae5a68914bd293194fcb4da2050ef02fa440eb24026
+```
+
+Protocol `native_full_ced_abba_baab_production_timing_v2` completes one
+10-case chronological packet: two warmup, four pilot and four retained cases,
+five Full and five CED, with a fresh state per case. The two output arms repeat
+that same packet; they are **not** 20 independent cases. All 10 cases have finite
+full-vocabulary endpoint logits, match warm Full bitwise and share this digest:
+
+```text
+a2db19afd7c377c54160e90bdefc52dc04ab13a69b0f929abb34eab099da6edf
+```
+
+Every case reports its requested policy with required Full/CED admission and no
+fallback. Preweight peak capacity, load admission and diagnostic whole-peak-now
+assessment all admit. Ordinary loader, binding, state and prefill fresh gates
+remain active and complete; these budgets are not OS reservations or continuous
+allocation high-water measurements.
+
+| 8K budget term | Bytes |
+| --- | ---: |
+| 243 resident caches C | 14179368960 |
+| Load Metal R+C+B | 169404710912 |
+| Runtime Metal T_M | 11527784728 |
+| Required Metal R+C+B+T_M | 180932495640 |
+| Load CPU S+U+A | 292246464 |
+| Runtime CPU T_U | 1815144042 |
+| Required CPU S+U+A+T_U | 2107390506 |
+
+Full uses two default 4,096-row chunks. CED reports two input encoder chunks at
+the same selected width, not an 8K encoder. This result gives no 8K-encoder or
+per-stage profiling authorization and does not change another owner's seams.
+
+Retained prefill host-wall observations are Full 6.115900625 / 5.821071 s and
+CED 3.673439666 / 3.670493167 s. They are observations, **not a new performance
+win or causal baseline**. The captured Qwen environment contains only the
+canonical lease descriptor and `WAIT=0`; captured validation/injection entries
+are null and the run is not instrumented. External injection is not independently
+ruled out by that capture, and there is no external continuous frequency monitor
+or formal performance claim.
+
+Endpoint agreement within this one artifact/prompt-length Full/CED comparison
+is not independent reference/model-quality qualification, intermediate-state
+coverage or evidence for other contexts and workloads. The earlier 557-test CPU
+source evidence, bounded toy witness and metadata quote retain their separate
+scopes. The parent retains the private proof and owns final review, refreshed
+main integration and the clean release handoff. **Main is not claimed merged**
+by this checkpoint; no new source, stage or execution policy is authorized here.

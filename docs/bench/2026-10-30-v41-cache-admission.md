@@ -138,13 +138,61 @@ log:     a071197c2c1d3bf9c13d547a7439e2c71926c9c86c7a4cb506244627b3263cb4
 A private metadata-only production-helper quote executable was also compiled
 (SHA-256
 `0435f8ca5fef486e0c68bd4d5df1f034837a3830b6293e28067e466bc891af16`). Its
-actual target attempt was **refused before context creation** because the
-canonical lease was busy in another lane. That refusal is not a quote result:
-there is still no actual GSQ active-cache count or live-device price, no 8K
-staged admission, and no full-artifact execution evidence from this work.
+first target attempt was **refused before context creation** because the
+canonical lease was busy in another lane. That refusal remains a refusal, not
+quotation or execution evidence.
 
-V4 main integration remains pending. The parent retains the private proof and
-owns the next fail-fast quote attempt after the concurrent lane releases its
-lease; this checkpoint does not authorize a retry. Actual-artifact quotation,
-integration, the applicable qualified build and authorized execution checks
-remain prerequisites for the next cache-enabled profile.
+## Actual GSQ Metadata Quote
+
+A later authorized attempt **passes** on the actual GSQ artifact using source
+`41d3d862`, live M5 production pricing, the normal canonical lease/wired guard
+and no PATH changes. The retained quote JSON has SHA-256:
+
+```text
+38c666ffef1cebda74fdd39e2753ec8c8d9899fd6aad409d1cf59ad8b121762e
+```
+
+This is a **one-row, capacity-one, Full-only metadata quote**, with a finite
+64 MiB caller CPU envelope. It is not 8K staged admission or full-artifact
+construction/execution. The production active inventory selects 243 resident
+caches, priced at **14,179,368,960 bytes = 13.20556640625 GiB**. Native controls
+cost 5,292,032 bytes: 323 separately page-priced resources. Grouped views share
+their bank backing; the cache sum remains distinct from reusable per-chunk
+scratch.
+
+| Metal term | Bytes |
+| --- | ---: |
+| Resident views R | 155220049920 |
+| Resident caches C | 14179368960 |
+| Native controls B | 5292032 |
+| Load R+C+B | 169404710912 |
+| One-row runtime T_M | 53629260 |
+| Required R+C+B+T_M | 169458340172 |
+
+| CPU term | Bytes |
+| --- | ---: |
+| Private shadows S | 0 |
+| Binding envelope U | 225137600 |
+| Caller envelope A | 67108864 |
+| Load S+U+A | 292246464 |
+| One-row runtime T_U | 20881402 |
+| Required S+U+A+T_U | 313127866 |
+
+The device page is 16,384 bytes. The 8-byte control sample reports heap size 8,
+device alignment 256 and priced upper bound 16,384 bytes. These are live-device
+prices, not an assumed CPU-only 16 KiB rounding model. The sampled Metal
+allocation counter is unchanged at 458,752 bytes before/after planning; this is
+not a continuous high-water measurement or proof of total process/framework
+memory. The explicit caller envelope does not attest unmeasured parser, driver
+or framework peaks.
+
+No resident weights, binder, state or dispatch were constructed/executed by the
+quote, and no whole-cold admission was performed. The 557-test CPU evidence and
+bounded toy allocation/lifetime result above remain separate evidence classes.
+The parent retains the private proof and verifies the quoted arithmetic.
+
+V4 main integration and the clean release handoff remain pending until a
+reviewed canonical artifact passes the ordinary 8K Full/CED production-timing
+pair under the parent's actual bounded timeout. That next check is for the
+qualified cached stack's admission/construction/execution plumbing, not a
+stages/instrumentation run, optimization campaign or performance claim.

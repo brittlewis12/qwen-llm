@@ -41,26 +41,29 @@ Full-session validation separately pins the release KDA/MLA block layout and
 rejects a synthetic all-MLA config. Tests verify the no-KDA case at the shared
 buffer-list/pricing boundary; this candidate does not broaden model support.
 
-## Deferred Qualification
+## Build And Qualification
 
-No GPU execution, remote work, full release/LTO build, benchmark, installation,
-publication, or merge is part of this handoff. Local offline typechecks cannot
+No GPU execution, remote work, benchmark execution, installation, publication,
+or main merge is part of this handoff. Local offline typechecks cannot
 qualify the Metal tensor tier: the local compiler probe rejects `metal4.1`.
-The parent must authorize builds after the concurrent builders finish.
+After independent review, the parent authorizes one canonical release library
+test build and one native benchmark build from the final clean branch commit.
+Binary paths and SHA256 digests are returned separately in the build handoff;
+they are not source changes requiring another post-build commit.
 
 Build from this worktree, using the established toolchain and a tensor-capable
 Metal SDK for the later M5 qualification binary:
 
 ```sh
-cargo test --offline --release -p qwen-llm --lib --no-run --message-format=json
-cargo build --offline --release -p qwen-cli --bin qwen-bench
+cargo test --locked --offline --release -p qwen-llm --lib --no-run --message-format=json
+cargo build --locked --offline --release -p qwen-cli --bin qwen-bench
 ```
 
 The first command reports the exact native test executable in its
 `compiler-artifact.executable` JSON field. The second produces
-`target/release/qwen-bench`. Neither command has been run here; do not substitute
-a dev/test-profile binary for the release model screen. Preserve binary hashes
-when transferring through the parent's established workflow.
+`target/release/qwen-bench`. Do not substitute a dev/test-profile binary for the
+release model screen. Preserve binary hashes when transferring through the
+parent's established workflow.
 
 Exact ignored primitive tests in that binary:
 
@@ -112,23 +115,32 @@ create-new mode-0600 report records source/binary/fixture hashes, model pin and
 retained stamps; no complete event is emitted without all expected rows/calls
 and final state/stamp checks. Payload hashes are not reverified: identity scope
 is explicitly recorded, as in the existing actual-Q4 screen.
+The strict role inventory additionally checks Q8_0 MLA k/v for every block
+3,7,...43 plus unused MTP block 45: k `[256,512,64]`, v `[512,256,64]`, exactly
+24 serialized banks. Shard names/sizes and primary SHA alone are not this audit.
 
-The historical `tensor_m5_transfers.rs` body is unchanged. The KDA GPU fixture
-is also untouched; the parent's forthcoming test-only `view_bytes` fix and
-lean KDA model smoke must be preserved when integrating the shared scratch
-rename. No overlap with that fixture is introduced here.
+The historical `tensor_m5_transfers.rs` body is unchanged. Upstream test-only
+`f39707065c8d3a2a0cf6a7d94e74a247058478e6` is cherry-picked with provenance:
+both Q8 prefixes in the KDA fanout fixture use `view_bytes`, and its lean
+three-document KDA model smoke is retained. Its only local adaptations use
+the shared `normalized_half` buffer specification/options and force routed
+gate/up execution OFF. Qualified wide/Q5 controls remain ON; only KDA staging
+TLS differs between its two arms. For that separate KDA-only smoke, use global
+`QWEN_GLM53_KDA_HALF_INPUTS=1`, `QWEN_GLM53_TENSOR_GATE_UP=0`, and a fresh private
+`GLM53_KDA_HALF_SMOKE_REPORT`. This is not the routed gate/up A/B protocol.
 
 ## Local Verification
 
-- `cargo check --offline --workspace --tests` passes.
-- `cargo check --offline --release --workspace --tests` passes; metadata/typecheck
+- `cargo check --locked --offline --workspace --tests` passes.
+- `cargo check --locked --offline --release --workspace --tests` passes; metadata/typecheck
   only, no release executable or LTO build.
 - `cargo fmt --all -- --check` and `git diff --check` pass.
-- Dev-profile CPU execution passes 19 focused contracts: four new gate/up,
-  seven KDA, two Q5-down policy, two tensor-down geometry/overflow, three
+- Dev-profile CPU execution passes 22 focused contracts: four new gate/up,
+  ten KDA including the imported smoke, two Q5-down policy, two tensor-down
+  geometry/overflow, three
   incumbent down policy/geometry, and the existing packet expert selector.
-- The four new contracts and seven KDA contracts also pass in a fresh process
-  with `QWEN_GLM53_TENSOR_GATE_UP=1`.
+- The four new contracts and ten KDA contracts pass in fresh processes with
+  all four on/off combinations of the routed and KDA global flags.
 - All GPU numerical, refusal, census, model-quality and timing witnesses remain
   unexecuted. The local SDK's tensor compiler probe is unavailable as noted
   earlier; CPU/typecheck success is not shader or numerical qualification.

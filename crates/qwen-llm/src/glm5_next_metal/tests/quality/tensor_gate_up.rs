@@ -101,6 +101,24 @@ fn m5_gate_up_actual_q4_three_document_smoke_profile_plain_abba() {
             assert_eq!((t.dtype, t.shape.as_slice()), (dtype, shape.as_slice()));
         }
     }
+    for block in (3..45).step_by(4).chain([45]) {
+        for (suffix, shape) in [("k", [256, 512, 64]), ("v", [512, 256, 64])] {
+            let t = gguf
+                .tensors
+                .iter()
+                .find(|t| t.name == format!("blk.{block}.attn_{suffix}_b.weight"))
+                .unwrap();
+            assert_eq!(t.dtype, GgmlType::Q8_0);
+            assert_eq!(t.shape, shape);
+        }
+    }
+    assert_eq!(
+        gguf.tensors
+            .iter()
+            .filter(|t| t.name.ends_with(".attn_k_b.weight") || t.name.ends_with(".attn_v_b.weight"))
+            .count(),
+        24
+    );
     let vocab = config.vocab_size as usize;
     assert!(
         docs.iter()
@@ -127,6 +145,8 @@ fn m5_gate_up_actual_q4_three_document_smoke_profile_plain_abba() {
         "packed_sha256":sha256_hex(include_bytes!("../../packed.rs")),
         "memory_sha256":sha256_hex(include_bytes!("../../../glm5_next/memory.rs")),
         "arms":LABELS,"q8_wide":true,"q5_down":true,"kda_execution":false,
+        "q8_mla_inventory":{"main_blocks":(3..45).step_by(4).collect::<Vec<_>>(),"unused_mtp_block":45,
+            "serialized_banks":24,"dtype":"Q8_0","attn_k_b_shape":[256,512,64],"attn_v_b_shape":[512,256,64]},
         "scope":"only gate/up TLS differs during prefill; global gate/up opt-in allocates one shared 16MiB Half buffer in both arms; ordinary decode outside scopes",
         "documents":docs.iter().map(|d|json!({"path":d.path,"stratum":d.stratum,"prefix":d.prefix,"tokens_sha256":token_hash(&d.tokens)})).collect::<Vec<_>>(),
         "capacity":capacity,"workspace_rows":ROWS,"cpu_terms":terms,"cpu_reserve_bytes":cpu,

@@ -1,6 +1,6 @@
 //! Actual-Q4 bitwise smoke only: three frozen documents, no performance/tool packet.
 use super::*;
-use crate::glm5_next::memory::KdaHalfInputsScope;
+use crate::glm5_next::memory::{KdaHalfInputsScope, TensorGateUpScope};
 use crate::glm5_next_metal::tensor_q5_down;
 
 const CAPACITY: usize = 4416;
@@ -142,6 +142,7 @@ fn m5_kda_half_actual_q4_three_document_bitwise_smoke() {
         Ok("1")
     );
     assert!(memory::kda_half_inputs_enabled());
+    let _routed_off = TensorGateUpScope::new(false);
     let _lease = production_lease();
     let _dense = tensor_prefill::Scope::new(true);
     let _down = tensor_down::Scope::new(true);
@@ -220,7 +221,7 @@ fn m5_kda_half_actual_q4_three_document_bitwise_smoke() {
         "identity_scope":"pinned shard names/sizes, metadata-only primary SHA, tensor-table digest and retained stamps; weight payload hashes not verified",
         "shard_stamps":stamps.iter().map(|s|json!({"shard":s.shard_idx,"bytes":s.size,"device":s.device,"inode":s.inode,
             "mtime_sec":s.mtime_sec,"mtime_nsec":s.mtime_nsec,"ctime_sec":s.ctime_sec,"ctime_nsec":s.ctime_nsec})).collect::<Vec<_>>(),
-        "qualified_wide_q8_and_q5_down":true,"stage_arms":[["CURRENT",false],["KDA_HALF",true]],
+        "qualified_wide_q8_and_q5_down":true,"routed_tensor_gate_up":false,"stage_arms":[["CURRENT",false],["KDA_HALF",true]],
         "capacity":CAPACITY,"rows":ROWS,"half_backing_logical_bytes_both_arms":HALF_BYTES,
         "half_backing_priced_upper_bytes_both_arms":half_price,"cpu_terms":terms,"cpu_reserve_bytes":cpu,
         "eligible_kda_input_audit":audit,"q5_down_audit":q5_names,
@@ -247,12 +248,9 @@ fn m5_kda_half_actual_q4_three_document_bitwise_smoke() {
         Glm5NextWeights::load(&ctx, &gguf).unwrap()
     };
     let ledger = Glm5NextSession::plan_memory(&ctx, &weights, CAPACITY, ROWS).unwrap();
-    let specs = memory::packed_kda_half_input_specs(
-        c,
-        ROWS as u64,
-        ledger.scratch_options().kda_half_inputs,
-    );
+    let specs = memory::packed_normalized_half_specs(c, ROWS as u64, ledger.scratch_options());
     assert_eq!(specs.len(), 1);
+    assert_eq!(specs[0].name, "normalized_half");
     assert_eq!(specs[0].shape, [4096, 2048]);
     assert_eq!(specs[0].bytes(), Some(HALF_BYTES));
     let mut warm: Option<(BTreeMap<String, usize>, Vec<f32>)> = None;

@@ -32,7 +32,8 @@ Q8-wide and Q5-down defaults stay on.
 
 ## Ownership And Admission
 
-One `packed_scratch.kda_half_input` F16 buffer has shape
+On the routed integration branch this is the shared
+`packed_scratch.normalized_half` F16 buffer, with shape
 `[hidden, admitted_prefill_rows]`: 8 MiB at 1024 and 16 MiB at 2048 for
 hidden=4096. It has no tile padding; half-input twins mask ragged rows.
 The whole backing is checked, not merely the current packet prefix.
@@ -67,8 +68,11 @@ arms. Both arms must physically own and price the full buffer, including
 baseline inside a false override. Census runs stay outside plain timing;
 normal strict pinning, stamps and fresh private reports remain required.
 Native process flag 0 versus 1 separately measures actual allocation cost.
-The test-only review follow-up adds the bounded model smoke described below;
-production code and the frozen native `4ace096b` binary are unchanged.
+The upstream test-only review follow-up adds the bounded model smoke described
+below; its production code and frozen native `4ace096b` binary are unchanged.
+The routed integration branch separately rebuilds both canonical release
+artifacts from its final clean commit; see
+`GLM-ROUTED-TENSOR-GATE-UP-CANDIDATE.md` for that build protocol.
 
 ## Witnesses And Limits
 
@@ -109,8 +113,11 @@ helpers. It requires global staging flag 1, the pinned six-shard Q4 artifact,
 and a fresh private `GLM53_KDA_HALF_SMOKE_REPORT`. Both qualified controls are
 forced ON throughout; only staging TLS differs during prefill, never during
 preflight/session construction or continuation. Every session has capacity
-4416, workspace 2048 and the same ledger-owned 16 MiB half backing. The warm
-2K census requires 34 added conversions, 204 half-input consumers, unchanged
+4416, workspace 2048 and the same ledger-owned 16 MiB half backing. In the
+routed integration binary, run this KDA-only smoke with global routed gate/up
+flag 0; its local TLS override also forces routed gate/up execution OFF. The
+shared `normalized_half` buffer/options retain the same KDA-only ownership and
+census semantics. The warm 2K census requires 34 added conversions, 204 half-input consumers, unchanged
 39 Q5-down calls and otherwise identical dispatch counts, backed by a named
 weight/shape audit. Prefixes are 2048/2048/4352, each followed by all 64 common
 teacher-forced forward calls. Both complete 65-row trajectories (prefill plus

@@ -4767,6 +4767,7 @@ pub(crate) fn preflight(
         "kernel_qwen4exp_qsa_pool_publish_f16",
         "kernel_qwen4exp_qsa_fill_block_ids_i32",
         "kernel_qwen4exp_qsa_expand_ids_i32",
+        "kernel_qwen4exp_qsa_expand_ids_par_i32",
         "kernel_qwen4exp_qsa_qgate_norm_rope_f32",
         "kernel_qwen4exp_qsa_publish_kv_f16",
     ] {
@@ -5280,11 +5281,21 @@ fn encode_expand_ids_tensors(
     visible: usize,
     length: usize,
 ) -> Result<(), MetalError> {
-    let pso = ctx.pipeline("kernel_qwen4exp_qsa_expand_ids_i32")?;
+    let parallel = expand_ids_parallel() && geometry.block_budget() <= EXPAND_PAR_MAX_BLOCKS;
+    let pso = ctx.pipeline(if parallel {
+        "kernel_qwen4exp_qsa_expand_ids_par_i32"
+    } else {
+        "kernel_qwen4exp_qsa_expand_ids_i32"
+    })?;
     enc.set_pipeline(&pso);
     enc.set_bytes(0, &id_args(geometry, visible, length));
     enc.set_tensor(1, selected_blocks);
     enc.set_tensor(2, token_ids);
+    let threads = if parallel {
+        pso.maxTotalThreadsPerThreadgroup().min(1024)
+    } else {
+        1
+    };
     enc.dispatch(
         MTLSize {
             width: 1,
@@ -5292,7 +5303,7 @@ fn encode_expand_ids_tensors(
             depth: 1,
         },
         MTLSize {
-            width: 1,
+            width: threads,
             height: 1,
             depth: 1,
         },
@@ -6199,3 +6210,17 @@ fn invalid<T>(detail: impl Into<String>) -> Result<T, Qwen4ExpQsaError> {
 
 #[cfg(test)]
 mod tests;
+
+/// Largest block budget the parallel id expansion stages in threadgroup
+/// memory (`QWEN4EXP_EXPAND_PAR_MAX_BLOCKS` in kernels/qwen4exp.metal).
+const EXPAND_PAR_MAX_BLOCKS: usize = 2048;
+
+/// `0` keeps the one-thread decode expansion of selected QSA blocks into key
+/// ids; the default expands them with one parallel threadgroup (integer ids
+/// identical, about 106 -> 30 us per QSA layer on M5 Ultra).
+const EXPAND_IDS_PARALLEL_ENV: &str = "QWEN_FN_EXPAND_PAR";
+
+fn expand_ids_parallel() -> bool {
+    static PAR: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *PAR.get_or_init(|| std::env::var(EXPAND_IDS_PARALLEL_ENV).as_deref() != Ok("0"))
+}

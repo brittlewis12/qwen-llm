@@ -188,6 +188,7 @@ pub fn encode_mat_vec_f32_sigmoid(
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn encode_mat_vec_16bit_weight_f32(
     ctx: &MetalContext,
     enc: &KernelEncoder,
@@ -198,6 +199,33 @@ pub(crate) fn encode_mat_vec_16bit_weight_f32(
     n_out: usize,
     expected: GgmlType,
     kernel_name: &'static str,
+) -> Result<(), MetalError> {
+    encode_mat_vec_16bit_weight_f32_with(
+        ctx,
+        enc,
+        weight,
+        x,
+        y,
+        n_in,
+        n_out,
+        expected,
+        kernel_name,
+        true,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn encode_mat_vec_16bit_weight_f32_with(
+    ctx: &MetalContext,
+    enc: &KernelEncoder,
+    weight: &MetalTensor,
+    x: &MetalTensor,
+    y: &MetalTensor,
+    n_in: usize,
+    n_out: usize,
+    expected: GgmlType,
+    kernel_name: &'static str,
+    split_allowed: bool,
 ) -> Result<(), MetalError> {
     if weight.dtype != expected {
         return Err(MetalError::BadShape {
@@ -225,6 +253,7 @@ pub(crate) fn encode_mat_vec_16bit_weight_f32(
     }
     // Split-K BF16 rows: 16-byte loads need 8-element rows and aligned bases.
     let split_k = expected == GgmlType::BF16
+        && split_allowed
         && bf16_split_k_enabled()
         && n_in.is_multiple_of(8)
         && weight.offset.is_multiple_of(16)
@@ -323,6 +352,32 @@ pub fn encode_mat_vec_bf16_f32(
         n_out,
         GgmlType::BF16,
         "kernel_mat_vec_bf16_f32",
+    )
+}
+
+/// [`encode_mat_vec_bf16_f32`] on the simdgroup-per-row kernel, never the
+/// one-threadgroup-per-row split-K form: for short rows (K = 320) the split
+/// form leaves most of each 128-thread threadgroup idle.
+pub fn encode_mat_vec_bf16_f32_rows(
+    ctx: &MetalContext,
+    enc: &KernelEncoder,
+    weight: &MetalTensor,
+    x: &MetalTensor,
+    y: &MetalTensor,
+    n_in: usize,
+    n_out: usize,
+) -> Result<(), MetalError> {
+    encode_mat_vec_16bit_weight_f32_with(
+        ctx,
+        enc,
+        weight,
+        x,
+        y,
+        n_in,
+        n_out,
+        GgmlType::BF16,
+        "kernel_mat_vec_bf16_f32",
+        false,
     )
 }
 

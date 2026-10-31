@@ -580,6 +580,137 @@ kernel void kernel_dot_sigmoid_f32(
     }
 }
 
+// kernel_qwen4exp_topk_guarded_f32 with each round's arg-max taken by SIMD
+// reductions (value, then lowest index among equals) and one cross-SIMD
+// step: 3 barriers per selected expert instead of a 9-level tree. Same
+// nonfinite serial fallback, selection and softmax, so outputs are identical.
+kernel void kernel_qwen4exp_topk_guarded_simd_f32(
+        constant topk_logits_args & args [[buffer(0)]],
+        device const float * logits [[buffer(1)]],
+        device int * out_idx [[buffer(2)]],
+        device float * out_w [[buffer(3)]],
+        threadgroup float * sh_score [[threadgroup(0)]],
+        threadgroup float * red_val [[threadgroup(1)]],
+        threadgroup int * red_idx [[threadgroup(2)]],
+        uint tid [[thread_position_in_threadgroup]],
+        ushort lane [[thread_index_in_simdgroup]],
+        ushort simd [[simdgroup_index_in_threadgroup]]) {
+    if (args.k == 0 || args.k > 16) return;
+    const device uint * bits = reinterpret_cast<const device uint *>(logits);
+    const bool nonfinite = simd_any((bits[tid] & 0x7f800000u) == 0x7f800000u);
+    if (lane == 0) red_idx[tid / 32] = nonfinite ? 1 : 0;
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    if (tid == 0) {
+        int any = 0;
+        for (uint i = 0; i < 16; ++i) any |= red_idx[i];
+        red_idx[0] = any;
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    const bool serial = red_idx[0] != 0;
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    if (serial) {
+        if (tid == 0) {
+            const uint MAX_K = 16;
+            int top_idx[MAX_K];
+            float top_val[MAX_K];
+            for (uint i = 0; i < args.k; ++i) {
+                top_idx[i] = -1;
+                top_val[i] = -INFINITY;
+            }
+            for (uint i = 0; i < args.n; ++i) {
+                const float v = logits[i];
+                for (uint j = 0; j < args.k; ++j) {
+                    const bool better = (v > top_val[j]) || (v == top_val[j] && (top_idx[j] < 0 || int(i) < top_idx[j]));
+                    if (better) {
+                        for (uint m = args.k - 1; m > j; --m) {
+                            top_val[m] = top_val[m - 1];
+                            top_idx[m] = top_idx[m - 1];
+                        }
+                        top_val[j] = v;
+                        top_idx[j] = int(i);
+                        break;
+                    }
+                }
+            }
+            const float max_top = top_val[0];
+            float sum = 0.0f;
+            float exp_val[MAX_K];
+            for (uint i = 0; i < args.k; ++i) {
+                exp_val[i] = top_idx[i] >= 0 ? exp(top_val[i] - max_top) : 0.0f;
+                sum += exp_val[i];
+            }
+            sum = max(sum, 6.103515625e-5f);
+            for (uint i = 0; i < args.k; ++i) {
+                out_idx[i] = max(top_idx[i], 0);
+                out_w[i] = exp_val[i] / sum;
+            }
+        }
+        return;
+    }
+    float v = logits[tid];
+    for (uint slot = 0; slot < args.k; ++slot) {
+        const float m = simd_max(v);
+        const int lowest = simd_min(v == m ? int(tid) : INT_MAX);
+        if (lane == 0) {
+            red_val[simd] = m;
+            red_idx[simd] = lowest;
+        }
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+        if (simd == 0) {
+            const float cv = lane < 16 ? red_val[lane] : -INFINITY;
+            const int ci = lane < 16 ? red_idx[lane] : INT_MAX;
+            const float m2 = simd_max(cv);
+            const int winner = simd_min(cv == m2 ? ci : INT_MAX);
+            if (lane == 0) {
+                out_idx[slot] = max(winner, 0);
+                out_w[slot] = m2;
+                red_idx[16] = winner;
+            }
+        }
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+        if (int(tid) == red_idx[16]) v = -INFINITY;
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+    }
+    if (tid == 0) {
+        const float max_top = out_w[0];
+        float sum = 0.0f;
+        float exp_val[16];
+        for (uint i = 0; i < args.k; ++i) {
+            exp_val[i] = exp(out_w[i] - max_top);
+            sum += exp_val[i];
+        }
+        sum = max(sum, 6.103515625e-5f);
+        for (uint i = 0; i < args.k; ++i) out_w[i] = exp_val[i] / sum;
+    }
+}
+
+// kernel_dot_sigmoid_f32 with one threadgroup of up to 1024 threads instead
+// of one simdgroup; the reduction order differs (not bitwise).
+kernel void kernel_dot_sigmoid_tg_f32(
+        constant dot_sigmoid_args & args [[buffer(0)]],
+        device const float       * weight [[buffer(1)]],
+        device const float       * x      [[buffer(2)]],
+        device       float       * out    [[buffer(3)]],
+        uint   tid  [[thread_position_in_threadgroup]],
+        uint   ntg  [[threads_per_threadgroup]],
+        ushort simd [[simdgroup_index_in_threadgroup]],
+        ushort lane [[thread_index_in_simdgroup]]) {
+    threadgroup float partial[32];
+    float sum = 0.0f;
+    for (uint i = tid; i < args.n; i += ntg) {
+        sum += weight[i] * x[i];
+    }
+    sum = simd_sum(sum);
+    if (lane == 0) partial[simd] = sum;
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    if (simd == 0) {
+        const uint simdgroups = (ntg + 31u) / 32u;
+        float total = lane < simdgroups ? partial[lane] : 0.0f;
+        total = simd_sum(total);
+        if (lane == 0) out[0] = 1.0f / (1.0f + exp(-total));
+    }
+}
+
 kernel void kernel_topk_logits_softmax_dot_sigmoid_f32(
         constant topk_dot_sigmoid_args & args          [[buffer(0)]],
         device const float             * logits        [[buffer(1)]],

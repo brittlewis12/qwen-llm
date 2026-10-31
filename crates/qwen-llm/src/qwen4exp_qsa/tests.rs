@@ -4126,3 +4126,85 @@ fn released_layer_three_position_zero_matches_cpu_quantized_oracle() {
         3e-3,
     );
 }
+
+/// The parallel decode id expansion writes exactly the serial kernel's ids
+/// for random block lists with invalid (-1, beyond-visible) entries, tails,
+/// truncated heads and every round count of the parallel compaction.
+#[test]
+fn parallel_id_expansion_matches_serial_kernel() {
+    let Some(ctx) = context() else { return };
+    let mut state = 0x9e37_79b9_7f4a_7c15u64;
+    let mut next = move |bound: u32| {
+        state ^= state << 13;
+        state ^= state >> 7;
+        state ^= state << 17;
+        (state % u64::from(bound.max(1))) as u32
+    };
+    let cases: [(u32, u32, u32); 7] = [
+        (1, 4, 8),
+        (32, 4, 160),
+        (64, 8, 512),
+        (100, 4, 300),
+        (1024, 2, 2304),
+        (1500, 4, 6100),
+        (2048, 1, 2100),
+    ];
+    for (case, (budget, ratio, output_width)) in cases.into_iter().enumerate() {
+        for trial in 0..4u32 {
+            let visible = next(budget * 2 + 3);
+            let sequence_length = visible * ratio + next(3 * ratio + 2);
+            let blocks: Vec<i32> = (0..budget)
+                .map(|_| match next(10) {
+                    0 => -1,
+                    1 => (visible + next(5)) as i32,
+                    _ => next(visible.max(1)) as i32,
+                })
+                .collect();
+            let args = IdArgs {
+                block_budget: budget,
+                visible_blocks: visible,
+                ratio,
+                sequence_length,
+                output_width,
+            };
+            let selected = MetalTensor::zeros_i32(&ctx, vec![u64::from(budget)]).unwrap();
+            write_i32_tensor(&selected, &blocks);
+            let run = |kernel: &str, threads: usize| {
+                let ids = MetalTensor::zeros_i32(&ctx, vec![u64::from(output_width)]).unwrap();
+                write_i32_tensor(&ids, &vec![7_777; output_width as usize]);
+                let command = ctx.queue.commandBuffer().unwrap();
+                let enc = KernelEncoder::begin(&command);
+                let pso = ctx.pipeline(kernel).unwrap();
+                enc.set_pipeline(&pso);
+                enc.set_bytes(0, &args);
+                enc.set_tensor(1, &selected);
+                enc.set_tensor(2, &ids);
+                enc.dispatch(
+                    MTLSize {
+                        width: 1,
+                        height: 1,
+                        depth: 1,
+                    },
+                    MTLSize {
+                        width: threads,
+                        height: 1,
+                        depth: 1,
+                    },
+                );
+                enc.end();
+                command.commit();
+                crate::metal::wait_completed(&command).expect("command buffer completed");
+                assert_eq!(command.status(), MTLCommandBufferStatus::Completed);
+                read_i32(&ids)
+            };
+            let serial = run("kernel_qwen4exp_qsa_expand_ids_i32", 1);
+            for threads in [32usize, 256, 1024] {
+                assert_eq!(
+                    run("kernel_qwen4exp_qsa_expand_ids_par_i32", threads),
+                    serial,
+                    "case {case} trial {trial} threads {threads}"
+                );
+            }
+        }
+    }
+}

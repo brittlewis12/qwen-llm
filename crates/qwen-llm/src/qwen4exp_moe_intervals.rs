@@ -104,7 +104,7 @@ fn expected_census() -> Vec<serde_json::Value> {
     [
         ("kernel_mat_vec_f32_f32_lcpp_r2", [256,1,1],128),
         ("kernel_topk_logits_softmax_f32", [1,1,1],1),
-        ("kernel_dot_sigmoid_f32", [1,1,1],32),
+        (if crate::qwen4exp_moe::gate_wide() { "kernel_dot_sigmoid_tg_f32" } else { "kernel_dot_sigmoid_f32" }, [1,1,1], if crate::qwen4exp_moe::gate_wide() { 1024 } else { 32 }),
         ("kernel_moe_swiglu_iq4_xs_f32", [160,10,1],128),
         ("kernel_moe_down_weighted_sum_q8_0_f32", [1280,1,1],128),
         ("kernel_shared_swiglu_q8_0_f32_lcpp", [320,1,1],128),
@@ -213,7 +213,7 @@ pub(crate) fn observe_guarded_captures(
         assert_eq!(rows.len(), count);
         assert_eq!(
             rows.iter()
-                .filter(|r| r["kernel"] == guarded_topk::KERNEL)
+                .filter(|r| r["kernel"] == guarded_topk::kernel())
                 .count(),
             1
         );

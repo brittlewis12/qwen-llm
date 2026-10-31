@@ -184,7 +184,7 @@ fn native_moe_observation(guarded: bool) {
         assert_eq!(
             census
                 .iter()
-                .filter(|r| r.kernel == crate::qwen4exp_moe::guarded_topk::KERNEL)
+                .filter(|r| r.kernel == crate::qwen4exp_moe::guarded_topk::kernel())
                 .count(),
             48
         );

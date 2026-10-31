@@ -1884,7 +1884,11 @@ fn packed_common_moe_motor_matches_serial_rows_and_routes() {
             vec![
                 f32_matvec,
                 "kernel_topk_logits_softmax_f32",
-                "kernel_dot_sigmoid_f32",
+                if crate::qwen4exp_moe::gate_wide() {
+                    "kernel_dot_sigmoid_tg_f32"
+                } else {
+                    "kernel_dot_sigmoid_f32"
+                },
                 iq3_singleton,
                 iq4_down_singleton,
                 "kernel_moe_weighted_sum_f32",
@@ -2418,7 +2422,11 @@ fn packed_common_moe_motor_matches_serial_rows_and_routes() {
             vec![
                 f32_matvec,
                 "kernel_topk_logits_softmax_f32",
-                "kernel_dot_sigmoid_f32",
+                if crate::qwen4exp_moe::gate_wide() {
+                    "kernel_dot_sigmoid_tg_f32"
+                } else {
+                    "kernel_dot_sigmoid_f32"
+                },
                 iq3_singleton,
                 "kernel_moe_down_weighted_sum_q8_0_f32",
                 "kernel_shared_swiglu_q8_0_f32_lcpp",
@@ -2580,7 +2588,11 @@ fn packed_common_moe_motor_matches_serial_rows_and_routes() {
             vec![
                 f32_matvec,
                 "kernel_topk_logits_softmax_f32",
-                "kernel_dot_sigmoid_f32",
+                if crate::qwen4exp_moe::gate_wide() {
+                    "kernel_dot_sigmoid_tg_f32"
+                } else {
+                    "kernel_dot_sigmoid_f32"
+                },
                 "kernel_moe_swiglu_iq4_xs_f32",
                 "kernel_moe_down_weighted_sum_q8_0_f32",
                 "kernel_shared_swiglu_q8_0_f32_lcpp",

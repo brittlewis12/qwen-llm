@@ -1450,15 +1450,27 @@ fn encode_read(
         hc_up::encode(ctx, enc, weights.up, scratch)?;
         return Ok(());
     }
-    encode_mat_vec_dispatch(
-        ctx,
-        enc,
-        weights.up,
-        &scratch.low,
-        &scratch.raw_gate,
-        scratch.low_rank,
-        hyper_hidden,
-    )?;
+    if weights.up.dtype == GgmlType::BF16 && hc_up_rows() {
+        crate::metal::encode_mat_vec_bf16_f32_rows(
+            ctx,
+            enc,
+            weights.up,
+            &scratch.low,
+            &scratch.raw_gate,
+            scratch.low_rank,
+            hyper_hidden,
+        )?;
+    } else {
+        encode_mat_vec_dispatch(
+            ctx,
+            enc,
+            weights.up,
+            &scratch.low,
+            &scratch.raw_gate,
+            scratch.low_rank,
+            hyper_hidden,
+        )?;
+    }
     encode_hc_gated_mean(
         ctx,
         enc,
@@ -2014,7 +2026,9 @@ fn encode_hc_combine(
     enc.set_tensor(3, block_output);
     enc.set_tensor(4, residual);
     enc.set_tensor(5, raw_injection);
-    let threads = pipeline.maxTotalThreadsPerThreadgroup().min(256);
+    let threads = pipeline
+        .maxTotalThreadsPerThreadgroup()
+        .min(if hc_combine_wide() { 1024 } else { 256 });
     enc.set_threadgroup_memory(0, 32 * size_of::<f32>());
     enc.dispatch(
         MTLSize {
@@ -3939,4 +3953,23 @@ mod tests {
         );
         concurrent_encoder.end();
     }
+}
+
+/// `0` keeps 256 threads per branch in the fused HC combine; the default uses
+/// up to 1024 so the 4 x hidden inject dot has more loads in flight (only 4
+/// threadgroups run per call; the dot's reduction order differs).
+const HC_COMBINE_WIDE_ENV: &str = "QWEN_FN_HC_WIDE";
+
+fn hc_combine_wide() -> bool {
+    static WIDE: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *WIDE.get_or_init(|| std::env::var(HC_COMBINE_WIDE_ENV).as_deref() != Ok("0"))
+}
+
+/// `0` sends the BF16 HC up projection (K = low rank) through the shared
+/// mat-vec dispatch; the default uses the simdgroup-per-row BF16 kernel.
+const HC_UP_ROWS_ENV: &str = "QWEN_FN_HC_UP_ROWS";
+
+fn hc_up_rows() -> bool {
+    static ROWS: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ROWS.get_or_init(|| std::env::var(HC_UP_ROWS_ENV).as_deref() != Ok("0"))
 }

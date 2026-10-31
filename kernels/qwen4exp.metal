@@ -899,6 +899,60 @@ kernel void kernel_qwen4exp_qsa_expand_ids_i32(
     }
 }
 
+// Same output as kernel_qwen4exp_qsa_expand_ids_i32 (integers, exact), one
+// threadgroup: thread 0 compacts the valid selected blocks (block_budget <=
+// QWEN4EXP_EXPAND_PAR_MAX_BLOCKS, checked by the host), then every thread
+// writes its output slots in parallel instead of one thread writing all.
+constant uint QWEN4EXP_EXPAND_PAR_MAX_BLOCKS = 2048u;
+kernel void kernel_qwen4exp_qsa_expand_ids_par_i32(
+        constant qwen4exp_qsa_ids_args & args [[buffer(0)]],
+        device const int * selected_blocks [[buffer(1)]],
+        device int * token_ids [[buffer(2)]],
+        uint tid [[thread_position_in_threadgroup]],
+        uint threads [[threads_per_threadgroup]],
+        ushort lane [[thread_index_in_simdgroup]],
+        ushort simd [[simdgroup_index_in_threadgroup]]) {
+    threadgroup int valid_blocks[QWEN4EXP_EXPAND_PAR_MAX_BLOCKS];
+    threadgroup uint simd_counts[32];
+    threadgroup uint valid_count;
+    if (tid == 0u) valid_count = 0u;
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    // Stream compaction in slot order: per round, a SIMD prefix within each
+    // simdgroup plus the counts of earlier simdgroups and earlier rounds.
+    for (uint round = 0u; round < args.block_budget; round += threads) {
+        const uint slot = round + tid;
+        const int block = slot < args.block_budget ? selected_blocks[slot] : -1;
+        const bool valid = block >= 0 && uint(block) < args.visible_blocks;
+        const uint flag = valid ? 1u : 0u;
+        const uint lane_prefix = simd_prefix_exclusive_sum(flag);
+        const uint simd_total = simd_sum(flag);
+        if (lane == 0) simd_counts[simd] = simd_total;
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+        uint before = valid_count;
+        for (uint s = 0u; s < uint(simd); ++s) before += simd_counts[s];
+        if (valid) valid_blocks[before + lane_prefix] = block;
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+        if (tid == 0u) {
+            uint total = 0u;
+            for (uint s = 0u; s < (threads + 31u) / 32u; ++s) total += simd_counts[s];
+            valid_count += total;
+        }
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+    }
+    const uint head = args.ratio == 0u ? 0u : valid_count * args.ratio;
+    const uint tail_start = args.visible_blocks * args.ratio;
+    for (uint slot = tid; slot < args.output_width; slot += threads) {
+        int value;
+        if (slot < head) {
+            value = valid_blocks[slot / args.ratio] * int(args.ratio) + int(slot % args.ratio);
+        } else {
+            const uint position = tail_start + (slot - head);
+            value = position < args.sequence_length ? int(position) : -1;
+        }
+        token_ids[slot] = value;
+    }
+}
+
 kernel void kernel_qwen4exp_qsa_expand_ids_packed_i32(
         constant qwen4exp_qsa_packed_ids_args & args [[buffer(0)]],
         device const int * visible_counts [[buffer(1)]],

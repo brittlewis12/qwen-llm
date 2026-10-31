@@ -166,6 +166,20 @@ pub fn encode_axpy_scalar_f32(
     Ok(())
 }
 
+/// [`encode_dot_sigmoid_f32`] with one 1024-thread threadgroup instead of one
+/// simdgroup (reduction order differs; not bitwise). Needs a pipeline that
+/// admits 1024 threads.
+pub fn encode_dot_sigmoid_wide_f32(
+    ctx: &MetalContext,
+    enc: &KernelEncoder,
+    weight: &MetalTensor,
+    x: &MetalTensor,
+    out: &MetalTensor,
+    n: usize,
+) -> Result<(), MetalError> {
+    encode_dot_sigmoid_with(ctx, enc, weight, x, out, n, true)
+}
+
 pub fn encode_dot_sigmoid_f32(
     ctx: &MetalContext,
     enc: &KernelEncoder,
@@ -173,6 +187,18 @@ pub fn encode_dot_sigmoid_f32(
     x: &MetalTensor,
     out: &MetalTensor,
     n: usize,
+) -> Result<(), MetalError> {
+    encode_dot_sigmoid_with(ctx, enc, weight, x, out, n, false)
+}
+
+fn encode_dot_sigmoid_with(
+    ctx: &MetalContext,
+    enc: &KernelEncoder,
+    weight: &MetalTensor,
+    x: &MetalTensor,
+    out: &MetalTensor,
+    n: usize,
+    wide: bool,
 ) -> Result<(), MetalError> {
     if weight.dtype != GgmlType::F32 || x.dtype != GgmlType::F32 || out.dtype != GgmlType::F32 {
         return Err(MetalError::BadShape {
@@ -194,7 +220,11 @@ pub fn encode_dot_sigmoid_f32(
             ),
         });
     }
-    let pso = ctx.pipeline("kernel_dot_sigmoid_f32")?;
+    let pso = ctx.pipeline(if wide {
+        "kernel_dot_sigmoid_tg_f32"
+    } else {
+        "kernel_dot_sigmoid_f32"
+    })?;
     enc.set_pipeline(&pso);
     #[repr(C)]
     #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
@@ -212,7 +242,7 @@ pub fn encode_dot_sigmoid_f32(
             depth: 1,
         },
         MTLSize {
-            width: 32,
+            width: if wide { 1024 } else { 32 },
             height: 1,
             depth: 1,
         },
@@ -2508,6 +2538,62 @@ pub(crate) fn validate_compact_f32_tensor(
 mod tests {
     use super::*;
     use crate::metal::test_support::*;
+
+    /// The 1024-thread dot-sigmoid gate matches the one-simdgroup kernel and
+    /// an F64 reference within F32 reduction-order error.
+    #[test]
+    fn wide_dot_sigmoid_matches_simdgroup_kernel() {
+        let Some(ctx) = crate::test_fixtures::metal_context_or_skip() else {
+            return;
+        };
+        for n in [1usize, 31, 1000, 2048, 4096, 10_240] {
+            let w: Vec<f32> = (0..n)
+                .map(|i| ((i * 37 % 101) as f32 - 50.0) * 1e-3)
+                .collect();
+            let x: Vec<f32> = (0..n)
+                .map(|i| ((i * 53 % 97) as f32 - 48.0) * 2e-2)
+                .collect();
+            let wt = MetalTensor::from_bytes(
+                &ctx,
+                bytemuck::cast_slice(&w),
+                vec![n as u64],
+                GgmlType::F32,
+            )
+            .unwrap();
+            let xt = MetalTensor::from_bytes(
+                &ctx,
+                bytemuck::cast_slice(&x),
+                vec![n as u64],
+                GgmlType::F32,
+            )
+            .unwrap();
+            let run = |wide: bool| {
+                let out = MetalTensor::zeros_f32(&ctx, vec![1]).unwrap();
+                let command = ctx.queue.commandBuffer().unwrap();
+                let enc = KernelEncoder::begin(&command);
+                encode_dot_sigmoid_with(&ctx, &enc, &wt, &xt, &out, n, wide).unwrap();
+                enc.end();
+                command.commit();
+                crate::metal::wait_completed(&command).expect("command buffer completed");
+                tensor_f32_at_offset(&out)[0]
+            };
+            let dot: f64 = w
+                .iter()
+                .zip(&x)
+                .map(|(a, b)| f64::from(*a) * f64::from(*b))
+                .sum();
+            let reference = 1.0 / (1.0 + (-dot).exp());
+            let (narrow, wide) = (run(false), run(true));
+            assert!(
+                (f64::from(wide) - reference).abs() < 1e-6,
+                "n={n} wide={wide} ref={reference}"
+            );
+            assert!(
+                (wide - narrow).abs() < 1e-6,
+                "n={n} wide={wide} narrow={narrow}"
+            );
+        }
+    }
 
     #[test]
     fn mps_two_pass_topk_matches_cpu_at_full_vocabulary_width() {

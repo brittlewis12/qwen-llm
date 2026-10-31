@@ -56,7 +56,7 @@ fn witness(census: &[crate::metal::DispatchCensusRow], steps: usize, split: bool
     assert_eq!(
         census
             .iter()
-            .filter(|r| r.kernel == crate::qwen4exp_moe::guarded_topk::KERNEL)
+            .filter(|r| r.kernel == crate::qwen4exp_moe::guarded_topk::kernel())
             .count(),
         steps * 48
     );
@@ -132,7 +132,7 @@ fn product_guarded_topk_shared_prefix() {
     assert!(
         !census
             .iter()
-            .any(|row| row.kernel == crate::qwen4exp_moe::guarded_topk::KERNEL)
+            .any(|row| row.kernel == crate::qwen4exp_moe::guarded_topk::kernel())
     );
     let checkpoint = r.workspace.checkpoint_for_tests();
     let mut a = run(&mut r, &tokens[PREFIX..], false, true, false, true, PREFIX);

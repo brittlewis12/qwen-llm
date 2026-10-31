@@ -3,13 +3,14 @@
 use crate::metal::{
     KernelEncoder, MetalContext, MetalError, MetalTensor, MetalTensorProvenance,
     MetalTimestampSampleBuffer, encode_axpy_rowwise_f32, encode_axpy_scalar_f32,
-    encode_copy_offset_f32, encode_dot_sigmoid_f32, encode_mat_mat_f32_router_e8p32_strict,
-    encode_moe_down_f32_grouped_slots_generic, encode_moe_down_iq4_nl_f32,
-    encode_moe_down_iq4_nl_f32_fast, encode_moe_down_iq4_nl_f32_grouped_slots,
-    encode_moe_down_iq4_nl_f32_grouped_slots_m128_n16, encode_moe_down_q2_0_f32,
-    encode_moe_down_q8_0_f32_grouped_slots, encode_moe_down_weighted_sum_q8_0_f32,
-    encode_moe_route_bucket_slots_f32, encode_moe_swiglu_f32_grouped_slots_generic_range,
-    encode_moe_swiglu_iq3_s_f32, encode_moe_swiglu_iq3_xxs_f32, encode_moe_swiglu_iq3_xxs_f32_fast,
+    encode_copy_offset_f32, encode_dot_sigmoid_f32, encode_dot_sigmoid_wide_f32,
+    encode_mat_mat_f32_router_e8p32_strict, encode_moe_down_f32_grouped_slots_generic,
+    encode_moe_down_iq4_nl_f32, encode_moe_down_iq4_nl_f32_fast,
+    encode_moe_down_iq4_nl_f32_grouped_slots, encode_moe_down_iq4_nl_f32_grouped_slots_m128_n16,
+    encode_moe_down_q2_0_f32, encode_moe_down_q8_0_f32_grouped_slots,
+    encode_moe_down_weighted_sum_q8_0_f32, encode_moe_route_bucket_slots_f32,
+    encode_moe_swiglu_f32_grouped_slots_generic_range, encode_moe_swiglu_iq3_s_f32,
+    encode_moe_swiglu_iq3_xxs_f32, encode_moe_swiglu_iq3_xxs_f32_fast,
     encode_moe_swiglu_iq3_xxs_f32_grouped_slots_n16, encode_moe_swiglu_iq4_xs_f32,
     encode_moe_swiglu_iq4_xs_f32_grouped_slots_n16, encode_moe_weighted_sum_f32,
     encode_moe_weighted_sum_packed_f32, encode_shared_swiglu_q8_0_f32, encode_silu_mul_f32,
@@ -1550,7 +1551,12 @@ fn encode_singleton_router(
             )?;
         }
     }
-    encode_dot_sigmoid_f32(
+    let gate = if gate_wide() {
+        encode_dot_sigmoid_wide_f32
+    } else {
+        encode_dot_sigmoid_f32
+    };
+    gate(
         ctx,
         enc,
         weights.shared_router,
@@ -3100,7 +3106,11 @@ pub(crate) fn preflight(
         dtype => return invalid(format!("unsupported routed gate/up dtype {dtype:?}")),
     };
     require_pipeline_capacity(ctx, "kernel_topk_logits_softmax_f32", 1, 0)?;
-    require_pipeline_capacity(ctx, "kernel_dot_sigmoid_f32", 32, 0)?;
+    if gate_wide() {
+        require_pipeline_capacity(ctx, "kernel_dot_sigmoid_tg_f32", 1024, 0)?;
+    } else {
+        require_pipeline_capacity(ctx, "kernel_dot_sigmoid_f32", 32, 0)?;
+    }
     require_pipeline_capacity(
         ctx,
         routed_gate_kernel,
@@ -3556,3 +3566,12 @@ mod tests;
 #[cfg(test)]
 #[path = "qwen4exp_moe_compat_tests.rs"]
 mod compat_tests;
+
+/// `0` computes the shared-expert gate dot with one simdgroup; the default
+/// uses one 1024-thread threadgroup (reduction order differs).
+const GATE_WIDE_ENV: &str = "QWEN_FN_GATE_WIDE";
+
+pub(crate) fn gate_wide() -> bool {
+    static WIDE: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *WIDE.get_or_init(|| std::env::var(GATE_WIDE_ENV).as_deref() != Ok("0"))
+}

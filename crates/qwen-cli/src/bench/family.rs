@@ -379,6 +379,7 @@ pub(crate) fn with_family_bench_planned<R>(
                 .create_runner(ctx)
                 .context("bind Flash-Next execution graph")?;
             let mut bench = Qwen4ExpBench {
+                ctx,
                 runner,
                 vocab: config.vocab_size as usize,
                 last_prefill_mode: "none",
@@ -766,6 +767,7 @@ impl FamilyBench for Glm5NextBench<'_, '_> {
 }
 
 struct Qwen4ExpBench<'ctx, 'model, 'gguf> {
+    ctx: &'ctx MetalContext,
     runner: Qwen4ExpTextRunner<'ctx, 'model, 'gguf>,
     vocab: usize,
     last_prefill_mode: &'static str,
@@ -793,6 +795,63 @@ impl FamilyBench for Qwen4ExpBench<'_, '_, '_> {
         Ok(())
     }
     fn decode(&mut self, id: u32) -> Result<()> {
+        // Measurement hook (not a product flag): QWEN_FN_DECODE_DISPATCHES
+        // times every dispatch of each decoded token in its own encoder and
+        // prints one per-kernel aggregate JSON line per token.
+        if std::env::var_os("QWEN_FN_DECODE_DISPATCHES").is_some() {
+            let guard = qwen_llm::metal::dispatch_profile_begin(self.ctx, 4096)
+                .map_err(anyhow::Error::msg)?;
+            let logits = self.runner.forward_token(id)?.to_vec();
+            std::hint::black_box(logits);
+            let report = qwen_llm::metal::dispatch_profile_finish(self.ctx, guard)
+                .map_err(anyhow::Error::msg)?;
+            let mut by_kernel: std::collections::BTreeMap<&str, (usize, u64)> =
+                std::collections::BTreeMap::new();
+            let mut total = 0u64;
+            for row in &report.rows {
+                let ns = row.gpu_ns.unwrap_or(0);
+                total += ns;
+                let e = by_kernel.entry(row.kernel.as_str()).or_default();
+                e.0 += 1;
+                e.1 += ns;
+            }
+            let mut top: Vec<_> = by_kernel.into_iter().collect();
+            top.sort_by_key(|(_, (_, ns))| std::cmp::Reverse(*ns));
+            // Per-(kernel, grid, threads) breakdown of the 16 costliest kernels.
+            let mut shapes: std::collections::BTreeMap<
+                (String, [usize; 3], [usize; 3]),
+                (usize, u64),
+            > = std::collections::BTreeMap::new();
+            for row in &report.rows {
+                if top.iter().take(16).any(|(k, _)| *k == row.kernel.as_str()) {
+                    let e = shapes
+                        .entry((row.kernel.clone(), row.grid, row.threads))
+                        .or_default();
+                    e.0 += 1;
+                    e.1 += row.gpu_ns.unwrap_or(0);
+                }
+            }
+            let first = report.rows.iter().filter_map(|r| r.gpu_start).min();
+            let last = report.rows.iter().filter_map(|r| r.gpu_end).max();
+            eprintln!(
+                "[fn-decode-dispatches] {}",
+                serde_json::json!({
+                    "dispatches": report.rows.len(),
+                    "overflow": report.overflow,
+                    "kernel_ns": total,
+                    "span_ns": first.zip(last).map(|(a, b)| b.saturating_sub(a)),
+                    "kernels": top
+                        .iter()
+                        .map(|(k, (n, ns))| serde_json::json!([k, n, ns]))
+                        .collect::<Vec<_>>(),
+                    "shapes": shapes
+                        .iter()
+                        .map(|((k, g, t), (n, ns))| serde_json::json!([k, g, t, n, ns]))
+                        .collect::<Vec<_>>(),
+                })
+            );
+            return Ok(());
+        }
         let logits = self.runner.forward_token(id)?.to_vec();
         std::hint::black_box(logits);
         Ok(())

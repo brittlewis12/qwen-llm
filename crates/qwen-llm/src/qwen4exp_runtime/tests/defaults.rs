@@ -31,7 +31,7 @@ fn decode_policy_defaults_and_independent_qualification() {
 /// property of the released geometry and always runs at this depth.
 pub(super) fn witness(census: &[DispatchCensusRow], steps: usize, flags: [bool; 2]) {
     for (name, per_step, enabled) in [
-        (crate::qwen4exp_moe::guarded_topk::KERNEL, 48, flags[0]),
+        (crate::qwen4exp_moe::guarded_topk::kernel(), 48, flags[0]),
         ("kernel_qwen4exp_qsa_split_f16", 12, true),
         ("kernel_qwen4exp_qsa_split_merge_f32", 12, true),
         ("kernel_qwen4exp_qsa_split_softmax_f32", 12, true),
@@ -106,7 +106,7 @@ fn qualified_defaults_final_closure() {
     runner.prefill(&tokens[..PREFIX]).unwrap();
     let census = crate::metal::dispatch_census_take();
     for name in [
-        crate::qwen4exp_moe::guarded_topk::KERNEL,
+        crate::qwen4exp_moe::guarded_topk::kernel(),
         "kernel_qwen4exp_qsa_split_f16",
         "kernel_qwen4exp_qsa_split_merge_f32",
         "kernel_qwen4exp_hc_up_mix_q8_k320",

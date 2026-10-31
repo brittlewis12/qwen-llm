@@ -29,7 +29,7 @@ fn witness(census: &[crate::metal::DispatchCensusRow], steps: usize, split: bool
     assert_eq!(
         census
             .iter()
-            .filter(|r| r.kernel == crate::qwen4exp_moe::guarded_topk::KERNEL)
+            .filter(|r| r.kernel == crate::qwen4exp_moe::guarded_topk::kernel())
             .count(),
         if guarded { steps * 48 } else { 0 }
     );

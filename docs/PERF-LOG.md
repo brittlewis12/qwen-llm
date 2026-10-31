@@ -6,6 +6,34 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the current state and evidence index.
 
+## 2026-10-31 - Flash-Next Decode +25-27%: Five Serialized Kernels Unblocked
+
+- A new bench-only per-dispatch profile (`QWEN_FN_DECODE_DISPATCHES`, one
+  isolated encoder per dispatch) of GSQ-RCO IQ3_S on M5 Ultra at depth 2048
+  found serialized kernels on every token's critical path: QSA id expansion
+  on 1 thread (~106 us x 12), the shared-expert gate dot on 1 simdgroup
+  (~31 us x 48), the HC combine on 4 x 256 threads (~19 us x 96), the guarded
+  top-k at ~11 barriers per selected expert (~15.5 us x 48) and the BF16 HC
+  up projection at K = 320 on one 128-thread threadgroup per row (~15 us x 98).
+- Landed: parallel id expansion with SIMD-prefix compaction (exact ids),
+  SIMD-reduction guarded top-k (identical selection, ties, nonfinite fallback
+  and weights), 1024-thread gate dot and HC combine, and the simdgroup-per-row
+  BF16 kernel for the HC up projection. Flash-Next only; other families keep
+  their kernels. Opt-outs `QWEN_FN_EXPAND_PAR` / `QWEN_FN_TOPK_SIMD` /
+  `QWEN_FN_GATE_WIDE` / `QWEN_FN_HC_WIDE` / `QWEN_FN_HC_UP_ROWS` = 0.
+- Same build, all five on versus all five off, tg64, ABBA, 30 s cool-downs:
+  d2048 49.46 / 49.46 -> 62.79 / 62.67 tok/s (+26.8%); d0 52.91 / 52.93 ->
+  66.35 / 66.35 (+25.4%). Attribution on the experiment build at d2048: ids
+  +4.5% (+1.9% more with parallel compaction), gate +7.2%, HC combine +6.3%,
+  top-k +2.1%, BF16 rows +2.3%. A 256-thread long-row BF16 variant was neutral
+  and is not kept.
+- Greedy 160-token outputs on two prompts are byte-identical with the five
+  changes on and off (96-token outputs also identical across intermediate
+  arms). GPU tests pin id expansion and top-k to the incumbent kernels and
+  the gate to an F64 reference.
+- Remaining profile leaders: small Q6_K mat-vecs (2.5K-10K rows at roughly
+  250-450 GB/s, ~3 ms/token in isolation) and the K = 10240 BF16 HC down.
+
 ## 2026-10-31 - Native GLM Row-Owned Pair Misses Material Ceiling
 
 - Canonical `4bb008c4` / SDK 26.2 M5 gates pass: canonical Half coefficients,

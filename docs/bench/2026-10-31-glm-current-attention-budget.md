@@ -148,7 +148,32 @@ bounded F32/Half QK and independently supplied F32 P/Half V arithmetic and
 role-specific physical ownership. It does not qualify fused exponentiation,
 denominator/rescaling, seeded PV accumulation, full attention or performance.
 Those are new proof obligations for the fixed fused design. Source/CPU/compile
-review comes first; no GPU stage or model integration follows automatically.
+tranche `da7b33ef` now passes 42 CPU tests, configured MSL 4.0 compilation and
+independent source review, without changing production code. Its new fused
+pipeline then passes the separately reviewed metadata-only gate at `9bce7d27`:
+
+| Actual Fused PSO Metadata | Value |
+| --- | ---: |
+| SIMD width / maximum threads | 32 / 256 |
+| Static / dynamic LDS bytes | 30272 / 0 |
+| Device LDS limit / remaining bytes | 32768 / 2496 |
+| Observed allocation growth bytes | 557056 |
+| Kernel dispatches | 0 |
+
+The metadata process exits successfully in two seconds with natural lease
+release. Independent review accepts report SHA256
+`615aa57ece77b0eaa0df0950199274f52d121ebc58a243e298b8f97a26af173a`,
+bound to standalone host `9c9b1a29804046a90f31a912223736c41dbfce2b23092b0928115d9b4741dff1`
+and fused metallib `cab33997b4866ce1e000ebce6895cf3551961e771d05c2c4d49258c50c70dba3`.
+The metadata host's CPU/CLI controls pass and all 160 cached compiler inputs remain
+hash-identical. Its 96 MiB Metal and separate 64 MiB CPU framework policies are
+not formal peaks; owned, copied and contiguous-mapped library bytes are charged.
+
+This clears the actual pipeline-capacity stop, not fused ownership, arithmetic,
+spills, occupancy, performance, N2048 admission or model quality. The experimental
+kernel and hosts stay on their branch. Bounded N64 collection and offline checking
+are the next preparation step; no dispatch or model integration follows
+automatically from metadata acceptance.
 
 Synthetic operands, reused cache residency, the standalone command composition
 and device state can differ from ordinary MLA. This measurement supplies a

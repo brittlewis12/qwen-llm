@@ -2,6 +2,66 @@
 
 ## Status
 
+### Current Priorities: 2026-10-31
+
+The maintained routed tensor gate/up default is now qualified on the actual
+six-shard Q4 artifact. Its stable ordinary-call improvement is 29.7% at 1K and
+26.1% at 2K against the preceding Fast/Half configuration; these are sequential
+changes, not percentages to add to earlier wins. See the
+[default decision and rollback](2026-10-30-glm-routed-tensor-gate-up.md).
+
+The [current post-C 2K budget](2026-10-31-glm-current-post-c-2k-budget.md)
+records plain calls of 2001.65/2001.09 ms and 0.97% profiler overhead.
+Its largest GPU spans are routed experts 856.84 ms, combined MLA 376.43 ms,
+KDA recurrence 189.70 ms and KDA input projections 184.10 ms. Those ordered
+spans are nonexclusive; they do not establish recoverable wall fractions or
+hardware roofline utilization.
+
+The next work is ranked by structural opportunity and the missing evidence:
+
+1. **Keep routed arithmetic in view without repeating closed loader designs.**
+   It remains the largest parent. Native K64, RowOwned and GROUP32 INT8 did not
+   meet their material complete-pair targets. Do not rescue them with another
+   tile/barrier sweep. A compact expert-major Half intermediate is a distinct,
+   conditional representation hypothesis: down already rounds its input to
+   Half, and up already fuses clamped SwiGLU. It would need inclusive producer,
+   offset/prefix and consumer costs; fewer logical bytes are not a DRAM or
+   application-speedup measurement.
+2. **Test KDA reuse on actual prepared inputs before timing.**
+   The [value4 witness](2026-10-31-glm-kda-value4-bitwise.md) is fully bitwise
+   on one synthetic M5 case, including final state and signed zeros. The next
+   source gate captures an unchanged ordinary prefix3 plus 2048-row continuation
+   and compares ordinary CURRENT, direct CURRENT replay and the frozen candidate.
+   Synthetic exactness does not waive nonempty-state/carry correctness or the
+   repeatable >=30% recurrence and reset-inclusive composition screens.
+3. **Measure MLA's unchanged grouped query/output transforms before moving them.**
+   The [fixed full-F32/Half D512 implementation](2026-10-31-glm-mla-fused-2k-negative.md)
+   is correct but approximately 2.93x slower than its matched attention-only
+   control; that design is closed. A distinct dense-prefill graph lifts shared
+   rounded C512 into per-head K256/V256, attends with the original Q256 and
+   produces O256 directly. MLX-Serve implements this long-prefill distinction
+   at source `da964cf1`, `src/plugins/glm5_next/table_forward.zig`.
+   The transforms move rather than disappear. A transposed quantized-key
+   producer, extra coefficient/KV rounding and any retained dense banks need
+   separate cost, admission and numerical review. First obtain the actual
+   ordinary transform denominator, not the difference between a synthetic
+   attention leaf and the combined MLA parent.
+4. **Retain head-axis attention as a separate sparse-context architecture.**
+   GLM's 64 attention heads share selected row IDs for each query. Reusing those
+   indirect C rows across heads is a different dataflow from the rejected
+   query-axis D512 implementation. V4 and MLX-Serve provide donor evidence, not
+   a GLM speed estimate or permission to round the existing F32 Q/P contract.
+   Any low-precision operand proposal needs its own numerical policy and a
+   representative sparse-context denominator before implementation.
+
+V4's owner-held transition/attention work remains a parallel lane. Its finer
+current-stack profiling still depends on an accepted minimal command-lifetime
+repair/support composition; old stage percentages are not a substitute. No
+GLM primitive result qualifies a V4 change, and no new result here changes an
+installed binary, service or production default.
+
+### Earlier Transfer Context
+
 The initial source/evidence review uses `adad4461`, without a claim of M5
 saturation. GLM and V4.1 both have substantial default M5 optimization;
 neither is a completed reference implementation for the other. Compare gains

@@ -6,6 +6,19 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the current state and evidence index.
 
+## 2026-10-30 - GLM Routed Tensor Default Integrated
+
+- `9b99a8e3` integrates default decision `342c2864` into local main. Bounded
+  M5 Fast/Half routed gate/up is ON; KDA staging remains OFF. The prepared
+  checkpoint below retains its original scope and complete evidence link.
+- Primary stable one-load 1K/2K latency falls 29.70%/26.05%. The numerical
+  change and long-stratum uncertainty remain explicit; all eight registered
+  tool sequences match. This is not a formal noninferiority claim.
+- Release artifacts are built separately from a clean maintained-source
+  checkout. No installation, service restart, Git push or GPU lease is implied
+  by source integration or CPU builds. Rollback remains
+  `QWEN_GLM53_TENSOR_GATE_UP=0` before process startup.
+
 ## 2026-10-30 - GLM Routed Gate/Up Default Promotion Prepared
 
 - Parent approves C default ON within bounded M5 Fast/Half, with qualified

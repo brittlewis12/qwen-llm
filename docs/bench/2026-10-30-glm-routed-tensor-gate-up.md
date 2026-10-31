@@ -11,11 +11,11 @@ noninferiority or equivalence result. In particular, long-stratum uncertainty
 is accepted explicitly; the descriptive intervals are not a retroactive pass
 of the old Exact/Fast preregistered procedure.
 
-This source/default-only promotion is prepared on the isolated routed branch.
-The parent owns independent review, maintained-main integration and a clean
-final release handoff. No new GPU run, release/LTO/native build, installation
-or service action accompanies this source change. Existing qualified binaries
-predate the default flip and selected C explicitly.
+Default promotion `342c2864` is integrated into local maintained main by
+`9b99a8e3`. The measured qualification binaries predate the default flip and
+selected C explicitly; the default-only delta changes no arithmetic or
+eligibility. A clean release handoff is separate from those frozen measurements.
+Integration does not install binaries, restart services or publish Git history.
 
 A remains default OFF. Its standalone evidence below does not qualify A+C.
 Neither the parked decode-fusion D nor the FFN encoder split is promoted;

@@ -9,7 +9,7 @@ The stable standalone 1K/2K gain is approximately 1.44%; 4K is nonstationary.
 This does not qualify A+C or authorize A's default promotion. See the
 [authoritative C decision and standalone A evidence](bench/2026-10-30-glm-routed-tensor-gate-up.md).
 
-After C becomes default ON, every A-only replay must explicitly set
+With C now default ON, every A-only replay must explicitly set
 `QWEN_GLM53_TENSOR_GATE_UP=0`; both owned A protocols enforce that mode.
 Setting A=1 while leaving C enabled requests an unqualified composition, not
 the standalone evidence. The resource OR only shares one admitted Half buffer;

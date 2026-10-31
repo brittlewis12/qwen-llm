@@ -35,7 +35,10 @@ The next work is ranked by structural opportunity and the missing evidence:
    model-quality proof. The [captured-input cost screen](2026-10-31-glm-kda-value4-cost.md)
    clears its>=30% bar with61.24%/60.84% lower median GPU time including state
    restoration. Next is ordinary PRIMARY conversion and all34-site/carry proof,
-   not a34x application projection or automatic default change.
+   not a34x application projection or automatic default change. The
+   [first model attempt refuses baseline prefix richness](2026-10-31-glm-kda-model-refusal.md)
+   before candidate execution; diagnose that coverage prerequisite separately,
+   without relabeling it as candidate parity or an arithmetic mismatch.
    The sibling's eligible per-core path still uses a staged serial recurrence;
    a vector-decay WY reformulation is research, not a missing tensor-kernel port.
 3. **Target MLA attention dataflow, not a dominant-transform assumption.**

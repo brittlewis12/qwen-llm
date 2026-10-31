@@ -103,3 +103,8 @@ That new translation unit needs fresh machine/artifact proof. Any bit mismatch
 stops conversion; no tolerance waiver follows from this cost result. Matched
 ordinary-call performance and broader carry/quality/default decisions remain
 separate gates.
+
+The [first ordinary-model attempt](2026-10-31-glm-kda-model-refusal.md) subsequently
+stops in CURRENT's prefix-state richness prerequisite, before the candidate runs.
+It is neither a candidate bit mismatch nor a model qualification. This cost pass
+does not override that refusal.

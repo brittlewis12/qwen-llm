@@ -6,6 +6,24 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the current state and evidence index.
 
+## 2026-10-31 - V4.1 Routed Expert Decode Ceiling: Load-Only Is +9.4%
+
+- Diagnostic stand-ins (branch `test/v41-expert-loadonly` `3acc1621`, not for
+  main) replace the shape-specialized routed IQ2_XXS / IQ2_XS / IQ2_S decode
+  kernels with coalesced loads of the same weight rows: no activations,
+  tables or arithmetic, zero output. M5 Ultra, GSQ IQ2_XS, tg64 at depth 0,
+  one build, A/B/B/A with 60 s cool-downs: production 80.27 / 80.27 tok/s,
+  load-only 87.66 / 88.03 (+9.4%; 12.46 -> 11.38 ms/token).
+- All routed dequant, activation and arithmetic work therefore costs about
+  1.08 ms/token in the real stream (~13 us per routed dispatch, 80 per
+  token), not the ~38% of isolated kernel time the 10-26 probe implied. A
+  redesign that keeps the bytes recovers at most that, realistically about
+  half. Above the predeclared 8% kill line, below the 15% bar for a top
+  lever: demoted, not pursued now.
+- The rest of the ~5 ms depth-0 gap to the ~7.2 ms weight-byte floor lies
+  outside routed arithmetic (dense projection efficiency, dependent dispatch
+  drains, attention).
+
 ## 2026-10-31 - V4.1 Cache Admission Artifact Handoff Complete
 
 - Clean maintained `bcdaac78` builds both canonical applications off GPU:

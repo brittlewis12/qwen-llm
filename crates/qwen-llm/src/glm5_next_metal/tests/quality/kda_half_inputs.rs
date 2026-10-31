@@ -4,6 +4,9 @@ use crate::glm5_next::memory::{KdaHalfInputsScope, TensorGateUpScope};
 use crate::glm5_next_metal::tensor_q5_down;
 use crate::tensor::TensorDesc;
 
+#[path = "kda_half_plain.rs"]
+mod plain;
+
 const CAPACITY: usize = 4416;
 const HALF_BYTES: u64 = 16 << 20;
 const Q4_PIN: &[u8] =
@@ -65,6 +68,59 @@ pub(super) fn assert_metadata_pins(tensors: &[TensorDesc]) {
     assert_eq!(tensors.iter().filter(|t| t.name.ends_with(".attn_k_b.weight") || t.name.ends_with(".attn_v_b.weight")).count(), 24);
 }
 
+fn pin_q4_shards(gguf: &GgufFile) -> String {
+    let pin: Value = serde_json::from_slice(Q4_PIN).unwrap();
+    assert_eq!(gguf.shards.len(), 6);
+    assert_eq!(gguf.tensors.len(), 1412);
+    for (shard, expected) in gguf.shards.iter().zip(pin["shards"].as_array().unwrap()) {
+        assert_eq!(
+            shard.path.file_name().unwrap().to_str().unwrap(),
+            expected["name"].as_str().unwrap()
+        );
+        assert_eq!(shard.mmap_len() as u64, expected["size"].as_u64().unwrap());
+    }
+    let header_sha = sha256_hex(gguf.primary_shard().mmap_bytes());
+    assert_eq!(header_sha, pin["shards"][0]["sha256"].as_str().unwrap());
+    header_sha
+}
+
+fn cpu_reserve_total(terms: &[(&str, u64)]) -> u64 {
+    terms
+        .iter()
+        .try_fold(0u64, |n, (_, bytes)| n.checked_add(*bytes))
+        .unwrap()
+}
+
+fn preload_admission(
+    peak: u64,
+    cpu: u64,
+    signals: crate::metal::MetalMemorySignals,
+) -> crate::metal::MetalMemoryAdmission {
+    crate::metal::evaluate_metal_memory_admission_with_cpu_bytes(peak, cpu, 0, signals, true)
+}
+
+fn load_admitted(
+    ctx: &MetalContext,
+    gguf: &GgufFile,
+    model: &crate::glm5_next::Glm5NextModel<'_>,
+    cpu: u64,
+    out: &mut Report,
+) -> Glm5NextWeights {
+    let _allocation = ctx.begin_allocation_transaction();
+    let preflight = preflight_session(ctx, gguf, model, CAPACITY, ROWS).unwrap();
+    assert!(preflight.ledger.scratch_options().kda_half_inputs);
+    let admission = preload_admission(preflight.ledger.peak_bytes(), cpu, ctx.memory_signals());
+    out.emit(json!({"event":"preload_admission","ledger":preflight.ledger.terms(),
+        "cpu_reserve_bytes":cpu,"required_bytes":admission.required_bytes,"admitted":admission.is_admitted(),
+        "reason":admission.reason.as_str(),"cpu_availability_guard":true,
+        "cpu_required_bytes":admission.cpu_required_bytes,"cpu_charged_to_nonzero_process_budget":true}));
+    assert!(
+        admission.is_admitted(),
+        "full model/session/CPU admission refused"
+    );
+    Glm5NextWeights::load(ctx, gguf).unwrap()
+}
+
 fn reserve(vocab: u32) -> (Vec<(&'static str, u64)>, u64) {
     // Parent's two 64-row captures plus one extra prefill row per trajectory.
     let mut terms = cpu_terms(vocab, true);
@@ -72,11 +128,40 @@ fn reserve(vocab: u32) -> (Vec<(&'static str, u64)>, u64) {
         "two_extra_prefill_rows_and_headers",
         2 * (u64::from(vocab) * 4 + size_of::<Vec<f32>>() as u64),
     ));
-    let total = terms
-        .iter()
-        .try_fold(0u64, |n, (_, bytes)| n.checked_add(*bytes))
-        .unwrap();
+    let total = cpu_reserve_total(&terms);
     (terms, total)
+}
+
+#[test]
+fn cpu_kda_half_preload_checks_cpu_availability_not_only_combined_budget() {
+    let mut signals = crate::metal::MetalMemorySignals {
+        recommended_max_bytes: 8 << 30,
+        current_allocated_bytes: 0,
+        process_limit_remaining_bytes: Some(0),
+        host_budget: Some(crate::metal::HostMemoryBudget {
+            physical_bytes: 16 << 30,
+            conservative_available_bytes: 128 << 20,
+            external_gap_bytes: 0,
+            private_shadow_bytes: 0,
+        }),
+    };
+    let (peak, cpu) = (1 << 30, 256 << 20);
+    assert!(
+        crate::metal::evaluate_metal_memory_admission(peak + cpu, 0, signals, true).is_admitted()
+    );
+    let refused = preload_admission(peak, cpu, signals);
+    assert_eq!(
+        refused.reason,
+        crate::metal::MetalMemoryAdmissionReason::HostAvailabilityInsufficient
+    );
+    assert_eq!(refused.cpu_required_bytes, Some(cpu));
+    assert_eq!(refused.required_bytes, Some(peak + cpu));
+    signals
+        .host_budget
+        .as_mut()
+        .unwrap()
+        .conservative_available_bytes = 512 << 20;
+    assert!(preload_admission(peak, cpu, signals).is_admitted());
 }
 
 fn bitwise(a: &[Vec<f32>], b: &[Vec<f32>], vocab: usize) {
@@ -297,18 +382,7 @@ fn m5_kda_half_actual_q4_three_document_bitwise_smoke() {
     let mut out = Report::new("GLM53_KDA_HALF_SMOKE_REPORT", true);
     let docs = documents();
     let gguf = GgufFile::open(std::env::var_os("GLM53_GGUF").unwrap()).expect("open Q4 artifact");
-    let pin: Value = serde_json::from_slice(Q4_PIN).unwrap();
-    assert_eq!(gguf.shards.len(), 6);
-    assert_eq!(gguf.tensors.len(), 1412);
-    for (shard, expected) in gguf.shards.iter().zip(pin["shards"].as_array().unwrap()) {
-        assert_eq!(
-            shard.path.file_name().unwrap().to_str().unwrap(),
-            expected["name"].as_str().unwrap()
-        );
-        assert_eq!(shard.mmap_len() as u64, expected["size"].as_u64().unwrap());
-    }
-    let header_sha = sha256_hex(gguf.primary_shard().mmap_bytes());
-    assert_eq!(header_sha, pin["shards"][0]["sha256"].as_str().unwrap());
+    let header_sha = pin_q4_shards(&gguf);
     let stamps = gguf.revalidate_retained_shard_stamps().unwrap();
     let artifact = Glm5NextArtifactLayout::inspect(&gguf).unwrap();
     assert!(artifact.packed_prefill());
@@ -379,26 +453,7 @@ fn m5_kda_half_actual_q4_three_document_bitwise_smoke() {
         "documents":docs.iter().map(|d|json!({"stratum":d.stratum,"prefix":d.prefix,"tokens_sha256":token_hash(&d.tokens)})).collect::<Vec<_>>(),
         "teacher_forced_steps":CONTINUATION,"compared_rows_per_document":CONTINUATION+1,
         "timed":false,"performance_verdict":null,"state_capture":false}));
-    let weights = {
-        let _allocation = ctx.begin_allocation_transaction();
-        let preflight = preflight_session(&ctx, &gguf, artifact.model(), CAPACITY, ROWS).unwrap();
-        assert!(preflight.ledger.scratch_options().kda_half_inputs);
-        let admission = crate::metal::evaluate_metal_memory_admission_with_cpu_bytes(
-            preflight.ledger.peak_bytes(),
-            cpu,
-            0,
-            ctx.memory_signals(),
-            true,
-        );
-        out.emit(json!({"event":"preload_admission","ledger":preflight.ledger.terms(),
-            "cpu_reserve_bytes":cpu,"required_bytes":admission.required_bytes,"admitted":admission.is_admitted(),
-            "reason":admission.reason.as_str(),"cpu_availability_checked":true,"cpu_charged_to_physical_and_nonzero_process_budget":true}));
-        assert!(
-            admission.is_admitted(),
-            "full model/session/CPU admission refused"
-        );
-        Glm5NextWeights::load(&ctx, &gguf).unwrap()
-    };
+    let weights = load_admitted(&ctx, &gguf, artifact.model(), cpu, &mut out);
     let ledger = Glm5NextSession::plan_memory(&ctx, &weights, CAPACITY, ROWS).unwrap();
     let specs = memory::packed_normalized_half_specs(c, ROWS as u64, ledger.scratch_options());
     assert_eq!(specs.len(), 1);

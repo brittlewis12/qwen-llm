@@ -140,6 +140,41 @@ The only edit to the old quality parent is a new module declaration; removing
 that declaration restores its exact prior bytes. The historical transfer
 test, stock fixtures and old packet bodies/semantics remain unchanged.
 
+## One-Load Ordinary Latency Source
+
+The separate nested `plain::m5_kda_half_one_load_plain_abba_baab` ignored test
+requires a release binary, `MTL_DEBUG_LAYER=0`, global staging flag 1 and a
+fresh private `GLM53_KDA_HALF_PLAIN_REPORT`. It reuses strict Q4 pinning and
+normal CPU-aware full-model admission. A runner must enforce a real external
+240-second limit; the test does not claim it can interrupt in-flight GPU work.
+
+Weights load once. Every fresh session uses capacity 4416, workspace 2048,
+the same ledger-owned 16 MiB half backing, and qualified Q8-wide/Q5-down ON.
+For each prompt length 512/1024/2048/4096, both arms warm separately, followed
+by exactly eight ordinary samples in ABBA+BAAB order. The 512 case is the
+unchanged short control; 4096 uses two 2048-row chunks. Only staging TLS
+differs, and only around prefill, never admission/construction.
+
+Only ordinary `prefill_packed` with its normal wait/readback is clocked.
+Fresh session allocation/drop is outside the timer. Eight normal returned
+CPU logit rows are retained, priced with two live rows, row/session headers,
+report/scalar buffers and frozen-token parse/retention. All checks occur
+after the eight-sample block, with no hashes, JSON, oracle comparisons,
+observers, census, profiling, state captures or additional GPU reads between
+samples. Warm and plain timings remain separate. The final private report
+records all 32 plain timings, both block contrasts and A-control drift;
+there is no promotion threshold or performance verdict.
+
+The strict smoke and ordinary test share a preload admission helper using
+`evaluate_metal_memory_admission_with_cpu_bytes(ledger.peak_bytes(), cpu,
+0, signals, true)`. This preserves reserve amounts and checks CPU availability
+separately, rather than folding CPU bytes into Metal demand. A CPU negative
+control demonstrates the previously missed low-availability refusal.
+
+This ordinary test is source/typecheck-only in this lane. No additional A
+release/LTO build or GPU run is part of this handoff; the integration owner
+will adapt its stage control and build the shared qualification binary.
+
 The witnesses are compile-checked, not executed here. Bitwise equivalence,
 half edge behavior on hardware, model continuation and any performance
 benefit remain unverified. Aliased synthetic outputs are not a model-level
@@ -148,11 +183,14 @@ timing. No GPU, remote operation, merge, deployment or promotion is included.
 
 ## CPU Verification
 
-Offline dev and release `cargo check --workspace --tests` pass. All twelve
-`cpu_kda_half` contracts (the original seven plus five smoke contracts) pass
+Offline dev and release `cargo check --workspace --tests` pass. All fifteen
+`cpu_kda_half` contracts (the original seven, five smoke contracts, one CPU
+availability guard and two ordinary-latency contracts) pass
 both with the environment unset and with global staging flag 1; the nine
 existing dense tensor CPU policy tests also pass.
 Formatting and diff checks pass. No GPU lease is acquired by these checks.
+The source-only ordinary-test handoff runs focused CPU tests with `--profile
+dev`, avoiding the test profile's ThinLTO; no further release binary is linked.
 Five additional device-free smoke contracts cover protocol/capture reserves,
 exact census deltas, finite full-vocabulary bit comparisons and strict named
 expert/MLA metadata pins with malformed-metadata negative controls.

@@ -56,6 +56,10 @@ with KDA recurrence/projection next. It does not identify an exclusive gate/up
 fraction, an isolated MLA projection defect or a roofline-utilization number.
 The span sum's difference from command time is not an idle-time measurement.
 
+The subsequent [mixed-operand MLA gate](2026-10-31-glm-mla-mixed-operand-gate.md)
+validates bounded QK/PV ownership and arithmetic. It does not measure the
+CURRENT attention leaf or establish fused/native MLA savings.
+
 The actual cold gate requests 199265371264 Metal bytes and 1611860564 CPU bytes,
 including the separate diagnostic policies. Each fresh gate requests 4146692096
 Metal bytes with retained weights already live and the same conservative CPU

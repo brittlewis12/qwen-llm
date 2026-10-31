@@ -2559,7 +2559,12 @@ pub fn encode_mat_vec_q6_k_f32(
             detail: format!("weight.dtype = {:?}, expected Q6_K", weight.dtype),
         });
     }
-    let pso = ctx.pipeline("kernel_mat_vec_q6_K_f32")?;
+    let r1 = q6k_r1_enabled() && n_out <= 16_384;
+    let pso = ctx.pipeline(if r1 {
+        "kernel_mat_vec_q6_K_f32_r1"
+    } else {
+        "kernel_mat_vec_q6_K_f32"
+    })?;
     enc.set_pipeline(&pso);
 
     #[repr(C)]
@@ -2579,11 +2584,11 @@ pub fn encode_mat_vec_q6_k_f32(
     enc.set_tensor(2, x);
     enc.set_tensor(3, y);
 
-    const NR0: usize = 2;
+    let nr0: usize = if r1 { 1 } else { 2 };
     const NSG: usize = 2;
     enc.dispatch(
         MTLSize {
-            width: n_out.div_ceil(NR0 * NSG),
+            width: n_out.div_ceil(nr0 * NSG),
             height: 1,
             depth: 1,
         },
@@ -2932,6 +2937,90 @@ pub fn encode_mat_vec_q6_k_batch_f32(
 mod tests {
     use super::*;
     use crate::metal::test_support::*;
+
+    /// The one-row-per-simdgroup Q6_K mat-vec is bitwise equal to the
+    /// two-row kernel on random blocks, including odd row counts.
+    #[test]
+    fn q6k_one_row_kernel_matches_two_row_kernel_bitwise() {
+        let Some(ctx) = crate::test_fixtures::metal_context_or_skip() else {
+            return;
+        };
+        let mut state = 0x6a09_e667_f3bc_c909u64;
+        let mut next = move || {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            state
+        };
+        for (n_in, n_out) in [
+            (2560usize, 2560usize),
+            (2560, 10_240),
+            (512, 2561),
+            (6144, 640),
+            (256, 3),
+        ] {
+            let blocks = n_in / 256 * n_out;
+            let mut bytes = vec![0u8; blocks * 210];
+            for (b, chunk) in bytes.chunks_mut(210).enumerate() {
+                for v in chunk[..208].iter_mut() {
+                    *v = next() as u8;
+                }
+                let d = half::f16::from_f32(0.01 + (b % 7) as f32 * 0.003).to_bits();
+                chunk[208..].copy_from_slice(&d.to_le_bytes());
+            }
+            let x: Vec<f32> = (0..n_in)
+                .map(|_| (next() % 2001) as f32 * 1e-3 - 1.0)
+                .collect();
+            let w = MetalTensor::from_bytes(
+                &ctx,
+                &bytes,
+                vec![n_out as u64, n_in as u64],
+                GgmlType::Q6_K,
+            )
+            .unwrap();
+            let xt = MetalTensor::from_bytes(
+                &ctx,
+                bytemuck::cast_slice(&x),
+                vec![n_in as u64],
+                GgmlType::F32,
+            )
+            .unwrap();
+            let run = |kernel: &str, nr0: usize| {
+                let y = MetalTensor::zeros_f32(&ctx, vec![n_out as u64]).unwrap();
+                let command = ctx.queue.commandBuffer().unwrap();
+                let enc = KernelEncoder::begin(&command);
+                enc.set_pipeline(&ctx.pipeline(kernel).unwrap());
+                enc.set_bytes_slice(0, &[n_in as u32, n_out as u32]);
+                enc.set_tensor(1, &w);
+                enc.set_tensor(2, &xt);
+                enc.set_tensor(3, &y);
+                enc.dispatch(
+                    MTLSize {
+                        width: n_out.div_ceil(nr0 * 2),
+                        height: 1,
+                        depth: 1,
+                    },
+                    MTLSize {
+                        width: 64,
+                        height: 1,
+                        depth: 1,
+                    },
+                );
+                enc.end();
+                command.commit();
+                crate::metal::wait_completed(&command).expect("command buffer completed");
+                tensor_f32_at_offset(&y)
+                    .iter()
+                    .map(|v| v.to_bits())
+                    .collect::<Vec<u32>>()
+            };
+            assert_eq!(
+                run("kernel_mat_vec_q6_K_f32_r1", 1),
+                run("kernel_mat_vec_q6_K_f32", 2),
+                "n_in={n_in} n_out={n_out}"
+            );
+        }
+    }
 
     /// Split-K BF16 rows (aligned, n_in % 8 == 0) and the legacy fallback
     /// (n_in % 8 != 0, or a misaligned weight view) both match an f64
@@ -4452,4 +4541,15 @@ mod tests {
             );
         }
     }
+}
+
+/// `0` keeps two rows per simdgroup for every Q6_K mat-vec; by default
+/// matrices of at most 16384 rows run one row per simdgroup (each row's
+/// lanes, loop order and reduction are unchanged, so outputs are bitwise
+/// equal; small matrices get twice the simdgroups).
+const Q6K_R1_ENV: &str = "QWEN_Q6K_R1";
+
+fn q6k_r1_enabled() -> bool {
+    static R1: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *R1.get_or_init(|| std::env::var(Q6K_R1_ENV).as_deref() != Ok("0"))
 }

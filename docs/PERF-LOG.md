@@ -6,6 +6,23 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the current state and evidence index.
 
+## 2026-10-31 - Native GLM Row-Owned Pair Misses Material Ceiling
+
+- Canonical `4bb008c4` / SDK 26.2 M5 gates pass: canonical Half coefficients,
+  independent raw gate/up F32 bits before clamp, complete pair, F64 samples,
+  guards and preflight. Optional actual shape fits its 5.096875 GiB ledger.
+- Direct complete-pair GPU medians: balanced C 10.128 -> Row 9.168 ms (-9.48%),
+  N64 7.849 -> Row 9.166 (+16.77%); skewed C 11.129 -> Row 9.405 (-15.49%),
+  N64 9.820 -> Row 9.388 (-4.39%). Both halves agree; maximum GPU/host drift
+  is 0.3373%/0.4366%. All 32 timed samples and 16 warmups are retained.
+- Correct and faster than C, but below the 5-6 ms material screen and slower
+  than balanced N64. No model adapter, quality campaign, promotion or geometry
+  sweep. This closes the fixed design, not every possible native-codec lever.
+- Current exclusive application fraction and compiled/DRAM attribution remain
+  unknown. Old unbounded CURRENT-profile packet is not reused; scoped bounded
+  post-C ranking preparation is next. No production source/default changes.
+  [Frozen inputs, direct comparisons, bounds and limits](bench/2026-10-31-glm-row-owned-native-ceiling.md).
+
 ## 2026-10-31 - V4.1 Routed Prefill GEMM Ceiling +53%; Int8 Tile Killed At K=16
 
 - Diagnostic knob (branch `test/v41-int8-tile` `367e1a83`, not for main)

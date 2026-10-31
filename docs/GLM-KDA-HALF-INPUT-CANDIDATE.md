@@ -67,7 +67,8 @@ arms. Both arms must physically own and price the full buffer, including
 baseline inside a false override. Census runs stay outside plain timing;
 normal strict pinning, stamps and fresh private reports remain required.
 Native process flag 0 versus 1 separately measures actual allocation cost.
-No model-level continuation smoke is added by this candidate.
+The test-only review follow-up adds the bounded model smoke described below;
+production code and the frozen native `4ace096b` binary are unchanged.
 
 ## Witnesses And Limits
 
@@ -98,6 +99,30 @@ compact tensor fixtures provide F64 sample oracles, never a whole-weight F32
 oracle. Admission caps prospective fixture physical buffers plus 160 MiB CPU
 allowance plus the existing 512 MiB reserve at 1 GiB. Outputs are streamed
 between two reusable GPU targets; mismatch reporting is bounded too.
+The review follow-up fixes its aligned Q8 weight prefixes to use `view_bytes`,
+not the non-quantized-only `view_subrange` API.
+
+The separate ignored
+`quality::tensor_prefill::kda_half_inputs::m5_kda_half_actual_q4_three_document_bitwise_smoke`
+reuses the parent frozen documents, session/admission, observer and report
+helpers. It requires global staging flag 1, the pinned six-shard Q4 artifact,
+and a fresh private `GLM53_KDA_HALF_SMOKE_REPORT`. Both qualified controls are
+forced ON throughout; only staging TLS differs during prefill, never during
+preflight/session construction or continuation. Every session has capacity
+4416, workspace 2048 and the same ledger-owned 16 MiB half backing. The warm
+2K census requires 34 added conversions, 204 half-input consumers, unchanged
+39 Q5-down calls and otherwise identical dispatch counts, backed by a named
+weight/shape audit. Prefixes are 2048/2048/4352, each followed by all 64 common
+teacher-forced forward calls. Both complete 65-row trajectories (prefill plus
+continuation) are CPU-reserved and compared full-vocabulary, finite and
+bitwise after sessions finish. No tools, 22-document expansion, state capture,
+timing or performance verdict is added. Reports contain hashes/metadata only,
+not raw token IDs, logits, decoded output or private paths. Shard stamps are
+checked unchanged after completion.
+
+The only edit to the old quality parent is a new module declaration; removing
+that declaration restores its exact prior bytes. The historical transfer
+test, stock fixtures and old packet bodies/semantics remain unchanged.
 
 The witnesses are compile-checked, not executed here. Bitwise equivalence,
 half edge behavior on hardware, model continuation and any performance
@@ -107,10 +132,13 @@ timing. No GPU, remote operation, merge, deployment or promotion is included.
 
 ## CPU Verification
 
-Offline dev and release `cargo check --workspace --tests` pass. The seven
-`cpu_kda_half` contracts pass both with the environment unset and with global
-staging flag 1; the nine existing dense tensor CPU policy tests also pass.
+Offline dev and release `cargo check --workspace --tests` pass. All ten
+`cpu_kda_half` contracts (the original seven plus three smoke contracts) pass
+both with the environment unset and with global staging flag 1; the nine
+existing dense tensor CPU policy tests also pass.
 Formatting and diff checks pass. No GPU lease is acquired by these checks.
+Three additional device-free smoke contracts cover protocol/capture reserves,
+exact census deltas and finite full-vocabulary bit comparisons.
 
 The broader `glm5_next::tests::` run is not green: 21 pass, two artifact
 witnesses are ignored, and three unchanged IQ1_M binder/coverage expectations

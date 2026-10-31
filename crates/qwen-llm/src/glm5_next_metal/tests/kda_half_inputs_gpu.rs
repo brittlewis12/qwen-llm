@@ -369,8 +369,8 @@ fn m5_kda_half_complete_eight_op_fanout_bitwise_and_full_copy_cost() {
         let rank_b = empty_guarded(&ctx, 128, rows, GgmlType::F32);
         let beta_a = empty_guarded(&ctx, 64, rows, GgmlType::F32);
         let beta_b = empty_guarded(&ctx, 64, rows, GgmlType::F32);
-        let small = f.w.view_subrange(0, vec![4096, 128]);
-        let beta = f.w.view_subrange(0, vec![4096, 64]);
+        let small = f.w.view_bytes(0, vec![4096, 128]);
+        let beta = f.w.view_bytes(0, vec![4096, 64]);
         let a = consumers(&f.w, &small, &beta, &baseline_y, &rank_a, &beta_a);
         let b = consumers(&f.w, &small, &beta, &f.y, &rank_b, &beta_b);
         let input_hash = hash(&f.x);

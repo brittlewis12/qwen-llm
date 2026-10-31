@@ -723,9 +723,10 @@ fn binder_refuses_structural_drift() {
     let refuse = |f: &dyn Fn(&mut Vec<TensorDesc>)| {
         let mut tensors = release_tensors();
         f(&mut tensors);
-        Glm5NextModel::bind(config(), &tensors)
-            .unwrap_err()
-            .to_string()
+        match Glm5NextModel::bind(config(), &tensors) {
+            Err(err) => err.to_string(),
+            Ok(_) => panic!("binding accepted structural drift"),
+        }
     };
     let find = |t: &mut Vec<TensorDesc>, name: &str| t.iter().position(|d| d.name == name).unwrap();
     assert!(
@@ -765,10 +766,10 @@ fn binder_refuses_structural_drift() {
         })
         .contains("inconsistent")
     );
-    // IQ1_M still lacks an all-slot path; NextN remains census-only.
+    // Known storage layout does not imply an executable expert codec.
     assert!(
         refuse(&|t| {
-            retype(t, "blk.20.ffn_gate_exps.weight", GgmlType::IQ1_M);
+            retype(t, "blk.20.ffn_gate_exps.weight", GgmlType::Q8_1);
         })
         .contains("no executable path")
     );
@@ -789,7 +790,12 @@ fn coverage_matrix_names_remaining_adaptations() {
     // Native all-slot composition covers these without expanding weights.
     assert!(coverage::coverage(TensorRole::ExpertDown, GgmlType::IQ2_S).is_some());
     assert!(coverage::coverage(TensorRole::ExpertGateUp, GgmlType::Q8_0).is_some());
-    assert!(coverage::coverage(TensorRole::ExpertGateUp, GgmlType::IQ1_M).is_none());
+    for role in [TensorRole::ExpertGateUp, TensorRole::ExpertDown] {
+        let cell = coverage::coverage(role, GgmlType::IQ1_M).expect("native IQ1_M experts");
+        assert!(matches!(cell.decode, Support::Kernel(_)));
+        assert!(matches!(cell.prefill, Support::Kernel(_)));
+        assert!(coverage::coverage(role, GgmlType::Q8_1).is_none());
+    }
     assert!(coverage::coverage(TensorRole::LatentAbsorb, GgmlType::Q6_K).is_some());
 }
 
@@ -823,7 +829,7 @@ fn retype(tensors: &mut [TensorDesc], name: &str, dtype: GgmlType) {
 fn binding_accepts_alternate_native_quant_mixtures() {
     use GgmlType::*;
     // Different codecs across roles/layers and within dense FFNs are legal;
-    // routed gate/up pairs still share one codec.
+    // these fixtures use equal-type routed gate/up pairs.
     for (embedding, head, projection, hc, latent, router, down) in [
         (IQ4_NL, F32, Q2_K, Q4_0, Q6_K, Q4_1, IQ3_XXS),
         (IQ4_XS, IQ2_XXS, IQ1_M, BF16, Q2_0, IQ4_NL, Q4_K),
@@ -888,19 +894,26 @@ fn binding_rejects_unimplemented_codecs_not_independently_typed_experts() {
         ("blk.3.attn_v_b.weight", IQ1_M),
         ("blk.3.ffn_gate_inp.weight", Q8_1),
         ("blk.3.indexer.proj.weight", Q1_0),
-        ("blk.3.ffn_gate_exps.weight", IQ1_M), // dense support, no all-slot gate/up
-        ("blk.3.ffn_down_exps.weight", IQ1_M), // dense support, no all-slot down
+        ("blk.3.ffn_gate_exps.weight", Q8_1), // storage layout, no expert decoder
+        ("blk.3.ffn_up_exps.weight", Q8_1),
+        ("blk.3.ffn_down_exps.weight", Q8_1),
         ("output_norm.weight", F16),
     ] {
         let mut tensors = release_tensors();
         retype(&mut tensors, name, dtype);
-        let err = Glm5NextModel::bind(config(), &tensors)
-            .unwrap_err()
-            .to_string();
-        assert!(
-            err.contains(name) && err.contains("no executable path"),
-            "{err}"
-        );
+        let err = match Glm5NextModel::bind(config(), &tensors) {
+            Err(Glm5NextError::Tensor {
+                name: actual,
+                detail,
+            }) => {
+                assert_eq!(actual, name);
+                assert!(detail.contains(&format!("{dtype:?}")), "{detail}");
+                detail
+            }
+            Err(err) => panic!("wrong refusal for {name} {dtype:?}: {err}"),
+            Ok(_) => panic!("binding accepted unsupported {name} {dtype:?}"),
+        };
+        assert!(err.contains("no executable path"), "{err}");
     }
     let mut tensors = release_tensors();
     retype(&mut tensors, "blk.3.ffn_up_exps.weight", IQ3_S);
@@ -908,10 +921,106 @@ fn binding_rejects_unimplemented_codecs_not_independently_typed_experts() {
     mixed
         .validate_execution(ExecutionMode::PackedPrefill)
         .unwrap();
-    // NextN remains census-only, including otherwise unexecutable mixed pairs.
+    // The same unsupported up codec is legal only in census-only NextN.
     let mut tensors = release_tensors();
-    retype(&mut tensors, "blk.45.ffn_up_exps.weight", Q4_K);
-    Glm5NextModel::bind(config(), &tensors).unwrap();
+    let trunk_bytes = Glm5NextModel::bind(config(), &tensors).unwrap().trunk_bytes;
+    let name = "blk.45.ffn_up_exps.weight";
+    retype(&mut tensors, name, Q8_1);
+    let model = Glm5NextModel::bind(config(), &tensors).unwrap();
+    assert!(
+        model
+            .nextn
+            .iter()
+            .any(|t| t.name == name && t.dtype == Q8_1)
+    );
+    assert_eq!(model.trunk_bytes, trunk_bytes);
+    assert!(model.retained_tensors().iter().all(|t| t.name != name));
+    assert!(model.coverage().iter().all(|r| r.dtype != Q8_1));
+    for mode in [ExecutionMode::SerialDecode, ExecutionMode::PackedPrefill] {
+        model.validate_execution(mode).unwrap();
+    }
+}
+
+#[test]
+fn iq1_m_experts_bind_independently_in_both_modes() {
+    use GgmlType::*;
+    // Literal witnesses complement the capability-derived sweep below.
+    for block in [3, 20] {
+        for (gate, up, down) in [
+            (IQ1_M, IQ2_S, IQ3_S),
+            (IQ2_S, IQ1_M, IQ3_S),
+            (IQ2_S, IQ2_S, IQ1_M),
+            (IQ1_M, IQ1_M, IQ1_M),
+            (IQ1_S, IQ1_M, IQ1_M),
+            (IQ1_M, IQ1_S, IQ3_S),
+        ] {
+            let mut tensors = release_tensors();
+            for (bank, dtype) in [("gate", gate), ("up", up), ("down", down)] {
+                retype(
+                    &mut tensors,
+                    &format!("blk.{block}.ffn_{bank}_exps.weight"),
+                    dtype,
+                );
+            }
+            let model = Glm5NextModel::bind(config(), &tensors).unwrap();
+            for mode in [ExecutionMode::SerialDecode, ExecutionMode::PackedPrefill] {
+                model.validate_execution(mode).unwrap();
+            }
+            assert!(model.pending_coverage().is_empty());
+            let rows = model.coverage();
+            for (role, count) in [
+                (
+                    TensorRole::ExpertGateUp,
+                    usize::from(gate == IQ1_M) + usize::from(up == IQ1_M),
+                ),
+                (TensorRole::ExpertDown, usize::from(down == IQ1_M)),
+            ] {
+                let row = rows.iter().find(|r| r.role == role && r.dtype == IQ1_M);
+                if count == 0 {
+                    assert!(row.is_none(), "{block}: {gate:?}/{up:?}/{down:?}");
+                } else {
+                    let row = row.expect("literal IQ1_M expert coverage");
+                    assert_eq!(row.tensors, count);
+                    assert!(matches!(row.coverage.decode, Support::Kernel(_)));
+                    assert!(matches!(row.coverage.prefill, Support::Kernel(_)));
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn iq1_m_expert_support_does_not_bypass_byte_extent_validation() {
+    for name in [
+        "blk.3.ffn_gate_exps.weight",
+        "blk.3.ffn_up_exps.weight",
+        "blk.3.ffn_down_exps.weight",
+    ] {
+        for corruption in 0..3 {
+            let mut tensors = release_tensors();
+            retype(&mut tensors, name, GgmlType::IQ1_M);
+            let tensor = tensors.iter_mut().find(|t| t.name == name).unwrap();
+            match corruption {
+                0 => tensor.n_bytes -= 1,
+                1 => tensor.n_bytes += 1,
+                _ => tensor.data_offset = u64::MAX,
+            }
+            match Glm5NextModel::bind(config(), &tensors) {
+                Err(Glm5NextError::Tensor {
+                    name: actual,
+                    detail,
+                }) => {
+                    assert_eq!(actual, name);
+                    assert!(
+                        detail.contains("byte count or data range is inconsistent"),
+                        "{detail}"
+                    );
+                }
+                Err(err) => panic!("wrong refusal for {name} corruption {corruption}: {err}"),
+                Ok(_) => panic!("binding accepted invalid {name} extent {corruption}"),
+            }
+        }
+    }
 }
 
 #[test]

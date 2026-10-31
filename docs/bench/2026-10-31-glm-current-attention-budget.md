@@ -175,6 +175,9 @@ kernel and hosts stay on their branch. Bounded N64 collection and offline checki
 subsequently pass [the separate runtime gate](2026-10-31-glm-mla-fused-n64.md),
 including independent replay of all active outputs and physical support records.
 That does not qualify N2048 cost, whole-MLA savings or model integration.
+The subsequent [matched N2048 cost gate](2026-10-31-glm-mla-fused-2k-negative.md)
+passes correctness but closes this fixed implementation at approximately 2.93x
+CURRENT latency; no native adapter or model campaign is funded by that result.
 
 Synthetic operands, reused cache residency, the standalone command composition
 and device state can differ from ordinary MLA. This measurement supplies a

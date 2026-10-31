@@ -145,8 +145,9 @@ end-to-end results and zero internal proof errors do not independently expose
 hidden operand maps or QK partials; direct new QK-stage capture remains unfinished.
 No universal arithmetic, spill/occupancy or roofline claim follows.
 
-Next preparation is a separately admitted N2048 correctness gate, then matched
-CURRENT/candidate attention cost in the same balanced packet. Whole-MLA
-continuation still requires both >=30% and >=8 ms saved per block, followed by
-ordinary-model quality and release qualification. N64 acceptance alone authorizes
-none of those GPU stages or production promotion.
+The subsequent [N2048 gate](2026-10-31-glm-mla-fused-2k-negative.md) passes its
+separate correctness checks but is a decisive matched-cost negative. The fixed
+implementation closes without native adaptation, model-quality investment or
+promotion. Whole-MLA continuation would still require both >=30% and >=8 ms saved
+per block, followed by ordinary-model quality and release qualification. N64
+acceptance alone authorizes none of those stages.

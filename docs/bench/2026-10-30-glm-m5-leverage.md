@@ -32,8 +32,10 @@ The next work is ranked by structural opportunity and the missing evidence:
    separately [accepted actual-prepared prefix3/2048 case](2026-10-31-glm-kda-actual-prepared.md):
    ordinary CURRENT, direct CURRENT and value4 match every output/final-state
    word with nonzero asymmetric incoming state. This is not general carry or
-   model-quality proof. The next screen reuses the captured inputs, includes
-   state restoration and requires repeatable >=30% recurrence improvement.
+   model-quality proof. The [captured-input cost screen](2026-10-31-glm-kda-value4-cost.md)
+   clears its>=30% bar with61.24%/60.84% lower median GPU time including state
+   restoration. Next is ordinary PRIMARY conversion and all34-site/carry proof,
+   not a34x application projection or automatic default change.
    The sibling's eligible per-core path still uses a staged serial recurrence;
    a vector-decay WY reformulation is research, not a missing tensor-kernel port.
 3. **Target MLA attention dataflow, not a dominant-transform assumption.**

@@ -98,6 +98,7 @@ are part of this packet.
 | Independent actual replay | `b54c815e316c07c2bf8b3e4a17d33c94f28d4df8784d4f54ff3fd2502b2d754d` |
 
 Process/lease assertions are trusted parent observations, not remote attestation.
-Next is a separately reviewed captured-input cost screen, with the4MiB restore
-inside every timed command and repeatable>=30% improvement required. This witness
-alone authorizes neither timing execution nor a model/default change.
+The subsequent [captured-input cost screen](2026-10-31-glm-kda-value4-cost.md)
+passes with61.24%/60.84% lower reset-inclusive median GPU time. That separate
+result funds ordinary-path conversion, not an application/default claim. This
+correctness witness alone authorizes neither timing nor a model/default change.

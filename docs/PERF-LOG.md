@@ -6,6 +6,23 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the current state and evidence index.
 
+## 2026-10-31 - Native GLM K64 Loader Rejected At Operator Ceiling
+
+- Frozen `fe725642`, canonical release SDK 26.2: all six bounded M5 entries
+  pass, including canonical Half coefficient bits, complete C/N64/K64 pair
+  bits, F64 samples, guards and preflight non-mutation. No model is loaded.
+- At actual H4096/F2048/E288/top8/R2048, cooperative K64 is 7-27% slower
+  than maintained C and 40-44% slower than N64 in GPU medians. Balanced C
+  controls drift 4.15%; both halves still reject K64. Other full-shape control
+  drift is at most 1.70%. Host medians corroborate the negative decision.
+- Reduced source barriers/codec duplication do not offset this design's
+  costs. LDS rises from C/N64's 8/16 KiB to 32 KiB; occupancy/register/DRAM
+  attribution remains unmeasured. Reject the design, not native GGUF execution.
+- No model adapter, expanded bank, quality campaign or default change follows.
+  N64's synthetic operator headroom is not an application gain. Both bounded
+  GPU campaigns complete naturally, with no service or installation changes.
+  [Frozen inputs, all comparisons, budgets and limits](bench/2026-10-31-glm-native-loader-ceiling.md).
+
 ## 2026-10-30 - GLM Routed Tensor Default Integrated
 
 - `9b99a8e3` integrates default decision `342c2864` into local main. Bounded

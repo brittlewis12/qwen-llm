@@ -159,10 +159,7 @@ impl Weights {
 
     pub(super) fn model<'a>(&'a self, ctx: &'a MetalContext) -> Forward<'a> {
         let c = config();
-        let b = bind::Binder {
-            ctx,
-            weights: &self.dense,
-        };
+        let b = bind::Binder::for_test(ctx, &self.dense).unwrap();
         let layers = (0..40)
             .map(|l| {
                 let p = format!("layers.{l}");

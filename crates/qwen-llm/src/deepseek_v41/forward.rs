@@ -4,6 +4,7 @@ mod attention;
 mod attention_gpu;
 mod bind;
 pub(super) mod binding;
+pub use binding::BindingMemoryPlan;
 mod ced;
 mod ced_plan;
 mod columns;

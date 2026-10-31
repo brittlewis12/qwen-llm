@@ -1,5 +1,23 @@
 use super::*;
 
+fn binding_metal_bytes(
+    dtypes: impl IntoIterator<Item = GgmlType>,
+    price: &impl Fn(u64) -> Result<u64>,
+) -> Result<u64> {
+    let dtypes: Vec<_> = dtypes.into_iter().collect();
+    BindingMemoryPlan::new(
+        (0..dtypes.len()).map(|i| binding::LinearSpec {
+            name: i.to_string(),
+            input: 256,
+            output: 1,
+        }),
+        |spec| Ok(dtypes[spec.name.parse::<usize>().unwrap()]),
+        false,
+        price,
+    )
+    .map(|p| p.control_metal_bytes())
+}
+
 #[test]
 fn loader_control_cpu_budget_is_explicit_checked_and_never_charges_shared_weights() {
     let controls = gguf::ControlAccounting {

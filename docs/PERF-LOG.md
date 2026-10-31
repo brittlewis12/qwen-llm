@@ -248,6 +248,21 @@ See also: `docs/PERF-ROADMAP.md` for the current state and evidence index.
   `test/v41-cache1024`, not promoted. Raw:
   `~/qwen-runs/2026-10-29-v41-encoder-depth/append-cache1024-*`.
 
+## 2026-10-30 - V4.1 Resident Cache Admission Repair
+
+- The cold/load quote omitted the persistent F16 cache sum; its dense-preweight
+  scratch term covered only a reusable single matrix. Binding also lacked a
+  cache-construction admission gate. Later live-Metal runtime checks did not
+  establish upfront coverage. This is not a historical OOM/latency claim.
+- Freeze the active binding inventory/cache selection, separately price every
+  cache backing, include it in full cold/load demand, and freshly admit all
+  remaining binding plus known future/caller demand before cache allocation.
+  Direct/serve binding admits construction with its full CPU envelope. Existing
+  source/shadow, runtime/scratch and later admission guards remain unchanged.
+- No kernel, arithmetic, fallback/default or mapping policy change. CPU tests
+  and an ignored bounded allocation/lifetime witness are separated from pending
+  M5 qualification. [Accounting and verification boundary](bench/2026-10-30-v41-cache-admission.md).
+
 ## 2026-10-30 - V4.1 Q5_K Resident F16 Cache: +6.4%, Bitwise Pair
 
 - Per-chunk dequant was the regression, not the dense GEMM. A resident F16

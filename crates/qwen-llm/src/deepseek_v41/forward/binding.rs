@@ -2,6 +2,10 @@
 use super::*;
 use crate::deepseek_v41::gguf::Schedule;
 
+mod memory;
+pub use memory::BindingMemoryPlan;
+
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub(in crate::deepseek_v41) struct LinearSpec {
     pub name: String,
     pub input: usize,

@@ -138,6 +138,7 @@ struct ResidentPreloadUpper {
     storage_view_metal_bytes: u64,
     private_shadow_cpu_bytes: u64,
     binding_control_metal_bytes: u64,
+    resident_cache_metal_bytes: u64,
     bookkeeping_cpu_bytes: u64,
     planner_evidence: Value,
 }
@@ -177,6 +178,7 @@ fn preload_report(cold: &ColdPrefillPreflight) -> AResult<(RuntimeUpper, Residen
         storage_view_metal_bytes: storage.metal_view_bytes,
         private_shadow_cpu_bytes: storage.private_shadow_bytes,
         binding_control_metal_bytes: cold.binding_metal_bytes,
+        resident_cache_metal_bytes: cold.binding_plan.cache_metal_bytes(),
         bookkeeping_cpu_bytes: cold.binding_cpu_bytes,
         planner_evidence: json!({"page_size": storage.page_size,
             "soft_coalescing_target": storage.soft_coalescing_target,
@@ -709,6 +711,8 @@ fn run_pair(soft_target: Option<usize>) -> AResult<()> {
                 "full_incremental_cpu_bytes": cold.full_incremental_cpu_bytes, "ced": cold.ced,
                 "runtime_metal_bytes": cold.runtime_metal_bytes, "runtime_cpu_bytes": cold.runtime_cpu_bytes,
                 "binding_cpu_bytes": cold.binding_cpu_bytes, "caller_cpu_bytes": cold.caller_cpu_bytes,
+                "resident_cache_metal_bytes": cold.binding_plan.cache_metal_bytes(),
+                "resident_cache_count": cold.binding_plan.cache_count(),
                 "loader_control_cpu_bytes": cold.loader_control_cpu_bytes,
                 "descriptor_window_cpu_bytes": cold.descriptor_window_cpu_bytes,
                 "retained_summary_cpu_bytes": cold.retained_summary_cpu_bytes,
@@ -758,9 +762,14 @@ fn run_pair(soft_target: Option<usize>) -> AResult<()> {
         );
         report["realized_retained_weight_resources"] =
             serde_json::to_value(&weights.retained_resources)?;
-        let model =
-            Forward::from_resident(&ctx, &weights, weights.token_map.clone(), weights.raw_pad)
-                .map_err(anyhow::Error::msg)?;
+        let model = Forward::from_resident_with_cold_plan(
+            &ctx,
+            &weights,
+            weights.token_map.clone(),
+            weights.raw_pad,
+            &cold,
+        )
+        .map_err(anyhow::Error::msg)?;
         let request = model.plan_request_from_cold(&cold)?;
         report["stage"] = json!("current_full");
         write_report(&mut report_file, &report)?;

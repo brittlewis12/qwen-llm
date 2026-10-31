@@ -830,9 +830,14 @@ pub(crate) fn run(
         weights.config.vocab == tokenizer.n_vocab() as usize,
         "V4.1 tokenizer/model vocabulary mismatch"
     );
-    let forward =
-        Forward::from_resident(&ctx, &weights, weights.token_map.clone(), weights.raw_pad)
-            .map_err(anyhow::Error::msg)?;
+    let forward = Forward::from_resident_with_cold_plan(
+        &ctx,
+        &weights,
+        weights.token_map.clone(),
+        weights.raw_pad,
+        &cold,
+    )
+    .map_err(anyhow::Error::msg)?;
     let load_ms = loading.elapsed().as_secs_f64() * 1e3;
     let request_plan = forward.plan_request_from_cold(&cold)?;
     let mut state = forward.new_state_from_plan(&request_plan)?;

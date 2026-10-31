@@ -35,6 +35,8 @@ pub struct ColdPrefillPlan {
     /// Retained per-linear native controls, priced as separate Metal resources.
     /// Excludes shared resident weight views and per-request runtime buffers.
     pub binding_metal_bytes: u64,
+    /// Frozen active controls/cache inventory, including separately priced F16 copies.
+    pub binding_plan: BindingMemoryPlan,
     pub caller_cpu_bytes: u64,
     /// Full cold peak, including the resident/binding and runtime phases.
     pub required_metal_bytes: u64,
@@ -71,6 +73,26 @@ impl std::ops::Deref for ColdPrefillPreflight {
 }
 
 impl ColdPrefillPlan {
+    fn with_binding_plan(
+        mut self,
+        binding_plan: BindingMemoryPlan,
+    ) -> std::result::Result<Self, PlanError> {
+        let cache = binding_plan.cache_metal_bytes();
+        self.required_metal_bytes = self
+            .required_metal_bytes
+            .checked_add(cache)
+            .ok_or(PlanError::Overflow)?;
+        self.load_metal_bytes = self
+            .load_metal_bytes
+            .checked_add(cache)
+            .ok_or(PlanError::Overflow)?;
+        self.required_metal_bytes
+            .checked_add(self.required_cpu_bytes)
+            .ok_or(PlanError::Overflow)?;
+        self.binding_plan = binding_plan;
+        Ok(self)
+    }
+
     /// Allow only the load/binding phase, after checking the complete future
     /// peak's capacity. Neither result reserves memory for a later phase.
     fn assess_load_fixed(
@@ -186,7 +208,7 @@ impl ColdPrefillPlan {
     }
 
     #[cfg(test)]
-    pub(super) fn into_strict_for_test(
+    pub(in crate::deepseek_v41) fn into_strict_for_test(
         self,
         signals: metal::MetalMemorySignals,
     ) -> std::result::Result<ColdPrefillPreflight, LoadError> {
@@ -268,6 +290,7 @@ pub fn plan_cold_prefill_with_target(
         executions,
         caller_cpu_bytes,
         metal::moe_grouped_tensor_selected(ctx),
+        prefill::dense_preweight_cache_selected(),
         &|bytes| {
             if bytes == 0 {
                 return Ok(0);
@@ -281,7 +304,7 @@ pub fn plan_cold_prefill_with_target(
 }
 
 #[derive(Debug)]
-enum PlanError {
+pub(in crate::deepseek_v41) enum PlanError {
     Load(LoadError),
     Overflow,
 }
@@ -437,13 +460,14 @@ pub(in crate::deepseek_v41) fn preflight_with_pricing(
         executions,
         caller_cpu_bytes,
         half_selected,
+        prefill::dense_preweight_cache_selected(),
         price,
     )
     .map_err(|error| error.with_signals(signals))?
     .into_strict(signals)
 }
 
-fn plan_with_pricing(
+pub(in crate::deepseek_v41) fn plan_with_pricing(
     gguf: &GgufFile,
     resident_storage: ResidentStoragePlan,
     prompt_rows: usize,
@@ -451,6 +475,7 @@ fn plan_with_pricing(
     executions: &[PrefillExecution],
     caller_cpu_bytes: u64,
     half_selected: bool,
+    cache_enabled: bool,
     price: &impl Fn(u64) -> Result<u64>,
 ) -> std::result::Result<ColdPrefillPlan, PlanError> {
     if prompt_rows == 0 {
@@ -467,6 +492,20 @@ fn plan_with_pricing(
     .map_err(LoadError::Invalid)?;
     let descriptor_window = summary.shared_cpu_envelope(descriptor_window);
     let preferred = super::prefill_rows_for_resident(p.bytes.resident_bytes());
+    let binding_cpu_bytes =
+        binding_cpu_bytes(gguf, &p, descriptor_window).map_err(LoadError::Invalid)?;
+    let binding_plan = BindingMemoryPlan::new(
+        binding::linear_inventory(&p.config, &p.schedule, &p.engram_hash),
+        |spec| {
+            p.binding_linears
+                .get(&spec.name)
+                .copied()
+                .ok_or_else(|| "missing binding linear dtype".into())
+        },
+        cache_enabled,
+        price,
+    )
+    .map_err(LoadError::Invalid)?;
     let calculate = |full_chunk_rows, executions: &[PrefillExecution]| -> Result<_> {
         let output = p
             .config
@@ -487,18 +526,7 @@ fn plan_with_pricing(
             half_selected,
             price,
         )?;
-        let metadata_bytes = serde_json::to_vec(gguf.model.metadata())
-            .map_err(|e| e.to_string())?
-            .len() as u64;
-        let binding_cpu_bytes = sum(&[
-            product(metadata_bytes, 8)?,
-            product(p.config.vocab as u64, 32)?,
-            binding_vectors_bytes(&p.config, p.schedule.layers)?,
-            128 * 1024 * 1024,
-            descriptor_window,
-            loader_control_cpu_bytes(p.controls)?,
-        ])?;
-        let binding_metal_bytes = binding_metal_bytes(p.binding_linears.values().copied(), price)?;
+        let binding_metal_bytes = binding_plan.control_metal_bytes();
         Ok((request, full, ced, binding_cpu_bytes, binding_metal_bytes))
     };
     let build = |full_chunk_rows,
@@ -528,7 +556,8 @@ fn plan_with_pricing(
             binding_cpu_bytes,
             binding_metal_bytes,
             caller_cpu_bytes,
-        )?;
+        )?
+        .with_binding_plan(binding_plan.clone())?;
         combined.full_chunk_rows = full_chunk_rows;
         combined.geometry = PrefillGeometry {
             start: 0,
@@ -571,23 +600,27 @@ fn loader_control_cpu_bytes(controls: gguf::ControlAccounting) -> Result<u64> {
     ])
 }
 
-fn binding_metal_bytes(
-    dtypes: impl IntoIterator<Item = GgmlType>,
-    price: &impl Fn(u64) -> Result<u64>,
+pub(in crate::deepseek_v41) fn binding_cpu_bytes(
+    gguf: &GgufFile,
+    p: &gguf::Plan,
+    descriptor_window: u64,
 ) -> Result<u64> {
-    dtypes.into_iter().try_fold(0, |total, dtype| {
-        let bytes = binding::native_control_bytes(dtype)?;
-        if bytes == 0 {
-            return Ok(total);
-        }
-        // Each call allocates its own buffer; rounding the aggregate underprices it.
-        sum(&[total, price(bytes)?])
-    })
+    let metadata_bytes = serde_json::to_vec(gguf.model.metadata())
+        .map_err(|e| e.to_string())?
+        .len() as u64;
+    sum(&[
+        product(metadata_bytes, 8)?,
+        product(p.config.vocab as u64, 32)?,
+        binding_vectors_bytes(&p.config, p.schedule.layers)?,
+        128 * 1024 * 1024,
+        descriptor_window,
+        loader_control_cpu_bytes(p.controls)?,
+    ])
 }
 
 fn binding_vectors_bytes(c: &Config, layers: usize) -> Result<u64> {
     // Up to 64 F32 control/vector widths per layer, including separate Engram
-    // gates and grouped projection descriptors. Matrices remain shared views.
+    // gates and grouped projection descriptors. F16 matrix caches are priced separately.
     let width = [
         c.hidden,
         c.query_rank,
@@ -667,6 +700,7 @@ fn combine_plan(
         descriptor_window_cpu_bytes: 0,
         retained_summary_cpu_bytes: 0,
         binding_metal_bytes,
+        binding_plan: BindingMemoryPlan::default(),
         caller_cpu_bytes,
         required_metal_bytes,
         required_cpu_bytes,

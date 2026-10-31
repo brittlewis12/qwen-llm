@@ -179,10 +179,7 @@ impl TinyWeights {
     fn model<'a>(&'a self, ctx: &'a MetalContext) -> Forward<'a> {
         let c = toy::config();
         let schedule = schedule();
-        let b = bind::Binder {
-            ctx,
-            weights: &self.dense,
-        };
+        let b = bind::Binder::for_test(ctx, &self.dense).unwrap();
         let mut hash = engram::HashConfig::default();
         hash.layers.truncate(1);
         hash.layers[0].layer = 0;

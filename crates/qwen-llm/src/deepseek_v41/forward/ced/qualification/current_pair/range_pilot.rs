@@ -503,9 +503,14 @@ fn run() -> AResult<()> {
             "loaded normalized controls changed"
         );
         report["retained_resources"] = serde_json::to_value(&weights.retained_resources)?;
-        let model =
-            Forward::from_resident(&ctx, &weights, weights.token_map.clone(), weights.raw_pad)
-                .map_err(anyhow::Error::msg)?;
+        let model = Forward::from_resident_with_cold_plan(
+            &ctx,
+            &weights,
+            weights.token_map.clone(),
+            weights.raw_pad,
+            &cold,
+        )
+        .map_err(anyhow::Error::msg)?;
         let request = model.plan_request_from_cold(&cold)?;
         let mut full = None;
         let mut old = None;

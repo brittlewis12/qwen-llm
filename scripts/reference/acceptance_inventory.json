@@ -5416,5 +5416,152 @@
     "class": "gpu",
     "ignored": true,
     "reason": "Explicitly ignored Metal toy-model pre-spawn panic witness: acquires the GPU lease and context and checks committed-command drain on unwind, poisoned state and a healthy followup; excluded from CPU acceptance."
+  },
+  {
+    "target": "lib",
+    "name": "deepseek_v41::forward::bind::tests::bounded_gpu_cache_backings_and_group_views_match_independent_quote",
+    "class": "gpu",
+    "ignored": true,
+    "reason": "Self-leased M5-only source/cache/control allocation and alias lifetime witness; normal upfront and fresh binding admission, <=1 GiB combined toy quote including 128 MiB CPU reserve; never CPU acceptance."
+  },
+  {
+    "target": "lib",
+    "name": "deepseek_v41::forward::binding::memory::tests::binding_aggregate_refuses_before_factory_at_each_one_byte_boundary",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Reviewed resident-cache active inventory, physical pricing, frozen selection or synthetic admission/factory boundary; tiny GGUF fixture or pure host values only, no Metal context or model payload."
+  },
+  {
+    "target": "lib",
+    "name": "deepseek_v41::forward::binding::memory::tests::cache_plan_rejects_overflow_device_limit_unsupported_and_duplicate_inventory",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Reviewed resident-cache active inventory, physical pricing, frozen selection or synthetic admission/factory boundary; tiny GGUF fixture or pure host values only, no Metal context or model payload."
+  },
+  {
+    "target": "lib",
+    "name": "deepseek_v41::forward::binding::memory::tests::cache_selection_is_frozen_and_each_buffer_is_priced_separately",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Reviewed resident-cache active inventory, physical pricing, frozen selection or synthetic admission/factory boundary; tiny GGUF fixture or pure host values only, no Metal context or model payload."
+  },
+  {
+    "target": "lib",
+    "name": "deepseek_v41::forward::binding::memory::tests::direct_binding_admits_only_construction_and_runtime_counts_live_cache_once",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Reviewed resident-cache active inventory, physical pricing, frozen selection or synthetic admission/factory boundary; tiny GGUF fixture or pure host values only, no Metal context or model payload."
+  },
+  {
+    "target": "lib",
+    "name": "deepseek_v41::forward::binding::memory::tests::grouped_output_has_one_cache_backing_for_eight_views",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Reviewed resident-cache active inventory, physical pricing, frozen selection or synthetic admission/factory boundary; tiny GGUF fixture or pure host values only, no Metal context or model payload."
+  },
+  {
+    "target": "lib",
+    "name": "deepseek_v41::gguf::tests::binding_preflight::resident_cache_cold_inventory_uses_active_normalized_shapes_head_not_embedding",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Reviewed resident-cache active inventory, physical pricing, frozen selection or synthetic admission/factory boundary; tiny GGUF fixture or pure host values only, no Metal context or model payload."
+  },
+  {
+    "target": "lib",
+    "name": "deepseek_v41::gguf::tests::binding_preflight::resident_cache_full_cold_boundaries_refuse_before_weight_factory",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Reviewed resident-cache active inventory, physical pricing, frozen selection or synthetic admission/factory boundary; tiny GGUF fixture or pure host values only, no Metal context or model payload."
+  },
+  {
+    "target": "lib",
+    "name": "deepseek_v41::gguf::tests::binding_preflight::resident_cache_postbinding_runtime_uses_live_cache_once_and_keeps_cpu_reserves",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Reviewed actual cold planner/runtime gate with tiny GGUF metadata and synthetic live source/cache/shadow signals; no Metal context or model."
+  },
+  {
+    "target": "qwen",
+    "name": "serve::backend_v41::mapping::tests::byte_conversion_overflow_fails",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Pre-existing maintained-main discovery omission reviewed during cache-admission repair: pure serve mapping/parser arithmetic and sparse metadata, or CPU-only fake native-result/profile-scope controls; no Metal context or execution."
+  },
+  {
+    "target": "qwen",
+    "name": "serve::backend_v41::mapping::tests::effective_target_rounds_to_pages_and_clamps_to_device",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Pre-existing maintained-main discovery omission reviewed during cache-admission repair: pure serve mapping/parser arithmetic and sparse metadata, or CPU-only fake native-result/profile-scope controls; no Metal context or execution."
+  },
+  {
+    "target": "qwen",
+    "name": "serve::backend_v41::mapping::tests::integer_overflow_fails",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Pre-existing maintained-main discovery omission reviewed during cache-admission repair: pure serve mapping/parser arithmetic and sparse metadata, or CPU-only fake native-result/profile-scope controls; no Metal context or execution."
+  },
+  {
+    "target": "qwen",
+    "name": "serve::backend_v41::mapping::tests::invalid_empty_negative_and_non_decimal_values_fail",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Pre-existing maintained-main discovery omission reviewed during cache-admission repair: pure serve mapping/parser arithmetic and sparse metadata, or CPU-only fake native-result/profile-scope controls; no Metal context or execution."
+  },
+  {
+    "target": "qwen",
+    "name": "serve::backend_v41::mapping::tests::largest_representable_mib_succeeds",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Pre-existing maintained-main discovery omission reviewed during cache-admission repair: pure serve mapping/parser arithmetic and sparse metadata, or CPU-only fake native-result/profile-scope controls; no Metal context or execution."
+  },
+  {
+    "target": "qwen",
+    "name": "serve::backend_v41::mapping::tests::positive_mib_converts_to_bytes",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Pre-existing maintained-main discovery omission reviewed during cache-admission repair: pure serve mapping/parser arithmetic and sparse metadata, or CPU-only fake native-result/profile-scope controls; no Metal context or execution."
+  },
+  {
+    "target": "qwen",
+    "name": "serve::backend_v41::mapping::tests::sparse_cpu_plan_keeps_oversized_singletons_and_payload",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Pre-existing maintained-main discovery omission reviewed during cache-admission repair: pure serve mapping/parser arithmetic and sparse metadata, or CPU-only fake native-result/profile-scope controls; no Metal context or execution."
+  },
+  {
+    "target": "qwen",
+    "name": "serve::backend_v41::mapping::tests::unset_and_zero_disable",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Pre-existing maintained-main discovery omission reviewed during cache-admission repair: pure serve mapping/parser arithmetic and sparse metadata, or CPU-only fake native-result/profile-scope controls; no Metal context or execution."
+  },
+  {
+    "target": "qwen",
+    "name": "serve::backend_v41::native_failure_tests::native_fault_tracking_survives_cancellation_remapping",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Pre-existing maintained-main discovery omission reviewed during cache-admission repair: pure serve mapping/parser arithmetic and sparse metadata, or CPU-only fake native-result/profile-scope controls; no Metal context or execution."
+  },
+  {
+    "target": "qwen",
+    "name": "serve::backend_v41::native_failure_tests::tracking_preserves_native_results_and_error_identity",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Pre-existing maintained-main discovery omission reviewed during cache-admission repair: pure serve mapping/parser arithmetic and sparse metadata, or CPU-only fake native-result/profile-scope controls; no Metal context or execution."
+  },
+  {
+    "target": "qwen",
+    "name": "serve::backend_v41::prefill_timing_tests::disabled_timing_preserves_results_and_does_not_open_a_scope",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Pre-existing maintained-main discovery omission reviewed during cache-admission repair: pure serve mapping/parser arithmetic and sparse metadata, or CPU-only fake native-result/profile-scope controls; no Metal context or execution."
+  },
+  {
+    "target": "qwen",
+    "name": "serve::backend_v41::prefill_timing_tests::enabled_timing_preserves_errors_and_an_existing_scope",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Pre-existing maintained-main discovery omission reviewed during cache-admission repair: pure serve mapping/parser arithmetic and sparse metadata, or CPU-only fake native-result/profile-scope controls; no Metal context or execution."
   }
 ]

@@ -1,4 +1,4 @@
-//! Default-off GLM gate/up transfer; the down policy remains independent.
+//! Default-on bounded GLM gate/up transfer; the down policy remains independent.
 
 use super::{
     memory,

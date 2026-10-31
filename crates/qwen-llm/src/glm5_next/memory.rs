@@ -30,8 +30,8 @@ crate::env_flag!(
 );
 
 crate::env_flag!(
-    /// Opt-in N32 tensor gate/up using shared normalized Half scratch.
-    default_off tensor_gate_up_flag,
+    /// Default-on bounded M5 Fast/Half N32 Q4_K/Q5_K routed gate/up using shared normalized Half activations; 0 restores generic gate/up without changing the current down policy. Eligibility, tensor/global rollback, Q5-down rollback, binding and capacity guards remain mandatory. Does not enable KDA staging.
+    default_on tensor_gate_up_flag,
     "QWEN_GLM53_TENSOR_GATE_UP"
 );
 
@@ -126,7 +126,7 @@ impl ScratchOptions {
     }
 
     /// Unknown-device planning deliberately assumes an eligible M5. This can
-    /// overprice a non-M5 plan with the opt-in set, but never underprices M5.
+    /// overprice a non-M5 plan with either owner enabled, but never underprices M5.
     pub(crate) fn device_free(generic_hc: bool) -> Self {
         Self::for_tensor_tier(generic_hc, true)
     }

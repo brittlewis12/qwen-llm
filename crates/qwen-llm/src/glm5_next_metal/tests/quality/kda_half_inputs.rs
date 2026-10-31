@@ -374,6 +374,11 @@ fn m5_kda_half_actual_q4_three_document_bitwise_smoke() {
         Ok("1")
     );
     assert!(memory::kda_half_inputs_enabled());
+    assert_eq!(
+        std::env::var("QWEN_GLM53_TENSOR_GATE_UP").as_deref(),
+        Ok("0"),
+        "A-only replay requires explicit routed rollback"
+    );
     let _routed_off = TensorGateUpScope::new(false);
     let _lease = production_lease();
     let _dense = tensor_prefill::Scope::new(true);

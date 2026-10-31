@@ -51,12 +51,21 @@ fn environment_for(validation: bool) {
             "qualified control {key} must remain ON"
         );
     }
-    assert!(crate::env_flag::read_default_off(
+    assert!(crate::env_flag::read_default_on(
         "QWEN_GLM53_TENSOR_GATE_UP"
     ));
+    assert_eq!(
+        std::env::var("QWEN_GLM53_TENSOR_GATE_UP").as_deref(),
+        Ok("1"),
+        "replay requires explicit routed storage policy"
+    );
     assert!(!crate::env_flag::read_default_off(
         "QWEN_GLM53_KDA_HALF_INPUTS"
     ));
+    assert_eq!(
+        std::env::var("QWEN_GLM53_KDA_HALF_INPUTS").as_deref(),
+        Ok("0")
+    );
     assert!(std::env::var_os("GLM53_GGUF").is_some());
     assert_plain();
 }

@@ -1,8 +1,20 @@
 # Routed Gate/Up Qualification Tranche
 
-This tranche changes tests and generated caller documentation only. It does
-not change production kernels, arithmetic, defaults, allocation, decode or
-native benchmark code. The parent owns independent review and all GPU runs.
+## Current Status
+
+The parent completed these EEA protocols and authorizes bounded C default ON
+within the existing M5 Fast/Half policy. This is not formal NI or equivalence;
+long-stratum uncertainty and 4K timing drift remain explicit. A remains default
+OFF and A+C is not qualified. The [authoritative result and default record](bench/2026-10-30-glm-routed-tensor-gate-up.md)
+owns the current decision, including A's separate approximately 1.44% stable
+standalone gain and the requirement to replay A with C=0.
+
+The qualification tranche below was test/documentation-only at measured source
+`eea1d369`; it did not change production kernels, arithmetic, defaults,
+allocation, decode or native benchmark code. The later source-only promotion
+changes C's cached default, not these protocols' math or sampling. Explicit
+C=1/A=0 and C=0/A=1 replay guards remain required even after the default flip.
+The parent owns independent review, all GPU runs and final release integration.
 
 ## Source Dependencies
 
@@ -159,11 +171,12 @@ is a replay-hygiene correction, not a reinterpretation of already observed
 numerical rows or a claim that the healthy M5 encountered an actual failure.
 The historical transfer helper remains unchanged.
 
-Commit source and complete CPU/type/format/generator checks before the one
-authorized `cargo test --locked --offline --release -p qwen-llm --lib --no-run`
-build. The parent arranges independent review of the source while that build
-runs. No new native build, GPU run, remote change,
-main merge or default promotion is delegated here.
+The historical shared test build followed clean source/CPU/type/format/ENV
+checks and parent review, using
+`cargo test --locked --offline --release -p qwen-llm --lib --no-run`.
+The later default promotion performs CPU/type/document checks only: no new
+library LTO, app/native build, GPU run or service action. Final maintained-main
+integration and clean release handoff remain parent-owned.
 
 ## Imported A Entry Points
 
@@ -182,7 +195,7 @@ fresh external 240-second outer limit. A's imported ordinary test owns its
 own order, reserve and report helpers; C does not duplicate it. Never use a
 broad ignored-test filter that mixes A/C globals or validation modes.
 
-## Local Verification
+## Historical Local Verification (EEA)
 
 - Locked/offline dev and release workspace test typechecks pass.
 - The selected unleased CPU contracts pass: 26 maintained GLM cases (two
@@ -195,5 +208,6 @@ broad ignored-test filter that mixes A/C globals or validation modes.
 - Production is byte-unchanged from 6991; historical packet/helper bodies and
   the upstream Q8 `view_bytes` fixture are preserved. The old native benchmark
   is not rebuilt, and a separate copy preserves the frozen 6991 test binary.
-- New quality, strict tools and both heated latency protocols remain GPU-
-  unexecuted locally. The parent owns independent review and remote execution.
+- These GPU protocols were unexecuted locally; the parent subsequently
+  completed the reported EEA runs. See the authoritative result record rather
+  than treating the earlier local-only handoff as the current qualification.

@@ -40,12 +40,21 @@ fn prefill(
 fn m5_gate_up_actual_q4_three_document_smoke_profile_plain_abba() {
     environment();
     assert!(
-        crate::env_flag::read_default_off("QWEN_GLM53_TENSOR_GATE_UP"),
-        "global opt-in owns identical scratch in BOTH arms"
+        crate::env_flag::read_default_on("QWEN_GLM53_TENSOR_GATE_UP"),
+        "global routed policy owns identical scratch in BOTH arms"
+    );
+    assert_eq!(
+        std::env::var("QWEN_GLM53_TENSOR_GATE_UP").as_deref(),
+        Ok("1"),
+        "replay requires explicit routed storage policy"
     );
     assert!(!crate::env_flag::read_default_off(
         "QWEN_GLM53_KDA_HALF_INPUTS"
     ));
+    assert_eq!(
+        std::env::var("QWEN_GLM53_KDA_HALF_INPUTS").as_deref(),
+        Ok("0")
+    );
     for key in ["QWEN_GLM53_DENSE_Q8_WIDE", "QWEN_GLM53_TENSOR_Q5_DOWN"] {
         assert!(
             crate::env_flag::read_default_on(key),
@@ -147,7 +156,7 @@ fn m5_gate_up_actual_q4_three_document_smoke_profile_plain_abba() {
         "arms":LABELS,"q8_wide":true,"q5_down":true,"kda_execution":false,
         "q8_mla_inventory":{"main_blocks":(3..45).step_by(4).collect::<Vec<_>>(),"unused_mtp_block":45,
             "serialized_banks":24,"dtype":"Q8_0","attn_k_b_shape":[256,512,64],"attn_v_b_shape":[512,256,64]},
-        "scope":"only gate/up TLS differs during prefill; global gate/up opt-in allocates one shared 16MiB Half buffer in both arms; ordinary decode outside scopes",
+        "scope":"only gate/up TLS differs during prefill; explicit global gate/up policy reserves one shared 16MiB Half buffer in both arms; ordinary decode outside scopes",
         "documents":docs.iter().map(|d|json!({"path":d.path,"stratum":d.stratum,"prefix":d.prefix,"tokens_sha256":token_hash(&d.tokens)})).collect::<Vec<_>>(),
         "capacity":capacity,"workspace_rows":ROWS,"cpu_terms":terms,"cpu_reserve_bytes":cpu,
         "tensor_tier":format!("{:?}",ctx.tensor_ops_status()),

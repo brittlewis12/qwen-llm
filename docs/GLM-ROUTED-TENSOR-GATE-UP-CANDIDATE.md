@@ -1,8 +1,18 @@
 # GLM Routed Tensor Gate/Up Candidate
 
-Base: exactly `4ace096b47cb1a9e9a5a48c45ededfe599023e1c`. Isolated branch:
-`perf/glm-routed-tensor-up`. This is an unqualified, default-off candidate;
-there is no performance or quality verdict and no default promotion.
+## Current Status
+
+The parent authorizes bounded C default ON under the existing M5 Fast/Half
+policy, not formal noninferiority or equivalence. A KDA staging stays OFF and
+A+C is not qualified. See the [authoritative decision and evidence](bench/2026-10-30-glm-routed-tensor-gate-up.md)
+for the stable 1K/2K result, descriptive quality intervals and 4K drift limits.
+This promotion changes only the cached C default and its policy documentation;
+no new GPU, LTO, native build or service action is part of the source change.
+
+The historical candidate base is exactly
+`4ace096b47cb1a9e9a5a48c45ededfe599023e1c`, isolated branch
+`perf/glm-routed-tensor-up`. Default-off and pending-qualification descriptions
+in the preparation/build record below describe that earlier unit.
 
 This document records the original bounded candidate/6991 build protocol.
 The later test-only extended quality and shared A/C one-load qualification
@@ -11,7 +21,7 @@ release library-test rebuild, not another native benchmark build.
 
 ## Contract
 
-- `QWEN_GLM53_TENSOR_GATE_UP=1` requests the existing N32 Q4_K/Q5_K
+- The default-on `QWEN_GLM53_TENSOR_GATE_UP` policy requests the existing N32 Q4_K/Q5_K
   F16-activation tensor gate and clamped-up kernels. Two dispatches remain;
   this is not a launch or weight-reread fusion. No shaders, expanded weights,
   codecs, decode paths, V4 paths, or precision modes change.
@@ -28,6 +38,9 @@ release library-test rebuild, not another native benchmark build.
   generic down -> post-down routing-weighted sum. The unchanged epilogue is
   `silu(min(gate, limit)) * clamp(up, -limit, limit)`. Q5-down rollback
   explicitly declines the new gate/up candidate rather than overriding down.
+- `QWEN_GLM53_TENSOR_GATE_UP=0` is the independent cached rollback to generic
+  gate/up with the current down policy. Set it before process startup/admission;
+  the value latches on first read. Shared Half ownership never enables A.
 - All physical extents, devices, alignment, overflow, serial encoder and
   writable-output disjointness are checked before conversion/bucketing.
   Converter, gate, up, effective down, bucket and weighted-sum pipelines are
@@ -46,7 +59,11 @@ Full-session validation separately pins the release KDA/MLA block layout and
 rejects a synthetic all-MLA config. Tests verify the no-KDA case at the shared
 buffer-list/pricing boundary; this candidate does not broaden model support.
 
-## Build And Qualification
+## Historical Build And Qualification
+
+The following commands record the earlier 6991 build handoff, not instructions
+to rebuild during default promotion. The parent owns the later clean final
+maintained-main release handoff; this source-only promotion does not build it.
 
 No GPU execution, remote work, benchmark execution, installation, publication,
 or main merge is part of this handoff. Local offline typechecks cannot

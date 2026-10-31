@@ -225,7 +225,7 @@ fn cpu_gate_up_shared_half_owners_price_once_without_kda_metadata() {
     assert!(!memory::ScratchOptions::for_tensor_tier(false, false).tensor_gate_up);
     assert_eq!(
         memory::ScratchOptions::device_free(false).tensor_gate_up,
-        crate::env_flag::read_default_off("QWEN_GLM53_TENSOR_GATE_UP")
+        crate::env_flag::read_default_on("QWEN_GLM53_TENSOR_GATE_UP")
     );
 }
 

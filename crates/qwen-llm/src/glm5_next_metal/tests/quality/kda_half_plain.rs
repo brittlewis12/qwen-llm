@@ -168,6 +168,11 @@ fn m5_kda_half_one_load_plain_abba_baab() {
     assert!(crate::env_flag::read_default_on("QWEN_MATMAT_Q6_K_N64"));
     assert!(memory::kda_half_inputs_enabled());
     assert_plain();
+    assert_eq!(
+        std::env::var("QWEN_GLM53_TENSOR_GATE_UP").as_deref(),
+        Ok("0"),
+        "A-only replay requires explicit routed rollback"
+    );
     let _routed_off = TensorGateUpScope::new(false);
     let _lease = crate::metal::acquire_metal_benchmark_lease()
         .expect("production benchmark lease, validation OFF");

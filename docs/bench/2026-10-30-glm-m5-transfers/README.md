@@ -9,6 +9,13 @@ original source/binary identities; they are not retagged as final-main runs.
 This promotion within the existing Fast/Half policy does not establish global
 quality equality, formal noninferiority or a universal speedup.
 
+**Historical replay after the later C default:** explicitly set
+`QWEN_GLM53_TENSOR_GATE_UP=0` and `QWEN_GLM53_KDA_HALF_INPUTS=0` when replaying
+the frozen CURRENT/WIDE/Q5 packet below. Its original scopes do not control
+these newer flags. Q5 rollback alone still leaves three Q6-down blocks eligible
+for C. The Rust packet bodies and fixtures remain unchanged; this is replay
+hygiene, not requalification. See the [later C decision and evidence](../2026-10-30-glm-routed-tensor-gate-up.md).
+
 At 2K/4K, median native wall falls 3.3526%/3.1844% for wide-only and
 8.3784%/7.5065% for Q5-down-only. N512 does not improve. Late-run drift limits
 the precision of the down estimate; these are not universal speedups or

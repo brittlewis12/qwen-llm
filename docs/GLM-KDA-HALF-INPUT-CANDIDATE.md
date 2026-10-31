@@ -1,5 +1,24 @@
 # Bounded GLM KDA Half Input Candidate
 
+## Current Status
+
+A remains default OFF. The parent reports A07 standalone bitwise success for
+195 paired full-vocabulary comparisons (390 arm rows), with no state captures,
+and EEA one-load DEBUG-OFF success for 32 samples plus eight warms/40 sessions.
+The stable standalone 1K/2K gain is approximately 1.44%; 4K is nonstationary.
+This does not qualify A+C or authorize A's default promotion. See the
+[authoritative C decision and standalone A evidence](bench/2026-10-30-glm-routed-tensor-gate-up.md).
+
+After C becomes default ON, every A-only replay must explicitly set
+`QWEN_GLM53_TENSOR_GATE_UP=0`; both owned A protocols enforce that mode.
+Setting A=1 while leaving C enabled requests an unqualified composition, not
+the standalone evidence. The resource OR only shares one admitted Half buffer;
+it does not turn on A execution. No additional A run/build accompanies this
+status update. Historical preparation and source-only handoff statements below
+retain their original scope, not the current evidence status.
+
+## Historical Preparation
+
 Base: committed `093ea5dd`, branch `perf/glm-kda-half-stage` in the isolated
 `qwen-llm-glm-kda-half-stage` worktree. This is one default-off attempt, not
 a qualification, performance result, or default promotion. No GPU runs are

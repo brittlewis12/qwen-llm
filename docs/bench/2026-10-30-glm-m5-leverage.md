@@ -27,14 +27,20 @@ The next work is ranked by structural opportunity and the missing evidence:
    Half, and up already fuses clamped SwiGLU. It would need inclusive producer,
    offset/prefix and consumer costs; fewer logical bytes are not a DRAM or
    application-speedup measurement.
-2. **Test KDA reuse on actual prepared inputs before timing.**
-   The [value4 witness](2026-10-31-glm-kda-value4-bitwise.md) is fully bitwise
-   on one synthetic M5 case, including final state and signed zeros. The next
-   source gate captures an unchanged ordinary prefix3 plus 2048-row continuation
-   and compares ordinary CURRENT, direct CURRENT replay and the frozen candidate.
-   Synthetic exactness does not waive nonempty-state/carry correctness or the
-   repeatable >=30% recurrence and reset-inclusive composition screens.
-3. **Measure MLA's unchanged grouped query/output transforms before moving them.**
+2. **Screen real-prepared KDA reuse for material inclusive cost.**
+   The [synthetic value4 witness](2026-10-31-glm-kda-value4-bitwise.md) now has a
+   separately [accepted actual-prepared prefix3/2048 case](2026-10-31-glm-kda-actual-prepared.md):
+   ordinary CURRENT, direct CURRENT and value4 match every output/final-state
+   word with nonzero asymmetric incoming state. This is not general carry or
+   model-quality proof. The next screen reuses the captured inputs, includes
+   state restoration and requires repeatable >=30% recurrence improvement.
+   The sibling's eligible per-core path still uses a staged serial recurrence;
+   a vector-decay WY reformulation is research, not a missing tensor-kernel port.
+3. **Target MLA attention dataflow, not a dominant-transform assumption.**
+   [Actual child profiling](2026-10-31-glm-mla-child-budget.md) finds about58ms
+   of grouped transforms versus241ms dense attention in each of two forwards.
+   Both ordinary brackets drift about19%; these are nonexclusive profiled spans,
+   not a stable plain-latency decomposition or predicted savings.
    The [fixed full-F32/Half D512 implementation](2026-10-31-glm-mla-fused-2k-negative.md)
    is correct but approximately 2.93x slower than its matched attention-only
    control; that design is closed. A distinct dense-prefill graph lifts shared
@@ -43,9 +49,9 @@ The next work is ranked by structural opportunity and the missing evidence:
    at source `da964cf1`, `src/plugins/glm5_next/table_forward.zig`.
    The transforms move rather than disappear. A transposed quantized-key
    producer, extra coefficient/KV rounding and any retained dense banks need
-   separate cost, admission and numerical review. First obtain the actual
-   ordinary transform denominator, not the difference between a synthetic
-   attention leaf and the combined MLA parent.
+   separate cost, admission and numerical review. It must stand on complete
+   attention/dataflow economics, not removed-transform arithmetic or the
+   difference between a synthetic leaf and a combined parent.
 4. **Retain head-axis attention as a separate sparse-context architecture.**
    GLM's 64 attention heads share selected row IDs for each query. Reusing those
    indirect C rows across heads is a different dataflow from the rejected

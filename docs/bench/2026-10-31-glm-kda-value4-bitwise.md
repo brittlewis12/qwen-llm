@@ -119,7 +119,9 @@ installation, PATH, SDK selection or production-default change occurs.
 | Authored actual replay | `cc03ba0b4e6700ee02a2596cf56517247d0fda6ad44d85b5aadb2442766d85e1` |
 | Independent actual replay/rerun | `0406ec17375f39c2ef7bac47fa648df10eb0da6dfe3b0703322b9334ae4707da` |
 
-Next is a separately reviewed actual-prepared-input capture with nonempty prefix
-and continuation proof, not automatic timing. The future recurrence screen still
-requires >=30% repeatable improvement and reset-inclusive composition qualification
-before any integration. This one synthetic exact match waives none of those gates.
+The subsequent [actual-prepared prefix witness](2026-10-31-glm-kda-actual-prepared.md)
+also passes strict full-word replay for its fixed prefix3/2048 block0 case.
+Neither result is general carry, model-quality or performance qualification.
+The future recurrence screen still requires >=30% repeatable improvement and
+reset-inclusive composition qualification before integration. There is no
+automatic timing or promotion from these correctness gates.

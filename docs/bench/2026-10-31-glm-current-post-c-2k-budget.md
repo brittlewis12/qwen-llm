@@ -64,7 +64,11 @@ measures that unchanged dispatch at about 21.8 ms for the fixed synthetic 2K
 shape; it funds one fused source gate, not a whole-MLA or application gain.
 That [fixed implementation subsequently closes as a matched-cost negative](2026-10-31-glm-mla-fused-2k-negative.md).
 The separate [KDA value4 synthetic bitwise witness](2026-10-31-glm-kda-value4-bitwise.md)
-passes on M5 but has no actual-model or performance qualification yet.
+and [actual-prepared prefix witness](2026-10-31-glm-kda-actual-prepared.md) pass
+on M5 but have no model-quality or performance qualification. The later
+[MLA child profile](2026-10-31-glm-mla-child-budget.md) directly measures grouped
+transforms and attention; its drifting ordinary brackets do not replace this
+packet's stable plain reference or create an exclusive decomposition.
 
 The actual cold gate requests 199265371264 Metal bytes and 1611860564 CPU bytes,
 including the separate diagnostic policies. Each fresh gate requests 4146692096

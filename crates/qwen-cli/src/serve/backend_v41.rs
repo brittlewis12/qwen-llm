@@ -10,7 +10,7 @@ use anyhow::{Context, Result, ensure};
 use qwen_llm::deepseek_v41::forward::{Forward, RequestMemoryEstimate, StateError};
 use qwen_llm::metal::{HostMemoryHeadroom, MetalContext, MetalMemorySignals};
 use qwen_llm::sampling::{Sampler, SamplingConfig};
-use std::io::{self, Write};
+use std::io;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
@@ -414,7 +414,15 @@ fn time_native_prefill<T, E>(
         "wall_ms": wall_ms,
         "profile": report,
     });
-    let _ = writeln!(io::stderr().lock(), "serve native prefill timing: {record}");
+    // libtest captures eprintln! but not raw stderr writes; under test the
+    // record must not interleave with the harness's per-test result lines.
+    #[cfg(not(test))]
+    {
+        use std::io::Write;
+        let _ = writeln!(io::stderr().lock(), "serve native prefill timing: {record}");
+    }
+    #[cfg(test)]
+    eprintln!("serve native prefill timing: {record}");
     result
 }
 

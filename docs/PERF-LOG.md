@@ -6,6 +6,20 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the current state and evidence index.
 
+## 2026-10-31 - V4.1 Cache Admission Artifact Handoff Complete
+
+- Clean maintained `bcdaac78` builds both canonical applications off GPU:
+  `qwen` SHA `8b7d2548...`, `qwen-bench` SHA `4031246e...`, SDK 26.2,
+  normal fat LTO, features/overrides empty. Full hashes and receipts are retained.
+- M5 byte/startup checks pass; `qwen-bench` compiled/runtime identity is clean
+  MATCH. Its final ordinary 8K Full/CED run completes naturally in 54 s under
+  180 s, with all ten finite endpoint hashes equal internally and to the earlier
+  qualified artifact. Cache-inclusive budgets and default 4K chunks are unchanged.
+- This closes local artifact delivery, not installation, service/HTTP validation,
+  statistical speedup, new quality qualification or stage-owner composition.
+  Later docs do not change the frozen production source. No deploy/restart/push.
+  [Exact artifacts, identity and final execution limits](bench/2026-10-30-v41-cache-admission.md#clean-maintained-source-artifact-handoff).
+
 ## 2026-10-31 - V4.1 Resident Cache Admission Integrated
 
 - Integrates reviewed `a94ebfa1` / `41d3d862` and evidence checkpoint `0a3be09a`.

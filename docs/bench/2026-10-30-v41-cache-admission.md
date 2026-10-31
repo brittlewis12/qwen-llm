@@ -273,6 +273,51 @@ checkpoint `0a3be09a`. Production source is identical to the qualified `bd9f4407
 artifact; the later changes record evidence and integration only. The existing
 qualified GLM defaults and unrelated work remain intact.
 
-The clean maintained-source release handoff remains a separate delivery step.
-Integration does not install a binary, restart a service, grant stage-capture or
-8K-encoder permission, or publish Git history.
+At integration, the clean maintained-source release handoff remained a separate
+delivery step. Its completion is recorded below. Integration does not install a
+binary, restart a service, grant stage-capture or 8K-encoder permission, or publish
+Git history.
+
+## Clean Maintained-Source Artifact Handoff
+
+Both `qwen` and `qwen-bench` are built together from clean maintained-main
+checkpoint `bcdaac7814d5750c94383b2175831d117c917095`, using the normal canonical
+release build, fat LTO, one codegen unit, SDK 26.2 and no diagnostic features or
+overrides. All 1,439 non-documentation entries match the qualified source
+checkpoint. The build runs CPU-local without a GPU lease.
+
+| Frozen artifact | SHA256 |
+| --- | --- |
+| `qwen` | `8b7d25484d5a5dad537835d2244976cbe3734a25a1d396b36bfaecf0a3d7bfd7` |
+| `qwen-bench` | `4031246e8f76d1aebc02931480ad5a9de23977829378a42ec9ebdf3c06fc5325` |
+| Private build receipt | `1aa76e278760c6735f8f39fc11effda6020a6d5992a86871d3e3a1a22062872d` |
+| Final ordinary M5 suite | `d5e5db32c5be027a39b16e9caec3a2a1455c95af58bd2dbcecde2543477cd33d` |
+| M5 `qwen-bench` build identity | `63af6a3a2fc7a29ef513e529e3c9c09ee48e81854d08c8695c89bb207f6f6112` |
+
+The exact transferred applications pass byte verification and M5 startup/linkage
+checks. `qwen-bench` reports clean compiled/runtime MATCH at that commit with
+source identity:
+
+```text
+git-source-sha256-v2:1faa6886d29e13094cacf35749aa4ad41685b5439e8c4f7291bf868fbf58b094
+```
+
+`qwen` has no equivalent full CPU-only identity command; its evidence is the
+matching canonical build provenance and fingerprints, binary hash and successful
+M5 `--version`, not a direct CLI-generation or HTTP-serving qualification.
+
+The final maintained `qwen-bench` repeats the same bounded ordinary 8K Full/CED
+check and completes naturally in 54 s under 180 s. Its ten fresh cases all have
+finite, bitwise-identical endpoint hashes, also identical to the earlier
+qualified artifact's endpoint digest. The 243-cache count and cache-inclusive
+8K cold budgets are unchanged and admit; default input chunks remain 4K.
+
+Retained Full observations are 6.839804750 / 5.822833667 s; CED observations are
+3.656124667 / 3.670363667 s. In particular, the Full dispersion is not a basis
+for a performance comparison. This is construction/execution and delivery
+verification, not a new optimization, quality campaign or peak-memory proof.
+
+The frozen clean source and local artifacts remain available. Later documentation
+commits do not change production source. Nothing is installed or published, and
+no service/current deployment is restarted or replaced. Stage-owner composition
+and bounded stage instrumentation remain separate work.

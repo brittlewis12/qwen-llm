@@ -11,9 +11,10 @@ native benchmark code. The parent owns independent review and all GPU runs.
 - Maintained-main `266c2825` is merged non-destructively: the stale IQ1_M CPU
   expectations are repaired using real native capability evidence; no
   production changes enter through this dependency.
-- The parent's forthcoming A-owned heated latency module must be imported
-  before the single shared release test-binary build. This tranche does not
-  duplicate A's latency implementation or rebuild the native benchmark.
+- A-owned source-only latency commit `bda6221b` is imported with provenance.
+  Both A model tests retain KDA-only execution, shared `normalized_half`
+  ownership, all fifteen CPU contracts, and CPU-aware preloads. This tranche
+  does not duplicate A's latency implementation or rebuild the native benchmark.
 - Historical `tensor_m5_transfers.rs` and the old packet bodies are unchanged.
   The parent quality file gains only module declarations.
 
@@ -61,6 +62,10 @@ The private reports contain hashes, metric counts, parsed tool call metadata
 and sanitized shard stamps, not home directories, hostnames, prompts or raw
 token IDs. Do not publish private reports as public results. Source, fixture,
 strict-scorer and binary hashes identify the exact protocol.
+
+The common full projection audit also runs in A's admitted loader before
+weights, so both imported A model tests and both new C tests pin the actual
+Q8 KDA ranks/output as well as the mixed expert and serialized MLA roles.
 
 ## Extended Quality
 
@@ -136,6 +141,12 @@ or diagnostic instrumentation is inserted between timed samples. The parent
 plans a fresh external four-minute outer limit, with the same synchronous-call
 limitation as the quality test.
 
+Both DEBUG-OFF latency entry points acquire the canonical benchmark lease
+directly, retaining the explicit DEBUG=0/WAIT=1 guards and inherited lease FD.
+They must not call the historical validation-ON `production_lease` helper.
+Compact CPU source-boundary guards check this distinction; that historical
+helper and its validation requirement remain unchanged.
+
 ## Earlier Evidence And Replay Hygiene
 
 The parent reports successful tiny-composition and three-document numerical
@@ -150,6 +161,39 @@ The historical transfer helper remains unchanged.
 
 Commit source and complete CPU/type/format/generator checks before the one
 authorized `cargo test --locked --offline --release -p qwen-llm --lib --no-run`
-build, and only after importing the A-owned latency dependency and receiving
-the parent's independent review. No new native build, GPU run, remote change,
+build. The parent arranges independent review of the source while that build
+runs. No new native build, GPU run, remote change,
 main merge or default promotion is delegated here.
+
+## Imported A Entry Points
+
+The same shared release test binary contains these separate A-only protocols:
+
+```text
+glm5_next_metal::tests::quality::tensor_prefill::kda_half_inputs::m5_kda_half_actual_q4_three_document_bitwise_smoke
+glm5_next_metal::tests::quality::tensor_prefill::kda_half_inputs::plain::m5_kda_half_one_load_plain_abba_baab
+```
+
+For A only, set `QWEN_GLM53_KDA_HALF_INPUTS=1` and
+`QWEN_GLM53_TENSOR_GATE_UP=0`, retaining core/wide/Q5 ON. The model smoke uses
+`MTL_DEBUG_LAYER=1` and a fresh `GLM53_KDA_HALF_SMOKE_REPORT`; one-load A
+latency uses `MTL_DEBUG_LAYER=0`, a fresh `GLM53_KDA_HALF_PLAIN_REPORT`, and a
+fresh external 240-second outer limit. A's imported ordinary test owns its
+own order, reserve and report helpers; C does not duplicate it. Never use a
+broad ignored-test filter that mixes A/C globals or validation modes.
+
+## Local Verification
+
+- Locked/offline dev and release workspace test typechecks pass.
+- The selected unleased CPU contracts pass: 26 maintained GLM cases (two
+  artifact witnesses remain ignored), fifteen A contracts, six new C protocol
+  contracts, four routed selection/ownership contracts, nine dense policy
+  contracts, and eight incumbent down/packet contracts: 68 CPU passes total.
+- All four global routed/KDA on/off combinations pass the fifteen A and four
+  routed ownership/selection contracts in fresh processes.
+- Formatter/diff checks and the generated ENV reference/self-tests pass.
+- Production is byte-unchanged from 6991; historical packet/helper bodies and
+  the upstream Q8 `view_bytes` fixture are preserved. The old native benchmark
+  is not rebuilt, and a separate copy preserves the frozen 6991 test binary.
+- New quality, strict tools and both heated latency protocols remain GPU-
+  unexecuted locally. The parent owns independent review and remote execution.

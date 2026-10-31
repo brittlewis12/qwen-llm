@@ -147,6 +147,9 @@ requires a release binary, `MTL_DEBUG_LAYER=0`, global staging flag 1 and a
 fresh private `GLM53_KDA_HALF_PLAIN_REPORT`. It reuses strict Q4 pinning and
 normal CPU-aware full-model admission. A runner must enforce a real external
 240-second limit; the test does not claim it can interrupt in-flight GPU work.
+In the shared integration binary, set routed gate/up global flag 0; its local
+TLS override also forces routed execution OFF. The shared `normalized_half`
+specification/options preserve the same one-buffer KDA-only resource contract.
 
 Weights load once. Every fresh session uses capacity 4416, workspace 2048,
 the same ledger-owned 16 MiB half backing, and qualified Q8-wide/Q5-down ON.
@@ -198,7 +201,7 @@ expert/MLA metadata pins with malformed-metadata negative controls.
 The original broader CPU run had three stale IQ1_M binder/coverage expectations.
 Maintained-main test-only fix `266c2825`, merged into this branch, resolves them
 using real native IQ1 capability evidence and Q8_1 negatives. The maintained
-filter now expects 26 CPU passes and two ignored artifact witnesses. The old
+filter now passes 26 CPU cases with two ignored artifact witnesses. The old
 three failures were test-contract drift, not production changes. Binder,
 coverage and admission implementations are unchanged; the repaired contracts
 retain IQ1_M latent refusal and malformed-storage guards.

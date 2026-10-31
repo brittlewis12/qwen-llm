@@ -59,7 +59,8 @@ fn contrasts(walls: &[f64; 8]) -> Value {
 #[ignore = "release M5 DEBUG-OFF, production lease, fresh GLM53_ROUTED_HEATED_REPORT; external fresh 240s wall limit"]
 fn m5_routed_heated_plain_latency() {
     environment_for(false);
-    let _lease = production_lease();
+    let _lease = crate::metal::acquire_metal_benchmark_lease()
+        .expect("production benchmark lease, validation OFF");
     let mut out = Report::new("GLM53_ROUTED_HEATED_REPORT", true);
     let docs = documents();
     let long = &docs.iter().find(|d| d.stratum == "long").unwrap().tokens;
@@ -120,6 +121,16 @@ fn m5_routed_heated_plain_latency() {
 
 #[test]
 fn cpu_routed_heated_order_contrasts_and_storage_contract() {
+    let body = include_str!("routed_latency.rs")
+        .split("\nfn m5_routed_heated_plain_latency() {")
+        .nth(1)
+        .unwrap()
+        .split("#[test]")
+        .next()
+        .unwrap();
+    assert!(body.contains("crate::metal::acquire_metal_benchmark_lease()"));
+    assert!(!body.contains("production_lease()"));
+    assert!(body.contains("environment_for(false)"));
     assert_eq!(ORDER, [false, true, true, false, true, false, false, true]);
     assert_eq!(LATENCY_CAPACITY, 4416);
     let value = contrasts(&[4.0, 2.0, 2.0, 4.0, 2.0, 4.0, 4.0, 2.0]);

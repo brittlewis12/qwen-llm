@@ -91,6 +91,14 @@ fn contrasts(walls: &[f64; 8]) -> Value {
 
 #[test]
 fn cpu_kda_half_plain_protocol_balances_eight_samples_and_prices_returned_rows() {
+    let body = include_str!("kda_half_plain.rs")
+        .split("\nfn m5_kda_half_one_load_plain_abba_baab() {")
+        .nth(1)
+        .unwrap();
+    assert!(body.contains("crate::metal::acquire_metal_benchmark_lease()"));
+    assert!(!body.contains("production_lease()"));
+    assert!(body.contains("(\"MTL_DEBUG_LAYER\", \"0\")"));
+    assert!(body.contains("(\"QWEN_METAL_LEASE_WAIT\", \"1\")"));
     assert_eq!(ORDER, [false, true, true, false, true, false, false, true]);
     for block in ORDER.chunks_exact(4) {
         assert_eq!(block.iter().filter(|&&b| b).count(), 2);
@@ -161,7 +169,8 @@ fn m5_kda_half_one_load_plain_abba_baab() {
     assert!(memory::kda_half_inputs_enabled());
     assert_plain();
     let _routed_off = TensorGateUpScope::new(false);
-    let _lease = production_lease();
+    let _lease = crate::metal::acquire_metal_benchmark_lease()
+        .expect("production benchmark lease, validation OFF");
     let _dense = tensor_prefill::Scope::new(true);
     let _down = tensor_down::Scope::new(true);
     let _wide = tensor_prefill::Q8WideScope::new(true);

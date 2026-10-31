@@ -106,6 +106,7 @@ fn load_admitted(
     cpu: u64,
     out: &mut Report,
 ) -> Glm5NextWeights {
+    super::routed_qualification::assert_pins(&gguf.tensors);
     let _allocation = ctx.begin_allocation_transaction();
     let preflight = preflight_session(ctx, gguf, model, CAPACITY, ROWS).unwrap();
     assert!(preflight.ledger.scratch_options().kda_half_inputs);

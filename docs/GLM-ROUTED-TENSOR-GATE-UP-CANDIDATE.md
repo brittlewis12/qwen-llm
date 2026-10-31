@@ -4,6 +4,11 @@ Base: exactly `4ace096b47cb1a9e9a5a48c45ededfe599023e1c`. Isolated branch:
 `perf/glm-routed-tensor-up`. This is an unqualified, default-off candidate;
 there is no performance or quality verdict and no default promotion.
 
+This document records the original bounded candidate/6991 build protocol.
+The later test-only extended quality and shared A/C one-load qualification
+protocols are in `GLM-ROUTED-QUALIFICATION.md`; they require only one shared
+release library-test rebuild, not another native benchmark build.
+
 ## Contract
 
 - `QWEN_GLM53_TENSOR_GATE_UP=1` requests the existing N32 Q4_K/Q5_K
@@ -141,6 +146,8 @@ TLS differs between its two arms. For that separate KDA-only smoke, use global
   incumbent down policy/geometry, and the existing packet expert selector.
 - The four new contracts and ten KDA contracts pass in fresh processes with
   all four on/off combinations of the routed and KDA global flags.
-- All GPU numerical, refusal, census, model-quality and timing witnesses remain
-  unexecuted. The local SDK's tensor compiler probe is unavailable as noted
-  earlier; CPU/typecheck success is not shader or numerical qualification.
+- At the original local source handoff all GPU witnesses were unexecuted.
+  The parent subsequently reported bounded M5 success for 6991; see the later
+  qualification document for scope and the CPU-aware preload replay correction.
+  The local SDK warning remains as noted earlier; CPU/typecheck success alone
+  is not shader or numerical qualification.

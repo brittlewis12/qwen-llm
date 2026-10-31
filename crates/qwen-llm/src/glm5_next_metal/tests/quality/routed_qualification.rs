@@ -81,7 +81,7 @@ fn kda_pins() -> Vec<(String, GgmlType, Vec<u64>)> {
     pins
 }
 
-fn assert_pins(tensors: &[TensorDesc]) {
+pub(super) fn assert_pins(tensors: &[TensorDesc]) {
     super::kda_half_inputs::assert_metadata_pins(tensors);
     for (name, dtype, shape) in kda_pins() {
         let t = tensors
@@ -562,7 +562,10 @@ fn cpu_routed_strict_tool_scorer_rejects_lenient_cases() {
         name: name.into(),
         arguments: args.as_object().unwrap().clone(),
     };
-    let good = call("get_weather", json!({"city":"Montréal, Canada","days":3}));
+    let good = call(
+        "get_weather",
+        json!({"city":"Montr\u{e9}al, Canada","days":3}),
+    );
     assert!(strict_correct(
         &[good.clone()],
         Some(OBSERVATION),

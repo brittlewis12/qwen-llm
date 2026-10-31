@@ -505,7 +505,7 @@ pub fn encode_grouped_routed_experts(
 /// dtypes, expert banks, 16-byte activation alignment, and no output
 /// aliasing an input or another output.
 #[allow(clippy::too_many_arguments)]
-fn check_grouped_routed_experts(
+pub(super) fn check_grouped_routed_experts(
     kernel: &'static str,
     enc: &KernelEncoder,
     b: &GroupedExperts<'_>,

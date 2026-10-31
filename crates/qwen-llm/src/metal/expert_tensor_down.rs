@@ -57,7 +57,12 @@ fn positive_i32(value: usize, name: &str) -> Result<(), MetalError> {
     Ok(())
 }
 
-fn bank_bytes(dtype: GgmlType, k: usize, m: usize, e: usize) -> Result<usize, MetalError> {
+pub(super) fn bank_bytes(
+    dtype: GgmlType,
+    k: usize,
+    m: usize,
+    e: usize,
+) -> Result<usize, MetalError> {
     let (block, bytes) = dtype
         .storage_layout()
         .ok_or_else(|| bad_shape(KERNEL, "unknown expert storage layout"))?;
@@ -110,7 +115,7 @@ pub(crate) fn geometry(
     })
 }
 
-fn check_encoder(ctx: &MetalContext, enc: &KernelEncoder) -> Result<(), MetalError> {
+pub(super) fn check_encoder(ctx: &MetalContext, enc: &KernelEncoder) -> Result<(), MetalError> {
     require_serial(KERNEL, enc)?;
     if enc.ended {
         return Err(bad_shape(KERNEL, "encoder has ended"));
@@ -121,7 +126,7 @@ fn check_encoder(ctx: &MetalContext, enc: &KernelEncoder) -> Result<(), MetalErr
     Ok(())
 }
 
-fn check_extent(
+pub(super) fn check_extent(
     ctx: &MetalContext,
     tensor: &MetalTensor,
     expected: usize,

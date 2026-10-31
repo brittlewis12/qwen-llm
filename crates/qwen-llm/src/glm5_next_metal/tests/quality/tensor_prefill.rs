@@ -1,5 +1,8 @@
 //! Same-binary Fast/Half2048 screen; all wall times are diagnostic with validation on.
 #[cfg(not(debug_assertions))]
+#[path = "tensor_gate_up.rs"]
+mod tensor_gate_up;
+#[cfg(not(debug_assertions))]
 #[path = "tensor_m5_transfers.rs"]
 mod tensor_m5_transfers;
 

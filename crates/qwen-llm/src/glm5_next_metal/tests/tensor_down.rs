@@ -1,6 +1,9 @@
 //! Primitive witnesses only. Ignored GPU tests require actual named hardware,
 //! MTL_DEBUG_LAYER=1, QWEN_METAL_LEASE_WAIT=1 and an explicit production lease.
 
+#[path = "tensor_gate_up_gpu.rs"]
+mod tensor_gate_up_gpu;
+
 use super::*;
 use crate::glm5_next_metal::packed;
 use crate::metal::{self, expert_tensor_down as adapter, *};

@@ -298,6 +298,7 @@ mod encoder;
 mod expert;
 mod expert_native;
 pub(crate) mod expert_tensor_down;
+pub(crate) mod expert_tensor_gate_up;
 mod gdn;
 mod host_budget;
 mod indexer_pool;

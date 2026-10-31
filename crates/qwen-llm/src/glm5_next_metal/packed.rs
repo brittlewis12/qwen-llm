@@ -713,7 +713,7 @@ pub(super) struct PackedScratch {
     comb: MetalTensor,
     collapsed: MetalTensor,
     normed: MetalTensor,
-    kda_half_input: Option<MetalTensor>,
+    normalized_half: Option<MetalTensor>,
     block_out: MetalTensor,
     q: MetalTensor,
     k: MetalTensor,
@@ -854,7 +854,7 @@ impl PackedScratch {
     ) -> Result<Self> {
         let r = rows as u64;
         let specs = memory::packed_scratch_specs_with_options(c, r, options);
-        let has_half = specs.iter().any(|spec| spec.name == "kda_half_input");
+        let has_half = specs.iter().any(|spec| spec.name == "normalized_half");
         let mut b = SpecBuffers::allocate(ctx, "packed_scratch", &specs)?;
         let scratch = Self {
             rows,
@@ -878,7 +878,7 @@ impl PackedScratch {
             comb: take_rows(&mut b, "comb", rows)?,
             collapsed: take_rows(&mut b, "collapsed", rows)?,
             normed: take_rows(&mut b, "normed", rows)?,
-            kda_half_input: has_half.then(|| b.take("kda_half_input")).transpose()?,
+            normalized_half: has_half.then(|| b.take("normalized_half")).transpose()?,
             block_out: take_rows(&mut b, "block_out", rows)?,
             q: take_rows(&mut b, "q", rows)?,
             k: take_rows(&mut b, "k", rows)?,
@@ -1087,6 +1087,56 @@ fn packet_q8_fewrow_selected(
         && (2..=max_rows).contains(&rows)
         && n_in > 0
         && n_in.is_multiple_of(32)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn encode_experts_with_half(
+    ctx: &MetalContext,
+    enc: &KernelEncoder,
+    arith: Arith,
+    b: &GroupedExperts<'_>,
+    half: Option<&MetalTensor>,
+    status: &MetalTensor,
+    row_inner: &MetalTensor,
+    row_out: &MetalTensor,
+    h: usize,
+    f: usize,
+    e: usize,
+    k: usize,
+    rows: usize,
+    clamp: f32,
+) -> Result<StageMode> {
+    let mode = expert_mode(arith, b.gate_bank.dtype, b.up_bank.dtype, b.down_bank.dtype);
+    if super::tensor_gate_up::selected(
+        arith,
+        mode,
+        b.gate_bank.dtype,
+        b.up_bank.dtype,
+        (h, f, e, k),
+        rows,
+    ) && let Some(half) = half
+        && let Some(prepared) = crate::metal::expert_tensor_gate_up::prepare(
+            ctx,
+            enc,
+            b,
+            half,
+            h,
+            f,
+            e,
+            k,
+            rows,
+            clamp,
+            grouped_down_policy(arith, mode, b.down_bank.dtype, f, h, e, k, rows),
+        )?
+    {
+        #[cfg(test)]
+        record_census(Stage::RoutedExperts, "experts".into(), CensusPath::Half);
+        prepared.encode()?;
+        return Ok(mode);
+    }
+    encode_experts(
+        ctx, enc, arith, b, status, row_inner, row_out, h, f, e, k, rows, clamp,
+    )
 }
 
 /// Shared by the session and synthetic dispatch tests; returns arithmetic mode.
@@ -1970,11 +2020,12 @@ impl Glm5NextSession<'_> {
                             .view_subrange(0, vec![h as u64, (k * rows) as u64]),
                         output: &v(&p.routed),
                     };
-                    let _expert_mode = encode_experts(
+                    let _expert_mode = encode_experts_with_half(
                         ctx,
                         &enc,
                         p.arith(),
                         &grouped,
+                        p.normalized_half.as_ref(),
                         &v(&route.status),
                         &self.s.expert_inner,
                         &self.s.expert_out,
@@ -2196,7 +2247,7 @@ impl Glm5NextSession<'_> {
             enc,
             p.arith(),
             &x,
-            p.kda_half_input.as_ref(),
+            p.normalized_half.as_ref(),
             &[
                 (&kda.query, &v(&p.q), width),
                 (&kda.key, &v(&p.k), width),

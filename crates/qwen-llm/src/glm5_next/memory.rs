@@ -29,6 +29,48 @@ crate::env_flag!(
     "QWEN_GLM53_KDA_HALF_INPUTS"
 );
 
+crate::env_flag!(
+    /// Opt-in N32 tensor gate/up using shared normalized Half scratch.
+    default_off tensor_gate_up_flag,
+    "QWEN_GLM53_TENSOR_GATE_UP"
+);
+
+#[cfg(test)]
+thread_local! {
+    static TENSOR_GATE_UP: std::cell::Cell<Option<bool>> = const { std::cell::Cell::new(None) };
+}
+
+pub(crate) fn tensor_gate_up_enabled() -> bool {
+    #[cfg(test)]
+    if let Some(enabled) = TENSOR_GATE_UP.with(std::cell::Cell::get) {
+        return enabled;
+    }
+    tensor_gate_up_flag()
+}
+
+#[cfg(test)]
+pub(crate) struct TensorGateUpScope {
+    previous: Option<bool>,
+    _thread: std::marker::PhantomData<std::rc::Rc<()>>,
+}
+
+#[cfg(test)]
+impl TensorGateUpScope {
+    pub(crate) fn new(enabled: bool) -> Self {
+        Self {
+            previous: TENSOR_GATE_UP.with(|flag| flag.replace(Some(enabled))),
+            _thread: std::marker::PhantomData,
+        }
+    }
+}
+
+#[cfg(test)]
+impl Drop for TensorGateUpScope {
+    fn drop(&mut self) {
+        TENSOR_GATE_UP.with(|flag| flag.set(self.previous));
+    }
+}
+
 #[cfg(test)]
 thread_local! {
     static KDA_HALF_INPUTS: std::cell::Cell<Option<bool>> = const { std::cell::Cell::new(None) };
@@ -71,6 +113,7 @@ impl Drop for KdaHalfInputsScope {
 pub(crate) struct ScratchOptions {
     pub generic_hc: bool,
     pub kda_half_inputs: bool,
+    pub tensor_gate_up: bool,
 }
 
 impl ScratchOptions {
@@ -78,6 +121,7 @@ impl ScratchOptions {
         Self {
             generic_hc,
             kda_half_inputs: kda_half_inputs_enabled() && tensor_selected,
+            tensor_gate_up: tensor_gate_up_flag() && tensor_selected,
         }
     }
 
@@ -269,16 +313,23 @@ pub fn packed_generic_hc_scratch_specs(c: &Glm5NextConfig, rows: u64) -> Vec<Buf
 
 /// Exactly one reusable F16 input, sized by admitted capacity, not packet rows.
 /// The half tensor tile masks ragged rows; no padded half rows are read.
-pub(crate) fn packed_kda_half_input_specs(
+pub(crate) fn packed_normalized_half_specs(
     c: &Glm5NextConfig,
     rows: u64,
-    selected: bool,
+    options: ScratchOptions,
 ) -> Vec<BufferSpec> {
-    if !selected || rows < 1024 || c.block_count(MixerKind::Kda) == 0 {
+    let kda = options.kda_half_inputs && c.block_count(MixerKind::Kda) != 0;
+    let routed = options.tensor_gate_up
+        && c.hidden_size == 4096
+        && c.expert_ffn_size == 2048
+        && c.expert_count == 288
+        && c.expert_used_count == 8
+        && c.blocks.iter().any(|block| block.ffn == FfnKind::Moe);
+    if rows < 1024 || !(kda || routed) {
         return Vec::new();
     }
     vec![BufferSpec::zeros(
-        "kda_half_input",
+        "normalized_half",
         F16,
         &[u64::from(c.hidden_size), rows],
     )]
@@ -293,11 +344,7 @@ pub(crate) fn packed_scratch_specs_with_options(
     if options.generic_hc {
         specs.extend(packed_generic_hc_scratch_specs(c, rows));
     }
-    specs.extend(packed_kda_half_input_specs(
-        c,
-        rows,
-        options.kda_half_inputs,
-    ));
+    specs.extend(packed_normalized_half_specs(c, rows, options));
     specs
 }
 

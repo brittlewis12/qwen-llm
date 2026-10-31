@@ -309,10 +309,12 @@ def main() -> None:
                 [str(path), "--exact", "--test-threads=1", *sorted(names)],
                 text=True,
                 stdout=subprocess.PIPE,
-                stderr=subprocess.STDOUT,
+                stderr=subprocess.PIPE,
                 cwd=ROOT,
             )
+            # Native diagnostics must not splice into libtest's status lines.
             print(result.stdout, end="", flush=True)
+            print(result.stderr, end="", file=sys.stderr, flush=True)
             result.check_returncode()
             check_execution(result.stdout, names, total - len(names))
             print(

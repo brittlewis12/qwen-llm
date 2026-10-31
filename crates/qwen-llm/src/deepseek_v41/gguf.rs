@@ -199,6 +199,8 @@ pub struct ResidentWeights {
     pub bytes: ByteCounters,
     /// Captured once from owning views after load; no physical residency claim.
     pub retained_resources: RetainedWeightResourceSummary,
+    /// Full binding CPU envelope; re-admitted before constructing Forward.
+    pub(crate) binding_cpu_bytes: u64,
 }
 #[derive(Debug)]
 pub struct Plan {
@@ -462,6 +464,20 @@ impl ResidentWeights {
         };
         let bookkeeping: RetainedSummaryBookkeeping =
             retained_summary_bookkeeping(&g, &p, &storage)?;
+        let descriptor_window = add(
+            (storage.windows.len() as u64)
+                .checked_mul(4096)
+                .ok_or_else(|| invalid("binding descriptor overflow"))?,
+            (g.tensors.len() as u64)
+                .checked_mul(1024)
+                .ok_or_else(|| invalid("binding descriptor overflow"))?,
+        )?;
+        let binding_cpu_bytes = super::forward::preflight::binding_cpu_bytes(
+            &g,
+            &p,
+            bookkeeping.shared_cpu_envelope(descriptor_window),
+        )
+        .map_err(invalid)?;
         let windows = &storage.windows;
         let requests: Vec<_> = g
             .tensors
@@ -566,6 +582,7 @@ impl ResidentWeights {
             raw_pad: p.raw_pad,
             bytes: p.bytes,
             retained_resources,
+            binding_cpu_bytes,
         })
     }
 }

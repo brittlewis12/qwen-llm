@@ -443,6 +443,7 @@ mod tests {
             descriptor_window_cpu_bytes: 0,
             retained_summary_cpu_bytes: 0,
             binding_metal_bytes: 0,
+            binding_plan: Default::default(),
             caller_cpu_bytes: 0,
             required_metal_bytes: 1 << 20,
             required_cpu_bytes: 0,

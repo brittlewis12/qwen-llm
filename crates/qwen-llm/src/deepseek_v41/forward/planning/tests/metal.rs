@@ -125,11 +125,12 @@ fn admitted_2k_request_on_4k_model_executes_ced_public_api_and_matches_same_widt
             .chain(resident.banks.iter().map(|b| &b.tensor))
             .map(|t| Weak::from_retained(&t.buffer))
             .collect();
-        let model = Forward::from_resident(
+        let model = Forward::from_resident_with_cold_plan(
             &ctx,
             &resident,
             resident.token_map.clone(),
             resident.raw_pad,
+            &cold,
         )
         .unwrap();
         assert_eq!(model.prefill_chunk_rows(), 4096);

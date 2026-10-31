@@ -159,10 +159,7 @@ impl Weights {
 
     pub(super) fn model<'a>(&'a self, ctx: &'a MetalContext) -> Forward<'a> {
         let c = config();
-        let b = bind::Binder {
-            ctx,
-            weights: &self.dense,
-        };
+        let b = bind::Binder::for_test(ctx, &self.dense).unwrap();
         let layers = (0..40)
             .map(|l| {
                 let p = format!("layers.{l}");
@@ -211,6 +208,7 @@ impl Weights {
             norm: vec![1.0; 32],
             head: b.linear("head.weight", 32, 8).unwrap(),
             prefill_rows: crate::deepseek_v41::forward::MAX_PREFILL_CHUNK_ROWS,
+            cold_binding: None,
             identity: Arc::new(()),
         }
     }

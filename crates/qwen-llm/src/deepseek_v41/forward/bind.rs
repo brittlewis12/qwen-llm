@@ -2,9 +2,13 @@ use super::*;
 use attention::{AttentionWeights, CompressorWeights, IndexWeights};
 use binding::{LayerLinears, LinearSpec};
 
+#[cfg(test)]
+mod tests;
+
 pub(super) struct Binder<'a> {
     pub(super) ctx: &'a MetalContext,
     pub(super) weights: &'a std::collections::BTreeMap<String, MetalTensor>,
+    plan: BindingMemoryPlan,
 }
 impl<'a> Binder<'a> {
     fn tensor(&self, name: &str, shape: &[usize]) -> Result<&'a MetalTensor> {
@@ -42,14 +46,13 @@ impl<'a> Binder<'a> {
             dense_linear_supported(tensor.dtype),
             "unsupported linear storage",
         )?;
-        let half_weight =
-            if tensor.dtype == GgmlType::Q5_K && super::prefill::dense_preweight_cache_selected() {
-                Some(super::prefill::build_dense_preweight_cache(
-                    self.ctx, tensor, input, output,
-                )?)
-            } else {
-                None
-            };
+        let half_weight = if self.plan.cache_for(name, input, output, tensor.dtype)? {
+            Some(super::prefill::build_dense_preweight_cache(
+                self.ctx, tensor, input, output,
+            )?)
+        } else {
+            None
+        };
         Ok(Linear {
             ctx: self.ctx,
             tensor: tensor.clone(),
@@ -57,6 +60,34 @@ impl<'a> Binder<'a> {
             input,
             output,
             half_weight,
+        })
+    }
+
+    #[cfg(test)]
+    pub(super) fn for_test(
+        ctx: &'a MetalContext,
+        weights: &'a std::collections::BTreeMap<String, MetalTensor>,
+    ) -> Result<Self> {
+        let specs = weights
+            .iter()
+            .filter(|(_, t)| t.shape.len() == 2)
+            .map(|(name, t)| LinearSpec {
+                name: name.clone(),
+                input: t.shape[0] as usize,
+                output: t.shape[1] as usize,
+            });
+        let plan = BindingMemoryPlan::new(
+            specs,
+            |s| Ok(weights[&s.name].dtype),
+            prefill::dense_preweight_cache_selected(),
+            &|bytes| {
+                ctx.price_shared_buffer_upper(bytes)
+                    .map(|p| p.priced_upper_bytes)
+                    .map_err(|e| e.to_string())
+            },
+        )?;
+        plan.with_admission(128 * 1024 * 1024, 0, 0, ctx.memory_signals(), |plan| {
+            Ok(Self { ctx, weights, plan })
         })
     }
     fn linear_spec(&self, spec: &LinearSpec) -> Result<Linear<'a>> {
@@ -212,6 +243,36 @@ impl<'a> Forward<'a> {
         raw_pad: u32,
         config: Config,
     ) -> Result<Self> {
+        Self::bind_resident(ctx, resident, token_map, raw_pad, config, None)
+    }
+
+    /// Bind the frozen cold cache selection, re-admitting all remaining binding
+    /// and known future request/caller demand against already-resident weights.
+    pub fn from_resident_with_cold_plan(
+        ctx: &'a MetalContext,
+        resident: &'a ResidentWeights,
+        token_map: Vec<u32>,
+        raw_pad: u32,
+        cold: &ColdPrefillPlan,
+    ) -> Result<Self> {
+        Self::bind_resident(
+            ctx,
+            resident,
+            token_map,
+            raw_pad,
+            resident.config.clone(),
+            Some(cold),
+        )
+    }
+
+    fn bind_resident(
+        ctx: &'a MetalContext,
+        resident: &'a ResidentWeights,
+        token_map: Vec<u32>,
+        raw_pad: u32,
+        config: Config,
+        cold: Option<&ColdPrefillPlan>,
+    ) -> Result<Self> {
         let c = &config;
         resident.schedule.validate().map_err(|e| e.to_string())?;
         resident
@@ -281,102 +342,154 @@ impl<'a> Forward<'a> {
         let pad = *token_map
             .get(raw_pad as usize)
             .ok_or("pad outside raw vocabulary")?;
-        let b = Binder {
-            ctx,
-            weights: &resident.dense,
-        };
-        let mut layers = Vec::with_capacity(resident.schedule.layers);
-        for id in 0..resident.schedule.layers {
-            let linears = LayerLinears::new(
-                c,
-                &resident.schedule,
-                id,
-                resident.engram_hash.layers.iter().any(|h| h.layer == id),
-            );
-            let mut banks = Vec::new();
-            for (part, input, output) in [
-                ("w1", c.hidden, c.intermediate),
-                ("w3", c.hidden, c.intermediate),
-                ("w2", c.intermediate, c.hidden),
-            ] {
-                let t = resident
-                    .bank(id, part)
-                    .ok_or_else(|| format!("missing expert bank {id}/{part}"))?;
-                let expected = vec![input as u64, output as u64, c.experts as u64];
-                let bytes = row_bytes(t)?
-                    .checked_mul(output as u64)
-                    .and_then(|n| n.checked_mul(c.experts as u64))
-                    .and_then(|n| n.checked_add(t.offset))
-                    .ok_or("expert extent overflow")?;
+        let cache_enabled = cold.map_or_else(prefill::dense_preweight_cache_selected, |p| {
+            p.binding_plan.cache_enabled()
+        });
+        let plan = BindingMemoryPlan::new(
+            binding::linear_inventory(c, &resident.schedule, &resident.engram_hash),
+            |spec| {
+                let tensor = resident
+                    .dense
+                    .get(&spec.name)
+                    .ok_or_else(|| format!("missing binding linear {}", spec.name))?;
                 op::require(
-                    metal::all_slots_down_native_supported(t.dtype)
-                        && t.shape == expected
-                        && t.offset % 16 == 0
-                        && bytes <= t.buffer.length() as u64,
-                    &format!("invalid expert bank {id}/{part}"),
+                    tensor.shape == vec![spec.input as u64, spec.output as u64],
+                    "binding inventory shape mismatch",
                 )?;
-                banks.push(t);
-            }
-            let engram = if let Some(projection) = &linears.engram {
-                let p = format!("layers.{id}.engram");
-                Some(Engram {
-                    projection: b.linear_spec(projection)?,
-                    gate: if let Some(t) = b.weights.get(&format!("{p}.gate.weight")) {
-                        op::require(
-                            t.shape == vec![c.hidden as u64, 4],
-                            "folded Engram gate shape",
-                        )?;
-                        EngramGate::Folded(decode_rows(t, 0, 4)?)
-                    } else {
-                        EngramGate::Separate {
-                            q: decode_rows(
-                                b.tensor(&format!("{p}.q_weight"), &[4, c.hidden])?,
-                                0,
-                                4,
-                            )?,
-                            k: decode_rows(
-                                b.tensor(&format!("{p}.k_weight"), &[4, c.hidden])?,
-                                0,
-                                4,
-                            )?,
-                        }
-                    },
-                })
-            } else {
-                None
-            };
-            layers.push(Layer {
-                attention: b.attention_with_linears(id, c, &resident.schedule, &linears)?,
-                attn_hc: b.hc_with_linear(id, "attn", c, &linears.attn_hc)?,
-                ffn_hc: b.hc_with_linear(id, "ffn", c, &linears.ffn_hc)?,
-                router: b.linear_spec(&linears.router)?,
-                bias: b.vector(&format!("layers.{id}.ffn.gate.bias"), c.experts)?,
-                shared: [
-                    b.linear_spec(&linears.shared[0])?,
-                    b.linear_spec(&linears.shared[1])?,
-                    b.linear_spec(&linears.shared[2])?,
-                ],
-                banks: [banks[0], banks[1], banks[2]],
-                engram,
-            });
+                Ok(tensor.dtype)
+            },
+            cache_enabled,
+            &|bytes| {
+                ctx.price_shared_buffer_upper(bytes)
+                    .map(|p| p.priced_upper_bytes)
+                    .map_err(|e| e.to_string())
+            },
+        )?;
+        if let Some(cold) = cold {
+            op::require(
+                resident.binding_cpu_bytes == cold.binding_cpu_bytes,
+                "cold binding CPU pricing mismatch",
+            )?;
         }
-        let embedding = b.tensor("embed.weight", &[c.vocab, c.hidden])?;
-        let norm = b.vector("norm.weight", c.hidden)?;
-        let head = b.linear_spec(&LinearSpec::head(c))?;
-        Ok(Self {
-            ctx,
-            engram_rows: EngramRows::Disk(&resident.engram),
-            engram_hash: resident.engram_hash.clone(),
-            schedule: resident.schedule.clone(),
-            config,
-            token_map,
-            pad,
-            layers,
-            embedding,
-            norm,
-            head,
-            prefill_rows: super::prefill_rows_for_resident(resident.bytes.resident_bytes()),
-            identity: Arc::new(()),
-        })
+        let _transaction = ctx.begin_allocation_transaction();
+        let construct = |plan, cold_binding| {
+            let c = &config;
+            let b = Binder {
+                ctx,
+                weights: &resident.dense,
+                plan,
+            };
+            let mut layers = Vec::with_capacity(resident.schedule.layers);
+            for id in 0..resident.schedule.layers {
+                let linears = LayerLinears::new(
+                    c,
+                    &resident.schedule,
+                    id,
+                    resident.engram_hash.layers.iter().any(|h| h.layer == id),
+                );
+                let mut banks = Vec::new();
+                for (part, input, output) in [
+                    ("w1", c.hidden, c.intermediate),
+                    ("w3", c.hidden, c.intermediate),
+                    ("w2", c.intermediate, c.hidden),
+                ] {
+                    let t = resident
+                        .bank(id, part)
+                        .ok_or_else(|| format!("missing expert bank {id}/{part}"))?;
+                    let expected = vec![input as u64, output as u64, c.experts as u64];
+                    let bytes = row_bytes(t)?
+                        .checked_mul(output as u64)
+                        .and_then(|n| n.checked_mul(c.experts as u64))
+                        .and_then(|n| n.checked_add(t.offset))
+                        .ok_or("expert extent overflow")?;
+                    op::require(
+                        metal::all_slots_down_native_supported(t.dtype)
+                            && t.shape == expected
+                            && t.offset % 16 == 0
+                            && bytes <= t.buffer.length() as u64,
+                        &format!("invalid expert bank {id}/{part}"),
+                    )?;
+                    banks.push(t);
+                }
+                let engram = if let Some(projection) = &linears.engram {
+                    let p = format!("layers.{id}.engram");
+                    Some(Engram {
+                        projection: b.linear_spec(projection)?,
+                        gate: if let Some(t) = b.weights.get(&format!("{p}.gate.weight")) {
+                            op::require(
+                                t.shape == vec![c.hidden as u64, 4],
+                                "folded Engram gate shape",
+                            )?;
+                            EngramGate::Folded(decode_rows(t, 0, 4)?)
+                        } else {
+                            EngramGate::Separate {
+                                q: decode_rows(
+                                    b.tensor(&format!("{p}.q_weight"), &[4, c.hidden])?,
+                                    0,
+                                    4,
+                                )?,
+                                k: decode_rows(
+                                    b.tensor(&format!("{p}.k_weight"), &[4, c.hidden])?,
+                                    0,
+                                    4,
+                                )?,
+                            }
+                        },
+                    })
+                } else {
+                    None
+                };
+                layers.push(Layer {
+                    attention: b.attention_with_linears(id, c, &resident.schedule, &linears)?,
+                    attn_hc: b.hc_with_linear(id, "attn", c, &linears.attn_hc)?,
+                    ffn_hc: b.hc_with_linear(id, "ffn", c, &linears.ffn_hc)?,
+                    router: b.linear_spec(&linears.router)?,
+                    bias: b.vector(&format!("layers.{id}.ffn.gate.bias"), c.experts)?,
+                    shared: [
+                        b.linear_spec(&linears.shared[0])?,
+                        b.linear_spec(&linears.shared[1])?,
+                        b.linear_spec(&linears.shared[2])?,
+                    ],
+                    banks: [banks[0], banks[1], banks[2]],
+                    engram,
+                });
+            }
+            let embedding = b.tensor("embed.weight", &[c.vocab, c.hidden])?;
+            let norm = b.vector("norm.weight", c.hidden)?;
+            let head = b.linear_spec(&LinearSpec::head(c))?;
+            Ok(Self {
+                ctx,
+                engram_rows: EngramRows::Disk(&resident.engram),
+                engram_hash: resident.engram_hash.clone(),
+                schedule: resident.schedule.clone(),
+                config,
+                token_map,
+                pad,
+                layers,
+                embedding,
+                norm,
+                head,
+                prefill_rows: super::prefill_rows_for_resident(resident.bytes.resident_bytes()),
+                cold_binding,
+                identity: Arc::new(()),
+            })
+        };
+        match cold {
+            Some(cold) => cold
+                .with_binding_admission(
+                    plan,
+                    || ctx.memory_signals(),
+                    |plan, selected| construct(plan, Some(selected)),
+                )
+                .map_err(|e| e.to_string()),
+            // Direct/serve binding admits construction, not an unknown request.
+            None => plan.with_admission(
+                resident.binding_cpu_bytes,
+                0,
+                0,
+                ctx.memory_signals(),
+                |plan| construct(plan, None),
+            ),
+        }
     }
 }

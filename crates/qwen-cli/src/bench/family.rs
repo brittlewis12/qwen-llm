@@ -167,11 +167,12 @@ pub(crate) fn with_family_bench_planned<R>(
                 "[v41-retained-weight-resources] {}",
                 serde_json::to_string(&weights.retained_resources)?
             );
-            let forward = V41Forward::from_resident(
+            let forward = V41Forward::from_resident_with_cold_plan(
                 ctx,
                 &weights,
                 weights.token_map.clone(),
                 weights.raw_pad,
+                &planned,
             )
             .map_err(anyhow::Error::msg)?;
             let request_plan = forward.plan_request_from_cold(&planned)?;

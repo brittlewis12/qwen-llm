@@ -179,10 +179,7 @@ impl TinyWeights {
     fn model<'a>(&'a self, ctx: &'a MetalContext) -> Forward<'a> {
         let c = toy::config();
         let schedule = schedule();
-        let b = bind::Binder {
-            ctx,
-            weights: &self.dense,
-        };
+        let b = bind::Binder::for_test(ctx, &self.dense).unwrap();
         let mut hash = engram::HashConfig::default();
         hash.layers.truncate(1);
         hash.layers[0].layer = 0;
@@ -226,6 +223,7 @@ impl TinyWeights {
             norm: vec![1.0; 32],
             head: b.linear("head.weight", 32, 8).unwrap(),
             prefill_rows: crate::deepseek_v41::forward::MAX_PREFILL_CHUNK_ROWS,
+            cold_binding: None,
             identity: Arc::new(()),
         }
     }

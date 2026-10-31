@@ -252,9 +252,14 @@ fn bounded_gpu_preflight_request_matches_loaded_metadata_estimator() {
                 .unwrap();
             assert!(cold.resident_storage.metal_view_bytes < 4 << 20);
             let weights = ResidentWeights::load(&ctx, Arc::clone(&g)).unwrap();
-            let model =
-                Forward::from_resident(&ctx, &weights, weights.token_map.clone(), weights.raw_pad)
-                    .unwrap();
+            let model = Forward::from_resident_with_cold_plan(
+                &ctx,
+                &weights,
+                weights.token_map.clone(),
+                weights.raw_pad,
+                &cold,
+            )
+            .unwrap();
             assert_eq!(
                 cold.request,
                 model.estimate_request_memory_with_gpu_step(16).unwrap()

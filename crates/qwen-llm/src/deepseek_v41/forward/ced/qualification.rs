@@ -565,6 +565,8 @@ fn preweight_memory(
         "required_metal_bytes": cold.required_metal_bytes, "required_cpu_bytes": cold.required_cpu_bytes,
         "runtime_metal_bytes": cold.runtime_metal_bytes, "runtime_cpu_bytes": cold.runtime_cpu_bytes,
         "binding_metal_bytes": cold.binding_metal_bytes, "binding_cpu_bytes": cold.binding_cpu_bytes,
+        "resident_cache_metal_bytes": cold.binding_plan.cache_metal_bytes(),
+        "resident_cache_count": cold.binding_plan.cache_count(),
         "loader_control_cpu_bytes": cold.loader_control_cpu_bytes,
         "descriptor_window_cpu_bytes": cold.descriptor_window_cpu_bytes,
         "retained_summary_cpu_bytes": cold.retained_summary_cpu_bytes,
@@ -1002,8 +1004,14 @@ fn run(arm: Arm) -> AResult<()> {
             && weights.raw_pad == planned.raw_pad,
         "loaded normalized controls differ from plan"
     );
-    let model = Forward::from_resident(&ctx, &weights, weights.token_map.clone(), weights.raw_pad)
-        .map_err(anyhow::Error::msg)?;
+    let model = Forward::from_resident_with_cold_plan(
+        &ctx,
+        &weights,
+        weights.token_map.clone(),
+        weights.raw_pad,
+        &cold,
+    )
+    .map_err(anyhow::Error::msg)?;
     let request = model.plan_request_from_cold(&cold)?;
     let mut state = model.new_state_from_plan(&request)?;
     let comparator = Rc::new(RefCell::new(Comparator::new(Rc::clone(&reference), arm)));

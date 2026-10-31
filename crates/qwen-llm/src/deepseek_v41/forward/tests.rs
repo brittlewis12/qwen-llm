@@ -463,10 +463,7 @@ fn resident_metal_projections_match_old_source_all_40_layers() {
     let ctx = MetalContext::new().expect("Metal required for resident forward fixture");
     let data = fixture();
     let tensors = fixture_tensors(&ctx, &data);
-    let b = bind::Binder {
-        ctx: &ctx,
-        weights: &tensors,
-    };
+    let b = bind::Binder::for_test(&ctx, &tensors).unwrap();
     let c = Config {
         hidden: 8,
         heads: 2,
@@ -606,10 +603,7 @@ fn six_native_experts_plus_shared_match_cpu_f32() {
     };
     let data = fixture();
     let tensors = fixture_tensors(&ctx, &data);
-    let b = bind::Binder {
-        ctx: &ctx,
-        weights: &tensors,
-    };
+    let b = bind::Binder::for_test(&ctx, &tensors).unwrap();
     let tiny = Config {
         hidden: 8,
         heads: 2,

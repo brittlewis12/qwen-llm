@@ -6,6 +6,25 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the current state and evidence index.
 
+## 2026-10-31 - V4.1 Resident Cache Admission Integrated
+
+- Integrates reviewed `a94ebfa1` / `41d3d862` and evidence checkpoint `0a3be09a`.
+  Price active resident F16 caches before weight import/binding, retaining native
+  sources, CPU/private-shadow reserves and fresh request gates. Optional CED can
+  admit Full before cache construction; required policies and sticky fallback
+  semantics remain intact. No arithmetic, kernels or cache defaults change.
+- Real GSQ live-device quote confirms 243 caches / 14,179,368,960 bytes
+  (13.20556640625 GiB), previously absent from the cold/load cache term. This is
+  a confirmed accounting gap, not proof of prior OOM or latency causation.
+- 557 exact CPU tests, independent source/inventory reviews and bounded M5
+  allocation/lifetime validation pass. Canonical `bd9f4407` ordinary 8K Full/CED
+  completes naturally in 51 s: ten fresh cases, all finite endpoint hashes equal.
+  Cold budgets include 180,932,495,640 Metal and 2,107,390,506 CPU bytes.
+- Full/CED keeps the two default 4K input chunks; there is no stage/8K-encoder
+  authorization or new performance claim. Clean maintained-source release
+  handoff is separate; no installation, service restart or publication occurs.
+  [Accounting boundaries, all gates and execution evidence](bench/2026-10-30-v41-cache-admission.md).
+
 ## 2026-10-31 - Native GLM K64 Loader Rejected At Operator Ceiling
 
 - Frozen `fe725642`, canonical release SDK 26.2: all six bounded M5 entries
@@ -264,6 +283,21 @@ See also: `docs/PERF-ROADMAP.md` for the current state and evidence index.
   append remains selection-bound. Threshold experiment kept on
   `test/v41-cache1024`, not promoted. Raw:
   `~/qwen-runs/2026-10-29-v41-encoder-depth/append-cache1024-*`.
+
+## 2026-10-30 - V4.1 Resident Cache Admission Repair
+
+- The cold/load quote omitted the persistent F16 cache sum; its dense-preweight
+  scratch term covered only a reusable single matrix. Binding also lacked a
+  cache-construction admission gate. Later live-Metal runtime checks did not
+  establish upfront coverage. This is not a historical OOM/latency claim.
+- Freeze the active binding inventory/cache selection, separately price every
+  cache backing, include it in full cold/load demand, and freshly admit all
+  remaining binding plus known future/caller demand before cache allocation.
+  Direct/serve binding admits construction with its full CPU envelope. Existing
+  source/shadow, runtime/scratch and later admission guards remain unchanged.
+- No kernel, arithmetic, fallback/default or mapping policy change. CPU tests
+  and an ignored bounded allocation/lifetime witness are separated from pending
+  M5 qualification. [Accounting and verification boundary](bench/2026-10-30-v41-cache-admission.md).
 
 ## 2026-10-30 - V4.1 Q5_K Resident F16 Cache: +6.4%, Bitwise Pair
 

@@ -5,6 +5,205 @@ use crate::deepseek_v41::forward::{PrefillExecution, preflight, preflight_cold_p
 type Metadata = Vec<(&'static str, Value<'static>)>;
 type Tensors = Vec<(String, Vec<u64>, GgmlType)>;
 
+fn cache_gguf() -> Arc<GgufFile> {
+    let (mut kv, mut tensors) = nondefault_parts(&[], false);
+    for (key, value) in &mut kv {
+        if matches!(
+            *key,
+            "deepseek41.embedding_length"
+                | "deepseek41.expert_feed_forward_length"
+                | "deepseek41.head_dim"
+                | "deepseek41.q_lora_rank"
+                | "deepseek41.o_lora_rank"
+                | "deepseek41.index_head_dim"
+        ) {
+            *value = Value::U32(256);
+        }
+    }
+    for (name, shape, dtype) in &mut tensors {
+        for dimension in shape.iter_mut() {
+            *dimension = match *dimension {
+                32 => 256,
+                64 => 512,
+                128 => 1024,
+                160 => 1280,
+                n => n,
+            };
+        }
+        if matches!(
+            name.as_str(),
+            "output.weight"
+                | "token_embd.weight"
+                | "blk.0.attn_output_a.weight"
+                | "blk.3.ffn_gate_shexp.weight"
+                | "blk.4.attn_compressor_gate.weight"
+                | "blk.2.attn_compressor_kv.weight"
+                | "blk.2.indexer.attn_q_b.weight"
+                | "blk.5.engram_kv.weight"
+        ) {
+            *dtype = GgmlType::Q5_K;
+        }
+        if name == "blk.0.attn_output_a.weight" {
+            *shape = vec![512, 256, 2];
+        }
+    }
+    write_fixture(kv, tensors)
+}
+
+fn cache_cold(
+    g: &GgufFile,
+    enabled: bool,
+    half: bool,
+) -> crate::deepseek_v41::forward::ColdPrefillPlan {
+    preflight::plan_with_pricing(
+        g,
+        resident_storage_plan(g, PAGE, M5_MAX_BUFFER_LENGTH).unwrap(),
+        8,
+        16,
+        &[PrefillExecution::FullForward],
+        1234,
+        half,
+        enabled,
+        &|n| Ok(n.next_multiple_of(PAGE as u64)),
+    )
+    .unwrap()
+}
+
+#[test]
+fn resident_cache_cold_inventory_uses_active_normalized_shapes_head_not_embedding() {
+    let g = cache_gguf();
+    let on = cache_cold(&g, true, true);
+    let off = cache_cold(&g, false, true);
+    let cache = &on.binding_plan;
+    assert_eq!(cache.cache_count(), 3);
+    assert_eq!(
+        cache.cache_metal_bytes(),
+        16_384 + 512 * 512 * 2 + 256 * 256 * 2
+    );
+    assert!(
+        cache
+            .cache_for("head.weight", 256, 3, GgmlType::Q5_K)
+            .unwrap()
+    );
+    assert!(
+        cache
+            .cache_for("layers.0.attn.wo_a.weight", 512, 512, GgmlType::Q5_K)
+            .unwrap()
+    );
+    assert!(
+        cache
+            .cache_for("embed.weight", 256, 3, GgmlType::Q5_K)
+            .is_err()
+    );
+    for name in [
+        "layers.4.attn.compressor.wgate.weight",
+        "layers.2.attn.compressor.wkv.weight",
+        "layers.2.attn.indexer.wq_b.weight",
+        "layers.5.engram.wkv.weight",
+    ] {
+        assert!(cache.cache_for(name, 256, 256, GgmlType::Q5_K).is_err());
+    }
+    assert_eq!(off.binding_plan.cache_count(), 0);
+    assert_eq!(on.binding_metal_bytes, off.binding_metal_bytes);
+    assert_eq!(on.binding_cpu_bytes, off.binding_cpu_bytes);
+    assert_eq!(on.runtime_metal_bytes, off.runtime_metal_bytes);
+    assert_eq!(on.required_cpu_bytes, off.required_cpu_bytes);
+    assert_eq!(
+        on.required_metal_bytes - off.required_metal_bytes,
+        cache.cache_metal_bytes()
+    );
+    assert_eq!(
+        on.load_metal_bytes - off.load_metal_bytes,
+        cache.cache_metal_bytes()
+    );
+    let scalar_tier = cache_cold(&g, true, false);
+    assert_eq!(
+        cache.cache_metal_bytes(),
+        scalar_tier.binding_plan.cache_metal_bytes()
+    );
+    assert!(on.full_incremental_metal_bytes > scalar_tier.full_incremental_metal_bytes);
+}
+
+#[test]
+fn resident_cache_full_cold_boundaries_refuse_before_weight_factory() {
+    let g = cache_gguf();
+    let cold = cache_cold(&g, true, true);
+    let mut exact = preflight_signals();
+    exact.recommended_max_bytes = cold.required_metal_bytes;
+    exact.process_limit_remaining_bytes = Some(cold.required_metal_bytes + cold.required_cpu_bytes);
+    let host = exact.host_budget.as_mut().unwrap();
+    host.physical_bytes = cold.required_metal_bytes + cold.required_cpu_bytes;
+    host.conservative_available_bytes = cold.required_cpu_bytes;
+    let calls = std::cell::Cell::new(0);
+    let load = |signals| -> std::result::Result<(), LoadError> {
+        cold.clone().into_strict_for_test(signals)?;
+        calls.set(calls.get() + 1);
+        Ok(())
+    };
+    load(exact).unwrap();
+    assert_eq!(calls.get(), 1);
+    for field in 0..4 {
+        let mut short = exact;
+        match field {
+            0 => short.recommended_max_bytes -= 1,
+            1 => *short.process_limit_remaining_bytes.as_mut().unwrap() -= 1,
+            2 => short.host_budget.as_mut().unwrap().physical_bytes -= 1,
+            3 => {
+                short
+                    .host_budget
+                    .as_mut()
+                    .unwrap()
+                    .conservative_available_bytes -= 1
+            }
+            _ => unreachable!(),
+        }
+        assert!(load(short).is_err(), "field {field}");
+        assert_eq!(calls.get(), 1);
+    }
+    let off = cache_cold(&g, false, true);
+    let mut without_cache = preflight_signals();
+    without_cache.recommended_max_bytes = off.required_metal_bytes;
+    off.assess_load(without_cache).unwrap();
+    assert!(cold.select_load(without_cache).is_err());
+    let cache = cold.binding_plan.cache_metal_bytes();
+    assert_eq!(
+        cold.load_metal_bytes,
+        cold.resident_storage.metal_view_bytes + cold.binding_metal_bytes + cache
+    );
+    assert_eq!(
+        cold.required_metal_bytes,
+        cold.load_metal_bytes + cold.runtime_metal_bytes
+    );
+}
+
+#[test]
+fn resident_cache_postbinding_runtime_uses_live_cache_once_and_keeps_cpu_reserves() {
+    let g = cache_gguf();
+    let cold = cache_cold(&g, true, true);
+    let mut live = preflight_signals();
+    live.current_allocated_bytes = cold.load_metal_bytes;
+    live.recommended_max_bytes = cold.required_metal_bytes;
+    live.process_limit_remaining_bytes =
+        Some(cold.runtime_metal_bytes + cold.runtime_gate_cpu_bytes);
+    let host = live.host_budget.as_mut().unwrap();
+    host.private_shadow_bytes = cold.resident_storage.private_shadow_bytes;
+    host.physical_bytes =
+        cold.required_metal_bytes + host.private_shadow_bytes + cold.runtime_gate_cpu_bytes;
+    host.conservative_available_bytes = host.private_shadow_bytes + cold.runtime_gate_cpu_bytes;
+    let admitted = cold.assess_runtime(live).unwrap();
+    assert_eq!(
+        admitted.required_bytes,
+        Some(cold.runtime_metal_bytes + cold.runtime_gate_cpu_bytes)
+    );
+    assert_eq!(
+        cold.runtime_gate_cpu_bytes,
+        cold.runtime_cpu_bytes + cold.binding_cpu_bytes + cold.caller_cpu_bytes
+    );
+    assert!(cold.binding_plan.cache_metal_bytes() > 0);
+    live.recommended_max_bytes -= 1;
+    assert!(cold.assess_runtime(live).is_err());
+}
+
 fn nondefault_parts(engram_layers: &[usize], folded: bool) -> (Metadata, Tensors) {
     let schedule = Schedule {
         layers: 6,

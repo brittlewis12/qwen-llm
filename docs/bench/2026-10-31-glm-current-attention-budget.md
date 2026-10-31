@@ -172,8 +172,9 @@ not formal peaks; owned, copied and contiguous-mapped library bytes are charged.
 This clears the actual pipeline-capacity stop, not fused ownership, arithmetic,
 spills, occupancy, performance, N2048 admission or model quality. The experimental
 kernel and hosts stay on their branch. Bounded N64 collection and offline checking
-are the next preparation step; no dispatch or model integration follows
-automatically from metadata acceptance.
+subsequently pass [the separate runtime gate](2026-10-31-glm-mla-fused-n64.md),
+including independent replay of all active outputs and physical support records.
+That does not qualify N2048 cost, whole-MLA savings or model integration.
 
 Synthetic operands, reused cache residency, the standalone command composition
 and device state can differ from ordinary MLA. This measurement supplies a

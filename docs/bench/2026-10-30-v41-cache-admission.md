@@ -85,6 +85,10 @@ availability while Full fits, required CED refusing before the factory, sticky
 postbinding/allocation handoff, repricing mismatch, invalid telemetry, changing
 signals and one-byte-short cache/control/source-shadow/CPU/Full budgets.
 
+Independent review of `41d3d862` clears this P2 correction, with no new P1/P2
+finding in the reviewed repair. This source-review result is distinct from
+real-artifact resource admission or execution qualification.
+
 Quantized sources remain retained during and after conversion. GPU conversion
 writes directly to each final F16 destination and waits; there is no additional
 full-cache-sized conversion buffer. Source and accumulated destinations coexist.
@@ -104,7 +108,8 @@ Local optimized non-LTO CPU acceptance passes exactly 557 tests: library 358,
 oracle 33, benchmark 53 and CLI 113, including eight new cache regressions.
 Eleven additional existing shared-buffer pricing/capacity/admission CPU tests
 pass. Workspace/all-target checks, formatting, environment-reference checking
-and acceptance-runner self-tests pass. No GPU/model witness was executed.
+and acceptance-runner self-tests pass. This 557-test CPU source evidence remains
+unchanged; the separate M5 toy result below does not extend it to model execution.
 
 Acceptance discovery also exposed twelve pre-existing maintained-main serve
 mapping/timing/native-failure tests missing from the exact registry. Each is
@@ -112,13 +117,34 @@ reviewed and classified individually as CPU-only. The runner captures diagnostic
 stderr separately so native timing output cannot splice into libtest stdout;
 the exact result/count validator and all discovery/ignore checks are unchanged.
 
-The ignored M5 witness is source-only in this repair. Its combined toy quote is
-at most 1 GiB including a 128 MiB CPU envelope, with normal admission before
-source allocation and again before binding. It checks independent source,
-control/cache costs, live allocation bounds, distinct cache backings, shared
-group views and final buffer release. It is not a real-artifact qualification.
+The ignored bounded M5 allocation/lifetime witness was run separately with
+`MTL_DEBUG_LAYER=1` and **PASS in 0.10 s**:
 
-Independent review, integration, a qualified build, actual-artifact cache quote
-and authorized allocation/execution qualification remain prerequisites for the
-next cache-enabled profile. Local non-LTO CPU acceptance is not performance or
-M5 execution evidence.
+`deepseek_v41::forward::bind::tests::bounded_gpu_cache_backings_and_group_views_match_independent_quote`
+
+Its combined toy quote is at most 1 GiB including a 128 MiB CPU envelope, with
+normal admission before source allocation and again before binding. The pass
+covers independent source/control/cache costs, sampled live allocation bounds,
+distinct cache backings, shared group views and final buffer release. It is
+**not** full-artifact execution, a continuous high-water measurement or timing
+benchmark qualification. The frozen normal non-LTO dev libtest and retained log
+are identified by SHA-256:
+
+```text
+libtest: 4de7d79569b42d50bb1f831ab784676c0ce6229b4cc7081b0f18516dd1ae9448
+log:     a071197c2c1d3bf9c13d547a7439e2c71926c9c86c7a4cb506244627b3263cb4
+```
+
+A private metadata-only production-helper quote executable was also compiled
+(SHA-256
+`0435f8ca5fef486e0c68bd4d5df1f034837a3830b6293e28067e466bc891af16`). Its
+actual target attempt was **refused before context creation** because the
+canonical lease was busy in another lane. That refusal is not a quote result:
+there is still no actual GSQ active-cache count or live-device price, no 8K
+staged admission, and no full-artifact execution evidence from this work.
+
+V4 main integration remains pending. The parent retains the private proof and
+owns the next fail-fast quote attempt after the concurrent lane releases its
+lease; this checkpoint does not authorize a retry. Actual-artifact quotation,
+integration, the applicable qualified build and authorized execution checks
+remain prerequisites for the next cache-enabled profile.

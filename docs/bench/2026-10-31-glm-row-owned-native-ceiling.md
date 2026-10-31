@@ -114,6 +114,12 @@ a denominator. Prepare a narrowly bounded post-C current-stack ranking packet
 before another large implementation commitment; coarse parent spans are not an
 exclusive affected fraction.
 
+The subsequent [bounded post-C 2K packet](2026-10-31-glm-current-post-c-2k-budget.md)
+now passes independent recomputation: plain calls are approximately 2.001 s with
+0.97% profiling overhead. Routed experts remain the largest combined parent,
+followed by MLA and the KDA recurrence/input components. This supplies the new
+coarse ranking, not exclusive gate/up time or grounds to reopen this fixed design.
+
 ## Retained Evidence
 
 Private build/validation/timing logs, all samples and independent recomputation

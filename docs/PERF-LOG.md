@@ -6,7 +6,7 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the current state and evidence index.
 
-## 2026-10-31 - V4.1 Routed Prefill GEMM Ceiling: +53% If Free; Int8 Peak 2x
+## 2026-10-31 - V4.1 Routed Prefill GEMM Ceiling +53%; Int8 Tile Killed At K=16
 
 - Diagnostic knob (branch `test/v41-int8-tile` `367e1a83`, not for main)
   skips the Metal 4 tensor routed gate/up and down dispatches in prefill.
@@ -19,8 +19,12 @@ See also: `docs/PERF-ROADMAP.md` for the current state and evidence index.
   accumulation (`matmul2d_peak_timing`, `QWEN_V41_TILE_PEAK_I8=1`): 216-259
   TOPS across 64x64x32 / 32x64x64 / 64x64x64 / 128x64x32 / 64x64x128 tiles,
   versus 113-132 TFLOPS for half. A 2x routed GEMM is worth ~+21% 8K
-  prefill; 1.5x ~+13%. An int8-activation routed tile is the next prefill
-  candidate; activation quantization must pass the witness and task screen.
+  prefill; 1.5x ~+13%.
+- Int8 is closed for this artifact: IQ2_XS / IQ2_S carry one scale per 16
+  weights, so each int32 product must be rescaled every K=16, and K=16 int8
+  matmul2d reaches only 122-165 TOPS (32x64x16, 64x64x16) versus 122-127
+  TFLOPS for K=16 half, before the per-element rescale. Requantizing a
+  32-block across two sub-scales is badly lossy. No int8 tile is built.
 
 ## 2026-10-31 - V4.1 Routed Expert Decode Ceiling: Load-Only Is +9.4%
 

@@ -165,13 +165,14 @@ fn m5_gate_up_actual_q4_three_document_smoke_profile_plain_abba() {
             plan.ledger.scratch_options(),
         );
         assert_eq!((half.len(), half[0].bytes()), (1, Some(16 << 20)));
-        let admission = crate::metal::evaluate_metal_memory_admission(
-            plan.ledger.peak_bytes().checked_add(cpu).unwrap(),
+        let admission = crate::metal::evaluate_metal_memory_admission_with_cpu_bytes(
+            plan.ledger.peak_bytes(),
+            cpu,
             0,
             ctx.memory_signals(),
             true,
         );
-        out.emit(json!({"event":"preload_admission","ledger":plan.ledger.terms(),"cpu_reserve_bytes":cpu,"required_bytes":admission.required_bytes,"admitted":admission.is_admitted(),"reason":admission.reason.as_str()}));
+        out.emit(json!({"event":"preload_admission","ledger":plan.ledger.terms(),"cpu_reserve_bytes":cpu,"cpu_availability_checked":true,"required_bytes":admission.required_bytes,"admitted":admission.is_admitted(),"reason":admission.reason.as_str()}));
         assert!(
             admission.is_admitted(),
             "full GPU+CPU admission refused: {admission:?}"

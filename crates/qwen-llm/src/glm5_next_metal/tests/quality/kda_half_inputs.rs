@@ -16,7 +16,7 @@ const Q6_DOWN_BLOCKS: [usize; 3] = [11, 12, 44];
 const Q5_GATE_UP_BLOCKS: [usize; 1] = [11];
 const Q8_MLA_BLOCKS: [usize; 11] = [3, 7, 11, 15, 19, 23, 27, 31, 35, 39, 43];
 
-fn metadata_pins() -> Vec<(String, GgmlType, Vec<u64>)> {
+pub(super) fn metadata_pins() -> Vec<(String, GgmlType, Vec<u64>)> {
     let mut pins = Vec::new();
     for block in 3..45 {
         let down = if Q6_DOWN_BLOCKS.contains(&block) {
@@ -53,7 +53,7 @@ fn metadata_pins() -> Vec<(String, GgmlType, Vec<u64>)> {
     pins
 }
 
-fn assert_metadata_pins(tensors: &[TensorDesc]) {
+pub(super) fn assert_metadata_pins(tensors: &[TensorDesc]) {
     for (name, dtype, shape) in metadata_pins() {
         let tensor = tensors
             .iter()
@@ -383,15 +383,16 @@ fn m5_kda_half_actual_q4_three_document_bitwise_smoke() {
         let _allocation = ctx.begin_allocation_transaction();
         let preflight = preflight_session(&ctx, &gguf, artifact.model(), CAPACITY, ROWS).unwrap();
         assert!(preflight.ledger.scratch_options().kda_half_inputs);
-        let admission = crate::metal::evaluate_metal_memory_admission(
-            preflight.ledger.peak_bytes().checked_add(cpu).unwrap(),
+        let admission = crate::metal::evaluate_metal_memory_admission_with_cpu_bytes(
+            preflight.ledger.peak_bytes(),
+            cpu,
             0,
             ctx.memory_signals(),
             true,
         );
         out.emit(json!({"event":"preload_admission","ledger":preflight.ledger.terms(),
             "cpu_reserve_bytes":cpu,"required_bytes":admission.required_bytes,"admitted":admission.is_admitted(),
-            "reason":admission.reason.as_str(),"cpu_charged_to_working_set_and_nonzero_process_budget":true}));
+            "reason":admission.reason.as_str(),"cpu_availability_checked":true,"cpu_charged_to_physical_and_nonzero_process_budget":true}));
         assert!(
             admission.is_admitted(),
             "full model/session/CPU admission refused"

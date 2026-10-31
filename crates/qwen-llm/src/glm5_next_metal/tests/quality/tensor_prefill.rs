@@ -9,6 +9,9 @@ mod tensor_m5_transfers;
 #[path = "kda_half_inputs.rs"]
 mod kda_half_inputs;
 
+#[path = "routed_qualification.rs"]
+mod routed_qualification;
+
 use super::super::super::{tensor_down, tensor_prefill};
 use super::*;
 use crate::glm5_next::admission::Glm5NextArtifactLayout;

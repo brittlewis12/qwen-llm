@@ -157,10 +157,10 @@ Five additional device-free smoke contracts cover protocol/capture reserves,
 exact census deltas, finite full-vocabulary bit comparisons and strict named
 expert/MLA metadata pins with malformed-metadata negative controls.
 
-The broader `glm5_next::tests::` run is not green: 21 pass, two artifact
-witnesses are ignored, and three unchanged IQ1_M binder/coverage expectations
-fail (`binder_refuses_structural_drift`,
-`binding_rejects_unimplemented_codecs_not_independently_typed_experts`, and
-`coverage_matrix_names_remaining_adaptations`). Those tests, their binder,
-coverage and admission implementations are byte-identical to the base; this
-lane does not repair or weaken them. The ledger regressions in that run pass.
+The original broader CPU run had three stale IQ1_M binder/coverage expectations.
+Maintained-main test-only fix `266c2825`, merged into this branch, resolves them
+using real native IQ1 capability evidence and Q8_1 negatives. The maintained
+filter now expects 26 CPU passes and two ignored artifact witnesses. The old
+three failures were test-contract drift, not production changes. Binder,
+coverage and admission implementations are unchanged; the repaired contracts
+retain IQ1_M latent refusal and malformed-storage guards.

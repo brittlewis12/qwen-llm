@@ -6,6 +6,23 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the current state and evidence index.
 
+## 2026-10-31 - Flash-Next Decode +2.7% More: One-Row Q6_K, BF16 HC Up-Mix
+
+- Q6_K mat-vecs of at most 16384 rows now run one row per simdgroup
+  (`kernel_mat_vec_q6_K_f32_r1`): each row keeps the two-row kernel's lanes,
+  loop order and reduction, and a GPU test pins the outputs bitwise on M4 and
+  M5. Applies to every family; `QWEN_Q6K_R1=0` restores two rows.
+- Flash-Next BF16 HC up projections (GSQ-RCO keeps HC at BF16) use a BF16
+  twin of the existing Q8_0 up-mix: the up mat-vec and the sigmoid-gated
+  branch mean in one dispatch, under the HC up-mix decode option;
+  `QWEN_FN_HC_UP_MIX_BF16=0` opts out. Checked against an F64 reference.
+- M5 Ultra, GSQ-RCO IQ3_S, tg64, one build, 30 s cool-downs: d2048
+  62.58 / 62.57 -> 63.67 with one-row Q6_K -> 64.27 / 64.24 with both
+  (+2.7%); d0 66.26 -> 68.06 (+2.7%). Greedy 160-token text on two prompts
+  is byte-identical to the previous default and to the pre-change baseline.
+- Flash-Next decode since the morning profile: d2048 49.5 -> 64.3 tok/s
+  (+30%), d0 52.9 -> 68.1 (+29%).
+
 ## 2026-10-31 - Flash-Next Decode +25-27%: Five Serialized Kernels Unblocked
 
 - A new bench-only per-dispatch profile (`QWEN_FN_DECODE_DISPATCHES`, one

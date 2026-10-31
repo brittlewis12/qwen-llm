@@ -127,6 +127,15 @@ timing or performance verdict is added. Reports contain hashes/metadata only,
 not raw token IDs, logits, decoded output or private paths. Shard stamps are
 checked unchanged after completion.
 
+Before any weight load, strict historical metadata pins also require Q6 down
+only at blocks 11/12/44, Q5 down at the other 39 routed blocks, Q5 gate/up
+only at block 11 and Q4 gate/up elsewhere. Named Q8 MLA k_b/v_b tensors are
+checked at blocks 3/7/11/15/19/23/27/31/35/39/43 and serialized MTP block 45,
+including exact shapes and the total of 24 serialized banks. Device-free
+controls reject count-preserving expert assignment swaps, renamed/wrong-type/
+wrong-shape MLA banks and extra serialized pairs. The historical harness is
+not modified.
+
 The only edit to the old quality parent is a new module declaration; removing
 that declaration restores its exact prior bytes. The historical transfer
 test, stock fixtures and old packet bodies/semantics remain unchanged.
@@ -139,13 +148,14 @@ timing. No GPU, remote operation, merge, deployment or promotion is included.
 
 ## CPU Verification
 
-Offline dev and release `cargo check --workspace --tests` pass. All ten
-`cpu_kda_half` contracts (the original seven plus three smoke contracts) pass
+Offline dev and release `cargo check --workspace --tests` pass. All twelve
+`cpu_kda_half` contracts (the original seven plus five smoke contracts) pass
 both with the environment unset and with global staging flag 1; the nine
 existing dense tensor CPU policy tests also pass.
 Formatting and diff checks pass. No GPU lease is acquired by these checks.
-Three additional device-free smoke contracts cover protocol/capture reserves,
-exact census deltas and finite full-vocabulary bit comparisons.
+Five additional device-free smoke contracts cover protocol/capture reserves,
+exact census deltas, finite full-vocabulary bit comparisons and strict named
+expert/MLA metadata pins with malformed-metadata negative controls.
 
 The broader `glm5_next::tests::` run is not green: 21 pass, two artifact
 witnesses are ignored, and three unchanged IQ1_M binder/coverage expectations

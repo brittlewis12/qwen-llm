@@ -2,6 +2,7 @@
 use super::*;
 use crate::glm5_next::memory::{KdaHalfInputsScope, TensorGateUpScope};
 use crate::glm5_next_metal::tensor_q5_down;
+use crate::tensor::TensorDesc;
 
 const CAPACITY: usize = 4416;
 const HALF_BYTES: u64 = 16 << 20;
@@ -11,6 +12,58 @@ const CONVERT: &str = "kernel_scatter_offset_f32_to_f16";
 const HALF: &str = "kernel_mat_mat_q8_0_f16act_tensor_wide";
 const WIDE: &str = "kernel_mat_mat_q8_0_f32_tensor_wide";
 const DOWN: &str = "kernel_moe_down_q5_K_f32_grouped_slots_tensor";
+const Q6_DOWN_BLOCKS: [usize; 3] = [11, 12, 44];
+const Q5_GATE_UP_BLOCKS: [usize; 1] = [11];
+const Q8_MLA_BLOCKS: [usize; 11] = [3, 7, 11, 15, 19, 23, 27, 31, 35, 39, 43];
+
+fn metadata_pins() -> Vec<(String, GgmlType, Vec<u64>)> {
+    let mut pins = Vec::new();
+    for block in 3..45 {
+        let down = if Q6_DOWN_BLOCKS.contains(&block) {
+            GgmlType::Q6_K
+        } else {
+            GgmlType::Q5_K
+        };
+        let gate_up = if Q5_GATE_UP_BLOCKS.contains(&block) {
+            GgmlType::Q5_K
+        } else {
+            GgmlType::Q4_K
+        };
+        for (suffix, dtype, shape) in [
+            ("down", down, vec![2048, 4096, 288]),
+            ("gate", gate_up, vec![4096, 2048, 288]),
+            ("up", gate_up, vec![4096, 2048, 288]),
+        ] {
+            pins.push((
+                format!("blk.{block}.ffn_{suffix}_exps.weight"),
+                dtype,
+                shape,
+            ));
+        }
+    }
+    for block in Q8_MLA_BLOCKS.into_iter().chain([45]) {
+        for (suffix, shape) in [("k", vec![256, 512, 64]), ("v", vec![512, 256, 64])] {
+            pins.push((
+                format!("blk.{block}.attn_{suffix}_b.weight"),
+                GgmlType::Q8_0,
+                shape,
+            ));
+        }
+    }
+    pins
+}
+
+fn assert_metadata_pins(tensors: &[TensorDesc]) {
+    for (name, dtype, shape) in metadata_pins() {
+        let tensor = tensors
+            .iter()
+            .find(|t| t.name == name)
+            .unwrap_or_else(|| panic!("missing pinned tensor {name}"));
+        assert_eq!(tensor.dtype, dtype, "{name} dtype");
+        assert_eq!(tensor.shape, shape, "{name} shape");
+    }
+    assert_eq!(tensors.iter().filter(|t| t.name.ends_with(".attn_k_b.weight") || t.name.ends_with(".attn_v_b.weight")).count(), 24);
+}
 
 fn reserve(vocab: u32) -> (Vec<(&'static str, u64)>, u64) {
     // Parent's two 64-row captures plus one extra prefill row per trajectory.
@@ -134,6 +187,99 @@ fn cpu_kda_half_smoke_comparison_requires_finite_full_vocabulary_bits() {
 }
 
 #[test]
+fn cpu_kda_half_smoke_metadata_pins_exact_expert_and_serialized_mla_assignments() {
+    let pins = metadata_pins();
+    let names = |dtype, suffix: &str| {
+        pins.iter()
+            .filter(|(name, kind, _)| *kind == dtype && name.ends_with(suffix))
+            .map(|(name, _, _)| name.as_str())
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(pins.len(), 150);
+    assert_eq!(
+        names(GgmlType::Q6_K, ".ffn_down_exps.weight"),
+        [
+            "blk.11.ffn_down_exps.weight",
+            "blk.12.ffn_down_exps.weight",
+            "blk.44.ffn_down_exps.weight"
+        ]
+    );
+    assert_eq!(names(GgmlType::Q5_K, ".ffn_down_exps.weight").len(), 39);
+    assert_eq!(
+        names(GgmlType::Q5_K, ".ffn_gate_exps.weight"),
+        ["blk.11.ffn_gate_exps.weight"]
+    );
+    assert_eq!(
+        names(GgmlType::Q5_K, ".ffn_up_exps.weight"),
+        ["blk.11.ffn_up_exps.weight"]
+    );
+    assert_eq!(
+        names(GgmlType::Q4_K, ".ffn_gate_exps.weight").len()
+            + names(GgmlType::Q4_K, ".ffn_up_exps.weight").len(),
+        82
+    );
+    for suffix in ["k", "v"] {
+        assert_eq!(
+            names(GgmlType::Q8_0, &format!(".attn_{suffix}_b.weight")),
+            [3, 7, 11, 15, 19, 23, 27, 31, 35, 39, 43, 45]
+                .map(|block| format!("blk.{block}.attn_{suffix}_b.weight"))
+        );
+    }
+}
+
+#[test]
+fn cpu_kda_half_smoke_metadata_rejects_count_preserving_swaps_and_mla_drift() {
+    let tensors = metadata_pins()
+        .into_iter()
+        .map(|(name, dtype, shape)| {
+            let (_, bytes) = crate::metal::checked_ggml_shape_bytes(&shape, dtype).unwrap();
+            TensorDesc {
+                name,
+                dtype,
+                shape,
+                shard_idx: 0,
+                data_offset: 0,
+                n_bytes: bytes as u64,
+            }
+        })
+        .collect::<Vec<_>>();
+    assert_metadata_pins(&tensors);
+    for (a, b) in [
+        ("blk.11.ffn_down_exps.weight", "blk.10.ffn_down_exps.weight"),
+        ("blk.11.ffn_gate_exps.weight", "blk.12.ffn_gate_exps.weight"),
+        ("blk.11.ffn_up_exps.weight", "blk.12.ffn_up_exps.weight"),
+    ] {
+        let mut bad = tensors.clone();
+        let i = bad.iter().position(|t| t.name == a).unwrap();
+        let j = bad.iter().position(|t| t.name == b).unwrap();
+        let (left, right) = (bad[i].dtype, bad[j].dtype);
+        bad[i].dtype = right;
+        bad[j].dtype = left;
+        assert!(std::panic::catch_unwind(|| assert_metadata_pins(&bad)).is_err());
+    }
+    for block in [3, 7, 11, 15, 19, 23, 27, 31, 35, 39, 43, 45] {
+        for suffix in ["k", "v"] {
+            let name = format!("blk.{block}.attn_{suffix}_b.weight");
+            let i = tensors.iter().position(|t| t.name == name).unwrap();
+            for change in 0..3 {
+                let mut bad = tensors.clone();
+                match change {
+                    0 => bad[i].name = format!("blk.46.attn_{suffix}_b.weight"),
+                    1 => bad[i].dtype = GgmlType::Q6_K,
+                    _ => bad[i].shape.swap(0, 1),
+                }
+                assert!(std::panic::catch_unwind(|| assert_metadata_pins(&bad)).is_err());
+            }
+        }
+    }
+    let mut extra = tensors.clone();
+    let mut tensor = tensors.last().unwrap().clone();
+    tensor.name = "blk.46.attn_v_b.weight".into();
+    extra.push(tensor);
+    assert!(std::panic::catch_unwind(|| assert_metadata_pins(&extra)).is_err());
+}
+
+#[test]
 #[ignore = "actual pinned Q4 M5; release, validation ON, production lease, global QWEN_GLM53_KDA_HALF_INPUTS=1, fresh GLM53_KDA_HALF_SMOKE_REPORT"]
 fn m5_kda_half_actual_q4_three_document_bitwise_smoke() {
     environment();
@@ -167,6 +313,9 @@ fn m5_kda_half_actual_q4_three_document_bitwise_smoke() {
     let artifact = Glm5NextArtifactLayout::inspect(&gguf).unwrap();
     assert!(artifact.packed_prefill());
     let c = artifact.config();
+    assert_eq!(c.blocks.len(), 45);
+    assert_eq!(c.leading_dense_block_count, 3);
+    assert_metadata_pins(&gguf.tensors);
     let vocab = c.vocab_size as usize;
     assert!(
         docs.iter()
@@ -225,6 +374,8 @@ fn m5_kda_half_actual_q4_three_document_bitwise_smoke() {
         "capacity":CAPACITY,"rows":ROWS,"half_backing_logical_bytes_both_arms":HALF_BYTES,
         "half_backing_priced_upper_bytes_both_arms":half_price,"cpu_terms":terms,"cpu_reserve_bytes":cpu,
         "eligible_kda_input_audit":audit,"q5_down_audit":q5_names,
+        "strict_metadata_pins":{"q6_down_blocks":Q6_DOWN_BLOCKS,"q5_gate_up_blocks":Q5_GATE_UP_BLOCKS,
+            "executed_q8_mla_blocks":Q8_MLA_BLOCKS,"serialized_mtp_mla_block":45,"named_tensors":150},
         "documents":docs.iter().map(|d|json!({"stratum":d.stratum,"prefix":d.prefix,"tokens_sha256":token_hash(&d.tokens)})).collect::<Vec<_>>(),
         "teacher_forced_steps":CONTINUATION,"compared_rows_per_document":CONTINUATION+1,
         "timed":false,"performance_verdict":null,"state_capture":false}));

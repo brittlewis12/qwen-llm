@@ -1,21 +1,22 @@
-# GLM INT8 GROUP32: Epoch Correctness Gate
+# GLM INT8 GROUP32: Correctness And Resident Cost
 
 ## Decision
 
-The fixed M5 Ultra hardware audit passes, including independent replay of the
-physical output dump. This accepts the opaque INT32 destination layout and
-per-epoch reset/rescale arithmetic for two discriminating synthetic patterns.
-It is not a speed result, native operator, GPU activation quantizer, model-quality
-qualification or production precision-mode change.
+Park this fixed GROUP32 resident composition. Its reset/rescale-inclusive
+complete-pair device-cost medians are **10.585167 / 10.587187 ms**, already well
+above the 5-6 ms complete native-pair target before native unpack, activation
+packing, buckets, epilogue and real output delivery are added.
 
-The next useful falsifier is a resident cost screen that includes a fresh INT32
-reset, conversion and F32 affine accumulation at every K32 epoch. Raw INT8 peak
-does not include those costs. Do not reopen the closed Half K64/RowOwned family
-or V4's per-16-scale INT8 design on the strength of this result.
+Do not fund its native operator, model adapter, quality campaign or a geometry/
+barrier/offset rescue sweep. Keep the qualified CURRENT-C production path and
+the closed Half K64/RowOwned and V4 per-16-scale decisions unchanged.
 
-The subsequent full-grid, 128-epoch cost shader also passes hardware correctness
-and independent physical replay, as detailed below. Cost timing remains a
-separate, unexecuted gate; neither correctness result is a performance claim.
+Both the two-epoch audit and subsequent full-grid 128-epoch shader pass hardware
+correctness and independent physical replay. Correctness establishes neither
+speed nor a production precision-mode promotion. The timing result is a material
+negative for this frozen composition, not a formal native lower bound or proof
+that every INT8 design is impossible; compressed delivery and a different
+pipeline could behave differently.
 
 ## Arithmetic And Scope
 
@@ -125,8 +126,49 @@ these policies or terminal allocation counters is a formal peak bound.
 
 The validation-only process exits successfully under a fail-fast self-lease and
 an actual 90 s timeout, with API validation enabled. The lease ends naturally.
-The next gate is source/CPU review of timing this same fixed shader; no cost,
-native-operator, DRAM, model-quality or application-speedup result exists yet.
+The subsequent timing uses this same shader. These correctness checks alone
+establish no native-operator, DRAM, model-quality or application-speedup result.
+
+## Resident Cost Screen
+
+Frozen timing host source is `bc509024aa2555cc753b7b33985726d56bbd6b80`, with the
+unchanged cost metallib. The standalone opt1/no-LTO host is not a canonical
+application or native-operator timing binary; the compiled Metal shader uses
+SDK 26.2, Metal 32023.864/4.0 and its frozen ordinary optimization flags.
+
+One untimed numerical precheck precedes two blocks, each with eight excluded
+warmups and sixteen retained samples. All 48 raw intervals are retained, with
+32 predefined retained samples and no filtering. Each interval measures one
+checked command containing both serial full-grid bank dispatches, not one bank.
+The run completes all 49 commands / 98 dispatches and five full numerical
+checkpoints under DEBUG0, a fail-fast self-lease and an actual 90 s timeout.
+
+| Block | GPU Median ms | GPU Mean ms | GPU Min-Max ms | Host-Wall Median ms |
+| --- | ---: | ---: | ---: | ---: |
+| 0 | 10.585167 | 11.028370 | 10.573042-17.664375 | 10.810042 |
+| 1 | 10.587187 | 10.597549 | 10.566625-10.736375 | 10.820875 |
+
+Block-median drift is +0.01909%. Half medians are 10.586771 / 10.584688 ms and
+10.589438 / 10.582938 ms. The first retained 17.664375 ms sample remains included;
+block 1's first 17.650125 ms warmup remains recorded and excluded only by its
+predefined index. No clock/thermal cause is established.
+
+Every retained sample exceeds 6 ms. Even the fastest is 76.1% above that upper
+target, so the stop decision does not depend on interpreting the outlier. The
+618,475,290,624 shape-issued integer-dot operations imply about 58.43 / 58.42
+issued INT TOPS at the block medians, not hardware-counter or total-pipeline
+throughput. Raw 216-259 TOPS dot-rate evidence omits this composition's 128
+reset/conversion/affine epochs, staging, barriers, inactive scheduling and fixed
+observable outputs. This experiment does not isolate the cause of the gap.
+
+All checkpoint-visible outputs pass. The final 46,207,168-byte physical dump is
+byte-identical to the independently replayed validation dump. Checkpoints do
+not audit every intermediate GPU execution; checksum/layout limits remain.
+There is no native-weight, activation-quantizer, model-quality, application-gain,
+DRAM, register/spill or occupancy inference. No repeat campaign is needed for
+this fixed design. Frozen implementation/history remain on
+`probe/glm-i8-group32-cost`; maintained main carries this report, not a promoted
+INT8 precision mode.
 
 ## Retained Evidence
 
@@ -144,6 +186,9 @@ replay receipts are retained. Public SHA256 identifiers:
 | 128-epoch hardware report | `cf23442581ebd11042fd5632805fe0f7e92aaf764aa56701e3ebe0e7027832e3` |
 | 128-epoch physical dump | `9a26cfd8b1b07cbe5c724d5b6ffe943edb95c65ceaf4fed6908578fbbec400f0` |
 | 128-epoch independent replay | `031d9d85cfedb68262fecfcb1ef7442fb8939054dbef03c4b85113474a5d3a9a` |
+| Resident timing host | `65e38358ee40db1a8fe9dbd1501391506ea0d4df1517f7f5b4662e0dcbe885c5` |
+| Resident timing report | `faf8838f37b58f38044bd3183f3816b1900751eedd9a5448d50a4b0ae3dd9b78` |
+| Independent timing recomputation | `ae652fcb9b547b2fd29c639751726bbe65ef39245720e6c63d44955f3bf09300` |
 
-The standalone validation host is not a canonical application timing binary.
-No timing, model logits, model quality or application speedup is claimed.
+The standalone hosts do not qualify canonical native/application performance.
+The resident timing is a bounded device-cost screen, not a model speedup.

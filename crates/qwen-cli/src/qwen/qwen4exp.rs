@@ -74,7 +74,8 @@ pub(crate) fn qwen4exp_prompt_capability_failure(
     if family != ModelFamily::Qwen4Exp {
         return Some(Qwen4ExpPromptCapabilityFailure::Architecture);
     }
-    match prompt_template::QwenHeaderFacts::from_gguf("qwen4exp", gguf) {
+    let architecture = gguf.architecture().unwrap_or_default();
+    match prompt_template::QwenHeaderFacts::from_gguf(&architecture, gguf) {
         Ok(facts) => classify_qwen4exp_prompt_capability(family, &facts),
         Err(_) => Some(Qwen4ExpPromptCapabilityFailure::Tokenizer(
             prompt_template::QwenTokenizerMismatch::TokenCount,
@@ -487,10 +488,9 @@ pub(crate) fn run_qwen4exp_single_turn(
         required_forwards("Qwen3.8-Flash-Next", prompt_ids.len(), args.tokens, None)?;
     let config =
         Qwen4ExpConfig::from_gguf(gguf).context("bind Qwen3.8-Flash-Next request geometry")?;
-    ensure!(
-        config == Qwen4ExpConfig::flash_next_reference(),
-        "Qwen3.8-Flash-Next runtime requires the released architecture contract"
-    );
+    config
+        .validate_artifact()
+        .context("validate Qwen4 artifact contract")?;
     ensure!(
         tokenizer.n_vocab() == config.vocab_size,
         "Qwen3.8-Flash-Next tokenizer vocabulary {} differs from model vocabulary {}",

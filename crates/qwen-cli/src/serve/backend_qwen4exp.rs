@@ -74,10 +74,9 @@ impl Prepared {
         .context("Qwen3.8-Flash-Next profile has no fixed serve capacity")?;
         let (context_limit, default_max_tokens) = (limits.context_tokens, limits.max_tokens);
         let tokenizer = Tokenizer::from_gguf(gguf).context("load Qwen3.8-Flash-Next tokenizer")?;
-        anyhow::ensure!(
-            config == Qwen4ExpConfig::flash_next_reference(),
-            "Qwen3.8-Flash-Next runtime requires the released architecture contract"
-        );
+        config
+            .validate_artifact()
+            .context("validate Qwen4 artifact contract")?;
         let vocab_size = tokenizer.n_vocab();
         anyhow::ensure!(
             vocab_size == config.vocab_size,

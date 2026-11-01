@@ -348,10 +348,9 @@ pub(crate) fn with_family_bench_planned<R>(
                 );
             }
             let config = Qwen4ExpConfig::from_gguf(gguf).context("bind Flash-Next geometry")?;
-            ensure!(
-                config == Qwen4ExpConfig::flash_next_reference(),
-                "Qwen3.8-Flash-Next runtime requires the released architecture contract"
-            );
+            config
+                .validate_artifact()
+                .context("validate Qwen4 artifact contract")?;
             let capacity = Qwen4ExpSessionCapacity::for_forward_limit(&config, extent.forwards)
                 .context("derive Flash-Next session capacity")?;
             let options = qwen4exp_decode_options_from_env()?;

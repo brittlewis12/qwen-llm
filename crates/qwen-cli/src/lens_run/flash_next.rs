@@ -19,10 +19,9 @@ pub(super) fn run_qwen4exp(
     output_path: Option<&Path>,
 ) -> Result<()> {
     let config = Qwen4ExpConfig::from_gguf(&gguf).context("bind Flash-Next model geometry")?;
-    ensure!(
-        config == Qwen4ExpConfig::flash_next_reference(),
-        "qwen-lens run requires the released Flash-Next architecture contract"
-    );
+    config
+        .validate_artifact()
+        .context("validate Qwen4 artifact contract")?;
     let tokenizer = Tokenizer::from_gguf(&gguf).context("load Flash-Next tokenizer")?;
     ensure!(
         tokenizer.n_vocab() == config.vocab_size,

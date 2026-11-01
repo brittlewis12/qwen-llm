@@ -48,8 +48,8 @@ fn parses_live_qwen4exp_metadata_when_available() {
     );
 
     let table = PleIq4NlTable::new(
-        ple_embedding,
-        gguf.try_slice(ple_embedding).expect("slice PLE embedding"),
+        &ple_embedding,
+        gguf.try_slice(&ple_embedding).expect("slice PLE embedding"),
         actual
             .ple
             .as_ref()

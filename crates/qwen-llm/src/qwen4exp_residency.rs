@@ -122,6 +122,7 @@ impl Qwen4ExpDtypeCensus {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Qwen4ExpMetalWeightPlanReport {
+    /// Bound canonical trunk descriptors, excluding ignored MTP tensors.
     pub source_tensor_count: usize,
     pub metal_tensor_count: usize,
     pub cpu_ple_tensor_count: usize,
@@ -137,6 +138,9 @@ pub struct Qwen4ExpMetalWeightPlanReport {
     pub normalized_buffer_count: usize,
     pub normalized_bytes: u64,
     pub normalized_priced_upper_bytes: u64,
+    pub repacked_buffer_count: usize,
+    pub repacked_bytes: u64,
+    pub repacked_priced_upper_bytes: u64,
     pub ple_boundary_overlap_bytes: u64,
     pub page_size: usize,
     pub device_max_buffer_length: usize,
@@ -379,8 +383,9 @@ impl Qwen4ExpMetalWeightPlan {
         Self::for_qualification(ctx, gguf, WeightQualification::UdQ3KXl)
     }
 
-    /// Native role admission with the same reference geometry and tensor inventory.
-    /// Fixed F32 auxiliaries alone may be normalized from BF16/F16 during realization.
+    /// Native role admission against validated architecture rules and a bound inventory.
+    /// Fixed F32 auxiliaries are normalized during realization, including the
+    /// inject rows of merged quantized HC projections.
     pub fn for_native(ctx: &MetalContext, gguf: &GgufFile) -> Result<Self, Qwen4ExpResidencyError> {
         Self::for_qualification(ctx, gguf, WeightQualification::Native)
     }
@@ -392,24 +397,18 @@ impl Qwen4ExpMetalWeightPlan {
     ) -> Result<Self, Qwen4ExpResidencyError> {
         let shard_stamps = gguf.revalidate_retained_shard_stamps()?;
         let model = Qwen4ExpModel::from_gguf(gguf)?;
-        let reference = Qwen4ExpConfig::flash_next_reference();
-        if model.config != reference {
-            return invalid("GGUF configuration differs from the released Flash-Next contract");
-        }
-        if gguf.tensors.len() != QWEN4EXP_RELEASE_TENSOR_COUNT {
-            return invalid(format!(
-                "released Flash-Next requires {QWEN4EXP_RELEASE_TENSOR_COUNT} tensors, got {}",
-                gguf.tensors.len()
-            ));
-        }
-        if model.tied_embeddings {
-            return invalid("released Flash-Next requires a separate output.weight tensor");
-        }
-
-        let ple_desc = model.ple_embedding.ok_or_else(|| {
+        model
+            .config
+            .validate_artifact()
+            .map_err(Qwen4ExpLoadError::from)?;
+        let inventory = &model.tensors;
+        let ple_desc = model.ple_embedding.as_ref().ok_or_else(|| {
             Qwen4ExpResidencyError::Invalid("released PLE table is missing".into())
         })?;
-        validate_release_ple_geometry(ple_desc)?;
+        validate_ple_geometry(
+            ple_desc,
+            model.config.ple.as_ref().unwrap().embedding_head_dim,
+        )?;
         let ple_shard_stamp = shard_stamps
             .get(ple_desc.shard_idx)
             .cloned()
@@ -427,26 +426,16 @@ impl Qwen4ExpMetalWeightPlan {
             .logical_row_count()
             .map_err(Qwen4ExpLoadError::from)?;
         let dtype_census = match qualification {
-            WeightQualification::UdQ3KXl => validate_ud_q3_k_xl_dtypes(&gguf.tensors)?,
-            WeightQualification::Native => validate_native_dtypes(&gguf.tensors)?,
+            WeightQualification::UdQ3KXl => validate_ud_q3_k_xl_dtypes(inventory)?,
+            WeightQualification::Native => validate_native_dtypes(inventory)?,
         };
-        let normalized = normalization_descriptors(&gguf.tensors)?;
+        let normalized = normalization_descriptors(inventory)?;
 
         let page_size = host_page_size_bytes()?;
         let device_max_buffer_length = ctx.max_buffer_length();
         let planning_max_buffer_length =
             device_max_buffer_length.min(QWEN4EXP_RETAINED_WINDOW_CEILING_BYTES);
-        let requests = gguf
-            .tensors
-            .iter()
-            .filter(|desc| desc.name != ple_desc.name)
-            .collect::<Vec<_>>();
-        if requests.len() != QWEN4EXP_METAL_TENSOR_COUNT {
-            return invalid(format!(
-                "expected {QWEN4EXP_METAL_TENSOR_COUNT} non-PLE tensors, got {}",
-                requests.len()
-            ));
-        }
+        let requests = model.residency_sources();
         let retained = plan_retained_storage(
             &gguf.shard_mapped_lengths(),
             &requests,
@@ -455,10 +444,13 @@ impl Qwen4ExpMetalWeightPlan {
             QWEN4EXP_GGUF_BINDING_ALIGNMENT,
         )?;
         validate_retained_policy(&retained)?;
+        if retained.entries.len() != requests.len() {
+            return invalid("retained planner count differs from the bound inventory");
+        }
         let ple_boundary_overlap_bytes =
             validate_ple_window_isolation(&retained.windows, ple_desc, retained.page_size)?;
         let mut report = report_for_plan(
-            gguf,
+            inventory,
             &retained,
             ple_desc,
             ple_boundary_overlap_bytes,
@@ -474,6 +466,17 @@ impl Qwen4ExpMetalWeightPlan {
                 .map(|d| price_shared_buffer(ctx, d.n_bytes, &d.name))
                 .collect::<Result<Vec<_>, _>>()?,
             "normalized priced bytes",
+        )?;
+        let repacked: Vec<_> = model.repacks.iter().flat_map(|r| &r.targets).collect();
+        report.metal_tensor_count = inventory.len() - 1;
+        report.repacked_buffer_count = repacked.len();
+        report.repacked_bytes = checked_sum(repacked.iter().map(|d| d.n_bytes), "repacked bytes")?;
+        report.repacked_priced_upper_bytes = checked_sum(
+            repacked
+                .iter()
+                .map(|d| price_shared_buffer(ctx, d.n_bytes, &d.name))
+                .collect::<Result<Vec<_>, _>>()?,
+            "repacked priced bytes",
         )?;
         let memory = build_weight_memory_plan(ctx, &retained, &report)?;
         let descriptors = gguf
@@ -632,7 +635,11 @@ impl Qwen4ExpMetalWeights {
     }
 
     pub fn tensor(&self, name: &str) -> Option<&MetalTensor> {
-        self.tensors.get(name)
+        self.tensors.get(name).or_else(|| {
+            (name == "output.weight")
+                .then(|| self.tensors.get("token_embd.weight"))
+                .flatten()
+        })
     }
 
     pub fn require_tensor(&self, name: &str) -> Result<&MetalTensor, Qwen4ExpResidencyError> {
@@ -674,10 +681,10 @@ impl Qwen4ExpMetalWeights {
     }
 }
 
-fn validate_release_ple_geometry(desc: &TensorDesc) -> Result<(), Qwen4ExpResidencyError> {
-    if desc.shape.len() != 2 || desc.shape[0] != 160 || desc.shape[1] == 0 {
+fn validate_ple_geometry(desc: &TensorDesc, width: u32) -> Result<(), Qwen4ExpResidencyError> {
+    if desc.shape.len() != 2 || desc.shape[0] != u64::from(width) || desc.shape[1] == 0 {
         return invalid(format!(
-            "released PLE storage must have 160 columns and nonzero physical rows, got {:?}",
+            "PLE storage must have {width} columns and nonzero physical rows, got {:?}",
             desc.shape
         ));
     }
@@ -778,7 +785,14 @@ enum NativeRole {
 
 fn native_role(name: &str) -> Option<NativeRole> {
     // Reuse the closed name vocabulary, never infer a role from an arbitrary suffix.
-    let existing = expected_ud_q3_k_xl_dtype(name)?;
+    let vocabulary_name =
+        if let Some((layer, suffix)) = name.strip_prefix("blk.").and_then(|s| s.split_once('.')) {
+            layer.parse::<u32>().ok()?;
+            format!("blk.0.{suffix}")
+        } else {
+            name.to_string()
+        };
+    let existing = expected_ud_q3_k_xl_dtype(&vocabulary_name)?;
     match name {
         "token_embd.weight" => return Some(NativeRole::Embedding),
         "output.weight" | "output_hc_down.weight" | "output_hc_up.weight" => {
@@ -847,7 +861,7 @@ fn validate_native_dtypes(
                 desc.name
             ))
         })?;
-        if !native_dtype_allowed(role, desc.dtype) {
+        if !native_dtype_allowed(role, desc.dtype) && !quantized_inject(desc) {
             return invalid(format!(
                 "tensor {:?} cannot use {:?} for native role {role:?}",
                 desc.name, desc.dtype
@@ -870,10 +884,19 @@ fn validate_native_dtypes(
     Ok(census)
 }
 
+// A merged HC down/inject weight has a single dtype. The tiny inject view
+// must reach the existing HC kernels as F32; retain and price its source too.
+fn quantized_inject(desc: &TensorDesc) -> bool {
+    (desc.name.ends_with(".hc_attn_inject.weight") || desc.name.ends_with(".hc_ffn_inject.weight"))
+        && desc.dtype != GgmlType::F32
+        && native_dtype_allowed(NativeRole::Dense, desc.dtype)
+}
+
 /// Describe the owned destination without changing the immutable source fingerprint.
 fn normalized_descriptor(desc: &TensorDesc) -> Result<Option<TensorDesc>, Qwen4ExpResidencyError> {
-    if native_role(&desc.name) != Some(NativeRole::F32Auxiliary)
-        || !matches!(desc.dtype, GgmlType::BF16 | GgmlType::F16)
+    if !quantized_inject(desc)
+        && (native_role(&desc.name) != Some(NativeRole::F32Auxiliary)
+            || !matches!(desc.dtype, GgmlType::BF16 | GgmlType::F16))
     {
         return Ok(None);
     }
@@ -886,7 +909,19 @@ fn normalized_descriptor(desc: &TensorDesc) -> Result<Option<TensorDesc>, Qwen4E
                 desc.name
             ))
         })?;
-    if elements.checked_mul(2) != Some(desc.n_bytes) {
+    let (block, bytes) = desc
+        .dtype
+        .storage_layout()
+        .ok_or_else(|| Qwen4ExpResidencyError::Invalid("unknown normalization storage".into()))?;
+    if desc
+        .shape
+        .first()
+        .is_none_or(|width| !width.is_multiple_of(block))
+        || elements
+            .checked_div(block)
+            .and_then(|n| n.checked_mul(bytes))
+            != Some(desc.n_bytes)
+    {
         return invalid(format!(
             "normalization source byte count differs from shape for {:?}",
             desc.name
@@ -934,12 +969,6 @@ fn initialize_f32_auxiliary(
 }
 
 fn validate_retained_policy(plan: &RetainedStoragePlan) -> Result<(), Qwen4ExpResidencyError> {
-    if plan.entries.len() != QWEN4EXP_METAL_TENSOR_COUNT {
-        return invalid(format!(
-            "retained planner produced {} entries, expected {QWEN4EXP_METAL_TENSOR_COUNT}",
-            plan.entries.len()
-        ));
-    }
     for entry in &plan.entries {
         match entry.disposition {
             RetainedStorageDisposition::View { .. } => {}
@@ -1030,26 +1059,37 @@ fn build_weight_memory_plan_with_pricer(
 
     buffer_count = buffer_count
         .checked_add(report.normalized_buffer_count)
+        .and_then(|n| n.checked_add(report.repacked_buffer_count))
         .ok_or_else(|| {
             Qwen4ExpResidencyError::Invalid("normalized buffer count overflow".into())
         })?;
     logical_bytes = checked_sum(
-        [logical_bytes, report.normalized_bytes],
+        [
+            logical_bytes,
+            report.normalized_bytes,
+            report.repacked_bytes,
+        ],
         "logical weight bytes",
     )?;
     priced_upper_bytes = checked_sum(
-        [priced_upper_bytes, report.normalized_priced_upper_bytes],
+        [
+            priced_upper_bytes,
+            report.normalized_priced_upper_bytes,
+            report.repacked_priced_upper_bytes,
+        ],
         "priced weight bytes",
     )?;
     let expected_buffers = report
         .planned_window_count
         .checked_add(report.fallback_count)
         .and_then(|n| n.checked_add(report.normalized_buffer_count))
+        .and_then(|n| n.checked_add(report.repacked_buffer_count))
         .ok_or_else(|| Qwen4ExpResidencyError::Invalid("report buffer count overflow".into()))?;
     let expected_logical = report
         .planned_window_bytes
         .checked_add(report.fallback_bytes)
         .and_then(|n| n.checked_add(report.normalized_bytes))
+        .and_then(|n| n.checked_add(report.repacked_bytes))
         .ok_or_else(|| Qwen4ExpResidencyError::Invalid("report weight bytes overflow".into()))?;
     if buffer_count != expected_buffers || logical_bytes != expected_logical {
         return invalid(format!(
@@ -1077,11 +1117,8 @@ fn realize_retained(
     gguf: &GgufFile,
     plan: &RetainedStoragePlan,
 ) -> Result<RealizedQwen4ExpStorage, Qwen4ExpResidencyError> {
-    let descriptors = gguf
-        .tensors
-        .iter()
-        .filter(|desc| desc.name != "per_layer_token_embd.weight")
-        .collect::<Vec<_>>();
+    let model = Qwen4ExpModel::from_gguf(gguf)?;
+    let descriptors = model.residency_sources();
     let (windows, realized) = realize_retained_storage_views(
         ctx,
         gguf,
@@ -1124,7 +1161,12 @@ fn realize_retained(
                     n_bytes / size_of::<f32>(),
                 )
             };
-            initialize_f32_auxiliary(desc.dtype, source, output)?;
+            if matches!(desc.dtype, GgmlType::BF16 | GgmlType::F16) {
+                initialize_f32_auxiliary(desc.dtype, source, output)?;
+            } else {
+                crate::codec::dequant_to_f32_into(desc, source, output)
+                    .map_err(|error| Qwen4ExpResidencyError::Invalid(error.to_string()))?;
+            }
             let converted = MetalTensor::owned_weight_view(
                 buffer,
                 0,
@@ -1145,6 +1187,43 @@ fn realize_retained(
         if tensors.insert(desc.name.clone(), tensor).is_some() {
             return invalid(format!("duplicate realized tensor {:?}", desc.name));
         }
+    }
+    for repack in &model.repacks {
+        let source = gguf.try_slice(&repack.source)?;
+        for (bank, desc) in repack.targets.iter().enumerate() {
+            let n_bytes = usize::try_from(desc.n_bytes).map_err(|_| {
+                Qwen4ExpResidencyError::Invalid("repacked size exceeds usize".into())
+            })?;
+            let buffer = ctx.buffer_uninit(n_bytes)?;
+            // SAFETY: the fresh private buffer has n_bytes writable bytes; copy_bank
+            // validates all spans before initializing every output byte.
+            let output = unsafe {
+                std::slice::from_raw_parts_mut(
+                    buffer
+                        .contents()
+                        .as_ptr()
+                        .cast::<std::mem::MaybeUninit<u8>>(),
+                    n_bytes,
+                )
+            };
+            repack.copy_bank(bank, source, output)?;
+            let tensor = MetalTensor::owned_weight_view(
+                buffer,
+                0,
+                desc.shape.clone(),
+                desc.dtype,
+                QWEN4EXP_GGUF_BINDING_ALIGNMENT,
+            )?;
+            validate_realized_tensor(desc, &tensor, MetalTensorProvenance::OwnedWeightReadOnly)?;
+            if tensors.insert(desc.name.clone(), tensor).is_some() {
+                return invalid("duplicate repacked bank");
+            }
+        }
+        normalization_sources.push(
+            tensors
+                .remove(&repack.source.name)
+                .ok_or_else(|| Qwen4ExpResidencyError::Invalid("missing repack source".into()))?,
+        );
     }
     Ok((windows, tensors, normalization_sources))
 }
@@ -1185,15 +1264,13 @@ fn validate_realized_weights(
     gguf: &GgufFile,
     tensors: &BTreeMap<String, MetalTensor>,
 ) -> Result<(), Qwen4ExpResidencyError> {
-    if tensors.len() != QWEN4EXP_METAL_TENSOR_COUNT
+    let model = Qwen4ExpModel::from_gguf(gguf)?;
+    if tensors.len() != model.tensors.len() - usize::from(model.ple_embedding.is_some())
         || tensors.contains_key("per_layer_token_embd.weight")
     {
-        return invalid(format!(
-            "realized map has {} tensors or includes the CPU-only PLE table",
-            tensors.len()
-        ));
+        return invalid("realized map differs from the bound non-PLE inventory");
     }
-    for desc in gguf
+    for desc in model
         .tensors
         .iter()
         .filter(|desc| desc.name != "per_layer_token_embd.weight")
@@ -1266,7 +1343,7 @@ fn validate_ple_window_isolation(
 }
 
 fn report_for_plan(
-    gguf: &GgufFile,
+    inventory: &[TensorDesc],
     plan: &RetainedStoragePlan,
     ple: &TensorDesc,
     ple_boundary_overlap_bytes: u64,
@@ -1274,7 +1351,7 @@ fn report_for_plan(
     dtype_census: Qwen4ExpDtypeCensus,
 ) -> Result<Qwen4ExpMetalWeightPlanReport, Qwen4ExpResidencyError> {
     let source_bytes = checked_sum(
-        gguf.tensors.iter().map(|desc| desc.n_bytes),
+        inventory.iter().map(|desc| desc.n_bytes),
         "source byte count",
     )?;
     let metal_source_bytes = checked_sum(
@@ -1305,7 +1382,7 @@ fn report_for_plan(
         .count();
 
     Ok(Qwen4ExpMetalWeightPlanReport {
-        source_tensor_count: gguf.tensors.len(),
+        source_tensor_count: inventory.len(),
         metal_tensor_count: plan.entries.len(),
         cpu_ple_tensor_count: 1,
         source_bytes,
@@ -1319,6 +1396,9 @@ fn report_for_plan(
         normalized_buffer_count: 0,
         normalized_bytes: 0,
         normalized_priced_upper_bytes: 0,
+        repacked_buffer_count: 0,
+        repacked_bytes: 0,
+        repacked_priced_upper_bytes: 0,
         ple_boundary_overlap_bytes,
         page_size: plan.page_size,
         device_max_buffer_length,
@@ -1432,6 +1512,69 @@ mod tests {
     }
 
     #[test]
+    fn alternate_native_inventory_has_no_release_layer_ceiling_and_prices_merged_inject() {
+        let mut c = Qwen4ExpConfig::flash_next_reference();
+        c.layer_count = 52;
+        c.compress_ratios = (0..52).map(|i| if i % 4 == 3 { 4 } else { 0 }).collect();
+        let source: Vec<_> = crate::qwen4exp_loader::expected_tensor_inventory(&c)
+            .unwrap()
+            .into_iter()
+            .map(|(name, shape)| {
+                let dtype = expected_ud_q3_k_xl_dtype(&name).unwrap_or_else(|| {
+                    expected_ud_q3_k_xl_dtype(
+                        &name
+                            .replacen("blk.48.", "blk.0.", 1)
+                            .replacen("blk.49.", "blk.1.", 1)
+                            .replacen("blk.50.", "blk.2.", 1)
+                            .replacen("blk.51.", "blk.3.", 1),
+                    )
+                    .unwrap()
+                });
+                let (block, bytes) = dtype.storage_layout().unwrap();
+                let n_bytes = shape.iter().product::<u64>() / block * bytes;
+                TensorDesc {
+                    name,
+                    shape,
+                    dtype,
+                    shard_idx: 0,
+                    data_offset: 0,
+                    n_bytes,
+                }
+            })
+            .collect();
+        assert_eq!(
+            validate_native_dtypes(&source).unwrap().total(),
+            source.len()
+        );
+        let mut inject = TensorDesc {
+            name: "blk.51.hc_attn_inject.weight".into(),
+            shape: vec![256, 4],
+            dtype: GgmlType::Q8_0,
+            shard_idx: 0,
+            data_offset: 0,
+            n_bytes: 1088,
+        };
+        let normalized = normalized_descriptor(&inject).unwrap().unwrap();
+        assert_eq!(normalized.n_bytes, 4096);
+        assert_eq!(normalized.dtype, GgmlType::F32);
+        assert!(validate_native_dtypes(&[inject.clone()]).is_ok());
+        // Every Q8 block stores an exactly representable scale and signed bytes.
+        let mut bytes = vec![0u8; inject.n_bytes as usize];
+        for block in bytes.chunks_exact_mut(34) {
+            block[..2].copy_from_slice(&half::f16::from_f32(0.5).to_bits().to_le_bytes());
+            for (i, value) in block[2..].iter_mut().enumerate() {
+                *value = (i as i8 - 16) as u8;
+            }
+        }
+        let decoded = crate::codec::dequant_to_f32(&inject, &bytes).unwrap();
+        for (i, value) in decoded.iter().enumerate() {
+            assert_eq!(*value, (i % 32) as f32 * 0.5 - 8.0);
+        }
+        inject.n_bytes -= 1;
+        assert!(normalized_descriptor(&inject).is_err());
+    }
+
+    #[test]
     fn native_roles_cover_release_and_match_dense_adapter() {
         for name in release_tensor_names() {
             let role = native_role(&name).unwrap();
@@ -1447,13 +1590,11 @@ mod tests {
                 crate::qwen4exp_metal::projection_dtype_supported(dtype)
             );
         }
-        for name in [
-            "blk.48.ffn_gate_inp.weight",
-            "blk.1.unknown.weight",
-            "ffn_gate_inp.weight",
-        ] {
+        for name in ["blk.1.unknown.weight", "ffn_gate_inp.weight"] {
             assert_eq!(native_role(name), None);
         }
+        // Layer bounds are checked against the artifact inventory, not a release constant.
+        assert!(native_role("blk.48.ffn_gate_inp.weight").is_some());
         for name in [
             "blk.1.hc_attn_norm.weight",
             "blk.3.indexer.q_norm.weight",
@@ -1634,6 +1775,9 @@ mod tests {
             normalized_buffer_count: normalized.len(),
             normalized_bytes: normalized.iter().map(|d| d.n_bytes).sum(),
             normalized_priced_upper_bytes: 8192,
+            repacked_buffer_count: 0,
+            repacked_bytes: 0,
+            repacked_priced_upper_bytes: 0,
             ple_boundary_overlap_bytes: 0,
             page_size: 4096,
             device_max_buffer_length: 8192,
@@ -1652,6 +1796,20 @@ mod tests {
         assert!(
             build_weight_memory_plan_with_pricer(&retained, &overflow, |bytes, _| Ok(bytes))
                 .is_err()
+        );
+        let mut repacked = report.clone();
+        repacked.repacked_buffer_count = 2;
+        repacked.repacked_bytes = 512;
+        repacked.repacked_priced_upper_bytes = 8192;
+        let expanded = build_weight_memory_plan_with_pricer(&retained, &repacked, |bytes, _| {
+            Ok(bytes.next_multiple_of(4096))
+        })
+        .unwrap();
+        assert_eq!(expanded.buffer_count, memory.buffer_count + 2);
+        assert_eq!(expanded.logical_bytes, memory.logical_bytes + 512);
+        assert_eq!(
+            expanded.priced_upper_bytes,
+            memory.priced_upper_bytes + 8192
         );
     }
 
@@ -1723,7 +1881,7 @@ mod tests {
             data_offset: 0,
             n_bytes: 360,
         };
-        validate_release_ple_geometry(&desc).unwrap();
+        validate_ple_geometry(&desc, 160).unwrap();
     }
 
     #[test]

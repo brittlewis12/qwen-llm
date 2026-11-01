@@ -10,92 +10,99 @@ use crate::tensor::{GgmlType, TensorDesc};
 use std::collections::HashSet;
 
 #[derive(Clone)]
-pub struct GatedResidualWeights<'a> {
-    pub norm: &'a TensorDesc,
-    pub down: &'a TensorDesc,
-    pub up: &'a TensorDesc,
-    pub inject: &'a TensorDesc,
+pub struct GatedResidualWeights {
+    pub norm: TensorDesc,
+    pub down: TensorDesc,
+    pub up: TensorDesc,
+    pub inject: TensorDesc,
 }
 
 #[derive(Clone)]
-pub struct FinalGatedResidualWeights<'a> {
-    pub norm: &'a TensorDesc,
-    pub down: &'a TensorDesc,
-    pub up: &'a TensorDesc,
+pub struct FinalGatedResidualWeights {
+    pub norm: TensorDesc,
+    pub down: TensorDesc,
+    pub up: TensorDesc,
 }
 
 #[derive(Clone)]
-pub struct GatedDeltaNetWeights<'a> {
-    pub qkv: &'a TensorDesc,
-    pub gate: &'a TensorDesc,
-    pub beta: &'a TensorDesc,
-    pub alpha: &'a TensorDesc,
-    pub a: &'a TensorDesc,
-    pub dt_bias: &'a TensorDesc,
-    pub conv: &'a TensorDesc,
-    pub norm: &'a TensorDesc,
-    pub output: &'a TensorDesc,
+pub struct GatedDeltaNetWeights {
+    pub qkv: TensorDesc,
+    pub gate: TensorDesc,
+    pub beta: TensorDesc,
+    pub alpha: TensorDesc,
+    pub a: TensorDesc,
+    pub dt_bias: TensorDesc,
+    pub conv: TensorDesc,
+    pub norm: TensorDesc,
+    pub output: TensorDesc,
 }
 
 #[derive(Clone)]
-pub struct QwenSparseAttentionWeights<'a> {
-    pub query_gate: &'a TensorDesc,
-    pub key: &'a TensorDesc,
-    pub value: &'a TensorDesc,
-    pub output: &'a TensorDesc,
-    pub query_norm: &'a TensorDesc,
-    pub key_norm: &'a TensorDesc,
-    pub index_query: &'a TensorDesc,
-    pub index_key: &'a TensorDesc,
-    pub index_query_norm: &'a TensorDesc,
-    pub index_key_norm: &'a TensorDesc,
+pub struct QwenSparseAttentionWeights {
+    pub query_gate: TensorDesc,
+    pub key: TensorDesc,
+    pub value: TensorDesc,
+    pub output: TensorDesc,
+    pub query_norm: TensorDesc,
+    pub key_norm: TensorDesc,
+    pub index_query: TensorDesc,
+    pub index_key: TensorDesc,
+    pub index_query_norm: TensorDesc,
+    pub index_key_norm: TensorDesc,
 }
 
 #[derive(Clone)]
-pub enum MixerWeights<'a> {
-    GatedDeltaNet(GatedDeltaNetWeights<'a>),
-    QwenSparseAttention(QwenSparseAttentionWeights<'a>),
+pub enum MixerWeights {
+    GatedDeltaNet(GatedDeltaNetWeights),
+    QwenSparseAttention(QwenSparseAttentionWeights),
 }
 
 #[derive(Clone)]
-pub struct MoeWeights<'a> {
-    pub router: &'a TensorDesc,
-    pub routed_gate: &'a TensorDesc,
-    pub routed_up: &'a TensorDesc,
-    pub routed_down: &'a TensorDesc,
-    pub shared_router: &'a TensorDesc,
-    pub shared_gate: &'a TensorDesc,
-    pub shared_up: &'a TensorDesc,
-    pub shared_down: &'a TensorDesc,
+pub struct MoeWeights {
+    pub router: TensorDesc,
+    pub routed_gate: TensorDesc,
+    pub routed_up: TensorDesc,
+    pub routed_down: TensorDesc,
+    pub shared_router: TensorDesc,
+    pub shared_gate: TensorDesc,
+    pub shared_up: TensorDesc,
+    pub shared_down: TensorDesc,
 }
 
 #[derive(Clone)]
-pub struct PleLayerWeights<'a> {
-    pub key: &'a TensorDesc,
-    pub value: &'a TensorDesc,
-    pub key_norm: &'a TensorDesc,
-    pub query_norm: &'a TensorDesc,
-    pub conv_norm: &'a TensorDesc,
-    pub conv: &'a TensorDesc,
+pub struct PleLayerWeights {
+    pub key: TensorDesc,
+    pub value: TensorDesc,
+    pub key_norm: TensorDesc,
+    pub query_norm: TensorDesc,
+    pub conv_norm: TensorDesc,
+    pub conv: TensorDesc,
 }
 
 #[derive(Clone)]
-pub struct Qwen4ExpBlock<'a> {
-    pub attention_residual: GatedResidualWeights<'a>,
-    pub mixer: MixerWeights<'a>,
-    pub ffn_residual: GatedResidualWeights<'a>,
-    pub moe: MoeWeights<'a>,
-    pub ple: Option<PleLayerWeights<'a>>,
+pub struct Qwen4ExpBlock {
+    pub attention_residual: GatedResidualWeights,
+    pub mixer: MixerWeights,
+    pub ffn_residual: GatedResidualWeights,
+    pub moe: MoeWeights,
+    pub ple: Option<PleLayerWeights>,
 }
 
-pub struct Qwen4ExpModel<'a> {
+pub struct Qwen4ExpModel {
     pub config: Qwen4ExpConfig,
-    pub token_embedding: &'a TensorDesc,
-    pub output: &'a TensorDesc,
+    pub token_embedding: TensorDesc,
+    pub output: TensorDesc,
     pub tied_embeddings: bool,
-    pub final_residual: FinalGatedResidualWeights<'a>,
-    pub ple_embedding: Option<&'a TensorDesc>,
-    pub blocks: Vec<Qwen4ExpBlock<'a>>,
+    pub final_residual: FinalGatedResidualWeights,
+    pub ple_embedding: Option<TensorDesc>,
+    pub blocks: Vec<Qwen4ExpBlock>,
+    /// Canonical split views; merged weights retain their original bytes and offsets.
+    pub tensors: Vec<TensorDesc>,
+    /// Recognized speculation weights, excluded from execution and residency.
+    pub ignored_mtp: Vec<String>,
+    /// Owned bank destinations in `tensors`; these require a byte permutation
+    /// rather than a contiguous GGUF view. Do not slice their descriptors directly.
+    pub repacks: Vec<ExpertBankRepack>,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -123,15 +130,34 @@ pub enum Qwen4ExpLoadError {
         block_size: u64,
         dtype: GgmlType,
     },
+    #[error("ambiguous tensor layout: {0}")]
+    AmbiguousLayout(String),
     #[error("unexpected qwen4exp tensor set: {0:?}")]
     UnexpectedTensors(Vec<String>),
 }
 
-impl<'a> Qwen4ExpModel<'a> {
-    pub fn from_gguf(gguf: &'a GgufFile) -> Result<Self, Qwen4ExpLoadError> {
+impl Qwen4ExpModel {
+    pub fn from_gguf(gguf: &GgufFile) -> Result<Self, Qwen4ExpLoadError> {
         let config = Qwen4ExpConfig::from_gguf(gguf)?;
+        let arch = gguf.get_str("general.architecture").unwrap_or("qwen4exp");
+        let mtp_layers = gguf
+            .get_u64(&format!("{arch}.nextn_predict_layers"))
+            .or_else(|| gguf.get_u64("qwen4exp.nextn_predict_layers"))
+            .unwrap_or(0);
+        Self::from_inventory(config, &gguf.tensors, mtp_layers)
+    }
+
+    /// Bind synthetic or mapped inventories without allocating device resources.
+    pub fn from_inventory(
+        config: Qwen4ExpConfig,
+        source: &[TensorDesc],
+        mtp_layers: u64,
+    ) -> Result<Self, Qwen4ExpLoadError> {
+        config.validate()?;
+        let (tensors, ignored_mtp, repacks) = canonical_inventory(&config, source, mtp_layers)?;
+        let gguf = tensors.as_slice();
         let dims = Dimensions::new(&config)?;
-        let mut used = HashSet::with_capacity(gguf.tensors.len());
+        let mut used = HashSet::with_capacity(gguf.len());
 
         let token_embedding = bind(
             gguf,
@@ -139,7 +165,7 @@ impl<'a> Qwen4ExpModel<'a> {
             "token_embd.weight".into(),
             &[dims.hidden, dims.vocab],
         )?;
-        let (output, tied_embeddings) = if gguf.find("output.weight").is_some() {
+        let (output, tied_embeddings) = if find(gguf, "output.weight").is_some() {
             (
                 bind(
                     gguf,
@@ -150,7 +176,7 @@ impl<'a> Qwen4ExpModel<'a> {
                 false,
             )
         } else {
-            (token_embedding, true)
+            (token_embedding.clone(), true)
         };
         let final_residual = FinalGatedResidualWeights {
             norm: bind(
@@ -220,7 +246,6 @@ impl<'a> Qwen4ExpModel<'a> {
         }
 
         let mut unexpected: Vec<_> = gguf
-            .tensors
             .iter()
             .filter(|tensor| !used.contains(tensor.name.as_str()))
             .map(|tensor| tensor.name.clone())
@@ -238,8 +263,371 @@ impl<'a> Qwen4ExpModel<'a> {
             final_residual,
             ple_embedding,
             blocks,
+            tensors,
+            ignored_mtp,
+            repacks,
         })
     }
+}
+
+#[derive(Clone)]
+pub struct ExpertBankRepack {
+    pub source: TensorDesc,
+    pub targets: [TensorDesc; 2],
+    expert_bytes: usize,
+}
+
+impl ExpertBankRepack {
+    /// Copy one bank, preserving every packed quantization byte. All bounds are
+    /// checked before writing, so malformed spans leave the destination untouched.
+    pub fn copy_bank(
+        &self,
+        bank: usize,
+        source: &[u8],
+        output: &mut [std::mem::MaybeUninit<u8>],
+    ) -> Result<(), Qwen4ExpLoadError> {
+        if bank >= 2
+            || source.len() != self.source.n_bytes as usize
+            || output.len() != self.targets[bank].n_bytes as usize
+        {
+            return Err(Qwen4ExpLoadError::DimensionOverflow(
+                "expert repack byte span",
+            ));
+        }
+        for (expert, dst) in output.chunks_exact_mut(self.expert_bytes).enumerate() {
+            let start = (expert * 2 + bank) * self.expert_bytes;
+            for (out, &byte) in dst
+                .iter_mut()
+                .zip(&source[start..start + self.expert_bytes])
+            {
+                out.write(byte);
+            }
+        }
+        Ok(())
+    }
+}
+
+impl Qwen4ExpModel {
+    pub(crate) fn residency_sources(&self) -> Vec<&TensorDesc> {
+        self.tensors
+            .iter()
+            .filter(|desc| {
+                desc.name != "per_layer_token_embd.weight"
+                    && !self
+                        .repacks
+                        .iter()
+                        .any(|r| r.targets.iter().any(|t| t.name == desc.name))
+            })
+            .chain(self.repacks.iter().map(|r| &r.source))
+            .collect()
+    }
+}
+
+fn find<'a>(tensors: &'a [TensorDesc], name: &str) -> Option<&'a TensorDesc> {
+    tensors.iter().find(|tensor| tensor.name == name)
+}
+
+/// Names and GGUF dimensions for the split trunk layout. PLE rows may be padded
+/// on disk and output.weight may be omitted for tied embeddings.
+pub fn expected_tensor_inventory(
+    config: &Qwen4ExpConfig,
+) -> Result<Vec<(String, Vec<u64>)>, Qwen4ExpLoadError> {
+    config.validate()?;
+    let d = Dimensions::new(config)?;
+    let mut out = Vec::new();
+    let mut add = |name: String, shape: &[u64]| out.push((name, shape.to_vec()));
+    add("token_embd.weight".into(), &[d.hidden, d.vocab]);
+    add("output.weight".into(), &[d.hidden, d.vocab]);
+    add("output_hc_norm.weight".into(), &[d.hyper_hidden]);
+    add(
+        "output_hc_down.weight".into(),
+        &[d.hyper_hidden, d.hyper_rank],
+    );
+    add(
+        "output_hc_up.weight".into(),
+        &[d.hyper_rank, d.hyper_hidden],
+    );
+    if let Some(ple) = &config.ple {
+        add(
+            "per_layer_token_embd.weight".into(),
+            &[u64::from(ple.embedding_head_dim), ple.logical_row_count()?],
+        );
+    }
+    for layer in 0..config.layer_count {
+        let p = format!("blk.{layer}");
+        for role in ["attn", "ffn"] {
+            add(format!("{p}.hc_{role}_norm.weight"), &[d.hyper_hidden]);
+            add(
+                format!("{p}.hc_{role}_down.weight"),
+                &[d.hyper_hidden, d.hyper_rank],
+            );
+            add(
+                format!("{p}.hc_{role}_up.weight"),
+                &[d.hyper_rank, d.hyper_hidden],
+            );
+            add(
+                format!("{p}.hc_{role}_inject.weight"),
+                &[d.hyper_hidden, d.hyper_count],
+            );
+        }
+        let mixer = match config.mixer_kind(layer).unwrap() {
+            MixerKind::GatedDeltaNet => vec![
+                ("attn_qkv.weight", vec![d.hidden, d.gdn_qkv]),
+                ("attn_gate.weight", vec![d.hidden, d.gdn_value]),
+                ("ssm_beta.weight", vec![d.hidden, d.gdn_heads]),
+                ("ssm_alpha.weight", vec![d.hidden, d.gdn_heads]),
+                ("ssm_a", vec![d.gdn_heads]),
+                ("ssm_dt.bias", vec![d.gdn_heads]),
+                ("ssm_conv1d.weight", vec![d.gdn_conv, d.gdn_qkv]),
+                ("ssm_norm.weight", vec![d.gdn_value / d.gdn_heads]),
+                ("ssm_out.weight", vec![d.gdn_value, d.hidden]),
+            ],
+            MixerKind::QwenSparseAttention => vec![
+                ("attn_q.weight", vec![d.hidden, d.attention_q * 2]),
+                ("attn_k.weight", vec![d.hidden, d.attention_kv]),
+                ("attn_v.weight", vec![d.hidden, d.attention_kv]),
+                ("attn_output.weight", vec![d.attention_q, d.hidden]),
+                ("attn_q_norm.weight", vec![d.attention_head]),
+                ("attn_k_norm.weight", vec![d.attention_head]),
+                ("indexer.q_proj.weight", vec![d.hidden, d.index_query]),
+                ("indexer.k_proj.weight", vec![d.hidden, d.index_key]),
+                ("indexer.q_norm.weight", vec![d.index_head]),
+                ("indexer.k_norm.weight", vec![d.index_head]),
+            ],
+        };
+        for (name, shape) in mixer {
+            add(format!("{p}.{name}"), &shape);
+        }
+        for (name, shape) in [
+            ("ffn_gate_inp.weight", vec![d.hidden, d.experts]),
+            (
+                "ffn_gate_exps.weight",
+                vec![d.hidden, d.expert_ffn, d.experts],
+            ),
+            (
+                "ffn_up_exps.weight",
+                vec![d.hidden, d.expert_ffn, d.experts],
+            ),
+            (
+                "ffn_down_exps.weight",
+                vec![d.expert_ffn, d.hidden, d.experts],
+            ),
+            ("ffn_gate_inp_shexp.weight", vec![d.hidden]),
+            ("ffn_gate_shexp.weight", vec![d.hidden, d.shared_ffn]),
+            ("ffn_up_shexp.weight", vec![d.hidden, d.shared_ffn]),
+            ("ffn_down_shexp.weight", vec![d.shared_ffn, d.hidden]),
+        ] {
+            add(format!("{p}.{name}"), &shape);
+        }
+        if config
+            .ple
+            .as_ref()
+            .is_some_and(|ple| ple.layers.contains(&layer))
+        {
+            for (name, shape) in [
+                ("ple_key.weight", vec![d.hidden, d.hyper_hidden]),
+                ("ple_value.weight", vec![d.hidden, d.hidden]),
+                ("ple_norm_key.weight", vec![d.hyper_hidden]),
+                ("ple_norm_query.weight", vec![d.hyper_hidden]),
+                ("ple_norm_conv.weight", vec![d.hyper_hidden]),
+                ("ple_conv1d.weight", vec![d.ple_conv, d.hyper_hidden]),
+            ] {
+                add(format!("{p}.{name}"), &shape);
+            }
+        }
+    }
+    Ok(out)
+}
+
+// Layouts follow llama.cpp conversion/qwen4exp.py and src/models/qwen4exp.cpp
+// (a91eab67d838), plus the shared QKV and expert gate/up loaders.
+fn canonical_inventory(
+    config: &Qwen4ExpConfig,
+    source: &[TensorDesc],
+    mtp_layers: u64,
+) -> Result<(Vec<TensorDesc>, Vec<String>, Vec<ExpertBankRepack>), Qwen4ExpLoadError> {
+    let mut seen = HashSet::new();
+    let mut tensors = Vec::new();
+    let mut ignored = Vec::new();
+    let mut repacks = Vec::new();
+    if mtp_layers > u64::from(u32::MAX - config.layer_count) {
+        return Err(Qwen4ExpLoadError::DimensionOverflow("MTP layer range"));
+    }
+    for desc in source {
+        if !seen.insert(desc.name.as_str()) {
+            return Err(Qwen4ExpLoadError::AmbiguousLayout(format!(
+                "duplicate tensor {}",
+                desc.name
+            )));
+        }
+        let block = desc
+            .name
+            .strip_prefix("blk.")
+            .and_then(|s| s.split_once('.'));
+        let mtp_block = block
+            .and_then(|(n, _)| n.parse::<u64>().ok())
+            .is_some_and(|n| {
+                n >= u64::from(config.layer_count) && n < u64::from(config.layer_count) + mtp_layers
+            });
+        let nextn = desc.name.starts_with("nextn_")
+            || desc.name.starts_with("nextn.")
+            || block
+                .is_some_and(|(_, role)| role.starts_with("nextn_") || role.starts_with("nextn."));
+        if desc.name.starts_with("mtp.") || nextn || mtp_block {
+            ignored.push(desc.name.clone());
+        } else {
+            tensors.push(desc.clone());
+        }
+    }
+    let schema = expected_tensor_inventory(config)?;
+    for desc in &mut tensors {
+        if desc.shape
+            == [
+                u64::from(config.hidden_size),
+                u64::from(config.hyper_connection.count),
+            ]
+            && schema.iter().any(|(name, shape)| {
+                name == &desc.name
+                    && shape
+                        == &[u64::from(config.hidden_size)
+                            * u64::from(config.hyper_connection.count)]
+            })
+        {
+            desc.shape =
+                vec![u64::from(config.hidden_size) * u64::from(config.hyper_connection.count)];
+        }
+    }
+    for layer in 0..config.layer_count {
+        let p = format!("blk.{layer}");
+        let mut groups = vec![
+            (
+                "hc_attn_down_inject",
+                vec!["hc_attn_down", "hc_attn_inject"],
+            ),
+            ("hc_ffn_down_inject", vec!["hc_ffn_down", "hc_ffn_inject"]),
+        ];
+        match config.mixer_kind(layer).unwrap() {
+            MixerKind::GatedDeltaNet => groups.extend([
+                ("attn_qkv_gate", vec!["attn_qkv", "attn_gate"]),
+                ("ssm_beta_alpha", vec!["ssm_beta", "ssm_alpha"]),
+                ("ssm_beta_alpha_cat", vec!["ssm_beta", "ssm_alpha"]),
+            ]),
+            MixerKind::QwenSparseAttention => {
+                groups.push(("attn_qkv", vec!["attn_q", "attn_k", "attn_v"]))
+            }
+        }
+        for (merged, parts) in groups {
+            let name = format!("{p}.{merged}.weight");
+            let Some(index) = tensors.iter().position(|t| t.name == name) else {
+                continue;
+            };
+            let names: Vec<_> = parts.iter().map(|s| format!("{p}.{s}.weight")).collect();
+            if names.iter().any(|n| tensors.iter().any(|t| &t.name == n)) {
+                return Err(Qwen4ExpLoadError::AmbiguousLayout(name));
+            }
+            let shapes: Vec<_> = names
+                .iter()
+                .map(|name| &schema.iter().find(|(n, _)| n == name).unwrap().1)
+                .collect();
+            let rows = shapes
+                .iter()
+                .try_fold(0u64, |sum, shape| checked_add(sum, shape[1], "merged rows"))?;
+            let desc = tensors.remove(index);
+            let expected = vec![shapes[0][0], rows];
+            if desc.shape != expected {
+                return Err(Qwen4ExpLoadError::Shape {
+                    name,
+                    expected,
+                    got: desc.shape,
+                });
+            }
+            validate_weight_storage(&desc)?;
+            let (block, bytes) = desc.dtype.storage_layout().unwrap();
+            let row_bytes = checked_mul(desc.shape[0] / block, bytes, "merged row bytes")?;
+            if checked_mul(row_bytes, rows, "merged bytes")? != desc.n_bytes {
+                return Err(Qwen4ExpLoadError::DimensionOverflow(
+                    "merged byte length disagrees with shape",
+                ));
+            }
+            let mut offset = desc.data_offset;
+            for (name, shape) in names.into_iter().zip(shapes) {
+                let n_bytes = checked_mul(row_bytes, shape[1], "split view bytes")?;
+                tensors.push(TensorDesc {
+                    name,
+                    shape: shape.clone(),
+                    data_offset: offset,
+                    n_bytes,
+                    ..desc.clone()
+                });
+                offset = checked_add(offset, n_bytes, "split view offset")?;
+            }
+        }
+    }
+    for layer in 0..config.layer_count {
+        let name = format!("blk.{layer}.ffn_gate_up_exps.weight");
+        let Some(index) = tensors.iter().position(|t| t.name == name) else {
+            continue;
+        };
+        let source = tensors.remove(index);
+        let names = [
+            format!("blk.{layer}.ffn_gate_exps.weight"),
+            format!("blk.{layer}.ffn_up_exps.weight"),
+        ];
+        if names.iter().any(|n| tensors.iter().any(|t| &t.name == n)) {
+            return Err(Qwen4ExpLoadError::AmbiguousLayout(name));
+        }
+        let shape = schema
+            .iter()
+            .find(|(n, _)| n == &names[0])
+            .unwrap()
+            .1
+            .clone();
+        let expected = vec![
+            shape[0],
+            checked_mul(shape[1], 2, "merged expert rows")?,
+            shape[2],
+        ];
+        if source.shape != expected {
+            return Err(Qwen4ExpLoadError::Shape {
+                name,
+                expected,
+                got: source.shape,
+            });
+        }
+        validate_weight_storage(&source)?;
+        let (block, bytes) = source.dtype.storage_layout().unwrap();
+        let expert_bytes = checked_mul(
+            checked_mul(shape[0] / block, bytes, "expert row bytes")?,
+            shape[1],
+            "expert bytes",
+        )?;
+        if checked_mul(
+            checked_mul(expert_bytes, 2, "expert pair bytes")?,
+            shape[2],
+            "expert bank bytes",
+        )? != source.n_bytes
+        {
+            return Err(Qwen4ExpLoadError::DimensionOverflow(
+                "merged expert byte length",
+            ));
+        }
+        let n_bytes = source.n_bytes / 2;
+        let targets = names.map(|name| TensorDesc {
+            name,
+            shape: shape.clone(),
+            data_offset: 0,
+            n_bytes,
+            ..source.clone()
+        });
+        tensors.extend(targets.clone());
+        repacks.push(ExpertBankRepack {
+            source,
+            targets,
+            expert_bytes: usize::try_from(expert_bytes)
+                .map_err(|_| Qwen4ExpLoadError::DimensionOverflow("expert host bytes"))?,
+        });
+    }
+    Ok((tensors, ignored, repacks))
 }
 
 struct Dimensions {
@@ -327,13 +715,13 @@ impl Dimensions {
     }
 }
 
-fn bind_residual<'a>(
-    gguf: &'a GgufFile,
+fn bind_residual(
+    gguf: &[TensorDesc],
     used: &mut HashSet<String>,
     layer: u32,
     role: &str,
     dims: &Dimensions,
-) -> Result<GatedResidualWeights<'a>, Qwen4ExpLoadError> {
+) -> Result<GatedResidualWeights, Qwen4ExpLoadError> {
     let prefix = format!("blk.{layer}.hc_{role}");
     Ok(GatedResidualWeights {
         norm: bind(
@@ -363,12 +751,12 @@ fn bind_residual<'a>(
     })
 }
 
-fn bind_gdn<'a>(
-    gguf: &'a GgufFile,
+fn bind_gdn(
+    gguf: &[TensorDesc],
     used: &mut HashSet<String>,
     layer: u32,
     dims: &Dimensions,
-) -> Result<GatedDeltaNetWeights<'a>, Qwen4ExpLoadError> {
+) -> Result<GatedDeltaNetWeights, Qwen4ExpLoadError> {
     let prefix = format!("blk.{layer}");
     Ok(GatedDeltaNetWeights {
         qkv: bind(
@@ -423,12 +811,12 @@ fn bind_gdn<'a>(
     })
 }
 
-fn bind_qsa<'a>(
-    gguf: &'a GgufFile,
+fn bind_qsa(
+    gguf: &[TensorDesc],
     used: &mut HashSet<String>,
     layer: u32,
     dims: &Dimensions,
-) -> Result<QwenSparseAttentionWeights<'a>, Qwen4ExpLoadError> {
+) -> Result<QwenSparseAttentionWeights, Qwen4ExpLoadError> {
     let prefix = format!("blk.{layer}");
     Ok(QwenSparseAttentionWeights {
         query_gate: bind(
@@ -497,12 +885,12 @@ fn bind_qsa<'a>(
     })
 }
 
-fn bind_moe<'a>(
-    gguf: &'a GgufFile,
+fn bind_moe(
+    gguf: &[TensorDesc],
     used: &mut HashSet<String>,
     layer: u32,
     dims: &Dimensions,
-) -> Result<MoeWeights<'a>, Qwen4ExpLoadError> {
+) -> Result<MoeWeights, Qwen4ExpLoadError> {
     let prefix = format!("blk.{layer}");
     Ok(MoeWeights {
         router: bind(
@@ -556,12 +944,12 @@ fn bind_moe<'a>(
     })
 }
 
-fn bind_ple<'a>(
-    gguf: &'a GgufFile,
+fn bind_ple(
+    gguf: &[TensorDesc],
     used: &mut HashSet<String>,
     layer: u32,
     dims: &Dimensions,
-) -> Result<PleLayerWeights<'a>, Qwen4ExpLoadError> {
+) -> Result<PleLayerWeights, Qwen4ExpLoadError> {
     let prefix = format!("blk.{layer}.ple");
     Ok(PleLayerWeights {
         key: bind(
@@ -603,16 +991,14 @@ fn bind_ple<'a>(
     })
 }
 
-fn bind_ple_embedding<'a>(
-    gguf: &'a GgufFile,
+fn bind_ple_embedding(
+    gguf: &[TensorDesc],
     used: &mut HashSet<String>,
     row_width: u64,
     logical_rows: u64,
-) -> Result<&'a TensorDesc, Qwen4ExpLoadError> {
+) -> Result<TensorDesc, Qwen4ExpLoadError> {
     let name = "per_layer_token_embd.weight".to_string();
-    let tensor = gguf
-        .find(&name)
-        .ok_or_else(|| Qwen4ExpLoadError::Missing(name.clone()))?;
+    let tensor = find(gguf, &name).ok_or_else(|| Qwen4ExpLoadError::Missing(name.clone()))?;
     if !ple_embedding_shape_is_valid(&tensor.shape, row_width, logical_rows) {
         return Err(Qwen4ExpLoadError::Shape {
             name,
@@ -622,22 +1008,20 @@ fn bind_ple_embedding<'a>(
     }
     validate_weight_storage(tensor)?;
     used.insert(tensor.name.clone());
-    Ok(tensor)
+    Ok(tensor.clone())
 }
 
 fn ple_embedding_shape_is_valid(shape: &[u64], row_width: u64, logical_rows: u64) -> bool {
     shape.len() == 2 && shape[0] == row_width && shape[1] >= logical_rows
 }
 
-fn bind<'a>(
-    gguf: &'a GgufFile,
+fn bind(
+    gguf: &[TensorDesc],
     used: &mut HashSet<String>,
     name: String,
     expected: &[u64],
-) -> Result<&'a TensorDesc, Qwen4ExpLoadError> {
-    let tensor = gguf
-        .find(&name)
-        .ok_or_else(|| Qwen4ExpLoadError::Missing(name.clone()))?;
+) -> Result<TensorDesc, Qwen4ExpLoadError> {
+    let tensor = find(gguf, &name).ok_or_else(|| Qwen4ExpLoadError::Missing(name.clone()))?;
     if tensor.shape != expected {
         return Err(Qwen4ExpLoadError::Shape {
             name,
@@ -647,7 +1031,7 @@ fn bind<'a>(
     }
     validate_weight_storage(tensor)?;
     used.insert(tensor.name.clone());
-    Ok(tensor)
+    Ok(tensor.clone())
 }
 
 fn validate_weight_storage(tensor: &TensorDesc) -> Result<(), Qwen4ExpLoadError> {
@@ -696,9 +1080,370 @@ fn checked_add(a: u64, b: u64, label: &'static str) -> Result<u64, Qwen4ExpLoadE
 
 #[cfg(test)]
 mod tests {
-    use super::{ple_embedding_shape_is_valid, validate_weight_storage};
+    use super::*;
     use crate::qwen4exp::Qwen4ExpConfig;
     use crate::tensor::{GgmlType, TensorDesc};
+
+    fn fixture(config: &Qwen4ExpConfig) -> Vec<TensorDesc> {
+        let mut offset = 0;
+        expected_tensor_inventory(config)
+            .unwrap()
+            .into_iter()
+            .map(|(name, shape)| {
+                let n_bytes = shape.iter().product::<u64>() * 4;
+                let desc = TensorDesc {
+                    name,
+                    shape,
+                    dtype: GgmlType::F32,
+                    shard_idx: 0,
+                    data_offset: offset,
+                    n_bytes,
+                };
+                offset += n_bytes;
+                desc
+            })
+            .collect()
+    }
+
+    fn alternate(layers: u32) -> Qwen4ExpConfig {
+        let mut c = Qwen4ExpConfig::flash_next_reference();
+        c.layer_count = layers;
+        c.hidden_size = 4096;
+        c.moe.expert_count = 64;
+        c.moe.experts_per_token = 4;
+        c.moe.expert_intermediate_size = 256;
+        c.moe.shared_expert_intermediate_size = 512;
+        c.hyper_connection.count = 3;
+        c.hyper_connection.low_rank = 128;
+        c.attention.kv_heads = 4;
+        c.ple.as_mut().unwrap().embedding_head_dim = 256;
+        c.compress_ratios = (0..layers)
+            .map(|i| if i % 4 == 3 { 2 } else { 0 })
+            .collect();
+        c.qsa.token_budget = 512;
+        c
+    }
+
+    #[test]
+    fn artifact_contract_admits_reference_and_alternate_sizes_with_derived_inventories() {
+        for config in [
+            Qwen4ExpConfig::flash_next_reference(),
+            alternate(8),
+            alternate(52),
+        ] {
+            config.validate_artifact().unwrap();
+            let capacity =
+                crate::qwen4exp_runtime::Qwen4ExpSessionCapacity::for_forward_limit(&config, 16)
+                    .unwrap();
+            crate::qwen4exp_text_session::Qwen4ExpTextSessionMetalGeometry::from_config(
+                &config,
+                capacity.qsa_physical_capacity(),
+            )
+            .unwrap();
+            let source = fixture(&config);
+            let count = 6
+                + (config.layer_count as usize - config.qsa_layer_count()) * 25
+                + config.qsa_layer_count() * 26
+                + 6;
+            assert_eq!(source.len(), count);
+            let model = Qwen4ExpModel::from_inventory(config.clone(), &source, 0).unwrap();
+            assert_eq!(model.blocks.len(), config.layer_count as usize);
+            assert_eq!(
+                model.ple_embedding.unwrap().shape[0],
+                u64::from(config.ple.unwrap().embedding_head_dim)
+            );
+        }
+    }
+
+    #[test]
+    fn artifact_contract_refuses_malformed_and_unsupported_geometry() {
+        let reference = alternate(8);
+        let changes: Vec<Box<dyn Fn(&mut Qwen4ExpConfig)>> = vec![
+            Box::new(|c| c.attention.kv_heads = 5),
+            Box::new(|c| c.gated_delta_net.value_head_dim = 64),
+            Box::new(|c| c.compress_ratios[0] = 4),
+            Box::new(|c| c.moe.experts_per_token = 65),
+            Box::new(|c| c.hyper_connection.count = 1),
+            Box::new(|c| c.hyper_connection.low_rank = 0),
+            Box::new(|c| c.qsa.query_heads = 8),
+            Box::new(|c| c.qsa.head_dim = 256),
+            Box::new(|c| c.ple = None),
+            Box::new(|c| c.ple.as_mut().unwrap().layers = vec![2]),
+            Box::new(|c| c.ple.as_mut().unwrap().embedding_head_dim = 160),
+            Box::new(|c| c.moe.experts_per_token = 17),
+            Box::new(|c| c.moe.expert_count = 0),
+            Box::new(|c| c.gated_delta_net.conv_kernel = 3),
+        ];
+        for change in changes {
+            let mut config = reference.clone();
+            change(&mut config);
+            assert!(config.validate_artifact().is_err(), "{config:?}");
+        }
+        let mut dense = reference;
+        dense.moe.expert_count = 0;
+        assert!(matches!(
+            dense.validate_artifact(),
+            Err(Qwen4ExpError::UnsupportedShape {
+                feature: "dense FFN",
+                ..
+            })
+        ));
+    }
+
+    fn merge(source: &mut Vec<TensorDesc>, merged: &str, names: &[&str]) {
+        let parts: Vec<_> = names
+            .iter()
+            .map(|name| source.remove(source.iter().position(|t| t.name == *name).unwrap()))
+            .collect();
+        let mut desc = parts[0].clone();
+        desc.name = merged.into();
+        desc.shape[1] = parts.iter().map(|p| p.shape[1]).sum();
+        desc.n_bytes = parts.iter().map(|p| p.n_bytes).sum();
+        source.push(desc);
+    }
+
+    #[test]
+    fn tied_output_and_unsqueezed_hc_norms_follow_config_inventory() {
+        let c = alternate(8);
+        let mut source = fixture(&c);
+        source.retain(|t| t.name != "output.weight");
+        for tensor in &mut source {
+            if tensor.name == "output_hc_norm.weight"
+                || tensor.name.ends_with(".hc_attn_norm.weight")
+                || tensor.name.ends_with(".hc_ffn_norm.weight")
+                || tensor.name.contains(".ple_norm_")
+            {
+                tensor.shape = vec![
+                    u64::from(c.hidden_size),
+                    u64::from(c.hyper_connection.count),
+                ];
+            }
+        }
+        let model = Qwen4ExpModel::from_inventory(c.clone(), &source, 0).unwrap();
+        assert!(model.tied_embeddings);
+        assert_eq!(model.output.name, "token_embd.weight");
+        assert_eq!(
+            model.tensors.len() + 1,
+            expected_tensor_inventory(&c).unwrap().len()
+        );
+        assert_eq!(
+            model.final_residual.norm.shape,
+            vec![u64::from(c.hidden_size) * u64::from(c.hyper_connection.count)]
+        );
+    }
+
+    #[test]
+    fn fused_expert_banks_copy_packed_bytes_without_changing_values() {
+        let mut c = alternate(4);
+        c.hidden_size = 512;
+        c.ple.as_mut().unwrap().embedding_head_dim = 32;
+        c.moe.expert_count = 3;
+        c.moe.experts_per_token = 2;
+        c.moe.expert_intermediate_size = 32;
+        let mut source = fixture(&c);
+        let gate = source
+            .iter()
+            .position(|t| t.name == "blk.0.ffn_gate_exps.weight")
+            .unwrap();
+        let mut merged = source.remove(gate);
+        source.retain(|t| t.name != "blk.0.ffn_up_exps.weight");
+        merged.name = "blk.0.ffn_gate_up_exps.weight".into();
+        merged.shape[1] *= 2;
+        merged.dtype = GgmlType::IQ3_XXS;
+        let (block, bytes) = merged.dtype.storage_layout().unwrap();
+        merged.n_bytes = merged.shape.iter().product::<u64>() / block * bytes;
+        source.push(merged.clone());
+        let model = Qwen4ExpModel::from_inventory(c.clone(), &source, 0).unwrap();
+        assert_eq!(model.repacks.len(), 1);
+        let repack = &model.repacks[0];
+        let bytes: Vec<_> = (0..merged.n_bytes)
+            .map(|i| (i.wrapping_mul(13) % 251) as u8)
+            .collect();
+        for bank in 0..2 {
+            let mut output =
+                vec![std::mem::MaybeUninit::new(0); repack.targets[bank].n_bytes as usize];
+            repack.copy_bank(bank, &bytes, &mut output).unwrap();
+            let actual: Vec<_> = output
+                .into_iter()
+                .map(|b| unsafe { b.assume_init() })
+                .collect();
+            let expected: Vec<_> = bytes
+                .chunks_exact(repack.expert_bytes)
+                .enumerate()
+                .filter(|(i, _)| i % 2 == bank)
+                .flat_map(|(_, b)| b.iter().copied())
+                .collect();
+            assert_eq!(actual, expected);
+            assert_eq!(repack.targets[bank].dtype, merged.dtype);
+        }
+        assert_eq!(model.residency_sources().len(), model.tensors.len() - 2);
+        let mut sentinel = vec![std::mem::MaybeUninit::new(7); repack.targets[0].n_bytes as usize];
+        assert!(repack.copy_bank(0, &bytes[1..], &mut sentinel).is_err());
+        assert!(
+            sentinel
+                .into_iter()
+                .all(|b| unsafe { b.assume_init() } == 7)
+        );
+        let mut malformed = source.clone();
+        malformed.last_mut().unwrap().shape[2] += 1;
+        assert!(matches!(
+            Qwen4ExpModel::from_inventory(c, &malformed, 0),
+            Err(Qwen4ExpLoadError::Shape { .. })
+        ));
+    }
+
+    #[test]
+    fn merged_llama_cpp_projections_preserve_split_shapes_and_byte_ranges() {
+        for beta_name in ["ssm_beta_alpha", "ssm_beta_alpha_cat"] {
+            let config = alternate(8);
+            let split = fixture(&config);
+            let mut source = split.clone();
+            for layer in 0..config.layer_count {
+                for (merged, parts) in [
+                    (
+                        "hc_attn_down_inject",
+                        vec!["hc_attn_down", "hc_attn_inject"],
+                    ),
+                    ("hc_ffn_down_inject", vec!["hc_ffn_down", "hc_ffn_inject"]),
+                ] {
+                    let names: Vec<_> = parts
+                        .iter()
+                        .map(|p| format!("blk.{layer}.{p}.weight"))
+                        .collect();
+                    merge(
+                        &mut source,
+                        &format!("blk.{layer}.{merged}.weight"),
+                        &names.iter().map(String::as_str).collect::<Vec<_>>(),
+                    );
+                }
+            }
+            merge(
+                &mut source,
+                "blk.0.attn_qkv_gate.weight",
+                &["blk.0.attn_qkv.weight", "blk.0.attn_gate.weight"],
+            );
+            merge(
+                &mut source,
+                &format!("blk.0.{beta_name}.weight"),
+                &["blk.0.ssm_beta.weight", "blk.0.ssm_alpha.weight"],
+            );
+            merge(
+                &mut source,
+                "blk.3.attn_qkv.weight",
+                &[
+                    "blk.3.attn_q.weight",
+                    "blk.3.attn_k.weight",
+                    "blk.3.attn_v.weight",
+                ],
+            );
+            let model = Qwen4ExpModel::from_inventory(config, &source, 0).unwrap();
+            assert_eq!(model.tensors.len(), split.len());
+            for tensor in &model.tensors {
+                let original = split.iter().find(|t| t.name == tensor.name).unwrap();
+                assert_eq!(tensor.shape, original.shape);
+                assert_eq!(tensor.n_bytes, original.n_bytes);
+            }
+            let qkv = source
+                .iter()
+                .find(|t| t.name == "blk.0.attn_qkv_gate.weight")
+                .unwrap();
+            let q = model
+                .tensors
+                .iter()
+                .find(|t| t.name == "blk.0.attn_qkv.weight")
+                .unwrap();
+            let gate = model
+                .tensors
+                .iter()
+                .find(|t| t.name == "blk.0.attn_gate.weight")
+                .unwrap();
+            assert_eq!(q.data_offset, qkv.data_offset);
+            assert_eq!(gate.data_offset, q.data_offset + q.n_bytes);
+            assert_eq!(
+                gate.data_offset + gate.n_bytes,
+                qkv.data_offset + qkv.n_bytes
+            );
+        }
+    }
+
+    #[test]
+    fn inventory_refuses_missing_unknown_ambiguous_and_malformed_merged_tensors() {
+        let c = alternate(8);
+        let mut source = fixture(&c);
+        source.pop();
+        assert!(matches!(
+            Qwen4ExpModel::from_inventory(c.clone(), &source, 0),
+            Err(Qwen4ExpLoadError::Missing(_))
+        ));
+        let mut source = fixture(&c);
+        let mut extra = source[0].clone();
+        extra.name = "blk.99.ffn_gate_inp.weight".into();
+        source.push(extra);
+        assert!(matches!(
+            Qwen4ExpModel::from_inventory(c.clone(), &source, 0),
+            Err(Qwen4ExpLoadError::UnexpectedTensors(_))
+        ));
+        let mut source = fixture(&c);
+        let duplicate = source[0].clone();
+        source.push(duplicate);
+        assert!(matches!(
+            Qwen4ExpModel::from_inventory(c.clone(), &source, 0),
+            Err(Qwen4ExpLoadError::AmbiguousLayout(_))
+        ));
+        let mut source = fixture(&c);
+        merge(
+            &mut source,
+            "blk.0.attn_qkv_gate.weight",
+            &["blk.0.attn_qkv.weight", "blk.0.attn_gate.weight"],
+        );
+        let index = source
+            .iter()
+            .position(|t| t.name == "blk.0.attn_qkv_gate.weight")
+            .unwrap();
+        source[index].shape[1] += 1;
+        assert!(matches!(
+            Qwen4ExpModel::from_inventory(c.clone(), &source, 0),
+            Err(Qwen4ExpLoadError::Shape { .. })
+        ));
+        source[index].shape[1] -= 1;
+        source.push(
+            fixture(&c)
+                .into_iter()
+                .find(|t| t.name == "blk.0.attn_gate.weight")
+                .unwrap(),
+        );
+        assert!(matches!(
+            Qwen4ExpModel::from_inventory(c, &source, 0),
+            Err(Qwen4ExpLoadError::AmbiguousLayout(_))
+        ));
+    }
+
+    #[test]
+    fn mtp_names_and_declared_appended_blocks_are_excluded_but_unknown_blocks_refuse() {
+        let c = alternate(8);
+        let mut source = fixture(&c);
+        for name in [
+            "nextn_fc_embedding.weight",
+            "nextn.pre_projection.weight",
+            "nextn.post_projection.weight",
+            "blk.8.nextn.eh_proj.weight",
+            "blk.8.nextn.hc_head_down.weight",
+            "mtp.fc_hidden.weight",
+            "blk.8.attn_q.weight",
+        ] {
+            let mut desc = source[0].clone();
+            desc.name = name.into();
+            desc.dtype = GgmlType::I32;
+            source.push(desc);
+        }
+        let model = Qwen4ExpModel::from_inventory(c.clone(), &source, 1).unwrap();
+        assert_eq!(model.ignored_mtp.len(), 7);
+        assert_eq!(model.tensors.len(), fixture(&c).len());
+        assert!(matches!(
+            Qwen4ExpModel::from_inventory(c, &source, 0),
+            Err(Qwen4ExpLoadError::UnexpectedTensors(_))
+        ));
+    }
 
     #[test]
     fn release_schema_has_exact_tensor_count() {

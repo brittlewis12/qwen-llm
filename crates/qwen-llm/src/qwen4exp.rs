@@ -9,6 +9,15 @@ use std::collections::HashSet;
 
 pub const ARCHITECTURE_NAME: &str = "qwen4exp";
 
+/// Architecture spellings sharing the HC + GDN + QSA contract. Dense variants
+/// are detected here too, and refused explicitly until their FFN is implemented.
+pub fn is_qwen4_architecture(name: &str) -> bool {
+    matches!(
+        name,
+        "qwen4exp" | "qwen4_exp" | "qwen4" | "qwen4moe" | "qwen4dense"
+    )
+}
+
 pub const FLASH_NEXT_PLE_MULTIPLIERS: [u64; 3] =
     [23_703_573_157_769, 20_109_073_645_365, 8_052_911_324_071];
 
@@ -102,6 +111,11 @@ pub struct Qwen4ExpConfig {
 pub enum Qwen4ExpError {
     #[error("unsupported architecture: {0:?}")]
     UnsupportedArchitecture(Option<String>),
+    #[error("unsupported Qwen4 artifact shape ({feature}): {reason}")]
+    UnsupportedShape {
+        feature: &'static str,
+        reason: String,
+    },
     #[error("missing required metadata key: {0}")]
     MissingMetadata(&'static str),
     #[error("invalid metadata key {key:?}: {reason}")]
@@ -112,10 +126,31 @@ pub enum Qwen4ExpError {
 
 impl Qwen4ExpConfig {
     pub fn from_gguf(gguf: &GgufFile) -> Result<Self, Qwen4ExpError> {
-        if gguf.architecture().as_deref() != Some(ARCHITECTURE_NAME) {
+        if !gguf
+            .architecture()
+            .as_deref()
+            .is_some_and(is_qwen4_architecture)
+        {
             return Err(Qwen4ExpError::UnsupportedArchitecture(gguf.architecture()));
         }
 
+        if optional_u32(gguf, "qwen4exp.expert_count")?.unwrap_or(0) == 0 {
+            return Err(unsupported(
+                "dense FFN",
+                "dense Qwen4 execution is not implemented; a routed MoE configuration is required",
+            ));
+        }
+        let total_layers = required_u32(gguf, "qwen4exp.block_count")?;
+        let mtp_layers = optional_u32(gguf, "qwen4exp.nextn_predict_layers")?.unwrap_or(0);
+        let layer_count = total_layers
+            .checked_sub(mtp_layers)
+            .filter(|&n| n > 0)
+            .ok_or_else(|| {
+                invalid(
+                    "qwen4exp.nextn_predict_layers",
+                    "must leave at least one trunk layer",
+                )
+            })?;
         let rope_sections =
             required_nonnegative_u32_array(gguf, "qwen4exp.rope.dimension_sections")?;
         let rope_sections: [u32; 4] = rope_sections.try_into().map_err(|values: Vec<u32>| {
@@ -125,8 +160,15 @@ impl Qwen4ExpConfig {
             )
         })?;
 
-        let compress_ratios =
+        let mut compress_ratios =
             required_nonnegative_u32_array(gguf, "qwen4exp.attention.compress_ratios")?;
+        if compress_ratios.len() != total_layers as usize {
+            return Err(invalid(
+                "qwen4exp.attention.compress_ratios",
+                "must describe every declared trunk and MTP layer",
+            ));
+        }
+        compress_ratios.truncate(layer_count as usize);
         let vocab_size = required_array_len_u32(gguf, "tokenizer.ggml.tokens")?;
         let ple_layers = optional_nonnegative_u32_array(gguf, "qwen4exp.ple.layers")?;
         let ple = match ple_layers {
@@ -151,7 +193,7 @@ impl Qwen4ExpConfig {
 
         let config = Self {
             context_length: required_u32(gguf, "qwen4exp.context_length")?,
-            layer_count: required_u32(gguf, "qwen4exp.block_count")?,
+            layer_count,
             hidden_size: required_u32(gguf, "qwen4exp.embedding_length")?,
             vocab_size,
             rms_norm_eps: required_f32(gguf, "qwen4exp.attention.layer_norm_rms_epsilon")?,
@@ -360,6 +402,12 @@ impl Qwen4ExpConfig {
         require_nonzero("qwen4exp.ssm.time_step_rank", gdn.value_heads)?;
         require_nonzero("qwen4exp.ssm.state_size", gdn.key_head_dim)?;
         require_nonzero("qwen4exp.ssm.conv_kernel", gdn.conv_kernel)?;
+        if gdn.key_head_dim != gdn.value_head_dim {
+            return Err(invalid(
+                "qwen4exp.ssm.state_size",
+                "key and value head dimensions must agree",
+            ));
+        }
         if !gdn.value_heads.is_multiple_of(gdn.key_heads) {
             return Err(invalid(
                 "qwen4exp.ssm.time_step_rank",
@@ -448,6 +496,79 @@ impl Qwen4ExpConfig {
                 ));
             }
             ple.validate(self.hidden_size, self.layer_count)?;
+        }
+        Ok(())
+    }
+
+    /// Admission for the executable MoE/PLE path. Keep architecture validation
+    /// separate so inspection can describe valid shapes the runtime cannot execute.
+    pub fn validate_artifact(&self) -> Result<(), Qwen4ExpError> {
+        if self.moe.expert_count == 0 {
+            return Err(unsupported(
+                "dense FFN",
+                "dense Qwen4 execution is not implemented",
+            ));
+        }
+        self.validate()?;
+        let refuse = |feature, reason| Err(unsupported(feature, reason));
+        if self.layer_count < 2
+            || self.qsa_layer_count() == 0
+            || self.mixer_kind(0) != Some(MixerKind::GatedDeltaNet)
+            || self.mixer_kind(1) != Some(MixerKind::GatedDeltaNet)
+        {
+            return refuse(
+                "layer schedule",
+                "requires the first two layers to use GDN and at least one later QSA layer",
+            );
+        }
+        let gdn = &self.gated_delta_net;
+        if gdn.key_head_dim != 128 || gdn.value_head_dim != 128 || gdn.conv_kernel != 4 {
+            return refuse(
+                "GDN",
+                "requires equal 128-wide key/value heads and convolution width 4",
+            );
+        }
+        if self.qsa_layer_count() > 0
+            && (self.attention.key_head_dim != 256
+                || self.qsa.head_dim != 128
+                || self.qsa.query_heads != 4
+                || self.attention.rotary_dim == 0)
+        {
+            return refuse(
+                "QSA",
+                "requires 256-wide attention heads and four 128-wide index query heads",
+            );
+        }
+        if self.moe.experts_per_token > 16
+            || self.moe.expert_count > i32::MAX as u32
+            || !self.hidden_size.is_multiple_of(256)
+            || !self.moe.expert_intermediate_size.is_multiple_of(32)
+            || !self.moe.shared_expert_intermediate_size.is_multiple_of(32)
+        {
+            return refuse(
+                "MoE",
+                "requires top-k <= 16, signed I32 expert IDs, hidden width divisible by 256 and FFN widths divisible by 32",
+            );
+        }
+        let Some(ple) = &self.ple else {
+            return refuse("PLE", "the executable path requires PLE at layer 1");
+        };
+        if ple.layers != [1] || !ple.embedding_head_dim.is_multiple_of(32) {
+            return refuse(
+                "PLE",
+                "requires PLE only at layer 1 and head width divisible by 32",
+            );
+        }
+        // All projection widths cross a signed I32 Metal indexing boundary.
+        for width in [
+            u64::from(self.hidden_size) * u64::from(self.hyper_connection.count),
+            u64::from(self.hyper_connection.low_rank),
+            u64::from(self.attention.query_heads) * u64::from(self.attention.key_head_dim) * 2,
+            u64::from(gdn.key_heads) * 256 + u64::from(gdn.inner_size),
+        ] {
+            if width > i32::MAX as u64 {
+                return refuse("addressing", "projection dimensions must fit signed I32");
+            }
         }
         Ok(())
     }
@@ -911,15 +1032,35 @@ impl QsaConfig {
     }
 }
 
+fn metadata_key(gguf: &GgufFile, key: &str) -> String {
+    if let Some(suffix) = key.strip_prefix("qwen4exp.") {
+        let arch = gguf
+            .get_str("general.architecture")
+            .unwrap_or(ARCHITECTURE_NAME);
+        let alias = format!("{arch}.{suffix}");
+        if gguf.model.metadata().contains_key(&alias) {
+            return alias;
+        }
+    }
+    key.to_string()
+}
+
+fn unsupported(feature: &'static str, reason: impl Into<String>) -> Qwen4ExpError {
+    Qwen4ExpError::UnsupportedShape {
+        feature,
+        reason: reason.into(),
+    }
+}
+
 fn required_u32(gguf: &GgufFile, key: &'static str) -> Result<u32, Qwen4ExpError> {
     let value = gguf
-        .get_u64(key)
+        .get_u64(&metadata_key(gguf, key))
         .ok_or(Qwen4ExpError::MissingMetadata(key))?;
     u32::try_from(value).map_err(|_| invalid(key, format!("{value} does not fit u32")))
 }
 
 fn optional_u32(gguf: &GgufFile, key: &'static str) -> Result<Option<u32>, Qwen4ExpError> {
-    gguf.get_u64(key)
+    gguf.get_u64(&metadata_key(gguf, key))
         .map(|value| {
             u32::try_from(value).map_err(|_| invalid(key, format!("{value} does not fit u32")))
         })
@@ -928,7 +1069,7 @@ fn optional_u32(gguf: &GgufFile, key: &'static str) -> Result<Option<u32>, Qwen4
 
 fn required_f32(gguf: &GgufFile, key: &'static str) -> Result<f32, Qwen4ExpError> {
     let value = gguf
-        .get_f64(key)?
+        .get_f64(&metadata_key(gguf, key))?
         .ok_or(Qwen4ExpError::MissingMetadata(key))?;
     if !value.is_finite() || value < f32::MIN as f64 || value > f32::MAX as f64 {
         return Err(invalid(key, format!("{value} does not fit finite f32")));
@@ -937,13 +1078,13 @@ fn required_f32(gguf: &GgufFile, key: &'static str) -> Result<f32, Qwen4ExpError
 }
 
 fn required_u64_array(gguf: &GgufFile, key: &'static str) -> Result<Vec<u64>, Qwen4ExpError> {
-    gguf.get_u64_array(key)?
+    gguf.get_u64_array(&metadata_key(gguf, key))?
         .ok_or(Qwen4ExpError::MissingMetadata(key))
 }
 
 fn required_array_len_u32(gguf: &GgufFile, key: &'static str) -> Result<u32, Qwen4ExpError> {
     let length = gguf
-        .get_array_len(key)?
+        .get_array_len(&metadata_key(gguf, key))?
         .ok_or(Qwen4ExpError::MissingMetadata(key))?;
     u32::try_from(length).map_err(|_| invalid(key, format!("length {length} does not fit u32")))
 }
@@ -953,7 +1094,7 @@ fn required_nonnegative_u32_array(
     key: &'static str,
 ) -> Result<Vec<u32>, Qwen4ExpError> {
     let values = gguf
-        .get_i64_array(key)?
+        .get_i64_array(&metadata_key(gguf, key))?
         .ok_or(Qwen4ExpError::MissingMetadata(key))?;
     nonnegative_u32_values(key, values)
 }
@@ -962,7 +1103,7 @@ fn optional_nonnegative_u32_array(
     gguf: &GgufFile,
     key: &'static str,
 ) -> Result<Option<Vec<u32>>, Qwen4ExpError> {
-    gguf.get_i64_array(key)?
+    gguf.get_i64_array(&metadata_key(gguf, key))?
         .map(|values| nonnegative_u32_values(key, values))
         .transpose()
 }
@@ -1000,6 +1141,242 @@ fn invalid(key: &'static str, reason: impl Into<String>) -> Qwen4ExpError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn metadata_fixture(architecture: &str, mtp: bool, dense: bool) -> GgufFile {
+        metadata_fixture_with(architecture, mtp, |config| {
+            if dense {
+                config.moe.expert_count = 0;
+            }
+        })
+    }
+
+    fn metadata_fixture_with(
+        architecture: &str,
+        mtp: bool,
+        mutate: impl FnOnce(&mut Qwen4ExpConfig),
+    ) -> GgufFile {
+        fn string(bytes: &mut Vec<u8>, value: &str) {
+            bytes.extend((value.len() as u64).to_le_bytes());
+            bytes.extend(value.as_bytes());
+        }
+        fn array(values: &[u64]) -> Vec<u8> {
+            let mut bytes = 9u32.to_le_bytes().to_vec();
+            bytes.extend(10u32.to_le_bytes());
+            bytes.extend((values.len() as u64).to_le_bytes());
+            for value in values {
+                bytes.extend(value.to_le_bytes());
+            }
+            bytes
+        }
+        let mut c = Qwen4ExpConfig::flash_next_reference();
+        mutate(&mut c);
+        let ple = c.ple.as_ref().unwrap();
+        let mut fields: Vec<(String, Vec<u8>)> = Vec::new();
+        let mut arch_value = 8u32.to_le_bytes().to_vec();
+        string(&mut arch_value, architecture);
+        fields.push(("general.architecture".into(), arch_value));
+        for (key, value) in [
+            ("context_length", c.context_length),
+            ("block_count", c.layer_count + u32::from(mtp)),
+            ("embedding_length", c.hidden_size),
+            ("full_attention_interval", c.full_attention_interval),
+            ("hyper_connection.count", c.hyper_connection.count),
+            ("hyper_connection.low_rank", c.hyper_connection.low_rank),
+            ("attention.head_count", c.attention.query_heads),
+            ("attention.head_count_kv", c.attention.kv_heads),
+            ("attention.key_length", c.attention.key_head_dim),
+            ("attention.value_length", c.attention.value_head_dim),
+            ("rope.dimension_count", c.attention.rotary_dim),
+            ("ssm.group_count", c.gated_delta_net.key_heads),
+            ("ssm.time_step_rank", c.gated_delta_net.value_heads),
+            ("ssm.state_size", c.gated_delta_net.key_head_dim),
+            ("ssm.conv_kernel", c.gated_delta_net.conv_kernel),
+            ("ssm.inner_size", c.gated_delta_net.inner_size),
+            ("expert_count", c.moe.expert_count),
+            ("expert_used_count", c.moe.experts_per_token),
+            ("expert_feed_forward_length", c.moe.expert_intermediate_size),
+            (
+                "expert_shared_feed_forward_length",
+                c.moe.shared_expert_intermediate_size,
+            ),
+            ("attention.indexer.head_count", c.qsa.query_heads),
+            ("attention.indexer.key_length", c.qsa.head_dim),
+            ("attention.indexer.top_k", c.qsa.token_budget),
+            ("ple.ngram_size", ple.ngram_size),
+            ("ple.heads_per_ngram", ple.heads_per_ngram),
+            ("embedding_length_per_layer_input", ple.embedding_head_dim),
+            ("ple.conv_kernel", ple.conv_kernel),
+            ("ple.eos_token_id", ple.eos_token_id),
+            ("ple.image_token_id", ple.image_token_id.unwrap()),
+            ("nextn_predict_layers", u32::from(mtp)),
+        ] {
+            let mut bytes = 4u32.to_le_bytes().to_vec();
+            bytes.extend(value.to_le_bytes());
+            fields.push((format!("{architecture}.{key}"), bytes));
+        }
+        for (key, value) in [
+            ("attention.layer_norm_rms_epsilon", c.rms_norm_eps),
+            ("rope.freq_base", c.attention.rope_theta),
+        ] {
+            let mut bytes = 6u32.to_le_bytes().to_vec();
+            bytes.extend(value.to_le_bytes());
+            fields.push((format!("{architecture}.{key}"), bytes));
+        }
+        let mut ratios: Vec<_> = c.compress_ratios.iter().map(|&n| u64::from(n)).collect();
+        if mtp {
+            ratios.push(4);
+        }
+        for (key, values) in [
+            (
+                "rope.dimension_sections",
+                c.attention.rope_sections.map(u64::from).to_vec(),
+            ),
+            ("attention.compress_ratios", ratios),
+            (
+                "ple.layers",
+                c.ple
+                    .as_ref()
+                    .map(|ple| ple.layers.iter().copied().map(u64::from).collect())
+                    .unwrap_or_default(),
+            ),
+            ("ple.layer_multipliers", ple.multipliers.clone()),
+            ("ple.head_offsets", ple.head_offsets.clone()),
+            ("ple.head_vocab_sizes", ple.head_vocab_sizes.clone()),
+        ] {
+            fields.push((format!("{architecture}.{key}"), array(&values)));
+        }
+        let mut tokens = 9u32.to_le_bytes().to_vec();
+        tokens.extend(8u32.to_le_bytes());
+        tokens.extend(u64::from(c.vocab_size).to_le_bytes());
+        for _ in 0..c.vocab_size {
+            string(&mut tokens, "");
+        }
+        fields.push(("tokenizer.ggml.tokens".into(), tokens));
+        let mut bytes = b"GGUF".to_vec();
+        bytes.extend(3u32.to_le_bytes());
+        bytes.extend(0u64.to_le_bytes());
+        bytes.extend((fields.len() as u64).to_le_bytes());
+        for (key, value) in fields {
+            string(&mut bytes, &key);
+            bytes.extend(value);
+        }
+        bytes.resize(bytes.len().next_multiple_of(32), 0);
+        static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let path = std::env::temp_dir().join(format!(
+            "qwen4-artifact-{}-{}.gguf",
+            std::process::id(),
+            NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+        ));
+        let mut file = std::fs::OpenOptions::new()
+            .create_new(true)
+            .read(true)
+            .write(true)
+            .open(&path)
+            .unwrap();
+        std::fs::remove_file(path).unwrap();
+        std::io::Write::write_all(&mut file, &bytes).unwrap();
+        GgufFile::from_opened_file(file, "qwen4-artifact.gguf").unwrap()
+    }
+
+    #[test]
+    fn architecture_alias_metadata_namespaces_and_appended_mtp_preserve_reference_config() {
+        for architecture in ["qwen4exp", "qwen4_exp", "qwen4", "qwen4moe", "qwen4dense"] {
+            for mtp in [false, true] {
+                let gguf = metadata_fixture(architecture, mtp, false);
+                let config = Qwen4ExpConfig::from_gguf(&gguf).unwrap();
+                assert_eq!(config, Qwen4ExpConfig::flash_next_reference());
+                config.validate_artifact().unwrap();
+                assert_eq!(
+                    crate::model_family::ModelFamily::detect(&gguf),
+                    Some(crate::model_family::ModelFamily::Qwen4Exp)
+                );
+            }
+        }
+        let dense = metadata_fixture("qwen4", false, true);
+        assert!(matches!(
+            Qwen4ExpConfig::from_gguf(&dense),
+            Err(Qwen4ExpError::UnsupportedShape {
+                feature: "dense FFN",
+                ..
+            })
+        ));
+    }
+
+    fn alternate_metadata(config: &mut Qwen4ExpConfig) {
+        config.layer_count = 12;
+        config.hidden_size = 4096;
+        config.moe.expert_count = 64;
+        config.moe.experts_per_token = 4;
+        config.moe.expert_intermediate_size = 256;
+        config.moe.shared_expert_intermediate_size = 512;
+        config.hyper_connection.count = 3;
+        config.hyper_connection.low_rank = 128;
+        config.ple.as_mut().unwrap().embedding_head_dim = 256;
+        config.compress_ratios = (0..config.layer_count)
+            .map(|layer| if layer % 4 == 3 { 2 } else { 0 })
+            .collect();
+        config.qsa.token_budget = 512;
+    }
+
+    #[test]
+    fn alternate_metadata_is_admitted_and_malformed_shapes_are_refused() {
+        let gguf = metadata_fixture_with("qwen4moe", true, alternate_metadata);
+        let config = Qwen4ExpConfig::from_gguf(&gguf).unwrap();
+        assert_eq!(config.layer_count, 12);
+        assert_eq!(config.compress_ratios.len(), 12);
+        assert_eq!(config.hidden_size, 4096);
+        assert_eq!(config.moe.expert_count, 64);
+        assert_eq!(config.ple.as_ref().unwrap().embedding_head_dim, 256);
+        config.validate_artifact().unwrap();
+        assert_eq!(
+            crate::qwen4exp_loader::expected_tensor_inventory(&config)
+                .unwrap()
+                .len(),
+            6 + (12 - 3) * 25 + 3 * 26 + 6
+        );
+
+        // A schedule that does not describe every declared trunk/MTP layer.
+        let extra_ratio = metadata_fixture_with("qwen4", false, |config| {
+            alternate_metadata(config);
+            config.compress_ratios.push(0);
+        });
+        assert!(matches!(
+            Qwen4ExpConfig::from_gguf(&extra_ratio),
+            Err(Qwen4ExpError::InvalidMetadata {
+                key: "qwen4exp.attention.compress_ratios",
+                ..
+            })
+        ));
+
+        // Every block claimed by MTP leaves no trunk layer.
+        let no_trunk = metadata_fixture_with("qwen4", true, |config| config.layer_count = 0);
+        assert!(matches!(
+            Qwen4ExpConfig::from_gguf(&no_trunk),
+            Err(Qwen4ExpError::InvalidMetadata {
+                key: "qwen4exp.nextn_predict_layers",
+                ..
+            })
+        ));
+
+        // Shape-valid metadata the executable MoE/PLE runtime cannot serve.
+        for mutate in [
+            |config: &mut Qwen4ExpConfig| {
+                alternate_metadata(config);
+                config.gated_delta_net.conv_kernel = 3;
+            },
+            |config: &mut Qwen4ExpConfig| {
+                alternate_metadata(config);
+                config.ple.as_mut().unwrap().layers = vec![2];
+            },
+        ] {
+            let gguf = metadata_fixture_with("qwen4", false, mutate);
+            let config = Qwen4ExpConfig::from_gguf(&gguf).unwrap();
+            assert!(matches!(
+                config.validate_artifact(),
+                Err(Qwen4ExpError::UnsupportedShape { .. })
+            ));
+        }
+    }
 
     #[test]
     fn release_contract_is_self_consistent() {

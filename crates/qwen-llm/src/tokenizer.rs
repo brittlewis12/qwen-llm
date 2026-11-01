@@ -760,6 +760,30 @@ mod retained_tokenizer_tests {
     }
 
     #[test]
+    fn qwen4exp_architecture_aliases_share_native_tokenizer_bytes() {
+        let temp = Temp::new();
+        let mut reference = None;
+        for arch in ["qwen4exp", "qwen4_exp", "qwen4", "qwen4moe", "qwen4dense"] {
+            let path = temp.0.join(format!("{arch}.gguf"));
+            fs::write(&path, vocab_gguf_for(false, None, arch, "qwen35")).unwrap();
+            let gguf = GgufFile::open(path).unwrap();
+            let tokenizer = NativeTokenizer::from_gguf(&gguf).unwrap();
+            let text = "Hello, Qwen4! 1234";
+            let ids = tokenizer.encode(text, false).unwrap();
+            assert_eq!(tokenizer.try_decode(&ids).unwrap(), text);
+            assert_eq!(
+                crate::model_family::ModelFamily::detect(&gguf),
+                Some(crate::model_family::ModelFamily::Qwen4Exp)
+            );
+            if let Some(expected) = &reference {
+                assert_eq!(&ids, expected);
+            } else {
+                reference = Some(ids);
+            }
+        }
+    }
+
+    #[test]
     fn deepseek41_native_tokenizer_needs_only_standard_gguf_metadata() {
         let temp = Temp::new();
         let path = temp.0.join("joyai-llm.gguf");
@@ -968,9 +992,14 @@ impl NativeTokenizer {
         let pre = required_str(g, "tokenizer.ggml.pre")?;
         let architecture = g.architecture();
         let pretokenizer = match (architecture.as_deref(), model, pre) {
-            (Some("qwen35" | "qwen35moe" | "qwen4exp"), "gpt2", "qwen35") => {
-                PretokenizerKind::Qwen35
-            }
+            (
+                Some(
+                    "qwen35" | "qwen35moe" | "qwen4exp" | "qwen4_exp" | "qwen4" | "qwen4moe"
+                    | "qwen4dense",
+                ),
+                "gpt2",
+                "qwen35",
+            ) => PretokenizerKind::Qwen35,
             (Some("deepseek4" | "deepseek41"), "gpt2", "joyai-llm") => PretokenizerKind::JoyAi,
             (Some("k2-horizon"), "gpt2", "k2-horizon") => PretokenizerKind::K2Horizon,
             (Some("glm5-next" | "glm5next"), "gpt2", "glm4") => PretokenizerKind::Glm4,

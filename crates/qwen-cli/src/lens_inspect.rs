@@ -1261,7 +1261,7 @@ fn validate_trace_input_rendering(document: &TraceDocument, rendering: &Renderin
         .as_ref()
         .and_then(|model| model.architecture.as_deref());
     let ordinary_qwen = matches!(architecture, Some("qwen35" | "qwen35moe"));
-    let flash_next = architecture == Some("qwen4exp");
+    let flash_next = architecture.is_some_and(qwen_llm::qwen4exp::is_qwen4_architecture);
     let muse = architecture == Some("muse-glimmer");
     let valid = match source {
         "prompt" => {

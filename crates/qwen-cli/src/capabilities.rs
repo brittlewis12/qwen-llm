@@ -110,7 +110,8 @@ pub fn qwen4exp_template_projection(identity: &prompt_template::QwenReleaseIdent
     if matches!(
         &identity.status,
         prompt_template::QwenReleaseStatus::Identified { .. }
-    ) {
+    ) || identity.template == prompt_template::QwenPromptTemplate::Qwen4Next
+    {
         value["rendered_as"] = json!(identity.template.renderer_name());
     }
     value

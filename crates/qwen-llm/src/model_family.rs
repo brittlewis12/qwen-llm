@@ -31,6 +31,9 @@ impl ModelFamily {
     pub const FAMILY_COUNT: usize = 8;
 
     pub fn from_architecture_name(name: &str) -> Option<Self> {
+        if crate::qwen4exp::is_qwen4_architecture(name) {
+            return Some(Self::Qwen4Exp);
+        }
         // The original unsloth shard spells GLM-5.3 without the hyphen.
         if name == crate::glm5_next::LEGACY_ARCHITECTURE_NAME {
             return Some(Self::Glm5Next);

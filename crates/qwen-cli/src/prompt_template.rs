@@ -57,9 +57,11 @@ pub fn resolve_model_prompt_template(gguf: &GgufFile) -> Result<ModelPromptTempl
         .architecture()
         .context("model is missing general.architecture")?;
     match architecture.as_str() {
-        "qwen35" | "qwen35moe" | "qwen4exp" => Ok(ModelPromptTemplate::Qwen(
-            resolve_qwen_contract_for_gguf(gguf)?.template,
-        )),
+        "qwen35" | "qwen35moe" | "qwen4exp" | "qwen4_exp" | "qwen4" | "qwen4moe" | "qwen4dense" => {
+            Ok(ModelPromptTemplate::Qwen(
+                resolve_qwen_contract_for_gguf(gguf)?.template,
+            ))
+        }
         MUSE_GLIMMER_ARCHITECTURE => {
             let config =
                 MuseGlimmerConfig::from_gguf(gguf).context("bind Muse Glimmer prompt template")?;
@@ -258,6 +260,15 @@ pub fn identify_qwen_release(facts: &QwenHeaderFacts<'_>) -> QwenReleaseIdentity
             },
         };
     }
+    if qwen_llm::qwen4exp::is_qwen4_architecture(facts.architecture) {
+        return QwenReleaseIdentity {
+            template: QwenPromptTemplate::Qwen4Next,
+            status: QwenReleaseStatus::Unknown {
+                reason: "Qwen4 architecture alias does not establish a release identity".into(),
+                fields_consulted: vec!["general.architecture"],
+            },
+        };
+    }
     let mut versions: Vec<(&'static str, &'static str)> = Vec::new();
     for (field, value) in QWEN_NAME_FIELDS.iter().zip(facts.names) {
         for version in value.map(qwen_versions_in).unwrap_or_default() {
@@ -376,6 +387,35 @@ mod tests {
 
     fn template(architecture: &str, names: [Option<&str>; 5]) -> QwenPromptTemplate {
         identify_qwen_release(&facts(architecture, names)).template
+    }
+
+    #[test]
+    fn qwen4exp_aliases_route_templates_capabilities_serve_and_bench_family() {
+        use crate::qwen_contract_fixture::{self as fixture, Value};
+        for architecture in ["qwen4", "qwen4moe", "qwen4dense", "qwen4_exp"] {
+            let gguf = fixture::gguf(
+                "future Qwen",
+                "",
+                &[("general.architecture", Value::Text(architecture))],
+            );
+            let family = ModelFamily::detect(&gguf);
+            assert_eq!(family, Some(ModelFamily::Qwen4Exp));
+            let template = resolve_model_prompt_template(&gguf).unwrap();
+            assert!(matches!(
+                template,
+                ModelPromptTemplate::Qwen(QwenPromptTemplate::Qwen4Next)
+            ));
+            let identity = resolve_qwen_contract_for_gguf(&gguf).unwrap();
+            assert!(matches!(identity.status, QwenReleaseStatus::Unknown { .. }));
+            assert_eq!(
+                serve_qwen_template(family.unwrap(), &gguf).unwrap(),
+                QwenPromptTemplate::Qwen4Next.serve_template()
+            );
+            let projection = crate::capabilities::template_for(family, &gguf, |_| unreachable!());
+            assert_eq!(projection["rendered_as"], "qwen4next_messages_v1");
+            let input = crate::capabilities::input_for(family, &gguf, |_| None, |_| unreachable!());
+            assert_eq!(input, InputCapability::all_supported());
+        }
     }
 
     #[test]

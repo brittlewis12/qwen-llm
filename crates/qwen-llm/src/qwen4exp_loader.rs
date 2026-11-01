@@ -132,6 +132,8 @@ pub enum Qwen4ExpLoadError {
     },
     #[error("ambiguous tensor layout: {0}")]
     AmbiguousLayout(String),
+    #[error("MTP inventory does not match declared nextn_predict_layers: {0}")]
+    MtpInventory(String),
     #[error("unexpected qwen4exp tensor set: {0:?}")]
     UnexpectedTensors(Vec<String>),
 }
@@ -453,6 +455,10 @@ fn canonical_inventory(
     if mtp_layers > u64::from(u32::MAX - config.layer_count) {
         return Err(Qwen4ExpLoadError::DimensionOverflow("MTP layer range"));
     }
+    let trunk_layers = u64::from(config.layer_count);
+    let mtp_end = trunk_layers + mtp_layers;
+    let mut mtp_blocks = HashSet::new();
+    let mut saw_mtp = false;
     for desc in source {
         if !seen.insert(desc.name.as_str()) {
             return Err(Qwen4ExpLoadError::AmbiguousLayout(format!(
@@ -464,19 +470,48 @@ fn canonical_inventory(
             .name
             .strip_prefix("blk.")
             .and_then(|s| s.split_once('.'));
-        let mtp_block = block
-            .and_then(|(n, _)| n.parse::<u64>().ok())
-            .is_some_and(|n| {
-                n >= u64::from(config.layer_count) && n < u64::from(config.layer_count) + mtp_layers
-            });
-        let nextn = desc.name.starts_with("nextn_")
+        let block_index = block.and_then(|(n, _)| n.parse::<u64>().ok());
+        let declared_mtp_block = block_index.is_some_and(|n| n >= trunk_layers && n < mtp_end);
+        let nextn_named = desc.name.starts_with("nextn_")
             || desc.name.starts_with("nextn.")
             || block
                 .is_some_and(|(_, role)| role.starts_with("nextn_") || role.starts_with("nextn."));
-        if desc.name.starts_with("mtp.") || nextn || mtp_block {
+        if desc.name.starts_with("mtp.") || nextn_named || declared_mtp_block {
+            if mtp_layers == 0 {
+                return Err(Qwen4ExpLoadError::MtpInventory(format!(
+                    "tensor {:?} is MTP but nextn_predict_layers is 0",
+                    desc.name
+                )));
+            }
+            if let Some(index) = block_index {
+                if index >= mtp_end {
+                    return Err(Qwen4ExpLoadError::MtpInventory(format!(
+                        "tensor {:?} declares block {index} outside the {trunk_layers}-block trunk and {mtp_layers} declared MTP block(s)",
+                        desc.name
+                    )));
+                }
+                mtp_blocks.insert(index);
+            }
+            saw_mtp = true;
             ignored.push(desc.name.clone());
         } else {
             tensors.push(desc.clone());
+        }
+    }
+    if mtp_layers > 0 {
+        if !saw_mtp {
+            return Err(Qwen4ExpLoadError::MtpInventory(format!(
+                "nextn_predict_layers={mtp_layers} but the inventory has no MTP tensors"
+            )));
+        }
+        if !mtp_blocks.is_empty() {
+            for index in trunk_layers..mtp_end {
+                if !mtp_blocks.contains(&index) {
+                    return Err(Qwen4ExpLoadError::MtpInventory(format!(
+                        "MTP block {index} is declared but absent"
+                    )));
+                }
+            }
         }
     }
     let schema = expected_tensor_inventory(config)?;
@@ -1419,7 +1454,7 @@ mod tests {
     }
 
     #[test]
-    fn mtp_names_and_declared_appended_blocks_are_excluded_but_unknown_blocks_refuse() {
+    fn mtp_names_and_declared_appended_blocks_are_excluded_when_consistent() {
         let c = alternate(8);
         let mut source = fixture(&c);
         for name in [
@@ -1439,10 +1474,65 @@ mod tests {
         let model = Qwen4ExpModel::from_inventory(c.clone(), &source, 1).unwrap();
         assert_eq!(model.ignored_mtp.len(), 7);
         assert_eq!(model.tensors.len(), fixture(&c).len());
+    }
+
+    #[test]
+    fn mtp_inventory_must_match_declared_nextn_layers() {
+        let c = alternate(8);
+        let trunk = fixture(&c);
+        let mut with_mtp = trunk.clone();
+        for name in ["blk.8.nextn.eh_proj.weight", "blk.8.attn_q.weight"] {
+            let mut desc = trunk[0].clone();
+            desc.name = name.into();
+            desc.dtype = GgmlType::I32;
+            with_mtp.push(desc);
+        }
+
+        // Declared MTP but no MTP tensors: previously this silently consumed a
+        // trunk layer; now it must refuse.
         assert!(matches!(
-            Qwen4ExpModel::from_inventory(c, &source, 0),
+            Qwen4ExpModel::from_inventory(c.clone(), &trunk, 1),
+            Err(Qwen4ExpLoadError::MtpInventory(_))
+        ));
+
+        // MTP tensors present but metadata declares none.
+        assert!(matches!(
+            Qwen4ExpModel::from_inventory(c.clone(), &with_mtp, 0),
+            Err(Qwen4ExpLoadError::MtpInventory(_))
+        ));
+
+        // Two declared blocks but only the first is present.
+        assert!(matches!(
+            Qwen4ExpModel::from_inventory(c.clone(), &with_mtp, 2),
+            Err(Qwen4ExpLoadError::MtpInventory(_))
+        ));
+
+        // A nextn tensor outside the declared block range is inconsistent.
+        let mut out_of_range = with_mtp.clone();
+        let mut desc = trunk[0].clone();
+        desc.name = "blk.9.nextn.eh_proj.weight".into();
+        out_of_range.push(desc);
+        assert!(matches!(
+            Qwen4ExpModel::from_inventory(c.clone(), &out_of_range, 1),
+            Err(Qwen4ExpLoadError::MtpInventory(_))
+        ));
+
+        // A plain out-of-range block is still an unexpected tensor, not MTP.
+        let mut unknown = trunk.clone();
+        let mut desc = trunk[0].clone();
+        desc.name = "blk.8.attn_q.weight".into();
+        unknown.push(desc);
+        assert!(matches!(
+            Qwen4ExpModel::from_inventory(c, &unknown, 0),
             Err(Qwen4ExpLoadError::UnexpectedTensors(_))
         ));
+
+        // MTP as a separate root-level artifact is consistent with a declaration.
+        let mut root_mtp = trunk.clone();
+        let mut desc = trunk[0].clone();
+        desc.name = "nextn.pre_projection.weight".into();
+        root_mtp.push(desc);
+        assert!(Qwen4ExpModel::from_inventory(alternate(8), &root_mtp, 1).is_ok());
     }
 
     #[test]

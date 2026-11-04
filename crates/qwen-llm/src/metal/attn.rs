@@ -3649,7 +3649,7 @@ mod tests {
                     )
                 })
                 .unwrap();
-                let actual = read_back_f32(&out);
+                let actual = read_back_f32(&out.buffer, q.len());
                 let reference =
                     cpu_matrix_attn_reference(&q, &kf, &vf, rows, pos - rows, pos, 24, 4, 6, 256);
                 let mut max_abs = 0.0f32;

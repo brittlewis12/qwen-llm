@@ -273,6 +273,9 @@ pub fn census_uncached(gguf: &GgufFile) -> Result<HalfRangeCensus, GgufError> {
     // file order across a split model, and a random-order parallel scan turns
     // a cold artifact into a seek storm. Parallelism is per shard; each shard
     // is a sequential pass.
+    for shard in &gguf.shards {
+        let _ = shard.advise(memmap2::Advice::Sequential);
+    }
     let mut by_shard: Vec<Vec<&TensorDesc>> = vec![Vec::new(); gguf.shards.len()];
     for desc in &gguf.tensors {
         let Some(group) = by_shard.get_mut(desc.shard_idx) else {
@@ -938,6 +941,15 @@ mod tests {
             return;
         };
         let gguf = GgufFile::open(path).expect("open GGUF");
+        if std::env::var_os("QWEN_HALF_RANGE_PREFETCH").is_some() {
+            for shard in &gguf.shards {
+                let _ = crate::prefetch::prefetch_file(
+                    &shard.path,
+                    crate::prefetch::DEFAULT_WORKERS,
+                    crate::prefetch::DEFAULT_CHUNK_BYTES,
+                );
+            }
+        }
         let started = Instant::now();
         let census = census_uncached(&gguf).expect("census");
         let wall = started.elapsed();

@@ -53,6 +53,10 @@ quant = "UD-IQ3_XXS"
 path = "DeepSeek-V4-Flash-0731-UD-IQ3_XXS-00001-of-00004.gguf"
 tg_depths = [0, 8192]
 
+# llama.cpp v0.9.0 cannot load this artifact: llama-bench reports
+# "array key not found in model: deepseek41.attention.kv_source_layers"
+# while reading hyperparameters. The GSQ-RCO IQ2_XS artifact fails the same
+# way, so this is not a REAP-only file issue and no substitute file is used.
 [[models]]
 tag = "deepseek-v41"
 display = "DeepSeek-V4.1-Flash-REAP-272E-MXFP4-Q8Engram"
@@ -82,11 +86,10 @@ path = "K2-Horizon-7B-Q4_K_M.gguf"
 lcpp = false
 tg_depths = [0, 8192]
 
-# The pinned llama.cpp (b11182) predates GLM5-Next support (upstream #27773,
-# 2026-09-30); llama.cpp comparisons for this model use the GLM oracle pin
-# (docs/bench/2026-10-04-glm53-*). Depth 4096 decodes in the sparse range
-# (visible length 2052 and up) after an untimed packed fill that crosses the
-# frontier; timed pp4096 is in docs/bench/2026-10-04-glm53-p4-sparse.
+# The pinned llama.cpp (v0.9.0) supports GLM5-Next; a llama-bench smoke on this
+# exact artifact loads it. Depth 4096 decodes in the sparse range (visible
+# length 2052 and up) after an untimed packed fill that crosses the frontier;
+# timed pp4096 is in docs/bench/2026-10-04-glm53-p4-sparse.
 [[models]]
 tag = "glm53-flash"
 display = "GLM-5.3-Flash"
@@ -94,5 +97,5 @@ family = "glm5_next"
 kind = "moe"
 quant = "UD-IQ3_XXS"
 path = "GLM-5.3-Flash-UD-IQ3_XXS-00001-of-00004.gguf"
-lcpp = false
+lcpp = true
 tg_depths = [0, 4096]

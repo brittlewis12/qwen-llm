@@ -937,6 +937,7 @@ impl Composition {
             input,
             ids,
             weights,
+            status: counts,
             counts,
             slots,
             inner,

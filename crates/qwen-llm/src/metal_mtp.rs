@@ -38,6 +38,7 @@ use crate::metal::{
     encode_mul_f32, encode_rms_norm_batched_f32, encode_rms_norm_mul_f32, encode_rope_neox_f32,
     encode_scatter_offset_f32_to_f16_kv, encode_sigmoid_f32, encode_silu_mul_f32,
     encode_split_q_gate_f32, encode_topk_logits_softmax_dot_sigmoid_f32,
+    encode_topk_logits_softmax_dot_sigmoid_f32_status,
 };
 use crate::metal_dflash::{
     MetalDFlashLayerMajorScratch, MetalDFlashVerifyScratch, PackedVerifyCaller,
@@ -720,6 +721,7 @@ pub struct MetalMtpSession {
     pub moe_topk_idx: MetalTensor,
     pub moe_topk_weight: MetalTensor,
     pub moe_shared_gate: MetalTensor,
+    pub moe_route_status: MetalTensor,
     pub moe_expert_out: MetalTensor,
 
     // Attn scratch.
@@ -818,6 +820,7 @@ impl MetalMtpSession {
             moe_topk_idx: MetalTensor::zeros_f32(ctx, vec![moe_topk_n])?,
             moe_topk_weight: MetalTensor::zeros_f32(ctx, vec![moe_topk_n])?,
             moe_shared_gate: MetalTensor::zeros_f32(ctx, vec![1])?,
+            moe_route_status: MetalTensor::zeros_i32(ctx, vec![1])?,
             moe_expert_out: MetalTensor::zeros_f32(ctx, vec![moe_expert_out_n])?,
             attn_q_full: MetalTensor::zeros_f32(ctx, vec![attn_q_full_elems])?,
             attn_q: MetalTensor::zeros_f32(ctx, vec![q_dim])?,
@@ -1296,7 +1299,7 @@ impl<'a> SpeculativeDecoder<'a> {
             h,
             n_expert,
         )?;
-        encode_topk_logits_softmax_dot_sigmoid_f32(
+        encode_topk_logits_softmax_dot_sigmoid_f32_status(
             ctx,
             enc,
             &router_probs,
@@ -1305,6 +1308,7 @@ impl<'a> SpeculativeDecoder<'a> {
             &topk_idx,
             &topk_w,
             &self.mtp_session.moe_shared_gate,
+            &self.mtp_session.moe_route_status,
             n_expert,
             topk,
             h,

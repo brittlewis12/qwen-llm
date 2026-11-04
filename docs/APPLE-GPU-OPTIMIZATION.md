@@ -743,7 +743,9 @@ Avoid by default:
 - generic CPU-ledger expert-major gather/scatter + per-expert GEMM; it is already
   a measured negative on A3B and A10B,
 - broad token-major packing beyond the fixed route/routed tail unless it clears
-  an end-to-end prompt-length sweep and a stage profile.
+  an end-to-end prompt-length sweep and a stage profile,
+- fixed-capacity expert buckets fed by route ids that are not duplicate-free by
+  construction; see invariant 2 above and keep every bucket write bounded.
 
 ### GDN / recurrent state
 
@@ -911,6 +913,48 @@ small and operational:
   shapes and measuring the variants.
 - Trusting reverse-engineered constants as specs instead of using them to choose
   experiments.
+
+## Correctness invariants for fused, grouped and in-place kernels
+
+1. **No cross-thread aliasing.** If any thread of a dispatch reads an element
+   another thread or threadgroup writes (row/slot/expert reductions, weighted
+   sums, finalizers, mHC post/combine, grouped mat-mul epilogues, mat-vec and
+   mat-mat), every written binding is byte-disjoint from every other binding.
+   Encode that with `checks::check_disjoint`. Exact-range aliasing is allowed
+   only where the audit shows each output element comes from same-index inputs
+   read by the writing thread (`+=` axpy, add-in-place, one-threadgroup-per-row
+   norms with the reduction behind a barrier). Those sites use
+   `checks::check_disjoint_or_exact`, which still refuses partial overlap, and
+   document "may alias X exactly" at the call site. Shared scratch (overlays,
+   `view_subrange` of one parent) must be phase-disjoint and never read and
+   written by one dispatch. `note_read`/`note_write` orders dispatches; it does
+   not check aliasing within one.
+
+2. **Routing ids are unique or slot-compact.** Fixed-capacity buckets
+   (`ids[e * n_tokens + i]`) require duplicate-free per-token expert lists.
+   Qwen/Flash-Next top-k kernels guarantee that by construction with an
+   explicit taken/available flag (not a tie-able `-INFINITY` score) and never
+   clamp an unfilled slot to expert 0. They also OR a per-token status word:
+   bit 0 ready, bit 1 non-finite router logits, bit 2 bucket overflow. The host
+   checks that word after command completion
+   (`metal::check_moe_route_status`). Bucket writers bound every write
+   (`count < n_tokens`) and set the overflow bit instead of spilling into the
+   next expert or past `ids`. Routing that may legitimately repeat an expert
+   (hash tables such as `ffn_gate_tid2eid`) uses a slot-compact layout
+   (count, prefix-sum, write; capacity `n_tokens * top_k`; one output row per
+   slot), like the DeepSeek V4 compact route. `*_unique` scatter-add needs
+   unique destination rows.
+
+3. **Addressing is width-checked.** Form offsets that scale with context,
+   vocabulary, experts, rows or slots in 64 bits (`(ulong)a * b`). The
+   `attn_v4` KQ score offsets now use 64-bit products. If a kernel keeps a
+   32-bit product, the encoder checks that exact product with
+   `u32::try_from`/`i32::try_from`; the mat-mat dispatcher rejects a wrapping
+   `n_query * n_out` (and `n_in * n_out`, `n_in * n_query`) for every weight
+   dtype, and the older reduce/scatter encoders use `checks::to_u32` instead
+   of `as u32`. Never `slice()` an MPP device tensor whose extent can exceed
+   2 GiB (int32 offset); build each tile tensor from a 64-bit base pointer. Ids
+   are `int`/`uint`, never `short`.
 
 ## Ranked resource guide
 

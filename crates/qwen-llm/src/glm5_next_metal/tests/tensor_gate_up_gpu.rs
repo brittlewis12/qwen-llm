@@ -200,6 +200,7 @@ impl Tiny {
             input,
             ids,
             weights,
+            status: counts,
             counts,
             slots,
             inner,

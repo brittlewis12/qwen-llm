@@ -60,9 +60,10 @@ use crate::metal::{
     encode_scatter_offset_f32_to_f16_kv, encode_scatter_offset_f32_to_q8_0_kv,
     encode_shared_swiglu_q8_0_f32, encode_sigmoid_f32, encode_sigmoid_mul_gate_strided_f32,
     encode_silu_mul_f32, encode_split_q_gate_f32, encode_ssm_conv_silu_f32,
-    encode_topk_logits_softmax_dot_sigmoid_f32, encode_topk_logits_softmax_f32,
-    encode_topk_logits_softmax_parallel_f32, evaluate_metal_memory_admission, host_page_size_bytes,
-    plan_retained_storage,
+    encode_topk_logits_softmax_dot_sigmoid_f32, encode_topk_logits_softmax_dot_sigmoid_f32_status,
+    encode_topk_logits_softmax_f32, encode_topk_logits_softmax_f32_status,
+    encode_topk_logits_softmax_parallel_f32, encode_topk_logits_softmax_parallel_f32_status,
+    evaluate_metal_memory_admission, host_page_size_bytes, plan_retained_storage,
 };
 use crate::model::ArchKind;
 use crate::sampling::{BoundedTopKEvidence, GreedySelection, SampledToken, Sampler, SamplingError};
@@ -2335,6 +2336,9 @@ pub struct MetalSession {
     pub moe_topk_idx: MetalTensor,     // [top_k] i32 in F32 buffer (or [1] on dense models)
     pub moe_topk_weight: MetalTensor,  // [top_k] F32 (or [1] on dense models)
     pub moe_shared_gate: MetalTensor,  // [1] F32
+    /// Sticky per-token Qwen route status: ready / non-finite logits /
+    /// bucket overflow (`metal::MOE_ROUTE_STATUS_*`).
+    pub moe_route_status: MetalTensor, // [1] I32
     pub moe_inner: MetalTensor,        // [top_k, expert_ffn] F32 (or [1] on dense models)
     pub moe_expert_out: MetalTensor,   // [top_k, hidden] F32 (or [1] on dense models)
     pub ids_buf: MetalTensor,          // [1] I32 input-token scratch
@@ -2392,6 +2396,7 @@ impl MetalSession {
                 &self.moe_topk_idx,
                 &self.moe_topk_weight,
                 &self.moe_shared_gate,
+                &self.moe_route_status,
                 &self.moe_inner,
                 &self.moe_expert_out,
                 &self.ids_buf,
@@ -2577,6 +2582,7 @@ impl MetalSession {
             moe_topk_idx: MetalTensor::zeros_f32(ctx, vec![moe_topk_n])?,
             moe_topk_weight: MetalTensor::zeros_f32(ctx, vec![moe_topk_n])?,
             moe_shared_gate: MetalTensor::zeros_f32(ctx, vec![1])?,
+            moe_route_status: MetalTensor::zeros_i32(ctx, vec![1])?,
             moe_inner: MetalTensor::zeros_f32(ctx, vec![moe_inner_n])?,
             moe_expert_out: MetalTensor::zeros_f32(ctx, vec![moe_expert_out_n])?,
             ids_buf: MetalTensor::zeros_i32(ctx, vec![1])?,

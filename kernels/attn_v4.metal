@@ -2218,10 +2218,10 @@ kernel void kernel_attn_matrix_kq_f32(
 
     const ulong batch = (ulong)kvh * (ulong)N * (ulong)M;
     if (r0 + AM_NR0 <= M && r1 + AM_NR1 <= N) {
-        device float * C = scores + batch + (r0 + 32 * (sgitg & 1))
-                         + (r1 + 16 * (sgitg >> 1)) * M;
+        device float * C = scores + batch + (ulong)(r0 + 32 * (sgitg & 1))
+                         + (ulong)(r1 + 16 * (sgitg >> 1)) * (ulong)M;
         for (short i = 0; i < 8; ++i) {
-            simdgroup_store(mc[i], C + 8 * (i % 4) + 8 * M * (i / 4), M, 0, false);
+            simdgroup_store(mc[i], C + 8 * (i % 4) + 8 * (ulong)M * (i / 4), M, 0, false);
         }
     } else {
         threadgroup_barrier(mem_flags::mem_threadgroup);
@@ -2233,7 +2233,7 @@ kernel void kernel_attn_matrix_kq_f32(
         threadgroup_barrier(mem_flags::mem_threadgroup);
         if (sgitg == 0) {
             for (int j = tiitg; j < nr1; j += AM_NR1) {
-                device float * Dst = scores + batch + r0 + (r1 + j) * M;
+                device float * Dst = scores + batch + (ulong)r0 + (ulong)(r1 + j) * (ulong)M;
                 threadgroup float * Src = temp + j * AM_NR0;
                 for (int i = 0; i < nr0; ++i) {
                     Dst[i] = Src[i];
@@ -2332,10 +2332,10 @@ kernel void kernel_attn_matrix_kq_f32_full_tiles(
     }
 
     const ulong batch = (ulong)kvh * (ulong)N * (ulong)M;
-    device float * C = scores + batch + (r0 + 32 * (sgitg & 1))
-                     + (r1 + 16 * (sgitg >> 1)) * M;
+    device float * C = scores + batch + (ulong)(r0 + 32 * (sgitg & 1))
+                     + (ulong)(r1 + 16 * (sgitg >> 1)) * (ulong)M;
     for (short i = 0; i < 8; ++i) {
-        simdgroup_store(mc[i], C + 8 * (i % 4) + 8 * M * (i / 4), M, 0, false);
+        simdgroup_store(mc[i], C + 8 * (i % 4) + 8 * (ulong)M * (i / 4), M, 0, false);
     }
 }
 

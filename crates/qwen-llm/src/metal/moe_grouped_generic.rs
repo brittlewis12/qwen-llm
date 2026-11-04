@@ -256,6 +256,16 @@ fn encode_generic_mm(
         kernel, weight, src, counts, ids, out, n_in, n_out, n_expert, n_tokens, b_div, min_count,
         max_count,
     )?;
+    super::checks::check_disjoint(
+        kernel,
+        out,
+        &[
+            (weight, "weight"),
+            (src, "source"),
+            (counts, "counts"),
+            (ids, "ids"),
+        ],
+    )?;
     let name = moe_grouped_generic_pipeline_name(role, weight.dtype)
         .expect("layout lookup succeeded in generic_mm_args");
     dispatch_generic_mm(
@@ -592,6 +602,17 @@ fn encode_fused_swiglu(
 ) -> Result<(), MetalError> {
     let l = generic_layout_for(kernel, w_gate, n_hidden, n_ffn, n_expert)?;
     generic_layout_for(kernel, w_up, n_hidden, n_ffn, n_expert)?;
+    super::checks::check_disjoint(
+        kernel,
+        inner,
+        &[
+            (w_gate, "gate bank"),
+            (w_up, "up bank"),
+            (x_pack, "activations"),
+            (counts, "counts"),
+            (ids, "ids"),
+        ],
+    )?;
     let name = match clamp {
         None => moe_grouped_generic_pipeline_name(MoeGroupedGenericRole::Swiglu, w_gate.dtype)
             .expect("layout lookup succeeded above"),

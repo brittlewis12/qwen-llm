@@ -1217,11 +1217,21 @@ impl Workspace {
         let grouped = half || grouped_selected(c, layer, n);
         if grouped {
             let bucket = if route_bucket_parallel() {
-                metal::encode_moe_route_bucket_slots_parallel_f32
+                metal::encode_moe_route_bucket_slots_parallel_f32_status
             } else {
-                metal::encode_moe_route_bucket_slots_f32
+                metal::encode_moe_route_bucket_slots_f32_status
             };
-            bucket(ctx, e.enc(), &b[8], &counts, &b[11], c.experts, n, c.topk)?;
+            bucket(
+                ctx,
+                e.enc(),
+                &b[8],
+                &counts,
+                &b[11],
+                &status,
+                c.experts,
+                n,
+                c.topk,
+            )?;
             e.mark(4);
             if tensor {
                 // The caller's half copy of the normalized input when it made

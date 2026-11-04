@@ -111,7 +111,17 @@ impl Prepared<'_> {
         } = self;
         // normed is rewritten by FFN normalization after KDA. Always recopy.
         encode_scatter_offset_f32_to_f16(ctx, enc, &flat(b.input), &flat(&half), 0, h * rows)?;
-        encode_moe_route_bucket_slots_f32(ctx, enc, &flat(b.ids), b.counts, b.slots, e, rows, top)?;
+        encode_moe_route_bucket_slots_f32_status(
+            ctx,
+            enc,
+            &flat(b.ids),
+            b.counts,
+            b.slots,
+            b.status,
+            e,
+            rows,
+            top,
+        )?;
         encode_moe_swiglu_f32_grouped_slots_tensor(
             ctx,
             enc,

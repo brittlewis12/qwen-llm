@@ -352,11 +352,41 @@ inline void dequantize_iq3_s_half_grouped(device const uchar * blk_bytes,
     }
 }
 
+// Route status bits shared by the Qwen/Flash-Next top-k and bucket kernels.
+// A top-k dispatch writes READY, or READY | NONFINITE when any router logit is
+// NaN or infinite; a bucket writer only ORs OVERFLOW into the affected row.
+#define MOE_ROUTE_STATUS_READY      1
+#define MOE_ROUTE_STATUS_NONFINITE  2
+#define MOE_ROUTE_STATUS_OVERFLOW   4
+
+inline bool moe_finite_bits(float v) {
+    return (as_type<uint>(v) & 0x7f800000u) != 0x7f800000u;
+}
+
+// Fill any unfilled top-k slot with the lowest expert id not already selected.
+// Finite input always fills every slot (n >= k), so this is a nonfinite-only
+// repair; it never repeats expert 0.
+inline void moe_fill_unused_slots(thread int *top_idx, uint k) {
+    for (uint i = 0; i < k; ++i) {
+        if (top_idx[i] >= 0) continue;
+        int fill = 0;
+        bool used = true;
+        while (used) {
+            used = false;
+            for (uint j = 0; j < k; ++j) {
+                if (top_idx[j] == fill) { used = true; ++fill; break; }
+            }
+        }
+        top_idx[i] = fill;
+    }
+}
+
 kernel void kernel_topk_logits_softmax_f32(
         constant topk_logits_args & args [[buffer(0)]],
         device const float       * logits [[buffer(1)]],
         device       int         * out_idx [[buffer(2)]],
         device       float       * out_w   [[buffer(3)]],
+        device       int         * status  [[buffer(4)]],
         uint tid [[thread_position_in_grid]]) {
     if (tid != 0) return;
     const uint MAX_K = 16;
@@ -364,6 +394,7 @@ kernel void kernel_topk_logits_softmax_f32(
 
     int top_idx[MAX_K];
     float top_val[MAX_K];
+    bool nonfinite = false;
     for (uint i = 0; i < args.k; ++i) {
         top_idx[i] = -1;
         top_val[i] = -INFINITY;
@@ -371,6 +402,7 @@ kernel void kernel_topk_logits_softmax_f32(
 
     for (uint i = 0; i < args.n; ++i) {
         const float v = logits[i];
+        nonfinite |= !moe_finite_bits(v);
         for (uint j = 0; j < args.k; ++j) {
             const bool better = (v > top_val[j]) || (v == top_val[j] && (top_idx[j] < 0 || int(i) < top_idx[j]));
             if (better) {
@@ -384,19 +416,22 @@ kernel void kernel_topk_logits_softmax_f32(
             }
         }
     }
+    moe_fill_unused_slots(top_idx, args.k);
 
     const float max_top = top_val[0];
+    const bool finite_top = moe_finite_bits(max_top);
     float sum = 0.0f;
     float exp_val[MAX_K];
     for (uint i = 0; i < args.k; ++i) {
-        exp_val[i] = top_idx[i] >= 0 ? exp(top_val[i] - max_top) : 0.0f;
+        exp_val[i] = finite_top ? exp(top_val[i] - max_top) : 0.0f;
         sum += exp_val[i];
     }
     sum = max(sum, 6.103515625e-5f);
     for (uint i = 0; i < args.k; ++i) {
-        out_idx[i] = max(top_idx[i], 0);
+        out_idx[i] = top_idx[i];
         out_w[i] = exp_val[i] / sum;
     }
+    status[0] |= MOE_ROUTE_STATUS_READY | (nonfinite ? MOE_ROUTE_STATUS_NONFINITE : 0);
 }
 
 inline bool moe_better_pair(float cand_v, int cand_i, float best_v, int best_i) {
@@ -408,6 +443,7 @@ kernel void kernel_topk_logits_softmax_parallel_f32(
         device const float       * logits [[buffer(1)]],
         device       int         * out_idx [[buffer(2)]],
         device       float       * out_w   [[buffer(3)]],
+        device       int         * status  [[buffer(4)]],
         threadgroup  float       * sh_score [[threadgroup(0)]],
         threadgroup  float       * red_val  [[threadgroup(1)]],
         threadgroup  int         * red_idx  [[threadgroup(2)]],
@@ -417,11 +453,13 @@ kernel void kernel_topk_logits_softmax_parallel_f32(
     if (args.n > ntg || args.k == 0 || args.k > MAX_K) return;
 
     sh_score[tid] = tid < args.n ? logits[tid] : -INFINITY;
+    bool taken = false;
     threadgroup_barrier(mem_flags::mem_threadgroup);
 
     for (uint slot = 0; slot < args.k; ++slot) {
-        red_val[tid] = sh_score[tid];
-        red_idx[tid] = tid < args.n ? int(tid) : -1;
+        const bool available = tid < args.n && !taken;
+        red_val[tid] = available ? sh_score[tid] : -INFINITY;
+        red_idx[tid] = available ? int(tid) : -1;
         threadgroup_barrier(mem_flags::mem_threadgroup);
 
         for (uint stride = ntg >> 1; stride > 0; stride >>= 1) {
@@ -437,27 +475,31 @@ kernel void kernel_topk_logits_softmax_parallel_f32(
         }
 
         if (tid == 0) {
-            out_idx[slot] = max(red_idx[0], 0);
+            out_idx[slot] = red_idx[0];
             out_w[slot] = red_val[0];
         }
         threadgroup_barrier(mem_flags::mem_threadgroup);
 
-        if (int(tid) == red_idx[0]) sh_score[tid] = -INFINITY;
+        if (int(tid) == red_idx[0]) taken = true;
         threadgroup_barrier(mem_flags::mem_threadgroup);
     }
 
     if (tid == 0) {
         const float max_top = out_w[0];
+        const bool finite_top = args.k > 0 && moe_finite_bits(max_top);
         float sum = 0.0f;
         float exp_val[MAX_K];
         for (uint i = 0; i < args.k; ++i) {
-            exp_val[i] = exp(out_w[i] - max_top);
+            exp_val[i] = finite_top ? exp(out_w[i] - max_top) : 0.0f;
             sum += exp_val[i];
         }
         sum = max(sum, 6.103515625e-5f);
         for (uint i = 0; i < args.k; ++i) {
             out_w[i] = exp_val[i] / sum;
         }
+        bool nonfinite = false;
+        for (uint i = 0; i < args.n; ++i) nonfinite |= !moe_finite_bits(logits[i]);
+        status[0] |= MOE_ROUTE_STATUS_READY | (nonfinite ? MOE_ROUTE_STATUS_NONFINITE : 0);
     }
 }
 
@@ -468,6 +510,7 @@ kernel void kernel_qwen4exp_topk_guarded_f32(
         device const float * logits [[buffer(1)]],
         device int * out_idx [[buffer(2)]],
         device float * out_w [[buffer(3)]],
+        device int * status [[buffer(4)]],
         threadgroup float * sh_score [[threadgroup(0)]],
         threadgroup float * red_val [[threadgroup(1)]],
         threadgroup int * red_idx [[threadgroup(2)]],
@@ -511,26 +554,31 @@ kernel void kernel_qwen4exp_topk_guarded_f32(
                     }
                 }
             }
+            moe_fill_unused_slots(top_idx, args.k);
             const float max_top = top_val[0];
+            const bool finite_top = moe_finite_bits(max_top);
             float sum = 0.0f;
             float exp_val[MAX_K];
             for (uint i = 0; i < args.k; ++i) {
-                exp_val[i] = top_idx[i] >= 0 ? exp(top_val[i] - max_top) : 0.0f;
+                exp_val[i] = finite_top ? exp(top_val[i] - max_top) : 0.0f;
                 sum += exp_val[i];
             }
             sum = max(sum, 6.103515625e-5f);
             for (uint i = 0; i < args.k; ++i) {
-                out_idx[i] = max(top_idx[i], 0);
+                out_idx[i] = top_idx[i];
                 out_w[i] = exp_val[i] / sum;
             }
+            status[0] |= MOE_ROUTE_STATUS_READY | MOE_ROUTE_STATUS_NONFINITE;
         }
         return;
     }
     sh_score[tid] = logits[tid];
+    bool taken = false;
     threadgroup_barrier(mem_flags::mem_threadgroup);
     for (uint slot = 0; slot < args.k; ++slot) {
-        red_val[tid] = sh_score[tid];
-        red_idx[tid] = int(tid);
+        const bool available = !taken;
+        red_val[tid] = available ? sh_score[tid] : -INFINITY;
+        red_idx[tid] = available ? int(tid) : -1;
         threadgroup_barrier(mem_flags::mem_threadgroup);
         for (uint stride = 256; stride > 0; stride >>= 1) {
             if (tid < stride) {
@@ -544,11 +592,11 @@ kernel void kernel_qwen4exp_topk_guarded_f32(
             threadgroup_barrier(mem_flags::mem_threadgroup);
         }
         if (tid == 0) {
-            out_idx[slot] = max(red_idx[0], 0);
+            out_idx[slot] = red_idx[0];
             out_w[slot] = red_val[0];
         }
         threadgroup_barrier(mem_flags::mem_threadgroup);
-        if (int(tid) == red_idx[0]) sh_score[tid] = -INFINITY;
+        if (int(tid) == red_idx[0]) taken = true;
         threadgroup_barrier(mem_flags::mem_threadgroup);
     }
     if (tid == 0) {
@@ -561,6 +609,7 @@ kernel void kernel_qwen4exp_topk_guarded_f32(
         }
         sum = max(sum, 6.103515625e-5f);
         for (uint i = 0; i < args.k; ++i) out_w[i] = exp_val[i] / sum;
+        status[0] |= MOE_ROUTE_STATUS_READY;
     }
 }
 
@@ -589,6 +638,7 @@ kernel void kernel_qwen4exp_topk_guarded_simd_f32(
         device const float * logits [[buffer(1)]],
         device int * out_idx [[buffer(2)]],
         device float * out_w [[buffer(3)]],
+        device int * status [[buffer(4)]],
         threadgroup float * sh_score [[threadgroup(0)]],
         threadgroup float * red_val [[threadgroup(1)]],
         threadgroup int * red_idx [[threadgroup(2)]],
@@ -632,25 +682,29 @@ kernel void kernel_qwen4exp_topk_guarded_simd_f32(
                     }
                 }
             }
+            moe_fill_unused_slots(top_idx, args.k);
             const float max_top = top_val[0];
+            const bool finite_top = moe_finite_bits(max_top);
             float sum = 0.0f;
             float exp_val[MAX_K];
             for (uint i = 0; i < args.k; ++i) {
-                exp_val[i] = top_idx[i] >= 0 ? exp(top_val[i] - max_top) : 0.0f;
+                exp_val[i] = finite_top ? exp(top_val[i] - max_top) : 0.0f;
                 sum += exp_val[i];
             }
             sum = max(sum, 6.103515625e-5f);
             for (uint i = 0; i < args.k; ++i) {
-                out_idx[i] = max(top_idx[i], 0);
+                out_idx[i] = top_idx[i];
                 out_w[i] = exp_val[i] / sum;
             }
+            status[0] |= MOE_ROUTE_STATUS_READY | MOE_ROUTE_STATUS_NONFINITE;
         }
         return;
     }
     float v = logits[tid];
+    bool active = true;
     for (uint slot = 0; slot < args.k; ++slot) {
-        const float m = simd_max(v);
-        const int lowest = simd_min(v == m ? int(tid) : INT_MAX);
+        const float m = simd_max(active ? v : -INFINITY);
+        const int lowest = simd_min(active && v == m ? int(tid) : INT_MAX);
         if (lane == 0) {
             red_val[simd] = m;
             red_idx[simd] = lowest;
@@ -662,13 +716,13 @@ kernel void kernel_qwen4exp_topk_guarded_simd_f32(
             const float m2 = simd_max(cv);
             const int winner = simd_min(cv == m2 ? ci : INT_MAX);
             if (lane == 0) {
-                out_idx[slot] = max(winner, 0);
+                out_idx[slot] = winner;
                 out_w[slot] = m2;
                 red_idx[16] = winner;
             }
         }
         threadgroup_barrier(mem_flags::mem_threadgroup);
-        if (int(tid) == red_idx[16]) v = -INFINITY;
+        if (int(tid) == red_idx[16]) active = false;
         threadgroup_barrier(mem_flags::mem_threadgroup);
     }
     if (tid == 0) {
@@ -681,6 +735,7 @@ kernel void kernel_qwen4exp_topk_guarded_simd_f32(
         }
         sum = max(sum, 6.103515625e-5f);
         for (uint i = 0; i < args.k; ++i) out_w[i] = exp_val[i] / sum;
+        status[0] |= MOE_ROUTE_STATUS_READY;
     }
 }
 
@@ -719,6 +774,7 @@ kernel void kernel_topk_logits_softmax_dot_sigmoid_f32(
         device       int               * out_idx       [[buffer(4)]],
         device       float             * out_w         [[buffer(5)]],
         device       float             * shared_out    [[buffer(6)]],
+        device       int               * status        [[buffer(7)]],
         threadgroup  float             * sh_score      [[threadgroup(0)]],
         threadgroup  float             * red_val       [[threadgroup(1)]],
         threadgroup  int               * red_idx       [[threadgroup(2)]],
@@ -742,9 +798,11 @@ kernel void kernel_topk_logits_softmax_dot_sigmoid_f32(
     sh_score[tid] = tid < args.n_expert ? logits[tid] : -INFINITY;
     threadgroup_barrier(mem_flags::mem_threadgroup);
 
+    bool taken = false;
     for (uint slot = 0; slot < args.topk; ++slot) {
-        red_val[tid] = sh_score[tid];
-        red_idx[tid] = tid < args.n_expert ? int(tid) : -1;
+        const bool available = tid < args.n_expert && !taken;
+        red_val[tid] = available ? sh_score[tid] : -INFINITY;
+        red_idx[tid] = available ? int(tid) : -1;
         threadgroup_barrier(mem_flags::mem_threadgroup);
 
         for (uint stride = ntg >> 1; stride > 0; stride >>= 1) {
@@ -760,27 +818,31 @@ kernel void kernel_topk_logits_softmax_dot_sigmoid_f32(
         }
 
         if (tid == 0) {
-            out_idx[slot] = max(red_idx[0], 0);
+            out_idx[slot] = red_idx[0];
             out_w[slot] = red_val[0];
         }
         threadgroup_barrier(mem_flags::mem_threadgroup);
 
-        if (int(tid) == red_idx[0]) sh_score[tid] = -INFINITY;
+        if (int(tid) == red_idx[0]) taken = true;
         threadgroup_barrier(mem_flags::mem_threadgroup);
     }
 
     if (tid == 0) {
         const float max_top = out_w[0];
+        const bool finite_top = moe_finite_bits(max_top);
         float sum = 0.0f;
         float exp_val[MAX_K];
         for (uint i = 0; i < args.topk; ++i) {
-            exp_val[i] = exp(out_w[i] - max_top);
+            exp_val[i] = finite_top ? exp(out_w[i] - max_top) : 0.0f;
             sum += exp_val[i];
         }
         sum = max(sum, 6.103515625e-5f);
         for (uint i = 0; i < args.topk; ++i) {
             out_w[i] = exp_val[i] / sum;
         }
+        bool nonfinite = false;
+        for (uint i = 0; i < args.n_expert; ++i) nonfinite |= !moe_finite_bits(logits[i]);
+        status[0] |= MOE_ROUTE_STATUS_READY | (nonfinite ? MOE_ROUTE_STATUS_NONFINITE : 0);
     }
 }
 
@@ -792,6 +854,7 @@ kernel void kernel_topk_logits_softmax_dot_sigmoid_packed_f32(
         device       int               * out_idx       [[buffer(4)]],
         device       float             * out_w         [[buffer(5)]],
         device       float             * shared_out    [[buffer(6)]],
+        device       int               * status        [[buffer(7)]],
         threadgroup  float             * sh_score      [[threadgroup(0)]],
         threadgroup  float             * red_val       [[threadgroup(1)]],
         threadgroup  int               * red_idx       [[threadgroup(2)]],
@@ -824,9 +887,11 @@ kernel void kernel_topk_logits_softmax_dot_sigmoid_packed_f32(
     sh_score[tid] = tid < args.n_expert ? logits_t[tid] : -INFINITY;
     threadgroup_barrier(mem_flags::mem_threadgroup);
 
+    bool taken = false;
     for (uint slot = 0; slot < args.topk; ++slot) {
-        red_val[tid] = sh_score[tid];
-        red_idx[tid] = tid < args.n_expert ? int(tid) : -1;
+        const bool available = tid < args.n_expert && !taken;
+        red_val[tid] = available ? sh_score[tid] : -INFINITY;
+        red_idx[tid] = available ? int(tid) : -1;
         threadgroup_barrier(mem_flags::mem_threadgroup);
 
         for (uint stride = ntg >> 1; stride > 0; stride >>= 1) {
@@ -842,27 +907,31 @@ kernel void kernel_topk_logits_softmax_dot_sigmoid_packed_f32(
         }
 
         if (tid == 0) {
-            out_idx_t[slot] = max(red_idx[0], 0);
+            out_idx_t[slot] = red_idx[0];
             out_w_t[slot] = red_val[0];
         }
         threadgroup_barrier(mem_flags::mem_threadgroup);
 
-        if (int(tid) == red_idx[0]) sh_score[tid] = -INFINITY;
+        if (int(tid) == red_idx[0]) taken = true;
         threadgroup_barrier(mem_flags::mem_threadgroup);
     }
 
     if (tid == 0) {
         const float max_top = out_w_t[0];
+        const bool finite_top = moe_finite_bits(max_top);
         float sum = 0.0f;
         float exp_val[MAX_K];
         for (uint i = 0; i < args.topk; ++i) {
-            exp_val[i] = exp(out_w_t[i] - max_top);
+            exp_val[i] = finite_top ? exp(out_w_t[i] - max_top) : 0.0f;
             sum += exp_val[i];
         }
         sum = max(sum, 6.103515625e-5f);
         for (uint i = 0; i < args.topk; ++i) {
             out_w_t[i] = exp_val[i] / sum;
         }
+        bool nonfinite = false;
+        for (uint i = 0; i < args.n_expert; ++i) nonfinite |= !moe_finite_bits(logits_t[i]);
+        status[token] |= MOE_ROUTE_STATUS_READY | (nonfinite ? MOE_ROUTE_STATUS_NONFINITE : 0);
     }
 }
 
@@ -876,6 +945,7 @@ kernel void kernel_topk_bucket_logits_softmax_dot_sigmoid_packed_f32(
         device       float             * shared_out    [[buffer(6)]],
         device atomic_int              * counts        [[buffer(7)]],
         device int                     * ids           [[buffer(8)]],
+        device       int               * status        [[buffer(9)]],
         threadgroup  float             * sh_score      [[threadgroup(0)]],
         threadgroup  float             * red_val       [[threadgroup(1)]],
         threadgroup  int               * red_idx       [[threadgroup(2)]],
@@ -908,9 +978,11 @@ kernel void kernel_topk_bucket_logits_softmax_dot_sigmoid_packed_f32(
     sh_score[tid] = tid < args.n_expert ? logits_t[tid] : -INFINITY;
     threadgroup_barrier(mem_flags::mem_threadgroup);
 
+    bool taken = false;
     for (uint slot = 0; slot < args.topk; ++slot) {
-        red_val[tid] = sh_score[tid];
-        red_idx[tid] = tid < args.n_expert ? int(tid) : -1;
+        const bool available = tid < args.n_expert && !taken;
+        red_val[tid] = available ? sh_score[tid] : -INFINITY;
+        red_idx[tid] = available ? int(tid) : -1;
         threadgroup_barrier(mem_flags::mem_threadgroup);
 
         for (uint stride = ntg >> 1; stride > 0; stride >>= 1) {
@@ -926,33 +998,42 @@ kernel void kernel_topk_bucket_logits_softmax_dot_sigmoid_packed_f32(
         }
 
         if (tid == 0) {
-            out_idx_t[slot] = max(red_idx[0], 0);
+            out_idx_t[slot] = red_idx[0];
             out_w_t[slot] = red_val[0];
         }
         threadgroup_barrier(mem_flags::mem_threadgroup);
 
-        if (int(tid) == red_idx[0]) sh_score[tid] = -INFINITY;
+        if (int(tid) == red_idx[0]) taken = true;
         threadgroup_barrier(mem_flags::mem_threadgroup);
     }
 
     if (tid == 0) {
         const float max_top = out_w_t[0];
+        const bool finite_top = moe_finite_bits(max_top);
         float sum = 0.0f;
         float exp_val[MAX_K];
         const uint base = token * args.topk;
         for (uint i = 0; i < args.topk; ++i) {
-            exp_val[i] = exp(out_w_t[i] - max_top);
+            exp_val[i] = finite_top ? exp(out_w_t[i] - max_top) : 0.0f;
             sum += exp_val[i];
         }
         sum = max(sum, 6.103515625e-5f);
+        bool nonfinite = false;
+        for (uint i = 0; i < args.n_expert; ++i) nonfinite |= !moe_finite_bits(logits_t[i]);
+        int word = MOE_ROUTE_STATUS_READY | (nonfinite ? MOE_ROUTE_STATUS_NONFINITE : 0);
         for (uint i = 0; i < args.topk; ++i) {
             out_w_t[i] = exp_val[i] / sum;
             const int expert = out_idx_t[i];
             if (expert >= 0 && expert < int(args.n_expert)) {
                 const int dst = atomic_fetch_add_explicit(&counts[expert], 1, memory_order_relaxed);
-                ids[(ulong)expert * args.n_tokens + dst] = int(base + i);
+                if (dst >= 0 && dst < int(args.n_tokens)) {
+                    ids[(ulong)expert * args.n_tokens + dst] = int(base + i);
+                } else {
+                    word |= MOE_ROUTE_STATUS_OVERFLOW;
+                }
             }
         }
+        status[token] |= word;
     }
 }
 
@@ -961,6 +1042,7 @@ kernel void kernel_moe_route_bucket_slots_f32(
         device const int              * top_idx [[buffer(1)]],
         device       int              * counts  [[buffer(2)]],
         device       int              * ids     [[buffer(3)]],
+        device       int              * status  [[buffer(4)]],
         uint tid [[thread_position_in_grid]]) {
     if (tid >= args.n_expert) return;
     int count = 0;
@@ -969,7 +1051,13 @@ kernel void kernel_moe_route_bucket_slots_f32(
         for (uint k = 0; k < args.topk; ++k) {
             const int expert_i = top_idx[base + k];
             if (expert_i == int(tid)) {
-                ids[(ulong)tid * args.n_tokens + count] = int(base + k);
+                if (count < int(args.n_tokens)) {
+                    ids[(ulong)tid * args.n_tokens + count] = int(base + k);
+                } else {
+                    atomic_fetch_or_explicit((device atomic_int *)&status[token],
+                                             MOE_ROUTE_STATUS_OVERFLOW,
+                                             memory_order_relaxed);
+                }
                 count += 1;
             }
         }
@@ -989,6 +1077,7 @@ kernel void kernel_moe_route_bucket_slots_parallel_f32(
         device const int              * top_idx [[buffer(1)]],
         device       int              * counts  [[buffer(2)]],
         device       int              * ids     [[buffer(3)]],
+        device       int              * status  [[buffer(4)]],
         uint expert [[threadgroup_position_in_grid]],
         uint tid [[thread_index_in_threadgroup]]) {
     threadgroup int prefix[256];
@@ -1010,7 +1099,16 @@ kernel void kernel_moe_route_bucket_slots_parallel_f32(
     int pos = prefix[tid] - local;
     device int * out = ids + (ulong)expert * args.n_tokens;
     for (uint s = first; s < last; ++s) {
-        if (top_idx[s] == int(expert)) out[pos++] = int(s);
+        if (top_idx[s] == int(expert)) {
+            if (pos >= 0 && pos < int(args.n_tokens)) {
+                out[pos] = int(s);
+            } else {
+                atomic_fetch_or_explicit((device atomic_int *)&status[s / args.topk],
+                                         MOE_ROUTE_STATUS_OVERFLOW,
+                                         memory_order_relaxed);
+            }
+            ++pos;
+        }
     }
     if (tid == 255u) counts[expert] = prefix[255];
 }

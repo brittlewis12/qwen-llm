@@ -218,6 +218,11 @@ pub fn encode_mat_vec_dispatch(
     n_in: usize,
     n_out: usize,
 ) -> Result<(), MfError> {
+    crate::metal::checks::check_disjoint(
+        "mat_vec_dispatch",
+        y,
+        &[(weight, "weight"), (x, "input")],
+    )?;
     if matches!(
         weight.dtype,
         GgmlType::IQ2_XXS | GgmlType::IQ1_S | GgmlType::IQ1_M
@@ -254,9 +259,10 @@ pub(crate) fn validate_f32_q8_mat_mat_addressing(
     n_out: usize,
     n_query: usize,
 ) -> Result<(), MfError> {
-    if !matches!(dtype, GgmlType::F32 | GgmlType::Q8_0) {
-        return Ok(());
-    }
+    // Every mat-mat route (not only F32/Q8_0) forms its output row offset
+    // from `n_query * n_out` in the shader; refuse a product that wraps u32
+    // regardless of the weight dtype. F32/Q8_0 also keep their exact
+    // weight/input and row-stride checks below.
     for (name, value) in [("n_in", n_in), ("n_out", n_out), ("n_query", n_query)] {
         if value == 0 || u32::try_from(value).is_err() {
             return Err(MetalError::BadShape {
@@ -496,6 +502,11 @@ fn encode_mat_mat_dispatch_routed(
     allow_q8_fewrow: bool,
     allow_fewrow_gen: bool,
 ) -> Result<(), MfError> {
+    crate::metal::checks::check_disjoint(
+        "mat_mat_dispatch",
+        y,
+        &[(weight, "weight"), (x, "input")],
+    )?;
     validate_f32_q8_mat_mat_addressing(weight.dtype, n_in, n_out, n_query)?;
     if weight.dtype == GgmlType::IQ2_XS {
         crate::metal::validate_iq2_xs_mat_mat_addressing(n_in, n_out, n_query)?;

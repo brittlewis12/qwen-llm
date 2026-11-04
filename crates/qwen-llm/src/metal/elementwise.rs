@@ -85,6 +85,7 @@ pub fn encode_scatter_rows_f32_unique(
             ),
         });
     }
+    super::checks::check_disjoint("scatter_rows_unique", out, &[(x, "x"), (rows, "rows")])?;
     let pso = ctx.pipeline("kernel_scatter_rows_f32_unique")?;
     enc.set_pipeline(&pso);
     #[repr(C)]
@@ -97,9 +98,13 @@ pub fn encode_scatter_rows_f32_unique(
     enc.set_bytes(
         0,
         &Args {
-            n_cols: n_cols as u32,
-            n_rows: n_rows as u32,
-            out_rows: (out.n_elements() as usize / n_cols) as u32,
+            n_cols: super::checks::to_u32("scatter_rows_unique", n_cols, "n_cols")?,
+            n_rows: super::checks::to_u32("scatter_rows_unique", n_rows, "n_rows")?,
+            out_rows: super::checks::to_u32(
+                "scatter_rows_unique",
+                out.n_elements() as usize / n_cols,
+                "out_rows",
+            )?,
         },
     );
     enc.set_tensor(1, x);
@@ -139,6 +144,8 @@ pub fn encode_axpy_scalar_f32(
             ),
         });
     }
+    super::checks::check_disjoint_or_exact("axpy_scalar", accum, &[(x, "x")])?;
+    super::checks::check_disjoint("axpy_scalar", accum, &[(scale, "scale")])?;
     let pso = ctx.pipeline("kernel_axpy_scalar_f32")?;
     enc.set_pipeline(&pso);
     #[repr(C)]
@@ -250,7 +257,7 @@ fn encode_dot_sigmoid_with(
     Ok(())
 }
 
-pub fn encode_topk_bucket_logits_softmax_dot_sigmoid_packed_f32(
+pub fn encode_topk_bucket_logits_softmax_dot_sigmoid_packed_f32_status(
     ctx: &MetalContext,
     enc: &KernelEncoder,
     logits: &MetalTensor,
@@ -261,6 +268,7 @@ pub fn encode_topk_bucket_logits_softmax_dot_sigmoid_packed_f32(
     shared_out: &MetalTensor,
     counts: &MetalTensor,
     ids: &MetalTensor,
+    status: &MetalTensor,
     n_expert: usize,
     topk: usize,
     hidden: usize,
@@ -273,6 +281,7 @@ pub fn encode_topk_bucket_logits_softmax_dot_sigmoid_packed_f32(
         || shared_out.dtype != GgmlType::F32
         || counts.dtype != GgmlType::F32
         || ids.dtype != GgmlType::F32
+        || status.dtype != GgmlType::I32
     {
         return Err(MetalError::BadShape {
             kernel: "topk_bucket_logits_softmax_dot_sigmoid_packed",
@@ -295,6 +304,7 @@ pub fn encode_topk_bucket_logits_softmax_dot_sigmoid_packed_f32(
         || shared_out.n_elements() as usize != n_tokens
         || counts.n_elements() as usize != n_expert
         || ids.n_elements() as usize != n_expert * n_tokens
+        || status.n_elements() < n_tokens as u64
     {
         return Err(MetalError::BadShape {
             kernel: "topk_bucket_logits_softmax_dot_sigmoid_packed",
@@ -329,6 +339,7 @@ pub fn encode_topk_bucket_logits_softmax_dot_sigmoid_packed_f32(
     enc.set_tensor(6, shared_out);
     enc.set_tensor(7, counts);
     enc.set_tensor(8, ids);
+    enc.set_tensor(9, status);
     const THREADS: usize = 256;
     enc.set_threadgroup_memory(0, THREADS * std::mem::size_of::<f32>());
     enc.set_threadgroup_memory(1, THREADS * std::mem::size_of::<f32>());
@@ -366,7 +377,12 @@ pub(crate) fn encode_elementwise_1in_1out(
     }
     let pso = ctx.pipeline(kernel)?;
     enc.set_pipeline(&pso);
-    enc.set_bytes(0, &NArgs { n: n as u32 });
+    enc.set_bytes(
+        0,
+        &NArgs {
+            n: super::checks::to_u32("add_inplace", n, "n")?,
+        },
+    );
     enc.set_tensor(1, x);
     enc.set_tensor(2, y);
 
@@ -516,6 +532,9 @@ pub fn encode_add_inplace_f32(
             detail: format!("y.n={} != x.n={n}", y.n_elements()),
         });
     }
+    // x += y is a same-index read-modify-write: exact aliasing is safe,
+    // partial overlap is not.
+    super::checks::check_disjoint_or_exact("add_inplace", x, &[(y, "y")])?;
     let pso = ctx.pipeline("kernel_add_inplace_f32")?;
     enc.set_pipeline(&pso);
     enc.set_bytes(0, &NArgs { n: n as u32 });
@@ -590,6 +609,7 @@ pub fn encode_axpy_f32(
             ),
         });
     }
+    super::checks::check_disjoint_or_exact("axpy", accum, &[(x, "x")])?;
     let pso = ctx.pipeline("kernel_axpy_f32")?;
     enc.set_pipeline(&pso);
     #[repr(C)]
@@ -598,7 +618,13 @@ pub fn encode_axpy_f32(
         n: u32,
         alpha: f32,
     }
-    enc.set_bytes(0, &Args { n: n as u32, alpha });
+    enc.set_bytes(
+        0,
+        &Args {
+            n: super::checks::to_u32("axpy", n, "n")?,
+            alpha,
+        },
+    );
     enc.set_tensor(1, x);
     enc.set_tensor(2, accum);
     let tg_threads = pso.maxTotalThreadsPerThreadgroup().min(1024);
@@ -805,6 +831,8 @@ pub fn encode_axpy_rowwise_f32(
             ),
         });
     }
+    super::checks::check_disjoint_or_exact("axpy_rowwise", accum, &[(x, "x")])?;
+    super::checks::check_disjoint("axpy_rowwise", accum, &[(scales, "scales")])?;
     let pso = ctx.pipeline("kernel_axpy_rowwise_f32")?;
     enc.set_pipeline(&pso);
     #[repr(C)]
@@ -817,9 +845,13 @@ pub fn encode_axpy_rowwise_f32(
     enc.set_bytes(
         0,
         &Args {
-            n_cols: n_cols as u32,
-            n_rows: n_rows as u32,
-            out_rows: (accum.n_elements() as usize / n_cols) as u32,
+            n_cols: super::checks::to_u32("axpy_rowwise", n_cols, "n_cols")?,
+            n_rows: super::checks::to_u32("axpy_rowwise", n_rows, "n_rows")?,
+            out_rows: super::checks::to_u32(
+                "axpy_rowwise",
+                accum.n_elements() as usize / n_cols,
+                "out_rows",
+            )?,
         },
     );
     enc.set_tensor(1, x);
@@ -871,6 +903,11 @@ pub fn encode_scatter_axpy_rows_unique_f32(
             ),
         });
     }
+    super::checks::check_disjoint(
+        "scatter_axpy_rows_unique",
+        accum,
+        &[(x, "x"), (rows, "rows"), (scales, "scales")],
+    )?;
     let pso = ctx.pipeline("kernel_scatter_axpy_rows_unique_f32")?;
     enc.set_pipeline(&pso);
     #[repr(C)]
@@ -884,9 +921,9 @@ pub fn encode_scatter_axpy_rows_unique_f32(
     enc.set_bytes(
         0,
         &Args {
-            n_cols: n_cols as u32,
-            n_rows: n_rows as u32,
-            out_rows: out_rows as u32,
+            n_cols: super::checks::to_u32("scatter_axpy_rows_unique", n_cols, "n_cols")?,
+            n_rows: super::checks::to_u32("scatter_axpy_rows_unique", n_rows, "n_rows")?,
+            out_rows: super::checks::to_u32("scatter_axpy_rows_unique", out_rows, "out_rows")?,
         },
     );
     enc.set_tensor(1, x);
@@ -2534,6 +2571,45 @@ pub(crate) fn validate_compact_f32_tensor(
     Ok(())
 }
 
+/// Legacy fused route+bucket convenience for tests/diagnostics: allocates a
+/// private status buffer and discards it. Production calls the `_status` form.
+#[allow(clippy::too_many_arguments)]
+pub fn encode_topk_bucket_logits_softmax_dot_sigmoid_packed_f32(
+    ctx: &MetalContext,
+    enc: &KernelEncoder,
+    logits: &MetalTensor,
+    shared_weight: &MetalTensor,
+    x: &MetalTensor,
+    out_idx: &MetalTensor,
+    out_w: &MetalTensor,
+    shared_out: &MetalTensor,
+    counts: &MetalTensor,
+    ids: &MetalTensor,
+    n_expert: usize,
+    topk: usize,
+    hidden: usize,
+    n_tokens: usize,
+) -> Result<(), MetalError> {
+    let status = MetalTensor::zeros_i32(ctx, vec![n_tokens as u64])?;
+    encode_topk_bucket_logits_softmax_dot_sigmoid_packed_f32_status(
+        ctx,
+        enc,
+        logits,
+        shared_weight,
+        x,
+        out_idx,
+        out_w,
+        shared_out,
+        counts,
+        ids,
+        &status,
+        n_expert,
+        topk,
+        hidden,
+        n_tokens,
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -4055,6 +4131,35 @@ mod tests {
                 assert_eq!(gap, vec![0.0], "boundary width {width} gap");
             }
         }
+    }
+
+    #[test]
+    fn in_place_elementwise_refuses_partial_aliasing() {
+        let Some(ctx) = metal_test_context() else {
+            return;
+        };
+        let values = vec![1.0f32; 12];
+        let backing =
+            MetalTensor::from_bytes(&ctx, bytemuck::cast_slice(&values), vec![12], GgmlType::F32)
+                .unwrap();
+        let x = backing.view_subrange(0, vec![10]);
+        let y = backing.view_subrange(1, vec![10]);
+        let command = ctx.queue.commandBuffer().unwrap();
+        let enc = KernelEncoder::begin(&command);
+        let err = encode_add_inplace_f32(&ctx, &enc, &x, &y).unwrap_err();
+        assert!(err.to_string().contains("partially aliases"), "{err}");
+        // Exact x += x is the intended in-place use.
+        encode_add_inplace_f32(&ctx, &enc, &x, &x).unwrap();
+        let err = encode_axpy_f32(&ctx, &enc, &y, &x, 1.0).unwrap_err();
+        assert!(err.to_string().contains("partially aliases"), "{err}");
+        let scale = MetalTensor::zeros_f32(&ctx, vec![1]).unwrap();
+        let err = encode_axpy_scalar_f32(&ctx, &enc, &x, &x, &scale).unwrap_err();
+        assert!(err.to_string().contains("scale"), "{err}");
+        let rows = MetalTensor::zeros_i32(&ctx, vec![5]).unwrap();
+        let scales = MetalTensor::zeros_f32(&ctx, vec![5]).unwrap();
+        let err = encode_scatter_axpy_rows_unique_f32(&ctx, &enc, &x, &rows, &scales, &x, 2, 5)
+            .unwrap_err();
+        assert!(err.to_string().contains("aliases x"), "{err}");
     }
 }
 

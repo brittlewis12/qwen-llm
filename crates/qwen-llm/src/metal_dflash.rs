@@ -48,7 +48,8 @@ use crate::metal::{
     encode_rope_neox_pair_adaptive_f32_packed_consecutive, encode_scatter_offset_f32_to_f16_kv,
     encode_scatter_offset_f32_to_f16_kv_vt, encode_sigmoid_f32, encode_silu_mul_f32,
     encode_split_qkv_fused_f32, encode_topk_logits_softmax_dot_sigmoid_packed_f32,
-    encode_topk16_f32, kernel_trace_begin, kernel_trace_snapshot, kernel_trace_take_delta,
+    encode_topk_logits_softmax_dot_sigmoid_packed_f32_status, encode_topk16_f32,
+    kernel_trace_begin, kernel_trace_snapshot, kernel_trace_take_delta,
 };
 #[cfg(feature = "dflash-k0s-diagnostics")]
 use crate::metal::{
@@ -7008,6 +7009,7 @@ fn build_prefill_scratch_plan_from_arch(
         ("moe_router_probs_pack", n_experts),
         ("moe_topk_weight_pack", moe_slot_elems),
         ("moe_shared_gate_pack", n),
+        ("moe_route_status_pack", n),
         (
             "moe_inner_pack",
             if include_spec_packs {
@@ -7044,7 +7046,7 @@ fn build_prefill_scratch_plan_from_arch(
             },
         ),
     ] {
-        if name == "moe_group_slot_idx_pack" {
+        if name == "moe_group_slot_idx_pack" || name == "moe_route_status_pack" {
             builder.i32(name, elements)?;
         } else {
             builder.f32(name, elements)?;
@@ -7268,6 +7270,9 @@ pub struct MetalDFlashLayerMajorScratch {
 
     /// `[N * topk]` i32-in-F32 buffer — packed routed expert ids per token.
     pub moe_topk_idx_pack: MetalTensor,
+    /// `[N]` I32 — per-token Qwen route status (non-finite logits or bucket
+    /// overflow), checked after the owning command completes.
+    pub moe_route_status_pack: MetalTensor,
     /// `[N, n_expert]` F32 — packed router logits per token.
     pub moe_router_probs_pack: MetalTensor,
     /// `[N * topk]` F32 — packed routed expert weights per token.
@@ -7910,6 +7915,7 @@ impl MetalDFlashLayerMajorScratch {
             ffn_inner_pack: allocator.f32(ctx, "ffn_inner_pack", vec![n, f])?,
             ffn_out_pack: allocator.f32(ctx, "ffn_out_pack", vec![n, h])?,
             moe_topk_idx_pack: allocator.f32(ctx, "moe_topk_idx_pack", vec![moe_slot_elems])?,
+            moe_route_status_pack: allocator.i32(ctx, "moe_route_status_pack", vec![n])?,
             moe_router_probs_pack: allocator.f32(
                 ctx,
                 "moe_router_probs_pack",
@@ -9105,7 +9111,7 @@ fn encode_packed_verify_moe_grouped_ffn_after_mixer(
         n,
     )?;
     encode_fill_f32(base.ctx, enc, &moe_group_count_pack, 0.0)?;
-    crate::metal::encode_topk_bucket_logits_softmax_dot_sigmoid_packed_f32(
+    crate::metal::encode_topk_bucket_logits_softmax_dot_sigmoid_packed_f32_status(
         base.ctx,
         enc,
         &moe_router_probs_pack,
@@ -9116,6 +9122,9 @@ fn encode_packed_verify_moe_grouped_ffn_after_mixer(
         &moe_shared_gate_pack,
         &moe_group_count_pack,
         &moe_group_ids_pack,
+        &layer_scratch
+            .moe_route_status_pack
+            .view_subrange(0, vec![n as u64]),
         n_expert,
         topk,
         h,
@@ -10690,7 +10699,7 @@ pub fn encode_packed_verify_layer_major_inner_for(
                             n_expert,
                             n,
                         )?;
-                        encode_topk_logits_softmax_dot_sigmoid_packed_f32(
+                        encode_topk_logits_softmax_dot_sigmoid_packed_f32_status(
                             base.ctx,
                             &enc,
                             &router_probs_pack,
@@ -10699,6 +10708,9 @@ pub fn encode_packed_verify_layer_major_inner_for(
                             &topk_idx_pack,
                             &topk_weight_pack,
                             &shared_gate_pack,
+                            &layer_scratch
+                                .moe_route_status_pack
+                                .view_subrange(0, vec![n as u64]),
                             n_expert,
                             topk,
                             h,
@@ -14185,7 +14197,7 @@ fn prefill_tokens_with_multi_hidden_profiled_inner<'a>(
                             chunk_p,
                         )?;
                         encode_fill_f32(base.ctx, &enc, &moe_group_count_pack, 0.0)?;
-                        crate::metal::encode_topk_bucket_logits_softmax_dot_sigmoid_packed_f32(
+                        crate::metal::encode_topk_bucket_logits_softmax_dot_sigmoid_packed_f32_status(
                             base.ctx,
                             &enc,
                             &moe_router_probs_pack_p,
@@ -14196,6 +14208,9 @@ fn prefill_tokens_with_multi_hidden_profiled_inner<'a>(
                             &moe_shared_gate_pack_p,
                             &moe_group_count_pack,
                             &moe_group_ids_pack,
+                            &layer_scratch
+                                .moe_route_status_pack
+                                .view_subrange(0, vec![chunk_p as u64]),
                             n_expert,
                             topk,
                             h,
@@ -14215,7 +14230,7 @@ fn prefill_tokens_with_multi_hidden_profiled_inner<'a>(
                             n_expert,
                             chunk_p,
                         )?;
-                        encode_topk_logits_softmax_dot_sigmoid_packed_f32(
+                        encode_topk_logits_softmax_dot_sigmoid_packed_f32_status(
                             base.ctx,
                             &enc,
                             &moe_router_probs_pack_p,
@@ -14224,6 +14239,9 @@ fn prefill_tokens_with_multi_hidden_profiled_inner<'a>(
                             &moe_topk_idx_pack_p,
                             &moe_topk_weight_pack_p,
                             &moe_shared_gate_pack_p,
+                            &layer_scratch
+                                .moe_route_status_pack
+                                .view_subrange(0, vec![chunk_p as u64]),
                             n_expert,
                             topk,
                             h,
@@ -14325,12 +14343,15 @@ fn prefill_tokens_with_multi_hidden_profiled_inner<'a>(
                         if trace_layer_phases {
                             if !fused_route_bucket {
                                 let enc = KernelEncoder::begin(&cmd_buf);
-                                crate::metal::encode_moe_route_bucket_slots_f32(
+                                crate::metal::encode_moe_route_bucket_slots_f32_status(
                                     base.ctx,
                                     &enc,
                                     &moe_topk_idx_pack_p,
                                     &moe_group_count_pack,
                                     &moe_group_ids_pack,
+                                    &layer_scratch
+                                        .moe_route_status_pack
+                                        .view_subrange(0, vec![chunk_p as u64]),
                                     n_expert,
                                     chunk_p,
                                     topk,
@@ -14675,12 +14696,15 @@ fn prefill_tokens_with_multi_hidden_profiled_inner<'a>(
                             let enc = KernelEncoder::begin(&cmd_buf);
                             label_prefill_encoder(&enc, il, "moe-routed-grouped");
                             if !fused_route_bucket {
-                                crate::metal::encode_moe_route_bucket_slots_f32(
+                                crate::metal::encode_moe_route_bucket_slots_f32_status(
                                     base.ctx,
                                     &enc,
                                     &moe_topk_idx_pack_p,
                                     &moe_group_count_pack,
                                     &moe_group_ids_pack,
+                                    &layer_scratch
+                                        .moe_route_status_pack
+                                        .view_subrange(0, vec![chunk_p as u64]),
                                     n_expert,
                                     chunk_p,
                                     topk,
@@ -16001,6 +16025,13 @@ fn prefill_tokens_with_multi_hidden_profiled_inner<'a>(
                 evidence.command_error_none = error.is_none();
             }
             require_prefill_command_completed(&cmd_buf)?;
+            crate::metal::check_moe_route_status(
+                "qwen_prefill_moe_route",
+                &layer_scratch
+                    .moe_route_status_pack
+                    .view_subrange(0, vec![chunk_p as u64]),
+                chunk_p,
+            )?;
             let chunk_gpu_ms = (cmd_buf.GPUEndTime() - cmd_buf.GPUStartTime()) * 1e3;
             prefill_gpu_total_ms += chunk_gpu_ms;
             let mut tail_readback_ms = 0.0f64;
@@ -16064,6 +16095,13 @@ fn prefill_tokens_with_multi_hidden_profiled_inner<'a>(
         crate::metal::wait_unchecked(&cmd_buf);
         let after_wait = Instant::now();
         require_prefill_command_completed(&cmd_buf)?;
+        crate::metal::check_moe_route_status(
+            "qwen_prefill_moe_route",
+            &layer_scratch
+                .moe_route_status_pack
+                .view_subrange(0, vec![chunk_p as u64]),
+            chunk_p,
+        )?;
         let chunk_gpu_ms = (cmd_buf.GPUEndTime() - cmd_buf.GPUStartTime()) * 1e3;
         let chunk_wall_ms = chunk_wall.elapsed().as_secs_f64() * 1e3;
         prefill_gpu_total_ms += chunk_gpu_ms;

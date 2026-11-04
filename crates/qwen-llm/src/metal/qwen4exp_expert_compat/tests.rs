@@ -156,6 +156,7 @@ fn run_case(k: usize, rows: usize, experts: usize, routes: &[i32]) {
             router_logits: &input,
             topk_weights: &input,
             shared_scale: &input,
+            route_status: &ids,
             routed_expert_output: &input,
             shared_inner: &input,
             shared_output: &input,

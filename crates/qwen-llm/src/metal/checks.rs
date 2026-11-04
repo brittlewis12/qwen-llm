@@ -181,6 +181,25 @@ pub(crate) fn check_disjoint(
     Ok(())
 }
 
+/// Like [`check_disjoint`], but permits an input that covers exactly the same
+/// bytes as `output` (same-index read-modify-write). Partial overlap is still
+/// refused because it would make one thread read another's output.
+pub(crate) fn check_disjoint_or_exact(
+    kernel: &'static str,
+    output: &MetalTensor,
+    inputs: &[(&MetalTensor, &str)],
+) -> Result<(), MetalError> {
+    for (input, name) in inputs {
+        if overlaps(output, input) && !same_range(output, input) {
+            return Err(bad_shape(
+                kernel,
+                format!("output partially aliases {name}"),
+            ));
+        }
+    }
+    Ok(())
+}
+
 pub(crate) fn to_u32(kernel: &'static str, value: usize, name: &str) -> Result<u32, MetalError> {
     u32::try_from(value).map_err(|_| bad_shape(kernel, format!("{name} {value} exceeds u32")))
 }

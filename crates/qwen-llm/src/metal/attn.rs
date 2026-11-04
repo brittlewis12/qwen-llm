@@ -2498,10 +2498,32 @@ pub(crate) fn validate_attn_matrix_common(
             detail: "n_rows must be > 0".into(),
         });
     }
-    if n_pos < base_pos + n_rows {
+    for (name, value) in [
+        ("n_rows", n_rows),
+        ("n_pos", n_pos),
+        ("base_pos", base_pos),
+        ("n_q_heads", n_q_heads),
+        ("n_kv_heads", n_kv_heads),
+        ("group", group),
+        ("head_dim", head_dim),
+    ] {
+        if u32::try_from(value).is_err() {
+            return Err(MetalError::BadShape {
+                kernel,
+                detail: format!("{name}={value} exceeds u32 shader arguments"),
+            });
+        }
+    }
+    let n_pos_end = base_pos
+        .checked_add(n_rows)
+        .ok_or_else(|| MetalError::BadShape {
+            kernel,
+            detail: "base_pos + n_rows overflow".into(),
+        })?;
+    if n_pos < n_pos_end {
         return Err(MetalError::BadShape {
             kernel,
-            detail: format!("n_pos={n_pos} < base_pos+n_rows={}", base_pos + n_rows),
+            detail: format!("n_pos={n_pos} < base_pos+n_rows={n_pos_end}"),
         });
     }
     if n_kv_heads == 0 || group == 0 || n_q_heads != n_kv_heads * group || head_dim != 256 {

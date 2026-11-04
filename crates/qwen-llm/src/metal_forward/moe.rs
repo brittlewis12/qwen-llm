@@ -405,12 +405,13 @@ impl<'a> MetalForward<'a> {
         let topk_idx = session.moe_topk_idx.view_subrange(0, vec![topk as u64]);
         let topk_w = session.moe_topk_weight.view_subrange(0, vec![topk as u64]);
 
-        encode_topk_logits_softmax_f32(
+        encode_topk_logits_softmax_f32_status(
             self.ctx,
             enc,
             &router_probs,
             &topk_idx,
             &topk_w,
+            &session.moe_route_status,
             n_expert,
             topk,
         )?;
@@ -432,12 +433,13 @@ impl<'a> MetalForward<'a> {
         let topk_idx = session.moe_topk_idx.view_subrange(0, vec![topk as u64]);
         let topk_w = session.moe_topk_weight.view_subrange(0, vec![topk as u64]);
 
-        encode_topk_logits_softmax_parallel_f32(
+        encode_topk_logits_softmax_parallel_f32_status(
             self.ctx,
             enc,
             &router_probs,
             &topk_idx,
             &topk_w,
+            &session.moe_route_status,
             n_expert,
             topk,
         )?;
@@ -467,7 +469,7 @@ impl<'a> MetalForward<'a> {
         let topk_idx = session.moe_topk_idx.view_subrange(0, vec![topk as u64]);
         let topk_w = session.moe_topk_weight.view_subrange(0, vec![topk as u64]);
 
-        encode_topk_logits_softmax_dot_sigmoid_f32(
+        encode_topk_logits_softmax_dot_sigmoid_f32_status(
             self.ctx,
             enc,
             &router_probs,
@@ -476,6 +478,7 @@ impl<'a> MetalForward<'a> {
             &topk_idx,
             &topk_w,
             &session.moe_shared_gate,
+            &session.moe_route_status,
             n_expert,
             topk,
             h,
@@ -3138,6 +3141,7 @@ impl<'a> MetalForward<'a> {
         } else {
             self.single_token_profiled_moe(token_id, position, session)?
         };
+        crate::metal::check_moe_route_status("qwen_moe_decode", &session.moe_route_status, 1)?;
         Ok(logits)
     }
 

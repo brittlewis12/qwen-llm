@@ -822,13 +822,15 @@ impl<'a> MetalForward<'a> {
         reduction: ArgmaxReduction,
     ) -> Result<(i32, TokenProfile), MfError> {
         if self.model.arch.kind == ArchKind::Moe {
-            return if concurrent_gdn_moe_decode_enabled() {
+            let result = if concurrent_gdn_moe_decode_enabled() {
                 self.single_token_argmax_profiled_concurrent_gdn_moe_with_reduction(
                     token_id, position, session, reduction,
                 )
             } else {
                 self.single_token_argmax_profiled_moe(token_id, position, session, reduction)
-            };
+            }?;
+            crate::metal::check_moe_route_status("qwen_moe_decode", &session.moe_route_status, 1)?;
+            return Ok(result);
         }
         if concurrent_gdn_dense_decode_enabled() {
             return self.single_token_argmax_profiled_concurrent_gdn_dense_with_reduction(

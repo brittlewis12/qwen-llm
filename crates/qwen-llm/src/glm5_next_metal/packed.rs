@@ -2012,6 +2012,7 @@ impl Glm5NextSession<'_> {
                         input: &v(&p.normed),
                         ids: &route_ids,
                         weights: &route_weights,
+                        status: &v(&route.status),
                         counts: &p.counts,
                         slots: &flat(&p.slots, e * rows),
                         inner: &p.inner.view_subrange(0, vec![f as u64, (k * rows) as u64]),

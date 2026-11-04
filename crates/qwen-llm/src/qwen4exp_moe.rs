@@ -9,12 +9,14 @@ use crate::metal::{
     encode_moe_down_iq4_nl_f32_grouped_slots, encode_moe_down_iq4_nl_f32_grouped_slots_m128_n16,
     encode_moe_down_q2_0_f32, encode_moe_down_q8_0_f32_grouped_slots,
     encode_moe_down_weighted_sum_q8_0_f32, encode_moe_route_bucket_slots_f32,
-    encode_moe_swiglu_f32_grouped_slots_generic_range, encode_moe_swiglu_iq3_s_f32,
-    encode_moe_swiglu_iq3_xxs_f32, encode_moe_swiglu_iq3_xxs_f32_fast,
+    encode_moe_route_bucket_slots_f32_status, encode_moe_swiglu_f32_grouped_slots_generic_range,
+    encode_moe_swiglu_iq3_s_f32, encode_moe_swiglu_iq3_xxs_f32, encode_moe_swiglu_iq3_xxs_f32_fast,
     encode_moe_swiglu_iq3_xxs_f32_grouped_slots_n16, encode_moe_swiglu_iq4_xs_f32,
     encode_moe_swiglu_iq4_xs_f32_grouped_slots_n16, encode_moe_weighted_sum_f32,
     encode_moe_weighted_sum_packed_f32, encode_shared_swiglu_q8_0_f32, encode_silu_mul_f32,
-    encode_topk_logits_softmax_dot_sigmoid_packed_f32, encode_topk_logits_softmax_f32,
+    encode_topk_logits_softmax_dot_sigmoid_packed_f32,
+    encode_topk_logits_softmax_dot_sigmoid_packed_f32_status, encode_topk_logits_softmax_f32,
+    encode_topk_logits_softmax_f32_status,
 };
 #[cfg(test)]
 use crate::metal::{
@@ -849,6 +851,7 @@ pub struct Qwen4ExpMoeMetalWorkspace {
     topk_ids: MetalTensor,
     topk_weights: MetalTensor,
     shared_gate: MetalTensor,
+    route_status: MetalTensor,
     routed_inner: MetalTensor,
     routed_expert_output: MetalTensor,
     shared_inner: MetalTensor,
@@ -867,6 +870,7 @@ pub(crate) struct Qwen4ExpMoePackedMotorScratch {
     shared_scale: MetalTensor,
     route_counts: MetalTensor,
     route_slots: MetalTensor,
+    pub(crate) route_status: MetalTensor,
     routed_inner: MetalTensor,
     routed_expert_output: MetalTensor,
     shared_gate_projection: MetalTensor,
@@ -883,6 +887,7 @@ struct Qwen4ExpMoePackedViews {
     shared_scale: MetalTensor,
     route_counts: MetalTensor,
     route_slots: MetalTensor,
+    route_status: MetalTensor,
     routed_inner: MetalTensor,
     routed_expert_output: MetalTensor,
     shared_gate_projection: MetalTensor,
@@ -930,6 +935,7 @@ impl Qwen4ExpMoePackedMotorScratch {
             ("shared scale", vec![capacity]),
             ("route counts", vec![geometry.expert_count]),
             ("route slots", vec![geometry.expert_count, capacity]),
+            ("route status", vec![capacity]),
             (
                 "routed inner",
                 vec![
@@ -981,6 +987,7 @@ impl Qwen4ExpMoePackedMotorScratch {
                 ctx,
                 vec![(geometry.expert_count * capacity) as u64],
             )?,
+            route_status: MetalTensor::zeros_i32(ctx, vec![capacity as u64])?,
             routed_inner: MetalTensor::zeros_f32(
                 ctx,
                 vec![
@@ -1040,6 +1047,7 @@ impl Qwen4ExpMoePackedMotorScratch {
             capacity,
             geometry.expert_count,
             checked_product(&[geometry.expert_count, capacity], "packed route slots")?,
+            capacity,
             checked_product(
                 &[
                     geometry.routed_intermediate_size,
@@ -1145,6 +1153,13 @@ impl Qwen4ExpMoePackedMotorScratch {
                 tokens,
                 vec![tokens as u64, g.expert_count as u64],
             )?,
+            route_status: self.prefix_view(
+                "packed MoE route status",
+                &self.route_status,
+                1,
+                tokens,
+                vec![tokens as u64],
+            )?,
             routed_inner: self.prefix_view(
                 "packed MoE routed inner",
                 &self.routed_inner,
@@ -1235,6 +1250,7 @@ impl Qwen4ExpMoeMetalWorkspace {
             topk_ids: MetalTensor::zeros_i32(ctx, vec![geometry.experts_per_token as u64])?,
             topk_weights: MetalTensor::zeros_f32(ctx, vec![geometry.experts_per_token as u64])?,
             shared_gate: MetalTensor::zeros_f32(ctx, vec![1])?,
+            route_status: MetalTensor::zeros_i32(ctx, vec![1])?,
             routed_inner: MetalTensor::zeros_f32(
                 ctx,
                 vec![
@@ -1292,7 +1308,11 @@ impl Qwen4ExpMoeMetalWorkspace {
         let error = command.error().map(|error| error.to_string());
         self.active_command = None;
         if status == MTLCommandBufferStatus::Completed && error.is_none() {
-            Ok(())
+            crate::metal::check_moe_route_status("qwen4exp_moe_decode", &self.route_status, 1)
+                .map_err(|error| {
+                    self.state_poisoned = true;
+                    Qwen4ExpMoeError::Invalid(error.to_string())
+                })
         } else {
             self.state_poisoned = true;
             Err(Qwen4ExpMoeError::CommandBuffer(format!(
@@ -1445,6 +1465,7 @@ fn encode_step(
             topk_ids: &workspace.topk_ids,
             topk_weights: &workspace.topk_weights,
             shared_scale: &workspace.shared_gate,
+            route_status: &workspace.route_status,
             routed_inner: &workspace.routed_inner,
             routed_expert_output: &workspace.routed_expert_output,
             shared_inner: &workspace.shared_inner,
@@ -1461,6 +1482,7 @@ struct Qwen4ExpMoeSingletonBuffers<'a> {
     topk_ids: &'a MetalTensor,
     topk_weights: &'a MetalTensor,
     shared_scale: &'a MetalTensor,
+    route_status: &'a MetalTensor,
     routed_inner: &'a MetalTensor,
     routed_expert_output: &'a MetalTensor,
     shared_inner: &'a MetalTensor,
@@ -1532,20 +1554,22 @@ fn encode_singleton_router(
     let probed = false;
     if !probed {
         if buffers.guarded_topk && guarded_topk::eligible(g.expert_count, g.experts_per_token) {
-            guarded_topk::encode(
+            guarded_topk::encode_with_status(
                 ctx,
                 enc,
                 buffers.router_logits,
                 buffers.topk_ids,
                 buffers.topk_weights,
+                buffers.route_status,
             )?;
         } else {
-            encode_topk_logits_softmax_f32(
+            encode_topk_logits_softmax_f32_status(
                 ctx,
                 enc,
                 buffers.router_logits,
                 buffers.topk_ids,
                 buffers.topk_weights,
+                buffers.route_status,
                 g.expert_count,
                 g.experts_per_token,
             )?;
@@ -1834,7 +1858,7 @@ impl Qwen4ExpMoePackedExecution<'_, '_> {
             enc,
             Qwen4ExpPackedProfileLabel::detail("moe.topk", layer, mixer),
         )?;
-        encode_topk_logits_softmax_dot_sigmoid_packed_f32(
+        encode_topk_logits_softmax_dot_sigmoid_packed_f32_status(
             ctx,
             enc,
             &self.views.router_logits,
@@ -1843,6 +1867,7 @@ impl Qwen4ExpMoePackedExecution<'_, '_> {
             &self.views.topk_ids,
             &self.views.topk_weights,
             &self.views.shared_scale,
+            &self.views.route_status,
             g.expert_count,
             g.experts_per_token,
             g.hidden_size,
@@ -1866,12 +1891,13 @@ impl Qwen4ExpMoePackedExecution<'_, '_> {
             enc,
             Qwen4ExpPackedProfileLabel::detail("moe.bucket", layer, mixer),
         )?;
-        encode_moe_route_bucket_slots_f32(
+        encode_moe_route_bucket_slots_f32_status(
             ctx,
             enc,
             &self.views.topk_ids,
             &self.views.route_counts,
             &self.views.route_slots,
+            &self.views.route_status,
             g.expert_count,
             self.tokens,
             g.experts_per_token,
@@ -2564,6 +2590,7 @@ unsafe fn encode_qwen4exp_moe_packed_motor_inner(
                 topk_ids: &views.topk_ids,
                 topk_weights: &views.topk_weights,
                 shared_scale: &views.shared_scale,
+                route_status: &views.route_status,
                 routed_inner: &views.routed_inner,
                 routed_expert_output: &views.routed_expert_output,
                 shared_inner: &views.shared_inner,
@@ -3056,6 +3083,7 @@ fn packed_scratch_tensors(
         ("packed MoE shared scale", &scratch.shared_scale),
         ("packed MoE route counts", &scratch.route_counts),
         ("packed MoE route slots", &scratch.route_slots),
+        ("packed MoE route status", &scratch.route_status),
         ("packed MoE routed inner", &scratch.routed_inner),
         (
             "packed MoE routed expert output",
@@ -3081,6 +3109,7 @@ fn workspace_tensors(workspace: &Qwen4ExpMoeMetalWorkspace) -> Vec<(&'static str
         ("MoE top-k IDs", &workspace.topk_ids),
         ("MoE top-k weights", &workspace.topk_weights),
         ("MoE shared gate scalar", &workspace.shared_gate),
+        ("MoE route status", &workspace.route_status),
         ("MoE routed inner", &workspace.routed_inner),
         ("MoE routed expert output", &workspace.routed_expert_output),
         ("MoE shared inner", &workspace.shared_inner),

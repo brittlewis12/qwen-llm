@@ -339,6 +339,30 @@ pub(super) fn encode_post(
             )));
         }
     }
+    // The post reads block/residual/mix/constants and writes four separate
+    // streams. Partial or exact aliasing with a read is a cross-thread race.
+    let reads = [
+        (site.block, "block"),
+        (site.residual, "residual"),
+        (site.mix, "mix"),
+        (&constants[0], "scale"),
+        (&constants[1], "base"),
+    ];
+    let written = [
+        (site.pre, "pre"),
+        (site.post, "post"),
+        (site.combination, "combination"),
+        (site.output, "output"),
+    ];
+    for (index, (output, name)) in written.iter().enumerate() {
+        metal::checks::check_disjoint(K, output, &reads)
+            .map_err(|error| bad(format!("{name}: {error}")))?;
+        for (other, other_name) in &written[index + 1..] {
+            if metal::checks::overlaps(output, other) {
+                return Err(bad(format!("{name} aliases {other_name}")));
+            }
+        }
+    }
     let pso = ctx.pipeline("kernel_deepseek_v41_hc_post_controls")?;
     enc.set_pipeline(&pso);
     enc.set_bytes(
@@ -430,6 +454,31 @@ pub(super) fn encode_ffn_post(
                 t.dtype,
                 t.shape
             )));
+        }
+    }
+    let reads = [
+        (site.slots, "slots"),
+        (site.weights, "weights"),
+        (site.shared, "shared"),
+        (site.status, "status"),
+        (site.residual, "residual"),
+        (site.mix, "mix"),
+        (&constants[0], "scale"),
+        (&constants[1], "base"),
+    ];
+    let written = [
+        (site.pre, "pre"),
+        (site.post, "post"),
+        (site.combination, "combination"),
+        (site.output, "output"),
+    ];
+    for (index, (output, name)) in written.iter().enumerate() {
+        metal::checks::check_disjoint(K, output, &reads)
+            .map_err(|error| bad(format!("{name}: {error}")))?;
+        for (other, other_name) in &written[index + 1..] {
+            if metal::checks::overlaps(output, other) {
+                return Err(bad(format!("{name} aliases {other_name}")));
+            }
         }
     }
     let pso = ctx.pipeline("kernel_deepseek_v41_ffn_post_controls")?;

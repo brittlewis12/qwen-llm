@@ -5,6 +5,64 @@ use super::*;
 #[cfg(test)]
 pub(crate) mod hc4_strict;
 
+/// Qwen/Flash-Next route-status word bits written by the top-k and bucket
+/// kernels (`kernels/moe.metal`). A ready row has bit 0 set and neither
+/// failure bit.
+pub const MOE_ROUTE_STATUS_READY: i32 = 1;
+pub const MOE_ROUTE_STATUS_NONFINITE: i32 = 2;
+pub const MOE_ROUTE_STATUS_OVERFLOW: i32 = 4;
+
+/// Read and validate a route-status buffer after its command buffer has
+/// completed. `rows` is the number of per-token words the dispatch could have
+/// written; zero words are treated as "no route dispatched" and skipped.
+pub fn check_moe_route_status(
+    kernel: &'static str,
+    status: &MetalTensor,
+    rows: usize,
+) -> Result<(), MetalError> {
+    if status.dtype != GgmlType::I32 || status.n_elements() < rows as u64 {
+        return Err(MetalError::BadShape {
+            kernel,
+            detail: format!(
+                "route status must be I32[{rows}], got {:?} {:?}",
+                status.dtype, status.shape
+            ),
+        });
+    }
+    let base = status.offset / 4;
+    let words = unsafe {
+        std::slice::from_raw_parts(
+            (status.buffer.contents().as_ptr() as *const i32).add(base as usize),
+            rows,
+        )
+    };
+    for (row, &word) in words.iter().enumerate() {
+        // Zero means no route was dispatched for this row (dense layer,
+        // no-op route ablation, or a diagnostic probe that bypasses this
+        // status word). Only rows that actually ran a route are judged.
+        if word == 0 {
+            continue;
+        }
+        if word & MOE_ROUTE_STATUS_READY != 0
+            && word & (MOE_ROUTE_STATUS_NONFINITE | MOE_ROUTE_STATUS_OVERFLOW) == 0
+        {
+            continue;
+        }
+        let reason = if word & MOE_ROUTE_STATUS_OVERFLOW != 0 {
+            "fixed-capacity expert bucket overflow"
+        } else if word & MOE_ROUTE_STATUS_NONFINITE != 0 {
+            "non-finite router logits"
+        } else {
+            "route did not complete"
+        };
+        return Err(MetalError::BadShape {
+            kernel,
+            detail: format!("route row {row} status {word}: {reason}"),
+        });
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 fn diagnostic_max_abs(a: &[f32], b: &[f32]) -> f32 {
     crate::compare::report_max_abs_diff_f32(a.iter(), b.iter())
@@ -5387,6 +5445,11 @@ pub fn encode_moe_weighted_sum_f32(
             ),
         });
     }
+    super::checks::check_disjoint(
+        "moe_weighted_sum",
+        out,
+        &[(expert_out, "expert outputs"), (weights, "weights")],
+    )?;
     let pso = ctx.pipeline("kernel_moe_weighted_sum_f32")?;
     enc.set_pipeline(&pso);
     #[repr(C)]
@@ -5398,8 +5461,8 @@ pub fn encode_moe_weighted_sum_f32(
     enc.set_bytes(
         0,
         &Args {
-            n_out: n_out as u32,
-            topk: topk as u32,
+            n_out: super::checks::to_u32("moe_reduce", n_out, "n_out")?,
+            topk: super::checks::to_u32("moe_reduce", topk, "topk")?,
         },
     );
     enc.set_tensor(1, expert_out);
@@ -5448,6 +5511,11 @@ pub fn encode_moe_weighted_sum_packed_f32(
             ),
         });
     }
+    super::checks::check_disjoint(
+        "moe_weighted_sum_packed",
+        out,
+        &[(expert_out, "expert outputs"), (weights, "weights")],
+    )?;
     let pso = ctx.pipeline("kernel_moe_weighted_sum_packed_f32")?;
     enc.set_pipeline(&pso);
     #[repr(C)]
@@ -5459,8 +5527,8 @@ pub fn encode_moe_weighted_sum_packed_f32(
     enc.set_bytes(
         0,
         &Args {
-            n_out: n_out as u32,
-            topk: topk as u32,
+            n_out: super::checks::to_u32("moe_reduce", n_out, "n_out")?,
+            topk: super::checks::to_u32("moe_reduce", topk, "topk")?,
         },
     );
     enc.set_tensor(1, expert_out);
@@ -5517,6 +5585,16 @@ pub fn encode_moe_grouped_finalizer_f32(
             ),
         });
     }
+    super::checks::check_disjoint(
+        "moe_grouped_finalizer",
+        x_pack,
+        &[
+            (expert_out, "expert outputs"),
+            (topk_w, "top-k weights"),
+            (shared_gate, "shared gate"),
+            (shared_out, "shared output"),
+        ],
+    )?;
     let pso = ctx.pipeline("kernel_moe_grouped_finalizer_f32")?;
     enc.set_pipeline(&pso);
     #[repr(C)]
@@ -5528,8 +5606,8 @@ pub fn encode_moe_grouped_finalizer_f32(
     enc.set_bytes(
         0,
         &Args {
-            n_out: n_out as u32,
-            topk: topk as u32,
+            n_out: super::checks::to_u32("moe_reduce", n_out, "n_out")?,
+            topk: super::checks::to_u32("moe_reduce", topk, "topk")?,
         },
     );
     enc.set_tensor(1, expert_out);
@@ -5576,6 +5654,30 @@ pub fn encode_moe_shared_accum_resid_f32(
             ),
         });
     }
+    // Same-index wobble: shared_out, mixer_out and x may alias only when they
+    // cover exactly the same bytes; shared_gate is read by every thread and
+    // must stay separate from both written streams.
+    super::checks::check_disjoint_or_exact(
+        "moe_shared_accum_resid",
+        mixer_out,
+        &[(shared_out, "shared output")],
+    )?;
+    super::checks::check_disjoint_or_exact(
+        "moe_shared_accum_resid",
+        x,
+        &[(shared_out, "shared output")],
+    )?;
+    super::checks::check_disjoint_or_exact(
+        "moe_shared_accum_resid",
+        mixer_out,
+        &[(x, "residual")],
+    )?;
+    super::checks::check_disjoint(
+        "moe_shared_accum_resid",
+        mixer_out,
+        &[(shared_gate, "shared gate")],
+    )?;
+    super::checks::check_disjoint("moe_shared_accum_resid", x, &[(shared_gate, "shared gate")])?;
     let pso = ctx.pipeline("kernel_moe_shared_accum_resid_f32")?;
     enc.set_pipeline(&pso);
     #[repr(C)]
@@ -5583,7 +5685,12 @@ pub fn encode_moe_shared_accum_resid_f32(
     struct Args {
         n: u32,
     }
-    enc.set_bytes(0, &Args { n: n as u32 });
+    enc.set_bytes(
+        0,
+        &Args {
+            n: super::checks::to_u32("moe_shared_accum_resid", n, "n")?,
+        },
+    );
     enc.set_tensor(1, shared_out);
     enc.set_tensor(2, shared_gate);
     enc.set_tensor(3, mixer_out);
@@ -5604,12 +5711,13 @@ pub fn encode_moe_shared_accum_resid_f32(
     Ok(())
 }
 
-pub fn encode_topk_logits_softmax_f32(
+pub fn encode_topk_logits_softmax_f32_status(
     ctx: &MetalContext,
     enc: &KernelEncoder,
     logits: &MetalTensor,
     out_idx: &MetalTensor,
     out_w: &MetalTensor,
+    status: &MetalTensor,
     n: usize,
     k: usize,
 ) -> Result<(), MetalError> {
@@ -5635,6 +5743,12 @@ pub fn encode_topk_logits_softmax_f32(
             detail: format!("k={k} must be in 1..=16"),
         });
     }
+    if status.dtype != GgmlType::I32 || status.n_elements() < 1 {
+        return Err(MetalError::BadShape {
+            kernel: "topk_logits_softmax",
+            detail: "status must be a nonempty I32 buffer".into(),
+        });
+    }
     let pso = ctx.pipeline("kernel_topk_logits_softmax_f32")?;
     enc.set_pipeline(&pso);
     #[repr(C)]
@@ -5653,6 +5767,7 @@ pub fn encode_topk_logits_softmax_f32(
     enc.set_tensor(1, logits);
     enc.set_tensor(2, out_idx);
     enc.set_tensor(3, out_w);
+    enc.set_tensor(4, status);
     enc.dispatch(
         MTLSize {
             width: 1,
@@ -5668,12 +5783,13 @@ pub fn encode_topk_logits_softmax_f32(
     Ok(())
 }
 
-pub fn encode_topk_logits_softmax_parallel_f32(
+pub fn encode_topk_logits_softmax_parallel_f32_status(
     ctx: &MetalContext,
     enc: &KernelEncoder,
     logits: &MetalTensor,
     out_idx: &MetalTensor,
     out_w: &MetalTensor,
+    status: &MetalTensor,
     n: usize,
     k: usize,
 ) -> Result<(), MetalError> {
@@ -5699,6 +5815,12 @@ pub fn encode_topk_logits_softmax_parallel_f32(
             detail: format!("expected 1 <= k <= n <= 256 and k <= 16, got n={n} k={k}"),
         });
     }
+    if status.dtype != GgmlType::I32 || status.n_elements() < 1 {
+        return Err(MetalError::BadShape {
+            kernel: "topk_logits_softmax_parallel",
+            detail: "status must be a nonempty I32 buffer".into(),
+        });
+    }
     let pso = ctx.pipeline("kernel_topk_logits_softmax_parallel_f32")?;
     enc.set_pipeline(&pso);
     #[repr(C)]
@@ -5717,6 +5839,7 @@ pub fn encode_topk_logits_softmax_parallel_f32(
     enc.set_tensor(1, logits);
     enc.set_tensor(2, out_idx);
     enc.set_tensor(3, out_w);
+    enc.set_tensor(4, status);
     const THREADS: usize = 256;
     enc.set_threadgroup_memory(0, THREADS * std::mem::size_of::<f32>());
     enc.set_threadgroup_memory(1, THREADS * std::mem::size_of::<f32>());
@@ -5736,7 +5859,7 @@ pub fn encode_topk_logits_softmax_parallel_f32(
     Ok(())
 }
 
-pub fn encode_topk_logits_softmax_dot_sigmoid_f32(
+pub fn encode_topk_logits_softmax_dot_sigmoid_f32_status(
     ctx: &MetalContext,
     enc: &KernelEncoder,
     logits: &MetalTensor,
@@ -5745,6 +5868,7 @@ pub fn encode_topk_logits_softmax_dot_sigmoid_f32(
     out_idx: &MetalTensor,
     out_w: &MetalTensor,
     shared_out: &MetalTensor,
+    status: &MetalTensor,
     n_expert: usize,
     topk: usize,
     hidden: usize,
@@ -5777,6 +5901,8 @@ pub fn encode_topk_logits_softmax_dot_sigmoid_f32(
         || shared_weight.n_elements() as usize != hidden
         || x.n_elements() as usize != hidden
         || shared_out.n_elements() != 1
+        || status.dtype != GgmlType::I32
+        || status.n_elements() < 1
     {
         return Err(MetalError::BadShape {
             kernel: "topk_logits_softmax_dot_sigmoid",
@@ -5817,6 +5943,7 @@ pub fn encode_topk_logits_softmax_dot_sigmoid_f32(
     enc.set_tensor(4, out_idx);
     enc.set_tensor(5, out_w);
     enc.set_tensor(6, shared_out);
+    enc.set_tensor(7, status);
     const THREADS: usize = 256;
     enc.set_threadgroup_memory(0, THREADS * std::mem::size_of::<f32>());
     enc.set_threadgroup_memory(1, THREADS * std::mem::size_of::<f32>());
@@ -5836,7 +5963,7 @@ pub fn encode_topk_logits_softmax_dot_sigmoid_f32(
     Ok(())
 }
 
-pub fn encode_topk_logits_softmax_dot_sigmoid_packed_f32(
+pub fn encode_topk_logits_softmax_dot_sigmoid_packed_f32_status(
     ctx: &MetalContext,
     enc: &KernelEncoder,
     logits: &MetalTensor,
@@ -5845,6 +5972,7 @@ pub fn encode_topk_logits_softmax_dot_sigmoid_packed_f32(
     out_idx: &MetalTensor,
     out_w: &MetalTensor,
     shared_out: &MetalTensor,
+    status: &MetalTensor,
     n_expert: usize,
     topk: usize,
     hidden: usize,
@@ -5913,6 +6041,8 @@ pub fn encode_topk_logits_softmax_dot_sigmoid_packed_f32(
         || shared_weight.n_elements() as usize != hidden
         || x.n_elements() as usize != input_elements
         || shared_out.n_elements() as usize != n_tokens
+        || status.dtype != GgmlType::I32
+        || status.n_elements() < n_tokens as u64
     {
         return Err(MetalError::BadShape {
             kernel: KERNEL,
@@ -5958,6 +6088,7 @@ pub fn encode_topk_logits_softmax_dot_sigmoid_packed_f32(
     enc.set_tensor(4, out_idx);
     enc.set_tensor(5, out_w);
     enc.set_tensor(6, shared_out);
+    enc.set_tensor(7, status);
     let threads = if n_expert <= 256 { 256 } else { 512 };
     if pso.maxTotalThreadsPerThreadgroup() < threads {
         return Err(MetalError::BadShape {
@@ -6010,36 +6141,38 @@ pub fn encode_topk_logits_softmax_dot_sigmoid_packed_f32(
 
 /// Buckets route ids by expert with one thread per expert scanning every
 /// rows x topk id (`kernel_moe_route_bucket_slots_f32`).
-pub fn encode_moe_route_bucket_slots_f32(
+pub fn encode_moe_route_bucket_slots_f32_status(
     ctx: &MetalContext,
     enc: &KernelEncoder,
     topk_idx: &MetalTensor,
     counts: &MetalTensor,
     ids: &MetalTensor,
+    status: &MetalTensor,
     n_expert: usize,
     n_tokens: usize,
     topk: usize,
 ) -> Result<(), MetalError> {
     encode_route_bucket(
-        ctx, enc, topk_idx, counts, ids, n_expert, n_tokens, topk, false,
+        ctx, enc, topk_idx, counts, ids, status, n_expert, n_tokens, topk, false,
     )
 }
 
 /// Same counts and slot lists as [`encode_moe_route_bucket_slots_f32`]
 /// (bitwise), with one 256-thread threadgroup per expert that counts, scans
 /// and scatters its matches in parallel.
-pub fn encode_moe_route_bucket_slots_parallel_f32(
+pub fn encode_moe_route_bucket_slots_parallel_f32_status(
     ctx: &MetalContext,
     enc: &KernelEncoder,
     topk_idx: &MetalTensor,
     counts: &MetalTensor,
     ids: &MetalTensor,
+    status: &MetalTensor,
     n_expert: usize,
     n_tokens: usize,
     topk: usize,
 ) -> Result<(), MetalError> {
     encode_route_bucket(
-        ctx, enc, topk_idx, counts, ids, n_expert, n_tokens, topk, true,
+        ctx, enc, topk_idx, counts, ids, status, n_expert, n_tokens, topk, true,
     )
 }
 
@@ -6050,6 +6183,7 @@ fn encode_route_bucket(
     topk_idx: &MetalTensor,
     counts: &MetalTensor,
     ids: &MetalTensor,
+    status: &MetalTensor,
     n_expert: usize,
     n_tokens: usize,
     topk: usize,
@@ -6058,6 +6192,8 @@ fn encode_route_bucket(
     if topk_idx.n_elements() as usize != n_tokens * topk
         || counts.n_elements() as usize != n_expert
         || ids.n_elements() as usize != n_expert * n_tokens
+        || status.dtype != GgmlType::I32
+        || status.n_elements() < n_tokens as u64
     {
         return Err(MetalError::BadShape {
             kernel: "moe_route_bucket_slots",
@@ -6088,14 +6224,15 @@ fn encode_route_bucket(
     enc.set_bytes(
         0,
         &Args {
-            n_expert: n_expert as u32,
-            n_tokens: n_tokens as u32,
-            topk: topk as u32,
+            n_expert: super::checks::to_u32("moe_route_bucket_slots", n_expert, "n_expert")?,
+            n_tokens: super::checks::to_u32("moe_route_bucket_slots", n_tokens, "n_tokens")?,
+            topk: super::checks::to_u32("moe_route_bucket_slots", topk, "topk")?,
         },
     );
     enc.set_tensor(1, topk_idx);
     enc.set_tensor(2, counts);
     enc.set_tensor(3, ids);
+    enc.set_tensor(4, status);
     enc.dispatch(
         MTLSize {
             width: if parallel {
@@ -6113,6 +6250,136 @@ fn encode_route_bucket(
         },
     );
     Ok(())
+}
+
+/// Legacy top-k convenience for tests/diagnostics: allocates a private
+/// status word and does not return it. Production paths call
+/// [`encode_topk_logits_softmax_f32_status`] and check the word.
+pub fn encode_topk_logits_softmax_f32(
+    ctx: &MetalContext,
+    enc: &KernelEncoder,
+    logits: &MetalTensor,
+    out_idx: &MetalTensor,
+    out_w: &MetalTensor,
+    n: usize,
+    k: usize,
+) -> Result<(), MetalError> {
+    let status = MetalTensor::zeros_i32(ctx, vec![1])?;
+    encode_topk_logits_softmax_f32_status(ctx, enc, logits, out_idx, out_w, &status, n, k)
+}
+
+/// See [`encode_topk_logits_softmax_f32`].
+pub fn encode_topk_logits_softmax_parallel_f32(
+    ctx: &MetalContext,
+    enc: &KernelEncoder,
+    logits: &MetalTensor,
+    out_idx: &MetalTensor,
+    out_w: &MetalTensor,
+    n: usize,
+    k: usize,
+) -> Result<(), MetalError> {
+    let status = MetalTensor::zeros_i32(ctx, vec![1])?;
+    encode_topk_logits_softmax_parallel_f32_status(ctx, enc, logits, out_idx, out_w, &status, n, k)
+}
+
+/// See [`encode_topk_logits_softmax_f32`].
+#[allow(clippy::too_many_arguments)]
+pub fn encode_topk_logits_softmax_dot_sigmoid_f32(
+    ctx: &MetalContext,
+    enc: &KernelEncoder,
+    logits: &MetalTensor,
+    shared_weight: &MetalTensor,
+    x: &MetalTensor,
+    out_idx: &MetalTensor,
+    out_w: &MetalTensor,
+    shared_out: &MetalTensor,
+    n_expert: usize,
+    topk: usize,
+    hidden: usize,
+) -> Result<(), MetalError> {
+    let status = MetalTensor::zeros_i32(ctx, vec![1])?;
+    encode_topk_logits_softmax_dot_sigmoid_f32_status(
+        ctx,
+        enc,
+        logits,
+        shared_weight,
+        x,
+        out_idx,
+        out_w,
+        shared_out,
+        &status,
+        n_expert,
+        topk,
+        hidden,
+    )
+}
+
+/// See [`encode_topk_logits_softmax_f32`].
+#[allow(clippy::too_many_arguments)]
+pub fn encode_topk_logits_softmax_dot_sigmoid_packed_f32(
+    ctx: &MetalContext,
+    enc: &KernelEncoder,
+    logits: &MetalTensor,
+    shared_weight: &MetalTensor,
+    x: &MetalTensor,
+    out_idx: &MetalTensor,
+    out_w: &MetalTensor,
+    shared_out: &MetalTensor,
+    n_expert: usize,
+    topk: usize,
+    hidden: usize,
+    n_tokens: usize,
+) -> Result<(), MetalError> {
+    let status = MetalTensor::zeros_i32(ctx, vec![n_tokens as u64])?;
+    encode_topk_logits_softmax_dot_sigmoid_packed_f32_status(
+        ctx,
+        enc,
+        logits,
+        shared_weight,
+        x,
+        out_idx,
+        out_w,
+        shared_out,
+        &status,
+        n_expert,
+        topk,
+        hidden,
+        n_tokens,
+    )
+}
+
+/// See [`encode_topk_logits_softmax_f32`].
+pub fn encode_moe_route_bucket_slots_f32(
+    ctx: &MetalContext,
+    enc: &KernelEncoder,
+    topk_idx: &MetalTensor,
+    counts: &MetalTensor,
+    ids: &MetalTensor,
+    n_expert: usize,
+    n_tokens: usize,
+    topk: usize,
+) -> Result<(), MetalError> {
+    let status = MetalTensor::zeros_i32(ctx, vec![n_tokens as u64])?;
+    encode_moe_route_bucket_slots_f32_status(
+        ctx, enc, topk_idx, counts, ids, &status, n_expert, n_tokens, topk,
+    )
+}
+
+/// See [`encode_topk_logits_softmax_f32`].
+pub fn encode_moe_route_bucket_slots_parallel_f32(
+    ctx: &MetalContext,
+    enc: &KernelEncoder,
+    topk_idx: &MetalTensor,
+    counts: &MetalTensor,
+    ids: &MetalTensor,
+    n_expert: usize,
+    n_tokens: usize,
+    topk: usize,
+) -> Result<(), MetalError> {
+    let status = MetalTensor::zeros_i32(ctx, vec![n_tokens as u64])?;
+    encode_moe_route_bucket_slots_parallel_f32_status(
+        ctx, enc, topk_idx, counts, ids, &status, n_expert, n_tokens, topk,
+    )
 }
 
 #[cfg(test)]
@@ -6155,10 +6422,11 @@ mod tests {
                     GgmlType::I32,
                 )
                 .unwrap();
+                let status = MetalTensor::zeros_i32(&ctx, vec![n_tokens as u64]).unwrap();
                 let command = ctx.queue.commandBuffer().unwrap();
                 let enc = KernelEncoder::begin(&command);
                 encode_route_bucket(
-                    &ctx, &enc, &top, &counts, &ids, n_expert, n_tokens, topk, parallel,
+                    &ctx, &enc, &top, &counts, &ids, &status, n_expert, n_tokens, topk, parallel,
                 )
                 .unwrap();
                 enc.end();
@@ -6186,6 +6454,271 @@ mod tests {
                 n_tokens * topk
             );
         }
+    }
+
+    #[test]
+    fn topk_nonfinite_logits_stay_unique_and_raise_status() {
+        let Some(ctx) = metal_test_context() else {
+            return;
+        };
+        let cases: [(&[f32], bool); 3] = [
+            (&vec![f32::NAN; 32], true),
+            (&vec![f32::NEG_INFINITY; 32], true),
+            (&(0..32).map(|i| i as f32 * 0.25).collect::<Vec<_>>(), false),
+        ];
+        for (logits, nonfinite) in cases {
+            let input = MetalTensor::from_bytes(
+                &ctx,
+                bytemuck::cast_slice(logits),
+                vec![logits.len() as u64],
+                GgmlType::F32,
+            )
+            .unwrap();
+            for parallel in [false, true] {
+                let ids = MetalTensor::zeros_i32(&ctx, vec![6]).unwrap();
+                let weights = MetalTensor::zeros_f32(&ctx, vec![6]).unwrap();
+                let status = MetalTensor::zeros_i32(&ctx, vec![1]).unwrap();
+                let command = ctx.queue.commandBuffer().unwrap();
+                let enc = KernelEncoder::begin(&command);
+                if parallel {
+                    encode_topk_logits_softmax_parallel_f32_status(
+                        &ctx,
+                        &enc,
+                        &input,
+                        &ids,
+                        &weights,
+                        &status,
+                        logits.len(),
+                        6,
+                    )
+                    .unwrap();
+                } else {
+                    encode_topk_logits_softmax_f32_status(
+                        &ctx,
+                        &enc,
+                        &input,
+                        &ids,
+                        &weights,
+                        &status,
+                        logits.len(),
+                        6,
+                    )
+                    .unwrap();
+                }
+                enc.end();
+                crate::metal::commit_and_wait(&command).unwrap();
+                let read_i32 = |t: &MetalTensor, n: usize| unsafe {
+                    std::slice::from_raw_parts(t.buffer.contents().as_ptr().cast::<i32>(), n)
+                        .to_vec()
+                };
+                let words = read_i32(&ids, 6);
+                for (slot, &id) in words.iter().enumerate() {
+                    assert!(
+                        (0..logits.len() as i32).contains(&id),
+                        "slot {slot} id {id}"
+                    );
+                    assert!(
+                        !words[..slot].contains(&id),
+                        "duplicate id {id} in {words:?}"
+                    );
+                }
+                let word = read_i32(&status, 1)[0];
+                assert_eq!(word & MOE_ROUTE_STATUS_READY, MOE_ROUTE_STATUS_READY);
+                assert_eq!(
+                    word & MOE_ROUTE_STATUS_NONFINITE != 0,
+                    nonfinite,
+                    "status {word} for parallel={parallel}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn packed_route_nonfinite_is_unique_per_token_and_flagged() {
+        let Some(ctx) = metal_test_context() else {
+            return;
+        };
+        const N_EXPERT: usize = 8;
+        const TOPK: usize = 3;
+        const HIDDEN: usize = 4;
+        const N_TOKENS: usize = 2;
+        let mut logits = vec![f32::NAN; N_TOKENS * N_EXPERT];
+        logits[N_EXPERT..].fill(f32::NEG_INFINITY);
+        let logits_t = MetalTensor::from_bytes(
+            &ctx,
+            bytemuck::cast_slice(&logits),
+            vec![(N_TOKENS * N_EXPERT) as u64],
+            GgmlType::F32,
+        )
+        .unwrap();
+        let shared_weight = MetalTensor::zeros_f32(&ctx, vec![HIDDEN as u64]).unwrap();
+        let x = MetalTensor::zeros_f32(&ctx, vec![(N_TOKENS * HIDDEN) as u64]).unwrap();
+        let ids = MetalTensor::zeros_i32(&ctx, vec![(N_TOKENS * TOPK) as u64]).unwrap();
+        let weights = MetalTensor::zeros_f32(&ctx, vec![(N_TOKENS * TOPK) as u64]).unwrap();
+        let shared_out = MetalTensor::zeros_f32(&ctx, vec![N_TOKENS as u64]).unwrap();
+        let status = MetalTensor::zeros_i32(&ctx, vec![N_TOKENS as u64]).unwrap();
+        let command = ctx.queue.commandBuffer().unwrap();
+        let enc = KernelEncoder::begin(&command);
+        encode_topk_logits_softmax_dot_sigmoid_packed_f32_status(
+            &ctx,
+            &enc,
+            &logits_t,
+            &shared_weight,
+            &x,
+            &ids,
+            &weights,
+            &shared_out,
+            &status,
+            N_EXPERT,
+            TOPK,
+            HIDDEN,
+            N_TOKENS,
+        )
+        .unwrap();
+        enc.end();
+        crate::metal::commit_and_wait(&command).unwrap();
+        let read_i32 = |t: &MetalTensor, n: usize| unsafe {
+            std::slice::from_raw_parts(t.buffer.contents().as_ptr().cast::<i32>(), n).to_vec()
+        };
+        let ids = read_i32(&ids, N_TOKENS * TOPK);
+        for token in 0..N_TOKENS {
+            let row = &ids[token * TOPK..(token + 1) * TOPK];
+            for (slot, &id) in row.iter().enumerate() {
+                assert!((0..N_EXPERT as i32).contains(&id), "row {row:?}");
+                assert!(!row[..slot].contains(&id), "duplicate in {row:?}");
+            }
+        }
+        let words = read_i32(&status, N_TOKENS);
+        assert!(words.iter().all(|w| w & MOE_ROUTE_STATUS_NONFINITE != 0));
+    }
+
+    #[test]
+    fn bucket_overflow_is_bounded_and_flagged() {
+        let Some(ctx) = metal_test_context() else {
+            return;
+        };
+        const N_EXPERT: usize = 2;
+        const N_TOKENS: usize = 4;
+        const TOPK: usize = 3;
+        // Every slot selects expert 0: 12 writes into a 4-slot bucket.
+        let top_idx = vec![0i32; N_TOKENS * TOPK];
+        let top = MetalTensor::from_bytes(
+            &ctx,
+            bytemuck::cast_slice(&top_idx),
+            vec![top_idx.len() as u64],
+            GgmlType::I32,
+        )
+        .unwrap();
+        for parallel in [false, true] {
+            let counts = MetalTensor::zeros_i32(&ctx, vec![N_EXPERT as u64]).unwrap();
+            let guard = 8usize;
+            let ids_backing = MetalTensor::from_bytes(
+                &ctx,
+                bytemuck::cast_slice(&vec![-77i32; N_EXPERT * N_TOKENS + guard]),
+                vec![(N_EXPERT * N_TOKENS + guard) as u64],
+                GgmlType::I32,
+            )
+            .unwrap();
+            let ids = ids_backing.view_subrange(0, vec![(N_EXPERT * N_TOKENS) as u64]);
+            let status = MetalTensor::from_bytes(
+                &ctx,
+                bytemuck::cast_slice(&vec![MOE_ROUTE_STATUS_READY; N_TOKENS]),
+                vec![N_TOKENS as u64],
+                GgmlType::I32,
+            )
+            .unwrap();
+            let command = ctx.queue.commandBuffer().unwrap();
+            let enc = KernelEncoder::begin(&command);
+            encode_route_bucket(
+                &ctx, &enc, &top, &counts, &ids, &status, N_EXPERT, N_TOKENS, TOPK, parallel,
+            )
+            .unwrap();
+            enc.end();
+            crate::metal::commit_and_wait(&command).unwrap();
+            let read_i32 = |t: &MetalTensor, n: usize| unsafe {
+                std::slice::from_raw_parts(t.buffer.contents().as_ptr().cast::<i32>(), n).to_vec()
+            };
+            assert_eq!(read_i32(&counts, N_EXPERT), vec![12, 0]);
+            let tail = read_i32(&ids_backing, N_EXPERT * N_TOKENS + guard);
+            assert_eq!(&tail[N_EXPERT * N_TOKENS..], &vec![-77; guard]);
+            let words = read_i32(&status, N_TOKENS);
+            assert!(
+                words.iter().any(|w| w & MOE_ROUTE_STATUS_OVERFLOW != 0),
+                "status {words:?}"
+            );
+            let err = check_moe_route_status("test_route", &status, N_TOKENS).unwrap_err();
+            assert!(err.to_string().contains("bucket overflow"), "{err}");
+        }
+    }
+
+    #[test]
+    fn route_status_names_both_failure_bits() {
+        let Some(ctx) = metal_test_context() else {
+            return;
+        };
+        for (word, needle) in [
+            (
+                MOE_ROUTE_STATUS_READY | MOE_ROUTE_STATUS_NONFINITE,
+                "non-finite",
+            ),
+            (
+                MOE_ROUTE_STATUS_READY | MOE_ROUTE_STATUS_OVERFLOW,
+                "overflow",
+            ),
+        ] {
+            let status = MetalTensor::from_bytes(
+                &ctx,
+                bytemuck::cast_slice(&[word]),
+                vec![1],
+                GgmlType::I32,
+            )
+            .unwrap();
+            let err = check_moe_route_status("test_route", &status, 1).unwrap_err();
+            assert!(err.to_string().contains(needle), "{err}");
+        }
+    }
+
+    #[test]
+    fn reduce_encoders_refuse_output_aliasing() {
+        let Some(ctx) = metal_test_context() else {
+            return;
+        };
+        let backing = MetalTensor::from_bytes(
+            &ctx,
+            bytemuck::cast_slice(&[1.0f32; 12]),
+            vec![12],
+            GgmlType::F32,
+        )
+        .unwrap();
+        let a = backing.view_subrange(0, vec![8]);
+        let a_partial = backing.view_subrange(1, vec![8]);
+        let b = MetalTensor::zeros_f32(&ctx, vec![8]).unwrap();
+        let weights = MetalTensor::from_bytes(
+            &ctx,
+            bytemuck::cast_slice(&[1.0f32]),
+            vec![1],
+            GgmlType::F32,
+        )
+        .unwrap();
+        let command = ctx.queue.commandBuffer().unwrap();
+        let enc = KernelEncoder::begin(&command);
+        let err = encode_moe_weighted_sum_f32(&ctx, &enc, &a, &weights, &a, 8, 1).unwrap_err();
+        assert!(err.to_string().contains("aliases expert outputs"), "{err}");
+        let err =
+            encode_moe_weighted_sum_packed_f32(&ctx, &enc, &a, &weights, &a, 8, 1, 1).unwrap_err();
+        assert!(err.to_string().contains("aliases expert outputs"), "{err}");
+        let gate = MetalTensor::from_bytes(
+            &ctx,
+            bytemuck::cast_slice(&[0.5f32]),
+            vec![1],
+            GgmlType::F32,
+        )
+        .unwrap();
+        let err =
+            encode_moe_shared_accum_resid_f32(&ctx, &enc, &a, &gate, &b, &a_partial).unwrap_err();
+        assert!(err.to_string().contains("partially aliases"), "{err}");
+        // Exact same-index aliases are allowed for this kernel.
+        encode_moe_shared_accum_resid_f32(&ctx, &enc, &a, &gate, &a, &b).unwrap();
     }
 
     #[test]

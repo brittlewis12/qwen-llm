@@ -451,9 +451,11 @@ pub struct GroupedExperts<'a> {
     /// Normalized FFN input, F32 `[hidden, rows]`.
     pub input: &'a MetalTensor,
     /// Routes from [`encode_route_learned_rows`]: I32 ids and F32 weights
-    /// `[top_k, rows]`.
+    /// `[top_k, rows]`, plus the I32 `[rows]` route status they were checked
+    /// against. Bucket overflow is reported in this status word.
     pub ids: &'a MetalTensor,
     pub weights: &'a MetalTensor,
+    pub status: &'a MetalTensor,
     /// Scratch: I32 per-expert counts `[experts]` and expert-major slots
     /// `[experts * rows]`; F32 slot activations `[ffn, top_k * rows]` and slot
     /// outputs `[hidden, top_k * rows]`.
@@ -676,12 +678,13 @@ pub(crate) fn encode_grouped_routed_experts_with_down_policy(
             rows,
         )?,
     };
-    encode_moe_route_bucket_slots_f32(
+    encode_moe_route_bucket_slots_f32_status(
         ctx,
         enc,
         &flat(b.ids),
         b.counts,
         b.slots,
+        b.status,
         experts,
         rows,
         top_k,
@@ -842,12 +845,13 @@ pub(crate) fn encode_grouped_routed_experts_f32x(
         experts,
         rows,
     )?;
-    encode_moe_route_bucket_slots_f32(
+    encode_moe_route_bucket_slots_f32_status(
         ctx,
         enc,
         &flat(b.ids),
         b.counts,
         b.slots,
+        b.status,
         experts,
         rows,
         top_k,
@@ -1226,6 +1230,7 @@ mod tests {
                         input: &input,
                         ids: &ids,
                         weights: &weights,
+                        status: &counts,
                         counts: &counts,
                         slots: &slots,
                         inner: &inner,
@@ -1302,6 +1307,7 @@ mod tests {
                         input,
                         ids: &ids,
                         weights: &weights,
+                        status: &counts,
                         counts: &counts,
                         slots: &slots,
                         inner,

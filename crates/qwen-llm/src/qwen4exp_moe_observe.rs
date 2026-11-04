@@ -230,6 +230,7 @@ fn buffers(w: &Qwen4ExpMoeMetalWorkspace) -> Qwen4ExpMoeSingletonBuffers<'_> {
         topk_ids: &w.topk_ids,
         topk_weights: &w.topk_weights,
         shared_scale: &w.shared_gate,
+        route_status: &w.route_status,
         routed_inner: &w.routed_inner,
         routed_expert_output: &w.routed_expert_output,
         shared_inner: &w.shared_inner,

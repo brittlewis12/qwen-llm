@@ -82,6 +82,7 @@ pub struct Qwen4ExpPackedPrefillWorkspace {
     active_command: Option<Retained<ProtocolObject<dyn MTLCommandBuffer>>>,
     state_poisoned: bool,
     encode_failed: bool,
+    route_status_rows: usize,
 }
 
 impl Qwen4ExpPackedPrefillWorkspace {
@@ -143,6 +144,7 @@ impl Qwen4ExpPackedPrefillWorkspace {
             active_command: None,
             state_poisoned: false,
             encode_failed: false,
+            route_status_rows: 0,
         })
     }
 
@@ -213,6 +215,14 @@ impl Qwen4ExpPackedPrefillWorkspace {
             && !self.encode_failed
             && let Some(pending) = pending
         {
+            if let Err(error) = crate::metal::check_moe_route_status(
+                "qwen4exp_moe_packed_prefill",
+                &self.moe.route_status,
+                self.route_status_rows,
+            ) {
+                self.state_poisoned = true;
+                return Err(Qwen4ExpPackedPrefillError::Invalid(error.to_string()));
+            }
             self.history = pending;
             self.encode_failed = false;
             return Ok(());
@@ -367,6 +377,7 @@ pub fn encode_qwen4exp_packed_prefill<'a>(
 
     reserve_command(workspace, enc)?;
     workspace.pending_history = Some(next_history);
+    workspace.route_status_rows = token_ids.len();
     if let Err(error) = encode_step(ctx, enc, weights, workspace, token_ids.len()) {
         workspace.encode_failed = true;
         workspace.state_poisoned = true;

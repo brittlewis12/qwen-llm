@@ -46,11 +46,29 @@ pub(crate) fn encode(
     ids: &MetalTensor,
     weights: &MetalTensor,
 ) -> Result<(), Qwen4ExpMoeError> {
+    let status = MetalTensor::zeros_i32(ctx, vec![1])?;
+    encode_with_status(ctx, enc, logits, ids, weights, &status)
+}
+
+pub(crate) fn encode_with_status(
+    ctx: &MetalContext,
+    enc: &KernelEncoder,
+    logits: &MetalTensor,
+    ids: &MetalTensor,
+    weights: &MetalTensor,
+    status: &MetalTensor,
+) -> Result<(), Qwen4ExpMoeError> {
     validate_encoder(ctx, enc)?;
     require_tensor("guarded top-k logits", logits, GgmlType::F32, &[512], false)?;
     require_tensor("guarded top-k IDs", ids, GgmlType::I32, &[10], true)?;
     require_tensor("guarded top-k weights", weights, GgmlType::F32, &[10], true)?;
-    let tensors = [("logits", logits), ("IDs", ids), ("weights", weights)];
+    require_tensor("guarded top-k status", status, GgmlType::I32, &[1], true)?;
+    let tensors = [
+        ("logits", logits),
+        ("IDs", ids),
+        ("weights", weights),
+        ("status", status),
+    ];
     require_same_device(ctx, &tensors)?;
     require_disjoint(&tensors)?;
     preflight(ctx)?;
@@ -59,6 +77,7 @@ pub(crate) fn encode(
     enc.set_tensor(1, logits);
     enc.set_tensor(2, ids);
     enc.set_tensor(3, weights);
+    enc.set_tensor(4, status);
     for slot in 0..3 {
         enc.set_threadgroup_memory(slot, 2048);
     }
@@ -82,11 +101,12 @@ mod tests {
     use super::*;
     use objc2_metal::{MTLCommandBuffer, MTLCommandQueue};
 
-    fn run(ctx: &MetalContext, kernel: &str, logits: &[f32]) -> (Vec<i32>, Vec<u32>) {
+    fn run(ctx: &MetalContext, kernel: &str, logits: &[f32]) -> (Vec<i32>, Vec<u32>, i32) {
         let bytes: Vec<u8> = logits.iter().flat_map(|v| v.to_le_bytes()).collect();
         let input = MetalTensor::from_bytes(ctx, &bytes, vec![512], GgmlType::F32).unwrap();
         let ids = MetalTensor::zeros_i32(ctx, vec![10]).unwrap();
         let weights = MetalTensor::zeros_f32(ctx, vec![10]).unwrap();
+        let status = MetalTensor::zeros_i32(ctx, vec![1]).unwrap();
         let command = ctx.queue.commandBuffer().unwrap();
         let enc = KernelEncoder::begin(&command);
         enc.set_pipeline(&ctx.pipeline(kernel).unwrap());
@@ -94,6 +114,7 @@ mod tests {
         enc.set_tensor(1, &input);
         enc.set_tensor(2, &ids);
         enc.set_tensor(3, &weights);
+        enc.set_tensor(4, &status);
         for slot in 0..3 {
             enc.set_threadgroup_memory(slot, 2048);
         }
@@ -125,7 +146,40 @@ mod tests {
             .to_vec()
         };
         let idx = read(&ids).into_iter().map(|v| v as i32).collect();
-        (idx, read(&weights))
+        let word = unsafe { *(status.buffer.contents().as_ptr().cast::<i32>()) };
+        (idx, read(&weights), word)
+    }
+
+    fn run_serial(ctx: &MetalContext, logits: &[f32]) -> (Vec<i32>, Vec<u32>, i32) {
+        let bytes: Vec<u8> = logits.iter().flat_map(|v| v.to_le_bytes()).collect();
+        let input = MetalTensor::from_bytes(ctx, &bytes, vec![512], GgmlType::F32).unwrap();
+        let ids = MetalTensor::zeros_i32(ctx, vec![10]).unwrap();
+        let weights = MetalTensor::zeros_f32(ctx, vec![10]).unwrap();
+        let status = MetalTensor::zeros_i32(ctx, vec![1]).unwrap();
+        let command = ctx.queue.commandBuffer().unwrap();
+        let enc = KernelEncoder::begin(&command);
+        crate::metal::encode_topk_logits_softmax_f32_status(
+            ctx, &enc, &input, &ids, &weights, &status, 512, 10,
+        )
+        .unwrap();
+        enc.end();
+        command.commit();
+        crate::metal::wait_completed(&command).expect("command buffer completed");
+        let read = |t: &MetalTensor| unsafe {
+            std::slice::from_raw_parts(
+                t.buffer
+                    .contents()
+                    .as_ptr()
+                    .cast::<u8>()
+                    .add(t.offset as usize)
+                    .cast::<u32>(),
+                10,
+            )
+            .to_vec()
+        };
+        let idx = read(&ids).into_iter().map(|v| v as i32).collect();
+        let word = unsafe { *(status.buffer.contents().as_ptr().cast::<i32>()) };
+        (idx, read(&weights), word)
     }
 
     /// The SIMD guarded top-k selects the same experts in the same order with
@@ -169,11 +223,36 @@ mod tests {
         inf[400] = f32::INFINITY;
         cases.push(inf);
         for (case, logits) in cases.iter().enumerate() {
-            assert_eq!(
-                run(&ctx, SIMD_KERNEL, logits),
-                run(&ctx, TREE_KERNEL, logits),
-                "case {case}"
-            );
+            let expected = run(&ctx, TREE_KERNEL, logits);
+            assert_eq!(run(&ctx, SIMD_KERNEL, logits), expected, "case {case} simd");
+            if logits.iter().all(|v| v.is_finite()) {
+                assert_eq!(run_serial(&ctx, logits), expected, "case {case} serial");
+            }
+        }
+    }
+
+    #[test]
+    fn nonfinite_guarded_topk_is_unique_and_flagged() {
+        let Some(ctx) = crate::test_fixtures::metal_context_or_skip() else {
+            return;
+        };
+        for logits in [vec![f32::NAN; 512], vec![f32::NEG_INFINITY; 512], {
+            let mut v = vec![f32::NEG_INFINITY; 512];
+            v[7] = 1.0;
+            v[300] = 1.0;
+            v
+        }] {
+            for kernel in [TREE_KERNEL, SIMD_KERNEL] {
+                let (ids, weights, status) = run(&ctx, kernel, &logits);
+                for (slot, &id) in ids.iter().enumerate() {
+                    assert!((0..512).contains(&id), "{kernel} slot {slot} id {id}");
+                    assert!(
+                        !ids[..slot].contains(&id),
+                        "{kernel} duplicate id {id} in {ids:?}"
+                    );
+                }
+                assert_ne!(status & 2, 0, "{kernel} status {status}");
+            }
         }
     }
 }

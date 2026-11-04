@@ -713,6 +713,7 @@ fn iq3_s_retile_shared_composition_requires_explicit_policy_and_honors_fallback(
             input: &input,
             ids: &ids,
             weights: &weights,
+            status: &counts,
             counts: &counts,
             slots: &slots,
             inner: &inner,

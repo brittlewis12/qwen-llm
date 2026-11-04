@@ -4187,10 +4187,19 @@ mod tests {
                 };
                 let inc_med = median(&mut inc_samples.clone());
                 let gen_med = median(&mut gen_samples.clone());
+                let inc_out = read_back_f32(&y_inc.buffer, n_out * n_cols);
+                let gen_out = read_back_f32(&y_gen.buffer, n_out * n_cols);
+                let max_ref = inc_out.iter().fold(0.0f32, |m, v| m.max(v.abs()));
+                let max_diff = inc_out
+                    .iter()
+                    .zip(&gen_out)
+                    .map(|(a, b)| (a - b).abs())
+                    .fold(0.0f32, f32::max);
                 eprintln!(
-                    "[fewrow-bench] tensor={name} dtype={:?} n_in={n_in} n_out={n_out} n_cols={n_cols} incumbent_ms={inc_samples:?} fewrow_ms={gen_samples:?} ratio={:.3}",
+                    "[fewrow-bench] tensor={name} dtype={:?} n_in={n_in} n_out={n_out} n_cols={n_cols} incumbent_ms={inc_samples:?} fewrow_ms={gen_samples:?} ratio={:.3} max_diff_rel={:.2e}",
                     t.dtype,
-                    inc_med / gen_med
+                    inc_med / gen_med,
+                    max_diff / max_ref.max(1.0)
                 );
             }
         }

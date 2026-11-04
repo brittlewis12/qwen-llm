@@ -456,6 +456,24 @@ fn encode_mat_mat_dispatch_routed(
         )?);
     }
 
+    // Generic few-row MMA (llama.cpp `kernel_mul_mv_mma_gen`): one weight
+    // read per 8-column tile, K split across simdgroups. Default off until
+    // the 27B Q4_K_M N=8 gate and end-to-end ABBA clear on both machines.
+    // Q8_0 uses the tuned Q8_0 arm at 1..=8 rows and this arm at 9..=16.
+    // Rollback: QWEN_MATMAT_FEWROW_GEN=0 (default).
+    if matmat_fewrow_gen_enabled()
+        && (2..=16).contains(&n_query)
+        && ((matches!(
+            weight.dtype,
+            GgmlType::Q4_K | GgmlType::Q5_K | GgmlType::Q6_K
+        ) && n_in.is_multiple_of(256))
+            || (weight.dtype == GgmlType::Q8_0 && n_query > 8 && n_in.is_multiple_of(64)))
+    {
+        return Ok(crate::metal::encode_mat_mat_fewrow_gen_f32(
+            ctx, enc, weight, x, y, n_in, n_out, n_query,
+        )?);
+    }
+
     // v0.501: small-N best-kernel table from the v0.500 selection sweep
     // (PERF-LOG v0.500; the pre-v0.501 selection fell through to the
     // GENERIC 32-wide tile at every N < 16 and lost 2-5x). Only fires

@@ -2704,3 +2704,6 @@ crate::env_flag!(default_on matmat_n1_matvec_enabled, "QWEN_MATMAT_N1_MATVEC");
 crate::env_flag!(default_on matmat_iq2_s_n2_nc2_enabled, "QWEN_MATMAT_IQ2_S_N2_NC2");
 crate::env_flag!(default_on matmat_iq3_s_n2_nc2_enabled, "QWEN_MATMAT_IQ3_S_N2_NC2");
 crate::env_flag!(default_on matmat_q8_fewrow_enabled, "QWEN_MATMAT_Q8_FEWROW");
+/// Routes Q4_K/Q5_K/Q6_K (and Q8_0 at 9..=16 rows) through the generic
+/// few-row MMA kernel instead of the per-type small-N routes.
+crate::env_flag!(default_off matmat_fewrow_gen_enabled, "QWEN_MATMAT_FEWROW_GEN");

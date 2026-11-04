@@ -465,9 +465,19 @@ fn encode_mat_mat_dispatch_routed(
         && (2..=16).contains(&n_query)
         && ((matches!(
             weight.dtype,
-            GgmlType::Q4_K | GgmlType::Q5_K | GgmlType::Q6_K
+            GgmlType::Q4_K
+                | GgmlType::Q5_K
+                | GgmlType::Q6_K
+                | GgmlType::IQ2_XXS
+                | GgmlType::IQ2_XS
+                | GgmlType::IQ2_S
+                | GgmlType::IQ3_XXS
+                | GgmlType::IQ3_S
+                | GgmlType::IQ4_XS
         ) && n_in.is_multiple_of(256))
-            || (weight.dtype == GgmlType::Q8_0 && n_query > 8 && n_in.is_multiple_of(64)))
+            || (matches!(weight.dtype, GgmlType::Q8_0 | GgmlType::IQ4_NL)
+                && n_in.is_multiple_of(64)
+                && (weight.dtype != GgmlType::Q8_0 || n_query > 8)))
     {
         return Ok(crate::metal::encode_mat_mat_fewrow_gen_f32(
             ctx, enc, weight, x, y, n_in, n_out, n_query,

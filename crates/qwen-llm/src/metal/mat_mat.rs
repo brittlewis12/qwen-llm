@@ -1939,6 +1939,13 @@ pub(crate) enum FewrowGenType {
     Q5K,
     Q6K,
     Q8_0,
+    IQ2Xxs,
+    IQ2Xs,
+    IQ2S,
+    IQ3Xxs,
+    IQ3S,
+    IQ4Nl,
+    IQ4Xs,
 }
 
 impl FewrowGenType {
@@ -1948,6 +1955,13 @@ impl FewrowGenType {
             GgmlType::Q5_K => Some(Self::Q5K),
             GgmlType::Q6_K => Some(Self::Q6K),
             GgmlType::Q8_0 => Some(Self::Q8_0),
+            GgmlType::IQ2_XXS => Some(Self::IQ2Xxs),
+            GgmlType::IQ2_XS => Some(Self::IQ2Xs),
+            GgmlType::IQ2_S => Some(Self::IQ2S),
+            GgmlType::IQ3_XXS => Some(Self::IQ3Xxs),
+            GgmlType::IQ3_S => Some(Self::IQ3S),
+            GgmlType::IQ4_NL => Some(Self::IQ4Nl),
+            GgmlType::IQ4_XS => Some(Self::IQ4Xs),
             _ => None,
         }
     }
@@ -1958,12 +1972,20 @@ impl FewrowGenType {
             Self::Q5K => "q5_K",
             Self::Q6K => "q6_K",
             Self::Q8_0 => "q8_0",
+            Self::IQ2Xxs => "iq2_xxs",
+            Self::IQ2Xs => "iq2_xs",
+            Self::IQ2S => "iq2_s",
+            Self::IQ3Xxs => "iq3_xxs",
+            Self::IQ3S => "iq3_s",
+            Self::IQ4Nl => "iq4_nl",
+            Self::IQ4Xs => "iq4_xs",
         }
     }
 
     fn block_weights(self) -> usize {
         match self {
             Self::Q8_0 => 32,
+            Self::IQ4Nl => 32,
             _ => 256,
         }
     }
@@ -3957,6 +3979,30 @@ mod tests {
                 }
                 b
             }
+            GgmlType::IQ2_XXS
+            | GgmlType::IQ2_XS
+            | GgmlType::IQ2_S
+            | GgmlType::IQ3_XXS
+            | GgmlType::IQ3_S
+            | GgmlType::IQ4_NL
+            | GgmlType::IQ4_XS => {
+                let bytes = match dtype {
+                    GgmlType::IQ2_XXS => 66,
+                    GgmlType::IQ2_XS => 74,
+                    GgmlType::IQ2_S => 82,
+                    GgmlType::IQ3_XXS => 98,
+                    GgmlType::IQ3_S => 110,
+                    GgmlType::IQ4_NL => 18,
+                    GgmlType::IQ4_XS => 136,
+                    _ => unreachable!(),
+                };
+                let mut b = vec![0u8; bytes];
+                b[..2].copy_from_slice(&half::f16::from_f32(0.01).to_le_bytes());
+                for i in 2..bytes {
+                    b[i] = next() as u8;
+                }
+                b
+            }
             other => panic!("no synthetic encoder for {other:?}"),
         }
     }
@@ -3977,6 +4023,20 @@ mod tests {
             (GgmlType::Q6_K, 1024, 17, 16),
             (GgmlType::Q8_0, 512, 9, 8),
             (GgmlType::Q8_0, 1024, 17, 16),
+            (GgmlType::IQ2_XXS, 512, 9, 8),
+            (GgmlType::IQ2_XXS, 1024, 17, 16),
+            (GgmlType::IQ2_XS, 512, 9, 8),
+            (GgmlType::IQ2_XS, 1024, 17, 16),
+            (GgmlType::IQ2_S, 512, 9, 8),
+            (GgmlType::IQ2_S, 1024, 17, 16),
+            (GgmlType::IQ3_XXS, 512, 9, 8),
+            (GgmlType::IQ3_XXS, 1024, 17, 16),
+            (GgmlType::IQ3_S, 512, 9, 8),
+            (GgmlType::IQ3_S, 1024, 17, 16),
+            (GgmlType::IQ4_NL, 512, 9, 8),
+            (GgmlType::IQ4_NL, 1024, 17, 16),
+            (GgmlType::IQ4_XS, 512, 9, 8),
+            (GgmlType::IQ4_XS, 1024, 17, 16),
         ];
         for (case, &(dtype, n_in, n_out, n_cols)) in cases.iter().enumerate() {
             let blocks_per_row = n_in / FewrowGenType::from_dtype(dtype).unwrap().block_weights();

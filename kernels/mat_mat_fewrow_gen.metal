@@ -23,6 +23,8 @@
 #include <metal_stdlib>
 using namespace metal;
 
+#include "fewrow_iq_tables.metalh"
+
 #define FOR_UNROLL _Pragma("clang loop unroll(full)") for
 
 struct mat_mat_fewrow_gen_args {
@@ -153,10 +155,215 @@ struct fewrow_gen_q8_0 {
 
     static inline void dequant(device const uchar * xb, short il, thread float4x4 & reg) {
         const float d = float(as_type<half>(*(device const ushort *) xb));
-        const device const char * qs = (device const char *) (xb + 2) + 16 * il;
+        device const char * qs = (device const char *) (xb + 2) + 16 * il;
         FOR_UNROLL (int i = 0; i < 4; ++i) {
             reg[i] = float4(float(qs[4 * i + 0]), float(qs[4 * i + 1]),
                             float(qs[4 * i + 2]), float(qs[4 * i + 3])) * d;
+        }
+    }
+};
+
+// IQ2_XS: d + 32 quant words + 8 scale bytes.
+struct fewrow_gen_iq2_xs {
+    enum { block_bytes = 74, block_weights = 256, nl = 16 };
+
+    static inline float sbyte(ulong word, int i) { return float((word >> (8 * i)) & 0xFFul); }
+
+    static inline void dequant(device const uchar * xb, short il, thread float4x4 & reg) {
+        const float d = float(as_type<half>(*(device const ushort *) xb));
+        const short ib32 = il / 2;
+        const short hb = il % 2;
+        device const ushort * q2 = (device const ushort *) (xb + 2) + 4 * ib32;
+        const uchar sc = xb[66 + ib32];
+        const float dl = d * (0.5f + float((sc >> (4 * hb)) & 0x0F)) * 0.25f;
+
+        const ushort w0 = q2[2 * hb + 0];
+        const ushort w1 = q2[2 * hb + 1];
+        uint8_t signs = fewrow_ksigns_iq2xs[w0 >> 9];
+        ulong g1 = fewrow_iq2xs_grid[w0 & 511];
+        FOR_UNROLL (int i = 0; i < 8; ++i) {
+            reg[i / 4][i % 4] = dl * sbyte(g1, i) *
+                ((signs & fewrow_kmask_iq2xs[i]) ? -1.0f : 1.0f);
+        }
+        signs = fewrow_ksigns_iq2xs[w1 >> 9];
+        g1 = fewrow_iq2xs_grid[w1 & 511];
+        FOR_UNROLL (int i = 0; i < 8; ++i) {
+            reg[2 + i / 4][i % 4] = dl * sbyte(g1, i) *
+                ((signs & fewrow_kmask_iq2xs[i]) ? -1.0f : 1.0f);
+        }
+    }
+};
+
+// IQ3_S: d + 64 qs + 8 qh + 32 signs + 4 scale bytes.
+struct fewrow_gen_iq3_s {
+    enum { block_bytes = 110, block_weights = 256, nl = 16 };
+
+    static inline float sbyte(uint word, int i) { return float((word >> (8 * i)) & 0xFFu); }
+
+    static inline void dequant(device const uchar * xb, short il, thread float4x4 & reg) {
+        const float d = float(as_type<half>(*(device const ushort *) xb));
+        const short ib32 = il / 2;
+        const short hb = il % 2;
+        device const uchar * qs = xb + 2 + 8 * ib32;
+        device const uchar * signs = xb + 74 + 4 * ib32 + 2 * hb;
+        const uchar qh = xb[66 + ib32] >> (4 * hb);
+        const float dl = d * (1.0f + 2.0f *
+            float((xb[106 + ib32 / 2] >> (4 * (ib32 % 2))) & 0x0F));
+
+        uint g1 = fewrow_iq3s_grid[qs[4 * hb + 0] | ((qh << 8) & 256)];
+        uint g2 = fewrow_iq3s_grid[qs[4 * hb + 1] | ((qh << 7) & 256)];
+        FOR_UNROLL (int i = 0; i < 4; ++i) {
+            reg[0][i] = dl * sbyte(g1, i) *
+                ((signs[0] & fewrow_kmask_iq2xs[i + 0]) ? -1.0f : 1.0f);
+            reg[1][i] = dl * sbyte(g2, i) *
+                ((signs[0] & fewrow_kmask_iq2xs[i + 4]) ? -1.0f : 1.0f);
+        }
+        g1 = fewrow_iq3s_grid[qs[4 * hb + 2] | ((qh << 6) & 256)];
+        g2 = fewrow_iq3s_grid[qs[4 * hb + 3] | ((qh << 5) & 256)];
+        FOR_UNROLL (int i = 0; i < 4; ++i) {
+            reg[2][i] = dl * sbyte(g1, i) *
+                ((signs[1] & fewrow_kmask_iq2xs[i + 0]) ? -1.0f : 1.0f);
+            reg[3][i] = dl * sbyte(g2, i) *
+                ((signs[1] & fewrow_kmask_iq2xs[i + 4]) ? -1.0f : 1.0f);
+        }
+    }
+};
+
+// IQ3_XXS: d + 96 grid/sign bytes.
+struct fewrow_gen_iq3_xxs {
+    enum { block_bytes = 98, block_weights = 256, nl = 16 };
+
+    static inline float sbyte(ulong word, int i) { return float((word >> (8 * i)) & 0xFFul); }
+
+    static inline void dequant(device const uchar * xb, short il, thread float4x4 & reg) {
+        const float d = float(as_type<half>(*(device const ushort *) xb));
+        const short ib32 = il / 2;
+        const short hb = il % 2;
+        device const uchar * q3 = xb + 2 + 8 * ib32;
+        device const ushort * gas = (device const ushort *) (xb + 2 + 64) + 2 * ib32;
+        const uint aux32 = uint(gas[0]) | (uint(gas[1]) << 16);
+        const float dl = d * (0.5f + float(aux32 >> 28)) * 0.5f;
+
+        uint8_t signs = fewrow_ksigns_iq2xs[(aux32 >> (14 * hb)) & 127];
+        ulong g1 = fewrow_iq3xxs_grid[q3[4 * hb + 0]];
+        ulong g2 = fewrow_iq3xxs_grid[q3[4 * hb + 1]];
+        FOR_UNROLL (int i = 0; i < 4; ++i) {
+            reg[0][i] = dl * sbyte(g1, i) * ((signs & fewrow_kmask_iq2xs[i + 0]) ? -1.0f : 1.0f);
+            reg[1][i] = dl * sbyte(g2, i) * ((signs & fewrow_kmask_iq2xs[i + 4]) ? -1.0f : 1.0f);
+        }
+        signs = fewrow_ksigns_iq2xs[(aux32 >> (14 * hb + 7)) & 127];
+        g1 = fewrow_iq3xxs_grid[q3[4 * hb + 2]];
+        g2 = fewrow_iq3xxs_grid[q3[4 * hb + 3]];
+        FOR_UNROLL (int i = 0; i < 4; ++i) {
+            reg[2][i] = dl * sbyte(g1, i) * ((signs & fewrow_kmask_iq2xs[i + 0]) ? -1.0f : 1.0f);
+            reg[3][i] = dl * sbyte(g2, i) * ((signs & fewrow_kmask_iq2xs[i + 4]) ? -1.0f : 1.0f);
+        }
+    }
+};
+
+// IQ4_NL: half d + 16 nibble-pair bytes.
+struct fewrow_gen_iq4_nl {
+    enum { block_bytes = 18, block_weights = 32, nl = 2 };
+
+    static inline void dequant(device const uchar * xb, short il, thread float4x4 & reg) {
+        const float d = float(as_type<half>(*(device const ushort *) xb));
+        device const ushort * q4 = (device const ushort *) (xb + 2);
+        FOR_UNROLL (int i = 0; i < 4; ++i) {
+            const uint aux32 = ((uint(q4[2 * i]) | (uint(q4[2 * i + 1]) << 16)) >> (4 * il)) &
+                               0x0F0F0F0Fu;
+            reg[i][0] = d * fewrow_iq4nl[(aux32 >> 0) & 0xFF];
+            reg[i][1] = d * fewrow_iq4nl[(aux32 >> 8) & 0xFF];
+            reg[i][2] = d * fewrow_iq4nl[(aux32 >> 16) & 0xFF];
+            reg[i][3] = d * fewrow_iq4nl[(aux32 >> 24) & 0xFF];
+        }
+    }
+};
+
+// IQ4_XS: d + scales_h + 4 low-scale bytes + 128 nibble bytes.
+struct fewrow_gen_iq4_xs {
+    enum { block_bytes = 136, block_weights = 256, nl = 16 };
+
+    static inline void dequant(device const uchar * xb, short il, thread float4x4 & reg) {
+        const float dh = float(as_type<half>(*(device const ushort *) xb));
+        const ushort scales_h = *(device const ushort *) (xb + 2);
+        device const uchar * scales_l = xb + 4;
+        device const ushort * q4 = (device const ushort *) (xb + 8);
+
+        const short ib32 = il / 2;
+        const short hb = il % 2;
+        const int ls = int((scales_l[ib32 / 2] >> (4 * (ib32 % 2))) & 0x0F) |
+                       (int((scales_h >> (2 * ib32)) & 3) << 4);
+        const float d = dh * float(ls - 32);
+
+        FOR_UNROLL (int i = 0; i < 4; ++i) {
+            const int word = 4 * ib32 + i;
+            const uint aux32 = ((uint(q4[2 * word]) | (uint(q4[2 * word + 1]) << 16)) >>
+                                (4 * hb)) &
+                               0x0F0F0F0Fu;
+            reg[i][0] = d * fewrow_iq4nl[(aux32 >> 0) & 0xFF];
+            reg[i][1] = d * fewrow_iq4nl[(aux32 >> 8) & 0xFF];
+            reg[i][2] = d * fewrow_iq4nl[(aux32 >> 16) & 0xFF];
+            reg[i][3] = d * fewrow_iq4nl[(aux32 >> 24) & 0xFF];
+        }
+    }
+};
+
+// IQ2_S: d + 64 qs + 8 qh + 8 scales bytes.
+struct fewrow_gen_iq2_s {
+    enum { block_bytes = 82, block_weights = 256, nl = 16 };
+
+    static inline float sbyte(ulong word, int i) { return float((word >> (8 * i)) & 0xFFul); }
+
+    static inline void dequant(device const uchar * xb, short il, thread float4x4 & reg) {
+        const float d = float(as_type<half>(*(device const ushort *) xb));
+        const short ib32 = il / 2;
+        const short hb = il % 2;
+        device const uchar * qs = xb + 2 + 4 * ib32 + 2 * hb;
+        device const uchar * signs = qs + 32;
+        device const uchar * scales = xb + 74;
+        const uchar qh = xb[66 + ib32] >> (4 * hb);
+        const float dl = d * (0.5f + float((scales[ib32] >> (4 * hb)) & 0x0F)) * 0.25f;
+        const ulong g1 = fewrow_iq2s_grid[qs[0] | ((qh << 8) & 0x300)];
+        const ulong g2 = fewrow_iq2s_grid[qs[1] | ((qh << 6) & 0x300)];
+        FOR_UNROLL (int i = 0; i < 8; ++i) {
+            reg[i / 4 + 0][i % 4] = dl * sbyte(g1, i) *
+                ((signs[0] & fewrow_kmask_iq2xs[i]) ? -1.0f : 1.0f);
+            reg[i / 4 + 2][i % 4] = dl * sbyte(g2, i) *
+                ((signs[1] & fewrow_kmask_iq2xs[i]) ? -1.0f : 1.0f);
+        }
+    }
+};
+
+// IQ2_XXS: d + 32 quant words (two grids and the scale share a word pair).
+struct fewrow_gen_iq2_xxs {
+    enum { block_bytes = 66, block_weights = 256, nl = 16 };
+
+    static inline float sbyte(ulong word, int i) { return float((word >> (8 * i)) & 0xFFul); }
+
+    static inline void dequant(device const uchar * xb, short il, thread float4x4 & reg) {
+        const float d = float(as_type<half>(*(device const ushort *) xb));
+        const short ib32 = il / 2;
+        const short hb = il % 2;
+        device const ushort * q2 = (device const ushort *) (xb + 2) + 4 * ib32;
+        const uint aux32_g = uint(q2[0]) | (uint(q2[1]) << 16);
+        const uint aux32_s = uint(q2[2]) | (uint(q2[3]) << 16);
+        const int aux8_0 = int(aux32_g & 0xFF);
+        const int aux8_1 = int((aux32_g >> 8) & 0xFF);
+        const int aux8_2 = int((aux32_g >> 16) & 0xFF);
+        const int aux8_3 = int((aux32_g >> 24) & 0xFF);
+        const float dl = d * (0.5f + float(aux32_s >> 28)) * 0.25f;
+
+        uint8_t signs = fewrow_ksigns_iq2xs[(aux32_s >> (14 * hb)) & 127];
+        ulong g1 = fewrow_iq2xxs_grid[hb == 0 ? aux8_0 : aux8_2];
+        FOR_UNROLL (int i = 0; i < 8; ++i) {
+            reg[i / 4][i % 4] = dl * sbyte(g1, i) *
+                ((signs & fewrow_kmask_iq2xs[i]) ? -1.0f : 1.0f);
+        }
+        signs = fewrow_ksigns_iq2xs[(aux32_s >> (14 * hb + 7)) & 127];
+        g1 = fewrow_iq2xxs_grid[hb == 0 ? aux8_1 : aux8_3];
+        FOR_UNROLL (int i = 0; i < 8; ++i) {
+            reg[2 + i / 4][i % 4] = dl * sbyte(g1, i) *
+                ((signs & fewrow_kmask_iq2xs[i]) ? -1.0f : 1.0f);
         }
     }
 };
@@ -295,3 +502,10 @@ FEWROW_GEN_TYPE(q4_K, fewrow_gen_q4_K)
 FEWROW_GEN_TYPE(q5_K, fewrow_gen_q5_K)
 FEWROW_GEN_TYPE(q6_K, fewrow_gen_q6_K)
 FEWROW_GEN_TYPE(q8_0, fewrow_gen_q8_0)
+FEWROW_GEN_TYPE(iq2_xxs, fewrow_gen_iq2_xxs)
+FEWROW_GEN_TYPE(iq2_xs, fewrow_gen_iq2_xs)
+FEWROW_GEN_TYPE(iq2_s, fewrow_gen_iq2_s)
+FEWROW_GEN_TYPE(iq3_xxs, fewrow_gen_iq3_xxs)
+FEWROW_GEN_TYPE(iq3_s, fewrow_gen_iq3_s)
+FEWROW_GEN_TYPE(iq4_nl, fewrow_gen_iq4_nl)
+FEWROW_GEN_TYPE(iq4_xs, fewrow_gen_iq4_xs)

@@ -32,13 +32,16 @@ fused residual add.
 
 `kernel_mat_mat_fewrow_gen_f32` in `kernels/mat_mat_fewrow_gen.metal` adapts
 llama.cpp's generic few-row MMA kernel `kernel_mul_mv_mma_gen` and its
-Q4_K/Q5_K/Q6_K/Q8_0 16-weight dequantizers (`kernel_mul_mv_mma_gen` and
-`dequantize_q4_K`, `dequantize_q5_K`, `dequantize_q6_K`, `dequantize_q8_0` in
-`ggml/src/ggml-metal/kernels/mul_mv_mma.metal` and `dequantize.h`, PR #29869,
-revision `a3a1c4747fdc0dcad40b3946108b89375d9a7d0e`; generic dispatch and
-Q4_K/Q6_K coverage from PR #30065, revision
+16-weight dequantizers for Q4_K, Q5_K, Q6_K, Q8_0, IQ2_XXS, IQ2_XS, IQ2_S,
+IQ3_XXS, IQ3_S, IQ4_NL and IQ4_XS (`kernel_mul_mv_mma_gen` and the matching
+`dequantize_*` functions in `ggml/src/ggml-metal/kernels/mul_mv_mma.metal`
+and `dequantize.h`, PR #29869, revision
+`a3a1c4747fdc0dcad40b3946108b89375d9a7d0e`; generic dispatch and the remaining
+type coverage from PR #30065, revision
 `988190680c65b2e38f4f75a52d16a59a2f84f3e1`), without batch dimensions, the
 fused residual add, or the function-constant tiling parameters.
+`kernels/fewrow_iq_tables.metalh` copies the IQ lookup tables from
+`ggml/src/ggml-common.h` at the same revision.
 
 ## MLX-Serve
 

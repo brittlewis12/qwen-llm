@@ -7006,10 +7006,10 @@ fn build_prefill_scratch_plan_from_arch(
         ("ffn_inner_pack", nf),
         ("ffn_out_pack", nh),
         ("moe_topk_idx_pack", moe_slot_elems),
+        ("moe_route_status_pack", n),
         ("moe_router_probs_pack", n_experts),
         ("moe_topk_weight_pack", moe_slot_elems),
         ("moe_shared_gate_pack", n),
-        ("moe_route_status_pack", n),
         (
             "moe_inner_pack",
             if include_spec_packs {

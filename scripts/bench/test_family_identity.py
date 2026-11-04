@@ -52,6 +52,20 @@ class FamilyIdentityTests(unittest.TestCase):
             identity(), COMMIT_A, False, STATE_A, allow_dirty=False
         )
 
+    def test_expand_resolves_published_filename(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            model = Path(temp) / "published.gguf"
+            model.write_text("model")
+            old = os.environ.get("QWEN_MODEL_SEARCH_PATH")
+            os.environ["QWEN_MODEL_SEARCH_PATH"] = temp
+            try:
+                self.assertEqual(family.expand("published.gguf"), model)
+            finally:
+                if old is None:
+                    os.environ.pop("QWEN_MODEL_SEARCH_PATH", None)
+                else:
+                    os.environ["QWEN_MODEL_SEARCH_PATH"] = old
+
     def test_binary_source_mismatch_is_rejected(self) -> None:
         self.assert_rejected(
             lambda: family.validate_qwen_identity(

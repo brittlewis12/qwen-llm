@@ -3582,6 +3582,8 @@ mod tests {
 
     #[test]
     fn tensor_flash_qwen27_matches_f64_reference() {
+        let _lease = crate::metal::context::acquire_metal_benchmark_lease()
+            .expect("tensor flash production GPU lease");
         let Some(ctx) = metal_test_context() else {
             return;
         };

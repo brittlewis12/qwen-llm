@@ -1,0 +1,85 @@
+[
+  {
+    "schema_version": 4,
+    "engine": "qwen-llm",
+    "build_commit": "b08ca56d9",
+    "build_dirty": 0,
+    "build_identity": {
+      "schema_version": 4,
+      "features": [],
+      "metallib_compiler_identity": "Apple metal version 32023.864 (metalfe-32023.864)",
+      "metallib_sdk_version": "26.2",
+      "build_commit": "b08ca56d9b8e644ddde504b075ecdf1ee15d240f",
+      "build_commit_short": "b08ca56d9",
+      "build_dirty": false,
+      "build_source_state": "git-source-sha256-v2:79a91c3b6b79f24fbbc7be1643d73dda3e8ff2817bd37915442c6e732ee4bbe9",
+      "stamp_source": "git",
+      "stamp_error": null,
+      "runtime_commit": "b08ca56d9b8e644ddde504b075ecdf1ee15d240f",
+      "runtime_dirty": false,
+      "runtime_source_state": "git-source-sha256-v2:79a91c3b6b79f24fbbc7be1643d73dda3e8ff2817bd37915442c6e732ee4bbe9",
+      "status": "match",
+      "problems": [],
+      "overrides": []
+    },
+    "test_time": "2026-11-04T19:52:38Z",
+    "model_filename": "$WEIGHTS_ARCHIVE/deepseek-v4-flash-0731-ud-iq3_xxs/UD-IQ3_XXS/DeepSeek-V4-Flash-0731-UD-IQ3_XXS-00001-of-00004.gguf",
+    "model_size": 104202502492,
+    "model_n_params": 284334567511,
+    "arch_kind": "deepseek_v4",
+    "family": "deepseek_v4",
+    "test": "pp4096",
+    "n_tokens": 4096,
+    "n_depth": 0,
+    "n_repetitions": 4,
+    "avg_ts": 219.3979779273337,
+    "stddev_ts": 55.066386179453616,
+    "samples_ts": [
+      136.8764474143166,
+      250.0062498968415,
+      246.52894597503186,
+      244.18026842314487
+    ],
+    "samples_ns": [
+      29924797709,
+      16383590417,
+      16614681832,
+      16774492166
+    ],
+    "avg_ns": 19924390531,
+    "avg_compute_ns": 19924390531,
+    "avg_session_alloc_ns": null,
+    "avg_scratch_alloc_ns": null,
+    "avg_gpu_ns": null,
+    "kernel_trace_command_buffers_per_token": null,
+    "kernel_trace_encoders_per_token": null,
+    "kernel_trace_concurrent_encoders_per_token": null,
+    "kernel_trace_dispatches_per_token": null,
+    "decode_gb_per_s": null,
+    "prefill_chunk": 4096,
+    "prefill_geometry": null,
+    "decode_mode": null,
+    "prefill_mode": "packed_chunks+final_logits_copy",
+    "power": {
+      "source": "AC Power",
+      "battery_percent": 100,
+      "battery_state": "finishing charge",
+      "battery_warning": null,
+      "powermode_battery": 2,
+      "powermode_ac": 2,
+      "thermal_warning_recorded": false,
+      "performance_warning_recorded": false,
+      "cpu_power_status_recorded": false
+    },
+    "qwen_env": {
+      "QWEN_METAL_LEASE_FD": "3",
+      "QWEN_METAL_LEASE_WAIT": "1",
+      "QWEN_MODEL_SEARCH_PATH": "$WEIGHTS_ARCHIVE/glm-5.3-flash-ud-iq3_xxs/glm5-next:$HOME/models:$WEIGHTS_ARCHIVE/unsloth-Qwen3.5-122B-A10B-GGUF:$WEIGHTS_ARCHIVE/deepseek-v4-flash-0731-ud-iq3_xxs"
+    },
+    "block_avg_ts": [
+      193.44134865557905,
+      245.35460719908838
+    ],
+    "n_blocks": 2
+  }
+]

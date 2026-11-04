@@ -104,14 +104,19 @@ pub fn record(ctx: &MetalContext, enc: &KernelEncoder, site: &'static str, x: &M
         return;
     };
     state.seen[site_index] = true;
+    // Cap the grid and let each thread walk a strided slice. The kernel
+    // reduces per simdgroup/threadgroup before the single device atomic.
+    const MAX_TELEMETRY_THREADS: u32 = 65_536;
+    let threads = n.min(MAX_TELEMETRY_THREADS).div_ceil(256) * 256;
     enc.set_pipeline(&pso);
     enc.set_bytes(0, &n);
     enc.set_tensor(1, x);
     enc.set_tensor(2, &state.tensor.0);
     enc.set_bytes(3, &(site_index as u32));
+    enc.set_bytes(4, &threads);
     enc.dispatch(
         objc2_metal::MTLSize {
-            width: n.div_ceil(256) as usize,
+            width: (threads / 256) as usize,
             height: 1,
             depth: 1,
         },

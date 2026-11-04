@@ -1,4 +1,4 @@
-// Research-only Apple10 attention falsifier; no runtime dispatch selects it.
+// Experimental Apple10 attention; selected only by a default-off prefill knob.
 // Structure follows llama.cpp fa_tensor (MIT): two tensor matmuls, strided
 // device K/V, float cooperative O resident across the complete key loop.
 #include <metal_stdlib>

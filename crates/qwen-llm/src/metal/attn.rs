@@ -2,6 +2,95 @@
 
 use super::*;
 
+/// Experimental Qwen dense prefill with register-resident float O on Apple10.
+/// The caller supplies the existing matrix ml workspace for byte-sized masks.
+#[allow(clippy::too_many_arguments)]
+pub fn encode_attn_tensor_flash_qwen27(
+    ctx: &MetalContext,
+    enc: &KernelEncoder,
+    q: &MetalTensor,
+    k: &MetalTensor,
+    v: &MetalTensor,
+    masks: &MetalTensor,
+    out: &MetalTensor,
+    n_rows: usize,
+    base_pos: usize,
+    n_pos: usize,
+) -> Result<(), MetalError> {
+    let tiles = (n_rows * 6).div_ceil(32);
+    let mask_bytes = tiles * (n_pos / 64);
+    if n_rows == 0
+        || !n_pos.is_multiple_of(64)
+        || base_pos.checked_add(n_rows) != Some(n_pos)
+        || q.dtype != GgmlType::F32
+        || out.dtype != GgmlType::F32
+        || k.dtype != GgmlType::F16
+        || v.dtype != GgmlType::F16
+        || q.n_elements() != (n_rows * 24 * 256) as u64
+        || out.n_elements() != q.n_elements()
+        || k.n_elements() < (n_pos * 1024) as u64
+        || v.n_elements() < (n_pos * 1024) as u64
+        || masks.n_bytes() < mask_bytes as u64
+        || n_pos > u32::MAX as usize / 1024
+    {
+        return Err(MetalError::BadShape {
+            kernel: "attn_tensor_flash_qwen27",
+            detail: "requires Qwen 24/4 heads, d256, contiguous F32 Q/O and F16 KV, 64-aligned KV length and mask workspace".into(),
+        });
+    }
+    let args = AttnMatrixArgs {
+        n_rows: n_rows as u32,
+        n_pos: n_pos as u32,
+        base_pos: base_pos as u32,
+        kv_stride: 1024,
+        vt_stride: 0,
+        n_q_heads: 24,
+        n_kv_heads: 4,
+        group: 6,
+        head_dim: 256,
+        scale: 1.0 / 16.0,
+        causal_skip: 1,
+    };
+    let mask = ctx.tensor_pipeline("kernel_attn_flash_probe_mask")?;
+    let flash = ctx.tensor_pipeline("kernel_attn_flash_probe_f16_d256")?;
+    enc.set_pipeline(&mask);
+    enc.set_bytes(0, &args);
+    enc.set_tensor(1, masks);
+    enc.dispatch(
+        MTLSize {
+            width: tiles.div_ceil(256),
+            height: n_pos / 64,
+            depth: 1,
+        },
+        MTLSize {
+            width: 256,
+            height: 1,
+            depth: 1,
+        },
+    );
+    enc.set_pipeline(&flash);
+    enc.set_bytes(0, &args);
+    enc.set_tensor(1, q);
+    enc.set_tensor(2, k);
+    enc.set_tensor(3, v);
+    enc.set_tensor(4, out);
+    enc.set_tensor(5, masks);
+    enc.set_threadgroup_memory(0, 28816);
+    enc.dispatch(
+        MTLSize {
+            width: tiles,
+            height: 4,
+            depth: 1,
+        },
+        MTLSize {
+            width: 256,
+            height: 1,
+            depth: 1,
+        },
+    );
+    Ok(())
+}
+
 /// Split the gated-attention Q-projection output into separate Q and
 /// gate tensors. Input layout per head: `[head_dim Q, head_dim gate]`,
 /// total length `n_heads * 2 * head_dim`. Outputs are
@@ -3490,6 +3579,118 @@ pub(crate) fn with_tiled_vt_pilot<T>(enabled: bool, f: impl FnOnce() -> T) -> (T
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn tensor_flash_qwen27_matches_f64_reference() {
+        let Some(ctx) = metal_test_context() else {
+            return;
+        };
+        if !ctx.tensor_ops_status().is_available() {
+            return;
+        }
+        let mut state = 0x6a09_e667_f3bc_c909u64;
+        let mut sample = || {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            ((state >> 40) as f32 / 16_777_216.0 * 2.0 - 1.0) * 1.732_050_8
+        };
+        for (rows, pos) in [(1usize, 64usize), (20, 64), (33, 192), (64, 64)] {
+            for pattern in 0..3 {
+                let mut q: Vec<f32> = (0..rows * 24 * 256)
+                    .map(|_| if pattern == 1 { 0.0 } else { sample() })
+                    .collect();
+                let k: Vec<u16> = (0..pos * 1024)
+                    .map(|_| half::f16::from_f32(sample()).to_bits())
+                    .collect();
+                let v: Vec<u16> = (0..pos * 1024)
+                    .map(|_| half::f16::from_f32(sample()).to_bits())
+                    .collect();
+                let kf: Vec<f32> = k
+                    .iter()
+                    .map(|&x| half::f16::from_bits(x).to_f32())
+                    .collect();
+                let vf: Vec<f32> = v
+                    .iter()
+                    .map(|&x| half::f16::from_bits(x).to_f32())
+                    .collect();
+                if pattern == 2 {
+                    for h in 0..24 {
+                        for d in 0..256 {
+                            q[((rows - 1) * 24 + h) * 256 + d] =
+                                kf[(pos - 1) * 1024 + h / 6 * 256 + d] * 8.0;
+                        }
+                    }
+                }
+                let make = |bytes: &[u8], n, dtype| {
+                    MetalTensor::from_bytes(&ctx, bytes, vec![n as u64], dtype).unwrap()
+                };
+                let qt = make(bytemuck::cast_slice(&q), q.len(), GgmlType::F32);
+                let kt = make(bytemuck::cast_slice(&k), k.len(), GgmlType::F16);
+                let vt = make(bytemuck::cast_slice(&v), v.len(), GgmlType::F16);
+                let masks = MetalTensor::zeros_f32(
+                    &ctx,
+                    vec![((rows * 6).div_ceil(32) * (pos / 64)).div_ceil(4) as u64],
+                )
+                .unwrap();
+                let out = MetalTensor::zeros_f32(&ctx, vec![q.len() as u64]).unwrap();
+                one_shot(&ctx, |enc| {
+                    encode_attn_tensor_flash_qwen27(
+                        &ctx,
+                        enc,
+                        &qt,
+                        &kt,
+                        &vt,
+                        &masks,
+                        &out,
+                        rows,
+                        pos - rows,
+                        pos,
+                    )
+                })
+                .unwrap();
+                let actual = read_back_f32(&out);
+                let reference =
+                    cpu_matrix_attn_reference(&q, &kf, &vf, rows, pos - rows, pos, 24, 4, 6, 256);
+                let mut max_abs = 0.0f32;
+                let mut min_cos = 1.0f64;
+                for (a, b) in actual.chunks_exact(256).zip(reference.chunks_exact(256)) {
+                    let (mut ab, mut aa, mut bb) = (0.0, 0.0, 0.0);
+                    for (&x, &y) in a.iter().zip(b) {
+                        assert!(x.is_finite());
+                        max_abs = max_abs.max((x - y).abs());
+                        ab += f64::from(x) * f64::from(y);
+                        aa += f64::from(x).powi(2);
+                        bb += f64::from(y).powi(2);
+                    }
+                    min_cos = min_cos.min(ab / (aa * bb).sqrt());
+                }
+                assert!(
+                    max_abs <= 0.02 && min_cos >= 0.9999,
+                    "rows={rows} pos={pos} pattern={pattern} max_abs={max_abs} min_cos={min_cos}"
+                );
+                one_shot(&ctx, |enc| {
+                    assert!(
+                        encode_attn_tensor_flash_qwen27(
+                            &ctx,
+                            enc,
+                            &qt,
+                            &kt,
+                            &vt,
+                            &masks,
+                            &out,
+                            rows,
+                            pos - rows,
+                            pos - 1
+                        )
+                        .is_err()
+                    );
+                    Ok(())
+                })
+                .unwrap();
+            }
+        }
+    }
 
     #[test]
     fn materialized_attention_scratch_is_aligned_without_changing_visible_positions() {

@@ -2229,6 +2229,18 @@ fn prefill_attn_matrix_causal_skip_enabled() -> bool {
     )
 }
 
+/// Enable experimental single-pass tensor flash attention for dense Qwen
+/// 24/4-head, d256 prefill on Apple10. Defaults off; other shapes use matrix attention.
+const PREFILL_ATTN_TENSOR_FLASH_ENV: &str = "QWEN_PREFILL_ATTN_TENSOR_FLASH";
+
+fn prefill_attn_tensor_flash_enabled() -> bool {
+    static MODE: OnceLock<PrefillEnvMode> = OnceLock::new();
+    matches!(
+        *MODE.get_or_init(|| env_mode(PREFILL_ATTN_TENSOR_FLASH_ENV)),
+        PrefillEnvMode::ForceOn
+    )
+}
+
 /// v0.439: two-pass online-softmax matrix attention (KQ folds the softmax
 /// into its epilogue and stores F16 `P~` + an (m, l) sidecar; KQV normalizes
 /// during staging). Deletes the separate softmax dispatch and drops score
@@ -13081,12 +13093,47 @@ fn prefill_tokens_with_multi_hidden_profiled_inner<'a>(
                                     layer_scratch.scratch_plan.modes.attn_matrix_online
                                         && (layer_scratch.attn_matrix_query_rows as usize)
                                             < chunk_p;
+                                let use_tensor_flash = use_matrix_g6
+                                    && layer_scratch.scratch_plan.modes.attn_matrix_online
+                                    && prefill_attn_tensor_flash_enabled()
+                                    && base.ctx.tensor_ops_status().is_available()
+                                    && n_q == 24
+                                    && n_kv == 4
+                                    && head_dim == 256
+                                    && chunk_p >= 20
+                                    && n_pos.is_multiple_of(64)
+                                    && (chunk_p * group).div_ceil(32) * n_kv * head_dim >= 8192
+                                    && layer_scratch.attn_matrix_ml_pack.n_bytes()
+                                        >= ((chunk_p * group).div_ceil(32) * (n_pos / 64)) as u64;
                                 let trace_matrix_subphases = use_matrix
+                                    && !use_tensor_flash
                                     && trace_attn_phases
                                     && !attn_packed_oracle
                                     && !matrix_query_tiled;
                                 traced_matrix_subphases = trace_matrix_subphases;
-                                if trace_matrix_subphases {
+                                if use_tensor_flash {
+                                    let enc = KernelEncoder::begin(&cmd_buf);
+                                    label_prefill_encoder(&enc, il, "attn-prefill-g6-tensor-flash");
+                                    crate::metal::encode_attn_tensor_flash_qwen27(
+                                        base.ctx,
+                                        &enc,
+                                        &q_normed_pack_p,
+                                        &target_session.kv_k[ai],
+                                        &target_session.kv_v[ai],
+                                        &layer_scratch.attn_matrix_ml_pack,
+                                        &attn_o_pack_p,
+                                        chunk_p,
+                                        chunk_start as usize,
+                                        n_pos,
+                                    )?;
+                                    enc.end();
+                                    target_session.kv_n_pos[ai] = n_pos;
+                                    // Scatter wrote this chunk's VT suffix. A missing prefix
+                                    // remains invalid so a later matrix fallback rebuilds it.
+                                    if attn_matrix_vt_valid_until[ai] >= chunk_start as usize {
+                                        attn_matrix_vt_valid_until[ai] = n_pos;
+                                    }
+                                } else if trace_matrix_subphases {
                                     let vt_stride = layer_scratch.attn_matrix_max_pos as usize;
                                     let per_attn_vt = n_kv * head_dim * vt_stride;
                                     let matrix_online =

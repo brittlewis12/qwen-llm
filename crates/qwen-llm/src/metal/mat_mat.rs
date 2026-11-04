@@ -1932,6 +1932,209 @@ pub fn encode_mat_mat_q8_0_fewrow_f32(
     Ok(())
 }
 
+/// Weight types with a 16-weight dequantizer in the generic few-row kernel.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum FewrowGenType {
+    Q4K,
+    Q5K,
+    Q6K,
+    Q8_0,
+}
+
+impl FewrowGenType {
+    fn from_dtype(dtype: GgmlType) -> Option<Self> {
+        match dtype {
+            GgmlType::Q4_K => Some(Self::Q4K),
+            GgmlType::Q5_K => Some(Self::Q5K),
+            GgmlType::Q6_K => Some(Self::Q6K),
+            GgmlType::Q8_0 => Some(Self::Q8_0),
+            _ => None,
+        }
+    }
+
+    fn tag(self) -> &'static str {
+        match self {
+            Self::Q4K => "q4_K",
+            Self::Q5K => "q5_K",
+            Self::Q6K => "q6_K",
+            Self::Q8_0 => "q8_0",
+        }
+    }
+
+    fn block_weights(self) -> usize {
+        match self {
+            Self::Q8_0 => 32,
+            _ => 256,
+        }
+    }
+}
+
+/// Simdgroups per threadgroup, 8-row weight tiles and 8-row activation
+/// tiles for the generic few-row kernel, following llama.cpp's
+/// `ggml_metal_op_mul_mat_mma_tiling`. Fewer output rows get more
+/// simdgroups splitting K; the row tile is the widest that still leaves
+/// >= 128 threadgroups and fits 16 KiB of reduction memory. Only NSG
+/// 8/16/32 are instantiated.
+pub(crate) fn fewrow_gen_tiling(n_in: usize, n_out: usize, n_cols: usize) -> (usize, usize, usize) {
+    let halve_to = |mut n: usize, limit: usize| {
+        while n > 1 && n > limit {
+            n /= 2;
+        }
+        n
+    };
+    let rt = if n_cols > 8 { 2 } else { 1 };
+    let n_steps = n_in / 64;
+    let mut nsg = if n_out <= 64 {
+        32
+    } else if n_out <= 6144 {
+        16
+    } else {
+        8
+    };
+    while nsg > 8 && nsg > n_steps {
+        nsg /= 2;
+    }
+    let nt_smem = 16384 / (nsg * rt * 256);
+    let nt_rows = n_out / (128 * 8);
+    let nt = halve_to(4, nt_smem.min(nt_rows));
+    (nt, rt, nsg)
+}
+
+fn validate_fewrow_gen_addressing(
+    ty: FewrowGenType,
+    n_in: usize,
+    n_out: usize,
+    n_cols: usize,
+) -> Result<(), MetalError> {
+    const KERNEL: &str = "mat_mat_fewrow_gen";
+    let unit = ty.block_weights().max(64);
+    if n_in == 0 || !n_in.is_multiple_of(unit) || n_out == 0 || !(1..=16).contains(&n_cols) {
+        return Err(super::checks::bad_shape(
+            KERNEL,
+            format!(
+                "n_in={n_in} (positive multiple of {unit}), n_out={n_out} (> 0), n_cols={n_cols} (1..=16)"
+            ),
+        ));
+    }
+    for (name, value) in [("n_in", n_in), ("n_out", n_out)] {
+        if i32::try_from(value).is_err() {
+            return Err(super::checks::bad_shape(
+                KERNEL,
+                format!("{name}={value} exceeds signed shader addressing"),
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// Generic few-row mat-mat for 1..=16 activation rows (x = [n_cols, n_in],
+/// y = [n_cols, n_out]), adapted from llama.cpp's `kernel_mul_mv_mma_gen`
+/// (`kernels/mat_mat_fewrow_gen.metal`). A lane dequantizes its 16 weights
+/// of a 64-weight chunk once for all rows; n_out and n_cols need no tile
+/// multiple. E1: weight fragments are half, so the accumulation order
+/// differs from the mat-vec decode chain.
+#[allow(clippy::too_many_arguments)]
+pub fn encode_mat_mat_fewrow_gen_f32(
+    ctx: &MetalContext,
+    enc: &KernelEncoder,
+    weight: &MetalTensor,
+    x: &MetalTensor,
+    y: &MetalTensor,
+    n_in: usize,
+    n_out: usize,
+    n_cols: usize,
+) -> Result<(), MetalError> {
+    use super::checks::{bad_shape, check_disjoint};
+    use super::moe::{checked_moe_product, validate_moe_decode_tensor};
+    use objc2_metal::MTLComputePipelineState as _;
+    const KERNEL: &str = "mat_mat_fewrow_gen";
+    let ty = FewrowGenType::from_dtype(weight.dtype)
+        .ok_or_else(|| bad_shape(KERNEL, format!("unsupported dtype {:?}", weight.dtype)))?;
+    validate_fewrow_gen_addressing(ty, n_in, n_out, n_cols)?;
+    // Preserve flattened views; the shader only needs contiguous physical
+    // extents. Its typed loads require half/float4/float alignment.
+    for (name, tensor, dims, dtype, writable, alignment) in [
+        ("weight", weight, [n_in, n_out], weight.dtype, false, 2),
+        ("input", x, [n_in, n_cols], GgmlType::F32, false, 16),
+        ("output", y, [n_out, n_cols], GgmlType::F32, true, 4),
+    ] {
+        let count = checked_moe_product(KERNEL, name, &dims)?;
+        validate_moe_decode_tensor(KERNEL, name, tensor, count, &[dtype], writable, alignment)?;
+    }
+    check_disjoint(KERNEL, y, &[(weight, "weight"), (x, "input")])?;
+    let device = ctx.device.registryID();
+    if enc.parent_command_buffer().device().registryID() != device
+        || [weight, x, y]
+            .into_iter()
+            .any(|tensor| tensor.buffer.device().registryID() != device)
+    {
+        return Err(bad_shape(
+            KERNEL,
+            "encoder and bindings must belong to the context device",
+        ));
+    }
+    let (nt, rt, mut nsg) = fewrow_gen_tiling(n_in, n_out, n_cols);
+    let pso_name = |ty: FewrowGenType, nt: usize, rt: usize, nsg: usize| {
+        format!(
+            "kernel_mat_mat_{}_fewrow_gen_nt{nt}_rt{rt}_nsg{nsg}_f32",
+            ty.tag()
+        )
+    };
+    let mut pso = ctx.pipeline(&pso_name(ty, nt, rt, nsg))?;
+    while nsg > 8 && pso.maxTotalThreadsPerThreadgroup() < 32 * nsg {
+        nsg /= 2;
+        pso = ctx.pipeline(&pso_name(ty, nt, rt, nsg))?;
+    }
+    if !q8_0_fewrow_capacity_supported(
+        pso.threadExecutionWidth(),
+        pso.maxTotalThreadsPerThreadgroup(),
+        pso.staticThreadgroupMemoryLength(),
+        ctx.device.maxThreadgroupMemoryLength(),
+        nsg,
+    ) {
+        return Err(bad_shape(
+            KERNEL,
+            format!(
+                "few-row pipeline needs SIMD32, {} threads and sufficient static threadgroup memory",
+                32 * nsg
+            ),
+        ));
+    }
+    enc.set_pipeline(&pso);
+
+    #[repr(C)]
+    #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+    struct Args {
+        n_in: u32,
+        n_out: u32,
+        n_cols: u32,
+    }
+    enc.set_bytes(
+        0,
+        &Args {
+            n_in: n_in as u32,
+            n_out: n_out as u32,
+            n_cols: n_cols as u32,
+        },
+    );
+    enc.set_tensor(1, weight);
+    enc.set_tensor(2, x);
+    enc.set_tensor(3, y);
+    enc.dispatch(
+        MTLSize {
+            width: n_out.div_ceil(8 * nt),
+            height: 1,
+            depth: 1,
+        },
+        MTLSize {
+            width: 32 * nsg,
+            height: 1,
+            depth: 1,
+        },
+    );
+    Ok(())
+}
+
 #[allow(clippy::too_many_arguments)]
 pub fn encode_ffn_fused_swiglu_q4_k_mma8_f32(
     ctx: &MetalContext,
@@ -3693,6 +3896,304 @@ mod tests {
             Ok(0.5),
             "a finite difference is measured"
         );
+    }
+
+    #[test]
+    fn fewrow_gen_tiling_follows_upstream_rule() {
+        // (n_in, n_out, n_cols) -> (nt, rt, nsg) for Qwen3.8-27B Q4_K_M.
+        assert_eq!(fewrow_gen_tiling(5120, 17408, 8), (4, 1, 8));
+        assert_eq!(fewrow_gen_tiling(5120, 6144, 8), (4, 1, 16));
+        assert_eq!(fewrow_gen_tiling(6144, 5120, 8), (4, 1, 16));
+        assert_eq!(fewrow_gen_tiling(5120, 1024, 8), (1, 1, 16));
+        assert_eq!(fewrow_gen_tiling(17408, 5120, 8), (4, 1, 16));
+        assert_eq!(fewrow_gen_tiling(5120, 248320, 8), (4, 1, 8));
+        assert_eq!(fewrow_gen_tiling(17408, 5120, 16), (2, 2, 16));
+        assert_eq!(fewrow_gen_tiling(5120, 64, 16), (1, 2, 32));
+    }
+
+    fn fewrow_gen_random_block(dtype: GgmlType, state: &mut u32) -> Vec<u8> {
+        let mut next = || {
+            *state = state.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+            *state
+        };
+        match dtype {
+            GgmlType::Q4_K => {
+                let mut b = vec![0u8; 144];
+                b[..2].copy_from_slice(&half::f16::from_f32(0.01).to_le_bytes());
+                b[2..4].copy_from_slice(&half::f16::from_f32(0.005).to_le_bytes());
+                for i in 4..16 {
+                    b[i] = next() as u8;
+                }
+                for i in 16..144 {
+                    b[i] = next() as u8;
+                }
+                b
+            }
+            GgmlType::Q5_K => {
+                let mut b = vec![0u8; 176];
+                b[..2].copy_from_slice(&half::f16::from_f32(0.01).to_le_bytes());
+                b[2..4].copy_from_slice(&half::f16::from_f32(0.005).to_le_bytes());
+                for i in 4..176 {
+                    b[i] = next() as u8;
+                }
+                b
+            }
+            GgmlType::Q6_K => {
+                let mut b = vec![0u8; 210];
+                for i in 0..192 {
+                    b[i] = next() as u8;
+                }
+                for i in 192..208 {
+                    b[i] = (((next() % 15) as i8) - 7) as u8;
+                }
+                b[208..210].copy_from_slice(&half::f16::from_f32(0.01).to_le_bytes());
+                b
+            }
+            GgmlType::Q8_0 => {
+                let mut b = vec![0u8; 34];
+                b[..2].copy_from_slice(&half::f16::from_f32(0.01).to_le_bytes());
+                for i in 2..34 {
+                    b[i] = next() as u8;
+                }
+                b
+            }
+            other => panic!("no synthetic encoder for {other:?}"),
+        }
+    }
+
+    #[test]
+    fn fewrow_gen_matches_cpu_reference_at_tile_edges() {
+        let ctx = match metal_test_context() {
+            Some(ctx) => ctx,
+            None => return,
+        };
+        let cases = [
+            (GgmlType::Q4_K, 512usize, 9usize, 2usize),
+            (GgmlType::Q4_K, 1024, 17, 8),
+            (GgmlType::Q4_K, 1024, 17, 16),
+            (GgmlType::Q5_K, 512, 9, 8),
+            (GgmlType::Q6_K, 512, 9, 2),
+            (GgmlType::Q6_K, 1024, 17, 8),
+            (GgmlType::Q6_K, 1024, 17, 16),
+            (GgmlType::Q8_0, 512, 9, 8),
+            (GgmlType::Q8_0, 1024, 17, 16),
+        ];
+        for (case, &(dtype, n_in, n_out, n_cols)) in cases.iter().enumerate() {
+            let blocks_per_row = n_in / FewrowGenType::from_dtype(dtype).unwrap().block_weights();
+            let mut state = 0x9E37_79B9u32 ^ case as u32;
+            let mut weight_bytes = Vec::new();
+            for _ in 0..n_out * blocks_per_row {
+                weight_bytes.extend_from_slice(&fewrow_gen_random_block(dtype, &mut state));
+            }
+            let desc = TensorDesc {
+                name: "fewrow_gen_test".into(),
+                shape: vec![n_in as u64, n_out as u64],
+                dtype,
+                shard_idx: 0,
+                data_offset: 0,
+                n_bytes: weight_bytes.len() as u64,
+            };
+            let weight_f32 =
+                crate::codec::dequant_to_f32(&desc, &weight_bytes).expect("reference dequant");
+            let x: Vec<f32> = (0..n_cols * n_in)
+                .map(|i| (((i * 37 + 11) % 97) as f32 * 0.01) - 0.48)
+                .collect();
+            let weight = offset_tensor(
+                &ctx,
+                32,
+                &weight_bytes,
+                6,
+                vec![n_in as u64, n_out as u64],
+                dtype,
+            );
+            let x_t = MetalTensor::from_bytes(
+                &ctx,
+                bytemuck::cast_slice(&x),
+                vec![(n_cols * n_in) as u64],
+                GgmlType::F32,
+            )
+            .unwrap();
+            let y_t = MetalTensor::zeros_f32(&ctx, vec![(n_cols * n_out) as u64]).unwrap();
+            one_shot(&ctx, |enc| {
+                encode_mat_mat_fewrow_gen_f32(&ctx, enc, &weight, &x_t, &y_t, n_in, n_out, n_cols)
+            })
+            .unwrap();
+            let got = read_back_f32(&y_t.buffer, n_cols * n_out);
+            let expected: Vec<f64> = (0..n_cols)
+                .flat_map(|c| (0..n_out).map(move |r| (c, r)))
+                .map(|(c, r)| {
+                    (0..n_in)
+                        .map(|k| f64::from(weight_f32[r * n_in + k]) * f64::from(x[c * n_in + k]))
+                        .sum()
+                })
+                .collect();
+            let max_err = checked_max_abs_error(&got, &expected).unwrap_or_else(|e| {
+                panic!("fewrow gen {dtype:?} n_in={n_in} n_out={n_out} n_cols={n_cols}: {e}")
+            });
+            let max_ref = expected.iter().fold(0.0f64, |m, e| m.max(e.abs()));
+            eprintln!(
+                "[fewrow-gen] {dtype:?} n_in={n_in} n_out={n_out} n_cols={n_cols} max_err={max_err:.3e} max_ref={max_ref:.3e}"
+            );
+            assert!(
+                max_err <= 5e-3 * max_ref.max(1.0),
+                "fewrow gen {dtype:?} n_in={n_in} n_out={n_out} n_cols={n_cols}: max_err {max_err} vs max_ref {max_ref}"
+            );
+        }
+    }
+
+    /// Exact Qwen3.8-27B Q4_K_M shapes: generic few-row kernel vs the
+    /// production `encode_mat_mat_dispatch` route, for N = 2/4/8/16.
+    ///
+    /// Run (on either machine, under the Metal lease):
+    /// `QWEN_METAL_LEASE_WAIT=1 cargo test --release --lib -p qwen-llm
+    /// fewrow_gen_production_shapes -- --ignored --nocapture`
+    #[test]
+    #[ignore]
+    fn fewrow_gen_production_shapes() {
+        let _ = crate::test_fixtures::catalog::QWEN3_8_27B_Q4_K_M.required();
+
+        let Some(ctx) = crate::test_fixtures::metal_context_or_skip() else {
+            return;
+        };
+        let path = std::env::var("QWEN_FEWROW_BENCH_MODEL")
+            .ok()
+            .or_else(|| {
+                crate::test_fixtures::catalog::QWEN3_8_27B_Q4_K_M
+                    .required()
+                    .to_str()
+                    .map(str::to_owned)
+            })
+            .expect("model path");
+        if !std::path::Path::new(&path).exists() {
+            eprintln!("[fewrow-bench] skipped - GGUF missing: {path}");
+            return;
+        }
+        let env_usize_list = |name: &str, default: &str| -> Vec<usize> {
+            std::env::var(name)
+                .unwrap_or_else(|_| default.into())
+                .split(',')
+                .map(|v| v.trim().parse().expect("integer list"))
+                .collect()
+        };
+        let ns = env_usize_list("QWEN_FEWROW_BENCH_NS", "2,4,8,16");
+        let iters: usize = std::env::var("QWEN_FEWROW_BENCH_ITERS")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(11);
+        let n_dispatches: usize = std::env::var("QWEN_FEWROW_BENCH_DISPATCHES")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(32);
+        const DEFAULT_TENSORS: &[&str] = &[
+            "blk.0.ffn_gate.weight",    // Q4_K [5120, 17408]
+            "blk.0.attn_gate.weight",   // Q4_K [5120, 6144]
+            "blk.3.attn_q.weight",      // Q4_K [5120, 12288]
+            "blk.3.attn_k.weight",      // Q4_K [5120, 1024]
+            "blk.3.attn_output.weight", // Q4_K [6144, 5120]
+            "blk.0.ffn_down.weight",    // Q6_K [17408, 5120]
+            "blk.0.attn_qkv.weight",    // Q6_K [5120, 10240]
+            "blk.3.attn_v.weight",      // Q6_K [5120, 1024]
+            "output.weight",            // Q6_K [5120, 248320]
+            "blk.0.ssm_out.weight",     // Q5_K [6144, 5120]
+        ];
+        let names: Vec<String> = std::env::var("QWEN_FEWROW_BENCH_TENSORS")
+            .ok()
+            .map(|v| v.split(',').map(|s| s.trim().to_owned()).collect())
+            .unwrap_or_else(|| DEFAULT_TENSORS.iter().map(|s| (*s).to_owned()).collect());
+
+        let g = crate::gguf::GgufFile::open(&path).expect("open");
+        eprintln!(
+            "[fewrow-bench] model={path} ns={ns:?} iters={iters} dispatches={n_dispatches} {}",
+            ctx.describe()
+        );
+        for name in names {
+            let Some(t) = g.find(&name) else {
+                eprintln!("[fewrow-bench] skip missing {name}");
+                continue;
+            };
+            if !matches!(
+                t.dtype,
+                GgmlType::Q4_K | GgmlType::Q5_K | GgmlType::Q6_K | GgmlType::Q8_0
+            ) {
+                eprintln!("[fewrow-bench] skip {name} dtype={:?}", t.dtype);
+                continue;
+            }
+            if t.shape.len() != 2 {
+                continue;
+            }
+            let n_in = t.shape[0] as usize;
+            let n_out = t.shape[1] as usize;
+            let w_t = MetalTensor::from_gguf_tensor(&ctx, t, g.slice(t)).expect("weight");
+            for &n_cols in &ns {
+                let x: Vec<f32> = (0..n_cols * n_in)
+                    .map(|i| ((i % 31) as f32 - 15.0) * 0.002)
+                    .collect();
+                let x_t = MetalTensor::from_bytes(
+                    &ctx,
+                    bytemuck::cast_slice(&x),
+                    vec![(n_cols * n_in) as u64],
+                    GgmlType::F32,
+                )
+                .unwrap();
+                let y_inc = MetalTensor::zeros_f32(&ctx, vec![(n_out * n_cols) as u64]).unwrap();
+                let y_gen = MetalTensor::zeros_f32(&ctx, vec![(n_out * n_cols) as u64]).unwrap();
+
+                let bench = |incumbent: bool| -> f64 {
+                    let cmd = ctx.queue.commandBuffer().expect("cmd");
+                    let enc = KernelEncoder::begin(&cmd);
+                    for _ in 0..n_dispatches {
+                        if incumbent {
+                            crate::metal_forward::encode_mat_mat_dispatch(
+                                &ctx, &enc, &w_t, &x_t, &y_inc, n_in, n_out, n_cols,
+                            )
+                            .unwrap();
+                        } else {
+                            encode_mat_mat_fewrow_gen_f32(
+                                &ctx, &enc, &w_t, &x_t, &y_gen, n_in, n_out, n_cols,
+                            )
+                            .unwrap();
+                        }
+                    }
+                    enc.end();
+                    let started = std::time::Instant::now();
+                    cmd.commit();
+                    wait_completed(&cmd).expect("Metal command buffer failed");
+                    started.elapsed().as_secs_f64() * 1e3 / n_dispatches as f64
+                };
+
+                for _ in 0..2 {
+                    bench(true);
+                    bench(false);
+                }
+                let mut inc_samples = Vec::with_capacity(iters);
+                let mut gen_samples = Vec::with_capacity(iters);
+                for iteration in 0..iters {
+                    let (a, b) = if iteration % 2 == 0 {
+                        (bench(true), bench(false))
+                    } else {
+                        (bench(false), bench(true))
+                    };
+                    if iteration % 2 == 0 {
+                        inc_samples.push(a);
+                        gen_samples.push(b);
+                    } else {
+                        gen_samples.push(a);
+                        inc_samples.push(b);
+                    }
+                }
+                let median = |values: &mut Vec<f64>| {
+                    values.sort_by(f64::total_cmp);
+                    values[values.len() / 2]
+                };
+                let inc_med = median(&mut inc_samples.clone());
+                let gen_med = median(&mut gen_samples.clone());
+                eprintln!(
+                    "[fewrow-bench] tensor={name} dtype={:?} n_in={n_in} n_out={n_out} n_cols={n_cols} incumbent_ms={inc_samples:?} fewrow_ms={gen_samples:?} ratio={:.3}",
+                    t.dtype,
+                    inc_med / gen_med
+                );
+            }
+        }
     }
 
     #[test]

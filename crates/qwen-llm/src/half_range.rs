@@ -269,10 +269,32 @@ pub fn cached_census(gguf: &GgufFile) -> Result<HalfRangeCensus, GgufError> {
 
 /// Uncached census. Used by tests and by `QWEN_HALF_RANGE_CACHE=0` runs.
 pub fn census_uncached(gguf: &GgufFile) -> Result<HalfRangeCensus, GgufError> {
-    let results: Vec<Result<ScanOutput, GgufError>> = gguf
-        .tensors
+    // Read each shard in offset order. Tensor descriptors are not stored in
+    // file order across a split model, and a random-order parallel scan turns
+    // a cold artifact into a seek storm. Parallelism is per shard; each shard
+    // is a sequential pass.
+    let mut by_shard: Vec<Vec<&TensorDesc>> = vec![Vec::new(); gguf.shards.len()];
+    for desc in &gguf.tensors {
+        let Some(group) = by_shard.get_mut(desc.shard_idx) else {
+            return Err(GgufError::Decode(format!(
+                "tensor {:?}: shard index {} is out of range",
+                desc.name, desc.shard_idx
+            )));
+        };
+        group.push(desc);
+    }
+    for group in &mut by_shard {
+        group.sort_by_key(|desc| desc.data_offset);
+    }
+    let per_shard: Vec<Result<Vec<ScanOutput>, GgufError>> = by_shard
         .par_iter()
-        .map(|desc| scan_tensor(gguf, desc))
+        .map(|descs| {
+            let mut outputs = Vec::with_capacity(descs.len());
+            for desc in descs {
+                outputs.push(scan_tensor(gguf, desc)?);
+            }
+            Ok(outputs)
+        })
         .collect();
 
     let mut tensors = BTreeMap::new();
@@ -280,43 +302,44 @@ pub fn census_uncached(gguf: &GgufFile) -> Result<HalfRangeCensus, GgufError> {
     let mut violations = Vec::new();
     let mut scanned_bytes = 0u64;
 
-    for result in results {
-        let output = result?;
-        scanned_bytes = scanned_bytes.saturating_add(output.scanned_bytes);
-        if let Some(range) = output.range {
-            if range.non_finite > 0 {
-                violations.push(HalfRangeViolation {
-                    name: range.name.clone(),
-                    dtype: range.dtype.clone(),
-                    kind: ViolationKind::NonFinite,
-                    bound: range.max_abs,
-                    limit: HALF_DECODED_MAX,
-                    detail: format!("{} non-finite decoded values/scales", range.non_finite),
-                });
-            } else if !range.max_abs.is_finite() || range.max_abs >= HALF_DECODED_MAX {
-                violations.push(HalfRangeViolation {
-                    name: range.name.clone(),
-                    dtype: range.dtype.clone(),
-                    kind: ViolationKind::DecodedRange,
-                    bound: range.max_abs,
-                    limit: HALF_DECODED_MAX,
-                    detail: "decoded max bound is not below 2^15".to_string(),
-                });
+    for result in per_shard {
+        for output in result? {
+            scanned_bytes = scanned_bytes.saturating_add(output.scanned_bytes);
+            if let Some(range) = output.range {
+                if range.non_finite > 0 {
+                    violations.push(HalfRangeViolation {
+                        name: range.name.clone(),
+                        dtype: range.dtype.clone(),
+                        kind: ViolationKind::NonFinite,
+                        bound: range.max_abs,
+                        limit: HALF_DECODED_MAX,
+                        detail: format!("{} non-finite decoded values/scales", range.non_finite),
+                    });
+                } else if !range.max_abs.is_finite() || range.max_abs >= HALF_DECODED_MAX {
+                    violations.push(HalfRangeViolation {
+                        name: range.name.clone(),
+                        dtype: range.dtype.clone(),
+                        kind: ViolationKind::DecodedRange,
+                        bound: range.max_abs,
+                        limit: HALF_DECODED_MAX,
+                        detail: "decoded max bound is not below 2^15".to_string(),
+                    });
+                }
+                tensors.insert(range.name.clone(), range);
             }
-            tensors.insert(range.name.clone(), range);
-        }
-        if let Some(norm) = output.norm {
-            if !norm.bound.is_finite() || norm.bound >= RMS_NORM_MAX {
-                violations.push(HalfRangeViolation {
-                    name: norm.name.clone(),
-                    dtype: "RMSNorm".to_string(),
-                    kind: ViolationKind::RmsRange,
-                    bound: norm.bound,
-                    limit: RMS_NORM_MAX,
-                    detail: format!("sqrt({})*max|gamma| is not below 2^11", norm.n),
-                });
+            if let Some(norm) = output.norm {
+                if !norm.bound.is_finite() || norm.bound >= RMS_NORM_MAX {
+                    violations.push(HalfRangeViolation {
+                        name: norm.name.clone(),
+                        dtype: "RMSNorm".to_string(),
+                        kind: ViolationKind::RmsRange,
+                        bound: norm.bound,
+                        limit: RMS_NORM_MAX,
+                        detail: format!("sqrt({})*max|gamma| is not below 2^11", norm.n),
+                    });
+                }
+                norms.insert(norm.name.clone(), norm);
             }
-            norms.insert(norm.name.clone(), norm);
         }
     }
 

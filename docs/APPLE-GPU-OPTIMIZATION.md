@@ -959,6 +959,60 @@ small and operational:
    MPP device tensor whose extent can exceed 2 GiB (int32 offset); build each
    tile tensor from a 64-bit base pointer. Ids are `int`/`uint`, never `short`.
 
+## Half-staging range and subnormal rules
+
+These rules apply to every path that narrows decoded weights or activations to
+half. They are enforced in code by `crate::half_range` (weights, load time) and
+`crate::half_telemetry` (debug-only activation peaks).
+
+1. **Weights.** Any path that narrows decoded weights to half
+   (`qt_dequantize_*`, the llama.cpp-style `_mm` dense tiles, half native rows,
+   grouped IQ/K-quant tiles, F16 weight caches, and F32/BF16 generic-tile
+   banks) requires every decoded `|w|` to stay below `2^15` before residency.
+   Half itself overflows at 65520; the extra binade keeps the guard independent
+   of rounding mode. MXFP4 (value `code * 2^(e-128)`, GGML's doubled table)
+   overflows for `|code|` 12/8 at `e >= 141`, 6/4 at `>= 142`, 3/2 at `>= 143`,
+   and 1 at `>= 144`; with the GGML/OCP scale choice this is block
+   `amax >= 2^16`. The load-time census bounds MXFP4 from the exponent-byte
+   histogram (`12 * 2^(e-128)`), K-quant/legacy/I-quant formats from the
+   per-block scale fields (`d`, `dmin`, `m`) and the format's maximum code
+   magnitude, and F32/F16/BF16 banks from their full max. A tensor that fails
+   the bound takes an F32-operand lane only where the loader already selects
+   one (currently DS4 MXFP4 routed down); otherwise loading fails with a named
+   `HalfRange` error. Adding a format to a half path adds its census bound in
+   the same change. Do not rely on downstream NaN detection: clamped SwiGLU
+   epilogues turn `+-inf` into finite `+-limit`.
+2. **Activations.** Every half-staged activation records its bound at the call
+   site: RMSNorm output `<= sqrt(n) * max|gamma|` (checked at load);
+   clamped SwiGLU `<= L * silu(L) * route scale` applied before down
+   (V4.1 `<= 150`, GLM `<= 100`); attention output `<= max|V|`; softmax
+   `P <= 1`. Anything else (unclamped SwiGLU down inputs in
+   qwen35/qwen35moe/qwen4exp, low-rank intermediates) needs a telemetry record
+   of per-layer `max|x|` on the reference corpus with at least 32x headroom
+   (`< 2048`), re-measured for new families or artifact classes. If headroom is
+   short, use an exact power-of-two prescale
+   (`s = clamp(ceil(log2(amax/1024)), 0, 127)`, undone in the F32 epilogue)
+   before reaching for F32 or bf16 staging.
+3. **Detection.** Kernels are built with `-ffast-math`, so `isfinite`/`isnan`
+   are not guaranteed. New checks use exponent bits (`finite_bits`,
+   `kernels/deepseek_v41_ffn.metal`) and run before any min/max/clamp that can
+   absorb inf or NaN.
+4. **Subnormals.** F32 -> half conversion keeps half subnormals (round to
+   nearest even). Half-operand MMA behavior is chip-specific and must be
+   measured, not assumed: the ignored `half_range_probe` test records
+   simdgroup MMA, Metal 4 `matmul2d`, and F32 -> half at 65520/1e5 on the
+   current device. Never build half operands from raw bit patterns that land in
+   the subnormal range (use the `1024 + q` construction,
+   `kernels/mat_mat_q8_0_fewrow.metal`). Values in `(0, 1]` staged as half
+   (softmax `P~`) are prescaled by an exact power of two (`<= 2^15`) and
+   unscaled in F32. F32 subnormals are flushed; paths that need them use the
+   exponent-shift pattern in `kernels/expert_native.metal`.
+
+The weight census is cached per artifact identity (shard device/inode/size/
+mtime/ctime plus the tensor descriptor table). A cache hit is one small JSON
+read; `QWEN_HALF_RANGE_CACHE=0` forces a rescan and
+`QWEN_HALF_RANGE_REPORT=1` prints the scan time and violation count.
+
 ## Ranked resource guide
 
 This is the reading order that gives the most signal for our use case.

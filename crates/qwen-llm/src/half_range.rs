@@ -253,6 +253,17 @@ pub fn cached_census(gguf: &GgufFile) -> Result<HalfRangeCensus, GgufError> {
     if let Some(root) = cache_root() {
         write_cache(&root, &key, &census);
     }
+    if std::env::var_os("QWEN_HALF_RANGE_REPORT").is_some() {
+        eprintln!(
+            "half-range-census tensors={} norms={} bytes={} scan_ms={} cache_hit={} violations={}",
+            census.tensors.len(),
+            census.norms.len(),
+            census.scanned_bytes,
+            census.scan_wall_ms,
+            census.cache_hit,
+            census.violations.len()
+        );
+    }
     Ok(census)
 }
 
@@ -874,6 +885,49 @@ mod tests {
         let range = scan_bytes(&d, &block).unwrap().unwrap();
         assert!(range.max_abs >= HALF_DECODED_MAX);
         assert_eq!(range.name, "blk.0.ffn_down.weight");
+    }
+
+    #[test]
+    #[ignore = "artifact census; set QWEN_HALF_RANGE_MODEL to a GGUF"]
+    fn artifact_census_report() {
+        let Some(path) = std::env::var_os("QWEN_HALF_RANGE_MODEL") else {
+            return;
+        };
+        let gguf = GgufFile::open(path).expect("open GGUF");
+        let started = Instant::now();
+        let census = census_uncached(&gguf).expect("census");
+        let wall = started.elapsed();
+        eprintln!(
+            "half-range-census uncached tensors={} norms={} bytes={} wall_ms={} violations={}",
+            census.tensors.len(),
+            census.norms.len(),
+            census.scanned_bytes,
+            wall.as_millis(),
+            census.violations.len()
+        );
+        for violation in &census.violations {
+            eprintln!("half-range-census violation {violation:?}");
+        }
+        let mut worst = census
+            .tensors
+            .values()
+            .map(|range| (range.max_abs, range.name.clone(), range.dtype.clone()))
+            .collect::<Vec<_>>();
+        worst.sort_by(|a, b| b.0.total_cmp(&a.0));
+        for (bound, name, dtype) in worst.into_iter().take(8) {
+            eprintln!("half-range-census worst bound={bound:.6e} dtype={dtype} tensor={name}");
+        }
+        let mut worst_norm = census
+            .norms
+            .values()
+            .map(|norm| (norm.bound, norm.name.clone(), norm.n, norm.max_abs))
+            .collect::<Vec<_>>();
+        worst_norm.sort_by(|a, b| b.0.total_cmp(&a.0));
+        for (bound, name, n, max_abs) in worst_norm.into_iter().take(5) {
+            eprintln!(
+                "half-range-census worst-norm bound={bound:.6e} n={n} max_abs={max_abs:.6} tensor={name}"
+            );
+        }
     }
 
     #[test]

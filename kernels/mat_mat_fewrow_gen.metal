@@ -130,13 +130,14 @@ struct fewrow_gen_q6_K {
         const uint shl_h = il4 > 1 ? 0u : (il4 > 0 ? 2u : 4u);
         const uint shr_l = il4 > 1 ? 4u : 0u;
 
+        device const ushort * ql16 = (device const ushort *) ql;
+        device const ushort * qh16 = (device const ushort *) qh;
+
         FOR_UNROLL (int i = 0; i < 4; ++i) {
-            const uint low = (uint(ql[4 * i + 0]) | (uint(ql[4 * i + 1]) << 8) |
-                              (uint(ql[4 * i + 2]) << 16) | (uint(ql[4 * i + 3]) << 24)) &
-                             kmask2;
-            const uint high = (uint(qh[4 * i + 0]) | (uint(qh[4 * i + 1]) << 8) |
-                               (uint(qh[4 * i + 2]) << 16) | (uint(qh[4 * i + 3]) << 24)) &
-                              kmask1;
+            // Upstream reads two 16-bit words per 32-bit lane; the block
+            // base is only 2-byte aligned, so 32-bit loads are not safe.
+            const uint low = (uint(ql16[2 * i]) | (uint(ql16[2 * i + 1]) << 16)) & kmask2;
+            const uint high = (uint(qh16[2 * i]) | (uint(qh16[2 * i + 1]) << 16)) & kmask1;
             const uint q = ((high << shl_h) >> shr_h) | (low >> shr_l);
             reg[i][0] = dl0 * float(q & 0xFFu) - ml;
             reg[i][1] = dl1 * float(q & 0xFF00u) - ml;

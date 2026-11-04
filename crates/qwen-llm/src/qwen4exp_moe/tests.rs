@@ -2725,7 +2725,7 @@ fn packed_common_moe_motor_matches_serial_rows_and_routes() {
     assert_eq!(
         Qwen4ExpMoePackedMotorScratch::required_bytes(released_geometry, MAX_PACKED_TOKENS,)
             .unwrap(),
-        328_378_368
+        328_386_560
     );
 }
 

@@ -2230,10 +2230,37 @@ fn prefill_attn_matrix_causal_skip_enabled() -> bool {
 }
 
 /// Enable experimental single-pass tensor flash attention for dense Qwen
-/// 24/4-head, d256 prefill on Apple10. Defaults off; other shapes use matrix attention.
+/// 24/4-head, d256 prefill on Apple10. Defaults off; unsupported devices and
+/// shapes retain their existing dispatch.
 const PREFILL_ATTN_TENSOR_FLASH_ENV: &str = "QWEN_PREFILL_ATTN_TENSOR_FLASH";
 
+thread_local! {
+    static PREFILL_ATTN_TENSOR_FLASH_OVERRIDE: Cell<Option<bool>> = const { Cell::new(None) };
+}
+
+struct TensorFlashOverrideGuard(Option<bool>);
+
+impl Drop for TensorFlashOverrideGuard {
+    fn drop(&mut self) {
+        PREFILL_ATTN_TENSOR_FLASH_OVERRIDE.with(|slot| slot.set(self.0));
+    }
+}
+
+/// Thread-local measurement scope for the tensor-flash knob. Hardware and
+/// shape checks still apply. The previous selection is restored on unwind.
+#[doc(hidden)]
+pub fn with_prefill_attn_tensor_flash_override<R>(enabled: bool, f: impl FnOnce() -> R) -> R {
+    let previous = PREFILL_ATTN_TENSOR_FLASH_OVERRIDE.with(|slot| slot.replace(Some(enabled)));
+    let guard = TensorFlashOverrideGuard(previous);
+    let result = f();
+    drop(guard);
+    result
+}
+
 fn prefill_attn_tensor_flash_enabled() -> bool {
+    if let Some(enabled) = PREFILL_ATTN_TENSOR_FLASH_OVERRIDE.with(Cell::get) {
+        return enabled;
+    }
     static MODE: OnceLock<PrefillEnvMode> = OnceLock::new();
     matches!(
         *MODE.get_or_init(|| env_mode(PREFILL_ATTN_TENSOR_FLASH_ENV)),

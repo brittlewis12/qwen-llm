@@ -15,6 +15,41 @@ fn packed_verify_caller_policy_only_dflash_uses_generic() {
     assert!(!PackedVerifyCaller::Mtp.uses_generic_fewrow());
 }
 
+#[test]
+fn tensor_flash_override_restores_scope_and_unwind() {
+    assert_eq!(PREFILL_ATTN_TENSOR_FLASH_OVERRIDE.with(Cell::get), None);
+    with_prefill_attn_tensor_flash_override(false, || {
+        assert!(!prefill_attn_tensor_flash_enabled());
+        with_prefill_attn_tensor_flash_override(true, || {
+            assert!(prefill_attn_tensor_flash_enabled());
+        });
+        assert!(!prefill_attn_tensor_flash_enabled());
+        let result = std::panic::catch_unwind(|| {
+            with_prefill_attn_tensor_flash_override(true, || panic!("scope unwind"));
+        });
+        assert!(result.is_err());
+        assert!(!prefill_attn_tensor_flash_enabled());
+    });
+    assert_eq!(PREFILL_ATTN_TENSOR_FLASH_OVERRIDE.with(Cell::get), None);
+}
+
+#[test]
+fn tensor_flash_override_is_thread_local() {
+    with_prefill_attn_tensor_flash_override(true, || {
+        assert!(prefill_attn_tensor_flash_enabled());
+        std::thread::spawn(|| {
+            assert_eq!(PREFILL_ATTN_TENSOR_FLASH_OVERRIDE.with(Cell::get), None);
+            with_prefill_attn_tensor_flash_override(false, || {
+                assert!(!prefill_attn_tensor_flash_enabled());
+            });
+        })
+        .join()
+        .unwrap();
+        assert!(prefill_attn_tensor_flash_enabled());
+    });
+    assert_eq!(PREFILL_ATTN_TENSOR_FLASH_OVERRIDE.with(Cell::get), None);
+}
+
 #[cfg(feature = "dflash-k0s-diagnostics")]
 struct K0sSyntheticRowProvider {
     side: DFlashK0sCodebookSide,

@@ -888,6 +888,27 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "artifact cached census; set QWEN_HALF_RANGE_MODEL to a GGUF"]
+    fn artifact_cached_census_report() {
+        let Some(path) = std::env::var_os("QWEN_HALF_RANGE_MODEL") else {
+            return;
+        };
+        let gguf = GgufFile::open(path).expect("open GGUF");
+        let started = Instant::now();
+        let census = cached_census(&gguf).expect("cached census");
+        let wall = started.elapsed();
+        eprintln!(
+            "half-range-census cached tensors={} norms={} bytes={} wall_ms={} cache_hit={} violations={}",
+            census.tensors.len(),
+            census.norms.len(),
+            census.scanned_bytes,
+            wall.as_millis(),
+            census.cache_hit,
+            census.violations.len()
+        );
+    }
+
+    #[test]
     #[ignore = "artifact census; set QWEN_HALF_RANGE_MODEL to a GGUF"]
     fn artifact_census_report() {
         let Some(path) = std::env::var_os("QWEN_HALF_RANGE_MODEL") else {

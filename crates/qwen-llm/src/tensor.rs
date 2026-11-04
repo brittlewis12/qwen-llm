@@ -62,6 +62,7 @@ pub enum GgmlType {
     NVFP4 = 40,
     Q1_0 = 41,
     Q2_0 = 42,
+    F8_E4M3 = 43,
     Unknown = -1,
 }
 
@@ -103,6 +104,7 @@ impl GgmlType {
             40 => Self::NVFP4,
             41 => Self::Q1_0,
             42 => Self::Q2_0,
+            43 => Self::F8_E4M3,
             _ => Self::Unknown,
         }
     }
@@ -144,6 +146,7 @@ impl GgmlType {
             Self::NVFP4 => "NVFP4",
             Self::Q1_0 => "Q1_0",
             Self::Q2_0 => "Q2_0",
+            Self::F8_E4M3 => "F8_E4M3",
             Self::Unknown => "UNKNOWN",
         }
     }
@@ -199,6 +202,7 @@ pub(crate) fn ggml_type_layout_raw(raw: u32) -> Option<(u64, u64)> {
         40 => (64, 36),
         41 => (128, 18),
         42 => (64, 18),
+        43 => (1, 1),
         _ => return None,
     })
 }
@@ -315,6 +319,7 @@ mod tests {
             (40, GgmlType::NVFP4, "NVFP4"),
             (41, GgmlType::Q1_0, "Q1_0"),
             (42, GgmlType::Q2_0, "Q2_0"),
+            (43, GgmlType::F8_E4M3, "F8_E4M3"),
         ];
         for (raw, dtype, wire_name) in cases {
             assert_eq!(GgmlType::from_raw(raw), dtype);

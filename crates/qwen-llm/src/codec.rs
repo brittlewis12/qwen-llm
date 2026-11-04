@@ -324,6 +324,7 @@ mod tests {
             GgmlType::NVFP4,
             GgmlType::Q1_0,
             GgmlType::Q2_0,
+            GgmlType::F8_E4M3,
         ] {
             let (elements, bytes) = dtype.storage_layout().unwrap();
             let tensor = desc("extended", vec![elements], dtype, bytes as usize);
@@ -438,6 +439,21 @@ mod tests {
                 assert_eq!(actual[sub * 16 + 8 + i], -value * scale);
             }
         }
+    }
+
+    #[test]
+    fn f8_e4m3_codec_matches_ocp_values() {
+        // OCP E4M3: 0x38 = 1.0, 0x40 = 2.0, 0x3c = 1.5, 0xb8 = -1.0,
+        // 0x7e = 448 (the saturating maximum), 0x00 = 0.0.
+        let payload = [0x38u8, 0x40, 0x3c, 0xb8, 0x7e, 0x00];
+        let tensor = desc(
+            "f8",
+            vec![payload.len() as u64],
+            GgmlType::F8_E4M3,
+            payload.len(),
+        );
+        let actual = dequant_to_f32(&tensor, &payload).unwrap();
+        assert_eq!(actual, vec![1.0, 2.0, 1.5, -1.0, 448.0, 0.0]);
     }
 
     #[test]

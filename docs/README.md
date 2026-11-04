@@ -30,6 +30,7 @@
 
 - [DEEPSEEK-V41-BRINGUP](DEEPSEEK-V41-BRINGUP.md): current V4.1 bring-up requirements and evidence.
 - [INFERENCE-GRAPH](INFERENCE-GRAPH.md): current semantic map of Qwen hybrid inference paths.
+- [LLAMA-CPP](LLAMA-CPP.md): the roles llama.cpp plays here (correctness oracle, CPU library, profiling baseline, performance reference), their pins and their limits.
 
 ## Design records for shipped features
 

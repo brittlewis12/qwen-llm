@@ -82,8 +82,10 @@ extra toolchain is required: each build uses the Metal language features
 available in its local Xcode toolchain, and portable kernels remain available
 when TensorOps cannot be used.
 
-llama.cpp is linked as a library for tokenization and CPU-side dequantization;
-models do not run through it.
+llama.cpp is linked as a library for CPU-side dequantization and for
+tokenizing families without a native tokenizer; models do not run through it.
+[docs/LLAMA-CPP.md](docs/LLAMA-CPP.md) describes the separate roles llama.cpp
+plays here.
 
 ## Running a model
 

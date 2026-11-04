@@ -50,8 +50,12 @@ pub const CENSUS_VERSION: u32 = 1;
 const SCAN_READ_BYTES: usize = 16 * 1024 * 1024;
 
 const CACHE_SCHEMA: &[u8] = b"qwen-half-range-census-v1\0";
+/// Overrides the directory for the per-artifact half-range census cache.
 const CACHE_DIR_ENV: &str = "QWEN_HALF_RANGE_CACHE_DIR";
+/// Set to 0 to disable the half-range census cache for this process.
 const CACHE_ENV: &str = "QWEN_HALF_RANGE_CACHE";
+/// Set to 1 to print one half-range census timing line per load.
+const REPORT_ENV: &str = "QWEN_HALF_RANGE_REPORT";
 
 /// How a tensor bound was obtained.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -194,11 +198,29 @@ fn is_routed_down_name(name: &str) -> bool {
         || name.ends_with(".down.weight")
 }
 
+crate::env_flag!(
+    /// Enables the load-time decoded-range guard for half-staged weights.
+    /// Default on; set to 0 to load without a census (rollback lever).
+    default_on half_range_guard_enabled,
+    "QWEN_HALF_RANGE_GUARD"
+);
+
 /// Compute (or load from cache) the census and refuse unsafe tensors.
 pub fn audit_or_refuse(
     gguf: &GgufFile,
     scope: HalfRangeScope,
 ) -> Result<HalfRangeCensus, HalfRangeError> {
+    if !half_range_guard_enabled() {
+        return Ok(HalfRangeCensus {
+            version: CENSUS_VERSION,
+            tensors: BTreeMap::new(),
+            norms: BTreeMap::new(),
+            violations: Vec::new(),
+            scanned_bytes: 0,
+            scan_wall_ms: 0,
+            cache_hit: false,
+        });
+    }
     let census = cached_census(gguf)?;
     for violation in &census.violations {
         match violation.kind {
@@ -262,7 +284,7 @@ pub fn cached_census(gguf: &GgufFile) -> Result<HalfRangeCensus, GgufError> {
 }
 
 fn report_census(census: &HalfRangeCensus) {
-    if std::env::var_os("QWEN_HALF_RANGE_REPORT").is_none() {
+    if std::env::var_os(REPORT_ENV).is_none() {
         return;
     }
     eprintln!(

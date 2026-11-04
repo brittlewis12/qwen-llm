@@ -1010,8 +1010,64 @@ half. They are enforced in code by `crate::half_range` (weights, load time) and
 
 The weight census is cached per artifact identity (shard device/inode/size/
 mtime/ctime plus the tensor descriptor table). A cache hit is one small JSON
-read; `QWEN_HALF_RANGE_CACHE=0` forces a rescan and
-`QWEN_HALF_RANGE_REPORT=1` prints the scan time and violation count.
+read; `QWEN_HALF_RANGE_CACHE=0` forces a rescan,
+`QWEN_HALF_RANGE_REPORT=1` prints the scan time and violation count, and
+`QWEN_HALF_RANGE_GUARD=0` is the rollback lever.
+
+### Measured facts (2026-11-04)
+
+Probe (`half_range_probe`, one ignored GPU test):
+
+| Device | simdgroup MMA, half subnormal operands | Metal 4 `matmul2d` | F32 -> half |
+|---|---|---|---|
+| M4 Max | preserves 2^-24, 2^-20, 2^-15 | unavailable (no tensor tier) | 65504 -> `0x7bff`; 65520/65536/1e5 -> `0x7c00` (inf) |
+| M5 Ultra | preserves 2^-24, 2^-20, 2^-15 | preserves 2^-24, 2^-20, 2^-15 | same, matches `half::f16` round-to-nearest-even |
+
+Neither chip flushes half-subnormal MMA operands. F32 -> half is round-to-
+nearest; the first overflow is at 65520, so a `2^15` weight guard keeps a full
+binade of margin.
+
+Activation telemetry (`QWEN_HALF_STAGING_TELEMETRY=1`, 2048-token chunk,
+long-context + code + multilingual + repetition prompts; V4.1 used one combined
+prompt because its single-turn CLI has no batch/chunk flags):
+
+| Family / artifact | Site | Peak `max|x|` | Headroom vs 2048 |
+|---|---|---|---|---|
+| qwen35 dense, 0.8B Q8_0 | `dense.down` | 70.4 | 29x |
+| qwen35moe, 35B-A3B Q4_K_M | `dense.down` (shared) | 60.7 | 34x |
+| qwen35moe, 35B-A3B Q4_K_M | `qwen35moe.routed.down` | 106.4 | 19x |
+| qwen4exp, IQ3_S | `dense.down` | 74.5 | 27x |
+| qwen4exp, IQ3_S | `qwen4exp.routed.down` | 78.1 | 26x |
+| qwen4exp, IQ3_S | `qwen4exp.shared.down` | 30.4 | 67x |
+| V4.1, 199 GB Q2_K_XL | `v41.output_b.input` | 13.9 | 147x |
+| V4.1, 199 GB Q2_K_XL | `v41.routed.down` | 149.8 | 13.7x |
+
+The V4.1 routed-down peak is just under its `<= 150` clamp bound and is the
+tightest measured site; it still has 13.7x headroom. No site is close to 2048.
+
+Census cost: the scan is a full pass over the mapped tensor payload (scale
+headers only, but the pages are touched), so it is I/O-bound on a cold artifact.
+Measured with the sequential pread reader:
+
+| Artifact | Bytes | First scan | Cache hit |
+|---|---|---|---|
+| qwen4exp IQ3_S | 83.6 GB | 53.4 s | 5 ms |
+| V4.1 UD-Q2_K_XL | 360.9 GB | 137.8 s | 11 ms |
+| GLM-5.3 UD-Q4_K_XL | 199.7 GB | 42.0 s | 7 ms |
+
+The first scan took 42-138 s on these artifacts, a material fraction of a
+cold load, so the `< 1%` cold-load bar is **not** met by the CPU scan. The shipped mitigation is
+the per-artifact cache: every load after the first pays one small JSON read.
+The two ways to remove the first-load cost are to fuse the census into the
+loader's existing prefetch/copy pass (then the added work is CPU-only) or to run
+a GPU max reduction over the resident buffers before first use. Both keep the
+same thresholds and cache schema. Until one lands, the guard is default-on with
+`QWEN_HALF_RANGE_GUARD=0` as the rollback lever.
+
+No artifact in the 32-artifact census produced a violation: MXFP4 exponents are
+117-127 (overflow needs >= 141; the `2^15` guard is at 140), and every K/IQ
+bound is far below 32768. The census is therefore a guard for the open artifact
+set, not a response to a live overflow.
 
 ## Ranked resource guide
 

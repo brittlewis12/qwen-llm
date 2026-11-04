@@ -4173,7 +4173,17 @@ mod tests {
             };
             if !matches!(
                 t.dtype,
-                GgmlType::Q4_K | GgmlType::Q5_K | GgmlType::Q6_K | GgmlType::Q8_0
+                GgmlType::Q4_K
+                    | GgmlType::Q5_K
+                    | GgmlType::Q6_K
+                    | GgmlType::Q8_0
+                    | GgmlType::IQ2_XXS
+                    | GgmlType::IQ2_XS
+                    | GgmlType::IQ2_S
+                    | GgmlType::IQ3_XXS
+                    | GgmlType::IQ3_S
+                    | GgmlType::IQ4_NL
+                    | GgmlType::IQ4_XS
             ) {
                 eprintln!("[fewrow-bench] skip {name} dtype={:?}", t.dtype);
                 continue;

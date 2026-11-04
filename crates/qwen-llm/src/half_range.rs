@@ -46,8 +46,8 @@ pub const RMS_NORM_MAX: f32 = 2_048.0;
 /// Bump when the bound formulas or cache schema change.
 pub const CENSUS_VERSION: u32 = 1;
 
-/// Contiguous chunk for parallel in-tensor scans (1 MiB).
-const SCAN_CHUNK_BYTES: usize = 1 << 20;
+/// Bounded pread chunk for the sequential per-shard census reader.
+const SCAN_READ_BYTES: usize = 16 * 1024 * 1024;
 
 const CACHE_SCHEMA: &[u8] = b"qwen-half-range-census-v1\0";
 const CACHE_DIR_ENV: &str = "QWEN_HALF_RANGE_CACHE_DIR";
@@ -278,13 +278,10 @@ fn report_census(census: &HalfRangeCensus) {
 
 /// Uncached census. Used by tests and by `QWEN_HALF_RANGE_CACHE=0` runs.
 pub fn census_uncached(gguf: &GgufFile) -> Result<HalfRangeCensus, GgufError> {
-    // Read each shard in offset order. Tensor descriptors are not stored in
-    // file order across a split model, and a random-order parallel scan turns
-    // a cold artifact into a seek storm. Parallelism is per shard; each shard
-    // is a sequential pass.
-    for shard in &gguf.shards {
-        let _ = shard.advise(memmap2::Advice::Sequential);
-    }
+    // Tensor descriptors are not stored in file order across a split model.
+    // Sort each shard by offset, then read it with bounded pread chunks. One
+    // sequential reader per shard avoids both the random-order seek storm and
+    // the mmap page-fault storm a many-threaded fault path causes.
     let mut by_shard: Vec<Vec<&TensorDesc>> = vec![Vec::new(); gguf.shards.len()];
     for desc in &gguf.tensors {
         let Some(group) = by_shard.get_mut(desc.shard_idx) else {
@@ -300,13 +297,8 @@ pub fn census_uncached(gguf: &GgufFile) -> Result<HalfRangeCensus, GgufError> {
     }
     let per_shard: Vec<Result<Vec<ScanOutput>, GgufError>> = by_shard
         .par_iter()
-        .map(|descs| {
-            let mut outputs = Vec::with_capacity(descs.len());
-            for desc in descs {
-                outputs.push(scan_tensor(gguf, desc)?);
-            }
-            Ok(outputs)
-        })
+        .enumerate()
+        .map(|(shard_idx, descs)| scan_shard(gguf, shard_idx, descs))
         .collect();
 
     let mut tensors = BTreeMap::new();
@@ -372,31 +364,173 @@ struct ScanOutput {
     scanned_bytes: u64,
 }
 
-fn scan_tensor(gguf: &GgufFile, desc: &TensorDesc) -> Result<ScanOutput, GgufError> {
+fn scan_shard(
+    gguf: &GgufFile,
+    shard_idx: usize,
+    descs: &[&TensorDesc],
+) -> Result<Vec<ScanOutput>, GgufError> {
+    let shard = &gguf.shards[shard_idx];
+    let mut buffer = vec![0u8; SCAN_READ_BYTES];
+    let mut outputs = Vec::with_capacity(descs.len());
+    for desc in descs {
+        outputs.push(scan_tensor_pread(shard, desc, &mut buffer)?);
+    }
+    Ok(outputs)
+}
+
+fn scan_tensor_pread(
+    shard: &crate::gguf::GgufShard,
+    desc: &TensorDesc,
+    buffer: &mut [u8],
+) -> Result<ScanOutput, GgufError> {
     let is_norm = is_rms_norm_weight(desc);
-    if !is_half_staged_dtype(desc.dtype) && !is_norm {
+    let half_staged = is_half_staged_dtype(desc.dtype);
+    if !half_staged && !is_norm {
         return Ok(ScanOutput {
             range: None,
             norm: None,
             scanned_bytes: 0,
         });
     }
-    let bytes = gguf.try_slice(desc)?;
-    let scanned_bytes = bytes.len() as u64;
-    let range = scan_bytes(desc, bytes)?;
+    let (block_elems, block_bytes) = match desc.dtype.storage_layout() {
+        Some(layout) => layout,
+        None => {
+            return Err(GgufError::Decode(format!(
+                "tensor {:?}: unknown layout",
+                desc.name
+            )));
+        }
+    };
+    if block_bytes == 0 || block_elems == 0 {
+        return Err(GgufError::Decode(format!(
+            "tensor {:?}: invalid block geometry",
+            desc.name
+        )));
+    }
+    if desc.n_bytes % block_bytes != 0 {
+        return Err(GgufError::Decode(format!(
+            "tensor {:?}: byte length {} is not a multiple of block size {block_bytes}",
+            desc.name, desc.n_bytes
+        )));
+    }
+    let block_bytes = block_bytes as usize;
+    let chunk_bytes = (SCAN_READ_BYTES / block_bytes).max(1) * block_bytes;
+    let mut max_abs = 0.0f32;
+    let mut non_finite = 0u64;
+    let mut blocks = 0u64;
+    let mut hist = [0u64; 256];
+
+    let mut offset = 0u64;
+    while offset < desc.n_bytes {
+        let want = (chunk_bytes as u64).min(desc.n_bytes - offset) as usize;
+        read_exact_at(
+            shard.file.as_ref(),
+            &mut buffer[..want],
+            desc.data_offset + offset,
+        )?;
+        let chunk = &buffer[..want];
+        if half_staged {
+            match desc.dtype {
+                GgufType::MXFP4 => {
+                    let (part, m, nf) = scan_mxfp4_chunk(chunk);
+                    for (slot, count) in hist.iter_mut().zip(part) {
+                        *slot = slot.saturating_add(count);
+                    }
+                    max_abs = max_abs.max(m);
+                    non_finite = non_finite.saturating_add(nf);
+                    blocks = blocks.saturating_add((chunk.len() / 17) as u64);
+                }
+                GgufType::F32 | GgufType::F16 | GgufType::BF16 => {
+                    let (m, nf) = scan_full_chunk(desc.dtype, chunk);
+                    max_abs = max_abs.max(m);
+                    non_finite = non_finite.saturating_add(nf);
+                    blocks = blocks.saturating_add((chunk.len() / block_bytes) as u64);
+                }
+                _ => {
+                    let (m, nf) = scan_block_chunk(desc.dtype, chunk);
+                    max_abs = max_abs.max(m);
+                    non_finite = non_finite.saturating_add(nf);
+                    blocks = blocks.saturating_add((chunk.len() / block_bytes) as u64);
+                }
+            }
+        } else {
+            let (m, nf) = scan_full_chunk(desc.dtype, chunk);
+            max_abs = max_abs.max(m);
+            non_finite = non_finite.saturating_add(nf);
+        }
+        offset += want as u64;
+    }
+
+    let range = if half_staged {
+        let mut nonzero = BTreeMap::new();
+        for (e, &count) in hist.iter().enumerate() {
+            if count != 0 {
+                nonzero.insert(e as u8, count);
+            }
+        }
+        Some(TensorRange {
+            name: desc.name.clone(),
+            dtype: desc.dtype.wire_name().to_string(),
+            method: match desc.dtype {
+                GgufType::MXFP4 => RangeMethod::Mxfp4Exponent,
+                GgufType::F32 | GgufType::F16 | GgufType::BF16 => RangeMethod::FullPrecision,
+                _ => RangeMethod::BlockScale,
+            },
+            max_abs,
+            blocks,
+            mxfp4_e_hist: (desc.dtype == GgufType::MXFP4).then_some(nonzero),
+            non_finite,
+        })
+    } else {
+        None
+    };
     let norm = if is_norm {
-        scan_norm(desc, bytes)?
+        let n = desc.n_elements();
+        let bound = (n as f64).sqrt() as f32 * max_abs;
+        let bound = if non_finite > 0 { f32::INFINITY } else { bound };
+        Some(RmsNormRange {
+            name: desc.name.clone(),
+            n,
+            max_abs,
+            bound,
+        })
     } else {
         None
     };
     Ok(ScanOutput {
         range,
         norm,
-        scanned_bytes,
+        scanned_bytes: desc.n_bytes,
     })
 }
 
+fn read_exact_at(
+    file: &std::fs::File,
+    mut buffer: &mut [u8],
+    mut offset: u64,
+) -> Result<(), GgufError> {
+    use std::os::unix::fs::FileExt;
+    while !buffer.is_empty() {
+        match file.read_at(buffer, offset) {
+            Ok(0) => {
+                return Err(GgufError::Io(std::io::Error::new(
+                    std::io::ErrorKind::UnexpectedEof,
+                    format!("short read at offset {offset}"),
+                )));
+            }
+            Ok(n) => {
+                buffer = &mut buffer[n..];
+                offset += n as u64;
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::Interrupted => {}
+            Err(error) => return Err(GgufError::Io(error)),
+        }
+    }
+    Ok(())
+}
+
 /// Pure byte-level scan, exposed for unit tests.
+#[cfg(test)]
 pub(crate) fn scan_bytes(
     desc: &TensorDesc,
     bytes: &[u8],
@@ -426,6 +560,7 @@ pub(crate) fn scan_bytes(
     }
 }
 
+#[cfg(test)]
 fn full_precision_range(
     desc: &TensorDesc,
     dtype: &str,
@@ -442,29 +577,7 @@ fn full_precision_range(
     }
 }
 
-fn scan_norm(desc: &TensorDesc, bytes: &[u8]) -> Result<Option<RmsNormRange>, GgufError> {
-    let (max_abs, non_finite) = match desc.dtype {
-        GgufType::F32 => f32_max(bytes),
-        GgufType::F16 => f16_max(bytes),
-        GgufType::BF16 => bf16_max(bytes),
-        _ => return Ok(None),
-    };
-    let n = desc.n_elements();
-    let bound = (n as f64).sqrt() as f32 * max_abs;
-    let non_finite = if non_finite > 0 {
-        // Surface as an out-of-range norm so the named error path reports it.
-        f32::INFINITY
-    } else {
-        bound
-    };
-    Ok(Some(RmsNormRange {
-        name: desc.name.clone(),
-        n,
-        max_abs,
-        bound: non_finite,
-    }))
-}
-
+#[cfg(test)]
 fn scan_mxfp4(desc: &TensorDesc, bytes: &[u8]) -> Result<TensorRange, GgufError> {
     let block_bytes = 17usize;
     if bytes.len() % block_bytes != 0 {
@@ -474,38 +587,7 @@ fn scan_mxfp4(desc: &TensorDesc, bytes: &[u8]) -> Result<TensorRange, GgufError>
             bytes.len()
         )));
     }
-    let blocks = (bytes.len() / block_bytes) as u64;
-    // Parallel contiguous chunks keep each worker's reads sequential while
-    // using every core. Only the exponent byte is touched.
-    let chunk_bytes = (SCAN_CHUNK_BYTES / block_bytes).max(1) * block_bytes;
-    let (hist, max_abs, non_finite) = bytes
-        .par_chunks(chunk_bytes)
-        .map(|chunk| {
-            let mut hist = [0u64; 256];
-            let mut max_abs = 0.0f32;
-            let mut non_finite = 0u64;
-            for block in chunk.chunks_exact(block_bytes) {
-                let e = block[0];
-                hist[e as usize] = hist[e as usize].saturating_add(1);
-                let bound = mxfp4_block_bound(e);
-                if !bound.is_finite() {
-                    non_finite = non_finite.saturating_add(1);
-                }
-                if bound > max_abs {
-                    max_abs = bound;
-                }
-            }
-            (hist, max_abs, non_finite)
-        })
-        .reduce(
-            || ([0u64; 256], 0.0f32, 0u64),
-            |mut a, b| {
-                for (slot, count) in a.0.iter_mut().zip(b.0) {
-                    *slot = slot.saturating_add(count);
-                }
-                (a.0, a.1.max(b.1), a.2.saturating_add(b.2))
-            },
-        );
+    let (hist, max_abs, non_finite) = scan_mxfp4_chunk(bytes);
     let mut nonzero = BTreeMap::new();
     for (e, &count) in hist.iter().enumerate() {
         if count != 0 {
@@ -517,10 +599,28 @@ fn scan_mxfp4(desc: &TensorDesc, bytes: &[u8]) -> Result<TensorRange, GgufError>
         dtype: desc.dtype.wire_name().to_string(),
         method: RangeMethod::Mxfp4Exponent,
         max_abs,
-        blocks,
+        blocks: (bytes.len() / block_bytes) as u64,
         mxfp4_e_hist: Some(nonzero),
         non_finite,
     })
+}
+
+fn scan_mxfp4_chunk(bytes: &[u8]) -> ([u64; 256], f32, u64) {
+    let mut hist = [0u64; 256];
+    let mut max_abs = 0.0f32;
+    let mut non_finite = 0u64;
+    for block in bytes.chunks_exact(17) {
+        let e = block[0];
+        hist[e as usize] = hist[e as usize].saturating_add(1);
+        let bound = mxfp4_block_bound(e);
+        if !bound.is_finite() {
+            non_finite = non_finite.saturating_add(1);
+        }
+        if bound > max_abs {
+            max_abs = bound;
+        }
+    }
+    (hist, max_abs, non_finite)
 }
 
 fn mxfp4_block_bound(e: u8) -> f32 {
@@ -535,6 +635,7 @@ fn mxfp4_block_bound(e: u8) -> f32 {
     12.0 * scale
 }
 
+#[cfg(test)]
 fn scan_block_scales(desc: &TensorDesc, bytes: &[u8]) -> Result<TensorRange, GgufError> {
     let (block_elems, block_bytes) = desc
         .dtype
@@ -553,22 +654,13 @@ fn scan_block_scales(desc: &TensorDesc, bytes: &[u8]) -> Result<TensorRange, Ggu
             bytes.len()
         )));
     }
-    let block_bytes = block_bytes as usize;
-    let blocks = (bytes.len() / block_bytes) as u64;
-    let chunk_bytes = (SCAN_CHUNK_BYTES / block_bytes).max(1) * block_bytes;
-    let (max_abs, non_finite) = bytes
-        .par_chunks(chunk_bytes)
-        .map(|chunk| scan_block_chunk(desc.dtype, chunk))
-        .reduce(
-            || (0.0f32, 0u64),
-            |a, b| (a.0.max(b.0), a.1.saturating_add(b.1)),
-        );
+    let (max_abs, non_finite) = scan_block_chunk(desc.dtype, bytes);
     Ok(TensorRange {
         name: desc.name.clone(),
         dtype: desc.dtype.wire_name().to_string(),
         method: RangeMethod::BlockScale,
         max_abs,
-        blocks,
+        blocks: (bytes.len() as u64 / block_bytes) as u64,
         mxfp4_e_hist: None,
         non_finite,
     })
@@ -646,13 +738,12 @@ fn iq1_m_scale(block: &[u8]) -> f32 {
     f16::from_bits(bits).to_f32()
 }
 
-fn f32_max(bytes: &[u8]) -> (f32, u64) {
-    let (max_bits, non_finite) = bytes
-        .par_chunks(SCAN_CHUNK_BYTES)
-        .map(|chunk| {
+fn scan_full_chunk(dtype: GgmlType, bytes: &[u8]) -> (f32, u64) {
+    match dtype {
+        GgufType::F32 => {
             let mut max_bits = 0u32;
             let mut non_finite = 0u64;
-            for bytes in chunk.chunks_exact(4) {
+            for bytes in bytes.chunks_exact(4) {
                 let bits = u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]);
                 let abs = bits & 0x7fff_ffff;
                 if abs & 0x7f80_0000 == 0x7f80_0000 {
@@ -661,22 +752,12 @@ fn f32_max(bytes: &[u8]) -> (f32, u64) {
                     max_bits = abs;
                 }
             }
-            (max_bits, non_finite)
-        })
-        .reduce(
-            || (0u32, 0u64),
-            |a, b| (a.0.max(b.0), a.1.saturating_add(b.1)),
-        );
-    (f32::from_bits(max_bits), non_finite)
-}
-
-fn f16_max(bytes: &[u8]) -> (f32, u64) {
-    let (max_bits, non_finite) = bytes
-        .par_chunks(SCAN_CHUNK_BYTES)
-        .map(|chunk| {
+            (f32::from_bits(max_bits), non_finite)
+        }
+        GgufType::F16 => {
             let mut max_bits = 0u16;
             let mut non_finite = 0u64;
-            for bytes in chunk.chunks_exact(2) {
+            for bytes in bytes.chunks_exact(2) {
                 let bits = u16::from_le_bytes([bytes[0], bytes[1]]);
                 let abs = bits & 0x7fff;
                 if abs & 0x7c00 == 0x7c00 {
@@ -685,22 +766,12 @@ fn f16_max(bytes: &[u8]) -> (f32, u64) {
                     max_bits = abs;
                 }
             }
-            (max_bits, non_finite)
-        })
-        .reduce(
-            || (0u16, 0u64),
-            |a, b| (a.0.max(b.0), a.1.saturating_add(b.1)),
-        );
-    (f16::from_bits(max_bits).to_f32(), non_finite)
-}
-
-fn bf16_max(bytes: &[u8]) -> (f32, u64) {
-    let (max_bits, non_finite) = bytes
-        .par_chunks(SCAN_CHUNK_BYTES)
-        .map(|chunk| {
+            (f16::from_bits(max_bits).to_f32(), non_finite)
+        }
+        GgufType::BF16 => {
             let mut max_bits = 0u16;
             let mut non_finite = 0u64;
-            for bytes in chunk.chunks_exact(2) {
+            for bytes in bytes.chunks_exact(2) {
                 let bits = u16::from_le_bytes([bytes[0], bytes[1]]);
                 let abs = bits & 0x7fff;
                 if abs & 0x7f80 == 0x7f80 {
@@ -709,13 +780,25 @@ fn bf16_max(bytes: &[u8]) -> (f32, u64) {
                     max_bits = abs;
                 }
             }
-            (max_bits, non_finite)
-        })
-        .reduce(
-            || (0u16, 0u64),
-            |a, b| (a.0.max(b.0), a.1.saturating_add(b.1)),
-        );
-    (f32::from_bits((max_bits as u32) << 16), non_finite)
+            (f32::from_bits((max_bits as u32) << 16), non_finite)
+        }
+        _ => (f32::INFINITY, 1),
+    }
+}
+
+#[cfg(test)]
+fn f32_max(bytes: &[u8]) -> (f32, u64) {
+    scan_full_chunk(GgufType::F32, bytes)
+}
+
+#[cfg(test)]
+fn f16_max(bytes: &[u8]) -> (f32, u64) {
+    scan_full_chunk(GgufType::F16, bytes)
+}
+
+#[cfg(test)]
+fn bf16_max(bytes: &[u8]) -> (f32, u64) {
+    scan_full_chunk(GgufType::BF16, bytes)
 }
 
 fn is_rms_norm_weight(desc: &TensorDesc) -> bool {

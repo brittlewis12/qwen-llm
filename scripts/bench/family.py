@@ -363,6 +363,7 @@ def validate_qwen_identity(
 ) -> None:
     required = {
         "schema_version",
+        "features",
         "metallib_compiler_identity",
         "metallib_sdk_version",
         "build_commit",
@@ -381,11 +382,16 @@ def validate_qwen_identity(
     missing = sorted(required - identity.keys())
     if missing:
         die(f"qwen build-info missing required fields: {', '.join(missing)}")
-    if identity["schema_version"] != 3:
+    if identity["schema_version"] != 4:
         die(
             "qwen build-info schema mismatch: "
-            f"expected=3 got={identity['schema_version']!r}"
+            f"expected=4 got={identity['schema_version']!r}"
         )
+    features = identity["features"]
+    if not isinstance(features, list) or not all(
+        isinstance(feature, str) for feature in features
+    ):
+        die(f"qwen build-info reported invalid features: {features!r}")
     if not identity["metallib_compiler_identity"] or not identity["metallib_sdk_version"]:
         die("qwen build-info is missing metallib compiler or SDK identity")
     build_commit = identity["build_commit"]
@@ -505,6 +511,7 @@ def validate_qwen_rows(
 ) -> None:
     stable_fields = (
         "schema_version",
+        "features",
         "build_commit",
         "build_commit_short",
         "build_dirty",
@@ -557,7 +564,7 @@ def validate_qwen_rows(
             identity["build_dirty"] is True or identity["runtime_dirty"] is True
         )
         aliases = {
-            "schema_version": 3,
+            "schema_version": 4,
             "engine": "qwen-llm",
             "build_commit": identity["build_commit_short"],
             "build_dirty": expected_dirty,

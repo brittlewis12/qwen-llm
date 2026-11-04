@@ -23,7 +23,8 @@ STATE_B = f"{family.SOURCE_STATE_PREFIX}{'b' * 64}"
 
 def identity(*, commit: str = COMMIT_A, dirty: bool = False) -> dict:
     return {
-        "schema_version": 3,
+        "schema_version": 4,
+        "features": [],
         "metallib_compiler_identity": "Apple metal version test",
         "metallib_sdk_version": "15.0",
         "build_commit": commit,
@@ -119,7 +120,7 @@ class FamilyIdentityTests(unittest.TestCase):
         row_identity = identity(dirty=True)
         row_identity["overrides"] = ["allow_dirty"]
         row = {
-            "schema_version": 3,
+            "schema_version": 4,
             "engine": "qwen-llm",
             "build_commit": COMMIT_A[:9],
             "build_dirty": 1,
@@ -141,7 +142,7 @@ class FamilyIdentityTests(unittest.TestCase):
         expected = identity()
         row_identity = identity()
         row = {
-            "schema_version": 3,
+            "schema_version": 4,
             "engine": "qwen-llm",
             "build_commit": COMMIT_A[:9],
             "build_dirty": 0,

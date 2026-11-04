@@ -239,32 +239,38 @@ pub fn audit_or_refuse(
 /// Cached census for diagnostics and cost measurement.
 pub fn cached_census(gguf: &GgufFile) -> Result<HalfRangeCensus, GgufError> {
     let key = cache_key(gguf)?;
+    let started = Instant::now();
     if let Some(root) = cache_root()
         && let Some(mut cached) = read_cache(&root, &key)
     {
         cached.cache_hit = true;
-        cached.scan_wall_ms = 0;
+        cached.scan_wall_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
+        report_census(&cached);
         return Ok(cached);
     }
-    let started = Instant::now();
     let mut census = census_uncached(gguf)?;
     census.scan_wall_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
     census.cache_hit = false;
     if let Some(root) = cache_root() {
         write_cache(&root, &key, &census);
     }
-    if std::env::var_os("QWEN_HALF_RANGE_REPORT").is_some() {
-        eprintln!(
-            "half-range-census tensors={} norms={} bytes={} scan_ms={} cache_hit={} violations={}",
-            census.tensors.len(),
-            census.norms.len(),
-            census.scanned_bytes,
-            census.scan_wall_ms,
-            census.cache_hit,
-            census.violations.len()
-        );
-    }
+    report_census(&census);
     Ok(census)
+}
+
+fn report_census(census: &HalfRangeCensus) {
+    if std::env::var_os("QWEN_HALF_RANGE_REPORT").is_none() {
+        return;
+    }
+    eprintln!(
+        "half-range-census tensors={} norms={} bytes={} scan_ms={} cache_hit={} violations={}",
+        census.tensors.len(),
+        census.norms.len(),
+        census.scanned_bytes,
+        census.scan_wall_ms,
+        census.cache_hit,
+        census.violations.len()
+    );
 }
 
 /// Uncached census. Used by tests and by `QWEN_HALF_RANGE_CACHE=0` runs.

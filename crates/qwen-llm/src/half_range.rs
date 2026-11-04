@@ -46,6 +46,9 @@ pub const RMS_NORM_MAX: f32 = 2_048.0;
 /// Bump when the bound formulas or cache schema change.
 pub const CENSUS_VERSION: u32 = 1;
 
+/// Contiguous chunk for parallel in-tensor scans (1 MiB).
+const SCAN_CHUNK_BYTES: usize = 1 << 20;
+
 const CACHE_SCHEMA: &[u8] = b"qwen-half-range-census-v1\0";
 const CACHE_DIR_ENV: &str = "QWEN_HALF_RANGE_CACHE_DIR";
 const CACHE_ENV: &str = "QWEN_HALF_RANGE_CACHE";
@@ -472,20 +475,37 @@ fn scan_mxfp4(desc: &TensorDesc, bytes: &[u8]) -> Result<TensorRange, GgufError>
         )));
     }
     let blocks = (bytes.len() / block_bytes) as u64;
-    let mut hist = [0u64; 256];
-    let mut max_abs = 0.0f32;
-    let mut non_finite = 0u64;
-    for block in bytes.chunks_exact(block_bytes) {
-        let e = block[0];
-        hist[e as usize] = hist[e as usize].saturating_add(1);
-        let bound = mxfp4_block_bound(e);
-        if !bound.is_finite() {
-            non_finite = non_finite.saturating_add(1);
-        }
-        if bound > max_abs {
-            max_abs = bound;
-        }
-    }
+    // Parallel contiguous chunks keep each worker's reads sequential while
+    // using every core. Only the exponent byte is touched.
+    let chunk_bytes = (SCAN_CHUNK_BYTES / block_bytes).max(1) * block_bytes;
+    let (hist, max_abs, non_finite) = bytes
+        .par_chunks(chunk_bytes)
+        .map(|chunk| {
+            let mut hist = [0u64; 256];
+            let mut max_abs = 0.0f32;
+            let mut non_finite = 0u64;
+            for block in chunk.chunks_exact(block_bytes) {
+                let e = block[0];
+                hist[e as usize] = hist[e as usize].saturating_add(1);
+                let bound = mxfp4_block_bound(e);
+                if !bound.is_finite() {
+                    non_finite = non_finite.saturating_add(1);
+                }
+                if bound > max_abs {
+                    max_abs = bound;
+                }
+            }
+            (hist, max_abs, non_finite)
+        })
+        .reduce(
+            || ([0u64; 256], 0.0f32, 0u64),
+            |mut a, b| {
+                for (slot, count) in a.0.iter_mut().zip(b.0) {
+                    *slot = slot.saturating_add(count);
+                }
+                (a.0, a.1.max(b.1), a.2.saturating_add(b.2))
+            },
+        );
     let mut nonzero = BTreeMap::new();
     for (e, &count) in hist.iter().enumerate() {
         if count != 0 {
@@ -535,94 +555,14 @@ fn scan_block_scales(desc: &TensorDesc, bytes: &[u8]) -> Result<TensorRange, Ggu
     }
     let block_bytes = block_bytes as usize;
     let blocks = (bytes.len() / block_bytes) as u64;
-    let mut max_abs = 0.0f32;
-    let mut non_finite = 0u64;
-
-    for block in bytes.chunks_exact(block_bytes) {
-        let bound = match desc.dtype {
-            GgufType::Q2_K => {
-                let d = half_at(block, 80, &mut non_finite);
-                let dmin = half_at(block, 82, &mut non_finite);
-                45.0 * d.abs() + 15.0 * dmin.abs()
-            }
-            GgufType::Q3_K => {
-                let d = half_at(block, 108, &mut non_finite);
-                128.0 * d.abs()
-            }
-            GgufType::Q4_K => {
-                let d = half_at(block, 0, &mut non_finite);
-                let dmin = half_at(block, 2, &mut non_finite);
-                945.0 * d.abs() + 63.0 * dmin.abs()
-            }
-            GgufType::Q5_K => {
-                let d = half_at(block, 0, &mut non_finite);
-                let dmin = half_at(block, 2, &mut non_finite);
-                1_953.0 * d.abs() + 63.0 * dmin.abs()
-            }
-            GgufType::Q6_K => {
-                let d = half_at(block, 208, &mut non_finite);
-                4_096.0 * d.abs()
-            }
-            GgufType::Q8_0 => {
-                let d = half_at(block, 0, &mut non_finite);
-                128.0 * d.abs()
-            }
-            GgufType::Q4_0 => {
-                let d = half_at(block, 0, &mut non_finite);
-                8.0 * d.abs()
-            }
-            GgufType::Q4_1 => {
-                let d = half_at(block, 0, &mut non_finite);
-                let m = half_at(block, 2, &mut non_finite);
-                15.0 * d.abs() + m.abs()
-            }
-            GgufType::IQ4_NL => {
-                let d = half_at(block, 0, &mut non_finite);
-                127.0 * d.abs()
-            }
-            GgufType::IQ2_S | GgufType::IQ2_XS | GgufType::IQ2_XXS => {
-                let d = half_at(block, 0, &mut non_finite);
-                166.625 * d.abs()
-            }
-            GgufType::IQ3_XXS => {
-                let d = half_at(block, 0, &mut non_finite);
-                480.5 * d.abs()
-            }
-            GgufType::IQ3_S => {
-                let d = half_at(block, 0, &mut non_finite);
-                465.0 * d.abs()
-            }
-            GgufType::IQ4_XS => {
-                let d = half_at(block, 0, &mut non_finite);
-                4_064.0 * d.abs()
-            }
-            GgufType::IQ1_S => {
-                let d = half_at(block, 0, &mut non_finite);
-                16.875 * d.abs()
-            }
-            GgufType::IQ1_M => {
-                let d = iq1_m_scale(block, &mut non_finite);
-                16.875 * d.abs()
-            }
-            GgufType::Q2_0 => {
-                let d = half_at(block, 0, &mut non_finite);
-                2.0 * d.abs()
-            }
-            other => {
-                return Err(GgufError::Decode(format!(
-                    "tensor {:?}: no half-range bound for {other:?}",
-                    desc.name
-                )));
-            }
-        };
-        if !bound.is_finite() {
-            non_finite = non_finite.saturating_add(1);
-        }
-        if bound > max_abs {
-            max_abs = bound;
-        }
-    }
-
+    let chunk_bytes = (SCAN_CHUNK_BYTES / block_bytes).max(1) * block_bytes;
+    let (max_abs, non_finite) = bytes
+        .par_chunks(chunk_bytes)
+        .map(|chunk| scan_block_chunk(desc.dtype, chunk))
+        .reduce(
+            || (0.0f32, 0u64),
+            |a, b| (a.0.max(b.0), a.1.saturating_add(b.1)),
+        );
     Ok(TensorRange {
         name: desc.name.clone(),
         dtype: desc.dtype.wire_name().to_string(),
@@ -634,7 +574,59 @@ fn scan_block_scales(desc: &TensorDesc, bytes: &[u8]) -> Result<TensorRange, Ggu
     })
 }
 
-fn half_at(block: &[u8], offset: usize, _non_finite: &mut u64) -> f32 {
+fn scan_block_chunk(dtype: GgmlType, bytes: &[u8]) -> (f32, u64) {
+    let block_bytes = dtype.storage_layout().map(|(_, b)| b as usize).unwrap_or(0);
+    let mut max_abs = 0.0f32;
+    let mut non_finite = 0u64;
+    for block in bytes.chunks_exact(block_bytes) {
+        let bound = match dtype {
+            GgufType::Q2_K => {
+                let d = half_at(block, 80);
+                let dmin = half_at(block, 82);
+                45.0 * d.abs() + 15.0 * dmin.abs()
+            }
+            GgufType::Q3_K => 128.0 * half_at(block, 108).abs(),
+            GgufType::Q4_K => {
+                let d = half_at(block, 0);
+                let dmin = half_at(block, 2);
+                945.0 * d.abs() + 63.0 * dmin.abs()
+            }
+            GgufType::Q5_K => {
+                let d = half_at(block, 0);
+                let dmin = half_at(block, 2);
+                1_953.0 * d.abs() + 63.0 * dmin.abs()
+            }
+            GgufType::Q6_K => 4_096.0 * half_at(block, 208).abs(),
+            GgufType::Q8_0 => 128.0 * half_at(block, 0).abs(),
+            GgufType::Q4_0 => 8.0 * half_at(block, 0).abs(),
+            GgufType::Q4_1 => {
+                let d = half_at(block, 0);
+                let m = half_at(block, 2);
+                15.0 * d.abs() + m.abs()
+            }
+            GgufType::IQ4_NL => 127.0 * half_at(block, 0).abs(),
+            GgufType::IQ2_S | GgufType::IQ2_XS | GgufType::IQ2_XXS => {
+                166.625 * half_at(block, 0).abs()
+            }
+            GgufType::IQ3_XXS => 480.5 * half_at(block, 0).abs(),
+            GgufType::IQ3_S => 465.0 * half_at(block, 0).abs(),
+            GgufType::IQ4_XS => 4_064.0 * half_at(block, 0).abs(),
+            GgufType::IQ1_S => 16.875 * half_at(block, 0).abs(),
+            GgufType::IQ1_M => 16.875 * iq1_m_scale(block).abs(),
+            GgufType::Q2_0 => 2.0 * half_at(block, 0).abs(),
+            _ => f32::INFINITY,
+        };
+        if !bound.is_finite() {
+            non_finite = non_finite.saturating_add(1);
+        }
+        if bound > max_abs {
+            max_abs = bound;
+        }
+    }
+    (max_abs, non_finite)
+}
+
+fn half_at(block: &[u8], offset: usize) -> f32 {
     if offset + 2 > block.len() {
         return f32::INFINITY;
     }
@@ -642,7 +634,7 @@ fn half_at(block: &[u8], offset: usize, _non_finite: &mut u64) -> f32 {
     f16::from_bits(bits).to_f32()
 }
 
-fn iq1_m_scale(block: &[u8], _non_finite: &mut u64) -> f32 {
+fn iq1_m_scale(block: &[u8]) -> f32 {
     // kernels/iq1_decode.metalh: the scale is the high nibble of each of four
     // little-endian ushort words at byte 48.
     if block.len() < 56 {
@@ -655,47 +647,74 @@ fn iq1_m_scale(block: &[u8], _non_finite: &mut u64) -> f32 {
 }
 
 fn f32_max(bytes: &[u8]) -> (f32, u64) {
-    let mut max_bits = 0u32;
-    let mut non_finite = 0u64;
-    for chunk in bytes.chunks_exact(4) {
-        let bits = u32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]);
-        let abs = bits & 0x7fff_ffff;
-        if abs & 0x7f80_0000 == 0x7f80_0000 {
-            non_finite = non_finite.saturating_add(1);
-        } else if abs > max_bits {
-            max_bits = abs;
-        }
-    }
+    let (max_bits, non_finite) = bytes
+        .par_chunks(SCAN_CHUNK_BYTES)
+        .map(|chunk| {
+            let mut max_bits = 0u32;
+            let mut non_finite = 0u64;
+            for bytes in chunk.chunks_exact(4) {
+                let bits = u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]);
+                let abs = bits & 0x7fff_ffff;
+                if abs & 0x7f80_0000 == 0x7f80_0000 {
+                    non_finite = non_finite.saturating_add(1);
+                } else if abs > max_bits {
+                    max_bits = abs;
+                }
+            }
+            (max_bits, non_finite)
+        })
+        .reduce(
+            || (0u32, 0u64),
+            |a, b| (a.0.max(b.0), a.1.saturating_add(b.1)),
+        );
     (f32::from_bits(max_bits), non_finite)
 }
 
 fn f16_max(bytes: &[u8]) -> (f32, u64) {
-    let mut max_bits = 0u16;
-    let mut non_finite = 0u64;
-    for chunk in bytes.chunks_exact(2) {
-        let bits = u16::from_le_bytes([chunk[0], chunk[1]]);
-        let abs = bits & 0x7fff;
-        if abs & 0x7c00 == 0x7c00 {
-            non_finite = non_finite.saturating_add(1);
-        } else if abs > max_bits {
-            max_bits = abs;
-        }
-    }
+    let (max_bits, non_finite) = bytes
+        .par_chunks(SCAN_CHUNK_BYTES)
+        .map(|chunk| {
+            let mut max_bits = 0u16;
+            let mut non_finite = 0u64;
+            for bytes in chunk.chunks_exact(2) {
+                let bits = u16::from_le_bytes([bytes[0], bytes[1]]);
+                let abs = bits & 0x7fff;
+                if abs & 0x7c00 == 0x7c00 {
+                    non_finite = non_finite.saturating_add(1);
+                } else if abs > max_bits {
+                    max_bits = abs;
+                }
+            }
+            (max_bits, non_finite)
+        })
+        .reduce(
+            || (0u16, 0u64),
+            |a, b| (a.0.max(b.0), a.1.saturating_add(b.1)),
+        );
     (f16::from_bits(max_bits).to_f32(), non_finite)
 }
 
 fn bf16_max(bytes: &[u8]) -> (f32, u64) {
-    let mut max_bits = 0u16;
-    let mut non_finite = 0u64;
-    for chunk in bytes.chunks_exact(2) {
-        let bits = u16::from_le_bytes([chunk[0], chunk[1]]);
-        let abs = bits & 0x7fff;
-        if abs & 0x7f80 == 0x7f80 {
-            non_finite = non_finite.saturating_add(1);
-        } else if abs > max_bits {
-            max_bits = abs;
-        }
-    }
+    let (max_bits, non_finite) = bytes
+        .par_chunks(SCAN_CHUNK_BYTES)
+        .map(|chunk| {
+            let mut max_bits = 0u16;
+            let mut non_finite = 0u64;
+            for bytes in chunk.chunks_exact(2) {
+                let bits = u16::from_le_bytes([bytes[0], bytes[1]]);
+                let abs = bits & 0x7fff;
+                if abs & 0x7f80 == 0x7f80 {
+                    non_finite = non_finite.saturating_add(1);
+                } else if abs > max_bits {
+                    max_bits = abs;
+                }
+            }
+            (max_bits, non_finite)
+        })
+        .reduce(
+            || (0u16, 0u64),
+            |a, b| (a.0.max(b.0), a.1.saturating_add(b.1)),
+        );
     (f32::from_bits((max_bits as u32) << 16), non_finite)
 }
 

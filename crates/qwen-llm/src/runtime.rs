@@ -20,6 +20,7 @@ use crate::dense_batch8::{
     dense_batch8_scratch_bytes, dense_batch8_scratch_upper_bytes, inspect_dense_batch8,
 };
 use crate::gguf::{GgufError, GgufFile, GgufShard};
+use crate::half_range::{self, HalfRangeError, HalfRangeScope};
 use crate::loader::{LoadError, Model};
 use crate::metal::{
     MetalContext, MetalError, MetalMemoryAdmission, evaluate_metal_memory_admission_with_cpu_bytes,
@@ -66,6 +67,8 @@ pub enum RuntimeError {
     Metal(#[from] MetalError),
     #[error("gguf load: {0}")]
     Gguf(#[from] GgufError),
+    #[error("half-range guard: {0}")]
+    HalfRange(#[from] HalfRangeError),
     #[error("opened GGUF has no backing shards")]
     EmptyGgufShards,
     #[error("model bind: {0}")]
@@ -315,6 +318,7 @@ impl Runtime {
             intent.metal_options(config.additional_metal_weight_bytes),
         )?;
         let prefetch_outcome = apply_prefetch_policy(&gguf, &config, prepared.prefetch_advice());
+        half_range::audit_or_refuse(&gguf, HalfRangeScope::Generic)?;
         let identity_shards = snapshot_shard_identity_inputs(&gguf)?;
         let metal_model = MetalModel::load_prepared(prepared)?;
         Ok(LoadedModel {

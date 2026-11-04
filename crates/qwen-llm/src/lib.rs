@@ -37,6 +37,8 @@ pub mod durable_store;
 pub mod env_flag;
 pub mod forward;
 pub mod gguf;
+pub mod half_range;
+pub mod half_telemetry;
 pub mod glm5_next;
 pub mod glm5_next_chat;
 pub mod glm5_next_metal;

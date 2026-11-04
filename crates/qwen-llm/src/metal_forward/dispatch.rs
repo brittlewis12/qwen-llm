@@ -523,6 +523,14 @@ fn encode_mat_mat_dispatch_routed(
         y,
         &[(weight, "weight"), (x, "input")],
     )?;
+    if n_in > n_out {
+        crate::half_telemetry::record(
+            ctx,
+            enc,
+            crate::half_telemetry::SITE_DENSE_DOWN,
+            x,
+        );
+    }
     validate_f32_q8_mat_mat_addressing(weight.dtype, n_in, n_out, n_query)?;
     if weight.dtype == GgmlType::IQ2_XS {
         crate::metal::validate_iq2_xs_mat_mat_addressing(n_in, n_out, n_query)?;

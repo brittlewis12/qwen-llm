@@ -1321,6 +1321,12 @@ impl Workspace {
             } else {
                 metal::encode_moe_down_f32x_grouped_slots
             };
+            crate::half_telemetry::record(
+                ctx,
+                e.enc(),
+                crate::half_telemetry::SITE_V41_ROUTED_DOWN,
+                &b[13],
+            );
             let inner_half = match &scratch.half_inner {
                 Some(half) if tensor => {
                     Some(half.convert(ctx, e.enc(), &b[13], c.intermediate * c.topk * n)?)

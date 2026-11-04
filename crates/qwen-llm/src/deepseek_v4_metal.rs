@@ -100,6 +100,8 @@ pub enum DeepSeekV4MetalError {
     #[error(transparent)]
     Gguf(#[from] GgufError),
     #[error(transparent)]
+    HalfRange(#[from] crate::half_range::HalfRangeError),
+    #[error(transparent)]
     Metal(#[from] MetalError),
     #[error(transparent)]
     Schema(#[from] DeepSeekV4Error),

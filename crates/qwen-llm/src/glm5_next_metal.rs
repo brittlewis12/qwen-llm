@@ -35,6 +35,8 @@ pub enum Glm5NextMetalError {
     Model(#[from] Glm5NextError),
     #[error(transparent)]
     Metal(#[from] MetalError),
+    #[error(transparent)]
+    HalfRange(#[from] crate::half_range::HalfRangeError),
     #[error("GLM-5.3 Metal: {0}")]
     Invalid(String),
     /// The caller's checkpoint stopped a multi-step operation at a boundary
@@ -350,6 +352,7 @@ impl Glm5NextWeights {
             .is_ok();
         let (page, max_buffer) = retained_geometry(ctx)?;
         let (plan, retained_bytes) = model.plan_retained(gguf, page, max_buffer)?;
+        crate::half_range::audit_or_refuse(gguf, crate::half_range::HalfRangeScope::Generic)?;
         // Admission and the allocations it prices form one transaction.
         let _allocation = ctx.begin_allocation_transaction();
         let admission =

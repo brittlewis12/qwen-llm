@@ -1643,6 +1643,12 @@ fn encode_prefill_moe_grouped_down(
     n_expert: usize,
     chunk_p: usize,
 ) -> Result<(), MetalError> {
+    crate::half_telemetry::record(
+        ctx,
+        enc,
+        crate::half_telemetry::SITE_QWEN35MOE_ROUTED_DOWN,
+        inner,
+    );
     match down_exps.dtype {
         GgmlType::Q5_K if prefill_moe_tiny_down_r16_enabled(chunk_p) => {
             crate::metal::encode_moe_down_q5_K_f32_grouped_slots_tiny8_r16(
@@ -9209,6 +9215,12 @@ fn encode_packed_verify_moe_grouped_ffn_after_mixer(
             &shared_up_pack,
             &shared_inner_pack,
         )?;
+        crate::half_telemetry::record(
+            base.ctx,
+            enc,
+            crate::half_telemetry::SITE_QWEN35MOE_SHARED_DOWN,
+            &shared_inner_pack,
+        );
         encode_verify_mat_mat(
             caller,
             base.ctx,

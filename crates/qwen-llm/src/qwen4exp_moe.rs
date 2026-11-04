@@ -2134,6 +2134,12 @@ impl Qwen4ExpMoePackedExecution<'_, '_> {
             enc,
             Qwen4ExpPackedProfileLabel::detail("moe.routed_down", layer, mixer),
         )?;
+        crate::half_telemetry::record(
+            ctx,
+            enc,
+            crate::half_telemetry::SITE_QWEN4EXP_ROUTED_DOWN,
+            &self.views.routed_inner,
+        );
         match self.weights.routed_down.dtype {
             GgmlType::Q2_0 => encode_moe_down_f32_grouped_slots_generic(
                 ctx,
@@ -2284,6 +2290,12 @@ impl Qwen4ExpMoePackedExecution<'_, '_> {
             enc,
             Qwen4ExpPackedProfileLabel::detail("moe.shared_down", layer, mixer),
         )?;
+        crate::half_telemetry::record(
+            ctx,
+            enc,
+            crate::half_telemetry::SITE_QWEN4EXP_SHARED_DOWN,
+            &self.views.shared_inner,
+        );
         encode_mat_mat_dispatch_without_fewrow(
             ctx,
             enc,

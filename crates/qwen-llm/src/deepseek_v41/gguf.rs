@@ -148,6 +148,8 @@ pub enum LoadError {
     #[error(transparent)]
     Gguf(#[from] crate::gguf::GgufError),
     #[error(transparent)]
+    HalfRange(#[from] crate::half_range::HalfRangeError),
+    #[error(transparent)]
     Metal(#[from] metal::MetalError),
     #[error(transparent)]
     Io(#[from] std::io::Error),
@@ -462,6 +464,7 @@ impl ResidentWeights {
             }
             None => prepared_load_plan(&g, page, ctx.max_buffer_length(), soft_target)?,
         };
+        crate::half_range::audit_or_refuse(&g, crate::half_range::HalfRangeScope::Generic)?;
         let bookkeeping: RetainedSummaryBookkeeping =
             retained_summary_bookkeeping(&g, &p, &storage)?;
         let descriptor_window = add(

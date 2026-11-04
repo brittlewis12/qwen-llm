@@ -893,6 +893,7 @@ impl DeepSeekV4MetalResidency {
         if model.config != plan.config {
             return invalid("DeepSeek V4 load-plan configuration differs from the GGUF binding");
         }
+        crate::half_range::audit_or_refuse(gguf, crate::half_range::HalfRangeScope::DeepSeekV4)?;
         validate_descriptor_fingerprints(&gguf.tensors, &plan.descriptors)?;
         validate_fallback_policy(&plan.retained)?;
         validate_retained_plan_against_gguf(ctx, gguf, &plan.retained)?;

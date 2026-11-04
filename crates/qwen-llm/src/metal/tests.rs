@@ -332,12 +332,10 @@ fn owned_weight_view_is_read_only_and_bounds_checked() {
         MetalTensorProvenance::OwnedWeightReadOnly
     );
     assert!(!view.is_writable());
-    assert!(
-        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            view.assert_writable("test write")
-        }))
-        .is_err()
-    );
+    assert!(std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        view.assert_writable("test write")
+    }))
+    .is_err());
     assert!(
         MetalTensor::owned_weight_view(buffer.clone(), 1, vec![1], GgmlType::F32, 32,).is_err()
     );
@@ -861,3 +859,174 @@ fn packed_q2_attention_perf_audit_130k() {
 mod dispatch_latency;
 mod f32_narrow_tiles;
 mod q6_k_f32_tile;
+
+/// Half-subnormal / F32->half probe. Run on M4 and M5:
+/// `cargo test -p qwen-llm --release --lib half_range_probe -- --ignored --nocapture`
+#[test]
+#[ignore = "GPU half-range probe; run on M4 and M5 with --ignored --nocapture"]
+fn half_range_probe() {
+    let Some(ctx) = crate::test_fixtures::metal_context_or_skip() else {
+        return;
+    };
+    eprintln!("half-range-probe device={}", ctx.device.name());
+
+    let values = [2f32.powi(-24), 2f32.powi(-20), 2f32.powi(-15), 1.0];
+
+    // 1. simdgroup half-operand MMA, F32 accumulator.
+    let mma = ctx.pipeline("kernel_half_range_mma_probe").unwrap();
+    for &v in &values {
+        let a = vec![half::f16::from_f32(v); 64];
+        let b = vec![half::f16::from_f32(1.0); 64];
+        let a_t = MetalTensor::from_bytes(&ctx, bytemuck::cast_slice(&a), vec![64], GgmlType::F16)
+            .unwrap();
+        let b_t = MetalTensor::from_bytes(&ctx, bytemuck::cast_slice(&b), vec![64], GgmlType::F16)
+            .unwrap();
+        let out = MetalTensor::zeros_f32(&ctx, vec![1]).unwrap();
+        let command = ctx.queue.commandBuffer().unwrap();
+        let enc = KernelEncoder::begin(&command);
+        enc.set_pipeline(&mma);
+        enc.set_tensor(0, &a_t);
+        enc.set_tensor(1, &b_t);
+        enc.set_tensor(2, &out);
+        enc.dispatch(
+            MTLSize {
+                width: 1,
+                height: 1,
+                depth: 1,
+            },
+            MTLSize {
+                width: 32,
+                height: 1,
+                depth: 1,
+            },
+        );
+        enc.end();
+        commit_and_wait(&command).unwrap();
+        let got = read_back_f32(&out.buffer, 1)[0];
+        let expected = 8.0 * v;
+        eprintln!(
+            "half-range-probe simdgroup-mma v={v:.9e} got={got:.9e} expected={expected:.9e} verdict={}",
+            if got == expected {
+                "preserve"
+            } else if got == 0.0 {
+                "flush"
+            } else {
+                "other"
+            }
+        );
+    }
+
+    // 2. Metal 4 matmul2d half operands, F32 accumulator.
+    match ctx.tensor_pipeline("kernel_tensor_matmul2d_f16_f32") {
+        Ok(tensor) => {
+            for &v in &values {
+                let left = vec![half::f16::from_f32(v); 16 * 32];
+                let right = vec![half::f16::from_f32(1.0); 16 * 32];
+                let left_t = MetalTensor::from_bytes(
+                    &ctx,
+                    bytemuck::cast_slice(&left),
+                    vec![32, 16],
+                    GgmlType::F16,
+                )
+                .unwrap();
+                let right_t = MetalTensor::from_bytes(
+                    &ctx,
+                    bytemuck::cast_slice(&right),
+                    vec![32, 16],
+                    GgmlType::F16,
+                )
+                .unwrap();
+                let out = MetalTensor::zeros_f32(&ctx, vec![16 * 16]).unwrap();
+                let command = ctx.queue.commandBuffer().unwrap();
+                let enc = KernelEncoder::begin(&command);
+                enc.set_pipeline(&tensor);
+                enc.set_tensor(0, &left_t);
+                enc.set_tensor(1, &right_t);
+                enc.set_tensor(2, &out);
+                enc.dispatch(
+                    MTLSize {
+                        width: 1,
+                        height: 1,
+                        depth: 1,
+                    },
+                    MTLSize {
+                        width: 32,
+                        height: 1,
+                        depth: 1,
+                    },
+                );
+                enc.end();
+                commit_and_wait(&command).unwrap();
+                let got = read_back_f32(&out.buffer, 1)[0];
+                let expected = 32.0 * v;
+                eprintln!(
+                    "half-range-probe matmul2d v={v:.9e} got={got:.9e} expected={expected:.9e} verdict={}",
+                    if got == expected {
+                        "preserve"
+                    } else if got == 0.0 {
+                        "flush"
+                    } else {
+                        "other"
+                    }
+                );
+            }
+        }
+        Err(error) => eprintln!("half-range-probe matmul2d unavailable: {error:?}"),
+    }
+
+    // 3. F32 -> half conversion at and above the overflow boundary.
+    let convert_values = [
+        65_504.0f32,
+        65_520.0,
+        65_536.0,
+        100_000.0,
+        2f32.powi(-24),
+        2f32.powi(-20),
+        2f32.powi(-15),
+    ];
+    let n = convert_values.len() as u32;
+    let input = MetalTensor::from_bytes(
+        &ctx,
+        bytemuck::cast_slice(&convert_values),
+        vec![n as u64],
+        GgmlType::F32,
+    )
+    .unwrap();
+    let output = MetalTensor::zeros_dtype(&ctx, vec![n as u64], GgmlType::F16).unwrap();
+    let pso = ctx.pipeline("kernel_f32_to_half_probe").unwrap();
+    let command = ctx.queue.commandBuffer().unwrap();
+    let enc = KernelEncoder::begin(&command);
+    enc.set_pipeline(&pso);
+    enc.set_bytes(0, &n);
+    enc.set_tensor(1, &input);
+    enc.set_tensor(2, &output);
+    enc.dispatch(
+        MTLSize {
+            width: n.div_ceil(32) as usize,
+            height: 1,
+            depth: 1,
+        },
+        MTLSize {
+            width: 32,
+            height: 1,
+            depth: 1,
+        },
+    );
+    enc.end();
+    commit_and_wait(&command).unwrap();
+    let bits: &[u16] = unsafe {
+        std::slice::from_raw_parts(output.buffer.contents().as_ptr().cast::<u16>(), n as usize)
+    };
+    for (&v, &got) in convert_values.iter().zip(bits) {
+        let oracle = half::f16::from_f32(v).to_bits();
+        eprintln!(
+            "half-range-probe f32->half v={v:.1} bits=0x{got:04x} value={:.9e} oracle=0x{oracle:04x} {}",
+            half::f16::from_bits(got).to_f32(),
+            if got == oracle { "match" } else { "MISMATCH" }
+        );
+        assert_eq!(
+            got, oracle,
+            "device conversion differs from half::f16 for {v}"
+        );
+    }
+}

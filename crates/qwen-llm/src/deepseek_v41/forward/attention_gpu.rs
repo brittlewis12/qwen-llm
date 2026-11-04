@@ -3163,6 +3163,12 @@ impl Workspace {
             rows.rows,
             c.groups,
         )?;
+        crate::half_telemetry::record(
+            ctx,
+            enc,
+            crate::half_telemetry::SITE_V41_OUTPUT_B_INPUT,
+            &rows.low,
+        );
         let low_half = rows
             .half_input(
                 ctx,

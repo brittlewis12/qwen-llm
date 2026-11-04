@@ -37,6 +37,8 @@ pub enum Qwen4ExpResidencyError {
     #[error(transparent)]
     Gguf(#[from] GgufError),
     #[error(transparent)]
+    HalfRange(#[from] crate::half_range::HalfRangeError),
+    #[error(transparent)]
     Ple(#[from] PleGatherError),
     #[error("invalid Qwen3.8-Flash-Next residency contract: {0}")]
     Invalid(String),
@@ -608,6 +610,7 @@ impl Qwen4ExpMetalWeights {
             ));
         }
         plan.revalidate(ctx, gguf)?;
+        crate::half_range::audit_or_refuse(gguf, crate::half_range::HalfRangeScope::Generic)?;
         let _allocation_transaction = ctx.begin_allocation_transaction();
         let refreshed_admission = plan.memory.admission(ctx.memory_signals());
         if !refreshed_admission.is_admitted() {

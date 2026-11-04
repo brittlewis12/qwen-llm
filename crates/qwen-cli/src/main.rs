@@ -266,7 +266,9 @@ fn main() -> std::process::ExitCode {
         eprintln!("{error}");
         return std::process::ExitCode::FAILURE;
     }
-    shutdown::finish(run())
+    let result = run();
+    qwen_llm::half_telemetry::dump_if_enabled();
+    shutdown::finish(result)
 }
 
 fn run() -> Result<()> {

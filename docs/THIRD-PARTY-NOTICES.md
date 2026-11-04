@@ -18,6 +18,16 @@ DwarfStar's kernels of the same names at that revision, with the same change.
 
 ## llama.cpp
 
+`kernel_attn_flash_probe_f16_d256` and its causal block pre-pass in
+`kernels/tensor/attn_flash_probe.metal` adapt the tensor flash-attention
+organization from `kernel_flash_attn_ext_tensor` in
+`ggml/src/ggml-metal/kernels/fa_tensor.metal`, v0.9.0 (revision
+`c4261a74a59c5a719e8f73038e28633b08f2bea4`). The upstream design was introduced
+in `926862e574617d5e5ab9e9c9bae317f98237f583` (PR #29570) and updated in
+`6e66cb5d4e9a2b4f02820a9f3053422b92ec4d51` (PR #30491). This adaptation
+packs GQA siblings into query tiles and retains a float cooperative PV
+destination across the key loop.
+
 `kernel_deepseek_v4_packed_grouped_mapped_iq2_xs_f32_mm64x32` in
 `kernels/mat_mat_iq2_xs.metal` adapts the indirect 64-output by 32-route
 quantized matrix topology from llama.cpp's `kernel_mul_mm_id`, revision

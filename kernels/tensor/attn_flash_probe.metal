@@ -1,6 +1,7 @@
 // Experimental Apple10 attention; selected only by a default-off prefill knob.
-// Structure follows llama.cpp fa_tensor (MIT): two tensor matmuls, strided
-// device K/V, float cooperative O resident across the complete key loop.
+// Adapted from llama.cpp fa_tensor: two tensor matmuls, strided device K/V,
+// float cooperative O resident across the complete key loop. Provenance and
+// MIT terms are retained in docs/THIRD-PARTY-NOTICES.md.
 #include <metal_stdlib>
 #include <metal_tensor>
 #include <MetalPerformancePrimitives/MetalPerformancePrimitives.h>

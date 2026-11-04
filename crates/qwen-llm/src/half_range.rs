@@ -21,8 +21,9 @@
 //!
 //! The scan is cached per artifact identity (shard device/inode/size/mtime/
 //! ctime plus the full tensor descriptor table). A cache hit costs one small
-//! JSON read. The first scan is CPU-only and parallel over tensors; the loader
-//! has already mapped the shards, so no second copy is made.
+//! JSON read. The first scan reads each shard sequentially in offset order
+//! through a reusable 16 MiB pread buffer; shards are scanned in parallel.
+//! Only scale/header bytes are inspected, but the payload pages are read once.
 //!
 //! Guard policy: an unsafe tensor is allowed only when the load path already
 //! selects an F32-operand lane for it (currently DS4 MXFP4 routed down). Every

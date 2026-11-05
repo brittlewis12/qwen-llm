@@ -5,12 +5,12 @@
     "cpu_info": "Accelerate, Apple M5 Ultra",
     "gpu_info": "Apple M5 Ultra",
     "backends": "MTL,BLAS",
-    "model_filename": "$HOME/models/Qwen3.8-27B-Q4_K_M.gguf",
-    "model_type": "qwen35 27B Q4_K - Medium",
-    "model_size": 17095778304,
-    "model_n_params": 27320697856,
+    "model_filename": "$HOME/models/Qwen3.6-35B-A3B-UD-Q4_K_M.gguf",
+    "model_type": "qwen35moe 35B.A3B Q4_K - Medium",
+    "model_size": 22123538944,
+    "model_n_params": 34660610688,
     "n_batch": 2048,
-    "n_ubatch": 2048,
+    "n_ubatch": 512,
     "n_threads": 12,
     "cpu_mask": "0x0",
     "cpu_strict": false,
@@ -37,27 +37,27 @@
     "n_prompt": 512,
     "n_gen": 0,
     "n_depth": 0,
-    "test_time": "2026-11-04T18:46:23Z",
-    "avg_ns": 8454233166,
-    "stddev_ns": 265390667,
-    "avg_ts": 60.606175,
-    "stddev_ts": 1.9029347586907275,
+    "test_time": "2026-11-05T17:52:07Z",
+    "avg_ns": 104531833,
+    "stddev_ns": 509962,
+    "avg_ts": 4898.12,
+    "stddev_ts": 23.948263680971476,
     "samples_ns": [
-      8208208958,
-      8241178958,
-      8684012959,
-      8683531792
+      104937708,
+      103857125,
+      104915334,
+      104417167
     ],
     "samples_ts": [
-      62.3766,
-      62.127,
-      58.9589,
-      58.9622
+      4879.09,
+      4929.85,
+      4880.13,
+      4903.41
     ],
     "test": "pp512",
     "block_avg_ts": [
-      62.251807,
-      58.960551
+      4904.467285,
+      4891.766899
     ],
     "n_repetitions": 4,
     "n_blocks": 2
@@ -68,12 +68,12 @@
     "cpu_info": "Accelerate, Apple M5 Ultra",
     "gpu_info": "Apple M5 Ultra",
     "backends": "MTL,BLAS",
-    "model_filename": "$HOME/models/Qwen3.8-27B-Q4_K_M.gguf",
-    "model_type": "qwen35 27B Q4_K - Medium",
-    "model_size": 17095778304,
-    "model_n_params": 27320697856,
+    "model_filename": "$HOME/models/Qwen3.6-35B-A3B-UD-Q4_K_M.gguf",
+    "model_type": "qwen35moe 35B.A3B Q4_K - Medium",
+    "model_size": 22123538944,
+    "model_n_params": 34660610688,
     "n_batch": 2048,
-    "n_ubatch": 2048,
+    "n_ubatch": 512,
     "n_threads": 12,
     "cpu_mask": "0x0",
     "cpu_strict": false,
@@ -100,27 +100,27 @@
     "n_prompt": 4096,
     "n_gen": 0,
     "n_depth": 0,
-    "test_time": "2026-11-04T18:46:48Z",
-    "avg_ns": 62808227521,
-    "stddev_ns": 872780731,
-    "avg_ts": 65.223825,
-    "stddev_ts": 0.9063931611061524,
+    "test_time": "2026-11-05T17:52:08Z",
+    "avg_ns": 863526000,
+    "stddev_ns": 935163,
+    "avg_ts": 4743.345,
+    "stddev_ts": 5.140690615082769,
     "samples_ns": [
-      63383789292,
-      63709087792,
-      62232045834,
-      61907987166
+      863808042,
+      864224542,
+      863923209,
+      862148208
     ],
     "samples_ts": [
-      64.6222,
-      64.2922,
-      65.8182,
-      66.1627
+      4741.79,
+      4739.51,
+      4741.16,
+      4750.92
     ],
     "test": "pp4096",
     "block_avg_ts": [
-      64.457221,
-      65.990443
+      4740.651624,
+      4746.042709
     ],
     "n_repetitions": 4,
     "n_blocks": 2

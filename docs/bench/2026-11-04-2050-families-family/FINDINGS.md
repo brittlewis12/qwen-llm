@@ -10,9 +10,9 @@ the GLM same-artifact oracle pin, the dequant codec, or a performance roofline.
 - Baseline lock: llama.cpp `b11182` (`e9f824d8c0`, 2026-09-25) ->
   `refs/tags/v0.9.0` (`cd959bae99ff4bed22bef2604f45241c09bbb8c8`, build 12110,
   backends `MTL,BLAS`).
-- qwen-llm: main `5c3da609` plus this branch's bench-lock and family-harness
-  commits; the engine crates are unchanged from main. Bench binary identity
-  `b08ca56d9`, clean.
+- qwen-llm: main `5c3da609` plus this branch's bench-lock, family-harness and
+  packet commits; the engine crates are unchanged from main. Bench binary
+  identities: M4 `b08ca56d9`, M5 `cd700105b`, both clean.
 - Both engines were built from the same checkouts on each host. llama.cpp was
   built by `scripts/bench/ensure_llama_cpp.py`; qwen-bench by
   `cargo build --release --locked -p qwen-cli --bin qwen-bench --bin qwen`.
@@ -20,8 +20,8 @@ the GLM same-artifact oracle pin, the dequant codec, or a performance roofline.
 ## Setup
 
 - M4 Max, 128 GB, AC power, macOS 15.7.9. Hardware used for the valid grid.
-- M5 Ultra, 256 GB, macOS 27.0.0. Attempted, but the host was not in a usable
-  performance state (see below), so its data is retained only as a warning.
+- M5 Ultra, 256 GB, macOS 27.0.0. Valid 2026-11-05 rerun with thermal pressure
+  level 0 before and after every arm; see the M5 section.
 - One representative artifact per family, the same GGUF for both engines.
   Depth 4096 is the GLM sparse range; the K2 cell has no llama.cpp
   implementation and is qwen-llm only.
@@ -145,26 +145,37 @@ clean way to separate the two sources of movement in this run.
    has a 1.5x block disagreement. Those cells need a quiet-host rerun before
    they become scoreboard authority.
 
-## M5 Ultra: not a baseline
+## M5 Ultra (2026-11-05, valid)
 
-The same pinned builds load and run on the M5 Ultra, but throughput was
-7-12x below the 2026-10-16 first-light reference on the same small artifact:
+The 2026-11-04 M5 attempt was thermally throttled (pressure level 4) and is
+discarded: no number from it is used here. The host recovered on 2026-11-05.
+Thermal pressure level was 0 before and after every arm (`m5/conditions.log`),
+load average was 1.43 at the first campaign, and no other benchmark process was
+running. The grid ran 17:47-18:16 UTC; the longest campaign was 9:08 (27B deep
+tg) and every campaign stayed under the 10-minute target.
 
-| check | 2026-10-16 first light | 2026-11-04 | ratio |
-|---|---:|---:|---:|
-| qwen 0.8B pp512 | 14938 t/s | 1984 t/s | 0.13x |
-| qwen 0.8B tg128 | 439 t/s | 35.7 t/s | 0.08x |
-| lcpp 0.8B pp512 | — | 1380 t/s | — |
-| lcpp 27B pp512 | — | 60.6 t/s | — |
-| qwen 27B pp512 | — | 24.7 t/s | — |
+- M5 bench identity `cd700105b` (engine crates unchanged from main);
+  llama.cpp v0.9.0 `cd959bae99`, build 12110.
+- Flash-Next used the artifact present on M5, **GSQ-RCO IQ3_S** (77.9 GiB), not
+  M4's UD-Q3_K_XL. A3B, 27B and GLM use the same artifacts as M4.
+- DS4-Flash, A10B, Muse and K2 artifacts are not present on M5; they were not
+  transferred in this slot.
 
-The 27B pp campaign alone took 35 minutes. The first-light comparison uses a
-different qwen-llm build, so it is not a controlled same-binary ratio; the size
-of the gap and the low lcpp number make a host-level problem (contention,
-thermal/power state, or a broken GPU path) the leading explanation. The M5 grid
-was stopped after the 27B pp campaign. Its JSON is under `m5-contended/` only to
-preserve what ran; do not use it as a scoreboard. The M5 baseline needs a
-repeat when the host is idle and verified against a short 0.8B sanity run.
+| model | pp512 | pp4096 | tg128 | tg@8K | tg@32K/@4K |
+|---|---:|---:|---:|---:|---:|
+| Qwen3.8-Flash-Next GSQ-RCO IQ3_S | 1064 / 1620 **0.66x** | 1093 / 2077 **0.53x** | 67.1 / 65.9 **1.02x** | 63.8 / 63.9 **1.00x** | — |
+| Qwen3.6-35B-A3B UD-Q4_K_M | 2916 / 4898 **0.60x** | 3688 / 6151 **0.60x** | 148.5 / 139.7 **1.06x** | 125.4 / 130.6 **0.96x** | 115.7 / 118.3 **0.98x** |
+| Qwen3.8-27B Q4_K_M | 509 / 1158 **0.44x** | 526 / 1338 **0.39x** | 49.2 / 48.6 **1.01x** | 45.2 / 46.9 **0.96x** | 38.3 / 42.3 **0.91x** |
+| GLM-5.3-Flash UD-IQ3_XXS | 473 / 811 **0.58x** | 695 / 799 **0.87x** | 59.4 / 43.5 **1.37x** | — | 55.1 / 42.0 @4K **1.31x** |
+
+The M5 splits cleanly by phase. Decode is at parity or ahead: A3B 1.06x, GLM
+1.31-1.37x, 27B 1.01x, Flash-Next 1.00-1.02x, with A3B/27B slightly behind at
+depth. Prefill is the gap: qwen is 0.39-0.87x of llama.cpp. llama.cpp's M5
+tensor-API path scales much more than ours (A3B pp4096 6151 t/s on M5 vs 1662 on
+M4; qwen 3688 vs 1769). The M5 baseline therefore points at qwen prefill
+tensor-op coverage, not decode, as the first M5 family-packet follow-up. The
+generated `m5/README.md` bandwidth table uses the M4 peak constant and should be
+ignored; `SAMPLES.md` and the JSON are the data.
 
 ## Caveats
 

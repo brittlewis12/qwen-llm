@@ -5,10 +5,10 @@
     "cpu_info": "Accelerate, Apple M5 Ultra",
     "gpu_info": "Apple M5 Ultra",
     "backends": "MTL,BLAS",
-    "model_filename": "$HOME/models/Qwen3.8-27B-Q4_K_M.gguf",
-    "model_type": "qwen35 27B Q4_K - Medium",
-    "model_size": 17095778304,
-    "model_n_params": 27320697856,
+    "model_filename": "$HOME/models/ISTA-DASLab-Qwen3.8-Flash-Next-GSQ-RCO-GGUF/IQ3_S/Qwen3.8-Flash-Next-GSQ-RCO-IQ3_S-00001-of-00002.gguf",
+    "model_type": "qwen4exp A3B IQ3_S - 3.4375 bpw",
+    "model_size": 83606638080,
+    "model_n_params": 176943899520,
     "n_batch": 2048,
     "n_ubatch": 512,
     "n_threads": 12,
@@ -37,27 +37,27 @@
     "n_prompt": 512,
     "n_gen": 0,
     "n_depth": 0,
-    "test_time": "2026-11-04T18:42:40Z",
-    "avg_ns": 8423145833,
-    "stddev_ns": 234004503,
-    "avg_ts": 60.820125,
-    "stddev_ts": 1.6898902141362129,
+    "test_time": "2026-11-05T17:48:09Z",
+    "avg_ns": 316042042,
+    "stddev_ns": 418531,
+    "avg_ts": 1620.04,
+    "stddev_ts": 2.145227260688205,
     "samples_ns": [
-      8208277041,
-      8233087625,
-      8626185542,
-      8625033125
+      316477209,
+      315976708,
+      315494167,
+      316220084
     ],
     "samples_ts": [
-      62.3761,
-      62.1881,
-      59.3542,
-      59.3621
+      1617.81,
+      1620.37,
+      1622.85,
+      1619.13
     ],
     "test": "pp512",
     "block_avg_ts": [
-      62.282076,
-      59.358126
+      1619.09131,
+      1620.988209
     ],
     "n_repetitions": 4,
     "n_blocks": 2
@@ -68,10 +68,10 @@
     "cpu_info": "Accelerate, Apple M5 Ultra",
     "gpu_info": "Apple M5 Ultra",
     "backends": "MTL,BLAS",
-    "model_filename": "$HOME/models/Qwen3.8-27B-Q4_K_M.gguf",
-    "model_type": "qwen35 27B Q4_K - Medium",
-    "model_size": 17095778304,
-    "model_n_params": 27320697856,
+    "model_filename": "$HOME/models/ISTA-DASLab-Qwen3.8-Flash-Next-GSQ-RCO-GGUF/IQ3_S/Qwen3.8-Flash-Next-GSQ-RCO-IQ3_S-00001-of-00002.gguf",
+    "model_type": "qwen4exp A3B IQ3_S - 3.4375 bpw",
+    "model_size": 83606638080,
+    "model_n_params": 176943899520,
     "n_batch": 2048,
     "n_ubatch": 512,
     "n_threads": 12,
@@ -100,27 +100,27 @@
     "n_prompt": 4096,
     "n_gen": 0,
     "n_depth": 0,
-    "test_time": "2026-11-04T18:43:04Z",
-    "avg_ns": 68220615906,
-    "stddev_ns": 2635544790,
-    "avg_ts": 60.10785,
-    "stddev_ts": 2.3246224704239618,
+    "test_time": "2026-11-05T17:48:10Z",
+    "avg_ns": 2680380833,
+    "stddev_ns": 2982572,
+    "avg_ts": 1528.1399999999999,
+    "stddev_ts": 1.7009605129651837,
     "samples_ns": [
-      65624549000,
-      66275643583,
-      70542563500,
-      70439707541
+      2683119875,
+      2677979834,
+      2682796666,
+      2677626958
     ],
     "samples_ts": [
-      62.4157,
-      61.8025,
-      58.0642,
-      58.149
+      1526.58,
+      1529.51,
+      1526.76,
+      1529.71
     ],
     "test": "pp4096",
     "block_avg_ts": [
-      62.10908,
-      58.106628
+      1528.046105,
+      1528.238847
     ],
     "n_repetitions": 4,
     "n_blocks": 2

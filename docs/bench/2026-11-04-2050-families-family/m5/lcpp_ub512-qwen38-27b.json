@@ -5,10 +5,10 @@
     "cpu_info": "Accelerate, Apple M5 Ultra",
     "gpu_info": "Apple M5 Ultra",
     "backends": "MTL,BLAS",
-    "model_filename": "$HOME/models/Qwen3.5-0.8B-Q8_0.gguf",
-    "model_type": "qwen35 0.8B Q8_0",
-    "model_size": 800881920,
-    "model_n_params": 752393024,
+    "model_filename": "$HOME/models/Qwen3.8-27B-Q4_K_M.gguf",
+    "model_type": "qwen35 27B Q4_K - Medium",
+    "model_size": 17095778304,
+    "model_n_params": 27320697856,
     "n_batch": 2048,
     "n_ubatch": 512,
     "n_threads": 12,
@@ -37,19 +37,30 @@
     "n_prompt": 512,
     "n_gen": 0,
     "n_depth": 0,
-    "test_time": "2026-11-04T19:33:18Z",
-    "avg_ns": 371018104,
-    "stddev_ns": 6338004,
-    "avg_ts": 1380.187951,
-    "stddev_ts": 23.577387,
+    "test_time": "2026-11-05T17:56:02Z",
+    "avg_ns": 443217124,
+    "stddev_ns": 1166056,
+    "avg_ts": 1155.195,
+    "stddev_ts": 3.034496114129429,
     "samples_ns": [
-      366536458,
-      375499750
+      442702666,
+      442923125,
+      442317291,
+      444925416
     ],
     "samples_ts": [
-      1396.86,
-      1363.52
-    ]
+      1156.53,
+      1155.96,
+      1157.54,
+      1150.75
+    ],
+    "test": "pp512",
+    "block_avg_ts": [
+      1156.244628,
+      1154.147383
+    ],
+    "n_repetitions": 4,
+    "n_blocks": 2
   },
   {
     "build_commit": "cd959bae99",
@@ -57,10 +68,10 @@
     "cpu_info": "Accelerate, Apple M5 Ultra",
     "gpu_info": "Apple M5 Ultra",
     "backends": "MTL,BLAS",
-    "model_filename": "$HOME/models/Qwen3.5-0.8B-Q8_0.gguf",
-    "model_type": "qwen35 0.8B Q8_0",
-    "model_size": 800881920,
-    "model_n_params": 752393024,
+    "model_filename": "$HOME/models/Qwen3.8-27B-Q4_K_M.gguf",
+    "model_type": "qwen35 27B Q4_K - Medium",
+    "model_size": 17095778304,
+    "model_n_params": 27320697856,
     "n_batch": 2048,
     "n_ubatch": 512,
     "n_threads": 12,
@@ -86,21 +97,32 @@
     "repack": true,
     "fit_target": 0,
     "fit_min_ctx": 0,
-    "n_prompt": 0,
-    "n_gen": 128,
+    "n_prompt": 4096,
+    "n_gen": 0,
     "n_depth": 0,
-    "test_time": "2026-11-04T19:33:20Z",
-    "avg_ns": 3735691437,
-    "stddev_ns": 219980377,
-    "avg_ts": 34.323582,
-    "stddev_ts": 2.021182,
+    "test_time": "2026-11-05T17:56:04Z",
+    "avg_ns": 3601082354,
+    "stddev_ns": 2317542,
+    "avg_ts": 1137.4375,
+    "stddev_ts": 0.7288518367953662,
     "samples_ns": [
-      3891241042,
-      3580141833
+      3597702417,
+      3602251708,
+      3602850334,
+      3601524958
     ],
     "samples_ts": [
-      32.8944,
-      35.7528
-    ]
+      1138.5,
+      1137.07,
+      1136.88,
+      1137.3
+    ],
+    "test": "pp4096",
+    "block_avg_ts": [
+      1137.785481,
+      1137.086832
+    ],
+    "n_repetitions": 4,
+    "n_blocks": 2
   }
 ]

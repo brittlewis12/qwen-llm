@@ -8,7 +8,7 @@
 //! sets). This module centralizes the parse and makes polarity part of the
 //! declaration site.
 //!
-//! Two polarities, matching the two existing idioms exactly:
+//! Two boolean polarities, matching the two existing idioms exactly:
 //!
 //! * **default-off / opt-in** (`env_flag!(default_off ...)`) — the flag is
 //!   `true` only when the variable is set to an explicitly truthy value
@@ -18,6 +18,10 @@
 //!   `true` unless the variable is set to an explicitly falsy value
 //!   (`0`, `false`, `FALSE`, `no`, `NO`). Used for shipped defaults whose
 //!   env var exists as a rollback lever.
+//!
+//! A third shape, `env_flag!(default_auto ...)`, returns [`EnvAuto`] for a
+//! knob whose unset state is the documented default; `1` explicitly enables
+//! it and `0` forces it off.
 //!
 //! Semantics are latch-on-first-read via `OnceLock`, identical to the
 //! hand-rolled blocks this replaces: changing the environment after the
@@ -56,6 +60,32 @@ pub fn read_default_off(name: &str) -> bool {
 #[inline]
 pub fn read_default_on(name: &str) -> bool {
     !std::env::var(name).as_deref().is_ok_and(env_value_falsy)
+}
+
+/// Tri-state switch for a knob whose unset state is the documented default,
+/// `1` explicitly enables it, and `0` forces it off.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum EnvAuto {
+    Unset,
+    On,
+    Off,
+}
+
+/// Parse a tri-state auto switch value. Unknown values use the unset (auto)
+/// state, matching the other env-flag parsers' choice.
+#[inline]
+pub fn parse_default_auto(value: Option<&str>) -> EnvAuto {
+    match value {
+        Some(v) if env_value_truthy(v) => EnvAuto::On,
+        Some(v) if env_value_falsy(v) => EnvAuto::Off,
+        _ => EnvAuto::Unset,
+    }
+}
+
+/// Read + parse a tri-state auto switch without caching.
+#[inline]
+pub fn read_default_auto(name: &str) -> EnvAuto {
+    parse_default_auto(std::env::var(name).ok().as_deref())
 }
 
 /// The one authoritative list for computation-skipping attribution settings.
@@ -226,6 +256,14 @@ macro_rules! env_flag {
             *ENABLED.get_or_init(|| $crate::env_flag::read_default_off($env))
         }
     };
+    ($(#[$meta:meta])* default_auto $fn_name:ident, $env:literal) => {
+        $(#[$meta])*
+        fn $fn_name() -> $crate::env_flag::EnvAuto {
+            static MODE: std::sync::OnceLock<$crate::env_flag::EnvAuto> =
+                std::sync::OnceLock::new();
+            *MODE.get_or_init(|| $crate::env_flag::read_default_auto($env))
+        }
+    };
     ($(#[$meta:meta])* perf_ablation $fn_name:ident, $env:literal) => {
         const _: () = assert!($crate::env_flag::is_perf_ablation_env($env));
         $(#[$meta])*
@@ -284,6 +322,20 @@ mod tests {
             assert!(!env_value_truthy(v));
             assert!(!env_value_falsy(v));
         }
+    }
+
+    #[test]
+    fn auto_switch_parses_explicit_arms_and_treats_unknown_as_unset() {
+        for value in ["1", "true", "TRUE", "yes", "YES"] {
+            assert_eq!(parse_default_auto(Some(value)), EnvAuto::On);
+        }
+        for value in ["0", "false", "FALSE", "no", "NO"] {
+            assert_eq!(parse_default_auto(Some(value)), EnvAuto::Off);
+        }
+        for value in ["", "ture", "on", "off", "2"] {
+            assert_eq!(parse_default_auto(Some(value)), EnvAuto::Unset);
+        }
+        assert_eq!(parse_default_auto(None), EnvAuto::Unset);
     }
 
     #[test]

@@ -348,7 +348,7 @@ def parse_env_flag(
     if (
         index + 1 >= len(declaration)
         or declaration[index].value
-        not in ("default_on", "default_off", "perf_ablation")
+        not in ("default_on", "default_off", "default_auto", "perf_ablation")
         or declaration[index + 1].kind != "ident"
         or len(declaration) != index + 2
         or len(variable) != 1
@@ -1173,9 +1173,14 @@ def collect() -> tuple[dict[str, Knob], list[tuple[str, str, str, int, str]]]:
                             conflicts.append(duplicate)
                         if not first_declaration:
                             continue
+                        kind = (
+                            "switch default-auto"
+                            if polarity == "default_auto"
+                            else "bool " + polarity.replace("_", "-")
+                        )
                         add(
                             variable,
-                            "bool " + polarity.replace("_", "-"),
+                            kind,
                             rel,
                             declaration_line,
                             lines,
@@ -1312,6 +1317,8 @@ def render(knobs: dict[str, Knob], revision: str) -> str:
                 rendered_description += " Perf-only computation-skipping ablation; requires the `perf-ablations` feature."
             elif polarity == "default_off":
                 parse_rule = "on for `1`/`true`/`TRUE`/`yes`/`YES`; any other value uses the default"
+            elif polarity == "default_auto":
+                parse_rule = "unset uses the documented default; `1` explicitly enables it; `0` disables everywhere"
             else:
                 parse_rule = "off for `0`/`false`/`FALSE`/`no`/`NO`; any other value uses the default"
             rendered_description += f" Parse rule: {parse_rule}; read once per process."
@@ -1379,6 +1386,7 @@ def main() -> int:
             for kind in (
                 "bool default-on",
                 "bool default-off",
+                "switch default-auto",
                 "value",
                 "build-time",
                 "fixture path",

@@ -135,7 +135,16 @@ See also: `docs/PERF-ROADMAP.md` for the current state and evidence index.
   per-output abs/rel and RMS bounds on synthetic blocks; real-weight 27B K/V
   projections within 5.8e-3 max relative error with top-1 and top-two margins
   agreeing. M4 Max ratios (1.3-2.4x on the N=8 matmuls) were taken under
-  build load and are provisional; M4 stays opt-in until a quiet repeat.
+  build load in paired ABBA with both arms under the same load.
+- Follow-up (2026-11-05): `QWEN_MATMAT_FEWROW_GEN` is now default-on for every
+  device (still Qwen DFlash verify only; prompt lookup, packed MTP and other
+  families keep the incumbent). `=1` is the same; `=0` disables it everywhere
+  and is the instant rollback. M5 evidence above: verify 2.27x, total
+  1.81-1.88x, acceptance unchanged, greedy identical. M4 is enabled too on
+  the paired 1.3-2.4x per-matmul evidence. A 160-token M5 greedy run is
+  byte-identical between unset and `=0`
+  (sha256 `74bc77c5798b302c7a2061956611acbed332450497616b93ba57f4568c475831`);
+  no timing was rerun.
 
 ## 2026-10-31 - Flash-Next Decode +2.7% More: One-Row Q6_K, BF16 HC Up-Mix
 

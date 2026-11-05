@@ -2720,15 +2720,15 @@ crate::env_flag!(default_on matmat_iq2_s_n2_nc2_enabled, "QWEN_MATMAT_IQ2_S_N2_N
 crate::env_flag!(default_on matmat_iq3_s_n2_nc2_enabled, "QWEN_MATMAT_IQ3_S_N2_NC2");
 crate::env_flag!(default_on matmat_q8_fewrow_enabled, "QWEN_MATMAT_Q8_FEWROW");
 crate::env_flag!(
-    /// Opt-in generic few-row mat-mul for Qwen DFlash verify only. The
-    /// caller kind is threaded through the shared verifier, so prompt lookup
-    /// and packed MTP stay on the incumbent in every mode. No automatic
-    /// default: the dispatcher has no robust target/drafter release and
-    /// whole-model quantization identity. Truthy values `1`/`true`/`TRUE`/
-    /// `yes`/`YES` enable it for eligible DFlash verify calls on any chip;
-    /// falsy values `0`/`false`/`FALSE`/`no`/`NO` disable it everywhere;
-    /// any other or unknown value keeps the default off. Read once per
-    /// process.
-    default_off matmat_fewrow_gen_enabled,
+    /// Tri-state generic few-row mat-mul gate for Qwen DFlash verify only.
+    /// The caller kind is threaded through the shared verifier, so prompt
+    /// lookup and packed MTP stay on the incumbent in every mode. Unset and
+    /// `1` enable every eligible DFlash verify call on any device that can
+    /// run the kernel (the kernel's own capability check may still decline
+    /// to the incumbent). `0` forces off everywhere and is the rollback
+    /// lever. Any other or unknown value keeps the unset default. Caller
+    /// policy and the existing Q5_K/IQ/Q8 precedence are unchanged. Read
+    /// once per process.
+    default_auto matmat_fewrow_gen_mode,
     "QWEN_MATMAT_FEWROW_GEN"
 );

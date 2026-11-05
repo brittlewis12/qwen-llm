@@ -439,23 +439,24 @@ fn dense_27b_ffn_shape(n_in: usize, n_out: usize) -> bool {
 /// Whether the caller may take the generic few-row arm, after the routes
 /// that keep precedence. `allow` is the caller policy: only Qwen DFlash
 /// verify passes `true`; prompt lookup and packed MTP pass `false` even
-/// when the knob is on. `enabled` is the explicit `QWEN_MATMAT_FEWROW_GEN`
-/// opt-in (there is no automatic default). Q5_K at 2..=4 rows keeps its
-/// sequential mat-vec route, and dense 27B IQ2_S/IQ3_S at 2 rows keep the
-/// nc2 routes. Q8_0 is limited to 9..=16 rows so its tuned 1..=8 arm is
-/// unchanged.
+/// when the knob is on. `mode` is the tri-state `QWEN_MATMAT_FEWROW_GEN`
+/// switch: `Unset` and `On` enable every eligible DFlash verify call on any
+/// device (the kernel's own capability check may still decline), and `Off`
+/// disables everywhere. Q5_K at 2..=4 rows keeps its sequential mat-vec
+/// route, and dense 27B IQ2_S/IQ3_S at 2 rows keep the nc2 routes. Q8_0 is
+/// limited to 9..=16 rows so its tuned 1..=8 arm is unchanged.
 pub(crate) fn fewrow_gen_route_selected_impl(
     dtype: GgmlType,
     n_in: usize,
     n_out: usize,
     n_query: usize,
     allow: bool,
-    enabled: bool,
+    mode: crate::env_flag::EnvAuto,
     q5_k_seq: bool,
     iq2_s_nc2: bool,
     iq3_s_nc2: bool,
 ) -> bool {
-    if !allow || !enabled || !(2..=16).contains(&n_query) {
+    if !allow || mode == crate::env_flag::EnvAuto::Off || !(2..=16).contains(&n_query) {
         return false;
     }
     if q5_k_seq && dtype == GgmlType::Q5_K && (2..=4).contains(&n_query) {
@@ -497,7 +498,7 @@ fn fewrow_gen_route_selected(
         n_out,
         n_query,
         allow,
-        matmat_fewrow_gen_enabled(),
+        matmat_fewrow_gen_mode(),
         matmat_q5_k_n2_seq_enabled(),
         matmat_iq2_s_n2_nc2_enabled(),
         matmat_iq3_s_n2_nc2_enabled(),
@@ -595,8 +596,8 @@ fn encode_mat_mat_dispatch_routed(
     // and `fewrow_gen_route_selected` gate it; only the Qwen DFlash verify
     // entry point passes `allow_fewrow_gen = true`. If the selected
     // pipeline cannot run on this device the arm declines here and the
-    // incumbent routes below stay in charge. Rollback:
-    // QWEN_MATMAT_FEWROW_GEN=0 (default).
+    // incumbent routes below stay in charge. Default on everywhere;
+    // QWEN_MATMAT_FEWROW_GEN=0 forces it off everywhere.
     if fewrow_gen_route_selected(weight.dtype, n_in, n_out, n_query, allow_fewrow_gen) {
         match crate::metal::try_encode_mat_mat_fewrow_gen_f32(
             ctx, enc, weight, x, y, n_in, n_out, n_query,
@@ -780,67 +781,76 @@ fn dense_capabilities_keep_partial_and_unimplemented_codecs_honest() {
 
 #[test]
 fn fewrow_gen_route_selection_respects_policy_and_precedence() {
+    use crate::env_flag::EnvAuto::{Off, On, Unset};
     use GgmlType::*;
-    let sel = |dtype, n_in, n_out, n_query, allow, enabled, q5, iq2, iq3| {
-        fewrow_gen_route_selected_impl(dtype, n_in, n_out, n_query, allow, enabled, q5, iq2, iq3)
+    let sel = |dtype, n_in, n_out, n_query, allow, mode, q5, iq2, iq3| {
+        fewrow_gen_route_selected_impl(dtype, n_in, n_out, n_query, allow, mode, q5, iq2, iq3)
     };
 
-    // The opt-in is chip-independent now that there is no automatic
-    // default; the loop documents the Apple10/other result equivalence.
-    for _chip in ["apple10", "other"] {
-        // DFlash verify caller: unset/off is false, =1 is true.
-        assert!(!sel(Q4_K, 5120, 17408, 8, true, false, true, true, true));
-        assert!(sel(Q4_K, 5120, 17408, 8, true, true, true, true, true));
-        assert!(sel(Q6_K, 17408, 5120, 8, true, true, true, true, true));
-        // Prompt lookup and packed MTP callers: incumbent in every mode.
-        assert!(!sel(Q4_K, 5120, 17408, 8, false, true, true, true, true));
-        assert!(!sel(Q4_K, 5120, 17408, 8, false, false, true, true, true));
-        assert!(!sel(Q6_K, 17408, 5120, 8, false, true, true, true, true));
+    // Caller policy is required in every mode.
+    for mode in [Unset, On, Off] {
+        assert!(!sel(Q4_K, 5120, 17408, 8, false, mode, true, true, true));
     }
 
-    // Explicit opt-in widens the chip and model cells for DFlash verify.
-    assert!(sel(Q4_K, 2560, 12288, 8, true, true, true, true, true));
-    assert!(sel(IQ3_S, 5120, 17408, 8, true, true, true, true, true));
-    assert!(sel(Q8_0, 5120, 1024, 9, true, true, true, true, true));
+    // Unset and explicit =1 enable every eligible DFlash verify cell on any
+    // device; =0 disables them all.
+    for (dtype, n_in, n_out, n_query) in [
+        (Q4_K, 5120, 17408, 8),
+        (Q4_K, 5120, 6144, 8),
+        (Q6_K, 17408, 5120, 8),
+        (Q5_K, 6144, 5120, 8),
+        (IQ3_S, 5120, 17408, 8),
+        (IQ4_XS, 17408, 5120, 8),
+        (Q4_K, 2560, 12288, 8),
+        (Q8_0, 5120, 1024, 9),
+    ] {
+        for mode in [Unset, On] {
+            assert!(sel(
+                dtype, n_in, n_out, n_query, true, mode, true, true, true
+            ));
+        }
+        assert!(!sel(
+            dtype, n_in, n_out, n_query, true, Off, true, true, true
+        ));
+    }
 
-    // Existing tuned routes keep precedence under the opt-in.
-    assert!(!sel(Q5_K, 6144, 5120, 2, true, true, true, true, true));
-    assert!(!sel(Q5_K, 6144, 5120, 4, true, true, true, true, true));
-    assert!(sel(Q5_K, 6144, 5120, 5, true, true, true, true, true));
-    assert!(!sel(IQ2_S, 5120, 17408, 2, true, true, true, true, true));
-    assert!(!sel(IQ3_S, 17408, 5120, 2, true, true, true, true, true));
-    assert!(sel(IQ2_S, 5120, 17408, 2, true, true, true, false, false));
-    assert!(sel(IQ3_S, 17408, 5120, 2, true, true, true, false, false));
+    // Existing tuned routes keep precedence under both enabled modes.
+    for mode in [Unset, On] {
+        assert!(!sel(Q5_K, 6144, 5120, 2, true, mode, true, true, true));
+        assert!(!sel(Q5_K, 6144, 5120, 4, true, mode, true, true, true));
+        assert!(sel(Q5_K, 6144, 5120, 5, true, mode, true, true, true));
+        assert!(!sel(IQ2_S, 5120, 17408, 2, true, mode, true, true, true));
+        assert!(!sel(IQ3_S, 17408, 5120, 2, true, mode, true, true, true));
+        assert!(sel(IQ2_S, 5120, 17408, 2, true, mode, true, false, false));
+        assert!(sel(IQ3_S, 17408, 5120, 2, true, mode, true, false, false));
+    }
 
     // Q8_0 1..=8 remains the existing few-row arm; generic is 9..=16 only.
-    assert!(!sel(Q8_0, 5120, 1024, 8, true, true, true, true, true));
-    assert!(sel(Q8_0, 5120, 1024, 9, true, true, true, true, true));
-    assert!(sel(Q8_0, 5120, 1024, 16, true, true, true, true, true));
+    assert!(!sel(Q8_0, 5120, 1024, 8, true, Unset, true, true, true));
+    assert!(sel(Q8_0, 5120, 1024, 9, true, Unset, true, true, true));
+    assert!(sel(Q8_0, 5120, 1024, 16, true, Unset, true, true, true));
 
     // Block alignment and row-count bounds.
-    assert!(!sel(Q4_K, 640, 17408, 8, true, true, true, true, true));
-    assert!(sel(IQ4_NL, 512, 1024, 8, true, true, true, true, true));
-    assert!(sel(IQ4_NL, 64, 1024, 8, true, true, true, true, true));
-    assert!(!sel(Q4_K, 5120, 17408, 1, true, true, true, true, true));
-    assert!(!sel(Q4_K, 5120, 17408, 17, true, true, true, true, true));
+    assert!(!sel(Q4_K, 640, 17408, 8, true, Unset, true, true, true));
+    assert!(sel(IQ4_NL, 512, 1024, 8, true, Unset, true, true, true));
+    assert!(sel(IQ4_NL, 64, 1024, 8, true, Unset, true, true, true));
+    assert!(!sel(Q4_K, 5120, 17408, 1, true, Unset, true, true, true));
+    assert!(!sel(Q4_K, 5120, 17408, 17, true, Unset, true, true, true));
 }
 
 #[test]
-fn fewrow_gen_caller_matrix_respects_knob_and_chip() {
+fn fewrow_gen_caller_matrix_respects_knob() {
+    use crate::env_flag::EnvAuto::{Off, On, Unset};
     use crate::metal_dflash::PackedVerifyCaller::{DFlash, Mtp, PromptLookup};
     use GgmlType::Q4_K;
 
-    // Each caller x {unset/off, =1} x Apple10/other. The opt-in is
-    // chip-independent by design; the loop records that equivalence.
+    // Each caller x {unset, =1, =0}; the device does not enter the gate.
     for caller in [DFlash, PromptLookup, Mtp] {
         let allow = caller == DFlash;
-        for enabled in [false, true] {
-            for _chip in ["apple10", "other"] {
-                let selected = fewrow_gen_route_selected_impl(
-                    Q4_K, 5120, 17408, 8, allow, enabled, true, true, true,
-                );
-                assert_eq!(selected, allow && enabled, "caller={caller:?}");
-            }
+        for (mode, expected) in [(Unset, allow), (On, allow), (Off, false)] {
+            let selected =
+                fewrow_gen_route_selected_impl(Q4_K, 5120, 17408, 8, allow, mode, true, true, true);
+            assert_eq!(selected, expected, "caller={caller:?} mode={mode:?}");
         }
     }
 }

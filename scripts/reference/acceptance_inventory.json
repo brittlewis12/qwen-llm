@@ -5563,5 +5563,12 @@
     "class": "cpu",
     "ignored": false,
     "reason": "Pre-existing maintained-main discovery omission reviewed during cache-admission repair: pure serve mapping/parser arithmetic and sparse metadata, or CPU-only fake native-result/profile-scope controls; no Metal context or execution."
+  },
+  {
+    "target": "lib",
+    "name": "deepseek_v41::forward::hc_gpu::tests::wide_post_rejects_finite_status_aliasing",
+    "class": "gpu",
+    "ignored": false,
+    "reason": "Metal binding-contract test: constructs the wide mHC post buffers and requires the encoder to reject finite-status aliasing before dispatch."
   }
 ]

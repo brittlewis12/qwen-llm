@@ -817,6 +817,12 @@ fn detect_qwen_message_protocol(
         ModelFamily::detect(gguf) == Some(family),
         "Qwen prompt family does not match the opened GGUF"
     );
+    if family == ModelFamily::Qwen4Exp {
+        if let Some(failure) = crate::prompt_template::qwen4_prompt_capability_failure(family, gguf)
+        {
+            return Err(failure.into());
+        }
+    }
     match resolve_model_prompt_template(gguf)? {
         ModelPromptTemplate::Qwen(template) => Ok(template),
         ModelPromptTemplate::MuseGlimmer(_) | ModelPromptTemplate::DeepSeekV4_0731 => {
@@ -1596,12 +1602,90 @@ fn is_structural_render_span(kind: MessageRenderSpanKind) -> bool {
 }
 
 #[cfg(test)]
+#[path = "qwen_contract_fixture.rs"]
+mod contract_fixture;
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use qwen_llm::muse_glimmer_prompt::{
         MuseGlimmerMessage, MuseGlimmerPromptOptions, MuseGlimmerToolDefinition,
         render_muse_glimmer_atem_prompt, render_muse_glimmer_atem_prompt_annotated,
     };
+
+    #[test]
+    fn qwen4_lens_production_input_rejects_unqualified_structured_input_only() {
+        let family = ModelFamily::Qwen4Exp;
+        for arch in ["qwen4", "qwen4_exp", "qwen4moe", "qwen4dense"] {
+            let gguf =
+                super::contract_fixture::qwen4_tokenizer_gguf(arch, "unrecognized chat program");
+            let tokenizer = Tokenizer::from_gguf(&gguf).unwrap();
+            let base = LensInputSpec {
+                prompt: None,
+                token_ids: None,
+                user: None,
+                system: None,
+                messages: None,
+                open_responses: None,
+                no_special_tokens: false,
+                message_mode: None,
+            };
+            let error = prepare_qwen_model_input(
+                LensInputSpec {
+                    user: Some("hello"),
+                    ..base
+                },
+                family,
+                &gguf,
+                &tokenizer,
+            )
+            .unwrap_err();
+            assert!(
+                error
+                    .downcast_ref::<crate::prompt_template::Qwen4PromptCapabilityFailure>()
+                    .is_some()
+            );
+            assert!(error.to_string().contains("tokenizer.chat_template"));
+            let error = prepare_qwen_model_messages_bytes(
+                br#"[{"role":"user","content":"hello"}]"#,
+                "inline",
+                None,
+                family,
+                &gguf,
+                &tokenizer,
+            )
+            .unwrap_err();
+            assert!(
+                error
+                    .downcast_ref::<crate::prompt_template::Qwen4PromptCapabilityFailure>()
+                    .is_some()
+            );
+            let raw = prepare_qwen_model_input(
+                LensInputSpec {
+                    prompt: Some("hello"),
+                    no_special_tokens: true,
+                    ..base
+                },
+                family,
+                &gguf,
+                &tokenizer,
+            )
+            .unwrap();
+            assert_eq!(tokenizer.try_decode(&raw.token_ids).unwrap(), "hello");
+            let ids = [0, 1, 2];
+            let raw = prepare_qwen_model_input(
+                LensInputSpec {
+                    token_ids: Some(&ids),
+                    ..base
+                },
+                family,
+                &gguf,
+                &tokenizer,
+            )
+            .unwrap();
+            assert_eq!(raw.token_ids, ids);
+        }
+    }
 
     fn open_responses_rendering(request: &ServeRequest) -> LensInputRendering {
         let rendered = render_qwen_serve_prompt_annotated(request);

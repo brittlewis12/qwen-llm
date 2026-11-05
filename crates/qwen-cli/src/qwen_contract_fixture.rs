@@ -112,6 +112,38 @@ pub(crate) fn qwen4_gguf_with_stops(
     eos: u64,
     eot: Option<u64>,
 ) -> GgufFile {
+    qwen4_gguf_inner(
+        architecture,
+        name,
+        template,
+        control_tokens,
+        eos,
+        eot,
+        false,
+    )
+}
+
+pub(crate) fn qwen4_tokenizer_gguf(architecture: &str, template: &str) -> GgufFile {
+    qwen4_gguf_inner(
+        architecture,
+        "future Qwen",
+        template,
+        true,
+        248_046,
+        None,
+        true,
+    )
+}
+
+fn qwen4_gguf_inner(
+    architecture: &str,
+    name: &str,
+    template: &str,
+    control_tokens: bool,
+    eos: u64,
+    eot: Option<u64>,
+    usable: bool,
+) -> GgufFile {
     use Value::*;
     let mut entries: Vec<(&str, Value<'_>)> = vec![
         ("general.architecture", Text(architecture)),
@@ -130,7 +162,7 @@ pub(crate) fn qwen4_gguf_with_stops(
     let mut bytes = b"GGUF".to_vec();
     bytes.extend(3u32.to_le_bytes());
     bytes.extend(0u64.to_le_bytes());
-    bytes.extend(((entries.len() + 1) as u64).to_le_bytes());
+    bytes.extend(((entries.len() + 1 + 2 * usize::from(usable)) as u64).to_le_bytes());
     for (key, value) in &entries {
         string(&mut bytes, key);
         match value {
@@ -167,7 +199,40 @@ pub(crate) fn qwen4_gguf_with_stops(
         } else {
             ""
         };
-        string(&mut bytes, text);
+        if usable && id < 256 {
+            let b = id as u8;
+            let ordinary = |b: u8| matches!(b,33..=126 | 161..=172 | 174..=255);
+            let c = if ordinary(b) {
+                u32::from(b)
+            } else {
+                256 + (0..b).filter(|b| !ordinary(*b)).count() as u32
+            };
+            string(&mut bytes, &char::from_u32(c).unwrap().to_string());
+        } else if usable && text.is_empty() {
+            string(&mut bytes, &format!("<unused_{id}>"));
+        } else {
+            string(&mut bytes, text);
+        }
+    }
+    if usable {
+        string(&mut bytes, "tokenizer.ggml.token_type");
+        bytes.extend(9u32.to_le_bytes());
+        bytes.extend(5u32.to_le_bytes());
+        bytes.extend(248_320u64.to_le_bytes());
+        for id in 0..248_320 {
+            bytes.extend(
+                (if (248_044..=248_046).contains(&id) {
+                    3i32
+                } else {
+                    1i32
+                })
+                .to_le_bytes(),
+            );
+        }
+        string(&mut bytes, "tokenizer.ggml.merges");
+        bytes.extend(9u32.to_le_bytes());
+        bytes.extend(8u32.to_le_bytes());
+        bytes.extend(0u64.to_le_bytes());
     }
     bytes.resize(bytes.len().div_ceil(32) * 32, 0);
     let (path, mut file) = temp_file();

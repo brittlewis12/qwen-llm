@@ -272,7 +272,7 @@ pub fn identify_qwen_release(facts: &QwenHeaderFacts<'_>) -> QwenReleaseIdentity
                 if *version == "qwen3.8"
                     && facts.names.iter().flatten().any(|name| {
                         let name = name.to_ascii_lowercase().replace(['-', '_', ' '], "");
-                        name.contains("flashnext")
+                        name.starts_with("qwen3.8flashnext")
                     }) =>
             {
                 QwenReleaseStatus::Identified { version, source }
@@ -350,6 +350,11 @@ pub fn resolve_qwen_contract_for_gguf(gguf: &GgufFile) -> Result<QwenReleaseIden
         .context("model is missing general.architecture")?;
     let facts = QwenHeaderFacts::from_gguf(&architecture, gguf)?;
     let mut identity = resolve_qwen_contract(&facts, gguf.get_str("tokenizer.chat_template"));
+    if architecture == "qwen4exp" {
+        let config = qwen_llm::qwen4exp::Qwen4ExpConfig::from_gguf(gguf).ok();
+        qualify_flash_next_identity(&mut identity, config.as_ref());
+    }
+
     if qwen_llm::qwen4exp::is_qwen4_architecture(&architecture)
         && architecture != "qwen4exp"
         && identity.template == QwenPromptTemplate::Qwen4Next
@@ -368,6 +373,93 @@ pub fn resolve_qwen_contract_for_gguf(gguf: &GgufFile) -> Result<QwenReleaseIden
         }
     }
     Ok(identity)
+}
+
+// A product name is necessary but insufficient: copied names on another
+// geometry must not establish the reference release identity.
+fn qualify_flash_next_identity(
+    identity: &mut QwenReleaseIdentity,
+    config: Option<&qwen_llm::qwen4exp::Qwen4ExpConfig>,
+) {
+    if !matches!(
+        identity.status,
+        QwenReleaseStatus::Identified {
+            version: "qwen3.8",
+            ..
+        }
+    ) {
+        return;
+    }
+    if config == Some(&qwen_llm::qwen4exp::Qwen4ExpConfig::flash_next_reference()) {
+        // Preserve the captured main identity for the qualified reference.
+        identity.status = QwenReleaseStatus::Identified {
+            version: "qwen3.8",
+            source: "general.architecture",
+        };
+    } else {
+        identity.status = QwenReleaseStatus::Unknown {
+            reason: "Flash-Next product name lacks the qualified reference configuration".into(),
+            fields_consulted: vec![
+                "general.architecture",
+                "general.name",
+                "qwen4exp.block_count",
+                "qwen4exp.embedding_length",
+            ],
+        };
+    }
+}
+
+/// Shared admission gate for run, serve and Lens structured Qwen4 input.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum Qwen4PromptCapabilityFailure {
+    Architecture,
+    Tokenizer(QwenTokenizerMismatch),
+    Template(&'static str),
+}
+impl Qwen4PromptCapabilityFailure {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Architecture => "general.architecture",
+            Self::Tokenizer(mismatch) => mismatch.header_key(),
+            Self::Template(reason) => reason,
+        }
+    }
+}
+impl std::fmt::Display for Qwen4PromptCapabilityFailure {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "Qwen4 structured prompting is unsupported: {}",
+            self.as_str()
+        )
+    }
+}
+impl std::error::Error for Qwen4PromptCapabilityFailure {}
+
+pub fn qwen4_prompt_capability_failure(
+    family: ModelFamily,
+    gguf: &GgufFile,
+) -> Option<Qwen4PromptCapabilityFailure> {
+    if family != ModelFamily::Qwen4Exp {
+        return Some(Qwen4PromptCapabilityFailure::Architecture);
+    }
+    let architecture = gguf.architecture().unwrap_or_default();
+    let facts = match QwenHeaderFacts::from_gguf(&architecture, gguf) {
+        Ok(facts) => facts,
+        Err(_) => {
+            return Some(Qwen4PromptCapabilityFailure::Tokenizer(
+                QwenTokenizerMismatch::TokenCount,
+            ));
+        }
+    };
+    qwen_tokenizer_gate(&facts)
+        .err()
+        .map(Qwen4PromptCapabilityFailure::Tokenizer)
+        .or_else(|| {
+            qwen4_alias_template_qualified(gguf)
+                .err()
+                .map(Qwen4PromptCapabilityFailure::Template)
+        })
 }
 
 /// An architecture alias may use the Flash-Next renderer only when the GGUF
@@ -393,7 +485,7 @@ pub fn qwen4_alias_template_qualified(gguf: &GgufFile) -> Result<(), &'static st
         .get_string_array_full("tokenizer.ggml.tokens")
         .map_err(|_| "tokenizer.ggml.tokens cannot be read")?
         .ok_or("tokenizer.ggml.tokens is missing")?;
-    let im_start = tokens
+    tokens
         .iter()
         .position(|token| *token == "<|im_start|>")
         .ok_or("tokenizer is missing <|im_start|>")?;
@@ -610,13 +702,10 @@ mod tests {
             &[("general.architecture", Value::Text("qwen4exp"))],
         );
         let identity = resolve_qwen_contract_for_gguf(&released).unwrap();
-        assert!(matches!(
-            identity.status,
-            QwenReleaseStatus::Identified {
-                version: "qwen3.8",
-                ..
-            }
-        ));
+        assert!(
+            matches!(identity.status, QwenReleaseStatus::Unknown { .. }),
+            "a name-only header cannot establish the reference profile"
+        );
         assert_eq!(identity.template, QwenPromptTemplate::Qwen4Next);
         let other = fixture::gguf(
             "Qwen4-Flash",
@@ -626,6 +715,55 @@ mod tests {
         let identity = resolve_qwen_contract_for_gguf(&other).unwrap();
         assert!(matches!(identity.status, QwenReleaseStatus::Unknown { .. }));
         assert_eq!(identity.template, QwenPromptTemplate::Qwen4Next);
+    }
+
+    #[test]
+    fn flash_next_identity_requires_product_evidence_and_exact_profile() {
+        let reference = qwen_llm::qwen4exp::Qwen4ExpConfig::flash_next_reference();
+        let names = [Some("Qwen3.8-Flash-Next"), None, None, None, None];
+        for (profile, identified) in [
+            (Some(reference.clone()), true),
+            (None, false),
+            (
+                Some({
+                    let mut c = reference.clone();
+                    c.context_length = 1_048_576;
+                    c
+                }),
+                false,
+            ),
+            (
+                Some({
+                    let mut c = reference.clone();
+                    c.hidden_size = 4096;
+                    c
+                }),
+                false,
+            ),
+        ] {
+            let mut identity = identify_qwen_release(&facts("qwen4exp", names));
+            qualify_flash_next_identity(&mut identity, profile.as_ref());
+            assert_eq!(
+                matches!(
+                    identity.status,
+                    QwenReleaseStatus::Identified {
+                        version: "qwen3.8",
+                        ..
+                    }
+                ),
+                identified
+            );
+        }
+        for name in [
+            "Distilled Qwen3.8 Flash Next",
+            "my Qwen3.8 flashnext derivative",
+            "renamed model",
+        ] {
+            let mut identity =
+                identify_qwen_release(&facts("qwen4exp", [Some(name), None, None, None, None]));
+            qualify_flash_next_identity(&mut identity, Some(&reference));
+            assert!(matches!(identity.status, QwenReleaseStatus::Unknown { .. }));
+        }
     }
 
     #[test]

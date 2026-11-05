@@ -50,43 +50,13 @@ pub(crate) const QWEN4EXP_FULL_SHARD_PREFETCH_ENV: &str = "QWEN4EXP_FULL_SHARD_P
 
 pub(crate) const QWEN4EXP_MAX_STOP_TOKENS: usize = 256;
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) enum Qwen4ExpPromptCapabilityFailure {
-    Architecture,
-    Tokenizer(prompt_template::QwenTokenizerMismatch),
-    Template(&'static str),
-}
+pub(crate) use prompt_template::Qwen4PromptCapabilityFailure as Qwen4ExpPromptCapabilityFailure;
 
-impl Qwen4ExpPromptCapabilityFailure {
-    pub(crate) fn as_str(self) -> &'static str {
-        match self {
-            Self::Architecture => "general.architecture",
-            Self::Tokenizer(mismatch) => mismatch.header_key(),
-            Self::Template(reason) => reason,
-        }
-    }
-}
-
-/// Flash-Next renders the Qwen3.8 contract whenever the architecture is
-/// `qwen4exp` and the tokenizer is the Qwen3.x release tokenizer.
 pub(crate) fn qwen4exp_prompt_capability_failure(
     family: ModelFamily,
     gguf: &GgufFile,
 ) -> Option<Qwen4ExpPromptCapabilityFailure> {
-    if family != ModelFamily::Qwen4Exp {
-        return Some(Qwen4ExpPromptCapabilityFailure::Architecture);
-    }
-    let architecture = gguf.architecture().unwrap_or_default();
-    match prompt_template::QwenHeaderFacts::from_gguf(&architecture, gguf) {
-        Ok(facts) => classify_qwen4exp_prompt_capability(family, &facts).or_else(|| {
-            prompt_template::qwen4_alias_template_qualified(gguf)
-                .err()
-                .map(Qwen4ExpPromptCapabilityFailure::Template)
-        }),
-        Err(_) => Some(Qwen4ExpPromptCapabilityFailure::Tokenizer(
-            prompt_template::QwenTokenizerMismatch::TokenCount,
-        )),
-    }
+    prompt_template::qwen4_prompt_capability_failure(family, gguf)
 }
 
 pub(crate) fn classify_qwen4exp_prompt_capability(

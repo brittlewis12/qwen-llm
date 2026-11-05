@@ -745,7 +745,8 @@ Avoid by default:
 - broad token-major packing beyond the fixed route/routed tail unless it clears
   an end-to-end prompt-length sweep and a stage profile,
 - fixed-capacity expert buckets fed by route ids that are not duplicate-free by
-  construction; see invariant 2 above and keep every bucket write bounded.
+  construction; see the correctness-invariants section below and keep every
+  bucket write bounded.
 
 ### GDN / recurrent state
 
@@ -951,10 +952,11 @@ small and operational:
    32-bit product, the encoder checks that exact product with
    `u32::try_from`/`i32::try_from`; the mat-mat dispatcher rejects a wrapping
    `n_query * n_out` (and `n_in * n_out`, `n_in * n_query`) for every weight
-   dtype, and the older reduce/scatter encoders use `checks::to_u32` instead
-   of `as u32`. Never `slice()` an MPP device tensor whose extent can exceed
-   2 GiB (int32 offset); build each tile tensor from a 64-bit base pointer. Ids
-   are `int`/`uint`, never `short`.
+   dtype, and the audited reduce/scatter encoders use `checks::to_u32` instead
+   of `as u32`. These checks cover the listed paths; extend them to any new
+   32-bit product or narrowing cast before relying on it. Never `slice()` an
+   MPP device tensor whose extent can exceed 2 GiB (int32 offset); build each
+   tile tensor from a 64-bit base pointer. Ids are `int`/`uint`, never `short`.
 
 ## Ranked resource guide
 

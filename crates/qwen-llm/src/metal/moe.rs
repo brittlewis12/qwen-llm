@@ -5,6 +5,9 @@ use super::*;
 #[cfg(test)]
 pub(crate) mod hc4_strict;
 
+#[cfg(test)]
+mod route_parity_tests;
+
 /// Qwen/Flash-Next route-status word bits written by the top-k and bucket
 /// kernels (`kernels/moe.metal`). A ready row has bit 0 set and neither
 /// failure bit.
@@ -5721,6 +5724,12 @@ pub fn encode_topk_logits_softmax_f32_status(
     n: usize,
     k: usize,
 ) -> Result<(), MetalError> {
+    if n == 0 || k > n {
+        return Err(MetalError::BadShape {
+            kernel: "topk_logits_softmax",
+            detail: format!("need 1 <= k <= n, got n={n} k={k}"),
+        });
+    }
     if logits.n_elements() as usize != n {
         return Err(MetalError::BadShape {
             kernel: "topk_logits_softmax",
@@ -6189,9 +6198,29 @@ fn encode_route_bucket(
     topk: usize,
     parallel: bool,
 ) -> Result<(), MetalError> {
-    if topk_idx.n_elements() as usize != n_tokens * topk
+    let slot_count = n_tokens
+        .checked_mul(topk)
+        .ok_or_else(|| MetalError::BadShape {
+            kernel: "moe_route_bucket_slots",
+            detail: "n_tokens * topk overflow".into(),
+        })?;
+    let id_count = n_expert
+        .checked_mul(n_tokens)
+        .ok_or_else(|| MetalError::BadShape {
+            kernel: "moe_route_bucket_slots",
+            detail: "n_expert * n_tokens overflow".into(),
+        })?;
+    if i32::try_from(slot_count).is_err() {
+        return Err(MetalError::BadShape {
+            kernel: "moe_route_bucket_slots",
+            detail: format!("slot count {slot_count} exceeds signed bucket ids"),
+        });
+    }
+    super::checks::to_u32("moe_route_bucket_slots", slot_count, "n_tokens*topk")?;
+    super::checks::to_u32("moe_route_bucket_slots", id_count, "n_expert*n_tokens")?;
+    if topk_idx.n_elements() as usize != slot_count
         || counts.n_elements() as usize != n_expert
-        || ids.n_elements() as usize != n_expert * n_tokens
+        || ids.n_elements() as usize != id_count
         || status.dtype != GgmlType::I32
         || status.n_elements() < n_tokens as u64
     {
@@ -6202,9 +6231,9 @@ fn encode_route_bucket(
                 topk_idx.n_elements(),
                 counts.n_elements(),
                 ids.n_elements(),
-                n_tokens * topk,
+                slot_count,
                 n_expert,
-                n_expert * n_tokens
+                id_count
             ),
         });
     }
@@ -6629,10 +6658,17 @@ mod tests {
             .unwrap();
             let command = ctx.queue.commandBuffer().unwrap();
             let enc = KernelEncoder::begin(&command);
-            encode_route_bucket(
-                &ctx, &enc, &top, &counts, &ids, &status, N_EXPERT, N_TOKENS, TOPK, parallel,
-            )
-            .unwrap();
+            if parallel {
+                encode_moe_route_bucket_slots_parallel_f32_status(
+                    &ctx, &enc, &top, &counts, &ids, &status, N_EXPERT, N_TOKENS, TOPK,
+                )
+                .unwrap();
+            } else {
+                encode_moe_route_bucket_slots_f32_status(
+                    &ctx, &enc, &top, &counts, &ids, &status, N_EXPERT, N_TOKENS, TOPK,
+                )
+                .unwrap();
+            }
             enc.end();
             crate::metal::commit_and_wait(&command).unwrap();
             let read_i32 = |t: &MetalTensor, n: usize| unsafe {
@@ -6641,6 +6677,9 @@ mod tests {
             assert_eq!(read_i32(&counts, N_EXPERT), vec![12, 0]);
             let tail = read_i32(&ids_backing, N_EXPERT * N_TOKENS + guard);
             assert_eq!(&tail[N_EXPERT * N_TOKENS..], &vec![-77; guard]);
+            // Expert 1's bucket is empty: a duplicate expert-0 write must not
+            // spill into the adjacent expert row.
+            assert_eq!(&tail[N_TOKENS..2 * N_TOKENS], &vec![-77; N_TOKENS]);
             let words = read_i32(&status, N_TOKENS);
             assert!(
                 words.iter().any(|w| w & MOE_ROUTE_STATUS_OVERFLOW != 0),

@@ -2984,8 +2984,8 @@ fn single_chunk_vt_plan_shares_only_layer_storage() {
 #[test]
 fn prefill_scratch_plan_matches_product_residuals() {
     for (a10b, wide_chunk, logical_residual, observed_residual) in [
-        (false, 2048, 90_083_328u64, 90_079_232u64),
-        (true, 4096, 876_916_736u64, 876_920_832u64),
+        (false, 2048, 90_087_424u64, 90_083_328u64),
+        (true, 4096, 876_929_024u64, 876_933_120u64),
     ] {
         let arch = product_moe_plan_arch(a10b);
         let baseline = product_moe_plan(&arch, 1024, false);
@@ -3014,6 +3014,30 @@ fn prefill_scratch_plan_matches_product_residuals() {
                 .expect("grouped gather IDs are planned")
                 .dtype,
             GgmlType::I32
+        );
+        let names_in_alloc_order: Vec<&str> = wide
+            .allocations
+            .iter()
+            .map(|allocation| allocation.name)
+            .collect();
+        let topk = names_in_alloc_order
+            .iter()
+            .position(|name| *name == "moe_topk_idx_pack")
+            .unwrap();
+        let status = names_in_alloc_order
+            .iter()
+            .position(|name| *name == "moe_route_status_pack")
+            .unwrap();
+        let router = names_in_alloc_order
+            .iter()
+            .position(|name| *name == "moe_router_probs_pack")
+            .unwrap();
+        assert_eq!(status, topk + 1);
+        assert_eq!(router, status + 1);
+        assert_eq!(
+            wide.allocations[status].dtype,
+            GgmlType::I32,
+            "route status must be planned as I32 in allocator order"
         );
         assert_eq!(
             wide.logical_bytes,

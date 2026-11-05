@@ -3479,6 +3479,39 @@ fn iq3_xxs_iq4_nl_path_is_zero_safe_and_abandonable() {
         2e-4,
     );
 
+    // Production-entrypoint injection: NaN router input must raise a named
+    // route error, poison the workspace, and reset must clear sticky status.
+    let mut nan_values = input.to_vec();
+    nan_values[0] = f32::NAN;
+    let nan_input = tensor_f32(&ctx, &nan_values, input_gpu.shape.clone());
+    let nan_command = ctx.queue.commandBuffer().unwrap();
+    let nan_encoder = KernelEncoder::begin(&nan_command);
+    let read =
+        encode_qwen4exp_moe(&ctx, &nan_encoder, &nan_input, weights, &mut workspace).unwrap();
+    drop(read);
+    nan_encoder.end();
+    nan_command.commit();
+    let error = workspace.release_after().unwrap_err().to_string();
+    assert!(error.contains("non-finite router logits"), "{error}");
+    assert!(workspace.is_poisoned());
+    workspace.reset().unwrap();
+
+    let recovered_command = ctx.queue.commandBuffer().unwrap();
+    let recovered_encoder = KernelEncoder::begin(&recovered_command);
+    let read = encode_qwen4exp_moe(
+        &ctx,
+        &recovered_encoder,
+        &input_gpu,
+        weights,
+        &mut workspace,
+    )
+    .unwrap();
+    drop(read);
+    recovered_encoder.end();
+    recovered_command.commit();
+    workspace.release_after().unwrap();
+    assert!(!workspace.is_poisoned());
+
     workspace.state_poisoned = true;
     let poisoned_command = ctx.queue.commandBuffer().unwrap();
     let poisoned_encoder = KernelEncoder::begin(&poisoned_command);

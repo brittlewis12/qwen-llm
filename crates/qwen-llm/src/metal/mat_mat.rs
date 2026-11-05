@@ -4484,7 +4484,9 @@ mod tests {
         .unwrap();
         let y = MetalTensor::zeros_f32(&ctx, vec![(n_out * n_cols) as u64]).unwrap();
         let selected = std::env::var("QWEN_FEWROW_VARIANT").ok();
-        let all_variants = ["r1c1k128", "r1c1k64_sg2", "r2c1k64", "r2c2k64", "r4c1k64"];
+        // ct=1 only: these compute the same 8 activation columns as the
+        // generic arm. r2c2k64 is ct=2 and needs a 16-column operand.
+        let all_variants = ["r1c1k128", "r1c1k64_sg2", "r2c1k64", "r2c1k128", "r4c1k64"];
         let variants: Vec<&str> = match selected.as_deref() {
             Some(name) => vec![name],
             None => all_variants.to_vec(),

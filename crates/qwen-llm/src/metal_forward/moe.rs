@@ -2309,6 +2309,14 @@ impl<'a> MetalForward<'a> {
             session.poison("MoE concurrent-GDN decode command failed");
             return Err(failure.into());
         }
+        if let Err(error) = crate::metal::check_moe_route_status(
+            "qwen_moe_decode_concurrent",
+            &session.moe_route_status,
+            1,
+        ) {
+            session.poison("MoE concurrent-GDN decode route status failed");
+            return Err(error.into());
+        }
 
         Ok((
             TokenProfile {

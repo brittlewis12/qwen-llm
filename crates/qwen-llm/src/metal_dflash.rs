@@ -1844,6 +1844,15 @@ fn flush_prefill_phase(
     Ok(())
 }
 
+fn check_verify_route_statuses(
+    session_status: &MetalTensor,
+    packed_status: &MetalTensor,
+    rows: usize,
+) -> Result<(), MetalError> {
+    crate::metal::check_moe_route_status("qwen_dflash_verify_session", session_status, 1)?;
+    crate::metal::check_moe_route_status("qwen_dflash_verify_packed", packed_status, rows)
+}
+
 fn require_prefill_command_completed(
     cmd_buf: &ProtocolObject<dyn MTLCommandBuffer>,
 ) -> Result<(), DFlashError> {
@@ -11139,8 +11148,8 @@ pub fn encode_packed_verify_layer_major_inner_for(
 
     cmd_buf.commit();
     crate::metal::wait_completed(&cmd_buf)?;
-    if let Err(error) = crate::metal::check_moe_route_status(
-        "qwen_dflash_verify",
+    if let Err(error) = check_verify_route_statuses(
+        &target_session.moe_route_status,
         &layer_scratch.moe_route_status_pack,
         n,
     ) {

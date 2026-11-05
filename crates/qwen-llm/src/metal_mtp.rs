@@ -757,6 +757,15 @@ impl MetalMtpSession {
         }
     }
 
+    fn check_completed_route(&mut self, kernel: &'static str) -> Result<(), MtpError> {
+        let error = crate::metal::check_moe_route_status(kernel, &self.moe_route_status, 1).err();
+        if let Some(error) = error {
+            self.poisoned = Some("MTP route status failed");
+            return Err(MtpError::Metal(error));
+        }
+        Ok(())
+    }
+
     /// Allocate a fresh MTP session. `kv_capacity` is the max number of
     /// MTP KV slots (typically `prompt_len + max_new_tokens`).
     pub fn fresh(
@@ -1688,7 +1697,7 @@ impl<'a> SpeculativeDecoder<'a> {
         enc.end();
         cmd.commit();
         crate::metal::wait_completed(&cmd)?;
-        self.check_completed_route("qwen_mtp_draft")?;
+        self.mtp_session.check_completed_route("qwen_mtp_draft")?;
 
         // KV side-effect was committed by encode_mtp_attn; bump our counter.
         self.mtp_session.kv_n_pos = position as usize + 1;
@@ -1838,17 +1847,6 @@ impl<'a> SpeculativeDecoder<'a> {
         Ok(())
     }
 
-    fn check_completed_route(&mut self, kernel: &'static str) -> Result<(), MtpError> {
-        let error =
-            crate::metal::check_moe_route_status(kernel, &self.mtp_session.moe_route_status, 1)
-                .err();
-        if let Some(error) = error {
-            self.mtp_session.poisoned = Some("MTP route status failed");
-            return Err(MtpError::Metal(error));
-        }
-        Ok(())
-    }
-
     fn draft_chain_single_cb(
         &mut self,
         next_tok: i32,
@@ -1927,7 +1925,8 @@ impl<'a> SpeculativeDecoder<'a> {
         }
         cmd.commit();
         crate::metal::wait_completed(&cmd)?;
-        self.check_completed_route("qwen_mtp_draft_chain")?;
+        self.mtp_session
+            .check_completed_route("qwen_mtp_draft_chain")?;
 
         self.mtp_session.kv_n_pos = start_position as usize + n_drafts;
         let mut out = vec![0i32; n_drafts];
@@ -2019,7 +2018,8 @@ impl<'a> SpeculativeDecoder<'a> {
         }
         cmd.commit();
         crate::metal::wait_completed(&cmd)?;
-        self.check_completed_route("qwen_mtp_recorded_chain")?;
+        self.mtp_session
+            .check_completed_route("qwen_mtp_recorded_chain")?;
 
         self.mtp_session.kv_n_pos = start_position as usize + drafts.len();
         Ok(())
@@ -3514,6 +3514,87 @@ mod tests {
     use crate::forward::{Forward, GdnState, KvCache};
     use crate::loader::Model;
     use crate::metal_forward::MetalModel;
+
+    fn empty_mtp_session(ctx: &MetalContext) -> MetalMtpSession {
+        let f = |n: u64| MetalTensor::zeros_f32(ctx, vec![n]).unwrap();
+        let i = |n: u64| MetalTensor::zeros_i32(ctx, vec![n]).unwrap();
+        MetalMtpSession {
+            kv_k: MetalTensor::zeros_f16(ctx, vec![1]).unwrap(),
+            kv_v: MetalTensor::zeros_f16(ctx, vec![1]).unwrap(),
+            kv_n_pos: 7,
+            kv_capacity: 8,
+            e: f(1),
+            e_normed: f(1),
+            h_normed: f(1),
+            eh_concat: f(1),
+            x: f(1),
+            h: f(1),
+            ffn_gate: f(1),
+            ffn_up: f(1),
+            ffn_inner: f(1),
+            ffn_out: f(1),
+            mixer_out: f(1),
+            moe_router_probs: f(1),
+            moe_topk_idx: f(1),
+            moe_topk_weight: f(1),
+            moe_shared_gate: f(1),
+            moe_route_status: i(1),
+            moe_expert_out: f(1),
+            attn_q_full: f(1),
+            attn_q: f(1),
+            attn_gate: f(1),
+            attn_q_normed: f(1),
+            attn_k_now: f(1),
+            attn_v_now: f(1),
+            attn_k_normed: f(1),
+            attn_o: f(1),
+            attn_v4_o_partial: f(1),
+            attn_v4_ml_partial: f(1),
+            logits: f(1),
+            draft_argmax: i(1),
+            draft_ids: i(16),
+            ids_buf: i(1),
+            poisoned: None,
+        }
+    }
+
+    #[test]
+    fn mtp_route_failure_is_sticky_and_holds_the_counter() {
+        let Some(ctx) = crate::test_fixtures::metal_context_or_skip() else {
+            return;
+        };
+        let mut session = empty_mtp_session(&ctx);
+        session.moe_route_status = MetalTensor::from_bytes(
+            &ctx,
+            bytemuck::cast_slice(&[
+                crate::metal::MOE_ROUTE_STATUS_READY | crate::metal::MOE_ROUTE_STATUS_NONFINITE
+            ]),
+            vec![1],
+            GgmlType::I32,
+        )
+        .unwrap();
+        let before = session.kv_n_pos;
+        let error = session
+            .check_completed_route("mtp_seam_test")
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("non-finite"), "{error}");
+        assert!(session.poisoned.is_some());
+        assert_eq!(
+            session.kv_n_pos, before,
+            "failed check advanced the counter"
+        );
+        assert!(session.ensure_usable().is_err());
+        // Clearing the status does not un-poison the session.
+        session.moe_route_status = MetalTensor::from_bytes(
+            &ctx,
+            bytemuck::cast_slice(&[crate::metal::MOE_ROUTE_STATUS_READY]),
+            vec![1],
+            GgmlType::I32,
+        )
+        .unwrap();
+        assert!(session.ensure_usable().is_err());
+    }
 
     #[test]
     fn planned_terminal_draft_count_preserves_pending_final_token() {

@@ -950,11 +950,12 @@ small and operational:
    vocabulary, experts, rows or slots in 64 bits (`(ulong)a * b`). The
    `attn_v4` KQ score offsets now use 64-bit products. If a kernel keeps a
    32-bit product, the encoder checks that exact product with
-   `u32::try_from`/`i32::try_from`; the mat-mat dispatcher rejects a wrapping
-   `n_query * n_out` (and `n_in * n_out`, `n_in * n_query`) for every weight
-   dtype, and the audited reduce/scatter encoders use `checks::to_u32` instead
-   of `as u32`. These checks cover the listed paths; extend them to any new
-   32-bit product or narrowing cast before relying on it. Never `slice()` an
+   `u32::try_from`/`i32::try_from`; the mat-mat dispatcher rejects a
+   wrapping `n_query * n_out` for every weight dtype, while its weight/input
+   product limits apply only to F32/Q8_0, and the audited reduce/scatter
+   encoders use `checks::to_u32` instead of `as u32`. These checks cover the
+   listed paths; extend them to any new 32-bit product or narrowing cast
+   before relying on it. Never `slice()` an
    MPP device tensor whose extent can exceed 2 GiB (int32 offset); build each
    tile tensor from a 64-bit base pointer. Ids are `int`/`uint`, never `short`.
 

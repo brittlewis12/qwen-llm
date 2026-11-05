@@ -364,13 +364,10 @@ pub(super) fn encode_post(
         }
     }
     if let Some(status) = finite_status {
-        let others: Vec<(&MetalTensor, &str)> = reads
-            .iter()
-            .copied()
-            .chain(written.iter().copied())
-            .collect();
-        metal::checks::check_disjoint(K, status, &others)
-            .map_err(|error| bad(format!("finite status: {error}")))?;
+        for (other, name) in reads.iter().chain(written.iter()) {
+            metal::checks::check_disjoint(K, status, &[(other, *name)])
+                .map_err(|error| bad(format!("finite status aliases {name}: {error}")))?;
+        }
     }
     let pso = ctx.pipeline("kernel_deepseek_v41_hc_post_controls")?;
     enc.set_pipeline(&pso);

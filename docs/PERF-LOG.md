@@ -6,6 +6,29 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the current state and evidence index.
 
+## 2026-11-04 - Qwen DFlash Verify on M5: 1.8x Total With a Generic Few-Row MMA (Opt-In)
+
+- Ported llama.cpp's generic few-row MMA mat-mul (`kernel_mul_mv_mma`, 2-16
+  activation rows, weight fragments loaded straight into simdgroup lanes,
+  split-K across simdgroups) for Q4_K, Q5_K, Q6_K, Q8_0 and the IQ types,
+  behind `QWEN_MATMAT_FEWROW_GEN=1` (default off). Only Qwen DFlash verify can
+  take it; prompt lookup, packed MTP, the drafter and other families keep the
+  incumbent kernels in every mode.
+- M5 Ultra, Qwen3.8-27B Q4_K_M at N=8, generic vs incumbent per dispatch:
+  2.7-12x on Q4_K, 2.2-10.5x on Q6_K, 5.4x on Q5_K. The incumbent's existing
+  occupancy and split-K variants do not close the gap (2.5-13.7x remains);
+  a half-A-only incumbent variant was not tested.
+- M5 Ultra, 27B Q4_K_M + DFlash2 Q4_K_M, static-8, 96 tokens, ABBA,
+  thermal pressure 0 on every arm: verify 114.8 -> 50.5 ms (2.27x); total
+  tok/s code 40.0 -> 73.7 (1.84x), prose 25.9 -> 48.8 (1.88x), reasoning
+  33.5 -> 60.7 (1.81x). Acceptance unchanged (5.588 / 3.519 / 4.800
+  emitted per step); greedy output identical on all three prompts.
+- Numerics: different accumulation order, so not bitwise. F64 reference with
+  per-output abs/rel and RMS bounds on synthetic blocks; real-weight 27B K/V
+  projections within 5.8e-3 max relative error with top-1 and top-two margins
+  agreeing. M4 Max ratios (1.3-2.4x on the N=8 matmuls) were taken under
+  build load and are provisional; M4 stays opt-in until a quiet repeat.
+
 ## 2026-10-31 - Flash-Next Decode +2.7% More: One-Row Q6_K, BF16 HC Up-Mix
 
 - Q6_K mat-vecs of at most 16384 rows now run one row per simdgroup

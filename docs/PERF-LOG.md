@@ -6,6 +6,31 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the current state and evidence index.
 
+## 2026-11-05 - Qwen/Flash-Next Routing Guards: Duplicate-Free Top-k and Bounded Buckets at -0.4% Decode
+
+- Qwen MoE and Flash-Next top-k now produce unique expert ids by
+  construction (explicit taken flags; unfilled slots are never clamped to
+  expert 0) and report non-finite router input through a sticky per-token
+  status word checked after existing completion waits (decode, packed
+  prefill, DFlash packed and row-fallback verify, MTP chains, profiled and
+  concurrent helpers); failures poison the session with a named error.
+  Fixed-capacity bucket writes are bounded with an overflow flag. Reduce and
+  combine encoders refuse overlapping outputs; remaining 32-bit addressing
+  products are checked.
+- Previously, NaN or -inf router logits could repeat expert 0 in every slot,
+  overflow a fixed-capacity bucket into the next expert's rows (and past the
+  end of the id buffer), and silently corrupt finite tokens in the same
+  chunk.
+- Finite inputs are unchanged: ids, weight bits and layer-output bits match
+  the incumbent kernels across serial, parallel, dot, packed and fused
+  routing and Flash-Next tree/SIMD routing; greedy output is byte-identical
+  on A3B, Flash-Next, GLM-5.3 and V4.1.
+- M5 Ultra, A3B UD-Q4_K_M, 4+4 ABBA arms, thermal pressure 0 on every arm:
+  pp2048 3,733.1 -> 3,725.9 tok/s (-0.19%), tg64 149.18 -> 148.58 (-0.40%);
+  per-token command buffers, encoders and dispatches unchanged (1 / 222 /
+  793). The first version cost -5.0% decode from a serial non-finite scan of
+  all router logits; detection now happens in each thread's existing load.
+
 ## 2026-11-04 - Qwen DFlash Verify on M5: 1.8x Total With a Generic Few-Row MMA (Opt-In)
 
 - Ported llama.cpp's generic few-row MMA mat-mul (`kernel_mul_mv_mma`, 2-16

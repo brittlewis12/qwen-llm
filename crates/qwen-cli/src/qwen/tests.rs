@@ -2108,14 +2108,18 @@ fn muse_glimmer_sampling_uses_released_defaults_and_explicit_overrides() {
     );
 }
 
-/// Flash-Next samples with its released `generation_config.json` unless a
-/// flag says otherwise, at every reasoning level (one preset: the card's
-/// non-thinking preset depends on a presence penalty the sampler lacks).
-/// Greedy stays one explicit `--temp 0` away for determinism-first runs.
+/// Cross the CLI default-application boundary into the sampler used by the
+/// actual Qwen4 single-turn path, including all explicit field overrides.
 #[test]
-fn qwen38_flash_next_sampling_uses_released_defaults_and_explicit_overrides() {
-    let run = |extra: &[&str]| {
+fn qwen4exp_run_sampler_preserves_qualified_header_defaults_and_explicit_overrides() {
+    use crate::qwen_contract_fixture::{Value::*, qwen4_reference_gguf_with_extra};
+    use crate::release_identity::ReleaseIdentity;
+    use crate::release_sampling::{apply_run_defaults, gguf_sampling_defaults};
+    let run = |header: &GgufFile, extra: &[&str]| {
         let mut argv = vec!["qwen", "run", "-m", "model.gguf", "--user", "hello"];
+        if !extra.contains(&"--seed") {
+            argv.extend_from_slice(&["--seed", "42"]);
+        }
         argv.extend_from_slice(extra);
         let matches = Args::command().try_get_matches_from(argv).unwrap();
         let (_, run_matches) = matches.subcommand().unwrap();
@@ -2123,41 +2127,89 @@ fn qwen38_flash_next_sampling_uses_released_defaults_and_explicit_overrides() {
         let mut args = Args::from_arg_matches(&matches).unwrap();
         let invocation = cli::normalize(&mut args);
         invocation.apply_option_overrides(&mut args);
-        qwen38_flash_next_sampling_config(&args, explicit).unwrap()
+        let identity = ReleaseIdentity::detect(ModelFamily::detect(header).unwrap(), header);
+        let defaults = gguf_sampling_defaults(identity, header).with_seed(args.seed);
+        apply_run_defaults(&mut args, explicit, defaults);
+        Sampler::new(qwen4exp_run_sampling_config(&args).unwrap())
+            .unwrap()
+            .config()
     };
-    let release = SamplingConfig::qwen38_flash_next(42);
-    assert_eq!(
-        release,
-        SamplingConfig {
-            temperature: 1.0,
-            top_k: 20,
-            top_p: 0.95,
-            min_p: 0.0,
-            seed: 42,
+    let declared = [
+        ("general.sampling.temp", Float(0.37)),
+        ("general.sampling.top_k", Unsigned(13)),
+        ("general.sampling.top_p", Float(0.82)),
+        ("general.sampling.min_p", Float(0.11)),
+    ];
+    let header_defaults = SamplingConfig {
+        temperature: 0.37,
+        top_k: 13,
+        top_p: 0.82,
+        min_p: 0.11,
+        seed: 42,
+    };
+    for (name, expected) in [
+        ("Qwen3.8-Flash-Next", SamplingConfig::qwen38_flash_next(42)),
+        ("renamed Qwen4 artifact", header_defaults),
+        ("Distilled Qwen3.8-Flash-Next", header_defaults),
+    ] {
+        let header = qwen4_reference_gguf_with_extra("qwen4exp", name, |_| {}, &declared);
+        for mode in [
+            &[][..],
+            &["--no-thinking"][..],
+            &["--reasoning-effort", "low"][..],
+        ] {
+            assert_eq!(run(&header, mode), expected, "{name} {mode:?}");
         }
-    );
-    assert_eq!(run(&[]), release);
-    assert_eq!(run(&["--no-thinking"]), release);
-    assert_eq!(run(&["--reasoning-effort", "low"]), release);
-    assert_eq!(
-        run(&["--temp", "0"]),
-        SamplingConfig {
-            temperature: 0.0,
-            ..release
+        for (flags, override_config) in [
+            (
+                &["--temp", "0"][..],
+                SamplingConfig {
+                    temperature: 0.0,
+                    ..expected
+                },
+            ),
+            (
+                &["--top-k", "0"][..],
+                SamplingConfig {
+                    top_k: 0,
+                    ..expected
+                },
+            ),
+            (
+                &["--top-p", "1"][..],
+                SamplingConfig {
+                    top_p: 1.0,
+                    ..expected
+                },
+            ),
+            (
+                &["--min-p", "0.2"][..],
+                SamplingConfig {
+                    min_p: 0.2,
+                    ..expected
+                },
+            ),
+        ] {
+            assert_eq!(run(&header, flags), override_config, "{name} {flags:?}");
         }
-    );
-    assert_eq!(
-        run(&[
-            "--temp", "0.7", "--top-k", "0", "--top-p", "1", "--min-p", "0.1", "--seed", "7",
-        ]),
-        SamplingConfig {
-            temperature: 0.7,
-            top_k: 0,
-            top_p: 1.0,
-            min_p: 0.1,
-            seed: 7,
-        }
-    );
+        assert_eq!(
+            run(
+                &header,
+                &[
+                    "--temp", "0.7", "--top-k", "0", "--top-p", "1", "--min-p", "0.1", "--seed",
+                    "7"
+                ]
+            ),
+            SamplingConfig {
+                temperature: 0.7,
+                top_k: 0,
+                top_p: 1.0,
+                min_p: 0.1,
+                seed: 7
+            },
+            "{name}"
+        );
+    }
 }
 
 #[test]

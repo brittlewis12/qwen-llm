@@ -54,16 +54,10 @@ pub(crate) fn muse_glimmer_sampling_config(
     )
 }
 
-pub(crate) fn qwen38_flash_next_sampling_config(
-    args: &Args,
-    explicit: ExplicitCliOptions,
-) -> Result<SamplingConfig> {
-    release_sampling_config(
-        SamplingConfig::qwen38_flash_next(args.seed),
-        args,
-        explicit,
-        "Qwen3.8-Flash-Next",
-    )
+/// The Qwen4 run sampler consumes the defaults and explicit overrides already
+/// resolved by the CLI entry point; architecture alone does not select a release.
+pub(crate) fn qwen4exp_run_sampling_config(args: &Args) -> Result<SamplingConfig> {
+    cli_sampling_config(args)
 }
 
 pub(crate) fn request_sampling_config(

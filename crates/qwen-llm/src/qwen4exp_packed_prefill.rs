@@ -160,6 +160,16 @@ impl Qwen4ExpPackedPrefillWorkspace {
         self.state_poisoned
     }
 
+    #[cfg(test)]
+    pub(crate) fn route_status_for_test(&self) -> &MetalTensor {
+        &self.moe.route_status
+    }
+
+    #[cfg(test)]
+    pub(crate) fn route_status_rows_for_test(&self) -> usize {
+        self.route_status_rows
+    }
+
     pub fn next_position(&self) -> Option<u64> {
         self.history.next_position()
     }

@@ -15334,3 +15334,49 @@ mod prompt_lookup_layout_gate {
         assert!(err.to_string().contains("routed expert presence"), "{err}");
     }
 }
+
+#[test]
+fn verify_status_checks_both_session_and_packed_buffers() {
+    let Some(ctx) = crate::test_fixtures::metal_context_or_skip() else {
+        return;
+    };
+    let ready = [crate::metal::MOE_ROUTE_STATUS_READY; 4];
+    let session_ready = MetalTensor::from_bytes(
+        &ctx,
+        bytemuck::cast_slice(&ready[..1]),
+        vec![1],
+        GgmlType::I32,
+    )
+    .unwrap();
+    let packed_ready =
+        MetalTensor::from_bytes(&ctx, bytemuck::cast_slice(&ready), vec![4], GgmlType::I32)
+            .unwrap();
+    super::check_verify_route_statuses(&session_ready, &packed_ready, 4).unwrap();
+
+    let session_bad = MetalTensor::from_bytes(
+        &ctx,
+        bytemuck::cast_slice(&[
+            crate::metal::MOE_ROUTE_STATUS_READY | crate::metal::MOE_ROUTE_STATUS_NONFINITE
+        ]),
+        vec![1],
+        GgmlType::I32,
+    )
+    .unwrap();
+    let error = super::check_verify_route_statuses(&session_bad, &packed_ready, 4).unwrap_err();
+    assert!(error.to_string().contains("non-finite"), "{error}");
+
+    let packed_bad = MetalTensor::from_bytes(
+        &ctx,
+        bytemuck::cast_slice(&[
+            crate::metal::MOE_ROUTE_STATUS_READY,
+            crate::metal::MOE_ROUTE_STATUS_READY | crate::metal::MOE_ROUTE_STATUS_OVERFLOW,
+            crate::metal::MOE_ROUTE_STATUS_READY,
+            crate::metal::MOE_ROUTE_STATUS_READY,
+        ]),
+        vec![4],
+        GgmlType::I32,
+    )
+    .unwrap();
+    let error = super::check_verify_route_statuses(&session_ready, &packed_bad, 4).unwrap_err();
+    assert!(error.to_string().contains("overflow"), "{error}");
+}

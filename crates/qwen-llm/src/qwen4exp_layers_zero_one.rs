@@ -3600,4 +3600,89 @@ mod tests {
         }
         assert_eq!(packed_workspace.next_position(), Some(tokens.len() as u64));
     }
+    #[test]
+    fn packed_reset_clears_route_status() {
+        let Some(ctx) = crate::test_fixtures::metal_context_or_skip() else {
+            return;
+        };
+        let fixture = SyntheticFixture::new(&ctx);
+        let mut workspace = Qwen4ExpPackedPrefillWorkspace::new(&ctx, fixture.geometry, 4).unwrap();
+        let status = workspace.route_status_for_test().clone();
+        let words = status.n_elements() as usize;
+        unsafe {
+            let ptr = (status.buffer.contents().as_ptr() as *mut u8)
+                .add(status.offset as usize)
+                .cast::<i32>();
+            for i in 0..words {
+                *ptr.add(i) =
+                    crate::metal::MOE_ROUTE_STATUS_READY | crate::metal::MOE_ROUTE_STATUS_OVERFLOW;
+            }
+        }
+        workspace.reset().unwrap();
+        assert_eq!(workspace.route_status_rows_for_test(), 0);
+        let values = unsafe {
+            std::slice::from_raw_parts(
+                (status.buffer.contents().as_ptr() as *const u8)
+                    .add(status.offset as usize)
+                    .cast::<i32>(),
+                words,
+            )
+        };
+        assert!(values.iter().all(|&word| word == 0), "{values:?}");
+    }
+    #[test]
+    fn packed_route_failure_poisons_and_reset_recovers() {
+        let Some(ctx) = metal_context() else {
+            return;
+        };
+        let mut fixture = SyntheticFixture::new(&ctx);
+        let finite_router = fixture.l0_moe.router.clone();
+        let shape = finite_router.shape.clone();
+        let nan_values = vec![f32::NAN; read_f32(&finite_router).len()];
+        fixture.l0_moe.router = weight_f32(&ctx, &nan_values, shape);
+
+        let tokens = [3_u32, 7];
+        let mut workspace =
+            Qwen4ExpPackedPrefillWorkspace::new(&ctx, fixture.geometry, tokens.len()).unwrap();
+        let command = ctx.queue.commandBuffer().unwrap();
+        let encoder = KernelEncoder::begin(&command);
+        let read = encode_qwen4exp_packed_prefill(
+            &ctx,
+            &encoder,
+            &tokens,
+            0,
+            fixture.table.table(),
+            fixture.weights(),
+            &mut workspace,
+        )
+        .unwrap();
+        drop(read);
+        encoder.end();
+        command.commit();
+        let error = workspace.release_after().unwrap_err().to_string();
+        assert!(error.contains("non-finite"), "{error}");
+        assert!(workspace.is_poisoned());
+
+        workspace.reset().unwrap();
+        assert_eq!(workspace.route_status_rows_for_test(), 0);
+        fixture.l0_moe.router = finite_router;
+
+        let command = ctx.queue.commandBuffer().unwrap();
+        let encoder = KernelEncoder::begin(&command);
+        let read = encode_qwen4exp_packed_prefill(
+            &ctx,
+            &encoder,
+            &tokens,
+            0,
+            fixture.table.table(),
+            fixture.weights(),
+            &mut workspace,
+        )
+        .unwrap();
+        drop(read);
+        encoder.end();
+        command.commit();
+        workspace.release_after().unwrap();
+        assert!(!workspace.is_poisoned());
+    }
 }

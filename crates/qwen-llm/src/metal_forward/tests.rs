@@ -2896,6 +2896,43 @@ fn moe_decode_rejects_a_discarded_command_and_poisons_the_session() {
 }
 
 #[test]
+#[ignore = "model witness: qwen3.6-35b-a3b-ud-q4_k_m"]
+fn moe_decode_rejects_a_route_status_failure_and_poisons_the_session() {
+    let model_path = crate::test_fixtures::A3B_Q4_K_M
+        .required()
+        .to_str()
+        .expect("model fixture path must be UTF-8");
+    let Some(ctx) = crate::test_fixtures::metal_context_or_skip() else {
+        return;
+    };
+    let g = GgufFile::open(model_path).expect("open");
+    let m = Model::from_gguf(&g).expect("load");
+    let mm = MetalModel::load(&ctx, &g, &m).expect("metal load");
+    let forward = MetalForward::new(&ctx, &mm);
+    let mut session = MetalSession::fresh(&ctx, &mm, 4).expect("session");
+    forward
+        .single_token_profiled_concurrent_gdn_moe(1, 0, &mut session)
+        .expect("healthy decode");
+
+    let armed = crate::metal::fail_next_route_status_check();
+    let failed = forward.single_token_profiled_concurrent_gdn_moe(2, 1, &mut session);
+    drop(armed);
+    assert!(
+        matches!(failed, Err(MfError::Metal(MetalError::BadShape { .. }))),
+        "injected route failure must fail decode: {:?}",
+        failed.map(|(logits, _)| logits.len())
+    );
+    assert!(matches!(
+        session.ensure_usable(),
+        Err(MfError::SessionPoisoned { .. })
+    ));
+    assert!(matches!(
+        forward.single_token_profiled_concurrent_gdn_moe(2, 1, &mut session),
+        Err(MfError::SessionPoisoned { .. })
+    ));
+}
+
+#[test]
 #[ignore = "requires the 22 GB A3B fixture and Metal GPU"]
 fn metal_sampled_attribution_matches_production_a3b() {
     let _ = crate::test_fixtures::A3B_Q4_K_M.required();

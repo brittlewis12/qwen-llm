@@ -5917,6 +5917,7 @@ mod tests {
         config.hidden_size = 256;
         config.vocab_size = 2_097_152;
         let ple = config.ple.as_mut().unwrap();
+        ple.token_vocab_size = config.vocab_size;
         ple.embedding_head_dim = 32;
         ple.heads_per_ngram = 4;
         ple.head_offsets.truncate(8);
@@ -5946,6 +5947,7 @@ mod tests {
         // This is the pure allocation-description phase called at session
         // admission, before querying Metal prices or allocating any buffers.
         config.vocab_size = 16_777_216;
+        config.ple.as_mut().unwrap().token_vocab_size = config.vocab_size;
         let error = config.validate_artifact().unwrap_err();
         assert!(error.to_string().contains("output.weight"), "{error}");
         assert!(

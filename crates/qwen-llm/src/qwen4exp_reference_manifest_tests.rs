@@ -5,6 +5,9 @@
 use super::*;
 use serde_json::{Value, json};
 
+/// First-shard path for the optional captured GSQ witness; test-only, no weight realization.
+const REFERENCE_MANIFEST_GGUF_ENV: &str = "QWEN4EXP_REFERENCE_MANIFEST_GGUF";
+
 fn captured() -> Value {
     serde_json::from_str(include_str!(
         "../tests/fixtures/qwen4exp_reference_main_cc3e1029.json"
@@ -109,10 +112,11 @@ fn captured_reference_main_inventory_and_views_are_unchanged() {
 }
 #[test]
 #[ignore = "set QWEN4EXP_REFERENCE_MANIFEST_GGUF to the captured GSQ reference first shard; normal Metal lease, no weight realization"]
+#[cfg(test)]
 fn captured_reference_manifest_matches_live_artifact_without_realization() {
     use sha2::{Digest, Sha256};
     let expected = captured();
-    let gguf = GgufFile::open(std::env::var("QWEN4EXP_REFERENCE_MANIFEST_GGUF").unwrap()).unwrap();
+    let gguf = GgufFile::open(std::env::var(REFERENCE_MANIFEST_GGUF_ENV).unwrap()).unwrap();
     assert_eq!(
         json!(gguf.tensors.iter().map(descriptor_json).collect::<Vec<_>>()),
         expected["ordered_tensors"]

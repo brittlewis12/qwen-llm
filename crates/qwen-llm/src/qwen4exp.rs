@@ -1231,6 +1231,16 @@ pub(crate) mod tests {
         tail: Option<u32>,
         mutate: impl FnOnce(&mut Qwen4ExpConfig),
     ) -> GgufFile {
+        metadata_fixture_with_inventory(architecture, mtp, tail, mutate, &[])
+    }
+
+    pub(crate) fn metadata_fixture_with_inventory(
+        architecture: &str,
+        mtp: bool,
+        tail: Option<u32>,
+        mutate: impl FnOnce(&mut Qwen4ExpConfig),
+        inventory: &[crate::tensor::TensorDesc],
+    ) -> GgufFile {
         fn string(bytes: &mut Vec<u8>, value: &str) {
             bytes.extend((value.len() as u64).to_le_bytes());
             bytes.extend(value.as_bytes());
@@ -1332,11 +1342,20 @@ pub(crate) mod tests {
         fields.push(("tokenizer.ggml.tokens".into(), tokens));
         let mut bytes = b"GGUF".to_vec();
         bytes.extend(3u32.to_le_bytes());
-        bytes.extend(0u64.to_le_bytes());
+        bytes.extend((inventory.len() as u64).to_le_bytes());
         bytes.extend((fields.len() as u64).to_le_bytes());
         for (key, value) in fields {
             string(&mut bytes, &key);
             bytes.extend(value);
+        }
+        for desc in inventory {
+            string(&mut bytes, &desc.name);
+            bytes.extend((desc.shape.len() as u32).to_le_bytes());
+            for &dim in &desc.shape {
+                bytes.extend(dim.to_le_bytes());
+            }
+            bytes.extend((desc.dtype as u32).to_le_bytes());
+            bytes.extend(desc.data_offset.to_le_bytes());
         }
         bytes.resize(bytes.len().next_multiple_of(32), 0);
         static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
@@ -1353,6 +1372,15 @@ pub(crate) mod tests {
             .unwrap();
         std::fs::remove_file(path).unwrap();
         std::io::Write::write_all(&mut file, &bytes).unwrap();
+        if !inventory.is_empty() {
+            let end = inventory
+                .iter()
+                .map(|d| d.data_offset + d.n_bytes)
+                .max()
+                .unwrap();
+            file.set_len((bytes.len() as u64 + end).next_multiple_of(65_536))
+                .unwrap();
+        }
         GgufFile::from_opened_file(file, "qwen4-artifact.gguf").unwrap()
     }
 

@@ -718,6 +718,58 @@ mod tests {
     }
 
     #[test]
+    fn captured_reference_main_identity_and_rendered_bytes_are_unchanged() {
+        use crate::messages::{
+            ChatMessage, Qwen38GenerationMode, Qwen38ReasoningEffort, QwenGenerationMode,
+            render_qwen_chat_for_template,
+        };
+        let expected: serde_json::Value = serde_json::from_str(include_str!(
+            "../../qwen-llm/tests/fixtures/qwen4exp_reference_main_cc3e1029.json"
+        ))
+        .unwrap();
+        let header = &expected["header_facts"];
+        let facts = QwenHeaderFacts {
+            architecture: header["general.architecture"].as_str().unwrap(),
+            tokenizer_model: header["tokenizer.ggml.model"].as_str(),
+            tokenizer_pre: header["tokenizer.ggml.pre"].as_str(),
+            token_count: Some(header["tokenizer.ggml.tokens"].as_u64().unwrap() as usize),
+            names: QWEN_NAME_FIELDS.map(|key| header[key].as_str()),
+        };
+        let mut identity = identify_qwen_release(&facts);
+        qualify_flash_next_identity(
+            &mut identity,
+            Some(&qwen_llm::qwen4exp::Qwen4ExpConfig::flash_next_reference()),
+        );
+        assert_eq!(
+            crate::capabilities::qwen4exp_template_projection(&identity),
+            expected["identity"]
+        );
+        let messages: Vec<ChatMessage> =
+            serde_json::from_value(expected["messages"].clone()).unwrap();
+        for baseline in expected["renders"].as_array().unwrap() {
+            let mode = match baseline["mode"].as_str().unwrap() {
+                "thinking_xhigh" => Qwen38GenerationMode::Thinking(Qwen38ReasoningEffort::Xhigh),
+                "no_thinking" => Qwen38GenerationMode::NoThinking,
+                _ => unreachable!(),
+            };
+            let actual = render_qwen_chat_for_template(
+                &messages,
+                &[],
+                identity.template.serve_template(),
+                true,
+                true,
+                QwenGenerationMode::Thinking,
+                Some(mode),
+            )
+            .unwrap();
+            assert_eq!(
+                actual.text.as_bytes(),
+                baseline["text"].as_str().unwrap().as_bytes()
+            );
+        }
+    }
+
+    #[test]
     fn flash_next_identity_requires_product_evidence_and_exact_profile() {
         let reference = qwen_llm::qwen4exp::Qwen4ExpConfig::flash_next_reference();
         let names = [Some("Qwen3.8-Flash-Next"), None, None, None, None];

@@ -2026,6 +2026,102 @@ mod tests {
     }
 
     #[test]
+    fn tied_q6_output_and_quantized_ssm_realization_keep_read_only_views() {
+        let Some(ctx) = crate::test_fixtures::metal_context_or_skip() else {
+            return;
+        };
+        let tiny = |c: &mut Qwen4ExpConfig| {
+            c.layer_count = 4;
+            c.hidden_size = 256;
+            c.vocab_size = 32;
+            c.hyper_connection.count = 2;
+            c.hyper_connection.low_rank = 32;
+            c.attention.query_heads = 4;
+            c.attention.kv_heads = 1;
+            c.gated_delta_net.key_heads = 1;
+            c.gated_delta_net.value_heads = 2;
+            c.gated_delta_net.inner_size = 256;
+            c.moe.expert_count = 2;
+            c.moe.experts_per_token = 1;
+            c.moe.expert_intermediate_size = 32;
+            c.moe.shared_expert_intermediate_size = 32;
+            c.qsa.token_budget = 8;
+            c.compress_ratios = vec![0, 0, 0, 4];
+            let p = c.ple.as_mut().unwrap();
+            p.token_vocab_size = 32;
+            p.heads_per_ngram = 4;
+            p.embedding_head_dim = 32;
+            p.eos_token_id = 1;
+            p.image_token_id = Some(2);
+            p.head_vocab_sizes = vec![8; 8];
+            p.head_offsets = (0..8).map(|i| i * 8).collect();
+        };
+        let mut config = Qwen4ExpConfig::flash_next_reference();
+        tiny(&mut config);
+        config.validate_artifact().unwrap();
+        let mut offset = 0u64;
+        let source: Vec<_> = crate::qwen4exp_loader::expected_tensor_inventory(&config)
+            .unwrap()
+            .into_iter()
+            .filter(|(name, _)| name != "output.weight")
+            .map(|(name, shape)| {
+                let dtype = if name == "token_embd.weight" {
+                    GgmlType::Q6_K
+                } else if name.ends_with(".ssm_beta.weight") || name.ends_with(".ssm_alpha.weight")
+                {
+                    GgmlType::Q4_K
+                } else {
+                    expected_ud_q3_k_xl_dtype(&name).unwrap()
+                };
+                let (block, bytes) = dtype.storage_layout().unwrap();
+                let n_bytes = shape.iter().product::<u64>() / block * bytes;
+                offset = offset.next_multiple_of(32);
+                let d = TensorDesc {
+                    name,
+                    shape,
+                    dtype,
+                    shard_idx: 0,
+                    data_offset: offset,
+                    n_bytes,
+                };
+                offset += n_bytes;
+                d
+            })
+            .collect();
+        let gguf = crate::qwen4exp::tests::metadata_fixture_with_inventory(
+            "qwen4exp", false, None, tiny, &source,
+        );
+        let plan = Qwen4ExpMetalWeightPlan::for_native(&ctx, &gguf).unwrap();
+        assert_eq!(plan.report.normalized_buffer_count, 6);
+        let admitted = plan.admit(ctx.memory_signals()).unwrap();
+        let realized = Qwen4ExpMetalWeights::realize(&ctx, &gguf, admitted).unwrap();
+        let weights = realized.weights();
+        assert_eq!(weights.len(), source.len() - 1);
+        assert!(!weights.tensors().any(|(name, _)| name == "output.weight"));
+        assert!(std::ptr::eq(
+            weights.require_tensor("output.weight").unwrap(),
+            weights.require_tensor("token_embd.weight").unwrap()
+        ));
+        for role in ["beta", "alpha"] {
+            let name = format!("blk.0.ssm_{role}.weight");
+            assert_eq!(gguf.find(&name).unwrap().dtype, GgmlType::Q4_K);
+            let tensor = weights.require_tensor(&name).unwrap();
+            assert_eq!(tensor.dtype, GgmlType::F32);
+            assert_eq!(
+                tensor.provenance(),
+                MetalTensorProvenance::OwnedWeightReadOnly
+            );
+            assert!(!tensor.is_writable());
+        }
+        let bound = crate::qwen4exp_text_session::Qwen4ExpTextSessionMetalWeights::bind(weights, 8)
+            .unwrap();
+        assert!(std::ptr::eq(
+            bound.output,
+            bound.zero_one.layer_zero.token_embedding
+        ));
+    }
+
+    #[test]
     fn native_census_keeps_source_types_and_requires_matching_experts() {
         let mut tensors = vec![
             auxiliary("blk.1.ffn_gate_exps.weight", GgmlType::IQ2_S),
@@ -2311,3 +2407,7 @@ mod tests {
         assert!(validate_ple_window_isolation(&bridging, &ple, page_size).is_err());
     }
 }
+
+#[cfg(test)]
+#[path = "qwen4exp_reference_manifest_tests.rs"]
+mod reference_manifest_tests;

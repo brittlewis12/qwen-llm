@@ -1560,6 +1560,12 @@ mod tests {
 
     #[test]
     fn llama_cpp_v090_default_metadata_merged_views_and_appended_mtp() {
+        for dtype in [GgmlType::Q4_K, GgmlType::Q8_0] {
+            assert_v090_inventory(dtype);
+        }
+    }
+
+    fn assert_v090_inventory(beta_alpha_dtype: GgmlType) {
         use std::collections::HashMap;
         // c061df198 (#29761): block_count includes a full-QSA MTP block;
         // 2280f0fd1 (#31028): row concatenation, no grouped BA permutation.
@@ -1613,6 +1619,15 @@ mod tests {
         for d in &mut split {
             if d.name.ends_with("attn_qkv.weight") || d.name.ends_with("attn_gate.weight") {
                 d.dtype = GgmlType::Q5_K;
+                let (block, bytes) = d.dtype.storage_layout().unwrap();
+                d.n_bytes = d.shape.iter().product::<u64>() / block * bytes;
+            }
+        }
+        // ssm_beta_alpha is an ordinary quantizable matrix in v0.9.0:
+        // Q4_K_M -> Q4_K; Q8_0 -> Q8_0. Its halves share that type.
+        for d in &mut split {
+            if d.name.ends_with(".ssm_beta.weight") || d.name.ends_with(".ssm_alpha.weight") {
+                d.dtype = beta_alpha_dtype;
                 let (block, bytes) = d.dtype.storage_layout().unwrap();
                 d.n_bytes = d.shape.iter().product::<u64>() / block * bytes;
             }

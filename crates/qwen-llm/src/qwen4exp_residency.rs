@@ -891,7 +891,7 @@ pub(crate) fn validate_native_dtypes(
                 desc.name
             ))
         })?;
-        if !native_dtype_allowed(role, desc.dtype) && !quantized_inject(desc) {
+        if !native_dtype_allowed(role, desc.dtype) && !quantized_auxiliary(desc) {
             return invalid(format!(
                 "tensor {:?} cannot use {:?} for native role {role:?}",
                 desc.name, desc.dtype
@@ -914,17 +914,21 @@ pub(crate) fn validate_native_dtypes(
     Ok(census)
 }
 
-// A merged HC down/inject weight has a single dtype. The tiny inject view
-// must reach the existing HC kernels as F32; retain and price its source too.
-fn quantized_inject(desc: &TensorDesc) -> bool {
-    (desc.name.ends_with(".hc_attn_inject.weight") || desc.name.ends_with(".hc_ffn_inject.weight"))
+// Merged HC down/inject and SSM beta/alpha matrices have one dtype. Their
+// auxiliary views must reach the existing kernels as F32; retain and price
+// the immutable quantized sources as well as the normalized destinations.
+fn quantized_auxiliary(desc: &TensorDesc) -> bool {
+    (desc.name.ends_with(".hc_attn_inject.weight")
+        || desc.name.ends_with(".hc_ffn_inject.weight")
+        || desc.name.ends_with(".ssm_beta.weight")
+        || desc.name.ends_with(".ssm_alpha.weight"))
         && desc.dtype != GgmlType::F32
         && native_dtype_allowed(NativeRole::Dense, desc.dtype)
 }
 
 /// Describe the owned destination without changing the immutable source fingerprint.
 fn normalized_descriptor(desc: &TensorDesc) -> Result<Option<TensorDesc>, Qwen4ExpResidencyError> {
-    if !quantized_inject(desc)
+    if !quantized_auxiliary(desc)
         && (native_role(&desc.name) != Some(NativeRole::F32Auxiliary)
             || !matches!(desc.dtype, GgmlType::BF16 | GgmlType::F16))
     {
@@ -974,6 +978,19 @@ fn normalization_descriptors(
         .iter()
         .filter_map(|desc| normalized_descriptor(desc).transpose())
         .collect()
+}
+
+fn initialize_normalized_auxiliary(
+    desc: &TensorDesc,
+    source: &[u8],
+    output: &mut [std::mem::MaybeUninit<f32>],
+) -> Result<(), Qwen4ExpResidencyError> {
+    if matches!(desc.dtype, GgmlType::BF16 | GgmlType::F16) {
+        initialize_f32_auxiliary(desc.dtype, source, output)
+    } else {
+        crate::codec::dequant_to_f32_into(desc, source, output)
+            .map_err(|error| Qwen4ExpResidencyError::Invalid(error.to_string()))
+    }
 }
 
 /// Validate all spans before initializing even one destination element.
@@ -1191,12 +1208,7 @@ fn realize_retained(
                     n_bytes / size_of::<f32>(),
                 )
             };
-            if matches!(desc.dtype, GgmlType::BF16 | GgmlType::F16) {
-                initialize_f32_auxiliary(desc.dtype, source, output)?;
-            } else {
-                crate::codec::dequant_to_f32_into(desc, source, output)
-                    .map_err(|error| Qwen4ExpResidencyError::Invalid(error.to_string()))?;
-            }
+            initialize_normalized_auxiliary(desc, source, output)?;
             let converted = MetalTensor::owned_weight_view(
                 buffer,
                 0,
@@ -1942,6 +1954,75 @@ mod tests {
         bad.shape = vec![1_u64 << 62];
         bad.n_bytes = 1_u64 << 63;
         assert!(normalized_descriptor(&bad).is_err());
+    }
+
+    #[test]
+    fn merged_quantized_ssm_views_normalize_to_cpu_dequantization() {
+        // v0.9.0 llama-quant assigns the default matrix type to
+        // ssm_beta_alpha: Q4_K for Q4_K_M, Q8_0 for Q8_0 (2280f0fd1, #31028).
+        for dtype in [GgmlType::Q4_K, GgmlType::Q8_0] {
+            const WIDTH: usize = 256;
+            const ROWS: usize = 4;
+            let input: Vec<_> = (0..WIDTH * ROWS)
+                .map(|i| ((i * 17 % 97) as f32 - 48.0) * 0.125)
+                .collect();
+            let (block, bytes) = dtype.storage_layout().unwrap();
+            let mut source = vec![0u8; input.len() / block as usize * bytes as usize];
+            // SAFETY: the codec is initialized and every row/output span is exact.
+            unsafe {
+                llama_cpp_sys_2::ggml_quantize_init(dtype as u32);
+                assert_eq!(
+                    llama_cpp_sys_2::ggml_quantize_chunk(
+                        dtype as u32,
+                        input.as_ptr(),
+                        source.as_mut_ptr().cast(),
+                        0,
+                        ROWS as i64,
+                        WIDTH as i64,
+                        std::ptr::null()
+                    ),
+                    source.len()
+                );
+            }
+            let merged = TensorDesc {
+                name: "blk.0.ssm_beta_alpha.weight".into(),
+                shape: vec![WIDTH as u64, ROWS as u64],
+                dtype,
+                shard_idx: 1,
+                data_offset: 4096,
+                n_bytes: source.len() as u64,
+            };
+            let expected = crate::codec::dequant_to_f32(&merged, &source).unwrap();
+            for (bank, role) in ["beta", "alpha"].iter().enumerate() {
+                let view = TensorDesc {
+                    name: format!("blk.0.ssm_{role}.weight"),
+                    shape: vec![WIDTH as u64, (ROWS / 2) as u64],
+                    data_offset: 4096 + bank as u64 * merged.n_bytes / 2,
+                    n_bytes: merged.n_bytes / 2,
+                    ..merged.clone()
+                };
+                validate_native_dtypes(std::slice::from_ref(&view)).unwrap();
+                let normalized = normalized_descriptor(&view).unwrap().unwrap();
+                assert_eq!(normalized.dtype, GgmlType::F32);
+                assert_eq!(normalized.n_bytes, (WIDTH * ROWS / 2 * 4) as u64);
+                let start = bank * source.len() / 2;
+                let mut output = vec![std::mem::MaybeUninit::new(f32::NAN); WIDTH * ROWS / 2];
+                initialize_normalized_auxiliary(
+                    &view,
+                    &source[start..start + source.len() / 2],
+                    &mut output,
+                )
+                .unwrap();
+                let output: Vec<_> = output
+                    .into_iter()
+                    .map(|v| unsafe { v.assume_init() })
+                    .collect();
+                assert_eq!(
+                    output,
+                    &expected[bank * WIDTH * ROWS / 2..(bank + 1) * WIDTH * ROWS / 2]
+                );
+            }
+        }
     }
 
     #[test]

@@ -4248,3 +4248,217 @@ fn released_layers_two_through_four_match_selected_expert_cpu_oracles() {
         );
     }
 }
+
+#[repr(C)]
+#[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+struct GuardedTopkArgs {
+    n: u32,
+    k: u32,
+}
+
+fn guarded_finite_cases(n: usize) -> Vec<Vec<f32>> {
+    let mut state = 0x7f4a_7c15_8b2d_3910u64;
+    let mut next = move || {
+        state ^= state << 13;
+        state ^= state >> 7;
+        state ^= state << 17;
+        state
+    };
+    let mut cases = Vec::new();
+    cases.push(
+        (0..n)
+            .map(|_| ((next() % 101) as f32 - 50.0) * 0.03125)
+            .collect(),
+    );
+    cases.push((0..n).map(|i| ((i * 17) % 7) as f32 * 0.25).collect());
+    let mut zeros = vec![-1.0f32; n];
+    for (i, v) in zeros.iter_mut().enumerate().step_by(5) {
+        *v = if i % 2 == 0 { 0.0 } else { -0.0 };
+    }
+    cases.push(zeros);
+    let mut near = (0..n).map(|i| i as f32 * 1e-3).collect::<Vec<_>>();
+    near[0] = 1.0;
+    near[1] = f32::from_bits(1.0f32.to_bits() + 1);
+    cases.push(near);
+    let mut extreme = (0..n).map(|i| i as f32 * 0.5).collect::<Vec<_>>();
+    extreme[0] = f32::MAX;
+    extreme[1] = -f32::MAX;
+    extreme[2] = f32::MIN_POSITIVE;
+    extreme[3] = -f32::MIN_POSITIVE;
+    cases.push(extreme);
+    cases
+}
+
+fn run_guarded_topk(
+    ctx: &MetalContext,
+    kernel: &str,
+    logits: &MetalTensor,
+    status: Option<&MetalTensor>,
+) -> (MetalTensor, MetalTensor) {
+    let ids = MetalTensor::zeros_i32(ctx, vec![10]).unwrap();
+    let weights = MetalTensor::zeros_f32(ctx, vec![10]).unwrap();
+    let command = ctx.queue.commandBuffer().unwrap();
+    let enc = KernelEncoder::begin(&command);
+    enc.set_pipeline(&ctx.pipeline(kernel).unwrap());
+    enc.set_bytes(0, &GuardedTopkArgs { n: 512, k: 10 });
+    enc.set_tensor(1, logits);
+    enc.set_tensor(2, &ids);
+    enc.set_tensor(3, &weights);
+    if let Some(status) = status {
+        enc.set_tensor(4, status);
+    }
+    for slot in 0..3 {
+        enc.set_threadgroup_memory(slot, 2048);
+    }
+    enc.dispatch(
+        objc2_metal::MTLSize {
+            width: 1,
+            height: 1,
+            depth: 1,
+        },
+        objc2_metal::MTLSize {
+            width: 512,
+            height: 1,
+            depth: 1,
+        },
+    );
+    enc.end();
+    crate::metal::commit_and_wait(&command).unwrap();
+    (ids, weights)
+}
+
+#[test]
+fn flash_next_quantized_expert_layer_matches_incumbent_tree_and_simd() {
+    let Some(ctx) = metal_context() else {
+        return;
+    };
+    const HIDDEN: usize = 256;
+    const ROUTED: usize = 64;
+    const EXPERTS: usize = 512;
+    const TOPK: usize = 10;
+    let gate_source = synthetic_f32_bank(HIDDEN, ROUTED, EXPERTS, 401);
+    let gate_bytes = quantize_rows(&gate_source, GgmlType::IQ3_XXS, HIDDEN);
+    let up_source = synthetic_f32_bank(HIDDEN, ROUTED, EXPERTS, 409);
+    let up_bytes = quantize_rows(&up_source, GgmlType::IQ3_XXS, HIDDEN);
+    let down_source = synthetic_f32_bank(ROUTED, HIDDEN, EXPERTS, 419);
+    let down_bytes = quantize_rows(&down_source, GgmlType::IQ4_NL, ROUTED);
+    let gate = weight_bytes(
+        &ctx,
+        &gate_bytes,
+        vec![HIDDEN as u64, ROUTED as u64, EXPERTS as u64],
+        GgmlType::IQ3_XXS,
+    );
+    let up = weight_bytes(
+        &ctx,
+        &up_bytes,
+        vec![HIDDEN as u64, ROUTED as u64, EXPERTS as u64],
+        GgmlType::IQ3_XXS,
+    );
+    let down = weight_bytes(
+        &ctx,
+        &down_bytes,
+        vec![ROUTED as u64, HIDDEN as u64, EXPERTS as u64],
+        GgmlType::IQ4_NL,
+    );
+    let x_values = (0..HIDDEN)
+        .map(|i| ((i * 29 + 7) % 71) as f32 * 0.011_718_75 - 0.410_156_25)
+        .collect::<Vec<_>>();
+    let x = tensor_f32(&ctx, &x_values, vec![HIDDEN as u64]);
+
+    let run_layer = |ids: &MetalTensor, weights: &MetalTensor| {
+        let counts = MetalTensor::zeros_i32(&ctx, vec![EXPERTS as u64]).unwrap();
+        let slots = MetalTensor::zeros_i32(&ctx, vec![EXPERTS as u64]).unwrap();
+        let route_status = MetalTensor::zeros_i32(&ctx, vec![1]).unwrap();
+        let inner = MetalTensor::zeros_f32(&ctx, vec![(TOPK * ROUTED) as u64]).unwrap();
+        let expert_out = MetalTensor::zeros_f32(&ctx, vec![(TOPK * HIDDEN) as u64]).unwrap();
+        let output = MetalTensor::zeros_f32(&ctx, vec![HIDDEN as u64]).unwrap();
+        let command = ctx.queue.commandBuffer().unwrap();
+        let enc = KernelEncoder::begin(&command);
+        encode_moe_route_bucket_slots_f32_status(
+            &ctx,
+            &enc,
+            ids,
+            &counts,
+            &slots,
+            &route_status,
+            EXPERTS,
+            1,
+            TOPK,
+        )
+        .unwrap();
+        encode_moe_swiglu_iq3_xxs_f32_grouped_slots_n16(
+            &ctx, &enc, &gate, &up, &x, &counts, &slots, &inner, HIDDEN, ROUTED, EXPERTS, TOPK, 1,
+        )
+        .unwrap();
+        encode_moe_down_iq4_nl_f32_grouped_slots(
+            &ctx,
+            &enc,
+            &down,
+            &inner,
+            &counts,
+            &slots,
+            &expert_out,
+            ROUTED,
+            HIDDEN,
+            EXPERTS,
+            1,
+        )
+        .unwrap();
+        encode_moe_weighted_sum_packed_f32(
+            &ctx,
+            &enc,
+            &expert_out,
+            weights,
+            &output,
+            HIDDEN,
+            TOPK,
+            1,
+        )
+        .unwrap();
+        enc.end();
+        crate::metal::commit_and_wait(&command).unwrap();
+        read_f32(&output)
+            .into_iter()
+            .map(f32::to_bits)
+            .collect::<Vec<u32>>()
+    };
+
+    for (kernel, incumbent) in [
+        (
+            "kernel_qwen4exp_topk_guarded_f32",
+            "kernel_incumbent_qwen4exp_topk_guarded_f32",
+        ),
+        (
+            "kernel_qwen4exp_topk_guarded_simd_f32",
+            "kernel_incumbent_qwen4exp_topk_guarded_simd_f32",
+        ),
+    ] {
+        for (case, values) in guarded_finite_cases(EXPERTS).into_iter().enumerate() {
+            let logits = tensor_f32(&ctx, &values, vec![EXPERTS as u64]);
+            let status = MetalTensor::zeros_i32(&ctx, vec![1]).unwrap();
+            let (branch_ids, branch_w) = run_guarded_topk(&ctx, kernel, &logits, Some(&status));
+            let (inc_ids, inc_w) = run_guarded_topk(&ctx, incumbent, &logits, None);
+            assert_eq!(
+                read_i32(&branch_ids),
+                read_i32(&inc_ids),
+                "{kernel} case {case} ids"
+            );
+            assert_eq!(
+                read_f32(&branch_w)
+                    .into_iter()
+                    .map(f32::to_bits)
+                    .collect::<Vec<_>>(),
+                read_f32(&inc_w)
+                    .into_iter()
+                    .map(f32::to_bits)
+                    .collect::<Vec<_>>(),
+                "{kernel} case {case} weights"
+            );
+            assert_eq!(
+                run_layer(&branch_ids, &branch_w),
+                run_layer(&inc_ids, &inc_w),
+                "{kernel} case {case} quantized layer output"
+            );
+        }
+    }
+}

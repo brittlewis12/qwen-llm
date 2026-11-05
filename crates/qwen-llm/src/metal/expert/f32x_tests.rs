@@ -118,7 +118,7 @@ fn grouped(
             input: &input,
             ids: &ids,
             weights: &weights,
-            status: &counts,
+            status: &status,
             counts: &counts,
             slots: &slots,
             inner: &inner,
@@ -366,6 +366,7 @@ fn grouped_f32x_experts_refuse_types_without_a_tile() {
         let input = f32_tensor(&ctx, &values(HIDDEN * ROWS, 1), vec![h, r]);
         let ids = i32_zeros(&ctx, vec![k, r]);
         let weights = f32_tensor(&ctx, &[0.0; TOP_K * ROWS], vec![k, r]);
+        let status = i32_zeros(&ctx, vec![r]);
         let counts = i32_zeros(&ctx, vec![e]);
         let slots = i32_zeros(&ctx, vec![e * r]);
         let inner = f32_tensor(&ctx, &vec![0.0; FFN * TOP_K * ROWS], vec![f, k * r]);
@@ -383,7 +384,7 @@ fn grouped_f32x_experts_refuse_types_without_a_tile() {
                 input: &input,
                 ids: &ids,
                 weights: &weights,
-                status: &counts,
+                status: &status,
                 counts: &counts,
                 slots: &slots,
                 inner: &inner,

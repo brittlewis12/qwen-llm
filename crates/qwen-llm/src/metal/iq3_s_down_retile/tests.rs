@@ -693,6 +693,7 @@ fn iq3_s_retile_shared_composition_requires_explicit_policy_and_honors_fallback(
         &(0..ROWS).map(|i| (i % E) as i32).collect::<Vec<_>>(),
     );
     let weights = f32_tensor(vec![1, ROWS as u64], 1.0);
+    let status = i32_tensor(vec![ROWS as u64], &[0; ROWS]);
     let counts = i32_tensor(vec![E as u64], &[0; E]);
     let slots = i32_tensor(vec![(E * ROWS) as u64], &[0; E * ROWS]);
     let inner = f32_tensor(vec![WIDTH as u64, ROWS as u64], SENTINEL);
@@ -713,7 +714,7 @@ fn iq3_s_retile_shared_composition_requires_explicit_policy_and_honors_fallback(
             input: &input,
             ids: &ids,
             weights: &weights,
-            status: &counts,
+            status: &status,
             counts: &counts,
             slots: &slots,
             inner: &inner,

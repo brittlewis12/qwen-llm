@@ -69,6 +69,14 @@ class Knob:
     scopes: set[str] = field(default_factory=set)
 
 
+def document_if_missing(item: Knob, path: str, line: int, purpose: str) -> None:
+    """A literal read found first must not hide a documented declaration."""
+    if item.description == "undocumented" and purpose != "undocumented":
+        item.path = path
+        item.line = line
+        item.description = purpose
+
+
 def line_number(text: str, offset: int) -> int:
     return text.count("\n", 0, offset) + 1
 
@@ -376,6 +384,14 @@ def register_env_flag_declaration(
 
 
 def self_test() -> None:
+    lease = Knob("QWEN_METAL_LEASE_FD", "value", "example.rs", 1, "undocumented")
+    document_if_missing(lease, "context.rs", 12, "Inherited campaign lease descriptor.")
+    assert (lease.path, lease.line, lease.description) == (
+        "context.rs", 12, "Inherited campaign lease descriptor."
+    )
+    document_if_missing(lease, "later.rs", 7, "undocumented")
+    assert lease.path == "context.rs"
+
     def parse(source: str) -> tuple[str, str, str] | None:
         tokens = rust_tokens(source)
         start = next(i for i, token in enumerate(tokens) if token.value == "(")
@@ -1038,12 +1054,11 @@ def collect() -> tuple[dict[str, Knob], list[tuple[str, str, str, int, str]]]:
             return
         item = knobs.get(variable)
         desc = purpose if purpose is not None else description(lines, line)
-        if item is None or (
-            item.description == "undocumented" and desc != "undocumented"
-        ):
-            if item is None:
-                item = Knob(variable, kind, rel, line, desc)
-                knobs[variable] = item
+        if item is None:
+            item = Knob(variable, kind, rel, line, desc)
+            knobs[variable] = item
+        else:
+            document_if_missing(item, rel, line, desc)
         if kind == "build-time" or polarity:
             if polarity and not item.polarities:
                 item.path = rel

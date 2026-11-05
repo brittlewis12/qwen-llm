@@ -6,6 +6,61 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the current state and evidence index.
 
+## 2026-11-05 - Dense Qwen 27B Tensor Prefill: 1.88-1.92x, Enabled on Tensor Tier
+
+- 27B Q4_K_M stage attribution at pp4096 found dense projections at
+  93.3063% / 93.3382% of profiled GPU time (FFN 66.9978% / 67.0643%).
+  Production chunks are 1024 rows. Reuse the existing generic narrow
+  M32/N64/K32 half-operand tensor adapter for Q4_K/Q6_K prompt projections
+  with M >= 128 on the available Apple10/Metal 4 tensor tier. Enabled by
+  default; `QWEN_27B_PREFILL_TENSOR=0` restores incumbent dispatch for A/B
+  or rollback. Other models/devices and small tails retain their dispatch;
+  Q5_K already uses a tensor route. No new activation narrowing site.
+- Warmed command-buffer GPU kill test, incumbent A versus existing tensor B,
+  six samples per shape per ABBA arm occurrence (12 per arm total):
+
+  | Quant / M x N x K | A TFLOPS | B TFLOPS | A/B |
+  | --- | ---: | ---: | ---: |
+  | Q4_K / 1024 x 17408 x 5120 | 27.9068 | 56.8299 | 2.0364x |
+  | Q4_K / 1024 x 5120 x 17408 | 23.7839 | 46.3497 | 1.9488x |
+  | Q6_K / 1024 x 5120 x 17408 | 23.8366 | 44.2307 | 1.8556x |
+
+  Occurrence weights 128/32/32, each x4 chunks: **1.98423x weighted** over
+  70.2758% of linear FLOPs. F64 references use the same CPU-dequantized F32
+  weights and original F32 inputs; 1024 sampled cells per real matrix,
+  exhaustive small tails, edge magnitudes, all outputs finite and guards
+  intact. Max-absolute / relative-RMS error ratios to incumbent, in table
+  order: 1.001351809 / 0.999996068, 0.998877318 / 0.999828695,
+  0.999135995 / 1.000199020 (both metrics bounded by 1.5x incumbent).
+- M5 Ultra, 27B Q4_K_M, frozen `db70a767`, ordinary production prefill plus
+  endpoint logits, seed 1, one binary, four separate ABBA campaigns, two
+  retained repetitions per arm occurrence, 30 s cooldown before every arm.
+  Build lock and Metal lease held per campaign; all 32 boundary thermal
+  readings were 0. All samples below are wall milliseconds, chronological
+  within off/on; no samples dropped. Medians pool four samples per setting.
+
+  | pp | Off samples (ms) | On samples (ms) | Median off/on (ms) | Speedup | Off/on tok/s |
+  | ---: | --- | --- | ---: | ---: | ---: |
+  | 512 | 1004.984, 1003.307, 1004.244, 1004.482 | 529.469, 529.600, 530.294, 530.120 | 1004.363 / 529.860 | 1.89552x | 509.8 / 966.3 |
+  | 2048 | 3872.159, 3877.932, 3875.606, 3872.468 | 2017.204, 2016.507, 2018.348, 2021.096 | 3874.037 / 2017.776 | 1.91995x | 528.6 / 1015.0 |
+  | 4096 | 7792.383, 7788.352, 7785.922, 7790.596 | 4087.083, 4084.600, 4090.027, 4083.871 | 7789.474 / 4085.842 | 1.90646x | 525.8 / 1002.5 |
+  | 8192 | 15791.267, 15796.802, 15830.633, 15795.372 | 8394.970, 8401.094, 8388.335, 8398.605 | 15796.087 / 8396.787 | 1.88121x | 518.6 / 975.6 |
+
+  tok/s = prompt tokens / median wall seconds. pp512 uses 512-row chunks;
+  the other sizes use 1024. At pp4096, **1002.5 versus llama.cpp v0.9.0's
+  1338 tok/s = 0.749x**, up from about 0.39x.
+- Production-route checks passed 88 F64 cases (36 tensor-selected, 52
+  bitwise incumbent fallbacks); worst max-absolute / RMS error ratios
+  1.003166272 / 1.000612677. Greedy off/on, 3943 prompt tokens and 160
+  generated tokens, produced identical text; both SHA256s:
+  `fd77c78dcc585859801936ee84f0dd2973e9a5b4dc628aed0b5c357f955ac90c`.
+- Open follow-up: research C-f32 (M128/N64/K32, direct device F32 activation)
+  achieved 2.81086x weighted op speedup but failed the accuracy gate:
+  max-absolute error 1.407-1.704x incumbent, relative RMS 1.474-1.550x.
+  Its retained `relaxed_precision=true` is a suspected contributor; not
+  investigated. C-half was 2.00859x, only about 1.2% above existing B.
+  Research kernels/harness stay outside this production change.
+
 ## 2026-11-05 - Qwen/Flash-Next Routing Guards: Duplicate-Free Top-k and Bounded Buckets at -0.4% Decode
 
 - Qwen MoE and Flash-Next top-k now produce unique expert ids by

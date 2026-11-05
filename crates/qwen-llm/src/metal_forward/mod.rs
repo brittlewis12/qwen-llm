@@ -2666,6 +2666,7 @@ mod gdn;
 mod moe;
 #[cfg(test)]
 mod native_embedding_pilot;
+mod prefill_gemm;
 
 #[cfg(test)]
 mod snapshot_transfer_pilot;
@@ -2688,6 +2689,7 @@ pub use dispatch::*;
 pub use gdn::*;
 #[allow(unused_imports)]
 pub use moe::*;
+pub use prefill_gemm::*;
 #[allow(unused_imports)]
 pub use residency::*;
 #[allow(unused_imports)]

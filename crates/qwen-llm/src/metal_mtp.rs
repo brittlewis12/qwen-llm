@@ -3559,6 +3559,49 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "requires local A3B Q4_K_M MTP fixture and several GiB of Metal memory"]
+    fn mtp_chain_early_failure_is_sticky_and_holds_the_counter() {
+        let path = crate::test_fixtures::required_filename("Qwen3.6-27B-MTP-Q4_K_M.gguf");
+        if !std::path::Path::new(path).exists() {
+            eprintln!("[mtp-chain-failure] skipped - fixture missing");
+            return;
+        }
+        let ctx = MetalContext::new().expect("metal context");
+        let g = GgufFile::open(path).expect("open fixture");
+        let m = Model::from_gguf(&g).expect("load model");
+        let mtp = m.mtp.as_ref().expect("MTP head");
+        let mm = MetalModel::load(&ctx, &g, &m).expect("metal target load");
+        let head = MetalMtpHead::load_with_moe_bank_policy(&ctx, &g, mtp, MtpMoeBankPolicy::F32)
+            .expect("load MTP head");
+        let mf = MetalForward::new(&ctx, &mm);
+        let session = MetalMtpSession::fresh(&ctx, &head, &m.arch, 4).expect("MTP session");
+        let mut spec = SpeculativeDecoder::new(&mf, &head, session);
+        let hidden = MetalTensor::zeros_f32(&ctx, vec![m.arch.hidden_size as u64]).unwrap();
+
+        let armed = crate::metal::fail_next_route_status_check();
+        let error = spec
+            .draft_chain_single_cb(1, &hidden, 0, 2)
+            .unwrap_err()
+            .to_string();
+        drop(armed);
+        assert!(error.contains("injected route status failure"), "{error}");
+        assert!(spec.mtp_session.poisoned.is_some());
+        assert_eq!(
+            spec.mtp_session.kv_n_pos, 0,
+            "failed chain advanced the counter"
+        );
+        assert!(spec.mtp_session.ensure_usable().is_err());
+
+        let before = spec.mtp_session.kv_n_pos;
+        let error = spec
+            .draft_chain_single_cb(1, &hidden, 0, 2)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("session is poisoned"), "{error}");
+        assert_eq!(spec.mtp_session.kv_n_pos, before);
+    }
+
+    #[test]
     fn mtp_route_failure_is_sticky_and_holds_the_counter() {
         let Some(ctx) = crate::test_fixtures::metal_context_or_skip() else {
             return;

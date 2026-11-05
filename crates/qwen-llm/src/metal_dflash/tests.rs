@@ -15336,6 +15336,60 @@ mod prompt_lookup_layout_gate {
 }
 
 #[test]
+#[ignore = "model witness: qwen3.6-35b-a3b-ud-q4_k_m"]
+fn layer_major_nonfinite_routing_poisons_the_session() {
+    let path = crate::test_fixtures::A3B_Q4_K_M
+        .required()
+        .to_str()
+        .expect("model fixture path must be UTF-8");
+    let Some(ctx) = crate::test_fixtures::metal_context_or_skip() else {
+        return;
+    };
+    let g = GgufFile::open(path).expect("open");
+    let m = Model::from_gguf(&g).expect("load");
+    let mut mm = MetalModel::load(&ctx, &g, &m).expect("metal load");
+    for block in &mut mm.blocks {
+        let moe = match block {
+            crate::metal_forward::MetalBlock::Gdn(b) => b.ffn_moe.as_mut(),
+            crate::metal_forward::MetalBlock::Attn(b) => b.ffn_moe.as_mut(),
+        };
+        if let Some(moe) = moe {
+            let shape = moe.gate_inp.shape.clone();
+            let elements = moe.gate_inp.n_elements() as usize;
+            moe.gate_inp = MetalTensor::from_bytes(
+                &ctx,
+                bytemuck::cast_slice(&vec![f32::NAN; elements]),
+                shape,
+                GgmlType::F32,
+            )
+            .expect("NaN router");
+        }
+    }
+    let mf = MetalForward::new(&ctx, &mm);
+    let mut target = MetalSession::fresh(&ctx, &mm, 64).expect("target session");
+    let n = 4u32;
+    let mut verify = MetalDFlashVerifyScratch::fresh(&ctx, &mm, n, 2).expect("verify scratch");
+    let mut layer = MetalDFlashLayerMajorScratch::fresh(&ctx, &mm, n).expect("layer scratch");
+    let tokens = [1234i32, 7, 999, 42];
+    let target_layers = [5u32, 15];
+    let error = encode_packed_verify_layer_major_inner(
+        &mf,
+        &target_layers,
+        &tokens,
+        0,
+        &mut verify,
+        &mut layer,
+        &mut target,
+        None,
+        None,
+    )
+    .expect_err("non-finite routing must fail verification");
+    let message = error.to_string();
+    assert!(message.contains("non-finite router logits"), "{message}");
+    assert!(target.ensure_usable().is_err(), "session was not poisoned");
+}
+
+#[test]
 fn verify_status_checks_both_session_and_packed_buffers() {
     let Some(ctx) = crate::test_fixtures::metal_context_or_skip() else {
         return;

@@ -192,6 +192,7 @@ impl Buffers {
 }
 
 fn compare_vectors(label: &str, a: &[f32], b: &[f32]) {
+    assert_eq!(a.len(), b.len(), "{label}: output length");
     let mut error = 0f64;
     let mut min_cos = 1f64;
     for (a, b) in a.chunks_exact(256).zip(b.chunks_exact(256)) {
@@ -707,7 +708,19 @@ fn tensor_flash_restored_prefix_to_unaligned_matrix_rebuild() {
         let v_now = make32(&half_f32(&full.v[PREFIX * 1024..(PREFIX + FLASH) * 1024]));
         one_shot(ctx, |enc| {
             encode_scatter_offset_f32_to_f16_kv_vt(
-                ctx, enc, &k_now, &v_now, &k, &v, &vt, PREFIX, FLASH, 1024, vt_stride, 4, 256,
+                ctx,
+                enc,
+                &k_now,
+                &v_now,
+                &k,
+                &v,
+                &vt,
+                PREFIX * 1024,
+                FLASH * 1024,
+                PREFIX,
+                1024,
+                256,
+                vt_stride,
             )?;
             encode_attn_tensor_flash_qwen27(
                 ctx,
@@ -745,12 +758,12 @@ fn tensor_flash_restored_prefix_to_unaligned_matrix_rebuild() {
                 &k,
                 &v,
                 &vt,
+                (PREFIX + FLASH) * 1024,
+                TAIL * 1024,
                 PREFIX + FLASH,
-                TAIL,
                 1024,
-                vt_stride,
-                4,
                 256,
+                vt_stride,
             )?;
             encode_attn_matrix_transpose_v_f16(
                 ctx, enc, &v, &vt, 0, rebuild, full.pos, 1024, vt_stride, 4, 256,

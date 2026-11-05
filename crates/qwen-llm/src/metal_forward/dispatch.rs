@@ -272,21 +272,37 @@ pub(crate) fn validate_f32_q8_mat_mat_addressing(
             .into());
         }
     }
-    for (name, elements) in [
-        ("weight", n_in.checked_mul(n_out)),
-        ("input", n_in.checked_mul(n_query)),
-        ("output", n_out.checked_mul(n_query)),
-    ] {
-        let elements = elements.ok_or_else(|| MetalError::BadShape {
+    let output = n_out
+        .checked_mul(n_query)
+        .ok_or_else(|| MetalError::BadShape {
             kernel: "mat_mat_dispatch",
-            detail: format!("{name} element count overflow"),
+            detail: "output element count overflow".into(),
         })?;
-        if u32::try_from(elements).is_err() {
-            return Err(MetalError::BadShape {
+    if u32::try_from(output).is_err() {
+        return Err(MetalError::BadShape {
+            kernel: "mat_mat_dispatch",
+            detail: format!("output element count {output} exceeds u32 shader addressing"),
+        }
+        .into());
+    }
+    if matches!(dtype, GgmlType::F32 | GgmlType::Q8_0) {
+        for (name, elements) in [
+            ("weight", n_in.checked_mul(n_out)),
+            ("input", n_in.checked_mul(n_query)),
+        ] {
+            let elements = elements.ok_or_else(|| MetalError::BadShape {
                 kernel: "mat_mat_dispatch",
-                detail: format!("{name} element count {elements} exceeds u32 shader addressing"),
+                detail: format!("{name} element count overflow"),
+            })?;
+            if u32::try_from(elements).is_err() {
+                return Err(MetalError::BadShape {
+                    kernel: "mat_mat_dispatch",
+                    detail: format!(
+                        "{name} element count {elements} exceeds u32 shader addressing"
+                    ),
+                }
+                .into());
             }
-            .into());
         }
     }
     if dtype == GgmlType::Q8_0 {
@@ -818,4 +834,32 @@ fn fewrow_gen_caller_matrix_respects_knob_and_chip() {
             }
         }
     }
+}
+
+fn mat_mat_output_product_is_checked_for_every_dtype() {
+    // Quantized kernels may use 64-bit weight offsets, so a large K x M
+    // weight product is allowed as long as the output product is safe.
+    assert!(validate_f32_q8_mat_mat_addressing(GgmlType::Q4_K, 16_384, 262_144, 1).is_ok());
+    // The shader forms n_query * n_out in 32 bits for every dtype.
+    assert!(validate_f32_q8_mat_mat_addressing(GgmlType::Q4_K, 16_384, 262_144, 20_000).is_err());
+    // F32/Q8_0 still keep their weight/input product checks.
+    assert!(validate_f32_q8_mat_mat_addressing(GgmlType::F32, 65_536, 65_536, 1).is_err());
+}
+
+#[test]
+fn dispatchers_refuse_input_output_aliasing() {
+    let Some(ctx) = crate::test_fixtures::metal_context_or_skip() else {
+        return;
+    };
+    let mut weight = MetalTensor::zeros_f32(&ctx, vec![64]).unwrap();
+    weight.shape = vec![8, 8];
+    let backing = MetalTensor::zeros_f32(&ctx, vec![32]).unwrap();
+    let x = backing.view_subrange(0, vec![16]);
+    let y = backing.view_subrange(1, vec![16]);
+    let command = ctx.queue.commandBuffer().unwrap();
+    let enc = KernelEncoder::begin(&command);
+    let err = encode_mat_vec_dispatch(&ctx, &enc, &weight, &x, &x, 8, 8).unwrap_err();
+    assert!(err.to_string().contains("aliases input"), "{err}");
+    let err = encode_mat_mat_dispatch(&ctx, &enc, &weight, &x, &y, 8, 8, 2).unwrap_err();
+    assert!(err.to_string().contains("aliases input"), "{err}");
 }

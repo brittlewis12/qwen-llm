@@ -844,6 +844,30 @@ impl<'a> Qwen4ExpMoeMetalWeights<'a> {
     }
 }
 
+fn zero_route_status(status: &MetalTensor) -> Result<(), Qwen4ExpMoeError> {
+    if status.dtype != GgmlType::I32 || !status.is_writable() {
+        return invalid("route status reset requires writable I32 storage");
+    }
+    let offset = usize::try_from(status.offset)
+        .map_err(|_| Qwen4ExpMoeError::Invalid("route status offset exceeds usize".into()))?;
+    let bytes = usize::try_from(status.n_bytes())
+        .map_err(|_| Qwen4ExpMoeError::Invalid("route status length exceeds usize".into()))?;
+    let end = offset
+        .checked_add(bytes)
+        .ok_or_else(|| Qwen4ExpMoeError::Invalid("route status range overflow".into()))?;
+    if end > status.buffer.length() {
+        return invalid("route status range exceeds its Metal buffer");
+    }
+    unsafe {
+        std::ptr::write_bytes(
+            (status.buffer.contents().as_ptr() as *mut u8).add(offset),
+            0,
+            bytes,
+        );
+    }
+    Ok(())
+}
+
 pub struct Qwen4ExpMoeMetalWorkspace {
     guarded_topk: bool,
     geometry: Qwen4ExpMoeMetalGeometry,
@@ -1286,6 +1310,7 @@ impl Qwen4ExpMoeMetalWorkspace {
 
     pub fn reset(&mut self) -> Result<(), Qwen4ExpMoeError> {
         self.require_idle()?;
+        zero_route_status(&self.route_status)?;
         self.state_poisoned = false;
         Ok(())
     }

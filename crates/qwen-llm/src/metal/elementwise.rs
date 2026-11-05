@@ -67,7 +67,13 @@ pub fn encode_scatter_rows_f32_unique(
     n_cols: usize,
     n_rows: usize,
 ) -> Result<(), MetalError> {
-    let n = n_cols * n_rows;
+    let n = n_cols
+        .checked_mul(n_rows)
+        .ok_or_else(|| MetalError::BadShape {
+            kernel: "scatter_rows_unique",
+            detail: "n_cols * n_rows overflow".into(),
+        })?;
+    super::checks::to_u32("scatter_rows_unique", n, "n_cols*n_rows")?;
     if x.n_elements() as usize != n
         || rows.n_elements() as usize != n_rows
         || !(out.n_elements() as usize).is_multiple_of(n_cols)
@@ -153,7 +159,12 @@ pub fn encode_axpy_scalar_f32(
     struct Args {
         n: u32,
     }
-    enc.set_bytes(0, &Args { n: n as u32 });
+    enc.set_bytes(
+        0,
+        &Args {
+            n: super::checks::to_u32("axpy_scalar", n, "n")?,
+        },
+    );
     enc.set_tensor(1, x);
     enc.set_tensor(2, scale);
     enc.set_tensor(3, accum);
@@ -537,7 +548,12 @@ pub fn encode_add_inplace_f32(
     super::checks::check_disjoint_or_exact("add_inplace", x, &[(y, "y")])?;
     let pso = ctx.pipeline("kernel_add_inplace_f32")?;
     enc.set_pipeline(&pso);
-    enc.set_bytes(0, &NArgs { n: n as u32 });
+    enc.set_bytes(
+        0,
+        &NArgs {
+            n: super::checks::to_u32("add_inplace", n, "n")?,
+        },
+    );
     enc.set_tensor(1, x);
     enc.set_tensor(2, y);
 
@@ -573,7 +589,13 @@ pub fn encode_fill_f32(
         n: u32,
         value: f32,
     }
-    enc.set_bytes(0, &Args { n: n as u32, value });
+    enc.set_bytes(
+        0,
+        &Args {
+            n: super::checks::to_u32("fill_f32", n, "n")?,
+            value,
+        },
+    );
     enc.set_tensor(1, y);
     let tg_threads = pso.maxTotalThreadsPerThreadgroup().min(1024);
     let n_tg = n.div_ceil(tg_threads);
@@ -814,7 +836,13 @@ pub fn encode_axpy_rowwise_f32(
     n_cols: usize,
     n_rows: usize,
 ) -> Result<(), MetalError> {
-    let n = n_cols * n_rows;
+    let n = n_cols
+        .checked_mul(n_rows)
+        .ok_or_else(|| MetalError::BadShape {
+            kernel: "axpy_rowwise",
+            detail: "n_cols * n_rows overflow".into(),
+        })?;
+    super::checks::to_u32("axpy_rowwise", n, "n_cols*n_rows")?;
     if x.n_elements() as usize != n
         || accum.n_elements() as usize != n
         || scales.n_elements() as usize != n_rows
@@ -883,7 +911,13 @@ pub fn encode_scatter_axpy_rows_unique_f32(
     n_cols: usize,
     n_rows: usize,
 ) -> Result<(), MetalError> {
-    let n = n_cols * n_rows;
+    let n = n_cols
+        .checked_mul(n_rows)
+        .ok_or_else(|| MetalError::BadShape {
+            kernel: "scatter_axpy_rows_unique",
+            detail: "n_cols * n_rows overflow".into(),
+        })?;
+    super::checks::to_u32("scatter_axpy_rows_unique", n, "n_cols*n_rows")?;
     if x.n_elements() as usize != n
         || rows.n_elements() as usize != n_rows
         || scales.n_elements() as usize != n_rows
@@ -4152,9 +4186,9 @@ mod tests {
         encode_add_inplace_f32(&ctx, &enc, &x, &x).unwrap();
         let err = encode_axpy_f32(&ctx, &enc, &y, &x, 1.0).unwrap_err();
         assert!(err.to_string().contains("partially aliases"), "{err}");
-        let scale = MetalTensor::zeros_f32(&ctx, vec![1]).unwrap();
-        let err = encode_axpy_scalar_f32(&ctx, &enc, &x, &x, &scale).unwrap_err();
-        assert!(err.to_string().contains("scale"), "{err}");
+        let scale = x.view_subrange(0, vec![1]);
+        let err = encode_axpy_scalar_f32(&ctx, &enc, &x, &scale, &x).unwrap_err();
+        assert!(err.to_string().contains("aliases scale"), "{err}");
         let rows = MetalTensor::zeros_i32(&ctx, vec![5]).unwrap();
         let scales = MetalTensor::zeros_f32(&ctx, vec![5]).unwrap();
         let err = encode_scatter_axpy_rows_unique_f32(&ctx, &enc, &x, &rows, &scales, &x, 2, 5)

@@ -182,6 +182,8 @@ impl Qwen4ExpPackedPrefillWorkspace {
         ] {
             zero_writable_f32(state)?;
         }
+        zero_writable_i32(&self.moe.route_status)?;
+        self.route_status_rows = 0;
         self.history.reset();
         self.state_poisoned = false;
         self.encode_failed = false;
@@ -1051,6 +1053,32 @@ fn zero_f32(
         shape,
         GgmlType::F32,
     )?)
+}
+
+fn zero_writable_i32(tensor: &MetalTensor) -> Result<(), Qwen4ExpPackedPrefillError> {
+    if tensor.dtype != GgmlType::I32 || !tensor.is_writable() {
+        return invalid("route status reset requires writable I32 storage");
+    }
+    let offset = usize::try_from(tensor.offset).map_err(|_| {
+        Qwen4ExpPackedPrefillError::Invalid("route status offset exceeds usize".into())
+    })?;
+    let bytes = usize::try_from(tensor.n_bytes()).map_err(|_| {
+        Qwen4ExpPackedPrefillError::Invalid("route status length exceeds usize".into())
+    })?;
+    let end = offset
+        .checked_add(bytes)
+        .ok_or_else(|| Qwen4ExpPackedPrefillError::Invalid("route status range overflow".into()))?;
+    if end > tensor.buffer.length() {
+        return invalid("route status reset range exceeds its Metal buffer");
+    }
+    unsafe {
+        std::ptr::write_bytes(
+            (tensor.buffer.contents().as_ptr() as *mut u8).add(offset),
+            0,
+            bytes,
+        );
+    }
+    Ok(())
 }
 
 fn zero_writable_f32(tensor: &MetalTensor) -> Result<(), Qwen4ExpPackedPrefillError> {

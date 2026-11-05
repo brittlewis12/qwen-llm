@@ -2514,6 +2514,26 @@ pub(crate) fn validate_attn_matrix_common(
             });
         }
     }
+    let grouped_rows = n_rows
+        .checked_mul(group)
+        .ok_or_else(|| MetalError::BadShape {
+            kernel,
+            detail: "n_rows * group overflow".into(),
+        })?;
+    for (name, value) in [
+        ("n_rows", n_rows),
+        ("n_pos", n_pos),
+        ("base_pos", base_pos),
+        ("n_rows*group", grouped_rows),
+        ("head_dim", head_dim),
+    ] {
+        if value > i32::MAX as usize {
+            return Err(MetalError::BadShape {
+                kernel,
+                detail: format!("{name}={value} exceeds signed shader addressing"),
+            });
+        }
+    }
     let n_pos_end = base_pos
         .checked_add(n_rows)
         .ok_or_else(|| MetalError::BadShape {
@@ -2876,6 +2896,12 @@ pub fn encode_attn_matrix_kq_f32(
         group,
         head_dim,
     )?;
+    if kv_stride > i32::MAX as usize {
+        return Err(MetalError::BadShape {
+            kernel: "attn_matrix_kq",
+            detail: format!("kv_stride={kv_stride} exceeds signed shader addressing"),
+        });
+    }
     if q_rows.dtype != GgmlType::F32
         || scores.dtype != GgmlType::F32
         || k_cache.dtype != GgmlType::F16

@@ -6,6 +6,34 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the current state and evidence index.
 
+## 2026-11-05 - M5 Ultra Tensor-API Flash Attention On for Measured Long-Context Shapes
+
+- Qwen dense prefill now selects register-resident Metal 4 tensor-API flash
+  attention automatically on M5 Ultra: causal mask plus fused QK, online
+  softmax and PV, with F32 Q/output and F16 K/V. Main's dense 27B tensor
+  prefill projections remain enabled alongside it.
+- M5 Ultra, Qwen3.8-27B Q4_K_M, pp1024 restored-prefix append throughput:
+  actual-default paired gain +1.6% at total KV 8K; earlier healthy forced-on
+  medians +8.3% at 32K, +21.5% at 64K, +38.7% at 128K and +69.1% at 256K.
+  These measure production prefill plus endpoint logits, excluding model
+  load/restore, with five ABBA blocks per case and thermal pressure 0;
+  they are separate cohorts, not a completed default-on replay or new
+  measurements of the combined projection/attention changes.
+- Accuracy: complete attention comparisons and independent strict F64
+  checks pass at queries 128/129/4096 x KV 8192/262144. Sampled F64 maximum
+  absolute error 2.85e-5, minimum head cosine 0.9999999446; 208,944 complete
+  head vectors compared against the incumbent. Greedy 160-token outputs
+  match for literal 0 versus unset on a 9,805-token prompt.
+- Automatic gate unchanged: selected device exactly Apple M5 Ultra plus
+  Apple10/Metal4 availability; 24 query/4 KV heads, d256; actual query
+  chunks 128..=4096; total KV after append 8192..=262144 divisible by 64;
+  existing matrix-online/G6, layout, workspace and encoder safety guards.
+  The 38-64-row regressions are outside this gate. Other shapes fall back.
+- Rollback: `QWEN_PREFILL_ATTN_TENSOR_FLASH=0` forces off everywhere,
+  including diagnostic scopes; `=1` retains the broader experimental
+  Apple10 opt-in. Unset uses the automatic gate. The long default-on replay
+  was deliberately stopped and is not required for this landing decision.
+
 ## 2026-11-05 - Dense Qwen 27B Tensor Prefill: 1.88-1.92x, Enabled on Tensor Tier
 
 - 27B Q4_K_M stage attribution at pp4096 found dense projections at

@@ -3497,6 +3497,7 @@ fn add_packed_allocations(
         ("shared_scale", vec![capacity]),
         ("route_counts", vec![moe.expert_count()]),
         ("route_slots", vec![moe.expert_count(), capacity]),
+        ("route_status", vec![capacity]),
         (
             "routed_inner",
             vec![
@@ -3526,7 +3527,10 @@ fn add_packed_allocations(
     ];
     for (name, factors) in moe_allocations {
         let elements = product("MoE scratch", &factors)?;
-        if matches!(name, "topk_ids" | "route_counts" | "route_slots") {
+        if matches!(
+            name,
+            "topk_ids" | "route_counts" | "route_slots" | "route_status"
+        ) {
             builder.i32(format!("packed.moe.{name}"), elements)?;
         } else {
             builder.f32(format!("packed.moe.{name}"), elements)?;
@@ -3686,6 +3690,7 @@ fn add_moe_allocations(
         geometry.experts_per_token(),
     )?;
     builder.f32(format!("{prefix}.shared_gate"), 1)?;
+    builder.i32(format!("{prefix}.route_status"), 1)?;
     builder.f32(
         format!("{prefix}.routed_inner"),
         geometry
@@ -6342,14 +6347,14 @@ mod tests {
                 &ctx, &geometry, 0,
             )
             .unwrap();
-            let expected = 162_229_588_u64 + 25_356_u64 * capacity as u64;
+            let expected = 162_229_780_u64 + 25_356_u64 * capacity as u64;
             assert_eq!(geometry.layer_count(), 48);
             assert_eq!(geometry.qsa_layers().len(), 12);
             assert_eq!(
                 geometry.qsa_layers(),
                 &[3, 7, 11, 15, 19, 23, 27, 31, 35, 39, 43, 47]
             );
-            assert_eq!(plan.allocations().len(), 1_535);
+            assert_eq!(plan.allocations().len(), 1_583);
             assert_eq!(plan.packed_prefill_capacity(), None);
             assert!(
                 plan.allocations()
@@ -6399,11 +6404,11 @@ mod tests {
                 total_allocations,
                 expected_packed_allocations,
             ) = match packed_capacity {
-                4 => (4_477_600_u64, false, 1_590, 55),
-                2_048 => (1_917_951_744_u64, true, 1_600, 65),
+                4 => (4_477_616_u64, false, 1_639, 56),
+                2_048 => (1_917_959_936_u64, true, 1_649, 66),
                 other => panic!("unexpected packed capacity {other}"),
             };
-            let scalar_expected = 162_229_588_u64 + 25_356_u64 * capacity as u64;
+            let scalar_expected = 162_229_780_u64 + 25_356_u64 * capacity as u64;
             let packed_allocations = plan
                 .allocations()
                 .iter()

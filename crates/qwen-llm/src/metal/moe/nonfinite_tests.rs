@@ -4,22 +4,6 @@
 use super::*;
 use crate::test_fixtures::metal_context_or_skip;
 
-#[repr(C)]
-#[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
-struct TopkArgs {
-    n: u32,
-    k: u32,
-}
-
-#[repr(C)]
-#[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
-struct DotArgs {
-    n_expert: u32,
-    topk: u32,
-    hidden: u32,
-    n_tokens: u32,
-}
-
 fn finite_values(n: usize) -> Vec<f32> {
     (0..n)
         .map(|i| ((i * 37 + 11) % 101) as f32 * 0.013_671_875 - 0.683_593_75)

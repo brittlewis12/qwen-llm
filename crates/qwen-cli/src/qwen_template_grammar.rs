@@ -11,6 +11,19 @@ pub(super) fn is_xml_preserve(source: &str) -> bool {
     tokens(source).is_some_and(|actual| Some(actual) == tokens(REFERENCE))
 }
 
+/// The Qwen3.8 renderer is qualified against complete producer programs.
+pub(super) fn is_qwen38(source: &str) -> bool {
+    let Some(actual) = tokens(source) else {
+        return false;
+    };
+    [
+        include_str!("../tests/fixtures/templates/qwen38_27b_chat_template.jinja"),
+        include_str!("../tests/fixtures/templates/qwen38_27b_unsloth_chat_template.jinja"),
+    ]
+    .iter()
+    .any(|reference| tokens(reference).as_ref() == Some(&actual))
+}
+
 #[derive(Debug, PartialEq, Eq)]
 enum Token<'a> {
     Text(&'a str),

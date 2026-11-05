@@ -250,23 +250,59 @@ pub fn identify_qwen_release(facts: &QwenHeaderFacts<'_>) -> QwenReleaseIdentity
             mismatch.header_key()
         ));
     }
-    // Flash-Next is the only `qwen4exp` product; the architecture is the identity.
-    if facts.architecture == "qwen4exp" {
-        return QwenReleaseIdentity {
-            template: QwenPromptTemplate::Qwen4Next,
-            status: QwenReleaseStatus::Identified {
-                version: "qwen3.8",
-                source: "general.architecture",
+    // Qwen4 owns a renderer, not a release identity. Only a name field that
+    // names the qualified Qwen3.8 product may claim the Qwen3.8 identity; the
+    // canonical architecture name alone no longer does.
+    if qwen_llm::qwen4exp::is_qwen4_architecture(facts.architecture) {
+        let mut versions: Vec<(&'static str, &'static str)> = Vec::new();
+        for (field, value) in QWEN_NAME_FIELDS.iter().zip(facts.names) {
+            for version in value.map(qwen_versions_in).unwrap_or_default() {
+                if !versions.iter().any(|(_, seen)| *seen == version) {
+                    versions.push((field, version));
+                }
+            }
+        }
+        let status = match versions.as_slice() {
+            [] => QwenReleaseStatus::Unknown {
+                reason: "Qwen4 architecture establishes only the renderer, not a release identity"
+                    .into(),
+                fields_consulted: consulted(),
+            },
+            [(source, version)]
+                if *version == "qwen3.8"
+                    && facts.names.iter().flatten().any(|name| {
+                        let name = name.to_ascii_lowercase().replace(['-', '_', ' '], "");
+                        name.contains("flashnext")
+                    }) =>
+            {
+                QwenReleaseStatus::Identified { version, source }
+            }
+            [_] => QwenReleaseStatus::Unknown {
+                reason: "Qwen4 architecture has no qualified Flash-Next product name".into(),
+                fields_consulted: consulted(),
+            },
+            many => QwenReleaseStatus::Unknown {
+                reason: format!(
+                    "conflicting Qwen release versions: {}",
+                    many.iter()
+                        .map(|(source, version)| format!("{source}={version}"))
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                ),
+                fields_consulted: consulted(),
             },
         };
-    }
-    if qwen_llm::qwen4exp::is_qwen4_architecture(facts.architecture) {
-        return QwenReleaseIdentity {
-            template: QwenPromptTemplate::Qwen4Next,
-            status: QwenReleaseStatus::Unknown {
+        let status = if facts.architecture != "qwen4exp" {
+            QwenReleaseStatus::Unknown {
                 reason: "Qwen4 architecture alias does not establish a release identity".into(),
                 fields_consulted: vec!["general.architecture"],
-            },
+            }
+        } else {
+            status
+        };
+        return QwenReleaseIdentity {
+            template: QwenPromptTemplate::Qwen4Next,
+            status,
         };
     }
     let mut versions: Vec<(&'static str, &'static str)> = Vec::new();
@@ -313,10 +349,81 @@ pub fn resolve_qwen_contract_for_gguf(gguf: &GgufFile) -> Result<QwenReleaseIden
         .architecture()
         .context("model is missing general.architecture")?;
     let facts = QwenHeaderFacts::from_gguf(&architecture, gguf)?;
-    Ok(resolve_qwen_contract(
-        &facts,
-        gguf.get_str("tokenizer.chat_template"),
-    ))
+    let mut identity = resolve_qwen_contract(&facts, gguf.get_str("tokenizer.chat_template"));
+    if qwen_llm::qwen4exp::is_qwen4_architecture(&architecture)
+        && architecture != "qwen4exp"
+        && identity.template == QwenPromptTemplate::Qwen4Next
+    {
+        if let Err(reason) = qwen4_alias_template_qualified(gguf) {
+            identity.template = QwenPromptTemplate::UnknownChatMl;
+            identity.status = QwenReleaseStatus::Unknown {
+                reason: reason.into(),
+                fields_consulted: vec![
+                    "general.architecture",
+                    "tokenizer.chat_template",
+                    "tokenizer.ggml.tokens",
+                    "tokenizer.ggml.eos_token_id",
+                ],
+            };
+        }
+    }
+    Ok(identity)
+}
+
+/// An architecture alias may use the Flash-Next renderer only when the GGUF
+/// itself declares the Qwen ChatML template and maps the control tokens the
+/// renderer emits. Canonical `qwen4exp` artifacts keep their existing contract.
+pub fn qwen4_alias_template_qualified(gguf: &GgufFile) -> Result<(), &'static str> {
+    let Some(architecture) = gguf.architecture() else {
+        return Err("general.architecture is missing");
+    };
+    if architecture == "qwen4exp" {
+        return Ok(());
+    }
+    if !qwen_llm::qwen4exp::is_qwen4_architecture(&architecture) {
+        return Ok(());
+    }
+    let template = gguf
+        .get_str("tokenizer.chat_template")
+        .ok_or("tokenizer.chat_template is missing")?;
+    if !grammar::is_qwen38(template) {
+        return Err("tokenizer.chat_template is not a qualified Qwen3.8 program");
+    }
+    let tokens = gguf
+        .get_string_array_full("tokenizer.ggml.tokens")
+        .map_err(|_| "tokenizer.ggml.tokens cannot be read")?
+        .ok_or("tokenizer.ggml.tokens is missing")?;
+    let im_start = tokens
+        .iter()
+        .position(|token| *token == "<|im_start|>")
+        .ok_or("tokenizer is missing <|im_start|>")?;
+    let im_end = tokens
+        .iter()
+        .position(|token| *token == "<|im_end|>")
+        .ok_or("tokenizer is missing <|im_end|>")?;
+    if tokens
+        .iter()
+        .filter(|token| **token == "<|im_end|>")
+        .count()
+        != 1
+        || tokens
+            .iter()
+            .filter(|token| **token == "<|im_start|>")
+            .count()
+            != 1
+    {
+        return Err("tokenizer <|im_end|> mapping is ambiguous");
+    }
+    let eos = gguf
+        .get_u64("tokenizer.ggml.eos_token_id")
+        .ok_or("tokenizer.ggml.eos_token_id is missing")?;
+    if eos != im_end as u64 {
+        return Err("tokenizer EOS is not <|im_end|>");
+    }
+    if im_start == im_end {
+        return Err("tokenizer control-token mapping is invalid");
+    }
+    Ok(())
 }
 
 fn resolve_qwen_contract(facts: &QwenHeaderFacts<'_>, source: Option<&str>) -> QwenReleaseIdentity {
@@ -390,14 +497,12 @@ mod tests {
     }
 
     #[test]
-    fn qwen4exp_aliases_route_templates_capabilities_serve_and_bench_family() {
+    fn qwen4exp_aliases_require_a_qualified_template_and_never_claim_qwen38() {
         use crate::qwen_contract_fixture::{self as fixture, Value};
         for architecture in ["qwen4", "qwen4moe", "qwen4dense", "qwen4_exp"] {
-            let gguf = fixture::gguf(
-                "future Qwen",
-                "",
-                &[("general.architecture", Value::Text(architecture))],
-            );
+            let template =
+                include_str!("../tests/fixtures/templates/qwen38_27b_chat_template.jinja");
+            let gguf = fixture::qwen4_gguf(architecture, "future Qwen", template, true);
             let family = ModelFamily::detect(&gguf);
             assert_eq!(family, Some(ModelFamily::Qwen4Exp));
             let template = resolve_model_prompt_template(&gguf).unwrap();
@@ -406,7 +511,10 @@ mod tests {
                 ModelPromptTemplate::Qwen(QwenPromptTemplate::Qwen4Next)
             ));
             let identity = resolve_qwen_contract_for_gguf(&gguf).unwrap();
-            assert!(matches!(identity.status, QwenReleaseStatus::Unknown { .. }));
+            assert!(
+                matches!(identity.status, QwenReleaseStatus::Unknown { .. }),
+                "an alias must not claim a release identity"
+            );
             assert_eq!(
                 serve_qwen_template(family.unwrap(), &gguf).unwrap(),
                 QwenPromptTemplate::Qwen4Next.serve_template()
@@ -416,6 +524,83 @@ mod tests {
             let input = crate::capabilities::input_for(family, &gguf, |_| None, |_| unreachable!());
             assert_eq!(input, InputCapability::all_supported());
         }
+
+        // No declared template, wrong control tokens, or a marker-free
+        // template must refuse structured prompting but keep raw input.
+        let marker = include_str!("../tests/fixtures/templates/qwen38_27b_chat_template.jinja");
+        for gguf in [
+            fixture::gguf(
+                "future Qwen",
+                "",
+                &[("general.architecture", Value::Text("qwen4"))],
+            ),
+            fixture::qwen4_gguf("qwen4", "future Qwen", marker, false),
+            fixture::qwen4_gguf("qwen4", "future Qwen", "plain chatml", true),
+            fixture::qwen4_gguf(
+                "qwen4",
+                "future Qwen",
+                "<|im_start|><|im_end|>add_generation_prompt",
+                true,
+            ),
+        ] {
+            let family = ModelFamily::detect(&gguf);
+            assert_eq!(family, Some(ModelFamily::Qwen4Exp));
+            assert!(matches!(
+                resolve_model_prompt_template(&gguf).unwrap(),
+                ModelPromptTemplate::Qwen(QwenPromptTemplate::UnknownChatMl)
+            ));
+            assert_eq!(
+                serve_qwen_template(family.unwrap(), &gguf).unwrap(),
+                QwenTemplate::Generic
+            );
+            let failure =
+                qwen4_alias_template_qualified(&gguf).expect_err("unqualified alias must refuse");
+            assert!(!failure.is_empty());
+            let input = crate::capabilities::input_for(
+                family,
+                &gguf,
+                |gguf| {
+                    qwen4_alias_template_qualified(gguf)
+                        .err()
+                        .map(str::to_string)
+                },
+                |_| unreachable!(),
+            );
+            assert_eq!(input.raw, crate::prompt_template::Support::Supported);
+            assert!(matches!(
+                input.user,
+                crate::prompt_template::Support::Unsupported { .. }
+            ));
+            assert!(matches!(
+                input.messages,
+                crate::prompt_template::Support::Unsupported { .. }
+            ));
+        }
+
+        // The canonical architecture keeps the renderer and a name-qualified
+        // Qwen3.8 identity; a non-3.8 qwen4exp product reports unknown.
+        let released = fixture::gguf(
+            "Qwen3.8 Flash Next",
+            "",
+            &[("general.architecture", Value::Text("qwen4exp"))],
+        );
+        let identity = resolve_qwen_contract_for_gguf(&released).unwrap();
+        assert!(matches!(
+            identity.status,
+            QwenReleaseStatus::Identified {
+                version: "qwen3.8",
+                ..
+            }
+        ));
+        assert_eq!(identity.template, QwenPromptTemplate::Qwen4Next);
+        let other = fixture::gguf(
+            "Qwen4-Flash",
+            "",
+            &[("general.architecture", Value::Text("qwen4exp"))],
+        );
+        let identity = resolve_qwen_contract_for_gguf(&other).unwrap();
+        assert!(matches!(identity.status, QwenReleaseStatus::Unknown { .. }));
+        assert_eq!(identity.template, QwenPromptTemplate::Qwen4Next);
     }
 
     #[test]

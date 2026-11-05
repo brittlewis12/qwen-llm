@@ -54,6 +54,7 @@ pub(crate) const QWEN4EXP_MAX_STOP_TOKENS: usize = 256;
 pub(crate) enum Qwen4ExpPromptCapabilityFailure {
     Architecture,
     Tokenizer(prompt_template::QwenTokenizerMismatch),
+    Template(&'static str),
 }
 
 impl Qwen4ExpPromptCapabilityFailure {
@@ -61,6 +62,7 @@ impl Qwen4ExpPromptCapabilityFailure {
         match self {
             Self::Architecture => "general.architecture",
             Self::Tokenizer(mismatch) => mismatch.header_key(),
+            Self::Template(reason) => reason,
         }
     }
 }
@@ -76,7 +78,11 @@ pub(crate) fn qwen4exp_prompt_capability_failure(
     }
     let architecture = gguf.architecture().unwrap_or_default();
     match prompt_template::QwenHeaderFacts::from_gguf(&architecture, gguf) {
-        Ok(facts) => classify_qwen4exp_prompt_capability(family, &facts),
+        Ok(facts) => classify_qwen4exp_prompt_capability(family, &facts).or_else(|| {
+            prompt_template::qwen4_alias_template_qualified(gguf)
+                .err()
+                .map(Qwen4ExpPromptCapabilityFailure::Template)
+        }),
         Err(_) => Some(Qwen4ExpPromptCapabilityFailure::Tokenizer(
             prompt_template::QwenTokenizerMismatch::TokenCount,
         )),

@@ -1061,6 +1061,40 @@ fn qwen4exp_prompt_capability_is_the_shared_tokenizer_gate() {
 }
 
 #[test]
+fn qwen4exp_alias_capability_requires_a_qualified_template() {
+    use crate::qwen_contract_fixture as fixture;
+    use crate::qwen4exp::{Qwen4ExpPromptCapabilityFailure, qwen4exp_prompt_capability_failure};
+    let marker = include_str!("../../tests/fixtures/templates/qwen38_27b_chat_template.jinja");
+    for architecture in ["qwen4", "qwen4moe", "qwen4dense", "qwen4_exp"] {
+        let qualified = fixture::qwen4_gguf(architecture, "future Qwen", marker, true);
+        assert_eq!(
+            qwen4exp_prompt_capability_failure(
+                qwen_llm::model_family::ModelFamily::Qwen4Exp,
+                &qualified
+            ),
+            None
+        );
+        let unqualified = fixture::qwen4_gguf(architecture, "future Qwen", marker, false);
+        assert!(matches!(
+            qwen4exp_prompt_capability_failure(
+                qwen_llm::model_family::ModelFamily::Qwen4Exp,
+                &unqualified
+            ),
+            Some(Qwen4ExpPromptCapabilityFailure::Template(_))
+        ));
+    }
+    // Canonical qwen4exp keeps its existing tokenizer-gated contract.
+    let canonical = fixture::qwen4_gguf("qwen4exp", "Qwen3.8 Flash Next", "", false);
+    assert_eq!(
+        qwen4exp_prompt_capability_failure(
+            qwen_llm::model_family::ModelFamily::Qwen4Exp,
+            &canonical
+        ),
+        None
+    );
+}
+
+#[test]
 fn qwen4exp_projection_does_not_publish_a_renderer_the_lane_rejects() {
     use crate::prompt_template::{
         QwenHeaderFacts, QwenReleaseStatus, QwenTokenizerMismatch, identify_qwen_release,

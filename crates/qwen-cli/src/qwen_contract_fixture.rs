@@ -91,3 +91,73 @@ pub(crate) fn gguf(name: &str, template: &str, extra: &[(&str, Value<'_>)]) -> G
     file.write_all(&bytes).unwrap();
     GgufFile::from_opened_file(file, "qwen-contract-header.gguf").unwrap()
 }
+
+/// Minimal Qwen4 alias header. With `control_tokens`, ids 248044..=248046 hold
+/// the Qwen control strings and EOS points at `<|im_end|>`; otherwise the
+/// vocabulary is the same length but carries no usable control mapping.
+pub(crate) fn qwen4_gguf(
+    architecture: &str,
+    name: &str,
+    template: &str,
+    control_tokens: bool,
+) -> GgufFile {
+    use Value::*;
+    let mut entries: Vec<(&str, Value<'_>)> = vec![
+        ("general.architecture", Text(architecture)),
+        ("general.name", Text(name)),
+        ("general.basename", Text(name)),
+        ("tokenizer.ggml.model", Text("gpt2")),
+        ("tokenizer.ggml.pre", Text("qwen35")),
+        ("tokenizer.chat_template", Text(template)),
+    ];
+    if control_tokens {
+        entries.push(("tokenizer.ggml.eos_token_id", Unsigned(248_046)));
+    }
+    let mut bytes = b"GGUF".to_vec();
+    bytes.extend(3u32.to_le_bytes());
+    bytes.extend(0u64.to_le_bytes());
+    bytes.extend(((entries.len() + 1) as u64).to_le_bytes());
+    for (key, value) in &entries {
+        string(&mut bytes, key);
+        match value {
+            Text(value) => {
+                bytes.extend(8u32.to_le_bytes());
+                string(&mut bytes, value);
+            }
+            Float(value) => {
+                bytes.extend(12u32.to_le_bytes());
+                bytes.extend(value.to_le_bytes());
+            }
+            Signed(value) => {
+                bytes.extend(11u32.to_le_bytes());
+                bytes.extend(value.to_le_bytes());
+            }
+            Unsigned(value) => {
+                bytes.extend(10u32.to_le_bytes());
+                bytes.extend(value.to_le_bytes());
+            }
+        }
+    }
+    string(&mut bytes, "tokenizer.ggml.tokens");
+    bytes.extend(9u32.to_le_bytes());
+    bytes.extend(8u32.to_le_bytes());
+    bytes.extend(248_320u64.to_le_bytes());
+    for id in 0..248_320u64 {
+        let text = if control_tokens {
+            match id {
+                248_044 => "<|endoftext|>",
+                248_045 => "<|im_start|>",
+                248_046 => "<|im_end|>",
+                _ => "",
+            }
+        } else {
+            ""
+        };
+        string(&mut bytes, text);
+    }
+    bytes.resize(bytes.len().div_ceil(32) * 32, 0);
+    let (path, mut file) = temp_file();
+    std::fs::remove_file(path).unwrap();
+    file.write_all(&bytes).unwrap();
+    GgufFile::from_opened_file(file, "qwen4-alias-header.gguf").unwrap()
+}

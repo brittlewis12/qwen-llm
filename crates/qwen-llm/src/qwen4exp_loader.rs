@@ -2009,7 +2009,29 @@ mod tests {
                 "blk.3.attn_v.weight",
             ],
         );
+        // Lay out physical merged tensors anew: their bytes must not overlap
+        // the former split offsets. Exercise both shards and nonzero offsets.
+        let mut shard_ends = [4096u64, 8192];
+        for (i, d) in source.iter_mut().enumerate() {
+            d.shard_idx = i % 2;
+            d.data_offset = shard_ends[d.shard_idx].next_multiple_of(32);
+            shard_ends[d.shard_idx] = d.data_offset + d.n_bytes;
+        }
         let model = Qwen4ExpModel::from_inventory(config.clone(), &source, 0).unwrap();
+        let requests = model.residency_sources();
+        let lengths = shard_ends.map(|n| (n + 4096) as usize);
+        let retained =
+            crate::metal::plan_retained_storage(&lengths, &requests, 4096, 8 << 30, 32).unwrap();
+        assert_eq!(retained.entries.len(), requests.len());
+        for (entry, desc) in retained.entries.iter().zip(&requests) {
+            assert_eq!(entry.shard_idx, desc.shard_idx);
+            assert_eq!(entry.data_offset, desc.data_offset);
+            assert_eq!(entry.n_bytes, desc.n_bytes);
+            assert!(matches!(
+                entry.disposition,
+                crate::metal::RetainedStorageDisposition::View { .. }
+            ));
+        }
         for canonical in &model.tensors {
             let original = split.iter().find(|d| d.name == canonical.name).unwrap();
             assert_eq!(canonical.name, original.name);

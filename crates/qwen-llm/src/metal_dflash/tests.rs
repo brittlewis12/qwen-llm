@@ -8,6 +8,13 @@ use crate::metal::{
 use crate::metal_forward::{MetalModel, MetalSession};
 use std::time::Instant;
 
+#[test]
+fn packed_verify_caller_policy_only_dflash_uses_generic() {
+    assert!(PackedVerifyCaller::DFlash.uses_generic_fewrow());
+    assert!(!PackedVerifyCaller::PromptLookup.uses_generic_fewrow());
+    assert!(!PackedVerifyCaller::Mtp.uses_generic_fewrow());
+}
+
 #[cfg(feature = "dflash-k0s-diagnostics")]
 struct K0sSyntheticRowProvider {
     side: DFlashK0sCodebookSide,

@@ -40,8 +40,9 @@ use crate::metal::{
     encode_split_q_gate_f32, encode_topk_logits_softmax_dot_sigmoid_f32,
 };
 use crate::metal_dflash::{
-    MetalDFlashLayerMajorScratch, MetalDFlashVerifyScratch, encode_packed_verify_layer_major_inner,
-    encode_restore_after_partial_accept_inner, prefill_tokens_with_multi_hidden,
+    MetalDFlashLayerMajorScratch, MetalDFlashVerifyScratch, PackedVerifyCaller,
+    encode_packed_verify_layer_major_inner_for, encode_restore_after_partial_accept_inner,
+    prefill_tokens_with_multi_hidden,
 };
 use crate::metal_forward::{
     ATTN_V4_MAX_NWG, MetalAttnBlock, MetalForward, MetalMoeFfn, MetalSession, RMS_EPS,
@@ -2716,7 +2717,8 @@ impl<'a> SpeculativeDecoder<'a> {
             }
 
             let t_verify = std::time::Instant::now();
-            let verify_argmax = encode_packed_verify_layer_major_inner(
+            let verify_argmax = encode_packed_verify_layer_major_inner_for(
+                PackedVerifyCaller::Mtp,
                 self.base,
                 &last_layer,
                 &verify_input,
@@ -3002,7 +3004,8 @@ impl<'a> SpeculativeDecoder<'a> {
             let n_eff = physical_verify_n as u32;
 
             let t_verify = std::time::Instant::now();
-            let verify_argmax = encode_packed_verify_layer_major_inner(
+            let verify_argmax = encode_packed_verify_layer_major_inner_for(
+                PackedVerifyCaller::Mtp,
                 self.base,
                 &last_layer,
                 &verify_input,
@@ -3284,7 +3287,8 @@ impl<'a> SpeculativeDecoder<'a> {
             };
 
             let t_verify = std::time::Instant::now();
-            let verify_argmax = encode_packed_verify_layer_major_inner(
+            let verify_argmax = encode_packed_verify_layer_major_inner_for(
+                PackedVerifyCaller::Mtp,
                 self.base,
                 &last_layer,
                 &verify_input,

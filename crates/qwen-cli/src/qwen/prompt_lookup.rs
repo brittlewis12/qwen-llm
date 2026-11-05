@@ -141,7 +141,8 @@ where
         }
         let scratch = scratch.as_mut().expect("prompt lookup scratch initialized");
         let verify_t0 = Instant::now();
-        let verify_argmax = qwen_llm::metal_dflash::encode_packed_verify_layer_major_inner(
+        let verify_argmax = qwen_llm::metal_dflash::encode_packed_verify_layer_major_inner_for(
+            qwen_llm::metal_dflash::PackedVerifyCaller::PromptLookup,
             forward,
             &[],
             &verify_input,

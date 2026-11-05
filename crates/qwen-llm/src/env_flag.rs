@@ -58,26 +58,6 @@ pub fn read_default_on(name: &str) -> bool {
     !std::env::var(name).as_deref().is_ok_and(env_value_falsy)
 }
 
-/// Tri-state switch for a knob whose unset state is a narrow measured
-/// default, `1` widens it to an explicit opt-in, and `0` forces it off.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum EnvAuto {
-    Unset,
-    On,
-    Off,
-}
-
-/// Read + parse a tri-state auto switch without caching. Unknown values use
-/// the unset (auto) state, matching the other env-flag parsers' choice.
-#[inline]
-pub fn read_default_auto(name: &str) -> EnvAuto {
-    match std::env::var(name).as_deref() {
-        Ok(value) if env_value_truthy(value) => EnvAuto::On,
-        Ok(value) if env_value_falsy(value) => EnvAuto::Off,
-        _ => EnvAuto::Unset,
-    }
-}
-
 /// The one authoritative list for computation-skipping attribution settings.
 pub const PERF_ABLATION_ENV: &[&str] = &[
     "QWEN_DECODE_GDN_NOOP_ALPHA",
@@ -244,14 +224,6 @@ macro_rules! env_flag {
         fn $fn_name() -> bool {
             static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
             *ENABLED.get_or_init(|| $crate::env_flag::read_default_off($env))
-        }
-    };
-    ($(#[$meta:meta])* default_auto $fn_name:ident, $env:literal) => {
-        $(#[$meta])*
-        fn $fn_name() -> $crate::env_flag::EnvAuto {
-            static MODE: std::sync::OnceLock<$crate::env_flag::EnvAuto> =
-                std::sync::OnceLock::new();
-            *MODE.get_or_init(|| $crate::env_flag::read_default_auto($env))
         }
     };
     ($(#[$meta:meta])* perf_ablation $fn_name:ident, $env:literal) => {

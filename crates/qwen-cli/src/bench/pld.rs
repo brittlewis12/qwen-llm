@@ -267,7 +267,8 @@ pub(crate) fn run_pld(args: PldArgs) -> Result<()> {
         stats.final_effective_verify_n = n_eff as u32;
         let start_position = processed_pos + 1;
         let verify_start = Instant::now();
-        let verify_argmax = qwen_llm::metal_dflash::encode_packed_verify_layer_major_inner(
+        let verify_argmax = qwen_llm::metal_dflash::encode_packed_verify_layer_major_inner_for(
+            qwen_llm::metal_dflash::PackedVerifyCaller::PromptLookup,
             &mf,
             &[],
             &verify_input,

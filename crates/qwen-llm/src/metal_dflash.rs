@@ -8539,6 +8539,42 @@ impl<'a> DFlashDecoder<'a> {
     }
 }
 
+/// Which product caller owns a packed-verify invocation. Only the DFlash
+/// verifier may opt into the generic few-row mat-mul; prompt lookup and
+/// packed MTP share this verifier but stay on the incumbent in every mode
+/// until they are separately qualified.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PackedVerifyCaller {
+    DFlash,
+    PromptLookup,
+    Mtp,
+}
+
+impl PackedVerifyCaller {
+    fn uses_generic_fewrow(self) -> bool {
+        matches!(self, Self::DFlash)
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn encode_verify_mat_mat(
+    caller: PackedVerifyCaller,
+    ctx: &MetalContext,
+    enc: &KernelEncoder,
+    weight: &MetalTensor,
+    x: &MetalTensor,
+    y: &MetalTensor,
+    n_in: usize,
+    n_out: usize,
+    n_query: usize,
+) -> Result<(), MfError> {
+    if caller.uses_generic_fewrow() {
+        encode_mat_mat_dispatch_dflash_verify(ctx, enc, weight, x, y, n_in, n_out, n_query)
+    } else {
+        encode_mat_mat_dispatch(ctx, enc, weight, x, y, n_in, n_out, n_query)
+    }
+}
+
 /// H5.3a packed verify forward — low-level entrypoint that takes
 /// everything explicitly. `DFlashDecoder::packed_verify` is the
 /// production wrapper; this exists so unit tests can exercise the
@@ -8957,6 +8993,7 @@ fn encode_packed_verify_inner_impl(
 // =============================================================================
 
 fn encode_packed_verify_moe_grouped_ffn_after_mixer(
+    caller: PackedVerifyCaller,
     base: &MetalForward<'_>,
     enc: &KernelEncoder,
     block: &MetalBlock,
@@ -9125,7 +9162,8 @@ fn encode_packed_verify_moe_grouped_ffn_after_mixer(
     )?;
 
     if f_shared > 0 {
-        encode_mat_mat_dispatch_dflash_verify(
+        encode_verify_mat_mat(
+            caller,
             base.ctx,
             enc,
             ffn_gate,
@@ -9135,7 +9173,8 @@ fn encode_packed_verify_moe_grouped_ffn_after_mixer(
             f_shared,
             n,
         )?;
-        encode_mat_mat_dispatch_dflash_verify(
+        encode_verify_mat_mat(
+            caller,
             base.ctx,
             enc,
             ffn_up,
@@ -9152,7 +9191,8 @@ fn encode_packed_verify_moe_grouped_ffn_after_mixer(
             &shared_up_pack,
             &shared_inner_pack,
         )?;
-        encode_mat_mat_dispatch_dflash_verify(
+        encode_verify_mat_mat(
+            caller,
             base.ctx,
             enc,
             ffn_down,
@@ -9210,7 +9250,8 @@ fn encode_packed_verify_moe_grouped_ffn_after_mixer(
 // (silu_mul, residual_add, chained mat-mat with this output as srcB)
 // work without any transpose. The intermediate-layer cosine tests
 // added in this phase verify this for every per-layer pack buffer.
-pub fn encode_packed_verify_layer_major_inner(
+pub fn encode_packed_verify_layer_major_inner_for(
+    caller: PackedVerifyCaller,
     base: &MetalForward<'_>,
     target_layer_ids: &[u32],
     tokens: &[i32],
@@ -9520,6 +9561,7 @@ pub fn encode_packed_verify_layer_major_inner(
             let ffn_batched = if mtp_moe_verify_grouped_ffn_enabled() {
                 let enc = KernelEncoder::begin(&cmd_buf);
                 let done = encode_packed_verify_moe_grouped_ffn_after_mixer(
+                    caller,
                     base,
                     &enc,
                     block,
@@ -9669,7 +9711,8 @@ pub fn encode_packed_verify_layer_major_inner(
                         .view_subrange(0, vec![(n * v_dim) as u64]);
                     {
                         let enc = KernelEncoder::begin(&cmd_buf);
-                        encode_mat_mat_dispatch_dflash_verify(
+                        encode_verify_mat_mat(
+                            caller,
                             base.ctx,
                             &enc,
                             &g.in_proj_qkv,
@@ -9679,7 +9722,8 @@ pub fn encode_packed_verify_layer_major_inner(
                             conv_dim,
                             n,
                         )?;
-                        encode_mat_mat_dispatch_dflash_verify(
+                        encode_verify_mat_mat(
+                            caller,
                             base.ctx,
                             &enc,
                             &g.in_proj_z,
@@ -9958,7 +10002,8 @@ pub fn encode_packed_verify_layer_major_inner(
                     // gdn_normed_pack [N, v_dim], writes mixer_out_pack [N, H].
                     {
                         let enc = KernelEncoder::begin(&cmd_buf);
-                        encode_mat_mat_dispatch_dflash_verify(
+                        encode_verify_mat_mat(
+                            caller,
                             base.ctx,
                             &enc,
                             &g.out_proj,
@@ -10069,7 +10114,8 @@ pub fn encode_packed_verify_layer_major_inner(
                     {
                         let enc = KernelEncoder::begin(&cmd_buf);
                         // Q gated (Q + gate interleaved per head).
-                        encode_mat_mat_dispatch_dflash_verify(
+                        encode_verify_mat_mat(
+                            caller,
                             base.ctx,
                             &enc,
                             &a.q,
@@ -10084,7 +10130,8 @@ pub fn encode_packed_verify_layer_major_inner(
                         // (n_heads = N * n_q rows at stride 2*head_dim), and
                         // Step C's strided sigmoid_mul reads the gate halves.
                         // K, V projections.
-                        encode_mat_mat_dispatch_dflash_verify(
+                        encode_verify_mat_mat(
+                            caller,
                             base.ctx,
                             &enc,
                             &a.k,
@@ -10094,7 +10141,8 @@ pub fn encode_packed_verify_layer_major_inner(
                             kv_dim,
                             n,
                         )?;
-                        encode_mat_mat_dispatch_dflash_verify(
+                        encode_verify_mat_mat(
+                            caller,
                             base.ctx,
                             &enc,
                             &a.v,
@@ -10473,7 +10521,8 @@ pub fn encode_packed_verify_layer_major_inner(
                             head_dim,
                         )?;
                         // Batched O projection: attn_o_pack [N, q_dim] -> mixer_out_pack [N, H].
-                        encode_mat_mat_dispatch_dflash_verify(
+                        encode_verify_mat_mat(
+                            caller,
                             base.ctx,
                             &enc,
                             &a.o,
@@ -10599,6 +10648,7 @@ pub fn encode_packed_verify_layer_major_inner(
             let ffn_batched = if mtp_moe_verify_grouped_ffn_enabled() {
                 let enc = KernelEncoder::begin(&cmd_buf);
                 let done = encode_packed_verify_moe_grouped_ffn_after_mixer(
+                    caller,
                     base,
                     &enc,
                     block,
@@ -10857,7 +10907,8 @@ pub fn encode_packed_verify_layer_major_inner(
                         f,
                     )?;
                 } else {
-                    encode_mat_mat_dispatch_dflash_verify(
+                    encode_verify_mat_mat(
+                        caller,
                         base.ctx,
                         &enc,
                         g_w,
@@ -10867,7 +10918,8 @@ pub fn encode_packed_verify_layer_major_inner(
                         f,
                         n,
                     )?;
-                    encode_mat_mat_dispatch_dflash_verify(
+                    encode_verify_mat_mat(
+                        caller,
                         base.ctx,
                         &enc,
                         u_w,
@@ -10885,7 +10937,8 @@ pub fn encode_packed_verify_layer_major_inner(
                         &ffn_inner_pack,
                     )?;
                 }
-                encode_mat_mat_dispatch_dflash_verify(
+                encode_verify_mat_mat(
+                    caller,
                     base.ctx,
                     &enc,
                     d_w,
@@ -10999,7 +11052,8 @@ pub fn encode_packed_verify_layer_major_inner(
                 None => &final_logits_pack,
             };
             // Batched lm_head mat-mat.
-            encode_mat_mat_dispatch_dflash_verify(
+            encode_verify_mat_mat(
+                caller,
                 base.ctx,
                 &enc,
                 &base.model.lm_head,
@@ -11140,6 +11194,35 @@ pub fn encode_packed_verify_layer_major_inner(
 /// NR1 path (the NR1=16 fast path only fires when `n_query == 16`,
 /// which is fine — short final chunks pay slight per-N overhead
 /// but still amortize weight reads across the chunk).
+/// DFlash-only entry point retained for the session, tests and the
+/// production DFlash decoder. Non-DFlash callers must use
+/// [`encode_packed_verify_layer_major_inner_for`] with their own kind.
+#[allow(clippy::too_many_arguments)]
+pub fn encode_packed_verify_layer_major_inner(
+    base: &MetalForward<'_>,
+    target_layer_ids: &[u32],
+    tokens: &[i32],
+    start_position: u32,
+    verify_scratch: &mut MetalDFlashVerifyScratch,
+    layer_scratch: &mut MetalDFlashLayerMajorScratch,
+    target_session: &mut MetalSession,
+    debug_logits_dst: Option<&MetalTensor>,
+    n_eff_override: Option<u32>,
+) -> Result<Vec<i32>, DFlashError> {
+    encode_packed_verify_layer_major_inner_for(
+        PackedVerifyCaller::DFlash,
+        base,
+        target_layer_ids,
+        tokens,
+        start_position,
+        verify_scratch,
+        layer_scratch,
+        target_session,
+        debug_logits_dst,
+        n_eff_override,
+    )
+}
+
 pub fn prefill_tokens_with_multi_hidden(
     base: &MetalForward<'_>,
     token_ids: &[i32],

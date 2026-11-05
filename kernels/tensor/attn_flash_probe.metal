@@ -1,4 +1,4 @@
-// Experimental Apple10 attention; selected only by a default-off prefill knob.
+// Apple10 attention; selected by the prefill shape policy or an explicit opt-in.
 // Adapted from llama.cpp fa_tensor: two tensor matmuls, strided device K/V,
 // float cooperative O resident across the complete key loop. Provenance and
 // MIT terms are retained in docs/THIRD-PARTY-NOTICES.md.

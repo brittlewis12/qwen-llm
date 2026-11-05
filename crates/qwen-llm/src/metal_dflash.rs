@@ -1060,9 +1060,13 @@ enum PrefillEnvMode {
 }
 
 fn env_mode(name: &str) -> PrefillEnvMode {
-    match std::env::var(name).as_deref() {
-        Ok("1") | Ok("true") | Ok("TRUE") | Ok("yes") | Ok("YES") => PrefillEnvMode::ForceOn,
-        Ok("0") | Ok("false") | Ok("FALSE") | Ok("no") | Ok("NO") => PrefillEnvMode::ForceOff,
+    parse_prefill_env_mode(std::env::var(name).ok().as_deref())
+}
+
+fn parse_prefill_env_mode(value: Option<&str>) -> PrefillEnvMode {
+    match value {
+        Some("1" | "true" | "TRUE" | "yes" | "YES") => PrefillEnvMode::ForceOn,
+        Some("0" | "false" | "FALSE" | "no" | "NO") => PrefillEnvMode::ForceOff,
         _ => PrefillEnvMode::Auto,
     }
 }
@@ -2229,12 +2233,20 @@ fn prefill_attn_matrix_causal_skip_enabled() -> bool {
     )
 }
 
-/// Enable experimental single-pass tensor flash attention for dense Qwen
-/// 24/4-head, d256 prefill on Apple10. Defaults off; unsupported devices and
-/// shapes retain their existing dispatch. The 8192 eligibility threshold is
-/// output-tile work (query tiles * KV heads * head dimension), not KV length.
-/// Forced-on can select aligned KV below 8K; combined row/work predicates
-/// require at least 38 queries. No KV-length cutoff is implied.
+/// Single-pass tensor flash attention on Apple10 with Metal 4 tensor support.
+/// Unset (automatic): enable only for 24 query / 4 KV heads, head dimension
+/// 256, F32 Q/output, F16 K/V, actual query chunks 128..=4096 rows, and total
+/// KV after append 8192..=262144 rows divisible by 64. This gate uses attention
+/// shapes rather than model identity or weight quantization: kernel correctness
+/// and speed depend on those attention shapes, not the model name. Set 0 to
+/// force off everywhere. Set 1 for the broader experimental opt-in: retain the
+/// same hardware, dtype, geometry, layout and workspace guards, but omit the
+/// automatic row/KV ranges; combined row/output-work predicates require at
+/// least 38 queries and permit aligned KV below 8K. The legacy 8192 output-work
+/// threshold counts query tiles * KV heads * head dimension, not KV rows.
+/// All modes retain matrix-online/G6 prerequisites and encoder safety checks;
+/// unsupported shapes use the incumbent. Boolean aliases follow other prefill
+/// knobs; unrecognized values select automatic mode.
 const PREFILL_ATTN_TENSOR_FLASH_ENV: &str = "QWEN_PREFILL_ATTN_TENSOR_FLASH";
 
 /// Parallel output columns across 32-row query tiles, not a key count.
@@ -2242,13 +2254,18 @@ const TENSOR_FLASH_MIN_OUTPUT_TILE_WORK: usize = 8192;
 
 #[derive(Clone, Copy, Debug)]
 struct TensorFlashPrefillSelection {
-    requested: bool,
+    mode: PrefillEnvMode,
+    // Available requires both Apple10 and Metal 4 support.
     tensor_available: bool,
     matrix_g6: bool,
     matrix_online: bool,
     query_heads: usize,
     kv_heads: usize,
     head_dim: usize,
+    query_dtype: GgmlType,
+    key_dtype: GgmlType,
+    value_dtype: GgmlType,
+    output_dtype: GgmlType,
     query_rows: usize,
     kv_rows: usize,
     workspace_bytes: u64,
@@ -2261,14 +2278,23 @@ fn tensor_flash_output_tile_work(query_tiles: usize) -> Option<usize> {
 }
 
 fn tensor_flash_prefill_selected(s: TensorFlashPrefillSelection) -> bool {
-    if !s.requested
+    if s.mode == PrefillEnvMode::ForceOff
         || !s.tensor_available
         || !s.matrix_g6
         || !s.matrix_online
         || s.query_heads != crate::metal::TENSOR_FLASH_QUERY_HEADS
         || s.kv_heads != crate::metal::TENSOR_FLASH_KV_HEADS
         || s.head_dim != crate::metal::TENSOR_FLASH_HEAD_DIM
+        || s.query_dtype != GgmlType::F32
+        || s.key_dtype != GgmlType::F16
+        || s.value_dtype != GgmlType::F16
+        || s.output_dtype != GgmlType::F32
         || s.query_rows < 20
+    {
+        return false;
+    }
+    if s.mode == PrefillEnvMode::Auto
+        && (!(128..=4096).contains(&s.query_rows) || !(8192..=262144).contains(&s.kv_rows))
     {
         return false;
     }
@@ -2306,15 +2332,16 @@ pub fn with_prefill_attn_tensor_flash_override<R>(enabled: bool, f: impl FnOnce(
     result
 }
 
-fn prefill_attn_tensor_flash_enabled() -> bool {
+fn prefill_attn_tensor_flash_mode() -> PrefillEnvMode {
     if let Some(enabled) = PREFILL_ATTN_TENSOR_FLASH_OVERRIDE.with(Cell::get) {
-        return enabled;
+        return if enabled {
+            PrefillEnvMode::ForceOn
+        } else {
+            PrefillEnvMode::ForceOff
+        };
     }
     static MODE: OnceLock<PrefillEnvMode> = OnceLock::new();
-    matches!(
-        *MODE.get_or_init(|| env_mode(PREFILL_ATTN_TENSOR_FLASH_ENV)),
-        PrefillEnvMode::ForceOn
-    )
+    *MODE.get_or_init(|| env_mode(PREFILL_ATTN_TENSOR_FLASH_ENV))
 }
 
 /// v0.439: two-pass online-softmax matrix attention (KQ folds the softmax
@@ -13185,7 +13212,7 @@ fn prefill_tokens_with_multi_hidden_profiled_inner<'a>(
                                             < chunk_p;
                                 let use_tensor_flash =
                                     tensor_flash_prefill_selected(TensorFlashPrefillSelection {
-                                        requested: prefill_attn_tensor_flash_enabled(),
+                                        mode: prefill_attn_tensor_flash_mode(),
                                         tensor_available: base
                                             .ctx
                                             .tensor_ops_status()
@@ -13198,6 +13225,10 @@ fn prefill_tokens_with_multi_hidden_profiled_inner<'a>(
                                         query_heads: n_q,
                                         kv_heads: n_kv,
                                         head_dim,
+                                        query_dtype: q_normed_pack_p.dtype,
+                                        key_dtype: target_session.kv_k[ai].dtype,
+                                        value_dtype: target_session.kv_v[ai].dtype,
+                                        output_dtype: attn_o_pack_p.dtype,
                                         query_rows: chunk_p,
                                         kv_rows: n_pos,
                                         workspace_bytes: layer_scratch

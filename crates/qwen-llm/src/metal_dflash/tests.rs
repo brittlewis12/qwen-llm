@@ -18,50 +18,216 @@ fn packed_verify_caller_policy_only_dflash_uses_generic() {
 #[test]
 fn tensor_flash_override_restores_scope_and_unwind() {
     assert_eq!(PREFILL_ATTN_TENSOR_FLASH_OVERRIDE.with(Cell::get), None);
+    let before = prefill_attn_tensor_flash_mode();
     with_prefill_attn_tensor_flash_override(false, || {
-        assert!(!prefill_attn_tensor_flash_enabled());
+        assert_eq!(prefill_attn_tensor_flash_mode(), PrefillEnvMode::ForceOff);
         with_prefill_attn_tensor_flash_override(true, || {
-            assert!(prefill_attn_tensor_flash_enabled());
+            assert_eq!(prefill_attn_tensor_flash_mode(), PrefillEnvMode::ForceOn);
         });
-        assert!(!prefill_attn_tensor_flash_enabled());
+        assert_eq!(prefill_attn_tensor_flash_mode(), PrefillEnvMode::ForceOff);
         let result = std::panic::catch_unwind(|| {
             with_prefill_attn_tensor_flash_override(true, || panic!("scope unwind"));
         });
         assert!(result.is_err());
-        assert!(!prefill_attn_tensor_flash_enabled());
+        assert_eq!(prefill_attn_tensor_flash_mode(), PrefillEnvMode::ForceOff);
     });
     assert_eq!(PREFILL_ATTN_TENSOR_FLASH_OVERRIDE.with(Cell::get), None);
+    assert_eq!(prefill_attn_tensor_flash_mode(), before);
 }
 
 #[test]
 fn tensor_flash_override_is_thread_local() {
     with_prefill_attn_tensor_flash_override(true, || {
-        assert!(prefill_attn_tensor_flash_enabled());
+        assert_eq!(prefill_attn_tensor_flash_mode(), PrefillEnvMode::ForceOn);
         std::thread::spawn(|| {
             assert_eq!(PREFILL_ATTN_TENSOR_FLASH_OVERRIDE.with(Cell::get), None);
             with_prefill_attn_tensor_flash_override(false, || {
-                assert!(!prefill_attn_tensor_flash_enabled());
+                assert_eq!(prefill_attn_tensor_flash_mode(), PrefillEnvMode::ForceOff);
             });
         })
         .join()
         .unwrap();
-        assert!(prefill_attn_tensor_flash_enabled());
+        assert_eq!(prefill_attn_tensor_flash_mode(), PrefillEnvMode::ForceOn);
     });
     assert_eq!(PREFILL_ATTN_TENSOR_FLASH_OVERRIDE.with(Cell::get), None);
 }
 
 fn tensor_flash_selection_fixture() -> TensorFlashPrefillSelection {
     TensorFlashPrefillSelection {
-        requested: true,
+        mode: PrefillEnvMode::ForceOn,
         tensor_available: true,
         matrix_g6: true,
         matrix_online: true,
         query_heads: 24,
         kv_heads: 4,
         head_dim: 256,
+        query_dtype: GgmlType::F32,
+        key_dtype: GgmlType::F16,
+        value_dtype: GgmlType::F16,
+        output_dtype: GgmlType::F32,
         query_rows: 64,
         kv_rows: 128,
         workspace_bytes: 24,
+    }
+}
+
+fn tensor_flash_auto_selection_fixture() -> TensorFlashPrefillSelection {
+    TensorFlashPrefillSelection {
+        mode: PrefillEnvMode::Auto,
+        query_rows: 128,
+        kv_rows: 8192,
+        workspace_bytes: u64::MAX,
+        ..tensor_flash_selection_fixture()
+    }
+}
+
+#[test]
+fn tensor_flash_auto_query_lower_boundary() {
+    let s = tensor_flash_auto_selection_fixture();
+    assert!(tensor_flash_prefill_selected(s));
+    assert!(!tensor_flash_prefill_selected(
+        TensorFlashPrefillSelection {
+            query_rows: 127,
+            ..s
+        }
+    ));
+}
+
+#[test]
+fn tensor_flash_auto_query_upper_boundary() {
+    let s = tensor_flash_auto_selection_fixture();
+    assert!(tensor_flash_prefill_selected(TensorFlashPrefillSelection {
+        query_rows: 4096,
+        ..s
+    }));
+    assert!(!tensor_flash_prefill_selected(
+        TensorFlashPrefillSelection {
+            query_rows: 4097,
+            ..s
+        }
+    ));
+}
+
+#[test]
+fn tensor_flash_auto_kv_lower_boundary() {
+    let s = tensor_flash_auto_selection_fixture();
+    assert!(tensor_flash_prefill_selected(s));
+    assert!(!tensor_flash_prefill_selected(
+        TensorFlashPrefillSelection { kv_rows: 8128, ..s }
+    ));
+}
+
+#[test]
+fn tensor_flash_auto_kv_upper_boundary() {
+    let s = tensor_flash_auto_selection_fixture();
+    assert!(tensor_flash_prefill_selected(TensorFlashPrefillSelection {
+        kv_rows: 262144,
+        ..s
+    }));
+    assert!(!tensor_flash_prefill_selected(
+        TensorFlashPrefillSelection {
+            kv_rows: 262208,
+            ..s
+        }
+    ));
+}
+
+#[test]
+fn tensor_flash_auto_requires_aligned_total_kv() {
+    let s = tensor_flash_auto_selection_fixture();
+    for kv_rows in [8193, 8255, 9217, 262143] {
+        assert!(
+            !tensor_flash_prefill_selected(TensorFlashPrefillSelection { kv_rows, ..s }),
+            "kv_rows={kv_rows}"
+        );
+    }
+}
+
+#[test]
+fn tensor_flash_selector_unset_off_on_semantics() {
+    let s = tensor_flash_auto_selection_fixture();
+    for (value, mode) in [
+        (None, PrefillEnvMode::Auto),
+        (Some("0"), PrefillEnvMode::ForceOff),
+        (Some("1"), PrefillEnvMode::ForceOn),
+    ] {
+        assert_eq!(parse_prefill_env_mode(value), mode);
+        for (query_rows, kv_rows, automatic) in [
+            (127, 8192, false),
+            (128, 8192, true),
+            (4096, 8192, true),
+            (4097, 8192, false),
+            (128, 8128, false),
+            (128, 262144, true),
+            (128, 262208, false),
+            (38, 64, false),
+            (39, 8192, false),
+            (64, 32768, false),
+        ] {
+            assert_eq!(
+                tensor_flash_prefill_selected(TensorFlashPrefillSelection {
+                    mode: parse_prefill_env_mode(value),
+                    query_rows,
+                    kv_rows,
+                    ..s
+                }),
+                match mode {
+                    PrefillEnvMode::Auto => automatic,
+                    PrefillEnvMode::ForceOff => false,
+                    PrefillEnvMode::ForceOn => true,
+                },
+                "value={value:?}, rows={query_rows}, kv={kv_rows}",
+            );
+        }
+    }
+    for value in [None, Some(""), Some("auto"), Some("unrecognized")] {
+        assert_eq!(parse_prefill_env_mode(value), PrefillEnvMode::Auto);
+    }
+    for value in ["true", "TRUE", "yes", "YES"] {
+        assert_eq!(parse_prefill_env_mode(Some(value)), PrefillEnvMode::ForceOn);
+    }
+    for value in ["false", "FALSE", "no", "NO"] {
+        assert_eq!(
+            parse_prefill_env_mode(Some(value)),
+            PrefillEnvMode::ForceOff
+        );
+    }
+}
+
+#[test]
+fn tensor_flash_selector_common_guards_apply_in_auto_and_force_on() {
+    let ok = tensor_flash_auto_selection_fixture();
+    for mode in [PrefillEnvMode::Auto, PrefillEnvMode::ForceOn] {
+        for label in [
+            "other_chip",
+            "g6",
+            "online",
+            "q_heads",
+            "kv_heads",
+            "dim",
+            "q_dtype",
+            "k_dtype",
+            "v_dtype",
+            "o_dtype",
+            "workspace",
+        ] {
+            let mut s = TensorFlashPrefillSelection { mode, ..ok };
+            match label {
+                "other_chip" => s.tensor_available = false,
+                "g6" => s.matrix_g6 = false,
+                "online" => s.matrix_online = false,
+                "q_heads" => s.query_heads = 16,
+                "kv_heads" => s.kv_heads = 2,
+                "dim" => s.head_dim = 512,
+                "q_dtype" => s.query_dtype = GgmlType::F16,
+                "k_dtype" => s.key_dtype = GgmlType::F32,
+                "v_dtype" => s.value_dtype = GgmlType::F32,
+                "o_dtype" => s.output_dtype = GgmlType::F16,
+                "workspace" => s.workspace_bytes = 0,
+                _ => unreachable!(),
+            }
+            assert!(!tensor_flash_prefill_selected(s), "{mode:?}/{label}");
+        }
     }
 }
 
@@ -84,7 +250,7 @@ fn tensor_flash_selector_independent_guards_and_small_tails() {
     ] {
         let mut s = ok;
         match label {
-            "off" => s.requested = false,
+            "off" => s.mode = PrefillEnvMode::ForceOff,
             "hardware" => s.tensor_available = false,
             "g6" => s.matrix_g6 = false,
             "online" => s.matrix_online = false,
@@ -136,28 +302,31 @@ fn tensor_flash_selector_independent_guards_and_small_tails() {
 #[test]
 fn tensor_flash_selector_query_caps_preserve_or_fall_back_on_workspace() {
     let ok = tensor_flash_selection_fixture();
-    for (rows, cap, expected) in [
-        (1024, 1, true),
-        (1024, 32, true),
-        (1024, 256, true),
-        (1024, 1024, true),
-        (2048, 1, false),
-        (2048, 2, true),
-        (4096, 2, false),
-        (4096, 4, true),
-    ] {
-        let pos = 8192;
-        let bytes = cap * 24 * (pos / 64) * 2 * 4;
-        assert_eq!(
-            tensor_flash_prefill_selected(TensorFlashPrefillSelection {
-                query_rows: rows,
-                kv_rows: pos,
-                workspace_bytes: bytes as u64,
-                ..ok
-            }),
-            expected,
-            "rows={rows} query_cap={cap}"
-        );
+    for mode in [PrefillEnvMode::Auto, PrefillEnvMode::ForceOn] {
+        for (rows, cap, expected) in [
+            (1024, 1, true),
+            (1024, 32, true),
+            (1024, 256, true),
+            (1024, 1024, true),
+            (2048, 1, false),
+            (2048, 2, true),
+            (4096, 2, false),
+            (4096, 4, true),
+        ] {
+            let pos = 8192;
+            let bytes = cap * 24 * (pos / 64) * 2 * 4;
+            assert_eq!(
+                tensor_flash_prefill_selected(TensorFlashPrefillSelection {
+                    mode,
+                    query_rows: rows,
+                    kv_rows: pos,
+                    workspace_bytes: bytes as u64,
+                    ..ok
+                }),
+                expected,
+                "mode={mode:?} rows={rows} query_cap={cap}"
+            );
+        }
     }
 }
 

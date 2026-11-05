@@ -145,6 +145,7 @@ mod tests {
     use super::*;
     use crate::metal::{dispatch_census_begin, dispatch_census_take, wait_completed};
     use crate::tensor::TensorDesc;
+    use objc2_metal::{MTLBuffer, MTLCommandBuffer, MTLCommandQueue};
 
     fn random(state: &mut u64) -> u64 {
         *state ^= *state << 13;

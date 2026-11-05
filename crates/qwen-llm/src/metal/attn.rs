@@ -1,9 +1,145 @@
 //! Attention: naive decode, flash-attn v4 decode/prefill, matrix sidecar.
 
 use super::*;
+use std::mem::size_of;
 
-/// Experimental Qwen dense prefill with register-resident float O on Apple10.
-/// The caller supplies the existing matrix ml workspace for byte-sized masks.
+pub(crate) const TENSOR_FLASH_QUERY_TILE: usize = 32;
+pub(crate) const TENSOR_FLASH_KEY_TILE: usize = 64;
+pub(crate) const TENSOR_FLASH_HEAD_DIM: usize = 256;
+pub(crate) const TENSOR_FLASH_QUERY_HEADS: usize = 24;
+pub(crate) const TENSOR_FLASH_KV_HEADS: usize = 4;
+pub(crate) const TENSOR_FLASH_GROUP: usize = TENSOR_FLASH_QUERY_HEADS / TENSOR_FLASH_KV_HEADS;
+const TENSOR_FLASH_THREADS: usize = 8 * 32;
+const TENSOR_FLASH_KV_STRIDE: usize = TENSOR_FLASH_KV_HEADS * TENSOR_FLASH_HEAD_DIM;
+// Preserve the exported encoder's original position range. The products used
+// for Q/O and masks within this range exceed u32 and are ulong in the shader.
+pub(crate) const TENSOR_FLASH_MAX_POSITIONS: usize =
+    (u32::MAX as usize / TENSOR_FLASH_KV_STRIDE) / TENSOR_FLASH_KEY_TILE * TENSOR_FLASH_KEY_TILE;
+const TENSOR_FLASH_SCRATCH_LAYOUT_BYTES: usize = TENSOR_FLASH_QUERY_TILE * TENSOR_FLASH_HEAD_DIM * size_of::<u16>() // Q
+    + TENSOR_FLASH_QUERY_TILE * TENSOR_FLASH_KEY_TILE * size_of::<f32>() // S
+    + TENSOR_FLASH_QUERY_TILE * TENSOR_FLASH_KEY_TILE * size_of::<u16>() // P
+    + TENSOR_FLASH_QUERY_TILE * size_of::<f32>() // row rescale / final reciprocal
+    + size_of::<u32>(); // atomic rescale flag
+const TENSOR_FLASH_SCRATCH_BYTES: usize = TENSOR_FLASH_SCRATCH_LAYOUT_BYTES.div_ceil(16) * 16;
+
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct TensorFlashQwen27Layout {
+    pub(crate) tiles: usize,
+    pub(crate) mask_bytes: usize,
+    pub(crate) q_elements: u64,
+    pub(crate) kv_elements: u64,
+}
+
+fn tensor_flash_error(detail: impl Into<String>) -> MetalError {
+    MetalError::BadShape {
+        kernel: "attn_tensor_flash_qwen27",
+        detail: detail.into(),
+    }
+}
+
+/// Checked bounds for every device address and dispatch coordinate used by
+/// the fixed 24/4-head d256 shader. No buffers or GPU work are needed here.
+pub(crate) fn tensor_flash_qwen27_layout(
+    n_rows: usize,
+    base_pos: usize,
+    n_pos: usize,
+) -> Result<TensorFlashQwen27Layout, MetalError> {
+    if n_rows == 0 {
+        return Err(tensor_flash_error("n_rows must be positive"));
+    }
+    if !n_pos.is_multiple_of(TENSOR_FLASH_KEY_TILE) {
+        return Err(tensor_flash_error("KV length must be 64-aligned"));
+    }
+    if base_pos.checked_add(n_rows) != Some(n_pos) {
+        return Err(tensor_flash_error(
+            "base_pos + n_rows must equal n_pos without overflow",
+        ));
+    }
+    if n_pos > TENSOR_FLASH_MAX_POSITIONS {
+        return Err(tensor_flash_error(
+            "n_pos exceeds the position address contract",
+        ));
+    }
+    for value in [n_rows, base_pos, n_pos] {
+        u32::try_from(value).map_err(|_| tensor_flash_error("shader argument exceeds u32"))?;
+    }
+    let product = |xs: &[usize]| -> Result<usize, MetalError> {
+        xs.iter()
+            .try_fold(1usize, |a, b| a.checked_mul(*b))
+            .ok_or_else(|| tensor_flash_error("tensor/index product overflow"))
+    };
+    let local_rows = product(&[n_rows, TENSOR_FLASH_GROUP])?;
+    let tiles = local_rows.div_ceil(TENSOR_FLASH_QUERY_TILE);
+    let mask_bytes = product(&[tiles, n_pos / TENSOR_FLASH_KEY_TILE])?;
+    let q_elements = product(&[n_rows, TENSOR_FLASH_QUERY_HEADS, TENSOR_FLASH_HEAD_DIM])?;
+    let kv_elements = product(&[n_pos, TENSOR_FLASH_KV_STRIDE])?;
+    // Last vector load/store is within these complete typed extents. Check
+    // byte arithmetic too, before converting them into buffer requirements.
+    product(&[q_elements, size_of::<f32>()])?;
+    product(&[kv_elements, size_of::<u16>()])?;
+    // uint2 thread_position_in_grid in the mask pre-pass is axis-wise u32.
+    let mask_threads = product(&[tiles.div_ceil(TENSOR_FLASH_THREADS), TENSOR_FLASH_THREADS])?;
+    u32::try_from(mask_threads).map_err(|_| tensor_flash_error("mask grid exceeds u32"))?;
+    u32::try_from(n_pos / TENSOR_FLASH_KEY_TILE)
+        .map_err(|_| tensor_flash_error("key grid exceeds u32"))?;
+    Ok(TensorFlashQwen27Layout {
+        tiles,
+        mask_bytes,
+        q_elements: u64::try_from(q_elements)
+            .map_err(|_| tensor_flash_error("Q extent exceeds u64"))?,
+        kv_elements: u64::try_from(kv_elements)
+            .map_err(|_| tensor_flash_error("KV extent exceeds u64"))?,
+    })
+}
+
+fn tensor_flash_view_range(
+    name: &str,
+    tensor: &MetalTensor,
+    alignment: u64,
+) -> Result<(u64, u64, u64), MetalError> {
+    let (elements, bytes) =
+        checked_ggml_shape_bytes(&tensor.shape, tensor.dtype).map_err(|_| {
+            tensor_flash_error(format!(
+                "{name} shape/byte extent overflow or invalid dtype layout"
+            ))
+        })?;
+    let bytes = u64::try_from(bytes)
+        .map_err(|_| tensor_flash_error(format!("{name} byte extent exceeds u64")))?;
+    let end = tensor
+        .offset
+        .checked_add(bytes)
+        .ok_or_else(|| tensor_flash_error(format!("{name} buffer range overflow")))?;
+    if !tensor.offset.is_multiple_of(alignment) {
+        return Err(tensor_flash_error(format!(
+            "{name} offset requires {alignment}-byte alignment"
+        )));
+    }
+    if end > tensor.buffer.length() as u64 {
+        return Err(tensor_flash_error(format!(
+            "{name} view exceeds its buffer range"
+        )));
+    }
+    Ok((
+        u64::try_from(elements)
+            .map_err(|_| tensor_flash_error("view element extent exceeds u64"))?,
+        tensor.offset,
+        end,
+    ))
+}
+
+/// Experimental Qwen dense prefill with a float cooperative O on Apple10.
+/// Q/O are contiguous F32; KV is contiguous F16 with a 1024-element row
+/// stride. Q requires 16-byte float4 alignment. Masks are a writable byte
+/// workspace (the production matrix ml allocation); the declared tensor view
+/// must fit its buffer. Both writable views must be disjoint from each other
+/// and from every input. A serial encoder is required for the mask dependency.
+///
+/// Numerical contract: Q/K/V must be finite, Q representable in F16 (as in
+/// incumbent staging), and QK scores representable in F32. No sanitization is
+/// performed. +Inf scores can produce Inf-Inf; zero P does not guarantee
+/// suppression of NaN/Inf V operands that are read. Fully skipped future
+/// blocks are not read. Non-finite inputs are outside the numerical contract;
+/// propagation can differ from the incumbent because blocking differs.
 #[allow(clippy::too_many_arguments)]
 pub fn encode_attn_tensor_flash_qwen27(
     ctx: &MetalContext,
@@ -17,27 +153,61 @@ pub fn encode_attn_tensor_flash_qwen27(
     base_pos: usize,
     n_pos: usize,
 ) -> Result<(), MetalError> {
-    let tiles = (n_rows * 6).div_ceil(32);
-    let mask_bytes = tiles * (n_pos / 64);
-    if n_rows == 0
-        || !n_pos.is_multiple_of(64)
-        || base_pos.checked_add(n_rows) != Some(n_pos)
-        || q.dtype != GgmlType::F32
-        || out.dtype != GgmlType::F32
-        || k.dtype != GgmlType::F16
-        || v.dtype != GgmlType::F16
-        || q.n_elements() != (n_rows * 24 * 256) as u64
-        || out.n_elements() != q.n_elements()
-        || k.n_elements() < (n_pos * 1024) as u64
-        || v.n_elements() < (n_pos * 1024) as u64
-        || masks.n_bytes() < mask_bytes as u64
-        || n_pos > u32::MAX as usize / 1024
-    {
-        return Err(MetalError::BadShape {
-            kernel: "attn_tensor_flash_qwen27",
-            detail: "requires Qwen 24/4 heads, d256, contiguous F32 Q/O and F16 KV, 64-aligned KV length and mask workspace".into(),
-        });
+    if enc.concurrent {
+        return Err(tensor_flash_error(
+            "mask/flash dependent dispatches require a serial encoder",
+        ));
     }
+    let layout = tensor_flash_qwen27_layout(n_rows, base_pos, n_pos)?;
+    for (name, tensor, dtype) in [
+        ("q", q, GgmlType::F32),
+        ("out", out, GgmlType::F32),
+        ("k", k, GgmlType::F16),
+        ("v", v, GgmlType::F16),
+    ] {
+        if tensor.dtype != dtype {
+            return Err(tensor_flash_error(format!("{name} requires {dtype:?}")));
+        }
+    }
+    for (name, tensor) in [("masks", masks), ("out", out)] {
+        if !tensor.is_writable() {
+            return Err(tensor_flash_error(format!("{name} must be writable")));
+        }
+    }
+    let qr = tensor_flash_view_range("q", q, 16)?;
+    let kr = tensor_flash_view_range("k", k, 2)?;
+    let vr = tensor_flash_view_range("v", v, 2)?;
+    let mr = tensor_flash_view_range("masks", masks, 1)?;
+    let or = tensor_flash_view_range("out", out, 4)?;
+    if qr.0 != layout.q_elements {
+        return Err(tensor_flash_error("q element count mismatch"));
+    }
+    if or.0 != layout.q_elements {
+        return Err(tensor_flash_error("out element count mismatch"));
+    }
+    if kr.0 < layout.kv_elements {
+        return Err(tensor_flash_error("k cache too small"));
+    }
+    if vr.0 < layout.kv_elements {
+        return Err(tensor_flash_error("v cache too small"));
+    }
+    if mr.2 - mr.1 < layout.mask_bytes as u64 {
+        return Err(tensor_flash_error("mask workspace too small"));
+    }
+    let overlaps = |a: &MetalTensor, ar: (u64, u64, u64), b: &MetalTensor, br: (u64, u64, u64)| {
+        Retained::as_ptr(&a.buffer) == Retained::as_ptr(&b.buffer) && ar.1 < br.2 && br.1 < ar.2
+    };
+    for (name, input, range) in [("q", q, qr), ("k", k, kr), ("v", v, vr)] {
+        if overlaps(masks, mr, input, range) || overlaps(out, or, input, range) {
+            return Err(tensor_flash_error(format!(
+                "writable workspace/output aliases {name}"
+            )));
+        }
+    }
+    if overlaps(masks, mr, out, or) {
+        return Err(tensor_flash_error("masks and out overlap"));
+    }
+    let tiles = layout.tiles;
     let args = AttnMatrixArgs {
         n_rows: n_rows as u32,
         n_pos: n_pos as u32,
@@ -53,6 +223,11 @@ pub fn encode_attn_tensor_flash_qwen27(
     };
     let mask = ctx.tensor_pipeline("kernel_attn_flash_probe_mask")?;
     let flash = ctx.tensor_pipeline("kernel_attn_flash_probe_f16_d256")?;
+    enc.note_read(q);
+    enc.note_read(k);
+    enc.note_read(v);
+    enc.note_write(masks);
+    enc.note_write(out);
     enc.set_pipeline(&mask);
     enc.set_bytes(0, &args);
     enc.set_tensor(1, masks);
@@ -75,7 +250,7 @@ pub fn encode_attn_tensor_flash_qwen27(
     enc.set_tensor(3, v);
     enc.set_tensor(4, out);
     enc.set_tensor(5, masks);
-    enc.set_threadgroup_memory(0, 28816);
+    enc.set_threadgroup_memory(0, TENSOR_FLASH_SCRATCH_BYTES);
     enc.dispatch(
         MTLSize {
             width: tiles,
@@ -3577,122 +3752,12 @@ pub(crate) fn with_tiled_vt_pilot<T>(enabled: bool, f: impl FnOnce() -> T) -> (T
 }
 
 #[cfg(test)]
+#[path = "attn_tensor_flash_tests.rs"]
+mod tensor_flash_tests;
+
+#[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn tensor_flash_qwen27_matches_f64_reference() {
-        let _lease = crate::metal::context::acquire_metal_benchmark_lease()
-            .expect("tensor flash production GPU lease");
-        let Some(ctx) = metal_test_context() else {
-            return;
-        };
-        if !ctx.tensor_ops_status().is_available() {
-            return;
-        }
-        let mut state = 0x6a09_e667_f3bc_c909u64;
-        let mut sample = || {
-            state ^= state << 13;
-            state ^= state >> 7;
-            state ^= state << 17;
-            ((state >> 40) as f32 / 16_777_216.0 * 2.0 - 1.0) * 1.732_050_8
-        };
-        for (rows, pos) in [(1usize, 64usize), (20, 64), (33, 192), (64, 64)] {
-            for pattern in 0..3 {
-                let mut q: Vec<f32> = (0..rows * 24 * 256)
-                    .map(|_| if pattern == 1 { 0.0 } else { sample() })
-                    .collect();
-                let k: Vec<u16> = (0..pos * 1024)
-                    .map(|_| half::f16::from_f32(sample()).to_bits())
-                    .collect();
-                let v: Vec<u16> = (0..pos * 1024)
-                    .map(|_| half::f16::from_f32(sample()).to_bits())
-                    .collect();
-                let kf: Vec<f32> = k
-                    .iter()
-                    .map(|&x| half::f16::from_bits(x).to_f32())
-                    .collect();
-                let vf: Vec<f32> = v
-                    .iter()
-                    .map(|&x| half::f16::from_bits(x).to_f32())
-                    .collect();
-                if pattern == 2 {
-                    for h in 0..24 {
-                        for d in 0..256 {
-                            q[((rows - 1) * 24 + h) * 256 + d] =
-                                kf[(pos - 1) * 1024 + h / 6 * 256 + d] * 8.0;
-                        }
-                    }
-                }
-                let make = |bytes: &[u8], n, dtype| {
-                    MetalTensor::from_bytes(&ctx, bytes, vec![n as u64], dtype).unwrap()
-                };
-                let qt = make(bytemuck::cast_slice(&q), q.len(), GgmlType::F32);
-                let kt = make(bytemuck::cast_slice(&k), k.len(), GgmlType::F16);
-                let vt = make(bytemuck::cast_slice(&v), v.len(), GgmlType::F16);
-                let masks = MetalTensor::zeros_f32(
-                    &ctx,
-                    vec![((rows * 6).div_ceil(32) * (pos / 64)).div_ceil(4) as u64],
-                )
-                .unwrap();
-                let out = MetalTensor::zeros_f32(&ctx, vec![q.len() as u64]).unwrap();
-                one_shot(&ctx, |enc| {
-                    encode_attn_tensor_flash_qwen27(
-                        &ctx,
-                        enc,
-                        &qt,
-                        &kt,
-                        &vt,
-                        &masks,
-                        &out,
-                        rows,
-                        pos - rows,
-                        pos,
-                    )
-                })
-                .unwrap();
-                let actual = read_back_f32(&out.buffer, q.len());
-                let reference =
-                    cpu_matrix_attn_reference(&q, &kf, &vf, rows, pos - rows, pos, 24, 4, 6, 256);
-                let mut max_abs = 0.0f32;
-                let mut min_cos = 1.0f64;
-                for (a, b) in actual.chunks_exact(256).zip(reference.chunks_exact(256)) {
-                    let (mut ab, mut aa, mut bb) = (0.0, 0.0, 0.0);
-                    for (&x, &y) in a.iter().zip(b) {
-                        assert!(x.is_finite());
-                        max_abs = max_abs.max((x - y).abs());
-                        ab += f64::from(x) * f64::from(y);
-                        aa += f64::from(x).powi(2);
-                        bb += f64::from(y).powi(2);
-                    }
-                    min_cos = min_cos.min(ab / (aa * bb).sqrt());
-                }
-                assert!(
-                    max_abs <= 0.02 && min_cos >= 0.9999,
-                    "rows={rows} pos={pos} pattern={pattern} max_abs={max_abs} min_cos={min_cos}"
-                );
-                one_shot(&ctx, |enc| {
-                    assert!(
-                        encode_attn_tensor_flash_qwen27(
-                            &ctx,
-                            enc,
-                            &qt,
-                            &kt,
-                            &vt,
-                            &masks,
-                            &out,
-                            rows,
-                            pos - rows,
-                            pos - 1
-                        )
-                        .is_err()
-                    );
-                    Ok(())
-                })
-                .unwrap();
-            }
-        }
-    }
 
     #[test]
     fn materialized_attention_scratch_is_aligned_without_changing_visible_positions() {

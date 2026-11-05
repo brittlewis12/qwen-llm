@@ -50,6 +50,132 @@ fn tensor_flash_override_is_thread_local() {
     assert_eq!(PREFILL_ATTN_TENSOR_FLASH_OVERRIDE.with(Cell::get), None);
 }
 
+fn tensor_flash_selection_fixture() -> TensorFlashPrefillSelection {
+    TensorFlashPrefillSelection {
+        requested: true,
+        tensor_available: true,
+        matrix_g6: true,
+        matrix_online: true,
+        query_heads: 24,
+        kv_heads: 4,
+        head_dim: 256,
+        query_rows: 64,
+        kv_rows: 128,
+        workspace_bytes: 24,
+    }
+}
+
+#[test]
+fn tensor_flash_selector_independent_guards_and_small_tails() {
+    let ok = tensor_flash_selection_fixture();
+    assert!(tensor_flash_prefill_selected(ok));
+    let mut cases = Vec::new();
+    for label in [
+        "off",
+        "hardware",
+        "g6",
+        "online",
+        "q_heads",
+        "kv_heads",
+        "dim",
+        "workspace",
+        "unaligned",
+        "position_bound",
+    ] {
+        let mut s = ok;
+        match label {
+            "off" => s.requested = false,
+            "hardware" => s.tensor_available = false,
+            "g6" => s.matrix_g6 = false,
+            "online" => s.matrix_online = false,
+            "q_heads" => s.query_heads = 32,
+            "kv_heads" => s.kv_heads = 8,
+            "dim" => s.head_dim = 512,
+            "workspace" => s.workspace_bytes = 23,
+            "unaligned" => s.kv_rows = 127,
+            "position_bound" => s.kv_rows = crate::metal::TENSOR_FLASH_MAX_POSITIONS + 64,
+            _ => unreachable!(),
+        }
+        cases.push((label, s));
+    }
+    for (label, s) in cases {
+        assert!(!tensor_flash_prefill_selected(s), "{label}");
+    }
+    for rows in [0, 1, 19, 20, 31, 37] {
+        assert!(
+            !tensor_flash_prefill_selected(TensorFlashPrefillSelection {
+                query_rows: rows,
+                ..ok
+            }),
+            "rows={rows}"
+        );
+    }
+    // It is OUTPUT-TILE work:38queries already pass at totalKV64, below8K.
+    assert_eq!(tensor_flash_output_tile_work(7), Some(7168));
+    assert_eq!(tensor_flash_output_tile_work(8), Some(8192));
+    assert_eq!(tensor_flash_output_tile_work(usize::MAX), None);
+    for rows in [38, 39, 63, 64] {
+        assert!(
+            tensor_flash_prefill_selected(TensorFlashPrefillSelection {
+                query_rows: rows,
+                kv_rows: 64,
+                workspace_bytes: 12,
+                ..ok
+            }),
+            "rows={rows}"
+        );
+    }
+    assert!(!tensor_flash_prefill_selected(
+        TensorFlashPrefillSelection {
+            query_rows: 129,
+            ..ok
+        }
+    ));
+}
+
+#[test]
+fn tensor_flash_selector_query_caps_preserve_or_fall_back_on_workspace() {
+    let ok = tensor_flash_selection_fixture();
+    for (rows, cap, expected) in [
+        (1024, 1, true),
+        (1024, 32, true),
+        (1024, 256, true),
+        (1024, 1024, true),
+        (2048, 1, false),
+        (2048, 2, true),
+        (4096, 2, false),
+        (4096, 4, true),
+    ] {
+        let pos = 8192;
+        let bytes = cap * 24 * (pos / 64) * 2 * 4;
+        assert_eq!(
+            tensor_flash_prefill_selected(TensorFlashPrefillSelection {
+                query_rows: rows,
+                kv_rows: pos,
+                workspace_bytes: bytes as u64,
+                ..ok
+            }),
+            expected,
+            "rows={rows} query_cap={cap}"
+        );
+    }
+}
+
+#[test]
+fn tensor_flash_vt_validity_restored_prefix_then_matrix() {
+    assert_eq!(attn_matrix_vt_after_tensor_flash(0, 0, 64), 64);
+    assert_eq!(attn_matrix_vt_after_tensor_flash(64, 64, 128), 128);
+    for valid in [0, 63] {
+        let after = attn_matrix_vt_after_tensor_flash(valid, 64, 128);
+        assert_eq!(after, valid);
+        assert_eq!(
+            attn_matrix_vt_prefix_rebuild_rows(true, after, 128),
+            Some(128)
+        );
+        assert_eq!(attn_matrix_vt_prefix_rebuild_rows(false, after, 128), None);
+    }
+}
+
 #[cfg(feature = "dflash-k0s-diagnostics")]
 struct K0sSyntheticRowProvider {
     side: DFlashK0sCodebookSide,

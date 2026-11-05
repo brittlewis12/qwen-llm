@@ -2231,8 +2231,57 @@ fn prefill_attn_matrix_causal_skip_enabled() -> bool {
 
 /// Enable experimental single-pass tensor flash attention for dense Qwen
 /// 24/4-head, d256 prefill on Apple10. Defaults off; unsupported devices and
-/// shapes retain their existing dispatch.
+/// shapes retain their existing dispatch. The 8192 eligibility threshold is
+/// output-tile work (query tiles * KV heads * head dimension), not KV length.
+/// Forced-on can select aligned KV below 8K; combined row/work predicates
+/// require at least 38 queries. No KV-length cutoff is implied.
 const PREFILL_ATTN_TENSOR_FLASH_ENV: &str = "QWEN_PREFILL_ATTN_TENSOR_FLASH";
+
+/// Parallel output columns across 32-row query tiles, not a key count.
+const TENSOR_FLASH_MIN_OUTPUT_TILE_WORK: usize = 8192;
+
+#[derive(Clone, Copy, Debug)]
+struct TensorFlashPrefillSelection {
+    requested: bool,
+    tensor_available: bool,
+    matrix_g6: bool,
+    matrix_online: bool,
+    query_heads: usize,
+    kv_heads: usize,
+    head_dim: usize,
+    query_rows: usize,
+    kv_rows: usize,
+    workspace_bytes: u64,
+}
+
+fn tensor_flash_output_tile_work(query_tiles: usize) -> Option<usize> {
+    query_tiles
+        .checked_mul(crate::metal::TENSOR_FLASH_KV_HEADS)?
+        .checked_mul(crate::metal::TENSOR_FLASH_HEAD_DIM)
+}
+
+fn tensor_flash_prefill_selected(s: TensorFlashPrefillSelection) -> bool {
+    if !s.requested
+        || !s.tensor_available
+        || !s.matrix_g6
+        || !s.matrix_online
+        || s.query_heads != crate::metal::TENSOR_FLASH_QUERY_HEADS
+        || s.kv_heads != crate::metal::TENSOR_FLASH_KV_HEADS
+        || s.head_dim != crate::metal::TENSOR_FLASH_HEAD_DIM
+        || s.query_rows < 20
+    {
+        return false;
+    }
+    let Some(base) = s.kv_rows.checked_sub(s.query_rows) else {
+        return false;
+    };
+    let Ok(layout) = crate::metal::tensor_flash_qwen27_layout(s.query_rows, base, s.kv_rows) else {
+        return false;
+    };
+    tensor_flash_output_tile_work(layout.tiles)
+        .is_some_and(|work| work >= TENSOR_FLASH_MIN_OUTPUT_TILE_WORK)
+        && s.workspace_bytes >= layout.mask_bytes as u64
+}
 
 thread_local! {
     static PREFILL_ATTN_TENSOR_FLASH_OVERRIDE: Cell<Option<bool>> = const { Cell::new(None) };
@@ -2366,6 +2415,20 @@ pub(crate) fn attn_matrix_vt_prefix_rebuild_rows(
     chunk_start: usize,
 ) -> Option<usize> {
     (use_matrix && valid_until < chunk_start).then_some(chunk_start)
+}
+
+/// Flash does not rebuild a restored prefix's missing VT. The fused scatter
+/// only extends an already valid prefix; a later matrix call must rebuild it.
+pub(crate) fn attn_matrix_vt_after_tensor_flash(
+    valid_until: usize,
+    chunk_start: usize,
+    n_pos: usize,
+) -> usize {
+    if valid_until >= chunk_start {
+        n_pos
+    } else {
+        valid_until
+    }
 }
 
 fn prefill_attn_matrix_g16_mode() -> PrefillEnvMode {
@@ -13120,18 +13183,27 @@ fn prefill_tokens_with_multi_hidden_profiled_inner<'a>(
                                     layer_scratch.scratch_plan.modes.attn_matrix_online
                                         && (layer_scratch.attn_matrix_query_rows as usize)
                                             < chunk_p;
-                                let use_tensor_flash = use_matrix_g6
-                                    && layer_scratch.scratch_plan.modes.attn_matrix_online
-                                    && prefill_attn_tensor_flash_enabled()
-                                    && base.ctx.tensor_ops_status().is_available()
-                                    && n_q == 24
-                                    && n_kv == 4
-                                    && head_dim == 256
-                                    && chunk_p >= 20
-                                    && n_pos.is_multiple_of(64)
-                                    && (chunk_p * group).div_ceil(32) * n_kv * head_dim >= 8192
-                                    && layer_scratch.attn_matrix_ml_pack.n_bytes()
-                                        >= ((chunk_p * group).div_ceil(32) * (n_pos / 64)) as u64;
+                                let use_tensor_flash =
+                                    tensor_flash_prefill_selected(TensorFlashPrefillSelection {
+                                        requested: prefill_attn_tensor_flash_enabled(),
+                                        tensor_available: base
+                                            .ctx
+                                            .tensor_ops_status()
+                                            .is_available(),
+                                        matrix_g6: use_matrix_g6,
+                                        matrix_online: layer_scratch
+                                            .scratch_plan
+                                            .modes
+                                            .attn_matrix_online,
+                                        query_heads: n_q,
+                                        kv_heads: n_kv,
+                                        head_dim,
+                                        query_rows: chunk_p,
+                                        kv_rows: n_pos,
+                                        workspace_bytes: layer_scratch
+                                            .attn_matrix_ml_pack
+                                            .n_bytes(),
+                                    });
                                 let trace_matrix_subphases = use_matrix
                                     && !use_tensor_flash
                                     && trace_attn_phases
@@ -13157,9 +13229,12 @@ fn prefill_tokens_with_multi_hidden_profiled_inner<'a>(
                                     target_session.kv_n_pos[ai] = n_pos;
                                     // Scatter wrote this chunk's VT suffix. A missing prefix
                                     // remains invalid so a later matrix fallback rebuilds it.
-                                    if attn_matrix_vt_valid_until[ai] >= chunk_start as usize {
-                                        attn_matrix_vt_valid_until[ai] = n_pos;
-                                    }
+                                    attn_matrix_vt_valid_until[ai] =
+                                        attn_matrix_vt_after_tensor_flash(
+                                            attn_matrix_vt_valid_until[ai],
+                                            chunk_start as usize,
+                                            n_pos,
+                                        );
                                 } else if trace_matrix_subphases {
                                     let vt_stride = layer_scratch.attn_matrix_max_pos as usize;
                                     let per_attn_vt = n_kv * head_dim * vt_stride;

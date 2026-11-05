@@ -1325,6 +1325,7 @@ impl Workspace {
                 ctx,
                 e.enc(),
                 crate::half_telemetry::SITE_V41_ROUTED_DOWN,
+                id as u32,
                 &b[13],
             );
             let inner_half = match &scratch.half_inner {

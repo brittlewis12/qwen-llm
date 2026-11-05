@@ -37,7 +37,10 @@ use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::io::Write;
+use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
 /// Decoded weights entering a half-staged path must stay below this bound.
@@ -45,12 +48,12 @@ pub const HALF_DECODED_MAX: f32 = 32_768.0;
 /// RMSNorm output bound (`sqrt(n) * max|gamma|`) for half-staged consumers.
 pub const RMS_NORM_MAX: f32 = 2_048.0;
 /// Bump when the bound formulas or cache schema change.
-pub const CENSUS_VERSION: u32 = 1;
+pub const CENSUS_VERSION: u32 = 2;
 
 /// Bounded pread chunk for the sequential per-shard census reader.
 const SCAN_READ_BYTES: usize = 16 * 1024 * 1024;
 
-const CACHE_SCHEMA: &[u8] = b"qwen-half-range-census-v1\0";
+const CACHE_SCHEMA: &[u8] = b"qwen-half-range-census-v2\0";
 /// Overrides the directory for the per-artifact half-range census cache.
 const CACHE_DIR_ENV: &str = "QWEN_HALF_RANGE_CACHE_DIR";
 /// Set to 0 to disable the half-range census cache for this process.
@@ -64,6 +67,7 @@ const REPORT_ENV: &str = "QWEN_HALF_RANGE_REPORT";
 pub enum RangeMethod {
     Mxfp4Exponent,
     BlockScale,
+    ExactDecode,
     FullPrecision,
 }
 
@@ -182,7 +186,7 @@ pub enum HalfRangeScope {
 }
 
 impl HalfRangeScope {
-    fn allows_f32_reroute(self, range: &TensorRange) -> bool {
+    fn recognizes_existing_f32_dispatch(self, range: &TensorRange) -> bool {
         match self {
             Self::Generic => false,
             Self::DeepSeekV4 => {
@@ -201,26 +205,69 @@ fn is_routed_down_name(name: &str) -> bool {
 
 crate::env_flag!(
     /// Enables the load-time decoded-range guard for half-staged weights.
-    /// Default on; set to 0 to load without a census (rollback lever).
-    default_on half_range_guard_enabled,
+    /// Default off; set to 1/true/TRUE/yes/YES to enable. Disabled returns
+    /// before cache identity, filesystem access, or scanning.
+    default_off half_range_guard_enabled,
     "QWEN_HALF_RANGE_GUARD"
 );
+
+#[cfg(test)]
+thread_local! {
+    static GUARD_OVERRIDE: std::cell::Cell<Option<bool>> = const { std::cell::Cell::new(None) };
+}
+
+/// Test shim: the env flag is latched once per process, so loader tests need a
+/// scoped override.
+#[cfg(test)]
+pub(crate) fn with_guard_override<R>(value: bool, f: impl FnOnce() -> R) -> R {
+    struct Restore(Option<bool>);
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            GUARD_OVERRIDE.with(|slot| slot.set(self.0));
+        }
+    }
+    let previous = GUARD_OVERRIDE.with(|slot| slot.replace(Some(value)));
+    let _restore = Restore(previous);
+    f()
+}
+
+fn guard_enabled() -> bool {
+    #[cfg(test)]
+    if let Some(value) = GUARD_OVERRIDE.with(|slot| slot.get()) {
+        return value;
+    }
+    half_range_guard_enabled()
+}
+
+#[cfg(test)]
+pub(crate) fn guard_enabled_for_test() -> bool {
+    guard_enabled()
+}
+
+fn empty_census() -> HalfRangeCensus {
+    HalfRangeCensus {
+        version: CENSUS_VERSION,
+        tensors: BTreeMap::new(),
+        norms: BTreeMap::new(),
+        violations: Vec::new(),
+        scanned_bytes: 0,
+        scan_wall_ms: 0,
+        cache_hit: false,
+    }
+}
+
+#[cfg(test)]
+pub(crate) fn disabled_census_for_test() -> HalfRangeCensus {
+    empty_census()
+}
 
 /// Compute (or load from cache) the census and refuse unsafe tensors.
 pub fn audit_or_refuse(
     gguf: &GgufFile,
     scope: HalfRangeScope,
 ) -> Result<HalfRangeCensus, HalfRangeError> {
-    if !half_range_guard_enabled() {
-        return Ok(HalfRangeCensus {
-            version: CENSUS_VERSION,
-            tensors: BTreeMap::new(),
-            norms: BTreeMap::new(),
-            violations: Vec::new(),
-            scanned_bytes: 0,
-            scan_wall_ms: 0,
-            cache_hit: false,
-        });
+    if !guard_enabled() {
+        return Ok(empty_census());
     }
     let census = cached_census(gguf)?;
     for violation in &census.violations {
@@ -246,7 +293,7 @@ pub fn audit_or_refuse(
             }
             ViolationKind::DecodedRange => {
                 if let Some(range) = census.tensors.get(&violation.name)
-                    && scope.allows_f32_reroute(range)
+                    && scope.recognizes_existing_f32_dispatch(range)
                 {
                     continue;
                 }
@@ -264,28 +311,75 @@ pub fn audit_or_refuse(
 
 /// Cached census for diagnostics and cost measurement.
 pub fn cached_census(gguf: &GgufFile) -> Result<HalfRangeCensus, GgufError> {
+    cached_census_with_root_impl(gguf, cache_root().as_deref())
+}
+
+#[cfg(test)]
+pub(crate) fn cached_census_with_root(
+    gguf: &GgufFile,
+    root: Option<&Path>,
+) -> Result<HalfRangeCensus, GgufError> {
+    cached_census_with_root_impl(gguf, root)
+}
+
+fn cached_census_with_root_impl(
+    gguf: &GgufFile,
+    root: Option<&Path>,
+) -> Result<HalfRangeCensus, GgufError> {
+    // Opening-time stamps are not enough: an already-open GgufFile can outlive
+    // an in-place rewrite. Revalidate the retained descriptors before the cache
+    // lookup and again after scanning before publishing/returning success.
+    let before = gguf.revalidate_retained_shard_stamps()?;
     let key = cache_key(gguf)?;
+    let key_lock = key_lock(&key);
+    let _single_flight = key_lock
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
     let started = Instant::now();
-    if let Some(root) = cache_root()
-        && let Some(mut cached) = read_cache(&root, &key)
+
+    if let Some(root) = root
+        && let Some(mut cached) = read_cache(root, &key)
     {
-        cached.cache_hit = true;
-        cached.scan_wall_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
-        report_census(&cached);
-        return Ok(cached);
+        let after = gguf.revalidate_retained_shard_stamps()?;
+        if after != before {
+            return Err(scan_changed_error());
+        }
+        if cache_covers(gguf, &cached) {
+            cached.violations = violations_from(&cached.tensors, &cached.norms);
+            cached.cache_hit = true;
+            cached.scan_wall_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
+            report_census(&cached);
+            return Ok(cached);
+        }
     }
+
     let mut census = census_uncached(gguf)?;
+    let after = gguf.revalidate_retained_shard_stamps()?;
+    if after != before {
+        return Err(scan_changed_error());
+    }
+    census.violations = violations_from(&census.tensors, &census.norms);
     census.scan_wall_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
     census.cache_hit = false;
-    if let Some(root) = cache_root() {
-        write_cache(&root, &key, &census);
+    if let Some(root) = root {
+        write_cache(root, &key, &census);
     }
     report_census(&census);
     Ok(census)
 }
 
+fn scan_changed_error() -> GgufError {
+    GgufError::Decode("retained GGUF shard changed during half-range census".into())
+}
+
+fn report_enabled() -> bool {
+    std::env::var(REPORT_ENV)
+        .as_deref()
+        .is_ok_and(crate::env_flag::env_value_truthy)
+}
+
 fn report_census(census: &HalfRangeCensus) {
-    if std::env::var_os(REPORT_ENV).is_none() {
+    if !report_enabled() {
         return;
     }
     eprintln!(
@@ -297,6 +391,48 @@ fn report_census(census: &HalfRangeCensus) {
         census.cache_hit,
         census.violations.len()
     );
+}
+
+fn violations_from(
+    tensors: &BTreeMap<String, TensorRange>,
+    norms: &BTreeMap<String, RmsNormRange>,
+) -> Vec<HalfRangeViolation> {
+    let mut violations = Vec::new();
+    for range in tensors.values() {
+        if range.non_finite > 0 {
+            violations.push(HalfRangeViolation {
+                name: range.name.clone(),
+                dtype: range.dtype.clone(),
+                kind: ViolationKind::NonFinite,
+                bound: range.max_abs,
+                limit: HALF_DECODED_MAX,
+                detail: format!("{} non-finite decoded values/scales", range.non_finite),
+            });
+        } else if !range.max_abs.is_finite() || range.max_abs >= HALF_DECODED_MAX {
+            violations.push(HalfRangeViolation {
+                name: range.name.clone(),
+                dtype: range.dtype.clone(),
+                kind: ViolationKind::DecodedRange,
+                bound: range.max_abs,
+                limit: HALF_DECODED_MAX,
+                detail: "decoded max bound is not below 2^15".to_string(),
+            });
+        }
+    }
+    for norm in norms.values() {
+        if !norm.bound.is_finite() || norm.bound >= RMS_NORM_MAX {
+            violations.push(HalfRangeViolation {
+                name: norm.name.clone(),
+                dtype: "RMSNorm".to_string(),
+                kind: ViolationKind::RmsRange,
+                bound: norm.bound,
+                limit: RMS_NORM_MAX,
+                detail: format!("sqrt({})*max|gamma| is not below 2^11", norm.n),
+            });
+        }
+    }
+    violations.sort_by(|left, right| left.name.cmp(&right.name));
+    violations
 }
 
 /// Uncached census. Used by tests and by `QWEN_HALF_RANGE_CACHE=0` runs.
@@ -326,49 +462,20 @@ pub fn census_uncached(gguf: &GgufFile) -> Result<HalfRangeCensus, GgufError> {
 
     let mut tensors = BTreeMap::new();
     let mut norms = BTreeMap::new();
-    let mut violations = Vec::new();
     let mut scanned_bytes = 0u64;
 
     for result in per_shard {
         for output in result? {
             scanned_bytes = scanned_bytes.saturating_add(output.scanned_bytes);
             if let Some(range) = output.range {
-                if range.non_finite > 0 {
-                    violations.push(HalfRangeViolation {
-                        name: range.name.clone(),
-                        dtype: range.dtype.clone(),
-                        kind: ViolationKind::NonFinite,
-                        bound: range.max_abs,
-                        limit: HALF_DECODED_MAX,
-                        detail: format!("{} non-finite decoded values/scales", range.non_finite),
-                    });
-                } else if !range.max_abs.is_finite() || range.max_abs >= HALF_DECODED_MAX {
-                    violations.push(HalfRangeViolation {
-                        name: range.name.clone(),
-                        dtype: range.dtype.clone(),
-                        kind: ViolationKind::DecodedRange,
-                        bound: range.max_abs,
-                        limit: HALF_DECODED_MAX,
-                        detail: "decoded max bound is not below 2^15".to_string(),
-                    });
-                }
                 tensors.insert(range.name.clone(), range);
             }
             if let Some(norm) = output.norm {
-                if !norm.bound.is_finite() || norm.bound >= RMS_NORM_MAX {
-                    violations.push(HalfRangeViolation {
-                        name: norm.name.clone(),
-                        dtype: "RMSNorm".to_string(),
-                        kind: ViolationKind::RmsRange,
-                        bound: norm.bound,
-                        limit: RMS_NORM_MAX,
-                        detail: format!("sqrt({})*max|gamma| is not below 2^11", norm.n),
-                    });
-                }
                 norms.insert(norm.name.clone(), norm);
             }
         }
     }
+    let violations = violations_from(&tensors, &norms);
 
     Ok(HalfRangeCensus {
         version: CENSUS_VERSION,
@@ -396,18 +503,19 @@ fn scan_shard(
     let mut buffer = vec![0u8; SCAN_READ_BYTES];
     let mut outputs = Vec::with_capacity(descs.len());
     for desc in descs {
-        outputs.push(scan_tensor_pread(shard, desc, &mut buffer)?);
+        outputs.push(scan_tensor_pread(gguf, shard, desc, &mut buffer)?);
     }
     Ok(outputs)
 }
 
 fn scan_tensor_pread(
+    gguf: &GgufFile,
     shard: &crate::gguf::GgufShard,
     desc: &TensorDesc,
     buffer: &mut [u8],
 ) -> Result<ScanOutput, GgufError> {
     let is_norm = is_rms_norm_weight(desc);
-    let half_staged = is_half_staged_dtype(desc.dtype);
+    let half_staged = requires_half_bound(desc);
     if !half_staged && !is_norm {
         return Ok(ScanOutput {
             range: None,
@@ -484,6 +592,25 @@ fn scan_tensor_pread(
         offset += want as u64;
     }
 
+    let mut method = match desc.dtype {
+        GgufType::MXFP4 => RangeMethod::Mxfp4Exponent,
+        GgufType::F32 | GgufType::F16 | GgufType::BF16 => RangeMethod::FullPrecision,
+        _ => RangeMethod::BlockScale,
+    };
+    if half_staged
+        && (max_abs >= HALF_DECODED_MAX || non_finite > 0)
+        && !matches!(desc.dtype, GgufType::F32 | GgufType::F16 | GgufType::BF16)
+        && let Some((exact_max, exact_non_finite)) = exact_decode_range(gguf, desc)?
+    {
+        // The coarse bound is deliberately conservative (max code/subscale).
+        // Only on a coarse refusal do we pay for an exact decode. This admits
+        // e.g. an MXFP4 exponent 140 block whose only codes are small, and a
+        // K/IQ block whose maximum subscale is zero.
+        max_abs = exact_max;
+        non_finite = exact_non_finite;
+        method = RangeMethod::ExactDecode;
+    }
+
     let range = if half_staged {
         let mut nonzero = BTreeMap::new();
         for (e, &count) in hist.iter().enumerate() {
@@ -494,11 +621,7 @@ fn scan_tensor_pread(
         Some(TensorRange {
             name: desc.name.clone(),
             dtype: desc.dtype.wire_name().to_string(),
-            method: match desc.dtype {
-                GgufType::MXFP4 => RangeMethod::Mxfp4Exponent,
-                GgufType::F32 | GgufType::F16 | GgufType::BF16 => RangeMethod::FullPrecision,
-                _ => RangeMethod::BlockScale,
-            },
+            method,
             max_abs,
             blocks,
             mxfp4_e_hist: (desc.dtype == GgufType::MXFP4).then_some(nonzero),
@@ -525,6 +648,25 @@ fn scan_tensor_pread(
         norm,
         scanned_bytes: desc.n_bytes,
     })
+}
+
+fn exact_decode_range(gguf: &GgufFile, desc: &TensorDesc) -> Result<Option<(f32, u64)>, GgufError> {
+    let bytes = gguf.try_slice(desc)?;
+    Ok(exact_max_from_bytes(desc, bytes))
+}
+
+fn exact_max_from_bytes(desc: &TensorDesc, bytes: &[u8]) -> Option<(f32, u64)> {
+    let values = crate::codec::dequant_to_f32(desc, bytes).ok()?;
+    let mut max_abs = 0.0f32;
+    let mut non_finite = 0u64;
+    for value in values {
+        if !value.is_finite() {
+            non_finite = non_finite.saturating_add(1);
+        } else if value.abs() > max_abs {
+            max_abs = value.abs();
+        }
+    }
+    Some((max_abs, non_finite))
 }
 
 fn read_exact_at(
@@ -824,9 +966,85 @@ fn bf16_max(bytes: &[u8]) -> (f32, u64) {
     scan_full_chunk(GgufType::BF16, bytes)
 }
 
+fn is_rms_norm_weight_name(name: &str) -> bool {
+    name.ends_with("norm.weight")
+        || name.ends_with("norm.weight.0")
+        || name.ends_with("_norm_key.weight")
+        || name.ends_with("_norm_query.weight")
+        || name.ends_with("_norm_conv.weight")
+}
+
 fn is_rms_norm_weight(desc: &TensorDesc) -> bool {
-    let name = desc.name.as_str();
-    name.ends_with("norm.weight") || name.ends_with("norm.weight.0")
+    is_rms_norm_weight_name(&desc.name)
+}
+
+/// Weight role used to decide whether a tensor can enter a half-staged path.
+/// Names are the GGUF binding vocabulary; unknown names stay conservative.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum TensorRole {
+    Expert,
+    Dense,
+    Embedding,
+    Norm,
+    Auxiliary,
+    Unknown,
+}
+
+fn tensor_role(name: &str) -> TensorRole {
+    if name.contains("_exps") {
+        return TensorRole::Expert;
+    }
+    if is_rms_norm_weight_name(name) {
+        return TensorRole::Norm;
+    }
+    if name.ends_with(".bias")
+        || name.ends_with("ssm_a")
+        || name.ends_with("ssm_conv1d.weight")
+        || name.ends_with("conv1d.weight")
+        || name.ends_with("a_log")
+    {
+        return TensorRole::Auxiliary;
+    }
+    if name == "token_embd.weight" || name == "output.weight" || name.contains("token_embd") {
+        return TensorRole::Embedding;
+    }
+    if name.contains("ffn_")
+        || name.contains("attn_")
+        || name.contains("ssm_")
+        || name.contains("indexer.")
+        || name == "output.weight"
+    {
+        return TensorRole::Dense;
+    }
+    TensorRole::Unknown
+}
+
+fn dense_half_staged_dtype(dtype: GgmlType) -> bool {
+    matches!(
+        dtype,
+        GgmlType::Q2_K
+            | GgmlType::Q3_K
+            | GgmlType::Q4_K
+            | GgmlType::Q5_K
+            | GgmlType::Q6_K
+            | GgmlType::Q8_0
+            | GgmlType::Q4_0
+            | GgmlType::Q4_1
+            | GgmlType::IQ4_NL
+            | GgmlType::IQ2_S
+            | GgmlType::IQ3_XXS
+            | GgmlType::IQ3_S
+            | GgmlType::IQ4_XS
+    )
+}
+
+fn requires_half_bound(desc: &TensorDesc) -> bool {
+    match tensor_role(&desc.name) {
+        TensorRole::Expert => is_half_staged_dtype(desc.dtype),
+        TensorRole::Dense | TensorRole::Embedding => dense_half_staged_dtype(desc.dtype),
+        TensorRole::Norm | TensorRole::Auxiliary => false,
+        TensorRole::Unknown => is_half_staged_dtype(desc.dtype),
+    }
 }
 
 fn is_half_staged_dtype(dtype: GgmlType) -> bool {
@@ -890,11 +1108,12 @@ fn cache_key(gguf: &GgufFile) -> Result<[u8; 32], GgufError> {
 }
 
 fn cache_root() -> Option<PathBuf> {
-    if let Some(dir) = std::env::var_os(CACHE_DIR_ENV) {
-        return Some(PathBuf::from(dir));
-    }
+    // Disable wins over a directory override.
     if std::env::var(CACHE_ENV).as_deref() == Ok("0") {
         return None;
+    }
+    if let Some(dir) = std::env::var_os(CACHE_DIR_ENV) {
+        return Some(PathBuf::from(dir));
     }
     std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".cache/qwen-llm/half-range"))
 }
@@ -903,10 +1122,40 @@ fn cache_path(root: &Path, key: &[u8; 32]) -> PathBuf {
     root.join(format!("{}.json", hex(key)))
 }
 
+fn cache_covers(gguf: &GgufFile, census: &HalfRangeCensus) -> bool {
+    gguf.tensors.iter().all(|desc| {
+        let required = requires_half_bound(desc);
+        let is_norm = is_rms_norm_weight(desc);
+        (!required || census.tensors.contains_key(&desc.name))
+            && (!is_norm || census.norms.contains_key(&desc.name))
+    })
+}
+
 fn read_cache(root: &Path, key: &[u8; 32]) -> Option<HalfRangeCensus> {
     let bytes = std::fs::read(cache_path(root, key)).ok()?;
     let census: HalfRangeCensus = serde_json::from_slice(&bytes).ok()?;
     (census.version == CENSUS_VERSION).then_some(census)
+}
+
+static KEY_LOCKS: OnceLock<Mutex<BTreeMap<[u8; 32], Arc<Mutex<()>>>>> = OnceLock::new();
+static TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
+
+fn key_lock(key: &[u8; 32]) -> Arc<Mutex<()>> {
+    let locks = KEY_LOCKS.get_or_init(|| Mutex::new(BTreeMap::new()));
+    let mut guard = locks
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    guard
+        .entry(*key)
+        .or_insert_with(|| Arc::new(Mutex::new(())))
+        .clone()
+}
+
+fn private_cache_dir(root: &Path) {
+    let mut builder = std::fs::DirBuilder::new();
+    builder.recursive(true).mode(0o700);
+    let _ = builder.create(root);
+    let _ = std::fs::set_permissions(root, std::fs::Permissions::from_mode(0o700));
 }
 
 fn write_cache(root: &Path, key: &[u8; 32], census: &HalfRangeCensus) {
@@ -914,20 +1163,34 @@ fn write_cache(root: &Path, key: &[u8; 32], census: &HalfRangeCensus) {
     let Ok(bytes) = serde_json::to_vec(census) else {
         return;
     };
-    if std::fs::create_dir_all(root).is_err() {
+    private_cache_dir(root);
+    for attempt in 0..8 {
+        let tmp = path.with_extension(format!(
+            "tmp.{}.{}.{}",
+            std::process::id(),
+            TEMP_COUNTER.fetch_add(1, Ordering::Relaxed),
+            attempt
+        ));
+        let mut file = match std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(&tmp)
+        {
+            Ok(file) => file,
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(_) => return,
+        };
+        if file.write_all(&bytes).is_err() {
+            let _ = std::fs::remove_file(&tmp);
+            return;
+        }
+        let _ = file.sync_all();
+        if std::fs::rename(&tmp, &path).is_err() {
+            let _ = std::fs::remove_file(&tmp);
+            return;
+        }
         return;
-    }
-    let tmp = path.with_extension(format!("tmp.{}", std::process::id()));
-    let Ok(mut file) = std::fs::File::create(&tmp) else {
-        return;
-    };
-    if file.write_all(&bytes).is_err() {
-        let _ = std::fs::remove_file(&tmp);
-        return;
-    }
-    let _ = file.sync_all();
-    if std::fs::rename(&tmp, &path).is_err() {
-        let _ = std::fs::remove_file(&tmp);
     }
 }
 
@@ -1128,12 +1391,109 @@ mod tests {
             mxfp4_e_hist: None,
             non_finite: 0,
         };
-        assert!(HalfRangeScope::DeepSeekV4.allows_f32_reroute(&down));
+        assert!(HalfRangeScope::DeepSeekV4.recognizes_existing_f32_dispatch(&down));
         let gate = TensorRange {
             name: "blk.3.ffn_gate_exps.weight".to_string(),
             ..down.clone()
         };
-        assert!(!HalfRangeScope::DeepSeekV4.allows_f32_reroute(&gate));
-        assert!(!HalfRangeScope::Generic.allows_f32_reroute(&down));
+        assert!(!HalfRangeScope::DeepSeekV4.recognizes_existing_f32_dispatch(&gate));
+        assert!(!HalfRangeScope::Generic.recognizes_existing_f32_dispatch(&down));
+    }
+
+    #[test]
+    fn role_requirements_skip_f32_dense_and_auxiliary_but_keep_expert_banks() {
+        let f32_dense = desc("blk.0.ffn_down.weight", GgmlType::F32, vec![32], 128);
+        assert!(!requires_half_bound(&f32_dense));
+        let f32_expert = desc("blk.0.ffn_down_exps.weight", GgmlType::F32, vec![32], 128);
+        assert!(requires_half_bound(&f32_expert));
+        let q8_dense = desc("blk.0.ffn_down.weight", GgmlType::Q8_0, vec![32], 34);
+        assert!(requires_half_bound(&q8_dense));
+        let mxfp4_dense = desc("blk.0.ffn_down.weight", GgmlType::MXFP4, vec![32], 17);
+        assert!(!requires_half_bound(&mxfp4_dense));
+        let mxfp4_expert = desc("blk.0.ffn_down_exps.weight", GgmlType::MXFP4, vec![32], 17);
+        assert!(requires_half_bound(&mxfp4_expert));
+        let bias = desc("blk.0.ssm_dt.bias", GgmlType::F32, vec![32], 128);
+        assert!(!requires_half_bound(&bias));
+        let norm = desc("blk.0.attn_norm.weight", GgmlType::F32, vec![32], 128);
+        assert!(!requires_half_bound(&norm));
+        assert!(is_rms_norm_weight(&norm));
+    }
+
+    #[test]
+    fn coarse_bounds_cover_exact_decoder_for_half_formats() {
+        let formats = [
+            GgmlType::Q2_K,
+            GgmlType::Q3_K,
+            GgmlType::Q4_K,
+            GgmlType::Q5_K,
+            GgmlType::Q6_K,
+            GgmlType::Q8_0,
+            GgmlType::Q4_0,
+            GgmlType::Q4_1,
+            GgmlType::IQ4_NL,
+            GgmlType::IQ2_S,
+            GgmlType::IQ2_XS,
+            GgmlType::IQ2_XXS,
+            GgmlType::IQ3_XXS,
+            GgmlType::IQ3_S,
+            GgmlType::IQ4_XS,
+            GgmlType::IQ1_S,
+            GgmlType::IQ1_M,
+            GgmlType::Q2_0,
+            GgmlType::MXFP4,
+        ];
+        let mut state = 0x1234_5678u32;
+        for dtype in formats {
+            let (block_elems, block_bytes) = dtype.storage_layout().unwrap();
+            let blocks = 2u64;
+            let mut bytes = vec![0u8; (block_bytes * blocks) as usize];
+            for byte in &mut bytes {
+                state = state.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+                *byte = (state >> 24) as u8;
+            }
+            let d = desc(
+                "blk.0.ffn_down.weight",
+                dtype,
+                vec![block_elems * blocks],
+                block_bytes * blocks,
+            );
+            let coarse = scan_bytes(&d, &bytes).unwrap().unwrap();
+            if let Some((exact_max, _)) = exact_max_from_bytes(&d, &bytes) {
+                if coarse.max_abs.is_finite() && exact_max.is_finite() {
+                    assert!(
+                        coarse.max_abs >= exact_max,
+                        "{dtype:?}: coarse bound {} < exact max {}",
+                        coarse.max_abs,
+                        exact_max
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn exact_decode_admits_zero_scale_q8_block() {
+        let mut block = Vec::new();
+        block.extend_from_slice(&half_bytes(300.0));
+        block.extend_from_slice(&[0u8; 32]);
+        let d = desc("blk.0.ffn_down.weight", GgmlType::Q8_0, vec![32], 34);
+        let coarse = scan_bytes(&d, &block).unwrap().unwrap();
+        assert!(coarse.max_abs >= HALF_DECODED_MAX);
+        let (exact_max, non_finite) = exact_max_from_bytes(&d, &block).unwrap();
+        assert_eq!(exact_max, 0.0);
+        assert_eq!(non_finite, 0);
+    }
+
+    #[test]
+    fn exact_decode_keeps_nonfinite_scale_unsafe() {
+        let mut block = Vec::new();
+        block.extend_from_slice(&[0x00, 0x7c]);
+        block.extend_from_slice(&[0u8; 32]);
+        let d = desc("blk.0.ffn_down.weight", GgmlType::Q8_0, vec![32], 34);
+        let coarse = scan_bytes(&d, &block).unwrap().unwrap();
+        assert_eq!(coarse.non_finite, 1);
+        if let Some((exact_max, exact_non_finite)) = exact_max_from_bytes(&d, &block) {
+            assert!(exact_non_finite > 0 || !exact_max.is_finite());
+        }
     }
 }

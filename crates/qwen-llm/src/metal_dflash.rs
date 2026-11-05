@@ -1642,11 +1642,13 @@ fn encode_prefill_moe_grouped_down(
     h: usize,
     n_expert: usize,
     chunk_p: usize,
+    layer: u32,
 ) -> Result<(), MetalError> {
     crate::half_telemetry::record(
         ctx,
         enc,
         crate::half_telemetry::SITE_QWEN35MOE_ROUTED_DOWN,
+        layer,
         inner,
     );
     match down_exps.dtype {
@@ -9023,6 +9025,7 @@ fn encode_packed_verify_moe_grouped_ffn_after_mixer(
     layer_scratch: &MetalDFlashLayerMajorScratch,
     n: usize,
     h: usize,
+    layer: u32,
 ) -> Result<bool, DFlashError> {
     let arch = &base.model.arch;
     let (ffn_gate, ffn_up, ffn_down, moe) = match block {
@@ -9173,6 +9176,7 @@ fn encode_packed_verify_moe_grouped_ffn_after_mixer(
         h,
         n_expert,
         n,
+        layer,
     )?;
     crate::metal::encode_moe_weighted_sum_packed_f32(
         base.ctx,
@@ -9219,6 +9223,7 @@ fn encode_packed_verify_moe_grouped_ffn_after_mixer(
             base.ctx,
             enc,
             crate::half_telemetry::SITE_QWEN35MOE_SHARED_DOWN,
+            layer,
             &shared_inner_pack,
         );
         encode_verify_mat_mat(
@@ -9600,6 +9605,7 @@ pub fn encode_packed_verify_layer_major_inner_for(
                     layer_scratch,
                     n,
                     h,
+                    il as u32,
                 )?;
                 enc.end();
                 emit_mtp_verify_count_phase(trace_counts, il as isize, "moe", "ffn_grouped");
@@ -10687,6 +10693,7 @@ pub fn encode_packed_verify_layer_major_inner_for(
                     layer_scratch,
                     n,
                     h,
+                    il as u32,
                 )?;
                 enc.end();
                 emit_mtp_verify_count_phase(trace_counts, il as isize, "moe", "ffn_grouped");
@@ -14676,6 +14683,7 @@ fn prefill_tokens_with_multi_hidden_profiled_inner<'a>(
                                             h,
                                             n_expert,
                                             chunk_p,
+                                            il as u32,
                                         )?;
                                     }
                                     enc.end();
@@ -14780,6 +14788,7 @@ fn prefill_tokens_with_multi_hidden_profiled_inner<'a>(
                                     h,
                                     n_expert,
                                     chunk_p,
+                                    il as u32,
                                 )?;
                             }
                             if !fused_grouped_finalizer {

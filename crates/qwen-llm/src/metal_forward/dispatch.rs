@@ -528,6 +528,7 @@ fn encode_mat_mat_dispatch_routed(
             ctx,
             enc,
             crate::half_telemetry::SITE_DENSE_DOWN,
+            u32::MAX,
             x,
         );
     }

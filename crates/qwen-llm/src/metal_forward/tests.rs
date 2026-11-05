@@ -8017,3 +8017,86 @@ fn h2_packed_arena_snapshot_matches_cold() {
 
     eprintln!("[h2-arena] all prefix splits passed via packed-arena API.");
 }
+
+#[test]
+fn public_metal_loaders_refuse_an_unsafe_half_weight() {
+    let Some(source) = crate::test_fixtures::catalog::QWEN3_5_0_8B_Q8_0.path_or_skip() else {
+        return;
+    };
+    let Some(ctx) = metal_test_context() else {
+        return;
+    };
+    let mut path = std::env::temp_dir();
+    path.push(format!(
+        "qwen-half-range-refusal-{}-{}.gguf",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    std::fs::copy(&source, &path).expect("copy fixture");
+    let offset = {
+        let gguf = GgufFile::open(&path).expect("open patched fixture");
+        let desc = gguf.find("blk.0.ffn_down.weight").expect("ffn_down");
+        assert_eq!(desc.dtype, GgmlType::Q8_0);
+        desc.data_offset
+    };
+    {
+        use std::io::{Seek, SeekFrom, Write};
+        let mut file = std::fs::OpenOptions::new()
+            .write(true)
+            .open(&path)
+            .expect("open for patch");
+        file.seek(SeekFrom::Start(offset)).expect("seek");
+        file.write_all(&half::f16::from_f32(300.0).to_bits().to_le_bytes())
+            .expect("write unsafe scale");
+        // Keep the maximum code so an exact-decode fallback also refuses.
+        file.write_all(&[127u8; 32]).expect("write max codes");
+        file.sync_all().expect("sync");
+    }
+
+    let gguf = GgufFile::open(&path).expect("reopen patched fixture");
+    let model = Model::from_gguf(&gguf).expect("bind patched fixture");
+
+    let direct =
+        crate::half_range::with_guard_override(true, || MetalModel::load(&ctx, &gguf, &model));
+    assert!(
+        matches!(direct.err(), Some(MfError::HalfRange(_))),
+        "MetalModel::load did not refuse"
+    );
+    let additional = crate::half_range::with_guard_override(true, || {
+        MetalModel::load_with_additional_metal_weight_bytes(&ctx, &gguf, &model, 0)
+    });
+    assert!(
+        matches!(additional.err(), Some(MfError::HalfRange(_))),
+        "additional-weight-bytes loader did not refuse"
+    );
+
+    let runtime = crate::runtime::Runtime::metal().expect("Metal runtime");
+    let loaded = crate::half_range::with_guard_override(true, || runtime.load_model(&path));
+    assert!(
+        matches!(
+            loaded.err(),
+            Some(crate::runtime::RuntimeError::MetalModel(
+                MfError::HalfRange(_)
+            ))
+        ),
+        "Runtime::load_model did not refuse"
+    );
+
+    let _ = std::fs::remove_file(&path);
+}
+
+#[test]
+fn guard_is_disabled_by_default_before_identity_or_filesystem_work() {
+    // No fixture and no override: the default-off guard returns an empty census
+    // without opening the cache or requiring a scannable artifact. The helper
+    // below is the same early return used by every realization boundary.
+    assert!(!crate::half_range::guard_enabled_for_test());
+    let census = crate::half_range::disabled_census_for_test();
+    assert!(census.tensors.is_empty());
+    assert!(census.norms.is_empty());
+    assert!(census.violations.is_empty());
+    assert_eq!(census.scanned_bytes, 0);
+}

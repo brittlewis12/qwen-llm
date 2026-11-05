@@ -605,6 +605,7 @@ impl Workspace {
                     &attention,
                     &outputs,
                     scratch.dense_weight.as_ref(),
+                    id as u32,
                 )?;
                 for (position, _, snapshot) in snapshots.iter().filter(|(_, layer, _)| *layer == id)
                 {

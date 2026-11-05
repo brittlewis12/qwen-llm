@@ -2948,4 +2948,119 @@ mod tests {
         assert_eq!(legacy_bytes, expected_bytes);
         let _ = std::fs::remove_file(&path);
     }
+
+    fn write_at(path: &std::path::Path, offset: u64, bytes: &[u8]) {
+        use std::io::{Seek, SeekFrom, Write};
+        let mut file = std::fs::OpenOptions::new().write(true).open(path).unwrap();
+        file.seek(SeekFrom::Start(offset)).unwrap();
+        file.write_all(bytes).unwrap();
+        file.sync_all().unwrap();
+    }
+
+    fn temp_cache_dir() -> std::path::PathBuf {
+        let mut dir = std::env::temp_dir();
+        dir.push(format!(
+            "qwen-half-range-cache-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir(&dir).unwrap();
+        dir
+    }
+
+    #[test]
+    fn half_range_cache_rejects_in_place_change_before_lookup() {
+        let path = write_temp(&build_test_gguf(
+            &[],
+            &[TestTensor {
+                name: "t",
+                value: 1.0,
+            }],
+        ));
+        let cache = temp_cache_dir();
+        let gguf = GgufFile::open(&path).unwrap();
+        let first = crate::half_range::cached_census_with_root(&gguf, Some(&cache)).unwrap();
+        assert_eq!(first.tensors["t"].max_abs, 1.0);
+        let desc = gguf.find("t").unwrap();
+        write_at(&path, desc.data_offset, &2.0f32.to_le_bytes());
+        let error = crate::half_range::cached_census_with_root(&gguf, Some(&cache)).unwrap_err();
+        assert!(error.to_string().contains("changed"), "{error}");
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_dir_all(&cache);
+    }
+
+    #[test]
+    fn half_range_cache_replacement_gets_a_new_identity() {
+        let path = write_temp(&build_test_gguf(
+            &[],
+            &[TestTensor {
+                name: "t",
+                value: 1.0,
+            }],
+        ));
+        let cache = temp_cache_dir();
+        let gguf = GgufFile::open(&path).unwrap();
+        let first = crate::half_range::cached_census_with_root(&gguf, Some(&cache)).unwrap();
+        assert_eq!(first.tensors["t"].max_abs, 1.0);
+        drop(gguf);
+
+        let replacement = write_temp(&build_test_gguf(
+            &[],
+            &[TestTensor {
+                name: "t",
+                value: 2.0,
+            }],
+        ));
+        std::fs::rename(&replacement, &path).unwrap();
+        let gguf = GgufFile::open(&path).unwrap();
+        let second = crate::half_range::cached_census_with_root(&gguf, Some(&cache)).unwrap();
+        assert_eq!(second.tensors["t"].max_abs, 2.0);
+        assert!(!second.cache_hit);
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_dir_all(&cache);
+    }
+
+    #[test]
+    fn half_range_cache_rejects_split_shard_change_during_scan() {
+        let dir = temp_split_dir();
+        let first = dir.join("model-00001-of-00002.gguf");
+        let second = dir.join("model-00002-of-00002.gguf");
+        write_file(
+            &first,
+            &build_split_shard(
+                0,
+                2,
+                2,
+                &[TestTensor {
+                    name: "a",
+                    value: 1.0,
+                }],
+            ),
+        );
+        write_file(
+            &second,
+            &build_split_shard(
+                1,
+                2,
+                2,
+                &[TestTensor {
+                    name: "b",
+                    value: 2.0,
+                }],
+            ),
+        );
+        let cache = temp_cache_dir();
+        let gguf = GgufFile::open(&first).unwrap();
+        let first_census = crate::half_range::cached_census_with_root(&gguf, Some(&cache)).unwrap();
+        assert_eq!(first_census.tensors["b"].max_abs, 2.0);
+        let b = gguf.find("b").unwrap();
+        write_at(&second, b.data_offset, &9.0f32.to_le_bytes());
+        let error = crate::half_range::cached_census_with_root(&gguf, Some(&cache)).unwrap_err();
+        assert!(error.to_string().contains("changed"), "{error}");
+        let _ = std::fs::remove_dir_all(&dir);
+        let _ = std::fs::remove_dir_all(&cache);
+    }
 }

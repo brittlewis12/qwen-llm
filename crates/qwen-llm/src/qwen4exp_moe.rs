@@ -2138,6 +2138,7 @@ impl Qwen4ExpMoePackedExecution<'_, '_> {
             ctx,
             enc,
             crate::half_telemetry::SITE_QWEN4EXP_ROUTED_DOWN,
+            layer,
             &self.views.routed_inner,
         );
         match self.weights.routed_down.dtype {
@@ -2294,6 +2295,7 @@ impl Qwen4ExpMoePackedExecution<'_, '_> {
             ctx,
             enc,
             crate::half_telemetry::SITE_QWEN4EXP_SHARED_DOWN,
+            layer,
             &self.views.shared_inner,
         );
         encode_mat_mat_dispatch_without_fewrow(

@@ -409,6 +409,8 @@ pub enum MfError {
     UnsupportedDtype { name: String, dtype: GgmlType },
     #[error("metal load policy: {0}")]
     LoadPolicy(String),
+    #[error("half-range guard: {0}")]
+    HalfRange(#[from] crate::half_range::HalfRangeError),
     #[error("snapshot validation: {0}")]
     Snapshot(#[from] SnapshotValidationError),
     #[error("Metal command buffer failed: status={status} error={error}")]
@@ -1817,6 +1819,11 @@ impl MetalModel {
         let router_f16 = moe_router_f16_enabled();
         let choices = ResolvedWeightLoadChoices::resolve(embedding_selection, router_f16);
         let expected = choices.storage_requests(model)?;
+        // Common Qwen weight-realization boundary: every public MetalModel load
+        // path (load, load_with_options, additional-weight-bytes, and Runtime)
+        // reaches this before any import/copy. Other families have their own
+        // realization boundaries.
+        crate::half_range::audit_or_refuse(gguf, crate::half_range::HalfRangeScope::Generic)?;
         let direct_descriptors = expected
             .iter()
             .filter(|request| request.kind == ModelWeightStorageKind::Direct)

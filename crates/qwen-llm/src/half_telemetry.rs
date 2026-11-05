@@ -14,7 +14,6 @@
 use crate::metal::{KernelEncoder, MetalContext, MetalTensor};
 use crate::tensor::GgmlType;
 use objc2_metal::MTLBuffer;
-use std::collections::BTreeMap;
 use std::sync::{Mutex, OnceLock};
 
 crate::env_flag!(
@@ -46,9 +45,16 @@ pub const SITE_QWEN4EXP_SHARED_DOWN: &str = SITES[4];
 pub const SITE_V41_OUTPUT_B_INPUT: &str = SITES[5];
 pub const SITE_V41_ROUTED_DOWN: &str = SITES[6];
 
+/// Per-layer slots. Real models use far fewer layers; `u32::MAX` from callers
+/// without a layer index maps to the final aggregate slot.
+const MAX_LAYERS: usize = 256;
+/// Each site/layer slot stores the max-|x| bits and a non-finite count.
+const SLOTS_PER_SITE: usize = 2;
+const SLOT_COUNT: usize = SITES.len() * MAX_LAYERS * SLOTS_PER_SITE;
+
 struct TelemetryState {
     tensor: SendTensor,
-    seen: [bool; SITES.len()],
+    seen: [bool; SITES.len() * MAX_LAYERS],
 }
 
 /// The telemetry buffer is a shared Metal buffer; it is safe to read from the
@@ -70,7 +76,13 @@ pub fn enabled() -> bool {
 /// Record `max|x|` for one half-staging site into the caller's command buffer.
 ///
 /// No-op unless the debug flag is on and `x` is an F32 tensor.
-pub fn record(ctx: &MetalContext, enc: &KernelEncoder, site: &'static str, x: &MetalTensor) {
+pub fn record(
+    ctx: &MetalContext,
+    enc: &KernelEncoder,
+    site: &'static str,
+    layer: u32,
+    x: &MetalTensor,
+) {
     if !enabled() || x.dtype != GgmlType::F32 {
         return;
     }
@@ -92,18 +104,21 @@ pub fn record(ctx: &MetalContext, enc: &KernelEncoder, site: &'static str, x: &M
         Err(poisoned) => poisoned.into_inner(),
     };
     if guard.is_none() {
-        let Ok(tensor) = MetalTensor::zeros_i32(ctx, vec![SITES.len() as u64]) else {
+        let Ok(tensor) = MetalTensor::zeros_i32(ctx, vec![SLOT_COUNT as u64]) else {
             return;
         };
         *guard = Some(TelemetryState {
             tensor: SendTensor(tensor),
-            seen: [false; SITES.len()],
+            seen: [false; SITES.len() * MAX_LAYERS],
         });
     }
     let Some(state) = guard.as_mut() else {
         return;
     };
-    state.seen[site_index] = true;
+    let layer = (layer as usize).min(MAX_LAYERS - 1);
+    let seen_index = layer * SITES.len() + site_index;
+    let slot = seen_index * SLOTS_PER_SITE;
+    state.seen[seen_index] = true;
     // Cap the grid and let each thread walk a strided slice. The kernel
     // reduces per simdgroup/threadgroup before the single device atomic.
     const MAX_TELEMETRY_THREADS: u32 = 65_536;
@@ -112,8 +127,9 @@ pub fn record(ctx: &MetalContext, enc: &KernelEncoder, site: &'static str, x: &M
     enc.set_bytes(0, &n);
     enc.set_tensor(1, x);
     enc.set_tensor(2, &state.tensor.0);
-    enc.set_bytes(3, &(site_index as u32));
+    enc.set_bytes(3, &(slot as u32));
     enc.set_bytes(4, &threads);
+    enc.set_bytes(5, &((slot + 1) as u32));
     enc.dispatch(
         objc2_metal::MTLSize {
             width: (threads / 256) as usize,
@@ -128,7 +144,8 @@ pub fn record(ctx: &MetalContext, enc: &KernelEncoder, site: &'static str, x: &M
     );
 }
 
-/// Print the recorded peaks and optionally write them to `QWEN_HALF_STAGING_TELEMETRY_OUT`.
+/// Print the recorded peaks and optionally write JSON lines to
+/// `QWEN_HALF_STAGING_TELEMETRY_OUT`.
 ///
 /// Call after the model run has committed and waited for its command buffers.
 pub fn dump_if_enabled() {
@@ -145,31 +162,58 @@ pub fn dump_if_enabled() {
     let values: &[u32] = unsafe {
         std::slice::from_raw_parts(
             state.tensor.0.buffer.contents().as_ptr().cast::<u32>(),
-            SITES.len(),
+            SLOT_COUNT,
         )
     };
-    let mut lines = BTreeMap::new();
-    for (index, &name) in SITES.iter().enumerate() {
-        if !state.seen[index] {
-            continue;
+    let mut records = Vec::new();
+    for layer in 0..MAX_LAYERS {
+        for (site_index, &name) in SITES.iter().enumerate() {
+            let seen_index = layer * SITES.len() + site_index;
+            if !state.seen[seen_index] {
+                continue;
+            }
+            let slot = seen_index * SLOTS_PER_SITE;
+            let bits = values[slot];
+            let nonfinite = values[slot + 1];
+            let value = f32::from_bits(bits);
+            let layer_label = if layer == MAX_LAYERS - 1 {
+                "aggregate".to_string()
+            } else {
+                layer.to_string()
+            };
+            eprintln!(
+                "half-staging-telemetry site={name} layer={layer_label} max_abs={value:.9e} bits=0x{bits:08x} nonfinite={nonfinite} limit={:.0}",
+                crate::half_range::RMS_NORM_MAX
+            );
+            records.push(serde_json::json!({
+                "site": name,
+                "layer": if layer == MAX_LAYERS - 1 { serde_json::Value::String("aggregate".into()) } else { serde_json::Value::Number(layer.into()) },
+                "max_abs": value,
+                "bits": bits,
+                "nonfinite": nonfinite,
+                "limit": crate::half_range::RMS_NORM_MAX,
+            }));
         }
-        let bits = values[index];
-        let value = f32::from_bits(bits);
-        let line = format!(
-            "half-staging-telemetry site={name} max_abs={value:.9e} bits=0x{bits:08x} limit={:.0}",
-            crate::half_range::RMS_NORM_MAX
-        );
-        eprintln!("{line}");
-        lines.insert(name, line);
     }
     if let Some(path) = std::env::var_os(OUTPUT_ENV) {
         let mut body = String::new();
-        for line in lines.values() {
-            body.push_str(line);
-            body.push('\n');
+        for record in records {
+            if let Ok(line) = serde_json::to_string(&record) {
+                body.push_str(&line);
+                body.push('\n');
+            }
         }
         let _ = std::fs::write(path, body);
     }
+}
+
+/// Drop the accumulated buffer so the next run starts from zero.
+pub fn reset() {
+    let mut guard = match state().lock() {
+        Ok(guard) => guard,
+        Err(poisoned) => poisoned.into_inner(),
+    };
+    *guard = None;
 }
 
 #[cfg(test)]

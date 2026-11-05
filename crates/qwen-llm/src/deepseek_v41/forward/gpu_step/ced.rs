@@ -702,6 +702,7 @@ impl Workspace {
             &rows.attention,
             &rows.output,
             rows.dense_weight.as_ref(),
+            layer as u32,
         )?;
         metal::encode_mhc4_post_rows(
             ctx,

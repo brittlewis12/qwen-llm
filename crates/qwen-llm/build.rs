@@ -204,6 +204,11 @@ fn compile_metallib_with_language(
         .filter(|p| p.extension().and_then(|s| s.to_str()) == Some("metal"))
         .collect();
     metal_files.sort();
+    if name == "kernels" && std::env::var_os("CARGO_FEATURE_HALF_STAGING_TELEMETRY").is_none() {
+        metal_files.retain(|path| {
+            path.file_name().and_then(|name| name.to_str()) != Some("half_staging_telemetry.metal")
+        });
+    }
     for path in &metal_files {
         println!(
             "cargo:rerun-if-changed={}",

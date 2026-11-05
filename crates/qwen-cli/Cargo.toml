@@ -38,6 +38,7 @@ path = "src/lens.rs"
 workspace = true
 
 [features]
+half-staging-telemetry = ["qwen-llm/half-staging-telemetry"]
 default = []
 dflash-k0s-diagnostics = ["qwen-llm/dflash-k0s-diagnostics"]
 dsv4-diagnostics = ["qwen-llm/dsv4-diagnostics"]

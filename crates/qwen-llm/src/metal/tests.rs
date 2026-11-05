@@ -904,15 +904,15 @@ fn half_range_probe() {
         commit_and_wait(&command).unwrap();
         let got = read_back_f32(&out.buffer, 1)[0];
         let expected = 8.0 * v;
+        let verdict = if got == expected {
+            "preserve"
+        } else if got == 0.0 {
+            "flush"
+        } else {
+            panic!("simdgroup MMA returned an unrecognized value {got} for {v}");
+        };
         eprintln!(
-            "half-range-probe simdgroup-mma v={v:.9e} got={got:.9e} expected={expected:.9e} verdict={}",
-            if got == expected {
-                "preserve"
-            } else if got == 0.0 {
-                "flush"
-            } else {
-                "other"
-            }
+            "half-range-probe simdgroup-mma v={v:.9e} got={got:.9e} expected={expected:.9e} verdict={verdict}"
         );
     }
 
@@ -959,19 +959,27 @@ fn half_range_probe() {
                 commit_and_wait(&command).unwrap();
                 let got = read_back_f32(&out.buffer, 1)[0];
                 let expected = 32.0 * v;
+                let verdict = if got == expected {
+                    "preserve"
+                } else if got == 0.0 {
+                    "flush"
+                } else {
+                    panic!("matmul2d returned an unrecognized value {got} for {v}");
+                };
                 eprintln!(
-                    "half-range-probe matmul2d v={v:.9e} got={got:.9e} expected={expected:.9e} verdict={}",
-                    if got == expected {
-                        "preserve"
-                    } else if got == 0.0 {
-                        "flush"
-                    } else {
-                        "other"
-                    }
+                    "half-range-probe matmul2d v={v:.9e} got={got:.9e} expected={expected:.9e} verdict={verdict}"
                 );
             }
         }
-        Err(error) => eprintln!("half-range-probe matmul2d unavailable: {error:?}"),
+        Err(error) => {
+            if ctx.tensor_ops_status().is_available() {
+                panic!("tensor tier is available but matmul2d pipeline failed: {error:?}");
+            }
+            eprintln!(
+                "half-range-probe matmul2d unavailable status={:?}: {error:?}",
+                ctx.tensor_ops_status()
+            );
+        }
     }
 
     // 3. F32 -> half conversion at and above the overflow boundary.

@@ -19,6 +19,7 @@ kernel void kernel_half_staging_amax(
         device atomic_uint * out [[buffer(2)]],
         constant uint & site [[buffer(3)]],
         constant uint & stride [[buffer(4)]],
+        constant uint & nonfinite_slot [[buffer(5)]],
         uint tid [[thread_position_in_grid]],
         uint lid [[thread_position_in_threadgroup]],
         uint lsize [[threads_per_threadgroup]]) {
@@ -29,6 +30,8 @@ kernel void kernel_half_staging_amax(
         // record; the guard is about finite half-range values.
         if ((b & 0x7f800000u) != 0x7f800000u) {
             bits = max(bits, b);
+        } else {
+            atomic_fetch_add_explicit(&out[nonfinite_slot], 1u, memory_order_relaxed);
         }
     }
     bits = simd_max(bits);

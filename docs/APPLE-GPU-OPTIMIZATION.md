@@ -962,8 +962,10 @@ small and operational:
 ## Half-staging range and subnormal rules
 
 These rules apply to every path that narrows decoded weights or activations to
-half. They are enforced in code by `crate::half_range` (weights, load time) and
-`crate::half_telemetry` (debug-only activation peaks).
+half. Weights are checked by `crate::half_range` at load time when
+`QWEN_HALF_RANGE_GUARD` is enabled (default off). `crate::half_telemetry` is a
+debug-only measurement pass; it records peaks and does not enforce activation
+bounds.
 
 1. **Weights.** Any path that narrows decoded weights to half
    (`qt_dequantize_*`, the llama.cpp-style `_mm` dense tiles, half native rows,
@@ -976,10 +978,13 @@ half. They are enforced in code by `crate::half_range` (weights, load time) and
    `amax >= 2^16`. The load-time census bounds MXFP4 from the exponent-byte
    histogram (`12 * 2^(e-128)`), K-quant/legacy/I-quant formats from the
    per-block scale fields (`d`, `dmin`, `m`) and the format's maximum code
-   magnitude, and F32/F16/BF16 banks from their full max. A tensor that fails
-   the bound takes an F32-operand lane only where the loader already selects
-   one (currently DS4 MXFP4 routed down); otherwise loading fails with a named
-   `HalfRange` error. Adding a format to a half path adds its census bound in
+   magnitude, and F32/F16/BF16 banks from their full max. If the coarse bound
+   fails, the guard may exact-decode that tensor and use the decoded maximum;
+   this admits a conservative false positive such as an MXFP4 exponent-140
+   block whose only codes are small, or a zero-subscale K/IQ block. A tensor
+   that still fails takes an F32-operand lane only where the loader already
+   selects one (recognized, not rerouted: currently DS4 MXFP4 routed down);
+   otherwise loading fails with a named `HalfRange` error. Adding a format to a half path adds its census bound in
    the same change. Do not rely on downstream NaN detection: clamped SwiGLU
    epilogues turn `+-inf` into finite `+-limit`.
 2. **Activations.** Every half-staged activation records its bound at the call
@@ -987,12 +992,15 @@ half. They are enforced in code by `crate::half_range` (weights, load time) and
    clamped SwiGLU `<= L * silu(L) * route scale` applied before down
    (V4.1 `<= 150`, GLM `<= 100`); attention output `<= max|V|`; softmax
    `P <= 1`. Anything else (unclamped SwiGLU down inputs in
-   qwen35/qwen35moe/qwen4exp, low-rank intermediates) needs a telemetry record
-   of per-layer `max|x|` on the reference corpus with at least 32x headroom
-   (`< 2048`), re-measured for new families or artifact classes. If headroom is
-   short, use an exact power-of-two prescale
+   qwen35/qwen35moe/qwen4exp, low-rank intermediates) needs a debug telemetry
+   record of per-layer `max|x|` on the reference corpus. The monitoring
+   threshold is `2^11 = 2048`: a peak below 2048 is at least ~32x below the
+   65520 half-overflow boundary, so the ratio to 2048 is not itself the
+   headroom metric. Re-measure for new families or artifact classes. Telemetry
+   only measures; it does not enforce. If headroom is short, a proposed exact
+   power-of-two prescale
    (`s = clamp(ceil(log2(amax/1024)), 0, 127)`, undone in the F32 epilogue)
-   before reaching for F32 or bf16 staging.
+   is the first option before F32 or bf16 staging.
 3. **Detection.** Kernels are built with `-ffast-math`, so `isfinite`/`isnan`
    are not guaranteed. New checks use exponent bits (`finite_bits`,
    `kernels/deepseek_v41_ffn.metal`) and run before any min/max/clamp that can
@@ -1003,16 +1011,19 @@ half. They are enforced in code by `crate::half_range` (weights, load time) and
    simdgroup MMA, Metal 4 `matmul2d`, and F32 -> half at 65520/1e5 on the
    current device. Never build half operands from raw bit patterns that land in
    the subnormal range (use the `1024 + q` construction,
-   `kernels/mat_mat_q8_0_fewrow.metal`). Values in `(0, 1]` staged as half
-   (softmax `P~`) are prescaled by an exact power of two (`<= 2^15`) and
-   unscaled in F32. F32 subnormals are flushed; paths that need them use the
-   exponent-shift pattern in `kernels/expert_native.metal`.
+   `kernels/mat_mat_q8_0_fewrow.metal`). For values in `(0, 1]` staged as half
+   (softmax `P~`), the proposed fix is an exact power-of-two prescale
+   (`<= 2^15`) undone in F32; `attn_matrix_online.metal` currently stores the
+   unscaled probabilities, so this is not yet implemented. F32 subnormals are
+   flushed; paths that need them use the exponent-shift pattern in
+   `kernels/expert_native.metal`.
 
 The weight census is cached per artifact identity (shard device/inode/size/
 mtime/ctime plus the tensor descriptor table). A cache hit is one small JSON
 read; `QWEN_HALF_RANGE_CACHE=0` forces a rescan,
-`QWEN_HALF_RANGE_REPORT=1` prints the scan time and violation count, and
-`QWEN_HALF_RANGE_GUARD=0` is the rollback lever.
+`QWEN_HALF_RANGE_REPORT=1` prints the scan time and violation count,
+`QWEN_HALF_RANGE_GUARD=1` enables the guard, and unsetting it (the default)
+skips identity, filesystem and scan work entirely.
 
 ### Measured facts (2026-11-04)
 
@@ -1031,7 +1042,7 @@ Activation telemetry (`QWEN_HALF_STAGING_TELEMETRY=1`, 2048-token chunk,
 long-context + code + multilingual + repetition prompts; V4.1 used one combined
 prompt because its single-turn CLI has no batch/chunk flags):
 
-| Family / artifact | Site | Peak `max|x|` | Headroom vs 2048 |
+| Family / artifact | Site | Peak `max|x|` | 2048 / peak |
 |---|---|---|---|---|
 | qwen35 dense, 0.8B Q8_0 | `dense.down` | 70.4 | 29x |
 | qwen35moe, 35B-A3B Q4_K_M | `dense.down` (shared) | 60.7 | 34x |
@@ -1044,9 +1055,12 @@ prompt because its single-turn CLI has no batch/chunk flags):
 
 The V4.1 routed-down peak is just under its `<= 150` clamp bound and is the
 tightest measured site; it still has 13.7x headroom. No site is close to 2048.
+These are measurement records, not enforced activation bounds. The final
+column is the ratio to the 2048 monitoring threshold, not the 32x headroom
+relative to the 65520 half-overflow boundary.
 
-Census cost: the scan is a full pass over the mapped tensor payload (scale
-headers only, but the pages are touched), so it is I/O-bound on a cold artifact.
+Census cost: the scan is a full pass over the tensor payload (scale/header
+bytes only, but the payload is read once), so it is I/O-bound on a cold artifact.
 Measured with the sequential pread reader:
 
 | Artifact | Bytes | First scan | Cache hit |
@@ -1061,8 +1075,9 @@ the per-artifact cache: every load after the first pays one small JSON read.
 The two ways to remove the first-load cost are to fuse the census into the
 loader's existing prefetch/copy pass (then the added work is CPU-only) or to run
 a GPU max reduction over the resident buffers before first use. Both keep the
-same thresholds and cache schema. Until one lands, the guard is default-on with
-`QWEN_HALF_RANGE_GUARD=0` as the rollback lever.
+same thresholds and cache schema. The guard is default-off; set
+`QWEN_HALF_RANGE_GUARD=1` to opt in until fusion or the resident-buffer
+reduction removes the first-load cost.
 
 No artifact in the 32-artifact census produced a violation: MXFP4 exponents are
 117-127 (overflow needs >= 141; the `2^15` guard is at 140), and every K/IQ

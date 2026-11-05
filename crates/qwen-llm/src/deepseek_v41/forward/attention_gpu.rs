@@ -3086,7 +3086,7 @@ impl Workspace {
         rows: &Rows,
         output: &MetalTensor,
     ) -> Result<()> {
-        self.finish_rows_with_dense(ctx, enc, w, rows, output, None)
+        self.finish_rows_with_dense(ctx, enc, w, rows, output, None, u32::MAX)
     }
 
     /// `finish_rows` with an optional per-chunk Q5_K dense preweight scratch.
@@ -3098,6 +3098,7 @@ impl Workspace {
         rows: &Rows,
         output: &MetalTensor,
         dense_weight: Option<&MetalTensor>,
+        layer: u32,
     ) -> Result<()> {
         let c = &self.config;
         let group_width = c.heads * c.head_dim / c.groups;
@@ -3167,6 +3168,7 @@ impl Workspace {
             ctx,
             enc,
             crate::half_telemetry::SITE_V41_OUTPUT_B_INPUT,
+            layer,
             &rows.low,
         );
         let low_half = rows

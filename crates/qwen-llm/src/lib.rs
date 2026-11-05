@@ -38,7 +38,38 @@ pub mod env_flag;
 pub mod forward;
 pub mod gguf;
 pub mod half_range;
+#[cfg(feature = "half-staging-telemetry")]
 pub mod half_telemetry;
+#[cfg(not(feature = "half-staging-telemetry"))]
+pub mod half_telemetry {
+    use crate::metal::{KernelEncoder, MetalContext, MetalTensor};
+
+    pub const SITE_DENSE_DOWN: &str = "dense.down";
+    pub const SITE_QWEN35MOE_SHARED_DOWN: &str = "qwen35moe.shared.down";
+    pub const SITE_QWEN35MOE_ROUTED_DOWN: &str = "qwen35moe.routed.down";
+    pub const SITE_QWEN4EXP_ROUTED_DOWN: &str = "qwen4exp.routed.down";
+    pub const SITE_QWEN4EXP_SHARED_DOWN: &str = "qwen4exp.shared.down";
+    pub const SITE_V41_OUTPUT_B_INPUT: &str = "v41.output_b.input";
+    pub const SITE_V41_ROUTED_DOWN: &str = "v41.routed.down";
+
+    #[inline(always)]
+    pub fn record(
+        _ctx: &MetalContext,
+        _enc: &KernelEncoder,
+        _site: &'static str,
+        _layer: u32,
+        _x: &MetalTensor,
+    ) {
+    }
+    #[inline(always)]
+    pub const fn enabled() -> bool {
+        false
+    }
+    #[inline(always)]
+    pub fn reset() {}
+    #[inline(always)]
+    pub fn dump_if_enabled() {}
+}
 pub mod glm5_next;
 pub mod glm5_next_chat;
 pub mod glm5_next_metal;

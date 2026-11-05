@@ -15,6 +15,7 @@ workspace = true
 
 [features]
 default = []
+half-staging-telemetry = []
 dflash-k0s-diagnostics = []
 dsv4-diagnostics = []
 perf-ablations = []

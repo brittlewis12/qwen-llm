@@ -6,6 +6,87 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the current state and evidence index.
 
+## 2026-11-05 - A3B Tensor Prefill: 1.72-1.78x End to End, Enabled on Tensor Tier
+
+- Default-on Apple10/Metal 4 routes reuse existing half-operand tensor tiles:
+  wide M64/N64/K32 for A3B Q8_0 dense projections at M >= 128, and grouped
+  M32/N64/K32 Q4_K gate/up plus Q5_K/Q6_K down at the qualified M=2048
+  chunk. The grouped route includes both gate/up passes and SwiGLU.
+  Decode, unsupported architectures/quants/devices and unqualified tails
+  retain their dispatch. No new narrowing site or shader.
+- Dense 27B and A3B projections now share `QWEN_DENSE_PREFILL_TENSOR=0`
+  for A/B or rollback (replaces the just-landed `QWEN_27B_PREFILL_TENSOR`).
+  `QWEN_A3B_EXPERT_PREFILL_TENSOR=0` rolls back A3B routed experts.
+  Both are enabled by default on the available tensor tier; setting both
+  to 0 restores both incumbent A3B paths.
+- M5 Ultra, real A3B UD-Q4_K_M weights, M=2048 warmed whole-command GPU
+  kill tests, ABBA, six retained samples per role per arm occurrence
+  (twelve per setting). Dense projections are all Q8_0; paired TFLOPS
+  use each candidate campaign's own incumbent samples:
+
+  | Role | N x K | Narrow A -> B TFLOPS | Wide A -> B TFLOPS |
+  | --- | --- | ---: | ---: |
+  | GDN QKV | 8192 x 2048 | 13.222 -> 25.647 | 12.749 -> 34.598 |
+  | GDN gate | 4096 x 2048 | 19.155 -> 27.527 | 20.822 -> 34.347 |
+  | GDN output | 2048 x 4096 | 23.027 -> 39.903 | 21.418 -> 41.133 |
+  | Attention Q | 8192 x 2048 | 28.408 -> 50.932 | 28.212 -> 61.732 |
+  | Attention K | 512 x 2048 | 21.393 -> 30.172 | 20.840 -> 32.029 |
+  | Attention V | 512 x 2048 | 20.681 -> 29.505 | 18.230 -> 46.119 |
+  | Attention output | 2048 x 4096 | 16.747 -> 28.742 | 20.831 -> 48.033 |
+  | Shared gate | 512 x 2048 | 21.192 -> 30.072 | 20.862 -> 35.907 |
+  | Shared up | 512 x 2048 | 22.527 -> 37.922 | 22.181 -> 48.531 |
+  | Shared down | 2048 x 512 | 24.068 -> 39.236 | 25.504 -> 46.126 |
+
+  Occurrence-weighted pp4096 projection GPU time: narrow 652.334 ->
+  373.217 ms (**1.74787x**); wide 654.647 -> 294.530 ms (**2.22268x**),
+  both above the 1.5x kill bar. Wide is selected. Every sample is retained;
+  first-role clock-ramp variation remains visible.
+- Routed tests preserve all 80 retained layer/chunk histograms' bin counts,
+  slot sums, p50/p90 and maxima in balanced and extreme reconstructions;
+  exact counts/ids were not present in the original trace. Gate/up and down
+  timings below are separate diagnostic commands:
+
+  | Role | Balanced A -> B TFLOPS | Extreme A -> B TFLOPS |
+  | --- | ---: | ---: |
+  | Q4_K gate/up | 19.249 -> 35.633 | 19.900 -> 38.409 |
+  | Q5_K down | 16.164 -> 21.421 | 17.159 -> 23.424 |
+  | Q6_K down | 16.732 -> 20.670 | 17.371 -> 21.952 |
+
+  The acceptance bar uses combined gate/up, SwiGLU and down commands:
+  balanced 443.095 -> 258.809 ms (**1.71205x**); extreme 421.354 ->
+  237.105 ms (**1.77708x**), above 1.3x. Extreme retains four samples per
+  case per arm occurrence to fit the ten-minute lease; balanced retains six.
+  No samples dropped. All 10,080 primary/diagnostic timing rows retained.
+- Accuracy versus original F32 inputs and CPU-dequantized weights with F64
+  dots: worst max-absolute / relative-RMS error ratios to incumbent are
+  1.002755 / 1.000468 for integrated dense and 1.008296 / 1.000765 for
+  routed histogram witnesses, below 1.5x. Dense production checks passed
+  320 cases (200 tensor-selected, 120 bitwise fallbacks), including edge
+  magnitudes and partial tiles. Untimed real 40-/38-layer model-prefix
+  captures then replayed exact Q6/Q5 bucket ids and normalized inputs:
+  F64 bounds pass, owning gate/up outputs reproduce bitwise; 120 tensor
+  dispatches in the full prefix and zero in the architecture fallback.
+- Greedy 160-token off/on checks on a 2,301-token prompt, normal 2,048-row
+  chunks, temperature 0 and seed 1 are byte-identical for dense-only and
+  both routes together. All four output SHA256s:
+  `46be71a5d35e6767fad067e82f22b0400b729a54d83b9ec2ac08cad9bb8827de`.
+- Quick end-to-end confirmation: M5 Ultra, A3B UD-Q4_K_M, frozen
+  `1a1680b3`, one binary, both routes off/on, production prefill plus
+  endpoint logits, seed 1; separate ABBA campaigns, two retained reps per
+  arm occurrence, 30-second cooldowns, build lock plus Metal lease.
+  All 16 boundary thermal observations were 0. All retained wall samples
+  below are milliseconds, chronological within off/on; medians pool four
+  samples per setting. These are the confirmation runs, not a size sweep.
+
+  | pp | Off samples (ms) | On samples (ms) | Median off/on (ms) | Speedup | Off/on tok/s |
+  | ---: | --- | --- | ---: | ---: | ---: |
+  | 2048 | 547.989, 549.013, 549.062, 548.416 | 307.109, 308.031, 307.456, 307.781 | 548.714 / 307.618 | 1.78375x | 3732.4 / 6657.6 |
+  | 8192 | 2308.804, 2309.655, 2308.566, 2308.253 | 1340.932, 1344.214, 1341.643, 1342.333 | 2308.685 / 1341.988 | 1.72035x | 3548.3 / 6104.4 |
+
+  Both sizes use 2,048-row chunks. tok/s = prompt tokens / median wall
+  seconds. Research harnesses, campaigns and raw artifacts remain outside
+  this production landing.
+
 ## 2026-11-05 - M5 Ultra Tensor-API Flash Attention On for Measured Long-Context Shapes
 
 - Qwen dense prefill now selects register-resident Metal 4 tensor-API flash

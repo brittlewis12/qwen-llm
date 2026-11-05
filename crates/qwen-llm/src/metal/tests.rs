@@ -332,10 +332,12 @@ fn owned_weight_view_is_read_only_and_bounds_checked() {
         MetalTensorProvenance::OwnedWeightReadOnly
     );
     assert!(!view.is_writable());
-    assert!(std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        view.assert_writable("test write")
-    }))
-    .is_err());
+    assert!(
+        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            view.assert_writable("test write")
+        }))
+        .is_err()
+    );
     assert!(
         MetalTensor::owned_weight_view(buffer.clone(), 1, vec![1], GgmlType::F32, 32,).is_err()
     );

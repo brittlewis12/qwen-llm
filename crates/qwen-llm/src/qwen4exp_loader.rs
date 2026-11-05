@@ -513,23 +513,27 @@ fn canonical_inventory(
     let mut mtp_signature_blocks = HashSet::new();
     let mut saw_root_mtp = false;
     let mut ordinary_mtp_blocks = HashSet::new();
-    let mut appended_config = config.clone();
     if mtp_layers > 1 {
         return Err(Qwen4ExpLoadError::MtpInventory(
             "only one MTP block is qualified".into(),
         ));
     }
-    appended_config.layer_count += mtp_layers as u32;
-    appended_config.compress_ratios.extend(std::iter::repeat_n(
-        config
-            .compress_ratios
-            .iter()
-            .copied()
-            .find(|r| *r > 0)
-            .unwrap_or(4),
-        mtp_layers as usize,
-    ));
-    let appended_names = expected_tensor_inventory(&appended_config)?;
+    let schema = expected_tensor_inventory(config)?;
+    // The appended head is QSA regardless of the trunk's periodic schedule.
+    // Reuse a trunk QSA block's roles instead of pretending it is another
+    // periodic trunk layer (c061df198, #29761).
+    let qsa_prefix = config
+        .compress_ratios
+        .iter()
+        .position(|r| *r > 0)
+        .map(|index| format!("blk.{index}."));
+    let appended_names: HashSet<_> = schema
+        .iter()
+        .filter_map(|(name, _)| {
+            let role = name.strip_prefix(qsa_prefix.as_deref()?)?;
+            Some(format!("blk.{trunk_layers}.{role}"))
+        })
+        .collect();
     for desc in source {
         if !seen.insert(desc.name.as_str()) {
             return Err(Qwen4ExpLoadError::AmbiguousLayout(format!(
@@ -598,7 +602,7 @@ fn canonical_inventory(
             // A default converter MTP block is a full QSA block. Only known
             // trunk roles may accompany its nextn signature.
             let (_, role) = block.unwrap();
-            if !appended_names.iter().any(|(name, _)| name == &desc.name)
+            if !appended_names.contains(&desc.name)
                 && !matches!(
                     role,
                     "hc_attn_down_inject.weight"
@@ -634,7 +638,6 @@ fn canonical_inventory(
             }
         }
     }
-    let schema = expected_tensor_inventory(config)?;
     for desc in &mut tensors {
         if desc.shape
             == [
@@ -1596,14 +1599,16 @@ mod tests {
                 d.n_bytes = d.shape.iter().product::<u64>() / block * bytes;
             }
         }
-        let mut extended = c.clone();
-        extended.layer_count += 1;
-        extended.compress_ratios.push(4);
         let mut physical = split.clone();
         physical.extend(
-            quantized_fixture(&extended)
-                .into_iter()
-                .filter(|d| d.name.starts_with("blk.4.")),
+            split
+                .iter()
+                .filter(|d| d.name.starts_with("blk.3."))
+                .map(|d| {
+                    let mut d = d.clone();
+                    d.name = d.name.replacen("blk.3.", "blk.4.", 1);
+                    d
+                }),
         );
         for (role, shape) in [
             ("eh_proj", vec![512, 256]),

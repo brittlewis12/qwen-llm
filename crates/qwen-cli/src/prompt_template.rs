@@ -414,14 +414,19 @@ pub fn qwen4_alias_template_qualified(gguf: &GgufFile) -> Result<(), &'static st
     {
         return Err("tokenizer <|im_end|> mapping is ambiguous");
     }
-    let eos = gguf
-        .get_u64("tokenizer.ggml.eos_token_id")
-        .ok_or("tokenizer.ggml.eos_token_id is missing")?;
-    if eos != im_end as u64 {
-        return Err("tokenizer EOS is not <|im_end|>");
+    let stops = gguf
+        .stop_token_ids()
+        .map_err(|_| "tokenizer stop-token declaration is invalid")?;
+    if !stops.contains(&(im_end as i32)) {
+        return Err("tokenizer does not stop at <|im_end|>");
     }
-    if im_start == im_end {
-        return Err("tokenizer control-token mapping is invalid");
+    for stop in stops {
+        if !matches!(
+            tokens.get(stop as usize),
+            Some(&"<|im_end|>" | &"<|endoftext|>")
+        ) {
+            return Err("tokenizer stop token has an unsupported control mapping");
+        }
     }
     Ok(())
 }
@@ -524,6 +529,26 @@ mod tests {
             let input = crate::capabilities::input_for(family, &gguf, |_| None, |_| unreachable!());
             assert_eq!(input, InputCapability::all_supported());
         }
+
+        let template = include_str!("../tests/fixtures/templates/qwen38_27b_chat_template.jinja");
+        let eos_and_eot = fixture::qwen4_gguf_with_stops(
+            "qwen4",
+            "future Qwen",
+            template,
+            true,
+            248_044,
+            Some(248_046),
+        );
+        assert!(qwen4_alias_template_qualified(&eos_and_eot).is_ok());
+        let wrong_eos = fixture::qwen4_gguf_with_stops(
+            "qwen4",
+            "future Qwen",
+            template,
+            true,
+            248_045,
+            Some(248_046),
+        );
+        assert!(qwen4_alias_template_qualified(&wrong_eos).is_err());
 
         // No declared template, wrong control tokens, or a marker-free
         // template must refuse structured prompting but keep raw input.

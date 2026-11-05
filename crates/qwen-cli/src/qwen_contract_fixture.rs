@@ -101,6 +101,17 @@ pub(crate) fn qwen4_gguf(
     template: &str,
     control_tokens: bool,
 ) -> GgufFile {
+    qwen4_gguf_with_stops(architecture, name, template, control_tokens, 248_046, None)
+}
+
+pub(crate) fn qwen4_gguf_with_stops(
+    architecture: &str,
+    name: &str,
+    template: &str,
+    control_tokens: bool,
+    eos: u64,
+    eot: Option<u64>,
+) -> GgufFile {
     use Value::*;
     let mut entries: Vec<(&str, Value<'_>)> = vec![
         ("general.architecture", Text(architecture)),
@@ -111,7 +122,10 @@ pub(crate) fn qwen4_gguf(
         ("tokenizer.chat_template", Text(template)),
     ];
     if control_tokens {
-        entries.push(("tokenizer.ggml.eos_token_id", Unsigned(248_046)));
+        entries.push(("tokenizer.ggml.eos_token_id", Unsigned(eos)));
+        if let Some(eot) = eot {
+            entries.push(("tokenizer.ggml.eot_token_id", Unsigned(eot)));
+        }
     }
     let mut bytes = b"GGUF".to_vec();
     bytes.extend(3u32.to_le_bytes());

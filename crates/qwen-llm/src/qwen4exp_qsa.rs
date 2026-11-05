@@ -385,6 +385,14 @@ impl QwenSparseAttentionMetalGeometry {
             self.ratio,
         ) == (24, 2, 256, 2048, 4)
     }
+
+    /// The selected packed decode kernel needs head dim 256 and a GQA group
+    /// divisible by four. Anything else must stay on the scalar/unpacked path.
+    pub(crate) fn supports_selected_packed(self) -> bool {
+        self.head_dim == MAIN_HEAD_DIM
+            && self.kv_heads != 0
+            && (self.query_heads / self.kv_heads).is_multiple_of(PACKED_ATTENTION_HEADS_PER_TG)
+    }
     pub fn from_config(
         config: &Qwen4ExpConfig,
         layer: u32,

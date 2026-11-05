@@ -123,6 +123,7 @@ impl Qwen4ExpDtypeCensus {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Qwen4ExpMetalWeightPlanReport {
     /// Bound canonical trunk descriptors, excluding ignored MTP tensors.
+    /// Canonical trunk tensor count after splitting merged projections.
     pub source_tensor_count: usize,
     pub metal_tensor_count: usize,
     pub cpu_ple_tensor_count: usize,
@@ -141,6 +142,12 @@ pub struct Qwen4ExpMetalWeightPlanReport {
     pub repacked_buffer_count: usize,
     pub repacked_bytes: u64,
     pub repacked_priced_upper_bytes: u64,
+    /// GGUF host bytes read once for repacking; never Metal-resident.
+    pub repacked_source_bytes: u64,
+    /// Physical tensors in the GGUF, including merged sources and MTP heads.
+    pub physical_source_tensor_count: usize,
+    /// Recognized MTP tensors excluded from trunk execution.
+    pub ignored_mtp_tensor_count: usize,
     pub ple_boundary_overlap_bytes: u64,
     pub page_size: usize,
     pub device_max_buffer_length: usize,
@@ -449,8 +456,18 @@ impl Qwen4ExpMetalWeightPlan {
         }
         let ple_boundary_overlap_bytes =
             validate_ple_window_isolation(&retained.windows, ple_desc, retained.page_size)?;
+        let retained_inventory: Vec<_> = inventory
+            .iter()
+            .filter(|d| {
+                !model
+                    .repacks
+                    .iter()
+                    .any(|r| r.targets.iter().any(|t| t.name == d.name))
+            })
+            .cloned()
+            .collect();
         let mut report = report_for_plan(
-            inventory,
+            &retained_inventory,
             &retained,
             ple_desc,
             ple_boundary_overlap_bytes,
@@ -468,6 +485,8 @@ impl Qwen4ExpMetalWeightPlan {
             "normalized priced bytes",
         )?;
         let repacked: Vec<_> = model.repacks.iter().flat_map(|r| &r.targets).collect();
+        report.source_tensor_count = inventory.len();
+        report.source_bytes = checked_sum(inventory.iter().map(|d| d.n_bytes), "canonical bytes")?;
         report.metal_tensor_count = inventory.len() - 1;
         report.repacked_buffer_count = repacked.len();
         report.repacked_bytes = checked_sum(repacked.iter().map(|d| d.n_bytes), "repacked bytes")?;
@@ -478,6 +497,9 @@ impl Qwen4ExpMetalWeightPlan {
                 .collect::<Result<Vec<_>, _>>()?,
             "repacked priced bytes",
         )?;
+        report.repacked_source_bytes = model.repacked_source_bytes();
+        report.physical_source_tensor_count = gguf.tensors.len();
+        report.ignored_mtp_tensor_count = model.ignored_mtp.len();
         let memory = build_weight_memory_plan(ctx, &retained, &report)?;
         let descriptors = gguf
             .tensors
@@ -850,7 +872,7 @@ fn native_dtype_allowed(role: NativeRole, dtype: GgmlType) -> bool {
     }
 }
 
-fn validate_native_dtypes(
+pub(crate) fn validate_native_dtypes(
     tensors: &[TensorDesc],
 ) -> Result<Qwen4ExpDtypeCensus, Qwen4ExpResidencyError> {
     let mut census = Qwen4ExpDtypeCensus::default();
@@ -1219,11 +1241,6 @@ fn realize_retained(
                 return invalid("duplicate repacked bank");
             }
         }
-        normalization_sources.push(
-            tensors
-                .remove(&repack.source.name)
-                .ok_or_else(|| Qwen4ExpResidencyError::Invalid("missing repack source".into()))?,
-        );
     }
     Ok((windows, tensors, normalization_sources))
 }
@@ -1399,6 +1416,9 @@ fn report_for_plan(
         repacked_buffer_count: 0,
         repacked_bytes: 0,
         repacked_priced_upper_bytes: 0,
+        repacked_source_bytes: 0,
+        physical_source_tensor_count: inventory.len(),
+        ignored_mtp_tensor_count: 0,
         ple_boundary_overlap_bytes,
         page_size: plan.page_size,
         device_max_buffer_length,
@@ -1572,6 +1592,97 @@ mod tests {
         }
         inject.n_bytes -= 1;
         assert!(normalized_descriptor(&inject).is_err());
+    }
+
+    fn quantized_inventory(config: &Qwen4ExpConfig) -> Vec<TensorDesc> {
+        let mut offset = 0_u64;
+        crate::qwen4exp_loader::expected_tensor_inventory(config)
+            .unwrap()
+            .into_iter()
+            .map(|(name, shape)| {
+                let dtype = expected_ud_q3_k_xl_dtype(&name).unwrap();
+                let (block, bytes) = dtype.storage_layout().unwrap();
+                assert!(
+                    shape[0].is_multiple_of(block),
+                    "{name} row width {} is not aligned to {block}",
+                    shape[0]
+                );
+                offset = offset.next_multiple_of(32);
+                let n_bytes = shape.iter().product::<u64>() / block * bytes;
+                let desc = TensorDesc {
+                    name,
+                    shape,
+                    dtype,
+                    shard_idx: 0,
+                    data_offset: offset,
+                    n_bytes,
+                };
+                offset += n_bytes;
+                desc
+            })
+            .collect()
+    }
+
+    #[test]
+    fn reference_quantized_inventory_is_canonical_and_plans_in_source_order() {
+        let config = Qwen4ExpConfig::flash_next_reference();
+        let source = quantized_inventory(&config);
+        assert_eq!(source.len(), QWEN4EXP_RELEASE_TENSOR_COUNT);
+        assert!(
+            source
+                .iter()
+                .all(|desc| desc.data_offset.is_multiple_of(32))
+        );
+        assert!(validate_native_dtypes(&source).is_ok());
+
+        let model =
+            crate::qwen4exp_loader::Qwen4ExpModel::from_inventory(config.clone(), &source, 0)
+                .unwrap();
+        assert_eq!(model.tensors.len(), source.len());
+        for (canonical, original) in model.tensors.iter().zip(&source) {
+            assert_eq!(canonical.name, original.name);
+            assert_eq!(canonical.shape, original.shape);
+            assert_eq!(canonical.dtype, original.dtype);
+            assert_eq!(canonical.data_offset, original.data_offset);
+            assert_eq!(canonical.n_bytes, original.n_bytes);
+        }
+        let requests = model.residency_sources();
+        assert_eq!(requests.len(), source.len() - 1);
+        assert_eq!(
+            requests.iter().map(|d| d.name.as_str()).collect::<Vec<_>>(),
+            source
+                .iter()
+                .filter(|d| d.name != "per_layer_token_embd.weight")
+                .map(|d| d.name.as_str())
+                .collect::<Vec<_>>()
+        );
+
+        let shard_len = source
+            .iter()
+            .map(|d| d.data_offset + d.n_bytes)
+            .max()
+            .unwrap()
+            + 4096;
+        let plan = plan_retained_storage(
+            &[shard_len as usize],
+            &requests,
+            4096,
+            8 * 1024 * 1024 * 1024,
+            32,
+        )
+        .unwrap();
+        assert_eq!(plan.entries.len(), requests.len());
+        for (entry, desc) in plan.entries.iter().zip(&requests) {
+            assert_eq!(entry.name, desc.name);
+            assert_eq!(entry.shard_idx, desc.shard_idx);
+            assert_eq!(entry.data_offset, desc.data_offset);
+            assert_eq!(entry.n_bytes, desc.n_bytes);
+            assert!(matches!(
+                entry.disposition,
+                crate::metal::RetainedStorageDisposition::View { .. }
+                    | crate::metal::RetainedStorageDisposition::CopyFallback { .. }
+            ));
+        }
     }
 
     #[test]
@@ -1778,6 +1889,9 @@ mod tests {
             repacked_buffer_count: 0,
             repacked_bytes: 0,
             repacked_priced_upper_bytes: 0,
+            repacked_source_bytes: 0,
+            physical_source_tensor_count: 1,
+            ignored_mtp_tensor_count: 0,
             ple_boundary_overlap_bytes: 0,
             page_size: 4096,
             device_max_buffer_length: 8192,

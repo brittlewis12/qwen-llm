@@ -540,14 +540,14 @@ impl Qwen4ExpConfig {
             );
         }
         if self.moe.experts_per_token > 16
-            || self.moe.expert_count > i32::MAX as u32
+            || self.moe.expert_count > 512
             || !self.hidden_size.is_multiple_of(256)
             || !self.moe.expert_intermediate_size.is_multiple_of(32)
             || !self.moe.shared_expert_intermediate_size.is_multiple_of(32)
         {
             return refuse(
                 "MoE",
-                "requires top-k <= 16, signed I32 expert IDs, hidden width divisible by 256 and FFN widths divisible by 32",
+                "requires top-k <= 16, expert count <= 512, hidden width divisible by 256 and FFN widths divisible by 32",
             );
         }
         let Some(ple) = &self.ple else {
@@ -557,6 +557,25 @@ impl Qwen4ExpConfig {
             return refuse(
                 "PLE",
                 "requires PLE only at layer 1 and head width divisible by 32",
+            );
+        }
+        if self.qsa.token_budget > 2_048 {
+            return refuse(
+                "QSA",
+                "token budget exceeds the 2048-token packed MoE motor",
+            );
+        }
+        let mut ratios = self
+            .compress_ratios
+            .iter()
+            .copied()
+            .filter(|ratio| *ratio > 0);
+        if let Some(first) = ratios.next()
+            && ratios.any(|ratio| ratio != first)
+        {
+            return refuse(
+                "QSA",
+                "all full-attention layers must share one compression ratio",
             );
         }
         // All projection widths cross a signed I32 Metal indexing boundary.
@@ -1139,7 +1158,7 @@ fn invalid(key: &'static str, reason: impl Into<String>) -> Qwen4ExpError {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
 
     fn metadata_fixture(architecture: &str, mtp: bool, dense: bool) -> GgufFile {
@@ -1150,7 +1169,7 @@ mod tests {
         })
     }
 
-    fn metadata_fixture_with(
+    pub(crate) fn metadata_fixture_with(
         architecture: &str,
         mtp: bool,
         mutate: impl FnOnce(&mut Qwen4ExpConfig),

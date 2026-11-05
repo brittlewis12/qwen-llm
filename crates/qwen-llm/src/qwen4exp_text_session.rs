@@ -346,7 +346,8 @@ impl Qwen4ExpTextSessionMetalGeometry {
                 self.capacity
             ));
         }
-        Ok(prompt_extent > self.packed_qsa_geometry()?.output_width())
+        let geometry = self.packed_qsa_geometry()?;
+        Ok(prompt_extent > geometry.output_width() && geometry.supports_selected_packed())
     }
 }
 
@@ -6312,6 +6313,19 @@ mod tests {
                         && allocation.alignment.is_power_of_two())
             );
         }
+    }
+
+    #[test]
+    fn selected_packed_capability_declines_unsupported_gqa_groups() {
+        let mut config = Qwen4ExpConfig::flash_next_reference();
+        let geometry = Qwen4ExpTextSessionMetalGeometry::from_config(&config, 4_096).unwrap();
+        assert!(geometry.packed_selected_capable_for_extent(4_096).unwrap());
+        config.attention.kv_heads = 4;
+        let geometry = Qwen4ExpTextSessionMetalGeometry::from_config(&config, 4_096).unwrap();
+        assert!(
+            !geometry.packed_selected_capable_for_extent(4_096).unwrap(),
+            "GQA group 6 must not reserve selected packed scratch"
+        );
     }
 
     #[test]

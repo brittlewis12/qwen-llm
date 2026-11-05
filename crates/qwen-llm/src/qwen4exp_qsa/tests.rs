@@ -4208,3 +4208,17 @@ fn parallel_id_expansion_matches_serial_kernel() {
         }
     }
 }
+
+#[test]
+fn selected_packed_requires_quarter_gqa_group() {
+    let reference = Qwen4ExpConfig::flash_next_reference();
+    let geometry = QwenSparseAttentionMetalGeometry::from_config(&reference, 3, 2_048).unwrap();
+    assert!(geometry.supports_selected_packed());
+    let mut q24_kv4 = reference;
+    q24_kv4.attention.kv_heads = 4;
+    let geometry = QwenSparseAttentionMetalGeometry::from_config(&q24_kv4, 3, 2_048).unwrap();
+    assert!(
+        !geometry.supports_selected_packed(),
+        "a GQA group of six must stay on the scalar/unpacked path"
+    );
+}

@@ -94,6 +94,12 @@ fn plans_released_q3_k_xl_without_residing_the_ple_table() {
 
     let report = plan.report();
     assert_eq!(report.source_tensor_count, QWEN4EXP_RELEASE_TENSOR_COUNT);
+    assert_eq!(
+        report.physical_source_tensor_count,
+        QWEN4EXP_RELEASE_TENSOR_COUNT
+    );
+    assert_eq!(report.ignored_mtp_tensor_count, 0);
+    assert_eq!(report.repacked_source_bytes, 0);
     assert_eq!(report.metal_tensor_count, QWEN4EXP_METAL_TENSOR_COUNT);
     assert_eq!(report.cpu_ple_tensor_count, 1);
     assert!(report.cpu_ple_source_bytes > 0);

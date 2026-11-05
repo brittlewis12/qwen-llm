@@ -298,11 +298,14 @@ impl ExpertBankRepack {
         }
         for (expert, dst) in output.chunks_exact_mut(self.expert_bytes).enumerate() {
             let start = (expert * 2 + bank) * self.expert_bytes;
-            for (out, &byte) in dst
-                .iter_mut()
-                .zip(&source[start..start + self.expert_bytes])
-            {
-                out.write(byte);
+            // SAFETY: the validated source and destination spans are disjoint
+            // and cover exactly one complete expert bank, including quant bytes.
+            unsafe {
+                std::ptr::copy_nonoverlapping(
+                    source.as_ptr().add(start),
+                    dst.as_mut_ptr().cast::<u8>(),
+                    self.expert_bytes,
+                );
             }
         }
         Ok(())
@@ -310,6 +313,9 @@ impl ExpertBankRepack {
 }
 
 impl Qwen4ExpModel {
+    /// Metal-resident descriptors. Repack sources and targets are excluded:
+    /// the source is read once from the GGUF mapping during repacking and the
+    /// targets are owned copies created from it.
     pub(crate) fn residency_sources(&self) -> Vec<&TensorDesc> {
         self.tensors
             .iter()
@@ -320,8 +326,12 @@ impl Qwen4ExpModel {
                         .iter()
                         .any(|r| r.targets.iter().any(|t| t.name == desc.name))
             })
-            .chain(self.repacks.iter().map(|r| &r.source))
             .collect()
+    }
+
+    /// Host bytes read once for expert-bank repacking (not Metal-resident).
+    pub(crate) fn repacked_source_bytes(&self) -> u64 {
+        self.repacks.iter().map(|r| r.source.n_bytes).sum()
     }
 }
 
@@ -441,6 +451,49 @@ pub fn expected_tensor_inventory(
     Ok(out)
 }
 
+// Exact roles, never prefix matches: an unknown nextn suffix must fail closed.
+fn known_nextn_role(role: &str) -> bool {
+    matches!(
+        role,
+        "nextn.eh_proj.weight"
+            | "nextn.embed_tokens.weight"
+            | "nextn.enorm.weight"
+            | "nextn.hnorm.weight"
+            | "nextn.shared_head_norm.weight"
+            | "nextn.shared_head_head.weight"
+            | "nextn.hc_head_norm.weight"
+            | "nextn.hc_head_down.weight"
+            | "nextn.hc_head_up.weight"
+            | "nextn_fc_embedding.weight"
+            | "nextn_fc_hidden.weight"
+            | "nextn_hc_head.weight"
+    )
+}
+
+fn known_root_nextn_name(name: &str) -> bool {
+    matches!(
+        name,
+        "nextn.pre_projection.weight"
+            | "nextn.post_projection.weight"
+            | "nextn_fc_embedding.weight"
+            | "nextn_fc_hidden.weight"
+            | "nextn_hc_head.weight"
+    )
+}
+
+fn known_root_mtp_name(name: &str) -> bool {
+    matches!(
+        name,
+        "mtp.fc.weight"
+            | "mtp.pre_fc_norm_embedding.weight"
+            | "mtp.pre_fc_norm_hidden.weight"
+            | "mtp.norm.weight"
+            | "mtp.fc_embedding.weight"
+            | "mtp.fc_hidden.weight"
+            | "mtp.hyper_connection_mixer.weight"
+    )
+}
+
 // Layouts follow llama.cpp conversion/qwen4exp.py and src/models/qwen4exp.cpp
 // (a91eab67d838), plus the shared QKV and expert gate/up loaders.
 fn canonical_inventory(
@@ -457,8 +510,26 @@ fn canonical_inventory(
     }
     let trunk_layers = u64::from(config.layer_count);
     let mtp_end = trunk_layers + mtp_layers;
-    let mut mtp_blocks = HashSet::new();
-    let mut saw_mtp = false;
+    let mut mtp_signature_blocks = HashSet::new();
+    let mut saw_root_mtp = false;
+    let mut ordinary_mtp_blocks = HashSet::new();
+    let mut appended_config = config.clone();
+    if mtp_layers > 1 {
+        return Err(Qwen4ExpLoadError::MtpInventory(
+            "only one MTP block is qualified".into(),
+        ));
+    }
+    appended_config.layer_count += mtp_layers as u32;
+    appended_config.compress_ratios.extend(std::iter::repeat_n(
+        config
+            .compress_ratios
+            .iter()
+            .copied()
+            .find(|r| *r > 0)
+            .unwrap_or(4),
+        mtp_layers as usize,
+    ));
+    let appended_names = expected_tensor_inventory(&appended_config)?;
     for desc in source {
         if !seen.insert(desc.name.as_str()) {
             return Err(Qwen4ExpLoadError::AmbiguousLayout(format!(
@@ -476,41 +547,90 @@ fn canonical_inventory(
             || desc.name.starts_with("nextn.")
             || block
                 .is_some_and(|(_, role)| role.starts_with("nextn_") || role.starts_with("nextn."));
-        if desc.name.starts_with("mtp.") || nextn_named || declared_mtp_block {
+        if nextn_named {
+            let known = match block {
+                Some((_, role)) => known_nextn_role(role),
+                None => known_root_nextn_name(&desc.name),
+            };
+            if !known {
+                return Err(Qwen4ExpLoadError::MtpInventory(format!(
+                    "tensor {:?} has an unknown MTP role",
+                    desc.name
+                )));
+            }
             if mtp_layers == 0 {
                 return Err(Qwen4ExpLoadError::MtpInventory(format!(
                     "tensor {:?} is MTP but nextn_predict_layers is 0",
                     desc.name
                 )));
             }
-            if let Some(index) = block_index {
-                if index >= mtp_end {
+            match block_index {
+                Some(index) if index < trunk_layers || index >= mtp_end => {
                     return Err(Qwen4ExpLoadError::MtpInventory(format!(
-                        "tensor {:?} declares block {index} outside the {trunk_layers}-block trunk and {mtp_layers} declared MTP block(s)",
+                        "MTP tensor {:?} declares block {index} outside the {trunk_layers}-block trunk and {mtp_layers} declared MTP block(s)",
                         desc.name
                     )));
                 }
-                mtp_blocks.insert(index);
+                Some(index) => {
+                    if desc.name.ends_with(".nextn.eh_proj.weight") {
+                        mtp_signature_blocks.insert(index);
+                    }
+                }
+                None => saw_root_mtp = true,
             }
-            saw_mtp = true;
+            ignored.push(desc.name.clone());
+        } else if desc.name.starts_with("mtp.") {
+            if !known_root_mtp_name(&desc.name) {
+                return Err(Qwen4ExpLoadError::MtpInventory(format!(
+                    "tensor {:?} has an unknown root MTP role",
+                    desc.name
+                )));
+            }
+            if mtp_layers == 0 {
+                return Err(Qwen4ExpLoadError::MtpInventory(format!(
+                    "tensor {:?} is MTP but nextn_predict_layers is 0",
+                    desc.name
+                )));
+            }
+            saw_root_mtp = true;
+            ignored.push(desc.name.clone());
+        } else if declared_mtp_block {
+            // A default converter MTP block is a full QSA block. Only known
+            // trunk roles may accompany its nextn signature.
+            let (_, role) = block.unwrap();
+            if !appended_names.iter().any(|(name, _)| name == &desc.name)
+                && !matches!(
+                    role,
+                    "hc_attn_down_inject.weight"
+                        | "hc_ffn_down_inject.weight"
+                        | "attn_qkv.weight"
+                        | "ffn_gate_up_exps.weight"
+                )
+            {
+                return Err(Qwen4ExpLoadError::MtpInventory(format!(
+                    "tensor {:?} has an unknown appended MTP role",
+                    desc.name
+                )));
+            }
+            ordinary_mtp_blocks.insert(block_index.unwrap());
             ignored.push(desc.name.clone());
         } else {
             tensors.push(desc.clone());
         }
     }
     if mtp_layers > 0 {
-        if !saw_mtp {
+        if !saw_root_mtp && mtp_signature_blocks.is_empty() {
             return Err(Qwen4ExpLoadError::MtpInventory(format!(
-                "nextn_predict_layers={mtp_layers} but the inventory has no MTP tensors"
+                "nextn_predict_layers={mtp_layers} but the inventory has no MTP signature tensor"
             )));
         }
-        if !mtp_blocks.is_empty() {
-            for index in trunk_layers..mtp_end {
-                if !mtp_blocks.contains(&index) {
-                    return Err(Qwen4ExpLoadError::MtpInventory(format!(
-                        "MTP block {index} is declared but absent"
-                    )));
-                }
+        for index in trunk_layers..mtp_end {
+            if (!saw_root_mtp || ordinary_mtp_blocks.contains(&index))
+                && !mtp_signature_blocks.contains(&index)
+            {
+                return Err(Qwen4ExpLoadError::MtpInventory(format!(
+                    "MTP block {index} is declared but has no nextn signature tensor"
+                )));
             }
         }
     }
@@ -1207,6 +1327,9 @@ mod tests {
             Box::new(|c| c.ple.as_mut().unwrap().embedding_head_dim = 160),
             Box::new(|c| c.moe.experts_per_token = 17),
             Box::new(|c| c.moe.expert_count = 0),
+            Box::new(|c| c.moe.expert_count = 513),
+            Box::new(|c| c.qsa.token_budget = 4_096),
+            Box::new(|c| c.compress_ratios[3] = 4),
             Box::new(|c| c.gated_delta_net.conv_kernel = 3),
         ];
         for change in changes {
@@ -1311,7 +1434,20 @@ mod tests {
             assert_eq!(actual, expected);
             assert_eq!(repack.targets[bank].dtype, merged.dtype);
         }
-        assert_eq!(model.residency_sources().len(), model.tensors.len() - 2);
+        assert_eq!(model.residency_sources().len(), model.tensors.len() - 3);
+        let resident: Vec<_> = model
+            .residency_sources()
+            .iter()
+            .map(|desc| desc.name.as_str())
+            .collect();
+        assert!(!resident.contains(&"blk.0.ffn_gate_up_exps.weight"));
+        assert!(!resident.contains(&"blk.0.ffn_gate_exps.weight"));
+        assert!(!resident.contains(&"blk.0.ffn_up_exps.weight"));
+        assert_eq!(model.repacked_source_bytes(), merged.n_bytes);
+        assert_eq!(
+            repack.targets[0].n_bytes + repack.targets[1].n_bytes,
+            merged.n_bytes
+        );
         let mut sentinel = vec![std::mem::MaybeUninit::new(7); repack.targets[0].n_bytes as usize];
         assert!(repack.copy_bank(0, &bytes[1..], &mut sentinel).is_err());
         assert!(
@@ -1480,59 +1616,216 @@ mod tests {
     fn mtp_inventory_must_match_declared_nextn_layers() {
         let c = alternate(8);
         let trunk = fixture(&c);
-        let mut with_mtp = trunk.clone();
-        for name in ["blk.8.nextn.eh_proj.weight", "blk.8.attn_q.weight"] {
-            let mut desc = trunk[0].clone();
+        let append = |source: &mut Vec<TensorDesc>, name: &str| {
+            let mut desc = source[0].clone();
             desc.name = name.into();
             desc.dtype = GgmlType::I32;
-            with_mtp.push(desc);
-        }
+            source.push(desc);
+        };
+        let mut signature = trunk.clone();
+        append(&mut signature, "blk.8.nextn.eh_proj.weight");
 
-        // Declared MTP but no MTP tensors: previously this silently consumed a
-        // trunk layer; now it must refuse.
+        // Declared MTP with no signature tensor: previously this silently
+        // consumed a trunk layer; now it must refuse.
         assert!(matches!(
             Qwen4ExpModel::from_inventory(c.clone(), &trunk, 1),
             Err(Qwen4ExpLoadError::MtpInventory(_))
         ));
 
+        // Ordinary tensors in the appended range are not MTP evidence.
+        let mut ordinary_only = trunk.clone();
+        append(&mut ordinary_only, "blk.8.attn_q.weight");
+        assert!(matches!(
+            Qwen4ExpModel::from_inventory(c.clone(), &ordinary_only, 1),
+            Err(Qwen4ExpLoadError::MtpInventory(_))
+        ));
+
         // MTP tensors present but metadata declares none.
         assert!(matches!(
-            Qwen4ExpModel::from_inventory(c.clone(), &with_mtp, 0),
+            Qwen4ExpModel::from_inventory(c.clone(), &signature, 0),
             Err(Qwen4ExpLoadError::MtpInventory(_))
         ));
 
-        // Two declared blocks but only the first is present.
+        // Two declared blocks but only the first has a signature.
         assert!(matches!(
-            Qwen4ExpModel::from_inventory(c.clone(), &with_mtp, 2),
+            Qwen4ExpModel::from_inventory(c.clone(), &signature, 2),
             Err(Qwen4ExpLoadError::MtpInventory(_))
         ));
 
-        // A nextn tensor outside the declared block range is inconsistent.
-        let mut out_of_range = with_mtp.clone();
-        let mut desc = trunk[0].clone();
-        desc.name = "blk.9.nextn.eh_proj.weight".into();
-        out_of_range.push(desc);
-        assert!(matches!(
-            Qwen4ExpModel::from_inventory(c.clone(), &out_of_range, 1),
-            Err(Qwen4ExpLoadError::MtpInventory(_))
-        ));
+        // Signatures outside the declared range are inconsistent.
+        for name in ["blk.9.nextn.eh_proj.weight", "blk.7.nextn.eh_proj.weight"] {
+            let mut misplaced = trunk.clone();
+            append(&mut misplaced, name);
+            assert!(matches!(
+                Qwen4ExpModel::from_inventory(c.clone(), &misplaced, 1),
+                Err(Qwen4ExpLoadError::MtpInventory(_))
+            ));
+        }
+
+        // Unknown MTP roles refuse in both layouts.
+        for name in [
+            "blk.8.nextn.bogus.weight",
+            "mtp.bogus.weight",
+            "blk.8.nextn.eh_proj.bogus.weight",
+            "mtp.fc.bogus.weight",
+            "mtp.layers.999.bogus.weight",
+            "blk.8.bogus.weight",
+        ] {
+            let mut unknown = trunk.clone();
+            append(&mut unknown, name);
+            assert!(matches!(
+                Qwen4ExpModel::from_inventory(c.clone(), &unknown, 1),
+                Err(Qwen4ExpLoadError::MtpInventory(_))
+            ));
+        }
 
         // A plain out-of-range block is still an unexpected tensor, not MTP.
-        let mut unknown = trunk.clone();
-        let mut desc = trunk[0].clone();
-        desc.name = "blk.8.attn_q.weight".into();
-        unknown.push(desc);
+        let mut unknown_block = trunk.clone();
+        append(&mut unknown_block, "blk.8.attn_q.weight");
         assert!(matches!(
-            Qwen4ExpModel::from_inventory(c, &unknown, 0),
+            Qwen4ExpModel::from_inventory(c.clone(), &unknown_block, 0),
             Err(Qwen4ExpLoadError::UnexpectedTensors(_))
         ));
 
-        // MTP as a separate root-level artifact is consistent with a declaration.
+        // Root-level MTP evidence is consistent with a declaration.
         let mut root_mtp = trunk.clone();
-        let mut desc = trunk[0].clone();
-        desc.name = "nextn.pre_projection.weight".into();
-        root_mtp.push(desc);
-        assert!(Qwen4ExpModel::from_inventory(alternate(8), &root_mtp, 1).is_ok());
+        append(&mut root_mtp, "nextn.pre_projection.weight");
+        assert!(Qwen4ExpModel::from_inventory(c.clone(), &root_mtp, 1).is_ok());
+        let mut root_mtp = trunk.clone();
+        append(&mut root_mtp, "mtp.fc.weight");
+        assert!(Qwen4ExpModel::from_inventory(c, &root_mtp, 1).is_ok());
+    }
+
+    fn quantized_fixture(config: &Qwen4ExpConfig) -> Vec<TensorDesc> {
+        let mut offset = 0_u64;
+        expected_tensor_inventory(config)
+            .unwrap()
+            .into_iter()
+            .map(|(name, shape)| {
+                let dtype = if name.ends_with("down_exps.weight") {
+                    GgmlType::IQ4_NL
+                } else if name.ends_with("exps.weight") {
+                    GgmlType::IQ3_XXS
+                } else if name == "output.weight" {
+                    GgmlType::Q6_K
+                } else if name == "per_layer_token_embd.weight" {
+                    GgmlType::IQ4_NL
+                } else if name.contains("indexer.q_proj") || name.contains("indexer.k_proj") {
+                    GgmlType::BF16
+                } else if name.ends_with("norm.weight")
+                    || name.ends_with("norm_key.weight")
+                    || name.ends_with("norm_query.weight")
+                    || name.ends_with("norm_conv.weight")
+                    || name.ends_with("inject.weight")
+                    || name.ends_with("gate_inp.weight")
+                    || name.ends_with("gate_inp_shexp.weight")
+                    || name.ends_with("ssm_beta.weight")
+                    || name.ends_with("ssm_alpha.weight")
+                    || name.ends_with("ssm_a")
+                    || name.ends_with("ssm_dt.bias")
+                    || name.ends_with("ssm_conv1d.weight")
+                    || name.ends_with("ple_conv1d.weight")
+                {
+                    GgmlType::F32
+                } else {
+                    GgmlType::Q8_0
+                };
+                let (block, bytes) = dtype.storage_layout().unwrap();
+                assert!(
+                    shape[0].is_multiple_of(block),
+                    "{name} row width {} is not aligned to {block}",
+                    shape[0]
+                );
+                offset = offset.next_multiple_of(32);
+                let n_bytes = shape.iter().product::<u64>() / block * bytes;
+                let desc = TensorDesc {
+                    name,
+                    shape,
+                    dtype,
+                    shard_idx: 0,
+                    data_offset: offset,
+                    n_bytes,
+                };
+                offset += n_bytes;
+                desc
+            })
+            .collect()
+    }
+
+    #[test]
+    fn quantized_merged_inventory_preserves_alignment_and_tied_output() {
+        let config = alternate(8);
+        let mut split = quantized_fixture(&config);
+        // The converter quantizes each merged HC projection as one tensor;
+        // both canonical halves therefore share the same Q8_0 row encoding.
+        for d in &mut split {
+            if d.name.ends_with("inject.weight") {
+                d.dtype = GgmlType::Q8_0;
+                d.n_bytes = d.shape.iter().product::<u64>() / 32 * 34;
+            }
+        }
+        assert!(split.iter().all(|desc| desc.data_offset.is_multiple_of(32)));
+        let mut source = split.clone();
+        for layer in 0..config.layer_count {
+            for (merged, parts) in [
+                (
+                    "hc_attn_down_inject",
+                    vec!["hc_attn_down", "hc_attn_inject"],
+                ),
+                ("hc_ffn_down_inject", vec!["hc_ffn_down", "hc_ffn_inject"]),
+            ] {
+                let names: Vec<_> = parts
+                    .iter()
+                    .map(|part| format!("blk.{layer}.{part}.weight"))
+                    .collect();
+                merge(
+                    &mut source,
+                    &format!("blk.{layer}.{merged}.weight"),
+                    &names.iter().map(String::as_str).collect::<Vec<_>>(),
+                );
+            }
+        }
+        merge(
+            &mut source,
+            "blk.0.attn_qkv_gate.weight",
+            &["blk.0.attn_qkv.weight", "blk.0.attn_gate.weight"],
+        );
+        merge(
+            &mut source,
+            "blk.0.ssm_beta_alpha.weight",
+            &["blk.0.ssm_beta.weight", "blk.0.ssm_alpha.weight"],
+        );
+        merge(
+            &mut source,
+            "blk.3.attn_qkv.weight",
+            &[
+                "blk.3.attn_q.weight",
+                "blk.3.attn_k.weight",
+                "blk.3.attn_v.weight",
+            ],
+        );
+        let model = Qwen4ExpModel::from_inventory(config.clone(), &source, 0).unwrap();
+        for (canonical, original) in model.tensors.iter().zip(&split) {
+            assert_eq!(canonical.name, original.name);
+            assert_eq!(canonical.shape, original.shape);
+            assert_eq!(canonical.dtype, original.dtype);
+            assert_eq!(canonical.n_bytes, original.n_bytes);
+            assert!(canonical.data_offset.is_multiple_of(32));
+        }
+
+        crate::qwen4exp_residency::validate_native_dtypes(&model.tensors).unwrap();
+        let mut tied = split;
+        tied.retain(|desc| desc.name != "output.weight");
+        let model = Qwen4ExpModel::from_inventory(config, &tied, 0).unwrap();
+        assert!(model.tied_embeddings);
+        assert_eq!(model.output.name, "token_embd.weight");
+        assert_eq!(model.output.dtype, GgmlType::Q8_0);
+        assert!(
+            !model
+                .residency_sources()
+                .iter()
+                .any(|desc| desc.name == "output.weight")
+        );
     }
 
     #[test]

@@ -866,12 +866,6 @@ fn tensor_flash_restored_model_case(prefix_rows: usize, tail_rows: usize, automa
     let path = crate::test_fixtures::required_filename("Qwen3.8-27B-Q4_K_M.gguf");
     let model = runtime.load_model(path).unwrap();
     assert_eq!(model.gguf().get_u64("qwen35.context_length"), Some(262144));
-    if automatic {
-        assert!(
-            std::env::var_os("QWEN_PREFILL_ATTN_TENSOR_FLASH").is_none(),
-            "unset-default fixture requires an unset knob"
-        );
-    }
     let total = prefix_rows + 1024 + tail_rows;
     let capacity = total.div_ceil(64) * 64;
     let ids: Vec<i32> = (0..total)

@@ -2322,7 +2322,8 @@ impl Drop for TensorFlashOverrideGuard {
 }
 
 /// Thread-local measurement scope for the tensor-flash knob. Hardware and
-/// shape checks still apply. The previous selection is restored on unwind.
+/// shape checks still apply, and an explicit environment 0 always wins.
+/// The previous selection is restored on unwind.
 #[doc(hidden)]
 pub fn with_prefill_attn_tensor_flash_override<R>(enabled: bool, f: impl FnOnce() -> R) -> R {
     let previous = PREFILL_ATTN_TENSOR_FLASH_OVERRIDE.with(|slot| slot.replace(Some(enabled)));
@@ -2333,15 +2334,19 @@ pub fn with_prefill_attn_tensor_flash_override<R>(enabled: bool, f: impl FnOnce(
 }
 
 fn prefill_attn_tensor_flash_mode() -> PrefillEnvMode {
-    if let Some(enabled) = PREFILL_ATTN_TENSOR_FLASH_OVERRIDE.with(Cell::get) {
-        return if enabled {
-            PrefillEnvMode::ForceOn
-        } else {
-            PrefillEnvMode::ForceOff
-        };
-    }
     static MODE: OnceLock<PrefillEnvMode> = OnceLock::new();
-    *MODE.get_or_init(|| env_mode(PREFILL_ATTN_TENSOR_FLASH_ENV))
+    tensor_flash_resolve_mode(
+        *MODE.get_or_init(|| env_mode(PREFILL_ATTN_TENSOR_FLASH_ENV)),
+        PREFILL_ATTN_TENSOR_FLASH_OVERRIDE.with(Cell::get),
+    )
+}
+
+fn tensor_flash_resolve_mode(mode: PrefillEnvMode, scoped: Option<bool>) -> PrefillEnvMode {
+    match (mode, scoped) {
+        (PrefillEnvMode::ForceOff, _) | (_, Some(false)) => PrefillEnvMode::ForceOff,
+        (_, Some(true)) => PrefillEnvMode::ForceOn,
+        (mode, None) => mode,
+    }
 }
 
 /// v0.439: two-pass online-softmax matrix attention (KQ folds the softmax

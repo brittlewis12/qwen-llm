@@ -195,6 +195,32 @@ fn tensor_flash_selector_unset_off_on_semantics() {
 }
 
 #[test]
+fn tensor_flash_explicit_off_dominates_diagnostic_override() {
+    for scoped in [None, Some(false), Some(true)] {
+        assert_eq!(
+            tensor_flash_resolve_mode(parse_prefill_env_mode(Some("0")), scoped),
+            PrefillEnvMode::ForceOff
+        );
+    }
+    assert_eq!(
+        tensor_flash_resolve_mode(PrefillEnvMode::Auto, None),
+        PrefillEnvMode::Auto
+    );
+    assert_eq!(
+        tensor_flash_resolve_mode(PrefillEnvMode::Auto, Some(true)),
+        PrefillEnvMode::ForceOn
+    );
+    assert_eq!(
+        tensor_flash_resolve_mode(PrefillEnvMode::ForceOn, Some(false)),
+        PrefillEnvMode::ForceOff
+    );
+    assert_eq!(
+        tensor_flash_resolve_mode(PrefillEnvMode::ForceOn, None),
+        PrefillEnvMode::ForceOn
+    );
+}
+
+#[test]
 fn tensor_flash_selector_common_guards_apply_in_auto_and_force_on() {
     let ok = tensor_flash_auto_selection_fixture();
     for mode in [PrefillEnvMode::Auto, PrefillEnvMode::ForceOn] {

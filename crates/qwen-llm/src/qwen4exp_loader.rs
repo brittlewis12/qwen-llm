@@ -291,6 +291,10 @@ impl ExpertBankRepack {
         if bank >= 2
             || source.len() != self.source.n_bytes as usize
             || output.len() != self.targets[bank].n_bytes as usize
+            || self.expert_bytes == 0
+            || !output.len().is_multiple_of(self.expert_bytes)
+            || output.len().checked_mul(2) != Some(source.len())
+            || self.targets[0].n_bytes != self.targets[1].n_bytes
         {
             return Err(Qwen4ExpLoadError::DimensionOverflow(
                 "expert repack byte span",
@@ -1452,6 +1456,20 @@ mod tests {
             merged.n_bytes
         );
         let mut sentinel = vec![std::mem::MaybeUninit::new(7); repack.targets[0].n_bytes as usize];
+        // Descriptors are public and mutable: reject changed spans before
+        // the unsafe bulk copy, leaving the entire destination untouched.
+        let mut changed = repack.clone();
+        changed.source.n_bytes = 1;
+        assert!(changed.copy_bank(0, &[0], &mut sentinel).is_err());
+        assert!(sentinel.iter().all(|b| unsafe { b.assume_init() } == 7));
+        changed = repack.clone();
+        changed.source.n_bytes = 2;
+        changed.targets[0].n_bytes = 1;
+        changed.targets[1].n_bytes = 1;
+        let mut short = [std::mem::MaybeUninit::new(7)];
+        assert!(changed.copy_bank(0, &[0, 1], &mut short).is_err());
+        assert_eq!(unsafe { short[0].assume_init() }, 7);
+
         assert!(repack.copy_bank(0, &bytes[1..], &mut sentinel).is_err());
         assert!(
             sentinel

@@ -155,7 +155,9 @@ running. The grid ran 17:47-18:16 UTC; the longest campaign was 9:08 (27B deep
 tg) and every campaign stayed under the 10-minute target.
 
 - M5 bench identity `cd700105b` (engine crates unchanged from main);
-  llama.cpp v0.9.0 `cd959bae99`, build 12110.
+  llama.cpp v0.9.0 `cd959bae99`, build 12110. The qwen build ran under the
+  per-machine build lock with `nice -n 10`; the pinned llama.cpp build was
+  already in the cache.
 - Flash-Next used the artifact present on M5, **GSQ-RCO IQ3_S** (77.9 GiB), not
   M4's UD-Q3_K_XL. A3B, 27B and GLM use the same artifacts as M4.
 - DS4-Flash, A10B, Muse and K2 artifacts are not present on M5; they were not

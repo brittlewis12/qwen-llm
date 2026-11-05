@@ -736,6 +736,10 @@ mod tests {
             "../../qwen-llm/tests/fixtures/qwen4exp_reference_main_cc3e1029.json"
         ))
         .unwrap();
+        assert_eq!(
+            expected["capture"]["checkout_revision"],
+            "cc3e1029249867241cbc74b66e15c9bccb164b57"
+        );
         let header = &expected["header_facts"];
         let facts = QwenHeaderFacts {
             architecture: header["general.architecture"].as_str().unwrap(),

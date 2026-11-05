@@ -9,6 +9,18 @@ fn captured() -> Value {
     serde_json::from_str(include_str!(
         "../tests/fixtures/qwen4exp_reference_main_cc3e1029.json"
     ))
+    .map(|manifest: Value| {
+        assert_eq!(
+            manifest["capture"]["checkout_revision"], "cc3e1029249867241cbc74b66e15c9bccb164b57",
+            "capture must establish the independently pinned main checkout"
+        );
+        assert_eq!(
+            manifest["capture"]["checkout_tree"],
+            "43689b7f777572ac7f126b537569aca90f1fe197"
+        );
+        assert_eq!(manifest["baseline"], "cc3e1029");
+        manifest
+    })
     .unwrap()
 }
 fn descriptor(value: &Value) -> TensorDesc {

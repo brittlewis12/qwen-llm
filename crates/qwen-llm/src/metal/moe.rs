@@ -6695,6 +6695,10 @@ mod tests {
         let Some(ctx) = metal_test_context() else {
             return;
         };
+        let skipped =
+            MetalTensor::from_bytes(&ctx, bytemuck::cast_slice(&[0i32]), vec![1], GgmlType::I32)
+                .unwrap();
+        check_moe_route_status("test_route", &skipped, 1).expect("zero means no route dispatched");
         for (word, needle) in [
             (
                 MOE_ROUTE_STATUS_READY | MOE_ROUTE_STATUS_NONFINITE,

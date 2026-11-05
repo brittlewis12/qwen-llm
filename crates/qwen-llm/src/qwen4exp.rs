@@ -604,39 +604,13 @@ impl Qwen4ExpConfig {
                 return refuse("addressing", "projection dimensions must fit signed I32");
             }
         }
-        // Validate the same element/stride contracts as native projection
-        // preflight, including all HC and output projections. The PLE table is
-        // CPU row-addressed. Routed-bank element products must also fit u32.
         let inventory = crate::qwen4exp_loader::expected_tensor_inventory(self)
             .map_err(|error| unsupported("addressing", error.to_string()))?;
-        let projections = inventory
-            .iter()
-            .filter(|(name, _)| name == "output.weight")
-            .chain(inventory.iter().filter(|(name, _)| name != "output.weight"));
-        for (name, shape) in projections {
-            if shape.len() < 2 || name == "per_layer_token_embd.weight" {
-                continue;
-            }
-            let elements = shape.iter().try_fold(1u64, |n, &d| n.checked_mul(d));
-            if elements.is_none_or(|n| n > u64::from(u32::MAX)) {
-                return Err(unsupported(
-                    "addressing",
-                    format!("{name}: weight element count exceeds u32 addressing"),
-                ));
-            }
-            crate::qwen4exp_metal::validate_projection_addressing(
-                crate::tensor::GgmlType::F32,
-                shape[0] as usize,
-                shape[1] as usize,
-                self.qsa.token_budget as usize
-                    * if shape.len() == 3 {
-                        self.moe.experts_per_token as usize
-                    } else {
-                        1
-                    },
-            )
-            .map_err(|error| unsupported("addressing", format!("{name}: {error}")))?;
-        }
+        validate_projection_inventory_addressing(
+            &inventory,
+            self.moe.experts_per_token as usize,
+            1,
+        )?;
         Ok(())
     }
 
@@ -656,6 +630,78 @@ impl Qwen4ExpConfig {
             .filter(|&&ratio| ratio > 0)
             .count()
     }
+}
+
+/// Projection bounds for an actual scalar or packed invocation. Weight-bank
+/// bounds are independent of the request; activation bounds use its row count.
+pub(crate) fn validate_projection_inventory_addressing(
+    inventory: &[(String, Vec<u64>)],
+    experts_per_token: usize,
+    tokens: usize,
+) -> Result<(), Qwen4ExpError> {
+    let projections = inventory
+        .iter()
+        .filter(|(name, _)| name == "output.weight")
+        .chain(inventory.iter().filter(|(name, _)| name != "output.weight"));
+    for (name, shape) in projections {
+        if shape.len() < 2 || name == "per_layer_token_embd.weight" {
+            continue; // PLE rows are addressed on the CPU.
+        }
+        let elements = shape.iter().try_fold(1u64, |n, &d| n.checked_mul(d));
+        if elements.is_none_or(|n| n > u64::from(u32::MAX)) {
+            return Err(unsupported(
+                "addressing",
+                format!("{name}: weight element count exceeds u32 addressing"),
+            ));
+        }
+        let n_in = shape[0] as usize;
+        let n_out = shape[1] as usize;
+        // The LM head and final HC read run once, including after packed
+        // prefill. Embeddings gather rows; convolution weights are not GEMMs.
+        let rows = if name.starts_with("blk.") && !name.ends_with("conv1d.weight") {
+            tokens
+        } else {
+            1
+        };
+        crate::qwen4exp_metal::validate_projection_addressing(
+            crate::tensor::GgmlType::F32,
+            n_in,
+            n_out,
+            rows,
+        )
+        .map_err(|error| unsupported("addressing", format!("{name}: {error}")))?;
+        if shape.len() == 3 {
+            let slots = rows.checked_mul(experts_per_token);
+            // Gate/up read one input per token and write one inner per routed
+            // slot. Down reads and writes per slot. The complete bank was
+            // checked above, rather than only one expert's matrix.
+            for (label, width) in [
+                ("output", n_out),
+                (
+                    "input",
+                    if name.ends_with("ffn_down_exps.weight") {
+                        n_in
+                    } else {
+                        0
+                    },
+                ),
+            ] {
+                if width != 0
+                    && slots
+                        .and_then(|n| n.checked_mul(width))
+                        .is_none_or(|n| n > u32::MAX as usize)
+                {
+                    return Err(unsupported(
+                        "addressing",
+                        format!(
+                            "{name}: {label} element count exceeds u32 addressing for {tokens} tokens"
+                        ),
+                    ));
+                }
+            }
+        }
+    }
+    Ok(())
 }
 
 impl PleConfig {
@@ -1422,20 +1468,6 @@ pub(crate) mod tests {
         assert!(
             matches!(experts.validate_artifact(),Err(Qwen4ExpError::UnsupportedShape {feature:"addressing",reason})
             if reason.contains("ffn_gate_exps.weight"))
-        );
-        let mut packed = Qwen4ExpConfig::flash_next_reference();
-        packed.hidden_size = 256;
-        packed.moe.expert_count = 16;
-        packed.moe.experts_per_token = 16;
-        packed.moe.expert_intermediate_size = 1_000_000;
-        packed.ple.as_mut().unwrap().embedding_head_dim = 32;
-        packed.ple.as_mut().unwrap().heads_per_ngram = 4;
-        packed.ple.as_mut().unwrap().head_offsets.truncate(8);
-        packed.ple.as_mut().unwrap().head_vocab_sizes.truncate(8);
-        packed.validate().unwrap();
-        assert!(
-            matches!(packed.validate_artifact(),Err(Qwen4ExpError::UnsupportedShape {feature:"addressing",reason})
-            if reason.contains("ffn_gate_exps.weight")&&reason.contains("output element count"))
         );
         let mut hc = Qwen4ExpConfig::flash_next_reference();
         hc.hyper_connection.low_rank = 1_048_576;

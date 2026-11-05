@@ -169,6 +169,7 @@ pub struct Qwen4ExpTextSessionMetalGeometry {
     qsa_layers: Vec<u32>,
     capacity: usize,
     vocab_size: usize,
+    projection_inventory: Vec<(String, Vec<u64>)>,
 }
 
 impl Qwen4ExpTextSessionMetalGeometry {
@@ -204,6 +205,8 @@ impl Qwen4ExpTextSessionMetalGeometry {
             qsa_layers,
             capacity,
             vocab_size: config.vocab_size as usize,
+            projection_inventory: crate::qwen4exp_loader::expected_tensor_inventory(config)
+                .map_err(|error| Qwen4ExpTextSessionError::Invalid(error.to_string()))?,
         };
         geometry.validate(config.layer_count as usize)?;
         Ok(geometry)
@@ -3394,6 +3397,11 @@ fn add_packed_allocations(
     capacity: usize,
     selected_capable: bool,
 ) -> Result<(), Qwen4ExpTextSessionError> {
+    crate::qwen4exp::validate_projection_inventory_addressing(
+        &geometry.projection_inventory,
+        geometry.zero_one().layer_zero().moe().experts_per_token(),
+        capacity,
+    )?;
     let zero_one = geometry.zero_one();
     let hidden = geometry.hidden_size();
     let hyper = geometry.hyper_width();
@@ -5901,6 +5909,49 @@ mod tests {
 
     fn context() -> Option<MetalContext> {
         crate::test_fixtures::metal_context_or_skip()
+    }
+
+    #[test]
+    fn projection_rows_follow_scalar_logits_and_requested_packed_extent() {
+        let mut config = Qwen4ExpConfig::flash_next_reference();
+        config.hidden_size = 256;
+        config.vocab_size = 2_097_152;
+        let ple = config.ple.as_mut().unwrap();
+        ple.embedding_head_dim = 32;
+        ple.heads_per_ngram = 4;
+        ple.head_offsets.truncate(8);
+        ple.head_vocab_sizes.truncate(8);
+        config.validate_artifact().unwrap();
+        let geometry = Qwen4ExpTextSessionMetalGeometry::from_config(&config, 2048).unwrap();
+        // Admission of the complete packed session must never invent packed
+        // logits or vocabulary-wide embedding activations.
+        add_packed_allocations(&mut AllocationBuilder::default(), &geometry, 2048, false).unwrap();
+        config.moe.expert_count = 16;
+        config.moe.experts_per_token = 16;
+        config.moe.expert_intermediate_size = 1_000_000;
+        config.validate_artifact().unwrap(); // scalar execution remains addressable
+        let geometry = Qwen4ExpTextSessionMetalGeometry::from_config(&config, 2048).unwrap();
+        add_packed_allocations(&mut AllocationBuilder::default(), &geometry, 2, false).unwrap();
+        let error =
+            add_packed_allocations(&mut AllocationBuilder::default(), &geometry, 2048, false)
+                .unwrap_err();
+        assert!(
+            error.to_string().contains("ffn_gate_exps.weight"),
+            "{error}"
+        );
+        assert!(
+            error.to_string().contains("output element count"),
+            "{error}"
+        );
+        // This is the pure allocation-description phase called at session
+        // admission, before querying Metal prices or allocating any buffers.
+        config.vocab_size = 16_777_216;
+        let error = config.validate_artifact().unwrap_err();
+        assert!(error.to_string().contains("output.weight"), "{error}");
+        assert!(
+            error.to_string().contains("weight element count"),
+            "{error}"
+        );
     }
 
     #[test]

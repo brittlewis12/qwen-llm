@@ -1538,6 +1538,202 @@ mod tests {
     }
 
     #[test]
+    fn llama_cpp_v090_default_metadata_merged_views_and_appended_mtp() {
+        use std::collections::HashMap;
+        // c061df198 (#29761): block_count includes a full-QSA MTP block;
+        // 2280f0fd1 (#31028): row concatenation, no grouped BA permutation.
+        let mut header = crate::qwen4exp::tests::metadata_fixture_with("qwen4exp", true, |c| {
+            c.layer_count = 4;
+            c.hidden_size = 256;
+            c.vocab_size = 32;
+            c.hyper_connection.count = 2;
+            c.hyper_connection.low_rank = 32;
+            c.attention.query_heads = 4;
+            c.attention.kv_heads = 1;
+            c.gated_delta_net.key_heads = 1;
+            c.gated_delta_net.value_heads = 2;
+            c.gated_delta_net.inner_size = 256;
+            c.moe.expert_count = 2;
+            c.moe.experts_per_token = 1;
+            c.moe.expert_intermediate_size = 32;
+            c.moe.shared_expert_intermediate_size = 32;
+            c.qsa.token_budget = 8;
+            c.compress_ratios = vec![0, 0, 0, 4];
+            let ple = c.ple.as_mut().unwrap();
+            ple.token_vocab_size = 32;
+            ple.heads_per_ngram = 4;
+            ple.embedding_head_dim = 32;
+            ple.eos_token_id = 1;
+            ple.image_token_id = Some(2);
+            ple.head_vocab_sizes = vec![8; 8];
+            ple.head_offsets = (0..8).map(|i| i * 8).collect();
+        });
+        let c = Qwen4ExpConfig::from_gguf(&header).unwrap();
+        c.validate_artifact().unwrap();
+        assert_eq!(header.get_u64("qwen4exp.block_count"), Some(5));
+        assert_eq!(header.get_u64("qwen4exp.nextn_predict_layers"), Some(1));
+        assert_eq!(
+            header
+                .get_i64_array("qwen4exp.attention.compress_ratios")
+                .unwrap()
+                .unwrap(),
+            vec![0, 0, 0, 4, 4]
+        );
+        let mut split = quantized_fixture(&c);
+        // One merged HC tensor has one dtype, including the inject rows.
+        for d in &mut split {
+            if d.name.ends_with("inject.weight") {
+                d.dtype = GgmlType::Q8_0;
+                d.n_bytes = d.shape.iter().product::<u64>() / 32 * 34;
+            }
+        }
+        let mut extended = c.clone();
+        extended.layer_count += 1;
+        extended.compress_ratios.push(4);
+        let mut physical = split.clone();
+        physical.extend(
+            quantized_fixture(&extended)
+                .into_iter()
+                .filter(|d| d.name.starts_with("blk.4.")),
+        );
+        for (role, shape) in [
+            ("eh_proj", vec![512, 256]),
+            ("enorm", vec![256]),
+            ("hnorm", vec![256]),
+            ("hc_head_norm", vec![256, 2]),
+            ("hc_head_down", vec![512, 32]),
+            ("hc_head_up", vec![32, 512]),
+        ] {
+            physical.push(TensorDesc {
+                name: format!("blk.4.nextn.{role}.weight"),
+                n_bytes: shape.iter().product::<u64>() * 4,
+                shape,
+                dtype: GgmlType::F32,
+                shard_idx: 0,
+                data_offset: 0,
+            });
+        }
+        // Preserve converter emission order: cache the first half and emit
+        // the concatenation when the second half arrives. QSA Q/K/V stay split.
+        let mut groups = Vec::new();
+        for layer in 0..5 {
+            for (merged, parts) in [
+                ("hc_attn_down_inject", ["hc_attn_down", "hc_attn_inject"]),
+                ("hc_ffn_down_inject", ["hc_ffn_down", "hc_ffn_inject"]),
+            ] {
+                groups.push((
+                    format!("blk.{layer}.{merged}.weight"),
+                    parts.map(|p| format!("blk.{layer}.{p}.weight")),
+                ));
+            }
+            if layer < 3 {
+                for (merged, parts) in [
+                    ("attn_qkv_gate", ["attn_qkv", "attn_gate"]),
+                    ("ssm_beta_alpha", ["ssm_beta", "ssm_alpha"]),
+                ] {
+                    groups.push((
+                        format!("blk.{layer}.{merged}.weight"),
+                        parts.map(|p| format!("blk.{layer}.{p}.weight")),
+                    ));
+                }
+            }
+        }
+        let bytes_for = |d: &TensorDesc| -> Vec<u8> {
+            let seed = d
+                .name
+                .bytes()
+                .fold(0u8, |acc, b| acc.wrapping_mul(31).wrapping_add(b));
+            (0..d.n_bytes)
+                .map(|i| seed.wrapping_add((i % 251) as u8))
+                .collect()
+        };
+        let mut payload = HashMap::new();
+        let mut emitted = Vec::new();
+        for d in &physical {
+            if let Some((name, parts)) = groups.iter().find(|(_, p)| p.contains(&d.name)) {
+                if d.name != parts[1] {
+                    continue;
+                }
+                let first = physical.iter().find(|d| d.name == parts[0]).unwrap();
+                let mut merged = first.clone();
+                merged.name = name.clone();
+                merged.shape[1] += d.shape[1];
+                // MTP HC halves also share one dtype after quantization.
+                merged.n_bytes = merged.shape.iter().product::<u64>()
+                    / merged.dtype.storage_layout().unwrap().0
+                    * merged.dtype.storage_layout().unwrap().1;
+                let mut data = bytes_for(first);
+                let mut second = d.clone();
+                second.dtype = first.dtype;
+                second.n_bytes = second.shape.iter().product::<u64>()
+                    / first.dtype.storage_layout().unwrap().0
+                    * first.dtype.storage_layout().unwrap().1;
+                data.extend(bytes_for(&second));
+                assert_eq!(data.len() as u64, merged.n_bytes);
+                payload.insert(name.clone(), data);
+                emitted.push(merged);
+            } else {
+                payload.insert(d.name.clone(), bytes_for(d));
+                emitted.push(d.clone());
+            }
+        }
+        let mut offsets = [4096u64, 8192];
+        for (i, d) in emitted.iter_mut().enumerate() {
+            d.shard_idx = i % 2;
+            d.data_offset = offsets[d.shard_idx].next_multiple_of(32);
+            offsets[d.shard_idx] = d.data_offset + d.n_bytes;
+        }
+        assert!(
+            emitted
+                .iter()
+                .any(|d| d.name == "blk.4.hc_attn_down_inject.weight")
+        );
+        assert!(
+            !emitted
+                .iter()
+                .any(|d| d.name == "blk.4.attn_qkv_gate.weight")
+        );
+        header.tensors = emitted.clone();
+        let model = Qwen4ExpModel::from_gguf(&header).unwrap();
+        assert_eq!(model.config, c);
+        assert_eq!(model.blocks.len(), 4);
+        assert_eq!(
+            model.ignored_mtp.len(),
+            physical
+                .iter()
+                .filter(|d| d.name.starts_with("blk.4."))
+                .count()
+                - 2
+        );
+        assert!(!model.tensors.iter().any(|d| d.name.starts_with("blk.4.")));
+        crate::qwen4exp_residency::validate_native_dtypes(&model.tensors).unwrap();
+        for view in &model.tensors {
+            let original = split.iter().find(|d| d.name == view.name).unwrap();
+            let source = emitted
+                .iter()
+                .find(|d| {
+                    d.shard_idx == view.shard_idx
+                        && d.data_offset <= view.data_offset
+                        && view.data_offset + view.n_bytes <= d.data_offset + d.n_bytes
+                })
+                .unwrap();
+            let offset = (view.data_offset - source.data_offset) as usize;
+            assert_eq!(
+                &payload[&source.name][offset..offset + view.n_bytes as usize],
+                bytes_for(original),
+                "{}",
+                view.name
+            );
+            assert!(view.data_offset.is_multiple_of(32));
+        }
+        // Pre-quantized checkpoints skip the merges; both layouts admit.
+        header.tensors = physical;
+        let old = Qwen4ExpModel::from_gguf(&header).unwrap();
+        assert_eq!(old.blocks.len(), 4);
+        assert_eq!(old.tensors.len(), split.len());
+    }
+
+    #[test]
     fn inventory_refuses_missing_unknown_ambiguous_and_malformed_merged_tensors() {
         let c = alternate(8);
         let mut source = fixture(&c);
@@ -1805,7 +2001,8 @@ mod tests {
             ],
         );
         let model = Qwen4ExpModel::from_inventory(config.clone(), &source, 0).unwrap();
-        for (canonical, original) in model.tensors.iter().zip(&split) {
+        for canonical in &model.tensors {
+            let original = split.iter().find(|d| d.name == canonical.name).unwrap();
             assert_eq!(canonical.name, original.name);
             assert_eq!(canonical.shape, original.shape);
             assert_eq!(canonical.dtype, original.dtype);

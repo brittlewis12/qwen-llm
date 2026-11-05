@@ -307,14 +307,43 @@ pub fn encode_topk_bucket_logits_softmax_dot_sigmoid_packed_f32_status(
             ),
         });
     }
-    if logits.n_elements() as usize != n_tokens * n_expert
-        || out_idx.n_elements() as usize != n_tokens * topk
-        || out_w.n_elements() as usize != n_tokens * topk
+    if hidden == 0 {
+        return Err(MetalError::BadShape {
+            kernel: "topk_bucket_logits_softmax_dot_sigmoid_packed",
+            detail: "hidden must be nonzero".into(),
+        });
+    }
+    let (slot_count, id_count) = super::moe::validate_bucket_layout(
+        "topk_bucket_logits_softmax_dot_sigmoid_packed",
+        n_expert,
+        n_tokens,
+        topk,
+    )?;
+    let logits_elements = n_tokens
+        .checked_mul(n_expert)
+        .ok_or_else(|| MetalError::BadShape {
+            kernel: "topk_bucket_logits_softmax_dot_sigmoid_packed",
+            detail: "n_tokens * n_expert overflow".into(),
+        })?;
+    let input_elements = n_tokens
+        .checked_mul(hidden)
+        .ok_or_else(|| MetalError::BadShape {
+            kernel: "topk_bucket_logits_softmax_dot_sigmoid_packed",
+            detail: "n_tokens * hidden overflow".into(),
+        })?;
+    super::checks::to_u32(
+        "topk_bucket_logits_softmax_dot_sigmoid_packed",
+        hidden,
+        "hidden",
+    )?;
+    if logits.n_elements() as usize != logits_elements
+        || out_idx.n_elements() as usize != slot_count
+        || out_w.n_elements() as usize != slot_count
         || shared_weight.n_elements() as usize != hidden
-        || x.n_elements() as usize != n_tokens * hidden
+        || x.n_elements() as usize != input_elements
         || shared_out.n_elements() as usize != n_tokens
         || counts.n_elements() as usize != n_expert
-        || ids.n_elements() as usize != n_expert * n_tokens
+        || ids.n_elements() as usize != id_count
         || status.n_elements() < n_tokens as u64
     {
         return Err(MetalError::BadShape {
@@ -336,10 +365,26 @@ pub fn encode_topk_bucket_logits_softmax_dot_sigmoid_packed_f32_status(
     enc.set_bytes(
         0,
         &Args {
-            n_expert: n_expert as u32,
-            topk: topk as u32,
-            hidden: hidden as u32,
-            n_tokens: n_tokens as u32,
+            n_expert: super::checks::to_u32(
+                "topk_bucket_logits_softmax_dot_sigmoid_packed",
+                n_expert,
+                "n_expert",
+            )?,
+            topk: super::checks::to_u32(
+                "topk_bucket_logits_softmax_dot_sigmoid_packed",
+                topk,
+                "topk",
+            )?,
+            hidden: super::checks::to_u32(
+                "topk_bucket_logits_softmax_dot_sigmoid_packed",
+                hidden,
+                "hidden",
+            )?,
+            n_tokens: super::checks::to_u32(
+                "topk_bucket_logits_softmax_dot_sigmoid_packed",
+                n_tokens,
+                "n_tokens",
+            )?,
         },
     );
     enc.set_tensor(1, logits);
@@ -4165,6 +4210,55 @@ mod tests {
                 assert_eq!(gap, vec![0.0], "boundary width {width} gap");
             }
         }
+    }
+
+    #[test]
+    fn fused_bucket_rejects_overflowing_products_and_signed_slots() {
+        let Some(ctx) = metal_test_context() else {
+            return;
+        };
+        let one_f32 = MetalTensor::zeros_f32(&ctx, vec![1]).unwrap();
+        let one_i32 = MetalTensor::zeros_i32(&ctx, vec![1]).unwrap();
+        let command = ctx.queue.commandBuffer().unwrap();
+        let enc = KernelEncoder::begin(&command);
+        let err = encode_topk_bucket_logits_softmax_dot_sigmoid_packed_f32_status(
+            &ctx,
+            &enc,
+            &one_f32,
+            &one_f32,
+            &one_f32,
+            &one_i32,
+            &one_f32,
+            &one_f32,
+            &one_f32,
+            &one_f32,
+            &one_i32,
+            8,
+            4,
+            1,
+            usize::MAX / 2,
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("overflow"), "{err}");
+        let err = encode_topk_bucket_logits_softmax_dot_sigmoid_packed_f32_status(
+            &ctx,
+            &enc,
+            &one_f32,
+            &one_f32,
+            &one_f32,
+            &one_i32,
+            &one_f32,
+            &one_f32,
+            &one_f32,
+            &one_f32,
+            &one_i32,
+            8,
+            1,
+            1,
+            i32::MAX as usize + 1,
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("signed bucket ids"), "{err}");
     }
 
     #[test]

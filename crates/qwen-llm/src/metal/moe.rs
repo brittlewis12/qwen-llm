@@ -15,6 +15,31 @@ pub const MOE_ROUTE_STATUS_READY: i32 = 1;
 pub const MOE_ROUTE_STATUS_NONFINITE: i32 = 2;
 pub const MOE_ROUTE_STATUS_OVERFLOW: i32 = 4;
 
+#[cfg(test)]
+thread_local! {
+    static FAIL_NEXT_ROUTE_CHECK: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// Test seam: the next route-status check on this thread reports a failed
+/// route, so production completion paths can be exercised without a real
+/// non-finite router input.
+#[cfg(test)]
+#[must_use = "the injection is disarmed when the guard drops"]
+pub(crate) fn fail_next_route_status_check() -> FailNextRouteStatusCheck {
+    FAIL_NEXT_ROUTE_CHECK.with(|flag| flag.set(true));
+    FailNextRouteStatusCheck
+}
+
+#[cfg(test)]
+pub(crate) struct FailNextRouteStatusCheck;
+
+#[cfg(test)]
+impl Drop for FailNextRouteStatusCheck {
+    fn drop(&mut self) {
+        FAIL_NEXT_ROUTE_CHECK.with(|flag| flag.set(false));
+    }
+}
+
 /// Read and validate a route-status buffer after its command buffer has
 /// completed. `rows` is the number of per-token words the dispatch could have
 /// written; zero words are treated as "no route dispatched" and skipped.
@@ -23,6 +48,13 @@ pub fn check_moe_route_status(
     status: &MetalTensor,
     rows: usize,
 ) -> Result<(), MetalError> {
+    #[cfg(test)]
+    if FAIL_NEXT_ROUTE_CHECK.with(|flag| flag.replace(false)) {
+        return Err(MetalError::BadShape {
+            kernel,
+            detail: "injected route status failure".into(),
+        });
+    }
     if status.dtype != GgmlType::I32 || status.n_elements() < rows as u64 {
         return Err(MetalError::BadShape {
             kernel,
@@ -6185,6 +6217,48 @@ pub fn encode_moe_route_bucket_slots_parallel_f32_status(
     )
 }
 
+/// Shared fixed-capacity bucket layout validation for every route/bucket
+/// encoder (standalone and fused).
+pub(super) fn validate_bucket_layout(
+    kernel: &'static str,
+    n_expert: usize,
+    n_tokens: usize,
+    topk: usize,
+) -> Result<(usize, usize), MetalError> {
+    if n_expert == 0 || n_tokens == 0 || topk == 0 {
+        return Err(MetalError::BadShape {
+            kernel,
+            detail: format!(
+                "degenerate bucket shape n_expert={n_expert} n_tokens={n_tokens} topk={topk}"
+            ),
+        });
+    }
+    let slot_count = n_tokens
+        .checked_mul(topk)
+        .ok_or_else(|| MetalError::BadShape {
+            kernel,
+            detail: "n_tokens * topk overflow".into(),
+        })?;
+    let id_count = n_expert
+        .checked_mul(n_tokens)
+        .ok_or_else(|| MetalError::BadShape {
+            kernel,
+            detail: "n_expert * n_tokens overflow".into(),
+        })?;
+    if i32::try_from(slot_count).is_err() {
+        return Err(MetalError::BadShape {
+            kernel,
+            detail: format!("slot count {slot_count} exceeds signed bucket ids"),
+        });
+    }
+    super::checks::to_u32(kernel, n_expert, "n_expert")?;
+    super::checks::to_u32(kernel, n_tokens, "n_tokens")?;
+    super::checks::to_u32(kernel, topk, "topk")?;
+    super::checks::to_u32(kernel, slot_count, "n_tokens*topk")?;
+    super::checks::to_u32(kernel, id_count, "n_expert*n_tokens")?;
+    Ok((slot_count, id_count))
+}
+
 #[allow(clippy::too_many_arguments)]
 fn encode_route_bucket(
     ctx: &MetalContext,
@@ -6198,26 +6272,8 @@ fn encode_route_bucket(
     topk: usize,
     parallel: bool,
 ) -> Result<(), MetalError> {
-    let slot_count = n_tokens
-        .checked_mul(topk)
-        .ok_or_else(|| MetalError::BadShape {
-            kernel: "moe_route_bucket_slots",
-            detail: "n_tokens * topk overflow".into(),
-        })?;
-    let id_count = n_expert
-        .checked_mul(n_tokens)
-        .ok_or_else(|| MetalError::BadShape {
-            kernel: "moe_route_bucket_slots",
-            detail: "n_expert * n_tokens overflow".into(),
-        })?;
-    if i32::try_from(slot_count).is_err() {
-        return Err(MetalError::BadShape {
-            kernel: "moe_route_bucket_slots",
-            detail: format!("slot count {slot_count} exceeds signed bucket ids"),
-        });
-    }
-    super::checks::to_u32("moe_route_bucket_slots", slot_count, "n_tokens*topk")?;
-    super::checks::to_u32("moe_route_bucket_slots", id_count, "n_expert*n_tokens")?;
+    let (slot_count, id_count) =
+        validate_bucket_layout("moe_route_bucket_slots", n_expert, n_tokens, topk)?;
     if topk_idx.n_elements() as usize != slot_count
         || counts.n_elements() as usize != n_expert
         || ids.n_elements() as usize != id_count

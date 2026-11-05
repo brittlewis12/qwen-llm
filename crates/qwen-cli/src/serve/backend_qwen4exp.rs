@@ -39,6 +39,7 @@ mod dflash;
 pub(super) struct Prepared {
     context_limit: usize,
     default_max_tokens: usize,
+    release_sampling: crate::release_sampling::SamplingDefaults,
     tokenizer: Tokenizer,
     stop_tokens: Vec<i32>,
     im_start: Option<u32>,
@@ -105,6 +106,7 @@ impl Prepared {
             crate::drafter_policy::Lane::Serve,
         )?;
         Ok(Self {
+            release_sampling: qwen4_sampling_defaults(gguf),
             context_limit,
             default_max_tokens,
             tokenizer,
@@ -115,6 +117,16 @@ impl Prepared {
             drafter,
         })
     }
+}
+
+fn qwen4_sampling_defaults(gguf: &GgufFile) -> crate::release_sampling::SamplingDefaults {
+    crate::release_sampling::gguf_sampling_defaults(
+        crate::release_identity::ReleaseIdentity::detect(
+            qwen_llm::model_family::ModelFamily::Qwen4Exp,
+            gguf,
+        ),
+        gguf,
+    )
 }
 
 /// Loads the prepared Flash-Next session after bind, then serves.
@@ -156,6 +168,7 @@ pub(crate) struct FlashNextBackend {
     dflash_head: Option<MetalDFlashHead>,
     model_id: String,
     default_max_tokens: usize,
+    release_sampling: crate::release_sampling::SamplingDefaults,
     /// Longest decoded piece of one token (output ceilings).
     max_piece_bytes: usize,
     forward_limit: usize,
@@ -301,6 +314,7 @@ impl FlashNextBackend {
             ctx.memory_signals(),
         )?;
         Ok(Self {
+            release_sampling: prepared.release_sampling,
             ctx,
             max_piece_bytes: prepared.tokenizer.max_decoded_piece_bytes(),
             tokenizer: prepared.tokenizer,
@@ -362,6 +376,7 @@ impl GenerationBackend for FlashNextBackend {
 
     fn request_profile(&self) -> super::request_profile::RequestProfile {
         super::request_profile::RequestProfile::FlashNext {
+            sampling: self.release_sampling,
             style: self.template_style,
             limits: self.output_limits(),
         }
@@ -378,7 +393,7 @@ impl GenerationBackend for FlashNextBackend {
         let max_tokens = self.output_limits().max_tokens(request);
         let mut sampler = Sampler::new(super::request_profile::sampling_with_defaults(
             request,
-            super::request_profile::flash_next_release(),
+            self.release_sampling,
         ))
         .map_err(|error| ServeError::invalid_request(None, format!("sampling: {error}")))?;
         let tokenize_t0 = Instant::now();

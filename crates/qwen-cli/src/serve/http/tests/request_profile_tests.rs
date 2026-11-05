@@ -199,6 +199,7 @@ fn all_family_request_profile_snapshot() {
         (
             "flash-next",
             RequestProfile::FlashNext {
+                sampling: crate::serve::request_profile::flash_next_release().into(),
                 style: TemplateStyle::House,
                 limits: crate::serve::request_profile::OutputLimits::TEST,
             },
@@ -536,6 +537,7 @@ fn family_profiles_drive_real_http_json_and_sse_without_hook_overrides() {
     }
     cases.push((
         RequestProfile::FlashNext {
+            sampling: crate::serve::request_profile::flash_next_release().into(),
             style: TemplateStyle::House,
             limits: crate::serve::request_profile::OutputLimits::TEST,
         },
@@ -668,6 +670,7 @@ fn served_families_default_to_release_sampling_and_keep_explicit_fields() {
     let profiles = [
         (
             RequestProfile::FlashNext {
+                sampling: crate::serve::request_profile::flash_next_release().into(),
                 style: TemplateStyle::House,
                 limits: crate::serve::request_profile::OutputLimits::TEST,
             },
@@ -827,6 +830,7 @@ fn profiles_preserve_style_and_history_normalization_boundaries() {
             limits: crate::serve::request_profile::OutputLimits::TEST,
         },
         RequestProfile::FlashNext {
+            sampling: crate::serve::request_profile::flash_next_release().into(),
             style: TemplateStyle::Upstream,
             limits: crate::serve::request_profile::OutputLimits::TEST,
         },
@@ -1112,6 +1116,7 @@ fn prefill_lineage_is_glm_only_and_refused_elsewhere() {
             limits: crate::serve::request_profile::OutputLimits::TEST,
         },
         RequestProfile::FlashNext {
+            sampling: crate::serve::request_profile::flash_next_release().into(),
             style: TemplateStyle::House,
             limits: crate::serve::request_profile::OutputLimits::TEST,
         },

@@ -3,8 +3,7 @@
 use super::items::{QwenTemplate, ServeError, ServeRequest, TemplateStyle};
 use super::output_partition::{OutputProtocol, ToolGrammar};
 use super::{render, render_ds4, render_glm5_next, render_k2, render_muse};
-use crate::release_identity::ReleaseIdentity;
-use crate::release_sampling::{SamplingDefaults, decimal, fresh_seed, release_sampling};
+use crate::release_sampling::{SamplingDefaults, decimal, fresh_seed};
 use qwen_llm::muse_glimmer::MuseGlimmerChatTemplateProfile;
 use qwen_llm::sampling::SamplingConfig;
 use serde_json::Value;
@@ -63,6 +62,7 @@ pub(crate) enum RequestProfile {
     },
     FlashNext {
         style: TemplateStyle,
+        sampling: SamplingDefaults,
         limits: OutputLimits,
     },
     DeepSeekV4 {
@@ -241,10 +241,10 @@ impl RequestProfile {
                 }
                 Ok(())
             }
-            Self::FlashNext { .. } => {
+            Self::FlashNext { sampling, .. } => {
                 *request =
                     crate::open_responses::bind_qwen_request(request, QwenTemplate::Qwen38, true)?;
-                fill_sampling_defaults(request, flash_next_release());
+                fill_sampling_defaults(request, *sampling);
                 Ok(())
             }
             Self::DeepSeekV4 { sampling, .. } => {
@@ -412,9 +412,13 @@ impl RequestProfile {
     }
 }
 
-/// Flash-Next's release defaults (`release_sampling`); serve seed 42.
+/// Flash-Next reference defaults for synthetic request-profile fixtures.
+#[cfg(test)]
 pub(crate) fn flash_next_release() -> SamplingConfig {
-    release_sampling(ReleaseIdentity::FlashNext, 42)
+    crate::release_sampling::release_sampling(
+        crate::release_identity::ReleaseIdentity::FlashNext,
+        42,
+    )
 }
 
 /// A request's sampler: each field it sets, else the release default, and a
@@ -550,6 +554,7 @@ mod tests {
                 limits,
             },
             RequestProfile::FlashNext {
+                sampling: crate::serve::request_profile::flash_next_release().into(),
                 style: TemplateStyle::House,
                 limits,
             },

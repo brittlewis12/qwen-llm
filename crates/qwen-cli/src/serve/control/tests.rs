@@ -450,6 +450,7 @@ fn family_profiles_serve_history_or_standalone_assets_without_native_inference()
             limits: crate::serve::request_profile::OutputLimits::TEST,
         },
         RequestProfile::FlashNext {
+            sampling: crate::serve::request_profile::flash_next_release().into(),
             style: TemplateStyle::House,
             limits: crate::serve::request_profile::OutputLimits::TEST,
         },

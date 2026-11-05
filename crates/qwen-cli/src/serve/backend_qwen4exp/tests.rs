@@ -4,6 +4,45 @@ use qwen_llm::qwen4exp::Qwen4ExpConfig;
 use serde_json::json;
 use std::io;
 
+#[test]
+fn qwen4_serve_sampling_uses_qualified_header_defaults_through_normalization() {
+    use crate::qwen_contract_fixture::{
+        Value, qwen4_reference_gguf, qwen4_reference_gguf_with_extra,
+    };
+    use crate::serve::request_profile::{OutputLimits, RequestProfile, sampling_with_defaults};
+    let declared = [("general.sampling.temp", Value::Float(0.37))];
+    let qualified =
+        qwen4_reference_gguf_with_extra("qwen4exp", "Qwen3.8-Flash-Next", |_| {}, &declared);
+    let renamed = qwen4_reference_gguf("qwen4exp", "renamed model", |_| {});
+    let unknown = qwen4_reference_gguf_with_extra("qwen4exp", "Qwen4-Flash", |_| {}, &declared);
+    for (header, temperature) in [(&qualified, 1.0), (&renamed, 1.0), (&unknown, 0.37)] {
+        let defaults = qwen4_sampling_defaults(header);
+        let profile = RequestProfile::FlashNext {
+            style: Default::default(),
+            sampling: defaults,
+            limits: OutputLimits::TEST,
+        };
+        let mut request = profile
+            .parse(&json!({"model":"test","input":"Hello"}))
+            .unwrap();
+        // Generation's fallback must agree even if normalization was bypassed.
+        assert_eq!(
+            sampling_with_defaults(&request, defaults).temperature,
+            temperature
+        );
+        profile.normalize(&mut request).unwrap();
+        assert_eq!(request.temperature, Some(temperature));
+        let mut explicit = profile
+            .parse(&json!({"model":"test","input":"Hello","temperature":0.17}))
+            .unwrap();
+        profile.normalize(&mut explicit).unwrap();
+        assert_eq!(
+            sampling_with_defaults(&explicit, defaults).temperature,
+            0.17
+        );
+    }
+}
+
 fn gpu_backend(snapshot_cache_mib: Option<u64>) -> FlashNextBackend {
     let path = qwen_llm::test_fixtures::QWEN4EXP_Q3_K_XL.required();
     let gguf = Box::leak(Box::new(GgufFile::open(&path).unwrap()));

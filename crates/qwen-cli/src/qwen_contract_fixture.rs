@@ -265,6 +265,15 @@ pub(crate) fn qwen4_reference_gguf(
     name: &str,
     mutate: impl FnOnce(&mut qwen_llm::qwen4exp::Qwen4ExpConfig),
 ) -> GgufFile {
+    qwen4_reference_gguf_with_extra(architecture, name, mutate, &[])
+}
+
+pub(crate) fn qwen4_reference_gguf_with_extra(
+    architecture: &str,
+    name: &str,
+    mutate: impl FnOnce(&mut qwen_llm::qwen4exp::Qwen4ExpConfig),
+    extra: &[(&str, Value<'_>)],
+) -> GgufFile {
     use Value::*;
     let mut c = qwen_llm::qwen4exp::Qwen4ExpConfig::flash_next_reference();
     mutate(&mut c);
@@ -335,6 +344,12 @@ pub(crate) fn qwen4_reference_gguf(
     ] {
         fields.push((format!("{architecture}.{key}"), UnsignedArray(values)));
     }
+    fields.retain(|(key, _)| !extra.iter().any(|(other, _)| key == other));
+    fields.extend(
+        extra
+            .iter()
+            .map(|(key, value)| (key.to_string(), value.clone())),
+    );
     let extra: Vec<_> = fields
         .iter()
         .map(|(key, value)| (key.as_str(), value.clone()))

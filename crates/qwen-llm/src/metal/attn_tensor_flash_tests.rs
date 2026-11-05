@@ -847,6 +847,16 @@ fn tensor_flash_restored_prefix_to_unaligned_matrix_rebuild() {
 #[test]
 #[ignore = "requires the Qwen3.8-27B-Q4_K_M model fixture and Apple10"]
 fn tensor_flash_restored_model_checkpoint_and_matrix_tail() {
+    tensor_flash_restored_model_case(64, 33, false);
+}
+
+#[test]
+#[ignore = "requires the model fixture, Apple10 and an unset tensor-flash knob"]
+fn tensor_flash_default_restored_checkpoint_and_aligned_tail() {
+    tensor_flash_restored_model_case(7168, 64, true);
+}
+
+fn tensor_flash_restored_model_case(prefix_rows: usize, tail_rows: usize, automatic: bool) {
     use crate::runtime::{Runtime, SequenceConfig};
     let _lease = acquire_metal_benchmark_lease().expect("canonical model correctness lease");
     let runtime = Runtime::metal().unwrap();
@@ -856,37 +866,55 @@ fn tensor_flash_restored_model_checkpoint_and_matrix_tail() {
     let path = crate::test_fixtures::required_filename("Qwen3.8-27B-Q4_K_M.gguf");
     let model = runtime.load_model(path).unwrap();
     assert_eq!(model.gguf().get_u64("qwen35.context_length"), Some(262144));
-    let ids: Vec<i32> = (0..1121)
+    if automatic {
+        assert!(
+            std::env::var_os("QWEN_PREFILL_ATTN_TENSOR_FLASH").is_none(),
+            "unset-default fixture requires an unset knob"
+        );
+    }
+    let total = prefix_rows + 1024 + tail_rows;
+    let capacity = total.div_ceil(64) * 64;
+    let ids: Vec<i32> = (0..total)
         .map(|i| ((i * 13 + 7) % model.arch().vocab_size as usize) as i32)
         .collect();
-    let mut prefix = model.create_sequence(SequenceConfig::new(1152)).unwrap();
+    let mut prefix = model
+        .create_sequence(SequenceConfig::new(capacity))
+        .unwrap();
     let mut scratch = model
-        .allocate_packed_prefill_scratch(model.plan_packed_prefill_scratch(1024, 1152).unwrap())
+        .allocate_packed_prefill_scratch(model.plan_packed_prefill_scratch(1024, capacity).unwrap())
         .unwrap();
     crate::metal_dflash::with_prefill_attn_tensor_flash_override(false, || {
-        model.prefill(&mut prefix, &mut scratch, &ids[..64])
+        model.prefill(&mut prefix, &mut scratch, &ids[..prefix_rows])
     })
     .unwrap();
     let checkpoint = model
-        .prepare_checkpoint_boundary(&prefix, ids[..64].to_vec(), None, None, None, 0)
+        .prepare_checkpoint_boundary(&prefix, ids[..prefix_rows].to_vec(), None, None, None, 0)
         .unwrap();
     let mut results = Vec::new();
     for enabled in [false, true] {
-        let mut seq = model.create_sequence(SequenceConfig::new(1152)).unwrap();
+        let mut seq = model
+            .create_sequence(SequenceConfig::new(capacity))
+            .unwrap();
         model
             .restore_prepared_checkpoint(&checkpoint, &mut seq, &ids)
             .unwrap();
-        assert_eq!(seq.position(), 64);
+        assert_eq!(seq.position(), prefix_rows);
         let mut scratch = model
-            .allocate_packed_prefill_scratch(model.plan_packed_prefill_scratch(1024, 1152).unwrap())
+            .allocate_packed_prefill_scratch(
+                model.plan_packed_prefill_scratch(1024, capacity).unwrap(),
+            )
             .unwrap();
         dispatch_census_begin();
-        let logits = crate::metal_dflash::with_prefill_attn_tensor_flash_override(enabled, || {
-            model.prefill(&mut seq, &mut scratch, &ids[64..])
-        })
+        let logits = if enabled && automatic {
+            model.prefill(&mut seq, &mut scratch, &ids[prefix_rows..])
+        } else {
+            crate::metal_dflash::with_prefill_attn_tensor_flash_override(enabled, || {
+                model.prefill(&mut seq, &mut scratch, &ids[prefix_rows..])
+            })
+        }
         .unwrap();
         let census = dispatch_census_take();
-        assert_eq!(seq.position(), 1121);
+        assert_eq!(seq.position(), total);
         let flash = census
             .iter()
             .filter(|x| x.kernel == "kernel_attn_flash_probe_f16_d256")
@@ -905,7 +933,7 @@ fn tensor_flash_restored_model_checkpoint_and_matrix_tail() {
         results.push(logits);
     }
     compare_vectors(
-        "restored model flash1024 plus matrix33",
+        "restored model flash chunk plus matrix tail",
         &results[0],
         &results[1],
     );

@@ -20,8 +20,10 @@ the GLM same-artifact oracle pin, the dequant codec, or a performance roofline.
 ## Setup
 
 - M4 Max, 128 GB, AC power, macOS 15.7.9. Hardware used for the valid grid.
-- M5 Ultra, 256 GB, macOS 27.0.0. Valid 2026-11-05 rerun with thermal pressure
-  level 0 before and after every arm; see the M5 section.
+- M5 Ultra, 256 GB, macOS 27.0.0. Valid 2026-11-05 rerun. Thermal pressure was
+  checked at campaign boundaries (before and after each campaign, not each
+  engine command) and was 0 throughout; per-command manifests record `pmset`
+  warning history, not instantaneous pressure. See the M5 section.
 - One representative artifact per family, the same GGUF for both engines.
   Depth 4096 is the GLM sparse range; the K2 cell has no llama.cpp
   implementation and is qwen-llm only.
@@ -59,21 +61,21 @@ Actual `llama-bench` smoke on the artifact, not code reading:
 
 | model | pp512 | pp4096 | tg128 | tg128 @8K | tg128 @32K |
 |---|---:|---:|---:|---:|---:|
-| Qwen3.8-27B Q4_K_M | 202 / 213 **0.95x** | 209 / 205 **1.02x** | 21.0 / 22.1 **0.95x** | 19.9 / 13.5 **1.48x*** | 18.8 / 15.3 **1.23x** |
+| Qwen3.8-27B Q4_K_M | 202 / 213 **0.95x** | 209 / 205 **1.02x** | 21.0 / 22.1 **0.95x** | 19.9 / 13.5 **1.48x rejected*** ([rerun 1.07x](stability/README.md)) | 18.8 / 15.3 **1.23x** |
 | Qwen3.6-35B-A3B UD-Q4_K_M | 1536 / 1635 **0.94x** | 1769 / 1662 **1.06x** | 117 / 97 **1.21x** | 104 / 88 **1.18x** | 92 / 67 **1.38x** |
 | Qwen3.5-122B-A10B UD-Q4_K_XL | 491 / 530 **0.93x** | 436 / 511 **0.85x** | 45.2 / 42.5 **1.06x** | 41.7 / 38.9 **1.07x** | — |
-| Qwen3.8-Flash-Next UD-Q3_K_XL | 551 / 630 **0.87x** | 509 / 585 **0.87x** | 46.7 / 43.1 **1.08x** | 43.1 / 40.1 **1.08x** | — |
-| DeepSeek-V4-Flash-0731 UD-IQ3_XXS | 130 / 299 **0.43x** | 219 / 295 **0.74x*** | 28.7 / 28.6 **1.01x** | 19.1 / 24.1 **0.79x*** | — |
+| Qwen3.8-Flash-Next UD-Q3_K_XL | 550 / 630 **0.87x** | 509 / 585 **0.87x** | 46.7 / 43.1 **1.08x** | 43.1 / 40.1 **1.08x** | — |
+| DeepSeek-V4-Flash-0731 UD-IQ3_XXS | 130 / 299 **0.43x** | 219 / 295 **0.74x provisional*** | 28.7 / 28.6 **1.01x** | 19.1 / 24.1 **0.79x provisional*** | — |
 | Muse-Glimmer-30B Q8_0 | 224 / 263 **0.85x** | 189 / 219 **0.86x** | 16.2 / 16.7 **0.97x** | 15.5 / 16.0 **0.96x** | — |
 | K2-Horizon-7B Q4_K_M | 747 / — | 531 / — | 71.0 / — | 56.7 / — | — |
-| GLM-5.3-Flash UD-IQ3_XXS | 214 / 226 **0.95x** | 226 / 188 **1.20x** | 29.9 / 25.8 **1.16x** | — | 27.8 / 23.2 @4K **1.20x** |
+| GLM-5.3-Flash UD-IQ3_XXS | 213 / 226 **0.95x** | 226 / 188 **1.20x** | 29.9 / 25.8 **1.16x** | — | 27.8 / 23.2 @4K **1.20x** |
 
 `*` unstable cell: the two blocks disagree materially. 27B lcpp @8K blocks
 were 19.0 and 8.0 t/s (samples 19.9/18.0 then 7.4/8.6); DS4 qwen @8K blocks
-were 23.0 and 15.1 t/s. A clean 27B rerun (same protocol) gave qwen 21.1 vs lcpp
+were 23.0 and 15.1 t/s. A less-divergent 27B rerun (same protocol) gave qwen 21.1 vs lcpp
 19.8 t/s, **1.07x**, matching 09-25; use that, not the main-grid 1.48x. The DS4
 cell remains provisional. Every sample is in `SAMPLES.md`; rerun data is under
-`stability/`.
+[`stability/`](stability/README.md).
 
 ## Ratio movement against 2026-09-25
 
@@ -102,9 +104,9 @@ clean way to separate the two sources of movement in this run.
 | Qwen3.8-Flash-Next | tg128 | 0.88 | 1.08 | 1.23x | +28.3% | +4.7% |
 | Qwen3.8-Flash-Next | tg128@d8192 | 0.75 | 1.08 | 1.43x | +60.6% | +12.0% |
 | DeepSeek-V4-Flash | pp512 | 0.48 | 0.43 | 0.91x | -7.4% | +1.6% |
-| DeepSeek-V4-Flash | pp4096 | 0.83 | 0.74* | 0.89x | -13.5% | -3.0% |
+| DeepSeek-V4-Flash | pp4096 | 0.83 | 0.74 provisional* | 0.89x | -13.5% | -3.0% |
 | DeepSeek-V4-Flash | tg128 | 1.00 | 1.01 | 1.00x | +0.1% | +0.0% |
-| DeepSeek-V4-Flash | tg128@d8192 | 0.85 | 0.79* | 0.93x | -14.7% | -8.2% |
+| DeepSeek-V4-Flash | tg128@d8192 | 0.85 | 0.79 provisional* | 0.93x | -14.7% | -8.2% |
 | Muse-Glimmer-30B | pp512 | 0.86 | 0.85 | 0.99x | -1.6% | -0.4% |
 | Muse-Glimmer-30B | pp4096 | 0.85 | 0.86 | 1.01x | -4.6% | -5.9% |
 | Muse-Glimmer-30B | tg128 | 0.97 | 0.97 | 1.00x | -1.4% | -1.6% |
@@ -120,16 +122,19 @@ clean way to separate the two sources of movement in this run.
    sharply (36.4 -> 46.7, 26.8 -> 43.1), so this ratio move is *both* engines:
    the ratio went from 0.75-0.88 to 1.08. The lcpp share is consistent with the
    upstream selection fix; the larger qwen share is ours (qwen4exp decode path
-   changes since 09-25). Without an old-vs-new qwen engine A/B this packet
-   cannot split the two numerically.
+   changes since 09-25), though that is an attribution across revisions and
+   host loads. Without an old-vs-new qwen engine A/B this packet cannot split
+   the two numerically.
 2. **GLM is a new baseline cell.** v0.9.0 loads the stock UD-IQ3_XXS artifact.
    qwen is at 0.95x on pp512, 1.20x on pp4096 and 1.16-1.20x on decode. The
    earlier separate GLM measurement (prefill 93-98% of llama.cpp, decode 21-25%
    ahead) is directionally consistent, not directly comparable.
 3. **A3B is stable or better.** Prefill is unchanged (0.94-1.06x); decode rose
    from 1.19/1.16/1.25 to 1.21/1.18/1.38. Absolute qwen decode rose 4.5-6.0%
-   while lcpp rose only 2.9-4.7% at shallow depths and fell 5.2% at 32K. The
-   32K improvement is ours, not a llama.cpp gain.
+   while lcpp rose only 2.9-4.7% at shallow depths and fell 5.2% at 32K. That
+   32K ratio movement is an observation across different days, revisions and
+   host loads; it is consistent with a qwen-side change but this packet cannot
+   attribute it cleanly.
 4. **DS4 and A10B prefill remain the weak cells.** DS4 pp512 is still ~0.43x
    and pp4096 ~0.74x with an outlier; block means at pp4096 were 193 and 245,
    so the honest value is nearer 0.8x. A10B pp4096 fell from 1.04x to 0.85x:
@@ -149,10 +154,14 @@ clean way to separate the two sources of movement in this run.
 
 The 2026-11-04 M5 attempt was thermally throttled (pressure level 4) and is
 discarded: no number from it is used here. The host recovered on 2026-11-05.
-Thermal pressure level was 0 before and after every arm (`m5/conditions.log`),
-load average was 1.43 at the first campaign, and no other benchmark process was
-running. The grid ran 17:47-18:16 UTC; the longest campaign was 9:08 (27B deep
-tg) and every campaign stayed under the 10-minute target.
+Thermal pressure was checked at campaign boundaries and was 0 before and after
+each campaign (`m5/conditions.log`); each campaign contains four engine
+commands, so this is not a per-command gate. The per-command manifests record
+`pmset` warning history, not instantaneous pressure. Future campaigns must gate
+every arm per charter rule 5. Load average was 1.43 at the first campaign, and
+no other benchmark process was running. The grid ran 17:47-18:16 UTC; the
+longest campaign was 9:08 (27B deep tg) and every campaign stayed under the
+10-minute target.
 
 - M5 bench identity `cd700105b` (engine crates unchanged from main);
   llama.cpp v0.9.0 `cd959bae99`, build 12110. The qwen build ran under the

@@ -1,7 +1,7 @@
 # Stability reruns
 
 The main grid's 27B `tg128@d8192` lcpp cell had a 2.4x disagreement between
-ABBA blocks, and its ratio (1.48x) therefore overstated the qwen lead. A clean
+ABBA blocks, and its ratio (1.48x) therefore overstated the qwen lead. A less-divergent
 rerun of the same model, shape, depth, `--runs 2`, `--blocks 2` protocol gave:
 
 | shape | engine | samples (t/s) | block means | mean |
@@ -12,7 +12,10 @@ rerun of the same model, shape, depth, `--runs 2`, `--blocks 2` protocol gave:
 | tg128@d8192 | qwen | 19.74, 20.30, 22.45, 22.09 | 20.02, 22.27 | 21.14 |
 
 The rerun ratio at 8K is **1.07x** (21.14 / 19.84), matching the 09-25 value
-(1.07x), not the 1.48x in the main grid. The main grid cell is retained in the
+(1.07x), not the 1.48x in the main grid. This is not a quiet-host control: the
+rerun manifest records load `5.53` and a `rustc` at 100% CPU, and the lcpp @8K
+block means still differ by about 21% (17.93 vs 21.76 t/s). It is less divergent
+than the main grid, not clean. The main grid cell is retained in the
 JSON and `SAMPLES.md` but should not be used.
 
 The A10B pp4096 stability rerun did not produce data: qwen-bench stopped with

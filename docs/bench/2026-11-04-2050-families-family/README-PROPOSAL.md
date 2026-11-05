@@ -15,18 +15,19 @@ A snapshot, not a current guarantee: qwen-llm `b08ca56d9` against llama.cpp
 v0.9.0 (`cd959bae99`) on 2026-11-04, M4 Max 128 GB, same file for both. Tokens
 per second for qwen-llm, with the ratio to the better of llama.cpp's `-ub 512`
 and `-ub 2048` runs. The host was shared with other builds during the sweep;
-the 27B 8K cell uses a clean stability rerun (1.07x); the remaining `*` cells had
-materially disagreeing ABBA blocks and need a quiet-host repeat.
+the 27B 8K cell uses a less-divergent stability rerun (21.14 / 19.84 = 1.07x);
+the remaining `*` cells had materially disagreeing ABBA blocks and need a
+quiet-host repeat.
 
 | Model, file size | pp512 | pp4096 | tg128 | tg128 at 8K |
 |---|---:|---:|---:|---:|
-| Qwen3.8-27B Q4_K_M, 15.9 GiB | 202 (0.95x) | 209 (1.02x) | 21.0 (0.95x) | 19.9 (1.07x) |
+| Qwen3.8-27B Q4_K_M, 15.9 GiB | 202 (0.95x) | 209 (1.02x) | 21.0 (0.95x) | 21.1 (1.07x) |
 | Qwen3.6-35B-A3B UD-Q4_K_M, 20.6 GiB | 1536 (0.94x) | 1769 (1.06x) | 117 (1.21x) | 104 (1.18x) |
 | Qwen3.5-122B-A10B UD-Q4_K_XL, 71.7 GiB | 491 (0.93x) | 436 (0.85x) | 45.2 (1.06x) | 41.7 (1.07x) |
-| Qwen3.8-Flash-Next UD-Q3_K_XL, 83.8 GiB | 551 (0.87x) | 509 (0.87x) | 46.7 (1.08x) | 43.1 (1.08x) |
-| DeepSeek-V4-Flash-0731 UD-IQ3_XXS, 97.1 GiB | 130 (0.43x) | 219 (0.74x)* | 28.7 (1.01x) | 19.1 (0.79x)* |
+| Qwen3.8-Flash-Next UD-Q3_K_XL, 83.8 GiB | 550 (0.87x) | 509 (0.87x) | 46.7 (1.08x) | 43.1 (1.08x) |
+| DeepSeek-V4-Flash-0731 UD-IQ3_XXS, 97.1 GiB | 130 (0.43x) | 219 (0.74x provisional)* | 28.7 (1.01x) | 19.1 (0.79x provisional)* |
 | Muse-Glimmer-30B Q8_0, 27.6 GiB | 224 (0.85x) | 189 (0.86x) | 16.2 (0.97x) | 15.5 (0.96x) |
-| GLM-5.3-Flash UD-IQ3_XXS, 112.1 GiB | 214 (0.95x) | 226 (1.20x) | 29.9 (1.16x) | 27.8 @4K (1.20x) |
+| GLM-5.3-Flash UD-IQ3_XXS, 112.1 GiB | 213 (0.95x) | 226 (1.20x) | 29.9 (1.16x) | 27.8 @4K (1.20x) |
 | K2-Horizon-7B Q4_K_M, 5.2 GiB | 747 (—) | 531 (—) | 71.0 (—) | 56.7 (—) |
 
 These are synthetic-token tests with llama-bench's semantics, not request
@@ -39,9 +40,13 @@ If the README also carries M5 numbers, add this separate table rather than
 mixing hosts. It uses qwen-llm `cd700105b` and the same llama.cpp v0.9.0 pin.
 
 ```markdown
-M5 Ultra, 256 GB, 2026-11-05. Thermal pressure level was 0 before and after
-every arm. Flash-Next uses the M5-resident GSQ-RCO IQ3_S artifact, not the M4
-UD-Q3_K_XL file. DS4-Flash, A10B, Muse and K2 artifacts were not present.
+M5 Ultra, 256 GB, 2026-11-05. Thermal pressure was checked at campaign
+boundaries and was 0 before and after each campaign, not before and after every
+engine command; per-command manifests record `pmset` warning history, not
+instantaneous pressure. Future campaigns must gate every arm per charter rule 5.
+Flash-Next uses the M5-resident GSQ-RCO IQ3_S artifact,
+not the M4 UD-Q3_K_XL file. DS4-Flash, A10B, Muse and K2 artifacts were not
+present.
 
 | Model, file size | pp512 | pp4096 | tg128 | tg128 at 8K |
 |---|---:|---:|---:|---:|

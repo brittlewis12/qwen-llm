@@ -8,6 +8,9 @@ pub(crate) mod hc4_strict;
 #[cfg(test)]
 mod route_parity_tests;
 
+#[cfg(test)]
+mod nonfinite_tests;
+
 /// Qwen/Flash-Next route-status word bits written by the top-k and bucket
 /// kernels (`kernels/moe.metal`). A ready row has bit 0 set and neither
 /// failure bit.

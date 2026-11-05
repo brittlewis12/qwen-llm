@@ -2072,7 +2072,8 @@ mod tests {
 
     #[test]
     fn extended_quant_gguf_rejects_removed_types_and_partial_rows() {
-        for kind in [4, 5, 31, 32, 33, 36, 37, 38, 43, u32::MAX] {
+        // 43 is F8_E4M3 (supported since the gguf-rs bump); 44 is the next unassigned id.
+        for kind in [4, 5, 31, 32, 33, 36, 37, 38, 44, u32::MAX] {
             let path = write_temp(&quant_fixture(kind, &[64], &[0; 256], None));
             assert_rejects!(&path, GgufError::Decode(_));
             std::fs::remove_file(path).unwrap();

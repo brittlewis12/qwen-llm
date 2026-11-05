@@ -713,6 +713,150 @@ fn production_grouped_layer_output_matches_incumbent_routes() {
         );
     }
 
+    // Parallel routing at several token counts.
+    for n_tokens in [1usize, 3, 7] {
+        let n_expert = 64usize;
+        let topk = 4usize;
+        let mut values = Vec::new();
+        for token in 0..n_tokens {
+            values.extend(finite_cases(n_expert, topk).remove((token + 2) % 5));
+        }
+        let mut incumbent_ids_v = Vec::new();
+        let mut incumbent_weights_v = Vec::new();
+        let mut branch_ids_v = Vec::new();
+        let mut branch_weights_v = Vec::new();
+        for token in 0..n_tokens {
+            let start = token * n_expert;
+            let logits = tensor_f32(
+                &ctx,
+                &values[start..start + n_expert],
+                vec![n_expert as u64],
+            );
+            let incumbent = run_incumbent_topk(
+                &ctx,
+                "kernel_incumbent_topk_logits_softmax_parallel_f32",
+                &logits,
+                n_expert,
+                topk,
+                true,
+            );
+            let branch = run_branch_topk(&ctx, true, &logits, n_expert, topk);
+            incumbent_ids_v.extend_from_slice(&incumbent.0);
+            incumbent_weights_v.extend_from_slice(&incumbent.1);
+            branch_ids_v.extend_from_slice(&branch.0);
+            branch_weights_v.extend_from_slice(&branch.1);
+        }
+        let (incumbent_ids, incumbent_weights) =
+            route_tensor(&ctx, &incumbent_ids_v, &incumbent_weights_v);
+        let (branch_ids, branch_weights) = route_tensor(&ctx, &branch_ids_v, &branch_weights_v);
+        assert_eq!(
+            grouped_layer_output(
+                &ctx,
+                &incumbent_ids,
+                &incumbent_weights,
+                64,
+                64,
+                n_expert,
+                topk,
+                n_tokens,
+            ),
+            grouped_layer_output(
+                &ctx,
+                &branch_ids,
+                &branch_weights,
+                64,
+                64,
+                n_expert,
+                topk,
+                n_tokens
+            ),
+            "parallel-route production layer output tokens={n_tokens}"
+        );
+    }
+
+    // Non-packed dot routing.
+    {
+        let n_expert = 256usize;
+        let topk = 8usize;
+        let hidden = 64usize;
+        let values = finite_cases(n_expert, topk)[1].clone();
+        let logits = tensor_f32(&ctx, &values, vec![n_expert as u64]);
+        let shared_weight = tensor_f32(&ctx, &vec![0.125; hidden], vec![hidden as u64]);
+        let x = tensor_f32(&ctx, &vec![0.75; hidden], vec![hidden as u64]);
+        let branch_ids = MetalTensor::zeros_i32(&ctx, vec![topk as u64]).unwrap();
+        let branch_w = MetalTensor::zeros_f32(&ctx, vec![topk as u64]).unwrap();
+        let branch_shared = MetalTensor::zeros_f32(&ctx, vec![1]).unwrap();
+        let status = MetalTensor::zeros_i32(&ctx, vec![1]).unwrap();
+        let command = ctx.queue.commandBuffer().unwrap();
+        let enc = KernelEncoder::begin(&command);
+        encode_topk_logits_softmax_dot_sigmoid_f32_status(
+            &ctx,
+            &enc,
+            &logits,
+            &shared_weight,
+            &x,
+            &branch_ids,
+            &branch_w,
+            &branch_shared,
+            &status,
+            n_expert,
+            topk,
+            hidden,
+        )
+        .unwrap();
+        enc.end();
+        crate::metal::commit_and_wait(&command).unwrap();
+
+        let inc_ids = MetalTensor::zeros_i32(&ctx, vec![topk as u64]).unwrap();
+        let inc_w = MetalTensor::zeros_f32(&ctx, vec![topk as u64]).unwrap();
+        let inc_shared = MetalTensor::zeros_f32(&ctx, vec![1]).unwrap();
+        let command = ctx.queue.commandBuffer().unwrap();
+        let enc = KernelEncoder::begin(&command);
+        enc.set_pipeline(
+            &ctx.pipeline("kernel_incumbent_topk_logits_softmax_dot_sigmoid_f32")
+                .unwrap(),
+        );
+        enc.set_bytes(
+            0,
+            &DotArgs {
+                n_expert: n_expert as u32,
+                topk: topk as u32,
+                hidden: hidden as u32,
+                n_tokens: 1,
+            },
+        );
+        enc.set_tensor(1, &logits);
+        enc.set_tensor(2, &shared_weight);
+        enc.set_tensor(3, &x);
+        enc.set_tensor(4, &inc_ids);
+        enc.set_tensor(5, &inc_w);
+        enc.set_tensor(6, &inc_shared);
+        for slot in 0..3 {
+            enc.set_threadgroup_memory(slot, 256 * 4);
+        }
+        enc.dispatch(
+            MTLSize {
+                width: 1,
+                height: 1,
+                depth: 1,
+            },
+            MTLSize {
+                width: 256,
+                height: 1,
+                depth: 1,
+            },
+        );
+        enc.end();
+        crate::metal::commit_and_wait(&command).unwrap();
+        assert_eq!(read_i32(&branch_ids, topk), read_i32(&inc_ids, topk));
+        assert_eq!(read_u32(&branch_w, topk), read_u32(&inc_w, topk));
+        assert_eq!(
+            grouped_layer_output(&ctx, &branch_ids, &branch_w, 64, 64, n_expert, topk, 1),
+            grouped_layer_output(&ctx, &inc_ids, &inc_w, 64, 64, n_expert, topk, 1),
+            "dot-route production layer output"
+        );
+    }
+
     // Packed route at several widths.
     for n_tokens in [1usize, 2, 7, 33] {
         let n_expert = 512usize;
@@ -1094,48 +1238,69 @@ fn flash_next_production_layer_output_matches_incumbent_route() {
     };
     let n_expert = 512usize;
     let topk = 10usize;
-    let values = finite_cases(n_expert, topk)[0].clone();
-    let logits = tensor_f32(&ctx, &values, vec![n_expert as u64]);
-    let run = |name: &str, status: Option<&MetalTensor>| {
-        let ids = MetalTensor::zeros_i32(&ctx, vec![topk as u64]).unwrap();
-        let weights = MetalTensor::zeros_f32(&ctx, vec![topk as u64]).unwrap();
-        let command = ctx.queue.commandBuffer().unwrap();
-        let enc = KernelEncoder::begin(&command);
-        enc.set_pipeline(&ctx.pipeline(name).unwrap());
-        enc.set_bytes(0, &TopkArgs { n: 512, k: 10 });
-        enc.set_tensor(1, &logits);
-        enc.set_tensor(2, &ids);
-        enc.set_tensor(3, &weights);
-        if let Some(status) = status {
-            enc.set_tensor(4, status);
+    let cases = finite_cases(n_expert, topk);
+    for (kernel, incumbent) in [
+        (
+            "kernel_qwen4exp_topk_guarded_f32",
+            "kernel_incumbent_qwen4exp_topk_guarded_f32",
+        ),
+        (
+            "kernel_qwen4exp_topk_guarded_simd_f32",
+            "kernel_incumbent_qwen4exp_topk_guarded_simd_f32",
+        ),
+    ] {
+        for (case, values) in cases.iter().enumerate() {
+            let logits = tensor_f32(&ctx, values, vec![n_expert as u64]);
+            let run = |name: &str, status: Option<&MetalTensor>| {
+                let ids = MetalTensor::zeros_i32(&ctx, vec![topk as u64]).unwrap();
+                let weights = MetalTensor::zeros_f32(&ctx, vec![topk as u64]).unwrap();
+                let command = ctx.queue.commandBuffer().unwrap();
+                let enc = KernelEncoder::begin(&command);
+                enc.set_pipeline(&ctx.pipeline(name).unwrap());
+                enc.set_bytes(0, &TopkArgs { n: 512, k: 10 });
+                enc.set_tensor(1, &logits);
+                enc.set_tensor(2, &ids);
+                enc.set_tensor(3, &weights);
+                if let Some(status) = status {
+                    enc.set_tensor(4, status);
+                }
+                for slot in 0..3 {
+                    enc.set_threadgroup_memory(slot, 2048);
+                }
+                enc.dispatch(
+                    MTLSize {
+                        width: 1,
+                        height: 1,
+                        depth: 1,
+                    },
+                    MTLSize {
+                        width: 512,
+                        height: 1,
+                        depth: 1,
+                    },
+                );
+                enc.end();
+                crate::metal::commit_and_wait(&command).unwrap();
+                (ids, weights)
+            };
+            let status = MetalTensor::zeros_i32(&ctx, vec![1]).unwrap();
+            let (branch_ids, branch_w) = run(kernel, Some(&status));
+            let (inc_ids, inc_w) = run(incumbent, None);
+            assert_eq!(
+                read_i32(&branch_ids, topk),
+                read_i32(&inc_ids, topk),
+                "{kernel} case {case} ids"
+            );
+            assert_eq!(
+                read_u32(&branch_w, topk),
+                read_u32(&inc_w, topk),
+                "{kernel} case {case} weights"
+            );
+            assert_eq!(
+                grouped_layer_output(&ctx, &branch_ids, &branch_w, 64, 64, n_expert, topk, 1),
+                grouped_layer_output(&ctx, &inc_ids, &inc_w, 64, 64, n_expert, topk, 1),
+                "{kernel} case {case} production layer output"
+            );
         }
-        for slot in 0..3 {
-            enc.set_threadgroup_memory(slot, 2048);
-        }
-        enc.dispatch(
-            MTLSize {
-                width: 1,
-                height: 1,
-                depth: 1,
-            },
-            MTLSize {
-                width: 512,
-                height: 1,
-                depth: 1,
-            },
-        );
-        enc.end();
-        crate::metal::commit_and_wait(&command).unwrap();
-        (ids, weights)
-    };
-    let status = MetalTensor::zeros_i32(&ctx, vec![1]).unwrap();
-    let (branch_ids, branch_w) = run("kernel_qwen4exp_topk_guarded_simd_f32", Some(&status));
-    let (inc_ids, inc_w) = run("kernel_incumbent_qwen4exp_topk_guarded_simd_f32", None);
-    assert_eq!(read_i32(&branch_ids, topk), read_i32(&inc_ids, topk));
-    assert_eq!(read_u32(&branch_w, topk), read_u32(&inc_w, topk));
-    assert_eq!(
-        grouped_layer_output(&ctx, &branch_ids, &branch_w, 64, 64, n_expert, topk, 1),
-        grouped_layer_output(&ctx, &inc_ids, &inc_w, 64, 64, n_expert, topk, 1),
-        "Flash-Next production layer output"
-    );
+    }
 }

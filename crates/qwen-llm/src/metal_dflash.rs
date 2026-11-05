@@ -11136,6 +11136,35 @@ pub fn encode_packed_verify_layer_major_inner_for(
     Ok(out)
 }
 
+/// DFlash-only entry point retained for the session, tests and the
+/// production DFlash decoder. Non-DFlash callers must use
+/// [`encode_packed_verify_layer_major_inner_for`] with their own kind.
+#[allow(clippy::too_many_arguments)]
+pub fn encode_packed_verify_layer_major_inner(
+    base: &MetalForward<'_>,
+    target_layer_ids: &[u32],
+    tokens: &[i32],
+    start_position: u32,
+    verify_scratch: &mut MetalDFlashVerifyScratch,
+    layer_scratch: &mut MetalDFlashLayerMajorScratch,
+    target_session: &mut MetalSession,
+    debug_logits_dst: Option<&MetalTensor>,
+    n_eff_override: Option<u32>,
+) -> Result<Vec<i32>, DFlashError> {
+    encode_packed_verify_layer_major_inner_for(
+        PackedVerifyCaller::DFlash,
+        base,
+        target_layer_ids,
+        tokens,
+        start_position,
+        verify_scratch,
+        layer_scratch,
+        target_session,
+        debug_logits_dst,
+        n_eff_override,
+    )
+}
+
 /// **v0.75.1** Packed multi-token prefill.
 ///
 /// Processes `token_ids` through chunks of P (= `layer_scratch.n`)
@@ -11194,35 +11223,6 @@ pub fn encode_packed_verify_layer_major_inner_for(
 /// NR1 path (the NR1=16 fast path only fires when `n_query == 16`,
 /// which is fine — short final chunks pay slight per-N overhead
 /// but still amortize weight reads across the chunk).
-/// DFlash-only entry point retained for the session, tests and the
-/// production DFlash decoder. Non-DFlash callers must use
-/// [`encode_packed_verify_layer_major_inner_for`] with their own kind.
-#[allow(clippy::too_many_arguments)]
-pub fn encode_packed_verify_layer_major_inner(
-    base: &MetalForward<'_>,
-    target_layer_ids: &[u32],
-    tokens: &[i32],
-    start_position: u32,
-    verify_scratch: &mut MetalDFlashVerifyScratch,
-    layer_scratch: &mut MetalDFlashLayerMajorScratch,
-    target_session: &mut MetalSession,
-    debug_logits_dst: Option<&MetalTensor>,
-    n_eff_override: Option<u32>,
-) -> Result<Vec<i32>, DFlashError> {
-    encode_packed_verify_layer_major_inner_for(
-        PackedVerifyCaller::DFlash,
-        base,
-        target_layer_ids,
-        tokens,
-        start_position,
-        verify_scratch,
-        layer_scratch,
-        target_session,
-        debug_logits_dst,
-        n_eff_override,
-    )
-}
-
 pub fn prefill_tokens_with_multi_hidden(
     base: &MetalForward<'_>,
     token_ids: &[i32],

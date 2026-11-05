@@ -363,6 +363,15 @@ pub(super) fn encode_post(
             }
         }
     }
+    if let Some(status) = finite_status {
+        let others: Vec<(&MetalTensor, &str)> = reads
+            .iter()
+            .copied()
+            .chain(written.iter().copied())
+            .collect();
+        metal::checks::check_disjoint(K, status, &others)
+            .map_err(|error| bad(format!("finite status: {error}")))?;
+    }
     let pso = ctx.pipeline("kernel_deepseek_v41_hc_post_controls")?;
     enc.set_pipeline(&pso);
     enc.set_bytes(
@@ -523,4 +532,56 @@ pub(super) fn encode_ffn_post(
         },
     );
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn wide_post_rejects_finite_status_aliasing() {
+        let Some(ctx) = crate::test_fixtures::metal_context_or_skip() else {
+            return;
+        };
+        let c = Config {
+            hidden: 8,
+            ..Config::default()
+        };
+        let block = MetalTensor::zeros_f32(&ctx, vec![c.hidden as u64]).unwrap();
+        let residual =
+            MetalTensor::zeros_f32(&ctx, vec![(HC_CONNECTIONS as usize * c.hidden) as u64])
+                .unwrap();
+        let mix = MetalTensor::zeros_f32(&ctx, vec![HC_MIXES]).unwrap();
+        let scale = MetalTensor::zeros_f32(&ctx, vec![3]).unwrap();
+        let base = MetalTensor::zeros_f32(&ctx, vec![HC_MIXES]).unwrap();
+        let pre = MetalTensor::zeros_f32(&ctx, vec![HC_CONNECTIONS]).unwrap();
+        let post = MetalTensor::zeros_f32(&ctx, vec![HC_CONNECTIONS]).unwrap();
+        let combination = MetalTensor::zeros_f32(&ctx, vec![16]).unwrap();
+        let output =
+            MetalTensor::zeros_f32(&ctx, vec![(HC_CONNECTIONS as usize * c.hidden) as u64])
+                .unwrap();
+        let mut status = block.view_subrange(0, vec![1]);
+        status.dtype = GgmlType::I32;
+        let command = ctx.queue.commandBuffer().unwrap();
+        let enc = KernelEncoder::begin(&command);
+        let err = encode_post(
+            &ctx,
+            &enc,
+            &c,
+            true,
+            &[scale, base],
+            HcPostSite {
+                block: &block,
+                residual: &residual,
+                mix: &mix,
+                pre: &pre,
+                post: &post,
+                combination: &combination,
+                output: &output,
+            },
+            Some(&status),
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("finite status"), "{err}");
+    }
 }

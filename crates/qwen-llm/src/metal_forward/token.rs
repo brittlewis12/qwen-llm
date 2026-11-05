@@ -2360,11 +2360,20 @@ impl<'a> MetalForward<'a> {
     ) -> Result<(Vec<f32>, TokenProfile), MfError> {
         session.ensure_usable()?;
         if self.model.arch.kind == ArchKind::Moe {
-            return if concurrent_gdn_moe_decode_enabled() {
+            let result = if concurrent_gdn_moe_decode_enabled() {
                 self.single_token_profiled_concurrent_gdn_moe(token_id, position, session)
             } else {
                 self.single_token_profiled_moe(token_id, position, session)
-            };
+            }?;
+            if let Err(error) = crate::metal::check_moe_route_status(
+                "qwen_moe_decode_profiled",
+                &session.moe_route_status,
+                1,
+            ) {
+                session.poison("profiled Qwen decode route status failed");
+                return Err(error.into());
+            }
+            return Ok(result);
         }
         if concurrent_gdn_dense_decode_enabled() {
             return self.single_token_profiled_concurrent_gdn_dense(token_id, position, session);

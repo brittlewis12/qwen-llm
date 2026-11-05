@@ -723,6 +723,9 @@ pub struct MetalMtpSession {
     pub moe_shared_gate: MetalTensor,
     pub moe_route_status: MetalTensor,
     pub moe_expert_out: MetalTensor,
+    /// Sticky failure set after a route-status check rejects a completed MTP
+    /// step. The session refuses further drafts until rebuilt.
+    poisoned: Option<&'static str>,
 
     // Attn scratch.
     pub attn_q_full: MetalTensor,   // [2 * q_dim] — Q + gate interleaved
@@ -745,6 +748,15 @@ pub struct MetalMtpSession {
 }
 
 impl MetalMtpSession {
+    fn ensure_usable(&self) -> Result<(), MtpError> {
+        match self.poisoned {
+            Some(reason) => Err(MtpError::MetalForward(
+                crate::metal_forward::MfError::SessionPoisoned { reason },
+            )),
+            None => Ok(()),
+        }
+    }
+
     /// Allocate a fresh MTP session. `kv_capacity` is the max number of
     /// MTP KV slots (typically `prompt_len + max_new_tokens`).
     pub fn fresh(
@@ -822,6 +834,7 @@ impl MetalMtpSession {
             moe_shared_gate: MetalTensor::zeros_f32(ctx, vec![1])?,
             moe_route_status: MetalTensor::zeros_i32(ctx, vec![1])?,
             moe_expert_out: MetalTensor::zeros_f32(ctx, vec![moe_expert_out_n])?,
+            poisoned: None,
             attn_q_full: MetalTensor::zeros_f32(ctx, vec![attn_q_full_elems])?,
             attn_q: MetalTensor::zeros_f32(ctx, vec![q_dim])?,
             attn_gate: MetalTensor::zeros_f32(ctx, vec![q_dim])?,
@@ -1506,6 +1519,7 @@ impl<'a> SpeculativeDecoder<'a> {
         position: u32,
         readback: DraftReadback,
     ) -> Result<DraftResult, MtpError> {
+        self.mtp_session.ensure_usable()?;
         let arch = &self.base.model.arch;
         if next_tok < 0 || (next_tok as u32) >= arch.vocab_size {
             return Err(MtpError::BadToken(next_tok, arch.vocab_size));
@@ -1674,6 +1688,7 @@ impl<'a> SpeculativeDecoder<'a> {
         enc.end();
         cmd.commit();
         crate::metal::wait_completed(&cmd)?;
+        self.check_completed_route("qwen_mtp_draft")?;
 
         // KV side-effect was committed by encode_mtp_attn; bump our counter.
         self.mtp_session.kv_n_pos = position as usize + 1;
@@ -1823,6 +1838,17 @@ impl<'a> SpeculativeDecoder<'a> {
         Ok(())
     }
 
+    fn check_completed_route(&mut self, kernel: &'static str) -> Result<(), MtpError> {
+        let error =
+            crate::metal::check_moe_route_status(kernel, &self.mtp_session.moe_route_status, 1)
+                .err();
+        if let Some(error) = error {
+            self.mtp_session.poisoned = Some("MTP route status failed");
+            return Err(MtpError::Metal(error));
+        }
+        Ok(())
+    }
+
     fn draft_chain_single_cb(
         &mut self,
         next_tok: i32,
@@ -1830,6 +1856,7 @@ impl<'a> SpeculativeDecoder<'a> {
         start_position: u32,
         n_drafts: usize,
     ) -> Result<Vec<i32>, MtpError> {
+        self.mtp_session.ensure_usable()?;
         let arch = &self.base.model.arch;
         if !(1..=15).contains(&n_drafts) {
             return Err(MtpError::Metal(MetalError::BadShape {
@@ -1900,6 +1927,7 @@ impl<'a> SpeculativeDecoder<'a> {
         }
         cmd.commit();
         crate::metal::wait_completed(&cmd)?;
+        self.check_completed_route("qwen_mtp_draft_chain")?;
 
         self.mtp_session.kv_n_pos = start_position as usize + n_drafts;
         let mut out = vec![0i32; n_drafts];
@@ -1919,6 +1947,7 @@ impl<'a> SpeculativeDecoder<'a> {
         prev_hidden: &MetalTensor,
         start_position: u32,
     ) -> Result<(), MtpError> {
+        self.mtp_session.ensure_usable()?;
         let arch = &self.base.model.arch;
         if !(1..=15).contains(&drafts.len()) {
             return Err(MtpError::Metal(MetalError::BadShape {
@@ -1990,6 +2019,7 @@ impl<'a> SpeculativeDecoder<'a> {
         }
         cmd.commit();
         crate::metal::wait_completed(&cmd)?;
+        self.check_completed_route("qwen_mtp_recorded_chain")?;
 
         self.mtp_session.kv_n_pos = start_position as usize + drafts.len();
         Ok(())

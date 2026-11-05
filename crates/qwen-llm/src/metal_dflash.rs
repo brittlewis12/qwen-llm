@@ -11139,6 +11139,14 @@ pub fn encode_packed_verify_layer_major_inner_for(
 
     cmd_buf.commit();
     crate::metal::wait_completed(&cmd_buf)?;
+    if let Err(error) = crate::metal::check_moe_route_status(
+        "qwen_dflash_verify",
+        &layer_scratch.moe_route_status_pack,
+        n,
+    ) {
+        target_session.poison("DFlash verify route status failed");
+        return Err(DFlashError::Metal(error));
+    }
 
     let mut out = vec![0i32; n];
     unsafe {

@@ -4294,6 +4294,10 @@ mod tests {
             (GgmlType::Q4_K, 512, 2048, 3, false),
             (GgmlType::Q4_K, 512, 8192, 9, false),
             (GgmlType::Q4_K, 512, 8192, 15, false),
+            // K=2048 with NSG=8 gives four K iterations per active
+            // SIMD group, not just a selector-arithmetic check.
+            (GgmlType::Q4_K, 2048, 8192, 7, false),
+            (GgmlType::Q6_K, 2048, 8192, 8, false),
             (GgmlType::Q6_K, 256, 9, 7, false),
             (GgmlType::Q5_K, 256, 9, 3, false),
             (GgmlType::Q8_0, 64, 9, 9, false),
@@ -4383,13 +4387,16 @@ mod tests {
         };
         let g = crate::gguf::GgufFile::open(&path).expect("open real model");
         let n_cols = 8usize;
-        for name in ["blk.3.attn_k.weight", "blk.3.attn_v.weight"] {
-            let Some(t) = g.find(name) else {
-                continue;
-            };
-            if t.shape.len() != 2 {
-                continue;
-            }
+        let names = ["blk.3.attn_k.weight", "blk.3.attn_v.weight"];
+        for name in names {
+            let t = g.find(name).unwrap_or_else(|| {
+                panic!("real-weight few-row test: missing tensor {name} in {path:?}")
+            });
+            assert_eq!(
+                t.shape.len(),
+                2,
+                "real-weight few-row test: {name} is not a 2D mat-mul tensor"
+            );
             let n_in = t.shape[0] as usize;
             let n_out = t.shape[1] as usize;
             let w_t = MetalTensor::from_gguf_tensor(&ctx, t, g.slice(t)).expect("weight");

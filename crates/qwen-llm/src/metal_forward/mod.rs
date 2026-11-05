@@ -2705,8 +2705,13 @@ crate::env_flag!(default_on matmat_iq2_s_n2_nc2_enabled, "QWEN_MATMAT_IQ2_S_N2_N
 crate::env_flag!(default_on matmat_iq3_s_n2_nc2_enabled, "QWEN_MATMAT_IQ3_S_N2_NC2");
 crate::env_flag!(default_on matmat_q8_fewrow_enabled, "QWEN_MATMAT_Q8_FEWROW");
 crate::env_flag!(
-    /// Routes eligible Qwen DFlash verify projections through the generic
-    /// few-row MMA kernel. Default off; other callers are unchanged.
-    default_off matmat_fewrow_gen_enabled,
+    /// Tri-state generic few-row gate. Unset: enabled only for Qwen DFlash
+    /// verify on Apple10 GPUs at N=8 for the measured Qwen3.8-27B Q4_K_M
+    /// verify shapes/dtypes (Q4_K 5120x17408, 5120x6144, 5120x12288,
+    /// 5120x1024, 6144x5120; Q6_K 17408x5120, 5120x10240, 5120x1024,
+    /// 5120x248320; Q5_K 6144x5120). `1`: opt in on every eligible caller
+    /// and chip (still subject to caller policy and precedence). `0`: force
+    /// off everywhere, including the Apple10 DFlash verify default.
+    default_auto matmat_fewrow_gen_mode,
     "QWEN_MATMAT_FEWROW_GEN"
 );

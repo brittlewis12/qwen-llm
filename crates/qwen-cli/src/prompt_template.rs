@@ -139,7 +139,7 @@ pub enum QwenReleaseStatus {
 pub struct QwenReleaseIdentity {
     /// Selected rendering contract; not evidence of a release version.
     pub template: QwenPromptTemplate,
-    /// Name-derived identity, unchanged by template recognition.
+    /// Qualified header identity, independent of template recognition.
     pub status: QwenReleaseStatus,
 }
 
@@ -337,10 +337,9 @@ pub fn identify_qwen_release_for_gguf(gguf: &GgufFile) -> Result<QwenReleaseIden
     let architecture = gguf
         .architecture()
         .context("model is missing general.architecture")?;
-    Ok(identify_qwen_release(&QwenHeaderFacts::from_gguf(
-        &architecture,
-        gguf,
-    )?))
+    let mut identity = identify_qwen_release(&QwenHeaderFacts::from_gguf(&architecture, gguf)?);
+    qualify_qwen_release_for_gguf(&mut identity, &architecture, gguf);
+    Ok(identity)
 }
 
 /// Bind rendering independently of release identity and engine admission.
@@ -350,10 +349,7 @@ pub fn resolve_qwen_contract_for_gguf(gguf: &GgufFile) -> Result<QwenReleaseIden
         .context("model is missing general.architecture")?;
     let facts = QwenHeaderFacts::from_gguf(&architecture, gguf)?;
     let mut identity = resolve_qwen_contract(&facts, gguf.get_str("tokenizer.chat_template"));
-    if architecture == "qwen4exp" {
-        let config = qwen_llm::qwen4exp::Qwen4ExpConfig::from_gguf(gguf).ok();
-        qualify_flash_next_identity(&mut identity, config.as_ref());
-    }
+    qualify_qwen_release_for_gguf(&mut identity, &architecture, gguf);
 
     if qwen_llm::qwen4exp::is_qwen4_architecture(&architecture)
         && architecture != "qwen4exp"
@@ -373,6 +369,19 @@ pub fn resolve_qwen_contract_for_gguf(gguf: &GgufFile) -> Result<QwenReleaseIden
         }
     }
     Ok(identity)
+}
+
+// Both public identity and prompt-contract entry points apply exactly the same
+// profile qualification after their header-name candidate detection.
+fn qualify_qwen_release_for_gguf(
+    identity: &mut QwenReleaseIdentity,
+    architecture: &str,
+    gguf: &GgufFile,
+) {
+    if architecture == "qwen4exp" {
+        let config = qwen_llm::qwen4exp::Qwen4ExpConfig::from_gguf(gguf).ok();
+        qualify_flash_next_identity(identity, config.as_ref());
+    }
 }
 
 // A product name is necessary but insufficient: copied names on another

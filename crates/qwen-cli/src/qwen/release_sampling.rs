@@ -57,7 +57,9 @@ pub(crate) fn release_sampling_defaults(identity: ReleaseIdentity) -> SamplingDe
         // 0.8B-9B) and unidentified Qwen models take the same convention: a
         // 2026-10-07 A/B on Qwen3.5-2B/9B against the 0.7/200/1/.05 chat
         // preset found it equal or better and loop-free.
-        ReleaseIdentity::Qwen { .. } => SamplingConfig::qwen3_release(1.0, 0),
+        ReleaseIdentity::Qwen { .. } | ReleaseIdentity::Qwen4Unknown => {
+            SamplingConfig::qwen3_release(1.0, 0)
+        }
         ReleaseIdentity::FlashNext => SamplingConfig::qwen38_flash_next(0),
         ReleaseIdentity::DeepSeekV41 => crate::deepseek_v41::default_sampling(0),
         ReleaseIdentity::DeepSeekV4 => SamplingConfig::deepseek_v4_0731(0),
@@ -89,7 +91,7 @@ pub(crate) fn gguf_sampling_defaults(
         ReleaseIdentity::Qwen {
             version: QwenVersion::Unknown,
             ..
-        }
+        } | ReleaseIdentity::Qwen4Unknown
     ) {
         return defaults;
     }

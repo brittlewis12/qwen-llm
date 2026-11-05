@@ -5,11 +5,13 @@ use std::io::Write;
 pub(crate) const TEMPLATE: &str =
     include_str!("../tests/fixtures/templates/qwen_xml_preserve_chat_template.jinja");
 
+#[derive(Clone)]
 pub(crate) enum Value<'a> {
     Text(&'a str),
     Float(f64),
     Signed(i64),
     Unsigned(u64),
+    UnsignedArray(Vec<u64>),
 }
 
 fn string(out: &mut Vec<u8>, text: &str) {
@@ -75,6 +77,14 @@ pub(crate) fn gguf(name: &str, template: &str, extra: &[(&str, Value<'_>)]) -> G
             Unsigned(value) => {
                 bytes.extend(10u32.to_le_bytes());
                 bytes.extend(value.to_le_bytes());
+            }
+            UnsignedArray(values) => {
+                bytes.extend(9u32.to_le_bytes());
+                bytes.extend(10u32.to_le_bytes());
+                bytes.extend((values.len() as u64).to_le_bytes());
+                for value in values {
+                    bytes.extend(value.to_le_bytes());
+                }
             }
         }
     }
@@ -182,6 +192,14 @@ fn qwen4_gguf_inner(
                 bytes.extend(10u32.to_le_bytes());
                 bytes.extend(value.to_le_bytes());
             }
+            UnsignedArray(values) => {
+                bytes.extend(9u32.to_le_bytes());
+                bytes.extend(10u32.to_le_bytes());
+                bytes.extend((values.len() as u64).to_le_bytes());
+                for value in values {
+                    bytes.extend(value.to_le_bytes());
+                }
+            }
         }
     }
     string(&mut bytes, "tokenizer.ggml.tokens");
@@ -239,4 +257,87 @@ fn qwen4_gguf_inner(
     std::fs::remove_file(path).unwrap();
     file.write_all(&bytes).unwrap();
     GgufFile::from_opened_file(file, "qwen4-alias-header.gguf").unwrap()
+}
+
+/// Complete reference-profile metadata for testing production release detection.
+pub(crate) fn qwen4_reference_gguf(
+    architecture: &str,
+    name: &str,
+    mutate: impl FnOnce(&mut qwen_llm::qwen4exp::Qwen4ExpConfig),
+) -> GgufFile {
+    use Value::*;
+    let mut c = qwen_llm::qwen4exp::Qwen4ExpConfig::flash_next_reference();
+    mutate(&mut c);
+    let ple = c.ple.as_ref().unwrap();
+    let mut fields = vec![("general.architecture".into(), Text(architecture))];
+    for (key, value) in [
+        ("context_length", c.context_length),
+        ("block_count", c.layer_count),
+        ("embedding_length", c.hidden_size),
+        ("full_attention_interval", c.full_attention_interval),
+        ("hyper_connection.count", c.hyper_connection.count),
+        ("hyper_connection.low_rank", c.hyper_connection.low_rank),
+        ("attention.head_count", c.attention.query_heads),
+        ("attention.head_count_kv", c.attention.kv_heads),
+        ("attention.key_length", c.attention.key_head_dim),
+        ("attention.value_length", c.attention.value_head_dim),
+        ("rope.dimension_count", c.attention.rotary_dim),
+        ("ssm.group_count", c.gated_delta_net.key_heads),
+        ("ssm.time_step_rank", c.gated_delta_net.value_heads),
+        ("ssm.state_size", c.gated_delta_net.key_head_dim),
+        ("ssm.conv_kernel", c.gated_delta_net.conv_kernel),
+        ("ssm.inner_size", c.gated_delta_net.inner_size),
+        ("expert_count", c.moe.expert_count),
+        ("expert_used_count", c.moe.experts_per_token),
+        ("expert_feed_forward_length", c.moe.expert_intermediate_size),
+        (
+            "expert_shared_feed_forward_length",
+            c.moe.shared_expert_intermediate_size,
+        ),
+        ("attention.indexer.head_count", c.qsa.query_heads),
+        ("attention.indexer.key_length", c.qsa.head_dim),
+        ("attention.indexer.top_k", c.qsa.token_budget),
+        ("ple.ngram_size", ple.ngram_size),
+        ("ple.heads_per_ngram", ple.heads_per_ngram),
+        ("embedding_length_per_layer_input", ple.embedding_head_dim),
+        ("ple.conv_kernel", ple.conv_kernel),
+        ("ple.eos_token_id", ple.eos_token_id),
+        ("ple.image_token_id", ple.image_token_id.unwrap()),
+        ("nextn_predict_layers", 0),
+    ] {
+        fields.push((format!("{architecture}.{key}"), Unsigned(u64::from(value))));
+    }
+    for (key, value) in [
+        ("attention.layer_norm_rms_epsilon", c.rms_norm_eps),
+        ("rope.freq_base", c.attention.rope_theta),
+    ] {
+        fields.push((format!("{architecture}.{key}"), Float(f64::from(value))));
+    }
+    for (key, values) in [
+        (
+            "rope.dimension_sections",
+            c.attention.rope_sections.map(u64::from).to_vec(),
+        ),
+        (
+            "attention.compress_ratios",
+            c.compress_ratios.iter().copied().map(u64::from).collect(),
+        ),
+        (
+            "ple.layers",
+            c.ple
+                .as_ref()
+                .map(|ple| ple.layers.iter().copied().map(u64::from).collect())
+                .unwrap_or_default(),
+        ),
+        ("ple.layer_multipliers", ple.multipliers.clone()),
+        ("ple.head_offsets", ple.head_offsets.clone()),
+        ("ple.head_vocab_sizes", ple.head_vocab_sizes.clone()),
+    ] {
+        fields.push((format!("{architecture}.{key}"), UnsignedArray(values)));
+    }
+    let extra: Vec<_> = fields
+        .iter()
+        .map(|(key, value)| (key.as_str(), value.clone()))
+        .collect();
+    gguf(name, TEMPLATE, &extra)
 }

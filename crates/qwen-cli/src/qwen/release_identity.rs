@@ -74,6 +74,7 @@ pub(crate) enum ReleaseIdentity {
         shape: QwenShape,
     },
     FlashNext,
+    Qwen4Unknown,
     DeepSeekV4,
     DeepSeekV41,
     MuseGlimmer,
@@ -102,7 +103,13 @@ impl ReleaseIdentity {
                 },
                 shape: QwenShape::from_header(family, gguf),
             },
-            ModelFamily::Qwen4Exp => Self::FlashNext,
+            ModelFamily::Qwen4Exp => match identify_qwen_release_for_gguf(gguf).map(|id| id.status)
+            {
+                Ok(QwenReleaseStatus::Identified {
+                    version: "qwen3.8", ..
+                }) => Self::FlashNext,
+                _ => Self::Qwen4Unknown,
+            },
             ModelFamily::DeepSeek4 => Self::DeepSeekV4,
             ModelFamily::DeepSeekV41 => Self::DeepSeekV41,
             ModelFamily::MuseGlimmer => Self::MuseGlimmer,
@@ -130,6 +137,7 @@ impl ReleaseIdentity {
                 format!("{version}/{shape}")
             }
             Self::FlashNext => "qwen3.8_flash_next".into(),
+            Self::Qwen4Unknown => "qwen4_unidentified".into(),
             Self::DeepSeekV4 => "deepseek_v4_0731".into(),
             Self::DeepSeekV41 => "deepseek_v41".into(),
             Self::MuseGlimmer => "muse_glimmer".into(),
@@ -142,6 +150,108 @@ impl ReleaseIdentity {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn qwen4_release_labels_sampling_and_prompt_identity_share_qualification() {
+        use crate::prompt_template::resolve_qwen_contract_for_gguf;
+        use crate::qwen_contract_fixture::{Value, gguf, qwen4_reference_gguf};
+        use crate::release_sampling::{gguf_sampling_defaults, release_sampling_defaults};
+        let check = |gguf: &GgufFile, qualified: bool| {
+            let public = identify_qwen_release_for_gguf(gguf).unwrap();
+            let prompt = resolve_qwen_contract_for_gguf(gguf).unwrap();
+            assert_eq!(
+                matches!(
+                    public.status,
+                    QwenReleaseStatus::Identified {
+                        version: "qwen3.8",
+                        ..
+                    }
+                ),
+                matches!(
+                    prompt.status,
+                    QwenReleaseStatus::Identified {
+                        version: "qwen3.8",
+                        ..
+                    }
+                ),
+            );
+            assert_eq!(
+                matches!(
+                    public.status,
+                    QwenReleaseStatus::Identified {
+                        version: "qwen3.8",
+                        ..
+                    }
+                ),
+                qualified
+            );
+            let runtime = ReleaseIdentity::detect(ModelFamily::Qwen4Exp, gguf);
+            assert_eq!(
+                runtime,
+                if qualified {
+                    ReleaseIdentity::FlashNext
+                } else {
+                    ReleaseIdentity::Qwen4Unknown
+                }
+            );
+            assert_eq!(
+                runtime.label(),
+                if qualified {
+                    "qwen3.8_flash_next"
+                } else {
+                    "qwen4_unidentified"
+                }
+            );
+            assert_eq!(
+                gguf_sampling_defaults(runtime, gguf),
+                release_sampling_defaults(runtime)
+            );
+        };
+        for name in ["Qwen3.8-Flash-Next", "Qwen3.8-Flash-Next GSQ-RCO"] {
+            check(&qwen4_reference_gguf("qwen4exp", name, |_| {}), true);
+        }
+        for name in [
+            "Distilled Qwen3.8-Flash-Next",
+            "renamed model",
+            "Qwen4-Flash",
+        ] {
+            check(&qwen4_reference_gguf("qwen4exp", name, |_| {}), false);
+        }
+        check(
+            &qwen4_reference_gguf("qwen4exp", "Qwen3.8-Flash-Next", |c| {
+                c.context_length = 1_048_576
+            }),
+            false,
+        );
+        check(
+            &qwen4_reference_gguf("qwen4exp", "Qwen3.8-Flash-Next", |c| c.hidden_size = 4096),
+            false,
+        );
+        check(
+            &qwen4_reference_gguf("qwen4", "Qwen3.8-Flash-Next", |_| {}),
+            false,
+        );
+        let incomplete = gguf(
+            "Qwen3.8-Flash-Next",
+            "",
+            &[
+                ("general.architecture", Value::Text("qwen4exp")),
+                ("general.sampling.temp", Value::Float(0.37)),
+            ],
+        );
+        let unknown = ReleaseIdentity::detect(ModelFamily::Qwen4Exp, &incomplete);
+        assert_eq!(unknown, ReleaseIdentity::Qwen4Unknown);
+        // Unknown Qwen4 uses validated header defaults, rather than silently
+        // taking a release-specific policy merely from its architecture.
+        assert_eq!(
+            gguf_sampling_defaults(unknown, &incomplete).temperature,
+            0.37
+        );
+        assert_eq!(
+            gguf_sampling_defaults(ReleaseIdentity::FlashNext, &incomplete).temperature,
+            1.0
+        );
+    }
 
     #[test]
     fn qwen_shapes_classify_from_released_geometry_only() {

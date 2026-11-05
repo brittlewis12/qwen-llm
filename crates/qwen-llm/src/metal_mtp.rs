@@ -3559,6 +3559,75 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "requires local 27B MTP fixture and several GiB of Metal memory"]
+    fn mtp_early_gpu_nonfinite_survives_later_finite_step() {
+        let path = crate::test_fixtures::required_filename("Qwen3.6-35B-A3B-UD-Q4_K_M.gguf");
+        if !std::path::Path::new(path).exists() {
+            eprintln!("[mtp-early-gpu-failure] skipped - fixture missing");
+            return;
+        }
+        let ctx = MetalContext::new().expect("metal context");
+        let g = GgufFile::open(path).expect("open fixture");
+        let m = Model::from_gguf(&g).expect("load model");
+        let mtp = m.mtp.as_ref().expect("MTP head");
+        let mm = MetalModel::load(&ctx, &g, &m).expect("metal target load");
+        let head = MetalMtpHead::load_with_moe_bank_policy(&ctx, &g, mtp, MtpMoeBankPolicy::F32)
+            .expect("load MTP head");
+        let mf = MetalForward::new(&ctx, &mm);
+        let session = MetalMtpSession::fresh(&ctx, &head, &m.arch, 4).expect("MTP session");
+        let mut spec = SpeculativeDecoder::new(&mf, &head, session);
+        let h = m.arch.hidden_size as usize;
+        let nan_hidden = MetalTensor::from_bytes(
+            &ctx,
+            bytemuck::cast_slice(&vec![f32::NAN; h]),
+            vec![h as u64],
+            GgmlType::F32,
+        )
+        .unwrap();
+        let finite_hidden = MetalTensor::from_bytes(
+            &ctx,
+            bytemuck::cast_slice(&vec![0.03125f32; h]),
+            vec![h as u64],
+            GgmlType::F32,
+        )
+        .unwrap();
+        let first =
+            MetalTensor::from_bytes(&ctx, bytemuck::cast_slice(&[1i32]), vec![1], GgmlType::I32)
+                .unwrap();
+        let second =
+            MetalTensor::from_bytes(&ctx, bytemuck::cast_slice(&[2i32]), vec![1], GgmlType::I32)
+                .unwrap();
+        let cmd = ctx.queue.commandBuffer().unwrap();
+        let enc = KernelEncoder::begin(&cmd);
+        spec.encode_mtp_draft_step(&enc, &first, &nan_hidden, 0, false)
+            .unwrap();
+        // This finite step routes normally after the failed one in the same
+        // command. It must OR READY without clearing the sticky failure bit.
+        spec.encode_mtp_draft_step(&enc, &second, &finite_hidden, 1, false)
+            .unwrap();
+        enc.end();
+        cmd.commit();
+        crate::metal::wait_completed(&cmd).unwrap();
+        let word = unsafe {
+            *(spec.mtp_session.moe_route_status.buffer.contents().as_ptr() as *const i32)
+        };
+        assert_ne!(
+            word & crate::metal::MOE_ROUTE_STATUS_NONFINITE,
+            0,
+            "sticky nonfinite bit was cleared by the later finite step: {word}"
+        );
+        let before = spec.mtp_session.kv_n_pos;
+        let error = spec
+            .mtp_session
+            .check_completed_route("mtp_early_gpu_failure")
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("non-finite"), "{error}");
+        assert!(spec.mtp_session.poisoned.is_some());
+        assert_eq!(spec.mtp_session.kv_n_pos, before);
+    }
+
+    #[test]
     #[ignore = "requires local A3B Q4_K_M MTP fixture and several GiB of Metal memory"]
     fn mtp_chain_early_failure_is_sticky_and_holds_the_counter() {
         let path = crate::test_fixtures::required_filename("Qwen3.6-27B-MTP-Q4_K_M.gguf");

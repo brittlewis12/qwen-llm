@@ -85,6 +85,11 @@ pub struct Qwen4ExpPackedPrefillWorkspace {
 }
 
 impl Qwen4ExpPackedPrefillWorkspace {
+    #[cfg(test)]
+    pub(crate) fn embedding_for_test(&self) -> &MetalTensor {
+        &self.embedding
+    }
+
     pub fn new(
         ctx: &MetalContext,
         geometry: Qwen4ExpLayersZeroOneMetalGeometry,
@@ -535,7 +540,7 @@ fn validate_contract(
         weights.layer_zero.token_embedding,
         hidden,
         geometry.vocab_size(),
-        GgmlType::Q8_0,
+        weights.layer_zero.token_embedding.dtype,
     )?;
     require_read_only("packed token embedding", weights.layer_zero.token_embedding)?;
     require_tensor(
@@ -545,10 +550,16 @@ fn validate_contract(
         &[tokens as u64],
         true,
     )?;
-    let get_rows = ctx.pipeline("kernel_get_rows_q8_0_f32")?;
+    let kernel = crate::qwen4exp_metal::token_embedding_kernel_name(
+        weights.layer_zero.token_embedding.dtype,
+    )
+    .ok_or_else(|| {
+        Qwen4ExpPackedPrefillError::Invalid("unsupported token embedding dtype".into())
+    })?;
+    let get_rows = ctx.pipeline(kernel)?;
     if get_rows.threadExecutionWidth() != 32 || get_rows.maxTotalThreadsPerThreadgroup() < 32 {
         return invalid(format!(
-            "packed Q8_0 row pipeline requires SIMD width and capacity 32, got width={} capacity={}",
+            "packed row pipeline requires SIMD width and capacity 32, got width={} capacity={}",
             get_rows.threadExecutionWidth(),
             get_rows.maxTotalThreadsPerThreadgroup()
         ));

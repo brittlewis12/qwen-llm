@@ -1671,11 +1671,12 @@ pub(crate) fn validate_projection_range(
     Ok(())
 }
 
-/// Token embeddings retain the existing Q8 route and admit archived GSQ IQ4_XS.
+/// Token embedding row-gather dispatch shared by scalar and packed sessions.
 pub(crate) fn token_embedding_kernel_name(dtype: GgmlType) -> Option<&'static str> {
     match dtype {
         GgmlType::Q8_0 => Some("kernel_get_rows_q8_0_f32"),
         GgmlType::IQ4_XS => Some("kernel_get_rows_iq4_xs_f32"),
+        GgmlType::Q6_K => Some("kernel_get_rows_q6_K_f32"),
         _ => None,
     }
 }

@@ -870,7 +870,7 @@ fn native_dtype_allowed(role: NativeRole, dtype: GgmlType) -> bool {
             dtype,
             F32 | BF16 | Q8_0 | Q4_K | Q5_K | Q6_K | IQ4_XS | IQ4_NL
         ),
-        NativeRole::Embedding => matches!(dtype, Q8_0 | IQ4_XS),
+        NativeRole::Embedding => matches!(dtype, Q8_0 | IQ4_XS | Q6_K),
         NativeRole::ExpertGateUp => matches!(dtype, IQ3_XXS | IQ4_XS | IQ2_S | IQ3_S),
         NativeRole::ExpertDown => matches!(dtype, IQ4_NL | Q8_0 | Q2_0),
         NativeRole::SharedGateUp => crate::qwen4exp_moe::SHARED_GATE_UP_DTYPES.contains(&dtype),

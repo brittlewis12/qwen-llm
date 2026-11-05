@@ -773,7 +773,7 @@ pub(crate) fn validate_contract(
         weights.token_embedding,
         g.hidden_size,
         g.vocab_size,
-        &[GgmlType::Q8_0, GgmlType::IQ4_XS],
+        &[GgmlType::Q8_0, GgmlType::IQ4_XS, GgmlType::Q6_K],
     )?;
     for (name, tensor, dtype, shape) in [
         ("token ID", &workspace.token_id, GgmlType::I32, vec![1]),
@@ -1369,12 +1369,25 @@ mod tests {
 
     #[test]
     fn two_tokens_compose_embedding_gdn_and_moe_in_one_command() {
+        two_tokens_embedding_path(GgmlType::Q8_0);
+    }
+
+    #[test]
+    fn q6_k_token_embedding_path_matches_cpu() {
+        two_tokens_embedding_path(GgmlType::Q6_K);
+    }
+
+    fn two_tokens_embedding_path(token_dtype: GgmlType) {
         let Some(ctx) = metal_context() else {
             return;
         };
         let geometry = geometry();
-        let token_bytes = q8_bank(HIDDEN, VOCAB, 1, 11);
-        let token_f32 = dequant_matrix(&token_bytes, GgmlType::Q8_0, HIDDEN, VOCAB);
+        let token_bytes = if token_dtype == GgmlType::Q8_0 {
+            q8_bank(HIDDEN, VOCAB, 1, 11)
+        } else {
+            quantize_rows(&values(HIDDEN * VOCAB, 17, 0.025), token_dtype, HIDDEN)
+        };
+        let token_f32 = dequant_matrix(&token_bytes, token_dtype, HIDDEN, VOCAB);
 
         let attention_cpu = CpuResidualWeights {
             norm: values(HYPER, 1, 0.002)
@@ -1423,7 +1436,7 @@ mod tests {
             &ctx,
             &token_bytes,
             vec![HIDDEN as u64, VOCAB as u64],
-            GgmlType::Q8_0,
+            token_dtype,
         );
         let attention_norm_gpu = weight_f32(&ctx, &attention_cpu.norm, vec![HYPER as u64]);
         let attention_down_gpu =

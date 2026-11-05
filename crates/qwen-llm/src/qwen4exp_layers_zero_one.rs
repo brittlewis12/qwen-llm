@@ -2496,6 +2496,72 @@ mod tests {
     }
 
     #[test]
+    fn q6_k_packed_embedding_lookup_matches_scalar_continuation() {
+        let Some(ctx) = metal_context() else { return };
+        let mut fixture = SyntheticFixture::new(&ctx);
+        let bytes = quantize_rows(&fixture.token_cpu, GgmlType::Q6_K, HIDDEN);
+        fixture.token_cpu = dequant(&bytes, GgmlType::Q6_K, vec![HIDDEN, VOCAB]);
+        fixture.token = weight_bytes(
+            &ctx,
+            &bytes,
+            vec![HIDDEN as u64, VOCAB as u64],
+            GgmlType::Q6_K,
+        );
+        let tokens = [3, 0, 31, 17, 2, 29, 1, 15];
+        let mut scalar_workspace =
+            Qwen4ExpLayersZeroOneMetalWorkspace::new(&ctx, fixture.geometry).unwrap();
+        let mut expected = Vec::new();
+        for (position, &token) in tokens.iter().enumerate() {
+            expected.extend(integrated_step(
+                &ctx,
+                &fixture,
+                &mut scalar_workspace,
+                token,
+                position as u64,
+            ));
+        }
+        for n in [1, 2, 8] {
+            let mut workspace =
+                Qwen4ExpPackedPrefillWorkspace::new(&ctx, fixture.geometry, n).unwrap();
+            let (actual, census) = packed_steps(&ctx, &fixture, &mut workspace, &tokens[..n], 0);
+            assert_eq!(
+                census
+                    .iter()
+                    .filter(|r| r.kernel == "kernel_get_rows_q6_K_f32")
+                    .count(),
+                1
+            );
+            assert_eq!(
+                census
+                    .iter()
+                    .filter(|r| r.kernel == "kernel_get_rows_q8_0_f32")
+                    .count(),
+                0
+            );
+            let gathered = read_f32(workspace.embedding_for_test());
+            for (row, &token) in tokens[..n].iter().enumerate() {
+                let cpu =
+                    &fixture.token_cpu[token as usize * HIDDEN..(token as usize + 1) * HIDDEN];
+                assert!(
+                    gathered[row * HIDDEN..(row + 1) * HIDDEN]
+                        .iter()
+                        .zip(cpu)
+                        .all(|(a, b)| a.to_bits() == b.to_bits()),
+                    "Q6_K gather must match CPU dequantization bitwise"
+                );
+                let a = &actual[row * HYPER..(row + 1) * HYPER];
+                let b = &expected[row * HYPER..(row + 1) * HYPER];
+                if n == 1 {
+                    assert!(a.iter().zip(b).all(|(a, b)| a.to_bits() == b.to_bits()));
+                }
+                // The same fixed packed-motor bound as the incumbent Q8
+                // chronological-prefix test below; lookup itself is exact.
+                assert_similarity("Q6_K packed/scalar continuation", a, b, 6e-2, 0.999_999);
+            }
+        }
+    }
+
+    #[test]
     fn packed_two_layer_prefix_matches_chronological_scalar_chunks() {
         let Some(ctx) = metal_context() else {
             return;

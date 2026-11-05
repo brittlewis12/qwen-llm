@@ -22,7 +22,8 @@ the GLM same-artifact oracle pin, the dequant codec, or a performance roofline.
 - M4 Max, 128 GB, AC power, macOS 15.7.9. Hardware used for the valid grid.
 - M5 Ultra, 256 GB, macOS 27.0.0. Valid 2026-11-05 rerun. Thermal pressure was
   checked at campaign boundaries (before and after each campaign, not each
-  engine command) and was 0 throughout; per-command manifests record `pmset`
+  engine command), and every recorded boundary reading was 0; that cannot
+  establish pressure between readings. Per-command manifests record `pmset`
   warning history, not instantaneous pressure. See the M5 section.
 - One representative artifact per family, the same GGUF for both engines.
   Depth 4096 is the GLM sparse range; the K2 cell has no llama.cpp
@@ -63,7 +64,7 @@ Actual `llama-bench` smoke on the artifact, not code reading:
 |---|---:|---:|---:|---:|---:|
 | Qwen3.8-27B Q4_K_M | 202 / 213 **0.95x** | 209 / 205 **1.02x** | 21.0 / 22.1 **0.95x** | 19.9 / 13.5 **1.48x rejected*** ([rerun 1.07x](stability/README.md)) | 18.8 / 15.3 **1.23x** |
 | Qwen3.6-35B-A3B UD-Q4_K_M | 1536 / 1635 **0.94x** | 1769 / 1662 **1.06x** | 117 / 97 **1.21x** | 104 / 88 **1.18x** | 92 / 67 **1.38x** |
-| Qwen3.5-122B-A10B UD-Q4_K_XL | 491 / 530 **0.93x** | 436 / 511 **0.85x** | 45.2 / 42.5 **1.06x** | 41.7 / 38.9 **1.07x** | — |
+| Qwen3.5-122B-A10B UD-Q4_K_XL | 491 / 530 **0.93x** | 436 / 511 **0.85x provisional†** | 45.2 / 42.5 **1.06x** | 41.7 / 38.9 **1.07x** | — |
 | Qwen3.8-Flash-Next UD-Q3_K_XL | 550 / 630 **0.87x** | 509 / 585 **0.87x** | 46.7 / 43.1 **1.08x** | 43.1 / 40.1 **1.08x** | — |
 | DeepSeek-V4-Flash-0731 UD-IQ3_XXS | 130 / 299 **0.43x** | 219 / 295 **0.74x provisional*** | 28.7 / 28.6 **1.01x** | 19.1 / 24.1 **0.79x provisional*** | — |
 | Muse-Glimmer-30B Q8_0 | 224 / 263 **0.85x** | 189 / 219 **0.86x** | 16.2 / 16.7 **0.97x** | 15.5 / 16.0 **0.96x** | — |
@@ -74,7 +75,9 @@ Actual `llama-bench` smoke on the artifact, not code reading:
 were 19.0 and 8.0 t/s (samples 19.9/18.0 then 7.4/8.6); DS4 qwen @8K blocks
 were 23.0 and 15.1 t/s. A less-divergent 27B rerun (same protocol) gave qwen 21.1 vs lcpp
 19.8 t/s, **1.07x**, matching 09-25; use that, not the main-grid 1.48x. The DS4
-cell remains provisional. Every sample is in `SAMPLES.md`; rerun data is under
+cell remains provisional. `†` the A10B pp4096 stability rerun produced no data
+(a harness chunk-allocation guard stopped it), so the main-grid value is
+unconfirmed. Every sample is in `SAMPLES.md`; rerun data is under
 [`stability/`](stability/README.md).
 
 ## Ratio movement against 2026-09-25
@@ -96,7 +99,7 @@ clean way to separate the two sources of movement in this run.
 | Qwen3.6-35B-A3B | tg128@d8192 | 1.16 | 1.18 | 1.02x | +5.0% | +2.9% |
 | Qwen3.6-35B-A3B | tg128@d32768 | 1.25 | 1.38 | 1.10x | +4.5% | -5.2% |
 | Qwen3.5-122B-A10B | pp512 | 0.96 | 0.93 | 0.97x | -0.0% | +3.4% |
-| Qwen3.5-122B-A10B | pp4096 | 1.04 | 0.85 | 0.82x | -21.4% | -4.5% |
+| Qwen3.5-122B-A10B | pp4096 | 1.04 | 0.85 provisional† | 0.82x | -21.4% | -4.5% |
 | Qwen3.5-122B-A10B | tg128 | 1.11 | 1.06 | 0.96x | -1.8% | +2.0% |
 | Qwen3.5-122B-A10B | tg128@d8192 | 1.12 | 1.07 | 0.96x | -2.2% | +2.2% |
 | Qwen3.8-Flash-Next | pp512 | 0.86 | 0.87 | 1.01x | -0.6% | -2.0% |

@@ -168,6 +168,21 @@ impl Qwen4ExpConfig {
                 "must describe every declared trunk and MTP layer",
             ));
         }
+        if mtp_layers != 0 {
+            let ratio = compress_ratios[..layer_count as usize]
+                .iter()
+                .copied()
+                .find(|r| *r > 0);
+            if mtp_layers != 1
+                || ratio.is_none()
+                || compress_ratios[layer_count as usize..] != [ratio.unwrap_or(0)]
+            {
+                return Err(invalid(
+                    "qwen4exp.attention.compress_ratios",
+                    "the qualified appended MTP block must be QSA with the trunk's positive compression ratio",
+                ));
+            }
+        }
         compress_ratios.truncate(layer_count as usize);
         let vocab_size = required_array_len_u32(gguf, "tokenizer.ggml.tokens")?;
         let ple_layers = optional_nonnegative_u32_array(gguf, "qwen4exp.ple.layers")?;
@@ -588,6 +603,39 @@ impl Qwen4ExpConfig {
             if width > i32::MAX as u64 {
                 return refuse("addressing", "projection dimensions must fit signed I32");
             }
+        }
+        // Validate the same element/stride contracts as native projection
+        // preflight, including all HC and output projections. The PLE table is
+        // CPU row-addressed. Routed-bank element products must also fit u32.
+        let inventory = crate::qwen4exp_loader::expected_tensor_inventory(self)
+            .map_err(|error| unsupported("addressing", error.to_string()))?;
+        let projections = inventory
+            .iter()
+            .filter(|(name, _)| name == "output.weight")
+            .chain(inventory.iter().filter(|(name, _)| name != "output.weight"));
+        for (name, shape) in projections {
+            if shape.len() < 2 || name == "per_layer_token_embd.weight" {
+                continue;
+            }
+            let elements = shape.iter().try_fold(1u64, |n, &d| n.checked_mul(d));
+            if elements.is_none_or(|n| n > u64::from(u32::MAX)) {
+                return Err(unsupported(
+                    "addressing",
+                    format!("{name}: weight element count exceeds u32 addressing"),
+                ));
+            }
+            crate::qwen4exp_metal::validate_projection_addressing(
+                crate::tensor::GgmlType::F32,
+                shape[0] as usize,
+                shape[1] as usize,
+                self.qsa.token_budget as usize
+                    * if shape.len() == 3 {
+                        self.moe.experts_per_token as usize
+                    } else {
+                        1
+                    },
+            )
+            .map_err(|error| unsupported("addressing", format!("{name}: {error}")))?;
         }
         Ok(())
     }
@@ -1174,6 +1222,15 @@ pub(crate) mod tests {
         mtp: bool,
         mutate: impl FnOnce(&mut Qwen4ExpConfig),
     ) -> GgufFile {
+        metadata_fixture_with_tail(architecture, mtp, None, mutate)
+    }
+
+    fn metadata_fixture_with_tail(
+        architecture: &str,
+        mtp: bool,
+        tail: Option<u32>,
+        mutate: impl FnOnce(&mut Qwen4ExpConfig),
+    ) -> GgufFile {
         fn string(bytes: &mut Vec<u8>, value: &str) {
             bytes.extend((value.len() as u64).to_le_bytes());
             bytes.extend(value.as_bytes());
@@ -1243,7 +1300,9 @@ pub(crate) mod tests {
         }
         let mut ratios: Vec<_> = c.compress_ratios.iter().map(|&n| u64::from(n)).collect();
         if mtp {
-            ratios.push(4);
+            ratios.push(u64::from(tail.unwrap_or_else(|| {
+                c.compress_ratios.iter().copied().find(|r| *r > 0).unwrap()
+            })));
         }
         for (key, values) in [
             (
@@ -1295,6 +1354,68 @@ pub(crate) mod tests {
         std::fs::remove_file(path).unwrap();
         std::io::Write::write_all(&mut file, &bytes).unwrap();
         GgufFile::from_opened_file(file, "qwen4-artifact.gguf").unwrap()
+    }
+
+    #[test]
+    fn appended_mtp_tail_requires_the_qualified_qsa_ratio() {
+        for arch in ["qwen4exp", "qwen4"] {
+            for tail in [0, 1, 2, 8, u32::MAX] {
+                let gguf = metadata_fixture_with_tail(arch, true, Some(tail), |_| {});
+                assert!(matches!(
+                    Qwen4ExpConfig::from_gguf(&gguf),
+                    Err(Qwen4ExpError::InvalidMetadata {
+                        key: "qwen4exp.attention.compress_ratios",
+                        ..
+                    })
+                ));
+            }
+            let gguf = metadata_fixture_with_tail(arch, true, Some(4), |_| {});
+            assert_eq!(
+                Qwen4ExpConfig::from_gguf(&gguf).unwrap(),
+                Qwen4ExpConfig::flash_next_reference()
+            );
+        }
+    }
+
+    #[test]
+    fn executable_projection_products_refuse_before_residency() {
+        let mut output = Qwen4ExpConfig::flash_next_reference();
+        output.hidden_size = 18_432;
+        output.moe.expert_count = 64;
+        output.ple.as_mut().unwrap().embedding_head_dim = 1_152;
+        output.validate().unwrap();
+        assert!(
+            matches!(output.validate_artifact(), Err(Qwen4ExpError::UnsupportedShape { feature: "addressing", reason })
+            if reason.contains("output.weight") && reason.contains("weight element count"))
+        );
+        let mut experts = Qwen4ExpConfig::flash_next_reference();
+        experts.moe.expert_intermediate_size = 4096;
+        experts.validate().unwrap();
+        assert!(
+            matches!(experts.validate_artifact(),Err(Qwen4ExpError::UnsupportedShape {feature:"addressing",reason})
+            if reason.contains("ffn_gate_exps.weight"))
+        );
+        let mut packed = Qwen4ExpConfig::flash_next_reference();
+        packed.hidden_size = 256;
+        packed.moe.expert_count = 16;
+        packed.moe.experts_per_token = 16;
+        packed.moe.expert_intermediate_size = 1_000_000;
+        packed.ple.as_mut().unwrap().embedding_head_dim = 32;
+        packed.ple.as_mut().unwrap().heads_per_ngram = 4;
+        packed.ple.as_mut().unwrap().head_offsets.truncate(8);
+        packed.ple.as_mut().unwrap().head_vocab_sizes.truncate(8);
+        packed.validate().unwrap();
+        assert!(
+            matches!(packed.validate_artifact(),Err(Qwen4ExpError::UnsupportedShape {feature:"addressing",reason})
+            if reason.contains("ffn_gate_exps.weight")&&reason.contains("output element count"))
+        );
+        let mut hc = Qwen4ExpConfig::flash_next_reference();
+        hc.hyper_connection.low_rank = 1_048_576;
+        hc.validate().unwrap();
+        assert!(
+            matches!(hc.validate_artifact(), Err(Qwen4ExpError::UnsupportedShape { feature: "addressing", reason })
+            if reason.contains("output_hc_down.weight") && reason.contains("weight element count"))
+        );
     }
 
     #[test]

@@ -1599,6 +1599,39 @@ mod tests {
     }
 
     #[test]
+    fn qwen4exp_day0_million_token_metadata_requires_explicit_serve_capacity() {
+        use crate::qwen_contract_fixture::{self as fixture, Value};
+        for architecture in ["qwen4exp", "qwen4"] {
+            let key = format!("{architecture}.context_length");
+            let gguf = fixture::gguf(
+                "future Qwen",
+                "",
+                &[
+                    ("general.architecture", Value::Text(architecture)),
+                    (&key, Value::Unsigned(1_048_576)),
+                ],
+            );
+            let family = ModelFamily::detect(&gguf).unwrap();
+            let declared = gguf.get_u64(&key).unwrap() as usize;
+            let refused =
+                resolve_serve_limits(profile(family), Some(declared), None, Some(64)).unwrap_err();
+            assert!(
+                refused
+                    .to_string()
+                    .contains("requires --max-context-tokens")
+            );
+            let limits =
+                resolve_serve_limits(profile(family), Some(declared), Some(4096), Some(64))
+                    .unwrap()
+                    .unwrap();
+            assert_eq!(limits.context_tokens, 4096);
+            assert_ne!(limits.context_tokens, declared);
+            // Both load and serve use this request-shaped capacity constructor;
+            // the resident model loader then prices and admits it before allocation.
+        }
+    }
+
+    #[test]
     fn capacity_limits_follow_each_family_profile() {
         for family in ModelFamily::ALL {
             let family_profile = profile(*family);

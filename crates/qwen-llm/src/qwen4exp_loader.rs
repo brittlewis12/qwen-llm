@@ -1587,6 +1587,15 @@ mod tests {
                 d.n_bytes = d.shape.iter().product::<u64>() / 32 * 34;
             }
         }
+        // Q4_K_M promotes the merged GDN QKV/z projection to Q5_K.
+        // Exercise its 256-element quant blocks at a nonzero shard offset.
+        for d in &mut split {
+            if d.name.ends_with("attn_qkv.weight") || d.name.ends_with("attn_gate.weight") {
+                d.dtype = GgmlType::Q5_K;
+                let (block, bytes) = d.dtype.storage_layout().unwrap();
+                d.n_bytes = d.shape.iter().product::<u64>() / block * bytes;
+            }
+        }
         let mut extended = c.clone();
         extended.layer_count += 1;
         extended.compress_ratios.push(4);
@@ -1599,7 +1608,7 @@ mod tests {
         for (role, shape) in [
             ("eh_proj", vec![512, 256]),
             ("enorm", vec![256]),
-            ("hnorm", vec![256]),
+            ("hnorm", vec![256, 2]),
             ("hc_head_norm", vec![256, 2]),
             ("hc_head_down", vec![512, 32]),
             ("hc_head_up", vec![32, 512]),

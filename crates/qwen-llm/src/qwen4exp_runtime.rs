@@ -111,6 +111,15 @@ impl Drop for Qwen4ExpPackedSelectedQsaOverride {
 pub enum Qwen4ExpRuntimeError {
     #[error("Qwen3.8-Flash-Next prefill memory admission denied: {0}")]
     MemoryAdmission(#[from] crate::metal::MemoryAdmissionDenied),
+    #[error(
+        "Qwen4 context {requested} cannot be reserved; retry with --max-context-tokens {max_context_tokens} or less (scalar prefill; shorten the request if needed). This limit fits the current memory preflight, not a future reservation: {source}"
+    )]
+    ContextCapacity {
+        requested: usize,
+        max_context_tokens: usize,
+        #[source]
+        source: Box<Qwen4ExpRuntimeError>,
+    },
     #[error(transparent)]
     Config(#[from] Qwen4ExpError),
     #[error(transparent)]
@@ -844,35 +853,39 @@ impl<'gguf> Qwen4ExpLoadedModel<'gguf> {
         }
         let decode = decode.resolve(ctx)?;
         let minimum_packed_rows = prepared_session.as_ref().map_or(0, |(_, floor)| *floor);
-        let session_plan = if let Some((plan, _)) = prepared_session {
-            let expected_geometry =
-                crate::qwen4exp_text_session::Qwen4ExpTextSessionMetalGeometry::from_config(
+        let session_plan = (|| -> Result<_, Qwen4ExpRuntimeError> {
+            Ok(if let Some((plan, _)) = prepared_session {
+                let expected_geometry =
+                    crate::qwen4exp_text_session::Qwen4ExpTextSessionMetalGeometry::from_config(
+                        weight_plan.config(),
+                        capacity.qsa_physical_capacity,
+                    )?;
+                if plan.geometry() != &expected_geometry
+                    || plan.memory_plan().residency_priced_upper_bytes()
+                        != weight_plan.memory_plan().priced_upper_bytes()
+                {
+                    return invalid(
+                        "preflighted session differs from target geometry or residency",
+                    );
+                }
+                plan
+            } else if let Some(prompt_tokens) = packed_prefill_tokens {
+                Qwen4ExpTextSessionPlan::for_config_with_packed_prefill_tokens(
+                    ctx,
                     weight_plan.config(),
                     capacity.qsa_physical_capacity,
-                )?;
-            if plan.geometry() != &expected_geometry
-                || plan.memory_plan().residency_priced_upper_bytes()
-                    != weight_plan.memory_plan().priced_upper_bytes()
-            {
-                return invalid("preflighted session differs from target geometry or residency");
-            }
-            plan
-        } else if let Some(prompt_tokens) = packed_prefill_tokens {
-            Qwen4ExpTextSessionPlan::for_config_with_packed_prefill_tokens(
-                ctx,
-                weight_plan.config(),
-                capacity.qsa_physical_capacity,
-                weight_plan.memory_plan(),
-                prompt_tokens,
-            )?
-        } else {
-            Qwen4ExpTextSessionPlan::for_config(
-                ctx,
-                weight_plan.config(),
-                capacity.qsa_physical_capacity,
-                weight_plan.memory_plan(),
-            )?
-        };
+                    weight_plan.memory_plan(),
+                    prompt_tokens,
+                )?
+            } else {
+                Qwen4ExpTextSessionPlan::for_config(
+                    ctx,
+                    weight_plan.config(),
+                    capacity.qsa_physical_capacity,
+                    weight_plan.memory_plan(),
+                )?
+            })
+        })();
 
         if decode.guarded_topk {
             crate::qwen4exp_moe::guarded_topk::preflight(ctx)
@@ -882,15 +895,29 @@ impl<'gguf> Qwen4ExpLoadedModel<'gguf> {
             crate::qwen4exp_metal::hc_up::preflight(ctx).map_err(Qwen4ExpTextSessionError::from)?;
         }
         let _allocation_transaction = ctx.begin_allocation_transaction();
-        let (mut session_plan, aggregate) = select_prefill_plan_with_floor(
-            ctx,
-            session_plan,
-            ctx.memory_signals(),
-            true,
-            adaptive,
-            minimum_packed_rows,
-            0,
-        )?;
+        let signals = ctx.memory_signals();
+        let (mut session_plan, aggregate) = session_plan
+            .and_then(|plan| {
+                select_prefill_plan_with_floor(
+                    ctx,
+                    plan,
+                    signals,
+                    true,
+                    adaptive,
+                    minimum_packed_rows,
+                    0,
+                )
+            })
+            .map_err(|error| {
+                context_capacity_refusal(
+                    ctx,
+                    &weight_plan,
+                    capacity,
+                    signals,
+                    minimum_packed_rows,
+                    error,
+                )
+            })?;
         let admitted_weights = weight_plan.admit(ctx.memory_signals())?;
         let realized = Qwen4ExpMetalWeights::realize(ctx, gguf, admitted_weights)?;
         let weight_admission = realized.admission();
@@ -2489,6 +2516,68 @@ fn session_allocation_can_narrow(error: &Qwen4ExpTextSessionError) -> bool {
         )
 }
 
+// Binary search uses only plans, never allocations, and never silently changes
+// the requested capacity. Keep the original refusal when even one token fails.
+fn largest_fitting_context(requested: usize, mut fits: impl FnMut(usize) -> bool) -> Option<usize> {
+    let (mut low, mut high) = (0, requested.saturating_sub(1));
+    while low < high {
+        let middle = low + (high - low).div_ceil(2);
+        if fits(middle) {
+            low = middle;
+        } else {
+            high = middle - 1;
+        }
+    }
+    (low > 0).then_some(low)
+}
+
+fn context_refusal_with(
+    requested: usize,
+    error: Qwen4ExpRuntimeError,
+    fits: impl FnMut(usize) -> bool,
+) -> Qwen4ExpRuntimeError {
+    match largest_fitting_context(requested, fits) {
+        Some(max_context_tokens) => Qwen4ExpRuntimeError::ContextCapacity {
+            requested,
+            max_context_tokens,
+            source: Box::new(error),
+        },
+        None => error,
+    }
+}
+
+fn context_capacity_refusal(
+    ctx: &MetalContext,
+    weights: &Qwen4ExpMetalWeightPlan,
+    capacity: Qwen4ExpSessionCapacity,
+    signals: crate::metal::MetalMemorySignals,
+    minimum_packed_rows: usize,
+    error: Qwen4ExpRuntimeError,
+) -> Qwen4ExpRuntimeError {
+    // A drafter with a packed floor needs a separate recommendation that prices
+    // its exact verify workspace. Never advertise a scalar limit for that case.
+    if minimum_packed_rows != 0 || !matches!(error, Qwen4ExpRuntimeError::MemoryAdmission(_)) {
+        return error;
+    }
+    context_refusal_with(capacity.forward_limit, error, |limit| {
+        let Ok(candidate) = Qwen4ExpSessionCapacity::for_forward_limit(weights.config(), limit)
+        else {
+            return false;
+        };
+        let Ok(plan) = Qwen4ExpTextSessionPlan::for_config(
+            ctx,
+            weights.config(),
+            candidate.qsa_physical_capacity,
+            weights.memory_plan(),
+        ) else {
+            return false;
+        };
+        plan.memory_plan()
+            .admission_before_residency(signals, 1)
+            .is_ok_and(|a| a.is_admitted())
+    })
+}
+
 /// Preflight target residency, one session and additional not-yet-resident
 /// weights (for example a drafter head). Narrow only reusable packed rows,
 /// preserving the original context and selected-QSA extent. Load the returned
@@ -4067,6 +4156,56 @@ mod tests {
             },
             "layers": layer_rows
         })
+    }
+
+    #[test]
+    fn day0_million_token_metadata_keeps_load_request_shaped_and_refusal_actionable() {
+        for architecture in ["qwen4exp", "qwen4"] {
+            let header = crate::qwen4exp::tests::metadata_fixture_with(architecture, false, |c| {
+                c.context_length = 1_048_576
+            });
+            let config = Qwen4ExpConfig::from_gguf(&header).unwrap();
+            config.validate_artifact().unwrap();
+            // The load path uses request forwards, never the producer's maximum.
+            let small = Qwen4ExpSessionCapacity::for_forward_limit(&config, 65).unwrap();
+            assert_eq!(small.qsa_physical_capacity(), 68);
+            // A synthetic 4 GiB cache budget, using the real QSA byte geometry.
+            // There is no Metal context and no memory reservation in this test.
+            let budget = 4u64 << 30;
+            let fits = |limit| {
+                let capacity = Qwen4ExpSessionCapacity::for_forward_limit(&config, limit).unwrap();
+                let qsa = crate::qwen4exp_qsa::QwenSparseAttentionMetalGeometry::from_config(
+                    &config,
+                    3,
+                    capacity.qsa_physical_capacity(),
+                )
+                .unwrap();
+                let bytes = qsa.checked_workspace_byte_estimate().unwrap();
+                (bytes.main_key_cache_bytes
+                    + bytes.main_value_cache_bytes
+                    + bytes.compressed_index_cache_bytes) as u64
+                    * config.qsa_layer_count() as u64
+                    <= budget
+            };
+            assert!(!fits(config.context_length as usize));
+            let maximum = largest_fitting_context(config.context_length as usize, fits).unwrap();
+            assert!(fits(maximum));
+            assert!(!fits(maximum + 1));
+            let error = context_refusal_with(
+                config.context_length as usize,
+                Qwen4ExpRuntimeError::Invalid("synthetic memory budget".into()),
+                fits,
+            );
+            assert!(
+                matches!(error, Qwen4ExpRuntimeError::ContextCapacity { max_context_tokens, .. } if max_context_tokens == maximum)
+            );
+            assert!(
+                error
+                    .to_string()
+                    .contains(&format!("--max-context-tokens {maximum}"))
+            );
+        }
+        assert_eq!(largest_fitting_context(1_048_576, |_| false), None);
     }
 
     #[test]

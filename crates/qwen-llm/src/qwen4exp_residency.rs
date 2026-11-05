@@ -443,13 +443,21 @@ impl Qwen4ExpMetalWeightPlan {
         let planning_max_buffer_length =
             device_max_buffer_length.min(QWEN4EXP_RETAINED_WINDOW_CEILING_BYTES);
         let requests = model.residency_sources();
-        let retained = plan_retained_storage(
+        let mut retained = plan_retained_storage(
             &gguf.shard_mapped_lengths(),
             &requests,
             page_size,
             planning_max_buffer_length,
             QWEN4EXP_GGUF_BINDING_ALIGNMENT,
         )?;
+        let mut nonresident: Vec<_> = model.repacks.iter().map(|r| &r.source).collect();
+        nonresident.extend(
+            gguf.tensors
+                .iter()
+                .filter(|d| model.ignored_mtp.contains(&d.name)),
+        );
+        nonresident.push(ple_desc);
+        exclude_nonresident_pages(&mut retained, &nonresident)?;
         validate_retained_policy(&retained)?;
         if retained.entries.len() != requests.len() {
             return invalid("retained planner count differs from the bound inventory");
@@ -1320,6 +1328,88 @@ fn validate_realized_weights(
     Ok(())
 }
 
+// Coalesced windows can bridge an unrequested tensor. Remove its complete
+// pages as well as its descriptor; only shared boundary pages may remain.
+fn exclude_nonresident_pages(
+    plan: &mut RetainedStoragePlan,
+    excluded: &[&TensorDesc],
+) -> Result<(), Qwen4ExpResidencyError> {
+    let page = plan.page_size as u64;
+    for desc in excluded {
+        let start = desc
+            .data_offset
+            .checked_add(page - 1)
+            .map(|n| n / page * page)
+            .ok_or_else(|| {
+                Qwen4ExpResidencyError::Invalid("excluded page start overflow".into())
+            })?;
+        let end = desc
+            .data_offset
+            .checked_add(desc.n_bytes)
+            .map(|n| n / page * page)
+            .ok_or_else(|| Qwen4ExpResidencyError::Invalid("excluded page end overflow".into()))?;
+        if start >= end {
+            continue;
+        }
+        let mut windows = Vec::new();
+        for window in std::mem::take(&mut plan.windows) {
+            let window_end = window
+                .mmap_offset
+                .checked_add(window.length as u64)
+                .ok_or_else(|| Qwen4ExpResidencyError::Invalid("window end overflow".into()))?;
+            if window.shard_idx != desc.shard_idx
+                || window_end <= start
+                || window.mmap_offset >= end
+            {
+                windows.push(window);
+                continue;
+            }
+            if window.mmap_offset < start {
+                windows.push(RetainedStorageWindow {
+                    length: (start - window.mmap_offset) as usize,
+                    ..window.clone()
+                });
+            }
+            if window_end > end {
+                windows.push(RetainedStorageWindow {
+                    mmap_offset: end,
+                    length: (window_end - end) as usize,
+                    ..window
+                });
+            }
+        }
+        plan.windows = windows;
+    }
+    for entry in &mut plan.entries {
+        if !matches!(entry.disposition, RetainedStorageDisposition::View { .. }) {
+            continue;
+        }
+        let entry_end = entry
+            .data_offset
+            .checked_add(entry.n_bytes)
+            .ok_or_else(|| Qwen4ExpResidencyError::Invalid("view end overflow".into()))?;
+        let index = plan
+            .windows
+            .iter()
+            .position(|window| {
+                window.shard_idx == entry.shard_idx
+                    && window.mmap_offset <= entry.data_offset
+                    && window.mmap_offset + window.length as u64 >= entry_end
+            })
+            .ok_or_else(|| {
+                Qwen4ExpResidencyError::Invalid(format!(
+                    "resident view {:?} overlaps excluded pages",
+                    entry.name
+                ))
+            })?;
+        entry.disposition = RetainedStorageDisposition::View {
+            window_index: index,
+            buffer_offset: entry.data_offset - plan.windows[index].mmap_offset,
+        };
+    }
+    Ok(())
+}
+
 fn validate_ple_window_isolation(
     windows: &[RetainedStorageWindow],
     ple: &TensorDesc,
@@ -1624,6 +1714,60 @@ mod tests {
     }
 
     #[test]
+    fn repack_and_mtp_pages_cannot_hide_inside_coalesced_windows() {
+        let page = 4096u64;
+        let weight = |name: &str, offset| TensorDesc {
+            name: name.into(),
+            shape: vec![1024],
+            dtype: GgmlType::F32,
+            shard_idx: 0,
+            data_offset: offset,
+            n_bytes: page,
+        };
+        let a = weight("a", page);
+        let b = weight("b", page * 100);
+        let mut plan = plan_retained_storage(
+            &[(page * 128) as usize],
+            &[&a, &b],
+            page as usize,
+            (page * 128) as usize,
+            32,
+        )
+        .unwrap();
+        assert_eq!(
+            plan.windows.len(),
+            1,
+            "the generic planner spans unrequested gaps"
+        );
+        let bank = TensorDesc {
+            name: "merged-bank".into(),
+            data_offset: page * 2 + 32,
+            n_bytes: page * 96,
+            ..a.clone()
+        };
+        exclude_nonresident_pages(&mut plan, &[&bank]).unwrap();
+        assert_eq!(plan.windows.len(), 2);
+        let overlap: u64 = plan
+            .windows
+            .iter()
+            .map(|w| {
+                (w.mmap_offset + w.length as u64)
+                    .min(bank.data_offset + bank.n_bytes)
+                    .saturating_sub(w.mmap_offset.max(bank.data_offset))
+            })
+            .sum();
+        assert!(overlap < 2 * page);
+        assert!(plan.windows.iter().all(|w| w.length as u64 <= 3 * page));
+        for (i, desc) in [&a, &b].iter().enumerate() {
+            assert!(
+                matches!(plan.entries[i].disposition, RetainedStorageDisposition::View { window_index, buffer_offset }
+                if plan.windows[window_index].mmap_offset + buffer_offset == desc.data_offset)
+            );
+        }
+        assert!(exclude_nonresident_pages(&mut plan, &[&a]).is_err());
+    }
+
+    #[test]
     fn reference_quantized_inventory_is_canonical_and_plans_in_source_order() {
         let config = Qwen4ExpConfig::flash_next_reference();
         let source = quantized_inventory(&config);
@@ -1663,7 +1807,7 @@ mod tests {
             .max()
             .unwrap()
             + 4096;
-        let plan = plan_retained_storage(
+        let mut plan = plan_retained_storage(
             &[shard_len as usize],
             &requests,
             4096,
@@ -1671,6 +1815,16 @@ mod tests {
             32,
         )
         .unwrap();
+        let original_plan = plan.clone();
+        let ple = source
+            .iter()
+            .find(|d| d.name == "per_layer_token_embd.weight")
+            .unwrap();
+        exclude_nonresident_pages(&mut plan, &[ple]).unwrap();
+        assert_eq!(
+            plan, original_plan,
+            "reference windows and planned views remain exact"
+        );
         assert_eq!(plan.entries.len(), requests.len());
         for (entry, desc) in plan.entries.iter().zip(&requests) {
             assert_eq!(entry.name, desc.name);

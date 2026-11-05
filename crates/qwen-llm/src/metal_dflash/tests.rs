@@ -19,10 +19,15 @@ fn packed_verify_caller_policy_only_dflash_uses_generic() {
 fn tensor_flash_override_restores_scope_and_unwind() {
     assert_eq!(PREFILL_ATTN_TENSOR_FLASH_OVERRIDE.with(Cell::get), None);
     let before = prefill_attn_tensor_flash_mode();
+    let enabled = if before == PrefillEnvMode::ForceOff {
+        PrefillEnvMode::ForceOff
+    } else {
+        PrefillEnvMode::ForceOn
+    };
     with_prefill_attn_tensor_flash_override(false, || {
         assert_eq!(prefill_attn_tensor_flash_mode(), PrefillEnvMode::ForceOff);
         with_prefill_attn_tensor_flash_override(true, || {
-            assert_eq!(prefill_attn_tensor_flash_mode(), PrefillEnvMode::ForceOn);
+            assert_eq!(prefill_attn_tensor_flash_mode(), enabled);
         });
         assert_eq!(prefill_attn_tensor_flash_mode(), PrefillEnvMode::ForceOff);
         let result = std::panic::catch_unwind(|| {
@@ -37,17 +42,24 @@ fn tensor_flash_override_restores_scope_and_unwind() {
 
 #[test]
 fn tensor_flash_override_is_thread_local() {
+    let before = prefill_attn_tensor_flash_mode();
+    let enabled = if before == PrefillEnvMode::ForceOff {
+        PrefillEnvMode::ForceOff
+    } else {
+        PrefillEnvMode::ForceOn
+    };
     with_prefill_attn_tensor_flash_override(true, || {
-        assert_eq!(prefill_attn_tensor_flash_mode(), PrefillEnvMode::ForceOn);
-        std::thread::spawn(|| {
+        assert_eq!(prefill_attn_tensor_flash_mode(), enabled);
+        std::thread::spawn(move || {
             assert_eq!(PREFILL_ATTN_TENSOR_FLASH_OVERRIDE.with(Cell::get), None);
+            assert_eq!(prefill_attn_tensor_flash_mode(), before);
             with_prefill_attn_tensor_flash_override(false, || {
                 assert_eq!(prefill_attn_tensor_flash_mode(), PrefillEnvMode::ForceOff);
             });
         })
         .join()
         .unwrap();
-        assert_eq!(prefill_attn_tensor_flash_mode(), PrefillEnvMode::ForceOn);
+        assert_eq!(prefill_attn_tensor_flash_mode(), enabled);
     });
     assert_eq!(PREFILL_ATTN_TENSOR_FLASH_OVERRIDE.with(Cell::get), None);
 }
@@ -56,6 +68,7 @@ fn tensor_flash_selection_fixture() -> TensorFlashPrefillSelection {
     TensorFlashPrefillSelection {
         mode: PrefillEnvMode::ForceOn,
         tensor_available: true,
+        measured_device_class: true,
         matrix_g6: true,
         matrix_online: true,
         query_heads: 24,
@@ -140,6 +153,49 @@ fn tensor_flash_auto_requires_aligned_total_kv() {
             !tensor_flash_prefill_selected(TensorFlashPrefillSelection { kv_rows, ..s }),
             "kv_rows={kv_rows}"
         );
+    }
+}
+
+#[test]
+fn tensor_flash_auto_only_measured_device_class_force_on_retains_apple10_scope() {
+    let s = tensor_flash_auto_selection_fixture();
+    for (name, measured) in [
+        ("Apple M5 Ultra", true),
+        ("Apple M5", false),
+        ("Apple M5 Pro", false),
+        ("Apple M5 Max", false),
+        ("Apple M4 Ultra", false),
+        ("Apple M4 Max", false),
+        ("Apple M3 Ultra", false),
+        ("Apple M6 Ultra", false),
+        ("Apple M5 Ultra Virtual", false),
+        ("Apple M5 UltraX", false),
+        ("", false),
+    ] {
+        assert_eq!(tensor_flash_measured_device_class(name), measured, "{name}");
+        for mode in [
+            PrefillEnvMode::Auto,
+            PrefillEnvMode::ForceOn,
+            PrefillEnvMode::ForceOff,
+        ] {
+            for tensor_available in [false, true] {
+                assert_eq!(
+                    tensor_flash_prefill_selected(TensorFlashPrefillSelection {
+                        mode,
+                        tensor_available,
+                        measured_device_class: tensor_flash_measured_device_class(name),
+                        ..s
+                    }),
+                    tensor_available
+                        && match mode {
+                            PrefillEnvMode::Auto => measured,
+                            PrefillEnvMode::ForceOn => true,
+                            PrefillEnvMode::ForceOff => false,
+                        },
+                    "{name}/{mode:?}/available={tensor_available}"
+                );
+            }
+        }
     }
 }
 

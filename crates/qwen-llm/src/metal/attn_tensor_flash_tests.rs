@@ -9,6 +9,7 @@ fn gpu(tensor_required: bool, f: impl FnOnce(&MetalContext)) {
         return;
     };
     if tensor_required && !ctx.tensor_ops_status().is_available() {
+        eprintln!("tensor flash numerical check requires Apple10/Metal4; unsupported device");
         return;
     }
     f(&ctx);
@@ -142,51 +143,71 @@ impl Buffers {
         }
     }
     fn matrix(&self, ctx: &MetalContext, d: &Data) -> Vec<f32> {
+        // Bound the reference workspace even for 4096 queries at context 262144:
+        // a full score matrix would require 48 GiB and exceed the buffer/index contract.
+        // Each incumbent batch still uses the original total KV and causal base.
+        const QUERY_BATCH: usize = 64;
+        let batch_rows = d.rows.min(QUERY_BATCH);
         let vt = MetalTensor::zeros_f16(ctx, vec![(d.pos * 1024) as u64]).unwrap();
-        let scores = MetalTensor::zeros_f16(ctx, vec![(d.rows * 24 * d.pos) as u64]).unwrap();
-        let ml = MetalTensor::zeros_f32(ctx, vec![attn_matrix_ml_elems(d.rows, 24, d.pos) as u64])
-            .unwrap();
+        let scores = MetalTensor::zeros_f16(ctx, vec![(batch_rows * 24 * d.pos) as u64]).unwrap();
+        let ml = MetalTensor::zeros_f32(
+            ctx,
+            vec![attn_matrix_ml_elems(batch_rows, 24, d.pos) as u64],
+        )
+        .unwrap();
         let out = MetalTensor::zeros_f32(ctx, vec![d.q.len() as u64]).unwrap();
         one_shot(ctx, |enc| {
             encode_attn_matrix_transpose_v_f16(
                 ctx, enc, &self.v, &vt, 0, d.pos, d.pos, 1024, d.pos, 4, 256,
-            )?;
-            encode_attn_matrix_kq_online_f32(
-                ctx,
-                enc,
-                &self.q,
-                &self.k,
-                &scores,
-                &ml,
-                d.rows,
-                d.base(),
-                d.pos,
-                1024,
-                24,
-                4,
-                6,
-                256,
-                true,
-            )?;
-            encode_attn_matrix_kqv_norm_f32(
-                ctx,
-                enc,
-                &scores,
-                &ml,
-                &vt,
-                &out,
-                d.rows,
-                d.base(),
-                d.pos,
-                d.pos,
-                24,
-                4,
-                6,
-                256,
-                true,
             )
         })
         .unwrap();
+        for first in (0..d.rows).step_by(QUERY_BATCH) {
+            let rows = (d.rows - first).min(QUERY_BATCH);
+            let q = self
+                .q
+                .view_subrange((first * 24 * 256) as u64, vec![(rows * 24 * 256) as u64]);
+            let o = out.view_subrange((first * 24 * 256) as u64, vec![(rows * 24 * 256) as u64]);
+            let scores = scores.view_subrange(0, vec![(rows * 24 * d.pos) as u64]);
+            let ml = ml.view_subrange(0, vec![attn_matrix_ml_elems(rows, 24, d.pos) as u64]);
+            one_shot(ctx, |enc| {
+                encode_attn_matrix_kq_online_f32(
+                    ctx,
+                    enc,
+                    &q,
+                    &self.k,
+                    &scores,
+                    &ml,
+                    rows,
+                    d.base() + first,
+                    d.pos,
+                    1024,
+                    24,
+                    4,
+                    6,
+                    256,
+                    true,
+                )?;
+                encode_attn_matrix_kqv_norm_f32(
+                    ctx,
+                    enc,
+                    &scores,
+                    &ml,
+                    &vt,
+                    &o,
+                    rows,
+                    d.base() + first,
+                    d.pos,
+                    d.pos,
+                    24,
+                    4,
+                    6,
+                    256,
+                    true,
+                )
+            })
+            .unwrap();
+        }
         read_back_f32(&out.buffer, d.q.len())
     }
 }
@@ -552,6 +573,91 @@ long_case!(tensor_flash_kv_65536_sampled_f64, 65536);
 // broader integer address contract tested without enormous GPU allocations.
 long_case!(tensor_flash_model_context_262144_sampled_f64, 262144);
 
+// Exercise the actual complete tensor query grid at both automatic boundaries,
+// not a 64-query proxy. The incumbent uses bounded score batches; all output
+// rows/heads/channels are compared, plus independent F64 at first/middle/last
+// queries across all four GQA groups. 129 includes the final partial 32-row tile.
+macro_rules! auto_query_case {
+    ($name:ident, $rows:expr, $pos:expr) => {
+        #[test]
+        fn $name() {
+            gpu(true, |ctx| {
+                let d = Data::random($rows, $pos);
+                let b = Buffers::upload(ctx, &d);
+                let actual = b.run(ctx, &d);
+                compare_vectors(
+                    "automatic query boundary incumbent",
+                    &actual,
+                    &b.matrix(ctx, &d),
+                );
+                sampled_f64(&d, &actual);
+            });
+        }
+    };
+}
+auto_query_case!(
+    tensor_flash_auto_128_queries_kv8192_f64_incumbent,
+    128,
+    8192
+);
+auto_query_case!(
+    tensor_flash_auto_4096_queries_kv8192_f64_incumbent,
+    4096,
+    8192
+);
+auto_query_case!(
+    tensor_flash_auto_128_queries_kv262144_f64_incumbent,
+    128,
+    262144
+);
+auto_query_case!(
+    tensor_flash_auto_4096_queries_kv262144_f64_incumbent,
+    4096,
+    262144
+);
+auto_query_case!(
+    tensor_flash_auto_129_queries_kv8192_f64_incumbent,
+    129,
+    8192
+);
+auto_query_case!(
+    tensor_flash_auto_129_queries_kv262144_f64_incumbent,
+    129,
+    262144
+);
+
+#[test]
+fn tensor_flash_incumbent_query_batching_matches_f64() {
+    // Runs without TensorOps too, protecting reference row views, causal base
+    // increments and the final one-row batch on the incumbent-only hardware.
+    gpu(false, |ctx| {
+        let d = Data::random(129, 192);
+        let b = Buffers::upload(ctx, &d);
+        let to_f32 = |xs: &[u16]| {
+            xs.iter()
+                .map(|&x| half::f16::from_bits(x).to_f32())
+                .collect::<Vec<_>>()
+        };
+        let reference = cpu_matrix_attn_reference(
+            &d.q,
+            &to_f32(&d.k),
+            &to_f32(&d.v),
+            d.rows,
+            d.base(),
+            d.pos,
+            24,
+            4,
+            6,
+            256,
+        );
+        compare_vectors(
+            "batched incumbent complete F64",
+            &b.matrix(ctx, &d),
+            &reference,
+        );
+    });
+}
+
 #[test]
 fn tensor_flash_long_uniform_distribution_keeps_float_accumulator() {
     gpu(true, |ctx| {
@@ -851,7 +957,7 @@ fn tensor_flash_restored_model_checkpoint_and_matrix_tail() {
 }
 
 #[test]
-#[ignore = "requires the model fixture, Apple10 and an unset tensor-flash knob"]
+#[ignore = "requires the model fixture, M5 Ultra and an unset tensor-flash knob"]
 fn tensor_flash_default_restored_checkpoint_and_aligned_tail() {
     tensor_flash_restored_model_case(7168, 64, true);
 }
@@ -861,6 +967,9 @@ fn tensor_flash_restored_model_case(prefix_rows: usize, tail_rows: usize, automa
     let _lease = acquire_metal_benchmark_lease().expect("canonical model correctness lease");
     let runtime = Runtime::metal().unwrap();
     if !runtime.context().tensor_ops_status().is_available() {
+        return;
+    }
+    if automatic && runtime.context().device_facts().name != "Apple M5 Ultra" {
         return;
     }
     let path = crate::test_fixtures::required_filename("Qwen3.8-27B-Q4_K_M.gguf");

@@ -2234,15 +2234,18 @@ fn prefill_attn_matrix_causal_skip_enabled() -> bool {
 }
 
 /// Single-pass tensor flash attention on Apple10 with Metal 4 tensor support.
-/// Unset (automatic): enable only for 24 query / 4 KV heads, head dimension
-/// 256, F32 Q/output, F16 K/V, actual query chunks 128..=4096 rows, and total
-/// KV after append 8192..=262144 rows divisible by 64. This gate uses attention
-/// shapes rather than model identity or weight quantization: kernel correctness
-/// and speed depend on those attention shapes, not the model name. Set 0 to
+/// Unset (automatic): enable only on the measured M5 Ultra device class
+/// (Metal device name exactly "Apple M5 Ultra"), for 24 query / 4 KV heads,
+/// head dimension 256, F32 Q/output, F16 K/V, actual query chunks 128..=4096 rows, and total
+/// KV after append 8192..=262144 rows divisible by 64. Attention shapes, rather
+/// than model identity or weight quantization, determine this kernel's semantics.
+/// Whole-prefill speed also depends on hardware, surrounding projections and
+/// memory pressure; evidence is one Q4_K_M artifact on one M5 Ultra configuration,
+/// so other Apple10 device classes remain experimental. Set 0 to
 /// force off everywhere. Set 1 for the broader experimental opt-in: retain the
-/// same hardware, dtype, geometry, layout and workspace guards, but omit the
-/// automatic row/KV ranges; combined row/output-work predicates require at
-/// least 38 queries and permit aligned KV below 8K. The legacy 8192 output-work
+/// Apple10/Metal4, dtype, geometry, layout and workspace guards, but omit the
+/// automatic device-class and row/KV restrictions; combined row/output-work
+/// predicates require at least 38 queries and permit aligned KV below 8K. The legacy 8192 output-work
 /// threshold counts query tiles * KV heads * head dimension, not KV rows.
 /// All modes retain matrix-online/G6 prerequisites and encoder safety checks;
 /// unsupported shapes use the incumbent. Boolean aliases follow other prefill
@@ -2257,6 +2260,7 @@ struct TensorFlashPrefillSelection {
     mode: PrefillEnvMode,
     // Available requires both Apple10 and Metal 4 support.
     tensor_available: bool,
+    measured_device_class: bool,
     matrix_g6: bool,
     matrix_online: bool,
     query_heads: usize,
@@ -2277,6 +2281,12 @@ fn tensor_flash_output_tile_work(query_tiles: usize) -> Option<usize> {
         .checked_mul(crate::metal::TENSOR_FLASH_HEAD_DIM)
 }
 
+fn tensor_flash_measured_device_class(device_name: &str) -> bool {
+    // MTLDevice's selected-device identity, not the host's CPU/marketing name.
+    // Fail closed on unknown names; Apple10/Metal4 capability is checked separately.
+    device_name == "Apple M5 Ultra"
+}
+
 fn tensor_flash_prefill_selected(s: TensorFlashPrefillSelection) -> bool {
     if s.mode == PrefillEnvMode::ForceOff
         || !s.tensor_available
@@ -2294,7 +2304,9 @@ fn tensor_flash_prefill_selected(s: TensorFlashPrefillSelection) -> bool {
         return false;
     }
     if s.mode == PrefillEnvMode::Auto
-        && (!(128..=4096).contains(&s.query_rows) || !(8192..=262144).contains(&s.kv_rows))
+        && (!s.measured_device_class
+            || !(128..=4096).contains(&s.query_rows)
+            || !(8192..=262144).contains(&s.kv_rows))
     {
         return false;
     }
@@ -13222,6 +13234,9 @@ fn prefill_tokens_with_multi_hidden_profiled_inner<'a>(
                                             .ctx
                                             .tensor_ops_status()
                                             .is_available(),
+                                        measured_device_class: tensor_flash_measured_device_class(
+                                            &base.ctx.device_facts().name,
+                                        ),
                                         matrix_g6: use_matrix_g6,
                                         matrix_online: layer_scratch
                                             .scratch_plan

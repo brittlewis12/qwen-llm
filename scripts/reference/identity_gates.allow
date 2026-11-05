@@ -64,6 +64,7 @@ crates/qwen-llm/src/metal/qualification.rs	1ba1ce14804b9ada2330f374d792bf7b93960
 crates/qwen-llm/src/metal/qualification.rs	Apple M1 Pro	frozen_experiment	device labels are stored in characterization records and are not read by holds_for
 crates/qwen-llm/src/metal/qualification.rs	Apple M4 Max	frozen_experiment	device labels are stored in characterization records and are not read by holds_for
 crates/qwen-llm/src/metal/qualification.rs	Apple M5 Ultra	frozen_experiment	device labels are stored in characterization records and are not read by holds_for
+crates/qwen-llm/src/metal_dflash.rs	Apple M5 Ultra	temporary	trigger: new device-class evidence and rollout approval permit removal or broadening of this lead-requested automatic rollout restriction; experimental opt-in remains capability-based.
 crates/qwen-llm/src/metal/qualification.rs	M1 Pro	frozen_experiment	device labels are stored in characterization records and are not read by holds_for
 crates/qwen-llm/src/metal/qualification.rs	M4 Max	frozen_experiment	device labels are stored in characterization records and are not read by holds_for
 crates/qwen-llm/src/metal/qualification.rs	aa186d57e040e263df0bec60531eead39beeafedd2d5705133db42ba8d83df8b	provenance	measurement report digests are serialized as evidence and not read by holds_for

@@ -2556,7 +2556,12 @@ fn context_capacity_refusal(
 ) -> Qwen4ExpRuntimeError {
     // A drafter with a packed floor needs a separate recommendation that prices
     // its exact verify workspace. Never advertise a scalar limit for that case.
-    if minimum_packed_rows != 0 || !matches!(error, Qwen4ExpRuntimeError::MemoryAdmission(_)) {
+    if minimum_packed_rows != 0
+        || !matches!(
+            error,
+            Qwen4ExpRuntimeError::MemoryAdmission(_) | Qwen4ExpRuntimeError::Session(_)
+        )
+    {
         return error;
     }
     context_refusal_with(capacity.forward_limit, error, |limit| {

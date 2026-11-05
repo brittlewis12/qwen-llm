@@ -2988,8 +2988,36 @@ fn prefill_scratch_plan_matches_product_residuals() {
         (true, 4096, 876_929_024u64, 876_933_120u64),
     ] {
         let arch = product_moe_plan_arch(a10b);
+        let check_status_order = |plan: &PrefillScratchPlan| {
+            let names: Vec<&str> = plan
+                .allocations
+                .iter()
+                .map(|allocation| allocation.name)
+                .collect();
+            let topk = names
+                .iter()
+                .position(|name| *name == "moe_topk_idx_pack")
+                .unwrap();
+            let status = names
+                .iter()
+                .position(|name| *name == "moe_route_status_pack")
+                .unwrap();
+            let router = names
+                .iter()
+                .position(|name| *name == "moe_router_probs_pack")
+                .unwrap();
+            assert_eq!(status, topk + 1);
+            assert_eq!(router, status + 1);
+            assert_eq!(
+                plan.allocations[status].dtype,
+                GgmlType::I32,
+                "route status must be planned as I32 in allocator order"
+            );
+        };
         let baseline = product_moe_plan(&arch, 1024, false);
         let wide = product_moe_plan(&arch, wide_chunk, true);
+        check_status_order(&baseline);
+        check_status_order(&wide);
         assert_eq!(
             wide.logical_bytes - baseline.logical_bytes,
             logical_residual
@@ -3015,30 +3043,7 @@ fn prefill_scratch_plan_matches_product_residuals() {
                 .dtype,
             GgmlType::I32
         );
-        let names_in_alloc_order: Vec<&str> = wide
-            .allocations
-            .iter()
-            .map(|allocation| allocation.name)
-            .collect();
-        let topk = names_in_alloc_order
-            .iter()
-            .position(|name| *name == "moe_topk_idx_pack")
-            .unwrap();
-        let status = names_in_alloc_order
-            .iter()
-            .position(|name| *name == "moe_route_status_pack")
-            .unwrap();
-        let router = names_in_alloc_order
-            .iter()
-            .position(|name| *name == "moe_router_probs_pack")
-            .unwrap();
-        assert_eq!(status, topk + 1);
-        assert_eq!(router, status + 1);
-        assert_eq!(
-            wide.allocations[status].dtype,
-            GgmlType::I32,
-            "route status must be planned as I32 in allocator order"
-        );
+
         assert_eq!(
             wide.logical_bytes,
             wide.allocations

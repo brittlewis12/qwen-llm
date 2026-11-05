@@ -38,10 +38,13 @@ IQ3_XXS, IQ3_S, IQ4_NL and IQ4_XS (`kernel_mul_mv_mma_gen` and the matching
 and `dequantize.h`, PR #29869, revision
 `a3a1c4747fdc0dcad40b3946108b89375d9a7d0e`; generic dispatch and the remaining
 type coverage from PR #30065, revision
-`988190680c65b2e38f4f75a52d16a59a2f84f3e1`), without batch dimensions, the
+`988190680d5a89fce97de3c20df2c2813731fd61`), without batch dimensions, the
 fused residual add, or the function-constant tiling parameters.
 `kernels/fewrow_iq_tables.metalh` copies the IQ lookup tables from
-`ggml/src/ggml-common.h` at the same revision.
+`ggml/src/ggml-common.h` at the same revision. Unlike the incumbent
+specialized kernels, this path dequantizes to float fragments and then
+rounds them to half for the MMA; the difference is accumulation order and
+rounding, not a codec change.
 
 ## MLX-Serve
 

@@ -59,7 +59,8 @@ use crate::metal_forward::{
     ATTN_V4_MAX_NWG, LmHeadTail, LmHeadTailEvidence, MetalBlock, MetalForward, MetalModel,
     MetalMoeFfn, MetalSession, MfError, RMS_EPS, checked_u64_add, checked_u64_double,
     checked_u64_mul, checked_u64_mul3, checked_u64_mul4, encode_mat_mat_dispatch,
-    encode_mat_vec_dispatch, encode_scatter_offset_f32, weight_dtype_kept_native,
+    encode_mat_mat_dispatch_dflash_verify, encode_mat_vec_dispatch, encode_scatter_offset_f32,
+    weight_dtype_kept_native,
 };
 use crate::sampling::{Sampler, SamplingError, SparseProposal, WeightedCandidate};
 use crate::tensor::{GgmlType, TensorDesc};
@@ -9124,7 +9125,7 @@ fn encode_packed_verify_moe_grouped_ffn_after_mixer(
     )?;
 
     if f_shared > 0 {
-        encode_mat_mat_dispatch(
+        encode_mat_mat_dispatch_dflash_verify(
             base.ctx,
             enc,
             ffn_gate,
@@ -9134,7 +9135,7 @@ fn encode_packed_verify_moe_grouped_ffn_after_mixer(
             f_shared,
             n,
         )?;
-        encode_mat_mat_dispatch(
+        encode_mat_mat_dispatch_dflash_verify(
             base.ctx,
             enc,
             ffn_up,
@@ -9151,7 +9152,7 @@ fn encode_packed_verify_moe_grouped_ffn_after_mixer(
             &shared_up_pack,
             &shared_inner_pack,
         )?;
-        encode_mat_mat_dispatch(
+        encode_mat_mat_dispatch_dflash_verify(
             base.ctx,
             enc,
             ffn_down,
@@ -9668,7 +9669,7 @@ pub fn encode_packed_verify_layer_major_inner(
                         .view_subrange(0, vec![(n * v_dim) as u64]);
                     {
                         let enc = KernelEncoder::begin(&cmd_buf);
-                        encode_mat_mat_dispatch(
+                        encode_mat_mat_dispatch_dflash_verify(
                             base.ctx,
                             &enc,
                             &g.in_proj_qkv,
@@ -9678,7 +9679,7 @@ pub fn encode_packed_verify_layer_major_inner(
                             conv_dim,
                             n,
                         )?;
-                        encode_mat_mat_dispatch(
+                        encode_mat_mat_dispatch_dflash_verify(
                             base.ctx,
                             &enc,
                             &g.in_proj_z,
@@ -9957,7 +9958,7 @@ pub fn encode_packed_verify_layer_major_inner(
                     // gdn_normed_pack [N, v_dim], writes mixer_out_pack [N, H].
                     {
                         let enc = KernelEncoder::begin(&cmd_buf);
-                        encode_mat_mat_dispatch(
+                        encode_mat_mat_dispatch_dflash_verify(
                             base.ctx,
                             &enc,
                             &g.out_proj,
@@ -10068,7 +10069,7 @@ pub fn encode_packed_verify_layer_major_inner(
                     {
                         let enc = KernelEncoder::begin(&cmd_buf);
                         // Q gated (Q + gate interleaved per head).
-                        encode_mat_mat_dispatch(
+                        encode_mat_mat_dispatch_dflash_verify(
                             base.ctx,
                             &enc,
                             &a.q,
@@ -10083,7 +10084,7 @@ pub fn encode_packed_verify_layer_major_inner(
                         // (n_heads = N * n_q rows at stride 2*head_dim), and
                         // Step C's strided sigmoid_mul reads the gate halves.
                         // K, V projections.
-                        encode_mat_mat_dispatch(
+                        encode_mat_mat_dispatch_dflash_verify(
                             base.ctx,
                             &enc,
                             &a.k,
@@ -10093,7 +10094,7 @@ pub fn encode_packed_verify_layer_major_inner(
                             kv_dim,
                             n,
                         )?;
-                        encode_mat_mat_dispatch(
+                        encode_mat_mat_dispatch_dflash_verify(
                             base.ctx,
                             &enc,
                             &a.v,
@@ -10472,7 +10473,7 @@ pub fn encode_packed_verify_layer_major_inner(
                             head_dim,
                         )?;
                         // Batched O projection: attn_o_pack [N, q_dim] -> mixer_out_pack [N, H].
-                        encode_mat_mat_dispatch(
+                        encode_mat_mat_dispatch_dflash_verify(
                             base.ctx,
                             &enc,
                             &a.o,
@@ -10856,8 +10857,26 @@ pub fn encode_packed_verify_layer_major_inner(
                         f,
                     )?;
                 } else {
-                    encode_mat_mat_dispatch(base.ctx, &enc, g_w, &h_pack, &ffn_gate_pack, h, f, n)?;
-                    encode_mat_mat_dispatch(base.ctx, &enc, u_w, &h_pack, &ffn_up_pack, h, f, n)?;
+                    encode_mat_mat_dispatch_dflash_verify(
+                        base.ctx,
+                        &enc,
+                        g_w,
+                        &h_pack,
+                        &ffn_gate_pack,
+                        h,
+                        f,
+                        n,
+                    )?;
+                    encode_mat_mat_dispatch_dflash_verify(
+                        base.ctx,
+                        &enc,
+                        u_w,
+                        &h_pack,
+                        &ffn_up_pack,
+                        h,
+                        f,
+                        n,
+                    )?;
                     encode_silu_mul_f32(
                         base.ctx,
                         &enc,
@@ -10866,7 +10885,7 @@ pub fn encode_packed_verify_layer_major_inner(
                         &ffn_inner_pack,
                     )?;
                 }
-                encode_mat_mat_dispatch(
+                encode_mat_mat_dispatch_dflash_verify(
                     base.ctx,
                     &enc,
                     d_w,
@@ -10980,7 +10999,7 @@ pub fn encode_packed_verify_layer_major_inner(
                 None => &final_logits_pack,
             };
             // Batched lm_head mat-mat.
-            encode_mat_mat_dispatch(
+            encode_mat_mat_dispatch_dflash_verify(
                 base.ctx,
                 &enc,
                 &base.model.lm_head,

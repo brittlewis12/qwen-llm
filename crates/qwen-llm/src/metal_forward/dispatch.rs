@@ -330,7 +330,29 @@ pub fn encode_mat_mat_dispatch(
     n_out: usize,
     n_query: usize,
 ) -> Result<(), MfError> {
-    encode_mat_mat_dispatch_routed(ctx, enc, weight, x, y, n_in, n_out, n_query, true, true)
+    encode_mat_mat_dispatch_routed(
+        ctx, enc, weight, x, y, n_in, n_out, n_query, true, true, false,
+    )
+}
+
+/// Qwen DFlash verify projections: the only callers that may take the
+/// generic few-row arm. Every other dispatch entry point keeps
+/// `allow_fewrow_gen = false`, so enabling `QWEN_MATMAT_FEWROW_GEN` cannot
+/// change Flash-Next, K2, GLM, DeepSeek, drafter or ordinary Qwen paths.
+#[allow(clippy::too_many_arguments)]
+pub fn encode_mat_mat_dispatch_dflash_verify(
+    ctx: &MetalContext,
+    enc: &KernelEncoder,
+    weight: &MetalTensor,
+    x: &MetalTensor,
+    y: &MetalTensor,
+    n_in: usize,
+    n_out: usize,
+    n_query: usize,
+) -> Result<(), MfError> {
+    encode_mat_mat_dispatch_routed(
+        ctx, enc, weight, x, y, n_in, n_out, n_query, true, true, true,
+    )
 }
 
 /// [`encode_mat_mat_dispatch`] without the Q8_0 few-row arm (2..=8 rows):
@@ -350,7 +372,9 @@ pub fn encode_mat_mat_dispatch_without_fewrow(
     n_out: usize,
     n_query: usize,
 ) -> Result<(), MfError> {
-    encode_mat_mat_dispatch_routed(ctx, enc, weight, x, y, n_in, n_out, n_query, true, false)
+    encode_mat_mat_dispatch_routed(
+        ctx, enc, weight, x, y, n_in, n_out, n_query, true, false, false,
+    )
 }
 
 /// Prompt GEMM dispatch with an explicit choice about the Qwen-tuned
@@ -382,6 +406,74 @@ pub fn encode_mat_mat_dispatch_with_policy(
         n_query,
         allow_n1_mat_vec,
         false,
+        false,
+    )
+}
+
+fn dense_27b_ffn_shape(n_in: usize, n_out: usize) -> bool {
+    matches!((n_in, n_out), (5120, 17408) | (17408, 5120))
+}
+
+/// Whether the caller may take the generic few-row arm, after the routes
+/// that keep precedence. `allow` is the caller policy: only Qwen DFlash
+/// verify passes `true`. Q5_K at 2..=4 rows keeps its sequential mat-vec
+/// route, and dense 27B IQ2_S/IQ3_S at 2 rows keep the nc2 routes. Q8_0 is
+/// limited to 9..=16 rows so its tuned 1..=8 arm is unchanged.
+pub(crate) fn fewrow_gen_route_selected_impl(
+    dtype: GgmlType,
+    n_in: usize,
+    n_out: usize,
+    n_query: usize,
+    allow: bool,
+    q5_k_seq: bool,
+    iq2_s_nc2: bool,
+    iq3_s_nc2: bool,
+) -> bool {
+    if !allow || !(2..=16).contains(&n_query) {
+        return false;
+    }
+    if q5_k_seq && dtype == GgmlType::Q5_K && (2..=4).contains(&n_query) {
+        return false;
+    }
+    let dense_ffn = dense_27b_ffn_shape(n_in, n_out);
+    if iq2_s_nc2 && dtype == GgmlType::IQ2_S && n_query == 2 && dense_ffn {
+        return false;
+    }
+    if iq3_s_nc2 && dtype == GgmlType::IQ3_S && n_query == 2 && dense_ffn {
+        return false;
+    }
+    match dtype {
+        GgmlType::Q4_K
+        | GgmlType::Q5_K
+        | GgmlType::Q6_K
+        | GgmlType::IQ2_XXS
+        | GgmlType::IQ2_XS
+        | GgmlType::IQ2_S
+        | GgmlType::IQ3_XXS
+        | GgmlType::IQ3_S
+        | GgmlType::IQ4_XS => n_in.is_multiple_of(256),
+        GgmlType::Q8_0 => n_query > 8 && n_in.is_multiple_of(64),
+        GgmlType::IQ4_NL => n_in.is_multiple_of(64),
+        _ => false,
+    }
+}
+
+fn fewrow_gen_route_selected(
+    dtype: GgmlType,
+    n_in: usize,
+    n_out: usize,
+    n_query: usize,
+    allow: bool,
+) -> bool {
+    fewrow_gen_route_selected_impl(
+        dtype,
+        n_in,
+        n_out,
+        n_query,
+        allow,
+        matmat_q5_k_n2_seq_enabled(),
+        matmat_iq2_s_n2_nc2_enabled(),
+        matmat_iq3_s_n2_nc2_enabled(),
     )
 }
 
@@ -397,6 +489,7 @@ fn encode_mat_mat_dispatch_routed(
     n_query: usize,
     allow_n1_mat_vec: bool,
     allow_q8_fewrow: bool,
+    allow_fewrow_gen: bool,
 ) -> Result<(), MfError> {
     validate_f32_q8_mat_mat_addressing(weight.dtype, n_in, n_out, n_query)?;
     if weight.dtype == GgmlType::IQ2_XS {
@@ -457,31 +550,22 @@ fn encode_mat_mat_dispatch_routed(
     }
 
     // Generic few-row MMA (llama.cpp `kernel_mul_mv_mma_gen`): one weight
-    // read per 8-column tile, K split across simdgroups. Default off until
-    // the 27B Q4_K_M N=8 gate and end-to-end ABBA clear on both machines.
-    // Q8_0 uses the tuned Q8_0 arm at 1..=8 rows and this arm at 9..=16.
-    // Rollback: QWEN_MATMAT_FEWROW_GEN=0 (default).
+    // read per 8-column tile, K split across simdgroups. The caller policy
+    // and `fewrow_gen_route_selected` gate it; only the Qwen DFlash verify
+    // entry point passes `allow_fewrow_gen = true`. If the selected
+    // pipeline cannot run on this device the arm declines here and the
+    // incumbent routes below stay in charge. Rollback:
+    // QWEN_MATMAT_FEWROW_GEN=0 (default).
     if matmat_fewrow_gen_enabled()
-        && (2..=16).contains(&n_query)
-        && ((matches!(
-            weight.dtype,
-            GgmlType::Q4_K
-                | GgmlType::Q5_K
-                | GgmlType::Q6_K
-                | GgmlType::IQ2_XXS
-                | GgmlType::IQ2_XS
-                | GgmlType::IQ2_S
-                | GgmlType::IQ3_XXS
-                | GgmlType::IQ3_S
-                | GgmlType::IQ4_XS
-        ) && n_in.is_multiple_of(256))
-            || (matches!(weight.dtype, GgmlType::Q8_0 | GgmlType::IQ4_NL)
-                && n_in.is_multiple_of(64)
-                && (weight.dtype != GgmlType::Q8_0 || n_query > 8)))
+        && fewrow_gen_route_selected(weight.dtype, n_in, n_out, n_query, allow_fewrow_gen)
     {
-        return Ok(crate::metal::encode_mat_mat_fewrow_gen_f32(
+        match crate::metal::try_encode_mat_mat_fewrow_gen_f32(
             ctx, enc, weight, x, y, n_in, n_out, n_query,
-        )?);
+        ) {
+            Ok(true) => return Ok(()),
+            Ok(false) => {}
+            Err(error) => return Err(error.into()),
+        }
     }
 
     // v0.501: small-N best-kernel table from the v0.500 selection sweep
@@ -653,4 +737,46 @@ fn dense_capabilities_keep_partial_and_unimplemented_codecs_honest() {
         assert!(!mat_vec_dispatch_supported(dtype), "{dtype:?}");
         assert!(!mat_mat_dispatch_supported(dtype), "{dtype:?}");
     }
+}
+
+#[test]
+fn fewrow_gen_route_selection_respects_policy_and_precedence() {
+    use GgmlType::*;
+    let sel = |dtype, n_in, n_out, n_query, allow, q5, iq2, iq3| {
+        fewrow_gen_route_selected_impl(dtype, n_in, n_out, n_query, allow, q5, iq2, iq3)
+    };
+
+    // Caller policy is the first gate: without it, every type is unchanged.
+    for dtype in [Q4_K, Q5_K, Q6_K, Q8_0, IQ2_S, IQ3_S, IQ4_XS] {
+        assert!(!sel(dtype, 5120, 17408, 8, false, true, true, true));
+    }
+
+    // Qualified Qwen DFlash verify shapes.
+    assert!(sel(Q4_K, 5120, 17408, 8, true, true, true, true));
+    assert!(sel(Q6_K, 17408, 5120, 8, true, true, true, true));
+    assert!(sel(Q5_K, 6144, 5120, 8, true, true, true, true));
+    assert!(sel(IQ3_S, 5120, 17408, 8, true, true, true, true));
+    assert!(sel(IQ4_XS, 17408, 5120, 8, true, true, true, true));
+
+    // Existing tuned routes keep precedence while their knobs are on.
+    assert!(!sel(Q5_K, 6144, 5120, 2, true, true, true, true));
+    assert!(!sel(Q5_K, 6144, 5120, 4, true, true, true, true));
+    assert!(sel(Q5_K, 6144, 5120, 5, true, true, true, true));
+    assert!(!sel(IQ2_S, 5120, 17408, 2, true, true, true, true));
+    assert!(!sel(IQ3_S, 17408, 5120, 2, true, true, true, true));
+    // If the nc2 knobs are off, the generic arm may take those shapes.
+    assert!(sel(IQ2_S, 5120, 17408, 2, true, true, false, false));
+    assert!(sel(IQ3_S, 17408, 5120, 2, true, true, false, false));
+
+    // Q8_0 1..=8 remains the existing few-row arm; generic is 9..=16 only.
+    assert!(!sel(Q8_0, 5120, 1024, 8, true, true, true, true));
+    assert!(sel(Q8_0, 5120, 1024, 9, true, true, true, true));
+    assert!(sel(Q8_0, 5120, 1024, 16, true, true, true, true));
+
+    // Block alignment and row-count bounds.
+    assert!(!sel(Q4_K, 640, 17408, 8, true, true, true, true));
+    assert!(sel(IQ4_NL, 512, 1024, 8, true, true, true, true));
+    assert!(sel(IQ4_NL, 64, 1024, 8, true, true, true, true));
+    assert!(!sel(Q4_K, 5120, 17408, 1, true, true, true, true));
+    assert!(!sel(Q4_K, 5120, 17408, 17, true, true, true, true));
 }

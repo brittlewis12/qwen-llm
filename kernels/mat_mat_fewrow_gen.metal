@@ -432,7 +432,7 @@ kernel void kernel_mat_mat_fewrow_gen_f32(
 
         FOR_UNROLL (short t = 0; t < NT; ++t) {
             float4x4 w;
-            Q::dequant(xr[t] + (ci / Q::nl) * Q::block_bytes, ci % Q::nl, w);
+            Q::dequant(xr[t] + ulong(ci / Q::nl) * Q::block_bytes, ci % Q::nl, w);
 
             FOR_UNROLL (short s = 0; s < 8; ++s) {
                 simdgroup_half8x8 ma;

@@ -1989,6 +1989,30 @@ impl FewrowGenType {
             _ => 256,
         }
     }
+
+    fn block_bytes(self) -> usize {
+        match self {
+            Self::Q4K => 144,
+            Self::Q5K => 176,
+            Self::Q6K => 210,
+            Self::Q8_0 => 34,
+            Self::IQ2Xxs => 66,
+            Self::IQ2Xs => 74,
+            Self::IQ2S => 82,
+            Self::IQ3Xxs => 98,
+            Self::IQ3S => 110,
+            Self::IQ4Nl => 18,
+            Self::IQ4Xs => 136,
+        }
+    }
+}
+
+/// Bytes in one weight row, computed in 64-bit arithmetic because the
+/// shader accepts Q8_0 K near `i32::MAX`: the old `int` product overflowed
+/// before the pointer add even though the block index itself fit.
+pub(crate) fn fewrow_gen_row_bytes(ty: FewrowGenType, n_in: usize) -> Option<u64> {
+    let blocks = u64::try_from(n_in / ty.block_weights()).ok()?;
+    blocks.checked_mul(ty.block_bytes() as u64)
 }
 
 /// Simdgroups per threadgroup, 8-row weight tiles and 8-row activation
@@ -2046,17 +2070,33 @@ fn validate_fewrow_gen_addressing(
             ));
         }
     }
+    if fewrow_gen_row_bytes(ty, n_in).is_none() {
+        return Err(super::checks::bad_shape(
+            KERNEL,
+            format!("n_in={n_in} row bytes overflow 64-bit addressing"),
+        ));
+    }
     Ok(())
 }
 
-/// Generic few-row mat-mat for 1..=16 activation rows (x = [n_cols, n_in],
-/// y = [n_cols, n_out]), adapted from llama.cpp's `kernel_mul_mv_mma_gen`
-/// (`kernels/mat_mat_fewrow_gen.metal`). A lane dequantizes its 16 weights
-/// of a 64-weight chunk once for all rows; n_out and n_cols need no tile
-/// multiple. E1: weight fragments are half, so the accumulation order
-/// differs from the mat-vec decode chain.
+/// Try the generic few-row mat-mat for 1..=16 activation rows
+/// (x = [n_cols, n_in], y = [n_cols, n_out]), adapted from llama.cpp's
+/// `kernel_mul_mv_mma_gen` (`kernels/mat_mat_fewrow_gen.metal`). A lane
+/// dequantizes its 16 weights of a 64-weight chunk once for all rows;
+/// n_out and n_cols need no tile multiple.
+///
+/// Returns `Ok(false)` when the selected pipeline cannot run on this device
+/// (or would exceed the 16 KiB reduction budget), so callers can fall back
+/// to the incumbent instead of failing. Bad shapes still return an error.
+///
+/// Exactness: E1. The dequantizers produce float fragments, which are then
+/// rounded to half for the MMA A operand. The incumbent specialized kernels
+/// keep half weights and apply block scales after the MMA, so the two paths
+/// differ in accumulation order and in the point where weight rounding
+/// happens. Differences are typically ~1e-4 relative on 27B weights; there
+/// is no universal cancellation-relative bound.
 #[allow(clippy::too_many_arguments)]
-pub fn encode_mat_mat_fewrow_gen_f32(
+pub fn try_encode_mat_mat_fewrow_gen_f32(
     ctx: &MetalContext,
     enc: &KernelEncoder,
     weight: &MetalTensor,
@@ -2065,7 +2105,7 @@ pub fn encode_mat_mat_fewrow_gen_f32(
     n_in: usize,
     n_out: usize,
     n_cols: usize,
-) -> Result<(), MetalError> {
+) -> Result<bool, MetalError> {
     use super::checks::{bad_shape, check_disjoint};
     use super::moe::{checked_moe_product, validate_moe_decode_tensor};
     use objc2_metal::MTLComputePipelineState as _;
@@ -2114,13 +2154,7 @@ pub fn encode_mat_mat_fewrow_gen_f32(
         ctx.device.maxThreadgroupMemoryLength(),
         nsg,
     ) {
-        return Err(bad_shape(
-            KERNEL,
-            format!(
-                "few-row pipeline needs SIMD32, {} threads and sufficient static threadgroup memory",
-                32 * nsg
-            ),
-        ));
+        return Ok(false);
     }
     enc.set_pipeline(&pso);
 
@@ -2154,7 +2188,30 @@ pub fn encode_mat_mat_fewrow_gen_f32(
             depth: 1,
         },
     );
-    Ok(())
+    Ok(true)
+}
+
+/// Strict generic few-row entry point: the fallback-capable route uses
+/// [`try_encode_mat_mat_fewrow_gen_f32`] so an unsupported pipeline can
+/// decline before any dispatch is encoded.
+#[allow(clippy::too_many_arguments)]
+pub fn encode_mat_mat_fewrow_gen_f32(
+    ctx: &MetalContext,
+    enc: &KernelEncoder,
+    weight: &MetalTensor,
+    x: &MetalTensor,
+    y: &MetalTensor,
+    n_in: usize,
+    n_out: usize,
+    n_cols: usize,
+) -> Result<(), MetalError> {
+    if try_encode_mat_mat_fewrow_gen_f32(ctx, enc, weight, x, y, n_in, n_out, n_cols)? {
+        return Ok(());
+    }
+    Err(super::checks::bad_shape(
+        "mat_mat_fewrow_gen",
+        format!("generic few-row pipeline unsupported for {n_in}x{n_out}, {n_cols} rows"),
+    ))
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -4007,43 +4064,258 @@ mod tests {
         }
     }
 
+    fn fewrow_gen_extreme_block(dtype: GgmlType, seed: usize) -> Vec<u8> {
+        let bytes = FewrowGenType::from_dtype(dtype).unwrap().block_bytes();
+        let mut b = vec![0u8; bytes];
+        b[..2].copy_from_slice(&half::f16::from_f32(0.001).to_le_bytes());
+        match dtype {
+            GgmlType::Q4_K | GgmlType::Q5_K => {
+                b[2..4].copy_from_slice(&half::f16::from_f32(5.0).to_le_bytes());
+                for i in 4..4 + 12 {
+                    b[i] = if (i + seed) % 2 == 0 { 0x00 } else { 0xFF };
+                }
+                for i in 4 + 12..bytes {
+                    b[i] = if (i + seed) % 2 == 0 { 0x00 } else { 0xFF };
+                }
+            }
+            GgmlType::Q6_K => {
+                for i in 0..192 {
+                    b[i] = if (i + seed) % 2 == 0 { 0x00 } else { 0xFF };
+                }
+                for i in 192..208 {
+                    b[i] = if (i + seed) % 2 == 0 { 0x80 } else { 0x7F };
+                }
+                b[208..210].copy_from_slice(&half::f16::from_f32(0.001).to_le_bytes());
+            }
+            GgmlType::Q8_0 => {
+                for i in 2..34 {
+                    b[i] = if (i + seed) % 2 == 0 { 0x80 } else { 0x7F };
+                }
+            }
+            _ => {
+                // IQ grids already span their index range; keep d tiny and
+                // make adjacent blocks differ in every byte.
+                for i in 2..bytes {
+                    b[i] = ((i * 37 + seed * 11) % 256) as u8;
+                }
+            }
+        }
+        b
+    }
+
+    /// Returns (max abs error, max relative error, RMS relative error).
+    /// Finiteness is asserted first, so the reductions cannot hide NaNs.
+    fn assert_fewrow_numerics(
+        label: &str,
+        got: &[f32],
+        expected: &[f64],
+        n_cols: usize,
+        n_out: usize,
+    ) -> (f64, f64, f64) {
+        assert_eq!(got.len(), expected.len(), "{label}: length");
+        assert!(
+            got.iter().all(|v| v.is_finite()),
+            "{label}: non-finite GPU output"
+        );
+        assert!(
+            expected.iter().all(|v| v.is_finite()),
+            "{label}: non-finite reference"
+        );
+        let max_ref = expected.iter().fold(0.0f64, |m, v| m.max(v.abs()));
+        let atol = 1e-3 * max_ref.max(1.0);
+        let rtol = 5e-3;
+        let mut max_abs = 0.0f64;
+        let mut max_rel = 0.0f64;
+        let mut sq_err = 0.0f64;
+        let mut sq_ref = 0.0f64;
+        for (&g, &e) in got.iter().zip(expected) {
+            let g = f64::from(g);
+            let abs = (g - e).abs();
+            let rel = abs / e.abs().max(max_ref * 1e-6).max(1e-12);
+            assert!(
+                abs <= atol + rtol * e.abs(),
+                "{label}: output {g} vs {e} (abs {abs}, rel {rel}) exceeds atol {atol} + rtol {rtol}"
+            );
+            max_abs = max_abs.max(abs);
+            max_rel = max_rel.max(rel);
+            sq_err += abs * abs;
+            sq_ref += e * e;
+        }
+        let rms_rel = (sq_err / sq_ref.max(1e-30)).sqrt();
+        assert!(
+            rms_rel <= 2e-3,
+            "{label}: RMS relative error {rms_rel} exceeds 2e-3"
+        );
+        // Keep the arguments live and document the tile used by the caller.
+        assert_eq!(got.len(), n_cols * n_out, "{label}: tile product");
+        (max_abs, max_rel, rms_rel)
+    }
+
+    /// Per-column target logit and top-two margin agreement. The expected
+    /// stream is the incumbent mat-mat output, so this is a real-weight
+    /// routing check rather than a synthetic codec check.
+    fn assert_fewrow_logits_and_margin(
+        label: &str,
+        inc: &[f32],
+        candidate: &[f32],
+        n_cols: usize,
+        n_out: usize,
+    ) {
+        assert!(n_out >= 2, "{label}: margin check needs two outputs");
+        assert!(
+            inc.iter().chain(candidate).all(|v| v.is_finite()),
+            "{label}: non-finite logits"
+        );
+        let max_ref = inc.iter().fold(0.0f32, |m, v| m.max(v.abs())) as f64;
+        let atol = 1e-3 * max_ref.max(1.0);
+        let rtol = 5e-3;
+        for c in 0..n_cols {
+            let base = c * n_out;
+            let mut inc_top = (0usize, f32::NEG_INFINITY);
+            let mut inc_second = f32::NEG_INFINITY;
+            let mut gen_top = (0usize, f32::NEG_INFINITY);
+            let mut gen_second = f32::NEG_INFINITY;
+            for r in 0..n_out {
+                let a = inc[base + r];
+                let b = candidate[base + r];
+                if a > inc_top.1 {
+                    inc_second = inc_top.1;
+                    inc_top = (r, a);
+                } else if a > inc_second {
+                    inc_second = a;
+                }
+                if b > gen_top.1 {
+                    gen_second = gen_top.1;
+                    gen_top = (r, b);
+                } else if b > gen_second {
+                    gen_second = b;
+                }
+            }
+            assert_eq!(
+                inc_top.0, gen_top.0,
+                "{label}: column {c} top-1 index differs"
+            );
+            let target = f64::from(inc_top.1);
+            let target_err = (f64::from(gen_top.1) - target).abs();
+            assert!(
+                target_err <= atol + rtol * target.abs(),
+                "{label}: column {c} target logit error {target_err}"
+            );
+            let inc_margin = f64::from(inc_top.1 - inc_second);
+            let gen_margin = f64::from(gen_top.1 - gen_second);
+            let margin_err = (gen_margin - inc_margin).abs();
+            assert!(
+                margin_err <= 1e-2 * max_ref.max(1.0) + 5e-3 * inc_margin.abs(),
+                "{label}: column {c} top-two margin error {margin_err} (inc {inc_margin}, gen {gen_margin})"
+            );
+        }
+    }
+
+    fn fewrow_gen_real_model_path() -> Option<std::path::PathBuf> {
+        if let Ok(path) = std::env::var("QWEN_FEWROW_REAL_MODEL") {
+            let path = std::path::PathBuf::from(path);
+            if path.exists() {
+                return Some(path);
+            }
+        }
+        let search = std::env::var("QWEN_MODEL_SEARCH_PATH").ok()?;
+        for dir in search.split(':') {
+            let path = std::path::Path::new(dir).join("Qwen3.8-27B-Q4_K_M.gguf");
+            if path.exists() {
+                return Some(path);
+            }
+        }
+        None
+    }
+
+    #[test]
+    fn fewrow_gen_row_bytes_use_64_bit_offsets() {
+        // Q8_0 K near the signed shader limit: the row byte count exceeds
+        // i32 even though n_in itself fits, which is why the shader block
+        // index is multiplied in 64-bit arithmetic.
+        let n_in = (i32::MAX as usize / 64) * 64;
+        let row = fewrow_gen_row_bytes(FewrowGenType::Q8_0, n_in).expect("row bytes");
+        assert_eq!(row, (n_in as u64 / 32) * 34);
+        assert!(row > i32::MAX as u64);
+        validate_fewrow_gen_addressing(FewrowGenType::Q8_0, n_in, 9, 8).expect("near-limit K");
+        // Non-block-aligned K is still refused before encoding.
+        assert!(validate_fewrow_gen_addressing(FewrowGenType::Q8_0, 63, 9, 8).is_err());
+    }
+
+    #[test]
+    fn fewrow_gen_tiling_coverage() {
+        // NT=2 with NSG=16 (K needs at least 16 steps for NSG 16).
+        assert_eq!(fewrow_gen_tiling(1024, 2048, 3), (2, 1, 16));
+        // NT=4 with NSG=8, and RT=2 for 9..=16 rows.
+        assert_eq!(fewrow_gen_tiling(512, 8192, 8), (4, 1, 8));
+        assert_eq!(fewrow_gen_tiling(512, 8192, 9), (4, 2, 8));
+        // Multiple K iterations at NSG=8: 2048/64 / 8 = 4.
+        assert_eq!(fewrow_gen_tiling(2048, 8192, 7), (4, 1, 8));
+        // Minimum K for a 256-weight block type and for Q8_0. The Q8 case
+        // uses 9 rows, so RT is 2 even though the row tile is 1.
+        assert_eq!(fewrow_gen_tiling(256, 9, 7), (1, 1, 8));
+        assert_eq!(fewrow_gen_tiling(64, 9, 9), (1, 2, 8));
+    }
+
     #[test]
     fn fewrow_gen_matches_cpu_reference_at_tile_edges() {
         let ctx = match metal_test_context() {
             Some(ctx) => ctx,
             None => return,
         };
-        let cases = [
-            (GgmlType::Q4_K, 512usize, 9usize, 2usize),
-            (GgmlType::Q4_K, 1024, 17, 8),
-            (GgmlType::Q4_K, 1024, 17, 16),
-            (GgmlType::Q5_K, 512, 9, 8),
-            (GgmlType::Q6_K, 512, 9, 2),
-            (GgmlType::Q6_K, 1024, 17, 8),
-            (GgmlType::Q6_K, 1024, 17, 16),
-            (GgmlType::Q8_0, 512, 9, 8),
-            (GgmlType::Q8_0, 1024, 17, 16),
-            (GgmlType::IQ2_XXS, 512, 9, 8),
-            (GgmlType::IQ2_XXS, 1024, 17, 16),
-            (GgmlType::IQ2_XS, 512, 9, 8),
-            (GgmlType::IQ2_XS, 1024, 17, 16),
-            (GgmlType::IQ2_S, 512, 9, 8),
-            (GgmlType::IQ2_S, 1024, 17, 16),
-            (GgmlType::IQ3_XXS, 512, 9, 8),
-            (GgmlType::IQ3_XXS, 1024, 17, 16),
-            (GgmlType::IQ3_S, 512, 9, 8),
-            (GgmlType::IQ3_S, 1024, 17, 16),
-            (GgmlType::IQ4_NL, 512, 9, 8),
-            (GgmlType::IQ4_NL, 1024, 17, 16),
-            (GgmlType::IQ4_XS, 512, 9, 8),
-            (GgmlType::IQ4_XS, 1024, 17, 16),
+        // (dtype, n_in, n_out, n_cols, extreme). The first block keeps the
+        // broad codec coverage; the second exercises NT=2/4, NSG=8/16,
+        // multiple K iterations, N=3/7/9/15, minimum K and extreme scales.
+        let cases: &[(GgmlType, usize, usize, usize, bool)] = &[
+            (GgmlType::Q4_K, 512, 9, 2, false),
+            (GgmlType::Q4_K, 1024, 17, 8, false),
+            (GgmlType::Q4_K, 1024, 17, 16, false),
+            (GgmlType::Q5_K, 512, 9, 8, false),
+            (GgmlType::Q6_K, 512, 9, 2, false),
+            (GgmlType::Q6_K, 1024, 17, 8, false),
+            (GgmlType::Q6_K, 1024, 17, 16, false),
+            (GgmlType::Q8_0, 512, 9, 8, false),
+            (GgmlType::Q8_0, 1024, 17, 16, false),
+            (GgmlType::IQ2_XXS, 512, 9, 8, false),
+            (GgmlType::IQ2_XXS, 1024, 17, 16, false),
+            (GgmlType::IQ2_XS, 512, 9, 8, false),
+            (GgmlType::IQ2_XS, 1024, 17, 16, false),
+            (GgmlType::IQ2_S, 512, 9, 8, false),
+            (GgmlType::IQ2_S, 1024, 17, 16, false),
+            (GgmlType::IQ3_XXS, 512, 9, 8, false),
+            (GgmlType::IQ3_XXS, 1024, 17, 16, false),
+            (GgmlType::IQ3_S, 512, 9, 8, false),
+            (GgmlType::IQ3_S, 1024, 17, 16, false),
+            (GgmlType::IQ4_NL, 512, 9, 8, false),
+            (GgmlType::IQ4_NL, 1024, 17, 16, false),
+            (GgmlType::IQ4_XS, 512, 9, 8, false),
+            (GgmlType::IQ4_XS, 1024, 17, 16, false),
+            (GgmlType::Q4_K, 512, 8192, 7, false),
+            (GgmlType::Q4_K, 512, 2048, 3, false),
+            (GgmlType::Q4_K, 512, 8192, 9, false),
+            (GgmlType::Q4_K, 512, 8192, 15, false),
+            (GgmlType::Q6_K, 256, 9, 7, false),
+            (GgmlType::Q5_K, 256, 9, 3, false),
+            (GgmlType::Q8_0, 64, 9, 9, false),
+            (GgmlType::IQ4_NL, 64, 9, 7, false),
+            (GgmlType::IQ3_S, 256, 17, 15, false),
+            (GgmlType::Q4_K, 512, 9, 7, true),
+            (GgmlType::Q5_K, 256, 9, 3, true),
+            (GgmlType::Q6_K, 256, 9, 7, true),
+            (GgmlType::Q8_0, 64, 9, 9, true),
+            (GgmlType::IQ3_S, 256, 17, 15, true),
         ];
-        for (case, &(dtype, n_in, n_out, n_cols)) in cases.iter().enumerate() {
-            let blocks_per_row = n_in / FewrowGenType::from_dtype(dtype).unwrap().block_weights();
+        for (case, &(dtype, n_in, n_out, n_cols, extreme)) in cases.iter().enumerate() {
+            let ty = FewrowGenType::from_dtype(dtype).unwrap();
+            let blocks_per_row = n_in / ty.block_weights();
             let mut state = 0x9E37_79B9u32 ^ case as u32;
             let mut weight_bytes = Vec::new();
-            for _ in 0..n_out * blocks_per_row {
-                weight_bytes.extend_from_slice(&fewrow_gen_random_block(dtype, &mut state));
+            for block in 0..n_out * blocks_per_row {
+                if extreme {
+                    weight_bytes.extend_from_slice(&fewrow_gen_extreme_block(dtype, block));
+                } else {
+                    weight_bytes.extend_from_slice(&fewrow_gen_random_block(dtype, &mut state));
+                }
             }
             let desc = TensorDesc {
                 name: "fewrow_gen_test".into(),
@@ -4087,18 +4359,214 @@ mod tests {
                         .sum()
                 })
                 .collect();
-            let max_err = checked_max_abs_error(&got, &expected).unwrap_or_else(|e| {
-                panic!("fewrow gen {dtype:?} n_in={n_in} n_out={n_out} n_cols={n_cols}: {e}")
-            });
-            let max_ref = expected.iter().fold(0.0f64, |m, e| m.max(e.abs()));
-            eprintln!(
-                "[fewrow-gen] {dtype:?} n_in={n_in} n_out={n_out} n_cols={n_cols} max_err={max_err:.3e} max_ref={max_ref:.3e}"
+            let (max_abs, max_rel, rms_rel) = assert_fewrow_numerics(
+                &format!("fewrow gen {dtype:?} {n_in}x{n_out} N={n_cols}"),
+                &got,
+                &expected,
+                n_cols,
+                n_out,
             );
-            assert!(
-                max_err <= 5e-3 * max_ref.max(1.0),
-                "fewrow gen {dtype:?} n_in={n_in} n_out={n_out} n_cols={n_cols}: max_err {max_err} vs max_ref {max_ref}"
+            eprintln!(
+                "[fewrow-gen] {dtype:?} n_in={n_in} n_out={n_out} n_cols={n_cols} max_abs={max_abs:.3e} max_rel={max_rel:.3e} rms_rel={rms_rel:.3e}"
             );
         }
+    }
+
+    #[test]
+    fn fewrow_gen_real_weights_logit_and_margin() {
+        let Some(path) = fewrow_gen_real_model_path() else {
+            eprintln!("[fewrow-gen-real] skipped: no 27B Q4_K_M model in QWEN_MODEL_SEARCH_PATH");
+            return;
+        };
+        let Some(ctx) = metal_test_context() else {
+            return;
+        };
+        let g = crate::gguf::GgufFile::open(&path).expect("open real model");
+        let n_cols = 8usize;
+        for name in ["blk.3.attn_k.weight", "blk.3.attn_v.weight"] {
+            let Some(t) = g.find(name) else {
+                continue;
+            };
+            if t.shape.len() != 2 {
+                continue;
+            }
+            let n_in = t.shape[0] as usize;
+            let n_out = t.shape[1] as usize;
+            let w_t = MetalTensor::from_gguf_tensor(&ctx, t, g.slice(t)).expect("weight");
+            let x: Vec<f32> = (0..n_cols * n_in)
+                .map(|i| ((i % 31) as f32 - 15.0) * 0.002)
+                .collect();
+            let x_t = MetalTensor::from_bytes(
+                &ctx,
+                bytemuck::cast_slice(&x),
+                vec![(n_cols * n_in) as u64],
+                GgmlType::F32,
+            )
+            .unwrap();
+            let y_inc = MetalTensor::zeros_f32(&ctx, vec![(n_out * n_cols) as u64]).unwrap();
+            let y_gen = MetalTensor::zeros_f32(&ctx, vec![(n_out * n_cols) as u64]).unwrap();
+            one_shot(&ctx, |enc| {
+                crate::metal_forward::encode_mat_mat_dispatch(
+                    &ctx, enc, &w_t, &x_t, &y_inc, n_in, n_out, n_cols,
+                )
+                .map_err(|error| match error {
+                    crate::metal_forward::MfError::Metal(error) => error,
+                    other => MetalError::BadShape {
+                        kernel: "fewrow_gen_real",
+                        detail: other.to_string(),
+                    },
+                })
+            })
+            .unwrap();
+            one_shot(&ctx, |enc| {
+                encode_mat_mat_fewrow_gen_f32(&ctx, enc, &w_t, &x_t, &y_gen, n_in, n_out, n_cols)
+            })
+            .unwrap();
+            let inc = read_back_f32(&y_inc.buffer, n_out * n_cols);
+            let candidate = read_back_f32(&y_gen.buffer, n_out * n_cols);
+            assert_fewrow_logits_and_margin(
+                &format!("real {name} {:?} {n_in}x{n_out}", t.dtype),
+                &inc,
+                &candidate,
+                n_cols,
+                n_out,
+            );
+            let expected: Vec<f64> = inc.iter().map(|&v| f64::from(v)).collect();
+            let (max_abs, max_rel, rms_rel) = assert_fewrow_numerics(
+                &format!("real {name} {:?}", t.dtype),
+                &candidate,
+                &expected,
+                n_cols,
+                n_out,
+            );
+            eprintln!(
+                "[fewrow-gen-real] {name} dtype={:?} max_abs={max_abs:.3e} max_rel={max_rel:.3e} rms_rel={rms_rel:.3e}",
+                t.dtype
+            );
+        }
+    }
+
+    /// Prepared for the next M5 timing slot: incumbent mma8 variants at an
+    /// N=8, 1024-output shape versus the generic kernel, with pipeline
+    /// statistics. Does not run a half-A-only variant; that shader variant
+    /// still has to be added before the review's attribution experiment.
+    #[test]
+    #[ignore]
+    fn fewrow_gen_vs_mma8_variants() {
+        use objc2_metal::MTLComputePipelineState as _;
+        let Some(path) = fewrow_gen_real_model_path() else {
+            eprintln!("[fewrow-variants] skipped: no model");
+            return;
+        };
+        let Some(ctx) = metal_test_context() else {
+            return;
+        };
+        let g = crate::gguf::GgufFile::open(&path).expect("open");
+        let name = std::env::var("QWEN_FEWROW_VARIANT_TENSOR")
+            .unwrap_or_else(|_| "blk.3.attn_k.weight".into());
+        let Some(t) = g.find(&name) else {
+            eprintln!("[fewrow-variants] missing {name}");
+            return;
+        };
+        let n_in = t.shape[0] as usize;
+        let n_out = t.shape[1] as usize;
+        let n_cols = 8usize;
+        let w_t = MetalTensor::from_gguf_tensor(&ctx, t, g.slice(t)).expect("weight");
+        let x: Vec<f32> = (0..n_cols * n_in)
+            .map(|i| ((i % 31) as f32 - 15.0) * 0.002)
+            .collect();
+        let x_t = MetalTensor::from_bytes(
+            &ctx,
+            bytemuck::cast_slice(&x),
+            vec![(n_cols * n_in) as u64],
+            GgmlType::F32,
+        )
+        .unwrap();
+        let y = MetalTensor::zeros_f32(&ctx, vec![(n_out * n_cols) as u64]).unwrap();
+        let selected = std::env::var("QWEN_FEWROW_VARIANT").ok();
+        let all_variants = ["r1c1k128", "r1c1k64_sg2", "r2c1k64", "r2c2k64", "r4c1k64"];
+        let variants: Vec<&str> = match selected.as_deref() {
+            Some(name) => vec![name],
+            None => all_variants.to_vec(),
+        };
+        let dt = match t.dtype {
+            GgmlType::Q4_K => "q4_K",
+            GgmlType::Q6_K => "q6_K",
+            GgmlType::Q5_K => "q5_K",
+            other => {
+                eprintln!("[fewrow-variants] unsupported dtype {other:?}");
+                return;
+            }
+        };
+        for variant in variants {
+            let pso_name = format!("kernel_mat_mat_{dt}_mma8v_{variant}_f32");
+            let Ok(pso) = ctx.pipeline(&pso_name) else {
+                eprintln!("[fewrow-variants] no pipeline {pso_name}");
+                continue;
+            };
+            eprintln!(
+                "[fewrow-variants] {variant} exec={} max_threads={} smem={}",
+                pso.threadExecutionWidth(),
+                pso.maxTotalThreadsPerThreadgroup(),
+                pso.staticThreadgroupMemoryLength()
+            );
+            let bench = || {
+                let cmd = ctx.queue.commandBuffer().expect("cmd");
+                let enc = KernelEncoder::begin(&cmd);
+                for _ in 0..16 {
+                    encode_mat_mat_mma8_variant(&ctx, &enc, &w_t, &x_t, &y, n_in, n_out, variant)
+                        .unwrap();
+                }
+                enc.end();
+                let started = std::time::Instant::now();
+                cmd.commit();
+                wait_completed(&cmd).expect("Metal command buffer failed");
+                started.elapsed().as_secs_f64() * 1e3 / 16.0
+            };
+            let mut samples = Vec::new();
+            for _ in 0..2 {
+                bench();
+            }
+            for _ in 0..5 {
+                samples.push(bench());
+            }
+            eprintln!("[fewrow-variants] {variant} ms={samples:?}");
+        }
+        let ty = FewrowGenType::from_dtype(t.dtype).unwrap();
+        let (nt, rt, nsg) = fewrow_gen_tiling(n_in, n_out, n_cols);
+        let gen_name = format!(
+            "kernel_mat_mat_{}_fewrow_gen_nt{nt}_rt{rt}_nsg{nsg}_f32",
+            ty.tag()
+        );
+        if let Ok(pso) = ctx.pipeline(&gen_name) {
+            eprintln!(
+                "[fewrow-variants] generic exec={} max_threads={} smem={}",
+                pso.threadExecutionWidth(),
+                pso.maxTotalThreadsPerThreadgroup(),
+                pso.staticThreadgroupMemoryLength()
+            );
+        }
+        let bench_gen = || {
+            let cmd = ctx.queue.commandBuffer().expect("cmd");
+            let enc = KernelEncoder::begin(&cmd);
+            for _ in 0..16 {
+                encode_mat_mat_fewrow_gen_f32(&ctx, &enc, &w_t, &x_t, &y, n_in, n_out, n_cols)
+                    .unwrap();
+            }
+            enc.end();
+            let started = std::time::Instant::now();
+            cmd.commit();
+            wait_completed(&cmd).expect("Metal command buffer failed");
+            started.elapsed().as_secs_f64() * 1e3 / 16.0
+        };
+        let mut samples = Vec::new();
+        for _ in 0..2 {
+            bench_gen();
+        }
+        for _ in 0..5 {
+            samples.push(bench_gen());
+        }
+        eprintln!("[fewrow-variants] generic ms={samples:?}");
     }
 
     /// Exact Qwen3.8-27B Q4_K_M shapes: generic few-row kernel vs the
@@ -4259,17 +4727,25 @@ mod tests {
                 let gen_med = median(&mut gen_samples.clone());
                 let inc_out = read_back_f32(&y_inc.buffer, n_out * n_cols);
                 let gen_out = read_back_f32(&y_gen.buffer, n_out * n_cols);
-                let max_ref = inc_out.iter().fold(0.0f32, |m, v| m.max(v.abs()));
-                let max_diff = inc_out
-                    .iter()
-                    .zip(&gen_out)
-                    .map(|(a, b)| (a - b).abs())
-                    .fold(0.0f32, f32::max);
+                assert_fewrow_logits_and_margin(
+                    &format!("bench {name} {:?}", t.dtype),
+                    &inc_out,
+                    &gen_out,
+                    n_cols,
+                    n_out,
+                );
+                let expected: Vec<f64> = inc_out.iter().map(|&v| f64::from(v)).collect();
+                let (max_abs, max_rel, rms_rel) = assert_fewrow_numerics(
+                    &format!("bench {name} {:?}", t.dtype),
+                    &gen_out,
+                    &expected,
+                    n_cols,
+                    n_out,
+                );
                 eprintln!(
-                    "[fewrow-bench] tensor={name} dtype={:?} n_in={n_in} n_out={n_out} n_cols={n_cols} incumbent_ms={inc_samples:?} fewrow_ms={gen_samples:?} ratio={:.3} max_diff_rel={:.2e}",
+                    "[fewrow-bench] tensor={name} dtype={:?} n_in={n_in} n_out={n_out} n_cols={n_cols} incumbent_ms={inc_samples:?} fewrow_ms={gen_samples:?} ratio={:.3} max_abs={max_abs:.2e} max_rel={max_rel:.2e} rms_rel={rms_rel:.2e}",
                     t.dtype,
                     inc_med / gen_med,
-                    max_diff / max_ref.max(1.0)
                 );
             }
         }

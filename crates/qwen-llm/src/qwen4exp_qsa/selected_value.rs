@@ -10,7 +10,7 @@ pub(super) const SPLIT_VALUE: &str = "kernel_qwen4exp_qsa_selected_value_split8_
 const STATS_TGM: usize = 4 * ATTENTION_SCRATCH_FLOATS * size_of::<f32>();
 
 crate::env_flag!(
-    /// Parallel F32 selected-prefill value accumulation on the M5 tensor tier, default on for full N32 bands. Changes addition order with unchanged softmax, cache and operand precision. Set to 0 to retain chronological GQA12 accumulation for A/B or rollback; no additional GPU allocations.
+    /// Parallel F32 selected-prefill value accumulation on qualified tensor or SIMD devices, default on for full N32 bands. Changes addition order with unchanged softmax, cache and operand precision. Set to 0 to retain chronological GQA12 accumulation for A/B or rollback; no additional GPU allocations.
     default_on split_value_enabled,
     "QWEN_FN_QSA_PREFILL_SPLIT_VALUE"
 );

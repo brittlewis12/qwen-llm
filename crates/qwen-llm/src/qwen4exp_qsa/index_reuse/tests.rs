@@ -200,7 +200,11 @@ fn qsa_index_query_reuse_matches_incumbent_bits_f64_and_guards() {
         let cmd = ctx.queue.commandBuffer().unwrap();
         let enc = KernelEncoder::begin(&cmd);
         crate::metal::dispatch_census_begin();
-        let bank = if configured_tile(&ctx) == 32 { 3 } else { 1 };
+        let bank = if configured_tile(&ctx) == 32 && tensor_available {
+            3
+        } else {
+            1
+        };
         let chosen = try_encode(
             &ctx,
             &enc,

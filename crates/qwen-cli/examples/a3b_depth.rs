@@ -10,7 +10,7 @@ use objc2_metal::{MTLBuffer, MTLCommandBuffer, MTLCommandQueue};
 use qwen_llm::{
     metal::*,
     metal_dflash::with_prefill_attn_tensor_flash_override as scoped,
-    runtime::{LoadedModel, Runtime},
+    runtime::{LoadedModel, Runtime, SequenceConfig},
 };
 use serde_json::json;
 use sha2::{Digest, Sha256};
@@ -438,6 +438,7 @@ fn main() -> Result<()> {
                 // is restored outside the timed span, just as the prefix is
                 // untimed in qwen-bench. Recreating scratch would time cold
                 // allocations on every retained append.
+                p.sequence = model.create_sequence(SequenceConfig::new(capacity))?;
                 let mut all = prefix_ids.clone();
                 all.extend_from_slice(&append_ids[..append]);
                 model.restore_prepared_checkpoint(

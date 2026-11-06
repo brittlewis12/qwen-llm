@@ -6,6 +6,76 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the current state and evidence index.
 
+## 2026-11-06 - V4.1 Decode: Router Priority, Native +1.4-1.7%
+
+- Base **`f1bb875c`**, screen **`9e1d26fc`**, production **`d522942b`**;
+  **`8717f2f6`** adds only the missing fields in a bench test fixture.
+  M5 Ultra, unchanged full GSQ-RCO IQ2_XS + IQ4_NL Engram artifact from
+  the standing below: full 384 experts/top-6 and sufficient memory headroom.
+  **Default on**, rollback **`QWEN_V41_ROUTER_FIRST=0`**. Encode the router
+  projection immediately after FFN mHC pre, before the shared expert;
+  top-k selection and routed experts remain in their existing encoder.
+  Same kernels, arithmetic, weights, buffers and dispatch/encoder/command
+  counts. Batched decode and the single-encoder FFN rollback keep their order.
+- Rollout is the measured M5 Ultra H5120/F2304/E384/top6 layout, BF16 router,
+  Q5_K shared expert, equal IQ2_XXS/IQ2_XS/IQ2_S gate/up and the artifact's
+  supported routed-down types. Other layouts retain shared-first ordering.
+  The temporary device restriction and broadening trigger are in the allowlist.
+- Attribution on current main: native tg64 two samples at 0 / 8K / 32K
+  average **80.387 / 74.909 / 73.739 tok/s**, about **63.92 / 60.76 / 60.42%**
+  of the unchanged 1.0-TB/s logical payload roof. Matched restored-prefix
+  normal/unsplit/stage/dispatch views keep all logits identical. Normal and
+  unsplit agree; stage/dispatch profiling adds substantial overhead and its
+  spans are not an additive production budget. Dispatch-end increments rank
+  dense Q5_K at roughly **5.6-6.0 ms**, routed FFN **4.1-4.2 ms**, versus
+  index **0.10 / 0.49 / 0.70 ms**. Counts are roughly **831 / 888 / 900** at
+  representative retained positions, not the historical ~2000.
+- New opt-in submission clocks preserve the production graph. At 32K,
+  unsplit rollback/default median wall **13.367 / 13.014 ms**, GPU span
+  **13.068 / 12.710**, CPU encode **0.686 / 0.686**, cached Engram rows
+  **0.069 / 0.070 ms**. Gaps between the three command buffers total only
+  **1.31 / 1.27 us**; encode and driver scheduling overlap GPU work.
+  Thus this win is GPU scheduling, not less host encoding or fewer dispatches.
+  Per-command GPU clock endpoints and CPU encode intervals are available via
+  **`QWEN_V41_DECODE_TIMING=1`** as JSON; no stage splits or extra waits.
+  All 40 layers move router-before-shared under default, zero under rollback;
+  representative dispatch counts remain 831/888/900 in both policies.
+- Prespecified kill: >=1.01x whole tg64 at both 0 and 8K, both cooled arm
+  pairs same direction, finite outputs and exact warm 64-vector fingerprints.
+  Separate-process C/R/T/T/R/C, 30 s cooldowns, immutable prefixes restored
+  outside timers, one excluded plus four retained streams/depth/arm: router
+  first **1.02733x / 1.01622x** at 0/8K. **Reject top-k-first**: moving both
+  projection and selection before shared yields **0.95647x / 0.95050x**.
+  That switch and its extra helpers are removed. All warm fingerprints match.
+- Production native **ABBA**, ordinary model/row warmups and untimed prefix
+  fills, `--tg 64 --depth 0,8192,32768 --runs 2 -o json`, separate processes,
+  full logits copies, no snapshots in this confirmation. All retained rates:
+
+  | Depth | Rollback tok/s | Default tok/s | Median latency off/on, ms/token | Ratio | Default % roof |
+  | ---: | --- | --- | --- | ---: | ---: |
+  | 0 | 80.49175,80.39123,80.29955,80.33550 | 81.43930,81.57871,81.42952,81.49590 | 12.44348 / 12.27482 | 1.01374x | 64.78% |
+  | 8192 | 74.72592,74.37759,74.69078,74.92170 | 75.60246,75.74938,76.13099,76.00237 | 13.38538 / 13.17946 | 1.01562x | 61.55% |
+  | 32768 | 73.63908,73.84911,73.45934,73.55634 | 74.83835,74.52214,74.97224,74.85162 | 13.58738 / 13.36095 | 1.01695x | 61.32% |
+
+  The native gain is smaller than the fixed-seed saved-prefix screen; it is
+  the headline. Build/runtime identities match; build lock, nice 10,
+  canonical Metal lease, 30 s arm cooldown, thermal **0 throughout** under
+  two-second supervision. Exact-artifact llama.cpp v0.9.0 remains unsupported.
+- Independent default/rollback teacher forcing: frozen code/prose, pp1 at
+  zero and pp512 after Full 8K/32K prefixes, 128 sequential targets/cell/doc.
+  **768 paired full-vocabulary vectors, 129280 logits each**, all finite and
+  bitwise identical: **delta NLL = mean/max KL = 0**, argmax **768/768**.
+  Greedy CLI smoke: **8432 prompt tokens, 64 generated**, status ok/token_limit,
+  identical ID fingerprints and 173 output bytes (same SHA256 as below).
+- Full M5 release library **2444 passed, 0 failed, 738 explicit ignores**.
+  Expanded GPU regression compares one/split FFN encoders and router priority,
+  with one/three command buffers over evolving 40-layer toy states; focused
+  **Metal API validation passes**. Rollout and clock-domain CPU tests pass.
+  **`scripts/check-contracts.sh` passes on `8717f2f6`**; its first attempt
+  caught the test-only profile literal, fixed before this final pass.
+  Raw source, plans, all samples, profiles, quality and validation receipts:
+  `metagross:~/qwen-runs/2026-11-06-v41-roofline3/`. No merge.
+
 
 ## 2026-11-06 - GLM M5 Sparse Prefill: Tensor QK/PV in Existing Scratch
 

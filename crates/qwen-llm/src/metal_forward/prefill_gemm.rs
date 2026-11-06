@@ -17,7 +17,7 @@ crate::env_flag!(
     "QWEN_FN_PREFILL_DENSE_WIDE"
 );
 
-/// Qualified short-append tensor routes, default on when the tensor tier is available: 27B Q4_K gate/up and Q6_K down at 256..=1024 rows, Q4_K down at 384..=1024, ragged Q5_K GDN output projections at 128..=1024, and A3B Q4_K gate/up plus Q5_K/Q6_K routed down at 512..=2048. Set to 0 for A/B or rollback to the original short-append dispatches; original 1024-row FFN and 2048-row expert routes are unaffected. Existing dense, FFN and expert off-switches still apply.
+/// Qualified short-append tensor routes, default on when the tensor tier is available: 27B Q4_K gate/up at 128 or 256..=1024 rows, Q6_K down at 256..=1024, Q4_K down at 384..=1024, Q5_K GDN output projections at 128 rows or ragged rows in 128..=1024, and A3B Q4_K gate/up plus Q5_K/Q6_K routed down at 512..=2048. Set to 0 for A/B or rollback to the original short-append dispatches; original 1024-row FFN and 2048-row expert routes are unaffected. Existing dense, FFN and expert off-switches still apply.
 const SHORT_APPEND_TENSOR_ENV: &str = "QWEN_SHORT_APPEND_TENSOR";
 
 fn short_append_tensor_enabled() -> bool {
@@ -135,7 +135,7 @@ fn eligible(
                 && dtype == GgmlType::Q5_K
                 && (k, n) == (6144, 5120)
                 && (128..=1024).contains(&m)
-                && !m.is_multiple_of(64))
+                && (m == 128 || !m.is_multiple_of(64)))
     } else {
         *arch == A3B_ARCH
             && dtype == GgmlType::Q8_0
@@ -372,12 +372,16 @@ fn ffn128_shape(dtype: GgmlType, k: usize, n: usize, m: usize) -> bool {
 fn ffn128_shape_with_short(short: bool, dtype: GgmlType, k: usize, n: usize, m: usize) -> bool {
     // The 128-row tile pays padding and one activation conversion. Q4 down
     // loses at 276 rows, while gate/up and Q6 down already win at 256.
+    // Gate/up also wins at exactly 128; 129 rows would pay for a second tile.
     let min_rows = match (dtype, k, n) {
         (GgmlType::Q4_K, 5120, 17408) | (GgmlType::Q6_K, 17408, 5120) => 256,
         (GgmlType::Q4_K, 17408, 5120) => 384,
         _ => return false,
     };
-    m == 1024 || (short && (min_rows..=1024).contains(&m))
+    m == 1024
+        || (short
+            && ((min_rows..=1024).contains(&m)
+                || (dtype == GgmlType::Q4_K && k == 5120 && m == 128)))
 }
 
 /// Only the measured 27B FFN shapes select the 128-row device-half tile.
@@ -650,7 +654,7 @@ mod tests {
                     m
                 ));
             }
-            for m in [129, 276, 513, 769, 1000, 1023] {
+            for m in [128, 129, 276, 513, 769, 1000, 1023] {
                 assert_eq!(
                     eligible(true, true, &QWEN3_27B, GgmlType::Q5_K, 6144, 5120, m),
                     on && crate::metal::mat_mat_q5_k_tensor_allowed()
@@ -674,7 +678,7 @@ mod tests {
                     m
                 ));
             }
-            for m in [127, 128, 512, 1024, 1025, 1300] {
+            for m in [127, 256, 512, 1024, 1025, 1300] {
                 assert!(!eligible(
                     true,
                     true,
@@ -1280,7 +1284,7 @@ mod tests {
         let (packed, decoded) = weights(GgmlType::Q5_K, k, n);
         let w = MetalTensor::from_bytes(&ctx, &packed, vec![k as u64, n as u64], GgmlType::Q5_K)
             .unwrap();
-        for m in [127, 276, 512, 513, 1023] {
+        for m in [127, 128, 276, 512, 513, 1023] {
             let cells: Vec<_> = sampled_axis(m)
                 .into_iter()
                 .flat_map(|r| sampled_axis(n).into_iter().map(move |c| (r, c)))
@@ -1296,7 +1300,7 @@ mod tests {
                         && crate::metal::mat_mat_q5_k_tensor_allowed()
                         && on
                         && m >= 128
-                        && m % 64 != 0
+                        && (m == 128 || m % 64 != 0)
                 );
                 for amplitude in [2f32.powi(-24), 1., 2048., 65504.] {
                     let mut rng = 0x5a31_89ef;
@@ -1505,7 +1509,7 @@ mod tests {
                 }
             }
         }
-        for m in [256, 276, 384, 512, 513, 1023, 1024] {
+        for m in [128, 256, 276, 384, 512, 513, 1023, 1024] {
             assert!(ffn128_shape_with_short(
                 true,
                 GgmlType::Q4_K,
@@ -1535,7 +1539,7 @@ mod tests {
             let (packed, decoded) = weights(dtype, k, n);
             let w =
                 MetalTensor::from_bytes(&ctx, &packed, vec![k as u64, n as u64], dtype).unwrap();
-            for m in [1024, 512, 513, 276, 127] {
+            for m in [1024, 512, 513, 276, 128, 127] {
                 let cells: Vec<_> = sampled_axis(m)
                     .into_iter()
                     .flat_map(|r| sampled_axis(n).into_iter().map(move |c| (r, c)))
@@ -1550,7 +1554,8 @@ mod tests {
                             || (short_append_tensor_enabled()
                                 && (m == 512
                                     || m == 513
-                                    || (m == 276 && (k == 5120 || dtype == GgmlType::Q6_K)))))
+                                    || (m == 276 && (k == 5120 || dtype == GgmlType::Q6_K))
+                                    || (m == 128 && k == 5120))))
                 );
                 assert!(!qwen_ffn128_selected(&ctx, &A3B_ARCH, dtype, k, n, m));
                 for amplitude in [2f32.powi(-24), 1.0, 2048.0, 65504.0] {

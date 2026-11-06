@@ -7,6 +7,17 @@ use objc2_metal::{MTLBuffer, MTLCommandBuffer, MTLCommandQueue};
 use serde_json::json;
 use std::{cell::Cell, collections::BTreeMap};
 
+/// Explicit ignored witness mode: trace, dense, q5, expert or quality.
+const PROBE_MODE_ENV: &str = "QWEN_SHORT_PROBE_MODE";
+/// External model fixture for the ignored short-append witness: 27b or a3b.
+const PROBE_MODEL_ENV: &str = "QWEN_SHORT_PROBE_MODEL";
+/// Optional comma-separated operator row counts for the ignored witness.
+const PROBE_ROWS_ENV: &str = "QWEN_SHORT_PROBE_ROWS";
+/// Frozen git revision supplying teacher-forcing texts; defaults to HEAD.
+const PROBE_CORPUS_REV_ENV: &str = "QWEN_SHORT_PROBE_CORPUS_REV";
+/// Optional prose/code selector to bound each value campaign; unset checks both.
+const PROBE_DOC_ENV: &str = "QWEN_SHORT_PROBE_DOC";
+
 thread_local! { static OVERRIDE: Cell<Option<bool>> = const { Cell::new(None) }; }
 pub(super) fn override_value() -> Option<bool> {
     OVERRIDE.with(Cell::get)
@@ -298,7 +309,7 @@ impl Dense {
     }
 }
 fn dense(ctx: &MetalContext, gg: &GgufFile, q5: bool) {
-    let ms = std::env::var("QWEN_SHORT_PROBE_ROWS").unwrap_or(
+    let ms = std::env::var(PROBE_ROWS_ENV).unwrap_or(
         if q5 {
             "128,129,276,512,513,769,1000,1023,1024,1300"
         } else {
@@ -359,7 +370,7 @@ fn dense(ctx: &MetalContext, gg: &GgufFile, q5: bool) {
 #[ignore = "external model/Metal short-append witness; opt-in only"]
 fn run_short_append_probe() {
     let _lease = crate::metal::acquire_metal_benchmark_lease().unwrap();
-    let file = match std::env::var("QWEN_SHORT_PROBE_MODEL")
+    let file = match std::env::var(PROBE_MODEL_ENV)
         .unwrap_or("27b".into())
         .as_str()
     {
@@ -371,7 +382,7 @@ fn run_short_append_probe() {
     let gg = GgufFile::open(path).unwrap();
     let model = Model::from_gguf(&gg).unwrap();
     let ctx = MetalContext::new().unwrap();
-    let mode = std::env::var("QWEN_SHORT_PROBE_MODE").unwrap_or("trace".into());
+    let mode = std::env::var(PROBE_MODE_ENV).unwrap_or("trace".into());
     if mode == "dense" || mode == "q5" {
         dense(&ctx, &gg, mode == "q5");
         return;
@@ -502,7 +513,7 @@ impl Expert<'_> {
 fn expert(ctx: &MetalContext, mm: &MetalModel) {
     let mf = MetalForward::new(ctx, mm);
     let mut fixtures = Vec::new();
-    let ms = std::env::var("QWEN_SHORT_PROBE_ROWS").unwrap_or("512,513,1024,1300,2048".into());
+    let ms = std::env::var(PROBE_ROWS_ENV).unwrap_or("512,513,1024,1300,2048".into());
     for m in ms.split(',').map(|s| s.parse::<usize>().unwrap()) {
         let mut sc = scratch(ctx, mm, m, m);
         let mut session = MetalSession::fresh(ctx, mm, m + 1).unwrap();
@@ -670,7 +681,7 @@ fn hash(data: &[u8]) -> String {
     format!("{:x}", Sha256::digest(data))
 }
 fn frozen(path: &str) -> String {
-    let rev = std::env::var("QWEN_SHORT_PROBE_CORPUS_REV").unwrap_or_else(|_| "HEAD".into());
+    let rev = std::env::var(PROBE_CORPUS_REV_ENV).unwrap_or_else(|_| "HEAD".into());
     let o = std::process::Command::new("git")
         .args(["show", &format!("{rev}:{path}")])
         .output()
@@ -758,6 +769,12 @@ fn compare_distribution(a: &[f32], b: &[f32], targets: &[i32], v: usize) -> Scor
     s
 }
 fn quality(ctx: &MetalContext, mm: &MetalModel, gg: &GgufFile) {
+    let selected_doc = std::env::var(PROBE_DOC_ENV).ok();
+    assert!(
+        selected_doc
+            .as_deref()
+            .is_none_or(|d| matches!(d, "code" | "prose"))
+    );
     let tok = crate::tokenizer::Tokenizer::from_gguf(gg).unwrap();
     let mf = MetalForward::new(ctx, mm);
     let h = mm.arch.hidden_size as usize;
@@ -775,6 +792,9 @@ fn quality(ctx: &MetalContext, mm: &MetalModel, gg: &GgufFile) {
             "crates/qwen-llm/src/metal_dflash.rs",
         ),
     ] {
+        if selected_doc.as_deref().is_some_and(|d| d != doc) {
+            continue;
+        }
         let prefix_text = frozen(prefix_path);
         let text = frozen(target_path);
         let prefix = tok.encode(&prefix_text, false).unwrap();

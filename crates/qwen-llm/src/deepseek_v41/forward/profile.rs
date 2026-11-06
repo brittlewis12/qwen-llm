@@ -29,6 +29,13 @@ pub struct Operation {
     pub invalid_gpu_timestamps: usize,
     /// Sum of valid completed-command durations only; None if none are valid.
     pub gpu_ms: Option<f64>,
+    /// Command-buffer GPU clock endpoints, when recorded by `submitted`.
+    /// Aggregated keys retain the first start and last end; counter-sampled
+    /// stage timestamps use a separate clock domain and do not fill these.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub gpu_first_start_s: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub gpu_last_end_s: Option<f64>,
     /// Metal kernelEndTime - kernelStartTime: CPU driver scheduling, not shader
     /// active time. Separate, potentially overlapping with GPU and commit/wait.
     /// Sum of valid completed pairs only; None means no valid pair was observed.
@@ -196,6 +203,8 @@ fn record(name: &'static str, dimensions: [usize; 4], update: impl FnOnce(&mut O
                     completed_submits: 0,
                     invalid_gpu_timestamps: 0,
                     gpu_ms: None,
+                    gpu_first_start_s: None,
+                    gpu_last_end_s: None,
                     driver_scheduling_ms: None,
                     invalid_driver_scheduling_timestamps: 0,
                     encode_ms: 0.0,
@@ -223,6 +232,8 @@ pub(super) fn submitted(
             op.completed_submits += 1;
             if let Some(ms) = timestamp_duration_ms(start, end) {
                 *op.gpu_ms.get_or_insert(0.0) += ms;
+                op.gpu_first_start_s = Some(op.gpu_first_start_s.map_or(start, |s| s.min(start)));
+                op.gpu_last_end_s = Some(op.gpu_last_end_s.map_or(end, |e| e.max(end)));
             } else {
                 op.invalid_gpu_timestamps += 1;
             }
@@ -318,6 +329,10 @@ mod tests {
         assert_eq!(op.invalid_driver_scheduling_timestamps, 1);
         assert_eq!(op.driver_scheduling_ms, Some(750.0));
         assert_eq!(op.gpu_ms, Some(375.0));
+        assert_eq!(op.gpu_first_start_s, Some(3.0));
+        assert_eq!(op.gpu_last_end_s, Some(3.125));
+        assert_eq!(report.operations[1].gpu_first_start_s, None);
+        assert_eq!(report.operations[1].gpu_last_end_s, None);
         assert_eq!(op.commit_wait_ms, 40.0);
         let json = serde_json::to_value(&report).unwrap();
         assert_eq!(json["operations"][0]["driver_scheduling_ms"], 750.0);

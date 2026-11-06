@@ -1301,6 +1301,9 @@ impl Workspace {
         let mut committed: Vec<
             objc2::rc::Retained<objc2::runtime::ProtocolObject<dyn objc2_metal::MTLCommandBuffer>>,
         > = Vec::new();
+        // Opt-in clocks on the existing production submissions. These do not
+        // introduce encoders, barriers, commands or waits.
+        let mut submit_times = started.map(|_| Vec::with_capacity(3));
         let encoded = (|| -> Result<()> {
             let segments = [
                 (0..lead, false, false),
@@ -1310,6 +1313,11 @@ impl Workspace {
             for (index, (range, engram_projection, head)) in segments.into_iter().enumerate() {
                 if index == 1 {
                     // The lead layers are running; read this token's rows.
+                    let _engram = profile::Wall(
+                        "decode_engram_rows",
+                        [position, self.engrams.len(), 0, 0],
+                        profile::start(),
+                    );
                     let layers: Vec<usize> = self.engrams.iter().map(|slot| slot.layer).collect();
                     let values = model.engram_rows.decode_layers(&layers, rows)?;
                     for (slot, values) in self.engrams.iter().zip(values) {
@@ -1319,6 +1327,7 @@ impl Workspace {
                 if range.is_empty() && !engram_projection && !head {
                     continue;
                 }
+                let segment_started = profile::start();
                 let command = ctx
                     .queue
                     .commandBuffer()
@@ -1369,6 +1378,14 @@ impl Workspace {
                 })();
                 stages.end();
                 segment?;
+                if let (Some(times), Some(started)) = (&mut submit_times, segment_started) {
+                    times.push((
+                        index,
+                        range.start,
+                        range.end,
+                        started.elapsed().as_secs_f64() * 1000.0,
+                    ));
+                }
                 command.commit();
                 committed.push(command);
             }
@@ -1384,15 +1401,32 @@ impl Workspace {
                 waited = Err(error.to_string());
             }
         }
+        let wait_ms = submit_times
+            .as_ref()
+            .map(|_| wait.elapsed().as_secs_f64() * 1000.0);
+        if let Some(times) = submit_times {
+            for ((index, start, end, encode_ms), command) in times.into_iter().zip(&committed) {
+                profile::submitted_with_driver_scheduling(
+                    "decode_submit",
+                    [position, index, start, end],
+                    encode_ms,
+                    0.0,
+                    encoded.is_ok() && waited.is_ok(),
+                    command.GPUStartTime(),
+                    command.GPUEndTime(),
+                    || (command.kernelStartTime(), command.kernelEndTime()),
+                );
+            }
+        }
         self.commands += committed.len();
-        if let (Some(encode_ms), Some(first), Some(last)) =
-            (encode_ms, committed.first(), committed.last())
+        if let (Some(encode_ms), Some(wait_ms), Some(first), Some(last)) =
+            (encode_ms, wait_ms, committed.first(), committed.last())
         {
             profile::submitted_with_driver_scheduling(
                 "gpu_step",
                 [position, 0, end, 0],
                 encode_ms,
-                wait.elapsed().as_secs_f64() * 1000.0,
+                wait_ms,
                 encoded.is_ok() && waited.is_ok(),
                 first.GPUStartTime(),
                 last.GPUEndTime(),

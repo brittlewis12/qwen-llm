@@ -27,6 +27,12 @@ use qwen_llm::qwen4exp_runtime::{
     Qwen4ExpLoadedModel, Qwen4ExpSessionCapacity, Qwen4ExpTextRunner,
 };
 
+/// Default off; presence emits each V4.1 decode step's unsplit timings as
+/// JSON. Includes the existing command buffers' GPU clock endpoints, encode
+/// and driver intervals, so gaps/overlap can be computed without splitting
+/// encoders. Stage or dispatch profiling takes priority. Read per step.
+const V41_DECODE_TIMING_ENV: &str = "QWEN_V41_DECODE_TIMING";
+
 /// What one family's timed calls executed, recorded on every row.
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct FamilySemantics {
@@ -262,7 +268,7 @@ pub(crate) fn with_family_bench_planned<R>(
                         Some(Scope::begin_dispatches())
                     } else if env("QWEN_V41_DECODE_STAGES") {
                         Some(Scope::begin_stages())
-                    } else if env("QWEN_V41_DECODE_TIMING") {
+                    } else if env(V41_DECODE_TIMING_ENV) {
                         Some(Scope::begin())
                     } else {
                         None
@@ -332,6 +338,10 @@ pub(crate) fn with_family_bench_planned<R>(
                             })
                         );
                     } else if let Some(report) = report {
+                        if !env("QWEN_V41_DECODE_STAGES") {
+                            eprintln!("[v41-decode-timing] {}", serde_json::json!(report));
+                            return Ok(logits);
+                        }
                         eprintln!(
                             "[v41-decode-stages] wall_ms={:.3} pageins={:?} disk_read_bytes={:?}",
                             report.token_wall_ms,

@@ -653,8 +653,10 @@ TT_INSTANTIATE_FN_DENSE_WIDE(iq4_xs, QT_IQ4_XS_BYTES, QT_IQ4_XS_NL, qt_dequantiz
 TT_INSTANTIATE_FN_DENSE_WIDE(iq4_nl, QT_IQ4_NL_BYTES, QT_IQ4_NL_NL, qt_dequantize_iq4_nl)
 
 // Explicit V4.1 projections; the shared automatic selector stays Q8_0-only.
-TT_INSTANTIATE_FN_DENSE_WIDE(q5_K, QT_Q5_K_BYTES, QT_Q5_K_NL, qt_dequantize_q5_K)
-TT_INSTANTIATE_FN_DENSE_WIDE(f16, QT_F16_BYTES, QT_F16_NL, qt_dequantize_f16)
+template [[host_name("kernel_mat_mat_q5_K_f16act_tensor_wide")]]
+kernel mat_mat_tensor_wide_f16act_t kernel_mat_mat_tensor_wide_f16act<QT_Q5_K_BYTES, QT_Q5_K_NL, qt_dequantize_q5_K>;
+template [[host_name("kernel_mat_mat_f16_f16act_tensor_wide")]]
+kernel mat_mat_tensor_wide_f16act_t kernel_mat_mat_tensor_wide_f16act<QT_F16_BYTES, QT_F16_NL, qt_dequantize_f16>;
 
 // 64-slot gate/up probe tile, one instantiation per generic dtype.
 typedef decltype(kernel_moe_wide_probe_f16act<QT_Q4_K_BYTES, QT_Q4_K_NL, qt_dequantize_q4_K>) moe_wide_probe_t;

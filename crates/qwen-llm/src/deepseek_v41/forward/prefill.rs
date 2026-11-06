@@ -474,8 +474,9 @@ crate::env_flag!(
     /// Use 64-row tensor tiles for measured M5 Ultra V4.1 Q5_K projections
     /// and their resident F16 caches. Half operands and ascending K32 sums
     /// are unchanged; `=0` restores the 32-row tiles. No cache threshold or
-    /// allocation changes. Experimental until whole-call qualification.
-    default_off dense_wide_enabled,
+    /// allocation changes. Qualified with whole-append ABBA and bitwise
+    /// full-vocabulary teacher-forced continuation checks.
+    default_on dense_wide_enabled,
     "QWEN_V41_DENSE_WIDE"
 );
 

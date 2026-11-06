@@ -6,6 +6,56 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the current state and evidence index.
 
+## 2026-11-06 - V4.1 Short Routed Tile: Operator Win, Whole-Append Kill
+
+- **Not shipped.** Frozen screen **`68838908`**, reverted **`60832588`**.
+  M5 Ultra, SDK 27 Metal 4.0, same full GSQ-RCO artifact. A dedicated
+  16-slot x 64-output, two-SIMD IQ2_XXS gate/up tile uses 5120 B shared
+  memory versus the existing 32-slot/four-SIMD/8192 B tile. Same half
+  operands, ascending K32 F32 sums and clamped epilogue. This differs from
+  the older failed 16x32 proposal. No persistent buffers or quantization
+  changes. Prototype selected only H5120/F2304/E384/top6, 512-row appends
+  on this device; buckets above sixteen retained the existing tile.
+- Cheap synthetic native-bank operator ABBA, K5120/M2304/E384/top6,
+  separate gate and clamped-up, all eight retained samples/policy/count:
+  uniform eight-route median **6910.708 -> 4886.479 us (1.41425x)**;
+  sixteen routes **1.33298x**; twenty-four routes **0.72832x**, hence the
+  hybrid. Outputs are finite and bitwise equal, output guards intact.
+  These favorable uniform counts establish no real-routing model speedup.
+- Prespecified whole-call bar **>=1.05x pp512**, <=1% regression for the
+  unchanged 4K control. Ordinary Full 8K prefix once/process, immutable
+  snapshot restored outside each timer, production prefill plus full logits
+  copy; separate-process ABBA, one excluded warm call and two retained
+  calls/width/arm. All samples retained:
+
+  | Append at 8K | Off median ms | On median ms | Speedup |
+  | ---: | ---: | ---: | ---: |
+  | 512 | 563.881 | 551.679 | 1.02212x |
+  | 4096 | 3053.317 | 3042.108 | 1.00368x |
+
+  Warm-only census proves **58 short dispatches**, total **2354 -> 2412**
+  at 512; zero short dispatches and **4594** total at 4096 under both
+  policies. Every endpoint hash matches. With real routing, the extra
+  dispatches and the rest of the append included, the isolated win becomes
+  **12.2 ms whole-call savings**, below the bar. Removed the shader, switch
+  and rollout exception; no
+  further campaign on this candidate. Build lock, nice 10, canonical lease,
+  30 s arm cooldown, thermal pressure 0 throughout.
+- Decode attribution, unchanged production **`2af73aad`**, unsplit
+  `--tg 8 --depth 8192 --runs 1` with timing/census only: **888 / 894
+  dispatches/token** at depth, not the historical ~2000. Eight retained
+  steps have median wall **13.601 ms**, GPU span **12.949 ms**, median
+  per-step difference **0.692 ms**, including host census work. Retain the
+  **25.726 ms** host hiccup with **12.879 ms GPU**; profiled tg8
+  **65.614 tok/s** is not a replacement for the unprofiled tg64 standing.
+  This prices the limited remaining CPU-overlap opportunity, not GPU
+  fusion's ceiling. No decode change is promoted. The first `--pp 0`
+  diagnostic was rejected before inference; its receipt is retained.
+- Final Rust, Metal, scripts and ENV content equals qualified **`2af73aad`**;
+  the Engram fix and its 2439-pass/full-contract/quality evidence below
+  remain the production change. Raw source, plans, samples, census and
+  failures share `metagross:~/qwen-runs/2026-11-06-v41-roofline2/`.
+
 ## 2026-11-06 - V4.1 Depth Append Tail: Earlier Engram Read-Ahead
 
 - Screen **`c2abc565`**, production **`2af73aad`**, M5 Ultra, same full

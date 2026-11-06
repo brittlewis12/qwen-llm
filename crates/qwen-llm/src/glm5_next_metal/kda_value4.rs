@@ -27,7 +27,11 @@ mod tests {
         for rows in [1024, 2048] {
             assert_eq!(selected(half, 64, rows), enabled());
         }
-        for rows in [0, 1, 8, 512, 1023, 1025, 2047, 2049, 4096] {
+        assert_eq!(
+            selected(half, 64, 512),
+            enabled() && crate::glm5_next_metal::short_prefill::enabled()
+        );
+        for rows in [0, 1, 8, 511, 513, 1023, 1025, 2047, 2049, 4096] {
             assert!(!selected(half, 64, rows));
         }
         for heads in [1, 32, 128] {
@@ -38,6 +42,7 @@ mod tests {
                 let arith = Arith { lineage, precision };
                 if arith != half {
                     assert!(!selected(arith, 64, 2048));
+                    assert!(!selected(arith, 64, 512));
                 }
             }
         }

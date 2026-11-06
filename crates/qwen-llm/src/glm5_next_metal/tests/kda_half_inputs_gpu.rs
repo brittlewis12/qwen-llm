@@ -422,7 +422,7 @@ fn m5_kda_half_complete_eight_op_fanout_bitwise_and_full_copy_cost() {
             assert_eq!(census.len(), 2);
             assert_eq!(
                 census[1].kernel,
-                Tile::selected(dtype)
+                Tile::selected_for_rows(dtype, rows)
                     .pipeline_for(dtype, metal::TensorActivation::F16)
                     .unwrap()
             );

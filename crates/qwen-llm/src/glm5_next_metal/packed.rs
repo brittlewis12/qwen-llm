@@ -2765,7 +2765,9 @@ mod down_policy_tests {
     #[test]
     fn iq3_s_down_policy_uses_actual_command_width_and_fast_lineage() {
         for rows in 0..=2048 {
-            let expected = if matches!(rows, 1024 | 2048) {
+            let expected = if rows == 512 && super::super::short_prefill::enabled() {
+                GroupedDownPolicy::Iq3STensorOrSmallCounts
+            } else if matches!(rows, 1024 | 2048) {
                 GroupedDownPolicy::Iq3STensor
             } else if (32..=512).contains(&rows) {
                 GroupedDownPolicy::Iq3SSmallCounts

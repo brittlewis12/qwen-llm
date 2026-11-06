@@ -328,7 +328,7 @@ pub fn mat_mat_tensor_q6_wide_pipeline_name(
 enum DenseTile {
     Narrow,
     WideQ8,
-    FlashNextWide,
+    ExplicitQuantWide,
 }
 
 /// Dense `y[row] = W x[row]` on the tensor tile with the `mat_mat`
@@ -420,7 +420,7 @@ pub fn encode_mat_mat_tensor_f32_flash_next_wide(
         n_in,
         n_out,
         n_query,
-        DenseTile::FlashNextWide,
+        DenseTile::ExplicitQuantWide,
     )
 }
 
@@ -450,7 +450,7 @@ pub fn encode_mat_mat_tensor_f32_q6_wide(
         n_in,
         n_out,
         n_query,
-        DenseTile::FlashNextWide,
+        DenseTile::ExplicitQuantWide,
     )
 }
 
@@ -544,7 +544,7 @@ fn encode_mat_mat_tensor_f32_impl(
     let wide_name = match tile {
         DenseTile::Narrow => None,
         DenseTile::WideQ8 => mat_mat_tensor_wide_pipeline_name(weight.dtype, activation),
-        DenseTile::FlashNextWide => matches!(
+        DenseTile::ExplicitQuantWide => matches!(
             weight.dtype,
             GgmlType::Q4_K | GgmlType::Q6_K | GgmlType::IQ4_XS | GgmlType::IQ4_NL
         )

@@ -23,6 +23,33 @@ const HALF: Arith = Arith {
 };
 
 #[test]
+fn cpu_short_q6_wide_is_explicit_and_keeps_shared_q8_capability() {
+    for activation in [metal::TensorActivation::F32, metal::TensorActivation::F16] {
+        assert!(metal::mat_mat_tensor_wide_pipeline_name(GgmlType::Q6_K, activation).is_none());
+        assert!(metal::mat_mat_tensor_q6_wide_pipeline_name(GgmlType::Q8_0, activation).is_none());
+        assert!(
+            metal::mat_mat_tensor_q6_wide_pipeline_name(GgmlType::Q6_K, activation)
+                .unwrap()
+                .ends_with("tensor_wide")
+        );
+    }
+    for rows in [1, 511, 513, 1023, 1025, 2048, 4096] {
+        assert_eq!(Tile::selected_for_rows(GgmlType::Q6_K, rows), Tile::Narrow);
+    }
+    for rows in [512, 1024] {
+        assert_eq!(
+            Tile::selected_for_rows(GgmlType::Q6_K, rows),
+            if crate::glm5_next_metal::short_prefill::enabled() {
+                Tile::Q6Wide
+            } else {
+                Tile::Narrow
+            }
+        );
+    }
+    assert_eq!(Tile::Q6Wide.threadgroup_bytes(), 16384);
+}
+
+#[test]
 fn cpu_policy_requires_ordinary_half_fast_resolved_mode_and_native_types() {
     let _scope = Scope::new(true);
     let _wide = Q8WideScope::new(true);
@@ -66,11 +93,11 @@ fn cpu_policy_row_boundary_matches_production_not_q6_test_n64_threshold() {
     let _wide = Q8WideScope::new(true);
     for dtype in [GgmlType::Q6_K, GgmlType::Q8_0] {
         for n in [
-            0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 32, 64, 512, 1023, 1024, 1025, 2048,
+            0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 32, 64, 511, 512, 513, 1023, 1024, 1025, 2048,
         ] {
             assert_eq!(
                 eligible(HALF, StageMode::Fast, dtype, 4096, 65, n).unwrap(),
-                n >= 1024
+                n >= 1024 || (n == 512 && crate::glm5_next_metal::short_prefill::enabled())
             );
         }
     }
@@ -124,7 +151,7 @@ fn cpu_geometry_uses_storage_layout_at_actual_shapes_and_genuine_m_tail() {
             (4096, 1536),
             (256, 65),
         ] {
-            for n in [1024, 2048] {
+            for n in [512, 1024, 2048] {
                 assert_eq!(
                     geometry(dtype, k, m, n).unwrap(),
                     Geometry {
@@ -564,9 +591,9 @@ fn m5_glm_shapes_baseline_vs_tensor_and_f64_oracles() {
             (256, 65),
         ] {
             let counts: &[usize] = if m == 65 {
-                &[1024, 1025, 2048]
+                &[512, 1024, 1025, 2048]
             } else {
-                &[1024, 2048]
+                &[512, 1024, 2048]
             };
             for &n in counts {
                 let f = Fixture::new(&ctx, dtype, k, m, n);
@@ -574,7 +601,11 @@ fn m5_glm_shapes_baseline_vs_tensor_and_f64_oracles() {
                 let baseline = run(&ctx, |enc| f.encode(&ctx, enc, false));
                 assert_eq!(baseline.len(), 1);
                 let expected = match dtype {
-                    GgmlType::Q6_K if m.is_multiple_of(64) => "kernel_mat_mat_q6_K_f32_n64",
+                    GgmlType::Q6_K
+                        if m.is_multiple_of(64) && n >= metal::mat_mat_q6_k_n64_min_query() =>
+                    {
+                        "kernel_mat_mat_q6_K_f32_n64"
+                    }
                     GgmlType::Q6_K => "kernel_mat_mat_q6_K_f32",
                     _ => "kernel_mat_mat_q8_0_f32",
                 };
@@ -587,18 +618,27 @@ fn m5_glm_shapes_baseline_vs_tensor_and_f64_oracles() {
                 f.poison_output();
                 let candidate = run(&ctx, |enc| f.encode(&ctx, enc, true));
                 assert_eq!(candidate.len(), 1);
-                assert_eq!(
-                    candidate[0].kernel,
+                let wide = dtype == GgmlType::Q6_K
+                    && matches!(n, 512 | 1024)
+                    && crate::glm5_next_metal::short_prefill::enabled();
+                let expected = if wide {
+                    "kernel_mat_mat_q6_K_f32_tensor_wide".to_owned()
+                } else {
                     metal::mat_mat_tensor_pipeline_name(dtype, metal::TensorActivation::F32)
                         .unwrap()
-                );
+                };
+                assert_eq!(candidate[0].kernel, expected);
                 assert_eq!(
                     [
                         candidate[0].grid_width,
                         candidate[0].grid_height,
                         candidate[0].grid_depth
                     ],
-                    [n.div_ceil(32) as u64, m.div_ceil(64) as u64, 1]
+                    [
+                        n.div_ceil(if wide { 64 } else { 32 }) as u64,
+                        m.div_ceil(64) as u64,
+                        1
+                    ]
                 );
                 assert_eq!(candidate[0].threads_width, 128);
                 let b = read(&f.y);
@@ -610,6 +650,20 @@ fn m5_glm_shapes_baseline_vs_tensor_and_f64_oracles() {
                         .zip(&b)
                         .all(|(&a, &b)| (a - b).abs() <= 2e-3 * scale + 1e-5)
                 );
+                if wide {
+                    run(&ctx, |enc| {
+                        metal::encode_mat_mat_tensor_f32_narrow(
+                            &ctx, enc, &f.w, &f.x, &f.y, k, m, n,
+                        )
+                        .unwrap()
+                    });
+                    let narrow = read(&f.y);
+                    assert_eq!(
+                        narrow.iter().map(|x| x.to_bits()).collect::<Vec<_>>(),
+                        b.iter().map(|x| x.to_bits()).collect::<Vec<_>>(),
+                        "wide Q6 must retain narrow bits"
+                    );
+                }
             }
         }
     }

@@ -70,7 +70,9 @@ fn cpu_down_policy_protects_all_arithmetic_modes_types_and_actual_rows() {
                         let expected = arith == HALF
                             && mode == StageMode::Fast
                             && dtype == GgmlType::IQ3_S
-                            && matches!(rows, 1024 | 2048);
+                            && (matches!(rows, 1024 | 2048)
+                                || (rows == 512
+                                    && crate::glm5_next_metal::short_prefill::enabled()));
                         assert_eq!(
                             selected(arith, mode, dtype, rows),
                             expected,
@@ -79,10 +81,21 @@ fn cpu_down_policy_protects_all_arithmetic_modes_types_and_actual_rows() {
                         let policy = packed::grouped_down_policy(
                             arith, mode, dtype, 2048, 4096, 288, TOP, rows,
                         );
-                        assert_eq!(policy == GroupedDownPolicy::Iq3STensor, expected);
+                        assert_eq!(
+                            matches!(
+                                policy,
+                                GroupedDownPolicy::Iq3STensor
+                                    | GroupedDownPolicy::Iq3STensorOrSmallCounts
+                            ),
+                            expected
+                        );
+                        if expected && rows == 512 {
+                            assert_eq!(policy, GroupedDownPolicy::Iq3STensorOrSmallCounts);
+                        }
                         if arith.lineage == PackedLineage::Fast
                             && dtype == GgmlType::IQ3_S
                             && (32..=512).contains(&rows)
+                            && !expected
                         {
                             assert_eq!(policy, GroupedDownPolicy::Iq3SSmallCounts);
                         }
@@ -667,6 +680,7 @@ fn m5_down_real_and_older_shapes_generic_tensor_f64_and_weighted_output() {
     let ctx = MetalContext::new().expect("Metal required, never silently skipped");
     require_m5(&ctx);
     for (k, m, e, rows) in [
+        (2048, 4096, 288, 512),
         (2048, 4096, 288, 1024),
         (2048, 4096, 288, 2048),
         (2048, 6144, 256, 1024),

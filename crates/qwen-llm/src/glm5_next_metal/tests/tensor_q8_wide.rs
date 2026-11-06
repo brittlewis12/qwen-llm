@@ -94,6 +94,19 @@ fn qualify(f: &Fixture, ctx: &MetalContext) {
     }
 }
 
+#[test]
+#[ignore = "M5 short-append numerical witness, Metal validation ON, production lease"]
+fn m5_glm_short_q8_wide_f64_and_guards() {
+    let _lease = validation_lease();
+    let ctx = MetalContext::new().unwrap();
+    require_m5(&ctx);
+    for (k, m) in [(4096, 8192), (8192, 4096), (1536, 16384), (4096, 1536)] {
+        let f = Fixture::new(&ctx, GgmlType::Q8_0, k, m, 512);
+        check_invalid_bindings(&f, &ctx);
+        qualify(&f, &ctx);
+    }
+}
+
 fn timed(f: &Fixture, ctx: &MetalContext, wide: bool) -> (f64, f64) {
     const REPEATS: usize = 4;
     let start = std::time::Instant::now();

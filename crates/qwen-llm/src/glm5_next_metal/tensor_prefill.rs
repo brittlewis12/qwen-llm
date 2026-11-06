@@ -17,12 +17,6 @@ const DEFAULT_ENABLED: bool = true;
 const THREADGROUP_BYTES: usize = 8192;
 
 crate::env_flag!(
-    /// Opt-in wider existing Q6_K tensor tile for M5 Fast/Half 512/1024-row appends, subordinate to the short-prefill rollback. Identical operands and F32 sums; no additional GPU allocation.
-    default_off short_q6_wide_enabled,
-    "QWEN_GLM53_SHORT_Q6_WIDE"
-);
-
-crate::env_flag!(
     /// Default-on GLM dense Q8_0 64-slot TensorOps prefill on eligible M5 Fast/Half; 0 restores the previous narrow tile. Does not bypass Half/Fast, row, tier, binding, or global rollback guards.
     default_on q8_wide_enabled,
     "QWEN_GLM53_DENSE_Q8_WIDE"
@@ -75,10 +69,7 @@ enum Tile {
 
 impl Tile {
     fn selected_for_rows(dtype: GgmlType, rows: usize) -> Self {
-        if dtype == GgmlType::Q6_K
-            && matches!(rows, 512 | 1024)
-            && super::short_prefill::enabled()
-            && short_q6_wide_enabled()
+        if dtype == GgmlType::Q6_K && matches!(rows, 512 | 1024) && super::short_prefill::enabled()
         {
             Self::Q6Wide
         } else {
@@ -203,7 +194,8 @@ fn geometry(dtype: GgmlType, k: usize, m: usize, n: usize) -> Result<Geometry, M
 }
 
 /// Resolved mode is load-bearing: stage-local Exact/F32 diagnostics still win
-/// even in an ordinary Half session. Short packets never reach new checks.
+/// even in an ordinary Half session. Unselected small/ragged packets never
+/// reach new checks.
 pub(super) fn eligible(
     arith: Arith,
     mode: StageMode,

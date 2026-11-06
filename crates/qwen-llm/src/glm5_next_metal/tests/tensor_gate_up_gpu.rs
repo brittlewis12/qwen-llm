@@ -230,6 +230,18 @@ impl Tiny {
 
     fn encode(&self, ctx: &MetalContext, enc: &KernelEncoder, lane: usize, limit: f32) {
         let b = Self::bindings(&self.tensors, &self.status);
+        if lane == 3 {
+            let policy = if self.rows == 512 && b.down_bank.dtype == GgmlType::IQ3_S {
+                GroupedDownPolicy::Iq3STensorOrSmallCounts
+            } else {
+                self.policy()
+            };
+            encode_grouped_routed_experts_with_tensor_gate_up(
+                ctx, enc, &b, H, F, E, TOP, self.rows, limit, policy,
+            )
+            .unwrap();
+            return;
+        }
         if lane == 2 {
             gate_adapter::prepare(
                 ctx,
@@ -450,13 +462,13 @@ fn m5_gate_up_native_compositions_tensor_f32_f16_bitwise_and_sampled_f64() {
         (GgmlType::IQ3_S, GgmlType::IQ3_S),
         (GgmlType::IQ3_S, GgmlType::IQ4_XS),
     ] {
-        for rows in [129, 1024, 2048] {
+        for rows in [129, 512, 1024, 2048] {
             objc2::rc::autoreleasepool(|_| {
                 let f = Tiny::new(&ctx, gate, down, rows);
                 let before: Vec<_> = f.tensors[..6].iter().map(fingerprint).collect();
                 for limit in [0.0001, 0.03, 7.0] {
                     let mut tensor_reference = None;
-                    for lane in 0..3 {
+                    for lane in 0..4 {
                         for t in &f.tensors[6..] {
                             poison(t);
                         }
@@ -519,6 +531,13 @@ fn m5_gate_up_native_compositions_tensor_f32_f16_bitwise_and_sampled_f64() {
                                     .all(|&b| b == 0xff),
                                 "inactive admitted Half rows were written"
                             );
+                        } else if lane == 3 {
+                            assert_eq!(tensor_reference.as_ref().unwrap(), &result);
+                            assert_eq!(census.len(), 5);
+                            assert_eq!(census[0].kernel, "kernel_moe_route_bucket_slots_f32");
+                            assert!(census[1].kernel.contains("f32_grouped_slots_tensor"));
+                            assert!(census[2].kernel.contains("up_clamped"));
+                            assert_eq!(census[4].kernel, "kernel_moe_weighted_sum_packed_f32");
                         }
                         for t in &f.tensors {
                             guards(t);

@@ -8,6 +8,76 @@ const HALF: Arith = Arith {
 };
 
 #[test]
+fn cpu_short_gate_preserves_exact_f32_and_geometry_contracts() {
+    let _scope = memory::TensorGateUpScope::new(true);
+    let shape = (4096, 2048, 288, 8);
+    for dtype in [GgmlType::IQ2_S, GgmlType::IQ3_S] {
+        assert_eq!(
+            short_selected(HALF, StageMode::Fast, dtype, dtype, shape, 512),
+            crate::glm5_next_metal::short_prefill::enabled() && iq_tensor_gate_up_enabled()
+        );
+        for rows in [0, 1, 8, 511, 513, 1024, 2048] {
+            assert!(!short_selected(
+                HALF,
+                StageMode::Fast,
+                dtype,
+                dtype,
+                shape,
+                rows
+            ));
+        }
+        for mode in [StageMode::Exact, StageMode::FastF32] {
+            assert!(!short_selected(HALF, mode, dtype, dtype, shape, 512));
+        }
+        for lineage in [PackedLineage::Fast, PackedLineage::Exact] {
+            for precision in FastPrecision::ALL {
+                let arith = Arith { lineage, precision };
+                if arith != HALF {
+                    assert!(!short_selected(
+                        arith,
+                        StageMode::Fast,
+                        dtype,
+                        dtype,
+                        shape,
+                        512
+                    ));
+                }
+            }
+        }
+    }
+    for (gate, up) in [
+        (GgmlType::Q4_K, GgmlType::Q4_K),
+        (GgmlType::IQ2_S, GgmlType::IQ3_S),
+        (GgmlType::F32, GgmlType::F32),
+    ] {
+        assert!(!short_selected(HALF, StageMode::Fast, gate, up, shape, 512));
+    }
+    for other in [
+        (4096, 2048, 288, 4),
+        (4096, 2048, 256, 8),
+        (2048, 2048, 288, 8),
+    ] {
+        assert!(!short_selected(
+            HALF,
+            StageMode::Fast,
+            GgmlType::IQ2_S,
+            GgmlType::IQ2_S,
+            other,
+            512
+        ));
+    }
+    let _off = memory::TensorGateUpScope::new(false);
+    assert!(!short_selected(
+        HALF,
+        StageMode::Fast,
+        GgmlType::IQ2_S,
+        GgmlType::IQ2_S,
+        shape,
+        512
+    ));
+}
+
+#[test]
 fn cpu_gate_up_selection_protects_modes_dtypes_rows_and_production_geometry() {
     let _scope = memory::TensorGateUpScope::new(true);
     for lineage in [PackedLineage::Fast, PackedLineage::Exact] {

@@ -193,10 +193,19 @@ pub(crate) fn with_family_bench_planned<R>(
                           ids: &[u32],
                           execution| {
                     shutdown::checkpoint()?;
-                    // Measurement hook (not a product flag): per-layer sampled
-                    // stage envelopes for one prefill, printed to stderr.
-                    let scope = std::env::var_os("QWEN_V41_PREFILL_STAGES")
-                        .map(|_| qwen_llm::deepseek_v41::forward::profile::Scope::begin_stages())
+                    // Timing keeps the production command/encoder graph. Stage
+                    // sampling takes priority and has its own overhead.
+                    let stages = std::env::var_os("QWEN_V41_PREFILL_STAGES").is_some();
+                    let timing = std::env::var_os("QWEN_V41_PREFILL_TIMING").is_some();
+                    let start = state.position();
+                    let scope = (stages || timing)
+                        .then(|| {
+                            if stages {
+                                qwen_llm::deepseek_v41::forward::profile::Scope::begin_stages()
+                            } else {
+                                qwen_llm::deepseek_v41::forward::profile::Scope::begin()
+                            }
+                        })
                         .transpose()
                         .map_err(anyhow::Error::msg)?;
                     let result = forward
@@ -209,6 +218,13 @@ pub(crate) fn with_family_bench_planned<R>(
                         .map_err(anyhow::Error::from)?;
                     if let Some(scope) = scope {
                         let report = scope.finish();
+                        if !stages {
+                            eprintln!(
+                                "[v41-prefill-timing] {}",
+                                serde_json::json!({"start": start, "rows": ids.len(), "report": report})
+                            );
+                            return Ok(result);
+                        }
                         eprintln!(
                             "[v41-prefill-stages] rows={} wall_ms={:.3}",
                             ids.len(),

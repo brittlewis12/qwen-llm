@@ -2284,8 +2284,8 @@ impl Glm5NextSession<'_> {
             out: &v(&p.kda_out),
         };
         let profiling = self.stage_recorder.borrow().is_some();
-        if profiling {
-            let prepared = crate::metal::prepare_kda_prefill(
+        if profiling || super::kda_value4::selected(p.arith(), c.head_count as usize, rows) {
+            let mut prepared = crate::metal::prepare_kda_prefill(
                 ctx,
                 enc,
                 c.head_count as usize,
@@ -2294,6 +2294,9 @@ impl Glm5NextSession<'_> {
                 c.kda_gate_lower_bound,
                 c.rms_epsilon,
             )?;
+            if super::kda_value4::selected(p.arith(), c.head_count as usize, rows) {
+                prepared.select_value4(ctx)?;
+            }
             self.stage(enc, Glm5NextStage::PackedKdaPrepare, Some(block))?;
             prepared.encode_prepare(enc)?;
             self.stage(enc, Glm5NextStage::PackedKdaRecurrence, Some(block))?;

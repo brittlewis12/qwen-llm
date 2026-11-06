@@ -2416,6 +2416,7 @@ mod checkpoint;
 mod dflash;
 mod interventions;
 mod kda_half_inputs;
+mod kda_value4;
 mod lens;
 mod packed;
 pub mod prefill_plan;

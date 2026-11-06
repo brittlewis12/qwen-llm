@@ -221,6 +221,7 @@ pub(crate) struct PreparedKdaPrefill<'a, 'b> {
     args: KdaPrefillArgs,
     prepare: Pipeline,
     recurrence: Pipeline,
+    values_per_lane: usize,
     output: Pipeline,
 }
 
@@ -324,11 +325,27 @@ pub(crate) fn prepare_kda_prefill<'a, 'b>(
         args,
         prepare: pipeline("kernel_glm53_kda_prefill_prepare")?,
         recurrence: pipeline("kernel_glm53_kda_prefill_recurrence")?,
+        values_per_lane: 1,
         output: pipeline("kernel_glm53_kda_prefill_output")?,
     })
 }
 
 impl PreparedKdaPrefill<'_, '_> {
+    /// Reuse the validated F32 bindings; no allocation or encoder mutation.
+    /// The owner supplies arithmetic/shape policy. Unsupported PSOs keep the
+    /// incumbent recurrence, including on devices without the tensor tier.
+    pub(crate) fn select_value4(&mut self, ctx: &MetalContext) -> Result<(), MetalError> {
+        if !ctx.tensor_ops_status().is_available() {
+            return Ok(());
+        }
+        let pso = ctx.pipeline("kernel_glm53_kda_prefill_recurrence_value4")?;
+        if pso.threadExecutionWidth() == 32 && pso.maxTotalThreadsPerThreadgroup() >= THREADS {
+            self.recurrence = pso;
+            self.values_per_lane = 4;
+        }
+        Ok(())
+    }
+
     pub(crate) fn encode_prepare(&self, enc: &KernelEncoder) -> Result<(), MetalError> {
         require_serial("kda_prefill", enc)?;
         let b = self.b;
@@ -382,7 +399,7 @@ impl PreparedKdaPrefill<'_, '_> {
         enc.dispatch(
             MTLSize {
                 width: self.args.n_heads as usize,
-                height: KDA_HEAD_DIM / 4,
+                height: KDA_HEAD_DIM / (4 * self.values_per_lane),
                 depth: 1,
             },
             MTLSize {
@@ -425,6 +442,97 @@ mod tests {
     use super::super::test_support::{offset_tensor, tensor_f32_at_offset};
     use super::*;
     use crate::glm5_next::oracle::{KdaStepInput, KdaWeights, kda_decode_step};
+
+    #[test]
+    fn kda_value4_recurrence_matches_bits_with_carry_and_decay_edges() {
+        let Some(ctx) = crate::test_fixtures::metal_context_or_skip() else {
+            return;
+        };
+        if !ctx.tensor_ops_status().is_available() {
+            return;
+        }
+        const HEADS: usize = 2;
+        let width = HEADS * KDA_HEAD_DIM;
+        for rows in [1usize, 7, 37, 1024, 2048] {
+            let shape = vec![width as u64, rows as u64];
+            let q = tensor(&ctx, &series(width * rows, 1, 0.05), shape.clone());
+            let k = tensor(&ctx, &series(width * rows, 2, 0.2), shape.clone());
+            let v = tensor(&ctx, &series(width * rows, 3, 2.0), shape.clone());
+            let decay = tensor(
+                &ctx,
+                &(0..width * rows)
+                    .map(|i| match (i / width + i % width) % 17 {
+                        0 => 0.0,
+                        1 => 1.0,
+                        2 => 0.999999,
+                        _ => 0.95,
+                    })
+                    .collect::<Vec<_>>(),
+                shape.clone(),
+            );
+            let beta = tensor(
+                &ctx,
+                &series(HEADS * rows, 5, 4.0),
+                vec![HEADS as u64, rows as u64],
+            );
+            let run = |value4: bool| {
+                let state = tensor(
+                    &ctx,
+                    &series(HEADS * KDA_HEAD_DIM * KDA_HEAD_DIM, 6, 0.2),
+                    vec![128, 128, HEADS as u64],
+                );
+                let out = tensor(&ctx, &vec![f32::NAN; width * rows], shape.clone());
+                let args = KdaPrefillArgs {
+                    n_heads: HEADS as u32,
+                    n_rows: rows as u32,
+                    lower_bound: -5.0,
+                    norm_eps: 1e-5,
+                };
+                let pso = ctx
+                    .pipeline(if value4 {
+                        "kernel_glm53_kda_prefill_recurrence_value4"
+                    } else {
+                        "kernel_glm53_kda_prefill_recurrence"
+                    })
+                    .unwrap();
+                let mut results = Vec::new();
+                for _ in 0..2 {
+                    let command = ctx.queue.commandBuffer().unwrap();
+                    let enc = KernelEncoder::begin(&command);
+                    enc.set_pipeline(&pso);
+                    enc.set_bytes(0, &args);
+                    for (i, t) in [&q, &k, &v, &decay, &beta, &state, &out]
+                        .into_iter()
+                        .enumerate()
+                    {
+                        enc.set_tensor(i + 1, t);
+                    }
+                    enc.dispatch(
+                        MTLSize {
+                            width: HEADS,
+                            height: if value4 { 8 } else { 32 },
+                            depth: 1,
+                        },
+                        MTLSize {
+                            width: 128,
+                            height: 1,
+                            depth: 1,
+                        },
+                    );
+                    enc.end();
+                    command.commit();
+                    wait_completed(&command).unwrap();
+                    for t in [&out, &state] {
+                        let values = tensor_f32_at_offset(t);
+                        assert!(values.iter().all(|x| x.is_finite()));
+                        results.extend(values.into_iter().map(f32::to_bits));
+                    }
+                }
+                results
+            };
+            assert_eq!(run(false), run(true), "rows={rows}");
+        }
+    }
 
     fn val(i: usize, salt: usize, scale: f64) -> f32 {
         ((((i * 7919 + salt * 104_729) % 2003) as f64 / 2003.0 - 0.5) * scale) as f32

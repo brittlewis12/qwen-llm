@@ -49,6 +49,7 @@ const SELECTED_AUDIT_ORDER_MISMATCH_STATUS: i32 = 5;
 const SELECTOR_SCRATCH_BYTES: usize = 2 * ATTENTION_THREADS * size_of::<u32>();
 const DENSE_PACKED_QUERY_TILE: usize = 32;
 
+mod index_reuse;
 mod selected_value;
 pub(crate) mod split_decode;
 #[cfg(test)]
@@ -5108,6 +5109,20 @@ fn encode_index_scores_packed(
     ratio: usize,
     block_capacity: usize,
 ) -> Result<(), MetalError> {
+    if index_reuse::try_encode(
+        ctx,
+        enc,
+        queries,
+        compressed_keys,
+        scores,
+        visible_counts,
+        start_position,
+        query_count,
+        ratio,
+        block_capacity,
+    )? {
+        return Ok(());
+    }
     let maximum_visible = (start_position + query_count) / ratio;
     let pso = ctx.pipeline("kernel_qwen4exp_qsa_index_scores_packed_4x128_f16")?;
     enc.set_pipeline(&pso);
@@ -5221,6 +5236,7 @@ fn encode_select_blocks_tensors(
     block_budget: usize,
     query_count: usize,
 ) -> Result<(), MetalError> {
+    let threads = index_reuse::selector_threads(ctx, block_capacity, query_count);
     #[repr(C)]
     #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
     struct Args {
@@ -5245,8 +5261,8 @@ fn encode_select_blocks_tensors(
     enc.set_tensor(3, selected_blocks);
     enc.set_tensor(4, selected_count);
     enc.set_tensor(5, selector_status);
-    enc.set_threadgroup_memory(0, ATTENTION_THREADS * size_of::<u32>());
-    enc.set_threadgroup_memory(1, ATTENTION_THREADS * size_of::<u32>());
+    enc.set_threadgroup_memory(0, threads * size_of::<u32>());
+    enc.set_threadgroup_memory(1, threads * size_of::<u32>());
     enc.dispatch(
         MTLSize {
             width: query_count,
@@ -5254,7 +5270,7 @@ fn encode_select_blocks_tensors(
             depth: 1,
         },
         MTLSize {
-            width: ATTENTION_THREADS,
+            width: threads,
             height: 1,
             depth: 1,
         },

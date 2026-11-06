@@ -11,7 +11,6 @@ use qwen_llm::{
     metal::*,
     metal_dflash::with_prefill_attn_tensor_flash_override as scoped,
     runtime::{LoadedModel, Runtime},
-    tensor::GgmlType,
 };
 use serde_json::json;
 use sha2::{Digest, Sha256};
@@ -240,10 +239,12 @@ fn main() -> Result<()> {
         "A3B geometry required"
     );
     let quality = a.mode == "quality";
+    let greedy = a.mode == "greedy";
     let append = if quality { 2048 } else { a.rows };
     let total = a.depth + append;
+    let capacity = total + if greedy { 160 } else { 0 };
     let tok = model.tokenizer()?;
-    let (prefix_ids, append_ids) = if quality {
+    let (prefix_ids, append_ids) = if quality || greedy {
         let (p, t) = match a.doc.as_str() {
             "prose" => ("docs/PERF-LOG.md", "docs/APPLE-GPU-OPTIMIZATION.md"),
             "code" => (
@@ -268,7 +269,7 @@ fn main() -> Result<()> {
             ids(append, model.arch().vocab_size, 1),
         )
     };
-    let policy_prefix = a.automatic || quality;
+    let policy_prefix = a.automatic || quality || greedy;
     let mut snapshots = Vec::new();
     for on in if policy_prefix {
         vec![false, true]
@@ -280,7 +281,7 @@ fn main() -> Result<()> {
             &model,
             prefill_plan::PrefillChunkArg::Auto,
             total,
-            total,
+            capacity,
             true,
         )?;
         policy(on, a.automatic, || {
@@ -302,7 +303,7 @@ fn main() -> Result<()> {
             &model,
             prefill_plan::PrefillChunkArg::Auto,
             total,
-            total,
+            capacity,
             true,
         )?;
         let mut all = prefix_ids.clone();
@@ -320,7 +321,9 @@ fn main() -> Result<()> {
         let mut on = restore(true)?;
         let mut done = 0;
         let mut pooled = Score::default();
-        for rows in [512, 512, 1024] {
+        // Exercise flash -> unaligned matrix fallback -> flash, including a
+        // restored prefix with no valid derived transposed-V storage.
+        for rows in [512, 33, 479, 1024] {
             let s = objc2::rc::autoreleasepool(|_| -> Result<Score> {
                 let mut outputs = Vec::new();
                 for (candidate, p) in [(false, &mut off), (true, &mut on)] {
@@ -360,6 +363,40 @@ fn main() -> Result<()> {
         pooled.check()?;
         return Ok(());
     }
+    if greedy {
+        for on in [false, true] {
+            thermal(&format!("greedy-{on}"), "before")?;
+            let mut p = restore(on)?;
+            let logits = policy(on, a.automatic, || {
+                model.prefill(&mut p.sequence, &mut p.scratch, &append_ids[..append])
+            })?;
+            ensure!(
+                logits.iter().all(|x| x.is_finite()),
+                "nonfinite greedy logits"
+            );
+            let mut token = logits
+                .iter()
+                .enumerate()
+                .max_by(|a, b| a.1.total_cmp(b.1))
+                .unwrap()
+                .0 as i32;
+            let mut output = Vec::new();
+            for index in 0..160 {
+                output.push(token);
+                if index + 1 < 160 {
+                    token = model
+                        .decode_token_greedy(&mut p.sequence, token)?
+                        .into_token()?;
+                }
+            }
+            let text = tok.decode(&output);
+            emit(json!({"record":"greedy","candidate":on,"depth":a.depth,
+                "ids":output,"ids_sha256":hash(bytemuck::cast_slice(&output)),
+                "text_sha256":hash(text.as_bytes())}));
+            thermal(&format!("greedy-{on}"), "after")?;
+        }
+        return Ok(());
+    }
     if a.mode == "profile" || a.mode == "census" {
         for on in [false, true] {
             std::thread::sleep(std::time::Duration::from_secs(30));
@@ -393,9 +430,21 @@ fn main() -> Result<()> {
     for (arm, on) in [false, true, true, false].into_iter().enumerate() {
         std::thread::sleep(std::time::Duration::from_secs(30));
         thermal(&format!("{arm}-{on}"), "before")?;
+        let mut p = restore(on)?;
         for sample in 0..=a.reps {
             objc2::rc::autoreleasepool(|_| -> Result<()> {
-                let mut p = restore(on)?;
+                // Keep the same native scratch after the excluded warmup,
+                // including its lazy score allocation. Only sequence state
+                // is restored outside the timed span, just as the prefix is
+                // untimed in qwen-bench. Recreating scratch would time cold
+                // allocations on every retained append.
+                let mut all = prefix_ids.clone();
+                all.extend_from_slice(&append_ids[..append]);
+                model.restore_prepared_checkpoint(
+                    &snapshots[usize::from(on && policy_prefix)],
+                    &mut p.sequence,
+                    &all,
+                )?;
                 let chunk = p.chunk;
                 let start = Instant::now();
                 let logits = policy(on, a.automatic, || {

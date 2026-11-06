@@ -1,31 +1,20 @@
 use super::*;
 use crate::metal::Pipeline;
-use std::sync::OnceLock;
 
-/// M5 Flash-Next packed QSA selector for N32 bands and >=8192 block capacity. Default 2 caches a <=512-key threshold bucket in threadgroup memory, exits resolved radix passes early and uses parallel stable scans. 1 selects scans/early exit without bucket caching; 0 restores the existing radix4 selector. IDs, ties and error statuses remain exact; no added device buffers. Unsupported PSOs/devices use the incumbent.
-const SELECTOR_ENV: &str = "QWEN_FN_QSA_SELECTOR_COMPACT";
+#[cfg(test)]
+mod tests;
 
-fn selector_mode() -> usize {
-    static MODE: OnceLock<usize> = OnceLock::new();
-    *MODE.get_or_init(|| match std::env::var(SELECTOR_ENV).ok().as_deref() {
-        Some("0") => 0,
-        Some("1") => 1,
-        _ => 2,
-    })
-}
+crate::env_flag!(
+    /// M5 Flash-Next exact packed QSA selector for N32 bands, K512 and >=8192 block capacity. Parallel stable scans replace serial compaction scans, and radix passes stop when the threshold bucket is fully selected. IDs, ties and error statuses are unchanged; no added GPU buffers or static threadgroup storage. Set 0 for the existing radix4 selector. Unsupported PSOs/devices use the incumbent.
+    default_on compact_selector_enabled,
+    "QWEN_FN_QSA_SELECTOR_COMPACT"
+);
 
-/// M5 Flash-Next selected QSA logits at N32 and depth >=32768. Default 8 reuses original F32 query vectors across eight selected keys per SIMD; 16/32 tune the key loop; 1 aliases 8; 0 restores the incumbent. Preserves the dimension/SIMD reduction order, with no operand narrowing or new device buffers.
-const LOGITS_ENV: &str = "QWEN_FN_QSA_LOGITS_REUSE";
-
-fn logits_slots() -> usize {
-    static SLOTS: OnceLock<usize> = OnceLock::new();
-    *SLOTS.get_or_init(|| match std::env::var(LOGITS_ENV).ok().as_deref() {
-        Some("0") => 0,
-        Some("16") => 16,
-        Some("32") => 32,
-        _ => 8,
-    })
-}
+crate::env_flag!(
+    /// M5 Flash-Next selected QSA logits at N32 and depth >=32768: reuse original F32 query vectors across eight selected keys, preserving the incumbent dimension and SIMD reduction order. No operand narrowing or new device buffers. Set 0 for the incumbent.
+    default_on logits_reuse_enabled,
+    "QWEN_FN_QSA_LOGITS_REUSE"
+);
 
 crate::env_flag!(
     /// M5 Flash-Next selected QSA value at N32 and depth >=32768: explicit F32 vector accumulators with the existing eight-way split and slot/reduction order. Original F32 masses and F16 values; no added GPU buffers. Set 0 for the existing split8 kernel.
@@ -61,8 +50,7 @@ pub(super) fn selector_pipeline(
     count: usize,
     threads: usize,
 ) -> Result<Option<Pipeline>, MetalError> {
-    let mode = selector_mode();
-    if mode == 0
+    if !compact_selector_enabled()
         || !ctx.tensor_ops_status().is_available()
         || count != 32
         || capacity < 8192
@@ -72,11 +60,7 @@ pub(super) fn selector_pipeline(
     }
     optional(
         ctx,
-        if mode == 1 {
-            "kernel_qwen4exp_qsa_select_scan_f32"
-        } else {
-            "kernel_qwen4exp_qsa_select_compact_f32"
-        },
+        "kernel_qwen4exp_qsa_select_scan_f32",
         threads,
         threads * 8,
     )
@@ -87,9 +71,8 @@ pub(super) fn logits_pipeline(
     g: QwenSparseAttentionMetalGeometry,
     start: usize,
     count: usize,
-) -> Result<Option<(Pipeline, usize)>, MetalError> {
-    let slots = logits_slots();
-    if slots == 0
+) -> Result<Option<Pipeline>, MetalError> {
+    if !logits_reuse_enabled()
         || !ctx.tensor_ops_status().is_available()
         || !selected_value::geometry_qualified(g)
         || count != 32
@@ -97,12 +80,12 @@ pub(super) fn logits_pipeline(
     {
         return Ok(None);
     }
-    let name = match slots {
-        16 => "kernel_qwen4exp_qsa_logits_reuse4_s16_f32",
-        32 => "kernel_qwen4exp_qsa_logits_reuse4_s32_f32",
-        _ => "kernel_qwen4exp_qsa_logits_reuse4_f32",
-    };
-    Ok(optional(ctx, name, PACKED_ATTENTION_THREADS, 0)?.map(|p| (p, slots * 4)))
+    optional(
+        ctx,
+        "kernel_qwen4exp_qsa_logits_reuse4_f32",
+        PACKED_ATTENTION_THREADS,
+        0,
+    )
 }
 
 pub(super) fn value_pipeline(ctx: &MetalContext) -> Result<Option<Pipeline>, MetalError> {

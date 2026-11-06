@@ -124,7 +124,7 @@ impl Pipelines {
                 None
             },
             vector_value: if split_enabled {
-                super::prefill_next::value_pipeline(ctx)?
+                super::prefill_reuse::value_pipeline(ctx)?
             } else {
                 None
             },

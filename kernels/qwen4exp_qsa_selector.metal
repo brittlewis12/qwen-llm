@@ -1,6 +1,6 @@
-// Exact IDs-only radix selection for Flash-Next. The threshold bucket can
-// move into bounded threadgroup storage; final IDs still compact original
-// rows in order. No score rounding or additional device buffers.
+// Exact IDs-only radix selection for Flash-Next: parallel stable scans and
+// early termination when the threshold bucket is fully selected.
+// No score rounding or additional device buffers.
 #include <metal_stdlib>
 using namespace metal;
 
@@ -30,12 +30,10 @@ inline uint qsa_exclusive_scan(uint value,threadgroup uint *scratch,
     return before+scratch[sg];
 }
 
-template <bool Cache>
 inline void qsa_select_compact(constant qsa_select_args &a,
         device const float *scores,device const int *visible_counts,
         device int *ids,device int *counts,device int *status,
         threadgroup uint *scratch,threadgroup uint *shared,
-        threadgroup uint *keys,threadgroup atomic_uint *used,
         uint lane,uint query,uint width,ushort sg,ushort sl) {
     if (query>=a.query_count) return;
     const uint groups=width/32u;
@@ -60,13 +58,11 @@ inline void qsa_select_compact(constant qsa_select_args &a,
     threadgroup_barrier(mem_flags::mem_threadgroup);
     error=shared[0];
     uint prefix=0u,mask=0u,rank=selected;
-    bool cached=false;
-    uint population=visible;
     if (error==0u && selected<visible) {
         for (int shift=28;shift>=0;shift-=4) {
             uint bins[16]={};
-            for (uint i=lane;i<population;i+=width) {
-                const uint key=cached ? keys[i] : qsa_select_key(row[i]);
+            for (uint i=lane;i<visible;i+=width) {
+                const uint key=qsa_select_key(row[i]);
                 if ((key&mask)==prefix) ++bins[(key>>uint(shift))&15u];
             }
             for (uint bin=0u;bin<16u;++bin) {
@@ -99,20 +95,7 @@ inline void qsa_select_compact(constant qsa_select_args &a,
             // Every key in this bucket belongs to the top-k. Its lower bound
             // is sufficient; compaction below includes the entire bucket.
             if (bucket==rank || shift==0) break;
-            if (Cache && !cached && bucket<=512u) {
-                if (lane==0u) atomic_store_explicit(used,0u,memory_order_relaxed);
-                threadgroup_barrier(mem_flags::mem_threadgroup);
-                for (uint i=lane;i<visible;i+=width) {
-                    const uint key=qsa_select_key(row[i]);
-                    if ((key&mask)==prefix) {
-                        const uint dst=atomic_fetch_add_explicit(used,1u,memory_order_relaxed);
-                        if (dst<512u) keys[dst]=key;
-                    }
-                }
-                threadgroup_barrier(mem_flags::mem_threadgroup);
-                if (atomic_load_explicit(used,memory_order_relaxed)!=bucket) {error=3u;break;}
-                cached=true;population=bucket;
-            }
+
         }
     }
     if (error==0u) {
@@ -148,16 +131,13 @@ inline void qsa_select_compact(constant qsa_select_args &a,
     if (lane==0u) {counts[query]=int(selected);status[query]=int(error);}
 }
 
-#define QSA_SELECT_ENTRY(NAME,CACHE,N) \
-kernel void NAME(constant qsa_select_args &a [[buffer(0)]], \
-        device const float *scores [[buffer(1)]],device const int *visible [[buffer(2)]], \
-        device int *ids [[buffer(3)]],device int *counts [[buffer(4)]],device int *status [[buffer(5)]], \
-        threadgroup uint *scratch [[threadgroup(0)]],threadgroup uint *shared [[threadgroup(1)]], \
-        uint lane [[thread_index_in_threadgroup]],uint query [[threadgroup_position_in_grid]], \
-        uint width [[threads_per_threadgroup]],ushort sg [[simdgroup_index_in_threadgroup]], \
-        ushort sl [[thread_index_in_simdgroup]]) { \
-    threadgroup uint keys[N];threadgroup atomic_uint used; \
-    qsa_select_compact<CACHE>(a,scores,visible,ids,counts,status,scratch,shared,keys,&used,lane,query,width,sg,sl); \
+kernel void kernel_qwen4exp_qsa_select_scan_f32(
+        constant qsa_select_args &a [[buffer(0)]],
+        device const float *scores [[buffer(1)]],device const int *visible [[buffer(2)]],
+        device int *ids [[buffer(3)]],device int *counts [[buffer(4)]],device int *status [[buffer(5)]],
+        threadgroup uint *scratch [[threadgroup(0)]],threadgroup uint *shared [[threadgroup(1)]],
+        uint lane [[thread_index_in_threadgroup]],uint query [[threadgroup_position_in_grid]],
+        uint width [[threads_per_threadgroup]],ushort sg [[simdgroup_index_in_threadgroup]],
+        ushort sl [[thread_index_in_simdgroup]]) {
+    qsa_select_compact(a,scores,visible,ids,counts,status,scratch,shared,lane,query,width,sg,sl);
 }
-QSA_SELECT_ENTRY(kernel_qwen4exp_qsa_select_compact_f32,true,512)
-QSA_SELECT_ENTRY(kernel_qwen4exp_qsa_select_scan_f32,false,1)

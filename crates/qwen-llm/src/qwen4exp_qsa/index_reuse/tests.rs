@@ -286,7 +286,6 @@ fn qsa_selector_widths_preserve_cpu_ids_ties_errors_and_guards() {
     for kernel in [
         "kernel_deepseek_v4_select_top_k_radix4_ids_f32",
         "kernel_qwen4exp_qsa_select_scan_f32",
-        "kernel_qwen4exp_qsa_select_compact_f32",
     ] {
         let p = ctx.pipeline(kernel).unwrap();
         let widths: Vec<_> = [32usize, 64, 128, 256, 512, 1024]
@@ -398,7 +397,7 @@ fn qsa_selector_widths_preserve_cpu_ids_ties_errors_and_guards() {
         }
         let expected: Vec<u32> = expected.into_iter().map(|x| x as u32).collect();
         for (i, (ids, n, e)) in banks.iter().enumerate() {
-            assert_eq!(bits(ids), expected, "width{}", widths[i]);
+            assert_eq!(bits(ids), expected, "{kernel} width{}", widths[i]);
             assert_eq!(bits(n), counts);
             assert_eq!(bits(e), status);
             guards(ids);

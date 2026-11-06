@@ -13,20 +13,19 @@ struct qwen4exp_qsa_packed_attention_args {
     uint cache_capacity;
     float scale;
 };
-template <uint KeysPerSimd>
-inline void qsa_logits_reuse(
-        constant qwen4exp_qsa_packed_attention_args & args,
-        device const float * query,
-        device const half * key_cache,
-        device const int * token_ids,
-        device const int * selected_counts,
-        device const int * status,
-        device float * logits,
-        uint3 group,
-        ushort simdgroup,
-        ushort simd_lane) {
+kernel void kernel_qwen4exp_qsa_logits_reuse4_f32(
+        constant qwen4exp_qsa_packed_attention_args & args [[buffer(0)]],
+        device const float * query [[buffer(1)]],
+        device const half * key_cache [[buffer(2)]],
+        device const int * token_ids [[buffer(3)]],
+        device const int * selected_counts [[buffer(4)]],
+        device const int * status [[buffer(5)]],
+        device float * logits [[buffer(6)]],
+        uint3 group [[threadgroup_position_in_grid]],
+        ushort simdgroup [[simdgroup_index_in_threadgroup]],
+        ushort simd_lane [[thread_index_in_simdgroup]]) {
     constexpr uint heads_per_group = 4u;
-    constexpr uint slots_per_simdgroup = KeysPerSimd;
+    constexpr uint slots_per_simdgroup = 8u;
     constexpr uint simdgroups_per_threadgroup = 4u;
     constexpr uint slots_per_threadgroup = slots_per_simdgroup * simdgroups_per_threadgroup;
     if (args.head_dim != 256u
@@ -113,17 +112,3 @@ inline void qsa_logits_reuse(
         }
     }
 }
-
-
-#define QSA_LOGITS_ENTRY(NAME,N) \
-kernel void NAME(constant qwen4exp_qsa_packed_attention_args &a [[buffer(0)]], \
-        device const float *q [[buffer(1)]],device const half *k [[buffer(2)]], \
-        device const int *ids [[buffer(3)]],device const int *counts [[buffer(4)]], \
-        device const int *status [[buffer(5)]],device float *out [[buffer(6)]], \
-        uint3 group [[threadgroup_position_in_grid]],ushort sg [[simdgroup_index_in_threadgroup]], \
-        ushort lane [[thread_index_in_simdgroup]]) { \
-    qsa_logits_reuse<N>(a,q,k,ids,counts,status,out,group,sg,lane); \
-}
-QSA_LOGITS_ENTRY(kernel_qwen4exp_qsa_logits_reuse4_f32,8)
-QSA_LOGITS_ENTRY(kernel_qwen4exp_qsa_logits_reuse4_s16_f32,16)
-QSA_LOGITS_ENTRY(kernel_qwen4exp_qsa_logits_reuse4_s32_f32,32)

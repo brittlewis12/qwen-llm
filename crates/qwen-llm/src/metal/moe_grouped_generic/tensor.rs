@@ -125,29 +125,6 @@ pub(super) fn dispatch_tensor_mm(
     n_tokens: usize,
     clamp: Option<f32>,
 ) -> Result<(), MetalError> {
-    dispatch_tensor_mm_tile(
-        ctx, enc, name, args, weight, src, counts, ids, out, n_out, n_expert, n_tokens, clamp,
-        false,
-    )
-}
-
-#[allow(clippy::too_many_arguments)]
-fn dispatch_tensor_mm_tile(
-    ctx: &MetalContext,
-    enc: &KernelEncoder,
-    name: &str,
-    args: &GenericMmArgs,
-    weight: &MetalTensor,
-    src: &MetalTensor,
-    counts: &MetalTensor,
-    ids: &MetalTensor,
-    out: &MetalTensor,
-    n_out: usize,
-    n_expert: usize,
-    n_tokens: usize,
-    clamp: Option<f32>,
-    short: bool,
-) -> Result<(), MetalError> {
     let pso = ctx.tensor_pipeline(name)?;
     enc.set_pipeline(&pso);
     enc.set_bytes(0, args);
@@ -159,37 +136,21 @@ fn dispatch_tensor_mm_tile(
     if let Some(clamp) = clamp {
         enc.set_bytes(6, &clamp);
     }
-    enc.set_threadgroup_memory(
-        0,
-        if short {
-            5120
-        } else {
-            TENSOR_THREADGROUP_BYTES
-        },
-    );
+    enc.set_threadgroup_memory(0, TENSOR_THREADGROUP_BYTES);
     enc.dispatch(
         MTLSize {
-            width: n_tokens.div_ceil(if short { 16 } else { 32 }),
+            width: n_tokens.div_ceil(32),
             height: n_out.div_ceil(64),
             depth: n_expert,
         },
         MTLSize {
-            width: if short { 64 } else { 128 },
+            width: 128,
             height: 1,
             depth: 1,
         },
     );
     Ok(())
 }
-
-crate::env_flag!(
-    /// Experimental M5 Ultra V4.1 IQ2_XXS short gate/up tile. At 512 rows,
-    /// H5120/F2304/E384/top6, use two SIMD groups and 16 slots for buckets
-    /// with at most 16 routes; retain the existing tile for larger buckets.
-    /// Same operands and K32 sums. Whole-append kill-test switch.
-    default_off v41_short_tile_enabled,
-    "QWEN_V41_ROUTED_SHORT_TILE"
-);
 
 /// Tensor-tile down projection; contract of
 /// [`encode_moe_down_f32_grouped_slots_generic`].
@@ -319,38 +280,6 @@ pub fn encode_moe_swiglu_f32_grouped_slots_tensor(
     };
     let up = moe_grouped_tensor_pipeline_name(up_role, w_up.dtype, activation)
         .expect("layout lookup succeeded in generic_mm_args");
-    if v41_short_tile_enabled()
-        && ctx.device_facts().name == "Apple M5 Ultra"
-        && (n_hidden, n_ffn, n_expert, topk, n_tokens) == (5120, 2304, 384, 6, 512)
-        && w_gate.dtype == GgmlType::IQ2_XXS
-        && w_up.dtype == GgmlType::IQ2_XXS
-        && activation == TensorActivation::F16
-        && clamp.is_some()
-    {
-        let short_gate = format!("{gate}_short");
-        let short_up = format!("{up}_short");
-        // Validate every pipeline before either disjoint count range writes.
-        for name in [&gate, &up, &short_gate, &short_up] {
-            ctx.tensor_pipeline(name)?;
-        }
-        for (weight, mut args, name, short_name, limit) in [
-            (w_gate, gate_args, &gate, &short_gate, None),
-            (w_up, up_args, &up, &short_up, clamp),
-        ] {
-            args.max_count = 16;
-            dispatch_tensor_mm_tile(
-                ctx, enc, short_name, &args, weight, x_pack, counts, ids, inner, n_ffn, n_expert,
-                16, limit, true,
-            )?;
-            args.min_count = 17;
-            args.max_count = i32::MAX as u32;
-            dispatch_tensor_mm(
-                ctx, enc, name, &args, weight, x_pack, counts, ids, inner, n_ffn, n_expert,
-                n_tokens, limit,
-            )?;
-        }
-        return Ok(());
-    }
     // Resolve both pipelines before the first dispatch so a missing up
     // instantiation cannot leave the gate projection half applied.
     ctx.tensor_pipeline(&up)?;

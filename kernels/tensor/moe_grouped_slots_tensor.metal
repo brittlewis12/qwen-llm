@@ -199,8 +199,6 @@ inline void moe_grouped_slots_mm_tensor_body(
     }
 }
 
-#include "moe_grouped_slots_iq2_short.h"
-
 // 64-slot gate/up tile. One 64-slot panel per dispatch, same K order and
 // epilogue as the narrow tile; `epi` selects the down/gate, up_silu_mul or
 // clamped-up epilogue. The launch size is n_tokens/64 x M/64 x experts and

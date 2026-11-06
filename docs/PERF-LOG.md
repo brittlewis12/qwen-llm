@@ -38,8 +38,8 @@ See also: `docs/PERF-ROADMAP.md` for the current state and evidence index.
   policies. Every endpoint hash matches. With real routing, the extra
   dispatches and the rest of the append included, the isolated win becomes
   **12.2 ms whole-call savings**, below the bar. Removed the shader, switch
-  and rollout exception; no
-  further campaign on this candidate. Build lock, nice 10, canonical lease,
+  and rollout exception; no further campaign on this candidate.
+  Build lock, nice 10, canonical lease,
   30 s arm cooldown, thermal pressure 0 throughout.
 - Decode attribution, unchanged production **`2af73aad`**, unsplit
   `--tg 8 --depth 8192 --runs 1` with timing/census only: **888 / 894
@@ -53,8 +53,12 @@ See also: `docs/PERF-ROADMAP.md` for the current state and evidence index.
   diagnostic was rejected before inference; its receipt is retained.
 - Final Rust, Metal, scripts and ENV content equals qualified **`2af73aad`**;
   the Engram fix and its 2439-pass/full-contract/quality evidence below
-  remain the production change. Raw source, plans, samples, census and
-  failures share `metagross:~/qwen-runs/2026-11-06-v41-roofline2/`.
+  remain the production change. Restored M5 release **`60832588`** is clean
+  with matching build/runtime identity. Raw source, plans, samples, census,
+  quality and failures: **`2026-11-06-v41-roofline2-raw.tar`**, SHA256
+  **`aeba404025fca2c7fa46ae599ee08acb35eba41e6203cd0e4becf3b16cd5aa62`**,
+  retained outside the repository on metagross alongside
+  `~/qwen-runs/2026-11-06-v41-roofline2/`.
 
 ## 2026-11-06 - V4.1 Depth Append Tail: Earlier Engram Read-Ahead
 

@@ -327,6 +327,7 @@ fn main() -> Result<()> {
             let s = objc2::rc::autoreleasepool(|_| -> Result<Score> {
                 let mut outputs = Vec::new();
                 for (candidate, p) in [(false, &mut off), (true, &mut on)] {
+                    thermal(&format!("quality-{done}-{candidate}"), "before")?;
                     let hidden = MetalTensor::zeros_f32(
                         ctx,
                         vec![(rows * model.arch().hidden_size as usize) as u64],
@@ -341,10 +342,25 @@ fn main() -> Result<()> {
                             &hidden,
                         )
                     })?;
+                    let dispatches = dispatch_census_take();
+                    let flash = dispatches
+                        .iter()
+                        .filter(|r| r.kernel.contains("attn_flash_probe_f16_d256"))
+                        .count();
+                    if a.automatic {
+                        let expected =
+                            candidate && rows >= 512 && (a.depth + done + rows).is_multiple_of(64);
+                        ensure!(
+                            (flash > 0) == expected,
+                            "unexpected flash dispatch count: {flash}"
+                        );
+                    }
                     emit(
-                        json!({"record":"dispatches","candidate":candidate,"rows":rows,"position":a.depth+done,"dispatches":census(dispatch_census_take())}),
+                        json!({"record":"dispatches","candidate":candidate,"rows":rows,
+                        "position":a.depth+done,"flash":flash,"dispatches":census(dispatches)}),
                     );
                     outputs.push(readout(&model, &hidden, rows, &endpoint)?);
+                    thermal(&format!("quality-{done}-{candidate}"), "after")?;
                 }
                 score(
                     f32s(&outputs[0]),
@@ -402,6 +418,18 @@ fn main() -> Result<()> {
             std::thread::sleep(std::time::Duration::from_secs(30));
             thermal(&format!("profile-{on}"), "before")?;
             let mut p = restore(on)?;
+            // Prime pipelines and lazy scratch without profiler serialization.
+            policy(on, a.automatic, || {
+                model.prefill(&mut p.sequence, &mut p.scratch, &append_ids)
+            })?;
+            p.sequence = model.create_sequence(SequenceConfig::new(capacity))?;
+            let mut all = prefix_ids.clone();
+            all.extend_from_slice(&append_ids[..append]);
+            model.restore_prepared_checkpoint(
+                &snapshots[usize::from(on && policy_prefix)],
+                &mut p.sequence,
+                &all,
+            )?;
             dispatch_census_begin();
             let profile = if a.mode == "profile" {
                 Some(dispatch_profile_begin(ctx, 8192)?)

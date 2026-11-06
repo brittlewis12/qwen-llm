@@ -22,7 +22,7 @@ const TENSOR_FLASH_SCRATCH_LAYOUT_BYTES: usize = TENSOR_FLASH_QUERY_TILE * TENSO
 const TENSOR_FLASH_SCRATCH_BYTES: usize = TENSOR_FLASH_SCRATCH_LAYOUT_BYTES.div_ceil(16) * 16;
 
 #[derive(Clone, Copy, Debug)]
-pub(crate) struct TensorFlashQwen27Layout {
+pub(crate) struct TensorFlashQwenLayout {
     pub(crate) tiles: usize,
     pub(crate) mask_bytes: usize,
     pub(crate) q_elements: u64,
@@ -38,11 +38,12 @@ fn tensor_flash_error(detail: impl Into<String>) -> MetalError {
 
 /// Checked bounds for every device address and dispatch coordinate used by
 /// the fixed 24/4-head d256 shader. No buffers or GPU work are needed here.
+#[cfg(test)]
 pub(crate) fn tensor_flash_qwen27_layout(
     n_rows: usize,
     base_pos: usize,
     n_pos: usize,
-) -> Result<TensorFlashQwen27Layout, MetalError> {
+) -> Result<TensorFlashQwenLayout, MetalError> {
     tensor_flash_qwen_layout(
         n_rows,
         base_pos,
@@ -61,7 +62,7 @@ pub(crate) fn tensor_flash_qwen_layout(
     query_heads: usize,
     kv_heads: usize,
     head_dim: usize,
-) -> Result<TensorFlashQwen27Layout, MetalError> {
+) -> Result<TensorFlashQwenLayout, MetalError> {
     if !matches!(
         (query_heads, kv_heads, head_dim),
         (24, 4, 256) | (16, 2, 256)
@@ -106,7 +107,7 @@ pub(crate) fn tensor_flash_qwen_layout(
     u32::try_from(mask_threads).map_err(|_| tensor_flash_error("mask grid exceeds u32"))?;
     u32::try_from(n_pos / TENSOR_FLASH_KEY_TILE)
         .map_err(|_| tensor_flash_error("key grid exceeds u32"))?;
-    Ok(TensorFlashQwen27Layout {
+    Ok(TensorFlashQwenLayout {
         tiles,
         mask_bytes,
         q_elements: u64::try_from(q_elements)
@@ -178,7 +179,19 @@ pub fn encode_attn_tensor_flash_qwen27(
     n_pos: usize,
 ) -> Result<(), MetalError> {
     encode_attn_tensor_flash_qwen(
-        ctx, enc, q, k, v, masks, out, n_rows, base_pos, n_pos, 24, 4, 256,
+        ctx,
+        enc,
+        q,
+        k,
+        v,
+        masks,
+        out,
+        n_rows,
+        base_pos,
+        n_pos,
+        TENSOR_FLASH_QUERY_HEADS,
+        TENSOR_FLASH_KV_HEADS,
+        TENSOR_FLASH_HEAD_DIM,
     )
 }
 

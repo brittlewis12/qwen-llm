@@ -214,6 +214,10 @@ fn numerical(ctx: &MetalContext, m: usize, pos: usize, uniform: bool) {
         "A3B attention F64 M{m} KV{pos} uniform={uniform} flash={a:?} incumbent={b:?} ratios={:?}",
         (a.0 / b.0, a.1 / b.1)
     );
+    assert!(
+        a.0 <= 1.5 * b.0 && a.1 <= 1.5 * b.1,
+        "A3B F64 error exceeds 1.5x incumbent: flash={a:?} incumbent={b:?}"
+    );
     // Keep the landed flash family's complete-vector and strict F64 contract.
     let ref32: Vec<f32> = reference.iter().map(|x| *x as f32).collect();
     compare_vectors("A3B sampled F64", &av, &ref32);

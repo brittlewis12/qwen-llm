@@ -2260,21 +2260,20 @@ fn prefill_attn_matrix_causal_skip_enabled() -> bool {
 
 /// Single-pass tensor flash attention on Apple10 with Metal 4 tensor support.
 /// Unset (automatic): enable only on the measured M5 Ultra device class
-/// (Metal device name exactly "Apple M5 Ultra"), for 24 query / 4 KV heads,
-/// head dimension 256, F32 Q/output, F16 K/V, actual query chunks 128..=4096 rows, and total
-/// KV after append 8192..=262144 rows divisible by 64. Attention shapes, rather
+/// (Metal device name exactly "Apple M5 Ultra"), with head dimension 256,
+/// F32 Q/output and F16 K/V: 24 query / 4 KV heads at actual query chunks
+/// 128..=4096 and total KV 8192..=262144; or A3B's 16 query / 2 KV heads
+/// at actual query chunks 512..=1024 and total KV 32768..=262144.
+/// Total KV after append must be divisible by 64. Attention shapes, rather
 /// than model identity or weight quantization, determine this kernel's semantics.
 /// Whole-prefill speed also depends on hardware, surrounding projections and
-/// memory pressure; evidence is one Q4_K_M artifact on one M5 Ultra configuration,
+/// memory pressure; evidence covers dense Q4_K_M and A3B UD-Q4_K_M on one M5 Ultra configuration,
 /// so other Apple10 device classes remain experimental. Set 0 to
 /// force off everywhere. Set 1 for the broader experimental opt-in: retain the
 /// Apple10/Metal4, dtype, geometry, layout and workspace guards, but omit the
 /// automatic device-class and row/KV restrictions; combined row/output-work
-/// predicates require at least 38 queries and permit aligned KV below 8K. The legacy 8192 output-work
+/// predicates require at least 38 queries for G6 or 61 for G8, and permit aligned KV below 8K. The legacy 8192 output-work
 /// threshold counts query tiles * KV heads * head dimension, not KV rows.
-/// Experimental explicit-on also accepts A3B's 16 query / 2 KV heads, d256,
-/// with the existing G8 matrix/online prerequisites. A3B stays off in automatic
-/// mode pending whole-append qualification at depth.
 /// All modes retain matrix-online/G6-or-G8 prerequisites and encoder safety checks;
 /// unsupported shapes use the incumbent. Boolean aliases follow other prefill
 /// knobs; unrecognized values select automatic mode.
@@ -2332,16 +2331,17 @@ fn tensor_flash_prefill_selected(s: TensorFlashPrefillSelection) -> bool {
     {
         return false;
     }
-    if s.mode == PrefillEnvMode::Auto && s.query_heads == 16 {
-        // A3B remains an explicit opt-in until whole-append qualification.
-        return false;
-    }
-    if s.mode == PrefillEnvMode::Auto
-        && (!s.measured_device_class
-            || !(128..=4096).contains(&s.query_rows)
-            || !(8192..=262144).contains(&s.kv_rows))
-    {
-        return false;
+    if s.mode == PrefillEnvMode::Auto {
+        // A3B's production allocator caps attention subchunks at 1024 even
+        // when its outer MoE chunk is 2048. Keep larger query tiles opt-in.
+        let qualified = if s.query_heads == 16 {
+            (512..=1024).contains(&s.query_rows) && (32768..=262144).contains(&s.kv_rows)
+        } else {
+            (128..=4096).contains(&s.query_rows) && (8192..=262144).contains(&s.kv_rows)
+        };
+        if !s.measured_device_class || !qualified {
+            return false;
+        }
     }
     let Some(base) = s.kv_rows.checked_sub(s.query_rows) else {
         return false;

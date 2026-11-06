@@ -85,7 +85,7 @@ fn tensor_flash_selection_fixture() -> TensorFlashPrefillSelection {
 }
 
 #[test]
-fn tensor_flash_a3b_geometry_opt_in_preserves_independent_guards() {
+fn tensor_flash_a3b_geometry_preserves_independent_guards() {
     let s = TensorFlashPrefillSelection {
         query_heads: 16,
         kv_heads: 2,
@@ -95,12 +95,10 @@ fn tensor_flash_a3b_geometry_opt_in_preserves_independent_guards() {
         ..tensor_flash_selection_fixture()
     };
     assert!(tensor_flash_prefill_selected(s));
-    assert!(!tensor_flash_prefill_selected(
-        TensorFlashPrefillSelection {
-            mode: PrefillEnvMode::Auto,
-            ..s
-        }
-    ));
+    assert!(tensor_flash_prefill_selected(TensorFlashPrefillSelection {
+        mode: PrefillEnvMode::Auto,
+        ..s
+    }));
     for (q, k, d) in [(16, 4, 256), (24, 2, 256), (32, 4, 256), (16, 2, 128)] {
         assert!(!tensor_flash_prefill_selected(
             TensorFlashPrefillSelection {
@@ -131,6 +129,71 @@ fn tensor_flash_a3b_geometry_opt_in_preserves_independent_guards() {
             ));
         }
     }
+}
+
+#[test]
+fn tensor_flash_a3b_auto_boundaries_and_fallbacks() {
+    let s = TensorFlashPrefillSelection {
+        mode: PrefillEnvMode::Auto,
+        query_heads: 16,
+        kv_heads: 2,
+        query_rows: 512,
+        kv_rows: 33280,
+        workspace_bytes: u64::MAX,
+        ..tensor_flash_selection_fixture()
+    };
+    for query_rows in [512, 768, 1024] {
+        for kv_rows in [32768, 33280, 131584, 262144] {
+            assert!(tensor_flash_prefill_selected(TensorFlashPrefillSelection {
+                query_rows,
+                kv_rows,
+                ..s
+            }));
+        }
+    }
+    for (query_rows, kv_rows) in [
+        (511, 33280),
+        (1025, 33280),
+        (2048, 131584),
+        (512, 32704),
+        (512, 262208),
+        (512, 33281),
+    ] {
+        assert!(!tensor_flash_prefill_selected(
+            TensorFlashPrefillSelection {
+                query_rows,
+                kv_rows,
+                ..s
+            }
+        ));
+    }
+    assert!(!tensor_flash_prefill_selected(
+        TensorFlashPrefillSelection {
+            measured_device_class: false,
+            ..s
+        }
+    ));
+    assert!(!tensor_flash_prefill_selected(
+        TensorFlashPrefillSelection {
+            mode: PrefillEnvMode::ForceOff,
+            ..s
+        }
+    ));
+    assert!(tensor_flash_prefill_selected(TensorFlashPrefillSelection {
+        mode: PrefillEnvMode::ForceOn,
+        measured_device_class: false,
+        query_rows: 61,
+        kv_rows: 128,
+        ..s
+    }));
+    assert!(!tensor_flash_prefill_selected(
+        TensorFlashPrefillSelection {
+            mode: PrefillEnvMode::ForceOn,
+            query_rows: 60,
+            kv_rows: 128,
+            ..s
+        }
+    ));
 }
 
 fn tensor_flash_auto_selection_fixture() -> TensorFlashPrefillSelection {

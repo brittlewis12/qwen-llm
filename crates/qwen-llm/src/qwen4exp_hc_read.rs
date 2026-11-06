@@ -1,8 +1,8 @@
 use super::*;
 
 crate::env_flag!(
-    /// Flash-Next BF16 HC decode at branches4/H2560/rank320: fuse down projection with SiLU and prepare F32 injection before the block when its incumbent uses 1024 lanes. Reuses existing buffers and row/reduction order. Set 0 for the incumbent; unsupported PSOs/alignments retain it. Candidate opt-in until whole-token qualification.
-    default_off enabled,
+    /// Flash-Next BF16 HC decode at branches4/H2560/rank320: fuse down projection with SiLU and prepare F32 injection before the block when its incumbent uses 1024 lanes. Reuses existing buffers and row/reduction order. Set 0 for the incumbent; unsupported PSOs/alignments retain it. Default on; this also respects QWEN_MAT_VEC_BF16_TG=0.
+    default_on enabled,
     "QWEN_FN_HC_READ_FUSED"
 );
 
@@ -72,3 +72,6 @@ pub(super) fn try_encode(
     );
     Ok(Some(prepared))
 }
+
+#[cfg(test)]
+mod tests;

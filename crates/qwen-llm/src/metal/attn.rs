@@ -811,11 +811,9 @@ pub fn with_attn_v4_group_tile_override<T>(tile: usize, f: impl FnOnce() -> T) -
 const DECODE_ATTN_DEPTH_ENV: &str = "QWEN_DECODE_ATTN_DEPTH";
 
 fn decode_attn_depth_enabled() -> bool {
+    static ENABLED: OnceLock<bool> = OnceLock::new();
     ATTN_REGISTER_Q_OVERRIDE.with(|s| s.get()).unwrap_or(true)
-        && !matches!(
-            std::env::var(DECODE_ATTN_DEPTH_ENV).as_deref(),
-            Ok("0" | "false" | "FALSE" | "off" | "OFF")
-        )
+        && *ENABLED.get_or_init(|| crate::env_flag::read_default_on(DECODE_ATTN_DEPTH_ENV))
 }
 
 fn decode_attn_depth_layout(

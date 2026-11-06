@@ -13,6 +13,8 @@ use objc2_metal::{
 };
 
 mod hc_device;
+#[path = "qwen4exp_hc_read.rs"]
+mod hc_read;
 
 #[cfg(test)]
 #[path = "qwen4exp_metal/projection_tests.rs"]
@@ -559,6 +561,7 @@ impl GatedResidualPackedScratch {
 
 #[must_use = "encode the residual block, then call encode_combine"]
 pub struct GatedResidualMetalRead<'scratch, 'resources, 'pass> {
+    injection_prepared: bool,
     ctx: &'pass MetalContext,
     encoder: &'pass KernelEncoder,
     hyper_input: &'resources MetalTensor,
@@ -573,6 +576,18 @@ impl GatedResidualMetalRead<'_, '_, '_> {
     }
 
     pub fn encode_combine(self) -> Result<(), Qwen4ExpMetalError> {
+        if self.injection_prepared {
+            encode_hc_injection(
+                self.ctx,
+                self.encoder,
+                self.block_output,
+                &self.scratch.injection,
+                self.hyper_input,
+                self.scratch.branch_count,
+                self.scratch.hidden_size,
+            )?;
+            return Ok(());
+        }
         if self.inject.dtype == GgmlType::F32 {
             encode_hc_combine(
                 self.ctx,
@@ -739,7 +754,7 @@ pub fn encode_gated_residual_mix<'scratch, 'resources, 'pass>(
     )?;
     reserve_command(scratch, enc)?;
     let hyper_hidden = scratch.branch_count * scratch.hidden_size;
-    encode_read(
+    let injection_prepared = encode_read(
         ctx,
         enc,
         hyper_input,
@@ -748,8 +763,10 @@ pub fn encode_gated_residual_mix<'scratch, 'resources, 'pass>(
         scratch,
         hyper_hidden,
         true,
+        Some(inject),
     )?;
     Ok(GatedResidualMetalRead {
+        injection_prepared,
         ctx,
         encoder: enc,
         hyper_input,
@@ -1360,6 +1377,7 @@ pub(crate) fn encode_final_gated_residual_mix_with_policy<'scratch>(
         scratch,
         hyper_hidden,
         allow_hc_up_mix,
+        None,
     )?;
     Ok(GatedResidualMetalFinalRead { scratch })
 }
@@ -1459,7 +1477,8 @@ fn encode_read(
     scratch: &GatedResidualMetalScratch,
     hyper_hidden: usize,
     allow_hc_up_mix: bool,
-) -> Result<(), Qwen4ExpMetalError> {
+    inject: Option<&MetalTensor>,
+) -> Result<bool, Qwen4ExpMetalError> {
     encode_hc_norm(
         ctx,
         enc,
@@ -1470,22 +1489,25 @@ fn encode_read(
         scratch.hidden_size,
         eps,
     )?;
-    encode_mat_vec_dispatch(
-        ctx,
-        enc,
-        weights.down,
-        &scratch.normalized,
-        &scratch.low,
-        hyper_hidden,
-        scratch.low_rank,
-    )?;
-    encode_hc_low_activation(ctx, enc, &scratch.low, scratch.branch_count)?;
+    let fused = hc_read::try_encode(ctx, enc, weights.down, inject, scratch)?;
+    if fused.is_none() {
+        encode_mat_vec_dispatch(
+            ctx,
+            enc,
+            weights.down,
+            &scratch.normalized,
+            &scratch.low,
+            hyper_hidden,
+            scratch.low_rank,
+        )?;
+        encode_hc_low_activation(ctx, enc, &scratch.low, scratch.branch_count)?;
+    }
     let use_hc = scratch.hc_up_mix && hc_up::eligible(scratch, weights.up.dtype);
     #[cfg(test)]
     let use_hc = hc_up_probe::route_if_requested(weights.up.dtype, scratch).unwrap_or(use_hc);
     if use_hc && allow_hc_up_mix {
         hc_up::encode(ctx, enc, weights.up, scratch)?;
-        return Ok(());
+        return Ok(fused == Some(true));
     }
     if weights.up.dtype == GgmlType::BF16 && hc_up_rows() {
         crate::metal::encode_mat_vec_bf16_f32_rows(
@@ -1517,7 +1539,7 @@ fn encode_read(
         scratch.branch_count,
         scratch.hidden_size,
     )?;
-    Ok(())
+    Ok(fused == Some(true))
 }
 
 fn validate_encoder(ctx: &MetalContext, enc: &KernelEncoder) -> Result<(), Qwen4ExpMetalError> {

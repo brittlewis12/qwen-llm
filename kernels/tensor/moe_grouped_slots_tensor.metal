@@ -635,11 +635,22 @@ TT_INSTANTIATE(iq1_s,   QT_IQ1_S_BYTES,   QT_IQ1_S_NL,   qt_dequantize_iq1_s)
 TT_INSTANTIATE(iq1_m,   QT_IQ1_M_BYTES,   QT_IQ1_M_NL,   qt_dequantize_iq1_m)
 
 // The wide dense tile is instantiated for the Q8_0 projections V4.1 uses
-// (q/kv/output and the shared expert); other dtypes keep the 32-slot form.
+// (q/kv/output and the shared expert). Additional forms below are explicit-only.
 typedef decltype(kernel_mat_mat_tensor_wide<QT_Q8_0_BYTES, QT_Q8_0_NL, qt_dequantize_q8_0>) mat_mat_tensor_wide_t;
 template [[host_name("kernel_mat_mat_q8_0_f32_tensor_wide")]] kernel mat_mat_tensor_wide_t kernel_mat_mat_tensor_wide<QT_Q8_0_BYTES, QT_Q8_0_NL, qt_dequantize_q8_0>;
 typedef decltype(kernel_mat_mat_tensor_wide_f16act<QT_Q8_0_BYTES, QT_Q8_0_NL, qt_dequantize_q8_0>) mat_mat_tensor_wide_f16act_t;
 template [[host_name("kernel_mat_mat_q8_0_f16act_tensor_wide")]] kernel mat_mat_tensor_wide_f16act_t kernel_mat_mat_tensor_wide_f16act<QT_Q8_0_BYTES, QT_Q8_0_NL, qt_dequantize_q8_0>;
+
+// Explicit wide forms for screened Flash-Next dense projections. The generic
+// automatic selector retains Q8_0-only widening; Flash-Next opts in by shape.
+#define TT_INSTANTIATE_FN_DENSE_WIDE(suffix, BYTES, NL, DEQ) \
+    template [[host_name("kernel_mat_mat_" #suffix "_f32_tensor_wide")]] kernel mat_mat_tensor_wide_t kernel_mat_mat_tensor_wide<BYTES, NL, DEQ>; \
+    template [[host_name("kernel_mat_mat_" #suffix "_f16act_tensor_wide")]] kernel mat_mat_tensor_wide_f16act_t kernel_mat_mat_tensor_wide_f16act<BYTES, NL, DEQ>;
+
+TT_INSTANTIATE_FN_DENSE_WIDE(q4_K, QT_Q4_K_BYTES, QT_Q4_K_NL, qt_dequantize_q4_K)
+TT_INSTANTIATE_FN_DENSE_WIDE(q6_K, QT_Q6_K_BYTES, QT_Q6_K_NL, qt_dequantize_q6_K)
+TT_INSTANTIATE_FN_DENSE_WIDE(iq4_xs, QT_IQ4_XS_BYTES, QT_IQ4_XS_NL, qt_dequantize_iq4_xs)
+TT_INSTANTIATE_FN_DENSE_WIDE(iq4_nl, QT_IQ4_NL_BYTES, QT_IQ4_NL_NL, qt_dequantize_iq4_nl)
 
 // 64-slot gate/up probe tile, one instantiation per generic dtype.
 typedef decltype(kernel_moe_wide_probe_f16act<QT_Q4_K_BYTES, QT_Q4_K_NL, qt_dequantize_q4_K>) moe_wide_probe_t;

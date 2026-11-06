@@ -306,14 +306,23 @@ pub fn mat_mat_tensor_pipeline_name(
     ))
 }
 
-/// 64-slot dense form. Instanced only for Q8_0, the dtype of the V4.1
-/// attention/output/shared-expert projections.
+/// 64-slot dense form. Automatic widening is Q8_0-only; qualified Flash-Next
+/// callers explicitly select Q4_K/Q6_K/IQ4_XS/IQ4_NL wide forms.
 pub fn mat_mat_tensor_wide_pipeline_name(
     dtype: GgmlType,
     activation: TensorActivation,
 ) -> Option<String> {
-    (dtype == GgmlType::Q8_0)
-        .then(|| format!("kernel_mat_mat_q8_0_{}_tensor_wide", activation.infix()))
+    matches!(
+        dtype,
+        GgmlType::Q8_0 | GgmlType::Q4_K | GgmlType::Q6_K | GgmlType::IQ4_XS | GgmlType::IQ4_NL
+    )
+    .then(|| {
+        format!(
+            "kernel_mat_mat_{}_{}_tensor_wide",
+            moe_grouped_generic_layout(dtype).unwrap().suffix,
+            activation.infix()
+        )
+    })
 }
 
 /// Dense `y[row] = W x[row]` on the tensor tile with the `mat_mat`
@@ -339,7 +348,9 @@ pub fn encode_mat_mat_tensor_f32(
     n_out: usize,
     n_query: usize,
 ) -> Result<(), MetalError> {
-    let wide = n_query >= 128 && std::env::var_os("QWEN_V41_DENSE_NARROW").is_none();
+    let wide = weight.dtype == GgmlType::Q8_0
+        && n_query >= 128
+        && std::env::var_os("QWEN_V41_DENSE_NARROW").is_none();
     encode_mat_mat_tensor_f32_impl(ctx, enc, weight, x, y, n_in, n_out, n_query, wide)
 }
 

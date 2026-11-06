@@ -11,6 +11,12 @@ use std::sync::OnceLock;
 
 const DENSE_PREFILL_TENSOR_ENV: &str = "QWEN_DENSE_PREFILL_TENSOR";
 
+crate::env_flag!(
+    /// Wide 64-row Metal 4 tensor tile for the qualified 2048-row Flash-Next dense projection cohorts, default on. Reuses the incumbent half operands and F32 accumulation with no new GPU buffers. Set to 0 to retain the 32-row tile; QWEN_DENSE_PREFILL_TENSOR=0 still disables both.
+    default_on flash_next_dense_wide_enabled,
+    "QWEN_FN_PREFILL_DENSE_WIDE"
+);
+
 /// Strict device-half 128-row tile for qualified 27B FFN projections at exactly 1024 rows, default on when QWEN_DENSE_PREFILL_TENSOR and the tensor tier are available. Set to 0 to retain the previous narrow B tile for A/B or rollback. Other shapes and A3B retain their existing tiles.
 const FFN128_ENV: &str = "QWEN_27B_FFN_TENSOR128";
 
@@ -144,7 +150,7 @@ fn flash_next_eligible(
         }
 }
 
-/// Flash-Next packed projections reuse the existing half-operand narrow tile.
+/// Flash-Next packed projections reuse the existing half-operand tensor tiles.
 /// Both routes already stage half operands; existing caller down telemetry is
 /// retained, along with the generic dispatcher's dense-down telemetry below.
 pub(crate) fn encode_qwen4exp_prefill_mat_mat(
@@ -186,7 +192,11 @@ pub(crate) fn encode_qwen4exp_prefill_mat_mat(
             u32::MAX,
             x,
         );
-        crate::metal::encode_mat_mat_tensor_f32_narrow(ctx, enc, weight, x, y, k, n, m)?;
+        if flash_next_dense_wide_enabled() {
+            crate::metal::encode_mat_mat_tensor_f32_wide(ctx, enc, weight, x, y, k, n, m)?;
+        } else {
+            crate::metal::encode_mat_mat_tensor_f32_narrow(ctx, enc, weight, x, y, k, n, m)?;
+        }
         Ok(())
     } else {
         super::encode_mat_mat_dispatch_without_fewrow(ctx, enc, weight, x, y, k, n, m)

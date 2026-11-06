@@ -47,6 +47,8 @@ use objc2_metal::{
 #[path = "metal/qwen4exp_expert_compat.rs"]
 mod qwen4exp_expert_compat;
 
+mod router_tensor;
+
 const MAX_TOP_K: usize = 16;
 const ROUTED_GATE_UP_DTYPES: &[GgmlType] = &[
     GgmlType::IQ2_S,
@@ -2468,6 +2470,10 @@ fn encode_packed_router_projection(
     tokens: usize,
 ) -> Result<(), Qwen4ExpMoeError> {
     if packed_router_e8p32_strict_qualified(ctx, geometry, weight.dtype, tokens) {
+        if let Some(pipeline) = router_tensor::pipeline(ctx, geometry, weight.dtype, tokens)? {
+            router_tensor::encode(enc, &pipeline, weight, input, output)?;
+            return Ok(());
+        }
         encode_mat_mat_f32_router_e8p32_strict(
             ctx,
             enc,
@@ -3374,6 +3380,7 @@ pub(crate) fn preflight_packed(
     }
     if packed_router_e8p32_strict_qualified(ctx, weights.geometry, weights.router.dtype, tokens) {
         require_pipeline_capacity(ctx, "kernel_mat_mat_f32_f32_router_e8p32_strict", 32, 0)?;
+        let _ = router_tensor::pipeline(ctx, weights.geometry, weights.router.dtype, tokens)?;
     } else {
         preflight_packed_projection(ctx, weights.router.dtype)?;
     }

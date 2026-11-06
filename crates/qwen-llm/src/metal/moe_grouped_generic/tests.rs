@@ -1227,7 +1227,7 @@ fn run_tensor_dense_case(dtype: GgmlType) {
 /// 64-slot dense tile against the CPU reference and the explicit 32-slot
 /// tile at ragged shapes (partial first and second slot groups, output-row
 /// tails).
-fn run_tensor_dense_wide_case(n_out: usize, rows: usize, seed: u64) {
+fn run_tensor_dense_wide_case(dtype: GgmlType, n_out: usize, rows: usize, seed: u64) {
     let _lease = crate::metal::acquire_metal_benchmark_lease().expect("production GPU lease");
     let Some(ctx) = metal_test_context() else {
         return;
@@ -1237,14 +1237,14 @@ fn run_tensor_dense_wide_case(n_out: usize, rows: usize, seed: u64) {
         return;
     }
     const N_IN: usize = 512;
-    let bank = synthetic_bank(GgmlType::Q8_0, N_IN, n_out, 1, seed);
-    let w_cpu = cpu_expert(GgmlType::Q8_0, &bank, N_IN, n_out, 0);
+    let bank = synthetic_bank(dtype, N_IN, n_out, 1, seed);
+    let w_cpu = cpu_expert(dtype, &bank, N_IN, n_out, 0);
     let mut rng = Lcg(seed ^ 0x5a);
     let x: Vec<f32> = (0..rows * N_IN).map(|_| rng.signed(0.5)).collect();
     let cpu: Vec<f32> = (0..rows)
         .flat_map(|r| matvec(&w_cpu, N_IN, &x[r * N_IN..(r + 1) * N_IN]))
         .collect();
-    let w = MetalTensor::from_bytes(&ctx, &bank, vec![N_IN as u64, n_out as u64], GgmlType::Q8_0)
+    let w = MetalTensor::from_bytes(&ctx, &bank, vec![N_IN as u64, n_out as u64], dtype)
         .expect("weight tensor");
     let x_t = f32_tensor(&ctx, &x);
     let x_v = x_t.view_bytes(0, vec![N_IN as u64, rows as u64]);
@@ -1272,8 +1272,21 @@ fn run_tensor_dense_wide_case(n_out: usize, rows: usize, seed: u64) {
 
 #[test]
 fn tensor_dense_wide_q8_0_matches_narrow() {
-    run_tensor_dense_wide_case(320, 130, 0x9d);
-    run_tensor_dense_wide_case(321, 97, 0x9e);
+    run_tensor_dense_wide_case(GgmlType::Q8_0, 320, 130, 0x9d);
+    run_tensor_dense_wide_case(GgmlType::Q8_0, 321, 97, 0x9e);
+}
+
+#[test]
+fn tensor_dense_wide_flash_next_formats_match_narrow() {
+    for dtype in [
+        GgmlType::Q4_K,
+        GgmlType::Q6_K,
+        GgmlType::IQ4_XS,
+        GgmlType::IQ4_NL,
+    ] {
+        run_tensor_dense_wide_case(dtype, 320, 130, 0x9d);
+        run_tensor_dense_wide_case(dtype, 321, 97, 0x9e);
+    }
 }
 
 /// Opt-in narrow/wide dense timing at short batch lengths (the selector

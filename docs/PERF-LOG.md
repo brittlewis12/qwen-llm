@@ -6,6 +6,121 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the current state and evidence index.
 
+## 2026-11-05 - GLM M5 Prefill +34.2%: IQ Tensor Gate/Up and F32 KDA Value4
+
+- Standing on main `2c7d3c30`, M5 Ultra, stock UD-IQ3_XXS, pp4096:
+  two retained production-prefill-plus-endpoint-logit wall samples
+  **5903.631082 / 5900.511458 ms**, median **5902.071270 ms**,
+  **694.0 tok/s**. llama.cpp v0.9.0's saved
+  [same-artifact, ub2048 reference](bench/2026-11-04-2050-families-family/m5/lcpp-glm53-flash.json)
+  is **799.349 tok/s**: main is **0.868x**. Seed 1, native 2048-row
+  chunks, one excluded warmup, build lock + Metal lease, thermal boundaries
+  both 0. Build/runtime source stamps are clean and match. All existing
+  October defaults remain enabled.
+- Fresh pp4096 stage attribution, same seed and two native chunks:
+  ordinary warmed wall **5906.783750 / 5904.425333 ms**;
+  profiled **6061.284292 ms**, command GPU sum **6047.439333 ms**,
+  984 spans summing **5864.971640 ms**. Stage encoder boundaries perturb
+  execution; these are diagnostic, nonexclusive shares of the span sum.
+  Each diagnostic chunk also computes an endpoint head, versus one head
+  for the ordinary whole prompt. The `mla_projection` span covers combined
+  MLA execution, including attention; its name is not a projection-only cost.
+
+  | Stage | Profile ms | Share |
+  | --- | ---: | ---: |
+  | Routed experts | 2827.709 | 48.2% |
+  | Combined MLA | 1205.654 | 20.6% |
+  | KDA input + output projections | 773.394 | 13.2% |
+  | KDA recurrence | 379.545 | 6.5% |
+  | Shared expert | 187.453 | 3.2% |
+  | KDA preparation | 160.324 | 2.7% |
+
+- **Default on:** extend GLM's existing prepared N32 tensor gate/up adapter
+  to equal-type IQ2_S/IQ3_S banks, at H4096/F2048/E288/top-8 and actual
+  1024/2048 rows on the available M5 tensor tier. Reuse the already-admitted
+  normalized Half input. Preserve clamped SwiGLU, unweighted F32 inner,
+  independent current down policy (including specialized IQ4_XS), and
+  routing weights applied after down. The old IQ route used grouped MMA;
+  the Q4/Q5 route was already enabled. No new narrowing site or allocation.
+  Rollback: **`QWEN_GLM53_IQ_TENSOR_GATE_UP=0`**; enclosing
+  `QWEN_GLM53_TENSOR_GATE_UP=0` / `QWEN_EXPERT_TENSOR_TILE=0` also win.
+- **Default on:** KDA recurrence reuses each F32 q/k/decay load across four
+  independent value rows per SIMD group. Keep each row's float4 operations,
+  SIMD reductions and F32 state; preparation and output normalization are
+  unchanged. Bounded to Fast/Half, 64 heads, D128, actual 1024/2048 rows,
+  available M5 tier and supported PSO. **Zero added GPU buffers, admission
+  bytes or threadgroup memory.** Exact/F32, decode, other shapes and devices
+  retain the incumbent. Rollback: **`QWEN_GLM53_KDA_VALUE4=0`**.
+- Whole-prefill kill screens, AB, two retained reps per arm, 30 s cooldown
+  before each arm, every thermal boundary 0. IQ screen at `8f2a4817`:
+  off **5925.059583 / 5906.583750 ms**, on
+  **4618.264667 / 4632.853750 ms**; medians
+  **5915.821667 -> 4625.559209 ms (1.278942x)**.
+  KDA screen at `f15e5092`, IQ enabled in both arms:
+  off **4623.783042 / 4622.292417 ms**, on
+  **4397.457375 / 4398.082292 ms**; medians
+  **4623.037730 -> 4397.769834 ms (1.051223x)**.
+- Teacher forcing on frozen Bash manual prose and real
+  `qwen4exp_runtime.rs` source: 4096 next-token targets per document in two
+  2048-row commands, identical input/target IDs in both arms, native all-row
+  captures using the production per-row output tail. Full-vocabulary F64
+  log-sum-exp, NLL and KL(off||on); all rows finite, no generated feedback.
+  Only the two new flags differ (both 0 versus both 1); existing tensor
+  defaults remain enabled. Frozen code `f15e5092`; the later default flip
+  changes selection defaults, not the measured operators.
+
+  | Document | Targets | NLL off | NLL on | dNLL | Mean KL | Argmax agreement |
+  | --- | ---: | ---: | ---: | ---: | ---: | ---: |
+  | Prose | 4096 | 0.102636697 | 0.103965558 | +0.001328861 | 0.001811853 | 4080/4096 |
+  | Code | 4096 | 0.984380422 | 0.985417744 | +0.001037322 | 0.004293413 | 4014/4096 |
+  | Pooled | 8192 | 0.543508559 | 0.544691651 | +0.001183091 | 0.003052633 | 8094/8192 |
+
+  **Pass**, per document and pooled: |dNLL| <=0.005 nats/token and mean
+  KL <=0.01. Pooled p99/max row KL **0.047082693 / 0.339034651**.
+  Code's second 2048-row diagnostic has dNLL **+0.005078273**; the gate is
+  per document and pooled, not a claim about every subchunk. This is bounded
+  two-document evidence, not a model-wide accuracy claim or greedy identity.
+  Token-ID SHA256s (4097 u32 LE):
+  prose `3596d0e7a2a87f97fc77b093c98a200a9ab1a5461911fece1aa1f35af04df6cf`,
+  code `2632f72ce98fca4817d6b990e3a20b708834c8c90e23ded7fa41095ad01adb5c`.
+- KDA's validation-on operator witness compares every output/state bit
+  against the incumbent at 1/7/37/1024/2048 rows, two successive commands,
+  nonzero incoming state and zero/unit/near-unit decay: **pass**. Each
+  head/value remains independent; the Exact/F32 policy tests retain the
+  incumbent rather than relying on approximate equivalence.
+- IQ's validation-on guarded composition witness passes IQ2_S/IQ3_S
+  gate/up with both IQ3_S and IQ4_XS down, alongside the existing Q4/Q5
+  cases, at 129/1024/2048 rows and three asymmetric clamp limits. All
+  tensor F32-input versus copy-inclusive F16-input outputs match bits;
+  sampled F64 dots pass the existing operator bounds. Bucket edges,
+  empty/full experts, inactive Half rows, status words and offset guards
+  pass. The repaired witness executes 189 compositions across seven
+  gate/down pairs, including the incumbent arm.
+- Final short end-to-end confirmation, frozen production code `7e87b7a6`,
+  one normal release binary, both new flags 0 versus unset/default on.
+  ABBA, two retained reps per arm occurrence, four per setting; 30 s
+  cooldown before each arm, build lock + Metal lease. All eight thermal
+  boundaries 0; no samples dropped. Every retained wall sample, milliseconds:
+
+  | Setting | Samples (ms) | Median (ms) | tok/s |
+  | --- | --- | ---: | ---: |
+  | Both off | 5907.029250, 5906.300042, 5901.942959, 5902.435875 | 5904.367959 | 693.7 |
+  | Default on | 4406.425583, 4403.424750, 4394.262624, 4395.033958 | 4399.229354 | 931.1 |
+
+  **1.342137x whole-prefill throughput (+34.21%)**; versus llama.cpp
+  **0.868x -> 1.165x**. Binary SHA256
+  `c1950639d3fb5528d84b9d8427bc35c72fa8d10317a6f3c918b35eb4cc23d5f1`;
+  build/runtime source stamps are clean and match in every arm. Native
+  chunk size remains 2048. Subsequent fixture repair `95111e04` gives the
+  ignored composition witness its own guarded per-row status buffer instead
+  of aliasing expert counts; it changes no production arithmetic.
+- Full `cargo test --release -p qwen-llm --lib`, Metal required:
+  **2413 passed, 0 failed, 736 ignored**, 101.15 s, on `95111e04`.
+  `scripts/check-contracts.sh` passed on that commit, tree
+  `41a38ed8b304def653c766122fbf6c91885876b4`. Final follow-up adds this
+  log entry only. Branch remains unmerged; temporary harness sources are
+  removed and no work from this lane is left running. No extra report files.
+
 ## 2026-11-05 - Flash-Next M5 Prefill +15%: Parallel F32 QSA Values and Stable Bucketing
 
 - Standing on main `eca78d7b`, M5 Ultra, GSQ-RCO IQ3_S, pp4096:

@@ -199,6 +199,12 @@ fn op(ctx: &MetalContext, a: &Args) -> Result<()> {
         for (arm, candidate) in [false, true, true, false].into_iter().enumerate() {
             std::thread::sleep(std::time::Duration::from_secs(30));
             thermal(&format!("op-{pos}-{arm}"), "before")?;
+            // Clock/cache priming is identical for A and the candidate sweep.
+            // Pipeline compilation and first-touch costs stay outside samples.
+            let priming = Instant::now();
+            while priming.elapsed().as_millis() < 200 {
+                one(base.0, base.1)?;
+            }
             for &(nwg, c) in if candidate {
                 configs.as_slice()
             } else {
@@ -310,18 +316,22 @@ fn run() -> Result<()> {
     if a.mode == "profile" {
         thermal("profile", "before")?;
         let mut seq = restore()?;
-        let guard = dispatch_profile_begin(ctx, 8192)?;
-        let logits = model.decode_token(&mut seq, tokens[0])?;
-        ensure!(
-            logits.iter().all(|x| x.is_finite()),
-            "nonfinite profile logits"
-        );
-        let profile = dispatch_profile_finish(ctx, guard)?;
-        ensure!(
-            profile.overflow == 0 && profile.rows.iter().all(|r| r.gpu_ns.is_some()),
-            "incomplete profile"
-        );
-        emit(json!({"record":"profile","depth":a.depth,"rows":profile.rows}));
+        for (token_index, &id) in tokens.iter().take(2).enumerate() {
+            let guard = dispatch_profile_begin(ctx, 8192)?;
+            let logits = model.decode_token(&mut seq, id)?;
+            ensure!(
+                logits.iter().all(|x| x.is_finite()),
+                "nonfinite profile logits"
+            );
+            let profile = dispatch_profile_finish(ctx, guard)?;
+            ensure!(
+                profile.overflow == 0 && profile.rows.iter().all(|r| r.gpu_ns.is_some()),
+                "incomplete profile"
+            );
+            emit(
+                json!({"record":"profile","depth":a.depth,"token_index":token_index,"rows":profile.rows}),
+            );
+        }
         thermal("profile", "after")?;
         return Ok(());
     }
@@ -330,8 +340,13 @@ fn run() -> Result<()> {
     thermal("bench", "before")?;
     for sample in 0..a.reps {
         let mut seq = restore()?;
+        // Match suite's xorshift stream: every 64-token run consumes a final
+        // unused token before the next run selects its first token.
+        let skip = (sample + 1) * (a.tokens + 1);
+        let sample_ids = ids(skip + a.tokens, model.arch().vocab_size, 1);
+        let sample_ids = &sample_ids[skip..];
         let start = Instant::now();
-        let logits = run_decode(&model, &mut seq, &tokens)?;
+        let logits = run_decode(&model, &mut seq, sample_ids)?;
         let ms = start.elapsed().as_secs_f64() * 1e3;
         ensure!(
             logits.iter().all(|x| x.is_finite()),

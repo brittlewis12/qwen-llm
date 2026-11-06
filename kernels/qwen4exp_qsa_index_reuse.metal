@@ -17,38 +17,41 @@ inline void qsa_index_reuse(constant qsa_index_reuse_args &a,
         device float *scores, device int *visible_counts,
         uint2 group, ushort simdgroup, ushort lane) {
     const uint q0=group.y*Q;
-    if (q0>=a.query_count || a.ratio==0u) return;
+    if (q0+Q>a.query_count || a.ratio==0u) return;
     if (group.x==0u && simdgroup==0u && lane==0u) {
-        for (uint q=0u;q<Q && q0+q<a.query_count;++q) {
+        for (uint q=0u;q<Q;++q) {
             const uint visible=(a.start_position+q0+q+1u)/a.ratio;
             visible_counts[q0+q]=visible<=a.block_capacity ? int(visible) : -1;
         }
     }
     const uint block=group.x*8u+uint(simdgroup);
-    const uint maximum_visible=(a.start_position+min(q0+Q,a.query_count))/a.ratio;
+    const uint maximum_visible=(a.start_position+q0+Q)/a.ratio;
     if (block>=maximum_visible || block>=a.block_capacity) return;
     device const half *key=keys+ulong(block)*128u;
-    float score[Q];
-    for (uint q=0u;q<Q;++q) score[q]=0.0f;
+    float4 score0=0.0f,score1=0.0f;
     for (uint head=0u;head<4u;++head) {
-        float dot[Q];
-        for (uint q=0u;q<Q;++q) dot[q]=0.0f;
+        float4 dot0=0.0f,dot1=0.0f;
         for (uint dimension=uint(lane);dimension<128u;dimension+=32u) {
             const float k=float(key[dimension]);
-            for (uint q=0u;q<Q;++q) {
-                const uint query=min(q0+q,a.query_count-1u);
-                dot[q]+=queries[ulong(query)*512u+head*128u+dimension]*k;
-            }
+            const ulong base=ulong(q0)*512u+head*128u+dimension;
+            dot0+=float4(queries[base],queries[base+512u],queries[base+1024u],queries[base+1536u])*k;
+            if (Q==8u) dot1+=float4(queries[base+2048u],queries[base+2560u],queries[base+3072u],queries[base+3584u])*k;
         }
-        for (uint q=0u;q<Q;++q) {
-            const float sum=simd_sum(dot[q]);
-            if (lane==0u) score[q]+=max(sum,0.0f);
+        const float4 sum0(simd_sum(dot0.x),simd_sum(dot0.y),simd_sum(dot0.z),simd_sum(dot0.w));
+        if (lane==0u) score0+=max(sum0,float4(0.0f));
+        if (Q==8u) {
+            const float4 sum1(simd_sum(dot1.x),simd_sum(dot1.y),simd_sum(dot1.z),simd_sum(dot1.w));
+            if (lane==0u) score1+=max(sum1,float4(0.0f));
         }
     }
     if (lane==0u) {
-        for (uint q=0u;q<Q && q0+q<a.query_count;++q) {
+        for (uint q=0u;q<4u;++q) {
             const uint visible=(a.start_position+q0+q+1u)/a.ratio;
-            if (block<visible) scores[ulong(q0+q)*a.block_capacity+block]=score[q]*0.08838834764831845f;
+            if (block<visible) scores[ulong(q0+q)*a.block_capacity+block]=score0[q]*0.08838834764831845f;
+            if (Q==8u) {
+                const uint visible1=(a.start_position+q0+q+5u)/a.ratio;
+                if (block<visible1) scores[ulong(q0+q+4u)*a.block_capacity+block]=score1[q]*0.08838834764831845f;
+            }
         }
     }
 }

@@ -255,6 +255,22 @@ fn qsa_selector_widths_preserve_cpu_ids_ties_errors_and_guards() {
     s[7 * C + 17] = f32::INFINITY;
     s[8 * C + 23] = f32::NAN;
     s[9 * C + 29] = f32::NEG_INFINITY;
+    for i in 0..C {
+        s[10 * C + i] = next(&mut seed) * 2.0;
+        s[11 * C + i] = f32::from_bits(0x3f000000 + (i as u32 % 8192));
+        s[13 * C + i] = [
+            0.0,
+            -0.0,
+            f32::MIN_POSITIVE / 2.0,
+            -f32::MIN_POSITIVE / 2.0,
+            f32::MIN_POSITIVE,
+            -f32::MIN_POSITIVE,
+            1.0,
+            -1.0,
+        ][i % 8];
+    }
+    v[12] = 8193;
+    s[12 * C + 8193..13 * C].fill(f32::NAN);
     let st = guarded(
         &ctx,
         bytemuck::cast_slice(&s),
@@ -267,127 +283,129 @@ fn qsa_selector_widths_preserve_cpu_ids_ties_errors_and_guards() {
         GgmlType::I32,
         vec![Q as u64],
     );
-    let p = ctx
-        .pipeline("kernel_deepseek_v4_select_top_k_radix4_ids_f32")
-        .unwrap();
-    let widths: Vec<_> = [32usize, 64, 128, 256, 512, 1024]
-        .into_iter()
-        .filter(|&w| {
-            w <= p.maxTotalThreadsPerThreadgroup()
-                && p.staticThreadgroupMemoryLength() + w * 8
-                    <= ctx.device.maxThreadgroupMemoryLength()
-        })
-        .collect();
-    let banks: Vec<_> = widths
-        .iter()
-        .map(|_| {
-            (
-                guarded(
-                    &ctx,
-                    bytemuck::cast_slice(&vec![-999i32; K * Q]),
-                    GgmlType::I32,
-                    vec![K as u64, Q as u64],
-                ),
-                guarded(
-                    &ctx,
-                    bytemuck::cast_slice(&vec![-999i32; Q]),
-                    GgmlType::I32,
-                    vec![Q as u64],
-                ),
-                guarded(
-                    &ctx,
-                    bytemuck::cast_slice(&vec![-999i32; Q]),
-                    GgmlType::I32,
-                    vec![Q as u64],
-                ),
-            )
-        })
-        .collect();
-    #[repr(C)]
-    #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
-    struct Args {
-        row_capacity: u32,
-        top_k: u32,
-        query_count: u32,
-        emit_ranked: u32,
-    }
-    let cmd = ctx.queue.commandBuffer().unwrap();
-    let enc = KernelEncoder::begin(&cmd);
-    for (i, &width) in widths.iter().enumerate() {
-        enc.set_pipeline(
-            &ctx.pipeline("kernel_deepseek_v4_select_top_k_radix4_ids_f32")
-                .unwrap(),
-        );
-        enc.set_bytes(
-            0,
-            &Args {
-                row_capacity: C as u32,
-                top_k: K as u32,
-                query_count: Q as u32,
-                emit_ranked: 0,
-            },
-        );
-        enc.set_tensor(1, &st);
-        enc.set_tensor(2, &vt);
-        enc.set_tensor(3, &banks[i].0);
-        enc.set_tensor(4, &banks[i].1);
-        enc.set_tensor(5, &banks[i].2);
-        enc.set_threadgroup_memory(0, width * 4);
-        enc.set_threadgroup_memory(1, width * 4);
-        enc.dispatch(
-            MTLSize {
-                width: Q,
-                height: 1,
-                depth: 1,
-            },
-            MTLSize {
-                width,
-                height: 1,
-                depth: 1,
-            },
-        );
-    }
-    enc.end();
-    cmd.commit();
-    crate::metal::wait_completed(&cmd).unwrap();
-    let mut expected = vec![-1i32; K * Q];
-    let mut counts = vec![0u32; Q];
-    let mut status = vec![0u32; Q];
-    for row in 0..Q {
-        if v[row] <= 0 || v[row] as usize > C {
-            status[row] = 1;
-            continue;
+    for kernel in [
+        "kernel_deepseek_v4_select_top_k_radix4_ids_f32",
+        "kernel_qwen4exp_qsa_select_scan_f32",
+        "kernel_qwen4exp_qsa_select_compact_f32",
+    ] {
+        let p = ctx.pipeline(kernel).unwrap();
+        let widths: Vec<_> = [32usize, 64, 128, 256, 512, 1024]
+            .into_iter()
+            .filter(|&w| {
+                w <= p.maxTotalThreadsPerThreadgroup()
+                    && p.staticThreadgroupMemoryLength() + w * 8
+                        <= ctx.device.maxThreadgroupMemoryLength()
+            })
+            .collect();
+        let banks: Vec<_> = widths
+            .iter()
+            .map(|_| {
+                (
+                    guarded(
+                        &ctx,
+                        bytemuck::cast_slice(&vec![-999i32; K * Q]),
+                        GgmlType::I32,
+                        vec![K as u64, Q as u64],
+                    ),
+                    guarded(
+                        &ctx,
+                        bytemuck::cast_slice(&vec![-999i32; Q]),
+                        GgmlType::I32,
+                        vec![Q as u64],
+                    ),
+                    guarded(
+                        &ctx,
+                        bytemuck::cast_slice(&vec![-999i32; Q]),
+                        GgmlType::I32,
+                        vec![Q as u64],
+                    ),
+                )
+            })
+            .collect();
+        #[repr(C)]
+        #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+        struct Args {
+            row_capacity: u32,
+            top_k: u32,
+            query_count: u32,
+            emit_ranked: u32,
         }
-        let visible = v[row] as usize;
-        let n = K.min(visible);
-        counts[row] = n as u32;
-        let mut ids: Vec<_> = (0..visible).collect();
-        if s[row * C..row * C + visible].iter().any(|x| !x.is_finite()) {
-            status[row] = 2;
-            ids.truncate(n);
-        } else {
-            ids.sort_by(|&a, &b| {
-                s[row * C + b]
-                    .partial_cmp(&s[row * C + a])
-                    .unwrap()
-                    .then(a.cmp(&b))
-            });
-            ids.truncate(n);
-            ids.sort_unstable();
+        let cmd = ctx.queue.commandBuffer().unwrap();
+        let enc = KernelEncoder::begin(&cmd);
+        for (i, &width) in widths.iter().enumerate() {
+            enc.set_pipeline(&ctx.pipeline(kernel).unwrap());
+            enc.set_bytes(
+                0,
+                &Args {
+                    row_capacity: C as u32,
+                    top_k: K as u32,
+                    query_count: Q as u32,
+                    emit_ranked: 0,
+                },
+            );
+            enc.set_tensor(1, &st);
+            enc.set_tensor(2, &vt);
+            enc.set_tensor(3, &banks[i].0);
+            enc.set_tensor(4, &banks[i].1);
+            enc.set_tensor(5, &banks[i].2);
+            enc.set_threadgroup_memory(0, width * 4);
+            enc.set_threadgroup_memory(1, width * 4);
+            enc.dispatch(
+                MTLSize {
+                    width: Q,
+                    height: 1,
+                    depth: 1,
+                },
+                MTLSize {
+                    width,
+                    height: 1,
+                    depth: 1,
+                },
+            );
         }
-        for (i, id) in ids.into_iter().enumerate() {
-            expected[row * K + i] = id as i32;
+        enc.end();
+        cmd.commit();
+        crate::metal::wait_completed(&cmd).unwrap();
+        let mut expected = vec![-1i32; K * Q];
+        let mut counts = vec![0u32; Q];
+        let mut status = vec![0u32; Q];
+        for row in 0..Q {
+            if v[row] <= 0 || v[row] as usize > C {
+                status[row] = 1;
+                continue;
+            }
+            let visible = v[row] as usize;
+            let n = K.min(visible);
+            counts[row] = n as u32;
+            let mut ids: Vec<_> = (0..visible).collect();
+            if s[row * C..row * C + visible].iter().any(|x| !x.is_finite()) {
+                status[row] = 2;
+                ids.truncate(n);
+            } else {
+                ids.sort_by(|&a, &b| {
+                    let canonical = |x: f32| if x.abs() < f32::MIN_POSITIVE { 0.0 } else { x };
+                    canonical(s[row * C + b])
+                        .partial_cmp(&canonical(s[row * C + a]))
+                        .unwrap()
+                        .then(a.cmp(&b))
+                });
+                ids.truncate(n);
+                ids.sort_unstable();
+            }
+            for (i, id) in ids.into_iter().enumerate() {
+                expected[row * K + i] = id as i32;
+            }
         }
+        let expected: Vec<u32> = expected.into_iter().map(|x| x as u32).collect();
+        for (i, (ids, n, e)) in banks.iter().enumerate() {
+            assert_eq!(bits(ids), expected, "width{}", widths[i]);
+            assert_eq!(bits(n), counts);
+            assert_eq!(bits(e), status);
+            guards(ids);
+            guards(n);
+            guards(e);
+        }
+        guards(&st);
+        guards(&vt);
     }
-    let expected: Vec<u32> = expected.into_iter().map(|x| x as u32).collect();
-    for (i, (ids, n, e)) in banks.iter().enumerate() {
-        assert_eq!(bits(ids), expected, "width{}", widths[i]);
-        assert_eq!(bits(n), counts);
-        assert_eq!(bits(e), status);
-        guards(ids);
-        guards(n);
-        guards(e);
-    }
-    guards(&st);
-    guards(&vt);
 }

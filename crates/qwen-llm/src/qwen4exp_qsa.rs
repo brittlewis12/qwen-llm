@@ -5711,9 +5711,14 @@ fn encode_attention_logits_packed_gqa4(
     let g = geometry;
     let heads_per_kv = g.query_heads / g.kv_heads;
     let head_groups = heads_per_kv / PACKED_ATTENTION_HEADS_PER_TG;
-    let slot_tiles = g.output_width().div_ceil(SLOTS_PER_THREADGROUP);
-    let pso = prefill_next::logits_pipeline(ctx, g, start_position, query_count)?
-        .unwrap_or(ctx.pipeline("kernel_qwen4exp_qsa_attention_logits_packed_gqa4_f16")?);
+    let (pso, slots) = match prefill_next::logits_pipeline(ctx, g, start_position, query_count)? {
+        Some(v) => v,
+        None => (
+            ctx.pipeline("kernel_qwen4exp_qsa_attention_logits_packed_gqa4_f16")?,
+            SLOTS_PER_THREADGROUP,
+        ),
+    };
+    let slot_tiles = g.output_width().div_ceil(slots);
     enc.set_pipeline(&pso);
     enc.set_bytes(0, &packed_attention_args(g, start_position, query_count));
     enc.set_tensor(1, query);

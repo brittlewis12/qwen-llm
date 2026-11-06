@@ -264,6 +264,15 @@ fn reused_attention_matches_incumbent_bits_and_guards_at_depth() {
             pipelines.uses_split(32, start),
             split_on && (tensor || (vector_on && start >= 32768))
         );
+        assert_eq!(
+            pipelines.uses_vector(32, start),
+            split_on
+                && vector_on
+                && (start >= 32768
+                    || (tensor
+                        && crate::env_flag::read_default_on("QWEN_FN_QSA_SHALLOW_VALUE_VECTOR")))
+        );
+        assert!(!pipelines.uses_vector(31, start));
         assert!(!pipelines.uses_split(31, start));
     }
     attention(&ctx);

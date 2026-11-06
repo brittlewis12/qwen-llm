@@ -15,6 +15,12 @@ crate::env_flag!(
     "QWEN_FN_QSA_PREFILL_SPLIT_VALUE"
 );
 
+crate::env_flag!(
+    /// Flash-Next selected QSA value vector accumulators below depth 32768 on the tensor tier, default on for qualified full N32 selected bands. Retains split8 arithmetic, F32 masses/F16 values and buffers. Set 0 to restore the prior 32768 depth boundary; QWEN_FN_QSA_VALUE_VECTOR=0 disables vector values at every depth.
+    default_on shallow_vector_enabled,
+    "QWEN_FN_QSA_SHALLOW_VALUE_VECTOR"
+);
+
 pub(super) fn geometry_qualified(g: QwenSparseAttentionMetalGeometry) -> bool {
     (
         g.query_heads,
@@ -79,6 +85,7 @@ pub(super) struct Pipelines {
     split_value: Option<Pipeline>,
     vector_value: Option<Pipeline>,
     split_from: usize,
+    vector_from: usize,
     device: u64,
 }
 
@@ -134,8 +141,13 @@ impl Pipelines {
                 None
             },
             // Neither split variant pays at the M4 dense frontier. Extend only
-            // deep selected bands; the tensor-tier policy remains unchanged.
+            // deep selected bands on SIMD devices. The tensor tier may extend vector values.
             vector_value,
+            vector_from: if tensor && shallow_vector_enabled() {
+                2051
+            } else {
+                32768
+            },
             split_from: if tensor { 0 } else { 32768 },
             device: ctx.device.registryID(),
         }))
@@ -162,6 +174,10 @@ impl Pipelines {
 
     pub(super) fn uses_split(&self, n: usize, start: usize) -> bool {
         n == DENSE_PACKED_QUERY_TILE && start >= self.split_from && self.split_value.is_some()
+    }
+
+    pub(super) fn uses_vector(&self, n: usize, start: usize) -> bool {
+        self.uses_split(n, start) && start >= self.vector_from && self.vector_value.is_some()
     }
 
     /// The direct leaf accepts N1..32 for product-metallib qualification. Only
@@ -324,7 +340,7 @@ impl Pipelines {
         enc.set_threadgroup_memory(0, STATS_TGM);
         enc.dispatch(size(3, 2, n), size(256, 1, 1));
         let split = self.uses_split(n, start);
-        enc.set_pipeline(if split && start >= 32768 && self.vector_value.is_some() {
+        enc.set_pipeline(if self.uses_vector(n, start) {
             self.vector_value.as_ref().unwrap()
         } else if split {
             self.split_value.as_ref().unwrap()

@@ -28,7 +28,7 @@ crate::env_flag!(
 );
 
 crate::env_flag!(
-    /// Flash-Next selected QSA value at N32: depth >=32768 on the tensor tier or qualified SIMD devices. Explicit F32 vector accumulators with the existing eight-way split and slot/reduction order. Original F32 masses and F16 values; no added GPU buffers. Set 0 for the existing split8 kernel on the tensor tier, or chronological GQA12 on SIMD devices.
+    /// Flash-Next selected QSA value at N32: depth >=32768 on qualified SIMD devices; the tensor tier also includes shallower selected bands with QWEN_FN_QSA_SHALLOW_VALUE_VECTOR. Explicit F32 vector accumulators with the existing eight-way split and slot/reduction order. Original F32 masses and F16 values; no added GPU buffers. Set 0 for the existing split8 kernel on the tensor tier, or chronological GQA12 on SIMD devices.
     default_on value_vector_enabled,
     "QWEN_FN_QSA_VALUE_VECTOR"
 );

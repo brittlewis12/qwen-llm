@@ -6,48 +6,77 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the current state and evidence index.
 
-## 2026-11-05 - Chunked GDN F32 Kill Test: Stop Before Integration
+## 2026-11-05 - Chunked GDN Prefill: Distribution-Qualified, Default On
 
-- M5 Ultra, base `585d67d6`. Read the actual 27B, A3B and Flash-Next GGUF
-  headers: D=128, Hk=16; Hv=48/32/48 respectively. Tested a two-dispatch
-  F32 Metal 4 prototype: shared KK/QK Gram, 16x16 diagonal inverses plus
-  block triangular solve, then an in-kernel chunk scan with VT=32 and F32
-  state. Interleaved head mapping `h % Hk`, unscaled Q, post-update output.
-  C=64 uses 20.5/24 KiB static threadgroup memory; C=32 uses 6.25/20 KiB.
-- One-layer T=4096, production packed recurrence as incumbent, outer chunks
-  512/1024 plus the current A3B/Flash-Next 2048. Seeded normalized random
-  Q/K, sigmoid beta, Qwen-like decay, nonzero initial state. Full F64 serial
-  reference covers every output and final-state element. Worst candidate
-  max-absolute errors: **4.8844e-6 output / 2.2915e-6 state**; cosine
-  >=0.999999999995. This passes the operator's 1e-5 / 0.999999 bar;
-  it is synthetic operator evidence, not model-distribution qualification.
-- Whole-command GPU timestamps, one command per arm sample, 100 alternating
-  warmups, ABBA with ten retained repetitions per arm occurrence (20 per
-  setting). Every sample contributes to the medians; no outliers dropped.
-  Build lock plus Metal lease; every thermal boundary 0. Medians in ms:
+- Enable F32 chunked GDN prompt recurrence on the available Metal 4 tensor
+  tier for Hk=16, Hv=32/48, D=128 at >=256 rows. A3B uses C=64; Hv48 uses
+  C=64 below 2048 rows and C=32 at >=2048 (the production Flash-Next chunk).
+  VT=32; shared Gram/causal-inverse precompute followed by output/state with
+  an in-kernel chunk scan. Preserve interleaved `h % Hk`, unscaled Q,
+  post-update output and F32 state. No new half operands or state format.
+- Rollback: **`QWEN_GDN_CHUNKED_PREFILL=0`**. M4, unavailable tensor tiers,
+  decode, checkpointed verification and other head shapes retain incumbent
+  recurrence. Incomplete internal chunks finish with the serial kernel.
+  Reuse dead QKV projection storage after convolution: **zero added GPU
+  scratch buffers or admission bytes**. Static threadgroup memory for
+  precompute/scan: C64 20.5/24 KiB; C32 6.25/20 KiB.
+- F64 regression checks on both head counts and both C values cover nonzero
+  state, outer-call carry, offset scratch with sentinel guards, short serial
+  suffixes, near-unit decay, collinear keys, beta near one and zero-decay
+  resets. Worst max-absolute output/state error **4.315e-6 / 1.513e-6**,
+  cosine >0.99999999999; within the 1e-5 / 0.999999 operator bar.
+- Teacher forcing: frozen rendered Bash manual and real
+  `qwen4exp_runtime.rs` source. A3B and Flash-Next each score 4096 next-token
+  targets per document, two 2048-row commands/chunks; 27B scores 1024 per
+  document at its production 1024-row geometry. Identical input/target IDs
+  are checked against the off reference header. Native all-row gated-residual
+  readout for Flash-Next; final-residual capture plus the production per-row
+  RMSNorm/GEMV head for A3B/27B, with bitwise endpoint checks. Full-vocabulary
+  F64 log-sum-exp, NLL and KL(off||on); every row finite; no generated-token
+  feedback. Other tensor defaults remain enabled in both arms.
 
-  | Hv | Outer chunk | C | Serial | Chunked | Speedup |
-  | ---: | ---: | ---: | ---: | ---: | ---: |
-  | 32 | 512 | 64 | 3.110458 | 1.978938 | 1.572x |
-  | 32 | 1024 | 64 | 3.017812 | 1.829208 | 1.650x |
-  | 32 | 2048 | 64 | 3.102563 | 1.796688 | 1.727x |
-  | 48 | 512 | 64 | 4.412667 | 2.498437 | 1.766x |
-  | 48 | 1024 | 64 | 5.175125 | 2.327375 | 2.224x |
-  | 48 | 2048 | 64 | 6.373813 | 2.289729 | 2.784x |
-  | 32 | 2048 | 32 | 3.118146 | 1.864792 | 1.672x |
-  | 48 | 2048 | 32 | 6.293125 | 2.088271 | 3.014x |
+  | Model / document | Targets | NLL off | NLL on | dNLL | Mean KL | Argmax agreement |
+  | --- | ---: | ---: | ---: | ---: | ---: | ---: |
+  | A3B / prose | 4096 | 0.261647138 | 0.261188535 | -0.000458603 | 0.001035089 | 4081/4096 |
+  | A3B / code | 4096 | 1.005243634 | 1.004915947 | -0.000327687 | 0.000464944 | 4078/4096 |
+  | A3B / pooled | 8192 | 0.633445386 | 0.633052241 | -0.000393145 | 0.000750016 | 8159/8192 |
+  | Flash-Next / prose | 4096 | 0.104325082 | 0.105208934 | +0.000883852 | 0.000824300 | 4084/4096 |
+  | Flash-Next / code | 4096 | 0.856992302 | 0.857470942 | +0.000478640 | 0.002961055 | 4044/4096 |
+  | Flash-Next / pooled | 8192 | 0.480658692 | 0.481339938 | +0.000681246 | 0.001892677 | 8128/8192 |
+  | 27B / prose | 1024 | 0.602950606 | 0.602995841 | +0.000045235 | 0.000001550 | 1024/1024 |
+  | 27B / code | 1024 | 1.440608074 | 1.440604231 | -0.000003843 | 0.000000438 | 1024/1024 |
+  | 27B / pooled | 2048 | 1.021779340 | 1.021800036 | +0.000020696 | 0.000000994 | 2048/2048 |
 
-- Limiter: the F32 output/state scan, not the causal inverse. Separate
-  Hv32/C64/outer1024 diagnostic commands measure 0.353479 ms precompute and
-  1.492750 ms scan (six retained samples each). The scan accounts for about
-  81% of their sum. Small-N tensor work and sequential chunk barriers are
-  candidates for further study; no hardware-counter attribution was taken.
-- **Stop:** neither head-count cohort reaches the design study's >=4x body
-  kill bar; A3B remains below 2x even at its current production outer chunk.
-  C=32 helps Flash-Next but does not fix A3B. Removed the research sources;
-  no production dispatch, default, rollback knob or M4 changes. No model
-  NLL/KL, end-to-end campaign or full library test run was undertaken after
-  the negative kill decision.
+  **Pass** per document and pooled: |dNLL| <=0.005 nats/token and mean
+  KL <=0.01. Maximum observed row KL 0.737679 (Flash-Next code); this is
+  bounded document evidence, not a model-wide noninferiority claim.
+- End-to-end M5 Ultra: A3B UD-Q4_K_M, Flash-Next GSQ-RCO IQ3_S, 27B Q4_K_M;
+  production prefill plus endpoint logits, seed 1. Separate ABBA campaigns
+  per model/pp; two retained reps per arm occurrence, four per setting;
+  30 s cooldown before each arm. Build lock plus Metal lease, all 48
+  thermal boundaries 0, no samples dropped. Off=0 versus unset/default on;
+  all other knobs identical. Native outer chunks: A3B/Flash-Next 2048,
+  27B 1024. Every retained wall sample below is milliseconds:
+
+  | Model / pp | Off samples (ms) | On samples (ms) | Median off/on (ms) | Speedup | Off/on tok/s |
+  | --- | --- | --- | ---: | ---: | ---: |
+  | A3B / 2048 | 306.620292, 306.466834, 306.403125, 306.445750 | 282.516792, 283.027291, 282.619875, 281.923250 | 306.456292 / 282.568333 | 1.084539x | 6682.8 / 7247.8 |
+  | A3B / 8192 | 1340.630375, 1339.973334, 1341.492875, 1342.313500 | 1245.976417, 1244.931583, 1245.441958, 1244.651375 | 1341.061625 / 1245.186770 | 1.076996x | 6108.6 / 6578.9 |
+  | Flash-Next / 2048 | 1126.784583, 1130.599500, 1132.448958, 1134.956333 | 1086.192708, 1085.353459, 1092.494459, 1087.301166 | 1131.524229 / 1086.746937 | 1.041203x | 1809.9 / 1884.5 |
+  | Flash-Next / 8192 | 7117.179750, 7117.345208, 7114.014000, 7118.414624 | 6962.225832, 6949.937333, 6965.139875, 6952.373541 | 7117.262479 / 6957.299686 | 1.022992x | 1151.0 / 1177.5 |
+  | 27B / 2048 | 1531.500917, 1530.087292, 1532.511292, 1532.886750 | 1490.971292, 1489.885458, 1489.911666, 1494.907207 | 1532.006104 / 1490.441479 | 1.027887x | 1336.8 / 1374.1 |
+  | 27B / 8192 | 6407.065334, 6413.898167, 6407.599084, 6410.492458 | 6247.872709, 6247.569666, 6248.587665, 6246.601208 | 6409.045771 / 6247.721188 | 1.025821x | 1278.2 / 1311.2 |
+
+  Frozen code `8b3e640d` from main `585d67d6`; one normal release binary,
+  SHA256 `306be02f8ce46ee1f97dc08a7317863a53df2e95bf645768172a18736dd90e05`.
+  Build/runtime source stamps are clean and match in every arm. Final cleanup
+  removes only the temporary scoring example and updates documentation;
+  production Rust and shader sources remain byte-identical to the timed code.
+- **Default on for all three tested models:** A3B +8.45% / +7.70%,
+  Flash-Next +4.12% / +2.30%, 27B +2.79% / +2.58% at pp2048 / pp8192.
+  Rebased on main `585d67d6`; no merge and no separate report files.
+- Full `cargo test --release -p qwen-llm --lib`: **2410 passed, 0 failed,
+  736 ignored**.
 
 ## 2026-11-05 - Flash-Next M5 Tensor Prefill: Distribution-Qualified, Default On
 

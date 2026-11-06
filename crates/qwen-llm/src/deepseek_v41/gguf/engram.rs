@@ -246,7 +246,14 @@ impl DiskEngram {
         let mut done = 0;
         while done < ids.len() {
             // A short first block detects uncached rows early.
-            let block = if done == 0 { PROBE_ROWS } else { BLOCK_ROWS };
+            let probe = done == 0;
+            let block = if probe {
+                PROBE_ROWS
+            } else if !advised && early_advice_enabled() {
+                UNADVISED_BLOCK_ROWS
+            } else {
+                BLOCK_ROWS
+            };
             let block = &ids[done..(done + block).min(ids.len())];
             let started = std::time::Instant::now();
             output.extend(
@@ -254,10 +261,20 @@ impl DiskEngram {
                     .map_err(|e| e.to_string())?,
             );
             done += block.len();
-            if !advised
-                && started.elapsed() > COLD_ROW * u32::try_from(block.len()).unwrap_or(u32::MAX)
-            {
+            let elapsed = started.elapsed();
+            super::super::forward::profile::host_interval(
+                "engram_read_block",
+                [layer, block.len(), usize::from(probe), usize::from(advised)],
+                elapsed.as_secs_f64() * 1000.0,
+            );
+            if !advised && elapsed > COLD_ROW * u32::try_from(block.len()).unwrap_or(u32::MAX) {
+                let started = std::time::Instant::now();
                 self.advise_rows(layer, &ids[done..]);
+                super::super::forward::profile::host_interval(
+                    "engram_read_advice",
+                    [layer, ids.len() - done, done, 0],
+                    started.elapsed().as_secs_f64() * 1000.0,
+                );
                 advised = true;
             }
         }
@@ -345,7 +362,17 @@ impl DiskEngram {
 /// decode in under 1 us; an uncached row is ~60-70 us.
 const PROBE_ROWS: usize = 64;
 const BLOCK_ROWS: usize = 4096;
+const UNADVISED_BLOCK_ROWS: usize = 256;
 const COLD_ROW: std::time::Duration = std::time::Duration::from_micros(8);
+
+crate::env_flag!(
+    /// Recheck batched Engram read latency every 256 rows until read-ahead
+    /// triggers, then retain 4096-row blocks. The initial 64-row probe,
+    /// 8 us/row threshold, cached serial reads and explicit serial policy
+    /// are unchanged. Experimental kill-test switch.
+    default_off early_advice_enabled,
+    "QWEN_V41_ENGRAM_EARLY_ADVISE"
+);
 
 /// `QWEN_V41_ENGRAM_IO=serial` restores one blocking read per row with no
 /// read-ahead advice (A/B control).

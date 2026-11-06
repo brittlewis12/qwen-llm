@@ -162,6 +162,15 @@ pub(super) fn start() -> Option<Instant> {
     ACTIVE.with(|slot| slot.borrow().is_some().then(Instant::now))
 }
 pub(super) struct Wall(pub &'static str, pub [usize; 4], pub Option<Instant>);
+
+/// A caller-measured inclusive CPU interval. Inactive scopes record nothing.
+pub(crate) fn host_interval(name: &'static str, dimensions: [usize; 4], wall_ms: f64) {
+    record(name, dimensions, |op| {
+        op.count += 1;
+        op.wall_ms += wall_ms;
+    });
+}
+
 impl Drop for Wall {
     fn drop(&mut self) {
         if let Some(start) = self.2 {

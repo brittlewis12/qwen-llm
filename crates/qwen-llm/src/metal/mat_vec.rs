@@ -1878,6 +1878,118 @@ pub(crate) fn mat_vec_q8_0_lcpp_enabled() -> bool {
     override_value.unwrap_or(true)
 }
 
+/// Three independent Q8_0 projections with one shared F32 input. Each output
+/// width is even so its threadgroups never cross matrix boundaries. The
+/// singleton LCPP kernel's per-row operations and reductions stay identical;
+/// weights and outputs may be disjoint views of existing buffers.
+pub fn encode_mat_vec_q8_0_f32_x3(
+    ctx: &MetalContext,
+    enc: &KernelEncoder,
+    weights: [&MetalTensor; 3],
+    x: &MetalTensor,
+    ys: [&MetalTensor; 3],
+    n_in: usize,
+    n_outs: [usize; 3],
+) -> Result<(), MetalError> {
+    const K: &str = "mat_vec_q8_0_x3";
+    let bad = |detail: &str| MetalError::BadShape {
+        kernel: K,
+        detail: detail.into(),
+    };
+    if n_in == 0
+        || !n_in.is_multiple_of(32)
+        || n_outs.iter().any(|&n| n == 0 || !n.is_multiple_of(2))
+    {
+        return Err(bad(
+            "positive K multiple of 32 and even output widths required",
+        ));
+    }
+    let k = super::checks::to_u32(K, n_in, "K")?;
+    let rows = n_outs.iter().try_fold(0u32, |sum, &n| {
+        sum.checked_add(super::checks::to_u32(K, n, "output rows")?)
+            .ok_or_else(|| bad("combined output width exceeds u32"))
+    })?;
+    for (i, &n) in n_outs.iter().enumerate() {
+        if weights[i].dtype != GgmlType::Q8_0 || weights[i].shape != [n_in as u64, n as u64] {
+            return Err(bad("weight must be Q8_0 [K, output rows]"));
+        }
+        (n_in / 32)
+            .checked_mul(n)
+            .and_then(|blocks| blocks.checked_mul(34))
+            .ok_or_else(|| bad("Q8_0 weight byte extent overflows usize"))?;
+        super::checks::check_physical(K, weights[i], 2, false, "weight")?;
+        super::checks::check_tensor(K, ys[i], GgmlType::F32, &[n as u64], true, "output")?;
+    }
+    super::checks::check_tensor(K, x, GgmlType::F32, &[n_in as u64], false, "input")?;
+    // Validate every extent before the pairwise alias checks inspect it.
+    for i in 0..3 {
+        super::checks::check_disjoint(
+            K,
+            ys[i],
+            &[
+                (x, "input"),
+                (weights[0], "weight0"),
+                (weights[1], "weight1"),
+                (weights[2], "weight2"),
+            ],
+        )?;
+        for other in &ys[i + 1..] {
+            super::checks::check_disjoint(K, ys[i], &[(other, "other output")])?;
+        }
+    }
+    let pso = ctx.pipeline("kernel_mat_vec_q8_0_f32_lcpp_x3")?;
+    if pso.threadExecutionWidth() != 32 || pso.maxTotalThreadsPerThreadgroup() < 128 {
+        return Err(bad(
+            "requires 32-wide SIMD groups and 128 threads per group",
+        ));
+    }
+    for weight in weights {
+        enc.note_read(weight);
+    }
+    enc.note_read(x);
+    for y in ys {
+        enc.note_write(y);
+    }
+    enc.set_pipeline(&pso);
+    #[repr(C)]
+    #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+    struct Args {
+        n_in: u32,
+        n0: u32,
+        n1: u32,
+        n2: u32,
+    }
+    enc.set_bytes(
+        0,
+        &Args {
+            n_in: k,
+            n0: n_outs[0] as u32,
+            n1: n_outs[1] as u32,
+            n2: n_outs[2] as u32,
+        },
+    );
+    for (i, t) in [weights[0], weights[1], weights[2], x, ys[0], ys[1], ys[2]]
+        .into_iter()
+        .enumerate()
+    {
+        enc.set_tensor(i + 1, t);
+    }
+    enc.set_threadgroup_memory(0, 32 * 2 * 4);
+    enc.dispatch(
+        MTLSize {
+            width: (rows as usize).div_ceil(2),
+            height: 1,
+            depth: 1,
+        },
+        MTLSize {
+            width: 128,
+            height: 1,
+            depth: 1,
+        },
+    );
+    Ok(())
+}
+
 pub fn encode_mat_vec_q8_0_f32(
     ctx: &MetalContext,
     enc: &KernelEncoder,
@@ -3172,6 +3284,149 @@ mod tests {
                     "{n_in}x{n_out} matrix {i}"
                 );
             }
+        }
+    }
+
+    #[test]
+    fn q8_0_x3_mat_vec_equals_single_dispatches_bitwise_with_offsets() {
+        let Some(ctx) = metal_test_context() else {
+            return;
+        };
+        for (n_in, n_outs) in [
+            (4096usize, [128usize, 128, 64]),
+            (96, [2, 6, 4]),
+            (32, [2, 2, 2]),
+        ] {
+            let weights: Vec<_> = n_outs
+                .iter()
+                .enumerate()
+                .map(|(i, &n)| {
+                    let (mut bytes, _) = synthetic_q8_0_bank(n_in, n);
+                    for block in bytes.chunks_exact_mut(34) {
+                        for q in &mut block[2..] {
+                            *q ^= (i as u8 + 1) * 31;
+                        }
+                    }
+                    // Native Q8_0 scales need two-byte, not four-byte alignment.
+                    offset_tensor(
+                        &ctx,
+                        2,
+                        &bytes,
+                        2,
+                        vec![n_in as u64, n as u64],
+                        GgmlType::Q8_0,
+                    )
+                })
+                .collect();
+            let f32_t = |values: &[f32]| {
+                offset_tensor(
+                    &ctx,
+                    16,
+                    bytemuck::cast_slice(values),
+                    16,
+                    vec![values.len() as u64],
+                    GgmlType::F32,
+                )
+            };
+            let x = f32_t(
+                &(0..n_in)
+                    .map(|i| ((i * 29 + 3) % 97) as f32 * 0.04 - 2.0)
+                    .collect::<Vec<_>>(),
+            );
+            let singles: Vec<_> = n_outs.iter().map(|&n| f32_t(&vec![f32::NAN; n])).collect();
+            let fused: Vec<_> = n_outs.iter().map(|&n| f32_t(&vec![f32::NAN; n])).collect();
+            let command = ctx.queue.commandBuffer().unwrap();
+            let enc = KernelEncoder::begin(&command);
+            for i in 0..3 {
+                encode_mat_vec_q8_0_f32(&ctx, &enc, &weights[i], &x, &singles[i], n_in, n_outs[i])
+                    .unwrap();
+            }
+            encode_mat_vec_q8_0_f32_x3(
+                &ctx,
+                &enc,
+                [&weights[0], &weights[1], &weights[2]],
+                &x,
+                [&fused[0], &fused[1], &fused[2]],
+                n_in,
+                n_outs,
+            )
+            .unwrap();
+            enc.end();
+            command.commit();
+            wait_completed(&command).unwrap();
+            for i in 0..3 {
+                let a = tensor_f32_at_offset(&singles[i]);
+                let b = tensor_f32_at_offset(&fused[i]);
+                assert!(a.iter().chain(&b).all(|v| v.is_finite()));
+                assert!(a.iter().any(|v| *v != 0.0));
+                assert_eq!(
+                    a.iter().map(|v| v.to_bits()).collect::<Vec<_>>(),
+                    b.iter().map(|v| v.to_bits()).collect::<Vec<_>>(),
+                    "K={n_in}, widths={n_outs:?}, matrix={i}"
+                );
+                let bytes = unsafe {
+                    std::slice::from_raw_parts(
+                        fused[i].buffer.contents().as_ptr().cast::<u8>(),
+                        fused[i].buffer.length(),
+                    )
+                };
+                assert_eq!(&bytes[..16], &[0xA5; 16]);
+                assert_eq!(&bytes[16 + n_outs[i] * 4..], &[0x5A; 16]);
+            }
+        }
+    }
+
+    #[test]
+    fn q8_0_x3_rejects_bad_bindings_before_dispatch() {
+        let Some(ctx) = metal_test_context() else {
+            return;
+        };
+        let (bytes, _) = synthetic_q8_0_bank(32, 2);
+        let w = offset_tensor(&ctx, 2, &bytes, 2, vec![32, 2], GgmlType::Q8_0);
+        let x = MetalTensor::zeros_f32(&ctx, vec![32]).unwrap();
+        let ys: Vec<_> = (0..3)
+            .map(|_| MetalTensor::zeros_f32(&ctx, vec![2]).unwrap())
+            .collect();
+        let command = ctx.queue.commandBuffer().unwrap();
+        let enc = KernelEncoder::begin(&command);
+        let call = |weights: [&MetalTensor; 3], x: &MetalTensor, y: [&MetalTensor; 3], k, outs| {
+            encode_mat_vec_q8_0_f32_x3(&ctx, &enc, weights, x, y, k, outs)
+        };
+        let ws = [&w, &w, &w];
+        let out = [&ys[0], &ys[1], &ys[2]];
+        assert!(call(ws, &x, out, 0, [2, 2, 2]).is_err());
+        assert!(call(ws, &x, out, 31, [2, 2, 2]).is_err());
+        assert!(call(ws, &x, out, 32, [2, 3, 2]).is_err());
+        assert!(call(ws, &x, out, 32, [2, 0, 2]).is_err());
+        assert!(call(ws, &x, out, 32, [2, u32::MAX as usize + 1, 2]).is_err());
+        assert!(call(ws, &x, out, 32, [u32::MAX as usize - 1, 2, 2]).is_err());
+        let huge_k = u32::MAX as usize - 31;
+        let huge_n = u32::MAX as usize - 5;
+        let mut huge = w.clone();
+        huge.shape = vec![huge_k as u64, huge_n as u64];
+        assert!(call([&huge, &w, &w], &x, out, huge_k, [huge_n, 2, 2]).is_err());
+        assert!(call(ws, &x, [&ys[0], &ys[0], &ys[2]], 32, [2, 2, 2]).is_err());
+        let x_alias = x.view_subrange(0, vec![2]);
+        assert!(call(ws, &x, [&x_alias, &ys[1], &ys[2]], 32, [2, 2, 2]).is_err());
+        let mut odd = w.clone();
+        odd.offset = 1;
+        assert!(call([&w, &odd, &w], &x, out, 32, [2, 2, 2]).is_err());
+        let mut wrong = w.clone();
+        wrong.dtype = GgmlType::F16;
+        assert!(call([&wrong, &w, &w], &x, out, 32, [2, 2, 2]).is_err());
+        let mut past = ys[1].clone();
+        past.offset = past.buffer.length() as u64 - 4;
+        assert!(call(ws, &x, [&ys[0], &past, &ys[2]], 32, [2, 2, 2]).is_err());
+        let mut readonly = ys[1].clone();
+        readonly.provenance = MetalTensorProvenance::RetainedGgufReadOnly;
+        assert!(call(ws, &x, [&ys[0], &readonly, &ys[2]], 32, [2, 2, 2]).is_err());
+        // A valid dispatch still works after all refusals on the same encoder.
+        call(ws, &x, out, 32, [2, 2, 2]).unwrap();
+        enc.end();
+        command.commit();
+        wait_completed(&command).unwrap();
+        for y in ys {
+            assert!(tensor_f32_at_offset(&y).iter().all(|v| *v == 0.0));
         }
     }
 

@@ -29,6 +29,12 @@ use crate::tensor::{GgmlType, TensorDesc};
 use objc2_metal::{MTLBuffer, MTLCommandBuffer, MTLCommandQueue, MTLDevice};
 use std::collections::HashMap;
 
+crate::env_flag!(
+    /// Default-on M5 GLM KDA decode fusion of the three Q8_0 input projections. Preserves each singleton LCPP kernel's F32 operations and reduction order, with no weight copies or added scratch. Zero restores three dispatches; the global Q8_0 LCPP rollback also disables fusion. Packed Exact/F32 arithmetic is unchanged.
+    default_on kda_fanout_requested,
+    "QWEN_GLM53_KDA_FANOUT"
+);
+
 #[derive(Debug, thiserror::Error)]
 pub enum Glm5NextMetalError {
     #[error(transparent)]
@@ -1976,37 +1982,80 @@ impl<'w> Glm5NextSession<'w> {
             matvec(ctx, enc, &kda.key, &s.normed, &s.k, h, width)?;
             matvec(ctx, enc, &kda.value, &s.normed, &s.v, h, width)?;
         }
-        matvec(ctx, enc, &kda.decay_a, &s.normed, &s.rank_a, h, rank)?;
-        low_rank_expand(
-            ctx,
-            enc,
-            &kda.decay_b,
-            &s.rank_a,
-            &s.raw_gate,
-            rank,
-            width,
-            1,
-        )?;
-        matvec(
-            ctx,
-            enc,
-            &kda.beta,
-            &s.normed,
-            &s.raw_beta,
-            h,
-            c.head_count as usize,
-        )?;
-        matvec(ctx, enc, &kda.gate_a, &s.normed, &s.rank_b, h, rank)?;
-        low_rank_expand(
-            ctx,
-            enc,
-            &kda.gate_b,
-            &s.rank_b,
-            &s.output_gate,
-            rank,
-            width,
-            1,
-        )?;
+        // These three independent projections read the same normalized input.
+        // Keep the incumbent per-row arithmetic, and leave both expansions
+        // after their inputs have been produced. All outputs have separate,
+        // already admitted scratch regions.
+        if kda_fanout_requested()
+            && ctx.device_facts().gpu_families.apple10
+            && crate::metal::mat_vec_q8_0_lcpp_enabled()
+            && (h, rank, c.head_count) == (4096, 128, 64)
+            && [&kda.decay_a, &kda.gate_a, &kda.beta]
+                .iter()
+                .all(|w| w.dtype == GgmlType::Q8_0)
+        {
+            crate::metal::encode_mat_vec_q8_0_f32_x3(
+                ctx,
+                enc,
+                [&kda.decay_a, &kda.gate_a, &kda.beta],
+                &s.normed,
+                [&s.rank_a, &s.rank_b, &s.raw_beta],
+                h,
+                [rank, rank, c.head_count as usize],
+            )?;
+            low_rank_expand(
+                ctx,
+                enc,
+                &kda.decay_b,
+                &s.rank_a,
+                &s.raw_gate,
+                rank,
+                width,
+                1,
+            )?;
+            low_rank_expand(
+                ctx,
+                enc,
+                &kda.gate_b,
+                &s.rank_b,
+                &s.output_gate,
+                rank,
+                width,
+                1,
+            )?;
+        } else {
+            matvec(ctx, enc, &kda.decay_a, &s.normed, &s.rank_a, h, rank)?;
+            low_rank_expand(
+                ctx,
+                enc,
+                &kda.decay_b,
+                &s.rank_a,
+                &s.raw_gate,
+                rank,
+                width,
+                1,
+            )?;
+            matvec(
+                ctx,
+                enc,
+                &kda.beta,
+                &s.normed,
+                &s.raw_beta,
+                h,
+                c.head_count as usize,
+            )?;
+            matvec(ctx, enc, &kda.gate_a, &s.normed, &s.rank_b, h, rank)?;
+            low_rank_expand(
+                ctx,
+                enc,
+                &kda.gate_b,
+                &s.rank_b,
+                &s.output_gate,
+                rank,
+                width,
+                1,
+            )?;
+        }
         encode_kda_decode(
             ctx,
             enc,

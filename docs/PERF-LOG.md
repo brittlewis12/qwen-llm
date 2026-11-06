@@ -6,6 +6,73 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the current state and evidence index.
 
+## 2026-11-06 - GLM Decode: Fuse KDA's Three Small Input Projections
+
+- Base **`57c60a1b`**, M5 Ultra, unchanged UD-IQ3_XXS alias. KDA's decay-A,
+  gate-A and beta projections share one 4096-wide F32 input, with output
+  widths 128/128/64. One native Q8_0 dispatch replaces three; the two
+  dependent low-rank expansions follow it. No weight concatenation, added
+  scratch, admission change or Half conversion. The singleton LCPP kernel's
+  per-row operations and reduction order are retained. Default-on only for
+  the measured Apple10 geometry and three Q8_0 weights. Rollback:
+  **`QWEN_GLM53_KDA_FANOUT=0`**; `QWEN_MATVEC_Q8_0_LCPP=0` also restores the
+  singleton path. Packed Exact/F32 routes and earlier devices are unchanged.
+- Initial same-binary kill, warmup + two retained reps, canonical Metal
+  lease and build lock, nice 10, thermal 0 before/after both arms: tg64@0
+  **62.381836,62.478576 -> 63.701957,63.796651 tok/s**, tg64@8192
+  **56.762510,56.848005 -> 57.996778,57.988830**. The pp512@8192 control is
+  **714.261384,714.925203 -> 713.712071,713.671945**.
+- Final same-binary **ABBA**, warmup + two retained reps per arm, 30 s
+  between arms; canonical Metal lease + build lock, nice 10, thermal **0
+  before/after all four arms**. Production forward/prefill including complete
+  endpoint logits and status handling; immutable saved prefixes restored
+  outside timers. Prefill seed 1, salted depth prefixes, TG seeds 2/3.
+
+  | Cell / depth | Singleton samples tok/s | Fused samples tok/s | Median ratio |
+  | --- | --- | --- | ---: |
+  | tg64 / 0 | 62.343565,62.347356,62.274041,62.247555 | 63.519507,63.518818,63.727388,63.706900 | **1.02093x** |
+  | tg64 / 8192 | 56.747038,56.756891,56.714953,56.751292 | 57.862102,57.862821,57.873052,57.864009 | **1.01963x** |
+  | tg64 / 32768 | 55.611970,55.611233,55.667426,55.674169 | 56.704237,56.694383,56.739387,56.780398 | **1.01945x** |
+  | pp4096 / 0 | 1031.668131,1031.549113,1030.292144,1030.681932 | 1029.739101,1029.586386,1030.023934,1030.024657 | 0.99880x |
+  | pp512 / 8192 | 711.957260,709.716732,713.126643,712.259051 | 712.623704,713.056335,712.805096,713.414390 | 1.00116x |
+  | pp512 / 32768 | 687.885193,687.922702,687.918197,687.544566 | 688.571126,688.288955,689.918011,688.488448 | 1.00091x |
+
+  Decode medians **63.613 / 57.863 / 56.722 tok/s** correspond to **60.1% /
+  55.2% / 54.2%** of the unchanged measured 1106.57-GB/s logical-byte roof.
+  Saved-prefix controls are relative tests, not replacements for the earlier
+  fresh-session llama.cpp standing. Final binding preflight additionally
+  rejects overflowing byte extents before alias checks; kernel arithmetic
+  and dispatch geometry are identical to this campaign.
+- Native serial teacher forcing, **2048 targets/document**, code and Bash
+  prose at depths **0 and 8192**, independent on/off sessions and prefix
+  fills: **8192 paired targets**, complete-vocabulary F64 log-sum-exp,
+  identical checked input/target IDs, all logits finite and **bitwise equal**.
+  Per-cell and pooled **delta NLL = mean/max KL = 0**, argmax **8192/8192**;
+  passes |delta NLL| <=0.005 and mean KL <=0.01. NLL off/on is
+  **1.209798001 / 0.123060046** for code/prose at 0 and
+  **0.812100701 / 0.069702052** at 8K. Each first-token census witnesses
+  **34 fused calls**, zero off; dispatches **1040 -> 972** at 0 and
+  **1128 -> 1060** at 8K. The first harness launch rejected a 513-token
+  capacity with 2048 prefill rows before execution; corrected by increasing
+  the target count to 2048. No failed timing or quality samples were scored.
+- Retained operator tests compare all three native outputs against separate
+  dispatches bitwise, including the production geometry, short K, unequal
+  widths, two-byte weight offsets, poisoned outputs and untouched guards.
+  Invalid dimensions, integer/byte-extent overflow, aliases, dtype,
+  alignment, range and read-only outputs are refused before dispatch.
+- Further prefill kill tests, all omitted from the product: a 64-row Q6
+  tensor tile with K=64 matches the K=32 tile bitwise, but at 2048 rows
+  takes **2.297771 ms** with eight SIMD groups or **1.950708 ms** with four,
+  versus **1.786083 ms** for K=32. At 512 rows the same three timings are
+  **0.598542 / 0.545750 / 0.481708 ms**. Fewer K-loop iterations do not
+  compensate for the staging/register cost. A wide routed-expert gate/up
+  tile at 2048 command rows yields only **1030.695408,1030.610951 ->
+  1042.410213,1042.364298 tok/s** whole pp4096 (+1.14%), insufficient to
+  add a new prepared-route geometry and qualification surface here.
+- Previous increment **`57c60a1b`** completed the full release library suite:
+  **2438 passed, 0 failed, 738 ignored**; `scripts/check-contracts.sh` passed
+  on tree **`075a34920dcf79c2c07e9026c55388a0301fa011`**.
+
 ## 2026-11-06 - GLM Roofline Follow-Up: Wide Q6 at 2048 Rows, +9.77% Prefill
 
 - Base **`29be820c`**, M5 Ultra, unchanged UD-IQ3_XXS `glm5-next` alias.

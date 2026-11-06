@@ -163,6 +163,98 @@ kernel void kernel_mat_vec_q8_0_f32_lcpp(
     }
 }
 
+struct mat_vec_q8_x3_args { uint n_in; uint n0; uint n1; uint n2; };
+// Matrix selection is uniform within each two-row threadgroup. Everything
+// after selecting the native weight/output pointers matches the singleton
+// LCPP body above, including its split-K and SIMD reductions.
+kernel void kernel_mat_vec_q8_0_f32_lcpp_x3(
+        constant mat_vec_q8_x3_args & args [[buffer(0)]],
+        device const uchar * w0 [[buffer(1)]],
+        device const uchar * w1 [[buffer(2)]],
+        device const uchar * w2 [[buffer(3)]],
+        device const float * x [[buffer(4)]],
+        device float * y0 [[buffer(5)]],
+        device float * y1 [[buffer(6)]],
+        device float * y2 [[buffer(7)]],
+        threadgroup float * shmem [[threadgroup(0)]],
+        uint tgpig [[threadgroup_position_in_grid]],
+        ushort sgitg [[simdgroup_index_in_threadgroup]],
+        ushort tiisg [[thread_index_in_simdgroup]]) {
+    constexpr ushort NW = 32;
+    constexpr ushort NQ = NQ_Q80;
+    constexpr ushort NR0 = NR0_Q80_LCPP;
+    constexpr ushort NSG = NSG_Q80_LCPP;
+
+    const uint nb = args.n_in / QK8_0;
+    const uint global_row = tgpig * NR0;
+    if (global_row >= args.n0 + args.n1 + args.n2) return;
+    const uint matrix = global_row < args.n0 ? 0u : (global_row < args.n0 + args.n1 ? 1u : 2u);
+    const uint first_row = global_row - (matrix == 0u ? 0u : (matrix == 1u ? args.n0 : args.n0 + args.n1));
+    const uint n_out = matrix == 0u ? args.n0 : (matrix == 1u ? args.n1 : args.n2);
+    device const uchar * weight = matrix == 0u ? w0 : (matrix == 1u ? w1 : w2);
+    device float * y = matrix == 0u ? y0 : (matrix == 1u ? y1 : y2);
+    if (first_row >= n_out) return;
+
+    const ushort ix = tiisg / (NW / NQ);
+    const ushort il = tiisg % (NW / NQ);
+    const uint ib0 = sgitg * NQ + ix;
+
+    const ulong row_stride_bytes = (ulong)nb * Q8_0_BYTES;
+    device const uchar * row0 = weight + (ulong)first_row * row_stride_bytes;
+    device const float * xb = x + (ulong)ib0 * QK8_0 + (ulong)il * NQ;
+
+    float sumf[NR0] = {0.0f, 0.0f};
+    float xv[NQ];
+
+    for (uint ib = ib0; ib < nb; ib += NSG * NQ) {
+        for (ushort i = 0; i < NQ; ++i) {
+            xv[i] = xb[i];
+        }
+
+        for (ushort row = 0; row < NR0; ++row) {
+            if (first_row + row >= n_out) break;
+            device const uchar * blk = row0
+                + (ulong)row * row_stride_bytes
+                + (ulong)ib * Q8_0_BYTES;
+            device const half   * dh = (device const half *)blk;
+            device const int8_t * qs = (device const int8_t *)(blk + 2) + il * NQ;
+
+            float sumq = 0.0f;
+            for (ushort i = 0; i < NQ; ++i) {
+                sumq += (float)qs[i] * xv[i];
+            }
+            sumf[row] += sumq * (float)dh[0];
+        }
+
+        xb += (ulong)NSG * NQ * QK8_0;
+    }
+
+    for (ushort row = 0; row < NR0; ++row) {
+        threadgroup float * row_shmem = shmem + NW * row;
+        if (sgitg == 0) {
+            row_shmem[tiisg] = 0.0f;
+        }
+        sumf[row] = simd_sum(sumf[row]);
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+
+    for (ushort row = 0; row < NR0; ++row) {
+        threadgroup float * row_shmem = shmem + NW * row;
+        if (tiisg == 0) {
+            row_shmem[sgitg] = sumf[row];
+        }
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+
+    for (ushort row = 0; row < NR0 && first_row + row < n_out; ++row) {
+        threadgroup float * row_shmem = shmem + NW * row;
+        const float total = simd_sum(row_shmem[tiisg]);
+        if (tiisg == 0 && sgitg == 0) {
+            y[first_row + row] = total;
+        }
+    }
+}
+
 // Activation VJP for a frozen Q8_0 linear map. Weight rows are output
 // features, while each simdgroup owns one 32-wide input block and one
 // cotangent row:

@@ -6,6 +6,183 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the current state and evidence index.
 
+## 2026-11-06 - M5 Qwen Short Appends: Qualified Tensor Row Gates
+
+- M5 Ultra, base `eca09c26`, 27B Q4_K_M and A3B UD-Q4_K_M. Native dispatch census:
+  27B pp512 used the narrow M32 tensor FFN, pp1024 already used M128,
+  and pp1300 split into 1024 + 276 rows; the 276-row Q5_K GDN output
+  projection fell back to classic MMA. A3B's dense Q8_0 projections already
+  used the wide tensor tile, while routed experts at 512/1024/1300 rows
+  retained legacy Q4_K gate/up and Q5_K/Q6_K down. The shallow A3B pp1300
+  request uses one 1300-row expert matrix; deep requests retain the 2048-row
+  scratch budget with actual append rows of 512/1024.
+- **Default on, available Metal 4 tensor tier only:** `QWEN_SHORT_APPEND_TENSOR`.
+  27B Q4_K gate/up: M128 or M256..1024; Q6_K down: M256..1024;
+  Q4_K down: M384..1024. Reuse the strict device-half 128x64x32 tile and dead
+  FFN scratch. Q5_K output K6144/N5120: existing narrow tensor tile at M128
+  and ragged M129..1023; retain the incumbent at other aligned sizes.
+  A3B stock H2048/F512/E256/top-8 Q4_K gate/up and Q5_K/Q6_K down:
+  M512..2048. Reuses existing half-operand kernels and scratch; no new shader,
+  persistent GPU allocation or admission charge. Decode and unavailable-tier
+  paths keep their incumbents.
+- Set `QWEN_SHORT_APPEND_TENSOR=0` for A/B or rollback. Existing dense,
+  FFN128, Q5_K tensor and A3B expert switches remain effective. The original
+  M1024 FFN and M2048 expert routes remain active with the new switch off.
+- Operator screens use real packed banks, original F32 inputs and CPU
+  dequantized weights with F64 dots, 1024 sampled output cells per cohort.
+  A3B replays captured uneven routing and owned activation copies.
+  Warm pipelines, ABBA, six GPU command-buffer samples
+  per arm occurrence (12 per setting), every sample retained; all thermal
+  boundaries 0. **1,584 samples across 66 cohorts** retained outside the
+  repository in `short-append-operator-samples.jsonl`, SHA256
+  `8cad5ffd5ba3283561979080f50d738b35c0d9f60eaf5f9e0c91bcf0e8e7ee1e`.
+  Dense prototype `50f13ae3`; Q5/expert screen `7a51770e`.
+  An earlier expert stdout capture was incomplete; the entire campaign was
+  repeated with file-backed logging. TFLOPS below include activation
+  conversion in the GPU command.
+- Dense FFN shapes: Q4_K K5120/N17408 gate/up, Q4_K and Q6_K
+  K17408/N5120 down. Weighted by 128 gate/up, 32 Q4 down, 32 Q6 down
+  occurrences. Unselected small down cohorts keep the incumbent;
+  M1024 controls run the same kernel in both settings.
+
+| GEMM rows | Q4 gate/up TFLOPS off → on | Q4 down | Q6 down | Weighted selected-route speed |
+| ---: | ---: | ---: | ---: | ---: |
+| 128 | 49.32 → 63.25 | incumbent | incumbent | 1.144x |
+| 256 | 55.63 → 81.17 | incumbent | 39.04 → 53.60 | 1.335x |
+| 276 | 55.29 → 65.36 | incumbent | 39.66 → 51.32 | 1.169x |
+| 384 | 59.82 → 89.76 | 47.54 → 63.17 | 43.13 → 67.95 | 1.479x |
+| 512 | 60.82 → 95.37 | 51.24 → 81.94 | 45.00 → 80.83 | 1.616x |
+| 513 | 58.33 → 78.14 | 48.21 → 59.25 | 43.79 → 57.00 | 1.310x |
+| 768 | 61.34 → 100.66 | 48.48 → 76.76 | 46.29 → 75.61 | 1.628x |
+| 769 | 60.14 → 86.51 | 48.57 → 72.03 | 44.94 → 70.80 | 1.473x |
+| 1000 | 61.39 → 99.19 | 47.94 → 73.83 | 46.79 → 76.26 | 1.603x |
+| 1023 | 62.57 → 101.00 | 49.20 → 74.48 | 47.08 → 76.93 | 1.598x |
+| 1024 (control) | 99.38 → 101.74 | 75.76 → 74.77 | 73.54 → 74.58 | 1.014x |
+
+- A3B gate/up TFLOPS count both matrices; weighting uses 37 Q5_K-down
+  layers and three Q6_K-down layers. M2048 is the existing-route control.
+
+| Rows | Q4 gate/up TFLOPS off → on | Q5 down | Q6 down | Weighted speed |
+| ---: | ---: | ---: | ---: | ---: |
+| 512 | 13.57 → 22.79 | 10.40 → 16.03 | 10.15 → 15.44 | 1.621x |
+| 513 | 13.75 → 23.10 | 10.29 → 16.67 | 10.35 → 15.08 | 1.649x |
+| 1024 | 17.75 → 33.14 | 14.67 → 23.89 | 14.49 → 22.60 | 1.767x |
+| 1300 | 18.96 → 35.71 | 15.68 → 26.72 | 15.58 → 24.01 | 1.806x |
+| 2048 (control) | 40.87 → 40.59 | 29.23 → 29.31 | 27.24 → 27.28 | 0.997x |
+
+- Q5_K K6144/N5120 at M276: **1.836x**; other selected ragged screens
+  M129/513/769/1000/1023: **1.897/1.950/1.916/1.930/1.917x**.
+  M128: **1.968x**. Keep the aligned M512/M1024 incumbents.
+  Worst max-absolute / relative-RMS error ratios to the same F64 reference:
+  dense **1.000000 / 1.000000**, Q5 **1.004267 / 1.000233**,
+  routed experts **1.003095 / 1.000706**, all below 1.5x and all outputs
+  finite. Guarded GPU regressions cover partial rows, edge magnitudes
+  2^-24 through 65504, scratch aliases, serial encoders and bitwise fallbacks.
+- Distribution qualification follows the existing Flash-Next **per-document
+  and pooled** protocol: |delta NLL| <=0.005 nats/token and mean KL <=0.01.
+  Frozen `eca09c26` prose/code, sequential 512/1024/1300-token appends after
+  depths 0 and 32768: 5672 targets per document, **11,344 per model**.
+  Native RMSNorm + GEMV for every row, full-vocabulary F64 log-sum-exp,
+  identical teacher IDs, every scored logit finite. The readout's last row
+  matches native endpoint logits exactly.
+- A stricter slice gate was explored first: A3B's first 512-token prose
+  slice has delta NLL **+0.006591097**, KL **0.001994834**; gate/up-only
+  also crossed that absolute slice threshold on an *improvement*
+  (-0.005274340 at 32K). Those slice results remain retained. The final
+  document/pooled gate is the prior qualification protocol.
+  Down-only passes every stricter
+  slice, but has larger pooled NLL/KL drift (+0.000932550 / 0.001214632)
+  than the full route (+0.000690296 / 0.001120271). A depth-0 incumbent-
+  against-itself prose control has zero NLL/KL difference.
+
+  | Model / document | Targets | NLL off | NLL on | delta NLL | Mean / max KL | Argmax agreement |
+  | --- | ---: | ---: | ---: | ---: | ---: | ---: |
+  | 27B prose | 5672 | 1.874097633 | 1.874091576 | -0.000006056 | 2.792797e-8 / 1.324611e-5 | 5672/5672 |
+  | 27B code | 5672 | 1.096251165 | 1.096242566 | -0.000008600 | 7.455397e-8 / 1.144603e-4 | 5672/5672 |
+  | 27B pooled | 11344 | 1.485174399 | 1.485167071 | -0.000007328 | 5.124097e-8 / 1.144603e-4 | 11344/11344 |
+  | A3B prose | 5672 | 2.312848631 | 2.313187190 | 0.000338559 | 1.221911e-3 / 7.938317e-2 | 5554/5672 |
+  | A3B code | 5672 | 1.338284624 | 1.339326657 | 0.001042032 | 1.018630e-3 / 4.422267e-1 | 5628/5672 |
+  | A3B pooled | 11344 | 1.825566628 | 1.826256923 | 0.000690296 | 1.120271e-3 / 4.422267e-1 | 11182/11344 |
+
+- Checked-witness replay at `5d401f14` reproduces these scores exactly;
+  all **48** native endpoint comparisons are equal-length, nonempty and
+  finite, with maximum absolute difference **0**. The census proves 27B
+  pp512 C128 dispatches **0 -> 192**, pp1024 **192 -> 192**, pp1300
+  **192 -> 352** plus **48** new ragged Q5 tensor dispatches; A3B expert
+  tensor dispatches are **0 -> 120** for every append size, at both depths.
+  Every slice and corpus fingerprint is retained in
+  `short-append-distribution-samples.jsonl`, SHA256
+  `b5036d5aa836eb6886e8907c3c3e88b4e1057b79672e3a779458f5ec25369e6e`.
+- Greedy, one frozen 793-token code prompt, 160 generated tokens,
+  `--no-thinking --temp 0 --seed 1`, the same clean `9e9771eb` build:
+  27B off/on bytes are identical, SHA256
+  `84cfa24b676e33e8214c044704dde95dd6248ea8c0d58b57d3d2a1a262f8de8a`.
+  A3B diverges: off
+  `81da84c9fa9162555b4d154d9ad28d891d97a754c0aa898ef967adcf5fc1ebc2`,
+  on `602c5788e31bb150990a40349c2774678f6c93619a6d11d8cc62632f40ee3af9`.
+  Distribution checks above provide the quality qualification.
+  Prompt SHA256
+  `026c14906a5287ec8017d496cc0ce22114967f4719c10f2ba32ee77446cfb0d4`.
+- Final ordinary end-to-end campaigns: **`9e9771eb`**, one release binary,
+  SHA256 `d47df3e0d1ac4e0fa5134d24904bb2af2048d35a31164048c3f5ccbe3362cf45`.
+  Short switch 0 versus unset/default on, ABBA, two retained reps per arm
+  occurrence (four per setting/cell), stock model/row warmups, seed 1.
+  Only the append is timed after an untimed prefix; includes production
+  prefill plus endpoint logits. Both build lock and Metal lease per bounded
+  campaign, nice 10, 30 s cooldown before each arm; all **56** timing
+  boundary thermal readings were **0**. Every one of the **80** qwen samples
+  follows, chronological within setting; median wall times determine speed
+  and tok/s. Native build/runtime stamps are clean and match.
+  Campaign driver: [`qwen-short-append.py`](../scripts/bench/qwen-short-append.py).
+  Machine-readable latency data, including references:
+  `short-append-e2e-samples.jsonl`, SHA256
+  `4ac4ac587fee3830c364d3770f2dc87ba1f069b2afbe44db5eeebbdee01c3549`.
+
+  | Model | pp | Depth | Off samples (ms) | On samples (ms) | Median off / on (ms) | Speed | On tok/s | On / llama.cpp |
+  | --- | ---: | ---: | --- | --- | ---: | ---: | ---: | ---: |
+  | 27B | 512 | 0 | 523.408709, 523.428415, 523.819333, 522.706458 | 399.162250, 400.022959, 399.321125, 399.996417 | 523.418562 / 399.658771 | 1.309664x | 1281.1 | 1.107x |
+  | 27B | 1024 | 0 | 747.037834, 746.571000, 748.235542, 746.403334 | 747.115833, 746.269416, 746.549875, 746.704000 | 746.804417 / 746.626938 | 1.000238x | 1371.5 | 1.068x |
+  | 27B | 1300 | 0 | 1078.053791, 1079.001334, 1078.830167, 1080.412666 | 1034.897709, 1033.368000, 1033.215792, 1034.164375 | 1078.915751 / 1033.766187 | 1.043675x | 1257.5 | 0.993x |
+  | 27B | 512 | 32768 | 693.185625, 699.057916, 693.756542, 693.614084 | 570.016125, 569.920250, 570.086041, 570.803125 | 693.685313 / 570.051083 | 1.216883x | 898.2 | 1.084x |
+  | 27B | 1024 | 32768 | 1068.245083, 1070.841541, 1071.524291, 1072.618875 | 1069.198542, 1069.230499, 1071.235874, 1068.575000 | 1071.182916 / 1069.214520 | 1.001841x | 957.7 | 1.053x |
+  | A3B | 512 | 0 | 138.143542, 137.739459, 137.569250, 137.417833 | 94.857250, 94.763625, 94.641542, 94.751542 | 137.654355 / 94.757583 | 1.452700x | 5403.3 | 1.102x |
+  | A3B | 1024 | 0 | 221.693750, 221.563000, 221.386875, 221.711500 | 156.140042, 156.353875, 156.153333, 156.232292 | 221.628375 / 156.192813 | 1.418941x | 6556.0 | 1.106x |
+  | A3B | 1300 | 0 | 277.370291, 277.600832, 277.249540, 276.902625 | 200.595708, 200.976250, 200.580209, 200.630375 | 277.309915 / 200.613042 | 1.382313x | 6480.1 | 1.105x |
+  | A3B | 512 | 32768 | 244.308625, 244.409750, 244.083500, 244.209250 | 201.856583, 201.552375, 201.806583, 201.710792 | 244.258938 / 201.758688 | 1.210649x | 2537.7 | 0.932x |
+  | A3B | 1024 | 32768 | 428.157084, 428.273917, 428.193125, 428.856124 | 365.706916, 363.371958, 363.957875, 363.479416 | 428.233521 / 363.718645 | 1.177376x | 2815.4 | 0.886x |
+
+- Pinned llama.cpp v0.9.0 `cd959bae99`, MTL/BLAS, `-b 2048 -ub 2048`,
+  F16 KV, two retained reps per cell, warmups enabled. pp512 reuses the
+  supplied standing references; pp1024/1300 references are fresh. Ratios
+  above divide qwen's median-derived throughput by llama.cpp's arithmetic
+  mean throughput. All reference samples:
+
+  | Model | pp | Depth | llama.cpp tok/s (both samples) | Mean tok/s | Reference |
+  | --- | ---: | ---: | --- | ---: | --- |
+  | 27B | 512 | 0 | 1157.860, 1156.610 | 1157.235 | preceding standing entry |
+  | 27B | 1024 | 0 | 1287.120, 1281.803 | 1284.462 | fresh |
+  | 27B | 1300 | 0 | 1268.589, 1265.303 | 1266.946 | fresh |
+  | 27B | 512 | 32768 | 822.698, 835.197 | 828.948 | preceding standing entry |
+  | 27B | 1024 | 32768 | 904.846, 914.117 | 909.482 | fresh |
+  | A3B | 512 | 0 | 4873.460, 4930.860 | 4902.160 | preceding standing entry |
+  | A3B | 1024 | 0 | 5936.794, 5917.020 | 5926.907 | fresh |
+  | A3B | 1300 | 0 | 5863.219, 5863.850 | 5863.535 | fresh |
+  | A3B | 512 | 32768 | 2689.700, 2757.220 | 2723.460 | preceding standing entry |
+  | A3B | 1024 | 32768 | 3160.382, 3197.278 | 3178.830 | fresh |
+
+- **Result:** pp512 at depth 0 reaches **1.107x / 1.102x llama.cpp** for
+  27B/A3B. At 32K, **1.084x / 0.932x**. 27B pp1024 is an unchanged-route
+  control; A3B still trails llama.cpp at 32K despite the measured append
+  speedups.
+- Full `cargo test --release -p qwen-llm --lib`: **2418 passed, zero
+  failed, 737 ignored**. `scripts/check-contracts.sh`: **pass** at
+  `5d401f14`, including all 10 numeric comparison-tripwire tests.
+  The follow-up changes only the ignored witness's endpoint comparison
+  to the shared checked helper; the timed runtime paths and shaders are
+  unchanged. Focused M5 checks: 11 pass, one explicitly ignored model
+  witness; 72 FFN F64 cases, 48 selected and 24 bitwise fallbacks, with
+  scratch guards and serial-order rejection checks.
+
 ## 2026-11-06 - Flash-Next Short Appends: +59% Cold, +38–40% at 32K
 
 - Fresh main `eca09c26`, M5 Ultra, GSQ-RCO IQ3_S: pp512 **1082.1 tok/s**

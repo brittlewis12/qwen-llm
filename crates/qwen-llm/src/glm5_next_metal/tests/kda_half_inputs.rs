@@ -53,7 +53,9 @@ fn cpu_kda_half_selection_respects_resolved_mode_and_actual_packet_rows() {
                                 && precision == FastPrecision::Half
                                 && mode == StageMode::Fast
                                 && matches!(dtype, GgmlType::Q8_0 | GgmlType::Q6_K)
-                                && rows >= 1024
+                                && (rows >= 1024
+                                    || (rows == 512
+                                        && crate::glm5_next_metal::short_prefill::enabled()))
                         );
                     }
                 }

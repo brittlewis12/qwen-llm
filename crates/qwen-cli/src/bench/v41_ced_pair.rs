@@ -1601,6 +1601,8 @@ mod tests {
             completed_submits: 1,
             invalid_gpu_timestamps: 0,
             gpu_ms: Some(12.0),
+            gpu_first_start_s: None,
+            gpu_last_end_s: None,
             driver_scheduling_ms: Some(3.0),
             invalid_driver_scheduling_timestamps: 0,
             encode_ms: 5.0,

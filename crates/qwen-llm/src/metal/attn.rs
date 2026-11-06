@@ -812,6 +812,56 @@ pub fn with_attn_v4_group_tile_override<T>(tile: usize, f: impl FnOnce() -> T) -
 /// Tile size `tile_c ∈ {16, 32, 64, 128}` selects the kernel variant.
 /// Use `attn_v4_choose_tile_c(n_pos, group)` for the empirically-tuned choice
 /// or pass 32 (default; backward-compat) if unsure.
+/// Decode-only experiment; prefill and verification retain their existing dispatch.
+#[allow(clippy::too_many_arguments)]
+pub fn encode_attn_decode_depth_f32(
+    ctx: &MetalContext,
+    enc: &KernelEncoder,
+    q: &MetalTensor,
+    k_cache: &MetalTensor,
+    v_cache: &MetalTensor,
+    o_partial: &MetalTensor,
+    ml_partial: &MetalTensor,
+    out: &MetalTensor,
+    n_q_heads: usize,
+    n_kv_heads: usize,
+    head_dim: usize,
+    n_pos: usize,
+    nwg: usize,
+    tile_c: usize,
+) -> Result<(), MetalError> {
+    let enabled = ATTN_REGISTER_Q_OVERRIDE.with(|s| s.get()).unwrap_or(false);
+    let eligible = enabled
+        && ctx.device_facts().name.contains("M5 Ultra")
+        && (n_q_heads, n_kv_heads, head_dim) == (24, 4, 256)
+        && (32768..98304).contains(&n_pos)
+        && nwg == 128
+        && tile_c == 32
+        && k_cache.dtype == GgmlType::F16
+        && v_cache.dtype == GgmlType::F16
+        && ["QWEN_ATTN_V4_NWG", "QWEN_ATTN_V4_TILE_C"]
+            .iter()
+            .all(|k| std::env::var_os(k).is_none());
+    with_attn_v4_register_q_override(eligible, || {
+        encode_attn_decode_v4_f32(
+            ctx,
+            enc,
+            q,
+            k_cache,
+            v_cache,
+            o_partial,
+            ml_partial,
+            out,
+            n_q_heads,
+            n_kv_heads,
+            head_dim,
+            n_pos,
+            if eligible { 256 } else { nwg },
+            tile_c,
+        )
+    })
+}
+
 pub fn encode_attn_decode_v4_f32(
     ctx: &MetalContext,
     enc: &KernelEncoder,

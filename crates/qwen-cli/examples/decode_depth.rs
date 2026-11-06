@@ -38,6 +38,10 @@ struct Args {
     qreg: bool,
     #[arg(long)]
     automatic: bool,
+    #[arg(long, value_delimiter = ',')]
+    positions: Vec<usize>,
+    #[arg(long)]
+    narrow: bool,
 }
 fn emit(v: serde_json::Value) {
     println!("{v}");
@@ -106,7 +110,11 @@ fn op(ctx: &MetalContext, a: &Args) -> Result<()> {
         random_state ^= random_state << 17;
         ((random_state >> 40) as f32 / 16_777_216. * 2. - 1.) * 1.7320508
     };
-    for pos in [32769usize, 131073] {
+    for pos in if a.positions.is_empty() {
+        vec![32769usize, 131073]
+    } else {
+        a.positions.clone()
+    } {
         let q: Vec<f32> = (0..a.heads * 256).map(|_| random()).collect();
         let k: Vec<u16> = (0..pos * a.kv_heads * 256)
             .map(|_| half::f16::from_f32(random()).to_bits())
@@ -200,17 +208,21 @@ fn op(ctx: &MetalContext, a: &Args) -> Result<()> {
         };
         let inc = error(&incumbent);
         let mut config_inc = std::collections::BTreeMap::<(usize, usize), Vec<f32>>::new();
-        let configs: Vec<_> = [64, 128, 256, 512, 1024]
-            .into_iter()
-            .flat_map(|n| {
-                [16, 32, 64, 128].into_iter().flat_map(move |c| {
-                    [false, true]
-                        .into_iter()
-                        .filter(move |q| !q || group == 6)
-                        .map(move |q| (n, c, q))
+        let configs: Vec<_> = if a.narrow {
+            vec![(256, 32, false), (256, 32, true)]
+        } else {
+            [64, 128, 256, 512, 1024]
+                .into_iter()
+                .flat_map(|n| {
+                    [16, 32, 64, 128].into_iter().flat_map(move |c| {
+                        [false, true]
+                            .into_iter()
+                            .filter(move |q| !q || group == 6)
+                            .map(move |q| (n, c, q))
+                    })
                 })
-            })
-            .collect();
+                .collect()
+        };
         for (arm, candidate) in [false, true, true, false].into_iter().enumerate() {
             std::thread::sleep(std::time::Duration::from_secs(30));
             thermal(&format!("op-{pos}-{arm}"), "before")?;
@@ -366,29 +378,42 @@ fn run_args(a: Args) -> Result<()> {
         thermal("profile", "after")?;
         return Ok(());
     }
-    ensure!(a.mode == "bench", "unknown mode");
-    std::thread::sleep(std::time::Duration::from_secs(30));
-    thermal("bench", "before")?;
-    for sample in 0..a.reps {
-        let mut seq = restore()?;
-        // Match suite's xorshift stream: every 64-token run consumes a final
-        // unused token before the next run selects its first token.
-        let skip = (sample + 1) * (a.tokens + 1);
-        let sample_ids = ids(skip + a.tokens, model.arch().vocab_size, 1);
-        let sample_ids = &sample_ids[skip..];
-        let start = Instant::now();
-        let logits = run_decode(&model, &mut seq, sample_ids)?;
-        let ms = start.elapsed().as_secs_f64() * 1e3;
-        ensure!(
-            logits.iter().all(|x| x.is_finite()),
-            "nonfinite endpoint logits"
-        );
-        let sha = hash(bytemuck::cast_slice(&logits));
-        emit(
-            json!({"record":"sample","depth":a.depth,"sample":sample,"tokens":a.tokens,"ms":ms,"tok_s":a.tokens as f64*1000./ms,"logits_sha256":sha}),
-        );
+    ensure!(matches!(a.mode.as_str(), "bench" | "abba"), "unknown mode");
+    let arms = if a.mode == "abba" {
+        vec![false, true, true, false]
+    } else {
+        vec![a.qreg]
+    };
+    for (arm, candidate) in arms.into_iter().enumerate() {
+        std::thread::sleep(std::time::Duration::from_secs(30));
+        thermal(&format!("bench-{arm}"), "before")?;
+        with_attn_v4_register_q_override(candidate, || -> Result<()> {
+            let mut warm = restore()?;
+            run_decode(&model, &mut warm, &tokens)?;
+            drop(warm);
+            for sample in 0..a.reps {
+                let mut seq = restore()?;
+                // Match suite's xorshift stream: every 64-token run consumes a final
+                // unused token before the next run selects its first token.
+                let skip = (sample + 1) * (a.tokens + 1);
+                let sample_ids = ids(skip + a.tokens, model.arch().vocab_size, 1);
+                let sample_ids = &sample_ids[skip..];
+                let start = Instant::now();
+                let logits = run_decode(&model, &mut seq, sample_ids)?;
+                let ms = start.elapsed().as_secs_f64() * 1e3;
+                ensure!(
+                    logits.iter().all(|x| x.is_finite()),
+                    "nonfinite endpoint logits"
+                );
+                let sha = hash(bytemuck::cast_slice(&logits));
+                emit(
+                    json!({"record":"sample","arm":arm,"candidate":candidate,"depth":a.depth,"sample":sample,"tokens":a.tokens,"ms":ms,"tok_s":a.tokens as f64*1000./ms,"logits_sha256":sha}),
+                );
+            }
+            Ok(())
+        })?;
+        thermal(&format!("bench-{arm}"), "after")?;
     }
-    thermal("bench", "after")?;
     Ok(())
 }
 fn main() -> std::process::ExitCode {

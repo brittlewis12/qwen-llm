@@ -356,7 +356,7 @@ impl<'a> MetalForward<'a> {
         if use_v4 {
             let nwg = attn_v4_choose_nwg(s.kv_n_pos[attn_i], group);
             let tile_c = attn_v4_choose_tile_c(s.kv_n_pos[attn_i], group);
-            encode_attn_decode_v4_f32(
+            encode_attn_decode_depth_f32(
                 self.ctx,
                 enc,
                 &s.attn_q_normed,
@@ -621,7 +621,7 @@ impl<'a> MetalForward<'a> {
         if use_v4 {
             let nwg = attn_v4_choose_nwg(s.kv_n_pos[attn_i], group);
             let tile_c = attn_v4_choose_tile_c(s.kv_n_pos[attn_i], group);
-            encode_attn_decode_v4_f32(
+            encode_attn_decode_depth_f32(
                 self.ctx,
                 enc,
                 &s.attn_q_normed,

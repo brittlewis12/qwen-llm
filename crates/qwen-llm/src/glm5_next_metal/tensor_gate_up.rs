@@ -7,8 +7,8 @@ use super::{
 use crate::tensor::GgmlType;
 
 crate::env_flag!(
-    /// Opt-in bounded M5 Fast/Half IQ2_S/IQ3_S routed tensor gate/up; preserves the independent down policy and all enclosing guards.
-    default_off iq_tensor_gate_up_enabled,
+    /// Default-on bounded M5 Fast/Half IQ2_S/IQ3_S routed tensor gate/up at 1024/2048 rows and 4096/2048/288/top-8 geometry. Zero restores incumbent IQ gate/up; preserves the independent down policy and all enclosing guards. Reuses the admitted normalized Half buffer, with no added allocation.
+    default_on iq_tensor_gate_up_enabled,
     "QWEN_GLM53_IQ_TENSOR_GATE_UP"
 );
 

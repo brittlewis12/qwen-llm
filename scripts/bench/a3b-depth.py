@@ -13,6 +13,15 @@ import sys
 import threading
 
 
+def thermal(where):
+    raw = subprocess.check_output(
+        ["notifyutil", "-g", "com.apple.system.thermalpressurelevel"], text=True
+    ).strip()
+    print(json.dumps(dict(record="thermal", arm="campaign", where=where, value=raw)), flush=True)
+    if raw.split()[-1] != "0":
+        raise RuntimeError("nonzero thermal pressure; stop without retry")
+
+
 def main():
     log = Path(sys.argv[1])
     fd = int(os.environ["QWEN_METAL_LEASE_FD"])
@@ -33,6 +42,7 @@ def main():
     timer = threading.Timer(570, stop)
     timer.start()
     try:
+        thermal("before")
         with log.open("x") as output:
             child = subprocess.Popen(sys.argv[2:], stdout=subprocess.PIPE,
                                      stderr=subprocess.STDOUT, text=True, pass_fds=(fd,))
@@ -47,6 +57,7 @@ def main():
                     pass
                 print(line, end="", flush=True)
             code = child.wait()
+            thermal("after")
             if code or expired:
                 raise RuntimeError(f"campaign failed: code={code}, expired={expired}")
     finally:

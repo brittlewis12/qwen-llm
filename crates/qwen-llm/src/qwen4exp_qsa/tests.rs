@@ -1657,9 +1657,21 @@ fn selected_attention_packet_matches_repeated_scalar_kernels() {
                 .as_ref()
                 .unwrap()
                 .uses_split(query_count, g.output_width());
+        let vector_value = product_value
+            && fixture
+                .scratch
+                .selected
+                .as_ref()
+                .unwrap()
+                .value_pipelines
+                .as_ref()
+                .unwrap()
+                .uses_vector(query_count, g.output_width());
         let (value_kernel, value_grid) = if product_value {
             (
-                if split_value {
+                if vector_value {
+                    "kernel_qwen4exp_qsa_selected_value_vec8_f32"
+                } else if split_value {
                     selected_value::SPLIT_VALUE
                 } else {
                     selected_value::VALUE

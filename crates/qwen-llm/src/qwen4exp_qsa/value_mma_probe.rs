@@ -1059,10 +1059,13 @@ fn qualify_fixture_with_product(
     }
     let census = crate::metal::dispatch_census_take();
     let split = product.is_some_and(|p| p.uses_split(n, start));
+    let vector = product.is_some_and(|p| p.uses_vector(n, start));
     let kernels = if product.is_some() {
         [
             selected_value::SOFTMAX,
-            if split {
+            if vector {
+                "kernel_qwen4exp_qsa_selected_value_vec8_f32"
+            } else if split {
                 selected_value::SPLIT_VALUE
             } else {
                 selected_value::VALUE

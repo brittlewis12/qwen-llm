@@ -134,7 +134,7 @@ fn selected_value_product_dispatch_and_inventory() {
     let fixture = admitted_fixture(&ctx);
     let g = fixture.geometry;
     let selected = fixture.scratch.selected.as_ref().unwrap();
-    let prepared = product::Pipelines::prepare(&ctx).unwrap();
+    let prepared = product::Pipelines::prepare_with_split(&ctx, false).unwrap();
     assert_eq!(selected.attention_denominators.shape, [24, 32]);
     assert_eq!(selected.attention_denominators.n_bytes(), 3072);
     let inventory = dense_packed_scratch_tensors(&fixture.scratch);
@@ -259,7 +259,7 @@ fn selected_value_product_rejects_before_packet_updates() {
     );
     let cache = read_tensor_bytes(&fixture.value_cache);
     let logits = read_tensor_bytes(&selected.attention_logits);
-    let prepared = product::Pipelines::prepare(&ctx).unwrap();
+    let prepared = product::Pipelines::prepare_with_split(&ctx, false).unwrap();
     for fault in 0..5 {
         let mut bad = saved.clone();
         match fault {

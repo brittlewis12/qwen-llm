@@ -1058,8 +1058,16 @@ fn qualify_fixture_with_product(
         f.run(ctx, true);
     }
     let census = crate::metal::dispatch_census_take();
+    let split = product.is_some_and(|p| p.uses_split(n));
     let kernels = if product.is_some() {
-        [selected_value::SOFTMAX, selected_value::VALUE]
+        [
+            selected_value::SOFTMAX,
+            if split {
+                selected_value::SPLIT_VALUE
+            } else {
+                selected_value::VALUE
+            },
+        ]
     } else {
         [SOFTMAX, variant.kernel()]
     };
@@ -1068,7 +1076,7 @@ fn qualify_fixture_with_product(
         kernels
     );
     let candidate = read::<f32>(&f.candidate);
-    if product.is_some() || variant == ValueVariant::Gqa12 {
+    if !split && (product.is_some() || variant == ValueVariant::Gqa12) {
         assert_output_bits(&candidate, &baseline);
         let pv = &census[1];
         assert_eq!(
@@ -1125,11 +1133,50 @@ fn selected_value_product_correctness() {
     let Some(ctx) = crate::test_fixtures::metal_context_or_skip() else {
         return;
     };
-    let pipelines = selected_value::Pipelines::prepare(&ctx)
+    let pipelines = selected_value::Pipelines::prepare_with_split(&ctx, false)
         .unwrap()
         .expect("product scalar GQA12 pipelines required for qualification");
     for start in [2051, 8192] {
         for n in [1, 7, 31, 32] {
+            qualify_fixture_with_product(
+                &ctx,
+                Fixture::new_variant(&ctx, start, n, 1, Case::Ordinary, ValueVariant::Gqa12),
+                Case::Ordinary,
+                Some(&pipelines),
+            );
+        }
+        for case in [
+            Case::InvalidIds,
+            Case::NoIds,
+            Case::AllMasked,
+            Case::Metadata,
+            Case::Cancellation,
+        ] {
+            qualify_fixture_with_product(
+                &ctx,
+                Fixture::new_variant(&ctx, start, 32, 1, case, ValueVariant::Gqa12),
+                case,
+                Some(&pipelines),
+            );
+        }
+    }
+}
+
+#[test]
+fn selected_value_split_product_matches_f64() {
+    let Some(ctx) = crate::test_fixtures::metal_context_or_skip() else {
+        return;
+    };
+    if !ctx.tensor_ops_status().is_available() {
+        return;
+    }
+    let pipelines = selected_value::Pipelines::prepare_with_split(&ctx, true)
+        .unwrap()
+        .expect("M5 split-value pipeline");
+    assert!(pipelines.uses_split(32));
+    for start in [2051, 8192] {
+        for n in [1, 7, 31, 32] {
+            assert_eq!(pipelines.uses_split(n), n == 32);
             qualify_fixture_with_product(
                 &ctx,
                 Fixture::new_variant(&ctx, start, n, 1, Case::Ordinary, ValueVariant::Gqa12),

@@ -9,8 +9,9 @@ use crate::metal::{
     encode_moe_down_iq4_nl_f32_grouped_slots, encode_moe_down_iq4_nl_f32_grouped_slots_m128_n16,
     encode_moe_down_q2_0_f32, encode_moe_down_q8_0_f32_grouped_slots,
     encode_moe_down_weighted_sum_q8_0_f32, encode_moe_route_bucket_slots_f32,
-    encode_moe_route_bucket_slots_f32_status, encode_moe_swiglu_f32_grouped_slots_generic_range,
-    encode_moe_swiglu_iq3_s_f32, encode_moe_swiglu_iq3_xxs_f32, encode_moe_swiglu_iq3_xxs_f32_fast,
+    encode_moe_route_bucket_slots_f32_status, encode_moe_route_bucket_slots_parallel_f32_status,
+    encode_moe_swiglu_f32_grouped_slots_generic_range, encode_moe_swiglu_iq3_s_f32,
+    encode_moe_swiglu_iq3_xxs_f32, encode_moe_swiglu_iq3_xxs_f32_fast,
     encode_moe_swiglu_iq3_xxs_f32_grouped_slots_n16, encode_moe_swiglu_iq4_xs_f32,
     encode_moe_swiglu_iq4_xs_f32_grouped_slots_n16, encode_moe_weighted_sum_f32,
     encode_moe_weighted_sum_packed_f32, encode_shared_swiglu_q8_0_f32, encode_silu_mul_f32,
@@ -285,6 +286,23 @@ crate::env_flag!(
     default_on configured_qwen4exp_packed_router_e8p32_strict_enabled,
     "QWEN4EXP_PACKED_ROUTER_E8P32_STRICT"
 );
+
+crate::env_flag!(
+    /// Parallel stable expert bucketing for Flash-Next packed prefill on the M5 tensor tier at 2048 rows, default on. Counts and ascending route-slot order are exact. Set to 0 for the serial bucketing rollback; no additional GPU allocations.
+    default_on parallel_bucket_enabled,
+    "QWEN_FN_PREFILL_PARALLEL_BUCKET"
+);
+
+fn parallel_bucket_qualified(
+    ctx: &MetalContext,
+    g: Qwen4ExpMoeMetalGeometry,
+    tokens: usize,
+) -> bool {
+    parallel_bucket_enabled()
+        && ctx.tensor_ops_status().is_available()
+        && (g.hidden_size, g.expert_count, g.experts_per_token, tokens) == (2560, 512, 10, 2048)
+        && pipeline_supports(ctx, "kernel_moe_route_bucket_slots_parallel_f32", 256, 0)
+}
 crate::env_flag!(
     default_on configured_qwen4exp_moe_iq4_down_m128_n16_enabled,
     "QWEN4EXP_MOE_IQ4_DOWN_M128_N16"
@@ -1976,7 +1994,12 @@ impl Qwen4ExpMoePackedExecution<'_, '_> {
             enc,
             Qwen4ExpPackedProfileLabel::detail("moe.bucket", layer, mixer),
         )?;
-        encode_moe_route_bucket_slots_f32_status(
+        let encode_bucket = if parallel_bucket_qualified(ctx, g, self.tokens) {
+            encode_moe_route_bucket_slots_parallel_f32_status
+        } else {
+            encode_moe_route_bucket_slots_f32_status
+        };
+        encode_bucket(
             ctx,
             enc,
             &self.views.topk_ids,
@@ -3375,6 +3398,9 @@ pub(crate) fn preflight_packed(
         512 * 3 * size_of::<u32>(),
     )?;
     require_pipeline_capacity(ctx, "kernel_moe_route_bucket_slots_f32", 256, 0)?;
+    if parallel_bucket_qualified(ctx, weights.geometry, tokens) {
+        require_pipeline_capacity(ctx, "kernel_moe_route_bucket_slots_parallel_f32", 256, 0)?;
+    }
     require_pipeline_capacity(ctx, routed_gate_kernel, 128, 16_384)?;
     match weights.routed_down.dtype {
         GgmlType::Q2_0 => require_pipeline_capacity(

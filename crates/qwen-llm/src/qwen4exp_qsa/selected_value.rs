@@ -1,4 +1,4 @@
-//! Full-band selected-prefill scalar value reuse. Storage belongs to the
+//! Full-band selected-prefill value reuse and parallel F32 accumulation. Storage belongs to the
 //! session's packed scratch; these prepared pipelines own no tensor allocation.
 
 use super::*;
@@ -6,7 +6,14 @@ use crate::metal::Pipeline;
 
 pub(super) const SOFTMAX: &str = "kernel_qwen4exp_qsa_selected_softmax_gqa4_f32";
 pub(super) const VALUE: &str = "kernel_qwen4exp_qsa_selected_value_gqa12_f32";
+pub(super) const SPLIT_VALUE: &str = "kernel_qwen4exp_qsa_selected_value_split8_f32";
 const STATS_TGM: usize = 4 * ATTENTION_SCRATCH_FLOATS * size_of::<f32>();
+
+crate::env_flag!(
+    /// Parallel F32 selected-prefill value accumulation on the M5 tensor tier, default on for full N32 bands. Changes addition order with unchanged softmax, cache and operand precision. Set to 0 to retain chronological GQA12 accumulation for A/B or rollback; no additional GPU allocations.
+    default_on split_value_enabled,
+    "QWEN_FN_QSA_PREFILL_SPLIT_VALUE"
+);
 
 pub(super) fn geometry_qualified(g: QwenSparseAttentionMetalGeometry) -> bool {
     (
@@ -69,6 +76,7 @@ fn optional_pipeline(ctx: &MetalContext, name: &str) -> Result<Option<Pipeline>,
 pub(super) struct Pipelines {
     softmax: Pipeline,
     value: Pipeline,
+    split_value: Option<Pipeline>,
     device: u64,
 }
 
@@ -88,6 +96,13 @@ impl Pipelines {
     /// Optional capability: absence or an unsupported PSO selects the incumbent
     /// before any encoding. Other errors, and all binding errors, propagate.
     pub(super) fn prepare(ctx: &MetalContext) -> Result<Option<Self>, MetalError> {
+        Self::prepare_with_split(ctx, split_value_enabled())
+    }
+
+    pub(super) fn prepare_with_split(
+        ctx: &MetalContext,
+        split_enabled: bool,
+    ) -> Result<Option<Self>, MetalError> {
         let Some(softmax) = optional_pipeline(ctx, SOFTMAX)? else {
             return Ok(None);
         };
@@ -102,6 +117,11 @@ impl Pipelines {
         Ok(Some(Self {
             softmax,
             value,
+            split_value: if split_enabled && ctx.tensor_ops_status().is_available() {
+                optional_pipeline(ctx, SPLIT_VALUE)?.filter(|p| pipeline_supported(p, 0, limit))
+            } else {
+                None
+            },
             device: ctx.device.registryID(),
         }))
     }
@@ -111,10 +131,18 @@ impl Pipelines {
         if self.device != ctx.device.registryID()
             || !pipeline_supported(&self.softmax, STATS_TGM, limit)
             || !pipeline_supported(&self.value, 0, limit)
+            || self
+                .split_value
+                .as_ref()
+                .is_some_and(|p| !pipeline_supported(p, 0, limit))
         {
             return invalid("selected value pipelines do not support this context");
         }
         Ok(())
+    }
+
+    pub(super) fn uses_split(&self, n: usize) -> bool {
+        n == DENSE_PACKED_QUERY_TILE && self.split_value.is_some()
     }
 
     /// The direct leaf accepts N1..32 for product-metallib qualification. Only
@@ -276,7 +304,12 @@ impl Pipelines {
         enc.set_tensor(4, denominators);
         enc.set_threadgroup_memory(0, STATS_TGM);
         enc.dispatch(size(3, 2, n), size(256, 1, 1));
-        enc.set_pipeline(&self.value);
+        let split = self.uses_split(n);
+        enc.set_pipeline(if split {
+            self.split_value.as_ref().unwrap()
+        } else {
+            &self.value
+        });
         enc.set_bytes(0, &args);
         enc.set_tensor(1, gate);
         enc.set_tensor(2, cache);
@@ -287,7 +320,7 @@ impl Pipelines {
         enc.set_tensor(7, output);
         enc.set_tensor(8, denominators);
         enc.set_threadgroup_memory(0, 0);
-        enc.dispatch(size(1, 2, n), size(256, 1, 1));
+        enc.dispatch(size(if split { 8 } else { 1 }, 2, n), size(256, 1, 1));
         Ok(())
     }
 }

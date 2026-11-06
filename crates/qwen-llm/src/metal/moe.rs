@@ -6483,6 +6483,7 @@ mod tests {
             (384, 3, 6),
             (8, 37, 2),
             (160, 2048, 8),
+            (512, 2048, 10),
         ] {
             // Skewed, repeating expert choices (some experts empty, some hot).
             let idx: Vec<i32> = (0..n_tokens * topk)

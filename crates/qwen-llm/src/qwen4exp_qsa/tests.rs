@@ -1640,10 +1640,28 @@ fn selected_attention_packet_matches_repeated_scalar_kernels() {
             .unwrap()
             .value_pipelines
             .is_some();
+        let split_value = product_value
+            && fixture
+                .scratch
+                .selected
+                .as_ref()
+                .unwrap()
+                .value_pipelines
+                .as_ref()
+                .unwrap()
+                .uses_split(query_count);
         let (value_kernel, value_grid) = if product_value {
             (
-                selected_value::VALUE,
-                [1, g.kv_heads as u64, query_count as u64],
+                if split_value {
+                    selected_value::SPLIT_VALUE
+                } else {
+                    selected_value::VALUE
+                },
+                [
+                    if split_value { 8 } else { 1 },
+                    g.kv_heads as u64,
+                    query_count as u64,
+                ],
             )
         } else if configured_qwen4exp_qsa_gqa4_value_enabled() {
             (
@@ -1765,10 +1783,20 @@ fn selected_attention_packet_matches_repeated_scalar_kernels() {
                 read_tensor_bytes(&actual.attention_logits),
                 read_tensor_bytes(&reference_logits)
             );
-            assert_eq!(
-                read_tensor_bytes(&packed.attention),
-                read_tensor_bytes(&reference_attention)
-            );
+            if split_value {
+                for (actual, expected) in read_f32(&packed.attention)
+                    .iter()
+                    .zip(read_f32(&reference_attention))
+                {
+                    assert!(actual.is_finite() && expected.is_finite());
+                    assert!((actual - expected).abs() <= 3e-5 + 3e-5 * expected.abs());
+                }
+            } else {
+                assert_eq!(
+                    read_tensor_bytes(&packed.attention),
+                    read_tensor_bytes(&reference_attention)
+                );
+            }
             let mut expected_kernels = vec![
                 "kernel_qwen4exp_qsa_norm_rope_packed_f32",
                 "kernel_qwen4exp_qsa_index_scores_packed_4x128_f16",

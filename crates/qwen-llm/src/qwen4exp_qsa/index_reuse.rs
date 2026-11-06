@@ -4,7 +4,7 @@ use std::sync::OnceLock;
 #[cfg(test)]
 mod tests;
 
-/// Query reuse for M5 Flash-Next selected QSA index scoring at >=8192 visible blocks and full 32-query bands. Value 8 (default) reuses each original F16 key across eight F32 query rows; 4 selects four queries; 32 selects strict F32 tensor matmul with exact F16-to-F32 key staging and a different reduction order; 0 restores the incumbent. No query narrowing or added GPU buffers. Other geometries/devices and unavailable PSOs retain the incumbent.
+/// Query reuse for M5 Flash-Next selected QSA index scoring at >=8192 visible blocks and full 32-query bands. Default 32 selects strict F32 tensor matmul with exact F16-to-F32 key staging and a different reduction order; 0 restores the incumbent. Values 4/8 select SIMD query reuse with the incumbent reduction order. No query narrowing or added GPU buffers. Other geometries/devices and unavailable PSOs retain the incumbent.
 const INDEX_QUERY_TILE_ENV: &str = "QWEN_FN_QSA_INDEX_QUERY_TILE";
 
 fn configured_tile() -> usize {
@@ -13,8 +13,8 @@ fn configured_tile() -> usize {
         || match std::env::var(INDEX_QUERY_TILE_ENV).ok().as_deref() {
             Some("0") => 0,
             Some("4") => 4,
-            Some("32") => 32,
-            _ => 8,
+            Some("8") => 8,
+            _ => 32,
         },
     )
 }

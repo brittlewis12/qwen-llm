@@ -14398,17 +14398,21 @@ fn prefill_tokens_with_multi_hidden_profiled_inner<'a>(
                         && moe_router_shared_ffn_batching_eligible(g_w.dtype)
                         && moe_router_shared_ffn_batching_eligible(u_w.dtype)
                         && moe_router_shared_ffn_batching_eligible(d_w.dtype);
-                    let a3b_expert_tensor = grouped_routed_path
+                    let [a3b_expert_swiglu_tensor, a3b_expert_down_tensor] = if grouped_routed_path
                         && !prefill_moe_grouped_q4_n32_all_enabled(arch, chunk_p)
                         && hot_expert_min_slots == Some(48)
-                        && crate::metal_forward::qwen_a3b_expert_prefill_tensor_selected(
+                    {
+                        crate::metal_forward::qwen_a3b_expert_prefill_tensor_roles(
                             base.ctx,
                             arch,
                             moe.gate_exps.dtype,
                             moe.up_exps.dtype,
                             moe.down_exps.dtype,
                             chunk_p,
-                        );
+                        )
+                    } else {
+                        [false, false]
+                    };
                     let fused_grouped_finalizer = grouped_routed_path
                         && prefill_moe_fused_finalizer_enabled()
                         && (skip_moe_shared || packed_shared_path);
@@ -14672,7 +14676,7 @@ fn prefill_tokens_with_multi_hidden_profiled_inner<'a>(
                                 ) && !grouped_q4_n32_all
                                     && prefill_moe_grouped_hot_q4_n32_enabled(chunk_p)
                                     && hot_expert_min_slots == Some(48);
-                                let split_swiglu_bins = !a3b_expert_tensor
+                                let split_swiglu_bins = !a3b_expert_swiglu_tensor
                                     && prefill_trace_moe_bucket_bins_enabled()
                                     && match (moe.gate_exps.dtype, moe.up_exps.dtype) {
                                         (GgmlType::Q4_K, GgmlType::Q4_K) => q4_hot_swiglu_bins,
@@ -14772,7 +14776,7 @@ fn prefill_tokens_with_multi_hidden_profiled_inner<'a>(
                                             chunk_p,
                                             grouped_q4_n32_all,
                                             hot_expert_min_slots,
-                                            a3b_expert_tensor,
+                                            a3b_expert_swiglu_tensor,
                                         )?;
                                     }
                                     enc.end();
@@ -14793,7 +14797,7 @@ fn prefill_tokens_with_multi_hidden_profiled_inner<'a>(
                                 // Specialized down kernels without a range
                                 // variant (Q6_K/Q8_0/IQ4_XS) stay unsplit so
                                 // the trace times the production kernel.
-                                let split_down_bins = !a3b_expert_tensor
+                                let split_down_bins = !a3b_expert_down_tensor
                                     && prefill_trace_moe_bucket_bins_enabled()
                                     && (matches!(
                                         moe.down_exps.dtype,
@@ -14936,7 +14940,7 @@ fn prefill_tokens_with_multi_hidden_profiled_inner<'a>(
                                             n_expert,
                                             chunk_p,
                                             il as u32,
-                                            a3b_expert_tensor,
+                                            a3b_expert_down_tensor,
                                         )?;
                                     }
                                     enc.end();
@@ -15021,7 +15025,7 @@ fn prefill_tokens_with_multi_hidden_profiled_inner<'a>(
                                     chunk_p,
                                     grouped_q4_n32_all,
                                     hot_expert_min_slots,
-                                    a3b_expert_tensor,
+                                    a3b_expert_swiglu_tensor,
                                 )?;
                             }
                             if zero_grouped_buffers {
@@ -15043,7 +15047,7 @@ fn prefill_tokens_with_multi_hidden_profiled_inner<'a>(
                                     n_expert,
                                     chunk_p,
                                     il as u32,
-                                    a3b_expert_tensor,
+                                    a3b_expert_down_tensor,
                                 )?;
                             }
                             if !fused_grouped_finalizer {

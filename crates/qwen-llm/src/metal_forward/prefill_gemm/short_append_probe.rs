@@ -17,6 +17,19 @@ const PROBE_ROWS_ENV: &str = "QWEN_SHORT_PROBE_ROWS";
 const PROBE_CORPUS_REV_ENV: &str = "QWEN_SHORT_PROBE_CORPUS_REV";
 /// Optional prose/code selector to bound each value campaign; unset checks both.
 const PROBE_DOC_ENV: &str = "QWEN_SHORT_PROBE_DOC";
+/// Ignored quality witness only: override short expert roles with gateup, down or both; unset uses the production role selection. The original 2048-row route is unaffected.
+const PROBE_EXPERT_ROLE_ENV: &str = "QWEN_SHORT_PROBE_EXPERT_ROLE";
+
+pub(super) fn expert_roles_override() -> Option<[bool; 2]> {
+    std::env::var(PROBE_EXPERT_ROLE_ENV)
+        .ok()
+        .map(|role| match role.as_str() {
+            "gateup" => [true, false],
+            "down" => [false, true],
+            "both" => [true, true],
+            _ => panic!("unknown expert role override"),
+        })
+}
 
 thread_local! { static OVERRIDE: Cell<Option<bool>> = const { Cell::new(None) }; }
 pub(super) fn override_value() -> Option<bool> {

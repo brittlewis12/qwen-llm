@@ -193,7 +193,9 @@ pub(crate) fn encode_qwen4exp_prefill_mat_mat(
             x,
         );
         if flash_next_dense_wide_enabled() {
-            crate::metal::encode_mat_mat_tensor_f32_wide(ctx, enc, weight, x, y, k, n, m)?;
+            crate::metal::encode_mat_mat_tensor_f32_flash_next_wide(
+                ctx, enc, weight, x, y, k, n, m,
+            )?;
         } else {
             crate::metal::encode_mat_mat_tensor_f32_narrow(ctx, enc, weight, x, y, k, n, m)?;
         }

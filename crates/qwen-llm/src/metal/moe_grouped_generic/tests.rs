@@ -1255,7 +1255,11 @@ fn run_tensor_dense_wide_case(dtype: GgmlType, n_out: usize, rows: usize, seed: 
     })
     .expect("narrow dense mat-mat");
     one_shot(&ctx, |enc| {
-        encode_mat_mat_tensor_f32_wide(&ctx, enc, &w, &x_v, &wide, N_IN, n_out, rows)
+        if dtype == GgmlType::Q8_0 {
+            encode_mat_mat_tensor_f32_wide(&ctx, enc, &w, &x_v, &wide, N_IN, n_out, rows)
+        } else {
+            encode_mat_mat_tensor_f32_flash_next_wide(&ctx, enc, &w, &x_v, &wide, N_IN, n_out, rows)
+        }
     })
     .expect("wide dense mat-mat");
     let narrow = read_back_f32(&narrow.buffer, rows * n_out);

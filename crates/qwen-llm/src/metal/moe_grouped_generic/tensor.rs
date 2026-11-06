@@ -306,23 +306,20 @@ pub fn mat_mat_tensor_pipeline_name(
     ))
 }
 
-/// 64-slot dense form. Automatic widening is Q8_0-only; qualified Flash-Next
-/// callers explicitly select Q4_K/Q6_K/IQ4_XS/IQ4_NL wide forms.
+/// 64-slot dense form for the shared Q8_0-only wide-tile contract.
 pub fn mat_mat_tensor_wide_pipeline_name(
     dtype: GgmlType,
     activation: TensorActivation,
 ) -> Option<String> {
-    matches!(
-        dtype,
-        GgmlType::Q8_0 | GgmlType::Q4_K | GgmlType::Q6_K | GgmlType::IQ4_XS | GgmlType::IQ4_NL
-    )
-    .then(|| {
-        format!(
-            "kernel_mat_mat_{}_{}_tensor_wide",
-            moe_grouped_generic_layout(dtype).unwrap().suffix,
-            activation.infix()
-        )
-    })
+    (dtype == GgmlType::Q8_0)
+        .then(|| format!("kernel_mat_mat_q8_0_{}_tensor_wide", activation.infix()))
+}
+
+#[derive(Clone, Copy)]
+enum DenseTile {
+    Narrow,
+    WideQ8,
+    FlashNextWide,
 }
 
 /// Dense `y[row] = W x[row]` on the tensor tile with the `mat_mat`
@@ -351,7 +348,21 @@ pub fn encode_mat_mat_tensor_f32(
     let wide = weight.dtype == GgmlType::Q8_0
         && n_query >= 128
         && std::env::var_os("QWEN_V41_DENSE_NARROW").is_none();
-    encode_mat_mat_tensor_f32_impl(ctx, enc, weight, x, y, n_in, n_out, n_query, wide)
+    encode_mat_mat_tensor_f32_impl(
+        ctx,
+        enc,
+        weight,
+        x,
+        y,
+        n_in,
+        n_out,
+        n_query,
+        if wide {
+            DenseTile::WideQ8
+        } else {
+            DenseTile::Narrow
+        },
+    )
 }
 
 /// Force the 64-slot dense form; test and probe entry point.
@@ -366,7 +377,42 @@ pub fn encode_mat_mat_tensor_f32_wide(
     n_out: usize,
     n_query: usize,
 ) -> Result<(), MetalError> {
-    encode_mat_mat_tensor_f32_impl(ctx, enc, weight, x, y, n_in, n_out, n_query, true)
+    encode_mat_mat_tensor_f32_impl(
+        ctx,
+        enc,
+        weight,
+        x,
+        y,
+        n_in,
+        n_out,
+        n_query,
+        DenseTile::WideQ8,
+    )
+}
+
+/// Explicit wide tile for the qualified Flash-Next projection caller. This
+/// does not expand the shared Q8-only wide-tile capability lookup.
+pub fn encode_mat_mat_tensor_f32_flash_next_wide(
+    ctx: &MetalContext,
+    enc: &KernelEncoder,
+    weight: &MetalTensor,
+    x: &MetalTensor,
+    y: &MetalTensor,
+    n_in: usize,
+    n_out: usize,
+    n_query: usize,
+) -> Result<(), MetalError> {
+    encode_mat_mat_tensor_f32_impl(
+        ctx,
+        enc,
+        weight,
+        x,
+        y,
+        n_in,
+        n_out,
+        n_query,
+        DenseTile::FlashNextWide,
+    )
 }
 
 /// Force the 32-slot dense form; test and probe entry point.
@@ -381,7 +427,17 @@ pub fn encode_mat_mat_tensor_f32_narrow(
     n_out: usize,
     n_query: usize,
 ) -> Result<(), MetalError> {
-    encode_mat_mat_tensor_f32_impl(ctx, enc, weight, x, y, n_in, n_out, n_query, false)
+    encode_mat_mat_tensor_f32_impl(
+        ctx,
+        enc,
+        weight,
+        x,
+        y,
+        n_in,
+        n_out,
+        n_query,
+        DenseTile::Narrow,
+    )
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -394,7 +450,7 @@ fn encode_mat_mat_tensor_f32_impl(
     n_in: usize,
     n_out: usize,
     n_query: usize,
-    wide: bool,
+    tile: DenseTile,
 ) -> Result<(), MetalError> {
     const KERNEL: &str = "mat_mat_tensor";
     let l = moe_grouped_generic_layout(weight.dtype).ok_or_else(|| MetalError::BadShape {
@@ -446,12 +502,25 @@ fn encode_mat_mat_tensor_f32_impl(
         b_div: 1,
         slot_limit: n_query as u32,
     };
-    let wide = wide && mat_mat_tensor_wide_pipeline_name(weight.dtype, activation).is_some();
-    let name = if wide {
-        mat_mat_tensor_wide_pipeline_name(weight.dtype, activation).expect("layout found above")
-    } else {
-        mat_mat_tensor_pipeline_name(weight.dtype, activation).expect("layout found above")
+    let wide_name = match tile {
+        DenseTile::Narrow => None,
+        DenseTile::WideQ8 => mat_mat_tensor_wide_pipeline_name(weight.dtype, activation),
+        DenseTile::FlashNextWide => matches!(
+            weight.dtype,
+            GgmlType::Q4_K | GgmlType::Q6_K | GgmlType::IQ4_XS | GgmlType::IQ4_NL
+        )
+        .then(|| {
+            format!(
+                "kernel_mat_mat_{}_{}_tensor_wide",
+                l.suffix,
+                activation.infix()
+            )
+        }),
     };
+    let wide = wide_name.is_some();
+    let name = wide_name.unwrap_or_else(|| {
+        mat_mat_tensor_pipeline_name(weight.dtype, activation).expect("layout found above")
+    });
     let slots = if wide { 64 } else { 32 };
     let threadgroup_bytes = if wide {
         TENSOR_THREADGROUP_BYTES_WIDE

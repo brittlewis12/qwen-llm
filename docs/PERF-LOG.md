@@ -6,6 +6,63 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the current state and evidence index.
 
+## 2026-11-06 - M5 Agent-Workload Decode Standing (Partial, Thermal Stop)
+
+- Frozen main **`fe86a7c2`**, ordinary release build, no code changes.
+  Registry 27B Q4_K_M, A3B UD-Q4_K_M and GLM-5.3 UD-IQ3_XXS;
+  GLM uses the established metadata-only `glm5-next` alias and unchanged
+  tensor shards. Flash-Next GSQ-RCO IQ3_S was planned but not reached.
+- Same pinned family comparator: llama.cpp **v0.9.0 `cd959bae99`**,
+  MTL/BLAS, batch/ubatch 2048, F16 K/V. Native commands:
+  `qwen-bench suite -m GGUF --tg 64 --depth D --runs 2 --seed 1 -o json`;
+  `llama-bench -m GGUF -p 0 -n 64 -d D -ub 2048 -r 2 -o json`.
+  Native model/row warmups retained. Qwen refills each prefix for the row
+  warmup and both reps; llama.cpp fills once and restores cached state.
+  Only production decode plus logits copy is timed.
+- One engine resident at a time, build.lock + normal Metal lease per bounded
+  campaign, nice 10, 30 s before every arm, pressure recorded before/after.
+  All earlier arms had **0 / 0**. The GLM llama.cpp arm ended **0 / 1**:
+  **stop, no retry**, exclude both of its reference cells from standing.
+  Every emitted retained sample follows (tok/s); ratios use native arithmetic
+  mean throughput. Dashes are unmeasured, not zero.
+
+| Family | Depth | qwen-llm samples | llama.cpp samples | Ratio |
+| --- | ---: | ---: | ---: | ---: |
+| 27B | 32768 | 38.204795, 38.242267 | 42.0266, 42.3734 | 0.905771x |
+| 27B | 131072 | deadline, no completed row | 29.9712, 30.0453 | — |
+| A3B | 32768 | 114.455626, 114.142908 | 117.5040, 118.0950 | 0.970286x |
+| A3B | 131072 | 78.954856, 79.038627 | 81.8673, 82.2772 | 0.962527x |
+| GLM-5.3 | 32768 | 53.915685, 53.906284 | invalid: thermal 1 | — |
+| GLM-5.3 | 131072 | not run before stop | invalid: thermal 1 | — |
+| Flash-Next | 32768 | not run before stop | not run before stop | — |
+| Flash-Next | 131072 | not run before stop | not run before stop | — |
+
+- Excluded GLM reference samples, retained for audit only: at 32768,
+  **41.1313 / 40.3477 tok/s**; at 131072, **36.9484 / 34.3677**.
+  No standing ratio is inferred from the pressure-1 arm.
+- 27B tg64@128K hit the **570 s campaign deadline**, then exited on SIGINT
+  (code 130), with pressure still 0. Native command wall **554.462 s**;
+  total lease campaign **584.485 s**, including cooldown and graceful exit.
+  No completed two-rep row was emitted and no partial rate is reported.
+  The context is supported; this is a runtime bound, not a context limit.
+- Missing pp512@128K: **27B skipped** because the native repeated-prefix
+  cost already exceeded the bounded decode campaign. **GLM not attempted**
+  before the thermal stop; its 32K tg command alone took **126.613 s**,
+  making a native three-fill 128K append cell a more-than-few-minutes
+  projection. Its 128K qwen decode and both Flash-Next cells were not reached.
+- Approximately **29.9 min** of active campaigns, including the interrupted
+  27B arm and cooldowns, plus **1m48s** for the locked release build; lease
+  waits excluded. All emitted samples, commands, source stamps and partial/
+  invalid logs remain outside the repository in `agent-standing-raw.tar`,
+  SHA256 `49180c6248ef9ff4a8b6f0f5e25ffb0dda2823e104e6c32c47fcc0f7d44254f6`.
+  Qwen binary SHA256
+  `a7cfb5db2048dc2d69a900f6230df22d07293904c16bd64633bb5a17e25c1c0d`;
+  matching clean build/runtime identities, no runtime tuning overrides.
+- **Next confirmed gap:** 27B decode at 32K is about **9.4% below llama.cpp**
+  (about 10.4% speedup needed for parity); A3B is within 3–4%.
+  GLM/Flash-Next and deep 27B need a healthy bounded follow-up before
+  drawing a broader decode conclusion. Nothing left queued or running.
+
 ## 2026-11-06 - Flash-Next Depth Appends: Reused Attention and Parallel Exact Selection
 
 - Main `98d8f4c9`, M5 Ultra, GSQ-RCO IQ3_S; frozen product `1fda4979`.

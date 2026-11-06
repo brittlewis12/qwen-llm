@@ -7,6 +7,32 @@ use super::{
 use crate::tensor::GgmlType;
 
 crate::env_flag!(
+    /// Opt-in F32-input M5 IQ tensor gate/up for 512-row Fast/Half appends; no Half scratch allocation.
+    default_off short_gate_up_enabled,
+    "QWEN_GLM53_SHORT_GATE_UP_TENSOR"
+);
+
+pub(super) fn short_selected(
+    arith: Arith,
+    mode: StageMode,
+    gate: GgmlType,
+    up: GgmlType,
+    shape: (usize, usize, usize, usize),
+    rows: usize,
+) -> bool {
+    short_gate_up_enabled()
+        && memory::tensor_gate_up_enabled()
+        && iq_tensor_gate_up_enabled()
+        && arith.lineage == PackedLineage::Fast
+        && arith.precision == FastPrecision::Half
+        && mode == StageMode::Fast
+        && shape == (4096, 2048, 288, 8)
+        && rows == 512
+        && gate == up
+        && matches!(gate, GgmlType::IQ2_S | GgmlType::IQ3_S)
+}
+
+crate::env_flag!(
     /// Default-on bounded M5 Fast/Half IQ2_S/IQ3_S routed tensor gate/up at 1024/2048 rows and 4096/2048/288/top-8 geometry. Zero restores incumbent IQ gate/up; preserves the independent down policy and all enclosing guards. Reuses the admitted normalized Half buffer, with no added allocation.
     default_on iq_tensor_gate_up_enabled,
     "QWEN_GLM53_IQ_TENSOR_GATE_UP"

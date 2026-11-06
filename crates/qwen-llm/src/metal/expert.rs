@@ -615,6 +615,65 @@ pub(crate) fn encode_grouped_routed_experts_with_down_policy(
     clamp: f32,
     down_policy: GroupedDownPolicy,
 ) -> Result<(), MetalError> {
+    encode_grouped_routed_experts_impl(
+        ctx,
+        enc,
+        b,
+        hidden,
+        ffn,
+        experts,
+        top_k,
+        rows,
+        clamp,
+        down_policy,
+        false,
+    )
+}
+
+/// Explicit F32-input tensor gate/up; down selection and post-down weighting
+/// remain owned by the ordinary grouped composition. No scratch allocation.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn encode_grouped_routed_experts_with_tensor_gate_up(
+    ctx: &MetalContext,
+    enc: &KernelEncoder,
+    b: &GroupedExperts<'_>,
+    hidden: usize,
+    ffn: usize,
+    experts: usize,
+    top_k: usize,
+    rows: usize,
+    clamp: f32,
+    down_policy: GroupedDownPolicy,
+) -> Result<(), MetalError> {
+    encode_grouped_routed_experts_impl(
+        ctx,
+        enc,
+        b,
+        hidden,
+        ffn,
+        experts,
+        top_k,
+        rows,
+        clamp,
+        down_policy,
+        true,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn encode_grouped_routed_experts_impl(
+    ctx: &MetalContext,
+    enc: &KernelEncoder,
+    b: &GroupedExperts<'_>,
+    hidden: usize,
+    ffn: usize,
+    experts: usize,
+    top_k: usize,
+    rows: usize,
+    clamp: f32,
+    down_policy: GroupedDownPolicy,
+    tensor_gate_up: bool,
+) -> Result<(), MetalError> {
     const K: &str = "grouped_routed_experts";
     if let Some(dtype) = down_policy.tensor_dtype() {
         if b.down_bank.dtype != dtype {
@@ -689,9 +748,45 @@ pub(crate) fn encode_grouped_routed_experts_with_down_policy(
         rows,
         top_k,
     )?;
-    match grouped_gate_up_wide_min() {
-        Some(wide_min_count) => {
-            super::moe_grouped_generic::encode_moe_swiglu_clamped_f32_grouped_slots_split(
+    if tensor_gate_up {
+        encode_moe_swiglu_f32_grouped_slots_tensor(
+            ctx,
+            enc,
+            b.gate_bank,
+            b.up_bank,
+            &flat(b.input),
+            b.counts,
+            b.slots,
+            &flat(b.inner),
+            hidden,
+            ffn,
+            experts,
+            top_k,
+            rows,
+            Some(clamp),
+        )?;
+    } else {
+        match grouped_gate_up_wide_min() {
+            Some(wide_min_count) => {
+                super::moe_grouped_generic::encode_moe_swiglu_clamped_f32_grouped_slots_split(
+                    ctx,
+                    enc,
+                    b.gate_bank,
+                    b.up_bank,
+                    &flat(b.input),
+                    b.counts,
+                    b.slots,
+                    &flat(b.inner),
+                    hidden,
+                    ffn,
+                    experts,
+                    top_k,
+                    rows,
+                    clamp,
+                    wide_min_count,
+                )?
+            }
+            None => encode_moe_swiglu_clamped_f32_grouped_slots_generic(
                 ctx,
                 enc,
                 b.gate_bank,
@@ -706,25 +801,8 @@ pub(crate) fn encode_grouped_routed_experts_with_down_policy(
                 top_k,
                 rows,
                 clamp,
-                wide_min_count,
-            )?
+            )?,
         }
-        None => encode_moe_swiglu_clamped_f32_grouped_slots_generic(
-            ctx,
-            enc,
-            b.gate_bank,
-            b.up_bank,
-            &flat(b.input),
-            b.counts,
-            b.slots,
-            &flat(b.inner),
-            hidden,
-            ffn,
-            experts,
-            top_k,
-            rows,
-            clamp,
-        )?,
     }
     if let Some(down) = tensor_down {
         down.encode()?;

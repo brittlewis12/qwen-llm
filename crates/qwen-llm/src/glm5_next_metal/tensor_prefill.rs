@@ -17,6 +17,12 @@ const DEFAULT_ENABLED: bool = true;
 const THREADGROUP_BYTES: usize = 8192;
 
 crate::env_flag!(
+    /// Opt-in M5 Fast/Half tensor projections for 512-row appends, retaining the incumbent operand precision and all existing capability guards.
+    default_off short_dense_enabled,
+    "QWEN_GLM53_SHORT_DENSE_TENSOR"
+);
+
+crate::env_flag!(
     /// Default-on GLM dense Q8_0 64-slot TensorOps prefill on eligible M5 Fast/Half; 0 restores the previous narrow tile. Does not bypass Half/Fast, row, tier, binding, or global rollback guards.
     default_on q8_wide_enabled,
     "QWEN_GLM53_DENSE_Q8_WIDE"
@@ -198,7 +204,7 @@ pub(super) fn eligible(
         || arith.precision != FastPrecision::Half
         || mode != StageMode::Fast
         || !matches!(dtype, GgmlType::Q6_K | GgmlType::Q8_0)
-        || n < MIN_ROWS
+        || (n < MIN_ROWS && !(n == 512 && short_dense_enabled()))
     {
         return Ok(false);
     }

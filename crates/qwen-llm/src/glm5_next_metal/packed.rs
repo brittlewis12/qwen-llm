@@ -1107,6 +1107,31 @@ fn encode_experts_with_half(
     clamp: f32,
 ) -> Result<StageMode> {
     let mode = expert_mode(arith, b.gate_bank.dtype, b.up_bank.dtype, b.down_bank.dtype);
+    if super::tensor_gate_up::short_selected(
+        arith,
+        mode,
+        b.gate_bank.dtype,
+        b.up_bank.dtype,
+        (h, f, e, k),
+        rows,
+    ) && crate::metal::moe_grouped_tensor_selected(ctx)
+    {
+        #[cfg(test)]
+        record_census(Stage::RoutedExperts, "experts".into(), CensusPath::Half);
+        crate::metal::encode_grouped_routed_experts_with_tensor_gate_up(
+            ctx,
+            enc,
+            b,
+            h,
+            f,
+            e,
+            k,
+            rows,
+            clamp,
+            grouped_down_policy(arith, mode, b.down_bank.dtype, f, h, e, k, rows),
+        )?;
+        return Ok(mode);
+    }
     if super::tensor_gate_up::selected(
         arith,
         mode,

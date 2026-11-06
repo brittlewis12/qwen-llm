@@ -2,6 +2,12 @@
 use super::packed::{Arith, FastPrecision, PackedLineage};
 
 crate::env_flag!(
+    /// Opt-in M5 Fast/Half KDA value4 scheduling at 512 rows; state and arithmetic remain F32.
+    default_off short_kda_enabled,
+    "QWEN_GLM53_SHORT_KDA_VALUE4"
+);
+
+crate::env_flag!(
     /// Default-on M5 Fast/Half KDA prefill recurrence with four independent values per SIMD group at 64 heads and 1024/2048 rows. No new state format or scratch. Zero restores the incumbent recurrence; Exact and F32 modes retain it.
     default_on enabled,
     "QWEN_GLM53_KDA_VALUE4"
@@ -12,7 +18,7 @@ pub(super) fn selected(arith: Arith, heads: usize, rows: usize) -> bool {
         && arith.lineage == PackedLineage::Fast
         && arith.precision == FastPrecision::Half
         && heads == 64
-        && matches!(rows, 1024 | 2048)
+        && (matches!(rows, 1024 | 2048) || (rows == 512 && short_kda_enabled()))
 }
 
 #[cfg(test)]

@@ -3,6 +3,24 @@
 use super::*;
 use std::mem::size_of;
 
+thread_local! {
+    static ATTN_REGISTER_Q_OVERRIDE: std::cell::Cell<Option<bool>> = const { std::cell::Cell::new(None) };
+}
+
+/// Thread-local operator witness; unset retains the incumbent kernel.
+pub fn with_attn_v4_register_q_override<T>(enabled: bool, f: impl FnOnce() -> T) -> T {
+    struct Restore(Option<bool>);
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            ATTN_REGISTER_Q_OVERRIDE.with(|s| s.set(self.0));
+        }
+    }
+    let guard = Restore(ATTN_REGISTER_Q_OVERRIDE.with(|s| s.replace(Some(enabled))));
+    let result = f();
+    drop(guard);
+    result
+}
+
 pub(crate) const TENSOR_FLASH_QUERY_TILE: usize = 32;
 pub(crate) const TENSOR_FLASH_KEY_TILE: usize = 64;
 pub(crate) const TENSOR_FLASH_HEAD_DIM: usize = 256;
@@ -926,7 +944,23 @@ pub fn encode_attn_decode_v4_f32(
         && group_tile == 4
         && tile_c == 64
         && attn_v4_pack() == 4;
-    let pipeline_name = if use_pack4 {
+    let use_register_q = group == 6
+        && k_cache.dtype == GgmlType::F16
+        && ATTN_REGISTER_Q_OVERRIDE.with(|s| s.get()).unwrap_or(false);
+    let pipeline_name = if use_register_q {
+        match tile_c {
+            16 => "kernel_attn_decode_v4_qreg_c16_f32",
+            32 => "kernel_attn_decode_v4_qreg_c32_f32",
+            64 => "kernel_attn_decode_v4_qreg_c64_f32",
+            128 => "kernel_attn_decode_v4_qreg_c128_f32",
+            _ => {
+                return Err(MetalError::BadShape {
+                    kernel: "attn_decode_v4",
+                    detail: "unsupported register-Q tile".into(),
+                });
+            }
+        }
+    } else if use_pack4 {
         "kernel_attn_decode_v4_g8_t4_c64_pack4_f32"
     } else if use_g8_bcast {
         match group_tile {
@@ -1107,7 +1141,11 @@ pub fn encode_attn_decode_v4_f32(
             },
         );
     } else {
-        let sq_bytes = group_tile * DK * 2; // f16 = 2 bytes per element
+        let sq_bytes = if use_register_q {
+            16
+        } else {
+            group_tile * DK * 2
+        }; // unused Q slot remains aligned
         let ss_bytes = group_tile * tile_c * std::mem::size_of::<f32>();
         enc.set_threadgroup_memory(0, sq_bytes);
         enc.set_threadgroup_memory(1, ss_bytes);

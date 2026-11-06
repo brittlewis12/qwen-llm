@@ -34,6 +34,10 @@ struct Args {
     heads: usize,
     #[arg(long, default_value_t = 4)]
     kv_heads: usize,
+    #[arg(long)]
+    qreg: bool,
+    #[arg(long)]
+    automatic: bool,
 }
 fn emit(v: serde_json::Value) {
     println!("{v}");
@@ -90,11 +94,11 @@ fn run_decode(model: &LoadedModel, seq: &mut Sequence, tokens: &[i32]) -> Result
     Ok(last)
 }
 fn op(ctx: &MetalContext, a: &Args) -> Result<()> {
-    let group = a.heads / a.kv_heads;
     ensure!(
         matches!((a.heads, a.kv_heads), (24, 4) | (16, 2)),
         "unsupported census heads"
     );
+    let group = a.heads / a.kv_heads;
     let mut random_state = 0xd3c0de51u64;
     let mut random = || {
         random_state ^= random_state << 13;
@@ -120,14 +124,17 @@ fn op(ctx: &MetalContext, a: &Args) -> Result<()> {
         let base = (
             attn_v4_choose_nwg(pos, group),
             attn_v4_choose_tile_c(pos, group),
+            false,
         );
-        let one = |nwg, c| -> Result<f64> {
+        let one = |nwg, c, qreg| -> Result<f64> {
             let cmd = ctx.queue.commandBuffer().unwrap();
             let enc = KernelEncoder::begin(&cmd);
-            encode_attn_decode_v4_f32(
-                ctx, &enc, &qt, &kt, &vt, &partial, &ml, &out, a.heads, a.kv_heads, 256, pos, nwg,
-                c,
-            )?;
+            with_attn_v4_register_q_override(qreg, || {
+                encode_attn_decode_v4_f32(
+                    ctx, &enc, &qt, &kt, &vt, &partial, &ml, &out, a.heads, a.kv_heads, 256, pos,
+                    nwg, c,
+                )
+            })?;
             enc.end();
             cmd.commit();
             wait_completed(&cmd)?;
@@ -137,7 +144,7 @@ fn op(ctx: &MetalContext, a: &Args) -> Result<()> {
             );
             Ok((cmd.GPUEndTime() - cmd.GPUStartTime()) * 1e3)
         };
-        one(base.0, base.1)?;
+        one(base.0, base.1, base.2)?;
         let incumbent = floats(&out).to_vec();
         // Original F32 query and the actual stored half cache, independent F64 softmax.
         let mut reference = Vec::new();
@@ -192,9 +199,17 @@ fn op(ctx: &MetalContext, a: &Args) -> Result<()> {
             (peak, (e / r).sqrt())
         };
         let inc = error(&incumbent);
+        let mut config_inc = std::collections::BTreeMap::<(usize, usize), Vec<f32>>::new();
         let configs: Vec<_> = [64, 128, 256, 512, 1024]
             .into_iter()
-            .flat_map(|n| [16, 32, 64, 128].into_iter().map(move |c| (n, c)))
+            .flat_map(|n| {
+                [16, 32, 64, 128].into_iter().flat_map(move |c| {
+                    [false, true]
+                        .into_iter()
+                        .filter(move |q| !q || group == 6)
+                        .map(move |q| (n, c, q))
+                })
+            })
             .collect();
         for (arm, candidate) in [false, true, true, false].into_iter().enumerate() {
             std::thread::sleep(std::time::Duration::from_secs(30));
@@ -203,23 +218,32 @@ fn op(ctx: &MetalContext, a: &Args) -> Result<()> {
             // Pipeline compilation and first-touch costs stay outside samples.
             let priming = Instant::now();
             while priming.elapsed().as_millis() < 200 {
-                one(base.0, base.1)?;
+                one(base.0, base.1, base.2)?;
             }
-            for &(nwg, c) in if candidate {
+            for &(nwg, c, qreg) in if candidate {
                 configs.as_slice()
             } else {
                 std::slice::from_ref(&base)
             } {
-                one(nwg, c)?;
-                one(nwg, c)?;
+                one(nwg, c, qreg)?;
+                one(nwg, c, qreg)?;
                 let err = error(floats(&out));
+                let eq = if qreg {
+                    floats(&out)
+                        .iter()
+                        .zip(&config_inc[&(nwg, c)])
+                        .all(|(x, y)| x.to_bits() == y.to_bits())
+                } else {
+                    config_inc.insert((nwg, c), floats(&out).to_vec());
+                    true
+                };
                 emit(
-                    json!({"record":"accuracy","pos":pos,"heads":a.heads,"nwg":nwg,"c":c,"max_abs":err.0,"relative_rms":err.1,"inc_max_abs":inc.0,"inc_relative_rms":inc.1,"max_ratio":err.0/inc.0,"rms_ratio":err.1/inc.1,"pass":err.0<=1.5*inc.0 && err.1<=1.5*inc.1}),
+                    json!({"record":"accuracy","pos":pos,"heads":a.heads,"nwg":nwg,"c":c,"qreg":qreg,"equal_config_inc":eq,"max_abs":err.0,"relative_rms":err.1,"inc_max_abs":inc.0,"inc_relative_rms":inc.1,"max_ratio":err.0/inc.0,"rms_ratio":err.1/inc.1,"pass":err.0<=1.5*inc.0 && err.1<=1.5*inc.1}),
                 );
                 for sample in 0..8 {
-                    let gpu_ms = one(nwg, c)?;
+                    let gpu_ms = one(nwg, c, qreg)?;
                     emit(
-                        json!({"record":"op_sample","pos":pos,"heads":a.heads,"arm":arm,"candidate":candidate,"nwg":nwg,"c":c,"sample":sample,"gpu_ms":gpu_ms}),
+                        json!({"record":"op_sample","pos":pos,"heads":a.heads,"arm":arm,"candidate":candidate,"nwg":nwg,"c":c,"qreg":qreg,"sample":sample,"gpu_ms":gpu_ms}),
                     );
                 }
             }
@@ -231,10 +255,17 @@ fn op(ctx: &MetalContext, a: &Args) -> Result<()> {
 fn run() -> Result<()> {
     qwen_cli::shutdown::install()?;
     let a = Args::parse();
+    if a.automatic {
+        run_args(a)
+    } else {
+        with_attn_v4_register_q_override(a.qreg, || run_args(a))
+    }
+}
+fn run_args(a: Args) -> Result<()> {
     let rt = Runtime::metal()?;
     let ctx = rt.context();
     emit(
-        json!({"record":"source","head":env!("QWEN_BUILD_COMMIT"),"device":ctx.device_facts().name,"mode":a.mode,"depth":a.depth}),
+        json!({"record":"source","head":env!("QWEN_BUILD_COMMIT"),"device":ctx.device_facts().name,"mode":a.mode,"depth":a.depth,"qreg":a.qreg,"automatic":a.automatic}),
     );
     if a.mode == "op" {
         return op(ctx, &a);

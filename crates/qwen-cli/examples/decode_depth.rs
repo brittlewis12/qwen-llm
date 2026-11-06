@@ -494,6 +494,9 @@ fn run_args(a: Args) -> Result<()> {
             for (candidate, seq) in [(false, &mut off), (true, &mut on)] {
                 thermal(&format!("quality-{start}-{candidate}"), "before")?;
                 let mut logits = Vec::new();
+                if start == 0 {
+                    dispatch_census_begin();
+                }
                 policy(candidate, a.automatic, || -> Result<()> {
                     for &id in &tokens[start..end] {
                         qwen_cli::shutdown::checkpoint()?;
@@ -501,6 +504,12 @@ fn run_args(a: Args) -> Result<()> {
                     }
                     Ok(())
                 })?;
+                if start == 0 {
+                    let census = dispatch_census_take();
+                    emit(
+                        json!({"record":"dispatch_witness","candidate":candidate,"qreg":census.iter().filter(|r|r.kernel.contains("qreg")).count(),"total":census.len()}),
+                    );
+                }
                 ensure!(
                     logits.iter().all(|x| x.is_finite()),
                     "nonfinite teacher logits"

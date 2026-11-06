@@ -806,13 +806,12 @@ pub fn with_attn_v4_group_tile_override<T>(tile: usize, f: impl FnOnce() -> T) -
     out
 }
 
-/// Enable qualified M5 Ultra register-query decode attention at medium depth.
+/// Default-on M5 Ultra 27B register-query decode at 32768..98304 KV positions.
 /// `0` restores the incumbent kernel and partition heuristic. Prefill is unaffected.
 const DECODE_ATTN_DEPTH_ENV: &str = "QWEN_DECODE_ATTN_DEPTH";
 
 fn decode_attn_depth_enabled() -> bool {
-    // Kept experimental until the whole-decode and distribution gates complete.
-    ATTN_REGISTER_Q_OVERRIDE.with(|s| s.get()).unwrap_or(false)
+    ATTN_REGISTER_Q_OVERRIDE.with(|s| s.get()).unwrap_or(true)
         && !matches!(
             std::env::var(DECODE_ATTN_DEPTH_ENV).as_deref(),
             Ok("0" | "false" | "FALSE" | "off" | "OFF")

@@ -6,6 +6,171 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the current state and evidence index.
 
+## 2026-11-06 - GLM M5 Short Appends: pp512 +85%/+66% at 0/32K
+
+- Target: stock GLM-5.3 UD-IQ3_XXS, M5 Ultra, 512/1024 new tokens at
+  depths 0/32768, from main `eca09c26`. The prior pp4096 win did not
+  cover 512 command rows: dense Q6/Q8 required >=1024, tensor gate/up/down
+  and KDA value4 selected only 1024/2048. A fresh 512-row session also
+  omitted normalized Half scratch. Actual rows, not the retained workspace
+  capacity, kept these routes off even after a 32K prefix.
+- Main's seed-1 pp512 diagnostic, one excluded warm call and two plain
+  calls from the same untimed restored prefix: depth 0
+  **1044.280750 / 1045.013458 ms**, depth 32768
+  **1231.964500 / 1230.687209 ms**. Workspace rows are 512/2048,
+  respectively; every append has 512 actual rows. Prefix snapshots and
+  restoration are outside the call timer. These are attribution brackets,
+  not the fresh-session end-to-end comparison below.
+  Profiled command GPU / span sum: **1047.193625 / 1044.934705 ms** at 0,
+  **1233.327125 / 1231.012712 ms** at 32K. Encoder boundaries perturb
+  execution; spans are diagnostic, not exclusive wall-time accounting.
+
+  | Stage | Depth 0 ms | Depth 32768 ms |
+  | --- | ---: | ---: |
+  | Routed experts | 610.376 | 617.023 |
+  | Combined MLA | 82.713 | 260.865 |
+  | KDA input projections | 153.103 | 153.425 |
+  | KDA output projection | 48.850 | 48.567 |
+  | Shared expert | 47.166 | 47.189 |
+  | KDA recurrence | 30.694 | 31.296 |
+
+- Dispatch profiles: **1381 / 2382** dispatches at 0/32K, zero overflow or
+  missing timestamp pairs. Both run **288 generic Q6_K** dense calls;
+  generic Q8_0 calls are **219 / 230** (22 grouped MLA transforms remain
+  separate). End-increment dense Q6/Q8 cohorts total **303.786 / 305.886 ms**;
+  these overlap coarse stage parents and must not be added to that table.
+  Experts use 42 generic + 42 N32 fused gate/up calls, 39 generic + 39
+  retiled IQ3_S down calls, and three specialized IQ4_XS downs. All 34 KDA
+  recurrences use the incumbent. The large gap is unconverted arithmetic;
+  router/bucketing are only about 13/11 ms, not the dominant targets.
+- **Default on:** `QWEN_GLM53_SHORT_PREFILL` enables existing M5 tensor
+  dense Q6_K/Q8_0, IQ2_S/IQ3_S gate/up, IQ3_S down and F32 KDA value4 at
+  exactly 512 command rows. Gate/up uses the existing **F32-input** tensor
+  tile, which stages the same Half operand values internally. It needs no
+  normalized Half buffer, so the ordinary admission ledger is unchanged.
+  Preserve clamped SwiGLU, unweighted inner, post-down routing weights,
+  and the specialized IQ4_XS down. Tensor-down capability declines retain
+  the prior small-count hybrid. Gate/up and the new down policy are bounded
+  to the released H4096/F2048/E288/top-8 geometry.
+- **Default on under the same knob:** widen the existing dense Q6_K tensor
+  tile from 32 to 64 query rows at **512/1024** command rows. Identical
+  Half operands and F32 sums; dynamic threadgroup memory **16 KiB** with
+  normal PSO capacity checks. A typed explicit Q6 entry preserves the shared
+  automatic wide lookup's Q8-only contract. Q8 uses its existing wide tile.
+  **No new shader, GPU buffer or admission bytes.** Exact/F32, other devices,
+  other/ragged widths and prior 2048-row routes retain their selectors.
+  Existing enclosing stage/tensor rollback guards still apply.
+  Rollback for the entire change: **`QWEN_GLM53_SHORT_PREFILL=0`**.
+- Independent pp512 whole-prefill kill screens at `9a7f743f`, two retained
+  reps per arm after warmup, 30 s cooldown per arm, all thermal boundaries 0.
+  Only the indicated short route is enabled; old large-batch defaults stay on.
+
+  | Arm | Both samples ms | Median ms | Throughput / incumbent |
+  | --- | --- | ---: | ---: |
+  | Incumbent | 1055.352832, 1057.023833 | 1056.188333 | 1.000000x |
+  | Dense tensor | 905.283583, 906.293166 | 905.788375 | 1.166043x |
+  | Tensor gate/up | 861.548583, 862.153167 | 861.850875 | 1.225488x |
+  | Tensor down | 975.525125, 974.088125 | 974.806625 | 1.083485x |
+  | KDA value4 | 1049.785042, 1048.066667 | 1048.922855 | 1.006927x |
+  | All four | 619.415667, 620.938458 | 620.177063 | 1.703043x |
+
+  KDA's isolated screen is small (0.7%); the combined whole-prefill result
+  is the value judgment, not a sum of individual speedups. A second screen,
+  `dd995a68`, holds those routes on and changes only the wide Q6 choice:
+  pp512 **622.958708 -> 577.242896 ms (1.079197x)**, pp1024
+  **1043.460687 -> 946.135021 ms (1.102867x)**. Two reps per arm, all
+  eight thermal boundaries 0; no samples dropped. Temporary stage knobs
+  are removed in the final one-knob policy.
+- Teacher forcing on frozen `ac3983dd`: frozen Bash manual and real
+  `qwen4exp_runtime.rs`, **4096 targets per document per cell**, four
+  cells (512/1024 rows at 0/32768 depth), **32768 scored targets** total.
+  Native all-row output tails, complete-vocabulary F64 log-sum-exp/NLL and
+  KL(off||on), identical checked input/target IDs including the prefix,
+  all rows finite, no generated-token feedback. The 32K prefix is filled
+  once per document at 2048 rows, then a committed snapshot is restored
+  untimed before each append-width trajectory. Each trajectory executes
+  eight 512-row or four 1024-row commands. Depth-0 workspaces are native
+  512/1024; retained long-context workspaces are 2048. Only the new common
+  flag differs (0 versus unset/default on); all old defaults remain on.
+
+  | Depth / rows / document | NLL off | NLL on | dNLL | Mean KL | Argmax agreement |
+  | --- | ---: | ---: | ---: | ---: | ---: |
+  | 0 / 512 / prose | 0.102295431 | 0.103945499 | +0.001650068 | 0.002550748 | 4077/4096 |
+  | 0 / 512 / code | 0.984159306 | 0.984117092 | -0.000042214 | 0.004953908 | 4014/4096 |
+  | 0 / 1024 / prose | 0.104057412 | 0.104057412 | 0 | 0 | 4096/4096 |
+  | 0 / 1024 / code | 0.983723751 | 0.983723751 | 0 | 0 | 4096/4096 |
+  | 32768 / 512 / prose | 0.113715660 | 0.113665784 | -0.000049875 | 0.002015612 | 4078/4096 |
+  | 32768 / 512 / code | 0.492232977 | 0.493272190 | +0.001039213 | 0.002967143 | 4044/4096 |
+  | 32768 / 1024 / prose | 0.113665784 | 0.113665784 | 0 | 0 | 4096/4096 |
+  | 32768 / 1024 / code | 0.493272190 | 0.493272190 | 0 | 0 | 4096/4096 |
+
+  **Pass** per document and pooled within every cell: |dNLL| <=0.005
+  nats/token, mean KL <=0.01. Pooled 512-row dNLL / mean KL are
+  **+0.000803927 / 0.003752328** at 0 and
+  **+0.000494669 / 0.002491377** at 32K. Both 1024-row cells are exactly
+  zero on these metrics. Worst observed row KL **0.555383573**. This is
+  bounded two-document, four-cell evidence, not a model-wide or
+  greedy-identity claim.
+- M5 validation-on operator checks pass: dense Q6/Q8 F64 oracles and
+  offset guards at 512 and existing widths, with Q6's incumbent N64
+  threshold pinned to production's 1024. Wide Q6 matches narrow bits;
+  Q8's four short-shape wide cases also match narrow bits. The guarded
+  expert composition runs 336 cases across seven native gate/down pairs,
+  129/512/1024/2048 rows, three clamp limits and four paths, including
+  the integrated F32-input composition. Tensor F32-input/F16-input outputs
+  match bits; sampled F64, weighted reduction, status and guards pass.
+  Actual H4096/F2048/E288 IQ3_S down at 512 also passes its F64/weighted
+  output witness. Existing KDA carry/decay bitwise regression remains.
+- Every scored on chunk proves **288 Q6-wide dispatches** and every off
+  chunk has zero Q6-wide calls. Each on 512-row chunk also proves 34 KDA
+  value4 calls, 41 IQ2_S tensor up passes, and 40 IQ3_S tensor gate/down
+  passes; the incumbent 512-row chunks have no value4 calls. Census is
+  separate from timing. Input IDs (u32 LE) match off/on and both widths:
+  depth-0 prose/code SHA256
+  `3596d0e7a2a87f97fc77b093c98a200a9ab1a5461911fece1aa1f35af04df6cf` /
+  `2632f72ce98fca4817d6b990e3a20b708834c8c90e23ded7fa41095ad01adb5c`;
+  32K-prefix prose/code
+  `3c428036fde15927142e1f62826b5298dfe2f9590807d43927402795a005f3aa` /
+  `aa1e76b774abb1bda81b019007a59f26852e7499f1e44ce5ed20816138c27060`.
+- Final ordinary end-to-end matrix, one normal release binary from frozen
+  `ac3983dd`, seed 1, only append wall timed after an untimed prefix fill;
+  a fresh session for each rep. Two retained reps per engine/cell, model
+  and row warmups enabled, 30 s cooldown before each arm. Each short arm
+  holds build lock + Metal lease, allowing other lanes between arms.
+  All **24 thermal boundaries are 0**, no samples dropped. Every qwen
+  build/runtime stamp is clean and matches. Native workspace rows are
+  512/1024 at depth 0 and 2048 at depth 32768; actual append rows remain
+  the requested 512/1024.
+  llama.cpp **v0.9.0 `cd959bae99`**, MTL/BLAS, `-b 2048 -ub 2048`,
+  F16 KV, 12 threads. Both engines use the established GLM metadata alias
+  described in the standing entry; actual tensor shards are unchanged.
+  All retained throughput samples follow; ratios use arithmetic means.
+
+  | Append / depth | Off tok/s (both) | On tok/s (both) | llama.cpp tok/s (both) | Off -> on / llama.cpp | On / off |
+  | --- | --- | --- | --- | ---: | ---: |
+  | 512 / 0 | 485.542, 484.099 | 896.278, 894.367 | 802.254, 806.149 | 0.603x -> 1.113x | 1.846709x |
+  | 1024 / 0 | 987.799, 988.600 | 1086.946, 1087.146 | 922.456, 924.936 | 1.070x -> 1.177x | 1.100027x |
+  | 512 / 32768 | 414.911, 415.385 | 687.825, 689.031 | 548.320, 529.840 | 0.770x -> 1.277x | 1.658270x |
+  | 1024 / 32768 | 760.512, 759.833 | 820.345, 820.937 | 626.842, 620.743 | 1.219x -> 1.316x | 1.079546x |
+
+  **pp512 +84.7% / +65.8%, pp1024 +10.0% / +8.0%** at 0/32K.
+  Binary SHA256
+  `44862fcc70c2fe43ffebeb177857ae3514efba6c510f34049fc61577cbabee45`.
+- The first full suite caught a stale >=1024 KDA-consumer eligibility
+  expectation and a 512-row down predicate reaching other geometries.
+  `5edb01fa` updates the intended row expectation and preserves the old
+  behavior outside H4096/F2048/E288/top-8. Released-geometry arithmetic is
+  unchanged from the timing/quality freeze. The follow-up runs in an
+  isolated checks worktree, leaving the frozen timing binary untouched.
+  Full `cargo test --release -p qwen-llm --lib`, Metal required:
+  **2418 passed, 0 failed, 737 ignored**, 99.37 s.
+  CPU-only `scripts/check-contracts.sh` passed on `5edb01fa`, tree
+  `df974629e7c9eaf23bd13de9ee9f099578126a0d`. Temporary harness sources
+  and **40,600,862,720 bytes** of scored logits are removed; input metadata,
+  censuses and scalar summaries remain in temporary evidence only. This
+  follow-up adds the log entry only. No extra report files, no main merge,
+  no deployment and no task work left running.
+
 ## 2026-11-06 - M5 Standing: 512-Token Prefill Appends at 32K and 128K
 
 - Measured local main `1cce4f40` on M5 Ultra, ordinary release build in a

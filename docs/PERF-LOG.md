@@ -6,6 +6,92 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the current state and evidence index.
 
+## 2026-11-06 - 27B Medium-Depth Decode: Partition Count and Register Queries
+
+- Base **`be4bac16`**, frozen production **`fc398655`**, M5 Ultra, registry
+  27B Q4_K_M, F16 KV. Steady second-token diagnostic spans at depth
+  0 / 32768 / 131072 are **21.372 / 26.902 / 33.063 ms**. Linear kernels
+  stay **17.879 / 17.962 / 18.224 ms**, GDN **0.378 / 0.364 / 0.385**;
+  attention main grows **0.378 / 5.521 / 9.424**, reduction
+  **0.225 / 0.685 / 2.658**. Attention reaches 23.1% / 36.5% at depth.
+  Attribution uses nonoverlapping increments of sorted GPU end timestamps;
+  ordinary throughput below is unprofiled. The first restored token has
+  **3.109 / 15.603 ms** of KV scatter at 32K / 128K; the next has
+  **0.085 / 0.083 ms**. This restore cost is transient.
+- **Default on:** Q24/KV4/D256 decode, 32768 <= KV positions < 98304,
+  measured M5 Ultra class, F16 cache and sufficient existing partial scratch:
+  **256 partitions, C32**, retaining the incumbent half-rounded query values
+  in registers. Existing 128 partitions underutilize this interval: increasing
+  partitions alone gives 1.393x at 32K; register queries bring it to 1.581x.
+  No additional operand narrowing or GPU buffers. Prefill/verification keep
+  their own dispatches. Other devices, geometries, deep contexts, Q8 KV,
+  small workspaces and explicit NWG/C tuning retain the incumbent.
+  Rollback: **`QWEN_DECODE_ATTN_DEPTH=0`**. Device restriction is recorded
+  in the identity-gate allowlist with a future qualification trigger.
+- Prespecified kill bars: >=1.20x attention operator, >=1.05x whole tg64 at
+  32K, no deep regression; finite outputs and max/RRMS error <=1.5x incumbent.
+  Operator ABBA, 16 samples/configuration, warmed PSOs and common GPU priming,
+  GPU command-buffer durations including reduction. F64 softmax/PV uses original
+  F32 Q and the actual stored F16 KV, three heads/all 256 channels (768 cells).
+  Every output is checked finite. Every screened sample remains in the archive.
+
+  | KV positions | Incumbent ms | Selected ms | Speedup | Max error ratio | RRMS ratio |
+  | ---: | ---: | ---: | ---: | ---: | ---: |
+  | 32769 | 0.370208 | 0.234229 | 1.58054x | 0.999656 | 0.999993 |
+  | 65537 | 0.696458 | 0.383042 | 1.81823x | 1.001156 | 1.000002 |
+  | 98303 | 1.012125 | 0.518062 | 1.95367x | 0.999660 | 0.999771 |
+
+- **Rejected at 128K:** best register-Q configuration is only **1.13305x**
+  (256 partitions/C64); retain 512/C32. At fixed partition/tile configuration
+  register reuse is bitwise identical. A3B already uses 256 partitions with
+  four-head tiles: the same reuse yields **1.01208x / 1.00689x** at
+  32769 / 131073, also rejected; its default is unchanged.
+- Distribution check, frozen `be4bac16` repeated code/prose prefixes at 32K,
+  2048 sequential next-token targets/document, independently evolving on/off
+  sequences, full-vocabulary F64 NLL/KL(off||on). Code/prose delta NLL
+  **-0.000003804 / -0.000009167**, mean KL **1.72782e-8 / 1.48949e-8**,
+  maximum KL **9.49865e-6 / 2.47002e-7**, argmax **4096/4096**.
+  Both cells pass unchanged |delta NLL| <=0.005 and mean KL <=0.01.
+  Default policy was witnessed at 2048 candidate dispatches versus zero off
+  for each first 128-token slice. Greedy at 32K is identical for 160 tokens;
+  text SHA256 in both arms
+  **`e8b1ad8983b8fd5f62b33b6da6136b5dc03a0b0be04ea8756514fbb11fec6734`**.
+- Whole tg64: seed 1/native token stream and production decode plus full
+  logits copy. Immutable saved prefixes restore outside the timer; one warm
+  run/arm, ABBA, two retained reps/arm, 30 s cooldown, thermal **0 before/after
+  every arm**. Build lock + canonical Metal lease per campaign, nice 10,
+  570 s deadline. 128K prefix preparation took 191.6 s once, replacing the
+  earlier repeated-fill timeout. The on/off 128K outputs are bitwise identical,
+  with zero candidate dispatches. Every retained tok/s sample follows; A lists
+  arms 0 then 3, B arms 1 then 2. Two-sample rows use native family harnesses.
+  One engine resident at a time; pinned llama.cpp **v0.9.0 `cd959bae99`**,
+  MTL/BLAS, batch/ubatch 2048, F16 K/V, two reps/cell, thermal 0.
+
+  | Family / depth | Off samples | On/default samples | llama.cpp samples | On/off | Default/CPP |
+  | --- | --- | --- | --- | ---: | ---: |
+  | 27B / 32768 | 38.473715, 38.427323, 38.471067, 38.456916 | 41.872709, 41.865491, 41.850967, 41.852609 | 42.190565, 42.422691 | 1.08827x | 0.98942x |
+  | 27B / 131072 | 30.781145, 30.788358, 30.813068, 30.808235 | 30.778828, 30.777334, 30.772188, 30.798666 | 30.039719, 30.072098 | 0.99934x | 1.02403x |
+  | GLM-5.3 / 32768 | — | 53.881758, 53.820037 | 41.019318, 40.167991 | — | 1.32658x |
+  | Flash-Next / 32768 | — | 62.347508, 62.283907 | 61.033825, 61.529678 | — | 1.01687x |
+
+  27B median off/on: **1663.893938 / 1528.940604 ms** at 32K,
+  **2078.037229 / 2079.401875 ms** at 128K; throughput medians
+  **38.463991 / 41.859050** and **30.798296 / 30.778081 tok/s**.
+  Ratios use median throughput; for two samples this equals the native mean.
+  GLM uses the established metadata-only `glm5-next` alias and unchanged
+  UD-IQ3_XXS shards; Flash-Next uses GSQ-RCO IQ3_S. These fill the earlier
+  missing healthy 32K decode comparisons, with no changes to either family.
+- Validation: full release library **2436 passed, 0 failed**; M5 focused
+  correctness **3 passed** under each of default and explicit rollback,
+  including NaN-primed partials, uniform/peaked Q, partition tails, F64 CPU
+  reference and bitwise fallback; contracts passed. ENV regeneration retains
+  the documented lease-FD entry. The archive includes all operator screens,
+  preliminary/final samples, profiles, corpus hashes, commands, source stamps,
+  failed harness attempt and validation logs: **`decode-depth-raw.tar`**,
+  SHA256 **`1389ab7188e0f61e5e3d7298c4d780ca549eb8e619f19e4d6201dad1f5e3a9d6`**.
+  Nothing queued/running. Next measured deficit remains A3B decode at depth;
+  query hoisting alone does not move its operator enough to promote.
+
 ## 2026-11-06 - M5 Agent-Workload Decode Standing (Partial, Thermal Stop)
 
 - Frozen main **`fe86a7c2`**, ordinary release build, no code changes.

@@ -738,11 +738,11 @@ fn readout(
     let values = read_f32(&out);
     assert!(values.iter().all(|v| v.is_finite()));
     let last = &values[(n - 1) * v..];
-    let peak = last
-        .iter()
-        .zip(endpoint)
-        .map(|(&a, &b)| (a - b).abs())
-        .fold(0f32, f32::max);
+    let peak = crate::compare::assert_max_abs_diff_f32(
+        "short-append native endpoint readout",
+        last,
+        endpoint,
+    );
     emit(json!({"record":"native_readout_witness","rows":n,"endpoint_max_abs":peak}));
     assert!(peak <= 1e-5, "native readout mismatch");
     out

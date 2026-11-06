@@ -1,6 +1,7 @@
 //! Attention layer execution and KV-cache handling.
 
 use super::*;
+use crate::metal::encode_attn_decode_depth_f32;
 
 pub(super) fn prefill_attn_fused_qkv_g8_enabled() -> bool {
     matches!(

@@ -225,21 +225,62 @@ fn split_submission() -> bool {
 const SPLIT_SUBMIT_MIDDLE_LAYERS: usize = 3;
 
 crate::env_flag!(
-    /// Experimental scalar decode ordering: encode the router after mHC pre,
-    /// before the shared expert, then consume its logits in the routed chain.
-    /// Same kernels, buffers and dependencies; only their encoding order changes.
-    /// Ignored when the single-encoder FFN rollback is selected.
-    default_off router_first_enabled,
+    /// On measured M5 Ultra V4.1 decode layouts, encode the router after mHC
+    /// pre, before the shared expert. Top-k and experts follow in their existing
+    /// encoder. Same kernels, buffers, dependencies and arithmetic. Set to 0
+    /// to restore shared-first ordering. The single-encoder FFN rollback and
+    /// batched decode retain their existing ordering.
+    default_on router_first_enabled,
     "QWEN_V41_ROUTER_FIRST"
 );
 
-crate::env_flag!(
-    /// Experimental scalar decode ordering: prepare both router logits and
-    /// top-k routes after mHC pre, before the shared expert. Supersedes
-    /// QWEN_V41_ROUTER_FIRST when both switches are on. Same kernels/buffers.
-    default_off route_first_enabled,
-    "QWEN_V41_ROUTE_FIRST"
-);
+#[cfg(test)]
+thread_local! {
+    static ROUTER_FIRST_OVERRIDE: std::cell::Cell<Option<bool>> = const { std::cell::Cell::new(None) };
+}
+
+fn router_first_geometry(
+    m5_ultra: bool,
+    dims: [usize; 4],
+    router: GgmlType,
+    shared: [GgmlType; 3],
+    routed: [GgmlType; 3],
+) -> bool {
+    m5_ultra
+        && dims == [5120, 2304, 384, 6]
+        && router == GgmlType::BF16
+        && shared == [GgmlType::Q5_K; 3]
+        && routed[0] == routed[1]
+        && matches!(
+            routed[0],
+            GgmlType::IQ2_XXS | GgmlType::IQ2_XS | GgmlType::IQ2_S
+        )
+        && matches!(
+            routed[2],
+            GgmlType::IQ2_XXS | GgmlType::IQ2_XS | GgmlType::IQ2_S | GgmlType::IQ3_XXS
+        )
+}
+
+fn router_first_selected(model: &Forward<'_>, id: usize) -> bool {
+    #[cfg(test)]
+    if let Some(enabled) = ROUTER_FIRST_OVERRIDE.with(|o| o.get()) {
+        return enabled;
+    }
+    let c = &model.config;
+    let l = &model.layers[id];
+    router_first_enabled()
+        && router_first_geometry(
+            model.ctx.device_facts().name == "Apple M5 Ultra",
+            [c.hidden, c.intermediate, c.experts, c.topk],
+            l.router.tensor.dtype,
+            [
+                l.shared[0].tensor.dtype,
+                l.shared[1].tensor.dtype,
+                l.shared[2].tensor.dtype,
+            ],
+            [l.banks[0].dtype, l.banks[1].dtype, l.banks[2].dtype],
+        )
+}
 
 /// Timestamp samples per layer of a sampled prefill chunk: six attention/FFN
 /// stage pairs, then the FFN's seven further sub-stage pairs.
@@ -1037,19 +1078,10 @@ impl Workspace {
                 .map_err(|e| e.to_string());
         }
         self.ffn_hc_pre(model, stages, id)?;
-        let preparation = if route_first_enabled() {
-            2
-        } else {
-            usize::from(router_first_enabled())
-        };
-        if preparation > 0 {
+        let router_ready = router_first_selected(model, id);
+        if router_ready {
             self.ffn
                 .encode_router(model.ctx, stages.enc(), &model.layers[id], id)
-                .map_err(|e| e.to_string())?;
-        }
-        if preparation == 2 {
-            self.ffn
-                .encode_route_selection(model.ctx, stages.enc(), &model.config, id)
                 .map_err(|e| e.to_string())?;
         }
         stages.split();
@@ -1062,7 +1094,7 @@ impl Workspace {
                 id,
             )
             .map_err(|e| e.to_string())?;
-        self.layer_after_shared_with_router(model, stages, id, preparation)
+        self.layer_after_shared_with_router(model, stages, id, router_ready)
     }
 
     /// The FFN's HC pre, which writes the shared expert's input
@@ -1096,7 +1128,7 @@ impl Workspace {
         stages: &mut StageEncoder<'_>,
         id: usize,
     ) -> Result<()> {
-        self.layer_after_shared_with_router(model, stages, id, 0)
+        self.layer_after_shared_with_router(model, stages, id, false)
     }
 
     fn layer_after_shared_with_router(
@@ -1104,7 +1136,7 @@ impl Workspace {
         model: &Forward<'_>,
         stages: &mut StageEncoder<'_>,
         id: usize,
-        preparation: usize,
+        router_ready: bool,
     ) -> Result<()> {
         let (ctx, c, l) = (model.ctx, &model.config, &model.layers[id]);
         let split = ffn_split_encoders();
@@ -1112,11 +1144,7 @@ impl Workspace {
         if split {
             stages.split();
         }
-        if preparation == 2 {
-            self.ffn
-                .encode_routed_after_route(ctx, stages.enc(), c, l, id, &self.half)
-                .map_err(err)?;
-        } else if preparation == 1 {
+        if router_ready {
             self.ffn
                 .encode_routed_after_router(ctx, stages.enc(), c, l, id, &self.half)
                 .map_err(err)?;

@@ -311,19 +311,98 @@ fn split_submission_matches_one_command_bitwise() {
 }
 
 #[test]
+fn router_first_rollout_requires_measured_device_layout_and_types() {
+    let dims = [5120, 2304, 384, 6];
+    let shared = [GgmlType::Q5_K; 3];
+    let selected =
+        |m5, d, router, shared, routed| router_first_geometry(m5, d, router, shared, routed);
+    for gate in [GgmlType::IQ2_XXS, GgmlType::IQ2_XS, GgmlType::IQ2_S] {
+        for down in [
+            GgmlType::IQ2_XXS,
+            GgmlType::IQ2_XS,
+            GgmlType::IQ2_S,
+            GgmlType::IQ3_XXS,
+        ] {
+            assert!(selected(
+                true,
+                dims,
+                GgmlType::BF16,
+                shared,
+                [gate, gate, down]
+            ));
+        }
+    }
+    let routed = [GgmlType::IQ2_XXS; 3];
+    assert!(!selected(false, dims, GgmlType::BF16, shared, routed));
+    for d in [
+        [4096, 2304, 384, 6],
+        [5120, 2048, 384, 6],
+        [5120, 2304, 272, 6],
+        [5120, 2304, 384, 8],
+    ] {
+        assert!(!selected(true, d, GgmlType::BF16, shared, routed));
+    }
+    assert!(!selected(true, dims, GgmlType::F32, shared, routed));
+    assert!(!selected(
+        true,
+        dims,
+        GgmlType::BF16,
+        [GgmlType::F16; 3],
+        routed
+    ));
+    assert!(!selected(
+        true,
+        dims,
+        GgmlType::BF16,
+        shared,
+        [GgmlType::IQ3_XXS; 3]
+    ));
+    assert!(!selected(
+        true,
+        dims,
+        GgmlType::BF16,
+        shared,
+        [GgmlType::IQ2_XXS, GgmlType::IQ2_XS, GgmlType::IQ2_XXS]
+    ));
+}
+
+#[test]
 fn split_ffn_encoders_match_one_encoder_bitwise() {
+    struct Reset;
+    impl Drop for Reset {
+        fn drop(&mut self) {
+            FFN_SPLIT_OVERRIDE.with(|o| o.set(None));
+            SPLIT_SUBMIT_OVERRIDE.with(|o| o.set(None));
+            ROUTER_FIRST_OVERRIDE.with(|o| o.set(None));
+        }
+    }
+    let _reset = Reset;
     let ctx = MetalContext::new().unwrap();
     let weights = toy::Weights::new(&ctx);
     let model = weights.model(&ctx);
-    let mut one = model.new_state_with_gpu_step(4).unwrap();
-    let mut split = model.new_state_with_gpu_step(4).unwrap();
-    for token in [0, 3, 1, 2] {
-        FFN_SPLIT_OVERRIDE.with(|o| o.set(Some(false)));
-        let expected = model.step(&mut one, token, None).unwrap();
-        FFN_SPLIT_OVERRIDE.with(|o| o.set(Some(true)));
-        let logits = model.step(&mut split, token, None);
-        FFN_SPLIT_OVERRIDE.with(|o| o.set(None));
-        assert_eq!(logits.unwrap(), expected);
+    for split_submit in [false, true] {
+        SPLIT_SUBMIT_OVERRIDE.with(|o| o.set(Some(split_submit)));
+        let mut one = model.new_state_with_gpu_step(4).unwrap();
+        let mut split = model.new_state_with_gpu_step(4).unwrap();
+        let mut prioritized = model.new_state_with_gpu_step(4).unwrap();
+        for token in [0, 3, 1, 2] {
+            FFN_SPLIT_OVERRIDE.with(|o| o.set(Some(false)));
+            ROUTER_FIRST_OVERRIDE.with(|o| o.set(Some(false)));
+            let expected = model.step(&mut one, token, None).unwrap();
+            FFN_SPLIT_OVERRIDE.with(|o| o.set(Some(true)));
+            let logits = model.step(&mut split, token, None).unwrap();
+            ROUTER_FIRST_OVERRIDE.with(|o| o.set(Some(true)));
+            let early = model.step(&mut prioritized, token, None).unwrap();
+            assert_eq!(logits, expected);
+            assert_eq!(
+                early, expected,
+                "submit split={split_submit}, token={token}"
+            );
+            assert_eq!(
+                prioritized.gpu_step.as_ref().unwrap().commands,
+                if split_submit { 3 } else { 1 }
+            );
+        }
     }
 }
 

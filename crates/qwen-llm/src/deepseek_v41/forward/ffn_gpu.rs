@@ -795,20 +795,12 @@ impl Workspace {
         id: usize,
         x: &MetalTensor,
     ) -> std::result::Result<(), metal::MetalError> {
-        self.encode_route_selection(ctx, enc, c, id)?;
-        self.encode_routed_after_route(ctx, enc, c, layer, id, x)
-    }
-
-    pub(super) fn encode_route_selection(
-        &self,
-        ctx: &MetalContext,
-        enc: &KernelEncoder,
-        c: &Config,
-        id: usize,
-    ) -> std::result::Result<(), metal::MetalError> {
-        composition_extents(c, 1)?;
+        let folded = self.folded_combine(c, layer, id, x);
+        let extents = composition_extents(c, 1)?;
         let b = &self.buffers;
-        metal::dispatch_profile_label("ffn_routed", Some(id));
+        let status = &self.statuses[id];
+        let label = |name| metal::dispatch_profile_label(name, Some(id));
+        label("ffn_routed");
         encode_route_rows(
             ctx,
             enc,
@@ -819,25 +811,8 @@ impl Workspace {
             &b[9],
             &b[10],
             &b[11],
-            &self.statuses[id],
-        )
-    }
-
-    pub(super) fn encode_routed_after_route(
-        &self,
-        ctx: &MetalContext,
-        enc: &KernelEncoder,
-        c: &Config,
-        layer: &Layer<'_>,
-        id: usize,
-        x: &MetalTensor,
-    ) -> std::result::Result<(), metal::MetalError> {
-        let folded = self.folded_combine(c, layer, id, x);
-        let extents = composition_extents(c, 1)?;
-        let b = &self.buffers;
-        let status = &self.statuses[id];
-        let label = |name| metal::dispatch_profile_label(name, Some(id));
-        label("ffn_routed");
+            status,
+        )?;
         metal::encode_all_slots_gate_up_swiglu_native_fused(
             ctx,
             enc,

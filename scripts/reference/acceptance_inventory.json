@@ -484,6 +484,20 @@
   },
   {
     "target": "lib",
+    "name": "deepseek_v41::forward::attention_gpu::ced::tests::pending_checked_ranges_match_rows_and_refuse_after_end_atomically",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Exact Pending/BatchCursor host-only partial/exact range-vs-row encoding, encoder publication gating and atomic refusal after end; no Metal context or execution."
+  },
+  {
+    "target": "lib",
+    "name": "deepseek_v41::forward::attention_gpu::ced::tests::pending_ranges_encode_without_finishing_coverage_completion_or_group_readiness",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Host-only checked range/cursor, command eligibility, scoped override, pending CED lifecycle or conservative fixture price; no Metal context or execution."
+  },
+  {
+    "target": "lib",
     "name": "deepseek_v41::forward::attention_gpu::ced::tests::retained_controls_prune_at_16385_and_reindex_uses_owner_query_masks",
     "class": "gpu",
     "ignored": true,
@@ -509,6 +523,20 @@
     "class": "gpu",
     "ignored": true,
     "reason": "Metal allocation/dispatch or self-leased device witness; excluded from CPU acceptance."
+  },
+  {
+    "target": "lib",
+    "name": "deepseek_v41::forward::attention_gpu::ced::tests::speculative_encoder_keeps_one_inflight_intent_and_completes_in_fifo_order",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Host-only CED Cursor fixture exercises one speculative encoder intent, FIFO completion and decoder/publication frontiers; no Metal context, lease, allocation or dispatch."
+  },
+  {
+    "target": "lib",
+    "name": "deepseek_v41::forward::attention_gpu::ced::tests::speculative_encoder_retires_three_contiguous_chunks_in_order",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Host-only CED Cursor fixture exercises three contiguous speculative encoder intents and ordered retirement; no Metal context, lease, allocation or dispatch."
   },
   {
     "target": "lib",
@@ -551,6 +579,13 @@
     "class": "cpu",
     "ignored": false,
     "reason": "Reviewed host-only CED, request-planning, execution contract or synthetic storage control; no Metal context or dispatch."
+  },
+  {
+    "target": "lib",
+    "name": "deepseek_v41::forward::attention_gpu::query_batch::lineage_tests::encoder8k_scope_keeps_original_tiles_and_compacted_singleton_lineage",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Fixed-8192 test-scoped host-only feasibility: synthetic pricing, geometry, lineage, bounds or scope restoration; no Metal context/resources, model import or execution."
   },
   {
     "target": "lib",
@@ -603,6 +638,41 @@
   },
   {
     "target": "lib",
+    "name": "deepseek_v41::forward::attention_gpu::query_batch::range_tests::cursor_range_matches_repeated_rows_partial_exact_and_final",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Host-only checked range/cursor, command eligibility, scoped override, pending CED lifecycle or conservative fixture price; no Metal context or execution."
+  },
+  {
+    "target": "lib",
+    "name": "deepseek_v41::forward::attention_gpu::query_batch::range_tests::cursor_range_refusals_are_atomic",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Host-only checked range/cursor, command eligibility, scoped override, pending CED lifecycle or conservative fixture price; no Metal context or execution."
+  },
+  {
+    "target": "lib",
+    "name": "deepseek_v41::forward::attention_gpu::query_batch::range_tests::old_host_override_is_nested_panic_safe_and_thread_local",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Host-only checked range/cursor, command eligibility, scoped override, pending CED lifecycle or conservative fixture price; no Metal context or execution."
+  },
+  {
+    "target": "lib",
+    "name": "deepseek_v41::forward::attention_gpu::query_batch::range_tests::prepared_range_eligibility_preserves_publication_and_selection_fallbacks",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Host-only checked range/cursor, command eligibility, scoped override, pending CED lifecycle or conservative fixture price; no Metal context or execution."
+  },
+  {
+    "target": "lib",
+    "name": "deepseek_v41::forward::attention_gpu::query_batch::range_tests::ratio_head_body_tail_cursor_parity",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Host-only checked range/cursor, command eligibility, scoped override, pending CED lifecycle or conservative fixture price; no Metal context or execution."
+  },
+  {
+    "target": "lib",
     "name": "deepseek_v41::forward::attention_gpu::query_batch::scratch_prefix_geometry_tests::long_selection_tile_requires_a_complete_score_and_publication_row",
     "class": "cpu",
     "ignored": false,
@@ -614,13 +684,6 @@
     "class": "cpu",
     "ignored": false,
     "reason": "Pure CPU capacity/ratio matrix from 32K through 512K; insufficient short tails retain per-row selection and fitting long chunks retain bounded tile sizes."
-  },
-  {
-    "target": "lib",
-    "name": "deepseek_v41::forward::attention_gpu::tests::query_batch::selection_tail::long_selection_short_tails_match_prepared_per_row_and_continue",
-    "class": "gpu",
-    "ignored": true,
-    "reason": "Self-leased DEBUG=1 Metal witness with production 32x128 index geometry, short score slabs, publisher/masked follower, per-row reference, exact controls/output/causal state and decode continuation; <=2 GiB admission price, no timing/model claim."
   },
   {
     "target": "lib",
@@ -897,6 +960,13 @@
   },
   {
     "target": "lib",
+    "name": "deepseek_v41::forward::attention_gpu::tests::compress_rows_batches_pool_key_rope_and_stores",
+    "class": "gpu",
+    "ignored": false,
+    "reason": "Metal context, allocation or dispatch witness; parent GPU lane only."
+  },
+  {
+    "target": "lib",
     "name": "deepseek_v41::forward::attention_gpu::tests::exact_dispatch_copy_pack_canaries",
     "class": "gpu",
     "ignored": false,
@@ -925,87 +995,10 @@
   },
   {
     "target": "lib",
-    "name": "deepseek_v41::forward::attention_gpu::tests::compress_rows_batches_pool_key_rope_and_stores",
-    "class": "gpu",
-    "ignored": false,
-    "reason": "Metal context, allocation or dispatch witness; parent GPU lane only."
-  },
-  {
-    "target": "lib",
-    "name": "deepseek_v41::forward::attention_gpu::tests::index_scores_tensor_matches_index_heads_rows",
-    "class": "gpu",
-    "ignored": false,
-    "reason": "Metal context, allocation or dispatch witness; parent GPU lane only."
-  },
-  {
-    "target": "lib",
-    "name": "deepseek_v41::forward::attention_gpu::tests::f32_pv_batch::tensor64_sink_tile_matches_tensor32_sink",
-    "class": "gpu",
-    "ignored": false,
-    "reason": "Metal context, allocation or dispatch witness; parent GPU lane only."
-  },
-  {
-    "target": "lib",
-    "name": "deepseek_v41::forward::attention_gpu::tests::radix_select::ilp_index_scores_match_index_heads_rows",
-    "class": "gpu",
-    "ignored": false,
-    "reason": "Metal context, allocation or dispatch witness; parent GPU lane only."
-  },
-  {
-    "target": "lib",
-    "name": "deepseek_v41::forward::attention_gpu::tests::radix_select::mma_index_scores_match_index_heads_rows",
-    "class": "gpu",
-    "ignored": false,
-    "reason": "Metal context, allocation or dispatch witness; parent GPU lane only."
-  },
-  {
-    "target": "lib",
-    "name": "deepseek_v41::forward::attention_gpu::tests::radix_select::radix_candidate_publication_matches_block_sort",
-    "class": "gpu",
-    "ignored": false,
-    "reason": "Metal context, allocation or dispatch witness; parent GPU lane only."
-  },
-  {
-    "target": "lib",
-    "name": "deepseek_v41::forward::attention_gpu::tests::radix_select::radix_selection_matches_sort_order_exactly",
-    "class": "gpu",
-    "ignored": false,
-    "reason": "Metal context, allocation or dispatch witness; parent GPU lane only."
-  },
-  {
-    "target": "lib",
-    "name": "deepseek_v41::forward::attention_gpu::tests::radix_select::radix_wide_rows_match_single_threadgroup_rows",
-    "class": "gpu",
-    "ignored": false,
-    "reason": "Metal context, allocation or dispatch witness; parent GPU lane only."
-  },
-  {
-    "target": "lib",
-    "name": "deepseek_v41::forward::attention_gpu::tests::radix_select::radix_wide_selection_matches_reference",
-    "class": "gpu",
-    "ignored": false,
-    "reason": "Metal context, allocation or dispatch witness; parent GPU lane only."
-  },
-  {
-    "target": "lib",
-    "name": "deepseek_v41::forward::attention_gpu::tests::radix_select::select_kernels_timing",
-    "class": "gpu",
-    "ignored": false,
-    "reason": "Metal context, allocation or dispatch witness; parent GPU lane only."
-  },
-  {
-    "target": "lib",
     "name": "deepseek_v41::forward::attention_gpu::tests::f32_pv_batch::attention_half_kv_tile_probe",
     "class": "timing",
     "ignored": true,
     "reason": "Opt-in resident GPU F32/half-KV tensor64 correctness and timing probe; requires validation controls unset and never runs in CPU acceptance."
-  },
-  {
-    "target": "lib",
-    "name": "deepseek_v41::forward::attention_gpu::tests::f32_pv_batch::q_register_cache::attention_q_register_cache_probe",
-    "class": "timing",
-    "ignored": true,
-    "reason": "Opt-in production-shaped Q-register-cache score and sink A/B with exact score/output comparisons; excluded from CPU acceptance."
   },
   {
     "target": "lib",
@@ -1065,6 +1058,13 @@
   },
   {
     "target": "lib",
+    "name": "deepseek_v41::forward::attention_gpu::tests::f32_pv_batch::q_register_cache::attention_q_register_cache_probe",
+    "class": "timing",
+    "ignored": true,
+    "reason": "Opt-in production-shaped Q-register-cache score and sink A/B with exact score/output comparisons; excluded from CPU acceptance."
+  },
+  {
+    "target": "lib",
     "name": "deepseek_v41::forward::attention_gpu::tests::f32_pv_batch::simdgroup_qk::attention_simdgroup_qk_probe",
     "class": "timing",
     "ignored": true,
@@ -1073,6 +1073,13 @@
   {
     "target": "lib",
     "name": "deepseek_v41::forward::attention_gpu::tests::f32_pv_batch::tensor32_sink_tile_matches_tensor_sink",
+    "class": "gpu",
+    "ignored": false,
+    "reason": "Metal context, allocation or dispatch witness; parent GPU lane only."
+  },
+  {
+    "target": "lib",
+    "name": "deepseek_v41::forward::attention_gpu::tests::f32_pv_batch::tensor64_sink_tile_matches_tensor32_sink",
     "class": "gpu",
     "ignored": false,
     "reason": "Metal context, allocation or dispatch witness; parent GPU lane only."
@@ -1108,6 +1115,13 @@
   {
     "target": "lib",
     "name": "deepseek_v41::forward::attention_gpu::tests::forty_layer_seven_token_chain_one_command",
+    "class": "gpu",
+    "ignored": false,
+    "reason": "Metal context, allocation or dispatch witness; parent GPU lane only."
+  },
+  {
+    "target": "lib",
+    "name": "deepseek_v41::forward::attention_gpu::tests::index_scores_tensor_matches_index_heads_rows",
     "class": "gpu",
     "ignored": false,
     "reason": "Metal context, allocation or dispatch witness; parent GPU lane only."
@@ -1310,6 +1324,41 @@
   },
   {
     "target": "lib",
+    "name": "deepseek_v41::forward::attention_gpu::tests::query_batch::range_execution::host_discovery_geometry_and_conservative_peak_fit_four_gib",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Host-only checked range/cursor, command eligibility, scoped override, pending CED lifecycle or conservative fixture price; no Metal context or execution."
+  },
+  {
+    "target": "lib",
+    "name": "deepseek_v41::forward::attention_gpu::tests::query_batch::range_execution::prepared_serial_host_encoding_discovery",
+    "class": "timing",
+    "ignored": true,
+    "reason": "Self-leased opt3 test-profile or canonical release HOST discovery, dynamically reported debug assertions/profile; release diagnostic features empty and injection/validation/profilers absent; <=4 GiB CPU+Metal; no submission/commit/GPU execution or model; unchanged synthetic payload and chronological samples, no release performance claim; prior M4 data stays source/profile-specific."
+  },
+  {
+    "target": "lib",
+    "name": "deepseek_v41::forward::attention_gpu::tests::query_batch::range_execution::prepared_serial_range_old_host_bitexact_outputs_controls_pending_and_census",
+    "class": "gpu",
+    "ignored": true,
+    "reason": "Self-leased shape-priced <=512 MiB CPU+Metal BF16 H64/head512/index128 old-host vs range parity, not measured fit; existing all-selected/scored/pruned/odd cases plus one N128 tensor64 correctness case with actual route census when capable; bitwise outputs, controls, pending mixed-owner state, bindings and cursors; debug validation, no model or speed assertion."
+  },
+  {
+    "target": "lib",
+    "name": "deepseek_v41::forward::attention_gpu::tests::query_batch::range_execution::range_parity_schedule_keeps_ratio_two_and_ratio_one_candidate_ownership",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Validate the actual Metal parity fixture schedule: ratio-two publication plus a distinct ratio-one candidate owner and follower reindexing; no Metal context or execution."
+  },
+  {
+    "target": "lib",
+    "name": "deepseek_v41::forward::attention_gpu::tests::query_batch::range_execution::tensor64_parity_geometry_and_shape_budget",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "CPU-only H64/N128 parity geometry and conservative shapes for paired workspaces/rows/scratch, BF16 synthetic weights/native controls, seed overlap and CPU/staging reserves under a declared 512 MiB bound; not measured memory fit or GPU execution."
+  },
+  {
+    "target": "lib",
     "name": "deepseek_v41::forward::attention_gpu::tests::query_batch::selection_hier::hier_top512_bounded_gpu_exact_legacy_cpu_canaries_and_reuse",
     "class": "gpu",
     "ignored": true,
@@ -1380,14 +1429,63 @@
   },
   {
     "target": "lib",
-    "name": "deepseek_v41::forward::attention_gpu::tests::scheduled_bf16_q8_attention_and_capture_match_f32",
+    "name": "deepseek_v41::forward::attention_gpu::tests::query_batch::selection_tail::long_selection_short_tails_match_prepared_per_row_and_continue",
+    "class": "gpu",
+    "ignored": true,
+    "reason": "Self-leased DEBUG=1 Metal witness with production 32x128 index geometry, short score slabs, publisher/masked follower, per-row reference, exact controls/output/causal state and decode continuation; <=2 GiB admission price, no timing/model claim."
+  },
+  {
+    "target": "lib",
+    "name": "deepseek_v41::forward::attention_gpu::tests::radix_select::ilp_index_scores_match_index_heads_rows",
     "class": "gpu",
     "ignored": false,
     "reason": "Metal context, allocation or dispatch witness; parent GPU lane only."
   },
   {
     "target": "lib",
-    "name": "deepseek_v41::forward::attention_gpu::tests::split_sink_real_geometry_same_run_witness",
+    "name": "deepseek_v41::forward::attention_gpu::tests::radix_select::mma_index_scores_match_index_heads_rows",
+    "class": "gpu",
+    "ignored": false,
+    "reason": "Metal context, allocation or dispatch witness; parent GPU lane only."
+  },
+  {
+    "target": "lib",
+    "name": "deepseek_v41::forward::attention_gpu::tests::radix_select::radix_candidate_publication_matches_block_sort",
+    "class": "gpu",
+    "ignored": false,
+    "reason": "Metal context, allocation or dispatch witness; parent GPU lane only."
+  },
+  {
+    "target": "lib",
+    "name": "deepseek_v41::forward::attention_gpu::tests::radix_select::radix_selection_matches_sort_order_exactly",
+    "class": "gpu",
+    "ignored": false,
+    "reason": "Metal context, allocation or dispatch witness; parent GPU lane only."
+  },
+  {
+    "target": "lib",
+    "name": "deepseek_v41::forward::attention_gpu::tests::radix_select::radix_wide_rows_match_single_threadgroup_rows",
+    "class": "gpu",
+    "ignored": false,
+    "reason": "Metal context, allocation or dispatch witness; parent GPU lane only."
+  },
+  {
+    "target": "lib",
+    "name": "deepseek_v41::forward::attention_gpu::tests::radix_select::radix_wide_selection_matches_reference",
+    "class": "gpu",
+    "ignored": false,
+    "reason": "Metal context, allocation or dispatch witness; parent GPU lane only."
+  },
+  {
+    "target": "lib",
+    "name": "deepseek_v41::forward::attention_gpu::tests::radix_select::select_kernels_timing",
+    "class": "gpu",
+    "ignored": false,
+    "reason": "Metal context, allocation or dispatch witness; parent GPU lane only."
+  },
+  {
+    "target": "lib",
+    "name": "deepseek_v41::forward::attention_gpu::tests::scheduled_bf16_q8_attention_and_capture_match_f32",
     "class": "gpu",
     "ignored": false,
     "reason": "Metal context, allocation or dispatch witness; parent GPU lane only."
@@ -1401,10 +1499,59 @@
   },
   {
     "target": "lib",
+    "name": "deepseek_v41::forward::attention_gpu::tests::split_sink_real_geometry_same_run_witness",
+    "class": "gpu",
+    "ignored": false,
+    "reason": "Metal context, allocation or dispatch witness; parent GPU lane only."
+  },
+  {
+    "target": "lib",
     "name": "deepseek_v41::forward::attention_gpu::tests::stable_gpu_selection_long_prefix_and_candidate_boundary",
     "class": "gpu",
     "ignored": false,
     "reason": "Metal context, allocation or dispatch witness; parent GPU lane only."
+  },
+  {
+    "target": "lib",
+    "name": "deepseek_v41::forward::bind::tests::bounded_gpu_cache_backings_and_group_views_match_independent_quote",
+    "class": "gpu",
+    "ignored": true,
+    "reason": "Self-leased M5-only source/cache/control allocation and alias lifetime witness; normal upfront and fresh binding admission, <=1 GiB combined toy quote including 128 MiB CPU reserve; never CPU acceptance."
+  },
+  {
+    "target": "lib",
+    "name": "deepseek_v41::forward::binding::memory::tests::binding_aggregate_refuses_before_factory_at_each_one_byte_boundary",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Reviewed resident-cache active inventory, physical pricing, frozen selection or synthetic admission/factory boundary; tiny GGUF fixture or pure host values only, no Metal context or model payload."
+  },
+  {
+    "target": "lib",
+    "name": "deepseek_v41::forward::binding::memory::tests::cache_plan_rejects_overflow_device_limit_unsupported_and_duplicate_inventory",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Reviewed resident-cache active inventory, physical pricing, frozen selection or synthetic admission/factory boundary; tiny GGUF fixture or pure host values only, no Metal context or model payload."
+  },
+  {
+    "target": "lib",
+    "name": "deepseek_v41::forward::binding::memory::tests::cache_selection_is_frozen_and_each_buffer_is_priced_separately",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Reviewed resident-cache active inventory, physical pricing, frozen selection or synthetic admission/factory boundary; tiny GGUF fixture or pure host values only, no Metal context or model payload."
+  },
+  {
+    "target": "lib",
+    "name": "deepseek_v41::forward::binding::memory::tests::direct_binding_admits_only_construction_and_runtime_counts_live_cache_once",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Reviewed resident-cache active inventory, physical pricing, frozen selection or synthetic admission/factory boundary; tiny GGUF fixture or pure host values only, no Metal context or model payload."
+  },
+  {
+    "target": "lib",
+    "name": "deepseek_v41::forward::binding::memory::tests::grouped_output_has_one_cache_backing_for_eight_views",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Reviewed resident-cache active inventory, physical pricing, frozen selection or synthetic admission/factory boundary; tiny GGUF fixture or pure host values only, no Metal context or model payload."
   },
   {
     "target": "lib",
@@ -1517,6 +1664,34 @@
     "class": "cpu",
     "ignored": false,
     "reason": "Reviewed host-only CED, request-planning, execution contract or synthetic storage control; no Metal context or dispatch."
+  },
+  {
+    "target": "lib",
+    "name": "deepseek_v41::forward::ced::qualification::current_pair::range_pilot::frozen_prefix_uses_two_true_next_ids_only",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Host-only private row choice defaults N2048 and accepts explicit N8192 only, with 60s/90s budget; frozen prefix and two real next-ID selection across prompt/continuation boundary; validates needed IDs without retokenization, unused-ID rejection or feedback."
+  },
+  {
+    "target": "lib",
+    "name": "deepseek_v41::forward::ced::qualification::current_pair::range_pilot::lease_descriptor_syntax_only",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Pure CPU nonnegative i32 descriptor syntax only: rejects empty, negative, nonnumeric, overflow and whitespace, accepts 0/3/i32::MAX without opening descriptors or mutating environment; actual openness, canonical inode, ownership and flock validation remain the authority of metal::acquire_metal_benchmark_lease before MetalContext/import."
+  },
+  {
+    "target": "lib",
+    "name": "deepseek_v41::forward::ced::qualification::current_pair::range_pilot::preferred_encoder_geometry_uses_actual_chunk_ceiling",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "CPU-only production resident-byte-derived preferred encoder width and actual ceil chunk counts for N2048/N8192 and a nonmultiple; selected width may exceed prompt length, without pinning production geometry or bypassing admission."
+  },
+  {
+    "target": "lib",
+    "name": "deepseek_v41::forward::ced::qualification::current_pair::range_pilot::range_host_full_model_native_abba",
+    "class": "model",
+    "ignored": true,
+    "reason": "Private release-native actual NAX one-import exact CED old-host/range discriminator; N2048 default (parent first launch only) or explicitly selected N8192, never automatic escalation; warm Full/A/B then primary ABBA, two true TF steps per arm, strict all-vocabulary FLOATBITS vs Full and causal hashes/readiness/status/origin vs old CED; fail-fast canonical lease (self-acquired or validated inherited/adopted) and parent <=60s/90s process cap, durable private evidence; never performance qualification."
   },
   {
     "target": "lib",
@@ -1772,6 +1947,34 @@
   },
   {
     "target": "lib",
+    "name": "deepseek_v41::forward::ced::tests::submit_ahead_completion_fault_drains_the_newer_encoder",
+    "class": "gpu",
+    "ignored": true,
+    "reason": "Explicitly ignored Metal toy-model completion-fault witness: acquires the GPU lease and context, submits encoder work, checks draining/poisoning and a healthy followup; excluded from CPU acceptance."
+  },
+  {
+    "target": "lib",
+    "name": "deepseek_v41::forward::ced::tests::submit_ahead_completion_hook_error_panic_and_cancel_drain_the_newer_encoder",
+    "class": "gpu",
+    "ignored": true,
+    "reason": "Explicitly ignored Metal toy-model completion-hook Error/Cancel/Panic witness: acquires the GPU lease and context and verifies committed encoder drain, poisoning and healthy followups; excluded from CPU acceptance."
+  },
+  {
+    "target": "lib",
+    "name": "deepseek_v41::forward::ced::tests::submit_ahead_deferred_status_rejects_after_both_encoders_retire",
+    "class": "gpu",
+    "ignored": true,
+    "reason": "Explicitly ignored Metal toy-model deferred-status witness: acquires the GPU lease and context, injects a sticky encoder status and checks rejection after both commands retire; excluded from CPU acceptance."
+  },
+  {
+    "target": "lib",
+    "name": "deepseek_v41::forward::ced::tests::submit_ahead_prespawn_panic_drains_the_committed_encoder",
+    "class": "gpu",
+    "ignored": true,
+    "reason": "Explicitly ignored Metal toy-model pre-spawn panic witness: acquires the GPU lease and context and checks committed-command drain on unwind, poisoned state and a healthy followup; excluded from CPU acceptance."
+  },
+  {
+    "target": "lib",
     "name": "deepseek_v41::forward::ced::tests::unfused_reference_is_nested_thread_local_and_unwind_safe",
     "class": "cpu",
     "ignored": false,
@@ -1867,6 +2070,55 @@
     "class": "cpu",
     "ignored": false,
     "reason": "Reviewed host-only CED, request-planning, execution contract or synthetic storage control; no Metal context or dispatch."
+  },
+  {
+    "target": "lib",
+    "name": "deepseek_v41::forward::chunk_geometry::encoder8k::conditional_resident_headroom_and_runtime_gates_use_cpu_plus_metal",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Fixed-8192 test-scoped host-only feasibility: synthetic pricing, geometry, lineage, bounds or scope restoration; no Metal context/resources, model import or execution."
+  },
+  {
+    "target": "lib",
+    "name": "deepseek_v41::forward::chunk_geometry::encoder8k::model_shaped_extents_fit_existing_integer_domains_without_kernel_changes",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Fixed-8192 test-scoped host-only feasibility: synthetic pricing, geometry, lineage, bounds or scope restoration; no Metal context/resources, model import or execution."
+  },
+  {
+    "target": "lib",
+    "name": "deepseek_v41::forward::chunk_geometry::encoder8k::one_8k_plan_preserves_work_retention_and_2k_decoder_replay",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Fixed-8192 test-scoped host-only feasibility: synthetic pricing, geometry, lineage, bounds or scope restoration; no Metal context/resources, model import or execution."
+  },
+  {
+    "target": "lib",
+    "name": "deepseek_v41::forward::chunk_geometry::encoder8k::prices_are_monotone_conservative_and_reject_max_buffer_and_overflow",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Fixed-8192 test-scoped host-only feasibility: synthetic pricing, geometry, lineage, bounds or scope restoration; no Metal context/resources, model import or execution."
+  },
+  {
+    "target": "lib",
+    "name": "deepseek_v41::forward::chunk_geometry::encoder8k::pricing_compares_8k_with_two_4k_pipeline_at_full_request_capacity",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Fixed-8192 test-scoped host-only feasibility: synthetic pricing, geometry, lineage, bounds or scope restoration; no Metal context/resources, model import or execution."
+  },
+  {
+    "target": "lib",
+    "name": "deepseek_v41::forward::chunk_geometry::encoder8k::scope_does_not_admit_invalid_requests_or_change_defaults_and_execution_guards",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Fixed-8192 test-scoped host-only feasibility: synthetic pricing, geometry, lineage, bounds or scope restoration; no Metal context/resources, model import or execution."
+  },
+  {
+    "target": "lib",
+    "name": "deepseek_v41::forward::chunk_geometry::encoder8k::scope_is_validated_nested_panic_safe_thread_local_and_default_off",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Fixed-8192 test-scoped host-only feasibility: synthetic pricing, geometry, lineage, bounds or scope restoration; no Metal context/resources, model import or execution."
   },
   {
     "target": "lib",
@@ -2353,6 +2605,13 @@
   },
   {
     "target": "lib",
+    "name": "deepseek_v41::forward::gpu_step::tests::dispatch_profile_times_every_decode_dispatch_without_changing_logits",
+    "class": "gpu",
+    "ignored": false,
+    "reason": "Metal context, allocation or dispatch witness; parent GPU lane only."
+  },
+  {
+    "target": "lib",
     "name": "deepseek_v41::forward::gpu_step::tests::earlier_route_failure_is_not_overwritten_by_later_layers",
     "class": "gpu",
     "ignored": false,
@@ -2374,6 +2633,13 @@
   },
   {
     "target": "lib",
+    "name": "deepseek_v41::forward::gpu_step::tests::fused_rank_norms_match_split_qkv_chain_bitwise",
+    "class": "gpu",
+    "ignored": false,
+    "reason": "Metal context, allocation or dispatch witness; parent GPU lane only."
+  },
+  {
+    "target": "lib",
     "name": "deepseek_v41::forward::gpu_step::tests::metadata_schedule_drives_full_gpu_graph_and_engram_at_zero",
     "class": "gpu",
     "ignored": false,
@@ -2388,7 +2654,28 @@
   },
   {
     "target": "lib",
+    "name": "deepseek_v41::forward::gpu_step::tests::router_first_rollout_requires_measured_device_layout_and_types",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Pure device/layout/dtype rollout predicate; no Metal context, model import or device allocation."
+  },
+  {
+    "target": "lib",
     "name": "deepseek_v41::forward::gpu_step::tests::single_sequence_batch_is_step_with_batched_shared_on",
+    "class": "gpu",
+    "ignored": false,
+    "reason": "Metal context, allocation or dispatch witness; parent GPU lane only."
+  },
+  {
+    "target": "lib",
+    "name": "deepseek_v41::forward::gpu_step::tests::split_ffn_encoders_match_one_encoder_bitwise",
+    "class": "gpu",
+    "ignored": false,
+    "reason": "Metal context, allocation or dispatch witness; parent GPU lane only."
+  },
+  {
+    "target": "lib",
+    "name": "deepseek_v41::forward::gpu_step::tests::split_submission_matches_one_command_bitwise",
     "class": "gpu",
     "ignored": false,
     "reason": "Metal context, allocation or dispatch witness; parent GPU lane only."
@@ -2406,6 +2693,20 @@
     "class": "gpu",
     "ignored": false,
     "reason": "Metal context, allocation or dispatch witness; parent GPU lane only."
+  },
+  {
+    "target": "lib",
+    "name": "deepseek_v41::forward::gpu_step::tests::wide_hc_pre_matches_two_dispatch_pre_within_reduction_order",
+    "class": "gpu",
+    "ignored": false,
+    "reason": "Metal context, allocation or dispatch witness; parent GPU lane only."
+  },
+  {
+    "target": "lib",
+    "name": "deepseek_v41::forward::hc_gpu::tests::wide_post_rejects_finite_status_aliasing",
+    "class": "gpu",
+    "ignored": false,
+    "reason": "Metal binding-contract test: constructs the wide mHC post buffers and requires the encoder to reject finite-status aliasing before dispatch."
   },
   {
     "target": "lib",
@@ -2693,6 +2994,20 @@
     "class": "cpu",
     "ignored": false,
     "reason": "Host-only metadata, arithmetic, source contract or synthetic disk fixture; no Metal context."
+  },
+  {
+    "target": "lib",
+    "name": "deepseek_v41::forward::prefill::tests::hc_timing::fused_hc_projection_rows_matches_split_passes",
+    "class": "gpu",
+    "ignored": false,
+    "reason": "Metal context, allocation or dispatch witness; parent GPU lane only."
+  },
+  {
+    "target": "lib",
+    "name": "deepseek_v41::forward::prefill::tests::hc_timing::hc_rows_kernel_timing",
+    "class": "gpu",
+    "ignored": false,
+    "reason": "Metal context, allocation or dispatch witness; parent GPU lane only."
   },
   {
     "target": "lib",
@@ -3004,27 +3319,6 @@
   },
   {
     "target": "lib",
-    "name": "deepseek_v41::forward::prefill::tests::hc_timing::fused_hc_projection_rows_matches_split_passes",
-    "class": "gpu",
-    "ignored": false,
-    "reason": "Metal context, allocation or dispatch witness; parent GPU lane only."
-  },
-  {
-    "target": "lib",
-    "name": "deepseek_v41::forward::prefill::tests::hc_timing::hc_rows_kernel_timing",
-    "class": "gpu",
-    "ignored": false,
-    "reason": "Metal context, allocation or dispatch witness; parent GPU lane only."
-  },
-  {
-    "target": "lib",
-    "name": "deepseek_v41::forward::tests::q8_0_rank_pair_matches_separate_native_projections",
-    "class": "gpu",
-    "ignored": false,
-    "reason": "Metal context, allocation or dispatch witness; parent GPU lane only."
-  },
-  {
-    "target": "lib",
     "name": "deepseek_v41::forward::tests::gguf_dense_extra_iq_formats_preserve_f32_operands",
     "class": "gpu",
     "ignored": false,
@@ -3054,6 +3348,13 @@
   {
     "target": "lib",
     "name": "deepseek_v41::forward::tests::profile_linear_completed_and_scope_cleanup",
+    "class": "gpu",
+    "ignored": false,
+    "reason": "Metal context, allocation or dispatch witness; parent GPU lane only."
+  },
+  {
+    "target": "lib",
+    "name": "deepseek_v41::forward::tests::q8_0_rank_pair_matches_separate_native_projections",
     "class": "gpu",
     "ignored": false,
     "reason": "Metal context, allocation or dispatch witness; parent GPU lane only."
@@ -3204,6 +3505,27 @@
     "class": "cpu",
     "ignored": false,
     "reason": "Reviewed host-only CED, request-planning, execution contract or synthetic storage control; no Metal context or dispatch."
+  },
+  {
+    "target": "lib",
+    "name": "deepseek_v41::gguf::tests::binding_preflight::resident_cache_cold_inventory_uses_active_normalized_shapes_head_not_embedding",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Reviewed resident-cache active inventory, physical pricing, frozen selection or synthetic admission/factory boundary; tiny GGUF fixture or pure host values only, no Metal context or model payload."
+  },
+  {
+    "target": "lib",
+    "name": "deepseek_v41::gguf::tests::binding_preflight::resident_cache_full_cold_boundaries_refuse_before_weight_factory",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Reviewed resident-cache active inventory, physical pricing, frozen selection or synthetic admission/factory boundary; tiny GGUF fixture or pure host values only, no Metal context or model payload."
+  },
+  {
+    "target": "lib",
+    "name": "deepseek_v41::gguf::tests::binding_preflight::resident_cache_postbinding_runtime_uses_live_cache_once_and_keeps_cpu_reserves",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Reviewed actual cold planner/runtime gate with tiny GGUF metadata and synthetic live source/cache/shadow signals; no Metal context or model."
   },
   {
     "target": "lib",
@@ -3725,17 +4047,17 @@
   },
   {
     "target": "lib",
-    "name": "deepseek_v41::gguf::tests::soft_windows::soft_window_live_resources_follow_first_containing_and_survive_owner_drop",
-    "class": "gpu",
-    "ignored": true,
-    "reason": "Metal allocation/dispatch or self-leased device witness; excluded from CPU acceptance."
-  },
-  {
-    "target": "lib",
     "name": "deepseek_v41::gguf::tests::soft_windows::soft_window_explicit_cold_plan_drives_loader_preparation_and_rejects_drift",
     "class": "cpu",
     "ignored": false,
     "reason": "Reduced GGUF fixture and CPU-only 8K Full/CED pricing; selected None/P4/tiny storage plans match loader preparation and reject geometry/accounting drift without importing Metal resources."
+  },
+  {
+    "target": "lib",
+    "name": "deepseek_v41::gguf::tests::soft_windows::soft_window_live_resources_follow_first_containing_and_survive_owner_drop",
+    "class": "gpu",
+    "ignored": true,
+    "reason": "Metal allocation/dispatch or self-leased device witness; excluded from CPU acceptance."
   },
   {
     "target": "lib",
@@ -4677,6 +4999,90 @@
   },
   {
     "target": "qwen",
+    "name": "serve::backend_v41::mapping::tests::byte_conversion_overflow_fails",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Pre-existing maintained-main discovery omission reviewed during cache-admission repair: pure serve mapping/parser arithmetic and sparse metadata, or CPU-only fake native-result/profile-scope controls; no Metal context or execution."
+  },
+  {
+    "target": "qwen",
+    "name": "serve::backend_v41::mapping::tests::effective_target_rounds_to_pages_and_clamps_to_device",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Pre-existing maintained-main discovery omission reviewed during cache-admission repair: pure serve mapping/parser arithmetic and sparse metadata, or CPU-only fake native-result/profile-scope controls; no Metal context or execution."
+  },
+  {
+    "target": "qwen",
+    "name": "serve::backend_v41::mapping::tests::integer_overflow_fails",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Pre-existing maintained-main discovery omission reviewed during cache-admission repair: pure serve mapping/parser arithmetic and sparse metadata, or CPU-only fake native-result/profile-scope controls; no Metal context or execution."
+  },
+  {
+    "target": "qwen",
+    "name": "serve::backend_v41::mapping::tests::invalid_empty_negative_and_non_decimal_values_fail",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Pre-existing maintained-main discovery omission reviewed during cache-admission repair: pure serve mapping/parser arithmetic and sparse metadata, or CPU-only fake native-result/profile-scope controls; no Metal context or execution."
+  },
+  {
+    "target": "qwen",
+    "name": "serve::backend_v41::mapping::tests::largest_representable_mib_succeeds",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Pre-existing maintained-main discovery omission reviewed during cache-admission repair: pure serve mapping/parser arithmetic and sparse metadata, or CPU-only fake native-result/profile-scope controls; no Metal context or execution."
+  },
+  {
+    "target": "qwen",
+    "name": "serve::backend_v41::mapping::tests::positive_mib_converts_to_bytes",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Pre-existing maintained-main discovery omission reviewed during cache-admission repair: pure serve mapping/parser arithmetic and sparse metadata, or CPU-only fake native-result/profile-scope controls; no Metal context or execution."
+  },
+  {
+    "target": "qwen",
+    "name": "serve::backend_v41::mapping::tests::sparse_cpu_plan_keeps_oversized_singletons_and_payload",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Pre-existing maintained-main discovery omission reviewed during cache-admission repair: pure serve mapping/parser arithmetic and sparse metadata, or CPU-only fake native-result/profile-scope controls; no Metal context or execution."
+  },
+  {
+    "target": "qwen",
+    "name": "serve::backend_v41::mapping::tests::unset_and_zero_disable",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Pre-existing maintained-main discovery omission reviewed during cache-admission repair: pure serve mapping/parser arithmetic and sparse metadata, or CPU-only fake native-result/profile-scope controls; no Metal context or execution."
+  },
+  {
+    "target": "qwen",
+    "name": "serve::backend_v41::native_failure_tests::native_fault_tracking_survives_cancellation_remapping",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Pre-existing maintained-main discovery omission reviewed during cache-admission repair: pure serve mapping/parser arithmetic and sparse metadata, or CPU-only fake native-result/profile-scope controls; no Metal context or execution."
+  },
+  {
+    "target": "qwen",
+    "name": "serve::backend_v41::native_failure_tests::tracking_preserves_native_results_and_error_identity",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Pre-existing maintained-main discovery omission reviewed during cache-admission repair: pure serve mapping/parser arithmetic and sparse metadata, or CPU-only fake native-result/profile-scope controls; no Metal context or execution."
+  },
+  {
+    "target": "qwen",
+    "name": "serve::backend_v41::prefill_timing_tests::disabled_timing_preserves_results_and_does_not_open_a_scope",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Pre-existing maintained-main discovery omission reviewed during cache-admission repair: pure serve mapping/parser arithmetic and sparse metadata, or CPU-only fake native-result/profile-scope controls; no Metal context or execution."
+  },
+  {
+    "target": "qwen",
+    "name": "serve::backend_v41::prefill_timing_tests::enabled_timing_preserves_errors_and_an_existing_scope",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Pre-existing maintained-main discovery omission reviewed during cache-admission repair: pure serve mapping/parser arithmetic and sparse metadata, or CPU-only fake native-result/profile-scope controls; no Metal context or execution."
+  },
+  {
+    "target": "qwen",
     "name": "serve::backend_v41::reuse::tests::capture_admission_checks_full_entry_plus_reserve_and_overflow",
     "class": "cpu",
     "ignored": false,
@@ -5178,404 +5584,5 @@
     "class": "cpu",
     "ignored": false,
     "reason": "Reviewed host-only planning, metadata, NSObject lifetime, pure arithmetic, fake-state lifecycle or loopback fixture; no Metal context or real model import."
-  },
-  {
-    "target": "lib",
-    "name": "deepseek_v41::forward::gpu_step::tests::dispatch_profile_times_every_decode_dispatch_without_changing_logits",
-    "class": "gpu",
-    "ignored": false,
-    "reason": "Metal context, allocation or dispatch witness; parent GPU lane only."
-  },
-  {
-    "target": "lib",
-    "name": "deepseek_v41::forward::gpu_step::tests::split_ffn_encoders_match_one_encoder_bitwise",
-    "class": "gpu",
-    "ignored": false,
-    "reason": "Metal context, allocation or dispatch witness; parent GPU lane only."
-  },
-  {
-    "target": "lib",
-    "name": "deepseek_v41::forward::gpu_step::tests::split_submission_matches_one_command_bitwise",
-    "class": "gpu",
-    "ignored": false,
-    "reason": "Metal context, allocation or dispatch witness; parent GPU lane only."
-  },
-  {
-    "target": "lib",
-    "name": "deepseek_v41::forward::gpu_step::tests::fused_rank_norms_match_split_qkv_chain_bitwise",
-    "class": "gpu",
-    "ignored": false,
-    "reason": "Metal context, allocation or dispatch witness; parent GPU lane only."
-  },
-  {
-    "target": "lib",
-    "name": "deepseek_v41::forward::gpu_step::tests::wide_hc_pre_matches_two_dispatch_pre_within_reduction_order",
-    "class": "gpu",
-    "ignored": false,
-    "reason": "Metal context, allocation or dispatch witness; parent GPU lane only."
-  },
-  {
-    "target": "lib",
-    "name": "deepseek_v41::forward::attention_gpu::ced::tests::pending_ranges_encode_without_finishing_coverage_completion_or_group_readiness",
-    "class": "cpu",
-    "ignored": false,
-    "reason": "Host-only checked range/cursor, command eligibility, scoped override, pending CED lifecycle or conservative fixture price; no Metal context or execution."
-  },
-  {
-    "target": "lib",
-    "name": "deepseek_v41::forward::attention_gpu::query_batch::range_tests::cursor_range_matches_repeated_rows_partial_exact_and_final",
-    "class": "cpu",
-    "ignored": false,
-    "reason": "Host-only checked range/cursor, command eligibility, scoped override, pending CED lifecycle or conservative fixture price; no Metal context or execution."
-  },
-  {
-    "target": "lib",
-    "name": "deepseek_v41::forward::attention_gpu::query_batch::range_tests::cursor_range_refusals_are_atomic",
-    "class": "cpu",
-    "ignored": false,
-    "reason": "Host-only checked range/cursor, command eligibility, scoped override, pending CED lifecycle or conservative fixture price; no Metal context or execution."
-  },
-  {
-    "target": "lib",
-    "name": "deepseek_v41::forward::attention_gpu::query_batch::range_tests::old_host_override_is_nested_panic_safe_and_thread_local",
-    "class": "cpu",
-    "ignored": false,
-    "reason": "Host-only checked range/cursor, command eligibility, scoped override, pending CED lifecycle or conservative fixture price; no Metal context or execution."
-  },
-  {
-    "target": "lib",
-    "name": "deepseek_v41::forward::attention_gpu::query_batch::range_tests::prepared_range_eligibility_preserves_publication_and_selection_fallbacks",
-    "class": "cpu",
-    "ignored": false,
-    "reason": "Host-only checked range/cursor, command eligibility, scoped override, pending CED lifecycle or conservative fixture price; no Metal context or execution."
-  },
-  {
-    "target": "lib",
-    "name": "deepseek_v41::forward::attention_gpu::query_batch::range_tests::ratio_head_body_tail_cursor_parity",
-    "class": "cpu",
-    "ignored": false,
-    "reason": "Host-only checked range/cursor, command eligibility, scoped override, pending CED lifecycle or conservative fixture price; no Metal context or execution."
-  },
-  {
-    "target": "lib",
-    "name": "deepseek_v41::forward::attention_gpu::tests::query_batch::range_execution::host_discovery_geometry_and_conservative_peak_fit_four_gib",
-    "class": "cpu",
-    "ignored": false,
-    "reason": "Host-only checked range/cursor, command eligibility, scoped override, pending CED lifecycle or conservative fixture price; no Metal context or execution."
-  },
-  {
-    "target": "lib",
-    "name": "deepseek_v41::forward::attention_gpu::tests::query_batch::range_execution::prepared_serial_host_encoding_discovery",
-    "class": "timing",
-    "ignored": true,
-    "reason": "Self-leased opt3 test-profile or canonical release HOST discovery, dynamically reported debug assertions/profile; release diagnostic features empty and injection/validation/profilers absent; <=4 GiB CPU+Metal; no submission/commit/GPU execution or model; unchanged synthetic payload and chronological samples, no release performance claim; prior M4 data stays source/profile-specific."
-  },
-  {
-    "target": "lib",
-    "name": "deepseek_v41::forward::attention_gpu::tests::query_batch::range_execution::range_parity_schedule_keeps_ratio_two_and_ratio_one_candidate_ownership",
-    "class": "cpu",
-    "ignored": false,
-    "reason": "Validate the actual Metal parity fixture schedule: ratio-two publication plus a distinct ratio-one candidate owner and follower reindexing; no Metal context or execution."
-  },
-  {
-    "target": "lib",
-    "name": "deepseek_v41::forward::attention_gpu::tests::query_batch::range_execution::prepared_serial_range_old_host_bitexact_outputs_controls_pending_and_census",
-    "class": "gpu",
-    "ignored": true,
-    "reason": "Self-leased shape-priced <=512 MiB CPU+Metal BF16 H64/head512/index128 old-host vs range parity, not measured fit; existing all-selected/scored/pruned/odd cases plus one N128 tensor64 correctness case with actual route census when capable; bitwise outputs, controls, pending mixed-owner state, bindings and cursors; debug validation, no model or speed assertion."
-  },
-  {
-    "target": "lib",
-    "name": "deepseek_v41::forward::attention_gpu::ced::tests::pending_checked_ranges_match_rows_and_refuse_after_end_atomically",
-    "class": "cpu",
-    "ignored": false,
-    "reason": "Exact Pending/BatchCursor host-only partial/exact range-vs-row encoding, encoder publication gating and atomic refusal after end; no Metal context or execution."
-  },
-  {
-    "target": "lib",
-    "name": "deepseek_v41::forward::ced::qualification::current_pair::range_pilot::range_host_full_model_native_abba",
-    "class": "model",
-    "ignored": true,
-    "reason": "Private release-native actual NAX one-import exact CED old-host/range discriminator; N2048 default (parent first launch only) or explicitly selected N8192, never automatic escalation; warm Full/A/B then primary ABBA, two true TF steps per arm, strict all-vocabulary FLOATBITS vs Full and causal hashes/readiness/status/origin vs old CED; fail-fast canonical lease (self-acquired or validated inherited/adopted) and parent <=60s/90s process cap, durable private evidence; never performance qualification."
-  },
-  {
-    "target": "lib",
-    "name": "deepseek_v41::forward::ced::qualification::current_pair::range_pilot::frozen_prefix_uses_two_true_next_ids_only",
-    "class": "cpu",
-    "ignored": false,
-    "reason": "Host-only private row choice defaults N2048 and accepts explicit N8192 only, with 60s/90s budget; frozen prefix and two real next-ID selection across prompt/continuation boundary; validates needed IDs without retokenization, unused-ID rejection or feedback."
-  },
-  {
-    "target": "lib",
-    "name": "deepseek_v41::forward::attention_gpu::tests::query_batch::range_execution::tensor64_parity_geometry_and_shape_budget",
-    "class": "cpu",
-    "ignored": false,
-    "reason": "CPU-only H64/N128 parity geometry and conservative shapes for paired workspaces/rows/scratch, BF16 synthetic weights/native controls, seed overlap and CPU/staging reserves under a declared 512 MiB bound; not measured memory fit or GPU execution."
-  },
-  {
-    "target": "lib",
-    "name": "deepseek_v41::forward::ced::qualification::current_pair::range_pilot::preferred_encoder_geometry_uses_actual_chunk_ceiling",
-    "class": "cpu",
-    "ignored": false,
-    "reason": "CPU-only production resident-byte-derived preferred encoder width and actual ceil chunk counts for N2048/N8192 and a nonmultiple; selected width may exceed prompt length, without pinning production geometry or bypassing admission."
-  },
-  {
-    "target": "lib",
-    "name": "deepseek_v41::forward::ced::qualification::current_pair::range_pilot::lease_descriptor_syntax_only",
-    "class": "cpu",
-    "ignored": false,
-    "reason": "Pure CPU nonnegative i32 descriptor syntax only: rejects empty, negative, nonnumeric, overflow and whitespace, accepts 0/3/i32::MAX without opening descriptors or mutating environment; actual openness, canonical inode, ownership and flock validation remain the authority of metal::acquire_metal_benchmark_lease before MetalContext/import."
-  },
-  {
-    "target": "lib",
-    "name": "deepseek_v41::forward::attention_gpu::query_batch::lineage_tests::encoder8k_scope_keeps_original_tiles_and_compacted_singleton_lineage",
-    "class": "cpu",
-    "ignored": false,
-    "reason": "Fixed-8192 test-scoped host-only feasibility: synthetic pricing, geometry, lineage, bounds or scope restoration; no Metal context/resources, model import or execution."
-  },
-  {
-    "target": "lib",
-    "name": "deepseek_v41::forward::chunk_geometry::encoder8k::conditional_resident_headroom_and_runtime_gates_use_cpu_plus_metal",
-    "class": "cpu",
-    "ignored": false,
-    "reason": "Fixed-8192 test-scoped host-only feasibility: synthetic pricing, geometry, lineage, bounds or scope restoration; no Metal context/resources, model import or execution."
-  },
-  {
-    "target": "lib",
-    "name": "deepseek_v41::forward::chunk_geometry::encoder8k::model_shaped_extents_fit_existing_integer_domains_without_kernel_changes",
-    "class": "cpu",
-    "ignored": false,
-    "reason": "Fixed-8192 test-scoped host-only feasibility: synthetic pricing, geometry, lineage, bounds or scope restoration; no Metal context/resources, model import or execution."
-  },
-  {
-    "target": "lib",
-    "name": "deepseek_v41::forward::chunk_geometry::encoder8k::one_8k_plan_preserves_work_retention_and_2k_decoder_replay",
-    "class": "cpu",
-    "ignored": false,
-    "reason": "Fixed-8192 test-scoped host-only feasibility: synthetic pricing, geometry, lineage, bounds or scope restoration; no Metal context/resources, model import or execution."
-  },
-  {
-    "target": "lib",
-    "name": "deepseek_v41::forward::chunk_geometry::encoder8k::prices_are_monotone_conservative_and_reject_max_buffer_and_overflow",
-    "class": "cpu",
-    "ignored": false,
-    "reason": "Fixed-8192 test-scoped host-only feasibility: synthetic pricing, geometry, lineage, bounds or scope restoration; no Metal context/resources, model import or execution."
-  },
-  {
-    "target": "lib",
-    "name": "deepseek_v41::forward::chunk_geometry::encoder8k::pricing_compares_8k_with_two_4k_pipeline_at_full_request_capacity",
-    "class": "cpu",
-    "ignored": false,
-    "reason": "Fixed-8192 test-scoped host-only feasibility: synthetic pricing, geometry, lineage, bounds or scope restoration; no Metal context/resources, model import or execution."
-  },
-  {
-    "target": "lib",
-    "name": "deepseek_v41::forward::chunk_geometry::encoder8k::scope_does_not_admit_invalid_requests_or_change_defaults_and_execution_guards",
-    "class": "cpu",
-    "ignored": false,
-    "reason": "Fixed-8192 test-scoped host-only feasibility: synthetic pricing, geometry, lineage, bounds or scope restoration; no Metal context/resources, model import or execution."
-  },
-  {
-    "target": "lib",
-    "name": "deepseek_v41::forward::chunk_geometry::encoder8k::scope_is_validated_nested_panic_safe_thread_local_and_default_off",
-    "class": "cpu",
-    "ignored": false,
-    "reason": "Fixed-8192 test-scoped host-only feasibility: synthetic pricing, geometry, lineage, bounds or scope restoration; no Metal context/resources, model import or execution."
-  },
-  {
-    "target": "lib",
-    "name": "deepseek_v41::forward::attention_gpu::ced::tests::speculative_encoder_keeps_one_inflight_intent_and_completes_in_fifo_order",
-    "class": "cpu",
-    "ignored": false,
-    "reason": "Host-only CED Cursor fixture exercises one speculative encoder intent, FIFO completion and decoder/publication frontiers; no Metal context, lease, allocation or dispatch."
-  },
-  {
-    "target": "lib",
-    "name": "deepseek_v41::forward::attention_gpu::ced::tests::speculative_encoder_retires_three_contiguous_chunks_in_order",
-    "class": "cpu",
-    "ignored": false,
-    "reason": "Host-only CED Cursor fixture exercises three contiguous speculative encoder intents and ordered retirement; no Metal context, lease, allocation or dispatch."
-  },
-  {
-    "target": "lib",
-    "name": "deepseek_v41::forward::ced::tests::submit_ahead_completion_fault_drains_the_newer_encoder",
-    "class": "gpu",
-    "ignored": true,
-    "reason": "Explicitly ignored Metal toy-model completion-fault witness: acquires the GPU lease and context, submits encoder work, checks draining/poisoning and a healthy followup; excluded from CPU acceptance."
-  },
-  {
-    "target": "lib",
-    "name": "deepseek_v41::forward::ced::tests::submit_ahead_completion_hook_error_panic_and_cancel_drain_the_newer_encoder",
-    "class": "gpu",
-    "ignored": true,
-    "reason": "Explicitly ignored Metal toy-model completion-hook Error/Cancel/Panic witness: acquires the GPU lease and context and verifies committed encoder drain, poisoning and healthy followups; excluded from CPU acceptance."
-  },
-  {
-    "target": "lib",
-    "name": "deepseek_v41::forward::ced::tests::submit_ahead_deferred_status_rejects_after_both_encoders_retire",
-    "class": "gpu",
-    "ignored": true,
-    "reason": "Explicitly ignored Metal toy-model deferred-status witness: acquires the GPU lease and context, injects a sticky encoder status and checks rejection after both commands retire; excluded from CPU acceptance."
-  },
-  {
-    "target": "lib",
-    "name": "deepseek_v41::forward::ced::tests::submit_ahead_prespawn_panic_drains_the_committed_encoder",
-    "class": "gpu",
-    "ignored": true,
-    "reason": "Explicitly ignored Metal toy-model pre-spawn panic witness: acquires the GPU lease and context and checks committed-command drain on unwind, poisoned state and a healthy followup; excluded from CPU acceptance."
-  },
-  {
-    "target": "lib",
-    "name": "deepseek_v41::forward::bind::tests::bounded_gpu_cache_backings_and_group_views_match_independent_quote",
-    "class": "gpu",
-    "ignored": true,
-    "reason": "Self-leased M5-only source/cache/control allocation and alias lifetime witness; normal upfront and fresh binding admission, <=1 GiB combined toy quote including 128 MiB CPU reserve; never CPU acceptance."
-  },
-  {
-    "target": "lib",
-    "name": "deepseek_v41::forward::binding::memory::tests::binding_aggregate_refuses_before_factory_at_each_one_byte_boundary",
-    "class": "cpu",
-    "ignored": false,
-    "reason": "Reviewed resident-cache active inventory, physical pricing, frozen selection or synthetic admission/factory boundary; tiny GGUF fixture or pure host values only, no Metal context or model payload."
-  },
-  {
-    "target": "lib",
-    "name": "deepseek_v41::forward::binding::memory::tests::cache_plan_rejects_overflow_device_limit_unsupported_and_duplicate_inventory",
-    "class": "cpu",
-    "ignored": false,
-    "reason": "Reviewed resident-cache active inventory, physical pricing, frozen selection or synthetic admission/factory boundary; tiny GGUF fixture or pure host values only, no Metal context or model payload."
-  },
-  {
-    "target": "lib",
-    "name": "deepseek_v41::forward::binding::memory::tests::cache_selection_is_frozen_and_each_buffer_is_priced_separately",
-    "class": "cpu",
-    "ignored": false,
-    "reason": "Reviewed resident-cache active inventory, physical pricing, frozen selection or synthetic admission/factory boundary; tiny GGUF fixture or pure host values only, no Metal context or model payload."
-  },
-  {
-    "target": "lib",
-    "name": "deepseek_v41::forward::binding::memory::tests::direct_binding_admits_only_construction_and_runtime_counts_live_cache_once",
-    "class": "cpu",
-    "ignored": false,
-    "reason": "Reviewed resident-cache active inventory, physical pricing, frozen selection or synthetic admission/factory boundary; tiny GGUF fixture or pure host values only, no Metal context or model payload."
-  },
-  {
-    "target": "lib",
-    "name": "deepseek_v41::forward::binding::memory::tests::grouped_output_has_one_cache_backing_for_eight_views",
-    "class": "cpu",
-    "ignored": false,
-    "reason": "Reviewed resident-cache active inventory, physical pricing, frozen selection or synthetic admission/factory boundary; tiny GGUF fixture or pure host values only, no Metal context or model payload."
-  },
-  {
-    "target": "lib",
-    "name": "deepseek_v41::gguf::tests::binding_preflight::resident_cache_cold_inventory_uses_active_normalized_shapes_head_not_embedding",
-    "class": "cpu",
-    "ignored": false,
-    "reason": "Reviewed resident-cache active inventory, physical pricing, frozen selection or synthetic admission/factory boundary; tiny GGUF fixture or pure host values only, no Metal context or model payload."
-  },
-  {
-    "target": "lib",
-    "name": "deepseek_v41::gguf::tests::binding_preflight::resident_cache_full_cold_boundaries_refuse_before_weight_factory",
-    "class": "cpu",
-    "ignored": false,
-    "reason": "Reviewed resident-cache active inventory, physical pricing, frozen selection or synthetic admission/factory boundary; tiny GGUF fixture or pure host values only, no Metal context or model payload."
-  },
-  {
-    "target": "lib",
-    "name": "deepseek_v41::gguf::tests::binding_preflight::resident_cache_postbinding_runtime_uses_live_cache_once_and_keeps_cpu_reserves",
-    "class": "cpu",
-    "ignored": false,
-    "reason": "Reviewed actual cold planner/runtime gate with tiny GGUF metadata and synthetic live source/cache/shadow signals; no Metal context or model."
-  },
-  {
-    "target": "qwen",
-    "name": "serve::backend_v41::mapping::tests::byte_conversion_overflow_fails",
-    "class": "cpu",
-    "ignored": false,
-    "reason": "Pre-existing maintained-main discovery omission reviewed during cache-admission repair: pure serve mapping/parser arithmetic and sparse metadata, or CPU-only fake native-result/profile-scope controls; no Metal context or execution."
-  },
-  {
-    "target": "qwen",
-    "name": "serve::backend_v41::mapping::tests::effective_target_rounds_to_pages_and_clamps_to_device",
-    "class": "cpu",
-    "ignored": false,
-    "reason": "Pre-existing maintained-main discovery omission reviewed during cache-admission repair: pure serve mapping/parser arithmetic and sparse metadata, or CPU-only fake native-result/profile-scope controls; no Metal context or execution."
-  },
-  {
-    "target": "qwen",
-    "name": "serve::backend_v41::mapping::tests::integer_overflow_fails",
-    "class": "cpu",
-    "ignored": false,
-    "reason": "Pre-existing maintained-main discovery omission reviewed during cache-admission repair: pure serve mapping/parser arithmetic and sparse metadata, or CPU-only fake native-result/profile-scope controls; no Metal context or execution."
-  },
-  {
-    "target": "qwen",
-    "name": "serve::backend_v41::mapping::tests::invalid_empty_negative_and_non_decimal_values_fail",
-    "class": "cpu",
-    "ignored": false,
-    "reason": "Pre-existing maintained-main discovery omission reviewed during cache-admission repair: pure serve mapping/parser arithmetic and sparse metadata, or CPU-only fake native-result/profile-scope controls; no Metal context or execution."
-  },
-  {
-    "target": "qwen",
-    "name": "serve::backend_v41::mapping::tests::largest_representable_mib_succeeds",
-    "class": "cpu",
-    "ignored": false,
-    "reason": "Pre-existing maintained-main discovery omission reviewed during cache-admission repair: pure serve mapping/parser arithmetic and sparse metadata, or CPU-only fake native-result/profile-scope controls; no Metal context or execution."
-  },
-  {
-    "target": "qwen",
-    "name": "serve::backend_v41::mapping::tests::positive_mib_converts_to_bytes",
-    "class": "cpu",
-    "ignored": false,
-    "reason": "Pre-existing maintained-main discovery omission reviewed during cache-admission repair: pure serve mapping/parser arithmetic and sparse metadata, or CPU-only fake native-result/profile-scope controls; no Metal context or execution."
-  },
-  {
-    "target": "qwen",
-    "name": "serve::backend_v41::mapping::tests::sparse_cpu_plan_keeps_oversized_singletons_and_payload",
-    "class": "cpu",
-    "ignored": false,
-    "reason": "Pre-existing maintained-main discovery omission reviewed during cache-admission repair: pure serve mapping/parser arithmetic and sparse metadata, or CPU-only fake native-result/profile-scope controls; no Metal context or execution."
-  },
-  {
-    "target": "qwen",
-    "name": "serve::backend_v41::mapping::tests::unset_and_zero_disable",
-    "class": "cpu",
-    "ignored": false,
-    "reason": "Pre-existing maintained-main discovery omission reviewed during cache-admission repair: pure serve mapping/parser arithmetic and sparse metadata, or CPU-only fake native-result/profile-scope controls; no Metal context or execution."
-  },
-  {
-    "target": "qwen",
-    "name": "serve::backend_v41::native_failure_tests::native_fault_tracking_survives_cancellation_remapping",
-    "class": "cpu",
-    "ignored": false,
-    "reason": "Pre-existing maintained-main discovery omission reviewed during cache-admission repair: pure serve mapping/parser arithmetic and sparse metadata, or CPU-only fake native-result/profile-scope controls; no Metal context or execution."
-  },
-  {
-    "target": "qwen",
-    "name": "serve::backend_v41::native_failure_tests::tracking_preserves_native_results_and_error_identity",
-    "class": "cpu",
-    "ignored": false,
-    "reason": "Pre-existing maintained-main discovery omission reviewed during cache-admission repair: pure serve mapping/parser arithmetic and sparse metadata, or CPU-only fake native-result/profile-scope controls; no Metal context or execution."
-  },
-  {
-    "target": "qwen",
-    "name": "serve::backend_v41::prefill_timing_tests::disabled_timing_preserves_results_and_does_not_open_a_scope",
-    "class": "cpu",
-    "ignored": false,
-    "reason": "Pre-existing maintained-main discovery omission reviewed during cache-admission repair: pure serve mapping/parser arithmetic and sparse metadata, or CPU-only fake native-result/profile-scope controls; no Metal context or execution."
-  },
-  {
-    "target": "qwen",
-    "name": "serve::backend_v41::prefill_timing_tests::enabled_timing_preserves_errors_and_an_existing_scope",
-    "class": "cpu",
-    "ignored": false,
-    "reason": "Pre-existing maintained-main discovery omission reviewed during cache-admission repair: pure serve mapping/parser arithmetic and sparse metadata, or CPU-only fake native-result/profile-scope controls; no Metal context or execution."
-  },
-  {
-    "target": "lib",
-    "name": "deepseek_v41::forward::hc_gpu::tests::wide_post_rejects_finite_status_aliasing",
-    "class": "gpu",
-    "ignored": false,
-    "reason": "Metal binding-contract test: constructs the wide mHC post buffers and requires the encoder to reject finite-status aliasing before dispatch."
   }
 ]

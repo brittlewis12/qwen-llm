@@ -138,7 +138,7 @@ fn bf16_bfloat_act_override_restores_nested_unwind_and_thread() {
     );
 }
 
-pub(super) fn matmat_bf16_bfloat_act_enabled() -> bool {
+pub(crate) fn matmat_bf16_bfloat_act_enabled() -> bool {
     if let Some(enabled) = MATMAT_BF16_BFLOAT_ACT_OVERRIDE.with(|slot| slot.get()) {
         return enabled;
     }

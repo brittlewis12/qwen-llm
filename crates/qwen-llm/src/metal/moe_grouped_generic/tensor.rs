@@ -686,13 +686,71 @@ pub fn encode_moe_swiglu_wide_probe(
     n_tokens: usize,
     clamp_limit: f32,
 ) -> Result<(), MetalError> {
+    encode_moe_swiglu_wide_impl(
+        ctx,
+        enc,
+        w_gate,
+        w_up,
+        x_pack,
+        counts,
+        ids,
+        inner,
+        n_hidden,
+        n_ffn,
+        n_expert,
+        topk,
+        n_tokens,
+        Some(clamp_limit),
+    )
+}
+
+/// Explicit unclamped wide gate/up for qualified Flash-Next callers.
+pub fn encode_moe_swiglu_wide_unclamped(
+    ctx: &MetalContext,
+    enc: &KernelEncoder,
+    w_gate: &MetalTensor,
+    w_up: &MetalTensor,
+    x_pack: &MetalTensor,
+    counts: &MetalTensor,
+    ids: &MetalTensor,
+    inner: &MetalTensor,
+    n_hidden: usize,
+    n_ffn: usize,
+    n_expert: usize,
+    topk: usize,
+    n_tokens: usize,
+) -> Result<(), MetalError> {
+    encode_moe_swiglu_wide_impl(
+        ctx, enc, w_gate, w_up, x_pack, counts, ids, inner, n_hidden, n_ffn, n_expert, topk,
+        n_tokens, None,
+    )
+}
+
+fn encode_moe_swiglu_wide_impl(
+    ctx: &MetalContext,
+    enc: &KernelEncoder,
+    w_gate: &MetalTensor,
+    w_up: &MetalTensor,
+    x_pack: &MetalTensor,
+    counts: &MetalTensor,
+    ids: &MetalTensor,
+    inner: &MetalTensor,
+    n_hidden: usize,
+    n_ffn: usize,
+    n_expert: usize,
+    topk: usize,
+    n_tokens: usize,
+    clamp_limit: Option<f32>,
+) -> Result<(), MetalError> {
     const KERNEL: &str = "moe_swiglu_wide_probe";
     require_wide_half(KERNEL, x_pack.dtype)?;
     crate::metal::checks::require_serial(KERNEL, enc)?;
-    if !clamp_limit.is_finite() || clamp_limit <= 0.0 {
+    if let Some(limit) = clamp_limit
+        && (!limit.is_finite() || limit <= 0.0)
+    {
         return Err(MetalError::BadShape {
             kernel: KERNEL,
-            detail: format!("clamp must be finite and positive, got {clamp_limit}"),
+            detail: format!("clamp must be finite and positive, got {limit}"),
         });
     }
     let gate_name = wide_probe_pipeline_name(w_gate.dtype).ok_or(MetalError::BadShape {
@@ -769,7 +827,13 @@ pub fn encode_moe_swiglu_wide_probe(
         Ok(())
     };
     dispatch(&gate_name, &gate_args, w_gate, 0, 0.0)?;
-    dispatch(&up_name, &up_args, w_up, 2, clamp_limit)?;
+    dispatch(
+        &up_name,
+        &up_args,
+        w_up,
+        if clamp_limit.is_some() { 2 } else { 1 },
+        clamp_limit.unwrap_or(0.0),
+    )?;
     Ok(())
 }
 

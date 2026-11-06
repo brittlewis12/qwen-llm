@@ -12,6 +12,8 @@ use objc2_metal::{
     MTLResource, MTLSize,
 };
 
+mod hc_device;
+
 #[cfg(test)]
 #[path = "qwen4exp_metal/projection_tests.rs"]
 mod projection_tests;
@@ -1032,7 +1034,19 @@ pub(crate) unsafe fn encode_gated_residual_packed_mix<'scratch, 'resources, 'ctx
     )?;
     #[cfg(not(test))]
     let down_overridden = false;
-    if !down_overridden {
+    if !down_overridden
+        && !hc_device::try_encode(
+            ctx,
+            enc,
+            weights.down,
+            &normalized,
+            &low,
+            &raw_gate,
+            hyper_hidden,
+            scratch.low_rank,
+            tokens,
+        )?
+    {
         encode_mat_mat_dispatch_without_fewrow(
             ctx,
             enc,
@@ -1080,7 +1094,19 @@ pub(crate) unsafe fn encode_gated_residual_packed_mix<'scratch, 'resources, 'ctx
     )?;
     #[cfg(not(test))]
     let up_overridden = false;
-    if !up_overridden {
+    if !up_overridden
+        && !hc_device::try_encode(
+            ctx,
+            enc,
+            weights.up,
+            &low,
+            &raw_gate,
+            &mixed,
+            scratch.low_rank,
+            hyper_hidden,
+            tokens,
+        )?
+    {
         encode_mat_mat_dispatch_without_fewrow(
             ctx,
             enc,

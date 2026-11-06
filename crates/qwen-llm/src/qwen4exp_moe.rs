@@ -47,6 +47,7 @@ use objc2_metal::{
 #[path = "metal/qwen4exp_expert_compat.rs"]
 mod qwen4exp_expert_compat;
 
+mod expert_wide;
 mod router_tensor;
 
 const MAX_TOP_K: usize = 16;
@@ -2056,6 +2057,22 @@ impl Qwen4ExpMoePackedExecution<'_, '_> {
                     layer,
                     self.input,
                 );
+                if expert_wide::try_encode(
+                    ctx,
+                    enc,
+                    self.weights.routed_gate,
+                    self.weights.routed_up,
+                    self.input,
+                    &self.views.route_counts,
+                    &self.views.route_slots,
+                    &self.views.routed_inner,
+                    &self.views.routed_expert_output,
+                    g,
+                    self.tokens,
+                )? {
+                    end_optional(&mut profile, enc, marker)?;
+                    return Ok(());
+                }
                 crate::metal::encode_moe_swiglu_f32_grouped_slots_tensor(
                     ctx,
                     enc,

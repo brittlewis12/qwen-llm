@@ -6,6 +6,104 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the current state and evidence index.
 
+## 2026-11-06 - Flash-Next Long-Context Short Appends: F32 Tensor Index, 78% Less Depth Slope
+
+- Main `1cc6a4d1`, M5 Ultra, GSQ-RCO IQ3_S. Native pp512 profiles at
+  32K / 128K: **404.766 / 493.620 ms** command timelines, 3833 dispatches,
+  zero missing pairs/overflow. Index score counter sums **24.535 / 93.074 ms**,
+  radix top-k **12.516 / 31.999**: **88.022 of 88.854 ms** added depth cost.
+  Selected QSA value/logits stay about **64 / 48 ms**. Counter sums overlap
+  and are not additive whole-append timings.
+- **Default on:** M5 QSA F32 TensorOps index scoring, full 32-query bands,
+  ratio 4, >=8192 visible pooled blocks (roughly 32K tokens). Tile 32 queries
+  x 32 keys x K128, four heads; original F32 queries, exact F16-to-F32 key
+  staging, F32 products/sums, safe math, no relaxed precision or query
+  narrowing. 16 KiB static threadgroup storage; no added GPU buffer or
+  admission bytes. Changed reduction order; original per-query visibility
+  masks future columns. Partial bands, other devices and unavailable PSOs
+  retain the incumbent. Rollback: **`QWEN_FN_QSA_INDEX_QUERY_TILE=0`**;
+  values **4/8** offer slower SIMD reuse with the incumbent reduction order.
+- **Default on:** 512-thread existing exact radix4 selection for M5 full
+  32-query bands with >=8192 block capacity. Actual PSO thread/memory caps
+  fall back to 256. Stable ties, finite/error handling and chronological IDs
+  are unchanged. Rollback: **`QWEN_FN_QSA_SELECTOR_THREADS=256`** (0 aliases
+  256). Both flags independently controlled; both rollback settings restore
+  the pre-change policy.
+- Whole-append kill screen at 128K, prefix snapshot restored outside timing,
+  one excluded warm append and two retained samples per width: incumbent
+  pp512/1024/2048 **541.377 / 963.459 / 1710.740 ms**, selected tensor+512
+  **447.101 / 782.389 / 1347.602 ms**. Array-form SIMD reuse8 offered only
+  1.6-2%; explicit float4 accumulators improved to **484.276 / 859.274 /
+  1498.915**, preserving endpoint bits, but tensor wins. Selector 1024 loses
+  to 512 (**529.947 vs 525.117 ms** at pp512 with the array-form index).
+  Do not infer llama.cpp standing from this diagnostic snapshot protocol.
+- Default profiles pp512 at 32K / 128K: **386.014 / 405.204 ms** timelines,
+  same 3833 dispatches and no missing pairs/overflow. Index **5.010 / 11.400 ms**,
+  selector **13.532 / 24.986**. Added depth cost **19.190 ms**, down **78.4%**.
+  The wider selector costs about 1 ms at 32K but saves 7 ms at 128K; the
+  combined policy wins at both. Most remaining depth growth is selection;
+  selected-value/logits work stays bounded by the existing 2048-token budget.
+- Frozen `9b0dabd1`, one teacher binary SHA across both unset / rollback
+  policies: native all-row gated-residual readout, full-vocabulary F64
+  log-sum-exp/NLL/KL(off||on), identical checked input/target IDs and prefix
+  token hashes, all finite. Prose concatenates unchanged Bash/curl/csh
+  manuals; code concatenates unchanged runtime/text-session/GDN Rust files.
+  Real prefixes at 32768/131072, independent 512/2048-row append cases,
+  1024/2048 targets per document/width/depth: **12,288 scored rows**.
+  Census proves 192/768 tensor-index and 512-thread-selector dispatches
+  per 512/2048 chunk; rollback uses the old index and 256-thread selector.
+  Prefix endpoint bits match at 32K and differ at 128K, qualifying the
+  composed policy including the long prefix fill.
+
+  | Document | Depth | Append rows | Targets | dNLL | Mean KL |
+  | --- | ---: | ---: | ---: | ---: | ---: |
+  | code | 32768 | 2048 | 2048 | +0.000977106 | 0.000143746 |
+  | code | 32768 | 512 | 1024 | +0.000883663 | 0.000349696 |
+  | prose | 32768 | 2048 | 2048 | +0.000904699 | 0.000150109 |
+  | prose | 32768 | 512 | 1024 | -0.000268769 | 0.000021621 |
+  | code | 131072 | 2048 | 2048 | -0.000345645 | 0.001441643 |
+  | code | 131072 | 512 | 1024 | +0.001767159 | 0.001869579 |
+  | prose | 131072 | 2048 | 2048 | -0.000185889 | 0.001523435 |
+  | prose | 131072 | 512 | 1024 | -0.001856814 | 0.001559767 |
+
+  Pooled NLL **0.176265455 -> 0.176534270**, dNLL **+0.000268815**,
+  mean KL **0.000859877**, max KL **0.179485701**, argmax **12233/12288**.
+  **Pass** every cell and pooled: |dNLL| <=0.005 nats/token, mean KL <=0.01.
+  Bounded held-text evidence, not a model-wide identity claim.
+- Fresh standard-CLI whole-append timing on the same frozen source, two
+  retained reps per cell, default model/shape warmups, seed 1. Each repetition
+  fills a fresh prefix outside the timer; full endpoint logits included.
+  llama.cpp v0.9.0 pin `cd959bae99ff4bed22bef2604f45241c09bbb8c8c8`,
+  Metal/BLAS, F16 K/V, batch/ubatch 2048, same 83,606,638,080-byte model.
+  All timing arms held build lock + Metal lease with thermal pressure 0
+  before/after. Values are mean token/s; raw retained append milliseconds
+  follow so the two-rep standing is reviewable.
+
+  | Depth | Append | Off tok/s | On tok/s | llama.cpp tok/s | Whole gain | Off -> on / llama.cpp |
+  | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+  | 32768 | 512 | 1145.6 | 1195.7 | 1339.4 | +4.37% | 0.855x -> 0.893x |
+  | 32768 | 2048 | 1517.7 | 1607.8 | 1804.6 | +5.94% | 0.841x -> 0.891x |
+  | 131072 | 512 | 957.4 | 1145.0 | 1228.4 | +19.59% | 0.779x -> 0.932x |
+  | 131072 | 2048 | 1201.7 | 1518.2 | 1641.0 | +26.33% | 0.732x -> 0.925x |
+
+  | Depth / append | Off retained ms | On retained ms | llama.cpp retained ms |
+  | --- | --- | --- | --- |
+  | 32768 / 512 | 446.717625 / 447.112667 | 428.162834 / 428.257750 | 385.499792 / 379.093459 |
+  | 32768 / 2048 | 1349.376333 / 1349.529167 | 1273.730208 / 1273.897291 | 1139.635584 / 1130.159708 |
+  | 131072 / 512 | 535.091792 / 534.426875 | 447.196375 / 447.120041 | 413.198417 / 420.432791 |
+  | 131072 / 2048 | 1704.232542 / 1704.170207 | 1348.712500 / 1349.301583 | 1246.293125 / 1249.685875 |
+
+  Fresh pp512 32K -> 128K append latency adds **87.844 ms** off versus
+  **18.948 ms** on, also a **78.4%** reduction in the whole-append depth slope.
+
+- Validation: operator GPU tests preserve all Q4/Q8 score bits, selector IDs,
+  ties/status/guards at supported 32..1024 thread widths, causal partial-key
+  boundaries and nonzero-offset views at both depths. Sampled F64 index
+  max absolute error **6.37e-8** (incumbent/SIMD), **2.15e-7** (tensor).
+  Full M5 `cargo test --release -p qwen-llm --lib`: **2422 passed, 737 ignored,
+  zero failures**. `scripts/check-contracts.sh` passed on `9b0dabd1`;
+  final docs/path checks pass. No merge.
+
 ## 2026-11-06 - M5 Qwen Short Appends: Qualified Tensor Row Gates
 
 - M5 Ultra, base `eca09c26`, 27B Q4_K_M and A3B UD-Q4_K_M. Native dispatch census:

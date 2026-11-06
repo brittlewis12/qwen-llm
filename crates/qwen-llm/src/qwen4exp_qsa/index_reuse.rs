@@ -18,7 +18,7 @@ fn configured_tile() -> usize {
     )
 }
 
-/// M5 Flash-Next exact radix4 selector width for full 32-query packed bands with >=8192 block capacity. Default 128; 32/64 are tuning alternatives and 256 restores the incumbent. Integer selection, stable ties, status and chronological IDs are unchanged. Other geometries/devices retain 256 threads.
+/// M5 Flash-Next exact radix4 selector width for full 32-query packed bands with >=8192 block capacity. Default 512; 32/64/128/1024 are tuning alternatives and 0 or 256 restores the incumbent. Unsupported widths use 256. Integer selection, stable ties, status and chronological IDs are unchanged. Other geometries/devices retain 256 threads.
 const SELECTOR_THREADS_ENV: &str = "QWEN_FN_QSA_SELECTOR_THREADS";
 
 pub(super) fn selector_threads(ctx: &MetalContext, capacity: usize, count: usize) -> usize {
@@ -30,8 +30,10 @@ pub(super) fn selector_threads(ctx: &MetalContext, capacity: usize, count: usize
         || match std::env::var(SELECTOR_THREADS_ENV).ok().as_deref() {
             Some("32") => 32,
             Some("64") => 64,
-            Some("256") => 256,
-            _ => 128,
+            Some("128") => 128,
+        Some("0" | "256") => 256,
+            Some("1024") => 1024,
+            _ => 512,
         },
     )
 }

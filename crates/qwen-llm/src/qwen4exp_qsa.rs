@@ -5246,6 +5246,14 @@ fn encode_select_blocks_tensors(
         emit_ranked: u32,
     }
     let pso = ctx.pipeline("kernel_deepseek_v4_select_top_k_radix4_ids_f32")?;
+    let threads = if threads <= pso.maxTotalThreadsPerThreadgroup()
+        && pso.staticThreadgroupMemoryLength() + threads * 2 * size_of::<u32>()
+            <= ctx.device.maxThreadgroupMemoryLength()
+    {
+        threads
+    } else {
+        ATTENTION_THREADS
+    };
     enc.set_pipeline(&pso);
     enc.set_bytes(
         0,

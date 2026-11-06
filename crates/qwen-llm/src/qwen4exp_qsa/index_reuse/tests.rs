@@ -232,7 +232,19 @@ fn qsa_selector_widths_preserve_cpu_ids_ties_errors_and_guards() {
         GgmlType::I32,
         vec![Q as u64],
     );
-    let banks: Vec<_> = (0..4)
+    let p = ctx
+        .pipeline("kernel_deepseek_v4_select_top_k_radix4_ids_f32")
+        .unwrap();
+    let widths: Vec<_> = [32usize, 64, 128, 256, 512, 1024]
+        .into_iter()
+        .filter(|&w| {
+            w <= p.maxTotalThreadsPerThreadgroup()
+                && p.staticThreadgroupMemoryLength() + w * 8
+                    <= ctx.device.maxThreadgroupMemoryLength()
+        })
+        .collect();
+    let banks: Vec<_> = widths
+        .iter()
         .map(|_| {
             (
                 guarded(
@@ -266,7 +278,7 @@ fn qsa_selector_widths_preserve_cpu_ids_ties_errors_and_guards() {
     }
     let cmd = ctx.queue.commandBuffer().unwrap();
     let enc = KernelEncoder::begin(&cmd);
-    for (i, width) in [32usize, 64, 128, 256].into_iter().enumerate() {
+    for (i, &width) in widths.iter().enumerate() {
         enc.set_pipeline(
             &ctx.pipeline("kernel_deepseek_v4_select_top_k_radix4_ids_f32")
                 .unwrap(),
@@ -334,7 +346,7 @@ fn qsa_selector_widths_preserve_cpu_ids_ties_errors_and_guards() {
     }
     let expected: Vec<u32> = expected.into_iter().map(|x| x as u32).collect();
     for (i, (ids, n, e)) in banks.iter().enumerate() {
-        assert_eq!(bits(ids), expected, "width{}", [32, 64, 128, 256][i]);
+        assert_eq!(bits(ids), expected, "width{}", widths[i]);
         assert_eq!(bits(n), counts);
         assert_eq!(bits(e), status);
         guards(ids);

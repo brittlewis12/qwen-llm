@@ -13,13 +13,13 @@ fn flash_next_tensor_scope_is_bounded() {
         Qwen4ExpMoeMetalGeometry::from_config(&Qwen4ExpConfig::flash_next_reference()).unwrap();
     for gate_up in [false, true] {
         assert!(packed_tensor_scope(production, 2048, gate_up));
-        for tokens in [512, 1024] {
+        for tokens in [512, 513, 769, 1009, 1024, 1536, 2047] {
             assert_eq!(
                 packed_tensor_scope(production, tokens, gate_up),
                 gate_up && crate::qwen4exp_prefill_tensor::rows_qualified(tokens)
             );
         }
-        for tokens in [0, 1, 2045, 2047, 2049, 4096] {
+        for tokens in [0, 1, 511, 2049, 4096] {
             assert!(!packed_tensor_scope(production, tokens, gate_up));
         }
         for geometry in [

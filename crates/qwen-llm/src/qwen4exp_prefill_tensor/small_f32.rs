@@ -6,7 +6,7 @@ use crate::{
 use objc2_metal::{MTLComputePipelineState, MTLDevice, MTLSize};
 
 crate::env_flag!(
-    /// Device-input F32 tensor HC injection and GDN alpha/beta projections at exactly 512/1024 rows, default on with the Metal 4 tier. Original F32 operands and sums, no relaxed precision, conversion or new buffers. Set to 0 for the scalar-ordered incumbent. Independent of QWEN_FN_SHORT_APPEND_TENSOR.
+    /// Device-input F32 tensor HC injection and GDN alpha/beta projections at 128-aligned 512..2047 rows, default on with the Metal 4 tier. Original F32 operands and sums, no relaxed precision, conversion or new buffers. Set to 0 for the scalar-ordered incumbent. Independent of QWEN_FN_SHORT_APPEND_TENSOR.
     default_on enabled,
     "QWEN_FN_SHORT_SMALL_F32"
 );
@@ -24,7 +24,8 @@ pub(crate) fn try_encode(
     if !enabled()
         || !ctx.tensor_ops_status().is_available()
         || w.dtype != GgmlType::F32
-        || !matches!(m, 512 | 1024)
+        || !(512..2048).contains(&m)
+        || !m.is_multiple_of(128)
         || !matches!((k, n), (10240, 4) | (2560, 48))
     {
         return Ok(false);
@@ -138,7 +139,7 @@ mod tests {
             )
             .to_vec()
         };
-        for (m, k, n) in [512usize, 1024]
+        for (m, k, n) in [512usize, 1024, 1536, 1920]
             .into_iter()
             .flat_map(|m| [(m, 10240, 4), (m, 2560, 48)])
         {

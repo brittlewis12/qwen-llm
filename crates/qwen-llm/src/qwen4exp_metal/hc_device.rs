@@ -1,7 +1,7 @@
 use super::*;
 
 crate::env_flag!(
-    /// BF16 device-input HC prompt projections for Flash-Next at M2048 (or M512/M1024 with QWEN_FN_SHORT_APPEND_TENSOR) on the Metal 4 tier, default on. Preserves the incumbent BF16 activation conversion and F32 sums; reuses dead raw-gate/mixed storage. Set to 0 to restore the incumbent. QWEN_MATMAT_BF16_BFLOAT_ACT=0 disables this route too.
+    /// BF16 device-input HC prompt projections for Flash-Next at M2048 (or 128-aligned M512..M2047 with QWEN_FN_SHORT_APPEND_TENSOR) on the Metal 4 tier, default on. Preserves the incumbent BF16 activation conversion and F32 sums; reuses dead raw-gate/mixed storage. Set to 0 to restore the incumbent. QWEN_MATMAT_BF16_BFLOAT_ACT=0 disables this route too.
     default_on enabled,
     "QWEN_FN_PREFILL_HC_DEVICE"
 );
@@ -22,6 +22,7 @@ pub(super) fn try_encode(
         || !crate::metal_forward::matmat_bf16_bfloat_act_enabled()
         || weight.dtype != GgmlType::BF16
         || !crate::qwen4exp_prefill_tensor::rows_qualified(m)
+        || !m.is_multiple_of(128)
         || !matches!((k, n), (10240, 320) | (320, 10240))
         || !dead.offset.is_multiple_of(16)
         || !weight.offset.is_multiple_of(16)
@@ -176,7 +177,7 @@ mod tests {
             )
             .to_vec()
         };
-        for (m, k, n) in [512usize, 1024, 2048]
+        for (m, k, n) in [512usize, 1024, 1536, 2048]
             .into_iter()
             .flat_map(|m| [(m, 10240, 320), (m, 320, 10240)])
         {

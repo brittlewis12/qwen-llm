@@ -6,6 +6,107 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the current state and evidence index.
 
+## 2026-11-06 - Flash-Next Depth Appends: Reused Attention and Parallel Exact Selection
+
+- Main `98d8f4c9`, M5 Ultra, GSQ-RCO IQ3_S; frozen product `1fda4979`.
+  The prior pp512 profiles at 32K / 128K were **386.014 / 405.204 ms**;
+  value **63.263 / 64.134 ms**, logits **47.572 / 47.914**, selection
+  **13.532 / 24.986**. These were the largest remaining QSA costs.
+  Per-stage counter sums overlap and are not additive wall time.
+- **Default on:** exact selected-QSA radix4 with parallel stable prefix scans
+  instead of two serial 512-lane scans, plus early exit when the resolved
+  threshold bucket is entirely selected. Preserves canonical zero/subnormal
+  ordering, stable ties, chronological IDs, visibility and error fallback.
+  M5 full N32 bands, K512, >=8192 block capacity; existing configured selector
+  width and dynamic scratch, no extra static threadgroup storage or GPU buffers.
+  Rollback: **`QWEN_FN_QSA_SELECTOR_COMPACT=0`**.
+- **Default on:** selected QSA logits reuse original F32 query vectors across
+  eight selected keys per SIMD. The dimension/FMA/SIMD reduction order and F16
+  key cache stay unchanged; no operand narrowing, scratch or device buffers.
+  Rollback: **`QWEN_FN_QSA_LOGITS_REUSE=0`**.
+- **Default on:** three explicit `float4` value accumulators in the existing
+  eight-way split. Keeps original F32 masses, exact F16 value conversion,
+  slot traversal, split reduction, denominator and gate order. Same 12 KiB
+  static threadgroup storage; no additional GPU allocations/admission bytes.
+  Rollback: **`QWEN_FN_QSA_VALUE_VECTOR=0`**. Logits/value promotion is M5,
+  released Q24/KV2/D256/budget2048/ratio4, full N32, start >=32768. Small bands,
+  other devices and unsupported PSOs keep their incumbents. All three flags
+  independently controlled; all three 0 restore the landed main policy.
+- Whole-append kill campaign, untimed prefix snapshot capture/restore,
+  one warm append plus two retained reps per cell, thermal pressure 0:
+
+  | Prototype arm | pp512 ms | pp1024 ms | pp2048 ms |
+  | --- | ---: | ---: | ---: |
+  | rollback main | 454.285 | 783.995 | 1347.063 |
+  | all three, bucket cache | 402.103 | 684.317 | 1147.824 |
+  | above without vector value | 424.559 | 727.653 | 1244.026 |
+  | above without query reuse | 422.215 | 719.407 | 1221.191 |
+  | all three, scans without cache | 400.480 | 685.474 | 1154.351 |
+  | above with original selector | 408.748 | 701.656 | 1188.858 |
+
+  Attention ablations share `a66dd466`; selector ablations share `69c59f4f`.
+  All prefix and retained endpoint hashes match. The vector, query and selector
+  marginal wins are about **22/43/96**, **20/35/73**, **8/16/35 ms**. Snapshot
+  screens select candidates; they are not the llama.cpp comparison protocol.
+- **Discard bucket caching:** copying the threshold bucket into 512 shared keys
+  adds atomics and storage for only **0.2-0.3%** larger-width difference against
+  scans/early exit, within this short screen's variation. Keep the simpler
+  selector. **Discard longer 16/32-key logits loops:** all match incumbent operator bits;
+  best pp2048 benefit is only **0.7%**, and 32 keys regresses pp512. Keep eight.
+  Failed tuning variants are removed from the product.
+- Teacher forcing: one frozen binary across all three flags 0 / unset, Bash,
+  curl and csh manuals plus unchanged runtime/text-session/GDN Rust source,
+  real 32768/131072-token prefixes. Independent 512/2048-row append cases,
+  1024/2048 targets per document/width/depth, **12,288 targets** over eight
+  cells. Native all-row gated-residual readout; full-vocabulary F64
+  log-sum-exp/NLL/KL(off||on); identical checked inputs, targets and prefix
+  token hashes; all finite. Census proves 192/768 selected selector/logit/value
+  dispatches for 512/2048 chunks, with the old kernels on rollback.
+  Prefix endpoint hashes match at both depths. Every cell and pooled:
+  **dNLL = 0, mean/max KL = 0**, argmax **12288/12288**. Pooled NLL
+  **0.176534270** in both arms. Pass unchanged |dNLL| <=0.005, mean KL <=0.01;
+  bounded held-text evidence, not a model-wide identity claim.
+- Post profiles pp512, 32K / 128K: **335.369 / 353.151 ms**, 3833 dispatches,
+  zero missing pairs/overflow. Value **35.164 / 36.566 ms**, logits
+  **31.184 / 31.767**, selector **6.825 / 16.799**, index **5.008 / 11.435**.
+  Remaining 32K -> 128K growth is **17.782 ms**, mostly selector/index
+  (**9.974 / 6.427 ms**). Largest fixed counter sums now include Q6_K wide
+  dense **41 ms**, mixed IQ4_NL down **39**, value **37**, small F32 HC **34**.
+  Further depth gains would require partitioning/batching selection or a
+  broader attention rewrite; stop here after the whole-append wins below.
+- Fresh qwen-bench CLI on/off, two retained reps/cell, normal model/shape
+  warmups, seed 1; each repetition fills a fresh prefix outside the timer,
+  full endpoint logits included. Build identity matches frozen source; all
+  timing arms held build lock + Metal lease with thermal pressure 0 before/after.
+  Compare with the **same-day pinned llama.cpp references in the preceding
+  depth entry**, v0.9.0 `cd959bae99ff4bed22bef2604f45241c09bbb8c8c8`,
+  Metal/BLAS, F16 K/V, batch/ubatch2048, same 83,606,638,080-byte model.
+  Rechecked CPP binary SHA256 `ec804ae203a7b7e801609cfe5f69bb234274d8b03fd6c50ce727d8b5600f13e6`;
+  unchanged. The fresh engine rollback reproduces the landed baseline.
+
+  | Depth | Append | Off tok/s | On tok/s | Whole gain | CPP reference tok/s | Off -> on / CPP |
+  | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+  | 32768 | 512 | 1195.1 | 1350.0 | +12.96% | 1339.37 | 0.892x -> 1.008x |
+  | 32768 | 2048 | 1608.0 | 1899.7 | +18.14% | 1804.60 | 0.891x -> 1.053x |
+  | 131072 | 512 | 1145.1 | 1286.7 | +12.37% | 1228.45 | 0.932x -> 1.047x |
+  | 131072 | 2048 | 1519.2 | 1777.6 | +17.01% | 1641.04 | 0.926x -> 1.083x |
+
+  | Depth / append | Off retained ms | On retained ms |
+  | --- | --- | --- |
+  | 32768 / 512 | 428.541584 / 428.280625 | 378.977708 / 379.516209 |
+  | 32768 / 2048 | 1273.563292 / 1273.733209 | 1077.616083 / 1078.472875 |
+  | 131072 / 512 | 447.160541 / 447.090125 | 398.105958 / 397.719042 |
+  | 131072 / 2048 | 1348.447792 / 1347.693500 | 1153.300417 / 1150.905125 |
+
+- GPU operator checks preserve incumbent logits/value bits at both depths,
+  invalid-ID/metadata behavior and nonzero-offset buffer guards. Selector
+  matches a CPU stable sort at all supported 32..1024-thread widths, including
+  ties, signed zeros/subnormals, near-equal floats, hidden non-finite padding,
+  invalid counts and non-finite error fallback. Full M5
+  `cargo test --release -p qwen-llm --lib`: **2425 passed, 738 ignored, 0 failed**.
+  `scripts/check-contracts.sh` passed on `1fda4979`; final docs/path checks pass.
+  No merge; temporary examples/logit dumps removed and owned jobs finished.
+
 ## 2026-11-06 - A3B M5 Depth: Tensor Flash Short Appends
 
 - Base `2ebe7e57`, production/measurement source **`d4365ed1`**, M5 Ultra,

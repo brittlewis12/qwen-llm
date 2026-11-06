@@ -11,35 +11,37 @@ use std::collections::BTreeMap;
 fn flash_next_tensor_scope_is_bounded() {
     let production =
         Qwen4ExpMoeMetalGeometry::from_config(&Qwen4ExpConfig::flash_next_reference()).unwrap();
-    assert!(packed_tensor_scope(production, 2048));
-    for tokens in [512, 1024] {
-        assert_eq!(
-            packed_tensor_scope(production, tokens),
-            crate::qwen4exp_prefill_tensor::rows_qualified(tokens)
-        );
-    }
-    for tokens in [0, 1, 2045, 2047, 2049, 4096] {
-        assert!(!packed_tensor_scope(production, tokens));
-    }
-    for geometry in [
-        Qwen4ExpMoeMetalGeometry {
-            hidden_size: 5120,
-            ..production
-        },
-        Qwen4ExpMoeMetalGeometry {
-            routed_intermediate_size: 768,
-            ..production
-        },
-        Qwen4ExpMoeMetalGeometry {
-            expert_count: 256,
-            ..production
-        },
-        Qwen4ExpMoeMetalGeometry {
-            experts_per_token: 8,
-            ..production
-        },
-    ] {
-        assert!(!packed_tensor_scope(geometry, 2048));
+    for gate_up in [false, true] {
+        assert!(packed_tensor_scope(production, 2048, gate_up));
+        for tokens in [512, 1024] {
+            assert_eq!(
+                packed_tensor_scope(production, tokens, gate_up),
+                gate_up && crate::qwen4exp_prefill_tensor::rows_qualified(tokens)
+            );
+        }
+        for tokens in [0, 1, 2045, 2047, 2049, 4096] {
+            assert!(!packed_tensor_scope(production, tokens, gate_up));
+        }
+        for geometry in [
+            Qwen4ExpMoeMetalGeometry {
+                hidden_size: 5120,
+                ..production
+            },
+            Qwen4ExpMoeMetalGeometry {
+                routed_intermediate_size: 768,
+                ..production
+            },
+            Qwen4ExpMoeMetalGeometry {
+                expert_count: 256,
+                ..production
+            },
+            Qwen4ExpMoeMetalGeometry {
+                experts_per_token: 8,
+                ..production
+            },
+        ] {
+            assert!(!packed_tensor_scope(geometry, 2048, gate_up));
+        }
     }
 }
 

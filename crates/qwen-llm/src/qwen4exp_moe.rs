@@ -80,15 +80,17 @@ pub(crate) mod router_capture;
 const MAX_PACKED_TOKENS: usize = 2_048;
 /// Default-on Metal 4 half-operand tensor tiles for Flash-Next routed IQ2_S/IQ3_S/IQ3_XXS/IQ4_XS prefill gate/up at 2048 rows (or 512/1024 with QWEN_FN_SHORT_APPEND_TENSOR) and the screened 2560/640/512/top-10 geometry. Set to 0 for A/B or rollback; other shapes, dtypes and unavailable tensor pipelines retain incumbent dispatch. Also respects QWEN_EXPERT_TENSOR_TILE=0.
 const PREFILL_TENSOR_GATE_UP_ENV: &str = "QWEN_FN_PREFILL_TENSOR_GATE_UP";
-/// Default-on Metal 4 half-operand tensor tiles for Flash-Next routed IQ4_NL/Q2_0 prefill down at 2048 rows (or 512/1024 with QWEN_FN_SHORT_APPEND_TENSOR) and the screened 2560/640/512/top-10 geometry. Set to 0 for A/B or rollback; Q8_0, other shapes and unavailable tensor pipelines retain incumbent dispatch. Also respects QWEN_EXPERT_TENSOR_TILE=0.
+/// Default-on Metal 4 half-operand tensor tiles for Flash-Next routed IQ4_NL/Q2_0 prefill down at exactly 2048 rows and the screened 2560/640/512/top-10 geometry. Set to 0 for A/B or rollback; Q8_0, other shapes and unavailable tensor pipelines retain incumbent dispatch. Also respects QWEN_EXPERT_TENSOR_TILE=0.
 const PREFILL_TENSOR_DOWN_ENV: &str = "QWEN_FN_PREFILL_TENSOR_DOWN";
 
-fn packed_tensor_scope(geometry: Qwen4ExpMoeMetalGeometry, tokens: usize) -> bool {
+fn packed_tensor_scope(geometry: Qwen4ExpMoeMetalGeometry, tokens: usize, gate_up: bool) -> bool {
     geometry.hidden_size == 2560
         && geometry.routed_intermediate_size == 640
         && geometry.expert_count == 512
         && geometry.experts_per_token == 10
         && crate::qwen4exp_prefill_tensor::rows_qualified(tokens)
+        // The composed short-append NLL screen retains the incumbent down.
+        && (gate_up || tokens == 2048)
 }
 
 fn packed_tensor_selected(
@@ -107,7 +109,7 @@ fn packed_tensor_selected(
         *DOWN.get_or_init(|| crate::env_flag::read_default_on(PREFILL_TENSOR_DOWN_ENV))
     };
     if !enabled
-        || !packed_tensor_scope(geometry, tokens)
+        || !packed_tensor_scope(geometry, tokens, gate_up)
         || if gate_up {
             !ROUTED_GATE_UP_DTYPES.contains(&dtype)
         } else {

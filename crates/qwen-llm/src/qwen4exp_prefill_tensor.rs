@@ -3,7 +3,7 @@
 pub(crate) mod small_f32;
 
 crate::env_flag!(
-    /// Extend Flash-Next tensor dense/expert projections, BF16 HC and parallel bucketing to exactly 512/1024-row appends, default on when their existing controls and hardware gates allow them. Set to 0 to restore the 2048-row-only qualification. No new operand precision or allocated buffers; wide expert gate/up retains its 2048-row qualification.
+    /// Extend Flash-Next tensor dense and routed gate/up projections, BF16 HC and parallel bucketing to exactly 512/1024-row appends, default on when their existing controls and hardware gates allow them. Set to 0 to restore the 2048-row-only qualification. No new operand precision or allocated buffers; routed down, wide expert gate/up and the tensor router retain their 2048-row qualification.
     default_on short_enabled,
     "QWEN_FN_SHORT_APPEND_TENSOR"
 );

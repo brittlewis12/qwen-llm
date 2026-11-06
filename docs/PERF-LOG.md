@@ -6,6 +6,101 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the current state and evidence index.
 
+## 2026-11-05 - Flash-Next M5 Tensor Prefill: Distribution-Qualified, Default On
+
+- Restore the operator-qualified `6b35e59b` routes: existing narrow Metal 4
+  half-operand dense tiles and grouped gate/up/down tiles, only at the
+  screened 2048-row geometry on the available Apple10/Metal 4 tier. No new
+  shader or activation narrowing site. Other shapes/dtypes/devices retain
+  incumbent dispatch. Greedy identity was the initial rejection criterion;
+  distribution accuracy is now the landing gate, as requested by the owner.
+- Rollback: `QWEN_DENSE_PREFILL_TENSOR=0` for dense and the shared
+  `QWEN_EXPERT_TENSOR_TILE=0` for both routed stages. Independent
+  `QWEN_FN_PREFILL_TENSOR_GATE_UP=0` / `QWEN_FN_PREFILL_TENSOR_DOWN=0`
+  also retain the incumbent per stage. The shared two-knob rollback reproduces
+  the original 160-token incumbent output byte-for-byte (SHA256
+  `99d90e29681f7aa5296fc53ce8abc0dae94a8d21a9760a335413936d73166344`).
+- M5 Ultra, real GSQ-RCO IQ3_S banks, M2048: 17 dense dtype/shape cohorts
+  (Q4_K/Q6_K/IQ4_XS projections plus IQ4_NL shared down), routed
+  H2560/F640/E512/top-10, all four released gate/up formats and IQ4_NL/Q2_0
+  down. Warmed command-buffer ABBA, six samples per arm occurrence,
+  12 per setting; every thermal boundary 0, no samples dropped. Dense wins
+  1.809-2.304x; IQ2_S/IQ3_S/IQ3_XXS/IQ4_XS gate/up wins
+  2.206/2.171/2.352/2.307x; IQ4_NL/Q2_0 down wins 1.678/1.649x.
+  Routed buckets were synthetic uneven loads, including full/empty experts,
+  not captured production histograms. F64 dots from original seeded F32
+  inputs and CPU-dequantized real weights cover 952 dense + 486 routed
+  cells. Worst max-absolute / relative-RMS error ratios to incumbent:
+  **1.001473 / 1.000865**, below 1.5x; all outputs finite. Integrated dense
+  dispatch reproduces the explicit tensor operator bitwise in all 17 cases.
+- Quick pp4096 attribution: existing per-dispatch profiler, end-to-end
+  increments per chunk (encoder starts may overlap previous ends).
+  Off: 12,922 dispatches, no missing pairs/overflow, 3987.625 ms timeline;
+  screened dense 685.536 ms (17.2%), routed gate/up 672.501 ms (16.9%),
+  routed down 362.048 ms (9.1%), selected-QSA value 474.094 ms (11.9%).
+  Profiling serializes dispatches and includes transition gaps in increments;
+  these shares are diagnostic, not an ordinary-throughput decomposition.
+- Teacher forcing: 4096 next-token targets each from frozen Bash manual prose
+  and real `qwen4exp_runtime.rs` Rust source, two actual 2048-row chunks per
+  document. All-row logits use the existing native gated-residual readout;
+  both arms share identical text/token IDs and head execution. Full-vocabulary
+  F64 log-sum-exp/NLL and KL(off||on), linear p99, no generated-token feedback.
+  Telemetry is disabled while scoring; range capture is separate.
+
+  | Text | Rows | NLL off | NLL on | dNLL | Mean KL | p99 KL | Argmax agreement |
+  | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+  | Prose/manual | 4096 | 0.087658565 | 0.089073446 | +0.001414881 | 0.001389033 | 0.028358160 | 4082/4096 (99.6582%) |
+  | Rust code | 4096 | 0.857783887 | 0.856992302 | -0.000791585 | 0.003007687 | 0.035742628 | 4029/4096 (98.3643%) |
+  | Pooled | 8192 | 0.472721226 | 0.473032874 | +0.000311648 | 0.002198360 | 0.033115394 | 8111/8192 (99.0112%) |
+
+  **Pass**: |dNLL| <=0.005 nats/token and mean KL <=0.01, pooled and per
+  document. Maximum observed KL 0.689747; this is bounded two-document
+  evidence, not a model-wide noninferiority claim. All complete-vocabulary
+  rows are finite in both arms. Token-ID SHA256s (4097 u32 LE per document):
+  prose `38ebe32deb00a5fbf624f08ffb9dc3f2e727fde77115865b039677bae3a46ef1`,
+  code `4b3520dc64ffe574f6138bd2d15fe83c666dfcf4491e30c1402ca0b24289a84a`.
+- Original greedy divergence reproduced on the same 2587-token prompt and
+  160-token off trajectory. First change: generated token **124**, next-token
+  position 2710 (input row 2709), ID13 `.` versus ID17225 ` lesson`.
+  Off top-two logits 23.883932 / 23.845165, gap **0.038766861**;
+  probabilities 0.459416 / 0.441947. On reverses them, gap 0.080293655,
+  probabilities 0.467606 / 0.431528. Both are close alternatives; continuation
+  identity is not used as the accuracy gate.
+- Range sanity on both texts: 451-tensor load-time census, zero violations
+  or non-finite values; maximum weight bound 4.15625 (<32768), maximum
+  RMSNorm bound 1353.4548 (<2048). Separate instrumented ordinary prefills
+  observe every selected dense/gate-up input and the existing routed/shared
+  down sites: 292 site/layer observations, all non-finite counters zero.
+  Maxima: tensor inputs 35.802086, routed down 85.315895, shared down
+  35.802086, dense-down aggregate 78.605141, all below even the 2048 guard
+  and far below F16's 65504. No observed half-range saturation.
+- Short end-to-end confirmation: M5 Ultra, GSQ-RCO IQ3_S, frozen code
+  `b99bcddc`, one normal release binary, production prefill plus endpoint
+  logits, seed 1, all three candidate switches 0 versus unset. Separate
+  ABBA campaigns, two retained reps per arm occurrence, 30 s cooldown before
+  each arm, build lock plus Metal lease. All 16 thermal boundary readings 0;
+  no samples dropped. Wall samples below are ms; medians pool four per setting.
+
+  | pp | Off samples (ms) | On samples (ms) | Median off/on (ms) | Speedup | Off/on tok/s |
+  | ---: | --- | --- | ---: | ---: | ---: |
+  | 2048 | 1553.300, 1560.792, 1548.537, 1552.634 | 1137.027, 1143.166, 1123.603, 1128.552 | 1552.967 / 1132.789 | 1.370923x | 1318.8 / 1807.9 |
+  | 8192 | 8373.105, 8371.167, 8391.093, 8389.226 | 7153.137, 7151.359, 7110.698, 7098.059 | 8381.166 / 7131.029 | 1.175309x | 977.4 / 1148.8 |
+
+  Both campaigns use binary SHA256
+  `391fa97f78b1bf4e10264f63446a852bb172982c95e610127c095b1c00f22c76`,
+  clean build/runtime source stamps match. Native admission uses 2048-row
+  chunks; the family suite currently reports its chunk field as null.
+- Rebased on current main `452e70eb` (27B FFN code `d9e165f9`), with
+  identical Flash-Next projection helpers, callers and tensor shader source.
+  That new tile only admits 27B dimensions; recorded Flash-Next paths are
+  unchanged. Full `cargo test --release -p qwen-llm --lib` on the combined
+  code: **2408 passed, zero failed, 736 ignored**; `scripts/check-contracts.sh`
+  passed. Corrected the three pre-existing F32-down
+  test inventory failures: enumerate the 20 F32-native formats separately
+  from generic half tiles and explicitly retain IQ1_S/IQ1_M rejection checks.
+  No production F32-down behavior changed. Research sources removed; no
+  separate report files added.
+
 ## 2026-11-05 - 27B FFN Device-Half Tile: 1.416x over the Shipped B Route
 
 - Follow-up to the 128x64 tensor experiment, measured on M5 Ultra from

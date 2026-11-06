@@ -25,7 +25,7 @@ use crate::metal::{
 };
 use crate::metal_forward::{
     MfError, encode_mat_mat_dispatch_without_fewrow, encode_mat_vec_dispatch,
-    validate_f32_q8_mat_mat_addressing,
+    encode_qwen4exp_prefill_mat_mat, validate_f32_q8_mat_mat_addressing,
 };
 use crate::qwen4exp::{MixerKind, Qwen4ExpConfig};
 use crate::qwen4exp_profile::{
@@ -74,6 +74,66 @@ pub(crate) mod singleton_observe;
 #[path = "qwen4exp_moe/router_capture.rs"]
 pub(crate) mod router_capture;
 const MAX_PACKED_TOKENS: usize = 2_048;
+/// Default-on Metal 4 half-operand tensor tiles for Flash-Next routed IQ2_S/IQ3_S/IQ3_XXS/IQ4_XS prefill gate/up at exactly 2048 rows and the screened 2560/640/512/top-10 geometry. Set to 0 for A/B or rollback; other shapes, dtypes and unavailable tensor pipelines retain incumbent dispatch. Also respects QWEN_EXPERT_TENSOR_TILE=0.
+const PREFILL_TENSOR_GATE_UP_ENV: &str = "QWEN_FN_PREFILL_TENSOR_GATE_UP";
+/// Default-on Metal 4 half-operand tensor tiles for Flash-Next routed IQ4_NL/Q2_0 prefill down at exactly 2048 rows and the screened 2560/640/512/top-10 geometry. Set to 0 for A/B or rollback; Q8_0, other shapes and unavailable tensor pipelines retain incumbent dispatch. Also respects QWEN_EXPERT_TENSOR_TILE=0.
+const PREFILL_TENSOR_DOWN_ENV: &str = "QWEN_FN_PREFILL_TENSOR_DOWN";
+
+fn packed_tensor_scope(geometry: Qwen4ExpMoeMetalGeometry, tokens: usize) -> bool {
+    geometry.hidden_size == 2560
+        && geometry.routed_intermediate_size == 640
+        && geometry.expert_count == 512
+        && geometry.experts_per_token == 10
+        && tokens == 2048
+}
+
+fn packed_tensor_selected(
+    ctx: &MetalContext,
+    geometry: Qwen4ExpMoeMetalGeometry,
+    tokens: usize,
+    dtype: GgmlType,
+    gate_up: bool,
+) -> bool {
+    use crate::metal::{MoeGroupedTensorRole as Role, TensorActivation};
+    static GATE_UP: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    static DOWN: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    let enabled = if gate_up {
+        *GATE_UP.get_or_init(|| crate::env_flag::read_default_on(PREFILL_TENSOR_GATE_UP_ENV))
+    } else {
+        *DOWN.get_or_init(|| crate::env_flag::read_default_on(PREFILL_TENSOR_DOWN_ENV))
+    };
+    if !enabled
+        || !packed_tensor_scope(geometry, tokens)
+        || if gate_up {
+            !ROUTED_GATE_UP_DTYPES.contains(&dtype)
+        } else {
+            !matches!(dtype, GgmlType::IQ4_NL | GgmlType::Q2_0)
+        }
+        || !crate::metal::moe_grouped_tensor_selected(ctx)
+    {
+        return false;
+    }
+    let roles: &[Role] = if gate_up {
+        &[Role::Down, Role::UpSiluMul]
+    } else {
+        &[Role::Down]
+    };
+    roles.iter().all(|&role| {
+        let Some(name) =
+            crate::metal::moe_grouped_tensor_pipeline_name(role, dtype, TensorActivation::F32)
+        else {
+            return false;
+        };
+        ctx.tensor_pipeline(&name).is_ok_and(|pipeline| {
+            pipeline.threadExecutionWidth() == 32
+                && pipeline.maxTotalThreadsPerThreadgroup() >= 128
+                && pipeline
+                    .staticThreadgroupMemoryLength()
+                    .checked_add(8192)
+                    .is_some_and(|bytes| bytes <= ctx.device.maxThreadgroupMemoryLength())
+        })
+    })
+}
 const PACKED_ROUTER_E8P32_STRICT_HIDDEN: usize = 2_560;
 const PACKED_ROUTER_E8P32_STRICT_EXPERTS: usize = 512;
 const PACKED_ROUTER_E8P32_STRICT_N512_TOKENS: usize = 512;
@@ -1960,6 +2020,34 @@ impl Qwen4ExpMoePackedExecution<'_, '_> {
             Qwen4ExpPackedProfileLabel::detail("moe.routed_gate_up", layer, mixer),
         )?;
         match self.weights.routed_gate.dtype {
+            dtype
+                if dtype == self.weights.routed_up.dtype
+                    && packed_tensor_selected(ctx, g, self.tokens, dtype, true) =>
+            {
+                crate::half_telemetry::record(
+                    ctx,
+                    enc,
+                    crate::half_telemetry::SITE_QWEN4EXP_TENSOR_INPUT,
+                    layer,
+                    self.input,
+                );
+                crate::metal::encode_moe_swiglu_f32_grouped_slots_tensor(
+                    ctx,
+                    enc,
+                    self.weights.routed_gate,
+                    self.weights.routed_up,
+                    self.input,
+                    &self.views.route_counts,
+                    &self.views.route_slots,
+                    &self.views.routed_inner,
+                    g.hidden_size,
+                    g.routed_intermediate_size,
+                    g.expert_count,
+                    g.experts_per_token,
+                    self.tokens,
+                    None,
+                )?;
+            }
             GgmlType::IQ2_S | GgmlType::IQ3_S => encode_moe_swiglu_f32_grouped_slots_generic_range(
                 ctx,
                 enc,
@@ -2142,6 +2230,21 @@ impl Qwen4ExpMoePackedExecution<'_, '_> {
             &self.views.routed_inner,
         );
         match self.weights.routed_down.dtype {
+            dtype if packed_tensor_selected(ctx, g, self.tokens, dtype, false) => {
+                crate::metal::encode_moe_down_f32_grouped_slots_tensor(
+                    ctx,
+                    enc,
+                    self.weights.routed_down,
+                    &self.views.routed_inner,
+                    &self.views.route_counts,
+                    &self.views.route_slots,
+                    &self.views.routed_expert_output,
+                    g.routed_intermediate_size,
+                    g.hidden_size,
+                    g.expert_count,
+                    self.tokens,
+                )?;
+            }
             GgmlType::Q2_0 => encode_moe_down_f32_grouped_slots_generic(
                 ctx,
                 enc,
@@ -2258,7 +2361,7 @@ impl Qwen4ExpMoePackedExecution<'_, '_> {
             enc,
             Qwen4ExpPackedProfileLabel::detail("moe.shared_gate_up", layer, mixer),
         )?;
-        encode_mat_mat_dispatch_without_fewrow(
+        encode_qwen4exp_prefill_mat_mat(
             ctx,
             enc,
             self.weights.shared_gate,
@@ -2268,7 +2371,7 @@ impl Qwen4ExpMoePackedExecution<'_, '_> {
             g.shared_intermediate_size,
             self.tokens,
         )?;
-        encode_mat_mat_dispatch_without_fewrow(
+        encode_qwen4exp_prefill_mat_mat(
             ctx,
             enc,
             self.weights.shared_up,
@@ -2298,7 +2401,7 @@ impl Qwen4ExpMoePackedExecution<'_, '_> {
             layer,
             &self.views.shared_inner,
         );
-        encode_mat_mat_dispatch_without_fewrow(
+        encode_qwen4exp_prefill_mat_mat(
             ctx,
             enc,
             self.weights.shared_down,

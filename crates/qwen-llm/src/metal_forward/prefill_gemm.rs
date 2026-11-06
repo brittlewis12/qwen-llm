@@ -1,5 +1,5 @@
 //! Tensor prompt projections for dense 27B and 35B-A3B, plus qualified
-//! A3B grouped experts. Decode retains its incumbent dispatch.
+//! A3B grouped experts and Flash-Next prompt projections. Decode retains its incumbent dispatch.
 
 use super::{MfError, encode_mat_mat_dispatch};
 use crate::metal::{KernelEncoder, MetalContext, MetalTensor};
@@ -7,7 +7,8 @@ use crate::model::{Arch, ArchKind, QWEN3_27B};
 use crate::tensor::GgmlType;
 use std::sync::OnceLock;
 
-/// Metal 4 half-operand tensor prompt projections for dense Qwen 27B Q4_K/Q6_K and Qwen 35B-A3B Q8_0 at >=128 rows, enabled by default when the tensor tier is available. Set to 0 for A/B or rollback. Qualified 27B FFN shapes at 1024 rows use a strict device-half 128-row tile with reused scratch. Other architectures, dtypes, shapes and small tails use incumbent dispatch; Q5_K retains its existing route and the endpoint head remains GEMV.
+/// Metal 4 half-operand tensor prompt projections for dense Qwen 27B Q4_K/Q6_K and Qwen 35B-A3B Q8_0 at >=128 rows, plus screened Flash-Next Q4_K/Q6_K/IQ4_XS/IQ4_NL projections at exactly 2048 rows, enabled by default when the tensor tier is available. Set to 0 for A/B or rollback. Qualified 27B FFN shapes at 1024 rows use a strict device-half 128-row tile with reused scratch. Other architectures, dtypes, shapes and small tails use incumbent dispatch; Q5_K retains its existing route and the endpoint head remains GEMV.
+
 const DENSE_PREFILL_TENSOR_ENV: &str = "QWEN_DENSE_PREFILL_TENSOR";
 
 /// Strict device-half 128-row tile for qualified 27B FFN projections at exactly 1024 rows, default on when QWEN_DENSE_PREFILL_TENSOR and the tensor tier are available. Set to 0 to retain the previous narrow B tile for A/B or rollback. Other shapes and A3B retain their existing tiles.
@@ -115,6 +116,147 @@ fn eligible(
                 (k, n),
                 (2048, 8192) | (2048, 4096) | (4096, 2048) | (2048, 512) | (512, 2048)
             )
+    }
+}
+
+// Only real GSQ-RCO dtype/shape cohorts screened on M5. K/N here are
+// projection dimensions, not architecture inference: callers are exclusively
+// Flash-Next packed GDN, QSA and shared-expert motors.
+fn flash_next_eligible(
+    on: bool,
+    available: bool,
+    dtype: GgmlType,
+    k: usize,
+    n: usize,
+    m: usize,
+) -> bool {
+    on && available
+        && m == 2048
+        && match dtype {
+            GgmlType::Q4_K => matches!((k, n), (2560, 640 | 6144 | 10240 | 12288) | (6144, 2560)),
+            GgmlType::Q6_K => matches!(
+                (k, n),
+                (2560, 512 | 640 | 6144 | 10240 | 12288) | (6144, 2560)
+            ),
+            GgmlType::IQ4_XS => matches!((k, n), (2560, 512 | 640 | 6144 | 10240 | 12288)),
+            GgmlType::IQ4_NL => (k, n) == (640, 2560),
+            _ => false,
+        }
+}
+
+/// Flash-Next packed projections reuse the existing half-operand narrow tile.
+/// Both routes already stage half operands; existing caller down telemetry is
+/// retained, along with the generic dispatcher's dense-down telemetry below.
+pub(crate) fn encode_qwen4exp_prefill_mat_mat(
+    ctx: &MetalContext,
+    enc: &KernelEncoder,
+    weight: &MetalTensor,
+    x: &MetalTensor,
+    y: &MetalTensor,
+    k: usize,
+    n: usize,
+    m: usize,
+) -> Result<(), MfError> {
+    if flash_next_eligible(
+        enabled(),
+        ctx.tensor_ops_status().is_available(),
+        weight.dtype,
+        k,
+        n,
+        m,
+    ) {
+        crate::metal::checks::check_disjoint(
+            "qwen4exp_prefill_tensor",
+            y,
+            &[(weight, "weight"), (x, "input")],
+        )?;
+        if k > n {
+            crate::half_telemetry::record(
+                ctx,
+                enc,
+                crate::half_telemetry::SITE_DENSE_DOWN,
+                u32::MAX,
+                x,
+            );
+        }
+        crate::half_telemetry::record(
+            ctx,
+            enc,
+            crate::half_telemetry::SITE_QWEN4EXP_TENSOR_INPUT,
+            u32::MAX,
+            x,
+        );
+        crate::metal::encode_mat_mat_tensor_f32_narrow(ctx, enc, weight, x, y, k, n, m)?;
+        Ok(())
+    } else {
+        super::encode_mat_mat_dispatch_without_fewrow(ctx, enc, weight, x, y, k, n, m)
+    }
+}
+
+#[test]
+fn flash_next_prefill_tensor_gate_preserves_fallbacks() {
+    for (dtype, shapes) in [
+        (
+            GgmlType::Q4_K,
+            &[
+                (2560, 640),
+                (2560, 6144),
+                (2560, 10240),
+                (2560, 12288),
+                (6144, 2560),
+            ][..],
+        ),
+        (
+            GgmlType::Q6_K,
+            &[
+                (2560, 512),
+                (2560, 640),
+                (2560, 6144),
+                (2560, 10240),
+                (2560, 12288),
+                (6144, 2560),
+            ][..],
+        ),
+        (
+            GgmlType::IQ4_XS,
+            &[
+                (2560, 512),
+                (2560, 640),
+                (2560, 6144),
+                (2560, 10240),
+                (2560, 12288),
+            ][..],
+        ),
+        (GgmlType::IQ4_NL, &[(640, 2560)][..]),
+    ] {
+        for &(k, n) in shapes {
+            assert!(flash_next_eligible(true, true, dtype, k, n, 2048));
+            assert!(!flash_next_eligible(false, true, dtype, k, n, 2048));
+            assert!(!flash_next_eligible(true, false, dtype, k, n, 2048));
+            for m in [0, 1, 16, 127, 128, 512, 1024, 2045, 2047, 2049, 4096] {
+                assert!(!flash_next_eligible(true, true, dtype, k, n, m));
+            }
+        }
+    }
+    for dtype in [
+        GgmlType::F32,
+        GgmlType::F16,
+        GgmlType::BF16,
+        GgmlType::Q5_K,
+        GgmlType::Q8_0,
+        GgmlType::IQ3_S,
+    ] {
+        assert!(!flash_next_eligible(true, true, dtype, 2560, 6144, 2048));
+    }
+    for (k, n) in [
+        (640, 512),
+        (2048, 6144),
+        (2560, 2560),
+        (2560, 256),
+        (6144, 512),
+        (2560, 248320),
+    ] {
+        assert!(!flash_next_eligible(true, true, GgmlType::Q6_K, k, n, 2048));
     }
 }
 

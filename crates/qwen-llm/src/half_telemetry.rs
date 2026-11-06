@@ -35,6 +35,7 @@ pub const SITES: &[&str] = &[
     "qwen4exp.shared.down",
     "v41.output_b.input",
     "v41.routed.down",
+    "qwen4exp.tensor.input",
 ];
 
 pub const SITE_DENSE_DOWN: &str = SITES[0];
@@ -44,6 +45,7 @@ pub const SITE_QWEN4EXP_ROUTED_DOWN: &str = SITES[3];
 pub const SITE_QWEN4EXP_SHARED_DOWN: &str = SITES[4];
 pub const SITE_V41_OUTPUT_B_INPUT: &str = SITES[5];
 pub const SITE_V41_ROUTED_DOWN: &str = SITES[6];
+pub const SITE_QWEN4EXP_TENSOR_INPUT: &str = SITES[7];
 
 /// Per-layer slots. Real models use far fewer layers; `u32::MAX` from callers
 /// without a layer index maps to the final aggregate slot.

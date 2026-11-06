@@ -13,7 +13,13 @@ mod reduction;
 
 #[test]
 fn down_f32x_capability_matches_native_instantiations() {
-    assert_eq!(MOE_GROUPED_GENERIC_LAYOUTS.len(), 20);
+    // Generic half tiles also support IQ1_S/IQ1_M. The F32-only down
+    // inventory remains independently bounded by its shader instantiations.
+    let layouts: Vec<_> = MOE_GROUPED_GENERIC_LAYOUTS
+        .iter()
+        .filter(|layout| !matches!(layout.dtype, GgmlType::IQ1_S | GgmlType::IQ1_M))
+        .collect();
+    assert_eq!(layouts.len(), 20);
     assert_eq!(
         SOURCE
             .matches("template [[host_name(\"kernel_moe_down_")
@@ -22,7 +28,10 @@ fn down_f32x_capability_matches_native_instantiations() {
     );
     assert!(SOURCE.contains("#include \"native_dequant_f32.h\""));
     assert!(moe_down_f32x_grouped_slots_supported(GgmlType::MXFP4));
-    for layout in MOE_GROUPED_GENERIC_LAYOUTS {
+    for layout in MOE_GROUPED_GENERIC_LAYOUTS
+        .iter()
+        .filter(|layout| !matches!(layout.dtype, GgmlType::IQ1_S | GgmlType::IQ1_M))
+    {
         let dtype = layout.dtype;
         assert!(moe_down_f32x_grouped_slots_supported(dtype));
         // MXFP4 and the IQ2 grid types keep their own F32 decoders (checked
@@ -58,7 +67,13 @@ fn down_f32x_capability_matches_native_instantiations() {
         assert!(SOURCE.contains(&format!("host_name(\"{name}\")")));
         assert!(SOURCE.contains(&format!("inline void f32x_dequantize_{suffix}(")));
     }
-    for dtype in [GgmlType::I32, GgmlType::Q5_0, GgmlType::Unknown] {
+    for dtype in [
+        GgmlType::I32,
+        GgmlType::Q5_0,
+        GgmlType::IQ1_S,
+        GgmlType::IQ1_M,
+        GgmlType::Unknown,
+    ] {
         assert!(!moe_down_f32x_grouped_slots_supported(dtype));
         assert!(moe_down_f32x_grouped_slots_pipeline_name(dtype).is_none());
     }
@@ -257,7 +272,10 @@ fn down_f32x_all_native_decoders_match_cpu_and_preserve_slot_independence() {
     let Some(ctx) = crate::test_fixtures::metal_context_or_skip() else {
         return;
     };
-    for layout in MOE_GROUPED_GENERIC_LAYOUTS {
+    for layout in MOE_GROUPED_GENERIC_LAYOUTS
+        .iter()
+        .filter(|layout| !matches!(layout.dtype, GgmlType::IQ1_S | GgmlType::IQ1_M))
+    {
         // Two storage blocks catch stepping errors; M=65 covers a row tail.
         let k = 2 * layout.block_elems.max(32);
         let mut first = None;
@@ -673,7 +691,10 @@ fn down_f32x_native_preflight_rejects_bad_shapes_types_and_alignment() {
     let counts = i32_zeros(&ctx, vec![1]);
     let ids = i32_zeros(&ctx, vec![1]);
     let out = f32_tensor(&ctx, &[0.0; 3], vec![3]);
-    for layout in MOE_GROUPED_GENERIC_LAYOUTS {
+    for layout in MOE_GROUPED_GENERIC_LAYOUTS
+        .iter()
+        .filter(|layout| !matches!(layout.dtype, GgmlType::IQ1_S | GgmlType::IQ1_M))
+    {
         let k = layout.block_elems.max(32);
         let bytes = native_bank(layout.dtype, k, 3, 1);
         let prefix = if layout.dtype == GgmlType::F32 {
@@ -738,7 +759,13 @@ fn down_f32x_native_preflight_rejects_bad_shapes_types_and_alignment() {
             ));
         }
     }
-    for dtype in [GgmlType::I32, GgmlType::Q5_0, GgmlType::Unknown] {
+    for dtype in [
+        GgmlType::I32,
+        GgmlType::Q5_0,
+        GgmlType::IQ1_S,
+        GgmlType::IQ1_M,
+        GgmlType::Unknown,
+    ] {
         let weight = MetalTensor {
             dtype,
             ..out.clone()

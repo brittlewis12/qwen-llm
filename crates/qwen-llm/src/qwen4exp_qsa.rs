@@ -19,6 +19,7 @@ use crate::metal::{
 };
 use crate::metal_forward::{
     MfError, encode_mat_mat_dispatch_without_fewrow, encode_mat_vec_dispatch,
+    encode_qwen4exp_prefill_mat_mat,
 };
 use crate::qwen4exp::{MixerKind, Qwen4ExpConfig};
 use crate::qwen4exp_profile::{
@@ -3564,7 +3565,7 @@ fn encode_packed_step(
             MixerKind::QwenSparseAttention,
         ),
     )?;
-    encode_mat_mat_dispatch_without_fewrow(
+    encode_qwen4exp_prefill_mat_mat(
         ctx,
         enc,
         weights.query,
@@ -3574,7 +3575,7 @@ fn encode_packed_step(
         g.query_projection_width(),
         tokens,
     )?;
-    encode_mat_mat_dispatch_without_fewrow(
+    encode_qwen4exp_prefill_mat_mat(
         ctx,
         enc,
         weights.key,
@@ -3584,7 +3585,7 @@ fn encode_packed_step(
         g.kv_width(),
         tokens,
     )?;
-    encode_mat_mat_dispatch_without_fewrow(
+    encode_qwen4exp_prefill_mat_mat(
         ctx,
         enc,
         weights.value,
@@ -3922,7 +3923,7 @@ fn encode_packed_step(
             )?;
         }
     } else {
-        encode_mat_mat_dispatch_without_fewrow(
+        encode_qwen4exp_prefill_mat_mat(
             ctx,
             enc,
             weights.output,

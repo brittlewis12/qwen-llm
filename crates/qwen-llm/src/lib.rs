@@ -51,6 +51,7 @@ pub mod half_telemetry {
     pub const SITE_QWEN4EXP_SHARED_DOWN: &str = "qwen4exp.shared.down";
     pub const SITE_V41_OUTPUT_B_INPUT: &str = "v41.output_b.input";
     pub const SITE_V41_ROUTED_DOWN: &str = "v41.routed.down";
+    pub const SITE_QWEN4EXP_TENSOR_INPUT: &str = "qwen4exp.tensor.input";
 
     #[inline(always)]
     pub fn record(

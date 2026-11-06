@@ -589,13 +589,15 @@ pub(crate) enum GroupedDownPolicy {
     Incumbent,
     Iq3SSmallCounts,
     Iq3STensor,
+    /// Short appends retain the hybrid when the tensor tier or PSO declines.
+    Iq3STensorOrSmallCounts,
     Q5KTensor,
 }
 
 impl GroupedDownPolicy {
     fn tensor_dtype(self) -> Option<GgmlType> {
         match self {
-            Self::Iq3STensor => Some(GgmlType::IQ3_S),
+            Self::Iq3STensor | Self::Iq3STensorOrSmallCounts => Some(GgmlType::IQ3_S),
             Self::Q5KTensor => Some(GgmlType::Q5_K),
             Self::Incumbent | Self::Iq3SSmallCounts => None,
         }
@@ -645,6 +647,22 @@ pub(crate) fn encode_grouped_routed_experts_with_tensor_gate_up(
     clamp: f32,
     down_policy: GroupedDownPolicy,
 ) -> Result<(), MetalError> {
+    let mut capable = moe_grouped_tensor_selected(ctx);
+    if capable {
+        for (role, dtype) in [
+            (MoeGroupedTensorRole::Down, b.gate_bank.dtype),
+            (MoeGroupedTensorRole::UpClamped, b.up_bank.dtype),
+        ] {
+            let name = moe_grouped_tensor_pipeline_name(role, dtype, TensorActivation::F32)
+                .ok_or_else(|| bad_shape("grouped_tensor_gate_up", "unsupported native bank"))?;
+            let p = ctx.tensor_pipeline(&name)?;
+            capable &= p.threadExecutionWidth() == 32
+                && p.maxTotalThreadsPerThreadgroup() >= 128
+                && p.staticThreadgroupMemoryLength()
+                    .checked_add(8192)
+                    .is_some_and(|n| n <= ctx.device.maxThreadgroupMemoryLength());
+        }
+    }
     encode_grouped_routed_experts_impl(
         ctx,
         enc,
@@ -656,7 +674,7 @@ pub(crate) fn encode_grouped_routed_experts_with_tensor_gate_up(
         rows,
         clamp,
         down_policy,
-        true,
+        capable,
     )
 }
 
@@ -723,19 +741,22 @@ fn encode_grouped_routed_experts_impl(
         GroupedDownPolicy::Incumbent
         | GroupedDownPolicy::Iq3STensor
         | GroupedDownPolicy::Q5KTensor => None,
-        GroupedDownPolicy::Iq3SSmallCounts => super::iq3_s_down_retile::prepare_small_counts(
-            ctx,
-            enc,
-            b.down_bank,
-            &down_inner,
-            b.counts,
-            b.slots,
-            &down_out,
-            ffn,
-            hidden,
-            experts,
-            rows,
-        )?,
+        GroupedDownPolicy::Iq3STensorOrSmallCounts if tensor_down.is_some() => None,
+        GroupedDownPolicy::Iq3SSmallCounts | GroupedDownPolicy::Iq3STensorOrSmallCounts => {
+            super::iq3_s_down_retile::prepare_small_counts(
+                ctx,
+                enc,
+                b.down_bank,
+                &down_inner,
+                b.counts,
+                b.slots,
+                &down_out,
+                ffn,
+                hidden,
+                experts,
+                rows,
+            )?
+        }
     };
     encode_moe_route_bucket_slots_f32_status(
         ctx,

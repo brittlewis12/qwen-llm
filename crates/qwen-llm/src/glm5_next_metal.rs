@@ -2420,6 +2420,7 @@ mod kda_value4;
 mod lens;
 mod packed;
 pub mod prefill_plan;
+mod short_prefill;
 pub(crate) mod tensor_down;
 mod tensor_gate_up;
 mod tensor_prefill;

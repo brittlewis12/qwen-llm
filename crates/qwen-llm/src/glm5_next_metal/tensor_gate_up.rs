@@ -6,12 +6,6 @@ use super::{
 };
 use crate::tensor::GgmlType;
 
-crate::env_flag!(
-    /// Opt-in F32-input M5 IQ tensor gate/up for 512-row Fast/Half appends; no Half scratch allocation.
-    default_off short_gate_up_enabled,
-    "QWEN_GLM53_SHORT_GATE_UP_TENSOR"
-);
-
 pub(super) fn short_selected(
     arith: Arith,
     mode: StageMode,
@@ -20,7 +14,7 @@ pub(super) fn short_selected(
     shape: (usize, usize, usize, usize),
     rows: usize,
 ) -> bool {
-    short_gate_up_enabled()
+    super::short_prefill::enabled()
         && memory::tensor_gate_up_enabled()
         && iq_tensor_gate_up_enabled()
         && arith.lineage == PackedLineage::Fast

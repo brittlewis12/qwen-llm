@@ -17,9 +17,9 @@ const DEFAULT_ENABLED: bool = true;
 const THREADGROUP_BYTES: usize = 8192;
 
 crate::env_flag!(
-    /// Opt-in M5 Fast/Half tensor projections for 512-row appends, retaining the incumbent operand precision and all existing capability guards.
-    default_off short_dense_enabled,
-    "QWEN_GLM53_SHORT_DENSE_TENSOR"
+    /// Opt-in wider existing Q6_K tensor tile for M5 Fast/Half 512/1024-row appends, subordinate to the short-prefill rollback. Identical operands and F32 sums; no additional GPU allocation.
+    default_off short_q6_wide_enabled,
+    "QWEN_GLM53_SHORT_Q6_WIDE"
 );
 
 crate::env_flag!(
@@ -70,9 +70,21 @@ fn wide_enabled() -> bool {
 enum Tile {
     Narrow,
     Q8Wide,
+    Q6Wide,
 }
 
 impl Tile {
+    fn selected_for_rows(dtype: GgmlType, rows: usize) -> Self {
+        if dtype == GgmlType::Q6_K
+            && matches!(rows, 512 | 1024)
+            && super::short_prefill::enabled()
+            && short_q6_wide_enabled()
+        {
+            Self::Q6Wide
+        } else {
+            Self::selected(dtype)
+        }
+    }
     // Called only after the existing GLM eligibility checks.
     fn selected(dtype: GgmlType) -> Self {
         if dtype == GgmlType::Q8_0 && wide_enabled() {
@@ -91,13 +103,14 @@ impl Tile {
         match self {
             Self::Narrow => metal::mat_mat_tensor_pipeline_name(dtype, activation),
             Self::Q8Wide => metal::mat_mat_tensor_wide_pipeline_name(dtype, activation),
+            Self::Q6Wide => metal::mat_mat_tensor_q6_wide_pipeline_name(dtype, activation),
         }
     }
 
     fn threadgroup_bytes(self) -> usize {
         match self {
             Self::Narrow => THREADGROUP_BYTES,
-            Self::Q8Wide => 16384,
+            Self::Q8Wide | Self::Q6Wide => 16384,
         }
     }
 }
@@ -204,7 +217,7 @@ pub(super) fn eligible(
         || arith.precision != FastPrecision::Half
         || mode != StageMode::Fast
         || !matches!(dtype, GgmlType::Q6_K | GgmlType::Q8_0)
-        || (n < MIN_ROWS && !(n == 512 && short_dense_enabled()))
+        || (n < MIN_ROWS && !(n == 512 && super::short_prefill::enabled()))
     {
         return Ok(false);
     }
@@ -369,6 +382,16 @@ impl PreparedHalf {
                 self.m,
                 self.n,
             ),
+            Tile::Q6Wide => metal::encode_mat_mat_tensor_f32_q6_wide(
+                ctx,
+                enc,
+                &self.weight,
+                &self.x,
+                &self.y,
+                self.k,
+                self.m,
+                self.n,
+            ),
         }
     }
 }
@@ -400,7 +423,7 @@ pub(super) fn prepare_half(
             (y, "output"),
         ],
     )?;
-    let tile = Tile::selected(weight.dtype);
+    let tile = Tile::selected_for_rows(weight.dtype, n);
     let original_supported = prepare(ctx, weight.dtype, tile)?;
     let half_supported = prepare_activation(ctx, weight.dtype, tile, metal::TensorActivation::F16)?;
     if !original_supported || !half_supported {
@@ -436,13 +459,14 @@ pub(super) fn try_encode(
         return Ok(false);
     }
     check_bindings(ctx, enc, weight, x, y, k, m, n)?;
-    let tile = Tile::selected(weight.dtype);
+    let tile = Tile::selected_for_rows(weight.dtype, n);
     if !prepare(ctx, weight.dtype, tile)? {
         return Ok(false);
     }
     match tile {
         Tile::Narrow => metal::encode_mat_mat_tensor_f32_narrow(ctx, enc, weight, x, y, k, m, n)?,
         Tile::Q8Wide => metal::encode_mat_mat_tensor_f32_wide(ctx, enc, weight, x, y, k, m, n)?,
+        Tile::Q6Wide => metal::encode_mat_mat_tensor_f32_q6_wide(ctx, enc, weight, x, y, k, m, n)?,
     }
     Ok(true)
 }

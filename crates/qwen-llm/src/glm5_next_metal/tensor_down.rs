@@ -6,12 +6,6 @@ use crate::tensor::GgmlType;
 
 const DEFAULT_ENABLED: bool = true;
 
-crate::env_flag!(
-    /// Opt-in M5 Fast/Half IQ3_S tensor down for 512-row appends, replacing the small-count hybrid only at this width.
-    default_off short_down_enabled,
-    "QWEN_GLM53_SHORT_DOWN_TENSOR"
-);
-
 #[cfg(test)]
 thread_local! {
     static OVERRIDE: std::cell::Cell<Option<bool>> = const { std::cell::Cell::new(None) };
@@ -56,7 +50,7 @@ pub(super) fn selected(arith: Arith, mode: StageMode, dtype: GgmlType, rows: usi
         && arith.precision == FastPrecision::Half
         && mode == StageMode::Fast
         && dtype == GgmlType::IQ3_S
-        && (matches!(rows, 1024 | 2048) || (rows == 512 && short_down_enabled()))
+        && (matches!(rows, 1024 | 2048) || (rows == 512 && super::short_prefill::enabled()))
 }
 
 #[cfg(test)]

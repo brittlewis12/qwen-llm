@@ -625,7 +625,11 @@ pub(super) fn grouped_down_policy(
     if super::tensor_q5_down::selected(arith, mode, dtype, (ffn, hidden, experts, top_k), rows) {
         GroupedDownPolicy::Q5KTensor
     } else if super::tensor_down::selected(arith, mode, dtype, rows) {
-        GroupedDownPolicy::Iq3STensor
+        if rows == 512 {
+            GroupedDownPolicy::Iq3STensorOrSmallCounts
+        } else {
+            GroupedDownPolicy::Iq3STensor
+        }
     } else if arith.lineage == PackedLineage::Fast
         && dtype == GgmlType::IQ3_S
         && (ffn, hidden, experts) == (2048, 4096, 288)

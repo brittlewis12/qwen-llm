@@ -315,6 +315,15 @@ pub fn mat_mat_tensor_wide_pipeline_name(
         .then(|| format!("kernel_mat_mat_q8_0_{}_tensor_wide", activation.infix()))
 }
 
+/// Explicit Q6_K capability; the shared automatic wide lookup stays Q8-only.
+pub fn mat_mat_tensor_q6_wide_pipeline_name(
+    dtype: GgmlType,
+    activation: TensorActivation,
+) -> Option<String> {
+    (dtype == GgmlType::Q6_K)
+        .then(|| format!("kernel_mat_mat_q6_K_{}_tensor_wide", activation.infix()))
+}
+
 #[derive(Clone, Copy)]
 enum DenseTile {
     Narrow,
@@ -402,6 +411,36 @@ pub fn encode_mat_mat_tensor_f32_flash_next_wide(
     n_out: usize,
     n_query: usize,
 ) -> Result<(), MetalError> {
+    encode_mat_mat_tensor_f32_impl(
+        ctx,
+        enc,
+        weight,
+        x,
+        y,
+        n_in,
+        n_out,
+        n_query,
+        DenseTile::FlashNextWide,
+    )
+}
+
+/// Explicit Q6_K wide tile for GLM's bounded short-append policy.
+pub fn encode_mat_mat_tensor_f32_q6_wide(
+    ctx: &MetalContext,
+    enc: &KernelEncoder,
+    weight: &MetalTensor,
+    x: &MetalTensor,
+    y: &MetalTensor,
+    n_in: usize,
+    n_out: usize,
+    n_query: usize,
+) -> Result<(), MetalError> {
+    if weight.dtype != GgmlType::Q6_K {
+        return Err(super::checks::bad_shape(
+            "mat_mat_q6_wide",
+            "Q6_K weights required",
+        ));
+    }
     encode_mat_mat_tensor_f32_impl(
         ctx,
         enc,

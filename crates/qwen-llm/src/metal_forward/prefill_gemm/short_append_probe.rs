@@ -11,9 +11,9 @@ thread_local! { static OVERRIDE: Cell<Option<bool>> = const { Cell::new(None) };
 pub(super) fn override_value() -> Option<bool> {
     OVERRIDE.with(Cell::get)
 }
-struct Scope(Option<bool>);
+pub(super) struct Scope(Option<bool>);
 impl Scope {
-    fn new(on: bool) -> Self {
+    pub(super) fn new(on: bool) -> Self {
         Self(OVERRIDE.with(|v| v.replace(Some(on))))
     }
 }
@@ -56,7 +56,7 @@ fn read_i32(t: &MetalTensor, n: usize) -> Vec<i32> {
         .to_vec()
     }
 }
-fn geometry(moe: bool, append: usize, total: usize) -> (usize, PrefillScratchConfig) {
+fn geometry(moe: bool, _append: usize, total: usize) -> (usize, PrefillScratchConfig) {
     if moe && total >= 1025 {
         (
             2048,
@@ -185,7 +185,12 @@ impl Dense {
     fn new(ctx: &MetalContext, gg: &GgufFile, m: usize, tensor: &str) -> Self {
         let d = gg.find(tensor).unwrap();
         let (k, n) = (d.shape[0] as usize, d.shape[1] as usize);
-        let bytes = if d.dtype == GgmlType::Q4_K { 144 } else { 210 };
+        let bytes = match d.dtype {
+            GgmlType::Q4_K => 144,
+            GgmlType::Q5_K => 176,
+            GgmlType::Q6_K => 210,
+            _ => panic!("unsupported dense witness dtype"),
+        };
         let stride = k / 256 * bytes;
         let points: Vec<_> = (0..32)
             .flat_map(|r| (0..32).map(move |c| (r * (m - 1) / 31) * n + c * (n - 1) / 31))
@@ -257,6 +262,20 @@ impl Dense {
         }
         let ms = run_scope(on, || {
             command(ctx, |e| {
+                if self.dtype == GgmlType::Q5_K {
+                    if on {
+                        encode_mat_mat_tensor_f32_narrow(
+                            ctx, e, &self.w, &self.x, &self.y, self.k, self.n, self.m,
+                        )
+                        .unwrap();
+                    } else {
+                        encode_mat_mat_dispatch(
+                            ctx, e, &self.w, &self.x, &self.y, self.k, self.n, self.m,
+                        )
+                        .unwrap();
+                    }
+                    return;
+                }
                 encode_qwen_ffn_prefill_mat_mat(
                     ctx,
                     e,
@@ -278,16 +297,27 @@ impl Dense {
         (ms, metrics(&vals, &self.reference))
     }
 }
-fn dense(ctx: &MetalContext, gg: &GgufFile) {
-    let ms = std::env::var("QWEN_SHORT_PROBE_ROWS")
-        .unwrap_or("128,256,276,384,512,513,768,769,1000,1023,1024,1300".into());
+fn dense(ctx: &MetalContext, gg: &GgufFile, q5: bool) {
+    let ms = std::env::var("QWEN_SHORT_PROBE_ROWS").unwrap_or(
+        if q5 {
+            "128,129,276,512,513,769,1000,1023,1024,1300"
+        } else {
+            "128,256,276,384,512,513,768,769,1000,1023,1024,1300"
+        }
+        .into(),
+    );
     let mut fixtures = Vec::new();
     for m in ms.split(',').map(|s| s.parse::<usize>().unwrap()) {
-        for name in [
-            "blk.0.ffn_gate.weight",
-            "blk.8.ffn_down.weight",
-            "blk.0.ffn_down.weight",
-        ] {
+        let names: &[&str] = if q5 {
+            &["blk.0.ssm_out.weight"]
+        } else {
+            &[
+                "blk.0.ffn_gate.weight",
+                "blk.8.ffn_down.weight",
+                "blk.0.ffn_down.weight",
+            ]
+        };
+        for name in names {
             fixtures.push(Dense::new(ctx, gg, m, name));
         }
     }
@@ -342,8 +372,8 @@ fn run_short_append_probe() {
     let model = Model::from_gguf(&gg).unwrap();
     let ctx = MetalContext::new().unwrap();
     let mode = std::env::var("QWEN_SHORT_PROBE_MODE").unwrap_or("trace".into());
-    if mode == "dense" {
-        dense(&ctx, &gg);
+    if mode == "dense" || mode == "q5" {
+        dense(&ctx, &gg, mode == "q5");
         return;
     }
     let mm = MetalModel::load(&ctx, &gg, &model).unwrap();
@@ -472,7 +502,7 @@ impl Expert<'_> {
 fn expert(ctx: &MetalContext, mm: &MetalModel) {
     let mf = MetalForward::new(ctx, mm);
     let mut fixtures = Vec::new();
-    let ms = std::env::var("QWEN_SHORT_PROBE_ROWS").unwrap_or("512,1024,1300,2048".into());
+    let ms = std::env::var("QWEN_SHORT_PROBE_ROWS").unwrap_or("512,513,1024,1300,2048".into());
     for m in ms.split(',').map(|s| s.parse::<usize>().unwrap()) {
         let mut sc = scratch(ctx, mm, m, m);
         let mut session = MetalSession::fresh(ctx, mm, m + 1).unwrap();

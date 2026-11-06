@@ -7,7 +7,7 @@ use crate::model::{Arch, ArchKind, QWEN3_27B};
 use crate::tensor::GgmlType;
 use std::sync::OnceLock;
 
-/// Metal 4 half-operand tensor prompt projections for dense Qwen 27B Q4_K/Q6_K and Qwen 35B-A3B Q8_0 at >=128 rows, plus screened Flash-Next Q4_K/Q6_K/IQ4_XS/IQ4_NL projections at 2048 rows or 512..2047 rows with QWEN_FN_SHORT_APPEND_TENSOR, enabled by default when the tensor tier is available. Set to 0 for A/B or rollback. Qualified 27B FFN shapes at 1024 rows use a strict device-half 128-row tile with reused scratch. Other architectures, dtypes, shapes and small tails use incumbent dispatch; Q5_K retains its existing route and the endpoint head remains GEMV.
+/// Metal 4 half-operand tensor prompt projections for dense Qwen 27B Q4_K/Q6_K and Qwen 35B-A3B Q8_0 at >=128 rows, plus screened Flash-Next Q4_K/Q6_K/IQ4_XS/IQ4_NL projections at 2048 rows or 512..2047 rows with QWEN_FN_SHORT_APPEND_TENSOR, enabled by default when the tensor tier is available. Set to 0 for A/B or rollback. Qualified 27B FFN shapes use a strict device-half 128-row tile with reused scratch; QWEN_SHORT_APPEND_TENSOR controls its short-row extension and the ragged Q5_K output-projection route. Other architectures, dtypes, shapes and small tails use incumbent dispatch; the endpoint head remains GEMV.
 
 const DENSE_PREFILL_TENSOR_ENV: &str = "QWEN_DENSE_PREFILL_TENSOR";
 
@@ -17,7 +17,7 @@ crate::env_flag!(
     "QWEN_FN_PREFILL_DENSE_WIDE"
 );
 
-/// Experimental row-range extensions for 27B FFN and A3B routed tensor prefill. Default off during qualification; original 1024/2048-row routes are unaffected. Set to 0 to retain the original short-append dispatches.
+/// Qualified short-append tensor routes, default on when the tensor tier is available: 27B Q4_K gate/up and Q6_K down at 256..=1024 rows, Q4_K down at 384..=1024, ragged Q5_K GDN output projections at 128..=1024, and A3B Q4_K gate/up plus Q5_K/Q6_K routed down at 512..=2048. Set to 0 for A/B or rollback to the original short-append dispatches; original 1024-row FFN and 2048-row expert routes are unaffected. Existing dense, FFN and expert off-switches still apply.
 const SHORT_APPEND_TENSOR_ENV: &str = "QWEN_SHORT_APPEND_TENSOR";
 
 fn short_append_tensor_enabled() -> bool {
@@ -26,13 +26,13 @@ fn short_append_tensor_enabled() -> bool {
         return value;
     }
     static ENABLED: OnceLock<bool> = OnceLock::new();
-    *ENABLED.get_or_init(|| crate::env_flag::read_default_off(SHORT_APPEND_TENSOR_ENV))
+    *ENABLED.get_or_init(|| crate::env_flag::read_default_on(SHORT_APPEND_TENSOR_ENV))
 }
 
 #[cfg(test)]
 mod short_append_probe;
 
-/// Strict device-half 128-row tile for qualified 27B FFN projections at exactly 1024 rows, default on when QWEN_DENSE_PREFILL_TENSOR and the tensor tier are available. Set to 0 to retain the previous narrow B tile for A/B or rollback. Other shapes and A3B retain their existing tiles.
+/// Strict device-half 128-row tile for qualified 27B FFN projections, default on when QWEN_DENSE_PREFILL_TENSOR and the tensor tier are available. QWEN_SHORT_APPEND_TENSOR extends the original 1024-row route to screened short rows. Set to 0 to retain the previous narrow B tile for A/B or rollback. Other shapes and A3B retain their existing tiles.
 const FFN128_ENV: &str = "QWEN_27B_FFN_TENSOR128";
 
 fn ffn128_enabled() -> bool {
@@ -40,7 +40,7 @@ fn ffn128_enabled() -> bool {
     *ENABLED.get_or_init(|| crate::env_flag::read_default_on(FFN128_ENV))
 }
 
-/// Metal 4 Q4_K gate/up and Q5_K/Q6_K down grouped expert tiles for stock Qwen 35B-A3B prefill at exactly 2048 rows, enabled by default when the tensor tier is available. Set to 0 for A/B or rollback. Other architectures, quant combinations and chunk sizes retain their incumbent expert kernels.
+/// Metal 4 Q4_K gate/up and Q5_K/Q6_K down grouped expert tiles for stock Qwen 35B-A3B prefill, enabled by default when the tensor tier is available. QWEN_SHORT_APPEND_TENSOR extends the original 2048-row route to 512..=2048 rows. Set to 0 for A/B or rollback. Other architectures, quant combinations and chunk sizes retain their incumbent expert kernels.
 const A3B_EXPERT_PREFILL_TENSOR_ENV: &str = "QWEN_A3B_EXPERT_PREFILL_TENSOR";
 
 const A3B_ARCH: Arch = Arch {
@@ -87,7 +87,7 @@ fn expert_eligible(
 ) -> bool {
     on && available
         && *arch == A3B_ARCH
-        && (m == 2048 || (short_append_tensor_enabled() && (128..=2048).contains(&m)))
+        && (m == 2048 || (short_append_tensor_enabled() && (512..=2048).contains(&m)))
         && gate == GgmlType::Q4_K
         && up == GgmlType::Q4_K
         && matches!(down, GgmlType::Q5_K | GgmlType::Q6_K)
@@ -126,10 +126,16 @@ fn eligible(
         return false;
     }
     if *arch == QWEN3_27B {
-        matches!(dtype, GgmlType::Q4_K | GgmlType::Q6_K)
+        (matches!(dtype, GgmlType::Q4_K | GgmlType::Q6_K)
             && n >= 64
             && k > 0
-            && k.is_multiple_of(256)
+            && k.is_multiple_of(256))
+            || (short_append_tensor_enabled()
+                && crate::metal::mat_mat_q5_k_tensor_allowed()
+                && dtype == GgmlType::Q5_K
+                && (k, n) == (6144, 5120)
+                && (128..=1024).contains(&m)
+                && !m.is_multiple_of(64))
     } else {
         *arch == A3B_ARCH
             && dtype == GgmlType::Q8_0
@@ -360,10 +366,18 @@ pub fn encode_qwen_prefill_mat_mat(
 }
 
 fn ffn128_shape(dtype: GgmlType, k: usize, n: usize, m: usize) -> bool {
-    matches!(
-        (dtype, k, n),
-        (GgmlType::Q4_K, 5120, 17408) | (GgmlType::Q4_K | GgmlType::Q6_K, 17408, 5120)
-    ) && (m == 1024 || (short_append_tensor_enabled() && (128..=2048).contains(&m)))
+    ffn128_shape_with_short(short_append_tensor_enabled(), dtype, k, n, m)
+}
+
+fn ffn128_shape_with_short(short: bool, dtype: GgmlType, k: usize, n: usize, m: usize) -> bool {
+    // The 128-row tile pays padding and one activation conversion. Q4 down
+    // loses at 276 rows, while gate/up and Q6 down already win at 256.
+    let min_rows = match (dtype, k, n) {
+        (GgmlType::Q4_K, 5120, 17408) | (GgmlType::Q6_K, 17408, 5120) => 256,
+        (GgmlType::Q4_K, 17408, 5120) => 384,
+        _ => return false,
+    };
+    m == 1024 || (short && (min_rows..=1024).contains(&m))
 }
 
 /// Only the measured 27B FFN shapes select the 128-row device-half tile.
@@ -536,6 +550,7 @@ mod tests {
 
     #[test]
     fn a3b_expert_prefill_tensor_gate_preserves_fallbacks() {
+        let _scope = short_append_probe::Scope::new(false);
         for down in [GgmlType::Q5_K, GgmlType::Q6_K] {
             assert!(expert_eligible(
                 true,
@@ -602,6 +617,75 @@ mod tests {
             GgmlType::Q5_K,
             2048
         ));
+    }
+
+    #[test]
+    fn short_append_prefill_tensor_gates() {
+        for on in [false, true] {
+            let _scope = short_append_probe::Scope::new(on);
+            for m in [512, 513, 1024, 1300, 2047] {
+                for down in [GgmlType::Q5_K, GgmlType::Q6_K] {
+                    assert_eq!(
+                        expert_eligible(
+                            true,
+                            true,
+                            &A3B_ARCH,
+                            GgmlType::Q4_K,
+                            GgmlType::Q4_K,
+                            down,
+                            m
+                        ),
+                        on
+                    );
+                }
+            }
+            for m in [0, 1, 127, 128, 511, 2049] {
+                assert!(!expert_eligible(
+                    true,
+                    true,
+                    &A3B_ARCH,
+                    GgmlType::Q4_K,
+                    GgmlType::Q4_K,
+                    GgmlType::Q5_K,
+                    m
+                ));
+            }
+            for m in [129, 276, 513, 769, 1000, 1023] {
+                assert_eq!(
+                    eligible(true, true, &QWEN3_27B, GgmlType::Q5_K, 6144, 5120, m),
+                    on && crate::metal::mat_mat_q5_k_tensor_allowed()
+                );
+                assert!(!eligible(
+                    false,
+                    true,
+                    &QWEN3_27B,
+                    GgmlType::Q5_K,
+                    6144,
+                    5120,
+                    m
+                ));
+                assert!(!eligible(
+                    true,
+                    false,
+                    &QWEN3_27B,
+                    GgmlType::Q5_K,
+                    6144,
+                    5120,
+                    m
+                ));
+            }
+            for m in [127, 128, 512, 1024, 1025, 1300] {
+                assert!(!eligible(
+                    true,
+                    true,
+                    &QWEN3_27B,
+                    GgmlType::Q5_K,
+                    6144,
+                    5120,
+                    m
+                ));
+            }
+        }
     }
 
     #[test]
@@ -990,194 +1074,286 @@ mod tests {
         if !ctx.tensor_ops_status().is_available() {
             return;
         }
-        const M: usize = 2048;
-        const H: usize = 2048;
-        const F: usize = 512;
-        const E: usize = 256;
-        const TOPK: usize = 8;
-        let mut counts = vec![0i32; E];
-        for e in [0, 1, 17, 63, 64, 127, 255] {
-            counts[e] = M as i32;
-        }
-        for (e, count) in [
-            (2, 1),
-            (3, 7),
-            (4, 15),
-            (5, 16),
-            (6, 31),
-            (7, 47),
-            (8, 48),
-            (9, 63),
-            (10, 128),
-            (11, 256),
-            (12, 1436),
-        ] {
-            counts[e] = count;
-        }
-        assert_eq!(counts.iter().sum::<i32>(), (M * TOPK) as i32);
-        let mut ids = vec![-1i32; E * M];
-        let mut ordinal = 0;
-        let mut probes = Vec::new();
-        for (e, &count) in counts.iter().enumerate() {
-            for entry in 0..count as usize {
-                ids[e * M + entry] = ((ordinal % M) * TOPK + ordinal / M) as i32;
-                ordinal += 1;
+        for m in [512usize, 513, 1024, 1300, 2048] {
+            const H: usize = 2048;
+            const F: usize = 512;
+            const E: usize = 256;
+            const TOPK: usize = 8;
+            let mut counts = vec![0i32; E];
+            for e in [0, 1, 17, 63, 64, 127] {
+                counts[e] = m as i32;
             }
-            if count > 0 {
-                for entry in [0, count as usize - 1] {
-                    probes.push((e, ids[e * M + entry] as usize));
+            for (e, count) in [
+                (2, 1),
+                (3, 7),
+                (4, 15),
+                (5, 16),
+                (6, 31),
+                (7, 47),
+                (8, 48),
+                (9, 63),
+                (10, 128),
+                (11, 256),
+            ] {
+                counts[e] = count;
+            }
+            let remaining = m * TOPK - counts.iter().sum::<i32>() as usize;
+            counts[12] = remaining.min(m) as i32;
+            counts[255] = (remaining - remaining.min(m)) as i32;
+            assert_eq!(counts.iter().sum::<i32>(), (m * TOPK) as i32);
+            assert!(counts.iter().all(|&n| n >= 0 && n <= m as i32));
+            let mut ids = vec![-1i32; E * m];
+            let mut ordinal = 0;
+            let mut probes = Vec::new();
+            for (e, &count) in counts.iter().enumerate() {
+                for entry in 0..count as usize {
+                    ids[e * m + entry] = ((ordinal % m) * TOPK + ordinal / m) as i32;
+                    ordinal += 1;
+                }
+                if count > 0 {
+                    for entry in [0, count as usize - 1] {
+                        probes.push((e, ids[e * m + entry] as usize));
+                    }
                 }
             }
-        }
-        let ct = MetalTensor::from_bytes(
-            &ctx,
-            bytemuck::cast_slice(&counts),
-            vec![E as u64],
-            GgmlType::I32,
-        )
-        .unwrap();
-        let it = MetalTensor::from_bytes(
-            &ctx,
-            bytemuck::cast_slice(&ids),
-            vec![(E * M) as u64],
-            GgmlType::I32,
-        )
-        .unwrap();
-        let mut rng = 0x5a31_89ef;
-        let x: Vec<f32> = (0..M * H)
-            .map(|_| ((random(&mut rng) >> 40) as f32 / (1u64 << 23) as f32 - 1.0) * 0.02)
-            .collect();
-        let dx: Vec<f32> = (0..M * TOPK * F)
-            .map(|_| (random(&mut rng) >> 40) as f32 / (1u64 << 23) as f32 - 1.0)
-            .collect();
-        let xt = MetalTensor::from_bytes(
-            &ctx,
-            bytemuck::cast_slice(&x),
-            vec![(M * H) as u64],
-            GgmlType::F32,
-        )
-        .unwrap();
-        let dt = MetalTensor::from_bytes(
-            &ctx,
-            bytemuck::cast_slice(&dx),
-            vec![(M * TOPK * F) as u64],
-            GgmlType::F32,
-        )
-        .unwrap();
-        let (gate, gb) = expert_bank(&ctx, GgmlType::Q4_K, H, F, false);
-        let (up, ub) = expert_bank(&ctx, GgmlType::Q4_K, H, F, true);
-        for dtype in [GgmlType::Q5_K, GgmlType::Q6_K] {
-            let (down, db) = expert_bank(&ctx, dtype, F, H, false);
-            let moe = super::super::MetalMoeFfn {
-                gate_inp: MetalTensor::zeros_f32(&ctx, vec![1]).unwrap(),
-                gate_exps: gate.clone(),
-                up_exps: up.clone(),
-                down_exps: down,
-                gate_inp_shexp: MetalTensor::zeros_f32(&ctx, vec![1]).unwrap(),
-                gate_inp_cpu: vec![],
-                gate_inp_shexp_cpu: vec![],
-            };
-            let dot = |a: &[f32], b: &[f32]| {
-                a.iter()
-                    .zip(b)
-                    .map(|(&x, &w)| f64::from(x) * f64::from(w))
-                    .sum::<f64>()
-            };
-            let mut gate_ref = Vec::new();
-            let mut down_ref = Vec::new();
-            for &(e, slot) in &probes {
-                let row = &x[(slot / TOPK) * H..(slot / TOPK + 1) * H];
-                for col in [0, 63, F - 1] {
-                    let g = dot(row, &decoded_row(&gb, GgmlType::Q4_K, H, F, e, col));
-                    let u = dot(row, &decoded_row(&ub, GgmlType::Q4_K, H, F, e, col));
-                    gate_ref.push(g / (1.0 + (-g).exp()) * u);
+            let ct = MetalTensor::from_bytes(
+                &ctx,
+                bytemuck::cast_slice(&counts),
+                vec![E as u64],
+                GgmlType::I32,
+            )
+            .unwrap();
+            let it = MetalTensor::from_bytes(
+                &ctx,
+                bytemuck::cast_slice(&ids),
+                vec![(E * m) as u64],
+                GgmlType::I32,
+            )
+            .unwrap();
+            let mut rng = 0x5a31_89ef;
+            let x: Vec<f32> = (0..m * H)
+                .map(|_| ((random(&mut rng) >> 40) as f32 / (1u64 << 23) as f32 - 1.0) * 0.02)
+                .collect();
+            let dx: Vec<f32> = (0..m * TOPK * F)
+                .map(|_| (random(&mut rng) >> 40) as f32 / (1u64 << 23) as f32 - 1.0)
+                .collect();
+            let xt = MetalTensor::from_bytes(
+                &ctx,
+                bytemuck::cast_slice(&x),
+                vec![(m * H) as u64],
+                GgmlType::F32,
+            )
+            .unwrap();
+            let dt = MetalTensor::from_bytes(
+                &ctx,
+                bytemuck::cast_slice(&dx),
+                vec![(m * TOPK * F) as u64],
+                GgmlType::F32,
+            )
+            .unwrap();
+            let (gate, gb) = expert_bank(&ctx, GgmlType::Q4_K, H, F, false);
+            let (up, ub) = expert_bank(&ctx, GgmlType::Q4_K, H, F, true);
+            for dtype in [GgmlType::Q5_K, GgmlType::Q6_K] {
+                let (down, db) = expert_bank(&ctx, dtype, F, H, false);
+                let moe = super::super::MetalMoeFfn {
+                    gate_inp: MetalTensor::zeros_f32(&ctx, vec![1]).unwrap(),
+                    gate_exps: gate.clone(),
+                    up_exps: up.clone(),
+                    down_exps: down,
+                    gate_inp_shexp: MetalTensor::zeros_f32(&ctx, vec![1]).unwrap(),
+                    gate_inp_cpu: vec![],
+                    gate_inp_shexp_cpu: vec![],
+                };
+                let dot = |a: &[f32], b: &[f32]| {
+                    a.iter()
+                        .zip(b)
+                        .map(|(&x, &w)| f64::from(x) * f64::from(w))
+                        .sum::<f64>()
+                };
+                let mut gate_ref = Vec::new();
+                let mut down_ref = Vec::new();
+                for &(e, slot) in &probes {
+                    let row = &x[(slot / TOPK) * H..(slot / TOPK + 1) * H];
+                    for col in [0, 63, F - 1] {
+                        let g = dot(row, &decoded_row(&gb, GgmlType::Q4_K, H, F, e, col));
+                        let u = dot(row, &decoded_row(&ub, GgmlType::Q4_K, H, F, e, col));
+                        gate_ref.push(g / (1.0 + (-g).exp()) * u);
+                    }
+                    for col in [0, 63, H - 1] {
+                        down_ref.push(dot(
+                            &dx[slot * F..(slot + 1) * F],
+                            &decoded_row(&db, dtype, F, H, e, col),
+                        ));
+                    }
                 }
-                for col in [0, 63, H - 1] {
-                    down_ref.push(dot(
-                        &dx[slot * F..(slot + 1) * F],
-                        &decoded_row(&db, dtype, F, H, e, col),
-                    ));
-                }
-            }
-            let mut results = Vec::new();
-            for production in [false, true] {
-                let tensor = production
-                    && qwen_a3b_expert_prefill_tensor_selected(
+                let mut results = Vec::new();
+                for production in [false, true] {
+                    let tensor = production
+                        && qwen_a3b_expert_prefill_tensor_selected(
+                            &ctx,
+                            &A3B_ARCH,
+                            GgmlType::Q4_K,
+                            GgmlType::Q4_K,
+                            dtype,
+                            m,
+                        );
+                    let inner = Guarded::new(&ctx, m * TOPK * F);
+                    let out = Guarded::new(&ctx, m * TOPK * H);
+                    dispatch_census_begin();
+                    let cmd = ctx.queue.commandBuffer().unwrap();
+                    let enc = KernelEncoder::begin(&cmd);
+                    crate::metal_dflash::encode_prefill_moe_grouped_swiglu(
                         &ctx,
-                        &A3B_ARCH,
-                        GgmlType::Q4_K,
-                        GgmlType::Q4_K,
-                        dtype,
-                        M,
-                    );
-                let inner = Guarded::new(&ctx, M * TOPK * F);
-                let out = Guarded::new(&ctx, M * TOPK * H);
-                dispatch_census_begin();
-                let cmd = ctx.queue.commandBuffer().unwrap();
-                let enc = KernelEncoder::begin(&cmd);
-                crate::metal_dflash::encode_prefill_moe_grouped_swiglu(
-                    &ctx,
-                    &enc,
-                    &moe,
-                    &xt,
-                    &ct,
-                    &it,
-                    &inner.tensor,
-                    H,
-                    F,
-                    E,
-                    TOPK,
-                    M,
-                    false,
-                    Some(48),
-                    tensor,
-                )
-                .unwrap();
-                crate::metal_dflash::encode_prefill_moe_grouped_down(
-                    &ctx,
-                    &enc,
-                    &moe.down_exps,
-                    &dt,
-                    &ct,
-                    &it,
-                    &out.tensor,
-                    F,
-                    H,
-                    E,
-                    M,
-                    0,
-                    tensor,
-                )
-                .unwrap();
-                enc.end();
-                cmd.commit();
-                wait_completed(&cmd).unwrap();
-                let dispatches = dispatch_census_take();
-                if tensor {
-                    assert_eq!(
-                        dispatches
-                            .iter()
-                            .filter(|d| d.kernel.ends_with("grouped_slots_tensor"))
-                            .count(),
-                        3
+                        &enc,
+                        &moe,
+                        &xt,
+                        &ct,
+                        &it,
+                        &inner.tensor,
+                        H,
+                        F,
+                        E,
+                        TOPK,
+                        m,
+                        false,
+                        Some(48),
+                        tensor,
+                    )
+                    .unwrap();
+                    crate::metal_dflash::encode_prefill_moe_grouped_down(
+                        &ctx,
+                        &enc,
+                        &moe.down_exps,
+                        &dt,
+                        &ct,
+                        &it,
+                        &out.tensor,
+                        F,
+                        H,
+                        E,
+                        m,
+                        0,
+                        tensor,
+                    )
+                    .unwrap();
+                    enc.end();
+                    cmd.commit();
+                    wait_completed(&cmd).unwrap();
+                    let dispatches = dispatch_census_take();
+                    if tensor {
+                        assert_eq!(
+                            dispatches
+                                .iter()
+                                .filter(|d| d.kernel.ends_with("grouped_slots_tensor"))
+                                .count(),
+                            3
+                        );
+                    }
+                    let (g, d) = (inner.values(), out.values());
+                    let gs: Vec<_> = probes
+                        .iter()
+                        .flat_map(|&(_, slot)| [0, 63, F - 1].map(|col| g[slot * F + col]))
+                        .collect();
+                    let ds: Vec<_> = probes
+                        .iter()
+                        .flat_map(|&(_, slot)| [0, 63, H - 1].map(|col| d[slot * H + col]))
+                        .collect();
+                    results.push((errors(&gs, &gate_ref), errors(&ds, &down_ref)));
+                }
+                for (a, b) in [(results[0].0, results[1].0), (results[0].1, results[1].1)] {
+                    assert!(
+                        b.0 <= 1.5 * a.0 && b.1 <= 1.5 * a.1,
+                        "{dtype:?}: incumbent={a:?}, tensor={b:?}"
                     );
                 }
-                let (g, d) = (inner.values(), out.values());
-                let gs: Vec<_> = probes
-                    .iter()
-                    .flat_map(|&(_, slot)| [0, 63, F - 1].map(|col| g[slot * F + col]))
-                    .collect();
-                let ds: Vec<_> = probes
-                    .iter()
-                    .flat_map(|&(_, slot)| [0, 63, H - 1].map(|col| d[slot * H + col]))
-                    .collect();
-                results.push((errors(&gs, &gate_ref), errors(&ds, &down_ref)));
             }
-            for (a, b) in [(results[0].0, results[1].0), (results[0].1, results[1].1)] {
-                assert!(
-                    b.0 <= 1.5 * a.0 && b.1 <= 1.5 * a.1,
-                    "{dtype:?}: incumbent={a:?}, tensor={b:?}"
+        }
+    }
+
+    #[test]
+    fn qwen27b_q5_ragged_gpu_regression() {
+        let _lease = crate::metal::acquire_metal_benchmark_lease().unwrap();
+        let Some(ctx) = crate::test_fixtures::metal_context_or_skip() else {
+            return;
+        };
+        let (k, n) = (6144, 5120);
+        let (packed, decoded) = weights(GgmlType::Q5_K, k, n);
+        let w = MetalTensor::from_bytes(&ctx, &packed, vec![k as u64, n as u64], GgmlType::Q5_K)
+            .unwrap();
+        for m in [127, 276, 512, 513, 1023] {
+            let cells: Vec<_> = sampled_axis(m)
+                .into_iter()
+                .flat_map(|r| sampled_axis(n).into_iter().map(move |c| (r, c)))
+                .collect();
+            for on in [false, true] {
+                let _scope = short_append_probe::Scope::new(on);
+                let selected =
+                    qwen_prefill_tensor_selected(&ctx, &QWEN3_27B, GgmlType::Q5_K, k, n, m);
+                assert_eq!(
+                    selected,
+                    ctx.tensor_ops_status().is_available()
+                        && enabled()
+                        && crate::metal::mat_mat_q5_k_tensor_allowed()
+                        && on
+                        && m >= 128
+                        && m % 64 != 0
                 );
+                for amplitude in [2f32.powi(-24), 1., 2048., 65504.] {
+                    let mut rng = 0x5a31_89ef;
+                    let input: Vec<f32> = (0..m * k)
+                        .map(|_| {
+                            ((random(&mut rng) >> 40) as f32 / (1u64 << 23) as f32 - 1.) * amplitude
+                        })
+                        .collect();
+                    let reference: Vec<f64> = cells
+                        .iter()
+                        .map(|&(r, c)| {
+                            input[r * k..(r + 1) * k]
+                                .iter()
+                                .zip(&decoded[c * k..(c + 1) * k])
+                                .map(|(&x, &w)| f64::from(x) * f64::from(w))
+                                .sum()
+                        })
+                        .collect();
+                    let x = MetalTensor::from_bytes(
+                        &ctx,
+                        bytemuck::cast_slice(&input),
+                        vec![(m * k) as u64],
+                        GgmlType::F32,
+                    )
+                    .unwrap();
+                    let a = Guarded::new(&ctx, m * n);
+                    let b = Guarded::new(&ctx, m * n);
+                    dispatch_census_begin();
+                    let cmd = ctx.queue.commandBuffer().unwrap();
+                    let enc = KernelEncoder::begin(&cmd);
+                    encode_mat_mat_dispatch(&ctx, &enc, &w, &x, &a.tensor, k, n, m).unwrap();
+                    encode_qwen_prefill_mat_mat(&ctx, &enc, &QWEN3_27B, &w, &x, &b.tensor, k, n, m)
+                        .unwrap();
+                    enc.end();
+                    cmd.commit();
+                    wait_completed(&cmd).unwrap();
+                    assert_eq!(
+                        dispatch_census_take()
+                            .iter()
+                            .any(|d| d.kernel == "kernel_mat_mat_q5_K_f32_tensor"),
+                        selected
+                    );
+                    let (av, bv) = (a.values(), b.values());
+                    let sample =
+                        |v: &[f32]| cells.iter().map(|&(r, c)| v[r * n + c]).collect::<Vec<_>>();
+                    let (ae, be) = (
+                        errors(&sample(av), &reference),
+                        errors(&sample(bv), &reference),
+                    );
+                    assert!(
+                        be.0 <= 1.5 * ae.0 && be.1 <= 1.5 * ae.1,
+                        "Q5 M{m} amplitude={amplitude}: incumbent={ae:?}, tensor={be:?}"
+                    );
+                    if !selected {
+                        assert!(av.iter().zip(bv).all(|(a, b)| a.to_bits() == b.to_bits()));
+                    }
+                }
             }
         }
     }
@@ -1313,10 +1489,30 @@ mod tests {
     #[test]
     fn qwen_ffn128_shape_gate() {
         for dtype in [GgmlType::Q4_K, GgmlType::Q6_K] {
-            assert!(ffn128_shape(dtype, 17408, 5120, 1024));
-            for m in [1, 127, 128, 512, 1023, 1025, 2048] {
-                assert!(!ffn128_shape(dtype, 17408, 5120, m));
+            for short in [false, true] {
+                assert!(ffn128_shape_with_short(short, dtype, 17408, 5120, 1024));
+                for m in [1, 127, 128, 255, 1025, 1300, 2048] {
+                    assert!(!ffn128_shape_with_short(short, dtype, 17408, 5120, m));
+                }
+                for m in [384, 385, 512, 513, 769, 1000, 1023] {
+                    assert_eq!(ffn128_shape_with_short(short, dtype, 17408, 5120, m), short);
+                }
+                for m in [256, 276, 383] {
+                    assert_eq!(
+                        ffn128_shape_with_short(short, dtype, 17408, 5120, m),
+                        short && dtype == GgmlType::Q6_K
+                    );
+                }
             }
+        }
+        for m in [256, 276, 384, 512, 513, 1023, 1024] {
+            assert!(ffn128_shape_with_short(
+                true,
+                GgmlType::Q4_K,
+                5120,
+                17408,
+                m
+            ));
         }
         assert!(ffn128_shape(GgmlType::Q4_K, 5120, 17408, 1024));
         assert!(!ffn128_shape(GgmlType::Q6_K, 5120, 17408, 1024));
@@ -1339,7 +1535,7 @@ mod tests {
             let (packed, decoded) = weights(dtype, k, n);
             let w =
                 MetalTensor::from_bytes(&ctx, &packed, vec![k as u64, n as u64], dtype).unwrap();
-            for m in [1024, 512, 1023] {
+            for m in [1024, 512, 513, 276, 127] {
                 let cells: Vec<_> = sampled_axis(m)
                     .into_iter()
                     .flat_map(|r| sampled_axis(n).into_iter().map(move |c| (r, c)))
@@ -1350,7 +1546,11 @@ mod tests {
                     ctx.tensor_ops_status().is_available()
                         && enabled()
                         && ffn128_enabled()
-                        && m == 1024
+                        && (m == 1024
+                            || (short_append_tensor_enabled()
+                                && (m == 512
+                                    || m == 513
+                                    || (m == 276 && (k == 5120 || dtype == GgmlType::Q6_K)))))
                 );
                 assert!(!qwen_ffn128_selected(&ctx, &A3B_ARCH, dtype, k, n, m));
                 for amplitude in [2f32.powi(-24), 1.0, 2048.0, 65504.0] {

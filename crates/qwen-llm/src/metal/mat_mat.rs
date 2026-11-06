@@ -2371,6 +2371,11 @@ crate::env_flag!(default_on mat_mat_q5_k_n64_enabled, "QWEN_MATMAT_Q5_K_N64");
 
 crate::env_flag!(default_on mat_mat_q5_k_tensor_enabled, "QWEN_MATMAT_Q5_K_TENSOR");
 
+/// Preserve the Q5_K tensor rollback switch in model-specific ragged routes.
+pub(crate) fn mat_mat_q5_k_tensor_allowed() -> bool {
+    mat_mat_q5_k_tensor_enabled()
+}
+
 pub(crate) fn mat_mat_q5_k_n64_min_query() -> usize {
     static MIN_N: OnceLock<usize> = OnceLock::new();
     *MIN_N.get_or_init(|| {

@@ -56,12 +56,19 @@ fn product_split_route_boundaries() {
         assert_eq!(cmd.status(), MTLCommandBufferStatus::Completed);
         assert!(cmd.error().is_none());
         assert!(read_f32(&w.output).iter().all(|v| v.is_finite()));
-        // Both routes compute logits with the same kernel; the split route
-        // then runs split softmax/value/merge instead of the fused
-        // softmax-value kernel.
+        // Logits reuse is independent of the split-value route, which runs
+        // split softmax/value/merge instead of the fused value kernel.
         let count = |kernel: &str| rows.iter().filter(|r| r.kernel == kernel).count();
         let split = length >= min;
-        assert_eq!(count("kernel_qwen4exp_qsa_attention_logits_f16"), 1);
+        let reuse = crate::env_flag::read_default_on("QWEN_FN_DECODE_QSA_REUSE") && length >= 256;
+        assert_eq!(
+            count("kernel_qwen4exp_qsa_attention_logits_f16"),
+            usize::from(!reuse)
+        );
+        assert_eq!(
+            count("kernel_qwen4exp_qsa_decode_logits_reuse_f32"),
+            usize::from(reuse)
+        );
         for kernel in [
             "kernel_qwen4exp_qsa_split_softmax_f32",
             "kernel_qwen4exp_qsa_split_f16",
@@ -3842,13 +3849,33 @@ fn released_attention_launch_geometry_and_large_width_reduction_match_cpu() {
 
     assert_eq!(census.len(), 2);
     let logits_launch = &census[0];
-    assert_eq!(
-        logits_launch.kernel,
-        "kernel_qwen4exp_qsa_attention_logits_f16"
-    );
-    assert_eq!(logits_launch.grid_width, 6_153);
-    assert_eq!(logits_launch.grid_height, 1);
-    assert_eq!(logits_launch.threads_width, 256);
+    if crate::env_flag::read_default_on("QWEN_FN_DECODE_QSA_REUSE") {
+        assert_eq!(
+            logits_launch.kernel,
+            "kernel_qwen4exp_qsa_decode_logits_reuse_f32"
+        );
+        assert_eq!(
+            (
+                logits_launch.grid_width,
+                logits_launch.grid_height,
+                logits_launch.threads_width
+            ),
+            (195, 2, 128)
+        );
+    } else {
+        assert_eq!(
+            logits_launch.kernel,
+            "kernel_qwen4exp_qsa_attention_logits_f16"
+        );
+        assert_eq!(
+            (
+                logits_launch.grid_width,
+                logits_launch.grid_height,
+                logits_launch.threads_width
+            ),
+            (6_153, 1, 256)
+        );
+    }
     let value_launch = &census[1];
     assert_eq!(
         value_launch.kernel,

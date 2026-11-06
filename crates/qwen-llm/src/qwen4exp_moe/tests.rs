@@ -564,15 +564,17 @@ fn check_packed_router_e8p32_bits(ctx: MetalContext, token_counts: &[usize]) {
         })
         .unwrap();
         with_qwen4exp_packed_router_e8p32_strict_override(true, || {
-            encode_packed_router_projection(
-                &ctx,
-                &encoder,
-                &router,
-                &input,
-                &candidate_logits,
-                geometry,
-                tokens,
-            )
+            router_tensor::with_enabled_override(false, || {
+                encode_packed_router_projection(
+                    &ctx,
+                    &encoder,
+                    &router,
+                    &input,
+                    &candidate_logits,
+                    geometry,
+                    tokens,
+                )
+            })
         })
         .unwrap();
         for (logits, ids, weights, shared) in [

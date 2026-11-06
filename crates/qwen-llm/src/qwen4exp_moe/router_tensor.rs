@@ -6,9 +6,32 @@ const KERNEL: &str = "kernel_qwen4exp_router_f32_tensor";
 
 crate::env_flag!(
     /// F32-operand Metal 4 tensor router for the Flash-Next H2560/E512/top-10 packed motor at exactly 2048 rows, default on. No half operands or added GPU buffers. Set to 0 to retain the strict E8P32 router; also respects QWEN4EXP_PACKED_ROUTER_E8P32_STRICT=0.
-    default_on enabled,
+    default_on configured_enabled,
     "QWEN_FN_PREFILL_ROUTER_TENSOR"
 );
+
+#[cfg(test)]
+thread_local! {static ENABLED_OVERRIDE: std::cell::Cell<Option<bool>> = const {std::cell::Cell::new(None)};}
+
+fn enabled() -> bool {
+    #[cfg(test)]
+    if let Some(value) = ENABLED_OVERRIDE.with(|s| s.get()) {
+        return value;
+    }
+    configured_enabled()
+}
+
+#[cfg(test)]
+pub(super) fn with_enabled_override<R>(enabled: bool, f: impl FnOnce() -> R) -> R {
+    struct Restore(Option<bool>);
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            ENABLED_OVERRIDE.with(|s| s.set(self.0));
+        }
+    }
+    let _restore = Restore(ENABLED_OVERRIDE.with(|s| s.replace(Some(enabled))));
+    f()
+}
 
 pub(super) fn pipeline(
     ctx: &MetalContext,
@@ -58,7 +81,7 @@ pub(super) fn encode(
     }
     enc.dispatch(
         MTLSize {
-            width: 64,
+            width: 32,
             height: 8,
             depth: 1,
         },

@@ -6,9 +6,15 @@ use crate::{
 use objc2_metal::{MTLComputePipelineState, MTLDevice, MTLSize};
 
 crate::env_flag!(
-    /// Device-input F32 tensor HC injection and GDN alpha/beta projections at 128-aligned 512..2047 rows, default on with the Metal 4 tier. Original F32 operands and sums, no relaxed precision, conversion or new buffers. Set to 0 for the scalar-ordered incumbent. Independent of QWEN_FN_SHORT_APPEND_TENSOR.
+    /// Device-input F32 tensor HC injection and GDN alpha/beta projections at 128-aligned 512..2047 rows, default on with the Metal 4 tier. QWEN_FN_SMALL_F32_TILES also includes M2048. Original F32 operands and sums, no relaxed precision, conversion or new buffers. Set to 0 for the scalar-ordered incumbent. Independent of QWEN_FN_SHORT_APPEND_TENSOR.
     default_on enabled,
     "QWEN_FN_SHORT_SMALL_F32"
+);
+
+crate::env_flag!(
+    /// Flash-Next F32 HC injection/GDN alpha-beta tensor projections: use 32-row tiles at 128-aligned M512..M2048, default on with the tensor tier. No narrowing, relaxed precision or new buffers. Set 0 to restore M128 tiles below 2048 and the scalar-ordered M2048 incumbent; QWEN_FN_SHORT_SMALL_F32=0 disables both routes. Unsupported PSOs retain the prior route.
+    default_on small_tiles_enabled,
+    "QWEN_FN_SMALL_F32_TILES"
 );
 
 pub(crate) fn try_encode(
@@ -24,7 +30,8 @@ pub(crate) fn try_encode(
     if !enabled()
         || !ctx.tensor_ops_status().is_available()
         || w.dtype != GgmlType::F32
-        || !(512..2048).contains(&m)
+        || !(512..=2048).contains(&m)
+        || (m == 2048 && !small_tiles_enabled())
         || !m.is_multiple_of(128)
         || !matches!((k, n), (10240, 4) | (2560, 48))
     {
@@ -35,16 +42,35 @@ pub(crate) fn try_encode(
     } else {
         "kernel_qwen4exp_small_f32_n48"
     };
-    let p = match ctx.tensor_pipeline(name) {
-        Ok(p)
-            if p.threadExecutionWidth() == 32
-                && p.maxTotalThreadsPerThreadgroup() >= 128
-                && p.staticThreadgroupMemoryLength() <= ctx.device.maxThreadgroupMemoryLength() =>
-        {
-            p
+    let small_name = if n == 4 {
+        "kernel_qwen4exp_small_f32_n4_m32"
+    } else {
+        "kernel_qwen4exp_small_f32_n48_m32"
+    };
+    let choices = [(small_name, 32), (name, 128)];
+    let choices = if small_tiles_enabled() {
+        &choices[..if m == 2048 { 1 } else { 2 }]
+    } else {
+        &choices[1..]
+    };
+    let mut chosen = None;
+    for &(name, tile) in choices {
+        match ctx.tensor_pipeline(name) {
+            Ok(p)
+                if p.threadExecutionWidth() == 32
+                    && p.maxTotalThreadsPerThreadgroup() >= 128
+                    && p.staticThreadgroupMemoryLength()
+                        <= ctx.device.maxThreadgroupMemoryLength() =>
+            {
+                chosen = Some((p, tile));
+                break;
+            }
+            Ok(_) | Err(MetalError::NoFunction(_) | MetalError::Pipeline(_, _)) => {}
+            Err(e) => return Err(e.into()),
         }
-        Ok(_) | Err(MetalError::NoFunction(_) | MetalError::Pipeline(_, _)) => return Ok(false),
-        Err(e) => return Err(e.into()),
+    }
+    let Some((p, tile)) = chosen else {
+        return Ok(false);
     };
     use crate::metal::checks::{check_disjoint, check_tensor, require_serial};
     require_serial("fn_small_f32", enc)?;
@@ -95,7 +121,7 @@ pub(crate) fn try_encode(
     enc.set_threadgroup_memory(0, 0);
     enc.dispatch(
         MTLSize {
-            width: m / 128,
+            width: m / tile,
             height: 1,
             depth: 1,
         },
@@ -139,10 +165,13 @@ mod tests {
             )
             .to_vec()
         };
-        for (m, k, n) in [512usize, 1024, 1536, 1920]
+        for (m, k, n) in [512usize, 1024, 1536, 1920, 2048]
             .into_iter()
             .flat_map(|m| [(m, 10240, 4), (m, 2560, 48)])
         {
+            if m == 2048 && !small_tiles_enabled() {
+                continue;
+            }
             let mut state = 0x12345678abcdefffu64;
             let mut next = || {
                 state ^= state << 13;
@@ -161,7 +190,15 @@ mod tests {
             crate::metal::encode_mat_mat_f32(&ctx, &enc, &wt, &xt, &old, k, n, m).unwrap();
             crate::metal::dispatch_census_begin();
             assert!(try_encode(&ctx, &enc, &wt, &xt, &yt, k, n, m).unwrap());
-            assert_eq!(crate::metal::dispatch_census_take().len(), 1);
+            let census = crate::metal::dispatch_census_take();
+            assert_eq!(census.len(), 1);
+            assert_eq!(census[0].threads_width, 128);
+            let tile = if census[0].kernel.ends_with("_m32") {
+                32
+            } else {
+                128
+            };
+            assert_eq!(census[0].grid_width, m / tile);
             enc.end();
             cmd.commit();
             crate::metal::wait_completed(&cmd).unwrap();

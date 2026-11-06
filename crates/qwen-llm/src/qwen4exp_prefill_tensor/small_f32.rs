@@ -3,7 +3,7 @@ use crate::{
     metal_forward::MfError,
     tensor::GgmlType,
 };
-use objc2_metal::MTLSize;
+use objc2_metal::{MTLComputePipelineState, MTLDevice, MTLSize};
 
 crate::env_flag!(
     /// Device-input F32 tensor HC injection and GDN alpha/beta projections at exactly 512/1024 rows, default on with the Metal 4 tier. Original F32 operands and sums, no relaxed precision, conversion or new buffers. Set to 0 for the scalar-ordered incumbent. Independent of QWEN_FN_SHORT_APPEND_TENSOR.
@@ -110,7 +110,7 @@ pub(crate) fn try_encode(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use objc2_metal::MTLCommandQueue;
+    use objc2_metal::{MTLBuffer, MTLCommandBuffer, MTLCommandQueue};
     #[test]
     fn small_f32_short_projections_match_f64_and_preserve_guards() {
         let Some(ctx) = crate::test_fixtures::metal_context_or_skip() else {

@@ -15,7 +15,7 @@ fn flash_next_tensor_scope_is_bounded() {
     for tokens in [512, 1024] {
         assert_eq!(
             packed_tensor_scope(production, tokens),
-            crate::qwen4exp_prefill_tensor::short_enabled()
+            crate::qwen4exp_prefill_tensor::rows_qualified(tokens)
         );
     }
     for tokens in [0, 1, 2045, 2047, 2049, 4096] {

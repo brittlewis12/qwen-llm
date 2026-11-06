@@ -251,7 +251,7 @@ fn flash_next_prefill_tensor_gate_preserves_fallbacks() {
             for m in [512, 1024] {
                 assert_eq!(
                     flash_next_eligible(true, true, dtype, k, n, m),
-                    crate::qwen4exp_prefill_tensor::short_enabled()
+                    crate::qwen4exp_prefill_tensor::rows_qualified(m)
                 );
             }
             for m in [0, 1, 16, 127, 128, 2045, 2047, 2049, 4096] {

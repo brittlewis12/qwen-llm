@@ -41,6 +41,29 @@ See also: `docs/PERF-ROADMAP.md` for the current state and evidence index.
   disables the entire dense tensor route. No whole-model speedup is claimed
   from these op measurements.
 
+- End-to-end follow-up on main `d9e165f9`, M5 Ultra, pp4096, stock
+  production prefill plus endpoint logits, seed 1, one frozen release binary.
+  27B A = `QWEN_27B_FFN_TENSOR128` unset, B = 0; ABBA with two retained
+  reps per arm. A3B is a separate plain-default arm with two reps. Build
+  lock + Metal lease per campaign, 30 s cooldown before every arm, all ten
+  before/after thermal readings 0. Every retained wall sample, milliseconds:
+
+  | Model / arm | Samples (ms) |
+  | --- | --- |
+  | 27B 1: default (unset) | 3114.361, 3112.170 |
+  | 27B 2: B (=0) | 4093.802, 4090.946 |
+  | 27B 3: B (=0) | 4092.908, 4091.516 |
+  | 27B 4: default (unset) | 3114.750, 3117.017 |
+  | A3B default | 627.888, 627.260 |
+
+  27B median wall time 4092.212 ms (B) -> 3114.555 ms (default):
+  **1000.9 -> 1315.1 tok/s, 1.313899x end-to-end**. A3B default:
+  median 627.574 ms, **6526.7 tok/s**. Medians pool all samples per
+  setting; tok/s = 4096 / median wall seconds. Production chunks were 1024
+  for 27B and 2048 for A3B.
+  Against llama.cpp v0.9.0's M5 pp4096 reference: 27B 1315.1 / 1338 =
+  **0.983x**; A3B 6526.7 / 6151 = **1.061x**.
+
 ## 2026-11-05 - A3B Tensor Prefill: 1.72-1.78x End to End, Enabled on Tensor Tier
 
 - Default-on Apple10/Metal 4 routes reuse existing half-operand tensor tiles:

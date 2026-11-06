@@ -17,6 +17,21 @@ crate::env_flag!(
     "QWEN_FN_PREFILL_DENSE_WIDE"
 );
 
+/// Experimental row-range extensions for 27B FFN and A3B routed tensor prefill. Default off during qualification; original 1024/2048-row routes are unaffected. Set to 0 to retain the original short-append dispatches.
+const SHORT_APPEND_TENSOR_ENV: &str = "QWEN_SHORT_APPEND_TENSOR";
+
+fn short_append_tensor_enabled() -> bool {
+    #[cfg(test)]
+    if let Some(value) = short_append_probe::override_value() {
+        return value;
+    }
+    static ENABLED: OnceLock<bool> = OnceLock::new();
+    *ENABLED.get_or_init(|| crate::env_flag::read_default_off(SHORT_APPEND_TENSOR_ENV))
+}
+
+#[cfg(test)]
+mod short_append_probe;
+
 /// Strict device-half 128-row tile for qualified 27B FFN projections at exactly 1024 rows, default on when QWEN_DENSE_PREFILL_TENSOR and the tensor tier are available. Set to 0 to retain the previous narrow B tile for A/B or rollback. Other shapes and A3B retain their existing tiles.
 const FFN128_ENV: &str = "QWEN_27B_FFN_TENSOR128";
 
@@ -72,7 +87,7 @@ fn expert_eligible(
 ) -> bool {
     on && available
         && *arch == A3B_ARCH
-        && m == 2048
+        && (m == 2048 || (short_append_tensor_enabled() && (128..=2048).contains(&m)))
         && gate == GgmlType::Q4_K
         && up == GgmlType::Q4_K
         && matches!(down, GgmlType::Q5_K | GgmlType::Q6_K)
@@ -346,9 +361,9 @@ pub fn encode_qwen_prefill_mat_mat(
 
 fn ffn128_shape(dtype: GgmlType, k: usize, n: usize, m: usize) -> bool {
     matches!(
-        (dtype, k, n, m),
-        (GgmlType::Q4_K, 5120, 17408, 1024) | (GgmlType::Q4_K | GgmlType::Q6_K, 17408, 5120, 1024)
-    )
+        (dtype, k, n),
+        (GgmlType::Q4_K, 5120, 17408) | (GgmlType::Q4_K | GgmlType::Q6_K, 17408, 5120)
+    ) && (m == 1024 || (short_append_tensor_enabled() && (128..=2048).contains(&m)))
 }
 
 /// Only the measured 27B FFN shapes select the 128-row device-half tile.
@@ -451,7 +466,7 @@ pub fn encode_qwen_ffn_prefill_mat_mat(
     enc.set_tensor(3, y);
     enc.dispatch(
         objc2_metal::MTLSize {
-            width: m / 128,
+            width: m.div_ceil(128),
             height: n / 64,
             depth: 1,
         },

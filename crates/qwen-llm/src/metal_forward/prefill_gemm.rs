@@ -163,6 +163,9 @@ pub(crate) fn encode_qwen4exp_prefill_mat_mat(
     n: usize,
     m: usize,
 ) -> Result<(), MfError> {
+    if crate::qwen4exp_prefill_tensor::small_f32::try_encode(ctx, enc, weight, x, y, k, n, m)? {
+        return Ok(());
+    }
     if flash_next_eligible(
         enabled(),
         ctx.tensor_ops_status().is_available(),

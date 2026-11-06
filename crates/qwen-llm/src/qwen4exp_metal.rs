@@ -669,7 +669,18 @@ impl GatedResidualPackedRead<'_, '_, '_> {
                 self.scratch.branch_count,
                 self.tokens,
             )?;
-        if !overridden {
+        if !overridden
+            && !crate::qwen4exp_prefill_tensor::small_f32::try_encode(
+                self.ctx,
+                enc,
+                self.inject,
+                &self.normalized,
+                &injection,
+                hyper_hidden,
+                self.scratch.branch_count,
+                self.tokens,
+            )?
+        {
             encode_mat_mat_dispatch_without_fewrow(
                 self.ctx,
                 enc,

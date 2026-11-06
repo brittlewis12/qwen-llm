@@ -1,0 +1,33 @@
+//! Additional screened row cohorts for the Flash-Next prompt routes.
+
+crate::env_flag!(
+    /// Extend Flash-Next tensor dense/expert projections, BF16 HC, F32 router and parallel bucketing to exactly 512/1024-row appends, default on when their existing controls and hardware gates allow them. Set to 0 to restore the 2048-row-only qualification. No new operand precision or allocated buffers; wide expert gate/up retains its 2048-row qualification.
+    default_on short_enabled,
+    "QWEN_FN_SHORT_APPEND_TENSOR"
+);
+
+fn qualifies(short: bool, rows: usize) -> bool {
+    rows == 2048 || short && matches!(rows, 512 | 1024)
+}
+
+pub(crate) fn rows_qualified(rows: usize) -> bool {
+    qualifies(short_enabled(), rows)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn short_append_row_qualification_preserves_rollback_and_tails() {
+        for on in [false, true] {
+            assert!(qualifies(on, 2048));
+            for m in [512, 1024] {
+                assert_eq!(qualifies(on, m), on);
+            }
+            for m in [0, 1, 32, 128, 256, 511, 513, 1023, 1025, 2047, 2049, 4096] {
+                assert!(!qualifies(on, m));
+            }
+        }
+    }
+}

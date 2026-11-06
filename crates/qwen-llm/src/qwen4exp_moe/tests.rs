@@ -12,7 +12,13 @@ fn flash_next_tensor_scope_is_bounded() {
     let production =
         Qwen4ExpMoeMetalGeometry::from_config(&Qwen4ExpConfig::flash_next_reference()).unwrap();
     assert!(packed_tensor_scope(production, 2048));
-    for tokens in [0, 1, 512, 1024, 2045, 2047, 2049, 4096] {
+    for tokens in [512, 1024] {
+        assert_eq!(
+            packed_tensor_scope(production, tokens),
+            crate::qwen4exp_prefill_tensor::short_enabled()
+        );
+    }
+    for tokens in [0, 1, 2045, 2047, 2049, 4096] {
         assert!(!packed_tensor_scope(production, tokens));
     }
     for geometry in [

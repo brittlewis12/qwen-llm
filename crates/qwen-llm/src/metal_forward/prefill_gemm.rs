@@ -7,12 +7,12 @@ use crate::model::{Arch, ArchKind, QWEN3_27B};
 use crate::tensor::GgmlType;
 use std::sync::OnceLock;
 
-/// Metal 4 half-operand tensor prompt projections for dense Qwen 27B Q4_K/Q6_K and Qwen 35B-A3B Q8_0 at >=128 rows, plus screened Flash-Next Q4_K/Q6_K/IQ4_XS/IQ4_NL projections at exactly 2048 rows, enabled by default when the tensor tier is available. Set to 0 for A/B or rollback. Qualified 27B FFN shapes at 1024 rows use a strict device-half 128-row tile with reused scratch. Other architectures, dtypes, shapes and small tails use incumbent dispatch; Q5_K retains its existing route and the endpoint head remains GEMV.
+/// Metal 4 half-operand tensor prompt projections for dense Qwen 27B Q4_K/Q6_K and Qwen 35B-A3B Q8_0 at >=128 rows, plus screened Flash-Next Q4_K/Q6_K/IQ4_XS/IQ4_NL projections at 2048 rows or 512/1024 rows with QWEN_FN_SHORT_APPEND_TENSOR, enabled by default when the tensor tier is available. Set to 0 for A/B or rollback. Qualified 27B FFN shapes at 1024 rows use a strict device-half 128-row tile with reused scratch. Other architectures, dtypes, shapes and small tails use incumbent dispatch; Q5_K retains its existing route and the endpoint head remains GEMV.
 
 const DENSE_PREFILL_TENSOR_ENV: &str = "QWEN_DENSE_PREFILL_TENSOR";
 
 crate::env_flag!(
-    /// Wide 64-row Metal 4 tensor tile for the qualified 2048-row Flash-Next dense projection cohorts, default on. Reuses the incumbent half operands and F32 accumulation with no new GPU buffers. Set to 0 to retain the 32-row tile; QWEN_DENSE_PREFILL_TENSOR=0 still disables both.
+    /// Wide 64-row Metal 4 tensor tile for the qualified Flash-Next dense projection cohorts (2048 rows, or 512/1024 with QWEN_FN_SHORT_APPEND_TENSOR), default on. Reuses the incumbent half operands and F32 accumulation with no new GPU buffers. Set to 0 to retain the 32-row tile; QWEN_DENSE_PREFILL_TENSOR=0 still disables both.
     default_on flash_next_dense_wide_enabled,
     "QWEN_FN_PREFILL_DENSE_WIDE"
 );
@@ -137,7 +137,7 @@ fn flash_next_eligible(
     m: usize,
 ) -> bool {
     on && available
-        && m == 2048
+        && crate::qwen4exp_prefill_tensor::rows_qualified(m)
         && match dtype {
             GgmlType::Q4_K => matches!((k, n), (2560, 640 | 6144 | 10240 | 12288) | (6144, 2560)),
             GgmlType::Q6_K => matches!(
@@ -245,7 +245,13 @@ fn flash_next_prefill_tensor_gate_preserves_fallbacks() {
             assert!(flash_next_eligible(true, true, dtype, k, n, 2048));
             assert!(!flash_next_eligible(false, true, dtype, k, n, 2048));
             assert!(!flash_next_eligible(true, false, dtype, k, n, 2048));
-            for m in [0, 1, 16, 127, 128, 512, 1024, 2045, 2047, 2049, 4096] {
+            for m in [512, 1024] {
+                assert_eq!(
+                    flash_next_eligible(true, true, dtype, k, n, m),
+                    crate::qwen4exp_prefill_tensor::short_enabled()
+                );
+            }
+            for m in [0, 1, 16, 127, 128, 2045, 2047, 2049, 4096] {
                 assert!(!flash_next_eligible(true, true, dtype, k, n, m));
             }
         }

@@ -78,9 +78,9 @@ pub(crate) mod singleton_observe;
 #[path = "qwen4exp_moe/router_capture.rs"]
 pub(crate) mod router_capture;
 const MAX_PACKED_TOKENS: usize = 2_048;
-/// Default-on Metal 4 half-operand tensor tiles for Flash-Next routed IQ2_S/IQ3_S/IQ3_XXS/IQ4_XS prefill gate/up at exactly 2048 rows and the screened 2560/640/512/top-10 geometry. Set to 0 for A/B or rollback; other shapes, dtypes and unavailable tensor pipelines retain incumbent dispatch. Also respects QWEN_EXPERT_TENSOR_TILE=0.
+/// Default-on Metal 4 half-operand tensor tiles for Flash-Next routed IQ2_S/IQ3_S/IQ3_XXS/IQ4_XS prefill gate/up at 2048 rows (or 512/1024 with QWEN_FN_SHORT_APPEND_TENSOR) and the screened 2560/640/512/top-10 geometry. Set to 0 for A/B or rollback; other shapes, dtypes and unavailable tensor pipelines retain incumbent dispatch. Also respects QWEN_EXPERT_TENSOR_TILE=0.
 const PREFILL_TENSOR_GATE_UP_ENV: &str = "QWEN_FN_PREFILL_TENSOR_GATE_UP";
-/// Default-on Metal 4 half-operand tensor tiles for Flash-Next routed IQ4_NL/Q2_0 prefill down at exactly 2048 rows and the screened 2560/640/512/top-10 geometry. Set to 0 for A/B or rollback; Q8_0, other shapes and unavailable tensor pipelines retain incumbent dispatch. Also respects QWEN_EXPERT_TENSOR_TILE=0.
+/// Default-on Metal 4 half-operand tensor tiles for Flash-Next routed IQ4_NL/Q2_0 prefill down at 2048 rows (or 512/1024 with QWEN_FN_SHORT_APPEND_TENSOR) and the screened 2560/640/512/top-10 geometry. Set to 0 for A/B or rollback; Q8_0, other shapes and unavailable tensor pipelines retain incumbent dispatch. Also respects QWEN_EXPERT_TENSOR_TILE=0.
 const PREFILL_TENSOR_DOWN_ENV: &str = "QWEN_FN_PREFILL_TENSOR_DOWN";
 
 fn packed_tensor_scope(geometry: Qwen4ExpMoeMetalGeometry, tokens: usize) -> bool {
@@ -88,7 +88,7 @@ fn packed_tensor_scope(geometry: Qwen4ExpMoeMetalGeometry, tokens: usize) -> boo
         && geometry.routed_intermediate_size == 640
         && geometry.expert_count == 512
         && geometry.experts_per_token == 10
-        && tokens == 2048
+        && crate::qwen4exp_prefill_tensor::rows_qualified(tokens)
 }
 
 fn packed_tensor_selected(
@@ -291,7 +291,7 @@ crate::env_flag!(
 );
 
 crate::env_flag!(
-    /// Parallel stable expert bucketing for Flash-Next packed prefill on the M5 tensor tier at 2048 rows, default on. Counts and ascending route-slot order are exact. Set to 0 for the serial bucketing rollback; no additional GPU allocations.
+    /// Parallel stable expert bucketing for Flash-Next packed prefill on the M5 tensor tier at 2048 rows (or 512/1024 with QWEN_FN_SHORT_APPEND_TENSOR), default on. Counts and ascending route-slot order are exact. Set to 0 for the serial bucketing rollback; no additional GPU allocations.
     default_on parallel_bucket_enabled,
     "QWEN_FN_PREFILL_PARALLEL_BUCKET"
 );
@@ -303,7 +303,8 @@ fn parallel_bucket_qualified(
 ) -> bool {
     parallel_bucket_enabled()
         && ctx.tensor_ops_status().is_available()
-        && (g.hidden_size, g.expert_count, g.experts_per_token, tokens) == (2560, 512, 10, 2048)
+        && (g.hidden_size, g.expert_count, g.experts_per_token) == (2560, 512, 10)
+        && crate::qwen4exp_prefill_tensor::rows_qualified(tokens)
         && pipeline_supports(ctx, "kernel_moe_route_bucket_slots_parallel_f32", 256, 0)
 }
 crate::env_flag!(

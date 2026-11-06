@@ -6,6 +6,111 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the current state and evidence index.
 
+## 2026-11-06 - V4.1 Wide Dense Tiles: Default On, Native pp4096 +5.3%
+
+- Frozen screen **`2fb67ed2`**, production **`ee79e087`**, M5 Ultra,
+  unchanged full GSQ-RCO IQ2_XS + IQ4_NL Engram artifact below. **Default on:**
+  64-row dense tensor tiles for Q5_K projections and their existing resident
+  F16 caches, replacing 32-row tiles. Same half operands, ascending K32 F32
+  accumulations, layouts, weights and output checks. Persistent buffers,
+  cache thresholds, allocation/admission and decode are unchanged. Rollback:
+  **`QWEN_V41_DENSE_WIDE=0`**. Production removes unused F32-input exports
+  from the screen and enables its already-qualified policy.
+- Scope: measured M5 Ultra, 512..4096 rows in complete 64-row bands;
+  q_b 1280->32768, eight output-A groups 4096->1024, output-B 8192->5120,
+  shared gate/up 5120->2304 and down 2304->5120. Other devices, geometries,
+  small/tail rows, operand policies and the shared automatic Q8-only selector
+  retain their incumbents. Device restriction and broadening trigger are in
+  the identity-gate allowlist. Wide tiles use 16 KiB dynamic threadgroup
+  memory versus 8 KiB, 128 threads; actual PSOs report zero static shared
+  memory and a 1024-thread maximum.
+- Prespecified kill bars: **>=1.15x** weighted dense operator mix,
+  **>=1.05x** whole append, finite outputs and intact guards. Cheap standalone
+  M5 ABBA, six retained samples/policy/shape, real projection dimensions,
+  synthetic finite F16/Q5_K banks, 512/1024/2048/4096 rows. Weighted mix counts
+  q_b once, output-A eight times, output-B once, shared gate/up twice and down
+  once/layer. Q5_K speedups **1.418x / 1.392x** at 512/1024; cached F16
+  **1.320x / 1.310x** at 2048/4096. Every checked output is bitwise equal
+  to narrow; finite values and guard words pass. Whole operator process
+  **4.04 s**, thermal 0, no model import.
+- **Reject short F16-cache widening:** 512-row F16 mix only **1.109x**,
+  below the bar; output-A is **0.890x**. Keep the existing **2048-row cache
+  threshold**, using wide quantized Q5_K below it. No short-cache experiment
+  or unused F32-input wide exports remain in the product.
+- Whole-call screen: one ordinary Full 8K prefix/process, immutable snapshot
+  capture/restore outside the timer, production `Forward::prefill` plus full
+  endpoint logits copy. One excluded warm append and two retained repetitions
+  per size/arm, separate-process ABBA, 30 s cooldown before every arm, one
+  engine resident, build lock + canonical Metal lease, nice 10. All samples
+  retained; medians below. Every endpoint hash matches across all arms.
+  Warm-only census proves **520 candidate dense dispatches/append versus
+  zero rollback**, with the same total dispatch count. This measures whole
+  append wall time, not just a GEMM or a transferred native scoreboard rate.
+
+  | Append at d8192 | Off ms | On ms | Speedup |
+  | ---: | ---: | ---: | ---: |
+  | 512 | 588.486 | 558.727 | 1.05326x |
+  | 1024 | 980.842 | 917.025 | 1.06959x |
+  | 2048 | 1677.350 | 1594.251 | 1.05212x |
+  | 4096 | 3175.289 | 2957.601 | 1.07360x |
+
+  The 4K row is noisy: off **3249.425, 3910.778, 3101.153, 3100.029**;
+  on **3382.782, 2964.503, 2950.698, 2947.667 ms**. No outlier is removed.
+- Native cold pp4096, same production binary, unset default versus rollback,
+  ordinary family harness/model and row warmups, two reps/arm, ABBA:
+  off **1409.2013, 1406.0310, 1408.0474, 1408.2495**; default
+  **1483.4177, 1483.1899, 1482.8291, 1483.3410 tok/s**. Median wall
+  **2908.784 / 2761.475 ms**, **1.05334x**; median rates **1408.148 /
+  1483.265 tok/s**. Default useful compute is **38.83%** of the same
+  130 TFLOP/s roofline. All timing arms are unprofiled, pressure **0**
+  before/throughout/after (two-second supervision), with the build lock,
+  inherited Metal lease and 30 s cooldown. Build/runtime identities match.
+- Native pp512@8K first A/B emitted off **394.481, 419.571**, default
+  **895.319, 894.272 tok/s**. Do **not** credit its 2.20x ratio. A fresh
+  balanced ABBA repeat, all samples retained, emits off **408.589, 855.059,
+  825.935, 845.454**, default **893.271, 443.103, 896.602, 894.947 tok/s**.
+  Median wall **612.748 / 572.638 ms**, **1.07004x**; median default
+  **894.109 tok/s**, **23.80%** useful compute roofline. Approximately
+  0.6 s extra wall time appears under **both** policies; its cause is not
+  attributed here. This is consistent with the conservative 5-7% gain,
+  not a universal 2x short-append improvement.
+- Native pp512@32K two-rep A/B: off **419.588, 419.065**, default
+  **443.511, 830.922 tok/s**. Default useful compute samples **12.25% /
+  22.96%**, arithmetic mean **17.61%**. This cell remains unstable; the
+  apparent 1.38x pooled ratio is **not promotion evidence**. All native
+  append commands retain ordinary untimed prefix fills and row warmups;
+  no snapshot rate is substituted into the native standing. Decode remains
+  the unchanged path and standing below. llama.cpp v0.9.0 still cannot load
+  the unmodified artifact, so comparator cells remain unsupported.
+- Same-artifact distribution check, frozen raw code/prose from `1a56970b`,
+  native tokenizer, cold pp4096 and pp512 after an 8192-token Full prefix.
+  Independently evolving on/off processes, 128 sequential next-token targets
+  per document/cell: **512 full-vocabulary vectors, 129280 logits each**.
+  All finite and **bitwise identical**, establishing **delta NLL = 0,
+  KL = 0, argmax 512/512**. F64 mean NLL code/prose **0.490529/1.100465**
+  after pp4096 and **0.591310/1.727878** after the append, identical in both
+  policies. Passes unchanged |delta NLL| <=0.005 and mean KL <=0.01.
+  IDs, raw vectors, corpus/source hashes and exact comparison receipts retained;
+  this is numerical equivalence on the bounded corpus, not a new model-quality
+  comparison against a different quantization.
+- Production CLI smoke on `ee79e087`, **8432 prompt tokens**, Full chunks
+  4096+4096+240, greedy seed 1, explicit `--reasoning-effort none`, bounded
+  **64-token cap**: status ok/token_limit under rollback and unset default;
+  generated token IDs and all **173 output bytes** match. Text SHA256
+  **`be3b1e901b5cc1963fed51f036deadc70f5e86b74ce8b0cc03cf276c4e46eb64`**.
+  Initial `--no-thinking` smoke was rejected before inference and is retained.
+  Cold smoke timings are not promoted as performance evidence.
+- Validation on production source: full **`cargo test --release -p qwen-llm
+  --lib`: 2438 passed, 0 failed, 738 explicit ignores**; focused M5 Q5_K/F16
+  output/row tails, poisoned guards, CPU reference and narrow-bit comparison
+  **1 passed with Metal API validation enabled**; existing wide Q8 and
+  Flash-Next cases also pass in the full suite. **`scripts/check-contracts.sh`
+  passes** for committed `ee79e087`. Default/rollback parsing, bounded device/
+  shape policy, generated ENV and CPU acceptance inventory are included.
+  No merge. Raw operator/native/teacher-forcing/smoke/validation data, failed
+  attempts and frozen helper sources: **`2026-11-06-v41-roofline-raw.tar`**, SHA256
+  **`e50f34de744e94ad8cb0719bf771fde4838371ec4346e7e7c5eae92614d3d06e`**; retained outside the repository on metagross.
+
 ## 2026-11-06 - V4.1 M5 Roofline Standing: Decode 61-64%, Short Append 14%
 
 - Frozen **`1a56970b`**, canonical release, M5 Ultra 80-core / 256 GiB.

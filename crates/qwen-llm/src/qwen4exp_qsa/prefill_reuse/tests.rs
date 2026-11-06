@@ -63,7 +63,7 @@ fn size(x: usize, y: usize, z: usize) -> MTLSize {
 }
 fn attention(ctx: &MetalContext) {
     const Q: usize = 32;
-    for start in [32768usize, 131072] {
+    for start in [2051usize, 32768, 131072] {
         let c = start + Q + 5;
         let mut seed = 0x12345678fedcba98;
         let q: Vec<f32> = (0..256 * 24 * Q).map(|_| next(&mut seed) * 0.5).collect();

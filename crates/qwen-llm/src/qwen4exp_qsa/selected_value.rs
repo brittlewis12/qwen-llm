@@ -78,6 +78,7 @@ pub(super) struct Pipelines {
     value: Pipeline,
     split_value: Option<Pipeline>,
     vector_value: Option<Pipeline>,
+    vector_from: usize,
     device: u64,
 }
 
@@ -115,19 +116,27 @@ impl Pipelines {
         {
             return Ok(None);
         }
+        let tensor = ctx.tensor_ops_status().is_available();
+        let vector_value = if split_enabled {
+            super::prefill_reuse::value_pipeline(ctx)?
+        } else {
+            None
+        };
         Ok(Some(Self {
             softmax,
             value,
-            split_value: if split_enabled && super::prefill_reuse::simd_available(ctx) {
+            split_value: if split_enabled
+                && super::prefill_reuse::simd_available(ctx)
+                && (tensor || vector_value.is_some())
+            {
                 optional_pipeline(ctx, SPLIT_VALUE)?.filter(|p| pipeline_supported(p, 0, limit))
             } else {
                 None
             },
-            vector_value: if split_enabled {
-                super::prefill_reuse::value_pipeline(ctx)?
-            } else {
-                None
-            },
+            // The scalar split does not pay on the M4 at the dense frontier.
+            // Its bitwise-equivalent vector leaf covers all selected bands there.
+            vector_value,
+            vector_from: if tensor { 32768 } else { 2051 },
             device: ctx.device.registryID(),
         }))
     }
@@ -315,13 +324,15 @@ impl Pipelines {
         enc.set_threadgroup_memory(0, STATS_TGM);
         enc.dispatch(size(3, 2, n), size(256, 1, 1));
         let split = self.uses_split(n);
-        enc.set_pipeline(if split && start >= 32768 && self.vector_value.is_some() {
-            self.vector_value.as_ref().unwrap()
-        } else if split {
-            self.split_value.as_ref().unwrap()
-        } else {
-            &self.value
-        });
+        enc.set_pipeline(
+            if split && start >= self.vector_from && self.vector_value.is_some() {
+                self.vector_value.as_ref().unwrap()
+            } else if split {
+                self.split_value.as_ref().unwrap()
+            } else {
+                &self.value
+            },
+        );
         enc.set_bytes(0, &args);
         enc.set_tensor(1, gate);
         enc.set_tensor(2, cache);

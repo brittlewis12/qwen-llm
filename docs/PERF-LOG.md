@@ -6,6 +6,136 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the current state and evidence index.
 
+## 2026-11-06 - A3B M5 Depth: Tensor Flash Short Appends
+
+- Base `2ebe7e57`, production/measurement source **`d4365ed1`**, M5 Ultra,
+  Qwen3.6-35B-A3B UD-Q4_K_M. Reuse the landed strict tensor-API flash shader
+  with A3B's **16 query / 2 KV heads, d256**, dynamic 512-element KV stride
+  and two KV threadgroup rows. The checked host layout now supports G8;
+  the existing G6 wrapper retains its geometry. No shader arithmetic changed.
+- **Automatic/default on** with an available tensor tier on the measured
+  M5 Ultra device class: F32 Q/output, F16 K/V, actual query chunks
+  **512..1024**, total KV **32768..262144 divisible by 64**. Existing
+  matrix/online, workspace, index, serial-encoder and alias guards apply.
+  Rollback: **`QWEN_PREFILL_ATTN_TENSOR_FLASH=0`**. The normal 2048-row
+  prefix chunks retain tiled matrix attention; this qualification targets
+  short appends. Other Apple10 device classes remain explicit opt-in.
+- Prespecified kill bar: **>=1.10x whole pp512 append at both 32K and 128K**.
+  Prototype `16e99e10`, same restored incumbent prefix, warmed native scratch,
+  ABBA, two retained reps per arm occurrence. Every retained sample (ms):
+
+  | Depth | Off samples | On samples | Median off / on | Speed |
+  | ---: | --- | --- | ---: | ---: |
+  | 32768 | 207.470334, 207.690042, 214.237667, 207.579959 | 181.590833, 181.502166, 188.479375, 182.071625 | 207.635000 / 181.831229 | 1.141911x |
+  | 131072 | 615.993042, 617.058125, 610.858542, 612.174000 | 461.069958, 457.346041, 457.713834, 449.667917 | 614.083521 / 457.529937 | 1.342171x |
+
+- F64 operator checks: original F32 Q and the same stored F16 K/V;
+  first/middle/last query rows, heads 0/7/8/15, every channel (3072 sampled
+  cells at the census shapes). Full vectors also satisfy the landed flash
+  contract: max abs <=0.02 and per-head cosine >=0.9999. All outputs finite;
+  sampled max-absolute and relative-RMS error each <=1.5x incumbent.
+  Metal validation enabled, six GPU/layout tests, eight numerical cohorts,
+  including partial queries, guarded outputs, 256K KV and long uniform
+  attention. Relevant actual errors and ratios:
+
+  | M / total KV | Incumbent max abs / relative RMS | Flash max abs / relative RMS | Max / RMS ratio |
+  | --- | ---: | ---: | ---: |
+  | 512 / 33280 | 1.101076e-5 / 3.267544e-4 | 9.956776e-6 / 2.958431e-4 | 0.904277 / 0.905399 |
+  | 512 / 131584 | 4.832659e-6 / 3.193208e-4 | 4.693157e-6 / 2.807042e-4 | 0.971133 / 0.879067 |
+
+  Worst ratios across all eight cohorts: **0.998328 / 0.953800**.
+  F64 prototype source `4d9b8dbc`; the final route uses the same encoder
+  arithmetic and shader. Selector regressions cover both geometries,
+  automatic cohort boundaries, unavailable tier, explicit off and guards.
+- Distribution gate, prespecified per **document x depth cell** and pooled:
+  |delta NLL| <=0.005 nats/token and mean KL <=0.01. Frozen `2ebe7e57`
+  prose/code, 2048 next-token targets per cell, **8192 total**. Sequential
+  appends **512, 33, 479, 1024** exercise flash -> unaligned matrix fallback
+  -> flash after a restored prefix. Prefixes use each full production policy.
+  Native RMSNorm + GEMV readout matches endpoint logits exactly; F64
+  full-vocabulary log-sum-exp/KL, every logit finite. Dispatch witnesses:
+  on has ten flash launches for 512/1024, zero for 33/479; off always zero.
+
+  | Document / depth | Targets | NLL off | NLL on | delta NLL | Mean / max KL | Argmax agreement |
+  | --- | ---: | ---: | ---: | ---: | ---: | ---: |
+  | code / 32768 | 2048 | 1.429631907 | 1.429802284 | +0.000170377 | 0.000601619 / 0.022274002 | 2031/2048 |
+  | code / 131072 | 2048 | 1.427550530 | 1.426346478 | -0.001204052 | 0.000474846 / 0.026687490 | 2031/2048 |
+  | prose / 32768 | 2048 | 2.460576218 | 2.460230218 | -0.000345999 | 0.001898612 / 0.720755946 | 2015/2048 |
+  | prose / 131072 | 2048 | 2.382656025 | 2.382448954 | -0.000207071 | 0.000634593 / 0.036014932 | 2028/2048 |
+  | pooled | 8192 | 1.925103670 | 1.924706984 | -0.000396686 | 0.000902418 / 0.720755946 | 8105/8192 |
+
+- Greedy after the 32K code prefix + 512-token append: **160 tokens identical**,
+  both token IDs and decoded bytes. Both output SHA256:
+  `f3421c697992556ada9b6f2f3a5bb7486e3d2100c7606d70db95c45129777e6c`.
+  Both token-ID SHA256:
+  `dbac98eab67d91271a1550e16024c4e695a0ef5a642f79418c8060b8efa9b79e`.
+- Depth attribution: warmed dispatch timestamp pairs, **1123 off / 1113 on**
+  at each depth, zero overflow or missing pairs. Sort by GPU end time and
+  attribute non-overlapping end-to-end increments; raw encoder envelopes
+  overlap. Includes transitions and serializes concurrent dispatches, so this
+  is diagnostic attribution, not an ordinary wall-time decomposition.
+
+  | Depth / arm | Timeline ms | Attention core + mask | V transpose | Grouped experts | GDN prep/scan/precompute | Q8 matmats, dense + shared |
+  | --- | ---: | ---: | ---: | ---: | ---: | ---: |
+  | 32768 / off | 205.254 | 97.336 | 13.889 | 41.696 | 14.612 | 23.426 |
+  | 32768 / on | 178.608 | 85.144 | 0.000 | 41.542 | 14.390 | 23.988 |
+  | 131072 / off | 599.113 | 449.204 | 56.028 | 41.584 | 14.525 | 23.948 |
+  | 131072 / on | 443.697 | 345.753 | 0.000 | 41.424 | 14.597 | 23.863 |
+
+  Attention plus transpose grows **111.226 -> 505.232 ms** off, versus
+  **85.144 -> 345.753 ms** on. Grouped experts and GDN stay roughly flat.
+  Flash avoids the full-prefix V-transpose rebuild and F16 score sidecar.
+  Attention remains about **78%** of the on timeline at 128K.
+- Final end-to-end: one clean `d4365ed1` release example, production allocator
+  (outer chunk 2048, matrix query cap 1024), seed 1, ordinary prefill plus
+  endpoint logits. In-process attention off versus automatic/default on
+  holds admission policy fixed. Prefix preparation/restoration is untimed;
+  each policy prepares its own prefix. Reuse native scratch after one
+  excluded warmup per arm, fresh restored sequence per sample. ABBA,
+  **two retained reps per arm occurrence**, four per setting/cell.
+  Both build lock and Metal lease per <=10-minute campaign, nice 10,
+  30 s before every timed arm; all thermal gates and exit readings **0**.
+  Every retained sample follows, chronological within setting:
+
+  | pp | Depth | Off samples (ms) | On samples (ms) | Median off / on (ms) | Speed | Off / on tok/s | On / llama.cpp |
+  | ---: | ---: | --- | --- | ---: | ---: | ---: | ---: |
+  | 512 | 32768 | 214.676584, 207.857250, 212.135875, 205.880875 | 188.776208, 182.361375, 182.110917, 181.966000 | 209.996562 / 182.236146 | 1.152332x | 2438.1 / 2809.5 | 1.023459x |
+  | 1024 | 32768 | 366.375750, 368.940959, 369.011875, 366.645625 | 304.945709, 303.969834, 301.513417, 305.290917 | 367.793292 / 304.457772 | 1.208027x | 2784.2 / 3363.4 | 1.058158x |
+  | 512 | 131072 | 616.794833, 620.437250, 609.877500, 610.813833 | 453.419875, 455.953000, 449.560708, 450.127459 | 613.804333 / 451.773667 | 1.358655x | 834.1 / 1133.3 | 0.981652x |
+  | 1024 | 131072 | 1223.210583, 1217.692792, 1220.244708, 1214.579458 | 797.147542, 790.667083, 791.870042, 788.393208 | 1218.968750 / 791.268563 | 1.540525x | 840.1 / 1294.1 | 1.008983x |
+
+- Fresh pinned llama.cpp **v0.9.0 `cd959bae99`**, MTL/BLAS, same artifact,
+  `-b 2048 -ub 2048 -ctk f16 -ctv f16 -r 2`, native warmup.
+  Ratios above use qwen's median-derived throughput / llama.cpp's native
+  mean throughput. Every reference sample:
+
+  | pp | Depth | llama.cpp samples (ms) | Samples (tok/s) | Mean tok/s |
+  | ---: | ---: | --- | --- | ---: |
+  | 512 | 32768 | 189.182375, 183.914584 | 2706.38, 2783.90 | 2745.142112 |
+  | 1024 | 32768 | 325.538292, 318.860000 | 3145.56, 3211.44 | 3178.500026 |
+  | 512 | 131072 | 447.371000, 439.665166 | 1144.46, 1164.52 | 1154.493270 |
+  | 1024 | 131072 | 811.701250, 785.482292 | 1261.55, 1303.66 | 1282.602771 |
+
+- Release example SHA256:
+  `0bad8433b55c6775d9444e171a1e82f668c64fe8696887610f91401657113c63`.
+  All accepted samples, warmups, cell/slice/corpus witnesses, greedy IDs and
+  raw GPU timestamp pairs are retained outside the repository in
+  `a3bd-qualified-samples.jsonl`, SHA256
+  `1a6296951b28153828fe3d91f07a570a7a663665a40d9b9a41df5d685236e1eb`.
+  Initial cold-scratch pilot logs are retained separately and do not enter
+  qualification; all reported timings reuse warmed scratch.
+- Reproduce with [`a3b_depth`](../crates/qwen-cli/examples/a3b_depth.rs)
+  (`--mode kill|quality|profile|e2e|greedy`, `--automatic` for final policy)
+  and the bounded [`a3b-depth.py`](../scripts/bench/a3b-depth.py) driver
+  under build.lock + the normal campaign lease. The laptop builds and
+  reports the tensor tier unavailable, then skips cleanly.
+- Full `cargo test --release -p qwen-llm --lib`: **2430 passed, 0 failed,
+  738 ignored**. `scripts/check-contracts.sh`: **pass**, both under the
+  build lock with nice 10. Generated ENV retains `QWEN_METAL_LEASE_FD`.
+  **Result:** pp512 is **1.023x / 0.982x llama.cpp** at 32K/128K;
+  pp1024 is **1.058x / 1.009x**. Recommend the qualified default-on route;
+  the remaining depth hotspot is flash attention's KV reuse.
+
 ## 2026-11-06 - Flash-Next Long-Context Short Appends: F32 Tensor Index, 78% Less Depth Slope
 
 - Main `1cc6a4d1`, M5 Ultra, GSQ-RCO IQ3_S. Native pp512 profiles at

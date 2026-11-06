@@ -6,6 +6,83 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the current state and evidence index.
 
+## 2026-11-06 - V4.1 M5 Roofline Standing: Decode 61-64%, Short Append 14%
+
+- Frozen **`1a56970b`**, canonical release, M5 Ultra 80-core / 256 GiB.
+  Primary artifact: **DeepSeek-V4.1-Flash-1017 GSQ-RCO IQ2_XS**, all four
+  shards, companion **Engram IQ4_NL**. This is the full 384-expert, top-6
+  model used by the recent V4.1 campaigns, with headroom for profiling;
+  the registry REAP-272E MXFP4-Q8Engram is a different artifact. No REAP or
+  Unsloth throughput is transferred to GSQ. Default **Full** prefill,
+  resident Q5_K F16 preweight cache, ordinary scalar decode; no overrides.
+- Header census: active serialized weight payload **8,033,673,088 B/token**
+  including a single embedding row: routed experts **2,329,067,520 B**
+  (IQ2_XXS/IQ2_XS/IQ2_S/IQ3_XXS), remainder Q5_K/Q8_0/BF16/F32.
+  Decode reads quantized sources, not the prefill-only F16 cache. At depth
+  zero the eight index query/weight projections are skipped throughout tg64:
+  **7,947,165,568 B/token**. Engram adds 48 IQ4_NL row gathers, **6,912 B**
+  of serialized CPU payload/token; SSD page traffic is not that payload.
+  For comparison, the real REAP header gives **13,410,770,368 B/token**,
+  or **74.57 tok/s** at 1.0 TB/s before state traffic. Its old ~75 tok/s
+  roof must not be applied to GSQ.
+- Bandwidth model: **1.0 decimal TB/s**, one read of each active weight,
+  F32 raw-window and selected shared-latent reads once per consuming layer,
+  index keys once per scoring source, plus cache writes. Averaged over the
+  actual 64 timed positions, weights/state total **7.95184 / 8.11146 /
+  8.19325 GB/token** at 0 / 8192 / 32768. State reads are **4.583 / 77.702 /
+  159.491 MB/token**; writes **0.088 MB**. Authoritative owner state grows
+  **6,400 B/position**, plus per-layer 128-row raw rings. This is an
+  unavoidable-payload lower bound, not measured physical DRAM traffic:
+  cache reuse, repeated reads, temporaries, dispatch drains and CPU work
+  remain in the gap.
+- Compute model: recorded M5 half-operand/F32-accumulate tensor peak
+  **~130 TFLOP/s** (production 32x64x32 calibration 129.6), FMA=2.
+  Header-derived active projection work, endpoint head once, causal QK/PV
+  and index scoring give **34.034 / 34.610 / 35.918 GFLOP/token** for
+  pp4096 / pp512@8K / pp512@32K. Percentages credit useful model work;
+  expert/tile padding and dequantization are not counted as useful FLOPs.
+  They are not hardware tensor-utilization counters.
+
+  | Cell | qwen-llm samples, tok/s | Mean tok/s | Roof tok/s | % roof | llama.cpp v0.9.0 |
+  | --- | --- | ---: | ---: | ---: | --- |
+  | tg64, d0 | 79.84796, 79.89738 | 79.87267 | 125.76 | 63.51% | unsupported artifact |
+  | tg64, d8192 | 74.84067, 74.68751 | 74.76409 | 123.28 | 60.64% | unsupported artifact |
+  | tg64, d32768 | 74.17531, 74.12535 | 74.15033 | 122.05 | 60.75% | unsupported artifact |
+  | pp4096, d0 | 1400.17938, 1399.82403 | 1400.00170 | 3819.75 | 36.65% | unsupported artifact |
+  | pp512, d8192 | 537.96462, 501.49277 | 519.72869 | 3756.16 | 13.84% | unsupported artifact |
+  | pp512, d32768 | 427.98796, 567.77597 | 497.88196 | 3619.31 | 13.76% | unsupported artifact |
+
+- Native `qwen-bench suite -m MODEL --pp P --tg 64 --depth D --runs 2
+  -o json`, seed 1, normal model/row warmups, full logits copies. The 32K
+  pp/tg cells ran separately: the combined six-fill command reached its
+  **300 s deadline**, exited 130 cleanly at **301.69 s**, and emitted no
+  aggregate. It is retained but excluded. Separate pp/tg campaign walls
+  **147.06 / 130.96 s**. Every arm uses build.lock, nice 10 and the canonical
+  inherited Metal lease; pressure **0 before/throughout/after**, monitored
+  every two seconds. The large 32K append spread is retained: this is a
+  two-sample standing, not evidence of a depth-dependent append regression
+  or an optimization A/B. Decode is tight; short-append screens need
+  amortized prefixes and warmed scratch.
+- Pinned llama.cpp **v0.9.0 `cd959bae99`**, exact unmodified GSQ artifact,
+  leased `llama-bench -m MODEL -p 0 -n 1 -r 1 -o json`: fails before
+  inference with **`array key not found in model:
+  deepseek41.attention.kv_source_layers`**. Thus no comparable pp/tg cells
+  exist for this artifact on the pinned engine. No metadata rewrite or
+  substitute checkpoint is presented as a comparator.
+- Diagnostic only, 8K / four unwarmed sampled decode steps: **888 / 894 /
+  888 / 894 dispatches**, with zero profile overflow. Fastest last step:
+  **14.611 ms GPU**, **18.449 ms wall**; sorted GPU-end increments attribute
+  routed FFN **4.482 ms**, attention output **2.456**, QKV **2.190**, shared
+  FFN **1.422**, attention core **1.241**, index **0.564**. Earlier steps
+  include PSO/ramp stalls and remain in the archive; profiling is not the
+  throughput protocol. The ~2,000-dispatch / 21-27 tok/s October standing
+  is obsolete. Short prefill remains the larger compute gap; first cheap
+  screen is wider cached-F16 dense tiles before more routed-GEMM redesign.
+- Raw commands, all samples/failed attempt, headers, accounting scripts,
+  matching source/build identity and diagnostic data are outside the repo:
+  `metagross:~/qwen-runs/2026-11-06-v41-roofline/v41-standing-raw.tar`,
+  SHA256 **`6714f43d2d6d2ee4a7cbaae90cd55d3f634a78d979b4c1eae136ea353972dc82`**.
+
 ## 2026-11-06 - GLM Rooflines on M5/M4: One-Row IQ2_S Decode Experts
 
 - Baseline **`1a56970b`**, GLM-5.3 Flash, M5 Ultra / 128-GB M4 Max.

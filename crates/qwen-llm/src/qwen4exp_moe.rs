@@ -11,11 +11,11 @@ use crate::metal::{
     encode_moe_down_weighted_sum_q8_0_f32, encode_moe_route_bucket_slots_f32,
     encode_moe_route_bucket_slots_f32_status, encode_moe_route_bucket_slots_parallel_f32_status,
     encode_moe_swiglu_f32_grouped_slots_generic_range, encode_moe_swiglu_iq3_s_f32,
-    encode_moe_swiglu_iq3_xxs_f32, encode_moe_swiglu_iq3_xxs_f32_fast,
-    encode_moe_swiglu_iq3_xxs_f32_grouped_slots_n16, encode_moe_swiglu_iq4_xs_f32,
-    encode_moe_swiglu_iq4_xs_f32_grouped_slots_n16, encode_moe_weighted_sum_f32,
-    encode_moe_weighted_sum_packed_f32, encode_shared_swiglu_q8_0_f32, encode_silu_mul_f32,
-    encode_topk_logits_softmax_dot_sigmoid_packed_f32,
+    encode_moe_swiglu_iq3_s_f32_fast, encode_moe_swiglu_iq3_xxs_f32,
+    encode_moe_swiglu_iq3_xxs_f32_fast, encode_moe_swiglu_iq3_xxs_f32_grouped_slots_n16,
+    encode_moe_swiglu_iq4_xs_f32, encode_moe_swiglu_iq4_xs_f32_grouped_slots_n16,
+    encode_moe_weighted_sum_f32, encode_moe_weighted_sum_packed_f32, encode_shared_swiglu_q8_0_f32,
+    encode_silu_mul_f32, encode_topk_logits_softmax_dot_sigmoid_packed_f32,
     encode_topk_logits_softmax_dot_sigmoid_packed_f32_status, encode_topk_logits_softmax_f32,
     encode_topk_logits_softmax_f32_status,
 };
@@ -277,6 +277,22 @@ struct Qwen4ExpIq3GateUpCaptureBinding {
     next_ordinal: std::rc::Rc<std::cell::Cell<usize>>,
     records: std::rc::Rc<std::cell::RefCell<Vec<Qwen4ExpIq3GateUpCaptureRecord>>>,
     seen_layers: std::rc::Rc<std::cell::RefCell<[bool; 48]>>,
+}
+
+crate::env_flag!(
+    /// Flash-Next singleton IQ3_S gate/up at H2560/F640/E512/top10: existing four-row F32 decoder with reused scales and activations. Changes accumulation order, not operands or buffers. Default on; set 0 for the elementwise decoder. Also respects QWEN4EXP_MOE_IQ3_FAST=0.
+    default_on iq3_s_decode_enabled,
+    "QWEN_FN_IQ3_S_DECODE"
+);
+fn iq3_s_decode(g: Qwen4ExpMoeMetalGeometry) -> bool {
+    iq3_s_decode_enabled()
+        && qwen4exp_moe_iq3_fast_enabled()
+        && (
+            g.hidden_size,
+            g.routed_intermediate_size,
+            g.expert_count,
+            g.experts_per_token,
+        ) == (2560, 640, 512, 10)
 }
 
 crate::env_flag!(
@@ -1710,19 +1726,26 @@ fn encode_singleton_gate_up(
     let g = weights.geometry;
     match weights.routed_gate.dtype {
         GgmlType::IQ2_S => qwen4exp_expert_compat::encode(ctx, enc, input, weights, buffers)?,
-        GgmlType::IQ3_S => encode_moe_swiglu_iq3_s_f32(
-            ctx,
-            enc,
-            weights.routed_gate,
-            weights.routed_up,
-            input,
-            buffers.topk_ids,
-            buffers.routed_inner,
-            g.hidden_size,
-            g.routed_intermediate_size,
-            g.expert_count,
-            g.experts_per_token,
-        )?,
+        GgmlType::IQ3_S => {
+            let encode = if iq3_s_decode(g) {
+                encode_moe_swiglu_iq3_s_f32_fast
+            } else {
+                encode_moe_swiglu_iq3_s_f32
+            };
+            encode(
+                ctx,
+                enc,
+                weights.routed_gate,
+                weights.routed_up,
+                input,
+                buffers.topk_ids,
+                buffers.routed_inner,
+                g.hidden_size,
+                g.routed_intermediate_size,
+                g.expert_count,
+                g.experts_per_token,
+            )?;
+        }
         GgmlType::IQ3_XXS => {
             let encode = if qwen4exp_moe_iq3_fast_enabled() {
                 encode_moe_swiglu_iq3_xxs_f32_fast
@@ -3317,6 +3340,9 @@ pub(crate) fn preflight(
     preflight_projection(ctx, weights.shared_down.dtype)?;
     let (routed_gate_kernel, routed_gate_threads) = match weights.routed_gate.dtype {
         GgmlType::IQ2_S => (qwen4exp_expert_compat::KERNEL, 64),
+        GgmlType::IQ3_S if iq3_s_decode(weights.geometry) => {
+            ("kernel_moe_swiglu_iq3_s_f32_fast", 64)
+        }
         GgmlType::IQ3_S => ("kernel_moe_swiglu_iq3_s_f32", 64),
         GgmlType::IQ3_XXS if qwen4exp_moe_iq3_fast_enabled() => {
             ("kernel_moe_swiglu_iq3_xxs_f32_fast", 64)

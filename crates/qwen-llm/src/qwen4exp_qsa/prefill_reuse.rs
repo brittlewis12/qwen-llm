@@ -5,6 +5,17 @@ use crate::metal::Pipeline;
 mod tests;
 
 crate::env_flag!(
+    /// Allow ordinary Metal SIMD selected-QSA prefill paths on Apple-family-7+ devices without the tensor tier. Default on; qualified M4 Max as well as existing M5 paths. Optional PSO width/thread/memory checks still gate each route; no tensor instructions or new buffers. Set 0 to restore the prior tensor-tier eligibility. Existing per-stage rollback flags remain effective.
+    default_on simd_prefill_enabled,
+    "QWEN_FN_SIMD_PREFILL_QSA"
+);
+
+pub(super) fn simd_available(ctx: &MetalContext) -> bool {
+    ctx.tensor_ops_status().is_available()
+        || (simd_prefill_enabled() && ctx.device.supportsFamily(objc2_metal::MTLGPUFamily::Apple7))
+}
+
+crate::env_flag!(
     /// M5 Flash-Next exact packed QSA selector for N32 bands, K512 and >=8192 block capacity. Parallel stable scans replace serial compaction scans, and radix passes stop when the threshold bucket is fully selected. IDs, ties and error statuses are unchanged; no added GPU buffers or static threadgroup storage. Set 0 for the existing radix4 selector. Unsupported PSOs/devices use the incumbent.
     default_on compact_selector_enabled,
     "QWEN_FN_QSA_SELECTOR_COMPACT"
@@ -51,7 +62,7 @@ pub(super) fn selector_pipeline(
     threads: usize,
 ) -> Result<Option<Pipeline>, MetalError> {
     if !compact_selector_enabled()
-        || !ctx.tensor_ops_status().is_available()
+        || !simd_available(ctx)
         || count != 32
         || capacity < 8192
         || budget != 512
@@ -73,7 +84,7 @@ pub(super) fn logits_pipeline(
     count: usize,
 ) -> Result<Option<Pipeline>, MetalError> {
     if !logits_reuse_enabled()
-        || !ctx.tensor_ops_status().is_available()
+        || !simd_available(ctx)
         || !selected_value::geometry_qualified(g)
         || count != 32
         || start < 32768
@@ -89,7 +100,7 @@ pub(super) fn logits_pipeline(
 }
 
 pub(super) fn value_pipeline(ctx: &MetalContext) -> Result<Option<Pipeline>, MetalError> {
-    if !value_vector_enabled() || !ctx.tensor_ops_status().is_available() {
+    if !value_vector_enabled() || !simd_available(ctx) {
         return Ok(None);
     }
     optional(ctx, "kernel_qwen4exp_qsa_selected_value_vec8_f32", 256, 0)

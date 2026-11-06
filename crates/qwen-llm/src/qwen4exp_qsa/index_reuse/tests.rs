@@ -46,9 +46,7 @@ fn qsa_index_query_reuse_matches_incumbent_bits_f64_and_guards() {
     let Some(ctx) = crate::test_fixtures::metal_context_or_skip() else {
         return;
     };
-    if !ctx.tensor_ops_status().is_available() {
-        return;
-    }
+    let tensor_available = ctx.tensor_ops_status().is_available();
     const Q: usize = 32;
     for start in [32765usize, 131069] {
         let capacity = (start + Q) / 4 + 5;
@@ -70,7 +68,7 @@ fn qsa_index_query_reuse_matches_incumbent_bits_f64_and_guards() {
             GgmlType::F16,
             vec![128, capacity as u64],
         );
-        let banks: Vec<_> = (0..4)
+        let banks: Vec<_> = (0..if tensor_available { 4 } else { 3 })
             .map(|_| {
                 (
                     guarded(
@@ -90,7 +88,7 @@ fn qsa_index_query_reuse_matches_incumbent_bits_f64_and_guards() {
             .collect();
         let cmd = ctx.queue.commandBuffer().unwrap();
         let enc = KernelEncoder::begin(&cmd);
-        for (i, tile) in [1usize, 4, 8, 32].into_iter().enumerate() {
+        for (i, tile) in [1usize, 4, 8, 32].into_iter().take(banks.len()).enumerate() {
             let name = match tile {
                 1 => "kernel_qwen4exp_qsa_index_scores_packed_4x128_f16",
                 4 => "kernel_qwen4exp_qsa_index_reuse4_f32",
@@ -147,7 +145,11 @@ fn qsa_index_query_reuse_matches_incumbent_bits_f64_and_guards() {
         }
         let mut max_error = 0.0f64;
         let mut tensor_max_error = 0.0f64;
-        let tensor_scores = bits(&banks[3].0);
+        let tensor_scores = if tensor_available {
+            bits(&banks[3].0)
+        } else {
+            reference.clone()
+        };
         for row in 0..Q {
             let visible = (start + row + 1) / 4;
             assert_eq!(bits(&banks[0].1)[row] as usize, visible);
@@ -198,7 +200,7 @@ fn qsa_index_query_reuse_matches_incumbent_bits_f64_and_guards() {
         let cmd = ctx.queue.commandBuffer().unwrap();
         let enc = KernelEncoder::begin(&cmd);
         crate::metal::dispatch_census_begin();
-        let bank = if configured_tile() == 32 { 3 } else { 1 };
+        let bank = if configured_tile(&ctx) == 32 { 3 } else { 1 };
         let chosen = try_encode(
             &ctx,
             &enc,
@@ -213,7 +215,12 @@ fn qsa_index_query_reuse_matches_incumbent_bits_f64_and_guards() {
         )
         .unwrap();
         let census = crate::metal::dispatch_census_take();
-        assert_eq!(chosen, configured_tile() != 0);
+        assert_eq!(
+            chosen,
+            configured_tile(&ctx) != 0
+                && super::super::prefill_reuse::simd_available(&ctx)
+                && (configured_tile(&ctx) != 32 || tensor_available)
+        );
         assert_eq!(census.len(), usize::from(chosen));
         enc.end();
         if chosen {

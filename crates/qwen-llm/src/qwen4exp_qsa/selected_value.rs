@@ -118,7 +118,7 @@ impl Pipelines {
         Ok(Some(Self {
             softmax,
             value,
-            split_value: if split_enabled && ctx.tensor_ops_status().is_available() {
+            split_value: if split_enabled && super::prefill_reuse::simd_available(ctx) {
                 optional_pipeline(ctx, SPLIT_VALUE)?.filter(|p| pipeline_supported(p, 0, limit))
             } else {
                 None

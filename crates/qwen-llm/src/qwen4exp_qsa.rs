@@ -49,6 +49,7 @@ const SELECTED_AUDIT_ORDER_MISMATCH_STATUS: i32 = 5;
 const SELECTOR_SCRATCH_BYTES: usize = 2 * ATTENTION_THREADS * size_of::<u32>();
 const DENSE_PACKED_QUERY_TILE: usize = 32;
 
+mod decode_reuse;
 mod index_reuse;
 mod prefill_reuse;
 mod selected_value;
@@ -5540,6 +5541,9 @@ fn encode_attention_logits(
     id_count: usize,
 ) -> Result<(), MetalError> {
     let g = workspace.geometry;
+    if decode_reuse::try_encode(ctx, enc, workspace, id_count)? {
+        return Ok(());
+    }
     encode_attention_logits_tensors(
         ctx,
         enc,

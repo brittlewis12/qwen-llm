@@ -4,19 +4,25 @@ use std::sync::OnceLock;
 #[cfg(test)]
 mod tests;
 
-/// Query reuse for M5 Flash-Next selected QSA index scoring at >=8192 visible blocks and full 32-query bands. Default 32 selects strict F32 tensor matmul with exact F16-to-F32 key staging and a different reduction order; 0 restores the incumbent. Values 4/8 select SIMD query reuse with the incumbent reduction order. No query narrowing or added GPU buffers. Other geometries/devices and unavailable PSOs retain the incumbent.
+/// Query reuse for Flash-Next selected QSA index scoring at >=8192 visible blocks and full 32-query bands. Default 32 on the tensor tier selects strict F32 tensor matmul with exact F16-to-F32 key staging and a different reduction order; 0 restores the incumbent. With QWEN_FN_SIMD_PREFILL_QSA on, non-tensor Apple devices default to 8; explicit 32 there keeps the incumbent. Values 4/8 select SIMD query reuse with the incumbent reduction order. No query narrowing or added GPU buffers. Other geometries/devices and unavailable PSOs retain the incumbent.
 const INDEX_QUERY_TILE_ENV: &str = "QWEN_FN_QSA_INDEX_QUERY_TILE";
 
-fn configured_tile() -> usize {
-    static TILE: OnceLock<usize> = OnceLock::new();
-    *TILE.get_or_init(
+fn configured_tile(ctx: &MetalContext) -> usize {
+    static TILE: OnceLock<Option<usize>> = OnceLock::new();
+    TILE.get_or_init(
         || match std::env::var(INDEX_QUERY_TILE_ENV).ok().as_deref() {
-            Some("0") => 0,
-            Some("4") => 4,
-            Some("8") => 8,
-            _ => 32,
+            Some("0") => Some(0),
+            Some("4") => Some(4),
+            Some("8") => Some(8),
+            Some("32") => Some(32),
+            _ => None,
         },
     )
+    .unwrap_or(if ctx.tensor_ops_status().is_available() {
+        32
+    } else {
+        8
+    })
 }
 
 /// M5 Flash-Next exact radix4 selector width for full 32-query packed bands with >=8192 block capacity. Default 512; 32/64/128/1024 are tuning alternatives and 0 or 256 restores the incumbent. Unsupported widths use 256. Integer selection, stable ties, status and chronological IDs are unchanged. Other geometries/devices retain 256 threads.
@@ -51,12 +57,13 @@ pub(super) fn try_encode(
     ratio: usize,
     capacity: usize,
 ) -> Result<bool, MetalError> {
-    let tile = configured_tile();
+    let tile = configured_tile(ctx);
     let Some(end) = start.checked_add(count) else {
         return Ok(false);
     };
     if tile == 0
-        || !ctx.tensor_ops_status().is_available()
+        || !super::prefill_reuse::simd_available(ctx)
+        || (tile == 32 && !ctx.tensor_ops_status().is_available())
         || count != 32
         || ratio != 4
         || end / ratio < 8192

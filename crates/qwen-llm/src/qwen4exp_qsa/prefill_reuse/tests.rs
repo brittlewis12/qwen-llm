@@ -250,7 +250,7 @@ fn reused_attention_matches_incumbent_bits_and_guards_at_depth() {
     let Some(ctx) = crate::test_fixtures::metal_context_or_skip() else {
         return;
     };
-    if !ctx.tensor_ops_status().is_available() {
+    if !simd_available(&ctx) {
         return;
     }
     attention(&ctx);

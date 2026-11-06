@@ -6,6 +6,100 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the current state and evidence index.
 
+## 2026-11-06 - Flash-Next M5 Prefill +9.5%: Device BF16 HC and Wide Routed Gate/Up
+
+- Fresh combined main `ff15d60d`, M5 Ultra, GSQ-RCO IQ3_S, pp4096:
+  **2295.216000 / 2298.464583 ms**, median **2296.840292 ms**,
+  **1783.3 tok/s**, **0.859x** llama.cpp v0.9.0's
+  [2077.1 tok/s reference](bench/2026-11-04-2050-families-family/m5/lcpp-flash-next.json).
+  Two retained reps, seed 1, production prefill plus endpoint logits,
+  native 2048-row chunks; thermal pressure 0 before/after, build lock + lease.
+- Refreshed frozen-fixture attribution: **13,090** dispatches, zero
+  overflow/missing pairs, **2271.338 ms** summed per-chunk timeline.
+  Selected QSA value **245.816 ms**, BF16 projections (mostly HC)
+  **211.838**, Q6_K dense **200.988**, selected QSA logits **186.243**,
+  routed down IQ4_NL **168.481**, dense QSA value **145.837**;
+  routed gate/up aggregate **351.808**. Router **50.630**, top-k + shared
+  gate **17.157**. Attribution uses end-to-end timestamp increments,
+  including transitions; serialized diagnostic shares are not a wall-time
+  decomposition or a stage comparison with llama.cpp.
+- **Default on:** BF16 device-input HC projections, **M128/N64/full-K**
+  Metal 4 matmul, BF16 weights and incumbent BF16 activation values,
+  F32 sums, no relaxed precision. Convert once into dead raw-gate storage
+  for down, dead mixed storage for up; no added GPU buffers/admission bytes.
+  Exactly M2048, K/N 10240/320 or 320/10240, available tier/PSO only.
+  Rollback: **`QWEN_FN_PREFILL_HC_DEVICE=0`**; the existing
+  `QWEN_MATMAT_BF16_BFLOAT_ACT=0` also disables this route.
+- **Default on:** routed gate/up tiles widen **32 -> 64 slots**, using
+  the existing wide tensor kernel and identical half operand values.
+  One F32-to-half conversion reuses dead routed-down output, with no new
+  GPU buffers/admission bytes; dynamic threadgroup memory **8 -> 16 KiB**.
+  H2560/F640/E512/top-10/M2048 and the four released IQ2_S/IQ3_S/IQ3_XXS/
+  IQ4_XS formats only, supported tier/PSO required. A separate explicit
+  unclamped adapter preserves GLM/V41's existing clamped route and shared
+  automatic selection. Rollback: **`QWEN_FN_PREFILL_EXPERT_WIDE=0`**;
+  existing expert tensor controls still apply.
+- Independent whole-prefill AB kill screens, two retained samples per arm,
+  other candidate held off, all thermal boundaries 0:
+  HC **2296.453438 -> 2174.462750 ms (1.056102x)**;
+  wider experts **2296.894958 -> 2213.193541 ms (1.037819x)**.
+- Operator checks: both HC shapes, original F32 inputs and BF16 weights,
+  128 sampled F64 dots each. BF16-operand-reference worst max-absolute error
+  **8.998497e-6**, original-input RMS error ratio to incumbent at most
+  **1.000028**; every output finite, offset guards preserved, scratch alias
+  rejections before dispatch. All four unclamped wide expert formats match
+  narrow/F32-input output bitwise; existing CPU references and clamped cases
+  also pass. The guarded BF16 fixture uses byte views, fixing its initial
+  unsupported `view_subrange` call before kernel execution.
+- Teacher forcing, frozen production `6156932c`: **4096 next-token targets
+  per document**, frozen Bash manual and `qwen4exp_runtime.rs` source,
+  two real M2048 commands each, native all-row gated-residual readout.
+  Full-vocabulary F64 log-sum-exp, NLL and KL(off||on), identical checked
+  input/target IDs, every row finite. Only the two new flags differ.
+  Census in each scored on chunk proves **192 HC device + 192 conversion
+  + 96 wide expert dispatches**, zero candidate dispatches in every off chunk.
+
+  | Document | Targets | NLL off | NLL on | dNLL | Mean/max KL | Argmax agreement |
+  | --- | ---: | ---: | ---: | ---: | ---: | ---: |
+  | Prose | 4096 | 0.087889625 | 0.087564752 | -0.000324873 | 0.000773092 / 0.221415240 | 4088/4096 |
+  | Code | 4096 | 0.858847622 | 0.857616511 | -0.001231112 | 0.002980102 / 0.420118495 | 4042/4096 |
+  | Pooled | 8192 | 0.473368624 | 0.472590631 | -0.000777992 | 0.001876597 / 0.420118495 | 8130/8192 |
+
+  **Pass**, per document and pooled: |dNLL| <=0.005 nats/token, mean KL <=0.01.
+  Bounded held-text evidence; no model-wide identity claim.
+- Final ordinary pp4096 ABBA, two retained reps per occurrence, four per
+  setting, 30 s cooldown before each arm, one normal release binary,
+  seed 1, both new flags 0 versus unset/default on. Build lock + Metal
+  lease, all eight arm boundaries and both profile boundaries thermal 0;
+  no dropped samples, clean matching build/runtime source stamps.
+
+  | Setting | Samples (ms) | Median (ms) | tok/s |
+  | --- | --- | ---: | ---: |
+  | Both off | 2295.469625, 2299.313000, 2292.730250, 2292.419041 | 2294.099938 | 1785.4 |
+  | Default on | 2096.339959, 2093.553417, 2096.202209, 2095.247790 | 2095.725000 | 1954.5 |
+
+  **1.094657x throughput (+9.47%)**, **0.941x llama.cpp**, from roughly
+  0.859x. Production `6156932c`, binary SHA256
+  `9982ceb7f3abbab5545bfc802b94321aea995e0cd4509d7e1f11bc4c5dd3ce22`.
+- Post-change profile: **13,570** dispatches, zero missing pairs/overflow,
+  **2086.182 ms** timeline. HC device matmuls **68.035 ms** + conversion
+  **25.666**; routed gate/up **259.510**. Leading residual costs:
+  selected QSA value/logits plus dense QSA value **583.469**, dense tensor
+  projections **329.892**, routed down **210.203**, GDN prep + scan
+  **117.421**. Router **49.947**, top-k + shared gate **16.324**.
+  Remaining ordinary wall gap is **123.723 ms**, requiring **6.27%** more
+  throughput for parity. Stop this round: the large residual targets need
+  new QSA or quantized matrix-kernel/layout work; the smaller routing/PLE/
+  GDN glue is distributed. These are our runtime costs, not an attribution
+  of llama.cpp's advantage to individual stages.
+- Full `cargo test --release -p qwen-llm --lib` on M5: **2416 passed,
+  0 failed, 736 ignored**. CPU-only `scripts/check-contracts.sh` passed on
+  `151a4d96`, tree `d684e89a1dedcd5758aacdf8ef2a809d1a1395da`.
+  The only source change after timing/quality freeze fixes the guarded test
+  view; production code is unchanged. Temporary harness sources removed
+  from both worktrees and scored temporary logits deleted. This follow-up
+  adds the log entry only; branch unmerged, no task work left running.
+
 ## 2026-11-06 - Flash-Next M5 Prefill +6.8%: Wide Dense Tiles and an F32 Tensor Router
 
 - Fresh main `2c7d3c30` pp4096 baseline, M5 Ultra, GSQ-RCO IQ3_S:

@@ -74,4 +74,5 @@ pub(super) fn try_encode(
 }
 
 #[cfg(test)]
+#[path = "qwen4exp_hc_read/tests.rs"]
 mod tests;

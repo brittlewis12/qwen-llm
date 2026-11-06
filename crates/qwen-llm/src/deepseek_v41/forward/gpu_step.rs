@@ -224,6 +224,23 @@ fn split_submission() -> bool {
 /// cover encoding the remaining layers on the host.
 const SPLIT_SUBMIT_MIDDLE_LAYERS: usize = 3;
 
+crate::env_flag!(
+    /// Experimental scalar decode ordering: encode the router after mHC pre,
+    /// before the shared expert, then consume its logits in the routed chain.
+    /// Same kernels, buffers and dependencies; only their encoding order changes.
+    /// Ignored when the single-encoder FFN rollback is selected.
+    default_off router_first_enabled,
+    "QWEN_V41_ROUTER_FIRST"
+);
+
+crate::env_flag!(
+    /// Experimental scalar decode ordering: prepare both router logits and
+    /// top-k routes after mHC pre, before the shared expert. Supersedes
+    /// QWEN_V41_ROUTER_FIRST when both switches are on. Same kernels/buffers.
+    default_off route_first_enabled,
+    "QWEN_V41_ROUTE_FIRST"
+);
+
 /// Timestamp samples per layer of a sampled prefill chunk: six attention/FFN
 /// stage pairs, then the FFN's seven further sub-stage pairs.
 const PREFILL_LAYER_SAMPLES: usize = 12 + 2 * (ffn_gpu::PREFILL_FFN_STAGES.len() - 1);
@@ -1020,6 +1037,21 @@ impl Workspace {
                 .map_err(|e| e.to_string());
         }
         self.ffn_hc_pre(model, stages, id)?;
+        let preparation = if route_first_enabled() {
+            2
+        } else {
+            usize::from(router_first_enabled())
+        };
+        if preparation > 0 {
+            self.ffn
+                .encode_router(model.ctx, stages.enc(), &model.layers[id], id)
+                .map_err(|e| e.to_string())?;
+        }
+        if preparation == 2 {
+            self.ffn
+                .encode_route_selection(model.ctx, stages.enc(), &model.config, id)
+                .map_err(|e| e.to_string())?;
+        }
         stages.split();
         self.ffn
             .encode_shared(
@@ -1030,7 +1062,7 @@ impl Workspace {
                 id,
             )
             .map_err(|e| e.to_string())?;
-        self.layer_after_shared(model, stages, id)
+        self.layer_after_shared_with_router(model, stages, id, preparation)
     }
 
     /// The FFN's HC pre, which writes the shared expert's input
@@ -1064,15 +1096,35 @@ impl Workspace {
         stages: &mut StageEncoder<'_>,
         id: usize,
     ) -> Result<()> {
+        self.layer_after_shared_with_router(model, stages, id, 0)
+    }
+
+    fn layer_after_shared_with_router(
+        &mut self,
+        model: &Forward<'_>,
+        stages: &mut StageEncoder<'_>,
+        id: usize,
+        preparation: usize,
+    ) -> Result<()> {
         let (ctx, c, l) = (model.ctx, &model.config, &model.layers[id]);
         let split = ffn_split_encoders();
         let err = |e: metal::MetalError| e.to_string();
         if split {
             stages.split();
         }
-        self.ffn
-            .encode_routed_experts(ctx, stages.enc(), c, l, id, &self.half)
-            .map_err(err)?;
+        if preparation == 2 {
+            self.ffn
+                .encode_routed_after_route(ctx, stages.enc(), c, l, id, &self.half)
+                .map_err(err)?;
+        } else if preparation == 1 {
+            self.ffn
+                .encode_routed_after_router(ctx, stages.enc(), c, l, id, &self.half)
+                .map_err(err)?;
+        } else {
+            self.ffn
+                .encode_routed_experts(ctx, stages.enc(), c, l, id, &self.half)
+                .map_err(err)?;
+        }
         if split {
             stages.split();
         }

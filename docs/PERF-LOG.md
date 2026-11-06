@@ -6,6 +6,102 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the current state and evidence index.
 
+## 2026-11-06 - Flash-Next M5 Prefill +6.8%: Wide Dense Tiles and an F32 Tensor Router
+
+- Fresh main `2c7d3c30` pp4096 baseline, M5 Ultra, GSQ-RCO IQ3_S:
+  two retained wall samples **2453.143750 / 2447.931375 ms**, median
+  **2450.537563 ms**, **1671.5 tok/s**, **0.805x** llama.cpp v0.9.0's
+  [2077.1 tok/s reference](bench/2026-11-04-2050-families-family/m5/lcpp-flash-next.json).
+  Production prefill plus endpoint logits, seed 1, native 2048-row chunks;
+  thermal pressure 0 before/after, build lock + Metal lease.
+- Fresh dispatch attribution on the frozen roadmap fixture: **13,090**
+  dispatches, zero overflow/missing pairs, **2454.668 ms** summed per-chunk
+  timeline. Dense tensor projections **405.261 ms** (Q6_K **295.342**);
+  selected QSA value **246.142**, BF16 projections (mostly HC) **212.291**,
+  selected QSA logits **186.089**, dense QSA value **144.620**, strict F32
+  router **106.986**. Stable bucketing is now only **10.501 ms**, top-k +
+  shared gate **20.874 ms**. Profiling serializes dispatches; attribution
+  uses end-to-end increments including transition gaps, not overlapping
+  encoder durations. Diagnostic shares are not an ordinary wall decomposition.
+- **Default on:** widen the existing qualified Flash-Next dense Q4_K/Q6_K/
+  IQ4_XS/IQ4_NL projection cohorts at M2048 from 32 to 64 activation rows,
+  reusing each decoded weight slab twice. Identical half operands, F32 sums,
+  no new narrowing or GPU buffers/admission bytes; dynamic threadgroup
+  memory **8 -> 16 KiB**. A separate explicit Flash-Next entry point preserves the shared Q8_0-only
+  wide-tile capability lookup and automatic selection.
+  Rollback: **`QWEN_FN_PREFILL_DENSE_WIDE=0`**; the shared
+  `QWEN_DENSE_PREFILL_TENSOR=0` still disables both dense tensor tiles.
+- **Default on:** Metal 4 **64x64x32** F32 router tile, reading F32
+  activations directly from device memory and staging original F32 weights
+  in **8 KiB** static threadgroup memory. Strict matmul, no relaxed precision
+  or half operands. H2560/E512/top-10 at exactly M2048, available tensor tier
+  and supported PSO only. Other shapes/devices use the incumbent.
+  Rollback: **`QWEN_FN_PREFILL_ROUTER_TENSOR=0`** restores strict E8P32;
+  `QWEN4EXP_PACKED_ROUTER_E8P32_STRICT=0` disables both router optimizations.
+  No additional GPU buffers/admission bytes.
+- Whole-prefill kill screens, AB with two retained samples per arm, every
+  thermal boundary 0. Other candidate held off for independent comparisons:
+  wide dense **2449.677063 -> 2335.871833 ms (1.048721x)**;
+  staged-input M32 F32 router **2449.642312 -> 2418.755459 ms (1.012770x)**;
+  direct-input M64 router **2450.086500 -> 2406.320729 ms (1.018188x)**.
+  Keep the direct-input router; the staged variant is replaced.
+- Operator checks: all eight Q4_K/Q6_K/IQ4_XS/IQ4_NL ragged wide-tile
+  cases match the narrow tile bitwise and retain the CPU reference checks.
+  The F32 router's 256 sampled F64 dots have worst max-absolute error
+  **1.825532e-5**, RMS error ratio to strict E8P32 **1.000000**, all outputs
+  finite and offset guards intact. The existing strict-router bitwise route
+  differential remains pinned to the rollback. The first full suite caught
+  the shared wide-capability leak; the explicit Flash-Next entry point fixes
+  it while retaining both GLM Q8-wide/Q6-narrow capability assertions.
+- Teacher forcing rerun on frozen production commit `d81e53a9`: 4096
+  next-token targets each from the same frozen Bash manual and
+  `qwen4exp_runtime.rs` source, two real 2048-row commands per document,
+  native all-row gated-residual readout. Full-vocabulary F64 log-sum-exp,
+  NLL and KL(off||on); input/target IDs checked identical, all rows finite.
+  Only the two new flags differ; all prior QSA, bucketing, dense/expert
+  tensor and GDN defaults remain enabled. Census in the scored execution
+  proves **264 new wide dense + 48 new F32 router dispatches per on chunk**,
+  zero candidate dispatches in the off arm.
+
+  | Document | Targets | NLL off | NLL on | dNLL | Mean/max KL | Argmax agreement |
+  | --- | ---: | ---: | ---: | ---: | ---: | ---: |
+  | Prose | 4096 | 0.087889625 | 0.087889625 | 0 | 0 / 0 | 4096/4096 |
+  | Code | 4096 | 0.858847622 | 0.858847622 | 0 | 0 / 0 | 4096/4096 |
+  | Pooled | 8192 | 0.473368624 | 0.473368624 | 0 | 0 / 0 | 8192/8192 |
+
+  **Pass**, per document and pooled: |dNLL| <=0.005 nats/token, mean KL <=0.01.
+  This is bounded held-text evidence; no model-wide identity claim.
+- Final pp4096 end-to-end ABBA, two retained reps per arm occurrence, four
+  per setting, 30 s cooldown before each arm. One normal release binary,
+  production prefill plus endpoint logits, seed 1, both new flags 0 versus
+  unset/default on. Build lock + Metal lease, every thermal boundary 0,
+  no dropped samples. Retained wall samples, milliseconds:
+
+  | Setting | Samples (ms) | Median (ms) | tok/s |
+  | --- | --- | ---: | ---: |
+  | Both off | 2452.055415, 2449.174334, 2453.791332, 2451.844583 | 2451.949999 | 1670.5 |
+  | Default on | 2300.518292, 2295.465916, 2294.959208, 2295.183541 | 2295.324729 | 1784.5 |
+
+  **1.068237x throughput (+6.82%)**, **0.859x llama.cpp**, from main's
+  roughly 0.805x. Frozen production code `d81e53a9`, binary SHA256
+  `950171f2b85f99179affd0e6a5d567a6cec0d6a30e729ac6cfe5fdc304ed5e4c`;
+  clean build/runtime source stamps match in all arms.
+- Post-change dispatch profile: **13,090** dispatches, no missing pairs or
+  overflow, **2314.044 ms** timeline. Dense tensor aggregate
+  **405.261 -> 307.910 ms**, Q6_K **295.342 -> 205.644 ms**, router
+  **106.986 -> 50.813 ms**. Eight timing-arm thermal boundaries and both
+  subsequent profile boundaries were 0. These diagnostic snapshots support
+  attribution; the ordinary ABBA above is the throughput evidence.
+- Full `cargo test --release -p qwen-llm --lib` on M5:
+  **2413 passed, 0 failed, 736 ignored**. CPU-only
+  `scripts/check-contracts.sh` passed locally on production commit
+  `d81e53a9` (tree `a7d322a980e0b6c874508088bf2bb1ccb7202ab6`).
+  Builds and timing serialized with the shared build lock, Metal work leased,
+  and short campaigns interleaved with the GLM lane.
+- Temporary harness sources removed from both worktrees. Final follow-up adds
+  this log entry only; production sources remain frozen. Branch unmerged and
+  no task work left running.
+
 ## 2026-11-05 - GLM M5 Prefill +34.2%: IQ Tensor Gate/Up and F32 KDA Value4
 
 - Standing on main `2c7d3c30`, M5 Ultra, stock UD-IQ3_XXS, pp4096:

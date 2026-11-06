@@ -4,7 +4,7 @@ use std::sync::OnceLock;
 #[cfg(test)]
 mod tests;
 
-/// Query reuse for M5 Flash-Next selected QSA index scoring at >=8192 visible blocks and full 32-query bands. Value 8 (default) reuses each original F16 key across eight F32 query rows; 4 selects the four-query tile; 0 restores the incumbent. Same lane/head reduction order, no narrowing or added GPU buffers. Other geometries/devices and unavailable PSOs retain the incumbent.
+/// Query reuse for M5 Flash-Next selected QSA index scoring at >=8192 visible blocks and full 32-query bands. Value 8 (default) reuses each original F16 key across eight F32 query rows; 4 selects four queries; 32 selects strict F32 tensor matmul with exact F16-to-F32 key staging and a different reduction order; 0 restores the incumbent. No query narrowing or added GPU buffers. Other geometries/devices and unavailable PSOs retain the incumbent.
 const INDEX_QUERY_TILE_ENV: &str = "QWEN_FN_QSA_INDEX_QUERY_TILE";
 
 fn configured_tile() -> usize {
@@ -13,6 +13,7 @@ fn configured_tile() -> usize {
         || match std::env::var(INDEX_QUERY_TILE_ENV).ok().as_deref() {
             Some("0") => 0,
             Some("4") => 4,
+            Some("32") => 32,
             _ => 8,
         },
     )
@@ -31,7 +32,7 @@ pub(super) fn selector_threads(ctx: &MetalContext, capacity: usize, count: usize
             Some("32") => 32,
             Some("64") => 64,
             Some("128") => 128,
-        Some("0" | "256") => 256,
+            Some("0" | "256") => 256,
             Some("1024") => 1024,
             _ => 512,
         },
@@ -63,15 +64,22 @@ pub(super) fn try_encode(
     {
         return Ok(false);
     }
-    let name = if tile == 4 {
+    let name = if tile == 32 {
+        "kernel_qwen4exp_qsa_index_tensor_f32"
+    } else if tile == 4 {
         "kernel_qwen4exp_qsa_index_reuse4_f32"
     } else {
         "kernel_qwen4exp_qsa_index_reuse8_f32"
     };
-    let pipeline = match ctx.pipeline(name) {
+    let threads = if tile == 32 { 128 } else { 256 };
+    let pipeline = match if tile == 32 {
+        ctx.tensor_pipeline(name)
+    } else {
+        ctx.pipeline(name)
+    } {
         Ok(p)
             if p.threadExecutionWidth() == 32
-                && p.maxTotalThreadsPerThreadgroup() >= 256
+                && p.maxTotalThreadsPerThreadgroup() >= threads
                 && p.staticThreadgroupMemoryLength() <= ctx.device.maxThreadgroupMemoryLength() =>
         {
             p
@@ -137,14 +145,16 @@ pub(super) fn try_encode(
     enc.set_tensor(2, keys);
     enc.set_tensor(3, scores);
     enc.set_tensor(4, visible);
+    enc.set_threadgroup_memory(0, 0);
+    enc.set_threadgroup_memory(1, 0);
     enc.dispatch(
         MTLSize {
-            width: (end / ratio).div_ceil(8),
+            width: (end / ratio).div_ceil(if tile == 32 { 32 } else { 8 }),
             height: count.div_ceil(tile),
             depth: 1,
         },
         MTLSize {
-            width: 256,
+            width: threads,
             height: 1,
             depth: 1,
         },

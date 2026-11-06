@@ -70,7 +70,7 @@ fn qsa_index_query_reuse_matches_incumbent_bits_f64_and_guards() {
             GgmlType::F16,
             vec![128, capacity as u64],
         );
-        let banks: Vec<_> = (0..3)
+        let banks: Vec<_> = (0..4)
             .map(|_| {
                 (
                     guarded(
@@ -90,13 +90,22 @@ fn qsa_index_query_reuse_matches_incumbent_bits_f64_and_guards() {
             .collect();
         let cmd = ctx.queue.commandBuffer().unwrap();
         let enc = KernelEncoder::begin(&cmd);
-        for (i, tile) in [1usize, 4, 8].into_iter().enumerate() {
+        for (i, tile) in [1usize, 4, 8, 32].into_iter().enumerate() {
             let name = match tile {
                 1 => "kernel_qwen4exp_qsa_index_scores_packed_4x128_f16",
                 4 => "kernel_qwen4exp_qsa_index_reuse4_f32",
-                _ => "kernel_qwen4exp_qsa_index_reuse8_f32",
+                8 => "kernel_qwen4exp_qsa_index_reuse8_f32",
+                _ => "kernel_qwen4exp_qsa_index_tensor_f32",
             };
-            enc.set_pipeline(&ctx.pipeline(name).unwrap());
+            let pipeline = if tile == 32 {
+                ctx.tensor_pipeline(name)
+            } else {
+                ctx.pipeline(name)
+            }
+            .unwrap();
+            enc.set_pipeline(&pipeline);
+            enc.set_threadgroup_memory(0, 0);
+            enc.set_threadgroup_memory(1, 0);
             enc.set_bytes(
                 0,
                 &PackedScoreArgs {
@@ -112,12 +121,12 @@ fn qsa_index_query_reuse_matches_incumbent_bits_f64_and_guards() {
             enc.set_tensor(4, &banks[i].1);
             enc.dispatch(
                 MTLSize {
-                    width: ((start + Q) / 4).div_ceil(8),
+                    width: ((start + Q) / 4).div_ceil(if tile == 32 { 32 } else { 8 }),
                     height: Q.div_ceil(tile),
                     depth: 1,
                 },
                 MTLSize {
-                    width: 256,
+                    width: if tile == 32 { 128 } else { 256 },
                     height: 1,
                     depth: 1,
                 },
@@ -129,12 +138,16 @@ fn qsa_index_query_reuse_matches_incumbent_bits_f64_and_guards() {
         let reference = bits(&banks[0].0);
         let visible = bits(&banks[0].1);
         for (i, (scores, counts)) in banks.iter().enumerate() {
-            assert_eq!(bits(scores), reference, "start{start} tile{}", [1, 4, 8][i]);
+            if i < 3 {
+                assert_eq!(bits(scores), reference, "start{start} tile{}", [1, 4, 8][i]);
+            }
             assert_eq!(bits(counts), visible);
             guards(scores);
             guards(counts);
         }
         let mut max_error = 0.0f64;
+        let mut tensor_max_error = 0.0f64;
+        let tensor_scores = bits(&banks[3].0);
         for row in 0..Q {
             let visible = (start + row + 1) / 4;
             assert_eq!(bits(&banks[0].1)[row] as usize, visible);
@@ -152,10 +165,28 @@ fn qsa_index_query_reuse_matches_incumbent_bits_f64_and_guards() {
                 expected *= f64::from(0.08838834764831845f32);
                 let actual = f64::from(f32::from_bits(reference[row * capacity + block]));
                 max_error = max_error.max((actual - expected).abs());
+                let tensor_actual =
+                    f64::from(f32::from_bits(tensor_scores[row * capacity + block]));
+                tensor_max_error = tensor_max_error.max((tensor_actual - expected).abs());
+                assert!(
+                    tensor_actual.is_finite()
+                        && (tensor_actual - expected).abs() <= 2e-5 + 2e-5 * expected.abs(),
+                    "tensor start{start} row{row} block{block}: {tensor_actual} vs {expected}"
+                );
                 assert!(
                     actual.is_finite() && (actual - expected).abs() <= 2e-5 + 2e-5 * expected.abs()
                 );
             }
+            assert!(
+                tensor_scores[row * capacity..row * capacity + visible]
+                    .iter()
+                    .all(|&b| f32::from_bits(b).is_finite())
+            );
+            assert!(
+                tensor_scores[row * capacity + (start + Q) / 4..(row + 1) * capacity]
+                    .iter()
+                    .all(|&v| v == 0x7fc00001)
+            );
             assert!(
                 reference[row * capacity + visible..(row + 1) * capacity]
                     .iter()
@@ -167,13 +198,14 @@ fn qsa_index_query_reuse_matches_incumbent_bits_f64_and_guards() {
         let cmd = ctx.queue.commandBuffer().unwrap();
         let enc = KernelEncoder::begin(&cmd);
         crate::metal::dispatch_census_begin();
+        let bank = if configured_tile() == 32 { 3 } else { 1 };
         let chosen = try_encode(
             &ctx,
             &enc,
             &qt,
             &kt,
-            &banks[1].0,
-            &banks[1].1,
+            &banks[bank].0,
+            &banks[bank].1,
             start,
             Q,
             4,
@@ -187,10 +219,13 @@ fn qsa_index_query_reuse_matches_incumbent_bits_f64_and_guards() {
         if chosen {
             cmd.commit();
             crate::metal::wait_completed(&cmd).unwrap();
-            assert_eq!(bits(&banks[1].0), reference);
+            assert_eq!(
+                bits(&banks[bank].0),
+                if bank == 3 { tensor_scores } else { reference }
+            );
         }
         eprintln!(
-            "index reuse start{start}: all score/visible bits equal for Q4/Q8; F64 max_abs={max_error:.9e}"
+            "index reuse start{start}: all score/visible bits equal for Q4/Q8; F64 max_abs={max_error:.9e}, tensor max_abs={tensor_max_error:.9e}"
         );
     }
 }

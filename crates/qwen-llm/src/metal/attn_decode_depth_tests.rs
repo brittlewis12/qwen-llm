@@ -116,7 +116,7 @@ fn depth_register_queries_and_fallback_are_bitwise() {
         );
         assert_eq!(incumbent, run(false, true, nwg));
         let promoted = run(true, true, nwg);
-        let selected = ctx.device_facts().name.contains("M5 Ultra")
+        let selected = ctx.device_facts().name == "Apple M5 Ultra"
             && (32768..98304).contains(&pos)
             && with_attn_v4_register_q_override(true, decode_attn_depth_enabled);
         // The production route equals its exact selected raw operator; all

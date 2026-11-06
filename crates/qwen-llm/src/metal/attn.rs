@@ -856,7 +856,7 @@ pub fn encode_attn_decode_depth_f32(
 ) -> Result<(), MetalError> {
     let eligible = decode_attn_depth_enabled()
         && decode_attn_depth_layout(
-            ctx.device_facts().name.contains("M5 Ultra"),
+            ctx.device_facts().name == "Apple M5 Ultra",
             (n_q_heads, n_kv_heads, head_dim),
             n_pos,
             nwg,
@@ -864,8 +864,8 @@ pub fn encode_attn_decode_depth_f32(
             k_cache.dtype == GgmlType::F16 && v_cache.dtype == GgmlType::F16,
             o_partial.dtype == GgmlType::F32
                 && ml_partial.dtype == GgmlType::F32
-                && o_partial.n_elements() >= (n_q_heads * 256 * 256) as u64
-                && ml_partial.n_elements() >= (n_q_heads * 256 * 2) as u64,
+                && o_partial.n_elements() >= (24 * 256 * 256) as u64
+                && ml_partial.n_elements() >= (24 * 256 * 2) as u64,
             ["QWEN_ATTN_V4_NWG", "QWEN_ATTN_V4_TILE_C"]
                 .iter()
                 .any(|k| std::env::var_os(k).is_some()),

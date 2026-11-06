@@ -8,7 +8,6 @@ pub(crate) const TENSOR_FLASH_KEY_TILE: usize = 64;
 pub(crate) const TENSOR_FLASH_HEAD_DIM: usize = 256;
 pub(crate) const TENSOR_FLASH_QUERY_HEADS: usize = 24;
 pub(crate) const TENSOR_FLASH_KV_HEADS: usize = 4;
-pub(crate) const TENSOR_FLASH_GROUP: usize = TENSOR_FLASH_QUERY_HEADS / TENSOR_FLASH_KV_HEADS;
 const TENSOR_FLASH_THREADS: usize = 8 * 32;
 const TENSOR_FLASH_KV_STRIDE: usize = TENSOR_FLASH_KV_HEADS * TENSOR_FLASH_HEAD_DIM;
 // Preserve the exported encoder's original position range. The products used
@@ -44,6 +43,31 @@ pub(crate) fn tensor_flash_qwen27_layout(
     base_pos: usize,
     n_pos: usize,
 ) -> Result<TensorFlashQwen27Layout, MetalError> {
+    tensor_flash_qwen_layout(
+        n_rows,
+        base_pos,
+        n_pos,
+        TENSOR_FLASH_QUERY_HEADS,
+        TENSOR_FLASH_KV_HEADS,
+        TENSOR_FLASH_HEAD_DIM,
+    )
+}
+
+/// Checked geometry for the released G6 dense and G8 A3B d256 layouts.
+pub(crate) fn tensor_flash_qwen_layout(
+    n_rows: usize,
+    base_pos: usize,
+    n_pos: usize,
+    query_heads: usize,
+    kv_heads: usize,
+    head_dim: usize,
+) -> Result<TensorFlashQwen27Layout, MetalError> {
+    if !matches!(
+        (query_heads, kv_heads, head_dim),
+        (24, 4, 256) | (16, 2, 256)
+    ) {
+        return Err(tensor_flash_error("unsupported query/KV head geometry"));
+    }
     if n_rows == 0 {
         return Err(tensor_flash_error("n_rows must be positive"));
     }
@@ -68,11 +92,11 @@ pub(crate) fn tensor_flash_qwen27_layout(
             .try_fold(1usize, |a, b| a.checked_mul(*b))
             .ok_or_else(|| tensor_flash_error("tensor/index product overflow"))
     };
-    let local_rows = product(&[n_rows, TENSOR_FLASH_GROUP])?;
+    let local_rows = product(&[n_rows, query_heads / kv_heads])?;
     let tiles = local_rows.div_ceil(TENSOR_FLASH_QUERY_TILE);
     let mask_bytes = product(&[tiles, n_pos / TENSOR_FLASH_KEY_TILE])?;
-    let q_elements = product(&[n_rows, TENSOR_FLASH_QUERY_HEADS, TENSOR_FLASH_HEAD_DIM])?;
-    let kv_elements = product(&[n_pos, TENSOR_FLASH_KV_STRIDE])?;
+    let q_elements = product(&[n_rows, query_heads, head_dim])?;
+    let kv_elements = product(&[n_pos, kv_heads, head_dim])?;
     // Last vector load/store is within these complete typed extents. Check
     // byte arithmetic too, before converting them into buffer requirements.
     product(&[q_elements, size_of::<f32>()])?;
@@ -153,12 +177,38 @@ pub fn encode_attn_tensor_flash_qwen27(
     base_pos: usize,
     n_pos: usize,
 ) -> Result<(), MetalError> {
+    encode_attn_tensor_flash_qwen(
+        ctx, enc, q, k, v, masks, out, n_rows, base_pos, n_pos, 24, 4, 256,
+    )
+}
+
+/// The same strict tensor loop for 24/4-head dense or 16/2-head A3B d256
+/// attention. KV token stride is `kv_heads * head_dim`. All dtype, finite
+/// operand, alias, alignment and serial-encoder contracts of the dense
+/// wrapper apply; unsupported geometries fail before encoder mutation.
+#[allow(clippy::too_many_arguments)]
+pub fn encode_attn_tensor_flash_qwen(
+    ctx: &MetalContext,
+    enc: &KernelEncoder,
+    q: &MetalTensor,
+    k: &MetalTensor,
+    v: &MetalTensor,
+    masks: &MetalTensor,
+    out: &MetalTensor,
+    n_rows: usize,
+    base_pos: usize,
+    n_pos: usize,
+    query_heads: usize,
+    kv_heads: usize,
+    head_dim: usize,
+) -> Result<(), MetalError> {
     if enc.concurrent {
         return Err(tensor_flash_error(
             "mask/flash dependent dispatches require a serial encoder",
         ));
     }
-    let layout = tensor_flash_qwen27_layout(n_rows, base_pos, n_pos)?;
+    let layout =
+        tensor_flash_qwen_layout(n_rows, base_pos, n_pos, query_heads, kv_heads, head_dim)?;
     for (name, tensor, dtype) in [
         ("q", q, GgmlType::F32),
         ("out", out, GgmlType::F32),
@@ -212,12 +262,12 @@ pub fn encode_attn_tensor_flash_qwen27(
         n_rows: n_rows as u32,
         n_pos: n_pos as u32,
         base_pos: base_pos as u32,
-        kv_stride: 1024,
+        kv_stride: (kv_heads * head_dim) as u32,
         vt_stride: 0,
-        n_q_heads: 24,
-        n_kv_heads: 4,
-        group: 6,
-        head_dim: 256,
+        n_q_heads: query_heads as u32,
+        n_kv_heads: kv_heads as u32,
+        group: (query_heads / kv_heads) as u32,
+        head_dim: head_dim as u32,
         scale: 1.0 / 16.0,
         causal_skip: 1,
     };
@@ -254,7 +304,7 @@ pub fn encode_attn_tensor_flash_qwen27(
     enc.dispatch(
         MTLSize {
             width: tiles,
-            height: 4,
+            height: kv_heads,
             depth: 1,
         },
         MTLSize {

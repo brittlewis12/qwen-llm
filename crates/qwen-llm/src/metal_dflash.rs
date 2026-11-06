@@ -2272,7 +2272,10 @@ fn prefill_attn_matrix_causal_skip_enabled() -> bool {
 /// automatic device-class and row/KV restrictions; combined row/output-work
 /// predicates require at least 38 queries and permit aligned KV below 8K. The legacy 8192 output-work
 /// threshold counts query tiles * KV heads * head dimension, not KV rows.
-/// All modes retain matrix-online/G6 prerequisites and encoder safety checks;
+/// Experimental explicit-on also accepts A3B's 16 query / 2 KV heads, d256,
+/// with the existing G8 matrix/online prerequisites. A3B stays off in automatic
+/// mode pending whole-append qualification at depth.
+/// All modes retain matrix-online/G6-or-G8 prerequisites and encoder safety checks;
 /// unsupported shapes use the incumbent. Boolean aliases follow other prefill
 /// knobs; unrecognized values select automatic mode.
 const PREFILL_ATTN_TENSOR_FLASH_ENV: &str = "QWEN_PREFILL_ATTN_TENSOR_FLASH";
@@ -2286,7 +2289,7 @@ struct TensorFlashPrefillSelection {
     // Available requires both Apple10 and Metal 4 support.
     tensor_available: bool,
     measured_device_class: bool,
-    matrix_g6: bool,
+    matrix_supported: bool,
     matrix_online: bool,
     query_heads: usize,
     kv_heads: usize,
@@ -2300,9 +2303,9 @@ struct TensorFlashPrefillSelection {
     workspace_bytes: u64,
 }
 
-fn tensor_flash_output_tile_work(query_tiles: usize) -> Option<usize> {
+fn tensor_flash_output_tile_work(query_tiles: usize, kv_heads: usize) -> Option<usize> {
     query_tiles
-        .checked_mul(crate::metal::TENSOR_FLASH_KV_HEADS)?
+        .checked_mul(kv_heads)?
         .checked_mul(crate::metal::TENSOR_FLASH_HEAD_DIM)
 }
 
@@ -2315,17 +2318,22 @@ fn tensor_flash_measured_device_class(device_name: &str) -> bool {
 fn tensor_flash_prefill_selected(s: TensorFlashPrefillSelection) -> bool {
     if s.mode == PrefillEnvMode::ForceOff
         || !s.tensor_available
-        || !s.matrix_g6
+        || !s.matrix_supported
         || !s.matrix_online
-        || s.query_heads != crate::metal::TENSOR_FLASH_QUERY_HEADS
-        || s.kv_heads != crate::metal::TENSOR_FLASH_KV_HEADS
-        || s.head_dim != crate::metal::TENSOR_FLASH_HEAD_DIM
+        || !matches!(
+            (s.query_heads, s.kv_heads, s.head_dim),
+            (24, 4, 256) | (16, 2, 256)
+        )
         || s.query_dtype != GgmlType::F32
         || s.key_dtype != GgmlType::F16
         || s.value_dtype != GgmlType::F16
         || s.output_dtype != GgmlType::F32
         || s.query_rows < 20
     {
+        return false;
+    }
+    if s.mode == PrefillEnvMode::Auto && s.query_heads == 16 {
+        // A3B remains an explicit opt-in until whole-append qualification.
         return false;
     }
     if s.mode == PrefillEnvMode::Auto
@@ -2338,10 +2346,17 @@ fn tensor_flash_prefill_selected(s: TensorFlashPrefillSelection) -> bool {
     let Some(base) = s.kv_rows.checked_sub(s.query_rows) else {
         return false;
     };
-    let Ok(layout) = crate::metal::tensor_flash_qwen27_layout(s.query_rows, base, s.kv_rows) else {
+    let Ok(layout) = crate::metal::tensor_flash_qwen_layout(
+        s.query_rows,
+        base,
+        s.kv_rows,
+        s.query_heads,
+        s.kv_heads,
+        s.head_dim,
+    ) else {
         return false;
     };
-    tensor_flash_output_tile_work(layout.tiles)
+    tensor_flash_output_tile_work(layout.tiles, s.kv_heads)
         .is_some_and(|work| work >= TENSOR_FLASH_MIN_OUTPUT_TILE_WORK)
         && s.workspace_bytes >= layout.mask_bytes as u64
 }
@@ -13265,7 +13280,7 @@ fn prefill_tokens_with_multi_hidden_profiled_inner<'a>(
                                         measured_device_class: tensor_flash_measured_device_class(
                                             &base.ctx.device_facts().name,
                                         ),
-                                        matrix_g6: use_matrix_g6,
+                                        matrix_supported: use_matrix_g6 || use_matrix_g8,
                                         matrix_online: layer_scratch
                                             .scratch_plan
                                             .modes
@@ -13291,8 +13306,8 @@ fn prefill_tokens_with_multi_hidden_profiled_inner<'a>(
                                 traced_matrix_subphases = trace_matrix_subphases;
                                 if use_tensor_flash {
                                     let enc = KernelEncoder::begin(&cmd_buf);
-                                    label_prefill_encoder(&enc, il, "attn-prefill-g6-tensor-flash");
-                                    crate::metal::encode_attn_tensor_flash_qwen27(
+                                    label_prefill_encoder(&enc, il, "attn-prefill-tensor-flash");
+                                    crate::metal::encode_attn_tensor_flash_qwen(
                                         base.ctx,
                                         &enc,
                                         &q_normed_pack_p,
@@ -13303,6 +13318,9 @@ fn prefill_tokens_with_multi_hidden_profiled_inner<'a>(
                                         chunk_p,
                                         chunk_start as usize,
                                         n_pos,
+                                        n_q,
+                                        n_kv,
+                                        head_dim,
                                     )?;
                                     enc.end();
                                     target_session.kv_n_pos[ai] = n_pos;

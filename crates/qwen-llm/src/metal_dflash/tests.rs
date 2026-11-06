@@ -69,7 +69,7 @@ fn tensor_flash_selection_fixture() -> TensorFlashPrefillSelection {
         mode: PrefillEnvMode::ForceOn,
         tensor_available: true,
         measured_device_class: true,
-        matrix_g6: true,
+        matrix_supported: true,
         matrix_online: true,
         query_heads: 24,
         kv_heads: 4,
@@ -81,6 +81,55 @@ fn tensor_flash_selection_fixture() -> TensorFlashPrefillSelection {
         query_rows: 64,
         kv_rows: 128,
         workspace_bytes: 24,
+    }
+}
+
+#[test]
+fn tensor_flash_a3b_geometry_opt_in_preserves_independent_guards() {
+    let s = TensorFlashPrefillSelection {
+        query_heads: 16,
+        kv_heads: 2,
+        query_rows: 512,
+        kv_rows: 33280,
+        workspace_bytes: u64::MAX,
+        ..tensor_flash_selection_fixture()
+    };
+    assert!(tensor_flash_prefill_selected(s));
+    assert!(!tensor_flash_prefill_selected(
+        TensorFlashPrefillSelection {
+            mode: PrefillEnvMode::Auto,
+            ..s
+        }
+    ));
+    for (q, k, d) in [(16, 4, 256), (24, 2, 256), (32, 4, 256), (16, 2, 128)] {
+        assert!(!tensor_flash_prefill_selected(
+            TensorFlashPrefillSelection {
+                query_heads: q,
+                kv_heads: k,
+                head_dim: d,
+                ..s
+            }
+        ));
+    }
+    assert_eq!(tensor_flash_output_tile_work(128, 2), Some(65536));
+    for mode in [PrefillEnvMode::ForceOn, PrefillEnvMode::Auto] {
+        for (available, matrix, online, workspace) in [
+            (false, true, true, u64::MAX),
+            (true, false, true, u64::MAX),
+            (true, true, false, u64::MAX),
+            (true, true, true, 0),
+        ] {
+            assert!(!tensor_flash_prefill_selected(
+                TensorFlashPrefillSelection {
+                    mode,
+                    tensor_available: available,
+                    matrix_supported: matrix,
+                    matrix_online: online,
+                    workspace_bytes: workspace,
+                    ..s
+                }
+            ));
+        }
     }
 }
 
@@ -296,7 +345,7 @@ fn tensor_flash_selector_common_guards_apply_in_auto_and_force_on() {
             let mut s = TensorFlashPrefillSelection { mode, ..ok };
             match label {
                 "other_chip" => s.tensor_available = false,
-                "g6" => s.matrix_g6 = false,
+                "g6" => s.matrix_supported = false,
                 "online" => s.matrix_online = false,
                 "q_heads" => s.query_heads = 16,
                 "kv_heads" => s.kv_heads = 2,
@@ -334,7 +383,7 @@ fn tensor_flash_selector_independent_guards_and_small_tails() {
         match label {
             "off" => s.mode = PrefillEnvMode::ForceOff,
             "hardware" => s.tensor_available = false,
-            "g6" => s.matrix_g6 = false,
+            "g6" => s.matrix_supported = false,
             "online" => s.matrix_online = false,
             "q_heads" => s.query_heads = 32,
             "kv_heads" => s.kv_heads = 8,
@@ -359,9 +408,9 @@ fn tensor_flash_selector_independent_guards_and_small_tails() {
         );
     }
     // It is OUTPUT-TILE work:38queries already pass at totalKV64, below8K.
-    assert_eq!(tensor_flash_output_tile_work(7), Some(7168));
-    assert_eq!(tensor_flash_output_tile_work(8), Some(8192));
-    assert_eq!(tensor_flash_output_tile_work(usize::MAX), None);
+    assert_eq!(tensor_flash_output_tile_work(7, 4), Some(7168));
+    assert_eq!(tensor_flash_output_tile_work(8, 4), Some(8192));
+    assert_eq!(tensor_flash_output_tile_work(usize::MAX, 4), None);
     for rows in [38, 39, 63, 64] {
         assert!(
             tensor_flash_prefill_selected(TensorFlashPrefillSelection {

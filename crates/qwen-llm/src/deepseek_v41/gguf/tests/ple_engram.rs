@@ -345,6 +345,25 @@ fn q5_and_q6_combined_rows_translate_once_and_retain_handles() {
             assert!(disk.read_rows(layer, &[]).unwrap().is_empty());
             assert!(disk.read_rows(layer, &[rows]).is_err());
             assert!(disk.read_rows(layer, &[u64::MAX]).is_err());
+            // Cross the probe, unadvised and advised block boundaries with
+            // repeated, reordered IDs. Advice changes I/O timing only: both
+            // policies must retain exact row values and reject a late bad ID.
+            let mut batched_ids: Vec<_> = (0..8501).map(|i| (i * 13) % rows).collect();
+            let expected_rows = disk.read_rows(layer, &batched_ids).unwrap();
+            for early_advice in [false, true] {
+                assert_eq!(
+                    disk.decode_rows_batched_with_policy(layer, &batched_ids, early_advice)
+                        .unwrap(),
+                    expected_rows
+                );
+            }
+            batched_ids[8300] = rows;
+            for early_advice in [false, true] {
+                assert!(
+                    disk.decode_rows_batched_with_policy(layer, &batched_ids, early_advice)
+                        .is_err()
+                );
+            }
         }
         assert_ne!(
             disk.read_rows(0, &[0]).unwrap(),

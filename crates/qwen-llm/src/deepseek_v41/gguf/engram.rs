@@ -238,6 +238,14 @@ impl DiskEngram {
     /// block reads slower than cached rows can (uncached rows are SSD round
     /// trips), read-ahead is queued for every remaining row at once.
     pub fn decode_rows_batched(&self, layer: usize, ids: &[u64]) -> Result<Vec<f32>, String> {
+        self.decode_rows_batched_with_policy(layer, ids, early_advice_enabled())
+    }
+    pub(super) fn decode_rows_batched_with_policy(
+        &self,
+        layer: usize,
+        ids: &[u64],
+        early_advice: bool,
+    ) -> Result<Vec<f32>, String> {
         let mut output = Vec::new();
         output
             .try_reserve_exact(ids.len() * ROW_WIDTH)
@@ -245,11 +253,12 @@ impl DiskEngram {
         let mut advised = !concurrent_reads();
         let mut done = 0;
         while done < ids.len() {
-            // A short first block detects uncached rows early.
+            // A cached first probe can precede a cold region. Keep checking
+            // before a large synchronous block can hide thousands of misses.
             let probe = done == 0;
             let block = if probe {
                 PROBE_ROWS
-            } else if !advised && early_advice_enabled() {
+            } else if !advised && early_advice {
                 UNADVISED_BLOCK_ROWS
             } else {
                 BLOCK_ROWS
@@ -369,8 +378,8 @@ crate::env_flag!(
     /// Recheck batched Engram read latency every 256 rows until read-ahead
     /// triggers, then retain 4096-row blocks. The initial 64-row probe,
     /// 8 us/row threshold, cached serial reads and explicit serial policy
-    /// are unchanged. Experimental kill-test switch.
-    default_off early_advice_enabled,
+    /// are unchanged. Set to 0 to restore 4096-row checks after the probe.
+    default_on early_advice_enabled,
     "QWEN_V41_ENGRAM_EARLY_ADVISE"
 );
 

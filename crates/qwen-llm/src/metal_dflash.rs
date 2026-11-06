@@ -37,11 +37,11 @@ use crate::metal::{
     encode_dflash2_conv_f32, encode_ffn_fused_swiglu_q4_k_mma8_f32, encode_fill_f32,
     encode_gdn_decay_chain_batched_f32, encode_gdn_decay_chain_f32,
     encode_gdn_prep_packed_ckpt_f32, encode_gdn_prep_packed_f32,
-    encode_gdn_step_decay_packed_ckpt_f32, encode_gdn_step_decay_packed_f32, encode_get_rows_f32,
-    encode_l2_norm_batched_f32, encode_l2_norm_pair_batched_f32, encode_mat_mat_f32_router_e8p32,
-    encode_moe_down_iq4_xs_f32, encode_moe_down_q5_K_f32,
-    encode_moe_down_weighted_sum_q5_K_f32_packed_slots, encode_moe_mat_vec_f32,
-    encode_moe_swiglu_q4_K_f32_packed_slots, encode_moe_weighted_sum_f32,
+    encode_gdn_step_decay_packed_ckpt_f32, encode_gdn_step_decay_packed_f32,
+    encode_gdn_step_decay_packed_prefill_f32, encode_get_rows_f32, encode_l2_norm_batched_f32,
+    encode_l2_norm_pair_batched_f32, encode_mat_mat_f32_router_e8p32, encode_moe_down_iq4_xs_f32,
+    encode_moe_down_q5_K_f32, encode_moe_down_weighted_sum_q5_K_f32_packed_slots,
+    encode_moe_mat_vec_f32, encode_moe_swiglu_q4_K_f32_packed_slots, encode_moe_weighted_sum_f32,
     encode_qk_rms_norm_rope_f32_packed_consecutive, encode_rms_norm_batched_f32,
     encode_rms_norm_batched_src_strided_f32, encode_rms_norm_mul_f32, encode_rmsnorm_gated_f32,
     encode_rope_neox_f32, encode_rope_neox_f32_packed_consecutive,
@@ -12471,7 +12471,7 @@ fn prefill_tokens_with_multi_hidden_profiled_inner<'a>(
 
                             if gdn_split.run_step() {
                                 let enc = KernelEncoder::begin(&cmd_buf);
-                                encode_gdn_step_decay_packed_f32(
+                                encode_gdn_step_decay_packed_prefill_f32(
                                     base.ctx,
                                     &enc,
                                     &gdn_q_norm_pack_p,
@@ -12481,6 +12481,7 @@ fn prefill_tokens_with_multi_hidden_profiled_inner<'a>(
                                     &gdn_beta_pack_p,
                                     &target_session.gdn_state[gi],
                                     &gdn_out_pack_p,
+                                    &gdn_qkv_pack_p,
                                     chunk_p,
                                     n_v_u,
                                     n_k_u,

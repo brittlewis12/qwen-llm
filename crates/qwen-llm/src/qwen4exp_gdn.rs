@@ -3,9 +3,9 @@
 use crate::metal::{
     KernelEncoder, MetalContext, MetalError, MetalTensor, MetalTensorProvenance,
     encode_copy_offset_f32, encode_gdn_decay_chain_batched_f32, encode_gdn_decay_chain_f32,
-    encode_gdn_prep_packed_serial_f32, encode_gdn_step_decay_f32, encode_gdn_step_decay_packed_f32,
-    encode_l2_norm_pair_batched_f32, encode_mat_vec_f32_sigmoid, encode_sigmoid_f32,
-    encode_ssm_conv_silu_f32,
+    encode_gdn_prep_packed_serial_f32, encode_gdn_step_decay_f32,
+    encode_gdn_step_decay_packed_prefill_f32, encode_l2_norm_pair_batched_f32,
+    encode_mat_vec_f32_sigmoid, encode_sigmoid_f32, encode_ssm_conv_silu_f32,
 };
 use crate::metal_forward::{MfError, encode_mat_vec_dispatch, encode_qwen4exp_prefill_mat_mat};
 use crate::qwen4exp::{MixerKind, Qwen4ExpConfig};
@@ -1064,7 +1064,7 @@ unsafe fn encode_gated_delta_net_packed_inner(
         }
     };
     if !captured_recurrence {
-        encode_gdn_step_decay_packed_f32(
+        encode_gdn_step_decay_packed_prefill_f32(
             ctx,
             enc,
             &query_norm,
@@ -1074,6 +1074,7 @@ unsafe fn encode_gated_delta_net_packed_inner(
             &beta,
             delta_state,
             &recurrent,
+            &qkv,
             tokens,
             g.value_heads,
             g.key_heads,

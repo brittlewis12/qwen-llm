@@ -388,7 +388,7 @@ fn run_args(a: Args) -> Result<()> {
         "Qwen census geometry required"
     );
     model.set_prefix_cache_max_bytes(64 << 30);
-    let capacity = a.depth + a.tokens.max(2048);
+    let capacity = a.depth + a.tokens.max(2048) + 1;
     let quality = matches!(a.mode.as_str(), "quality" | "greedy");
     let (prefix, tokens) = if quality {
         let (p, t) = match a.doc.as_str() {

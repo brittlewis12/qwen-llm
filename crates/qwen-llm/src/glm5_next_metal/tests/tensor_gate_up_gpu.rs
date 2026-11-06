@@ -9,6 +9,7 @@ const E: usize = 32;
 struct Tiny {
     tensors: [MetalTensor; 11],
     half: MetalTensor,
+    status: MetalTensor,
     compact: [Vec<f32>; 3],
     rows: usize,
 }
@@ -34,6 +35,7 @@ impl Tiny {
             H * TOP * rows * 4,
             H * rows * 4,
             H * (rows + 32) * 2,
+            rows * 4,
         ];
         let gpu: u64 = logical
             .iter()
@@ -167,9 +169,16 @@ impl Tiny {
             vec![H as u64, (rows + 32) as u64],
             GgmlType::F16,
         );
+        let status = guarded(
+            ctx,
+            bytemuck::cast_slice(&vec![ROUTE_STATUS_READY; rows]),
+            vec![rows as u64],
+            GgmlType::I32,
+        );
         Self {
             tensors,
             half,
+            status,
             compact,
             rows,
         }
@@ -179,7 +188,7 @@ impl Tiny {
         (expert * 3 + row + index * 2) % WR
     }
 
-    fn bindings(t: &[MetalTensor; 11]) -> GroupedExperts<'_> {
+    fn bindings<'a>(t: &'a [MetalTensor; 11], status: &'a MetalTensor) -> GroupedExperts<'a> {
         let [
             gate_bank,
             up_bank,
@@ -200,7 +209,7 @@ impl Tiny {
             input,
             ids,
             weights,
-            status: counts,
+            status,
             counts,
             slots,
             inner,
@@ -220,7 +229,7 @@ impl Tiny {
     }
 
     fn encode(&self, ctx: &MetalContext, enc: &KernelEncoder, lane: usize, limit: f32) {
-        let b = Self::bindings(&self.tensors);
+        let b = Self::bindings(&self.tensors, &self.status);
         if lane == 2 {
             gate_adapter::prepare(
                 ctx,
@@ -515,6 +524,10 @@ fn m5_gate_up_native_compositions_tensor_f32_f16_bitwise_and_sampled_f64() {
                             guards(t);
                         }
                         guards(&f.half);
+                        guards(&f.status);
+                        let status: &[i32] =
+                            bytemuck::cast_slice(&backing(&f.status)[GUARD..GUARD + f.rows * 4]);
+                        assert!(status.iter().all(|&word| word == ROUTE_STATUS_READY));
                     }
                 }
                 for (t, hash) in f.tensors[..6].iter().zip(before) {
@@ -534,7 +547,7 @@ fn m5_gate_up_whole_composition_preflight_failures() {
     let f = Tiny::new(&ctx, GgmlType::Q4_K, GgmlType::Q5_K, 129);
     let prepare =
         |enc: &KernelEncoder, t: &[MetalTensor; 11], half: &MetalTensor, limit, policy| {
-            let b = Tiny::bindings(t);
+            let b = Tiny::bindings(t, &f.status);
             gate_adapter::prepare(&ctx, enc, &b, half, H, F, E, TOP, f.rows, limit, policy)
                 .map(|p| p.is_some())
         };

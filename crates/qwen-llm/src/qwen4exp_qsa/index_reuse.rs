@@ -83,7 +83,7 @@ pub(super) fn try_encode(
         "qsa_index_reuse",
         queries,
         GgmlType::F32,
-        &[512, count as u64],
+        &[128, 4, count as u64],
         false,
         "queries",
     )?;

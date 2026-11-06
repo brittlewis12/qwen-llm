@@ -62,7 +62,7 @@ fn qsa_index_query_reuse_matches_incumbent_bits_f64_and_guards() {
             &ctx,
             bytemuck::cast_slice(&q),
             GgmlType::F32,
-            vec![512, Q as u64],
+            vec![128, 4, Q as u64],
         );
         let kt = guarded(
             &ctx,

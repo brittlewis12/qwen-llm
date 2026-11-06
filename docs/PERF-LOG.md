@@ -6,6 +6,148 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the current state and evidence index.
 
+## 2026-11-06 - GLM Rooflines on M5/M4: One-Row IQ2_S Decode Experts
+
+- Baseline **`1a56970b`**, GLM-5.3 Flash, M5 Ultra / 128-GB M4 Max.
+  M5 uses UD-IQ3_XXS through the established metadata-only `glm5-next`
+  alias; M4 uses the existing **Maya-M IQ2_S** artifact. UD passes laptop
+  admission but its native tg64@8K samples were **29.604 / 18.450**;
+  Maya's executed trunk is **112.402 GB**, versus UD's **117.558 GB**, and
+  gives **29.685 / 29.741**. No memory-limit or power-setting changes.
+- Measured roofs, decimal units: **1106.57 / 505.79 GB/s** streaming on
+  M5 / M4, and **131.4 / 15.776 TFLOP/s** raw Half/F32-accumulate tensor /
+  SIMD-group MMA. Streaming uses two distinct, pseudorandom, nonzero 512-MiB
+  buffers, `y += alpha*x`, counting X read + Y read + Y write; four passes
+  per command, two warm commands then eight retained GPU durations. Compute
+  probes use register/threadgroup operands, two passes of the existing raw
+  peak kernels; best warmed median. An earlier zero-buffer stream screen
+  gave 1105.84 / 496.12 GB/s; the nonzero rerun above defines these roofs.
+  October's 400-GB/s laptop planning ceiling would give 82.4% / 77.1%
+  decode utilization instead of the measured-roof percentages below.
+- Byte accounting binds **executed tensor roles and actual GGUF types**:
+  one embedding row, the whole output head, always-on matrices/vectors and
+  8/288 of each routed bank; NextN excluded. Active weights are **10.221870
+  / 10.038311 GB/token** (UD / Maya), consistent with October's rounded
+  9.52 / 9.35 GiB. UD's mix is Q6_K **6.083915**, IQ2_S **1.762656**,
+  IQ3_S **1.182269**, Q8_0 **0.865944**, F32 **0.220131**, IQ4_XS
+  **0.106955 GB**. Below the sparse frontier, subtract **79.299 / 75.063 MB**
+  of unused indexer-query/head-weight matrices. Add **305.267 MB/token**
+  of F32 KDA state/conv reads+writes and unique F16 latent/pooled-key cache
+  traffic at the actual depth. TG64 mean bytes/token are **10.448238 /
+  10.556045 / 10.573347 GB** at M5 depth 0 / 8K / 32K; Maya **10.268915 /
+  10.372487 GB** at 0 / 8K. Sparse attention reads 2048 selected latent rows
+  plus the incomplete pool tail. This is optimistic logical traffic with
+  cache reuse, not measured DRAM transactions; activation scratch and repeated
+  cache misses can add traffic.
+- Useful matmul FLOPs count **16.738288B** active matrix parameters, with
+  the **634.388M**-parameter head once per prefill call and sparse-only
+  indexer projections only on sparse rows, plus MLA QK/PV and indexer scores.
+  The denominators are **34.387949 GF/token** at pp4096@0 and **35.355523 /
+  35.909171 GF/token** for pp512@8K / 32K. Padding, dequantization, recurrence,
+  scalar/SFU work and dispatch costs are outside this useful-matmul numerator;
+  these percentages are end-to-end bounds, not hardware occupancy readings.
+
+  Baseline native family suite, seed 1, production Fast prefill, full endpoint
+  logits and decode route checks; warmup + two reps/cell. Comparator is pinned
+  **llama.cpp v0.9.0 `cd959bae99`**, MTL/BLAS, F16 KV, batch/ubatch 2048,
+  two reps. Both engines run one at a time under the canonical Metal lease
+  and build lock, nice 10. M4 holds the build lock for each entire campaign;
+  M5 thermal pressure is **0 before/after every timing arm**. Prefix fills
+  and session allocation are outside the timers.
+
+  | Machine / artifact | Cell / depth | Native tok/s | Roof % | CPP tok/s | Roof % | Native/CPP |
+  | --- | --- | ---: | ---: | ---: | ---: | ---: |
+  | M5 / UD | tg64 / 0 | 59.382 | 56.1 | 43.508 | 41.1 | 1.365x |
+  | M5 / UD | tg64 / 8192 | 54.909 | 52.4 | 42.204 | 40.3 | 1.301x |
+  | M5 / UD | tg64 / 32768 | 53.922 | 51.5 | 40.590 | 38.8 | 1.328x |
+  | M5 / UD | pp4096 / 0 | 928.257 | 24.3 | 795.555 | 20.8 | 1.167x |
+  | M5 / UD | pp512 / 8192 | 712.176 | 19.2 | 565.439 | 15.2 | 1.260x |
+  | M5 / UD | pp512 / 32768 | 687.176 | 18.8 | 536.777 | 14.7 | 1.280x |
+  | M4 / Maya | tg64 / 0 | 32.103 | 65.2 | 26.860 | 54.5 | 1.195x |
+  | M4 / Maya | tg64 / 8192 | 29.713 | 60.9 | 22.869 | 46.9 | 1.299x |
+  | M4 / Maya | pp4096 / 0 | 236.506 | 51.6 | 208.662 | 45.5 | 1.133x |
+  | M4 / Maya | pp512 / 8192 | 162.592 | 36.4 | 173.818 | 39.0 | 0.935x |
+
+  Retained native / CPP samples, in table order: M5 **59.412280,59.352180 /
+  43.4952,43.5207; 54.961066,54.856814 / 42.3302,42.0773;
+  53.890929,53.952402 / 41.0178,40.1613; 928.205455,928.308175 /
+  795.874,795.236; 712.196427,712.155771 / 566.001,564.878;
+  687.345196,687.007332 / 543.760,529.795**. M4 **32.159034,32.047464 /
+  26.8205,26.8988; 29.684750,29.740865 / 23.5195,22.2189;
+  237.289286,235.723700 / 206.725,210.599; 157.637854,167.545661 /
+  173.702,173.934**. All retained samples count, including laptop append
+  dispersion; the table uses native mean throughput. Saved-prefix policy
+  comparisons below have different residency history and are relative tests.
+- Attribution at 8K: instrumented M5 **19.80 ms**, KDA block **5.29**,
+  routed experts **4.85**, shared expert **1.48**, HC pre **1.37 ms**;
+  initial M4 UD profile **34.01 ms**, KDA **10.00**, routed **9.90**,
+  shared **2.46**, HC pre **1.29 ms**. Profiling perturbs boundaries; ordinary
+  M5 decode is about 18.2 ms. Recurrence itself is only **0.70 / 0.78 ms**
+  across 34 blocks. The Q6_K Q/K/V cohort already streams near each machine's
+  roof; IQ2_S gate/up is more tractable. Census is **1128 dispatches/token**
+  at 8K, within October's 1040–1310 range. Per-dispatch timestamps had
+  nonmonotonic ends and were excluded from timing attribution.
+- Kill screen: actual UD banks, 34 dependent launches/command, eight disjoint
+  expert sets / four QKV matrix sets to exceed cache, two passes, two warm
+  plus eight retained commands/configuration/pass. One-row IQ2_S gate/up
+  reduces per-thread accumulator rows from four to one, preserving lanes,
+  F32 dot order, SIMD reduction, clamp and invalid-route zeroing. Median ms
+  per 34 gate/up launches for rows/SIMD **4 / 1 / 2 / 8**:
+  M5 **2.125396 / 1.654875 / 1.778729 / 1.971000**;
+  M4 **4.971604 / 4.835792 / 4.836833 / 5.342562**. R1 is **1.284x /
+  1.028x**. All configurations are bitwise equal at four input scales and
+  eight expert sets on both GPUs. Q6_K QKV R1 is only **1.033x** on M5 and
+  **0.877x** on M4: rejected. Removing the IQ2_S R1 threadgroup exchange adds
+  only **1.012x** on M5 (1.652313 -> 1.633437 ms), below 0.2% whole-token
+  value: rejected; the queued M4 follow-up was canceled.
+- **Default on for Apple10/M5 GPUs:** IQ2_S equal-type gate/up,
+  `[4096,2048,288]`, top-8,
+  one row/SIMD, two SIMD groups/threadgroup. Rollback
+  **`QWEN_GLM53_EXPERT_R1=0`** restores four rows/SIMD. No new GPU buffers
+  or dispatches. Exact/F32 keep their F32 inputs, reduction and clamp; packed
+  Fast GEMMs retain their existing routes. A GPU test pins output bits at
+  nonzero offsets, input widths 256/512/4096, output tails 1/13 and production
+  2048 rows, three scales, invalid IDs, unready routes and NaN-primed outputs.
+- Whole decode, same binary on/default versus rollback, saved immutable
+  prefixes, one warm + two retained repetitions/arm, **AB then BA**, 30 s
+  between arms; synthetic TG seeds 2/3, prefix seed `1 ^ 0x9e3779b97f4a7c15`,
+  PP seed 1. Production forward includes full logits copy and route checks.
+  Median-ratio M5 decode gains are **3.64% / 3.32% / 3.07%** at 0 / 8K /
+  32K; append ratios **0.9984x / 0.9999x** at 8K / 32K.
+
+  | M5 cell / depth | Off samples tok/s | On/default samples tok/s | On/off |
+  | --- | --- | --- | ---: |
+  | tg64 / 0 | 59.991990,60.111780,60.032814,60.125152 | 62.201392,62.277324,62.241940,62.321098 | 1.03641x |
+  | tg64 / 8192 | 54.926611,54.919239,54.952633,54.924571 | 56.743571,56.756147,56.770084,56.741898 | 1.03321x |
+  | tg64 / 32768 | 53.885809,53.913599,53.937719,53.956817 | 55.566121,55.740778,55.554169,55.594809 | 1.03069x |
+  | pp512 / 8192 | 715.436646,714.109005,713.382748,713.532538 | 712.532299,713.289161,712.832800,712.421464 | 0.99841x |
+  | pp512 / 32768 | 689.037122,689.121206,688.901068,688.844995 | 689.202335,689.471057,688.544387,688.420754 | 0.99986x |
+
+- M4 candidate AB/BA, same saved-prefix protocol, all samples retained:
+
+  | M4 cell / depth | Off samples tok/s | Candidate R1 samples tok/s | R1/off |
+  | --- | --- | --- | ---: |
+  | tg64 / 0 | 32.449026,32.211418,32.344583,32.288566 | 31.346529,30.844516,32.528740,32.214791 | 0.98342x |
+  | tg64 / 8192 | 29.176720,28.251715,27.978627,28.327336 | 28.922330,28.262619,27.537240,28.848667 | 1.00941x |
+  | pp512 / 8192 | 187.612070,178.550775,187.682485,185.738567 | 189.763143,190.802713,187.659899,184.784711 | 1.01091x |
+
+  This does not establish consistent whole-runtime value on M4; **Apple9
+  retains the incumbent four-row tile**. The production policy uses cached
+  Apple10 family support, independent of the optional TensorOps library.
+  The M4 R1 timing used the earlier unrestricted candidate; `=1` does not
+  bypass the final hardware guard. Qualify a whole-model gain before widening
+  this policy to Apple9. The unchanged append path's dispersion also limits
+  small laptop claims.
+- Distribution: code (`qwen4exp_runtime.rs`) and prose (`bash.txt` frontier
+  corpus), prefix 8192, **1024 sequential teacher-forced targets/document**,
+  independent on/off sessions, full vocabulary. Every emitted logit is
+  finite and **bitwise identical across all 2048 rows**: delta NLL and mean /
+  maximum KL(off||on) **0**; argmax **2048/2048**. F64 NLL in each arm is
+  **0.563690 / 0.066679** nats/token for code / prose. Same token/target IDs in
+  both arms. This passes |delta NLL| <=0.005 nats/token and mean KL <=0.01.
+  The first-token census witnesses 41 R1 IQ2_S dispatches on and 41 incumbent
+  IQ2_S dispatches off. Prefill's remaining raw-compute gap is unchanged.
+
 ## 2026-11-06 - 27B Medium-Depth Decode: Partition Count and Register Queries
 
 - Base **`be4bac16`**, frozen production **`fc398655`**, M5 Ultra, registry

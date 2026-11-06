@@ -2649,7 +2649,8 @@ kernel void kernel_deepseek_v4_all_slots_swiglu_iq2_xs_f32_fast(
     }
 }
 
-kernel void kernel_deepseek_v4_all_slots_swiglu_iq2_s_f32_fast(
+template <short NR0>
+kernel void kernel_deepseek_v4_all_slots_swiglu_iq2_s_f32_fast_impl(
         constant ds4_all_slots_args & args [[buffer(0)]],
         device const uchar * gate_weight [[buffer(1)]],
         device const uchar * up_weight [[buffer(2)]],
@@ -2661,15 +2662,14 @@ kernel void kernel_deepseek_v4_all_slots_swiglu_iq2_s_f32_fast(
         uint2 tgpig [[threadgroup_position_in_grid]],
         ushort tiisg [[thread_index_in_simdgroup]],
         ushort sgitg [[simdgroup_index_in_threadgroup]]) {
-    const short NR0 = 4;
     const short NSG = 2;
     const uint slot = tgpig.y;
     const uint first_row = (tgpig.x * NSG + uint(sgitg)) * NR0;
     const int expert = slot < args.top_k ? expert_ids[slot] : -1;
     const bool valid = slot < args.top_k && route_status[0] == 1
         && expert >= 0 && uint(expert) < args.n_expert;
-    float gate_sumf[4] = {0.0f, 0.0f, 0.0f, 0.0f};
-    float up_sumf[4] = {0.0f, 0.0f, 0.0f, 0.0f};
+    float gate_sumf[NR0] = {};
+    float up_sumf[NR0] = {};
 
     if (valid && first_row < args.n_out) {
         const uint nb = args.n_in / 256u;
@@ -2752,7 +2752,7 @@ kernel void kernel_deepseek_v4_all_slots_swiglu_iq2_s_f32_fast(
         const float up_total = simd_sum(up_sumf[row]) * 0.25f;
         if (tiisg == 0) {
             totals[local_row] = gate_total;
-            totals[8u + local_row] = up_total;
+            totals[2u * NR0 + local_row] = up_total;
         }
     }
     threadgroup_barrier(mem_flags::mem_threadgroup);
@@ -2763,7 +2763,7 @@ kernel void kernel_deepseek_v4_all_slots_swiglu_iq2_s_f32_fast(
             if (out_row >= args.n_out) continue;
             const uint local_row = uint(sgitg) * uint(NR0) + uint(row);
             const float gate = totals[local_row];
-            const float up = totals[8u + local_row];
+            const float up = totals[2u * NR0 + local_row];
             const float clamped_gate = min(gate, args.clamp);
             const float clamped_up = clamp(up, -args.clamp, args.clamp);
             inner[(ulong)slot * args.n_out + out_row] = valid
@@ -2772,6 +2772,11 @@ kernel void kernel_deepseek_v4_all_slots_swiglu_iq2_s_f32_fast(
         }
     }
 }
+
+// Each row keeps its lanes, dot order, reduction and clamp. The one-row
+// specialization reduces register pressure for GLM decode.
+template [[host_name("kernel_deepseek_v4_all_slots_swiglu_iq2_s_f32_fast")]] kernel void kernel_deepseek_v4_all_slots_swiglu_iq2_s_f32_fast_impl<4>(constant ds4_all_slots_args &, device const uchar *, device const uchar *, device const float *, device const int *, device const int *, device float *, threadgroup float *, uint2, ushort, ushort);
+template [[host_name("kernel_deepseek_v4_all_slots_swiglu_iq2_s_f32_fast_r1")]] kernel void kernel_deepseek_v4_all_slots_swiglu_iq2_s_f32_fast_impl<1>(constant ds4_all_slots_args &, device const uchar *, device const uchar *, device const float *, device const int *, device const int *, device float *, threadgroup float *, uint2, ushort, ushort);
 
 kernel void kernel_deepseek_v4_all_slots_swiglu_iq3_xxs_f32_fast(
         constant ds4_all_slots_args & args [[buffer(0)]],

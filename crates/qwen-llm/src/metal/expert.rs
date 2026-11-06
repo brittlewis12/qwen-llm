@@ -17,6 +17,12 @@ use super::checks::{
 };
 use super::*;
 
+crate::env_flag!(
+    /// Default-on one-row IQ2_S gate/up SIMD tile for GLM decode geometry on Apple10 GPUs. Each row preserves F32 arithmetic and reduction order; 0 restores four rows per SIMD group. Earlier GPUs, other tensor types and geometries keep their existing recipe.
+    default_on glm53_expert_r1_requested,
+    "QWEN_GLM53_EXPERT_R1"
+);
+
 /// Fused all-slot `silu(min(g, c)) * clamp(u, -c, c)` launch recipe.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) struct AllSlotsGateUpRecipe {
@@ -270,8 +276,18 @@ pub fn encode_all_slots_gate_up_swiglu(
             (status, "route status"),
         ],
     )?;
-    let recipe = all_slots_gate_up_recipe(gate_bank.dtype)
+    let mut recipe = all_slots_gate_up_recipe(gate_bank.dtype)
         .ok_or_else(|| bad_shape(K, format!("no all-slot kernel for {:?}", gate_bank.dtype)))?;
+    if gate_bank.dtype == GgmlType::IQ2_S
+        && (n_in, n_out, experts, top_k) == (4096, 2048, 288, 8)
+        // Measured M5 gain; the M4 whole-model screen did not pay consistently.
+        && ctx.device_facts().gpu_families.apple10
+        && glm53_expert_r1_requested()
+    {
+        recipe.kernel = "kernel_deepseek_v4_all_slots_swiglu_iq2_s_f32_fast_r1";
+        recipe.rows_per_group = 2;
+        recipe.threadgroup_memory_f32 = 4;
+    }
     if !n_in.is_multiple_of(256) {
         return Err(bad_shape(
             K,
@@ -1244,6 +1260,98 @@ mod tests {
             .unwrap();
         });
         assert!(read_f32(&out).iter().all(|&v| v == 0.0));
+    }
+
+    /// The smaller row tile changes scheduling only: preserve every output
+    /// bit, including tails, clamping and invalid/unready route zeroing.
+    #[test]
+    fn iq2s_one_row_gate_up_matches_four_rows_bitwise() {
+        let Some(ctx) = crate::test_fixtures::metal_context_or_skip() else {
+            return;
+        };
+        for (n_in, n_out) in [(256, 1), (512, 13), (4096, 2048)] {
+            let dtype = GgmlType::IQ2_S;
+            let gate = bank(
+                &ctx,
+                &synthetic_bank(dtype, n_in, n_out, 3),
+                dtype,
+                n_in,
+                n_out,
+            );
+            let up = bank(
+                &ctx,
+                &synthetic_bank(dtype, n_in, n_out, 5),
+                dtype,
+                n_in,
+                n_out,
+            );
+            for scale in [0.001, 1.0, 10000.0] {
+                let x: Vec<_> = values(n_in, 1).into_iter().map(|v| v * scale).collect();
+                let input = f32_tensor(&ctx, &x, vec![n_in as u64]);
+                for (route_ids, state) in [
+                    (IDS, ROUTE_STATUS_READY),
+                    (IDS, ROUTE_STATUS_PENDING),
+                    ([-1, 12, 7, 0, 9, 5, 10, 2], ROUTE_STATUS_READY),
+                ] {
+                    let ids = i32_tensor(&ctx, &route_ids);
+                    let status = i32_tensor(&ctx, &[state]);
+                    let mut results = Vec::new();
+                    for (kernel, nr) in [
+                        ("kernel_deepseek_v4_all_slots_swiglu_iq2_s_f32_fast", 4),
+                        ("kernel_deepseek_v4_all_slots_swiglu_iq2_s_f32_fast_r1", 1),
+                    ] {
+                        let out = f32_tensor(
+                            &ctx,
+                            &vec![f32::NAN; n_out * TOP_K],
+                            vec![n_out as u64, TOP_K as u64],
+                        );
+                        run(&ctx, |enc| {
+                            let pso = pipeline_for(&ctx, kernel, 64).unwrap();
+                            enc.set_pipeline(&pso);
+                            enc.set_bytes(
+                                0,
+                                &AllSlotsArgs {
+                                    n_in: n_in as u32,
+                                    n_out: n_out as u32,
+                                    n_expert: EXPERTS as u32,
+                                    top_k: TOP_K as u32,
+                                    clamp: 10.0,
+                                },
+                            );
+                            for (i, t) in [&gate, &up, &input, &ids, &status, &out]
+                                .into_iter()
+                                .enumerate()
+                            {
+                                enc.set_tensor(i + 1, t);
+                            }
+                            enc.set_threadgroup_memory(0, 4 * nr * std::mem::size_of::<f32>());
+                            enc.dispatch(
+                                MTLSize {
+                                    width: n_out.div_ceil(2 * nr),
+                                    height: TOP_K,
+                                    depth: 1,
+                                },
+                                MTLSize {
+                                    width: 64,
+                                    height: 1,
+                                    depth: 1,
+                                },
+                            );
+                        });
+                        let values = read_f32(&out);
+                        assert!(
+                            values.iter().all(|v| v.is_finite()),
+                            "{kernel} {n_in}/{n_out}"
+                        );
+                        results.push(values.into_iter().map(f32::to_bits).collect::<Vec<_>>());
+                    }
+                    assert_eq!(
+                        results[0], results[1],
+                        "{n_in}/{n_out} scale {scale} status {state}"
+                    );
+                }
+            }
+        }
     }
 
     /// Packed grouped experts over 24 rows (GLM widths, 12-expert banks,

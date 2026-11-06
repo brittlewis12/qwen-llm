@@ -346,6 +346,13 @@ fn frozen(path: &str) -> Result<String> {
     Ok(String::from_utf8(out.stdout)?)
 }
 
+fn policy<T>(candidate: bool, automatic: bool, f: impl FnOnce() -> T) -> T {
+    if candidate && automatic {
+        f()
+    } else {
+        with_attn_v4_register_q_override(candidate, f)
+    }
+}
 fn run() -> Result<()> {
     qwen_cli::shutdown::install()?;
     let a = Args::parse();
@@ -487,7 +494,7 @@ fn run_args(a: Args) -> Result<()> {
             for (candidate, seq) in [(false, &mut off), (true, &mut on)] {
                 thermal(&format!("quality-{start}-{candidate}"), "before")?;
                 let mut logits = Vec::new();
-                with_attn_v4_register_q_override(candidate, || -> Result<()> {
+                policy(candidate, a.automatic, || -> Result<()> {
                     for &id in &tokens[start..end] {
                         qwen_cli::shutdown::checkpoint()?;
                         logits.extend(model.decode_token(seq, id)?);
@@ -521,7 +528,7 @@ fn run_args(a: Args) -> Result<()> {
             let mut seq = restore()?;
             let mut token = tokens[0];
             let mut output = Vec::new();
-            with_attn_v4_register_q_override(candidate, || -> Result<()> {
+            policy(candidate, a.automatic, || -> Result<()> {
                 for _ in 0..160 {
                     qwen_cli::shutdown::checkpoint()?;
                     token = model.decode_token_greedy(&mut seq, token)?.into_token()?;
@@ -570,9 +577,15 @@ fn run_args(a: Args) -> Result<()> {
     for (arm, candidate) in arms.into_iter().enumerate() {
         std::thread::sleep(std::time::Duration::from_secs(30));
         thermal(&format!("bench-{arm}"), "before")?;
-        with_attn_v4_register_q_override(candidate, || -> Result<()> {
+        policy(candidate, a.automatic, || -> Result<()> {
             let mut warm = restore()?;
+            dispatch_census_begin();
             run_decode(&model, &mut warm, &tokens)?;
+            let census = dispatch_census_take();
+            let qreg = census.iter().filter(|r| r.kernel.contains("qreg")).count();
+            emit(
+                json!({"record":"dispatch_witness","arm":arm,"candidate":candidate,"qreg":qreg,"total":census.len()}),
+            );
             drop(warm);
             for sample in 0..a.reps {
                 let mut seq = restore()?;

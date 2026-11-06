@@ -122,6 +122,9 @@ fn encode_chunked(
     if scratch.dtype != GgmlType::F32 || scratch.n_elements() < needed as u64 {
         return Err(bad(format!("dead QKV scratch needs {needed} F32 elements")));
     }
+    enc.note_write(scratch);
+    enc.note_write(state);
+    enc.note_write(out);
     // Resolve both pipelines before appending either dispatch.
     let (pre_name, scan_name) = if c == 32 {
         (

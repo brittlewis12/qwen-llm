@@ -6,6 +6,135 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the current state and evidence index.
 
+## 2026-11-06 - Flash-Next Short Appends: +59% Cold, +38–40% at 32K
+
+- Fresh main `eca09c26`, M5 Ultra, GSQ-RCO IQ3_S: pp512 **1082.1 tok/s**
+  cold and **822.6** at 32K; pp1024 **1279.5 / 949.3**. Two retained reps
+  per cell, default model/row warmups, seed 1; only the append is timed.
+  Source audit and dispatch traces confirm the dense/expert tensor routes,
+  device BF16 HC, tensor router and parallel bucketing were all qualified
+  only at M2048. QSA selected-value splitting already engages at depth.
+- Baseline pp512 profiles, cold / 32K / 128K: **2453 / 3593 / 3593**
+  dispatches, **443.456 / 594.369 / 683.850 ms** per-command timelines,
+  zero missing pairs/overflow. Cold Q6_K **69.976 ms**, BF16 projections
+  **47.499**, small F32 projections **45.242**, routed gate/up about **102**,
+  IQ4_NL down **38.613**, serial bucketing **14.875**, router **13.762**.
+  At 32K -> 128K, selected QSA value/logits stay about **63 / 48 ms**;
+  index scores **24.534 -> 92.847**, top-k **12.419 -> 32.153** account
+  for **88.047 of 89.481 ms** added timeline. Selection bounds the value
+  work; index scoring and selection still grow with context.
+- **Default on:** extend the existing qualified Flash-Next dense tensor,
+  routed gate/up tensor and parallel stable bucketing routes to **512..2047**
+  rows; extend device BF16 HC to **128-aligned** counts in that range.
+  Existing M2048 behavior and per-stage controls remain. Other geometries
+  retain their fallbacks. No new operand narrowing or GPU buffers/admission
+  bytes. Rollback: **`QWEN_FN_SHORT_APPEND_TENSOR=0`**.
+- **Default on:** device-input F32 matmuls for HC injection K10240/N4 and
+  GDN alpha/beta K2560/N48, **128-aligned M512..2047**, M128/N8 or N64
+  full-K tiles, original F32 operands/sums, safe math and no relaxed
+  precision, conversion or additional buffers. Optional tier/PSO gates.
+  Rollback: **`QWEN_FN_SHORT_SMALL_F32=0`**, independently controlled.
+- Whole-append kill screens: the preliminary all-route extension reduced
+  pp512 **473.107 -> 312.832 ms**, pp1024 **799.324 -> 486.785 ms**.
+  Marginal stage savings at 512/1024 were roughly dense **65/118 ms**,
+  gate/up **52/91**, HC **19/30**, bucketing **15/28**; not additive.
+  **Kill the short tensor router:** it adds about **9 ms** at 512 and
+  offers no useful 1024 win. Keep its strict E8P32 incumbent at short widths.
+  The small F32 candidate separately measured **303.296 -> 276.538 ms**
+  at 512 (**+9.68%**) and **484.799 -> 455.473** at 1024 (**+6.44%**).
+- **Kill the short tensor-down extension on composed quality:** its first
+  1024 cold code targets gave **dNLL +0.005040259**, above the unchanged
+  0.005 bound, despite passing pooled NLL and every KL mean. Rolling back
+  down gave **+0.001239685**; rolling back HC or gate/up did not pass that
+  slice. Dense rollback also passed but cost substantially more wall time.
+  Keep routed down at its existing M2048 qualification. Wide expert gate/up
+  likewise retains M2048; the new short route uses its narrow tensor tile.
+- The scheduler forwards arbitrary suffix lengths directly. Exact 512/1024
+  guards would miss real appends, so the final dense/gate-up/bucket scope is
+  the bounded range above. The existing dense/expert operators handle ragged
+  rows; HC/small-F32 retain the full-tile alignment requirement. Expanded
+  F64/guard checks cover aligned M512/1024/1536, plus M1920 for small F32
+  and the existing M2048 HC case. Released expert/dense contracts remain.
+- Teacher forcing on frozen **`ad610884`**: Bash manual and unchanged
+  `qwen4exp_runtime.rs`, native all-row gated-residual readout, full-vocabulary
+  F64 log-sum-exp/NLL/KL(off||on), all rows finite, identical checked input
+  and target IDs. Standard cells score 1024 targets per document/width/depth;
+  additional cold M1009 scores two real 1009-row appends (2018 targets),
+  M1536 scores 1536. **15,300 scored rows**, all twelve cells gated.
+  Census proves dense/gate-up/bucketing at 1009, aligned HC/small-F32 at
+  512/1024/1536, and no short tensor router/down. Both new flags 0 vs unset.
+  Normal 32K filling ends with a **2045-row** packed tail: the wider range
+  optimizes it too. Prefix input hashes match; prefix endpoint bits may
+  differ. This qualifies the full on/off policy, including that prefix.
+
+  | Document | Append rows | Depth | Targets/cell | dNLL | Mean / max KL | Argmax agreement |
+  | --- | --- | ---: | ---: | ---: | ---: | ---: |
+  | prose | 512/1024 | 0 | 1024 | -0.001338791 | 0.001456975 / 0.214196144 | 1019/1024 |
+  | code | 512/1024 | 0 | 1024 | 0.001239685 | 0.003340309 / 0.180432068 | 1009/1024 |
+  | prose | 512/1024 | 32768 | 1024 | 0.000604526 | 0.000949532 / 0.593221094 | 1021/1024 |
+  | code | 512/1024 | 32768 | 1024 | -0.000267149 | 0.000711076 / 0.138869271 | 1020/1024 |
+  | prose | 1009 | 0 | 2018 | -0.001336738 | 0.000830161 / 0.155103309 | 2015/2018 |
+  | code | 1009 | 0 | 2018 | 0.002833192 | 0.002910335 / 0.084945707 | 1989/2018 |
+  | prose | 1536 | 0 | 1536 | 0.000791397 | 0.001170556 / 0.214196144 | 1531/1536 |
+  | code | 1536 | 0 | 1536 | 0.000495682 | 0.003158044 / 0.335789371 | 1516/1536 |
+
+  The 512/1024 scores are identical and shown once; each width was scored
+  separately. Pooled NLL **0.533955057 -> 0.534313539**, dNLL
+  **+0.000358482**, mean KL **0.001792341**, argmax **15189/15300**.
+  **Pass** per cell and pooled: |dNLL| <=0.005 nats/token, mean KL <=0.01.
+  Bounded held-text evidence, not a model-wide identity claim.
+- Final ordinary release e2e, two retained reps per setting/cell, default
+  warmups and production admission, 30 s cooldown before each arm. Both
+  new flags 0 vs unset. Fresh pinned llama.cpp v0.9.0 `cd959bae99`,
+  MTL/BLAS, F16 KV, `-b 2048 -ub 2048`, same artifact and two reps.
+  Only append time after an untimed prefix; no samples dropped. Ratios
+  and gains use arithmetic means of retained throughput samples.
+
+  | Append | Depth | Qwen off samples (ms) | Qwen on samples (ms) | llama.cpp samples (ms) | Qwen on tok/s | Ratio |
+  | ---: | ---: | --- | --- | --- | ---: | ---: |
+  | 512 | 0 | 473.662791, 473.897999 | 297.282125, 297.624249 | 317.306792, 316.064042 | 1721.3 | 1.065x |
+  | 1024 | 0 | 800.433833, 800.646667 | 502.329750, 502.467083 | 508.648250, 506.503375 | 2038.2 | 1.010x |
+  | 512 | 32768 | 622.504916, 622.892625 | 445.225458, 445.239708 | 382.854167, 378.412916 | 1150.0 | 0.855x |
+  | 1024 | 32768 | 1079.230583, 1078.419250 | 780.100458, 779.349292 | 617.156417, 612.470334 | 1313.3 | 0.788x |
+
+  **+59.3% throughput** at both cold widths; **+39.9% / +38.4%** at 32K.
+  Cold appends reach roughly parity; 32K remains below parity. Fresh llama
+  throughput is **1616.8 / 2017.4** cold and **1345.2 / 1665.6** at 32K.
+  Additional real-length cold screens:
+
+  | Append | Off samples (ms) | On samples (ms) | Throughput gain |
+  | ---: | --- | --- | ---: |
+  | 1009 | 905.829583, 905.241917 | 664.323041, 663.478000 | +36.4% |
+  | 1536 | 1263.705333, 1261.805167 | 838.659875, 837.992667 | +50.6% |
+
+- Post-change pp512 profile: cold **2693 dispatches / 253.415 ms**;
+  32K **3833 / 405.171**, zero missing pairs/overflow. Cold dense tensor
+  aggregate **36.404 ms**, gate/up **52.471**, device HC + conversion
+  **29.178**, small F32 **7.643**, bucketing **0.617**. At 32K, selected
+  QSA value **63.632**, logits **47.553**, index scores **24.407**,
+  top-k **12.443** are the largest combined residual. Ordinary wall gaps
+  to llama.cpp are still **64.599 / 164.911 ms** at 32K for 512/1024.
+  Ragged pp1009 has **3113 dispatches / 617.474 ms**: scalar F32
+  projections **118.206**, legacy IQ4_NL down **75.913**, BF16 HC **63.438**,
+  off-tier Q5_K **38.790**.
+  Tail support for those operators and further QSA work are the next targets.
+  Profiles use end-to-end timestamp increments including transition gaps;
+  serialized shares are not ordinary wall decompositions or an attribution
+  of llama.cpp's advantage to individual stages.
+- One normal binary for final Qwen arms; clean build/runtime source stamps
+  match, features empty, Metal compiler `32023.921`, SDK `27.0`. SHA256
+  `b8ff3c70e2ca4c03f3bf8b7228180666dadd3b62b4d994477ccf1679cadc4cda`.
+  All timing/profile launch and exit thermal-pressure readings 0, build
+  lock + Metal lease + `nice -n 10`. Untimed numerical work used the lease
+  and could overlap CPU compilation; timed arms stayed build-locked.
+- Full `cargo test --release -p qwen-llm --lib` on final M5 code:
+  **2418 passed, 0 failed, 736 ignored**. CPU-only
+  `scripts/check-contracts.sh` passed on `ad610884`, tree
+  `0b928c8a4f3d5a9b00e45d48e575b2806d7eb6bc`.
+  Temporary harness sources removed from the worktree and scored logits
+  deleted. This follow-up adds the log only; branch unmerged, no task work
+  left running.
+
 ## 2026-11-06 - GLM M5 Short Appends: pp512 +85%/+66% at 0/32K
 
 - Target: stock GLM-5.3 UD-IQ3_XXS, M5 Ultra, 512/1024 new tokens at

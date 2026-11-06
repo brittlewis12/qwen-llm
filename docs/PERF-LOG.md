@@ -6,6 +6,74 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the current state and evidence index.
 
+## 2026-11-06 - V4.1 Depth Append Tail: Earlier Engram Read-Ahead
+
+- Screen **`c2abc565`**, production **`2af73aad`**, M5 Ultra, same full
+  GSQ-RCO IQ2_XS / IQ4_NL Engram artifact as the roofline standing below.
+  This preserves the full 384-expert/top-6 model and its measured memory
+  headroom. **Default on**, rollback **`QWEN_V41_ENGRAM_EARLY_ADVISE=0`**.
+  After the initial 64-row probe, check latency every **256 rows** until
+  read-ahead triggers, then retain 4096-row blocks. The 8 us/row threshold,
+  advice API, exact row reads, codec, order, output and explicit
+  `QWEN_V41_ENGRAM_IO=serial` policy are unchanged.
+- **Cause of the 32K spread:** the 64-row probe can be cached while later
+  rows are cold. The control then synchronously reads 4096 rows before
+  noticing misses. One pp512@32K trace has probe times **0.06 / 0.21 ms**,
+  then **290.16 / 292.70 ms** blocking reads in Engram layers 1 / 14;
+  advice begins only after row **4160**. Another starts advice at **8256**.
+  This is delayed cache-miss detection, not a different chunk or selector.
+- New **`QWEN_V41_PREFILL_TIMING=1`** records production command/encoder
+  geometry without stage splits; block/advice intervals appear in its
+  report. Initial control reproduces **674.146 / 1231.325 ms** append wall,
+  **87.090 / 643.924 ms** Engram preparation, but **556-562 ms GPU**,
+  roughly **0.3 ms scratch preparation** and **14-23 ms driver scheduling**.
+  These inclusive/overlapping intervals are not an additive GPU budget.
+- Block-instrumented same-binary screen, one excluded deep row warmup and
+  three retained appends: control wall **1241.004, 691.025, 1233.504 ms**;
+  candidate **664.556, 705.427, 724.423 ms**. Candidate Engram preparation
+  **66.54-110.65 ms** versus control **83.88-652.62 ms**. Physical disk
+  traffic varies with the page cache; the causal evidence is the delayed
+  synchronous block, not equal disk-byte totals. Unprofiled reverse-order
+  candidate: **737.271, 746.757, 753.590 tok/s**. Its control reaches the
+  **300 s deadline during prefix fills**, drains with exit 130, and has no
+  aggregate; retained as incomplete, never pooled as a timing sample.
+- Production native confirmation, unset default / rollback in separate
+  processes, normal model/row warmups, one retained sample/cell, full logits
+  copies and ordinary untimed prefix fills (no snapshot substitution):
+
+  | Cell | Rollback ms | Default ms | Default tok/s | Useful compute roof |
+  | --- | ---: | ---: | ---: | ---: |
+  | pp512@8K | 1222.719 | 651.684 | 785.657 | 20.92% |
+  | pp512@32K | 1109.511 | 691.640 | 740.269 | 20.45% |
+
+  These bounded confirmations support removal of the observed slow mode;
+  they do not establish a universal 1.6-1.9x gain over already-cached rows.
+  Same 130 TFLOP/s useful-work roof and unsupported exact-artifact llama.cpp
+  v0.9.0 comparator as below. Decode arithmetic and kernels are unchanged.
+- Cached native ABBA, three retained samples/arm: pp512 median rollback /
+  candidate **525.806 / 527.642 ms** (**0.35% cost**); pp4096
+  **2879.818 / 2854.781 ms** (**1.0088x**). The two pp4096 arm pairs drift
+  in opposite directions; claim no full-prefill speedup. A separate unsplit
+  pp4096 trace retains Engram **593.42 / 448.03 ms** rollback versus
+  **435.36 / 308.64 ms** candidate, with GPU **2525.6-2538.0 ms**.
+  Timing uses build.lock, nice 10, inherited canonical Metal lease and
+  30 s arm cooldown; pressure **0 before/throughout/after**, checked every 2 s.
+- Distribution: native tokenizer, frozen code/prose, pp4096 and pp512 after
+  Full 32K prefixes, independently evolving default/rollback processes,
+  128 sequential targets/document/cell: **512 paired full-vocabulary vectors
+  of 129280 logits**, all finite and bitwise identical. **Delta NLL = KL = 0,
+  argmax 512/512**. F64 NLL code/prose **0.490529 / 1.100465** after pp4096,
+  **0.416494 / 0.000029215** after 32K (corpus repeats to reach depth).
+  This is bounded numerical equivalence, not a broader quality claim.
+- Production greedy CLI: **8432 prompt tokens, 64 generated tokens**, both
+  arms status ok/token_limit, identical IDs and **173 output bytes**, SHA256
+  **`be3b1e901b5cc1963fed51f036deadc70f5e86b74ce8b0cc03cf276c4e46eb64`**.
+  Full release library **2439 passed, 0 failed, 738 explicit ignores**;
+  **`scripts/check-contracts.sh` passes on `2af73aad`**. CPU row fixture
+  checks both block policies across 8501 reordered/repeated IDs and a late
+  invalid ID. Raw commands, timings, incomplete arm, conditions, source and
+  quality receipts: `metagross:~/qwen-runs/2026-11-06-v41-roofline2/`.
+
 ## 2026-11-06 - GLM Decode: Fuse KDA's Three Small Input Projections
 
 - Base **`57c60a1b`**, M5 Ultra, unchanged UD-IQ3_XXS alias. KDA's decay-A,

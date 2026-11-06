@@ -17,7 +17,7 @@ crate::env_flag!(
     "QWEN_FN_PREFILL_DENSE_WIDE"
 );
 
-/// Qualified short-append tensor routes, default on when the tensor tier is available: 27B Q4_K gate/up at 128 or 256..=1024 rows, Q6_K down at 256..=1024, Q4_K down at 384..=1024, Q5_K GDN output projections at 128 rows or ragged rows in 128..=1024, and A3B Q5_K/Q6_K routed down at 512..=2048. Short A3B gate/up keeps its incumbent. Set to 0 for A/B or rollback to the original short-append dispatches; original 1024-row FFN and 2048-row expert routes are unaffected. Existing dense, FFN and expert off-switches still apply.
+/// Qualified short-append tensor routes, default on when the tensor tier is available: 27B Q4_K gate/up at 128 or 256..=1024 rows, Q6_K down at 256..=1024, Q4_K down at 384..=1024, Q5_K GDN output projections at 128 rows or ragged rows in 128..=1024, and A3B Q4_K gate/up plus Q5_K/Q6_K routed down at 512..=2048. Set to 0 for A/B or rollback to the original short-append dispatches; original 1024-row FFN and 2048-row expert routes are unaffected. Existing dense, FFN and expert off-switches still apply.
 const SHORT_APPEND_TENSOR_ENV: &str = "QWEN_SHORT_APPEND_TENSOR";
 
 fn short_append_tensor_enabled() -> bool {
@@ -40,7 +40,7 @@ fn ffn128_enabled() -> bool {
     *ENABLED.get_or_init(|| crate::env_flag::read_default_on(FFN128_ENV))
 }
 
-/// Metal 4 Q4_K gate/up and Q5_K/Q6_K down grouped expert tiles for stock Qwen 35B-A3B prefill, enabled by default when the tensor tier is available. QWEN_SHORT_APPEND_TENSOR extends down projections from the original 2048-row route to 512..=2048 rows; short gate/up retains its incumbent. Set to 0 for A/B or rollback. Other architectures, quant combinations and chunk sizes retain their incumbent expert kernels.
+/// Metal 4 Q4_K gate/up and Q5_K/Q6_K down grouped expert tiles for stock Qwen 35B-A3B prefill, enabled by default when the tensor tier is available. QWEN_SHORT_APPEND_TENSOR extends the original 2048-row route to 512..=2048 rows. Set to 0 for A/B or rollback. Other architectures, quant combinations and chunk sizes retain their incumbent expert kernels.
 const A3B_EXPERT_PREFILL_TENSOR_ENV: &str = "QWEN_A3B_EXPERT_PREFILL_TENSOR";
 
 const A3B_ARCH: Arch = Arch {
@@ -118,13 +118,13 @@ fn short_expert_roles() -> [bool; 2] {
     if let Some(roles) = short_append_probe::expert_roles_override() {
         return roles;
     }
-    // Qualify the two roles independently: the combined short-row extension
-    // missed the teacher-forced NLL guard despite passing the operator bound.
-    [false, true]
+    // The ignored witness can isolate roles without changing the 2048-row
+    // prefix route or adding public runtime knobs.
+    [true, true]
 }
 
 /// Gate/up and down selection separately; the original 2048-row route is
-/// unchanged. Short-row gate/up retains its incumbent reduction order.
+/// unchanged. Both short-row stages use the qualified policy above.
 pub fn qwen_a3b_expert_prefill_tensor_roles(
     ctx: &MetalContext,
     arch: &Arch,

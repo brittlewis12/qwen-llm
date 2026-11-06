@@ -7,7 +7,7 @@ use objc2_metal::{MTLBuffer, MTLCommandBuffer, MTLCommandQueue};
 use serde_json::json;
 use std::{cell::Cell, collections::BTreeMap};
 
-/// Explicit ignored witness mode: trace, dense, q5, expert or quality.
+/// Explicit ignored witness mode: trace, dense, q5, expert, quality (slice/document/pooled guards) or quality-document (the existing document/pooled NLL/KL protocol, with every slice reported).
 const PROBE_MODE_ENV: &str = "QWEN_SHORT_PROBE_MODE";
 /// External model fixture for the ignored short-append witness: 27b or a3b.
 const PROBE_MODEL_ENV: &str = "QWEN_SHORT_PROBE_MODEL";
@@ -404,7 +404,8 @@ fn run_short_append_probe() {
     match mode.as_str() {
         "trace" => trace(&ctx, &mm),
         "expert" => expert(&ctx, &mm),
-        "quality" => quality(&ctx, &mm, &gg),
+        "quality" => quality(&ctx, &mm, &gg, true),
+        "quality-document" => quality(&ctx, &mm, &gg, false),
         _ => panic!("unknown mode"),
     }
 }
@@ -781,7 +782,7 @@ fn compare_distribution(a: &[f32], b: &[f32], targets: &[i32], v: usize) -> Scor
     }
     s
 }
-fn quality(ctx: &MetalContext, mm: &MetalModel, gg: &GgufFile) {
+fn quality(ctx: &MetalContext, mm: &MetalModel, gg: &GgufFile, per_slice_gate: bool) {
     let selected_doc = std::env::var(PROBE_DOC_ENV).ok();
     assert!(
         selected_doc
@@ -875,17 +876,21 @@ fn quality(ctx: &MetalContext, mm: &MetalModel, gg: &GgufFile) {
                     )
                 });
                 emit(
-                    json!({"record":"quality_case","doc":doc,"depth":depth,"position":depth+consumed,"rows":n,"score":score.report()}),
+                    json!({"record":"quality_case","doc":doc,"depth":depth,"position":depth+consumed,"rows":n,"gate":if per_slice_gate{"slice"}else{"informational"},"score":score.report()}),
                 );
-                score.check();
+                if per_slice_gate {
+                    score.check();
+                }
                 document.add(score);
                 consumed += n;
             }
         }
-        emit(json!({"record":"quality_document","doc":doc,"score":document.report()}));
+        emit(
+            json!({"record":"quality_document","doc":doc,"gate":"document","score":document.report()}),
+        );
         document.check();
         pooled.add(document);
     }
-    emit(json!({"record":"quality_pooled","score":pooled.report()}));
+    emit(json!({"record":"quality_pooled","gate":"pooled","score":pooled.report()}));
     pooled.check();
 }

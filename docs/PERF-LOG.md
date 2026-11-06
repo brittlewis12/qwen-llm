@@ -6,6 +6,61 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the current state and evidence index.
 
+## 2026-11-06 — Flash-Next rooflines: faster decode on M4/M5, SIMD QSA for deep M4 appends
+
+- Baseline main `1a56970b`, branch `perf/fn-roofline`. Both machines use **Qwen3.8-Flash-Next-GSQ-RCO-IQ3_S-00001-of-00002.gguf**: the M5 model-search root and the M4 external weights archive. Tensor payload **83,606,638,080 bytes**, **176,943,899,520 parameters**. Comparator: llama.cpp v0.9.0 `cd959bae99ff`, Metal, F16 KV, batch/ubatch 2048. Decode is known-input tg64 with full endpoint-logit copy, without sampling. Two retained samples per standing/CLI arm.
+- Header-derived active weights: **5,158,730,240 bytes**, counting dense tensors once and each routed bank at 10/512; embedding/PLE tables contribute only their gathered rows, **2,800 bytes/token**. Active artifact types in GiB: Q6_K 1.749, BF16 1.423, IQ4_NL .375, Q5_K .323, IQ3_XXS .199, IQ2_S .196, Q4_K .185, IQ4_XS .174, IQ3_S .131, Q2_0 .039, F32 .009, Q8_0 .002, F16 <.001. Runtime aux/router widening replaces source reads and adds **151,715,840 bytes**, giving **5,310,448,880 native weight bytes/token**. Routed experts account for 982,272,000 bytes, 19% of artifact-active weights.
+- State traffic includes the GDN F32 state read/write (**226,492,416 bytes/token**), GDN/PLE convolution history, selected QSA F16 K/V, pooled F16 index keys and new cache writes. Mean useful payload over tg64 is **5.54737 / 5.60324 / 5.62211 GB/token** at 0 / 8K / 32K. This is a logical traffic floor, not a DRAM-counter measurement: activation traffic, cachelines, repeated passes and transfers can add bytes. Sparse selection bounds K/V reads; depth mainly grows index scoring/selection rather than full-context K/V traffic.
+- Loads-only streaming calibration: **506.96 GB/s M4**, **1175.47 GB/s M5**, 1 GiB input, 16 float4 loads/thread, checked checksum, median of seven retained runs. Also report utilization against the requested practical anchors, **400 / 1000 GB/s**. Nonzero-input, register/threadgroup-resident existing peak probes give **15.695 TFLOP/s M4 SIMD MMA** and **131.676 TFLOP/s M5 Metal 4 tensor**: F16 operands/F32 accumulation, 2000 iterations, two warm plus five retained per geometry, best measured configuration.
+- Useful learned projections cost **12.05297 GFLOP/token** in packed execution. QSA QK/PV/index products and amortized endpoint head/HC readout bring this to approximately **12.51159 GFLOP/token pp4096** and **12.76135 GFLOP/token pp512@32K**. The vocabulary head runs at chunk endpoints, not on every prompt row. The compute ceiling is optimistic: dequantization, tile padding, nonlinearities, GDN recurrence, memory and launches are outside these useful matmul FLOPs.
+
+  | Device / work / depth | Main policy tok/s | llama.cpp tok/s | Native / cpp | % measured ceiling | % practical BW ceiling |
+  | --- | ---: | ---: | ---: | ---: | ---: |
+  | M4 tg64 / 0 | 40.951 | 42.734* | .958x | 44.81% | 56.79% |
+  | M4 tg64 / 8K | 38.607 | 41.355 | .934x | 42.67% | 54.08% |
+  | M4 pp4096 / 0 | 496.132 | 624.071 | .795x | 39.55% | — |
+  | M4 pp512 / 32K | 390.578** | 528.972** | .738x | 31.76% | — |
+  | M5 tg64 / 0 | 67.962 | 65.977 | 1.030x | 32.07% | 37.70% |
+  | M5 tg64 / 8K | 63.881 | 64.518 | .990x | 30.45% | 35.79% |
+  | M5 tg64 / 32K | 62.326 | 61.764 | 1.009x | 29.81% | 35.04% |
+  | M5 pp4096 / 0 | 1949.979 | 2067.455 | .943x | 18.53% | — |
+  | M5 pp512 / 32K | 1348.535 | 1347.590 | 1.001x | 13.07% | — |
+
+  *M4 CPP's original cold tg0 samples were 35.722/41.161 tok/s. The warmed reference uses stock `-p 512 -n 64 --delay 20`: exclude the pp512 cell, keep both tg samples, 41.665/43.802. This matches native's weight warmup; retain the spread when interpreting the small cpp margin.
+
+  **The original M4 append campaign went thermal 0→2 (CPP 1→0), so those numbers are excluded. The replacement measures main policy with all three new knobs off in the native runner: one 32K prefix, snapshot restore outside timing, 60 seconds of stable thermal zero, an excluded 512-row warm append, then two retained appends/full endpoint copies. CPP uses its unmodified prefix cache with duplicate `-p 512,512 --delay 60 -r 2`; exclude the prefix-filling cell and retain the second cell after cooldown and stock pp512 warmup. All kept arms/samples are thermal 0→0. Post-idle native samples without matched priming are excluded from this comparison.
+- **Decode attribution:** 64 clean native steps at 8K give M4 encode/GPU/endpoint **1.642 / 23.635 / 26.006 ms**, M5 **.909 / 14.237 / 15.662 ms**, with **1701 dispatches/token** on both. October's focus table used UD-Q3_K_XL (5.37 GiB, ~1672 dispatches) and observed 6.7 ms encode / 22.7 ms GPU. The artifact/tree differ; today's clean encode budget is only ~6%. Full overlap cannot recover most of the current gap, and needs custody/staging changes. Sampled dispatch spans rank Q6_K, BF16 HC matrices and HC up/mix among the largest remaining leaves. Profiling is excluded from retained timing, and sampled spans are not summed as independent wall-time contributions.
+- **Default-on changes, with independent rollback:**
+  - `QWEN_FN_IQ3_S_DECODE=0` restores singleton IQ3_S gate/up. The new default reuses the existing four-row F32 decoder at Flash-Next H2560/F640/E512/top10; accumulation order changes, operands/buffers do not. It also honors `QWEN4EXP_MOE_IQ3_FAST=0`.
+  - `QWEN_FN_DECODE_QSA_REUSE=0` restores one-head decode logits. Four F32 heads reuse query loads across eight keys/SIMD at 256+ IDs; scalar invalid-ID and padding semantics, F16 KV and the dimension/FMA/SIMD reduction order are retained. Geometry and optional PSO capability checks precede encoding. At 2051 IDs the grid falls from 6153×256 threads to 390×128.
+  - `QWEN_FN_SIMD_PREFILL_QSA=0` restores prior tensor-tier eligibility on non-tensor devices. Qualified Apple-family-7+ SIMD devices gain index query tile 8, compact selection, query reuse and vector PV for deep N32 bands. **Non-tensor value splitting starts at 32K**; shallower PV retains the incumbent. M5's tensor-tier policy is unchanged. Existing per-stage rollbacks and unsupported-PSO fallbacks remain; no GPU tensor buffers are added.
+- **Kill tests:** at 8K, native M4 off/QSA/IQ3/both endpoint time is **26.559 / 25.334 / 25.230 / 24.243 ms**; M5 **15.692 / 15.630 / 15.159 / 15.044 ms**. Each decode route helps independently. M5 sampled IQ3_S spans fall .823→.301 ms and QSA logits .316→.189 ms. Both shallow M4 PV proposals are rejected: scalar split .982x whole pp4096, early vector .950x. The final depth gate retains the shallow path. A final M5 Q6 R2 fallback test gives **15.020→15.268 ms**, 1.6% slower, with identical full-logit hashes; keep R1.
+
+  | Qualified whole work | Off tok/s | On tok/s | On / off | On / cpp | % measured ceiling, on |
+  | --- | ---: | ---: | ---: | ---: | ---: |
+  | M4 tg64 / 0 | 41.693 | 44.641 | 1.071x | 1.045x* | 48.85% |
+  | M4 tg64 / 8K | 37.728 | 43.503 | 1.153x | 1.052x | 48.08% |
+  | M4 pp4096 / 0 | 495.387 | 494.980 | .999x | .793x | 39.46% |
+  | M4 pp512 / 32K | 390.578 | 429.939 | 1.101x | .813x | 34.96% |
+  | M5 tg64 / 0 | 67.492 | 70.208 | 1.040x | 1.064x | 33.13% |
+  | M5 tg64 / 8K | 63.596 | 66.394 | 1.044x | 1.029x | 31.65% |
+  | M5 tg64 / 32K | 61.726 | 64.525 | 1.045x | 1.045x | 30.86% |
+
+  M4 append is **1.310879→1.190867 seconds**, with 512/512 rows packed and 192 calls each to the new deep QSA leaves. CLI timing builds are `82f75e91` on M5, `b94131db` for M4 tg0, and `ce3592bb` for the final M4 depth gate; every CLI arm reports matching build identity. The later SIMD-only gate does not change M5 routes or depth-zero decode. M5 prefill cells above are the main standing; these changes target decode and M4 SIMD execution. All timing campaigns hold build lock plus Metal lease, including the whole M4 campaign, with thermal zero around retained arms.
+- **Distribution qualification:** independent on/off code and prose runs, identical teacher-forced tokens/targets, finite full-vocabulary logits, F64 log-softmax, KL(off‖on). Each document/cell is checked against **|dNLL| ≤ .005 nats/token, mean KL ≤ .01**; the table shows the worse document in each condition. Decode has 1024 targets/document; append has two 512-row chunks. The final deep-only policy is rerun after rejecting shallow splitting. Greedy text is not the acceptance gate.
+
+  | Device / rows / depth | Max abs(dNLL) over documents | Max mean KL |
+  | --- | ---: | ---: |
+  | M4 scalar / 0 | .000480374 | .000191619 |
+  | M4 scalar / 8K | .000069679 | .000012262 |
+  | M4 512 / 32K | .000943690 | .000645927 |
+  | M5 scalar / 0 | .000480374 | .000191619 |
+  | M5 scalar / 8K | .000072650 | .000058427 |
+  | M5 scalar / 32K | .000309649 | .000024859 |
+
+- **Validation:** bitwise decode/query/PV/index tests include partial tiles, invalid/future IDs, metadata, padding and allocation guards on both GPUs; the selected-value boundary test covers 2051/32767/32768 and non-N32 fallback. Both full `cargo test --release -p qwen-llm --lib` runs pass **2437 tests, 738 ignored**. CPU contract command: `scripts/check-contracts.sh`.
+- Remaining headroom combines Q6_K/BF16 HC traffic and dequantization, 1701 serial GPU dispatches, sparse/recurrent work and matmul tile padding. The measured useful-work ceilings are not attainable by removing CPU encode alone. Bigger reductions now need broader matvec/fusion or scheduling work; stop this bounded campaign here.
+
 ## 2026-11-06 - V4.1 Wide Dense Tiles: Default On, Native pp4096 +5.3%
 
 - Frozen screen **`2fb67ed2`**, production **`ee79e087`**, M5 Ultra,

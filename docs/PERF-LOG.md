@@ -6,6 +6,49 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the current state and evidence index.
 
+## 2026-11-05 - Chunked GDN F32 Kill Test: Stop Before Integration
+
+- M5 Ultra, base `585d67d6`. Read the actual 27B, A3B and Flash-Next GGUF
+  headers: D=128, Hk=16; Hv=48/32/48 respectively. Tested a two-dispatch
+  F32 Metal 4 prototype: shared KK/QK Gram, 16x16 diagonal inverses plus
+  block triangular solve, then an in-kernel chunk scan with VT=32 and F32
+  state. Interleaved head mapping `h % Hk`, unscaled Q, post-update output.
+  C=64 uses 20.5/24 KiB static threadgroup memory; C=32 uses 6.25/20 KiB.
+- One-layer T=4096, production packed recurrence as incumbent, outer chunks
+  512/1024 plus the current A3B/Flash-Next 2048. Seeded normalized random
+  Q/K, sigmoid beta, Qwen-like decay, nonzero initial state. Full F64 serial
+  reference covers every output and final-state element. Worst candidate
+  max-absolute errors: **4.8844e-6 output / 2.2915e-6 state**; cosine
+  >=0.999999999995. This passes the operator's 1e-5 / 0.999999 bar;
+  it is synthetic operator evidence, not model-distribution qualification.
+- Whole-command GPU timestamps, one command per arm sample, 100 alternating
+  warmups, ABBA with ten retained repetitions per arm occurrence (20 per
+  setting). Every sample contributes to the medians; no outliers dropped.
+  Build lock plus Metal lease; every thermal boundary 0. Medians in ms:
+
+  | Hv | Outer chunk | C | Serial | Chunked | Speedup |
+  | ---: | ---: | ---: | ---: | ---: | ---: |
+  | 32 | 512 | 64 | 3.110458 | 1.978938 | 1.572x |
+  | 32 | 1024 | 64 | 3.017812 | 1.829208 | 1.650x |
+  | 32 | 2048 | 64 | 3.102563 | 1.796688 | 1.727x |
+  | 48 | 512 | 64 | 4.412667 | 2.498437 | 1.766x |
+  | 48 | 1024 | 64 | 5.175125 | 2.327375 | 2.224x |
+  | 48 | 2048 | 64 | 6.373813 | 2.289729 | 2.784x |
+  | 32 | 2048 | 32 | 3.118146 | 1.864792 | 1.672x |
+  | 48 | 2048 | 32 | 6.293125 | 2.088271 | 3.014x |
+
+- Limiter: the F32 output/state scan, not the causal inverse. Separate
+  Hv32/C64/outer1024 diagnostic commands measure 0.353479 ms precompute and
+  1.492750 ms scan (six retained samples each). The scan accounts for about
+  81% of their sum. Small-N tensor work and sequential chunk barriers are
+  candidates for further study; no hardware-counter attribution was taken.
+- **Stop:** neither head-count cohort reaches the design study's >=4x body
+  kill bar; A3B remains below 2x even at its current production outer chunk.
+  C=32 helps Flash-Next but does not fix A3B. Removed the research sources;
+  no production dispatch, default, rollback knob or M4 changes. No model
+  NLL/KL, end-to-end campaign or full library test run was undertaken after
+  the negative kill decision.
+
 ## 2026-11-05 - Flash-Next M5 Tensor Prefill: Distribution-Qualified, Default On
 
 - Restore the operator-qualified `6b35e59b` routes: existing narrow Metal 4

@@ -198,7 +198,7 @@ mod tests {
             } else {
                 128
             };
-            assert_eq!(census[0].grid_width, m / tile);
+            assert_eq!(census[0].grid_width, (m / tile) as u64);
             enc.end();
             cmd.commit();
             crate::metal::wait_completed(&cmd).unwrap();

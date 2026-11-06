@@ -162,7 +162,7 @@ mod tests {
                 dtype,
             )
             .unwrap()
-            .view_subrange((64 / element) as u64, shape)
+            .view_bytes(64, shape)
         };
         let read = |t: &MetalTensor| unsafe {
             std::slice::from_raw_parts(

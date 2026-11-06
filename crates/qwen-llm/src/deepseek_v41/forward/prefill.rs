@@ -470,6 +470,25 @@ crate::env_flag!(
 /// 2,048/4,096 rows, while 1K appends stay on the tile.
 pub(super) const DENSE_PREWEIGHT_MIN_ROWS: usize = 2_048;
 
+crate::env_flag!(
+    /// Use 64-row tensor tiles for measured M5 Ultra V4.1 Q5_K projections
+    /// and their resident F16 caches. Half operands and ascending K32 sums
+    /// are unchanged; `=0` restores the 32-row tiles. No cache threshold or
+    /// allocation changes. Experimental until whole-call qualification.
+    default_off dense_wide_enabled,
+    "QWEN_V41_DENSE_WIDE"
+);
+
+fn dense_wide_geometry(m5_ultra: bool, input: usize, output: usize, rows: usize) -> bool {
+    m5_ultra
+        && (512..=MAX_CHUNK_ROWS).contains(&rows)
+        && rows.is_multiple_of(64)
+        && matches!(
+            (input, output),
+            (1280, 32768) | (4096, 1024) | (8192, 5120) | (5120, 2304) | (2304, 5120)
+        )
+}
+
 /// Largest Q5_K dense linear the preweight scratch must hold. The per-group
 /// output_a is smaller than output_b, so the q_b/output_b/shared extents
 /// bound it.
@@ -539,6 +558,16 @@ crate::env_flag!(
 );
 
 impl Linear<'_> {
+    fn dense_wide_selected(&self, rows: usize) -> bool {
+        dense_wide_enabled()
+            && dense_wide_geometry(
+                self.ctx.device_facts().name == "Apple M5 Ultra",
+                self.input,
+                self.output,
+                rows,
+            )
+    }
+
     /// Eligibility uses logical operand lineage, not just the replay tile size.
     pub(super) fn tensor_rows_selected_with_arithmetic(
         &self,
@@ -630,6 +659,21 @@ impl Linear<'_> {
                     }
                 });
                 let x_half = x_half.transpose()?;
+                if self.tensor.dtype == GgmlType::Q5_K
+                    && let Some(x_half) = x_half.as_ref()
+                    && self.dense_wide_selected(rows)
+                {
+                    return metal::encode_mat_mat_tensor_f32_v41_wide(
+                        self.ctx,
+                        enc,
+                        &self.tensor,
+                        x_half,
+                        &y,
+                        self.input,
+                        self.output,
+                        rows,
+                    );
+                }
                 return metal::encode_mat_mat_tensor_f32(
                     self.ctx,
                     enc,
@@ -737,7 +781,12 @@ impl Linear<'_> {
                 return Ok(false);
             }
             let weight = cache.view_subrange(0, vec![self.input as u64, self.output as u64]);
-            metal::encode_mat_mat_tensor_f32(
+            let encode = if self.dense_wide_selected(rows) {
+                metal::encode_mat_mat_tensor_f32_v41_wide
+            } else {
+                metal::encode_mat_mat_tensor_f32
+            };
+            encode(
                 self.ctx,
                 enc,
                 &weight,

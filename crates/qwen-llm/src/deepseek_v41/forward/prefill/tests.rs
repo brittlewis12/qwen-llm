@@ -6,6 +6,28 @@ pub(super) mod lifetime;
 mod real;
 
 #[test]
+fn dense_wide_policy_is_bounded() {
+    for (input, output) in [
+        (1280, 32768),
+        (4096, 1024),
+        (8192, 5120),
+        (5120, 2304),
+        (2304, 5120),
+    ] {
+        for rows in [512, 1024, 2048, 4096] {
+            assert!(dense_wide_geometry(true, input, output, rows));
+            assert!(!dense_wide_geometry(false, input, output, rows));
+        }
+    }
+    for rows in [0, 1, 64, 256, 511, 513, 1025, 4097, 8192] {
+        assert!(!dense_wide_geometry(true, 8192, 5120, rows));
+    }
+    for shape in [(1280, 4096), (5120, 512), (8192, 5119)] {
+        assert!(!dense_wide_geometry(true, shape.0, shape.1, 512));
+    }
+}
+
+#[test]
 fn rowwise_linear_override_is_scoped_and_changes_dispatch() {
     let ctx = MetalContext::new().unwrap();
     let linear = Linear {

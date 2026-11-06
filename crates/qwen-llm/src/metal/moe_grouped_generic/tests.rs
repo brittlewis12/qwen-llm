@@ -1283,8 +1283,22 @@ fn run_tensor_dense_wide_case(dtype: GgmlType, n_out: usize, rows: usize, seed: 
         .expect("weight tensor");
     let x_t = f32_tensor(&ctx, &x);
     let x_v = x_t.view_bytes(0, vec![N_IN as u64, rows as u64]);
-    let narrow = MetalTensor::zeros_f32(&ctx, vec![n_out as u64, rows as u64]).unwrap();
-    let wide = MetalTensor::zeros_f32(&ctx, vec![n_out as u64, rows as u64]).unwrap();
+    let x_half = matches!(dtype, GgmlType::Q5_K | GgmlType::F16).then(|| {
+        let bytes: Vec<u8> = x
+            .iter()
+            .flat_map(|&v| half::f16::from_f32(v).to_le_bytes())
+            .collect();
+        MetalTensor::from_bytes(&ctx, &bytes, vec![N_IN as u64, rows as u64], GgmlType::F16)
+            .unwrap()
+    });
+    let sentinel = f32::from_bits(0x7fc1_2345);
+    let guarded = || {
+        let root = f32_tensor(&ctx, &vec![sentinel; rows * n_out + 128]);
+        let view = root.view_subrange(64, vec![n_out as u64, rows as u64]);
+        (root, view)
+    };
+    let (narrow_root, narrow) = guarded();
+    let (wide_root, wide) = guarded();
     one_shot(&ctx, |enc| {
         encode_mat_mat_tensor_f32_narrow(&ctx, enc, &w, &x_v, &narrow, N_IN, n_out, rows)
     })
@@ -1292,13 +1306,34 @@ fn run_tensor_dense_wide_case(dtype: GgmlType, n_out: usize, rows: usize, seed: 
     one_shot(&ctx, |enc| {
         if dtype == GgmlType::Q8_0 {
             encode_mat_mat_tensor_f32_wide(&ctx, enc, &w, &x_v, &wide, N_IN, n_out, rows)
+        } else if matches!(dtype, GgmlType::Q5_K | GgmlType::F16) {
+            encode_mat_mat_tensor_f32_v41_wide(
+                &ctx,
+                enc,
+                &w,
+                x_half.as_ref().unwrap(),
+                &wide,
+                N_IN,
+                n_out,
+                rows,
+            )
         } else {
             encode_mat_mat_tensor_f32_flash_next_wide(&ctx, enc, &w, &x_v, &wide, N_IN, n_out, rows)
         }
     })
     .expect("wide dense mat-mat");
-    let narrow = read_back_f32(&narrow.buffer, rows * n_out);
-    let wide = read_back_f32(&wide.buffer, rows * n_out);
+    for root in [&narrow_root, &wide_root] {
+        let values = read_back_f32(&root.buffer, rows * n_out + 128);
+        assert!(
+            values[..64]
+                .iter()
+                .chain(&values[64 + rows * n_out..])
+                .all(|v| v.to_bits() == sentinel.to_bits()),
+            "dense wide output guards changed"
+        );
+    }
+    let narrow = tensor_f32_at_offset(&narrow);
+    let wide = tensor_f32_at_offset(&wide);
     let label = format!("tensor-dense-wide-{n_out}x{rows}");
     assert_close(&label, &wide, &cpu);
     let bits = |values: &[f32]| values.iter().map(|v| v.to_bits()).collect::<Vec<_>>();
@@ -1313,6 +1348,14 @@ fn run_tensor_dense_wide_case(dtype: GgmlType, n_out: usize, rows: usize, seed: 
 fn tensor_dense_wide_q8_0_matches_narrow() {
     run_tensor_dense_wide_case(GgmlType::Q8_0, 320, 130, 0x9d);
     run_tensor_dense_wide_case(GgmlType::Q8_0, 321, 97, 0x9e);
+}
+
+#[test]
+fn tensor_dense_wide_v41_formats_match_narrow() {
+    for dtype in [GgmlType::Q5_K, GgmlType::F16] {
+        run_tensor_dense_wide_case(dtype, 320, 512, 0x9d);
+        run_tensor_dense_wide_case(dtype, 321, 519, 0x9e);
+    }
 }
 
 #[test]

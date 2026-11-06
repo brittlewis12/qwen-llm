@@ -329,6 +329,7 @@ enum DenseTile {
     Narrow,
     WideQ8,
     ExplicitQuantWide,
+    V41Wide,
 }
 
 /// Dense `y[row] = W x[row]` on the tensor tile with the `mat_mat`
@@ -421,6 +422,38 @@ pub fn encode_mat_mat_tensor_f32_flash_next_wide(
         n_out,
         n_query,
         DenseTile::ExplicitQuantWide,
+    )
+}
+
+/// Explicit V4.1 Q5_K/cached-F16 projections with preconverted half input.
+/// The caller owns device/geometry qualification; shared widening is unchanged.
+#[allow(clippy::too_many_arguments)]
+pub fn encode_mat_mat_tensor_f32_v41_wide(
+    ctx: &MetalContext,
+    enc: &KernelEncoder,
+    weight: &MetalTensor,
+    x: &MetalTensor,
+    y: &MetalTensor,
+    n_in: usize,
+    n_out: usize,
+    n_query: usize,
+) -> Result<(), MetalError> {
+    if !matches!(weight.dtype, GgmlType::Q5_K | GgmlType::F16) || x.dtype != GgmlType::F16 {
+        return Err(MetalError::BadShape {
+            kernel: "v41_dense_wide",
+            detail: "Q5_K/F16 weights and F16 activations required".into(),
+        });
+    }
+    encode_mat_mat_tensor_f32_impl(
+        ctx,
+        enc,
+        weight,
+        x,
+        y,
+        n_in,
+        n_out,
+        n_query,
+        DenseTile::V41Wide,
     )
 }
 
@@ -544,6 +577,11 @@ fn encode_mat_mat_tensor_f32_impl(
     let wide_name = match tile {
         DenseTile::Narrow => None,
         DenseTile::WideQ8 => mat_mat_tensor_wide_pipeline_name(weight.dtype, activation),
+        DenseTile::V41Wide => Some(format!(
+            "kernel_mat_mat_{}_{}_tensor_wide",
+            l.suffix,
+            activation.infix()
+        )),
         DenseTile::ExplicitQuantWide => matches!(
             weight.dtype,
             GgmlType::Q4_K | GgmlType::Q6_K | GgmlType::IQ4_XS | GgmlType::IQ4_NL

@@ -2661,6 +2661,13 @@
   },
   {
     "target": "lib",
+    "name": "deepseek_v41::forward::prefill::tests::dense_wide_policy_is_bounded",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Pure device-class, geometry and row-range selection checks; no Metal context or model import."
+  },
+  {
+    "target": "lib",
     "name": "deepseek_v41::forward::prefill::tests::early_layer_route_failure_survives_later_healthy_layer",
     "class": "gpu",
     "ignored": false,

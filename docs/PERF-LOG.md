@@ -6,6 +6,23 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the current state and evidence index.
 
+## 2026-11-06 — Flash-Next HC read fusion: M5 decode +2.9–3.5%, bitwise outputs
+
+- Main `11a92f50`, branch `perf/fn-roofline2`, unchanged GSQ-RCO IQ3_S on both machines. Default-on **`QWEN_FN_HC_READ_FUSED`** fuses BF16 HC down + SiLU and prepares the independent F32 injection before the block. The injection emulates the incumbent 1024 logical lanes with 128 physical threads, retaining each lane's loop and reduction order. Released branches4/H2560/rank320, aligned operands and supported PSOs only; other cases keep the incumbent. No tensor allocations/admission changes. Set **`QWEN_FN_HC_READ_FUSED=0`** to roll back; `QWEN_MAT_VEC_BF16_TG=0` and the old narrow-combine override remain effective.
+- Operator kill: all 97 real HC sites, forward/reverse policy order, 12 retained GPU samples/policy. M5 **3.0440 -> 2.5806 ms**; M4 **4.6446 -> 4.2056 ms**. Every low/gate/mixed/injection/residual buffer matches original bits. Reject duplicated RMS normalization inside the down kernel: **5.24–5.60 ms M5**, also slower on M4; retain the shared normalized input.
+- Whole native token kill at 8K: 64 excluded warm steps then 64 retained steps, full endpoint copies, separate-process ABBA. M5 mean off/on **15.03307 / 14.56230 ms** (**1.03233x**); GPU **13.64362 / 13.20427 ms**, CPU encode **.89073 / .86421 ms**. Dispatches **1701 -> 1604**. All four full-logit stream hashes match. M4 A/B is **23.86210 -> 23.18060 ms** (**1.02940x**), again identical logits and 1701 -> 1604 dispatches.
+- Ordinary release CLI tg64, two retained samples/arm, seed 1, normal model/row warmups, full endpoint copies, frozen `fdd30113`. All build identities match; build lock + canonical Metal lease and thermal pressure 0 around every arm. Comparator is the same-artifact llama.cpp v0.9.0 `cd959bae99ff` reference from the preceding roofline entry. Measured BW ceiling uses the unchanged header/state payloads and **1175.47 GB/s** streaming calibration.
+
+  | M5 depth | Off tok/s | Default tok/s | On / off | llama.cpp tok/s | On / cpp | % measured BW ceiling |
+  | --- | ---: | ---: | ---: | ---: | ---: | ---: |
+  | 0 | 70.0713 | 72.5276 | 1.0351x | 65.9775 | 1.0993x | 34.23% |
+  | 8192 | 66.2527 | 68.1791 | 1.0291x | 64.5182 | 1.0567x | 32.50% |
+  | 32768 | 64.6567 | 66.8037 | 1.0332x | 61.7644 | 1.0816x | 31.95% |
+
+- Distribution: independent on/off teacher-forced code and prose, **1024 targets/document at 0/8K/32K**, 6144 total targets. Identical token hashes and finite full-vocabulary logit streams in every pair establish **dNLL = 0, mean/max KL = 0**; census proves 96 early-injection and one down-only fusion per token. Passes unchanged |dNLL| <=.005 and mean KL <=.01. M4/M5 offset/guard/cancellation/unaligned-fallback test passes.
+- HC read fusion leaves packed-body arithmetic unchanged. Fresh clean pp4096 **2091.482 ms / 1958.42 tok/s** and pp512@32K **379.136 ms / 1350.44 tok/s**, two kept snapshot/reset samples, are essentially the preceding prefill standing. Diagnostic dispatch profiles (outside those samples; isolated spans are not an additive wall decomposition) put pp4096 generic F32 projections at **287.617 ms** (HC injection **181.642**, GDN alpha/beta **105.975**), Q6_K tensor projections **315.575**, selected value **246.074**, selected logits **187.878**. At pp512@32K: Q6_K **41.150**, IQ4_NL down **38.858**, selected value **35.301**, narrow F32 HC **34.608**. Zero missing pairs/overflow in both profiles.
+- Validation: full `cargo test --release -p qwen-llm --lib` passes **2441, 738 ignored** on M5 (`fdd30113`) and M4 (`2b9fd88d`); CPU-only `scripts/check-contracts.sh` passes on `2b9fd88d`, tree `7b48a02a31a5ff9badb9d9681a2691f2a6500a7c`. CPU encoding is now about 6% of token wall time; remaining decode headroom is chiefly Q6_K/BF16 work and GPU serial dependencies.
+
 ## 2026-11-06 - V4.1 Short Routed Tile: Operator Win, Whole-Append Kill
 
 - **Not shipped.** Frozen screen **`68838908`**, reverted **`60832588`**.

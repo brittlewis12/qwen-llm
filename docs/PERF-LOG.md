@@ -6,6 +6,64 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the current state and evidence index.
 
+## 2026-11-06 - M5 Standing: 512-Token Prefill Appends at 32K and 128K
+
+- Measured local main `1cce4f40` on M5 Ultra, ordinary release build in a
+  separate remote worktree. Pinned llama.cpp v0.9.0 `cd959bae99`,
+  MTL/BLAS, harness defaults with `-ub 2048` (`-b 2048`), F16 KV.
+  Two retained reps per engine/cell, default model/row warmups enabled;
+  only the 512-token append is timed, after an untimed prefix fill.
+  Added fresh depth-0 pp512 controls to distinguish batch size from depth.
+- Registry artifacts: **27B Q4_K_M**, **A3B UD-Q4_K_M**,
+  **GLM-5.3 UD-IQ3_XXS**, **Flash-Next GSQ-RCO IQ3_S** (the M5 artifact,
+  replacing the registry's UD-Q3_K_XL path). Every retained sample follows;
+  ratios divide the arithmetic means of the two throughput samples.
+
+| Family | Depth | qwen-llm tok/s (both samples) | llama.cpp tok/s (both samples) | Ratio |
+| --- | ---: | ---: | ---: | ---: |
+| 27B | 0 | 982.053, 982.495 | 1157.860, 1156.610 | 0.849x |
+| 27B | 32768 | 737.897, 738.607 | 822.698, 835.197 | 0.891x |
+| A3B | 0 | 3754.403, 3761.628 | 4873.460, 4930.860 | 0.767x |
+| A3B | 32768 | 2094.176, 2098.794 | 2689.700, 2757.220 | 0.770x |
+| A3B | 131072 | 791.063, 768.400 | 1136.330, 1164.710 | 0.678x |
+| GLM-5.3 | 0 | 483.815, 482.517 | 804.442, 808.094 | 0.599x |
+| GLM-5.3 | 32768 | 415.409, 411.769 | 545.508, 529.885 | 0.769x |
+| Flash-Next | 0 | 1081.276, 1081.599 | 1611.810, 1613.540 | 0.671x |
+| Flash-Next | 32768 | 821.624, 822.530 | 1327.060, 1346.060 | 0.615x |
+| Flash-Next | 131072 | 720.432, 719.863 | 1235.590, 1217.190 | 0.587x |
+
+- **pp4096 parity does not carry over to pp512 appends.** Much of the
+  small-batch gap already exists at depth 0: GLM **0.599x**, Flash-Next
+  **0.671x**. GLM's relative standing improves to **0.769x** at 32K;
+  these measurements do not isolate a particular kernel.
+  At fixed pp512, A3B falls **2096 -> 780 tok/s** from 32K to 128K
+  (**-62.8%**, ratio **0.770x -> 0.678x**); llama.cpp falls
+  **2723 -> 1151 tok/s** (**-57.8%**). Flash-Next falls
+  **822 -> 720 tok/s** (**-12.4%**, ratio **0.615x -> 0.587x**).
+- All four checkpoints permit 128K + 512 tokens (27B/A3B/Flash-Next
+  context 262144; GLM 1048576). Skipped 128K for 27B and GLM: their
+  32K qwen command walls were **93.3 / 127.1 s**, already projecting
+  beyond the five-minute arm cap at linear scaling. The retained 128K
+  qwen arms took **247.4 s** (A3B) and **292.5 s** (Flash-Next), including
+  warmups and repeated prefix fills. No timed samples were dropped.
+- GLM llama.cpp uses the existing `glm-stock-iq3-download/glm5-next/`
+  alias used by the saved family baseline. Its metadata-only first shard
+  renames `glm5next` keys to `glm5-next` and adds
+  `attention.indexer.index_share_mtp=true`; all actual tensor shards
+  are the same files as qwen's `UD-IQ3_XXS/` artifact. The initial
+  original-spelling llama load failed before timing; retried with this
+  established alias, without changing weights.
+- Build and all three campaigns held `~/.cache/qwen-llm/locks/build.lock`
+  under `nice -n 10`; campaigns used `scripts/bench/with-metal-lease`,
+  `QWEN_METAL_LEASE_WAIT=1`, and inherited the lease FD. One engine
+  resident at a time. All **21 launch** and **20 completed-arm exit**
+  thermal-pressure readings were **0**. Qwen seed 1, stock defaults;
+  clean matching build/runtime source stamps in all ten rows.
+  Binary SHA256
+  `f8593a969613c829aa0f3b8d4256600cbf6846bdd1c04bd621c203dd625a5fe6`.
+  About **22 minutes** of M5 build/campaign time; docs-only branch,
+  unmerged, temporary drivers/raw logs removed, nothing left running.
+
 ## 2026-11-06 - Flash-Next M5 Prefill +9.5%: Device BF16 HC and Wide Routed Gate/Up
 
 - Fresh combined main `ff15d60d`, M5 Ultra, GSQ-RCO IQ3_S, pp4096:

@@ -78,7 +78,7 @@ pub(super) struct Pipelines {
     value: Pipeline,
     split_value: Option<Pipeline>,
     vector_value: Option<Pipeline>,
-    vector_from: usize,
+    split_from: usize,
     device: u64,
 }
 
@@ -133,10 +133,10 @@ impl Pipelines {
             } else {
                 None
             },
-            // The scalar split does not pay on the M4 at the dense frontier.
-            // Its bitwise-equivalent vector leaf covers all selected bands there.
+            // Neither split variant pays at the M4 dense frontier. Extend only
+            // deep selected bands; the tensor-tier policy remains unchanged.
             vector_value,
-            vector_from: if tensor { 32768 } else { 2051 },
+            split_from: if tensor { 0 } else { 32768 },
             device: ctx.device.registryID(),
         }))
     }
@@ -160,8 +160,8 @@ impl Pipelines {
         Ok(())
     }
 
-    pub(super) fn uses_split(&self, n: usize) -> bool {
-        n == DENSE_PACKED_QUERY_TILE && self.split_value.is_some()
+    pub(super) fn uses_split(&self, n: usize, start: usize) -> bool {
+        n == DENSE_PACKED_QUERY_TILE && start >= self.split_from && self.split_value.is_some()
     }
 
     /// The direct leaf accepts N1..32 for product-metallib qualification. Only
@@ -323,16 +323,14 @@ impl Pipelines {
         enc.set_tensor(4, denominators);
         enc.set_threadgroup_memory(0, STATS_TGM);
         enc.dispatch(size(3, 2, n), size(256, 1, 1));
-        let split = self.uses_split(n);
-        enc.set_pipeline(
-            if split && start >= self.vector_from && self.vector_value.is_some() {
-                self.vector_value.as_ref().unwrap()
-            } else if split {
-                self.split_value.as_ref().unwrap()
-            } else {
-                &self.value
-            },
-        );
+        let split = self.uses_split(n, start);
+        enc.set_pipeline(if split && start >= 32768 && self.vector_value.is_some() {
+            self.vector_value.as_ref().unwrap()
+        } else if split {
+            self.split_value.as_ref().unwrap()
+        } else {
+            &self.value
+        });
         enc.set_bytes(0, &args);
         enc.set_tensor(1, gate);
         enc.set_tensor(2, cache);

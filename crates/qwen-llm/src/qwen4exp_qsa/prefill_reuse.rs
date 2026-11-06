@@ -5,7 +5,7 @@ use crate::metal::Pipeline;
 mod tests;
 
 crate::env_flag!(
-    /// Allow ordinary Metal SIMD selected-QSA prefill paths on Apple-family-7+ devices without the tensor tier. Default on; qualified M4 Max as well as existing M5 paths. Optional PSO width/thread/memory checks still gate each route; no tensor instructions or new buffers. Set 0 to restore the prior tensor-tier eligibility. Existing per-stage rollback flags remain effective.
+    /// Allow ordinary Metal SIMD selected-QSA prefill paths on Apple-family-7+ devices without the tensor tier. Non-tensor value splitting starts at depth 32768; shallower value accumulation retains the incumbent. Default on; qualified M4 Max as well as existing M5 paths. Optional PSO width/thread/memory checks still gate each route; no tensor instructions or new buffers. Set 0 to restore the prior tensor-tier eligibility. Existing per-stage rollback flags remain effective.
     default_on simd_prefill_enabled,
     "QWEN_FN_SIMD_PREFILL_QSA"
 );
@@ -28,7 +28,7 @@ crate::env_flag!(
 );
 
 crate::env_flag!(
-    /// Flash-Next selected QSA value at N32: depth >=32768 on the tensor tier and >=2051 on qualified SIMD devices. Explicit F32 vector accumulators with the existing eight-way split and slot/reduction order. Original F32 masses and F16 values; no added GPU buffers. Set 0 for the existing split8 kernel on the tensor tier, or chronological GQA12 on SIMD devices.
+    /// Flash-Next selected QSA value at N32: depth >=32768 on the tensor tier or qualified SIMD devices. Explicit F32 vector accumulators with the existing eight-way split and slot/reduction order. Original F32 masses and F16 values; no added GPU buffers. Set 0 for the existing split8 kernel on the tensor tier, or chronological GQA12 on SIMD devices.
     default_on value_vector_enabled,
     "QWEN_FN_QSA_VALUE_VECTOR"
 );

@@ -1656,7 +1656,7 @@ fn selected_attention_packet_matches_repeated_scalar_kernels() {
                 .value_pipelines
                 .as_ref()
                 .unwrap()
-                .uses_split(query_count);
+                .uses_split(query_count, g.output_width());
         let (value_kernel, value_grid) = if product_value {
             (
                 if split_value {

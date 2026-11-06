@@ -1058,7 +1058,7 @@ fn qualify_fixture_with_product(
         f.run(ctx, true);
     }
     let census = crate::metal::dispatch_census_take();
-    let split = product.is_some_and(|p| p.uses_split(n));
+    let split = product.is_some_and(|p| p.uses_split(n, start));
     let kernels = if product.is_some() {
         [
             selected_value::SOFTMAX,
@@ -1173,10 +1173,10 @@ fn selected_value_split_product_matches_f64() {
     let pipelines = selected_value::Pipelines::prepare_with_split(&ctx, true)
         .unwrap()
         .expect("M5 split-value pipeline");
-    assert!(pipelines.uses_split(32));
+    assert!(pipelines.uses_split(32, 2051));
     for start in [2051, 8192] {
         for n in [1, 7, 31, 32] {
-            assert_eq!(pipelines.uses_split(n), n == 32);
+            assert_eq!(pipelines.uses_split(n, start), n == 32);
             qualify_fixture_with_product(
                 &ctx,
                 Fixture::new_variant(&ctx, start, n, 1, Case::Ordinary, ValueVariant::Gqa12),

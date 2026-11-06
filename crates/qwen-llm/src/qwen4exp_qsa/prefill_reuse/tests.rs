@@ -253,5 +253,18 @@ fn reused_attention_matches_incumbent_bits_and_guards_at_depth() {
     if !simd_available(&ctx) {
         return;
     }
+    let tensor = ctx.tensor_ops_status().is_available();
+    let pipelines = super::super::selected_value::Pipelines::prepare(&ctx)
+        .unwrap()
+        .unwrap();
+    let split_on = crate::env_flag::read_default_on("QWEN_FN_QSA_PREFILL_SPLIT_VALUE");
+    let vector_on = crate::env_flag::read_default_on("QWEN_FN_QSA_VALUE_VECTOR");
+    for start in [2051, 32767, 32768] {
+        assert_eq!(
+            pipelines.uses_split(32, start),
+            split_on && (tensor || (vector_on && start >= 32768))
+        );
+        assert!(!pipelines.uses_split(31, start));
+    }
     attention(&ctx);
 }

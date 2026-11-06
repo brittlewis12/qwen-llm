@@ -7,6 +7,11 @@ crate::env_flag!(
 );
 
 const DOWN: &str = "kernel_qwen4exp_hc_down_silu_bf16";
+fn incumbent_tg_enabled() -> bool {
+    static TG: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *TG.get_or_init(|| std::env::var("QWEN_MAT_VEC_BF16_TG").as_deref() != Ok("0"))
+}
+
 const INJECT: &str = "kernel_qwen4exp_hc_down_silu_inject_bf16";
 
 // All tensor/device/disjointness checks precede this private encoder in the
@@ -19,6 +24,7 @@ pub(super) fn try_encode(
     scratch: &GatedResidualMetalScratch,
 ) -> Result<Option<bool>, MetalError> {
     if !enabled()
+        || !incumbent_tg_enabled()
         || (scratch.branch_count, scratch.hidden_size, scratch.low_rank) != (4, 2560, 320)
         || down.dtype != GgmlType::BF16
         || !down.offset.is_multiple_of(16)

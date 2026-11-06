@@ -40,6 +40,9 @@ pub(super) fn try_encode(
         Err(e) => return Err(e.into()),
     };
     let convert = ctx.pipeline("kernel_qwen4exp_hc_convert_bf16")?;
+    if convert.threadExecutionWidth() != 32 || convert.maxTotalThreadsPerThreadgroup() < 256 {
+        return Ok(false);
+    }
     use crate::metal::checks::{
         bad_shape, check_disjoint, check_physical, check_tensor, require_serial,
     };
@@ -130,4 +133,156 @@ pub(super) fn try_encode(
         },
     );
     Ok(true)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use objc2_metal::MTLCommandQueue;
+
+    #[test]
+    fn hc_device_bf16_matches_f64_and_preserves_offset_guards() {
+        let Some(ctx) = crate::test_fixtures::metal_context_or_skip() else {
+            return;
+        };
+        if !enabled()
+            || !ctx.tensor_ops_status().is_available()
+            || !crate::metal_forward::matmat_bf16_bfloat_act_enabled()
+        {
+            return;
+        }
+        let guarded = |bytes: &[u8], dtype: GgmlType, shape: Vec<u64>| {
+            let element = if dtype == GgmlType::BF16 { 2 } else { 4 };
+            let mut storage = vec![0xa5; bytes.len() + 128];
+            storage[64..64 + bytes.len()].copy_from_slice(bytes);
+            MetalTensor::from_bytes(
+                &ctx,
+                &storage,
+                vec![(storage.len() / element) as u64],
+                dtype,
+            )
+            .unwrap()
+            .view_subrange((64 / element) as u64, shape)
+        };
+        let read = |t: &MetalTensor| unsafe {
+            std::slice::from_raw_parts(
+                t.buffer
+                    .contents()
+                    .as_ptr()
+                    .cast::<u8>()
+                    .add(t.offset as usize)
+                    .cast::<f32>(),
+                t.n_elements() as usize,
+            )
+            .to_vec()
+        };
+        for (k, n) in [(10240usize, 320usize), (320, 10240)] {
+            const M: usize = 2048;
+            let mut state = 0x12345678abcdefffu64;
+            let mut next = || {
+                state ^= state << 13;
+                state ^= state >> 7;
+                state ^= state << 17;
+                (state % 20001) as f32 / 10000.0 - 1.0
+            };
+            let w: Vec<half::bf16> = (0..k * n)
+                .map(|_| half::bf16::from_f32(next() * 0.02))
+                .collect();
+            let x: Vec<f32> = (0..k * M).map(|_| next() * 4.0).collect();
+            let wt = guarded(
+                bytemuck::cast_slice(&w),
+                GgmlType::BF16,
+                vec![k as u64, n as u64],
+            );
+            let xt = guarded(
+                bytemuck::cast_slice(&x),
+                GgmlType::F32,
+                vec![k as u64, M as u64],
+            );
+            let poison = vec![f32::NAN; n * M];
+            let yt = guarded(
+                bytemuck::cast_slice(&poison),
+                GgmlType::F32,
+                vec![n as u64, M as u64],
+            );
+            let old = guarded(
+                bytemuck::cast_slice(&poison),
+                GgmlType::F32,
+                vec![n as u64, M as u64],
+            );
+            let dead = guarded(
+                bytemuck::cast_slice(&vec![f32::NAN; k * M / 2]),
+                GgmlType::F32,
+                vec![(k * M / 2) as u64],
+            );
+            let cmd = ctx.queue.commandBuffer().unwrap();
+            let enc = KernelEncoder::begin(&cmd);
+            crate::metal::encode_mat_mat_bf16_bfloat_act_f32(&ctx, &enc, &wt, &xt, &old, k, n, M)
+                .unwrap();
+            crate::metal::dispatch_census_begin();
+            assert!(try_encode(&ctx, &enc, &wt, &xt, &yt, &dead, k, n, M).unwrap());
+            let census = crate::metal::dispatch_census_take();
+            assert_eq!(
+                census.iter().map(|r| r.kernel.as_str()).collect::<Vec<_>>(),
+                [
+                    "kernel_qwen4exp_hc_convert_bf16",
+                    "kernel_qwen4exp_hc_bf16_device"
+                ]
+            );
+            enc.end();
+            cmd.commit();
+            crate::metal::wait_completed(&cmd).unwrap();
+            let a = read(&old);
+            let b = read(&yt);
+            assert!(a.iter().chain(&b).all(|v| v.is_finite()));
+            let mut errors = [0.0f64; 2];
+            let mut maximum = 0.0f64;
+            for i in 0..128 {
+                let row = i * (M - 1) / 127;
+                let column = i * 7919 % n;
+                let mut original = 0.0f64;
+                let mut rounded = 0.0f64;
+                for j in 0..k {
+                    let v = f64::from(w[column * k + j].to_f32());
+                    original += v * f64::from(x[row * k + j]);
+                    rounded += v * f64::from(half::bf16::from_f32(x[row * k + j]).to_f32());
+                }
+                let actual = f64::from(b[row * n + column]);
+                maximum = maximum.max((actual - rounded).abs());
+                assert!(
+                    (actual - rounded).abs() <= 3e-5 + 3e-5 * rounded.abs(),
+                    "HC K{k} N{n}: {actual} vs {rounded}"
+                );
+                errors[0] += (f64::from(a[row * n + column]) - original).powi(2);
+                errors[1] += (actual - original).powi(2);
+            }
+            assert!(errors[1] <= 2.25 * errors[0] + 1e-12);
+            for t in [&wt, &xt, &yt, &old, &dead] {
+                let bytes = unsafe {
+                    std::slice::from_raw_parts(
+                        t.buffer.contents().as_ptr().cast::<u8>(),
+                        t.buffer.length(),
+                    )
+                };
+                assert!(
+                    bytes[..64]
+                        .iter()
+                        .chain(&bytes[64 + t.n_bytes() as usize..64 + t.n_bytes() as usize + 64])
+                        .all(|b| *b == 0xa5)
+                );
+            }
+            let cmd = ctx.queue.commandBuffer().unwrap();
+            let enc = KernelEncoder::begin(&cmd);
+            crate::metal::dispatch_census_begin();
+            for bad in [&xt, &yt] {
+                assert!(try_encode(&ctx, &enc, &wt, &xt, &yt, bad, k, n, M).is_err());
+            }
+            assert!(crate::metal::dispatch_census_take().is_empty());
+            enc.end();
+            eprintln!(
+                "HC device K{k} N{n}: BF16-operand F64 max_abs={maximum:.9e}, original-input RMS error ratio={:.9}",
+                (errors[1] / errors[0]).sqrt()
+            );
+        }
+    }
 }

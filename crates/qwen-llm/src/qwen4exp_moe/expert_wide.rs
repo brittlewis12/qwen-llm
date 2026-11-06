@@ -39,8 +39,9 @@ pub(super) fn try_encode(
             Ok(p)
                 if p.threadExecutionWidth() == 32
                     && p.maxTotalThreadsPerThreadgroup() >= 128
-                    && p.staticThreadgroupMemoryLength() + 16384
-                        <= ctx.device.maxThreadgroupMemoryLength() => {}
+                    && p.staticThreadgroupMemoryLength()
+                        .checked_add(16384)
+                        .is_some_and(|size| size <= ctx.device.maxThreadgroupMemoryLength()) => {}
             Ok(_) | Err(MetalError::NoFunction(_) | MetalError::Pipeline(_, _)) => {
                 return Ok(false);
             }

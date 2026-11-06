@@ -1092,6 +1092,41 @@ fn run_tensor_gate_up_case(dtype: GgmlType) {
         .expect("tensor grouped gate/up");
         let gpu = read_back_f32(&out_tensor.buffer, n_slots * GU_N_FFN);
         let generic = read_back_f32(&out_generic.buffer, n_slots * GU_N_FFN);
+        if clamp.is_none()
+            && matches!(
+                dtype,
+                GgmlType::IQ2_S | GgmlType::IQ3_S | GgmlType::IQ3_XXS | GgmlType::IQ4_XS
+            )
+        {
+            let half = f16_tensor(&ctx, &x);
+            let wide = MetalTensor::zeros_f32(&ctx, vec![(n_slots * GU_N_FFN) as u64]).unwrap();
+            one_shot(&ctx, |enc| {
+                encode_moe_swiglu_wide_unclamped(
+                    &ctx,
+                    enc,
+                    &g,
+                    &u,
+                    &half,
+                    &counts_t,
+                    &ids_t,
+                    &wide,
+                    GU_N_HIDDEN,
+                    GU_N_FFN,
+                    r.n_expert,
+                    r.topk,
+                    r.n_tokens,
+                )
+            })
+            .unwrap();
+            assert_eq!(
+                read_back_f32(&wide.buffer, n_slots * GU_N_FFN)
+                    .iter()
+                    .map(|v| v.to_bits())
+                    .collect::<Vec<_>>(),
+                gpu.iter().map(|v| v.to_bits()).collect::<Vec<_>>(),
+                "{dtype:?}: unclamped wide/half vs narrow/F32"
+            );
+        }
         let label = format!("tensor-gate-up-{dtype:?}-clamp{clamp:?}");
         assert_close(&label, &gpu, &cpu);
         assert_tile_agreement(&label, &gpu, &generic);

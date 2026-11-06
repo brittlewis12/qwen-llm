@@ -6,6 +6,113 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the current state and evidence index.
 
+## 2026-11-05 - Flash-Next M5 Prefill +15%: Parallel F32 QSA Values and Stable Bucketing
+
+- Standing on main `eca78d7b`, M5 Ultra, GSQ-RCO IQ3_S, pp4096:
+  two retained production-prefill-plus-endpoint-logit wall samples
+  **2811.489458 / 2817.032457 ms**, median **2814.260958 ms**,
+  **1455.4 tok/s**. llama.cpp v0.9.0's saved
+  [same-artifact reference](bench/2026-11-04-2050-families-family/m5/lcpp-flash-next.json)
+  is **2077.1 tok/s**: main is **0.701x**. Seed 1, native 2048-row chunks;
+  the family suite's chunk field remains null. Build lock + Metal lease,
+  thermal pressure 0 before/after. No old morning defaults were disabled.
+- Fresh pp4096 attribution, frozen roadmap token fixture, two native chunks:
+  **13,090 dispatches**, zero overflow/missing timestamp pairs, **2899.746 ms**
+  summed per-chunk timeline. End-to-end increments per dispatch, including
+  transition gaps; profiling serializes dispatches and encoder starts can
+  overlap previous ends. These are diagnostic shares, not an ordinary wall
+  decomposition.
+
+  | Stage / kernel cohort | Profile ms | Share |
+  | --- | ---: | ---: |
+  | Selected QSA value | 474.735 | 16.4% |
+  | Dense tensor projections | 407.900 | 14.1% |
+  | Routed gate/up tensor passes | 339.767 | 11.7% |
+  | BF16 projections, mostly HC | 212.842 | 7.3% |
+  | Routed down tensor passes | 210.665 | 7.3% |
+  | Selected QSA logits | 186.627 | 6.4% |
+  | Dense QSA value | 145.749 | 5.0% |
+  | Serial expert bucketing | 124.198 | 4.3% |
+  | Strict F32 router | 105.157 | 3.6% |
+  | Grouped RMSNorm, shared with HC | 68.623 | 2.4% |
+  | Chunked GDN precompute + scan | 69.193 | 2.4% |
+  | GDN prep | 56.799 | 2.0% |
+  | Routing top-k + shared gate | 21.061 | 0.7% |
+
+  PLE gate + convolution epilogue are only 5.980 ms; the
+  `ple_grouped_rms_norm` name above also covers HC normalization. Most GEMM
+  time is already on the tensor tier.
+- **Default on:** selected QSA PV now uses eight disjoint key subsequences
+  per D32 tile, then an F32 reduction. Preserve softmax/masses, F16 cache,
+  invalid-ID handling, denominator and gate expressions. No new narrowing.
+  Full N32 selected bands only, released 24/2/256 geometry, available
+  Apple10/Metal 4 tier with supported PSO. Other devices, short bands and
+  unsupported pipelines retain the incumbent. **12 KiB static threadgroup
+  memory, zero additional GPU buffers/admission bytes.**
+  Rollback: **`QWEN_FN_QSA_PREFILL_SPLIT_VALUE=0`**.
+- **Default on:** route the 2048-row H2560/E512/top-10 packed motor to the
+  existing parallel stable expert-bucketing kernel on that tier. Counts,
+  ascending route-slot order and overflow status semantics are unchanged.
+  No additional GPU allocation. Other shapes/devices retain serial bucketing.
+  Rollback: **`QWEN_FN_PREFILL_PARALLEL_BUCKET=0`**.
+- Whole-prefill kill screens, two retained samples per arm, thermal boundaries
+  all 0: QSA alone **2810.567 -> 2563.431 ms (1.096408x)**; adding parallel
+  bucketing **2565.698 -> 2450.578 ms (1.046977x)**. QSA's product-metallib
+  F64 regression covers 18 cases at starts 2051/8192, N1/7/31/32, invalid
+  IDs/metadata, empty IDs, all-masked rows, cancellation and offset guards.
+  Twelve full-band split cases have worst max-absolute error **1.004174e-7**;
+  six short-band fallbacks retain exact scalar output bits. Softmax masses
+  remain unchanged. Extend the existing serial/parallel bitwise bucket test
+  to the actual 512/2048/top-10 geometry; bounded overflow tests remain.
+- Teacher forcing, frozen Bash manual and real `qwen4exp_runtime.rs` source,
+  4096 next-token targets per document in two 2048-row commands, native
+  all-row gated-residual readout. Full-vocabulary F64 log-sum-exp, NLL and
+  KL(off||on); identical input/target IDs in both arms, all rows finite.
+  Only the two new flags differ; other tensor/GDN defaults stay enabled.
+  First-chunk mean KL and dNLL are exactly zero in both documents.
+
+  | Document | Targets | NLL off | NLL on | dNLL | Mean KL | Argmax agreement |
+  | --- | ---: | ---: | ---: | ---: | ---: | ---: |
+  | Prose | 4096 | 0.088721301 | 0.087889625 | -0.000831677 | 0.000324898 | 4089/4096 |
+  | Code | 4096 | 0.857470942 | 0.858847622 | +0.001376680 | 0.000930269 | 4078/4096 |
+  | Pooled | 8192 | 0.473096122 | 0.473368624 | +0.000272502 | 0.000627584 | 8167/8192 |
+
+  **Pass**, per document and pooled: |dNLL| <=0.005 nats/token and mean
+  KL <=0.01. Pooled p99/max row KL **0.012810309 / 0.178749312**.
+  Token-ID SHA256s match the earlier tensor qualification:
+  prose `38ebe32deb00a5fbf624f08ffb9dc3f2e727fde77115865b039677bae3a46ef1`,
+  code `4b3520dc64ffe574f6138bd2d15fe83c666dfcf4491e30c1402ca0b24289a84a`.
+  This is bounded two-document evidence, not a model-wide accuracy claim.
+- **Rejected HC screen:** a dedicated BF16-operand 32x64x32 tensor tile
+  preserved incumbent weight/activation precision but regressed whole pp4096
+  with the other two changes enabled: off **2445.509625 / 2448.517084 ms**,
+  on **2770.689750 / 2772.613125 ms**, median **2447.013355 -> 2771.651438 ms**
+  (**13.3% slower**). All four thermal boundaries 0. Removed the kernel,
+  route, flag and temporary harnesses; no HC change is shipped.
+
+- Final short end-to-end confirmation, one normal release binary from frozen
+  production commit `f50a3a74`, seed 1, production prefill plus endpoint logits,
+  both new flags 0 versus unset/default on. ABBA, two retained samples per arm
+  occurrence, four per setting; 30 s cooldown before each arm, build lock +
+  Metal lease. All eight thermal boundary readings 0; no samples dropped.
+  Every retained wall sample, milliseconds:
+
+  | Setting | Samples (ms) | Median (ms) | tok/s |
+  | --- | --- | ---: | ---: |
+  | Both off | 2815.377875, 2814.290292, 2811.676541, 2814.443542 | 2814.366917 | 1455.4 |
+  | Default on | 2454.114542, 2448.966209, 2446.441250, 2443.974083 | 2447.703730 | 1673.4 |
+
+  **1.149799x whole-prefill throughput (+14.98%)**; versus llama.cpp
+  **0.701x -> 0.806x**. Binary SHA256
+  `7bbfc65d41f49092b4e1bdb8d4d133d272001596bff65d759c88ac8338a88035`;
+  clean build/runtime source stamps match in every arm. Native chunk size
+  remains 2048.
+- Full `cargo test --release -p qwen-llm --lib`: **2411 passed, 0 failed,
+  736 ignored**. `scripts/check-contracts.sh` passed on production commit
+  `f50a3a74` (tree `82a4af8561a61b23f55599ed2e11e1bcb4e48c06`).
+  Final follow-up adds this log entry only; production sources are unchanged.
+  Branch remains unmerged; temporary harnesses removed and no work left running.
+
 ## 2026-11-05 - Chunked GDN Prefill: Distribution-Qualified, Default On
 
 - Enable F32 chunked GDN prompt recurrence on the available Metal 4 tensor

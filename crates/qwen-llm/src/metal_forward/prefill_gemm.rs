@@ -1667,6 +1667,11 @@ mod tests {
                             );
                             e.end();
                             assert!(dispatch_census_take().is_empty());
+                            // Metal retains an unsubmitted command buffer until
+                            // the autorelease pool drains. Retire these empty
+                            // rejection cases before they fill the queue.
+                            rejected.commit();
+                            wait_completed(&rejected).unwrap();
                         }
                         dispatch_census_begin();
                         let rejected = ctx.queue.commandBuffer().unwrap();
@@ -1688,6 +1693,8 @@ mod tests {
                         );
                         concurrent.end();
                         assert!(dispatch_census_take().is_empty());
+                        rejected.commit();
+                        wait_completed(&rejected).unwrap();
                     } else {
                         assert!(
                             words[Guarded::GUARD..Guarded::GUARD + spare.len]

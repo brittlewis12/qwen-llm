@@ -279,7 +279,11 @@ fn native_compact(dtype: GgmlType, k: usize) -> Vec<u8> {
     let mut compact = vec![0u8; WR * k / elements as usize * bytes as usize];
     let mut rng = 0xdead_beefu32;
     for (i, block) in compact.chunks_exact_mut(bytes as usize).enumerate() {
-        let header = if dtype == GgmlType::IQ3_S { 2 } else { 4 };
+        let header = if matches!(dtype, GgmlType::IQ2_S | GgmlType::IQ3_S | GgmlType::IQ4_XS) {
+            2
+        } else {
+            4
+        };
         for byte in &mut block[header..] {
             rng = rng.wrapping_mul(1664525).wrapping_add(1013904223);
             *byte = (rng >> 24) as u8;

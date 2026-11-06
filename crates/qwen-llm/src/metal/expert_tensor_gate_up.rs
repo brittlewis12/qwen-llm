@@ -140,6 +140,20 @@ impl Prepared<'_> {
         )?;
         if let Some(down) = tensor_down {
             down.encode()?;
+        } else if b.down_bank.dtype == GgmlType::IQ4_XS {
+            encode_moe_down_iq4_xs_f32_grouped_slots(
+                ctx,
+                enc,
+                b.down_bank,
+                &flat(b.inner),
+                b.counts,
+                b.slots,
+                &flat(b.slot_out),
+                f,
+                h,
+                e,
+                rows,
+            )?;
         } else {
             encode_moe_down_f32_grouped_slots_generic(
                 ctx,
@@ -186,11 +200,16 @@ pub(crate) fn prepare<'a>(
     if !moe_grouped_tensor_selected(ctx) {
         return Ok(None);
     }
-    if !matches!(b.gate_bank.dtype, GgmlType::Q4_K | GgmlType::Q5_K)
-        || b.gate_bank.dtype != b.up_bank.dtype
+    if !matches!(
+        b.gate_bank.dtype,
+        GgmlType::Q4_K | GgmlType::Q5_K | GgmlType::IQ2_S | GgmlType::IQ3_S
+    ) || b.gate_bank.dtype != b.up_bank.dtype
         || !matches!(
             (b.down_bank.dtype, policy),
             (GgmlType::Q5_K, GroupedDownPolicy::Q5KTensor)
+                | (GgmlType::IQ3_S, GroupedDownPolicy::Iq3STensor)
+                | (GgmlType::IQ3_S, GroupedDownPolicy::Incumbent)
+                | (GgmlType::IQ4_XS, GroupedDownPolicy::Incumbent)
                 | (GgmlType::Q6_K, GroupedDownPolicy::Incumbent)
         )
         || rows > 2048
@@ -279,7 +298,10 @@ pub(crate) fn prepare<'a>(
         TensorActivation::F16,
     )
     .unwrap();
-    let down_tensor = policy == GroupedDownPolicy::Q5KTensor;
+    let down_tensor = matches!(
+        policy,
+        GroupedDownPolicy::Q5KTensor | GroupedDownPolicy::Iq3STensor
+    );
     let down = if down_tensor {
         moe_grouped_tensor_pipeline_name(
             MoeGroupedTensorRole::Down,
@@ -287,6 +309,8 @@ pub(crate) fn prepare<'a>(
             TensorActivation::F32,
         )
         .unwrap()
+    } else if b.down_bank.dtype == GgmlType::IQ4_XS {
+        "kernel_moe_down_iq4_xs_f32_grouped_slots".into()
     } else {
         moe_grouped_generic_pipeline_name(MoeGroupedGenericRole::Down, b.down_bank.dtype).unwrap()
     };

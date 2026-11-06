@@ -17,11 +17,17 @@ fn cpu_gate_up_selection_protects_modes_dtypes_rows_and_production_geometry() {
                 for gate in [
                     GgmlType::Q4_K,
                     GgmlType::Q5_K,
+                    GgmlType::IQ2_S,
                     GgmlType::IQ3_S,
                     GgmlType::Q6_K,
                     GgmlType::F32,
                 ] {
-                    for up in [GgmlType::Q4_K, GgmlType::Q5_K, GgmlType::IQ3_S] {
+                    for up in [
+                        GgmlType::Q4_K,
+                        GgmlType::Q5_K,
+                        GgmlType::IQ2_S,
+                        GgmlType::IQ3_S,
+                    ] {
                         for rows in [
                             0,
                             1,
@@ -40,7 +46,9 @@ fn cpu_gate_up_selection_protects_modes_dtypes_rows_and_production_geometry() {
                                 arith == HALF
                                     && mode == StageMode::Fast
                                     && gate == up
-                                    && matches!(gate, GgmlType::Q4_K | GgmlType::Q5_K)
+                                    && (matches!(gate, GgmlType::Q4_K | GgmlType::Q5_K)
+                                        || (iq_tensor_gate_up_enabled()
+                                            && matches!(gate, GgmlType::IQ2_S | GgmlType::IQ3_S)))
                                     && matches!(rows, 1024 | 2048)
                             );
                         }

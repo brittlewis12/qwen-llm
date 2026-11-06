@@ -212,6 +212,8 @@ impl Tiny {
     fn policy(&self) -> GroupedDownPolicy {
         if self.tensors[2].dtype == GgmlType::Q5_K {
             GroupedDownPolicy::Q5KTensor
+        } else if self.tensors[2].dtype == GgmlType::IQ3_S {
+            GroupedDownPolicy::Iq3STensor
         } else {
             GroupedDownPolicy::Incumbent
         }
@@ -285,7 +287,10 @@ impl Tiny {
             Some(limit),
         )
         .unwrap();
-        if self.policy() == GroupedDownPolicy::Q5KTensor {
+        if matches!(
+            self.policy(),
+            GroupedDownPolicy::Q5KTensor | GroupedDownPolicy::Iq3STensor
+        ) {
             adapter::prepare(
                 ctx,
                 enc,
@@ -303,6 +308,21 @@ impl Tiny {
             .unwrap()
             .unwrap()
             .encode()
+            .unwrap();
+        } else if b.down_bank.dtype == GgmlType::IQ4_XS {
+            encode_moe_down_iq4_xs_f32_grouped_slots(
+                ctx,
+                enc,
+                b.down_bank,
+                b.inner,
+                b.counts,
+                b.slots,
+                b.slot_out,
+                F,
+                H,
+                E,
+                self.rows,
+            )
             .unwrap();
         } else {
             encode_moe_down_f32_grouped_slots_generic(
@@ -416,6 +436,10 @@ fn m5_gate_up_native_compositions_tensor_f32_f16_bitwise_and_sampled_f64() {
         (GgmlType::Q4_K, GgmlType::Q5_K),
         (GgmlType::Q4_K, GgmlType::Q6_K),
         (GgmlType::Q5_K, GgmlType::Q6_K),
+        (GgmlType::IQ2_S, GgmlType::IQ3_S),
+        (GgmlType::IQ2_S, GgmlType::IQ4_XS),
+        (GgmlType::IQ3_S, GgmlType::IQ3_S),
+        (GgmlType::IQ3_S, GgmlType::IQ4_XS),
     ] {
         for rows in [129, 1024, 2048] {
             objc2::rc::autoreleasepool(|_| {
@@ -451,11 +475,15 @@ fn m5_gate_up_native_compositions_tensor_f32_f16_bitwise_and_sampled_f64() {
                             assert_eq!(census[1].kernel, "kernel_moe_route_bucket_slots_f32");
                             assert!(census[2].kernel.contains("f16act_grouped_slots_tensor"));
                             assert!(census[3].kernel.contains("up_clamped"));
-                            assert!(census[4].kernel.contains(if down == GgmlType::Q5_K {
-                                "f32_grouped_slots_tensor"
-                            } else {
-                                "f32_grouped_slots_generic"
-                            }));
+                            assert!(census[4].kernel.contains(
+                                if matches!(down, GgmlType::Q5_K | GgmlType::IQ3_S) {
+                                    "f32_grouped_slots_tensor"
+                                } else if down == GgmlType::IQ4_XS {
+                                    "f32_grouped_slots"
+                                } else {
+                                    "f32_grouped_slots_generic"
+                                }
+                            ));
                             assert_eq!(census[5].kernel, "kernel_moe_weighted_sum_packed_f32");
                             for row in &census[2..4] {
                                 assert_eq!(row.grid_width, rows.div_ceil(32) as u64);

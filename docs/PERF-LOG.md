@@ -6,6 +6,41 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the current state and evidence index.
 
+## 2026-11-05 - 27B FFN Device-Half Tile: 1.416x over the Shipped B Route
+
+- Follow-up to the 128x64 tensor experiment, measured on M5 Ultra from
+  `3e75c3bb` with research harness `165acb76`. Strict device-F32 fixes the
+  relaxed-mode error (worst max-absolute / relative-RMS ratios to B across
+  four seeds: 0.848407 / 0.778107), but achieves only **0.492612x B** weighted
+  throughput. Full-precision F32 gives up the relaxed path's speed.
+- Strict device-half operands avoid C-half's repeated activation tile
+  staging. GPU timings include the F32-to-half conversion pass, weight
+  decode, matrix multiply and store. Exact FFN shapes, M=1024:
+
+  | Quant / N / K | B mean ms | Device-half mean ms | B TFLOPS | Device-half TFLOPS | B/new |
+  | --- | ---: | ---: | ---: | ---: | ---: |
+  | Q4_K / 17408 / 5120 | 3.097934 | 2.141285 | 58.922 | 85.246 | 1.446764x |
+  | Q4_K / 5120 / 17408 | 3.745007 | 2.672573 | 48.741 | 68.300 | 1.401274x |
+  | Q6_K / 5120 / 17408 | 4.016750 | 2.992069 | 45.444 | 61.007 | 1.342466x |
+
+  Weights 128/32/32 occurrences, each x4 chunks: B 2579.647109 ms versus
+  1821.411999 ms, **1.416290x**, above the prespecified 1.2x bar. Each variant
+  had its own build-lock + Metal-lease ABBA campaign, six retained samples per
+  shape per arm occurrence (72 total), 30 s cooldown before every arm. All
+  20 thermal boundary/qualification readings were 0; no samples dropped.
+- Four seeds x two magnitudes x three shapes: every device-half
+  max-absolute / relative-RMS error ratio to B was **1.000000 / 1.000000**
+  against the same original-F32-input, CPU-dequantized-weight F64 reference
+  (1024 dots per matrix). All outputs finite/initialized, guards intact.
+- Enable the strict device-half tile only for these exact 1024-row 27B FFN
+  shapes. Other prompt sizes/tails, projections, A3B and devices retain the
+  existing selection. Reuse dead inner scratch before gate/up and dead up
+  scratch after SiLU for down, adding no buffers to the admission plan.
+  Half conversion matches B's existing narrowing; down telemetry is retained.
+  `QWEN_27B_FFN_TENSOR128=0` restores B; `QWEN_DENSE_PREFILL_TENSOR=0` still
+  disables the entire dense tensor route. No whole-model speedup is claimed
+  from these op measurements.
+
 ## 2026-11-05 - A3B Tensor Prefill: 1.72-1.78x End to End, Enabled on Tensor Tier
 
 - Default-on Apple10/Metal 4 routes reuse existing half-operand tensor tiles:

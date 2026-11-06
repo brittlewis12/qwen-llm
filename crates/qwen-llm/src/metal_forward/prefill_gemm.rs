@@ -7,8 +7,16 @@ use crate::model::{Arch, ArchKind, QWEN3_27B};
 use crate::tensor::GgmlType;
 use std::sync::OnceLock;
 
-/// Metal 4 half-operand tensor prompt projections for dense Qwen 27B Q4_K/Q6_K and Qwen 35B-A3B Q8_0 at >=128 rows, enabled by default when the tensor tier is available. Set to 0 for A/B or rollback. Other architectures, dtypes, shapes and small tails use incumbent dispatch; Q5_K retains its existing route and the endpoint head remains GEMV.
+/// Metal 4 half-operand tensor prompt projections for dense Qwen 27B Q4_K/Q6_K and Qwen 35B-A3B Q8_0 at >=128 rows, enabled by default when the tensor tier is available. Set to 0 for A/B or rollback. Qualified 27B FFN shapes at 1024 rows use a strict device-half 128-row tile with reused scratch. Other architectures, dtypes, shapes and small tails use incumbent dispatch; Q5_K retains its existing route and the endpoint head remains GEMV.
 const DENSE_PREFILL_TENSOR_ENV: &str = "QWEN_DENSE_PREFILL_TENSOR";
+
+/// Strict device-half 128-row tile for qualified 27B FFN projections at exactly 1024 rows, default on when QWEN_DENSE_PREFILL_TENSOR and the tensor tier are available. Set to 0 to retain the previous narrow B tile for A/B or rollback. Other shapes and A3B retain their existing tiles.
+const FFN128_ENV: &str = "QWEN_27B_FFN_TENSOR128";
+
+fn ffn128_enabled() -> bool {
+    static ENABLED: OnceLock<bool> = OnceLock::new();
+    *ENABLED.get_or_init(|| crate::env_flag::read_default_on(FFN128_ENV))
+}
 
 /// Metal 4 Q4_K gate/up and Q5_K/Q6_K down grouped expert tiles for stock Qwen 35B-A3B prefill at exactly 2048 rows, enabled by default when the tensor tier is available. Set to 0 for A/B or rollback. Other architectures, quant combinations and chunk sizes retain their incumbent expert kernels.
 const A3B_EXPERT_PREFILL_TENSOR_ENV: &str = "QWEN_A3B_EXPERT_PREFILL_TENSOR";
@@ -171,6 +179,126 @@ pub fn encode_qwen_prefill_mat_mat(
     } else {
         encode_mat_mat_dispatch(ctx, enc, weight, x, y, k, n, m)
     }
+}
+
+fn ffn128_shape(dtype: GgmlType, k: usize, n: usize, m: usize) -> bool {
+    matches!(
+        (dtype, k, n, m),
+        (GgmlType::Q4_K, 5120, 17408, 1024) | (GgmlType::Q4_K | GgmlType::Q6_K, 17408, 5120, 1024)
+    )
+}
+
+/// Only the measured 27B FFN shapes select the 128-row device-half tile.
+pub fn qwen_ffn128_selected(
+    ctx: &MetalContext,
+    arch: &Arch,
+    dtype: GgmlType,
+    k: usize,
+    n: usize,
+    m: usize,
+) -> bool {
+    ffn128_enabled()
+        && *arch == QWEN3_27B
+        && ffn128_shape(dtype, k, n, m)
+        && qwen_prefill_tensor_selected(ctx, arch, dtype, k, n, m)
+}
+
+/// FFN-only entry. The caller lends scratch whose previous contents are dead:
+/// inner before gate/up, up after SiLU for down. Reuse adds no allocated bytes
+/// to the prefill scratch plan. Source activations already entered half in B.
+#[allow(clippy::too_many_arguments)]
+pub fn encode_qwen_ffn_prefill_mat_mat(
+    ctx: &MetalContext,
+    enc: &KernelEncoder,
+    arch: &Arch,
+    weight: &MetalTensor,
+    x: &MetalTensor,
+    y: &MetalTensor,
+    dead_scratch: &MetalTensor,
+    k: usize,
+    n: usize,
+    m: usize,
+) -> Result<(), MfError> {
+    if !qwen_ffn128_selected(ctx, arch, weight.dtype, k, n, m) {
+        return encode_qwen_prefill_mat_mat(ctx, enc, arch, weight, x, y, k, n, m);
+    }
+    use crate::metal::checks::{
+        bad_shape, check_disjoint, check_physical, check_tensor, require_serial,
+    };
+    const K: &str = "qwen_ffn128";
+    // Dimensions are the three exact, bounded tuples above. Preflight every
+    // binding and PSO before the first telemetry/conversion dispatch.
+    require_serial(K, enc)?;
+    check_tensor(
+        K,
+        weight,
+        weight.dtype,
+        &[k as u64, n as u64],
+        false,
+        "weight",
+    )?;
+    check_physical(K, x, 4, false, "input")?;
+    check_physical(K, y, 4, true, "output")?;
+    check_physical(K, dead_scratch, 16, true, "dead scratch")?;
+    if x.dtype != GgmlType::F32
+        || x.n_elements() != (m * k) as u64
+        || y.dtype != GgmlType::F32
+        || y.n_elements() != (m * n) as u64
+        || dead_scratch.dtype != GgmlType::F32
+        || dead_scratch.n_elements() < (m * k / 2) as u64
+    {
+        return Err(bad_shape(K, "F32 input/output or dead-scratch capacity mismatch").into());
+    }
+    // An exact-byte view preserves provenance and backing bounds while lending
+    // only the required prefix as F16. No host write or new Metal buffer.
+    let mut half = dead_scratch.view_subrange(0, vec![(m * k / 2) as u64]);
+    half.dtype = GgmlType::F16;
+    half.shape = vec![(m * k) as u64];
+    check_disjoint(K, &half, &[(weight, "weight"), (x, "input"), (y, "output")])?;
+    check_disjoint(K, y, &[(weight, "weight"), (x, "input")])?;
+    let name = match weight.dtype {
+        GgmlType::Q4_K => "kernel_qwen_ffn_q4_K_f16act_tensor128",
+        GgmlType::Q6_K => "kernel_qwen_ffn_q6_K_f16act_tensor128",
+        _ => unreachable!("shape gate"),
+    };
+    let pso = ctx.tensor_pipeline(name)?;
+    ctx.pipeline("kernel_scatter_offset_f32_to_f16")?;
+    if k > n {
+        crate::half_telemetry::record(
+            ctx,
+            enc,
+            crate::half_telemetry::SITE_DENSE_DOWN,
+            u32::MAX,
+            x,
+        );
+    }
+    crate::metal::encode_scatter_offset_f32_to_f16(ctx, enc, x, &half, 0, m * k)?;
+    enc.set_pipeline(&pso);
+    let block_bytes = if weight.dtype == GgmlType::Q4_K {
+        144
+    } else {
+        210
+    };
+    enc.set_bytes(
+        0,
+        &[m as u32, n as u32, k as u32, (k / 256 * block_bytes) as u32],
+    );
+    enc.set_tensor(1, weight);
+    enc.set_tensor(2, &half);
+    enc.set_tensor(3, y);
+    enc.dispatch(
+        objc2_metal::MTLSize {
+            width: m / 128,
+            height: n / 64,
+            depth: 1,
+        },
+        objc2_metal::MTLSize {
+            width: 128,
+            height: 1,
+            depth: 1,
+        },
+    );
+    Ok(())
 }
 
 #[cfg(test)]
@@ -1001,6 +1129,202 @@ mod tests {
             "qwen27b_prefill_tensor: {cases} F64 cases passed, {routed} tensor-selected, {} bitwise fallbacks; tier={:?}",
             cases - routed,
             ctx.tensor_ops_status()
+        );
+    }
+
+    #[test]
+    fn qwen_ffn128_shape_gate() {
+        for dtype in [GgmlType::Q4_K, GgmlType::Q6_K] {
+            assert!(ffn128_shape(dtype, 17408, 5120, 1024));
+            for m in [1, 127, 128, 512, 1023, 1025, 2048] {
+                assert!(!ffn128_shape(dtype, 17408, 5120, m));
+            }
+        }
+        assert!(ffn128_shape(GgmlType::Q4_K, 5120, 17408, 1024));
+        assert!(!ffn128_shape(GgmlType::Q6_K, 5120, 17408, 1024));
+        assert!(!ffn128_shape(GgmlType::Q8_0, 2048, 8192, 1024));
+    }
+
+    #[test]
+    fn qwen_ffn128_gpu_regression() {
+        let _lease = crate::metal::acquire_metal_benchmark_lease().unwrap();
+        let Some(ctx) = crate::test_fixtures::metal_context_or_skip() else {
+            return;
+        };
+        let mut cases = 0;
+        let mut routed = 0;
+        for (dtype, k, n) in [
+            (GgmlType::Q4_K, 5120, 17408),
+            (GgmlType::Q4_K, 17408, 5120),
+            (GgmlType::Q6_K, 17408, 5120),
+        ] {
+            let (packed, decoded) = weights(dtype, k, n);
+            let w =
+                MetalTensor::from_bytes(&ctx, &packed, vec![k as u64, n as u64], dtype).unwrap();
+            for m in [1024, 512, 1023] {
+                let cells: Vec<_> = sampled_axis(m)
+                    .into_iter()
+                    .flat_map(|r| sampled_axis(n).into_iter().map(move |c| (r, c)))
+                    .collect();
+                let selected = qwen_ffn128_selected(&ctx, &QWEN3_27B, dtype, k, n, m);
+                assert_eq!(
+                    selected,
+                    ctx.tensor_ops_status().is_available()
+                        && enabled()
+                        && ffn128_enabled()
+                        && m == 1024
+                );
+                assert!(!qwen_ffn128_selected(&ctx, &A3B_ARCH, dtype, k, n, m));
+                for amplitude in [2f32.powi(-24), 1.0, 2048.0, 65504.0] {
+                    let mut rng = 0x5a31_89ef;
+                    let mut input: Vec<f32> = (0..m * k)
+                        .map(|_| {
+                            ((random(&mut rng) >> 40) as f32 / (1u64 << 23) as f32 - 1.0)
+                                * amplitude
+                        })
+                        .collect();
+                    input[..4].copy_from_slice(&[amplitude, -amplitude, 0.0, 2f32.powi(-24)]);
+                    let reference: Vec<f64> = cells
+                        .iter()
+                        .map(|&(r, c)| {
+                            input[r * k..(r + 1) * k]
+                                .iter()
+                                .zip(&decoded[c * k..(c + 1) * k])
+                                .map(|(&x, &w)| f64::from(x) * f64::from(w))
+                                .sum()
+                        })
+                        .collect();
+                    let x = MetalTensor::from_bytes(
+                        &ctx,
+                        bytemuck::cast_slice(&input),
+                        vec![(m * k) as u64],
+                        GgmlType::F32,
+                    )
+                    .unwrap();
+                    let spare = Guarded::new(&ctx, m * k / 2);
+                    let a = Guarded::new(&ctx, m * n);
+                    let b = Guarded::new(&ctx, m * n);
+                    // Deliberately follow B in the same serial encoder: this
+                    // also exercises pipeline/TG binding state and ordering.
+                    dispatch_census_begin();
+                    let cmd = ctx.queue.commandBuffer().unwrap();
+                    let enc = KernelEncoder::begin(&cmd);
+                    encode_qwen_prefill_mat_mat(&ctx, &enc, &QWEN3_27B, &w, &x, &a.tensor, k, n, m)
+                        .unwrap();
+                    encode_qwen_ffn_prefill_mat_mat(
+                        &ctx,
+                        &enc,
+                        &QWEN3_27B,
+                        &w,
+                        &x,
+                        &b.tensor,
+                        &spare.tensor,
+                        k,
+                        n,
+                        m,
+                    )
+                    .unwrap();
+                    enc.end();
+                    cmd.commit();
+                    wait_completed(&cmd).unwrap();
+                    let dispatches = dispatch_census_take();
+                    assert_eq!(
+                        dispatches
+                            .iter()
+                            .any(|d| d.kernel.ends_with("f16act_tensor128")),
+                        selected
+                    );
+                    let (av, bv) = (a.values(), b.values());
+                    let sample =
+                        |v: &[f32]| cells.iter().map(|&(r, c)| v[r * n + c]).collect::<Vec<_>>();
+                    let ae = errors(&sample(av), &reference);
+                    let be = errors(&sample(bv), &reference);
+                    assert!(
+                        be.0 <= 1.5 * ae.0 && be.1 <= 1.5 * ae.1,
+                        "{dtype:?} M{m}: B={ae:?} C={be:?}"
+                    );
+                    if !selected {
+                        assert!(av.iter().zip(bv).all(|(a, b)| a.to_bits() == b.to_bits()));
+                    }
+                    let words = unsafe {
+                        std::slice::from_raw_parts(
+                            spare.backing.buffer.contents().as_ptr().cast::<u32>(),
+                            spare.len + 2 * Guarded::GUARD,
+                        )
+                    };
+                    assert!(
+                        words[..Guarded::GUARD]
+                            .iter()
+                            .chain(&words[Guarded::GUARD + spare.len..])
+                            .all(|&v| v == Guarded::CANARY)
+                    );
+                    if selected {
+                        let half = unsafe {
+                            std::slice::from_raw_parts(
+                                words.as_ptr().add(Guarded::GUARD).cast::<u16>(),
+                                m * k,
+                            )
+                        };
+                        for index in (0..m * k).step_by((m * k / 1024).max(1)).chain([m * k - 1]) {
+                            let expected = half::f16::from_f32(input[index]).to_bits();
+                            // Metal may flush half subnormals. The F64/B gate
+                            // above still checks the resulting arithmetic.
+                            if expected & 0x7c00 == 0 {
+                                assert!(half[index] == expected || half[index] & 0x7fff == 0);
+                            } else {
+                                assert_eq!(half[index], expected);
+                            }
+                        }
+                        // Refuse live-input/output scratch aliases before any
+                        // encoder mutation, including the conversion dispatch.
+                        for bad in [&x, &b.tensor] {
+                            dispatch_census_begin();
+                            let rejected = ctx.queue.commandBuffer().unwrap();
+                            let e = KernelEncoder::begin(&rejected);
+                            assert!(
+                                encode_qwen_ffn_prefill_mat_mat(
+                                    &ctx, &e, &QWEN3_27B, &w, &x, &b.tensor, bad, k, n, m
+                                )
+                                .is_err()
+                            );
+                            e.end();
+                            assert!(dispatch_census_take().is_empty());
+                        }
+                        dispatch_census_begin();
+                        let rejected = ctx.queue.commandBuffer().unwrap();
+                        let concurrent = KernelEncoder::begin_concurrent(&rejected);
+                        assert!(
+                            encode_qwen_ffn_prefill_mat_mat(
+                                &ctx,
+                                &concurrent,
+                                &QWEN3_27B,
+                                &w,
+                                &x,
+                                &b.tensor,
+                                &spare.tensor,
+                                k,
+                                n,
+                                m
+                            )
+                            .is_err()
+                        );
+                        concurrent.end();
+                        assert!(dispatch_census_take().is_empty());
+                    } else {
+                        assert!(
+                            words[Guarded::GUARD..Guarded::GUARD + spare.len]
+                                .iter()
+                                .all(|&v| v == f32::NAN.to_bits())
+                        );
+                    }
+                    cases += 1;
+                    routed += usize::from(selected);
+                }
+            }
+        }
+        eprintln!(
+            "qwen_ffn128: {cases} F64 cases passed, {routed} selected, {} bitwise fallbacks; reused-scratch guards and serial ordering checked",
+            cases - routed
         );
     }
 }

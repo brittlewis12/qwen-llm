@@ -18,6 +18,13 @@ DwarfStar's kernels of the same names at that revision, with the same change.
 
 ## llama.cpp
 
+`kernels/tensor/qwen_ffn128.metal` adapts the 128-token by 64-output by
+32-K tensor topology and device activation view from llama.cpp v0.9.0
+`kernel_mul_mm`, revision `c4261a74a59c5a719e8f73038e28633b08f2bea4`.
+It uses this tree's Q4_K/Q6_K half dequantizers and strict device-half
+operands. The upstream MIT notice is retained in the source.
+
+
 `kernel_attn_flash_probe_f16_d256` and its causal block pre-pass in
 `kernels/tensor/attn_flash_probe.metal` adapt the tensor flash-attention
 organization from `kernel_flash_attn_ext_tensor` in

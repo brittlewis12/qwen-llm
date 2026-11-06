@@ -15880,6 +15880,25 @@ fn prefill_tokens_with_multi_hidden_profiled_inner<'a>(
                     enc.end();
                 }
             } else {
+                let ffn_mat_mat_dispatch = |ctx: &MetalContext,
+                                            enc: &KernelEncoder,
+                                            weight: &MetalTensor,
+                                            x: &MetalTensor,
+                                            y: &MetalTensor,
+                                            k: usize,
+                                            n: usize,
+                                            m: usize| {
+                    // Inner is dead before SiLU. After SiLU consumes up,
+                    // up is dead and can hold down's half activation operand.
+                    let spare = if k > n {
+                        &ffn_up_pack_p
+                    } else {
+                        &ffn_inner_pack_p
+                    };
+                    crate::metal_forward::encode_qwen_ffn_prefill_mat_mat(
+                        ctx, enc, arch, weight, x, y, spare, k, n, m,
+                    )
+                };
                 let mat_mat_path = ffn_mat_mat_eligible(g_w.dtype)
                     && ffn_mat_mat_eligible(u_w.dtype)
                     && ffn_mat_mat_eligible(d_w.dtype);
@@ -15913,7 +15932,7 @@ fn prefill_tokens_with_multi_hidden_profiled_inner<'a>(
                     if split_ffn_subphases {
                         {
                             let enc = KernelEncoder::begin(&cmd_buf);
-                            prefill_mat_mat_dispatch(
+                            ffn_mat_mat_dispatch(
                                 base.ctx,
                                 &enc,
                                 g_w,
@@ -15939,7 +15958,7 @@ fn prefill_tokens_with_multi_hidden_profiled_inner<'a>(
 
                         {
                             let enc = KernelEncoder::begin(&cmd_buf);
-                            prefill_mat_mat_dispatch(
+                            ffn_mat_mat_dispatch(
                                 base.ctx,
                                 &enc,
                                 u_w,
@@ -16000,7 +16019,7 @@ fn prefill_tokens_with_multi_hidden_profiled_inner<'a>(
                                 chunk_p,
                             )?;
                         } else {
-                            prefill_mat_mat_dispatch(
+                            ffn_mat_mat_dispatch(
                                 base.ctx,
                                 &enc,
                                 g_w,
@@ -16010,7 +16029,7 @@ fn prefill_tokens_with_multi_hidden_profiled_inner<'a>(
                                 f,
                                 chunk_p,
                             )?;
-                            prefill_mat_mat_dispatch(
+                            ffn_mat_mat_dispatch(
                                 base.ctx,
                                 &enc,
                                 u_w,
@@ -16049,7 +16068,7 @@ fn prefill_tokens_with_multi_hidden_profiled_inner<'a>(
                     if split_ffn_subphases {
                         {
                             let enc = KernelEncoder::begin(&cmd_buf);
-                            prefill_mat_mat_dispatch(
+                            ffn_mat_mat_dispatch(
                                 base.ctx,
                                 &enc,
                                 d_w,
@@ -16107,7 +16126,7 @@ fn prefill_tokens_with_multi_hidden_profiled_inner<'a>(
                     } else {
                         {
                             let enc = KernelEncoder::begin(&cmd_buf);
-                            prefill_mat_mat_dispatch(
+                            ffn_mat_mat_dispatch(
                                 base.ctx,
                                 &enc,
                                 d_w,
@@ -16174,7 +16193,7 @@ fn prefill_tokens_with_multi_hidden_profiled_inner<'a>(
                                 chunk_p,
                             )?;
                         } else {
-                            prefill_mat_mat_dispatch(
+                            ffn_mat_mat_dispatch(
                                 base.ctx,
                                 &enc,
                                 g_w,
@@ -16184,7 +16203,7 @@ fn prefill_tokens_with_multi_hidden_profiled_inner<'a>(
                                 f,
                                 chunk_p,
                             )?;
-                            prefill_mat_mat_dispatch(
+                            ffn_mat_mat_dispatch(
                                 base.ctx,
                                 &enc,
                                 u_w,
@@ -16202,7 +16221,7 @@ fn prefill_tokens_with_multi_hidden_profiled_inner<'a>(
                                 &ffn_inner_pack_p,
                             )?;
                         }
-                        prefill_mat_mat_dispatch(
+                        ffn_mat_mat_dispatch(
                             base.ctx,
                             &enc,
                             d_w,

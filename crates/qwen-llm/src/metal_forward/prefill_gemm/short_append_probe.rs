@@ -280,7 +280,7 @@ impl Dense {
 }
 fn dense(ctx: &MetalContext, gg: &GgufFile) {
     let ms = std::env::var("QWEN_SHORT_PROBE_ROWS")
-        .unwrap_or("128,256,276,384,512,768,1000,1023,1024,1300".into());
+        .unwrap_or("128,256,276,384,512,513,768,769,1000,1023,1024,1300".into());
     let mut fixtures = Vec::new();
     for m in ms.split(',').map(|s| s.parse::<usize>().unwrap()) {
         for name in [
@@ -349,6 +349,480 @@ fn run_short_append_probe() {
     let mm = MetalModel::load(&ctx, &gg, &model).unwrap();
     match mode.as_str() {
         "trace" => trace(&ctx, &mm),
+        "expert" => expert(&ctx, &mm),
+        "quality" => quality(&ctx, &mm, &gg),
         _ => panic!("unknown mode"),
     }
+}
+
+fn moe_at(block: &crate::metal_forward::MetalBlock) -> Option<&crate::metal_forward::MetalMoeFfn> {
+    match block {
+        crate::metal_forward::MetalBlock::Gdn(b) => b.ffn_moe.as_ref(),
+        crate::metal_forward::MetalBlock::Attn(b) => b.ffn_moe.as_ref(),
+    }
+}
+fn copy_f32(ctx: &MetalContext, t: &MetalTensor, n: usize) -> MetalTensor {
+    MetalTensor::from_bytes(
+        ctx,
+        bytemuck::cast_slice(&read_f32(t)[..n]),
+        vec![n as u64],
+        GgmlType::F32,
+    )
+    .unwrap()
+}
+fn packed_row(t: &MetalTensor, e: usize, col: usize) -> Vec<f32> {
+    let (k, n) = (t.shape[0] as usize, t.shape[1] as usize);
+    let (block, bytes) = t.dtype.storage_layout().unwrap();
+    let stride = k / (block as usize) * (bytes as usize);
+    let offset = (e * n + col) * stride;
+    let raw = unsafe {
+        std::slice::from_raw_parts(
+            t.buffer
+                .contents()
+                .as_ptr()
+                .cast::<u8>()
+                .add(t.offset as usize + offset),
+            stride,
+        )
+    };
+    codec::dequant_to_f32(
+        &TensorDesc {
+            name: "expert-reference".into(),
+            shape: vec![k as u64],
+            dtype: t.dtype,
+            shard_idx: 0,
+            data_offset: 0,
+            n_bytes: stride as u64,
+        },
+        raw,
+    )
+    .unwrap()
+}
+struct Expert<'a> {
+    m: usize,
+    role: bool,
+    moe: &'a crate::metal_forward::MetalMoeFfn,
+    x: MetalTensor,
+    counts: MetalTensor,
+    ids: MetalTensor,
+    y: MetalTensor,
+    points: Vec<usize>,
+    reference: Vec<f64>,
+}
+impl Expert<'_> {
+    fn run(&self, ctx: &MetalContext, on: bool) -> (f64, (f64, f64)) {
+        unsafe {
+            std::slice::from_raw_parts_mut(
+                self.y.buffer.contents().as_ptr().cast::<f32>(),
+                self.y.n_elements() as usize,
+            )
+            .fill(f32::NAN);
+        }
+        let tensor = on || self.m == 2048;
+        let ms = command(ctx, |e| {
+            if self.role {
+                crate::metal_dflash::encode_prefill_moe_grouped_swiglu(
+                    ctx,
+                    e,
+                    self.moe,
+                    &self.x,
+                    &self.counts,
+                    &self.ids,
+                    &self.y,
+                    2048,
+                    512,
+                    256,
+                    8,
+                    self.m,
+                    false,
+                    Some(48),
+                    tensor,
+                )
+                .unwrap();
+            } else {
+                crate::metal_dflash::encode_prefill_moe_grouped_down(
+                    ctx,
+                    e,
+                    &self.moe.down_exps,
+                    &self.x,
+                    &self.counts,
+                    &self.ids,
+                    &self.y,
+                    512,
+                    2048,
+                    256,
+                    self.m,
+                    39,
+                    tensor,
+                )
+                .unwrap();
+            }
+        });
+        let data = read_f32(&self.y);
+        assert!(data.iter().all(|v| v.is_finite()));
+        (
+            ms,
+            metrics(
+                &self.points.iter().map(|&p| data[p]).collect::<Vec<_>>(),
+                &self.reference,
+            ),
+        )
+    }
+}
+fn expert(ctx: &MetalContext, mm: &MetalModel) {
+    let mf = MetalForward::new(ctx, mm);
+    let mut fixtures = Vec::new();
+    let ms = std::env::var("QWEN_SHORT_PROBE_ROWS").unwrap_or("512,1024,1300,2048".into());
+    for m in ms.split(',').map(|s| s.parse::<usize>().unwrap()) {
+        let mut sc = scratch(ctx, mm, m, m);
+        let mut session = MetalSession::fresh(ctx, mm, m + 1).unwrap();
+        run_scope(false, || {
+            prefill_tokens_with_multi_hidden(
+                &mf,
+                &ids(m, mm.arch.vocab_size as usize),
+                0,
+                &mut session,
+                &mut sc,
+                &[],
+                None,
+            )
+        })
+        .unwrap();
+        let counts = read_i32(&sc.moe_group_count_pack, 256);
+        let bucket = read_i32(&sc.moe_group_ids_pack, 256 * m);
+        assert_eq!(counts.iter().sum::<i32>() as usize, m * 8);
+        let mut owner = vec![usize::MAX; m * 8];
+        for (e, &count) in counts.iter().enumerate() {
+            assert!((0..=m as i32).contains(&count));
+            for j in 0..count as usize {
+                let slot = bucket[e * m + j] as usize;
+                assert!(slot < m * 8 && owner[slot] == usize::MAX);
+                owner[slot] = e;
+            }
+        }
+        assert!(owner.iter().all(|&e| e != usize::MAX));
+        emit(json!({"record":"expert_distribution","m":m,"counts":counts}));
+        let norm = copy_f32(ctx, &sc.h_pack, m * 2048);
+        let inner = copy_f32(ctx, &sc.moe_group_inner_pack, m * 8 * 512);
+        let ct =
+            MetalTensor::from_bytes(ctx, bytemuck::cast_slice(&counts), vec![256], GgmlType::I32)
+                .unwrap();
+        let it = MetalTensor::from_bytes(
+            ctx,
+            bytemuck::cast_slice(&bucket),
+            vec![(256 * m) as u64],
+            GgmlType::I32,
+        )
+        .unwrap();
+        for dtype in [GgmlType::Q5_K, GgmlType::Q6_K] {
+            let moe = mm
+                .blocks
+                .iter()
+                .filter_map(moe_at)
+                .find(|q| q.down_exps.dtype == dtype)
+                .unwrap();
+            for role in [true, false] {
+                let n = if role { 512 } else { 2048 };
+                let input = if role { norm.clone() } else { inner.clone() };
+                let points: Vec<_> = (0..32)
+                    .flat_map(|r| {
+                        (0..32).map(move |c| (r * (m * 8 - 1) / 31) * n + c * (n - 1) / 31)
+                    })
+                    .collect();
+                let reference = points
+                    .iter()
+                    .map(|&p| {
+                        let (slot, col) = (p / n, p % n);
+                        let e = owner[slot];
+                        if role {
+                            let x = &read_f32(&input)[slot / 8 * 2048..(slot / 8 + 1) * 2048];
+                            let g = packed_row(&moe.gate_exps, e, col);
+                            let u = packed_row(&moe.up_exps, e, col);
+                            let dot = |w: &[f32]| {
+                                x.iter()
+                                    .zip(w)
+                                    .map(|(&x, &w)| f64::from(x) * f64::from(w))
+                                    .sum::<f64>()
+                            };
+                            let (g, u) = (dot(&g), dot(&u));
+                            g / (1. + (-g).exp()) * u
+                        } else {
+                            let x = &read_f32(&input)[slot * 512..(slot + 1) * 512];
+                            let w = packed_row(&moe.down_exps, e, col);
+                            x.iter()
+                                .zip(&w)
+                                .map(|(&x, &w)| f64::from(x) * f64::from(w))
+                                .sum()
+                        }
+                    })
+                    .collect();
+                fixtures.push(Expert {
+                    m,
+                    role,
+                    moe,
+                    x: input,
+                    counts: ct.clone(),
+                    ids: it.clone(),
+                    y: MetalTensor::zeros_f32(ctx, vec![(m * 8 * n) as u64]).unwrap(),
+                    points,
+                    reference,
+                });
+            }
+        }
+    }
+    let mut limits = Vec::new();
+    let mut passing = Vec::new();
+    thermal("qualify", "before");
+    for f in &fixtures {
+        let (_, a) = f.run(ctx, false);
+        let (_, b) = f.run(ctx, true);
+        let pass = b.0 <= 1.5 * a.0 && b.1 <= 1.5 * a.1;
+        limits.push(a);
+        passing.push(pass);
+        emit(
+            json!({"record":"qualify_expert","m":f.m,"role":if f.role{"gateup"}else{"down"},"down_dtype":format!("{:?}",f.moe.down_exps.dtype),"base":a,"candidate":b,"ratios":[b.0/a.0,b.1/a.1],"pass":pass}),
+        );
+    }
+    thermal("qualify", "after");
+    for (arm, on) in [false, true, true, false].into_iter().enumerate() {
+        std::thread::sleep(std::time::Duration::from_secs(30));
+        thermal(&format!("{arm}-{on}"), "before");
+        for f in &fixtures {
+            f.run(ctx, on);
+            f.run(ctx, on);
+        }
+        for sample in 0..6 {
+            for (i, f) in fixtures.iter().enumerate() {
+                let (ms, err) = f.run(ctx, on);
+                let a = limits[i];
+                emit(
+                    json!({"record":"op_expert","arm":arm,"candidate":on,"sample":sample,"m":f.m,"role":if f.role{"gateup"}else{"down"},"down_dtype":format!("{:?}",f.moe.down_exps.dtype),"gpu_ms":ms,"qualified":passing[i],"errors":err,"ratios":[err.0/a.0,err.1/a.1]}),
+                );
+            }
+        }
+        thermal(&format!("{arm}-{on}"), "after");
+    }
+}
+
+#[derive(Clone, Copy, Default)]
+struct Score {
+    n: usize,
+    off: f64,
+    on: f64,
+    kl: f64,
+    max_kl: f64,
+    agree: usize,
+}
+impl Score {
+    fn add(&mut self, s: Self) {
+        self.n += s.n;
+        self.off += s.off;
+        self.on += s.on;
+        self.kl += s.kl;
+        self.max_kl = self.max_kl.max(s.max_kl);
+        self.agree += s.agree;
+    }
+    fn report(&self) -> serde_json::Value {
+        let n = self.n as f64;
+        json!({"targets":self.n,"nll_off":self.off/n,"nll_on":self.on/n,"delta_nll":(self.on-self.off)/n,"mean_kl":self.kl/n,"max_kl":self.max_kl,"argmax_agree":self.agree,"pass":((self.on-self.off)/n).abs()<=0.005&&self.kl/n<=0.01})
+    }
+    fn check(&self) {
+        assert!(
+            ((self.on - self.off) / self.n as f64).abs() <= 0.005
+                && self.kl / self.n as f64 <= 0.01,
+            "quality gate: {}",
+            self.report()
+        );
+    }
+}
+fn hash(data: &[u8]) -> String {
+    use sha2::{Digest, Sha256};
+    format!("{:x}", Sha256::digest(data))
+}
+fn frozen(path: &str) -> String {
+    let rev = std::env::var("QWEN_SHORT_PROBE_CORPUS_REV").unwrap_or_else(|_| "HEAD".into());
+    let o = std::process::Command::new("git")
+        .args(["show", &format!("{rev}:{path}")])
+        .output()
+        .unwrap();
+    assert!(o.status.success());
+    String::from_utf8(o.stdout).unwrap()
+}
+fn readout(
+    ctx: &MetalContext,
+    mm: &MetalModel,
+    hidden: &MetalTensor,
+    n: usize,
+    endpoint: &[f32],
+) -> MetalTensor {
+    let h = mm.arch.hidden_size as usize;
+    let v = mm.arch.vocab_size as usize;
+    let norm = MetalTensor::zeros_f32(ctx, vec![h as u64]).unwrap();
+    let out = MetalTensor::zeros_f32(ctx, vec![(n * v) as u64]).unwrap();
+    unsafe {
+        std::slice::from_raw_parts_mut(out.buffer.contents().as_ptr().cast::<f32>(), n * v)
+            .fill(f32::NAN);
+    }
+    command(ctx, |e| {
+        for row in 0..n {
+            let x = hidden.view_subrange((row * h) as u64, vec![h as u64]);
+            let y = out.view_subrange((row * v) as u64, vec![v as u64]);
+            encode_rms_norm_mul_f32(
+                ctx,
+                e,
+                &x,
+                &mm.output_norm,
+                &norm,
+                crate::metal_forward::RMS_EPS,
+            )
+            .unwrap();
+            crate::metal_forward::encode_mat_vec_dispatch(ctx, e, &mm.lm_head, &norm, &y, h, v)
+                .unwrap();
+        }
+    });
+    let values = read_f32(&out);
+    assert!(values.iter().all(|v| v.is_finite()));
+    let last = &values[(n - 1) * v..];
+    let peak = last
+        .iter()
+        .zip(endpoint)
+        .map(|(&a, &b)| (a - b).abs())
+        .fold(0f32, f32::max);
+    emit(json!({"record":"native_readout_witness","rows":n,"endpoint_max_abs":peak}));
+    assert!(peak <= 1e-5, "native readout mismatch");
+    out
+}
+fn compare_distribution(a: &[f32], b: &[f32], targets: &[i32], v: usize) -> Score {
+    let mut s = Score::default();
+    for (row, &target) in targets.iter().enumerate() {
+        let x = &a[row * v..(row + 1) * v];
+        let y = &b[row * v..(row + 1) * v];
+        let argmax = |z: &[f32]| {
+            z.iter()
+                .enumerate()
+                .max_by(|a, b| a.1.total_cmp(b.1))
+                .unwrap()
+                .0
+        };
+        assert!(x.iter().chain(y).all(|v| v.is_finite()));
+        let (mx, my) = (f64::from(x[argmax(x)]), f64::from(y[argmax(y)]));
+        let zx = x.iter().map(|&a| (f64::from(a) - mx).exp()).sum::<f64>();
+        let zy = y.iter().map(|&a| (f64::from(a) - my).exp()).sum::<f64>();
+        let (lx, ly) = (mx + zx.ln(), my + zy.ln());
+        let kl = x
+            .iter()
+            .zip(y)
+            .map(|(&a, &b)| (f64::from(a) - mx).exp() / zx * (f64::from(a) - f64::from(b)))
+            .sum::<f64>()
+            + ly
+            - lx;
+        assert!(kl >= -1e-7 && kl.is_finite());
+        let kl = kl.max(0.);
+        s.n += 1;
+        s.off += lx - f64::from(x[target as usize]);
+        s.on += ly - f64::from(y[target as usize]);
+        s.kl += kl;
+        s.max_kl = s.max_kl.max(kl);
+        s.agree += usize::from(argmax(x) == argmax(y));
+    }
+    s
+}
+fn quality(ctx: &MetalContext, mm: &MetalModel, gg: &GgufFile) {
+    let tok = crate::tokenizer::Tokenizer::from_gguf(gg).unwrap();
+    let mf = MetalForward::new(ctx, mm);
+    let h = mm.arch.hidden_size as usize;
+    let v = mm.arch.vocab_size as usize;
+    let mut pooled = Score::default();
+    for (doc, prefix_path, target_path) in [
+        (
+            "prose",
+            "docs/PERF-LOG.md",
+            "docs/APPLE-GPU-OPTIMIZATION.md",
+        ),
+        (
+            "code",
+            "crates/qwen-llm/src/metal_forward/mod.rs",
+            "crates/qwen-llm/src/metal_dflash.rs",
+        ),
+    ] {
+        let prefix_text = frozen(prefix_path);
+        let text = frozen(target_path);
+        let prefix = tok.encode(&prefix_text, false).unwrap();
+        let targets = tok.encode(&text, false).unwrap();
+        let lengths = [512usize, 1024, 1300];
+        let total: usize = lengths.iter().sum();
+        assert!(targets.len() > total && !prefix.is_empty());
+        let mut document = Score::default();
+        emit(
+            json!({"record":"corpus","doc":doc,"prefix_sha256":hash(prefix_text.as_bytes()),"target_sha256":hash(text.as_bytes()),"teacher_ids_sha256":hash(bytemuck::cast_slice(&targets[..total+1])),"targets":total}),
+        );
+        for depth in [0usize, 32768] {
+            let extent = depth + total + 1;
+            let mut off = MetalSession::fresh(ctx, mm, extent).unwrap();
+            let mut on = MetalSession::fresh(ctx, mm, extent).unwrap();
+            if depth > 0 {
+                let input: Vec<_> = prefix.iter().copied().cycle().take(depth).collect();
+                for session in [&mut off, &mut on] {
+                    let mut sc = scratch(ctx, mm, depth, depth);
+                    run_scope(false, || {
+                        prefill_tokens_with_multi_hidden(
+                            &mf,
+                            &input,
+                            0,
+                            session,
+                            &mut sc,
+                            &[],
+                            None,
+                        )
+                    })
+                    .unwrap();
+                }
+            }
+            let mut consumed = 0;
+            for n in lengths {
+                let score = objc2::rc::autoreleasepool(|_| {
+                    let mut outputs = Vec::new();
+                    for (candidate, session) in [(false, &mut off), (true, &mut on)] {
+                        let mut sc = scratch(ctx, mm, n, depth + consumed + n);
+                        let hidden = MetalTensor::zeros_f32(ctx, vec![(n * h) as u64]).unwrap();
+                        dispatch_census_begin();
+                        let endpoint = run_scope(candidate, || {
+                            prefill_tokens_with_multi_hidden(
+                                &mf,
+                                &targets[consumed..consumed + n],
+                                (depth + consumed) as u32,
+                                session,
+                                &mut sc,
+                                &[mm.arch.n_layer - 1],
+                                Some(&hidden),
+                            )
+                        })
+                        .unwrap();
+                        let launches = census(dispatch_census_take());
+                        emit(
+                            json!({"record":"quality_dispatches","doc":doc,"depth":depth,"position":depth+consumed,"rows":n,"candidate":candidate,"dispatches":launches}),
+                        );
+                        outputs.push(readout(ctx, mm, &hidden, n, &endpoint));
+                    }
+                    compare_distribution(
+                        read_f32(&outputs[0]),
+                        read_f32(&outputs[1]),
+                        &targets[consumed + 1..consumed + n + 1],
+                        v,
+                    )
+                });
+                emit(
+                    json!({"record":"quality_case","doc":doc,"depth":depth,"position":depth+consumed,"rows":n,"score":score.report()}),
+                );
+                score.check();
+                document.add(score);
+                consumed += n;
+            }
+        }
+        emit(json!({"record":"quality_document","doc":doc,"score":document.report()}));
+        document.check();
+        pooled.add(document);
+    }
+    emit(json!({"record":"quality_pooled","score":pooled.report()}));
+    pooled.check();
 }

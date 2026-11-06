@@ -50,6 +50,7 @@ const SELECTOR_SCRATCH_BYTES: usize = 2 * ATTENTION_THREADS * size_of::<u32>();
 const DENSE_PACKED_QUERY_TILE: usize = 32;
 
 mod index_reuse;
+mod prefill_next;
 mod selected_value;
 pub(crate) mod split_decode;
 #[cfg(test)]
@@ -5245,7 +5246,9 @@ fn encode_select_blocks_tensors(
         query_count: u32,
         emit_ranked: u32,
     }
-    let pso = ctx.pipeline("kernel_deepseek_v4_select_top_k_radix4_ids_f32")?;
+    let pso =
+        prefill_next::selector_pipeline(ctx, block_capacity, block_budget, query_count, threads)?
+            .unwrap_or(ctx.pipeline("kernel_deepseek_v4_select_top_k_radix4_ids_f32")?);
     let threads = if threads <= pso.maxTotalThreadsPerThreadgroup()
         && pso.staticThreadgroupMemoryLength() + threads * 2 * size_of::<u32>()
             <= ctx.device.maxThreadgroupMemoryLength()
@@ -5709,7 +5712,8 @@ fn encode_attention_logits_packed_gqa4(
     let heads_per_kv = g.query_heads / g.kv_heads;
     let head_groups = heads_per_kv / PACKED_ATTENTION_HEADS_PER_TG;
     let slot_tiles = g.output_width().div_ceil(SLOTS_PER_THREADGROUP);
-    let pso = ctx.pipeline("kernel_qwen4exp_qsa_attention_logits_packed_gqa4_f16")?;
+    let pso = prefill_next::logits_pipeline(ctx, g, start_position, query_count)?
+        .unwrap_or(ctx.pipeline("kernel_qwen4exp_qsa_attention_logits_packed_gqa4_f16")?);
     enc.set_pipeline(&pso);
     enc.set_bytes(0, &packed_attention_args(g, start_position, query_count));
     enc.set_tensor(1, query);

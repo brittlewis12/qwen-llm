@@ -77,6 +77,7 @@ pub(super) struct Pipelines {
     softmax: Pipeline,
     value: Pipeline,
     split_value: Option<Pipeline>,
+    vector_value: Option<Pipeline>,
     device: u64,
 }
 
@@ -122,6 +123,11 @@ impl Pipelines {
             } else {
                 None
             },
+            vector_value: if split_enabled {
+                super::prefill_next::value_pipeline(ctx)?
+            } else {
+                None
+            },
             device: ctx.device.registryID(),
         }))
     }
@@ -133,6 +139,10 @@ impl Pipelines {
             || !pipeline_supported(&self.value, 0, limit)
             || self
                 .split_value
+                .as_ref()
+                .is_some_and(|p| !pipeline_supported(p, 0, limit))
+            || self
+                .vector_value
                 .as_ref()
                 .is_some_and(|p| !pipeline_supported(p, 0, limit))
         {
@@ -305,7 +315,9 @@ impl Pipelines {
         enc.set_threadgroup_memory(0, STATS_TGM);
         enc.dispatch(size(3, 2, n), size(256, 1, 1));
         let split = self.uses_split(n);
-        enc.set_pipeline(if split {
+        enc.set_pipeline(if split && start >= 32768 && self.vector_value.is_some() {
+            self.vector_value.as_ref().unwrap()
+        } else if split {
             self.split_value.as_ref().unwrap()
         } else {
             &self.value

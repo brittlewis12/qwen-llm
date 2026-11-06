@@ -6,6 +6,68 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the current state and evidence index.
 
+## 2026-11-06 - GLM Roofline Follow-Up: Wide Q6 at 2048 Rows, +9.77% Prefill
+
+- Base **`29be820c`**, M5 Ultra, unchanged UD-IQ3_XXS `glm5-next` alias.
+  Ordinary decode at 8K is **17.63 ms/token**: median CPU encode **0.358 ms**,
+  ordinary command GPU time **16.914 ms**, encode-through-wait **17.526 ms**.
+  Temporary host clocks leave about 0.10 ms for status/logit handling and
+  instrumentation. CPU encoding is only about 2%; the gap is mostly GPU work
+  and dependencies. The clocks and temporary switches were removed.
+- A 2048-row dense chunk takes **1978.459 / 1977.008 ms**; the next chunk
+  at depth 2048 takes **2382.061 / 2382.494 ms**. Stage-profiled dense-chunk
+  routed experts total **771.0 ms**, MLA **400.6**, KDA input projections
+  **290.7**, KDA output projection **96.6**, shared expert **93.8 ms**.
+  MLA grows to **803.5 ms** in the sparse chunk. Isolated-dispatch Q6 tensor
+  durations sum to **804.8 ms** in the dense chunk (diagnostic, not an
+  additive wall-time attribution). There are **288 narrow Q6 tensor calls**
+  per chunk, while short packets already use the qualified wide Q6 tile.
+  The first sparse per-dispatch capture overflowed its 4096-slot buffer;
+  its partial timings were discarded. Ordinary and stage runs completed.
+- **Rejected decode experiment:** distributing the HC finish's serial 4x4
+  Sinkhorn controls across a SIMD group takes **0.700854 vs 0.658229 ms**
+  for 90 finish calls, about 6.5% slower. Mixes, gates, collapsed values and
+  normalized outputs match bits in the operator screen; combination entries
+  differ by at most 1.19e-7. No whole-model campaign or default change.
+- **Default on:** use the existing 64-query-row Q6_K tensor tile at exactly
+  **2048 command rows** in GLM Fast/Half prefill. The prior 512/1024 policy
+  stays independent. Same native weights, Half operands and F32 accumulators;
+  no new shader or persistent buffer. Dynamic threadgroup memory is 16 KiB
+  instead of 8 KiB, with the existing PSO/device capacity preflight. Global
+  tensor, resolved arithmetic, dtype, binding and geometry guards still win;
+  Exact/F32 and devices without TensorOps keep their routes. Rollback:
+  **`QWEN_GLM53_DENSE_Q6_WIDE=0`** restores the 2048-row narrow tile.
+- Initial whole-pp4096 kill: narrow **936.904 / 939.112 tok/s**, wide
+  **1031.400 / 1031.457**. Final same-binary **ABBA**, warmup + two retained
+  reps/arm, 30 s between arms, canonical Metal lease + build lock, nice 10;
+  thermal pressure **0 before/after every arm**. Production prefill/forward
+  and endpoint logits; immutable saved prefixes restored outside timers.
+  Seed 1 prefill and salted depth prefixes, TG seeds 2/3. Every sample follows.
+
+  | Cell / depth | Narrow samples tok/s | Wide/default samples tok/s | Median ratio |
+  | --- | --- | --- | ---: |
+  | pp4096 / 0 | 939.495286,939.486864,939.200865,939.150609 | 1031.263122,1031.036459,1031.134722,1031.128233 | **1.09771x** |
+  | pp512 / 8192 | 713.430131,713.655906,709.595624,711.420587 | 712.838673,713.324564,712.513005,712.182146 | 1.00035x |
+  | tg64 / 0 | 62.410379,62.402093,62.221091,62.299130 | 62.296949,62.411094,62.283596,62.344641 | 0.99952x |
+  | tg64 / 8192 | 56.819416,56.805192,56.685213,56.738567 | 56.871120,56.872533,56.834189,56.826277 | 1.00142x |
+
+  pp4096 is about **27.0%** of the 131.4-TFLOP/s useful-matmul roof, versus
+  24.3% in the preceding native standing. Against that unchanged pinned
+  llama.cpp pp4096 reference (**795.555 tok/s**, not rerun), this is about
+  **1.296x**. The saved-prefix narrow control is slightly faster than the
+  preceding fresh-session native baseline; use the paired ratio for the gain.
+- Native all-row teacher forcing: **4096 targets/document**, code and Bash
+  prose, at depths **0 and 8192**, 2048-row commands, independent on/off
+  sessions including each long prefix: **16384 paired targets**. Complete
+  vocabulary F64 log-sum-exp; identical checked input/target IDs, all logits
+  finite. Per-cell and pooled **delta NLL = mean/max KL = 0**; argmax
+  **16384/16384**. NLL off/on is **0.985417744 / 0.103965558** for code /
+  prose at 0, **0.603965698 / 0.089048077** at 8K. Every scored on chunk
+  witnesses **288 Q6-wide calls**, every off chunk zero. This passes the
+  unchanged |delta NLL| <=0.005 and mean KL <=0.01 bars. CPU policy tests
+  cover the rollback, adjacent row boundaries, unchanged short policy and
+  Exact/F32 exclusion. M4's tensor-unavailable route is unchanged.
+
 ## 2026-11-06 — Flash-Next rooflines: faster decode on M4/M5, SIMD QSA for deep M4 appends
 
 - Baseline main `1a56970b`, branch `perf/fn-roofline`. Both machines use **Qwen3.8-Flash-Next-GSQ-RCO-IQ3_S-00001-of-00002.gguf**: the M5 model-search root and the M4 external weights archive. Tensor payload **83,606,638,080 bytes**, **176,943,899,520 parameters**. Comparator: llama.cpp v0.9.0 `cd959bae99ff`, Metal, F16 KV, batch/ubatch 2048. Decode is known-input tg64 with full endpoint-logit copy, without sampling. Two retained samples per standing/CLI arm.

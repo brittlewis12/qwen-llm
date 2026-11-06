@@ -33,7 +33,7 @@ fn cpu_short_q6_wide_is_explicit_and_keeps_shared_q8_capability() {
                 .ends_with("tensor_wide")
         );
     }
-    for rows in [1, 511, 513, 1023, 1025, 2048, 4096] {
+    for rows in [1, 511, 513, 1023, 1025, 4096] {
         assert_eq!(Tile::selected_for_rows(GgmlType::Q6_K, rows), Tile::Narrow);
     }
     for rows in [512, 1024] {
@@ -47,6 +47,42 @@ fn cpu_short_q6_wide_is_explicit_and_keeps_shared_q8_capability() {
         );
     }
     assert_eq!(Tile::Q6Wide.threadgroup_bytes(), 16384);
+}
+
+#[test]
+fn cpu_large_q6_wide_is_bounded_and_rolls_back_independently() {
+    for enabled in [false, true] {
+        let _scope = Q6WideScope::new(enabled);
+        assert_eq!(
+            Tile::selected_for_rows(GgmlType::Q6_K, 2048),
+            if enabled { Tile::Q6Wide } else { Tile::Narrow }
+        );
+        for rows in [1, 511, 513, 1023, 1025, 2047, 2049, 4096] {
+            assert_eq!(Tile::selected_for_rows(GgmlType::Q6_K, rows), Tile::Narrow);
+        }
+        for rows in [512, 1024] {
+            assert_eq!(
+                Tile::selected_for_rows(GgmlType::Q6_K, rows),
+                if crate::glm5_next_metal::short_prefill::enabled() {
+                    Tile::Q6Wide
+                } else {
+                    Tile::Narrow
+                }
+            );
+        }
+        // The enclosing eligibility gate still refuses Exact/F32.
+        for lineage in [PackedLineage::Fast, PackedLineage::Exact] {
+            for precision in FastPrecision::ALL {
+                for mode in [StageMode::Fast, StageMode::FastF32, StageMode::Exact] {
+                    let arith = Arith { lineage, precision };
+                    assert_eq!(
+                        eligible(arith, mode, GgmlType::Q6_K, 4096, 8192, 2048).unwrap(),
+                        arith == HALF && mode == StageMode::Fast && super::enabled()
+                    );
+                }
+            }
+        }
+    }
 }
 
 #[test]

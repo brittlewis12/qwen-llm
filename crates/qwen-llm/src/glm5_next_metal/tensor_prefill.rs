@@ -13,6 +13,12 @@ use objc2_metal::{MTLCommandBuffer, MTLComputePipelineState, MTLDevice, MTLResou
 
 const KERNEL: &str = "glm5_dense_tensor_prefill";
 const MIN_ROWS: usize = 1024;
+
+crate::env_flag!(
+    /// Default-on wide Q6_K tile at exactly 2048 GLM prefill rows. Zero restores the narrow tile there; the independent 512/1024 short-prefill policy is unchanged. Enclosing Fast/Half, tensor-tier, binding and capacity guards remain mandatory.
+    default_on large_q6_wide_requested,
+    "QWEN_GLM53_DENSE_Q6_WIDE"
+);
 const DEFAULT_ENABLED: bool = true;
 const THREADGROUP_BYTES: usize = 8192;
 
@@ -26,6 +32,35 @@ crate::env_flag!(
 thread_local! {
     static OVERRIDE: std::cell::Cell<Option<bool>> = const { std::cell::Cell::new(None) };
     static Q8_WIDE_OVERRIDE: std::cell::Cell<Option<bool>> = const { std::cell::Cell::new(None) };
+    static Q6_WIDE_OVERRIDE: std::cell::Cell<Option<bool>> = const { std::cell::Cell::new(None) };
+}
+
+#[cfg(test)]
+struct Q6WideScope(Option<bool>, std::marker::PhantomData<std::rc::Rc<()>>);
+
+#[cfg(test)]
+impl Q6WideScope {
+    fn new(enabled: bool) -> Self {
+        Self(
+            Q6_WIDE_OVERRIDE.with(|v| v.replace(Some(enabled))),
+            std::marker::PhantomData,
+        )
+    }
+}
+
+#[cfg(test)]
+impl Drop for Q6WideScope {
+    fn drop(&mut self) {
+        Q6_WIDE_OVERRIDE.with(|v| v.set(self.0));
+    }
+}
+
+fn large_q6_wide_enabled() -> bool {
+    #[cfg(test)]
+    if let Some(value) = Q6_WIDE_OVERRIDE.with(std::cell::Cell::get) {
+        return value;
+    }
+    large_q6_wide_requested()
 }
 
 /// Independent wide/narrow control; never enables the enclosing tensor route.
@@ -69,7 +104,9 @@ enum Tile {
 
 impl Tile {
     fn selected_for_rows(dtype: GgmlType, rows: usize) -> Self {
-        if dtype == GgmlType::Q6_K && matches!(rows, 512 | 1024) && super::short_prefill::enabled()
+        if dtype == GgmlType::Q6_K
+            && ((matches!(rows, 512 | 1024) && super::short_prefill::enabled())
+                || (rows == 2048 && large_q6_wide_enabled()))
         {
             Self::Q6Wide
         } else {

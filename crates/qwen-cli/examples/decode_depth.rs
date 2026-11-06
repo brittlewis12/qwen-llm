@@ -42,6 +42,8 @@ struct Args {
     positions: Vec<usize>,
     #[arg(long)]
     narrow: bool,
+    #[arg(long, default_value = "code")]
+    doc: String,
 }
 fn emit(v: serde_json::Value) {
     println!("{v}");
@@ -209,17 +211,17 @@ fn op(ctx: &MetalContext, a: &Args) -> Result<()> {
         let inc = error(&incumbent);
         let mut config_inc = std::collections::BTreeMap::<(usize, usize), Vec<f32>>::new();
         let configs: Vec<_> = if a.narrow {
-            vec![(256, 32, false), (256, 32, true)]
+            vec![
+                (256, if group == 8 { 64 } else { 32 }, false),
+                (256, if group == 8 { 64 } else { 32 }, true),
+            ]
         } else {
             [64, 128, 256, 512, 1024]
                 .into_iter()
                 .flat_map(|n| {
-                    [16, 32, 64, 128].into_iter().flat_map(move |c| {
-                        [false, true]
-                            .into_iter()
-                            .filter(move |q| !q || group == 6)
-                            .map(move |q| (n, c, q))
-                    })
+                    [16, 32, 64, 128]
+                        .into_iter()
+                        .flat_map(move |c| [false, true].into_iter().map(move |q| (n, c, q)))
                 })
                 .collect()
         };
@@ -264,6 +266,86 @@ fn op(ctx: &MetalContext, a: &Args) -> Result<()> {
     }
     Ok(())
 }
+#[derive(Default)]
+struct Score {
+    n: usize,
+    off: f64,
+    on: f64,
+    kl: f64,
+    max_kl: f64,
+    agree: usize,
+}
+impl Score {
+    fn add(&mut self, s: &Self) {
+        self.n += s.n;
+        self.off += s.off;
+        self.on += s.on;
+        self.kl += s.kl;
+        self.max_kl = self.max_kl.max(s.max_kl);
+        self.agree += s.agree;
+    }
+    fn report(&self) -> serde_json::Value {
+        json!({"targets":self.n,"nll_off":self.off/self.n as f64,"nll_on":self.on/self.n as f64,"delta_nll":(self.on-self.off)/self.n as f64,"mean_kl":self.kl/self.n as f64,"max_kl":self.max_kl,"argmax_agree":self.agree})
+    }
+    fn check(&self) -> Result<()> {
+        ensure!(
+            self.n > 0
+                && ((self.on - self.off) / self.n as f64).abs() <= 0.005
+                && self.kl / self.n as f64 <= 0.01,
+            "distribution cell failed: {}",
+            self.report()
+        );
+        Ok(())
+    }
+}
+fn score(a: &[f32], b: &[f32], targets: &[i32], v: usize) -> Result<Score> {
+    ensure!(
+        a.len() == targets.len() * v && a.len() == b.len(),
+        "logit extents"
+    );
+    let mut s = Score::default();
+    for (r, &target) in targets.iter().enumerate() {
+        let x = &a[r * v..(r + 1) * v];
+        let y = &b[r * v..(r + 1) * v];
+        ensure!(x.iter().chain(y).all(|x| x.is_finite()), "nonfinite logits");
+        let arg = |z: &[f32]| {
+            z.iter()
+                .enumerate()
+                .max_by(|a, b| a.1.total_cmp(b.1))
+                .unwrap()
+                .0
+        };
+        let (ax, ay) = (arg(x), arg(y));
+        let (mx, my) = (f64::from(x[ax]), f64::from(y[ay]));
+        let zx = x.iter().map(|&x| (f64::from(x) - mx).exp()).sum::<f64>();
+        let zy = y.iter().map(|&x| (f64::from(x) - my).exp()).sum::<f64>();
+        let (lx, ly) = (mx + zx.ln(), my + zy.ln());
+        let kl = x
+            .iter()
+            .zip(y)
+            .map(|(&a, &b)| (f64::from(a) - mx).exp() / zx * (f64::from(a) - f64::from(b)))
+            .sum::<f64>()
+            + ly
+            - lx;
+        ensure!(kl.is_finite() && kl >= -1e-7, "invalid KL");
+        s.n += 1;
+        s.off += lx - f64::from(x[target as usize]);
+        s.on += ly - f64::from(y[target as usize]);
+        s.kl += kl.max(0.);
+        s.max_kl = s.max_kl.max(kl);
+        s.agree += usize::from(ax == ay);
+    }
+    Ok(s)
+}
+
+fn frozen(path: &str) -> Result<String> {
+    let out = std::process::Command::new("git")
+        .args(["show", &format!("be4bac16:{path}")])
+        .output()?;
+    ensure!(out.status.success(), "frozen corpus missing");
+    Ok(String::from_utf8(out.stdout)?)
+}
+
 fn run() -> Result<()> {
     qwen_cli::shutdown::install()?;
     let a = Args::parse();
@@ -300,8 +382,32 @@ fn run_args(a: Args) -> Result<()> {
     );
     model.set_prefix_cache_max_bytes(64 << 30);
     let capacity = a.depth + a.tokens.max(2048);
-    let prefix = ids(a.depth, model.arch().vocab_size, 1 ^ 0x9e37_79b9_7f4a_7c15);
-    let tokens = ids(a.tokens, model.arch().vocab_size, 1);
+    let quality = matches!(a.mode.as_str(), "quality" | "greedy");
+    let (prefix, tokens) = if quality {
+        let (p, t) = match a.doc.as_str() {
+            "code" => (
+                "crates/qwen-llm/src/metal_forward/mod.rs",
+                "crates/qwen-llm/src/metal_dflash.rs",
+            ),
+            "prose" => ("docs/PERF-LOG.md", "docs/APPLE-GPU-OPTIMIZATION.md"),
+            _ => anyhow::bail!("unknown corpus"),
+        };
+        let tok = model.tokenizer()?;
+        let pi = tok.encode(&frozen(p)?, false)?;
+        let ti = tok.encode(&frozen(t)?, false)?;
+        ensure!(ti.len() > a.tokens, "corpus too short");
+        let prefix = pi.into_iter().cycle().take(a.depth).collect::<Vec<_>>();
+        let tokens = ti[..a.tokens + 1].to_vec();
+        emit(
+            json!({"record":"corpus","doc":a.doc,"revision":"be4bac16","prefix_sha256":hash(bytemuck::cast_slice(&prefix)),"teacher_sha256":hash(bytemuck::cast_slice(&tokens))}),
+        );
+        (prefix, tokens)
+    } else {
+        (
+            ids(a.depth, model.arch().vocab_size, 1 ^ 0x9e37_79b9_7f4a_7c15),
+            ids(a.tokens, model.arch().vocab_size, 1),
+        )
+    };
     let mut request = prefix.clone();
     request.extend_from_slice(&tokens);
     let store = DurableCheckpointStore::new(
@@ -330,7 +436,24 @@ fn run_args(a: Args) -> Result<()> {
         thermal("prepare", "after")?;
         return Ok(());
     }
-    if a.depth > 0 {
+    let checkpoint = if quality {
+        thermal("quality-prefix", "before")?;
+        let mut p = prefill_plan::allocate_prefill_request_state(
+            &model,
+            prefill_plan::PrefillChunkArg::Auto,
+            a.depth.max(1),
+            capacity,
+            true,
+        )?;
+        model.prefill(&mut p.sequence, &mut p.scratch, &prefix)?;
+        let checkpoint =
+            model.prepare_checkpoint_boundary(&p.sequence, prefix.clone(), None, None, None, 0)?;
+        thermal("quality-prefix", "after")?;
+        Some(checkpoint)
+    } else {
+        None
+    };
+    if a.depth > 0 && !quality {
         let mut seq = model.create_sequence(SequenceConfig::new(capacity))?;
         let restored = model.restore_durable_prefix(&store, &mut seq, &request, 32 << 30)?;
         let hit = restored
@@ -344,7 +467,9 @@ fn run_args(a: Args) -> Result<()> {
     }
     let restore = || -> Result<Sequence> {
         let mut seq = model.create_sequence(SequenceConfig::new(capacity))?;
-        if a.depth > 0 {
+        if let Some(checkpoint) = &checkpoint {
+            model.restore_prepared_checkpoint(checkpoint, &mut seq, &request)?;
+        } else if a.depth > 0 {
             ensure!(
                 model.restore_cached_prefix(&mut seq, &request)?.is_some(),
                 "RAM prefix miss"
@@ -353,6 +478,64 @@ fn run_args(a: Args) -> Result<()> {
         ensure!(seq.position() == a.depth, "wrong restored position");
         Ok(seq)
     };
+    if a.mode == "quality" {
+        let (mut off, mut on) = (restore()?, restore()?);
+        let mut pooled = Score::default();
+        for start in (0..a.tokens).step_by(128) {
+            let end = (start + 128).min(a.tokens);
+            let mut outputs = Vec::new();
+            for (candidate, seq) in [(false, &mut off), (true, &mut on)] {
+                thermal(&format!("quality-{start}-{candidate}"), "before")?;
+                let mut logits = Vec::new();
+                with_attn_v4_register_q_override(candidate, || -> Result<()> {
+                    for &id in &tokens[start..end] {
+                        qwen_cli::shutdown::checkpoint()?;
+                        logits.extend(model.decode_token(seq, id)?);
+                    }
+                    Ok(())
+                })?;
+                ensure!(
+                    logits.iter().all(|x| x.is_finite()),
+                    "nonfinite teacher logits"
+                );
+                outputs.push(logits);
+                thermal(&format!("quality-{start}-{candidate}"), "after")?;
+            }
+            let s = score(
+                &outputs[0],
+                &outputs[1],
+                &tokens[start + 1..end + 1],
+                model.arch().vocab_size as usize,
+            )?;
+            pooled.add(&s);
+            emit(
+                json!({"record":"quality_slice","doc":a.doc,"depth":a.depth,"start":start,"score":s.report()}),
+            );
+        }
+        emit(json!({"record":"quality_cell","doc":a.doc,"depth":a.depth,"score":pooled.report()}));
+        return pooled.check();
+    }
+    if a.mode == "greedy" {
+        for candidate in [false, true] {
+            thermal(&format!("greedy-{candidate}"), "before")?;
+            let mut seq = restore()?;
+            let mut token = tokens[0];
+            let mut output = Vec::new();
+            with_attn_v4_register_q_override(candidate, || -> Result<()> {
+                for _ in 0..160 {
+                    qwen_cli::shutdown::checkpoint()?;
+                    token = model.decode_token_greedy(&mut seq, token)?.into_token()?;
+                    output.push(token);
+                }
+                Ok(())
+            })?;
+            emit(
+                json!({"record":"greedy","candidate":candidate,"depth":a.depth,"ids_sha256":hash(bytemuck::cast_slice(&output)),"text_sha256":hash(model.tokenizer()?.decode(&output).as_bytes()),"ids":output}),
+            );
+            thermal(&format!("greedy-{candidate}"), "after")?;
+        }
+        return Ok(());
+    }
     let mut warm = restore()?;
     run_decode(&model, &mut warm, &tokens)?;
     drop(warm);

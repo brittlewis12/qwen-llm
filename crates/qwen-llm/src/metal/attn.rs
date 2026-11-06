@@ -994,10 +994,26 @@ pub fn encode_attn_decode_v4_f32(
         && group_tile == 4
         && tile_c == 64
         && attn_v4_pack() == 4;
-    let use_register_q = group == 6
+    let use_register_q = (group == 6 || (group == 8 && group_tile == 4))
+        && !use_pack4
+        && !use_g8_bcast
+        && !use_g8_vstage
         && k_cache.dtype == GgmlType::F16
         && ATTN_REGISTER_Q_OVERRIDE.with(|s| s.get()).unwrap_or(false);
-    let pipeline_name = if use_register_q {
+    let pipeline_name = if use_register_q && group == 8 {
+        match tile_c {
+            16 => "kernel_attn_decode_v4_g8_t4_qreg_c16_f32",
+            32 => "kernel_attn_decode_v4_g8_t4_qreg_c32_f32",
+            64 => "kernel_attn_decode_v4_g8_t4_qreg_c64_f32",
+            128 => "kernel_attn_decode_v4_g8_t4_qreg_c128_f32",
+            _ => {
+                return Err(MetalError::BadShape {
+                    kernel: "attn_decode_v4",
+                    detail: "unsupported register-Q tile".into(),
+                });
+            }
+        }
+    } else if use_register_q {
         match tile_c {
             16 => "kernel_attn_decode_v4_qreg_c16_f32",
             32 => "kernel_attn_decode_v4_qreg_c32_f32",

@@ -447,7 +447,7 @@ inline void attn_v4_main_body_q8(
     }
 }
 
-template <ushort GROUP_TOTAL, ushort GROUP_TILE, ushort C, bool HEAD_MAJOR>
+template <ushort GROUP_TOTAL, ushort GROUP_TILE, ushort C, bool HEAD_MAJOR, bool REGISTER_Q = false>
 inline void attn_v4_main_subgroup_body(
         constant attn_v4_args & args,
         device const float    * q,
@@ -471,6 +471,7 @@ inline void attn_v4_main_subgroup_body(
     const uint p_end_raw = p_start + args.rows_per_partition;
     const uint p_end = p_end_raw < args.n_pos ? p_end_raw : args.n_pos;
 
+    float4 qr[REGISTER_Q ? GROUP_TILE : 1][DK4_PER_LANE];
     {
         device const float4 * q4_base =
             (device const float4 *)(q + ((ulong)kvh * GROUP_TOTAL + g_base) * DK);
@@ -479,11 +480,12 @@ inline void attn_v4_main_subgroup_body(
             for (ushort ii = 0; ii < DK4_PER_LANE; ++ii) {
                 const ushort idx = g * DK4 + ii * NW + tiisg;
                 float4 qv = q4_base[idx];
-                sq4[idx] = half4(qv * args.scale);
+                if (REGISTER_Q) qr[g][ii] = float4(half4(qv * args.scale));
+                else sq4[idx] = half4(qv * args.scale);
             }
         }
     }
-    threadgroup_barrier(mem_flags::mem_threadgroup);
+    if (!REGISTER_Q) threadgroup_barrier(mem_flags::mem_threadgroup);
 
     float  m_state[GROUP_TILE];
     float  l_state[GROUP_TILE];
@@ -539,7 +541,7 @@ inline void attn_v4_main_subgroup_body(
                     const half4 k_chunk = pk4[ii * NW + tiisg];
                     const float4 k_f32 = float4(k_chunk);
                     for (ushort g = 0; g < GROUP_TILE; ++g) {
-                        const float4 q_f32 = float4(sq4[g * DK4 + ii * NW + tiisg]);
+                        const float4 q_f32 = REGISTER_Q ? qr[g][ii] : float4(sq4[g * DK4 + ii * NW + tiisg]);
                         partial[g] += dot(k_f32, q_f32);
                     }
                 }
@@ -1403,7 +1405,7 @@ ATTN_V4_G16_SUBGROUP_KERNEL(kernel_attn_decode_v4_g16_t4_f32,       4, 32)
 ATTN_V4_G16_SUBGROUP_KERNEL(kernel_attn_decode_v4_g16_t4_c64_f32,   4, 64)
 ATTN_V4_G16_SUBGROUP_KERNEL(kernel_attn_decode_v4_g16_t4_c128_f32,  4, 128)
 
-#define ATTN_V4_G8_SUBGROUP_KERNEL(NAME, GROUP_TILE_VAL, C_VAL) \
+#define ATTN_V4_G8_SUBGROUP_IMPL(NAME, GROUP_TILE_VAL, C_VAL, REGISTER_Q_VAL) \
 [[max_total_threads_per_threadgroup(32)]] \
 kernel void NAME( \
         constant attn_v4_args & args      [[buffer(0)]], \
@@ -1416,9 +1418,17 @@ kernel void NAME( \
         threadgroup  float    * ss         [[threadgroup(1)]], \
         uint3  tgpig [[threadgroup_position_in_grid]], \
         ushort tiisg [[thread_index_in_simdgroup]]) { \
-    attn_v4_main_subgroup_body<8, GROUP_TILE_VAL, C_VAL, false>(args, q, k_cache, v_cache, o_partial, ml_partial, \
+    attn_v4_main_subgroup_body<8, GROUP_TILE_VAL, C_VAL, false, REGISTER_Q_VAL>(args, q, k_cache, v_cache, o_partial, ml_partial, \
                                                          sq, ss, tgpig, tiisg); \
 }
+
+#define ATTN_V4_G8_SUBGROUP_KERNEL(NAME, GROUP_TILE_VAL, C_VAL) \
+    ATTN_V4_G8_SUBGROUP_IMPL(NAME, GROUP_TILE_VAL, C_VAL, false)
+
+ATTN_V4_G8_SUBGROUP_IMPL(kernel_attn_decode_v4_g8_t4_qreg_c16_f32, 4, 16, true)
+ATTN_V4_G8_SUBGROUP_IMPL(kernel_attn_decode_v4_g8_t4_qreg_c32_f32, 4, 32, true)
+ATTN_V4_G8_SUBGROUP_IMPL(kernel_attn_decode_v4_g8_t4_qreg_c64_f32, 4, 64, true)
+ATTN_V4_G8_SUBGROUP_IMPL(kernel_attn_decode_v4_g8_t4_qreg_c128_f32, 4, 128, true)
 
 #define ATTN_V4_G16_SUBGROUP_HM_KERNEL(NAME, GROUP_TILE_VAL, C_VAL) \
 kernel void NAME( \

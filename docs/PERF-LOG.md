@@ -6,6 +6,77 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the current state and evidence index.
 
+## 2026-11-07 - V4.1 Engram/GPU Append Overlap: Opt-In; Pooled Control Miss
+
+- Code **`976c1890`**, base **`f6547e85`**. **Default off**; opt in with
+  **`QWEN_V41_ENGRAM_OVERLAP=1`**, `=0` retains preparation before one GPU
+  command. M5 Ultra, Full prefill, exactly **512 command rows at depth 8K+**,
+  H5120/F2304/E384/top-6/40 layers and Engram consumers at 1/14. Same main
+  four-shard **DeepSeek-V4.1-Flash-1017-GSQ-RCO-IQ2_XS** plus **IQ4_NL Engram**
+  as the production roofline census: real mixed types and all 384 experts/top-6.
+- Submit layers **[0,1), [1,14), [14,40)** in sequence. The caller reads and
+  uploads the next Engram while the preceding prefix runs, then joins before
+  encoding its consumer. Per-segment autorelease pools and a checked RAII
+  submission guard bound live work to **one pending command and one existing
+  chunk scratch**. IO errors, cancellation and unwind drain submitted work;
+  partial state stays poisoned without advancing addresses. No worker,
+  extra buffer, shader, precision change or memory-plan term. Reader policy
+  and the incumbent layer bodies are unchanged.
+- Timing/distribution source **`ab8b2b5f`**, archived at
+  `evidence/v41-engram-overlap`. It was rebased over unrelated Flash-Next work
+  and then made opt-in; the enabled V4.1 path is unchanged. Stock native
+  `qwen-bench suite --pp 512 --depth D --runs 1`, normal model/row warmups,
+  **four fresh processes per cell**, one retained fresh-state append/process.
+  Final 32K **BAAB** is independent of discovery; 8K/128K **ABBA**. Enabled
+  arms unset the then-default-on flag; rollback arms set `0`. Clean matching
+  build/runtime identities, no overrides/features; no snapshot timing promotion.
+
+  | Depth | Off median ms | On median ms | On tok/s | Ratio |
+  | --- | ---: | ---: | ---: | ---: |
+  | 8192 | 632.839 | 581.284 | 880.809 | 1.08869x |
+  | 32768 | 694.965 | 610.310 | 838.917 | 1.13871x |
+  | 131072 | 848.854 | 743.500 | 688.635 | 1.14170x |
+
+  All active cells clear the predeclared **1.05x** median gate with both
+  chronological pairs positive: **1.010/1.165x**, **1.151/1.127x**,
+  **1.170/1.113x** respectively. 8K rollback spans **578.454-687.224 ms**,
+  enabled **572.700-589.868**; preserve that spread. Earlier discovery:
+  32K **1.20590x**; separate 8K ABBA/BAAB **1.07203x / 1.09913x**.
+- **Automatic promotion held.** Inactive cold pp4096 control is **-0.972%**
+  in median latency. Inactive pp256/32K ABBA is **+3.491%**, missing its
+  1% bar. One bounded, separately declared BAAB confirmation, five native
+  fresh-state samples/process, gives **493.497 -> 494.224 ms (+0.147%)**.
+  Pooling **all 24 raw samples** gives **492.778 -> 498.518 (+1.165%)**,
+  still outside the declared **1% pooled control gate**. At pp256, selection
+  returns before reading the flag; these are identical engine paths, but the
+  noisy placebo does not pass the gate. No further control retries and no
+  default-on claim. The failed block and confirmation remain in the archive.
+- One diagnostic 32K pair, not promotion evidence: wall **723.814 ->
+  617.812 ms**, GPU **561.093 -> 555.512**. Old Engram preparation is
+  **121.672 ms** before submission; enabled reads take **56.299 / 48.345 ms**
+  after committing their prefixes. GPU work stays nearly constant while host
+  reads overlap it; driver scheduling metrics can overlap and are not additive.
+- Native production-plan code/prose at 8K, prose at 32K/128K and code at
+  **32769/131073**, **128 teacher-forced targets/cell/policy**, complete
+  **129280-word vectors**: all **768 predictions/policy bitwise equal**,
+  finite, **dNLL = mean/max KL = 0**. Binding/load plans match across policies.
+  Seven focused GPU cases cover append/decode equality, IO failure, cancellation,
+  discarded completion, unwind, guard drop and sampling. Six safety/numeric
+  cases also pass Metal API and shader validation; sampling passes API validation.
+- Final opt-in source **`976c1890`**: full
+  `cargo test --offline --locked --release -p qwen-llm --lib`:
+  **2465 passed, 0 failed, 738 ignored**, **116.03 s**. Functional native
+  8K coverage confirms **1 default / 3 opt-in submits**, spanning 40 layers;
+  its profiled/no-warmup timings are not promoted. Rebuilt stock CLI with
+  opt-in: **37376 input + 4 output tokens**, expected **`V41_OK`**, EOS;
+  eligible final chunk **[36864,37376)**. CPU contracts pass on `976c1890`.
+- Build lock, nice 10, canonical Metal leases; thermal pressure **0 throughout
+  valid GPU arms**. Frozen helper sources/binary hashes, plans, every arm,
+  failed control decision, numerical vectors and final witnesses:
+  `$HOME/qwen-runs/2026-11-07-v41-engram-overlap` on metagross. Final branch
+  is one implementation/tests commit plus this evidence commit; prototype
+  history is separate under `research/v41-engram-overlap*`.
+
 ## 2026-11-07 - Flash-Next Narrow F32 Prefill: M5/M4
 
 - Base **`5db4cb0b`**, qualified production/ENV tree **`c0c87c2c`**.

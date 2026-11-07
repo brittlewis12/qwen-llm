@@ -265,26 +265,6 @@ is not a residency set.
   value because its Metal allocations stay wired anyway. With mapped weights,
   the backend pulses the retained GGUF buffers through the same idle lifecycle.
 
-### V4.1 retained-weight mapping
-
-`QWEN_SERVE_V41_WEIGHT_WINDOW_MIB` is a serve-only soft coalescing target, read
-once before loading weights. Unset or 0 preserves the ordinary loader; 4096
-requests approximately 4 GiB retained windows. Invalid or overflowing values
-are startup errors. Oversized singleton tensors remain eligible up to Metal's
-device buffer limit; this is not a model-fit cap.
-
-The selected plan is revalidated by the existing loader and uses normal memory
-admission. Startup reports requested/effective target, window count, largest
-window, exposed mapping bytes and private-shadow bytes. These describe mapping
-geometry, not physical residency. Disk Engram remains excluded.
-
-This setting is independent of idle keep-alive and does not select CED, change
-prefill chunks, or change numerical kernels. Both controls remain opt-in so
-they can be compared independently. Smaller mappings reduced observed driver
-tails on an earlier artifact; that is motivation for current-artifact testing,
-not proof that the reported cached-prefill regression is fixed. See
-[the investigation](bench/2026-10-30-v41-serve-latency.md).
-
 ### Durable snapshots (cross-restart warmth)
 
 Qwen (3.5/3.6/3.8 dense and MoE) and DeepSeek V4 keep warm prefixes across

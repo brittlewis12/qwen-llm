@@ -1,3 +1,5 @@
+> Historical checkpoint: the serve-only weight-window selector was removed after its current-artifact comparison showed no benefit. Idle keep-alive remains available.
+
 # V4.1 Serve Latency: Idle Driver Delay, Long Tail Still Open
 
 ## Status

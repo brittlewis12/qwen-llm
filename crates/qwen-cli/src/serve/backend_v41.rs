@@ -90,7 +90,6 @@ pub(super) struct Prepared {
     live_state_bytes: Option<u64>,
     max_active: usize,
     sample_workers: usize,
-    weight_window_bytes: Option<usize>,
 }
 impl Prepared {
     pub(super) fn new(
@@ -125,7 +124,6 @@ impl Prepared {
             max_active,
             sample_workers: non_negative_env(SAMPLE_WORKERS_ENV)?.unwrap_or(max_active - 1),
             live_state_bytes,
-            weight_window_bytes: mapping::target_from_env()?,
             snapshot_mib: invocation.snapshot_cache_mib,
             snapshot_policy: invocation.snapshot_policy,
             settings: Settings::new(
@@ -149,11 +147,7 @@ pub(super) fn start(
     crate::shutdown::checkpoint()?;
     let ctx = MetalContext::new()?;
     let started = Instant::now();
-    let weights = mapping::load(
-        &ctx,
-        &std::sync::Arc::new(gguf),
-        prepared.weight_window_bytes,
-    )?;
+    let weights = crate::deepseek_v41::load(&ctx, std::sync::Arc::new(gguf))?;
     let forward =
         Forward::from_resident(&ctx, &weights, weights.token_map.clone(), weights.raw_pad)
             .map_err(anyhow::Error::msg)?;
@@ -226,7 +220,6 @@ fn warm_batched_decode(forward: &Forward<'_>, width: usize, token: u32) -> Resul
 
 mod cursor;
 mod execution;
-mod mapping;
 #[path = "backend_v41/io.rs"]
 mod memory_io;
 mod reuse;

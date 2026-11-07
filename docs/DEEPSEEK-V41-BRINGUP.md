@@ -54,11 +54,7 @@ requests and continuous-batch compute quanta track activity separately from
 HTTP completion; native errors close the window even when cancellation masks
 the published error. This integration is not a measured latency-fix claim.
 
-`QWEN_SERVE_V41_WEIGHT_WINDOW_MIB` independently selects a serve-only soft
-coalescing target: unset/0 keeps ordinary loading; 4096 requests 4 GiB windows.
-Larger singleton tensors remain eligible up to the device limit. Existing
-loader admission and source checks apply. Neither control enables CED or
-changes arithmetic; current-artifact M5 latency validation remains separate.
+Serving uses the ordinary retained-weight loader. Idle keep-alive does not select CED or change arithmetic.
 
 ## Readiness And Evidence Limits
 

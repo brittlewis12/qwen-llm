@@ -5545,62 +5545,6 @@
   },
   {
     "target": "qwen",
-    "name": "serve::backend_v41::mapping::tests::byte_conversion_overflow_fails",
-    "class": "cpu",
-    "ignored": false,
-    "reason": "Pre-existing maintained-main discovery omission reviewed during cache-admission repair: pure serve mapping/parser arithmetic and sparse metadata, or CPU-only fake native-result/profile-scope controls; no Metal context or execution."
-  },
-  {
-    "target": "qwen",
-    "name": "serve::backend_v41::mapping::tests::effective_target_rounds_to_pages_and_clamps_to_device",
-    "class": "cpu",
-    "ignored": false,
-    "reason": "Pre-existing maintained-main discovery omission reviewed during cache-admission repair: pure serve mapping/parser arithmetic and sparse metadata, or CPU-only fake native-result/profile-scope controls; no Metal context or execution."
-  },
-  {
-    "target": "qwen",
-    "name": "serve::backend_v41::mapping::tests::integer_overflow_fails",
-    "class": "cpu",
-    "ignored": false,
-    "reason": "Pre-existing maintained-main discovery omission reviewed during cache-admission repair: pure serve mapping/parser arithmetic and sparse metadata, or CPU-only fake native-result/profile-scope controls; no Metal context or execution."
-  },
-  {
-    "target": "qwen",
-    "name": "serve::backend_v41::mapping::tests::invalid_empty_negative_and_non_decimal_values_fail",
-    "class": "cpu",
-    "ignored": false,
-    "reason": "Pre-existing maintained-main discovery omission reviewed during cache-admission repair: pure serve mapping/parser arithmetic and sparse metadata, or CPU-only fake native-result/profile-scope controls; no Metal context or execution."
-  },
-  {
-    "target": "qwen",
-    "name": "serve::backend_v41::mapping::tests::largest_representable_mib_succeeds",
-    "class": "cpu",
-    "ignored": false,
-    "reason": "Pre-existing maintained-main discovery omission reviewed during cache-admission repair: pure serve mapping/parser arithmetic and sparse metadata, or CPU-only fake native-result/profile-scope controls; no Metal context or execution."
-  },
-  {
-    "target": "qwen",
-    "name": "serve::backend_v41::mapping::tests::positive_mib_converts_to_bytes",
-    "class": "cpu",
-    "ignored": false,
-    "reason": "Pre-existing maintained-main discovery omission reviewed during cache-admission repair: pure serve mapping/parser arithmetic and sparse metadata, or CPU-only fake native-result/profile-scope controls; no Metal context or execution."
-  },
-  {
-    "target": "qwen",
-    "name": "serve::backend_v41::mapping::tests::sparse_cpu_plan_keeps_oversized_singletons_and_payload",
-    "class": "cpu",
-    "ignored": false,
-    "reason": "Pre-existing maintained-main discovery omission reviewed during cache-admission repair: pure serve mapping/parser arithmetic and sparse metadata, or CPU-only fake native-result/profile-scope controls; no Metal context or execution."
-  },
-  {
-    "target": "qwen",
-    "name": "serve::backend_v41::mapping::tests::unset_and_zero_disable",
-    "class": "cpu",
-    "ignored": false,
-    "reason": "Pre-existing maintained-main discovery omission reviewed during cache-admission repair: pure serve mapping/parser arithmetic and sparse metadata, or CPU-only fake native-result/profile-scope controls; no Metal context or execution."
-  },
-  {
-    "target": "qwen",
     "name": "serve::backend_v41::native_failure_tests::native_fault_tracking_survives_cancellation_remapping",
     "class": "cpu",
     "ignored": false,

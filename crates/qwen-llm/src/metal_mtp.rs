@@ -67,7 +67,9 @@ pub enum MtpError {
     NoMtpHead,
     #[error("token {0} out of vocab range {1}")]
     BadToken(i32, u32),
-    #[error("invalid QWEN_MTP_MOE_NATIVE_BANKS value {0:?}; expected 0, gate_up, down, 1, or all")]
+    #[error(
+        "invalid QWEN_MTP_MOE_NATIVE_BANKS value {0:?}; expected 0 (F32 rollback) or 1 (qualified automatic native banks)"
+    )]
     InvalidMoeBankPolicy(String),
     #[error(
         "MTP MoE bank policy {policy:?} does not support source gate/up/down={gate:?}/{up:?}/{down:?} shapes={gate_shape:?}/{up_shape:?}/{down_shape:?}"
@@ -87,25 +89,47 @@ pub enum MtpError {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum MtpMoeBankPolicy {
+    Auto,
     F32,
     GateUp,
     Down,
     All,
 }
 
+/// A3B block-40 Q4_K/Q4_K/Q5_K K512 expert banks stay native automatically.
+/// Set 0/false/no for the F32 rollback; positive values retain tuple qualification.
+const MTP_MOE_NATIVE_BANKS_ENV: &str = "QWEN_MTP_MOE_NATIVE_BANKS";
+
 impl MtpMoeBankPolicy {
     fn parse(raw: Option<&str>) -> Result<Self, MtpError> {
         match raw {
-            None | Some("0") => Ok(Self::F32),
-            Some("gate_up") => Ok(Self::GateUp),
-            Some("down") => Ok(Self::Down),
-            Some("1" | "all") => Ok(Self::All),
+            None => Ok(Self::Auto),
+            Some(value) if crate::env_flag::env_value_falsy(value) => Ok(Self::F32),
+            Some(value) if crate::env_flag::env_value_truthy(value) || value == "all" => {
+                Ok(Self::Auto)
+            }
             Some(other) => Err(MtpError::InvalidMoeBankPolicy(other.to_string())),
         }
     }
 
+    fn for_head(self, mtp: &MtpHead<'_>) -> Self {
+        if self != Self::Auto {
+            return self;
+        }
+        let qualified = mtp.block_idx == 40
+            && mtp.attn.ffn_moe.as_ref().is_some_and(|moe| {
+                moe.gate_exps.dtype == GgmlType::Q4_K
+                    && moe.up_exps.dtype == GgmlType::Q4_K
+                    && moe.down_exps.dtype == GgmlType::Q5_K
+                    && moe.gate_exps.shape.as_slice() == [2048, 512, 256]
+                    && moe.up_exps.shape.as_slice() == [2048, 512, 256]
+                    && moe.down_exps.shape.as_slice() == [512, 2048, 256]
+            });
+        if qualified { Self::All } else { Self::F32 }
+    }
+
     fn from_env() -> Result<Self, MtpError> {
-        match std::env::var("QWEN_MTP_MOE_NATIVE_BANKS") {
+        match std::env::var(MTP_MOE_NATIVE_BANKS_ENV) {
             Ok(raw) => Self::parse(Some(&raw)),
             Err(std::env::VarError::NotPresent) => Self::parse(None),
             Err(std::env::VarError::NotUnicode(raw)) => Err(MtpError::InvalidMoeBankPolicy(
@@ -533,7 +557,7 @@ impl MetalMtpHead {
         ctx: &MetalContext,
         mtp: &MtpHead<'_>,
     ) -> Result<u64, MtpError> {
-        let policy = MtpMoeBankPolicy::from_env()?;
+        let policy = MtpMoeBankPolicy::from_env()?.for_head(mtp);
         let mut f32_weights = vec![
             mtp.attn.attn_norm,
             mtp.attn.q_norm,
@@ -609,6 +633,7 @@ impl MetalMtpHead {
         mtp: &MtpHead<'_>,
         moe_bank_policy: MtpMoeBankPolicy,
     ) -> Result<Self, MtpError> {
+        let moe_bank_policy = moe_bank_policy.for_head(mtp);
         let direct_f32_destination = mtp_direct_f32_destination_enabled();
         let load_f32 =
             |desc: &TensorDesc| load_mtp_f32_tensor(ctx, gguf, desc, direct_f32_destination);
@@ -3720,29 +3745,23 @@ mod tests {
     fn mtp_moe_bank_policy_parser_is_strict() {
         assert_eq!(
             MtpMoeBankPolicy::parse(None).unwrap(),
-            MtpMoeBankPolicy::F32
+            MtpMoeBankPolicy::Auto
         );
-        assert_eq!(
-            MtpMoeBankPolicy::parse(Some("0")).unwrap(),
-            MtpMoeBankPolicy::F32
-        );
-        assert_eq!(
-            MtpMoeBankPolicy::parse(Some("gate_up")).unwrap(),
-            MtpMoeBankPolicy::GateUp
-        );
-        assert_eq!(
-            MtpMoeBankPolicy::parse(Some("down")).unwrap(),
-            MtpMoeBankPolicy::Down
-        );
-        assert_eq!(
-            MtpMoeBankPolicy::parse(Some("1")).unwrap(),
-            MtpMoeBankPolicy::All
-        );
-        assert_eq!(
-            MtpMoeBankPolicy::parse(Some("all")).unwrap(),
-            MtpMoeBankPolicy::All
-        );
-        assert!(MtpMoeBankPolicy::parse(Some("true")).is_err());
+        for value in ["0", "false", "no"] {
+            assert_eq!(
+                MtpMoeBankPolicy::parse(Some(value)).unwrap(),
+                MtpMoeBankPolicy::F32
+            );
+        }
+        for value in ["1", "true", "yes", "all"] {
+            assert_eq!(
+                MtpMoeBankPolicy::parse(Some(value)).unwrap(),
+                MtpMoeBankPolicy::Auto
+            );
+        }
+        for value in ["gate_up", "down", "invalid"] {
+            assert!(MtpMoeBankPolicy::parse(Some(value)).is_err());
+        }
     }
 
     fn metal_tensor_digest(tensor: &MetalTensor) -> blake3::Hash {
@@ -3891,7 +3910,34 @@ mod tests {
         assert_eq!(source.up_exps.shape, vec![2048, 512, 256]);
         assert_eq!(source.down_exps.shape, vec![512, 2048, 256]);
 
+        assert_eq!(MtpMoeBankPolicy::Auto.for_head(mtp), MtpMoeBankPolicy::All);
+        assert_eq!(MtpMoeBankPolicy::F32.for_head(mtp), MtpMoeBankPolicy::F32);
+        let mut outside = mtp.clone();
+        outside.block_idx = 39;
+        assert_eq!(
+            MtpMoeBankPolicy::Auto.for_head(&outside),
+            MtpMoeBankPolicy::F32
+        );
+        outside = mtp.clone();
+        outside.attn.ffn_moe = None;
+        assert_eq!(
+            MtpMoeBankPolicy::Auto.for_head(&outside),
+            MtpMoeBankPolicy::F32
+        );
+        let mut other_gate = source.gate_exps.clone();
+        other_gate.dtype = GgmlType::Q5_K;
+        outside = mtp.clone();
+        outside.attn.ffn_moe.as_mut().unwrap().gate_exps = &other_gate;
+        assert_eq!(
+            MtpMoeBankPolicy::Auto.for_head(&outside),
+            MtpMoeBankPolicy::F32
+        );
         let expected = [
+            (
+                MtpMoeBankPolicy::Auto,
+                [GgmlType::Q4_K, GgmlType::Q4_K, GgmlType::Q5_K],
+                486_539_264u64,
+            ),
             (
                 MtpMoeBankPolicy::F32,
                 [GgmlType::F32, GgmlType::F32, GgmlType::F32],

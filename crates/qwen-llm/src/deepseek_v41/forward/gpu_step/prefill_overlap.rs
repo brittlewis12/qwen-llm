@@ -6,8 +6,8 @@ use objc2::{rc::Retained, runtime::ProtocolObject};
 use objc2_metal::MTLDevice;
 
 crate::env_flag!(
-    /// Opt-in M512 Full append Engram/GPU overlap on M5 Ultra at depth 8K+, for the 40-layer 5120/2304/384/top-6 layout and Engram consumers at layers 1/14. Set to 1 to enable; default off because the pooled inactive-width timing control missed its 1% gate. Zero retains preparation before one GPU command.
-    default_off enabled,
+    /// M512 Full append Engram/GPU overlap on M5 Ultra at depth 8K+, for the 40-layer 5120/2304/384/top-6 layout and Engram consumers at layers 1/14, enabled by default (fresh-process appends 1.09-1.14x, bitwise identical). Set to 0 for A/B or rollback, which retains preparation before one GPU command.
+    default_on enabled,
     "QWEN_V41_ENGRAM_OVERLAP"
 );
 

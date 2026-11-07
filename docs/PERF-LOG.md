@@ -6,11 +6,11 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the current state and evidence index.
 
-## 2026-11-07 - V4.1 Engram/GPU Append Overlap: Opt-In; Pooled Control Miss
+## 2026-11-07 - V4.1 Engram/GPU Append Overlap: 1.09-1.14x Appends, Default On
 
-- Code **`976c1890`**, base **`f6547e85`**. **Default off**; opt in with
-  **`QWEN_V41_ENGRAM_OVERLAP=1`**, `=0` retains preparation before one GPU
-  command. M5 Ultra, Full prefill, exactly **512 command rows at depth 8K+**,
+- Code **`976c1890`**, base **`f6547e85`**. **Enabled by default**;
+  **`QWEN_V41_ENGRAM_OVERLAP=0`** retains preparation before one GPU
+  command (A/B or rollback). M5 Ultra, Full prefill, exactly **512 command rows at depth 8K+**,
   H5120/F2304/E384/top-6/40 layers and Engram consumers at 1/14. Same main
   four-shard **DeepSeek-V4.1-Flash-1017-GSQ-RCO-IQ2_XS** plus **IQ4_NL Engram**
   as the production roofline census: real mixed types and all 384 experts/top-6.
@@ -42,7 +42,10 @@ See also: `docs/PERF-ROADMAP.md` for the current state and evidence index.
   **1.170/1.113x** respectively. 8K rollback spans **578.454-687.224 ms**,
   enabled **572.700-589.868**; preserve that spread. Earlier discovery:
   32K **1.20590x**; separate 8K ABBA/BAAB **1.07203x / 1.09913x**.
-- **Automatic promotion held.** Inactive cold pp4096 control is **-0.972%**
+- **Default on (lead decision).** The lane held promotion on the placebo
+  control below; the lead enabled it because that control runs identical
+  engine paths (noise of about 1%), while every active cell gains 9-14% with
+  bitwise-identical outputs, and `=0` rolls it back. Inactive cold pp4096 control is **-0.972%**
   in median latency. Inactive pp256/32K ABBA is **+3.491%**, missing its
   1% bar. One bounded, separately declared BAAB confirmation, five native
   fresh-state samples/process, gives **493.497 -> 494.224 ms (+0.147%)**.

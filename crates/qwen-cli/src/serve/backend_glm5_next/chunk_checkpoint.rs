@@ -130,6 +130,47 @@ pub(super) fn namespace(
         })
 }
 
+/// Last full command in the ACTUAL suffix plan, not a hypothetical grid
+/// measured from the shared cut. Observing it never changes execution cuts.
+pub(super) fn trajectory_target(
+    start: usize,
+    cuts: &[usize],
+    prompt: usize,
+    rows: usize,
+) -> Option<usize> {
+    if rows == 0 {
+        return None;
+    }
+    let mut position = start;
+    let mut target = None;
+    for end in cuts
+        .iter()
+        .copied()
+        .filter(|&cut| cut > start)
+        .chain([prompt])
+    {
+        let available = end.checked_sub(position)?;
+        let full = if end == prompt {
+            available.saturating_sub(1) / rows
+        } else {
+            available / rows
+        };
+        if full > 0 {
+            target = Some(position + full * rows);
+        }
+        position = end;
+    }
+    target
+}
+
+pub(super) struct TrajectoryCapture {
+    pub conversation: super::super::checkpoint_ladder::Conversation,
+    pub namespace: CacheNamespace,
+    pub target: usize,
+    pub estimate: Option<u64>,
+    pub outcome: Option<CaptureOutcome>,
+}
+
 /// Consume all candidates here, so the unselected Arc is gone before admission.
 /// Equal lengths prefer live, then the incumbent shared/Exact candidate.
 pub(super) fn choose<V>(
@@ -192,6 +233,8 @@ pub(super) struct Capture<'a> {
     pub origin: Option<ChunkOrigin>,
     pub elapsed_ms: f64,
     pub outcome: Option<CaptureOutcome>,
+    pub trajectory: Option<TrajectoryCapture>,
+    pub trajectory_valid: bool,
 }
 
 impl Capture<'_> {
@@ -203,15 +246,46 @@ impl Capture<'_> {
         range: std::ops::Range<usize>,
         before: &mut dyn FnMut() -> std::result::Result<(), String>,
     ) -> Result<Vec<f32>, Glm5NextMetalError> {
+        self.trajectory_valid &= session.position() == range.start;
         let mut start = range.start;
         let tokens = self.tokens;
         session.prefill_packed_with_observer(ctx, &tokens[range], before, &mut |session, len| {
             let committed = session.position();
-            if committed.checked_sub(start) != Some(len) {
+            let valid = committed.checked_sub(start) == Some(len);
+            if !valid {
                 self.origin = None;
+                self.trajectory_valid = false;
             }
             ChunkOrigin::advance(&mut self.origin, start, committed);
             start = committed;
+            // A live trajectory is published only after a successful committed
+            // callback. It is never promoted into the canonical namespace.
+            if self.trajectory_valid
+                && valid
+                && !(Some(committed) == self.target && self.origin.is_some())
+            {
+                if let Some(trajectory) = self.trajectory.as_mut().filter(|t| t.target == committed)
+                {
+                    let started = Instant::now();
+                    trajectory.outcome = Some(with_pins(cache, [None, self.restored], |cache| {
+                        if self.denied {
+                            CaptureOutcome::Denied
+                        } else {
+                            capture_checkpoint(
+                                cache,
+                                session,
+                                ctx,
+                                trajectory.namespace,
+                                &tokens[..committed],
+                                trajectory.estimate,
+                                self.reserve,
+                                Some(trajectory.conversation),
+                            )
+                        }
+                    }));
+                    self.elapsed_ms += started.elapsed().as_secs_f64() * 1e3;
+                }
+            }
             if Some(committed) != self.target || self.origin.is_none() {
                 return;
             }
@@ -255,6 +329,16 @@ impl Capture<'_> {
         }
     }
 
+    pub(super) fn trajectory_description(&self) -> String {
+        self.trajectory
+            .as_ref()
+            .and_then(|t| {
+                t.outcome
+                    .map(|outcome| format!("{}:{}", t.target, outcome.name()))
+            })
+            .unwrap_or_default()
+    }
+
     pub(super) fn description(&self) -> String {
         self.outcome.map_or_else(String::new, |outcome| {
             format!(
@@ -269,6 +353,22 @@ impl Capture<'_> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn live_targets_follow_committed_command_plan() {
+        assert_eq!(trajectory_target(16385, &[237], 32445, 2048), Some(30721));
+        assert_eq!(trajectory_target(32508, &[237], 48568, 2048), Some(46844));
+        assert_eq!(trajectory_target(64754, &[237], 65838, 2048), None);
+        assert_eq!(
+            trajectory_target(0, &[237], 16322, 2048),
+            target(16322, 237, 2048)
+        );
+        assert_eq!(
+            trajectory_target(0, &[237], 237 + 4096, 2048),
+            Some(237 + 2048)
+        );
+        assert_eq!(trajectory_target(0, &[], 4000, 0), None);
+    }
 
     #[test]
     fn all_fast_precisions_use_existing_rollbacks_and_geometry() {

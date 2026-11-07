@@ -168,6 +168,14 @@ impl<'a> SnapshotPolicyPinGuard<'a> {
         }
     }
 
+    pub fn fits_strict(&self, bytes: u64) -> bool {
+        self.policy.fits_strict(bytes)
+    }
+
+    pub fn evict_to_budget(&mut self, keep: Option<EntryId>) -> Evicted {
+        self.policy.evict_to_budget(keep)
+    }
+
     pub fn evict_for(&mut self, bytes: u64) -> Evicted {
         self.policy.evict_for(bytes)
     }
@@ -237,6 +245,11 @@ impl SnapshotPolicy {
 
     pub fn contains(&self, id: EntryId) -> bool {
         self.entries.contains_key(&id)
+    }
+
+    /// Whether optional retention may remove this entry now.
+    pub fn is_pinned(&self, id: EntryId) -> bool {
+        self.entries.get(&id).is_some_and(|entry| entry.pins > 0)
     }
 
     /// Whether `bytes` can be admitted by evicting only unpinned entries.

@@ -14,6 +14,8 @@ use std::sync::Arc;
 pub(crate) struct SnapshotCache<V, N = ()> {
     entries: HashMap<EntryId, Entry<V, N>>,
     policy: SnapshotPolicy,
+    ladder: super::checkpoint_ladder::Ladder,
+    tips: HashMap<super::checkpoint_ladder::Conversation, Vec<EntryId>>,
 }
 
 /// One cached snapshot: its compatibility namespace (what must match for a
@@ -23,6 +25,7 @@ struct Entry<V, N> {
     namespace: N,
     tokens: Vec<u32>,
     value: Arc<V>,
+    bytes: u64,
 }
 
 /// A compatible cached prefix found by [`SnapshotCache::peek_best_prefix_in`].
@@ -45,7 +48,175 @@ impl<V, N: PartialEq> SnapshotCache<V, N> {
         Self {
             entries: HashMap::new(),
             policy: SnapshotPolicy::with_clock(max_bytes, config, clock),
+            ladder: Default::default(),
+            tips: Default::default(),
         }
+    }
+
+    pub(super) fn with_checkpoint_ladder(
+        mut self,
+        config: super::checkpoint_ladder::Config,
+    ) -> Self {
+        self.ladder = super::checkpoint_ladder::Ladder::new(config, self.max_bytes());
+        self
+    }
+
+    pub(super) fn ladder_enabled(&self) -> bool {
+        self.ladder.enabled()
+    }
+    pub(super) fn ladder_status(&self) -> (usize, u64, u64) {
+        (self.ladder.len(), self.ladder.bytes(), self.ladder.budget())
+    }
+
+    /// Keep the latest transcript/completed pair in addition to the spaced
+    /// ladder. Old turn tips must not consume the whole cache indefinitely.
+    /// Pins/held restores defer pruning; pressure and expiry always apply.
+    pub(super) fn record_tip(
+        &mut self,
+        conversation: Option<super::checkpoint_ladder::Conversation>,
+        namespace: &N,
+        tokens: &[u32],
+    ) {
+        if !self.ladder_enabled() || tokens.len() < 4096 {
+            return;
+        }
+        let Some(key) = conversation else {
+            return;
+        };
+        let Some(id) = self.entry_for_in(namespace, tokens) else {
+            return;
+        };
+        // Reuse an already-paid copy at spaced turn boundaries. This keeps
+        // coverage advancing during many short appends with ZERO extra copy.
+        if !self.ladder.contains(id) {
+            let bytes = self.entries[&id].bytes;
+            if let Some(victims) = self.ladder_plan(key, namespace, tokens, bytes) {
+                for victim in victims {
+                    self.remove(victim);
+                }
+                self.ladder.inserted(id, key, tokens.len(), bytes);
+            }
+        }
+        let tips = self.tips.entry(key).or_default();
+        tips.retain(|&other| other != id);
+        tips.push(id);
+        let old = tips
+            .iter()
+            .take(tips.len().saturating_sub(2))
+            .copied()
+            .collect::<Vec<_>>();
+        for id in old {
+            let covered = self.entries.get(&id).is_some_and(|tip| {
+                self.entries.iter().any(|(anchor_id, anchor)| {
+                    self.ladder.contains(*anchor_id)
+                        && anchor.namespace == tip.namespace
+                        && tip.tokens.starts_with(&anchor.tokens)
+                })
+            });
+            if covered
+                && !self.ladder.contains(id)
+                && !self.policy.is_pinned(id)
+                && self
+                    .entries
+                    .get(&id)
+                    .is_some_and(|e| Arc::strong_count(&e.value) == 1)
+            {
+                self.remove(id);
+            }
+        }
+    }
+
+    fn sync_retention(&mut self) {
+        self.ladder.retain(|id| self.entries.contains_key(&id));
+        self.tips.retain(|_, ids| {
+            ids.retain(|id| self.entries.contains_key(id));
+            !ids.is_empty()
+        });
+    }
+
+    fn ladder_plan(
+        &self,
+        conversation: super::checkpoint_ladder::Conversation,
+        namespace: &N,
+        tokens: &[u32],
+        bytes: u64,
+    ) -> Option<Vec<EntryId>> {
+        let parent = self
+            .entries
+            .iter()
+            .filter(|(id, e)| {
+                self.ladder.contains(**id)
+                    && e.namespace == *namespace
+                    && tokens.starts_with(&e.tokens)
+            })
+            .map(|(_, e)| e.tokens.len())
+            .max()
+            .unwrap_or(0);
+        let ranks = self.policy.ranked_best_first();
+        self.ladder.plan(
+            conversation,
+            tokens.len(),
+            bytes,
+            parent,
+            |id| {
+                self.entries
+                    .get(&id)
+                    .is_some_and(|e| Arc::strong_count(&e.value) == 1)
+                    && !self.policy.is_pinned(id)
+            },
+            |id| {
+                ranks
+                    .iter()
+                    .position(|&other| other == id)
+                    .unwrap_or(usize::MAX)
+            },
+        )
+    }
+
+    /// Pure admission probe: failed/denied copies never prune old coverage.
+    pub(super) fn ladder_eligibility_in(
+        &self,
+        conversation: super::checkpoint_ladder::Conversation,
+        namespace: &N,
+        tokens: &[u32],
+        payload: u64,
+    ) -> Option<u64> {
+        let bytes = self.strict_eligibility_in(namespace, tokens, payload)?;
+        self.ladder_plan(conversation, namespace, tokens, bytes)?;
+        Some(bytes)
+    }
+
+    pub(super) fn insert_ladder_in(
+        &mut self,
+        conversation: super::checkpoint_ladder::Conversation,
+        namespace: N,
+        tokens: Vec<u32>,
+        value: V,
+        bytes: u64,
+    ) -> bool {
+        self.sweep();
+        let Some(victims) = self.ladder_plan(conversation, &namespace, &tokens, bytes) else {
+            return false;
+        };
+        let position = tokens.len();
+        // Payload is already copied. Insert first; prune only after success.
+        // All entries, including these optional points, share the parent budget.
+        let value = Arc::new(value);
+        if !self.insert_shared_strict_in(namespace, tokens, Arc::clone(&value), bytes) {
+            return false;
+        }
+        let id = *self
+            .entries
+            .iter()
+            .find(|(_, entry)| Arc::ptr_eq(&entry.value, &value))
+            .expect("inserted entry")
+            .0;
+        for victim in victims {
+            self.remove(victim);
+        }
+        self.ladder.inserted(id, conversation, position, bytes);
+        self.sync_retention();
+        true
     }
 
     pub(crate) fn indexed_bytes(&self) -> u64 {
@@ -186,9 +357,27 @@ impl<V, N: PartialEq> SnapshotCache<V, N> {
                 namespace,
                 tokens,
                 value,
+                bytes,
             },
         );
-        let evicted = self.policy.evict_to_budget(Some(id));
+        // Protect spaced history from a stream of ordinary tip snapshots when
+        // both can coexist. Under pressure the normal policy wins instead.
+        let protected: Vec<_> = self
+            .entries
+            .keys()
+            .copied()
+            .filter(|&id| self.ladder.contains(id) && !self.policy.is_pinned(id))
+            .collect();
+        // Use the policy's accounted payload bytes, not the token-key size.
+        let evicted = {
+            let mut pins = SnapshotPolicyPinGuard::new(&mut self.policy, protected);
+            if pins.fits_strict(bytes) {
+                Some(pins.evict_to_budget(Some(id)))
+            } else {
+                None
+            }
+        }
+        .unwrap_or_else(|| self.policy.evict_to_budget(Some(id)));
         self.drop_entries(&evicted);
         true
     }
@@ -234,6 +423,7 @@ impl<V, N: PartialEq> SnapshotCache<V, N> {
     pub(crate) fn remove(&mut self, id: EntryId) -> Option<u64> {
         let bytes = self.policy.remove(id)?;
         self.entries.remove(&id);
+        self.sync_retention();
         Some(bytes)
     }
 
@@ -241,6 +431,7 @@ impl<V, N: PartialEq> SnapshotCache<V, N> {
         for id in &evicted.ids {
             self.entries.remove(id);
         }
+        self.sync_retention();
     }
 }
 
@@ -300,6 +491,111 @@ mod tests {
 
     fn lru(max_bytes: u64) -> SnapshotCache<&'static str> {
         SnapshotCache::new(max_bytes, SnapshotPolicyConfig::LRU)
+    }
+
+    #[test]
+    fn ladder_retains_only_the_recent_tip_pair_and_spaced_anchors() {
+        use super::super::checkpoint_ladder::{Config, Conversation};
+        let key = Conversation::testing(1);
+        let mut cache = lru(1_000_000).with_checkpoint_ladder(Config::testing(500_000));
+        let anchor = vec![1; 4096];
+        let bytes = cache.ladder_eligibility_in(key, &(), &anchor, 1).unwrap();
+        assert!(cache.insert_ladder_in(key, (), anchor.clone(), "anchor", bytes));
+        for i in 2..8 {
+            let mut tokens = vec![1; 5000];
+            tokens[4999] = i;
+            assert!(cache.insert_strict(tokens.clone(), "tip", 20_001));
+            cache.record_tip(Some(key), &(), &tokens);
+        }
+        assert_eq!(cache.len(), 3, "one anchor plus transcript/completed pair");
+        assert!(cache.entry_for(&anchor).is_some());
+        let mut recent = vec![1; 5000];
+        recent[4999] = 6;
+        assert!(cache.entry_for(&recent).is_some());
+        recent[4999] = 7;
+        assert!(cache.entry_for(&recent).is_some());
+        cache.record_tip(Some(key), &(), &vec![9; 5000]);
+        assert_eq!(cache.len(), 3, "failed publication does not prune tips");
+        let mut extended = vec![1; 9000];
+        extended[8999] = 8;
+        assert!(cache.insert_strict(extended.clone(), "paid tip", 36_001));
+        let before = cache.indexed_bytes();
+        cache.record_tip(Some(key), &(), &extended);
+        assert_eq!(
+            cache.ladder_status().0,
+            2,
+            "spaced existing tip promoted without another payload"
+        );
+        assert!(
+            cache.indexed_bytes() <= before,
+            "promotion allocates no payload"
+        );
+    }
+
+    #[test]
+    fn ladder_shares_budget_preserves_history_and_respects_pins_and_held_arcs() {
+        use super::super::checkpoint_ladder::{Config, Conversation};
+        let key = Conversation::testing(1);
+        let mut cache = lru(1_000_000).with_checkpoint_ladder(Config::testing(300_000));
+        for position in [4096, 8192, 12288] {
+            let tokens = vec![1; position];
+            let bytes = cache
+                .ladder_eligibility_in(key, &(), &tokens, 20_000)
+                .unwrap();
+            assert!(cache.insert_ladder_in(key, (), tokens, "checkpoint", bytes));
+        }
+        assert_eq!(cache.ladder_status().0, 3);
+        let held = cache.peek_exact_in(&(), &vec![1; 4096]).unwrap();
+        assert!(cache.pin(held.id));
+        assert!(
+            cache
+                .ladder_eligibility_in(key, &(), &vec![1; 13000], 20_000)
+                .is_none(),
+            "spacing"
+        );
+        assert!(
+            cache
+                .ladder_eligibility_in(key, &(), &vec![2; 20000], 300_001)
+                .is_none(),
+            "aux budget"
+        );
+        assert_eq!(cache.ladder_status().0, 3, "failed probes never evict");
+        assert!(cache.insert_strict(vec![3; 50000], "tip", 700_000));
+        assert!(cache.indexed_bytes() <= cache.max_bytes());
+        assert!(
+            cache.entry_for(&vec![1; 4096]).is_some(),
+            "explicit pins survive tip insertion"
+        );
+        cache.unpin(held.id);
+        cache.evict_for(u64::MAX);
+        assert_eq!(
+            cache.ladder_status().0,
+            1,
+            "held Arc survives pressure; metadata swept"
+        );
+        drop(held);
+        cache.evict_for(u64::MAX);
+        assert_eq!(cache.ladder_status(), (0, 0, 300_000));
+    }
+
+    #[test]
+    fn ladder_prunes_only_after_success_and_uses_exact_branch_keys() {
+        use super::super::checkpoint_ladder::{Config, Conversation};
+        let key = Conversation::testing(1);
+        let mut cache = lru(2_000_000).with_checkpoint_ladder(Config::testing(500_000));
+        for position in [4096, 8192, 12288, 16384, 20480, 24576] {
+            // Different branches can overlap in coordinate; restore is still
+            // authorized only by the full exact token prefix.
+            let tokens = vec![position as u32; position];
+            let bytes = cache.ladder_eligibility_in(key, &(), &tokens, 1).unwrap();
+            assert!(cache.insert_ladder_in(key, (), tokens, "state", bytes));
+            assert!(cache.ladder_status().0 <= 5);
+            assert!(cache.ladder_status().1 <= 500_000);
+        }
+        assert!(cache.best_prefix(&vec![999; 30000]).is_none());
+        assert!(cache.best_prefix(&vec![4096; 5000]).is_some());
+        cache.evict_for(u64::MAX);
+        assert_eq!(cache.ladder_status().0, 0);
     }
 
     #[test]

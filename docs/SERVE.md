@@ -193,6 +193,31 @@ This job directory is separate from reusable model snapshots.
   by the same rank for the deficit and re-checks once. Metal-headroom denials
   are not retried: snapshots are CPU arenas, invisible to the Metal signal.
 
+### Conversation checkpoint ladder
+
+GLM-5.3 Fast serve also retains checkpoints of live conversation extensions,
+not just the original cold shared-prefix prefill. The default-on ladder observes
+an existing committed full chunk strictly before a long request's endpoint;
+it never adds execution splits. Exact token-prefix keys and a separate
+`fast_trajectory_checkpoint_v1` namespace (shared cut, workspace rows, operand
+precision and lineage) authorize restore. This reproduces the captured live
+trajectory exactly; it does not relabel Fast's partition-dependent arithmetic
+as a cold-canonical execution. The existing canonical guards remain in place.
+
+Up to five optional points per conversation family are thinned to preserve
+spaced older history. The current live tip and existing transcript snapshots
+remain available. A family is identified by its first user turn because the
+stateless API has no conversation id; this affects retention only, never restore
+compatibility. The auxiliary ceiling is `QWEN_SERVE_CHECKPOINT_LADDER_MIB`
+(`auto`: 8192 MiB), also capped at half the existing snapshot-cache budget.
+These are entries in that cache, not additional memory entitlement. Expiry,
+process-memory admission, pinning and pressure eviction still apply; denied
+copies leave the execution schedule unchanged. Small extensions do not add interior copies. To advance coverage through many
+short appends, GLM may instead capture a spaced endpoint after decode, outside
+the first-token path. Its `ladder_tip_capture_ms` reports that completion cost. `QWEN_SERVE_CHECKPOINT_LADDER=0` (or a zero auxiliary
+budget) restores the previous capture and lookup paths. Drafting paths continue
+to skip snapshot publication and reuse.
+
 ### Idle residency (no-copy families)
 
 Metal wires no-copy weights only while commands use them, and unwires them

@@ -5591,5 +5591,61 @@
     "class": "gpu",
     "ignored": false,
     "reason": "Metal context, allocation or dispatch witness; parent GPU lane only."
+  },
+  {
+    "target": "lib",
+    "name": "glm5_next_metal::tests::snapshot_gates::live_trajectory_observer_restore_is_exact",
+    "class": "model",
+    "ignored": true,
+    "reason": "Explicit leased real-model witness: read-only committed observer, snapshot restore, all logits and persistent state exact against captured live trajectory."
+  },
+  {
+    "target": "qwen",
+    "name": "serve::backend_glm5_next::chunk_checkpoint::tests::live_targets_follow_committed_command_plan",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Reviewed pure checkpoint retention/planning or fake-state execution; no Metal context or real model import."
+  },
+  {
+    "target": "qwen",
+    "name": "serve::checkpoint_ladder::tests::byte_limit_pins_and_conversation_limits_are_independent",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Reviewed pure checkpoint retention/planning or fake-state execution; no Metal context or real model import."
+  },
+  {
+    "target": "qwen",
+    "name": "serve::checkpoint_ladder::tests::config_is_bounded_by_parent_and_has_explicit_rollback",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Reviewed pure checkpoint retention/planning or fake-state execution; no Metal context or real model import."
+  },
+  {
+    "target": "qwen",
+    "name": "serve::checkpoint_ladder::tests::spaced_history_survives_small_recent_turns",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Reviewed pure checkpoint retention/planning or fake-state execution; no Metal context or real model import."
+  },
+  {
+    "target": "qwen",
+    "name": "serve::snapshot_cache::tests::ladder_prunes_only_after_success_and_uses_exact_branch_keys",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Reviewed pure checkpoint retention/planning or fake-state execution; no Metal context or real model import."
+  },
+  {
+    "target": "qwen",
+    "name": "serve::snapshot_cache::tests::ladder_retains_only_the_recent_tip_pair_and_spaced_anchors",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Reviewed pure checkpoint retention/planning or fake-state execution; no Metal context or real model import."
+  },
+  {
+    "target": "qwen",
+    "name": "serve::snapshot_cache::tests::ladder_shares_budget_preserves_history_and_respects_pins_and_held_arcs",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Reviewed pure checkpoint retention/planning or fake-state execution; no Metal context or real model import."
   }
 ]

@@ -21,8 +21,10 @@
 //! comparison against Exact was inconclusive) and `QWEN_GLM_FAST_SNAPSHOTS=0`
 //! turns them off. Shared snapshots must end at the request's verified cut;
 //! deeper snapshots must belong to that same cut's uninterrupted full-chunk
-//! schedule. Live ties win. Decoded or partially chunked states cannot publish
-//! deeper snapshots; without a verified shared cut neither path is used.
+//! schedule. The budgeted ladder separately publishes actual live trajectories
+//! after committed full commands, in its own precision/rows/cut namespace. These
+//! never seed canonical provenance. Live ties win. Without a verified shared
+//! cut neither Fast snapshot namespace is used.
 //! Memory-pressure refusals of the transport or a new session release the
 //! cache (except a snapshot being restored) and retry once.
 use super::decode_loop;
@@ -90,6 +92,10 @@ enum Schedule {
     /// Fast lineage: one cut at the shared prefix end.
     FastSharedSplitV1,
     /// Cache provenance, NEVER an execution schedule or extra cut.
+    FastTrajectoryCheckpointV1 {
+        shared_cut: usize,
+        precision: FastPrecision,
+    },
     FastChunkCheckpointV1 {
         shared_cut: usize,
         precision: FastPrecision,
@@ -101,6 +107,7 @@ impl Schedule {
         match self {
             Self::ExactV1 => "exact_v1",
             Self::FastSharedSplitV1 => "fast_shared_split_v1",
+            Self::FastTrajectoryCheckpointV1 { .. } => "fast_trajectory_checkpoint_v1",
             Self::FastChunkCheckpointV1 { .. } => "fast_chunk_checkpoint_v1",
         }
     }
@@ -128,6 +135,7 @@ pub(super) struct Prepared<'g> {
     max_piece_bytes: usize,
     /// Operand precision of every Fast session ([`FAST_PRECISION_ENV`]).
     fast_precision: FastPrecision,
+    checkpoint_ladder: super::checkpoint_ladder::Config,
     drafter: Option<crate::drafter_policy::PreparedDrafter>,
 }
 
@@ -182,6 +190,7 @@ impl<'g> Prepared<'g> {
             profile,
             max_piece_bytes,
             fast_precision,
+            checkpoint_ladder: super::checkpoint_ladder::Config::from_env()?,
             drafter,
         })
     }
@@ -399,7 +408,7 @@ fn cut_positions(
             ("shared_prefix", boundaries.shared_prefix_end),
             ("generation_header", None),
         ],
-        Schedule::FastChunkCheckpointV1 { .. } => {
+        Schedule::FastChunkCheckpointV1 { .. } | Schedule::FastTrajectoryCheckpointV1 { .. } => {
             panic!("checkpoint provenance must never select execution cuts")
         }
     };
@@ -439,12 +448,28 @@ fn capture_into(
     estimate: Option<u64>,
     reserve: u64,
 ) -> CaptureOutcome {
+    capture_checkpoint(
+        cache, session, ctx, namespace, prefix, estimate, reserve, None,
+    )
+}
+
+fn capture_checkpoint(
+    cache: &mut SnapshotCache<Glm5NextSnapshot, CacheNamespace>,
+    session: &Glm5NextSession<'_>,
+    ctx: &MetalContext,
+    namespace: CacheNamespace,
+    prefix: &[u32],
+    estimate: Option<u64>,
+    reserve: u64,
+    conversation: Option<super::checkpoint_ladder::Conversation>,
+) -> CaptureOutcome {
     if cache.entry_for_in(&namespace, prefix).is_some() {
         return CaptureOutcome::Present;
     }
-    let Some(entry_bytes) =
-        estimate.and_then(|payload| cache.strict_eligibility_in(&namespace, prefix, payload))
-    else {
+    let Some(entry_bytes) = estimate.and_then(|payload| match conversation {
+        Some(key) => cache.ladder_eligibility_in(key, &namespace, prefix, payload),
+        None => cache.strict_eligibility_in(&namespace, prefix, payload),
+    }) else {
         return CaptureOutcome::Ineligible;
     };
     let Some(required) = entry_bytes.checked_add(reserve) else {
@@ -480,7 +505,11 @@ fn capture_into(
     ) else {
         return CaptureOutcome::Ineligible;
     };
-    if cache.insert_strict_in(namespace, prefix.to_vec(), snapshot, bytes) {
+    let inserted = match conversation {
+        Some(key) => cache.insert_ladder_in(key, namespace, prefix.to_vec(), snapshot, bytes),
+        None => cache.insert_strict_in(namespace, prefix.to_vec(), snapshot, bytes),
+    };
+    if inserted {
         CaptureOutcome::Captured
     } else {
         CaptureOutcome::Ineligible
@@ -633,6 +662,7 @@ impl<'w, 'g> Glm5NextBackend<'w, 'g> {
         idle_residency: std::time::Duration,
         snapshot_cache_plan: super::SnapshotCachePlan,
     ) -> Self {
+        let checkpoint_ladder = prepared.checkpoint_ladder;
         Self {
             ctx,
             weights,
@@ -644,7 +674,8 @@ impl<'w, 'g> Glm5NextBackend<'w, 'g> {
             prefix_reuse: qwen_llm::env_flag::read_default_on(PREFIX_REUSE_ENV),
             idle_residency: super::idle_residency::IdleResidency::new("glm5_next", idle_residency),
             lineage: PackedLineage::default(),
-            cache: SnapshotCache::new(snapshot_cache_plan.bytes, snapshot_cache_plan.policy),
+            cache: SnapshotCache::new(snapshot_cache_plan.bytes, snapshot_cache_plan.policy)
+                .with_checkpoint_ladder(checkpoint_ladder),
             snapshot_cache_plan,
             fast_snapshots: qwen_llm::env_flag::read_default_on(FAST_SNAPSHOTS_ENV),
             live_canonical: false,
@@ -787,6 +818,7 @@ impl<'w, 'g> Glm5NextBackend<'w, 'g> {
         self.idle_residency.before_request();
         // Everything a client can get wrong is refused before the live
         // session is touched, so a 400 keeps the cached conversation.
+        let conversation = super::checkpoint_ladder::conversation(&request);
         let maximum = request
             .max_output_tokens
             .unwrap_or(self.prepared.default_max);
@@ -915,7 +947,10 @@ impl<'w, 'g> Glm5NextBackend<'w, 'g> {
                 Schedule::FastSharedSplitV1 => {
                     self.cache.peek_exact_in(&namespace, &tokens[..cuts[0]])
                 }
-                Schedule::FastChunkCheckpointV1 { .. } => unreachable!("not an execution schedule"),
+                Schedule::FastChunkCheckpointV1 { .. }
+                | Schedule::FastTrajectoryCheckpointV1 { .. } => {
+                    unreachable!("not an execution schedule")
+                }
             })
             .filter(|hit| hit.prefix_len > live);
         let chunk_enabled = self.chunk_checkpoints_allowed()
@@ -940,6 +975,19 @@ impl<'w, 'g> Glm5NextBackend<'w, 'g> {
                 });
             chunk_checkpoint::choose(live, hit, deep)
         };
+        let trajectory_namespace = namespace
+            .filter(|_| chunk_enabled && self.cache.ladder_enabled())
+            .map(|ns| CacheNamespace {
+                schedule: Schedule::FastTrajectoryCheckpointV1 {
+                    shared_cut: cuts[0],
+                    precision: self.prepared.fast_precision,
+                },
+                ..ns
+            });
+        let trajectory =
+            trajectory_namespace.and_then(|ns| self.cache.peek_best_prefix_in(&ns, &tokens));
+        let (hit, trajectory_hit) = chunk_checkpoint::choose(live, hit, trajectory);
+        let deep_hit = deep_hit && !trajectory_hit;
         let restore_t0 = Instant::now();
         let mut restored: Option<EntryId> = None;
         // Whether the session's state at the current position equals a
@@ -985,7 +1033,7 @@ impl<'w, 'g> Glm5NextBackend<'w, 'g> {
                         // A shared Fast entry is canonical from zero; a deep
                         // entry instead carries the shared-relative origin.
                         canonical = lineage == PackedLineage::Fast;
-                        if deep_hit {
+                        if deep_hit || trajectory_hit {
                             canonical = false;
                         }
                         hit.prefix_len
@@ -1111,7 +1159,9 @@ impl<'w, 'g> Glm5NextBackend<'w, 'g> {
             .and_then(|_| chunk_checkpoint::target(tokens.len(), cuts[0], selected_rows));
         let chunk_origin = chunk_namespace.and_then(|_| {
             let source = restored.and_then(|_| {
-                if deep_hit {
+                if trajectory_hit {
+                    trajectory_namespace.map(|ns| ns.schedule)
+                } else if deep_hit {
                     chunk_namespace.map(|ns| ns.schedule)
                 } else {
                     schedule
@@ -1127,7 +1177,9 @@ impl<'w, 'g> Glm5NextBackend<'w, 'g> {
             )
         });
         let restore_origin = if restored.is_some() {
-            if deep_hit {
+            if trajectory_hit {
+                "fast_trajectory_checkpoint_v1"
+            } else if deep_hit {
                 "fast_chunk_checkpoint_v1"
             } else {
                 schedule.map_or("none", Schedule::name)
@@ -1164,6 +1216,30 @@ impl<'w, 'g> Glm5NextBackend<'w, 'g> {
             origin: chunk_origin,
             elapsed_ms: 0.0,
             outcome: None,
+            trajectory_valid: true,
+            trajectory: conversation
+                .filter(|_| self.cache.ladder_enabled())
+                .and_then(|conversation| {
+                    let target = chunk_checkpoint::trajectory_target(
+                        matched,
+                        &cuts,
+                        tokens.len(),
+                        selected_rows,
+                    )?;
+                    Some(chunk_checkpoint::TrajectoryCapture {
+                        conversation,
+                        namespace: CacheNamespace {
+                            schedule: Schedule::FastTrajectoryCheckpointV1 {
+                                shared_cut: cuts[0],
+                                precision: self.prepared.fast_precision,
+                            },
+                            ..deep_namespace
+                        },
+                        target,
+                        estimate: snapshot_bytes(&self.weights.config, target as u64),
+                        outcome: None,
+                    })
+                }),
         });
         // The entry this request restored, reused through the live session
         // or captured last stays pinned while a later cut is captured, so
@@ -1315,6 +1391,41 @@ impl<'w, 'g> Glm5NextBackend<'w, 'g> {
                 .map(|&token| token as u32),
         );
         self.history = history;
+        // Many small appends may contain no full command. Publish a spaced
+        // actual-trajectory endpoint AFTER decode, never on the TTFT path.
+        // Long extensions already had their optional interior capture.
+        let mut ladder_tip_ms = 0.0;
+        let mut ladder_tip_outcome = None;
+        if self.cache.ladder_enabled()
+            && chunk_enabled
+            && chunk_checkpoint::trajectory_target(matched, &cuts, tokens.len(), selected_rows)
+                .is_none()
+            && let (Some(key), Some(ns)) = (conversation, chunk_namespace)
+        {
+            let started = Instant::now();
+            let ns = CacheNamespace {
+                schedule: Schedule::FastTrajectoryCheckpointV1 {
+                    shared_cut: cuts[0],
+                    precision: self.prepared.fast_precision,
+                },
+                ..ns
+            };
+            ladder_tip_outcome = Some(if chunk_capture.as_ref().is_some_and(|c| c.denied) {
+                CaptureOutcome::Denied
+            } else {
+                capture_checkpoint(
+                    &mut self.cache,
+                    session,
+                    ctx,
+                    ns,
+                    &self.history,
+                    snapshot_bytes(&self.weights.config, self.history.len() as u64),
+                    reserve,
+                    Some(key),
+                )
+            });
+            ladder_tip_ms = started.elapsed().as_secs_f64() * 1e3;
+        }
         #[cfg(test)]
         {
             self.last_chunk_checkpoint = Some(serde_json::json!({
@@ -1333,7 +1444,7 @@ impl<'w, 'g> Glm5NextBackend<'w, 'g> {
         }
         tracing::info!(
             target: "qwen_diag",
-            "serve phases: family=glm5_next prefill_ms={prefill_ms:.1} reused_tokens={matched} reuse_source={reuse_source} restore_origin={restore_origin} restore_ms={restore_ms:.1} boundary_ms={boundary_ms:.1} prefill_tokens={} decode_ms={:.1} required_forwards={required} capacity={} transitions={} lineage={} snapshot_schedule={} cuts={cuts:?} captures=[{}] snapshot_capture_ms={capture_ms:.1} snapshot_cache_bytes={} snapshot_cache_entries={} checkpoint_target={} checkpoint_captures=[{}] checkpoint_capture_ms={chunk_capture_ms:.1}",
+            "serve phases: family=glm5_next prefill_ms={prefill_ms:.1} reused_tokens={matched} reuse_source={reuse_source} restore_origin={restore_origin} restore_ms={restore_ms:.1} boundary_ms={boundary_ms:.1} prefill_tokens={} decode_ms={:.1} required_forwards={required} capacity={} transitions={} lineage={} snapshot_schedule={} cuts={cuts:?} captures=[{}] snapshot_capture_ms={capture_ms:.1} snapshot_cache_bytes={} snapshot_cache_entries={} checkpoint_target={} checkpoint_captures=[{}] checkpoint_capture_ms={chunk_capture_ms:.1} ladder={:?} ladder_capture=[{}] ladder_tip_position={} ladder_tip_capture={} ladder_tip_capture_ms={ladder_tip_ms:.3}",
             tokens.len() - matched,
             generation.wall_ms,
             self.prepared.capacity,
@@ -1345,6 +1456,10 @@ impl<'w, 'g> Glm5NextBackend<'w, 'g> {
             self.cache.len(),
             chunk_target.unwrap_or(0), // Zero means no eligible checkpoint.
             chunk_capture.as_ref().map_or_else(String::new, |capture| capture.description()),
+            self.cache.ladder_status(),
+            chunk_capture.as_ref().map_or_else(String::new, |capture| capture.trajectory_description()),
+            self.history.len(),
+            ladder_tip_outcome.map_or("none", CaptureOutcome::name),
         );
         Ok(super::outcome::finish_generation(
             tokens.len(),

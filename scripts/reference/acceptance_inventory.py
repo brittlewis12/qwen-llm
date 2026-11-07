@@ -32,6 +32,7 @@ TARGETS = {
 SCOPES = {
     "lib": [
         "deepseek_v41::",
+        "glm5_next_metal::tests::snapshot_gates::live_trajectory_observer_restore_is_exact",
         "metal::moe_grouped_generic::tests::staging_ownership::",
         "metal::moe_grouped_generic::tests::wide_activation_type::",
     ],
@@ -45,6 +46,9 @@ SCOPES = {
     "qwen": [
         "deepseek_v41::tests::",
         "serve::backend_v41::",
+        "serve::checkpoint_ladder::",
+        "serve::snapshot_cache::tests::ladder_",
+        "serve::backend_glm5_next::chunk_checkpoint::tests::live_targets_follow_committed_command_plan",
         "family_options::tests::v41_",
         "telemetry::family_diagnostics_tests::v41_",
     ],

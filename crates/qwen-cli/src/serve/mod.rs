@@ -22,6 +22,7 @@ pub(crate) mod backend_muse;
 pub(crate) mod backend_qwen4exp;
 pub(crate) mod backend_v41;
 pub(crate) mod batching;
+mod checkpoint_ladder;
 mod control;
 pub(crate) mod decode_loop;
 pub(crate) mod durable;

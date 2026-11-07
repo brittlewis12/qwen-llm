@@ -338,3 +338,62 @@ fn f32_operand_snapshot_restore_and_frontier_chunkings() {
     }
     assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
+
+/// A checkpoint observed inside a live extension after partial prefill AND
+/// serial decode. This deliberately has no cold-canonical chunk origin.
+#[test]
+#[ignore = "GLM53_GGUF live trajectory checkpoint restore; production lease; model GPU"]
+fn live_trajectory_observer_restore_is_exact() {
+    let _lease = production_lease();
+    let path = crate::test_fixtures::GLM53_FLASH_UD_IQ3_XXS.required();
+    let ctx = MetalContext::new().unwrap();
+    let gguf = GgufFile::open(&path).unwrap();
+    let weights = Glm5NextWeights::load(&ctx, &gguf).unwrap();
+    let tokens: Vec<u32> = crate::tokenizer::Tokenizer::from_gguf(&gguf)
+        .unwrap()
+        .encode(&long_qualification_text(), false)
+        .unwrap()
+        .into_iter()
+        .map(|t| t as u32)
+        .collect();
+    let mut session = fresh(&ctx, &weights, 2300, PackedLineage::Fast);
+    session.prefill_packed(&ctx, &tokens[..97]).unwrap();
+    for &token in &tokens[97..100] {
+        session.forward(&ctx, token).unwrap();
+    }
+    let mut checkpoint = None;
+    let reference = session
+        .prefill_packed_with_observer(&ctx, &tokens[100..2185], &mut || Ok(()), &mut |s, rows| {
+            assert!(rows > 0);
+            if s.position() == 2148 {
+                checkpoint = Some(s.capture_snapshot().unwrap());
+            }
+        })
+        .unwrap();
+    let reference_tail: Vec<_> = tokens[2185..2189]
+        .iter()
+        .map(|&t| session.forward(&ctx, t).unwrap())
+        .collect();
+    let end = session.capture_snapshot().unwrap();
+    let checkpoint = checkpoint.expect("actual committed callback after sparse frontier");
+    session.restore_snapshot(&checkpoint).unwrap();
+    let restored = session.prefill_packed(&ctx, &tokens[2148..2185]).unwrap();
+    let restored_tail: Vec<_> = tokens[2185..2189]
+        .iter()
+        .map(|&t| session.forward(&ctx, t).unwrap())
+        .collect();
+    assert_eq!(
+        logit_bits(&[reference]),
+        logit_bits(&[restored]),
+        "all prompt logits"
+    );
+    assert_eq!(
+        logit_bits(&reference_tail),
+        logit_bits(&restored_tail),
+        "teacher-forced decode logits"
+    );
+    assert!(
+        end.same_state(&session.capture_snapshot().unwrap()),
+        "all persistent end-state bytes"
+    );
+}

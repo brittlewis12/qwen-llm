@@ -19,6 +19,10 @@ pub const LATENT_NO_SINK: f32 = -1.0e30;
 pub const LATENT_HEADS: usize = 64;
 pub const LATENT_WIDTH: usize = 512;
 
+#[path = "latent/tensor.rs"]
+mod tensor;
+pub use tensor::try_encode_selected_attention_tensor_f16;
+
 /// `queries` and `output` are F32 `[512, 64, rows]`; `cache` is F16 `[512,
 /// capacity]` with rows `0..start + rows` written; `sinks` is F32 `[64]`.
 #[allow(clippy::too_many_arguments)]

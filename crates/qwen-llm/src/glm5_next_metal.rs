@@ -2468,6 +2468,7 @@ mod kda_half_inputs;
 mod kda_value4;
 mod lens;
 mod packed;
+mod prefill_attention;
 pub mod prefill_plan;
 mod short_prefill;
 pub(crate) mod tensor_down;

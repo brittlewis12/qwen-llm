@@ -6,6 +6,106 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the current state and evidence index.
 
+
+## 2026-11-06 - GLM M5 Sparse Prefill: Tensor QK/PV in Existing Scratch
+
+- Base **`f1bb875c`**, unchanged M5 Ultra UD-IQ3_XXS alias. Prior attribution
+  put sparse MLA at **803.5 ms** in a 2048-row chunk; its online attention
+  partitions each query into 17 ranges and dispatches only 16 queries at a
+  time. The candidate replaces split/merge traffic and per-key online updates
+  with **tensor QK, masked F32 softmax, tensor PV**, batching 64 queries.
+  Native F16 cache, Half-staged Q/probabilities, F32 accumulators/output.
+- **Default on** for Fast/Half, exactly **512/1024/2048 command rows**, 64
+  heads, 512-wide latent rows, 2051 selected slots, and **32..=64 queries**.
+  PSO SIMD width/thread/static-memory capacity and all binding checks precede
+  encoder mutation. Global tensor rollback and the 512-row short-prefill
+  rollback still win. **`QWEN_GLM53_PREFILL_ATTN=0`** restores split attention.
+  Exact/F32, serial decode and devices without TensorOps retain their routes.
+- **No new GPU buffer or admission change:** the admitted **34-MiB** partial
+  accumulator hosts a **32.5-MiB** score slab `[2080,64,64]`; partial stats
+  are unused on this route. CPU tests pin this bound and fallback geometry.
+  QK uses 32 KiB static threadgroup memory; PV 8 KiB. Invalid/future ids are
+  excluded from both softmax maximum and mass, including logits equal to the
+  finite no-sink sentinel. Within the new operator, query offsets and batch
+  sizes do not change a row's output bits.
+- Resident M5 operator screen: 2051 slots, 32K F16 cache, distinct signed
+  inputs and selected ids, poisoned outputs, empty counts and rejected ids;
+  amplitudes 1/8/32, two ABBA passes, two warm + eight retained commands/arm.
+  At **64 queries**, split **2.265979 ms**, tensor **1.039875 ms** (**2.179x**).
+  At **16**, tensor is slower (**0.617125 vs 0.521479 ms**), hence the batch
+  gate. Initial whole-model kill, one warm + two retained reps, lease/build
+  lock, nice 10, thermal 0 before/after: pp4096 **1030.289304,1030.322607 ->
+  1104.984573,1105.546131 tok/s** (+7.28%); pp512@8K **708.679168,710.832208
+  -> 791.053677,791.853907** (+11.51%). TG controls stay within 0.22%.
+- Final **same-binary ABBA**, warmup + two retained reps/arm/cell, 30 s
+  between arms, canonical Metal lease + build lock, nice 10. Thermal **0
+  before/after all four arms**. Production forward/prefill with complete
+  endpoint logits and status handling; immutable prefixes restored outside
+  timers. PP seed 1, salted depth prefixes, TG seeds 2/3. All samples below.
+
+  | Cell / depth | Off samples tok/s | On/default samples tok/s | Median ratio |
+  | --- | --- | --- | ---: |
+  | pp4096 / 0 | 1031.057113,1030.616029,1029.821959,1029.877133 | 1105.931594,1105.500353,1104.251637,1104.704845 | 1.07266x |
+  | pp512 / 8192 | 712.632177,713.158925,711.945711,712.627258 | 785.556551,788.816321,789.909574,789.191468 | 1.10717x |
+  | pp512 / 32768 | 687.815308,688.224307,687.811804,687.250628 | 762.019056,761.507671,761.714475,762.062579 | 1.10766x |
+  | pp1024 / 8192 | 854.851080,854.644946,853.425106,854.210442 | 966.469647,966.778400,967.281437,967.426472 | 1.13179x |
+  | pp1024 / 32768 | 818.925824,819.261144,818.512695,819.083226 | 926.130852,925.761541,926.210188,925.571802 | 1.13058x |
+  | pp512 / 0 | 910.878054,910.089213,909.389625,910.156489 | 911.003797,911.030002,910.156961,910.706652 | 1.00080x |
+  | pp1024 / 0 | 1110.075484,1110.887411,1109.304449,1109.550505 | 1110.066308,1110.671429,1110.142426,1109.319821 | 1.00026x |
+  | tg64 / 0 | 63.872375,63.858527,63.589722,63.680433 | 63.474497,63.554985,63.574388,63.639100 | 0.99679x |
+  | tg64 / 8192 | 58.017683,58.004557,57.840104,57.805783 | 57.705924,57.697710,57.881643,57.880877 | 0.99777x |
+  | tg64 / 32768 | 56.812087,56.826388,56.741101,56.772140 | 56.692023,56.667543,56.831434,56.820851 | 0.99937x |
+
+  Medians: pp4096 **1105.103 tok/s**, pp512@8K/32K **789.004 /
+  761.867**; pp1024 appends gain **13.18% / 13.06%**. Cold short
+  prefill controls stay within 0.09%; TG controls are 0.99679x/0.99777x/
+  0.99937x. Serial decode kernels are unchanged.
+  Useful-matmul roof fractions are **28.9% / 21.2% /
+  20.8%** at pp4096@0 / pp512@8K / pp512@32K, using the unchanged
+  131.4-TFLOP/s denominator and tensor-type FLOP accounting. Against the
+  earlier pinned CPP references (795.555 / 565.439 / 536.777 tok/s, not
+  rerun), about **1.389x / 1.395x / 1.419x**. Saved-prefix paired ratios
+  establish the gain; the older fresh-session CPP standing is context.
+- Validation: full `cargo test --release -p qwen-llm --lib` on M5:
+  **2449 passed, 0 failed, 738 ignored**, 114.96 s. Local release Rust
+  checks also passed. New tests cover Exact/F32/batch/geometry exclusion,
+  unchanged scratch bounds, PSO capacity, independent F64 softmax, sinks,
+  invalid ids, offset/batch invariance, guards and refusal before dispatch.
+- Frozen native all-row teacher forcing: code (`qwen4exp_runtime.rs`) and
+  Bash prose, independent on/off sessions including each prefix. At depth 0:
+  4096 targets/document in 2048-row commands; at 8K: 2048 targets/document
+  in 512/1024/2048-row commands; at 32K: 2048 targets/document in 512-row
+  commands. **24576 paired targets across geometry cells**, full vocabulary,
+  F64 log-sum-exp, identical input/target ids, all logits finite. Per-document
+  and pooled |delta NLL| <=0.005 and mean KL <=0.01 pass in every cell.
+
+  | Depth / command rows | Document | NLL off | NLL on | Delta NLL | Mean KL |
+  | --- | --- | ---: | ---: | ---: | ---: |
+  | 0 / 2048 | code | 0.985417744 | 0.984219373 | -0.001198371 | 0.001864681 |
+  | 0 / 2048 | prose | 0.103965558 | 0.103055764 | -0.000909794 | 0.000619837 |
+  | 8192 / 512,1024,2048 | code | 0.810929598 | 0.812689546 | +0.001759948 | 0.003217560 |
+  | 8192 / 512,1024,2048 | prose | 0.069446525 | 0.069029993 | -0.000416532 | 0.001473530 |
+  | 32768 / 512 | code | 0.461425664 | 0.458623576 | -0.002802088 | 0.003665889 |
+  | 32768 / 512 | prose | 0.115739381 | 0.114149023 | -0.001590358 | 0.002178605 |
+
+  The three 8K geometries have identical statistics. Largest document
+  |delta NLL| **0.00280209**, mean KL **0.00366589**; largest single-target
+  KL **0.6043604**, argmax agreement **24400/24576**. Each active 512-row
+  on chunk witnesses **88 calls each** to QK/softmax/PV, off zero; 1024/2048
+  commands witness 176/352. Dense-only chunks witness zero. Operator tests
+  cover F64 softmax/sinks, masked sentinel ties, query offsets/partitioning,
+  guards and refusal before dispatch; all five focused M5 tests passed.
+- **M4 experiments rejected** (Maya-M IQ2_S, whole timing campaigns hold
+  build lock + lease, thermal 0 around every arm): KDA fanout gives **+0.59%**
+  tg0 but **-3.34%** tg8K; its unchanged append control shifts +9.8%.
+  A SIMD-group MMA version of this attention is **1.172x** at 64 queries
+  (**4.126479 -> 3.519709 ms**), padded staging **1.193x** (**4.146458 ->
+  3.477000 ms**). Whole pp512@8K AB improves **8.00%**, reverse BA regresses
+  **1.83%**; retained off samples **169.786125,170.056127,181.101798,
+  171.190488**, on **191.307601,175.738002,172.476893,173.376417 tok/s**.
+  The opposite pair signs and sample spread do not establish a consistent
+  whole-runtime gain. Neither M4 route nor its extra shaders are shipped.
+
 ## 2026-11-06 — Flash-Next prefill: shallow vector values and smaller F32 tensor tiles
 
 - Same GSQ-RCO IQ3_S/M5 Ultra as the preceding roofline and HC entries. Default-on **`QWEN_FN_QSA_SHALLOW_VALUE_VECTOR`** extends the existing split8 F32 vector value leaf to full selected N32 bands from start 2051 on the tensor tier. M4 retains its 32768 boundary. No precision, slot/reduction order, static storage or tensor allocation changes. Set **`QWEN_FN_QSA_SHALLOW_VALUE_VECTOR=0`** for the prior boundary; the existing value-vector and split-value rollbacks still apply.

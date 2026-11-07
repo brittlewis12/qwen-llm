@@ -106,3 +106,6 @@ pub(super) fn try_encode(
     );
     Ok(true)
 }
+
+#[cfg(test)]
+mod tests;

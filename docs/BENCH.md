@@ -82,16 +82,18 @@ For priorities: `docs/PERF-ROADMAP.md`.
 
 ## Cold V4.1 Product Profile
 
-For cold `qwen run` or ordinary `qwen-bench`, explicitly set
-`QWEN_V41_PREFILL_EXECUTION=shrinking_ced` to use the measured CED/P4 profile:
+Cold `qwen run` and ordinary `qwen-bench` default to the measured CED/P4 profile
+when `QWEN_V41_PREFILL_EXECUTION` is unset (or explicitly `shrinking_ced`):
 optional shrinking CED plus a 4 GiB (`4294967296` byte) soft resident mapping
 coalescing target. The selected cold plan carries that mapping into loading.
-Unset or `full_forward` keeps ordinary Full/None (P0) unchanged. Other values,
+Set `full_forward` to roll back to ordinary Full/None (P0). Other values,
 including non-UTF-8, error. No context or chunk width is forced; larger singleton
 tensors retain their existing eligibility. Normal admission and optional CED to
 Full fallback remain active; fallback retains P4 and diagnostics report actual
-execution and fallback. Serving ignores this cold control and stays Full/None.
-This is an explicit profile, not automatic crossover selection.
+execution and fallback. Nonzero-depth pp and suffix calls remain Full. Serving
+ignores this cold control and stays Full/None. This selects the qualified cold
+policy without a prompt-length performance crossover heuristic; it does not
+claim a speedup for every short prompt.
 
 ## Native V4.1 Full/CED Pair
 

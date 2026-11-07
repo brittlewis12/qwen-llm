@@ -17,10 +17,12 @@ questions the evidence has closed. Dated measurements remain in
 - DeepSeek V4.1 current requirements and operation live in
   [DEEPSEEK-V41-STRATEGY](DEEPSEEK-V41-STRATEGY.md) and
   [DEEPSEEK-V41-BRINGUP](DEEPSEEK-V41-BRINGUP.md).
-- Cold V4.1 run/ordinary bench support the explicit CED/P4 profile through
-  `QWEN_V41_PREFILL_EXECUTION=shrinking_ced`; default Full/None and serving are
-  unchanged. Current-source 8K economics, state/continuation and frontend checks
-  are in [the measured delivery packet](bench/2026-10-25-v41-current-ced-8k.md).
+- Cold V4.1 run/ordinary bench default to the qualified CED/P4 profile, retaining
+  optional Full fallback. `QWEN_V41_PREFILL_EXECUTION=full_forward` restores
+  Full/None; nonzero-depth pp and serving remain Full. The 2026-11-07 default
+  confirmation is in [PERF-LOG](PERF-LOG.md); 8K economics, state/continuation and
+  frontend qualification are in
+  [the measured delivery packet](bench/2026-10-25-v41-current-ced-8k.md).
 
 ## Open Leverage Map
 

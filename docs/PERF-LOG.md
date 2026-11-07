@@ -6,6 +6,66 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the current state and evidence index.
 
+## 2026-11-07 - V4.1: Make Qualified Cold Shrinking CED The Default
+
+- Code **`36da39a3`**, based on main **`e44e7dc4`**. Unset
+  `QWEN_V41_PREFILL_EXECUTION` now selects optional shrinking CED with the
+  qualified 4 GiB soft resident mapping target (P4) for cold `qwen run` and
+  ordinary `qwen-bench`. Explicit `shrinking_ced` remains a synonym;
+  **`full_forward`** restores Full/None. Native unsupported-policy and memory
+  admission fallback remain before mutation; Full fallback retains the selected
+  P4 mapping and reports its actual execution/reason. Chunk selection, kernels,
+  arithmetic, paired controls and poisoned-state handling are unchanged.
+- The original opt-in was a bounded delivery, without an automatic performance
+  crossover or a short-prompt speed claim (Aven **V41-S63P**). The
+  [October 25 qualification](bench/2026-10-25-v41-current-ced-8k.md#cold-profile-delivery)
+  already passed all 257 complete vocabulary heads and 56 causal-region hashes
+  per position, including 256 teacher-forced steps, plus restore/growth. Those
+  completed checks remain the exactness basis. This changes policy selection;
+  it does not claim every short prompt is faster.
+- **M5 Ultra**, same GSQ-RCO **IQ2_XS + IQ4_NL Engram** artifact. Native
+  `qwen-bench suite`, independent processes in **Full/default/default/Full**
+  order, one retained call/process (**two/policy**), `--runs 1 --seed 1`,
+  selected width **4096**. Cold means fresh request/KV with resident weights,
+  excluding model loading; pp4096 excludes one complete warmup per process.
+  Append uses `--no-warmup` and an independent real, untimed **32768-token**
+  prefix before each fresh 512-token suffix. Endpoint logits copy is included.
+
+  | Cell | Full tok/s | Default tok/s | Mean wall ms, Full -> default |
+  | --- | ---: | ---: | ---: |
+  | pp4096 / depth 0 | 1465.67 / 1466.52 | 1902.35 / 1917.43 | 2793.82 -> 2144.66 |
+  | pp512 / depth 32768 | 867.28 / 866.96 | 862.64 / 868.81 | 590.46 -> 591.42 |
+
+  Cold throughput **1.30269x**, saving **649.16 ms** (23.24% wall time).
+  Cold default reports shrinking CED with no fallback. Both append policies
+  report Full: the existing cold whole-prompt guard explicitly preserves Full
+  for nonzero-depth pp and suffix calls. Append differs by **0.96 ms / 0.16%**;
+  no append gain attributed. This compares the product profiles CED/P4 versus
+  Full/None. Clean matching build/runtime identities; no drafting; build lock,
+  `nice -n 10`, canonical campaign Metal lease with wait enabled, thermal
+  pressure **0 before/after every arm**. The roofline lane alternated between
+  the short cold and append/output campaigns.
+- Actual `qwen run`, same **3256-token** text prompt, `--temp 0 --seed 1
+  --max-tokens 16`: both arms stop at EOS after **2 generated tokens**, with
+  identical output bytes, usage and generated-token SHA-256 fingerprints.
+  Diagnostics confirm Full versus shrinking CED, without fallback. This is the
+  requested output smoke, using the existing exactness qualification above.
+- Serving remains Full/None. Its checkpoint cuts and interleaved 512-row
+  prefill need request-level cold planning; its live/snapshot reuse guard rejects
+  CED-origin states. Aven **V41-VVR3** tracks that separate integration boundary.
+  See [the CED design](DEEPSEEK-V41-CED-DESIGN.md) for the required work.
+- Policy regression tests: **9 qwen + 6 bench passed**, including unset-default
+  parsing/loading, explicit rollback, pressure fallback and nonzero-depth Full.
+  Full **`cargo test --release -p qwen-llm --lib -- --test-threads=1`** on the
+  local M4: **2468 passed, 0 failed, 738 ignored**, 95.31 seconds; build lock
+  and Metal lease held, thermal pressure zero before/after. The M5 was reserved
+  for the native confirmation above.
+  CPU contracts pass code tree **`7553ecea1333d4a01f7a5f2e3256a8cce1069238`**.
+- Raw build identities, driver, thermal logs, all eight benchmark arms and output
+  equality receipts: **`~/qwen-runs/2026-11-07-v41-ced-default/`** on the M5.
+  Main receipts are `cold-summary.json`, `append-summary.json` and
+  `output-equality.json`; original stdout/stderr and request stats are retained.
+
 ## 2026-11-07 - Flash-Next M4: Extend Compact Experts to IQ3_XXS
 
 - Code **`9c8e3a16`**, following the qualified IQ2_S/IQ3_S increment below,

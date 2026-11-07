@@ -147,7 +147,7 @@ mod tests {
         let Some(ctx) = crate::test_fixtures::metal_context_or_skip() else {
             return;
         };
-        if !enabled() || !ctx.tensor_ops_status().is_available() {
+        if !enabled() {
             return;
         }
         let guarded = |values: &[f32], shape: Vec<u64>| {
@@ -173,7 +173,11 @@ mod tests {
             .into_iter()
             .flat_map(|m| [(m, 10240, 4), (m, 2560, 48)])
         {
-            if m == 2048 && !small_tiles_enabled() {
+            if (!ctx.tensor_ops_status().is_available()
+                && (!small_tiles_enabled()
+                    || !crate::env_flag::read_default_on("QWEN_FN_PREFILL_F32_MMA")))
+                || (m == 2048 && !small_tiles_enabled())
+            {
                 continue;
             }
             let mut state = 0x12345678abcdefffu64;
@@ -197,7 +201,9 @@ mod tests {
             let census = crate::metal::dispatch_census_take();
             assert_eq!(census.len(), 1);
             assert_eq!(census[0].threads_width, 128);
-            let tile = if census[0].kernel.ends_with("_m32") {
+            let tile = if census[0].kernel.ends_with("_m32")
+                || census[0].kernel == "kernel_qwen4exp_small_f32_mma_k128_s4"
+            {
                 32
             } else {
                 128
